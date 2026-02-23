@@ -1410,8 +1410,10 @@
         // ── TREES: InstancedMesh from tree.glb + CPU frustum culling (max perf, no per-tree physics) ──
         const treesGroup = new THREE.Group();
         scene.add(treesGroup);
-        let treeInstancedMesh = null;
-        let treeInstanceMatrices = null; // full N*16 float source of truth for culling
+        let treeInstancedMesh = null;       // first mesh — used for stats display
+        const treeInstancedMeshes = [];     // all instanced meshes (trunk + leaf)
+        let treeInstanceMatrices = null;    // full N×16 source of truth
+        let treeCompactMatrices = null;     // compacted buffer shared across all meshes
         let treeCullRadius = 4;
         let treeCountActual = 0;
         const treeLeafMaterials = [];
@@ -1426,14 +1428,19 @@
           "models/pine-transformed.glb",
           (gltf) => {
             const root = gltf.scene;
-            const geometries = [];
-            const materialsList = [];
+            // Separate leaf and trunk geometry/material so each gets its own
+            // InstancedMesh — the shadow pass then uses each mesh's own material,
+            // giving alpha-tested (holey) needle shadows on the leaf mesh and
+            // solid shadows on the trunk mesh.
+            const leafGeos = [], leafMats = [];
+            const trunkGeos = [], trunkMats = [];
             root.traverse((o) => {
               if (!o.isMesh || !o.geometry) return;
               const g = o.geometry.clone();
               g.applyMatrix4(o.matrixWorld);
-              geometries.push(g);
               const m = o.material;
+              let nodeMat;
+              let isLeafMaterial = false;
               if (m) {
                 const isTransparent = m.transparent === true;
                 const hasMap = !!m.map;
@@ -1442,13 +1449,12 @@
                 const meshName = (o.name || '').toLowerCase();
                 const matName = (m.name || '').toLowerCase();
                 const isLeafByName = /leaf|leave|foliage|canopy|frond|branch/i.test(meshName + ' ' + matName);
-                const isLeafMaterial =
+                isLeafMaterial =
                   isTransparent ||
                   isLeafByName ||
                   (hasMap && (isDoubleSide || hasAlphaTest));
-                const nodeMat = new THREE.MeshStandardNodeMaterial({
-                  color:
-                    m.color && m.color.getHex ? m.color.getHex() : 0x888888,
+                nodeMat = new THREE.MeshStandardNodeMaterial({
+                  color: m.color && m.color.getHex ? m.color.getHex() : 0x888888,
                   roughness: m.roughness != null ? m.roughness : 0.7,
                   metalness: m.metalness != null ? m.metalness : 0,
                   map: m.map || null,
@@ -1462,49 +1468,43 @@
                     : (m.opacity != null ? m.opacity : 1),
                   side: isLeafMaterial || isDoubleSide
                     ? THREE.DoubleSide
-                    : m.side != null
-                      ? m.side
-                      : THREE.FrontSide,
-                  depthWrite: isLeafMaterial
-                    ? PARAMS.treeDepthWrite
-                    : true,
+                    : m.side != null ? m.side : THREE.FrontSide,
+                  depthWrite: isLeafMaterial ? PARAMS.treeDepthWrite : true,
                 });
                 if (isLeafMaterial) treeLeafMaterials.push(nodeMat);
-                materialsList.push(nodeMat);
               } else {
-                materialsList.push(
-                  new THREE.MeshStandardNodeMaterial({
-                    color: 0x2d6b1a,
-                    roughness: 0.7,
-                  }),
-                );
+                nodeMat = new THREE.MeshStandardNodeMaterial({ color: 0x2d6b1a, roughness: 0.7 });
+              }
+              if (isLeafMaterial) {
+                leafGeos.push(g);
+                leafMats.push(nodeMat);
+              } else {
+                trunkGeos.push(g);
+                trunkMats.push(nodeMat);
               }
             });
-            if (geometries.length === 0) {
+            if (leafGeos.length === 0 && trunkGeos.length === 0) {
               console.warn("pine-transformed.glb: no meshes");
               return;
             }
-            const mergedGeo = mergeGeometries(geometries, true); // useGroups so trunk/leaves keep separate materials
-            mergedGeo.computeBoundingSphere();
-            treeCullRadius = mergedGeo.boundingSphere
-              ? mergedGeo.boundingSphere.radius
-              : 4;
-            const mat =
-              materialsList.length > 0
-                ? materialsList
-                : new THREE.MeshStandardNodeMaterial({
-                    color: 0x2d6b1a,
-                    roughness: 0.7,
-                  });
-            const instanced = new THREE.InstancedMesh(
-              mergedGeo,
-              mat,
-              MAX_TREES,
-            );
-            instanced.castShadow = true;
-            instanced.receiveShadow = false; // too expensive on foliage; shadow lookups on thousands of needle fragments
-            instanced.frustumCulled = false; // we cull instances ourselves
+            // Build one InstancedMesh per group; both share the same placement data
+            const makeInstanced = (geos, mats) => {
+              if (geos.length === 0) return null;
+              const geo = mergeGeometries(geos, true);
+              geo.computeBoundingSphere();
+              const radius = geo.boundingSphere ? geo.boundingSphere.radius : 4;
+              if (radius > treeCullRadius) treeCullRadius = radius;
+              const im = new THREE.InstancedMesh(geo, mats.length === 1 ? mats[0] : mats, MAX_TREES);
+              im.castShadow = true;
+              im.receiveShadow = false;
+              im.frustumCulled = false;
+              return im;
+            };
+            const trunkMesh = makeInstanced(trunkGeos, trunkMats);
+            const leafMesh  = makeInstanced(leafGeos,  leafMats);
+            // Place trees — write into every mesh that exists
             treeInstanceMatrices = new Float32Array(MAX_TREES * 16);
+            treeCompactMatrices  = new Float32Array(MAX_TREES * 16);
             const halfTerrain = TERRAIN_SIZE * 0.48;
             setSeed(42);
             let placed = 0;
@@ -1515,8 +1515,7 @@
             ) {
               const tx = (seededRandom() * 2 - 1) * halfTerrain;
               const tz = (seededRandom() * 2 - 1) * halfTerrain;
-              const distOrigin = Math.sqrt(tx * tx + tz * tz);
-              if (distOrigin < 20) continue;
+              if (Math.sqrt(tx * tx + tz * tz) < 20) continue;
               const ty = sampleHeight(tx, tz);
               const scale = (0.85 + seededRandom() * 0.3) * PARAMS.treeScale;
               const rotY = seededRandom() * Math.PI * 2;
@@ -1526,14 +1525,19 @@
                 .scale(new THREE.Vector3(scale, scale, scale))
                 .setPosition(tx, ty, tz);
               treeMatrix.toArray(treeInstanceMatrices, placed * 16);
-              instanced.setMatrixAt(placed, treeMatrix);
+              if (trunkMesh) trunkMesh.setMatrixAt(placed, treeMatrix);
+              if (leafMesh)  leafMesh.setMatrixAt(placed, treeMatrix);
               placed++;
             }
             treeCountActual = placed;
-            instanced.count = treeCountActual;
-            instanced.instanceMatrix.needsUpdate = true;
-            treeInstancedMesh = instanced;
-            treesGroup.add(instanced);
+            for (const im of [trunkMesh, leafMesh]) {
+              if (!im) continue;
+              im.count = treeCountActual;
+              im.instanceMatrix.needsUpdate = true;
+              treesGroup.add(im);
+              treeInstancedMeshes.push(im);
+            }
+            treeInstancedMesh = treeInstancedMeshes[0]; // for stats display
             renderer.compileAsync(scene, camera).catch(() => {});
           },
           undefined,
@@ -2537,12 +2541,12 @@
           );
           frustum.setFromProjectionMatrix(projMat);
 
-          // Tree instance culling: compact visible instances so only they are drawn (max perf)
-          if (treeInstancedMesh && treeInstanceMatrices != null) {
-            const im = treeInstancedMesh;
-            const arr = im.instanceMatrix.array;
+          // Tree instance culling: compact visible instances into shared buffer,
+          // then copy to every instanced mesh (trunk + leaf stay in sync).
+          if (treeInstancedMeshes.length > 0 && treeInstanceMatrices != null) {
+            let visibleCount = 0;
             if (PARAMS.treeCulling) {
-              let visibleCount = 0;
+              const shadowDist2 = 80 * 80;
               for (let i = 0; i < treeCountActual; i++) {
                 const o = i * 16;
                 treePosition.set(
@@ -2550,20 +2554,26 @@
                   treeInstanceMatrices[o + 13],
                   treeInstanceMatrices[o + 14],
                 );
+                const dx = treePosition.x - charPos.x;
+                const dz = treePosition.z - charPos.z;
+                const inShadowRange = dx * dx + dz * dz < shadowDist2;
                 treeFrustumSphere.center.copy(treePosition);
                 treeFrustumSphere.radius = treeCullRadius;
-                if (frustum.intersectsSphere(treeFrustumSphere)) {
+                if (inShadowRange || frustum.intersectsSphere(treeFrustumSphere)) {
                   for (let j = 0; j < 16; j++)
-                    arr[visibleCount * 16 + j] = treeInstanceMatrices[o + j];
+                    treeCompactMatrices[visibleCount * 16 + j] = treeInstanceMatrices[o + j];
                   visibleCount++;
                 }
               }
-              im.count = visibleCount;
             } else {
-              arr.set(treeInstanceMatrices.subarray(0, treeCountActual * 16));
-              im.count = treeCountActual;
+              treeCompactMatrices.set(treeInstanceMatrices.subarray(0, treeCountActual * 16));
+              visibleCount = treeCountActual;
             }
-            im.instanceMatrix.needsUpdate = true;
+            for (const im of treeInstancedMeshes) {
+              im.instanceMatrix.array.set(treeCompactMatrices.subarray(0, visibleCount * 16));
+              im.count = visibleCount;
+              im.instanceMatrix.needsUpdate = true;
+            }
           }
 
           baseCellPos
