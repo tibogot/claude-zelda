@@ -61,6 +61,7 @@ import { SkyMesh } from 'three/addons/objects/SkyMesh.js';
 import { CSMShadowNode } from 'three/addons/csm/CSMShadowNode.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import RAPIER from 'https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.19.3/+esm';
 
 const PI = Math.PI;
 const GRASS_PATCH_SIZE = 10, GRASS_SEGMENTS_LOW = 1, GRASS_SEGMENTS_HIGH = 6;
@@ -106,11 +107,21 @@ const PARAMS = {
   // Terrain
   terrainHeight: TERRAIN_HEIGHT,
   // Player & Camera
-  playerSpeed: 12.0,
+  playerSpeed: 3.2,
+  runSpeedMultiplier: 1.95,
+  jumpSpeed: 5.5,
+  gravity: 9.81,
   camDist: 7, camHeight: 0.0, camPitchMin: -0.2, camPitchMax: 1.2,
+  mouseSensitivity: 0.002,
   cameraMode: 'thirdPerson',
   // NPCs (disable = better FPS — grass shader skips 6 interactors)
   npcEnabled: true,
+  // Physics debug (wireframe colliders)
+  rapierDebug: false,
+  // Character (human-sized, feet on ground) + physics capsule
+  characterHeight: 1.7,
+  characterOffsetY: 0,
+  capsuleRadius: 0.35,
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -596,13 +607,73 @@ async function init() {
   }
   updateSky();
 
-  // ── CAPSULE CHARACTER ──
+  // ── PLAYER VISUAL: capsule placeholder + character model (replaces capsule when loaded) ──
   const capsuleGeo=new THREE.CapsuleGeometry(0.4,1.2,8,16);
   const capsuleMat=new THREE.MeshStandardNodeMaterial({color:0xee8833,roughness:0.4,metalness:0.0});
   const capsule=new THREE.Mesh(capsuleGeo,capsuleMat);
   capsule.castShadow=true;
   capsule.receiveShadow=true;
   scene.add(capsule);
+  const characterGroup=new THREE.Group();
+  scene.add(characterGroup);
+  let characterMixer=null;
+  const charDraco = new DRACOLoader();
+  charDraco.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
+  const charLoader = new GLTFLoader();
+  charLoader.setDRACOLoader(charDraco);
+  charLoader.load(
+    'models/AnimationLibrary_Godot_Standard-transformed.glb',
+    (gltf)=>{
+      const model=gltf.scene;
+      model.traverse((o)=>{
+        if(o.isMesh){
+          o.castShadow=true;
+          o.receiveShadow=true;
+          if(o.material && !o.material.isNodeMaterial){
+            const m=o.material;
+            o.material=new THREE.MeshStandardNodeMaterial({
+              color: m.color?.getHex?.() ?? 0x888888,
+              roughness: m.roughness ?? 0.5,
+              metalness: m.metalness ?? 0,
+              map: m.map || null
+            });
+          }
+        }
+      });
+      const box=new THREE.Box3().setFromObject(model);
+      const size=new THREE.Vector3(), center=new THREE.Vector3();
+      box.getSize(size);
+      const scale=PARAMS.characterHeight/(size.y||1);
+      model.scale.setScalar(scale);
+      box.setFromObject(model);
+      box.getCenter(center);
+      model.position.sub(center);
+      characterGroup.userData.modelBaseY=model.position.y;
+      characterGroup.userData.initialCharHeight=PARAMS.characterHeight;
+      characterGroup.add(model);
+      try {
+        if(gltf.animations&&gltf.animations.length){
+          characterMixer=new THREE.AnimationMixer(model);
+          const idleClip=gltf.animations.find(a=>a.name==='Idle_Loop')||gltf.animations[0];
+          const walkClip=gltf.animations.find(a=>a.name==='Walk_Loop')||gltf.animations[0];
+          const runClip=gltf.animations.find(a=>a.name==='Jog_Fwd_Loop')||gltf.animations.find(a=>a.name==='Sprint_Loop')||walkClip;
+          const jumpClip=gltf.animations.find(a=>a.name==='Jump_Loop')||gltf.animations.find(a=>a.name==='Jump_Start')||idleClip;
+          const idleAction=characterMixer.clipAction(idleClip).setLoop(2201).play();
+          const walkAction=characterMixer.clipAction(walkClip).setLoop(2201);
+          const runAction=characterMixer.clipAction(runClip).setLoop(2201);
+          const jumpAction=characterMixer.clipAction(jumpClip).setLoop(2201);
+          characterGroup.userData.idleAction=idleAction;
+          characterGroup.userData.walkAction=walkAction;
+          characterGroup.userData.runAction=runAction;
+          characterGroup.userData.jumpAction=jumpAction;
+          characterGroup.userData.lastMoveState='idle';
+        }
+      } catch(e){ console.warn('Character animations:', e); }
+      renderer.compileAsync(scene,camera).catch(e=>console.warn('Recompile after character load:',e));
+    },
+    undefined,
+    (err)=>{ console.error('Character GLB load failed:', err); }
+  );
 
   // ── CAPSULE NPCs (wander slowly, grass bends away from them)
   const NPC_SPEED = 2.2;
@@ -634,7 +705,36 @@ async function init() {
     });
   }
 
-  // ── BUILDINGS (shadow casters) ──
+  // ── RAPIER PHYSICS (ground, cubes; buildings/trees/ruins get colliders below) ──
+  await RAPIER.init({});
+  const gravity = { x: 0, y: -9.81, z: 0 };
+  const physicsWorld = new RAPIER.World(gravity);
+  // Ground: large static cuboid (half-extents). Top face at y = 0.5.
+  const groundHalfX = TERRAIN_SIZE * 0.5, groundHalfY = 0.5, groundHalfZ = TERRAIN_SIZE * 0.5;
+  const groundColliderDesc = RAPIER.ColliderDesc.cuboid(groundHalfX, groundHalfY, groundHalfZ);
+  physicsWorld.createCollider(groundColliderDesc);
+  // Dynamic cubes (body + Three.js mesh) — spawn above ground so they fall
+  const physicsCubes = [];
+  const cubePositions = [
+    [0, 8, 0], [3, 12, 2], [-2, 6, -1], [5, 10, -3], [-4, 15, 2],
+    [2, 7, 4], [-3, 11, -2], [4, 9, 1]
+  ];
+  const cubeHalfExtent = 0.5;
+  const cubeGeo = new THREE.BoxGeometry(cubeHalfExtent * 2, cubeHalfExtent * 2, cubeHalfExtent * 2);
+  const cubeMat = new THREE.MeshStandardMaterial({ color: 0x4488ff, roughness: 0.6, metalness: 0.1 });
+  for (const [px, py, pz] of cubePositions) {
+    const bodyDesc = RAPIER.RigidBodyDesc.dynamic().setTranslation(px, py, pz);
+    const body = physicsWorld.createRigidBody(bodyDesc);
+    const colliderDesc = RAPIER.ColliderDesc.cuboid(cubeHalfExtent, cubeHalfExtent, cubeHalfExtent);
+    physicsWorld.createCollider(colliderDesc, body);
+    const mesh = new THREE.Mesh(cubeGeo, cubeMat.clone());
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    scene.add(mesh);
+    physicsCubes.push({ body, mesh });
+  }
+
+  // ── BUILDINGS (shadow casters + physics colliders) ──
   const buildingMat=new THREE.MeshStandardNodeMaterial({color:0xc8b898,roughness:0.8});
   const roofMat=new THREE.MeshStandardNodeMaterial({color:0x8b4513,roughness:0.7});
   function addBuilding(x,z,w,d,h){
@@ -652,6 +752,14 @@ async function init() {
     roof.rotation.y=PI/4;
     roof.castShadow=true;
     scene.add(roof);
+    // Physics: static colliders for wall and roof
+    const wallBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(bx, by + h / 2, bz);
+    const wallBody = physicsWorld.createRigidBody(wallBodyDesc);
+    physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(w / 2, h / 2, d / 2), wallBody);
+    const roofHalfH = h * 0.25, roofRadius = Math.max(w, d) * 0.375;
+    const roofBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(bx, by + h + roofHalfH, bz);
+    const roofBody = physicsWorld.createRigidBody(roofBodyDesc);
+    physicsWorld.createCollider(RAPIER.ColliderDesc.cylinder(roofHalfH, roofRadius), roofBody);
   }
   // Place a few buildings
   addBuilding(25,15,6,5,5);
@@ -659,7 +767,7 @@ async function init() {
   addBuilding(60,-20,8,6,6);
   addBuilding(-50,-60,5,7,5);
 
-  // ── TREES (shadow casters) ──
+  // ── TREES (shadow casters + physics colliders) ──
   const trunkMat=new THREE.MeshStandardNodeMaterial({color:0x5c3a1e,roughness:0.9});
   const leafMat=new THREE.MeshStandardNodeMaterial({color:0x2d6b1a,roughness:0.7});
   const trunkGeo=new THREE.CylinderGeometry(0.2,0.35,3,6);
@@ -671,12 +779,20 @@ async function init() {
     trunk.position.set(x,ty+1.5,z);
     trunk.castShadow=true;
     scene.add(trunk);
-    const crown=new THREE.Mesh(Math.random()>0.5?leafGeo1:leafGeo2,leafMat);
     const crownH=2.8+Math.random()*1.5;
+    const crown=new THREE.Mesh(Math.random()>0.5?leafGeo1:leafGeo2,leafMat);
     crown.position.set(x+Math.random()*0.5-0.25,ty+crownH,z+Math.random()*0.5-0.25);
     crown.scale.setScalar(0.8+Math.random()*0.6);
     crown.castShadow=true; crown.receiveShadow=true;
     scene.add(crown);
+    // Physics: trunk cylinder + crown ball (approximate)
+    const trunkBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(x, ty + 1.5, z);
+    const trunkBody = physicsWorld.createRigidBody(trunkBodyDesc);
+    physicsWorld.createCollider(RAPIER.ColliderDesc.cylinder(1.5, 0.35), trunkBody);
+    const crownCenterY = ty + crownH;
+    const crownBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(x, crownCenterY, z);
+    const crownBody = physicsWorld.createRigidBody(crownBodyDesc);
+    physicsWorld.createCollider(RAPIER.ColliderDesc.ball(1.8), crownBody);
   }
   // Scatter trees using seeded positions
   const treePositions=[];
@@ -689,14 +805,15 @@ async function init() {
     addTree(tx,tz);
   }
 
-  // ── ANCIENT RUINS (compressed GLB on terrain) ──
+  // ── ANCIENT RUINS (compressed GLB on terrain + physics collider from bbox) ──
   const dracoLoader = new DRACOLoader();
   dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
   const gltfLoader = new GLTFLoader();
   gltfLoader.setDRACOLoader(dracoLoader);
+  const RUINS_X = 120, RUINS_Z = 80; // offset from center so player doesn't spawn inside
   gltfLoader.load('models/ancient_ruins_modular_mr.glb', (gltf) => {
     const ruins = gltf.scene;
-    ruins.position.set(0, sampleHeight(0, 0), 0);
+    ruins.position.set(RUINS_X, sampleHeight(RUINS_X, RUINS_Z), RUINS_Z);
     ruins.scale.setScalar(0.05);
     ruins.traverse((o) => {
       if (o.isMesh) {
@@ -705,15 +822,100 @@ async function init() {
       }
     });
     scene.add(ruins);
+    ruins.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(ruins);
+    const center = new THREE.Vector3();
+    box.getCenter(center);
+    const verts = [], inds = [];
+    const vTemp = new THREE.Vector3();
+    let vertexOffset = 0;
+    ruins.traverse((o) => {
+      if (!o.isMesh || !o.geometry) return;
+      const geo = o.geometry;
+      const posAttr = geo.attributes.position;
+      const idxAttr = geo.index;
+      const worldMat = o.matrixWorld;
+      for (let i = 0; i < posAttr.count; i++) {
+        vTemp.fromBufferAttribute(posAttr, i).applyMatrix4(worldMat);
+        verts.push(vTemp.x - center.x, vTemp.y - center.y, vTemp.z - center.z);
+      }
+      if (idxAttr) {
+        for (let i = 0; i < idxAttr.count; i++) inds.push(vertexOffset + idxAttr.getX(i));
+      } else {
+        for (let i = 0; i < posAttr.count; i++) inds.push(vertexOffset + i);
+      }
+      vertexOffset += posAttr.count;
+    });
+    const ruinsVerts = new Float32Array(verts);
+    const ruinsInds = new Uint32Array(inds);
+    const ruinsBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(center.x, center.y, center.z);
+    const ruinsBody = physicsWorld.createRigidBody(ruinsBodyDesc);
+    physicsWorld.createCollider(RAPIER.ColliderDesc.trimesh(ruinsVerts, ruinsInds), ruinsBody);
   });
 
+  const capR=PARAMS.capsuleRadius;
+  const capHalfH=Math.max(0.1,(PARAMS.characterHeight-2*capR)/2);
   const charPos=new THREE.Vector3(0,0,0);
-  charPos.y=sampleHeight(0,0)+1.0;
+  charPos.y=sampleHeight(0,0)+capHalfH+capR;
+  const playerBodyDesc = RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(charPos.x, charPos.y, charPos.z);
+  const playerBody = physicsWorld.createRigidBody(playerBodyDesc);
+  const playerCollider = physicsWorld.createCollider(RAPIER.ColliderDesc.capsule(capHalfH, capR), playerBody);
+  const characterController = physicsWorld.createCharacterController(0.01);
+  characterController.enableSnapToGround(0.5);
+  characterController.setMaxSlopeClimbAngle(45 * Math.PI / 180);
+  // Rapier debug: wireframe group for colliders
+  const physicsDebugGroup = new THREE.Group();
+  scene.add(physicsDebugGroup);
+  const rapierDebugMat = new THREE.MeshBasicMaterial({ color: 0x00ff88, wireframe: true, depthTest: true });
+  function buildRapierDebugMeshes() {
+    physicsDebugGroup.clear();
+    try {
+      physicsWorld.forEachCollider((collider) => {
+        const body = collider.parent ? collider.parent() : null;
+        const pos = body ? body.translation() : collider.translation();
+        const rot = body ? body.rotation() : { x: 0, y: 0, z: 0, w: 1 };
+        const shape = collider.shape;
+        if (!shape) return;
+        let geo = null;
+        const st = RAPIER.ShapeType;
+        if (shape.type === st.Cuboid && shape.halfExtents) {
+          const h = shape.halfExtents;
+          geo = new THREE.BoxGeometry(h.x * 2, h.y * 2, h.z * 2);
+        } else if (shape.type === st.Ball && shape.radius != null) {
+          geo = new THREE.SphereGeometry(shape.radius, 8, 6);
+        } else if (shape.type === st.Capsule && shape.halfHeight != null) {
+          const halfH = shape.halfHeight, r = shape.radius;
+          geo = new THREE.CapsuleGeometry(r, halfH * 2, 4, 8);
+        } else if (shape.type === st.Cylinder && shape.halfHeight != null) {
+          const halfH = shape.halfHeight, r = shape.radius;
+          geo = new THREE.CylinderGeometry(r, r, halfH * 2, 8);
+        } else if (shape.type === st.TriMesh && shape.vertices && shape.indices) {
+          const v = shape.vertices, i = shape.indices;
+          const posArr = [], idxArr = [];
+          for (let k = 0; k < v.length; k += 3) posArr.push(v[k], v[k + 1], v[k + 2]);
+          for (let k = 0; k < i.length; k++) idxArr.push(i[k]);
+          const bg = new THREE.BufferGeometry();
+          bg.setAttribute('position', new THREE.Float32BufferAttribute(posArr, 3));
+          bg.setIndex(idxArr);
+          geo = bg;
+        }
+        if (geo) {
+          const wire = new THREE.LineSegments(new THREE.WireframeGeometry(geo), rapierDebugMat);
+          wire.position.set(pos.x, pos.y, pos.z);
+          wire.quaternion.set(rot.x, rot.y, rot.z, rot.w);
+          physicsDebugGroup.add(wire);
+        }
+      });
+    } catch (e) { console.warn('Rapier debug render:', e); }
+  }
   const charAngle={y:0};
-  const keys={w:false,a:false,s:false,d:false};
+  const keys={w:false,a:false,s:false,d:false,shift:false,space:false};
+  let characterVelY=0;
   window.addEventListener('keydown',e=>{
     const k=e.key.toLowerCase();
     if(keys[k]!==undefined){keys[k]=true;e.preventDefault();}
+    if(e.key==='Shift'){keys.shift=true;}
+    if(e.key===' '||e.code==='Space'){keys.space=true;e.preventDefault();}
     if(e.key==='ArrowUp'){keys.w=true;e.preventDefault();}
     if(e.key==='ArrowDown'){keys.s=true;e.preventDefault();}
     if(e.key==='ArrowLeft'){keys.a=true;e.preventDefault();}
@@ -722,6 +924,8 @@ async function init() {
   window.addEventListener('keyup',e=>{
     const k=e.key.toLowerCase();
     if(keys[k]!==undefined)keys[k]=false;
+    if(e.key==='Shift'){keys.shift=false;}
+    if(e.key===' '||e.code==='Space')keys.space=false;
     if(e.key==='ArrowUp')keys.w=false;
     if(e.key==='ArrowDown')keys.s=false;
     if(e.key==='ArrowLeft')keys.a=false;
@@ -736,9 +940,11 @@ async function init() {
   renderer.domElement.addEventListener('click',()=>{if(PARAMS.cameraMode==='thirdPerson')renderer.domElement.requestPointerLock();});
   document.addEventListener('pointerlockchange',()=>{isPointerLocked=!!document.pointerLockElement;});
   document.addEventListener('mousemove',e=>{
-    if(!isPointerLocked) return;
-    camYaw-=e.movementX*0.003;
-    camPitch=Math.max(PARAMS.camPitchMin,Math.min(PARAMS.camPitchMax,camPitch+e.movementY*0.003));
+    if(!isPointerLocked && !(e.buttons & 1)) return;
+    const sens=PARAMS.mouseSensitivity;
+    camYaw+=e.movementX*sens;
+    camPitch-=e.movementY*sens;
+    camPitch=Math.max(PARAMS.camPitchMin,Math.min(PARAMS.camPitchMax,camPitch));
   });
 
   // Grass
@@ -798,12 +1004,20 @@ async function init() {
   fTrail.addBinding(PARAMS,'trailCrushSpeed',{min:0.05,max:1,step:0.05,label:'crushSpeed'});
   fTrail.addBinding(PARAMS,'trailGrowRate',{min:0.001,max:0.05,step:0.001,label:'growRate'});
   fTrail.addBinding(PARAMS,'trailRadius',{min:0.2,max:3,step:0.1,label:'radius'});
+  const fChar=pane.addFolder({title:'Character',expanded:true});
+  fChar.addBinding(PARAMS,'characterHeight',{min:1,max:2.5,step:0.05,label:'height (m)'});
+  fChar.addBinding(PARAMS,'characterOffsetY',{min:-0.5,max:0.5,step:0.01,label:'feet offset'});
+  fChar.addBinding(PARAMS,'capsuleRadius',{min:0.2,max:0.5,step:0.02,label:'capsule radius'});
   const fPlayer=pane.addFolder({title:'Player & Camera',expanded:false});
   fPlayer.addBinding(PARAMS,'interactionEnabled');fPlayer.addBinding(PARAMS,'interactionRange',{min:0.5,max:10,step:0.5});
   fPlayer.addBinding(PARAMS,'interactionStrength',{min:0,max:5,step:0.25});
-  fPlayer.addBinding(PARAMS,'playerSpeed',{min:1,max:25,step:1});
+  fPlayer.addBinding(PARAMS,'playerSpeed',{min:1,max:25,step:0.5});
+  fPlayer.addBinding(PARAMS,'runSpeedMultiplier',{min:1,max:2.5,step:0.05,label:'run speed ×'});
+  fPlayer.addBinding(PARAMS,'jumpSpeed',{min:3,max:12,step:0.5,label:'jump'});
+  fPlayer.addBinding(PARAMS,'gravity',{min:5,max:25,step:0.5});
   fPlayer.addBinding(PARAMS,'camDist',{min:3,max:25,step:0.5,label:'camDistance'});
   fPlayer.addBinding(PARAMS,'camHeight',{min:-2,max:8,step:0.25,label:'camHeight'});
+  fPlayer.addBinding(PARAMS,'mouseSensitivity',{min:0.0005,max:0.01,step:0.0005,label:'mouse sensitivity'});
   fPlayer.addBinding(PARAMS,'cameraMode',{options:{thirdPerson:'thirdPerson',orbit:'orbit'}});
   const fNpc=pane.addFolder({title:'NPCs',expanded:true});
   fNpc.addBinding(PARAMS,'npcEnabled',{label:'enabled'}).on('change',()=>{ for(let i=0;i<NPC_COUNT;i++) capsuleNpcs[i].visible=PARAMS.npcEnabled; });
@@ -829,6 +1043,8 @@ async function init() {
   fSky.addBinding(PARAMS,'skyRayleigh',{min:0,max:4,step:0.1,label:'rayleigh'});
   fSky.addBinding(PARAMS,'skyMie',{min:0,max:0.1,step:0.001,label:'mieCoeff'});
   fSky.addBinding(PARAMS,'skyMieG',{min:0,max:1,step:0.05,label:'mieDirectional'});
+  const fPhysics=pane.addFolder({title:'Physics',expanded:false});
+  fPhysics.addBinding(PARAMS,'rapierDebug',{label:'Rapier debug (colliders)'});
 
   // Terrain regeneration
   let lastTerrainH = PARAMS.terrainHeight;
@@ -910,6 +1126,7 @@ async function init() {
 
     // Character movement
     moveDir.set(0,0,0);
+    let desiredDx = 0, desiredDz = 0;
     if(keys.w) moveDir.z-=1;
     if(keys.s) moveDir.z+=1;
     if(keys.a) moveDir.x-=1;
@@ -917,16 +1134,91 @@ async function init() {
     if(moveDir.length()>0){
       moveDir.normalize();
       const sinY=Math.sin(camYaw), cosY=Math.cos(camYaw);
-      const mx=moveDir.x*cosY-moveDir.z*sinY;
-      const mz=moveDir.x*sinY+moveDir.z*cosY;
-      charPos.x+=mx*PARAMS.playerSpeed*dt;
-      charPos.z+=mz*PARAMS.playerSpeed*dt;
-      const hb=TERRAIN_SIZE*0.48;
-      charPos.x=Math.max(-hb,Math.min(hb,charPos.x));
-      charPos.z=Math.max(-hb,Math.min(hb,charPos.z));
+      const forwardX=sinY, forwardZ=cosY;
+      const rightX=cosY, rightZ=-sinY;
+      const mx=moveDir.x*rightX-moveDir.z*forwardX;
+      const mz=moveDir.x*rightZ-moveDir.z*forwardZ;
+      const speedMult = keys.shift ? PARAMS.runSpeedMultiplier : 1;
+      desiredDx = mx * PARAMS.playerSpeed * speedMult * dt;
+      desiredDz = mz * PARAMS.playerSpeed * speedMult * dt;
     }
-    charPos.y=sampleHeight(charPos.x,charPos.z)+1.0;
-    capsule.position.copy(charPos);
+    const hb = TERRAIN_SIZE * 0.48;
+    const nextX = Math.max(-hb, Math.min(hb, charPos.x + desiredDx));
+    const nextZ = Math.max(-hb, Math.min(hb, charPos.z + desiredDz));
+    const groundY = sampleHeight(charPos.x, charPos.z) + capHalfH + capR;
+    const onGround = charPos.y <= groundY + 0.6;
+    let desiredY;
+    if (onGround) {
+      if (keys.space) {
+        characterVelY = PARAMS.jumpSpeed;
+        desiredY = charPos.y + characterVelY * dt;
+      } else {
+        characterVelY = 0;
+        desiredY = sampleHeight(nextX, nextZ) + capHalfH + capR;
+      }
+    } else {
+      characterVelY -= PARAMS.gravity * dt;
+      desiredY = charPos.y + characterVelY * dt;
+    }
+    const desiredTranslation = { x: nextX - charPos.x, y: desiredY - charPos.y, z: nextZ - charPos.z };
+    characterController.computeColliderMovement(playerCollider, desiredTranslation);
+    const corrected = characterController.computedMovement();
+    const cur = playerBody.translation();
+    const nextPos = { x: cur.x + corrected.x, y: cur.y + corrected.y, z: cur.z + corrected.z };
+    playerBody.setNextKinematicTranslation(nextPos);
+
+    // Rapier physics step, then sync player and cube meshes
+    physicsWorld.step();
+    const playerT = playerBody.translation();
+    charPos.set(playerT.x, playerT.y, playerT.z);
+    const landedGroundY = sampleHeight(charPos.x, charPos.z) + capHalfH + capR;
+    if (characterVelY < 0 && charPos.y <= landedGroundY + 0.2) characterVelY = 0;
+    const inAir = charPos.y > landedGroundY + 0.15;
+    characterGroup.position.copy(charPos);
+    characterGroup.rotation.y = camYaw;
+    if (characterGroup.children.length > 0) {
+      const ud = characterGroup.userData;
+      if (ud.initialCharHeight != null) characterGroup.scale.setScalar(PARAMS.characterHeight / ud.initialCharHeight);
+      if (ud.modelBaseY != null) characterGroup.children[0].position.y = ud.modelBaseY + PARAMS.characterOffsetY;
+    }
+    capsule.visible = characterGroup.children.length === 0;
+    const moving = moveDir.length() > 0;
+    const running = moving && keys.shift;
+    const moveState = inAir ? 'jump' : (moving ? (running ? 'run' : 'walk') : 'idle');
+    const ud = characterGroup.userData;
+    if (ud && ud.idleAction && ud.walkAction && ud.runAction && ud.jumpAction) {
+      const skipT = 0.4;
+      const last = ud.lastMoveState;
+      if (moveState !== last) {
+        const toWalk = () => { if (ud.walkAction.time < skipT) ud.walkAction.time = skipT; ud.walkAction.enabled = true; ud.walkAction.crossFadeFrom(ud.idleAction, 0.2).play(); };
+        const toRun = () => { if (ud.runAction.time < skipT) ud.runAction.time = skipT; ud.runAction.enabled = true; ud.runAction.crossFadeFrom(ud.idleAction, 0.2).play(); };
+        const toIdle = (from) => { if (ud.idleAction.time < skipT) ud.idleAction.time = skipT; ud.idleAction.enabled = true; ud.idleAction.crossFadeFrom(from, 0.2).play(); };
+        const toJump = (from) => { if (ud.jumpAction.time < skipT) ud.jumpAction.time = skipT; ud.jumpAction.enabled = true; ud.jumpAction.crossFadeFrom(from, 0.15).play(); };
+        if (moveState === 'jump') {
+          toJump(last === 'idle' ? ud.idleAction : last === 'run' ? ud.runAction : ud.walkAction);
+        } else if (moveState === 'walk') {
+          if (last === 'idle') { toWalk(); }
+          else if (last === 'run') { if (ud.walkAction.time < skipT) ud.walkAction.time = skipT; ud.walkAction.enabled = true; ud.walkAction.crossFadeFrom(ud.runAction, 0.2).play(); }
+          else if (last === 'jump') { if (ud.walkAction.time < skipT) ud.walkAction.time = skipT; ud.walkAction.enabled = true; ud.walkAction.crossFadeFrom(ud.jumpAction, 0.2).play(); }
+        } else if (moveState === 'run') {
+          if (last === 'idle') { toRun(); }
+          else if (last === 'walk') { if (ud.runAction.time < skipT) ud.runAction.time = skipT; ud.runAction.enabled = true; ud.runAction.crossFadeFrom(ud.walkAction, 0.2).play(); }
+          else if (last === 'jump') { if (ud.runAction.time < skipT) ud.runAction.time = skipT; ud.runAction.enabled = true; ud.runAction.crossFadeFrom(ud.jumpAction, 0.2).play(); }
+        } else {
+          toIdle(last === 'jump' ? ud.jumpAction : last === 'run' ? ud.runAction : ud.walkAction);
+        }
+      }
+      ud.lastMoveState = moveState;
+    }
+    if (characterMixer) characterMixer.update(dt);
+    physicsDebugGroup.visible = !!PARAMS.rapierDebug;
+    if (PARAMS.rapierDebug) buildRapierDebugMeshes();
+    for (const { body, mesh } of physicsCubes) {
+      const t = body.translation();
+      const r = body.rotation();
+      mesh.position.set(t.x, t.y, t.z);
+      mesh.quaternion.set(r.x, r.y, r.z, r.w);
+    }
 
     // Shadow camera follows player
     shadowTarget.position.set(charPos.x,0,charPos.z);

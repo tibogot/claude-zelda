@@ -1,0 +1,1878 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WebGPU Grass v8 – Open World + Shadows + Wave Wind</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #000;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        z-index: 10;
+        font:
+          12px/1.5 "SF Mono",
+          "Fira Code",
+          monospace;
+        color: #b0d890;
+        background: rgba(0, 0, 0, 0.55);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: none;
+        user-select: none;
+        backdrop-filter: blur(4px);
+      }
+      #info span {
+        color: #e0f0c0;
+        font-weight: 600;
+      }
+      .tp-dfwv {
+        z-index: 20 !important;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">
+      WebGPU Grass v8 &mdash; <span id="backend">loading…</span> &bull;
+      <span id="stats"></span> &bull; WASD/Arrows + click to look
+    </div>
+
+    <script type="module">
+      const Tweakpane =
+        await import("https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/dist/tweakpane.min.js");
+
+      import * as THREE from "three";
+      import Stats from "stats-gl";
+      import {
+        Fn,
+        uniform,
+        float,
+        int,
+        vec2,
+        vec3,
+        vec4,
+        color,
+        positionLocal,
+        normalLocal,
+        cameraPosition,
+        cameraViewMatrix,
+        modelWorldMatrix,
+        modelNormalMatrix,
+        modelViewMatrix,
+        instanceIndex,
+        vertexIndex,
+        attribute,
+        varying,
+        texture,
+        mix,
+        step,
+        smoothstep,
+        clamp,
+        abs,
+        sign,
+        pow,
+        sqrt,
+        exp,
+        sin,
+        cos,
+        fract,
+        floor,
+        mod,
+        dot,
+        cross,
+        normalize,
+        length,
+        distance,
+        negate,
+        add,
+        sub,
+        mul,
+        div,
+        max,
+        min,
+        mat3,
+        mat4,
+        If,
+        Loop,
+        uv,
+        pass,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+      import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+
+      const PI = Math.PI;
+      const GRASS_PATCH_SIZE = 10,
+        GRASS_SEGMENTS_LOW = 1,
+        GRASS_SEGMENTS_HIGH = 6;
+      const GRASS_VERTS_LOW = (GRASS_SEGMENTS_LOW + 1) * 2,
+        GRASS_VERTS_HIGH = (GRASS_SEGMENTS_HIGH + 1) * 2;
+      const GRASS_DENSITY = 32 * 32 * 3,
+        GRID_SIZE = 18,
+        PATCH_SPACING = 10;
+      const TRAIL_RES = 256,
+        TRAIL_SIZE = 60;
+      const TERRAIN_SIZE = 800,
+        TERRAIN_RES = 512,
+        TERRAIN_HEIGHT = 30;
+
+      // ═══════════════════════════════════════════════════════════════
+      // PARAMS
+      // ═══════════════════════════════════════════════════════════════
+      const PARAMS = {
+        grassWidth: 0.08,
+        grassHeight: 0.7,
+        lodDistance: 15,
+        maxDistance: 150,
+        gradientCurve: 2.0,
+        baseColor1: "#143210",
+        baseColor2: "#183a12",
+        tipColor1: "#a6cc40",
+        tipColor2: "#cce666",
+        colorVariation: 0.3,
+        lushColor: "#1a4a0a",
+        bleachedColor: "#d4cc80",
+        // Wave wind (vertex shader noise — like R3F original)
+        windSpeed: 1.0,
+        windStrength: 0.4,
+        windWaveScale: 0.08,
+        windDir: 0.7, // radians — direction the wind blows toward
+        windGust: 0.3,
+        windMicroSway: 0.15,
+        // Player interaction
+        interactionEnabled: true,
+        interactionRange: 1.8,
+        interactionStrength: 1.5,
+        interactionHeightThreshold: 3.0,
+        interactionRepel: true,
+        // Trail
+        trailEnabled: true,
+        trailCrushSpeed: 0.35,
+        trailGrowRate: 0.008,
+        trailRadius: 0.7,
+        // Visual
+        aoEnabled: true,
+        aoIntensity: 1.0,
+        minSkyBlend: 0.55,
+        maxSkyBlend: 0.7,
+        bsEnabled: true,
+        bsIntensity: 0.4,
+        bsColor: "#51cc66",
+        bsPower: 2.0,
+        frontScatter: 0.3,
+        rimSSS: 0.4,
+        // Fog
+        fogEnabled: true,
+        fogNear: 50.0,
+        fogFar: 160.0,
+        fogIntensity: 0.45,
+        fogColor: "#a8c0d8",
+        // Seasonal
+        seasonalEnabled: false,
+        seasonalStrength: 0.3,
+        seasonalScale: 0.02,
+        seasonalDryColor: "#8b7d3c",
+        // Ground
+        groundVariation: true,
+        groundBaseColor: "#1a3a0a",
+        groundDirtColor: "#3d2b1a",
+        // Sun & Scene
+        sunDirX: -1.0,
+        sunDirY: 0.55,
+        sunDirZ: 1.0,
+        sunIntensity: 2.5,
+        sceneAmbient: 1.5,
+        exposure: 1.0,
+        // Sky
+        skyTurbidity: 2,
+        skyRayleigh: 1.5,
+        skyMie: 0.005,
+        skyMieG: 0.8,
+        // Terrain
+        terrainHeight: TERRAIN_HEIGHT,
+        // Player & Camera
+        playerSpeed: 12.0,
+        camDist: 7,
+        camHeight: 0.0,
+        camPitchMin: -0.2,
+        camPitchMax: 1.2,
+        cameraMode: "thirdPerson",
+        // NPCs (disable = better FPS — grass shader skips 6 interactors)
+        npcEnabled: true,
+      };
+
+      // ═══════════════════════════════════════════════════════════════
+      // SEEDED RNG
+      // ═══════════════════════════════════════════════════════════════
+      let _seed = 0;
+      function setSeed(s) {
+        _seed = s;
+      }
+      function seededRandom() {
+        const x = Math.sin(_seed++) * 10000;
+        return x - Math.floor(x);
+      }
+      function randRange(lo, hi) {
+        return lo + seededRandom() * (hi - lo);
+      }
+
+      // ═══════════════════════════════════════════════════════════════
+      // HEIGHTMAP
+      // ═══════════════════════════════════════════════════════════════
+      function cpuHash(x, y) {
+        let n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+        return n - Math.floor(n);
+      }
+      function cpuNoise(x, y) {
+        const ix = Math.floor(x),
+          iy = Math.floor(y),
+          fx = x - ix,
+          fy = y - iy;
+        const ux = fx * fx * (3 - 2 * fx),
+          uy = fy * fy * (3 - 2 * fy);
+        const a = cpuHash(ix, iy),
+          b = cpuHash(ix + 1, iy),
+          c = cpuHash(ix, iy + 1),
+          d = cpuHash(ix + 1, iy + 1);
+        return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+      }
+      function fbmNoise(x, y, octaves) {
+        let val = 0,
+          amp = 1,
+          freq = 1,
+          total = 0;
+        for (let i = 0; i < octaves; i++) {
+          val += cpuNoise(x * freq, y * freq) * amp;
+          total += amp;
+          amp *= 0.5;
+          freq *= 2;
+        }
+        return val / total;
+      }
+
+      const heightData = new Float32Array(TERRAIN_RES * TERRAIN_RES * 4);
+      const heightTex = new THREE.DataTexture(
+        heightData,
+        TERRAIN_RES,
+        TERRAIN_RES,
+        THREE.RGBAFormat,
+        THREE.FloatType,
+      );
+      heightTex.wrapS = heightTex.wrapT = THREE.ClampToEdgeWrapping;
+      heightTex.magFilter = THREE.LinearFilter;
+      heightTex.minFilter = THREE.LinearFilter;
+
+      function generateHeightmap() {
+        for (let y = 0; y < TERRAIN_RES; y++) {
+          for (let x = 0; x < TERRAIN_RES; x++) {
+            const wx = (x / TERRAIN_RES - 0.5) * TERRAIN_SIZE;
+            const wz = (y / TERRAIN_RES - 0.5) * TERRAIN_SIZE;
+            const h =
+              fbmNoise(wx * 0.008, wz * 0.008, 6) * PARAMS.terrainHeight;
+            const idx = (y * TERRAIN_RES + x) * 4;
+            heightData[idx] = h;
+            heightData[idx + 1] = h;
+            heightData[idx + 2] = h;
+            heightData[idx + 3] = 1;
+          }
+        }
+        heightTex.needsUpdate = true;
+      }
+      generateHeightmap();
+
+      function sampleHeight(wx, wz) {
+        const u = (wx / TERRAIN_SIZE + 0.5) * TERRAIN_RES;
+        const v = (wz / TERRAIN_SIZE + 0.5) * TERRAIN_RES;
+        const ix = Math.max(0, Math.min(TERRAIN_RES - 2, Math.floor(u)));
+        const iy = Math.max(0, Math.min(TERRAIN_RES - 2, Math.floor(v)));
+        const fx = u - ix,
+          fy = v - iy;
+        const h00 = heightData[(iy * TERRAIN_RES + ix) * 4];
+        const h10 = heightData[(iy * TERRAIN_RES + ix + 1) * 4];
+        const h01 = heightData[((iy + 1) * TERRAIN_RES + ix) * 4];
+        const h11 = heightData[((iy + 1) * TERRAIN_RES + ix + 1) * 4];
+        return (
+          h00 * (1 - fx) * (1 - fy) +
+          h10 * fx * (1 - fy) +
+          h01 * (1 - fx) * fy +
+          h11 * fx * fy
+        );
+      }
+
+      // ═══════════════════════════════════════════════════════════════
+      // TRAIL TEXTURE (CPU: crush + regrow)
+      // ═══════════════════════════════════════════════════════════════
+      const trailData = new Float32Array(TRAIL_RES * TRAIL_RES * 4);
+      for (let i = 0; i < trailData.length; i += 4) {
+        trailData[i] = 1;
+        trailData[i + 1] = 0;
+        trailData[i + 2] = 0;
+        trailData[i + 3] = 1;
+      }
+      const trailTex = new THREE.DataTexture(
+        trailData,
+        TRAIL_RES,
+        TRAIL_RES,
+        THREE.RGBAFormat,
+        THREE.FloatType,
+      );
+      trailTex.wrapS = trailTex.wrapT = THREE.ClampToEdgeWrapping;
+      trailTex.magFilter = THREE.LinearFilter;
+      trailTex.minFilter = THREE.LinearFilter;
+
+      function updateTrail(dt, px, pz) {
+        const grow = PARAMS.trailGrowRate,
+          crush = PARAMS.trailCrushSpeed;
+        const r2 = PARAMS.trailRadius * PARAMS.trailRadius;
+        for (let y = 0; y < TRAIL_RES; y++)
+          for (let x = 0; x < TRAIL_RES; x++) {
+            const idx = (y * TRAIL_RES + x) * 4;
+            let scale = trailData[idx];
+            const wx = (x / TRAIL_RES - 0.5) * TRAIL_SIZE,
+              wz = (y / TRAIL_RES - 0.5) * TRAIL_SIZE;
+            const d2 = wx * wx + wz * wz;
+            if (d2 < r2 && PARAMS.trailEnabled) {
+              const contact = 1.0 - d2 / r2;
+              scale += (0.15 - scale) * crush * contact;
+            } else {
+              scale += (1.0 - scale) * grow;
+            }
+            trailData[idx] = Math.max(0.1, Math.min(1.0, scale));
+          }
+        trailTex.needsUpdate = true;
+      }
+
+      // ═══════════════════════════════════════════════════════════════
+      // GEOMETRY
+      // ═══════════════════════════════════════════════════════════════
+      function createGrassGeometry(segments, numGrass) {
+        setSeed(0);
+        const V = (segments + 1) * 2,
+          T = V * 2,
+          indices = [];
+        for (let i = 0; i < segments; i++) {
+          const v = i * 2;
+          indices.push(v, v + 1, v + 2, v + 2, v + 1, v + 3);
+          const f = V + v;
+          indices.push(f + 2, f + 1, f, f + 3, f + 1, f + 2);
+        }
+        const pos = new Float32Array(T * 3),
+          nrm = new Float32Array(T * 3),
+          vid = new Float32Array(T),
+          off = new Float32Array(numGrass * 3);
+        for (let i = 0; i < T; i++) {
+          nrm[i * 3 + 1] = 1;
+          vid[i] = i;
+        }
+        for (let i = 0; i < numGrass; i++) {
+          off[i * 3] = randRange(
+            -GRASS_PATCH_SIZE * 0.5,
+            GRASS_PATCH_SIZE * 0.5,
+          );
+          off[i * 3 + 1] = randRange(
+            -GRASS_PATCH_SIZE * 0.5,
+            GRASS_PATCH_SIZE * 0.5,
+          );
+          off[i * 3 + 2] = 0;
+        }
+        const geo = new THREE.InstancedBufferGeometry();
+        geo.instanceCount = numGrass;
+        geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+        geo.setAttribute("normal", new THREE.Float32BufferAttribute(nrm, 3));
+        geo.setAttribute("vertIndex", new THREE.Float32BufferAttribute(vid, 1));
+        geo.setAttribute("offset", new THREE.InstancedBufferAttribute(off, 3));
+        geo.setIndex(indices);
+        geo.boundingSphere = new THREE.Sphere(
+          new THREE.Vector3(0, 0, 0),
+          1 + GRASS_PATCH_SIZE * 2,
+        );
+        return geo;
+      }
+
+      // ═══════════════════════════════════════════════════════════════
+      // TSL NOISE + UTILS
+      // ═══════════════════════════════════════════════════════════════
+      const hash12 = Fn(([p]) =>
+        fract(sin(dot(vec2(p), vec2(127.1, 311.7))).mul(43758.5453)),
+      );
+      const noise12 = Fn(([p_in]) => {
+        const p = vec2(p_in),
+          i = floor(p),
+          f = fract(p),
+          u = f.mul(f).mul(sub(3.0, f.mul(2.0)));
+        return mix(
+          mix(hash12(i), hash12(add(i, vec2(1, 0))), u.x),
+          mix(hash12(add(i, vec2(0, 1))), hash12(add(i, vec2(1, 1))), u.x),
+          u.y,
+        );
+      });
+      const hash42 = Fn(([p_in]) => {
+        const p = vec2(p_in),
+          p4 = fract(
+            vec4(p.x, p.y, p.x, p.y).mul(
+              vec4(443.897, 441.423, 437.195, 429.123),
+            ),
+          ),
+          d = dot(p4, p4.wzxy.add(19.19)),
+          r = p4.add(d);
+        return fract(r.xxyz.add(r.yzzw).mul(r.zywx));
+      });
+      const hash22 = Fn(([p_in]) => {
+        const p = vec2(p_in),
+          p3 = fract(vec3(p.x, p.y, p.x).mul(vec3(443.897, 441.423, 437.195))),
+          d = dot(p3, p3.yzx.add(19.19)),
+          r = p3.add(d);
+        return fract(r.xx.add(r.yz).mul(r.zy));
+      });
+
+      const saturate = Fn(([x]) => clamp(x, 0, 1));
+      const remap = Fn(([v, a, b, c, d]) =>
+        mix(c, d, sub(v, a).div(sub(b, a))),
+      );
+      const easeOut = Fn(([x, t]) => sub(1, pow(sub(1, x), t)));
+      const easeIn = Fn(([x, t]) => pow(x, t));
+      const rotateY_mat = Fn(([th]) => {
+        const c = cos(th),
+          s = sin(th);
+        return mat3(c, 0, s, 0, 1, 0, negate(s), 0, c);
+      });
+      const rotateX_mat = Fn(([th]) => {
+        const c = cos(th),
+          s = sin(th);
+        return mat3(1, 0, 0, 0, c, negate(s), 0, s, c);
+      });
+      const rotateAxis_mat = Fn(([ax_in, ang]) => {
+        const ax = normalize(vec3(ax_in)),
+          s = sin(ang),
+          c = cos(ang),
+          oc = sub(1, c);
+        return mat3(
+          add(mul(oc, ax.x, ax.x), c),
+          add(mul(oc, ax.x, ax.y), mul(ax.z, s)),
+          sub(mul(oc, ax.z, ax.x), mul(ax.y, s)),
+          sub(mul(oc, ax.x, ax.y), mul(ax.z, s)),
+          add(mul(oc, ax.y, ax.y), c),
+          add(mul(oc, ax.y, ax.z), mul(ax.x, s)),
+          add(mul(oc, ax.z, ax.x), mul(ax.y, s)),
+          sub(mul(oc, ax.y, ax.z), mul(ax.x, s)),
+          add(mul(oc, ax.z, ax.z), c),
+        );
+      });
+
+      // ═══════════════════════════════════════════════════════════════
+      // UNIFORMS
+      // ═══════════════════════════════════════════════════════════════
+      function srgbToLinear(hex) {
+        const c = new THREE.Color(hex);
+        c.convertSRGBToLinear();
+        return c;
+      }
+
+      const uTime = uniform(0),
+        uPlayerPos = uniform(new THREE.Vector3(0, 0, 0));
+      const NPC_COUNT = 6;
+      const uNpcPos = Array.from({ length: NPC_COUNT }, () =>
+        uniform(new THREE.Vector3(9999, 0, 9999)),
+      );
+      const uGrassWidth = uniform(PARAMS.grassWidth),
+        uGrassHeight = uniform(PARAMS.grassHeight);
+      const uLodDist = uniform(PARAMS.lodDistance),
+        uMaxDist = uniform(PARAMS.maxDistance);
+      const uBaseColor1 = uniform(srgbToLinear(PARAMS.baseColor1)),
+        uBaseColor2 = uniform(srgbToLinear(PARAMS.baseColor2));
+      const uTipColor1 = uniform(srgbToLinear(PARAMS.tipColor1)),
+        uTipColor2 = uniform(srgbToLinear(PARAMS.tipColor2));
+      const uGradientCurve = uniform(PARAMS.gradientCurve);
+      const uColorVariation = uniform(PARAMS.colorVariation);
+      const uLushColor = uniform(srgbToLinear(PARAMS.lushColor)),
+        uBleachedColor = uniform(srgbToLinear(PARAMS.bleachedColor));
+      // Wave wind uniforms
+      const uWindSpeed = uniform(PARAMS.windSpeed),
+        uWindStr = uniform(PARAMS.windStrength);
+      const uWindWaveScale = uniform(PARAMS.windWaveScale);
+      const uWindDirX = uniform(Math.cos(PARAMS.windDir)),
+        uWindDirZ = uniform(Math.sin(PARAMS.windDir));
+      const uWindGust = uniform(PARAMS.windGust),
+        uWindMicro = uniform(PARAMS.windMicroSway);
+      // Interaction
+      const uInteractionRange = uniform(PARAMS.interactionRange),
+        uInteractionStrength = uniform(PARAMS.interactionStrength);
+      const uInteractionHThresh = uniform(PARAMS.interactionHeightThreshold),
+        uInteractionRepel = uniform(1.0);
+      // Visual
+      const uMinSkyBlend = uniform(PARAMS.minSkyBlend),
+        uMaxSkyBlend = uniform(PARAMS.maxSkyBlend);
+      const uBsIntensity = uniform(PARAMS.bsIntensity),
+        uBsColor = uniform(srgbToLinear(PARAMS.bsColor));
+      const uBsPower = uniform(PARAMS.bsPower),
+        uFrontScatter = uniform(PARAMS.frontScatter);
+      const uRimSSS = uniform(PARAMS.rimSSS);
+      const uFogNear = uniform(PARAMS.fogNear),
+        uFogFar = uniform(PARAMS.fogFar);
+      const uFogIntensity = uniform(PARAMS.fogIntensity),
+        uFogColor = uniform(srgbToLinear(PARAMS.fogColor));
+      const uFogCameraFar = uniform(500000),
+        uFogEnabled = uniform(1);
+      const uSeasonalStr = uniform(0),
+        uSeasonalScale = uniform(PARAMS.seasonalScale);
+      const uSeasonalDryColor = uniform(srgbToLinear(PARAMS.seasonalDryColor));
+      const uSunDir = uniform(new THREE.Vector3(-1, 0.45, 1).normalize());
+      const uSunIntensity = uniform(PARAMS.sunIntensity);
+      const uTerrainSize = uniform(TERRAIN_SIZE);
+      const uTrailCenter = uniform(new THREE.Vector2());
+      const uTrailSize = uniform(TRAIL_SIZE);
+
+      // ═══════════════════════════════════════════════════════════════
+      // GRASS MATERIAL (MeshStandardNodeMaterial — real shadows!)
+      // Packed varyings to stay under 16 locations:
+      //   vGrassColor (vec3) — 1 loc
+      //   vPacked (vec3: heightPct, xSide, highLOD) — 1 loc
+      //   vWorldPos (vec3) — 1 loc
+      //   Total custom: 3 locs. MeshStandard uses ~7. Grand total ~10.
+      // Normal computed in vertex → normalNode (no extra varying)
+      // ═══════════════════════════════════════════════════════════════
+      function createGrassMaterial(segments, verts, useNpcInteraction) {
+        const SEGS = float(segments),
+          NVERTS = float(verts);
+        const vGrassColor = varying(vec3(0), "v_gc");
+        const vPacked = varying(vec3(0), "v_pk"); // x=heightPct, y=xSide, z=highLOD
+        const vWorldPos = varying(vec3(0), "v_wp");
+
+        const positionNode = Fn(() => {
+          const offsetAttr = attribute("offset", "vec3"),
+            vertIdxAttr = attribute("vertIndex", "float");
+          const grassOffset = vec3(offsetAttr.x, 0, offsetAttr.y);
+          const bladeWorld = modelWorldMatrix.mul(vec4(grassOffset, 1)).xyz;
+
+          // Sample heightmap
+          const terrainUV = add(div(bladeWorld.xz, uTerrainSize), vec2(0.5));
+          const terrainH = texture(heightTex, terrainUV).r;
+
+          // Trail: crush/regrow with edge fadeout
+          const trailUV = add(
+            div(sub(bladeWorld.xz, uTrailCenter), uTrailSize),
+            vec2(0.5),
+          );
+          const edgeDist = max(
+            abs(sub(trailUV.x, 0.5)),
+            abs(sub(trailUV.y, 0.5)),
+          );
+          const trailEdgeFade = smoothstep(0.42, 0.5, edgeDist);
+          const trailRaw = texture(trailTex, clamp(trailUV, 0.01, 0.99)).r;
+          const trailScale = mix(clamp(trailRaw, 0.1, 1.0), 1.0, trailEdgeFade);
+
+          const hv = hash42(bladeWorld.xz),
+            hv2 = hash22(bladeWorld.xz);
+          const distXZ = length(sub(cameraPosition.xz, bladeWorld.xz));
+          const highLODOut = smoothstep(mul(uLodDist, 0.5), uLodDist, distXZ);
+          const lodFadeIn = smoothstep(uLodDist, uMaxDist, distXZ);
+          const randomAngle = mul(hv.x, 2 * PI),
+            randomShade = remap(hv.y, -1, 1, 0.75, 1);
+          const randomHeight = mul(
+            remap(hv.z, 0, 1, 0.75, 1.5),
+            mix(1, 0, lodFadeIn),
+          );
+          const randomLean = remap(hv.w, 0, 1, 0.1, 0.3);
+
+          const vertID = mod(vertIdxAttr, NVERTS);
+          const zSide = negate(sub(mul(floor(div(vertIdxAttr, NVERTS)), 2), 1));
+          const xSide = mod(vertID, 2);
+          const heightPct = div(sub(vertID, xSide), mul(SEGS, 2));
+          const totalHeight = mul(uGrassHeight, randomHeight, trailScale);
+          const widthHigh = easeOut(sub(1, heightPct), 2),
+            widthLow = sub(1, heightPct);
+          const totalWidth = mul(
+            uGrassWidth,
+            mix(widthHigh, widthLow, highLODOut),
+          );
+          const x = mul(sub(xSide, 0.5), totalWidth),
+            y = mul(heightPct, totalHeight);
+
+          // ════════════════════════════════════════════════
+          // WAVE WIND (noise-based rolling waves — R3F style)
+          // ════════════════════════════════════════════════
+          const windDirVec = vec2(uWindDirX, uWindDirZ);
+          // Scroll noise in wind direction over time
+          const windScroll = mul(windDirVec, mul(uTime, uWindSpeed));
+          // Large rolling wave: noise sampled at world pos + scroll
+          const waveUV1 = add(mul(bladeWorld.xz, uWindWaveScale), windScroll);
+          const wave1 = sub(mul(noise12(waveUV1), 2), 1); // remap 0..1 to -1..1
+          // Second noise octave: different scale, cross-direction variation
+          const crossDir = vec2(negate(uWindDirZ), uWindDirX); // perpendicular
+          const waveUV2 = add(
+            mul(bladeWorld.xz, mul(uWindWaveScale, 2.3)),
+            mul(windScroll, 1.4),
+            mul(crossDir, mul(uTime, 0.3)),
+          );
+          const wave2 = mul(sub(mul(noise12(waveUV2), 2), 1), 0.35);
+          // Gust layer: slow, large-scale noise pulse
+          const gustUV = add(
+            mul(bladeWorld.xz, mul(uWindWaveScale, 0.25)),
+            mul(windScroll, 0.3),
+          );
+          const gustRaw = noise12(gustUV);
+          const gustStr = mul(smoothstep(0.5, 0.9, gustRaw), uWindGust); // only strong gusts pass
+          // Combine all layers
+          const windLean = mul(add(wave1, wave2, gustStr), uWindStr);
+          // Per-blade micro sway for organic feel
+          const microPhase = add(mul(hv.x, 6.28), mul(uTime, 2.5));
+          const micro = mul(sin(microPhase), uWindMicro, 0.3);
+          // Slight perpendicular sway from second noise (figure-8 motion)
+          const crossSway = mul(wave2, 0.3, uWindStr, heightPct);
+          // Total wind lean, scaled by height (base stays planted)
+          const totalWindLean = mul(add(windLean, micro), heightPct);
+          // Wind axis: perpendicular to wind direction in XZ plane
+          const windAxis = normalize(vec3(uWindDirZ, 0, negate(uWindDirX)));
+          // Cross axis for perpendicular sway
+          const crossAxis = normalize(vec3(uWindDirX, 0, uWindDirZ));
+
+          // Player (+ optional NPC) interaction — NPC path is heavier (6 extra interactors), disable for FPS
+          const bladeY = add(bladeWorld.y, terrainH);
+          const pDist = length(sub(bladeWorld.xz, uPlayerPos.xz)),
+            pHD = abs(sub(bladeY, uPlayerPos.y));
+          const pFall = mul(
+            smoothstep(uInteractionRange, 0.5, pDist),
+            smoothstep(uInteractionHThresh, 0, pHD),
+          );
+          const pAng = mul(
+            mix(0, uInteractionStrength, pFall),
+            uInteractionRepel,
+          );
+          const pTo = normalize(
+            sub(
+              vec3(uPlayerPos.x, 0, uPlayerPos.z),
+              vec3(bladeWorld.x, 0, bladeWorld.z),
+            ),
+          );
+          const pAx = vec3(pTo.z, 0, negate(pTo.x));
+          let totalFall, sumAxis, sumAngle;
+          if (useNpcInteraction) {
+            const n0D = length(sub(bladeWorld.xz, uNpcPos[0].xz)),
+              n0H = abs(sub(bladeY, uNpcPos[0].y));
+            const n0Fall = mul(
+              smoothstep(uInteractionRange, 0.5, n0D),
+              smoothstep(uInteractionHThresh, 0, n0H),
+            );
+            const n0To = normalize(
+              sub(
+                vec3(uNpcPos[0].x, 0, uNpcPos[0].z),
+                vec3(bladeWorld.x, 0, bladeWorld.z),
+              ),
+            );
+            const n0Ax = vec3(n0To.z, 0, negate(n0To.x));
+            const n1D = length(sub(bladeWorld.xz, uNpcPos[1].xz)),
+              n1H = abs(sub(bladeY, uNpcPos[1].y));
+            const n1Fall = mul(
+              smoothstep(uInteractionRange, 0.5, n1D),
+              smoothstep(uInteractionHThresh, 0, n1H),
+            );
+            const n1To = normalize(
+              sub(
+                vec3(uNpcPos[1].x, 0, uNpcPos[1].z),
+                vec3(bladeWorld.x, 0, bladeWorld.z),
+              ),
+            );
+            const n1Ax = vec3(n1To.z, 0, negate(n1To.x));
+            const n2D = length(sub(bladeWorld.xz, uNpcPos[2].xz)),
+              n2H = abs(sub(bladeY, uNpcPos[2].y));
+            const n2Fall = mul(
+              smoothstep(uInteractionRange, 0.5, n2D),
+              smoothstep(uInteractionHThresh, 0, n2H),
+            );
+            const n2To = normalize(
+              sub(
+                vec3(uNpcPos[2].x, 0, uNpcPos[2].z),
+                vec3(bladeWorld.x, 0, bladeWorld.z),
+              ),
+            );
+            const n2Ax = vec3(n2To.z, 0, negate(n2To.x));
+            const n3D = length(sub(bladeWorld.xz, uNpcPos[3].xz)),
+              n3H = abs(sub(bladeY, uNpcPos[3].y));
+            const n3Fall = mul(
+              smoothstep(uInteractionRange, 0.5, n3D),
+              smoothstep(uInteractionHThresh, 0, n3H),
+            );
+            const n3To = normalize(
+              sub(
+                vec3(uNpcPos[3].x, 0, uNpcPos[3].z),
+                vec3(bladeWorld.x, 0, bladeWorld.z),
+              ),
+            );
+            const n3Ax = vec3(n3To.z, 0, negate(n3To.x));
+            const n4D = length(sub(bladeWorld.xz, uNpcPos[4].xz)),
+              n4H = abs(sub(bladeY, uNpcPos[4].y));
+            const n4Fall = mul(
+              smoothstep(uInteractionRange, 0.5, n4D),
+              smoothstep(uInteractionHThresh, 0, n4H),
+            );
+            const n4To = normalize(
+              sub(
+                vec3(uNpcPos[4].x, 0, uNpcPos[4].z),
+                vec3(bladeWorld.x, 0, bladeWorld.z),
+              ),
+            );
+            const n4Ax = vec3(n4To.z, 0, negate(n4To.x));
+            const n5D = length(sub(bladeWorld.xz, uNpcPos[5].xz)),
+              n5H = abs(sub(bladeY, uNpcPos[5].y));
+            const n5Fall = mul(
+              smoothstep(uInteractionRange, 0.5, n5D),
+              smoothstep(uInteractionHThresh, 0, n5H),
+            );
+            const n5To = normalize(
+              sub(
+                vec3(uNpcPos[5].x, 0, uNpcPos[5].z),
+                vec3(bladeWorld.x, 0, bladeWorld.z),
+              ),
+            );
+            const n5Ax = vec3(n5To.z, 0, negate(n5To.x));
+            totalFall = add(
+              pFall,
+              add(
+                n0Fall,
+                add(n1Fall, add(n2Fall, add(n3Fall, add(n4Fall, n5Fall)))),
+              ),
+            );
+            sumAxis = add(
+              mul(pAx, pFall),
+              add(
+                mul(n0Ax, n0Fall),
+                add(
+                  mul(n1Ax, n1Fall),
+                  add(
+                    mul(n2Ax, n2Fall),
+                    add(
+                      mul(n3Ax, n3Fall),
+                      add(mul(n4Ax, n4Fall), mul(n5Ax, n5Fall)),
+                    ),
+                  ),
+                ),
+              ),
+            );
+            sumAngle = add(
+              mul(pAng, pFall),
+              add(
+                mul(
+                  mix(0, uInteractionStrength, n0Fall),
+                  uInteractionRepel,
+                  n0Fall,
+                ),
+                add(
+                  mul(
+                    mix(0, uInteractionStrength, n1Fall),
+                    uInteractionRepel,
+                    n1Fall,
+                  ),
+                  add(
+                    mul(
+                      mix(0, uInteractionStrength, n2Fall),
+                      uInteractionRepel,
+                      n2Fall,
+                    ),
+                    add(
+                      mul(
+                        mix(0, uInteractionStrength, n3Fall),
+                        uInteractionRepel,
+                        n3Fall,
+                      ),
+                      add(
+                        mul(
+                          mix(0, uInteractionStrength, n4Fall),
+                          uInteractionRepel,
+                          n4Fall,
+                        ),
+                        mul(
+                          mix(0, uInteractionStrength, n5Fall),
+                          uInteractionRepel,
+                          n5Fall,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          } else {
+            totalFall = pFall;
+            sumAxis = mul(pAx, pFall);
+            sumAngle = mul(pAng, pFall);
+          }
+          const invTotal = div(1, max(totalFall, 0.001));
+          const hasInteraction = smoothstep(0.001, 0.002, totalFall);
+          const pAxis = normalize(mix(vec3(1, 0, 0), sumAxis, hasInteraction));
+          const pAngle = mul(mul(sumAngle, invTotal), hasInteraction);
+
+          // Lean + curve
+          const easedH = mix(easeIn(heightPct, 2), 1, highLODOut);
+          const curveAmt = mul(negate(randomLean), easedH);
+          // Build transform: player push → wind lean → cross sway → random yaw
+          const grassMat = rotateAxis_mat(pAxis, pAngle)
+            .mul(rotateAxis_mat(windAxis, totalWindLean))
+            .mul(rotateAxis_mat(crossAxis, crossSway))
+            .mul(rotateY_mat(randomAngle));
+
+          // ════════════════════════════════════════════════
+          // NORMAL — blend left/right for rounded look, then assign to normalNode
+          // No extra varyings needed! Computed here, used by MeshStandard lighting.
+          // ════════════════════════════════════════════════
+          const nc1 = mul(negate(randomLean), easedH);
+          const n1p = rotateX_mat(nc1).mul(vec3(0, add(heightPct, 0.01), 0));
+          const n2p = rotateX_mat(mul(nc1, 0.9)).mul(
+            vec3(0, mul(add(heightPct, 0.01), 0.9), 0),
+          );
+          const ncurve = normalize(sub(n1p, n2p));
+          const gvn = vec3(0, negate(ncurve.z), ncurve.y);
+          // Two face normals (left/right rounded)
+          const gvn1 = mul(
+            grassMat,
+            rotateY_mat(mul(PI, 0.3, zSide)).mul(gvn),
+          ).mul(zSide);
+          const gvn2 = mul(
+            grassMat,
+            rotateY_mat(mul(PI, -0.3, zSide)).mul(gvn),
+          ).mul(zSide);
+          // Blend by xSide for rounded cross-section
+          const blendedNormal = normalize(mix(gvn1, gvn2, xSide));
+          // Sky fade: blend toward up at distance
+          const skyFade = mix(uMinSkyBlend, uMaxSkyBlend, highLODOut);
+          const finalNormal = normalize(
+            mix(blendedNormal, vec3(0, 1, 0), skyFade),
+          );
+          // Assign to normalLocal so MeshStandardNodeMaterial uses it
+          normalLocal.assign(finalNormal);
+
+          const localVert = rotateX_mat(curveAmt).mul(vec3(x, y, 0));
+          const finalVert = add(grassMat.mul(localVert), grassOffset);
+
+          // ════════════════════════════════════════════════
+          // COLOR (computed in vertex, passed as varying)
+          // ════════════════════════════════════════════════
+          const cn1 = noise12(mul(bladeWorld.xz, 0.015)),
+            cn2 = noise12(mul(bladeWorld.xz, 0.04)),
+            cn3 = noise12(mul(bladeWorld.xz, 0.1));
+          const colorMix = mul(add(cn1, mul(cn2, 0.5), mul(cn3, 0.25)), 0.57);
+          const seasonNoise = noise12(mul(bladeWorld.xz, uSeasonalScale));
+          const seasonFactor = mul(
+            smoothstep(0.4, 0.7, seasonNoise),
+            uSeasonalStr,
+          );
+          const baseCol = mix(uBaseColor1, uBaseColor2, hv2.x),
+            tipCol = mix(uTipColor1, uTipColor2, hv2.y);
+          const hiCol = mul(
+            mix(baseCol, tipCol, easeIn(heightPct, uGradientCurve)),
+            randomShade,
+          );
+          const loCol = mul(
+            mix(uBaseColor1, uTipColor1, heightPct),
+            randomShade,
+          );
+          let grassCol = mix(hiCol, loCol, highLODOut);
+          grassCol = mix(
+            grassCol,
+            mul(uLushColor, randomShade),
+            mul(smoothstep(0.3, 0.6, colorMix), uColorVariation, 0.5),
+          );
+          grassCol = mix(
+            grassCol,
+            mul(uBleachedColor, randomShade),
+            mul(smoothstep(0.7, 0.9, colorMix), uColorVariation, 0.3),
+          );
+          grassCol = mix(grassCol, uSeasonalDryColor, seasonFactor);
+          // Crushed trail tint
+          grassCol = mix(
+            grassCol,
+            mul(grassCol, vec3(1.1, 1.05, 0.85)),
+            sub(1, trailScale),
+          );
+          // Mild AO in vertex (gentle — won't cause LOD mismatch at this range)
+          const ao = mix(0.8, 1.0, smoothstep(0.0, 0.3, heightPct));
+          // LOD fade
+          const fadeFactor = sub(1, smoothstep(0.4, 1, lodFadeIn));
+          vGrassColor.assign(mul(grassCol, ao, mul(fadeFactor, fadeFactor)));
+          vPacked.assign(vec3(heightPct, xSide, highLODOut));
+
+          // World final position with terrain height
+          const worldFinal = vec3(
+            finalVert.x,
+            add(finalVert.y, terrainH),
+            finalVert.z,
+          );
+          vWorldPos.assign(modelWorldMatrix.mul(vec4(worldFinal, 1)).xyz);
+          return worldFinal;
+        })();
+
+        // ════════════════════════════════════════════════
+        // COLOR NODE — MeshStandard handles main lighting + shadows
+        // We only add SSS (fog is applied globally via post-process)
+        // ════════════════════════════════════════════════
+        const colorNode = Fn(() => {
+          const heightPct = vPacked.x;
+          let col = vGrassColor;
+          // SSS (subsurface scattering — additive glow)
+          const viewDir = normalize(sub(cameraPosition, vWorldPos));
+          const n = normalLocal;
+          const backScat = max(dot(negate(uSunDir), n), 0),
+            frontScat = max(dot(uSunDir, n), 0);
+          const rim = sub(1, max(dot(n, viewDir), 0));
+          const thickness = add(mul(sub(1, heightPct), 0.7), 0.3);
+          const transmitCol = mix(
+            uBsColor,
+            mul(uBsColor, vec3(1.3, 1.1, 0.7)),
+            sub(1, thickness),
+          );
+          const totalSSS = clamp(
+            add(
+              mul(pow(backScat, uBsPower), thickness),
+              mul(pow(frontScat, 1.5), thickness, uFrontScatter),
+              mul(pow(pow(rim, 1.5), 2), thickness, uRimSSS),
+            ),
+            0,
+            1,
+          );
+          col = add(col, mul(transmitCol, 0.35, totalSSS, uBsIntensity));
+          return col;
+        })();
+
+        const mat = new THREE.MeshStandardNodeMaterial({
+          side: THREE.DoubleSide,
+          roughness: 0.85,
+          metalness: 0.0,
+        });
+        mat.positionNode = positionNode;
+        mat.colorNode = colorNode;
+        return mat;
+      }
+
+      // ═══════════════════════════════════════════════════════════════
+      // SCENE
+      // ═══════════════════════════════════════════════════════════════
+      async function init() {
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        await renderer.init();
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = PARAMS.exposure;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+        const be = renderer.backend?.constructor?.name || "?";
+        document.getElementById("backend").textContent = be.includes("WebGPU")
+          ? "WebGPU ✓"
+          : "WebGL fallback";
+
+        // Performance stats (FPS, CPU) — GPU timing can trigger query-pool warnings without resolveTimestampsAsync
+        const stats = new Stats({ trackGPU: false });
+        stats.init(renderer);
+        document.body.appendChild(stats.dom);
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(
+          60,
+          innerWidth / innerHeight,
+          0.5,
+          500000,
+        );
+        camera.position.set(0, 8, 20);
+
+        // Orbit controls
+        const orbitControls = new OrbitControls(camera, renderer.domElement);
+        orbitControls.target.set(0, 2, 0);
+        orbitControls.maxPolarAngle = PI * 0.48;
+        orbitControls.enableDamping = true;
+        orbitControls.dampingFactor = 0.05;
+        orbitControls.enabled = false;
+        orbitControls.update();
+
+        // ── LIGHTING ──
+        const dirLight = new THREE.DirectionalLight(
+          0xfff5e0,
+          PARAMS.sunIntensity,
+        );
+        dirLight.position.copy(
+          new THREE.Vector3(PARAMS.sunDirX, PARAMS.sunDirY, PARAMS.sunDirZ)
+            .normalize()
+            .multiplyScalar(50),
+        );
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.width = 2048;
+        dirLight.shadow.mapSize.height = 2048;
+        dirLight.shadow.camera.near = 1;
+        dirLight.shadow.camera.far = 500;
+        dirLight.shadow.camera.left = -200;
+        dirLight.shadow.camera.right = 200;
+        dirLight.shadow.camera.top = 200;
+        dirLight.shadow.camera.bottom = -200;
+        dirLight.shadow.bias = -0.001;
+        dirLight.shadow.normalBias = 0.05;
+        // Cascaded shadow maps (CSM) — do not set csm.camera so renderer _init(builder) runs and creates mainFrustum/lights
+        const csm = new CSMShadowNode(dirLight, {
+          cascades: 4,
+          maxFar: 400,
+          mode: "practical",
+          lightMargin: 80,
+        });
+        dirLight.shadow.shadowNode = csm;
+        scene.add(dirLight);
+        // Shadow camera follows player
+        const shadowTarget = new THREE.Object3D();
+        scene.add(shadowTarget);
+        dirLight.target = shadowTarget;
+
+        const hemiLight = new THREE.HemisphereLight(0x99bbff, 0x557733, 1.5);
+        scene.add(hemiLight);
+        const ambLight = new THREE.AmbientLight(0x909080, PARAMS.sceneAmbient);
+        scene.add(ambLight);
+
+        // ── TERRAIN MESH ──
+        const terrainGeo = new THREE.PlaneGeometry(
+          TERRAIN_SIZE,
+          TERRAIN_SIZE,
+          TERRAIN_RES - 1,
+          TERRAIN_RES - 1,
+        );
+        terrainGeo.rotateX(-PI / 2);
+        const posArr = terrainGeo.attributes.position.array;
+        for (let i = 0; i < posArr.length; i += 3) {
+          const wx = posArr[i],
+            wz = posArr[i + 2];
+          posArr[i + 1] = sampleHeight(wx, wz);
+        }
+        terrainGeo.computeVertexNormals();
+        const uGroundBase = uniform(srgbToLinear(PARAMS.groundBaseColor));
+        const uGroundDirt = uniform(srgbToLinear(PARAMS.groundDirtColor));
+        const uGroundVar = uniform(1.0);
+        const terrainMat = new THREE.MeshStandardNodeMaterial({
+          roughness: 1,
+          metalness: 0,
+        });
+        terrainMat.colorNode = Fn(() => {
+          const wp = modelWorldMatrix.mul(vec4(positionLocal, 1)).xyz;
+          const n1 = noise12(mul(wp.xz, 0.03)),
+            n2 = noise12(mul(wp.xz, 0.08)),
+            n3 = noise12(mul(wp.xz, 0.2));
+          const combined = add(n1, mul(n2, 0.5), mul(n3, 0.25)).mul(0.57);
+          const heightBlend = smoothstep(3, 8, wp.y);
+          const dirtMix = max(
+            mul(smoothstep(0.35, 0.65, combined), uGroundVar),
+            heightBlend,
+          );
+          return mix(uGroundBase, uGroundDirt, dirtMix);
+        })();
+        const terrain = new THREE.Mesh(terrainGeo, terrainMat);
+        terrain.receiveShadow = true;
+        scene.add(terrain);
+
+        // ── SKY ──
+        const sky = new SkyMesh();
+        sky.scale.setScalar(450000);
+        scene.add(sky);
+        sky.turbidity.value = PARAMS.skyTurbidity;
+        sky.rayleigh.value = PARAMS.skyRayleigh;
+        sky.mieCoefficient.value = PARAMS.skyMie;
+        sky.mieDirectionalG.value = PARAMS.skyMieG;
+        function updateSky() {
+          const sd = new THREE.Vector3(
+            PARAMS.sunDirX,
+            PARAMS.sunDirY,
+            PARAMS.sunDirZ,
+          ).normalize();
+          sky.sunPosition.value.copy(sd);
+          sky.turbidity.value = PARAMS.skyTurbidity;
+          sky.rayleigh.value = PARAMS.skyRayleigh;
+          sky.mieCoefficient.value = PARAMS.skyMie;
+          sky.mieDirectionalG.value = PARAMS.skyMieG;
+        }
+        updateSky();
+
+        // ── CAPSULE CHARACTER ──
+        const capsuleGeo = new THREE.CapsuleGeometry(0.4, 1.2, 8, 16);
+        const capsuleMat = new THREE.MeshStandardNodeMaterial({
+          color: 0xee8833,
+          roughness: 0.4,
+          metalness: 0.0,
+        });
+        const capsule = new THREE.Mesh(capsuleGeo, capsuleMat);
+        capsule.castShadow = true;
+        capsule.receiveShadow = true;
+        scene.add(capsule);
+
+        // ── CAPSULE NPCs (wander slowly, grass bends away from them)
+        const NPC_SPEED = 2.2;
+        const npcColors = [
+          0x4488cc, 0xcc8844, 0x88cc44, 0xcc4488, 0x44ccaa, 0xaa44cc,
+        ];
+        const npcPositions = [
+          [20, 10],
+          [-25, 35],
+          [55, -25],
+          [-45, -50],
+          [15, -40],
+          [-35, 20],
+        ];
+        const capsuleNpcs = [];
+        const npcState = []; // { dirX, dirZ, timer, duration } per NPC
+        const hb = TERRAIN_SIZE * 0.48;
+        for (let i = 0; i < NPC_COUNT; i++) {
+          const npcGeo = new THREE.CapsuleGeometry(0.35, 1.0, 6, 12);
+          const npcMat = new THREE.MeshStandardNodeMaterial({
+            color: npcColors[i],
+            roughness: 0.5,
+            metalness: 0.0,
+          });
+          const npc = new THREE.Mesh(npcGeo, npcMat);
+          npc.castShadow = true;
+          npc.receiveShadow = true;
+          const [nx, nz] = npcPositions[i];
+          const ny = sampleHeight(nx, nz) + 0.9;
+          npc.position.set(nx, ny, nz);
+          npc.visible = PARAMS.npcEnabled;
+          scene.add(npc);
+          capsuleNpcs.push(npc);
+          const angle = Math.random() * Math.PI * 2;
+          npcState.push({
+            dirX: Math.cos(angle),
+            dirZ: Math.sin(angle),
+            timer: Math.random() * 4,
+            duration: 2 + Math.random() * 5,
+          });
+        }
+
+        // ── BUILDINGS (shadow casters) ──
+        const buildingMat = new THREE.MeshStandardNodeMaterial({
+          color: 0xc8b898,
+          roughness: 0.8,
+        });
+        const roofMat = new THREE.MeshStandardNodeMaterial({
+          color: 0x8b4513,
+          roughness: 0.7,
+        });
+        function addBuilding(x, z, w, d, h) {
+          const bx = x,
+            bz = z,
+            by = sampleHeight(x, z);
+          // Walls
+          const wallGeo = new THREE.BoxGeometry(w, h, d);
+          const wall = new THREE.Mesh(wallGeo, buildingMat);
+          wall.position.set(bx, by + h / 2, bz);
+          wall.castShadow = true;
+          wall.receiveShadow = true;
+          scene.add(wall);
+          // Roof (simple prism — use a box rotated, or a cone)
+          const roofGeo = new THREE.ConeGeometry(
+            Math.max(w, d) * 0.75,
+            h * 0.5,
+            4,
+          );
+          const roof = new THREE.Mesh(roofGeo, roofMat);
+          roof.position.set(bx, by + h + h * 0.25, bz);
+          roof.rotation.y = PI / 4;
+          roof.castShadow = true;
+          scene.add(roof);
+        }
+        // Place a few buildings
+        addBuilding(25, 15, 6, 5, 5);
+        addBuilding(-30, 40, 4, 4, 4);
+        addBuilding(60, -20, 8, 6, 6);
+        addBuilding(-50, -60, 5, 7, 5);
+
+        // ── TREES (shadow casters) ──
+        const trunkMat = new THREE.MeshStandardNodeMaterial({
+          color: 0x5c3a1e,
+          roughness: 0.9,
+        });
+        const leafMat = new THREE.MeshStandardNodeMaterial({
+          color: 0x2d6b1a,
+          roughness: 0.7,
+        });
+        const trunkGeo = new THREE.CylinderGeometry(0.2, 0.35, 3, 6);
+        const leafGeo1 = new THREE.SphereGeometry(2, 8, 6);
+        const leafGeo2 = new THREE.SphereGeometry(1.6, 8, 6);
+        function addTree(x, z) {
+          const ty = sampleHeight(x, z);
+          const trunk = new THREE.Mesh(trunkGeo, trunkMat);
+          trunk.position.set(x, ty + 1.5, z);
+          trunk.castShadow = true;
+          scene.add(trunk);
+          const crown = new THREE.Mesh(
+            Math.random() > 0.5 ? leafGeo1 : leafGeo2,
+            leafMat,
+          );
+          const crownH = 2.8 + Math.random() * 1.5;
+          crown.position.set(
+            x + Math.random() * 0.5 - 0.25,
+            ty + crownH,
+            z + Math.random() * 0.5 - 0.25,
+          );
+          crown.scale.setScalar(0.8 + Math.random() * 0.6);
+          crown.castShadow = true;
+          crown.receiveShadow = true;
+          scene.add(crown);
+        }
+        // Scatter trees using seeded positions
+        const treePositions = [];
+        for (let i = 0; i < 40; i++) {
+          const tx =
+            (Math.sin(i * 73.13) * 0.5 + 0.5 - 0.5) * TERRAIN_SIZE * 0.7;
+          const tz =
+            (Math.sin(i * 137.7) * 0.5 + 0.5 - 0.5) * TERRAIN_SIZE * 0.7;
+          // Skip if too close to a building or origin
+          const distOrigin = Math.sqrt(tx * tx + tz * tz);
+          if (distOrigin < 15) continue;
+          addTree(tx, tz);
+        }
+
+        // ── ANCIENT RUINS (compressed GLB on terrain) ──
+        const dracoLoader = new DRACOLoader();
+        dracoLoader.setDecoderPath(
+          "https://www.gstatic.com/draco/versioned/decoders/1.5.6/",
+        );
+        const gltfLoader = new GLTFLoader();
+        gltfLoader.setDRACOLoader(dracoLoader);
+        gltfLoader.load("models/ancient_ruins_modular_mr.glb", (gltf) => {
+          const ruins = gltf.scene;
+          ruins.position.set(0, sampleHeight(0, 0), 0);
+          ruins.scale.setScalar(0.05);
+          ruins.traverse((o) => {
+            if (o.isMesh) {
+              o.castShadow = true;
+              o.receiveShadow = true;
+            }
+          });
+          scene.add(ruins);
+        });
+
+        const charPos = new THREE.Vector3(0, 0, 0);
+        charPos.y = sampleHeight(0, 0) + 1.0;
+        const charAngle = { y: 0 };
+        const keys = { w: false, a: false, s: false, d: false };
+        window.addEventListener("keydown", (e) => {
+          const k = e.key.toLowerCase();
+          if (keys[k] !== undefined) {
+            keys[k] = true;
+            e.preventDefault();
+          }
+          if (e.key === "ArrowUp") {
+            keys.w = true;
+            e.preventDefault();
+          }
+          if (e.key === "ArrowDown") {
+            keys.s = true;
+            e.preventDefault();
+          }
+          if (e.key === "ArrowLeft") {
+            keys.a = true;
+            e.preventDefault();
+          }
+          if (e.key === "ArrowRight") {
+            keys.d = true;
+            e.preventDefault();
+          }
+        });
+        window.addEventListener("keyup", (e) => {
+          const k = e.key.toLowerCase();
+          if (keys[k] !== undefined) keys[k] = false;
+          if (e.key === "ArrowUp") keys.w = false;
+          if (e.key === "ArrowDown") keys.s = false;
+          if (e.key === "ArrowLeft") keys.a = false;
+          if (e.key === "ArrowRight") keys.d = false;
+        });
+
+        // Camera
+        const camOffset = new THREE.Vector3(0, 4, 8);
+        let camYaw = 0,
+          camPitch = 0.3;
+        let isPointerLocked = false;
+
+        renderer.domElement.addEventListener("click", () => {
+          if (PARAMS.cameraMode === "thirdPerson")
+            renderer.domElement.requestPointerLock();
+        });
+        document.addEventListener("pointerlockchange", () => {
+          isPointerLocked = !!document.pointerLockElement;
+        });
+        document.addEventListener("mousemove", (e) => {
+          if (!isPointerLocked) return;
+          camYaw -= e.movementX * 0.003;
+          camPitch = Math.max(
+            PARAMS.camPitchMin,
+            Math.min(PARAMS.camPitchMax, camPitch + e.movementY * 0.003),
+          );
+        });
+
+        // Grass
+        const geoLow = createGrassGeometry(GRASS_SEGMENTS_LOW, GRASS_DENSITY);
+        const geoHigh = createGrassGeometry(GRASS_SEGMENTS_HIGH, GRASS_DENSITY);
+        const matLow = createGrassMaterial(
+          GRASS_SEGMENTS_LOW,
+          GRASS_VERTS_LOW,
+          true,
+        );
+        const matHigh = createGrassMaterial(
+          GRASS_SEGMENTS_HIGH,
+          GRASS_VERTS_HIGH,
+          true,
+        );
+        const matLowSimple = createGrassMaterial(
+          GRASS_SEGMENTS_LOW,
+          GRASS_VERTS_LOW,
+          false,
+        );
+        const matHighSimple = createGrassMaterial(
+          GRASS_SEGMENTS_HIGH,
+          GRASS_VERTS_HIGH,
+          false,
+        );
+        const grassGroup = new THREE.Group();
+        scene.add(grassGroup);
+        const poolLow = { meshes: [], idx: 0 },
+          poolHigh = { meshes: [], idx: 0 };
+        function getMesh(pool, geo, mat) {
+          if (pool.idx < pool.meshes.length) return pool.meshes[pool.idx++];
+          const m = new THREE.Mesh(geo, mat);
+          m.frustumCulled = false;
+          m.castShadow = false;
+          m.receiveShadow = true;
+          grassGroup.add(m);
+          pool.meshes.push(m);
+          pool.idx++;
+          return m;
+        }
+
+        const frustum = new THREE.Frustum(),
+          projMat = new THREE.Matrix4();
+        const baseCellPos = new THREE.Vector3(),
+          cameraPosXZ = new THREE.Vector3();
+        const aabb = new THREE.Box3(),
+          cellPos = new THREE.Vector3();
+        const aabbSize = new THREE.Vector3(PATCH_SPACING, 1000, PATCH_SPACING);
+
+        // ═══════════════════════════════════════════════════════════
+        // TWEAKPANE
+        // ═══════════════════════════════════════════════════════════
+        const pane = new Tweakpane.Pane({
+          title: "🌿 Grass v8",
+          expanded: true,
+        });
+        const fShape = pane.addFolder({ title: "Grass Shape" });
+        fShape.addBinding(PARAMS, "grassWidth", {
+          min: 0.02,
+          max: 0.3,
+          step: 0.01,
+        });
+        fShape.addBinding(PARAMS, "grassHeight", {
+          min: 0.3,
+          max: 4,
+          step: 0.1,
+        });
+        fShape.addBinding(PARAMS, "gradientCurve", {
+          min: 1,
+          max: 8,
+          step: 0.5,
+        });
+        fShape.addBinding(PARAMS, "lodDistance", { min: 5, max: 50, step: 1 });
+        fShape.addBinding(PARAMS, "maxDistance", {
+          min: 30,
+          max: 300,
+          step: 10,
+        });
+        const fCol = pane.addFolder({ title: "Colors", expanded: false });
+        fCol.addBinding(PARAMS, "baseColor1", { view: "color" });
+        fCol.addBinding(PARAMS, "baseColor2", { view: "color" });
+        fCol.addBinding(PARAMS, "tipColor1", { view: "color" });
+        fCol.addBinding(PARAMS, "tipColor2", { view: "color" });
+        fCol.addBinding(PARAMS, "colorVariation", {
+          min: 0,
+          max: 1,
+          step: 0.05,
+        });
+        fCol.addBinding(PARAMS, "lushColor", { view: "color" });
+        fCol.addBinding(PARAMS, "bleachedColor", { view: "color" });
+        const fSeason = pane.addFolder({
+          title: "Seasonal Patches",
+          expanded: false,
+        });
+        fSeason.addBinding(PARAMS, "seasonalEnabled");
+        fSeason.addBinding(PARAMS, "seasonalStrength", {
+          min: 0,
+          max: 1,
+          step: 0.05,
+        });
+        fSeason.addBinding(PARAMS, "seasonalScale", {
+          min: 0.005,
+          max: 0.1,
+          step: 0.005,
+        });
+        fSeason.addBinding(PARAMS, "seasonalDryColor", { view: "color" });
+        const fWind = pane.addFolder({ title: "Wind" });
+        fWind.addBinding(PARAMS, "windSpeed", {
+          min: 0,
+          max: 4,
+          step: 0.1,
+          label: "speed",
+        });
+        fWind.addBinding(PARAMS, "windStrength", {
+          min: 0,
+          max: 1.5,
+          step: 0.05,
+          label: "strength",
+        });
+        fWind.addBinding(PARAMS, "windWaveScale", {
+          min: 0.01,
+          max: 0.3,
+          step: 0.01,
+          label: "waveScale",
+        });
+        fWind.addBinding(PARAMS, "windDir", {
+          min: 0,
+          max: 6.28,
+          step: 0.1,
+          label: "direction",
+        });
+        fWind.addBinding(PARAMS, "windGust", {
+          min: 0,
+          max: 1,
+          step: 0.05,
+          label: "gustStrength",
+        });
+        fWind.addBinding(PARAMS, "windMicroSway", {
+          min: 0,
+          max: 0.5,
+          step: 0.05,
+          label: "microSway",
+        });
+        const fTrail = pane.addFolder({ title: "Trail", expanded: false });
+        fTrail.addBinding(PARAMS, "trailEnabled");
+        fTrail.addBinding(PARAMS, "trailCrushSpeed", {
+          min: 0.05,
+          max: 1,
+          step: 0.05,
+          label: "crushSpeed",
+        });
+        fTrail.addBinding(PARAMS, "trailGrowRate", {
+          min: 0.001,
+          max: 0.05,
+          step: 0.001,
+          label: "growRate",
+        });
+        fTrail.addBinding(PARAMS, "trailRadius", {
+          min: 0.2,
+          max: 3,
+          step: 0.1,
+          label: "radius",
+        });
+        const fPlayer = pane.addFolder({
+          title: "Player & Camera",
+          expanded: false,
+        });
+        fPlayer.addBinding(PARAMS, "interactionEnabled");
+        fPlayer.addBinding(PARAMS, "interactionRange", {
+          min: 0.5,
+          max: 10,
+          step: 0.5,
+        });
+        fPlayer.addBinding(PARAMS, "interactionStrength", {
+          min: 0,
+          max: 5,
+          step: 0.25,
+        });
+        fPlayer.addBinding(PARAMS, "playerSpeed", { min: 1, max: 25, step: 1 });
+        fPlayer.addBinding(PARAMS, "camDist", {
+          min: 3,
+          max: 25,
+          step: 0.5,
+          label: "camDistance",
+        });
+        fPlayer.addBinding(PARAMS, "camHeight", {
+          min: -2,
+          max: 8,
+          step: 0.25,
+          label: "camHeight",
+        });
+        fPlayer.addBinding(PARAMS, "cameraMode", {
+          options: { thirdPerson: "thirdPerson", orbit: "orbit" },
+        });
+        const fNpc = pane.addFolder({ title: "NPCs", expanded: true });
+        fNpc
+          .addBinding(PARAMS, "npcEnabled", { label: "enabled" })
+          .on("change", () => {
+            for (let i = 0; i < NPC_COUNT; i++)
+              capsuleNpcs[i].visible = PARAMS.npcEnabled;
+          });
+        const fSSS = pane.addFolder({
+          title: "Subsurface Scatter",
+          expanded: false,
+        });
+        fSSS.addBinding(PARAMS, "bsEnabled");
+        fSSS.addBinding(PARAMS, "bsIntensity", { min: 0, max: 2, step: 0.1 });
+        fSSS.addBinding(PARAMS, "bsColor", { view: "color" });
+        fSSS.addBinding(PARAMS, "bsPower", { min: 0.5, max: 5, step: 0.25 });
+        fSSS.addBinding(PARAMS, "frontScatter", { min: 0, max: 1, step: 0.05 });
+        fSSS.addBinding(PARAMS, "rimSSS", { min: 0, max: 1, step: 0.05 });
+        const fFog = pane.addFolder({ title: "Fog", expanded: false });
+        fFog.addBinding(PARAMS, "fogEnabled");
+        fFog.addBinding(PARAMS, "fogNear", { min: 0, max: 50, step: 1 });
+        fFog.addBinding(PARAMS, "fogFar", { min: 10, max: 400, step: 10 });
+        fFog.addBinding(PARAMS, "fogIntensity", { min: 0, max: 1, step: 0.05 });
+        fFog.addBinding(PARAMS, "fogColor", { view: "color" });
+        const fGround = pane.addFolder({ title: "Ground", expanded: false });
+        fGround.addBinding(PARAMS, "groundVariation");
+        fGround.addBinding(PARAMS, "groundBaseColor", { view: "color" });
+        fGround.addBinding(PARAMS, "groundDirtColor", { view: "color" });
+        const fTerrain = pane.addFolder({ title: "Terrain", expanded: false });
+        fTerrain.addBinding(PARAMS, "terrainHeight", {
+          min: 0,
+          max: 60,
+          step: 1,
+        });
+        const fSun = pane.addFolder({ title: "Sun & Lighting" });
+        fSun.addBinding(PARAMS, "sunDirX", { min: -2, max: 2, step: 0.1 });
+        fSun.addBinding(PARAMS, "sunDirY", { min: 0.1, max: 2, step: 0.05 });
+        fSun.addBinding(PARAMS, "sunDirZ", { min: -2, max: 2, step: 0.1 });
+        fSun.addBinding(PARAMS, "sunIntensity", {
+          min: 0.5,
+          max: 5,
+          step: 0.25,
+        });
+        fSun.addBinding(PARAMS, "sceneAmbient", {
+          min: 0,
+          max: 4,
+          step: 0.1,
+          label: "ambientLight",
+        });
+        fSun.addBinding(PARAMS, "exposure", { min: 0.2, max: 2, step: 0.05 });
+        const fSky = pane.addFolder({ title: "Sky", expanded: false });
+        fSky.addBinding(PARAMS, "skyTurbidity", {
+          min: 0,
+          max: 20,
+          step: 0.5,
+          label: "turbidity",
+        });
+        fSky.addBinding(PARAMS, "skyRayleigh", {
+          min: 0,
+          max: 4,
+          step: 0.1,
+          label: "rayleigh",
+        });
+        fSky.addBinding(PARAMS, "skyMie", {
+          min: 0,
+          max: 0.1,
+          step: 0.001,
+          label: "mieCoeff",
+        });
+        fSky.addBinding(PARAMS, "skyMieG", {
+          min: 0,
+          max: 1,
+          step: 0.05,
+          label: "mieDirectional",
+        });
+
+        // Terrain regeneration
+        let lastTerrainH = PARAMS.terrainHeight;
+        function regenTerrain() {
+          generateHeightmap();
+          const pa = terrainGeo.attributes.position.array;
+          for (let i = 0; i < pa.length; i += 3)
+            pa[i + 1] = sampleHeight(pa[i], pa[i + 2]);
+          terrainGeo.attributes.position.needsUpdate = true;
+          terrainGeo.computeVertexNormals();
+        }
+
+        function syncUniforms() {
+          uGrassWidth.value = PARAMS.grassWidth;
+          uGrassHeight.value = PARAMS.grassHeight;
+          uGradientCurve.value = PARAMS.gradientCurve;
+          uLodDist.value = PARAMS.lodDistance;
+          uMaxDist.value = PARAMS.maxDistance;
+          uBaseColor1.value.copy(srgbToLinear(PARAMS.baseColor1));
+          uBaseColor2.value.copy(srgbToLinear(PARAMS.baseColor2));
+          uTipColor1.value.copy(srgbToLinear(PARAMS.tipColor1));
+          uTipColor2.value.copy(srgbToLinear(PARAMS.tipColor2));
+          uColorVariation.value = PARAMS.colorVariation;
+          uLushColor.value.copy(srgbToLinear(PARAMS.lushColor));
+          uBleachedColor.value.copy(srgbToLinear(PARAMS.bleachedColor));
+          // Wind
+          uWindSpeed.value = PARAMS.windSpeed;
+          uWindStr.value = PARAMS.windStrength;
+          uWindWaveScale.value = PARAMS.windWaveScale;
+          uWindDirX.value = Math.cos(PARAMS.windDir);
+          uWindDirZ.value = Math.sin(PARAMS.windDir);
+          uWindGust.value = PARAMS.windGust;
+          uWindMicro.value = PARAMS.windMicroSway;
+          // Interaction
+          uInteractionRange.value = PARAMS.interactionEnabled
+            ? PARAMS.interactionRange
+            : 999;
+          uInteractionStrength.value = PARAMS.interactionEnabled
+            ? PARAMS.interactionStrength
+            : 0;
+          uInteractionHThresh.value = PARAMS.interactionHeightThreshold;
+          uInteractionRepel.value = PARAMS.interactionRepel ? 1 : -1;
+          // Visual
+          uMinSkyBlend.value = PARAMS.minSkyBlend;
+          uMaxSkyBlend.value = PARAMS.maxSkyBlend;
+          uBsIntensity.value = PARAMS.bsEnabled ? PARAMS.bsIntensity : 0;
+          uBsColor.value.copy(srgbToLinear(PARAMS.bsColor));
+          uBsPower.value = PARAMS.bsPower;
+          uFrontScatter.value = PARAMS.frontScatter;
+          uRimSSS.value = PARAMS.rimSSS;
+          uFogNear.value = PARAMS.fogEnabled ? PARAMS.fogNear : 9999;
+          uFogFar.value = PARAMS.fogEnabled ? PARAMS.fogFar : 99999;
+          uFogIntensity.value = PARAMS.fogEnabled ? PARAMS.fogIntensity : 0;
+          uFogColor.value.copy(srgbToLinear(PARAMS.fogColor));
+          uFogCameraFar.value = camera.far;
+          uFogEnabled.value = PARAMS.fogEnabled ? 1 : 0;
+          uSeasonalStr.value = PARAMS.seasonalEnabled
+            ? PARAMS.seasonalStrength
+            : 0;
+          uSeasonalScale.value = PARAMS.seasonalScale;
+          uSeasonalDryColor.value.copy(srgbToLinear(PARAMS.seasonalDryColor));
+          uGroundBase.value.copy(srgbToLinear(PARAMS.groundBaseColor));
+          uGroundDirt.value.copy(srgbToLinear(PARAMS.groundDirtColor));
+          uGroundVar.value = PARAMS.groundVariation ? 1 : 0;
+          // Sun
+          const sd = new THREE.Vector3(
+            PARAMS.sunDirX,
+            PARAMS.sunDirY,
+            PARAMS.sunDirZ,
+          ).normalize();
+          uSunDir.value.copy(sd);
+          dirLight.position.copy(sd.clone().multiplyScalar(50));
+          dirLight.intensity = PARAMS.sunIntensity;
+          uSunIntensity.value = PARAMS.sunIntensity;
+          ambLight.intensity = PARAMS.sceneAmbient;
+          renderer.toneMappingExposure = PARAMS.exposure;
+          updateSky();
+          if (PARAMS.terrainHeight !== lastTerrainH) {
+            lastTerrainH = PARAMS.terrainHeight;
+            regenTerrain();
+          }
+          uTrailCenter.value.set(charPos.x, charPos.z);
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        // ANIMATION
+        // ═══════════════════════════════════════════════════════════
+        const timer = new THREE.Timer();
+        let frameCount = 0,
+          patchCount = 0,
+          lastTime = 0;
+        const moveDir = new THREE.Vector3();
+
+        // Post-process: global fog (single source of truth; grass no longer applies fog)
+        const scenePass = pass(scene, camera);
+        const sceneColor = scenePass.getTextureNode
+          ? scenePass.getTextureNode()
+          : scenePass;
+        const linearDepth = scenePass.getLinearDepthNode
+          ? scenePass.getLinearDepthNode()
+          : float(0.5);
+        const worldDepth = mul(linearDepth, uFogCameraFar);
+        const fogF = mul(
+          clamp(
+            mul(
+              div(sub(worldDepth, uFogNear), sub(uFogFar, uFogNear)),
+              uFogIntensity,
+            ),
+            0,
+            1,
+          ),
+          uFogEnabled,
+        );
+        // Only skip fog for the sky: sky is at the far plane (linearDepth ~= 1), everything else gets fog
+        const skyMask = step(float(0.999), linearDepth);
+        const foggedOutput = mix(
+          sceneColor,
+          vec4(uFogColor, 1),
+          mul(fogF, sub(1, skyMask)),
+        );
+        const renderPipeline = new THREE.RenderPipeline(renderer);
+        renderPipeline.outputNode = foggedOutput;
+
+        // Pre-compile scene (including CSM) so node builder runs before first frame
+        await renderer.compileAsync(scene, camera);
+
+        renderer.setAnimationLoop(() => {
+          timer.update();
+          const elapsed = timer.getElapsed();
+          const dt = Math.min(elapsed - lastTime, 0.05);
+          lastTime = elapsed;
+
+          // Character movement
+          moveDir.set(0, 0, 0);
+          if (keys.w) moveDir.z -= 1;
+          if (keys.s) moveDir.z += 1;
+          if (keys.a) moveDir.x -= 1;
+          if (keys.d) moveDir.x += 1;
+          if (moveDir.length() > 0) {
+            moveDir.normalize();
+            const sinY = Math.sin(camYaw),
+              cosY = Math.cos(camYaw);
+            const mx = moveDir.x * cosY - moveDir.z * sinY;
+            const mz = moveDir.x * sinY + moveDir.z * cosY;
+            charPos.x += mx * PARAMS.playerSpeed * dt;
+            charPos.z += mz * PARAMS.playerSpeed * dt;
+            const hb = TERRAIN_SIZE * 0.48;
+            charPos.x = Math.max(-hb, Math.min(hb, charPos.x));
+            charPos.z = Math.max(-hb, Math.min(hb, charPos.z));
+          }
+          charPos.y = sampleHeight(charPos.x, charPos.z) + 1.0;
+          capsule.position.copy(charPos);
+
+          // Shadow camera follows player
+          shadowTarget.position.set(charPos.x, 0, charPos.z);
+          const sd = new THREE.Vector3(
+            PARAMS.sunDirX,
+            PARAMS.sunDirY,
+            PARAMS.sunDirZ,
+          ).normalize();
+          dirLight.position.set(
+            charPos.x + sd.x * 50,
+            charPos.y + sd.y * 50,
+            charPos.z + sd.z * 50,
+          );
+
+          if (PARAMS.cameraMode === "thirdPerson") {
+            const camDist = PARAMS.camDist;
+            const cx =
+              charPos.x - Math.sin(camYaw) * Math.cos(camPitch) * camDist;
+            const cy =
+              charPos.y + Math.sin(camPitch) * camDist + PARAMS.camHeight;
+            const cz =
+              charPos.z - Math.cos(camYaw) * Math.cos(camPitch) * camDist;
+            const camTerrainY = sampleHeight(cx, cz) + 1.5;
+            camera.position.set(cx, Math.max(cy, camTerrainY), cz);
+            camera.lookAt(charPos.x, charPos.y + 0.5, charPos.z);
+            orbitControls.enabled = false;
+          } else {
+            orbitControls.enabled = true;
+            orbitControls.update();
+          }
+
+          // Trail
+          updateTrail(dt, charPos.x, charPos.z);
+          syncUniforms();
+          uTime.value = elapsed;
+          uPlayerPos.value.copy(charPos);
+          if (PARAMS.npcEnabled) {
+            for (let i = 0; i < NPC_COUNT; i++) {
+              const npc = capsuleNpcs[i];
+              const state = npcState[i];
+              state.timer -= dt;
+              if (state.timer <= 0) {
+                const angle = Math.random() * Math.PI * 2;
+                state.dirX = Math.cos(angle);
+                state.dirZ = Math.sin(angle);
+                state.duration = 2 + Math.random() * 5;
+                state.timer = state.duration;
+              }
+              npc.position.x += state.dirX * NPC_SPEED * dt;
+              npc.position.z += state.dirZ * NPC_SPEED * dt;
+              npc.position.x = Math.max(-hb, Math.min(hb, npc.position.x));
+              npc.position.z = Math.max(-hb, Math.min(hb, npc.position.z));
+              npc.position.y =
+                sampleHeight(npc.position.x, npc.position.z) + 0.9;
+              npc.rotation.y = Math.atan2(state.dirX, state.dirZ);
+              uNpcPos[i].value.copy(npc.position);
+            }
+          }
+
+          // CSM: camera comes from builder in _init(); update cascades every frame for moving camera
+          camera.updateMatrixWorld();
+          if (csm.mainFrustum) {
+            csm.camera = camera;
+            csm.updateFrustums();
+          }
+
+          // Grass patches
+          for (let i = 0; i < grassGroup.children.length; i++)
+            grassGroup.children[i].visible = false;
+          poolLow.idx = 0;
+          poolHigh.idx = 0;
+          projMat.multiplyMatrices(
+            camera.projectionMatrix,
+            camera.matrixWorldInverse,
+          );
+          frustum.setFromProjectionMatrix(projMat);
+          baseCellPos
+            .copy(camera.position)
+            .divideScalar(PATCH_SPACING)
+            .floor()
+            .multiplyScalar(PATCH_SPACING);
+          cameraPosXZ.set(camera.position.x, 0, camera.position.z);
+          patchCount = 0;
+          for (let x = -GRID_SIZE; x < GRID_SIZE; x++) {
+            for (let z = -GRID_SIZE; z < GRID_SIZE; z++) {
+              cellPos.set(
+                baseCellPos.x + x * PATCH_SPACING,
+                0,
+                baseCellPos.z + z * PATCH_SPACING,
+              );
+              aabb.setFromCenterAndSize(cellPos, aabbSize);
+              const dist = aabb.distanceToPoint(cameraPosXZ);
+              if (dist > PARAMS.maxDistance) continue;
+              if (!frustum.intersectsBox(aabb)) continue;
+              const useLow = dist > PARAMS.lodDistance;
+              // Use simple materials (player-only interaction) to avoid 6× vertex shader cost; NPCs stay visible but don't bend grass
+              const mat = useLow ? matLowSimple : matHighSimple;
+              const mesh = getMesh(
+                useLow ? poolLow : poolHigh,
+                useLow ? geoLow : geoHigh,
+                mat,
+              );
+              mesh.material = mat;
+              mesh.position.set(cellPos.x, 0, cellPos.z);
+              mesh.visible = true;
+              patchCount++;
+            }
+          }
+
+          renderPipeline.render();
+          stats.update();
+          if (++frameCount % 30 === 0) {
+            document.getElementById("stats").textContent =
+              `${patchCount} patches ▪ ${((patchCount * GRASS_DENSITY) / 1000) | 0}k blades`;
+          }
+        });
+
+        window.addEventListener("resize", () => {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(innerWidth, innerHeight);
+          if (csm.mainFrustum) csm.updateFrustums();
+        });
+      }
+
+      init().catch((e) => {
+        console.error("Init failed:", e);
+        document.getElementById("backend").textContent = "Error: " + e.message;
+      });
+    </script>
+  </body>
+</html>
