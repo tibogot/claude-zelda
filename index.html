@@ -113,11 +113,16 @@ const PARAMS = {
   gravity: 9.81,
   camDist: 7, camHeight: 0.0, camPitchMin: -0.2, camPitchMax: 1.2,
   mouseSensitivity: 0.002,
+  keyTurnSpeed: 2.2,
   cameraMode: 'thirdPerson',
   // NPCs (disable = better FPS — grass shader skips 6 interactors)
   npcEnabled: true,
   // Physics debug (wireframe colliders)
   rapierDebug: false,
+  // Scene toggles for FPS debugging
+  showRuins: true,
+  showTrees: true,
+  showBuildings: true,
   // Character (human-sized, feet on ground) + physics capsule
   characterHeight: 1.7,
   characterOffsetY: 0,
@@ -735,6 +740,8 @@ async function init() {
   }
 
   // ── BUILDINGS (shadow casters + physics colliders) ──
+  const buildingsGroup=new THREE.Group();
+  scene.add(buildingsGroup);
   const buildingMat=new THREE.MeshStandardNodeMaterial({color:0xc8b898,roughness:0.8});
   const roofMat=new THREE.MeshStandardNodeMaterial({color:0x8b4513,roughness:0.7});
   function addBuilding(x,z,w,d,h){
@@ -744,14 +751,14 @@ async function init() {
     const wall=new THREE.Mesh(wallGeo,buildingMat);
     wall.position.set(bx,by+h/2,bz);
     wall.castShadow=true; wall.receiveShadow=true;
-    scene.add(wall);
+    buildingsGroup.add(wall);
     // Roof (simple prism — use a box rotated, or a cone)
     const roofGeo=new THREE.ConeGeometry(Math.max(w,d)*0.75,h*0.5,4);
     const roof=new THREE.Mesh(roofGeo,roofMat);
     roof.position.set(bx,by+h+h*0.25,bz);
     roof.rotation.y=PI/4;
     roof.castShadow=true;
-    scene.add(roof);
+    buildingsGroup.add(roof);
     // Physics: static colliders for wall and roof
     const wallBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(bx, by + h / 2, bz);
     const wallBody = physicsWorld.createRigidBody(wallBodyDesc);
@@ -768,6 +775,8 @@ async function init() {
   addBuilding(-50,-60,5,7,5);
 
   // ── TREES (shadow casters + physics colliders) ──
+  const treesGroup=new THREE.Group();
+  scene.add(treesGroup);
   const trunkMat=new THREE.MeshStandardNodeMaterial({color:0x5c3a1e,roughness:0.9});
   const leafMat=new THREE.MeshStandardNodeMaterial({color:0x2d6b1a,roughness:0.7});
   const trunkGeo=new THREE.CylinderGeometry(0.2,0.35,3,6);
@@ -778,13 +787,13 @@ async function init() {
     const trunk=new THREE.Mesh(trunkGeo,trunkMat);
     trunk.position.set(x,ty+1.5,z);
     trunk.castShadow=true;
-    scene.add(trunk);
+    treesGroup.add(trunk);
     const crownH=2.8+Math.random()*1.5;
     const crown=new THREE.Mesh(Math.random()>0.5?leafGeo1:leafGeo2,leafMat);
     crown.position.set(x+Math.random()*0.5-0.25,ty+crownH,z+Math.random()*0.5-0.25);
     crown.scale.setScalar(0.8+Math.random()*0.6);
     crown.castShadow=true; crown.receiveShadow=true;
-    scene.add(crown);
+    treesGroup.add(crown);
     // Physics: trunk cylinder + crown ball (approximate)
     const trunkBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(x, ty + 1.5, z);
     const trunkBody = physicsWorld.createRigidBody(trunkBodyDesc);
@@ -811,8 +820,10 @@ async function init() {
   const gltfLoader = new GLTFLoader();
   gltfLoader.setDRACOLoader(dracoLoader);
   const RUINS_X = 120, RUINS_Z = 80; // offset from center so player doesn't spawn inside
+  let ruinsModel = null;
   gltfLoader.load('models/ancient_ruins_modular_mr.glb', (gltf) => {
     const ruins = gltf.scene;
+    ruinsModel = ruins;
     ruins.position.set(RUINS_X, sampleHeight(RUINS_X, RUINS_Z), RUINS_Z);
     ruins.scale.setScalar(0.05);
     ruins.traverse((o) => {
@@ -821,6 +832,7 @@ async function init() {
         o.receiveShadow = true;
       }
     });
+    ruins.visible = PARAMS.showRuins;
     scene.add(ruins);
     ruins.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(ruins);
@@ -909,7 +921,7 @@ async function init() {
     } catch (e) { console.warn('Rapier debug render:', e); }
   }
   const charAngle={y:0};
-  const keys={w:false,a:false,s:false,d:false,shift:false,space:false};
+  const keys={w:false,a:false,s:false,d:false,shift:false,space:false,arrowLeft:false,arrowRight:false};
   let characterVelY=0;
   window.addEventListener('keydown',e=>{
     const k=e.key.toLowerCase();
@@ -918,8 +930,8 @@ async function init() {
     if(e.key===' '||e.code==='Space'){keys.space=true;e.preventDefault();}
     if(e.key==='ArrowUp'){keys.w=true;e.preventDefault();}
     if(e.key==='ArrowDown'){keys.s=true;e.preventDefault();}
-    if(e.key==='ArrowLeft'){keys.a=true;e.preventDefault();}
-    if(e.key==='ArrowRight'){keys.d=true;e.preventDefault();}
+    if(e.key==='ArrowLeft'){keys.arrowLeft=true;e.preventDefault();}
+    if(e.key==='ArrowRight'){keys.arrowRight=true;e.preventDefault();}
   });
   window.addEventListener('keyup',e=>{
     const k=e.key.toLowerCase();
@@ -928,8 +940,8 @@ async function init() {
     if(e.key===' '||e.code==='Space')keys.space=false;
     if(e.key==='ArrowUp')keys.w=false;
     if(e.key==='ArrowDown')keys.s=false;
-    if(e.key==='ArrowLeft')keys.a=false;
-    if(e.key==='ArrowRight')keys.d=false;
+    if(e.key==='ArrowLeft')keys.arrowLeft=false;
+    if(e.key==='ArrowRight')keys.arrowRight=false;
   });
 
   // Camera
@@ -1018,6 +1030,7 @@ async function init() {
   fPlayer.addBinding(PARAMS,'camDist',{min:3,max:25,step:0.5,label:'camDistance'});
   fPlayer.addBinding(PARAMS,'camHeight',{min:-2,max:8,step:0.25,label:'camHeight'});
   fPlayer.addBinding(PARAMS,'mouseSensitivity',{min:0.0005,max:0.01,step:0.0005,label:'mouse sensitivity'});
+  fPlayer.addBinding(PARAMS,'keyTurnSpeed',{min:0.5,max:5,step:0.1,label:'arrow turn speed'});
   fPlayer.addBinding(PARAMS,'cameraMode',{options:{thirdPerson:'thirdPerson',orbit:'orbit'}});
   const fNpc=pane.addFolder({title:'NPCs',expanded:true});
   fNpc.addBinding(PARAMS,'npcEnabled',{label:'enabled'}).on('change',()=>{ for(let i=0;i<NPC_COUNT;i++) capsuleNpcs[i].visible=PARAMS.npcEnabled; });
@@ -1045,6 +1058,10 @@ async function init() {
   fSky.addBinding(PARAMS,'skyMieG',{min:0,max:1,step:0.05,label:'mieDirectional'});
   const fPhysics=pane.addFolder({title:'Physics',expanded:false});
   fPhysics.addBinding(PARAMS,'rapierDebug',{label:'Rapier debug (colliders)'});
+  const fScene=pane.addFolder({title:'Scene (FPS debug)',expanded:true});
+  fScene.addBinding(PARAMS,'showRuins',{label:'Ruins'});
+  fScene.addBinding(PARAMS,'showTrees',{label:'Trees'});
+  fScene.addBinding(PARAMS,'showBuildings',{label:'Buildings'});
 
   // Terrain regeneration
   let lastTerrainH = PARAMS.terrainHeight;
@@ -1124,7 +1141,8 @@ async function init() {
     const dt=Math.min(elapsed-lastTime,0.05);
     lastTime=elapsed;
 
-    // Character movement
+    if (keys.arrowLeft) camYaw += PARAMS.keyTurnSpeed * dt;
+    if (keys.arrowRight) camYaw -= PARAMS.keyTurnSpeed * dt;
     moveDir.set(0,0,0);
     let desiredDx = 0, desiredDz = 0;
     if(keys.w) moveDir.z-=1;
@@ -1212,6 +1230,9 @@ async function init() {
     }
     if (characterMixer) characterMixer.update(dt);
     physicsDebugGroup.visible = !!PARAMS.rapierDebug;
+    buildingsGroup.visible = PARAMS.showBuildings;
+    treesGroup.visible = PARAMS.showTrees;
+    if (ruinsModel) ruinsModel.visible = PARAMS.showRuins;
     if (PARAMS.rapierDebug) buildRapierDebugMeshes();
     for (const { body, mesh } of physicsCubes) {
       const t = body.translation();
