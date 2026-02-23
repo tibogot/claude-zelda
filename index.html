@@ -68,6 +68,8 @@
 
       import * as THREE from "three";
       import Stats from "stats-gl";
+      import { createFlag } from "./flag.js";
+      import { createBirds } from "./birds.js";
       import {
         Fn,
         uniform,
@@ -246,6 +248,14 @@
         treeAlphaTest: 0.5,
         treeOpacity: 1,
         treeDepthWrite: true,
+        // Birds (GPU compute boids)
+        birdsEnabled: true,
+        birdsCenterY: 60,
+        birdsMinY: 30,
+        birdsMaxY: 100,
+        birdsSeparation: 15,
+        birdsAlignment: 20,
+        birdsCohesion: 20,
         // Shadows (tune if flickering or sun artifacts)
         shadowBias: -0.002,
         shadowNormalBias: 0.08,
@@ -1000,7 +1010,10 @@
       // SCENE
       // ═══════════════════════════════════════════════════════════════
       async function init() {
-        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        const renderer = new THREE.WebGPURenderer({
+          antialias: true,
+          requiredLimits: { maxStorageBuffersInVertexStage: 3 }, // needed for birds GPU vertex storage reads
+        });
         await renderer.init();
         renderer.setSize(innerWidth, innerHeight);
         renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -1293,18 +1306,19 @@
           groundHalfZ,
         );
         physicsWorld.createCollider(groundColliderDesc);
-        // Dynamic cubes (body + Three.js mesh) — spawn above ground so they fall
+        // Dynamic cubes (body + Three.js mesh) — spawn above terrain elsewhere so they fall
         const physicsCubes = [];
+        const cubeSpawnHeight = 3; // drop from this much above terrain
         const cubePositions = [
-          [0, 8, 0],
-          [3, 12, 2],
-          [-2, 6, -1],
-          [5, 10, -3],
-          [-4, 15, 2],
-          [2, 7, 4],
-          [-3, 11, -2],
-          [4, 9, 1],
-        ];
+          [80, 0, 60],
+          [-100, 0, 80],
+          [120, 0, -50],
+          [-60, 0, -120],
+          [200, 0, 40],
+          [-180, 0, -80],
+          [50, 0, -200],
+          [-140, 0, 100],
+        ].map(([x, _, z]) => [x, sampleHeight(x, z) + cubeSpawnHeight, z]);
         const cubeHalfExtent = 0.5;
         const cubeGeo = new THREE.BoxGeometry(
           cubeHalfExtent * 2,
@@ -1604,6 +1618,26 @@
             RAPIER.ColliderDesc.trimesh(ruinsVerts, ruinsInds),
             ruinsBody,
           );
+        });
+
+        // ── FLAG (cloth physics simulation) ──
+        // Pole bottom sits ~0.4225 * scale units below the group origin,
+        // so raise Y by that amount to plant the pole base on the terrain.
+        const FLAG_SCALE = 15;
+        const flagX = 8, flagZ = 0;
+        const flag = createFlag({
+          position: [flagX, sampleHeight(flagX, flagZ) + 0.4225 * FLAG_SCALE, flagZ],
+          scale: FLAG_SCALE,
+        });
+        scene.add(flag.group);
+
+        // ── BIRDS (GPU compute boids, no mouse — pure autonomous flocking) ──
+        const birds = createBirds({
+          scene, renderer,
+          count: 1024, bounds: 400,
+          centerY: PARAMS.birdsCenterY,
+          minY: PARAMS.birdsMinY,
+          maxY: PARAMS.birdsMaxY,
         });
 
         const capR = PARAMS.capsuleRadius;
@@ -2102,12 +2136,55 @@
         fScene.addBinding(PARAMS, "showTrees", { label: "Trees" });
         fScene.addBinding(PARAMS, "showBuildings", { label: "Buildings" });
 
+        // Re-places all tree instances using the current PARAMS without reloading the GLB.
+        // Safe to call any time after the GLB has loaded.
+        function respawnTrees() {
+          if (!treeInstanceMatrices || treeInstancedMeshes.length === 0) return;
+          const newCount = Math.min(Math.max(100, PARAMS.treeCount | 0), MAX_TREES);
+          setSeed(42);
+          const halfTerrain = TERRAIN_SIZE * 0.48;
+          let placed = 0;
+          for (
+            let attempts = 0;
+            placed < newCount && attempts < newCount * 4;
+            attempts++
+          ) {
+            const tx = (seededRandom() * 2 - 1) * halfTerrain;
+            const tz = (seededRandom() * 2 - 1) * halfTerrain;
+            if (Math.sqrt(tx * tx + tz * tz) < 20) continue;
+            const ty    = sampleHeight(tx, tz);
+            const scale = (0.85 + seededRandom() * 0.3) * PARAMS.treeScale;
+            const rotY  = seededRandom() * Math.PI * 2;
+            treeMatrix
+              .identity()
+              .makeRotationY(rotY)
+              .scale(new THREE.Vector3(scale, scale, scale))
+              .setPosition(tx, ty, tz);
+            treeMatrix.toArray(treeInstanceMatrices, placed * 16);
+            for (const im of treeInstancedMeshes) im.setMatrixAt(placed, treeMatrix);
+            placed++;
+          }
+          treeCountActual = placed;
+          treeCompactMatrices.set(treeInstanceMatrices.subarray(0, treeCountActual * 16));
+          for (const im of treeInstancedMeshes) {
+            im.count = treeCountActual;
+            im.instanceMatrix.needsUpdate = true;
+          }
+        }
+
         const fTrees = pane.addFolder({ title: "Trees (leaves)", expanded: true });
+        fTrees.addBinding(PARAMS, "treeCount", {
+          min: 100,
+          max: MAX_TREES,
+          step: 100,
+          label: "count",
+        });
+        fTrees.addButton({ title: "↺ respawn trees" }).on("click", respawnTrees);
         fTrees.addBinding(PARAMS, "treeScale", {
           min: 0.1,
           max: 50,
           step: 0.1,
-          label: "scale (reload trees to apply)",
+          label: "scale",
         });
         fTrees.addBinding(PARAMS, "treeAlphaTest", {
           min: 0,
@@ -2127,6 +2204,30 @@
         fTrees.addBinding(PARAMS, "treeCulling", {
           label: "frustum culling",
         });
+
+        const fBirds = pane.addFolder({ title: "Birds", expanded: true });
+        const bp = birds.params;
+        fBirds.addBinding(PARAMS, "birdsEnabled", { label: "enabled" }).on("change", () => {
+          birds.mesh.visible = PARAMS.birdsEnabled;
+        });
+        fBirds.addBinding(PARAMS, "birdsCenterY", {
+          min: 10, max: 150, step: 1, label: "altitude center",
+        }).on("change", () => { bp.uCenterY.value = PARAMS.birdsCenterY; });
+        fBirds.addBinding(PARAMS, "birdsMinY", {
+          min: 0, max: 120, step: 1, label: "min altitude",
+        }).on("change", () => { bp.uMinY.value = PARAMS.birdsMinY; });
+        fBirds.addBinding(PARAMS, "birdsMaxY", {
+          min: 10, max: 200, step: 1, label: "max altitude",
+        }).on("change", () => { bp.uMaxY.value = PARAMS.birdsMaxY; });
+        fBirds.addBinding(PARAMS, "birdsSeparation", {
+          min: 1, max: 60, step: 0.5, label: "separation zone",
+        }).on("change", () => { bp.uSeparation.value = PARAMS.birdsSeparation; });
+        fBirds.addBinding(PARAMS, "birdsAlignment", {
+          min: 1, max: 60, step: 0.5, label: "alignment zone",
+        }).on("change", () => { bp.uAlignment.value = PARAMS.birdsAlignment; });
+        fBirds.addBinding(PARAMS, "birdsCohesion", {
+          min: 1, max: 60, step: 0.5, label: "cohesion zone",
+        }).on("change", () => { bp.uCohesion.value = PARAMS.birdsCohesion; });
 
         const fShadows = pane.addFolder({ title: "Shadows", expanded: true });
         fShadows.addBinding(PARAMS, "shadowBias", {
@@ -2444,6 +2545,8 @@
             ud.lastMoveState = moveState;
           }
           if (characterMixer) characterMixer.update(dt);
+          flag.update(dt);
+          if (PARAMS.birdsEnabled) birds.update(dt);
           physicsDebugGroup.visible = !!PARAMS.rapierDebug;
           buildingsGroup.visible = PARAMS.showBuildings;
           treesGroup.visible = PARAMS.showTrees;
