@@ -59,7 +59,7 @@
   <body>
     <div id="info">
       WebGPU Grass v8 &mdash; <span id="backend">loading…</span> &bull;
-      <span id="stats"></span> &bull; WASD/Arrows + click to look
+      <span id="stats"></span> &bull; WASD + click to look &bull; right-click attack
     </div>
 
     <script type="module">
@@ -240,7 +240,16 @@
         // Scene toggles for FPS debugging
         showRuins: true,
         showTrees: true,
+        showScatter: true,
         showBuildings: false,
+        // Scatter (instanced rocks): per-type scale & count, live in Tweakpane
+        scatterBoulderScale: 0.04,
+        scatterGameAssetScale: 0.03,
+        scatterBoulderCount: 1500,
+        scatterGameAssetCount: 1000,
+        scatterScaleVariation: 0.5,
+        scatterInnerRadius: 18,
+        scatterCastShadow: true,
         // Trees: instanced from tree.glb, frustum culling for max perf
         treeCount: 10000,
         treeCulling: true,
@@ -1202,6 +1211,15 @@
             characterGroup.userData.modelBaseY = model.position.y;
             characterGroup.userData.initialCharHeight = PARAMS.characterHeight;
             characterGroup.add(model);
+
+            // Bone names from this rig: right hand = DEF-handR, left hand = DEF-handL
+            const HAND_BONE_R = "DEF-handR";
+            const HAND_BONE_L = "DEF-handL";
+            characterGroup.userData.rightHandBone =
+              model.getObjectByName(HAND_BONE_R) || null;
+            characterGroup.userData.leftHandBone =
+              model.getObjectByName(HAND_BONE_L) || null;
+
             try {
               if (gltf.animations && gltf.animations.length) {
                 characterMixer = new THREE.AnimationMixer(model);
@@ -1219,6 +1237,10 @@
                   gltf.animations.find((a) => a.name === "Jump_Loop") ||
                   gltf.animations.find((a) => a.name === "Jump_Start") ||
                   idleClip;
+                const attackClip =
+                  gltf.animations.find((a) => a.name === "Sword_Attack") ||
+                  gltf.animations.find((a) => a.name === "Sword_Attack_RM") ||
+                  null;
                 const idleAction = characterMixer
                   .clipAction(idleClip)
                   .setLoop(2201)
@@ -1232,11 +1254,45 @@
                 const jumpAction = characterMixer
                   .clipAction(jumpClip)
                   .setLoop(2201);
+                const attackAction = attackClip
+                  ? characterMixer.clipAction(attackClip).setLoop(2200)
+                  : null;
+                if (attackAction && attackAction.clampWhenFinished !== undefined)
+                  attackAction.clampWhenFinished = true;
                 characterGroup.userData.idleAction = idleAction;
                 characterGroup.userData.walkAction = walkAction;
                 characterGroup.userData.runAction = runAction;
                 characterGroup.userData.jumpAction = jumpAction;
+                characterGroup.userData.attackAction = attackAction;
                 characterGroup.userData.lastMoveState = "idle";
+                characterGroup.userData.isAttacking = false;
+                if (attackAction) {
+                  characterMixer.addEventListener("finished", (e) => {
+                    if (e.action !== attackAction) return;
+                    const ud = characterGroup.userData;
+                    ud.isAttacking = false;
+                    const from = ud.preAttackState || "idle";
+                    const toIdle = () => {
+                      attackAction.enabled = false;
+                      ud.idleAction.enabled = true;
+                      ud.idleAction.crossFadeFrom(attackAction, 0.2).play();
+                    };
+                    const toWalk = () => {
+                      attackAction.enabled = false;
+                      ud.walkAction.enabled = true;
+                      ud.walkAction.crossFadeFrom(attackAction, 0.2).play();
+                    };
+                    const toRun = () => {
+                      attackAction.enabled = false;
+                      ud.runAction.enabled = true;
+                      ud.runAction.crossFadeFrom(attackAction, 0.2).play();
+                    };
+                    if (from === "walk") toWalk();
+                    else if (from === "run") toRun();
+                    else toIdle();
+                    ud.lastMoveState = from;
+                  });
+                }
               }
             } catch (e) {
               console.warn("Character animations:", e);
@@ -1558,6 +1614,99 @@
           (e) => console.warn("pine-transformed.glb load failed", e),
         );
 
+        // ── SCATTER (rocks / stones) — InstancedMesh, WebGPU-safe, no BatchedMesh LOD ──
+        // The "spread debris" pattern (stones, rocks, flowers) often uses @three.ez/batched-mesh-extensions
+        // for per-instance LOD (addGeometryLOD + radix sort). That extension is WebGL-only. In WebGPU you can:
+        // (1) Use core BatchedMesh without LOD — one batch per type, same geometry for all distances.
+        // (2) Use InstancedMesh per type (here): one draw per type, no LOD; fine for low-poly scatter.
+        // (3) Manual per-instance LOD: e.g. 3 InstancedMesh (near/med/far) and rebucket instances by
+        //     distance each frame — more work, same visual idea as the extension.
+        const scatterGroup = new THREE.Group();
+        scene.add(scatterGroup);
+        const halfTerrainScatter = TERRAIN_SIZE * 0.48;
+        const MAX_SCATTER_PER_TYPE = 4000;
+        const scatterMeshes = { boulder: null, gameAsset: null };
+        const scatterSeedOffset = { boulder: 100, gameAsset: 101 };
+
+        function updateScatterPlacement(key) {
+          const im = scatterMeshes[key];
+          if (!im) return;
+          const count = Math.min(MAX_SCATTER_PER_TYPE, Math.max(0, key === "boulder" ? PARAMS.scatterBoulderCount : PARAMS.scatterGameAssetCount));
+          const baseScale = key === "boulder" ? PARAMS.scatterBoulderScale : PARAMS.scatterGameAssetScale;
+          const variation = Math.max(0, Math.min(1, PARAMS.scatterScaleVariation));
+          const innerR = Math.max(0, PARAMS.scatterInnerRadius);
+          setSeed(scatterSeedOffset[key]);
+          const mat4 = new THREE.Matrix4();
+          let placed = 0;
+          for (let i = 0; i < count && placed < count; i++) {
+            const tx = (seededRandom() * 2 - 1) * halfTerrainScatter;
+            const tz = (seededRandom() * 2 - 1) * halfTerrainScatter;
+            if (Math.sqrt(tx * tx + tz * tz) < innerR) continue;
+            const ty = sampleHeight(tx, tz);
+            const scaleMult = 1 - variation * 0.5 + seededRandom() * variation;
+            const scale = baseScale * scaleMult;
+            const rotY = seededRandom() * Math.PI * 2;
+            mat4.identity().makeRotationY(rotY).scale(new THREE.Vector3(scale, scale, scale)).setPosition(tx, ty, tz);
+            im.setMatrixAt(placed, mat4);
+            placed++;
+          }
+          im.count = placed;
+          im.instanceMatrix.needsUpdate = true;
+        }
+
+        function createScatterFromGlb(url, key) {
+          gltfLoader.load(
+            url,
+            (gltf) => {
+              const root = gltf.scene;
+              const meshes = [];
+              root.traverse((o) => {
+                if (o.isMesh && o.geometry) meshes.push(o);
+              });
+              if (meshes.length === 0) {
+                console.warn("Scatter GLB has no meshes:", url);
+                return;
+              }
+              const geos = [];
+              const mats = [];
+              for (const m of meshes) {
+                const g = m.geometry.clone();
+                g.applyMatrix4(m.matrixWorld);
+                geos.push(g);
+                const src = m.material;
+                const nodeMat = new THREE.MeshStandardNodeMaterial({
+                  color: (src && src.color) ? (src.color.getHex ? src.color.getHex() : src.color) : 0x6b5d52,
+                  roughness: src && src.roughness != null ? src.roughness : 0.9,
+                  metalness: src && src.metalness != null ? src.metalness : 0,
+                  map: src && src.map ? src.map : null,
+                  normalMap: src && src.normalMap ? src.normalMap : null,
+                  normalScale: src && src.normalScale ? src.normalScale.clone() : new THREE.Vector2(1, 1),
+                  roughnessMap: src && src.roughnessMap ? src.roughnessMap : null,
+                  metalnessMap: src && src.metalnessMap ? src.metalnessMap : null,
+                  aoMap: src && src.aoMap ? src.aoMap : null,
+                  aoMapIntensity: src && src.aoMapIntensity != null ? src.aoMapIntensity : 1,
+                });
+                mats.push(nodeMat);
+              }
+              const geo = mergeGeometries(geos, true);
+              geo.computeBoundingSphere();
+              const im = new THREE.InstancedMesh(geo, mats.length === 1 ? mats[0] : mats, MAX_SCATTER_PER_TYPE);
+              im.castShadow = PARAMS.scatterCastShadow;
+              im.receiveShadow = false;
+              im.frustumCulled = false;
+              scatterMeshes[key] = im;
+              scatterGroup.add(im);
+              updateScatterPlacement(key);
+              renderer.compileAsync(scene, camera).catch(() => {});
+            },
+            undefined,
+            (e) => console.warn("Scatter GLB load failed", url, e),
+          );
+        }
+
+        createScatterFromGlb("models/rock_boulder.glb", "boulder");
+        createScatterFromGlb("models/rock__game_asset.glb", "gameAsset");
+
         // ── ANCIENT RUINS (compressed GLB on terrain + physics collider from bbox) ──
         const RUINS_X = 120,
           RUINS_Z = 80; // offset from center so player doesn't spawn inside
@@ -1798,6 +1947,28 @@
         });
         document.addEventListener("pointerlockchange", () => {
           isPointerLocked = !!document.pointerLockElement;
+        });
+        renderer.domElement.addEventListener("contextmenu", (e) =>
+          e.preventDefault(),
+        );
+        renderer.domElement.addEventListener("mousedown", (e) => {
+          if (e.button !== 2) return;
+          const ud = characterGroup.userData;
+          if (!ud.attackAction || ud.isAttacking) return;
+          ud.isAttacking = true;
+          ud.preAttackState = ud.lastMoveState || "idle";
+          ud.attackAction.stop();
+          ud.attackAction.time = 0;
+          ud.attackAction.enabled = true;
+          const from =
+            ud.preAttackState === "run"
+              ? ud.runAction
+              : ud.preAttackState === "walk"
+                ? ud.walkAction
+                : ud.preAttackState === "jump"
+                  ? ud.jumpAction
+                  : ud.idleAction;
+          ud.attackAction.crossFadeFrom(from, 0.1).play();
         });
         document.addEventListener("mousemove", (e) => {
           if (!isPointerLocked && !(e.buttons & 1)) return;
@@ -2135,6 +2306,51 @@
         fScene.addBinding(PARAMS, "showRuins", { label: "Ruins" });
         fScene.addBinding(PARAMS, "showTrees", { label: "Trees" });
         fScene.addBinding(PARAMS, "showBuildings", { label: "Buildings" });
+
+        const fScatter = pane.addFolder({ title: "Scatter (rocks)", expanded: true });
+        fScatter.addBinding(PARAMS, "showScatter", { label: "visible" });
+        fScatter
+          .addBinding(PARAMS, "scatterCastShadow", { label: "cast shadow" })
+          .on("change", () => {
+            if (scatterMeshes.boulder) scatterMeshes.boulder.castShadow = PARAMS.scatterCastShadow;
+            if (scatterMeshes.gameAsset) scatterMeshes.gameAsset.castShadow = PARAMS.scatterCastShadow;
+          });
+        fScatter
+          .addBinding(PARAMS, "scatterScaleVariation", {
+            min: 0,
+            max: 1,
+            step: 0.05,
+            label: "scale variation",
+          })
+          .on("change", () => {
+            updateScatterPlacement("boulder");
+            updateScatterPlacement("gameAsset");
+          });
+        fScatter
+          .addBinding(PARAMS, "scatterInnerRadius", {
+            min: 0,
+            max: 80,
+            step: 1,
+            label: "inner radius (no placement)",
+          })
+          .on("change", () => {
+            updateScatterPlacement("boulder");
+            updateScatterPlacement("gameAsset");
+          });
+        const fScatterBoulder = fScatter.addFolder({ title: "Boulder", expanded: true });
+        fScatterBoulder
+          .addBinding(PARAMS, "scatterBoulderScale", { min: 0.002, max: 0.5, step: 0.002, label: "scale" })
+          .on("change", () => updateScatterPlacement("boulder"));
+        fScatterBoulder
+          .addBinding(PARAMS, "scatterBoulderCount", { min: 0, max: MAX_SCATTER_PER_TYPE, step: 100, label: "count" })
+          .on("change", () => updateScatterPlacement("boulder"));
+        const fScatterGameAsset = fScatter.addFolder({ title: "Game asset rock", expanded: true });
+        fScatterGameAsset
+          .addBinding(PARAMS, "scatterGameAssetScale", { min: 0.002, max: 0.5, step: 0.002, label: "scale" })
+          .on("change", () => updateScatterPlacement("gameAsset"));
+        fScatterGameAsset
+          .addBinding(PARAMS, "scatterGameAssetCount", { min: 0, max: MAX_SCATTER_PER_TYPE, step: 100, label: "count" })
+          .on("change", () => updateScatterPlacement("gameAsset"));
 
         // Re-places all tree instances using the current PARAMS without reloading the GLB.
         // Safe to call any time after the GLB has loaded.
@@ -2475,7 +2691,8 @@
             ud.idleAction &&
             ud.walkAction &&
             ud.runAction &&
-            ud.jumpAction
+            ud.jumpAction &&
+            !ud.isAttacking
           ) {
             const skipT = 0.4;
             const last = ud.lastMoveState;
@@ -2545,11 +2762,40 @@
             ud.lastMoveState = moveState;
           }
           if (characterMixer) characterMixer.update(dt);
+          // Blend back from attack when clip ends (in case "finished" event doesn't fire)
+          if (
+            ud.isAttacking &&
+            ud.attackAction &&
+            ud.idleAction &&
+            ud.walkAction &&
+            ud.runAction
+          ) {
+            const clip = ud.attackAction.getClip();
+            const dur = clip && clip.duration != null ? clip.duration : 1;
+            if (ud.attackAction.time >= dur - 0.02) {
+              ud.isAttacking = false;
+              const from = ud.preAttackState || "idle";
+              ud.attackAction.enabled = false;
+              ud.attackAction.time = 0;
+              if (from === "walk") {
+                ud.walkAction.enabled = true;
+                ud.walkAction.crossFadeFrom(ud.attackAction, 0.15).play();
+              } else if (from === "run") {
+                ud.runAction.enabled = true;
+                ud.runAction.crossFadeFrom(ud.attackAction, 0.15).play();
+              } else {
+                ud.idleAction.enabled = true;
+                ud.idleAction.crossFadeFrom(ud.attackAction, 0.15).play();
+              }
+              ud.lastMoveState = from;
+            }
+          }
           flag.update(dt);
           if (PARAMS.birdsEnabled) birds.update(dt);
           physicsDebugGroup.visible = !!PARAMS.rapierDebug;
           buildingsGroup.visible = PARAMS.showBuildings;
           treesGroup.visible = PARAMS.showTrees;
+          scatterGroup.visible = PARAMS.showScatter;
           treeLeafMaterials.forEach((mat) => {
             mat.alphaTest = PARAMS.treeAlphaTest;
             mat.opacity = PARAMS.treeOpacity;
