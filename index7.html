@@ -70,7 +70,6 @@
       import Stats from "stats-gl";
       import { createFlag } from "./flag.js";
       import { createBirds } from "./birds.js";
-      import { createOctahedralImpostorForest } from "./octahedralImpostor.js";
       import {
         Fn,
         uniform,
@@ -212,7 +211,6 @@
         groundVariation: true,
         groundBaseColor: "#1a3a0a",
         groundDirtColor: "#3d2b1a",
-        texTiling: 80.0,
         // Sun & Scene
         sunDirX: -1.0,
         sunDirY: 0.55,
@@ -245,8 +243,8 @@
         rapierDebug: false,
         // Scene toggles for FPS debugging
         showRuins: true,
-        showTrees: false,
-        showScatter: false,
+        showTrees: true,
+        showScatter: true,
         showBuildings: false,
         // Scatter (instanced rocks): per-type scale & count, live in Tweakpane
         scatterBoulderScale: 0.04,
@@ -267,12 +265,8 @@
         treeAlphaTest: 0.5,
         treeOpacity: 1,
         treeDepthWrite: true,
-        // Octahedral impostor forest (LOD impostors from octahedralImpostor.js)
-        octahedralForestEnabled: true,
-        octahedralForestScale: 1,
-        octahedralForestAlphaClamp: 0.4,
         // Birds (GPU compute boids)
-        birdsEnabled: false,
+        birdsEnabled: true,
         birdsCount: 2048,
         birdsCenterY: 60,
         birdsMinY: 30,
@@ -1160,27 +1154,14 @@
           posArr[i + 1] = sampleHeight(wx, wz);
         }
         terrainGeo.computeVertexNormals();
+        const uGroundBase = uniform(srgbToLinear(PARAMS.groundBaseColor));
         const uGroundDirt = uniform(srgbToLinear(PARAMS.groundDirtColor));
         const uGroundVar = uniform(1.0);
-        const uTexTiling = uniform(PARAMS.texTiling);
-
-        // Load AmbientCG Ground037 textures
-        const texLoader = new THREE.TextureLoader();
-        const groundColorTex = texLoader.load("textures/Ground037_1K-JPG_Color.jpg");
-        const groundNormalTex = texLoader.load("textures/Ground037_1K-JPG_NormalGL.jpg");
-        const groundRoughTex  = texLoader.load("textures/Ground037_1K-JPG_Roughness.jpg");
-        for (const t of [groundColorTex, groundNormalTex, groundRoughTex]) {
-          t.wrapS = t.wrapT = THREE.RepeatWrapping;
-        }
-        groundColorTex.colorSpace = THREE.SRGBColorSpace;
-
         const terrainMat = new THREE.MeshStandardNodeMaterial({
           roughness: 1,
           metalness: 0,
         });
-        const tiledUV = uv().mul(uTexTiling);
         terrainMat.colorNode = Fn(() => {
-          const texColor = texture(groundColorTex, tiledUV).rgb;
           const wp = modelWorldMatrix.mul(vec4(positionLocal, 1)).xyz;
           const n1 = noise12(mul(wp.xz, 0.03)),
             n2 = noise12(mul(wp.xz, 0.08)),
@@ -1191,11 +1172,8 @@
             mul(smoothstep(0.35, 0.65, combined), uGroundVar),
             heightBlend,
           );
-          return mix(texColor, uGroundDirt, dirtMix);
+          return mix(uGroundBase, uGroundDirt, dirtMix);
         })();
-        terrainMat.normalNode = normalMap(texture(groundNormalTex, tiledUV));
-        terrainMat.roughnessNode = max(texture(groundRoughTex, tiledUV).r, float(0.85));
-        terrainMat.envMapIntensity = 0; // no sky IBL specular on ground — grass does the same
         const terrain = new THREE.Mesh(terrainGeo, terrainMat);
         terrain.receiveShadow = true;
         scene.add(terrain);
@@ -1910,28 +1888,6 @@
           minY: PARAMS.birdsMinY,
           maxY: PARAMS.birdsMaxY,
         });
-        birds.mesh.visible = PARAMS.birdsEnabled;
-
-        // ── OCTAHEDRAL IMPOSTOR FOREST (optional: LOD impostor from external module) ──
-        let octahedralForest = null;
-        try {
-          octahedralForest = await createOctahedralImpostorForest({
-            modelPath: "models/tree.glb",
-            treeCount: 2000,
-            treeScale: 1.5,
-            lodDistance: 40,
-            radius: 450,
-            minRadius: 20,
-            centerPosition: [0, 0, 0],
-            getTerrainHeight: sampleHeight,
-            impostorSettings: { spritesPerSide: 8, textureSize: 2048, alphaClamp: 0.1, alphaTest: 0.05 },
-            impostorDebug: false,
-          });
-          scene.add(octahedralForest.group);
-          octahedralForest.group.visible = PARAMS.octahedralForestEnabled;
-        } catch (e) {
-          console.warn("Octahedral impostor forest skipped:", e);
-        }
 
         const capR = PARAMS.capsuleRadius;
         const capHalfH = Math.max(0.1, (PARAMS.characterHeight - 2 * capR) / 2);
@@ -2179,7 +2135,7 @@
           title: "🌿 Grass v8",
           expanded: true,
         });
-        const fShape = pane.addFolder({ title: "Grass Shape", expanded: false });
+        const fShape = pane.addFolder({ title: "Grass Shape" });
         fShape.addBinding(PARAMS, "grassWidth", {
           min: 0.02,
           max: 0.3,
@@ -2229,7 +2185,7 @@
           step: 0.005,
         });
         fSeason.addBinding(PARAMS, "seasonalDryColor", { view: "color" });
-        const fWind = pane.addFolder({ title: "Wind", expanded: false });
+        const fWind = pane.addFolder({ title: "Wind" });
         fWind.addBinding(PARAMS, "windSpeed", {
           min: 0,
           max: 4,
@@ -2286,7 +2242,7 @@
           step: 0.1,
           label: "radius",
         });
-        const fChar = pane.addFolder({ title: "Character", expanded: false });
+        const fChar = pane.addFolder({ title: "Character", expanded: true });
         fChar.addBinding(PARAMS, "characterHeight", {
           min: 1,
           max: 2.5,
@@ -2365,7 +2321,7 @@
         fPlayer.addBinding(PARAMS, "cameraMode", {
           options: { thirdPerson: "thirdPerson", orbit: "orbit" },
         });
-        const fNpc = pane.addFolder({ title: "NPCs", expanded: false });
+        const fNpc = pane.addFolder({ title: "NPCs", expanded: true });
         fNpc
           .addBinding(PARAMS, "npcEnabled", { label: "enabled" })
           .on("change", () => {
@@ -2390,15 +2346,15 @@
         fFog.addBinding(PARAMS, "fogColor", { view: "color" });
         const fGround = pane.addFolder({ title: "Ground", expanded: false });
         fGround.addBinding(PARAMS, "groundVariation");
+        fGround.addBinding(PARAMS, "groundBaseColor", { view: "color" });
         fGround.addBinding(PARAMS, "groundDirtColor", { view: "color" });
-        fGround.addBinding(PARAMS, "texTiling", { min: 10, max: 200, step: 5, label: "tex tiling" });
         const fTerrain = pane.addFolder({ title: "Terrain", expanded: false });
         fTerrain.addBinding(PARAMS, "terrainHeight", {
           min: 0,
           max: 60,
           step: 1,
         });
-        const fSun = pane.addFolder({ title: "Sun & Lighting", expanded: false });
+        const fSun = pane.addFolder({ title: "Sun & Lighting" });
         fSun.addBinding(PARAMS, "sunDirX", { min: -2, max: 2, step: 0.1 }).on("change", bakeEnvMap);
         fSun.addBinding(PARAMS, "sunDirY", { min: 0.1, max: 2, step: 0.05 }).on("change", bakeEnvMap);
         fSun.addBinding(PARAMS, "sunDirZ", { min: -2, max: 2, step: 0.1 }).on("change", bakeEnvMap);
@@ -2414,9 +2370,9 @@
           label: "ambientLight",
         });
         fSun.addBinding(PARAMS, "exposure", { min: 0.2, max: 2, step: 0.05 });
-        const fPost = pane.addFolder({ title: "Post Processing", expanded: false });
+        const fPost = pane.addFolder({ title: "Post Processing", expanded: true });
         fPost.addBinding(PARAMS, "postProcessingEnabled", { label: "enabled" });
-        const fLensflare = fPost.addFolder({ title: "Lens flare", expanded: false });
+        const fLensflare = fPost.addFolder({ title: "Lens flare", expanded: true });
         fLensflare.addBinding(PARAMS, "lensflareEnabled", { label: "enabled" });
         fLensflare.addBinding(PARAMS, "lensflareBloomThreshold", {
           min: 0.3,
@@ -2473,13 +2429,13 @@
         });
         const fScene = pane.addFolder({
           title: "Scene (FPS debug)",
-          expanded: false,
+          expanded: true,
         });
         fScene.addBinding(PARAMS, "showRuins", { label: "Ruins" });
         fScene.addBinding(PARAMS, "showTrees", { label: "Trees" });
         fScene.addBinding(PARAMS, "showBuildings", { label: "Buildings" });
 
-        const fScatter = pane.addFolder({ title: "Scatter (rocks)", expanded: false });
+        const fScatter = pane.addFolder({ title: "Scatter (rocks)", expanded: true });
         fScatter.addBinding(PARAMS, "showScatter", { label: "visible" });
         fScatter
           .addBinding(PARAMS, "scatterCastShadow", { label: "cast shadow" })
@@ -2524,21 +2480,21 @@
         fScatter.addBinding(PARAMS, "scatterCulling", {
           label: "frustum culling",
         });
-        const fScatterBoulder = fScatter.addFolder({ title: "Boulder", expanded: false });
+        const fScatterBoulder = fScatter.addFolder({ title: "Boulder", expanded: true });
         fScatterBoulder
           .addBinding(PARAMS, "scatterBoulderScale", { min: 0.002, max: 0.5, step: 0.002, label: "scale" })
           .on("change", () => updateScatterPlacement("boulder"));
         fScatterBoulder
           .addBinding(PARAMS, "scatterBoulderCount", { min: 0, max: MAX_SCATTER_PER_TYPE, step: 100, label: "count" })
           .on("change", () => updateScatterPlacement("boulder"));
-        const fScatterGameAsset = fScatter.addFolder({ title: "Game asset rock", expanded: false });
+        const fScatterGameAsset = fScatter.addFolder({ title: "Game asset rock", expanded: true });
         fScatterGameAsset
           .addBinding(PARAMS, "scatterGameAssetScale", { min: 0.02, max: 2, step: 0.01, label: "scale" })
           .on("change", () => updateScatterPlacement("gameAsset"));
         fScatterGameAsset
           .addBinding(PARAMS, "scatterGameAssetCount", { min: 0, max: MAX_SCATTER_PER_TYPE, step: 100, label: "count" })
           .on("change", () => updateScatterPlacement("gameAsset"));
-        const fScatterFlower = fScatter.addFolder({ title: "Flowers", expanded: false });
+        const fScatterFlower = fScatter.addFolder({ title: "Flowers", expanded: true });
         fScatterFlower
           .addBinding(PARAMS, "scatterFlowerScale", { min: 0.02, max: 1.5, step: 0.01, label: "scale" })
           .on("change", () => updateScatterPlacement("flower"));
@@ -2582,7 +2538,7 @@
           }
         }
 
-        const fTrees = pane.addFolder({ title: "Trees (leaves)", expanded: false });
+        const fTrees = pane.addFolder({ title: "Trees (leaves)", expanded: true });
         fTrees.addBinding(PARAMS, "treeCount", {
           min: 100,
           max: MAX_TREES,
@@ -2615,7 +2571,7 @@
           label: "frustum culling",
         });
 
-        const fBirds = pane.addFolder({ title: "Birds", expanded: false });
+        const fBirds = pane.addFolder({ title: "Birds", expanded: true });
         const bp = birds.params;
         fBirds.addBinding(PARAMS, "birdsEnabled", { label: "enabled" }).on("change", () => {
           birds.mesh.visible = PARAMS.birdsEnabled;
@@ -2649,23 +2605,7 @@
           min: 1, max: 60, step: 0.5, label: "cohesion zone",
         }).on("change", () => { bp.uCohesion.value = PARAMS.birdsCohesion; });
 
-        const fOctahedralForest = pane.addFolder({ title: "Octahedral forest", expanded: false });
-        fOctahedralForest.addBinding(PARAMS, "octahedralForestEnabled", { label: "enabled" }).on("change", () => {
-          if (octahedralForest) octahedralForest.group.visible = PARAMS.octahedralForestEnabled;
-        });
-        fOctahedralForest.addBinding(PARAMS, "octahedralForestScale", {
-          min: 0.2, max: 2, step: 0.05, label: "scale",
-        }).on("change", () => {
-          if (octahedralForest) octahedralForest.group.scale.setScalar(PARAMS.octahedralForestScale);
-        });
-        fOctahedralForest.addBinding(PARAMS, "octahedralForestAlphaClamp", {
-          min: 0.01, max: 0.99, step: 0.02, label: "alpha clamp (leaf cutout)",
-        }).on("change", () => {
-          if (octahedralForest && octahedralForest.setAlphaClamp)
-            octahedralForest.setAlphaClamp(PARAMS.octahedralForestAlphaClamp);
-        });
-
-        const fShadows = pane.addFolder({ title: "Shadows", expanded: false });
+        const fShadows = pane.addFolder({ title: "Shadows", expanded: true });
         fShadows.addBinding(PARAMS, "shadowBias", {
           min: -0.01,
           max: 0.01,
@@ -2745,9 +2685,9 @@
             : 0;
           uSeasonalScale.value = PARAMS.seasonalScale;
           uSeasonalDryColor.value.copy(srgbToLinear(PARAMS.seasonalDryColor));
+          uGroundBase.value.copy(srgbToLinear(PARAMS.groundBaseColor));
           uGroundDirt.value.copy(srgbToLinear(PARAMS.groundDirtColor));
           uGroundVar.value = PARAMS.groundVariation ? 1 : 0;
-          uTexTiling.value = PARAMS.texTiling;
           // Sun
           const sd = new THREE.Vector3(
             PARAMS.sunDirX,
@@ -3034,14 +2974,10 @@
           }
           flag.update(dt);
           if (PARAMS.birdsEnabled) birds.update(dt);
-          if (octahedralForest) octahedralForest.update(camera);
           physicsDebugGroup.visible = !!PARAMS.rapierDebug;
           buildingsGroup.visible = PARAMS.showBuildings;
           scatterGroup.visible = PARAMS.showScatter;
           treesGroup.visible = PARAMS.showTrees;
-          if (octahedralForest) {
-            octahedralForest.group.visible = PARAMS.octahedralForestEnabled;
-          }
           treeLeafMaterials.forEach((mat) => {
             mat.alphaTest = PARAMS.treeAlphaTest;
             mat.opacity = PARAMS.treeOpacity;

@@ -43,11 +43,14 @@ class BirdGeometry extends THREE.BufferGeometry {
   }
 }
 
+const MAX_BIRDS = 4096;
+
 /**
  * @param {Object}               options
  * @param {THREE.Scene}          options.scene
  * @param {THREE.WebGPURenderer} options.renderer
- * @param {number} [options.count=1024]   number of birds
+ * @param {number} [options.count=1024]   initial number of birds (live-tweakable via params.uBirdCount)
+ * @param {number} [options.maxCount=4096] max birds (buffer size; count slider cannot exceed this)
  * @param {number} [options.bounds=400]   XZ roaming diameter — must be large enough
  *                                        that zone radius (55) ≈ 4–6× avg bird spacing
  * @param {number} [options.centerY=40]   cruising altitude
@@ -57,14 +60,16 @@ class BirdGeometry extends THREE.BufferGeometry {
 export function createBirds({
   scene,
   renderer,
-  count   = 1024,
-  bounds  = 400,   // larger space → boid zones proportional → proper flocking groups
-  centerY = 40,
-  minY    = 18,
-  maxY    = 75,
+  count    = 1024,
+  maxCount = MAX_BIRDS,
+  bounds   = 400,   // larger space → boid zones proportional → proper flocking groups
+  centerY  = 40,
+  minY     = 18,
+  maxY     = 75,
 } = {}) {
 
-  const BIRDS       = count;
+  const BIRDS        = Math.min(maxCount, MAX_BIRDS);
+  const initialCount = Math.min(count, BIRDS);
   const BOUNDS_HALF = bounds / 2;
 
   // ── Initial CPU-side data ─────────────────────────────────────────────────
@@ -73,14 +78,14 @@ export function createBirds({
   const phaseArray    = new Float32Array(BIRDS);
 
   for (let i = 0; i < BIRDS; i++) {
-    positionArray[i * 3 + 0] = (Math.random() * 2 - 1) * BOUNDS_HALF;
-    positionArray[i * 3 + 1] = centerY + (Math.random() - 0.5) * 30;
-    positionArray[i * 3 + 2] = (Math.random() * 2 - 1) * BOUNDS_HALF;
+    const active = i < initialCount;
+    positionArray[i * 3 + 0] = active ? (Math.random() * 2 - 1) * BOUNDS_HALF : 0;
+    positionArray[i * 3 + 1] = active ? centerY + (Math.random() - 0.5) * 30 : 0;
+    positionArray[i * 3 + 2] = active ? (Math.random() * 2 - 1) * BOUNDS_HALF : 0;
 
-    // Small initial velocities — boid rules accelerate them to SPEED_LIMIT naturally
-    velocityArray[i * 3 + 0] = (Math.random() - 0.5) * 2;
-    velocityArray[i * 3 + 1] = (Math.random() - 0.5) * 2;
-    velocityArray[i * 3 + 2] = (Math.random() - 0.5) * 2;
+    velocityArray[i * 3 + 0] = active ? (Math.random() - 0.5) * 2 : 0;
+    velocityArray[i * 3 + 1] = active ? (Math.random() - 0.5) * 2 : 0;
+    velocityArray[i * 3 + 2] = active ? (Math.random() - 0.5) * 2 : 0;
 
     phaseArray[i] = Math.random() * Math.PI * 2;
   }
@@ -105,6 +110,7 @@ export function createBirds({
   const uCenterY    = uniform(centerY).setName("centerY");
   const uMinY       = uniform(minY).setName("minY");
   const uMaxY       = uniform(maxY).setName("maxY");
+  const uBirdCount  = uniform(initialCount).setName("birdCount");
 
   // ── Bird mesh ─────────────────────────────────────────────────────────────
   const birdGeometry = new BirdGeometry();
@@ -152,14 +158,20 @@ export function createBirds({
   birdMaterial.vertexNode = birdVertexTSL();
 
   const birdMesh = new THREE.InstancedMesh(birdGeometry, birdMaterial, BIRDS);
+  birdMesh.count = initialCount;
   birdMesh.rotation.y       = Math.PI / 2;
   birdMesh.scale.setScalar(0.12); // ≈ 1 unit wingspan — visible at game distances
   birdMesh.matrixAutoUpdate = false;
   birdMesh.frustumCulled    = false;
   birdMesh.updateMatrix();
 
+  // Strength multipliers so alignment/cohesion produce visible flocking (not too weak)
+  const ALIGNMENT_STRENGTH = 8.0;
+  const COHESION_STRENGTH  = 8.0;
+
   // ── Compute: velocity ─────────────────────────────────────────────────────
   const computeVelocity = Fn(() => {
+    If(instanceIndex.lessThan(uBirdCount), () => {
     const PI   = float(Math.PI);
     const PI_2 = PI.mul(2.0);
     const limit = float(SPEED_LIMIT).toVar("limit");
@@ -186,9 +198,10 @@ export function createBirds({
       velocity.y.subAssign(uDeltaTime.mul(20.0));
     });
 
-    // O(n²) boid neighbour loop
+    // O(n²) boid neighbour loop — only consider active birds
     Loop({ start: uint(0), end: uint(BIRDS), type: "uint", condition: "<" }, ({ i }) => {
       If(i.equal(birdIndex), () => { Continue(); });
+      If(i.greaterThanEqual(uBirdCount), () => { Continue(); });
 
       const birdPos = positionStorage.element(i);
       const dir     = birdPos.sub(position);
@@ -202,23 +215,23 @@ export function createBirds({
       const percent = distSq.div(zoneRadiusSq);
 
       If(percent.lessThan(separationThresh), () => {
-        // Separation
+        // Separation — steer away from close neighbors
         const adj = separationThresh.div(percent).sub(1.0).mul(uDeltaTime);
         velocity.subAssign(normalize(dir).mul(adj));
 
       }).ElseIf(percent.lessThan(alignmentThresh), () => {
-        // Alignment
+        // Alignment — match neighbor velocity (stronger so flock direction emerges)
         const threshDelta = alignmentThresh.sub(separationThresh);
         const pct         = percent.sub(separationThresh).div(threshDelta);
-        const adj         = float(0.5).sub(cos(pct.mul(PI_2)).mul(0.5)).add(0.5).mul(uDeltaTime);
+        const adj         = float(0.5).sub(cos(pct.mul(PI_2)).mul(0.5)).add(0.5).mul(uDeltaTime).mul(ALIGNMENT_STRENGTH);
         velocity.addAssign(normalize(velocityStorage.element(i)).mul(adj));
 
       }).Else(() => {
-        // Cohesion
+        // Cohesion — steer toward neighbors (stronger so flock stays together)
         const threshDelta = alignmentThresh.oneMinus();
         const pct         = threshDelta.equal(0.0).select(1.0, percent.sub(alignmentThresh).div(threshDelta));
         const c           = cos(pct.mul(PI_2));
-        const adj         = float(0.5).sub(c.mul(-0.5).add(0.5)).mul(uDeltaTime);
+        const adj         = float(0.5).sub(c.mul(-0.5).add(0.5)).mul(uDeltaTime).mul(COHESION_STRENGTH);
         velocity.addAssign(normalize(dir).mul(adj));
       });
     });
@@ -228,11 +241,13 @@ export function createBirds({
     });
 
     velocityStorage.element(birdIndex).assign(velocity);
+    });
 
   })().compute(BIRDS).setName("BirdsVelocity");
 
   // ── Compute: integrate position + wing-flap phase ────────────────────────
   const computePosition = Fn(() => {
+    If(instanceIndex.lessThan(uBirdCount), () => {
     positionStorage.element(instanceIndex).addAssign(
       velocityStorage.element(instanceIndex).mul(uDeltaTime).mul(INTEGRATION_SPEED)
     );
@@ -245,6 +260,7 @@ export function createBirds({
       .add(max(vel.y, 0.0).mul(uDeltaTime).mul(6.0));
 
     phaseStorage.element(instanceIndex).assign(newPhase.mod(62.83));
+    });
 
   })().compute(BIRDS).setName("BirdsPosition");
 
@@ -258,6 +274,7 @@ export function createBirds({
     },
     mesh: birdMesh,
     /** Live-tweakable uniforms — write .value to update without recreating birds */
-    params: { uSeparation, uAlignment, uCohesion, uCenterY, uMinY, uMaxY },
+    params: { uSeparation, uAlignment, uCohesion, uCenterY, uMinY, uMaxY, uBirdCount },
+    MAX_BIRDS: BIRDS,
   };
 }

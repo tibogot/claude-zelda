@@ -198,6 +198,7 @@ export function createFlag(options = {}) {
       (tex) => {
         tex.anisotropy = 16;
         tex.colorSpace = THREE.SRGBColorSpace;
+        tex.flipY = false;
         material.map = tex;
         material.needsUpdate = true;
       },

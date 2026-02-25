@@ -59,7 +59,8 @@
   <body>
     <div id="info">
       WebGPU Grass v8 &mdash; <span id="backend">loading…</span> &bull;
-      <span id="stats"></span> &bull; WASD + click to look &bull; right-click attack
+      <span id="stats"></span> &bull; WASD + click to look &bull; right-click
+      attack
     </div>
 
     <script type="module">
@@ -70,7 +71,6 @@
       import Stats from "stats-gl";
       import { createFlag } from "./flag.js";
       import { createBirds } from "./birds.js";
-      import { createOctahedralImpostorForest } from "./octahedralImpostor.js";
       import {
         Fn,
         uniform,
@@ -124,7 +124,6 @@
         Loop,
         uv,
         pass,
-        normalMap,
       } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
@@ -132,9 +131,6 @@
       import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
       import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
       import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-      import { bloom } from "three/addons/tsl/display/BloomNode.js";
-      import { lensflare } from "three/addons/tsl/display/LensflareNode.js";
-      import { gaussianBlur } from "three/addons/tsl/display/GaussianBlurNode.js";
       import RAPIER from "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.19.3/+esm";
 
       const PI = Math.PI;
@@ -212,7 +208,6 @@
         groundVariation: true,
         groundBaseColor: "#1a3a0a",
         groundDirtColor: "#3d2b1a",
-        texTiling: 80.0,
         // Sun & Scene
         sunDirX: -1.0,
         sunDirY: 0.55,
@@ -245,21 +240,17 @@
         rapierDebug: false,
         // Scene toggles for FPS debugging
         showRuins: true,
-        showTrees: false,
-        showScatter: false,
+        showTrees: true,
+        showScatter: true,
         showBuildings: false,
         // Scatter (instanced rocks): per-type scale & count, live in Tweakpane
         scatterBoulderScale: 0.04,
-        scatterGameAssetScale: 0.18,
-        scatterFlowerScale: 0.15,
+        scatterGameAssetScale: 0.03,
         scatterBoulderCount: 1500,
         scatterGameAssetCount: 1000,
-        scatterFlowerCount: 8000,
         scatterScaleVariation: 0.5,
         scatterInnerRadius: 18,
         scatterCastShadow: true,
-        scatterLodDistance: 50,
-        scatterCulling: true,
         // Trees: instanced from tree.glb, frustum culling for max perf
         treeCount: 10000,
         treeCulling: true,
@@ -267,13 +258,8 @@
         treeAlphaTest: 0.5,
         treeOpacity: 1,
         treeDepthWrite: true,
-        // Octahedral impostor forest (LOD impostors from octahedralImpostor.js)
-        octahedralForestEnabled: true,
-        octahedralForestScale: 1,
-        octahedralForestAlphaClamp: 0.4,
         // Birds (GPU compute boids)
-        birdsEnabled: false,
-        birdsCount: 2048,
+        birdsEnabled: true,
         birdsCenterY: 60,
         birdsMinY: 30,
         birdsMaxY: 100,
@@ -283,13 +269,6 @@
         // Shadows (tune if flickering or sun artifacts)
         shadowBias: -0.002,
         shadowNormalBias: 0.08,
-        // Post processing
-        postProcessingEnabled: false,
-        lensflareEnabled: true,
-        lensflareBloomThreshold: 0.72,
-        lensflareThreshold: 0.6,
-        lensflareGhostAttenuation: 25,
-        lensflareGhostSpacing: 0.25,
         // Character (human-sized, feet on ground) + physics capsule
         characterHeight: 2.5,
         characterOffsetY: 0.37,
@@ -611,7 +590,7 @@
       const uSeasonalStr = uniform(0),
         uSeasonalScale = uniform(PARAMS.seasonalScale);
       const uSeasonalDryColor = uniform(srgbToLinear(PARAMS.seasonalDryColor));
-      const uSunDir = uniform(new THREE.Vector3(PARAMS.sunDirX, PARAMS.sunDirY, PARAMS.sunDirZ).normalize());
+      const uSunDir = uniform(new THREE.Vector3(-1, 0.45, 1).normalize());
       const uSunIntensity = uniform(PARAMS.sunIntensity);
       const uTerrainSize = uniform(TERRAIN_SIZE);
       const uTrailCenter = uniform(new THREE.Vector2());
@@ -1034,7 +1013,6 @@
         });
         mat.positionNode = positionNode;
         mat.colorNode = colorNode;
-        mat.envMapIntensity = 0; // grass has 2.35M instances — skip IBL cubemap lookup
         return mat;
       }
 
@@ -1103,47 +1081,24 @@
         dirLight.shadow.camera.bottom = -80;
         dirLight.shadow.bias = PARAMS.shadowBias;
         dirLight.shadow.normalBias = PARAMS.shadowNormalBias;
-
-        // CSM — cascaded shadow maps for quality across the full terrain
+        // Cascaded shadow maps (CSM) — do not set csm.camera so renderer _init(builder) runs and creates mainFrustum/lights
         const csm = new CSMShadowNode(dirLight, {
           cascades: 3,
-          maxFar: 150,
+          maxFar: 60,
           mode: "practical",
-          lightMargin: 100,
+          lightMargin: 25,
         });
-
-        // Sphere-bounding patch: replaces AABB bounding with a rotation-invariant
-        // bounding sphere so cascade projection sizes stay constant as camera rotates.
-        // Without this, rotating the camera resizes each cascade's AABB → texel size
-        // changes → shadow swimming. With a sphere, radius is rotation-invariant.
-        csm._updateShadowBounds = function () {
-          for (let i = 0; i < this.frustums.length; i++) {
-            const shadowCam = this.lights[i].shadow.camera;
-            const frustum   = this.frustums[i];
-            const nv = frustum.vertices.near;
-            const fv = frustum.vertices.far;
-            const d1 = fv[0].distanceTo(fv[2]);   // far-plane diagonal
-            const d2 = fv[0].distanceTo(nv[2]);   // frustum body diagonal
-            const sphereRadius = Math.max(d1, d2) / 2;
-            const ext = sphereRadius * 2;
-            shadowCam.left   = -ext / 2;
-            shadowCam.right  =  ext / 2;
-            shadowCam.top    =  ext / 2;
-            shadowCam.bottom = -ext / 2;
-            shadowCam.updateProjectionMatrix();
-          }
-        };
-
         dirLight.shadow.shadowNode = csm;
         scene.add(dirLight);
-
         // Shadow camera follows player
         const shadowTarget = new THREE.Object3D();
         scene.add(shadowTarget);
         dirLight.target = shadowTarget;
 
-        const hemiLight = new THREE.HemisphereLight(0x99bbff, 0x557733, PARAMS.sceneAmbient);
+        const hemiLight = new THREE.HemisphereLight(0x99bbff, 0x557733, 1.5);
         scene.add(hemiLight);
+        const ambLight = new THREE.AmbientLight(0x909080, PARAMS.sceneAmbient);
+        scene.add(ambLight);
 
         // ── TERRAIN MESH ──
         const terrainGeo = new THREE.PlaneGeometry(
@@ -1160,27 +1115,14 @@
           posArr[i + 1] = sampleHeight(wx, wz);
         }
         terrainGeo.computeVertexNormals();
+        const uGroundBase = uniform(srgbToLinear(PARAMS.groundBaseColor));
         const uGroundDirt = uniform(srgbToLinear(PARAMS.groundDirtColor));
         const uGroundVar = uniform(1.0);
-        const uTexTiling = uniform(PARAMS.texTiling);
-
-        // Load AmbientCG Ground037 textures
-        const texLoader = new THREE.TextureLoader();
-        const groundColorTex = texLoader.load("textures/Ground037_1K-JPG_Color.jpg");
-        const groundNormalTex = texLoader.load("textures/Ground037_1K-JPG_NormalGL.jpg");
-        const groundRoughTex  = texLoader.load("textures/Ground037_1K-JPG_Roughness.jpg");
-        for (const t of [groundColorTex, groundNormalTex, groundRoughTex]) {
-          t.wrapS = t.wrapT = THREE.RepeatWrapping;
-        }
-        groundColorTex.colorSpace = THREE.SRGBColorSpace;
-
         const terrainMat = new THREE.MeshStandardNodeMaterial({
           roughness: 1,
           metalness: 0,
         });
-        const tiledUV = uv().mul(uTexTiling);
         terrainMat.colorNode = Fn(() => {
-          const texColor = texture(groundColorTex, tiledUV).rgb;
           const wp = modelWorldMatrix.mul(vec4(positionLocal, 1)).xyz;
           const n1 = noise12(mul(wp.xz, 0.03)),
             n2 = noise12(mul(wp.xz, 0.08)),
@@ -1191,11 +1133,8 @@
             mul(smoothstep(0.35, 0.65, combined), uGroundVar),
             heightBlend,
           );
-          return mix(texColor, uGroundDirt, dirtMix);
+          return mix(uGroundBase, uGroundDirt, dirtMix);
         })();
-        terrainMat.normalNode = normalMap(texture(groundNormalTex, tiledUV));
-        terrainMat.roughnessNode = max(texture(groundRoughTex, tiledUV).r, float(0.85));
-        terrainMat.envMapIntensity = 0; // no sky IBL specular on ground — grass does the same
         const terrain = new THREE.Mesh(terrainGeo, terrainMat);
         terrain.receiveShadow = true;
         scene.add(terrain);
@@ -1208,9 +1147,7 @@
         sky.rayleigh.value = PARAMS.skyRayleigh;
         sky.mieCoefficient.value = PARAMS.skyMie;
         sky.mieDirectionalG.value = PARAMS.skyMieG;
-        // PMREMGenerator: bakes the sky into an env map so PBR materials get IBL from the visible sky
-        const pmremGenerator = new THREE.PMREMGenerator(renderer);
-        function updateSkyParams() {
+        function updateSky() {
           const sd = new THREE.Vector3(
             PARAMS.sunDirX,
             PARAMS.sunDirY,
@@ -1222,16 +1159,6 @@
           sky.mieCoefficient.value = PARAMS.skyMie;
           sky.mieDirectionalG.value = PARAMS.skyMieG;
         }
-        function bakeEnvMap() {
-          // Expensive — only call at init or on GUI sky/sun changes, never per-frame
-          const skyEnvScene = new THREE.Scene();
-          skyEnvScene.add(sky.clone());
-          const skyEnv = pmremGenerator.fromScene(skyEnvScene, 0.04).texture;
-          if (scene.environment) scene.environment.dispose();
-          scene.environment = skyEnv;
-          scene.environmentIntensity = 0.2;
-        }
-        function updateSky() { updateSkyParams(); bakeEnvMap(); }
         updateSky();
 
         // ── PLAYER VISUAL: capsule placeholder + character model (replaces capsule when loaded) ──
@@ -1331,7 +1258,10 @@
                 const attackAction = attackClip
                   ? characterMixer.clipAction(attackClip).setLoop(2200)
                   : null;
-                if (attackAction && attackAction.clampWhenFinished !== undefined)
+                if (
+                  attackAction &&
+                  attackAction.clampWhenFinished !== undefined
+                )
                   attackAction.clampWhenFinished = true;
                 characterGroup.userData.idleAction = idleAction;
                 characterGroup.userData.walkAction = walkAction;
@@ -1554,10 +1484,10 @@
         // ── TREES: InstancedMesh from tree.glb + CPU frustum culling (max perf, no per-tree physics) ──
         const treesGroup = new THREE.Group();
         scene.add(treesGroup);
-        let treeInstancedMesh = null;       // first mesh — used for stats display
-        const treeInstancedMeshes = [];     // all instanced meshes (trunk + leaf)
-        let treeInstanceMatrices = null;    // full N×16 source of truth
-        let treeCompactMatrices = null;     // compacted buffer shared across all meshes
+        let treeInstancedMesh = null; // first mesh — used for stats display
+        const treeInstancedMeshes = []; // all instanced meshes (trunk + leaf)
+        let treeInstanceMatrices = null; // full N×16 source of truth
+        let treeCompactMatrices = null; // compacted buffer shared across all meshes
         let treeCullRadius = 4;
         let treeCountActual = 0;
         const treeLeafMaterials = [];
@@ -1576,8 +1506,10 @@
             // InstancedMesh — the shadow pass then uses each mesh's own material,
             // giving alpha-tested (holey) needle shadows on the leaf mesh and
             // solid shadows on the trunk mesh.
-            const leafGeos = [], leafMats = [];
-            const trunkGeos = [], trunkMats = [];
+            const leafGeos = [],
+              leafMats = [];
+            const trunkGeos = [],
+              trunkMats = [];
             root.traverse((o) => {
               if (!o.isMesh || !o.geometry) return;
               const g = o.geometry.clone();
@@ -1590,15 +1522,19 @@
                 const hasMap = !!m.map;
                 const isDoubleSide = m.side === THREE.DoubleSide;
                 const hasAlphaTest = m.alphaTest != null && m.alphaTest > 0;
-                const meshName = (o.name || '').toLowerCase();
-                const matName = (m.name || '').toLowerCase();
-                const isLeafByName = /leaf|leave|foliage|canopy|frond|branch/i.test(meshName + ' ' + matName);
+                const meshName = (o.name || "").toLowerCase();
+                const matName = (m.name || "").toLowerCase();
+                const isLeafByName =
+                  /leaf|leave|foliage|canopy|frond|branch/i.test(
+                    meshName + " " + matName,
+                  );
                 isLeafMaterial =
                   isTransparent ||
                   isLeafByName ||
                   (hasMap && (isDoubleSide || hasAlphaTest));
                 nodeMat = new THREE.MeshStandardNodeMaterial({
-                  color: m.color && m.color.getHex ? m.color.getHex() : 0x888888,
+                  color:
+                    m.color && m.color.getHex ? m.color.getHex() : 0x888888,
                   roughness: m.roughness != null ? m.roughness : 0.7,
                   metalness: m.metalness != null ? m.metalness : 0,
                   map: m.map || null,
@@ -1606,18 +1542,28 @@
                   transparent: false,
                   alphaTest: isLeafMaterial
                     ? PARAMS.treeAlphaTest
-                    : (m.alphaTest != null ? m.alphaTest : 0),
+                    : m.alphaTest != null
+                      ? m.alphaTest
+                      : 0,
                   opacity: isLeafMaterial
                     ? PARAMS.treeOpacity
-                    : (m.opacity != null ? m.opacity : 1),
-                  side: isLeafMaterial || isDoubleSide
-                    ? THREE.DoubleSide
-                    : m.side != null ? m.side : THREE.FrontSide,
+                    : m.opacity != null
+                      ? m.opacity
+                      : 1,
+                  side:
+                    isLeafMaterial || isDoubleSide
+                      ? THREE.DoubleSide
+                      : m.side != null
+                        ? m.side
+                        : THREE.FrontSide,
                   depthWrite: isLeafMaterial ? PARAMS.treeDepthWrite : true,
                 });
                 if (isLeafMaterial) treeLeafMaterials.push(nodeMat);
               } else {
-                nodeMat = new THREE.MeshStandardNodeMaterial({ color: 0x2d6b1a, roughness: 0.7 });
+                nodeMat = new THREE.MeshStandardNodeMaterial({
+                  color: 0x2d6b1a,
+                  roughness: 0.7,
+                });
               }
               if (isLeafMaterial) {
                 leafGeos.push(g);
@@ -1638,17 +1584,21 @@
               geo.computeBoundingSphere();
               const radius = geo.boundingSphere ? geo.boundingSphere.radius : 4;
               if (radius > treeCullRadius) treeCullRadius = radius;
-              const im = new THREE.InstancedMesh(geo, mats.length === 1 ? mats[0] : mats, MAX_TREES);
+              const im = new THREE.InstancedMesh(
+                geo,
+                mats.length === 1 ? mats[0] : mats,
+                MAX_TREES,
+              );
               im.castShadow = true;
               im.receiveShadow = false;
               im.frustumCulled = false;
               return im;
             };
             const trunkMesh = makeInstanced(trunkGeos, trunkMats);
-            const leafMesh  = makeInstanced(leafGeos,  leafMats);
+            const leafMesh = makeInstanced(leafGeos, leafMats);
             // Place trees — write into every mesh that exists
             treeInstanceMatrices = new Float32Array(MAX_TREES * 16);
-            treeCompactMatrices  = new Float32Array(MAX_TREES * 16);
+            treeCompactMatrices = new Float32Array(MAX_TREES * 16);
             const halfTerrain = TERRAIN_SIZE * 0.48;
             setSeed(42);
             let placed = 0;
@@ -1670,7 +1620,7 @@
                 .setPosition(tx, ty, tz);
               treeMatrix.toArray(treeInstanceMatrices, placed * 16);
               if (trunkMesh) trunkMesh.setMatrixAt(placed, treeMatrix);
-              if (leafMesh)  leafMesh.setMatrixAt(placed, treeMatrix);
+              if (leafMesh) leafMesh.setMatrixAt(placed, treeMatrix);
               placed++;
             }
             treeCountActual = placed;
@@ -1699,23 +1649,29 @@
         scene.add(scatterGroup);
         const halfTerrainScatter = TERRAIN_SIZE * 0.48;
         const MAX_SCATTER_PER_TYPE = 4000;
-        const MAX_SCATTER_FLOWERS = 20000;
-        const scatterMeshes = { boulder: null, gameAsset: null, flower: null };
-        const scatterInstanceData = { boulder: null, gameAsset: null, flower: null };
-        const scatterInstanceCount = { boulder: 0, gameAsset: 0, flower: 0 };
-        const scatterSeedOffset = { boulder: 100, gameAsset: 101, flower: 102 };
-        const scatterLodPos = new THREE.Vector3();
-        const scatterCullSphere = new THREE.Sphere();
-        const SCATTER_CULL_RADIUS = 1.5;
+        const scatterMeshes = { boulder: null, gameAsset: null };
+        const scatterSeedOffset = { boulder: 100, gameAsset: 101 };
 
         function updateScatterPlacement(key) {
-          const data = scatterInstanceData[key];
-          const meshes = scatterMeshes[key];
-          if (!data || !meshes) return;
-          const maxCount = key === "flower" ? MAX_SCATTER_FLOWERS : MAX_SCATTER_PER_TYPE;
-          const count = Math.min(maxCount, Math.max(0, key === "boulder" ? PARAMS.scatterBoulderCount : key === "gameAsset" ? PARAMS.scatterGameAssetCount : PARAMS.scatterFlowerCount));
-          const baseScale = key === "boulder" ? PARAMS.scatterBoulderScale : key === "gameAsset" ? PARAMS.scatterGameAssetScale : PARAMS.scatterFlowerScale;
-          const variation = Math.max(0, Math.min(1, PARAMS.scatterScaleVariation));
+          const im = scatterMeshes[key];
+          if (!im) return;
+          const count = Math.min(
+            MAX_SCATTER_PER_TYPE,
+            Math.max(
+              0,
+              key === "boulder"
+                ? PARAMS.scatterBoulderCount
+                : PARAMS.scatterGameAssetCount,
+            ),
+          );
+          const baseScale =
+            key === "boulder"
+              ? PARAMS.scatterBoulderScale
+              : PARAMS.scatterGameAssetScale;
+          const variation = Math.max(
+            0,
+            Math.min(1, PARAMS.scatterScaleVariation),
+          );
           const innerR = Math.max(0, PARAMS.scatterInnerRadius);
           setSeed(scatterSeedOffset[key]);
           const mat4 = new THREE.Matrix4();
@@ -1728,41 +1684,16 @@
             const scaleMult = 1 - variation * 0.5 + seededRandom() * variation;
             const scale = baseScale * scaleMult;
             const rotY = seededRandom() * Math.PI * 2;
-            mat4.identity().makeRotationY(rotY).scale(new THREE.Vector3(scale, scale, scale)).setPosition(tx, ty, tz);
-            data[placed].copy(mat4);
+            mat4
+              .identity()
+              .makeRotationY(rotY)
+              .scale(new THREE.Vector3(scale, scale, scale))
+              .setPosition(tx, ty, tz);
+            im.setMatrixAt(placed, mat4);
             placed++;
           }
-          scatterInstanceCount[key] = placed;
-          if (typeof camera !== "undefined") updateScatterLOD(key, camera, null);
-        }
-
-        function updateScatterLOD(key, camera, frustum) {
-          const meshes = scatterMeshes[key];
-          const data = scatterInstanceData[key];
-          const total = scatterInstanceCount[key];
-          if (!meshes || !data || total === 0) return;
-          const dist = Math.max(1, PARAMS.scatterLodDistance);
-          const doCull = PARAMS.scatterCulling && frustum != null;
-          scatterCullSphere.radius = SCATTER_CULL_RADIUS;
-          const nearList = [];
-          const farList = [];
-          for (let i = 0; i < total; i++) {
-            scatterLodPos.setFromMatrixPosition(data[i]);
-            if (doCull) {
-              scatterCullSphere.center.copy(scatterLodPos);
-              if (!frustum.intersectsSphere(scatterCullSphere)) continue;
-            }
-            if (camera.position.distanceTo(scatterLodPos) < dist) nearList.push(data[i]);
-            else farList.push(data[i]);
-          }
-          const nearIm = meshes.near;
-          const farIm = meshes.far;
-          for (let i = 0; i < nearList.length; i++) nearIm.setMatrixAt(i, nearList[i]);
-          nearIm.count = nearList.length;
-          nearIm.instanceMatrix.needsUpdate = true;
-          for (let i = 0; i < farList.length; i++) farIm.setMatrixAt(i, farList[i]);
-          farIm.count = farList.length;
-          farIm.instanceMatrix.needsUpdate = true;
+          im.count = placed;
+          im.instanceMatrix.needsUpdate = true;
         }
 
         function createScatterFromGlb(url, key) {
@@ -1786,35 +1717,42 @@
                 geos.push(g);
                 const src = m.material;
                 const nodeMat = new THREE.MeshStandardNodeMaterial({
-                  color: (src && src.color) ? (src.color.getHex ? src.color.getHex() : src.color) : 0x6b5d52,
+                  color:
+                    src && src.color
+                      ? src.color.getHex
+                        ? src.color.getHex()
+                        : src.color
+                      : 0x6b5d52,
                   roughness: src && src.roughness != null ? src.roughness : 0.9,
                   metalness: src && src.metalness != null ? src.metalness : 0,
                   map: src && src.map ? src.map : null,
                   normalMap: src && src.normalMap ? src.normalMap : null,
-                  normalScale: src && src.normalScale ? src.normalScale.clone() : new THREE.Vector2(1, 1),
-                  roughnessMap: src && src.roughnessMap ? src.roughnessMap : null,
-                  metalnessMap: src && src.metalnessMap ? src.metalnessMap : null,
+                  normalScale:
+                    src && src.normalScale
+                      ? src.normalScale.clone()
+                      : new THREE.Vector2(1, 1),
+                  roughnessMap:
+                    src && src.roughnessMap ? src.roughnessMap : null,
+                  metalnessMap:
+                    src && src.metalnessMap ? src.metalnessMap : null,
                   aoMap: src && src.aoMap ? src.aoMap : null,
-                  aoMapIntensity: src && src.aoMapIntensity != null ? src.aoMapIntensity : 1,
+                  aoMapIntensity:
+                    src && src.aoMapIntensity != null ? src.aoMapIntensity : 1,
                 });
                 mats.push(nodeMat);
               }
               const geo = mergeGeometries(geos, true);
               geo.computeBoundingSphere();
-              const maxCount = key === "flower" ? MAX_SCATTER_FLOWERS : MAX_SCATTER_PER_TYPE;
-              const castShadow = key !== "flower" && PARAMS.scatterCastShadow;
-              const nearIm = new THREE.InstancedMesh(geo, mats.length === 1 ? mats[0] : mats, maxCount);
-              nearIm.castShadow = castShadow;
-              nearIm.receiveShadow = true;
-              nearIm.frustumCulled = false;
-              const farIm = new THREE.InstancedMesh(geo, mats.length === 1 ? mats[0] : mats, maxCount);
-              farIm.castShadow = false;
-              farIm.receiveShadow = false;
-              farIm.frustumCulled = false;
-              scatterMeshes[key] = { near: nearIm, far: farIm };
-              scatterInstanceData[key] = Array.from({ length: maxCount }, () => new THREE.Matrix4());
-              scatterGroup.add(nearIm);
-              scatterGroup.add(farIm);
+              const im = new THREE.InstancedMesh(
+                geo,
+                mats.length === 1 ? mats[0] : mats,
+                MAX_SCATTER_PER_TYPE,
+              );
+              im.castShadow = PARAMS.scatterCastShadow;
+              im.receiveShadow = false;
+              im.frustumCulled = false;
+              scatterMeshes[key] = im;
+              scatterGroup.add(im);
               updateScatterPlacement(key);
               renderer.compileAsync(scene, camera).catch(() => {});
             },
@@ -1825,7 +1763,6 @@
 
         createScatterFromGlb("models/rock_boulder.glb", "boulder");
         createScatterFromGlb("models/rock__game_asset.glb", "gameAsset");
-        createScatterFromGlb("models/low_poly_flower-transformed.glb", "flower");
 
         // ── ANCIENT RUINS (compressed GLB on terrain + physics collider from bbox) ──
         const RUINS_X = 120,
@@ -1834,7 +1771,7 @@
         gltfLoader.load("models/ancient_ruins_modular_mr.glb", (gltf) => {
           const ruins = gltf.scene;
           ruinsModel = ruins;
-          ruins.position.set(RUINS_X, sampleHeight(RUINS_X, RUINS_Z) - 0.8, RUINS_Z);
+          ruins.position.set(RUINS_X, sampleHeight(RUINS_X, RUINS_Z), RUINS_Z);
           ruins.scale.setScalar(0.03);
           ruins.traverse((o) => {
             if (o.isMesh) {
@@ -1889,49 +1826,32 @@
           );
         });
 
-        // ── FLAG (cloth physics simulation) — near ruins ──
+        // ── FLAG (cloth physics simulation) ──
         // Pole bottom sits ~0.4225 * scale units below the group origin,
         // so raise Y by that amount to plant the pole base on the terrain.
         const FLAG_SCALE = 15;
-        const flagX = RUINS_X - 14, flagZ = RUINS_Z - 6;
+        const flagX = 8,
+          flagZ = 0;
         const flag = createFlag({
-          position: [flagX, sampleHeight(flagX, flagZ) + 0.4225 * FLAG_SCALE, flagZ],
+          position: [
+            flagX,
+            sampleHeight(flagX, flagZ) + 0.4225 * FLAG_SCALE,
+            flagZ,
+          ],
           scale: FLAG_SCALE,
-          textureUrl: "textures/Zaire.png",
         });
         scene.add(flag.group);
 
         // ── BIRDS (GPU compute boids, no mouse — pure autonomous flocking) ──
         const birds = createBirds({
-          scene, renderer,
-          count: PARAMS.birdsCount,
+          scene,
+          renderer,
+          count: 1024,
           bounds: 400,
           centerY: PARAMS.birdsCenterY,
           minY: PARAMS.birdsMinY,
           maxY: PARAMS.birdsMaxY,
         });
-        birds.mesh.visible = PARAMS.birdsEnabled;
-
-        // ── OCTAHEDRAL IMPOSTOR FOREST (optional: LOD impostor from external module) ──
-        let octahedralForest = null;
-        try {
-          octahedralForest = await createOctahedralImpostorForest({
-            modelPath: "models/tree.glb",
-            treeCount: 2000,
-            treeScale: 1.5,
-            lodDistance: 40,
-            radius: 450,
-            minRadius: 20,
-            centerPosition: [0, 0, 0],
-            getTerrainHeight: sampleHeight,
-            impostorSettings: { spritesPerSide: 8, textureSize: 2048, alphaClamp: 0.1, alphaTest: 0.05 },
-            impostorDebug: false,
-          });
-          scene.add(octahedralForest.group);
-          octahedralForest.group.visible = PARAMS.octahedralForestEnabled;
-        } catch (e) {
-          console.warn("Octahedral impostor forest skipped:", e);
-        }
 
         const capR = PARAMS.capsuleRadius;
         const capHalfH = Math.max(0.1, (PARAMS.characterHeight - 2 * capR) / 2);
@@ -2179,7 +2099,7 @@
           title: "🌿 Grass v8",
           expanded: true,
         });
-        const fShape = pane.addFolder({ title: "Grass Shape", expanded: false });
+        const fShape = pane.addFolder({ title: "Grass Shape" });
         fShape.addBinding(PARAMS, "grassWidth", {
           min: 0.02,
           max: 0.3,
@@ -2229,7 +2149,7 @@
           step: 0.005,
         });
         fSeason.addBinding(PARAMS, "seasonalDryColor", { view: "color" });
-        const fWind = pane.addFolder({ title: "Wind", expanded: false });
+        const fWind = pane.addFolder({ title: "Wind" });
         fWind.addBinding(PARAMS, "windSpeed", {
           min: 0,
           max: 4,
@@ -2286,7 +2206,7 @@
           step: 0.1,
           label: "radius",
         });
-        const fChar = pane.addFolder({ title: "Character", expanded: false });
+        const fChar = pane.addFolder({ title: "Character", expanded: true });
         fChar.addBinding(PARAMS, "characterHeight", {
           min: 1,
           max: 2.5,
@@ -2365,7 +2285,7 @@
         fPlayer.addBinding(PARAMS, "cameraMode", {
           options: { thirdPerson: "thirdPerson", orbit: "orbit" },
         });
-        const fNpc = pane.addFolder({ title: "NPCs", expanded: false });
+        const fNpc = pane.addFolder({ title: "NPCs", expanded: true });
         fNpc
           .addBinding(PARAMS, "npcEnabled", { label: "enabled" })
           .on("change", () => {
@@ -2390,18 +2310,18 @@
         fFog.addBinding(PARAMS, "fogColor", { view: "color" });
         const fGround = pane.addFolder({ title: "Ground", expanded: false });
         fGround.addBinding(PARAMS, "groundVariation");
+        fGround.addBinding(PARAMS, "groundBaseColor", { view: "color" });
         fGround.addBinding(PARAMS, "groundDirtColor", { view: "color" });
-        fGround.addBinding(PARAMS, "texTiling", { min: 10, max: 200, step: 5, label: "tex tiling" });
         const fTerrain = pane.addFolder({ title: "Terrain", expanded: false });
         fTerrain.addBinding(PARAMS, "terrainHeight", {
           min: 0,
           max: 60,
           step: 1,
         });
-        const fSun = pane.addFolder({ title: "Sun & Lighting", expanded: false });
-        fSun.addBinding(PARAMS, "sunDirX", { min: -2, max: 2, step: 0.1 }).on("change", bakeEnvMap);
-        fSun.addBinding(PARAMS, "sunDirY", { min: 0.1, max: 2, step: 0.05 }).on("change", bakeEnvMap);
-        fSun.addBinding(PARAMS, "sunDirZ", { min: -2, max: 2, step: 0.1 }).on("change", bakeEnvMap);
+        const fSun = pane.addFolder({ title: "Sun & Lighting" });
+        fSun.addBinding(PARAMS, "sunDirX", { min: -2, max: 2, step: 0.1 });
+        fSun.addBinding(PARAMS, "sunDirY", { min: 0.1, max: 2, step: 0.05 });
+        fSun.addBinding(PARAMS, "sunDirZ", { min: -2, max: 2, step: 0.1 });
         fSun.addBinding(PARAMS, "sunIntensity", {
           min: 0.5,
           max: 5,
@@ -2414,84 +2334,55 @@
           label: "ambientLight",
         });
         fSun.addBinding(PARAMS, "exposure", { min: 0.2, max: 2, step: 0.05 });
-        const fPost = pane.addFolder({ title: "Post Processing", expanded: false });
-        fPost.addBinding(PARAMS, "postProcessingEnabled", { label: "enabled" });
-        const fLensflare = fPost.addFolder({ title: "Lens flare", expanded: false });
-        fLensflare.addBinding(PARAMS, "lensflareEnabled", { label: "enabled" });
-        fLensflare.addBinding(PARAMS, "lensflareBloomThreshold", {
-          min: 0.3,
-          max: 0.95,
-          step: 0.02,
-          label: "bloom threshold",
-        });
-        fLensflare.addBinding(PARAMS, "lensflareThreshold", {
-          min: 0.2,
-          max: 0.9,
-          step: 0.05,
-          label: "threshold",
-        });
-        fLensflare.addBinding(PARAMS, "lensflareGhostAttenuation", {
-          min: 10,
-          max: 50,
-          step: 1,
-          label: "ghost attenuation",
-        });
-        fLensflare.addBinding(PARAMS, "lensflareGhostSpacing", {
-          min: 0.05,
-          max: 0.5,
-          step: 0.01,
-          label: "ghost spacing",
-        });
         const fSky = pane.addFolder({ title: "Sky", expanded: false });
         fSky.addBinding(PARAMS, "skyTurbidity", {
           min: 0,
           max: 20,
           step: 0.5,
           label: "turbidity",
-        }).on("change", bakeEnvMap);
+        });
         fSky.addBinding(PARAMS, "skyRayleigh", {
           min: 0,
           max: 4,
           step: 0.1,
           label: "rayleigh",
-        }).on("change", bakeEnvMap);
+        });
         fSky.addBinding(PARAMS, "skyMie", {
           min: 0,
           max: 0.1,
           step: 0.001,
           label: "mieCoeff",
-        }).on("change", bakeEnvMap);
+        });
         fSky.addBinding(PARAMS, "skyMieG", {
           min: 0,
           max: 1,
           step: 0.05,
           label: "mieDirectional",
-        }).on("change", bakeEnvMap);
+        });
         const fPhysics = pane.addFolder({ title: "Physics", expanded: false });
         fPhysics.addBinding(PARAMS, "rapierDebug", {
           label: "Rapier debug (colliders)",
         });
         const fScene = pane.addFolder({
           title: "Scene (FPS debug)",
-          expanded: false,
+          expanded: true,
         });
         fScene.addBinding(PARAMS, "showRuins", { label: "Ruins" });
         fScene.addBinding(PARAMS, "showTrees", { label: "Trees" });
         fScene.addBinding(PARAMS, "showBuildings", { label: "Buildings" });
 
-        const fScatter = pane.addFolder({ title: "Scatter (rocks)", expanded: false });
+        const fScatter = pane.addFolder({
+          title: "Scatter (rocks)",
+          expanded: true,
+        });
         fScatter.addBinding(PARAMS, "showScatter", { label: "visible" });
         fScatter
           .addBinding(PARAMS, "scatterCastShadow", { label: "cast shadow" })
           .on("change", () => {
-            if (scatterMeshes.boulder) {
-              scatterMeshes.boulder.near.castShadow = PARAMS.scatterCastShadow;
-              scatterMeshes.boulder.near.receiveShadow = PARAMS.scatterCastShadow;
-            }
-            if (scatterMeshes.gameAsset) {
-              scatterMeshes.gameAsset.near.castShadow = PARAMS.scatterCastShadow;
-              scatterMeshes.gameAsset.near.receiveShadow = PARAMS.scatterCastShadow;
-            }
+            if (scatterMeshes.boulder)
+              scatterMeshes.boulder.castShadow = PARAMS.scatterCastShadow;
+            if (scatterMeshes.gameAsset)
+              scatterMeshes.gameAsset.castShadow = PARAMS.scatterCastShadow;
           });
         fScatter
           .addBinding(PARAMS, "scatterScaleVariation", {
@@ -2515,42 +2406,55 @@
             updateScatterPlacement("boulder");
             updateScatterPlacement("gameAsset");
           });
-        fScatter.addBinding(PARAMS, "scatterLodDistance", {
-          min: 10,
-          max: 150,
-          step: 5,
-          label: "LOD distance (shadows within)",
+        const fScatterBoulder = fScatter.addFolder({
+          title: "Boulder",
+          expanded: true,
         });
-        fScatter.addBinding(PARAMS, "scatterCulling", {
-          label: "frustum culling",
-        });
-        const fScatterBoulder = fScatter.addFolder({ title: "Boulder", expanded: false });
         fScatterBoulder
-          .addBinding(PARAMS, "scatterBoulderScale", { min: 0.002, max: 0.5, step: 0.002, label: "scale" })
+          .addBinding(PARAMS, "scatterBoulderScale", {
+            min: 0.002,
+            max: 0.5,
+            step: 0.002,
+            label: "scale",
+          })
           .on("change", () => updateScatterPlacement("boulder"));
         fScatterBoulder
-          .addBinding(PARAMS, "scatterBoulderCount", { min: 0, max: MAX_SCATTER_PER_TYPE, step: 100, label: "count" })
+          .addBinding(PARAMS, "scatterBoulderCount", {
+            min: 0,
+            max: MAX_SCATTER_PER_TYPE,
+            step: 100,
+            label: "count",
+          })
           .on("change", () => updateScatterPlacement("boulder"));
-        const fScatterGameAsset = fScatter.addFolder({ title: "Game asset rock", expanded: false });
+        const fScatterGameAsset = fScatter.addFolder({
+          title: "Game asset rock",
+          expanded: true,
+        });
         fScatterGameAsset
-          .addBinding(PARAMS, "scatterGameAssetScale", { min: 0.02, max: 2, step: 0.01, label: "scale" })
+          .addBinding(PARAMS, "scatterGameAssetScale", {
+            min: 0.002,
+            max: 0.5,
+            step: 0.002,
+            label: "scale",
+          })
           .on("change", () => updateScatterPlacement("gameAsset"));
         fScatterGameAsset
-          .addBinding(PARAMS, "scatterGameAssetCount", { min: 0, max: MAX_SCATTER_PER_TYPE, step: 100, label: "count" })
+          .addBinding(PARAMS, "scatterGameAssetCount", {
+            min: 0,
+            max: MAX_SCATTER_PER_TYPE,
+            step: 100,
+            label: "count",
+          })
           .on("change", () => updateScatterPlacement("gameAsset"));
-        const fScatterFlower = fScatter.addFolder({ title: "Flowers", expanded: false });
-        fScatterFlower
-          .addBinding(PARAMS, "scatterFlowerScale", { min: 0.02, max: 1.5, step: 0.01, label: "scale" })
-          .on("change", () => updateScatterPlacement("flower"));
-        fScatterFlower
-          .addBinding(PARAMS, "scatterFlowerCount", { min: 0, max: MAX_SCATTER_FLOWERS, step: 500, label: "count" })
-          .on("change", () => updateScatterPlacement("flower"));
 
         // Re-places all tree instances using the current PARAMS without reloading the GLB.
         // Safe to call any time after the GLB has loaded.
         function respawnTrees() {
           if (!treeInstanceMatrices || treeInstancedMeshes.length === 0) return;
-          const newCount = Math.min(Math.max(100, PARAMS.treeCount | 0), MAX_TREES);
+          const newCount = Math.min(
+            Math.max(100, PARAMS.treeCount | 0),
+            MAX_TREES,
+          );
           setSeed(42);
           const halfTerrain = TERRAIN_SIZE * 0.48;
           let placed = 0;
@@ -2562,34 +2466,42 @@
             const tx = (seededRandom() * 2 - 1) * halfTerrain;
             const tz = (seededRandom() * 2 - 1) * halfTerrain;
             if (Math.sqrt(tx * tx + tz * tz) < 20) continue;
-            const ty    = sampleHeight(tx, tz);
+            const ty = sampleHeight(tx, tz);
             const scale = (0.85 + seededRandom() * 0.3) * PARAMS.treeScale;
-            const rotY  = seededRandom() * Math.PI * 2;
+            const rotY = seededRandom() * Math.PI * 2;
             treeMatrix
               .identity()
               .makeRotationY(rotY)
               .scale(new THREE.Vector3(scale, scale, scale))
               .setPosition(tx, ty, tz);
             treeMatrix.toArray(treeInstanceMatrices, placed * 16);
-            for (const im of treeInstancedMeshes) im.setMatrixAt(placed, treeMatrix);
+            for (const im of treeInstancedMeshes)
+              im.setMatrixAt(placed, treeMatrix);
             placed++;
           }
           treeCountActual = placed;
-          treeCompactMatrices.set(treeInstanceMatrices.subarray(0, treeCountActual * 16));
+          treeCompactMatrices.set(
+            treeInstanceMatrices.subarray(0, treeCountActual * 16),
+          );
           for (const im of treeInstancedMeshes) {
             im.count = treeCountActual;
             im.instanceMatrix.needsUpdate = true;
           }
         }
 
-        const fTrees = pane.addFolder({ title: "Trees (leaves)", expanded: false });
+        const fTrees = pane.addFolder({
+          title: "Trees (leaves)",
+          expanded: true,
+        });
         fTrees.addBinding(PARAMS, "treeCount", {
           min: 100,
           max: MAX_TREES,
           step: 100,
           label: "count",
         });
-        fTrees.addButton({ title: "↺ respawn trees" }).on("click", respawnTrees);
+        fTrees
+          .addButton({ title: "↺ respawn trees" })
+          .on("click", respawnTrees);
         fTrees.addBinding(PARAMS, "treeScale", {
           min: 0.1,
           max: 50,
@@ -2615,57 +2527,75 @@
           label: "frustum culling",
         });
 
-        const fBirds = pane.addFolder({ title: "Birds", expanded: false });
+        const fBirds = pane.addFolder({ title: "Birds", expanded: true });
         const bp = birds.params;
-        fBirds.addBinding(PARAMS, "birdsEnabled", { label: "enabled" }).on("change", () => {
-          birds.mesh.visible = PARAMS.birdsEnabled;
-        });
-        fBirds.addBinding(PARAMS, "birdsCount", {
-          min: 64,
-          max: birds.MAX_BIRDS,
-          step: 64,
-          label: "count",
-        }).on("change", () => {
-          const n = Math.min(PARAMS.birdsCount, birds.MAX_BIRDS);
-          birds.mesh.count = n;
-          bp.uBirdCount.value = n;
-        });
-        fBirds.addBinding(PARAMS, "birdsCenterY", {
-          min: 10, max: 150, step: 1, label: "altitude center",
-        }).on("change", () => { bp.uCenterY.value = PARAMS.birdsCenterY; });
-        fBirds.addBinding(PARAMS, "birdsMinY", {
-          min: 0, max: 120, step: 1, label: "min altitude",
-        }).on("change", () => { bp.uMinY.value = PARAMS.birdsMinY; });
-        fBirds.addBinding(PARAMS, "birdsMaxY", {
-          min: 10, max: 200, step: 1, label: "max altitude",
-        }).on("change", () => { bp.uMaxY.value = PARAMS.birdsMaxY; });
-        fBirds.addBinding(PARAMS, "birdsSeparation", {
-          min: 1, max: 60, step: 0.5, label: "separation zone",
-        }).on("change", () => { bp.uSeparation.value = PARAMS.birdsSeparation; });
-        fBirds.addBinding(PARAMS, "birdsAlignment", {
-          min: 1, max: 60, step: 0.5, label: "alignment zone",
-        }).on("change", () => { bp.uAlignment.value = PARAMS.birdsAlignment; });
-        fBirds.addBinding(PARAMS, "birdsCohesion", {
-          min: 1, max: 60, step: 0.5, label: "cohesion zone",
-        }).on("change", () => { bp.uCohesion.value = PARAMS.birdsCohesion; });
+        fBirds
+          .addBinding(PARAMS, "birdsEnabled", { label: "enabled" })
+          .on("change", () => {
+            birds.mesh.visible = PARAMS.birdsEnabled;
+          });
+        fBirds
+          .addBinding(PARAMS, "birdsCenterY", {
+            min: 10,
+            max: 150,
+            step: 1,
+            label: "altitude center",
+          })
+          .on("change", () => {
+            bp.uCenterY.value = PARAMS.birdsCenterY;
+          });
+        fBirds
+          .addBinding(PARAMS, "birdsMinY", {
+            min: 0,
+            max: 120,
+            step: 1,
+            label: "min altitude",
+          })
+          .on("change", () => {
+            bp.uMinY.value = PARAMS.birdsMinY;
+          });
+        fBirds
+          .addBinding(PARAMS, "birdsMaxY", {
+            min: 10,
+            max: 200,
+            step: 1,
+            label: "max altitude",
+          })
+          .on("change", () => {
+            bp.uMaxY.value = PARAMS.birdsMaxY;
+          });
+        fBirds
+          .addBinding(PARAMS, "birdsSeparation", {
+            min: 1,
+            max: 60,
+            step: 0.5,
+            label: "separation zone",
+          })
+          .on("change", () => {
+            bp.uSeparation.value = PARAMS.birdsSeparation;
+          });
+        fBirds
+          .addBinding(PARAMS, "birdsAlignment", {
+            min: 1,
+            max: 60,
+            step: 0.5,
+            label: "alignment zone",
+          })
+          .on("change", () => {
+            bp.uAlignment.value = PARAMS.birdsAlignment;
+          });
+        fBirds
+          .addBinding(PARAMS, "birdsCohesion", {
+            min: 1,
+            max: 60,
+            step: 0.5,
+            label: "cohesion zone",
+          })
+          .on("change", () => {
+            bp.uCohesion.value = PARAMS.birdsCohesion;
+          });
 
-        const fOctahedralForest = pane.addFolder({ title: "Octahedral forest", expanded: false });
-        fOctahedralForest.addBinding(PARAMS, "octahedralForestEnabled", { label: "enabled" }).on("change", () => {
-          if (octahedralForest) octahedralForest.group.visible = PARAMS.octahedralForestEnabled;
-        });
-        fOctahedralForest.addBinding(PARAMS, "octahedralForestScale", {
-          min: 0.2, max: 2, step: 0.05, label: "scale",
-        }).on("change", () => {
-          if (octahedralForest) octahedralForest.group.scale.setScalar(PARAMS.octahedralForestScale);
-        });
-        fOctahedralForest.addBinding(PARAMS, "octahedralForestAlphaClamp", {
-          min: 0.01, max: 0.99, step: 0.02, label: "alpha clamp (leaf cutout)",
-        }).on("change", () => {
-          if (octahedralForest && octahedralForest.setAlphaClamp)
-            octahedralForest.setAlphaClamp(PARAMS.octahedralForestAlphaClamp);
-        });
-
-        const fShadows = pane.addFolder({ title: "Shadows", expanded: false });
+        const fShadows = pane.addFolder({ title: "Shadows", expanded: true });
         fShadows.addBinding(PARAMS, "shadowBias", {
           min: -0.01,
           max: 0.01,
@@ -2734,20 +2664,14 @@
           uFogColor.value.copy(srgbToLinear(PARAMS.fogColor));
           uFogCameraFar.value = camera.far;
           uFogEnabled.value = PARAMS.fogEnabled ? 1 : 0;
-          uFlareAmount.value =
-            PARAMS.postProcessingEnabled && PARAMS.lensflareEnabled ? 1 : 0;
-          bloomPass.threshold.value = PARAMS.lensflareBloomThreshold;
-          flareThreshold.value = PARAMS.lensflareThreshold;
-          flareGhostAttenuation.value = PARAMS.lensflareGhostAttenuation;
-          flareGhostSpacing.value = PARAMS.lensflareGhostSpacing;
           uSeasonalStr.value = PARAMS.seasonalEnabled
             ? PARAMS.seasonalStrength
             : 0;
           uSeasonalScale.value = PARAMS.seasonalScale;
           uSeasonalDryColor.value.copy(srgbToLinear(PARAMS.seasonalDryColor));
+          uGroundBase.value.copy(srgbToLinear(PARAMS.groundBaseColor));
           uGroundDirt.value.copy(srgbToLinear(PARAMS.groundDirtColor));
           uGroundVar.value = PARAMS.groundVariation ? 1 : 0;
-          uTexTiling.value = PARAMS.texTiling;
           // Sun
           const sd = new THREE.Vector3(
             PARAMS.sunDirX,
@@ -2758,17 +2682,14 @@
           dirLight.position.copy(sd.clone().multiplyScalar(50));
           dirLight.intensity = PARAMS.sunIntensity;
           uSunIntensity.value = PARAMS.sunIntensity;
-          hemiLight.intensity = PARAMS.sceneAmbient;
+          ambLight.intensity = PARAMS.sceneAmbient;
           renderer.toneMappingExposure = PARAMS.exposure;
-          updateSkyParams();
+          updateSky();
           if (PARAMS.terrainHeight !== lastTerrainH) {
             lastTerrainH = PARAMS.terrainHeight;
             regenTerrain();
           }
           uTrailCenter.value.set(charPos.x, charPos.z);
-          const birdCount = Math.min(PARAMS.birdsCount, birds.MAX_BIRDS);
-          birds.mesh.count = birdCount;
-          bp.uBirdCount.value = birdCount;
         }
 
         // ═══════════════════════════════════════════════════════════
@@ -2807,29 +2728,16 @@
           vec4(uFogColor, 1),
           mul(fogF, sub(1, skyMask)),
         );
-        // WebGPU lens flare (bloom-based): only the sun drives the flare; high threshold excludes character/grass
-        const bloomPass = bloom(sceneColor, 1, 0.5, PARAMS.lensflareBloomThreshold);
-        const flareThreshold = uniform(0.6);
-        const flareGhostAttenuation = uniform(25);
-        const flareGhostSpacing = uniform(0.25);
-        const flarePass = lensflare(bloomPass, {
-          threshold: flareThreshold,
-          ghostAttenuationFactor: flareGhostAttenuation,
-          ghostSpacing: flareGhostSpacing,
-        });
-        const flareBlurPass = gaussianBlur(flarePass, null, 8);
-        const uFlareAmount = uniform(1);
         const renderPipeline = new THREE.RenderPipeline(renderer);
-        renderPipeline.outputNode = foggedOutput.add(flareBlurPass.mul(uFlareAmount));
+        renderPipeline.outputNode = foggedOutput;
 
-        // Pre-compile scene so WebGPU node builder runs and initialises CSM internals
+        // Pre-compile scene (including CSM) so node builder runs before first frame
         await renderer.compileAsync(scene, camera);
 
-        // NOW safe to call updateFrustums — renderer._init(builder) has already created
-        // mainFrustum and the internal cascade lights (calling before compileAsync gives null)
-        csm.camera = camera;
-        csm.updateFrustums();
-
+        // Shadow stabilisation: only refit CSM cascades when the player moves,
+        // never on camera rotation (that causes the shadow-swimming artifact).
+        const lastCsmPos = new THREE.Vector3(-9999, 0, -9999);
+        const CSM_REFIT_DIST = 2.0; // world units of movement before cascade refit
 
         renderer.setAnimationLoop(() => {
           timer.update();
@@ -3034,14 +2942,10 @@
           }
           flag.update(dt);
           if (PARAMS.birdsEnabled) birds.update(dt);
-          if (octahedralForest) octahedralForest.update(camera);
           physicsDebugGroup.visible = !!PARAMS.rapierDebug;
           buildingsGroup.visible = PARAMS.showBuildings;
-          scatterGroup.visible = PARAMS.showScatter;
           treesGroup.visible = PARAMS.showTrees;
-          if (octahedralForest) {
-            octahedralForest.group.visible = PARAMS.octahedralForestEnabled;
-          }
+          scatterGroup.visible = PARAMS.showScatter;
           treeLeafMaterials.forEach((mat) => {
             mat.alphaTest = PARAMS.treeAlphaTest;
             mat.opacity = PARAMS.treeOpacity;
@@ -3116,6 +3020,18 @@
             }
           }
 
+          // CSM: only refit cascades when player moves — not on camera rotation,
+          // which would cause the shadow-swimming artifact.
+          camera.updateMatrixWorld();
+          if (
+            csm.mainFrustum &&
+            charPos.distanceTo(lastCsmPos) > CSM_REFIT_DIST
+          ) {
+            lastCsmPos.copy(charPos);
+            csm.camera = camera;
+            csm.updateFrustums();
+          }
+
           // Grass patches + tree frustum culling (same frustum)
           for (let i = 0; i < grassGroup.children.length; i++)
             grassGroup.children[i].visible = false;
@@ -3126,12 +3042,6 @@
             camera.matrixWorldInverse,
           );
           frustum.setFromProjectionMatrix(projMat);
-
-          if (PARAMS.showScatter) {
-            updateScatterLOD("boulder", camera, frustum);
-            updateScatterLOD("gameAsset", camera, frustum);
-            updateScatterLOD("flower", camera, frustum);
-          }
 
           // Tree instance culling: compact visible instances into shared buffer,
           // then copy to every instanced mesh (trunk + leaf stay in sync).
@@ -3151,18 +3061,26 @@
                 const inShadowRange = dx * dx + dz * dz < shadowDist2;
                 treeFrustumSphere.center.copy(treePosition);
                 treeFrustumSphere.radius = treeCullRadius;
-                if (inShadowRange || frustum.intersectsSphere(treeFrustumSphere)) {
+                if (
+                  inShadowRange ||
+                  frustum.intersectsSphere(treeFrustumSphere)
+                ) {
                   for (let j = 0; j < 16; j++)
-                    treeCompactMatrices[visibleCount * 16 + j] = treeInstanceMatrices[o + j];
+                    treeCompactMatrices[visibleCount * 16 + j] =
+                      treeInstanceMatrices[o + j];
                   visibleCount++;
                 }
               }
             } else {
-              treeCompactMatrices.set(treeInstanceMatrices.subarray(0, treeCountActual * 16));
+              treeCompactMatrices.set(
+                treeInstanceMatrices.subarray(0, treeCountActual * 16),
+              );
               visibleCount = treeCountActual;
             }
             for (const im of treeInstancedMeshes) {
-              im.instanceMatrix.array.set(treeCompactMatrices.subarray(0, visibleCount * 16));
+              im.instanceMatrix.array.set(
+                treeCompactMatrices.subarray(0, visibleCount * 16),
+              );
               im.count = visibleCount;
               im.instanceMatrix.needsUpdate = true;
             }
@@ -3201,7 +3119,6 @@
             }
           }
 
-          camera.updateMatrixWorld(); // required by CSMShadowNode.updateBefore() each frame
           renderPipeline.render();
           stats.update();
           if (++frameCount % 30 === 0) {
@@ -3216,7 +3133,7 @@
           camera.aspect = innerWidth / innerHeight;
           camera.updateProjectionMatrix();
           renderer.setSize(innerWidth, innerHeight);
-          if (csm.frustums) csm.updateFrustums(); // recalculate cascade sizes for new aspect ratio
+          if (csm.mainFrustum) csm.updateFrustums();
         });
       }
 
