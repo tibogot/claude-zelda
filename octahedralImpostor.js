@@ -105,10 +105,10 @@ void main() {
   vec4 c = texture(map, vUv);
   c.rgb *= uMatColor;
   if (c.a < alphaTest) discard;
-  // Soft vertical AO: darker at base of tree, full brightness at crown
+  // Subtle vertical AO: slight darkening at base (was 0.6–1.0; now 0.92–1.0 to avoid shady/hollow look on rocks)
   float baseY = uSphereCenter.y - uSphereRadius;
   float yNorm = clamp((vWorldPos.y - baseY) / (uSphereRadius * 0.8), 0.0, 1.0);
-  float ao = mix(0.6, 1.0, yNorm);
+  float ao = mix(0.92, 1.0, yNorm);
   outColor = vec4(c.rgb * ao, c.a);
 }`;
 
@@ -128,7 +128,7 @@ function whiteTexture(gl) {
   if (_whiteTex) return _whiteTex;
   _whiteTex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, _whiteTex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([210,210,210,255]));
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([255,255,255,255]));
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
   return _whiteTex;
@@ -245,7 +245,8 @@ function bakeAtlas(modelScene, { textureSize = 2048, spritesPerSide = 12, alphaT
   const uNMap     = gl.getUniformLocation(normProg, "map");
   const uNAlpha   = gl.getUniformLocation(normProg, "alphaTest");
 
-  const half = sphere.radius * 1.0;
+  // Slight margin (1.15) so base/edges aren't clipped when baking from some angles
+  const half = sphere.radius * 1.15;
   const cam  = new THREE.OrthographicCamera(-half, half, half, -half, 0.001, sphere.radius * 4);
 
   const fbo     = gl.createFramebuffer();
@@ -313,7 +314,8 @@ function bakeAtlas(modelScene, { textureSize = 2048, spritesPerSide = 12, alphaT
     gl.uniformMatrix4fv(uProj, false, cam.projectionMatrix.elements);
     gl.uniformMatrix4fv(uMod,  false, mesh.matrixWorld.elements);
     gl.uniform1f(uAlpha, mat.alphaTest > 0 ? mat.alphaTest : alphaTest);
-    const mc = mat.color ?? { r: 1, g: 1, b: 1 };
+    const col = mat.color;
+    const mc = col ? (typeof col.getHex === 'function' ? { r: col.r, g: col.g, b: col.b } : { r: col.r ?? 1, g: col.g ?? 1, b: col.b ?? 1 }) : { r: 1, g: 1, b: 1 };
     gl.uniform3f(uMatCol, mc.r, mc.g, mc.b);
     let t = null, own = false;
     if (mat.map?.image) { t = uploadTex(gl, mat.map.image); own = !!t; }
@@ -510,19 +512,23 @@ function createImpostorMaterial(atlasTex, normalTex, impostorScale, centersStora
   const colorNodeFn = Fn(() => {
     const fs = div(float(1), uSPS);
 
-    // ── Albedo blend (mega: 1 sprite; standard: 3-sprite trilinear) ──
     const c1 = texture(atlasTex, getUV(vUV1, vS1, fs));
-    const blended = mega
-      ? c1
-      : add(add(mul(c1, vWeight.x), mul(texture(atlasTex, getUV(vUV2, vS2, fs)), vWeight.y)), mul(texture(atlasTex, getUV(vUV3, vS3, fs)), vWeight.z));
+    const c2 = mega ? c1 : texture(atlasTex, getUV(vUV2, vS2, fs));
+    const c3 = mega ? c1 : texture(atlasTex, getUV(vUV3, vS3, fs));
 
-    // ── Normal blend → dynamic lighting ──
+    // ── Color: trilinear blend for smooth orbit (no jump when view angle changes) ──
+    const blendedRgb = mega ? c1.rgb : add(add(mul(c1.rgb, vWeight.x), mul(c2.rgb, vWeight.y)), mul(c3.rgb, vWeight.z));
+    // ── Alpha: dominant sprite only — single crisp silhouette, no hollow/layered/ghost look ──
+    const dominantAlpha = mega ? c1.a : select(
+      vWeight.x.greaterThanEqual(vWeight.y).and(vWeight.x.greaterThanEqual(vWeight.z)),
+      c1.a,
+      select(vWeight.y.greaterThanEqual(vWeight.z), c2.a, c3.a)
+    );
+
+    // ── Normal: trilinear blend so lighting transitions smoothly with orbit ──
     const n1 = texture(normalTex, getUV(vUV1, vS1, fs)).xyz;
-    const normEnc = mega
-      ? n1
-      : add(add(mul(n1, vWeight.x), mul(texture(normalTex, getUV(vUV2, vS2, fs)).xyz, vWeight.y)), mul(texture(normalTex, getUV(vUV3, vS3, fs)).xyz, vWeight.z));
+    const normEnc = mega ? n1 : add(add(mul(n1, vWeight.x), mul(texture(normalTex, getUV(vUV2, vS2, fs)).xyz, vWeight.y)), mul(texture(normalTex, getUV(vUV3, vS3, fs)).xyz, vWeight.z));
     const worldNorm = normalize(sub(mul(normEnc, float(2.0)), float(1.0)));
-    // Wrap-around lighting (foliage-friendly: softer than hard dot)
     const wrap  = add(mul(dot(worldNorm, uSunDir), 0.5), 0.5);
     const light = add(uAmbColor, mul(uSunColor, wrap));
 
@@ -530,12 +536,15 @@ function createImpostorMaterial(atlasTex, normalTex, impostorScale, centersStora
     const dist   = length(sub(centerNode, cameraPosition));
     const fadeT  = saturate(div(sub(dist, sub(uLodDist, uFadeRange)), uFadeRange));
     const dither = IGN(screenCoordinate.xy);
-    const alphaOut = select(dither.greaterThan(fadeT), float(0.0), blended.a);
+    const alphaOut = select(dither.greaterThan(fadeT), float(0.0), dominantAlpha);
 
-    return vec4(mul(blended.rgb, light), alphaOut);
+    // Darken albedo so impostor matches real GLB (bake can be too bright; apply in shader)
+    const darkenedAlbedo = mul(blendedRgb, float(0.52));
+    return vec4(mul(darkenedAlbedo, light), alphaOut);
   });
 
-  const mat = new THREE.MeshBasicNodeMaterial({ side: THREE.DoubleSide });
+  // FrontSide only — avoids drawing both sides of the billboard (was causing layered/ghost look)
+  const mat = new THREE.MeshBasicNodeMaterial({ side: THREE.FrontSide });
   mat.positionNode = positionNodeFn();  // positionNode = local-space pos, engine applies instanceMatrix
   mat.colorNode    = colorNodeFn();
   mat.transparent  = false;            // alpha-tested opaque → depthWrite stays true
@@ -570,7 +579,7 @@ export async function createOctahedralImpostorForest(opts = {}) {
   };
 
   // Dynamic lighting uniforms shared by all impostor materials (regular + mega)
-  // Initialised to match game defaults; updated via forest.updateSunDir() each frame
+  // Initialised to match game defaults; updated via forest.updateSunDir() etc. each frame
   const _uSunDir   = uniform(new THREE.Vector3(-1.0, 0.55, 1.0).normalize());
   const _uSunColor = uniform(new THREE.Vector3(0.85, 0.78, 0.60));
   const _uAmbColor = uniform(new THREE.Vector3(0.35, 0.40, 0.50));
@@ -773,8 +782,8 @@ export async function createOctahedralImpostorForest(opts = {}) {
         nearCount++;
       }
 
-      // LOD1: standard impostor — shown from (lodDist - fadeRange) to (lod2Dist + fadeRange)
-      if (distSq >= innerDistSq && distSq < outer2DistSq) {
+      // LOD1: standard impostor — only before mega starts (no overlap = no double-drawn layer)
+      if (distSq >= innerDistSq && distSq < inner2DistSq) {
         _m.fromArray(allImpostorMats, i * 16);
         impostorMesh.setMatrixAt(farCount, _m);
         compactCenters[farCount * 4]     = allCenters[i * 3];

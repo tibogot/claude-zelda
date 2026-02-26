@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Octahedral Impostor Showcase</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1a1a2e; overflow: hidden; font-family: "SF Mono", "Fira Code", monospace; }
+
+    #app { width: 100vw; height: 100vh; position: relative; }
+
+    /* Two side-by-side viewports */
+    #left-label, #right-label {
+      position: fixed; top: 12px; z-index: 20;
+      background: rgba(0,0,0,0.6); color: #b0d890;
+      padding: 5px 12px; border-radius: 4px;
+      font-size: 12px; font-weight: 600; pointer-events: none;
+    }
+    #left-label  { left: calc(25vw - 60px); }
+    #right-label { left: calc(75vw - 70px); }
+
+    /* Vertical divider */
+    #divider {
+      position: fixed; left: 50%; top: 0;
+      width: 2px; height: 100vh;
+      background: rgba(255,255,255,0.15);
+      pointer-events: none; z-index: 5;
+    }
+
+    /* Atlas preview panel */
+    #atlas-panel {
+      position: fixed; bottom: 12px; right: 12px; z-index: 20;
+      background: rgba(0,0,0,0.75); border-radius: 8px;
+      padding: 8px; display: flex; gap: 8px; flex-direction: column;
+    }
+    #atlas-panel .atlas-row { display: flex; gap: 8px; align-items: center; }
+    #atlas-panel label { color: #888; font-size: 10px; writing-mode: vertical-lr; }
+    #atlas-panel canvas { border-radius: 4px; border: 1px solid #333; width: 220px; height: 220px; }
+
+    /* Controls / info */
+    #info {
+      position: fixed; bottom: 12px; left: 12px; z-index: 20;
+      background: rgba(0,0,0,0.6); color: #b0d890;
+      padding: 8px 12px; border-radius: 6px;
+      font-size: 11px; line-height: 1.7;
+      backdrop-filter: blur(4px);
+    }
+    #info span { color: #e0f0c0; font-weight: 700; }
+
+    /* GLB picker */
+    #picker {
+      position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+      z-index: 30; display: flex; gap: 8px; align-items: center;
+    }
+    #picker select {
+      background: rgba(0,0,0,0.7); color: #e0f0c0; border: 1px solid #444;
+      padding: 4px 10px; border-radius: 4px; font-size: 12px; cursor: pointer;
+    }
+    #picker button {
+      background: #2a6; color: #fff; border: none;
+      padding: 4px 14px; border-radius: 4px; font-size: 12px; cursor: pointer;
+    }
+    #picker button:hover { background: #3b7; }
+    #picker #cam-close, #picker #cam-lod {
+      background: #446; font-size: 11px; padding: 4px 10px;
+    }
+    #picker #cam-close:hover, #picker #cam-lod:hover { background: #558; }
+    #picker #quality-select {
+      background: rgba(0,0,0,0.7); color: #e0f0c0; border: 1px solid #444;
+      padding: 4px 8px; border-radius: 4px; font-size: 11px; cursor: pointer;
+    }
+
+    /* Loading overlay */
+    #loading {
+      position: fixed; inset: 0; background: rgba(10,10,20,0.85);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 100; color: #b0d890; font-size: 16px;
+    }
+    #loading.hidden { display: none; }
+
+    /* Tweakpane overrides */
+    .tp-dfwv { z-index: 40 !important; }
+  </style>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three":          "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+      "three/webgpu":   "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+      "three/tsl":      "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+      "three/addons/":  "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+<div id="app"></div>
+<div id="left-label">REAL GLB</div>
+<div id="right-label">IMPOSTOR</div>
+<div id="divider"></div>
+
+<div id="picker">
+  <select id="model-select">
+    <option value="models/pine-transformed.glb">pine-transformed</option>
+    <option value="models/pine2.glb">pine2</option>
+    <option value="models/pine3.glb">pine3</option>
+    <option value="models/pine_tree_game-ready.glb">pine_tree_game-ready</option>
+    <option value="models/realistic_palm_tree_4_free.glb">realistic_palm_tree</option>
+    <option value="models/tree.glb">tree</option>
+    <option value="models/low_poly_flower-transformed.glb">low_poly_flower</option>
+    <option value="models/rock__game_asset.glb">rock</option>
+    <option value="models/rock_boulder.glb">rock_boulder</option>
+  </select>
+  <button id="load-btn">Load</button>
+  <select id="quality-select" title="Texture quality">
+    <option value="1024_8">1024 / 8 sprites (fast)</option>
+    <option value="2048_12" selected>2048 / 12 sprites (default)</option>
+    <option value="2048_16">2048 / 16 sprites</option>
+    <option value="4096_12">4096 / 12 sprites (high)</option>
+  </select>
+  <button id="cam-close">Close view</button>
+  <button id="cam-lod">LOD distance (~80u)</button>
+</div>
+
+<div id="loading">Baking atlas…</div>
+
+<div id="atlas-panel">
+  <div class="atlas-row">
+    <label>COLOR</label>
+    <canvas id="atlas-color" width="220" height="220"></canvas>
+  </div>
+  <div class="atlas-row">
+    <label>NORMAL</label>
+    <canvas id="atlas-normal" width="220" height="220"></canvas>
+  </div>
+</div>
+
+<div id="info">
+  <span style="opacity:0.9">impostor-showcase</span> (darken + FrontSide)<br>
+  <span>Left</span> — real GLB &nbsp;|&nbsp; <span>Right</span> — impostor<br>
+  Orbit: <span>left-drag</span> &nbsp; Zoom: <span>scroll</span><br>
+  Both views share the same camera angle
+</div>
+
+<script type="module">
+import * as THREE from "three";
+import { WebGPURenderer }  from "three/webgpu";
+import { OrbitControls }   from "three/addons/controls/OrbitControls.js";
+import { GLTFLoader }      from "three/addons/loaders/GLTFLoader.js";
+import { DRACOLoader }     from "three/addons/loaders/DRACOLoader.js";
+// Cache-bust so browser loads latest impostor code (change ?v= when you edit octahedralImpostor.js)
+import { createOctahedralImpostorForest } from "./octahedralImpostor.js?v=2";
+
+// ─── Renderer ────────────────────────────────────────────────────────────────
+const renderer = new WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = false;
+document.getElementById("app").appendChild(renderer.domElement);
+
+await renderer.init();
+
+// ─── Scene ───────────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a2e);
+scene.fog = new THREE.Fog(0x1a1a2e, 60, 200);
+
+// Shared directional light (for the real GLB side)
+const sun = new THREE.DirectionalLight(0xfff0d0, 1.8);
+sun.position.set(-1, 1.5, 1);
+scene.add(sun);
+scene.add(new THREE.AmbientLight(0x8090b0, 0.8));
+
+// Ground grid for depth reference
+const grid = new THREE.GridHelper(120, 40, 0x333355, 0x222244);
+scene.add(grid);
+
+// ─── Camera + shared orbit controls ──────────────────────────────────────────
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 800);
+camera.position.set(0, 6, 85);  // start at ~game LOD distance so quality is representative
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.set(0, 3, 0);
+controls.update();
+
+// ─── DRACO loader ─────────────────────────────────────────────────────────────
+const draco = new DRACOLoader();
+draco.setDecoderPath("https://www.gstatic.com/draco/versioned/decoders/1.5.6/");
+const gltfLoader = new GLTFLoader();
+gltfLoader.setDRACOLoader(draco);
+
+// ─── Atlas pixel capture via readPixels interception ─────────────────────────
+// bakeAtlas uses a WebGL2 offscreen context and calls readPixels twice.
+// The main WebGPU renderer never touches WebGL2, so these are the only hits.
+const _atlasCaptures = [];
+const _origReadPixels = WebGL2RenderingContext.prototype.readPixels;
+WebGL2RenderingContext.prototype.readPixels = function(x, y, w, h, fmt, type, buf) {
+  _origReadPixels.call(this, x, y, w, h, fmt, type, buf);
+  if (buf instanceof Uint8Array && w >= 512) _atlasCaptures.push({ w, h, data: buf.slice() });
+};
+
+// ─── State ────────────────────────────────────────────────────────────────────
+let realGroup   = null;   // left side — real GLB clone
+let forest      = null;   // right side — impostor forest (treeCount=1)
+const LEFT_X    =  0;
+const RIGHT_X   =  0;
+
+// ─── Load / reload ────────────────────────────────────────────────────────────
+async function loadModel(path) {
+  document.getElementById("loading").classList.remove("hidden");
+
+  // Tear down previous
+  if (realGroup) { scene.remove(realGroup); realGroup = null; }
+  if (forest)    { forest.dispose(); scene.remove(forest.group); forest = null; }
+
+  // ── Load GLB once to compute scale + sphere center ───────────────────────
+  const gltf = await new Promise((res, rej) => gltfLoader.load(path, res, undefined, rej));
+  const tempRoot = gltf.scene;
+  tempRoot.updateMatrixWorld(true);
+
+  // Auto-scale: fit to ~6 units tall
+  const rawBox = new THREE.Box3().setFromObject(tempRoot);
+  const rawH   = rawBox.getSize(new THREE.Vector3()).y;
+  const scale  = 6 / Math.max(rawH, 0.001);
+
+  // Approximate sphere center at treeScale — mirrors what the forest computes:
+  //   sphere.center (unscaled model) * treeScale → sphereCenter
+  const rawSphere = new THREE.Sphere();
+  rawBox.getBoundingSphere(rawSphere);
+  const spCx = rawSphere.center.x * scale;
+  const spCy = rawSphere.center.y * scale;
+  const spCz = rawSphere.center.z * scale;
+
+  // To make the impostor land exactly at world (0, spCy, 0):
+  //   impostor center = treeScatterPos + sphereCenter → treeScatterPos = (-spCx, 0, -spCz)
+  const treeX = -spCx;
+  const treeZ = -spCz;
+
+  // ── Real GLB — positioned identically to a forest near-LOD tree ──────────
+  realGroup = tempRoot.clone(true);
+  realGroup.scale.setScalar(scale);
+  realGroup.position.set(treeX, 0, treeZ);  // same origin as near-LOD in forest
+  scene.add(realGroup);
+
+  // ── Impostor forest — treeCount=1 ────────────────────────────────────────
+  forest = await createOctahedralImpostorForest({
+    modelPath:        path,
+    treeCount:        1,
+    treeScale:        scale,
+    lodDistance:      0,          // always show impostor
+    radius:           0,          // exact position, no scatter
+    minRadius:        0,
+    centerPosition:   [treeX, 0, treeZ],   // impostor billboard lands at (0, spCy, 0)
+    getTerrainHeight: () => 0,
+    impostorSettings: {
+      ...getQuality(),
+      alphaClamp:     0.1,
+      alphaTest:      0.05,
+      fadeRange:      0,          // no fade — always fully visible
+    },
+  });
+  scene.add(forest.group);
+  window._forest = forest;  // expose for debug
+
+  // ── Sync impostor lighting to match real GLB (darkening is done in shader via albedo scale) ───
+  forest.updateSunDir(sun.position.clone().normalize());
+  forest.updateSunColor(new THREE.Vector3(sun.color.r, sun.color.g, sun.color.b).multiplyScalar(sun.intensity));
+  const amb = new THREE.Color(0x8090b0); amb.multiplyScalar(0.8);
+  forest.updateAmbColor(new THREE.Vector3(amb.r, amb.g, amb.b));
+
+  // ── Pre-run one update so near-LOD count is set to 0 before first render ─
+  forest.update(camera);
+
+  // ── Atlas previews — grab the two readPixels calls from bakeAtlas ────────
+  // _atlasCaptures now has [colorPixels, normalPixels] from the just-completed bake
+  const colorCapture  = _atlasCaptures.at(-2);
+  const normalCapture = _atlasCaptures.at(-1);
+  _atlasCaptures.length = 0;  // clear for next load
+  drawAtlasPreview(colorCapture, normalCapture);
+
+  // Orbit target at the impostor visual center
+  controls.target.set(0, spCy, 0);
+  controls.update();
+
+  document.getElementById("loading").classList.add("hidden");
+}
+
+// ─── Atlas 2D preview ─────────────────────────────────────────────────────────
+// colorCapture / normalCapture are { w, h, data: Uint8Array } from readPixels interception
+function drawAtlasPreview(colorCapture, normalCapture) {
+  const drawCapture = (capture, canvasId) => {
+    if (!capture) return;
+    const { w, h, data } = capture;
+    const c   = document.getElementById(canvasId);
+    const ctx = c.getContext("2d");
+    // readPixels gives bottom-up rows → flip vertically for display
+    const tmp = document.createElement("canvas");
+    tmp.width = w; tmp.height = h;
+    tmp.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(data), w, h), 0, 0);
+    const sz = 220;
+    ctx.save();
+    ctx.translate(0, sz);
+    ctx.scale(1, -1);
+    ctx.drawImage(tmp, 0, 0, sz, sz);
+    ctx.restore();
+  };
+
+  drawCapture(colorCapture,  "atlas-color");
+  drawCapture(normalCapture, "atlas-normal");
+}
+
+// ─── UI wiring ────────────────────────────────────────────────────────────────
+function getQuality() {
+  const [ts, sps] = document.getElementById("quality-select").value.split("_");
+  return { textureSize: +ts, spritesPerSide: +sps };
+}
+
+document.getElementById("load-btn").addEventListener("click", () => {
+  const path = document.getElementById("model-select").value;
+  loadModel(path).catch(err => {
+    console.error(err);
+    document.getElementById("loading").classList.add("hidden");
+  });
+});
+
+document.getElementById("cam-close").addEventListener("click", () => {
+  camera.position.set(0, controls.target.y * 0.5 + 2, 18);
+  controls.update();
+});
+document.getElementById("cam-lod").addEventListener("click", () => {
+  camera.position.set(0, controls.target.y * 0.5 + 4, 85);
+  controls.update();
+});
+
+// ─── Split-screen scissor render ─────────────────────────────────────────────
+// Left half: real GLB visible, impostor hidden
+// Right half: impostor visible, real GLB hidden
+function render() {
+  controls.update();
+
+  if (forest) forest.update(camera);
+
+  const W = window.innerWidth, H = window.innerHeight;
+  const half = Math.floor(W / 2);
+
+  renderer.setScissorTest(true);
+
+  // ── Left: real GLB ──
+  if (realGroup)         realGroup.visible    = true;
+  if (forest)            forest.group.visible = false;
+
+  renderer.setViewport(0, 0, half, H);
+  renderer.setScissor( 0, 0, half, H);
+  renderer.render(scene, camera);
+
+  // ── Right: impostor ──
+  if (realGroup)         realGroup.visible    = false;
+  if (forest)            forest.group.visible = true;
+
+  renderer.setViewport(half, 0, W - half, H);
+  renderer.setScissor( half, 0, W - half, H);
+  renderer.render(scene, camera);
+
+  // Restore
+  renderer.setScissorTest(false);
+  if (realGroup) realGroup.visible    = true;
+  if (forest)    forest.group.visible = true;
+}
+
+renderer.setAnimationLoop(render);
+
+// ─── Resize ───────────────────────────────────────────────────────────────────
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ─── Auto-load first model ────────────────────────────────────────────────────
+loadModel(document.getElementById("model-select").value).catch(console.error);
+</script>
+</body>
+</html>
