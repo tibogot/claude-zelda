@@ -284,6 +284,7 @@
         octahedralForestLod0Vis: true,
         octahedralForestLod1Vis: true,
         octahedralForestLod2Vis: true,
+        octahedralForestWireframe: false,
         // Count monitors (readonly, updated each frame)
         octahedralForestNearCount: 0,
         octahedralForestLod1Count: 0,
@@ -292,6 +293,7 @@
         octahedralForestTreeCount: 2000,
         octahedralForestSprites:   8,
         octahedralForestTexSize:   2048,
+        octahedralForestBakeSingle: false,
         octahedralForestModelPath: "models/tree.glb",
         // Birds (GPU compute boids)
         birdsEnabled: false,
@@ -1163,8 +1165,9 @@
         dirLight.shadow.shadowNode = csm;
         scene.add(dirLight);
 
-        // Shadow camera follows player
+        // Fixed world-space target so sun direction is consistent everywhere (CSM still follows camera for shadow quality).
         const shadowTarget = new THREE.Object3D();
+        shadowTarget.position.set(0, 0, 0);
         scene.add(shadowTarget);
         dirLight.target = shadowTarget;
 
@@ -1958,11 +1961,19 @@
             minRadius: 20,
             centerPosition: [0, 0, 0],
             getTerrainHeight: sampleHeight,
-            impostorSettings: { spritesPerSide: 8, textureSize: 2048, alphaClamp: 0.1, alphaTest: 0.05, fadeRange: 8, lod2Distance: 150 },
-            impostorDebug: false,
+            impostorSettings: {
+              spritesPerSide: 8,
+              textureSize: 2048,
+              alphaClamp: 0.1,
+              alphaTest: 0.05,
+              fadeRange: 8,
+              lod2Distance: 150,
+              bakeOnlyLargestMesh: false,
+            },
           });
           scene.add(octahedralForest.group);
           octahedralForest.group.visible = PARAMS.octahedralForestEnabled;
+          octahedralForest.setWireframeVisible(PARAMS.octahedralForestWireframe);
           syncImpostorLighting();
         } catch (e) {
           console.warn("Octahedral impostor forest skipped:", e);
@@ -2004,17 +2015,19 @@
               centerPosition:  [0, 0, 0],
               getTerrainHeight: sampleHeight,
               impostorSettings: {
-                spritesPerSide: PARAMS.octahedralForestSprites,
-                textureSize:    PARAMS.octahedralForestTexSize,
-                alphaClamp:     0.1,
-                alphaTest:      0.05,
-                fadeRange:      PARAMS.octahedralForestFadeRange,
-                lod2Distance:   PARAMS.octahedralForestLod2Dist,
+                spritesPerSide:       PARAMS.octahedralForestSprites,
+                textureSize:          PARAMS.octahedralForestTexSize,
+                alphaClamp:           0.1,
+                alphaTest:            0.05,
+                fadeRange:            PARAMS.octahedralForestFadeRange,
+                lod2Distance:         PARAMS.octahedralForestLod2Dist,
+                bakeOnlyLargestMesh:  PARAMS.octahedralForestBakeSingle,
               },
             });
             scene.add(octahedralForest.group);
             octahedralForest.group.visible = PARAMS.octahedralForestEnabled;
             octahedralForest.group.scale.setScalar(PARAMS.octahedralForestScale);
+            octahedralForest.setWireframeVisible(PARAMS.octahedralForestWireframe);
             syncImpostorLighting();
           } catch (e) {
             console.warn("Octahedral impostor forest rebuild failed:", e);
@@ -2792,6 +2805,9 @@
         fForestDebug.addBinding(PARAMS, "octahedralForestLod2Vis", { label: "LOD2 (mega)" }).on("change", () => {
           if (octahedralForest) octahedralForest.setLodVisible(2, PARAMS.octahedralForestLod2Vis);
         });
+        fForestDebug.addBinding(PARAMS, "octahedralForestWireframe", { label: "wireframe (plane)" }).on("change", () => {
+          if (octahedralForest) octahedralForest.setWireframeVisible(PARAMS.octahedralForestWireframe);
+        });
         const bNear = fForestDebug.addBinding(PARAMS, "octahedralForestNearCount", { readonly: true, label: "near count" });
         const bLod1 = fForestDebug.addBinding(PARAMS, "octahedralForestLod1Count", { readonly: true, label: "LOD1 count" });
         const bLod2 = fForestDebug.addBinding(PARAMS, "octahedralForestLod2Count", { readonly: true, label: "LOD2 count" });
@@ -2805,6 +2821,9 @@
         fAtlas.addBinding(PARAMS, "octahedralForestTexSize", {
           label: "texture size",
           options: { "1024": 1024, "2048": 2048, "4096": 4096 },
+        });
+        fAtlas.addBinding(PARAMS, "octahedralForestBakeSingle", {
+          label: "bake single (largest mesh)",
         });
         fAtlas.addButton({ title: "↺ Rebuild Atlas" }).on("click", rebuildOctahedralForest);
 
@@ -3220,18 +3239,12 @@
             mesh.quaternion.set(r.x, r.y, r.z, r.w);
           }
 
-          // Shadow camera follows player
-          shadowTarget.position.set(charPos.x, 0, charPos.z);
+          // Sun is fixed in world space (no longer follows player). CSM still follows camera for shadow quality.
           const sd = new THREE.Vector3(
             PARAMS.sunDirX,
             PARAMS.sunDirY,
             PARAMS.sunDirZ,
           ).normalize();
-          dirLight.position.set(
-            charPos.x + sd.x * 50,
-            charPos.y + sd.y * 50,
-            charPos.z + sd.z * 50,
-          );
           if (octahedralForest) octahedralForest.updateSunDir(sd);
 
           if (PARAMS.cameraMode === "thirdPerson") {

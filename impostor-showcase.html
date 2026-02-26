@@ -47,6 +47,8 @@
       backdrop-filter: blur(4px);
     }
     #info span { color: #e0f0c0; font-weight: 700; }
+    #info .hint { font-weight: normal; color: #888; }
+    #info a { color: #8ab; }
 
     /* GLB picker */
     #picker {
@@ -70,6 +72,17 @@
       background: rgba(0,0,0,0.7); color: #e0f0c0; border: 1px solid #444;
       padding: 4px 8px; border-radius: 4px; font-size: 11px; cursor: pointer;
     }
+
+    /* Debug panel */
+    #debug-panel {
+      position: fixed; top: 48px; right: 12px; z-index: 25;
+      background: rgba(0,0,0,0.75); border-radius: 8px;
+      padding: 10px 12px; font-size: 11px; color: #b0d890;
+    }
+    #debug-panel h3 { margin: 0 0 8px 0; font-size: 11px; color: #e0f0c0; text-transform: uppercase; letter-spacing: 0.05em; }
+    #debug-panel label { display: flex; align-items: center; gap: 8px; cursor: pointer; margin-bottom: 6px; }
+    #debug-panel input[type="checkbox"] { cursor: pointer; }
+    #debug-panel .hint { color: #888; font-size: 10px; margin-top: 8px; max-width: 200px; line-height: 1.4; }
 
     /* Loading overlay */
     #loading {
@@ -114,9 +127,11 @@
   </select>
   <button id="load-btn">Load</button>
   <select id="quality-select" title="Texture quality">
+    <option value="1024_6">1024 / 6 sprites (fewer, larger — like shaderbits)</option>
     <option value="1024_8">1024 / 8 sprites (fast)</option>
     <option value="2048_12" selected>2048 / 12 sprites (default)</option>
     <option value="2048_16">2048 / 16 sprites</option>
+    <option value="4096_8">4096 / 8 sprites (fewer, larger, high res)</option>
     <option value="4096_12">4096 / 12 sprites (high)</option>
   </select>
   <button id="cam-close">Close view</button>
@@ -124,6 +139,14 @@
 </div>
 
 <div id="loading">Baking atlas…</div>
+
+<div id="debug-panel">
+  <h3>Debug</h3>
+  <label><input type="checkbox" id="debug-wireframe" /> Wireframe (impostor plane)</label>
+  <label><input type="checkbox" id="debug-atlas-grid" /> Atlas grid on preview</label>
+  <label><input type="checkbox" id="debug-bake-single" title="Bake only the largest mesh (fixes 4 small + 1 big per cell)" /> Bake single (largest mesh only)</label>
+  <p class="hint">Wireframe shows the billboard quad. Atlas grid draws cell boundaries. &quot;Bake single&quot; = one object per cell if the GLB has multiple meshes.</p>
+</div>
 
 <div id="atlas-panel">
   <div class="atlas-row">
@@ -140,7 +163,8 @@
   <span style="opacity:0.9">impostor-showcase</span> (gamma bake + FrontSide)<br>
   <span>Left</span> — real GLB &nbsp;|&nbsp; <span>Right</span> — impostor<br>
   Orbit: <span>left-drag</span> &nbsp; Zoom: <span>scroll</span><br>
-  Both views share the same camera angle
+  Both views share the same camera angle<br>
+  <span class="hint">Quality: fewer, larger sprites (e.g. 6 or 8) = more texels per view, often better per-angle quality; more sprites = smoother orbit. See <a href="https://shaderbits.com/blog/octahedral-impostors" target="_blank" rel="noopener" style="color:#8ab">shaderbits</a>.</span>
 </div>
 
 <script type="module">
@@ -207,6 +231,10 @@ let realGroup   = null;   // left side — real GLB clone
 let forest      = null;   // right side — impostor forest (treeCount=1)
 const LEFT_X    =  0;
 const RIGHT_X   =  0;
+let debugAtlasGrid = false;
+let _lastColorCapture = null;
+let _lastNormalCapture = null;
+let _lastSps = 12;
 
 // ─── Load / reload ────────────────────────────────────────────────────────────
 async function loadModel(path) {
@@ -257,10 +285,11 @@ async function loadModel(path) {
     getTerrainHeight: () => 0,
     impostorSettings: {
       ...getQuality(),
-      alphaClamp:     0.1,
-      alphaTest:      0.05,
-      fadeRange:      0,          // no fade — always fully visible
-      lod2Distance:   9999,       // never use mega (single-sprite) in showcase — always show LOD1 (3-sprite)
+      alphaClamp:          0.1,
+      alphaTest:           0.05,
+      fadeRange:           0,          // no fade — always fully visible
+      lod2Distance:        9999,       // never use mega (single-sprite) in showcase — always show LOD1 (3-sprite)
+      bakeOnlyLargestMesh: document.getElementById("debug-bake-single").checked,
     },
   });
   scene.add(forest.group);
@@ -288,11 +317,18 @@ async function loadModel(path) {
   const colorCapture  = _atlasCaptures.at(-2);
   const normalCapture = _atlasCaptures.at(-1);
   _atlasCaptures.length = 0;  // clear for next load
+  _lastColorCapture = colorCapture;
+  _lastNormalCapture = normalCapture;
+  _lastSps = getQuality().spritesPerSide;
   drawAtlasPreview(colorCapture, normalCapture);
 
   // Orbit target at the impostor visual center
   controls.target.set(0, spCy, 0);
   controls.update();
+
+  // Sync debug toggles
+  const wf = document.getElementById("debug-wireframe");
+  if (wf && wf.checked) forest.setWireframeVisible(true);
 
   document.getElementById("loading").classList.add("hidden");
 }
@@ -300,7 +336,7 @@ async function loadModel(path) {
 // ─── Atlas 2D preview ─────────────────────────────────────────────────────────
 // colorCapture / normalCapture are { w, h, data: Uint8Array } from readPixels interception
 function drawAtlasPreview(colorCapture, normalCapture) {
-  const drawCapture = (capture, canvasId) => {
+  const drawCapture = (capture, canvasId, drawGrid = false, sps = 12) => {
     if (!capture) return;
     const { w, h, data } = capture;
     const c   = document.getElementById(canvasId);
@@ -315,10 +351,36 @@ function drawAtlasPreview(colorCapture, normalCapture) {
     ctx.scale(1, -1);
     ctx.drawImage(tmp, 0, 0, sz, sz);
     ctx.restore();
+    if (drawGrid && sps > 0) {
+      ctx.strokeStyle = "rgba(255,255,255,0.7)";
+      ctx.lineWidth = 1;
+      const step = sz / sps;
+      for (let i = 0; i <= sps; i++) {
+        const p = i * step;
+        ctx.beginPath();
+        ctx.moveTo(p, 0);
+        ctx.lineTo(p, sz);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(0, p);
+        ctx.lineTo(sz, p);
+        ctx.stroke();
+      }
+      // Diagonal in each cell (wireframe-style)
+      for (let row = 0; row < sps; row++) {
+        for (let col = 0; col < sps; col++) {
+          const x0 = col * step, y0 = row * step;
+          ctx.beginPath();
+          ctx.moveTo(x0, y0);
+          ctx.lineTo(x0 + step, y0 + step);
+          ctx.stroke();
+        }
+      }
+    }
   };
 
-  drawCapture(colorCapture,  "atlas-color");
-  drawCapture(normalCapture, "atlas-normal");
+  drawCapture(colorCapture,  "atlas-color", debugAtlasGrid, _lastSps);
+  drawCapture(normalCapture, "atlas-normal", false);
 }
 
 // ─── UI wiring ────────────────────────────────────────────────────────────────
@@ -342,6 +404,18 @@ document.getElementById("cam-close").addEventListener("click", () => {
 document.getElementById("cam-lod").addEventListener("click", () => {
   camera.position.set(0, controls.target.y * 0.5 + 4, 85);
   controls.update();
+});
+
+// Debug: wireframe
+document.getElementById("debug-wireframe").addEventListener("change", (e) => {
+  if (forest) forest.setWireframeVisible(e.target.checked);
+});
+
+// Debug: atlas grid — redraw atlas preview with/without grid overlay
+document.getElementById("debug-atlas-grid").addEventListener("change", (e) => {
+  debugAtlasGrid = e.target.checked;
+  if (_lastColorCapture || _lastNormalCapture)
+    drawAtlasPreview(_lastColorCapture, _lastNormalCapture);
 });
 
 // ─── Split-screen scissor render ─────────────────────────────────────────────
