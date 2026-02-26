@@ -137,7 +137,7 @@
 </div>
 
 <div id="info">
-  <span style="opacity:0.9">impostor-showcase</span> (darken + FrontSide)<br>
+  <span style="opacity:0.9">impostor-showcase</span> (gamma bake + FrontSide)<br>
   <span>Left</span> — real GLB &nbsp;|&nbsp; <span>Right</span> — impostor<br>
   Orbit: <span>left-drag</span> &nbsp; Zoom: <span>scroll</span><br>
   Both views share the same camera angle
@@ -150,7 +150,7 @@ import { OrbitControls }   from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader }      from "three/addons/loaders/GLTFLoader.js";
 import { DRACOLoader }     from "three/addons/loaders/DRACOLoader.js";
 // Cache-bust so browser loads latest impostor code (change ?v= when you edit octahedralImpostor.js)
-import { createOctahedralImpostorForest } from "./octahedralImpostor.js?v=2";
+import { createOctahedralImpostorForest } from "./octahedralImpostor.js?v=10";
 
 // ─── Renderer ────────────────────────────────────────────────────────────────
 const renderer = new WebGPURenderer({ antialias: true });
@@ -260,16 +260,25 @@ async function loadModel(path) {
       alphaClamp:     0.1,
       alphaTest:      0.05,
       fadeRange:      0,          // no fade — always fully visible
+      lod2Distance:   9999,       // never use mega (single-sprite) in showcase — always show LOD1 (3-sprite)
     },
   });
   scene.add(forest.group);
   window._forest = forest;  // expose for debug
 
-  // ── Sync impostor lighting to match real GLB (darkening is done in shader via albedo scale) ───
+  // Sync lighting from scene to impostor uniforms so they match the real GLB side.
   forest.updateSunDir(sun.position.clone().normalize());
-  forest.updateSunColor(new THREE.Vector3(sun.color.r, sun.color.g, sun.color.b).multiplyScalar(sun.intensity));
-  const amb = new THREE.Color(0x8090b0); amb.multiplyScalar(0.8);
-  forest.updateAmbColor(new THREE.Vector3(amb.r, amb.g, amb.b));
+  forest.updateSunColor(new THREE.Vector3(
+    sun.color.r * sun.intensity,
+    sun.color.g * sun.intensity,
+    sun.color.b * sun.intensity,
+  ));
+  const amb = scene.getObjectByProperty('isAmbientLight', true);
+  if (amb) forest.updateAmbColor(new THREE.Vector3(
+    amb.color.r * amb.intensity,
+    amb.color.g * amb.intensity,
+    amb.color.b * amb.intensity,
+  ));
 
   // ── Pre-run one update so near-LOD count is set to 0 before first render ─
   forest.update(camera);

@@ -103,8 +103,13 @@ in vec3 vWorldPos;
 out vec4 outColor;
 void main() {
   vec4 c = texture(map, vUv);
-  c.rgb *= uMatColor;
   if (c.a < alphaTest) discard;
+  // Convert sRGB texture + material color to linear.
+  // WebGL2 texImage2D(RGBA) returns raw bytes — no gamma decode — so game textures
+  // (which are sRGB-encoded) must be linearised here. Storing linear in the atlas
+  // means runtime lighting works in linear space; WebGPU handles final sRGB output.
+  c.rgb = pow(max(c.rgb, vec3(0.001)), vec3(2.2));
+  c.rgb *= pow(max(uMatColor, vec3(0.001)), vec3(2.2));
   // Subtle vertical AO: slight darkening at base (was 0.6–1.0; now 0.92–1.0 to avoid shady/hollow look on rocks)
   float baseY = uSphereCenter.y - uSphereRadius;
   float yNorm = clamp((vWorldPos.y - baseY) / (uSphereRadius * 0.8), 0.0, 1.0);
@@ -245,8 +250,8 @@ function bakeAtlas(modelScene, { textureSize = 2048, spritesPerSide = 12, alphaT
   const uNMap     = gl.getUniformLocation(normProg, "map");
   const uNAlpha   = gl.getUniformLocation(normProg, "alphaTest");
 
-  // Slight margin (1.15) so base/edges aren't clipped when baking from some angles
-  const half = sphere.radius * 1.15;
+  // No margin — sphere already encloses all geometry for orthographic projection
+  const half = sphere.radius;
   const cam  = new THREE.OrthographicCamera(-half, half, half, -half, 0.001, sphere.radius * 4);
 
   const fbo     = gl.createFramebuffer();
@@ -363,6 +368,7 @@ function bakeAtlas(modelScene, { textureSize = 2048, spritesPerSide = 12, alphaT
     t.magFilter      = THREE.LinearFilter;
     t.generateMipmaps = true;
     t.anisotropy     = 4;
+    t.colorSpace     = THREE.LinearSRGBColorSpace;  // atlas stores linear (bake uses no gamma encode)
     return t;
   };
   // No flipY — DataTexture row-0 = bottom matches readPixels row-0 = bottom
@@ -394,18 +400,21 @@ function createImpostorMaterial(atlasTex, normalTex, impostorScale, centersStora
   const uLodDist   = opts.lodDistUniform   ?? uniform(float(lodDistance));
   const uFadeRange = opts.fadeRangeUniform ?? uniform(float(fadeRange));
   // Dynamic lighting uniforms (shared via opts.sunDir etc. from forest scope)
-  const uSunDir   = opts.sunDir   ?? uniform(new THREE.Vector3( 0.5,  1.0,  0.3).normalize());
-  const uSunColor = opts.sunColor ?? uniform(new THREE.Vector3(0.85, 0.78, 0.60));
-  const uAmbColor = opts.ambColor ?? uniform(new THREE.Vector3(0.35, 0.40, 0.50));
+  const uSunDir     = opts.sunDir     ?? uniform(new THREE.Vector3( 0.5,  1.0,  0.3).normalize());
+  const uSunColor   = opts.sunColor   ?? uniform(new THREE.Vector3(0.85, 0.78, 0.60));
+  const uAmbColor   = opts.ambColor   ?? uniform(new THREE.Vector3(0.35, 0.40, 0.50));
+  const uLightScale = typeof opts.lightScale === 'number'
+    ? uniform(float(opts.lightScale))
+    : (opts.lightScale ?? uniform(float(1.0)));  // e.g. 0.8 for rocks to match PBR
 
-  // Varyings: sprite weights, indices, and per-vertex ray-plane UVs
+  // Varyings: sprite weights, indices, and pre-computed sprite UVs (vertex-stage parallax)
   const vWeight = varying(vec4(0,0,0,0), "vWeight");
   const vS1     = varying(vec2(0,0),     "vS1");
   const vS2     = varying(vec2(0,0),     "vS2");
   const vS3     = varying(vec2(0,0),     "vS3");
-  const vUV1    = varying(vec2(0,0),     "vUV1");
-  const vUV2    = varying(vec2(0,0),     "vUV2");
-  const vUV3    = varying(vec2(0,0),     "vUV3");
+  const vUV1    = varying(vec2(0,0),     "vUV1");  // ray-plane UV for sprite 1 (vertex-stage)
+  const vUV2    = varying(vec2(0,0),     "vUV2");  // ray-plane UV for sprite 2
+  const vUV3    = varying(vec2(0,0),     "vUV3");  // ray-plane UV for sprite 3
 
   // Per-instance center (world-space sphere centre) from storage buffer
   // Read xyz from vec4 (vec3 in WebGPU storage buffers needs 16-byte/4-float alignment)
@@ -461,14 +470,13 @@ function createImpostorMaterial(atlasTex, normalTex, impostorScale, centersStora
     const center = centerNode;
 
     // Camera position in LOCAL space (sphere-radius-normalized)
-    // camLocal ∈ roughly [-6, 6] range when tree is at ~100m distance
     const camLocal = mul(sub(cameraPosition, center), div(float(1), uScale));
     const camDir   = normalize(camLocal);
 
     // Billboard vertex in local space (±0.5 × tangent/bitangent)
     const bv = projectVert(camDir);
 
-    // View direction from billboard vertex toward camera (for parallax UV)
+    // View direction from billboard vertex toward camera (vertex-stage parallax)
     const viewDir = normalize(sub(bv, camLocal));
 
     // Octahedral grid lookup and trilinear blend weights
@@ -490,21 +498,21 @@ function createImpostorMaterial(atlasTex, normalTex, impostorScale, centersStora
     const s3 = min(add(s1, vec2(1,1)), nm1);
     vS1.assign(s1); vS2.assign(s2); vS3.assign(s3);
 
-    // Decode sprite normals and compute per-vertex ray-plane UV for each sprite
-    const n1 = decode(s1, nm1); const t1 = planeTangent(n1); const b1 = planeBitangent(n1, t1);
-    const n2 = decode(s2, nm1); const t2 = planeTangent(n2); const b2 = planeBitangent(n2, t2);
-    const n3 = decode(s3, nm1); const t3 = planeTangent(n3); const b3 = planeBitangent(n3, t3);
-
-    vUV1.assign(planeUV(n1, t1, b1, camLocal, viewDir));
-    vUV2.assign(planeUV(n2, t2, b2, camLocal, viewDir));
-    vUV3.assign(planeUV(n3, t3, b3, camLocal, viewDir));
+    // Compute ray-plane UVs per-vertex and pass as varyings.
+    // Vertex-stage is stable (no per-fragment divergence at oblique angles).
+    const pn1 = decode(s1, nm1); const pt1 = planeTangent(pn1); const pb1 = planeBitangent(pn1, pt1);
+    const pn2 = decode(s2, nm1); const pt2 = planeTangent(pn2); const pb2 = planeBitangent(pn2, pt2);
+    const pn3 = decode(s3, nm1); const pt3 = planeTangent(pn3); const pb3 = planeBitangent(pn3, pt3);
+    vUV1.assign(planeUV(pn1, pt1, pb1, camLocal, viewDir));
+    vUV2.assign(planeUV(pn2, pt2, pb2, camLocal, viewDir));
+    vUV3.assign(planeUV(pn3, pt3, pb3, camLocal, viewDir));
 
     // Return billboard vertex offset in local space.
     // InstancedMesh applies T(center)*S(scale) → correct world position.
     return bv;
   });
 
-  // ── Color node — sample atlas with interpolated ray-plane UVs ──────────────
+  // ── Color node — uses vertex-stage parallax UVs (interpolated from positionNodeFn) ──
   const getUV = Fn(([uvf, frame, fs]) =>
     clamp(mul(fs, add(frame, clamp(uvf, 0, 1))), 0, 1)
   );
@@ -517,20 +525,30 @@ function createImpostorMaterial(atlasTex, normalTex, impostorScale, centersStora
     const c3 = mega ? c1 : texture(atlasTex, getUV(vUV3, vS3, fs));
 
     // ── Color: trilinear blend for smooth orbit (no jump when view angle changes) ──
-    const blendedRgb = mega ? c1.rgb : add(add(mul(c1.rgb, vWeight.x), mul(c2.rgb, vWeight.y)), mul(c3.rgb, vWeight.z));
+    let blendedRgb = mega ? c1.rgb : add(add(mul(c1.rgb, vWeight.x), mul(c2.rgb, vWeight.y)), mul(c3.rgb, vWeight.z));
     // ── Alpha: dominant sprite only — single crisp silhouette, no hollow/layered/ghost look ──
     const dominantAlpha = mega ? c1.a : select(
       vWeight.x.greaterThanEqual(vWeight.y).and(vWeight.x.greaterThanEqual(vWeight.z)),
       c1.a,
       select(vWeight.y.greaterThanEqual(vWeight.z), c2.a, c3.a)
     );
+    // Undo pre-multiplied alpha from atlas bake: albedo pass uses clear(0,0,0,0) + blend, so
+    // transparent pixels (e.g. foliage over background) were stored as rgb*alpha → darker tree.
+    // Opaque pixels (e.g. rock) have alpha=1 so this is a no-op.
+    blendedRgb = mul(blendedRgb, div(float(1), max(dominantAlpha, float(0.001))));
+    blendedRgb = saturate(blendedRgb);
 
     // ── Normal: trilinear blend so lighting transitions smoothly with orbit ──
     const n1 = texture(normalTex, getUV(vUV1, vS1, fs)).xyz;
     const normEnc = mega ? n1 : add(add(mul(n1, vWeight.x), mul(texture(normalTex, getUV(vUV2, vS2, fs)).xyz, vWeight.y)), mul(texture(normalTex, getUV(vUV3, vS3, fs)).xyz, vWeight.z));
     const worldNorm = normalize(sub(mul(normEnc, float(2.0)), float(1.0)));
-    const wrap  = add(mul(dot(worldNorm, uSunDir), 0.5), 0.5);
-    const light = add(uAmbColor, mul(uSunColor, wrap));
+    // Lambert diffuse — back faces get 0 sun contribution (correct).
+    // Wrap (dot*0.5+0.5) was causing perpendicular faces to receive sunColor*0.5 phantom light,
+    // making impostors 2-3× brighter than the real PBR mesh at matching view angles.
+    const diffuse = max(dot(worldNorm, uSunDir), float(0));
+    // Light can exceed 1.0 — let the renderer's tone mapping handle compression
+    let light = add(uAmbColor, mul(uSunColor, diffuse));
+    light = mul(light, uLightScale);
 
     // ── LOD dither fade-in ──
     const dist   = length(sub(centerNode, cameraPosition));
@@ -538,9 +556,7 @@ function createImpostorMaterial(atlasTex, normalTex, impostorScale, centersStora
     const dither = IGN(screenCoordinate.xy);
     const alphaOut = select(dither.greaterThan(fadeT), float(0.0), dominantAlpha);
 
-    // Darken albedo so impostor matches real GLB (bake can be too bright; apply in shader)
-    const darkenedAlbedo = mul(blendedRgb, float(0.52));
-    return vec4(mul(darkenedAlbedo, light), alphaOut);
+    return vec4(mul(blendedRgb, light), alphaOut);
   });
 
   // FrontSide only — avoids drawing both sides of the billboard (was causing layered/ghost look)
@@ -576,6 +592,7 @@ export async function createOctahedralImpostorForest(opts = {}) {
     alphaTest:      impostorSettings.alphaTest      ?? 0.05,  // bake discard — very low to capture full foliage
     fadeRange:      impostorSettings.fadeRange      ?? 8,     // crossfade half-width in world units
     lod2Distance:   impostorSettings.lod2Distance   ?? 150,   // mega-impostor starts here
+    lightScale:     impostorSettings.lightScale     ?? 1.0,   // 1 = default; e.g. 0.8 for rocks to match PBR
   };
 
   // Dynamic lighting uniforms shared by all impostor materials (regular + mega)

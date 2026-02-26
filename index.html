@@ -70,7 +70,7 @@
       import Stats from "stats-gl";
       import { createFlag } from "./flag.js";
       import { createBirds } from "./birds.js";
-      import { createOctahedralImpostorForest } from "./octahedralImpostor.js";
+      import { createOctahedralImpostorForest } from "./octahedralImpostor.js?v=10";
       import { createFluffyTree } from "./fluffyTree.js";
       import {
         Fn,
@@ -160,7 +160,7 @@
         grassWidth: 0.08,
         grassHeight: 0.7,
         lodDistance: 15,
-        maxDistance: 150,
+        maxDistance: 80,
         gradientCurve: 2.0,
         baseColor1: "#143210",
         baseColor2: "#183a12",
@@ -1963,8 +1963,28 @@
           });
           scene.add(octahedralForest.group);
           octahedralForest.group.visible = PARAMS.octahedralForestEnabled;
+          syncImpostorLighting();
         } catch (e) {
           console.warn("Octahedral impostor forest skipped:", e);
+        }
+
+        // Sync impostor lighting to scene lights so ACES tonemapping matches real objects.
+        // Ambient: average of hemi sky+ground × 0.25. This matches what Lambert back-faces see:
+        // a surface perpendicular to the ground gets roughly (sky+ground)/2 from the hemi light,
+        // and the 0.25 factor accounts for the hemi solid-angle distribution (vs a naive intensity).
+        function syncImpostorLighting() {
+          if (!octahedralForest) return;
+          octahedralForest.updateSunColor(new THREE.Vector3(
+            dirLight.color.r * dirLight.intensity,
+            dirLight.color.g * dirLight.intensity,
+            dirLight.color.b * dirLight.intensity,
+          ));
+          const ambFactor = hemiLight.intensity * 0.25;
+          octahedralForest.updateAmbColor(new THREE.Vector3(
+            (hemiLight.color.r + hemiLight.groundColor.r) * 0.5 * ambFactor,
+            (hemiLight.color.g + hemiLight.groundColor.g) * 0.5 * ambFactor,
+            (hemiLight.color.b + hemiLight.groundColor.b) * 0.5 * ambFactor,
+          ));
         }
 
         async function rebuildOctahedralForest() {
@@ -1995,6 +2015,7 @@
             scene.add(octahedralForest.group);
             octahedralForest.group.visible = PARAMS.octahedralForestEnabled;
             octahedralForest.group.scale.setScalar(PARAMS.octahedralForestScale);
+            syncImpostorLighting();
           } catch (e) {
             console.warn("Octahedral impostor forest rebuild failed:", e);
           }
