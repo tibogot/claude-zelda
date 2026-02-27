@@ -1,0 +1,1409 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Debug Scene 2 - Beautiful Castle Interior</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #000;
+        font-family: 'Courier New', monospace;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        z-index: 10;
+        font: 14px/1.5 "SF Mono", "Fira Code", monospace;
+        color: #b0d890;
+        background: rgba(0, 0, 0, 0.7);
+        padding: 12px 16px;
+        border-radius: 8px;
+        pointer-events: none;
+        user-select: none;
+        backdrop-filter: blur(4px);
+      }
+      #info span {
+        color: #e0f0c0;
+        font-weight: 600;
+      }
+      #scene-indicator {
+        position: fixed;
+        top: 16px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 10;
+        font: bold 18px/1.5 "SF Mono", "Fira Code", monospace;
+        color: #fff;
+        background: rgba(0, 100, 200, 0.8);
+        padding: 8px 24px;
+        border-radius: 8px;
+        pointer-events: none;
+        user-select: none;
+      }
+      #transition-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        background: #000;
+        opacity: 0;
+        pointer-events: none;
+        z-index: 100;
+        transition: opacity 0.5s ease-in-out;
+      }
+      #transition-overlay.active {
+        opacity: 1;
+      }
+      #prompt-box {
+        position: fixed;
+        bottom: 100px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 20;
+        background: rgba(0,0,0,0.85);
+        border: 2px solid #f0d070;
+        border-radius: 8px;
+        padding: 14px 28px;
+        color: #ffe0a0;
+        font-family: inherit;
+        font-size: 14px;
+        letter-spacing: 1px;
+        text-align: center;
+        opacity: 0;
+        transition: opacity 0.3s;
+        pointer-events: none;
+      }
+      #prompt-box.visible { opacity: 1; }
+      .key { 
+        display: inline-block;
+        background: rgba(255,200,80,0.2);
+        border: 1px solid rgba(255,200,80,0.4);
+        border-radius: 3px;
+        padding: 1px 6px;
+        margin: 0 2px;
+        font-weight: bold;
+        color: #ffe0a0;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">
+      DEBUG SCENE 2 &mdash; <span id="backend">loading…</span><br />
+      WASD: move &bull; Shift: run &bull; Space: jump &bull; Click: look &bull; Right-click: attack<br />
+      <span id="status">Walk into the glowing door to enter the castle</span><br />
+      Position: <span id="pos-debug">0, 0, 0</span>
+    </div>
+    <div id="scene-indicator">OVERWORLD</div>
+    <div id="transition-overlay"></div>
+    <div id="prompt-box">Press <span class="key">E</span> or walk closer to enter</div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+      import RAPIER from "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.19.3/+esm";
+
+      const PI = Math.PI;
+
+      // ═══════════════════════════════════════════════════════════════
+      // PARAMS
+      // ═══════════════════════════════════════════════════════════════
+      const PARAMS = {
+        playerSpeed: 3.2,
+        runSpeedMultiplier: 1.95,
+        jumpSpeed: 5.5,
+        gravity: 9.81,
+        camDist: 7,
+        camHeight: 0.0,
+        camPitchMin: -0.2,
+        camPitchMax: 1.2,
+        mouseSensitivity: 0.002,
+        keyTurnSpeed: 2.2,
+        characterHeight: 2.5,
+        characterOffsetY: 0.37,
+        capsuleRadius: 0.35,
+      };
+
+      // ═══════════════════════════════════════════════════════════════
+      // SCENE STATE
+      // ═══════════════════════════════════════════════════════════════
+      let currentScene = "overworld";
+      let isTransitioning = false;
+      let transitionCooldown = 0;
+      let nearTrigger = null;
+
+      let overworldGroup = null;
+      let castleInteriorGroup = null;
+      let overworldColliders = [];
+      let interiorColliders = [];
+
+      // Castle exterior position in overworld
+      const CASTLE_POS = new THREE.Vector3(0, 0, -28);
+      const DOOR_TRIGGER_POS = new THREE.Vector3(0, 0, -26);
+      const DOOR_TRIGGER_RADIUS = 2.5;
+
+      // Interior dimensions (bigger on inside - Zelda magic!)
+      const INTERIOR_WIDTH = 50;
+      const INTERIOR_DEPTH = 60;
+      const INTERIOR_HEIGHT = 14;
+      const INTERIOR_WORLD_OFFSET = new THREE.Vector3(0, 0, -500);
+
+      // Spawn points
+      const OVERWORLD_SPAWN = new THREE.Vector3(0, 0, 5);
+      const INTERIOR_SPAWN = new THREE.Vector3(0, 0, 25);  // Just inside the entrance (room goes from z=-30 to z=+30)
+      const OVERWORLD_EXIT_SPAWN = new THREE.Vector3(0, 0, -22);
+
+      // Interior exit trigger (near the entrance door at z=30)
+      const EXIT_TRIGGER_POS = new THREE.Vector3(0, 0, 28);
+      const EXIT_TRIGGER_RADIUS = 2.5;
+
+      async function init() {
+        // ── RENDERER ──
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        await renderer.init();
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.0;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+
+        const backend = renderer.backend?.parameters?.device ? "WebGPU" : "WebGL";
+        document.getElementById("backend").textContent = backend;
+
+        // ── SCENE & CAMERA ──
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87ceeb);
+        // No fog in overworld - was washing out the ground completely
+        // scene.fog = new THREE.Fog(0x87ceeb, 80, 150);
+
+        const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 500);
+        camera.position.set(0, 5, 10);
+
+        // ── RAPIER PHYSICS ──
+        await RAPIER.init({});
+        const gravity = { x: 0, y: -9.81, z: 0 };
+        const physicsWorld = new RAPIER.World(gravity);
+
+        // Ground collider for overworld
+        const groundBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(0, -0.5, 0);
+        const groundBody = physicsWorld.createRigidBody(groundBodyDesc);
+        physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(100, 0.5, 100), groundBody);
+
+        // Interior floor collider
+        const intFloorBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(
+          INTERIOR_WORLD_OFFSET.x, -0.5, INTERIOR_WORLD_OFFSET.z
+        );
+        const intFloorBody = physicsWorld.createRigidBody(intFloorBodyDesc);
+        physicsWorld.createCollider(
+          RAPIER.ColliderDesc.cuboid(INTERIOR_WIDTH / 2 + 2, 0.5, INTERIOR_DEPTH / 2 + 2),
+          intFloorBody
+        );
+
+        // ══════════════════════════════════════════════════════════════
+        // SCENE REFS FOR ANIMATION (must be created before scene creation)
+        // ══════════════════════════════════════════════════════════════
+        const flames = [];
+        const glowingDoors = [];
+        window._sceneRefs = { flames, glowingDoors };
+
+        // ══════════════════════════════════════════════════════════════
+        // OVERWORLD SCENE
+        // ══════════════════════════════════════════════════════════════
+        overworldGroup = new THREE.Group();
+        scene.add(overworldGroup);
+
+        createOverworld(overworldGroup, physicsWorld);
+
+        // ══════════════════════════════════════════════════════════════
+        // CASTLE INTERIOR SCENE
+        // ══════════════════════════════════════════════════════════════
+        castleInteriorGroup = new THREE.Group();
+        castleInteriorGroup.position.copy(INTERIOR_WORLD_OFFSET);
+        castleInteriorGroup.visible = false;
+        scene.add(castleInteriorGroup);
+
+        createCastleInterior(castleInteriorGroup, physicsWorld);
+
+        // ══════════════════════════════════════════════════════════════
+        // PLAYER SETUP
+        // ══════════════════════════════════════════════════════════════
+        const capR = PARAMS.capsuleRadius;
+        const capHalfH = Math.max(0.1, (PARAMS.characterHeight - 2 * capR) / 2);
+        const charPos = new THREE.Vector3(OVERWORLD_SPAWN.x, capHalfH + capR, OVERWORLD_SPAWN.z);
+
+        const playerBodyDesc = RAPIER.RigidBodyDesc.kinematicPositionBased()
+          .setTranslation(charPos.x, charPos.y, charPos.z);
+        const playerBody = physicsWorld.createRigidBody(playerBodyDesc);
+        const playerCollider = physicsWorld.createCollider(
+          RAPIER.ColliderDesc.capsule(capHalfH, capR),
+          playerBody
+        );
+        const characterController = physicsWorld.createCharacterController(0.01);
+        characterController.enableSnapToGround(0.5);
+        characterController.setMaxSlopeClimbAngle((45 * Math.PI) / 180);
+
+        // Placeholder capsule
+        const capsuleGeo = new THREE.CapsuleGeometry(0.4, 1.2, 8, 16);
+        const capsuleMat = new THREE.MeshStandardNodeMaterial({ color: 0x44aa66, roughness: 0.4 });
+        const capsule = new THREE.Mesh(capsuleGeo, capsuleMat);
+        capsule.castShadow = true;
+        scene.add(capsule);
+
+        // Character model group
+        const characterGroup = new THREE.Group();
+        scene.add(characterGroup);
+        let characterMixer = null;
+
+        // Load character
+        const charDraco = new DRACOLoader();
+        charDraco.setDecoderPath("https://www.gstatic.com/draco/versioned/decoders/1.5.6/");
+        const charLoader = new GLTFLoader();
+        charLoader.setDRACOLoader(charDraco);
+
+        charLoader.load(
+          "models/AnimationLibrary_Godot_Standard-transformed.glb",
+          (gltf) => {
+            const model = gltf.scene;
+            model.traverse((o) => {
+              if (o.isMesh) {
+                o.castShadow = true;
+                o.receiveShadow = true;
+                if (o.material && !o.material.isNodeMaterial) {
+                  const m = o.material;
+                  o.material = new THREE.MeshStandardNodeMaterial({
+                    color: m.color?.getHex?.() ?? 0x888888,
+                    roughness: m.roughness ?? 0.5,
+                    metalness: m.metalness ?? 0,
+                    map: m.map || null,
+                  });
+                }
+              }
+            });
+
+            const box = new THREE.Box3().setFromObject(model);
+            const size = new THREE.Vector3();
+            box.getSize(size);
+            const scale = PARAMS.characterHeight / (size.y || 1);
+            model.scale.setScalar(scale);
+            box.setFromObject(model);
+            const center = new THREE.Vector3();
+            box.getCenter(center);
+            model.position.sub(center);
+            characterGroup.userData.modelBaseY = model.position.y;
+            characterGroup.userData.initialCharHeight = PARAMS.characterHeight;
+            characterGroup.add(model);
+
+            if (gltf.animations && gltf.animations.length) {
+              characterMixer = new THREE.AnimationMixer(model);
+              const idleClip = gltf.animations.find((a) => a.name === "Idle_Loop") || gltf.animations[0];
+              const walkClip = gltf.animations.find((a) => a.name === "Walk_Loop") || gltf.animations[0];
+              const runClip = gltf.animations.find((a) => a.name === "Jog_Fwd_Loop") || 
+                              gltf.animations.find((a) => a.name === "Sprint_Loop") || walkClip;
+              const jumpClip = gltf.animations.find((a) => a.name === "Jump_Loop") || 
+                               gltf.animations.find((a) => a.name === "Jump_Start") || idleClip;
+              const attackClip = gltf.animations.find((a) => a.name === "Sword_Attack") || 
+                                 gltf.animations.find((a) => a.name === "Sword_Attack_RM") || null;
+
+              const idleAction = characterMixer.clipAction(idleClip).setLoop(2201).play();
+              const walkAction = characterMixer.clipAction(walkClip).setLoop(2201);
+              const runAction = characterMixer.clipAction(runClip).setLoop(2201);
+              const jumpAction = characterMixer.clipAction(jumpClip).setLoop(2201);
+              const attackAction = attackClip ? characterMixer.clipAction(attackClip).setLoop(2200) : null;
+              if (attackAction) attackAction.clampWhenFinished = true;
+
+              characterGroup.userData.idleAction = idleAction;
+              characterGroup.userData.walkAction = walkAction;
+              characterGroup.userData.runAction = runAction;
+              characterGroup.userData.jumpAction = jumpAction;
+              characterGroup.userData.attackAction = attackAction;
+              characterGroup.userData.lastMoveState = "idle";
+              characterGroup.userData.isAttacking = false;
+
+              if (attackAction) {
+                characterMixer.addEventListener("finished", (e) => {
+                  if (e.action !== attackAction) return;
+                  const ud = characterGroup.userData;
+                  ud.isAttacking = false;
+                  const from = ud.preAttackState || "idle";
+                  attackAction.enabled = false;
+                  if (from === "walk") {
+                    ud.walkAction.enabled = true;
+                    ud.walkAction.crossFadeFrom(attackAction, 0.2).play();
+                  } else if (from === "run") {
+                    ud.runAction.enabled = true;
+                    ud.runAction.crossFadeFrom(attackAction, 0.2).play();
+                  } else {
+                    ud.idleAction.enabled = true;
+                    ud.idleAction.crossFadeFrom(attackAction, 0.2).play();
+                  }
+                  ud.lastMoveState = from;
+                });
+              }
+            }
+
+            renderer.compileAsync(scene, camera).catch((e) => console.warn("Recompile:", e));
+          },
+          undefined,
+          (err) => console.error("Character load failed:", err)
+        );
+
+        // ── INPUT ──
+        const keys = { w: false, a: false, s: false, d: false, shift: false, space: false, 
+                       arrowLeft: false, arrowRight: false, e: false };
+        let characterVelY = 0;
+
+        window.addEventListener("keydown", (e) => {
+          const k = e.key.toLowerCase();
+          if (keys[k] !== undefined) { keys[k] = true; e.preventDefault(); }
+          if (e.key === "Shift") keys.shift = true;
+          if (e.key === " " || e.code === "Space") { keys.space = true; e.preventDefault(); }
+          if (e.key === "ArrowUp") { keys.w = true; e.preventDefault(); }
+          if (e.key === "ArrowDown") { keys.s = true; e.preventDefault(); }
+          if (e.key === "ArrowLeft") { keys.arrowLeft = true; e.preventDefault(); }
+          if (e.key === "ArrowRight") { keys.arrowRight = true; e.preventDefault(); }
+        });
+
+        window.addEventListener("keyup", (e) => {
+          const k = e.key.toLowerCase();
+          if (keys[k] !== undefined) keys[k] = false;
+          if (e.key === "Shift") keys.shift = false;
+          if (e.key === " " || e.code === "Space") keys.space = false;
+          if (e.key === "ArrowUp") keys.w = false;
+          if (e.key === "ArrowDown") keys.s = false;
+          if (e.key === "ArrowLeft") keys.arrowLeft = false;
+          if (e.key === "ArrowRight") keys.arrowRight = false;
+        });
+
+        // Camera
+        let camYaw = PI, camPitch = 0.3;  // Face toward castle (negative Z)
+        let isPointerLocked = false;
+
+        renderer.domElement.addEventListener("click", () => renderer.domElement.requestPointerLock());
+        document.addEventListener("pointerlockchange", () => { isPointerLocked = !!document.pointerLockElement; });
+        renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
+
+        renderer.domElement.addEventListener("mousedown", (e) => {
+          if (e.button !== 2) return;
+          const ud = characterGroup.userData;
+          if (!ud.attackAction || ud.isAttacking) return;
+          ud.isAttacking = true;
+          ud.preAttackState = ud.lastMoveState || "idle";
+          ud.attackAction.stop();
+          ud.attackAction.time = 0;
+          ud.attackAction.enabled = true;
+          const from = ud.preAttackState === "run" ? ud.runAction : 
+                       ud.preAttackState === "walk" ? ud.walkAction : ud.idleAction;
+          ud.attackAction.crossFadeFrom(from, 0.1).play();
+        });
+
+        document.addEventListener("mousemove", (e) => {
+          if (!isPointerLocked && !(e.buttons & 1)) return;
+          camYaw += e.movementX * PARAMS.mouseSensitivity;
+          camPitch -= e.movementY * PARAMS.mouseSensitivity;
+          camPitch = Math.max(PARAMS.camPitchMin, Math.min(PARAMS.camPitchMax, camPitch));
+        });
+
+        // ══════════════════════════════════════════════════════════════
+        // SCENE TRANSITION
+        // ══════════════════════════════════════════════════════════════
+        const transitionOverlay = document.getElementById("transition-overlay");
+        const sceneIndicator = document.getElementById("scene-indicator");
+        const statusText = document.getElementById("status");
+        const promptBox = document.getElementById("prompt-box");
+
+        function transitionToScene(targetScene, spawnPos, facingYaw) {
+          if (isTransitioning || transitionCooldown > 0) return;
+          isTransitioning = true;
+          promptBox.classList.remove("visible");
+
+          transitionOverlay.classList.add("active");
+
+          setTimeout(() => {
+            currentScene = targetScene;
+
+            if (targetScene === "interior") {
+              overworldGroup.visible = false;
+              castleInteriorGroup.visible = true;
+              scene.background = new THREE.Color(0x1a1208);
+              scene.fog = new THREE.Fog(0x1a1208, 40, 100);
+              renderer.toneMappingExposure = 1.8;
+              sceneIndicator.textContent = "CASTLE INTERIOR";
+              sceneIndicator.style.background = "rgba(139, 69, 19, 0.8)";
+              statusText.textContent = "Explore the castle! Walk to the glowing exit to leave";
+            } else {
+              overworldGroup.visible = true;
+              castleInteriorGroup.visible = false;
+              scene.background = new THREE.Color(0x87ceeb);
+              scene.fog = null;  // No fog in overworld
+              renderer.toneMappingExposure = 1.0;
+              sceneIndicator.textContent = "OVERWORLD";
+              sceneIndicator.style.background = "rgba(0, 100, 200, 0.8)";
+              statusText.textContent = "Walk into the glowing door to enter the castle";
+            }
+
+            // Teleport player
+            characterVelY = 0;
+            const worldSpawn = targetScene === "interior" 
+              ? new THREE.Vector3(
+                  INTERIOR_WORLD_OFFSET.x + spawnPos.x,
+                  capHalfH + capR,
+                  INTERIOR_WORLD_OFFSET.z + spawnPos.z
+                )
+              : new THREE.Vector3(spawnPos.x, capHalfH + capR, spawnPos.z);
+
+            charPos.copy(worldSpawn);
+            playerBody.setNextKinematicTranslation({ x: charPos.x, y: charPos.y, z: charPos.z });
+            physicsWorld.step();
+
+            if (facingYaw !== undefined) {
+              camYaw = facingYaw;
+            }
+
+            transitionCooldown = 1.0;
+
+            setTimeout(() => {
+              transitionOverlay.classList.remove("active");
+              setTimeout(() => { isTransitioning = false; }, 300);
+            }, 300);
+          }, 500);
+        }
+
+        // DEBUG: Expose transition function for testing
+        window._debugTransition = (scene) => {
+          if (scene === 'interior') {
+            transitionToScene("interior", INTERIOR_SPAWN, PI);  // Face inward (toward throne at -Z)
+          } else {
+            transitionToScene("overworld", OVERWORLD_EXIT_SPAWN, 0);
+          }
+        };
+
+        // ══════════════════════════════════════════════════════════════
+        // ANIMATION LOOP
+        // ══════════════════════════════════════════════════════════════
+        const moveDir = new THREE.Vector3();
+        const timer = new THREE.Timer();
+
+        renderer.setAnimationLoop(() => {
+          timer.update();
+          const elapsed = timer.getElapsed();
+          const dt = Math.min(timer.getDelta(), 0.05);
+
+          if (transitionCooldown > 0) transitionCooldown -= dt;
+
+          // Arrow keys camera
+          if (keys.arrowLeft) camYaw += PARAMS.keyTurnSpeed * dt;
+          if (keys.arrowRight) camYaw -= PARAMS.keyTurnSpeed * dt;
+
+          // Movement
+          moveDir.set(0, 0, 0);
+          let desiredDx = 0, desiredDz = 0;
+          if (keys.w) moveDir.z -= 1;
+          if (keys.s) moveDir.z += 1;
+          if (keys.a) moveDir.x -= 1;
+          if (keys.d) moveDir.x += 1;
+
+          if (moveDir.length() > 0) {
+            moveDir.normalize();
+            const sinY = Math.sin(camYaw), cosY = Math.cos(camYaw);
+            const forwardX = sinY, forwardZ = cosY;
+            const rightX = cosY, rightZ = -sinY;
+            const mx = moveDir.x * rightX - moveDir.z * forwardX;
+            const mz = moveDir.x * rightZ - moveDir.z * forwardZ;
+            const speedMult = keys.shift ? PARAMS.runSpeedMultiplier : 1;
+            desiredDx = mx * PARAMS.playerSpeed * speedMult * dt;
+            desiredDz = mz * PARAMS.playerSpeed * speedMult * dt;
+          }
+
+          const groundY = capHalfH + capR;
+          const onGround = charPos.y <= groundY + 0.1;
+          let desiredY;
+
+          if (onGround) {
+            if (keys.space) {
+              characterVelY = PARAMS.jumpSpeed;
+              desiredY = charPos.y + characterVelY * dt;
+            } else {
+              characterVelY = 0;
+              desiredY = groundY;
+            }
+          } else {
+            characterVelY -= PARAMS.gravity * dt;
+            desiredY = charPos.y + characterVelY * dt;
+          }
+
+          const desiredTranslation = {
+            x: desiredDx,
+            y: desiredY - charPos.y,
+            z: desiredDz,
+          };
+
+          characterController.computeColliderMovement(playerCollider, desiredTranslation);
+          const corrected = characterController.computedMovement();
+          const cur = playerBody.translation();
+          const nextPos = { x: cur.x + corrected.x, y: cur.y + corrected.y, z: cur.z + corrected.z };
+          playerBody.setNextKinematicTranslation(nextPos);
+
+          physicsWorld.step();
+
+          const playerT = playerBody.translation();
+          charPos.set(playerT.x, playerT.y, playerT.z);
+
+          if (characterVelY < 0 && charPos.y <= groundY + 0.2) characterVelY = 0;
+          const inAir = charPos.y > groundY + 0.15;
+
+          // Update visuals
+          characterGroup.position.copy(charPos);
+          characterGroup.rotation.y = camYaw;
+
+          if (characterGroup.children.length > 0) {
+            const ud = characterGroup.userData;
+            if (ud.initialCharHeight != null) {
+              characterGroup.scale.setScalar(PARAMS.characterHeight / ud.initialCharHeight);
+            }
+            if (ud.modelBaseY != null) {
+              characterGroup.children[0].position.y = ud.modelBaseY + PARAMS.characterOffsetY;
+            }
+          }
+
+          capsule.visible = characterGroup.children.length === 0;
+          if (capsule.visible) {
+            capsule.position.copy(charPos);
+            capsule.rotation.y = camYaw;
+          }
+
+          // Animation state
+          const moving = moveDir.length() > 0;
+          const running = moving && keys.shift;
+          const moveState = inAir ? "jump" : moving ? (running ? "run" : "walk") : "idle";
+          const ud = characterGroup.userData;
+
+          if (ud && ud.idleAction && ud.walkAction && ud.runAction && ud.jumpAction && !ud.isAttacking) {
+            const skipT = 0.4;
+            const last = ud.lastMoveState;
+
+            if (moveState !== last) {
+              const crossFade = (to, from, duration = 0.2) => {
+                if (to.time < skipT) to.time = skipT;
+                to.enabled = true;
+                to.crossFadeFrom(from, duration).play();
+              };
+
+              if (moveState === "jump") {
+                crossFade(ud.jumpAction, last === "run" ? ud.runAction : last === "walk" ? ud.walkAction : ud.idleAction, 0.15);
+              } else if (moveState === "walk") {
+                crossFade(ud.walkAction, last === "run" ? ud.runAction : last === "jump" ? ud.jumpAction : ud.idleAction);
+              } else if (moveState === "run") {
+                crossFade(ud.runAction, last === "walk" ? ud.walkAction : last === "jump" ? ud.jumpAction : ud.idleAction);
+              } else {
+                crossFade(ud.idleAction, last === "run" ? ud.runAction : last === "walk" ? ud.walkAction : ud.jumpAction);
+              }
+            }
+            ud.lastMoveState = moveState;
+          }
+
+          if (characterMixer) characterMixer.update(dt);
+
+          // ── CHECK TRIGGERS ──
+          checkTriggers(charPos, keys);
+
+          // ── ANIMATE SCENE ──
+          animateSceneEffects(elapsed);
+
+          // Camera
+          const camDist = PARAMS.camDist;
+          const cx = charPos.x - Math.sin(camYaw) * Math.cos(camPitch) * camDist;
+          const cy = charPos.y + Math.sin(camPitch) * camDist + PARAMS.camHeight + 1;
+          const cz = charPos.z - Math.cos(camYaw) * Math.cos(camPitch) * camDist;
+          camera.position.set(cx, Math.max(cy, 2), cz);
+
+          // Keep camera inside interior room walls
+          if (currentScene === "interior") {
+            const m = 0.5;
+            const minX = INTERIOR_WORLD_OFFSET.x - INTERIOR_WIDTH / 2 + m;
+            const maxX = INTERIOR_WORLD_OFFSET.x + INTERIOR_WIDTH / 2 - m;
+            const minZ = INTERIOR_WORLD_OFFSET.z - INTERIOR_DEPTH / 2 + m;
+            const maxZ = INTERIOR_WORLD_OFFSET.z + INTERIOR_DEPTH / 2 - m;
+            camera.position.x = Math.max(minX, Math.min(maxX, camera.position.x));
+            camera.position.z = Math.max(minZ, Math.min(maxZ, camera.position.z));
+            camera.position.y = Math.min(camera.position.y, INTERIOR_HEIGHT - 1);
+          }
+
+          camera.lookAt(charPos.x, charPos.y + 0.5, charPos.z);
+
+          document.getElementById("pos-debug").textContent = 
+            `x:${charPos.x.toFixed(1)}, y:${charPos.y.toFixed(1)}, z:${charPos.z.toFixed(1)}`;
+
+          renderer.render(scene, camera);
+        });
+
+        // ── TRIGGER CHECKING ──
+        function checkTriggers(playerPos, keys) {
+          if (isTransitioning || transitionCooldown > 0) {
+            promptBox.classList.remove("visible");
+            return;
+          }
+
+          nearTrigger = null;
+
+          if (currentScene === "overworld") {
+            const dist = playerPos.distanceTo(DOOR_TRIGGER_POS);
+            if (dist < DOOR_TRIGGER_RADIUS + 2) {
+              nearTrigger = { type: "enter", dist };
+              promptBox.textContent = "Press E or walk closer to enter castle";
+              promptBox.classList.add("visible");
+
+              if (dist < DOOR_TRIGGER_RADIUS || keys.e) {
+                keys.e = false;
+                transitionToScene("interior", INTERIOR_SPAWN, PI);  // Face inward (toward throne at -Z)
+              }
+              return;
+            }
+          } else {
+            // Interior - check exit
+            const localPos = new THREE.Vector3(
+              playerPos.x - INTERIOR_WORLD_OFFSET.x,
+              playerPos.y,
+              playerPos.z - INTERIOR_WORLD_OFFSET.z
+            );
+            const exitWorldPos = new THREE.Vector3(
+              INTERIOR_WORLD_OFFSET.x + EXIT_TRIGGER_POS.x,
+              0,
+              INTERIOR_WORLD_OFFSET.z + EXIT_TRIGGER_POS.z
+            );
+            const dist = playerPos.distanceTo(exitWorldPos);
+
+            if (dist < EXIT_TRIGGER_RADIUS + 2) {
+              nearTrigger = { type: "exit", dist };
+              promptBox.textContent = "Press E or walk closer to exit castle";
+              promptBox.classList.add("visible");
+
+              if (dist < EXIT_TRIGGER_RADIUS || keys.e) {
+                keys.e = false;
+                transitionToScene("overworld", OVERWORLD_EXIT_SPAWN, 0);
+              }
+              return;
+            }
+          }
+
+          promptBox.classList.remove("visible");
+        }
+
+        // ── ANIMATE FLAMES AND GLOWING DOORS ──
+        function animateSceneEffects(time) {
+          const { flames, glowingDoors } = window._sceneRefs;
+          flames.forEach((flame) => {
+            flame.scale.setScalar(0.8 + Math.sin(time * 8 + flame.id) * 0.3);
+          });
+          glowingDoors.forEach((door) => {
+            if (door.material && door.material.emissiveIntensity !== undefined) {
+              door.material.emissiveIntensity = 0.4 + Math.sin(time * 3) * 0.3;
+            }
+          });
+        }
+
+        window.addEventListener("resize", () => {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(innerWidth, innerHeight);
+        });
+      }
+
+      // ═══════════════════════════════════════════════════════════════
+      // OVERWORLD CREATION
+      // ═══════════════════════════════════════════════════════════════
+      function createOverworld(group, physicsWorld) {
+        const { flames, glowingDoors } = window._sceneRefs || { flames: [], glowingDoors: [] };
+
+        // Sun light - warm sunlight
+        const sun = new THREE.DirectionalLight(0xfffae0, 2.0);
+        sun.position.set(20, 30, -10);
+        sun.castShadow = true;
+        sun.shadow.mapSize.set(2048, 2048);
+        sun.shadow.camera.left = -50;
+        sun.shadow.camera.right = 50;
+        sun.shadow.camera.top = 50;
+        sun.shadow.camera.bottom = -50;
+        sun.shadow.camera.near = 1;
+        sun.shadow.camera.far = 100;
+        sun.shadow.bias = -0.001;
+        group.add(sun);
+
+        // Warmer ambient for overworld
+        const ambient = new THREE.AmbientLight(0xffeedd, 0.6);
+        group.add(ambient);
+
+        // Hemisphere light for nicer outdoor lighting (sky color, ground color)
+        const hemiLight = new THREE.HemisphereLight(0xffffff, 0x4a7a30, 1.0);
+        group.add(hemiLight);
+
+        // Ground - simple flat plane first to test
+        const groundGeo = new THREE.PlaneGeometry(300, 300);
+        const groundMat = new THREE.MeshStandardNodeMaterial({ 
+          color: 0x3d6b1e,  // Nice grass green
+          roughness: 0.9,
+          side: THREE.DoubleSide  // Render both sides
+        });
+        const ground = new THREE.Mesh(groundGeo, groundMat);
+        ground.rotation.x = -PI / 2;
+        ground.position.y = -0.1;  // Slightly below zero
+        ground.receiveShadow = true;
+        group.add(ground);
+        
+        console.log('Ground added to group');
+
+        // Path to castle
+        const pathGeo = new THREE.PlaneGeometry(4, 40);
+        const pathMat = new THREE.MeshStandardNodeMaterial({ color: 0x8B7355, roughness: 1 });
+        const path = new THREE.Mesh(pathGeo, pathMat);
+        path.rotation.x = -PI / 2;
+        path.position.set(0, 0.02, -8);
+        group.add(path);
+
+        // ── CASTLE EXTERIOR ──
+        const castleGroup = new THREE.Group();
+        castleGroup.position.copy(CASTLE_POS);
+
+        const wallMat = new THREE.MeshStandardNodeMaterial({ color: 0x888888, roughness: 0.8 });
+        const darkStoneMat = new THREE.MeshStandardNodeMaterial({ color: 0x666666, roughness: 0.9 });
+
+        // Main wall
+        const mainWall = new THREE.Mesh(new THREE.BoxGeometry(14, 8, 3), wallMat);
+        mainWall.position.y = 4;
+        mainWall.castShadow = true;
+        mainWall.receiveShadow = true;
+        castleGroup.add(mainWall);
+
+        // Towers
+        [-6, 6].forEach(x => {
+          const tower = new THREE.Mesh(new THREE.CylinderGeometry(2, 2.2, 12, 8), darkStoneMat);
+          tower.position.set(x, 6, 0);
+          tower.castShadow = true;
+          castleGroup.add(tower);
+
+          const cone = new THREE.Mesh(
+            new THREE.ConeGeometry(2.5, 3, 8),
+            new THREE.MeshStandardNodeMaterial({ color: 0x8B0000, roughness: 0.7 })
+          );
+          cone.position.set(x, 13.5, 0);
+          cone.castShadow = true;
+          castleGroup.add(cone);
+
+          // Battlements
+          for (let a = 0; a < 8; a++) {
+            const merlon = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.8, 0.6), darkStoneMat);
+            const angle = (a / 8) * PI * 2;
+            merlon.position.set(x + Math.cos(angle) * 2.1, 12.4, Math.sin(angle) * 2.1);
+            castleGroup.add(merlon);
+          }
+        });
+
+        // Door frame
+        const doorFrame = new THREE.Mesh(new THREE.BoxGeometry(2.5, 4, 3.2), darkStoneMat);
+        doorFrame.position.set(0, 2, 0);
+        castleGroup.add(doorFrame);
+
+        // Glowing door
+        const doorMat = new THREE.MeshStandardNodeMaterial({
+          color: 0xf0d070,
+          emissive: 0xf0a030,
+          emissiveIntensity: 0.6,
+          roughness: 0.3,
+          metalness: 0.2
+        });
+        const door = new THREE.Mesh(new THREE.BoxGeometry(1.8, 3.2, 0.2), doorMat);
+        door.position.set(0, 1.8, 1.6);
+        door.userData.isGlowingDoor = true;
+        castleGroup.add(door);
+        glowingDoors.push(door);
+
+        // Door glow light
+        const doorLight = new THREE.PointLight(0xf0a030, 2, 10);
+        doorLight.position.set(0, 2, 3);
+        castleGroup.add(doorLight);
+
+        group.add(castleGroup);
+
+        // Castle colliders
+        const castleWorldPos = CASTLE_POS;
+        
+        // Main wall collider
+        const mainWallBody = physicsWorld.createRigidBody(
+          RAPIER.RigidBodyDesc.fixed().setTranslation(castleWorldPos.x, 4, castleWorldPos.z)
+        );
+        physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(7, 4, 1.5), mainWallBody);
+
+        // Tower colliders
+        [-6, 6].forEach(x => {
+          const towerBody = physicsWorld.createRigidBody(
+            RAPIER.RigidBodyDesc.fixed().setTranslation(castleWorldPos.x + x, 6, castleWorldPos.z)
+          );
+          physicsWorld.createCollider(RAPIER.ColliderDesc.cylinder(6, 2.1), towerBody);
+        });
+
+        // ── TREES ──
+        const treePosns = [
+          [-12, -5], [-18, -15], [14, -8], [20, -20], [-22, 5],
+          [16, 5], [-10, -22], [22, -12], [-25, -10], [18, 12],
+          [-14, 10], [25, 3], [-20, -3], [10, -18], [-28, -20],
+          [8, 15], [-8, 18], [28, 8], [-15, 22], [12, 22]
+        ];
+        treePosns.forEach(([x, z]) => {
+          const trunk = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.3, 0.4, 3, 8),
+            new THREE.MeshStandardNodeMaterial({ color: 0x6B4226, roughness: 0.9 })
+          );
+          trunk.position.set(x, 1.5, z);
+          trunk.castShadow = true;
+          group.add(trunk);
+
+          const leaves = new THREE.Mesh(
+            new THREE.SphereGeometry(1.5 + Math.random() * 0.8, 8, 6),
+            new THREE.MeshStandardNodeMaterial({ color: 0x2d6b1e, roughness: 0.8 })
+          );
+          leaves.position.set(x, 4 + Math.random() * 0.5, z);
+          leaves.castShadow = true;
+          group.add(leaves);
+
+          // Tree collider
+          const treeBody = physicsWorld.createRigidBody(
+            RAPIER.RigidBodyDesc.fixed().setTranslation(x, 1.5, z)
+          );
+          physicsWorld.createCollider(RAPIER.ColliderDesc.cylinder(1.5, 0.4), treeBody);
+        });
+
+        // ── ROCKS ──
+        for (let i = 0; i < 15; i++) {
+          const rock = new THREE.Mesh(
+            new THREE.DodecahedronGeometry(0.4 + Math.random() * 0.6, 0),
+            new THREE.MeshStandardNodeMaterial({ color: 0x777777, roughness: 0.95 })
+          );
+          rock.position.set(
+            (Math.random() - 0.5) * 60,
+            0.3,
+            (Math.random() - 0.5) * 60
+          );
+          rock.rotation.set(Math.random(), Math.random(), Math.random());
+          rock.castShadow = true;
+          group.add(rock);
+        }
+      }
+
+      // ═══════════════════════════════════════════════════════════════
+      // CASTLE INTERIOR CREATION
+      // ═══════════════════════════════════════════════════════════════
+      function createCastleInterior(group, physicsWorld) {
+        const { flames, glowingDoors } = window._sceneRefs || { flames: [], glowingDoors: [] };
+        const W = INTERIOR_WIDTH / 2;
+        const L = INTERIOR_DEPTH / 2;
+        const H = INTERIOR_HEIGHT;
+        const ox = INTERIOR_WORLD_OFFSET.x;
+        const oz = INTERIOR_WORLD_OFFSET.z;
+
+        // Ambient light - brighter warm dungeon feel
+        const ambient = new THREE.AmbientLight(0x553322, 1.5);
+        group.add(ambient);
+
+        // Hemisphere light for better fill
+        const hemiLight = new THREE.HemisphereLight(0x665544, 0x332211, 1.2);
+        group.add(hemiLight);
+
+        // Main directional fill light from above
+        const fillLight = new THREE.DirectionalLight(0xffddaa, 1.0);
+        fillLight.position.set(0, INTERIOR_HEIGHT - 2, 0);
+        group.add(fillLight);
+
+        // Additional area lights along the hall for better visibility
+        const hallLightPositions = [
+          [0, 10, -20],   // Back area near throne
+          [0, 10, 0],     // Center
+          [0, 10, 20],    // Near entrance
+          [-20, 8, 0],    // Left side
+          [20, 8, 0],     // Right side
+        ];
+        hallLightPositions.forEach(([lx, ly, lz]) => {
+          const areaLight = new THREE.PointLight(0xffaa66, 3.0, 40);
+          areaLight.position.set(lx, ly, lz);
+          group.add(areaLight);
+        });
+
+        // Materials
+        const wallMat = new THREE.MeshStandardNodeMaterial({ color: 0x5a5045, roughness: 0.9 });
+        const darkStoneMat = new THREE.MeshStandardNodeMaterial({ color: 0x3a3530, roughness: 0.95 });
+        const pillarMat = new THREE.MeshStandardNodeMaterial({ color: 0x6a6055, roughness: 0.7 });
+        const goldMat = new THREE.MeshStandardNodeMaterial({ color: 0xffd700, metalness: 0.8, roughness: 0.2 });
+        const redMat = new THREE.MeshStandardNodeMaterial({ color: 0x8B0000, roughness: 0.5, metalness: 0.3 });
+        const floorMat = new THREE.MeshStandardNodeMaterial({ color: 0x6a5a48, roughness: 0.85 });  // Warm stone
+        const ceilMat = new THREE.MeshStandardNodeMaterial({ color: 0x2a2520, roughness: 0.9 });
+
+        // ── FLOOR ──
+        const floor = new THREE.Mesh(new THREE.PlaneGeometry(W * 2, L * 2), floorMat);
+        floor.rotation.x = -PI / 2;
+        floor.receiveShadow = true;
+        group.add(floor);
+
+        // Checkerboard tiles - warm stone colors
+        for (let x = -W + 1; x < W; x += 3) {
+          for (let z = -L + 1; z < L; z += 3) {
+            const isDark = (Math.floor((x + W) / 3) + Math.floor((z + L) / 3)) % 2 === 0;
+            const tile = new THREE.Mesh(
+              new THREE.PlaneGeometry(2.8, 2.8),
+              new THREE.MeshStandardNodeMaterial({ color: isDark ? 0x4a3d30 : 0x6a5a48, roughness: 0.8 })
+            );
+            tile.rotation.x = -PI / 2;
+            tile.position.set(x + 1, 0.01, z + 1);
+            group.add(tile);
+          }
+        }
+
+        // ── WALLS ──
+        // Back wall
+        const backWall = new THREE.Mesh(new THREE.BoxGeometry(W * 2, H, 1), wallMat);
+        backWall.position.set(0, H / 2, -L);
+        backWall.receiveShadow = true;
+        group.add(backWall);
+
+        // Side walls
+        [-W, W].forEach(x => {
+          const wall = new THREE.Mesh(new THREE.BoxGeometry(1, H, L * 2), wallMat);
+          wall.position.set(x, H / 2, 0);
+          wall.receiveShadow = true;
+          group.add(wall);
+        });
+
+        // Front wall with door opening
+        const doorW = 4;
+        const leftFrontW = (W - doorW / 2);
+        const fwLeft = new THREE.Mesh(new THREE.BoxGeometry(leftFrontW, H, 1), wallMat);
+        fwLeft.position.set(-W + leftFrontW / 2, H / 2, L);
+        group.add(fwLeft);
+
+        const fwRight = new THREE.Mesh(new THREE.BoxGeometry(leftFrontW, H, 1), wallMat);
+        fwRight.position.set(W - leftFrontW / 2, H / 2, L);
+        group.add(fwRight);
+
+        const fwTop = new THREE.Mesh(new THREE.BoxGeometry(doorW, H - 5, 1), wallMat);
+        fwTop.position.set(0, H - (H - 5) / 2, L);
+        group.add(fwTop);
+
+        // Wall colliders
+        function addWallCollider(tx, ty, tz, hw, hh, hd) {
+          const body = physicsWorld.createRigidBody(
+            RAPIER.RigidBodyDesc.fixed().setTranslation(ox + tx, ty, oz + tz)
+          );
+          physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(hw, hh, hd), body);
+        }
+
+        addWallCollider(0, H / 2, -L, W, H / 2, 0.5);           // back
+        addWallCollider(-W, H / 2, 0, 0.5, H / 2, L);           // left
+        addWallCollider(W, H / 2, 0, 0.5, H / 2, L);            // right
+        addWallCollider(-W + leftFrontW / 2, H / 2, L, leftFrontW / 2, H / 2, 0.5);   // front left
+        addWallCollider(W - leftFrontW / 2, H / 2, L, leftFrontW / 2, H / 2, 0.5);    // front right
+        addWallCollider(0, H - (H - 5) / 2, L, doorW / 2, (H - 5) / 2, 0.5);          // above door
+
+        // ── CEILING ──
+        const ceiling = new THREE.Mesh(new THREE.PlaneGeometry(W * 2, L * 2), ceilMat);
+        ceiling.rotation.x = PI / 2;
+        ceiling.position.y = H;
+        group.add(ceiling);
+
+        // Ceiling beams
+        for (let z = -L + 5; z < L; z += 10) {
+          const beam = new THREE.Mesh(
+            new THREE.BoxGeometry(W * 1.8, 0.4, 0.8),
+            new THREE.MeshStandardNodeMaterial({ color: 0x3a2a1a, roughness: 0.8 })
+          );
+          beam.position.set(0, H - 0.5, z);
+          group.add(beam);
+        }
+
+        // ── GRAND PILLARS ──
+        const pillarSpacing = 10;
+        const pillarRowX = 15;
+        for (let z = -L + 10; z <= L - 10; z += pillarSpacing) {
+          [-pillarRowX, pillarRowX].forEach(x => {
+            const pillar = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.2, H, 12), pillarMat);
+            pillar.position.set(x, H / 2, z);
+            pillar.castShadow = true;
+            group.add(pillar);
+
+            const base = new THREE.Mesh(new THREE.CylinderGeometry(1.4, 1.6, 0.6, 12), darkStoneMat);
+            base.position.set(x, 0.3, z);
+            group.add(base);
+
+            const capital = new THREE.Mesh(new THREE.CylinderGeometry(1.4, 1.0, 0.8, 12), darkStoneMat);
+            capital.position.set(x, H - 0.4, z);
+            group.add(capital);
+
+            const ring = new THREE.Mesh(new THREE.TorusGeometry(1.15, 0.08, 8, 24), goldMat);
+            ring.position.set(x, H / 2 + 2, z);
+            ring.rotation.x = PI / 2;
+            group.add(ring);
+
+            // Pillar collider
+            const pillarBody = physicsWorld.createRigidBody(
+              RAPIER.RigidBodyDesc.fixed().setTranslation(ox + x, H / 2, oz + z)
+            );
+            physicsWorld.createCollider(RAPIER.ColliderDesc.cylinder(H / 2, 1.2), pillarBody);
+          });
+        }
+
+        // ── RED CARPET ──
+        const carpet = new THREE.Mesh(
+          new THREE.PlaneGeometry(6, L * 1.6),
+          new THREE.MeshStandardNodeMaterial({ color: 0x8B1A1A, roughness: 0.95 })
+        );
+        carpet.rotation.x = -PI / 2;
+        carpet.position.set(0, 0.02, -5);
+        group.add(carpet);
+
+        // Carpet gold borders
+        [-3.1, 3.1].forEach(x => {
+          const border = new THREE.Mesh(
+            new THREE.PlaneGeometry(0.15, L * 1.6),
+            new THREE.MeshStandardNodeMaterial({ color: 0xc4a035, roughness: 0.6 })
+          );
+          border.rotation.x = -PI / 2;
+          border.position.set(x, 0.025, -5);
+          group.add(border);
+        });
+
+        // ── TORCHES ──
+        function addTorch(x, y, z) {
+          const stick = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.06, 0.06, 1, 6),
+            new THREE.MeshStandardNodeMaterial({ color: 0x4a3520 })
+          );
+          stick.position.set(x, y, z);
+          group.add(stick);
+
+          const flame = new THREE.Mesh(
+            new THREE.SphereGeometry(0.18, 8, 8),
+            new THREE.MeshStandardNodeMaterial({ color: 0xff6600, emissive: 0xff4400, emissiveIntensity: 2 })
+          );
+          flame.position.set(x, y + 0.6, z);
+          flame.userData.isFlame = true;
+          group.add(flame);
+          flames.push(flame);
+
+          const torchLight = new THREE.PointLight(0xff6622, 4.0, 25);
+          torchLight.position.set(x, y + 0.6, z);
+          group.add(torchLight);
+        }
+
+        // Wall torches
+        for (let z = -L + 8; z <= L - 8; z += 12) {
+          addTorch(-W + 1.5, 5, z);
+          addTorch(W - 1.5, 5, z);
+        }
+        // Pillar torches
+        for (let z = -L + 10; z <= L - 10; z += pillarSpacing * 2) {
+          addTorch(-pillarRowX, 6, z);
+          addTorch(pillarRowX, 6, z);
+        }
+
+        // ── THRONE AREA ──
+        const platform = new THREE.Mesh(new THREE.BoxGeometry(20, 1.2, 12), darkStoneMat);
+        platform.position.set(0, 0.6, -L + 8);
+        platform.receiveShadow = true;
+        group.add(platform);
+
+        // Platform collider
+        const platBody = physicsWorld.createRigidBody(
+          RAPIER.RigidBodyDesc.fixed().setTranslation(ox, 0.6, oz - L + 8)
+        );
+        physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(10, 0.6, 6), platBody);
+
+        // Steps
+        for (let i = 0; i < 3; i++) {
+          const step = new THREE.Mesh(
+            new THREE.BoxGeometry(16 + i * 3, 0.3, 1.5),
+            new THREE.MeshStandardNodeMaterial({ color: 0x504840, roughness: 0.85 })
+          );
+          step.position.set(0, 0.15 + (2 - i) * 0.3, -L + 14 + i * 1.5);
+          group.add(step);
+        }
+
+        // Throne
+        const throneSeat = new THREE.Mesh(new THREE.BoxGeometry(3.5, 0.6, 3), redMat);
+        throneSeat.position.set(0, 1.5, -L + 6);
+        throneSeat.castShadow = true;
+        group.add(throneSeat);
+
+        const throneBack = new THREE.Mesh(new THREE.BoxGeometry(3.5, 6, 0.5), redMat);
+        throneBack.position.set(0, 4.5, -L + 4.7);
+        throneBack.castShadow = true;
+        group.add(throneBack);
+
+        const throneTopTrim = new THREE.Mesh(new THREE.BoxGeometry(3.8, 0.3, 0.6), goldMat);
+        throneTopTrim.position.set(0, 7.65, -L + 4.7);
+        group.add(throneTopTrim);
+
+        [-1.5, 1.5].forEach(x => {
+          const arm = new THREE.Mesh(new THREE.BoxGeometry(0.4, 1.5, 3), redMat);
+          arm.position.set(x, 2.5, -L + 6);
+          group.add(arm);
+        });
+
+        // Throne spotlight
+        const throneSpot = new THREE.SpotLight(0xffcc66, 3, 20, PI / 6, 0.5);
+        throneSpot.position.set(0, H - 1, -L + 10);
+        throneSpot.target.position.set(0, 1, -L + 6);
+        group.add(throneSpot);
+        group.add(throneSpot.target);
+
+        // ── BANNERS ──
+        const bannerMat = new THREE.MeshStandardNodeMaterial({ color: 0x8B0000, roughness: 0.7, side: THREE.DoubleSide });
+        const bannerGoldMat = new THREE.MeshStandardNodeMaterial({ color: 0xc4a035, roughness: 0.5, side: THREE.DoubleSide });
+        for (let z = -L + 15; z <= L - 15; z += 20) {
+          [-W + 0.8, W - 0.8].forEach(x => {
+            const banner = new THREE.Mesh(new THREE.PlaneGeometry(3, 7), bannerMat);
+            banner.position.set(x, 7, z);
+            banner.rotation.y = x < 0 ? PI / 2 : -PI / 2;
+            group.add(banner);
+
+            const emblem = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 1.2), bannerGoldMat);
+            emblem.position.set(x < 0 ? x + 0.05 : x - 0.05, 7.5, z);
+            emblem.rotation.y = x < 0 ? PI / 2 : -PI / 2;
+            emblem.rotation.z = PI / 4;
+            group.add(emblem);
+          });
+        }
+
+        // ── ALCOVES WITH DECORATIONS ──
+        for (let z = -35; z <= 35; z += 20) {
+          [-W + 3, W - 3].forEach(x => {
+            const alcove = new THREE.Mesh(
+              new THREE.BoxGeometry(4, 6, 0.3),
+              new THREE.MeshStandardNodeMaterial({ color: 0x2a2520, roughness: 0.9 })
+            );
+            alcove.position.set(x, 3.5, z);
+            group.add(alcove);
+
+            const pedestal = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.6, 1.5, 8), darkStoneMat);
+            pedestal.position.set(x, 0.75, z + 1);
+            group.add(pedestal);
+
+            const itemType = Math.floor(Math.abs(Math.sin(x * z)) * 3);
+            if (itemType === 0) {
+              const vase = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.2, 0.35, 0.8, 8),
+                new THREE.MeshStandardNodeMaterial({ color: 0x4488aa, roughness: 0.3, metalness: 0.4 })
+              );
+              vase.position.set(x, 1.9, z + 1);
+              group.add(vase);
+            } else if (itemType === 1) {
+              const chalice = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.15, 0.6, 8), goldMat);
+              chalice.position.set(x, 1.8, z + 1);
+              group.add(chalice);
+            } else {
+              const orb = new THREE.Mesh(
+                new THREE.SphereGeometry(0.25, 12, 12),
+                new THREE.MeshStandardNodeMaterial({ color: 0x6688ff, emissive: 0x2244aa, emissiveIntensity: 0.5, roughness: 0.1, metalness: 0.3 })
+              );
+              orb.position.set(x, 1.8, z + 1);
+              group.add(orb);
+            }
+          });
+        }
+
+        // ── DINING TABLES ──
+        [-25, 25].forEach(xArea => {
+          const tableMat = new THREE.MeshStandardNodeMaterial({ color: 0x5a3a1a, roughness: 0.7 });
+          const table = new THREE.Mesh(new THREE.BoxGeometry(8, 0.3, 18), tableMat);
+          table.position.set(xArea, 1.2, -5);
+          table.castShadow = true;
+          group.add(table);
+
+          // Table collider
+          const tableBody = physicsWorld.createRigidBody(
+            RAPIER.RigidBodyDesc.fixed().setTranslation(ox + xArea, 0.6, oz - 5)
+          );
+          physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(4, 0.6, 9), tableBody);
+
+          [[-3.5, -8], [3.5, -8], [-3.5, 4], [3.5, 4]].forEach(([lx, lz]) => {
+            const leg = new THREE.Mesh(new THREE.BoxGeometry(0.3, 1.2, 0.3), tableMat);
+            leg.position.set(xArea + lx, 0.6, -5 + lz);
+            group.add(leg);
+          });
+
+          // Candelabras
+          [-8, 0, 8].forEach(zOff => {
+            const candleBase = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.3, 0.2, 8), goldMat);
+            candleBase.position.set(xArea, 1.45, -5 + zOff);
+            group.add(candleBase);
+
+            [-0.2, 0, 0.2].forEach(cx => {
+              const candle = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.04, 0.04, 0.5, 6),
+                new THREE.MeshStandardNodeMaterial({ color: 0xeeddbb })
+              );
+              candle.position.set(xArea + cx, 1.75, -5 + zOff);
+              group.add(candle);
+
+              const candleFlame = new THREE.Mesh(
+                new THREE.SphereGeometry(0.06, 6, 6),
+                new THREE.MeshStandardNodeMaterial({ color: 0xff8800, emissive: 0xff6600, emissiveIntensity: 2 })
+              );
+              candleFlame.position.set(xArea + cx, 2.05, -5 + zOff);
+              candleFlame.userData.isFlame = true;
+              group.add(candleFlame);
+              flames.push(candleFlame);
+            });
+
+            const tableLight = new THREE.PointLight(0xff8844, 0.8, 8);
+            tableLight.position.set(xArea, 2.5, -5 + zOff);
+            group.add(tableLight);
+          });
+
+          // Benches
+          [-4.8, 4.8].forEach(benchOffset => {
+            const bench = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.2, 16), tableMat);
+            bench.position.set(xArea + benchOffset, 0.6, -5);
+            group.add(bench);
+          });
+        });
+
+        // ── SUITS OF ARMOR ──
+        for (let z = -L + 15; z <= L - 20; z += 20) {
+          [-pillarRowX - 4, pillarRowX + 4].forEach(x => {
+            const armorGroup = new THREE.Group();
+            const armorMat = new THREE.MeshStandardNodeMaterial({ color: 0x888888, roughness: 0.4, metalness: 0.7 });
+
+            const body = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.5, 1.5, 8), armorMat);
+            body.position.y = 1.5;
+            armorGroup.add(body);
+
+            const helmet = new THREE.Mesh(new THREE.SphereGeometry(0.35, 8, 8), armorMat);
+            helmet.position.y = 2.5;
+            armorGroup.add(helmet);
+
+            const visor = new THREE.Mesh(
+              new THREE.BoxGeometry(0.3, 0.1, 0.4),
+              new THREE.MeshStandardNodeMaterial({ color: 0x222222 })
+            );
+            visor.position.set(0, 2.45, 0.2);
+            armorGroup.add(visor);
+
+            const spear = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.03, 0.03, 4, 6),
+              new THREE.MeshStandardNodeMaterial({ color: 0x5a3a1a })
+            );
+            spear.position.set(0.5, 2.2, 0);
+            armorGroup.add(spear);
+
+            const spearTip = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.4, 6), armorMat);
+            spearTip.position.set(0.5, 4.4, 0);
+            armorGroup.add(spearTip);
+
+            const armorBase = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.6, 0.5, 8), darkStoneMat);
+            armorBase.position.y = 0.25;
+            armorGroup.add(armorBase);
+
+            armorGroup.position.set(x, 0, z);
+            group.add(armorGroup);
+
+            // Armor collider
+            const armorBody = physicsWorld.createRigidBody(
+              RAPIER.RigidBodyDesc.fixed().setTranslation(ox + x, 1.5, oz + z)
+            );
+            physicsWorld.createCollider(RAPIER.ColliderDesc.cylinder(1.5, 0.5), armorBody);
+          });
+        }
+
+        // ── CHANDELIERS ──
+        [0, -25, 25].forEach(zPos => {
+          const chandelierGroup = new THREE.Group();
+
+          const chanRing = new THREE.Mesh(new THREE.TorusGeometry(2.5, 0.15, 8, 24), goldMat);
+          chanRing.rotation.x = PI / 2;
+          chandelierGroup.add(chanRing);
+
+          for (let i = 0; i < 4; i++) {
+            const angle = (i / 4) * PI * 2;
+            const chain = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.03, 0.03, 3, 4),
+              new THREE.MeshStandardNodeMaterial({ color: 0x888866 })
+            );
+            chain.position.set(Math.cos(angle) * 2.3, 1.5, Math.sin(angle) * 2.3);
+            chandelierGroup.add(chain);
+          }
+
+          for (let i = 0; i < 8; i++) {
+            const angle = (i / 8) * PI * 2;
+            const cx = Math.cos(angle) * 2.5;
+            const cz = Math.sin(angle) * 2.5;
+
+            const candle = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.04, 0.04, 0.4, 6),
+              new THREE.MeshStandardNodeMaterial({ color: 0xeeddbb })
+            );
+            candle.position.set(cx, 0.2, cz);
+            chandelierGroup.add(candle);
+
+            const fl = new THREE.Mesh(
+              new THREE.SphereGeometry(0.07, 6, 6),
+              new THREE.MeshStandardNodeMaterial({ color: 0xff8800, emissive: 0xff6600, emissiveIntensity: 2 })
+            );
+            fl.position.set(cx, 0.45, cz);
+            fl.userData.isFlame = true;
+            chandelierGroup.add(fl);
+            flames.push(fl);
+          }
+
+          const chanLight = new THREE.PointLight(0xff9944, 5.0, 35);
+          chandelierGroup.add(chanLight);
+
+          chandelierGroup.position.set(0, H - 3.5, zPos);
+          group.add(chandelierGroup);
+        });
+
+        // ── EXIT DOOR (glowing blue) ──
+        const exitDoorMat = new THREE.MeshStandardNodeMaterial({
+          color: 0x80c0ff,
+          emissive: 0x4080ff,
+          emissiveIntensity: 0.6,
+          roughness: 0.3
+        });
+        const exitDoor = new THREE.Mesh(new THREE.BoxGeometry(3, 4.5, 0.3), exitDoorMat);
+        exitDoor.position.set(0, 2.25, L);
+        exitDoor.userData.isGlowingDoor = true;
+        group.add(exitDoor);
+        glowingDoors.push(exitDoor);
+
+        const exitLight = new THREE.PointLight(0x4080ff, 3, 12);
+        exitLight.position.set(0, 3, L - 2);
+        group.add(exitLight);
+      }
+
+      init().catch((e) => {
+        console.error("Init failed:", e);
+        document.getElementById("backend").textContent = "Error: " + e.message;
+      });
+    </script>
+  </body>
+</html>

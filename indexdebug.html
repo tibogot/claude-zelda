@@ -139,12 +139,14 @@
       const INTERIOR_DEPTH = 30;
       const INTERIOR_HEIGHT = 12;
       const INTERIOR_CENTER = new THREE.Vector3(0, 0, 0);
+      // Interior is placed far from exterior so their physics colliders never overlap
+      const INTERIOR_WORLD_POS = new THREE.Vector3(0, 0, -300);
 
       // Spawn points
       const EXTERIOR_SPAWN = new THREE.Vector3(0, 0, 0);
-      // Interior room: x from -12.5 to +12.5, z from -15 to +15, door at z=+15
-      // Spawn in CENTER of room at origin, facing the back wall (toward -Z)
-      const INTERIOR_SPAWN = new THREE.Vector3(0, 0, 0);
+      // Spawn just inside the door (local z = +6). camYaw is PRESERVED from exterior so
+      // the camera angle is seamless – player faces the door they just walked through.
+      const INTERIOR_SPAWN = new THREE.Vector3(INTERIOR_WORLD_POS.x, 0, INTERIOR_WORLD_POS.z + 6);
       const EXTERIOR_EXIT_SPAWN = new THREE.Vector3(BUILDING_POS.x, 0, BUILDING_POS.z + BUILDING_DEPTH / 2 + 2.5);
 
       async function init() {
@@ -179,6 +181,11 @@
         const groundBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(0, -0.5, 0);
         const groundBody = physicsWorld.createRigidBody(groundBodyDesc);
         physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(groundHalfExtent, 0.5, groundHalfExtent), groundBody);
+
+        // Interior floor collider – interior is at z=-300, outside the ground body range
+        const intFloorBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(INTERIOR_WORLD_POS.x, -0.5, INTERIOR_WORLD_POS.z);
+        const intFloorBody = physicsWorld.createRigidBody(intFloorBodyDesc);
+        physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(INTERIOR_WIDTH / 2 + 1, 0.5, INTERIOR_DEPTH / 2 + 1), intFloorBody);
 
         // ══════════════════════════════════════════════════════════════
         // EXTERIOR SCENE
@@ -240,23 +247,22 @@
         // Door is on the +Z wall (z = +15)
         // ══════════════════════════════════════════════════════════════
         interiorGroup = new THREE.Group();
+        interiorGroup.position.copy(INTERIOR_WORLD_POS); // all child geometry is local to this offset
         interiorGroup.visible = false;
         scene.add(interiorGroup);
 
-        // ── INTERIOR LIGHTING (very bright) ──
-        const intAmbient = new THREE.AmbientLight(0xffffff, 3.0);
+        // ── INTERIOR LIGHTING (warm dungeon – torches added later) ──
+        const intAmbient = new THREE.AmbientLight(0xffddaa, 0.7);
         interiorGroup.add(intAmbient);
 
-        const intHemi = new THREE.HemisphereLight(0xffffff, 0x888877, 2.0);
-        interiorGroup.add(intHemi);
-
-        const intDirLight = new THREE.DirectionalLight(0xffffff, 2.0);
+        // Soft fill so nothing is pitch-black without torches
+        const intDirLight = new THREE.DirectionalLight(0xffeecc, 0.3);
         intDirLight.position.set(0, 10, 0);
         interiorGroup.add(intDirLight);
 
         // ── FLOOR (distinctive blue-gray color) ──
         const intFloorGeo = new THREE.PlaneGeometry(INTERIOR_WIDTH, INTERIOR_DEPTH);
-        const intFloorMat = new THREE.MeshStandardNodeMaterial({ color: 0x4a6a7a, roughness: 0.7 });
+        const intFloorMat = new THREE.MeshStandardNodeMaterial({ color: 0x6a6458, roughness: 0.88 });
         const intFloor = new THREE.Mesh(intFloorGeo, intFloorMat);
         intFloor.rotation.x = -PI / 2;
         intFloor.position.y = 0.01;
@@ -386,9 +392,32 @@
         const exitTriggerGeo = new THREE.BoxGeometry(DOOR_WIDTH, DOOR_HEIGHT, 2);
         const exitTriggerMat = new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.3 });
         const exitTriggerMesh = new THREE.Mesh(exitTriggerGeo, exitTriggerMat);
-        // Put it INSIDE the room, just before the door (at z = +13)
+        // Local z = INTERIOR_DEPTH/2 - 2 = +13 (2 units inside the front wall)
         exitTriggerMesh.position.set(0, DOOR_HEIGHT / 2, INTERIOR_DEPTH / 2 - 2);
         interiorGroup.add(exitTriggerMesh);
+
+        // ── CORNER PILLARS ──
+        const pillarMat = new THREE.MeshStandardNodeMaterial({ color: 0x7a7268, roughness: 0.85 });
+        [
+          [-INTERIOR_WIDTH / 2 + 0.4, -INTERIOR_DEPTH / 2 + 0.4],
+          [ INTERIOR_WIDTH / 2 - 0.4, -INTERIOR_DEPTH / 2 + 0.4],
+          [-INTERIOR_WIDTH / 2 + 0.4,  INTERIOR_DEPTH / 2 - 0.4],
+          [ INTERIOR_WIDTH / 2 - 0.4,  INTERIOR_DEPTH / 2 - 0.4],
+        ].forEach(([px, pz]) => {
+          const pillar = new THREE.Mesh(new THREE.BoxGeometry(0.8, INTERIOR_HEIGHT, 0.8), pillarMat);
+          pillar.position.set(px, INTERIOR_HEIGHT / 2, pz);
+          pillar.castShadow = true;
+          interiorGroup.add(pillar);
+        });
+
+        // ── WALL TORCHES (4 torches, added to group so world pos = group offset + local) ──
+        addInteriorTorch(interiorGroup, -INTERIOR_WIDTH / 2 + 0.5, 4,  0);                   // left wall
+        addInteriorTorch(interiorGroup,  INTERIOR_WIDTH / 2 - 0.5, 4,  0);                   // right wall
+        addInteriorTorch(interiorGroup, -4,                         4, -INTERIOR_DEPTH / 2 + 0.5); // back-left
+        addInteriorTorch(interiorGroup,  4,                         4, -INTERIOR_DEPTH / 2 + 0.5); // back-right
+
+        // ── INTERIOR WALL PHYSICS COLLIDERS ──
+        createInteriorColliders(physicsWorld);
 
         // ══════════════════════════════════════════════════════════════
         // PLAYER SETUP
@@ -579,7 +608,7 @@
             if (targetScene === "interior") {
               exteriorGroup.visible = false;
               interiorGroup.visible = true;
-              scene.background = new THREE.Color(0x2a2a3a);
+              scene.background = new THREE.Color(0x1a1208); // dark warm dungeon
               renderer.toneMappingExposure = 1.2;
               sceneIndicator.textContent = "INTERIOR (Inside Building)";
               sceneIndicator.style.background = "rgba(139, 69, 19, 0.8)";
@@ -595,9 +624,14 @@
             }
 
             // Teleport player
+            characterVelY = 0;
             charPos.set(spawnPos.x, capHalfH + capR, spawnPos.z);
             playerBody.setNextKinematicTranslation({ x: charPos.x, y: charPos.y, z: charPos.z });
-            characterVelY = 0;
+            // CRITICAL: step physics NOW to commit the teleport position.
+            // Without this, the next animation-loop frame reads the OLD body translation,
+            // recomputes nextPos = old + delta, and calls setNextKinematicTranslation again
+            // — silently overwriting the teleport before the scene even fades in.
+            physicsWorld.step();
 
             // Set camera facing
             if (facingYaw !== undefined) {
@@ -622,9 +656,10 @@
         }
 
         function isInInteriorDoorZone(pos) {
-          // Exit trigger is INSIDE room at z = +13 (INTERIOR_DEPTH/2 - 2)
-          const dx = pos.x - 0;
-          const dz = pos.z - (INTERIOR_DEPTH / 2 - 2);
+          // Exit trigger local z = INTERIOR_DEPTH/2 - 2 = +13 → world z = INTERIOR_WORLD_POS.z + 13
+          const doorWorldZ = INTERIOR_WORLD_POS.z + INTERIOR_DEPTH / 2 - 2;
+          const dx = pos.x - INTERIOR_WORLD_POS.x;
+          const dz = pos.z - doorWorldZ;
           return Math.abs(dx) < DOOR_WIDTH / 2 + 0.5 && Math.abs(dz) < 1.5 && pos.y < DOOR_HEIGHT;
         }
 
@@ -758,8 +793,8 @@
           // ── CHECK DOOR TRIGGERS ──
           if (!isTransitioning && transitionCooldown <= 0) {
             if (currentScene === "exterior" && isInExteriorDoorZone(charPos)) {
-              // Spawn inside room, facing INTO the room (toward -Z where furniture is)
-              transitionToScene("interior", INTERIOR_SPAWN, 0);
+              // No facingYaw → camYaw is preserved, same camera angle as exterior
+              transitionToScene("interior", INTERIOR_SPAWN);
             } else if (currentScene === "interior" && isInInteriorDoorZone(charPos)) {
               // Exit and face away from building
               transitionToScene("exterior", EXTERIOR_EXIT_SPAWN, PI);
@@ -772,6 +807,16 @@
           const cy = charPos.y + Math.sin(camPitch) * camDist + PARAMS.camHeight + 1;
           const cz = charPos.z - Math.cos(camYaw) * Math.cos(camPitch) * camDist;
           camera.position.set(cx, Math.max(cy, 2), cz);
+
+          // Keep camera inside interior room walls
+          if (currentScene === "interior") {
+            const m = 0.3;
+            camera.position.x = Math.max(INTERIOR_WORLD_POS.x - INTERIOR_WIDTH / 2 + m,
+                                  Math.min(INTERIOR_WORLD_POS.x + INTERIOR_WIDTH / 2 - m, camera.position.x));
+            camera.position.z = Math.max(INTERIOR_WORLD_POS.z - INTERIOR_DEPTH / 2 + m,
+                                  Math.min(INTERIOR_WORLD_POS.z + INTERIOR_DEPTH / 2 - m, camera.position.z));
+          }
+
           camera.lookAt(charPos.x, charPos.y + 0.5, charPos.z);
 
           // Debug position display
@@ -943,6 +988,55 @@
         const frontTopBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(buildingPos.x, DH + (H - DH) / 2, buildingPos.z + D / 2);
         const frontTopBody = physicsWorld.createRigidBody(frontTopBodyDesc);
         physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(DW / 2, (H - DH) / 2, wallThickness / 2), frontTopBody);
+      }
+
+      // ═══════════════════════════════════════════════════════════════
+      // INTERIOR HELPERS
+      // ═══════════════════════════════════════════════════════════════
+
+      function createInteriorColliders(physicsWorld) {
+        const W  = INTERIOR_WIDTH,  D  = INTERIOR_DEPTH,  H  = INTERIOR_HEIGHT;
+        const DW = DOOR_WIDTH,      DH = DOOR_HEIGHT,     wt = 0.5;
+        const ox = INTERIOR_WORLD_POS.x, oz = INTERIOR_WORLD_POS.z;
+
+        function addWall(tx, ty, tz, hw, hh, hd) {
+          const body = physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(tx, ty, tz));
+          physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(hw, hh, hd), body);
+        }
+
+        addWall(ox,              H / 2,           oz - D / 2,  W / 2,         H / 2,           wt / 2); // back
+        addWall(ox - W / 2,     H / 2,           oz,          wt / 2,        H / 2,           D / 2);  // left
+        addWall(ox + W / 2,     H / 2,           oz,          wt / 2,        H / 2,           D / 2);  // right
+
+        const fw = (W - DW) / 2;
+        addWall(ox - W / 2 + fw / 2,  H / 2,            oz + D / 2,  fw / 2,  H / 2,  wt / 2); // front-left
+        addWall(ox + W / 2 - fw / 2,  H / 2,            oz + D / 2,  fw / 2,  H / 2,  wt / 2); // front-right
+        addWall(ox,                   DH + (H - DH) / 2, oz + D / 2,  DW / 2,  (H - DH) / 2, wt / 2); // above door
+      }
+
+      function addInteriorTorch(group, x, y, z) {
+        const woodMat  = new THREE.MeshStandardNodeMaterial({ color: 0x4a3020, roughness: 0.9 });
+        const flameMat = new THREE.MeshStandardNodeMaterial({ color: 0xff8800, roughness: 0.2 });
+
+        // Wall bracket
+        const bracket = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.1, 0.35), woodMat);
+        bracket.position.set(x, y, z);
+        group.add(bracket);
+
+        // Torch stick
+        const stick = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.06, 0.5, 6), woodMat);
+        stick.position.set(x, y + 0.3, z);
+        group.add(stick);
+
+        // Flame
+        const flame = new THREE.Mesh(new THREE.SphereGeometry(0.13, 8, 8), flameMat);
+        flame.position.set(x, y + 0.6, z);
+        group.add(flame);
+
+        // Point light – warm orange, 14-unit radius
+        const light = new THREE.PointLight(0xff8844, 10, 14, 1.5);
+        light.position.set(x, y + 0.6, z);
+        group.add(light);
       }
 
       init().catch((e) => {

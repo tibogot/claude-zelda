@@ -268,11 +268,6 @@
         rapierDebug: false,
         // Scene toggles for FPS debugging
         showRuins: true,
-        showChurch: true,
-        churchX: -100,
-        churchZ: 60,
-        churchScale: 2.0,
-        churchYOffset: -0.5,
         showTrees: false,
         showScatter: false,
         showBuildings: false,
@@ -2322,70 +2317,6 @@
           );
         });
 
-        // ── RUINED CHURCH (Elden Ring style) ──
-        let churchModel = null;
-        gltfLoader.load("models/ruined_elden_ring_church.glb", (gltf) => {
-          const church = gltf.scene;
-          churchModel = church;
-          church.position.set(
-            PARAMS.churchX,
-            sampleHeight(PARAMS.churchX, PARAMS.churchZ) + PARAMS.churchYOffset,
-            PARAMS.churchZ,
-          );
-          church.scale.setScalar(PARAMS.churchScale);
-          church.traverse((o) => {
-            if (o.isMesh) {
-              o.castShadow = true;
-              o.receiveShadow = true;
-            }
-          });
-          church.visible = PARAMS.showChurch;
-          scene.add(church);
-          church.updateMatrixWorld(true);
-          const box = new THREE.Box3().setFromObject(church);
-          const center = new THREE.Vector3();
-          box.getCenter(center);
-          const verts = [],
-            inds = [];
-          const vTemp = new THREE.Vector3();
-          let vertexOffset = 0;
-          church.traverse((o) => {
-            if (!o.isMesh || !o.geometry) return;
-            const geo = o.geometry;
-            const posAttr = geo.attributes.position;
-            const idxAttr = geo.index;
-            const worldMat = o.matrixWorld;
-            for (let i = 0; i < posAttr.count; i++) {
-              vTemp.fromBufferAttribute(posAttr, i).applyMatrix4(worldMat);
-              verts.push(
-                vTemp.x - center.x,
-                vTemp.y - center.y,
-                vTemp.z - center.z,
-              );
-            }
-            if (idxAttr) {
-              for (let i = 0; i < idxAttr.count; i++)
-                inds.push(vertexOffset + idxAttr.getX(i));
-            } else {
-              for (let i = 0; i < posAttr.count; i++)
-                inds.push(vertexOffset + i);
-            }
-            vertexOffset += posAttr.count;
-          });
-          const churchVerts = new Float32Array(verts);
-          const churchInds = new Uint32Array(inds);
-          const churchBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(
-            center.x,
-            center.y,
-            center.z,
-          );
-          const churchBody = physicsWorld.createRigidBody(churchBodyDesc);
-          physicsWorld.createCollider(
-            RAPIER.ColliderDesc.trimesh(churchVerts, churchInds),
-            churchBody,
-          );
-        });
-
         // ── FLAG (cloth physics simulation) — near ruins ──
         // Pole bottom sits ~0.4225 * scale units below the group origin,
         // so raise Y by that amount to plant the pole base on the terrain.
@@ -3206,11 +3137,6 @@
           expanded: false,
         });
         fScene.addBinding(PARAMS, "showRuins", { label: "Ruins" });
-        fScene.addBinding(PARAMS, "showChurch", { label: "Church" });
-        fScene.addBinding(PARAMS, "churchX", { min: -200, max: 200, step: 1, label: "Church X" });
-        fScene.addBinding(PARAMS, "churchZ", { min: -200, max: 200, step: 1, label: "Church Z" });
-        fScene.addBinding(PARAMS, "churchScale", { min: 0.1, max: 10, step: 0.1, label: "Church Scale" });
-        fScene.addBinding(PARAMS, "churchYOffset", { min: -10, max: 10, step: 0.1, label: "Church Y Offset" });
         fScene.addBinding(PARAMS, "showTrees", { label: "Trees" });
         fScene.addBinding(PARAMS, "showBuildings", { label: "Buildings" });
         fScene.addBinding(PARAMS, "showFluffyTree", { label: "Fluffy Tree" });
@@ -4234,15 +4160,6 @@
           dirLight.shadow.bias = PARAMS.shadowBias;
           dirLight.shadow.normalBias = PARAMS.shadowNormalBias;
           if (ruinsModel) ruinsModel.visible = PARAMS.showRuins;
-          if (churchModel) {
-            churchModel.visible = PARAMS.showChurch;
-            churchModel.position.set(
-              PARAMS.churchX,
-              sampleHeight(PARAMS.churchX, PARAMS.churchZ) + PARAMS.churchYOffset,
-              PARAMS.churchZ,
-            );
-            churchModel.scale.setScalar(PARAMS.churchScale);
-          }
           if (PARAMS.rapierDebug) buildRapierDebugMeshes();
           for (const { body, mesh } of physicsCubes) {
             const t = body.translation();
