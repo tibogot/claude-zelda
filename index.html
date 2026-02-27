@@ -285,13 +285,15 @@
         treeCount: 10000,
         treeCulling: true,
         treeScale: 10,
-        treeAlphaTest: 0.5,
+        treeAlphaTest: 0.1,
         treeOpacity: 1,
         treeDepthWrite: true,
         // Octahedral impostor forest (LOD impostors from octahedralImpostor.js)
         octahedralForestEnabled: true,
         octahedralForestScale: 1,
-        octahedralForestAlphaClamp: 0.4,
+        octahedralForestTreeScale: 1.5,
+        octahedralForestAlphaClamp: 0.15,
+        octahedralForestLod0Alpha: 0.1,
         // LOD distances (instant sliders)
         octahedralForestLodDist:   40,
         octahedralForestLod2Dist:  150,
@@ -1807,7 +1809,7 @@
                   metalness: m.metalness != null ? m.metalness : 0,
                   map: m.map || null,
                   normalMap: m.normalMap || null,
-                  transparent: false,
+                  transparent: isLeafMaterial,
                   alphaTest: isLeafMaterial
                     ? PARAMS.treeAlphaTest
                     : (m.alphaTest != null ? m.alphaTest : 0),
@@ -2183,12 +2185,13 @@
             octahedralForest = await createOctahedralImpostorForest({
               modelPath:       PARAMS.octahedralForestModelPath,
               treeCount:       PARAMS.octahedralForestTreeCount,
-              treeScale:       1.5,
+              treeScale:       PARAMS.octahedralForestTreeScale,
               lodDistance:     PARAMS.octahedralForestLodDist,
               radius:          450,
               minRadius:       20,
               centerPosition:  [0, 0, 0],
               getTerrainHeight: sampleHeight,
+              lod0AlphaTest:   PARAMS.octahedralForestLod0Alpha,
               impostorSettings: {
                 spritesPerSide:       PARAMS.octahedralForestSprites,
                 textureSize:          PARAMS.octahedralForestTexSize,
@@ -2963,9 +2966,14 @@
           if (octahedralForest) octahedralForest.group.scale.setScalar(PARAMS.octahedralForestScale);
         });
         fOctahedralForest.addBinding(PARAMS, "octahedralForestAlphaClamp", {
-          min: 0.01, max: 0.5, step: 0.01, label: "alpha clamp (leaf cutout)",
+          min: 0.01, max: 0.5, step: 0.01, label: "impostor alpha (LOD1/2)",
         }).on("change", () => {
           if (octahedralForest) octahedralForest.setAlphaClamp(PARAMS.octahedralForestAlphaClamp);
+        });
+        fOctahedralForest.addBinding(PARAMS, "octahedralForestLod0Alpha", {
+          min: 0.01, max: 0.5, step: 0.01, label: "LOD0 alpha (real mesh)",
+        }).on("change", () => {
+          if (octahedralForest) octahedralForest.setLod0AlphaTest(PARAMS.octahedralForestLod0Alpha);
         });
 
         // ── LOD Distances ────────────────────────────────────────────────────────
@@ -3037,6 +3045,9 @@
         fForestRebuild.addBinding(PARAMS, "octahedralForestModelPath", { label: "model path" });
         fForestRebuild.addBinding(PARAMS, "octahedralForestTreeCount", {
           min: 200, max: 5000, step: 100, label: "tree count",
+        });
+        fForestRebuild.addBinding(PARAMS, "octahedralForestTreeScale", {
+          min: 0.5, max: 5, step: 0.1, label: "tree scale",
         });
         fForestRebuild.addButton({ title: "↺ Rebuild Forest" }).on("click", rebuildOctahedralForest);
 

@@ -880,6 +880,7 @@ export async function createOctahedralImpostorForest(opts = {}) {
     minRadius = 30,
     centerPosition = [0, 0, 0],
     getTerrainHeight = null,
+    lod0AlphaTest = 0.1,  // alpha test for LOD0 leaf materials
     impostorSettings = {},
   } = opts;
 
@@ -961,8 +962,8 @@ export async function createOctahedralImpostorForest(opts = {}) {
       roughness: m?.roughness ?? 0.8,
       metalness: m?.metalness ?? 0,
       map: m?.map ?? null,
-      transparent: false,
-      alphaTest: isLeaf ? iOpts.alphaTest : 0.5, // 0.5 lets dither-discard (alpha=0) work on trunks too
+      transparent: isLeaf,
+      alphaTest: isLeaf ? lod0AlphaTest : 0.5,
       side: isLeaf ? THREE.DoubleSide : (m?.side ?? THREE.FrontSide),
       depthWrite: true,
     });
@@ -1302,6 +1303,10 @@ export async function createOctahedralImpostorForest(opts = {}) {
     setAlphaClamp: (v) => {
       impostorMat.alphaTest = v;
       megaMat.alphaTest = v;
+    },
+    // Alpha test on LOD0 real mesh leaf materials (instant)
+    setLod0AlphaTest: (v) => {
+      leafMats.forEach((mat) => { mat.alphaTest = v; });
     },
     // Debug: show wireframe of impostor plane(s)
     setWireframeVisible: (v) => {
