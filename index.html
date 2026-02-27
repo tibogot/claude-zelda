@@ -2165,9 +2165,6 @@
         }
 
         // Sync impostor lighting to scene lights so ACES tonemapping matches real objects.
-        // Ambient: average of hemi sky+ground × 0.25. This matches what Lambert back-faces see:
-        // a surface perpendicular to the ground gets roughly (sky+ground)/2 from the hemi light,
-        // and the 0.25 factor accounts for the hemi solid-angle distribution (vs a naive intensity).
         function syncImpostorLighting() {
           if (!octahedralForest) return;
           octahedralForest.updateSunColor(new THREE.Vector3(
@@ -2175,6 +2172,21 @@
             dirLight.color.g * dirLight.intensity,
             dirLight.color.b * dirLight.intensity,
           ));
+          // Hemisphere light colors for proper ambient gradient
+          const hemiIntensity = hemiLight.intensity * 0.5;
+          octahedralForest.updateHemiColors(
+            new THREE.Vector3(
+              hemiLight.color.r * hemiIntensity,
+              hemiLight.color.g * hemiIntensity,
+              hemiLight.color.b * hemiIntensity,
+            ),
+            new THREE.Vector3(
+              hemiLight.groundColor.r * hemiIntensity,
+              hemiLight.groundColor.g * hemiIntensity,
+              hemiLight.groundColor.b * hemiIntensity,
+            ),
+          );
+          // Keep legacy ambColor for backwards compatibility (averaged)
           const ambFactor = hemiLight.intensity * 0.25;
           octahedralForest.updateAmbColor(new THREE.Vector3(
             (hemiLight.color.r + hemiLight.groundColor.r) * 0.5 * ambFactor,

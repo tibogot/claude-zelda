@@ -673,6 +673,8 @@ function createImpostorMaterial(
   const uSunColor =
     opts.sunColor ?? uniform(new THREE.Vector3(0.85, 0.78, 0.6));
   const uAmbColor = opts.ambColor ?? uniform(new THREE.Vector3(0.35, 0.4, 0.5));
+  const uHemiSkyColor = opts.hemiSkyColor ?? uniform(new THREE.Vector3(0.4, 0.45, 0.5));
+  const uHemiGroundColor = opts.hemiGroundColor ?? uniform(new THREE.Vector3(0.25, 0.3, 0.2));
   const uLightScale =
     typeof opts.lightScale === "number"
       ? uniform(float(opts.lightScale))
@@ -869,11 +871,14 @@ function createImpostorMaterial(
         );
     const worldNorm = normalize(sub(mul(normEnc, float(2.0)), float(1.0)));
     // Lambert diffuse — back faces get 0 sun contribution (correct).
-    // Wrap (dot*0.5+0.5) was causing perpendicular faces to receive sunColor*0.5 phantom light,
-    // making impostors 2-3× brighter than the real PBR mesh at matching view angles.
     const diffuse = max(dot(worldNorm, uSunDir), float(0));
+    // Hemisphere ambient: interpolate between ground and sky based on normal.y
+    // normal.y = 1 (pointing up) → full sky color
+    // normal.y = -1 (pointing down) → full ground color
+    const hemiT = mul(add(worldNorm.y, 1.0), 0.5); // remap [-1,1] to [0,1]
+    const hemiAmbient = mix(uHemiGroundColor, uHemiSkyColor, hemiT);
     // Light can exceed 1.0 — let the renderer's tone mapping handle compression
-    let light = add(uAmbColor, mul(uSunColor, diffuse));
+    let light = add(hemiAmbient, mul(uSunColor, diffuse));
     light = mul(light, uLightScale);
 
     // ── LOD dither fade-in ──
@@ -936,6 +941,8 @@ export async function createOctahedralImpostorForest(opts = {}) {
   const _uSunDir = uniform(new THREE.Vector3(-1.0, 0.55, 1.0).normalize());
   const _uSunColor = uniform(new THREE.Vector3(0.85, 0.78, 0.6));
   const _uAmbColor = uniform(new THREE.Vector3(0.35, 0.4, 0.5));
+  const _uHemiSkyColor = uniform(new THREE.Vector3(0.4, 0.45, 0.5));
+  const _uHemiGroundColor = uniform(new THREE.Vector3(0.25, 0.3, 0.2));
 
   // LOD distance uniforms — lifted to forest scope so setters can update them at runtime
   let _lodDist = lodDistance;
@@ -1135,6 +1142,8 @@ export async function createOctahedralImpostorForest(opts = {}) {
     sunDir: _uSunDir,
     sunColor: _uSunColor,
     ambColor: _uAmbColor,
+    hemiSkyColor: _uHemiSkyColor,
+    hemiGroundColor: _uHemiGroundColor,
     lightScale: _uLightScale,  // pass pre-created uniform so both materials share it
   };
   const impostorMat = createImpostorMaterial(
@@ -1343,6 +1352,10 @@ export async function createOctahedralImpostorForest(opts = {}) {
     updateSunDir: (v3) => _uSunDir.value.copy(v3),
     updateSunColor: (v3) => _uSunColor.value.copy(v3),
     updateAmbColor: (v3) => _uAmbColor.value.copy(v3),
+    updateHemiColors: (skyV3, groundV3) => {
+      _uHemiSkyColor.value.copy(skyV3);
+      _uHemiGroundColor.value.copy(groundV3);
+    },
     setLightScale: (v) => { _uLightScale.value = v; },
     // LOD distances (instant — updates uniforms + recomputes JS thresholds)
     setLodDistance: (d) => {
