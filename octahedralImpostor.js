@@ -93,13 +93,37 @@ function hemiOctaGridToDir(gx, gy, out) {
   return out.normalize();
 }
 
-function computeBoundingSphere(obj, out, force = false) {
+// Returns true if the geometry is a degenerate proxy mesh (LOD card, shadow plane, billboard rect).
+// Detection uses two independent signals so it works for axis-aligned AND rotated planes:
+//   1. Very low vertex count  — a rectangle has 4 verts; any real tree mesh has hundreds.
+//   2. Bounding-box flatness  — catches axis-aligned thin planes that happen to have more verts.
+const _flatBox = new THREE.Box3();
+const _flatSz  = new THREE.Vector3();
+function isFlatGeometry(g) {
+  const pos = g.attributes.position;
+  if (!pos) return false;
+  // Signal 1: suspiciously few vertices (quad = 4, simple strip = 6, etc.)
+  if (pos.count <= 16) return true;
+  // Signal 2: one bounding-box axis is tiny relative to the other two (axis-aligned planes)
+  _flatBox.setFromBufferAttribute(pos);
+  _flatBox.getSize(_flatSz);
+  const maxDim = Math.max(_flatSz.x, _flatSz.y, _flatSz.z);
+  const minDim = Math.min(_flatSz.x, _flatSz.y, _flatSz.z);
+  return maxDim > 0 && minDim / maxDim < 0.02;
+}
+
+function computeBoundingSphere(obj, out, force = false, skipFlat = false) {
   out.makeEmpty();
   const s = new THREE.Sphere();
   function walk(o) {
     if (o.isMesh && o.geometry) {
       const g = o.geometry;
       if (force || !g.boundingSphere) g.computeBoundingSphere();
+      if (skipFlat) {
+        const gc = g.clone();
+        gc.applyMatrix4(o.matrixWorld);
+        if (isFlatGeometry(gc)) return;
+      }
       s.copy(g.boundingSphere).applyMatrix4(o.matrixWorld);
       out.union(s);
     }
@@ -165,11 +189,14 @@ void main() {
   outColor = vec4(normalize(vWorldNormal) * 0.5 + 0.5, 1.0);
 }`;
 
-let _whiteTex = null;
+// WeakMap so each WebGL2 context (new canvas per bake call) gets its own white texture.
+// A plain module variable would cache the texture from the first context and cause
+// "bindTexture: object does not belong to this context" on every rebake.
+const _whiteTexByCtx = new WeakMap();
 function whiteTexture(gl) {
-  if (_whiteTex) return _whiteTex;
-  _whiteTex = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, _whiteTex);
+  if (_whiteTexByCtx.has(gl)) return _whiteTexByCtx.get(gl);
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
   gl.texImage2D(
     gl.TEXTURE_2D,
     0,
@@ -183,7 +210,8 @@ function whiteTexture(gl) {
   );
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  return _whiteTex;
+  _whiteTexByCtx.set(gl, t);
+  return t;
 }
 
 function buildProgram(gl, vs, fs) {
@@ -296,6 +324,7 @@ function bakeAtlas(
     spritesPerSide = 12,
     alphaTest = 0.4,
     bakeOnlyLargestMesh = false,
+    sphereMargin = 1.05,  // inflate bounding sphere slightly to prevent orthographic frustum clipping
   } = {},
 ) {
   const N = spritesPerSide;
@@ -304,7 +333,12 @@ function bakeAtlas(
 
   let meshes = [];
   modelScene.traverse((o) => {
-    if (o.isMesh && o.geometry) meshes.push(o);
+    if (!o.isMesh || !o.geometry) return;
+    // Skip flat/degenerate meshes (LOD cards, shadow planes) — they corrupt atlas sprites
+    const _gc = o.geometry.clone();
+    _gc.applyMatrix4(o.matrixWorld);
+    if (isFlatGeometry(_gc)) return;
+    meshes.push(o);
   });
   if (!meshes.length) throw new Error("[OctahedralImpostor] No meshes to bake");
 
@@ -325,8 +359,13 @@ function bakeAtlas(
     meshes = [best];
     computeBoundingSphere(best, sphere, true);
   } else {
-    sphere = computeBoundingSphere(modelScene, new THREE.Sphere(), true);
+    sphere = computeBoundingSphere(modelScene, new THREE.Sphere(), true, true);
   }
+
+  // Inflate bounding sphere by the margin so geometry at the sphere surface doesn't
+  // get clipped by the orthographic bake frustum (exactly sphere.radius wide).
+  // The same inflated radius is returned and used for impostorScale at runtime — both stay in sync.
+  sphere.radius *= sphereMargin;
 
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = textureSize;
@@ -497,31 +536,11 @@ function bakeAtlas(
     colorPixels,
   );
 
-  // Flip each atlas cell vertically so texture V=0 (bottom of cell) = top of tree (foliage).
-  // This matches the shader's expectation and removes the "trunk at top" artifact.
-  // Use integer cell size so indices stay in bounds (textureSize/N may be fractional).
-  const flipAtlasCellsVertical = (pixels) => {
-    const ssCell = Math.floor(textureSize / N);
-    if (ssCell < 1) return;
-    const rowBytes = ssCell * 4;
-    const rowStride = textureSize * 4;
-    const tmp = new Uint8Array(rowBytes);
-    for (let cy = 0; cy < N; cy++) {
-      for (let cx = 0; cx < N; cx++) {
-        const colStart = cx * ssCell * 4;
-        const halfRows = Math.floor(ssCell / 2);
-        for (let j = 0; j < halfRows; j++) {
-          const j2 = ssCell - 1 - j;
-          const r1 = (cy * ssCell + j) * rowStride + colStart;
-          const r2 = (cy * ssCell + j2) * rowStride + colStart;
-          tmp.set(pixels.subarray(r1, r1 + rowBytes));
-          pixels.copyWithin(r1, r2, r2 + rowBytes);
-          pixels.set(tmp, r2);
-        }
-      }
-    }
-  };
-  flipAtlasCellsVertical(colorPixels);
+  // Do NOT flip atlas vertically — keep native bake order: V=0 = view -Y = bottom of mesh, V=1 = top.
+  // Runtime getUV uses uvf.y directly so quad top (uvf.y=1) samples atlas V=1 = top of mesh.
+  // (Removing flipAtlasCellsVertical to avoid view-dependent vertical shift bugs.)
+  // const flipAtlasCellsVertical = (pixels) => { ... };
+  // flipAtlasCellsVertical(colorPixels);
 
   // ── Pass 2: World-space normals ───────────────────────────────────────────
   const normGLTex = makeGLTex();
@@ -560,7 +579,7 @@ function bakeAtlas(
     gl.UNSIGNED_BYTE,
     normalPixels,
   );
-  flipAtlasCellsVertical(normalPixels);
+  // flipAtlasCellsVertical(normalPixels);  // match color: no flip, native V=0=bottom
 
   // ── Cleanup ───────────────────────────────────────────────────────────────
   gl.deleteTexture(colGLTex);
@@ -666,7 +685,6 @@ function createImpostorMaterial(
 
   // ── Plane basis — degenerate-safe (mirrors TSX computePlaneBasis) ───────────
   const planeTangent = Fn(([n]) => {
-    // When n ≈ (0,1,0) the cross is degenerate → fall back to (-1,0,0) as up
     const up = mix(
       vec3(0, 1, 0),
       vec3(-1, 0, 0),
@@ -676,20 +694,28 @@ function createImpostorMaterial(
   });
   const planeBitangent = Fn(([n, t]) => cross(n, t));
 
-  // Billboard vertex offset in local coords (positionLocal.xy ∈ ±0.5)
-  const projectVert = Fn(([n]) => {
-    const t = planeTangent(n);
-    const b = planeBitangent(n, t);
-    return add(mul(positionLocal.x, t), mul(positionLocal.y, b));
+  // World-up in plane: matches bake camera (0,1,0) so quad and UV share same vertical axis.
+  const planeUp = Fn(([n, t]) => {
+    const worldUp = vec3(0, 1, 0);
+    const proj = sub(worldUp, mul(n, dot(n, worldUp)));
+    const len = length(proj);
+    return select(len.lessThan(float(0.001)), t, normalize(proj));
   });
 
-  // Ray–plane intersection → sprite UV within a frame
-  // Plane: passes through origin, normal n; ray: from camL toward vd
+  // Billboard: use planeUp for vertical so quad bottom = world bottom = mesh bottom in texture.
+  const projectVert = Fn(([n]) => {
+    const t = planeTangent(n);
+    const up = planeUp(n, t);
+    return add(mul(positionLocal.x, t), mul(positionLocal.y, up));
+  });
+
+  // Ray–plane intersection → sprite UV within a frame (same up axis as quad).
   const planeUV = Fn(([n, t, b, camL, vd]) => {
     const denom = dot(vd, n);
     const tt = mul(dot(negate(camL), n), div(1, denom));
     const hit = add(camL, mul(vd, tt));
-    return add(vec2(dot(t, hit), dot(b, hit)), 0.5);
+    const upInPlane = planeUp(n, t);
+    return add(vec2(dot(t, hit), dot(upInPlane, hit)), 0.5);
   });
 
   // ── Position node — billboard vertex (engine applies T*S instance matrix) ──
@@ -751,10 +777,10 @@ function createImpostorMaterial(
   });
 
   // ── Color node — uses vertex-stage parallax UVs (interpolated from positionNodeFn) ──
-  // Flip V so that after atlas cell flip: top of billboard (uvf.y=1) samples bottom of cell = foliage.
+  // Native bake: V=0 = bottom of mesh, V=1 = top. Quad top (uvf.y=1) → sample V=1 = top of mesh.
   const getUV = Fn(([uvf, frame, fs]) =>
     clamp(
-      mul(fs, add(frame, clamp(vec2(uvf.x, sub(float(1), uvf.y)), 0, 1))),
+      mul(fs, add(frame, clamp(vec2(uvf.x, uvf.y), 0, 1))),
       0,
       1,
     ),
@@ -846,6 +872,7 @@ function createImpostorMaterial(
 export async function createOctahedralImpostorForest(opts = {}) {
   const {
     modelPath,
+    modelScene: _modelSceneOpt = null,  // optional pre-built Three.js scene (skips GLTF load)
     treeCount = 300,
     treeScale = 1,
     lodDistance = 80,
@@ -865,6 +892,7 @@ export async function createOctahedralImpostorForest(opts = {}) {
     lod2Distance: impostorSettings.lod2Distance ?? 150, // mega-impostor starts here
     lightScale: impostorSettings.lightScale ?? 1.0, // 1 = default; e.g. 0.8 for rocks to match PBR
     bakeOnlyLargestMesh: impostorSettings.bakeOnlyLargestMesh ?? false, // if true, bake only the largest mesh (avoids "4 small + 1 big" per cell)
+    sphereMargin: impostorSettings.sphereMargin ?? 1.05, // bounding sphere inflation factor (1.05 = 5% margin)
   };
 
   // Dynamic lighting uniforms shared by all impostor materials (regular + mega)
@@ -882,10 +910,15 @@ export async function createOctahedralImpostorForest(opts = {}) {
   const _uLod2Dist = uniform(float(_lod2Dist));
 
   // ── Load model ──────────────────────────────────────────────────────────────
-  const gltf = await new Promise((res, rej) =>
-    _gltf.load(modelPath, res, undefined, rej),
-  );
-  const root = gltf.scene;
+  let root;
+  if (_modelSceneOpt) {
+    root = _modelSceneOpt;
+  } else {
+    const gltf = await new Promise((res, rej) =>
+      _gltf.load(modelPath, res, undefined, rej),
+    );
+    root = gltf.scene;
+  }
   root.updateMatrixWorld(true);
 
   // ── Bake atlas (albedo+AO pass + world-normal pass) ────────────────────────
@@ -894,6 +927,7 @@ export async function createOctahedralImpostorForest(opts = {}) {
     spritesPerSide: iOpts.spritesPerSide,
     alphaTest: iOpts.alphaTest,
     bakeOnlyLargestMesh: iOpts.bakeOnlyLargestMesh,
+    sphereMargin: iOpts.sphereMargin,
   });
   const { colorTex, normalTex, sphere } = bakeResult;
   // Use the same sphere the bake used (important when bakeOnlyLargestMesh: one mesh = one sphere)
@@ -913,6 +947,9 @@ export async function createOctahedralImpostorForest(opts = {}) {
     if (!o.isMesh || !o.geometry) return;
     const g = o.geometry.clone();
     g.applyMatrix4(o.matrixWorld);
+    // Skip flat/degenerate meshes (LOD cards, shadow planes, billboard proxies left in the export).
+    // A genuine tree mesh has significant extent in all 3 axes; a flat plane has near-zero in one.
+    if (isFlatGeometry(g)) return;
     const m = o.material;
     const name = (o.name + " " + (m?.name ?? "")).toLowerCase();
     const isLeaf =
@@ -983,9 +1020,11 @@ export async function createOctahedralImpostorForest(opts = {}) {
       .setPosition(x, y, z);
     _m.toArray(allNearMats, i * 16);
 
-    // Impostor: T(center) * S(impostorScale). Place so quad bottom sits on ground: center.y = terrain + radius.
+    // Impostor: T(sphereCenter) * S(impostorScale).
+    // sphereCenter.y (= sphere.center.y * treeScale) matches where the bake camera aimed (sphere.center),
+    // so UV=0.5 in the atlas sprite lands at the correct world height for every model.
     const wcx = x + sphereCenter.x;
-    const wcy = y + sphere.radius * treeScale; // so bottom of quad (center - radius) = y
+    const wcy = y + sphereCenter.y;
     const wcz = z + sphereCenter.z;
     allCenters[i * 3] = wcx;
     allCenters[i * 3 + 1] = wcy;
@@ -1035,10 +1074,14 @@ export async function createOctahedralImpostorForest(opts = {}) {
     "impostorCenters",
   );
 
+  // Shared lightScale uniform — both materials use the same node so one setter updates both
+  const _uLightScale = uniform(float(iOpts.lightScale ?? 1.0));
+
   const _sunOpts = {
     sunDir: _uSunDir,
     sunColor: _uSunColor,
     ambColor: _uAmbColor,
+    lightScale: _uLightScale,  // pass pre-created uniform so both materials share it
   };
   const impostorMat = createImpostorMaterial(
     colorTex,
@@ -1238,6 +1281,7 @@ export async function createOctahedralImpostorForest(opts = {}) {
     updateSunDir: (v3) => _uSunDir.value.copy(v3),
     updateSunColor: (v3) => _uSunColor.value.copy(v3),
     updateAmbColor: (v3) => _uAmbColor.value.copy(v3),
+    setLightScale: (v) => { _uLightScale.value = v; },
     // LOD distances (instant — updates uniforms + recomputes JS thresholds)
     setLodDistance: (d) => {
       _lodDist = d;

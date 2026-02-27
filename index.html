@@ -211,16 +211,16 @@
         seasonalDryColor: "#8b7d3c",
         // Ground
         groundVariation: true,
-        groundBaseColor: "#1a3a0a",
-        groundDirtColor: "#3d2b1a",
+        groundBaseColor: "#2a5a12",
+        groundDirtColor: "#6b4a2e",
         texTiling: 80.0,
         // Sun & Scene
         sunDirX: -1.0,
-        sunDirY: 0.55,
+        sunDirY: 1.2,
         sunDirZ: 1.0,
-        sunIntensity: 2.5,
-        sceneAmbient: 1.5,
-        exposure: 1.0,
+        sunIntensity: 3.5,
+        sceneAmbient: 2.2,
+        exposure: 0.4,
         // Sky
         skyTurbidity: 2,
         skyRayleigh: 1.5,
@@ -1171,7 +1171,7 @@
         scene.add(shadowTarget);
         dirLight.target = shadowTarget;
 
-        const hemiLight = new THREE.HemisphereLight(0x99bbff, 0x557733, PARAMS.sceneAmbient);
+        const hemiLight = new THREE.HemisphereLight(0xc8e0ff, 0x88aa55, PARAMS.sceneAmbient);
         scene.add(hemiLight);
 
         // ── TERRAIN MESH ──
@@ -1198,7 +1198,8 @@
         const groundColorTex = texLoader.load("textures/Ground037_1K-JPG_Color.jpg");
         const groundNormalTex = texLoader.load("textures/Ground037_1K-JPG_NormalGL.jpg");
         const groundRoughTex  = texLoader.load("textures/Ground037_1K-JPG_Roughness.jpg");
-        for (const t of [groundColorTex, groundNormalTex, groundRoughTex]) {
+        const groundAOTex     = texLoader.load("textures/Ground037_1K-JPG_AmbientOcclusion.jpg");
+        for (const t of [groundColorTex, groundNormalTex, groundRoughTex, groundAOTex]) {
           t.wrapS = t.wrapT = THREE.RepeatWrapping;
         }
         groundColorTex.colorSpace = THREE.SRGBColorSpace;
@@ -1215,16 +1216,18 @@
             n2 = noise12(mul(wp.xz, 0.08)),
             n3 = noise12(mul(wp.xz, 0.2));
           const combined = add(n1, mul(n2, 0.5), mul(n3, 0.25)).mul(0.57);
-          const heightBlend = smoothstep(3, 8, wp.y);
+          // Slope-based dirt blend: steep faces -> dirt/rock, flat tops -> grass texture
+          const slopeBlend = smoothstep(0.85, 0.6, normalLocal.y);
           const dirtMix = max(
             mul(smoothstep(0.35, 0.65, combined), uGroundVar),
-            heightBlend,
+            slopeBlend,
           );
           return mix(texColor, uGroundDirt, dirtMix);
         })();
         terrainMat.normalNode = normalMap(texture(groundNormalTex, tiledUV));
-        terrainMat.roughnessNode = max(texture(groundRoughTex, tiledUV).r, float(0.85));
-        terrainMat.envMapIntensity = 0; // no sky IBL specular on ground — grass does the same
+        terrainMat.roughnessNode = max(texture(groundRoughTex, tiledUV).r, float(0.65));
+        terrainMat.aoNode = texture(groundAOTex, tiledUV);
+        terrainMat.envMapIntensity = 0.6;
         const terrain = new THREE.Mesh(terrainGeo, terrainMat);
         terrain.receiveShadow = true;
         scene.add(terrain);
@@ -1258,7 +1261,7 @@
           const skyEnv = pmremGenerator.fromScene(skyEnvScene, 0.04).texture;
           if (scene.environment) scene.environment.dispose();
           scene.environment = skyEnv;
-          scene.environmentIntensity = 0.2;
+          scene.environmentIntensity = 0.6;
         }
         function updateSky() { updateSkyParams(); bakeEnvMap(); }
         updateSky();

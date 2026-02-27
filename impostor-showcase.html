@@ -115,6 +115,7 @@
 
 <div id="picker">
   <select id="model-select">
+    <option value="__torusknot__">TorusKnot (Three.js debug)</option>
     <option value="models/pine-transformed.glb">pine-transformed</option>
     <option value="models/pine2.glb">pine2</option>
     <option value="models/pine3.glb">pine3</option>
@@ -173,8 +174,9 @@ import { WebGPURenderer }  from "three/webgpu";
 import { OrbitControls }   from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader }      from "three/addons/loaders/GLTFLoader.js";
 import { DRACOLoader }     from "three/addons/loaders/DRACOLoader.js";
+import GUI                 from "three/addons/libs/lil-gui.module.min.js";
 // Cache-bust so browser loads latest impostor code (change ?v= when you edit octahedralImpostor.js)
-import { createOctahedralImpostorForest } from "./octahedralImpostor.js?v=10";
+import { createOctahedralImpostorForest } from "./octahedralImpostor.js?v=14";
 
 // ─── Renderer ────────────────────────────────────────────────────────────────
 const renderer = new WebGPURenderer({ antialias: true });
@@ -199,6 +201,55 @@ scene.add(new THREE.AmbientLight(0x8090b0, 0.8));
 // Ground grid for depth reference
 const grid = new THREE.GridHelper(120, 40, 0x333355, 0x222244);
 scene.add(grid);
+
+// ─── Debug params (GUI-controlled) ───────────────────────────────────────────
+const PARAMS = {
+  // Lighting (instant — no re-bake needed)
+  sunAzimuth:    225,   // degrees, 0=+Z, 90=+X, 180=-Z, 270=-X
+  sunElevation:   56,   // degrees above horizon
+  sunIntensity:   1.8,  // multiplied into sun RGB
+  ambIntensity:   0.8,  // multiplied into ambient RGB
+  lightScale:     1.0,  // impostor lighting multiplier (vs PBR)
+  // Bake (applied on next Load click)
+  sphereMargin:  1.05,  // inflate bounding sphere to prevent frustum clip
+  alphaTest:     0.05,  // discard threshold during bake
+};
+
+// Sync sun direction + colors from PARAMS → scene lights + forest uniforms
+function applySunToScene() {
+  const az = (PARAMS.sunAzimuth  * Math.PI) / 180;
+  const el = (PARAMS.sunElevation * Math.PI) / 180;
+  sun.position.set(
+    Math.cos(el) * Math.sin(az),
+    Math.sin(el),
+    Math.cos(el) * Math.cos(az),
+  );
+  sun.intensity = PARAMS.sunIntensity;
+}
+function applyLightingToForest() {
+  if (!forest) return;
+  const az = (PARAMS.sunAzimuth  * Math.PI) / 180;
+  const el = (PARAMS.sunElevation * Math.PI) / 180;
+  const dir = new THREE.Vector3(
+    Math.cos(el) * Math.sin(az),
+    Math.sin(el),
+    Math.cos(el) * Math.cos(az),
+  ).normalize();
+  forest.updateSunDir(dir);
+  forest.updateSunColor(new THREE.Vector3(
+    sun.color.r * PARAMS.sunIntensity,
+    sun.color.g * PARAMS.sunIntensity,
+    sun.color.b * PARAMS.sunIntensity,
+  ));
+  const amb = scene.getObjectByProperty('isAmbientLight', true);
+  if (amb) forest.updateAmbColor(new THREE.Vector3(
+    amb.color.r * PARAMS.ambIntensity,
+    amb.color.g * PARAMS.ambIntensity,
+    amb.color.b * PARAMS.ambIntensity,
+  ));
+  forest.setLightScale(PARAMS.lightScale);
+}
+applySunToScene();
 
 // ─── Camera + shared orbit controls ──────────────────────────────────────────
 const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 800);
@@ -244,9 +295,21 @@ async function loadModel(path) {
   if (realGroup) { scene.remove(realGroup); realGroup = null; }
   if (forest)    { forest.dispose(); scene.remove(forest.group); forest = null; }
 
-  // ── Load GLB once to compute scale + sphere center ───────────────────────
-  const gltf = await new Promise((res, rej) => gltfLoader.load(path, res, undefined, rej));
-  const tempRoot = gltf.scene;
+  // ── Load model (GLB or built-in Three.js shape) ───────────────────────────
+  let tempRoot;
+  if (path === '__torusknot__') {
+    const geo = new THREE.TorusKnotGeometry(1.0, 0.35, 128, 20);
+    geo.computeBoundingBox();
+    const mat = new THREE.MeshStandardMaterial({ color: 0x22cc55, roughness: 0.45, metalness: 0.05 });
+    const mesh = new THREE.Mesh(geo, mat);
+    // Lift so base sits at Y=0 — makes sphere.center.y > 0 so billboard is above ground
+    mesh.position.y = -geo.boundingBox.min.y;
+    tempRoot = new THREE.Group();
+    tempRoot.add(mesh);
+  } else {
+    const gltf = await new Promise((res, rej) => gltfLoader.load(path, res, undefined, rej));
+    tempRoot = gltf.scene;
+  }
   tempRoot.updateMatrixWorld(true);
 
   // Auto-scale: fit to ~6 units tall
@@ -274,8 +337,14 @@ async function loadModel(path) {
   scene.add(realGroup);
 
   // ── Impostor forest — treeCount=1 ────────────────────────────────────────
+  // For built-in shapes (e.g. __torusknot__), pass the pre-built scene directly.
+  // For GLB paths, pass modelPath so the impostor system loads it internally.
+  const forestModelOpts = path === '__torusknot__'
+    ? { modelScene: tempRoot.clone(true) }   // clone so bake doesn't mutate the real-side group
+    : { modelPath: path };
+
   forest = await createOctahedralImpostorForest({
-    modelPath:        path,
+    ...forestModelOpts,
     treeCount:        1,
     treeScale:        scale,
     lodDistance:      0,          // always show impostor
@@ -286,7 +355,9 @@ async function loadModel(path) {
     impostorSettings: {
       ...getQuality(),
       alphaClamp:          0.1,
-      alphaTest:           0.05,
+      alphaTest:           PARAMS.alphaTest,   // from GUI
+      sphereMargin:        PARAMS.sphereMargin, // from GUI
+      lightScale:          PARAMS.lightScale,   // from GUI
       fadeRange:           0,          // no fade — always fully visible
       lod2Distance:        9999,       // never use mega (single-sprite) in showcase — always show LOD1 (3-sprite)
       bakeOnlyLargestMesh: document.getElementById("debug-bake-single").checked,
@@ -295,19 +366,8 @@ async function loadModel(path) {
   scene.add(forest.group);
   window._forest = forest;  // expose for debug
 
-  // Sync lighting from scene to impostor uniforms so they match the real GLB side.
-  forest.updateSunDir(sun.position.clone().normalize());
-  forest.updateSunColor(new THREE.Vector3(
-    sun.color.r * sun.intensity,
-    sun.color.g * sun.intensity,
-    sun.color.b * sun.intensity,
-  ));
-  const amb = scene.getObjectByProperty('isAmbientLight', true);
-  if (amb) forest.updateAmbColor(new THREE.Vector3(
-    amb.color.r * amb.intensity,
-    amb.color.g * amb.intensity,
-    amb.color.b * amb.intensity,
-  ));
+  // Sync lighting from PARAMS → impostor uniforms
+  applyLightingToForest();
 
   // ── Pre-run one update so near-LOD count is set to 0 before first render ─
   forest.update(camera);
@@ -382,6 +442,28 @@ function drawAtlasPreview(colorCapture, normalCapture) {
   drawCapture(colorCapture,  "atlas-color", debugAtlasGrid, _lastSps);
   drawCapture(normalCapture, "atlas-normal", false);
 }
+
+// ─── lil-gui control panel ────────────────────────────────────────────────────
+const gui = new GUI({ title: "Impostor Controls", width: 240 });
+gui.domElement.style.position = "fixed";
+gui.domElement.style.top = "48px";
+gui.domElement.style.left = "12px";
+
+// Lighting folder — instant, no re-bake
+const fLight = gui.addFolder("Lighting (instant)");
+fLight.add(PARAMS, "sunAzimuth",    0, 360, 1 ).name("Sun azimuth°").onChange(() => { applySunToScene(); applyLightingToForest(); });
+fLight.add(PARAMS, "sunElevation",  0,  90, 0.5).name("Sun elevation°").onChange(() => { applySunToScene(); applyLightingToForest(); });
+fLight.add(PARAMS, "sunIntensity",  0,   5, 0.05).name("Sun intensity").onChange(() => { applySunToScene(); applyLightingToForest(); });
+fLight.add(PARAMS, "ambIntensity",  0,   3, 0.05).name("Ambient intensity").onChange(applyLightingToForest);
+fLight.add(PARAMS, "lightScale",  0.1, 2.5, 0.05).name("Impostor light scale").onChange(applyLightingToForest);
+fLight.open();
+
+// Bake folder — applied on next Load
+const fBake = gui.addFolder("Bake (reload to apply)");
+fBake.add(PARAMS, "sphereMargin", 1.0, 1.3, 0.01).name("Sphere margin");
+fBake.add(PARAMS, "alphaTest",   0.01, 0.5, 0.01).name("Alpha test");
+fBake.add({ reload: () => document.getElementById("load-btn").click() }, "reload").name("↺ Re-bake (Load)");
+fBake.open();
 
 // ─── UI wiring ────────────────────────────────────────────────────────────────
 function getQuality() {
