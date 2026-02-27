@@ -1,0 +1,954 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Debug Scene - Scene Transitions Test</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #000;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        z-index: 10;
+        font: 14px/1.5 "SF Mono", "Fira Code", monospace;
+        color: #b0d890;
+        background: rgba(0, 0, 0, 0.7);
+        padding: 12px 16px;
+        border-radius: 8px;
+        pointer-events: none;
+        user-select: none;
+        backdrop-filter: blur(4px);
+      }
+      #info span {
+        color: #e0f0c0;
+        font-weight: 600;
+      }
+      #scene-indicator {
+        position: fixed;
+        top: 16px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 10;
+        font: bold 18px/1.5 "SF Mono", "Fira Code", monospace;
+        color: #fff;
+        background: rgba(0, 100, 200, 0.8);
+        padding: 8px 24px;
+        border-radius: 8px;
+        pointer-events: none;
+        user-select: none;
+      }
+      #transition-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        background: #000;
+        opacity: 0;
+        pointer-events: none;
+        z-index: 100;
+        transition: opacity 0.5s ease-in-out;
+      }
+      #transition-overlay.active {
+        opacity: 1;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">
+      DEBUG SCENE &mdash; <span id="backend">loading…</span><br />
+      WASD: move &bull; Shift: run &bull; Space: jump &bull; Click: look &bull; Right-click: attack<br />
+      <span id="status">Walk into the door to trigger scene transition</span><br />
+      Position: <span id="pos-debug">0, 0, 0</span>
+    </div>
+    <div id="scene-indicator">EXTERIOR (Overworld)</div>
+    <div id="transition-overlay"></div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+      import RAPIER from "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.19.3/+esm";
+
+      const PI = Math.PI;
+
+      // ═══════════════════════════════════════════════════════════════
+      // PARAMS
+      // ═══════════════════════════════════════════════════════════════
+      const PARAMS = {
+        playerSpeed: 3.2,
+        runSpeedMultiplier: 1.95,
+        jumpSpeed: 5.5,
+        gravity: 9.81,
+        camDist: 7,
+        camHeight: 0.0,
+        camPitchMin: -0.2,
+        camPitchMax: 1.2,
+        mouseSensitivity: 0.002,
+        keyTurnSpeed: 2.2,
+        characterHeight: 2.5,
+        characterOffsetY: 0.37,
+        capsuleRadius: 0.35,
+      };
+
+      // ═══════════════════════════════════════════════════════════════
+      // SCENE STATE
+      // ═══════════════════════════════════════════════════════════════
+      let currentScene = "exterior";
+      let isTransitioning = false;
+      let transitionCooldown = 0;
+
+      // Scene content groups
+      let exteriorGroup = null;
+      let interiorGroup = null;
+
+      // Exterior building (small from outside)
+      const BUILDING_WIDTH = 10;
+      const BUILDING_DEPTH = 10;
+      const BUILDING_HEIGHT = 7;
+      const DOOR_WIDTH = 2.5;
+      const DOOR_HEIGHT = 3.5;
+      const BUILDING_POS = new THREE.Vector3(15, 0, 15);
+
+      // Interior is BIGGER on the inside (Zelda magic!)
+      const INTERIOR_WIDTH = 25;
+      const INTERIOR_DEPTH = 30;
+      const INTERIOR_HEIGHT = 12;
+      const INTERIOR_CENTER = new THREE.Vector3(0, 0, 0);
+
+      // Spawn points
+      const EXTERIOR_SPAWN = new THREE.Vector3(0, 0, 0);
+      // Interior room: x from -12.5 to +12.5, z from -15 to +15, door at z=+15
+      // Spawn in CENTER of room at origin, facing the back wall (toward -Z)
+      const INTERIOR_SPAWN = new THREE.Vector3(0, 0, 0);
+      const EXTERIOR_EXIT_SPAWN = new THREE.Vector3(BUILDING_POS.x, 0, BUILDING_POS.z + BUILDING_DEPTH / 2 + 2.5);
+
+      async function init() {
+        // ── RENDERER ──
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        await renderer.init();
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 0.6;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+
+        const backend = renderer.backend?.parameters?.device ? "WebGPU" : "WebGL";
+        document.getElementById("backend").textContent = backend;
+
+        // ── SCENE & CAMERA ──
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87ceeb);
+
+        const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 500);
+        camera.position.set(0, 5, 10);
+
+        // ── RAPIER PHYSICS ──
+        await RAPIER.init({});
+        const gravity = { x: 0, y: -9.81, z: 0 };
+        const physicsWorld = new RAPIER.World(gravity);
+
+        // Ground collider (flat at y=0)
+        const groundHalfExtent = 200;
+        const groundBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(0, -0.5, 0);
+        const groundBody = physicsWorld.createRigidBody(groundBodyDesc);
+        physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(groundHalfExtent, 0.5, groundHalfExtent), groundBody);
+
+        // ══════════════════════════════════════════════════════════════
+        // EXTERIOR SCENE
+        // ══════════════════════════════════════════════════════════════
+        exteriorGroup = new THREE.Group();
+        scene.add(exteriorGroup);
+
+        // Exterior lighting
+        const extAmbient = new THREE.HemisphereLight(0x87ceeb, 0x3d5c35, 1.2);
+        exteriorGroup.add(extAmbient);
+
+        const extSun = new THREE.DirectionalLight(0xfff4e5, 2.5);
+        extSun.position.set(-30, 50, 30);
+        extSun.castShadow = true;
+        extSun.shadow.mapSize.setScalar(2048);
+        extSun.shadow.camera.near = 1;
+        extSun.shadow.camera.far = 150;
+        extSun.shadow.camera.left = -60;
+        extSun.shadow.camera.right = 60;
+        extSun.shadow.camera.top = 60;
+        extSun.shadow.camera.bottom = -60;
+        extSun.shadow.bias = -0.001;
+        exteriorGroup.add(extSun);
+
+        // Ground plane
+        const groundGeo = new THREE.PlaneGeometry(400, 400);
+        const groundMat = new THREE.MeshStandardNodeMaterial({ color: 0x4a7c3f, roughness: 0.9 });
+        const ground = new THREE.Mesh(groundGeo, groundMat);
+        ground.rotation.x = -PI / 2;
+        ground.receiveShadow = true;
+        exteriorGroup.add(ground);
+
+        // Grid helper
+        const gridHelper = new THREE.GridHelper(100, 50, 0x666666, 0x444444);
+        gridHelper.position.y = 0.01;
+        exteriorGroup.add(gridHelper);
+
+        // Building exterior
+        const buildingGroup = createBuildingExterior();
+        buildingGroup.position.copy(BUILDING_POS);
+        exteriorGroup.add(buildingGroup);
+
+        // Building physics colliders
+        createBuildingColliders(physicsWorld, BUILDING_POS);
+
+        // Door trigger visual (green zone)
+        const doorTriggerGeo = new THREE.BoxGeometry(DOOR_WIDTH + 1, DOOR_HEIGHT, 3);
+        const doorTriggerMat = new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.25 });
+        const doorTriggerMesh = new THREE.Mesh(doorTriggerGeo, doorTriggerMat);
+        doorTriggerMesh.position.set(BUILDING_POS.x, DOOR_HEIGHT / 2, BUILDING_POS.z + BUILDING_DEPTH / 2 + 0.5);
+        exteriorGroup.add(doorTriggerMesh);
+
+        // Some exterior decoration
+        addExteriorDecoration(exteriorGroup, physicsWorld);
+
+        // ══════════════════════════════════════════════════════════════
+        // INTERIOR SCENE (Bigger on the inside!)
+        // Room centered at origin: x from -12.5 to +12.5, z from -15 to +15
+        // Door is on the +Z wall (z = +15)
+        // ══════════════════════════════════════════════════════════════
+        interiorGroup = new THREE.Group();
+        interiorGroup.visible = false;
+        scene.add(interiorGroup);
+
+        // ── INTERIOR LIGHTING (very bright) ──
+        const intAmbient = new THREE.AmbientLight(0xffffff, 3.0);
+        interiorGroup.add(intAmbient);
+
+        const intHemi = new THREE.HemisphereLight(0xffffff, 0x888877, 2.0);
+        interiorGroup.add(intHemi);
+
+        const intDirLight = new THREE.DirectionalLight(0xffffff, 2.0);
+        intDirLight.position.set(0, 10, 0);
+        interiorGroup.add(intDirLight);
+
+        // ── FLOOR (distinctive blue-gray color) ──
+        const intFloorGeo = new THREE.PlaneGeometry(INTERIOR_WIDTH, INTERIOR_DEPTH);
+        const intFloorMat = new THREE.MeshStandardNodeMaterial({ color: 0x4a6a7a, roughness: 0.7 });
+        const intFloor = new THREE.Mesh(intFloorGeo, intFloorMat);
+        intFloor.rotation.x = -PI / 2;
+        intFloor.position.y = 0.01;
+        intFloor.receiveShadow = true;
+        interiorGroup.add(intFloor);
+
+        // ── WALLS (cream/beige color - clearly different from floor) ──
+        const wallMat = new THREE.MeshStandardNodeMaterial({ color: 0xe8dcc8, roughness: 0.8 });
+        const wallH = INTERIOR_HEIGHT;
+        const wallThick = 0.5;
+
+        // Back wall (at z = -15)
+        const backWall = new THREE.Mesh(new THREE.BoxGeometry(INTERIOR_WIDTH, wallH, wallThick), wallMat);
+        backWall.position.set(0, wallH / 2, -INTERIOR_DEPTH / 2);
+        interiorGroup.add(backWall);
+
+        // Left wall (at x = -12.5)
+        const leftWall = new THREE.Mesh(new THREE.BoxGeometry(wallThick, wallH, INTERIOR_DEPTH), wallMat);
+        leftWall.position.set(-INTERIOR_WIDTH / 2, wallH / 2, 0);
+        interiorGroup.add(leftWall);
+
+        // Right wall (at x = +12.5)
+        const rightWall = new THREE.Mesh(new THREE.BoxGeometry(wallThick, wallH, INTERIOR_DEPTH), wallMat);
+        rightWall.position.set(INTERIOR_WIDTH / 2, wallH / 2, 0);
+        interiorGroup.add(rightWall);
+
+        // Front wall with door opening (at z = +15)
+        const doorWallWidth = (INTERIOR_WIDTH - DOOR_WIDTH) / 2;
+        
+        // Left part of front wall
+        const frontLeftWall = new THREE.Mesh(new THREE.BoxGeometry(doorWallWidth, wallH, wallThick), wallMat);
+        frontLeftWall.position.set(-INTERIOR_WIDTH / 2 + doorWallWidth / 2, wallH / 2, INTERIOR_DEPTH / 2);
+        interiorGroup.add(frontLeftWall);
+
+        // Right part of front wall
+        const frontRightWall = new THREE.Mesh(new THREE.BoxGeometry(doorWallWidth, wallH, wallThick), wallMat);
+        frontRightWall.position.set(INTERIOR_WIDTH / 2 - doorWallWidth / 2, wallH / 2, INTERIOR_DEPTH / 2);
+        interiorGroup.add(frontRightWall);
+
+        // Top part (above door)
+        const frontTopWall = new THREE.Mesh(new THREE.BoxGeometry(DOOR_WIDTH, wallH - DOOR_HEIGHT, wallThick), wallMat);
+        frontTopWall.position.set(0, DOOR_HEIGHT + (wallH - DOOR_HEIGHT) / 2, INTERIOR_DEPTH / 2);
+        interiorGroup.add(frontTopWall);
+
+        // ── CEILING (darker than walls) ──
+        const ceilingMat = new THREE.MeshStandardNodeMaterial({ color: 0xc0b8a8, roughness: 0.9 });
+        const ceiling = new THREE.Mesh(new THREE.PlaneGeometry(INTERIOR_WIDTH, INTERIOR_DEPTH), ceilingMat);
+        ceiling.rotation.x = PI / 2;
+        ceiling.position.y = wallH;
+        interiorGroup.add(ceiling);
+
+        // ── DOOR FRAME (dark wood, visible from inside) ──
+        const doorFrameMat = new THREE.MeshStandardNodeMaterial({ color: 0x3a2515, roughness: 0.6 });
+        const frameSize = 0.3;
+
+        // Left frame
+        const leftFrame = new THREE.Mesh(new THREE.BoxGeometry(frameSize, DOOR_HEIGHT, frameSize), doorFrameMat);
+        leftFrame.position.set(-DOOR_WIDTH / 2, DOOR_HEIGHT / 2, INTERIOR_DEPTH / 2 - frameSize / 2);
+        interiorGroup.add(leftFrame);
+
+        // Right frame  
+        const rightFrame = new THREE.Mesh(new THREE.BoxGeometry(frameSize, DOOR_HEIGHT, frameSize), doorFrameMat);
+        rightFrame.position.set(DOOR_WIDTH / 2, DOOR_HEIGHT / 2, INTERIOR_DEPTH / 2 - frameSize / 2);
+        interiorGroup.add(rightFrame);
+
+        // Top frame
+        const topFrame = new THREE.Mesh(new THREE.BoxGeometry(DOOR_WIDTH + frameSize * 2, frameSize, frameSize), doorFrameMat);
+        topFrame.position.set(0, DOOR_HEIGHT, INTERIOR_DEPTH / 2 - frameSize / 2);
+        interiorGroup.add(topFrame);
+
+        // ── FURNITURE ──
+        // Table in center (dark wood)
+        const tableMat = new THREE.MeshStandardNodeMaterial({ color: 0x5c3d2e, roughness: 0.7 });
+        const tableTop = new THREE.Mesh(new THREE.BoxGeometry(4, 0.2, 2.5), tableMat);
+        tableTop.position.set(0, 1, 0);
+        tableTop.castShadow = true;
+        interiorGroup.add(tableTop);
+
+        // Table legs
+        const legGeo = new THREE.BoxGeometry(0.2, 1, 0.2);
+        [[-1.7, -1], [1.7, -1], [-1.7, 1], [1.7, 1]].forEach(([x, z]) => {
+          const leg = new THREE.Mesh(legGeo, tableMat);
+          leg.position.set(x, 0.5, z);
+          interiorGroup.add(leg);
+        });
+
+        // Red carpet under table
+        const carpetMat = new THREE.MeshStandardNodeMaterial({ color: 0x8b2222, roughness: 0.95 });
+        const carpet = new THREE.Mesh(new THREE.PlaneGeometry(6, 4), carpetMat);
+        carpet.rotation.x = -PI / 2;
+        carpet.position.set(0, 0.02, 0);
+        interiorGroup.add(carpet);
+
+        // Treasure chest at back (gold accents)
+        const chestMat = new THREE.MeshStandardNodeMaterial({ color: 0x4a3020, roughness: 0.75 });
+        const chestBody = new THREE.Mesh(new THREE.BoxGeometry(2, 1.2, 1.2), chestMat);
+        chestBody.position.set(0, 0.6, -INTERIOR_DEPTH / 2 + 2);
+        chestBody.castShadow = true;
+        interiorGroup.add(chestBody);
+
+        const goldMat = new THREE.MeshStandardNodeMaterial({ color: 0xffd700, roughness: 0.3, metalness: 0.8 });
+        const chestLock = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 0.2), goldMat);
+        chestLock.position.set(0, 0.8, -INTERIOR_DEPTH / 2 + 2.7);
+        interiorGroup.add(chestLock);
+
+        // Chairs (2 on each side of table)
+        const chairMat = new THREE.MeshStandardNodeMaterial({ color: 0x6b4423, roughness: 0.8 });
+        [[-3, 0], [3, 0]].forEach(([x, z]) => {
+          const seat = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.1, 0.8), chairMat);
+          seat.position.set(x, 0.5, z);
+          interiorGroup.add(seat);
+          
+          const back = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.8, 0.1), chairMat);
+          back.position.set(x, 0.95, z + (x > 0 ? 0.35 : -0.35));
+          interiorGroup.add(back);
+        });
+
+        // Barrels in corner
+        const barrelMat = new THREE.MeshStandardNodeMaterial({ color: 0x654321, roughness: 0.85 });
+        [[INTERIOR_WIDTH / 2 - 2, -INTERIOR_DEPTH / 2 + 2], [INTERIOR_WIDTH / 2 - 3.5, -INTERIOR_DEPTH / 2 + 2]].forEach(([x, z]) => {
+          const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.7, 1.4, 12), barrelMat);
+          barrel.position.set(x, 0.7, z);
+          interiorGroup.add(barrel);
+        });
+
+        // ── EXIT TRIGGER (green, INSIDE the room near door) ──
+        const exitTriggerGeo = new THREE.BoxGeometry(DOOR_WIDTH, DOOR_HEIGHT, 2);
+        const exitTriggerMat = new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.3 });
+        const exitTriggerMesh = new THREE.Mesh(exitTriggerGeo, exitTriggerMat);
+        // Put it INSIDE the room, just before the door (at z = +13)
+        exitTriggerMesh.position.set(0, DOOR_HEIGHT / 2, INTERIOR_DEPTH / 2 - 2);
+        interiorGroup.add(exitTriggerMesh);
+
+        // ══════════════════════════════════════════════════════════════
+        // PLAYER SETUP
+        // ══════════════════════════════════════════════════════════════
+        const capR = PARAMS.capsuleRadius;
+        const capHalfH = Math.max(0.1, (PARAMS.characterHeight - 2 * capR) / 2);
+        const charPos = new THREE.Vector3(0, capHalfH + capR, 0);
+
+        const playerBodyDesc = RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(charPos.x, charPos.y, charPos.z);
+        const playerBody = physicsWorld.createRigidBody(playerBodyDesc);
+        const playerCollider = physicsWorld.createCollider(RAPIER.ColliderDesc.capsule(capHalfH, capR), playerBody);
+        const characterController = physicsWorld.createCharacterController(0.01);
+        characterController.enableSnapToGround(0.5);
+        characterController.setMaxSlopeClimbAngle((45 * Math.PI) / 180);
+
+        // Placeholder capsule
+        const capsuleGeo = new THREE.CapsuleGeometry(0.4, 1.2, 8, 16);
+        const capsuleMat = new THREE.MeshStandardNodeMaterial({ color: 0xee8833, roughness: 0.4 });
+        const capsule = new THREE.Mesh(capsuleGeo, capsuleMat);
+        capsule.castShadow = true;
+        scene.add(capsule);
+
+        // Character model group
+        const characterGroup = new THREE.Group();
+        scene.add(characterGroup);
+        let characterMixer = null;
+
+        // Load character
+        const charDraco = new DRACOLoader();
+        charDraco.setDecoderPath("https://www.gstatic.com/draco/versioned/decoders/1.5.6/");
+        const charLoader = new GLTFLoader();
+        charLoader.setDRACOLoader(charDraco);
+
+        charLoader.load(
+          "models/AnimationLibrary_Godot_Standard-transformed.glb",
+          (gltf) => {
+            const model = gltf.scene;
+            model.traverse((o) => {
+              if (o.isMesh) {
+                o.castShadow = true;
+                o.receiveShadow = true;
+                if (o.material && !o.material.isNodeMaterial) {
+                  const m = o.material;
+                  o.material = new THREE.MeshStandardNodeMaterial({
+                    color: m.color?.getHex?.() ?? 0x888888,
+                    roughness: m.roughness ?? 0.5,
+                    metalness: m.metalness ?? 0,
+                    map: m.map || null,
+                  });
+                }
+              }
+            });
+
+            const box = new THREE.Box3().setFromObject(model);
+            const size = new THREE.Vector3();
+            const center = new THREE.Vector3();
+            box.getSize(size);
+            const scale = PARAMS.characterHeight / (size.y || 1);
+            model.scale.setScalar(scale);
+            box.setFromObject(model);
+            box.getCenter(center);
+            model.position.sub(center);
+            characterGroup.userData.modelBaseY = model.position.y;
+            characterGroup.userData.initialCharHeight = PARAMS.characterHeight;
+            characterGroup.add(model);
+
+            if (gltf.animations && gltf.animations.length) {
+              characterMixer = new THREE.AnimationMixer(model);
+              const idleClip = gltf.animations.find((a) => a.name === "Idle_Loop") || gltf.animations[0];
+              const walkClip = gltf.animations.find((a) => a.name === "Walk_Loop") || gltf.animations[0];
+              const runClip = gltf.animations.find((a) => a.name === "Jog_Fwd_Loop") || gltf.animations.find((a) => a.name === "Sprint_Loop") || walkClip;
+              const jumpClip = gltf.animations.find((a) => a.name === "Jump_Loop") || gltf.animations.find((a) => a.name === "Jump_Start") || idleClip;
+              const attackClip = gltf.animations.find((a) => a.name === "Sword_Attack") || gltf.animations.find((a) => a.name === "Sword_Attack_RM") || null;
+
+              const idleAction = characterMixer.clipAction(idleClip).setLoop(2201).play();
+              const walkAction = characterMixer.clipAction(walkClip).setLoop(2201);
+              const runAction = characterMixer.clipAction(runClip).setLoop(2201);
+              const jumpAction = characterMixer.clipAction(jumpClip).setLoop(2201);
+              const attackAction = attackClip ? characterMixer.clipAction(attackClip).setLoop(2200) : null;
+              if (attackAction) attackAction.clampWhenFinished = true;
+
+              characterGroup.userData.idleAction = idleAction;
+              characterGroup.userData.walkAction = walkAction;
+              characterGroup.userData.runAction = runAction;
+              characterGroup.userData.jumpAction = jumpAction;
+              characterGroup.userData.attackAction = attackAction;
+              characterGroup.userData.lastMoveState = "idle";
+              characterGroup.userData.isAttacking = false;
+
+              if (attackAction) {
+                characterMixer.addEventListener("finished", (e) => {
+                  if (e.action !== attackAction) return;
+                  const ud = characterGroup.userData;
+                  ud.isAttacking = false;
+                  const from = ud.preAttackState || "idle";
+                  attackAction.enabled = false;
+                  if (from === "walk") {
+                    ud.walkAction.enabled = true;
+                    ud.walkAction.crossFadeFrom(attackAction, 0.2).play();
+                  } else if (from === "run") {
+                    ud.runAction.enabled = true;
+                    ud.runAction.crossFadeFrom(attackAction, 0.2).play();
+                  } else {
+                    ud.idleAction.enabled = true;
+                    ud.idleAction.crossFadeFrom(attackAction, 0.2).play();
+                  }
+                  ud.lastMoveState = from;
+                });
+              }
+            }
+
+            renderer.compileAsync(scene, camera).catch((e) => console.warn("Recompile:", e));
+          },
+          undefined,
+          (err) => console.error("Character load failed:", err)
+        );
+
+        // ── INPUT ──
+        const keys = { w: false, a: false, s: false, d: false, shift: false, space: false, arrowLeft: false, arrowRight: false };
+        let characterVelY = 0;
+
+        window.addEventListener("keydown", (e) => {
+          const k = e.key.toLowerCase();
+          if (keys[k] !== undefined) { keys[k] = true; e.preventDefault(); }
+          if (e.key === "Shift") keys.shift = true;
+          if (e.key === " " || e.code === "Space") { keys.space = true; e.preventDefault(); }
+          if (e.key === "ArrowUp") { keys.w = true; e.preventDefault(); }
+          if (e.key === "ArrowDown") { keys.s = true; e.preventDefault(); }
+          if (e.key === "ArrowLeft") { keys.arrowLeft = true; e.preventDefault(); }
+          if (e.key === "ArrowRight") { keys.arrowRight = true; e.preventDefault(); }
+        });
+
+        window.addEventListener("keyup", (e) => {
+          const k = e.key.toLowerCase();
+          if (keys[k] !== undefined) keys[k] = false;
+          if (e.key === "Shift") keys.shift = false;
+          if (e.key === " " || e.code === "Space") keys.space = false;
+          if (e.key === "ArrowUp") keys.w = false;
+          if (e.key === "ArrowDown") keys.s = false;
+          if (e.key === "ArrowLeft") keys.arrowLeft = false;
+          if (e.key === "ArrowRight") keys.arrowRight = false;
+        });
+
+        // Camera
+        let camYaw = 0, camPitch = 0.3;
+        let isPointerLocked = false;
+
+        renderer.domElement.addEventListener("click", () => renderer.domElement.requestPointerLock());
+        document.addEventListener("pointerlockchange", () => { isPointerLocked = !!document.pointerLockElement; });
+        renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
+
+        renderer.domElement.addEventListener("mousedown", (e) => {
+          if (e.button !== 2) return;
+          const ud = characterGroup.userData;
+          if (!ud.attackAction || ud.isAttacking) return;
+          ud.isAttacking = true;
+          ud.preAttackState = ud.lastMoveState || "idle";
+          ud.attackAction.stop();
+          ud.attackAction.time = 0;
+          ud.attackAction.enabled = true;
+          const from = ud.preAttackState === "run" ? ud.runAction : ud.preAttackState === "walk" ? ud.walkAction : ud.idleAction;
+          ud.attackAction.crossFadeFrom(from, 0.1).play();
+        });
+
+        document.addEventListener("mousemove", (e) => {
+          if (!isPointerLocked && !(e.buttons & 1)) return;
+          camYaw += e.movementX * PARAMS.mouseSensitivity;
+          camPitch -= e.movementY * PARAMS.mouseSensitivity;
+          camPitch = Math.max(PARAMS.camPitchMin, Math.min(PARAMS.camPitchMax, camPitch));
+        });
+
+        // ══════════════════════════════════════════════════════════════
+        // SCENE TRANSITION
+        // ══════════════════════════════════════════════════════════════
+        const transitionOverlay = document.getElementById("transition-overlay");
+        const sceneIndicator = document.getElementById("scene-indicator");
+        const statusText = document.getElementById("status");
+
+        function transitionToScene(targetScene, spawnPos, facingYaw) {
+          if (isTransitioning || transitionCooldown > 0) return;
+          isTransitioning = true;
+
+          transitionOverlay.classList.add("active");
+
+          setTimeout(() => {
+            currentScene = targetScene;
+
+            if (targetScene === "interior") {
+              exteriorGroup.visible = false;
+              interiorGroup.visible = true;
+              scene.background = new THREE.Color(0x2a2a3a);
+              renderer.toneMappingExposure = 1.2;
+              sceneIndicator.textContent = "INTERIOR (Inside Building)";
+              sceneIndicator.style.background = "rgba(139, 69, 19, 0.8)";
+              statusText.textContent = "Explore! Walk to the GREEN zone (door) to exit";
+            } else {
+              exteriorGroup.visible = true;
+              interiorGroup.visible = false;
+              scene.background = new THREE.Color(0x87ceeb);
+              renderer.toneMappingExposure = 0.6;
+              sceneIndicator.textContent = "EXTERIOR (Overworld)";
+              sceneIndicator.style.background = "rgba(0, 100, 200, 0.8)";
+              statusText.textContent = "Walk into the green zone (door) to enter building";
+            }
+
+            // Teleport player
+            charPos.set(spawnPos.x, capHalfH + capR, spawnPos.z);
+            playerBody.setNextKinematicTranslation({ x: charPos.x, y: charPos.y, z: charPos.z });
+            characterVelY = 0;
+
+            // Set camera facing
+            if (facingYaw !== undefined) {
+              camYaw = facingYaw;
+            }
+
+            // Cooldown to prevent immediate re-trigger
+            transitionCooldown = 1.0;
+
+            setTimeout(() => {
+              transitionOverlay.classList.remove("active");
+              isTransitioning = false;
+            }, 150);
+          }, 500);
+        }
+
+        // Trigger zone checks
+        function isInExteriorDoorZone(pos) {
+          const dx = pos.x - BUILDING_POS.x;
+          const dz = pos.z - (BUILDING_POS.z + BUILDING_DEPTH / 2 + 0.5);
+          return Math.abs(dx) < (DOOR_WIDTH + 1) / 2 && Math.abs(dz) < 1.5 && pos.y < DOOR_HEIGHT;
+        }
+
+        function isInInteriorDoorZone(pos) {
+          // Exit trigger is INSIDE room at z = +13 (INTERIOR_DEPTH/2 - 2)
+          const dx = pos.x - 0;
+          const dz = pos.z - (INTERIOR_DEPTH / 2 - 2);
+          return Math.abs(dx) < DOOR_WIDTH / 2 + 0.5 && Math.abs(dz) < 1.5 && pos.y < DOOR_HEIGHT;
+        }
+
+        // ══════════════════════════════════════════════════════════════
+        // ANIMATION LOOP
+        // ══════════════════════════════════════════════════════════════
+        const moveDir = new THREE.Vector3();
+        const timer = new THREE.Timer();
+
+        renderer.setAnimationLoop(() => {
+          timer.update();
+          const elapsed = timer.getElapsed();
+          const dt = Math.min(timer.getDelta(), 0.05);
+
+          // Decrease cooldown
+          if (transitionCooldown > 0) transitionCooldown -= dt;
+
+          // Arrow keys camera
+          if (keys.arrowLeft) camYaw += PARAMS.keyTurnSpeed * dt;
+          if (keys.arrowRight) camYaw -= PARAMS.keyTurnSpeed * dt;
+
+          // Movement
+          moveDir.set(0, 0, 0);
+          let desiredDx = 0, desiredDz = 0;
+          if (keys.w) moveDir.z -= 1;
+          if (keys.s) moveDir.z += 1;
+          if (keys.a) moveDir.x -= 1;
+          if (keys.d) moveDir.x += 1;
+
+          if (moveDir.length() > 0) {
+            moveDir.normalize();
+            const sinY = Math.sin(camYaw), cosY = Math.cos(camYaw);
+            const forwardX = sinY, forwardZ = cosY;
+            const rightX = cosY, rightZ = -sinY;
+            const mx = moveDir.x * rightX - moveDir.z * forwardX;
+            const mz = moveDir.x * rightZ - moveDir.z * forwardZ;
+            const speedMult = keys.shift ? PARAMS.runSpeedMultiplier : 1;
+            desiredDx = mx * PARAMS.playerSpeed * speedMult * dt;
+            desiredDz = mz * PARAMS.playerSpeed * speedMult * dt;
+          }
+
+          const groundY = capHalfH + capR;
+          const onGround = charPos.y <= groundY + 0.1;
+          let desiredY;
+
+          if (onGround) {
+            if (keys.space) {
+              characterVelY = PARAMS.jumpSpeed;
+              desiredY = charPos.y + characterVelY * dt;
+            } else {
+              characterVelY = 0;
+              desiredY = groundY;
+            }
+          } else {
+            characterVelY -= PARAMS.gravity * dt;
+            desiredY = charPos.y + characterVelY * dt;
+          }
+
+          const desiredTranslation = {
+            x: desiredDx,
+            y: desiredY - charPos.y,
+            z: desiredDz,
+          };
+
+          characterController.computeColliderMovement(playerCollider, desiredTranslation);
+          const corrected = characterController.computedMovement();
+          const cur = playerBody.translation();
+          const nextPos = { x: cur.x + corrected.x, y: cur.y + corrected.y, z: cur.z + corrected.z };
+          playerBody.setNextKinematicTranslation(nextPos);
+
+          physicsWorld.step();
+
+          const playerT = playerBody.translation();
+          charPos.set(playerT.x, playerT.y, playerT.z);
+
+          if (characterVelY < 0 && charPos.y <= groundY + 0.2) characterVelY = 0;
+          const inAir = charPos.y > groundY + 0.15;
+
+          // Update visuals
+          characterGroup.position.copy(charPos);
+          characterGroup.rotation.y = camYaw;
+
+          if (characterGroup.children.length > 0) {
+            const ud = characterGroup.userData;
+            if (ud.initialCharHeight != null) {
+              characterGroup.scale.setScalar(PARAMS.characterHeight / ud.initialCharHeight);
+            }
+            if (ud.modelBaseY != null) {
+              characterGroup.children[0].position.y = ud.modelBaseY + PARAMS.characterOffsetY;
+            }
+          }
+
+          capsule.visible = characterGroup.children.length === 0;
+          if (capsule.visible) {
+            capsule.position.copy(charPos);
+            capsule.rotation.y = camYaw;
+          }
+
+          // Animation state
+          const moving = moveDir.length() > 0;
+          const running = moving && keys.shift;
+          const moveState = inAir ? "jump" : moving ? (running ? "run" : "walk") : "idle";
+          const ud = characterGroup.userData;
+
+          if (ud && ud.idleAction && ud.walkAction && ud.runAction && ud.jumpAction && !ud.isAttacking) {
+            const skipT = 0.4;
+            const last = ud.lastMoveState;
+
+            if (moveState !== last) {
+              const crossFade = (to, from, duration = 0.2) => {
+                if (to.time < skipT) to.time = skipT;
+                to.enabled = true;
+                to.crossFadeFrom(from, duration).play();
+              };
+
+              if (moveState === "jump") {
+                crossFade(ud.jumpAction, last === "run" ? ud.runAction : last === "walk" ? ud.walkAction : ud.idleAction, 0.15);
+              } else if (moveState === "walk") {
+                crossFade(ud.walkAction, last === "run" ? ud.runAction : last === "jump" ? ud.jumpAction : ud.idleAction);
+              } else if (moveState === "run") {
+                crossFade(ud.runAction, last === "walk" ? ud.walkAction : last === "jump" ? ud.jumpAction : ud.idleAction);
+              } else {
+                crossFade(ud.idleAction, last === "run" ? ud.runAction : last === "walk" ? ud.walkAction : ud.jumpAction);
+              }
+            }
+            ud.lastMoveState = moveState;
+          }
+
+          if (characterMixer) characterMixer.update(dt);
+
+          // ── CHECK DOOR TRIGGERS ──
+          if (!isTransitioning && transitionCooldown <= 0) {
+            if (currentScene === "exterior" && isInExteriorDoorZone(charPos)) {
+              // Spawn inside room, facing INTO the room (toward -Z where furniture is)
+              transitionToScene("interior", INTERIOR_SPAWN, 0);
+            } else if (currentScene === "interior" && isInInteriorDoorZone(charPos)) {
+              // Exit and face away from building
+              transitionToScene("exterior", EXTERIOR_EXIT_SPAWN, PI);
+            }
+          }
+
+          // Camera
+          const camDist = PARAMS.camDist;
+          const cx = charPos.x - Math.sin(camYaw) * Math.cos(camPitch) * camDist;
+          const cy = charPos.y + Math.sin(camPitch) * camDist + PARAMS.camHeight + 1;
+          const cz = charPos.z - Math.cos(camYaw) * Math.cos(camPitch) * camDist;
+          camera.position.set(cx, Math.max(cy, 2), cz);
+          camera.lookAt(charPos.x, charPos.y + 0.5, charPos.z);
+
+          // Debug position display
+          document.getElementById("pos-debug").textContent = 
+            `x:${charPos.x.toFixed(1)}, y:${charPos.y.toFixed(1)}, z:${charPos.z.toFixed(1)}`;
+
+          renderer.render(scene, camera);
+        });
+
+        window.addEventListener("resize", () => {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(innerWidth, innerHeight);
+        });
+      }
+
+      // ═══════════════════════════════════════════════════════════════
+      // BUILDING CREATION HELPERS
+      // ═══════════════════════════════════════════════════════════════
+      function createBuildingExterior() {
+        const group = new THREE.Group();
+        const wallMat = new THREE.MeshStandardNodeMaterial({ color: 0xc8b898, roughness: 0.8 });
+        const roofMat = new THREE.MeshStandardNodeMaterial({ color: 0x8b4513, roughness: 0.7 });
+
+        const W = BUILDING_WIDTH;
+        const D = BUILDING_DEPTH;
+        const H = BUILDING_HEIGHT;
+        const DW = DOOR_WIDTH;
+        const DH = DOOR_HEIGHT;
+        const wallThickness = 0.5;
+
+        // Back wall
+        const backWall = new THREE.Mesh(new THREE.BoxGeometry(W, H, wallThickness), wallMat);
+        backWall.position.set(0, H / 2, -D / 2);
+        backWall.castShadow = true;
+        backWall.receiveShadow = true;
+        group.add(backWall);
+
+        // Left wall
+        const leftWall = new THREE.Mesh(new THREE.BoxGeometry(wallThickness, H, D), wallMat);
+        leftWall.position.set(-W / 2, H / 2, 0);
+        leftWall.castShadow = true;
+        leftWall.receiveShadow = true;
+        group.add(leftWall);
+
+        // Right wall
+        const rightWall = new THREE.Mesh(new THREE.BoxGeometry(wallThickness, H, D), wallMat);
+        rightWall.position.set(W / 2, H / 2, 0);
+        rightWall.castShadow = true;
+        rightWall.receiveShadow = true;
+        group.add(rightWall);
+
+        // Front wall with door
+        const frontLeftWidth = (W - DW) / 2;
+        const frontLeft = new THREE.Mesh(new THREE.BoxGeometry(frontLeftWidth, H, wallThickness), wallMat);
+        frontLeft.position.set(-W / 2 + frontLeftWidth / 2, H / 2, D / 2);
+        frontLeft.castShadow = true;
+        group.add(frontLeft);
+
+        const frontRight = new THREE.Mesh(new THREE.BoxGeometry(frontLeftWidth, H, wallThickness), wallMat);
+        frontRight.position.set(W / 2 - frontLeftWidth / 2, H / 2, D / 2);
+        frontRight.castShadow = true;
+        group.add(frontRight);
+
+        const frontTop = new THREE.Mesh(new THREE.BoxGeometry(DW, H - DH, wallThickness), wallMat);
+        frontTop.position.set(0, DH + (H - DH) / 2, D / 2);
+        frontTop.castShadow = true;
+        group.add(frontTop);
+
+        // Roof
+        const roofGeo = new THREE.ConeGeometry(Math.max(W, D) * 0.65, H * 0.5, 4);
+        const roof = new THREE.Mesh(roofGeo, roofMat);
+        roof.position.set(0, H + H * 0.25, 0);
+        roof.rotation.y = PI / 4;
+        roof.castShadow = true;
+        group.add(roof);
+
+        // Door frame
+        const frameMat = new THREE.MeshStandardNodeMaterial({ color: 0x5c4033, roughness: 0.6 });
+        const frameThickness = 0.15;
+
+        const leftFrame = new THREE.Mesh(new THREE.BoxGeometry(frameThickness, DH, frameThickness * 2), frameMat);
+        leftFrame.position.set(-DW / 2 - frameThickness / 2, DH / 2, D / 2 + frameThickness);
+        group.add(leftFrame);
+
+        const rightFrame = new THREE.Mesh(new THREE.BoxGeometry(frameThickness, DH, frameThickness * 2), frameMat);
+        rightFrame.position.set(DW / 2 + frameThickness / 2, DH / 2, D / 2 + frameThickness);
+        group.add(rightFrame);
+
+        const topFrame = new THREE.Mesh(new THREE.BoxGeometry(DW + frameThickness * 2, frameThickness, frameThickness * 2), frameMat);
+        topFrame.position.set(0, DH + frameThickness / 2, D / 2 + frameThickness);
+        group.add(topFrame);
+
+        return group;
+      }
+
+      function addExteriorDecoration(group, physicsWorld) {
+        const rockMat = new THREE.MeshStandardNodeMaterial({ color: 0x666666, roughness: 0.9 });
+        const treeTrunkMat = new THREE.MeshStandardNodeMaterial({ color: 0x4a3020, roughness: 0.85 });
+        const treeLeafMat = new THREE.MeshStandardNodeMaterial({ color: 0x2d5a1e, roughness: 0.8 });
+
+        // Some rocks
+        const rockPositions = [[-8, 3], [25, -10], [-15, 30], [40, 25]];
+        rockPositions.forEach(([x, z]) => {
+          const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(1 + Math.random()), rockMat);
+          rock.position.set(x, 0.5, z);
+          rock.rotation.set(Math.random(), Math.random(), Math.random());
+          rock.scale.y = 0.6;
+          rock.castShadow = true;
+          rock.receiveShadow = true;
+          group.add(rock);
+        });
+
+        // Simple trees (cylinders + cones)
+        const treePositions = [[-20, -15], [35, 5], [-10, 40], [45, 35], [-30, 10]];
+        treePositions.forEach(([x, z]) => {
+          const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.6, 4, 8), treeTrunkMat);
+          trunk.position.set(x, 2, z);
+          trunk.castShadow = true;
+          group.add(trunk);
+
+          const leaves = new THREE.Mesh(new THREE.ConeGeometry(2.5, 5, 8), treeLeafMat);
+          leaves.position.set(x, 6, z);
+          leaves.castShadow = true;
+          group.add(leaves);
+
+          // Tree collider
+          const treeBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(x, 2, z);
+          const treeBody = physicsWorld.createRigidBody(treeBodyDesc);
+          physicsWorld.createCollider(RAPIER.ColliderDesc.cylinder(2, 0.5), treeBody);
+        });
+      }
+
+      function createBuildingColliders(physicsWorld, buildingPos) {
+        const W = BUILDING_WIDTH;
+        const D = BUILDING_DEPTH;
+        const H = BUILDING_HEIGHT;
+        const DW = DOOR_WIDTH;
+        const DH = DOOR_HEIGHT;
+        const wallThickness = 0.5;
+
+        // Back wall
+        const backBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(buildingPos.x, H / 2, buildingPos.z - D / 2);
+        const backBody = physicsWorld.createRigidBody(backBodyDesc);
+        physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(W / 2, H / 2, wallThickness / 2), backBody);
+
+        // Left wall
+        const leftBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(buildingPos.x - W / 2, H / 2, buildingPos.z);
+        const leftBody = physicsWorld.createRigidBody(leftBodyDesc);
+        physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(wallThickness / 2, H / 2, D / 2), leftBody);
+
+        // Right wall
+        const rightBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(buildingPos.x + W / 2, H / 2, buildingPos.z);
+        const rightBody = physicsWorld.createRigidBody(rightBodyDesc);
+        physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(wallThickness / 2, H / 2, D / 2), rightBody);
+
+        // Front wall left
+        const frontLeftWidth = (W - DW) / 2;
+        const frontLeftBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(buildingPos.x - W / 2 + frontLeftWidth / 2, H / 2, buildingPos.z + D / 2);
+        const frontLeftBody = physicsWorld.createRigidBody(frontLeftBodyDesc);
+        physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(frontLeftWidth / 2, H / 2, wallThickness / 2), frontLeftBody);
+
+        // Front wall right
+        const frontRightBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(buildingPos.x + W / 2 - frontLeftWidth / 2, H / 2, buildingPos.z + D / 2);
+        const frontRightBody = physicsWorld.createRigidBody(frontRightBodyDesc);
+        physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(frontLeftWidth / 2, H / 2, wallThickness / 2), frontRightBody);
+
+        // Front wall top (above door)
+        const frontTopBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(buildingPos.x, DH + (H - DH) / 2, buildingPos.z + D / 2);
+        const frontTopBody = physicsWorld.createRigidBody(frontTopBodyDesc);
+        physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(DW / 2, (H - DH) / 2, wallThickness / 2), frontTopBody);
+      }
+
+      init().catch((e) => {
+        console.error("Init failed:", e);
+        document.getElementById("backend").textContent = "Error: " + e.message;
+      });
+    </script>
+  </body>
+</html>
