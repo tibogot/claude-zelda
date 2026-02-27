@@ -1308,6 +1308,10 @@ export async function createOctahedralImpostorForest(opts = {}) {
     setLod0AlphaTest: (v) => {
       leafMats.forEach((mat) => { mat.alphaTest = v; });
     },
+    // Light scale multiplier for impostor brightness (instant)
+    setLightScale: (v) => {
+      _uLightScale.value = v;
+    },
     // Debug: show wireframe of impostor plane(s)
     setWireframeVisible: (v) => {
       wireframeMesh.visible = !!v;
