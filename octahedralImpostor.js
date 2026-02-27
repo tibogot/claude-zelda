@@ -46,6 +46,8 @@ import {
   select,
   screenCoordinate,
   uv,
+  sin,
+  cos,
 } from "three/tsl";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
@@ -57,6 +59,12 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 
 // Per-frame golden-ratio offset for temporal dithering (updated by forest.update())
 const uFrameOffset = uniform(float(0));
+
+// Wind uniforms — shared across all forest materials, updated by forest.update()
+const uWindTime = uniform(float(0));
+const uWindStrength = uniform(float(0.3));
+const uWindSpeed = uniform(float(1.0));
+const uWindDirection = uniform(vec2(1.0, 0.3));
 
 // Interleaved Gradient Noise — screen-stable dither pattern with temporal jitter
 // Returns float in [0, 1). Input: screenCoordinate.xy (raw pixel position).
@@ -73,6 +81,23 @@ const IGN = Fn(([coord]) =>
     ),
   ),
 );
+
+// Wind displacement for LOD0 vertices — uses world position for per-tree variation
+// heightFactor: 0 at base, 1 at top (normalized vertex height within tree)
+// seedOffset: per-tree random offset (e.g. tree center x+z) for variation
+const windDisplacement = Fn(([worldPos, heightFactor, seedOffset]) => {
+  const windDir = normalize(vec3(uWindDirection.x, 0, uWindDirection.y));
+  const phase = add(
+    mul(uWindTime, uWindSpeed),
+    mul(seedOffset, 0.1),
+  );
+  const wave1 = sin(add(phase, mul(worldPos.x, 0.5)));
+  const wave2 = sin(add(mul(phase, 1.3), mul(worldPos.z, 0.4)));
+  const wave3 = sin(add(mul(phase, 0.7), mul(add(worldPos.x, worldPos.z), 0.3)));
+  const combined = mul(add(wave1, add(mul(wave2, 0.5), mul(wave3, 0.3))), 0.55);
+  const strength = mul(mul(combined, uWindStrength), mul(heightFactor, heightFactor));
+  return mul(windDir, strength);
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Loaders
@@ -600,7 +625,7 @@ function bakeAtlas(
     t.minFilter = THREE.LinearMipmapLinearFilter;
     t.magFilter = THREE.LinearFilter;
     t.generateMipmaps = true;
-    t.anisotropy = 4;
+    t.anisotropy = 16;
     t.colorSpace = THREE.LinearSRGBColorSpace; // atlas stores linear (bake uses no gamma encode)
     return t;
   };
@@ -771,9 +796,19 @@ function createImpostorMaterial(
     vUV2.assign(planeUV(pn2, pt2, pb2, camLocal, viewDir));
     vUV3.assign(planeUV(pn3, pt3, pb3, camLocal, viewDir));
 
-    // Return billboard vertex offset in local space.
+    // Wind sway for impostor billboard — tilts the whole billboard
+    // Use center position as seed for per-tree variation
+    const windSeed = add(center.x, center.z);
+    const windPhase = add(mul(uWindTime, uWindSpeed), mul(windSeed, 0.1));
+    const windWave = mul(sin(windPhase), uWindStrength);
+    // Scale sway by vertex height (top of billboard sways more)
+    const vertHeight = add(positionLocal.y, 0.5); // positionLocal.y is -0.5 to 0.5
+    const windDir3 = normalize(vec3(uWindDirection.x, 0, uWindDirection.y));
+    const windOffset = mul(mul(windDir3, windWave), mul(vertHeight, 0.3));
+
+    // Return billboard vertex offset in local space with wind.
     // InstancedMesh applies T(center)*S(scale) → correct world position.
-    return bv;
+    return add(bv, windOffset);
   });
 
   // ── Color node — uses vertex-stage parallax UVs (interpolated from positionNodeFn) ──
@@ -957,6 +992,12 @@ export async function createOctahedralImpostorForest(opts = {}) {
       m?.transparent ||
       /leaf|leave|foliage|canopy|frond|branch/i.test(name) ||
       (m?.map && (m?.side === THREE.DoubleSide || m?.alphaTest > 0));
+    // Compute geometry bounds for wind height factor
+    g.computeBoundingBox();
+    const geoMinY = g.boundingBox.min.y;
+    const geoMaxY = g.boundingBox.max.y;
+    const geoHeight = Math.max(0.1, geoMaxY - geoMinY);
+
     const nodeMat = new THREE.MeshStandardNodeMaterial({
       color: m?.color?.getHex?.() ?? 0x448833,
       roughness: m?.roughness ?? 0.8,
@@ -967,6 +1008,18 @@ export async function createOctahedralImpostorForest(opts = {}) {
       side: isLeaf ? THREE.DoubleSide : (m?.side ?? THREE.FrontSide),
       depthWrite: true,
     });
+
+    // Wind displacement for leaves (trunk stays fixed)
+    if (isLeaf) {
+      const uGeoMinY = uniform(float(geoMinY));
+      const uGeoHeight = uniform(float(geoHeight));
+      nodeMat.positionNode = Fn(() => {
+        const heightFactor = saturate(div(sub(positionLocal.y, uGeoMinY), uGeoHeight));
+        const seedOffset = add(positionWorld.x, positionWorld.z);
+        const windOffset = windDisplacement(positionWorld, heightFactor, seedOffset);
+        return add(positionLocal, windOffset);
+      })();
+    }
 
     // LOD dither fade-out: near tree disappears as it approaches lodDistance
     // fadeT: 1=near camera (fully visible), 0=at/past lodDist (fully dithered away)
@@ -1173,10 +1226,18 @@ export async function createOctahedralImpostorForest(opts = {}) {
     _lastLod1Count = 0,
     _lastLod2Count = 0;
 
+  let _lastTime = performance.now();
+  
   function update(camera, frustum) {
     // Temporal dithering: advance golden-ratio frame offset for IGN jitter
     _frameCount++;
     uFrameOffset.value = (_frameCount * 0.6180339887) % 1.0;
+    
+    // Wind time — accumulates real elapsed time for smooth animation
+    const now = performance.now();
+    const dt = (now - _lastTime) / 1000;
+    _lastTime = now;
+    uWindTime.value += dt;
 
     const cpx = camera.position.x;
     const cpy = camera.position.y;
@@ -1312,6 +1373,10 @@ export async function createOctahedralImpostorForest(opts = {}) {
     setLightScale: (v) => {
       _uLightScale.value = v;
     },
+    // Wind controls (instant)
+    setWindStrength: (v) => { uWindStrength.value = v; },
+    setWindSpeed: (v) => { uWindSpeed.value = v; },
+    setWindDirection: (x, z) => { uWindDirection.value.set(x, z); },
     // Debug: show wireframe of impostor plane(s)
     setWireframeVisible: (v) => {
       wireframeMesh.visible = !!v;
