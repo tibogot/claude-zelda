@@ -65,27 +65,6 @@
       attack
     </div>
 
-    <!-- ═══ CASTLE SYSTEM UI START ═══ -->
-    <div id="scene-indicator" style="
-      position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 10;
-      font: bold 16px/1.5 'SF Mono', 'Fira Code', monospace; color: #fff;
-      background: rgba(0, 100, 50, 0.8); padding: 6px 20px; border-radius: 6px;
-      pointer-events: none; user-select: none; opacity: 0; transition: opacity 0.3s;
-    ">OVERWORLD</div>
-    <div id="transition-overlay" style="
-      position: fixed; inset: 0; background: #000; opacity: 0;
-      pointer-events: none; z-index: 100; transition: opacity 0.5s ease-in-out;
-    "></div>
-    <div id="castle-prompt" style="
-      position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%); z-index: 20;
-      background: rgba(0,0,0,0.85); border: 2px solid #f0d070; border-radius: 8px;
-      padding: 12px 24px; color: #ffe0a0; font: 14px 'SF Mono', monospace;
-      letter-spacing: 1px; text-align: center; opacity: 0; transition: opacity 0.3s;
-      pointer-events: none;
-    ">Press <span style="background: rgba(255,200,80,0.2); border: 1px solid rgba(255,200,80,0.4);
-      border-radius: 3px; padding: 1px 6px; font-weight: bold;">E</span> to enter</div>
-    <!-- ═══ CASTLE SYSTEM UI END ═══ -->
-
     <script type="module">
       const Tweakpane =
         await import("https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/dist/tweakpane.min.js");
@@ -160,8 +139,6 @@
       import { bloom } from "three/addons/tsl/display/BloomNode.js";
       import { lensflare } from "three/addons/tsl/display/LensflareNode.js";
       import { gaussianBlur } from "three/addons/tsl/display/GaussianBlurNode.js";
-      import { godrays } from "three/addons/tsl/display/GodraysNode.js";
-      import { bilateralBlur } from "three/addons/tsl/display/BilateralBlurNode.js";
       import RAPIER from "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.19.3/+esm";
 
       const PI = Math.PI;
@@ -377,36 +354,6 @@
         characterOffsetY: 0.37,
         capsuleRadius: 0.35,
       };
-
-      // ═══════════════════════════════════════════════════════════════
-      // CASTLE SYSTEM - State & Constants
-      // ═══════════════════════════════════════════════════════════════
-      let currentScene = "overworld";
-      let isTransitioning = false;
-      let transitionCooldown = 0;
-      let teleportFrameSkip = 0;  // Skip physics for N frames after teleport
-
-      // Castle position in overworld (will be placed on terrain)
-      const CASTLE_POS_X = 80;
-      const CASTLE_POS_Z = -60;
-      
-      // Interior is far away from overworld to avoid any overlap
-      const INTERIOR_WORLD_OFFSET = new THREE.Vector3(0, 0, -800);
-      const INTERIOR_WIDTH = 50;
-      const INTERIOR_DEPTH = 60;
-      const INTERIOR_HEIGHT = 14;
-      
-      // Triggers
-      const DOOR_TRIGGER_RADIUS = 3.0;
-      const EXIT_TRIGGER_RADIUS = 3.0;
-      
-      // Groups that will be toggled
-      let castleExteriorGroup = null;
-      let castleInteriorGroup = null;
-      let overworldGroups = []; // Will hold references to hide when inside
-      
-      // Godrays light for interior (will be created in interior setup)
-      let interiorGodraysLight = null;
 
       // ═══════════════════════════════════════════════════════════════
       // SEEDED RNG
@@ -2589,640 +2536,6 @@
           }
         }
 
-        // ═══════════════════════════════════════════════════════════════
-        // CASTLE SYSTEM - Exterior & Interior Creation
-        // ═══════════════════════════════════════════════════════════════
-        
-        // Castle exterior in overworld
-        castleExteriorGroup = new THREE.Group();
-        const castleTerrainY = sampleHeight(CASTLE_POS_X, CASTLE_POS_Z);
-        castleExteriorGroup.position.set(CASTLE_POS_X, castleTerrainY, CASTLE_POS_Z);
-        scene.add(castleExteriorGroup);
-        
-        // Create castle exterior
-        (function createCastleExterior() {
-          const wallMat = new THREE.MeshStandardNodeMaterial({ color: 0x888888, roughness: 0.8 });
-          const darkStoneMat = new THREE.MeshStandardNodeMaterial({ color: 0x666666, roughness: 0.9 });
-          
-          // Main wall
-          const mainWall = new THREE.Mesh(new THREE.BoxGeometry(14, 8, 3), wallMat);
-          mainWall.position.y = 4;
-          mainWall.castShadow = true;
-          mainWall.receiveShadow = true;
-          castleExteriorGroup.add(mainWall);
-          
-          // Towers
-          [-6, 6].forEach(x => {
-            const tower = new THREE.Mesh(new THREE.CylinderGeometry(2, 2.2, 12, 8), darkStoneMat);
-            tower.position.set(x, 6, 0);
-            tower.castShadow = true;
-            castleExteriorGroup.add(tower);
-            
-            const cone = new THREE.Mesh(
-              new THREE.ConeGeometry(2.5, 3, 8),
-              new THREE.MeshStandardNodeMaterial({ color: 0x8B0000, roughness: 0.7 })
-            );
-            cone.position.set(x, 13.5, 0);
-            cone.castShadow = true;
-            castleExteriorGroup.add(cone);
-            
-            // Battlements
-            for (let a = 0; a < 8; a++) {
-              const merlon = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.8, 0.6), darkStoneMat);
-              const angle = (a / 8) * PI * 2;
-              merlon.position.set(x + Math.cos(angle) * 2.1, 12.4, Math.sin(angle) * 2.1);
-              castleExteriorGroup.add(merlon);
-            }
-          });
-          
-          // Door frame (stone arch around door, positioned in front of wall)
-          const doorFrame = new THREE.Mesh(new THREE.BoxGeometry(4.5, 6.0, 2.0), darkStoneMat);
-          doorFrame.position.set(0, 3.0, 2.5);
-          castleExteriorGroup.add(doorFrame);
-          
-          // Solid wooden door (thick enough to cover the entire entrance)
-          const doorMat = new THREE.MeshStandardNodeMaterial({
-            color: 0x5c3d2e, roughness: 0.8, metalness: 0.05
-          });
-          const door = new THREE.Mesh(new THREE.BoxGeometry(3.2, 5.0, 1.5), doorMat);
-          door.position.set(0, 2.5, 2.5);
-          door.castShadow = true;
-          castleExteriorGroup.add(door);
-          
-          // Door metal bands/decoration
-          const metalMat = new THREE.MeshStandardNodeMaterial({
-            color: 0x3a3a3a, roughness: 0.4, metalness: 0.8
-          });
-          [-1.5, -0.5, 0.5, 1.5].forEach(yOff => {
-            const band = new THREE.Mesh(new THREE.BoxGeometry(3.3, 0.2, 0.15), metalMat);
-            band.position.set(0, 2.5 + yOff, 3.3);
-            castleExteriorGroup.add(band);
-          });
-          
-          // Door handle
-          const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.5, 8), metalMat);
-          handle.position.set(1.1, 2.5, 3.3);
-          handle.rotation.x = Math.PI / 2;
-          castleExteriorGroup.add(handle);
-          
-          // Door knocker ring
-          const knocker = new THREE.Mesh(new THREE.TorusGeometry(0.2, 0.05, 8, 16), metalMat);
-          knocker.position.set(-0.9, 2.8, 3.3);
-          knocker.rotation.x = Math.PI / 2;
-          castleExteriorGroup.add(knocker);
-          
-          // Torch lights on either side of door
-          const torchLight1 = new THREE.PointLight(0xf0a030, 1.5, 10);
-          torchLight1.position.set(-2.8, 4, 3.5);
-          castleExteriorGroup.add(torchLight1);
-          const torchLight2 = new THREE.PointLight(0xf0a030, 1.5, 10);
-          torchLight2.position.set(2.8, 4, 3.5);
-          castleExteriorGroup.add(torchLight2);
-          
-          // Castle colliders
-          const castleWorldX = CASTLE_POS_X;
-          const castleWorldZ = CASTLE_POS_Z;
-          const castleWorldY = castleTerrainY;
-          
-          // Main wall collider
-          const mainWallBody = physicsWorld.createRigidBody(
-            RAPIER.RigidBodyDesc.fixed().setTranslation(castleWorldX, castleWorldY + 4, castleWorldZ)
-          );
-          physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(7, 4, 1.5), mainWallBody);
-          
-          // Tower colliders
-          [-6, 6].forEach(x => {
-            const towerBody = physicsWorld.createRigidBody(
-              RAPIER.RigidBodyDesc.fixed().setTranslation(castleWorldX + x, castleWorldY + 6, castleWorldZ)
-            );
-            physicsWorld.createCollider(RAPIER.ColliderDesc.cylinder(6, 2.1), towerBody);
-          });
-          
-          // Door collider - blocks player from walking through the door
-          const doorBody = physicsWorld.createRigidBody(
-            RAPIER.RigidBodyDesc.fixed().setTranslation(castleWorldX, castleWorldY + 2.5, castleWorldZ + 2.5)
-          );
-          physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(1.7, 2.5, 0.8), doorBody);
-        })();
-        
-        // Castle interior (far from overworld)
-        castleInteriorGroup = new THREE.Group();
-        castleInteriorGroup.position.copy(INTERIOR_WORLD_OFFSET);
-        castleInteriorGroup.visible = false;
-        scene.add(castleInteriorGroup);
-        
-        // Interior floor collider
-        const intFloorBody = physicsWorld.createRigidBody(
-          RAPIER.RigidBodyDesc.fixed().setTranslation(INTERIOR_WORLD_OFFSET.x, -0.5, INTERIOR_WORLD_OFFSET.z)
-        );
-        physicsWorld.createCollider(
-          RAPIER.ColliderDesc.cuboid(INTERIOR_WIDTH / 2 + 2, 0.5, INTERIOR_DEPTH / 2 + 2),
-          intFloorBody
-        );
-        
-        // Create castle interior
-        (function createCastleInterior() {
-          const W = INTERIOR_WIDTH / 2;
-          const L = INTERIOR_DEPTH / 2;
-          const H = INTERIOR_HEIGHT;
-          const ox = INTERIOR_WORLD_OFFSET.x;
-          const oz = INTERIOR_WORLD_OFFSET.z;
-          
-          // Interior ambient lights - darker for dramatic torch lighting
-          const ambient = new THREE.AmbientLight(0x221511, 0.4);
-          castleInteriorGroup.add(ambient);
-          const hemiLight = new THREE.HemisphereLight(0x332211, 0x110808, 0.3);
-          castleInteriorGroup.add(hemiLight);
-          
-          // Main godrays light source (centered above the hall)
-          interiorGodraysLight = new THREE.PointLight(0xff8844, 15, 80);
-          interiorGodraysLight.position.set(ox, H - 2, oz);
-          scene.add(interiorGodraysLight);  // Add to scene, not group (godrays need world position)
-          
-          // Materials
-          const wallMat = new THREE.MeshStandardNodeMaterial({ color: 0x5a5045, roughness: 0.9 });
-          const darkStoneMat = new THREE.MeshStandardNodeMaterial({ color: 0x3a3530, roughness: 0.95 });
-          const pillarMat = new THREE.MeshStandardNodeMaterial({ color: 0x6a6055, roughness: 0.7 });
-          const goldMat = new THREE.MeshStandardNodeMaterial({ color: 0xffd700, metalness: 0.8, roughness: 0.2 });
-          const redMat = new THREE.MeshStandardNodeMaterial({ color: 0x8B0000, roughness: 0.5, metalness: 0.3 });
-          const floorMat = new THREE.MeshStandardNodeMaterial({ color: 0x6a5a48, roughness: 0.85, side: THREE.DoubleSide });
-          
-          // Floor
-          const floor = new THREE.Mesh(new THREE.PlaneGeometry(W * 2, L * 2), floorMat);
-          floor.rotation.x = -PI / 2;
-          floor.position.y = -0.1;
-          floor.receiveShadow = true;
-          castleInteriorGroup.add(floor);
-          
-          // Checkerboard tiles
-          for (let x = -W + 1; x < W; x += 3) {
-            for (let z = -L + 1; z < L; z += 3) {
-              const isDark = (Math.floor((x + W) / 3) + Math.floor((z + L) / 3)) % 2 === 0;
-              const tile = new THREE.Mesh(
-                new THREE.PlaneGeometry(2.8, 2.8),
-                new THREE.MeshStandardNodeMaterial({ color: isDark ? 0x4a3d30 : 0x6a5a48, roughness: 0.8 })
-              );
-              tile.rotation.x = -PI / 2;
-              tile.position.set(x + 1, 0.01, z + 1);
-              castleInteriorGroup.add(tile);
-            }
-          }
-          
-          // Walls
-          const backWall = new THREE.Mesh(new THREE.BoxGeometry(W * 2, H, 1), wallMat);
-          backWall.position.set(0, H / 2, -L);
-          castleInteriorGroup.add(backWall);
-          
-          [-W, W].forEach(x => {
-            const wall = new THREE.Mesh(new THREE.BoxGeometry(1, H, L * 2), wallMat);
-            wall.position.set(x, H / 2, 0);
-            castleInteriorGroup.add(wall);
-          });
-          
-          // Front wall with door opening
-          const doorW = 4;
-          const leftFrontW = (W - doorW / 2);
-          const fwLeft = new THREE.Mesh(new THREE.BoxGeometry(leftFrontW, H, 1), wallMat);
-          fwLeft.position.set(-W + leftFrontW / 2, H / 2, L);
-          castleInteriorGroup.add(fwLeft);
-          const fwRight = new THREE.Mesh(new THREE.BoxGeometry(leftFrontW, H, 1), wallMat);
-          fwRight.position.set(W - leftFrontW / 2, H / 2, L);
-          castleInteriorGroup.add(fwRight);
-          const fwTop = new THREE.Mesh(new THREE.BoxGeometry(doorW, H - 5, 1), wallMat);
-          fwTop.position.set(0, H - (H - 5) / 2, L);
-          castleInteriorGroup.add(fwTop);
-          
-          // Ceiling
-          const ceilMat = new THREE.MeshStandardNodeMaterial({ color: 0x2a2520, roughness: 0.9 });
-          const ceiling = new THREE.Mesh(new THREE.PlaneGeometry(W * 2, L * 2), ceilMat);
-          ceiling.rotation.x = PI / 2;
-          ceiling.position.y = H;
-          castleInteriorGroup.add(ceiling);
-          
-          // Ceiling beams
-          for (let z = -L + 5; z < L; z += 10) {
-            const beam = new THREE.Mesh(
-              new THREE.BoxGeometry(W * 1.8, 0.4, 0.8),
-              new THREE.MeshStandardNodeMaterial({ color: 0x3a2a1a, roughness: 0.8 })
-            );
-            beam.position.set(0, H - 0.5, z);
-            castleInteriorGroup.add(beam);
-          }
-          
-          // Grand pillars
-          const pillarSpacing = 10;
-          const pillarRowX = 15;
-          for (let z = -L + 10; z <= L - 10; z += pillarSpacing) {
-            [-pillarRowX, pillarRowX].forEach(x => {
-              const pillar = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.2, H, 12), pillarMat);
-              pillar.position.set(x, H / 2, z);
-              pillar.castShadow = true;
-              castleInteriorGroup.add(pillar);
-              
-              const base = new THREE.Mesh(new THREE.CylinderGeometry(1.4, 1.6, 0.6, 12), darkStoneMat);
-              base.position.set(x, 0.3, z);
-              castleInteriorGroup.add(base);
-              
-              const capital = new THREE.Mesh(new THREE.CylinderGeometry(1.4, 1.0, 0.8, 12), darkStoneMat);
-              capital.position.set(x, H - 0.4, z);
-              castleInteriorGroup.add(capital);
-              
-              const ring = new THREE.Mesh(new THREE.TorusGeometry(1.15, 0.08, 8, 24), goldMat);
-              ring.position.set(x, H / 2 + 2, z);
-              ring.rotation.x = PI / 2;
-              castleInteriorGroup.add(ring);
-              
-              // Pillar collider
-              const pillarBody = physicsWorld.createRigidBody(
-                RAPIER.RigidBodyDesc.fixed().setTranslation(ox + x, H / 2, oz + z)
-              );
-              physicsWorld.createCollider(RAPIER.ColliderDesc.cylinder(H / 2, 1.2), pillarBody);
-            });
-          }
-          
-          // Red carpet
-          const carpet = new THREE.Mesh(
-            new THREE.PlaneGeometry(6, L * 1.6),
-            new THREE.MeshStandardNodeMaterial({ color: 0x8B1A1A, roughness: 0.95 })
-          );
-          carpet.rotation.x = -PI / 2;
-          carpet.position.set(0, 0.02, -5);
-          castleInteriorGroup.add(carpet);
-          
-          // Carpet gold borders
-          [-3.1, 3.1].forEach(x => {
-            const border = new THREE.Mesh(
-              new THREE.PlaneGeometry(0.15, L * 1.6),
-              new THREE.MeshStandardNodeMaterial({ color: 0xc4a035, roughness: 0.6 })
-            );
-            border.rotation.x = -PI / 2;
-            border.position.set(x, 0.025, -5);
-            castleInteriorGroup.add(border);
-          });
-          
-          // Torches with wall brackets
-          function addTorch(x, y, z, facingIn = true) {
-            // Wall bracket
-            const bracket = new THREE.Mesh(
-              new THREE.BoxGeometry(0.15, 0.15, 0.5),
-              new THREE.MeshStandardNodeMaterial({ color: 0x2a2015, metalness: 0.6, roughness: 0.4 })
-            );
-            bracket.position.set(x, y - 0.3, z);
-            castleInteriorGroup.add(bracket);
-            
-            // Torch holder ring
-            const ring = new THREE.Mesh(
-              new THREE.TorusGeometry(0.12, 0.03, 6, 12),
-              new THREE.MeshStandardNodeMaterial({ color: 0x3a3025, metalness: 0.7, roughness: 0.3 })
-            );
-            ring.position.set(x, y - 0.1, z + (facingIn ? 0.25 : -0.25));
-            ring.rotation.x = Math.PI / 2;
-            castleInteriorGroup.add(ring);
-            
-            // Torch stick
-            const stick = new THREE.Mesh(
-              new THREE.CylinderGeometry(0.05, 0.07, 0.8, 6),
-              new THREE.MeshStandardNodeMaterial({ color: 0x3a2510 })
-            );
-            stick.position.set(x, y + 0.2, z + (facingIn ? 0.25 : -0.25));
-            castleInteriorGroup.add(stick);
-            
-            // Flame (larger, brighter)
-            const flame = new THREE.Mesh(
-              new THREE.ConeGeometry(0.15, 0.4, 8),
-              new THREE.MeshStandardNodeMaterial({ 
-                color: 0xffaa22, emissive: 0xff6600, emissiveIntensity: 3,
-                transparent: true, opacity: 0.9
-              })
-            );
-            flame.position.set(x, y + 0.75, z + (facingIn ? 0.25 : -0.25));
-            castleInteriorGroup.add(flame);
-            
-            // Inner flame core
-            const flameCore = new THREE.Mesh(
-              new THREE.ConeGeometry(0.08, 0.25, 6),
-              new THREE.MeshStandardNodeMaterial({ 
-                color: 0xffffaa, emissive: 0xffff88, emissiveIntensity: 4
-              })
-            );
-            flameCore.position.set(x, y + 0.7, z + (facingIn ? 0.25 : -0.25));
-            castleInteriorGroup.add(flameCore);
-            
-            // Torch light - warm flickering fire color
-            const torchLight = new THREE.PointLight(0xff6622, 8.0, 20);
-            torchLight.position.set(x, y + 0.8, z + (facingIn ? 0.5 : -0.5));
-            castleInteriorGroup.add(torchLight);
-          }
-          
-          // Wall torches - more of them for better lighting
-          for (let z = -L + 6; z <= L - 6; z += 8) {
-            addTorch(-W + 0.5, 4.5, z, true);
-            addTorch(W - 0.5, 4.5, z, true);
-          }
-          
-          // Throne platform
-          const platform = new THREE.Mesh(new THREE.BoxGeometry(20, 1.2, 12), darkStoneMat);
-          platform.position.set(0, 0.6, -L + 8);
-          castleInteriorGroup.add(platform);
-          
-          // Platform collider
-          const platBody = physicsWorld.createRigidBody(
-            RAPIER.RigidBodyDesc.fixed().setTranslation(ox, 0.6, oz - L + 8)
-          );
-          physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(10, 0.6, 6), platBody);
-          
-          // Steps
-          for (let i = 0; i < 3; i++) {
-            const step = new THREE.Mesh(
-              new THREE.BoxGeometry(16 + i * 3, 0.3, 1.5),
-              new THREE.MeshStandardNodeMaterial({ color: 0x504840, roughness: 0.85 })
-            );
-            step.position.set(0, 0.15 + (2 - i) * 0.3, -L + 14 + i * 1.5);
-            castleInteriorGroup.add(step);
-          }
-          
-          // Throne - grander design
-          const throneSeat = new THREE.Mesh(new THREE.BoxGeometry(3.5, 0.6, 3), redMat);
-          throneSeat.position.set(0, 1.5, -L + 6);
-          throneSeat.castShadow = true;
-          castleInteriorGroup.add(throneSeat);
-          
-          const throneBack = new THREE.Mesh(new THREE.BoxGeometry(3.5, 6, 0.5), redMat);
-          throneBack.position.set(0, 4.5, -L + 4.7);
-          throneBack.castShadow = true;
-          castleInteriorGroup.add(throneBack);
-          
-          const throneTopTrim = new THREE.Mesh(new THREE.BoxGeometry(3.8, 0.3, 0.6), goldMat);
-          throneTopTrim.position.set(0, 7.65, -L + 4.7);
-          castleInteriorGroup.add(throneTopTrim);
-          
-          // Throne armrests
-          [-1.5, 1.5].forEach(x => {
-            const armrest = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.5, 2.5), redMat);
-            armrest.position.set(x, 2.0, -L + 5.5);
-            castleInteriorGroup.add(armrest);
-            
-            // Gold trim on armrest
-            const armTrim = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.15, 2.6), goldMat);
-            armTrim.position.set(x, 2.3, -L + 5.5);
-            castleInteriorGroup.add(armTrim);
-          });
-          
-          // Throne side pillars
-          [-2.2, 2.2].forEach(x => {
-            const sidePillar = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.25, 7, 8), darkStoneMat);
-            sidePillar.position.set(x, 4.7, -L + 4.7);
-            castleInteriorGroup.add(sidePillar);
-            
-            // Pillar top ornament
-            const ornament = new THREE.Mesh(new THREE.SphereGeometry(0.35, 8, 8), goldMat);
-            ornament.position.set(x, 8.4, -L + 4.7);
-            castleInteriorGroup.add(ornament);
-          });
-          
-          // Braziers beside throne (fire pits)
-          [-5, 5].forEach(x => {
-            const brazierBase = new THREE.Mesh(
-              new THREE.CylinderGeometry(0.8, 1.0, 0.5, 8),
-              new THREE.MeshStandardNodeMaterial({ color: 0x2a2520, metalness: 0.6, roughness: 0.4 })
-            );
-            brazierBase.position.set(x, 1.45, -L + 6);
-            castleInteriorGroup.add(brazierBase);
-            
-            const brazierBowl = new THREE.Mesh(
-              new THREE.CylinderGeometry(0.9, 0.6, 0.8, 8, 1, true),
-              new THREE.MeshStandardNodeMaterial({ color: 0x3a3530, metalness: 0.5, roughness: 0.5, side: THREE.DoubleSide })
-            );
-            brazierBowl.position.set(x, 1.9, -L + 6);
-            castleInteriorGroup.add(brazierBowl);
-            
-            // Fire inside brazier
-            const fire = new THREE.Mesh(
-              new THREE.ConeGeometry(0.5, 1.2, 8),
-              new THREE.MeshStandardNodeMaterial({ 
-                color: 0xff6600, emissive: 0xff4400, emissiveIntensity: 4, 
-                transparent: true, opacity: 0.85 
-              })
-            );
-            fire.position.set(x, 2.5, -L + 6);
-            castleInteriorGroup.add(fire);
-            
-            // Brazier light
-            const brazierLight = new THREE.PointLight(0xff5500, 10, 18);
-            brazierLight.position.set(x, 3, -L + 6);
-            castleInteriorGroup.add(brazierLight);
-          });
-          
-          // Wall banners/tapestries - rich crimson with slight glow to be visible in dark
-          const bannerMat = new THREE.MeshStandardNodeMaterial({ 
-            color: 0x8B1515, emissive: 0x220505, emissiveIntensity: 0.3,
-            roughness: 0.85, side: THREE.DoubleSide 
-          });
-          const bannerGoldMat = new THREE.MeshStandardNodeMaterial({ 
-            color: 0xd4a535, emissive: 0x554410, emissiveIntensity: 0.4,
-            roughness: 0.4, metalness: 0.5, side: THREE.DoubleSide
-          });
-          
-          // Banners on side walls - positioned between pillars, closer to wall
-          const bannerPositionsZ = [-20, -4, 12];  // Strategic positions along the hall
-          bannerPositionsZ.forEach(z => {
-            [-W + 0.6, W - 0.6].forEach((x, idx) => {
-              // Banner cloth - larger and more visible
-              const banner = new THREE.Mesh(new THREE.PlaneGeometry(4, 7), bannerMat);
-              banner.position.set(x, 5.5, z);
-              banner.rotation.y = idx === 0 ? Math.PI / 2 : -Math.PI / 2;
-              castleInteriorGroup.add(banner);
-              
-              // Banner rod (gold)
-              const rod = new THREE.Mesh(
-                new THREE.CylinderGeometry(0.1, 0.1, 4.5, 8),
-                new THREE.MeshStandardNodeMaterial({ color: 0xb8860b, metalness: 0.7, roughness: 0.3 })
-              );
-              rod.position.set(x, 9.2, z);
-              rod.rotation.z = Math.PI / 2;
-              castleInteriorGroup.add(rod);
-              
-              // Rod end caps
-              [-2.1, 2.1].forEach(offset => {
-                const cap = new THREE.Mesh(
-                  new THREE.SphereGeometry(0.15, 8, 8),
-                  new THREE.MeshStandardNodeMaterial({ color: 0xffd700, metalness: 0.8, roughness: 0.2 })
-                );
-                cap.position.set(x, 9.2, z + offset);
-                castleInteriorGroup.add(cap);
-              });
-              
-              // Gold trim at bottom of banner
-              const trim = new THREE.Mesh(new THREE.PlaneGeometry(4, 0.4), bannerGoldMat);
-              trim.position.set(x + (idx === 0 ? 0.02 : -0.02), 2.2, z);
-              trim.rotation.y = idx === 0 ? Math.PI / 2 : -Math.PI / 2;
-              castleInteriorGroup.add(trim);
-              
-              // Gold trim at top
-              const topTrim = new THREE.Mesh(new THREE.PlaneGeometry(4, 0.3), bannerGoldMat);
-              topTrim.position.set(x + (idx === 0 ? 0.02 : -0.02), 8.8, z);
-              topTrim.rotation.y = idx === 0 ? Math.PI / 2 : -Math.PI / 2;
-              castleInteriorGroup.add(topTrim);
-              
-              // Simple crest/symbol on banner (circle)
-              const crest = new THREE.Mesh(
-                new THREE.CircleGeometry(0.8, 16),
-                bannerGoldMat
-              );
-              crest.position.set(x + (idx === 0 ? 0.03 : -0.03), 6, z);
-              crest.rotation.y = idx === 0 ? Math.PI / 2 : -Math.PI / 2;
-              castleInteriorGroup.add(crest);
-            });
-          });
-          
-          // Large banner behind throne
-          const throneBanner = new THREE.Mesh(new THREE.PlaneGeometry(10, 11), bannerMat);
-          throneBanner.position.set(0, 6.5, -L + 0.6);
-          castleInteriorGroup.add(throneBanner);
-          
-          // Gold border frame around throne banner
-          const frameMat = new THREE.MeshStandardNodeMaterial({ 
-            color: 0xffd700, emissive: 0x886600, emissiveIntensity: 0.5, metalness: 0.8, roughness: 0.2 
-          });
-          // Top border
-          const frameTop = new THREE.Mesh(new THREE.BoxGeometry(10.5, 0.3, 0.15), frameMat);
-          frameTop.position.set(0, 12.1, -L + 0.55);
-          castleInteriorGroup.add(frameTop);
-          // Bottom border
-          const frameBottom = new THREE.Mesh(new THREE.BoxGeometry(10.5, 0.3, 0.15), frameMat);
-          frameBottom.position.set(0, 1.1, -L + 0.55);
-          castleInteriorGroup.add(frameBottom);
-          // Side borders
-          [-5.1, 5.1].forEach(x => {
-            const frameSide = new THREE.Mesh(new THREE.BoxGeometry(0.3, 11, 0.15), frameMat);
-            frameSide.position.set(x, 6.6, -L + 0.55);
-            castleInteriorGroup.add(frameSide);
-          });
-          
-          // Gold emblem on throne banner (larger, more ornate)
-          const emblem = new THREE.Mesh(
-            new THREE.CircleGeometry(2, 6),
-            new THREE.MeshStandardNodeMaterial({ 
-              color: 0xffd700, emissive: 0xaa7700, emissiveIntensity: 0.6, metalness: 0.8, roughness: 0.2 
-            })
-          );
-          emblem.position.set(0, 7.5, -L + 0.5);
-          emblem.rotation.z = Math.PI / 6;
-          castleInteriorGroup.add(emblem);
-          
-          // Inner emblem detail
-          const emblemInner = new THREE.Mesh(
-            new THREE.CircleGeometry(1.2, 6),
-            new THREE.MeshStandardNodeMaterial({ 
-              color: 0x8B1515, emissive: 0x330808, emissiveIntensity: 0.3 
-            })
-          );
-          emblemInner.position.set(0, 7.5, -L + 0.48);
-          emblemInner.rotation.z = Math.PI / 6;
-          castleInteriorGroup.add(emblemInner);
-          
-          // Chandeliers with candles
-          [-20, 0, 20].forEach(zPos => {
-            const chandelierGroup = new THREE.Group();
-            
-            // Main ring
-            const chanRing = new THREE.Mesh(new THREE.TorusGeometry(2.2, 0.12, 8, 24), goldMat);
-            chanRing.rotation.x = PI / 2;
-            chandelierGroup.add(chanRing);
-            
-            // Inner ring
-            const innerRing = new THREE.Mesh(new THREE.TorusGeometry(1.2, 0.08, 8, 16), goldMat);
-            innerRing.rotation.x = PI / 2;
-            chandelierGroup.add(innerRing);
-            
-            // Chains
-            for (let i = 0; i < 4; i++) {
-              const angle = (i / 4) * PI * 2;
-              const chain = new THREE.Mesh(
-                new THREE.CylinderGeometry(0.025, 0.025, 3.5, 4),
-                new THREE.MeshStandardNodeMaterial({ color: 0x998866, metalness: 0.5 })
-              );
-              chain.position.set(Math.cos(angle) * 2.0, 1.75, Math.sin(angle) * 2.0);
-              chandelierGroup.add(chain);
-            }
-            
-            // Candles on outer ring
-            for (let i = 0; i < 8; i++) {
-              const angle = (i / 8) * PI * 2;
-              const cx = Math.cos(angle) * 2.2;
-              const cz = Math.sin(angle) * 2.2;
-              
-              // Candle holder
-              const holder = new THREE.Mesh(
-                new THREE.CylinderGeometry(0.1, 0.12, 0.15, 8),
-                goldMat
-              );
-              holder.position.set(cx, -0.1, cz);
-              chandelierGroup.add(holder);
-              
-              // Candle
-              const candle = new THREE.Mesh(
-                new THREE.CylinderGeometry(0.06, 0.06, 0.4, 8),
-                new THREE.MeshStandardNodeMaterial({ color: 0xfff8e0 })
-              );
-              candle.position.set(cx, 0.15, cz);
-              chandelierGroup.add(candle);
-              
-              // Candle flame
-              const candleFlame = new THREE.Mesh(
-                new THREE.ConeGeometry(0.05, 0.15, 6),
-                new THREE.MeshStandardNodeMaterial({ 
-                  color: 0xffdd44, emissive: 0xff8800, emissiveIntensity: 3 
-                })
-              );
-              candleFlame.position.set(cx, 0.42, cz);
-              chandelierGroup.add(candleFlame);
-            }
-            
-            // Central light
-            const chanLight = new THREE.PointLight(0xff9944, 12.0, 30);
-            chanLight.position.y = -0.5;
-            chandelierGroup.add(chanLight);
-            
-            chandelierGroup.position.set(0, H - 3.5, zPos);
-            castleInteriorGroup.add(chandelierGroup);
-          });
-          
-          // Exit door (glowing red - original style but sized to cover doorway)
-          const exitDoorMat = new THREE.MeshStandardNodeMaterial({
-            color: 0xf0d070, emissive: 0xf0a030, emissiveIntensity: 0.6, roughness: 0.3
-          });
-          // Make door slightly larger than doorW to fully cover the opening
-          const exitDoor = new THREE.Mesh(new THREE.BoxGeometry(doorW + 0.5, 5.2, 0.3), exitDoorMat);
-          exitDoor.position.set(0, 2.6, L - 0.4);  // Slightly inside to avoid Z-fighting with wall
-          castleInteriorGroup.add(exitDoor);
-          
-          const exitLight = new THREE.PointLight(0xf0a030, 3, 12);
-          exitLight.position.set(0, 3, L - 2);
-          castleInteriorGroup.add(exitLight);
-          
-          // Wall colliders
-          function addWallCollider(tx, ty, tz, hw, hh, hd) {
-            const body = physicsWorld.createRigidBody(
-              RAPIER.RigidBodyDesc.fixed().setTranslation(ox + tx, ty, oz + tz)
-            );
-            physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(hw, hh, hd), body);
-          }
-          
-          addWallCollider(0, H / 2, -L, W, H / 2, 0.5);           // back
-          addWallCollider(-W, H / 2, 0, 0.5, H / 2, L);           // left
-          addWallCollider(W, H / 2, 0, 0.5, H / 2, L);            // right
-          addWallCollider(-W + leftFrontW / 2, H / 2, L, leftFrontW / 2, H / 2, 0.5);  // front left
-          addWallCollider(W - leftFrontW / 2, H / 2, L, leftFrontW / 2, H / 2, 0.5);   // front right
-          addWallCollider(0, H - (H - 5) / 2, L, doorW / 2, (H - 5) / 2, 0.5);         // above door
-          addWallCollider(0, 2.6, L, (doorW + 0.5) / 2, 2.6, 0.5);  // exit door collider
-        })();
-        
-        console.log("Castle system initialized - exterior at", CASTLE_POS_X, CASTLE_POS_Z);
-        // ═══════════════════════════════════════════════════════════════
-        // END CASTLE SYSTEM CREATION
-        // ═══════════════════════════════════════════════════════════════
-
         const capR = PARAMS.capsuleRadius;
         const capHalfH = Math.max(0.1, (PARAMS.characterHeight - 2 * capR) / 2);
         const charPos = new THREE.Vector3(0, 0, 0);
@@ -3320,7 +2633,6 @@
           a: false,
           s: false,
           d: false,
-          e: false,  // Castle door interaction
           shift: false,
           space: false,
           arrowLeft: false,
@@ -3431,15 +2743,6 @@
         );
         const grassGroup = new THREE.Group();
         scene.add(grassGroup);
-        
-        // Store overworld groups for visibility toggling (castle system)
-        overworldGroups = [terrain, waterMesh, treesGroup, scatterGroup, buildingsGroup, grassGroup];
-        if (octahedralForest) overworldGroups.push(octahedralForest.group);
-        if (flag) overworldGroups.push(flag.group);
-        if (fluffyTree) overworldGroups.push(fluffyTree.group);
-        if (birds && birds.mesh) overworldGroups.push(birds.mesh);
-        capsuleNpcs.forEach(npc => overworldGroups.push(npc));  // Hide NPCs too
-        
         const poolLow = { meshes: [], idx: 0 },
           poolHigh = { meshes: [], idx: 0 };
         function getMesh(pool, geo, mat) {
@@ -4686,25 +3989,10 @@
         });
         const flareBlurPass = gaussianBlur(flarePass, null, 8);
         const uFlareAmount = uniform(1);
-        
-        // Overworld output (with lensflare)
-        const overworldOutput = foggedOutput.add(flareBlurPass.mul(uFlareAmount));
-        
-        // Interior output - just fogged scene, no extra bloom for now
-        const interiorOutput = foggedOutput;
-        
         const renderPipeline = new THREE.RenderPipeline(renderer);
-        renderPipeline.outputNode = overworldOutput;
-        
-        // Function to switch render pipeline output
-        function setRenderOutput(isInterior) {
-          if (isInterior) {
-            renderPipeline.outputNode = interiorOutput;
-          } else {
-            renderPipeline.outputNode = overworldOutput;
-          }
-          renderPipeline.needsUpdate = true;
-        }
+        renderPipeline.outputNode = foggedOutput.add(
+          flareBlurPass.mul(uFlareAmount),
+        );
 
         // Pre-compile scene so WebGPU node builder runs and initialises CSM internals
         await renderer.compileAsync(scene, camera);
@@ -4713,231 +4001,6 @@
         // mainFrustum and the internal cascade lights (calling before compileAsync gives null)
         csm.camera = camera;
         csm.updateFrustums();
-
-        // ═══════════════════════════════════════════════════════════════
-        // CASTLE SYSTEM - Transition Logic
-        // ═══════════════════════════════════════════════════════════════
-        const overlay = document.getElementById('transition-overlay');
-        const prompt = document.getElementById('castle-prompt');
-        const sceneIndicator = document.getElementById('scene-indicator');
-        
-        // Store original fog/background for restoration
-        const originalFog = scene.fog;
-        const originalBg = scene.background;
-        const originalExposure = renderer.toneMappingExposure;
-        
-        // Interior fog/bg (dark moody atmosphere - let torches shine)
-        const interiorFog = new THREE.Fog(0x0a0604, 15, 70);
-        const interiorBg = new THREE.Color(0x050302);
-        const interiorExposure = 1.2;
-        
-        // Door trigger position (world coords)
-        function getDoorTriggerPos() {
-          return new THREE.Vector3(
-            CASTLE_POS_X,
-            sampleHeight(CASTLE_POS_X, CASTLE_POS_Z) + 1.5,
-            CASTLE_POS_Z + 2  // slightly in front of castle
-          );
-        }
-        
-        // Exit trigger position (inside castle, near door)
-        function getExitTriggerPos() {
-          return new THREE.Vector3(
-            INTERIOR_WORLD_OFFSET.x,
-            1.5,
-            INTERIOR_WORLD_OFFSET.z + INTERIOR_DEPTH / 2 - 2
-          );
-        }
-        
-        // Spawn point inside castle
-        function getInteriorSpawn() {
-          return new THREE.Vector3(
-            INTERIOR_WORLD_OFFSET.x,
-            1.5,
-            INTERIOR_WORLD_OFFSET.z + INTERIOR_DEPTH / 2 - 5
-          );
-        }
-        
-        // Spawn point outside castle
-        function getOverworldSpawn() {
-          return new THREE.Vector3(
-            CASTLE_POS_X,
-            sampleHeight(CASTLE_POS_X, CASTLE_POS_Z + 5) + 1.5,
-            CASTLE_POS_Z + 5
-          );
-        }
-        
-        function transitionToScene(targetScene) {
-          if (isTransitioning || transitionCooldown > 0) return;
-          isTransitioning = true;
-          
-          // Fade to black
-          overlay.style.opacity = '1';
-          
-          setTimeout(() => {
-            if (targetScene === 'interior') {
-              // Hide overworld, show interior
-              overworldGroups.forEach(g => { if (g) g.visible = false; });
-              castleExteriorGroup.visible = false;
-              castleInteriorGroup.visible = true;
-              
-              // Interior atmosphere
-              scene.fog = interiorFog;
-              scene.background = interiorBg;
-              renderer.toneMappingExposure = interiorExposure;
-              
-              // Teleport player inside
-              const spawn = getInteriorSpawn();
-              spawn.y = capHalfH + capR;
-              characterVelY = 0;
-              charPos.copy(spawn);
-              playerBody.setNextKinematicTranslation({ x: charPos.x, y: charPos.y, z: charPos.z });
-              physicsWorld.step();
-              characterGroup.position.copy(charPos);
-              teleportFrameSkip = 10;  // Skip physics for 10 frames to stabilize
-              
-              // Face inward (toward throne) with proper camera angle
-              camYaw = PI;
-              camPitch = 0.3;  // Reset to default pitch (not top-down)
-
-              sceneIndicator.textContent = 'CASTLE INTERIOR';
-              sceneIndicator.style.background = 'rgba(100, 50, 0, 0.8)';
-              currentScene = 'interior';
-              
-              // Switch to interior godrays rendering
-              setRenderOutput(true);
-              
-            } else {
-              // Show overworld, hide interior - but respect PARAMS settings
-              // Core terrain/environment (always visible)
-              terrain.visible = true;
-              waterMesh.visible = PARAMS.showWater;
-              treesGroup.visible = PARAMS.showTrees;
-              scatterGroup.visible = PARAMS.showScatter;
-              buildingsGroup.visible = PARAMS.showBuildings;
-              grassGroup.visible = true;  // Grass visibility handled by patch system
-              
-              // Optional systems - respect their PARAMS
-              if (octahedralForest) octahedralForest.group.visible = PARAMS.octahedralForestEnabled;
-              if (flag) flag.group.visible = true;
-              if (fluffyTree) fluffyTree.group.visible = PARAMS.showFluffyTree;
-              if (birds && birds.mesh) birds.mesh.visible = PARAMS.birdsEnabled;
-              capsuleNpcs.forEach(npc => { npc.visible = PARAMS.npcEnabled; });
-              
-              castleExteriorGroup.visible = true;
-              castleInteriorGroup.visible = false;
-              
-              // Restore overworld atmosphere
-              scene.fog = originalFog;
-              scene.background = originalBg;
-              renderer.toneMappingExposure = originalExposure;
-              
-              // Teleport player outside
-              const spawn = getOverworldSpawn();
-              characterVelY = 0;
-              charPos.copy(spawn);
-              playerBody.setNextKinematicTranslation({ x: charPos.x, y: charPos.y, z: charPos.z });
-              physicsWorld.step();
-              characterGroup.position.copy(charPos);
-              teleportFrameSkip = 10;  // Skip physics for 10 frames to stabilize
-              
-              // Face away from castle with proper camera angle
-              camYaw = 0;
-              camPitch = 0.3;  // Reset to default pitch
-
-              sceneIndicator.textContent = 'OVERWORLD';
-              sceneIndicator.style.background = 'rgba(0, 100, 50, 0.8)';
-              currentScene = 'overworld';
-              
-              // Switch back to overworld lensflare rendering
-              setRenderOutput(false);
-            }
-            
-            // Fade back in
-            setTimeout(() => {
-              overlay.style.opacity = '0';
-              setTimeout(() => {
-                isTransitioning = false;
-                transitionCooldown = 0.5;  // half second cooldown
-              }, 300);
-            }, 300);
-          }, 500);
-        }
-        
-        // Check if near trigger and show prompt
-        function checkCastleTriggers(playerPos, dt) {
-          if (transitionCooldown > 0) transitionCooldown -= dt;
-          
-          if (isTransitioning) {
-            prompt.style.opacity = '0';
-            return;
-          }
-          
-          let nearTrigger = null;
-          let triggerLabel = '';
-          
-          if (currentScene === 'overworld') {
-            const doorPos = getDoorTriggerPos();
-            const dist = playerPos.distanceTo(doorPos);
-            if (dist < DOOR_TRIGGER_RADIUS) {
-              nearTrigger = 'interior';
-              triggerLabel = 'Enter Castle';
-            }
-          } else {
-            const exitPos = getExitTriggerPos();
-            const dist = playerPos.distanceTo(exitPos);
-            if (dist < EXIT_TRIGGER_RADIUS) {
-              nearTrigger = 'overworld';
-              triggerLabel = 'Exit Castle';
-            }
-          }
-          
-          if (nearTrigger) {
-            prompt.innerHTML = `Press <span style="background: rgba(255,200,80,0.2); border: 1px solid rgba(255,200,80,0.4); border-radius: 3px; padding: 1px 6px; font-weight: bold;">E</span> to ${triggerLabel}`;
-            prompt.style.opacity = '1';
-            
-            // Auto-enter on proximity OR press E
-            if (keys.e) {
-              keys.e = false;  // consume keypress
-              transitionToScene(nearTrigger);
-            }
-          } else {
-            prompt.style.opacity = '0';
-          }
-        }
-        
-        // Expose for debug
-        window._castleDebug = {
-          transitionTo: transitionToScene,
-          getPlayerPos: () => charPos.clone(),
-          getDoorPos: getDoorTriggerPos,
-          getExitPos: getExitTriggerPos,
-          getInteriorSpawn: getInteriorSpawn,
-          getCurrentScene: () => currentScene,
-          getTeleportSkip: () => teleportFrameSkip,
-          getInteriorVisible: () => castleInteriorGroup.visible,
-          teleportPlayer: (x, y, z) => {
-            characterVelY = 0;
-            charPos.set(x, y, z);
-            playerBody.setNextKinematicTranslation({ x, y, z });
-            physicsWorld.step();
-            characterGroup.position.copy(charPos);
-            teleportFrameSkip = 10;
-          },
-          getConstants: () => ({
-            INTERIOR_OFFSET: { x: INTERIOR_WORLD_OFFSET.x, y: INTERIOR_WORLD_OFFSET.y, z: INTERIOR_WORLD_OFFSET.z },
-            CASTLE_POS: { x: CASTLE_POS_X, z: CASTLE_POS_Z },
-            INTERIOR_DEPTH,
-            INTERIOR_WIDTH
-          }),
-          setCamYaw: (yaw) => { camYaw = yaw; },
-          getCamYaw: () => camYaw
-        };
-        
-        console.log("Castle transition system ready. Door at:", getDoorTriggerPos());
-        // ═══════════════════════════════════════════════════════════════
-        // END CASTLE SYSTEM TRANSITION LOGIC
-        // ═══════════════════════════════════════════════════════════════
 
         renderer.setAnimationLoop(() => {
           timer.update();
@@ -4969,18 +4032,9 @@
             desiredDz = mz * PARAMS.playerSpeed * speedMult * dt;
           }
           const hb = TERRAIN_SIZE * 0.48;
-          // Use flat floor inside castle, terrain outside
-          const insideCastleMovement = currentScene === 'interior';
-          // Don't clamp bounds when inside castle (it's at Z=-800)
-          const nextX = insideCastleMovement 
-            ? charPos.x + desiredDx 
-            : Math.max(-hb, Math.min(hb, charPos.x + desiredDx));
-          const nextZ = insideCastleMovement 
-            ? charPos.z + desiredDz 
-            : Math.max(-hb, Math.min(hb, charPos.z + desiredDz));
-          const groundY = insideCastleMovement ? capHalfH + capR : sampleHeight(charPos.x, charPos.z) + capHalfH + capR;
-          const nextGroundY = insideCastleMovement ? capHalfH + capR : sampleHeight(nextX, nextZ) + capHalfH + capR;
-          
+          const nextX = Math.max(-hb, Math.min(hb, charPos.x + desiredDx));
+          const nextZ = Math.max(-hb, Math.min(hb, charPos.z + desiredDz));
+          const groundY = sampleHeight(charPos.x, charPos.z) + capHalfH + capR;
           const onGround = charPos.y <= groundY + 0.6;
           let desiredY;
           if (onGround) {
@@ -4989,48 +4043,36 @@
               desiredY = charPos.y + characterVelY * dt;
             } else {
               characterVelY = 0;
-              desiredY = nextGroundY;  // Use appropriate ground based on scene
+              desiredY = sampleHeight(nextX, nextZ) + capHalfH + capR;
             }
           } else {
             characterVelY -= PARAMS.gravity * dt;
             desiredY = charPos.y + characterVelY * dt;
           }
-          // Skip physics movement after teleport to let position stabilize
-          if (teleportFrameSkip > 0) {
-            teleportFrameSkip--;
-            // Force player to stay at charPos during teleport stabilization
-            playerBody.setNextKinematicTranslation({ x: charPos.x, y: charPos.y, z: charPos.z });
-            physicsWorld.step();
-          } else {
-            const desiredTranslation = {
-              x: nextX - charPos.x,
-              y: desiredY - charPos.y,
-              z: nextZ - charPos.z,
-            };
-            characterController.computeColliderMovement(
-              playerCollider,
-              desiredTranslation,
-            );
-            const corrected = characterController.computedMovement();
-            const cur = playerBody.translation();
-            const nextPos = {
-              x: cur.x + corrected.x,
-              y: cur.y + corrected.y,
-              z: cur.z + corrected.z,
-            };
-            playerBody.setNextKinematicTranslation(nextPos);
+          const desiredTranslation = {
+            x: nextX - charPos.x,
+            y: desiredY - charPos.y,
+            z: nextZ - charPos.z,
+          };
+          characterController.computeColliderMovement(
+            playerCollider,
+            desiredTranslation,
+          );
+          const corrected = characterController.computedMovement();
+          const cur = playerBody.translation();
+          const nextPos = {
+            x: cur.x + corrected.x,
+            y: cur.y + corrected.y,
+            z: cur.z + corrected.z,
+          };
+          playerBody.setNextKinematicTranslation(nextPos);
 
-            // Rapier physics step, then sync player and cube meshes
-            physicsWorld.step();
-            const playerT = playerBody.translation();
-            charPos.set(playerT.x, playerT.y, playerT.z);
-          }
-          
-          // Inside castle interior: use flat floor at y=0, skip terrain height
-          const insideCastle = currentScene === 'interior';
-          const landedGroundY = insideCastle
-            ? capHalfH + capR  // Interior floor is at y=0
-            : sampleHeight(charPos.x, charPos.z) + capHalfH + capR;
+          // Rapier physics step, then sync player and cube meshes
+          physicsWorld.step();
+          const playerT = playerBody.translation();
+          charPos.set(playerT.x, playerT.y, playerT.z);
+          const landedGroundY =
+            sampleHeight(charPos.x, charPos.z) + capHalfH + capR;
           if (characterVelY < 0 && charPos.y <= landedGroundY + 0.2)
             characterVelY = 0;
           const inAir = charPos.y > landedGroundY + 0.15;
@@ -5161,22 +4203,19 @@
               ud.lastMoveState = from;
             }
           }
-          // Only update overworld systems when not in castle interior
-          if (currentScene !== 'interior') {
-            flag.update(dt);
-            fluffyTree.update(elapsed);
-            if (PARAMS.birdsEnabled) birds.update(dt);
-            if (octahedralForest) {
-              octahedralForest.update(camera, frustum);
-              const _fc = octahedralForest.getLodCounts();
-              PARAMS.octahedralForestNearCount = _fc.near;
-              PARAMS.octahedralForestLod1Count = _fc.lod1;
-              PARAMS.octahedralForestLod2Count = _fc.lod2;
-              if (bNear) {
-                bNear.refresh();
-                bLod1.refresh();
-                bLod2.refresh();
-              }
+          flag.update(dt);
+          fluffyTree.update(elapsed);
+          if (PARAMS.birdsEnabled) birds.update(dt);
+          if (octahedralForest) {
+            octahedralForest.update(camera, frustum);
+            const _fc = octahedralForest.getLodCounts();
+            PARAMS.octahedralForestNearCount = _fc.near;
+            PARAMS.octahedralForestLod1Count = _fc.lod1;
+            PARAMS.octahedralForestLod2Count = _fc.lod2;
+            if (bNear) {
+              bNear.refresh();
+              bLod1.refresh();
+              bLod2.refresh();
             }
           }
           physicsDebugGroup.visible = !!PARAMS.rapierDebug;
@@ -5228,13 +4267,8 @@
               charPos.y + Math.sin(camPitch) * camDist + PARAMS.camHeight;
             const cz =
               charPos.z - Math.cos(camYaw) * Math.cos(camPitch) * camDist;
-            // Inside castle, don't use terrain height for camera (no terrain there)
-            if (currentScene === 'interior') {
-              camera.position.set(cx, cy, cz);
-            } else {
-              const camTerrainY = sampleHeight(cx, cz) + 1.5;
-              camera.position.set(cx, Math.max(cy, camTerrainY), cz);
-            }
+            const camTerrainY = sampleHeight(cx, cz) + 1.5;
+            camera.position.set(cx, Math.max(cy, camTerrainY), cz);
             camera.lookAt(charPos.x, charPos.y + 0.5, charPos.z);
             orbitControls.enabled = false;
           } else {
@@ -5242,19 +4276,12 @@
             orbitControls.update();
           }
 
-          // Trail (only in overworld)
-          if (currentScene !== 'interior') {
-            updateTrail(dt, charPos.x, charPos.z);
-          }
-          
-          // Castle trigger check
-          checkCastleTriggers(charPos, dt);
-          
+          // Trail
+          updateTrail(dt, charPos.x, charPos.z);
           syncUniforms();
           uTime.value = elapsed;
           uPlayerPos.value.copy(charPos);
-          // Only update NPCs when in overworld (they're hidden in castle anyway)
-          if (PARAMS.npcEnabled && currentScene !== 'interior') {
+          if (PARAMS.npcEnabled) {
             for (let i = 0; i < NPC_COUNT; i++) {
               const npc = capsuleNpcs[i];
               const state = npcState[i];
@@ -5278,8 +4305,6 @@
           }
 
           // Grass patches + tree frustum culling (same frustum)
-          // Skip entirely when inside castle interior
-          if (currentScene !== 'interior') {
           for (let i = 0; i < grassGroup.children.length; i++)
             grassGroup.children[i].visible = false;
           poolLow.idx = 0;
@@ -5371,7 +4396,6 @@
               patchCount++;
             }
           }
-          } // end if (currentScene !== 'interior')
 
           camera.updateMatrixWorld(); // required by CSMShadowNode.updateBefore() each frame
           renderPipeline.render();
