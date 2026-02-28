@@ -14,7 +14,7 @@ import {
   uniform, vec3, max, sin, mat3, uint, negate,
   instancedArray, cameraProjectionMatrix, cameraViewMatrix, positionLocal,
   modelWorldMatrix, sqrt, float, Fn, If, cos, Loop, Continue, normalize,
-  instanceIndex, length, vertexIndex, dot,
+  instanceIndex, length, vertexIndex, dot, select, clamp,
 } from "three/tsl";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -104,9 +104,9 @@ export function createBirds({
   const uDeltaTime  = uniform(0.0).setName("deltaTime");
   // Zone radii match the original example — they work correctly when
   // bounds ≥ 400 (zone 55 ≈ 4× average bird spacing at that density)
-  const uSeparation = uniform(15.0).setName("separation");
-  const uAlignment  = uniform(20.0).setName("alignment");
-  const uCohesion   = uniform(20.0).setName("cohesion");
+  const uSeparation = uniform(10.0).setName("separation");
+  const uAlignment  = uniform(22.0).setName("alignment");
+  const uCohesion   = uniform(30.0).setName("cohesion");
   // Height uniforms — exposed so external code (e.g. Tweakpane) can adjust live
   const uCenterY    = uniform(centerY).setName("centerY");
   const uMinY       = uniform(minY).setName("minY");
@@ -124,7 +124,9 @@ export function createBirds({
   const birdVertexTSL = Fn(() => {
     const position = positionLocal.toVar();
     const phase    = phaseStorage.element(instanceIndex).toVar();
-    const vel      = normalize(velocityStorage.element(instanceIndex)).toVar();
+    const rawVel   = velocityStorage.element(instanceIndex);
+    const velLen  = length(rawVel);
+    const vel     = select(velLen.lessThan(float(0.001)), vec3(0, 0, 1), normalize(rawVel)).toVar();
 
     // Flap wingtips (vertex indices 4 and 7)
     If(vertexIndex.equal(4).or(vertexIndex.equal(7)), () => {
@@ -133,12 +135,14 @@ export function createBirds({
 
     const worldVert = modelWorldMatrix.mul(position);
 
-    // Orient bird along velocity direction
+    // Orient bird along velocity direction (safe when flying straight up/down: xz=0)
     vel.z.mulAssign(-1.0);
     const xz    = length(vel.xz);
+    const eps   = float(0.001);
+    const safeXz = select(xz.lessThan(eps), float(1.0), xz);
     const x     = sqrt(vel.y.mul(vel.y).oneMinus());
-    const cosry = vel.x.div(xz).toVar();
-    const sinry = vel.z.div(xz).toVar();
+    const cosry = vel.x.div(safeXz).toVar();
+    const sinry = vel.z.div(safeXz).toVar();
     const cosrz = x.div(float(1.0));
     const sinrz = vel.y.div(float(1.0)).toVar();
 
@@ -199,17 +203,20 @@ export function createBirds({
     // Attract toward cruising-altitude centre (keeps flock coherent and in-bounds)
     const dirToCenter = position.sub(vec3(0, uCenterY, 0)).toVar();
     dirToCenter.y.mulAssign(2.5);
-    velocity.subAssign(normalize(dirToCenter).mul(uDeltaTime).mul(5.0));
+    const dirToCenterLen = length(dirToCenter);
+    If(dirToCenterLen.greaterThan(float(0.001)), () => {
+      velocity.subAssign(normalize(dirToCenter).mul(uDeltaTime).mul(5.0));
+    });
 
-    // Soft Y bounds — gentle nudge so birds can swoop before turning back
+    // Soft Y bounds — gentle nudge so birds can swoop before turning back (stronger near floor)
     If(position.y.lessThan(uMinY), () => {
-      velocity.y.addAssign(uDeltaTime.mul(8.0));
+      velocity.y.addAssign(uDeltaTime.mul(12.0));
     });
     If(position.y.greaterThan(uMaxY), () => {
-      velocity.y.subAssign(uDeltaTime.mul(8.0));
+      velocity.y.subAssign(uDeltaTime.mul(12.0));
     });
 
-    // Mouse/pointer disturbance — birds flee when cursor is near (like original example)
+    // Mouse/pointer disturbance — birds flee when cursor is near (only when camera provided)
     const directionToRay = uRayOrigin.sub(position).toConst();
     const projectionLength = dot(directionToRay, uRayDirection).toConst();
     const closestPoint = uRayOrigin.sub(uRayDirection.mul(projectionLength)).toConst();
@@ -218,10 +225,10 @@ export function createBirds({
     const distanceToClosestPointSq = distanceToClosestPoint.mul(distanceToClosestPoint).toConst();
     const rayRadius = float(150.0).toConst();
     const rayRadiusSq = rayRadius.mul(rayRadius).toConst();
-    If(distanceToClosestPointSq.lessThan(rayRadiusSq), () => {
-      const velocityAdjust = distanceToClosestPointSq.div(rayRadiusSq).sub(1.0).mul(uDeltaTime).mul(100.0);
+    If(distanceToClosestPointSq.lessThan(rayRadiusSq).and(distanceToClosestPointSq.greaterThan(float(0.01))), () => {
+      const velocityAdjust = distanceToClosestPointSq.div(rayRadiusSq).sub(1.0).mul(uDeltaTime).mul(80.0);
       velocity.addAssign(normalize(directionToClosestPoint).mul(velocityAdjust));
-      limit.addAssign(5.0);
+      limit.addAssign(3.0);
     });
 
     // O(n²) boid neighbour loop — only consider active birds
@@ -247,11 +254,15 @@ export function createBirds({
 
       }).ElseIf(percent.lessThan(alignmentThresh), () => {
         // Alignment — fly the same direction (boosted for visible flocking at slower speed)
-        const threshDelta = alignmentThresh.sub(separationThresh);
-        const adjustedPercent = percent.sub(separationThresh).div(threshDelta);
-        const cosRangeAdjust = float(0.5).sub(cos(adjustedPercent.mul(PI_2)).mul(0.5)).add(0.5);
-        const velocityAdjust = cosRangeAdjust.mul(uDeltaTime).mul(5.0);
-        velocity.addAssign(normalize(velocityStorage.element(i)).mul(velocityAdjust));
+        const neighborVel = velocityStorage.element(i);
+        const neighborVelLen = length(neighborVel);
+        If(neighborVelLen.greaterThan(float(0.001)), () => {
+          const threshDelta = alignmentThresh.sub(separationThresh);
+          const adjustedPercent = percent.sub(separationThresh).div(threshDelta);
+          const cosRangeAdjust = float(0.5).sub(cos(adjustedPercent.mul(PI_2)).mul(0.5)).add(0.5);
+          const velocityAdjust = cosRangeAdjust.mul(uDeltaTime).mul(5.0);
+          velocity.addAssign(normalize(neighborVel).mul(velocityAdjust));
+        });
 
       }).Else(() => {
         // Cohesion — move closer (strong for tight flock shapes)
@@ -278,9 +289,10 @@ export function createBirds({
   // ── Compute: integrate position + wing-flap phase ────────────────────────
   const computePosition = Fn(() => {
     If(instanceIndex.lessThan(uBirdCount), () => {
-    positionStorage.element(instanceIndex).addAssign(
-      velocityStorage.element(instanceIndex).mul(uDeltaTime).mul(INTEGRATION_SPEED)
-    );
+    const pos = positionStorage.element(instanceIndex).toVar();
+    pos.addAssign(velocityStorage.element(instanceIndex).mul(uDeltaTime).mul(INTEGRATION_SPEED));
+    pos.y.assign(clamp(pos.y, uMinY, uMaxY));
+    positionStorage.element(instanceIndex).assign(pos);
 
     const vel      = velocityStorage.element(instanceIndex);
     const phase    = phaseStorage.element(instanceIndex);
@@ -306,9 +318,9 @@ export function createBirds({
         uRayDirection.value.copy(raycaster.ray.direction);
         pointer.y = 10; // move pointer away so birds only react when mouse moves
       } else {
-        // No camera: point ray far away so it never disturbs birds
-        uRayOrigin.value.set(0, 1e6, 0);
-        uRayDirection.value.set(0, 1, 0);
+        // No camera: ray far from flock so no birds are ever disturbed
+        uRayOrigin.value.set(1e6, 1e6, 1e6);
+        uRayDirection.value.set(1, 0, 0);
       }
       renderer.compute(computeVelocity);
       renderer.compute(computePosition);

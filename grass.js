@@ -146,6 +146,7 @@ export function createGrassMaterial(
     uInteractionRepel,
     uMinSkyBlend,
     uMaxSkyBlend,
+    uAoIntensity,
     uSeasonalScale,
     uSeasonalStr,
     uBaseColor1,
@@ -511,7 +512,8 @@ export function createGrassMaterial(
       mul(grassCol, vec3(1.1, 1.05, 0.85)),
       mul(sub(1, trailScale), 0.4),
     );
-    const ao = mix(0.8, 1.0, smoothstep(0.0, 0.3, heightPct));
+    const aoBase = max(sub(1.0, mul(uAoIntensity, 0.65)), 0.2);
+    const ao = mix(aoBase, 1.0, smoothstep(0.0, 0.5, heightPct));
     const fadeFactor = sub(1, smoothstep(0.4, 1, lodFadeIn));
     vGrassColor.assign(
       mul(grassCol, ao, mul(fadeFactor, fadeFactor), bladeVisible),

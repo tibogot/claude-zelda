@@ -177,7 +177,7 @@ export const PARAMS = {
   octahedralForestTexSize: 2048,
   octahedralForestBakeSingle: false,
   octahedralForestModelPath: "models/tree.glb",
-  birdsEnabled: false,
+  birdsEnabled: true,
   birdsCount: 2048,
   birdsCenterY: 120,
   birdsMinY: 80,

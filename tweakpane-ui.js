@@ -237,6 +237,17 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
   fNpc
     .addBinding(PARAMS, "npcEnabled", { label: "enabled" })
     .on("change", () => setNpcVisibility(PARAMS.npcEnabled));
+  const fAO = pane.addFolder({
+    title: "AO (Ambient Occlusion)",
+    expanded: false,
+  });
+  fAO.addBinding(PARAMS, "aoEnabled");
+  fAO.addBinding(PARAMS, "aoIntensity", {
+    min: 0,
+    max: 2,
+    step: 0.1,
+    label: "intensity",
+  });
   const fSSS = pane.addFolder({
     title: "Subsurface Scatter",
     expanded: false,
@@ -785,7 +796,7 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
     });
   fBirds
     .addBinding(PARAMS, "birdsMinY", {
-      min: 0,
+      min: 50,
       max: 120,
       step: 1,
       label: "min altitude",
