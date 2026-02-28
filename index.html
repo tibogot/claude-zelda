@@ -150,6 +150,8 @@
         uv,
         pass,
         normalMap,
+        reflect,
+        positionWorld,
       } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
@@ -265,14 +267,19 @@
         lakeDepth: 14,
         showWater: true,
         waterLevel: 1.5,
-        waterRippleSpeed: 1.2,
-        waterRippleSize: 0.065,
-        waterFresnelPower: 3.5,
-        waterDeepColor: "#0d3d56",
-        waterReflectColor: "#7eb8da",
-        waterShoreFoam: 0.35,
-        waterPlayerFoamRadius: 4.5,
-        waterPlayerFoamStrength: 0.9,
+        // Advanced water params
+        waterUvScale: 2.7,
+        waterNormalScale: 0.08,
+        waterFresnelScale: 0.6,
+        waterSpeed: 0.08,
+        waterShininess: 400,
+        waterSunColor: "#fffaf0",
+        waterHighlightsGlow: 3.5,
+        waterHighlightFresnelInfluence: 0.4,
+        waterHighlightsSpread: 0.3,
+        waterDeepColor: "#0a2830",
+        waterShallowColor: "#3a7a8a",
+        waterMinOpacity: 0.7,
         // Player & Camera
         playerSpeed: 3.2,
         runSpeedMultiplier: 1.95,
@@ -292,10 +299,10 @@
         // Scene toggles for FPS debugging
         showRuins: true,
         showChurch: true,
-        churchX: -100,
-        churchZ: 60,
-        churchScale: 2.0,
-        churchYOffset: -0.5,
+        churchX: 39,
+        churchZ: 48,
+        churchScale: 9,
+        churchYOffset: -1.5,
         showTrees: false,
         showScatter: false,
         showBuildings: false,
@@ -374,7 +381,7 @@
         lensflareGhostSpacing: 0.25,
         // Character (human-sized, feet on ground) + physics capsule
         characterHeight: 2.5,
-        characterOffsetY: 0.37,
+        characterOffsetY: 0,
         capsuleRadius: 0.35,
       };
 
@@ -1447,156 +1454,141 @@
         terrain.receiveShadow = true;
         scene.add(terrain);
 
+        // ══════════════════════════════════════════════════════════════
+        // ADVANCED WATER SHADER (Fresnel, animated normals, sun glints)
+        // Note: No screen-space refraction (incompatible with MSAA)
+        // ══════════════════════════════════════════════════════════════
         const waterGeo = new THREE.CircleGeometry(1, 128);
         waterGeo.rotateX(-PI / 2);
-        const uWaterRippleSpeed = uniform(PARAMS.waterRippleSpeed);
-        const uWaterRippleSize = uniform(PARAMS.waterRippleSize);
-        const uWaterFresnelPower = uniform(PARAMS.waterFresnelPower);
-        const uWaterDeep = uniform(
-          new THREE.Color(PARAMS.waterDeepColor).convertSRGBToLinear(),
-        );
-        const uWaterReflect = uniform(
-          new THREE.Color(PARAMS.waterReflectColor).convertSRGBToLinear(),
-        );
-        const uWaterShoreFoam = uniform(PARAMS.waterShoreFoam);
-        const uWaterPlayerFoamR = uniform(PARAMS.waterPlayerFoamRadius);
-        const uWaterPlayerFoamStr = uniform(PARAMS.waterPlayerFoamStrength);
-        const vWaterWorldPos = varying(vec3(0), "v_wwp");
+
+        // Water uniforms
+        const uWaterUvScale = uniform(PARAMS.waterUvScale);
+        const uWaterNormalScale = uniform(PARAMS.waterNormalScale);
+        const uWaterFresnelScale = uniform(PARAMS.waterFresnelScale);
+        const uWaterSpeed = uniform(PARAMS.waterSpeed);
+        const uWaterShininess = uniform(PARAMS.waterShininess);
+        const uWaterSunColor = uniform(new THREE.Color(PARAMS.waterSunColor).convertSRGBToLinear());
+        const uWaterHighlightsGlow = uniform(PARAMS.waterHighlightsGlow);
+        const uWaterHighlightFresnelInfluence = uniform(PARAMS.waterHighlightFresnelInfluence);
+        const uWaterHighlightsSpread = uniform(PARAMS.waterHighlightsSpread);
+        const uWaterDeepColor = uniform(new THREE.Color(PARAMS.waterInscatterTint).convertSRGBToLinear());
+        const uWaterShallowColor = uniform(new THREE.Color(0x4a90a4).convertSRGBToLinear());
+        const uWaterMinOpacity = uniform(PARAMS.waterMinOpacity);
+        const uWaterNoiseScrollDir = uniform(new THREE.Vector2(0.1, 0));
+
+        // TBN vectors for normal mapping
+        const uWaterTworld = uniform(new THREE.Vector3(1, 0, 0));
+        const uWaterBworld = uniform(new THREE.Vector3(0, 0, -1));
+        const uWaterNworld = uniform(new THREE.Vector3(0, 1, 0));
+
+        // Load water normal map texture
+        const waterNormalTex = texLoader.load("textures/waterNormal.webp");
+        waterNormalTex.wrapS = waterNormalTex.wrapT = THREE.RepeatWrapping;
+
+        // Varying for local position (used for edge fade)
         const vWaterLocalPos = varying(vec3(0), "v_wlp");
-        const waterMat = new THREE.MeshStandardNodeMaterial({
-          roughness: 0.06,
-          metalness: 0,
+
+        // RNM (Reoriented Normal Mapping) blend for combining two normal maps
+        const blendRNM = Fn(([n1, n2]) => {
+          const t = n1.add(vec3(0, 0, 1));
+          const u = n2.mul(vec3(-1, -1, 1));
+          return t.mul(dot(t, u)).sub(u.mul(t.z)).normalize();
+        });
+
+        const waterMat = new THREE.MeshBasicNodeMaterial({
           transparent: true,
-          depthWrite: false,
+          depthWrite: true,
+          side: THREE.DoubleSide,
         });
+
+        // Position node to store local position for edge calculations
         waterMat.positionNode = Fn(() => {
-          const worldPos = modelWorldMatrix.mul(vec4(positionLocal, 1)).xyz;
-          vWaterWorldPos.assign(worldPos);
           vWaterLocalPos.assign(positionLocal);
-          const k = float(0.12),
-            k2 = float(0.08),
-            k3 = float(0.18);
-          const t = mul(uTime, uWaterRippleSpeed),
-            t2 = mul(uTime, mul(uWaterRippleSpeed, 0.7)),
-            t3 = mul(uTime, mul(uWaterRippleSpeed, 1.1));
-          const w1 = mul(
-            sin(add(mul(worldPos.x, k), t)),
-            sin(add(mul(worldPos.z, k), t2)),
-          );
-          const w2 = mul(
-            0.6,
-            sin(add(mul(worldPos.x, k2), t2)),
-            cos(add(mul(worldPos.z, k2), t3)),
-          );
-          const w3 = mul(
-            0.4,
-            cos(add(mul(worldPos.x, k3), t3)),
-            sin(add(mul(worldPos.z, k3), t)),
-          );
-          const ripple = mul(uWaterRippleSize, add(w1, w2, w3));
-          return add(positionLocal, vec3(0, 0, ripple));
+          return positionLocal;
         })();
-        const waveHeight = Fn(([wp]) => {
-          const k = float(0.12),
-            k2 = float(0.08),
-            k3 = float(0.18);
-          const t = mul(uTime, uWaterRippleSpeed),
-            t2 = mul(uTime, mul(uWaterRippleSpeed, 0.7)),
-            t3 = mul(uTime, mul(uWaterRippleSpeed, 1.1));
-          const w1 = mul(sin(add(mul(wp.x, k), t)), sin(add(mul(wp.z, k), t2)));
-          const w2 = mul(
-            0.6,
-            sin(add(mul(wp.x, k2), t2)),
-            cos(add(mul(wp.z, k2), t3)),
-          );
-          const w3 = mul(
-            0.4,
-            cos(add(mul(wp.x, k3), t3)),
-            sin(add(mul(wp.z, k3), t)),
-          );
-          return mul(uWaterRippleSize, add(w1, w2, w3));
-        });
-        const eps = float(1.5);
-        waterMat.normalNode = Fn(() => {
-          const wp = vWaterWorldPos;
-          const h = waveHeight(wp);
-          const hx = waveHeight(add(wp, vec3(eps, 0, 0)));
-          const hz = waveHeight(add(wp, vec3(0, 0, eps)));
-          const dhdx = div(sub(hx, h), eps);
-          const dhdz = div(sub(hz, h), eps);
-          const Nw = normalize(vec3(negate(dhdx), float(1), negate(dhdz)));
-          const mn = modelNormalMatrix;
-          const tx = vec3(mn[0].x, mn[1].x, mn[2].x),
-            ty = vec3(mn[0].y, mn[1].y, mn[2].y),
-            tz = vec3(mn[0].z, mn[1].z, mn[2].z);
-          return normalize(vec3(dot(tx, Nw), dot(ty, Nw), dot(tz, Nw)));
-        })();
+
         waterMat.colorNode = Fn(() => {
-          const worldPos = vWaterWorldPos;
-          const viewDir = normalize(sub(cameraPosition, worldPos));
-          const N = normalize(modelNormalMatrix.mul(normalLocal));
-          const NdotV = max(dot(N, viewDir), float(0));
-          const fresnel = sub(1, pow(NdotV, uWaterFresnelPower));
-          const reflDir = sub(mul(N, mul(2, dot(N, uSunDir))), uSunDir);
-          const sunReflect = max(dot(reflDir, viewDir), float(0));
-          const specular = pow(sunReflect, float(48));
-          let col = add(
-            mix(uWaterDeep, uWaterReflect, fresnel),
-            vec3(specular, specular, specular).mul(0.5),
-          );
+          // 0. Compute animated normals from dual scrolling normal map texture
+          const speed = uTime.mul(uWaterSpeed);
+          const frequency = uWaterNoiseScrollDir.mul(speed);
+          const nUV1 = uv().add(frequency).mul(uWaterUvScale.mul(1.37)).fract();
+          const tex1 = texture(waterNormalTex, nUV1);
+          const tsn1 = tex1.rgb.mul(2).sub(1).normalize();
+          const nUV2 = uv().sub(frequency).mul(uWaterUvScale.mul(0.73)).fract();
+          const tex2 = texture(waterNormalTex, nUV2);
+          const tsn2 = tex2.rgb.mul(2).sub(1).normalize();
+          const blendedTsn = blendRNM(tsn1, tsn2);
+          const tsn = vec3(blendedTsn.xy.mul(uWaterNormalScale), blendedTsn.z).normalize();
+
+          // Transform tangent-space normal to world space
+          const normal = uWaterTworld.mul(tsn.x)
+            .add(uWaterBworld.mul(tsn.y))
+            .add(uWaterNworld.mul(tsn.z))
+            .normalize();
+
+          // 1. View direction and Fresnel
+          const viewDir = normalize(cameraPosition.sub(positionWorld));
+          const cosTheta = dot(normal, viewDir).clamp();
+          const F0 = float(0.02);
+          const grazingAngle = float(1.0).sub(cosTheta);
+          const grazingAnglePow5 = grazingAngle.mul(grazingAngle).mul(grazingAngle).mul(grazingAngle).mul(grazingAngle);
+          const fresnelSchlick = F0.add(float(1).sub(F0).mul(grazingAnglePow5));
+          const fresnelWeight = fresnelSchlick.mul(uWaterFresnelScale).clamp();
+
+          // 2. Reflections - sky gradient based on reflected view direction
+          const reflectVector = reflect(viewDir.negate(), normal);
+          const skyGradient = reflectVector.y.mul(0.5).add(0.5).clamp();
+          const horizonColor = vec3(0.7, 0.82, 0.95);
+          const zenithColor = vec3(0.4, 0.6, 0.9);
+          const reflectedColor = mix(horizonColor, zenithColor, skyGradient);
+
+          // 3. Water base color - blend between deep and shallow based on distance from center
           const distToCenter = length(vWaterLocalPos.xz);
-          const shoreFoam = mul(
-            uWaterShoreFoam,
-            smoothstep(0.85, 0.5, distToCenter),
-          );
-          const toPlayer = sub(worldPos.xz, uPlayerPos.xz);
-          const distPlayer = length(toPlayer);
-          const playerFoam = mul(
-            uWaterPlayerFoamStr,
-            smoothstep(
-              uWaterPlayerFoamR,
-              mul(uWaterPlayerFoamR, 0.3),
-              distPlayer,
-            ),
-          );
-          const foam = min(add(shoreFoam, playerFoam), float(1));
-          col = mix(col, vec3(1, 1, 1), foam);
-          return col;
+          const depthFactor = smoothstep(float(0.3), float(0.9), distToCenter);
+          const waterBaseColor = mix(uWaterDeepColor, uWaterShallowColor, depthFactor);
+
+          // 4. Surface highlights (sun glints)
+          const tsnHighlights = vec3(blendedTsn.xy.mul(uWaterHighlightsSpread), blendedTsn.z).normalize();
+          const normalHighlights = uWaterTworld.mul(tsnHighlights.x)
+            .add(uWaterBworld.mul(tsnHighlights.y))
+            .add(uWaterNworld.mul(tsnHighlights.z))
+            .normalize();
+          const reflectedLight = reflect(uSunDir, normalHighlights);
+          const align = max(dot(reflectedLight, viewDir), 0);
+          const spec = pow(align, uWaterShininess);
+          const fresnelSpecBoost = mix(float(1), fresnelSchlick, uWaterHighlightFresnelInfluence);
+          const sunGlint = uWaterSunColor.mul(spec.mul(uWaterHighlightsGlow).mul(fresnelSpecBoost));
+
+          // 5. Final color - mix water color with reflections based on fresnel
+          const shadedWater = mix(waterBaseColor, reflectedColor, fresnelWeight);
+          return shadedWater.add(sunGlint);
         })();
+
         waterMat.opacityNode = Fn(() => {
-          const worldPos = vWaterWorldPos;
-          const viewDir = normalize(sub(cameraPosition, worldPos));
-          const N = normalize(modelNormalMatrix.mul(normalLocal));
-          const NdotV = max(dot(N, viewDir), float(0));
-          const fresnel = sub(1, pow(NdotV, uWaterFresnelPower));
+          // Edge fade for smoother shoreline blending
           const distToCenter = length(vWaterLocalPos.xz);
-          const shoreFoam = mul(
-            uWaterShoreFoam,
-            smoothstep(0.85, 0.5, distToCenter),
-          );
-          const toPlayer = sub(worldPos.xz, uPlayerPos.xz);
-          const distPlayer = length(toPlayer);
-          const playerFoam = mul(
-            uWaterPlayerFoamStr,
-            smoothstep(
-              uWaterPlayerFoamR,
-              mul(uWaterPlayerFoamR, 0.3),
-              distPlayer,
-            ),
-          );
-          const foam = min(add(shoreFoam, playerFoam), float(1));
-          return add(add(mul(fresnel, 0.5), 0.45), mul(foam, 0.25));
+          const edgeFade = smoothstep(float(1.0), float(0.85), distToCenter);
+          
+          // Fresnel-based opacity (more opaque at grazing angles)
+          const viewDir = normalize(cameraPosition.sub(positionWorld));
+          const NdotV = max(dot(uWaterNworld, viewDir), float(0));
+          const fresnelOpacity = float(1).sub(pow(NdotV, float(2.5))).mul(0.4).add(0.6);
+          
+          return edgeFade.mul(fresnelOpacity).mul(uWaterMinOpacity.add(0.5)).clamp();
         })();
-        waterMat.envMapIntensity = 0.35;
+
         const waterMesh = new THREE.Mesh(waterGeo, waterMat);
         waterMesh.scale.setScalar(PARAMS.lakeRadius);
-        waterMesh.position.set(
-          PARAMS.lakeCenterX,
-          PARAMS.waterLevel,
-          PARAMS.lakeCenterZ,
-        );
+        waterMesh.position.set(PARAMS.lakeCenterX, PARAMS.waterLevel, PARAMS.lakeCenterZ);
         waterMesh.visible = PARAMS.showWater;
-        waterMesh.receiveShadow = true;
+        waterMesh.renderOrder = 100;
+
+        // Set up TBN vectors based on mesh orientation
+        waterMesh.updateMatrixWorld(true);
+        uWaterTworld.value.set(1, 0, 0).transformDirection(waterMesh.matrixWorld).normalize();
+        uWaterBworld.value.set(0, 0, -1).transformDirection(waterMesh.matrixWorld).normalize();
+        uWaterNworld.value.set(0, 1, 0).transformDirection(waterMesh.matrixWorld).normalize();
+
         scene.add(waterMesh);
 
         // ── SKY ──
@@ -3751,57 +3743,54 @@
           step: 1,
           label: "lake depth",
         });
-        fTerrain.addBinding(PARAMS, "showWater", { label: "show water" });
         fTerrain.addBinding(PARAMS, "waterLevel", {
-          min: -5,
-          max: 15,
-          step: 0.5,
-          label: "water level",
+          min: -5, max: 15, step: 0.5, label: "water level",
         });
-        fTerrain.addBinding(PARAMS, "waterRippleSpeed", {
-          min: 0.2,
-          max: 3,
-          step: 0.1,
-          label: "ripple speed",
-        });
-        fTerrain.addBinding(PARAMS, "waterRippleSize", {
-          min: 0.02,
-          max: 0.15,
-          step: 0.005,
-          label: "ripple size",
-        });
-        fTerrain.addBinding(PARAMS, "waterFresnelPower", {
-          min: 2,
-          max: 6,
-          step: 0.2,
-          label: "fresnel power",
-        });
-        fTerrain.addBinding(PARAMS, "waterDeepColor", {
-          view: "color",
-          label: "deep color",
-        });
-        fTerrain.addBinding(PARAMS, "waterReflectColor", {
-          view: "color",
-          label: "reflect color",
-        });
-        fTerrain.addBinding(PARAMS, "waterShoreFoam", {
-          min: 0,
-          max: 0.8,
-          step: 0.05,
-          label: "shore foam",
-        });
-        fTerrain.addBinding(PARAMS, "waterPlayerFoamRadius", {
-          min: 1,
-          max: 12,
-          step: 0.5,
-          label: "player foam radius",
-        });
-        fTerrain.addBinding(PARAMS, "waterPlayerFoamStrength", {
-          min: 0,
-          max: 1,
-          step: 0.05,
-          label: "player foam strength",
-        });
+
+        // Advanced water debug controls
+        const fWater = pane.addFolder({ title: "Water", expanded: false });
+
+        const fWaves = fWater.addFolder({ title: "Waves", expanded: true });
+        fWaves.addBinding(PARAMS, "waterSpeed", {
+          min: 0.01, max: 0.3, step: 0.01, label: "speed",
+        }).on("change", () => uWaterSpeed.value = PARAMS.waterSpeed);
+        fWaves.addBinding(PARAMS, "waterNormalScale", {
+          min: 0.01, max: 0.3, step: 0.01, label: "normal scale",
+        }).on("change", () => uWaterNormalScale.value = PARAMS.waterNormalScale);
+        fWaves.addBinding(PARAMS, "waterUvScale", {
+          min: 0.5, max: 10, step: 0.1, label: "UV scale",
+        }).on("change", () => uWaterUvScale.value = PARAMS.waterUvScale);
+
+        const fHighlights = fWater.addFolder({ title: "Highlights", expanded: true });
+        fHighlights.addBinding(PARAMS, "waterShininess", {
+          min: 50, max: 2000, step: 10, label: "shininess",
+        }).on("change", () => uWaterShininess.value = PARAMS.waterShininess);
+        fHighlights.addBinding(PARAMS, "waterHighlightsGlow", {
+          min: 0.5, max: 10, step: 0.1, label: "glow",
+        }).on("change", () => uWaterHighlightsGlow.value = PARAMS.waterHighlightsGlow);
+        fHighlights.addBinding(PARAMS, "waterHighlightFresnelInfluence", {
+          min: 0, max: 1, step: 0.05, label: "fresnel influence",
+        }).on("change", () => uWaterHighlightFresnelInfluence.value = PARAMS.waterHighlightFresnelInfluence);
+        fHighlights.addBinding(PARAMS, "waterSunColor", {
+          view: "color", label: "sun color",
+        }).on("change", () => uWaterSunColor.value.set(PARAMS.waterSunColor).convertSRGBToLinear());
+        fHighlights.addBinding(PARAMS, "waterHighlightsSpread", {
+          min: 0.1, max: 1, step: 0.05, label: "spread",
+        }).on("change", () => uWaterHighlightsSpread.value = PARAMS.waterHighlightsSpread);
+
+        const fWaterColors = fWater.addFolder({ title: "Colors", expanded: true });
+        fWaterColors.addBinding(PARAMS, "waterDeepColor", {
+          view: "color", label: "deep color",
+        }).on("change", () => uWaterDeepColor.value.set(PARAMS.waterDeepColor).convertSRGBToLinear());
+        fWaterColors.addBinding(PARAMS, "waterShallowColor", {
+          view: "color", label: "shallow color",
+        }).on("change", () => uWaterShallowColor.value.set(PARAMS.waterShallowColor).convertSRGBToLinear());
+        fWaterColors.addBinding(PARAMS, "waterFresnelScale", {
+          min: 0, max: 2, step: 0.05, label: "fresnel scale",
+        }).on("change", () => uWaterFresnelScale.value = PARAMS.waterFresnelScale);
+        fWaterColors.addBinding(PARAMS, "waterMinOpacity", {
+          min: 0, max: 1, step: 0.05, label: "opacity",
+        }).on("change", () => uWaterMinOpacity.value = PARAMS.waterMinOpacity);
         const fSun = pane.addFolder({
           title: "Sun & Lighting",
           expanded: false,
@@ -3904,6 +3893,7 @@
         });
         fScene.addBinding(PARAMS, "showRuins", { label: "Ruins" });
         fScene.addBinding(PARAMS, "showChurch", { label: "Church" });
+        fScene.addBinding(PARAMS, "showWater", { label: "Water" });
         fScene.addBinding(PARAMS, "churchX", { min: -200, max: 200, step: 1, label: "Church X" });
         fScene.addBinding(PARAMS, "churchZ", { min: -200, max: 200, step: 1, label: "Church Z" });
         fScene.addBinding(PARAMS, "churchScale", { min: 0.1, max: 10, step: 0.1, label: "Church Scale" });
@@ -4577,18 +4567,7 @@
           uGrassSlopeMin.value = PARAMS.grassSlopeMin;
           uGrassSlopeMax.value = PARAMS.grassSlopeMax;
           uGrassAmount.value = PARAMS.grassAmount;
-          uWaterRippleSpeed.value = PARAMS.waterRippleSpeed;
-          uWaterRippleSize.value = PARAMS.waterRippleSize;
-          uWaterFresnelPower.value = PARAMS.waterFresnelPower;
-          uWaterDeep.value.copy(
-            new THREE.Color(PARAMS.waterDeepColor).convertSRGBToLinear(),
-          );
-          uWaterReflect.value.copy(
-            new THREE.Color(PARAMS.waterReflectColor).convertSRGBToLinear(),
-          );
-          uWaterShoreFoam.value = PARAMS.waterShoreFoam;
-          uWaterPlayerFoamR.value = PARAMS.waterPlayerFoamRadius;
-          uWaterPlayerFoamStr.value = PARAMS.waterPlayerFoamStrength;
+          // Water uniforms are updated via Tweakpane onChange handlers
           // Sun
           const sd = new THREE.Vector3(
             PARAMS.sunDirX,
