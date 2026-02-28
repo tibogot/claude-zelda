@@ -163,6 +163,16 @@ export function createGrassMaterial(
     uFrontScatter,
     uRimSSS,
     uBsIntensity,
+    uSpecV1Intensity,
+    uSpecV1Color,
+    uSpecV1Dir,
+    uSpecV2Intensity,
+    uSpecV2Color,
+    uSpecV2Dir,
+    uSpecV2NoiseScale,
+    uSpecV2NoiseStr,
+    uSpecV2Power,
+    uSpecV2TipBias,
     PI,
   } = ctx;
 
@@ -541,6 +551,54 @@ export function createGrassMaterial(
       1,
     );
     col = add(col, mul(transmitCol, 0.35, totalSSS, uBsIntensity));
+
+    // Specular V1: directional highlight
+    const sceneDepth = length(sub(cameraPosition, vWorldPos));
+    const specNormal = normalize(n);
+    const specReflect = sub(
+      uSpecV1Dir,
+      mul(specNormal, mul(2.0, dot(uSpecV1Dir, specNormal))),
+    );
+    const specDot = pow(max(dot(viewDir, specReflect), 0.0), 25.6);
+    const specDistFade = smoothstep(2.0, 10.0, sceneDepth);
+    const specTipFade = smoothstep(0.5, 1.0, heightPct);
+    const specV1 = mul(
+      uSpecV1Color,
+      specDot,
+      uSpecV1Intensity,
+      specDistFade,
+      specTipFade,
+      3.0,
+    );
+    col = add(col, specV1);
+
+    // Specular V2: scattered glints with noise-perturbed normals
+    const noiseUV = mul(vWorldPos.xz, uSpecV2NoiseScale);
+    const n1v2 = sub(mul(noise12(noiseUV), 2.0), 1.0);
+    const n2v2 = sub(mul(noise12(add(noiseUV, vec2(73.7, 157.3))), 2.0), 1.0);
+    const n3v2 = sub(
+      mul(noise12(add(mul(noiseUV, 2.7), vec2(31.1, 97.5))), 2.0),
+      1.0,
+    );
+    const perturbedN = normalize(
+      add(n, mul(vec3(n1v2, mul(n3v2, 0.3), n2v2), uSpecV2NoiseStr)),
+    );
+    const v2Reflect = sub(
+      uSpecV2Dir,
+      mul(perturbedN, mul(2.0, dot(uSpecV2Dir, perturbedN))),
+    );
+    const v2Spec = pow(max(dot(viewDir, v2Reflect), 0.0), uSpecV2Power);
+    const v2DistFade = smoothstep(2.0, 10.0, sceneDepth);
+    const v2TipFade = smoothstep(sub(1.0, uSpecV2TipBias), 1.0, heightPct);
+    const specV2 = mul(
+      uSpecV2Color,
+      v2Spec,
+      uSpecV2Intensity,
+      v2DistFade,
+      v2TipFade,
+    );
+    col = add(col, specV2);
+
     return col;
   })();
 

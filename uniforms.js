@@ -70,6 +70,22 @@ export function createUniforms(PARAMS, TERRAIN_SIZE, NPC_COUNT) {
   const uBsPower = uniform(PARAMS.bsPower);
   const uFrontScatter = uniform(PARAMS.frontScatter);
   const uRimSSS = uniform(PARAMS.rimSSS);
+  // Specular V1
+  const uSpecV1Intensity = uniform(PARAMS.specV1Enabled ? PARAMS.specV1Intensity : 0);
+  const uSpecV1Color = uniform(srgbToLinear(PARAMS.specV1Color));
+  const uSpecV1Dir = uniform(
+    new THREE.Vector3(PARAMS.specV1DirX, PARAMS.specV1DirY, PARAMS.specV1DirZ).normalize(),
+  );
+  // Specular V2
+  const uSpecV2Intensity = uniform(PARAMS.specV2Enabled ? PARAMS.specV2Intensity : 0);
+  const uSpecV2Color = uniform(srgbToLinear(PARAMS.specV2Color));
+  const uSpecV2Dir = uniform(
+    new THREE.Vector3(PARAMS.specV2DirX, PARAMS.specV2DirY, PARAMS.specV2DirZ).normalize(),
+  );
+  const uSpecV2NoiseScale = uniform(PARAMS.specV2NoiseScale);
+  const uSpecV2NoiseStr = uniform(PARAMS.specV2NoiseStr);
+  const uSpecV2Power = uniform(PARAMS.specV2Power);
+  const uSpecV2TipBias = uniform(PARAMS.specV2TipBias);
   const uFogNear = uniform(PARAMS.fogNear);
   const uFogFar = uniform(PARAMS.fogFar);
   const uFogIntensity = uniform(PARAMS.fogIntensity);
@@ -130,6 +146,16 @@ export function createUniforms(PARAMS, TERRAIN_SIZE, NPC_COUNT) {
     uBsPower,
     uFrontScatter,
     uRimSSS,
+    uSpecV1Intensity,
+    uSpecV1Color,
+    uSpecV1Dir,
+    uSpecV2Intensity,
+    uSpecV2Color,
+    uSpecV2Dir,
+    uSpecV2NoiseScale,
+    uSpecV2NoiseStr,
+    uSpecV2Power,
+    uSpecV2TipBias,
     uFogNear,
     uFogFar,
     uFogIntensity,
@@ -223,6 +249,16 @@ export function createSyncUniforms(u, deps, lastState) {
     u.uBsPower.value = PARAMS.bsPower;
     u.uFrontScatter.value = PARAMS.frontScatter;
     u.uRimSSS.value = PARAMS.rimSSS;
+    u.uSpecV1Intensity.value = PARAMS.specV1Enabled ? PARAMS.specV1Intensity : 0;
+    u.uSpecV1Color.value.copy(srgbToLinear(PARAMS.specV1Color));
+    u.uSpecV1Dir.value.set(PARAMS.specV1DirX, PARAMS.specV1DirY, PARAMS.specV1DirZ).normalize();
+    u.uSpecV2Intensity.value = PARAMS.specV2Enabled ? PARAMS.specV2Intensity : 0;
+    u.uSpecV2Color.value.copy(srgbToLinear(PARAMS.specV2Color));
+    u.uSpecV2Dir.value.set(PARAMS.specV2DirX, PARAMS.specV2DirY, PARAMS.specV2DirZ).normalize();
+    u.uSpecV2NoiseScale.value = PARAMS.specV2NoiseScale;
+    u.uSpecV2NoiseStr.value = PARAMS.specV2NoiseStr;
+    u.uSpecV2Power.value = PARAMS.specV2Power;
+    u.uSpecV2TipBias.value = PARAMS.specV2TipBias;
     u.uFogNear.value = PARAMS.fogEnabled ? PARAMS.fogNear : 9999;
     u.uFogFar.value = PARAMS.fogEnabled ? PARAMS.fogFar : 99999;
     u.uFogIntensity.value = PARAMS.fogEnabled ? PARAMS.fogIntensity : 0;

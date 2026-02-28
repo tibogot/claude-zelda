@@ -247,6 +247,30 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
   fSSS.addBinding(PARAMS, "bsPower", { min: 0.5, max: 5, step: 0.25 });
   fSSS.addBinding(PARAMS, "frontScatter", { min: 0, max: 1, step: 0.05 });
   fSSS.addBinding(PARAMS, "rimSSS", { min: 0, max: 1, step: 0.05 });
+  const fSpec1 = pane.addFolder({
+    title: "Specular V1 (Directional)",
+    expanded: false,
+  });
+  fSpec1.addBinding(PARAMS, "specV1Enabled");
+  fSpec1.addBinding(PARAMS, "specV1Intensity", { min: 0, max: 5, step: 0.25 });
+  fSpec1.addBinding(PARAMS, "specV1Color", { view: "color" });
+  fSpec1.addBinding(PARAMS, "specV1DirX", { min: -2, max: 2, step: 0.1, label: "dirX" });
+  fSpec1.addBinding(PARAMS, "specV1DirY", { min: 0.1, max: 2, step: 0.05, label: "dirY" });
+  fSpec1.addBinding(PARAMS, "specV1DirZ", { min: -2, max: 2, step: 0.1, label: "dirZ" });
+  const fSpec2 = pane.addFolder({
+    title: "Specular V2 (Glints)",
+    expanded: false,
+  });
+  fSpec2.addBinding(PARAMS, "specV2Enabled");
+  fSpec2.addBinding(PARAMS, "specV2Intensity", { min: 0, max: 4, step: 0.25 });
+  fSpec2.addBinding(PARAMS, "specV2Color", { view: "color" });
+  fSpec2.addBinding(PARAMS, "specV2DirX", { min: -2, max: 2, step: 0.1, label: "dirX" });
+  fSpec2.addBinding(PARAMS, "specV2DirY", { min: 0.1, max: 2, step: 0.05, label: "dirY" });
+  fSpec2.addBinding(PARAMS, "specV2DirZ", { min: -2, max: 2, step: 0.1, label: "dirZ" });
+  fSpec2.addBinding(PARAMS, "specV2NoiseScale", { min: 0.5, max: 10, step: 0.5, label: "noiseScale" });
+  fSpec2.addBinding(PARAMS, "specV2NoiseStr", { min: 0, max: 2, step: 0.1, label: "noiseStr" });
+  fSpec2.addBinding(PARAMS, "specV2Power", { min: 2, max: 40, step: 1, label: "power" });
+  fSpec2.addBinding(PARAMS, "specV2TipBias", { min: 0, max: 1, step: 0.1, label: "tipBias" });
   const fFog = pane.addFolder({ title: "Fog", expanded: false });
   fFog.addBinding(PARAMS, "fogEnabled");
   fFog.addBinding(PARAMS, "fogNear", { min: 0, max: 50, step: 1 });
