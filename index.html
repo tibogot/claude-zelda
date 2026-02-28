@@ -226,7 +226,11 @@
         GRASS_SEGMENTS_HIGH = 6;
       const GRASS_VERTS_LOW = (GRASS_SEGMENTS_LOW + 1) * 2,
         GRASS_VERTS_HIGH = (GRASS_SEGMENTS_HIGH + 1) * 2;
-      const GRASS_DENSITY = 32 * 32 * 3,
+      // BotW-style inner density ring: same blade count in a 5×5 patch instead of 10×10
+      // → 4× denser coverage in the area immediately around the player (zero perf cost per blade)
+      const NEAR_PATCH_SIZE = 5;
+      const NEAR_RING_EXTENT = 2; // 5×5 grid of near patches → (2*2+1)*5 = 25 units wide, edge at ~12.5m
+      const GRASS_DENSITY = 40 * 40 * 3,
         GRID_SIZE = 18,
         PATCH_SPACING = 10;
       const TRAIL_RES = 256,
@@ -241,7 +245,7 @@
       const PARAMS = {
         grassWidth: 0.08,
         grassHeight: 0.7,
-        lodDistance: 15,
+        lodDistance: 22,
         maxDistance: 80,
         gradientCurve: 2.0,
         baseColor1: "#143210",
@@ -659,7 +663,7 @@
       // ═══════════════════════════════════════════════════════════════
       // GEOMETRY
       // ═══════════════════════════════════════════════════════════════
-      function createGrassGeometry(segments, numGrass) {
+      function createGrassGeometry(segments, numGrass, patchSize = GRASS_PATCH_SIZE) {
         setSeed(0);
         const V = (segments + 1) * 2,
           T = V * 2,
@@ -678,15 +682,20 @@
           nrm[i * 3 + 1] = 1;
           vid[i] = i;
         }
+        // Jittered grid with exact factorization: find numCellsX × numCellsZ = numGrass
+        // exactly so no cells are left empty. Empty leftover cells cause a visible gap strip
+        // at the +Z edge of every patch, which repeats at every 10-unit patch seam and
+        // looks like a football-field grid. For 3072 this gives 48×64.
+        let numCellsX = Math.floor(Math.sqrt(numGrass));
+        while (numGrass % numCellsX !== 0) numCellsX--;
+        const numCellsZ = numGrass / numCellsX;
+        const cellW = patchSize / numCellsX;
+        const cellH = patchSize / numCellsZ;
         for (let i = 0; i < numGrass; i++) {
-          off[i * 3] = randRange(
-            -GRASS_PATCH_SIZE * 0.5,
-            GRASS_PATCH_SIZE * 0.5,
-          );
-          off[i * 3 + 1] = randRange(
-            -GRASS_PATCH_SIZE * 0.5,
-            GRASS_PATCH_SIZE * 0.5,
-          );
+          const col = i % numCellsX;
+          const row = Math.floor(i / numCellsX);
+          off[i * 3]     = -patchSize * 0.5 + col * cellW + randRange(0, cellW);
+          off[i * 3 + 1] = -patchSize * 0.5 + row * cellH + randRange(0, cellH);
           off[i * 3 + 2] = 0;
         }
         const geo = new THREE.InstancedBufferGeometry();
@@ -698,7 +707,7 @@
         geo.setIndex(indices);
         geo.boundingSphere = new THREE.Sphere(
           new THREE.Vector3(0, 0, 0),
-          1 + GRASS_PATCH_SIZE * 2,
+          1 + patchSize * 2,
         );
         return geo;
       }
@@ -898,7 +907,8 @@
           const hv = hash42(bladeWorld.xz),
             hv2 = hash22(bladeWorld.xz);
           const distXZ = length(sub(cameraPosition.xz, bladeWorld.xz));
-          const highLODOut = smoothstep(mul(uLodDist, 0.5), uLodDist, distXZ);
+          // Softer LOD transition: blend over 40%–100% of lodDistance so the density/quality step is less visible
+          const highLODOut = smoothstep(mul(uLodDist, 0.4), uLodDist, distXZ);
           const lodFadeIn = smoothstep(uLodDist, uMaxDist, distXZ);
           const randomAngle = mul(hv.x, 2 * PI),
             randomShade = remap(hv.y, -1, 1, 0.75, 1);
@@ -1415,6 +1425,7 @@
         }
         terrainGeo.computeVertexNormals();
         const uGroundDirt = uniform(srgbToLinear(PARAMS.groundDirtColor));
+        const uGroundBase = uniform(srgbToLinear(PARAMS.groundBaseColor));
         const uGroundVar = uniform(1.0);
         const uTexTiling = uniform(PARAMS.texTiling);
         const uGrassSlopeMin = uniform(PARAMS.grassSlopeMin);
@@ -1467,7 +1478,7 @@
         });
         const tiledUV = uv().mul(uTexTiling);
         terrainMat.colorNode = Fn(() => {
-          const grassCol = texture(grassColorTex, tiledUV).rgb;
+          const grassCol = uGroundBase; // flat color matching blade bases — avoids photo-grass double-layer artifact
           const groundCol = texture(groundColorTex, tiledUV).rgb;
           const grassFactor = mul(
             smoothstep(uGrassSlopeMin, uGrassSlopeMax, normalLocal.y),
@@ -3832,6 +3843,8 @@
         // Grass
         const geoLow = createGrassGeometry(GRASS_SEGMENTS_LOW, GRASS_DENSITY);
         const geoHigh = createGrassGeometry(GRASS_SEGMENTS_HIGH, GRASS_DENSITY);
+        // Near ring geometry: same blade count but 5×5 patch → 4× denser than 10×10
+        const geoNear = createGrassGeometry(GRASS_SEGMENTS_HIGH, GRASS_DENSITY, NEAR_PATCH_SIZE);
         const matLowSimple = createGrassMaterial(
           GRASS_SEGMENTS_LOW,
           GRASS_VERTS_LOW,
@@ -3861,7 +3874,8 @@
         capsuleNpcs.forEach((npc) => overworldGroups.push(npc)); // Hide NPCs too
 
         const poolLow = { meshes: [], idx: 0 },
-          poolHigh = { meshes: [], idx: 0 };
+          poolHigh = { meshes: [], idx: 0 },
+          poolNear = { meshes: [], idx: 0 };
         function getMesh(pool, geo, mat) {
           if (pool.idx < pool.meshes.length) return pool.meshes[pool.idx++];
           const m = new THREE.Mesh(geo, mat);
@@ -3881,6 +3895,8 @@
         const aabb = new THREE.Box3(),
           cellPos = new THREE.Vector3();
         const aabbSize = new THREE.Vector3(PATCH_SPACING, 1000, PATCH_SPACING);
+        const nearBaseCellPos = new THREE.Vector3();
+        const nearAabbSize = new THREE.Vector3(NEAR_PATCH_SIZE, 1000, NEAR_PATCH_SIZE);
 
         // ═══════════════════════════════════════════════════════════
         // TWEAKPANE
@@ -4103,6 +4119,7 @@
         fFog.addBinding(PARAMS, "fogColor", { view: "color" });
         const fGround = pane.addFolder({ title: "Ground", expanded: false });
         fGround.addBinding(PARAMS, "groundVariation");
+        fGround.addBinding(PARAMS, "groundBaseColor", { view: "color", label: "ground base color" });
         fGround.addBinding(PARAMS, "groundDirtColor", { view: "color" });
         fGround.addBinding(PARAMS, "grassSlopeMin", {
           min: 0.2,
@@ -5106,6 +5123,7 @@
           uSeasonalScale.value = PARAMS.seasonalScale;
           uSeasonalDryColor.value.copy(srgbToLinear(PARAMS.seasonalDryColor));
           uGroundDirt.value.copy(srgbToLinear(PARAMS.groundDirtColor));
+          uGroundBase.value.copy(srgbToLinear(PARAMS.groundBaseColor));
           uGroundVar.value = PARAMS.groundVariation ? 1 : 0;
           uTexTiling.value = PARAMS.texTiling;
           uGrassSlopeMin.value = PARAMS.grassSlopeMin;
@@ -5855,6 +5873,7 @@
               grassGroup.children[i].visible = false;
             poolLow.idx = 0;
             poolHigh.idx = 0;
+            poolNear.idx = 0;
             projMat.multiplyMatrices(
               camera.projectionMatrix,
               camera.matrixWorldInverse,
@@ -5944,6 +5963,32 @@
                 mesh.material = mat;
                 mesh.position.set(cellPos.x, 0, cellPos.z);
                 mesh.visible = true;
+                patchCount++;
+              }
+            }
+
+            // ── Near density ring (BotW-style) ─────────────────────────────
+            // 5×5 grid of 5-unit patches centred on the player (was 3×3 → larger radius so transition is further away).
+            // Same blade count per patch in 25 sq.units instead of 100 → 4× denser coverage.
+            // Additive on top of regular patches. Edge at ~12.5m so the density step is less visible when the ring snaps every 5 units.
+            nearBaseCellPos
+              .copy(charPos)
+              .divideScalar(NEAR_PATCH_SIZE)
+              .floor()
+              .multiplyScalar(NEAR_PATCH_SIZE);
+            for (let x = -NEAR_RING_EXTENT; x <= NEAR_RING_EXTENT; x++) {
+              for (let z = -NEAR_RING_EXTENT; z <= NEAR_RING_EXTENT; z++) {
+                cellPos.set(
+                  nearBaseCellPos.x + x * NEAR_PATCH_SIZE,
+                  0,
+                  nearBaseCellPos.z + z * NEAR_PATCH_SIZE,
+                );
+                aabb.setFromCenterAndSize(cellPos, nearAabbSize);
+                if (!frustum.intersectsBox(aabb)) continue;
+                const nearMesh = getMesh(poolNear, geoNear, matHighSimple);
+                nearMesh.material = matHighSimple;
+                nearMesh.position.copy(cellPos);
+                nearMesh.visible = true;
                 patchCount++;
               }
             }
