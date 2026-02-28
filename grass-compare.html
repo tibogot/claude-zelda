@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Grass Comparison</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { overflow: hidden; background: #87c5e8; font-family: "SF Mono", "Fira Code", monospace; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+
+    #divider {
+      position: fixed; top: 0; left: 50%; transform: translateX(-50%);
+      width: 2px; height: 100vh;
+      background: rgba(255, 255, 255, 0.45);
+      pointer-events: none;
+    }
+
+    .label {
+      position: fixed; bottom: 28px;
+      font-size: 13px; font-weight: 700; letter-spacing: 0.08em;
+      color: #fff; text-shadow: 0 1px 6px rgba(0,0,0,0.6);
+      pointer-events: none; text-align: center;
+    }
+    #label-left  { left: 25%; transform: translateX(-50%); }
+    #label-right { left: 75%; transform: translateX(-50%); }
+    .sub {
+      display: block; margin-top: 5px;
+      font-size: 11px; font-weight: 400; line-height: 1.5;
+      color: rgba(255,255,255,0.80);
+      text-shadow: 0 1px 4px rgba(0,0,0,0.55);
+    }
+
+    #fps {
+      position: fixed; top: 12px; right: 14px;
+      font-size: 12px; color: rgba(255,255,255,0.85);
+      background: rgba(0,0,0,0.42); padding: 4px 9px; border-radius: 5px;
+      pointer-events: none;
+    }
+    #hint {
+      position: fixed; top: 12px; left: 14px;
+      font-size: 11px; color: rgba(255,255,255,0.70);
+      background: rgba(0,0,0,0.38); padding: 4px 9px; border-radius: 5px;
+      pointer-events: none;
+    }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three":          "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+        "three/webgpu":   "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+        "three/tsl":      "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+        "three/addons/":  "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="divider"></div>
+
+  <div class="label" id="label-left">
+    YOUR GRASS
+    <span class="sub">
+      4 segs · crossed blades · easeOut taper<br>
+      3-layer wind · lush/bleach variation · SSS
+    </span>
+  </div>
+  <div class="label" id="label-right">
+    TOON GRASS
+    <span class="sub">
+      2 segs · linear taper (triangle blade)<br>
+      1-layer wind · bold 3-band color · no SSS
+    </span>
+  </div>
+
+  <div id="fps">-- fps</div>
+  <div id="hint">drag to orbit · scroll to zoom</div>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+    import { createSimpleGrassPatch } from "./grass-simple.js";
+    import { createToonGrassPatch }   from "./toon-grass.js";
+
+    // ─── Terrain height — JS version (must match TSL formula in grass shaders) ───
+    function terrainH(x, z) {
+      return 0.5 * Math.sin(0.25 * x) * Math.cos(0.20 * z)
+           + 0.3 * Math.sin(0.15 * x + 0.10 * z)
+           + 0.2 * Math.cos(0.30 * z + 0.05 * x);
+    }
+
+    // ─── Renderer ───
+    const renderer = new THREE.WebGPURenderer({ antialias: true });
+    renderer.setPixelRatio(devicePixelRatio);
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.15;
+    document.body.appendChild(renderer.domElement);
+    await renderer.init();
+
+    // ─── Scene ───
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87c5e8);
+    scene.fog = new THREE.FogExp2(0x9acfe8, 0.022);
+
+    // ─── Camera ───
+    const camera = new THREE.PerspectiveCamera(58, innerWidth / innerHeight, 0.1, 200);
+    camera.position.set(0, 5, 22);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 1, 0);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.07;
+    controls.maxPolarAngle = Math.PI * 0.46;
+    controls.minDistance = 6;
+    controls.maxDistance = 60;
+    controls.update();
+
+    // ─── Lighting ───
+    const sun = new THREE.DirectionalLight(0xfff4d0, 2.8);
+    sun.position.set(6, 12, 5);
+    scene.add(sun);
+
+    const ambient = new THREE.AmbientLight(0x88aaff, 0.9);
+    scene.add(ambient);
+
+    // Sky hemisphere light for colour bleed
+    const hemi = new THREE.HemisphereLight(0xc7e8ff, 0x3a6820, 0.6);
+    scene.add(hemi);
+
+    // ─── Terrain mesh ───
+    // Same height formula as the grass shaders — blades and ground match perfectly.
+    const groundGeo = new THREE.PlaneGeometry(80, 50, 160, 100);
+    groundGeo.rotateX(-Math.PI / 2);
+    const gPos = groundGeo.attributes.position.array;
+    for (let i = 0; i < gPos.length; i += 3) {
+      gPos[i + 1] = terrainH(gPos[i], gPos[i + 2]);
+    }
+    groundGeo.attributes.position.needsUpdate = true;
+    groundGeo.computeVertexNormals();
+
+    const groundMat = new THREE.MeshStandardMaterial({
+      color: 0x3d7a18,
+      roughness: 1.0,
+      metalness: 0.0,
+    });
+    scene.add(new THREE.Mesh(groundGeo, groundMat));
+
+    // ─── Grass patches ───
+    const PATCH  = 22;
+    const OFFSET_X = 13; // distance from centre to each patch
+
+    const simpleGrass = createSimpleGrassPatch(PATCH, 3200);
+    simpleGrass.mesh.position.set(-OFFSET_X, 0, 0);
+    scene.add(simpleGrass.mesh);
+
+    const toonGrass = createToonGrassPatch(PATCH, 2200);
+    toonGrass.mesh.position.set(OFFSET_X, 0, 0);
+    scene.add(toonGrass.mesh);
+
+    // ─── Resize ───
+    window.addEventListener("resize", () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+
+    // ─── FPS counter ───
+    const fpsEl = document.getElementById("fps");
+    let lastT = performance.now(), frames = 0;
+
+    // ─── Loop ───
+    const timer = new THREE.Timer();
+    renderer.setAnimationLoop((timestamp) => {
+      timer.update(timestamp);
+      const t = timer.getElapsed();
+      simpleGrass.update(t);
+      toonGrass.update(t);
+      controls.update();
+      renderer.render(scene, camera);
+
+      frames++;
+      const now = performance.now();
+      if (now - lastT >= 600) {
+        fpsEl.textContent = `${Math.round(frames * 1000 / (now - lastT))} fps`;
+        frames = 0; lastT = now;
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Castle Interior</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { overflow: hidden; background: #050302; }
+      canvas { display: block; width: 100vw; height: 100vh; }
+      #prompt {
+        position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+        z-index: 20; background: rgba(0,0,0,0.85); border: 2px solid #f0d070;
+        border-radius: 8px; padding: 12px 24px; color: #ffe0a0;
+        font: 14px "SF Mono", monospace; opacity: 0; transition: opacity 0.3s;
+        pointer-events: none;
+      }
+      #prompt span {
+        background: rgba(255,200,80,0.2); border: 1px solid rgba(255,200,80,0.4);
+        border-radius: 3px; padding: 1px 6px; font-weight: bold;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="prompt">Press <span>E</span> to exit</div>
+    <div id="hint" style="position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:15;color:#b0d890;font:12px monospace;pointer-events:none;">Click to lock pointer · WASD move · Arrow keys turn</div>
+    <script type="module">
+      import * as THREE from "three";
+      import { pass } from "three/tsl";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+      import RAPIER from "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.19.3/+esm";
+
+      await RAPIER.init();
+
+      const PI = Math.PI;
+      const W = 25, L = 30, H = 14;
+      const doorW = 4, leftFrontW = W - doorW / 2;
+      const EXIT_TRIGGER_RADIUS = 3;
+      const PLAYER_SPEED = 3.2;
+      const RUN_MULT = 1.95;
+      const GRAVITY = 9.81;
+      const JUMP_SPEED = 5.5;
+      const CAP_R = 0.35;
+      const CAP_HALF_H = Math.max(0.1, (2.5 - 2 * CAP_R) / 2);
+      const SPAWN_Z = L / 2 - 5;
+      const EXIT_Z = L / 2 - 2;
+
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      await renderer.init();
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.2;
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      document.body.appendChild(renderer.domElement);
+
+      const scene = new THREE.Scene();
+      scene.fog = new THREE.Fog(0x0a0604, 15, 70);
+      scene.background = new THREE.Color(0x050302);
+
+      const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 500);
+      camera.position.set(0, 4, 20);
+
+      const physicsWorld = new RAPIER.World(new RAPIER.Vector3(0, -GRAVITY, 0));
+
+      const ambient = new THREE.AmbientLight(0x443322, 0.85);
+      scene.add(ambient);
+      const hemi = new THREE.HemisphereLight(0x554433, 0x221108, 0.55);
+      scene.add(hemi);
+      const fillLight = new THREE.DirectionalLight(0xffeedd, 0.4);
+      fillLight.position.set(5, 15, 10);
+      fillLight.castShadow = false;
+      scene.add(fillLight);
+
+      const wallMat = new THREE.MeshStandardNodeMaterial({ color: 0x5a5045, roughness: 0.9 });
+      const darkStoneMat = new THREE.MeshStandardNodeMaterial({ color: 0x3a3530, roughness: 0.95 });
+      const pillarMat = new THREE.MeshStandardNodeMaterial({ color: 0x6a6055, roughness: 0.7 });
+      const goldMat = new THREE.MeshStandardNodeMaterial({ color: 0xffd700, metalness: 0.8, roughness: 0.2 });
+      const redMat = new THREE.MeshStandardNodeMaterial({ color: 0x8b0000, roughness: 0.5, metalness: 0.3 });
+      const floorMat = new THREE.MeshStandardNodeMaterial({ color: 0x6a5a48, roughness: 0.85, side: THREE.DoubleSide });
+
+      const floor = new THREE.Mesh(new THREE.PlaneGeometry(W * 2, L * 2), floorMat);
+      floor.rotation.x = -PI / 2;
+      floor.position.y = -0.1;
+      floor.receiveShadow = true;
+      scene.add(floor);
+
+      const backWall = new THREE.Mesh(new THREE.BoxGeometry(W * 2, H, 1), wallMat);
+      backWall.position.set(0, H / 2, -L);
+      scene.add(backWall);
+      [-W, W].forEach((x) => {
+        const wall = new THREE.Mesh(new THREE.BoxGeometry(1, H, L * 2), wallMat);
+        wall.position.set(x, H / 2, 0);
+        scene.add(wall);
+      });
+      const fwLeft = new THREE.Mesh(new THREE.BoxGeometry(leftFrontW, H, 1), wallMat);
+      fwLeft.position.set(-W + leftFrontW / 2, H / 2, L);
+      scene.add(fwLeft);
+      const fwRight = new THREE.Mesh(new THREE.BoxGeometry(leftFrontW, H, 1), wallMat);
+      fwRight.position.set(W - leftFrontW / 2, H / 2, L);
+      scene.add(fwRight);
+      const fwTop = new THREE.Mesh(new THREE.BoxGeometry(doorW, H - 5, 1), wallMat);
+      fwTop.position.set(0, H - (H - 5) / 2, L);
+      scene.add(fwTop);
+
+      const ceiling = new THREE.Mesh(
+        new THREE.PlaneGeometry(W * 2, L * 2),
+        new THREE.MeshStandardNodeMaterial({ color: 0x2a2520, roughness: 0.9 })
+      );
+      ceiling.rotation.x = PI / 2;
+      ceiling.position.y = H;
+      scene.add(ceiling);
+
+      const pillarSpacing = 10;
+      const pillarRowX = 15;
+      for (let z = -L + 10; z <= L - 10; z += pillarSpacing) {
+        [-pillarRowX, pillarRowX].forEach((x) => {
+          const pillar = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.2, H, 12), pillarMat);
+          pillar.position.set(x, H / 2, z);
+          pillar.castShadow = true;
+          scene.add(pillar);
+          const base = new THREE.Mesh(new THREE.CylinderGeometry(1.4, 1.6, 0.6, 12), darkStoneMat);
+          base.position.set(x, 0.3, z);
+          scene.add(base);
+          const capital = new THREE.Mesh(new THREE.CylinderGeometry(1.4, 1.0, 0.8, 12), darkStoneMat);
+          capital.position.set(x, H - 0.4, z);
+          scene.add(capital);
+          const ring = new THREE.Mesh(new THREE.TorusGeometry(1.15, 0.08, 8, 24), goldMat);
+          ring.position.set(x, H / 2 + 2, z);
+          ring.rotation.x = PI / 2;
+          scene.add(ring);
+          const pillarBody = physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(x, H / 2, z));
+          physicsWorld.createCollider(RAPIER.ColliderDesc.cylinder(H / 2, 1.2), pillarBody);
+        });
+      }
+
+      function addTorch(x, y, z) {
+        const torchLight = new THREE.PointLight(0xff6622, 25, 22);
+        torchLight.position.set(x, y + 0.8, z + 0.5);
+        scene.add(torchLight);
+      }
+      for (let z of [-20, 0, 20]) {
+        addTorch(-W + 0.5, 4.5, z);
+        addTorch(W - 0.5, 4.5, z);
+      }
+
+      const platform = new THREE.Mesh(new THREE.BoxGeometry(20, 1.2, 12), darkStoneMat);
+      platform.position.set(0, 0.6, -L + 8);
+      scene.add(platform);
+      const platBody = physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(0, 0.6, -L + 8));
+      physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(10, 0.6, 6), platBody);
+
+      const throneSeat = new THREE.Mesh(new THREE.BoxGeometry(3.5, 0.6, 3), redMat);
+      throneSeat.position.set(0, 1.5, -L + 6);
+      throneSeat.castShadow = true;
+      scene.add(throneSeat);
+      const throneBack = new THREE.Mesh(new THREE.BoxGeometry(3.5, 6, 0.5), redMat);
+      throneBack.position.set(0, 4.5, -L + 4.7);
+      throneBack.castShadow = true;
+      scene.add(throneBack);
+
+      [-5, 5].forEach((x) => {
+        const brazierLight = new THREE.PointLight(0xff5500, 28, 22);
+        brazierLight.position.set(x, 3, -L + 6);
+        scene.add(brazierLight);
+      });
+
+      [-20, 0, 20].forEach((zPos) => {
+        const chanLight = new THREE.PointLight(0xff9944, 30, 35);
+        chanLight.position.set(0, H - 3.5, zPos);
+        scene.add(chanLight);
+      });
+
+      const exitLight = new THREE.PointLight(0xf0a030, 12, 16);
+      exitLight.position.set(0, 3, L - 2);
+      scene.add(exitLight);
+
+      const exitDoor = new THREE.Mesh(
+        new THREE.BoxGeometry(doorW + 0.5, 5.2, 0.3),
+        new THREE.MeshStandardNodeMaterial({ color: 0xf0d070, emissive: 0xf0a030, emissiveIntensity: 0.6 })
+      );
+      exitDoor.position.set(0, 2.6, L - 0.4);
+      scene.add(exitDoor);
+
+      function addWallCollider(tx, ty, tz, hw, hh, hd) {
+        const body = physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(tx, ty, tz));
+        physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(hw, hh, hd), body);
+      }
+      addWallCollider(0, H / 2, -L, W, H / 2, 0.5);
+      addWallCollider(-W, H / 2, 0, 0.5, H / 2, L);
+      addWallCollider(W, H / 2, 0, 0.5, H / 2, L);
+      addWallCollider(-W + leftFrontW / 2, H / 2, L, leftFrontW / 2, H / 2, 0.5);
+      addWallCollider(W - leftFrontW / 2, H / 2, L, leftFrontW / 2, H / 2, 0.5);
+      addWallCollider(0, H - (H - 5) / 2, L, doorW / 2, (H - 5) / 2, 0.5);
+      addWallCollider(0, 2.6, L, (doorW + 0.5) / 2, 2.6, 0.5);
+
+      const floorBody = physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(0, -0.5, 0));
+      physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(W + 2, 0.5, L + 2), floorBody);
+
+      const charPos = new THREE.Vector3(0, CAP_HALF_H + CAP_R, SPAWN_Z);
+      const playerBody = physicsWorld.createRigidBody(
+        RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(charPos.x, charPos.y, charPos.z)
+      );
+      const playerCollider = physicsWorld.createCollider(
+        RAPIER.ColliderDesc.capsule(CAP_HALF_H, CAP_R),
+        playerBody
+      );
+      const characterController = physicsWorld.createCharacterController(0.01);
+      characterController.enableSnapToGround(0.5);
+      characterController.setMaxSlopeClimbAngle((45 * PI) / 180);
+
+      const capsuleGeo = new THREE.CapsuleGeometry(CAP_R, CAP_HALF_H * 2, 8, 16);
+      const capsuleMat = new THREE.MeshStandardNodeMaterial({ color: 0xee8833, roughness: 0.4 });
+      const capsule = new THREE.Mesh(capsuleGeo, capsuleMat);
+      capsule.castShadow = true;
+      scene.add(capsule);
+      const characterGroup = new THREE.Group();
+      scene.add(characterGroup);
+
+      const charDraco = new DRACOLoader();
+      charDraco.setDecoderPath("https://www.gstatic.com/draco/versioned/decoders/1.5.6/");
+      const charLoader = new GLTFLoader();
+      charLoader.setDRACOLoader(charDraco);
+      charLoader.load("models/AnimationLibrary_Godot_Standard-transformed.glb", (gltf) => {
+        const model = gltf.scene;
+        model.traverse((o) => {
+          if (o.isMesh) {
+            o.castShadow = true;
+            o.receiveShadow = true;
+            if (o.material && !o.material.isNodeMaterial) {
+              const m = o.material;
+              o.material = new THREE.MeshStandardNodeMaterial({
+                color: m.color?.getHex?.() ?? 0x888888,
+                roughness: m.roughness ?? 0.5,
+                metalness: m.metalness ?? 0,
+                map: m.map || null,
+              });
+            }
+          }
+        });
+        const box = new THREE.Box3().setFromObject(model);
+        const size = new THREE.Vector3(), center = new THREE.Vector3();
+        box.getSize(size);
+        const charHeight = 2.5;
+        const scale = charHeight / (size.y || 1);
+        model.scale.setScalar(scale);
+        box.setFromObject(model);
+        box.getCenter(center);
+        model.position.sub(center);
+        characterGroup.userData.modelBaseY = model.position.y;
+        characterGroup.userData.initialCharHeight = charHeight;
+        characterGroup.add(model);
+        capsule.visible = false;
+      });
+
+      const keys = { w: false, a: false, s: false, d: false, e: false, shift: false, space: false, arrowLeft: false, arrowRight: false };
+      let characterVelY = 0;
+      let camYaw = PI, camPitch = 0.3;
+      let isPointerLocked = false;
+
+      ["keydown", "keyup"].forEach((ev) => {
+        window.addEventListener(ev, (e) => {
+          const k = e.key.toLowerCase();
+          if (keys[k] !== undefined) {
+            keys[k] = ev === "keydown";
+            if (ev === "keydown") e.preventDefault();
+          }
+          if (e.key === "Shift") keys.shift = ev === "keydown";
+          if (e.key === " " || e.code === "Space") {
+            keys.space = ev === "keydown";
+            e.preventDefault();
+          }
+          if (e.key === "ArrowLeft") {
+            keys.arrowLeft = ev === "keydown";
+            e.preventDefault();
+          }
+          if (e.key === "ArrowRight") {
+            keys.arrowRight = ev === "keydown";
+            e.preventDefault();
+          }
+        });
+      });
+
+      renderer.domElement.addEventListener("click", () => {
+        renderer.domElement.requestPointerLock();
+        document.getElementById("hint").style.opacity = "0";
+      });
+      document.addEventListener("pointerlockchange", () => {
+        isPointerLocked = !!document.pointerLockElement;
+      });
+      renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
+      document.addEventListener("mousemove", (e) => {
+        if (!isPointerLocked && !(e.buttons & 1)) return;
+        camYaw += e.movementX * 0.002;
+        camPitch -= e.movementY * 0.002;
+        camPitch = Math.max(-0.5, Math.min(1.2, camPitch));
+      });
+
+      const promptEl = document.getElementById("prompt");
+      const exitPos = new THREE.Vector3(0, 1.5, EXIT_Z);
+
+      window.addEventListener("resize", () => {
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+      });
+
+      const timer = new THREE.Timer();
+      const renderPipeline = new THREE.RenderPipeline(renderer);
+      renderPipeline.outputNode = pass(scene, camera);
+      let lastTime = 0;
+
+      await renderer.compileAsync(scene, camera);
+
+      renderer.setAnimationLoop(() => {
+        timer.update();
+        const elapsed = timer.getElapsed();
+        const dt = Math.min(elapsed - lastTime, 0.05);
+        lastTime = elapsed;
+
+        if (keys.arrowLeft) camYaw += 2.2 * dt;
+        if (keys.arrowRight) camYaw -= 2.2 * dt;
+
+        let desiredDx = 0, desiredDz = 0;
+        if (keys.w) desiredDz -= 1;
+        if (keys.s) desiredDz += 1;
+        if (keys.a) desiredDx -= 1;
+        if (keys.d) desiredDx += 1;
+        if (desiredDx !== 0 || desiredDz !== 0) {
+          const len = Math.sqrt(desiredDx * desiredDx + desiredDz * desiredDz);
+          desiredDx /= len;
+          desiredDz /= len;
+          const sinY = Math.sin(camYaw), cosY = Math.cos(camYaw);
+          const mx = desiredDx * cosY - desiredDz * sinY;
+          const mz = desiredDx * sinY + desiredDz * cosY;
+          const speed = (keys.shift ? RUN_MULT : 1) * PLAYER_SPEED * dt;
+          desiredDx = mx * speed;
+          desiredDz = mz * speed;
+        }
+
+        const groundY = CAP_HALF_H + CAP_R;
+        const nextX = charPos.x + desiredDx;
+        const nextZ = charPos.z + desiredDz;
+        const onGround = charPos.y <= groundY + 0.6;
+        let desiredY;
+        if (onGround) {
+          if (keys.space) {
+            characterVelY = JUMP_SPEED;
+            desiredY = charPos.y + characterVelY * dt;
+          } else {
+            characterVelY = 0;
+            desiredY = groundY;
+          }
+        } else {
+          characterVelY -= GRAVITY * dt;
+          desiredY = charPos.y + characterVelY * dt;
+        }
+
+        const desiredTranslation = {
+          x: nextX - charPos.x,
+          y: desiredY - charPos.y,
+          z: nextZ - charPos.z,
+        };
+        characterController.computeColliderMovement(playerCollider, desiredTranslation);
+        const corrected = characterController.computedMovement();
+        const cur = playerBody.translation();
+        playerBody.setNextKinematicTranslation({
+          x: cur.x + corrected.x,
+          y: cur.y + corrected.y,
+          z: cur.z + corrected.z,
+        });
+        physicsWorld.step();
+        const t = playerBody.translation();
+        charPos.set(t.x, t.y, t.z);
+
+        if (charPos.y <= groundY + 0.2 && characterVelY < 0) characterVelY = 0;
+        characterGroup.position.copy(charPos);
+        characterGroup.rotation.y = camYaw;
+        capsule.position.copy(charPos);
+        capsule.rotation.y = camYaw;
+        if (characterGroup.children.length > 0) {
+          const ud = characterGroup.userData;
+          if (ud.initialCharHeight != null)
+            characterGroup.scale.setScalar(2.5 / ud.initialCharHeight);
+          if (ud.modelBaseY != null)
+            characterGroup.children[0].position.y = ud.modelBaseY;
+        }
+        capsule.visible = characterGroup.children.length === 0;
+
+        const camDist = 7, camHeight = 0.5;
+        const camOffset = new THREE.Vector3(
+          Math.sin(camYaw) * camDist,
+          camHeight + 4 * Math.sin(camPitch),
+          Math.cos(camYaw) * camDist
+        );
+        camera.position.copy(charPos).add(camOffset);
+        camera.lookAt(charPos.x, charPos.y + 1.5, charPos.z);
+
+        const distToExit = charPos.distanceTo(exitPos);
+        if (distToExit < EXIT_TRIGGER_RADIUS) {
+          promptEl.style.opacity = "1";
+          if (keys.e) {
+            keys.e = false;
+            window.location.href = "index.html?return=castle";
+          }
+        } else {
+          promptEl.style.opacity = "0";
+        }
+
+        renderPipeline.render();
+      });
+    </script>
+  </body>
+</html>
