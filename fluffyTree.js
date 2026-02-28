@@ -114,11 +114,6 @@ export async function createFluffyTree(opts = {}) {
   );
   const root = gltf.scene;
 
-  // Log every mesh name once so you can see exactly what's in the GLB.
-  console.group("[fluffyTree] GLB mesh inventory");
-  root.traverse(obj => { if (obj.isMesh) console.log(`  "${obj.name}"`); });
-  console.groupEnd();
-
   // ── Find the trunk's lowest point at root origin, then offset Y so the
   //    trunk base sits exactly on the terrain at position[1]. ──────────────
   root.position.set(0, 0, 0);
