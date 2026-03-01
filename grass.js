@@ -129,6 +129,8 @@ export function createGrassMaterial(
     uMaxDist,
     uBladeDensityRegular,
     uBladeDensityNear,
+    uNearFadeEnd,
+    uNearFadeRange,
     uGrassWidth,
     uGrassHeight,
     uWindDirX,
@@ -225,7 +227,18 @@ export function createGrassMaterial(
       uGrassWidth,
       mix(widthHigh, widthLow, highLODOut),
     );
-    const bladeVisible = step(hv.x, uBladeDensity);
+    let bladeVisible;
+    if (densityKey === "near") {
+      const distToPlayer = length(sub(bladeWorld.xz, uPlayerPos.xz));
+      const fadedDensity = mix(
+        uBladeDensityNear,
+        float(0),
+        smoothstep(sub(uNearFadeEnd, uNearFadeRange), uNearFadeEnd, distToPlayer),
+      );
+      bladeVisible = step(hv.x, fadedDensity);
+    } else {
+      bladeVisible = step(hv.x, uBladeDensity);
+    }
     const totalWidthVis = mul(totalWidth, bladeVisible);
     const totalHeightVis = mul(totalHeight, bladeVisible);
     const x = mul(sub(xSide, 0.5), totalWidthVis),

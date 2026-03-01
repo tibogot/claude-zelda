@@ -113,8 +113,8 @@ export function createPlayer(opts) {
             gltf.animations.find((a) => a.name === "Walk_Loop") ||
             gltf.animations[0];
           const runClip =
-            gltf.animations.find((a) => a.name === "Jog_Fwd_Loop") ||
             gltf.animations.find((a) => a.name === "Sprint_Loop") ||
+            gltf.animations.find((a) => a.name === "Jog_Fwd_Loop") ||
             walkClip;
           const jumpClip =
             gltf.animations.find((a) => a.name === "Jump_Loop") ||
@@ -124,6 +124,16 @@ export function createPlayer(opts) {
             gltf.animations.find((a) => a.name === "Sword_Attack") ||
             gltf.animations.find((a) => a.name === "Sword_Attack_RM") ||
             null;
+          const crouchClip =
+            gltf.animations.find((a) => a.name === "Crouch_Idle_Loop") ||
+            idleClip;
+          const crouchWalkClip =
+            gltf.animations.find((a) => a.name === "Crouch_Fwd_Loop") ||
+            crouchClip;
+          const rollClip =
+            gltf.animations.find((a) => a.name === "Roll") ||
+            gltf.animations.find((a) => a.name === "Roll_RM") ||
+            idleClip;
           const idleAction = characterMixer
             .clipAction(idleClip)
             .setLoop(2201)
@@ -134,18 +144,36 @@ export function createPlayer(opts) {
           const attackAction = attackClip
             ? characterMixer.clipAction(attackClip).setLoop(2200)
             : null;
+          const crouchAction = characterMixer
+            .clipAction(crouchClip)
+            .setLoop(2201);
+          const crouchWalkAction = characterMixer
+            .clipAction(crouchWalkClip)
+            .setLoop(2201);
+          const rollAction = characterMixer
+            .clipAction(rollClip)
+            .setLoop(2200);
           if (
             attackAction &&
             attackAction.clampWhenFinished !== undefined
           )
             attackAction.clampWhenFinished = true;
+          if (
+            rollAction &&
+            rollAction.clampWhenFinished !== undefined
+          )
+            rollAction.clampWhenFinished = true;
           characterGroup.userData.idleAction = idleAction;
           characterGroup.userData.walkAction = walkAction;
           characterGroup.userData.runAction = runAction;
           characterGroup.userData.jumpAction = jumpAction;
+          characterGroup.userData.crouchAction = crouchAction;
+          characterGroup.userData.crouchWalkAction = crouchWalkAction;
+          characterGroup.userData.rollAction = rollAction;
           characterGroup.userData.attackAction = attackAction;
           characterGroup.userData.lastMoveState = "idle";
           characterGroup.userData.isAttacking = false;
+          characterGroup.userData.isRolling = false;
           if (attackAction) {
             characterMixer.addEventListener("finished", (e) => {
               if (e.action !== attackAction) return;
@@ -167,10 +195,70 @@ export function createPlayer(opts) {
                 ud.runAction.enabled = true;
                 ud.runAction.crossFadeFrom(attackAction, 0.2).play();
               };
+              const toCrouch = () => {
+                attackAction.enabled = false;
+                ud.crouchAction.enabled = true;
+                ud.crouchAction.crossFadeFrom(attackAction, 0.2).play();
+              };
+              const toCrouchWalk = () => {
+                attackAction.enabled = false;
+                ud.crouchWalkAction.enabled = true;
+                ud.crouchWalkAction.crossFadeFrom(attackAction, 0.2).play();
+              };
               if (from === "walk") toWalk();
               else if (from === "run") toRun();
+              else if (from === "crouch") toCrouch();
+              else if (from === "crouch_walk") toCrouchWalk();
               else toIdle();
               ud.lastMoveState = from;
+            });
+          }
+          if (rollAction) {
+            characterMixer.addEventListener("finished", (e) => {
+              if (e.action !== rollAction) return;
+              const ud = characterGroup.userData;
+              ud.isRolling = false;
+              const moving = keys.w || keys.s || keys.a || keys.d;
+              const running = moving && keys.shift;
+              const crouching = keys.ctrl;
+              const targetState = crouching
+                ? moving
+                  ? "crouch_walk"
+                  : "crouch"
+                : moving
+                  ? running
+                    ? "run"
+                    : "walk"
+                  : "idle";
+              const toIdle = () => {
+                ud.idleAction.enabled = true;
+                ud.idleAction.crossFadeFrom(rollAction, 0.2).play();
+              };
+              const toWalk = () => {
+                ud.walkAction.enabled = true;
+                ud.walkAction.crossFadeFrom(rollAction, 0.2).play();
+              };
+              const toRun = () => {
+                ud.runAction.enabled = true;
+                ud.runAction.crossFadeFrom(rollAction, 0.2).play();
+              };
+              const toCrouch = () => {
+                ud.crouchAction.enabled = true;
+                ud.crouchAction.crossFadeFrom(rollAction, 0.2).play();
+              };
+              const toCrouchWalk = () => {
+                ud.crouchWalkAction.enabled = true;
+                ud.crouchWalkAction.crossFadeFrom(rollAction, 0.2).play();
+              };
+              if (targetState === "walk") toWalk();
+              else if (targetState === "run") toRun();
+              else if (targetState === "crouch") toCrouch();
+              else if (targetState === "crouch_walk") toCrouchWalk();
+              else toIdle();
+              ud.lastMoveState = targetState;
+              setTimeout(() => {
+                rollAction.enabled = false;
+              }, 220);
             });
           }
         }
@@ -193,7 +281,9 @@ export function createPlayer(opts) {
     s: false,
     d: false,
     e: false,
+    f: false,
     shift: false,
+    ctrl: false,
     space: false,
     arrowLeft: false,
     arrowRight: false,
@@ -213,6 +303,8 @@ export function createPlayer(opts) {
       e.preventDefault();
     }
     if (e.key === "Shift") keys.shift = true;
+    if (e.key === "Control") keys.ctrl = true;
+    if (e.key === "f" || e.key === "F") keys.f = true;
     if (e.key === " " || e.code === "Space") {
       keys.space = true;
       e.preventDefault();
@@ -238,6 +330,8 @@ export function createPlayer(opts) {
     const k = e.key.toLowerCase();
     if (keys[k] !== undefined) keys[k] = false;
     if (e.key === "Shift") keys.shift = false;
+    if (e.key === "Control") keys.ctrl = false;
+    if (e.key === "f" || e.key === "F") keys.f = false;
     if (e.key === " " || e.code === "Space") keys.space = false;
     if (e.key === "ArrowUp") keys.w = false;
     if (e.key === "ArrowDown") keys.s = false;
@@ -256,7 +350,7 @@ export function createPlayer(opts) {
   renderer.domElement.addEventListener("mousedown", (e) => {
     if (e.button !== 2) return;
     const ud = characterGroup.userData;
-    if (!ud.attackAction || ud.isAttacking) return;
+    if (!ud.attackAction || ud.isAttacking || ud.isRolling) return;
     ud.isAttacking = true;
     ud.preAttackState = ud.lastMoveState || "idle";
     ud.attackAction.stop();
@@ -269,7 +363,11 @@ export function createPlayer(opts) {
           ? ud.walkAction
           : ud.preAttackState === "jump"
             ? ud.jumpAction
-            : ud.idleAction;
+            : ud.preAttackState === "crouch"
+              ? ud.crouchAction
+              : ud.preAttackState === "crouch_walk"
+                ? ud.crouchWalkAction
+                : ud.idleAction;
     ud.attackAction.crossFadeFrom(from, 0.1).play();
   });
   document.addEventListener("mousemove", (e) => {
@@ -289,6 +387,40 @@ export function createPlayer(opts) {
     state.moveDir.set(0, 0, 0);
     let desiredDx = 0;
     let desiredDz = 0;
+    const groundYForCrouch =
+      sampleHeight(charPos.x, charPos.z) + capHalfH + capR;
+    const onGroundForCrouch = charPos.y <= groundYForCrouch + 0.6;
+    const ud = characterGroup.userData;
+    if (
+      keys.f &&
+      ud &&
+      ud.rollAction &&
+      !ud.isRolling &&
+      !ud.isAttacking &&
+      onGroundForCrouch
+    ) {
+      keys.f = false;
+      ud.isRolling = true;
+      ud.preRollState = ud.lastMoveState || "idle";
+      ud.rollStartTime = performance.now();
+      ud.rollDuration = ud.rollAction.getClip().duration || 1;
+      const from =
+        ud.preRollState === "run"
+          ? ud.runAction
+          : ud.preRollState === "walk"
+            ? ud.walkAction
+            : ud.preRollState === "crouch"
+              ? ud.crouchAction
+              : ud.preRollState === "crouch_walk"
+                ? ud.crouchWalkAction
+                : ud.preRollState === "jump"
+                  ? ud.jumpAction
+                  : ud.idleAction;
+      ud.rollAction.stop();
+      ud.rollAction.time = 0;
+      ud.rollAction.enabled = true;
+      ud.rollAction.crossFadeFrom(from, 0.1).play();
+    }
     if (keys.w) state.moveDir.z -= 1;
     if (keys.s) state.moveDir.z += 1;
     if (keys.a) state.moveDir.x -= 1;
@@ -303,9 +435,21 @@ export function createPlayer(opts) {
       const rightZ = -sinY;
       const mx = state.moveDir.x * rightX - state.moveDir.z * forwardX;
       const mz = state.moveDir.x * rightZ - state.moveDir.z * forwardZ;
-      const speedMult = keys.shift ? PARAMS.runSpeedMultiplier : 1;
+      const speedMult =
+        keys.ctrl && onGroundForCrouch
+          ? (PARAMS.crouchSpeedMultiplier ?? 0.5)
+          : keys.shift
+            ? PARAMS.runSpeedMultiplier
+            : 1;
       desiredDx = mx * PARAMS.playerSpeed * speedMult * dt;
       desiredDz = mz * PARAMS.playerSpeed * speedMult * dt;
+    }
+    if (ud && ud.isRolling && ud.rollDuration > 0) {
+      const rollSpeed = (PARAMS.rollDashDistance ?? 8) / ud.rollDuration;
+      const sinY = Math.sin(state.camYaw);
+      const cosY = Math.cos(state.camYaw);
+      desiredDx += sinY * rollSpeed * dt;
+      desiredDz += cosY * rollSpeed * dt;
     }
     const hb = TERRAIN_SIZE * 0.48;
     const nextX = Math.max(-hb, Math.min(hb, charPos.x + desiredDx));
@@ -367,21 +511,28 @@ export function createPlayer(opts) {
     capsule.visible = characterGroup.children.length === 0;
     const moving = state.moveDir.length() > 0;
     const running = moving && keys.shift;
+    const crouching = keys.ctrl && !inAir;
     const moveState = inAir
       ? "jump"
-      : moving
-        ? running
-          ? "run"
-          : "walk"
-        : "idle";
-    const ud = characterGroup.userData;
+      : crouching
+        ? moving
+          ? "crouch_walk"
+          : "crouch"
+        : moving
+          ? running
+            ? "run"
+            : "walk"
+          : "idle";
     if (
       ud &&
       ud.idleAction &&
       ud.walkAction &&
       ud.runAction &&
       ud.jumpAction &&
-      !ud.isAttacking
+      ud.crouchAction &&
+      ud.crouchWalkAction &&
+      !ud.isAttacking &&
+      !ud.isRolling
     ) {
       const skipT = 0.4;
       const last = ud.lastMoveState;
@@ -406,17 +557,59 @@ export function createPlayer(opts) {
           ud.jumpAction.enabled = true;
           ud.jumpAction.crossFadeFrom(from, 0.15).play();
         };
+        const toCrouch = (from) => {
+          if (ud.crouchAction.time < skipT) ud.crouchAction.time = skipT;
+          ud.crouchAction.enabled = true;
+          ud.crouchAction.crossFadeFrom(from, 0.2).play();
+        };
+        const toCrouchWalk = (from) => {
+          if (ud.crouchWalkAction.time < skipT) ud.crouchWalkAction.time = skipT;
+          ud.crouchWalkAction.enabled = true;
+          ud.crouchWalkAction.crossFadeFrom(from, 0.2).play();
+        };
         if (moveState === "jump") {
           toJump(
             last === "idle"
               ? ud.idleAction
               : last === "run"
                 ? ud.runAction
-                : ud.walkAction,
+                : last === "crouch"
+                  ? ud.crouchAction
+                  : last === "crouch_walk"
+                    ? ud.crouchWalkAction
+                    : ud.walkAction,
           );
+        } else if (moveState === "crouch") {
+          if (last === "idle") toCrouch(ud.idleAction);
+          else if (last === "walk") toCrouch(ud.walkAction);
+          else if (last === "run") toCrouch(ud.runAction);
+          else if (last === "jump") toCrouch(ud.jumpAction);
+          else if (last === "crouch_walk") {
+            if (ud.crouchAction.time < skipT) ud.crouchAction.time = skipT;
+            ud.crouchAction.enabled = true;
+            ud.crouchAction.crossFadeFrom(ud.crouchWalkAction, 0.2).play();
+          }
+        } else if (moveState === "crouch_walk") {
+          if (last === "idle") toCrouchWalk(ud.idleAction);
+          else if (last === "walk") toCrouchWalk(ud.walkAction);
+          else if (last === "run") toCrouchWalk(ud.runAction);
+          else if (last === "jump") toCrouchWalk(ud.jumpAction);
+          else if (last === "crouch") {
+            if (ud.crouchWalkAction.time < skipT) ud.crouchWalkAction.time = skipT;
+            ud.crouchWalkAction.enabled = true;
+            ud.crouchWalkAction.crossFadeFrom(ud.crouchAction, 0.2).play();
+          }
         } else if (moveState === "walk") {
           if (last === "idle") toWalk();
-          else if (last === "run") {
+          else if (last === "crouch") {
+            if (ud.walkAction.time < skipT) ud.walkAction.time = skipT;
+            ud.walkAction.enabled = true;
+            ud.walkAction.crossFadeFrom(ud.crouchAction, 0.2).play();
+          } else if (last === "crouch_walk") {
+            if (ud.walkAction.time < skipT) ud.walkAction.time = skipT;
+            ud.walkAction.enabled = true;
+            ud.walkAction.crossFadeFrom(ud.crouchWalkAction, 0.2).play();
+          } else if (last === "run") {
             if (ud.walkAction.time < skipT) ud.walkAction.time = skipT;
             ud.walkAction.enabled = true;
             ud.walkAction.crossFadeFrom(ud.runAction, 0.2).play();
@@ -427,7 +620,15 @@ export function createPlayer(opts) {
           }
         } else if (moveState === "run") {
           if (last === "idle") toRun();
-          else if (last === "walk") {
+          else if (last === "crouch") {
+            if (ud.runAction.time < skipT) ud.runAction.time = skipT;
+            ud.runAction.enabled = true;
+            ud.runAction.crossFadeFrom(ud.crouchAction, 0.2).play();
+          } else if (last === "crouch_walk") {
+            if (ud.runAction.time < skipT) ud.runAction.time = skipT;
+            ud.runAction.enabled = true;
+            ud.runAction.crossFadeFrom(ud.crouchWalkAction, 0.2).play();
+          } else if (last === "walk") {
             if (ud.runAction.time < skipT) ud.runAction.time = skipT;
             ud.runAction.enabled = true;
             ud.runAction.crossFadeFrom(ud.walkAction, 0.2).play();
@@ -442,7 +643,11 @@ export function createPlayer(opts) {
               ? ud.jumpAction
               : last === "run"
                 ? ud.runAction
-                : ud.walkAction,
+                : last === "crouch"
+                  ? ud.crouchAction
+                  : last === "crouch_walk"
+                    ? ud.crouchWalkAction
+                    : ud.walkAction,
           );
         }
         ud.lastMoveState = moveState;
@@ -470,6 +675,12 @@ export function createPlayer(opts) {
         } else if (from === "run") {
           ud.runAction.enabled = true;
           ud.runAction.crossFadeFrom(ud.attackAction, 0.15).play();
+        } else if (from === "crouch") {
+          ud.crouchAction.enabled = true;
+          ud.crouchAction.crossFadeFrom(ud.attackAction, 0.15).play();
+        } else if (from === "crouch_walk") {
+          ud.crouchWalkAction.enabled = true;
+          ud.crouchWalkAction.crossFadeFrom(ud.attackAction, 0.15).play();
         } else {
           ud.idleAction.enabled = true;
           ud.idleAction.crossFadeFrom(ud.attackAction, 0.15).play();

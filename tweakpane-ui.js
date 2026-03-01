@@ -57,6 +57,12 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
     step: 1,
     label: "dense ring size (1=3×3 … 6=13×13 patches)",
   });
+  fShape.addBinding(PARAMS, "nearFadeRange", {
+    min: 1,
+    max: 20,
+    step: 1,
+    label: "near ring fade width (world units)",
+  });
   fShape.addBinding(PARAMS, "grassBladesRegular", {
     min: 0.2,
     max: 1,
@@ -198,6 +204,18 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
     max: 2.5,
     step: 0.05,
     label: "run speed ×",
+  });
+  fPlayer.addBinding(PARAMS, "crouchSpeedMultiplier", {
+    min: 0.2,
+    max: 1,
+    step: 0.05,
+    label: "crouch speed ×",
+  });
+  fPlayer.addBinding(PARAMS, "rollDashDistance", {
+    min: 1,
+    max: 10,
+    step: 0.5,
+    label: "roll dash",
   });
   fPlayer.addBinding(PARAMS, "jumpSpeed", {
     min: 3,
@@ -616,7 +634,11 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
   });
   fScene.addBinding(PARAMS, "showTrees", { label: "Trees" });
   fScene.addBinding(PARAMS, "showFluffyTree", { label: "Fluffy Tree" });
-  fScene.addBinding(PARAMS, "showCastle", { label: "Castle" });
+  fScene
+    .addBinding(PARAMS, "showCastle", { label: "Castle" })
+    .on("change", () => {
+      if (PARAMS.showCastle && ctx.ensureCastleCreated) ctx.ensureCastleCreated();
+    });
 
   const fScatter = pane.addFolder({
     title: "Scatter (rocks)",

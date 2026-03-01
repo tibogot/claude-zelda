@@ -59,12 +59,9 @@ export function createPostProcessOutput(scene, camera, fogUniforms, PARAMS) {
     vec4(uFogColor, 1),
     mul(fogF, sub(1, skyMask)),
   );
-  const bloomPass = bloom(
-    sceneColor,
-    1,
-    0.5,
-    PARAMS.lensflareBloomThreshold,
-  );
+  // Only bloom the sky (far depth) — excludes character, grass, terrain regardless of color
+  const skyOnlyColor = mix(vec4(0, 0, 0, 0), sceneColor, skyMask);
+  const bloomPass = bloom(skyOnlyColor, 1, 0.5, PARAMS.lensflareBloomThreshold);
   const flareThreshold = uniform(0.6);
   const flareGhostAttenuation = uniform(25);
   const flareGhostSpacing = uniform(0.25);

@@ -4,6 +4,7 @@
  */
 import * as THREE from "three";
 import { uniform } from "three/tsl";
+import { NEAR_PATCH_SIZE } from "./grass.js";
 
 function srgbToLinear(hex) {
   const c = new THREE.Color(hex);
@@ -30,6 +31,8 @@ export function createUniforms(PARAMS, TERRAIN_SIZE, NPC_COUNT) {
   const uLodBlendStart = uniform(PARAMS.lodBlendStart);
   const uBladeDensityRegular = uniform(PARAMS.grassBladesRegular);
   const uBladeDensityNear = uniform(PARAMS.grassBladesNear);
+  const uNearFadeEnd = uniform(PARAMS.nearRingExtent * NEAR_PATCH_SIZE);
+  const uNearFadeRange = uniform(PARAMS.nearFadeRange);
   const uBaseColor1 = uniform(srgbToLinear(PARAMS.baseColor1));
   const uBaseColor2 = uniform(srgbToLinear(PARAMS.baseColor2));
   const uTipColor1 = uniform(srgbToLinear(PARAMS.tipColor1));
@@ -119,6 +122,8 @@ export function createUniforms(PARAMS, TERRAIN_SIZE, NPC_COUNT) {
     uLodBlendStart,
     uBladeDensityRegular,
     uBladeDensityNear,
+    uNearFadeEnd,
+    uNearFadeRange,
     uBaseColor1,
     uBaseColor2,
     uTipColor1,
@@ -212,6 +217,8 @@ export function createSyncUniforms(u, deps, lastState) {
     u.uLodBlendStart.value = PARAMS.lodBlendStart;
     u.uBladeDensityRegular.value = PARAMS.grassBladesRegular;
     u.uBladeDensityNear.value = PARAMS.grassBladesNear;
+    u.uNearFadeEnd.value = PARAMS.nearRingExtent * NEAR_PATCH_SIZE;
+    u.uNearFadeRange.value = PARAMS.nearFadeRange;
     u.uBaseColor1.value.copy(srgbToLinear(PARAMS.baseColor1));
     u.uBaseColor2.value.copy(srgbToLinear(PARAMS.baseColor2));
     u.uTipColor1.value.copy(srgbToLinear(PARAMS.tipColor1));
