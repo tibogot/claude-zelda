@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Parkour Scene</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #000;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        z-index: 10;
+        font:
+          12px/1.5 "SF Mono",
+          "Fira Code",
+          monospace;
+        color: #b0d890;
+        background: rgba(0, 0, 0, 0.55);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: none;
+        user-select: none;
+        backdrop-filter: blur(4px);
+      }
+      #info span {
+        color: #e0f0c0;
+        font-weight: 600;
+      }
+      .tp-dfwv {
+        z-index: 20 !important;
+        max-height: 90vh !important;
+        overflow-y: auto !important;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">
+      Parkour &mdash; <span id="backend">loading…</span> &bull;
+      <span id="stats">—</span> &bull; WASD + click to look &bull; Shift run
+      &bull; Ctrl crouch &bull; F roll &bull; Space jump
+    </div>
+
+    <script type="module">
+      const Tweakpane =
+        await import("https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/dist/tweakpane.min.js");
+
+      import * as THREE from "three";
+      import { pass } from "three/tsl";
+      import Stats from "stats-gl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+      import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
+      import RAPIER from "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.19.3/+esm";
+      import {
+        createPhysicsWorld,
+        createPlayerController,
+        createPhysicsDebug,
+      } from "./physics.js";
+      import { createPlayer } from "./player.js";
+      import { PARAMS } from "./params.js";
+      import { PI } from "./constants.js";
+      import { createTileMaterial } from "./tileMaterial.js";
+
+      const PARKOUR_SIZE = 800;
+
+      // Floor surface height — parkour ground sits on top of createPhysicsWorld's default ground
+      const FLOOR_Y = 1;
+
+      const parkourParams = {
+        tile: {
+          textureScale: 1500,
+          gradientIntensity: 0.5,
+          gradientBias: 0.1,
+          tileColor: "#d4d4d4",
+          gridColor: "#707070",
+          gridLineColor: "#404040",
+          roughness: 1,
+          metalness: 0,
+        },
+        ground: {
+          planeSize: 800,
+        },
+      };
+
+      function srgbToLinear(hex) {
+        const c = new THREE.Color(hex);
+        c.convertSRGBToLinear();
+        return c;
+      }
+
+      // Flat terrain: sampleHeight returns floor height for player ground checks
+      const sampleHeight = () => FLOOR_Y;
+
+      async function init() {
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        await renderer.init();
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 0.5;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+        document.getElementById("backend").textContent =
+          renderer.backend?.constructor?.name?.includes("WebGPU")
+            ? "WebGPU ✓"
+            : "WebGL fallback";
+
+        const stats = new Stats({ trackGPU: false });
+        stats.init(renderer);
+        document.body.appendChild(stats.dom);
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(
+          60,
+          innerWidth / innerHeight,
+          0.5,
+          1000
+        );
+        camera.position.set(0, 4, 12);
+
+        const orbitControls = new OrbitControls(camera, renderer.domElement);
+        orbitControls.target.set(0, 2, 0);
+        orbitControls.maxPolarAngle = PI * 0.48;
+        orbitControls.enableDamping = true;
+        orbitControls.dampingFactor = 0.05;
+        orbitControls.enabled = false;
+        orbitControls.update();
+
+        // ── LIGHTING ──
+        const dirLight = new THREE.DirectionalLight(0xfff5e0, 2.2);
+        dirLight.position.copy(
+          new THREE.Vector3(-1, 1.2, 1).normalize().multiplyScalar(50)
+        );
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.width = 2048;
+        dirLight.shadow.mapSize.height = 2048;
+        dirLight.shadow.camera.near = 1;
+        dirLight.shadow.camera.far = 200;
+        dirLight.shadow.camera.left = -80;
+        dirLight.shadow.camera.right = 80;
+        dirLight.shadow.camera.top = 80;
+        dirLight.shadow.camera.bottom = -80;
+        dirLight.shadow.bias = -0.001;
+        dirLight.shadow.normalBias = 0.05;
+
+        const csm = new CSMShadowNode(dirLight, {
+          cascades: 3,
+          maxFar: 200,
+          mode: "practical",
+          lightMargin: 250,
+        });
+
+        csm._updateShadowBounds = function () {
+          for (let i = 0; i < this.frustums.length; i++) {
+            const shadowCam = this.lights[i].shadow.camera;
+            const frustum = this.frustums[i];
+            const nv = frustum.vertices.near;
+            const fv = frustum.vertices.far;
+            const d1 = fv[0].distanceTo(fv[2]);
+            const d2 = fv[0].distanceTo(nv[2]);
+            const sphereRadius = Math.max(60, Math.max(d1, d2) / 2);
+            const ext = sphereRadius * 2;
+            shadowCam.left = -ext / 2;
+            shadowCam.right = ext / 2;
+            shadowCam.top = ext / 2;
+            shadowCam.bottom = -ext / 2;
+            shadowCam.updateProjectionMatrix();
+          }
+        };
+
+        const _csmCenter = new THREE.Vector3();
+        const _csmLightTarget = new THREE.Vector3();
+        const _csmLightPos = new THREE.Vector3();
+        const _csmLightDir = new THREE.Vector3();
+        const origUpdateBefore = csm.updateBefore.bind(csm);
+        csm.updateBefore = function () {
+          origUpdateBefore();
+          const cam = this.camera;
+          if (!cam || !cam.matrixWorld) return;
+          cam.getWorldPosition(_csmCenter);
+          dirLight.getWorldPosition(_csmLightPos);
+          dirLight.target.getWorldPosition(_csmLightTarget);
+          _csmLightDir.subVectors(_csmLightTarget, _csmLightPos).normalize();
+          for (let i = 0; i < this.lights.length; i++) {
+            const lw = this.lights[i];
+            lw.position.copy(_csmCenter);
+            lw.target.position.copy(_csmCenter).add(_csmLightDir);
+          }
+        };
+
+        dirLight.shadow.shadowNode = csm;
+        scene.add(dirLight);
+
+        const shadowTarget = new THREE.Object3D();
+        shadowTarget.position.set(0, 0, 0);
+        scene.add(shadowTarget);
+        dirLight.target = shadowTarget;
+
+        const hemiLight = new THREE.HemisphereLight(0xc8e0ff, 0x88aa55, 1);
+        scene.add(hemiLight);
+
+        // ── FLAT PLANE TERRAIN ──
+        const floorGeo = new THREE.PlaneGeometry(PARKOUR_SIZE, PARKOUR_SIZE);
+        floorGeo.rotateX(-PI / 2);
+        const floorMat = createTileMaterial({
+          textureScale: parkourParams.tile.textureScale,
+          gradientIntensity: parkourParams.tile.gradientIntensity,
+          gradientBias: parkourParams.tile.gradientBias,
+          tileColor: parkourParams.tile.tileColor,
+          gridColor: parkourParams.tile.gridColor,
+          gridLineColor: parkourParams.tile.gridLineColor,
+          roughness: parkourParams.tile.roughness,
+          metalness: parkourParams.tile.metalness,
+        });
+        const floor = new THREE.Mesh(floorGeo, floorMat);
+        floor.position.y = FLOOR_Y;
+        floor.receiveShadow = true;
+        scene.add(floor);
+
+        // ── TOWER (tile material, casts & receives shadows) ──
+        const towerMat = createTileMaterial({
+          textureScale: parkourParams.tile.textureScale,
+          gradientIntensity: parkourParams.tile.gradientIntensity,
+          gradientBias: parkourParams.tile.gradientBias,
+          tileColor: parkourParams.tile.tileColor,
+          gridColor: parkourParams.tile.gridColor,
+          gridLineColor: parkourParams.tile.gridLineColor,
+          roughness: parkourParams.tile.roughness,
+          metalness: parkourParams.tile.metalness,
+        });
+        const TOWER_X = 40;
+        const TOWER_Z = 40;
+        const TOWER_BASE = 24;
+        const TOWER_HEIGHT = 80;
+        const towerGroup = new THREE.Group();
+        towerGroup.position.set(TOWER_X, FLOOR_Y, TOWER_Z);
+
+        const towerBase = new THREE.Mesh(
+          new THREE.BoxGeometry(TOWER_BASE * 2, TOWER_BASE, TOWER_BASE * 2),
+          towerMat
+        );
+        towerBase.position.y = TOWER_BASE / 2;
+        towerBase.castShadow = true;
+        towerBase.receiveShadow = true;
+        towerGroup.add(towerBase);
+
+        const towerBody = new THREE.Mesh(
+          new THREE.BoxGeometry(TOWER_BASE * 1.6, TOWER_HEIGHT, TOWER_BASE * 1.6),
+          towerMat
+        );
+        towerBody.position.y = TOWER_BASE + TOWER_HEIGHT / 2;
+        towerBody.castShadow = true;
+        towerBody.receiveShadow = true;
+        towerGroup.add(towerBody);
+
+        const towerTop = new THREE.Mesh(
+          new THREE.BoxGeometry(TOWER_BASE * 1.8, TOWER_BASE * 0.8, TOWER_BASE * 1.8),
+          towerMat
+        );
+        towerTop.position.y = TOWER_BASE + TOWER_HEIGHT + TOWER_BASE * 0.4;
+        towerTop.castShadow = true;
+        towerTop.receiveShadow = true;
+        towerGroup.add(towerTop);
+
+        scene.add(towerGroup);
+
+        // ── SKY ──
+        const sky = new SkyMesh();
+        sky.scale.setScalar(10000);
+        scene.add(sky);
+        sky.turbidity.value = 2;
+        sky.rayleigh.value = 1.5;
+        sky.mieCoefficient.value = 0.005;
+        sky.mieDirectionalG.value = 0.8;
+        const sd = new THREE.Vector3(-1, 1.2, 1).normalize();
+        sky.sunPosition.value.copy(sd);
+
+        const pmremGenerator = new THREE.PMREMGenerator(renderer);
+        const skyEnvScene = new THREE.Scene();
+        skyEnvScene.add(sky.clone());
+        scene.environment = pmremGenerator.fromScene(skyEnvScene, 0.04).texture;
+        scene.environmentIntensity = 0.45;
+
+        // ── PHYSICS ──
+        await RAPIER.init({});
+        const { physicsWorld, physicsCubes } = createPhysicsWorld(
+          RAPIER,
+          scene,
+          PARKOUR_SIZE,
+          sampleHeight
+        );
+
+        // Parkour ground: fixed body so floor surface is at FLOOR_Y (top of cuboid)
+        const groundHalfY = 0.5;
+        const groundBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(
+          0,
+          FLOOR_Y - groundHalfY,
+          0
+        );
+        const groundBody = physicsWorld.createRigidBody(groundBodyDesc);
+        physicsWorld.createCollider(
+          RAPIER.ColliderDesc.cuboid(
+            PARKOUR_SIZE * 0.5,
+            groundHalfY,
+            PARKOUR_SIZE * 0.5
+          ),
+          groundBody
+        );
+
+        const towerBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(
+          TOWER_X,
+          FLOOR_Y + TOWER_BASE / 2 + TOWER_HEIGHT / 2 + TOWER_BASE * 0.4,
+          TOWER_Z
+        );
+        const towerBodyPhys = physicsWorld.createRigidBody(towerBodyDesc);
+        physicsWorld.createCollider(
+          RAPIER.ColliderDesc.cuboid(
+            TOWER_BASE * 0.9,
+            (TOWER_BASE + TOWER_HEIGHT + TOWER_BASE * 0.8) / 2,
+            TOWER_BASE * 0.9
+          ),
+          towerBodyPhys
+        );
+
+        // Hide physics cubes for clean parkour (add parkour elements later)
+        physicsCubes.forEach(({ mesh }) => {
+          mesh.visible = false;
+        });
+
+        const { physicsDebugGroup, buildRapierDebugMeshes } = createPhysicsDebug(
+          RAPIER,
+          scene,
+          physicsWorld
+        );
+        physicsDebugGroup.visible = false;
+
+        // ── PLAYER ──
+        const charPos = new THREE.Vector3(0, 0, 0);
+        const capR = PARAMS.capsuleRadius;
+        const capHalfH = Math.max(
+          0.1,
+          (PARAMS.characterHeight - 2 * capR) / 2
+        );
+        charPos.y = FLOOR_Y + capHalfH + capR;
+
+        const { playerBody, playerCollider, characterController } =
+          createPlayerController(RAPIER, physicsWorld, charPos, PARAMS);
+
+        const player = createPlayer({
+          scene,
+          renderer,
+          camera,
+          PARAMS,
+          charPos,
+          playerBody,
+          playerCollider,
+          characterController,
+          physicsWorld,
+          sampleHeight,
+          capR,
+          capHalfH,
+          TERRAIN_SIZE: PARKOUR_SIZE,
+        });
+
+        // ── TWEAKPANE CONTROLS ──
+        const pane = new Tweakpane.Pane({ title: "Parkour", expanded: true });
+
+        const tileFolder = pane.addFolder({ title: "Tile Material", expanded: true });
+        tileFolder.addBinding(parkourParams.tile, "textureScale", {
+          min: 1,
+          max: 3000,
+          step: 1,
+          label: "scale",
+        });
+        tileFolder.addBinding(parkourParams.tile, "gradientIntensity", {
+          min: 0,
+          max: 2,
+          step: 0.01,
+        });
+        tileFolder.addBinding(parkourParams.tile, "gradientBias", {
+          min: -0.5,
+          max: 0.5,
+          step: 0.01,
+        });
+        tileFolder.addBinding(parkourParams.tile, "tileColor", {
+          view: "color",
+          label: "tile",
+        });
+        tileFolder.addBinding(parkourParams.tile, "gridColor", {
+          view: "color",
+          label: "grid",
+        });
+        tileFolder.addBinding(parkourParams.tile, "gridLineColor", {
+          view: "color",
+          label: "lines",
+        });
+        tileFolder.addBinding(parkourParams.tile, "roughness", {
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+        tileFolder.addBinding(parkourParams.tile, "metalness", {
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+
+        const groundFolder = pane.addFolder({ title: "Ground", expanded: true });
+        groundFolder.addBinding(parkourParams.ground, "planeSize", {
+          min: 100,
+          max: 1500,
+          step: 50,
+        });
+
+        // ── RENDER PIPELINE ──
+        const renderPipeline = new THREE.RenderPipeline(renderer);
+        renderPipeline.outputNode = pass(scene, camera);
+
+        await renderer.compileAsync(scene, camera);
+        csm.camera = camera;
+        csm.updateFrustums();
+
+        const timer = new THREE.Timer();
+        let lastTime = 0;
+
+        renderer.setAnimationLoop(() => {
+          timer.update();
+          const elapsed = timer.getElapsed();
+          const dt = Math.min(elapsed - lastTime, 0.05);
+          lastTime = elapsed;
+
+          player.update(dt);
+
+          const syncTileMat = (mat) => {
+            const u = mat._tileUniforms;
+            if (u) {
+              u.textureScale.value = parkourParams.tile.textureScale;
+              u.gradientIntensity.value = parkourParams.tile.gradientIntensity;
+              u.gradientBias.value = parkourParams.tile.gradientBias;
+              u.tileColor.value.copy(srgbToLinear(parkourParams.tile.tileColor));
+              u.gridColor.value.copy(srgbToLinear(parkourParams.tile.gridColor));
+              u.gridLineColor.value.copy(
+                srgbToLinear(parkourParams.tile.gridLineColor)
+              );
+              mat.roughness = parkourParams.tile.roughness;
+              mat.metalness = parkourParams.tile.metalness;
+            }
+          };
+          syncTileMat(floorMat);
+          syncTileMat(towerMat);
+
+          const scale = parkourParams.ground.planeSize / PARKOUR_SIZE;
+          floor.scale.set(scale, 1, scale);
+
+          if (PARAMS.cameraMode === "thirdPerson") {
+            const camDist = PARAMS.camDist;
+            const cx =
+              charPos.x -
+              Math.sin(player.state.camYaw) *
+                Math.cos(player.state.camPitch) *
+                camDist;
+            const cy =
+              charPos.y +
+              Math.sin(player.state.camPitch) * camDist +
+              PARAMS.camHeight;
+            const cz =
+              charPos.z -
+              Math.cos(player.state.camYaw) *
+                Math.cos(player.state.camPitch) *
+                camDist;
+            camera.position.set(cx, Math.max(cy, FLOOR_Y + 1.5), cz);
+            camera.lookAt(charPos.x, charPos.y + 0.5, charPos.z);
+            orbitControls.enabled = false;
+          } else {
+            orbitControls.enabled = true;
+            orbitControls.update();
+          }
+
+          camera.updateMatrixWorld();
+          if (csm.frustums) csm.updateFrustums();
+          renderPipeline.render();
+          stats.update();
+        });
+
+        window.addEventListener("resize", () => {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(innerWidth, innerHeight);
+          if (csm.frustums) csm.updateFrustums();
+        });
+      }
+
+      init().catch((e) => {
+        console.error("Init failed:", e);
+        document.getElementById("backend").textContent =
+          "Error: " + e.message;
+      });
+    </script>
+  </body>
+</html>
