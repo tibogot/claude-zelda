@@ -117,6 +117,7 @@ export function createUniforms(PARAMS, TERRAIN_SIZE, NPC_COUNT) {
   const uSusukiBandWidth = uniform(PARAMS.susukiBandWidth);
   const uSusukiPlumeStart = uniform(PARAMS.susukiPlumeStart);
   const uSusukiPlumeFlex = uniform(PARAMS.susukiPlumeFlex);
+  const uSusukiPlumeSoftEdge = uniform(PARAMS.susukiPlumeSoftEdge);
   const uSusukiStemColor = uniform(srgbToLinear(PARAMS.susukiStemColor));
   const uSusukiPlumeColor = uniform(srgbToLinear(PARAMS.susukiPlumeColor));
 
@@ -192,6 +193,7 @@ export function createUniforms(PARAMS, TERRAIN_SIZE, NPC_COUNT) {
     uSusukiBandWidth,
     uSusukiPlumeStart,
     uSusukiPlumeFlex,
+    uSusukiPlumeSoftEdge,
     uSusukiStemColor,
     uSusukiPlumeColor,
   };
@@ -276,6 +278,7 @@ export function createSyncUniforms(u, deps, lastState) {
     u.uSusukiBandWidth.value = PARAMS.susukiBandWidth;
     u.uSusukiPlumeStart.value = PARAMS.susukiPlumeStart;
     u.uSusukiPlumeFlex.value = PARAMS.susukiPlumeFlex;
+    u.uSusukiPlumeSoftEdge.value = PARAMS.susukiPlumeSoftEdge;
     u.uSusukiStemColor.value.copy(srgbToLinear(PARAMS.susukiStemColor));
     u.uSusukiPlumeColor.value.copy(srgbToLinear(PARAMS.susukiPlumeColor));
     u.uInteractionRange.value = PARAMS.interactionEnabled

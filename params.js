@@ -33,6 +33,7 @@ export const PARAMS = {
   susukiBandWidth: 0.06,
   susukiPlumeStart: 0.6,
   susukiPlumeFlex: 0.2,
+  susukiPlumeSoftEdge: 0,
   susukiStemColor: "#2d5a1f",
   susukiPlumeColor: "#ffffff",
   susukiLodDistance: 18,

@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Volumetric Haze — Ground Mist</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1a1a2e; overflow: hidden; font-family: "SF Mono", "Fira Code", monospace; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #info {
+      position: fixed; bottom: 12px; left: 12px; z-index: 20;
+      background: rgba(0,0,0,0.6); color: #b0d890;
+      padding: 8px 12px; border-radius: 6px; font-size: 11px; line-height: 1.6;
+    }
+    #info span { color: #e0f0c0; font-weight: 600; }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+      "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+      "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+<div id="info">
+  <span>Volumetric Haze</span> — Ground mist (Ghost of Tsushima style)<br>
+  Orbit: <span>left-drag</span> &nbsp; Zoom: <span>scroll</span>
+</div>
+
+<script type="module">
+import * as THREE from 'three/webgpu';
+import { color, fog, float, positionWorld, triNoise3D, positionView, normalWorld, uniform } from 'three/tsl';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import GUI from 'three/addons/libs/lil-gui.module.min.js';
+
+let camera, scene, renderer, controls;
+
+init();
+
+function init() {
+  camera = new THREE.PerspectiveCamera( 50, window.innerWidth / window.innerHeight, 0.5, 800 );
+  camera.position.set( 80, 25, 80 );
+
+  scene = new THREE.Scene();
+
+  // ─── Custom volumetric ground haze (TSL) ───────────────────────────────────
+  const skyColorValue = 0xc8d8e8;
+  const groundColorValue = 0xe8e4d8;
+  const hazeColorValue = 0xf5f5f0;
+
+  const skyColor = color( skyColorValue );
+  const groundColor = color( groundColorValue );
+  const hazeColor = color( hazeColorValue );
+
+  // Distance-based fog falloff (view-space depth)
+  const fogNoiseDistance = positionView.z.negate().smoothstep( 0, camera.far - 200 );
+  const distance = fogNoiseDistance.mul( 35 ).max( 6 );
+
+  // Ground-hugging fog: denser near y=0, fades upward (cubic falloff)
+  const alpha = 0.92;
+  const groundFogArea = float( distance ).sub( positionWorld.y ).div( distance ).pow( 2.5 ).saturate().mul( alpha );
+
+  const timer = uniform( 0 ).onFrameUpdate( ( frame ) => frame.time );
+
+  // Layered procedural noise for patchy, rolling mist
+  const fogNoiseA = triNoise3D( positionWorld.mul( 0.004 ), 0.25, timer );
+  const fogNoiseB = triNoise3D( positionWorld.mul( 0.008 ), 0.2, timer.mul( 1.3 ) );
+  const fogNoise = fogNoiseA.add( fogNoiseB ).mul( hazeColor );
+
+  scene.fogNode = fog( fogNoiseDistance.oneMinus().mix( groundColor, fogNoise ), groundFogArea );
+  scene.backgroundNode = normalWorld.y.max( 0 ).mix( groundColor, skyColor );
+
+  // ─── Terrain (simple plane) ───────────────────────────────────────────────
+  const planeGeo = new THREE.PlaneGeometry( 400, 400, 64, 64 );
+  const vertices = planeGeo.attributes.position.array;
+  for ( let i = 0; i < vertices.length; i += 3 ) {
+    const x = vertices[ i ], z = vertices[ i + 1 ];
+    vertices[ i + 1 ] = ( Math.sin( x * 0.02 ) * Math.cos( z * 0.02 ) * 8 ) +
+      ( Math.sin( x * 0.05 + 1 ) * Math.cos( z * 0.05 ) * 3 );
+  }
+  planeGeo.computeVertexNormals();
+
+  const terrainMat = new THREE.MeshStandardNodeMaterial( {
+    color: 0x4a6b3a,
+    roughness: 0.9,
+    metalness: 0.05,
+  } );
+  const terrain = new THREE.Mesh( planeGeo, terrainMat );
+  terrain.rotation.x = - Math.PI / 2;
+  terrain.receiveShadow = true;
+  scene.add( terrain );
+
+  // ─── Simple trees (cones as placeholders) ─────────────────────────────────
+  const treeGeo = new THREE.ConeGeometry( 2, 12, 6 );
+  const treeMat = new THREE.MeshStandardNodeMaterial( { color: 0x2d5a1f, roughness: 0.95 } );
+  const trunkMat = new THREE.MeshStandardNodeMaterial( { color: 0x4a3728, roughness: 0.9 } );
+  const trunkGeo = new THREE.CylinderGeometry( 0.5, 0.7, 4, 6 );
+
+  for ( let i = 0; i < 80; i++ ) {
+    const g = new THREE.Group();
+    const x = ( Math.random() - 0.5 ) * 350;
+    const z = ( Math.random() - 0.5 ) * 350;
+    g.position.set( x, 0, z );
+    const trunk = new THREE.Mesh( trunkGeo, trunkMat );
+    trunk.position.y = 2;
+    trunk.scale.setScalar( 0.8 + Math.random() * 0.4 );
+    g.add( trunk );
+    const crown = new THREE.Mesh( treeGeo, treeMat );
+    crown.position.y = 8;
+    crown.scale.set( 1.2 + Math.random() * 0.6, 1, 1.2 + Math.random() * 0.6 );
+    g.add( crown );
+    scene.add( g );
+  }
+
+  // ─── Lights ──────────────────────────────────────────────────────────────
+  const hemi = new THREE.HemisphereLight( 0xc8d8e8, 0x8b9a7a, 0.6 );
+  scene.add( hemi );
+  const dir = new THREE.DirectionalLight( 0xf5f0e0, 1.2 );
+  dir.position.set( 80, 120, 60 );
+  dir.castShadow = true;
+  dir.shadow.mapSize.set( 1024, 1024 );
+  dir.shadow.camera.near = 1;
+  dir.shadow.camera.far = 400;
+  dir.shadow.camera.left = -120;
+  dir.shadow.camera.right = 120;
+  dir.shadow.camera.top = 120;
+  dir.shadow.camera.bottom = -120;
+  scene.add( dir );
+
+  // ─── Renderer ─────────────────────────────────────────────────────────────
+  renderer = new THREE.WebGPURenderer( { antialias: true } );
+  renderer.setPixelRatio( window.devicePixelRatio );
+  renderer.setSize( window.innerWidth, window.innerHeight );
+  renderer.setAnimationLoop( animate );
+  document.body.appendChild( renderer.domElement );
+
+  controls = new OrbitControls( camera, renderer.domElement );
+  controls.target.set( 0, 5, 0 );
+  controls.minDistance = 20;
+  controls.maxDistance = 250;
+  controls.maxPolarAngle = Math.PI / 2 - 0.1;
+  controls.autoRotate = true;
+  controls.autoRotateSpeed = 0.15;
+  controls.update();
+
+  // ─── GUI ──────────────────────────────────────────────────────────────────
+  const gui = new GUI( { title: 'Haze' } );
+  gui.add( controls, 'autoRotate' ).name( 'Auto rotate' );
+  gui.add( controls, 'autoRotateSpeed', 0, 0.5, 0.01 ).name( 'Rotate speed' );
+
+  window.addEventListener( 'resize', onResize );
+}
+
+function onResize() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize( window.innerWidth, window.innerHeight );
+}
+
+function animate() {
+  controls.update();
+  renderer.render( scene, camera );
+}
+</script>
+</body>
+</html>

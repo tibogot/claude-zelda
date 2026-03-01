@@ -446,6 +446,7 @@ export function createSusukiBandMaterial(segments, verts, ctx) {
     uStemHeight,
     uPlumeStart,
     uSusukiPlumeFlex = float(0.2),
+    uSusukiPlumeSoftEdge = float(0),
     uTrailCenter = uniform(new THREE.Vector2(9999, 9999)),
     uPlayerPos = uniform(new THREE.Vector3(9999, 0, 9999)),
     uInteractionRange = uniform(9999),
@@ -488,6 +489,7 @@ export function createSusukiBandMaterial(segments, verts, ctx) {
   const vColor = varying(vec3(0), "v_col");
   const vPacked = varying(vec3(0), "v_pk");
   const vWorldPos = varying(vec3(0), "v_wp");
+  const vEdgeFade = varying(float(1), "v_ef");
 
   const positionNode = Fn(() => {
     const offsetAttr = attribute("offset", "vec3"),
@@ -522,6 +524,12 @@ export function createSusukiBandMaterial(segments, verts, ctx) {
     const totalWidth = uBandWidth;
     const x = mul(sub(xSide, 0.5), totalWidth);
     const y = mul(heightPct, bandLength);
+
+    const tipFade = sub(
+      1,
+      mul(uSusukiPlumeSoftEdge, smoothstep(0.5, 0.95, heightPct)),
+    );
+    vEdgeFade.assign(tipFade);
 
     const windDirVec = vec2(uWindDirX, uWindDirZ);
     const windScroll = mul(windDirVec, mul(uTime, uWindSpeed));
@@ -724,9 +732,13 @@ export function createSusukiBandMaterial(segments, verts, ctx) {
     side: THREE.DoubleSide,
     roughness: 0.85,
     metalness: 0,
+    transparent: true,
+    alphaTest: 0.05,
+    depthWrite: true,
   });
   mat.positionNode = positionNode;
   mat.colorNode = colorNode;
+  mat.alphaNode = vEdgeFade;
   mat.envMapIntensity = 0;
   return mat;
 }

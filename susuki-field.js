@@ -29,6 +29,7 @@ export const SUSUKI_FIELD_PARAMS = {
   bandWidth: 0.06,
   plumeStart: 0.6,
   plumeFlex: 0.2,
+  plumeSoftEdge: 0,
   windDir: 0.7,
   windWaveScale: 0.08,
   windSpeed: 1.2,
@@ -68,6 +69,7 @@ export function buildSusukiCtx(opts) {
     uBandWidth: uniforms.uSusukiBandWidth ?? uniform(params.bandWidth),
     uPlumeStart: uniforms.uSusukiPlumeStart ?? uniform(params.plumeStart),
     uSusukiPlumeFlex: uniforms.uSusukiPlumeFlex ?? uniform(params.plumeFlex ?? 0.2),
+    uSusukiPlumeSoftEdge: uniforms.uSusukiPlumeSoftEdge ?? uniform(params.plumeSoftEdge ?? 0),
     uWindDirX: uniforms.uWindDirX ?? uniform(wd),
     uWindDirZ: uniforms.uWindDirZ ?? uniform(wz),
     uWindAxis:

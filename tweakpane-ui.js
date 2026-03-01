@@ -112,6 +112,12 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
     step: 0.1,
     label: "plume wind flex (0=like grass, 1.8=dramatic)",
   });
+  fSusuki.addBinding(PARAMS, "susukiPlumeSoftEdge", {
+    min: 0,
+    max: 1,
+    step: 0.05,
+    label: "plume soft tip (0=sharp, 1=fades at tip)",
+  });
   fSusuki.addBinding(PARAMS, "susukiStemColor", {
     view: "color",
     label: "stem color",
