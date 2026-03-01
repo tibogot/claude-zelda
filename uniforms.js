@@ -111,6 +111,14 @@ export function createUniforms(PARAMS, TERRAIN_SIZE, NPC_COUNT) {
   const uTerrainSize = uniform(TERRAIN_SIZE);
   const uTrailCenter = uniform(new THREE.Vector2());
   const uTrailSize = uniform(60);
+  // Susuki (pampas grass) — wind shared with grass via uWind* above
+  const uSusukiStemHeight = uniform(PARAMS.susukiStemHeight);
+  const uSusukiStemWidth = uniform(PARAMS.susukiStemWidth);
+  const uSusukiBandWidth = uniform(PARAMS.susukiBandWidth);
+  const uSusukiPlumeStart = uniform(PARAMS.susukiPlumeStart);
+  const uSusukiPlumeFlex = uniform(PARAMS.susukiPlumeFlex);
+  const uSusukiStemColor = uniform(srgbToLinear(PARAMS.susukiStemColor));
+  const uSusukiPlumeColor = uniform(srgbToLinear(PARAMS.susukiPlumeColor));
 
   return {
     uTime,
@@ -179,6 +187,13 @@ export function createUniforms(PARAMS, TERRAIN_SIZE, NPC_COUNT) {
     uTerrainSize,
     uTrailCenter,
     uTrailSize,
+    uSusukiStemHeight,
+    uSusukiStemWidth,
+    uSusukiBandWidth,
+    uSusukiPlumeStart,
+    uSusukiPlumeFlex,
+    uSusukiStemColor,
+    uSusukiPlumeColor,
   };
 }
 
@@ -256,6 +271,13 @@ export function createSyncUniforms(u, deps, lastState) {
     );
     u.uWindGust.value = PARAMS.windGust;
     u.uWindMicro.value = PARAMS.windMicroSway;
+    u.uSusukiStemHeight.value = PARAMS.susukiStemHeight;
+    u.uSusukiStemWidth.value = PARAMS.susukiStemWidth;
+    u.uSusukiBandWidth.value = PARAMS.susukiBandWidth;
+    u.uSusukiPlumeStart.value = PARAMS.susukiPlumeStart;
+    u.uSusukiPlumeFlex.value = PARAMS.susukiPlumeFlex;
+    u.uSusukiStemColor.value.copy(srgbToLinear(PARAMS.susukiStemColor));
+    u.uSusukiPlumeColor.value.copy(srgbToLinear(PARAMS.susukiPlumeColor));
     u.uInteractionRange.value = PARAMS.interactionEnabled
       ? PARAMS.interactionRange
       : 999;

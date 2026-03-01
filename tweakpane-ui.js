@@ -74,6 +74,75 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
     step: 0.05,
     label: "blades near (dense ring, 0–1)",
   });
+
+  const fSusuki = pane.addFolder({
+    title: "Susuki (pampas grass)",
+    expanded: false,
+  });
+  fSusuki.addBinding(PARAMS, "susukiEnabled", { label: "enabled" });
+  fSusuki.addBinding(PARAMS, "susukiStemHeight", {
+    min: 0.3,
+    max: 2,
+    step: 0.05,
+    label: "stem height",
+  });
+  fSusuki.addBinding(PARAMS, "susukiStemWidth", {
+    min: 0.02,
+    max: 0.2,
+    step: 0.01,
+    label: "stem width",
+  });
+  fSusuki.addBinding(PARAMS, "susukiBandWidth", {
+    min: 0.02,
+    max: 0.15,
+    step: 0.01,
+    label: "plume band width",
+  });
+  fSusuki.addBinding(PARAMS, "susukiPlumeStart", {
+    min: 0.3,
+    max: 0.9,
+    step: 0.05,
+    label: "plume start (0–1, stem vs plume)",
+  });
+  fSusuki.addBinding(PARAMS, "susukiPlumeFlex", {
+    min: 0,
+    max: 2,
+    step: 0.1,
+    label: "plume wind flex (0=like grass, 1.8=dramatic)",
+  });
+  fSusuki.addBinding(PARAMS, "susukiStemColor", {
+    view: "color",
+    label: "stem color",
+  });
+  fSusuki.addBinding(PARAMS, "susukiPlumeColor", {
+    view: "color",
+    label: "plume color",
+  });
+  fSusuki.addBinding(PARAMS, "susukiLodDistance", {
+    min: 10,
+    max: 80,
+    step: 1,
+    label: "LOD distance (high-detail radius)",
+  });
+  fSusuki.addBinding(PARAMS, "susukiMaxDistance", {
+    min: 20,
+    max: 150,
+    step: 5,
+    label: "max draw distance (field size)",
+  });
+  fSusuki.addBinding(PARAMS, "susukiGridSize", {
+    min: 4,
+    max: 24,
+    step: 1,
+    label: "grid size (patch count)",
+  });
+  fSusuki.addBinding(PARAMS, "susukiNearRingExtent", {
+    min: 1,
+    max: 6,
+    step: 1,
+    label: "near ring size (dense patches)",
+  });
+
   const fCol = pane.addFolder({ title: "Colors", expanded: false });
   fCol.addBinding(PARAMS, "baseColor1", { view: "color" });
   fCol.addBinding(PARAMS, "baseColor2", { view: "color" });

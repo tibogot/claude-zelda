@@ -24,10 +24,11 @@ export const SUSUKI_PLANTS_PER_PATCH = 12 * 12; // 144 plants per patch
 export const SUSUKI_NEAR_PATCH_SIZE = 10;
 
 export const SUSUKI_FIELD_PARAMS = {
-  stemHeight: 2.5,
-  stemWidth: 0.04,
-  bandWidth: 0.04,
+  stemHeight: 0.7,
+  stemWidth: 0.08,
+  bandWidth: 0.06,
   plumeStart: 0.6,
+  plumeFlex: 0.2,
   windDir: 0.7,
   windWaveScale: 0.08,
   windSpeed: 1.2,
@@ -49,38 +50,39 @@ function hexToVec3(hex) {
 
 /**
  * Build susuki material ctx from uniforms and options.
- * Pass uniforms from your app (uTime, uSunDir, uTerrainSize, etc.) to share with grass/terrain.
- * Susuki-specific params come from SUSUKI_FIELD_PARAMS or override.
+ * Pass uniforms from your app — wind (uWindDirX, uWindDirZ, etc.) is shared with grass.
+ * Susuki-specific: uSusukiStemHeight, uSusukiStemWidth, uSusukiBandWidth, uSusukiPlumeStart, uSusukiStemColor, uSusukiPlumeColor.
  * @param {object} opts - { uniforms, heightTex, params }
  * @returns {object} ctx for createSusukiStemMaterial / createSusukiBandMaterial
  */
 export function buildSusukiCtx(opts) {
   const { uniforms = {}, heightTex, params = SUSUKI_FIELD_PARAMS } = opts;
-  const wd = Math.cos(params.windDir);
-  const wz = Math.sin(params.windDir);
+  const wd = Math.cos(params.windDir ?? 0.7);
+  const wz = Math.sin(params.windDir ?? 0.7);
   return {
     heightTex,
     uTerrainSize: uniforms.uTerrainSize ?? uniform(800),
     uTime: uniforms.uTime ?? uniform(0),
-    uStemHeight: uniforms.uStemHeight ?? uniform(params.stemHeight),
-    uStemWidth: uniforms.uStemWidth ?? uniform(params.stemWidth),
-    uBandWidth: uniforms.uBandWidth ?? uniform(params.bandWidth),
-    uPlumeStart: uniforms.uPlumeStart ?? uniform(params.plumeStart),
+    uStemHeight: uniforms.uSusukiStemHeight ?? uniform(params.stemHeight),
+    uStemWidth: uniforms.uSusukiStemWidth ?? uniform(params.stemWidth),
+    uBandWidth: uniforms.uSusukiBandWidth ?? uniform(params.bandWidth),
+    uPlumeStart: uniforms.uSusukiPlumeStart ?? uniform(params.plumeStart),
+    uSusukiPlumeFlex: uniforms.uSusukiPlumeFlex ?? uniform(params.plumeFlex ?? 0.2),
     uWindDirX: uniforms.uWindDirX ?? uniform(wd),
     uWindDirZ: uniforms.uWindDirZ ?? uniform(wz),
     uWindAxis:
       uniforms.uWindAxis ??
-      uniform(new THREE.Vector3(Math.sin(params.windDir), 0, -Math.cos(params.windDir))),
+      uniform(new THREE.Vector3(Math.sin(params.windDir ?? 0.7), 0, -Math.cos(params.windDir ?? 0.7))),
     uCrossAxis:
       uniforms.uCrossAxis ??
-      uniform(new THREE.Vector3(Math.cos(params.windDir), 0, Math.sin(params.windDir))),
+      uniform(new THREE.Vector3(Math.cos(params.windDir ?? 0.7), 0, Math.sin(params.windDir ?? 0.7))),
     uWindWaveScale: uniforms.uWindWaveScale ?? uniform(params.windWaveScale),
     uWindSpeed: uniforms.uWindSpeed ?? uniform(params.windSpeed),
     uWindStr: uniforms.uWindStr ?? uniform(params.windStr),
     uWindGust: uniforms.uWindGust ?? uniform(params.windGust),
     uWindMicro: uniforms.uWindMicro ?? uniform(params.windMicro),
-    uStemColor: uniforms.uStemColor ?? uniform(hexToVec3(params.stemColor)),
-    uPlumeColor: uniforms.uPlumeColor ?? uniform(hexToVec3(params.plumeColor)),
+    uStemColor: uniforms.uSusukiStemColor ?? uniform(hexToVec3(params.stemColor)),
+    uPlumeColor: uniforms.uSusukiPlumeColor ?? uniform(hexToVec3(params.plumeColor)),
     uSunDir: uniforms.uSunDir ?? uniform(new THREE.Vector3(0.5, 0.7, 0.5).normalize()),
     uAoIntensity: uniforms.uAoIntensity ?? uniform(1.0),
     uBsColor: uniforms.uBsColor ?? uniform(hexToVec3("#51cc66")),
@@ -239,14 +241,9 @@ export function setupSusukiPatches(
     bandMatNear,
   } = geosAndMats;
 
-  const {
-    PATCH_SPACING = SUSUKI_FIELD_PATCH_SPACING,
-    GRID_SIZE = 18,
-    NEAR_PATCH_SIZE = SUSUKI_NEAR_PATCH_SIZE,
-    nearRingExtent = 3,
-    lodDistance = 35,
-    maxDistance = 90,
-  } = options;
+  const PATCH_SPACING = options.PATCH_SPACING ?? SUSUKI_FIELD_PATCH_SPACING;
+  const GRID_SIZE = options.GRID_SIZE ?? 18;
+  const NEAR_PATCH_SIZE = options.NEAR_PATCH_SIZE ?? SUSUKI_NEAR_PATCH_SIZE;
 
   const poolStemLow = { meshes: [], idx: 0 };
   const poolStemHigh = { meshes: [], idx: 0 };
@@ -276,6 +273,11 @@ export function setupSusukiPatches(
   const nearAabbSize = new THREE.Vector3(NEAR_PATCH_SIZE, 1000, NEAR_PATCH_SIZE);
 
   function update(charPos, frustum) {
+    const lodDistance = options.lodDistance ?? 35;
+    const maxDistance = options.maxDistance ?? 90;
+    const nearRingExtent = options.nearRingExtent ?? 3;
+    const gridSize = options.GRID_SIZE ?? 18;
+
     for (let i = 0; i < susukiGroup.children.length; i++)
       susukiGroup.children[i].visible = false;
     poolStemLow.idx = 0;
@@ -293,8 +295,8 @@ export function setupSusukiPatches(
     cameraPosXZ.set(camera.position.x, 0, camera.position.z);
     let patchCount = 0;
 
-    for (let x = -GRID_SIZE; x < GRID_SIZE; x++) {
-      for (let z = -GRID_SIZE; z < GRID_SIZE; z++) {
+    for (let x = -gridSize; x < gridSize; x++) {
+      for (let z = -gridSize; z < gridSize; z++) {
         cellPos.set(
           baseCellPos.x + x * PATCH_SPACING,
           0,

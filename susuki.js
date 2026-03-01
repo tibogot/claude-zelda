@@ -406,6 +406,7 @@ export function createSusukiBandMaterial(segments, verts, ctx) {
     uTime,
     uStemHeight,
     uPlumeStart,
+    uSusukiPlumeFlex = float(0.2),
     uBandWidth,
     uWindDirX,
     uWindDirZ,
@@ -516,8 +517,7 @@ export function createSusukiBandMaterial(segments, verts, ctx) {
       stemGrassMat.mul(stemTipLocal),
     );
     const totalWindLean = mul(add(windLean, micro), heightPct);
-    const plumeFlex = float(1);
-    const effectiveWind = mul(totalWindLean, add(1, mul(plumeFlex, 1.8)));
+    const effectiveWind = mul(totalWindLean, add(1, uSusukiPlumeFlex));
 
     const easedH = easeIn(heightPct, 2);
     const curveAmt = mul(negate(bandRandomLean), easedH);

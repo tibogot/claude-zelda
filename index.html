@@ -239,6 +239,13 @@
         NEAR_PATCH_SIZE,
         GRASS_DENSITY,
       } from "./grass.js";
+      import {
+        buildSusukiCtx,
+        createSusukiFieldResources,
+        setupSusukiPatches,
+        SUSUKI_FIELD_PATCH_SPACING,
+        SUSUKI_NEAR_PATCH_SIZE,
+      } from "./susuki-field.js";
       import { createTerrain } from "./terrain.js";
       import { setupTweakpaneUI } from "./tweakpane-ui.js";
       import { PARAMS } from "./params.js";
@@ -1193,6 +1200,52 @@
           },
         );
 
+        // Susuki (pampas grass) — same wind as grass, patch-based LOD
+        const susukiGroup = new THREE.Group();
+        scene.add(susukiGroup);
+        const susukiCtx = buildSusukiCtx({
+          uniforms,
+          heightTex,
+          params: {
+            stemHeight: PARAMS.susukiStemHeight,
+            stemWidth: PARAMS.susukiStemWidth,
+            bandWidth: PARAMS.susukiBandWidth,
+            plumeStart: PARAMS.susukiPlumeStart,
+            plumeFlex: PARAMS.susukiPlumeFlex,
+            stemColor: PARAMS.susukiStemColor,
+            plumeColor: PARAMS.susukiPlumeColor,
+            windDir: PARAMS.windDir,
+            windWaveScale: PARAMS.windWaveScale,
+            windSpeed: PARAMS.windSpeed,
+            windStr: PARAMS.windStrength,
+            windGust: PARAMS.windGust,
+            windMicro: PARAMS.windMicroSway,
+          },
+        });
+        const susukiResources = createSusukiFieldResources(susukiCtx);
+        const susukiPatchSystem = setupSusukiPatches(
+          scene,
+          camera,
+          susukiGroup,
+          susukiResources,
+          {
+            PATCH_SPACING: SUSUKI_FIELD_PATCH_SPACING,
+            get GRID_SIZE() {
+              return PARAMS.susukiGridSize;
+            },
+            NEAR_PATCH_SIZE: SUSUKI_NEAR_PATCH_SIZE,
+            get nearRingExtent() {
+              return PARAMS.susukiNearRingExtent;
+            },
+            get lodDistance() {
+              return PARAMS.susukiLodDistance;
+            },
+            get maxDistance() {
+              return PARAMS.susukiMaxDistance;
+            },
+          },
+        );
+
         const frustum = new THREE.Frustum();
         const projMat = new THREE.Matrix4();
 
@@ -1236,6 +1289,7 @@
         const timer = new THREE.Timer();
         let frameCount = 0,
           patchCount = 0,
+          susukiPatchCount = 0,
           lastTime = 0;
         let appliedReturnFromCastle = false;
         const moveDir = new THREE.Vector3();
@@ -1511,6 +1565,11 @@
           const { patchCount: patchCountResult } =
             grassPatchSystem.update(charPos, frustum);
           patchCount = patchCountResult;
+          susukiGroup.visible = PARAMS.susukiEnabled;
+          if (PARAMS.susukiEnabled) {
+            const { patchCount: sp } = susukiPatchSystem.update(charPos, frustum);
+            susukiPatchCount = sp;
+          }
           if (PARAMS.showScatter) {
             updateAllScatterLOD(camera, frustum);
           }
@@ -1523,7 +1582,9 @@
           renderPipeline.render();
           stats.update();
           if (++frameCount % 30 === 0) {
-            let statsText = `${patchCount} patches ▪ ${((patchCount * GRASS_DENSITY) / 1000) | 0}k blades`;
+            let statsText = `${patchCount} grass patches ▪ ${((patchCount * GRASS_DENSITY) / 1000) | 0}k blades`;
+            if (PARAMS.susukiEnabled)
+              statsText += ` ▪ ${susukiPatchCount} susuki patches`;
             if (treeInstancedMesh != null)
               statsText += ` ▪ ${treeInstancedMesh.count}/${treesState.treeCountActual} trees`;
             document.getElementById("stats").textContent = statsText;
