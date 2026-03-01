@@ -776,6 +776,31 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
     step: 0.1,
     label: "Church Y Offset",
   });
+  fScene.addBinding(PARAMS, "showPubgChurch", { label: "PUBG Church" });
+  fScene.addBinding(PARAMS, "pubgChurchX", {
+    min: -200,
+    max: 200,
+    step: 1,
+    label: "PUBG Church X",
+  });
+  fScene.addBinding(PARAMS, "pubgChurchZ", {
+    min: -200,
+    max: 200,
+    step: 1,
+    label: "PUBG Church Z",
+  });
+  fScene.addBinding(PARAMS, "pubgChurchYOffset", {
+    min: -10,
+    max: 10,
+    step: 0.1,
+    label: "PUBG Church Y Offset",
+  });
+  fScene.addBinding(PARAMS, "pubgChurchScale", {
+    min: 0.001,
+    max: 0.02,
+    step: 0.001,
+    label: "PUBG Church Scale",
+  });
   fScene.addBinding(PARAMS, "showTrees", { label: "Trees" });
   fScene.addBinding(PARAMS, "showFluffyTree", { label: "Fluffy Tree" });
   fScene

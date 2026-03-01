@@ -707,6 +707,71 @@
           });
         }
 
+        // ── PUBG CHURCH (separate model, controllable via Scene folder) ──
+        let pubgChurchModel = null;
+        gltfLoader.load("models/pubg__church_optimized.glb", (gltf) => {
+          const pubgChurch = gltf.scene;
+          pubgChurchModel = pubgChurch;
+          pubgChurch.position.set(
+            PARAMS.pubgChurchX,
+            sampleHeight(PARAMS.pubgChurchX, PARAMS.pubgChurchZ) +
+              PARAMS.pubgChurchYOffset,
+            PARAMS.pubgChurchZ,
+          );
+          pubgChurch.scale.setScalar(PARAMS.pubgChurchScale);
+          pubgChurch.visible = PARAMS.showPubgChurch;
+          pubgChurch.traverse((o) => {
+            if (o.isMesh) {
+              o.castShadow = true;
+              o.receiveShadow = true;
+            }
+          });
+          scene.add(pubgChurch);
+          pubgChurch.updateMatrixWorld(true);
+          const box = new THREE.Box3().setFromObject(pubgChurch);
+          const center = new THREE.Vector3();
+          box.getCenter(center);
+          const verts = [],
+            inds = [];
+          const vTemp = new THREE.Vector3();
+          let vertexOffset = 0;
+          pubgChurch.traverse((o) => {
+            if (!o.isMesh || !o.geometry) return;
+            const geo = o.geometry;
+            const posAttr = geo.attributes.position;
+            const idxAttr = geo.index;
+            const worldMat = o.matrixWorld;
+            for (let i = 0; i < posAttr.count; i++) {
+              vTemp.fromBufferAttribute(posAttr, i).applyMatrix4(worldMat);
+              verts.push(
+                vTemp.x - center.x,
+                vTemp.y - center.y,
+                vTemp.z - center.z,
+              );
+            }
+            if (idxAttr) {
+              for (let i = 0; i < idxAttr.count; i++)
+                inds.push(vertexOffset + idxAttr.getX(i));
+            } else {
+              for (let i = 0; i < posAttr.count; i++)
+                inds.push(vertexOffset + i);
+            }
+            vertexOffset += posAttr.count;
+          });
+          const pubgChurchVerts = new Float32Array(verts);
+          const pubgChurchInds = new Uint32Array(inds);
+          const pubgChurchBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(
+            center.x,
+            center.y,
+            center.z,
+          );
+          const pubgChurchBody = physicsWorld.createRigidBody(pubgChurchBodyDesc);
+          physicsWorld.createCollider(
+            RAPIER.ColliderDesc.trimesh(pubgChurchVerts, pubgChurchInds),
+            pubgChurchBody,
+          );
+        });
+
         // ── FLAG (cloth physics simulation) — near ruins ──
         // Pole bottom sits ~0.4225 * scale units below the group origin,
         // so raise Y by that amount to plant the pole base on the terrain.
@@ -1506,6 +1571,18 @@
                 PARAMS.churchZ,
               );
               churchModel.scale.setScalar(PARAMS.churchScale);
+            }
+          }
+          if (pubgChurchModel) {
+            pubgChurchModel.visible = PARAMS.showPubgChurch;
+            if (PARAMS.showPubgChurch) {
+              pubgChurchModel.position.set(
+                PARAMS.pubgChurchX,
+                sampleHeight(PARAMS.pubgChurchX, PARAMS.pubgChurchZ) +
+                  PARAMS.pubgChurchYOffset,
+                PARAMS.pubgChurchZ,
+              );
+              pubgChurchModel.scale.setScalar(PARAMS.pubgChurchScale);
             }
           }
           if (PARAMS.rapierDebug) buildRapierDebugMeshes();

@@ -29,12 +29,12 @@
 <body>
 <div id="info">
   <span>Volumetric Haze</span> — Ground mist (Ghost of Tsushima style)<br>
-  Orbit: <span>left-drag</span> &nbsp; Zoom: <span>scroll</span>
+  Orbit: <span>left-drag</span> &nbsp; Zoom: <span>scroll</span> &nbsp; Controls: <span>top-right</span>
 </div>
 
 <script type="module">
 import * as THREE from 'three/webgpu';
-import { color, fog, float, positionWorld, triNoise3D, positionView, normalWorld, uniform } from 'three/tsl';
+import { color, fog, float, positionWorld, triNoise3D, positionView, normalWorld, uniform, sin, cos } from 'three/tsl';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import GUI from 'three/addons/libs/lil-gui.module.min.js';
 
@@ -53,34 +53,56 @@ function init() {
   const groundColorValue = 0xe8e4d8;
   const hazeColorValue = 0xf5f5f0;
 
-  const skyColor = color( skyColorValue );
-  const groundColor = color( groundColorValue );
-  const hazeColor = color( hazeColorValue );
+  const uSkyColor = uniform( new THREE.Color( skyColorValue ) );
+  const uGroundColor = uniform( new THREE.Color( groundColorValue ) );
+  const skyColor = color( uSkyColor );
+  const groundColor = color( uGroundColor );
+
+  // Uniforms for GUI control
+  const uFogThickness = uniform( 40 );
+  const uFogOpacity = uniform( 0.94 );
+  const uFogFalloff = uniform( 2.2 );
+  const uNoiseScaleA = uniform( 0.004 );
+  const uNoiseScaleB = uniform( 0.008 );
+  const uNoiseAmountA = uniform( 0.25 );
+  const uNoiseAmountB = uniform( 0.2 );
+  const uNoiseSpeed = uniform( 1 );
+  const uNoiseDetail = uniform( 0.15 );
+  const uHazeColor = uniform( new THREE.Color( hazeColorValue ) );
+
+  const hazeColor = color( uHazeColor );
 
   // Distance-based fog falloff (view-space depth)
   const fogNoiseDistance = positionView.z.negate().smoothstep( 0, camera.far - 200 );
-  const distance = fogNoiseDistance.mul( 35 ).max( 6 );
+  const distance = fogNoiseDistance.mul( uFogThickness ).max( 8 );
 
-  // Ground-hugging fog: denser near y=0, fades upward (cubic falloff)
-  const alpha = 0.92;
-  const groundFogArea = float( distance ).sub( positionWorld.y ).div( distance ).pow( 2.5 ).saturate().mul( alpha );
+  // Procedural terrain height (must match terrain mesh formula)
+  const tx = positionWorld.x;
+  const tz = positionWorld.z;
+  const terrainHeight = sin( tx.mul( 0.02 ) ).mul( cos( tz.mul( 0.02 ) ) ).mul( 8 )
+    .add( sin( tx.mul( 0.05 ).add( float( 1 ) ) ).mul( cos( tz.mul( 0.05 ) ) ).mul( 3 ) );
+
+  // Height above terrain — fog hugs the surface, fills valleys, thins on hilltops
+  const heightAboveTerrain = positionWorld.y.sub( terrainHeight );
+  const groundFogArea = float( distance ).sub( heightAboveTerrain ).div( distance ).pow( uFogFalloff ).saturate().mul( uFogOpacity );
 
   const timer = uniform( 0 ).onFrameUpdate( ( frame ) => frame.time );
 
-  // Layered procedural noise for patchy, rolling mist
-  const fogNoiseA = triNoise3D( positionWorld.mul( 0.004 ), 0.25, timer );
-  const fogNoiseB = triNoise3D( positionWorld.mul( 0.008 ), 0.2, timer.mul( 1.3 ) );
-  const fogNoise = fogNoiseA.add( fogNoiseB ).mul( hazeColor );
+  // Layered procedural noise for patchy, rolling mist (3 layers = richer detail)
+  const fogNoiseA = triNoise3D( positionWorld.mul( uNoiseScaleA ), uNoiseAmountA, timer );
+  const fogNoiseB = triNoise3D( positionWorld.mul( uNoiseScaleB ), uNoiseAmountB, timer.mul( uNoiseSpeed ) );
+  const fogNoiseC = triNoise3D( positionWorld.mul( 0.015 ), uNoiseDetail, timer.mul( 0.5 ) );
+  const fogNoise = fogNoiseA.add( fogNoiseB ).add( fogNoiseC ).mul( hazeColor );
 
   scene.fogNode = fog( fogNoiseDistance.oneMinus().mix( groundColor, fogNoise ), groundFogArea );
   scene.backgroundNode = normalWorld.y.max( 0 ).mix( groundColor, skyColor );
 
-  // ─── Terrain (simple plane) ───────────────────────────────────────────────
+  // ─── Terrain (simple plane) — formula must match haze terrainHeight ────────
   const planeGeo = new THREE.PlaneGeometry( 400, 400, 64, 64 );
   const vertices = planeGeo.attributes.position.array;
   for ( let i = 0; i < vertices.length; i += 3 ) {
     const x = vertices[ i ], z = vertices[ i + 1 ];
-    vertices[ i + 1 ] = ( Math.sin( x * 0.02 ) * Math.cos( z * 0.02 ) * 8 ) +
+    vertices[ i + 2 ] = ( Math.sin( x * 0.02 ) * Math.cos( z * 0.02 ) * 8 ) +
       ( Math.sin( x * 0.05 + 1 ) * Math.cos( z * 0.05 ) * 3 );
   }
   planeGeo.computeVertexNormals();
@@ -95,6 +117,12 @@ function init() {
   terrain.receiveShadow = true;
   scene.add( terrain );
 
+  // Terrain height helper (matches mesh + haze formula)
+  function terrainHeightAt( x, z ) {
+    return Math.sin( x * 0.02 ) * Math.cos( z * 0.02 ) * 8 +
+      Math.sin( x * 0.05 + 1 ) * Math.cos( z * 0.05 ) * 3;
+  }
+
   // ─── Simple trees (cones as placeholders) ─────────────────────────────────
   const treeGeo = new THREE.ConeGeometry( 2, 12, 6 );
   const treeMat = new THREE.MeshStandardNodeMaterial( { color: 0x2d5a1f, roughness: 0.95 } );
@@ -105,7 +133,7 @@ function init() {
     const g = new THREE.Group();
     const x = ( Math.random() - 0.5 ) * 350;
     const z = ( Math.random() - 0.5 ) * 350;
-    g.position.set( x, 0, z );
+    g.position.set( x, terrainHeightAt( x, z ), z );
     const trunk = new THREE.Mesh( trunkGeo, trunkMat );
     trunk.position.y = 2;
     trunk.scale.setScalar( 0.8 + Math.random() * 0.4 );
@@ -149,9 +177,64 @@ function init() {
   controls.update();
 
   // ─── GUI ──────────────────────────────────────────────────────────────────
-  const gui = new GUI( { title: 'Haze' } );
-  gui.add( controls, 'autoRotate' ).name( 'Auto rotate' );
-  gui.add( controls, 'autoRotateSpeed', 0, 0.5, 0.01 ).name( 'Rotate speed' );
+  const gui = new GUI( { title: 'Haze', width: 280 } );
+
+  const camFolder = gui.addFolder( 'Camera' );
+  camFolder.add( controls, 'autoRotate' ).name( 'Auto rotate' );
+  camFolder.add( controls, 'autoRotateSpeed', 0, 0.5, 0.01 ).name( 'Rotate speed' );
+  camFolder.add( controls.target, 'y', -5, 25, 0.5 ).name( 'Look-at height' );
+
+  const colorObj = { sky: skyColorValue, ground: groundColorValue, haze: hazeColorValue };
+
+  const fogFolder = gui.addFolder( 'Fog' );
+  fogFolder.add( uFogThickness, 'value', 15, 80, 1 ).name( 'Layer thickness' );
+  fogFolder.add( uFogOpacity, 'value', 0.5, 1, 0.02 ).name( 'Opacity' );
+  fogFolder.add( uFogFalloff, 'value', 1.2, 4, 0.1 ).name( 'Height falloff' );
+  fogFolder.addColor( colorObj, 'haze' ).name( 'Haze color' ).onChange( ( v ) => {
+    uHazeColor.value.set( v );
+  } );
+
+  const skyFolder = gui.addFolder( 'Sky & Ground' );
+  skyFolder.addColor( colorObj, 'sky' ).name( 'Sky' ).onChange( ( v ) => {
+    uSkyColor.value.set( v );
+  } );
+  skyFolder.addColor( colorObj, 'ground' ).name( 'Ground' ).onChange( ( v ) => {
+    uGroundColor.value.set( v );
+  } );
+
+  const noiseFolder = gui.addFolder( 'Noise' );
+  noiseFolder.add( uNoiseScaleA, 'value', 0.001, 0.02, 0.001 ).name( 'Scale (large)' );
+  noiseFolder.add( uNoiseScaleB, 'value', 0.003, 0.02, 0.001 ).name( 'Scale (small)' );
+  noiseFolder.add( uNoiseAmountA, 'value', 0.1, 0.5, 0.02 ).name( 'Amount A' );
+  noiseFolder.add( uNoiseAmountB, 'value', 0.05, 0.4, 0.02 ).name( 'Amount B' );
+  noiseFolder.add( uNoiseDetail, 'value', 0, 0.35, 0.02 ).name( 'Fine detail' );
+  noiseFolder.add( uNoiseSpeed, 'value', 0, 2, 0.1 ).name( 'Drift speed' );
+
+  const DEFAULTS = {
+    fogThickness: 40, fogOpacity: 0.94, fogFalloff: 2.2,
+    noiseScaleA: 0.004, noiseScaleB: 0.008, noiseAmountA: 0.25, noiseAmountB: 0.2,
+    noiseDetail: 0.15, noiseSpeed: 1,
+    sky: skyColorValue, ground: groundColorValue, haze: hazeColorValue,
+  };
+  gui.add( {
+    reset: () => {
+      uFogThickness.value = DEFAULTS.fogThickness;
+      uFogOpacity.value = DEFAULTS.fogOpacity;
+      uFogFalloff.value = DEFAULTS.fogFalloff;
+      uNoiseScaleA.value = DEFAULTS.noiseScaleA;
+      uNoiseScaleB.value = DEFAULTS.noiseScaleB;
+      uNoiseAmountA.value = DEFAULTS.noiseAmountA;
+      uNoiseAmountB.value = DEFAULTS.noiseAmountB;
+      uNoiseDetail.value = DEFAULTS.noiseDetail;
+      uNoiseSpeed.value = DEFAULTS.noiseSpeed;
+      uSkyColor.value.set( DEFAULTS.sky );
+      uGroundColor.value.set( DEFAULTS.ground );
+      uHazeColor.value.set( DEFAULTS.haze );
+      Object.assign( colorObj, { sky: DEFAULTS.sky, ground: DEFAULTS.ground, haze: DEFAULTS.haze } );
+    },
+  }, 'reset' ).name( 'Reset to defaults' );
+
+  gui.open();
 
   window.addEventListener( 'resize', onResize );
 }
