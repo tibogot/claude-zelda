@@ -136,7 +136,6 @@ export function createBirds({
     const worldVert = modelWorldMatrix.mul(position);
 
     // Orient bird along velocity direction (safe when flying straight up/down: xz=0)
-    vel.z.mulAssign(-1.0);
     const xz    = length(vel.xz);
     const eps   = float(0.001);
     const safeXz = select(xz.lessThan(eps), float(1.0), xz);

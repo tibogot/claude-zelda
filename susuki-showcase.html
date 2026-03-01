@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Susuki Grass Showcase</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1a1a2e; overflow: hidden; font-family: "SF Mono", "Fira Code", monospace; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #info {
+      position: fixed; bottom: 12px; left: 12px; z-index: 20;
+      background: rgba(0,0,0,0.6); color: #b0d890;
+      padding: 8px 12px; border-radius: 6px; font-size: 11px; line-height: 1.6;
+    }
+    #info span { color: #e0f0c0; font-weight: 600; }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+      "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+      "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+<div id="info">
+  <span>Susuki Grass</span> — Ghost of Tsushima style<br>
+  Orbit: <span>left-drag</span> &nbsp; Zoom: <span>scroll</span>
+</div>
+
+<script type="module">
+import * as THREE from "three";
+import { WebGPURenderer } from "three/webgpu";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { uniform } from "three/tsl";
+import GUI from "three/addons/libs/lil-gui.module.min.js";
+import { setSeed, randRange } from "./rng.js";
+import {
+  createSusukiStemGeometry,
+  createSusukiBandGeometry,
+  createSusukiStemMaterial,
+  createSusukiBandMaterial,
+  SUSUKI_PATCH_SIZE,
+  SUSUKI_STEM_SEGMENTS,
+  SUSUKI_BAND_SEGMENTS,
+  SUSUKI_COUNT,
+} from "./susuki.js";
+
+function hexToVec3(hex) {
+  const c = new THREE.Color(hex);
+  c.convertSRGBToLinear();
+  return new THREE.Vector3(c.r, c.g, c.b);
+}
+
+// ─── PARAMS ──────────────────────────────────────────────────────────────────
+const PARAMS = {
+  stemHeight: 2.5,
+  stemWidth: 0.04,
+  bandWidth: 0.04,
+  plumeStart: 0.6,
+  windDir: 0.7,
+  windWaveScale: 0.08,
+  windSpeed: 1.2,
+  windStr: 0.35,
+  windGust: 0.25,
+  windMicro: 0.15,
+  stemColor: "#2d5a1f",
+  plumeColor: "#ffffff",
+  sunAzimuth: 225,
+  sunElevation: 56,
+  sunIntensity: 2.0,
+  ambIntensity: 0.7,
+  aoIntensity: 1.0,
+  bsIntensity: 0.4,
+  bsColor: "#51cc66",
+  bsPower: 2.0,
+  frontScatter: 0.3,
+  rimSSS: 0.4,
+  specV1Intensity: 1.5,
+  specV1Color: "#ffffff",
+  specV1DirX: -1.0,
+  specV1DirY: 1.0,
+  specV1DirZ: 0.5,
+  specV2Intensity: 1.0,
+  specV2Color: "#ffffff",
+  specV2DirX: -1.0,
+  specV2DirY: 0.45,
+  specV2DirZ: 1.0,
+  specV2NoiseScale: 3.0,
+  specV2NoiseStr: 0.6,
+  specV2Power: 12.0,
+  specV2TipBias: 0.5,
+  fogNear: 40,
+  fogFar: 120,
+  fogColor: "#2a3a4a",
+  groundColor: "#3d5a3d",
+  showGrid: true,
+};
+
+// ─── Renderer ────────────────────────────────────────────────────────────────
+const renderer = new WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+// ─── Scene ───────────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(PARAMS.fogColor);
+scene.fog = new THREE.Fog(PARAMS.fogColor, PARAMS.fogNear, PARAMS.fogFar);
+
+const sun = new THREE.DirectionalLight(0xfff0d0, PARAMS.sunIntensity);
+scene.add(sun);
+const ambLight = new THREE.AmbientLight(0x8090b0, PARAMS.ambIntensity);
+scene.add(ambLight);
+
+const groundGeo = new THREE.PlaneGeometry(80, 80, 1, 1);
+const groundMat = new THREE.MeshStandardMaterial({
+  color: PARAMS.groundColor,
+  roughness: 0.95,
+  metalness: 0,
+});
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+scene.add(ground);
+
+const grid = new THREE.GridHelper(80, 20, 0x4a5a6a, 0x3a4a5a);
+grid.position.y = 0.01;
+grid.visible = PARAMS.showGrid;
+scene.add(grid);
+
+function applySun() {
+  const az = (PARAMS.sunAzimuth * Math.PI) / 180;
+  const el = (PARAMS.sunElevation * Math.PI) / 180;
+  sun.position.set(
+    Math.cos(el) * Math.sin(az),
+    Math.sin(el),
+    Math.cos(el) * Math.cos(az),
+  );
+  sun.intensity = PARAMS.sunIntensity;
+  ambLight.intensity = PARAMS.ambIntensity;
+  const dir = new THREE.Vector3(
+    Math.cos(el) * Math.sin(az),
+    Math.sin(el),
+    Math.cos(el) * Math.cos(az),
+  ).normalize();
+  uSunDir.value.copy(dir);
+}
+function applyFog() {
+  scene.background.setStyle(PARAMS.fogColor);
+  scene.fog.color.setStyle(PARAMS.fogColor);
+  scene.fog.near = PARAMS.fogNear;
+  scene.fog.far = PARAMS.fogFar;
+}
+function applyGround() {
+  groundMat.color.setStyle(PARAMS.groundColor);
+}
+function applyWind() {
+  const d = PARAMS.windDir;
+  uWindDirX.value = Math.cos(d);
+  uWindDirZ.value = Math.sin(d);
+  uWindAxis.value.set(Math.sin(d), 0, -Math.cos(d));
+  uCrossAxis.value.set(Math.cos(d), 0, Math.sin(d));
+}
+function applySpecDirs() {
+  const d1 = new THREE.Vector3(PARAMS.specV1DirX, PARAMS.specV1DirY, PARAMS.specV1DirZ).normalize();
+  const d2 = new THREE.Vector3(PARAMS.specV2DirX, PARAMS.specV2DirY, PARAMS.specV2DirZ).normalize();
+  uSpecV1Dir.value.copy(d1);
+  uSpecV2Dir.value.copy(d2);
+}
+function applyColors() {
+  uStemColor.value.copy(hexToVec3(PARAMS.stemColor));
+  uPlumeColor.value.copy(hexToVec3(PARAMS.plumeColor));
+  uBsColor.value.copy(hexToVec3(PARAMS.bsColor));
+  uSpecV1Color.value.copy(hexToVec3(PARAMS.specV1Color));
+  uSpecV2Color.value.copy(hexToVec3(PARAMS.specV2Color));
+}
+
+// ─── Susuki uniforms ──────────────────────────────────────────────────────────
+const uTime = uniform(0);
+const uStemHeight = uniform(PARAMS.stemHeight);
+const uStemWidth = uniform(PARAMS.stemWidth);
+const uBandWidth = uniform(PARAMS.bandWidth);
+const uPlumeStart = uniform(PARAMS.plumeStart);
+const uWindDirX = uniform(Math.cos(PARAMS.windDir));
+const uWindDirZ = uniform(Math.sin(PARAMS.windDir));
+const uWindAxis = uniform(
+  new THREE.Vector3(
+    Math.sin(PARAMS.windDir),
+    0,
+    -Math.cos(PARAMS.windDir),
+  ),
+);
+const uCrossAxis = uniform(
+  new THREE.Vector3(
+    Math.cos(PARAMS.windDir),
+    0,
+    Math.sin(PARAMS.windDir),
+  ),
+);
+const uWindWaveScale = uniform(PARAMS.windWaveScale);
+const uWindSpeed = uniform(PARAMS.windSpeed);
+const uWindStr = uniform(PARAMS.windStr);
+const uWindGust = uniform(PARAMS.windGust);
+const uWindMicro = uniform(PARAMS.windMicro);
+const uStemColor = uniform(hexToVec3(PARAMS.stemColor));
+const uPlumeColor = uniform(hexToVec3(PARAMS.plumeColor));
+const uSunDir = uniform(new THREE.Vector3(0.5, 0.7, 0.5).normalize());
+const uAoIntensity = uniform(PARAMS.aoIntensity);
+const uBsColor = uniform(hexToVec3(PARAMS.bsColor));
+const uBsPower = uniform(PARAMS.bsPower);
+const uFrontScatter = uniform(PARAMS.frontScatter);
+const uRimSSS = uniform(PARAMS.rimSSS);
+const uBsIntensity = uniform(PARAMS.bsIntensity);
+const uSpecV1Intensity = uniform(PARAMS.specV1Intensity);
+const uSpecV1Color = uniform(hexToVec3(PARAMS.specV1Color));
+const uSpecV1Dir = uniform(new THREE.Vector3(PARAMS.specV1DirX, PARAMS.specV1DirY, PARAMS.specV1DirZ).normalize());
+const uSpecV2Intensity = uniform(PARAMS.specV2Intensity);
+const uSpecV2Color = uniform(hexToVec3(PARAMS.specV2Color));
+const uSpecV2Dir = uniform(new THREE.Vector3(PARAMS.specV2DirX, PARAMS.specV2DirY, PARAMS.specV2DirZ).normalize());
+const uSpecV2NoiseScale = uniform(PARAMS.specV2NoiseScale);
+const uSpecV2NoiseStr = uniform(PARAMS.specV2NoiseStr);
+const uSpecV2Power = uniform(PARAMS.specV2Power);
+const uSpecV2TipBias = uniform(PARAMS.specV2TipBias);
+
+const sharedLighting = {
+  uSunDir,
+  uAoIntensity,
+  uBsColor,
+  uBsPower,
+  uFrontScatter,
+  uRimSSS,
+  uBsIntensity,
+  uSpecV1Intensity,
+  uSpecV1Color,
+  uSpecV1Dir,
+  uSpecV2Intensity,
+  uSpecV2Color,
+  uSpecV2Dir,
+  uSpecV2NoiseScale,
+  uSpecV2NoiseStr,
+  uSpecV2Power,
+  uSpecV2TipBias,
+};
+
+const stemCtx = {
+  uTime,
+  uStemHeight,
+  uStemWidth,
+  uPlumeStart,
+  uWindDirX,
+  uWindDirZ,
+  uWindAxis,
+  uCrossAxis,
+  uWindWaveScale,
+  uWindSpeed,
+  uWindStr,
+  uWindGust,
+  uWindMicro,
+  uStemColor,
+  ...sharedLighting,
+};
+
+const bandCtx = {
+  uTime,
+  uStemHeight,
+  uPlumeStart,
+  uBandWidth,
+  uWindDirX,
+  uWindDirZ,
+  uWindAxis,
+  uCrossAxis,
+  uWindWaveScale,
+  uWindSpeed,
+  uWindStr,
+  uWindGust,
+  uWindMicro,
+  uPlumeColor,
+  ...sharedLighting,
+};
+
+// ─── Susuki meshes ───────────────────────────────────────────────────────────
+const stemVerts = (SUSUKI_STEM_SEGMENTS + 1) * 2 * 2;
+const stemGeo = createSusukiStemGeometry(SUSUKI_STEM_SEGMENTS, SUSUKI_COUNT, SUSUKI_PATCH_SIZE, setSeed, randRange);
+const stemMat = createSusukiStemMaterial(SUSUKI_STEM_SEGMENTS, stemVerts, stemCtx);
+const stemMesh = new THREE.Mesh(stemGeo, stemMat);
+stemMesh.frustumCulled = false;
+scene.add(stemMesh);
+
+const bandVerts = (SUSUKI_BAND_SEGMENTS + 1) * 2 * 2;
+const bandGeo = createSusukiBandGeometry(SUSUKI_BAND_SEGMENTS, SUSUKI_COUNT, SUSUKI_PATCH_SIZE, setSeed, randRange);
+const bandMat = createSusukiBandMaterial(SUSUKI_BAND_SEGMENTS, bandVerts, bandCtx);
+const bandMesh = new THREE.Mesh(bandGeo, bandMat);
+bandMesh.frustumCulled = false;
+scene.add(bandMesh);
+
+// ─── GUI (lil-gui) ───────────────────────────────────────────────────────────
+const gui = new GUI({ title: "Susuki Grass", width: 260 });
+gui.domElement.style.cssText = "position:fixed;top:12px;right:12px;z-index:30;max-height:90vh;overflow-y:auto;";
+
+const fPlant = gui.addFolder("Plant");
+fPlant.add(PARAMS, "stemHeight", 1, 5, 0.1).onChange((v) => { uStemHeight.value = v; });
+fPlant.add(PARAMS, "stemWidth", 0.01, 0.1, 0.005).onChange((v) => { uStemWidth.value = v; });
+fPlant.add(PARAMS, "bandWidth", 0.01, 0.1, 0.005).onChange((v) => { uBandWidth.value = v; });
+fPlant.add(PARAMS, "plumeStart", 0.4, 0.9, 0.05).onChange((v) => { uPlumeStart.value = v; });
+
+const fColors = gui.addFolder("Colors");
+fColors.addColor(PARAMS, "stemColor").onChange(applyColors);
+fColors.addColor(PARAMS, "plumeColor").onChange(applyColors);
+
+const fWind = gui.addFolder("Wind");
+fWind.add(PARAMS, "windDir", 0, Math.PI * 2, 0.1).onChange(applyWind);
+fWind.add(PARAMS, "windWaveScale", 0.02, 0.2, 0.01).onChange((v) => { uWindWaveScale.value = v; });
+fWind.add(PARAMS, "windSpeed", 0.2, 2, 0.1).onChange((v) => { uWindSpeed.value = v; });
+fWind.add(PARAMS, "windStr", 0, 0.5, 0.02).onChange((v) => { uWindStr.value = v; });
+fWind.add(PARAMS, "windGust", 0, 0.4, 0.02).onChange((v) => { uWindGust.value = v; });
+fWind.add(PARAMS, "windMicro", 0, 0.3, 0.01).onChange((v) => { uWindMicro.value = v; });
+
+const fLight = gui.addFolder("Lighting");
+fLight.add(PARAMS, "sunAzimuth", 0, 360, 5).onChange(applySun);
+fLight.add(PARAMS, "sunElevation", 0, 90, 2).onChange(applySun);
+fLight.add(PARAMS, "sunIntensity", 0.5, 4, 0.1).onChange(applySun);
+fLight.add(PARAMS, "ambIntensity", 0.2, 1.5, 0.1).onChange(applySun);
+
+const fSSS = gui.addFolder("SSS (subsurface)");
+fSSS.add(PARAMS, "bsIntensity", 0, 1, 0.05).onChange((v) => { uBsIntensity.value = v; });
+fSSS.addColor(PARAMS, "bsColor").onChange(applyColors);
+fSSS.add(PARAMS, "bsPower", 1, 5, 0.25).onChange((v) => { uBsPower.value = v; });
+fSSS.add(PARAMS, "frontScatter", 0, 1, 0.05).onChange((v) => { uFrontScatter.value = v; });
+fSSS.add(PARAMS, "rimSSS", 0, 1, 0.05).onChange((v) => { uRimSSS.value = v; });
+
+const fSpec = gui.addFolder("Specular");
+fSpec.add(PARAMS, "specV1Intensity", 0, 4, 0.25).onChange((v) => { uSpecV1Intensity.value = v; });
+fSpec.addColor(PARAMS, "specV1Color").onChange(applyColors);
+fSpec.add(PARAMS, "specV1DirX", -2, 2, 0.1).onChange(applySpecDirs);
+fSpec.add(PARAMS, "specV1DirY", 0.1, 2, 0.05).onChange(applySpecDirs);
+fSpec.add(PARAMS, "specV1DirZ", -2, 2, 0.1).onChange(applySpecDirs);
+fSpec.add(PARAMS, "specV2Intensity", 0, 3, 0.25).onChange((v) => { uSpecV2Intensity.value = v; });
+fSpec.addColor(PARAMS, "specV2Color").onChange(applyColors);
+fSpec.add(PARAMS, "specV2DirX", -2, 2, 0.1).onChange(applySpecDirs);
+fSpec.add(PARAMS, "specV2DirY", 0.1, 2, 0.05).onChange(applySpecDirs);
+fSpec.add(PARAMS, "specV2DirZ", -2, 2, 0.1).onChange(applySpecDirs);
+fSpec.add(PARAMS, "specV2NoiseScale", 0.5, 10, 0.5).onChange((v) => { uSpecV2NoiseScale.value = v; });
+fSpec.add(PARAMS, "specV2NoiseStr", 0, 2, 0.1).onChange((v) => { uSpecV2NoiseStr.value = v; });
+fSpec.add(PARAMS, "specV2Power", 2, 40, 1).onChange((v) => { uSpecV2Power.value = v; });
+fSpec.add(PARAMS, "specV2TipBias", 0, 1, 0.1).onChange((v) => { uSpecV2TipBias.value = v; });
+
+const fScene = gui.addFolder("Scene");
+fScene.add(PARAMS, "aoIntensity", 0, 2, 0.1).onChange((v) => { uAoIntensity.value = v; });
+fScene.add(PARAMS, "fogNear", 10, 80, 5).onChange(applyFog);
+fScene.add(PARAMS, "fogFar", 60, 200, 10).onChange(applyFog);
+fScene.addColor(PARAMS, "fogColor").onChange(applyFog);
+fScene.addColor(PARAMS, "groundColor").onChange(applyGround);
+fScene.add(PARAMS, "showGrid").onChange((v) => { grid.visible = v; });
+
+applySun();
+applyWind();
+applySpecDirs();
+applyColors();
+
+// ─── Camera ──────────────────────────────────────────────────────────────────
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 300);
+camera.position.set(0, 4, 18);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.set(0, 1.2, 0);
+controls.update();
+
+// ─── Animation ────────────────────────────────────────────────────────────────
+const timer = new THREE.Timer();
+renderer.setAnimationLoop(() => {
+  timer.update();
+  uTime.value = timer.getElapsed();
+  controls.update();
+  renderer.render(scene, camera);
+});
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>

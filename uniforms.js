@@ -107,6 +107,7 @@ export function createUniforms(PARAMS, TERRAIN_SIZE, NPC_COUNT) {
     ).normalize(),
   );
   const uSunIntensity = uniform(PARAMS.sunIntensity);
+  const uSunScreenPos = uniform(new THREE.Vector2(0.5, 0.5));
   const uTerrainSize = uniform(TERRAIN_SIZE);
   const uTrailCenter = uniform(new THREE.Vector2());
   const uTrailSize = uniform(60);
@@ -174,6 +175,7 @@ export function createUniforms(PARAMS, TERRAIN_SIZE, NPC_COUNT) {
     uSeasonalDryColor,
     uSunDir,
     uSunIntensity,
+    uSunScreenPos,
     uTerrainSize,
     uTrailCenter,
     uTrailSize,
@@ -182,7 +184,7 @@ export function createUniforms(PARAMS, TERRAIN_SIZE, NPC_COUNT) {
 
 /**
  * @param {object} u - result of createUniforms()
- * @param {object} deps - { PARAMS, camera, dirLight, hemiLight, renderer, bloomPass, flareThreshold, flareGhostAttenuation, flareGhostSpacing, uFlareAmount, syncTerrainUniforms, updateSkyParams, regenTerrain, waterMesh, charPos, birds, bp }
+ * @param {object} deps - { PARAMS, camera, dirLight, hemiLight, renderer, bloomPass, uDofEnabled, uDofFocusDistance, uDofBlurStart, uDofBlurEnd, uDofBlurSize, uDofBlurSpread, flareThreshold, flareGhostAttenuation, flareGhostSpacing, uFlareAmount, uGodRaysEnabled, uGodRaysStrength, uGodRaysDecay, uGodRaysDensity, uGodRaysSamples, syncTerrainUniforms, updateSkyParams, regenTerrain, waterMesh, charPos, birds, bp }
  * @param {object} lastState - mutable { lastTerrainH, lastMountain, lastFieldFlat, lastLakeX, lastLakeZ, lastLakeR, lastLakeD }
  * @returns {() => void} syncUniforms
  */
@@ -195,10 +197,21 @@ export function createSyncUniforms(u, deps, lastState) {
     hemiLight,
     renderer,
     bloomPass,
+    uDofEnabled,
+    uDofFocusDistance,
+    uDofBlurStart,
+    uDofBlurEnd,
+    uDofBlurSize,
+    uDofBlurSpread,
     flareThreshold,
     flareGhostAttenuation,
     flareGhostSpacing,
     uFlareAmount,
+    uGodRaysEnabled,
+    uGodRaysStrength,
+    uGodRaysDecay,
+    uGodRaysDensity,
+    uGodRaysSamples,
     syncTerrainUniforms,
     updateSkyParams,
     regenTerrain,
@@ -277,7 +290,20 @@ export function createSyncUniforms(u, deps, lastState) {
     u.uFogEnabled.value = PARAMS.fogEnabled ? 1 : 0;
     uFlareAmount.value =
       PARAMS.postProcessingEnabled && PARAMS.lensflareEnabled ? 1 : 0;
+    uDofEnabled.value =
+      PARAMS.postProcessingEnabled && PARAMS.dofEnabled ? 1 : 0;
+    uDofFocusDistance.value = PARAMS.dofFocusDistance;
+    uDofBlurStart.value = PARAMS.dofBlurStart;
+    uDofBlurEnd.value = PARAMS.dofBlurEnd;
+    uDofBlurSize.value = PARAMS.dofBlurSize;
+    uDofBlurSpread.value = PARAMS.dofBlurSpread;
     bloomPass.threshold.value = PARAMS.lensflareBloomThreshold;
+    uGodRaysEnabled.value =
+      PARAMS.postProcessingEnabled && PARAMS.godRaysEnabled ? 1 : 0;
+    uGodRaysStrength.value = PARAMS.godRaysStrength;
+    uGodRaysDecay.value = PARAMS.godRaysDecay;
+    uGodRaysDensity.value = PARAMS.godRaysDensity;
+    uGodRaysSamples.value = PARAMS.godRaysSamples;
     flareThreshold.value = PARAMS.lensflareThreshold;
     flareGhostAttenuation.value = PARAMS.lensflareGhostAttenuation;
     flareGhostSpacing.value = PARAMS.lensflareGhostSpacing;
@@ -293,6 +319,14 @@ export function createSyncUniforms(u, deps, lastState) {
       PARAMS.sunDirZ,
     ).normalize();
     u.uSunDir.value.copy(sd);
+    // Sun screen position for god rays (project sun direction to NDC)
+    const sunWorld = camera.position.clone().add(sd.clone().multiplyScalar(500000));
+    const v4 = new THREE.Vector4(sunWorld.x, sunWorld.y, sunWorld.z, 1);
+    v4.applyMatrix4(camera.matrixWorldInverse);
+    v4.applyMatrix4(camera.projectionMatrix);
+    const ndcX = v4.x / v4.w;
+    const ndcY = v4.y / v4.w;
+    u.uSunScreenPos.value.set(ndcX * 0.5 + 0.5, ndcY * 0.5 + 0.5);
     dirLight.position.copy(sd.clone().multiplyScalar(50));
     dirLight.intensity = PARAMS.sunIntensity;
     u.uSunIntensity.value = PARAMS.sunIntensity;

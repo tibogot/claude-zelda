@@ -11,7 +11,6 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
     updateScatterPlacement,
     respawnTrees,
     birds,
-    octahedralForest,
     hexToVec3,
     rebuildOctahedralForest,
     MAX_SCATTER_PER_TYPE,
@@ -535,6 +534,70 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
     expanded: false,
   });
   fPost.addBinding(PARAMS, "postProcessingEnabled", { label: "enabled" });
+  const fDof = fPost.addFolder({
+    title: "Depth of Field",
+    expanded: false,
+  });
+  fDof.addBinding(PARAMS, "dofEnabled", { label: "enabled" });
+  fDof.addBinding(PARAMS, "dofFocusDistance", {
+    min: 5,
+    max: 80,
+    step: 1,
+    label: "focus distance",
+  });
+  fDof.addBinding(PARAMS, "dofBlurStart", {
+    min: 1,
+    max: 30,
+    step: 1,
+    label: "blur start",
+  });
+  fDof.addBinding(PARAMS, "dofBlurEnd", {
+    min: 10,
+    max: 150,
+    step: 5,
+    label: "blur end",
+  });
+  fDof.addBinding(PARAMS, "dofBlurSize", {
+    min: 1,
+    max: 3,
+    step: 1,
+    label: "blur size",
+  });
+  fDof.addBinding(PARAMS, "dofBlurSpread", {
+    min: 1,
+    max: 7,
+    step: 1,
+    label: "blur spread",
+  });
+  const fGodRays = fPost.addFolder({
+    title: "God Rays",
+    expanded: false,
+  });
+  fGodRays.addBinding(PARAMS, "godRaysEnabled", { label: "enabled" });
+  fGodRays.addBinding(PARAMS, "godRaysStrength", {
+    min: 0.02,
+    max: 0.8,
+    step: 0.02,
+    label: "strength",
+  });
+  fGodRays.addBinding(PARAMS, "godRaysDecay", {
+    min: 0.9,
+    max: 0.99,
+    step: 0.01,
+    label: "decay",
+  });
+  fGodRays.addBinding(PARAMS, "godRaysDensity", {
+    min: 0.2,
+    max: 1.5,
+    step: 0.1,
+    label: "density",
+  });
+  fGodRays.addBinding(PARAMS, "godRaysSamples", {
+    min: 16,
+    max: 64,
+    step: 8,
+    label: "samples",
+  });
   const fLensflare = fPost.addFolder({
     title: "Lens flare",
     expanded: false,
@@ -874,8 +937,8 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
   fOctahedralForest
     .addBinding(PARAMS, "octahedralForestEnabled", { label: "enabled" })
     .on("change", () => {
-      if (octahedralForest)
-        octahedralForest.group.visible = PARAMS.octahedralForestEnabled;
+      const forest = ctx.octahedralForest;
+      if (forest) forest.group.visible = PARAMS.octahedralForestEnabled;
     });
   fOctahedralForest
     .addBinding(PARAMS, "octahedralForestScale", {
@@ -885,8 +948,8 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       label: "scale",
     })
     .on("change", () => {
-      if (octahedralForest)
-        octahedralForest.group.scale.setScalar(PARAMS.octahedralForestScale);
+      const forest = ctx.octahedralForest;
+      if (forest) forest.group.scale.setScalar(PARAMS.octahedralForestScale);
     });
   fOctahedralForest
     .addBinding(PARAMS, "octahedralForestAlphaClamp", {
@@ -896,8 +959,8 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       label: "impostor alpha (LOD1/2)",
     })
     .on("change", () => {
-      if (octahedralForest)
-        octahedralForest.setAlphaClamp(PARAMS.octahedralForestAlphaClamp);
+      const forest = ctx.octahedralForest;
+      if (forest) forest.setAlphaClamp(PARAMS.octahedralForestAlphaClamp);
     });
   fOctahedralForest
     .addBinding(PARAMS, "octahedralForestLod0Alpha", {
@@ -907,8 +970,8 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       label: "LOD0 alpha (real mesh)",
     })
     .on("change", () => {
-      if (octahedralForest)
-        octahedralForest.setLod0AlphaTest(PARAMS.octahedralForestLod0Alpha);
+      const forest = ctx.octahedralForest;
+      if (forest) forest.setLod0AlphaTest(PARAMS.octahedralForestLod0Alpha);
     });
 
   const fLod = fOctahedralForest.addFolder({
@@ -923,8 +986,8 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       label: "LOD0→LOD1 dist",
     })
     .on("change", () => {
-      if (octahedralForest)
-        octahedralForest.setLodDistance(PARAMS.octahedralForestLodDist);
+      const forest = ctx.octahedralForest;
+      if (forest) forest.setLodDistance(PARAMS.octahedralForestLodDist);
     });
   fLod
     .addBinding(PARAMS, "octahedralForestLod2Dist", {
@@ -934,8 +997,8 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       label: "LOD1→LOD2 dist",
     })
     .on("change", () => {
-      if (octahedralForest)
-        octahedralForest.setLod2Distance(PARAMS.octahedralForestLod2Dist);
+      const forest = ctx.octahedralForest;
+      if (forest) forest.setLod2Distance(PARAMS.octahedralForestLod2Dist);
     });
   fLod
     .addBinding(PARAMS, "octahedralForestFadeRange", {
@@ -945,8 +1008,8 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       label: "fade range",
     })
     .on("change", () => {
-      if (octahedralForest)
-        octahedralForest.setFadeRange(PARAMS.octahedralForestFadeRange);
+      const forest = ctx.octahedralForest;
+      if (forest) forest.setFadeRange(PARAMS.octahedralForestFadeRange);
     });
 
   const fForestLight = fOctahedralForest.addFolder({
@@ -959,8 +1022,9 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       label: "sun color",
     })
     .on("change", () => {
-      if (octahedralForest)
-        octahedralForest.updateSunColor(
+      const forest = ctx.octahedralForest;
+      if (forest)
+        forest.updateSunColor(
           hexToVec3(PARAMS.octahedralForestSunColor),
         );
     });
@@ -970,8 +1034,9 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       label: "ambient color",
     })
     .on("change", () => {
-      if (octahedralForest)
-        octahedralForest.updateAmbColor(
+      const forest = ctx.octahedralForest;
+      if (forest)
+        forest.updateAmbColor(
           hexToVec3(PARAMS.octahedralForestAmbColor),
         );
     });
@@ -983,8 +1048,8 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       label: "light scale (brightness)",
     })
     .on("change", () => {
-      if (octahedralForest)
-        octahedralForest.setLightScale(PARAMS.octahedralForestLightScale);
+      const forest = ctx.octahedralForest;
+      if (forest) forest.setLightScale(PARAMS.octahedralForestLightScale);
     });
 
   const fForestWind = fOctahedralForest.addFolder({
@@ -999,8 +1064,9 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       label: "strength",
     })
     .on("change", () => {
-      if (octahedralForest)
-        octahedralForest.setWindStrength(
+      const forest = ctx.octahedralForest;
+      if (forest)
+        forest.setWindStrength(
           PARAMS.octahedralForestWindStrength,
         );
     });
@@ -1012,8 +1078,8 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       label: "speed",
     })
     .on("change", () => {
-      if (octahedralForest)
-        octahedralForest.setWindSpeed(PARAMS.octahedralForestWindSpeed);
+      const forest = ctx.octahedralForest;
+      if (forest) forest.setWindSpeed(PARAMS.octahedralForestWindSpeed);
     });
   fForestWind
     .addBinding(PARAMS, "octahedralForestWindDirX", {
@@ -1023,8 +1089,9 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       label: "direction X",
     })
     .on("change", () => {
-      if (octahedralForest)
-        octahedralForest.setWindDirection(
+      const forest = ctx.octahedralForest;
+      if (forest)
+        forest.setWindDirection(
           PARAMS.octahedralForestWindDirX,
           PARAMS.octahedralForestWindDirZ,
         );
@@ -1037,8 +1104,9 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       label: "direction Z",
     })
     .on("change", () => {
-      if (octahedralForest)
-        octahedralForest.setWindDirection(
+      const forest = ctx.octahedralForest;
+      if (forest)
+        forest.setWindDirection(
           PARAMS.octahedralForestWindDirX,
           PARAMS.octahedralForestWindDirZ,
         );
@@ -1053,32 +1121,33 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       label: "LOD0 (real mesh)",
     })
     .on("change", () => {
-      if (octahedralForest)
-        octahedralForest.setLodVisible(0, PARAMS.octahedralForestLod0Vis);
+      const forest = ctx.octahedralForest;
+      if (forest) forest.setLodVisible(0, PARAMS.octahedralForestLod0Vis);
     });
   fForestDebug
     .addBinding(PARAMS, "octahedralForestLod1Vis", {
       label: "LOD1 (impostor)",
     })
     .on("change", () => {
-      if (octahedralForest)
-        octahedralForest.setLodVisible(1, PARAMS.octahedralForestLod1Vis);
+      const forest = ctx.octahedralForest;
+      if (forest) forest.setLodVisible(1, PARAMS.octahedralForestLod1Vis);
     });
   fForestDebug
     .addBinding(PARAMS, "octahedralForestLod2Vis", {
       label: "LOD2 (mega)",
     })
     .on("change", () => {
-      if (octahedralForest)
-        octahedralForest.setLodVisible(2, PARAMS.octahedralForestLod2Vis);
+      const forest = ctx.octahedralForest;
+      if (forest) forest.setLodVisible(2, PARAMS.octahedralForestLod2Vis);
     });
   fForestDebug
     .addBinding(PARAMS, "octahedralForestWireframe", {
       label: "wireframe (plane)",
     })
     .on("change", () => {
-      if (octahedralForest)
-        octahedralForest.setWireframeVisible(
+      const forest = ctx.octahedralForest;
+      if (forest)
+        forest.setWireframeVisible(
           PARAMS.octahedralForestWireframe,
         );
     });
