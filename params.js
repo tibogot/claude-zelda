@@ -138,6 +138,7 @@ export const PARAMS = {
   keyTurnSpeed: 2.2,
   cameraMode: "thirdPerson",
   npcEnabled: false,
+  deerEnabled: true,
   rapierDebug: false,
   showRuins: true,
   showChurch: true,

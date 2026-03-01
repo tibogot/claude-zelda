@@ -5,6 +5,7 @@
 export function setupTweakpaneUI(pane, PARAMS, ctx) {
   const {
     setNpcVisibility,
+    setDeerVisibility,
     water,
     bakeEnvMap,
     scatterMeshes,
@@ -324,6 +325,10 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
   fNpc
     .addBinding(PARAMS, "npcEnabled", { label: "enabled" })
     .on("change", () => setNpcVisibility(PARAMS.npcEnabled));
+  const fDeer = pane.addFolder({ title: "Deer", expanded: false });
+  fDeer
+    .addBinding(PARAMS, "deerEnabled", { label: "enabled" })
+    .on("change", () => setDeerVisibility(PARAMS.deerEnabled));
   const fAO = pane.addFolder({
     title: "AO (Ambient Occlusion)",
     expanded: false,

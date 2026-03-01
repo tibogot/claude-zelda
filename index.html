@@ -148,6 +148,7 @@
       import Stats from "stats-gl";
       import { createFlag } from "./flag.js";
       import { createBirds } from "./birds.js";
+      import { createDeer } from "./deer.js";
       import { createOctahedralImpostorForest } from "./octahedralImpostor.js?v=10";
       import { createFluffyTree } from "./fluffyTree.js";
       import {
@@ -558,6 +559,16 @@
           renderer,
           camera,
         });
+
+        // ── DEER AI (5 deer, terrain-following, Idle/Eating/Walk/Gallop)
+        const { deerGroup, update: updateDeer } = createDeer({
+          scene,
+          sampleHeight,
+          TERRAIN_SIZE,
+          gltfLoader,
+          PARAMS,
+        });
+        deerGroup.visible = PARAMS.deerEnabled;
 
         // ── ANCIENT RUINS (compressed GLB on terrain + physics collider from bbox) ──
         // Only load when enabled — no scene/physics cost when disabled
@@ -1266,6 +1277,9 @@
             for (let i = 0; i < NPC_COUNT; i++)
               capsuleNpcs[i].visible = visible;
           },
+          setDeerVisibility: (visible) => {
+            deerGroup.visible = visible;
+          },
           ensureCastleCreated,
           water: waterUniforms,
           bakeEnvMap,
@@ -1539,6 +1553,10 @@
           uniforms.uTime.value = elapsed;
           uniforms.uPlayerPos.value.copy(charPos);
           uniforms.uTrailCenter.value.set(charPos.x, charPos.z);
+          // Deer AI (terrain-following, animation state machine)
+          updateDeer(dt);
+          if (PARAMS.deerEnabled) deerGroup.visible = true;
+          else deerGroup.visible = false;
           // Only update NPCs when in overworld (they're hidden in castle anyway)
           if (PARAMS.npcEnabled) {
             for (let i = 0; i < NPC_COUNT; i++) {
