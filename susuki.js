@@ -13,9 +13,11 @@ import {
   attribute,
   varying,
   texture,
+  uniform,
   mix,
   smoothstep,
   clamp,
+  abs,
   sin,
   cos,
   fract,
@@ -182,6 +184,12 @@ export function createSusukiStemMaterial(segments, verts, ctx) {
     uStemHeight,
     uStemWidth,
     uPlumeStart,
+    uTrailCenter = uniform(new THREE.Vector2(9999, 9999)),
+    uPlayerPos = uniform(new THREE.Vector3(9999, 0, 9999)),
+    uInteractionRange = uniform(9999),
+    uInteractionStrength = uniform(0),
+    uInteractionHThresh = uniform(2),
+    uInteractionRepel = uniform(1),
     uWindDirX,
     uWindDirZ,
     uWindAxis,
@@ -266,9 +274,40 @@ export function createSusukiStemMaterial(segments, verts, ctx) {
     const crossSway = mul(wave2, 0.3, uWindStr, heightPct);
     const totalWindLean = mul(add(windLean, micro), heightPct);
 
+    const bladeY = add(terrainH, float(0));
+    const repulseCenterXZ = uTrailCenter;
+    const pDist = length(sub(bladeWorld.xz, repulseCenterXZ));
+    const pHD = abs(sub(bladeY, uPlayerPos.y));
+    const distFalloff = mix(
+      float(1),
+      float(0),
+      smoothstep(float(0.5), uInteractionRange, pDist),
+    );
+    const heightFalloff = smoothstep(uInteractionHThresh, 0, pHD);
+    const pFall = mul(distFalloff, heightFalloff);
+    const pAng = mul(
+      negate(mix(0, uInteractionStrength, pFall)),
+      uInteractionRepel,
+    );
+    const pTo = normalize(
+      sub(
+        vec3(repulseCenterXZ.x, 0, repulseCenterXZ.y),
+        vec3(bladeWorld.x, 0, bladeWorld.z),
+      ),
+    );
+    const pAx = vec3(pTo.z, 0, negate(pTo.x));
+    const totalFall = pFall;
+    const sumAxis = mul(pAx, pFall);
+    const sumAngle = mul(pAng, pFall);
+    const invTotal = div(1, max(totalFall, 0.001));
+    const hasInteraction = smoothstep(0.001, 0.002, totalFall);
+    const pAxis = normalize(mix(vec3(1, 0, 0), sumAxis, hasInteraction));
+    const pAngle = mul(mul(sumAngle, invTotal), hasInteraction);
+
     const easedH = easeIn(heightPct, 2);
     const curveAmt = mul(negate(randomLean), easedH);
-    const grassMat = rotateAxis_mat(uWindAxis, totalWindLean)
+    const grassMat = rotateAxis_mat(pAxis, pAngle)
+      .mul(rotateAxis_mat(uWindAxis, totalWindLean))
       .mul(rotateAxis_mat(uCrossAxis, crossSway))
       .mul(rotateY_mat(randomAngle));
 
@@ -407,6 +446,12 @@ export function createSusukiBandMaterial(segments, verts, ctx) {
     uStemHeight,
     uPlumeStart,
     uSusukiPlumeFlex = float(0.2),
+    uTrailCenter = uniform(new THREE.Vector2(9999, 9999)),
+    uPlayerPos = uniform(new THREE.Vector3(9999, 0, 9999)),
+    uInteractionRange = uniform(9999),
+    uInteractionStrength = uniform(0),
+    uInteractionHThresh = uniform(2),
+    uInteractionRepel = uniform(1),
     uBandWidth,
     uWindDirX,
     uWindDirZ,
@@ -500,10 +545,41 @@ export function createSusukiBandMaterial(segments, verts, ctx) {
     const micro = mul(sin(microPhase), uWindMicro, 0.3);
     const crossSway = mul(wave2, 0.3, uWindStr, heightPct);
 
-    // Stem tip position with wind — must match stem's deformed tip exactly
+    const bladeY = add(terrainH, float(0));
+    const repulseCenterXZ = uTrailCenter;
+    const pDist = length(sub(bladeWorld.xz, repulseCenterXZ));
+    const pHD = abs(sub(bladeY, uPlayerPos.y));
+    const distFalloff = mix(
+      float(1),
+      float(0),
+      smoothstep(float(0.5), uInteractionRange, pDist),
+    );
+    const heightFalloff = smoothstep(uInteractionHThresh, 0, pHD);
+    const pFall = mul(distFalloff, heightFalloff);
+    const pAng = mul(
+      negate(mix(0, uInteractionStrength, pFall)),
+      uInteractionRepel,
+    );
+    const pTo = normalize(
+      sub(
+        vec3(repulseCenterXZ.x, 0, repulseCenterXZ.y),
+        vec3(bladeWorld.x, 0, bladeWorld.z),
+      ),
+    );
+    const pAx = vec3(pTo.z, 0, negate(pTo.x));
+    const totalFall = pFall;
+    const sumAxis = mul(pAx, pFall);
+    const sumAngle = mul(pAng, pFall);
+    const invTotal = div(1, max(totalFall, 0.001));
+    const hasInteraction = smoothstep(0.001, 0.002, totalFall);
+    const pAxis = normalize(mix(vec3(1, 0, 0), sumAxis, hasInteraction));
+    const pAngle = mul(mul(sumAngle, invTotal), hasInteraction);
+
+    // Stem tip position with wind + interaction — must match stem's deformed tip exactly
     const stemTipWindLean = add(windLean, micro);
     const stemTipCrossSway = mul(wave2, 0.3, uWindStr, float(1));
-    const stemGrassMat = rotateAxis_mat(uWindAxis, stemTipWindLean)
+    const stemGrassMat = rotateAxis_mat(pAxis, pAngle)
+      .mul(rotateAxis_mat(uWindAxis, stemTipWindLean))
       .mul(rotateAxis_mat(uCrossAxis, stemTipCrossSway))
       .mul(rotateY_mat(randomAngle));
     const stemCurveAmt = mul(negate(stemRandomLean), float(1));
@@ -521,7 +597,8 @@ export function createSusukiBandMaterial(segments, verts, ctx) {
 
     const easedH = easeIn(heightPct, 2);
     const curveAmt = mul(negate(bandRandomLean), easedH);
-    const bandMat = rotateAxis_mat(uWindAxis, effectiveWind)
+    const bandMat = rotateAxis_mat(pAxis, pAngle)
+      .mul(rotateAxis_mat(uWindAxis, effectiveWind))
       .mul(rotateAxis_mat(uCrossAxis, crossSway))
       .mul(rotateY_mat(add(randomAngle, bandAngle)));
 

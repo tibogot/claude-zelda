@@ -102,6 +102,12 @@ export function buildSusukiCtx(opts) {
     uSpecV2NoiseStr: uniforms.uSpecV2NoiseStr ?? uniform(0.6),
     uSpecV2Power: uniforms.uSpecV2Power ?? uniform(12.0),
     uSpecV2TipBias: uniforms.uSpecV2TipBias ?? uniform(0.5),
+    uTrailCenter: uniforms.uTrailCenter ?? uniform(new THREE.Vector2(9999, 9999)),
+    uPlayerPos: uniforms.uPlayerPos ?? uniform(new THREE.Vector3(9999, 0, 9999)),
+    uInteractionRange: uniforms.uInteractionRange ?? uniform(9999),
+    uInteractionStrength: uniforms.uInteractionStrength ?? uniform(0),
+    uInteractionHThresh: uniforms.uInteractionHThresh ?? uniform(2),
+    uInteractionRepel: uniforms.uInteractionRepel ?? uniform(1),
   };
 }
 
