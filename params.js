@@ -149,12 +149,20 @@ export const PARAMS = {
   showScatter: false,
   showFluffyTree: false,
   showCastle: false,
-  scatterBoulderScale: 0.04,
-  scatterGameAssetScale: 0.18,
-  scatterFlowerScale: 0.15,
-  scatterBoulderCount: 1500,
-  scatterGameAssetCount: 1000,
-  scatterFlowerCount: 8000,
+  // Scatter: configurable slots. Each slot: { key, label, url, scale, count, castShadow, alphaTest, opacity }.
+  // alphaTest/opacity only affect foliage (transparent) models.
+  scatterSlots: [
+    { key: "slot0", label: "Boulder", url: "models/rock_boulder.glb", scale: 0.04, count: 1500, castShadow: true, alphaTest: 0.05, opacity: 1 },
+    { key: "slot1", label: "Game rock", url: "models/rock__game_asset.glb", scale: 0.18, count: 1000, castShadow: true, alphaTest: 0.05, opacity: 1 },
+    { key: "slot2", label: "Flowers", url: "models/low_poly_flower-transformed.glb", scale: 0.15, count: 8000, castShadow: false, alphaTest: 0.05, opacity: 1 },
+  ],
+  scatterPresetModels: [
+    "models/rock_boulder.glb",
+    "models/rock__game_asset.glb",
+    "models/low_poly_flower-transformed.glb",
+    "models/low_poly_fern.glb",
+    "models/cliff_shrub_for_terrain.glb",
+  ],
   scatterScaleVariation: 0.5,
   scatterInnerRadius: 18,
   scatterCastShadow: true,

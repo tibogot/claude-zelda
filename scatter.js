@@ -1,14 +1,14 @@
 /**
- * Scatter: instanced rocks/flowers from GLBs, near/far LOD, placement + culling.
- * createScatter(scene, PARAMS, opts) → { scatterGroup, scatterMeshes, updateScatterPlacement, updateAllScatterLOD, MAX_SCATTER_PER_TYPE, MAX_SCATTER_FLOWERS }.
- * scatterMeshes keys are filled async as GLBs load. Index calls updateAllScatterLOD(camera, frustum) each frame when showScatter.
+ * Scatter: instanced objects from GLBs, configurable slots.
+ * createScatter(scene, PARAMS, opts) → { scatterGroup, scatterMeshes, updateScatterPlacement, updateAllScatterLOD, reloadScatterSlot, MAX_SCATTER_PER_TYPE }.
+ * PARAMS.scatterSlots: [{ key, label, url, scale, count, castShadow }, ...]
+ * Use reloadScatterSlot(key, url) when user changes model (dropdown or file upload).
  */
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 
-const MAX_SCATTER_PER_TYPE = 4000;
-const MAX_SCATTER_FLOWERS = 20000;
+const MAX_SCATTER_PER_TYPE = 20000;
 const SCATTER_CULL_RADIUS = 1.5;
 
 export function createScatter(scene, PARAMS, opts) {
@@ -26,44 +26,30 @@ export function createScatter(scene, PARAMS, opts) {
   scene.add(scatterGroup);
 
   const halfTerrainScatter = TERRAIN_SIZE * 0.48;
-  const scatterMeshes = { boulder: null, gameAsset: null, flower: null };
-  const scatterInstanceData = {
-    boulder: null,
-    gameAsset: null,
-    flower: null,
-  };
-  const scatterInstanceCount = { boulder: 0, gameAsset: 0, flower: 0 };
-  const scatterSeedOffset = { boulder: 100, gameAsset: 101, flower: 102 };
+  const scatterMeshes = {};
+  const scatterInstanceData = {};
+  const scatterInstanceCount = {};
+  const scatterSeedOffset = {};
   const scatterLodPos = new THREE.Vector3();
   const scatterCullSphere = new THREE.Sphere();
+
+  const slots = PARAMS.scatterSlots || [];
+  slots.forEach((slot, i) => {
+    scatterSeedOffset[slot.key] = 100 + i;
+  });
+
+  function getSlot(key) {
+    return slots.find((s) => s.key === key);
+  }
 
   function updateScatterPlacement(key) {
     const data = scatterInstanceData[key];
     const meshes = scatterMeshes[key];
-    if (!data || !meshes) return;
-    const maxCount =
-      key === "flower" ? MAX_SCATTER_FLOWERS : MAX_SCATTER_PER_TYPE;
-    const count = Math.min(
-      maxCount,
-      Math.max(
-        0,
-        key === "boulder"
-          ? PARAMS.scatterBoulderCount
-          : key === "gameAsset"
-            ? PARAMS.scatterGameAssetCount
-            : PARAMS.scatterFlowerCount,
-      ),
-    );
-    const baseScale =
-      key === "boulder"
-        ? PARAMS.scatterBoulderScale
-        : key === "gameAsset"
-          ? PARAMS.scatterGameAssetScale
-          : PARAMS.scatterFlowerScale;
-    const variation = Math.max(
-      0,
-      Math.min(1, PARAMS.scatterScaleVariation),
-    );
+    const slot = getSlot(key);
+    if (!data || !meshes || !slot) return;
+    const count = Math.min(MAX_SCATTER_PER_TYPE, Math.max(0, slot.count));
+    const baseScale = Math.max(0.001, slot.scale);
+    const variation = Math.max(0, Math.min(1, PARAMS.scatterScaleVariation));
     const innerR = Math.max(0, PARAMS.scatterInnerRadius);
     setSeed(scatterSeedOffset[key]);
     const mat4 = new THREE.Matrix4();
@@ -85,14 +71,13 @@ export function createScatter(scene, PARAMS, opts) {
       placed++;
     }
     scatterInstanceCount[key] = placed;
-    if (typeof camera !== "undefined")
-      updateScatterLOD(key, camera, null);
+    if (typeof camera !== "undefined") updateScatterLOD(key, camera, null);
   }
 
   function updateScatterLOD(key, cam, frustum) {
     const meshes = scatterMeshes[key];
     const data = scatterInstanceData[key];
-    const total = scatterInstanceCount[key];
+    const total = scatterInstanceCount[key] ?? 0;
     if (!meshes || !data || total === 0) return;
     const dist = Math.max(1, PARAMS.scatterLodDistance);
     const doCull = PARAMS.scatterCulling && frustum != null;
@@ -123,63 +108,96 @@ export function createScatter(scene, PARAMS, opts) {
 
   function updateAllScatterLOD(cam, frustum) {
     if (!PARAMS.showScatter) return;
-    updateScatterLOD("boulder", cam, frustum);
-    updateScatterLOD("gameAsset", cam, frustum);
-    updateScatterLOD("flower", cam, frustum);
+    for (const slot of slots) {
+      updateScatterLOD(slot.key, cam, frustum);
+    }
+  }
+
+  function disposeSlot(key) {
+    const meshes = scatterMeshes[key];
+    if (!meshes) return;
+    scatterGroup.remove(meshes.near);
+    scatterGroup.remove(meshes.far);
+    meshes.near.geometry?.dispose();
+    meshes.far.geometry?.dispose();
+    const mats = Array.isArray(meshes.near.material)
+      ? meshes.near.material
+      : [meshes.near.material];
+    mats.forEach((m) => m?.dispose?.());
+    scatterMeshes[key] = null;
+    scatterInstanceData[key] = null;
+    scatterInstanceCount[key] = 0;
   }
 
   function createScatterFromGlb(url, key) {
+    if (!url || url.trim() === "") return;
+    const slot = getSlot(key);
+    if (!slot) return;
+    const castShadow =
+      slot.castShadow !== undefined ? slot.castShadow : PARAMS.scatterCastShadow;
+
     gltfLoader.load(
       url,
       (gltf) => {
         const root = gltf.scene;
-        const meshes = [];
+        const meshList = [];
         root.traverse((o) => {
-          if (o.isMesh && o.geometry) meshes.push(o);
+          if (o.isMesh && o.geometry) meshList.push(o);
         });
-        if (meshes.length === 0) {
+        if (meshList.length === 0) {
           console.warn("Scatter GLB has no meshes:", url);
           return;
         }
         const geos = [];
         const mats = [];
-        for (const m of meshes) {
+        for (const m of meshList) {
           const g = m.geometry.clone();
           g.applyMatrix4(m.matrixWorld);
           geos.push(g);
           const src = m.material;
-          const nodeMat = new THREE.MeshStandardNodeMaterial({
-            color:
-              src && src.color
-                ? src.color.getHex
-                  ? src.color.getHex()
-                  : src.color
-                : 0x6b5d52,
-            roughness: src && src.roughness != null ? src.roughness : 0.9,
-            metalness: src && src.metalness != null ? src.metalness : 0,
-            map: src && src.map ? src.map : null,
-            normalMap: src && src.normalMap ? src.normalMap : null,
-            normalScale:
-              src && src.normalScale
-                ? src.normalScale.clone()
-                : new THREE.Vector2(1, 1),
-            roughnessMap: src && src.roughnessMap ? src.roughnessMap : null,
-            metalnessMap: src && src.metalnessMap ? src.metalnessMap : null,
-            aoMap: src && src.aoMap ? src.aoMap : null,
-            aoMapIntensity:
-              src && src.aoMapIntensity != null ? src.aoMapIntensity : 1,
-          });
-          mats.push(nodeMat);
+          const hasAlpha =
+            (src && src.alphaMap) ||
+            (src && src.transparent) ||
+            (src && src.alphaTest != null && src.alphaTest > 0);
+          let mat;
+          if (hasAlpha && src) {
+            // Use original material for foliage — WebGPU auto-converts, preserves alpha
+            mat = src.clone();
+            const slotCfg = getSlot(key);
+            mat.alphaTest = slotCfg && slotCfg.alphaTest != null ? slotCfg.alphaTest : 0.05;
+            mat.opacity = slotCfg && slotCfg.opacity != null ? slotCfg.opacity : 1;
+            if (mat.side == null) mat.side = THREE.DoubleSide;
+          } else {
+            mat = new THREE.MeshStandardNodeMaterial({
+              color:
+                src && src.color
+                  ? src.color.getHex
+                    ? src.color.getHex()
+                    : src.color
+                  : 0x6b5d52,
+              roughness: src && src.roughness != null ? src.roughness : 0.9,
+              metalness: src && src.metalness != null ? src.metalness : 0,
+              map: src && src.map ? src.map : null,
+              normalMap: src && src.normalMap ? src.normalMap : null,
+              normalScale:
+                src && src.normalScale
+                  ? src.normalScale.clone()
+                  : new THREE.Vector2(1, 1),
+              roughnessMap: src && src.roughnessMap ? src.roughnessMap : null,
+              metalnessMap: src && src.metalnessMap ? src.metalnessMap : null,
+              aoMap: src && src.aoMap ? src.aoMap : null,
+              aoMapIntensity:
+                src && src.aoMapIntensity != null ? src.aoMapIntensity : 1,
+            });
+          }
+          mats.push(mat);
         }
         const geo = mergeGeometries(geos, true);
         geo.computeBoundingSphere();
-        const maxCount =
-          key === "flower" ? MAX_SCATTER_FLOWERS : MAX_SCATTER_PER_TYPE;
-        const castShadow = key !== "flower" && PARAMS.scatterCastShadow;
         const nearIm = new THREE.InstancedMesh(
           geo,
           mats.length === 1 ? mats[0] : mats,
-          maxCount,
+          MAX_SCATTER_PER_TYPE,
         );
         nearIm.castShadow = castShadow;
         nearIm.receiveShadow = true;
@@ -187,14 +205,14 @@ export function createScatter(scene, PARAMS, opts) {
         const farIm = new THREE.InstancedMesh(
           geo,
           mats.length === 1 ? mats[0] : mats,
-          maxCount,
+          MAX_SCATTER_PER_TYPE,
         );
         farIm.castShadow = false;
         farIm.receiveShadow = false;
         farIm.frustumCulled = false;
         scatterMeshes[key] = { near: nearIm, far: farIm };
         scatterInstanceData[key] = Array.from(
-          { length: maxCount },
+          { length: MAX_SCATTER_PER_TYPE },
           () => new THREE.Matrix4(),
         );
         scatterGroup.add(nearIm);
@@ -208,16 +226,44 @@ export function createScatter(scene, PARAMS, opts) {
     );
   }
 
-  createScatterFromGlb("models/rock_boulder.glb", "boulder");
-  createScatterFromGlb("models/rock__game_asset.glb", "gameAsset");
-  createScatterFromGlb("models/low_poly_flower-transformed.glb", "flower");
+  function reloadScatterSlot(key, url) {
+    const slot = getSlot(key);
+    if (!slot) return;
+    slot.url = url;
+    disposeSlot(key);
+    createScatterFromGlb(url, key);
+  }
+
+  function updateScatterSlotAlpha(key) {
+    const slot = getSlot(key);
+    const meshes = scatterMeshes[key];
+    if (!slot || !meshes) return;
+    const mats = Array.isArray(meshes.near.material)
+      ? meshes.near.material
+      : [meshes.near.material];
+    const alphaTest = slot.alphaTest != null ? slot.alphaTest : 0.05;
+    const opacity = slot.opacity != null ? slot.opacity : 1;
+    mats.forEach((m) => {
+      if (m) {
+        m.alphaTest = alphaTest;
+        m.opacity = opacity;
+      }
+    });
+  }
+
+  // Initial load for all slots
+  for (const slot of slots) {
+    createScatterFromGlb(slot.url, slot.key);
+  }
 
   return {
     scatterGroup,
     scatterMeshes,
     updateScatterPlacement,
     updateAllScatterLOD,
+    reloadScatterSlot,
+    updateScatterSlotAlpha,
     MAX_SCATTER_PER_TYPE,
-    MAX_SCATTER_FLOWERS,
+    scatterSlots: slots,
   };
 }

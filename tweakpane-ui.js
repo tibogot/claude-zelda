@@ -9,12 +9,13 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
     bakeEnvMap,
     scatterMeshes,
     updateScatterPlacement,
+    reloadScatterSlot,
+    updateScatterSlotAlpha,
     respawnTrees,
     birds,
     hexToVec3,
     rebuildOctahedralForest,
     MAX_SCATTER_PER_TYPE,
-    MAX_SCATTER_FLOWERS,
     MAX_TREES,
   } = ctx;
 
@@ -773,20 +774,20 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
     });
 
   const fScatter = pane.addFolder({
-    title: "Scatter (rocks)",
+    title: "Scatter (rocks / flowers)",
     expanded: false,
   });
   fScatter.addBinding(PARAMS, "showScatter", { label: "visible" });
   fScatter
-    .addBinding(PARAMS, "scatterCastShadow", { label: "cast shadow" })
+    .addBinding(PARAMS, "scatterCastShadow", { label: "cast shadow (default)" })
     .on("change", () => {
-      if (scatterMeshes.boulder) {
-        scatterMeshes.boulder.near.castShadow = PARAMS.scatterCastShadow;
-        scatterMeshes.boulder.near.receiveShadow = PARAMS.scatterCastShadow;
-      }
-      if (scatterMeshes.gameAsset) {
-        scatterMeshes.gameAsset.near.castShadow = PARAMS.scatterCastShadow;
-        scatterMeshes.gameAsset.near.receiveShadow = PARAMS.scatterCastShadow;
+      for (const slot of PARAMS.scatterSlots || []) {
+        const m = scatterMeshes[slot.key];
+        if (m) {
+          const cast = slot.castShadow !== undefined ? slot.castShadow : PARAMS.scatterCastShadow;
+          m.near.castShadow = cast;
+          m.near.receiveShadow = cast;
+        }
       }
     });
   fScatter
@@ -797,8 +798,8 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       label: "scale variation",
     })
     .on("change", () => {
-      updateScatterPlacement("boulder");
-      updateScatterPlacement("gameAsset");
+      for (const slot of PARAMS.scatterSlots || [])
+        updateScatterPlacement(slot.key);
     });
   fScatter
     .addBinding(PARAMS, "scatterInnerRadius", {
@@ -808,8 +809,8 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       label: "inner radius (no placement)",
     })
     .on("change", () => {
-      updateScatterPlacement("boulder");
-      updateScatterPlacement("gameAsset");
+      for (const slot of PARAMS.scatterSlots || [])
+        updateScatterPlacement(slot.key);
     });
   fScatter.addBinding(PARAMS, "scatterLodDistance", {
     min: 10,
@@ -820,66 +821,104 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
   fScatter.addBinding(PARAMS, "scatterCulling", {
     label: "frustum culling",
   });
-  const fScatterBoulder = fScatter.addFolder({
-    title: "Boulder",
-    expanded: false,
+
+  // Build preset options from scatterPresetModels
+  const presetOptions = {};
+  for (const p of PARAMS.scatterPresetModels || []) {
+    presetOptions[p.split("/").pop() || p] = p;
+  }
+
+  // Hidden file input for GLB upload
+  const scatterFileInput = document.createElement("input");
+  scatterFileInput.type = "file";
+  scatterFileInput.accept = ".glb,.gltf";
+  scatterFileInput.style.display = "none";
+  document.body.appendChild(scatterFileInput);
+  let pendingUploadSlotKey = null;
+  scatterFileInput.addEventListener("change", () => {
+    const file = scatterFileInput.files?.[0];
+    scatterFileInput.value = "";
+    if (!file || !pendingUploadSlotKey || !reloadScatterSlot) return;
+    const url = URL.createObjectURL(file);
+    const slot = (PARAMS.scatterSlots || []).find((s) => s.key === pendingUploadSlotKey);
+    if (slot) {
+      if (slot.url && slot.url.startsWith("blob:")) URL.revokeObjectURL(slot.url);
+      slot.url = url;
+      reloadScatterSlot(pendingUploadSlotKey, url);
+    }
+    pendingUploadSlotKey = null;
   });
-  fScatterBoulder
-    .addBinding(PARAMS, "scatterBoulderScale", {
-      min: 0.002,
-      max: 0.5,
-      step: 0.002,
-      label: "scale",
-    })
-    .on("change", () => updateScatterPlacement("boulder"));
-  fScatterBoulder
-    .addBinding(PARAMS, "scatterBoulderCount", {
-      min: 0,
-      max: MAX_SCATTER_PER_TYPE,
-      step: 100,
-      label: "count",
-    })
-    .on("change", () => updateScatterPlacement("boulder"));
-  const fScatterGameAsset = fScatter.addFolder({
-    title: "Game asset rock",
-    expanded: false,
-  });
-  fScatterGameAsset
-    .addBinding(PARAMS, "scatterGameAssetScale", {
-      min: 0.02,
-      max: 2,
-      step: 0.01,
-      label: "scale",
-    })
-    .on("change", () => updateScatterPlacement("gameAsset"));
-  fScatterGameAsset
-    .addBinding(PARAMS, "scatterGameAssetCount", {
-      min: 0,
-      max: MAX_SCATTER_PER_TYPE,
-      step: 100,
-      label: "count",
-    })
-    .on("change", () => updateScatterPlacement("gameAsset"));
-  const fScatterFlower = fScatter.addFolder({
-    title: "Flowers",
-    expanded: false,
-  });
-  fScatterFlower
-    .addBinding(PARAMS, "scatterFlowerScale", {
-      min: 0.02,
-      max: 1.5,
-      step: 0.01,
-      label: "scale",
-    })
-    .on("change", () => updateScatterPlacement("flower"));
-  fScatterFlower
-    .addBinding(PARAMS, "scatterFlowerCount", {
-      min: 0,
-      max: MAX_SCATTER_FLOWERS,
-      step: 500,
-      label: "count",
-    })
-    .on("change", () => updateScatterPlacement("flower"));
+
+  for (const slot of PARAMS.scatterSlots || []) {
+    const fSlot = fScatter.addFolder({
+      title: slot.label,
+      expanded: false,
+    });
+    fSlot
+      .addBinding(slot, "url", { label: "model path" })
+      .on("change", (ev) => {
+        if (ev.value && reloadScatterSlot) reloadScatterSlot(slot.key, ev.value);
+      });
+    const presetObj = { preset: "" };
+    fSlot
+      .addBinding(presetObj, "preset", {
+        label: "quick select",
+        options: { "—": "", ...presetOptions },
+      })
+      .on("change", (ev) => {
+        if (ev.value && reloadScatterSlot) {
+          slot.url = ev.value;
+          reloadScatterSlot(slot.key, ev.value);
+        }
+      });
+    fSlot
+      .addButton({ title: "Upload GLB…" })
+      .on("click", () => {
+        pendingUploadSlotKey = slot.key;
+        scatterFileInput.click();
+      });
+    fSlot
+      .addBinding(slot, "scale", {
+        min: 0.002,
+        max: 2,
+        step: 0.01,
+        label: "scale",
+      })
+      .on("change", () => updateScatterPlacement(slot.key));
+    fSlot
+      .addBinding(slot, "count", {
+        min: 0,
+        max: MAX_SCATTER_PER_TYPE,
+        step: slot.count > 1000 ? 500 : 100,
+        label: "count",
+      })
+      .on("change", () => updateScatterPlacement(slot.key));
+    fSlot
+      .addBinding(slot, "castShadow", { label: "cast shadow" })
+      .on("change", () => {
+        const m = scatterMeshes[slot.key];
+        if (m) {
+          m.near.castShadow = slot.castShadow;
+          m.near.receiveShadow = slot.castShadow;
+        }
+      });
+    fSlot
+      .addBinding(slot, "alphaTest", {
+        min: 0,
+        max: 0.5,
+        step: 0.01,
+        label: "alpha test (foliage)",
+      })
+      .on("change", () => updateScatterSlotAlpha?.(slot.key));
+    fSlot
+      .addBinding(slot, "opacity", {
+        min: 0.1,
+        max: 1,
+        step: 0.05,
+        label: "opacity (foliage)",
+      })
+      .on("change", () => updateScatterSlotAlpha?.(slot.key));
+  }
 
   const fTrees = pane.addFolder({
     title: "Trees (leaves)",

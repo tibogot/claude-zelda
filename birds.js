@@ -141,7 +141,7 @@ export function createBirds({
     const safeXz = select(xz.lessThan(eps), float(1.0), xz);
     const x     = sqrt(vel.y.mul(vel.y).oneMinus());
     const cosry = vel.x.div(safeXz).toVar();
-    const sinry = vel.z.div(safeXz).toVar();
+    const sinry = vel.z.negate().div(safeXz).toVar();
     const cosrz = x.div(float(1.0));
     const sinrz = vel.y.div(float(1.0)).toVar();
 
