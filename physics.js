@@ -22,21 +22,24 @@ const CUBE_HALF_EXTENT = 0.5;
  * @param {THREE.Scene} scene
  * @param {number} TERRAIN_SIZE
  * @param {(x: number, z: number) => number} sampleHeight
+ * @param {{ noDefaultGround?: boolean }} [options] - Optional. Set noDefaultGround: true when using a custom ground (e.g. parkour) to avoid overlapping colliders and jitter.
  * @returns {{ physicsWorld: import("@dimforge/rapier3d").World, physicsCubes: Array<{ body: import("@dimforge/rapier3d").RigidBody, mesh: THREE.Mesh }> }}
  */
-export function createPhysicsWorld(RAPIER, scene, TERRAIN_SIZE, sampleHeight) {
+export function createPhysicsWorld(RAPIER, scene, TERRAIN_SIZE, sampleHeight, options = {}) {
   const gravity = { x: 0, y: -9.81, z: 0 };
   const physicsWorld = new RAPIER.World(gravity);
 
-  const groundHalfX = TERRAIN_SIZE * 0.5;
-  const groundHalfY = 0.5;
-  const groundHalfZ = TERRAIN_SIZE * 0.5;
-  const groundColliderDesc = RAPIER.ColliderDesc.cuboid(
-    groundHalfX,
-    groundHalfY,
-    groundHalfZ,
-  );
-  physicsWorld.createCollider(groundColliderDesc);
+  if (!options.noDefaultGround) {
+    const groundHalfX = TERRAIN_SIZE * 0.5;
+    const groundHalfY = 0.5;
+    const groundHalfZ = TERRAIN_SIZE * 0.5;
+    const groundColliderDesc = RAPIER.ColliderDesc.cuboid(
+      groundHalfX,
+      groundHalfY,
+      groundHalfZ,
+    );
+    physicsWorld.createCollider(groundColliderDesc);
+  }
 
   const physicsCubes = [];
   const cubePositions = CUBE_POSITIONS.map(([x, _, z]) => [
@@ -78,9 +81,10 @@ export function createPhysicsWorld(RAPIER, scene, TERRAIN_SIZE, sampleHeight) {
  * @param {import("@dimforge/rapier3d").World} physicsWorld
  * @param {THREE.Vector3} charPos
  * @param {object} PARAMS
+ * @param {{ enableSnapToGround?: boolean, characterOffset?: number, maxSlopeClimbAngle?: number, minSlopeSlideAngle?: number }} [options] - Optional. enableSnapToGround: false for flat terrain. maxSlopeClimbAngle/minSlopeSlideAngle in radians for slope handling.
  * @returns {{ playerBody: import("@dimforge/rapier3d").RigidBody, playerCollider: import("@dimforge/rapier3d").Collider, characterController: import("@dimforge/rapier3d").CharacterController }}
  */
-export function createPlayerController(RAPIER, physicsWorld, charPos, PARAMS) {
+export function createPlayerController(RAPIER, physicsWorld, charPos, PARAMS, options = {}) {
   const capR = PARAMS.capsuleRadius;
   const capHalfH = Math.max(
     0.1,
@@ -97,9 +101,15 @@ export function createPlayerController(RAPIER, physicsWorld, charPos, PARAMS) {
     RAPIER.ColliderDesc.capsule(capHalfH, capR),
     playerBody,
   );
-  const characterController = physicsWorld.createCharacterController(0.01);
-  characterController.enableSnapToGround(0.5);
-  characterController.setMaxSlopeClimbAngle((45 * Math.PI) / 180);
+  const characterOffset = options.characterOffset ?? 0.01;
+  const characterController = physicsWorld.createCharacterController(characterOffset);
+  if (options.enableSnapToGround !== false) {
+    characterController.enableSnapToGround(0.5);
+  }
+  const maxSlopeClimb = options.maxSlopeClimbAngle ?? (45 * Math.PI) / 180;
+  const minSlopeSlide = options.minSlopeSlideAngle ?? (50 * Math.PI) / 180;
+  characterController.setMaxSlopeClimbAngle(maxSlopeClimb);
+  characterController.setMinSlopeSlideAngle(minSlopeSlide);
   return { playerBody, playerCollider, characterController };
 }
 

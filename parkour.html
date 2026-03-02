@@ -73,6 +73,7 @@
       import { pass } from "three/tsl";
       import Stats from "stats-gl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
       import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
       import RAPIER from "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.19.3/+esm";
@@ -82,6 +83,7 @@
         createPhysicsDebug,
       } from "./physics.js";
       import { createPlayer } from "./player.js";
+      import { createFloatingLeaves } from "./floating-leaves.js";
       import { PARAMS } from "./params.js";
       import { PI } from "./constants.js";
       import { createTileMaterial } from "./tileMaterial.js";
@@ -105,12 +107,68 @@
         ground: {
           planeSize: 800,
         },
+        csm: {
+          cascades: 3,
+          maxFar: 150,
+          lightMargin: 100,
+          mapSize: 2048,
+          updateEveryFrame: true,
+        },
+        light: {
+          sunAzimuth: 135,
+          sunElevation: 43,
+          dirColor: "#fff5e0",
+          dirIntensity: 2.2,
+          hemiSkyColor: "#c8e0ff",
+          hemiGroundColor: "#88aa55",
+          hemiIntensity: 1,
+          envIntensity: 0.45,
+          exposure: 0.5,
+        },
+        sky: {
+          turbidity: 2,
+          rayleigh: 1.5,
+          mie: 0.005,
+          mieG: 0.8,
+        },
+        debug: {
+          rapierDebug: false,
+        },
+        foliage: {
+          floatingLeaves: false,
+          count: 40,
+          areaSize: 25,
+          spawnHeight: 12,
+          leafSize: 0.5,
+          scale: 2,
+          opacity: 0.9,
+          windInfluence: 0.2,
+          gravity: 0.0003,
+          terminalVelocity: 0.004,
+          rotationSpeed: 0.0003,
+          airResistance: 0.995,
+          maxAge: 2000,
+          terrainFloorOffset: 2,
+          windStr: 0.08,
+          windSpeed: 0.4,
+        },
       };
 
       function srgbToLinear(hex) {
         const c = new THREE.Color(hex);
         c.convertSRGBToLinear();
         return c;
+      }
+
+      function sunDirectionFromAngles(azimuthDeg, elevationDeg) {
+        const az = (azimuthDeg * Math.PI) / 180;
+        const el = (elevationDeg * Math.PI) / 180;
+        const cosEl = Math.cos(el);
+        return new THREE.Vector3(
+          cosEl * Math.cos(az),
+          Math.sin(el),
+          cosEl * Math.sin(az)
+        ).normalize();
       }
 
       // Flat terrain: sampleHeight returns floor height for player ground checks
@@ -122,7 +180,7 @@
         renderer.setSize(innerWidth, innerHeight);
         renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
         renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        renderer.toneMappingExposure = 0.5;
+        renderer.toneMappingExposure = parkourParams.light.exposure;
         renderer.shadowMap.enabled = true;
         renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         document.body.appendChild(renderer.domElement);
@@ -153,76 +211,48 @@
         orbitControls.update();
 
         // ── LIGHTING ──
-        const dirLight = new THREE.DirectionalLight(0xfff5e0, 2.2);
-        dirLight.position.copy(
-          new THREE.Vector3(-1, 1.2, 1).normalize().multiplyScalar(50)
+        const _sunDir = sunDirectionFromAngles(
+          parkourParams.light.sunAzimuth,
+          parkourParams.light.sunElevation
         );
+        const dirLight = new THREE.DirectionalLight(
+          parkourParams.light.dirColor,
+          parkourParams.light.dirIntensity
+        );
+        dirLight.position.copy(_sunDir.clone().multiplyScalar(50));
         dirLight.castShadow = true;
-        dirLight.shadow.mapSize.width = 2048;
-        dirLight.shadow.mapSize.height = 2048;
+        dirLight.shadow.mapSize.width = parkourParams.csm.mapSize;
+        dirLight.shadow.mapSize.height = parkourParams.csm.mapSize;
         dirLight.shadow.camera.near = 1;
         dirLight.shadow.camera.far = 200;
         dirLight.shadow.camera.left = -80;
         dirLight.shadow.camera.right = 80;
         dirLight.shadow.camera.top = 80;
         dirLight.shadow.camera.bottom = -80;
-        dirLight.shadow.bias = -0.001;
-        dirLight.shadow.normalBias = 0.05;
+        dirLight.shadow.bias = PARAMS.shadowBias;
+        dirLight.shadow.normalBias = PARAMS.shadowNormalBias;
 
         const csm = new CSMShadowNode(dirLight, {
-          cascades: 3,
-          maxFar: 200,
+          cascades: parkourParams.csm.cascades,
+          maxFar: parkourParams.csm.maxFar,
           mode: "practical",
-          lightMargin: 250,
+          lightMargin: parkourParams.csm.lightMargin,
         });
-
-        csm._updateShadowBounds = function () {
-          for (let i = 0; i < this.frustums.length; i++) {
-            const shadowCam = this.lights[i].shadow.camera;
-            const frustum = this.frustums[i];
-            const nv = frustum.vertices.near;
-            const fv = frustum.vertices.far;
-            const d1 = fv[0].distanceTo(fv[2]);
-            const d2 = fv[0].distanceTo(nv[2]);
-            const sphereRadius = Math.max(60, Math.max(d1, d2) / 2);
-            const ext = sphereRadius * 2;
-            shadowCam.left = -ext / 2;
-            shadowCam.right = ext / 2;
-            shadowCam.top = ext / 2;
-            shadowCam.bottom = -ext / 2;
-            shadowCam.updateProjectionMatrix();
-          }
-        };
-
-        const _csmCenter = new THREE.Vector3();
-        const _csmLightTarget = new THREE.Vector3();
-        const _csmLightPos = new THREE.Vector3();
-        const _csmLightDir = new THREE.Vector3();
-        const origUpdateBefore = csm.updateBefore.bind(csm);
-        csm.updateBefore = function () {
-          origUpdateBefore();
-          const cam = this.camera;
-          if (!cam || !cam.matrixWorld) return;
-          cam.getWorldPosition(_csmCenter);
-          dirLight.getWorldPosition(_csmLightPos);
-          dirLight.target.getWorldPosition(_csmLightTarget);
-          _csmLightDir.subVectors(_csmLightTarget, _csmLightPos).normalize();
-          for (let i = 0; i < this.lights.length; i++) {
-            const lw = this.lights[i];
-            lw.position.copy(_csmCenter);
-            lw.target.position.copy(_csmCenter).add(_csmLightDir);
-          }
-        };
 
         dirLight.shadow.shadowNode = csm;
         scene.add(dirLight);
 
+        // Fixed shadow target — sun points at scene center so fixed objects (building) have stable shadows
         const shadowTarget = new THREE.Object3D();
-        shadowTarget.position.set(0, 0, 0);
+        shadowTarget.position.set(0, FLOOR_Y, 0);
         scene.add(shadowTarget);
         dirLight.target = shadowTarget;
 
-        const hemiLight = new THREE.HemisphereLight(0xc8e0ff, 0x88aa55, 1);
+        const hemiLight = new THREE.HemisphereLight(
+          parkourParams.light.hemiSkyColor,
+          parkourParams.light.hemiGroundColor,
+          parkourParams.light.hemiIntensity
+        );
         scene.add(hemiLight);
 
         // ── FLAT PLANE TERRAIN ──
@@ -290,22 +320,89 @@
 
         scene.add(towerGroup);
 
+        // ── PARKOUR PLATFORMS (GLB + per-object tile material) ──
+        const parkourGroup = new THREE.Group();
+        parkourGroup.position.y = FLOOR_Y;
+        const gltfLoader = new GLTFLoader();
+        const PARKOUR_MODELS = [
+          { url: "models/parkour/slope1.glb", pos: [8, 0, 0], textureScale: 1200, gradientBias: -0.4, uvOffset: [127.3, 41.7, 89.2] },
+          { url: "models/parkour/parkour1.glb", pos: [16, 0, 0], textureScale: 1500, gradientBias: -0.15, uvOffset: [203.1, 67.9, 151.4] },
+          { url: "models/parkour/holewall.glb", pos: [24, 0, 0], textureScale: 1800, gradientBias: 0.55, uvOffset: [311.5, 93.2, 227.8] },
+          { url: "models/parkour/cylinder.glb", pos: [32, 0, 0], textureScale: 1000, gradientBias: 0.3, uvOffset: [419.7, 178.3, 293.6] },
+        ];
+        for (const { url, pos, textureScale, gradientBias, uvOffset } of PARKOUR_MODELS) {
+          const gltf = await gltfLoader.loadAsync(url);
+          const mat = createTileMaterial({
+            textureScale: textureScale ?? parkourParams.tile.textureScale,
+            gradientIntensity: parkourParams.tile.gradientIntensity,
+            gradientBias: gradientBias ?? parkourParams.tile.gradientBias,
+            tileColor: "#d4d4d4",
+            gridColor: "#707070",
+            gridLineColor: "#404040",
+            roughness: parkourParams.tile.roughness,
+            metalness: parkourParams.tile.metalness,
+            objectSpace: true,
+            uvOffset: uvOffset ?? [0, 0, 0],
+          });
+          gltf.scene.traverse((child) => {
+            if (child.isMesh) {
+              child.material = mat;
+              child.castShadow = true;
+              child.receiveShadow = true;
+            }
+          });
+          gltf.scene.position.set(pos[0], pos[1], pos[2]);
+          parkourGroup.add(gltf.scene);
+        }
+        scene.add(parkourGroup);
+
         // ── SKY ──
         const sky = new SkyMesh();
         sky.scale.setScalar(10000);
         scene.add(sky);
-        sky.turbidity.value = 2;
-        sky.rayleigh.value = 1.5;
-        sky.mieCoefficient.value = 0.005;
-        sky.mieDirectionalG.value = 0.8;
-        const sd = new THREE.Vector3(-1, 1.2, 1).normalize();
-        sky.sunPosition.value.copy(sd);
+        sky.turbidity.value = parkourParams.sky.turbidity;
+        sky.rayleigh.value = parkourParams.sky.rayleigh;
+        sky.mieCoefficient.value = parkourParams.sky.mie;
+        sky.mieDirectionalG.value = parkourParams.sky.mieG;
+        sky.sunPosition.value.copy(
+          sunDirectionFromAngles(
+            parkourParams.light.sunAzimuth,
+            parkourParams.light.sunElevation
+          )
+        );
 
         const pmremGenerator = new THREE.PMREMGenerator(renderer);
         const skyEnvScene = new THREE.Scene();
         skyEnvScene.add(sky.clone());
         scene.environment = pmremGenerator.fromScene(skyEnvScene, 0.04).texture;
-        scene.environmentIntensity = 0.45;
+        scene.environmentIntensity = parkourParams.light.envIntensity;
+
+        // ── FLOATING LEAVES ──
+        const windParams = {
+          uTime: { value: 0 },
+          uWindStr: { value: parkourParams.foliage.windStr },
+          uWindSpeed: { value: parkourParams.foliage.windSpeed },
+        };
+        const leaves = createFloatingLeaves({
+          scene,
+          enabled: parkourParams.foliage.floatingLeaves,
+          count: parkourParams.foliage.count,
+          maxCount: 500,
+          areaSize: parkourParams.foliage.areaSize,
+          spawnHeight: parkourParams.foliage.spawnHeight,
+          leafSize: parkourParams.foliage.leafSize,
+          scale: parkourParams.foliage.scale,
+          opacity: parkourParams.foliage.opacity,
+          windInfluence: parkourParams.foliage.windInfluence,
+          gravity: parkourParams.foliage.gravity,
+          terminalVelocity: parkourParams.foliage.terminalVelocity,
+          rotationSpeed: parkourParams.foliage.rotationSpeed,
+          airResistance: parkourParams.foliage.airResistance,
+          maxAge: parkourParams.foliage.maxAge,
+          terrainFloorOffset: parkourParams.foliage.terrainFloorOffset,
+          getTerrainHeight: () => FLOOR_Y,
+          windParams,
+        });
 
         // ── PHYSICS ──
         await RAPIER.init({});
@@ -313,10 +410,11 @@
           RAPIER,
           scene,
           PARKOUR_SIZE,
-          sampleHeight
+          sampleHeight,
+          { noDefaultGround: true }
         );
 
-        // Parkour ground: fixed body so floor surface is at FLOOR_Y (top of cuboid)
+        // Parkour ground: fixed body so floor surface is at FLOOR_Y (top of cuboid) — matches index physics setup
         const groundHalfY = 0.5;
         const groundBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(
           0,
@@ -348,6 +446,65 @@
           towerBodyPhys
         );
 
+        // Parkour platforms: one trimesh per platform (merge all meshes, like index7 ruins)
+        // Per Rapier docs: vertices=Float32Array [x,y,z,...], indices=Uint32Array [i0,i1,i2,...]
+        const _box = new THREE.Box3();
+        const _center = new THREE.Vector3();
+        const _v = new THREE.Vector3();
+        for (const platform of parkourGroup.children) {
+          platform.updateMatrixWorld(true);
+          _box.setFromObject(platform);
+          _box.getCenter(_center);
+          const verts = [];
+          const inds = [];
+          let vertexOffset = 0;
+          platform.traverse((child) => {
+            if (!child.isMesh || !child.geometry) return;
+            const geo = child.geometry;
+            const posAttr = geo.getAttribute?.("position") ?? geo.attributes?.position;
+            if (!posAttr || posAttr.count < 3) return;
+            const worldMat = child.matrixWorld;
+            for (let i = 0; i < posAttr.count; i++) {
+              _v.fromBufferAttribute(posAttr, i).applyMatrix4(worldMat);
+              verts.push(_v.x - _center.x, _v.y - _center.y, _v.z - _center.z);
+            }
+            const idxAttr = geo.index;
+            if (idxAttr) {
+              for (let i = 0; i < idxAttr.count; i++)
+                inds.push(vertexOffset + idxAttr.getX(i));
+            } else {
+              for (let i = 0; i < posAttr.count; i++)
+                inds.push(vertexOffset + i);
+            }
+            vertexOffset += posAttr.count;
+          });
+          if (verts.length < 9 || inds.length < 3) continue; // need at least 1 triangle
+          const platformVerts = new Float32Array(verts);
+          const platformInds = new Uint32Array(inds);
+          // TriMeshFlags: MERGE_DUPLICATE=16, DELETE_DEGENERATE=32, FIX_INTERNAL_EDGES=144
+          const tf = RAPIER.TriMeshFlags ?? {};
+          const flags = (tf.MERGE_DUPLICATE_VERTICES ?? 16) |
+            (tf.DELETE_DEGENERATE_TRIANGLES ?? 32) |
+            (tf.FIX_INTERNAL_EDGES ?? 144);
+          try {
+            const platformBody = physicsWorld.createRigidBody(
+              RAPIER.RigidBodyDesc.fixed().setTranslation(
+                _center.x,
+                _center.y,
+                _center.z
+              )
+            );
+            const colliderDesc = RAPIER.ColliderDesc.trimesh(
+              platformVerts,
+              platformInds,
+              flags
+            );
+            physicsWorld.createCollider(colliderDesc, platformBody);
+          } catch (e) {
+            console.warn("Parkour collider failed for", platform.name || platform.uuid, e);
+          }
+        }
+
         // Hide physics cubes for clean parkour (add parkour elements later)
         physicsCubes.forEach(({ mesh }) => {
           mesh.visible = false;
@@ -370,7 +527,12 @@
         charPos.y = FLOOR_Y + capHalfH + capR;
 
         const { playerBody, playerCollider, characterController } =
-          createPlayerController(RAPIER, physicsWorld, charPos, PARAMS);
+          createPlayerController(RAPIER, physicsWorld, charPos, PARAMS, {
+          enableSnapToGround: true,
+          characterOffset: 0.02,
+          maxSlopeClimbAngle: (60 * Math.PI) / 180,
+          minSlopeSlideAngle: (65 * Math.PI) / 180,
+        });
 
         const player = createPlayer({
           scene,
@@ -438,6 +600,216 @@
           step: 50,
         });
 
+        const lightingFolder = pane.addFolder({ title: "Lighting", expanded: true });
+        lightingFolder.addBinding(parkourParams.light, "sunAzimuth", {
+          min: 0,
+          max: 360,
+          step: 1,
+          label: "sun azimuth",
+        });
+        lightingFolder.addBinding(parkourParams.light, "sunElevation", {
+          min: -10,
+          max: 90,
+          step: 1,
+          label: "sun elevation",
+        });
+        lightingFolder.addBinding(parkourParams.light, "dirColor", {
+          view: "color",
+          label: "sun color",
+        });
+        lightingFolder.addBinding(parkourParams.light, "dirIntensity", {
+          min: 0,
+          max: 5,
+          step: 0.1,
+          label: "sun intensity",
+        });
+        lightingFolder.addBinding(parkourParams.light, "hemiSkyColor", {
+          view: "color",
+          label: "ambient sky",
+        });
+        lightingFolder.addBinding(parkourParams.light, "hemiGroundColor", {
+          view: "color",
+          label: "ambient ground",
+        });
+        lightingFolder.addBinding(parkourParams.light, "hemiIntensity", {
+          min: 0,
+          max: 3,
+          step: 0.1,
+          label: "ambient intensity",
+        });
+        lightingFolder.addBinding(parkourParams.light, "envIntensity", {
+          min: 0,
+          max: 2,
+          step: 0.01,
+          label: "env map",
+        });
+        lightingFolder.addBinding(parkourParams.light, "exposure", {
+          min: 0.1,
+          max: 2,
+          step: 0.05,
+          label: "exposure",
+        });
+
+        const skyFolder = pane.addFolder({ title: "Sky", expanded: true });
+        skyFolder.addBinding(parkourParams.sky, "turbidity", {
+          min: 0,
+          max: 10,
+          step: 0.1,
+        });
+        skyFolder.addBinding(parkourParams.sky, "rayleigh", {
+          min: 0,
+          max: 4,
+          step: 0.1,
+        });
+        skyFolder.addBinding(parkourParams.sky, "mie", {
+          min: 0,
+          max: 0.1,
+          step: 0.001,
+        });
+        skyFolder.addBinding(parkourParams.sky, "mieG", {
+          min: 0,
+          max: 1,
+          step: 0.01,
+          label: "mie g",
+        });
+
+        const foliageFolder = pane.addFolder({ title: "Foliage", expanded: true });
+        foliageFolder.addBinding(parkourParams.foliage, "floatingLeaves", {
+          label: "enable",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "count", {
+          min: 10,
+          max: 500,
+          step: 10,
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "areaSize", {
+          min: 20,
+          max: 400,
+          step: 10,
+          label: "area size",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "spawnHeight", {
+          min: 5,
+          max: 80,
+          step: 5,
+          label: "spawn height",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "leafSize", {
+          min: 0.05,
+          max: 1,
+          step: 0.05,
+          label: "leaf size",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "scale", {
+          min: 0.2,
+          max: 3,
+          step: 0.1,
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "opacity", {
+          min: 0.1,
+          max: 1,
+          step: 0.05,
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "windInfluence", {
+          min: 0,
+          max: 3,
+          step: 0.1,
+          label: "wind influence",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "windStr", {
+          min: 0,
+          max: 1,
+          step: 0.05,
+          label: "wind strength",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "windSpeed", {
+          min: 0.2,
+          max: 3,
+          step: 0.1,
+          label: "wind speed",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "gravity", {
+          min: 0,
+          max: 0.01,
+          step: 0.0005,
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "terminalVelocity", {
+          min: 0.005,
+          max: 0.1,
+          step: 0.005,
+          label: "terminal vel",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "rotationSpeed", {
+          min: 0,
+          max: 0.01,
+          step: 0.0005,
+          label: "rotation speed",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "airResistance", {
+          min: 0.9,
+          max: 1,
+          step: 0.005,
+          label: "air resistance",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "maxAge", {
+          min: 200,
+          max: 2000,
+          step: 100,
+          label: "max age (respawn)",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "terrainFloorOffset", {
+          min: 0.5,
+          max: 10,
+          step: 0.5,
+          label: "floor offset",
+        });
+
+        const debugFolder = pane.addFolder({ title: "Debug", expanded: false });
+        debugFolder.addBinding(parkourParams.debug, "rapierDebug", {
+          label: "Rapier colliders",
+        });
+
+        const lightFolder = pane.addFolder({ title: "Shadows (CSM)", expanded: true });
+        lightFolder.addBinding(parkourParams.csm, "updateEveryFrame", {
+          label: "update every frame",
+        });
+        lightFolder.addBinding(PARAMS, "shadowBias", {
+          min: -0.01,
+          max: 0.001,
+          step: 0.0001,
+          label: "bias",
+        });
+        lightFolder.addBinding(PARAMS, "shadowNormalBias", {
+          min: 0,
+          max: 0.2,
+          step: 0.01,
+          label: "normalBias",
+        });
+        lightFolder.addBinding(parkourParams.csm, "cascades", {
+          min: 1,
+          max: 4,
+          step: 1,
+          label: "cascades",
+        });
+        lightFolder.addBinding(parkourParams.csm, "maxFar", {
+          min: 50,
+          max: 500,
+          step: 10,
+          label: "maxFar",
+        });
+        lightFolder.addBinding(parkourParams.csm, "lightMargin", {
+          min: 0,
+          max: 300,
+          step: 10,
+          label: "lightMargin",
+        });
+        lightFolder.addBinding(parkourParams.csm, "mapSize", {
+          min: 512,
+          max: 4096,
+          step: 512,
+          label: "mapSize",
+        });
+
         // ── RENDER PIPELINE ──
         const renderPipeline = new THREE.RenderPipeline(renderer);
         renderPipeline.outputNode = pass(scene, camera);
@@ -448,6 +820,18 @@
 
         const timer = new THREE.Timer();
         let lastTime = 0;
+        let lastPlaneSize = parkourParams.ground.planeSize;
+        const smoothCamPos = new THREE.Vector3();
+        const smoothLookAt = new THREE.Vector3();
+        const smoothCharPos = new THREE.Vector3();
+        let camSmoothInit = false;
+        let charSmoothInit = false;
+        const CAM_SMOOTH = 12; // higher = snappier, lower = smoother (filters jitter)
+        const CHAR_SMOOTH = 14; // character visual smoothing
+        let lastCsmCascades = parkourParams.csm.cascades;
+        let lastCsmMaxFar = parkourParams.csm.maxFar;
+        let lastCsmLightMargin = parkourParams.csm.lightMargin;
+        let lastCsmMapSize = parkourParams.csm.mapSize;
 
         renderer.setAnimationLoop(() => {
           timer.update();
@@ -456,6 +840,42 @@
           lastTime = elapsed;
 
           player.update(dt);
+
+          windParams.uTime.value = elapsed;
+          windParams.uWindStr.value = parkourParams.foliage.windStr;
+          windParams.uWindSpeed.value = parkourParams.foliage.windSpeed;
+          leaves.params.enabled = parkourParams.foliage.floatingLeaves;
+          leaves.params.count = parkourParams.foliage.count;
+          leaves.params.areaSize = parkourParams.foliage.areaSize;
+          leaves.params.spawnHeight = parkourParams.foliage.spawnHeight;
+          leaves.params.leafSize = parkourParams.foliage.leafSize;
+          leaves.params.scale = parkourParams.foliage.scale;
+          leaves.params.opacity = parkourParams.foliage.opacity;
+          leaves.params.windInfluence = parkourParams.foliage.windInfluence;
+          leaves.params.gravity = parkourParams.foliage.gravity;
+          leaves.params.terminalVelocity = parkourParams.foliage.terminalVelocity;
+          leaves.params.rotationSpeed = parkourParams.foliage.rotationSpeed;
+          leaves.params.airResistance = parkourParams.foliage.airResistance;
+          leaves.params.maxAge = parkourParams.foliage.maxAge;
+          leaves.params.terrainFloorOffset = parkourParams.foliage.terrainFloorOffset;
+          leaves.update();
+
+          // Smooth character visual + camera to filter physics jitter (ground appears to shake otherwise)
+          const capHalfH = Math.max(0.1, (PARAMS.characterHeight - 2 * PARAMS.capsuleRadius) / 2);
+          const groundY = FLOOR_Y + capHalfH + PARAMS.capsuleRadius;
+          const inAir = charPos.y > groundY + 0.15;
+          if (!charSmoothInit) {
+            smoothCharPos.copy(charPos);
+            charSmoothInit = true;
+          }
+          if (inAir) {
+            smoothCharPos.copy(charPos);
+            player.characterGroup.position.copy(charPos);
+          } else {
+            const charAlpha = 1 - Math.exp(-CHAR_SMOOTH * dt);
+            smoothCharPos.lerp(charPos, charAlpha);
+            player.characterGroup.position.copy(smoothCharPos);
+          }
 
           const syncTileMat = (mat) => {
             const u = mat._tileUniforms;
@@ -475,35 +895,90 @@
           syncTileMat(floorMat);
           syncTileMat(towerMat);
 
-          const scale = parkourParams.ground.planeSize / PARKOUR_SIZE;
-          floor.scale.set(scale, 1, scale);
+          if (parkourParams.ground.planeSize !== lastPlaneSize) {
+            lastPlaneSize = parkourParams.ground.planeSize;
+            const scale = lastPlaneSize / PARKOUR_SIZE;
+            floor.scale.set(scale, 1, scale);
+          }
 
           if (PARAMS.cameraMode === "thirdPerson") {
             const camDist = PARAMS.camDist;
             const cx =
-              charPos.x -
-              Math.sin(player.state.camYaw) *
-                Math.cos(player.state.camPitch) *
-                camDist;
+              smoothCharPos.x - Math.sin(player.state.camYaw) * Math.cos(player.state.camPitch) * camDist;
             const cy =
-              charPos.y +
-              Math.sin(player.state.camPitch) * camDist +
-              PARAMS.camHeight;
+              smoothCharPos.y + Math.sin(player.state.camPitch) * camDist + PARAMS.camHeight;
             const cz =
-              charPos.z -
-              Math.cos(player.state.camYaw) *
-                Math.cos(player.state.camPitch) *
-                camDist;
-            camera.position.set(cx, Math.max(cy, FLOOR_Y + 1.5), cz);
-            camera.lookAt(charPos.x, charPos.y + 0.5, charPos.z);
+              smoothCharPos.z - Math.cos(player.state.camYaw) * Math.cos(player.state.camPitch) * camDist;
+            const camTerrainY = sampleHeight(cx, cz) + 1.5;
+            const targetPos = new THREE.Vector3(cx, Math.max(cy, camTerrainY), cz);
+            const targetLook = new THREE.Vector3(smoothCharPos.x, smoothCharPos.y + 0.5, smoothCharPos.z);
+            if (!camSmoothInit) {
+              smoothCamPos.copy(targetPos);
+              smoothLookAt.copy(targetLook);
+              camSmoothInit = true;
+            }
+            const alpha = 1 - Math.exp(-CAM_SMOOTH * dt);
+            smoothCamPos.lerp(targetPos, alpha);
+            smoothLookAt.lerp(targetLook, alpha);
+            camera.position.copy(smoothCamPos);
+            camera.lookAt(smoothLookAt);
             orbitControls.enabled = false;
           } else {
             orbitControls.enabled = true;
             orbitControls.update();
           }
 
+          dirLight.shadow.bias = PARAMS.shadowBias;
+          dirLight.shadow.normalBias = PARAMS.shadowNormalBias;
+
+          // Apply lighting params
+          const sunDir = sunDirectionFromAngles(
+            parkourParams.light.sunAzimuth,
+            parkourParams.light.sunElevation
+          );
+          dirLight.position.copy(sunDir.clone().multiplyScalar(50));
+          dirLight.color.set(parkourParams.light.dirColor);
+          dirLight.intensity = parkourParams.light.dirIntensity;
+          hemiLight.color.set(parkourParams.light.hemiSkyColor);
+          hemiLight.groundColor.set(parkourParams.light.hemiGroundColor);
+          hemiLight.intensity = parkourParams.light.hemiIntensity;
+          sky.turbidity.value = parkourParams.sky.turbidity;
+          sky.rayleigh.value = parkourParams.sky.rayleigh;
+          sky.mieCoefficient.value = parkourParams.sky.mie;
+          sky.mieDirectionalG.value = parkourParams.sky.mieG;
+          sky.sunPosition.value.copy(sunDir);
+          scene.environmentIntensity = parkourParams.light.envIntensity;
+          renderer.toneMappingExposure = parkourParams.light.exposure;
+
+          // Apply CSM param changes (only when changed — updateFrustums is expensive)
+          const csmChanged =
+            parkourParams.csm.cascades !== lastCsmCascades ||
+            parkourParams.csm.maxFar !== lastCsmMaxFar ||
+            parkourParams.csm.lightMargin !== lastCsmLightMargin ||
+            parkourParams.csm.mapSize !== lastCsmMapSize;
+          if (csmChanged) {
+            lastCsmCascades = parkourParams.csm.cascades;
+            lastCsmMaxFar = parkourParams.csm.maxFar;
+            lastCsmLightMargin = parkourParams.csm.lightMargin;
+            lastCsmMapSize = parkourParams.csm.mapSize;
+            csm.cascades = parkourParams.csm.cascades;
+            csm.maxFar = parkourParams.csm.maxFar;
+            csm.lightMargin = parkourParams.csm.lightMargin;
+            dirLight.shadow.mapSize.width = parkourParams.csm.mapSize;
+            dirLight.shadow.mapSize.height = parkourParams.csm.mapSize;
+            if (csm.frustums) csm.updateFrustums();
+          }
+
+          // Update frustums every frame when enabled — fixes shadow disappearing at certain
+          // camera angles (CSM is camera-relative; stale frustums = shadow outside cascade bounds)
+          if (parkourParams.csm.updateEveryFrame && csm.frustums) {
+            csm.updateFrustums();
+          }
+
+          physicsDebugGroup.visible = !!parkourParams.debug.rapierDebug;
+          if (parkourParams.debug.rapierDebug) buildRapierDebugMeshes();
+
           camera.updateMatrixWorld();
-          if (csm.frustums) csm.updateFrustums();
           renderPipeline.render();
           stats.update();
         });
@@ -512,7 +987,7 @@
           camera.aspect = innerWidth / innerHeight;
           camera.updateProjectionMatrix();
           renderer.setSize(innerWidth, innerHeight);
-          if (csm.frustums) csm.updateFrustums();
+          if (csm.frustums) csm.updateFrustums(); // Only on resize
         });
       }
 
