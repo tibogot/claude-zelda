@@ -297,6 +297,11 @@ export function createPlayer(opts) {
     isGrounded: false,
     moveDir: new THREE.Vector3(),
   };
+  // Grace counter: keeps isGrounded true for a few frames after contact loss.
+  // Prevents 1-frame flicker on descending slopes and dipping kinematic planks.
+  // Cleared immediately on intentional jump so air state engages without delay.
+  let _groundGrace = 0;
+  let _justJumped  = false;
   let isPointerLocked = false;
 
   window.addEventListener("keydown", (e) => {
@@ -464,6 +469,7 @@ export function createPlayer(opts) {
     if (onGround) {
       if (keys.space) {
         state.characterVelY = PARAMS.jumpSpeed;
+        _justJumped = true;
         desiredY = charPos.y + state.characterVelY * dt;
       } else {
         state.characterVelY = 0;
@@ -521,8 +527,22 @@ export function createPlayer(opts) {
       const landedGroundY = sampleHeight(charPos.x, charPos.z) + capHalfH + capR;
       if (state.characterVelY < 0 && charPos.y <= landedGroundY + 0.2) state.characterVelY = 0;
     } else {
-      // parkour mode: Rapier trimesh colliders are ground truth
-      state.isGrounded = characterController.computedGrounded();
+      // parkour mode: Rapier trimesh colliders are ground truth.
+      // 3-frame grace period prevents 1-frame flicker on dipping planks and descending slopes.
+      const rawGrounded = characterController.computedGrounded();
+      if (_justJumped) {
+        _justJumped = false;
+        _groundGrace = 0;
+        state.isGrounded = false;
+      } else if (rawGrounded) {
+        _groundGrace = 3;
+        state.isGrounded = true;
+      } else if (_groundGrace > 0) {
+        _groundGrace--;
+        state.isGrounded = true;
+      } else {
+        state.isGrounded = false;
+      }
       if (state.isGrounded && state.characterVelY < 0) state.characterVelY = 0;
     }
     const corrected = characterController.computedMovement();

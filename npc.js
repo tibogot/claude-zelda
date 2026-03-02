@@ -23,6 +23,7 @@ const DRACO_URL =
  * @param {number} [opts.capsuleRadius]
  * @param {{ pos: THREE.Vector3, yaw: number }} [opts.spawnInFrontOf] - Spawn in front of this position/facing
  * @param {number} [opts.spawnDistance] - Distance in front when using spawnInFrontOf
+ * @param {THREE.Vector3} [opts.playerPos] - Player position for proximity checks (idle when near)
  * @returns {{ group: THREE.Group, capsule: THREE.Mesh, update: (dt: number) => void }}
  */
 export function createNpc(opts) {
@@ -37,6 +38,7 @@ export function createNpc(opts) {
     capsuleRadius = 0.35,
     spawnInFrontOf = null,
     spawnDistance = 4,
+    playerPos = null,
   } = opts;
 
   const capR = capsuleRadius;
@@ -60,6 +62,7 @@ export function createNpc(opts) {
 
   let mixer = null;
   let walkAction = null;
+  let idleAction = null;
   let baseScale = 1;
   group.userData.modelBaseY = 0;
   group.userData.initialCharHeight = characterHeight;
@@ -84,6 +87,7 @@ export function createNpc(opts) {
   }
   let dir = new THREE.Vector3(1, 0, 0);
   let dirChangeTimer = 0;
+  let wasNearPlayer = false;
 
   const draco = new DRACOLoader();
   draco.setDecoderPath(DRACO_URL);
@@ -122,10 +126,14 @@ export function createNpc(opts) {
 
       if (gltf.animations && gltf.animations.length) {
         mixer = new THREE.AnimationMixer(model);
+        const idleClip =
+          gltf.animations.find((a) => a.name === "Idle_Loop") ||
+          gltf.animations[0];
         const walkClip =
           gltf.animations.find((a) => a.name === "Walk_Loop") ||
           gltf.animations.find((a) => a.name === "Jog_Fwd_Loop") ||
           gltf.animations[0];
+        idleAction = mixer.clipAction(idleClip).setLoop(2201);
         walkAction = mixer.clipAction(walkClip).setLoop(2201);
         walkAction.play();
       }
@@ -137,6 +145,8 @@ export function createNpc(opts) {
     (err) => console.error("NPC GLB load failed:", err),
   );
 
+  const _toPlayer = new THREE.Vector3();
+
   function update(dt) {
     const npc = parkourParams.npc;
     const enabled = !!npc.enabled;
@@ -147,29 +157,65 @@ export function createNpc(opts) {
 
     if (mixer) mixer.update(dt);
 
-    const speed = npc.speed ?? 2;
-    const walkRadius = npc.walkRadius ?? 100;
-    const interval = npc.directionChangeInterval ?? 3;
-
-    dirChangeTimer -= dt;
-    if (dirChangeTimer <= 0) {
-      dirChangeTimer = interval;
-      const angle = Math.random() * Math.PI * 2;
-      dir.set(Math.cos(angle), 0, Math.sin(angle));
+    const idleWhenNear = !!npc.idleWhenNearPlayer && playerPos;
+    const nearDist = npc.nearPlayerDistance ?? 4;
+    let isNearPlayer = false;
+    if (idleWhenNear) {
+      _toPlayer.set(playerPos.x - pos.x, 0, playerPos.z - pos.z);
+      isNearPlayer = _toPlayer.length() < nearDist;
     }
 
-    pos.x += dir.x * speed * dt;
-    pos.z += dir.z * speed * dt;
+    if (isNearPlayer) {
+      if (!wasNearPlayer) {
+        wasNearPlayer = true;
+        if (walkAction?.isRunning()) {
+          if (idleAction) {
+            idleAction.enabled = true;
+            idleAction.crossFadeFrom(walkAction, 0.35).play();
+          }
+        } else {
+          idleAction?.play();
+        }
+      }
+    } else {
+      const speed = npc.speed ?? 2;
+      const walkRadius = npc.walkRadius ?? 100;
+      const interval = npc.directionChangeInterval ?? 3;
 
-    const dist = Math.sqrt(pos.x * pos.x + pos.z * pos.z);
-    if (dist > walkRadius) {
-      dir.set(-pos.x, 0, -pos.z).normalize();
-      pos.x = (pos.x / dist) * walkRadius;
-      pos.z = (pos.z / dist) * walkRadius;
+      if (wasNearPlayer) {
+        wasNearPlayer = false;
+        if (walkAction) {
+          walkAction.enabled = true;
+          if (idleAction?.isRunning()) {
+            if (walkAction.time < 0.1) walkAction.time = 0.1;
+            walkAction.crossFadeFrom(idleAction, 0.35).play();
+          } else {
+            walkAction.play();
+          }
+        }
+      }
+
+      dirChangeTimer -= dt;
+      if (dirChangeTimer <= 0) {
+        dirChangeTimer = interval;
+        const angle = Math.random() * Math.PI * 2;
+        dir.set(Math.cos(angle), 0, Math.sin(angle));
+      }
+
+      pos.x += dir.x * speed * dt;
+      pos.z += dir.z * speed * dt;
+
+      const dist = Math.sqrt(pos.x * pos.x + pos.z * pos.z);
+      if (dist > walkRadius) {
+        dir.set(-pos.x, 0, -pos.z).normalize();
+        pos.x = (pos.x / dist) * walkRadius;
+        pos.z = (pos.z / dist) * walkRadius;
+      }
+
+      pos.x = Math.max(-half, Math.min(half, pos.x));
+      pos.z = Math.max(-half, Math.min(half, pos.z));
     }
 
-    pos.x = Math.max(-half, Math.min(half, pos.x));
-    pos.z = Math.max(-half, Math.min(half, pos.z));
     const floorOff = npc.floorOffset ?? 0;
     pos.y = FLOOR_Y + heightOffset + floorOff;
 
@@ -184,7 +230,17 @@ export function createNpc(opts) {
       }
     }
 
-    const targetYaw = Math.atan2(dir.x, dir.z);
+    let targetYaw;
+    if (isNearPlayer && playerPos) {
+      _toPlayer.set(playerPos.x - pos.x, 0, playerPos.z - pos.z);
+      if (_toPlayer.lengthSq() > 0.0001) {
+        targetYaw = Math.atan2(_toPlayer.x, _toPlayer.z);
+      } else {
+        targetYaw = currentYaw;
+      }
+    } else {
+      targetYaw = Math.atan2(dir.x, dir.z);
+    }
     let diff = targetYaw - currentYaw;
     while (diff > Math.PI) diff -= 2 * Math.PI;
     while (diff < -Math.PI) diff += 2 * Math.PI;
@@ -193,8 +249,6 @@ export function createNpc(opts) {
     currentYaw += diff * turnAlpha;
     group.rotation.y = currentYaw;
     capsule.rotation.y = currentYaw;
-
-    if (walkAction && !walkAction.isRunning()) walkAction.play();
   }
 
   return { group, capsule, update };
