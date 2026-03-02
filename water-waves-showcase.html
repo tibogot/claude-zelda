@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Procedural Water Waves — Gerstner + FBM</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a1520; overflow: hidden; font-family: "SF Mono", "Fira Code", monospace; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #info {
+      position: fixed; bottom: 12px; left: 12px; z-index: 20;
+      background: rgba(0,0,0,0.6); color: #7dd3fc;
+      padding: 8px 12px; border-radius: 6px; font-size: 11px; line-height: 1.6;
+    }
+    #info span { color: #bae6fd; font-weight: 600; }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+      "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+      "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+<div id="info">
+  <span>Procedural Water</span> — Gerstner waves + FBM (WebGPU TSL)<br>
+  Orbit: <span>left-drag</span> &nbsp; Zoom: <span>scroll</span>
+</div>
+
+<script type="module">
+import * as THREE from "three";
+import { WebGPURenderer } from "three/webgpu";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { uniform } from "three/tsl";
+import GUI from "three/addons/libs/lil-gui.module.min.js";
+import { createWaterMaterial } from "./water.js";
+
+function hexToVec3(hex) {
+  const c = new THREE.Color(hex);
+  c.convertSRGBToLinear();
+  return new THREE.Vector3(c.r, c.g, c.b);
+}
+
+// ─── PARAMS ──────────────────────────────────────────────────────────────────
+const PARAMS = {
+  baseMaterial: "standard",
+  flatShading: false,
+  size: 12,
+  segments: 256,
+  waterHeight: 0.5,
+  waterColor: "#52a7f7",
+  waterHighlight: "#b3ffff",
+  brightness: 0.5,
+  offset: 0.02,
+  contrast: 12,
+  timeSpeed: 5,
+  waveAmplitude: 1.4,
+  waveFrequency: 1.0,
+  fogNear: 20,
+  fogFar: 80,
+  fogColor: "#0a1520",
+  groundColor: "#1e3a5f",
+  showGrid: true,
+};
+
+// ─── Renderer ────────────────────────────────────────────────────────────────
+const renderer = new WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+// ─── Scene ───────────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(PARAMS.fogColor);
+scene.fog = new THREE.Fog(PARAMS.fogColor, PARAMS.fogNear, PARAMS.fogFar);
+
+const sun = new THREE.DirectionalLight(0xfff0d0, 1.5);
+scene.add(sun);
+const ambLight = new THREE.AmbientLight(0x6080a0, 0.6);
+scene.add(ambLight);
+
+const groundGeo = new THREE.PlaneGeometry(40, 40, 1, 1);
+const groundMat = new THREE.MeshStandardMaterial({
+  color: PARAMS.groundColor,
+  roughness: 0.95,
+  metalness: 0,
+});
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+scene.add(ground);
+
+const grid = new THREE.GridHelper(40, 20, 0x2a4a6a, 0x1a3a5a);
+grid.position.y = 0.01;
+grid.visible = PARAMS.showGrid;
+scene.add(grid);
+
+// ─── Water uniforms ───────────────────────────────────────────────────────────
+const uTime = uniform(0);
+const uWaterHeight = uniform(PARAMS.waterHeight);
+const uWaterColor = uniform(hexToVec3(PARAMS.waterColor));
+const uWaterHighlight = uniform(hexToVec3(PARAMS.waterHighlight));
+const uOffset = uniform(PARAMS.offset);
+const uContrast = uniform(PARAMS.contrast);
+const uBrightness = uniform(PARAMS.brightness * 2);
+const uTimeSpeed = uniform(PARAMS.timeSpeed);
+const uWaveAmplitude = uniform(PARAMS.waveAmplitude);
+const uWaveFrequency = uniform(PARAMS.waveFrequency);
+
+let waterSurfaceMesh, waterVolumeMesh, waterSurfaceGeo, waterVolumeGeo, waterSurfaceMat, waterVolumeMat;
+
+function rebuildWater() {
+  if (waterSurfaceMesh) {
+    scene.remove(waterSurfaceMesh);
+    scene.remove(waterVolumeMesh);
+    if (waterSurfaceGeo) waterSurfaceGeo.dispose();
+    if (waterVolumeGeo) waterVolumeGeo.dispose();
+    if (waterSurfaceMat) waterSurfaceMat.dispose();
+    if (waterVolumeMat) waterVolumeMat.dispose();
+  }
+
+  const thickness = PARAMS.waterHeight;
+
+  const surfaceCtx = {
+    uTime,
+    uHeight: uWaterHeight,
+    waterColor: uWaterColor,
+    waterHighlight: uWaterHighlight,
+    offset: uOffset,
+    contrast: uContrast,
+    brightness: uBrightness,
+    timeSpeed: uTimeSpeed,
+    waveAmplitude: uWaveAmplitude,
+    waveFrequency: uWaveFrequency,
+    baseMaterial: PARAMS.baseMaterial,
+    flatShading: PARAMS.flatShading,
+    surfaceOnly: true,
+  };
+
+  waterSurfaceGeo = new THREE.PlaneGeometry(
+    PARAMS.size,
+    PARAMS.size,
+    PARAMS.segments,
+    PARAMS.segments
+  );
+  waterSurfaceMat = createWaterMaterial(surfaceCtx);
+  waterSurfaceMesh = new THREE.Mesh(waterSurfaceGeo, waterSurfaceMat);
+  waterSurfaceMesh.rotation.x = -Math.PI / 2;
+  waterSurfaceMesh.position.y = thickness + 0.001;
+  waterSurfaceMesh.renderOrder = 1;
+  waterSurfaceMesh.receiveShadow = true;
+  scene.add(waterSurfaceMesh);
+
+  const volumeCtx = {
+    uTime,
+    uHeight: uWaterHeight,
+    waterColor: uWaterColor,
+    waterHighlight: uWaterHighlight,
+    offset: uOffset,
+    contrast: uContrast,
+    brightness: uBrightness,
+    timeSpeed: uTimeSpeed,
+    waveAmplitude: uWaveAmplitude,
+    waveFrequency: uWaveFrequency,
+    baseMaterial: PARAMS.baseMaterial,
+    flatShading: PARAMS.flatShading,
+    surfaceOnly: false,
+  };
+
+  waterVolumeGeo = new THREE.BoxGeometry(
+    PARAMS.size,
+    thickness,
+    PARAMS.size,
+    PARAMS.segments,
+    1,
+    PARAMS.segments
+  );
+  waterVolumeMat = createWaterMaterial(volumeCtx);
+  waterVolumeMesh = new THREE.Mesh(waterVolumeGeo, waterVolumeMat);
+  waterVolumeMesh.position.y = thickness / 2;
+  waterVolumeMesh.renderOrder = 0;
+  waterVolumeMesh.receiveShadow = true;
+  scene.add(waterVolumeMesh);
+}
+
+rebuildWater();
+
+// ─── Sun position ─────────────────────────────────────────────────────────────
+sun.position.set(8, 12, 8);
+sun.castShadow = true;
+sun.shadow.mapSize.width = 1024;
+sun.shadow.mapSize.height = 1024;
+
+// ─── GUI ─────────────────────────────────────────────────────────────────────
+const gui = new GUI({ title: "Water Waves", width: 260 });
+gui.domElement.style.cssText = "position:fixed;top:12px;right:12px;z-index:30;max-height:90vh;overflow-y:auto;";
+
+const fWater = gui.addFolder("Water");
+fWater
+  .add(PARAMS, "baseMaterial", {
+    Basic: "basic",
+    Lambert: "lambert",
+    Phong: "phong",
+    Standard: "standard",
+    Physical: "physical",
+  })
+  .onChange(rebuildWater);
+fWater.add(PARAMS, "flatShading").onChange(rebuildWater);
+fWater.add(PARAMS, "size", 2, 30, 1).onChange(rebuildWater);
+fWater.add(PARAMS, "waterHeight", 0.1, 1.5, 0.05).onChange((v) => {
+  uWaterHeight.value = v;
+  rebuildWater();
+});
+fWater.add(PARAMS, "segments", 32, 256, 32).onChange(rebuildWater);
+fWater.addColor(PARAMS, "waterColor").onChange((v) => {
+  uWaterColor.value.copy(hexToVec3(v));
+});
+fWater.addColor(PARAMS, "waterHighlight").onChange((v) => {
+  uWaterHighlight.value.copy(hexToVec3(v));
+});
+fWater.add(PARAMS, "brightness", 0.1, 2, 0.05).onChange((v) => {
+  uBrightness.value = v * 2;
+});
+fWater.add(PARAMS, "offset", 0, 1, 0.05).onChange((v) => { uOffset.value = v; });
+fWater.add(PARAMS, "contrast", 1, 20, 0.5).onChange((v) => { uContrast.value = v; });
+fWater.add(PARAMS, "timeSpeed", 0.5, 15, 0.5).onChange((v) => { uTimeSpeed.value = v; });
+fWater.add(PARAMS, "waveAmplitude", 0.2, 2, 0.1).onChange((v) => { uWaveAmplitude.value = v; });
+fWater.add(PARAMS, "waveFrequency", 0.5, 3, 0.1).onChange((v) => { uWaveFrequency.value = v; });
+
+const fScene = gui.addFolder("Scene");
+fScene.add(PARAMS, "fogNear", 5, 50, 5).onChange((v) => {
+  scene.fog.near = v;
+});
+fScene.add(PARAMS, "fogFar", 40, 150, 10).onChange((v) => {
+  scene.fog.far = v;
+});
+fScene.addColor(PARAMS, "fogColor").onChange((v) => {
+  scene.background.setStyle(v);
+  scene.fog.color.setStyle(v);
+});
+fScene.addColor(PARAMS, "groundColor").onChange((v) => {
+  groundMat.color.setStyle(v);
+});
+fScene.add(PARAMS, "showGrid").onChange((v) => { grid.visible = v; });
+
+// ─── Camera ──────────────────────────────────────────────────────────────────
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 200);
+camera.position.set(0, 6, 18);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.set(0, 0.5, 0);
+controls.update();
+
+// ─── Animation ────────────────────────────────────────────────────────────────
+const timer = new THREE.Timer();
+renderer.setAnimationLoop(() => {
+  timer.update();
+  uTime.value = timer.getElapsed();
+  controls.update();
+  renderer.render(scene, camera);
+});
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>

@@ -313,6 +313,7 @@ export function createPlayer(opts) {
   const _crouchShift = _normalHH_c - _crouchHH_c;
   let _isCrouching   = false;
   let _crouchVisualT = 0; // 0 = standing, 1 = fully crouched (lerped for smooth model transition)
+  let _platformBody = null;  // kinematic body player stood on last frame
   let isPointerLocked = false;
 
   window.addEventListener("keydown", (e) => {
@@ -532,10 +533,40 @@ export function createPlayer(opts) {
     }
     // Apply one-frame Y shift from crouch start/end (moves centre down or up)
     desiredY += _crouchDeltaY;
+
+    // Proactively detect kinematic platform via downward ray cast BEFORE computing
+    // desired movement. This is zero-lag: the velocity is applied the same frame
+    // contact starts, avoiding the 1-frame gap where the platform rises into the player.
+    if (!hasSampleHeight && RAPIER && state.isGrounded) {
+      const capBottom = charPos.y - _normalHH_c - _capR_c;
+      const ray = new RAPIER.Ray({ x: charPos.x, y: capBottom + 0.02, z: charPos.z }, { x: 0, y: -1, z: 0 });
+      const hit = physicsWorld.castRay(ray, 0.6, true, undefined, undefined, playerCollider);
+      if (hit) {
+        const hitCol = physicsWorld.getCollider(hit.collider);
+        const hitBody = hitCol?.parent?.();
+        _platformBody = hitBody?.isKinematic?.() ? hitBody : null;
+      } else {
+        _platformBody = null;
+      }
+    } else if (!hasSampleHeight && !state.isGrounded) {
+      _platformBody = null;
+    }
+
+    // Inherit velocity from the detected kinematic platform.
+    // Rapier auto-computes linvel() for kinematicPositionBased bodies from their
+    // setNextKinematicTranslation delta each step, so we can read it directly.
+    let platDx = 0, platDy = 0, platDz = 0;
+    if (!hasSampleHeight && _platformBody) {
+      const vel = _platformBody.linvel();
+      platDx = vel.x * dt;
+      platDy = vel.y * dt;
+      platDz = vel.z * dt;
+    }
+
     const desiredTranslation = {
-      x: nextX - charPos.x,
-      y: desiredY - charPos.y,
-      z: nextZ - charPos.z,
+      x: nextX - charPos.x + platDx,
+      y: desiredY - charPos.y + platDy,
+      z: nextZ - charPos.z + platDz,
     };
     characterController.computeColliderMovement(
       playerCollider,
@@ -565,7 +596,7 @@ export function createPlayer(opts) {
     if (!hasSampleHeight) {
       for (let i = 0; i < characterController.numComputedCollisions(); i++) {
         const col = characterController.computedCollision(i);
-        if (!col?.normal || col.normal.y < 0.6) continue;
+        if (!col?.normal1 || col.normal1.y < 0.6) continue;
         const hitBody = col?.collider?.parent?.();
         if (!hitBody?.isDynamic?.()) continue;
         // Weight impulse: scale with plank mass so lighter planks react more
@@ -573,6 +604,7 @@ export function createPlayer(opts) {
         hitBody.applyImpulse({ x: 0, y: -PARAMS.gravity * w * dt, z: 0 }, true);
       }
     }
+    // _platformBody is now set by the proactive ray cast above (before computeColliderMovement).
     if (hasSampleHeight) {
       // terrain mode: ground truth comes from heightmap
       state.isGrounded = onGround;

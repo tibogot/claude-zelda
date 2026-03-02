@@ -987,6 +987,38 @@
           }
         }
 
+        // ── DEBUG ELEVATOR ────────────────────────────────────────────────────
+        // Simple kinematic platform at X=8, Z=0 that oscillates vertically
+        // between FLOOR_Y+0.3 and FLOOR_Y+4 — used to test platform-following.
+        const debugElevator = (() => {
+          const ELV_X = 8, ELV_Z = 0;
+          const ELV_HW = 2.0, ELV_HH = 0.25, ELV_HD = 2.0;
+          // Top surface flush with floor at lowest so player can walk straight onto it.
+          // (If the elevator starts higher, it rises into the player's capsule — Rapier
+          // KCC can't resolve kinematic bodies moving INTO a kinematic character.)
+          const ELV_LO = FLOOR_Y - ELV_HH;  // centre: top surface = FLOOR_Y exactly
+          const ELV_HI = FLOOR_Y + 4.0;
+          const ELV_SPD = 0.5;  // rad/s
+          // physics body
+          const rbDesc = RAPIER.RigidBodyDesc.kinematicPositionBased()
+            .setTranslation(ELV_X, ELV_LO, ELV_Z);
+          const body = physicsWorld.createRigidBody(rbDesc);
+          const colDesc = RAPIER.ColliderDesc.cuboid(ELV_HW, ELV_HH, ELV_HD);
+          physicsWorld.createCollider(colDesc, body);
+          // visual mesh
+          const geo  = new THREE.BoxGeometry(ELV_HW * 2, ELV_HH * 2, ELV_HD * 2);
+          const mat  = new THREE.MeshStandardMaterial({ color: 0xff8800, roughness: 0.5, metalness: 0.3 });
+          const mesh = new THREE.Mesh(geo, mat);
+          mesh.castShadow = true; mesh.receiveShadow = true;
+          scene.add(mesh);
+          // label so it's easy to spot
+          const fn = (t) => {
+            const y = ELV_LO + (ELV_HI - ELV_LO) * (0.5 - 0.5 * Math.cos(ELV_SPD * t));
+            return { x: ELV_X, y, z: ELV_Z };
+          };
+          return { body, mesh, fn };
+        })();
+
         // ── PUSHABLE BOX PUZZLE ───────────────────────────────────────────────
         // A 2.5 m ledge at X=15, Z=-25 that is too tall to jump from the ground.
         // Push the heavy crate south against the ledge face, then step on it
@@ -1846,6 +1878,84 @@
           const dt = Math.min(elapsed - lastTime, 0.05);
           lastTime = elapsed;
 
+          // ─── PRE-STEP: kinematic body updates ─────────────────────────────────
+          // setNextKinematicTranslation MUST be called before physicsWorld.step()
+          // (which runs inside player.update). This way Rapier sees the correct
+          // frame-N target positions during collision detection and computes
+          // accurate linvel() for platform-riding.
+
+          // Oscillate moving platform along Z
+          const platZ = Math.sin(elapsed * 0.7) * 6;
+          movPlatBody.setNextKinematicTranslation({ x: -8, y: FLOOR_Y + 0.25, z: platZ });
+          movPlatMesh.position.set(-8, FLOOR_Y + 0.25, platZ);
+
+          // Bridge 2: spring-animated planks (kinematic, must be pre-step)
+          if (parkourParams.bridge2.enabled) {
+            const onBridgeX = Math.abs(charPos.x - B2_X) < B2_HW + 0.8;
+            const inp = new Array(B2_N).fill(0);
+            if (onBridgeX) {
+              for (let i = 0; i < B2_N; i++) {
+                const dz = Math.abs(charPos.z - bridge2Planks[i].pz);
+                if (dz < B2_STEP * 0.7) inp[i] = 1 - dz / (B2_STEP * 0.7);
+              }
+            }
+            for (let i = 0; i < B2_N; i++) {
+              if (i > 0)      inp[i] = Math.max(inp[i], inp[i - 1] * 0.4);
+              if (i < B2_N-1) inp[i] = Math.max(inp[i], inp[i + 1] * 0.4);
+            }
+            b2BufL[0] = B2_X - B2_HW; b2BufL[1] = B2_Y; b2BufL[2] = B2_Z_MIN;
+            b2BufR[0] = B2_X + B2_HW; b2BufR[1] = B2_Y; b2BufR[2] = B2_Z_MIN;
+            for (let i = 0; i < B2_N; i++) {
+              const p = bridge2Planks[i];
+              const target = -B2_DIP * Math.min(inp[i], 1);
+              p.vel += ((target - p.offset) * B2_K - p.vel * B2_D) * dt;
+              p.offset += p.vel * dt;
+              if (p.offset >  0.05)   { p.offset =  0.05;   p.vel = Math.min(p.vel, 0); }
+              if (p.offset < -B2_DIP) { p.offset = -B2_DIP; p.vel = Math.max(p.vel, 0); }
+              const ny = B2_Y + p.offset;
+              p.body.setNextKinematicTranslation({ x: B2_X, y: ny, z: p.pz });
+              p.mesh.position.set(B2_X, ny, p.pz);
+              const prevOff = i > 0      ? bridge2Planks[i - 1].offset : 0;
+              const nextOff = i < B2_N-1 ? bridge2Planks[i + 1].offset : 0;
+              p.mesh.rotation.x = Math.atan2(nextOff - prevOff, B2_STEP * 2);
+              const ri = (i + 1) * 3;
+              b2BufL[ri] = B2_X - B2_HW; b2BufL[ri+1] = ny; b2BufL[ri+2] = p.pz;
+              b2BufR[ri] = B2_X + B2_HW; b2BufR[ri+1] = ny; b2BufR[ri+2] = p.pz;
+            }
+            const li = (B2_N + 1) * 3;
+            b2BufL[li] = B2_X - B2_HW; b2BufL[li+1] = B2_Y; b2BufL[li+2] = B2_Z_MAX;
+            b2BufR[li] = B2_X + B2_HW; b2BufR[li+1] = B2_Y; b2BufR[li+2] = B2_Z_MAX;
+            b2GeoL.attributes.position.needsUpdate = true;
+            b2GeoR.attributes.position.needsUpdate = true;
+          }
+
+          // Debug elevator
+          {
+            const pos = debugElevator.fn(elapsed);
+            debugElevator.body.setNextKinematicTranslation(pos);
+            debugElevator.mesh.position.set(pos.x, pos.y, pos.z);
+          }
+
+          // Moving platform gauntlet
+          for (const mp of movingGauntlet) {
+            const pos = mp.fn(elapsed);
+            mp.body.setNextKinematicTranslation(pos);
+            mp.mesh.position.set(pos.x, pos.y, pos.z);
+          }
+
+          // Pendulum gauntlet
+          for (const pnd of pendulumBods) {
+            const angle = pnd.amp * Math.sin(pnd.freq * elapsed + pnd.phase);
+            const bx = Math.sin(angle) * pnd.ropeLen;
+            const by = pnd.pivotY - Math.cos(angle) * pnd.ropeLen;
+            pnd.body.setNextKinematicTranslation({ x: bx, y: by, z: pnd.pivotZ });
+            pnd.mesh.position.set(bx, by, pnd.pivotZ);
+            pnd.ropePts[0] = 0;   pnd.ropePts[1] = pnd.pivotY; pnd.ropePts[2] = pnd.pivotZ;
+            pnd.ropePts[3] = bx;  pnd.ropePts[4] = by;         pnd.ropePts[5] = pnd.pivotZ;
+            pnd.ropeLine.geometry.attributes.position.needsUpdate = true;
+          }
+          // ──────────────────────────────────────────────────────────────────────
+
           player.update(dt);
           npc.update(dt);
 
@@ -1856,16 +1966,6 @@
             mesh.position.set(t.x, t.y, t.z);
             mesh.quaternion.set(r.x, r.y, r.z, r.w);
           }
-
-          // Oscillate moving platform along Z
-          const platZ = Math.sin(elapsed * 0.7) * 6;
-          movPlatBody.setNextKinematicTranslation({
-            x: -8,
-            y: FLOOR_Y + 0.25,
-            z: platZ,
-          });
-          const pt = movPlatBody.translation();
-          movPlatMesh.position.set(pt.x, pt.y, pt.z);
 
           // Sync bridge planks + update rope line geometry
           if (parkourParams.bridge1.enabled) {
@@ -1891,76 +1991,6 @@
             ropeBufR[li] = tb.x + P_HW; ropeBufR[li+1] = tb.y; ropeBufR[li+2] = tb.z;
             ropeGeoL.attributes.position.needsUpdate = true;
             ropeGeoR.attributes.position.needsUpdate = true;
-          }
-
-          // Bridge 2: spring-animated planks
-          if (parkourParams.bridge2.enabled) {
-            const onBridgeX = Math.abs(charPos.x - B2_X) < B2_HW + 0.8;
-
-            // Player footprint force per plank (0..1)
-            const inp = new Array(B2_N).fill(0);
-            if (onBridgeX) {
-              for (let i = 0; i < B2_N; i++) {
-                const dz = Math.abs(charPos.z - bridge2Planks[i].pz);
-                if (dz < B2_STEP * 0.7) inp[i] = 1 - dz / (B2_STEP * 0.7);
-              }
-            }
-
-            // Propagate to immediate neighbours for stagger/wave
-            for (let i = 0; i < B2_N; i++) {
-              if (i > 0)      inp[i] = Math.max(inp[i], inp[i - 1] * 0.4);
-              if (i < B2_N-1) inp[i] = Math.max(inp[i], inp[i + 1] * 0.4);
-            }
-
-            // Spring integration + kinematic body update
-            b2BufL[0] = B2_X - B2_HW; b2BufL[1] = B2_Y; b2BufL[2] = B2_Z_MIN;
-            b2BufR[0] = B2_X + B2_HW; b2BufR[1] = B2_Y; b2BufR[2] = B2_Z_MIN;
-            for (let i = 0; i < B2_N; i++) {
-              const p = bridge2Planks[i];
-              const target = -B2_DIP * Math.min(inp[i], 1);
-              p.vel += ((target - p.offset) * B2_K - p.vel * B2_D) * dt;
-              p.offset += p.vel * dt;
-              if (p.offset >  0.05)    { p.offset =  0.05;    p.vel = Math.min(p.vel, 0); }
-              if (p.offset < -B2_DIP)  { p.offset = -B2_DIP;  p.vel = Math.max(p.vel, 0); }
-
-              const ny = B2_Y + p.offset;
-              p.body.setNextKinematicTranslation({ x: B2_X, y: ny, z: p.pz });
-              p.mesh.position.set(B2_X, ny, p.pz);
-
-              // Tilt plank slightly to match the slope created by its neighbours
-              const prevOff = i > 0      ? bridge2Planks[i - 1].offset : 0;
-              const nextOff = i < B2_N-1 ? bridge2Planks[i + 1].offset : 0;
-              p.mesh.rotation.x = Math.atan2(nextOff - prevOff, B2_STEP * 2);
-
-              const ri = (i + 1) * 3;
-              b2BufL[ri] = B2_X - B2_HW; b2BufL[ri+1] = ny; b2BufL[ri+2] = p.pz;
-              b2BufR[ri] = B2_X + B2_HW; b2BufR[ri+1] = ny; b2BufR[ri+2] = p.pz;
-            }
-            const li = (B2_N + 1) * 3;
-            b2BufL[li] = B2_X - B2_HW; b2BufL[li+1] = B2_Y; b2BufL[li+2] = B2_Z_MAX;
-            b2BufR[li] = B2_X + B2_HW; b2BufR[li+1] = B2_Y; b2BufR[li+2] = B2_Z_MAX;
-            b2GeoL.attributes.position.needsUpdate = true;
-            b2GeoR.attributes.position.needsUpdate = true;
-          }
-
-          // Moving platform gauntlet: drive kinematic bodies each frame
-          for (const mp of movingGauntlet) {
-            const pos = mp.fn(elapsed);
-            mp.body.setNextKinematicTranslation(pos);
-            mp.mesh.position.set(pos.x, pos.y, pos.z);
-          }
-
-          // Pendulum gauntlet: swing kinematic bobs + update rope lines
-          for (const pnd of pendulumBods) {
-            const angle = pnd.amp * Math.sin(pnd.freq * elapsed + pnd.phase);
-            const bx = Math.sin(angle) * pnd.ropeLen;
-            const by = pnd.pivotY - Math.cos(angle) * pnd.ropeLen;
-            pnd.body.setNextKinematicTranslation({ x: bx, y: by, z: pnd.pivotZ });
-            pnd.mesh.position.set(bx, by, pnd.pivotZ);
-            // Rope: pivot → bob
-            pnd.ropePts[0] = 0;   pnd.ropePts[1] = pnd.pivotY; pnd.ropePts[2] = pnd.pivotZ;
-            pnd.ropePts[3] = bx;  pnd.ropePts[4] = by;         pnd.ropePts[5] = pnd.pivotZ;
-            pnd.ropeLine.geometry.attributes.position.needsUpdate = true;
           }
 
           windParams.uTime.value = elapsed;
