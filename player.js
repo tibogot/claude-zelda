@@ -473,8 +473,13 @@ export function createPlayer(opts) {
         desiredY = charPos.y + state.characterVelY * dt;
       } else {
         state.characterVelY = 0;
-        // terrain mode: follow heightmap; parkour mode: let snap-to-ground handle it
-        desiredY = hasSampleHeight ? nextGroundY : charPos.y;
+        // terrain mode: follow heightmap; parkour mode: tiny dt-scaled downward push
+        // ONLY while moving so the capsule stays in contact with descending slopes.
+        // Skip it when standing still to avoid floating-point drift that sinks the character.
+        const isMovingH = desiredDx * desiredDx + desiredDz * desiredDz > 1e-6;
+        desiredY = hasSampleHeight ? nextGroundY
+                 : isMovingH       ? charPos.y - 0.5 * dt
+                 :                   charPos.y;
       }
     } else {
       state.characterVelY -= PARAMS.gravity * dt;

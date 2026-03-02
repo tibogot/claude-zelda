@@ -214,6 +214,11 @@ export function createSyncUniforms(u, deps, lastState) {
     hemiLight,
     renderer,
     bloomPass,
+    aoPass,
+    denoisePass,
+    uGtaoEnabled,
+    uGtaoIntensity,
+    uGtaoDenoiseEnabled,
     uDofEnabled,
     uDofFocusDistance,
     uDofBlurStart,
@@ -315,6 +320,33 @@ export function createSyncUniforms(u, deps, lastState) {
     u.uFogEnabled.value = PARAMS.fogEnabled ? 1 : 0;
     uFlareAmount.value =
       PARAMS.postProcessingEnabled && PARAMS.lensflareEnabled ? 1 : 0;
+    if (uGtaoEnabled)
+      uGtaoEnabled.value =
+        PARAMS.postProcessingEnabled && PARAMS.gtaoEnabled ? 1 : 0;
+    if (uGtaoIntensity) uGtaoIntensity.value = PARAMS.gtaoIntensity;
+    if (uGtaoDenoiseEnabled)
+      uGtaoDenoiseEnabled.value = PARAMS.gtaoDenoiseEnabled ? 1 : 0;
+    if (denoisePass) {
+      denoisePass.radius.value = PARAMS.gtaoDenoiseRadius;
+      denoisePass.lumaPhi.value = PARAMS.gtaoDenoiseLumaPhi;
+      denoisePass.depthPhi.value = PARAMS.gtaoDenoiseDepthPhi;
+      denoisePass.normalPhi.value = PARAMS.gtaoDenoiseNormalPhi;
+      // DenoiseNode expects texture.image; render-target textures don't have it.
+      // Sync resolution from renderer (AO is at gtaoResolutionScale).
+      const w = Math.max(1, Math.round(renderer.domElement.width * PARAMS.gtaoResolutionScale));
+      const h = Math.max(1, Math.round(renderer.domElement.height * PARAMS.gtaoResolutionScale));
+      if (denoisePass._resolution)
+        denoisePass._resolution.value.set(w, h);
+    }
+    if (aoPass) {
+      aoPass.resolutionScale = PARAMS.gtaoResolutionScale;
+      aoPass.radius.value = PARAMS.gtaoRadius;
+      aoPass.samples.value = PARAMS.gtaoSamples;
+      aoPass.scale.value = PARAMS.gtaoScale;
+      aoPass.distanceFallOff.value = PARAMS.gtaoDistanceFallOff;
+      aoPass.distanceExponent.value = PARAMS.gtaoDistanceExponent;
+      aoPass.thickness.value = PARAMS.gtaoThickness;
+    }
     uDofEnabled.value =
       PARAMS.postProcessingEnabled && PARAMS.dofEnabled ? 1 : 0;
     uDofFocusDistance.value = PARAMS.dofFocusDistance;

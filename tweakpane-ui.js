@@ -615,6 +615,90 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
     expanded: false,
   });
   fPost.addBinding(PARAMS, "postProcessingEnabled", { label: "enabled" });
+  const fGtao = fPost.addFolder({
+    title: "GTAO (Ambient Occlusion)",
+    expanded: true,
+  });
+  fGtao.addBinding(PARAMS, "gtaoEnabled", {
+    label: "enabled (requires Post Processing on)",
+  });
+  fGtao.addBinding(PARAMS, "gtaoIntensity", {
+    min: 0,
+    max: 2,
+    step: 0.1,
+    label: "intensity",
+  });
+  fGtao.addBinding(PARAMS, "gtaoRadius", {
+    min: 0.05,
+    max: 0.8,
+    step: 0.05,
+    label: "radius",
+  });
+  fGtao.addBinding(PARAMS, "gtaoSamples", {
+    min: 4,
+    max: 24,
+    step: 2,
+    label: "samples",
+  });
+  fGtao.addBinding(PARAMS, "gtaoResolutionScale", {
+    min: 0.25,
+    max: 1,
+    step: 0.25,
+    label: "resolution (0.5 = half, faster)",
+  });
+  fGtao.addBinding(PARAMS, "gtaoScale", {
+    min: 0.5,
+    max: 2,
+    step: 0.1,
+    label: "scale",
+  });
+  fGtao.addBinding(PARAMS, "gtaoDistanceFallOff", {
+    min: 0.01,
+    max: 1,
+    step: 0.05,
+    label: "distance falloff",
+  });
+  fGtao.addBinding(PARAMS, "gtaoDistanceExponent", {
+    min: 1,
+    max: 2,
+    step: 0.1,
+    label: "distance exponent",
+  });
+  fGtao.addBinding(PARAMS, "gtaoThickness", {
+    min: 0.1,
+    max: 2,
+    step: 0.1,
+    label: "thickness",
+  });
+  const fGtaoDenoise = fGtao.addFolder({
+    title: "Denoise (smoothing)",
+    expanded: true,
+  });
+  fGtaoDenoise.addBinding(PARAMS, "gtaoDenoiseEnabled", { label: "enabled" });
+  fGtaoDenoise.addBinding(PARAMS, "gtaoDenoiseRadius", {
+    min: 1,
+    max: 12,
+    step: 1,
+    label: "radius",
+  });
+  fGtaoDenoise.addBinding(PARAMS, "gtaoDenoiseLumaPhi", {
+    min: 1,
+    max: 15,
+    step: 1,
+    label: "luma phi",
+  });
+  fGtaoDenoise.addBinding(PARAMS, "gtaoDenoiseDepthPhi", {
+    min: 1,
+    max: 15,
+    step: 1,
+    label: "depth phi",
+  });
+  fGtaoDenoise.addBinding(PARAMS, "gtaoDenoiseNormalPhi", {
+    min: 1,
+    max: 15,
+    step: 1,
+    label: "normal phi",
+  });
   const fDof = fPost.addFolder({
     title: "Depth of Field",
     expanded: false,

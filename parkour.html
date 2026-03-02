@@ -164,6 +164,8 @@
           windStr: 0.08,
           windSpeed: 0.4,
         },
+        bridge1: { enabled: false },
+        bridge2: { enabled: false },
       };
 
       function srgbToLinear(hex) {
@@ -733,6 +735,41 @@
         movPlatMesh.receiveShadow = true;
         scene.add(movPlatMesh);
 
+        // ── STEP HEIGHT TEST ──────────────────────────────────────────────────
+        // A row of blocks with increasing heights at Z=22.  Walk north from spawn
+        // and try to walk directly into each block to see the auto-step threshold,
+        // then jump to verify clearance.  Heights go from 5 cm to 80 cm.
+        {
+          const STEP_HEIGHTS  = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 0.65, 0.80];
+          const STEP_SPACING  = 2.6;   // centre-to-centre along X
+          const STEP_BW       = 2.0;   // block X width  — wide enough for capsule
+          const STEP_BD       = 2.0;   // block Z depth
+          const STEP_Z        = 22;    // row Z position
+          const totalW = (STEP_HEIGHTS.length - 1) * STEP_SPACING;
+          for (let i = 0; i < STEP_HEIGHTS.length; i++) {
+            const h  = STEP_HEIGHTS[i];
+            const bx = -totalW * 0.5 + i * STEP_SPACING;
+            const by = FLOOR_Y + h * 0.5;
+            // Colour gradient: green (short/easy) → red (tall/jump required)
+            const t = i / (STEP_HEIGHTS.length - 1);
+            const color = new THREE.Color().setHSL(0.33 * (1 - t), 0.65, 0.50);
+            const mesh = new THREE.Mesh(
+              new THREE.BoxGeometry(STEP_BW, h, STEP_BD),
+              new THREE.MeshStandardMaterial({ color, roughness: 0.75 }));
+            mesh.position.set(bx, by, STEP_Z);
+            mesh.castShadow = true; mesh.receiveShadow = true;
+            scene.add(mesh);
+            const body = physicsWorld.createRigidBody(
+              RAPIER.RigidBodyDesc.fixed().setTranslation(bx, by, STEP_Z));
+            physicsWorld.createCollider(
+              RAPIER.ColliderDesc.cuboid(STEP_BW * 0.5, h * 0.5, STEP_BD * 0.5), body);
+          }
+        }
+
+        // Mesh/body collectors for tweakpane show-hide
+        const b1Vis = [], b1Phy = [];  // bridge 1 (physics)
+        const b2Vis = [], b2Phy = [];  // bridge 2 (spring)
+
         // ── FLEXIBLE ROPE BRIDGE ──────────────────────────────────────────────
         // Chain of planks linked by spherical joints (ball-socket), anchored at
         // both ends to fixed pillars. Sways under the player's movement impulses.
@@ -757,9 +794,10 @@
             const m = new THREE.Mesh(pillarGeo, pillarMat);
             m.position.set(BRIDGE_X, py, pz);
             m.castShadow = true; m.receiveShadow = true;
-            scene.add(m);
+            scene.add(m); b1Vis.push(m);
             const pb = physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(BRIDGE_X, py, pz));
             physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(P_HW + 0.2, pillarH * 0.5, 0.6), pb);
+            b1Phy.push(pb);
           }
         }
 
@@ -781,7 +819,7 @@
             m.position.set(BRIDGE_X, cy, cz);
             m.quaternion.copy(q);
             m.castShadow = true; m.receiveShadow = true;
-            scene.add(m);
+            scene.add(m); b1Vis.push(m);
             // collider
             const rb = physicsWorld.createRigidBody(
               RAPIER.RigidBodyDesc.fixed()
@@ -789,6 +827,7 @@
                 .setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }));
             physicsWorld.createCollider(
               RAPIER.ColliderDesc.cuboid(P_HW + 0.2, 0.2, rampLen * 0.5), rb);
+            b1Phy.push(rb);
           }
         }
 
@@ -797,6 +836,7 @@
           RAPIER.RigidBodyDesc.fixed().setTranslation(BRIDGE_X, BRIDGE_Y, BRIDGE_Z_MIN));
         const bridgeAnchorB = physicsWorld.createRigidBody(
           RAPIER.RigidBodyDesc.fixed().setTranslation(BRIDGE_X, BRIDGE_Y, BRIDGE_Z_MAX));
+        b1Phy.push(bridgeAnchorA, bridgeAnchorB);
 
         // Planks — pre-positioned on a parabolic arc so the chain starts near equilibrium.
         // Each plank is also pre-rotated to match the catenary tangent angle at its position,
@@ -827,6 +867,7 @@
             scene.add(mesh);
             bridgePlanks.push({ body, mesh });
           }
+          bridgePlanks.forEach(p => { b1Vis.push(p.mesh); b1Phy.push(p.body); });
         }
 
         // Revolute (hinge) joint chain — planks hinge around the bridge's X-axis only.
@@ -871,6 +912,7 @@
         ropeLineL.frustumCulled = false;
         ropeLineR.frustumCulled = false;
         scene.add(ropeLineL); scene.add(ropeLineR);
+        b1Vis.push(ropeLineL, ropeLineR);
         // Temp vectors reused each frame for rope corner computation
         const _brV = new THREE.Vector3();
         const _brQ = new THREE.Quaternion();
@@ -901,9 +943,10 @@
             const py = FLOOR_Y + pillarH * 0.5;
             const m = new THREE.Mesh(pillarGeo, pillarMat);
             m.position.set(B2_X, py, pz); m.castShadow = true; m.receiveShadow = true;
-            scene.add(m);
+            scene.add(m); b2Vis.push(m);
             const pb = physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(B2_X, py, pz));
             physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(B2_HW + 0.2, pillarH * 0.5, 0.6), pb);
+            b2Phy.push(pb);
           }
         }
 
@@ -921,12 +964,13 @@
             const q  = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), rx);
             const m = new THREE.Mesh(rampGeo, rampMat);
             m.position.set(B2_X, cy, cz); m.quaternion.copy(q);
-            m.castShadow = true; m.receiveShadow = true; scene.add(m);
+            m.castShadow = true; m.receiveShadow = true; scene.add(m); b2Vis.push(m);
             const rb = physicsWorld.createRigidBody(
               RAPIER.RigidBodyDesc.fixed()
                 .setTranslation(B2_X, cy, cz)
                 .setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }));
             physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(B2_HW + 0.2, 0.2, rampLen * 0.5), rb);
+            b2Phy.push(rb);
           }
         }
 
@@ -939,11 +983,14 @@
             const pz   = B2_Z_MIN + B2_STEP * (i + 0.5);
             const body = physicsWorld.createRigidBody(
               RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(B2_X, B2_Y, pz));
-            physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(B2_HW, B2_HH, B2_HD), body);
+            // Collider is slightly wider than the visual plank so there are no physics gaps
+            // between boards — the visual gap is cosmetic but the walkable surface is seamless.
+            physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(B2_HW, B2_HH, B2_STEP * 0.52), body);
             const mesh = new THREE.Mesh(plankGeo, plankMat);
             mesh.castShadow = true; mesh.receiveShadow = true; scene.add(mesh);
             bridge2Planks.push({ body, mesh, pz, offset: 0, vel: 0 });
           }
+          bridge2Planks.forEach(p => { b2Vis.push(p.mesh); b2Phy.push(p.body); });
         }
 
         // Rope lines for bridge 2 (reuses the same brown material)
@@ -958,6 +1005,13 @@
         const b2LineR = new THREE.Line(b2GeoR, ropeLineMat);
         b2LineL.frustumCulled = false; b2LineR.frustumCulled = false;
         scene.add(b2LineL); scene.add(b2LineR);
+        b2Vis.push(b2LineL, b2LineR);
+
+        // Apply initial bridge visibility (both disabled by default)
+        b1Vis.forEach(m => m.visible = parkourParams.bridge1.enabled);
+        b1Phy.forEach(b => b.setEnabled(parkourParams.bridge1.enabled));
+        b2Vis.forEach(m => m.visible = parkourParams.bridge2.enabled);
+        b2Phy.forEach(b => b.setEnabled(parkourParams.bridge2.enabled));
 
         const { physicsDebugGroup, buildRapierDebugMeshes } =
           createPhysicsDebug(RAPIER, scene, physicsWorld);
@@ -1279,6 +1333,18 @@
           label: "near distance",
         });
 
+        const bridgesFolder = pane.addFolder({ title: "Bridges", expanded: true });
+        bridgesFolder.addBinding(parkourParams.bridge1, "enabled", { label: "Physics bridge" })
+          .on("change", ({ value }) => {
+            b1Vis.forEach(m => m.visible = value);
+            b1Phy.forEach(b => b.setEnabled(value));
+          });
+        bridgesFolder.addBinding(parkourParams.bridge2, "enabled", { label: "Spring bridge" })
+          .on("change", ({ value }) => {
+            b2Vis.forEach(m => m.visible = value);
+            b2Phy.forEach(b => b.setEnabled(value));
+          });
+
         const debugFolder = pane.addFolder({ title: "Debug", expanded: false });
         debugFolder.addBinding(parkourParams.debug, "rapierDebug", {
           label: "Rapier colliders",
@@ -1379,7 +1445,7 @@
           movPlatMesh.position.set(pt.x, pt.y, pt.z);
 
           // Sync bridge planks + update rope line geometry
-          {
+          if (parkourParams.bridge1.enabled) {
             const ta = bridgeAnchorA.translation();
             ropeBufL[0] = ta.x - P_HW; ropeBufL[1] = ta.y; ropeBufL[2] = ta.z;
             ropeBufR[0] = ta.x + P_HW; ropeBufR[1] = ta.y; ropeBufR[2] = ta.z;
@@ -1405,7 +1471,7 @@
           }
 
           // Bridge 2: spring-animated planks
-          {
+          if (parkourParams.bridge2.enabled) {
             const onBridgeX = Math.abs(charPos.x - B2_X) < B2_HW + 0.8;
 
             // Player footprint force per plank (0..1)
