@@ -39,6 +39,7 @@ export function createPlayer(opts) {
     playerCollider,
     characterController,
     physicsWorld,
+    RAPIER = null,
     sampleHeight = null,
     capR = 0,
     capHalfH = 0,
@@ -302,6 +303,16 @@ export function createPlayer(opts) {
   // Cleared immediately on intentional jump so air state engages without delay.
   let _groundGrace = 0;
   let _justJumped  = false;
+
+  // Capsule resize for crouch-through-tunnel (parkour mode only).
+  // _normalHH_c / _crouchHH_c are the capsule half-heights.
+  // _crouchShift is how far the body centre moves down/up on transition.
+  const _capR_c      = PARAMS.capsuleRadius ?? 0.35;
+  const _normalHH_c  = Math.max(0.1, (PARAMS.characterHeight - 2 * _capR_c) / 2);
+  const _crouchHH_c  = Math.max(0.05, _normalHH_c * 0.31); // ≈50 % height
+  const _crouchShift = _normalHH_c - _crouchHH_c;
+  let _isCrouching   = false;
+  let _crouchVisualT = 0; // 0 = standing, 1 = fully crouched (lerped for smooth model transition)
   let isPointerLocked = false;
 
   window.addEventListener("keydown", (e) => {
@@ -392,6 +403,40 @@ export function createPlayer(opts) {
   function update(dt) {
     if (keys.arrowLeft) state.camYaw += PARAMS.keyTurnSpeed * dt;
     if (keys.arrowRight) state.camYaw -= PARAMS.keyTurnSpeed * dt;
+
+    // ── CROUCH TRANSITION (parkour mode only) ──────────────────────────────
+    // Shrinks / restores the capsule collider half-height each time the player
+    // enters or leaves crouch.  A headroom ray-cast prevents standing up inside
+    // a tunnel.  _crouchDeltaY carries the required Y shift into desiredY below.
+    let _crouchDeltaY = 0;
+    if (!hasSampleHeight) {
+      const wantCrouch = keys.ctrl && state.isGrounded;
+      if (wantCrouch && !_isCrouching) {
+        playerCollider.setHalfHeight(_crouchHH_c);
+        _isCrouching  = true;
+        _crouchDeltaY = -_crouchShift;          // move centre down this frame
+      } else if (!wantCrouch && _isCrouching) {
+        // Ray upward from top of crouching capsule — check if normal height fits
+        let canStand = true;
+        if (RAPIER) {
+          const ray = new RAPIER.Ray(
+            { x: charPos.x, y: charPos.y + _crouchHH_c + _capR_c + 0.02, z: charPos.z },
+            { x: 0, y: 1, z: 0 });
+          const hit = physicsWorld.castRay(ray, _crouchShift + 0.05, true,
+            undefined, undefined, playerCollider);
+          canStand = (hit === null);
+        }
+        if (canStand) {
+          playerCollider.setHalfHeight(_normalHH_c);
+          _isCrouching  = false;
+          _crouchDeltaY = _crouchShift;         // move centre up this frame
+        }
+      }
+    }
+
+    // Smooth visual lerp — physics snaps instantly, model eases over ~0.15 s
+    _crouchVisualT += ((_isCrouching ? 1 : 0) - _crouchVisualT) * Math.min(10 * dt, 1);
+
     state.moveDir.set(0, 0, 0);
     let desiredDx = 0;
     let desiredDz = 0;
@@ -444,7 +489,7 @@ export function createPlayer(opts) {
       const mx = state.moveDir.x * rightX - state.moveDir.z * forwardX;
       const mz = state.moveDir.x * rightZ - state.moveDir.z * forwardZ;
       const speedMult =
-        keys.ctrl && onGroundForCrouch
+        _isCrouching
           ? (PARAMS.crouchSpeedMultiplier ?? 0.5)
           : keys.shift
             ? PARAMS.runSpeedMultiplier
@@ -467,7 +512,7 @@ export function createPlayer(opts) {
     const onGround = hasSampleHeight ? charPos.y <= groundY + 0.6 : state.isGrounded;
     let desiredY;
     if (onGround) {
-      if (keys.space) {
+      if (keys.space && !_isCrouching) {   // no jumping while crouched
         state.characterVelY = PARAMS.jumpSpeed;
         _justJumped = true;
         desiredY = charPos.y + state.characterVelY * dt;
@@ -485,6 +530,8 @@ export function createPlayer(opts) {
       state.characterVelY -= PARAMS.gravity * dt;
       desiredY = charPos.y + state.characterVelY * dt;
     }
+    // Apply one-frame Y shift from crouch start/end (moves centre down or up)
+    desiredY += _crouchDeltaY;
     const desiredTranslation = {
       x: nextX - charPos.x,
       y: desiredY - charPos.y,
@@ -573,13 +620,15 @@ export function createPlayer(opts) {
           PARAMS.characterHeight / ud.initialCharHeight,
         );
       if (ud.modelBaseY != null)
+        // Offset model upward to counteract the capsule-centre drop during crouch.
+        // Uses the lerped _crouchVisualT so the transition eases in/out smoothly.
         characterGroup.children[0].position.y =
-          ud.modelBaseY + PARAMS.characterOffsetY;
+          ud.modelBaseY + PARAMS.characterOffsetY + _crouchVisualT * _crouchShift;
     }
     capsule.visible = characterGroup.children.length === 0;
     const moving = state.moveDir.length() > 0;
     const running = moving && keys.shift;
-    const crouching = keys.ctrl && !inAir;
+    const crouching = _isCrouching;
     const moveState = inAir
       ? "jump"
       : crouching

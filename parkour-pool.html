@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Parkour — Swimming Pool Demo</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { overflow: hidden; background: #0a0a0f; }
+      canvas { display: block; width: 100vw; height: 100vh; }
+      #info {
+        position: fixed; bottom: 16px; left: 16px; z-index: 10;
+        font: 12px/1.5 "SF Mono", "Fira Code", monospace;
+        color: #b0d890; background: rgba(0,0,0,0.55);
+        padding: 8px 12px; border-radius: 6px;
+        pointer-events: none; user-select: none; backdrop-filter: blur(4px);
+      }
+      #info span { color: #e0f0c0; font-weight: 600; }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">
+      Swimming Pool Demo &mdash; <span id="backend">loading…</span> &bull;
+      Drag to orbit &bull; Scroll to zoom
+    </div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { pass, uniform } from "three/tsl";
+      import Stats from "stats-gl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+      import { createTileMaterial } from "./tileMaterial.js";
+      import { createSwimmingPool, createFloorWithPoolHole } from "./swimming-pool.js";
+      import { PI } from "./constants.js";
+
+      const FLOOR_Y = 1;
+      const FLOOR_SIZE = 120;
+      const POOL_X = 0;
+      const POOL_Z = 0;
+
+      function sunDirectionFromAngles(azimuthDeg, elevationDeg) {
+        const az = (azimuthDeg * Math.PI) / 180;
+        const el = (elevationDeg * Math.PI) / 180;
+        const cosEl = Math.cos(el);
+        return new THREE.Vector3(
+          cosEl * Math.cos(az), Math.sin(el), cosEl * Math.sin(az)
+        ).normalize();
+      }
+
+      async function init() {
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        await renderer.init();
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 0.55;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+        document.getElementById("backend").textContent =
+          renderer.backend?.constructor?.name?.includes("WebGPU") ? "WebGPU ✓" : "WebGL fallback";
+
+        const stats = new Stats({ trackGPU: false });
+        stats.init(renderer);
+        document.body.appendChild(stats.dom);
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.5, 1000);
+        camera.position.set(25, 14, 25);
+        camera.lookAt(POOL_X, FLOOR_Y, POOL_Z);
+
+        const orbitControls = new OrbitControls(camera, renderer.domElement);
+        orbitControls.target.set(POOL_X, FLOOR_Y + 0.5, POOL_Z);
+        orbitControls.maxPolarAngle = PI * 0.48;
+        orbitControls.enableDamping = true;
+        orbitControls.dampingFactor = 0.05;
+
+        const sunDir = sunDirectionFromAngles(135, 43);
+        const dirLight = new THREE.DirectionalLight("#fff5e0", 2.2);
+        dirLight.position.copy(sunDir.clone().multiplyScalar(80));
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.width = 2048;
+        dirLight.shadow.mapSize.height = 2048;
+        dirLight.shadow.camera.near = 1;
+        dirLight.shadow.camera.far = 200;
+        dirLight.shadow.camera.left = -60;
+        dirLight.shadow.camera.right = 60;
+        dirLight.shadow.camera.top = 60;
+        dirLight.shadow.camera.bottom = -60;
+        scene.add(dirLight);
+        dirLight.target.position.set(POOL_X, FLOOR_Y, POOL_Z);
+        scene.add(dirLight.target);
+
+        const hemiLight = new THREE.HemisphereLight("#c8e0ff", "#88aa55", 1);
+        scene.add(hemiLight);
+
+        const floorMat = createTileMaterial({
+          textureScale: 1500, gradientIntensity: 0.5, gradientBias: 0.1,
+          tileColor: "#d4d4d4", gridColor: "#707070", gridLineColor: "#404040",
+          roughness: 1, metalness: 0,
+        });
+
+        const uTime = uniform(0);
+        const poolOpts = {
+          scene,
+          floorY: FLOOR_Y,
+          x: POOL_X,
+          z: POOL_Z,
+          length: 22,
+          width: 14,
+          depth: 2.2,
+          waterMode: "shader",
+          uvScale: 2.7,
+          normalScale: 0.12,
+          flowSpeed: 0.12,
+          flowDirection: [0.15, 0.08],
+          shininess: 350,
+          highlightsGlow: 4,
+          highlightsSpread: 0.25,
+          fresnelScale: 0.75,
+          sunDirection: [sunDir.x, sunDir.y, sunDir.z],
+          uTime,
+        };
+
+        const { deckBounds } = await createSwimmingPool(poolOpts);
+
+        const floor = createFloorWithPoolHole(
+          floorMat,
+          FLOOR_SIZE,
+          POOL_X,
+          POOL_Z,
+          deckBounds.halfW,
+          deckBounds.halfL,
+          FLOOR_Y
+        );
+        scene.add(floor);
+
+        const sky = new SkyMesh();
+        sky.scale.setScalar(10000);
+        scene.add(sky);
+        sky.turbidity.value = 2;
+        sky.rayleigh.value = 1.5;
+        sky.mieCoefficient.value = 0.005;
+        sky.mieDirectionalG.value = 0.8;
+        sky.sunPosition.value.copy(sunDir);
+
+        const pmremGenerator = new THREE.PMREMGenerator(renderer);
+        const skyEnvScene = new THREE.Scene();
+        skyEnvScene.add(sky.clone());
+        scene.environment = pmremGenerator.fromScene(skyEnvScene, 0.04).texture;
+        scene.environmentIntensity = 0.45;
+
+        const cubeMat = new THREE.MeshStandardMaterial({ color: 0xff6b35, roughness: 0.4, metalness: 0.3 });
+        const sphereMat = new THREE.MeshStandardMaterial({ color: 0x4ecdc4, roughness: 0.3, metalness: 0.2 });
+        const cube = new THREE.Mesh(new THREE.BoxGeometry(1.5, 2, 1.5), cubeMat);
+        cube.position.set(10, FLOOR_Y + 1, 8);
+        cube.castShadow = true;
+        cube.receiveShadow = true;
+        scene.add(cube);
+        const sphere = new THREE.Mesh(new THREE.SphereGeometry(1.2, 24, 24), sphereMat);
+        sphere.position.set(-9, FLOOR_Y + 1.2, 7);
+        sphere.castShadow = true;
+        sphere.receiveShadow = true;
+        scene.add(sphere);
+
+        const renderPipeline = new THREE.RenderPipeline(renderer);
+        renderPipeline.outputNode = pass(scene, camera);
+        await renderer.compileAsync(scene, camera);
+
+        const timer = new THREE.Timer();
+        renderer.setAnimationLoop(() => {
+          timer.update();
+          uTime.value = timer.getElapsed();
+          orbitControls.update();
+          renderPipeline.render();
+        });
+
+        window.addEventListener("resize", () => {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(innerWidth, innerHeight);
+        });
+      }
+
+      init();
+    </script>
+  </body>
+</html>

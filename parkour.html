@@ -70,7 +70,16 @@
         await import("https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/dist/tweakpane.min.js");
 
       import * as THREE from "three";
-      import { pass } from "three/tsl";
+      import {
+        pass,
+        color,
+        fog,
+        float,
+        positionWorld,
+        positionView,
+        triNoise3D,
+        uniform,
+      } from "three/tsl";
       import Stats from "stats-gl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
@@ -166,6 +175,19 @@
         },
         bridge1: { enabled: false },
         bridge2: { enabled: false },
+      };
+      const hazeParams = {
+        enabled: false,
+        thickness: 35,
+        opacity: 0.9,
+        falloff: 2.2,
+        hazeColor: "#f5f5f0",
+        noiseScaleA: 0.004,
+        noiseScaleB: 0.008,
+        noiseAmountA: 0.22,
+        noiseAmountB: 0.18,
+        noiseDetail: 0.12,
+        noiseSpeed: 1,
       };
 
       function srgbToLinear(hex) {
@@ -428,6 +450,64 @@
         skyEnvScene.add(sky.clone());
         scene.environment = pmremGenerator.fromScene(skyEnvScene, 0.04).texture;
         scene.environmentIntensity = parkourParams.light.envIntensity;
+
+        // ── VOLUMETRIC HAZE (ground mist, Ghost of Tsushima style) ──
+        const uHazeThickness = uniform(hazeParams.thickness);
+        const uHazeOpacity = uniform(hazeParams.opacity);
+        const uHazeFalloff = uniform(hazeParams.falloff);
+        const uHazeColor = uniform(new THREE.Color(hazeParams.hazeColor));
+        const uNoiseScaleA = uniform(hazeParams.noiseScaleA);
+        const uNoiseScaleB = uniform(hazeParams.noiseScaleB);
+        const uNoiseAmountA = uniform(hazeParams.noiseAmountA);
+        const uNoiseAmountB = uniform(hazeParams.noiseAmountB);
+        const uNoiseDetail = uniform(hazeParams.noiseDetail);
+        const uNoiseSpeed = uniform(hazeParams.noiseSpeed);
+        const hazeTimer = uniform(0).onFrameUpdate((frame) => frame.time);
+
+        function applyVolumetricHaze() {
+          if (!hazeParams.enabled) {
+            scene.fogNode = null;
+            return;
+          }
+          const fogNoiseDistance = positionView.z
+            .negate()
+            .smoothstep(0, camera.far - 200);
+          const distance = fogNoiseDistance.mul(uHazeThickness).max(8);
+          const heightAboveFloor = positionWorld.y.sub(float(FLOOR_Y));
+          const groundFogArea = float(distance)
+            .sub(heightAboveFloor)
+            .div(distance)
+            .pow(uHazeFalloff)
+            .saturate()
+            .mul(uHazeOpacity);
+          const fogNoiseA = triNoise3D(
+            positionWorld.mul(uNoiseScaleA),
+            uNoiseAmountA,
+            hazeTimer,
+          );
+          const fogNoiseB = triNoise3D(
+            positionWorld.mul(uNoiseScaleB),
+            uNoiseAmountB,
+            hazeTimer.mul(uNoiseSpeed),
+          );
+          const fogNoiseC = triNoise3D(
+            positionWorld.mul(0.015),
+            uNoiseDetail,
+            hazeTimer.mul(0.5),
+          );
+          const fogNoise = fogNoiseA
+            .add(fogNoiseB)
+            .add(fogNoiseC)
+            .mul(color(uHazeColor));
+          const groundColor = color(
+            new THREE.Color(parkourParams.light.hemiGroundColor),
+          );
+          scene.fogNode = fog(
+            fogNoiseDistance.oneMinus().mix(groundColor, fogNoise),
+            groundFogArea,
+          );
+        }
+        applyVolumetricHaze();
 
         // ── FLOATING LEAVES ──
         const windParams = {
@@ -812,6 +892,241 @@
           }
         }
 
+        // ── TUNNEL ────────────────────────────────────────────────────────────
+        // 10 m long at X=0, Z=32–42. Inner: 5 m wide × 1.7 m tall.
+        // Too low to walk through standing (char = 2.5 m).
+        // Hold Ctrl to crouch (~1.26 m) and slide through.
+        // Headroom ray-cast in player.js prevents standing up inside.
+        {
+          const TUN_Z0  = 32;
+          const TUN_LEN = 10;
+          const TUN_ZC  = TUN_Z0 + TUN_LEN / 2;
+          const TUN_IW  = 5.0;   // inner width
+          const TUN_IH  = 1.7;   // inner height (fits crouch ≈1.26 m, blocks stand ≈2.5 m)
+          const TUN_THK = 0.55;  // wall / ceiling thickness
+          const TUN_HL  = TUN_LEN / 2;
+          const mat = new THREE.MeshStandardMaterial({ color: 0x4e4640, roughness: 0.9 });
+
+          const addTunBox = (x, y, z, hw, hh, hd) => {
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(hw * 2, hh * 2, hd * 2), mat);
+            mesh.position.set(x, y, z);
+            mesh.castShadow = true; mesh.receiveShadow = true;
+            scene.add(mesh);
+            const body = physicsWorld.createRigidBody(
+              RAPIER.RigidBodyDesc.fixed().setTranslation(x, y, z));
+            physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(hw, hh, hd), body);
+          };
+
+          const wallHH   = (TUN_IH + TUN_THK) / 2;
+          const wallY    = FLOOR_Y + wallHH;
+          const halfSide = TUN_IW / 2 + TUN_THK / 2;
+
+          addTunBox(-halfSide, wallY, TUN_ZC, TUN_THK / 2, wallHH, TUN_HL); // left wall
+          addTunBox( halfSide, wallY, TUN_ZC, TUN_THK / 2, wallHH, TUN_HL); // right wall
+          addTunBox(0, FLOOR_Y + TUN_IH + TUN_THK / 2, TUN_ZC,              // ceiling
+            TUN_IW / 2 + TUN_THK, TUN_THK / 2, TUN_HL);
+        }
+
+        // ── MOVING PLATFORM GAUNTLET ─────────────────────────────────────────
+        // 5 kinematic platforms north of the tunnel (Z≈51–73), each with a
+        // distinct motion type.  Colour-coded easy (blue) → hard (red).
+        // A launch pad at Z=48 gives a clean entry from the tunnel exit.
+        // A gold goal pad at Z=77 marks the finish.
+        const movingGauntlet = [];   // { body, mesh, fn(t)→{x,y,z} } updated every frame
+        {
+          const MPG_HH = 0.15;   // half-height for all pads
+          const addStaticPad = (x, y, z, hw, hd, col) => {
+            const mesh = new THREE.Mesh(
+              new THREE.BoxGeometry(hw * 2, MPG_HH * 2, hd * 2),
+              new THREE.MeshStandardMaterial({ color: col, roughness: 0.5, metalness: 0.2 }));
+            mesh.position.set(x, y, z);
+            mesh.castShadow = true; mesh.receiveShadow = true;
+            scene.add(mesh);
+            const b = physicsWorld.createRigidBody(
+              RAPIER.RigidBodyDesc.fixed().setTranslation(x, y, z));
+            physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(hw, MPG_HH, hd), b);
+          };
+
+          // Launch pad — standing point right after the tunnel, at floor level
+          addStaticPad(0, FLOOR_Y + MPG_HH, 48, 3.5, 2.5, 0x6688cc);
+          // Goal platform — visible gold finish marker
+          addStaticPad(0, FLOOR_Y + 0.5, 77, 3.5, 2.5, 0xffdd44);
+
+          const mpDefs = [
+            // 1. Lateral sweep — slides ±3.5 m along X  (speed 0.85 rad/s, easy)
+            { fn: (t) => ({ x: Math.sin(t * 0.85) * 3.5, y: FLOOR_Y + 1.5, z: 51 }),
+              hw: 1.3, hd: 1.3, col: 0x44aaff },
+            // 2. Depth surge — slides ±2 m along Z from base Z=57  (speed 1.1, medium)
+            { fn: (t) => ({ x: 0, y: FLOOR_Y + 2.0, z: 57 + Math.sin(t * 1.1) * 2.0 }),
+              hw: 1.2, hd: 1.2, col: 0x44ddaa },
+            // 3. Elevator — Y oscillates between 1 and 3.5 m at Z=63  (speed 0.9, medium)
+            { fn: (t) => ({ x: 0, y: FLOOR_Y + 1 + (Math.sin(t * 0.9) * 0.5 + 0.5) * 2.5, z: 63 }),
+              hw: 1.3, hd: 1.3, col: 0xaadd44 },
+            // 4. Circular orbit — rotates around Z=67 at radius 2.5 in XZ  (speed 0.65, hard)
+            { fn: (t) => ({ x: Math.cos(t * 0.65) * 2.5, y: FLOOR_Y + 2.5,
+                z: 67 + Math.sin(t * 0.65) * 1.5 }),
+              hw: 1.1, hd: 1.1, col: 0xffaa33 },
+            // 5. Fast sweeper — slides ±3.8 m along X at Z=73  (speed 1.5, hardest)
+            { fn: (t) => ({ x: Math.sin(t * 1.5) * 3.8, y: FLOOR_Y + 2.0, z: 73 }),
+              hw: 1.0, hd: 1.0, col: 0xff4444 },
+          ];
+
+          for (const def of mpDefs) {
+            const p0 = def.fn(0);
+            const body = physicsWorld.createRigidBody(
+              RAPIER.RigidBodyDesc.kinematicPositionBased()
+                .setTranslation(p0.x, p0.y, p0.z));
+            physicsWorld.createCollider(
+              RAPIER.ColliderDesc.cuboid(def.hw, MPG_HH, def.hd), body);
+            const mesh = new THREE.Mesh(
+              new THREE.BoxGeometry(def.hw * 2, MPG_HH * 2, def.hd * 2),
+              new THREE.MeshStandardMaterial({ color: def.col, roughness: 0.45, metalness: 0.25 }));
+            mesh.castShadow = true; mesh.receiveShadow = true;
+            scene.add(mesh);
+            movingGauntlet.push({ body, mesh, fn: def.fn });
+          }
+        }
+
+        // ── PUSHABLE BOX PUZZLE ───────────────────────────────────────────────
+        // A 2.5 m ledge at X=15, Z=-25 that is too tall to jump from the ground.
+        // Push the heavy crate south against the ledge face, then step on it
+        // and jump to reach the green goal pad on top.
+        // Guide walls on each side keep the crate aimed at the ledge.
+        {
+          const PBX      = 15;
+          const LEDGE_Z  = -25;   // Z of ledge south face (player approaches from south)
+          const LEDGE_H  = 2.5;   // just out of plain-jump reach (~1.5 m jump from ground)
+          const LEDGE_W  = 5.0;
+          const LEDGE_D  = 3.5;
+          const CRATE_S  = 1.0;   // side of the cube crate
+
+          const stoneMat = new THREE.MeshStandardMaterial({ color: 0xb0a090, roughness: 0.85 });
+          const crateMat = new THREE.MeshStandardMaterial({ color: 0x7a5a2a, roughness: 0.9, metalness: 0.05 });
+          const goalMat  = new THREE.MeshStandardMaterial({ color: 0x66ff88, roughness: 0.5 });
+
+          // Ledge body
+          const ledgeCy = FLOOR_Y + LEDGE_H / 2;
+          const ledgeCz = LEDGE_Z + LEDGE_D / 2;
+          {
+            const m = new THREE.Mesh(new THREE.BoxGeometry(LEDGE_W, LEDGE_H, LEDGE_D), stoneMat);
+            m.position.set(PBX, ledgeCy, ledgeCz);
+            m.castShadow = true; m.receiveShadow = true;
+            scene.add(m);
+            const b = physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(PBX, ledgeCy, ledgeCz));
+            physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(LEDGE_W / 2, LEDGE_H / 2, LEDGE_D / 2), b);
+          }
+
+          // Goal pad on ledge top (green = success)
+          {
+            const gy = FLOOR_Y + LEDGE_H + 0.06;
+            const m = new THREE.Mesh(new THREE.BoxGeometry(LEDGE_W - 0.4, 0.12, LEDGE_D - 0.4), goalMat);
+            m.position.set(PBX, gy, ledgeCz);
+            scene.add(m);
+          }
+
+          // Channel guide walls — keep the crate aimed straight at the ledge face
+          const GUIDE_Z0  = LEDGE_Z - 7;   // south start of channel
+          const GUIDE_D   = (LEDGE_Z - GUIDE_Z0) / 2;
+          const GUIDE_CZ  = GUIDE_Z0 + GUIDE_D;
+          const GUIDE_HH  = 0.9;
+          for (const gx of [PBX - LEDGE_W / 2, PBX + LEDGE_W / 2]) {
+            const m = new THREE.Mesh(new THREE.BoxGeometry(0.3, GUIDE_HH * 2, GUIDE_D * 2), stoneMat);
+            m.position.set(gx, FLOOR_Y + GUIDE_HH, GUIDE_CZ);
+            m.castShadow = true; m.receiveShadow = true;
+            scene.add(m);
+            const b = physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(gx, FLOOR_Y + GUIDE_HH, GUIDE_CZ));
+            physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(0.15, GUIDE_HH, GUIDE_D), b);
+          }
+
+          // Pushable crate — dynamic, heavy & damped so it doesn't bounce wildly
+          const crateBody = physicsWorld.createRigidBody(
+            RAPIER.RigidBodyDesc.dynamic()
+              .setTranslation(PBX, FLOOR_Y + CRATE_S / 2, LEDGE_Z - 4.5)
+              .setLinearDamping(3.5)
+              .setAngularDamping(10.0)
+              .setAdditionalMass(14));
+          physicsWorld.createCollider(
+            RAPIER.ColliderDesc.cuboid(CRATE_S / 2, CRATE_S / 2, CRATE_S / 2), crateBody);
+          const crateMesh = new THREE.Mesh(
+            new THREE.BoxGeometry(CRATE_S, CRATE_S, CRATE_S), crateMat);
+          crateMesh.castShadow = true; crateMesh.receiveShadow = true;
+          scene.add(crateMesh);
+          dynamicObjects.push({ body: crateBody, mesh: crateMesh });
+        }
+
+        // ── PENDULUM GAUNTLET ─────────────────────────────────────────────────
+        // 3 swinging bobs (kinematic) at Z=-30, -38, -46, south of spawn.
+        // Each pivots at Y=6.2 and swings ±40-45° along X with different
+        // speeds and start phases.  Wait for the bob to reach full extension,
+        // then dash through the centre to the teal goal pad at Z=-52.
+        const pendulumBods = [];   // { body, mesh, rope*, pivot*, amp, freq, phase }
+        {
+          const PND_ROPE = 3.5;    // rope length (m)
+          const PND_BOB  = 0.55;   // bob sphere radius
+          const PND_PIVH = FLOOR_Y + 5.8;  // pivot height above world origin
+          const PND_COL  = [0xcc4422, 0xdd8811, 0xcc2266];
+          const ropeMat  = new THREE.LineBasicMaterial({ color: 0x554433 });
+
+          const pndDefs = [
+            { z: -30, amp: 0.70, freq: 0.80, phase: 0.0          },  // slow,   ~40°
+            { z: -38, amp: 0.65, freq: 1.05, phase: Math.PI * 0.7 },  // medium, offset
+            { z: -46, amp: 0.75, freq: 1.28, phase: Math.PI * 1.4 },  // fast,   wider
+          ];
+
+          // Teal goal pad at south end
+          {
+            const gm = new THREE.Mesh(
+              new THREE.BoxGeometry(6, 0.2, 3.5),
+              new THREE.MeshStandardMaterial({ color: 0x44ddcc, roughness: 0.5 }));
+            gm.position.set(0, FLOOR_Y + 0.1, -52);
+            scene.add(gm);
+            const gb = physicsWorld.createRigidBody(
+              RAPIER.RigidBodyDesc.fixed().setTranslation(0, FLOOR_Y + 0.1, -52));
+            physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(3, 0.1, 1.75), gb);
+          }
+
+          for (let i = 0; i < pndDefs.length; i++) {
+            const def = pndDefs[i];
+
+            // Pivot post — visual only (thin dark pillar)
+            const postH = PND_PIVH - FLOOR_Y;
+            const postM = new THREE.Mesh(
+              new THREE.BoxGeometry(0.22, postH, 0.22),
+              new THREE.MeshStandardMaterial({ color: 0x445566, roughness: 0.85 }));
+            postM.position.set(0, FLOOR_Y + postH / 2, def.z);
+            postM.castShadow = true;
+            scene.add(postM);
+
+            // Kinematic bob
+            const ang0 = def.amp * Math.sin(def.phase);
+            const bx0  = Math.sin(ang0) * PND_ROPE;
+            const by0  = PND_PIVH - Math.cos(ang0) * PND_ROPE;
+            const body = physicsWorld.createRigidBody(
+              RAPIER.RigidBodyDesc.kinematicPositionBased()
+                .setTranslation(bx0, by0, def.z));
+            physicsWorld.createCollider(RAPIER.ColliderDesc.ball(PND_BOB), body);
+            const mesh = new THREE.Mesh(
+              new THREE.SphereGeometry(PND_BOB, 14, 10),
+              new THREE.MeshStandardMaterial({ color: PND_COL[i], roughness: 0.4, metalness: 0.3 }));
+            mesh.castShadow = true;
+            scene.add(mesh);
+
+            // Rope line (two points: pivot → bob, updated every frame)
+            const ropePts = new Float32Array([0, PND_PIVH, def.z, bx0, by0, def.z]);
+            const ropeGeo = new THREE.BufferGeometry();
+            ropeGeo.setAttribute('position', new THREE.BufferAttribute(ropePts, 3));
+            const ropeLine = new THREE.Line(ropeGeo, ropeMat);
+            ropeLine.frustumCulled = false;
+            scene.add(ropeLine);
+
+            pendulumBods.push({
+              body, mesh, ropeLine, ropePts,
+              pivotY: PND_PIVH, pivotZ: def.z,
+              ropeLen: PND_ROPE, amp: def.amp, freq: def.freq, phase: def.phase,
+            });
+          }
+        }
+
         // Mesh/body collectors for tweakpane show-hide
         const b1Vis = [], b1Phy = [];  // bridge 1 (physics)
         const b2Vis = [], b2Phy = [];  // bridge 2 (spring)
@@ -1087,6 +1402,7 @@
           playerCollider,
           characterController,
           physicsWorld,
+          RAPIER,
           // no sampleHeight → parkour mode: Rapier trimesh colliders + computedGrounded()
           TERRAIN_SIZE: PARKOUR_SIZE,
         });
@@ -1213,6 +1529,67 @@
           step: 0.05,
           label: "exposure",
         });
+
+        const hazeFolder = pane.addFolder({
+          title: "Volumetric Haze",
+          expanded: true,
+        });
+        hazeFolder
+          .addBinding(hazeParams, "enabled", { label: "enable" })
+          .on("change", () => applyVolumetricHaze());
+        hazeFolder.addBinding(hazeParams, "thickness", {
+          min: 15,
+          max: 80,
+          step: 1,
+        }).on("change", (e) => { uHazeThickness.value = e.value; });
+        hazeFolder.addBinding(hazeParams, "opacity", {
+          min: 0.4,
+          max: 1,
+          step: 0.02,
+        }).on("change", (e) => { uHazeOpacity.value = e.value; });
+        hazeFolder.addBinding(hazeParams, "falloff", {
+          min: 1.2,
+          max: 4,
+          step: 0.1,
+        }).on("change", (e) => { uHazeFalloff.value = e.value; });
+        hazeFolder.addBinding(hazeParams, "hazeColor", {
+          view: "color",
+          label: "color",
+        }).on("change", (e) => {
+          uHazeColor.value.set(e.value);
+        });
+        hazeFolder.addBinding(hazeParams, "noiseScaleA", {
+          min: 0.001,
+          max: 0.02,
+          step: 0.001,
+          label: "noise scale A",
+        }).on("change", (e) => { uNoiseScaleA.value = e.value; });
+        hazeFolder.addBinding(hazeParams, "noiseScaleB", {
+          min: 0.003,
+          max: 0.02,
+          step: 0.001,
+          label: "noise scale B",
+        }).on("change", (e) => { uNoiseScaleB.value = e.value; });
+        hazeFolder.addBinding(hazeParams, "noiseAmountA", {
+          min: 0.1,
+          max: 0.5,
+          step: 0.02,
+        }).on("change", (e) => { uNoiseAmountA.value = e.value; });
+        hazeFolder.addBinding(hazeParams, "noiseAmountB", {
+          min: 0.05,
+          max: 0.4,
+          step: 0.02,
+        }).on("change", (e) => { uNoiseAmountB.value = e.value; });
+        hazeFolder.addBinding(hazeParams, "noiseDetail", {
+          min: 0,
+          max: 0.35,
+          step: 0.02,
+        }).on("change", (e) => { uNoiseDetail.value = e.value; });
+        hazeFolder.addBinding(hazeParams, "noiseSpeed", {
+          min: 0,
+          max: 2,
+          step: 0.1,
+        }).on("change", (e) => { uNoiseSpeed.value = e.value; });
 
         const skyFolder = pane.addFolder({ title: "Sky", expanded: true });
         skyFolder.addBinding(parkourParams.sky, "turbidity", {
@@ -1564,6 +1941,26 @@
             b2BufR[li] = B2_X + B2_HW; b2BufR[li+1] = B2_Y; b2BufR[li+2] = B2_Z_MAX;
             b2GeoL.attributes.position.needsUpdate = true;
             b2GeoR.attributes.position.needsUpdate = true;
+          }
+
+          // Moving platform gauntlet: drive kinematic bodies each frame
+          for (const mp of movingGauntlet) {
+            const pos = mp.fn(elapsed);
+            mp.body.setNextKinematicTranslation(pos);
+            mp.mesh.position.set(pos.x, pos.y, pos.z);
+          }
+
+          // Pendulum gauntlet: swing kinematic bobs + update rope lines
+          for (const pnd of pendulumBods) {
+            const angle = pnd.amp * Math.sin(pnd.freq * elapsed + pnd.phase);
+            const bx = Math.sin(angle) * pnd.ropeLen;
+            const by = pnd.pivotY - Math.cos(angle) * pnd.ropeLen;
+            pnd.body.setNextKinematicTranslation({ x: bx, y: by, z: pnd.pivotZ });
+            pnd.mesh.position.set(bx, by, pnd.pivotZ);
+            // Rope: pivot → bob
+            pnd.ropePts[0] = 0;   pnd.ropePts[1] = pnd.pivotY; pnd.ropePts[2] = pnd.pivotZ;
+            pnd.ropePts[3] = bx;  pnd.ropePts[4] = by;         pnd.ropePts[5] = pnd.pivotZ;
+            pnd.ropeLine.geometry.attributes.position.needsUpdate = true;
           }
 
           windParams.uTime.value = elapsed;
