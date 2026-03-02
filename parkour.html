@@ -83,6 +83,7 @@
         createPhysicsDebug,
       } from "./physics.js";
       import { createPlayer } from "./player.js";
+      import { createNpc } from "./npc.js";
       import { createFloatingLeaves } from "./floating-leaves.js";
       import { PARAMS } from "./params.js";
       import { PI } from "./constants.js";
@@ -134,6 +135,15 @@
         debug: {
           rapierDebug: false,
         },
+        npc: {
+          enabled: true,
+          speed: 2,
+          walkRadius: 100,
+          directionChangeInterval: 3,
+          turnSpeed: 5,
+          scale: 1,
+          floorOffset: 0,
+        },
         foliage: {
           floatingLeaves: false,
           count: 40,
@@ -167,7 +177,7 @@
         return new THREE.Vector3(
           cosEl * Math.cos(az),
           Math.sin(el),
-          cosEl * Math.sin(az)
+          cosEl * Math.sin(az),
         ).normalize();
       }
 
@@ -198,7 +208,7 @@
           60,
           innerWidth / innerHeight,
           0.5,
-          1000
+          1000,
         );
         camera.position.set(0, 4, 12);
 
@@ -213,11 +223,11 @@
         // ── LIGHTING ──
         const _sunDir = sunDirectionFromAngles(
           parkourParams.light.sunAzimuth,
-          parkourParams.light.sunElevation
+          parkourParams.light.sunElevation,
         );
         const dirLight = new THREE.DirectionalLight(
           parkourParams.light.dirColor,
-          parkourParams.light.dirIntensity
+          parkourParams.light.dirIntensity,
         );
         dirLight.position.copy(_sunDir.clone().multiplyScalar(50));
         dirLight.castShadow = true;
@@ -251,7 +261,7 @@
         const hemiLight = new THREE.HemisphereLight(
           parkourParams.light.hemiSkyColor,
           parkourParams.light.hemiGroundColor,
-          parkourParams.light.hemiIntensity
+          parkourParams.light.hemiIntensity,
         );
         scene.add(hemiLight);
 
@@ -293,7 +303,7 @@
 
         const towerBase = new THREE.Mesh(
           new THREE.BoxGeometry(TOWER_BASE * 2, TOWER_BASE, TOWER_BASE * 2),
-          towerMat
+          towerMat,
         );
         towerBase.position.y = TOWER_BASE / 2;
         towerBase.castShadow = true;
@@ -301,8 +311,12 @@
         towerGroup.add(towerBase);
 
         const towerBody = new THREE.Mesh(
-          new THREE.BoxGeometry(TOWER_BASE * 1.6, TOWER_HEIGHT, TOWER_BASE * 1.6),
-          towerMat
+          new THREE.BoxGeometry(
+            TOWER_BASE * 1.6,
+            TOWER_HEIGHT,
+            TOWER_BASE * 1.6,
+          ),
+          towerMat,
         );
         towerBody.position.y = TOWER_BASE + TOWER_HEIGHT / 2;
         towerBody.castShadow = true;
@@ -310,8 +324,12 @@
         towerGroup.add(towerBody);
 
         const towerTop = new THREE.Mesh(
-          new THREE.BoxGeometry(TOWER_BASE * 1.8, TOWER_BASE * 0.8, TOWER_BASE * 1.8),
-          towerMat
+          new THREE.BoxGeometry(
+            TOWER_BASE * 1.8,
+            TOWER_BASE * 0.8,
+            TOWER_BASE * 1.8,
+          ),
+          towerMat,
         );
         towerTop.position.y = TOWER_BASE + TOWER_HEIGHT + TOWER_BASE * 0.4;
         towerTop.castShadow = true;
@@ -325,12 +343,42 @@
         parkourGroup.position.y = FLOOR_Y;
         const gltfLoader = new GLTFLoader();
         const PARKOUR_MODELS = [
-          { url: "models/parkour/slope1.glb", pos: [8, 0, 0], textureScale: 1200, gradientBias: -0.4, uvOffset: [127.3, 41.7, 89.2] },
-          { url: "models/parkour/parkour1.glb", pos: [16, 0, 0], textureScale: 1500, gradientBias: -0.15, uvOffset: [203.1, 67.9, 151.4] },
-          { url: "models/parkour/holewall.glb", pos: [24, 0, 0], textureScale: 1800, gradientBias: 0.55, uvOffset: [311.5, 93.2, 227.8] },
-          { url: "models/parkour/cylinder.glb", pos: [32, 0, 0], textureScale: 1000, gradientBias: 0.3, uvOffset: [419.7, 178.3, 293.6] },
+          {
+            url: "models/parkour/slope1.glb",
+            pos: [8, 0, 0],
+            textureScale: 1200,
+            gradientBias: -0.4,
+            uvOffset: [127.3, 41.7, 89.2],
+          },
+          {
+            url: "models/parkour/parkour1.glb",
+            pos: [16, 0, 0],
+            textureScale: 1500,
+            gradientBias: -0.15,
+            uvOffset: [203.1, 67.9, 151.4],
+          },
+          {
+            url: "models/parkour/holewall.glb",
+            pos: [24, 0, 0],
+            textureScale: 1800,
+            gradientBias: 0.55,
+            uvOffset: [311.5, 93.2, 227.8],
+          },
+          {
+            url: "models/parkour/cylinder.glb",
+            pos: [32, 0, 0],
+            textureScale: 1000,
+            gradientBias: 0.3,
+            uvOffset: [419.7, 178.3, 293.6],
+          },
         ];
-        for (const { url, pos, textureScale, gradientBias, uvOffset } of PARKOUR_MODELS) {
+        for (const {
+          url,
+          pos,
+          textureScale,
+          gradientBias,
+          uvOffset,
+        } of PARKOUR_MODELS) {
           const gltf = await gltfLoader.loadAsync(url);
           const mat = createTileMaterial({
             textureScale: textureScale ?? parkourParams.tile.textureScale,
@@ -367,8 +415,8 @@
         sky.sunPosition.value.copy(
           sunDirectionFromAngles(
             parkourParams.light.sunAzimuth,
-            parkourParams.light.sunElevation
-          )
+            parkourParams.light.sunElevation,
+          ),
         );
 
         const pmremGenerator = new THREE.PMREMGenerator(renderer);
@@ -411,7 +459,7 @@
           scene,
           PARKOUR_SIZE,
           sampleHeight,
-          { noDefaultGround: true }
+          { noDefaultGround: true },
         );
 
         // Parkour ground: fixed body so floor surface is at FLOOR_Y (top of cuboid) — matches index physics setup
@@ -419,35 +467,70 @@
         const groundBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(
           0,
           FLOOR_Y - groundHalfY,
-          0
+          0,
         );
         const groundBody = physicsWorld.createRigidBody(groundBodyDesc);
         physicsWorld.createCollider(
           RAPIER.ColliderDesc.cuboid(
             PARKOUR_SIZE * 0.5,
             groundHalfY,
-            PARKOUR_SIZE * 0.5
+            PARKOUR_SIZE * 0.5,
           ),
-          groundBody
+          groundBody,
         );
 
-        const towerBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(
-          TOWER_X,
-          FLOOR_Y + TOWER_BASE / 2 + TOWER_HEIGHT / 2 + TOWER_BASE * 0.4,
-          TOWER_Z
+        // Three separate cuboids — one per visual part — so each exactly matches its mesh.
+        // A single merged box used TOWER_BASE*0.9 XZ, but the base is TOWER_BASE*2 wide
+        // (half = TOWER_BASE), leaving a 2.4-unit gap the player could walk into.
+        const _towerBase = physicsWorld.createRigidBody(
+          RAPIER.RigidBodyDesc.fixed().setTranslation(
+            TOWER_X,
+            FLOOR_Y + TOWER_BASE / 2,
+            TOWER_Z,
+          ),
         );
-        const towerBodyPhys = physicsWorld.createRigidBody(towerBodyDesc);
+        physicsWorld.createCollider(
+          RAPIER.ColliderDesc.cuboid(TOWER_BASE, TOWER_BASE / 2, TOWER_BASE),
+          _towerBase,
+        );
+        const _towerBody = physicsWorld.createRigidBody(
+          RAPIER.RigidBodyDesc.fixed().setTranslation(
+            TOWER_X,
+            FLOOR_Y + TOWER_BASE + TOWER_HEIGHT / 2,
+            TOWER_Z,
+          ),
+        );
+        physicsWorld.createCollider(
+          RAPIER.ColliderDesc.cuboid(
+            TOWER_BASE * 0.8,
+            TOWER_HEIGHT / 2,
+            TOWER_BASE * 0.8,
+          ),
+          _towerBody,
+        );
+        const _towerTop = physicsWorld.createRigidBody(
+          RAPIER.RigidBodyDesc.fixed().setTranslation(
+            TOWER_X,
+            FLOOR_Y + TOWER_BASE + TOWER_HEIGHT + TOWER_BASE * 0.4,
+            TOWER_Z,
+          ),
+        );
         physicsWorld.createCollider(
           RAPIER.ColliderDesc.cuboid(
             TOWER_BASE * 0.9,
-            (TOWER_BASE + TOWER_HEIGHT + TOWER_BASE * 0.8) / 2,
-            TOWER_BASE * 0.9
+            TOWER_BASE * 0.4,
+            TOWER_BASE * 0.9,
           ),
-          towerBodyPhys
+          _towerTop,
         );
 
         // Parkour platforms: one trimesh per platform (merge all meshes, like index7 ruins)
         // Per Rapier docs: vertices=Float32Array [x,y,z,...], indices=Uint32Array [i0,i1,i2,...]
+        // IMPORTANT: force-update the full scene graph so parkourGroup.matrixWorld reflects its
+        // position.y = FLOOR_Y offset before we sample child worldMatrix values for colliders.
+        // Without this, parkourGroup.matrixWorld stays identity and every trimesh ends up 1 unit
+        // below the visual mesh (inside the ground), making platforms un-walkable.
+        scene.updateMatrixWorld();
         const _box = new THREE.Box3();
         const _center = new THREE.Vector3();
         const _v = new THREE.Vector3();
@@ -461,7 +544,8 @@
           platform.traverse((child) => {
             if (!child.isMesh || !child.geometry) return;
             const geo = child.geometry;
-            const posAttr = geo.getAttribute?.("position") ?? geo.attributes?.position;
+            const posAttr =
+              geo.getAttribute?.("position") ?? geo.attributes?.position;
             if (!posAttr || posAttr.count < 3) return;
             const worldMat = child.matrixWorld;
             for (let i = 0; i < posAttr.count; i++) {
@@ -483,7 +567,8 @@
           const platformInds = new Uint32Array(inds);
           // TriMeshFlags: MERGE_DUPLICATE=16, DELETE_DEGENERATE=32, FIX_INTERNAL_EDGES=144
           const tf = RAPIER.TriMeshFlags ?? {};
-          const flags = (tf.MERGE_DUPLICATE_VERTICES ?? 16) |
+          const flags =
+            (tf.MERGE_DUPLICATE_VERTICES ?? 16) |
             (tf.DELETE_DEGENERATE_TRIANGLES ?? 32) |
             (tf.FIX_INTERNAL_EDGES ?? 144);
           try {
@@ -491,48 +576,308 @@
               RAPIER.RigidBodyDesc.fixed().setTranslation(
                 _center.x,
                 _center.y,
-                _center.z
-              )
+                _center.z,
+              ),
             );
             const colliderDesc = RAPIER.ColliderDesc.trimesh(
               platformVerts,
               platformInds,
-              flags
+              flags,
             );
             physicsWorld.createCollider(colliderDesc, platformBody);
           } catch (e) {
-            console.warn("Parkour collider failed for", platform.name || platform.uuid, e);
+            console.warn(
+              "Parkour collider failed for",
+              platform.name || platform.uuid,
+              e,
+            );
           }
         }
 
-        // Hide physics cubes for clean parkour (add parkour elements later)
+        // Hide the default world cubes (they spawn far away)
         physicsCubes.forEach(({ mesh }) => {
           mesh.visible = false;
         });
 
-        const { physicsDebugGroup, buildRapierDebugMeshes } = createPhysicsDebug(
-          RAPIER,
-          scene,
-          physicsWorld
+        // ── DYNAMIC PROPS ──────────────────────────────────────────────────────
+        // boxes: [x, z, half-size, mass, color]  — y is computed from FLOOR_Y+half
+        // ball:  [x, z, radius,    mass, color]
+        const BOX_DEFS = [
+          // tiny light (easy to kick) — red / orange / yellow
+          [-3, -4, 0.3, 1, 0xff3333],
+          [-4, -2, 0.3, 1, 0xff8800],
+          [-2, -6, 0.3, 1, 0xffdd00],
+          // medium (jump on / push with effort) — green / blue
+          [4, -6, 0.5, 15, 0x33cc44],
+          [6, -4, 0.5, 15, 0x3388ff],
+          // stacked pair — purple tones
+          [0, -8, 0.4, 5, 0xcc33ff],
+          [0, -8, 0.4, 5, 0xff33cc], // spawns on top of previous
+          // heavy blocks (barely budge, great to jump on) — dark blue / red
+          [-5, 5, 0.75, 80, 0x2244dd],
+          [5, 5, 0.75, 80, 0xdd4422],
+        ];
+        const BALL_DEFS = [
+          // [x, z, radius, mass, color]
+          [2, -4, 0.45, 3, 0xffffff],
+          [-1, -3, 0.25, 1, 0xffaaff],
+        ];
+
+        // Dominos: 7 thin standing slabs in a line (push the first to knock the chain)
+        const DOMINO_DEFS = [];
+        for (let i = 0; i < 7; i++) {
+          DOMINO_DEFS.push([3 + i * 0.65, -3]); // [x, z]
+        }
+
+        const dynamicObjects = []; // { body, mesh } — synced every frame
+
+        let stackOffset = 0; // for the stacked pair
+        for (const [bx, bz, bh, mass, color] of BOX_DEFS) {
+          const isStack = bx === 0 && bz === -8;
+          const by = FLOOR_Y + bh + stackOffset;
+          if (isStack) stackOffset += bh * 2 + 0.05;
+          const body = physicsWorld.createRigidBody(
+            RAPIER.RigidBodyDesc.dynamic()
+              .setTranslation(bx, by, bz)
+              .setAdditionalMass(mass),
+          );
+          physicsWorld.createCollider(
+            RAPIER.ColliderDesc.cuboid(bh, bh, bh),
+            body,
+          );
+          const mesh = new THREE.Mesh(
+            new THREE.BoxGeometry(bh * 2, bh * 2, bh * 2),
+            new THREE.MeshStandardMaterial({
+              color,
+              roughness: 0.55,
+              metalness: 0.1,
+            }),
+          );
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          scene.add(mesh);
+          dynamicObjects.push({ body, mesh });
+        }
+
+        for (const [bx, bz, r, mass, color] of BALL_DEFS) {
+          const body = physicsWorld.createRigidBody(
+            RAPIER.RigidBodyDesc.dynamic()
+              .setTranslation(bx, FLOOR_Y + r, bz)
+              .setAdditionalMass(mass),
+          );
+          physicsWorld.createCollider(RAPIER.ColliderDesc.ball(r), body);
+          const mesh = new THREE.Mesh(
+            new THREE.SphereGeometry(r, 14, 10),
+            new THREE.MeshStandardMaterial({
+              color,
+              roughness: 0.3,
+              metalness: 0.2,
+            }),
+          );
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          scene.add(mesh);
+          dynamicObjects.push({ body, mesh });
+        }
+
+        const dominoHx = 0.09,
+          dominoHy = 0.75,
+          dominoHz = 0.35;
+        for (const [dx, dz] of DOMINO_DEFS) {
+          const body = physicsWorld.createRigidBody(
+            RAPIER.RigidBodyDesc.dynamic()
+              .setTranslation(dx, FLOOR_Y + dominoHy, dz)
+              .setAdditionalMass(2),
+          );
+          physicsWorld.createCollider(
+            RAPIER.ColliderDesc.cuboid(dominoHx, dominoHy, dominoHz),
+            body,
+          );
+          const mesh = new THREE.Mesh(
+            new THREE.BoxGeometry(dominoHx * 2, dominoHy * 2, dominoHz * 2),
+            new THREE.MeshStandardMaterial({
+              color: 0xddaa33,
+              roughness: 0.6,
+              metalness: 0.05,
+            }),
+          );
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          scene.add(mesh);
+          dynamicObjects.push({ body, mesh });
+        }
+
+        // ── MOVING PLATFORM ────────────────────────────────────────────────────
+        const movPlatBody = physicsWorld.createRigidBody(
+          RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(
+            -8,
+            FLOOR_Y + 0.25,
+            0,
+          ),
         );
+        physicsWorld.createCollider(
+          RAPIER.ColliderDesc.cuboid(2, 0.25, 2),
+          movPlatBody,
+        );
+        const movPlatMesh = new THREE.Mesh(
+          new THREE.BoxGeometry(4, 0.5, 4),
+          new THREE.MeshStandardMaterial({
+            color: 0x88ffaa,
+            roughness: 0.4,
+            metalness: 0.3,
+          }),
+        );
+        movPlatMesh.castShadow = true;
+        movPlatMesh.receiveShadow = true;
+        scene.add(movPlatMesh);
+
+        // ── FLEXIBLE ROPE BRIDGE ──────────────────────────────────────────────
+        // Chain of planks linked by spherical joints (ball-socket), anchored at
+        // both ends to fixed pillars. Sways under the player's movement impulses.
+        const BRIDGE_X      = -15;
+        const BRIDGE_Z_MIN  = -12;
+        const BRIDGE_Z_MAX  =  12;
+        const BRIDGE_Y      = FLOOR_Y + 3.5;   // deck height
+        const N_PLANKS      = 12;
+        const BSPAN         = BRIDGE_Z_MAX - BRIDGE_Z_MIN;  // 24 units
+        const BSTEP         = BSPAN / N_PLANKS;              // 2 units/plank
+        const P_HW = 1.5,  P_HH = 0.09,  P_HD = BSTEP * 0.38; // half extents
+        const BRIDGE_CENTER_Z = (BRIDGE_Z_MIN + BRIDGE_Z_MAX) * 0.5;
+        const MAX_SAG = 0.4; // centre sags this many units below anchor height
+
+        // Pillar visuals + colliders at each end
+        {
+          const pillarH = BRIDGE_Y - FLOOR_Y + 0.5;
+          const pillarGeo = new THREE.BoxGeometry(P_HW * 2 + 0.4, pillarH, 1.2);
+          const pillarMat = new THREE.MeshStandardMaterial({ color: 0x7a5c3a, roughness: 0.9 });
+          for (const pz of [BRIDGE_Z_MIN, BRIDGE_Z_MAX]) {
+            const py = FLOOR_Y + pillarH * 0.5;
+            const m = new THREE.Mesh(pillarGeo, pillarMat);
+            m.position.set(BRIDGE_X, py, pz);
+            m.castShadow = true; m.receiveShadow = true;
+            scene.add(m);
+            const pb = physicsWorld.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(BRIDGE_X, py, pz));
+            physicsWorld.createCollider(RAPIER.ColliderDesc.cuboid(P_HW + 0.2, pillarH * 0.5, 0.6), pb);
+          }
+        }
+
+        // Access ramps — one tilted box at each bridge end so the player can walk up
+        {
+          const RAMP_RUN  = 10;   // horizontal length of ramp
+          const rampAngle = Math.atan2(BRIDGE_Y - FLOOR_Y, RAMP_RUN); // tilt angle
+          const rampLen   = Math.sqrt(RAMP_RUN * RAMP_RUN + (BRIDGE_Y - FLOOR_Y) ** 2);
+          const rampMat   = new THREE.MeshStandardMaterial({ color: 0x9a7a5a, roughness: 0.8 });
+          const rampGeo   = new THREE.BoxGeometry(P_HW * 2 + 0.4, 0.4, rampLen);
+          // [anchorZ, sign]: sign < 0 → ramp runs from low (outside) to high (bridge entry)
+          for (const [anchorZ, sign] of [[BRIDGE_Z_MIN, -1], [BRIDGE_Z_MAX, 1]]) {
+            const cz = anchorZ + sign * RAMP_RUN * 0.5;
+            const cy = FLOOR_Y + (BRIDGE_Y - FLOOR_Y) * 0.5;
+            const rx = sign * rampAngle;
+            const q  = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), rx);
+            // visual
+            const m = new THREE.Mesh(rampGeo, rampMat);
+            m.position.set(BRIDGE_X, cy, cz);
+            m.quaternion.copy(q);
+            m.castShadow = true; m.receiveShadow = true;
+            scene.add(m);
+            // collider
+            const rb = physicsWorld.createRigidBody(
+              RAPIER.RigidBodyDesc.fixed()
+                .setTranslation(BRIDGE_X, cy, cz)
+                .setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }));
+            physicsWorld.createCollider(
+              RAPIER.ColliderDesc.cuboid(P_HW + 0.2, 0.2, rampLen * 0.5), rb);
+          }
+        }
+
+        // Fixed anchor bodies at deck height (joint attachment only, no collider needed)
+        const bridgeAnchorA = physicsWorld.createRigidBody(
+          RAPIER.RigidBodyDesc.fixed().setTranslation(BRIDGE_X, BRIDGE_Y, BRIDGE_Z_MIN));
+        const bridgeAnchorB = physicsWorld.createRigidBody(
+          RAPIER.RigidBodyDesc.fixed().setTranslation(BRIDGE_X, BRIDGE_Y, BRIDGE_Z_MAX));
+
+        // Planks — pre-positioned on a parabolic arc so the chain starts near equilibrium.
+        // Each plank is also pre-rotated to match the catenary tangent angle at its position,
+        // minimising joint stress at spawn and preventing oscillation from the start.
+        const bridgePlanks = [];
+        const _iq = new THREE.Quaternion();
+        {
+          const plankGeo = new THREE.BoxGeometry(P_HW * 2, P_HH * 2, P_HD * 2);
+          const plankMat = new THREE.MeshStandardMaterial({ color: 0xa07830, roughness: 0.85 });
+          for (let i = 0; i < N_PLANKS; i++) {
+            const pz  = BRIDGE_Z_MIN + BSTEP * (i + 0.5);
+            const rel = (pz - BRIDGE_CENTER_Z) / (BSPAN * 0.5);
+            const py  = BRIDGE_Y - MAX_SAG * (1 - rel * rel); // catenary approx
+            // Tangent slope of the parabola at this z: dy/dz = -MAX_SAG * 2*rel / (BSPAN*0.5)
+            const slope = -MAX_SAG * 2 * rel / (BSPAN * 0.5);
+            const rx = Math.atan(slope); // rotate X-axis to match slope
+            _iq.setFromAxisAngle(new THREE.Vector3(1, 0, 0), rx);
+            const body = physicsWorld.createRigidBody(
+              RAPIER.RigidBodyDesc.dynamic()
+                .setTranslation(BRIDGE_X, py, pz)
+                .setRotation({ x: _iq.x, y: _iq.y, z: _iq.z, w: _iq.w })
+                .setLinearDamping(6.0)
+                .setAngularDamping(12.0));
+            physicsWorld.createCollider(
+              RAPIER.ColliderDesc.cuboid(P_HW, P_HH, P_HD).setDensity(5), body);
+            const mesh = new THREE.Mesh(plankGeo, plankMat);
+            mesh.castShadow = true; mesh.receiveShadow = true;
+            scene.add(mesh);
+            bridgePlanks.push({ body, mesh });
+          }
+        }
+
+        // Spherical joint chain: anchorA → plank[0] → … → plank[N-1] → anchorB
+        {
+          const HS = BSTEP * 0.5;
+          physicsWorld.createImpulseJoint(
+            RAPIER.JointData.spherical({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: -HS }),
+            bridgeAnchorA, bridgePlanks[0].body, true);
+          for (let i = 0; i < N_PLANKS - 1; i++) {
+            physicsWorld.createImpulseJoint(
+              RAPIER.JointData.spherical({ x: 0, y: 0, z: HS }, { x: 0, y: 0, z: -HS }),
+              bridgePlanks[i].body, bridgePlanks[i + 1].body, true);
+          }
+          physicsWorld.createImpulseJoint(
+            RAPIER.JointData.spherical({ x: 0, y: 0, z: HS }, { x: 0, y: 0, z: 0 }),
+            bridgePlanks[N_PLANKS - 1].body, bridgeAnchorB, true);
+        }
+
+        // Rope line geometry: two lines tracing the left/right plank edges
+        const ROPE_PTS = N_PLANKS + 2; // anchorA + planks + anchorB
+        const ropeBufL = new Float32Array(ROPE_PTS * 3);
+        const ropeBufR = new Float32Array(ROPE_PTS * 3);
+        const ropeGeoL = new THREE.BufferGeometry();
+        const ropeGeoR = new THREE.BufferGeometry();
+        ropeGeoL.setAttribute('position', new THREE.BufferAttribute(ropeBufL, 3));
+        ropeGeoR.setAttribute('position', new THREE.BufferAttribute(ropeBufR, 3));
+        const ropeLineMat = new THREE.LineBasicMaterial({ color: 0x5a3010 });
+        const ropeLineL = new THREE.Line(ropeGeoL, ropeLineMat);
+        const ropeLineR = new THREE.Line(ropeGeoR, ropeLineMat);
+        ropeLineL.frustumCulled = false;
+        ropeLineR.frustumCulled = false;
+        scene.add(ropeLineL); scene.add(ropeLineR);
+        // Temp vectors reused each frame for rope corner computation
+        const _brV = new THREE.Vector3();
+        const _brQ = new THREE.Quaternion();
+
+        const { physicsDebugGroup, buildRapierDebugMeshes } =
+          createPhysicsDebug(RAPIER, scene, physicsWorld);
         physicsDebugGroup.visible = false;
 
         // ── PLAYER ──
         const charPos = new THREE.Vector3(0, 0, 0);
         const capR = PARAMS.capsuleRadius;
-        const capHalfH = Math.max(
-          0.1,
-          (PARAMS.characterHeight - 2 * capR) / 2
-        );
+        const capHalfH = Math.max(0.1, (PARAMS.characterHeight - 2 * capR) / 2);
         charPos.y = FLOOR_Y + capHalfH + capR;
 
         const { playerBody, playerCollider, characterController } =
           createPlayerController(RAPIER, physicsWorld, charPos, PARAMS, {
-          enableSnapToGround: true,
-          characterOffset: 0.02,
-          maxSlopeClimbAngle: (60 * Math.PI) / 180,
-          minSlopeSlideAngle: (65 * Math.PI) / 180,
-        });
+            enableSnapToGround: true,
+            characterOffset: 0.02,
+            maxSlopeClimbAngle: (60 * Math.PI) / 180,
+            minSlopeSlideAngle: (65 * Math.PI) / 180,
+          });
 
         const player = createPlayer({
           scene,
@@ -544,16 +889,30 @@
           playerCollider,
           characterController,
           physicsWorld,
-          sampleHeight,
-          capR,
-          capHalfH,
+          // no sampleHeight → parkour mode: Rapier trimesh colliders + computedGrounded()
           TERRAIN_SIZE: PARKOUR_SIZE,
+        });
+
+        const npc = createNpc({
+          scene,
+          renderer,
+          camera,
+          parkourParams,
+          FLOOR_Y,
+          PARKOUR_SIZE,
+          characterHeight: PARAMS.characterHeight,
+          capsuleRadius: PARAMS.capsuleRadius,
+          spawnInFrontOf: { pos: charPos, yaw: player.state.camYaw },
+          spawnDistance: 4,
         });
 
         // ── TWEAKPANE CONTROLS ──
         const pane = new Tweakpane.Pane({ title: "Parkour", expanded: true });
 
-        const tileFolder = pane.addFolder({ title: "Tile Material", expanded: true });
+        const tileFolder = pane.addFolder({
+          title: "Tile Material",
+          expanded: true,
+        });
         tileFolder.addBinding(parkourParams.tile, "textureScale", {
           min: 1,
           max: 3000,
@@ -593,14 +952,20 @@
           step: 0.01,
         });
 
-        const groundFolder = pane.addFolder({ title: "Ground", expanded: true });
+        const groundFolder = pane.addFolder({
+          title: "Ground",
+          expanded: true,
+        });
         groundFolder.addBinding(parkourParams.ground, "planeSize", {
           min: 100,
           max: 1500,
           step: 50,
         });
 
-        const lightingFolder = pane.addFolder({ title: "Lighting", expanded: true });
+        const lightingFolder = pane.addFolder({
+          title: "Lighting",
+          expanded: true,
+        });
         lightingFolder.addBinding(parkourParams.light, "sunAzimuth", {
           min: 0,
           max: 360,
@@ -673,7 +1038,10 @@
           label: "mie g",
         });
 
-        const foliageFolder = pane.addFolder({ title: "Foliage", expanded: true });
+        const foliageFolder = pane.addFolder({
+          title: "Foliage",
+          expanded: true,
+        });
         foliageFolder.addBinding(parkourParams.foliage, "floatingLeaves", {
           label: "enable",
         });
@@ -764,12 +1132,54 @@
           label: "floor offset",
         });
 
+        const npcFolder = pane.addFolder({ title: "NPC", expanded: true });
+        npcFolder.addBinding(parkourParams.npc, "enabled", {
+          label: "enabled",
+        });
+        npcFolder.addBinding(parkourParams.npc, "speed", {
+          min: 0.5,
+          max: 6,
+          step: 0.1,
+        });
+        npcFolder.addBinding(parkourParams.npc, "walkRadius", {
+          min: 20,
+          max: 350,
+          step: 10,
+          label: "walk radius",
+        });
+        npcFolder.addBinding(parkourParams.npc, "directionChangeInterval", {
+          min: 1,
+          max: 10,
+          step: 0.5,
+          label: "dir change (s)",
+        });
+        npcFolder.addBinding(parkourParams.npc, "turnSpeed", {
+          min: 1,
+          max: 15,
+          step: 0.5,
+          label: "turn speed",
+        });
+        npcFolder.addBinding(parkourParams.npc, "scale", {
+          min: 0.5,
+          max: 3,
+          step: 0.1,
+        });
+        npcFolder.addBinding(parkourParams.npc, "floorOffset", {
+          min: -2,
+          max: 2,
+          step: 0.1,
+          label: "floor offset",
+        });
+
         const debugFolder = pane.addFolder({ title: "Debug", expanded: false });
         debugFolder.addBinding(parkourParams.debug, "rapierDebug", {
           label: "Rapier colliders",
         });
 
-        const lightFolder = pane.addFolder({ title: "Shadows (CSM)", expanded: true });
+        const lightFolder = pane.addFolder({
+          title: "Shadows (CSM)",
+          expanded: true,
+        });
         lightFolder.addBinding(parkourParams.csm, "updateEveryFrame", {
           label: "update every frame",
         });
@@ -840,6 +1250,51 @@
           lastTime = elapsed;
 
           player.update(dt);
+          npc.update(dt);
+
+          // Sync dynamic props visual → physics
+          for (const { body, mesh } of dynamicObjects) {
+            const t = body.translation();
+            const r = body.rotation();
+            mesh.position.set(t.x, t.y, t.z);
+            mesh.quaternion.set(r.x, r.y, r.z, r.w);
+          }
+
+          // Oscillate moving platform along Z
+          const platZ = Math.sin(elapsed * 0.7) * 6;
+          movPlatBody.setNextKinematicTranslation({
+            x: -8,
+            y: FLOOR_Y + 0.25,
+            z: platZ,
+          });
+          const pt = movPlatBody.translation();
+          movPlatMesh.position.set(pt.x, pt.y, pt.z);
+
+          // Sync bridge planks + update rope line geometry
+          {
+            const ta = bridgeAnchorA.translation();
+            ropeBufL[0] = ta.x - P_HW; ropeBufL[1] = ta.y; ropeBufL[2] = ta.z;
+            ropeBufR[0] = ta.x + P_HW; ropeBufR[1] = ta.y; ropeBufR[2] = ta.z;
+            for (let i = 0; i < bridgePlanks.length; i++) {
+              const { body, mesh } = bridgePlanks[i];
+              const t = body.translation();
+              const r = body.rotation();
+              mesh.position.set(t.x, t.y, t.z);
+              _brQ.set(r.x, r.y, r.z, r.w);
+              mesh.quaternion.copy(_brQ);
+              // Left (-X) and right (+X) world-space plank corners for rope
+              _brV.set(-P_HW, 0, 0).applyQuaternion(_brQ);
+              const ri = (i + 1) * 3;
+              ropeBufL[ri]   = t.x + _brV.x; ropeBufL[ri+1] = t.y + _brV.y; ropeBufL[ri+2] = t.z + _brV.z;
+              ropeBufR[ri]   = t.x - _brV.x; ropeBufR[ri+1] = t.y - _brV.y; ropeBufR[ri+2] = t.z - _brV.z;
+            }
+            const tb = bridgeAnchorB.translation();
+            const li = (N_PLANKS + 1) * 3;
+            ropeBufL[li] = tb.x - P_HW; ropeBufL[li+1] = tb.y; ropeBufL[li+2] = tb.z;
+            ropeBufR[li] = tb.x + P_HW; ropeBufR[li+1] = tb.y; ropeBufR[li+2] = tb.z;
+            ropeGeoL.attributes.position.needsUpdate = true;
+            ropeGeoR.attributes.position.needsUpdate = true;
+          }
 
           windParams.uTime.value = elapsed;
           windParams.uWindStr.value = parkourParams.foliage.windStr;
@@ -853,17 +1308,17 @@
           leaves.params.opacity = parkourParams.foliage.opacity;
           leaves.params.windInfluence = parkourParams.foliage.windInfluence;
           leaves.params.gravity = parkourParams.foliage.gravity;
-          leaves.params.terminalVelocity = parkourParams.foliage.terminalVelocity;
+          leaves.params.terminalVelocity =
+            parkourParams.foliage.terminalVelocity;
           leaves.params.rotationSpeed = parkourParams.foliage.rotationSpeed;
           leaves.params.airResistance = parkourParams.foliage.airResistance;
           leaves.params.maxAge = parkourParams.foliage.maxAge;
-          leaves.params.terrainFloorOffset = parkourParams.foliage.terrainFloorOffset;
+          leaves.params.terrainFloorOffset =
+            parkourParams.foliage.terrainFloorOffset;
           leaves.update();
 
           // Smooth character visual + camera to filter physics jitter (ground appears to shake otherwise)
-          const capHalfH = Math.max(0.1, (PARAMS.characterHeight - 2 * PARAMS.capsuleRadius) / 2);
-          const groundY = FLOOR_Y + capHalfH + PARAMS.capsuleRadius;
-          const inAir = charPos.y > groundY + 0.15;
+          const inAir = !player.state.isGrounded;
           if (!charSmoothInit) {
             smoothCharPos.copy(charPos);
             charSmoothInit = true;
@@ -883,10 +1338,14 @@
               u.textureScale.value = parkourParams.tile.textureScale;
               u.gradientIntensity.value = parkourParams.tile.gradientIntensity;
               u.gradientBias.value = parkourParams.tile.gradientBias;
-              u.tileColor.value.copy(srgbToLinear(parkourParams.tile.tileColor));
-              u.gridColor.value.copy(srgbToLinear(parkourParams.tile.gridColor));
+              u.tileColor.value.copy(
+                srgbToLinear(parkourParams.tile.tileColor),
+              );
+              u.gridColor.value.copy(
+                srgbToLinear(parkourParams.tile.gridColor),
+              );
               u.gridLineColor.value.copy(
-                srgbToLinear(parkourParams.tile.gridLineColor)
+                srgbToLinear(parkourParams.tile.gridLineColor),
               );
               mat.roughness = parkourParams.tile.roughness;
               mat.metalness = parkourParams.tile.metalness;
@@ -904,14 +1363,30 @@
           if (PARAMS.cameraMode === "thirdPerson") {
             const camDist = PARAMS.camDist;
             const cx =
-              smoothCharPos.x - Math.sin(player.state.camYaw) * Math.cos(player.state.camPitch) * camDist;
+              smoothCharPos.x -
+              Math.sin(player.state.camYaw) *
+                Math.cos(player.state.camPitch) *
+                camDist;
             const cy =
-              smoothCharPos.y + Math.sin(player.state.camPitch) * camDist + PARAMS.camHeight;
+              smoothCharPos.y +
+              Math.sin(player.state.camPitch) * camDist +
+              PARAMS.camHeight;
             const cz =
-              smoothCharPos.z - Math.cos(player.state.camYaw) * Math.cos(player.state.camPitch) * camDist;
+              smoothCharPos.z -
+              Math.cos(player.state.camYaw) *
+                Math.cos(player.state.camPitch) *
+                camDist;
             const camTerrainY = sampleHeight(cx, cz) + 1.5;
-            const targetPos = new THREE.Vector3(cx, Math.max(cy, camTerrainY), cz);
-            const targetLook = new THREE.Vector3(smoothCharPos.x, smoothCharPos.y + 0.5, smoothCharPos.z);
+            const targetPos = new THREE.Vector3(
+              cx,
+              Math.max(cy, camTerrainY),
+              cz,
+            );
+            const targetLook = new THREE.Vector3(
+              smoothCharPos.x,
+              smoothCharPos.y + 0.5,
+              smoothCharPos.z,
+            );
             if (!camSmoothInit) {
               smoothCamPos.copy(targetPos);
               smoothLookAt.copy(targetLook);
@@ -934,7 +1409,7 @@
           // Apply lighting params
           const sunDir = sunDirectionFromAngles(
             parkourParams.light.sunAzimuth,
-            parkourParams.light.sunElevation
+            parkourParams.light.sunElevation,
           );
           dirLight.position.copy(sunDir.clone().multiplyScalar(50));
           dirLight.color.set(parkourParams.light.dirColor);
@@ -993,8 +1468,7 @@
 
       init().catch((e) => {
         console.error("Init failed:", e);
-        document.getElementById("backend").textContent =
-          "Error: " + e.message;
+        document.getElementById("backend").textContent = "Error: " + e.message;
       });
     </script>
   </body>

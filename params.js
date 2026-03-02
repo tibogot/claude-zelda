@@ -27,7 +27,7 @@ export const PARAMS = {
   windGust: 0.3,
   windMicroSway: 0.15,
   // Susuki (pampas grass) — shares wind with grass, same size as grass by default
-  susukiEnabled: true,
+  susukiEnabled: false,
   susukiStemHeight: 0.7,
   susukiStemWidth: 0.08,
   susukiBandWidth: 0.06,

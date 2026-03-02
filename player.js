@@ -22,11 +22,11 @@ const DRACO_URL =
  * @param {import("@dimforge/rapier3d").Collider} opts.playerCollider
  * @param {import("@dimforge/rapier3d").CharacterController} opts.characterController
  * @param {import("@dimforge/rapier3d").World} opts.physicsWorld
- * @param {(x: number, z: number) => number} opts.sampleHeight
- * @param {number} opts.capR
- * @param {number} opts.capHalfH
+ * @param {(x: number, z: number) => number} [opts.sampleHeight] - Optional. When provided, drives character Y via heightmap (terrain mode). When absent, Rapier trimesh colliders + computedGrounded() handle everything (parkour mode).
+ * @param {number} [opts.capR] - Capsule radius (required when sampleHeight provided)
+ * @param {number} [opts.capHalfH] - Capsule half-height (required when sampleHeight provided)
  * @param {number} opts.TERRAIN_SIZE
- * @returns {{ characterGroup: THREE.Group, capsule: THREE.Mesh, keys: object, state: { camYaw: number, camPitch: number, characterVelY: number, moveDir: THREE.Vector3 }, update: (dt: number) => void }}
+ * @returns {{ characterGroup: THREE.Group, capsule: THREE.Mesh, keys: object, state: { camYaw: number, camPitch: number, characterVelY: number, isGrounded: boolean, moveDir: THREE.Vector3 }, update: (dt: number) => void }}
  */
 export function createPlayer(opts) {
   const {
@@ -39,11 +39,13 @@ export function createPlayer(opts) {
     playerCollider,
     characterController,
     physicsWorld,
-    sampleHeight,
-    capR,
-    capHalfH,
+    sampleHeight = null,
+    capR = 0,
+    capHalfH = 0,
     TERRAIN_SIZE,
   } = opts;
+  // terrain mode: Y driven by heightmap sampling; parkour mode: trimesh colliders + computedGrounded()
+  const hasSampleHeight = typeof sampleHeight === "function";
 
   const capsuleGeo = new THREE.CapsuleGeometry(0.4, 1.2, 8, 16);
   const capsuleMat = new THREE.MeshStandardNodeMaterial({
@@ -292,6 +294,7 @@ export function createPlayer(opts) {
     camYaw: 0,
     camPitch: 0.3,
     characterVelY: 0,
+    isGrounded: false,
     moveDir: new THREE.Vector3(),
   };
   let isPointerLocked = false;
@@ -387,9 +390,9 @@ export function createPlayer(opts) {
     state.moveDir.set(0, 0, 0);
     let desiredDx = 0;
     let desiredDz = 0;
-    const groundYForCrouch =
-      sampleHeight(charPos.x, charPos.z) + capHalfH + capR;
-    const onGroundForCrouch = charPos.y <= groundYForCrouch + 0.6;
+    const onGroundForCrouch = hasSampleHeight
+      ? charPos.y <= (sampleHeight(charPos.x, charPos.z) + capHalfH + capR) + 0.6
+      : state.isGrounded;
     const ud = characterGroup.userData;
     if (
       keys.f &&
@@ -454,10 +457,9 @@ export function createPlayer(opts) {
     const hb = TERRAIN_SIZE * 0.48;
     const nextX = Math.max(-hb, Math.min(hb, charPos.x + desiredDx));
     const nextZ = Math.max(-hb, Math.min(hb, charPos.z + desiredDz));
-    const groundY =
-      sampleHeight(charPos.x, charPos.z) + capHalfH + capR;
-    const nextGroundY = sampleHeight(nextX, nextZ) + capHalfH + capR;
-    const onGround = charPos.y <= groundY + 0.6;
+    const groundY = hasSampleHeight ? sampleHeight(charPos.x, charPos.z) + capHalfH + capR : 0;
+    const nextGroundY = hasSampleHeight ? sampleHeight(nextX, nextZ) + capHalfH + capR : 0;
+    const onGround = hasSampleHeight ? charPos.y <= groundY + 0.6 : state.isGrounded;
     let desiredY;
     if (onGround) {
       if (keys.space) {
@@ -465,7 +467,8 @@ export function createPlayer(opts) {
         desiredY = charPos.y + state.characterVelY * dt;
       } else {
         state.characterVelY = 0;
-        desiredY = nextGroundY;
+        // terrain mode: follow heightmap; parkour mode: let snap-to-ground handle it
+        desiredY = hasSampleHeight ? nextGroundY : charPos.y;
       }
     } else {
       state.characterVelY -= PARAMS.gravity * dt;
@@ -480,6 +483,48 @@ export function createPlayer(opts) {
       playerCollider,
       desiredTranslation,
     );
+    // Push dynamic bodies the character walked into.
+    // Kinematic bodies don't generate contact forces automatically (unlike dynamic ones),
+    // so we read what the controller hit this frame and apply an impulse manually.
+    // str = 3/mass → light boxes (1kg) fly, medium (15kg) slide, heavy (80kg) barely budge.
+    const movLen = Math.sqrt(desiredTranslation.x ** 2 + desiredTranslation.z ** 2);
+    if (movLen > 0.0001) {
+      for (let i = 0; i < characterController.numComputedCollisions(); i++) {
+        const col = characterController.computedCollision(i);
+        const hitBody = col?.collider?.parent?.();
+        if (!hitBody?.isDynamic?.()) continue;
+        const str = 3 / Math.max(hitBody.mass(), 1);
+        hitBody.applyImpulse({
+          x: (desiredTranslation.x / movLen) * str,
+          y: 0.1 * str,
+          z: (desiredTranslation.z / movLen) * str,
+        }, true);
+      }
+    }
+    // Transfer player weight to dynamic bodies the character stands on (e.g. bridge planks).
+    // Collision normal pointing up (ny > 0.6) means the character is resting on that surface.
+    // This makes planks sag and sway even when the player is standing still.
+    if (!hasSampleHeight) {
+      for (let i = 0; i < characterController.numComputedCollisions(); i++) {
+        const col = characterController.computedCollision(i);
+        if (!col?.normal || col.normal.y < 0.6) continue;
+        const hitBody = col?.collider?.parent?.();
+        if (!hitBody?.isDynamic?.()) continue;
+        // Weight impulse: scale with plank mass so lighter planks react more
+        const w = Math.min(3 / Math.max(hitBody.mass(), 0.5), 1.5);
+        hitBody.applyImpulse({ x: 0, y: -PARAMS.gravity * w * dt, z: 0 }, true);
+      }
+    }
+    if (hasSampleHeight) {
+      // terrain mode: ground truth comes from heightmap
+      state.isGrounded = onGround;
+      const landedGroundY = sampleHeight(charPos.x, charPos.z) + capHalfH + capR;
+      if (state.characterVelY < 0 && charPos.y <= landedGroundY + 0.2) state.characterVelY = 0;
+    } else {
+      // parkour mode: Rapier trimesh colliders are ground truth
+      state.isGrounded = characterController.computedGrounded();
+      if (state.isGrounded && state.characterVelY < 0) state.characterVelY = 0;
+    }
     const corrected = characterController.computedMovement();
     const cur = playerBody.translation();
     const nextPos = {
@@ -491,11 +536,9 @@ export function createPlayer(opts) {
     physicsWorld.step();
     const playerT = playerBody.translation();
     charPos.set(playerT.x, playerT.y, playerT.z);
-    const landedGroundY =
-      sampleHeight(charPos.x, charPos.z) + capHalfH + capR;
-    if (state.characterVelY < 0 && charPos.y <= landedGroundY + 0.2)
-      state.characterVelY = 0;
-    const inAir = charPos.y > landedGroundY + 0.15;
+    const inAir = hasSampleHeight
+      ? charPos.y > (sampleHeight(charPos.x, charPos.z) + capHalfH + capR) + 0.15
+      : !state.isGrounded;
     characterGroup.position.copy(charPos);
     characterGroup.rotation.y = state.camYaw;
     if (characterGroup.children.length > 0) {
