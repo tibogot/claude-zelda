@@ -766,6 +766,52 @@
           }
         }
 
+        // ── STAIRS ────────────────────────────────────────────────────────────
+        // 10 steps × 20 cm rise / 60 cm run at X=20, going north (+Z).
+        // Rise is well under the 35 cm autostep limit so every step is walkable.
+        // Layout: ascending stairs → 4 m landing → descending stairs back to floor.
+        {
+          const STAIR_N    = 10;
+          const STAIR_RISE = 0.20;   // 20 cm per step
+          const STAIR_RUN  = 0.60;   // 60 cm tread depth
+          const STAIR_W    = 4.0;    // 4 m wide
+          const STAIR_X    = 20;
+          const STAIR_Z0   = 4;      // Z of bottom riser face
+          const STAIR_H    = STAIR_N * STAIR_RISE;  // 2.0 m total height
+          const mat = new THREE.MeshStandardMaterial({ color: 0xb8a080, roughness: 0.85 });
+          const hw = STAIR_W / 2, hr = STAIR_RUN / 2;
+
+          const addStepBox = (bx, by, bz, hh, hd) => {
+            const mesh = new THREE.Mesh(
+              new THREE.BoxGeometry(STAIR_W, hh * 2, hd * 2), mat);
+            mesh.position.set(bx, by, bz);
+            mesh.castShadow = true; mesh.receiveShadow = true;
+            scene.add(mesh);
+            const body = physicsWorld.createRigidBody(
+              RAPIER.RigidBodyDesc.fixed().setTranslation(bx, by, bz));
+            physicsWorld.createCollider(
+              RAPIER.ColliderDesc.cuboid(hw, hh, hd), body);
+          };
+
+          // Ascending steps — each box is full height from floor so they look solid
+          for (let i = 0; i < STAIR_N; i++) {
+            const stepH = (i + 1) * STAIR_RISE;
+            addStepBox(STAIR_X, FLOOR_Y + stepH / 2, STAIR_Z0 + (i + 0.5) * STAIR_RUN, stepH / 2, hr);
+          }
+
+          // Top landing
+          const LAND_Z0 = STAIR_Z0 + STAIR_N * STAIR_RUN;  // Z = 10
+          const LAND_D  = 4.0;
+          addStepBox(STAIR_X, FLOOR_Y + STAIR_H / 2, LAND_Z0 + LAND_D / 2, STAIR_H / 2, LAND_D / 2);
+
+          // Descending steps — mirror of ascent on the far side of the landing
+          const DESC_Z0 = LAND_Z0 + LAND_D;  // Z = 14
+          for (let i = 0; i < STAIR_N; i++) {
+            const stepH = (STAIR_N - i) * STAIR_RISE;
+            addStepBox(STAIR_X, FLOOR_Y + stepH / 2, DESC_Z0 + (i + 0.5) * STAIR_RUN, stepH / 2, hr);
+          }
+        }
+
         // Mesh/body collectors for tweakpane show-hide
         const b1Vis = [], b1Phy = [];  // bridge 1 (physics)
         const b2Vis = [], b2Phy = [];  // bridge 2 (spring)

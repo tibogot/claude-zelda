@@ -106,6 +106,7 @@ export function createPlayerController(RAPIER, physicsWorld, charPos, PARAMS, op
   if (options.enableSnapToGround !== false) {
     characterController.enableSnapToGround(0.5);
   }
+  characterController.enableAutostep(0.35, 0.1, false);
   const maxSlopeClimb = options.maxSlopeClimbAngle ?? (45 * Math.PI) / 180;
   const minSlopeSlide = options.minSlopeSlideAngle ?? (50 * Math.PI) / 180;
   characterController.setMaxSlopeClimbAngle(maxSlopeClimb);

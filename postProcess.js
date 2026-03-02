@@ -149,7 +149,17 @@ export function createPostProcessOutput(scene, camera, fogUniforms, PARAMS) {
     vec4(uFogColor, 1),
     mul(fogF, sub(1, skyMask)),
   );
-  // Only bloom the sky (far depth) — excludes character, grass, terrain regardless of color
+  // Standalone scene bloom (full scene glow) — gated by bloomEnabled
+  const uBloomEnabled = uniform(
+    PARAMS.postProcessingEnabled && PARAMS.bloomEnabled ? 1 : 0,
+  );
+  const bloomScenePass = bloom(
+    foggedOutput,
+    PARAMS.bloomStrength,
+    PARAMS.bloomRadius,
+    PARAMS.bloomThreshold,
+  );
+  // Lens flare: only bloom the sky (far depth) — excludes character, grass, terrain
   const skyOnlyColor = mix(vec4(0, 0, 0, 0), sceneColor, skyMask);
   const bloomPass = bloom(skyOnlyColor, 1, 0.5, PARAMS.lensflareBloomThreshold);
   const flareThreshold = uniform(0.6);
@@ -196,12 +206,15 @@ export function createPostProcessOutput(scene, camera, fogUniforms, PARAMS) {
   });
   const godRaysNode = godRaysFn();
   const outputNode = foggedOutput
+    .add(bloomScenePass.mul(uBloomEnabled))
     .add(flareBlurPass.mul(uFlareAmount))
     .add(godRaysNode);
 
   return {
     outputNode,
     bloomPass,
+    bloomScenePass,
+    uBloomEnabled,
     aoPass,
     denoisePass,
     uGtaoEnabled,

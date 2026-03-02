@@ -214,6 +214,8 @@ export function createSyncUniforms(u, deps, lastState) {
     hemiLight,
     renderer,
     bloomPass,
+    bloomScenePass,
+    uBloomEnabled,
     aoPass,
     denoisePass,
     uGtaoEnabled,
@@ -320,6 +322,14 @@ export function createSyncUniforms(u, deps, lastState) {
     u.uFogEnabled.value = PARAMS.fogEnabled ? 1 : 0;
     uFlareAmount.value =
       PARAMS.postProcessingEnabled && PARAMS.lensflareEnabled ? 1 : 0;
+    if (uBloomEnabled)
+      uBloomEnabled.value =
+        PARAMS.postProcessingEnabled && PARAMS.bloomEnabled ? 1 : 0;
+    if (bloomScenePass) {
+      bloomScenePass.strength.value = PARAMS.bloomStrength;
+      bloomScenePass.radius.value = PARAMS.bloomRadius;
+      bloomScenePass.threshold.value = PARAMS.bloomThreshold;
+    }
     if (uGtaoEnabled)
       uGtaoEnabled.value =
         PARAMS.postProcessingEnabled && PARAMS.gtaoEnabled ? 1 : 0;

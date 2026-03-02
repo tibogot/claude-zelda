@@ -615,6 +615,31 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
     expanded: false,
   });
   fPost.addBinding(PARAMS, "postProcessingEnabled", { label: "enabled" });
+  const fBloom = fPost.addFolder({
+    title: "Bloom (scene glow)",
+    expanded: false,
+  });
+  fBloom.addBinding(PARAMS, "bloomEnabled", {
+    label: "enabled (requires Post Processing on)",
+  });
+  fBloom.addBinding(PARAMS, "bloomStrength", {
+    min: 0.1,
+    max: 2,
+    step: 0.05,
+    label: "strength",
+  });
+  fBloom.addBinding(PARAMS, "bloomRadius", {
+    min: 0,
+    max: 1,
+    step: 0.05,
+    label: "radius",
+  });
+  fBloom.addBinding(PARAMS, "bloomThreshold", {
+    min: 0.2,
+    max: 1,
+    step: 0.05,
+    label: "threshold (brightness cutoff)",
+  });
   const fGtao = fPost.addFolder({
     title: "GTAO (Ambient Occlusion)",
     expanded: true,
