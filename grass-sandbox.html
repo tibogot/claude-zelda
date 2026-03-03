@@ -74,6 +74,7 @@
       } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+      import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
       import RAPIER from "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.19.3/+esm";
       import { createTerrain } from "./terrain-sandbox.js";
       import {
@@ -165,12 +166,37 @@
         dirLight.shadow.mapSize.height = 2048;
         dirLight.shadow.camera.near = 1;
         dirLight.shadow.camera.far = 200;
-        dirLight.shadow.camera.left = -80;
-        dirLight.shadow.camera.right = 80;
-        dirLight.shadow.camera.top = 80;
-        dirLight.shadow.camera.bottom = -80;
         dirLight.shadow.bias = PARAMS.shadowBias;
         dirLight.shadow.normalBias = PARAMS.shadowNormalBias;
+
+        // CSM — cascaded shadow maps (no custom updateBefore; use default texel snapping)
+        const csm = new CSMShadowNode(dirLight, {
+          cascades: 3,
+          maxFar: 400,
+          mode: "practical",
+          lightMargin: 200,
+          fade: true,
+        });
+        // Sphere-bounding: rotation-invariant cascade size to reduce shadow swimming
+        csm._updateShadowBounds = function () {
+          for (let i = 0; i < this.frustums.length; i++) {
+            const shadowCam = this.lights[i].shadow.camera;
+            const frustum = this.frustums[i];
+            const nv = frustum.vertices.near;
+            const fv = frustum.vertices.far;
+            const d1 = fv[0].distanceTo(fv[2]);
+            const d2 = fv[0].distanceTo(nv[2]);
+            const sphereRadius = Math.max(d1, d2) / 2;
+            const ext = sphereRadius * 2;
+            shadowCam.left = -ext / 2;
+            shadowCam.right = ext / 2;
+            shadowCam.top = ext / 2;
+            shadowCam.bottom = -ext / 2;
+            shadowCam.updateProjectionMatrix();
+          }
+        };
+
+        dirLight.shadow.shadowNode = csm;
         const shadowTarget = new THREE.Object3D();
         shadowTarget.position.set(0, 0, 0);
         scene.add(shadowTarget);
@@ -524,6 +550,9 @@
 
         await renderer.compileAsync(scene, camera);
 
+        csm.camera = camera;
+        csm.updateFrustums();
+
         const timer = new THREE.Timer();
         let lastTime = 0;
         let frameCount = 0;
@@ -593,6 +622,7 @@
           uFogColor.value.copy(srgbToLinear(PARAMS.fogColor));
           uFogEnabled.value = PARAMS.fogEnabled ? 1 : 0;
 
+          camera.updateMatrixWorld(); // required by CSMShadowNode.updateBefore
           renderPipeline.render();
         });
 
@@ -600,6 +630,7 @@
           camera.aspect = innerWidth / innerHeight;
           camera.updateProjectionMatrix();
           renderer.setSize(innerWidth, innerHeight);
+          if (csm.frustums) csm.updateFrustums();
         });
       }
 
