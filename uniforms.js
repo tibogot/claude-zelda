@@ -70,6 +70,8 @@ export function createUniforms(PARAMS, TERRAIN_SIZE, NPC_COUNT) {
   const uMinSkyBlend = uniform(PARAMS.minSkyBlend);
   const uMaxSkyBlend = uniform(PARAMS.maxSkyBlend);
   const uAoIntensity = uniform(PARAMS.aoEnabled ? PARAMS.aoIntensity : 0);
+  const uAoBaseRange = uniform(PARAMS.aoBaseRange);
+  const uCylindricalStrength = uniform(PARAMS.grassCylindricalStrength);
   const uBsIntensity = uniform(PARAMS.bsIntensity);
   const uBsColor = uniform(srgbToLinear(PARAMS.bsColor));
   const uBsPower = uniform(PARAMS.bsPower);
@@ -160,6 +162,8 @@ export function createUniforms(PARAMS, TERRAIN_SIZE, NPC_COUNT) {
     uMinSkyBlend,
     uMaxSkyBlend,
     uAoIntensity,
+    uAoBaseRange,
+    uCylindricalStrength,
     uBsIntensity,
     uBsColor,
     uBsPower,
@@ -302,6 +306,8 @@ export function createSyncUniforms(u, deps, lastState) {
     u.uMinSkyBlend.value = PARAMS.minSkyBlend;
     u.uMaxSkyBlend.value = PARAMS.maxSkyBlend;
     u.uAoIntensity.value = PARAMS.aoEnabled ? PARAMS.aoIntensity : 0;
+    u.uAoBaseRange.value = PARAMS.aoBaseRange;
+    u.uCylindricalStrength.value = PARAMS.grassCylindricalStrength;
     u.uBsIntensity.value = PARAMS.bsEnabled ? PARAMS.bsIntensity : 0;
     u.uBsColor.value.copy(srgbToLinear(PARAMS.bsColor));
     u.uBsPower.value = PARAMS.bsPower;

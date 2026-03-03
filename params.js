@@ -52,6 +52,8 @@ export const PARAMS = {
   trailRadius: 0.7,
   aoEnabled: true,
   aoIntensity: 1.0,
+  aoBaseRange: 0.5,
+  grassCylindricalStrength: 1.0,
   minSkyBlend: 0.55,
   maxSkyBlend: 0.7,
   bsEnabled: true,

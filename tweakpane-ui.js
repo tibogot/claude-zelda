@@ -40,6 +40,12 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
     step: 0.1,
     label: "base bend (0=straight, 1=default, 2=more curved)",
   });
+  fShape.addBinding(PARAMS, "grassCylindricalStrength", {
+    min: 0,
+    max: 1.5,
+    step: 0.05,
+    label: "cylindrical (0=flat, 1=default, 1.5=strong)",
+  });
   fShape.addBinding(PARAMS, "gradientCurve", {
     min: 1,
     max: 8,
@@ -351,6 +357,12 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
     max: 2,
     step: 0.1,
     label: "intensity",
+  });
+  fAO.addBinding(PARAMS, "aoBaseRange", {
+    min: 0.2,
+    max: 0.8,
+    step: 0.05,
+    label: "base range",
   });
   const fSSS = pane.addFolder({
     title: "Subsurface Scatter",

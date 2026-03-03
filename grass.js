@@ -150,6 +150,8 @@ export function createGrassMaterial(
     uMinSkyBlend,
     uMaxSkyBlend,
     uAoIntensity,
+    uAoBaseRange,
+    uCylindricalStrength,
     uSeasonalScale,
     uSeasonalStr,
     uBaseColor1,
@@ -468,13 +470,14 @@ export function createGrassMaterial(
     );
     const ncurve = normalize(sub(n1p, n2p));
     const gvn = vec3(0, negate(ncurve.z), ncurve.y);
+    const cylAngle = mul(0.3, uCylindricalStrength);
     const gvn1 = mul(
       grassMat,
-      rotateY_mat(mul(PI, 0.3, zSide)).mul(gvn),
+      rotateY_mat(mul(PI, cylAngle, zSide)).mul(gvn),
     ).mul(zSide);
     const gvn2 = mul(
       grassMat,
-      rotateY_mat(mul(PI, -0.3, zSide)).mul(gvn),
+      rotateY_mat(mul(PI, negate(cylAngle), zSide)).mul(gvn),
     ).mul(zSide);
     const blendedNormal = normalize(mix(gvn1, gvn2, xSide));
     const skyFade = mix(uMinSkyBlend, uMaxSkyBlend, highLODOut);
@@ -526,8 +529,8 @@ export function createGrassMaterial(
       mul(grassCol, vec3(1.1, 1.05, 0.85)),
       mul(sub(1, trailScale), 0.4),
     );
-    const aoBase = max(sub(1.0, mul(uAoIntensity, 0.65)), 0.2);
-    const ao = mix(aoBase, 1.0, smoothstep(0.0, 0.5, heightPct));
+    const aoBase = max(sub(1.0, mul(uAoIntensity, 0.95)), 0.05);
+    const ao = mix(aoBase, 1.0, smoothstep(0.0, uAoBaseRange, heightPct));
     const fadeFactor = sub(1, smoothstep(0.4, 1, lodFadeIn));
     vGrassColor.assign(
       mul(grassCol, ao, mul(fadeFactor, fadeFactor), bladeVisible),
