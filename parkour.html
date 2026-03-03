@@ -63,7 +63,7 @@
       Parkour &mdash; <span id="backend">loading…</span> &bull;
       <span id="stats">—</span> &bull; WASD + click to look &bull; Shift run
       &bull; Ctrl crouch &bull; F roll &bull; right-click / E attack &bull; Space jump &bull; Space mid-air glide
-      &bull; Pool at <span>(-60, 80)</span>
+      &bull; Pool (-60, 80) &bull; Church (-40, -35) god rays
     </div>
     <div id="platform-debug" style="display:none; position:fixed; top:60px; left:16px; z-index:100; font:12px monospace; color:#0f0; background:rgba(0,0,0,0.8); padding:8px; border-radius:4px; max-width:320px;"></div>
 
@@ -85,9 +85,35 @@
         positionView,
         triNoise3D,
         uniform,
+        mul,
+        div,
+        sub,
+        add,
+        clamp,
+        mix,
+        vec4,
+        step,
+        abs,
+        smoothstep,
+        uv,
+        Loop,
+        Fn,
+        int,
+        convertToTexture,
+        nodeObject,
+        normalView,
+        directionToColor,
+        colorToDirection,
+        sample,
+        screenUV,
       } from "three/tsl";
       import { bloom } from "three/addons/tsl/display/BloomNode.js";
       import { fxaa } from "three/addons/tsl/display/FXAANode.js";
+      import { lensflare } from "three/addons/tsl/display/LensflareNode.js";
+      import { gaussianBlur } from "three/addons/tsl/display/GaussianBlurNode.js";
+      import { boxBlur } from "three/addons/tsl/display/boxBlur.js";
+      import { ao } from "three/addons/tsl/display/GTAONode.js";
+      import { denoise } from "three/addons/tsl/display/DenoiseNode.js";
       import Stats from "stats-gl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
@@ -212,6 +238,50 @@
         noiseAmountB: 0.18,
         noiseDetail: 0.12,
         noiseSpeed: 1,
+      };
+
+      // Post-processing params (enable/disable + per-effect settings)
+      const postParams = {
+        enabled: true,
+        bloom: { enabled: false, strength: 0.4, radius: 0.4, threshold: 0.6 },
+        lensflare: {
+          enabled: false,
+          bloomThreshold: 0.72,
+          threshold: 0.6,
+          ghostAttenuation: 25,
+          ghostSpacing: 0.25,
+        },
+        godRays: {
+          enabled: true,
+          strength: 0.15,
+          decay: 0.96,
+          density: 0.8,
+          samples: 32,
+        },
+        dof: {
+          enabled: false,
+          focusDistance: 25,
+          blurStart: 5,
+          blurEnd: 60,
+          blurSize: 1,
+          blurSpread: 3,
+        },
+        gtao: {
+          enabled: false,
+          intensity: 1.2,
+          radius: 1.2,
+          samples: 14,
+          resolutionScale: 0.5,
+          scale: 1,
+          distanceFallOff: 1,
+          distanceExponent: 1,
+          thickness: 1,
+          denoiseEnabled: true,
+          denoiseRadius: 5,
+          denoiseLumaPhi: 5,
+          denoiseDepthPhi: 5,
+          denoiseNormalPhi: 5,
+        },
       };
 
       function srgbToLinear(hex) {
@@ -660,6 +730,109 @@
           scene.add(stepMesh);
         }
 
+        // ── CHURCH (solid cube like tower, only door hole — windows later) ──
+        const CHURCH_X = -40;
+        const CHURCH_Z = -35;
+        const CHURCH_S = 20;
+        const CHURCH_H = 14;
+        const doorW = 2.5;
+        const doorH = 4;
+        const churchMat = createTileMaterial({
+          textureScale: parkourParams.tile.textureScale,
+          gradientIntensity: parkourParams.tile.gradientIntensity,
+          gradientBias: parkourParams.tile.gradientBias,
+          tileColor: parkourParams.tile.tileColor,
+          gridColor: parkourParams.tile.gridColor,
+          gridLineColor: parkourParams.tile.gridLineColor,
+          roughness: parkourParams.tile.roughness,
+          metalness: parkourParams.tile.metalness,
+        });
+        const churchGroup = new THREE.Group();
+        churchGroup.position.set(CHURCH_X, FLOOR_Y, CHURCH_Z);
+
+        const HS = CHURCH_S / 2;
+
+        // Floor
+        const churchFloor = new THREE.Mesh(
+          new THREE.PlaneGeometry(CHURCH_S, CHURCH_S),
+          churchMat,
+        );
+        churchFloor.rotation.x = -PI / 2;
+        churchFloor.position.y = 0.01;
+        churchFloor.receiveShadow = true;
+        churchGroup.add(churchFloor);
+
+        // Back wall (full)
+        const churchBack = new THREE.Mesh(
+          new THREE.BoxGeometry(CHURCH_S, CHURCH_H, 0.5),
+          churchMat,
+        );
+        churchBack.position.set(0, CHURCH_H / 2, -HS + 0.25);
+        churchBack.castShadow = true;
+        churchBack.receiveShadow = true;
+        churchGroup.add(churchBack);
+
+        // Left wall (full)
+        const churchLeft = new THREE.Mesh(
+          new THREE.BoxGeometry(0.5, CHURCH_H, CHURCH_S),
+          churchMat,
+        );
+        churchLeft.position.set(-HS + 0.25, CHURCH_H / 2, 0);
+        churchLeft.castShadow = true;
+        churchLeft.receiveShadow = true;
+        churchGroup.add(churchLeft);
+
+        // Right wall (full)
+        const churchRight = new THREE.Mesh(
+          new THREE.BoxGeometry(0.5, CHURCH_H, CHURCH_S),
+          churchMat,
+        );
+        churchRight.position.set(HS - 0.25, CHURCH_H / 2, 0);
+        churchRight.castShadow = true;
+        churchRight.receiveShadow = true;
+        churchGroup.add(churchRight);
+
+        // Front wall — door cutout (3 segments: left, right, above)
+        const doorSide = (CHURCH_S - doorW) / 2;
+        const churchFrontL = new THREE.Mesh(
+          new THREE.BoxGeometry(doorSide, doorH, 0.5),
+          churchMat,
+        );
+        churchFrontL.position.set(-HS + doorSide / 2, doorH / 2, HS - 0.25);
+        churchFrontL.castShadow = true;
+        churchFrontL.receiveShadow = true;
+        churchGroup.add(churchFrontL);
+
+        const churchFrontR = new THREE.Mesh(
+          new THREE.BoxGeometry(doorSide, doorH, 0.5),
+          churchMat,
+        );
+        churchFrontR.position.set(HS - doorSide / 2, doorH / 2, HS - 0.25);
+        churchFrontR.castShadow = true;
+        churchFrontR.receiveShadow = true;
+        churchGroup.add(churchFrontR);
+
+        const churchFrontT = new THREE.Mesh(
+          new THREE.BoxGeometry(CHURCH_S, CHURCH_H - doorH, 0.5),
+          churchMat,
+        );
+        churchFrontT.position.set(0, doorH + (CHURCH_H - doorH) / 2, HS - 0.25);
+        churchFrontT.castShadow = true;
+        churchFrontT.receiveShadow = true;
+        churchGroup.add(churchFrontT);
+
+        // Roof (full)
+        const churchRoof = new THREE.Mesh(
+          new THREE.BoxGeometry(CHURCH_S + 1, 0.5, CHURCH_S + 1),
+          churchMat,
+        );
+        churchRoof.position.y = CHURCH_H + 0.25;
+        churchRoof.castShadow = true;
+        churchRoof.receiveShadow = true;
+        churchGroup.add(churchRoof);
+
+        scene.add(churchGroup);
+
         // ── SKY ──
         const sky = new SkyMesh();
         sky.scale.setScalar(10000);
@@ -836,6 +1009,90 @@
             TOWER_BASE * 0.9,
           ),
           _towerTop,
+        );
+
+        // Church colliders (solid cube, door opening only)
+        const churchHS = CHURCH_S / 2;
+        const _churchFrontL = physicsWorld.createRigidBody(
+          RAPIER.RigidBodyDesc.fixed().setTranslation(
+            CHURCH_X - churchHS + doorSide / 2,
+            FLOOR_Y + doorH / 2,
+            CHURCH_Z + churchHS - 0.25,
+          ),
+        );
+        physicsWorld.createCollider(
+          RAPIER.ColliderDesc.cuboid(doorSide / 2, doorH / 2, 0.25),
+          _churchFrontL,
+        );
+        const _churchFrontR = physicsWorld.createRigidBody(
+          RAPIER.RigidBodyDesc.fixed().setTranslation(
+            CHURCH_X + churchHS - doorSide / 2,
+            FLOOR_Y + doorH / 2,
+            CHURCH_Z + churchHS - 0.25,
+          ),
+        );
+        physicsWorld.createCollider(
+          RAPIER.ColliderDesc.cuboid(doorSide / 2, doorH / 2, 0.25),
+          _churchFrontR,
+        );
+        const _churchFrontT = physicsWorld.createRigidBody(
+          RAPIER.RigidBodyDesc.fixed().setTranslation(
+            CHURCH_X,
+            FLOOR_Y + doorH + (CHURCH_H - doorH) / 2,
+            CHURCH_Z + churchHS - 0.25,
+          ),
+        );
+        physicsWorld.createCollider(
+          RAPIER.ColliderDesc.cuboid(
+            CHURCH_S / 2,
+            (CHURCH_H - doorH) / 2,
+            0.25,
+          ),
+          _churchFrontT,
+        );
+        const _churchBack = physicsWorld.createRigidBody(
+          RAPIER.RigidBodyDesc.fixed().setTranslation(
+            CHURCH_X,
+            FLOOR_Y + CHURCH_H / 2,
+            CHURCH_Z - churchHS + 0.25,
+          ),
+        );
+        physicsWorld.createCollider(
+          RAPIER.ColliderDesc.cuboid(CHURCH_S / 2, CHURCH_H / 2, 0.25),
+          _churchBack,
+        );
+        const _churchLeft = physicsWorld.createRigidBody(
+          RAPIER.RigidBodyDesc.fixed().setTranslation(
+            CHURCH_X - churchHS + 0.25,
+            FLOOR_Y + CHURCH_H / 2,
+            CHURCH_Z,
+          ),
+        );
+        physicsWorld.createCollider(
+          RAPIER.ColliderDesc.cuboid(0.25, CHURCH_H / 2, CHURCH_S / 2),
+          _churchLeft,
+        );
+        const _churchRight = physicsWorld.createRigidBody(
+          RAPIER.RigidBodyDesc.fixed().setTranslation(
+            CHURCH_X + churchHS - 0.25,
+            FLOOR_Y + CHURCH_H / 2,
+            CHURCH_Z,
+          ),
+        );
+        physicsWorld.createCollider(
+          RAPIER.ColliderDesc.cuboid(0.25, CHURCH_H / 2, CHURCH_S / 2),
+          _churchRight,
+        );
+        const _churchRoof = physicsWorld.createRigidBody(
+          RAPIER.RigidBodyDesc.fixed().setTranslation(
+            CHURCH_X,
+            FLOOR_Y + CHURCH_H + 0.25,
+            CHURCH_Z,
+          ),
+        );
+        physicsWorld.createCollider(
+          RAPIER.ColliderDesc.cuboid((CHURCH_S + 1) / 2, 0.25, (CHURCH_S + 1) / 2),
+          _churchRoof,
         );
 
         // Pool GLB trimesh collider (deck, walls, floor — player can walk inside)
@@ -2246,17 +2503,328 @@
           label: "mapSize",
         });
 
-        // ── RENDER PIPELINE ──
+        // ── POST-PROCESSING ──
+        const postFolder = pane.addFolder({
+          title: "Post-Processing",
+          expanded: true,
+        });
+        postFolder.addBinding(postParams, "enabled", { label: "master" });
+
+        const postBloomFolder = postFolder.addFolder({
+          title: "Bloom",
+          expanded: false,
+        });
+        postBloomFolder.addBinding(postParams.bloom, "enabled");
+        postBloomFolder.addBinding(postParams.bloom, "strength", {
+          min: 0,
+          max: 2,
+          step: 0.05,
+        });
+        postBloomFolder.addBinding(postParams.bloom, "radius", {
+          min: 0,
+          max: 1,
+          step: 0.02,
+        });
+        postBloomFolder.addBinding(postParams.bloom, "threshold", {
+          min: 0,
+          max: 2,
+          step: 0.02,
+        });
+
+        const postLensflareFolder = postFolder.addFolder({
+          title: "Lens Flare / Sun Flare",
+          expanded: true,
+        });
+        postLensflareFolder.addBinding(postParams.lensflare, "enabled");
+        postLensflareFolder.addBinding(postParams.lensflare, "bloomThreshold", {
+          min: 0.4,
+          max: 1.2,
+          step: 0.02,
+          label: "sky bloom thresh",
+        });
+        postLensflareFolder.addBinding(postParams.lensflare, "threshold", {
+          min: 0.2,
+          max: 1,
+          step: 0.02,
+        });
+        postLensflareFolder.addBinding(postParams.lensflare, "ghostAttenuation", {
+          min: 5,
+          max: 50,
+          step: 1,
+        });
+        postLensflareFolder.addBinding(postParams.lensflare, "ghostSpacing", {
+          min: 0.1,
+          max: 0.5,
+          step: 0.01,
+        });
+
+        const postGodRaysFolder = postFolder.addFolder({
+          title: "God Rays (Volumetric Sun)",
+          expanded: true,
+        });
+        postGodRaysFolder.addBinding(postParams.godRays, "enabled");
+        postGodRaysFolder.addBinding(postParams.godRays, "strength", {
+          min: 0,
+          max: 0.5,
+          step: 0.01,
+        });
+        postGodRaysFolder.addBinding(postParams.godRays, "decay", {
+          min: 0.9,
+          max: 0.99,
+          step: 0.005,
+        });
+        postGodRaysFolder.addBinding(postParams.godRays, "density", {
+          min: 0.2,
+          max: 1.5,
+          step: 0.05,
+        });
+        postGodRaysFolder.addBinding(postParams.godRays, "samples", {
+          min: 8,
+          max: 64,
+          step: 4,
+        });
+
+        const postDofFolder = postFolder.addFolder({
+          title: "Depth of Field",
+          expanded: false,
+        });
+        postDofFolder.addBinding(postParams.dof, "enabled");
+        postDofFolder.addBinding(postParams.dof, "focusDistance", {
+          min: 5,
+          max: 100,
+          step: 1,
+        });
+        postDofFolder.addBinding(postParams.dof, "blurStart", {
+          min: 1,
+          max: 30,
+          step: 1,
+        });
+        postDofFolder.addBinding(postParams.dof, "blurEnd", {
+          min: 30,
+          max: 150,
+          step: 5,
+        });
+        postDofFolder.addBinding(postParams.dof, "blurSize", {
+          min: 1,
+          max: 3,
+          step: 1,
+        });
+        postDofFolder.addBinding(postParams.dof, "blurSpread", {
+          min: 1,
+          max: 8,
+          step: 0.5,
+        });
+
+        const postGtaoFolder = postFolder.addFolder({
+          title: "GTAO (Ambient Occlusion)",
+          expanded: false,
+        });
+        postGtaoFolder.addBinding(postParams.gtao, "enabled");
+        postGtaoFolder.addBinding(postParams.gtao, "intensity", {
+          min: 0.5,
+          max: 2.5,
+          step: 0.1,
+        });
+        postGtaoFolder.addBinding(postParams.gtao, "radius", {
+          min: 0.5,
+          max: 2.5,
+          step: 0.1,
+        });
+        postGtaoFolder.addBinding(postParams.gtao, "samples", {
+          min: 8,
+          max: 24,
+          step: 2,
+        });
+        postGtaoFolder.addBinding(postParams.gtao, "resolutionScale", {
+          min: 0.25,
+          max: 1,
+          step: 0.05,
+          label: "resolution",
+        });
+        postGtaoFolder.addBinding(postParams.gtao, "scale", {
+          min: 0.5,
+          max: 2,
+          step: 0.1,
+        });
+        postGtaoFolder.addBinding(postParams.gtao, "denoiseEnabled", {
+          label: "denoise",
+        });
+        postGtaoFolder.addBinding(postParams.gtao, "denoiseRadius", {
+          min: 1,
+          max: 10,
+          step: 1,
+        });
+
+        // ── RENDER PIPELINE (full post-processing) ──
         const renderPipeline = new THREE.RenderPipeline(renderer);
         renderPipeline.outputColorTransform = false;
-        // MRT + bloom pipeline (matches water-showcase) — avoids WaterMesh reflector
-        // format mismatch (bgra8unorm vs rgba16float) with simple pass
+        // MRT: output (beauty), emissive (portals), normal (GTAO)
         const scenePass = pass(scene, camera);
-        scenePass.setMRT(mrt({ output, emissive }));
-        const beautyPass = scenePass.getTextureNode();
+        scenePass.setMRT(
+          mrt({
+            output,
+            emissive,
+            normal: directionToColor(normalView),
+          }),
+        );
+        const scenePassColor = scenePass.getTextureNode("output");
         const emissivePass = scenePass.getTextureNode("emissive");
-        const bloomPass = bloom(emissivePass, 2);
-        renderPipeline.outputNode = fxaa(renderOutput(beautyPass.add(bloomPass)));
+        const scenePassDepth = scenePass.getTextureNode("depth");
+        const scenePassNormalEncoded = scenePass.getTextureNode("normal");
+        const scenePassNormal = sample((uvCoord) =>
+          colorToDirection(scenePassNormalEncoded.sample(uvCoord)),
+        );
+        const normalTexture = scenePass.getTexture("normal");
+        if (normalTexture) normalTexture.type = THREE.UnsignedByteType;
+
+        // Emissive bloom (portals, glowing elements)
+        const emissiveBloomPass = bloom(emissivePass, 2);
+        let baseColor = scenePassColor.add(emissiveBloomPass);
+
+        // GTAO (screen-space ambient occlusion)
+        const uGtaoEnabled = uniform(
+          postParams.enabled && postParams.gtao.enabled ? 1 : 0,
+        );
+        const uGtaoIntensity = uniform(postParams.gtao.intensity);
+        const aoPass = ao(scenePassDepth, scenePassNormal, camera);
+        aoPass.resolutionScale = postParams.gtao.resolutionScale;
+        aoPass.radius.value = postParams.gtao.radius;
+        aoPass.samples.value = postParams.gtao.samples;
+        aoPass.scale.value = postParams.gtao.scale;
+        aoPass.distanceFallOff.value = postParams.gtao.distanceFallOff;
+        aoPass.distanceExponent.value = postParams.gtao.distanceExponent;
+        aoPass.thickness.value = postParams.gtao.thickness;
+        const aoTex = aoPass.getTextureNode();
+        const denoisePass = denoise(
+          aoTex,
+          scenePassDepth,
+          scenePassNormal,
+          camera,
+        );
+        denoisePass.updateBefore = () => {};
+        denoisePass.radius.value = postParams.gtao.denoiseRadius;
+        denoisePass.lumaPhi.value = postParams.gtao.denoiseLumaPhi;
+        denoisePass.depthPhi.value = postParams.gtao.denoiseDepthPhi;
+        denoisePass.normalPhi.value = postParams.gtao.denoiseNormalPhi;
+        const uGtaoDenoiseEnabled = uniform(
+          postParams.gtao.denoiseEnabled ? 1 : 0,
+        );
+        const rawAoVal = aoTex.sample(screenUV).r;
+        const denoisedAoVal = denoisePass.r;
+        const aoVal = mix(rawAoVal, denoisedAoVal, uGtaoDenoiseEnabled);
+        baseColor = vec4(
+          baseColor.rgb.mul(
+            sub(1, mul(mul(aoVal, uGtaoIntensity), uGtaoEnabled)),
+          ),
+          baseColor.a,
+        );
+
+        // Depth for DoF, sky mask, god rays
+        const linearDepth = scenePass.getLinearDepthNode
+          ? scenePass.getLinearDepthNode()
+          : float(0.5);
+        const uCameraFar = uniform(camera.far);
+        const worldDepth = mul(linearDepth, uCameraFar);
+        const skyMask = step(float(0.999), linearDepth);
+
+        // DoF (depth of field)
+        const uDofEnabled = uniform(
+          postParams.enabled && postParams.dof.enabled ? 1 : 0,
+        );
+        const uDofFocusDistance = uniform(postParams.dof.focusDistance);
+        const uDofBlurStart = uniform(postParams.dof.blurStart);
+        const uDofBlurEnd = uniform(postParams.dof.blurEnd);
+        const uDofBlurSize = uniform(postParams.dof.blurSize);
+        const uDofBlurSpread = uniform(postParams.dof.blurSpread);
+        const sceneBlurred = boxBlur(baseColor, {
+          size: uDofBlurSize,
+          separation: uDofBlurSpread,
+        });
+        const dofBlurAmount = smoothstep(
+          uDofBlurStart,
+          uDofBlurEnd,
+          abs(sub(worldDepth, uDofFocusDistance)),
+        );
+        baseColor = mix(baseColor, sceneBlurred, mul(dofBlurAmount, uDofEnabled));
+
+        // Scene bloom (full scene glow)
+        const uBloomEnabled = uniform(
+          postParams.enabled && postParams.bloom.enabled ? 1 : 0,
+        );
+        const bloomScenePass = bloom(
+          baseColor,
+          postParams.bloom.strength,
+          postParams.bloom.radius,
+          postParams.bloom.threshold,
+        );
+
+        // Lens flare: bloom sky only (sun/sky at far depth)
+        const skyOnlyColor = mix(vec4(0, 0, 0, 0), baseColor, skyMask);
+        const skyBloomPass = bloom(
+          skyOnlyColor,
+          1,
+          0.5,
+          postParams.lensflare.bloomThreshold,
+        );
+        const flareThreshold = uniform(postParams.lensflare.threshold);
+        const flareGhostAttenuation = uniform(
+          postParams.lensflare.ghostAttenuation,
+        );
+        const flareGhostSpacing = uniform(postParams.lensflare.ghostSpacing);
+        const flarePass = lensflare(skyBloomPass, {
+          threshold: flareThreshold,
+          ghostAttenuationFactor: flareGhostAttenuation,
+          ghostSpacing: flareGhostSpacing,
+        });
+        const flareBlurPass = gaussianBlur(flarePass, null, 8);
+        const uLensflareEnabled = uniform(
+          postParams.enabled && postParams.lensflare.enabled ? 1 : 0,
+        );
+
+        // God rays (volumetric sunlight)
+        const uSunScreenPos = uniform(new THREE.Vector2(0.5, 0.5));
+        const uGodRaysEnabled = uniform(
+          postParams.enabled && postParams.godRays.enabled ? 1 : 0,
+        );
+        const uGodRaysStrength = uniform(postParams.godRays.strength);
+        const uGodRaysDecay = uniform(postParams.godRays.decay);
+        const uGodRaysDensity = uniform(postParams.godRays.density);
+        const uGodRaysSamples = uniform(postParams.godRays.samples);
+        const sceneTex = convertToTexture(baseColor);
+        const godRaysFn = Fn(() => {
+          const uvNode = uv();
+          const stepUV = sub(nodeObject(uSunScreenPos), uvNode)
+            .mul(uGodRaysDensity)
+            .div(uGodRaysSamples);
+          const illumination = float(0).toVar();
+          const decayVar = float(1).toVar();
+          Loop(
+            { start: int(0), end: int(uGodRaysSamples), type: "int", condition: "<" },
+            ({ i }) => {
+              const sampleUV = add(uvNode, stepUV.mul(float(i)));
+              const s = sceneTex.sample(sampleUV);
+              const lum = add(
+                add(mul(s.r, 0.299), mul(s.g, 0.587)),
+                mul(s.b, 0.114),
+              );
+              illumination.addAssign(mul(lum, decayVar));
+              decayVar.mulAssign(uGodRaysDecay);
+            },
+          );
+          const normalized = illumination.div(uGodRaysSamples);
+          return vec4(normalized, normalized, normalized, 1)
+            .mul(uGodRaysStrength)
+            .mul(uGodRaysEnabled);
+        });
+        const godRaysNode = godRaysFn();
+
+        // Final composite (each effect gated by postParams.enabled && effect.enabled)
+        const finalOutput = baseColor
+          .add(bloomScenePass.mul(uBloomEnabled))
+          .add(flareBlurPass.mul(uLensflareEnabled))
+          .add(godRaysNode);
+
+        renderPipeline.outputNode = fxaa(renderOutput(finalOutput));
 
         await renderer.compileAsync(scene, camera);
         csm.camera = camera;
@@ -2622,6 +3190,70 @@ moveState: ${d.moveState ?? "?"}</pre>`
           sky.sunPosition.value.copy(sunDir);
           scene.environmentIntensity = parkourParams.light.envIntensity;
           renderer.toneMappingExposure = parkourParams.light.exposure;
+
+          // Post-processing uniform sync
+          uGtaoEnabled.value =
+            postParams.enabled && postParams.gtao.enabled ? 1 : 0;
+          uGtaoIntensity.value = postParams.gtao.intensity;
+          aoPass.radius.value = postParams.gtao.radius;
+          aoPass.samples.value = postParams.gtao.samples;
+          aoPass.scale.value = postParams.gtao.scale;
+          aoPass.distanceFallOff.value = postParams.gtao.distanceFallOff;
+          aoPass.distanceExponent.value = postParams.gtao.distanceExponent;
+          aoPass.thickness.value = postParams.gtao.thickness;
+          denoisePass.radius.value = postParams.gtao.denoiseRadius;
+          denoisePass.lumaPhi.value = postParams.gtao.denoiseLumaPhi;
+          denoisePass.depthPhi.value = postParams.gtao.denoiseDepthPhi;
+          denoisePass.normalPhi.value = postParams.gtao.denoiseNormalPhi;
+          uGtaoDenoiseEnabled.value = postParams.gtao.denoiseEnabled ? 1 : 0;
+          if (denoisePass._resolution) {
+            const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+            denoisePass._resolution.value.set(size.x, size.y);
+          }
+
+          uDofEnabled.value =
+            postParams.enabled && postParams.dof.enabled ? 1 : 0;
+          uDofFocusDistance.value = postParams.dof.focusDistance;
+          uDofBlurStart.value = postParams.dof.blurStart;
+          uDofBlurEnd.value = postParams.dof.blurEnd;
+          uDofBlurSize.value = postParams.dof.blurSize;
+          uDofBlurSpread.value = postParams.dof.blurSpread;
+
+          uBloomEnabled.value =
+            postParams.enabled && postParams.bloom.enabled ? 1 : 0;
+          bloomScenePass.strength.value = postParams.bloom.strength;
+          bloomScenePass.radius.value = postParams.bloom.radius;
+          bloomScenePass.threshold.value = postParams.bloom.threshold;
+
+          uLensflareEnabled.value =
+            postParams.enabled && postParams.lensflare.enabled ? 1 : 0;
+          skyBloomPass.threshold.value = postParams.lensflare.bloomThreshold;
+          flareThreshold.value = postParams.lensflare.threshold;
+          flareGhostAttenuation.value = postParams.lensflare.ghostAttenuation;
+          flareGhostSpacing.value = postParams.lensflare.ghostSpacing;
+
+          uGodRaysEnabled.value =
+            postParams.enabled && postParams.godRays.enabled ? 1 : 0;
+          uGodRaysStrength.value = postParams.godRays.strength;
+          uGodRaysDecay.value = postParams.godRays.decay;
+          uGodRaysDensity.value = postParams.godRays.density;
+          uGodRaysSamples.value = postParams.godRays.samples;
+
+          // Sun screen position for god rays (project sun direction to NDC)
+          const sunWorld = camera.position
+            .clone()
+            .add(sunDir.clone().multiplyScalar(500000));
+          const v4 = new THREE.Vector4(
+            sunWorld.x,
+            sunWorld.y,
+            sunWorld.z,
+            1,
+          );
+          v4.applyMatrix4(camera.matrixWorldInverse);
+          v4.applyMatrix4(camera.projectionMatrix);
+          const ndcX = v4.x / v4.w;
+          const ndcY = v4.y / v4.w;
+          uSunScreenPos.value.set(ndcX * 0.5 + 0.5, ndcY * 0.5 + 0.5);
 
           // Apply CSM param changes (only when changed — updateFrustums is expensive)
           const csmChanged =
