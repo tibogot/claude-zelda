@@ -18,7 +18,15 @@ import {
   positionLocal,
   uniform,
   vec3,
+  vec4,
   varying,
+  max,
+  length,
+  smoothstep,
+  abs,
+  div,
+  negate,
+  modelWorldMatrixInverse,
 } from "three/tsl";
 
 function hash(i) {
@@ -215,6 +223,22 @@ export async function createFlowerField(scene, options = {}) {
   const windSpeed = options.windSpeed ?? 1.2;
   const windStr = (options.windStr ?? 0.15) * 0.4;
 
+  // Instance positions for player interaction (flower center: top of stem)
+  const instancePosArr = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    instancePosArr[i * 3] = off[i * 3];
+    instancePosArr[i * 3 + 1] = off[i * 3 + 1] + flowerHeight[i];
+    instancePosArr[i * 3 + 2] = off[i * 3 + 2];
+  }
+
+  // Player interaction uniforms (same as grass/susuki/reed)
+  const uTrailCenter = options.uniforms?.uTrailCenter ?? uniform(new THREE.Vector2(9999, 9999));
+  const uPlayerPos = options.uniforms?.uPlayerPos ?? uniform(new THREE.Vector3(9999, 0, 9999));
+  const uInteractionRange = options.uniforms?.uInteractionRange ?? uniform(9999);
+  const uInteractionStrength = options.uniforms?.uInteractionStrength ?? uniform(0);
+  const uInteractionHThresh = options.uniforms?.uInteractionHThresh ?? uniform(2);
+  const uInteractionRepel = options.uniforms?.uInteractionRepel ?? uniform(1);
+
   // TSL uniforms (WebGPU-compatible)
   const uFlowerTime = uniform(0);
   const uPetalColorBase = uniform(new THREE.Color(p.petalColorBase).convertSRGBToLinear());
@@ -234,11 +258,12 @@ export async function createFlowerField(scene, options = {}) {
     roughness: 0.85,
     metalness: 0,
   });
-  // Wind: vertex displacement — radial falloff so petals bend from center (softer, less rigid)
+  // Wind + player interaction: vertex displacement — radial falloff so petals bend from center
   flowerHeadMat.positionNode = (() => {
     const aIdx = attribute("aFlowerIndex", "float");
     const aHeight = attribute("aFlowerHeight", "float");
     const aRadial = attribute("aRadialNorm", "float");
+    const instancePosAttr = attribute("instancePos", "vec3");
     const phase = add(
       mul(uFlowerTime, windSpeed),
       mul(aIdx, 1.2),
@@ -247,12 +272,30 @@ export async function createFlowerField(scene, options = {}) {
     const bend = mul(sin(phase), windStr, aHeight, aRadial);
     const micro = mul(sin(add(mul(phase, 2.3), mul(aIdx, 3))), 0.08, windStr, aHeight, aRadial);
     const amount = add(bend, micro);
-    const windOffset = vec3(
-      mul(cos(windDir), amount),
-      0,
-      mul(sin(windDir), amount)
+    let pos = add(
+      positionLocal,
+      vec3(mul(cos(windDir), amount), 0, mul(sin(windDir), amount))
     );
-    return add(positionLocal, windOffset);
+    // Player interaction (bend away, same as susuki/reed)
+    const reedBaseWorld = instancePosAttr;
+    const pDist = length(sub(reedBaseWorld.xz, uTrailCenter));
+    const pHD = abs(sub(reedBaseWorld.y, uPlayerPos.y));
+    const distFalloff = mix(float(1), float(0), smoothstep(float(0.5), uInteractionRange, pDist));
+    const heightFalloff = smoothstep(uInteractionHThresh, 0, pHD);
+    const pFall = mul(distFalloff, heightFalloff);
+    const diffXZ = sub(
+      vec3(reedBaseWorld.x, 0, reedBaseWorld.z),
+      vec3(uTrailCenter.x, 0, uTrailCenter.y),
+    );
+    const len = max(length(diffXZ), 0.001);
+    const pTo = mul(diffXZ, div(1, len));
+    const pAng = mul(negate(mix(0, uInteractionStrength, pFall)), uInteractionRepel);
+    const heightPct = aRadial;
+    const pushAmount = mul(pAng, heightPct);
+    const dispWorld = mul(pTo, pushAmount);
+    const dispLocal = modelWorldMatrixInverse.mul(vec4(dispWorld, 0)).xyz;
+    pos = add(pos, dispLocal);
+    return pos;
   })();
   // Pink gradient: base (center) → tip (edge)
   flowerHeadMat.colorNode = mix(
@@ -269,12 +312,17 @@ export async function createFlowerField(scene, options = {}) {
     instGeo.instanceCount = indices.length;
     const idxArr = new Float32Array(indices.length);
     const hArr = new Float32Array(indices.length);
+    const posArr = new Float32Array(indices.length * 3);
     indices.forEach((ii, j) => {
       idxArr[j] = flowerIndex[ii];
       hArr[j] = flowerHeight[ii];
+      posArr[j * 3] = instancePosArr[ii * 3];
+      posArr[j * 3 + 1] = instancePosArr[ii * 3 + 1];
+      posArr[j * 3 + 2] = instancePosArr[ii * 3 + 2];
     });
     instGeo.setAttribute("aFlowerIndex", new THREE.InstancedBufferAttribute(idxArr, 1));
     instGeo.setAttribute("aFlowerHeight", new THREE.InstancedBufferAttribute(hArr, 1));
+    instGeo.setAttribute("instancePos", new THREE.InstancedBufferAttribute(posArr, 3));
     const mesh = new THREE.InstancedMesh(instGeo, flowerHeadMat, indices.length);
     mesh.frustumCulled = false;
     mesh.renderOrder = 1;
@@ -300,6 +348,7 @@ export async function createFlowerField(scene, options = {}) {
   centerInstancedGeo.instanceCount = count;
   centerInstancedGeo.setAttribute("aFlowerIndex", new THREE.InstancedBufferAttribute(new Float32Array(flowerIndex), 1));
   centerInstancedGeo.setAttribute("aFlowerHeight", new THREE.InstancedBufferAttribute(new Float32Array(flowerHeight), 1));
+  centerInstancedGeo.setAttribute("instancePos", new THREE.InstancedBufferAttribute(instancePosArr, 3));
   const centerMat = new THREE.MeshStandardNodeMaterial({
     color: p.centerColor,
     normalMap: petalNormalTex,
@@ -311,11 +360,27 @@ export async function createFlowerField(scene, options = {}) {
   centerMat.positionNode = (() => {
     const aIdx = attribute("aFlowerIndex", "float");
     const aHeight = attribute("aFlowerHeight", "float");
+    const instancePosAttr = attribute("instancePos", "vec3");
     const phase = add(mul(uFlowerTime, windSpeed), mul(aIdx, 1.2), windDir);
     const bend = mul(sin(phase), windStr, aHeight, 0.6);
     const micro = mul(sin(add(mul(phase, 2.3), mul(aIdx, 3))), 0.06, windStr, aHeight);
     const amount = add(bend, micro);
-    return add(positionLocal, vec3(mul(cos(windDir), amount), 0, mul(sin(windDir), amount)));
+    let pos = add(positionLocal, vec3(mul(cos(windDir), amount), 0, mul(sin(windDir), amount)));
+    // Player interaction
+    const reedBaseWorld = instancePosAttr;
+    const pDist = length(sub(reedBaseWorld.xz, uTrailCenter));
+    const pHD = abs(sub(reedBaseWorld.y, uPlayerPos.y));
+    const distFalloff = mix(float(1), float(0), smoothstep(float(0.5), uInteractionRange, pDist));
+    const heightFalloff = smoothstep(uInteractionHThresh, 0, pHD);
+    const pFall = mul(distFalloff, heightFalloff);
+    const diffXZ = sub(vec3(reedBaseWorld.x, 0, reedBaseWorld.z), vec3(uTrailCenter.x, 0, uTrailCenter.y));
+    const len = max(length(diffXZ), 0.001);
+    const pTo = mul(diffXZ, div(1, len));
+    const pAng = mul(negate(mix(0, uInteractionStrength, pFall)), uInteractionRepel);
+    const dispWorld = mul(pTo, pAng);
+    const dispLocal = modelWorldMatrixInverse.mul(vec4(dispWorld, 0)).xyz;
+    pos = add(pos, dispLocal);
+    return pos;
   })();
   const centerMesh = new THREE.InstancedMesh(centerInstancedGeo, centerMat, count);
   centerMesh.frustumCulled = false;
@@ -335,6 +400,7 @@ export async function createFlowerField(scene, options = {}) {
   stemInstancedGeo.instanceCount = count;
   stemInstancedGeo.setAttribute("aStemIndex", new THREE.InstancedBufferAttribute(new Float32Array(flowerIndex), 1));
   stemInstancedGeo.setAttribute("aStemHeight", new THREE.InstancedBufferAttribute(new Float32Array(flowerHeight), 1));
+  stemInstancedGeo.setAttribute("instancePos", new THREE.InstancedBufferAttribute(instancePosArr, 3));
   const uStemTime = uniform(0);
   const uStemColorBase = uniform(new THREE.Color(p.stemColor).convertSRGBToLinear());
   const uStemColorTop = uniform(new THREE.Color(p.stemColorTop).convertSRGBToLinear());
@@ -344,6 +410,7 @@ export async function createFlowerField(scene, options = {}) {
   stemMat.positionNode = Fn(() => {
     const aIdx = attribute("aStemIndex", "float");
     const aHeight = attribute("aStemHeight", "float");
+    const instancePosAttr = attribute("instancePos", "vec3");
     const heightPct = add(positionLocal.y, 0.5);
     vStemHeightNorm.assign(heightPct);
     const topFactor = mul(heightPct, heightPct);
@@ -359,7 +426,23 @@ export async function createFlowerField(scene, options = {}) {
     const amount = add(bend, micro);
     const windX = add(mul(cos(windDir), amount), mul(cos(add(windDir, 0.5)), baseBend));
     const windZ = add(mul(sin(windDir), amount), mul(sin(add(windDir, 0.5)), baseBend));
-    return add(positionLocal, vec3(windX, 0, windZ));
+    let pos = add(positionLocal, vec3(windX, 0, windZ));
+    // Player interaction (stem bends more at top)
+    const reedBaseWorld = instancePosAttr;
+    const pDist = length(sub(reedBaseWorld.xz, uTrailCenter));
+    const pHD = abs(sub(reedBaseWorld.y, uPlayerPos.y));
+    const distFalloff = mix(float(1), float(0), smoothstep(float(0.5), uInteractionRange, pDist));
+    const heightFalloff = smoothstep(uInteractionHThresh, 0, pHD);
+    const pFall = mul(distFalloff, heightFalloff);
+    const diffXZ = sub(vec3(reedBaseWorld.x, 0, reedBaseWorld.z), vec3(uTrailCenter.x, 0, uTrailCenter.y));
+    const len = max(length(diffXZ), 0.001);
+    const pTo = mul(diffXZ, div(1, len));
+    const pAng = mul(negate(mix(0, uInteractionStrength, pFall)), uInteractionRepel);
+    const pushAmount = mul(pAng, topFactor);
+    const dispWorld = mul(pTo, pushAmount);
+    const dispLocal = modelWorldMatrixInverse.mul(vec4(dispWorld, 0)).xyz;
+    pos = add(pos, dispLocal);
+    return pos;
   })();
   const stemMesh = new THREE.InstancedMesh(stemInstancedGeo, stemMat, count);
   stemMesh.frustumCulled = false;
