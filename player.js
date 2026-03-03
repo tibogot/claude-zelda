@@ -117,6 +117,74 @@ export function createPlayer(opts) {
       characterGroup.userData.leftHandBone =
         model.getObjectByName(HAND_BONE_L) || null;
 
+      // Attach a simple sword to the right hand for attack animation work
+      const rightHand = characterGroup.userData.rightHandBone;
+      if (rightHand) {
+        const swordGroup = new THREE.Group();
+        const handleGeo = new THREE.CylinderGeometry(0.02, 0.025, 0.18, 8);
+        const bladeGeo = new THREE.BoxGeometry(0.015, 0.06, 0.95);
+        const handleMat = new THREE.MeshStandardNodeMaterial({
+          color: 0x4a3728,
+          roughness: 0.8,
+          metalness: 0.1,
+        });
+        const bladeMat = new THREE.MeshStandardNodeMaterial({
+          color: 0xc0c8d0,
+          roughness: 0.3,
+          metalness: 0.8,
+        });
+        const handle = new THREE.Mesh(handleGeo, handleMat);
+        const blade = new THREE.Mesh(bladeGeo, bladeMat);
+        handle.castShadow = true;
+        blade.castShadow = true;
+        handle.position.set(0, 0, 0);
+        blade.position.set(0, 0, 0.565); // blade extends forward from grip
+        swordGroup.add(handle);
+        swordGroup.add(blade);
+        // Adjust so grip sits in palm; tweak these for your rig
+        swordGroup.position.set(0.02, 0, 0.04);
+        swordGroup.rotation.set(-0.1, 0, 0.15);
+        rightHand.add(swordGroup);
+        characterGroup.userData.sword = swordGroup;
+      }
+
+      // Paraglider/kite for skydiving (Space during jump) — triangular canopy
+      const kiteGroup = new THREE.Group();
+      const kiteShape = new THREE.Shape();
+      kiteShape.moveTo(0, -0.7);       // point at bottom (toward character)
+      kiteShape.lineTo(-1.6, 0.6);     // top-left
+      kiteShape.lineTo(1.6, 0.6);      // top-right
+      kiteShape.closePath();
+      const canopyGeo = new THREE.ShapeGeometry(kiteShape);
+      const canopyMat = new THREE.MeshStandardNodeMaterial({
+        color: 0x2563eb,
+        roughness: 0.5,
+        metalness: 0.1,
+        side: THREE.DoubleSide,
+      });
+      const canopy = new THREE.Mesh(canopyGeo, canopyMat);
+      canopy.castShadow = true;
+      canopy.receiveShadow = true;
+      canopy.rotation.x = -0.5; // tilt wide part up to catch air
+      canopy.position.set(0, 0.15, 0);
+      kiteGroup.add(canopy);
+      // Control bar (grip)
+      const barGeo = new THREE.BoxGeometry(0.7, 0.04, 0.04);
+      const barMat = new THREE.MeshStandardNodeMaterial({
+        color: 0x1e293b,
+        roughness: 0.7,
+        metalness: 0.2,
+      });
+      const bar = new THREE.Mesh(barGeo, barMat);
+      bar.position.set(0, -0.6, 0.35);
+      bar.rotation.x = 0.25;
+      kiteGroup.add(bar);
+      kiteGroup.position.set(0, 1.4, -0.4); // above character, canopy spreads wide
+      kiteGroup.rotation.x = 0.12;
+      kiteGroup.visible = false;
+      characterGroup.add(kiteGroup);
+      characterGroup.userData.kite = kiteGroup;
+
       // Find foot bones for footstep sync (DEF-footL / DEF-footR naming)
       let _fbl = null, _fbr = null;
       model.traverse(o => {
@@ -312,6 +380,7 @@ export function createPlayer(opts) {
     shift: false,
     ctrl: false,
     space: false,
+    spacePrev: false,
     arrowLeft: false,
     arrowRight: false,
   };
@@ -320,6 +389,7 @@ export function createPlayer(opts) {
     camPitch: 0.3,
     characterVelY: 0,
     isGrounded: false,
+    isGliding: false,
     moveDir: new THREE.Vector3(),
   };
   // Grace counter: keeps isGrounded true for a few frames after contact loss.
@@ -566,7 +636,15 @@ export function createPlayer(opts) {
                  :                   charPos.y;
       }
     } else {
+      // Glider toggle: Space mid-air opens/closes (press again to close)
+      const spaceJustPressed = keys.space && !keys.spacePrev;
+      if (spaceJustPressed) state.isGliding = !state.isGliding;
+
       state.characterVelY -= PARAMS.gravity * dt;
+      if (state.isGliding) {
+        const cap = -(PARAMS.glideFallSpeed ?? 3);
+        state.characterVelY = Math.max(state.characterVelY, cap);
+      }
       desiredY = charPos.y + state.characterVelY * dt;
     }
     // Apply one-frame Y shift from crouch start/end (moves centre down or up)
@@ -654,6 +732,7 @@ export function createPlayer(opts) {
     if (hasSampleHeight) {
       // terrain mode: ground truth comes from heightmap
       state.isGrounded = onGround;
+      if (onGround) state.isGliding = false;
       const landedGroundY = sampleHeight(charPos.x, charPos.z) + capHalfH + capR;
       if (state.characterVelY < 0 && charPos.y <= landedGroundY + 0.2) state.characterVelY = 0;
     } else {
@@ -675,7 +754,10 @@ export function createPlayer(opts) {
       } else {
         state.isGrounded = false;
       }
-      if (state.isGrounded && state.characterVelY < 0) state.characterVelY = 0;
+      if (state.isGrounded) {
+        if (state.characterVelY < 0) state.characterVelY = 0;
+        state.isGliding = false; // landing auto-closes glider
+      }
     }
     const corrected = characterController.computedMovement();
     const cur = playerBody.translation();
@@ -769,6 +851,7 @@ export function createPlayer(opts) {
           ud.modelBaseY + PARAMS.characterOffsetY + _crouchVisualT * _crouchShift;
     }
     capsule.visible = characterGroup.children.length === 0;
+    if (ud?.kite) ud.kite.visible = state.isGliding;
     const moving = state.moveDir.length() > 0;
     const running = moving && keys.shift;
     const crouching = _isCrouching;
@@ -933,6 +1016,8 @@ export function createPlayer(opts) {
       }
     }
     if (characterMixer) characterMixer.update(dt);
+
+    keys.spacePrev = keys.space;
 
     // ── FOOTSTEP SYNC ─────────────────────────────────────────────────────
     // Track each foot bone's Y relative to character centre.

@@ -131,6 +131,7 @@ export const PARAMS = {
   rollDashDistance: 8,
   jumpSpeed: 5.5,
   gravity: 9.81,
+  glideFallSpeed: 3,
   camDist: 7,
   camHeight: 0.0,
   camPitchMin: -0.2,
