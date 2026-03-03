@@ -276,7 +276,10 @@ export function createPlayer(opts) {
             const from = ud.preAttackState || "idle";
             // Don't disable attack immediately — let crossFade blend first to avoid T-pose flash
             const disableAfterBlend = () => {
-              setTimeout(() => { action.enabled = false; }, 250);
+              setTimeout(() => {
+                if (ud.isAttacking) return; // User started another attack — don't disable
+                action.enabled = false;
+              }, 250);
             };
             const toIdle = () => {
               ud.idleAction.enabled = true;
@@ -1143,6 +1146,7 @@ export function createPlayer(opts) {
           }
           ud.lastMoveState = from;
           setTimeout(() => {
+            if (ud.isAttacking) return; // User started another attack — don't disable
             currentAttack.enabled = false;
             currentAttack.time = 0;
           }, 250);

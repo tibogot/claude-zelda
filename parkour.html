@@ -103,6 +103,7 @@
       } from "./physics.js";
       import { createPlayer } from "./player.js";
       import { createNpc } from "./npc.js";
+      import { createEnemy } from "./enemy.js";
       import { createFloatingLeaves } from "./floating-leaves.js";
       import { PARAMS } from "./params.js";
       import { PI } from "./constants.js";
@@ -186,6 +187,18 @@
         },
         bridge1: { enabled: false },
         bridge2: { enabled: false },
+        enemies: {
+          enabled: true,
+          speed: 2,
+          walkRadius: 80,
+          directionChangeInterval: 3,
+          turnSpeed: 5,
+          scale: 1,
+          floorOffset: 0,
+          maxHp: 100,
+          idleWhenNearPlayer: true,
+          nearPlayerDistance: 4,
+        },
       };
       const hazeParams = {
         enabled: false,
@@ -1757,6 +1770,29 @@
           playerPos: charPos,
         });
 
+        // ── ENEMIES ──
+        const enemySpawnPositions = [
+          new THREE.Vector3(5, FLOOR_Y, 5),
+          new THREE.Vector3(50, FLOOR_Y, 50),
+          new THREE.Vector3(-40, FLOOR_Y, 60),
+        ];
+        const enemies = enemySpawnPositions.map((spawnPos) =>
+          createEnemy({
+            scene,
+            renderer,
+            camera,
+            enemyParams: parkourParams.enemies,
+            FLOOR_Y,
+            PARKOUR_SIZE,
+            characterHeight: PARAMS.characterHeight,
+            capsuleRadius: PARAMS.capsuleRadius,
+            spawnPos,
+            playerPos: charPos,
+          })
+        );
+        const enemiesHitThisAttack = new Set();
+        let lastFrameWasAttacking = false;
+
         // ── TWEAKPANE CONTROLS ──
         const pane = new Tweakpane.Pane({ title: "Parkour", expanded: true });
 
@@ -2092,6 +2128,60 @@
           label: "near distance",
         });
 
+        const enemiesFolder = pane.addFolder({ title: "Enemies", expanded: true });
+        enemiesFolder.addBinding(parkourParams.enemies, "enabled", {
+          label: "enabled",
+        });
+        enemiesFolder.addBinding(parkourParams.enemies, "speed", {
+          min: 0.5,
+          max: 6,
+          step: 0.1,
+        });
+        enemiesFolder.addBinding(parkourParams.enemies, "walkRadius", {
+          min: 20,
+          max: 350,
+          step: 10,
+          label: "walk radius",
+        });
+        enemiesFolder.addBinding(parkourParams.enemies, "directionChangeInterval", {
+          min: 1,
+          max: 10,
+          step: 0.5,
+          label: "dir change (s)",
+        });
+        enemiesFolder.addBinding(parkourParams.enemies, "turnSpeed", {
+          min: 1,
+          max: 15,
+          step: 0.5,
+          label: "turn speed",
+        });
+        enemiesFolder.addBinding(parkourParams.enemies, "scale", {
+          min: 0.5,
+          max: 3,
+          step: 0.1,
+        });
+        enemiesFolder.addBinding(parkourParams.enemies, "floorOffset", {
+          min: -2,
+          max: 2,
+          step: 0.1,
+          label: "floor offset",
+        });
+        enemiesFolder.addBinding(parkourParams.enemies, "maxHp", {
+          min: 10,
+          max: 500,
+          step: 10,
+          label: "max HP",
+        });
+        enemiesFolder.addBinding(parkourParams.enemies, "idleWhenNearPlayer", {
+          label: "idle when near",
+        });
+        enemiesFolder.addBinding(parkourParams.enemies, "nearPlayerDistance", {
+          min: 1,
+          max: 15,
+          step: 0.5,
+          label: "near distance",
+        });
+
         const bridgesFolder = pane.addFolder({ title: "Bridges", expanded: true });
         bridgesFolder.addBinding(parkourParams.bridge1, "enabled", { label: "Physics bridge" })
           .on("change", ({ value }) => {
@@ -2271,8 +2361,32 @@
           }
           // ──────────────────────────────────────────────────────────────────────
 
+          // ── ATTACK HIT DETECTION (use last frame's attack state so we don't miss the end frame) ──
+          if (lastFrameWasAttacking && parkourParams.enemies.enabled) {
+            const attackRange = 5;
+            const fwdX = Math.sin(player.state.camYaw);
+            const fwdZ = -Math.cos(player.state.camYaw);
+            for (const enemy of enemies) {
+              if (enemy.isDead() || enemiesHitThisAttack.has(enemy)) continue;
+              const dx = enemy.pos.x - charPos.x;
+              const dz = enemy.pos.z - charPos.z;
+              const distSq = dx * dx + dz * dz;
+              if (distSq > attackRange * attackRange) continue;
+              const dist = Math.sqrt(distSq);
+              const dot = dist > 0.01 ? (dx * fwdX + dz * fwdZ) / dist : 1;
+              if (dot < 0.3) continue;
+              enemiesHitThisAttack.add(enemy);
+              enemy.takeDamage(34);
+            }
+          }
+          const ud = player.characterGroup.userData;
+          lastFrameWasAttacking = !!ud.isAttacking;
+          if (!lastFrameWasAttacking) enemiesHitThisAttack.clear();
+
           player.update(dt);
+
           npc.update(dt);
+          for (const enemy of enemies) enemy.update(dt);
 
           // ── PORTAL: glow pulse + teleport trigger ──────────────────────────
           portalCooldown = Math.max(0, portalCooldown - dt);
