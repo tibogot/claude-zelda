@@ -148,12 +148,12 @@ export function createPlayer(opts) {
         characterGroup.userData.sword = swordGroup;
       }
 
-      // Paraglider/kite for skydiving (Space during jump) — triangular canopy
+      // Paraglider/kite for skydiving (Space during jump) — flat triangle, perpendicular to player
       const kiteGroup = new THREE.Group();
       const kiteShape = new THREE.Shape();
       kiteShape.moveTo(0, -0.7);       // point at bottom (toward character)
       kiteShape.lineTo(-1.6, 0.6);     // top-left
-      kiteShape.lineTo(1.6, 0.6);      // top-right
+      kiteShape.lineTo(1.6, 0.6);     // top-right
       kiteShape.closePath();
       const canopyGeo = new THREE.ShapeGeometry(kiteShape);
       const canopyMat = new THREE.MeshStandardNodeMaterial({
@@ -168,7 +168,6 @@ export function createPlayer(opts) {
       canopy.rotation.x = -0.5; // tilt wide part up to catch air
       canopy.position.set(0, 0.15, 0);
       kiteGroup.add(canopy);
-      // Control bar (grip)
       const barGeo = new THREE.BoxGeometry(0.7, 0.04, 0.04);
       const barMat = new THREE.MeshStandardNodeMaterial({
         color: 0x1e293b,
@@ -179,8 +178,9 @@ export function createPlayer(opts) {
       bar.position.set(0, -0.6, 0.35);
       bar.rotation.x = 0.25;
       kiteGroup.add(bar);
-      kiteGroup.position.set(0, 1.4, -0.4); // above character, canopy spreads wide
+      kiteGroup.position.set(0, 1.4, -0.4);
       kiteGroup.rotation.x = 0.12;
+      kiteGroup.rotation.y = Math.PI / 2; // perpendicular to player (face forward)
       kiteGroup.visible = false;
       characterGroup.add(kiteGroup);
       characterGroup.userData.kite = kiteGroup;
@@ -215,10 +215,8 @@ export function createPlayer(opts) {
             gltf.animations.find((a) => a.name === "Jump_Loop") ||
             gltf.animations.find((a) => a.name === "Jump_Start") ||
             idleClip;
-          const attackClip =
-            gltf.animations.find((a) => a.name === "Sword_Attack") ||
-            gltf.animations.find((a) => a.name === "Sword_Attack_RM") ||
-            null;
+          const attackClip = gltf.animations.find((a) => a.name === "Sword_Attack") || null;
+          const attackClip2 = gltf.animations.find((a) => a.name === "Sword_Attack_RM") || attackClip;
           const crouchClip =
             gltf.animations.find((a) => a.name === "Crouch_Idle_Loop") ||
             idleClip;
@@ -239,6 +237,9 @@ export function createPlayer(opts) {
           const attackAction = attackClip
             ? characterMixer.clipAction(attackClip).setLoop(2200)
             : null;
+          const attackAction2 = attackClip2
+            ? characterMixer.clipAction(attackClip2).setLoop(2200)
+            : null;
           const crouchAction = characterMixer
             .clipAction(crouchClip)
             .setLoop(2201);
@@ -248,11 +249,10 @@ export function createPlayer(opts) {
           const rollAction = characterMixer
             .clipAction(rollClip)
             .setLoop(2200);
-          if (
-            attackAction &&
-            attackAction.clampWhenFinished !== undefined
-          )
+          if (attackAction?.clampWhenFinished !== undefined)
             attackAction.clampWhenFinished = true;
+          if (attackAction2?.clampWhenFinished !== undefined)
+            attackAction2.clampWhenFinished = true;
           if (
             rollAction &&
             rollAction.clampWhenFinished !== undefined
@@ -266,46 +266,60 @@ export function createPlayer(opts) {
           characterGroup.userData.crouchWalkAction = crouchWalkAction;
           characterGroup.userData.rollAction = rollAction;
           characterGroup.userData.attackAction = attackAction;
+          characterGroup.userData.attackAction2 = attackAction2;
           characterGroup.userData.lastMoveState = "idle";
           characterGroup.userData.isAttacking = false;
           characterGroup.userData.isRolling = false;
+          const makeAttackFinishedHandler = (action) => () => {
+            const ud = characterGroup.userData;
+            ud.isAttacking = false;
+            const from = ud.preAttackState || "idle";
+            // Don't disable attack immediately — let crossFade blend first to avoid T-pose flash
+            const disableAfterBlend = () => {
+              setTimeout(() => { action.enabled = false; }, 250);
+            };
+            const toIdle = () => {
+              ud.idleAction.enabled = true;
+              ud.idleAction.crossFadeFrom(action, 0.25).play();
+              disableAfterBlend();
+            };
+            const toWalk = () => {
+              ud.walkAction.enabled = true;
+              ud.walkAction.crossFadeFrom(action, 0.25).play();
+              disableAfterBlend();
+            };
+            const toRun = () => {
+              ud.runAction.enabled = true;
+              ud.runAction.crossFadeFrom(action, 0.25).play();
+              disableAfterBlend();
+            };
+            const toCrouch = () => {
+              ud.crouchAction.enabled = true;
+              ud.crouchAction.crossFadeFrom(action, 0.25).play();
+              disableAfterBlend();
+            };
+            const toCrouchWalk = () => {
+              ud.crouchWalkAction.enabled = true;
+              ud.crouchWalkAction.crossFadeFrom(action, 0.25).play();
+              disableAfterBlend();
+            };
+            if (from === "walk") toWalk();
+            else if (from === "run") toRun();
+            else if (from === "crouch") toCrouch();
+            else if (from === "crouch_walk") toCrouchWalk();
+            else toIdle();
+            ud.lastMoveState = from;
+          };
           if (attackAction) {
             characterMixer.addEventListener("finished", (e) => {
               if (e.action !== attackAction) return;
-              const ud = characterGroup.userData;
-              ud.isAttacking = false;
-              const from = ud.preAttackState || "idle";
-              const toIdle = () => {
-                attackAction.enabled = false;
-                ud.idleAction.enabled = true;
-                ud.idleAction.crossFadeFrom(attackAction, 0.2).play();
-              };
-              const toWalk = () => {
-                attackAction.enabled = false;
-                ud.walkAction.enabled = true;
-                ud.walkAction.crossFadeFrom(attackAction, 0.2).play();
-              };
-              const toRun = () => {
-                attackAction.enabled = false;
-                ud.runAction.enabled = true;
-                ud.runAction.crossFadeFrom(attackAction, 0.2).play();
-              };
-              const toCrouch = () => {
-                attackAction.enabled = false;
-                ud.crouchAction.enabled = true;
-                ud.crouchAction.crossFadeFrom(attackAction, 0.2).play();
-              };
-              const toCrouchWalk = () => {
-                attackAction.enabled = false;
-                ud.crouchWalkAction.enabled = true;
-                ud.crouchWalkAction.crossFadeFrom(attackAction, 0.2).play();
-              };
-              if (from === "walk") toWalk();
-              else if (from === "run") toRun();
-              else if (from === "crouch") toCrouch();
-              else if (from === "crouch_walk") toCrouchWalk();
-              else toIdle();
-              ud.lastMoveState = from;
+              makeAttackFinishedHandler(attackAction)();
+            });
+          }
+          if (attackAction2 && attackAction2 !== attackAction) {
+            characterMixer.addEventListener("finished", (e) => {
+              if (e.action !== attackAction2) return;
+              makeAttackFinishedHandler(attackAction2)();
             });
           }
           if (rollAction) {
@@ -360,9 +374,13 @@ export function createPlayer(opts) {
       } catch (e) {
         console.warn("Character animations:", e);
       }
-      renderer
-        .compileAsync(scene, camera)
-        .catch((e) => console.warn("Recompile after character load:", e));
+      // Defer to next frame — calling compileAsync from the load callback can run
+      // mid-render and trigger WebGPU errors (e.g. with WaterMesh reflector).
+      requestAnimationFrame(() => {
+        renderer
+          .compileAsync(scene, camera)
+          .catch((e) => console.warn("Recompile after character load:", e));
+      });
     },
     undefined,
     (err) => {
@@ -495,6 +513,29 @@ export function createPlayer(opts) {
                 ? ud.crouchWalkAction
                 : ud.idleAction;
     ud.attackAction.crossFadeFrom(from, 0.1).play();
+  });
+  window.addEventListener("keydown", (e) => {
+    if (e.key.toLowerCase() !== "e" || e.repeat) return;
+    const ud = characterGroup.userData;
+    if (!ud.attackAction2 || ud.isAttacking || ud.isRolling) return;
+    ud.isAttacking = true;
+    ud.preAttackState = ud.lastMoveState || "idle";
+    ud.attackAction2.stop();
+    ud.attackAction2.time = 0;
+    ud.attackAction2.enabled = true;
+    const from =
+      ud.preAttackState === "run"
+        ? ud.runAction
+        : ud.preAttackState === "walk"
+          ? ud.walkAction
+          : ud.preAttackState === "jump"
+            ? ud.jumpAction
+            : ud.preAttackState === "crouch"
+              ? ud.crouchAction
+              : ud.preAttackState === "crouch_walk"
+                ? ud.crouchWalkAction
+                : ud.idleAction;
+    ud.attackAction2.crossFadeFrom(from, 0.1).play();
   });
   document.addEventListener("mousemove", (e) => {
     if (!isPointerLocked && !(e.buttons & 1)) return;
@@ -1073,35 +1114,39 @@ export function createPlayer(opts) {
     if (
       ud &&
       ud.isAttacking &&
-      ud.attackAction &&
       ud.idleAction &&
       ud.walkAction &&
       ud.runAction
     ) {
-      const clip = ud.attackAction.getClip();
-      const dur = clip && clip.duration != null ? clip.duration : 1;
-      if (ud.attackAction.time >= dur - 0.02) {
-        ud.isAttacking = false;
-        const from = ud.preAttackState || "idle";
-        ud.attackAction.enabled = false;
-        ud.attackAction.time = 0;
-        if (from === "walk") {
-          ud.walkAction.enabled = true;
-          ud.walkAction.crossFadeFrom(ud.attackAction, 0.15).play();
-        } else if (from === "run") {
-          ud.runAction.enabled = true;
-          ud.runAction.crossFadeFrom(ud.attackAction, 0.15).play();
-        } else if (from === "crouch") {
-          ud.crouchAction.enabled = true;
-          ud.crouchAction.crossFadeFrom(ud.attackAction, 0.15).play();
-        } else if (from === "crouch_walk") {
-          ud.crouchWalkAction.enabled = true;
-          ud.crouchWalkAction.crossFadeFrom(ud.attackAction, 0.15).play();
-        } else {
-          ud.idleAction.enabled = true;
-          ud.idleAction.crossFadeFrom(ud.attackAction, 0.15).play();
+      const currentAttack = ud.attackAction?.enabled ? ud.attackAction : ud.attackAction2?.enabled ? ud.attackAction2 : null;
+      if (currentAttack) {
+        const clip = currentAttack.getClip();
+        const dur = clip && clip.duration != null ? clip.duration : 1;
+        if (currentAttack.time >= dur - 0.02) {
+          ud.isAttacking = false;
+          const from = ud.preAttackState || "idle";
+          if (from === "walk") {
+            ud.walkAction.enabled = true;
+            ud.walkAction.crossFadeFrom(currentAttack, 0.25).play();
+          } else if (from === "run") {
+            ud.runAction.enabled = true;
+            ud.runAction.crossFadeFrom(currentAttack, 0.25).play();
+          } else if (from === "crouch") {
+            ud.crouchAction.enabled = true;
+            ud.crouchAction.crossFadeFrom(currentAttack, 0.25).play();
+          } else if (from === "crouch_walk") {
+            ud.crouchWalkAction.enabled = true;
+            ud.crouchWalkAction.crossFadeFrom(currentAttack, 0.25).play();
+          } else {
+            ud.idleAction.enabled = true;
+            ud.idleAction.crossFadeFrom(currentAttack, 0.25).play();
+          }
+          ud.lastMoveState = from;
+          setTimeout(() => {
+            currentAttack.enabled = false;
+            currentAttack.time = 0;
+          }, 250);
         }
-        ud.lastMoveState = from;
       }
     }
   }

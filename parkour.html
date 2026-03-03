@@ -62,7 +62,8 @@
     <div id="info">
       Parkour &mdash; <span id="backend">loading…</span> &bull;
       <span id="stats">—</span> &bull; WASD + click to look &bull; Shift run
-      &bull; Ctrl crouch &bull; F roll &bull; Space jump &bull; Space mid-air glide
+      &bull; Ctrl crouch &bull; F roll &bull; right-click / E attack &bull; Space jump &bull; Space mid-air glide
+      &bull; Pool at <span>(-60, 80)</span>
     </div>
     <div id="platform-debug" style="display:none; position:fixed; top:60px; left:16px; z-index:100; font:12px monospace; color:#0f0; background:rgba(0,0,0,0.8); padding:8px; border-radius:4px; max-width:320px;"></div>
 
@@ -76,14 +77,22 @@
         color,
         fog,
         float,
+        mrt,
+        output,
+        emissive,
+        renderOutput,
         positionWorld,
         positionView,
         triNoise3D,
         uniform,
       } from "three/tsl";
+      import { bloom } from "three/addons/tsl/display/BloomNode.js";
+      import { fxaa } from "three/addons/tsl/display/FXAANode.js";
       import Stats from "stats-gl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+      import { WaterMesh } from "three/addons/objects/Water2Mesh.js";
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
       import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
       import RAPIER from "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.19.3/+esm";
@@ -493,6 +502,11 @@
         const parkourGroup = new THREE.Group();
         parkourGroup.position.y = FLOOR_Y;
         const gltfLoader = new GLTFLoader();
+        const dracoLoader = new DRACOLoader();
+        dracoLoader.setDecoderPath(
+          "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/libs/draco/gltf/",
+        );
+        gltfLoader.setDRACOLoader(dracoLoader);
         const PARKOUR_MODELS = [
           {
             url: "models/parkour/slope1.glb",
@@ -554,6 +568,85 @@
           parkourGroup.add(gltf.scene);
         }
         scene.add(parkourGroup);
+
+        // ── SWIMMING POOL (from water-showcase: pool.glb + WaterMesh) ──
+        const POOL_X = -60;
+        const POOL_Z = 80;
+        const POOL_SCALE = 0.05;
+        const POOL_WATER_W = 18;
+        const POOL_WATER_H = 24;
+        const POOL_WATER_Y_OFFSET = 0.15;
+        const POOL_BASE_Y = FLOOR_Y + 4.0; // Raised so pool bowl has visible depth
+
+        const poolAssets = {
+          pool: "https://threejs.org/examples/models/gltf/pool.glb",
+          normal0: "https://threejs.org/examples/textures/water/Water_1_M_Normal.jpg",
+          normal1: "https://threejs.org/examples/textures/water/Water_2_M_Normal.jpg",
+        };
+
+        const textureLoader = new THREE.TextureLoader();
+
+        const [poolGltf, poolNormal0, poolNormal1] = await Promise.all([
+          gltfLoader.loadAsync(poolAssets.pool),
+          textureLoader.loadAsync(poolAssets.normal0),
+          textureLoader.loadAsync(poolAssets.normal1),
+        ]);
+
+        poolNormal0.wrapS = poolNormal0.wrapT = THREE.RepeatWrapping;
+        poolNormal1.wrapS = poolNormal1.wrapT = THREE.RepeatWrapping;
+
+        const poolGroup = new THREE.Group();
+        poolGroup.position.set(POOL_X, POOL_BASE_Y, POOL_Z);
+        poolGroup.scale.setScalar(POOL_SCALE);
+        poolGltf.scene.traverse((child) => {
+          if (child.isMesh) {
+            child.castShadow = true;
+            child.receiveShadow = true;
+          }
+        });
+        poolGroup.add(poolGltf.scene);
+        scene.add(poolGroup);
+
+        const poolWaterGeo = new THREE.PlaneGeometry(POOL_WATER_W, POOL_WATER_H);
+        const poolWater = new WaterMesh(poolWaterGeo, {
+          color: "#99e0ff",
+          scale: 2,
+          flowDirection: new THREE.Vector2(1, 1),
+          normalMap0: poolNormal0,
+          normalMap1: poolNormal1,
+        });
+        poolWater.position.set(POOL_X, POOL_BASE_Y + POOL_WATER_Y_OFFSET, POOL_Z);
+        poolWater.rotation.x = -PI / 2;
+        poolWater.renderOrder = 1000;
+        scene.add(poolWater);
+
+        // Stairs to reach the raised pool deck (south side)
+        const STAIR_N = 8;
+        const STAIR_RISE = (POOL_BASE_Y - FLOOR_Y) / STAIR_N;
+        const STAIR_RUN = 0.6;
+        const STAIR_W = 10;
+        const POOL_SOUTH = POOL_Z - POOL_WATER_H / 2 - 1;
+        const stairMat = new THREE.MeshStandardMaterial({
+          color: 0xc4b8a8,
+          roughness: 0.75,
+          metalness: 0.05,
+        });
+        for (let i = 0; i < STAIR_N; i++) {
+          const stepH = (i + 1) * STAIR_RISE;
+          const stepMesh = new THREE.Mesh(
+            new THREE.BoxGeometry(STAIR_W, stepH, STAIR_RUN),
+            stairMat,
+          );
+          stepMesh.position.set(
+            POOL_X,
+            FLOOR_Y + stepH / 2,
+            POOL_SOUTH - (STAIR_N - i - 0.5) * STAIR_RUN,
+          );
+          stepMesh.castShadow = true;
+          stepMesh.receiveShadow = true;
+          stepMesh.renderOrder = 500;
+          scene.add(stepMesh);
+        }
 
         // ── SKY ──
         const sky = new SkyMesh();
@@ -732,6 +825,89 @@
           ),
           _towerTop,
         );
+
+        // Pool GLB trimesh collider (deck, walls, floor — player can walk inside)
+        // Water has no collider.
+        scene.updateMatrixWorld();
+        const _poolBox = new THREE.Box3();
+        const _poolCenter = new THREE.Vector3();
+        const _poolV = new THREE.Vector3();
+        poolGltf.scene.updateMatrixWorld(true);
+        _poolBox.setFromObject(poolGltf.scene);
+        _poolBox.getCenter(_poolCenter);
+        const poolVerts = [];
+        const poolInds = [];
+        let poolVertexOffset = 0;
+        poolGltf.scene.traverse((child) => {
+          if (!child.isMesh || !child.geometry) return;
+          const geo = child.geometry;
+          const posAttr =
+            geo.getAttribute?.("position") ?? geo.attributes?.position;
+          if (!posAttr || posAttr.count < 3) return;
+          const worldMat = child.matrixWorld;
+          for (let i = 0; i < posAttr.count; i++) {
+            _poolV.fromBufferAttribute(posAttr, i).applyMatrix4(worldMat);
+            poolVerts.push(
+              _poolV.x - _poolCenter.x,
+              _poolV.y - _poolCenter.y,
+              _poolV.z - _poolCenter.z,
+            );
+          }
+          const idxAttr = geo.index;
+          if (idxAttr) {
+            for (let i = 0; i < idxAttr.count; i++)
+              poolInds.push(poolVertexOffset + idxAttr.getX(i));
+          } else {
+            for (let i = 0; i < posAttr.count; i++)
+              poolInds.push(poolVertexOffset + i);
+          }
+          poolVertexOffset += posAttr.count;
+        });
+        if (poolVerts.length >= 9 && poolInds.length >= 3) {
+          const tf = RAPIER.TriMeshFlags ?? {};
+          const flags =
+            (tf.MERGE_DUPLICATE_VERTICES ?? 16) |
+            (tf.DELETE_DEGENERATE_TRIANGLES ?? 32) |
+            (tf.FIX_INTERNAL_EDGES ?? 144);
+          try {
+            const poolBody = physicsWorld.createRigidBody(
+              RAPIER.RigidBodyDesc.fixed().setTranslation(
+                _poolCenter.x,
+                _poolCenter.y,
+                _poolCenter.z,
+              ),
+            );
+            physicsWorld.createCollider(
+              RAPIER.ColliderDesc.trimesh(
+                new Float32Array(poolVerts),
+                new Uint32Array(poolInds),
+                flags,
+              ),
+              poolBody,
+            );
+          } catch (e) {
+            console.warn("Pool trimesh collider failed:", e);
+          }
+        }
+
+        // Stair colliders
+        for (let i = 0; i < STAIR_N; i++) {
+          const stepH = (i + 1) * STAIR_RISE;
+          physicsWorld.createCollider(
+            RAPIER.ColliderDesc.cuboid(
+              STAIR_W / 2,
+              stepH / 2,
+              STAIR_RUN / 2,
+            ),
+            physicsWorld.createRigidBody(
+              RAPIER.RigidBodyDesc.fixed().setTranslation(
+                POOL_X,
+                FLOOR_Y + stepH / 2,
+                POOL_SOUTH - (STAIR_N - i - 0.5) * STAIR_RUN,
+              ),
+            ),
+          );
+        }
 
         // Parkour platforms: one trimesh per platform (merge all meshes, like index7 ruins)
         // Per Rapier docs: vertices=Float32Array [x,y,z,...], indices=Uint32Array [i0,i1,i2,...]
@@ -1982,7 +2158,15 @@
 
         // ── RENDER PIPELINE ──
         const renderPipeline = new THREE.RenderPipeline(renderer);
-        renderPipeline.outputNode = pass(scene, camera);
+        renderPipeline.outputColorTransform = false;
+        // MRT + bloom pipeline (matches water-showcase) — avoids WaterMesh reflector
+        // format mismatch (bgra8unorm vs rgba16float) with simple pass
+        const scenePass = pass(scene, camera);
+        scenePass.setMRT(mrt({ output, emissive }));
+        const beautyPass = scenePass.getTextureNode();
+        const emissivePass = scenePass.getTextureNode("emissive");
+        const bloomPass = bloom(emissivePass, 2);
+        renderPipeline.outputNode = fxaa(renderOutput(beautyPass.add(bloomPass)));
 
         await renderer.compileAsync(scene, camera);
         csm.camera = camera;
