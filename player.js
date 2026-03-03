@@ -429,6 +429,7 @@ export function createPlayer(opts) {
   const _crouchHH_c  = Math.max(0.05, _normalHH_c * 0.31); // ≈50 % height
   const _crouchShift = _normalHH_c - _crouchHH_c;
   let _isCrouching   = false;
+  let _justStoodUp   = false;
   let _crouchVisualT = 0; // 0 = standing, 1 = fully crouched (lerped for smooth model transition)
   let _platformBody = null;  // kinematic body player stood on last frame
   /** @type {{ [handle: number]: { x: number, y: number, z: number } }} */
@@ -555,17 +556,20 @@ export function createPlayer(opts) {
     if (keys.arrowLeft || keys.a) state.camYaw += PARAMS.keyTurnSpeed * dt;
     if (keys.arrowRight || keys.d) state.camYaw -= PARAMS.keyTurnSpeed * dt;
 
-    // ── CROUCH TRANSITION (parkour mode only) ──────────────────────────────
+    // ── CROUCH TRANSITION ──────────────────────────────────────────────────
     // Shrinks / restores the capsule collider half-height each time the player
     // enters or leaves crouch.  A headroom ray-cast prevents standing up inside
-    // a tunnel.  _crouchDeltaY carries the required Y shift into desiredY below.
-    let _crouchDeltaY = 0;
-    if (!hasSampleHeight) {
-      const wantCrouch = keys.ctrl && state.isGrounded;
+    // a tunnel.  In terrain mode, apply crouch Y offset every frame (not just on
+    // transition) to avoid jitter — nextGroundY uses standing height, so we must
+    // subtract _crouchShift while crouched.
+    const onGroundForCrouch = hasSampleHeight
+      ? charPos.y <= (sampleHeight(charPos.x, charPos.z) + capHalfH + capR) + 0.6
+      : state.isGrounded;
+    {
+      const wantCrouch = keys.ctrl && onGroundForCrouch;
       if (wantCrouch && !_isCrouching) {
         playerCollider.setHalfHeight(_crouchHH_c);
-        _isCrouching  = true;
-        _crouchDeltaY = -_crouchShift;          // move centre down this frame
+        _isCrouching = true;
       } else if (!wantCrouch && _isCrouching) {
         // Ray upward from top of crouching capsule — check if normal height fits
         let canStand = true;
@@ -579,11 +583,13 @@ export function createPlayer(opts) {
         }
         if (canStand) {
           playerCollider.setHalfHeight(_normalHH_c);
-          _isCrouching  = false;
-          _crouchDeltaY = _crouchShift;         // move centre up this frame
+          _isCrouching = false;
+          _justStoodUp = true;  // enforce min rise next frame so capsule doesn't sink
         }
       }
     }
+    const justStoodUp = !!_justStoodUp;
+    if (_justStoodUp) _justStoodUp = false;
 
     // Smooth visual lerp — physics snaps instantly, model eases over ~0.15 s
     _crouchVisualT += ((_isCrouching ? 1 : 0) - _crouchVisualT) * Math.min(10 * dt, 1);
@@ -591,9 +597,6 @@ export function createPlayer(opts) {
     state.moveDir.set(0, 0, 0);
     let desiredDx = 0;
     let desiredDz = 0;
-    const onGroundForCrouch = hasSampleHeight
-      ? charPos.y <= (sampleHeight(charPos.x, charPos.z) + capHalfH + capR) + 0.6
-      : state.isGrounded;
     const ud = characterGroup.userData;
     if (
       keys.f &&
@@ -691,8 +694,9 @@ export function createPlayer(opts) {
       }
       desiredY = charPos.y + state.characterVelY * dt;
     }
-    // Apply one-frame Y shift from crouch start/end (moves centre down or up)
-    desiredY += _crouchDeltaY;
+    // Apply crouch Y offset every frame while crouched (terrain mode uses standing
+    // height for nextGroundY, so we must subtract _crouchShift to avoid jitter)
+    desiredY += _isCrouching ? -_crouchShift : 0;
 
     // Proactively detect kinematic platform via downward ray cast BEFORE computing
     // desired movement. MUST run every frame in parkour mode — when platform descends,
@@ -808,8 +812,8 @@ export function createPlayer(opts) {
     let nextPosY = cur.y + corrected.y;
     // When standing up, the KCC/snap-to-ground can reject upward movement, leaving
     // the expanded capsule partly in the ground. Enforce minimum rise so feet stay on surface.
-    if (_crouchDeltaY > 0) {
-      nextPosY = Math.max(nextPosY, cur.y + _crouchDeltaY);
+    if (justStoodUp) {
+      nextPosY = Math.max(nextPosY, cur.y + _crouchShift);
     }
     const nextPos = {
       x: cur.x + corrected.x,

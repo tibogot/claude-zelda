@@ -1792,6 +1792,7 @@
         );
         const enemiesHitThisAttack = new Set();
         let lastFrameWasAttacking = false;
+        const _swordTipVec = new THREE.Vector3();
 
         // ── TWEAKPANE CONTROLS ──
         const pane = new Tweakpane.Pane({ title: "Parkour", expanded: true });
@@ -2361,15 +2362,24 @@
           }
           // ──────────────────────────────────────────────────────────────────────
 
-          // ── ATTACK HIT DETECTION (use last frame's attack state so we don't miss the end frame) ──
+          // ── ATTACK HIT DETECTION (sword-based: check distance from sword tip to enemy) ──
           if (lastFrameWasAttacking && parkourParams.enemies.enabled) {
-            const attackRange = 5;
+            const swordGroup = player.characterGroup.userData.sword;
+            let swordTip;
+            if (swordGroup) {
+              _swordTipVec.set(0, 0, 0.7);
+              swordGroup.localToWorld(_swordTipVec);
+              swordTip = _swordTipVec;
+            } else {
+              swordTip = charPos;
+            }
+            const attackRange = 1.2;
             const fwdX = Math.sin(player.state.camYaw);
             const fwdZ = -Math.cos(player.state.camYaw);
             for (const enemy of enemies) {
               if (enemy.isDead() || enemiesHitThisAttack.has(enemy)) continue;
-              const dx = enemy.pos.x - charPos.x;
-              const dz = enemy.pos.z - charPos.z;
+              const dx = enemy.pos.x - swordTip.x;
+              const dz = enemy.pos.z - swordTip.z;
               const distSq = dx * dx + dz * dz;
               if (distSq > attackRange * attackRange) continue;
               const dist = Math.sqrt(distSq);

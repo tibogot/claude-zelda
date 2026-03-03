@@ -133,6 +133,7 @@ export function createGrassMaterial(
     uNearFadeRange,
     uGrassWidth,
     uGrassHeight,
+    uGrassBaseBend,
     uWindDirX,
     uWindDirZ,
     uWindWaveScale,
@@ -214,7 +215,7 @@ export function createGrassMaterial(
       remap(hv.z, 0, 1, 0.75, 1.5),
       mix(1, 0, lodFadeIn),
     );
-    const randomLean = remap(hv.w, 0, 1, 0.1, 0.3);
+    const randomLean = mul(remap(hv.w, 0, 1, 0.1, 0.3), uGrassBaseBend);
 
     const vertID = mod(vertIdxAttr, NVERTS);
     const zSide = negate(sub(mul(floor(div(vertIdxAttr, NVERTS)), 2), 1));

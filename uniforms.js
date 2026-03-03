@@ -26,6 +26,7 @@ export function createUniforms(PARAMS, TERRAIN_SIZE, NPC_COUNT) {
   );
   const uGrassWidth = uniform(PARAMS.grassWidth);
   const uGrassHeight = uniform(PARAMS.grassHeight);
+  const uGrassBaseBend = uniform(PARAMS.grassBaseBend);
   const uLodDist = uniform(PARAMS.lodDistance);
   const uMaxDist = uniform(PARAMS.maxDistance);
   const uLodBlendStart = uniform(PARAMS.lodBlendStart);
@@ -127,6 +128,7 @@ export function createUniforms(PARAMS, TERRAIN_SIZE, NPC_COUNT) {
     uNpcPos,
     uGrassWidth,
     uGrassHeight,
+    uGrassBaseBend,
     uLodDist,
     uMaxDist,
     uLodBlendStart,
@@ -248,6 +250,7 @@ export function createSyncUniforms(u, deps, lastState) {
   return function syncUniforms() {
     u.uGrassWidth.value = PARAMS.grassWidth;
     u.uGrassHeight.value = PARAMS.grassHeight;
+    u.uGrassBaseBend.value = PARAMS.grassBaseBend;
     u.uGradientCurve.value = PARAMS.gradientCurve;
     u.uLodDist.value = PARAMS.lodDistance;
     u.uMaxDist.value = PARAMS.maxDistance;

@@ -5,6 +5,7 @@
 export const PARAMS = {
   grassWidth: 0.08,
   grassHeight: 0.7,
+  grassBaseBend: 1.0,
   lodDistance: 28,
   maxDistance: 80,
   lodBlendStart: 0.35,

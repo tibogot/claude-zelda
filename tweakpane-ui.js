@@ -34,6 +34,12 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
     max: 4,
     step: 0.1,
   });
+  fShape.addBinding(PARAMS, "grassBaseBend", {
+    min: 0,
+    max: 2,
+    step: 0.1,
+    label: "base bend (0=straight, 1=default, 2=more curved)",
+  });
   fShape.addBinding(PARAMS, "gradientCurve", {
     min: 1,
     max: 8,

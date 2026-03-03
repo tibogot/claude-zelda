@@ -144,6 +144,8 @@ export function createEnemy(opts) {
   let dirChangeTimer = 0;
   let hitStunUntil = 0;
   let deathStarted = false;
+  let deathTime = 0;
+  const DEATH_FALL_DURATION = 1.5;
   let wasNearPlayer = false;
 
   const _toPlayer = new THREE.Vector3();
@@ -196,6 +198,35 @@ export function createEnemy(opts) {
       group.userData.modelBaseY = model.position.y;
       group.userData.model = model;
       group.add(model);
+
+      const rightHand = model.getObjectByName("DEF-handR") || null;
+      if (rightHand) {
+        const swordGroup = new THREE.Group();
+        const handleGeo = new THREE.CylinderGeometry(0.02, 0.025, 0.18, 8);
+        const bladeGeo = new THREE.BoxGeometry(0.015, 0.06, 0.95);
+        const handleMat = new THREE.MeshStandardNodeMaterial({
+          color: 0x2a1a18,
+          roughness: 0.8,
+          metalness: 0.1,
+        });
+        const bladeMat = new THREE.MeshStandardNodeMaterial({
+          color: 0x606870,
+          roughness: 0.4,
+          metalness: 0.7,
+        });
+        const handle = new THREE.Mesh(handleGeo, handleMat);
+        const blade = new THREE.Mesh(bladeGeo, bladeMat);
+        handle.castShadow = true;
+        blade.castShadow = true;
+        handle.position.set(0, 0, 0);
+        blade.position.set(0, 0, 0.565);
+        swordGroup.add(handle);
+        swordGroup.add(blade);
+        swordGroup.position.set(0.02, 0, 0.04);
+        swordGroup.rotation.set(-0.1, 0, 0.15);
+        rightHand.add(swordGroup);
+        group.userData.sword = swordGroup;
+      }
 
       if (gltf.animations && gltf.animations.length) {
         mixer = new THREE.AnimationMixer(model);
@@ -296,7 +327,7 @@ export function createEnemy(opts) {
   function update(dt) {
     const params = enemyParams ?? {};
     const enabled = !!params.enabled;
-    group.visible = enabled && !deathStarted;
+    group.visible = enabled;
     capsule.visible = enabled && !group.userData.model && !deathStarted;
 
     if (!enabled) return;
@@ -307,6 +338,10 @@ export function createEnemy(opts) {
 
     if (hp <= 0) {
       if (!deathStarted) playDeath();
+      deathTime += dt;
+      const fallProgress = Math.min(1, deathTime / DEATH_FALL_DURATION);
+      group.rotation.x = -fallProgress * (Math.PI / 2);
+      pos.y = FLOOR_Y + heightOffset - fallProgress * (heightOffset - 0.25);
       group.position.copy(pos);
       capsule.position.copy(pos);
       return;
