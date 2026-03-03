@@ -1268,7 +1268,7 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
   fLod
     .addBinding(PARAMS, "octahedralForestLodDist", {
       min: 10,
-      max: 120,
+      max: 400,
       step: 1,
       label: "LOD0→LOD1 dist",
     })
@@ -1279,7 +1279,7 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
   fLod
     .addBinding(PARAMS, "octahedralForestLod2Dist", {
       min: 80,
-      max: 400,
+      max: 1000,
       step: 5,
       label: "LOD1→LOD2 dist",
     })

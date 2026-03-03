@@ -194,25 +194,61 @@ export function createTerrain(scene, PARAMS, options) {
   trailTex.magFilter = THREE.LinearFilter;
   trailTex.minFilter = THREE.LinearFilter;
 
+  let lastTrailCenterX = null;
+  let lastTrailCenterZ = null;
+  const trailTemp = new Float32Array(TRAIL_RES * TRAIL_RES * 4);
+
   function updateTrail(dt, px, pz) {
     const grow = PARAMS.trailGrowRate,
       crush = PARAMS.trailCrushSpeed;
     const r2 = PARAMS.trailRadius * PARAMS.trailRadius;
-    for (let y = 0; y < TRAIL_RES; y++)
+
+    if (lastTrailCenterX !== null && lastTrailCenterZ !== null) {
+      const shiftX = Math.round(((px - lastTrailCenterX) / TRAIL_SIZE) * TRAIL_RES);
+      const shiftZ = Math.round(((pz - lastTrailCenterZ) / TRAIL_SIZE) * TRAIL_RES);
+      if (shiftX !== 0 || shiftZ !== 0) {
+        trailTemp.set(trailData);
+        for (let y = 0; y < TRAIL_RES; y++) {
+          for (let x = 0; x < TRAIL_RES; x++) {
+            const srcX = x - shiftX;
+            const srcY = y - shiftZ;
+            const idx = (y * TRAIL_RES + x) * 4;
+            if (srcX >= 0 && srcX < TRAIL_RES && srcY >= 0 && srcY < TRAIL_RES) {
+              const srcIdx = (srcY * TRAIL_RES + srcX) * 4;
+              trailData[idx] = trailTemp[srcIdx];
+              trailData[idx + 1] = trailTemp[srcIdx + 1];
+              trailData[idx + 2] = trailTemp[srcIdx + 2];
+              trailData[idx + 3] = trailTemp[srcIdx + 3];
+            } else {
+              trailData[idx] = 1;
+              trailData[idx + 1] = 0;
+              trailData[idx + 2] = 0;
+              trailData[idx + 3] = 1;
+            }
+          }
+        }
+      }
+    }
+    lastTrailCenterX = px;
+    lastTrailCenterZ = pz;
+
+    for (let y = 0; y < TRAIL_RES; y++) {
       for (let x = 0; x < TRAIL_RES; x++) {
         const idx = (y * TRAIL_RES + x) * 4;
         let scale = trailData[idx];
-        const wx = (x / TRAIL_RES - 0.5) * TRAIL_SIZE,
-          wz = (y / TRAIL_RES - 0.5) * TRAIL_SIZE;
+        const wx = (x / TRAIL_RES - 0.5) * TRAIL_SIZE;
+        const wz = (y / TRAIL_RES - 0.5) * TRAIL_SIZE;
         const d2 = wx * wx + wz * wz;
         if (d2 < r2 && PARAMS.trailEnabled) {
           const contact = 1.0 - d2 / r2;
-          scale += (0.15 - scale) * crush * contact;
+          const contactSoft = contact * contact;
+          scale += (0.55 - scale) * crush * contactSoft;
         } else {
           scale += (1.0 - scale) * grow;
         }
-        trailData[idx] = Math.max(0.1, Math.min(1.0, scale));
+        trailData[idx] = Math.max(0.45, Math.min(1.0, scale));
       }
+    }
     trailTex.needsUpdate = true;
   }
 

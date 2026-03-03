@@ -199,8 +199,17 @@ export function createGrassMaterial(
     const terrainUV = add(div(bladeWorld.xz, uTerrainSize), vec2(0.5));
     const terrainH = texture(heightTex, terrainUV).r;
 
-    // Trail disabled for debugging (repulse-only). Set to 1 so no height shrink or tint.
-    const trailScale = float(1);
+    const trailUV = add(
+      div(sub(bladeWorld.xz, uTrailCenter), uTrailSize),
+      vec2(0.5),
+    );
+    const edgeDist = max(
+      abs(sub(trailUV.x, 0.5)),
+      abs(sub(trailUV.y, 0.5)),
+    );
+    const trailEdgeFade = smoothstep(0.42, 0.5, edgeDist);
+    const trailRaw = texture(trailTex, clamp(trailUV, 0.01, 0.99)).r;
+    const trailScale = mix(clamp(trailRaw, 0.45, 1.0), 1.0, trailEdgeFade);
 
     const hv = hash42(bladeWorld.xz),
       hv2 = hash22(bladeWorld.xz);
@@ -526,8 +535,8 @@ export function createGrassMaterial(
     grassCol = mix(grassCol, uSeasonalDryColor, seasonFactor);
     grassCol = mix(
       grassCol,
-      mul(grassCol, vec3(1.1, 1.05, 0.85)),
-      mul(sub(1, trailScale), 0.4),
+      mul(grassCol, vec3(1.05, 1.02, 0.92)),
+      mul(sub(1, trailScale), 0.2),
     );
     const aoBase = max(sub(1.0, mul(uAoIntensity, 0.95)), 0.05);
     const ao = mix(aoBase, 1.0, smoothstep(0.0, uAoBaseRange, heightPct));

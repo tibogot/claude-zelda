@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cloud Prototype – Billboard Sprites</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { overflow: hidden; background: #87ceeb; }
+      canvas { display: block; width: 100vw; height: 100vh; }
+      #info {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        z-index: 10;
+        font: 12px/1.5 "SF Mono", "Fira Code", monospace;
+        color: #1a3a5c;
+        background: rgba(255, 255, 255, 0.6);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: none;
+        backdrop-filter: blur(4px);
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">Cloud Prototype — Billboard Sprites &bull; Orbit to look around &bull; Scroll to zoom</div>
+
+    <script type="module">
+      import * as THREE from 'three';
+      import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+      // ── Renderer ──────────────────────────────────────────────────────────────
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.setPixelRatio(devicePixelRatio);
+      renderer.setSize(innerWidth, innerHeight);
+      document.body.appendChild(renderer.domElement);
+      await renderer.init();
+
+      // ── Scene / Camera ────────────────────────────────────────────────────────
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x7ec8e3);
+      scene.fog = new THREE.Fog(0xc0e8f8, 250, 700);
+
+      const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 2000);
+      camera.position.set(0, 40, 160);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 50, 0);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.06;
+      controls.minDistance = 20;
+      controls.maxDistance = 600;
+
+      // ── Lighting ──────────────────────────────────────────────────────────────
+      scene.add(new THREE.AmbientLight(0xd0eaff, 1.4));
+      const sun = new THREE.DirectionalLight(0xfff4d0, 1.8);
+      sun.position.set(120, 200, 80);
+      scene.add(sun);
+
+      // ── Ground (context only) ─────────────────────────────────────────────────
+      const ground = new THREE.Mesh(
+        new THREE.PlaneGeometry(1000, 1000, 8, 8),
+        new THREE.MeshLambertMaterial({ color: 0x4a7c3f })
+      );
+      ground.rotation.x = -Math.PI / 2;
+      scene.add(ground);
+
+      // a few simple hills for depth
+      const hillMat = new THREE.MeshLambertMaterial({ color: 0x3d6b33 });
+      [
+        [80, 0, -80, 22],
+        [-100, 0, -60, 18],
+        [0, 0, -120, 28],
+        [-60, 0, -140, 15],
+        [140, 0, -100, 20],
+      ].forEach(([x, y, z, r]) => {
+        const hill = new THREE.Mesh(new THREE.SphereGeometry(r, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2), hillMat);
+        hill.position.set(x, 0, z);
+        scene.add(hill);
+      });
+
+      // ── Procedural cloud texture ───────────────────────────────────────────────
+      function makeCloudTexture() {
+        const W = 512, H = 256;
+        const canvas = document.createElement('canvas');
+        canvas.width = W;
+        canvas.height = H;
+        const ctx = canvas.getContext('2d');
+
+        // several overlapping puffs
+        const puffCount = 10 + Math.floor(Math.random() * 10);
+        const puffs = Array.from({ length: puffCount }, () => ({
+          x: W * 0.1 + Math.random() * W * 0.8,
+          y: H * 0.25 + Math.random() * H * 0.5,
+          rx: 35 + Math.random() * 70,
+          ry: 25 + Math.random() * 40,
+        }));
+        // big blobs first
+        puffs.sort((a, b) => b.rx - a.rx);
+
+        for (const p of puffs) {
+          const r = Math.max(p.rx, p.ry);
+          const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
+          grad.addColorStop(0,    'rgba(255,255,255,0.95)');
+          grad.addColorStop(0.35, 'rgba(245,248,255,0.75)');
+          grad.addColorStop(0.7,  'rgba(230,238,255,0.25)');
+          grad.addColorStop(1,    'rgba(210,228,255,0)');
+          ctx.fillStyle = grad;
+          ctx.beginPath();
+          ctx.ellipse(p.x, p.y, p.rx, p.ry, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // subtle bottom shadow
+        const shadow = ctx.createLinearGradient(0, H * 0.55, 0, H);
+        shadow.addColorStop(0, 'rgba(160,185,220,0)');
+        shadow.addColorStop(1, 'rgba(140,168,210,0.18)');
+        ctx.fillStyle = shadow;
+        ctx.fillRect(0, H * 0.55, W, H * 0.45);
+
+        const tex = new THREE.CanvasTexture(canvas);
+        return tex;
+      }
+
+      // ── Spawn clouds ───────────────────────────────────────────────────────────
+      const CLOUD_COUNT  = 30;
+      const SPREAD_X     = 500;
+      const SPREAD_Z     = 500;
+      const HEIGHT_MIN   = 60;
+      const HEIGHT_MAX   = 130;
+      const WIND_SPEED   = 3.0; // units / sec
+
+      // pool of textures so not every cloud is unique (saves memory)
+      const TEX_POOL_SIZE = 8;
+      const texPool = Array.from({ length: TEX_POOL_SIZE }, makeCloudTexture);
+
+      const clouds = [];
+      for (let i = 0; i < CLOUD_COUNT; i++) {
+        const tex = texPool[i % TEX_POOL_SIZE];
+        const mat = new THREE.SpriteMaterial({
+          map: tex,
+          transparent: true,
+          depthWrite: false,
+          opacity: 0.80 + Math.random() * 0.18,
+          fog: true,
+        });
+        const sprite = new THREE.Sprite(mat);
+        const scaleX = 70 + Math.random() * 90;
+        sprite.scale.set(scaleX, scaleX * 0.45, 1);
+        sprite.position.set(
+          (Math.random() - 0.5) * SPREAD_X,
+          HEIGHT_MIN + Math.random() * (HEIGHT_MAX - HEIGHT_MIN),
+          (Math.random() - 0.5) * SPREAD_Z
+        );
+        sprite.userData.driftFactor = 0.5 + Math.random() * 1.0;
+        scene.add(sprite);
+        clouds.push(sprite);
+      }
+
+      // ── Resize ────────────────────────────────────────────────────────────────
+      window.addEventListener('resize', () => {
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+      });
+
+      // ── Render loop ───────────────────────────────────────────────────────────
+      const clock = new THREE.Clock();
+      renderer.setAnimationLoop(async () => {
+        const dt = clock.getDelta();
+        controls.update();
+
+        for (const c of clouds) {
+          c.position.x += WIND_SPEED * c.userData.driftFactor * dt;
+          // wrap to other side
+          if (c.position.x > SPREAD_X / 2) {
+            c.position.x = -SPREAD_X / 2;
+          }
+        }
+
+        await renderer.renderAsync(scene, camera);
+      });
+    </script>
+  </body>
+</html>
