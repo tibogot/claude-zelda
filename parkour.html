@@ -366,6 +366,129 @@
 
         scene.add(towerGroup);
 
+        // ── PORTAL ──────────────────────────────────────────────────────────────
+        // Glowing door at the south face of the tower base.
+        // Walking through it teleports the player to the top of the tower.
+        const PORTAL_X  = TOWER_X;
+        const PORTAL_Z  = TOWER_Z - TOWER_BASE;   // south face of base = Z 16
+        const PORTAL_W  = 3.0;
+        const PORTAL_H  = 4.2;
+        const PORTAL_HW = PORTAL_W / 2;
+        const PORTAL_HH = PORTAL_H / 2;
+        // Destination: on top of the tower cap + capsule clearance
+        // (capHalfH/capR not yet defined here — compute from PARAMS directly)
+        const _pCapR   = PARAMS.capsuleRadius ?? 0.35;
+        const _pCapHH  = Math.max(0.1, (PARAMS.characterHeight - 2 * _pCapR) / 2);
+        const PORTAL_DEST_Y = FLOOR_Y + TOWER_BASE + TOWER_HEIGHT + TOWER_BASE * 0.8
+                              + _pCapHH + _pCapR + 1.0;
+
+        const portalFrameMat = new THREE.MeshStandardMaterial({
+          color: 0x1a1030,
+          roughness: 0.4,
+          metalness: 0.7,
+          emissive: 0x5500cc,
+          emissiveIntensity: 0.4,
+        });
+        const portalSurfaceMat = new THREE.MeshStandardMaterial({
+          emissive: 0x00eeff,
+          emissiveIntensity: 1.5,
+          transparent: true,
+          opacity: 0.8,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
+
+        const portalGroup = new THREE.Group();
+        portalGroup.position.set(PORTAL_X, FLOOR_Y, PORTAL_Z);
+
+        const _pPostL = new THREE.Mesh(
+          new THREE.BoxGeometry(0.45, PORTAL_H + 0.5, 0.45), portalFrameMat);
+        _pPostL.position.set(-PORTAL_HW - 0.22, PORTAL_HH + 0.25, 0);
+        _pPostL.castShadow = true;
+        portalGroup.add(_pPostL);
+
+        const _pPostR = new THREE.Mesh(
+          new THREE.BoxGeometry(0.45, PORTAL_H + 0.5, 0.45), portalFrameMat);
+        _pPostR.position.set(PORTAL_HW + 0.22, PORTAL_HH + 0.25, 0);
+        _pPostR.castShadow = true;
+        portalGroup.add(_pPostR);
+
+        const _pLintel = new THREE.Mesh(
+          new THREE.BoxGeometry(PORTAL_W + 0.9, 0.45, 0.45), portalFrameMat);
+        _pLintel.position.set(0, PORTAL_H + 0.45, 0);
+        _pLintel.castShadow = true;
+        portalGroup.add(_pLintel);
+
+        // Inner glowing energy surface
+        const _pSurface = new THREE.Mesh(
+          new THREE.PlaneGeometry(PORTAL_W, PORTAL_H), portalSurfaceMat);
+        _pSurface.position.set(0, PORTAL_HH, 0.08);
+        portalGroup.add(_pSurface);
+
+        scene.add(portalGroup);
+        let portalCooldown = 0;
+
+        // ── PORTAL 2 (return) ────────────────────────────────────────────────────
+        // On top of the tower cap, north side. Teleports back to ground level.
+        const PORTAL2_BASE_Y = FLOOR_Y + TOWER_BASE + TOWER_HEIGHT + TOWER_BASE * 0.8;
+        const PORTAL2_X  = TOWER_X;
+        const PORTAL2_Z  = TOWER_Z + TOWER_BASE * 0.55;  // near north edge of cap
+        const PORTAL2_W  = PORTAL_W;
+        const PORTAL2_H  = PORTAL_H;
+        const PORTAL2_HW = PORTAL2_W / 2;
+        const PORTAL2_HH = PORTAL2_H / 2;
+        // Return destination: ground level, in front of the first portal
+        const PORTAL2_DEST_X = PORTAL_X;
+        const PORTAL2_DEST_Z = PORTAL_Z - 6;
+        const PORTAL2_DEST_Y = FLOOR_Y + _pCapHH + _pCapR + 1.0;
+
+        const portal2FrameMat = new THREE.MeshStandardMaterial({
+          color: 0x301000,
+          roughness: 0.4,
+          metalness: 0.7,
+          emissive: 0xcc3300,
+          emissiveIntensity: 0.4,
+        });
+        const portal2SurfaceMat = new THREE.MeshStandardMaterial({
+          emissive: 0xff7700,
+          emissiveIntensity: 1.5,
+          transparent: true,
+          opacity: 0.8,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
+
+        const portal2Group = new THREE.Group();
+        portal2Group.position.set(PORTAL2_X, PORTAL2_BASE_Y, PORTAL2_Z);
+
+        const _p2PostL = new THREE.Mesh(
+          new THREE.BoxGeometry(0.45, PORTAL2_H + 0.5, 0.45), portal2FrameMat);
+        _p2PostL.position.set(-PORTAL2_HW - 0.22, PORTAL2_HH + 0.25, 0);
+        _p2PostL.castShadow = true;
+        portal2Group.add(_p2PostL);
+
+        const _p2PostR = new THREE.Mesh(
+          new THREE.BoxGeometry(0.45, PORTAL2_H + 0.5, 0.45), portal2FrameMat);
+        _p2PostR.position.set(PORTAL2_HW + 0.22, PORTAL2_HH + 0.25, 0);
+        _p2PostR.castShadow = true;
+        portal2Group.add(_p2PostR);
+
+        const _p2Lintel = new THREE.Mesh(
+          new THREE.BoxGeometry(PORTAL2_W + 0.9, 0.45, 0.45), portal2FrameMat);
+        _p2Lintel.position.set(0, PORTAL2_H + 0.45, 0);
+        _p2Lintel.castShadow = true;
+        portal2Group.add(_p2Lintel);
+
+        const _p2Surface = new THREE.Mesh(
+          new THREE.PlaneGeometry(PORTAL2_W, PORTAL2_H), portal2SurfaceMat);
+        _p2Surface.position.set(0, PORTAL2_HH, 0.08);
+        portal2Group.add(_p2Surface);
+
+        scene.add(portal2Group);
+        let portal2Cooldown = 0;
+
         // ── PARKOUR PLATFORMS (GLB + per-object tile material) ──
         const parkourGroup = new THREE.Group();
         parkourGroup.position.y = FLOOR_Y;
@@ -1439,6 +1562,7 @@
           physicsWorld,
           RAPIER,
           // no sampleHeight → parkour mode: Rapier trimesh colliders + computedGrounded()
+          footstepSoundsPath: 'sounds',
           TERRAIN_SIZE: PARKOUR_SIZE,
           debugOut: platformDebugOut,
         });
@@ -1965,6 +2089,44 @@
 
           player.update(dt);
           npc.update(dt);
+
+          // ── PORTAL: glow pulse + teleport trigger ──────────────────────────
+          portalCooldown = Math.max(0, portalCooldown - dt);
+          portalSurfaceMat.emissiveIntensity = 1.2 + 0.6 * Math.sin(elapsed * 2.5);
+          portalSurfaceMat.opacity           = 0.65 + 0.2 * Math.sin(elapsed * 1.7);
+          if (portalCooldown <= 0) {
+            const _pdx = charPos.x - PORTAL_X;
+            const _pdz = charPos.z - PORTAL_Z;
+            const _pdy = charPos.y - (FLOOR_Y + PORTAL_HH);
+            if (Math.abs(_pdx) < PORTAL_HW + 0.4 &&
+                Math.abs(_pdz) < 1.0 &&
+                Math.abs(_pdy) < PORTAL_HH + 0.3) {
+              playerBody.setTranslation({ x: TOWER_X, y: PORTAL_DEST_Y, z: TOWER_Z }, true);
+              charPos.set(TOWER_X, PORTAL_DEST_Y, TOWER_Z);
+              player.state.characterVelY = 0;
+              portalCooldown = 2.5;
+              portal2Cooldown = 2.5; // also gate the return portal so landing doesn't re-trigger
+            }
+          }
+
+          // ── PORTAL 2: glow pulse + return-to-ground trigger ────────────────
+          portal2Cooldown = Math.max(0, portal2Cooldown - dt);
+          portal2SurfaceMat.emissiveIntensity = 1.2 + 0.6 * Math.sin(elapsed * 2.5 + 1.2);
+          portal2SurfaceMat.opacity           = 0.65 + 0.2 * Math.sin(elapsed * 1.7 + 0.8);
+          if (portal2Cooldown <= 0) {
+            const _p2dx = charPos.x - PORTAL2_X;
+            const _p2dz = charPos.z - PORTAL2_Z;
+            const _p2dy = charPos.y - (PORTAL2_BASE_Y + PORTAL2_HH);
+            if (Math.abs(_p2dx) < PORTAL2_HW + 0.4 &&
+                Math.abs(_p2dz) < 1.0 &&
+                Math.abs(_p2dy) < PORTAL2_HH + 0.3) {
+              playerBody.setTranslation({ x: PORTAL2_DEST_X, y: PORTAL2_DEST_Y, z: PORTAL2_DEST_Z }, true);
+              charPos.set(PORTAL2_DEST_X, PORTAL2_DEST_Y, PORTAL2_DEST_Z);
+              player.state.characterVelY = 0;
+              portal2Cooldown = 2.5;
+              portalCooldown = 2.5; // prevent walking straight back through portal 1
+            }
+          }
 
           const pdDiv = document.getElementById("platform-debug");
           if (parkourParams.debug.platformDebug) {

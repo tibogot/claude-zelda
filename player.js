@@ -7,6 +7,7 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
 import { resolveKinematicOverlap } from "./physics.js";
+import { createFootstepAudio } from "./footsteps.js";
 
 const CHAR_GLB = "models/AnimationLibrary_Godot_Standard-transformed.glb";
 const DRACO_URL =
@@ -45,11 +46,18 @@ export function createPlayer(opts) {
     sampleHeight = null,
     capR = 0,
     capHalfH = 0,
+    footstepSoundsPath = null,
     TERRAIN_SIZE,
     debugOut = null,
   } = opts;
   // terrain mode: Y driven by heightmap sampling; parkour mode: trimesh colliders + computedGrounded()
   const hasSampleHeight = typeof sampleHeight === "function";
+
+  // Footstep audio — loads async in background, starts working once ready
+  let footstepAudio = null;
+  if (footstepSoundsPath) {
+    createFootstepAudio(footstepSoundsPath).then(fa => { footstepAudio = fa; });
+  }
 
   const capsuleGeo = new THREE.CapsuleGeometry(0.4, 1.2, 8, 16);
   const capsuleMat = new THREE.MeshStandardNodeMaterial({
@@ -108,6 +116,19 @@ export function createPlayer(opts) {
         model.getObjectByName(HAND_BONE_R) || null;
       characterGroup.userData.leftHandBone =
         model.getObjectByName(HAND_BONE_L) || null;
+
+      // Find foot bones for footstep sync (DEF-footL / DEF-footR naming)
+      let _fbl = null, _fbr = null;
+      model.traverse(o => {
+        const n = o.name;
+        if (!/foot/i.test(n)) return;
+        if (n.endsWith('L') || n.endsWith('l') || n.endsWith('Left')) _fbl = o;
+        else if (n.endsWith('R') || n.endsWith('r') || n.endsWith('Right')) _fbr = o;
+      });
+      characterGroup.userData.footBoneL = _fbl;
+      characterGroup.userData.footBoneR = _fbr;
+      if (_fbl) console.log('[footsteps] L bone:', _fbl.name);
+      if (_fbr) console.log('[footsteps] R bone:', _fbr.name);
 
       try {
         if (gltf.animations && gltf.animations.length) {
@@ -322,6 +343,14 @@ export function createPlayer(opts) {
   /** @type {{ [handle: number]: { x: number, y: number, z: number } }} */
   const _lastPlatformPos = {};  // platform handle -> last position for velocity-from-delta
   let isPointerLocked = false;
+
+  // Foot bone Y tracking for footstep sync
+  const _footPos = new THREE.Vector3();
+  let _footRelYL = null, _footRelYR = null;
+  let _footVelL = 0, _footVelR = 0;
+  let _footCoolL = 0, _footCoolR = 0;
+  let _footCoolGlobal = 0; // prevents L+R from double-firing when sprint plants are close together
+  let _wasInAir = false;  // landing detection
 
   window.addEventListener("keydown", (e) => {
     const k = e.key.toLowerCase();
@@ -904,6 +933,58 @@ export function createPlayer(opts) {
       }
     }
     if (characterMixer) characterMixer.update(dt);
+
+    // ── FOOTSTEP SYNC ─────────────────────────────────────────────────────
+    // Track each foot bone's Y relative to character centre.
+    // When velocity crosses from negative → zero/positive the foot just planted.
+    if (footstepAudio && !inAir && moving) {
+      const fud = characterGroup.userData;
+      _footCoolL = Math.max(0, _footCoolL - dt);
+      _footCoolR = Math.max(0, _footCoolR - dt);
+      _footCoolGlobal = Math.max(0, _footCoolGlobal - dt);
+      const stepVol = _isCrouching ? 0.22 : 0.38;
+      const perFootCool = running ? 0.22 : 0.18;
+
+      if (fud.footBoneL) {
+        fud.footBoneL.getWorldPosition(_footPos);
+        const relY = _footPos.y - charPos.y;
+        if (_footRelYL !== null) {
+          const vel = relY - _footRelYL;
+          if (_footCoolL <= 0 && _footCoolGlobal <= 0 && _footVelL < -0.001 && vel >= -0.001) {
+            footstepAudio.play(running, stepVol);
+            _footCoolL = perFootCool;
+            _footCoolGlobal = 0.1;
+          }
+          _footVelL = vel;
+        }
+        _footRelYL = relY;
+      }
+
+      if (fud.footBoneR) {
+        fud.footBoneR.getWorldPosition(_footPos);
+        const relY = _footPos.y - charPos.y;
+        if (_footRelYR !== null) {
+          const vel = relY - _footRelYR;
+          if (_footCoolR <= 0 && _footCoolGlobal <= 0 && _footVelR < -0.001 && vel >= -0.001) {
+            footstepAudio.play(running, stepVol);
+            _footCoolR = perFootCool;
+            _footCoolGlobal = 0.1;
+          }
+          _footVelR = vel;
+        }
+        _footRelYR = relY;
+      }
+    } else {
+      // Reset on stop/air so no false trigger when movement resumes
+      _footRelYL = null;
+      _footRelYR = null;
+    }
+
+    // Landing sound — fires once on the frame inAir flips false
+    if (_wasInAir && !inAir && footstepAudio) {
+      footstepAudio.playLanding();
+    }
+    _wasInAir = inAir;
     if (
       ud &&
       ud.isAttacking &&

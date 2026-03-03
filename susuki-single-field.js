@@ -1,7 +1,7 @@
 /**
  * Susuki single field — one dense, fixed field of susuki grass.
  * Unlike susuki-field.js (camera-following grid everywhere), this places a single
- * dense field at a fixed world position. Uses noise for organic, natural-looking edges.
+ * dense square field at a fixed world position. Geometry LOD for perf when far.
  * Does not modify susuki-field.js.
  */
 import * as THREE from "three";
@@ -14,132 +14,134 @@ import {
 } from "./susuki.js";
 import { buildSusukiCtx } from "./susuki-field.js";
 
-// CPU noise for organic field shape (no external deps)
-function hash2(x, y) {
-  const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
-  return n - Math.floor(n);
-}
-function noise2(x, y) {
-  const ix = Math.floor(x), iy = Math.floor(y);
-  const fx = x - ix, fy = y - iy;
-  const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
-  const a = hash2(ix, iy), b = hash2(ix + 1, iy);
-  const c = hash2(ix, iy + 1), d = hash2(ix + 1, iy + 1);
-  return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
-}
-function fbm(x, y, octaves = 4) {
-  let v = 0, amp = 1, freq = 1, total = 0;
-  for (let i = 0; i < octaves; i++) {
-    v += noise2(x * freq, y * freq) * amp;
-    total += amp;
-    amp *= 0.5;
-    freq *= 2;
-  }
-  return v / total;
-}
 function smoothstep(a, b, t) {
-  const x = Math.max(0, Math.min(1, (t - a) / (b - a)));
+  const x = Math.max(0, Math.min(1, (b - a) !== 0 ? (t - a) / (b - a) : 0));
   return x * x * (3 - 2 * x);
 }
 
-/** Returns 0–1: blob-shaped field mask. Domain warping creates amoeba-like organic edges. */
-function fieldMask(px, pz, centerX, centerZ, baseRadius, opts = {}) {
-  const {
-    noiseScale = 0.04,
-    warpScale = 0.035,
-    warpAmt = 22,
-    noiseAmount = 0.55,
-    edgeSoftness = 10,
-  } = opts;
-
-  // Domain warp: distort coords before sampling — creates blob-like twists, not circular
-  const wx = px + fbm(px * warpScale, pz * warpScale) * warpAmt;
-  const wz = pz + fbm(px * warpScale + 100, pz * warpScale + 50) * warpAmt;
-
-  const dx = wx - centerX, dz = wz - centerZ;
-  const dist = Math.sqrt(dx * dx + dz * dz);
-  const n = fbm(wx * noiseScale, wz * noiseScale);
-  const radiusVariation = 1 + (n - 0.5) * 2 * noiseAmount;
-  const effectiveRadius = baseRadius * radiusVariation;
-  return 1 - smoothstep(effectiveRadius - edgeSoftness, effectiveRadius, dist);
+/** Returns 0–1: simple square field with soft edges. No holes. */
+function fieldMask(px, pz, centerX, centerZ, halfWidth, halfDepth, edgeSoft = 8) {
+  const dx = Math.abs(px - centerX);
+  const dz = Math.abs(pz - centerZ);
+  const fx = 1 - smoothstep(halfWidth - edgeSoft, halfWidth, dx);
+  const fz = 1 - smoothstep(halfDepth - edgeSoft, halfDepth, dz);
+  return fx * fz;
 }
 
-// Dense single field: more plants per patch, smaller patch size
+// High LOD: dense, detailed
 export const SUSUKI_SINGLE_PATCH_SIZE = 12;
 export const SUSUKI_SINGLE_PATCH_SPACING = 12;
-export const SUSUKI_SINGLE_PLANTS_PER_PATCH = 24 * 24; // 576 plants per patch (vs 144 in main field)
-export const SUSUKI_SINGLE_STEM_SEGMENTS = 6;
-export const SUSUKI_SINGLE_BAND_SEGMENTS = 8;
+export const SUSUKI_SINGLE_PLANTS_HIGH = 24 * 24;
 
-const STEM_VERTS = (SUSUKI_SINGLE_STEM_SEGMENTS + 1) * 2 * 2;
-const BAND_VERTS = (SUSUKI_SINGLE_BAND_SEGMENTS + 1) * 2 * 2;
+const STEM_SEGMENTS_HIGH = 6;
+const BAND_SEGMENTS_HIGH = 8;
+const STEM_SEGMENTS_LOW = 3;
+const BAND_SEGMENTS_LOW = 4;
+const PLANTS_LOW = 12 * 12;
+
+const STEM_VERTS_HIGH = (STEM_SEGMENTS_HIGH + 1) * 2 * 2;
+const BAND_VERTS_HIGH = (BAND_SEGMENTS_HIGH + 1) * 2 * 2;
+const STEM_VERTS_LOW = (STEM_SEGMENTS_LOW + 1) * 2 * 2;
+const BAND_VERTS_LOW = (BAND_SEGMENTS_LOW + 1) * 2 * 2;
 
 /**
- * Create geometries and materials for the single dense susuki field.
+ * Create all geometries and materials for the single dense susuki field (high + low LOD).
  * @param {object} susukiCtx - from buildSusukiCtx()
- * @returns {object} { stemGeo, bandGeo, stemMat, bandMat }
+ * @returns {object} { stemGeoHigh, bandGeoHigh, stemMatHigh, bandMatHigh, stemGeoLow, bandGeoLow, stemMatLow, bandMatLow }
  */
 export function createSusukiSingleFieldResources(susukiCtx) {
-  const stemGeo = createSusukiStemGeometry(
-    SUSUKI_SINGLE_STEM_SEGMENTS,
-    SUSUKI_SINGLE_PLANTS_PER_PATCH,
+  const stemGeoHigh = createSusukiStemGeometry(
+    STEM_SEGMENTS_HIGH,
+    SUSUKI_SINGLE_PLANTS_HIGH,
     SUSUKI_SINGLE_PATCH_SIZE,
     setSeed,
     randRange,
   );
-  const bandGeo = createSusukiBandGeometry(
-    SUSUKI_SINGLE_BAND_SEGMENTS,
-    SUSUKI_SINGLE_PLANTS_PER_PATCH,
+  const bandGeoHigh = createSusukiBandGeometry(
+    BAND_SEGMENTS_HIGH,
+    SUSUKI_SINGLE_PLANTS_HIGH,
     SUSUKI_SINGLE_PATCH_SIZE,
     setSeed,
     randRange,
   );
-  const stemMat = createSusukiStemMaterial(
-    SUSUKI_SINGLE_STEM_SEGMENTS,
-    STEM_VERTS,
+  const stemMatHigh = createSusukiStemMaterial(
+    STEM_SEGMENTS_HIGH,
+    STEM_VERTS_HIGH,
     susukiCtx,
   );
-  const bandMat = createSusukiBandMaterial(
-    SUSUKI_SINGLE_BAND_SEGMENTS,
-    BAND_VERTS,
+  const bandMatHigh = createSusukiBandMaterial(
+    BAND_SEGMENTS_HIGH,
+    BAND_VERTS_HIGH,
     susukiCtx,
   );
-  return { stemGeo, bandGeo, stemMat, bandMat };
+
+  const stemGeoLow = createSusukiStemGeometry(
+    STEM_SEGMENTS_LOW,
+    PLANTS_LOW,
+    SUSUKI_SINGLE_PATCH_SIZE,
+    setSeed,
+    randRange,
+  );
+  const bandGeoLow = createSusukiBandGeometry(
+    BAND_SEGMENTS_LOW,
+    PLANTS_LOW,
+    SUSUKI_SINGLE_PATCH_SIZE,
+    setSeed,
+    randRange,
+  );
+  const stemMatLow = createSusukiStemMaterial(
+    STEM_SEGMENTS_LOW,
+    STEM_VERTS_LOW,
+    susukiCtx,
+  );
+  const bandMatLow = createSusukiBandMaterial(
+    BAND_SEGMENTS_LOW,
+    BAND_VERTS_LOW,
+    susukiCtx,
+  );
+
+  return {
+    stemGeoHigh,
+    bandGeoHigh,
+    stemMatHigh,
+    bandMatHigh,
+    stemGeoLow,
+    bandGeoLow,
+    stemMatLow,
+    bandMatLow,
+  };
 }
 
 /**
- * Setup a single fixed dense susuki field at a world position.
- * Uses noise to create organic, natural-looking edges (not a square).
- * Patches are placed only where fieldMask > threshold.
+ * Setup a single fixed dense square susuki field at a world position.
+ * Geometry LOD: swaps to low-poly when far — no holes, full coverage.
  *
  * @param {THREE.Group} susukiGroup - parent for all susuki meshes
  * @param {object} resources - from createSusukiSingleFieldResources
- * @param {object} options - { centerX, centerZ, gridSize, patchSpacing, baseRadius, noiseScale, warpScale, warpAmt, noiseAmount, threshold, maxViewDist }
+ * @param {object} options - { centerX, centerZ, halfWidth, halfDepth, patchSpacing, threshold, lodDist }
  * @returns {{ update(charPos: THREE.Vector3, frustum: THREE.Frustum): { patchCount: number } }}
  */
 export function setupSusukiSingleField(susukiGroup, resources, options) {
   const {
-    stemGeo,
-    bandGeo,
-    stemMat,
-    bandMat,
+    stemGeoHigh,
+    bandGeoHigh,
+    stemMatHigh,
+    bandMatHigh,
+    stemGeoLow,
+    bandGeoLow,
+    stemMatLow,
+    bandMatLow,
   } = resources;
 
   const centerX = options.centerX ?? 50;
   const centerZ = options.centerZ ?? 30;
-  const gridSize = options.gridSize ?? 12;
+  const halfWidth = options.halfWidth ?? 60;
+  const halfDepth = options.halfDepth ?? 60;
   const patchSpacing = options.patchSpacing ?? SUSUKI_SINGLE_PATCH_SPACING;
-  const baseRadius = options.baseRadius ?? 52;
-  const threshold = options.threshold ?? 0.38;
-  const maxViewDist = options.maxViewDist ?? 85;
-
-  const maskOpts = {
-    noiseScale: options.noiseScale ?? 0.04,
-    warpScale: options.warpScale ?? 0.035,
-    warpAmt: options.warpAmt ?? 22,
-    noiseAmount: options.noiseAmount ?? 0.55,
-    edgeSoftness: options.edgeSoftness ?? 10,
-  };
+  const threshold = options.threshold ?? 0.2;
+  const lodDist = options.lodDist ?? 55;
+  const lodHysteresis = options.lodHysteresis ?? 6;
+  let currentLodHigh = true;
 
   const stemMeshes = [];
   const bandMeshes = [];
@@ -147,16 +149,17 @@ export function setupSusukiSingleField(susukiGroup, resources, options) {
   const aabbSize = new THREE.Vector3(patchSpacing, 1000, patchSpacing);
   const fieldCenter = new THREE.Vector3(centerX, 0, centerZ);
 
-  const halfGrid = Math.floor(gridSize / 2);
-  for (let x = -halfGrid; x <= halfGrid; x++) {
-    for (let z = -halfGrid; z <= halfGrid; z++) {
-      const px = centerX + x * patchSpacing;
-      const pz = centerZ + z * patchSpacing;
+  const minX = centerX - halfWidth;
+  const maxX = centerX + halfWidth;
+  const minZ = centerZ - halfDepth;
+  const maxZ = centerZ + halfDepth;
 
-      const mask = fieldMask(px, pz, centerX, centerZ, baseRadius, maskOpts);
+  for (let px = Math.floor(minX / patchSpacing) * patchSpacing; px <= maxX; px += patchSpacing) {
+    for (let pz = Math.floor(minZ / patchSpacing) * patchSpacing; pz <= maxZ; pz += patchSpacing) {
+      const mask = fieldMask(px, pz, centerX, centerZ, halfWidth, halfDepth);
       if (mask < threshold) continue;
 
-      const stemMesh = new THREE.Mesh(stemGeo, stemMat);
+      const stemMesh = new THREE.Mesh(stemGeoHigh, stemMatHigh);
       stemMesh.position.set(px, 0, pz);
       stemMesh.frustumCulled = false;
       stemMesh.castShadow = false;
@@ -164,7 +167,7 @@ export function setupSusukiSingleField(susukiGroup, resources, options) {
       susukiGroup.add(stemMesh);
       stemMeshes.push(stemMesh);
 
-      const bandMesh = new THREE.Mesh(bandGeo, bandMat);
+      const bandMesh = new THREE.Mesh(bandGeoHigh, bandMatHigh);
       bandMesh.position.set(px, 0, pz);
       bandMesh.frustumCulled = false;
       bandMesh.castShadow = false;
@@ -180,20 +183,30 @@ export function setupSusukiSingleField(susukiGroup, resources, options) {
   function update(charPos, frustum) {
     camPosXZ.set(charPos.x, 0, charPos.z);
     const distToField = camPosXZ.distanceTo(fieldCenter);
-    const fieldInRange = distToField < maxViewDist;
+    if (distToField > lodDist + lodHysteresis * 0.5) currentLodHigh = false;
+    else if (distToField < lodDist - lodHysteresis * 0.5) currentLodHigh = true;
+    const useLowLod = !currentLodHigh;
+
+    const stemGeo = useLowLod ? stemGeoLow : stemGeoHigh;
+    const bandGeo = useLowLod ? bandGeoLow : bandGeoHigh;
+    const stemMat = useLowLod ? stemMatLow : stemMatHigh;
+    const bandMat = useLowLod ? bandMatLow : bandMatHigh;
 
     let patchCount = 0;
     for (let i = 0; i < stemMeshes.length; i++) {
       const stemMesh = stemMeshes[i];
       const bandMesh = bandMeshes[i];
-      const visible = fieldInRange && (() => {
-        cellPos.set(stemMesh.position.x, 0, stemMesh.position.z);
-        aabb.setFromCenterAndSize(cellPos, aabbSize);
-        return frustum.intersectsBox(aabb);
-      })();
-      stemMesh.visible = visible;
-      bandMesh.visible = visible;
-      if (visible) patchCount++;
+      cellPos.set(stemMesh.position.x, 0, stemMesh.position.z);
+      aabb.setFromCenterAndSize(cellPos, aabbSize);
+      const inFrustum = frustum.intersectsBox(aabb);
+
+      stemMesh.geometry = stemGeo;
+      stemMesh.material = stemMat;
+      bandMesh.geometry = bandGeo;
+      bandMesh.material = bandMat;
+      stemMesh.visible = inFrustum;
+      bandMesh.visible = inFrustum;
+      if (inFrustum) patchCount++;
     }
     return { patchCount };
   }
