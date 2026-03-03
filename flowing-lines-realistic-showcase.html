@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Flowing Lines — Realistic (Ghost of Tsushima)</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1a1e22; overflow: hidden; font-family: "SF Mono", "Fira Code", monospace; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #info {
+      position: fixed; bottom: 12px; left: 12px; z-index: 20;
+      background: rgba(0,0,0,0.6); color: #d4c4a8;
+      padding: 8px 12px; border-radius: 6px; font-size: 11px; line-height: 1.6;
+    }
+    #info span { color: #e8dcc8; font-weight: 600; }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+      "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+      "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+<div id="info">
+  <span>Flowing Lines — Realistic</span> — Ghost of Tsushima style<br>
+  Path noise, wind drift, depth fade &bull; Orbit: <span>left-drag</span> Zoom: <span>scroll</span>
+</div>
+
+<script type="module">
+import * as THREE from "three";
+import { WebGPURenderer } from "three/webgpu";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import GUI from "three/addons/libs/lil-gui.module.min.js";
+import { createFlowingLines } from "./flowing-lines.js";
+
+// ─── Terrain height ────────────────────────────────────────────────────────
+function terrainHeight(x, z) {
+  return (
+    Math.sin(x * 0.25) * Math.cos(z * 0.2) * 0.5 +
+    Math.sin(x * 0.15 + z * 0.1) * 0.3 +
+    Math.cos(z * 0.3 + x * 0.05) * 0.2
+  ) * PARAMS.terrainScale;
+}
+
+// ─── PARAMS (Ghost of Tsushima defaults) ─────────────────────────────────────
+const PARAMS = {
+  lineCount: 16,
+  lineLength: 10,
+  lineWidth: 0.08,
+  segments: 20,
+  heightOffset: 0.5,
+  verticalWave: 0.06,
+  animationSpeed: 0.8,
+  pathRadius: 28,
+  pathFrequency: 0.6,
+  lineColor: "#e8e0d0",
+  lineOpacity: 0.45,
+  pathNoise: 2.5,
+  windDirX: 0.7,
+  windDirZ: 0.3,
+  windSpeed: 1.5,
+  perLineSpeedVariation: 0.35,
+  perLineRadiusVariation: 0.25,
+  thicknessVariation: 0.8,
+  depthFadeNear: 15,
+  depthFadeFar: 55,
+  terrainScale: 2.5,
+  groundColor: "#2a3028",
+  fogColor: "#1a1e22",
+  fogNear: 25,
+  fogFar: 90,
+  showGrid: false,
+};
+
+// ─── Renderer ───────────────────────────────────────────────────────────────
+const renderer = new WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+// ─── Scene ─────────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(PARAMS.fogColor);
+scene.fog = new THREE.Fog(PARAMS.fogColor, PARAMS.fogNear, PARAMS.fogFar);
+
+const sun = new THREE.DirectionalLight(0xfff5e8, 1.2);
+scene.add(sun);
+const ambLight = new THREE.AmbientLight(0x8090a0, 0.5);
+scene.add(ambLight);
+
+const groundSize = 120;
+const groundRes = 80;
+const groundGeo = new THREE.PlaneGeometry(groundSize, groundSize, groundRes, groundRes);
+groundGeo.rotateX(-Math.PI / 2);
+const posArr = groundGeo.attributes.position.array;
+for (let i = 0; i < posArr.length; i += 3) {
+  posArr[i + 1] = terrainHeight(posArr[i], posArr[i + 2]);
+}
+groundGeo.computeVertexNormals();
+
+const groundMat = new THREE.MeshStandardMaterial({
+  color: PARAMS.groundColor,
+  roughness: 0.95,
+  metalness: 0,
+});
+const ground = new THREE.Mesh(groundGeo, groundMat);
+scene.add(ground);
+
+const grid = new THREE.GridHelper(groundSize, 20, 0x2a3a3a, 0x1a2a2a);
+grid.position.y = 0.02;
+grid.visible = PARAMS.showGrid;
+scene.add(grid);
+
+// ─── Flowing Lines (Realistic) ──────────────────────────────────────────────
+let flowing = createFlowingLines({
+  scene,
+  getTerrainHeight: terrainHeight,
+  enabled: true,
+  lineCount: PARAMS.lineCount,
+  lineLength: PARAMS.lineLength,
+  lineWidth: PARAMS.lineWidth,
+  segments: PARAMS.segments,
+  heightOffset: PARAMS.heightOffset,
+  verticalWave: PARAMS.verticalWave,
+  animationSpeed: PARAMS.animationSpeed,
+  pathRadius: PARAMS.pathRadius,
+  pathFrequency: PARAMS.pathFrequency,
+  lineColor: PARAMS.lineColor,
+  lineOpacity: PARAMS.lineOpacity,
+  pathNoise: PARAMS.pathNoise,
+  windDirX: PARAMS.windDirX,
+  windDirZ: PARAMS.windDirZ,
+  windSpeed: PARAMS.windSpeed,
+  perLineSpeedVariation: PARAMS.perLineSpeedVariation,
+  perLineRadiusVariation: PARAMS.perLineRadiusVariation,
+  thicknessVariation: PARAMS.thicknessVariation,
+  depthFadeNear: PARAMS.depthFadeNear,
+  depthFadeFar: PARAMS.depthFadeFar,
+});
+
+function refreshFlowingLines() {
+  scene.remove(flowing.group);
+  const mat = flowing.linesData[0]?.mesh?.material;
+  if (mat) mat.dispose();
+  for (const line of flowing.linesData) {
+    line.mesh.geometry.dispose();
+  }
+  flowing = createFlowingLines({
+    scene,
+    getTerrainHeight: terrainHeight,
+    enabled: true,
+    lineCount: PARAMS.lineCount,
+    lineLength: PARAMS.lineLength,
+    lineWidth: PARAMS.lineWidth,
+    segments: PARAMS.segments,
+    heightOffset: PARAMS.heightOffset,
+    verticalWave: PARAMS.verticalWave,
+    animationSpeed: PARAMS.animationSpeed,
+    pathRadius: PARAMS.pathRadius,
+    pathFrequency: PARAMS.pathFrequency,
+    lineColor: PARAMS.lineColor,
+    lineOpacity: PARAMS.lineOpacity,
+    pathNoise: PARAMS.pathNoise,
+    windDirX: PARAMS.windDirX,
+    windDirZ: PARAMS.windDirZ,
+    windSpeed: PARAMS.windSpeed,
+    perLineSpeedVariation: PARAMS.perLineSpeedVariation,
+    perLineRadiusVariation: PARAMS.perLineRadiusVariation,
+    thicknessVariation: PARAMS.thicknessVariation,
+    depthFadeNear: PARAMS.depthFadeNear,
+    depthFadeFar: PARAMS.depthFadeFar,
+  });
+}
+
+function applySun() {
+  const az = (210 * Math.PI) / 180;
+  const el = (45 * Math.PI) / 180;
+  sun.position.set(
+    Math.cos(el) * Math.sin(az) * 80,
+    Math.sin(el) * 80,
+    Math.cos(el) * Math.cos(az) * 80,
+  );
+}
+applySun();
+
+// ─── GUI ────────────────────────────────────────────────────────────────────
+const gui = new GUI({ title: "Realistic Flowing Lines", width: 280 });
+gui.domElement.style.cssText = "position:fixed;top:12px;right:12px;z-index:30;max-height:90vh;overflow-y:auto;";
+
+const fLines = gui.addFolder("Lines");
+fLines.add({ refresh: refreshFlowingLines }, "refresh").name("Apply geometry");
+fLines.add(PARAMS, "lineCount", 1, 30, 1);
+fLines.add(PARAMS, "lineLength", 4, 20, 1);
+fLines.add(PARAMS, "lineWidth", 0.03, 0.2, 0.01);
+fLines.add(PARAMS, "segments", 8, 40, 2);
+fLines.add(PARAMS, "heightOffset", 0, 2, 0.1);
+fLines.add(PARAMS, "verticalWave", 0, 0.2, 0.01);
+fLines.add(PARAMS, "animationSpeed", 0.3, 1.5, 0.05);
+fLines.add(PARAMS, "pathRadius", 15, 60, 2);
+fLines.add(PARAMS, "pathFrequency", 0.2, 1.2, 0.05);
+fLines.addColor(PARAMS, "lineColor");
+fLines.add(PARAMS, "lineOpacity", 0.2, 0.8, 0.02);
+
+const fRealistic = gui.addFolder("Realistic");
+fRealistic.add(PARAMS, "pathNoise", 0, 5, 0.2).name("path wobble");
+fRealistic.add(PARAMS, "windDirX", -1, 1, 0.1).name("wind X");
+fRealistic.add(PARAMS, "windDirZ", -1, 1, 0.1).name("wind Z");
+fRealistic.add(PARAMS, "windSpeed", 0, 4, 0.2).name("wind speed");
+fRealistic.add(PARAMS, "perLineSpeedVariation", 0, 0.6, 0.05).name("speed variation");
+fRealistic.add(PARAMS, "perLineRadiusVariation", 0, 0.5, 0.05).name("radius variation");
+fRealistic.add(PARAMS, "thicknessVariation", 0, 1, 0.1).name("thinner tips");
+fRealistic.add(PARAMS, "depthFadeNear", 0, 40, 2).name("depth fade start");
+fRealistic.add(PARAMS, "depthFadeFar", 0, 100, 5).name("depth fade end");
+
+const fTerrain = gui.addFolder("Terrain");
+fTerrain.add(PARAMS, "terrainScale", 0, 6, 0.5);
+
+const fScene = gui.addFolder("Scene");
+fScene.addColor(PARAMS, "groundColor").onChange((v) => groundMat.color.setStyle(v));
+fScene.addColor(PARAMS, "fogColor").onChange((v) => {
+  scene.background.setStyle(v);
+  scene.fog.color.setStyle(v);
+});
+fScene.add(PARAMS, "fogNear", 10, 60, 5).onChange((v) => { scene.fog.near = v; });
+fScene.add(PARAMS, "fogFar", 50, 150, 10).onChange((v) => { scene.fog.far = v; });
+fScene.add(PARAMS, "showGrid").onChange((v) => { grid.visible = v; });
+
+// ─── Camera ─────────────────────────────────────────────────────────────────
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 300);
+camera.position.set(0, 6, 40);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.set(0, 2, 0);
+controls.update();
+
+// ─── Animation ──────────────────────────────────────────────────────────────
+const timer = new THREE.Timer();
+renderer.setAnimationLoop(() => {
+  timer.update();
+  const elapsed = timer.getElapsed();
+
+  flowing.params.heightOffset = PARAMS.heightOffset;
+  flowing.params.verticalWave = PARAMS.verticalWave;
+  flowing.params.animationSpeed = PARAMS.animationSpeed;
+  flowing.params.pathRadius = PARAMS.pathRadius;
+  flowing.params.pathFrequency = PARAMS.pathFrequency;
+  flowing.params.pathNoise = PARAMS.pathNoise;
+  flowing.params.windDirX = PARAMS.windDirX;
+  flowing.params.windDirZ = PARAMS.windDirZ;
+  flowing.params.windSpeed = PARAMS.windSpeed;
+  flowing.params.perLineSpeedVariation = PARAMS.perLineSpeedVariation;
+  flowing.params.perLineRadiusVariation = PARAMS.perLineRadiusVariation;
+  flowing.params.thicknessVariation = PARAMS.thicknessVariation;
+  flowing.params.depthFadeNear = PARAMS.depthFadeNear;
+  flowing.params.depthFadeFar = PARAMS.depthFadeFar;
+  flowing.setParams({
+    lineColor: PARAMS.lineColor,
+    lineOpacity: PARAMS.lineOpacity,
+    depthFadeNear: PARAMS.depthFadeNear,
+    depthFadeFar: PARAMS.depthFadeFar,
+  });
+  flowing.update(elapsed);
+
+  controls.update();
+  renderer.render(scene, camera);
+});
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+await renderer.compileAsync(scene, camera);
+</script>
+</body>
+</html>

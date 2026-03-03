@@ -25,7 +25,20 @@
  * - Terrain height from getTerrainHeight(x, z) callback
  */
 import * as THREE from "three";
-import { uniform, uv, mul, texture } from "three/tsl";
+import { uniform, uv, mul, texture, positionWorld, cameraPosition, sub, length, smoothstep, float } from "three/tsl";
+
+// ─── CPU noise for path wobble ───────────────────────────────────────────────
+function hash(x, y) {
+  const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+  return n - Math.floor(n);
+}
+function noise2d(x, y) {
+  const ix = Math.floor(x), iy = Math.floor(y);
+  const fx = x - ix, fy = y - iy;
+  const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
+  const a = hash(ix, iy), b = hash(ix + 1, iy), c = hash(ix, iy + 1), d = hash(ix + 1, iy + 1);
+  return a * (1 - ux) * (1 - uy) + b * ux * (1 - uy) + c * (1 - ux) * uy + d * ux * uy;
+}
 
 // ─── Default params ─────────────────────────────────────────────────────────
 const DEFAULTS = {
@@ -77,6 +90,15 @@ function createGradientTexture() {
  * @param {string} [options.lineColor='#a8d8ea']
  * @param {number} [options.lineOpacity=0.7]
  * @param {number} [options.boundaryRadius=50]
+ * @param {number} [options.pathNoise=0] — Realistic: add path wobble (0–4)
+ * @param {number} [options.windDirX=0] — Realistic: wind drift X
+ * @param {number} [options.windDirZ=0] — Realistic: wind drift Z
+ * @param {number} [options.windSpeed=0] — Realistic: wind drift speed
+ * @param {number} [options.perLineSpeedVariation=0] — Realistic: 0–0.5
+ * @param {number} [options.perLineRadiusVariation=0] — Realistic: 0–0.5
+ * @param {number} [options.thicknessVariation=0] — Realistic: 0–1 (thinner at tips)
+ * @param {number} [options.depthFadeNear=0] — Realistic: fade start distance (0=off)
+ * @param {number} [options.depthFadeFar=0] — Realistic: fade end distance
  */
 export function createFlowingLines({
   scene,
@@ -94,6 +116,15 @@ export function createFlowingLines({
   lineColor = DEFAULTS.lineColor,
   lineOpacity = DEFAULTS.lineOpacity,
   boundaryRadius = DEFAULTS.boundaryRadius,
+  pathNoise = 0,
+  windDirX = 0,
+  windDirZ = 0,
+  windSpeed = 0,
+  perLineSpeedVariation = 0,
+  perLineRadiusVariation = 0,
+  thicknessVariation = 0,
+  depthFadeNear = 0,
+  depthFadeFar = 0,
 } = {}) {
   if (!scene || typeof getTerrainHeight !== "function") {
     console.warn("flowing-lines: scene and getTerrainHeight are required");
@@ -108,6 +139,8 @@ export function createFlowingLines({
 
   const uColor = uniform(new THREE.Color(lineColor).convertSRGBToLinear());
   const uOpacity = uniform(lineOpacity);
+  const uDepthFadeNear = uniform(depthFadeNear);
+  const uDepthFadeFar = uniform(depthFadeFar);
 
   const lineMaterial = new THREE.MeshBasicNodeMaterial({
     side: THREE.DoubleSide,
@@ -115,8 +148,14 @@ export function createFlowingLines({
     depthWrite: false,
   });
   const gradTex = texture(gradientTexture, uv());
+  let opacityNode = mul(gradTex.a, uOpacity);
+  if (depthFadeNear > 0 && depthFadeFar > depthFadeNear) {
+    const dist = length(sub(positionWorld, cameraPosition));
+    const depthFade = smoothstep(uDepthFadeNear, uDepthFadeFar, dist).oneMinus();
+    opacityNode = mul(opacityNode, depthFade);
+  }
   lineMaterial.colorNode = mul(gradTex.rgb, uColor);
-  lineMaterial.opacityNode = mul(gradTex.a, uOpacity);
+  lineMaterial.opacityNode = opacityNode;
 
   const group = new THREE.Group();
   const linesData = [];
@@ -129,6 +168,15 @@ export function createFlowingLines({
     animationSpeed,
     pathRadius,
     pathFrequency,
+    pathNoise,
+    windDirX,
+    windDirZ,
+    windSpeed,
+    perLineSpeedVariation,
+    perLineRadiusVariation,
+    thicknessVariation,
+    depthFadeNear,
+    depthFadeFar,
   };
 
   const pointsPerRow = segments + 1;
@@ -144,6 +192,8 @@ export function createFlowingLines({
     const rndb = Math.random();
     const rndc = Math.random();
     const rndd = Math.random();
+    const rndSpeed = 1 + (Math.random() - 0.5) * 2 * perLineSpeedVariation;
+    const rndRadius = 1 + (Math.random() - 0.5) * 2 * perLineRadiusVariation;
 
     linesData.push({
       mesh,
@@ -152,6 +202,8 @@ export function createFlowingLines({
       rndb,
       rndc,
       rndd,
+      rndSpeed,
+      rndRadius,
     });
     group.add(mesh);
   }
@@ -160,14 +212,36 @@ export function createFlowingLines({
 
   function updateVertex(line, vertIdx, time) {
     const segmentIndex = vertIdx % pointsPerRow;
-    const t = (time * 1000) / (3000 / params.animationSpeed) + segmentIndex / 60;
+    const speedMult = line.rndSpeed ?? 1;
+    const radiusMult = line.rndRadius ?? 1;
+    const t = (time * 1000) / (3000 / (params.animationSpeed * speedMult)) + segmentIndex / 60;
 
-    const x = params.pathRadius * Math.sin(params.pathFrequency * line.rnda * t + 6 * line.rndb);
-    const z = params.pathRadius * Math.cos(params.pathFrequency * line.rndc * t + 6 * line.rndd);
+    let x = params.pathRadius * radiusMult * Math.sin(params.pathFrequency * line.rnda * t + 6 * line.rndb);
+    let z = params.pathRadius * radiusMult * Math.cos(params.pathFrequency * line.rndc * t + 6 * line.rndd);
+
+    if (params.pathNoise > 0) {
+      const n = noise2d(x * 0.08 + time * 0.3, z * 0.08) * 2 - 1;
+      const n2 = noise2d(z * 0.06 - time * 0.2, x * 0.06) * 2 - 1;
+      x += n * params.pathNoise + n2 * params.pathNoise * 0.5;
+      z += n2 * params.pathNoise + n * params.pathNoise * 0.5;
+    }
+
+    if (params.windSpeed !== 0) {
+      x += params.windDirX * params.windSpeed * time;
+      z += params.windDirZ * params.windSpeed * time;
+    }
 
     const terrainY = getTerrainHeight(x, z);
+
+    let thicknessScale = 1;
+    if (params.thicknessVariation > 0) {
+      const tNorm = segmentIndex / segments;
+      thicknessScale = Math.sin(tNorm * Math.PI);
+    }
+
     const waveOffset =
       params.verticalWave *
+      thicknessScale *
       (vertIdx > segments ? 1 : -1) *
       Math.cos((segmentIndex - segments / 2) / 8);
     const y = terrainY + params.heightOffset + waveOffset;
@@ -202,9 +276,13 @@ export function createFlowingLines({
     update,
     uColor,
     uOpacity,
+    uDepthFadeNear,
+    uDepthFadeFar,
     setParams: (p) => {
       if (p.lineColor != null) uColor.value.copy(new THREE.Color(p.lineColor).convertSRGBToLinear());
       if (p.lineOpacity != null) uOpacity.value = p.lineOpacity;
+      if (p.depthFadeNear != null) uDepthFadeNear.value = p.depthFadeNear;
+      if (p.depthFadeFar != null) uDepthFadeFar.value = p.depthFadeFar <= 0 ? 9999 : p.depthFadeFar;
     },
   };
 }
