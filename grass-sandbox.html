@@ -111,6 +111,11 @@
         NPC_COUNT,
       } from "./constants.js";
       import { setSeed, randRange } from "./rng.js";
+      import { buildSusukiCtx } from "./susuki-field.js";
+      import {
+        createSusukiSingleFieldResources,
+        setupSusukiSingleField,
+      } from "./susuki-single-field.js";
 
       async function init() {
         const renderer = new THREE.WebGPURenderer({ antialias: true });
@@ -422,6 +427,51 @@
             lodHysteresis: 2,
           },
         );
+
+        // ── SUSUKI SINGLE FIELD (one dense field at fixed position, organic noise-shaped edges) ──
+        const SUSUKI_FIELD_CENTER_X = 50;
+        const SUSUKI_FIELD_CENTER_Z = 30;
+        const susukiGroup = new THREE.Group();
+        scene.add(susukiGroup);
+        const susukiCtx = buildSusukiCtx({
+          uniforms,
+          heightTex,
+          params: {
+            stemHeight: PARAMS.susukiStemHeight,
+            stemWidth: PARAMS.susukiStemWidth,
+            bandWidth: PARAMS.susukiBandWidth,
+            plumeStart: PARAMS.susukiPlumeStart,
+            plumeFlex: PARAMS.susukiPlumeFlex,
+            plumeSoftEdge: PARAMS.susukiPlumeSoftEdge,
+            stemColor: PARAMS.susukiStemColor,
+            plumeColor: PARAMS.susukiPlumeColor,
+            windDir: PARAMS.windDir,
+            windWaveScale: PARAMS.windWaveScale,
+            windSpeed: PARAMS.windSpeed,
+            windStr: PARAMS.windStrength,
+            windGust: PARAMS.windGust,
+            windMicro: PARAMS.windMicroSway,
+          },
+        });
+        const susukiResources = createSusukiSingleFieldResources(susukiCtx);
+        const susukiPatchSystem = setupSusukiSingleField(
+          susukiGroup,
+          susukiResources,
+          {
+            centerX: SUSUKI_FIELD_CENTER_X,
+            centerZ: SUSUKI_FIELD_CENTER_Z,
+            gridSize: 12,
+            patchSpacing: 12,
+            baseRadius: 52,
+            noiseScale: 0.04,
+            warpScale: 0.035,
+            warpAmt: 22,
+            noiseAmount: 0.55,
+            threshold: 0.38,
+            maxViewDist: 85,
+          },
+        );
+
         const syncUniforms = createSyncUniforms(uniforms, {
           PARAMS: sandboxParams,
           camera,
@@ -494,13 +544,17 @@
           );
           frustum.setFromProjectionMatrix(projMat);
           const { patchCount } = grassPatchSystem.update(charPos, frustum);
+          const { patchCount: susukiPatchCount } =
+            susukiPatchSystem.update(charPos, frustum);
           syncUniforms();
           uniforms.uTime.value = elapsed;
           uniforms.uPlayerPos.value.copy(charPos);
 
           if (++frameCount % 30 === 0) {
-            document.getElementById("stats").textContent =
-              `${patchCount} grass patches`;
+            let statsText = `${patchCount} grass patches`;
+            if (susukiPatchCount > 0)
+              statsText += ` ▪ ${susukiPatchCount} susuki patches`;
+            document.getElementById("stats").textContent = statsText;
           }
 
           physicsDebugGroup.visible = !!PARAMS.rapierDebug;

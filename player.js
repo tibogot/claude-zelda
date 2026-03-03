@@ -224,7 +224,7 @@ export function createPlayer(opts) {
               if (e.action !== rollAction) return;
               const ud = characterGroup.userData;
               ud.isRolling = false;
-              const moving = keys.w || keys.s || keys.a || keys.d;
+              const moving = keys.w || keys.s;
               const running = moving && keys.shift;
               const crouching = keys.ctrl;
               const targetState = crouching
@@ -409,8 +409,8 @@ export function createPlayer(opts) {
   });
 
   function update(dt) {
-    if (keys.arrowLeft) state.camYaw += PARAMS.keyTurnSpeed * dt;
-    if (keys.arrowRight) state.camYaw -= PARAMS.keyTurnSpeed * dt;
+    if (keys.arrowLeft || keys.a) state.camYaw += PARAMS.keyTurnSpeed * dt;
+    if (keys.arrowRight || keys.d) state.camYaw -= PARAMS.keyTurnSpeed * dt;
 
     // ── CROUCH TRANSITION (parkour mode only) ──────────────────────────────
     // Shrinks / restores the capsule collider half-height each time the player
@@ -485,8 +485,6 @@ export function createPlayer(opts) {
     }
     if (keys.w) state.moveDir.z -= 1;
     if (keys.s) state.moveDir.z += 1;
-    if (keys.a) state.moveDir.x -= 1;
-    if (keys.d) state.moveDir.x += 1;
     if (state.moveDir.length() > 0) {
       state.moveDir.normalize();
       const sinY = Math.sin(state.camYaw);
