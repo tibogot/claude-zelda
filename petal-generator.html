@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Petal Shape Generator</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #1a1a2e;
+      min-height: 100vh;
+      font-family: "SF Mono", "Fira Code", monospace;
+      color: #b0d890;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+    }
+    h1 {
+      font-size: 18px;
+      margin-bottom: 16px;
+      color: #e0f0c0;
+      font-weight: 400;
+    }
+    .canvas-wrap {
+      background: #0d0d14;
+      border-radius: 8px;
+      padding: 16px;
+      box-shadow: inset 0 0 0 1px rgba(176, 216, 144, 0.15);
+      margin-bottom: 20px;
+    }
+    .canvas-wrap.checker {
+      background-image:
+        linear-gradient(45deg, #1a1a2e 25%, transparent 25%),
+        linear-gradient(-45deg, #1a1a2e 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #1a1a2e 75%),
+        linear-gradient(-45deg, transparent 75%, #1a1a2e 75%);
+      background-size: 20px 20px;
+      background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+      background-color: #252535;
+    }
+    #canvas {
+      display: block;
+    }
+    #gui-container {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      z-index: 30;
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+    .buttons {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      justify-content: center;
+      margin-top: 12px;
+    }
+    button {
+      background: #2d3a2d;
+      color: #b0d890;
+      border: 1px solid #4a5a4a;
+      padding: 10px 20px;
+      border-radius: 6px;
+      font-family: inherit;
+      font-size: 12px;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    button:hover {
+      background: #3d4d3d;
+      border-color: #5a6a5a;
+    }
+    button.primary {
+      background: #2d5a2d;
+      border-color: #4a7a4a;
+      color: #e0f0c0;
+    }
+    button.primary:hover {
+      background: #3d6a3d;
+    }
+    #info {
+      margin-top: 16px;
+      font-size: 11px;
+      color: #809080;
+      text-align: center;
+      max-width: 400px;
+    }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+<h1>Petal Shape Generator</h1>
+<div class="canvas-wrap checker">
+  <canvas id="canvas" width="256" height="256"></canvas>
+</div>
+<div class="buttons">
+  <button class="primary" id="btnExport">Download PNG</button>
+  <button id="btnCopy">Copy to clipboard</button>
+</div>
+<p id="info">Adjust the controls to shape the petal. Export as PNG for use as alpha texture in Three.js or other engines.</p>
+
+<div id="gui-container"></div>
+
+<script type="module">
+import GUI from "three/addons/libs/lil-gui.module.min.js";
+
+// ─── Petal shape parameters ───────────────────────────────────────────────────
+const PARAMS = {
+  // Size
+  resolution: 256,
+  padding: 0.05,
+  aspectRatio: 1.5, // height / width
+
+  // Shape
+  baseWidth: 1.0,
+  tipWidth: 0.08,
+  taper: 1.8,
+  tipRoundness: 0.4,
+  sideBulge: 0.15,
+  baseRoundness: 0.5,
+
+  // Asymmetry (for more organic look)
+  asymmetry: 0,
+  tipSkew: 0,
+
+  // Preview
+  showOutline: false,
+  bgAlpha: 0,
+};
+
+// ─── Petal path generation ───────────────────────────────────────────────────
+function getPetalPath(params) {
+  const {
+    baseWidth,
+    tipWidth,
+    taper,
+    tipRoundness,
+    sideBulge,
+    baseRoundness,
+    asymmetry,
+    tipSkew,
+  } = params;
+
+  const steps = 48;
+  const leftPoints = [];
+  const rightPoints = [];
+
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const y = t;
+
+    // Half-width at this y (0 = base, 1 = tip)
+    const linearMix = Math.pow(t, taper);
+    let halfW = (baseWidth * (1 - linearMix) + tipWidth * linearMix) / 2;
+
+    // Side bulge: wider in the middle
+    halfW *= 1 + sideBulge * Math.sin(Math.PI * t);
+
+    // Asymmetry: left and right can differ slightly
+    const asym = asymmetry * (0.5 - Math.abs(t - 0.5) * 2);
+    const leftW = halfW * (1 - asym);
+    const rightW = halfW * (1 + asym);
+
+    // Tip skew (increases toward tip)
+    const skew = tipSkew * t;
+
+    leftPoints.push({ x: -leftW + skew, y });
+    rightPoints.push({ x: rightW + skew, y });
+  }
+
+  // Build path: left base -> left edge -> tip cap -> right edge -> right base -> (optional base arc) -> close
+  const path = [];
+
+  // Left edge (base to tip)
+  for (let i = 0; i < leftPoints.length; i++) {
+    path.push(leftPoints[i]);
+  }
+
+  // Tip rounding: semicircle from left tip to right tip
+  if (tipRoundness > 0.01) {
+    const tipRadius = (tipWidth / 2) * tipRoundness * 2;
+    const segs = 6;
+    for (let i = 1; i <= segs; i++) {
+      const a = Math.PI - (Math.PI * i) / segs;
+      path.push({
+        x: tipRadius * Math.cos(a) + tipSkew,
+        y: 1 - tipRadius + tipRadius * Math.sin(a),
+      });
+    }
+  } else {
+    path.push({ x: tipSkew, y: 1 });
+  }
+
+  // Right edge (tip to base)
+  for (let i = rightPoints.length - 1; i >= 0; i--) {
+    path.push(rightPoints[i]);
+  }
+
+  // Base rounding: circular arc from right base to left base (bulges downward)
+  if (baseRoundness > 0.01) {
+    const halfW = baseWidth / 2;
+    const sagitta = halfW * baseRoundness;
+    const R = (halfW * halfW + sagitta * sagitta) / (2 * sagitta);
+    const cy = R - sagitta;
+    const aStart = Math.atan2(-(R - sagitta), halfW);
+    const aEnd = Math.atan2(-(R - sagitta), -halfW);
+    const segs = 12;
+    for (let i = 1; i <= segs; i++) {
+      const a = aStart + (aEnd - aStart) * (i / segs);
+      path.push({
+        x: R * Math.cos(a),
+        y: cy + R * Math.sin(a),
+      });
+    }
+  }
+
+  return path;
+}
+
+// ─── Canvas drawing ───────────────────────────────────────────────────────────
+function drawPetal(canvas, params) {
+  const ctx = canvas.getContext("2d");
+  const res = params.resolution;
+  const pad = params.padding;
+  const aspect = params.aspectRatio;
+
+  canvas.width = res;
+  canvas.height = res;
+
+  // Clear
+  ctx.clearRect(0, 0, res, res);
+
+  // Background (for transparency preview)
+  if (params.bgAlpha > 0) {
+    ctx.fillStyle = `rgba(60, 60, 80, ${params.bgAlpha})`;
+    ctx.fillRect(0, 0, res, res);
+  }
+
+  const path = getPetalPath(params);
+
+  // Compute bounds (base arc extends below y=0 when baseRoundness > 0)
+  const halfW = params.baseWidth / 2;
+  const sagitta =
+    params.baseRoundness > 0.01 ? halfW * params.baseRoundness : 0;
+  const minY = -sagitta;
+  const maxY = 1;
+  const minX = -halfW;
+  const maxX = halfW;
+  const bboxW = maxX - minX;
+  const bboxH = maxY - minY;
+  const centerY = (minY + maxY) / 2;
+
+  const contentSize = res * (1 - pad * 2);
+  const scaleX = contentSize / Math.max(bboxW, bboxH / aspect);
+  const scaleY = contentSize / Math.max(bboxH, bboxW * aspect);
+  const scale = Math.min(scaleX, scaleY);
+  const offX = res * 0.5;
+  const offY = res * 0.5;
+
+  ctx.beginPath();
+  for (let i = 0; i < path.length; i++) {
+    const p = path[i];
+    const px = offX + p.x * scale;
+    const py = offY - (p.y - centerY) * scale;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+
+  ctx.fillStyle = "rgba(255, 255, 255, 1)";
+  ctx.fill();
+
+  if (params.showOutline) {
+    ctx.strokeStyle = "rgba(255, 200, 100, 0.6)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+}
+
+// ─── Export ───────────────────────────────────────────────────────────────────
+function exportPNG() {
+  const canvas = document.getElementById("canvas");
+  const link = document.createElement("a");
+  link.download = "petal-alpha.png";
+  link.href = canvas.toDataURL("image/png");
+  link.click();
+}
+
+async function copyToClipboard() {
+  const canvas = document.getElementById("canvas");
+  try {
+    await navigator.clipboard.write([
+      new ClipboardItem({
+        "image/png": await createBlob(canvas),
+      }),
+    ]);
+    const btn = document.getElementById("btnCopy");
+    const orig = btn.textContent;
+    btn.textContent = "Copied!";
+    setTimeout(() => (btn.textContent = orig), 1500);
+  } catch (e) {
+    console.error("Copy failed:", e);
+  }
+}
+
+function createBlob(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => (blob ? resolve(blob) : reject(new Error("Blob failed"))),
+      "image/png"
+    );
+  });
+}
+
+// ─── GUI ──────────────────────────────────────────────────────────────────────
+const gui = new GUI({ title: "Petal Shape", container: document.getElementById("gui-container") });
+
+const fSize = gui.addFolder("Size");
+fSize.add(PARAMS, "resolution", 64, 512, 64).onChange(redraw);
+fSize.add(PARAMS, "padding", 0, 0.3, 0.01).onChange(redraw);
+fSize.add(PARAMS, "aspectRatio", 0.5, 3, 0.1).onChange(redraw);
+
+const fShape = gui.addFolder("Shape");
+fShape.add(PARAMS, "baseWidth", 0.3, 1.5, 0.05).onChange(redraw);
+fShape.add(PARAMS, "tipWidth", 0, 0.5, 0.02).onChange(redraw);
+fShape.add(PARAMS, "taper", 0.5, 4, 0.1).onChange(redraw);
+fShape.add(PARAMS, "tipRoundness", 0, 1, 0.05).onChange(redraw);
+fShape.add(PARAMS, "sideBulge", -0.3, 0.5, 0.02).onChange(redraw);
+fShape.add(PARAMS, "baseRoundness", 0, 1.2, 0.05).onChange(redraw);
+
+const fOrganic = gui.addFolder("Organic");
+fOrganic.add(PARAMS, "asymmetry", -0.3, 0.3, 0.02).onChange(redraw);
+fOrganic.add(PARAMS, "tipSkew", -0.2, 0.2, 0.01).onChange(redraw);
+
+const fPreview = gui.addFolder("Preview");
+fPreview.add(PARAMS, "showOutline").onChange(redraw);
+fPreview.add(PARAMS, "bgAlpha", 0, 1, 0.1).onChange(redraw);
+
+function redraw() {
+  drawPetal(document.getElementById("canvas"), PARAMS);
+}
+
+// ─── Init ────────────────────────────────────────────────────────────────────
+document.getElementById("btnExport").addEventListener("click", exportPNG);
+document.getElementById("btnCopy").addEventListener("click", copyToClipboard);
+
+redraw();
+</script>
+</body>
+</html>

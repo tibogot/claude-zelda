@@ -1,0 +1,728 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Flower Field Showcase</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1a1a2e; overflow: hidden; font-family: "SF Mono", "Fira Code", monospace; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #info {
+      position: fixed; bottom: 12px; left: 12px; z-index: 20;
+      background: rgba(0,0,0,0.6); color: #b0d890;
+      padding: 8px 12px; border-radius: 6px; font-size: 11px; line-height: 1.6;
+    }
+    #info span { color: #e0f0c0; font-weight: 600; }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+<div id="info">
+  <span>Flower Field</span> — instanced, grass-style density<br>
+  Orbit: <span>left-drag</span> &nbsp; Zoom: <span>scroll</span>
+</div>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+import GUI from "three/addons/libs/lil-gui.module.min.js";
+
+// ─── Grass-style layout (like grass.js) ───────────────────────────────────────
+function hash(i) {
+  let h = (i * 2654435761) >>> 0;
+  return (h % 10000) / 10000;
+}
+
+function getInstancedPositions(numFlowers, patchSize) {
+  let numCellsX = Math.floor(Math.sqrt(numFlowers));
+  while (numFlowers % numCellsX !== 0) numCellsX--;
+  const numCellsZ = numFlowers / numCellsX;
+  const cellW = patchSize / numCellsX;
+  const cellH = patchSize / numCellsZ;
+  const off = new Float32Array(numFlowers * 3);
+  const flowerIndex = new Float32Array(numFlowers);
+  const flowerHeight = new Float32Array(numFlowers);
+  const petalCounts = new Float32Array(numFlowers);
+  const flowerRotation = new Float32Array(numFlowers);
+  const baseColor = new THREE.Color(PARAMS.petalColorBase);
+  const hsl = { h: 0, s: 0, l: 0 };
+  baseColor.getHSL(hsl);
+  const pcMin = Math.floor(PARAMS.petalCountMin);
+  const pcMax = Math.floor(PARAMS.petalCountMax);
+  for (let i = 0; i < numFlowers; i++) {
+    const col = i % numCellsX;
+    const row = Math.floor(i / numCellsX);
+    off[i * 3] = -patchSize * 0.5 + col * cellW + hash(i * 11) * cellW;
+    off[i * 3 + 1] = -patchSize * 0.5 + row * cellH + hash(i * 13) * cellH;
+    off[i * 3 + 2] = 0;
+    flowerIndex[i] = i;
+    const hVar = 0.85 + hash(i * 17) * 0.3;
+    flowerHeight[i] = PARAMS.flowerHeight * hVar;
+    petalCounts[i] = pcMin + Math.floor(hash(i * 19) * (pcMax - pcMin + 1));
+    flowerRotation[i] = hash(i * 23) * Math.PI * 2;
+  }
+  const colors = [];
+  for (let i = 0; i < numFlowers; i++) {
+    const hue = (hash(i * 31) - 0.5) * 2 * PARAMS.colorVariation;
+    colors.push(new THREE.Color().setHSL((hsl.h + hue) % 1, hsl.s, hsl.l));
+  }
+  return { off, flowerIndex, flowerHeight, petalCounts, flowerRotation, colors, count: numFlowers };
+}
+
+// ─── PARAMS (grass-style density: 30*30*4 = 3600 per 20x20) ────────────────────
+const PARAMS = {
+  petalCountMin: 4,
+  petalCountMax: 7,
+  petalScale: 0.22,
+  petalTilt: 0.25,
+  petalVariation: 0.06,
+  petalColorBase: "#ff0000",
+  petalColorTip: "#0000ff",
+  centerColor: "#ffdd44",
+  centerRadius: 0.08,
+  centerDomeHeight: 0.02,
+  stemColor: "#4a7c3e",
+  stemColorTop: "#5a9c4e",
+  stemRadius: 0.012,
+  stemBaseBend: 0.08,
+  stemLeafScale: 0.15,
+  flowerDensity: 40 * 40 * 4,
+  fieldSize: 20,
+  flowerHeight: 0.7,
+  colorVariation: 0,
+  normalBend: 0.25,
+  normalMapStrength: 0.3,
+  subsurfaceStrength: 0.35,
+  sunAzimuth: 225,
+  sunElevation: 50,
+  sunIntensity: 2.0,
+  fillLightIntensity: 0.4,
+  ambIntensity: 0.7,
+  windDir: 0.7,
+  windSpeed: 1.2,
+  windStr: 0.1,
+  windPetalPhase: 0.4,
+  groundOcclusionStr: 0.4,
+  groundColorBleed: 0.15,
+  petalGradientBlend: 1.0,
+  petalNoiseStr: 0.08,
+  showGrid: false,
+};
+
+// ─── Instanced flower meshes (declare early for async texture load) ───────────
+let flowerHeadMeshes = [];
+let centerMesh = null;
+let stemMesh = null;
+let leafMesh = null;
+
+// ─── Texture ──────────────────────────────────────────────────────────────────
+const texLoader = new THREE.TextureLoader();
+let petalTex = null;
+texLoader.load(
+  "./textures/petal-alpha.png",
+  (tex) => {
+    petalTex = tex;
+    rebuildFlowers();
+  },
+  undefined,
+  (err) => console.error("Petal texture failed to load:", err)
+);
+
+function createPetalNormalMap(size = 64, domeStrength = 0.15) {
+  const data = new Uint8Array(size * size * 4);
+  const half = size / 2;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const u = (x - half) / half;
+      const v = (y - half) / half;
+      const nx = -u * domeStrength;
+      const ny = -v * domeStrength;
+      const nz = Math.sqrt(Math.max(0, 1 - nx * nx - ny * ny));
+      const i = (y * size + x) * 4;
+      data[i] = (nx * 0.5 + 0.5) * 255;
+      data[i + 1] = (ny * 0.5 + 0.5) * 255;
+      data[i + 2] = (nz * 0.5 + 0.5) * 255;
+      data[i + 3] = 255;
+    }
+  }
+  const tex = new THREE.DataTexture(data, size, size);
+  tex.format = THREE.RGBAFormat;
+  tex.type = THREE.UnsignedByteType;
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+const petalNormalTex = createPetalNormalMap(64, 0.2);
+const petalGeo = new THREE.PlaneGeometry(1, 1, 1, 1);
+
+// ─── Build base flower head geometry (per petal count) ─────────────────────────
+function buildFlowerHeadGeometry(petalCount) {
+  const pc = Math.max(3, Math.min(12, Math.floor(petalCount)));
+  const group = new THREE.Group();
+  const geometriesToMerge = [];
+  for (let i = 0; i < pc; i++) {
+    const baseAngle = (i / pc) * Math.PI * 2;
+    const vary = ((i * 7) % 100) / 100;
+    const angleOffset = (vary - 0.5) * 2 * PARAMS.petalVariation;
+    const scaleMul = 1 + (vary - 0.5) * 2 * PARAMS.petalVariation;
+    const angle = baseAngle + angleOffset;
+    const petalGroup = new THREE.Group();
+    petalGroup.rotation.y = angle;
+    const petal = new THREE.Mesh(petalGeo.clone(), new THREE.MeshBasicMaterial());
+    petal.scale.set(PARAMS.petalScale * scaleMul, PARAMS.petalScale * scaleMul, 1);
+    petal.rotation.x = -Math.PI / 2 - PARAMS.petalTilt;
+    petal.position.set(0, 0.001, 0.5 * PARAMS.petalScale);
+    petalGroup.add(petal);
+    group.add(petalGroup);
+  }
+  group.updateMatrixWorld(true);
+  const groupInv = group.matrixWorld.clone().invert();
+  group.traverse((child) => {
+    if (child.isMesh && child.geometry) {
+      const geo = child.geometry.clone().applyMatrix4(
+        groupInv.clone().multiply(child.matrixWorld)
+      );
+      geometriesToMerge.push(geo);
+    }
+  });
+  const merged = mergeGeometries(geometriesToMerge);
+  geometriesToMerge.forEach((g) => g.dispose());
+  const pos = merged.attributes.position;
+  const radialNorm = new Float32Array(pos.count);
+  const maxR = PARAMS.petalScale * 1.2;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const z = pos.getZ(i);
+    radialNorm[i] = Math.min(1, Math.sqrt(x * x + z * z) / maxR);
+  }
+  merged.setAttribute("aRadialNorm", new THREE.BufferAttribute(radialNorm, 1));
+  const norm = merged.attributes.normal;
+  if (pos && norm) {
+    const flatUp = new THREE.Vector3(0, 1, 0);
+    const v = new THREE.Vector3();
+    const n = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i);
+      if (v.length() > 0.01) {
+        n.fromBufferAttribute(norm, i);
+        const radial = v.clone().normalize();
+        n.lerpVectors(flatUp, radial, PARAMS.normalBend).normalize();
+        norm.setXYZ(i, n.x, n.y, n.z);
+      }
+    }
+    norm.needsUpdate = true;
+  }
+  return merged;
+}
+
+// ─── Instanced flower head material (wind + SSS in shader) ──────────────────────
+const flowerHeadPrefix = `
+attribute float aFlowerIndex;
+attribute float aFlowerHeight;
+attribute float aRadialNorm;
+uniform float uFlowerTime;
+uniform float uFlowerWindDir;
+uniform float uFlowerWindSpeed;
+uniform float uFlowerWindStr;
+uniform float uWindPetalPhase;
+uniform float uMaxFlowerHeight;
+uniform float uPetalScale;
+varying float vHeightNorm;
+varying float vRadialNorm;
+vec3 flowerHeadWind(vec3 pos) {
+  float phase = uFlowerTime * uFlowerWindSpeed + aFlowerIndex * 0.5 + uFlowerWindDir;
+  float bend = sin(phase) * uFlowerWindStr * aFlowerHeight;
+  float micro = sin(phase * 2.3 + aFlowerIndex) * 0.2 * uFlowerWindStr * aFlowerHeight;
+  float amount = bend + micro;
+  pos.x += cos(uFlowerWindDir) * amount;
+  pos.z += sin(uFlowerWindDir) * amount;
+  return pos;
+}
+`;
+const flowerHeadVertSuffix = `
+  vHeightNorm = clamp(aFlowerHeight / max(uMaxFlowerHeight, 0.01), 0.0, 1.0);
+  vRadialNorm = aRadialNorm;
+`;
+const flowerHeadFragInject = `
+  float ndotl = dot(normal, vec3(0.0, 1.0, 0.0));
+  float backlight = max(0.0, -ndotl) * uSubsurfaceStrength;
+  diffuseColor.rgb += backlight * diffuseColor.rgb;
+  float occ = 1.0 - uGroundOcclusionStr * (1.0 - vHeightNorm);
+  diffuseColor.rgb *= occ;
+  diffuseColor.rgb = mix(diffuseColor.rgb, uGroundColor, uGroundColorBleed * (1.0 - vHeightNorm));
+  float n = fract(sin(dot(vUv * 8.0, vec2(12.9898, 78.233))) * 43758.5453);
+  diffuseColor.rgb *= 1.0 + (n - 0.5) * 2.0 * uPetalNoiseStr;
+`;
+
+// ─── Instanced stem material (bend at base + gradient) ───────────────────────────
+const stemBendPrefix = `
+attribute float aStemIndex;
+attribute float aStemHeight;
+uniform float uStemTime;
+uniform float uStemWindDir;
+uniform float uStemWindSpeed;
+uniform float uStemWindStr;
+uniform float uStemBaseBend;
+varying float vStemHeightNorm;
+vec3 stemBend(vec3 pos) {
+  float heightPct = pos.y + 0.5;
+  vStemHeightNorm = heightPct;
+  float topFactor = heightPct;
+  float baseBend = (1.0 - heightPct) * (1.0 - heightPct) * uStemBaseBend * aStemHeight;
+  float phase = uStemTime * uStemWindSpeed + aStemIndex * 0.5 + uStemWindDir;
+  float bend = sin(phase) * uStemWindStr * aStemHeight * topFactor * topFactor;
+  float micro = sin(phase * 2.3 + aStemIndex) * 0.15 * uStemWindStr * aStemHeight * topFactor;
+  float amount = bend + micro;
+  pos.x += cos(uStemWindDir) * amount + cos(uStemWindDir + 0.5) * baseBend;
+  pos.z += sin(uStemWindDir) * amount + sin(uStemWindDir + 0.5) * baseBend;
+  return pos;
+}
+`;
+const stemFragInject = `
+  diffuseColor.rgb = mix(uStemColorBase, uStemColorTop, vStemHeightNorm);
+`;
+
+// ─── Renderer ────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ─── Scene ───────────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x2a3a4a);
+scene.fog = new THREE.Fog(0x2a3a4a, 25, 80);
+
+const sun = new THREE.DirectionalLight(0xfff0d0, PARAMS.sunIntensity);
+scene.add(sun);
+const fillLight = new THREE.DirectionalLight(0xa0c0ff, PARAMS.fillLightIntensity);
+fillLight.position.set(-15, 10, -20);
+scene.add(fillLight);
+const ambLight = new THREE.AmbientLight(0x8090b0, PARAMS.ambIntensity);
+scene.add(ambLight);
+
+function applySun() {
+  const az = (PARAMS.sunAzimuth * Math.PI) / 180;
+  const el = (PARAMS.sunElevation * Math.PI) / 180;
+  sun.position.set(
+    Math.cos(el) * Math.sin(az) * 50,
+    Math.sin(el) * 50,
+    Math.cos(el) * Math.cos(az) * 50
+  );
+  sun.intensity = PARAMS.sunIntensity;
+  fillLight.intensity = PARAMS.fillLightIntensity;
+  fillLight.position.set(
+    -Math.cos(el) * Math.sin(az) * 30 - 5,
+    15,
+    -Math.cos(el) * Math.cos(az) * 30 - 10
+  );
+  ambLight.intensity = PARAMS.ambIntensity;
+  sun.color.setStyle("#fff0d0");
+  fillLight.color.setStyle("#a0c0ff");
+}
+applySun();
+
+const groundGeo = new THREE.PlaneGeometry(80, 80, 1, 1);
+const groundMat = new THREE.MeshStandardMaterial({
+  color: 0x3d5a3d,
+  roughness: 0.95,
+  metalness: 0,
+});
+const groundColor = new THREE.Color();
+groundColor.copy(groundMat.color);
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+scene.add(ground);
+
+const grid = new THREE.GridHelper(80, 40, 0x4a5a6a, 0x3a4a5a);
+grid.position.y = 0.01;
+scene.add(grid);
+
+function rebuildFlowers() {
+  if (!petalTex) return;
+
+  const { off, flowerIndex, flowerHeight, petalCounts, flowerRotation, colors, count } = getInstancedPositions(
+    PARAMS.flowerDensity,
+    PARAMS.fieldSize
+  );
+
+  const maxHeight = Math.max(...Array.from(flowerHeight));
+  const dummy = new THREE.Object3D();
+
+  const byPetalCount = {};
+  for (let i = 0; i < count; i++) {
+    const pc = Math.floor(petalCounts[i]);
+    if (!byPetalCount[pc]) byPetalCount[pc] = [];
+    byPetalCount[pc].push(i);
+  }
+
+  flowerHeadMeshes.forEach((m) => {
+    scene.remove(m);
+    m.geometry.dispose();
+    m.material.dispose();
+  });
+  flowerHeadMeshes = [];
+
+  const flowerHeadMat = new THREE.MeshStandardMaterial({
+    map: petalTex,
+    alphaMap: petalTex,
+    normalMap: petalNormalTex,
+    normalScale: new THREE.Vector2(PARAMS.normalMapStrength, PARAMS.normalMapStrength),
+    color: 0xffffff,
+    transparent: true,
+    alphaTest: 0.02,
+    alphaToCoverage: true,
+    side: THREE.DoubleSide,
+    depthWrite: true,
+    depthTest: true,
+    roughness: 0.85,
+    metalness: 0,
+  });
+  flowerHeadMat.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, {
+      uFlowerTime: { value: 0 },
+      uFlowerWindDir: { value: PARAMS.windDir },
+      uFlowerWindSpeed: { value: PARAMS.windSpeed },
+      uFlowerWindStr: { value: PARAMS.windStr },
+      uWindPetalPhase: { value: PARAMS.windPetalPhase },
+      uMaxFlowerHeight: { value: maxHeight },
+      uPetalScale: { value: PARAMS.petalScale },
+      uSubsurfaceStrength: { value: PARAMS.subsurfaceStrength },
+      uGroundColor: { value: groundColor },
+      uGroundOcclusionStr: { value: PARAMS.groundOcclusionStr },
+      uGroundColorBleed: { value: PARAMS.groundColorBleed },
+      uPetalColorBase: { value: new THREE.Color(PARAMS.petalColorBase) },
+      uPetalColorTip: { value: new THREE.Color(PARAMS.petalColorTip) },
+      uPetalGradientBlend: { value: PARAMS.petalGradientBlend },
+      uPetalNoiseStr: { value: PARAMS.petalNoiseStr },
+    });
+    shader.vertexShader = flowerHeadPrefix + shader.vertexShader.replace(
+      "#include <begin_vertex>",
+      "#include <begin_vertex>\n  transformed = flowerHeadWind(transformed);\n  " + flowerHeadVertSuffix.trim()
+    );
+    const gradInject = `
+  vec3 gradColor = mix(uPetalColorBase, uPetalColorTip, vRadialNorm);
+  diffuseColor.rgb = mix(uPetalColorBase, gradColor, uPetalGradientBlend);
+`;
+    shader.fragmentShader = "uniform vec3 uPetalColorBase;\nuniform vec3 uPetalColorTip;\nuniform float uPetalGradientBlend;\nvarying float vHeightNorm;\nvarying float vRadialNorm;\n" + shader.fragmentShader
+      .replace("#include <color_fragment>", "#include <color_fragment>\n" + gradInject)
+      .replace("#include <output_fragment>", flowerHeadFragInject + "\n#include <output_fragment>");
+    flowerHeadMat.userData.flowerShader = shader;
+  };
+
+  for (const [pcStr, indices] of Object.entries(byPetalCount)) {
+    const pc = parseInt(pcStr, 10);
+    const baseGeo = buildFlowerHeadGeometry(pc);
+    const instGeo = new THREE.InstancedBufferGeometry().copy(baseGeo);
+    instGeo.instanceCount = indices.length;
+    const idxArr = new Float32Array(indices.length);
+    const hArr = new Float32Array(indices.length);
+    indices.forEach((ii, j) => {
+      idxArr[j] = flowerIndex[ii];
+      hArr[j] = flowerHeight[ii];
+    });
+    instGeo.setAttribute("aFlowerIndex", new THREE.InstancedBufferAttribute(idxArr, 1));
+    instGeo.setAttribute("aFlowerHeight", new THREE.InstancedBufferAttribute(hArr, 1));
+    const mesh = new THREE.InstancedMesh(instGeo, flowerHeadMat, indices.length);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = 1;
+    const useGrad = PARAMS.petalGradientBlend > 0.01;
+    indices.forEach((ii, j) => {
+      dummy.position.set(off[ii * 3], flowerHeight[ii], off[ii * 3 + 1]);
+      dummy.rotation.set(0, flowerRotation[ii], 0);
+      dummy.scale.setScalar(1);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(j, dummy.matrix);
+      mesh.setColorAt(j, useGrad ? new THREE.Color(0xffffff) : colors[ii]);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.instanceColor.needsUpdate = true;
+    scene.add(mesh);
+    flowerHeadMeshes.push(mesh);
+    baseGeo.dispose();
+  }
+
+  // Center discs: separate InstancedMesh (solid circle, no petal alpha)
+  if (centerMesh) {
+    scene.remove(centerMesh);
+    centerMesh.geometry.dispose();
+    centerMesh.material.dispose();
+  }
+  const centerGeo = new THREE.SphereGeometry(
+    PARAMS.centerRadius,
+    12,
+    6,
+    0,
+    Math.PI * 2,
+    0,
+    Math.PI * 0.5
+  );
+  centerGeo.scale(1, Math.max(0.1, PARAMS.centerDomeHeight / Math.max(PARAMS.centerRadius, 0.01)), 1);
+  centerGeo.translate(0, 0.0005, 0);
+  const centerInstancedGeo = new THREE.InstancedBufferGeometry().copy(centerGeo);
+  centerInstancedGeo.instanceCount = count;
+  centerInstancedGeo.setAttribute("aFlowerIndex", new THREE.InstancedBufferAttribute(flowerIndex, 1));
+  centerInstancedGeo.setAttribute("aFlowerHeight", new THREE.InstancedBufferAttribute(flowerHeight, 1));
+  const centerMat = new THREE.MeshStandardMaterial({
+    color: PARAMS.centerColor,
+    normalMap: petalNormalTex,
+    normalScale: new THREE.Vector2(PARAMS.normalMapStrength * 0.5, PARAMS.normalMapStrength * 0.5),
+    roughness: 0.9,
+    metalness: 0,
+    side: THREE.DoubleSide,
+  });
+  centerMat.onBeforeCompile = (shader) => {
+    shader.uniforms.uFlowerTime = { value: 0 };
+    shader.uniforms.uFlowerWindDir = { value: PARAMS.windDir };
+    shader.uniforms.uFlowerWindSpeed = { value: PARAMS.windSpeed };
+    shader.uniforms.uFlowerWindStr = { value: PARAMS.windStr };
+    shader.vertexShader = flowerHeadPrefix + shader.vertexShader.replace(
+      "#include <begin_vertex>",
+      "#include <begin_vertex>\n  transformed = flowerHeadWind(transformed);"
+    );
+    centerMat.userData.centerShader = shader;
+  };
+  centerMesh = new THREE.InstancedMesh(centerInstancedGeo, centerMat, count);
+  centerMesh.frustumCulled = false;
+  centerMesh.renderOrder = -1;
+  for (let i = 0; i < count; i++) {
+    dummy.position.set(off[i * 3], flowerHeight[i], off[i * 3 + 1]);
+    dummy.rotation.set(0, flowerRotation[i], 0);
+    dummy.scale.setScalar(1);
+    dummy.updateMatrix();
+    centerMesh.setMatrixAt(i, dummy.matrix);
+  }
+  centerMesh.instanceMatrix.needsUpdate = true;
+  scene.add(centerMesh);
+
+  // Stems: InstancedMesh (gradient + base bend)
+  if (stemMesh) {
+    scene.remove(stemMesh);
+    stemMesh.geometry.dispose();
+    stemMesh.material.dispose();
+  }
+
+  const avgHeight = flowerHeight.reduce((a, b) => a + b, 0) / count;
+  const stemBaseGeo = new THREE.CylinderGeometry(
+    PARAMS.stemRadius * 1.1,
+    PARAMS.stemRadius,
+    1,
+    6,
+    16
+  );
+  const stemInstancedGeo = new THREE.InstancedBufferGeometry().copy(stemBaseGeo);
+  stemInstancedGeo.instanceCount = count;
+  stemInstancedGeo.setAttribute("aStemIndex", new THREE.InstancedBufferAttribute(flowerIndex, 1));
+  stemInstancedGeo.setAttribute("aStemHeight", new THREE.InstancedBufferAttribute(flowerHeight, 1));
+
+  const stemMat = new THREE.MeshStandardMaterial({
+    color: PARAMS.stemColor,
+    roughness: 0.95,
+    metalness: 0,
+  });
+  stemMat.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, {
+      uStemTime: { value: 0 },
+      uStemWindDir: { value: PARAMS.windDir },
+      uStemWindSpeed: { value: PARAMS.windSpeed },
+      uStemWindStr: { value: PARAMS.windStr },
+      uStemBaseBend: { value: PARAMS.stemBaseBend },
+      uStemColorBase: { value: new THREE.Color(PARAMS.stemColor) },
+      uStemColorTop: { value: new THREE.Color(PARAMS.stemColorTop) },
+    });
+    shader.vertexShader = stemBendPrefix + shader.vertexShader.replace(
+      "#include <begin_vertex>",
+      "#include <begin_vertex>\n  transformed = stemBend(transformed);"
+    );
+    shader.fragmentShader = "uniform vec3 uStemColorBase;\nuniform vec3 uStemColorTop;\nvarying float vStemHeightNorm;\n" + shader.fragmentShader.replace(
+      "#include <color_fragment>",
+      "#include <color_fragment>\n" + stemFragInject
+    );
+    stemMat.userData.stemShader = shader;
+  };
+  stemMesh = new THREE.InstancedMesh(stemInstancedGeo, stemMat, count);
+  stemMesh.frustumCulled = false;
+  for (let i = 0; i < count; i++) {
+    const h = flowerHeight[i];
+    dummy.position.set(off[i * 3], h / 2, off[i * 3 + 1]);
+    dummy.scale.set(1, h, 1);
+    dummy.rotation.set(0, flowerRotation[i], 0);
+    dummy.updateMatrix();
+    stemMesh.setMatrixAt(i, dummy.matrix);
+  }
+  stemMesh.instanceMatrix.needsUpdate = true;
+  scene.add(stemMesh);
+
+  if (leafMesh) {
+    scene.remove(leafMesh);
+    leafMesh.geometry.dispose();
+    leafMesh.material.dispose();
+  }
+  const leafScale = Math.max(0.01, PARAMS.stemLeafScale);
+  const leafGeo = new THREE.PlaneGeometry(1, 1, 1, 1);
+  leafGeo.scale(leafScale * 0.4, leafScale, 1);
+  leafGeo.translate(0, -0.5 * leafScale, 0);
+  leafGeo.rotateX(-Math.PI / 2);
+  const leafInstancedGeo = new THREE.InstancedBufferGeometry().copy(leafGeo);
+  leafInstancedGeo.instanceCount = count * 2;
+  const leafMat = new THREE.MeshStandardMaterial({
+    map: petalTex,
+    alphaMap: petalTex,
+    color: PARAMS.stemColor,
+    transparent: true,
+    alphaTest: 0.01,
+    roughness: 0.95,
+    metalness: 0,
+    side: THREE.DoubleSide,
+  });
+  leafMesh = new THREE.InstancedMesh(leafInstancedGeo, leafMat, count * 2);
+  leafMesh.frustumCulled = false;
+  leafMesh.renderOrder = 0;
+  const r = PARAMS.stemRadius * 1.05;
+  for (let i = 0; i < count; i++) {
+    const h = flowerHeight[i];
+    const stemX = off[i * 3];
+    const stemZ = off[i * 3 + 1];
+    for (let L = 0; L < 2; L++) {
+      const angle = hash(i * 47 + L * 13) * Math.PI * 2;
+      const stemY = h * (0.12 + hash(i * 53 + L * 17) * 0.38);
+      const tilt = (hash(i * 59 + L * 19) - 0.5) * 0.5;
+      dummy.position.set(
+        stemX + r * Math.cos(angle),
+        stemY,
+        stemZ + r * Math.sin(angle)
+      );
+      dummy.rotation.set(tilt, angle, 0);
+      dummy.scale.setScalar(1);
+      dummy.updateMatrix();
+      leafMesh.setMatrixAt(i * 2 + L, dummy.matrix);
+    }
+  }
+  leafMesh.instanceMatrix.needsUpdate = true;
+  scene.add(leafMesh);
+
+  stemBaseGeo.dispose();
+  centerGeo.dispose();
+  leafGeo.dispose();
+}
+
+// ─── GUI ──────────────────────────────────────────────────────────────────────
+const gui = new GUI({ title: "Flower Field", width: 260 });
+gui.domElement.style.cssText = "position:fixed;top:12px;right:12px;z-index:30;max-height:90vh;overflow-y:auto;";
+
+const fField = gui.addFolder("Field");
+fField.add(PARAMS, "flowerDensity", 1000, 15000, 500).onChange(rebuildFlowers);
+fField.add(PARAMS, "fieldSize", 10, 40, 2).onChange(rebuildFlowers);
+fField.add(PARAMS, "flowerHeight", 0.4, 1.2, 0.05).onChange(rebuildFlowers);
+fField.add(PARAMS, "colorVariation", 0, 0.2, 0.01).onChange(rebuildFlowers);
+fField.add(PARAMS, "showGrid").onChange((v) => { grid.visible = v; });
+
+const fFlower = gui.addFolder("Flower");
+fFlower.add(PARAMS, "petalCountMin", 3, 8, 1).onChange(rebuildFlowers);
+fFlower.add(PARAMS, "petalCountMax", 4, 12, 1).onChange(rebuildFlowers);
+fFlower.add(PARAMS, "petalScale", 0.12, 0.4, 0.02).onChange(rebuildFlowers);
+fFlower.add(PARAMS, "petalTilt", 0, 0.6, 0.02).onChange(rebuildFlowers);
+fFlower.add(PARAMS, "centerRadius", 0.04, 0.15, 0.01).onChange(rebuildFlowers);
+fFlower.add(PARAMS, "centerDomeHeight", 0.01, 0.06, 0.005).onChange(rebuildFlowers);
+fFlower.addColor(PARAMS, "petalColorBase").onChange(rebuildFlowers);
+fFlower.addColor(PARAMS, "petalColorTip").onChange(rebuildFlowers);
+fFlower.add(PARAMS, "petalGradientBlend", 0, 1, 0.05).onChange(rebuildFlowers);
+fFlower.addColor(PARAMS, "centerColor").onChange(rebuildFlowers);
+fFlower.add(PARAMS, "stemRadius", 0.005, 0.03, 0.002).onChange(rebuildFlowers);
+fFlower.add(PARAMS, "stemBaseBend", 0, 0.2, 0.01).onChange(rebuildFlowers);
+fFlower.add(PARAMS, "stemLeafScale", 0, 0.3, 0.02).onChange(rebuildFlowers);
+fFlower.addColor(PARAMS, "stemColor").onChange(rebuildFlowers);
+fFlower.addColor(PARAMS, "stemColorTop").onChange(rebuildFlowers);
+
+const fLight = gui.addFolder("Lighting");
+fLight.add(PARAMS, "sunAzimuth", 0, 360, 5).onChange(applySun);
+fLight.add(PARAMS, "sunElevation", 0, 90, 2).onChange(applySun);
+fLight.add(PARAMS, "sunIntensity", 0.5, 4, 0.1).onChange(applySun);
+fLight.add(PARAMS, "fillLightIntensity", 0, 1.5, 0.1).onChange(applySun);
+fLight.add(PARAMS, "ambIntensity", 0.2, 1.5, 0.1).onChange(applySun);
+
+const fRealism = gui.addFolder("Realism");
+fRealism.add(PARAMS, "subsurfaceStrength", 0, 0.8, 0.05);
+fRealism.add(PARAMS, "groundOcclusionStr", 0, 0.8, 0.05);
+fRealism.add(PARAMS, "groundColorBleed", 0, 0.4, 0.02);
+fRealism.add(PARAMS, "petalNoiseStr", 0, 0.2, 0.01);
+
+const fWind = gui.addFolder("Wind");
+fWind.add(PARAMS, "windDir", 0, Math.PI * 2, 0.1);
+fWind.add(PARAMS, "windSpeed", 0.2, 2, 0.1);
+fWind.add(PARAMS, "windStr", 0, 0.4, 0.02);
+fWind.add(PARAMS, "windPetalPhase", 0, 1, 0.1);
+
+// ─── Camera ──────────────────────────────────────────────────────────────────
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 200);
+camera.position.set(0, 18, 25);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.set(0, 0, 0);
+controls.update();
+
+grid.visible = PARAMS.showGrid;
+
+const clock = new THREE.Clock();
+
+// ─── Animation ────────────────────────────────────────────────────────────────
+function animate() {
+  requestAnimationFrame(animate);
+  const t = clock.getElapsedTime();
+
+  flowerHeadMeshes.forEach((m) => {
+    if (m?.material?.userData?.flowerShader?.uniforms) {
+      const u = m.material.userData.flowerShader.uniforms;
+      u.uFlowerTime.value = t;
+      u.uFlowerWindDir.value = PARAMS.windDir;
+      u.uFlowerWindSpeed.value = PARAMS.windSpeed;
+      u.uFlowerWindStr.value = PARAMS.windStr;
+      u.uSubsurfaceStrength.value = PARAMS.subsurfaceStrength;
+      u.uGroundOcclusionStr.value = PARAMS.groundOcclusionStr;
+      u.uGroundColorBleed.value = PARAMS.groundColorBleed;
+      u.uPetalColorBase.value.copy(new THREE.Color(PARAMS.petalColorBase));
+      u.uPetalColorTip.value.copy(new THREE.Color(PARAMS.petalColorTip));
+      u.uPetalGradientBlend.value = PARAMS.petalGradientBlend;
+      u.uPetalNoiseStr.value = PARAMS.petalNoiseStr;
+    }
+  });
+  if (centerMesh?.material?.userData?.centerShader?.uniforms) {
+    const u = centerMesh.material.userData.centerShader.uniforms;
+    u.uFlowerTime.value = t;
+    u.uFlowerWindDir.value = PARAMS.windDir;
+    u.uFlowerWindSpeed.value = PARAMS.windSpeed;
+    u.uFlowerWindStr.value = PARAMS.windStr;
+  }
+  if (stemMesh?.material?.userData?.stemShader?.uniforms) {
+    const u = stemMesh.material.userData.stemShader.uniforms;
+    u.uStemTime.value = t;
+    u.uStemWindDir.value = PARAMS.windDir;
+    u.uStemWindSpeed.value = PARAMS.windSpeed;
+    u.uStemWindStr.value = PARAMS.windStr;
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Flower Showcase</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1a1a2e; overflow: hidden; font-family: "SF Mono", "Fira Code", monospace; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #info {
+      position: fixed; bottom: 12px; left: 12px; z-index: 20;
+      background: rgba(0,0,0,0.6); color: #b0d890;
+      padding: 8px 12px; border-radius: 6px; font-size: 11px; line-height: 1.6;
+    }
+    #info span { color: #e0f0c0; font-weight: 600; }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+<div id="info">
+  <span>Flower Showcase</span> — petals, stem, wind<br>
+  Orbit: <span>left-drag</span> &nbsp; Zoom: <span>scroll</span>
+</div>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+import GUI from "three/addons/libs/lil-gui.module.min.js";
+
+// ─── PARAMS ──────────────────────────────────────────────────────────────────
+const PARAMS = {
+  petalCount: 5,
+  petalScale: 0.5,
+  petalTilt: 0.25,
+  petalVariation: 0.08,
+  petalColor: "#ff88aa",
+  centerColor: "#ffdd44",
+  centerRadius: 0.14,
+  stemColor: "#4a7c3e",
+  stemRadius: 0.02,
+  flowerCount: 5,
+  flowerSpread: 4,
+  flowerHeight: 1.2,
+  normalBend: 0.25,
+  normalMapStrength: 0.4,
+  sunAzimuth: 225,
+  sunElevation: 50,
+  sunIntensity: 2.0,
+  ambIntensity: 0.6,
+  windDir: 0.7,
+  windSpeed: 1.2,
+  windStr: 0.15,
+};
+
+// ─── Texture ──────────────────────────────────────────────────────────────────
+const texLoader = new THREE.TextureLoader();
+let petalTex = null;
+texLoader.load(
+  "./textures/petal-alpha.png",
+  (tex) => {
+    petalTex = tex;
+    rebuildFlowers();
+  },
+  undefined,
+  (err) => console.error("Petal texture failed to load:", err)
+);
+
+function createPetalNormalMap(size = 64, domeStrength = 0.15) {
+  const data = new Uint8Array(size * size * 4);
+  const half = size / 2;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const u = (x - half) / half;
+      const v = (y - half) / half;
+      const nx = -u * domeStrength;
+      const ny = -v * domeStrength;
+      const nz = Math.sqrt(Math.max(0, 1 - nx * nx - ny * ny));
+      const i = (y * size + x) * 4;
+      data[i] = (nx * 0.5 + 0.5) * 255;
+      data[i + 1] = (ny * 0.5 + 0.5) * 255;
+      data[i + 2] = (nz * 0.5 + 0.5) * 255;
+      data[i + 3] = 255;
+    }
+  }
+  const tex = new THREE.DataTexture(data, size, size);
+  tex.format = THREE.RGBAFormat;
+  tex.type = THREE.UnsignedByteType;
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+const petalNormalTex = createPetalNormalMap(64, 0.2);
+
+const petalGeo = new THREE.PlaneGeometry(1, 1, 1, 1);
+
+// ─── Flexible stem material (vertex bend like susuki) ──────────────────────────
+const stemBendPrefix = `
+uniform float uStemTime;
+uniform float uStemWindDir;
+uniform float uStemWindSpeed;
+uniform float uStemWindStr;
+uniform float uStemHeight;
+uniform float uStemIndex;
+vec3 stemBend(vec3 pos) {
+  float heightPct = (pos.y + uStemHeight * 0.5) / uStemHeight;
+  float topFactor = heightPct;
+  float phase = uStemTime * uStemWindSpeed + uStemIndex * 0.5 + uStemWindDir;
+  float bend = sin(phase) * uStemWindStr * uStemHeight * topFactor * topFactor;
+  float micro = sin(phase * 2.3 + uStemIndex) * 0.15 * uStemWindStr * uStemHeight * topFactor;
+  float amount = bend + micro;
+  pos.x += cos(uStemWindDir) * amount;
+  pos.z += sin(uStemWindDir) * amount;
+  return pos;
+}
+`;
+
+function createStemMaterial(stemColor, flowerIndex, flowerHeight) {
+  const mat = new THREE.MeshStandardMaterial({
+    color: stemColor,
+    roughness: 0.95,
+    metalness: 0,
+  });
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uStemTime = { value: 0 };
+    shader.uniforms.uStemWindDir = { value: PARAMS.windDir };
+    shader.uniforms.uStemWindSpeed = { value: PARAMS.windSpeed };
+    shader.uniforms.uStemWindStr = { value: PARAMS.windStr };
+    shader.uniforms.uStemHeight = { value: flowerHeight };
+    shader.uniforms.uStemIndex = { value: flowerIndex };
+    shader.vertexShader = stemBendPrefix + shader.vertexShader.replace(
+      "#include <begin_vertex>",
+      "#include <begin_vertex>\n  transformed = stemBend(transformed);"
+    );
+    mat.userData.stemShader = shader;
+  };
+  return mat;
+}
+
+// ─── Renderer ────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ─── Scene ───────────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x2a3a4a);
+scene.fog = new THREE.Fog(0x2a3a4a, 15, 50);
+
+const sun = new THREE.DirectionalLight(0xfff0d0, PARAMS.sunIntensity);
+scene.add(sun);
+const ambLight = new THREE.AmbientLight(0x8090b0, PARAMS.ambIntensity);
+scene.add(ambLight);
+
+function applySun() {
+  const az = (PARAMS.sunAzimuth * Math.PI) / 180;
+  const el = (PARAMS.sunElevation * Math.PI) / 180;
+  sun.position.set(
+    Math.cos(el) * Math.sin(az) * 20,
+    Math.sin(el) * 20,
+    Math.cos(el) * Math.cos(az) * 20
+  );
+  sun.intensity = PARAMS.sunIntensity;
+  ambLight.intensity = PARAMS.ambIntensity;
+  sun.color.setStyle("#fff0d0");
+}
+applySun();
+
+const groundGeo = new THREE.PlaneGeometry(40, 40, 1, 1);
+const groundMat = new THREE.MeshStandardMaterial({
+  color: 0x3d5a3d,
+  roughness: 0.95,
+  metalness: 0,
+});
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+scene.add(ground);
+
+const grid = new THREE.GridHelper(40, 20, 0x4a5a6a, 0x3a4a5a);
+grid.position.y = 0.01;
+scene.add(grid);
+
+// ─── Flower creation ─────────────────────────────────────────────────────────
+function bendPetalNormals(geometry, bendAmount) {
+  const pos = geometry.attributes.position;
+  const norm = geometry.attributes.normal;
+  if (!pos || !norm) return;
+  const flatUp = new THREE.Vector3(0, -1, 0);
+  const v = new THREE.Vector3();
+  const n = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i);
+    const len = v.length();
+    if (len < 0.01) continue;
+    n.fromBufferAttribute(norm, i);
+    const radial = v.clone().normalize();
+    n.lerpVectors(flatUp, radial, bendAmount).normalize();
+    norm.setXYZ(i, n.x, n.y, n.z);
+  }
+  norm.needsUpdate = true;
+}
+
+function createPetalMaterial(color) {
+  return new THREE.MeshStandardMaterial({
+    map: petalTex,
+    alphaMap: petalTex,
+    color: color,
+    transparent: true,
+    alphaTest: 0.01,
+    side: THREE.DoubleSide,
+    depthWrite: true,
+    roughness: 0.85,
+    metalness: 0,
+  });
+}
+
+function createFlower(options = {}) {
+  const {
+    petalCount = PARAMS.petalCount,
+    petalScale = PARAMS.petalScale,
+    petalTilt = PARAMS.petalTilt,
+    petalVariation = PARAMS.petalVariation,
+    petalColor = PARAMS.petalColor,
+    centerColor = PARAMS.centerColor,
+    centerRadius = PARAMS.centerRadius,
+    stemColor = PARAMS.stemColor,
+    stemRadius = PARAMS.stemRadius,
+    flowerHeight = PARAMS.flowerHeight,
+    flowerIndex = 0,
+  } = options;
+
+  const group = new THREE.Group();
+  group.rotation.x = Math.PI;
+  group.userData.flowerIndex = flowerIndex;
+
+  const geometriesToMerge = [];
+
+  for (let i = 0; i < petalCount; i++) {
+    const baseAngle = (i / petalCount) * Math.PI * 2;
+    const vary = ((i * 7 + flowerIndex) % 100) / 100;
+    const angleOffset = (vary - 0.5) * 2 * petalVariation;
+    const scaleMul = 1 + (vary - 0.5) * 2 * petalVariation;
+    const angle = baseAngle + angleOffset;
+
+    const petalGroup = new THREE.Group();
+    petalGroup.rotation.y = angle;
+
+    const petal = new THREE.Mesh(petalGeo.clone(), createPetalMaterial(petalColor));
+    petal.scale.set(petalScale * scaleMul, petalScale * scaleMul, 1);
+    petal.rotation.x = -Math.PI / 2 + petalTilt;
+    petal.position.set(0, 0.001, 0.5 * petalScale);
+
+    petalGroup.add(petal);
+    group.add(petalGroup);
+  }
+
+  const center = new THREE.Mesh(
+    new THREE.CircleGeometry(centerRadius, 16),
+    new THREE.MeshStandardMaterial({ color: centerColor })
+  );
+  center.rotation.x = -Math.PI / 2;
+  center.position.y = 0.0005;
+  group.add(center);
+
+  group.updateMatrixWorld(true);
+
+  const groupInv = group.matrixWorld.clone().invert();
+
+  group.traverse((child) => {
+    if (child.isMesh && child.material.alphaMap === petalTex) {
+      const geo = child.geometry
+        .clone()
+        .applyMatrix4(groupInv.clone().multiply(child.matrixWorld));
+      geometriesToMerge.push(geo);
+    }
+  });
+
+  const mergedGeo = mergeGeometries(geometriesToMerge);
+  geometriesToMerge.forEach((g) => g.dispose());
+
+  bendPetalNormals(mergedGeo, PARAMS.normalBend);
+
+  const mergedMat = new THREE.MeshStandardMaterial({
+    map: petalTex,
+    alphaMap: petalTex,
+    normalMap: petalNormalTex,
+    normalScale: new THREE.Vector2(
+      PARAMS.normalMapStrength,
+      PARAMS.normalMapStrength
+    ),
+    color: petalColor,
+    transparent: true,
+    alphaTest: 0.01,
+    side: THREE.DoubleSide,
+    depthWrite: true,
+    roughness: 0.85,
+    metalness: 0,
+  });
+
+  const flowerMesh = new THREE.Mesh(mergedGeo, mergedMat);
+
+  const flowerHeadGroup = new THREE.Group();
+  flowerHeadGroup.add(flowerMesh);
+
+  const centerMat = new THREE.MeshStandardMaterial({
+    color: centerColor,
+    normalMap: petalNormalTex,
+    normalScale: new THREE.Vector2(
+      PARAMS.normalMapStrength * 0.5,
+      PARAMS.normalMapStrength * 0.5
+    ),
+    roughness: 0.9,
+    metalness: 0,
+    side: THREE.DoubleSide,
+  });
+  const centerMesh = new THREE.Mesh(
+    new THREE.CircleGeometry(centerRadius, 16),
+    centerMat
+  );
+  centerMesh.rotation.x = -Math.PI / 2;
+  centerMesh.position.y = 0.0005;
+  centerMesh.renderOrder = -1;
+  flowerHeadGroup.add(centerMesh);
+
+  while (group.children.length) group.remove(group.children[0]);
+  group.add(flowerHeadGroup);
+
+  group.userData.flowerHeadGroup = flowerHeadGroup;
+  group.userData.flowerHeight = flowerHeight;
+
+  return group;
+}
+
+// ─── Stems (scene-level so they render; flowers have rotation that hid them) ───
+const stemsGroup = new THREE.Group();
+scene.add(stemsGroup);
+
+function rebuildStems() {
+  while (stemsGroup.children.length) stemsGroup.remove(stemsGroup.children[0]);
+  const stemGeo = new THREE.CylinderGeometry(
+    PARAMS.stemRadius * 1.1,
+    PARAMS.stemRadius,
+    PARAMS.flowerHeight,
+    6,
+    16
+  );
+  for (let i = 0; i < PARAMS.flowerCount; i++) {
+    const angle = (i / PARAMS.flowerCount) * Math.PI * 2 + 0.3;
+    const r = PARAMS.flowerSpread * (0.5 + ((i * 0.618) % 1) * 0.5);
+    const x = Math.cos(angle) * r;
+    const z = Math.sin(angle) * r;
+    const stemMat = createStemMaterial(PARAMS.stemColor, i, PARAMS.flowerHeight);
+    const stem = new THREE.Mesh(stemGeo.clone(), stemMat);
+    stem.position.set(x, PARAMS.flowerHeight / 2, z);
+    stemsGroup.add(stem);
+  }
+}
+
+// ─── Flowers group ────────────────────────────────────────────────────────────
+const flowersGroup = new THREE.Group();
+scene.add(flowersGroup);
+
+function rebuildFlowers() {
+  if (!petalTex) return;
+  while (flowersGroup.children.length) {
+    flowersGroup.remove(flowersGroup.children[0]);
+  }
+  rebuildStems();
+
+  for (let i = 0; i < PARAMS.flowerCount; i++) {
+    const angle = (i / PARAMS.flowerCount) * Math.PI * 2 + 0.3;
+    const r = PARAMS.flowerSpread * (0.5 + ((i * 0.618) % 1) * 0.5);
+    const x = Math.cos(angle) * r;
+    const z = Math.sin(angle) * r;
+
+    const flower = createFlower({ flowerIndex: i });
+    flower.position.set(x, PARAMS.flowerHeight, z);
+    flowersGroup.add(flower);
+  }
+}
+
+// ─── Update colors (rebuild needed since we use vertex colors in merged mesh)
+function updateFlowerColors() {
+  rebuildFlowers();
+}
+
+// ─── GUI ──────────────────────────────────────────────────────────────────────
+const gui = new GUI({ title: "Flowers", width: 260 });
+gui.domElement.style.cssText =
+  "position:fixed;top:12px;right:12px;z-index:30;max-height:90vh;overflow-y:auto;";
+
+gui.add(PARAMS, "petalCount", 3, 12, 1).onChange(rebuildFlowers);
+gui.add(PARAMS, "petalScale", 0.2, 0.8, 0.05).onChange(rebuildFlowers);
+gui.add(PARAMS, "petalTilt", 0, 0.6, 0.02).onChange(rebuildFlowers);
+gui.add(PARAMS, "petalVariation", 0, 0.2, 0.01).onChange(rebuildFlowers);
+gui.add(PARAMS, "normalBend", 0, 0.6, 0.02).onChange(rebuildFlowers);
+gui.add(PARAMS, "normalMapStrength", 0, 1, 0.05).onChange(rebuildFlowers);
+gui.addColor(PARAMS, "petalColor").onChange(updateFlowerColors);
+gui.addColor(PARAMS, "centerColor").onChange(updateFlowerColors);
+gui.add(PARAMS, "centerRadius", 0.02, 0.2, 0.01).onChange(rebuildFlowers);
+gui.add(PARAMS, "flowerCount", 1, 15, 1).onChange(rebuildFlowers);
+gui.add(PARAMS, "flowerSpread", 1, 10, 0.5).onChange(rebuildFlowers);
+gui.add(PARAMS, "flowerHeight", 0.3, 2.0, 0.05).onChange(rebuildFlowers);
+gui.add(PARAMS, "stemRadius", 0.005, 0.08, 0.005).onChange(rebuildStems);
+gui.addColor(PARAMS, "stemColor").onChange(rebuildStems);
+
+const fLight = gui.addFolder("Lighting");
+fLight.add(PARAMS, "sunAzimuth", 0, 360, 5).onChange(applySun);
+fLight.add(PARAMS, "sunElevation", 0, 90, 2).onChange(applySun);
+fLight.add(PARAMS, "sunIntensity", 0.5, 4, 0.1).onChange(applySun);
+fLight.add(PARAMS, "ambIntensity", 0.2, 1.5, 0.1).onChange(applySun);
+
+const fWind = gui.addFolder("Wind");
+fWind.add(PARAMS, "windDir", 0, Math.PI * 2, 0.1);
+fWind.add(PARAMS, "windSpeed", 0.2, 2, 0.1);
+fWind.add(PARAMS, "windStr", 0, 0.4, 0.02);
+
+// ─── Camera ──────────────────────────────────────────────────────────────────
+const camera = new THREE.PerspectiveCamera(
+  50,
+  window.innerWidth / window.innerHeight,
+  0.1,
+  100
+);
+camera.position.set(0, 6, 8);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.set(0, 0, 0);
+controls.update();
+
+const clock = new THREE.Clock();
+
+// ─── Animation ────────────────────────────────────────────────────────────────
+function animate() {
+  requestAnimationFrame(animate);
+  const t = clock.getElapsedTime();
+  flowersGroup.children.forEach((flower, i) => {
+    const phase = t * PARAMS.windSpeed + i * 0.5 + PARAMS.windDir;
+    const bend = Math.sin(phase) * PARAMS.windStr;
+    const micro = Math.sin(phase * 2.3 + i) * 0.15 * PARAMS.windStr;
+    const amount = (bend + micro) * (flower.userData.flowerHeight ?? PARAMS.flowerHeight);
+    const fhg = flower.userData.flowerHeadGroup;
+    if (fhg) {
+      const dx = Math.cos(PARAMS.windDir) * amount;
+      const dz = Math.sin(PARAMS.windDir) * amount;
+      fhg.position.x = dx;
+      fhg.position.z = -dz;
+      const tilt = amount * 0.6;
+      fhg.rotation.x = tilt * Math.cos(PARAMS.windDir);
+      fhg.rotation.z = -tilt * Math.sin(PARAMS.windDir);
+    }
+  });
+  stemsGroup.children.forEach((stem) => {
+    const shader = stem.material?.userData?.stemShader;
+    if (shader?.uniforms) {
+      shader.uniforms.uStemTime.value = t;
+      shader.uniforms.uStemWindDir.value = PARAMS.windDir;
+      shader.uniforms.uStemWindSpeed.value = PARAMS.windSpeed;
+      shader.uniforms.uStemWindStr.value = PARAMS.windStr;
+    }
+  });
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>

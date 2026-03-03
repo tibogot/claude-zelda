@@ -131,6 +131,7 @@
       import { createNpc } from "./npc.js";
       import { createEnemy } from "./enemy.js";
       import { createFloatingLeaves } from "./floating-leaves.js";
+      import { createFlowingLines } from "./flowing-lines.js";
       import { PARAMS } from "./params.js";
       import { PI } from "./constants.js";
       import { createTileMaterial } from "./tileMaterial.js";
@@ -213,6 +214,20 @@
         },
         bridge1: { enabled: false },
         bridge2: { enabled: false },
+        flowingLines: {
+          enabled: false,
+          lineCount: 8,
+          lineLength: 12,
+          lineWidth: 0.15,
+          segments: 20,
+          heightOffset: 0.3,
+          verticalWave: 0.08,
+          animationSpeed: 1,
+          pathRadius: 25,
+          pathFrequency: 0.8,
+          lineColor: "#a8d8ea",
+          lineOpacity: 0.7,
+        },
         enemies: {
           enabled: true,
           speed: 2,
@@ -831,6 +846,31 @@
         churchRoof.receiveShadow = true;
         churchGroup.add(churchRoof);
 
+        // Interior surfaces — dark material (ignores lights = real enclosed darkness)
+        const interiorInset = 0.35;
+        const interiorMat = new THREE.MeshBasicMaterial({
+          color: 0x0a0a0a,
+        });
+        const addInteriorPlane = (w, h, x, y, z, rotX, rotY) => {
+          const plane = new THREE.Mesh(
+            new THREE.PlaneGeometry(w, h),
+            interiorMat,
+          );
+          plane.rotation.x = rotX ?? 0;
+          plane.rotation.y = rotY ?? 0;
+          plane.position.set(x, y, z);
+          churchGroup.add(plane);
+        };
+        const innerS = CHURCH_S - interiorInset * 2;
+        addInteriorPlane(innerS, innerS, 0, 0.02, 0, -PI / 2, 0);
+        addInteriorPlane(innerS, innerS, 0, CHURCH_H - 0.02, 0, PI / 2, 0);
+        addInteriorPlane(innerS, CHURCH_H - 0.1, 0, CHURCH_H / 2, -HS + interiorInset, 0, 0);
+        addInteriorPlane(innerS, CHURCH_H, -HS + interiorInset, CHURCH_H / 2, 0, 0, PI / 2);
+        addInteriorPlane(innerS, CHURCH_H, HS - interiorInset, CHURCH_H / 2, 0, 0, -PI / 2);
+        addInteriorPlane(doorSide - 0.1, doorH - 0.1, -HS + doorSide / 2, doorH / 2, HS - interiorInset, 0, PI);
+        addInteriorPlane(doorSide - 0.1, doorH - 0.1, HS - doorSide / 2, doorH / 2, HS - interiorInset, 0, PI);
+        addInteriorPlane(innerS, CHURCH_H - doorH - 0.1, 0, doorH + (CHURCH_H - doorH) / 2, HS - interiorInset, 0, PI);
+
         scene.add(churchGroup);
 
         // ── SKY ──
@@ -937,6 +977,24 @@
           terrainFloorOffset: parkourParams.foliage.terrainFloorOffset,
           getTerrainHeight: () => FLOOR_Y,
           windParams,
+        });
+
+        // ── FLOWING LINES ──
+        const flowing = createFlowingLines({
+          scene,
+          getTerrainHeight: (x, z) => FLOOR_Y,
+          enabled: parkourParams.flowingLines.enabled,
+          lineCount: parkourParams.flowingLines.lineCount,
+          lineLength: parkourParams.flowingLines.lineLength,
+          lineWidth: parkourParams.flowingLines.lineWidth,
+          segments: parkourParams.flowingLines.segments,
+          heightOffset: parkourParams.flowingLines.heightOffset,
+          verticalWave: parkourParams.flowingLines.verticalWave,
+          animationSpeed: parkourParams.flowingLines.animationSpeed,
+          pathRadius: parkourParams.flowingLines.pathRadius,
+          pathFrequency: parkourParams.flowingLines.pathFrequency,
+          lineColor: parkourParams.flowingLines.lineColor,
+          lineOpacity: parkourParams.flowingLines.lineOpacity,
         });
 
         // ── PHYSICS ──
@@ -2337,6 +2395,77 @@
           label: "floor offset",
         });
 
+        const flowingFolder = pane.addFolder({
+          title: "Flowing Lines",
+          expanded: true,
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "enabled", {
+          label: "enable",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "lineCount", {
+          min: 1,
+          max: 24,
+          step: 1,
+          label: "count",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "lineLength", {
+          min: 4,
+          max: 30,
+          step: 1,
+          label: "length",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "lineWidth", {
+          min: 0.05,
+          max: 0.5,
+          step: 0.01,
+          label: "width",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "segments", {
+          min: 8,
+          max: 40,
+          step: 2,
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "heightOffset", {
+          min: 0,
+          max: 2,
+          step: 0.1,
+          label: "height offset",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "verticalWave", {
+          min: 0,
+          max: 0.3,
+          step: 0.01,
+          label: "vertical wave",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "animationSpeed", {
+          min: 0.2,
+          max: 3,
+          step: 0.1,
+          label: "speed",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "pathRadius", {
+          min: 10,
+          max: 80,
+          step: 5,
+          label: "path radius",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "pathFrequency", {
+          min: 0.2,
+          max: 2,
+          step: 0.1,
+          label: "path frequency",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "lineColor", {
+          view: "color",
+          label: "color",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "lineOpacity", {
+          min: 0.2,
+          max: 1,
+          step: 0.05,
+          label: "opacity",
+        });
+
         const npcFolder = pane.addFolder({ title: "NPC", expanded: true });
         npcFolder.addBinding(parkourParams.npc, "enabled", {
           label: "enabled",
@@ -3082,6 +3211,19 @@ moveState: ${d.moveState ?? "?"}</pre>`
           leaves.params.terrainFloorOffset =
             parkourParams.foliage.terrainFloorOffset;
           leaves.update();
+
+          flowing.params.enabled = parkourParams.flowingLines.enabled;
+          flowing.params.heightOffset = parkourParams.flowingLines.heightOffset;
+          flowing.params.verticalWave = parkourParams.flowingLines.verticalWave;
+          flowing.params.animationSpeed = parkourParams.flowingLines.animationSpeed;
+          flowing.params.pathRadius = parkourParams.flowingLines.pathRadius;
+          flowing.params.pathFrequency = parkourParams.flowingLines.pathFrequency;
+          flowing.group.visible = parkourParams.flowingLines.enabled;
+          flowing.setParams({
+            lineColor: parkourParams.flowingLines.lineColor,
+            lineOpacity: parkourParams.flowingLines.lineOpacity,
+          });
+          flowing.update(elapsed);
 
           // Smooth character visual + camera to filter physics jitter (ground appears to shake otherwise)
           const inAir = !player.state.isGrounded;

@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fake God Rays Showcase — Mesh-based (nemutas style)</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0a12; overflow: hidden; font-family: "SF Mono", "Fira Code", monospace; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #info {
+      position: fixed; bottom: 12px; left: 12px; z-index: 20;
+      background: rgba(0,0,0,0.6); color: #ffd89b;
+      padding: 8px 12px; border-radius: 6px; font-size: 11px; line-height: 1.6;
+    }
+    #info span { color: #ffe4a8; font-weight: 600; }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+      "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+      "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+<div id="info">
+  <span>Fake God Rays</span> — nemutas / Anderson Mancini style<br>
+  Cone meshes + Fresnel + Sparkles &bull; Orbit: <span>left-drag</span> &nbsp; Zoom: <span>scroll</span>
+</div>
+
+<script type="module">
+import * as THREE from "three";
+import { WebGPURenderer } from "three/webgpu";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import {
+  Fn,
+  uniform,
+  float,
+  vec3,
+  vec4,
+  positionWorld,
+  positionLocal,
+  positionGeometry,
+  cameraPosition,
+  normalWorld,
+  normalize,
+  dot,
+  pow,
+  mix,
+  sin,
+  smoothstep,
+  uv,
+  instanceIndex,
+} from "three/tsl";
+import GUI from "three/addons/libs/lil-gui.module.min.js";
+
+// ─── PARAMS ──────────────────────────────────────────────────────────────────
+const PARAMS = {
+  sparkleCount: 8000,
+  sparkleSize: 0.08,
+  sparkleColor: "#fff9e6",
+  sparkleOpacity: 0.6,
+  lightProgress: 0.7,
+  rayCount: 12,
+  rayLength: 25,
+  rayWidth: 5,
+  rayFalloff: 1.8,
+  fresnelPower: 2.5,
+  fresnelScale: 0.08,
+  glowColor: "#fff9d0",
+  rayColor: "#fff9e0",
+  groundColor: "#1a2a1a",
+  fogColor: "#0f1520",
+  fogNear: 15,
+  fogFar: 60,
+};
+
+// ─── Renderer ────────────────────────────────────────────────────────────────
+const renderer = new WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+// ─── Scene ───────────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(PARAMS.fogColor);
+scene.fog = new THREE.Fog(PARAMS.fogColor, PARAMS.fogNear, PARAMS.fogFar);
+
+const sun = new THREE.DirectionalLight(0xfff0d0, 1.8);
+scene.add(sun);
+const ambLight = new THREE.AmbientLight(0x6080a0, 0.5);
+scene.add(ambLight);
+
+const groundGeo = new THREE.PlaneGeometry(40, 40, 1, 1);
+const groundMat = new THREE.MeshStandardMaterial({
+  color: PARAMS.groundColor,
+  roughness: 0.95,
+  metalness: 0,
+});
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+scene.add(ground);
+
+// ─── Center object with Fresnel glow (statue-like) ────────────────────────────
+const uTime = uniform(0);
+const uLightProgress = uniform(PARAMS.lightProgress);
+const uFresnelPower = uniform(PARAMS.fresnelPower);
+const uFresnelScale = uniform(PARAMS.fresnelScale);
+const uGlowColor = uniform(new THREE.Color(PARAMS.glowColor).convertSRGBToLinear());
+
+const torusGeo = new THREE.TorusGeometry(0.8, 0.25, 32, 48);
+const glowMat = new THREE.MeshBasicNodeMaterial({
+  transparent: true,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+});
+
+// Fresnel: pow(1 + dot(eye, normal), power) — high at rim, low at center (nemutas style)
+glowMat.outputNode = Fn(() => {
+  const viewDir = normalize(cameraPosition.sub(positionWorld));
+  const NdotV = dot(normalWorld, viewDir);
+  const fresnel = pow(float(1).add(NdotV), uFresnelPower);
+  const a = pow(fresnel.mul(uFresnelScale), float(1.2));
+  const col = uGlowColor.mul(fresnel);
+  return vec4(col, a.mul(uLightProgress));
+})();
+
+const glowMesh = new THREE.Mesh(torusGeo, glowMat);
+glowMesh.position.y = 1.2;
+glowMesh.renderOrder = 1;
+scene.add(glowMesh);
+
+// Base mesh (solid, behind glow)
+const baseMat = new THREE.MeshStandardMaterial({
+  color: 0x2a3a2a,
+  roughness: 0.9,
+  metalness: 0.1,
+});
+const baseMesh = new THREE.Mesh(torusGeo.clone(), baseMat);
+baseMesh.position.copy(glowMesh.position);
+scene.add(baseMesh);
+
+// ─── Sparkles (instanced particles) ───────────────────────────────────────────
+const SPARKLE_COUNT = PARAMS.sparkleCount;
+const sparkleGeo = new THREE.PlaneGeometry(1, 1, 1, 1);
+
+const uSparkleSize = uniform(PARAMS.sparkleSize);
+const uSparkleColor = uniform(new THREE.Color(PARAMS.sparkleColor).convertSRGBToLinear());
+const uSparkleOpacity = uniform(PARAMS.sparkleOpacity);
+
+const sparkleMat = new THREE.MeshBasicNodeMaterial({
+  transparent: true,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+  blending: THREE.AdditiveBlending,
+});
+
+sparkleMat.outputNode = Fn(() => {
+  const pulse = sin(uTime.add(instanceIndex.toFloat().mul(0.1))).mul(0.5).add(0.5);
+  const alpha = uSparkleOpacity.mul(pulse);
+  return vec4(uSparkleColor, alpha);
+})();
+
+const sparkles = new THREE.InstancedMesh(sparkleGeo, sparkleMat, SPARKLE_COUNT);
+sparkles.frustumCulled = false;
+sparkles.renderOrder = 2;
+
+const dummy = new THREE.Object3D();
+const rng = () => Math.random();
+for (let i = 0; i < SPARKLE_COUNT; i++) {
+  const radius = 2 + rng() * 8;
+  const theta = rng() * Math.PI * 2;
+  const y = rng() * 4 + 0.5;
+  dummy.position.set(
+    Math.cos(theta) * radius,
+    y,
+    Math.sin(theta) * radius,
+  );
+  dummy.scale.setScalar(0.04 + rng() * 0.06);
+  dummy.rotation.set(rng() * Math.PI, rng() * Math.PI, rng() * Math.PI);
+  dummy.updateMatrix();
+  sparkles.setMatrixAt(i, dummy.matrix);
+}
+sparkles.instanceMatrix.needsUpdate = true;
+scene.add(sparkles);
+
+// ─── Sun position ─────────────────────────────────────────────────────────────
+function applySun() {
+  const progress = PARAMS.lightProgress;
+  const el = Math.PI * 0.35;
+  const az = Math.PI * 0.25 + progress * Math.PI * 0.5;
+  sun.position.set(
+    Math.cos(el) * Math.sin(az) * 20,
+    Math.sin(el) * 20,
+    Math.cos(el) * Math.cos(az) * 20,
+  );
+}
+
+applySun();
+
+// ─── God rays: cone meshes with Fresnel shader (nemutas / Anderson Mancini) ───
+// The actual god rays are CONE geometry with the Fresnel material — not sparkles.
+// Cones emanate from the sun position and create visible light beams.
+const rayMat = new THREE.MeshBasicNodeMaterial({
+  transparent: true,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+  blending: THREE.AdditiveBlending,
+});
+
+const uRayColor = uniform(new THREE.Color(PARAMS.rayColor).convertSRGBToLinear());
+const uRayLength = uniform(PARAMS.rayLength);
+const uRayFalloff = uniform(PARAMS.rayFalloff);
+rayMat.outputNode = Fn(() => {
+  const viewDir = normalize(cameraPosition.sub(positionWorld));
+  const NdotV = dot(normalWorld, viewDir);
+  const fresnel = pow(float(1).add(NdotV), uFresnelPower);
+  const a = pow(fresnel.mul(uFresnelScale), float(1.2));
+
+  const tipToBase = positionGeometry.y.div(uRayLength).add(0.5).clamp();
+  const axialFalloff = pow(tipToBase, uRayFalloff);
+  const aWithFalloff = a.mul(axialFalloff).mul(uLightProgress);
+
+  const col = uRayColor.mul(fresnel);
+  return vec4(col, aWithFalloff);
+})();
+
+// Cone: tip at origin, base radiates outward. radialSegments = number of ray wedges.
+const rayConeGeo = new THREE.ConeGeometry(
+  PARAMS.rayWidth,
+  PARAMS.rayLength,
+  PARAMS.rayCount,
+  1,
+  true, // open-ended (no cap at base)
+);
+const rayMesh = new THREE.Mesh(rayConeGeo, rayMat);
+rayMesh.renderOrder = 0;
+rayMesh.frustumCulled = false;
+
+const dirToScene = new THREE.Vector3();
+function updateRayPosition() {
+  const progress = PARAMS.lightProgress;
+  const el = Math.PI * 0.35;
+  const az = Math.PI * 0.25 + progress * Math.PI * 0.5;
+  const dist = 30;
+  rayMesh.position.set(
+    Math.cos(el) * Math.sin(az) * dist,
+    Math.sin(el) * dist,
+    Math.cos(el) * Math.cos(az) * dist,
+  );
+  rayMesh.scale.setScalar(progress);
+  dirToScene.set(0, 0, 0).sub(rayMesh.position).normalize();
+  rayMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dirToScene);
+  rayMesh.position.addScaledVector(dirToScene, PARAMS.rayLength * 0.5);
+}
+updateRayPosition();
+scene.add(rayMesh);
+
+// ─── Camera ──────────────────────────────────────────────────────────────────
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(0, 3, 10);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.set(0, 1.2, 0);
+controls.update();
+
+// ─── GUI ─────────────────────────────────────────────────────────────────────
+const gui = new GUI({ title: "Fake God Rays", width: 260 });
+gui.domElement.style.cssText = "position:fixed;top:12px;right:12px;z-index:30;max-height:90vh;overflow-y:auto;";
+
+const fSparkles = gui.addFolder("Sparkles");
+fSparkles.add(PARAMS, "sparkleOpacity", 0.1, 1, 0.05).onChange((v) => { uSparkleOpacity.value = v; });
+fSparkles.add(PARAMS, "sparkleSize", 0.02, 0.2, 0.01).onChange((v) => { uSparkleSize.value = v; });
+fSparkles.addColor(PARAMS, "sparkleColor").onChange((v) => {
+  uSparkleColor.value.copy(new THREE.Color(v).convertSRGBToLinear());
+});
+
+const fRays = gui.addFolder("God Rays (cones)");
+fRays.add(PARAMS, "rayCount", 4, 24, 1).onChange(updateRayGeometry);
+fRays.add(PARAMS, "rayLength", 10, 40, 1).onChange(updateRayGeometry);
+fRays.add(PARAMS, "rayWidth", 2, 20, 1).onChange(updateRayGeometry);
+function updateRayGeometry() {
+  rayMesh.geometry.dispose();
+  rayMesh.geometry = new THREE.ConeGeometry(
+    PARAMS.rayWidth,
+    PARAMS.rayLength,
+    PARAMS.rayCount,
+    1,
+    true,
+  );
+  uRayLength.value = PARAMS.rayLength;
+}
+fRays.add(PARAMS, "rayFalloff", 0.3, 3, 0.1).onChange((v) => {
+  uRayFalloff.value = v;
+});
+fRays.addColor(PARAMS, "rayColor").onChange((v) => {
+  uRayColor.value.copy(new THREE.Color(v).convertSRGBToLinear());
+});
+
+const fGlow = gui.addFolder("Fresnel Glow");
+fGlow.add(PARAMS, "lightProgress", 0, 1, 0.05).onChange((v) => {
+  uLightProgress.value = v;
+  applySun();
+  updateRayPosition();
+});
+fGlow.add(PARAMS, "fresnelPower", 1, 5, 0.25).onChange((v) => { uFresnelPower.value = v; });
+fGlow.add(PARAMS, "fresnelScale", 0.05, 0.5, 0.01).onChange((v) => { uFresnelScale.value = v; });
+fGlow.addColor(PARAMS, "glowColor").onChange((v) => {
+  uGlowColor.value.copy(new THREE.Color(v).convertSRGBToLinear());
+});
+
+const fScene = gui.addFolder("Scene");
+fScene.addColor(PARAMS, "groundColor").onChange((v) => groundMat.color.setStyle(v));
+fScene.addColor(PARAMS, "fogColor").onChange((v) => {
+  scene.background.setStyle(v);
+  scene.fog.color.setStyle(v);
+});
+fScene.add(PARAMS, "fogNear", 5, 30, 1).onChange((v) => { scene.fog.near = v; });
+fScene.add(PARAMS, "fogFar", 30, 120, 5).onChange((v) => { scene.fog.far = v; });
+
+// ─── Animation ────────────────────────────────────────────────────────────────
+const timer = new THREE.Timer();
+renderer.setAnimationLoop(() => {
+  timer.update();
+  uTime.value = timer.getElapsed();
+  controls.update();
+  renderer.render(scene, camera);
+});
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+await renderer.compileAsync(scene, camera);
+</script>
+</body>
+</html>
