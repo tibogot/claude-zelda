@@ -1,6 +1,6 @@
 /**
- * Terrain: heightmap, trail texture, terrain mesh + TSL material.
- * Exports createTerrain(scene, PARAMS, options) → { terrain, heightTex, trailTex, sampleHeight, updateTrail, regenTerrain, syncTerrainUniforms }.
+ * Terrain for grass-sandbox: same as terrain.js but with darker, desaturated far color
+ * so distant terrain doesn't look bright green. index.html uses terrain.js unchanged.
  */
 import * as THREE from "three";
 import {
@@ -202,8 +202,8 @@ export function createTerrain(scene, PARAMS, options) {
       for (let x = 0; x < TRAIL_RES; x++) {
         const idx = (y * TRAIL_RES + x) * 4;
         let scale = trailData[idx];
-        const wx = (x / TRAIL_RES - 0.5) * TRAIL_SIZE,
-          wz = (y / TRAIL_RES - 0.5) * TRAIL_SIZE;
+        const wx = (x / TRAIL_RES - 0.5) * TERRAIN_SIZE,
+          wz = (y / TRAIL_RES - 0.5) * TERRAIN_SIZE;
         const d2 = wx * wx + wz * wz;
         if (d2 < r2 && PARAMS.trailEnabled) {
           const contact = 1.0 - d2 / r2;

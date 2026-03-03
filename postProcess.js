@@ -1,5 +1,6 @@
 /**
  * Post-processing: fog, bloom, lensflare, DoF, god rays, GTAO. Builds the overworld output node.
+ * createMinimalPostProcessOutput: scene pass + fog only — used when postProcessingEnabled=false.
  */
 import * as THREE from "three";
 import {
@@ -236,4 +237,25 @@ export function createPostProcessOutput(scene, camera, fogUniforms, PARAMS) {
     uGodRaysDensity,
     uGodRaysSamples,
   };
+}
+
+/**
+ * Minimal output: plain scene pass + fog only. No GTAO, bloom, DoF, god rays, lens flare.
+ * Used when postProcessingEnabled=false to avoid compiling the full post-process shader.
+ */
+export function createMinimalPostProcessOutput(scene, camera, fogUniforms) {
+  const { uFogNear, uFogFar, uFogCameraFar, uFogIntensity, uFogColor, uFogEnabled } = fogUniforms;
+  const scenePass = pass(scene, camera);
+  const sceneColor = scenePass.getTextureNode("output");
+  const linearDepth = scenePass.getLinearDepthNode
+    ? scenePass.getLinearDepthNode()
+    : float(0.5);
+  const worldDepth = mul(linearDepth, uFogCameraFar);
+  const fogF = mul(
+    clamp(mul(div(sub(worldDepth, uFogNear), sub(uFogFar, uFogNear)), uFogIntensity), 0, 1),
+    uFogEnabled,
+  );
+  const skyMask = step(float(0.999), linearDepth);
+  const outputNode = mix(sceneColor, vec4(uFogColor, 1), mul(fogF, sub(1, skyMask)));
+  return { outputNode };
 }

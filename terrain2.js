@@ -90,13 +90,8 @@ function ridgedFbm(x, y, octaves) {
  * @param {{ TERRAIN_SIZE: number, TERRAIN_RES: number, TERRAIN_HEIGHT: number, TRAIL_RES: number, TRAIL_SIZE: number }} options
  */
 export function createTerrain(scene, PARAMS, options) {
-  const {
-    TERRAIN_SIZE,
-    TERRAIN_RES,
-    TERRAIN_HEIGHT,
-    TRAIL_RES,
-    TRAIL_SIZE,
-  } = options;
+  const { TERRAIN_SIZE, TERRAIN_RES, TERRAIN_HEIGHT, TRAIL_RES, TRAIL_SIZE } =
+    options;
 
   const heightData = new Float32Array(TERRAIN_RES * TERRAIN_RES * 4);
   const heightTex = new THREE.DataTexture(
@@ -143,8 +138,7 @@ export function createTerrain(scene, PARAMS, options) {
           dz = wz - lz;
         const dist = Math.sqrt(dx * dx + dz * dz);
         const lakeFalloff = Math.max(0, 1 - dist / lr);
-        const lakeSmooth =
-          lakeFalloff * lakeFalloff * (3 - 2 * lakeFalloff);
+        const lakeSmooth = lakeFalloff * lakeFalloff * (3 - 2 * lakeFalloff);
         h -= ld * lakeSmooth;
         const idx = (y * TERRAIN_RES + x) * 4;
         heightData[idx] = h;
@@ -217,9 +211,7 @@ export function createTerrain(scene, PARAMS, options) {
   }
 
   const texLoader = new THREE.TextureLoader();
-  const groundColorTex = texLoader.load(
-    "textures/Ground037_1K-JPG_Color.jpg",
-  );
+  const groundColorTex = texLoader.load("textures/Ground037_1K-JPG_Color.jpg");
   const groundNormalTex = texLoader.load(
     "textures/Ground037_1K-JPG_NormalGL.jpg",
   );
@@ -229,9 +221,7 @@ export function createTerrain(scene, PARAMS, options) {
   const groundAOTex = texLoader.load(
     "textures/Ground037_1K-JPG_AmbientOcclusion.jpg",
   );
-  const grassColorTex = texLoader.load(
-    "textures/Grass005_1K-JPG_Color.jpg",
-  );
+  const grassColorTex = texLoader.load("textures/Grass005_1K-JPG_Color.jpg");
   const grassNormalTex = texLoader.load(
     "textures/Grass005_1K-JPG_NormalGL.jpg",
   );
@@ -312,10 +302,14 @@ export function createTerrain(scene, PARAMS, options) {
     const nearColor = mix(nearWithMacro, darkerEarth, mul(steepFactor, 0.22));
     const camPos = cameraPosition;
     const dist = length(sub(wp, camPos));
-    const farMix = smoothstep(35.0, 90.0, dist);
-    const farGrassBase = vec3(0.1, 0.28, 0.08);
-    const farPatchLight = add(0.7, mul(macro1, 0.15));
-    const farPatchTint = mix(farGrassBase, vec3(0.12, 0.3, 0.1), mul(macro2, 0.12));
+    const farMix = smoothstep(45.0, 115.0, dist);
+    const farGrassBase = vec3(0.28, 0.48, 0.2);
+    const farPatchLight = add(0.86, mul(macro1, 0.28));
+    const farPatchTint = mix(
+      farGrassBase,
+      vec3(0.32, 0.5, 0.22),
+      mul(macro2, 0.2),
+    );
     const farColor = mul(farPatchTint, farPatchLight);
     return mix(nearColor, farColor, farMix);
   })();

@@ -1,0 +1,617 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Zelda-Style Terrain Showcase — Terraced Plateaus</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        background: #0a1520;
+        overflow: hidden;
+        font-family: "SF Mono", "Fira Code", monospace;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        bottom: 12px;
+        left: 12px;
+        z-index: 20;
+        background: rgba(0, 0, 0, 0.65);
+        color: #7dd3fc;
+        padding: 8px 12px;
+        border-radius: 6px;
+        font-size: 11px;
+        line-height: 1.6;
+      }
+      #info span {
+        color: #bae6fd;
+        font-weight: 600;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">
+      <span>Zelda-Style Terrain</span> — Terraced plateaus, cake layers<br />
+      Orbit: <span>left-drag</span> &nbsp; Zoom: <span>scroll</span> &nbsp;
+      Regenerate: <span>GUI</span>
+    </div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { WebGPURenderer } from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+      import {
+        Fn,
+        uniform,
+        vec3,
+        vec4,
+        uv,
+        mix,
+        smoothstep,
+        mul,
+        add,
+        sub,
+        max,
+        length,
+        texture,
+        normalMap,
+        float,
+        positionLocal,
+        modelWorldMatrix,
+        cameraPosition,
+        normalLocal,
+      } from "three/tsl";
+      import { noise12 } from "./tsl-utils.js";
+      import GUI from "three/addons/libs/lil-gui.module.min.js";
+
+      const PI = Math.PI;
+
+      function srgbToLinear(hex) {
+        const c = new THREE.Color(hex);
+        c.convertSRGBToLinear();
+        return c;
+      }
+
+      // ─── CPU Noise (for heightmap generation) ────────────────────────────────────
+      function cpuHash(x, y) {
+        const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+        return n - Math.floor(n);
+      }
+
+      function cpuNoise(x, y) {
+        const ix = Math.floor(x),
+          iy = Math.floor(y);
+        const fx = x - ix,
+          fy = y - iy;
+        const ux = fx * fx * (3 - 2 * fx),
+          uy = fy * fy * (3 - 2 * fy);
+        const a = cpuHash(ix, iy),
+          b = cpuHash(ix + 1, iy),
+          c = cpuHash(ix, iy + 1),
+          d = cpuHash(ix + 1, iy + 1);
+        return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+      }
+
+      function fbmNoise(x, y, octaves) {
+        let val = 0,
+          amp = 1,
+          freq = 1,
+          total = 0;
+        for (let i = 0; i < octaves; i++) {
+          val += cpuNoise(x * freq, y * freq) * amp;
+          total += amp;
+          amp *= 0.5;
+          freq *= 2;
+        }
+        return val / total;
+      }
+
+      function ridgedFbm(x, y, octaves) {
+        let val = 0,
+          amp = 1,
+          freq = 1,
+          total = 0;
+        for (let i = 0; i < octaves; i++) {
+          let n = cpuNoise(x * freq, y * freq);
+          n = 1 - Math.abs(n);
+          n = n * n;
+          val += n * amp;
+          total += amp;
+          amp *= 0.5;
+          freq *= 2;
+        }
+        return val / total;
+      }
+
+      /** Smooth terrace: flat tops with steep transitions (Zelda cake layers) */
+      function smoothTerrace(h, stepHeight, sharpness) {
+        const t = h / stepHeight;
+        const tFloor = Math.floor(t);
+        const tFrac = t - tFloor;
+        const flatStart = 0.5 - sharpness * 0.5;
+        const flatEnd = 0.5 + sharpness * 0.5;
+        const tSmooth =
+          tFrac < flatStart
+            ? 0
+            : tFrac > flatEnd
+              ? 1
+              : (tFrac - flatStart) / (flatEnd - flatStart);
+        return (tFloor + tSmooth) * stepHeight;
+      }
+
+      // ─── PARAMS ──────────────────────────────────────────────────────────────────
+      const PARAMS = {
+        terrainSize: 800,
+        terrainRes: 384,
+        terrainHeight: 72,
+        terraceLevels: 12,
+        terraceSharpness: 0.35,
+        mountainStrength: 0.7,
+        fieldFlatten: 0.55,
+        lakeCenterX: -60,
+        lakeCenterZ: 50,
+        lakeRadius: 42,
+        lakeDepth: 10,
+        sunAzimuth: 225,
+        sunElevation: 52,
+        sunIntensity: 2.0,
+        ambIntensity: 0.85,
+        fogEnabled: true,
+        fogNear: 30,
+        fogFar: 120,
+        fogColor: "#a8c0d8",
+        groundBaseColor: "#4a9030",
+        groundDirtColor: "#8b6f4a",
+        grassSlopeMin: 0.5,
+        grassSlopeMax: 0.92,
+        grassAmount: 1.0,
+        texTiling: 60,
+      };
+
+      // ─── Terrain generation ─────────────────────────────────────────────────────
+      function generateHeightmap() {
+        const heightData = new Float32Array(
+          PARAMS.terrainRes * PARAMS.terrainRes,
+        );
+        const mx = PARAMS.mountainStrength;
+        const flat = PARAMS.fieldFlatten;
+        const lx = PARAMS.lakeCenterX;
+        const lz = PARAMS.lakeCenterZ;
+        const lr = PARAMS.lakeRadius;
+        const ld = PARAMS.lakeDepth;
+        const H = PARAMS.terrainHeight;
+        const stepHeight = H / PARAMS.terraceLevels;
+        const sharpness = Math.max(0.05, PARAMS.terraceSharpness);
+
+        for (let y = 0; y < PARAMS.terrainRes; y++) {
+          for (let x = 0; x < PARAMS.terrainRes; x++) {
+            const wx = (x / PARAMS.terrainRes - 0.5) * PARAMS.terrainSize;
+            const wz = (y / PARAMS.terrainRes - 0.5) * PARAMS.terrainSize;
+            const nx = wx * 0.008,
+              nz = wz * 0.008;
+            const nxL = wx * 0.002,
+              nzL = wz * 0.002;
+
+            const roll = fbmNoise(nx, nz, 6);
+            const ridge = ridgedFbm(nx * 0.9, nz * 0.9, 5);
+            const mountainMask = Math.max(0, fbmNoise(nxL, nzL, 4) - 0.35);
+            const mountainMaskSmooth =
+              mountainMask * mountainMask * (3 - 2 * mountainMask);
+
+            let h =
+              roll * (1 - mountainMaskSmooth * mx) +
+              (roll * 0.25 + ridge * 1.1) * mountainMaskSmooth * mx;
+            if (flat > 0 && mountainMaskSmooth < 0.5) {
+              const f = 1 - flat * (1 - mountainMaskSmooth * 2);
+              h *= 0.3 + 0.7 * f;
+            }
+            h *= H;
+
+            // Lake depression
+            const dx = wx - lx,
+              dz = wz - lz;
+            const dist = Math.sqrt(dx * dx + dz * dz);
+            const lakeFalloff = Math.max(0, 1 - dist / lr);
+            const lakeSmooth =
+              lakeFalloff * lakeFalloff * (3 - 2 * lakeFalloff);
+            h -= ld * lakeSmooth;
+
+            // Terraced layers (Zelda cake effect)
+            h = smoothTerrace(Math.max(0, h), stepHeight, sharpness);
+
+            heightData[y * PARAMS.terrainRes + x] = h;
+          }
+        }
+        return heightData;
+      }
+
+      function sampleHeight(heightData, wx, wz) {
+        const u = (wx / PARAMS.terrainSize + 0.5) * PARAMS.terrainRes;
+        const v = (wz / PARAMS.terrainSize + 0.5) * PARAMS.terrainRes;
+        const ix = Math.max(0, Math.min(PARAMS.terrainRes - 2, Math.floor(u)));
+        const iy = Math.max(0, Math.min(PARAMS.terrainRes - 2, Math.floor(v)));
+        const fx = u - ix,
+          fy = v - iy;
+        const h00 = heightData[iy * PARAMS.terrainRes + ix];
+        const h10 = heightData[iy * PARAMS.terrainRes + ix + 1];
+        const h01 = heightData[(iy + 1) * PARAMS.terrainRes + ix];
+        const h11 = heightData[(iy + 1) * PARAMS.terrainRes + ix + 1];
+        return (
+          h00 * (1 - fx) * (1 - fy) +
+          h10 * fx * (1 - fy) +
+          h01 * (1 - fx) * fy +
+          h11 * fx * fy
+        );
+      }
+
+      // ─── Renderer ──────────────────────────────────────────────────────────────────
+      const renderer = new WebGPURenderer({ antialias: true });
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 0.8;
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      document.body.appendChild(renderer.domElement);
+      await renderer.init();
+
+      // ─── Scene ───────────────────────────────────────────────────────────────────
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(PARAMS.fogColor);
+      scene.fog = new THREE.Fog(PARAMS.fogColor, PARAMS.fogNear, PARAMS.fogFar);
+
+      // ─── Lighting ─────────────────────────────────────────────────────────────────
+      function applySun() {
+        const az = (PARAMS.sunAzimuth * PI) / 180;
+        const el = (PARAMS.sunElevation * PI) / 180;
+        const dir = new THREE.Vector3(
+          Math.cos(el) * Math.sin(az),
+          Math.sin(el),
+          Math.cos(el) * Math.cos(az),
+        ).normalize();
+        sun.position.copy(dir.multiplyScalar(80));
+        sun.intensity = PARAMS.sunIntensity;
+        hemiLight.intensity = PARAMS.ambIntensity;
+        const sd = new THREE.Vector3(
+          Math.cos(el) * Math.sin(az),
+          Math.sin(el),
+          Math.cos(el) * Math.cos(az),
+        ).normalize();
+        uSunDir.value.copy(sd);
+        sky.sunPosition.value.copy(sd);
+      }
+
+      const sun = new THREE.DirectionalLight(0xfff5e0, PARAMS.sunIntensity);
+      sun.castShadow = true;
+      sun.shadow.mapSize.width = 2048;
+      sun.shadow.mapSize.height = 2048;
+      sun.shadow.camera.near = 1;
+      sun.shadow.camera.far = 150;
+      sun.shadow.camera.left = -60;
+      sun.shadow.camera.right = 60;
+      sun.shadow.camera.top = 60;
+      sun.shadow.camera.bottom = -60;
+      sun.shadow.bias = -0.002;
+      sun.shadow.normalBias = 0.06;
+      scene.add(sun);
+
+      const hemiLight = new THREE.HemisphereLight(
+        0xc8e0ff,
+        0x88aa55,
+        PARAMS.ambIntensity,
+      );
+      scene.add(hemiLight);
+
+      // ─── Sky ─────────────────────────────────────────────────────────────────────
+      const sky = new SkyMesh();
+      sky.scale.setScalar(200000);
+      scene.add(sky);
+      sky.turbidity.value = 2;
+      sky.rayleigh.value = 1.5;
+      sky.mieCoefficient.value = 0.005;
+      sky.mieDirectionalG.value = 0.8;
+
+      // ─── Terrain ──────────────────────────────────────────────────────────────────
+      const texLoader = new THREE.TextureLoader();
+      const groundColorTex = texLoader.load(
+        "textures/Ground037_1K-JPG_Color.jpg",
+      );
+      const groundNormalTex = texLoader.load(
+        "textures/Ground037_1K-JPG_NormalGL.jpg",
+      );
+      const groundRoughTex = texLoader.load(
+        "textures/Ground037_1K-JPG_Roughness.jpg",
+      );
+      const groundAOTex = texLoader.load(
+        "textures/Ground037_1K-JPG_AmbientOcclusion.jpg",
+      );
+      const grassColorTex = texLoader.load(
+        "textures/Grass005_1K-JPG_Color.jpg",
+      );
+      const grassNormalTex = texLoader.load(
+        "textures/Grass005_1K-JPG_NormalGL.jpg",
+      );
+      const grassRoughTex = texLoader.load(
+        "textures/Grass005_1K-JPG_Roughness.jpg",
+      );
+      const grassAOTex = texLoader.load(
+        "textures/Grass005_1K-JPG_AmbientOcclusion.jpg",
+      );
+      [
+        groundColorTex,
+        groundNormalTex,
+        groundRoughTex,
+        groundAOTex,
+        grassColorTex,
+        grassNormalTex,
+        grassRoughTex,
+        grassAOTex,
+      ].forEach((t) => {
+        t.wrapS = t.wrapT = THREE.RepeatWrapping;
+      });
+      groundColorTex.colorSpace = THREE.SRGBColorSpace;
+      grassColorTex.colorSpace = THREE.SRGBColorSpace;
+
+      const uGroundDirt = uniform(srgbToLinear(PARAMS.groundDirtColor));
+      const uGroundBase = uniform(srgbToLinear(PARAMS.groundBaseColor));
+      const uTexTiling = uniform(PARAMS.texTiling);
+      const uGrassSlopeMin = uniform(PARAMS.grassSlopeMin);
+      const uGrassSlopeMax = uniform(PARAMS.grassSlopeMax);
+      const uGrassAmount = uniform(PARAMS.grassAmount);
+      const uSunDir = uniform(new THREE.Vector3(0.5, 0.7, 0.5).normalize());
+
+      let terrain = null;
+      let terrainGeo = null;
+      let heightData = null;
+
+      function buildTerrain() {
+        if (terrain) {
+          scene.remove(terrain);
+          terrainGeo.dispose();
+          terrain.material.dispose();
+        }
+
+        heightData = generateHeightmap();
+
+        terrainGeo = new THREE.PlaneGeometry(
+          PARAMS.terrainSize,
+          PARAMS.terrainSize,
+          PARAMS.terrainRes - 1,
+          PARAMS.terrainRes - 1,
+        );
+        terrainGeo.rotateX(-PI / 2);
+        const posArr = terrainGeo.attributes.position.array;
+        for (let i = 0; i < posArr.length; i += 3) {
+          const wx = posArr[i],
+            wz = posArr[i + 2];
+          posArr[i + 1] = sampleHeight(heightData, wx, wz);
+        }
+        terrainGeo.computeVertexNormals();
+
+        const terrainMat = new THREE.MeshStandardNodeMaterial({
+          roughness: 1,
+          metalness: 0,
+        });
+        const tiledUV = uv().mul(uTexTiling);
+        terrainMat.colorNode = Fn(() => {
+          const grassCol = uGroundBase;
+          const groundCol = texture(groundColorTex, tiledUV).rgb;
+          const grassFactor = mul(
+            smoothstep(uGrassSlopeMin, uGrassSlopeMax, normalLocal.y),
+            uGrassAmount,
+          );
+          const texColor = mix(groundCol, grassCol, grassFactor);
+          const wp = modelWorldMatrix.mul(vec4(positionLocal, 1)).xyz;
+          const n1 = noise12(mul(wp.xz, 0.03)),
+            n2 = noise12(mul(wp.xz, 0.08)),
+            n3 = noise12(mul(wp.xz, 0.2));
+          const combined = add(n1, mul(n2, 0.5), mul(n3, 0.25)).mul(0.57);
+          const slopeBlend = smoothstep(0.85, 0.6, normalLocal.y);
+          const dirtMix = max(
+            mul(smoothstep(0.35, 0.65, combined), float(1)),
+            slopeBlend,
+          );
+          const baseColor = mix(texColor, uGroundDirt, mul(dirtMix, 0.58));
+          const macro1 = noise12(mul(wp.xz, 0.018));
+          const macro2 = noise12(mul(wp.xz, 0.048));
+          const macroLightness = sub(1.0, mul(macro1, 0.14));
+          const nearWithMacro = mul(baseColor, macroLightness);
+          const steepFactor = sub(1.0, smoothstep(0.52, 0.86, normalLocal.y));
+          const darkerEarth = vec3(0.22, 0.32, 0.18);
+          const nearColor = mix(
+            nearWithMacro,
+            darkerEarth,
+            mul(steepFactor, 0.22),
+          );
+          const camPos = cameraPosition;
+          const dist = length(sub(wp, camPos));
+          const farMix = smoothstep(45.0, 115.0, dist);
+          const farGrassBase = vec3(0.28, 0.48, 0.2);
+          const farPatchLight = add(0.86, mul(macro1, 0.28));
+          const farPatchTint = mix(
+            farGrassBase,
+            vec3(0.32, 0.5, 0.22),
+            mul(macro2, 0.2),
+          );
+          const farColor = mul(farPatchTint, farPatchLight);
+          return mix(nearColor, farColor, farMix);
+        })();
+        const grassNorm = texture(grassNormalTex, tiledUV);
+        const groundNorm = texture(groundNormalTex, tiledUV);
+        const grassRough = texture(grassRoughTex, tiledUV).r;
+        const groundRough = texture(groundRoughTex, tiledUV).r;
+        const grassAO = texture(grassAOTex, tiledUV);
+        const groundAO = texture(groundAOTex, tiledUV);
+        const terrainGrassFactor = mul(
+          smoothstep(uGrassSlopeMin, uGrassSlopeMax, normalLocal.y),
+          uGrassAmount,
+        );
+        terrainMat.normalNode = normalMap(
+          mix(groundNorm, grassNorm, terrainGrassFactor),
+        );
+        terrainMat.roughnessNode = max(
+          mix(groundRough, grassRough, terrainGrassFactor),
+          float(0.6),
+        );
+        terrainMat.aoNode = mix(
+          vec3(1, 1, 1),
+          mix(groundAO, grassAO, terrainGrassFactor),
+          float(0.76),
+        );
+        terrainMat.envMapIntensity = 0.85;
+
+        terrain = new THREE.Mesh(terrainGeo, terrainMat);
+        terrain.receiveShadow = true;
+        scene.add(terrain);
+      }
+
+      function syncTerrainUniforms() {
+        uGroundDirt.value.copy(srgbToLinear(PARAMS.groundDirtColor));
+        uGroundBase.value.copy(srgbToLinear(PARAMS.groundBaseColor));
+        uTexTiling.value = PARAMS.texTiling;
+        uGrassSlopeMin.value = PARAMS.grassSlopeMin;
+        uGrassSlopeMax.value = PARAMS.grassSlopeMax;
+        uGrassAmount.value = PARAMS.grassAmount;
+      }
+
+      function applyFog() {
+        scene.background.setStyle(PARAMS.fogColor);
+        if (PARAMS.fogEnabled) {
+          if (!scene.fog)
+            scene.fog = new THREE.Fog(
+              PARAMS.fogColor,
+              PARAMS.fogNear,
+              PARAMS.fogFar,
+            );
+          scene.fog.color.setStyle(PARAMS.fogColor);
+          scene.fog.near = PARAMS.fogNear;
+          scene.fog.far = PARAMS.fogFar;
+        } else {
+          scene.fog = null;
+        }
+      }
+
+      // Build initial terrain
+      buildTerrain();
+
+      // ─── PMREM / env map (optional, for nicer reflections) ───────────────────────
+      const pmremGenerator = new THREE.PMREMGenerator(renderer);
+      const skyEnvScene = new THREE.Scene();
+      skyEnvScene.add(sky.clone());
+      const skyEnv = pmremGenerator.fromScene(skyEnvScene, 0.04).texture;
+      scene.environment = skyEnv;
+      scene.environmentIntensity = 0.45;
+
+      // ─── GUI ─────────────────────────────────────────────────────────────────────
+      const gui = new GUI({ title: "Terrain", width: 260 });
+      gui.domElement.style.cssText =
+        "position:fixed;top:12px;right:12px;z-index:30;max-height:90vh;overflow-y:auto;";
+
+      const fTerrain = gui.addFolder("Terrain");
+      fTerrain.add(PARAMS, "terrainSize", 200, 1000, 50).onChange(buildTerrain);
+      fTerrain.add(PARAMS, "terrainRes", 128, 512, 32).onChange(buildTerrain);
+      fTerrain.add(PARAMS, "terrainHeight", 30, 120, 5).onChange(buildTerrain);
+      fTerrain.add(PARAMS, "terraceLevels", 4, 24, 1).onChange(buildTerrain);
+      fTerrain
+        .add(PARAMS, "terraceSharpness", 0.1, 0.8, 0.05)
+        .onChange(buildTerrain);
+      fTerrain
+        .add(PARAMS, "mountainStrength", 0, 1, 0.05)
+        .onChange(buildTerrain);
+      fTerrain.add(PARAMS, "fieldFlatten", 0, 1, 0.05).onChange(buildTerrain);
+      fTerrain.add(PARAMS, "lakeCenterX", -150, 150, 5).onChange(buildTerrain);
+      fTerrain.add(PARAMS, "lakeCenterZ", -150, 150, 5).onChange(buildTerrain);
+      fTerrain.add(PARAMS, "lakeRadius", 10, 100, 5).onChange(buildTerrain);
+      fTerrain.add(PARAMS, "lakeDepth", 0, 30, 2).onChange(buildTerrain);
+      fTerrain.add({ regen: buildTerrain }, "regen").name("Regenerate");
+
+      const fMaterial = gui.addFolder("Material");
+      fMaterial
+        .addColor(PARAMS, "groundBaseColor")
+        .onChange(syncTerrainUniforms);
+      fMaterial
+        .addColor(PARAMS, "groundDirtColor")
+        .onChange(syncTerrainUniforms);
+      fMaterial
+        .add(PARAMS, "grassSlopeMin", 0.2, 0.9, 0.05)
+        .onChange(syncTerrainUniforms);
+      fMaterial
+        .add(PARAMS, "grassSlopeMax", 0.5, 1, 0.05)
+        .onChange(syncTerrainUniforms);
+      fMaterial
+        .add(PARAMS, "grassAmount", 0, 1, 0.05)
+        .onChange(syncTerrainUniforms);
+      fMaterial
+        .add(PARAMS, "texTiling", 20, 120, 5)
+        .onChange(syncTerrainUniforms);
+
+      const fLight = gui.addFolder("Lighting");
+      fLight.add(PARAMS, "sunAzimuth", 0, 360, 5).onChange(applySun);
+      fLight.add(PARAMS, "sunElevation", 0, 90, 2).onChange(applySun);
+      fLight.add(PARAMS, "sunIntensity", 0.5, 4, 0.1).onChange(applySun);
+      fLight.add(PARAMS, "ambIntensity", 0.2, 1.5, 0.1).onChange(applySun);
+
+      const fScene = gui.addFolder("Scene");
+      fScene.add(PARAMS, "fogEnabled").name("Fog").onChange(applyFog);
+      fScene.add(PARAMS, "fogNear", 10, 80, 5).onChange(applyFog);
+      fScene.add(PARAMS, "fogFar", 60, 200, 10).onChange(applyFog);
+      fScene.addColor(PARAMS, "fogColor").onChange(applyFog);
+
+      applySun();
+      applyFog();
+      syncTerrainUniforms();
+
+      // ─── Camera ──────────────────────────────────────────────────────────────────
+      const camera = new THREE.PerspectiveCamera(
+        55,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        5000,
+      );
+      camera.position.set(0, 60, 120);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.08;
+      controls.target.set(0, 25, 0);
+      controls.maxPolarAngle = PI * 0.48;
+      controls.update();
+
+      // ─── Compile & render ────────────────────────────────────────────────────────
+      await renderer.compileAsync(scene, camera);
+
+      const timer = new THREE.Timer();
+      renderer.setAnimationLoop(() => {
+        timer.update();
+        controls.update();
+        renderer.render(scene, camera);
+      });
+
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>

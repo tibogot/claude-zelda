@@ -6,6 +6,7 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+import { resolveKinematicOverlap } from "./physics.js";
 
 const CHAR_GLB = "models/AnimationLibrary_Godot_Standard-transformed.glb";
 const DRACO_URL =
@@ -26,6 +27,7 @@ const DRACO_URL =
  * @param {number} [opts.capR] - Capsule radius (required when sampleHeight provided)
  * @param {number} [opts.capHalfH] - Capsule half-height (required when sampleHeight provided)
  * @param {number} opts.TERRAIN_SIZE
+ * @param {object} [opts.debugOut] - Optional. When provided, written each frame with platform debug info.
  * @returns {{ characterGroup: THREE.Group, capsule: THREE.Mesh, keys: object, state: { camYaw: number, camPitch: number, characterVelY: number, isGrounded: boolean, moveDir: THREE.Vector3 }, update: (dt: number) => void }}
  */
 export function createPlayer(opts) {
@@ -44,6 +46,7 @@ export function createPlayer(opts) {
     capR = 0,
     capHalfH = 0,
     TERRAIN_SIZE,
+    debugOut = null,
   } = opts;
   // terrain mode: Y driven by heightmap sampling; parkour mode: trimesh colliders + computedGrounded()
   const hasSampleHeight = typeof sampleHeight === "function";
@@ -303,6 +306,8 @@ export function createPlayer(opts) {
   // Cleared immediately on intentional jump so air state engages without delay.
   let _groundGrace = 0;
   let _justJumped  = false;
+  let _airFrames = 0;
+  let _groundFrames = 0;
 
   // Capsule resize for crouch-through-tunnel (parkour mode only).
   // _normalHH_c / _crouchHH_c are the capsule half-heights.
@@ -314,6 +319,8 @@ export function createPlayer(opts) {
   let _isCrouching   = false;
   let _crouchVisualT = 0; // 0 = standing, 1 = fully crouched (lerped for smooth model transition)
   let _platformBody = null;  // kinematic body player stood on last frame
+  /** @type {{ [handle: number]: { x: number, y: number, z: number } }} */
+  const _lastPlatformPos = {};  // platform handle -> last position for velocity-from-delta
   let isPointerLocked = false;
 
   window.addEventListener("keydown", (e) => {
@@ -458,6 +465,7 @@ export function createPlayer(opts) {
       ud.preRollState = ud.lastMoveState || "idle";
       ud.rollStartTime = performance.now();
       ud.rollDuration = ud.rollAction.getClip().duration || 1;
+      ud.rollYaw = state.camYaw; // lock direction at roll start
       const from =
         ud.preRollState === "run"
           ? ud.runAction
@@ -499,11 +507,14 @@ export function createPlayer(opts) {
       desiredDz = mz * PARAMS.playerSpeed * speedMult * dt;
     }
     if (ud && ud.isRolling && ud.rollDuration > 0) {
-      const rollSpeed = (PARAMS.rollDashDistance ?? 8) / ud.rollDuration;
-      const sinY = Math.sin(state.camYaw);
-      const cosY = Math.cos(state.camYaw);
-      desiredDx += sinY * rollSpeed * dt;
-      desiredDz += cosY * rollSpeed * dt;
+      const elapsed = (performance.now() - ud.rollStartTime) / 1000;
+      const t = Math.min(1, elapsed / ud.rollDuration);
+      const ease = Math.cos(t * Math.PI * 0.5); // 1→0 smooth ease-out
+      const rollSpeed = ((PARAMS.rollDashDistance ?? 8) / ud.rollDuration) * ease;
+      const sinY = Math.sin(ud.rollYaw ?? state.camYaw);
+      const cosY = Math.cos(ud.rollYaw ?? state.camYaw);
+      desiredDx = sinY * rollSpeed * dt; // override WASD, no stacking
+      desiredDz = cosY * rollSpeed * dt;
     }
     const hb = TERRAIN_SIZE * 0.48;
     const nextX = Math.max(-hb, Math.min(hb, charPos.x + desiredDx));
@@ -535,12 +546,12 @@ export function createPlayer(opts) {
     desiredY += _crouchDeltaY;
 
     // Proactively detect kinematic platform via downward ray cast BEFORE computing
-    // desired movement. This is zero-lag: the velocity is applied the same frame
-    // contact starts, avoiding the 1-frame gap where the platform rises into the player.
-    if (!hasSampleHeight && RAPIER && state.isGrounded) {
+    // desired movement. MUST run every frame in parkour mode — when platform descends,
+    // computedGrounded() becomes false and we'd stop inheriting velocity, leaving us floating.
+    if (!hasSampleHeight && RAPIER) {
       const capBottom = charPos.y - _normalHH_c - _capR_c;
       const ray = new RAPIER.Ray({ x: charPos.x, y: capBottom + 0.02, z: charPos.z }, { x: 0, y: -1, z: 0 });
-      const hit = physicsWorld.castRay(ray, 0.6, true, undefined, undefined, playerCollider);
+      const hit = physicsWorld.castRay(ray, 0.35, true, undefined, undefined, playerCollider);
       if (hit) {
         const hitCol = physicsWorld.getCollider(hit.collider);
         const hitBody = hitCol?.parent?.();
@@ -548,15 +559,14 @@ export function createPlayer(opts) {
       } else {
         _platformBody = null;
       }
-    } else if (!hasSampleHeight && !state.isGrounded) {
-      _platformBody = null;
     }
 
     // Inherit velocity from the detected kinematic platform.
     // Rapier auto-computes linvel() for kinematicPositionBased bodies from their
     // setNextKinematicTranslation delta each step, so we can read it directly.
+    // Skip when we've just jumped (positive velY) so we don't get pulled down mid-jump.
     let platDx = 0, platDy = 0, platDz = 0;
-    if (!hasSampleHeight && _platformBody) {
+    if (!hasSampleHeight && _platformBody && state.characterVelY <= 0.5 && state.isGrounded) {
       const vel = _platformBody.linvel();
       platDx = vel.x * dt;
       platDy = vel.y * dt;
@@ -568,6 +578,15 @@ export function createPlayer(opts) {
       y: desiredY - charPos.y + platDy,
       z: nextZ - charPos.z + platDz,
     };
+    // Disable autostep while airborne so jumping in front of a low obstacle doesn't
+    // autostep onto it before the jump fires (looks like a double-jump snap).
+    if (!hasSampleHeight) {
+      if (state.characterVelY > 0) {
+        characterController.disableAutostep();
+      } else {
+        characterController.enableAutostep(0.35, 0.1, false);
+      }
+    }
     characterController.computeColliderMovement(
       playerCollider,
       desiredTranslation,
@@ -612,14 +631,16 @@ export function createPlayer(opts) {
       if (state.characterVelY < 0 && charPos.y <= landedGroundY + 0.2) state.characterVelY = 0;
     } else {
       // parkour mode: Rapier trimesh colliders are ground truth.
-      // 3-frame grace period prevents 1-frame flicker on dipping planks and descending slopes.
+      // Grace period prevents flicker on dipping planks and descending slopes.
+      // Longer grace (8 frames) when on kinematic platform — computedGrounded() is unreliable when it descends.
       const rawGrounded = characterController.computedGrounded();
+      const graceMax = _platformBody ? 4 : 3;
       if (_justJumped) {
         _justJumped = false;
         _groundGrace = 0;
         state.isGrounded = false;
       } else if (rawGrounded) {
-        _groundGrace = 3;
+        _groundGrace = graceMax;
         state.isGrounded = true;
       } else if (_groundGrace > 0) {
         _groundGrace--;
@@ -631,22 +652,85 @@ export function createPlayer(opts) {
     }
     const corrected = characterController.computedMovement();
     const cur = playerBody.translation();
+    let nextPosY = cur.y + corrected.y;
+    // When standing up, the KCC/snap-to-ground can reject upward movement, leaving
+    // the expanded capsule partly in the ground. Enforce minimum rise so feet stay on surface.
+    if (_crouchDeltaY > 0) {
+      nextPosY = Math.max(nextPosY, cur.y + _crouchDeltaY);
+    }
     const nextPos = {
       x: cur.x + corrected.x,
-      y: cur.y + corrected.y,
+      y: nextPosY,
       z: cur.z + corrected.z,
     };
     playerBody.setNextKinematicTranslation(nextPos);
     physicsWorld.step();
     const playerT = playerBody.translation();
     charPos.set(playerT.x, playerT.y, playerT.z);
-    const inAir = hasSampleHeight
+    // Post-step correction: push character out of kinematic platforms (elevators, sweepers)
+    // that moved into us — Rapier KCC doesn't resolve kinematic-kinematic collisions.
+    let onKinematicPlatform = false;
+    if (!hasSampleHeight && RAPIER) {
+      const result = resolveKinematicOverlap(
+        RAPIER,
+        physicsWorld,
+        playerBody,
+        playerCollider,
+        charPos,
+        _normalHH_c,
+        _capR_c,
+        _isCrouching,
+        _crouchHH_c,
+        dt,
+        _lastPlatformPos,
+      );
+      onKinematicPlatform = result.isOnKinematicPlatform;
+      if (debugOut) {
+        debugOut._result = result;
+      }
+    }
+    if (onKinematicPlatform) {
+      state.isGrounded = true;
+      _groundGrace = 2;
+    } else {
+      // Clear platform position cache when off platform to avoid huge delta on re-mount
+      for (const k of Object.keys(_lastPlatformPos)) delete _lastPlatformPos[k];
+    }
+    const rawInAir = hasSampleHeight
       ? charPos.y > (sampleHeight(charPos.x, charPos.z) + capHalfH + capR) + 0.15
       : !state.isGrounded;
+    if (rawInAir) {
+      _airFrames++;
+      _groundFrames = 0;
+    } else {
+      _groundFrames++;
+      _airFrames = 0;
+    }
+    const lastWasJump = ud?.lastMoveState === "jump";
+    const inAir = onKinematicPlatform
+      ? false
+      : rawInAir
+        ? _airFrames >= 2
+        : lastWasJump && _groundFrames < 8;
+    if (debugOut && debugOut._result) {
+      Object.assign(debugOut, {
+        onKinematicPlatform,
+        platformBody: !!_platformBody,
+        charPosY: charPos.y.toFixed(3),
+        isGrounded: state.isGrounded,
+        rawInAir,
+        inAir,
+        moveState: inAir ? "jump" : "idle",
+        snapToY: debugOut._result.snapToY?.toFixed(3) ?? "null",
+        totalDy: debugOut._result.totalDy?.toFixed(3) ?? "0",
+        charBottom: debugOut._result.charBottom?.toFixed(3) ?? "?",
+        didCorrect: debugOut._result.didCorrect,
+      });
+      delete debugOut._result;
+    }
     characterGroup.position.copy(charPos);
     characterGroup.rotation.y = state.camYaw;
     if (characterGroup.children.length > 0) {
-      const ud = characterGroup.userData;
       if (ud.initialCharHeight != null)
         characterGroup.scale.setScalar(
           PARAMS.characterHeight / ud.initialCharHeight,
@@ -672,6 +756,25 @@ export function createPlayer(opts) {
             ? "run"
             : "walk"
           : "idle";
+    // Early roll exit: if player holds a direction past 75% of the animation,
+    // skip waiting for 'finished' and snap to walk/run immediately.
+    if (ud?.isRolling && ud.rollStartTime && ud.rollDuration > 0 && moving && !inAir) {
+      const rollT = (performance.now() - ud.rollStartTime) / 1000 / ud.rollDuration;
+      if (rollT >= 0.75) {
+        ud.isRolling = false;
+        const target =
+          moveState === "run"         ? ud.runAction :
+          moveState === "crouch_walk" ? ud.crouchWalkAction :
+          moveState === "crouch"      ? ud.crouchAction :
+                                        ud.walkAction;
+        if (target && ud.rollAction) {
+          target.enabled = true;
+          target.crossFadeFrom(ud.rollAction, 0.15).play();
+          setTimeout(() => { if (ud.rollAction) ud.rollAction.enabled = false; }, 150);
+        }
+        ud.lastMoveState = moveState; // prevent state machine double-transition
+      }
+    }
     if (
       ud &&
       ud.idleAction &&

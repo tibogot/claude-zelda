@@ -320,7 +320,7 @@ export function createSyncUniforms(u, deps, lastState) {
     u.uFogColor.value.copy(srgbToLinear(PARAMS.fogColor));
     u.uFogCameraFar.value = camera.far;
     u.uFogEnabled.value = PARAMS.fogEnabled ? 1 : 0;
-    uFlareAmount.value =
+    if (uFlareAmount) uFlareAmount.value =
       PARAMS.postProcessingEnabled && PARAMS.lensflareEnabled ? 1 : 0;
     if (uBloomEnabled)
       uBloomEnabled.value =
@@ -357,23 +357,29 @@ export function createSyncUniforms(u, deps, lastState) {
       aoPass.distanceExponent.value = PARAMS.gtaoDistanceExponent;
       aoPass.thickness.value = PARAMS.gtaoThickness;
     }
-    uDofEnabled.value =
-      PARAMS.postProcessingEnabled && PARAMS.dofEnabled ? 1 : 0;
-    uDofFocusDistance.value = PARAMS.dofFocusDistance;
-    uDofBlurStart.value = PARAMS.dofBlurStart;
-    uDofBlurEnd.value = PARAMS.dofBlurEnd;
-    uDofBlurSize.value = PARAMS.dofBlurSize;
-    uDofBlurSpread.value = PARAMS.dofBlurSpread;
-    bloomPass.threshold.value = PARAMS.lensflareBloomThreshold;
-    uGodRaysEnabled.value =
-      PARAMS.postProcessingEnabled && PARAMS.godRaysEnabled ? 1 : 0;
-    uGodRaysStrength.value = PARAMS.godRaysStrength;
-    uGodRaysDecay.value = PARAMS.godRaysDecay;
-    uGodRaysDensity.value = PARAMS.godRaysDensity;
-    uGodRaysSamples.value = PARAMS.godRaysSamples;
-    flareThreshold.value = PARAMS.lensflareThreshold;
-    flareGhostAttenuation.value = PARAMS.lensflareGhostAttenuation;
-    flareGhostSpacing.value = PARAMS.lensflareGhostSpacing;
+    if (uDofEnabled) {
+      uDofEnabled.value =
+        PARAMS.postProcessingEnabled && PARAMS.dofEnabled ? 1 : 0;
+      uDofFocusDistance.value = PARAMS.dofFocusDistance;
+      uDofBlurStart.value = PARAMS.dofBlurStart;
+      uDofBlurEnd.value = PARAMS.dofBlurEnd;
+      uDofBlurSize.value = PARAMS.dofBlurSize;
+      uDofBlurSpread.value = PARAMS.dofBlurSpread;
+    }
+    if (bloomPass) bloomPass.threshold.value = PARAMS.lensflareBloomThreshold;
+    if (uGodRaysEnabled) {
+      uGodRaysEnabled.value =
+        PARAMS.postProcessingEnabled && PARAMS.godRaysEnabled ? 1 : 0;
+      uGodRaysStrength.value = PARAMS.godRaysStrength;
+      uGodRaysDecay.value = PARAMS.godRaysDecay;
+      uGodRaysDensity.value = PARAMS.godRaysDensity;
+      uGodRaysSamples.value = PARAMS.godRaysSamples;
+    }
+    if (flareThreshold) {
+      flareThreshold.value = PARAMS.lensflareThreshold;
+      flareGhostAttenuation.value = PARAMS.lensflareGhostAttenuation;
+      flareGhostSpacing.value = PARAMS.lensflareGhostSpacing;
+    }
     u.uSeasonalStr.value = PARAMS.seasonalEnabled
       ? PARAMS.seasonalStrength
       : 0;
@@ -419,14 +425,16 @@ export function createSyncUniforms(u, deps, lastState) {
       lastState.lastLakeD = PARAMS.lakeDepth;
       regenTerrain();
     }
-    waterMesh.visible = PARAMS.showWater;
-    if (PARAMS.showWater) {
-      waterMesh.position.set(
-        PARAMS.lakeCenterX,
-        PARAMS.waterLevel,
-        PARAMS.lakeCenterZ,
-      );
-      waterMesh.scale.setScalar(PARAMS.lakeRadius);
+    if (waterMesh) {
+      waterMesh.visible = PARAMS.showWater;
+      if (PARAMS.showWater) {
+        waterMesh.position.set(
+          PARAMS.lakeCenterX,
+          PARAMS.waterLevel,
+          PARAMS.lakeCenterZ,
+        );
+        waterMesh.scale.setScalar(PARAMS.lakeRadius);
+      }
     }
     u.uTrailCenter.value.set(charPos.x, charPos.z);
     const birdCount = Math.min(PARAMS.birdsCount, birds.MAX_BIRDS);

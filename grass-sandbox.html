@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Grass Sandbox — Terrain + Character + Lights + Sky (no grass)</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #000;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        z-index: 10;
+        font:
+          12px/1.5 "SF Mono",
+          "Fira Code",
+          monospace;
+        color: #b0d890;
+        background: rgba(0, 0, 0, 0.55);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: none;
+        user-select: none;
+      }
+      #info span {
+        color: #e0f0c0;
+        font-weight: 600;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">
+      Grass Sandbox &mdash; <span id="backend">loading…</span> &bull;
+      <span id="stats"></span> &bull;
+      WASD + click to look &bull; Shift run &bull; Ctrl crouch &bull; F roll
+    </div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import {
+        pass,
+        uniform,
+        float,
+        vec4,
+        mix,
+        mul,
+        div,
+        sub,
+        clamp,
+        step,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+      import RAPIER from "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.19.3/+esm";
+      import { createTerrain } from "./terrain-sandbox.js";
+      import {
+        createGrassGeometry,
+        createGrassMaterial,
+        setupGrassPatches,
+        GRASS_PATCH_SIZE,
+        GRASS_SEGMENTS_LOW,
+        GRASS_SEGMENTS_MID,
+        GRASS_SEGMENTS_HIGH,
+        GRASS_VERTS_LOW,
+        GRASS_VERTS_MID,
+        GRASS_VERTS_HIGH,
+        NEAR_PATCH_SIZE,
+        GRASS_DENSITY,
+        GRASS_DENSITY_LOW,
+        GRASS_DENSITY_MID,
+      } from "./grass-sandbox.js";
+      import { createUniforms, createSyncUniforms } from "./uniforms-sandbox.js";
+      import {
+        createPhysicsWorld,
+        createPlayerController,
+        createPhysicsDebug,
+      } from "./physics.js";
+      import { createPlayer } from "./player.js";
+      import { PARAMS } from "./params.js";
+      import {
+        TERRAIN_SIZE,
+        TERRAIN_RES,
+        TRAIL_RES,
+        TRAIL_SIZE,
+        PI,
+        GRID_SIZE,
+        PATCH_SPACING,
+        NPC_COUNT,
+      } from "./constants.js";
+      import { setSeed, randRange } from "./rng.js";
+
+      async function init() {
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        await renderer.init();
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        const sandboxParams = { ...PARAMS, grassBladesNear: 0.78 };
+        renderer.toneMappingExposure = PARAMS.exposure;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+        const be = renderer.backend?.constructor?.name || "?";
+        document.getElementById("backend").textContent = be.includes("WebGPU")
+          ? "WebGPU ✓"
+          : "WebGL fallback";
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(
+          60,
+          innerWidth / innerHeight,
+          0.5,
+          500000
+        );
+        camera.position.set(0, 8, 20);
+
+        const orbitControls = new OrbitControls(camera, renderer.domElement);
+        orbitControls.target.set(0, 2, 0);
+        orbitControls.maxPolarAngle = PI * 0.48;
+        orbitControls.enableDamping = true;
+        orbitControls.dampingFactor = 0.05;
+        orbitControls.enabled = false;
+        orbitControls.update();
+
+        // ── LIGHTING ──
+        const dirLight = new THREE.DirectionalLight(
+          0xfff5e0,
+          PARAMS.sunIntensity
+        );
+        dirLight.position.copy(
+          new THREE.Vector3(PARAMS.sunDirX, PARAMS.sunDirY, PARAMS.sunDirZ)
+            .normalize()
+            .multiplyScalar(50)
+        );
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.width = 2048;
+        dirLight.shadow.mapSize.height = 2048;
+        dirLight.shadow.camera.near = 1;
+        dirLight.shadow.camera.far = 200;
+        dirLight.shadow.camera.left = -80;
+        dirLight.shadow.camera.right = 80;
+        dirLight.shadow.camera.top = 80;
+        dirLight.shadow.camera.bottom = -80;
+        dirLight.shadow.bias = PARAMS.shadowBias;
+        dirLight.shadow.normalBias = PARAMS.shadowNormalBias;
+        const shadowTarget = new THREE.Object3D();
+        shadowTarget.position.set(0, 0, 0);
+        scene.add(shadowTarget);
+        dirLight.target = shadowTarget;
+        scene.add(dirLight);
+
+        const hemiLight = new THREE.HemisphereLight(
+          0xc8e0ff,
+          0x88aa55,
+          PARAMS.sceneAmbient
+        );
+        scene.add(hemiLight);
+
+        // ── TERRAIN ──
+        const {
+          terrain,
+          heightTex,
+          trailTex,
+          sampleHeight,
+          regenTerrain,
+          syncTerrainUniforms,
+        } = createTerrain(scene, PARAMS, {
+          TERRAIN_SIZE,
+          TERRAIN_RES,
+          TERRAIN_HEIGHT: PARAMS.terrainHeight,
+          TRAIL_RES,
+          TRAIL_SIZE,
+        });
+
+        // ── SKY ──
+        const sky = new SkyMesh();
+        sky.scale.setScalar(450000);
+        scene.add(sky);
+        sky.turbidity.value = PARAMS.skyTurbidity;
+        sky.rayleigh.value = PARAMS.skyRayleigh;
+        sky.mieCoefficient.value = PARAMS.skyMie;
+        sky.mieDirectionalG.value = PARAMS.skyMieG;
+        const pmremGenerator = new THREE.PMREMGenerator(renderer);
+        function updateSkyParams() {
+          const sd = new THREE.Vector3(
+            PARAMS.sunDirX,
+            PARAMS.sunDirY,
+            PARAMS.sunDirZ
+          ).normalize();
+          sky.sunPosition.value.copy(sd);
+          sky.turbidity.value = PARAMS.skyTurbidity;
+          sky.rayleigh.value = PARAMS.skyRayleigh;
+          sky.mieCoefficient.value = PARAMS.skyMie;
+          sky.mieDirectionalG.value = PARAMS.skyMieG;
+        }
+        function bakeEnvMap() {
+          const skyEnvScene = new THREE.Scene();
+          skyEnvScene.add(sky.clone());
+          const skyEnv = pmremGenerator.fromScene(skyEnvScene, 0.04).texture;
+          if (scene.environment) scene.environment.dispose();
+          scene.environment = skyEnv;
+          scene.environmentIntensity = PARAMS.environmentIntensity;
+        }
+        updateSkyParams();
+        bakeEnvMap();
+
+        // ── PHYSICS ──
+        await RAPIER.init({});
+        const { physicsWorld, physicsCubes } = createPhysicsWorld(
+          RAPIER,
+          scene,
+          TERRAIN_SIZE,
+          sampleHeight
+        );
+        const { physicsDebugGroup, buildRapierDebugMeshes } = createPhysicsDebug(
+          RAPIER,
+          scene,
+          physicsWorld
+        );
+
+        // ── PLAYER ──
+        const charPos = new THREE.Vector3(0, 0, 0);
+        charPos.y =
+          sampleHeight(0, 0) +
+          Math.max(
+            0.1,
+            (PARAMS.characterHeight - 2 * PARAMS.capsuleRadius) / 2
+          ) +
+          PARAMS.capsuleRadius;
+        const { playerBody, playerCollider, characterController } =
+          createPlayerController(RAPIER, physicsWorld, charPos, PARAMS);
+        const capR = PARAMS.capsuleRadius;
+        const capHalfH = Math.max(
+          0.1,
+          (PARAMS.characterHeight - 2 * capR) / 2
+        );
+        const player = createPlayer({
+          scene,
+          renderer,
+          camera,
+          PARAMS,
+          charPos,
+          playerBody,
+          playerCollider,
+          characterController,
+          physicsWorld,
+          sampleHeight,
+          capR,
+          capHalfH,
+          TERRAIN_SIZE,
+        });
+
+        // ── GRASS (sandbox copy — same LOD system as index.html) ──
+        const uniforms = createUniforms(sandboxParams, TERRAIN_SIZE, NPC_COUNT);
+        const grassCtx = {
+          heightTex,
+          trailTex,
+          uTerrainSize: uniforms.uTerrainSize,
+          uTrailCenter: uniforms.uTrailCenter,
+          uTrailSize: uniforms.uTrailSize,
+          uTime: uniforms.uTime,
+          uPlayerPos: uniforms.uPlayerPos,
+          uNpcPos: uniforms.uNpcPos,
+          uLodDist: uniforms.uLodDist,
+          uLodBlendStart: uniforms.uLodBlendStart,
+          uMaxDist: uniforms.uMaxDist,
+          uBladeDensityRegular: uniforms.uBladeDensityRegular,
+          uBladeDensityNear: uniforms.uBladeDensityNear,
+          uNearFadeEnd: uniforms.uNearFadeEnd,
+          uNearFadeRange: uniforms.uNearFadeRange,
+          uGrassWidth: uniforms.uGrassWidth,
+          uGrassHeight: uniforms.uGrassHeight,
+          uWindDirX: uniforms.uWindDirX,
+          uWindDirZ: uniforms.uWindDirZ,
+          uWindWaveScale: uniforms.uWindWaveScale,
+          uWindSpeed: uniforms.uWindSpeed,
+          uWindAxis: uniforms.uWindAxis,
+          uCrossAxis: uniforms.uCrossAxis,
+          uWindGust: uniforms.uWindGust,
+          uWindStr: uniforms.uWindStr,
+          uWindMicro: uniforms.uWindMicro,
+          uInteractionRange: uniforms.uInteractionRange,
+          uInteractionStrength: uniforms.uInteractionStrength,
+          uInteractionHThresh: uniforms.uInteractionHThresh,
+          uInteractionRepel: uniforms.uInteractionRepel,
+          uMinSkyBlend: uniforms.uMinSkyBlend,
+          uMaxSkyBlend: uniforms.uMaxSkyBlend,
+          uAoIntensity: uniforms.uAoIntensity,
+          uSeasonalScale: uniforms.uSeasonalScale,
+          uSeasonalStr: uniforms.uSeasonalStr,
+          uBaseColor1: uniforms.uBaseColor1,
+          uBaseColor2: uniforms.uBaseColor2,
+          uTipColor1: uniforms.uTipColor1,
+          uTipColor2: uniforms.uTipColor2,
+          uGradientCurve: uniforms.uGradientCurve,
+          uColorVariation: uniforms.uColorVariation,
+          uLushColor: uniforms.uLushColor,
+          uBleachedColor: uniforms.uBleachedColor,
+          uSeasonalDryColor: uniforms.uSeasonalDryColor,
+          uSunDir: uniforms.uSunDir,
+          uBsColor: uniforms.uBsColor,
+          uBsPower: uniforms.uBsPower,
+          uFrontScatter: uniforms.uFrontScatter,
+          uRimSSS: uniforms.uRimSSS,
+          uBsIntensity: uniforms.uBsIntensity,
+          uSpecV1Intensity: uniforms.uSpecV1Intensity,
+          uSpecV1Color: uniforms.uSpecV1Color,
+          uSpecV1Dir: uniforms.uSpecV1Dir,
+          uSpecV2Intensity: uniforms.uSpecV2Intensity,
+          uSpecV2Color: uniforms.uSpecV2Color,
+          uSpecV2Dir: uniforms.uSpecV2Dir,
+          uSpecV2NoiseScale: uniforms.uSpecV2NoiseScale,
+          uSpecV2NoiseStr: uniforms.uSpecV2NoiseStr,
+          uSpecV2Power: uniforms.uSpecV2Power,
+          uSpecV2TipBias: uniforms.uSpecV2TipBias,
+          PI,
+        };
+        const geoLow = createGrassGeometry(
+          GRASS_SEGMENTS_LOW,
+          GRASS_DENSITY_LOW,
+          GRASS_PATCH_SIZE,
+          setSeed,
+          randRange,
+        );
+        const geoMid = createGrassGeometry(
+          GRASS_SEGMENTS_MID,
+          GRASS_DENSITY_MID,
+          GRASS_PATCH_SIZE,
+          setSeed,
+          randRange,
+        );
+        const geoHigh = createGrassGeometry(
+          GRASS_SEGMENTS_HIGH,
+          GRASS_DENSITY,
+          GRASS_PATCH_SIZE,
+          setSeed,
+          randRange,
+        );
+        const geoNear = createGrassGeometry(
+          GRASS_SEGMENTS_HIGH,
+          GRASS_DENSITY,
+          NEAR_PATCH_SIZE,
+          setSeed,
+          randRange,
+        );
+        const matLowSimple = createGrassMaterial(
+          GRASS_SEGMENTS_LOW,
+          GRASS_VERTS_LOW,
+          false,
+          "regular",
+          grassCtx,
+        );
+        const matMidSimple = createGrassMaterial(
+          GRASS_SEGMENTS_MID,
+          GRASS_VERTS_MID,
+          false,
+          "regular",
+          grassCtx,
+        );
+        const matHighSimple = createGrassMaterial(
+          GRASS_SEGMENTS_HIGH,
+          GRASS_VERTS_HIGH,
+          false,
+          "regular",
+          grassCtx,
+        );
+        const matHighSimpleNear = createGrassMaterial(
+          GRASS_SEGMENTS_HIGH,
+          GRASS_VERTS_HIGH,
+          false,
+          "near",
+          grassCtx,
+        );
+        const grassGroup = new THREE.Group();
+        scene.add(grassGroup);
+        const grassPatchSystem = setupGrassPatches(
+          scene,
+          camera,
+          grassGroup,
+          {
+            geoLow,
+            geoMid,
+            geoHigh,
+            geoNear,
+            matLowSimple,
+            matMidSimple,
+            matHighSimple,
+            matHighSimpleNear,
+          },
+          {
+            PATCH_SPACING,
+            GRID_SIZE,
+            NEAR_PATCH_SIZE,
+            GRASS_DENSITY,
+            nearRingExtent: PARAMS.nearRingExtent,
+            lodDistance: PARAMS.lodDistance,
+            lodDistanceMid: PARAMS.lodDistance * 1.4,
+            maxDistance: Math.min(PARAMS.maxDistance, 65),
+            lodHysteresis: 2,
+          },
+        );
+        const syncUniforms = createSyncUniforms(uniforms, {
+          PARAMS: sandboxParams,
+          camera,
+          dirLight,
+          hemiLight,
+          renderer,
+          charPos,
+          syncTerrainUniforms,
+          updateSkyParams,
+        });
+
+        const frustum = new THREE.Frustum();
+        const projMat = new THREE.Matrix4();
+
+        function srgbToLinear(hex) {
+          const c = new THREE.Color(hex);
+          c.convertSRGBToLinear();
+          return c;
+        }
+        const uFogNear = uniform(PARAMS.fogNear);
+        const uFogFar = uniform(PARAMS.fogFar);
+        const uFogCameraFar = uniform(500000);
+        const uFogIntensity = uniform(PARAMS.fogIntensity);
+        const uFogColor = uniform(srgbToLinear(PARAMS.fogColor));
+        const uFogEnabled = uniform(PARAMS.fogEnabled ? 1 : 0);
+
+        const scenePass = pass(scene, camera);
+        const sceneColor = scenePass.getTextureNode
+          ? scenePass.getTextureNode()
+          : scenePass;
+        const linearDepth = scenePass.getLinearDepthNode
+          ? scenePass.getLinearDepthNode()
+          : float(0.5);
+        const worldDepth = mul(linearDepth, uFogCameraFar);
+        const fogF = mul(
+          clamp(
+            mul(
+              div(sub(worldDepth, uFogNear), sub(uFogFar, uFogNear)),
+              uFogIntensity,
+            ),
+            0,
+            1,
+          ),
+          uFogEnabled,
+        );
+        const skyMask = step(float(0.999), linearDepth);
+        const foggedOutput = mix(
+          sceneColor,
+          vec4(uFogColor, 1),
+          mul(fogF, sub(1, skyMask)),
+        );
+        const renderPipeline = new THREE.RenderPipeline(renderer);
+        renderPipeline.outputNode = foggedOutput;
+
+        await renderer.compileAsync(scene, camera);
+
+        const timer = new THREE.Timer();
+        let lastTime = 0;
+        let frameCount = 0;
+        renderer.setAnimationLoop(() => {
+          timer.update();
+          const elapsed = timer.getElapsed();
+          const dt = Math.min(elapsed - lastTime, 0.05);
+          lastTime = elapsed;
+          player.update(dt);
+
+          projMat.multiplyMatrices(
+            camera.projectionMatrix,
+            camera.matrixWorldInverse,
+          );
+          frustum.setFromProjectionMatrix(projMat);
+          const { patchCount } = grassPatchSystem.update(charPos, frustum);
+          syncUniforms();
+          uniforms.uTime.value = elapsed;
+          uniforms.uPlayerPos.value.copy(charPos);
+
+          if (++frameCount % 30 === 0) {
+            document.getElementById("stats").textContent =
+              `${patchCount} grass patches`;
+          }
+
+          physicsDebugGroup.visible = !!PARAMS.rapierDebug;
+          if (PARAMS.rapierDebug) buildRapierDebugMeshes();
+          for (const { body, mesh } of physicsCubes) {
+            const t = body.translation();
+            const r = body.rotation();
+            mesh.position.set(t.x, t.y, t.z);
+            mesh.quaternion.set(r.x, r.y, r.z, r.w);
+          }
+
+          if (PARAMS.cameraMode === "thirdPerson") {
+            const camDist = PARAMS.camDist;
+            const cx =
+              charPos.x -
+              Math.sin(player.state.camYaw) *
+                Math.cos(player.state.camPitch) *
+                camDist;
+            const cy =
+              charPos.y +
+              Math.sin(player.state.camPitch) * camDist +
+              PARAMS.camHeight;
+            const cz =
+              charPos.z -
+              Math.cos(player.state.camYaw) *
+                Math.cos(player.state.camPitch) *
+                camDist;
+            const camTerrainY = sampleHeight(cx, cz) + 1.5;
+            camera.position.set(cx, Math.max(cy, camTerrainY), cz);
+            camera.lookAt(charPos.x, charPos.y + 0.5, charPos.z);
+            orbitControls.enabled = false;
+          } else {
+            orbitControls.enabled = true;
+            orbitControls.update();
+          }
+
+          uFogNear.value = PARAMS.fogEnabled ? PARAMS.fogNear : 9999;
+          uFogFar.value = PARAMS.fogEnabled ? PARAMS.fogFar : 99999;
+          uFogIntensity.value = PARAMS.fogEnabled ? PARAMS.fogIntensity : 0;
+          uFogColor.value.copy(srgbToLinear(PARAMS.fogColor));
+          uFogEnabled.value = PARAMS.fogEnabled ? 1 : 0;
+
+          renderPipeline.render();
+        });
+
+        window.addEventListener("resize", () => {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(innerWidth, innerHeight);
+        });
+      }
+
+      init().catch((e) => {
+        console.error("Init failed:", e);
+        document.getElementById("backend").textContent = "Error: " + e.message;
+      });
+    </script>
+  </body>
+</html>

@@ -473,7 +473,7 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       step: 0.01,
       label: "speed",
     })
-    .on("change", () => (water.uWaterSpeed.value = PARAMS.waterSpeed));
+    .on("change", () => water && (water.uWaterSpeed.value = PARAMS.waterSpeed));
   fWaves
     .addBinding(PARAMS, "waterNormalScale", {
       min: 0.01,
@@ -481,7 +481,7 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       step: 0.01,
       label: "normal scale",
     })
-    .on("change", () => (water.uWaterNormalScale.value = PARAMS.waterNormalScale));
+    .on("change", () => water && (water.uWaterNormalScale.value = PARAMS.waterNormalScale));
   fWaves
     .addBinding(PARAMS, "waterUvScale", {
       min: 0.5,
@@ -489,7 +489,7 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       step: 0.1,
       label: "UV scale",
     })
-    .on("change", () => (water.uWaterUvScale.value = PARAMS.waterUvScale));
+    .on("change", () => water && (water.uWaterUvScale.value = PARAMS.waterUvScale));
 
   const fHighlights = fWater.addFolder({
     title: "Highlights",
@@ -502,7 +502,7 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       step: 10,
       label: "shininess",
     })
-    .on("change", () => (water.uWaterShininess.value = PARAMS.waterShininess));
+    .on("change", () => water && (water.uWaterShininess.value = PARAMS.waterShininess));
   fHighlights
     .addBinding(PARAMS, "waterHighlightsGlow", {
       min: 0.5,
@@ -510,7 +510,7 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       step: 0.1,
       label: "glow",
     })
-    .on("change", () => (water.uWaterHighlightsGlow.value = PARAMS.waterHighlightsGlow));
+    .on("change", () => water && (water.uWaterHighlightsGlow.value = PARAMS.waterHighlightsGlow));
   fHighlights
     .addBinding(PARAMS, "waterHighlightFresnelInfluence", {
       min: 0,
@@ -518,14 +518,14 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       step: 0.05,
       label: "fresnel influence",
     })
-    .on("change", () => (water.uWaterHighlightFresnelInfluence.value = PARAMS.waterHighlightFresnelInfluence));
+    .on("change", () => water && (water.uWaterHighlightFresnelInfluence.value = PARAMS.waterHighlightFresnelInfluence));
   fHighlights
     .addBinding(PARAMS, "waterSunColor", {
       view: "color",
       label: "sun color",
     })
     .on("change", () =>
-      water.uWaterSunColor.value
+      water && water.uWaterSunColor.value
         .set(PARAMS.waterSunColor)
         .convertSRGBToLinear(),
     );
@@ -536,7 +536,7 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       step: 0.05,
       label: "spread",
     })
-    .on("change", () => (water.uWaterHighlightsSpread.value = PARAMS.waterHighlightsSpread));
+    .on("change", () => water && (water.uWaterHighlightsSpread.value = PARAMS.waterHighlightsSpread));
 
   const fWaterColors = fWater.addFolder({
     title: "Colors",
@@ -548,7 +548,7 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       label: "deep color",
     })
     .on("change", () =>
-      water.uWaterDeepColor.value
+      water && water.uWaterDeepColor.value
         .set(PARAMS.waterDeepColor)
         .convertSRGBToLinear(),
     );
@@ -558,7 +558,7 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       label: "shallow color",
     })
     .on("change", () =>
-      water.uWaterShallowColor.value
+      water && water.uWaterShallowColor.value
         .set(PARAMS.waterShallowColor)
         .convertSRGBToLinear(),
     );
@@ -569,7 +569,7 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       step: 0.05,
       label: "fresnel scale",
     })
-    .on("change", () => (water.uWaterFresnelScale.value = PARAMS.waterFresnelScale));
+    .on("change", () => water && (water.uWaterFresnelScale.value = PARAMS.waterFresnelScale));
   fWaterColors
     .addBinding(PARAMS, "waterMinOpacity", {
       min: 0,
@@ -577,7 +577,7 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       step: 0.05,
       label: "opacity",
     })
-    .on("change", () => (water.uWaterMinOpacity.value = PARAMS.waterMinOpacity));
+    .on("change", () => water && (water.uWaterMinOpacity.value = PARAMS.waterMinOpacity));
 
   const fSun = pane.addFolder({
     title: "Sun & Lighting",
@@ -916,6 +916,22 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
     .addBinding(PARAMS, "showCastle", { label: "Castle" })
     .on("change", () => {
       if (PARAMS.showCastle && ctx.ensureCastleCreated) ctx.ensureCastleCreated();
+    });
+
+  fScene.addBlade({ view: "separator" });
+  fScene
+    .addButton({ title: "⟳ Reload with current settings" })
+    .on("click", () => {
+      const reloadKeys = [
+        "susukiEnabled", "showRuins", "showChurch", "showPubgChurch",
+        "showTrees", "showFluffyTree", "showScatter", "showCastle",
+        "showWater", "npcEnabled", "deerEnabled",
+        "postProcessingEnabled", "bloomEnabled", "gtaoEnabled",
+        "dofEnabled", "godRaysEnabled", "lensflareEnabled",
+      ];
+      const usp = new URLSearchParams(location.search);
+      for (const k of reloadKeys) usp.set(k, String(PARAMS[k]));
+      location.search = usp.toString();
     });
 
   const fScatter = pane.addFolder({

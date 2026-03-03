@@ -250,6 +250,22 @@
       import { createTerrain } from "./terrain.js";
       import { setupTweakpaneUI } from "./tweakpane-ui.js";
       import { PARAMS } from "./params.js";
+
+      // Override init-gate PARAMS from URL query params (set by Tweakpane "Reload" button)
+      {
+        const _usp = new URLSearchParams(location.search);
+        const _boolKeys = [
+          "susukiEnabled", "showRuins", "showChurch", "showPubgChurch",
+          "showTrees", "showFluffyTree", "showScatter", "showCastle",
+          "showWater", "npcEnabled", "deerEnabled",
+          "postProcessingEnabled", "bloomEnabled", "gtaoEnabled",
+          "dofEnabled", "godRaysEnabled", "lensflareEnabled",
+        ];
+        for (const k of _boolKeys) {
+          if (_usp.has(k)) PARAMS[k] = _usp.get(k) === "true";
+        }
+      }
+
       import { createWater } from "./water.js";
       import { createTrees } from "./trees.js";
       import { createScatter } from "./scatter.js";
@@ -260,7 +276,7 @@
         createPlayerController,
         createPhysicsDebug,
       } from "./physics.js";
-      import { createPostProcessOutput } from "./postProcess.js";
+      import { createPostProcessOutput, createMinimalPostProcessOutput } from "./postProcess.js";
       import { createCastleSystem, CASTLE_POS_X, CASTLE_POS_Z, DOOR_TRIGGER_RADIUS } from "./castle.js";
       import { createUniforms, createSyncUniforms } from "./uniforms.js";
       import { createPlayer } from "./player.js";
@@ -422,11 +438,14 @@
         });
 
         const texLoader = new THREE.TextureLoader();
-        const { waterMesh, waterUniforms } = createWater(scene, PARAMS, {
-          uTime: uniforms.uTime,
-          uSunDir: uniforms.uSunDir,
-          texLoader,
-        });
+        let waterMesh = null, waterUniforms = null;
+        if (PARAMS.showWater) {
+          ({ waterMesh, waterUniforms } = createWater(scene, PARAMS, {
+            uTime: uniforms.uTime,
+            uSunDir: uniforms.uSunDir,
+            texLoader,
+          }));
+        }
 
         // ── SKY ──
         const sky = new SkyMesh();
@@ -523,52 +542,47 @@
         const gltfLoader = new GLTFLoader();
         gltfLoader.setDRACOLoader(dracoLoader);
 
-        const treesApi = await createTrees(scene, PARAMS, {
-          sampleHeight,
-          setSeed,
-          seededRandom,
-          TERRAIN_SIZE,
-          renderer,
-          camera,
-        });
-        const {
-          treesGroup,
-          treeInstancedMeshes,
-          state: treesState,
-          respawnTrees,
-          MAX_TREES,
-          updateTreesCulling,
-          treeLeafMaterials,
-        } = treesApi;
+        let treesGroup = null, treeInstancedMeshes = [], treesState = null;
+        let respawnTrees = () => {}, MAX_TREES = PARAMS.treeCount, updateTreesCulling = () => {}, treeLeafMaterials = [];
+        if (PARAMS.showTrees) {
+          const treesApi = await createTrees(scene, PARAMS, {
+            sampleHeight,
+            setSeed,
+            seededRandom,
+            TERRAIN_SIZE,
+            renderer,
+            camera,
+          });
+          ({ treesGroup, treeInstancedMeshes, state: treesState, respawnTrees, MAX_TREES, updateTreesCulling, treeLeafMaterials } = treesApi);
+        }
         const treeInstancedMesh = treeInstancedMeshes[0] ?? null;
 
-        const {
-          scatterGroup,
-          scatterMeshes,
-          updateScatterPlacement,
-          updateAllScatterLOD,
-          reloadScatterSlot,
-          updateScatterSlotAlpha,
-          MAX_SCATTER_PER_TYPE,
-        } = createScatter(scene, PARAMS, {
-          sampleHeight,
-          setSeed,
-          seededRandom,
-          TERRAIN_SIZE,
-          gltfLoader,
-          renderer,
-          camera,
-        });
+        let scatterGroup = null, scatterMeshes = {}, updateScatterPlacement = () => {};
+        let updateAllScatterLOD = () => {}, reloadScatterSlot = () => {}, updateScatterSlotAlpha = () => {}, MAX_SCATTER_PER_TYPE = 10000;
+        if (PARAMS.showScatter) {
+          ({ scatterGroup, scatterMeshes, updateScatterPlacement, updateAllScatterLOD, reloadScatterSlot, updateScatterSlotAlpha, MAX_SCATTER_PER_TYPE }
+            = createScatter(scene, PARAMS, {
+              sampleHeight,
+              setSeed,
+              seededRandom,
+              TERRAIN_SIZE,
+              gltfLoader,
+              renderer,
+              camera,
+            }));
+        }
 
         // ── DEER AI (5 deer, terrain-following, Idle/Eating/Walk/Gallop)
-        const { deerGroup, update: updateDeer } = createDeer({
-          scene,
-          sampleHeight,
-          TERRAIN_SIZE,
-          gltfLoader,
-          PARAMS,
-        });
-        deerGroup.visible = PARAMS.deerEnabled;
+        let deerGroup = null, updateDeer = () => {};
+        if (PARAMS.deerEnabled) {
+          ({ deerGroup, update: updateDeer } = createDeer({
+            scene,
+            sampleHeight,
+            TERRAIN_SIZE,
+            gltfLoader,
+            PARAMS,
+          }));
+        }
 
         // ── ANCIENT RUINS (compressed GLB on terrain + physics collider from bbox) ──
         // Only load when enabled — no scene/physics cost when disabled
@@ -708,7 +722,9 @@
         }
 
         // ── PUBG CHURCH (separate model, controllable via Scene folder) ──
+        // Only load when enabled — no scene/physics cost when disabled
         let pubgChurchModel = null;
+        if (PARAMS.showPubgChurch) {
         gltfLoader.load("models/pubg__church_optimized.glb", (gltf) => {
           const pubgChurch = gltf.scene;
           pubgChurchModel = pubgChurch;
@@ -771,6 +787,7 @@
             pubgChurchBody,
           );
         });
+        } // end if (PARAMS.showPubgChurch)
 
         // ── FLAG (cloth physics simulation) — near ruins ──
         // Pole bottom sits ~0.4225 * scale units below the group origin,
@@ -792,15 +809,18 @@
         // ── FLUFFY TREE (anime-style, WebGPU TSL shaders) ──
         const fluffyTreeX = 20,
           fluffyTreeZ = -15;
-        const fluffyTree = await createFluffyTree({
-          position: [
-            fluffyTreeX,
-            sampleHeight(fluffyTreeX, fluffyTreeZ),
-            fluffyTreeZ,
-          ],
-          dirLight,
-        });
-        scene.add(fluffyTree.group);
+        let fluffyTree = null;
+        if (PARAMS.showFluffyTree) {
+          fluffyTree = await createFluffyTree({
+            position: [
+              fluffyTreeX,
+              sampleHeight(fluffyTreeX, fluffyTreeZ),
+              fluffyTreeZ,
+            ],
+            dirLight,
+          });
+          scene.add(fluffyTree.group);
+        }
 
         // ── BIRDS (GPU compute boids — autonomous flocking) ──
         const birds = createBirds({
@@ -1277,52 +1297,55 @@
           },
         );
 
-        // Susuki (pampas grass) — same wind as grass, patch-based LOD
+        // Susuki (pampas grass) — only init if enabled (geometry + shader compile cost)
         const susukiGroup = new THREE.Group();
         scene.add(susukiGroup);
-        const susukiCtx = buildSusukiCtx({
-          uniforms,
-          heightTex,
-          params: {
-            stemHeight: PARAMS.susukiStemHeight,
-            stemWidth: PARAMS.susukiStemWidth,
-            bandWidth: PARAMS.susukiBandWidth,
-            plumeStart: PARAMS.susukiPlumeStart,
-            plumeFlex: PARAMS.susukiPlumeFlex,
-            plumeSoftEdge: PARAMS.susukiPlumeSoftEdge,
-            stemColor: PARAMS.susukiStemColor,
-            plumeColor: PARAMS.susukiPlumeColor,
-            windDir: PARAMS.windDir,
-            windWaveScale: PARAMS.windWaveScale,
-            windSpeed: PARAMS.windSpeed,
-            windStr: PARAMS.windStrength,
-            windGust: PARAMS.windGust,
-            windMicro: PARAMS.windMicroSway,
-          },
-        });
-        const susukiResources = createSusukiFieldResources(susukiCtx);
-        const susukiPatchSystem = setupSusukiPatches(
-          scene,
-          camera,
-          susukiGroup,
-          susukiResources,
-          {
-            PATCH_SPACING: SUSUKI_FIELD_PATCH_SPACING,
-            get GRID_SIZE() {
-              return PARAMS.susukiGridSize;
+        let susukiPatchSystem = null;
+        if (PARAMS.susukiEnabled) {
+          const susukiCtx = buildSusukiCtx({
+            uniforms,
+            heightTex,
+            params: {
+              stemHeight: PARAMS.susukiStemHeight,
+              stemWidth: PARAMS.susukiStemWidth,
+              bandWidth: PARAMS.susukiBandWidth,
+              plumeStart: PARAMS.susukiPlumeStart,
+              plumeFlex: PARAMS.susukiPlumeFlex,
+              plumeSoftEdge: PARAMS.susukiPlumeSoftEdge,
+              stemColor: PARAMS.susukiStemColor,
+              plumeColor: PARAMS.susukiPlumeColor,
+              windDir: PARAMS.windDir,
+              windWaveScale: PARAMS.windWaveScale,
+              windSpeed: PARAMS.windSpeed,
+              windStr: PARAMS.windStrength,
+              windGust: PARAMS.windGust,
+              windMicro: PARAMS.windMicroSway,
             },
-            NEAR_PATCH_SIZE: SUSUKI_NEAR_PATCH_SIZE,
-            get nearRingExtent() {
-              return PARAMS.susukiNearRingExtent;
+          });
+          const susukiResources = createSusukiFieldResources(susukiCtx);
+          susukiPatchSystem = setupSusukiPatches(
+            scene,
+            camera,
+            susukiGroup,
+            susukiResources,
+            {
+              PATCH_SPACING: SUSUKI_FIELD_PATCH_SPACING,
+              get GRID_SIZE() {
+                return PARAMS.susukiGridSize;
+              },
+              NEAR_PATCH_SIZE: SUSUKI_NEAR_PATCH_SIZE,
+              get nearRingExtent() {
+                return PARAMS.susukiNearRingExtent;
+              },
+              get lodDistance() {
+                return PARAMS.susukiLodDistance;
+              },
+              get maxDistance() {
+                return PARAMS.susukiMaxDistance;
+              },
             },
-            get lodDistance() {
-              return PARAMS.susukiLodDistance;
-            },
-            get maxDistance() {
-              return PARAMS.susukiMaxDistance;
-            },
-          },
-        );
+          );
+        } // end if (PARAMS.susukiEnabled)
 
         const frustum = new THREE.Frustum();
         const projMat = new THREE.Matrix4();
@@ -1344,7 +1367,7 @@
               capsuleNpcs[i].visible = visible;
           },
           setDeerVisibility: (visible) => {
-            deerGroup.visible = visible;
+            if (deerGroup) deerGroup.visible = visible;
           },
           ensureCastleCreated,
           water: waterUniforms,
@@ -1374,48 +1397,35 @@
           susukiPatchCount = 0,
           lastTime = 0;
         let appliedReturnFromCastle = false;
+        const _sunDir = new THREE.Vector3();
+        const _returnedFromCastle = new URLSearchParams(location.search).get("return") === "castle";
         const moveDir = new THREE.Vector3();
 
-        // Post-process: global fog + bloom + lensflare + DoF
-        const {
-          outputNode: overworldOutput,
-          bloomPass,
-          uDofEnabled,
-          uDofFocusDistance,
-          uDofBlurStart,
-          uDofBlurEnd,
-          uDofBlurSize,
-          uDofBlurSpread,
-          flareThreshold,
-          flareGhostAttenuation,
-          flareGhostSpacing,
-          uFlareAmount,
-          uGodRaysEnabled,
-          uGodRaysStrength,
-          uGodRaysDecay,
-          uGodRaysDensity,
-          uGodRaysSamples,
-          aoPass,
-          denoisePass,
-          bloomScenePass,
-          uBloomEnabled,
-          uGtaoEnabled,
-          uGtaoIntensity,
-          uGtaoDenoiseEnabled,
-        } = createPostProcessOutput(
-          scene,
-          camera,
-          {
-            uFogNear: uniforms.uFogNear,
-            uFogFar: uniforms.uFogFar,
-            uFogCameraFar: uniforms.uFogCameraFar,
-            uFogIntensity: uniforms.uFogIntensity,
-            uFogColor: uniforms.uFogColor,
-            uFogEnabled: uniforms.uFogEnabled,
-            uSunScreenPos: uniforms.uSunScreenPos,
-          },
-          PARAMS,
-        );
+        // Post-process: full pipeline or fog-only depending on postProcessingEnabled
+        const _fogUniforms = {
+          uFogNear: uniforms.uFogNear,
+          uFogFar: uniforms.uFogFar,
+          uFogCameraFar: uniforms.uFogCameraFar,
+          uFogIntensity: uniforms.uFogIntensity,
+          uFogColor: uniforms.uFogColor,
+          uFogEnabled: uniforms.uFogEnabled,
+          uSunScreenPos: uniforms.uSunScreenPos,
+        };
+        let overworldOutput, bloomPass, aoPass, denoisePass, bloomScenePass;
+        let uBloomEnabled, uGtaoEnabled, uGtaoIntensity, uGtaoDenoiseEnabled;
+        let uDofEnabled, uDofFocusDistance, uDofBlurStart, uDofBlurEnd, uDofBlurSize, uDofBlurSpread;
+        let flareThreshold, flareGhostAttenuation, flareGhostSpacing, uFlareAmount;
+        let uGodRaysEnabled, uGodRaysStrength, uGodRaysDecay, uGodRaysDensity, uGodRaysSamples;
+        if (PARAMS.postProcessingEnabled) {
+          ({ outputNode: overworldOutput, bloomPass, aoPass, denoisePass, bloomScenePass,
+             uBloomEnabled, uGtaoEnabled, uGtaoIntensity, uGtaoDenoiseEnabled,
+             uDofEnabled, uDofFocusDistance, uDofBlurStart, uDofBlurEnd, uDofBlurSize, uDofBlurSpread,
+             flareThreshold, flareGhostAttenuation, flareGhostSpacing, uFlareAmount,
+             uGodRaysEnabled, uGodRaysStrength, uGodRaysDecay, uGodRaysDensity, uGodRaysSamples,
+          } = createPostProcessOutput(scene, camera, _fogUniforms, PARAMS));
+        } else {
+          ({ outputNode: overworldOutput } = createMinimalPostProcessOutput(scene, camera, _fogUniforms));
+        }
 
         const renderPipeline = new THREE.RenderPipeline(renderer);
         renderPipeline.outputNode = overworldOutput;
@@ -1517,7 +1527,7 @@
           lastTime = elapsed;
 
           // Once: spawn at castle door when returning from interior page
-          if (!appliedReturnFromCastle && new URLSearchParams(location.search).get("return") === "castle") {
+          if (!appliedReturnFromCastle && _returnedFromCastle) {
             appliedReturnFromCastle = true;
             const spawn = getOverworldSpawn();
             spawn.y = sampleHeight(spawn.x, spawn.z) + capHalfH + capR;
@@ -1557,9 +1567,9 @@
             }
           }
           physicsDebugGroup.visible = !!PARAMS.rapierDebug;
-          scatterGroup.visible = PARAMS.showScatter;
-          treesGroup.visible = PARAMS.showTrees;
-          fluffyTree.group.visible = PARAMS.showFluffyTree;
+          if (scatterGroup) scatterGroup.visible = PARAMS.showScatter;
+          if (treesGroup) treesGroup.visible = PARAMS.showTrees;
+          if (fluffyTree) fluffyTree.group.visible = PARAMS.showFluffyTree;
           if (octahedralForest) {
             octahedralForest.group.visible = PARAMS.octahedralForestEnabled;
           }
@@ -1575,30 +1585,8 @@
           if (ruinsModel) ruinsModel.visible = PARAMS.showRuins;
           if (castleExteriorGroup)
             castleExteriorGroup.visible = PARAMS.showCastle;
-          if (churchModel) {
-            churchModel.visible = PARAMS.showChurch;
-            if (PARAMS.showChurch) {
-              churchModel.position.set(
-                PARAMS.churchX,
-                sampleHeight(PARAMS.churchX, PARAMS.churchZ) +
-                  PARAMS.churchYOffset,
-                PARAMS.churchZ,
-              );
-              churchModel.scale.setScalar(PARAMS.churchScale);
-            }
-          }
-          if (pubgChurchModel) {
-            pubgChurchModel.visible = PARAMS.showPubgChurch;
-            if (PARAMS.showPubgChurch) {
-              pubgChurchModel.position.set(
-                PARAMS.pubgChurchX,
-                sampleHeight(PARAMS.pubgChurchX, PARAMS.pubgChurchZ) +
-                  PARAMS.pubgChurchYOffset,
-                PARAMS.pubgChurchZ,
-              );
-              pubgChurchModel.scale.setScalar(PARAMS.pubgChurchScale);
-            }
-          }
+          if (churchModel) churchModel.visible = PARAMS.showChurch;
+          if (pubgChurchModel) pubgChurchModel.visible = PARAMS.showPubgChurch;
           if (PARAMS.rapierDebug) buildRapierDebugMeshes();
           for (const { body, mesh } of physicsCubes) {
             const t = body.translation();
@@ -1608,13 +1596,9 @@
           }
 
           // Sun is fixed in world space (no longer follows player). CSM still follows camera for shadow quality.
-          const sd = new THREE.Vector3(
-            PARAMS.sunDirX,
-            PARAMS.sunDirY,
-            PARAMS.sunDirZ,
-          ).normalize();
+          _sunDir.set(PARAMS.sunDirX, PARAMS.sunDirY, PARAMS.sunDirZ).normalize();
           if (octahedralForest && PARAMS.octahedralForestEnabled)
-            octahedralForest.updateSunDir(sd);
+            octahedralForest.updateSunDir(_sunDir);
 
           if (PARAMS.cameraMode === "thirdPerson") {
             const camDist = PARAMS.camDist;
@@ -1646,9 +1630,12 @@
           uniforms.uPlayerPos.value.copy(charPos);
           uniforms.uTrailCenter.value.set(charPos.x, charPos.z);
           // Deer AI (terrain-following, animation state machine)
-          updateDeer(dt);
-          if (PARAMS.deerEnabled) deerGroup.visible = true;
-          else deerGroup.visible = false;
+          if (PARAMS.deerEnabled && deerGroup) {
+            updateDeer(dt);
+            deerGroup.visible = true;
+          } else if (deerGroup) {
+            deerGroup.visible = false;
+          }
           // Only update NPCs when in overworld (they're hidden in castle anyway)
           if (PARAMS.npcEnabled) {
             for (let i = 0; i < NPC_COUNT; i++) {
@@ -1678,7 +1665,7 @@
             grassPatchSystem.update(charPos, frustum);
           patchCount = patchCountResult;
           susukiGroup.visible = PARAMS.susukiEnabled;
-          if (PARAMS.susukiEnabled) {
+          if (PARAMS.susukiEnabled && susukiPatchSystem) {
             const { patchCount: sp } = susukiPatchSystem.update(charPos, frustum);
             susukiPatchCount = sp;
           }

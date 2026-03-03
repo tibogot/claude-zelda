@@ -64,6 +64,7 @@
       <span id="stats">—</span> &bull; WASD + click to look &bull; Shift run
       &bull; Ctrl crouch &bull; F roll &bull; Space jump
     </div>
+    <div id="platform-debug" style="display:none; position:fixed; top:60px; left:16px; z-index:100; font:12px monospace; color:#0f0; background:rgba(0,0,0,0.8); padding:8px; border-radius:4px; max-width:320px;"></div>
 
     <script type="module">
       const Tweakpane =
@@ -143,6 +144,7 @@
         },
         debug: {
           rapierDebug: false,
+          platformDebug: false,
         },
         npc: {
           enabled: false,
@@ -1419,11 +1421,12 @@
         const { playerBody, playerCollider, characterController } =
           createPlayerController(RAPIER, physicsWorld, charPos, PARAMS, {
             enableSnapToGround: true,
-            characterOffset: 0.02,
+            characterOffset: 0.01,
             maxSlopeClimbAngle: (60 * Math.PI) / 180,
             minSlopeSlideAngle: (65 * Math.PI) / 180,
           });
 
+        const platformDebugOut = {};
         const player = createPlayer({
           scene,
           renderer,
@@ -1437,6 +1440,7 @@
           RAPIER,
           // no sampleHeight → parkour mode: Rapier trimesh colliders + computedGrounded()
           TERRAIN_SIZE: PARKOUR_SIZE,
+          debugOut: platformDebugOut,
         });
 
         const npc = createNpc({
@@ -1804,6 +1808,9 @@
         debugFolder.addBinding(parkourParams.debug, "rapierDebug", {
           label: "Rapier colliders",
         });
+        debugFolder.addBinding(parkourParams.debug, "platformDebug", {
+          label: "Platform debug (elevator)",
+        });
 
         const lightFolder = pane.addFolder({
           title: "Shadows (CSM)",
@@ -1958,6 +1965,31 @@
 
           player.update(dt);
           npc.update(dt);
+
+          const pdDiv = document.getElementById("platform-debug");
+          if (parkourParams.debug.platformDebug) {
+            pdDiv.style.display = "block";
+            const d = platformDebugOut;
+            const nearElevator = Math.abs(charPos.x - 8) < 4 && Math.abs(charPos.z) < 4;
+            const elevY = debugElevator?.body?.translation?.()?.y?.toFixed(3) ?? "?";
+            pdDiv.innerHTML = nearElevator
+              ? `<pre style="margin:0;font-size:11px">PLATFORM DEBUG (near elevator)
+elevatorY: ${elevY}
+onKinematicPlatform: ${d.onKinematicPlatform ?? "?"}
+platformBody: ${d.platformBody ?? "?"}
+charPosY: ${d.charPosY ?? "?"}
+charBottom: ${d.charBottom ?? "?"}
+snapToY: ${d.snapToY ?? "?"}
+totalDy: ${d.totalDy ?? "?"}
+didCorrect: ${d.didCorrect ?? "?"}
+isGrounded: ${d.isGrounded ?? "?"}
+rawInAir: ${d.rawInAir ?? "?"}
+inAir: ${d.inAir ?? "?"}
+moveState: ${d.moveState ?? "?"}</pre>`
+              : `<pre style="margin:0;font-size:11px">Stand on elevator (X≈8, Z≈0) to see debug</pre>`;
+          } else {
+            pdDiv.style.display = "none";
+          }
 
           // Sync dynamic props visual → physics
           for (const { body, mesh } of dynamicObjects) {

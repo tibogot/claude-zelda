@@ -194,3 +194,163 @@ export function createPhysicsDebug(RAPIER, scene, physicsWorld) {
   }
   return { physicsDebugGroup, buildRapierDebugMeshes };
 }
+
+/**
+ * Post-step correction: resolve character overlapping kinematic platforms.
+ * Rapier's KCC doesn't resolve kinematic-kinematic collisions, so when a platform
+ * moves into the character (elevator rising, sweeper sliding), we must push out.
+ * Uses forEachCollider to iterate kinematic bodies and explicit AABB overlap checks.
+ *
+ * @param {object} RAPIER - RAPIER module
+ * @param {import("@dimforge/rapier3d").World} physicsWorld
+ * @param {import("@dimforge/rapier3d").RigidBody} playerBody
+ * @param {import("@dimforge/rapier3d").Collider} playerCollider
+ * @param {{ x: number, y: number, z: number }} charPos - mutable, will be updated
+ * @param {number} capHalfH - capsule half-height
+ * @param {number} capR - capsule radius
+ * @param {boolean} isCrouching - use crouch dimensions if true
+ * @param {number} crouchHalfH - crouch capsule half-height
+ * @param {number} [dt] - timestep for platform velocity inheritance (horizontal movement)
+ * @param {{ [handle: number]: { x: number, y: number, z: number } }} [lastPlatformPos] - mutable map of platform handle -> last position; used to compute velocity from position delta when linvel() is unreliable after step
+ * @returns {{ didCorrect: boolean, isOnKinematicPlatform: boolean }}
+ */
+export function resolveKinematicOverlap(
+  RAPIER,
+  physicsWorld,
+  playerBody,
+  playerCollider,
+  charPos,
+  capHalfH,
+  capR,
+  isCrouching = false,
+  crouchHalfH = 0,
+  dt = 1 / 60,
+  lastPlatformPos = null,
+) {
+  const halfH = isCrouching ? crouchHalfH : capHalfH;
+  const charBottom = charPos.y - halfH - capR;
+  const charRadius = 0.05;
+  let totalDx = 0, totalDy = 0, totalDz = 0;
+  let maxPushUp = 0;
+  let isOnKinematicPlatform = false;
+  let snapToY = null;
+  /** @type {import("@dimforge/rapier3d").RigidBody | null} */
+  let platformBody = null;
+
+  physicsWorld.forEachCollider((collider) => {
+    const body = collider.parent ? collider.parent() : null;
+    if (!body?.isKinematic?.()) return;
+    if (body === playerBody) return;
+
+    const pos = body.translation();
+    const shape = collider.shape;
+    if (!shape) return;
+
+    const st = RAPIER.ShapeType;
+    let hx = 0, hy = 0, hz = 0;
+
+    if (shape.type === st.Cuboid && shape.halfExtents) {
+      hx = shape.halfExtents.x;
+      hy = shape.halfExtents.y;
+      hz = shape.halfExtents.z;
+    } else if (shape.type === st.Ball && shape.radius != null) {
+      hx = hy = hz = shape.radius;
+    } else if (shape.type === st.Cylinder && shape.halfHeight != null) {
+      const r = shape.radius ?? 0.5;
+      hx = hz = r;
+      hy = shape.halfHeight;
+    } else if (shape.type === st.Capsule && shape.halfHeight != null) {
+      const r = shape.radius ?? 0.5;
+      hx = hz = r;
+      hy = shape.halfHeight + r;
+    } else {
+      return;
+    }
+
+    const platMinX = pos.x - hx - charRadius;
+    const platMaxX = pos.x + hx + charRadius;
+    const platMinZ = pos.z - hz - charRadius;
+    const platMaxZ = pos.z + hz + charRadius;
+    const platTop = pos.y + hy;
+
+    const inXZ = charPos.x >= platMinX && charPos.x <= platMaxX &&
+                 charPos.z >= platMinZ && charPos.z <= platMaxZ;
+    if (!inXZ) return;
+
+    // Only treat platform as a floor if its top is at or below the character centre.
+    // A block at head/shoulder height is a ceiling or obstacle, not a floor to snap to.
+    const isFloor = platTop <= charPos.y + 0.1;
+    if (!isFloor) return;
+
+    const overlapping = charBottom < platTop + 0.02;
+    const floatingAbove = charBottom > platTop + 0.02 && charBottom <= platTop + 0.05;
+    if (overlapping) {
+      const overlap = platTop - charBottom + 0.02;
+      if (overlap > 0.03 && overlap > maxPushUp) {
+        maxPushUp = overlap;
+      }
+    }
+    if (overlapping || floatingAbove) {
+      if (charBottom >= platTop - 1.2 && charBottom <= platTop + 0.05) {
+        isOnKinematicPlatform = true;
+        platformBody = body;
+        const targetY = platTop + halfH + capR + 0.02;
+        if (snapToY === null || targetY > snapToY) snapToY = targetY;
+      }
+    }
+  });
+
+  // Inherit horizontal velocity from platform — KCC often rejects kinematic-platform
+  // movement, so we apply it directly here to ensure the character rides the platform.
+  // Use position delta when available (linvel() can be zero after physicsWorld.step()).
+  if (isOnKinematicPlatform && platformBody && dt > 0) {
+    const pos = platformBody.translation();
+    const handle = platformBody.handle;
+    let dx = 0, dz = 0;
+    if (lastPlatformPos && handle in lastPlatformPos) {
+      const last = lastPlatformPos[handle];
+      dx = pos.x - last.x;
+      dz = pos.z - last.z;
+    } else {
+      const vel = platformBody.linvel();
+      dx = vel.x * dt;
+      dz = vel.z * dt;
+    }
+    if (lastPlatformPos) lastPlatformPos[handle] = { x: pos.x, y: pos.y, z: pos.z };
+    totalDx += dx;
+    totalDz += dz;
+  }
+
+  if (maxPushUp > 0) {
+    totalDy = maxPushUp;
+  } else if (snapToY !== null) {
+    const snapDy = snapToY - charPos.y;
+    if (Math.abs(snapDy) > 0.001) {
+      const maxPerFrame = 0.05;
+      totalDy = Math.sign(snapDy) * Math.min(Math.abs(snapDy), maxPerFrame);
+    }
+  }
+
+  if (totalDx !== 0 || totalDy !== 0 || totalDz !== 0) {
+    charPos.x += totalDx;
+    charPos.y += totalDy;
+    charPos.z += totalDz;
+    const t = playerBody.translation();
+    playerBody.setNextKinematicTranslation({
+      x: t.x + totalDx,
+      y: t.y + totalDy,
+      z: t.z + totalDz,
+    });
+    playerBody.setTranslation(
+      { x: t.x + totalDx, y: t.y + totalDy, z: t.z + totalDz },
+      true,
+    );
+  }
+  return {
+    didCorrect: totalDx !== 0 || totalDy !== 0 || totalDz !== 0,
+    isOnKinematicPlatform,
+    snapToY,
+    totalDy,
+    charBottom,
+  };
+}
