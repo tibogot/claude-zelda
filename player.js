@@ -112,10 +112,13 @@ export function createPlayer(opts) {
 
       const HAND_BONE_R = "DEF-handR";
       const HAND_BONE_L = "DEF-handL";
+      const HEAD_BONE_NAMES = ["DEF-head", "head", "Head"]; // try common rig names
       characterGroup.userData.rightHandBone =
         model.getObjectByName(HAND_BONE_R) || null;
       characterGroup.userData.leftHandBone =
         model.getObjectByName(HAND_BONE_L) || null;
+      characterGroup.userData.headBone =
+        HEAD_BONE_NAMES.map((n) => model.getObjectByName(n)).find(Boolean) || null;
 
       // Attach a simple sword to the right hand for attack animation work
       const rightHand = characterGroup.userData.rightHandBone;
@@ -146,6 +149,43 @@ export function createPlayer(opts) {
         swordGroup.rotation.set(-0.1, 0, 0.15);
         rightHand.add(swordGroup);
         characterGroup.userData.sword = swordGroup;
+      }
+
+      // Attach asian_conical_hat.glb to head bone (same bone-locate pattern as sword)
+      const headBone = characterGroup.userData.headBone;
+      if (headBone) {
+        const hatLoader = new GLTFLoader();
+        hatLoader.setDRACOLoader(charDraco);
+        hatLoader.load(
+          "models/asian_conical_hat.glb",
+          (hatGltf) => {
+            const hatScene = hatGltf.scene;
+            hatScene.traverse((o) => {
+              if (o.isMesh) {
+                o.castShadow = true;
+                o.receiveShadow = true;
+                if (o.material && !o.material.isNodeMaterial) {
+                  const m = o.material;
+                  o.material = new THREE.MeshStandardNodeMaterial({
+                    color: m.color?.getHex?.() ?? 0x8b4513,
+                    roughness: m.roughness ?? 0.6,
+                    metalness: m.metalness ?? 0,
+                    map: m.map || null,
+                  });
+                }
+              }
+            });
+            // Scale/position/rotation so hat sits on head (tweak to match your character scale)
+            const hatScale = (PARAMS.characterHeight || 1.8) / 1.8;
+            hatScene.scale.setScalar(0.65 * hatScale);
+            hatScene.position.set(0, 0.2, 0);
+            hatScene.rotation.set(0, 0, 0);
+            headBone.add(hatScene);
+            characterGroup.userData.hat = hatScene;
+          },
+          undefined,
+          (err) => console.warn("Hat GLB load failed:", err),
+        );
       }
 
       // Paraglider/kite for skydiving (Space during jump) — flat triangle, perpendicular to player
