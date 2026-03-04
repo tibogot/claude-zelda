@@ -18,6 +18,8 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
     rebuildOctahedralForest,
     MAX_SCATTER_PER_TYPE,
     MAX_TREES,
+    applyVolumetricHaze = () => {},
+    hazeUniforms = {},
   } = ctx;
 
   const fShape = pane.addFolder({
@@ -404,6 +406,86 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
   fFog.addBinding(PARAMS, "fogFar", { min: 10, max: 400, step: 10 });
   fFog.addBinding(PARAMS, "fogIntensity", { min: 0, max: 1, step: 0.05 });
   fFog.addBinding(PARAMS, "fogColor", { view: "color" });
+
+  const fHaze = pane.addFolder({
+    title: "Volumetric Haze",
+    expanded: false,
+  });
+  fHaze
+    .addBinding(PARAMS, "hazeEnabled", { label: "enabled" })
+    .on("change", () => applyVolumetricHaze());
+  fHaze.addBinding(PARAMS, "hazeThickness", {
+    min: 15,
+    max: 80,
+    step: 1,
+  }).on("change", (e) => {
+    if (hazeUniforms.thickness) hazeUniforms.thickness.value = e.value;
+  });
+  fHaze.addBinding(PARAMS, "hazeOpacity", {
+    min: 0.4,
+    max: 1,
+    step: 0.02,
+  }).on("change", (e) => {
+    if (hazeUniforms.opacity) hazeUniforms.opacity.value = e.value;
+  });
+  fHaze.addBinding(PARAMS, "hazeFalloff", {
+    min: 1.2,
+    max: 4,
+    step: 0.1,
+  }).on("change", (e) => {
+    if (hazeUniforms.falloff) hazeUniforms.falloff.value = e.value;
+  });
+  fHaze.addBinding(PARAMS, "hazeColor", {
+    view: "color",
+    label: "color",
+  }).on("change", (e) => {
+    if (hazeUniforms.hazeColor) hazeUniforms.hazeColor.value.set(e.value);
+  });
+  fHaze.addBinding(PARAMS, "hazeNoiseScaleA", {
+    min: 0.001,
+    max: 0.02,
+    step: 0.001,
+    label: "noise scale A",
+  }).on("change", (e) => {
+    if (hazeUniforms.noiseScaleA) hazeUniforms.noiseScaleA.value = e.value;
+  });
+  fHaze.addBinding(PARAMS, "hazeNoiseScaleB", {
+    min: 0.003,
+    max: 0.02,
+    step: 0.001,
+    label: "noise scale B",
+  }).on("change", (e) => {
+    if (hazeUniforms.noiseScaleB) hazeUniforms.noiseScaleB.value = e.value;
+  });
+  fHaze.addBinding(PARAMS, "hazeNoiseAmountA", {
+    min: 0.1,
+    max: 0.5,
+    step: 0.02,
+  }).on("change", (e) => {
+    if (hazeUniforms.noiseAmountA) hazeUniforms.noiseAmountA.value = e.value;
+  });
+  fHaze.addBinding(PARAMS, "hazeNoiseAmountB", {
+    min: 0.05,
+    max: 0.4,
+    step: 0.02,
+  }).on("change", (e) => {
+    if (hazeUniforms.noiseAmountB) hazeUniforms.noiseAmountB.value = e.value;
+  });
+  fHaze.addBinding(PARAMS, "hazeNoiseDetail", {
+    min: 0,
+    max: 0.35,
+    step: 0.02,
+  }).on("change", (e) => {
+    if (hazeUniforms.noiseDetail) hazeUniforms.noiseDetail.value = e.value;
+  });
+  fHaze.addBinding(PARAMS, "hazeNoiseSpeed", {
+    min: 0,
+    max: 2,
+    step: 0.1,
+  }).on("change", (e) => {
+    if (hazeUniforms.noiseSpeed) hazeUniforms.noiseSpeed.value = e.value;
+  });
+
   const fGround = pane.addFolder({ title: "Ground", expanded: false });
   fGround.addBinding(PARAMS, "groundVariation");
   fGround.addBinding(PARAMS, "groundBaseColor", { view: "color", label: "ground base color" });

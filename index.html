@@ -159,6 +159,7 @@
         vec3,
         vec4,
         color,
+        uniform,
         positionLocal,
         normalLocal,
         cameraPosition,
@@ -205,6 +206,9 @@
         normalMap,
         reflect,
         positionWorld,
+        positionView,
+        triNoise3D,
+        fog,
       } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
@@ -483,6 +487,82 @@
           bakeEnvMap();
         }
         updateSky();
+
+        // ── VOLUMETRIC HAZE (ground mist, follows terrain via heightTex) ──
+        const uHazeThickness = uniform(PARAMS.hazeThickness);
+        const uHazeOpacity = uniform(PARAMS.hazeOpacity);
+        const uHazeFalloff = uniform(PARAMS.hazeFalloff);
+        const uHazeColor = uniform(new THREE.Color(PARAMS.hazeColor));
+        const uNoiseScaleA = uniform(PARAMS.hazeNoiseScaleA);
+        const uNoiseScaleB = uniform(PARAMS.hazeNoiseScaleB);
+        const uNoiseAmountA = uniform(PARAMS.hazeNoiseAmountA);
+        const uNoiseAmountB = uniform(PARAMS.hazeNoiseAmountB);
+        const uNoiseDetail = uniform(PARAMS.hazeNoiseDetail);
+        const uNoiseSpeed = uniform(PARAMS.hazeNoiseSpeed);
+        const hazeTimer = uniform(0).onFrameUpdate((frame) => frame.time);
+        const uHazeTerrainSize = uniform(TERRAIN_SIZE);
+
+        function applyVolumetricHaze() {
+          if (!PARAMS.hazeEnabled) {
+            scene.fogNode = null;
+            return;
+          }
+          const fogNoiseDistance = positionView.z
+            .negate()
+            .smoothstep(0, camera.far - 200);
+          const distance = fogNoiseDistance.mul(uHazeThickness).max(8);
+          const terrainUV = vec2(
+            div(positionWorld.x, uHazeTerrainSize).add(0.5),
+            div(positionWorld.z, uHazeTerrainSize).add(0.5),
+          );
+          const terrainUVClamped = clamp(terrainUV, 0.01, 0.99);
+          const terrainHeight = texture(heightTex, terrainUVClamped).r;
+          const heightAboveFloor = sub(positionWorld.y, terrainHeight);
+          const groundFogArea = float(distance)
+            .sub(heightAboveFloor)
+            .div(distance)
+            .pow(uHazeFalloff)
+            .saturate()
+            .mul(uHazeOpacity);
+          const fogNoiseA = triNoise3D(
+            positionWorld.mul(uNoiseScaleA),
+            uNoiseAmountA,
+            hazeTimer,
+          );
+          const fogNoiseB = triNoise3D(
+            positionWorld.mul(uNoiseScaleB),
+            uNoiseAmountB,
+            hazeTimer.mul(uNoiseSpeed),
+          );
+          const fogNoiseC = triNoise3D(
+            positionWorld.mul(0.015),
+            uNoiseDetail,
+            hazeTimer.mul(0.5),
+          );
+          const fogNoise = fogNoiseA
+            .add(fogNoiseB)
+            .add(fogNoiseC)
+            .mul(color(uHazeColor));
+          const groundColor = color(new THREE.Color(0x88aa55));
+          scene.fogNode = fog(
+            fogNoiseDistance.oneMinus().mix(groundColor, fogNoise),
+            groundFogArea,
+          );
+        }
+        applyVolumetricHaze();
+
+        const hazeUniforms = {
+          thickness: uHazeThickness,
+          opacity: uHazeOpacity,
+          falloff: uHazeFalloff,
+          hazeColor: uHazeColor,
+          noiseScaleA: uNoiseScaleA,
+          noiseScaleB: uNoiseScaleB,
+          noiseAmountA: uNoiseAmountA,
+          noiseAmountB: uNoiseAmountB,
+          noiseDetail: uNoiseDetail,
+          noiseSpeed: uNoiseSpeed,
+        };
 
         // ── CAPSULE NPCs (wander slowly, grass bends away from them)
         const NPC_SPEED = 2.2;
@@ -1390,6 +1470,8 @@
           rebuildOctahedralForest,
           MAX_SCATTER_PER_TYPE,
           MAX_TREES,
+          applyVolumetricHaze,
+          hazeUniforms,
         };
         const { bNear, bLod1, bLod2 } = setupTweakpaneUI(pane, PARAMS, ctx);
 
