@@ -564,120 +564,115 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
     label: "water level",
   });
 
-  const fWater = pane.addFolder({ title: "Water", expanded: false });
-  const fWaves = fWater.addFolder({ title: "Waves", expanded: true });
-  fWaves
-    .addBinding(PARAMS, "waterSpeed", {
-      min: 0.01,
-      max: 0.3,
-      step: 0.01,
-      label: "speed",
-    })
-    .on("change", () => water && (water.uWaterSpeed.value = PARAMS.waterSpeed));
-  fWaves
-    .addBinding(PARAMS, "waterNormalScale", {
-      min: 0.01,
-      max: 0.3,
-      step: 0.01,
-      label: "normal scale",
-    })
-    .on("change", () => water && (water.uWaterNormalScale.value = PARAMS.waterNormalScale));
-  fWaves
-    .addBinding(PARAMS, "waterUvScale", {
-      min: 0.5,
-      max: 10,
-      step: 0.1,
-      label: "UV scale",
-    })
-    .on("change", () => water && (water.uWaterUvScale.value = PARAMS.waterUvScale));
+  const fWater = pane.addFolder({ title: "Water (stylized)", expanded: false });
+  const syncWater = (w) => {
+    if (!w) return;
+    w.uWaterColor.value.set(PARAMS.waterColor);
+    w.uDeepColor.value.set(PARAMS.waterStylizedDeepColor);
+    w.uWaveSpeed.value = PARAMS.waterWaveSpeed;
+    w.uWaveHeight.value = PARAMS.waterWaveHeight;
+    w.uWaveDir2.value = PARAMS.waterWaveDirection2;
+    w.uNoiseScale.value = PARAMS.waterNoiseScale;
+    w.uLineThinness.value = PARAMS.waterLineThinness;
+    w.uCausticLayer2.value = PARAMS.waterCausticLayer2Scale;
+    w.uFoamWidth.value = PARAMS.waterFoamWidth;
+    w.uFoamDistort.value = PARAMS.waterFoamDistortion;
+    w.uFresnelPower.value = PARAMS.waterFresnelPower;
+    w.uFresnelStrength.value = PARAMS.waterFresnelStrength;
+    w.uSunHighlightSize.value = PARAMS.waterSunHighlightSize;
+    w.uSunHighlightStrength.value = PARAMS.waterSunHighlightStrength;
+    w.uLakeCenter.value.set(PARAMS.lakeCenterX, PARAMS.lakeCenterZ);
+    w.uLakeHalfSize.value = PARAMS.lakeHalfSize;
+  };
+  const fPlacement = fWater.addFolder({ title: "Placement on terrain", expanded: true });
+  fPlacement.addBinding(PARAMS, "lakeCenterX", {
+    min: -200,
+    max: 200,
+    step: 1,
+    label: "center X",
+  }).on("change", () => syncWater(water));
+  fPlacement.addBinding(PARAMS, "lakeCenterZ", {
+    min: -200,
+    max: 200,
+    step: 1,
+    label: "center Z",
+  }).on("change", () => syncWater(water));
+  fPlacement.addBinding(PARAMS, "lakeHalfSize", {
+    min: 5,
+    max: 80,
+    step: 1,
+    label: "half size (radius)",
+  }).on("change", () => syncWater(water));
+  fPlacement.addBinding(PARAMS, "waterHeightOffset", {
+    min: -2,
+    max: 2,
+    step: 0.01,
+    label: "height offset (vs terrain)",
+  }).on("change", () => syncWater(water));
 
-  const fHighlights = fWater.addFolder({
-    title: "Highlights",
-    expanded: true,
-  });
-  fHighlights
-    .addBinding(PARAMS, "waterShininess", {
-      min: 50,
-      max: 2000,
-      step: 10,
-      label: "shininess",
-    })
-    .on("change", () => water && (water.uWaterShininess.value = PARAMS.waterShininess));
-  fHighlights
-    .addBinding(PARAMS, "waterHighlightsGlow", {
-      min: 0.5,
-      max: 10,
-      step: 0.1,
-      label: "glow",
-    })
-    .on("change", () => water && (water.uWaterHighlightsGlow.value = PARAMS.waterHighlightsGlow));
-  fHighlights
-    .addBinding(PARAMS, "waterHighlightFresnelInfluence", {
-      min: 0,
-      max: 1,
-      step: 0.05,
-      label: "fresnel influence",
-    })
-    .on("change", () => water && (water.uWaterHighlightFresnelInfluence.value = PARAMS.waterHighlightFresnelInfluence));
-  fHighlights
-    .addBinding(PARAMS, "waterSunColor", {
-      view: "color",
-      label: "sun color",
-    })
-    .on("change", () =>
-      water && water.uWaterSunColor.value
-        .set(PARAMS.waterSunColor)
-        .convertSRGBToLinear(),
-    );
-  fHighlights
-    .addBinding(PARAMS, "waterHighlightsSpread", {
-      min: 0.1,
-      max: 1,
-      step: 0.05,
-      label: "spread",
-    })
-    .on("change", () => water && (water.uWaterHighlightsSpread.value = PARAMS.waterHighlightsSpread));
+  const fWaterColors = fWater.addFolder({ title: "Colors", expanded: true });
+  fWaterColors
+    .addBinding(PARAMS, "waterColor", { view: "color", label: "shallow" })
+    .on("change", () => water && water.uWaterColor.value.set(PARAMS.waterColor));
+  fWaterColors
+    .addBinding(PARAMS, "waterStylizedDeepColor", { view: "color", label: "deep" })
+    .on("change", () => water && water.uDeepColor.value.set(PARAMS.waterStylizedDeepColor));
 
-  const fWaterColors = fWater.addFolder({
-    title: "Colors",
-    expanded: true,
-  });
-  fWaterColors
-    .addBinding(PARAMS, "waterDeepColor", {
-      view: "color",
-      label: "deep color",
-    })
-    .on("change", () =>
-      water && water.uWaterDeepColor.value
-        .set(PARAMS.waterDeepColor)
-        .convertSRGBToLinear(),
-    );
-  fWaterColors
-    .addBinding(PARAMS, "waterShallowColor", {
-      view: "color",
-      label: "shallow color",
-    })
-    .on("change", () =>
-      water && water.uWaterShallowColor.value
-        .set(PARAMS.waterShallowColor)
-        .convertSRGBToLinear(),
-    );
-  fWaterColors
-    .addBinding(PARAMS, "waterFresnelScale", {
-      min: 0,
-      max: 2,
-      step: 0.05,
-      label: "fresnel scale",
-    })
-    .on("change", () => water && (water.uWaterFresnelScale.value = PARAMS.waterFresnelScale));
-  fWaterColors
-    .addBinding(PARAMS, "waterMinOpacity", {
-      min: 0,
-      max: 1,
-      step: 0.05,
-      label: "opacity",
-    })
-    .on("change", () => water && (water.uWaterMinOpacity.value = PARAMS.waterMinOpacity));
+  const fWaves = fWater.addFolder({ title: "Waves", expanded: false });
+  fWaves
+    .addBinding(PARAMS, "waterWaveSpeed", { min: 0.1, max: 2, step: 0.05, label: "speed" })
+    .on("change", () => water && (water.uWaveSpeed.value = PARAMS.waterWaveSpeed));
+  fWaves
+    .addBinding(PARAMS, "waterWaveHeight", { min: 0.05, max: 0.8, step: 0.01, label: "height" })
+    .on("change", () => water && (water.uWaveHeight.value = PARAMS.waterWaveHeight));
+  fWaves
+    .addBinding(PARAMS, "waterWaveDirection2", { min: 0, max: 1.5, step: 0.05, label: "direction 2" })
+    .on("change", () => water && (water.uWaveDir2.value = PARAMS.waterWaveDirection2));
+
+  const fCaustics = fWater.addFolder({ title: "Caustics / lines", expanded: false });
+  fCaustics
+    .addBinding(PARAMS, "waterNoiseScale", { min: 0.05, max: 0.5, step: 0.01, label: "noise scale" })
+    .on("change", () => water && (water.uNoiseScale.value = PARAMS.waterNoiseScale));
+  fCaustics
+    .addBinding(PARAMS, "waterLineThinness", { min: 0.01, max: 0.15, step: 0.005, label: "line thinness" })
+    .on("change", () => water && (water.uLineThinness.value = PARAMS.waterLineThinness));
+  fCaustics
+    .addBinding(PARAMS, "waterCausticLayer2Scale", { min: 0, max: 0.2, step: 0.01, label: "layer 2 scale" })
+    .on("change", () => water && (water.uCausticLayer2.value = PARAMS.waterCausticLayer2Scale));
+
+  const fFoam = fWater.addFolder({ title: "Foam", expanded: false });
+  fFoam
+    .addBinding(PARAMS, "waterFoamWidth", { min: 0.2, max: 3, step: 0.1, label: "width" })
+    .on("change", () => water && (water.uFoamWidth.value = PARAMS.waterFoamWidth));
+  fFoam
+    .addBinding(PARAMS, "waterFoamDistortion", { min: 0.5, max: 3, step: 0.1, label: "distortion" })
+    .on("change", () => water && (water.uFoamDistort.value = PARAMS.waterFoamDistortion));
+
+  const fFresnel = fWater.addFolder({ title: "Fresnel & opacity", expanded: false });
+  fFresnel
+    .addBinding(PARAMS, "waterOpacity", { min: 0.3, max: 1, step: 0.02, label: "opacity" })
+    .on("change", () => water && (water.uWaterOpacity.value = PARAMS.waterOpacity));
+  fFresnel
+    .addBinding(PARAMS, "waterFresnelPower", { min: 1, max: 8, step: 0.1, label: "fresnel power" })
+    .on("change", () => water && (water.uFresnelPower.value = PARAMS.waterFresnelPower));
+  fFresnel
+    .addBinding(PARAMS, "waterFresnelStrength", { min: 0.1, max: 0.8, step: 0.02, label: "fresnel strength" })
+    .on("change", () => water && (water.uFresnelStrength.value = PARAMS.waterFresnelStrength));
+
+  const fSunHighlight = fWater.addFolder({ title: "Sun highlight", expanded: false });
+  fSunHighlight
+    .addBinding(PARAMS, "waterSunHighlightSize", { min: 0.05, max: 0.5, step: 0.01, label: "size" })
+    .on("change", () => water && (water.uSunHighlightSize.value = PARAMS.waterSunHighlightSize));
+  fSunHighlight
+    .addBinding(PARAMS, "waterSunHighlightStrength", { min: 0, max: 1.5, step: 0.05, label: "strength" })
+    .on("change", () => water && (water.uSunHighlightStrength.value = PARAMS.waterSunHighlightStrength));
+
+  fWater.addBinding(PARAMS, "waterReflectionStrength", {
+    min: 0,
+    max: 1,
+    step: 0.05,
+    label: "reflection (see character)",
+  }).on("change", () => water && (water.uReflectionStrength.value = PARAMS.waterReflectionStrength));
 
   const fSun = pane.addFolder({
     title: "Sun & Lighting",

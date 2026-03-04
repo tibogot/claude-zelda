@@ -209,6 +209,8 @@
         positionView,
         triNoise3D,
         fog,
+        mx_noise_float,
+        reflector,
       } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
@@ -270,7 +272,6 @@
         }
       }
 
-      import { createWater } from "./water.js";
       import { createTrees } from "./trees.js";
       import { createScatter } from "./scatter.js";
       import { GRID_SIZE, PATCH_SPACING, TERRAIN_SIZE, TERRAIN_RES, TRAIL_RES, TRAIL_SIZE, NPC_COUNT, PI } from "./constants.js";
@@ -323,6 +324,7 @@
           500000,
         );
         camera.position.set(0, 8, 20);
+        camera.layers.enable(1);
 
         // Orbit controls
         const orbitControls = new OrbitControls(camera, renderer.domElement);
@@ -443,13 +445,147 @@
 
         const texLoader = new THREE.TextureLoader();
         let waterMesh = null, waterUniforms = null;
-        if (PARAMS.showWater) {
-          ({ waterMesh, waterUniforms } = createWater(scene, PARAMS, {
-            uTime: uniforms.uTime,
-            uSunDir: uniforms.uSunDir,
-            texLoader,
-          }));
-        }
+        // ── STYLIZED WATER (showcase3-style, terrain placement) ──
+        (function initStylizedWater() {
+          const REF_HALF = 50;
+          const uTerrainSize = uniform(TERRAIN_SIZE);
+          const uShoreFoamDepth = uniform(1.5);
+          const uReflectionStrength = uniform(PARAMS.waterReflectionStrength);
+          const reflection = reflector({ resolutionScale: 0.5 });
+          reflection.target.rotation.x = -Math.PI / 2;
+          const lakeYFromTerrain = () => {
+            const cx = PARAMS.lakeCenterX;
+            const cz = PARAMS.lakeCenterZ;
+            return sampleHeight(cx, cz) + PARAMS.waterHeightOffset;
+          };
+          const uWaterTime = uniform(0);
+          const uWaterColor = uniform(
+            new THREE.Color(PARAMS.waterColor).convertSRGBToLinear(),
+          );
+          const uDeepColor = uniform(
+            new THREE.Color(PARAMS.waterStylizedDeepColor).convertSRGBToLinear(),
+          );
+          const uWaveSpeed = uniform(PARAMS.waterWaveSpeed);
+          const uWaveHeight = uniform(PARAMS.waterWaveHeight);
+          const uNoiseScale = uniform(PARAMS.waterNoiseScale);
+          const uLineThinness = uniform(PARAMS.waterLineThinness);
+          const uCausticLayer2 = uniform(PARAMS.waterCausticLayer2Scale);
+          const uFoamWidth = uniform(PARAMS.waterFoamWidth);
+          const uFoamDistort = uniform(PARAMS.waterFoamDistortion);
+          const uFresnelPower = uniform(PARAMS.waterFresnelPower);
+          const uFresnelStrength = uniform(PARAMS.waterFresnelStrength);
+          const uSunHighlightSize = uniform(PARAMS.waterSunHighlightSize);
+          const uSunHighlightStrength = uniform(PARAMS.waterSunHighlightStrength);
+          const uWaveDir2 = uniform(PARAMS.waterWaveDirection2);
+          const uWaterCameraPosition = uniform(new THREE.Vector3());
+          const uWaterSunDirection = uniform(
+            new THREE.Vector3(PARAMS.sunDirX, PARAMS.sunDirY, PARAMS.sunDirZ).normalize(),
+          );
+          const uLakeCenter = uniform(new THREE.Vector2(PARAMS.lakeCenterX, PARAMS.lakeCenterZ));
+          const uLakeHalfSize = uniform(PARAMS.lakeHalfSize);
+          const uWaterLevel = uniform(lakeYFromTerrain());
+          const waterPositionNode = Fn(() => {
+            const p = positionLocal;
+            const t = uWaterTime.mul(uWaveSpeed);
+            const waveX = sin(p.x.mul(0.4).add(t)).mul(uWaveHeight);
+            const waveZ = sin(p.z.mul(0.35).add(t.mul(0.7))).mul(uWaveHeight).mul(uWaveDir2);
+            return positionLocal.add(vec3(0, 0, waveX.add(waveZ)));
+          })();
+          const waterColorNode = Fn(() => {
+            const wPos = positionWorld;
+            const distFromCenter = length(sub(wPos.xz, uLakeCenter));
+            const nUV = wPos.xz.mul(uNoiseScale).add(uWaterTime.mul(0.1));
+            const n1 = mx_noise_float(nUV);
+            const n2 = mx_noise_float(nUV.add(vec2(0.5, 0.5)));
+            const combined = mix(n1, n2, 0.5);
+            const ridge = abs(sub(combined, 0.5));
+            let thinLines = smoothstep(uLineThinness, float(0), ridge);
+            const nUV2 = wPos.xz.mul(uCausticLayer2).add(uWaterTime.mul(0.05));
+            const r2 = abs(sub(mx_noise_float(nUV2), 0.5));
+            const layer2Strength = smoothstep(float(0), float(0.05), uCausticLayer2);
+            thinLines = thinLines.add(
+              smoothstep(uLineThinness.mul(1.5), float(0), r2).mul(0.4).mul(layer2Strength),
+            ).clamp(0, 1);
+            const terrainUV = clamp(
+              vec2(div(wPos.x, uTerrainSize).add(0.5), div(wPos.z, uTerrainSize).add(0.5)),
+              0.01,
+              0.99,
+            );
+            const terrainHeight = texture(heightTex, terrainUV).r;
+            const depthUnderWater = sub(uWaterLevel, terrainHeight);
+            const fDistort = mx_noise_float(wPos.xz.mul(0.6).add(uWaterTime.mul(0.6))).mul(uFoamDistort);
+            const depthWithNoise = sub(depthUnderWater, fDistort);
+            const shoreFoam = sub(float(1), smoothstep(float(0), uShoreFoamDepth, depthWithNoise)).clamp(0, 1);
+            const viewDir = normalize(sub(uWaterCameraPosition, wPos));
+            const flatNormal = vec3(0, 1, 0);
+            const NdotV = dot(flatNormal, viewDir).clamp(0, 1);
+            const fresnel = pow(sub(float(1), NdotV), uFresnelPower).mul(uFresnelStrength);
+            const sunDir = normalize(uWaterSunDirection);
+            const H = normalize(add(viewDir, sunDir));
+            const NdotH = dot(flatNormal, H).clamp(0, 1);
+            const sunHighlight = pow(NdotH, div(float(1), uSunHighlightSize)).mul(uSunHighlightStrength);
+            const baseMix = smoothstep(float(0), uLakeHalfSize, distFromCenter);
+            const waterBase = mix(uWaterColor, uDeepColor, baseMix);
+            let final = waterBase;
+            final = mix(final, vec3(1, 1, 1), thinLines.mul(0.6));
+            final = mix(final, vec3(1, 1, 1), shoreFoam);
+            const reflectionBlend = fresnel.mul(uReflectionStrength).clamp(0, 1);
+            final = mix(final, reflection, reflectionBlend);
+            final = add(final, vec3(fresnel, fresnel, fresnel));
+            final = add(final, vec3(sunHighlight, sunHighlight, sunHighlight));
+            return final;
+          })();
+          const waterMat = new THREE.MeshBasicNodeMaterial({
+            transparent: true,
+            depthWrite: true,
+          });
+          waterMat.color.setHex(0xffffff);
+          const uWaterOpacity = uniform(PARAMS.waterOpacity);
+          waterMat.positionNode = waterPositionNode;
+          waterMat.colorNode = waterColorNode;
+          waterMat.opacityNode = uWaterOpacity;
+          const seg = Math.max(32, Math.min(256, PARAMS.waterSegments || 256));
+          const lakeGeometry = new THREE.PlaneGeometry(REF_HALF * 2, REF_HALF * 2, seg, seg);
+          waterMesh = new THREE.Mesh(lakeGeometry, waterMat);
+          waterMesh.rotation.x = -Math.PI / 2;
+          waterMesh.position.set(PARAMS.lakeCenterX, lakeYFromTerrain(), PARAMS.lakeCenterZ);
+          waterMesh.visible = PARAMS.showWater;
+          waterMesh.receiveShadow = true;
+          waterMesh.renderOrder = 100;
+          waterMesh.layers.set(1);
+          scene.add(waterMesh);
+          scene.add(reflection.target);
+          waterUniforms = {
+            uWaterTime,
+            uWaterColor,
+            uDeepColor,
+            uWaveSpeed,
+            uWaveHeight,
+            uNoiseScale,
+            uLineThinness,
+            uCausticLayer2,
+            uFoamWidth,
+            uFoamDistort,
+            uFresnelPower,
+            uFresnelStrength,
+            uSunHighlightSize,
+            uSunHighlightStrength,
+            uWaveDir2,
+            uWaterCameraPosition,
+            uWaterSunDirection,
+            uLakeCenter,
+            uLakeHalfSize,
+            uWaterLevel,
+            uShoreFoamDepth,
+            uTerrainSize,
+            uWaterOpacity,
+            uReflectionStrength,
+            lakeYFromTerrain,
+            refHalf: REF_HALF,
+            reflectionTarget: reflection.target,
+            reflectionRef: reflection,
+          };
+        })();
 
         // ── SKY ──
         const sky = new SkyMesh();
@@ -1714,6 +1850,33 @@
           uniforms.uTime.value = elapsed;
           uniforms.uPlayerPos.value.copy(charPos);
           uniforms.uTrailCenter.value.set(charPos.x, charPos.z);
+          if (waterMesh && waterUniforms) {
+            waterUniforms.uWaterTime.value = elapsed;
+            waterUniforms.uWaterCameraPosition.value.copy(camera.position);
+            waterUniforms.uWaterSunDirection.value.set(PARAMS.sunDirX, PARAMS.sunDirY, PARAMS.sunDirZ).normalize();
+            waterUniforms.uLakeCenter.value.set(PARAMS.lakeCenterX, PARAMS.lakeCenterZ);
+            waterUniforms.uLakeHalfSize.value = PARAMS.lakeHalfSize;
+            waterUniforms.uWaterColor.value.copy(new THREE.Color(PARAMS.waterColor).convertSRGBToLinear());
+            waterUniforms.uDeepColor.value.copy(new THREE.Color(PARAMS.waterStylizedDeepColor).convertSRGBToLinear());
+            waterUniforms.uReflectionStrength.value = PARAMS.waterReflectionStrength;
+            const lakeY = waterUniforms.lakeYFromTerrain();
+            waterUniforms.uWaterLevel.value = lakeY;
+            waterMesh.position.set(PARAMS.lakeCenterX, lakeY, PARAMS.lakeCenterZ);
+            waterMesh.visible = PARAMS.showWater;
+            if (waterUniforms.reflectionTarget) {
+              waterUniforms.reflectionTarget.position.copy(waterMesh.position);
+              waterUniforms.reflectionTarget.quaternion.copy(waterMesh.quaternion);
+            }
+            if (waterUniforms.reflectionRef && typeof waterUniforms.reflectionRef.getVirtualCamera === "function" && !waterUniforms._reflectionLayersSet) {
+              const vcam = waterUniforms.reflectionRef.getVirtualCamera(camera);
+              if (vcam) {
+                vcam.layers.set(0);
+                waterUniforms._reflectionLayersSet = true;
+              }
+            }
+            const refHalf = waterUniforms.refHalf || 50;
+            waterMesh.scale.set(PARAMS.lakeHalfSize / refHalf, 1, PARAMS.lakeHalfSize / refHalf);
+          }
           // Deer AI (terrain-following, animation state machine)
           if (PARAMS.deerEnabled && deerGroup) {
             updateDeer(dt);

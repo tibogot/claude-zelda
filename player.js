@@ -10,8 +10,7 @@ import { resolveKinematicOverlap } from "./physics.js";
 import { createFootstepAudio } from "./footsteps.js";
 
 const CHAR_GLB = "models/AnimationLibrary_Godot_Standard-transformed.glb";
-const DRACO_URL =
-  "https://www.gstatic.com/draco/versioned/decoders/1.5.6/";
+const DRACO_URL = "https://www.gstatic.com/draco/versioned/decoders/1.5.6/";
 
 /**
  * @param {object} opts
@@ -56,7 +55,9 @@ export function createPlayer(opts) {
   // Footstep audio — loads async in background, starts working once ready
   let footstepAudio = null;
   if (footstepSoundsPath) {
-    createFootstepAudio(footstepSoundsPath).then(fa => { footstepAudio = fa; });
+    createFootstepAudio(footstepSoundsPath).then((fa) => {
+      footstepAudio = fa;
+    });
   }
 
   const capsuleGeo = new THREE.CapsuleGeometry(0.4, 1.2, 8, 16);
@@ -118,7 +119,8 @@ export function createPlayer(opts) {
       characterGroup.userData.leftHandBone =
         model.getObjectByName(HAND_BONE_L) || null;
       characterGroup.userData.headBone =
-        HEAD_BONE_NAMES.map((n) => model.getObjectByName(n)).find(Boolean) || null;
+        HEAD_BONE_NAMES.map((n) => model.getObjectByName(n)).find(Boolean) ||
+        null;
 
       // Attach a simple sword to the right hand for attack animation work
       const rightHand = characterGroup.userData.rightHandBone;
@@ -157,7 +159,7 @@ export function createPlayer(opts) {
         const hatLoader = new GLTFLoader();
         hatLoader.setDRACOLoader(charDraco);
         hatLoader.load(
-          "models/asian_conical_hat.glb",
+          "models/asian_conical_hat_compressed.glb",
           (hatGltf) => {
             const hatScene = hatGltf.scene;
             hatScene.traverse((o) => {
@@ -191,9 +193,9 @@ export function createPlayer(opts) {
       // Paraglider/kite for skydiving (Space during jump) — flat triangle, perpendicular to player
       const kiteGroup = new THREE.Group();
       const kiteShape = new THREE.Shape();
-      kiteShape.moveTo(0, -0.7);       // point at bottom (toward character)
-      kiteShape.lineTo(-1.6, 0.6);     // top-left
-      kiteShape.lineTo(1.6, 0.6);     // top-right
+      kiteShape.moveTo(0, -0.7); // point at bottom (toward character)
+      kiteShape.lineTo(-1.6, 0.6); // top-left
+      kiteShape.lineTo(1.6, 0.6); // top-right
       kiteShape.closePath();
       const canopyGeo = new THREE.ShapeGeometry(kiteShape);
       const canopyMat = new THREE.MeshStandardNodeMaterial({
@@ -226,17 +228,19 @@ export function createPlayer(opts) {
       characterGroup.userData.kite = kiteGroup;
 
       // Find foot bones for footstep sync (DEF-footL / DEF-footR naming)
-      let _fbl = null, _fbr = null;
-      model.traverse(o => {
+      let _fbl = null,
+        _fbr = null;
+      model.traverse((o) => {
         const n = o.name;
         if (!/foot/i.test(n)) return;
-        if (n.endsWith('L') || n.endsWith('l') || n.endsWith('Left')) _fbl = o;
-        else if (n.endsWith('R') || n.endsWith('r') || n.endsWith('Right')) _fbr = o;
+        if (n.endsWith("L") || n.endsWith("l") || n.endsWith("Left")) _fbl = o;
+        else if (n.endsWith("R") || n.endsWith("r") || n.endsWith("Right"))
+          _fbr = o;
       });
       characterGroup.userData.footBoneL = _fbl;
       characterGroup.userData.footBoneR = _fbr;
-      if (_fbl) console.log('[footsteps] L bone:', _fbl.name);
-      if (_fbr) console.log('[footsteps] R bone:', _fbr.name);
+      if (_fbl) console.log("[footsteps] L bone:", _fbl.name);
+      if (_fbr) console.log("[footsteps] R bone:", _fbr.name);
 
       try {
         if (gltf.animations && gltf.animations.length) {
@@ -255,8 +259,11 @@ export function createPlayer(opts) {
             gltf.animations.find((a) => a.name === "Jump_Loop") ||
             gltf.animations.find((a) => a.name === "Jump_Start") ||
             idleClip;
-          const attackClip = gltf.animations.find((a) => a.name === "Sword_Attack") || null;
-          const attackClip2 = gltf.animations.find((a) => a.name === "Sword_Attack_RM") || attackClip;
+          const attackClip =
+            gltf.animations.find((a) => a.name === "Sword_Attack") || null;
+          const attackClip2 =
+            gltf.animations.find((a) => a.name === "Sword_Attack_RM") ||
+            attackClip;
           const crouchClip =
             gltf.animations.find((a) => a.name === "Crouch_Idle_Loop") ||
             idleClip;
@@ -286,17 +293,12 @@ export function createPlayer(opts) {
           const crouchWalkAction = characterMixer
             .clipAction(crouchWalkClip)
             .setLoop(2201);
-          const rollAction = characterMixer
-            .clipAction(rollClip)
-            .setLoop(2200);
+          const rollAction = characterMixer.clipAction(rollClip).setLoop(2200);
           if (attackAction?.clampWhenFinished !== undefined)
             attackAction.clampWhenFinished = true;
           if (attackAction2?.clampWhenFinished !== undefined)
             attackAction2.clampWhenFinished = true;
-          if (
-            rollAction &&
-            rollAction.clampWhenFinished !== undefined
-          )
+          if (rollAction && rollAction.clampWhenFinished !== undefined)
             rollAction.clampWhenFinished = true;
           characterGroup.userData.idleAction = idleAction;
           characterGroup.userData.walkAction = walkAction;
@@ -457,32 +459,35 @@ export function createPlayer(opts) {
   // Prevents 1-frame flicker on descending slopes and dipping kinematic planks.
   // Cleared immediately on intentional jump so air state engages without delay.
   let _groundGrace = 0;
-  let _justJumped  = false;
+  let _justJumped = false;
   let _airFrames = 0;
   let _groundFrames = 0;
 
   // Capsule resize for crouch-through-tunnel (parkour mode only).
   // _normalHH_c / _crouchHH_c are the capsule half-heights.
   // _crouchShift is how far the body centre moves down/up on transition.
-  const _capR_c      = PARAMS.capsuleRadius ?? 0.35;
-  const _normalHH_c  = Math.max(0.1, (PARAMS.characterHeight - 2 * _capR_c) / 2);
-  const _crouchHH_c  = Math.max(0.05, _normalHH_c * 0.31); // ≈50 % height
+  const _capR_c = PARAMS.capsuleRadius ?? 0.35;
+  const _normalHH_c = Math.max(0.1, (PARAMS.characterHeight - 2 * _capR_c) / 2);
+  const _crouchHH_c = Math.max(0.05, _normalHH_c * 0.31); // ≈50 % height
   const _crouchShift = _normalHH_c - _crouchHH_c;
-  let _isCrouching   = false;
-  let _justStoodUp   = false;
+  let _isCrouching = false;
+  let _justStoodUp = false;
   let _crouchVisualT = 0; // 0 = standing, 1 = fully crouched (lerped for smooth model transition)
-  let _platformBody = null;  // kinematic body player stood on last frame
+  let _platformBody = null; // kinematic body player stood on last frame
   /** @type {{ [handle: number]: { x: number, y: number, z: number } }} */
-  const _lastPlatformPos = {};  // platform handle -> last position for velocity-from-delta
+  const _lastPlatformPos = {}; // platform handle -> last position for velocity-from-delta
   let isPointerLocked = false;
 
   // Foot bone Y tracking for footstep sync
   const _footPos = new THREE.Vector3();
-  let _footRelYL = null, _footRelYR = null;
-  let _footVelL = 0, _footVelR = 0;
-  let _footCoolL = 0, _footCoolR = 0;
+  let _footRelYL = null,
+    _footRelYR = null;
+  let _footVelL = 0,
+    _footVelR = 0;
+  let _footCoolL = 0,
+    _footCoolR = 0;
   let _footCoolGlobal = 0; // prevents L+R from double-firing when sprint plants are close together
-  let _wasInAir = false;  // landing detection
+  let _wasInAir = false; // landing detection
 
   window.addEventListener("keydown", (e) => {
     const k = e.key.toLowerCase();
@@ -534,7 +539,9 @@ export function createPlayer(opts) {
   document.addEventListener("pointerlockchange", () => {
     isPointerLocked = !!document.pointerLockElement;
   });
-  renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
+  renderer.domElement.addEventListener("contextmenu", (e) =>
+    e.preventDefault(),
+  );
   renderer.domElement.addEventListener("mousedown", (e) => {
     if (e.button !== 2) return;
     const ud = characterGroup.userData;
@@ -603,7 +610,7 @@ export function createPlayer(opts) {
     // transition) to avoid jitter — nextGroundY uses standing height, so we must
     // subtract _crouchShift while crouched.
     const onGroundForCrouch = hasSampleHeight
-      ? charPos.y <= (sampleHeight(charPos.x, charPos.z) + capHalfH + capR) + 0.6
+      ? charPos.y <= sampleHeight(charPos.x, charPos.z) + capHalfH + capR + 0.6
       : state.isGrounded;
     {
       const wantCrouch = keys.ctrl && onGroundForCrouch;
@@ -615,16 +622,27 @@ export function createPlayer(opts) {
         let canStand = true;
         if (RAPIER) {
           const ray = new RAPIER.Ray(
-            { x: charPos.x, y: charPos.y + _crouchHH_c + _capR_c + 0.02, z: charPos.z },
-            { x: 0, y: 1, z: 0 });
-          const hit = physicsWorld.castRay(ray, _crouchShift + 0.05, true,
-            undefined, undefined, playerCollider);
-          canStand = (hit === null);
+            {
+              x: charPos.x,
+              y: charPos.y + _crouchHH_c + _capR_c + 0.02,
+              z: charPos.z,
+            },
+            { x: 0, y: 1, z: 0 },
+          );
+          const hit = physicsWorld.castRay(
+            ray,
+            _crouchShift + 0.05,
+            true,
+            undefined,
+            undefined,
+            playerCollider,
+          );
+          canStand = hit === null;
         }
         if (canStand) {
           playerCollider.setHalfHeight(_normalHH_c);
           _isCrouching = false;
-          _justStoodUp = true;  // enforce min rise next frame so capsule doesn't sink
+          _justStoodUp = true; // enforce min rise next frame so capsule doesn't sink
         }
       }
     }
@@ -632,7 +650,8 @@ export function createPlayer(opts) {
     if (_justStoodUp) _justStoodUp = false;
 
     // Smooth visual lerp — physics snaps instantly, model eases over ~0.15 s
-    _crouchVisualT += ((_isCrouching ? 1 : 0) - _crouchVisualT) * Math.min(10 * dt, 1);
+    _crouchVisualT +=
+      ((_isCrouching ? 1 : 0) - _crouchVisualT) * Math.min(10 * dt, 1);
 
     state.moveDir.set(0, 0, 0);
     let desiredDx = 0;
@@ -681,12 +700,11 @@ export function createPlayer(opts) {
       const rightZ = -sinY;
       const mx = state.moveDir.x * rightX - state.moveDir.z * forwardX;
       const mz = state.moveDir.x * rightZ - state.moveDir.z * forwardZ;
-      const speedMult =
-        _isCrouching
-          ? (PARAMS.crouchSpeedMultiplier ?? 0.5)
-          : keys.shift
-            ? PARAMS.runSpeedMultiplier
-            : 1;
+      const speedMult = _isCrouching
+        ? (PARAMS.crouchSpeedMultiplier ?? 0.5)
+        : keys.shift
+          ? PARAMS.runSpeedMultiplier
+          : 1;
       desiredDx = mx * PARAMS.playerSpeed * speedMult * dt;
       desiredDz = mz * PARAMS.playerSpeed * speedMult * dt;
     }
@@ -694,7 +712,8 @@ export function createPlayer(opts) {
       const elapsed = (performance.now() - ud.rollStartTime) / 1000;
       const t = Math.min(1, elapsed / ud.rollDuration);
       const ease = Math.cos(t * Math.PI * 0.5); // 1→0 smooth ease-out
-      const rollSpeed = ((PARAMS.rollDashDistance ?? 8) / ud.rollDuration) * ease;
+      const rollSpeed =
+        ((PARAMS.rollDashDistance ?? 8) / ud.rollDuration) * ease;
       const sinY = Math.sin(ud.rollYaw ?? state.camYaw);
       const cosY = Math.cos(ud.rollYaw ?? state.camYaw);
       desiredDx = sinY * rollSpeed * dt; // override WASD, no stacking
@@ -703,12 +722,19 @@ export function createPlayer(opts) {
     const hb = TERRAIN_SIZE * 0.48;
     const nextX = Math.max(-hb, Math.min(hb, charPos.x + desiredDx));
     const nextZ = Math.max(-hb, Math.min(hb, charPos.z + desiredDz));
-    const groundY = hasSampleHeight ? sampleHeight(charPos.x, charPos.z) + capHalfH + capR : 0;
-    const nextGroundY = hasSampleHeight ? sampleHeight(nextX, nextZ) + capHalfH + capR : 0;
-    const onGround = hasSampleHeight ? charPos.y <= groundY + 0.6 : state.isGrounded;
+    const groundY = hasSampleHeight
+      ? sampleHeight(charPos.x, charPos.z) + capHalfH + capR
+      : 0;
+    const nextGroundY = hasSampleHeight
+      ? sampleHeight(nextX, nextZ) + capHalfH + capR
+      : 0;
+    const onGround = hasSampleHeight
+      ? charPos.y <= groundY + 0.6
+      : state.isGrounded;
     let desiredY;
     if (onGround) {
-      if (keys.space && !_isCrouching) {   // no jumping while crouched
+      if (keys.space && !_isCrouching) {
+        // no jumping while crouched
         state.characterVelY = PARAMS.jumpSpeed;
         _justJumped = true;
         desiredY = charPos.y + state.characterVelY * dt;
@@ -718,9 +744,11 @@ export function createPlayer(opts) {
         // ONLY while moving so the capsule stays in contact with descending slopes.
         // Skip it when standing still to avoid floating-point drift that sinks the character.
         const isMovingH = desiredDx * desiredDx + desiredDz * desiredDz > 1e-6;
-        desiredY = hasSampleHeight ? nextGroundY
-                 : isMovingH       ? charPos.y - 0.5 * dt
-                 :                   charPos.y;
+        desiredY = hasSampleHeight
+          ? nextGroundY
+          : isMovingH
+            ? charPos.y - 0.5 * dt
+            : charPos.y;
       }
     } else {
       // Glider toggle: Space mid-air opens/closes (press again to close)
@@ -743,8 +771,18 @@ export function createPlayer(opts) {
     // computedGrounded() becomes false and we'd stop inheriting velocity, leaving us floating.
     if (!hasSampleHeight && RAPIER) {
       const capBottom = charPos.y - _normalHH_c - _capR_c;
-      const ray = new RAPIER.Ray({ x: charPos.x, y: capBottom + 0.02, z: charPos.z }, { x: 0, y: -1, z: 0 });
-      const hit = physicsWorld.castRay(ray, 0.35, true, undefined, undefined, playerCollider);
+      const ray = new RAPIER.Ray(
+        { x: charPos.x, y: capBottom + 0.02, z: charPos.z },
+        { x: 0, y: -1, z: 0 },
+      );
+      const hit = physicsWorld.castRay(
+        ray,
+        0.35,
+        true,
+        undefined,
+        undefined,
+        playerCollider,
+      );
       if (hit) {
         const hitCol = physicsWorld.getCollider(hit.collider);
         const hitBody = hitCol?.parent?.();
@@ -758,8 +796,15 @@ export function createPlayer(opts) {
     // Rapier auto-computes linvel() for kinematicPositionBased bodies from their
     // setNextKinematicTranslation delta each step, so we can read it directly.
     // Skip when we've just jumped (positive velY) so we don't get pulled down mid-jump.
-    let platDx = 0, platDy = 0, platDz = 0;
-    if (!hasSampleHeight && _platformBody && state.characterVelY <= 0.5 && state.isGrounded) {
+    let platDx = 0,
+      platDy = 0,
+      platDz = 0;
+    if (
+      !hasSampleHeight &&
+      _platformBody &&
+      state.characterVelY <= 0.5 &&
+      state.isGrounded
+    ) {
       const vel = _platformBody.linvel();
       platDx = vel.x * dt;
       platDy = vel.y * dt;
@@ -788,18 +833,23 @@ export function createPlayer(opts) {
     // Kinematic bodies don't generate contact forces automatically (unlike dynamic ones),
     // so we read what the controller hit this frame and apply an impulse manually.
     // str = 3/mass → light boxes (1kg) fly, medium (15kg) slide, heavy (80kg) barely budge.
-    const movLen = Math.sqrt(desiredTranslation.x ** 2 + desiredTranslation.z ** 2);
+    const movLen = Math.sqrt(
+      desiredTranslation.x ** 2 + desiredTranslation.z ** 2,
+    );
     if (movLen > 0.0001) {
       for (let i = 0; i < characterController.numComputedCollisions(); i++) {
         const col = characterController.computedCollision(i);
         const hitBody = col?.collider?.parent?.();
         if (!hitBody?.isDynamic?.()) continue;
         const str = 3 / Math.max(hitBody.mass(), 1);
-        hitBody.applyImpulse({
-          x: (desiredTranslation.x / movLen) * str,
-          y: 0.1 * str,
-          z: (desiredTranslation.z / movLen) * str,
-        }, true);
+        hitBody.applyImpulse(
+          {
+            x: (desiredTranslation.x / movLen) * str,
+            y: 0.1 * str,
+            z: (desiredTranslation.z / movLen) * str,
+          },
+          true,
+        );
       }
     }
     // Transfer player weight to dynamic bodies the character stands on (e.g. bridge planks).
@@ -821,8 +871,10 @@ export function createPlayer(opts) {
       // terrain mode: ground truth comes from heightmap
       state.isGrounded = onGround;
       if (onGround) state.isGliding = false;
-      const landedGroundY = sampleHeight(charPos.x, charPos.z) + capHalfH + capR;
-      if (state.characterVelY < 0 && charPos.y <= landedGroundY + 0.2) state.characterVelY = 0;
+      const landedGroundY =
+        sampleHeight(charPos.x, charPos.z) + capHalfH + capR;
+      if (state.characterVelY < 0 && charPos.y <= landedGroundY + 0.2)
+        state.characterVelY = 0;
     } else {
       // parkour mode: Rapier trimesh colliders are ground truth.
       // Grace period prevents flicker on dipping planks and descending slopes.
@@ -894,7 +946,7 @@ export function createPlayer(opts) {
       for (const k of Object.keys(_lastPlatformPos)) delete _lastPlatformPos[k];
     }
     const rawInAir = hasSampleHeight
-      ? charPos.y > (sampleHeight(charPos.x, charPos.z) + capHalfH + capR) + 0.15
+      ? charPos.y > sampleHeight(charPos.x, charPos.z) + capHalfH + capR + 0.15
       : !state.isGrounded;
     if (rawInAir) {
       _airFrames++;
@@ -936,7 +988,9 @@ export function createPlayer(opts) {
         // Offset model upward to counteract the capsule-centre drop during crouch.
         // Uses the lerped _crouchVisualT so the transition eases in/out smoothly.
         characterGroup.children[0].position.y =
-          ud.modelBaseY + PARAMS.characterOffsetY + _crouchVisualT * _crouchShift;
+          ud.modelBaseY +
+          PARAMS.characterOffsetY +
+          _crouchVisualT * _crouchShift;
     }
     capsule.visible = characterGroup.children.length === 0;
     if (ud?.kite) ud.kite.visible = state.isGliding;
@@ -956,19 +1010,31 @@ export function createPlayer(opts) {
           : "idle";
     // Early roll exit: if player holds a direction past 75% of the animation,
     // skip waiting for 'finished' and snap to walk/run immediately.
-    if (ud?.isRolling && ud.rollStartTime && ud.rollDuration > 0 && moving && !inAir) {
-      const rollT = (performance.now() - ud.rollStartTime) / 1000 / ud.rollDuration;
+    if (
+      ud?.isRolling &&
+      ud.rollStartTime &&
+      ud.rollDuration > 0 &&
+      moving &&
+      !inAir
+    ) {
+      const rollT =
+        (performance.now() - ud.rollStartTime) / 1000 / ud.rollDuration;
       if (rollT >= 0.75) {
         ud.isRolling = false;
         const target =
-          moveState === "run"         ? ud.runAction :
-          moveState === "crouch_walk" ? ud.crouchWalkAction :
-          moveState === "crouch"      ? ud.crouchAction :
-                                        ud.walkAction;
+          moveState === "run"
+            ? ud.runAction
+            : moveState === "crouch_walk"
+              ? ud.crouchWalkAction
+              : moveState === "crouch"
+                ? ud.crouchAction
+                : ud.walkAction;
         if (target && ud.rollAction) {
           target.enabled = true;
           target.crossFadeFrom(ud.rollAction, 0.15).play();
-          setTimeout(() => { if (ud.rollAction) ud.rollAction.enabled = false; }, 150);
+          setTimeout(() => {
+            if (ud.rollAction) ud.rollAction.enabled = false;
+          }, 150);
         }
         ud.lastMoveState = moveState; // prevent state machine double-transition
       }
@@ -1013,7 +1079,8 @@ export function createPlayer(opts) {
           ud.crouchAction.crossFadeFrom(from, 0.2).play();
         };
         const toCrouchWalk = (from) => {
-          if (ud.crouchWalkAction.time < skipT) ud.crouchWalkAction.time = skipT;
+          if (ud.crouchWalkAction.time < skipT)
+            ud.crouchWalkAction.time = skipT;
           ud.crouchWalkAction.enabled = true;
           ud.crouchWalkAction.crossFadeFrom(from, 0.2).play();
         };
@@ -1045,7 +1112,8 @@ export function createPlayer(opts) {
           else if (last === "run") toCrouchWalk(ud.runAction);
           else if (last === "jump") toCrouchWalk(ud.jumpAction);
           else if (last === "crouch") {
-            if (ud.crouchWalkAction.time < skipT) ud.crouchWalkAction.time = skipT;
+            if (ud.crouchWalkAction.time < skipT)
+              ud.crouchWalkAction.time = skipT;
             ud.crouchWalkAction.enabled = true;
             ud.crouchWalkAction.crossFadeFrom(ud.crouchAction, 0.2).play();
           }
@@ -1123,7 +1191,12 @@ export function createPlayer(opts) {
         const relY = _footPos.y - charPos.y;
         if (_footRelYL !== null) {
           const vel = relY - _footRelYL;
-          if (_footCoolL <= 0 && _footCoolGlobal <= 0 && _footVelL < -0.001 && vel >= -0.001) {
+          if (
+            _footCoolL <= 0 &&
+            _footCoolGlobal <= 0 &&
+            _footVelL < -0.001 &&
+            vel >= -0.001
+          ) {
             footstepAudio.play(running, stepVol);
             _footCoolL = perFootCool;
             _footCoolGlobal = 0.1;
@@ -1138,7 +1211,12 @@ export function createPlayer(opts) {
         const relY = _footPos.y - charPos.y;
         if (_footRelYR !== null) {
           const vel = relY - _footRelYR;
-          if (_footCoolR <= 0 && _footCoolGlobal <= 0 && _footVelR < -0.001 && vel >= -0.001) {
+          if (
+            _footCoolR <= 0 &&
+            _footCoolGlobal <= 0 &&
+            _footVelR < -0.001 &&
+            vel >= -0.001
+          ) {
             footstepAudio.play(running, stepVol);
             _footCoolR = perFootCool;
             _footCoolGlobal = 0.1;
@@ -1165,7 +1243,11 @@ export function createPlayer(opts) {
       ud.walkAction &&
       ud.runAction
     ) {
-      const currentAttack = ud.attackAction?.enabled ? ud.attackAction : ud.attackAction2?.enabled ? ud.attackAction2 : null;
+      const currentAttack = ud.attackAction?.enabled
+        ? ud.attackAction
+        : ud.attackAction2?.enabled
+          ? ud.attackAction2
+          : null;
       if (currentAttack) {
         const clip = currentAttack.getClip();
         const dur = clip && clip.duration != null ? clip.duration : 1;
