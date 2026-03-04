@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stylized Water — Cartoon Style (WebGPU TSL)</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        background: #fcffdc;
+        overflow: hidden;
+        font-family: "SF Mono", "Fira Code", monospace;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        bottom: 12px;
+        left: 12px;
+        z-index: 20;
+        background: rgba(0, 0, 0, 0.55);
+        color: #b0d890;
+        padding: 8px 12px;
+        border-radius: 6px;
+        font-size: 11px;
+        line-height: 1.6;
+      }
+      #info span {
+        color: #e0f0c0;
+        font-weight: 600;
+      }
+      .tp-dfwv {
+        z-index: 30 !important;
+        max-height: 90vh !important;
+        overflow-y: auto !important;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">
+      <span>Stylized Water</span> — Cartoon style + foam around rocks (WebGPU +
+      TSL)<br />
+      Orbit: <span>left-drag</span> &nbsp; Zoom: <span>scroll</span>
+    </div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { WebGPURenderer } from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import GUI from "three/addons/libs/lil-gui.module.min.js";
+      import {
+        Fn,
+        uniform,
+        float,
+        vec2,
+        vec3,
+        uv,
+        positionLocal,
+        positionWorld,
+        sin,
+        mix,
+        smoothstep,
+        step,
+        add,
+        sub,
+        mul,
+        length,
+        min,
+      } from "three/tsl";
+      import { noise12 } from "./tsl-utils.js";
+
+      function hexToVec3(hex) {
+        const c = new THREE.Color(hex);
+        c.convertSRGBToLinear();
+        return new THREE.Vector3(c.r, c.g, c.b);
+      }
+
+      // ─── Create stylized water material (TSL) ─────────────────────────────────────
+      function createStylizedWaterMaterial(params) {
+        const uTime = params.uTime;
+        const uWaveSpeed = uniform(params.waveSpeed);
+        const uWaveAmplitude = uniform(params.waveAmplitude);
+        const uTextureSize = uniform(params.textureSize);
+        const uColorNear = uniform(hexToVec3(params.colorNear));
+        const uColorFar = uniform(hexToVec3(params.colorFar));
+        const uFoamRadius = uniform(params.foamRadius);
+        const uRockPositions = params.rockPositions; // array of uniform vec3
+
+        const mat = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          depthWrite: true,
+          side: THREE.DoubleSide,
+        });
+
+        // Vertex: sine wave on Z (plane lies in XZ)
+        mat.positionNode = Fn(() => {
+          const sineOffset = sin(uTime.mul(uWaveSpeed)).mul(uWaveAmplitude);
+          return positionLocal.add(vec3(0, 0, sineOffset));
+        })();
+
+        // Fragment: foam, waves, vignette + object interaction (foam around rocks)
+        mat.colorNode = Fn(() => {
+          const vUv = uv();
+          const textureSize = sub(100.0, uTextureSize);
+
+          // Base noise for foam
+          const noiseBaseUV = add(
+            mul(vUv, mul(textureSize, 2.8)),
+            vec2(sin(uTime.mul(0.3)), sin(uTime.mul(0.3))),
+          );
+          const noiseBase = add(mul(noise12(noiseBaseUV), 0.5), 0.5);
+          const colorBase = vec3(noiseBase, noiseBase, noiseBase);
+
+          // Foam effect (procedural)
+          let foam = smoothstep(float(0.08), float(0.001), colorBase);
+          foam = step(float(0.5), foam);
+
+          // Object interaction: foam around rocks (distance-based)
+          const wp = positionWorld;
+          let minDistToRock = float(999.0);
+          for (let i = 0; i < 12; i++) {
+            minDistToRock = min(
+              minDistToRock,
+              length(sub(wp, uRockPositions[i])),
+            );
+          }
+          const foamAtObject = smoothstep(
+            uFoamRadius,
+            sub(uFoamRadius, float(0.15)),
+            minDistToRock,
+          );
+          const foamObjectVec = vec3(foamAtObject, foamAtObject, foamAtObject);
+          foam = add(foam, foamObjectVec);
+
+          // Wave noise
+          const noiseWavesUV = add(
+            mul(vUv, textureSize),
+            vec2(sin(uTime.mul(-0.1)), sin(uTime.mul(-0.1))),
+          );
+          const noiseWaves = add(mul(noise12(noiseWavesUV), 0.5), 0.5);
+          const colorWaves = vec3(noiseWaves, noiseWaves, noiseWaves);
+
+          // Wave threshold (oscillates)
+          const threshold = add(0.6, mul(0.01, sin(uTime.mul(2.0))));
+          const waveEffect = sub(
+            float(1.0),
+            add(
+              smoothstep(
+                add(threshold, 0.03),
+                add(threshold, 0.032),
+                colorWaves,
+              ),
+              smoothstep(threshold, sub(threshold, 0.01), colorWaves),
+            ),
+          );
+          const waveEffectStepped = step(float(0.5), waveEffect);
+
+          // Combine wave + foam (clamp to 1)
+          let combinedEffect = add(waveEffectStepped, foam);
+          combinedEffect = min(combinedEffect, vec3(1, 1, 1));
+
+          // Vignette (distance-based gradient)
+          const vignette = mul(length(sub(vUv, vec2(0.5, 0.5))), 1.5);
+          const baseEffect = smoothstep(
+            float(0.1),
+            float(0.3),
+            vec3(vignette, vignette, vignette),
+          );
+
+          // Base color: near to far gradient
+          const baseColor = mix(uColorNear, uColorFar, baseEffect);
+
+          // Fade foam/waves at edges
+          const combinedFaded = mix(combinedEffect, vec3(0, 0, 0), baseEffect);
+          const foamEffect = mix(foam, vec3(0, 0, 0), baseEffect);
+
+          // Final color: base + white foam/waves
+          const finalColor = add(
+            mul(sub(float(1.0), combinedFaded), baseColor),
+            combinedFaded,
+          );
+          return finalColor;
+        })();
+
+        mat.opacityNode = Fn(() => {
+          const vUv = uv();
+          const textureSize = sub(100.0, uTextureSize);
+          const noiseBaseUV = add(
+            mul(vUv, mul(textureSize, 2.8)),
+            vec2(sin(uTime.mul(0.3)), sin(uTime.mul(0.3))),
+          );
+          const noiseBase = add(mul(noise12(noiseBaseUV), 0.5), 0.5);
+          const colorBase = vec3(noiseBase, noiseBase, noiseBase);
+          let foam = smoothstep(float(0.08), float(0.001), colorBase);
+          foam = step(float(0.5), foam);
+          const wp = positionWorld;
+          let minDistToRock = float(999.0);
+          for (let i = 0; i < 12; i++) {
+            minDistToRock = min(
+              minDistToRock,
+              length(sub(wp, uRockPositions[i])),
+            );
+          }
+          const foamAtObject = smoothstep(
+            uFoamRadius,
+            sub(uFoamRadius, float(0.15)),
+            minDistToRock,
+          );
+          const foamEffectVal = add(
+            mix(
+              foam.x,
+              float(0),
+              smoothstep(
+                float(0.1),
+                float(0.3),
+                length(sub(vUv, vec2(0.5, 0.5))).mul(1.5),
+              ),
+            ),
+            foamAtObject,
+          );
+          const vignette = length(sub(vUv, vec2(0.5, 0.5))).mul(1.5);
+          const baseEffect = smoothstep(float(0.1), float(0.3), vignette);
+          let alpha = mix(float(0.2), float(1.0), foamEffectVal);
+          alpha = mix(alpha, float(1.0), add(vignette, 0.5));
+          return alpha.clamp(0, 1);
+        })();
+
+        return {
+          material: mat,
+          uniforms: {
+            uTime,
+            uWaveSpeed,
+            uWaveAmplitude,
+            uTextureSize,
+            uColorNear,
+            uColorFar,
+            uFoamRadius,
+            uRockPositions,
+          },
+        };
+      }
+
+      // ─── PARAMS ──────────────────────────────────────────────────────────────────
+      const PARAMS = {
+        colorNear: "#00fccd",
+        colorFar: "#1ceeff",
+        waterLevel: 1.5,
+        waveSpeed: 1.2,
+        waveAmplitude: 0.15,
+        textureSize: 45,
+        foamDepth: 0.08,
+        foamRadius: 1.2,
+        waterSize: 25,
+        waterSegments: 128,
+        background: "#fcffdc",
+        groundColor: "#7cb87c",
+        fogNear: 15,
+        fogFar: 80,
+        showGrid: false,
+      };
+
+      // ─── Renderer ──────────────────────────────────────────────────────────────────
+      const renderer = new WebGPURenderer({ antialias: true });
+      renderer.setPixelRatio(devicePixelRatio);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.body.appendChild(renderer.domElement);
+      await renderer.init();
+
+      // ─── Scene ────────────────────────────────────────────────────────────────────
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(PARAMS.background);
+      scene.fog = new THREE.Fog(
+        PARAMS.background,
+        PARAMS.fogNear,
+        PARAMS.fogFar,
+      );
+
+      const sun = new THREE.DirectionalLight(0xfff8e0, 1.2);
+      sun.position.set(10, 15, 8);
+      scene.add(sun);
+      const ambLight = new THREE.AmbientLight(0xa0c8ff, 0.5);
+      scene.add(ambLight);
+
+      // Ground
+      const groundGeo = new THREE.PlaneGeometry(60, 60, 1, 1);
+      const groundMat = new THREE.MeshStandardMaterial({
+        color: PARAMS.groundColor,
+        roughness: 0.95,
+        metalness: 0,
+      });
+      const ground = new THREE.Mesh(groundGeo, groundMat);
+      ground.rotation.x = -Math.PI / 2;
+      scene.add(ground);
+
+      const grid = new THREE.GridHelper(60, 30, 0x8ab88a, 0x6a9a6a);
+      grid.position.y = 0.01;
+      grid.visible = PARAMS.showGrid;
+      scene.add(grid);
+
+      // Rocks first (positions needed for water foam)
+      const rockGeo = new THREE.DodecahedronGeometry(0.8, 0);
+      const rockMat = new THREE.MeshStandardMaterial({
+        color: 0x6b5b4a,
+        roughness: 0.9,
+        metalness: 0,
+      });
+      const rockPositions = [];
+      for (let i = 0; i < 12; i++) {
+        const rock = new THREE.Mesh(rockGeo, rockMat);
+        const px = (Math.random() - 0.5) * 20;
+        const pz = (Math.random() - 0.5) * 20;
+        const py = PARAMS.waterLevel - 0.2 - Math.random() * 0.5;
+        rock.position.set(px, py, pz);
+        rockPositions.push(new THREE.Vector3(px, py, pz));
+        rock.rotation.set(
+          Math.random() * 0.3,
+          Math.random() * Math.PI,
+          Math.random() * 0.2,
+        );
+        rock.scale.setScalar(0.4 + Math.random() * 0.6);
+        scene.add(rock);
+      }
+
+      // Rock position uniforms for water foam (object interaction)
+      const uRockPositions = rockPositions.map((p) => uniform(p.clone()));
+
+      // Stylized water (with object interaction foam)
+      const waterCtx = {
+        waveSpeed: PARAMS.waveSpeed,
+        waveAmplitude: PARAMS.waveAmplitude,
+        textureSize: PARAMS.textureSize,
+        colorNear: PARAMS.colorNear,
+        colorFar: PARAMS.colorFar,
+        foamRadius: PARAMS.foamRadius,
+        rockPositions: uRockPositions,
+        uTime: uniform(0),
+      };
+      const { material: waterMat, uniforms: waterUniforms } =
+        createStylizedWaterMaterial(waterCtx);
+
+      const waterGeo = new THREE.PlaneGeometry(
+        PARAMS.waterSize,
+        PARAMS.waterSize,
+        PARAMS.waterSegments,
+        PARAMS.waterSegments,
+      );
+      const waterMesh = new THREE.Mesh(waterGeo, waterMat);
+      waterMesh.rotation.x = -Math.PI / 2;
+      waterMesh.position.y = PARAMS.waterLevel;
+      waterMesh.renderOrder = 10;
+      scene.add(waterMesh);
+
+      // ─── GUI ──────────────────────────────────────────────────────────────────────
+      const gui = new GUI({ title: "Stylized Water", width: 260 });
+      gui.domElement.style.cssText =
+        "position:fixed;top:12px;right:12px;z-index:30;max-height:90vh;overflow-y:auto;";
+
+      const fWater = gui.addFolder("Water");
+      fWater.addColor(PARAMS, "colorNear").onChange((v) => {
+        waterUniforms.uColorNear.value.copy(hexToVec3(v));
+      });
+      fWater.addColor(PARAMS, "colorFar").onChange((v) => {
+        waterUniforms.uColorFar.value.copy(hexToVec3(v));
+      });
+      fWater.add(PARAMS, "waterLevel", 0.5, 5, 0.1).onChange((v) => {
+        waterMesh.position.y = v;
+      });
+      fWater.add(PARAMS, "waveSpeed", 0.5, 2, 0.1).onChange((v) => {
+        waterUniforms.uWaveSpeed.value = v;
+      });
+      fWater.add(PARAMS, "waveAmplitude", 0.05, 0.5, 0.01).onChange((v) => {
+        waterUniforms.uWaveAmplitude.value = v;
+      });
+      fWater.add(PARAMS, "textureSize", 1, 80, 1).onChange((v) => {
+        waterUniforms.uTextureSize.value = v;
+      });
+      fWater.add(PARAMS, "foamDepth", 0.01, 0.5, 0.01);
+      fWater.add(PARAMS, "foamRadius", 0.3, 3, 0.1).onChange((v) => {
+        waterUniforms.uFoamRadius.value = v;
+      });
+
+      const fScene = gui.addFolder("Scene");
+      fScene.addColor(PARAMS, "background").onChange((v) => {
+        scene.background.setStyle(v);
+        scene.fog.color.setStyle(v);
+      });
+      fScene.addColor(PARAMS, "groundColor").onChange((v) => {
+        groundMat.color.setStyle(v);
+      });
+      fScene.add(PARAMS, "fogNear", 5, 50, 5).onChange((v) => {
+        scene.fog.near = v;
+      });
+      fScene.add(PARAMS, "fogFar", 40, 150, 10).onChange((v) => {
+        scene.fog.far = v;
+      });
+      fScene.add(PARAMS, "showGrid").onChange((v) => {
+        grid.visible = v;
+      });
+
+      // ─── Camera & controls ───────────────────────────────────────────────────────
+      const camera = new THREE.PerspectiveCamera(
+        50,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        200,
+      );
+      camera.position.set(0, 8, 22);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.08;
+      controls.target.set(0, PARAMS.waterLevel, 0);
+      controls.update();
+
+      // ─── Animation ───────────────────────────────────────────────────────────────
+      const timer = new THREE.Timer();
+      renderer.setAnimationLoop(() => {
+        timer.update();
+        waterUniforms.uTime.value = timer.getElapsed();
+        controls.update();
+        renderer.render(scene, camera);
+      });
+
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>

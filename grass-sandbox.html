@@ -54,8 +54,8 @@
   <body>
     <div id="info">
       Grass Sandbox &mdash; <span id="backend">loading…</span> &bull;
-      <span id="stats"></span> &bull;
-      WASD + click to look &bull; Shift run &bull; Ctrl crouch &bull; F roll
+      <span id="stats"></span> &bull; WASD + click to look &bull; Shift run
+      &bull; Ctrl crouch &bull; F roll
     </div>
 
     <script type="module">
@@ -64,13 +64,34 @@
         pass,
         uniform,
         float,
+        vec2,
+        vec3,
         vec4,
+        Fn,
         mix,
         mul,
         div,
         sub,
+        add,
         clamp,
         step,
+        color,
+        fog,
+        texture,
+        positionWorld,
+        positionView,
+        positionLocal,
+        triNoise3D,
+        sin,
+        cos,
+        smoothstep,
+        length,
+        abs,
+        pow,
+        dot,
+        normalize,
+        negate,
+        mx_noise_float,
       } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
@@ -93,7 +114,10 @@
         GRASS_DENSITY_LOW,
         GRASS_DENSITY_MID,
       } from "./grass-sandbox.js";
-      import { createUniforms, createSyncUniforms } from "./uniforms-sandbox.js";
+      import {
+        createUniforms,
+        createSyncUniforms,
+      } from "./uniforms-sandbox.js";
       import {
         createPhysicsWorld,
         createPlayerController,
@@ -119,6 +143,8 @@
       } from "./susuki-single-field.js";
       import { createFlowerField } from "./flower-field-sandbox.js";
       import { createReedField } from "./reed-field-sandbox.js";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
 
       async function init() {
         const renderer = new THREE.WebGPURenderer({ antialias: true });
@@ -141,7 +167,7 @@
           60,
           innerWidth / innerHeight,
           0.5,
-          500000
+          500000,
         );
         camera.position.set(0, 8, 20);
 
@@ -156,12 +182,12 @@
         // ── LIGHTING ──
         const dirLight = new THREE.DirectionalLight(
           0xfff5e0,
-          PARAMS.sunIntensity
+          PARAMS.sunIntensity,
         );
         dirLight.position.copy(
           new THREE.Vector3(PARAMS.sunDirX, PARAMS.sunDirY, PARAMS.sunDirZ)
             .normalize()
-            .multiplyScalar(50)
+            .multiplyScalar(50),
         );
         dirLight.castShadow = true;
         dirLight.shadow.mapSize.width = 2048;
@@ -171,33 +197,13 @@
         dirLight.shadow.bias = PARAMS.shadowBias;
         dirLight.shadow.normalBias = PARAMS.shadowNormalBias;
 
-        // CSM — cascaded shadow maps (no custom updateBefore; use default texel snapping)
+        // CSM — same setup as parkour (tighter = sharper shadows)
         const csm = new CSMShadowNode(dirLight, {
           cascades: 3,
-          maxFar: 400,
+          maxFar: 150,
           mode: "practical",
-          lightMargin: 200,
-          fade: true,
+          lightMargin: 100,
         });
-        // Sphere-bounding: rotation-invariant cascade size to reduce shadow swimming
-        csm._updateShadowBounds = function () {
-          for (let i = 0; i < this.frustums.length; i++) {
-            const shadowCam = this.lights[i].shadow.camera;
-            const frustum = this.frustums[i];
-            const nv = frustum.vertices.near;
-            const fv = frustum.vertices.far;
-            const d1 = fv[0].distanceTo(fv[2]);
-            const d2 = fv[0].distanceTo(nv[2]);
-            const sphereRadius = Math.max(d1, d2) / 2;
-            const ext = sphereRadius * 2;
-            shadowCam.left = -ext / 2;
-            shadowCam.right = ext / 2;
-            shadowCam.top = ext / 2;
-            shadowCam.bottom = -ext / 2;
-            shadowCam.updateProjectionMatrix();
-          }
-        };
-
         dirLight.shadow.shadowNode = csm;
         const shadowTarget = new THREE.Object3D();
         shadowTarget.position.set(0, 0, 0);
@@ -208,7 +214,7 @@
         const hemiLight = new THREE.HemisphereLight(
           0xc8e0ff,
           0x88aa55,
-          PARAMS.sceneAmbient
+          PARAMS.sceneAmbient,
         );
         scene.add(hemiLight);
 
@@ -241,7 +247,7 @@
           const sd = new THREE.Vector3(
             PARAMS.sunDirX,
             PARAMS.sunDirY,
-            PARAMS.sunDirZ
+            PARAMS.sunDirZ,
           ).normalize();
           sky.sunPosition.value.copy(sd);
           sky.turbidity.value = PARAMS.skyTurbidity;
@@ -260,19 +266,94 @@
         updateSkyParams();
         bakeEnvMap();
 
+        // ── VOLUMETRIC HAZE (ground mist, follows terrain via heightTex) ──
+        const hazeParams = {
+          enabled: true,
+          thickness: 35,
+          opacity: 0.9,
+          falloff: 2.2,
+          hazeColor: "#f5f5f0",
+          noiseScaleA: 0.004,
+          noiseScaleB: 0.008,
+          noiseAmountA: 0.22,
+          noiseAmountB: 0.18,
+          noiseDetail: 0.12,
+          noiseSpeed: 1,
+        };
+        const uHazeThickness = uniform(hazeParams.thickness);
+        const uHazeOpacity = uniform(hazeParams.opacity);
+        const uHazeFalloff = uniform(hazeParams.falloff);
+        const uHazeColor = uniform(new THREE.Color(hazeParams.hazeColor));
+        const uNoiseScaleA = uniform(hazeParams.noiseScaleA);
+        const uNoiseScaleB = uniform(hazeParams.noiseScaleB);
+        const uNoiseAmountA = uniform(hazeParams.noiseAmountA);
+        const uNoiseAmountB = uniform(hazeParams.noiseAmountB);
+        const uNoiseDetail = uniform(hazeParams.noiseDetail);
+        const uNoiseSpeed = uniform(hazeParams.noiseSpeed);
+        const hazeTimer = uniform(0).onFrameUpdate((frame) => frame.time);
+        const uHazeTerrainSize = uniform(TERRAIN_SIZE);
+
+        function applyVolumetricHaze() {
+          if (!hazeParams.enabled) {
+            scene.fogNode = null;
+            return;
+          }
+          const fogNoiseDistance = positionView.z
+            .negate()
+            .smoothstep(0, camera.far - 200);
+          const distance = fogNoiseDistance.mul(uHazeThickness).max(8);
+          const terrainUV = vec2(
+            div(positionWorld.x, uHazeTerrainSize).add(0.5),
+            div(positionWorld.z, uHazeTerrainSize).add(0.5),
+          );
+          const terrainUVClamped = clamp(terrainUV, 0.01, 0.99);
+          const terrainHeight = texture(heightTex, terrainUVClamped).r;
+          const heightAboveFloor = sub(positionWorld.y, terrainHeight);
+          const groundFogArea = float(distance)
+            .sub(heightAboveFloor)
+            .div(distance)
+            .pow(uHazeFalloff)
+            .saturate()
+            .mul(uHazeOpacity);
+          const fogNoiseA = triNoise3D(
+            positionWorld.mul(uNoiseScaleA),
+            uNoiseAmountA,
+            hazeTimer,
+          );
+          const fogNoiseB = triNoise3D(
+            positionWorld.mul(uNoiseScaleB),
+            uNoiseAmountB,
+            hazeTimer.mul(uNoiseSpeed),
+          );
+          const fogNoiseC = triNoise3D(
+            positionWorld.mul(0.015),
+            uNoiseDetail,
+            hazeTimer.mul(0.5),
+          );
+          const fogNoise = fogNoiseA
+            .add(fogNoiseB)
+            .add(fogNoiseC)
+            .mul(color(uHazeColor));
+          const groundColor = color(
+            new THREE.Color(PARAMS.hemiGroundColor ?? 0x88aa55),
+          );
+          scene.fogNode = fog(
+            fogNoiseDistance.oneMinus().mix(groundColor, fogNoise),
+            groundFogArea,
+          );
+        }
+        applyVolumetricHaze();
+
         // ── PHYSICS ──
         await RAPIER.init({});
         const { physicsWorld, physicsCubes } = createPhysicsWorld(
           RAPIER,
           scene,
           TERRAIN_SIZE,
-          sampleHeight
+          sampleHeight,
         );
-        const { physicsDebugGroup, buildRapierDebugMeshes } = createPhysicsDebug(
-          RAPIER,
-          scene,
-          physicsWorld
-        );
+        const { physicsDebugGroup, buildRapierDebugMeshes } =
+          createPhysicsDebug(RAPIER, scene, physicsWorld);
 
         // ── PLAYER ──
         const charPos = new THREE.Vector3(0, 0, 0);
@@ -280,16 +361,13 @@
           sampleHeight(0, 0) +
           Math.max(
             0.1,
-            (PARAMS.characterHeight - 2 * PARAMS.capsuleRadius) / 2
+            (PARAMS.characterHeight - 2 * PARAMS.capsuleRadius) / 2,
           ) +
           PARAMS.capsuleRadius;
         const { playerBody, playerCollider, characterController } =
           createPlayerController(RAPIER, physicsWorld, charPos, PARAMS);
         const capR = PARAMS.capsuleRadius;
-        const capHalfH = Math.max(
-          0.1,
-          (PARAMS.characterHeight - 2 * capR) / 2
-        );
+        const capHalfH = Math.max(0.1, (PARAMS.characterHeight - 2 * capR) / 2);
         const player = createPlayer({
           scene,
           renderer,
@@ -551,6 +629,211 @@
           },
         });
 
+        // ── STYLIZED WATER LAKE (from stylized-water-showcase3) ──
+        const LAKE_CENTER_X = 40;
+        const LAKE_CENTER_Z = -35;
+        const LAKE_HALF_SIZE = 25;
+        const lakeY = (() => {
+          const cx = LAKE_CENTER_X;
+          const cz = LAKE_CENTER_Z;
+          const r = LAKE_HALF_SIZE;
+          let minH = sampleHeight(cx, cz);
+          for (let dx = -r; dx <= r; dx += 10) {
+            for (let dz = -r; dz <= r; dz += 10) {
+              const h = sampleHeight(cx + dx, cz + dz);
+              if (h < minH) minH = h;
+            }
+          }
+          return minH - 0.02;
+        })();
+        const waterParams = {
+          waterColor: "#00f2ff",
+          deepColor: "#006d77",
+          waveSpeed: 0.8,
+          waveHeight: 0.25,
+          waveDirection2: 0.7,
+          noiseScale: 0.2,
+          lineThinness: 0.04,
+          causticLayer2Scale: 0.08,
+          foamWidth: 1.2,
+          foamDistortion: 1.5,
+          opacity: 0.85,
+          fresnelPower: 3.5,
+          fresnelStrength: 0.35,
+          sunHighlightSize: 0.15,
+          sunHighlightStrength: 0.5,
+        };
+        const uWaterTime = uniform(0);
+        const uWaterColor = uniform(new THREE.Color(waterParams.waterColor));
+        const uDeepColor = uniform(new THREE.Color(waterParams.deepColor));
+        const uWaveSpeed = uniform(waterParams.waveSpeed);
+        const uWaveHeight = uniform(waterParams.waveHeight);
+        const uNoiseScale = uniform(waterParams.noiseScale);
+        const uLineThinness = uniform(waterParams.lineThinness);
+        const uCausticLayer2 = uniform(waterParams.causticLayer2Scale);
+        const uFoamWidth = uniform(waterParams.foamWidth);
+        const uFoamDistort = uniform(waterParams.foamDistortion);
+        const uFresnelPower = uniform(waterParams.fresnelPower);
+        const uFresnelStrength = uniform(waterParams.fresnelStrength);
+        const uSunHighlightSize = uniform(waterParams.sunHighlightSize);
+        const uSunHighlightStrength = uniform(waterParams.sunHighlightStrength);
+        const uWaveDir2 = uniform(waterParams.waveDirection2);
+        const uWaterCameraPosition = uniform(new THREE.Vector3());
+        const uWaterSunDirection = uniform(
+          new THREE.Vector3(PARAMS.sunDirX, PARAMS.sunDirY, PARAMS.sunDirZ)
+            .normalize(),
+        );
+        const uLakeCenter = uniform(
+          new THREE.Vector2(LAKE_CENTER_X, LAKE_CENTER_Z),
+        );
+        const uLakeHalfSize = uniform(LAKE_HALF_SIZE);
+
+        const waterPositionNode = Fn(() => {
+          const p = positionLocal;
+          const t = uWaterTime.mul(uWaveSpeed);
+          const waveX = sin(p.x.mul(0.4).add(t)).mul(uWaveHeight);
+          const waveZ = sin(p.z.mul(0.35).add(t.mul(0.7)))
+            .mul(uWaveHeight)
+            .mul(uWaveDir2);
+          const yOff = waveX.add(waveZ);
+          return positionLocal.add(vec3(0, 0, yOff));
+        })();
+
+        const waterColorNode = Fn(() => {
+          const wPos = positionWorld;
+          const distFromCenter = length(sub(wPos.xz, uLakeCenter));
+
+          const nUV = wPos.xz.mul(uNoiseScale).add(uWaterTime.mul(0.1));
+          const n1 = mx_noise_float(nUV);
+          const n2 = mx_noise_float(nUV.add(vec2(0.5, 0.5)));
+          const combined = mix(n1, n2, 0.5);
+          const ridge = abs(sub(combined, 0.5));
+          let thinLines = smoothstep(uLineThinness, 0.0, ridge);
+          const nUV2 = wPos.xz.mul(uCausticLayer2).add(uWaterTime.mul(0.05));
+          const r2 = abs(sub(mx_noise_float(nUV2), 0.5));
+          const layer2Strength = smoothstep(0.0, 0.05, uCausticLayer2);
+          thinLines = thinLines.add(
+            smoothstep(uLineThinness.mul(1.5), 0.0, r2)
+              .mul(0.4)
+              .mul(layer2Strength),
+          );
+          thinLines = thinLines.clamp(0, 1);
+
+          const fDistort = mx_noise_float(
+            wPos.xz.mul(0.6).add(uWaterTime.mul(0.6)),
+          ).mul(uFoamDistort);
+          const foamMask = smoothstep(
+            uLakeHalfSize,
+            sub(uLakeHalfSize, uFoamWidth),
+            sub(distFromCenter, fDistort),
+          ).clamp(0, 1);
+
+          const viewDir = normalize(sub(uWaterCameraPosition, wPos));
+          const flatNormal = vec3(0, 1, 0);
+          const NdotV = dot(flatNormal, viewDir).clamp(0, 1);
+          const fresnel = pow(sub(1.0, NdotV), uFresnelPower).mul(
+            uFresnelStrength,
+          );
+
+          const sunDir = normalize(uWaterSunDirection);
+          const H = normalize(add(viewDir, sunDir));
+          const NdotH = dot(flatNormal, H).clamp(0, 1);
+          const sunHighlight = pow(NdotH, div(float(1), uSunHighlightSize)).mul(
+            uSunHighlightStrength,
+          );
+
+          const baseMix = smoothstep(
+            float(0),
+            uLakeHalfSize,
+            distFromCenter,
+          );
+          const waterBase = mix(uWaterColor, uDeepColor, baseMix);
+
+          let final = waterBase;
+          final = mix(final, vec3(1.0), thinLines.mul(0.6));
+          final = mix(final, vec3(1.0), foamMask);
+          final = add(final, vec3(fresnel, fresnel, fresnel));
+          final = add(final, vec3(sunHighlight, sunHighlight, sunHighlight));
+
+          return final;
+        })();
+
+        const waveNormalNode = Fn(() => {
+          const wPos = positionWorld;
+          const t = uWaterTime.mul(uWaveSpeed);
+          const dwaveDx = cos(wPos.x.mul(0.4).add(t)).mul(0.4).mul(uWaveHeight);
+          const dwaveDz = cos(wPos.z.mul(0.35).add(t.mul(0.7)))
+            .mul(0.35)
+            .mul(uWaveHeight)
+            .mul(uWaveDir2);
+          return normalize(vec3(negate(dwaveDx), float(1), negate(dwaveDz)));
+        })();
+
+        const waterMat = new THREE.MeshStandardNodeMaterial({
+          transparent: true,
+          roughness: 0.25,
+          metalness: 0.0,
+        });
+        waterMat.positionNode = waterPositionNode;
+        waterMat.colorNode = waterColorNode;
+        waterMat.normalNode = waveNormalNode;
+        waterMat.opacityNode = uniform(waterParams.opacity);
+
+        const lakeGeometry = new THREE.PlaneGeometry(
+          LAKE_HALF_SIZE * 2,
+          LAKE_HALF_SIZE * 2,
+          64,
+          64,
+        );
+        const waterMesh = new THREE.Mesh(lakeGeometry, waterMat);
+        waterMesh.rotation.x = -Math.PI / 2;
+        waterMesh.position.set(LAKE_CENTER_X, lakeY, LAKE_CENTER_Z);
+        waterMesh.receiveShadow = true;
+        scene.add(waterMesh);
+
+        // ── BOTANIQ TREE (single, on terrain, alpha leaves, shadow test) ──
+        const TREE_X = 18;
+        const TREE_Z = 20;
+        const dracoLoader = new DRACOLoader();
+        dracoLoader.setDecoderPath(
+          "https://www.gstatic.com/draco/versioned/decoders/1.5.6/",
+        );
+        const gltfLoader = new GLTFLoader();
+        gltfLoader.setDRACOLoader(dracoLoader);
+        const treeGltf = await gltfLoader.loadAsync("models/botaniq1.glb");
+        const treeRoot = treeGltf.scene;
+        treeRoot.traverse((o) => {
+          if (!o.isMesh) return;
+          const m = o.material;
+          const meshName = (o.name || "").toLowerCase();
+          const matName = (m?.name || "").toLowerCase();
+          const isLeaf =
+            /leaf|leave|foliage|canopy|frond|branch|plant/i.test(
+              meshName + " " + matName,
+            ) ||
+            (m && (m.transparent || (m.map && m.alphaTest > 0)));
+          o.castShadow = true;
+          o.receiveShadow = true;
+          if (m && !m.isNodeMaterial) {
+            o.material = new THREE.MeshStandardNodeMaterial({
+              color: m.color?.getHex?.() ?? 0x2d6b1a,
+              roughness: m.roughness ?? 0.7,
+              metalness: m.metalness ?? 0,
+              map: m.map || null,
+              normalMap: m.normalMap || null,
+              transparent: isLeaf,
+              alphaTest: isLeaf ? 0.05 : 0,
+              opacity: isLeaf ? (m.opacity ?? 1) : 1,
+              side: isLeaf ? THREE.DoubleSide : THREE.FrontSide,
+              depthWrite: !isLeaf,
+            });
+          }
+        });
+        const treeY = sampleHeight(TREE_X, TREE_Z);
+        treeRoot.position.set(TREE_X, treeY, TREE_Z);
+        treeRoot.scale.setScalar(5);
+        scene.add(treeRoot);
+
         const syncUniforms = createSyncUniforms(uniforms, {
           PARAMS: sandboxParams,
           camera,
@@ -626,11 +909,16 @@
           );
           frustum.setFromProjectionMatrix(projMat);
           const { patchCount } = grassPatchSystem.update(charPos, frustum);
-          const { patchCount: susukiPatchCount } =
-            susukiPatchSystem.update(charPos, frustum);
+          const { patchCount: susukiPatchCount } = susukiPatchSystem.update(
+            charPos,
+            frustum,
+          );
           syncUniforms();
           uniforms.uTime.value = elapsed;
           uniforms.uPlayerPos.value.copy(charPos);
+          uWaterTime.value = elapsed;
+          uWaterCameraPosition.value.copy(camera.position);
+          uWaterSunDirection.value.copy(dirLight.position).normalize();
           flowerField.update(elapsed);
           reedField.update(elapsed);
 

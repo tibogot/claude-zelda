@@ -63,7 +63,7 @@
       Parkour &mdash; <span id="backend">loading…</span> &bull;
       <span id="stats">—</span> &bull; WASD + click to look &bull; Shift run
       &bull; Ctrl crouch &bull; F roll &bull; right-click / E attack &bull; Space jump &bull; Space mid-air glide
-      &bull; Pool (-60, 80) &bull; Church (-40, -35) god rays
+      &bull; Pool (-60, 80) &bull; Stylized water + character foam at (28, -30) &bull; Church (-40, -35) god rays
     </div>
     <div id="platform-debug" style="display:none; position:fixed; top:60px; left:16px; z-index:100; font:12px monospace; color:#0f0; background:rgba(0,0,0,0.8); padding:8px; border-radius:4px; max-width:320px;"></div>
 
@@ -83,6 +83,7 @@
         renderOutput,
         positionWorld,
         positionView,
+        positionLocal,
         triNoise3D,
         uniform,
         mul,
@@ -91,6 +92,8 @@
         add,
         clamp,
         mix,
+        vec2,
+        vec3,
         vec4,
         step,
         abs,
@@ -106,6 +109,14 @@
         colorToDirection,
         sample,
         screenUV,
+        sin,
+        cos,
+        length,
+        pow,
+        dot,
+        normalize,
+        negate,
+        mx_noise_float,
       } from "three/tsl";
       import { bloom } from "three/addons/tsl/display/BloomNode.js";
       import { fxaa } from "three/addons/tsl/display/FXAANode.js";
@@ -666,6 +677,42 @@
         }
         scene.add(parkourGroup);
 
+        // ── BOTANIQ TREE (single, away from parkour objects, alpha leaves) ──
+        const TREE_X = -70;
+        const TREE_Z = -50;
+        const treeGltf = await gltfLoader.loadAsync("models/botaniq1.glb");
+        const treeRoot = treeGltf.scene;
+        treeRoot.traverse((o) => {
+          if (!o.isMesh) return;
+          const m = o.material;
+          const meshName = (o.name || "").toLowerCase();
+          const matName = (m?.name || "").toLowerCase();
+          const isLeaf =
+            /leaf|leave|foliage|canopy|frond|branch|plant/i.test(
+              meshName + " " + matName,
+            ) ||
+            (m && (m.transparent || (m.map && m.alphaTest > 0)));
+          o.castShadow = true;
+          o.receiveShadow = true;
+          if (m && !m.isNodeMaterial) {
+            o.material = new THREE.MeshStandardNodeMaterial({
+              color: m.color?.getHex?.() ?? 0x2d6b1a,
+              roughness: m.roughness ?? 0.7,
+              metalness: m.metalness ?? 0,
+              map: m.map || null,
+              normalMap: m.normalMap || null,
+              transparent: isLeaf,
+              alphaTest: isLeaf ? 0.05 : 0,
+              opacity: isLeaf ? (m.opacity ?? 1) : 1,
+              side: isLeaf ? THREE.DoubleSide : THREE.FrontSide,
+              depthWrite: !isLeaf,
+            });
+          }
+        });
+        treeRoot.position.set(TREE_X, FLOOR_Y, TREE_Z);
+        treeRoot.scale.setScalar(6);
+        scene.add(treeRoot);
+
         // ── SWIMMING POOL (from water-showcase: pool.glb + WaterMesh) ──
         const POOL_X = -60;
         const POOL_Z = 80;
@@ -717,6 +764,148 @@
         poolWater.renderOrder = 1000;
         scene.add(poolWater);
 
+        // ── STYLIZED WATER (character foam interaction) ──
+        // Patch on the terrain; Y set above ground so it doesn't clip the floor.
+        const STYLIZED_WATER_X = 28;
+        const STYLIZED_WATER_Z = -30;
+        const STYLIZED_WATER_SIZE = 14;
+        const STYLIZED_WATER_Y = FLOOR_Y + 0.35;
+        const stylizedWaterParams = {
+          waterColor: "#00f2ff",
+          deepColor: "#006d77",
+          waveSpeed: 0.8,
+          waveHeight: 0.25,
+          waveDirection2: 0.7,
+          noiseScale: 0.2,
+          lineThinness: 0.04,
+          causticLayer2Scale: 0.08,
+          foamWidth: 1.2,
+          foamDistortion: 1.5,
+          opacity: 0.85,
+          fresnelPower: 3.5,
+          fresnelStrength: 0.35,
+          sunHighlightSize: 0.15,
+          sunHighlightStrength: 0.5,
+        };
+        const uTimeSw = uniform(0);
+        const uWaterColorSw = uniform(new THREE.Color(stylizedWaterParams.waterColor));
+        const uDeepColorSw = uniform(new THREE.Color(stylizedWaterParams.deepColor));
+        const uWaveSpeedSw = uniform(stylizedWaterParams.waveSpeed);
+        const uWaveHeightSw = uniform(stylizedWaterParams.waveHeight);
+        const uNoiseScaleSw = uniform(stylizedWaterParams.noiseScale);
+        const uLineThinnessSw = uniform(stylizedWaterParams.lineThinness);
+        const uCausticLayer2Sw = uniform(stylizedWaterParams.causticLayer2Scale);
+        const uFoamWidthSw = uniform(stylizedWaterParams.foamWidth);
+        const uFoamDistortSw = uniform(stylizedWaterParams.foamDistortion);
+        const uFresnelPowerSw = uniform(stylizedWaterParams.fresnelPower);
+        const uFresnelStrengthSw = uniform(stylizedWaterParams.fresnelStrength);
+        const uSunHighlightSizeSw = uniform(stylizedWaterParams.sunHighlightSize);
+        const uSunHighlightStrengthSw = uniform(stylizedWaterParams.sunHighlightStrength);
+        const uWaveDir2Sw = uniform(stylizedWaterParams.waveDirection2);
+        const uOpacitySw = uniform(stylizedWaterParams.opacity);
+        const uCameraPositionSw = uniform(new THREE.Vector3());
+        const uSunDirectionSw = uniform(new THREE.Vector3(1, 1, 0).normalize());
+        const stylizedWaterObjPos = [];
+        const stylizedWaterObjRad = [];
+        const characterFoamPosSw = uniform(new THREE.Vector3(0, 0, 0));
+        const characterFoamRadSw = uniform(0.7);
+        stylizedWaterObjPos.push(characterFoamPosSw);
+        stylizedWaterObjRad.push(characterFoamRadSw);
+
+        const positionNodeSw = Fn(() => {
+          const p = positionLocal;
+          const t = uTimeSw.mul(uWaveSpeedSw);
+          const waveX = sin(p.x.mul(0.4).add(t)).mul(uWaveHeightSw);
+          const waveZ = sin(p.z.mul(0.35).add(t.mul(0.7)))
+            .mul(uWaveHeightSw)
+            .mul(uWaveDir2Sw);
+          const yOff = waveX.add(waveZ);
+          return positionLocal.add(vec3(0, 0, yOff));
+        })();
+
+        const waterColorNodeSw = Fn(() => {
+          const wPos = positionWorld;
+          const nUV = wPos.xz.mul(uNoiseScaleSw).add(uTimeSw.mul(0.1));
+          const n1 = mx_noise_float(nUV);
+          const n2 = mx_noise_float(nUV.add(vec2(0.5, 0.5)));
+          const combined = mix(n1, n2, 0.5);
+          const ridge = abs(sub(combined, 0.5));
+          let thinLines = smoothstep(uLineThinnessSw, float(0), ridge);
+          const nUV2 = wPos.xz.mul(uCausticLayer2Sw).add(uTimeSw.mul(0.05));
+          const r2 = abs(sub(mx_noise_float(nUV2), 0.5));
+          const layer2Strength = smoothstep(float(0), 0.05, uCausticLayer2Sw);
+          thinLines = thinLines.add(
+            smoothstep(uLineThinnessSw.mul(1.5), float(0), r2)
+              .mul(0.4)
+              .mul(layer2Strength),
+          );
+          thinLines = thinLines.clamp(0, 1);
+          const fDistort = mx_noise_float(
+            wPos.xz.mul(0.6).add(uTimeSw.mul(0.6)),
+          ).mul(uFoamDistortSw);
+          let foamMask = float(0);
+          for (let i = 0; i < stylizedWaterObjPos.length; i++) {
+            const d = length(sub(wPos.xz, stylizedWaterObjPos[i].xz));
+            const r = stylizedWaterObjRad[i];
+            const f = smoothstep(add(r, uFoamWidthSw), r, sub(d, fDistort));
+            foamMask = foamMask.add(f);
+          }
+          foamMask = foamMask.clamp(0, 1);
+          const viewDir = normalize(sub(uCameraPositionSw, wPos));
+          const flatNormal = vec3(0, 1, 0);
+          const NdotV = dot(flatNormal, viewDir).clamp(0, 1);
+          const fresnel = pow(sub(1.0, NdotV), uFresnelPowerSw).mul(
+            uFresnelStrengthSw,
+          );
+          const sunDir = normalize(uSunDirectionSw);
+          const H = normalize(add(viewDir, sunDir));
+          const NdotH = dot(flatNormal, H).clamp(0, 1);
+          const sunHighlight = pow(NdotH, div(float(1), uSunHighlightSizeSw)).mul(
+            uSunHighlightStrengthSw,
+          );
+          const baseMix = smoothstep(0.0, 40.0, length(wPos.xz));
+          const waterBase = mix(uWaterColorSw, uDeepColorSw, baseMix);
+          let final = waterBase;
+          final = mix(final, vec3(1.0), thinLines.mul(0.6));
+          final = mix(final, vec3(1.0), foamMask);
+          final = add(final, vec3(fresnel, fresnel, fresnel));
+          final = add(final, vec3(sunHighlight, sunHighlight, sunHighlight));
+          return final;
+        })();
+
+        const waveNormalNodeSw = Fn(() => {
+          const wPos = positionWorld;
+          const t = uTimeSw.mul(uWaveSpeedSw);
+          const dwaveDx = cos(wPos.x.mul(0.4).add(t)).mul(0.4).mul(uWaveHeightSw);
+          const dwaveDz = cos(wPos.z.mul(0.35).add(t.mul(0.7)))
+            .mul(0.35)
+            .mul(uWaveHeightSw)
+            .mul(uWaveDir2Sw);
+          return normalize(vec3(negate(dwaveDx), float(1), negate(dwaveDz)));
+        })();
+
+        const matStylizedWater = new THREE.MeshStandardNodeMaterial({
+          transparent: true,
+          roughness: 0.25,
+          metalness: 0.0,
+        });
+        matStylizedWater.positionNode = positionNodeSw;
+        matStylizedWater.colorNode = waterColorNodeSw;
+        matStylizedWater.normalNode = waveNormalNodeSw;
+        matStylizedWater.opacityNode = uOpacitySw;
+
+        const stylizedWaterGeo = new THREE.PlaneGeometry(
+          STYLIZED_WATER_SIZE,
+          STYLIZED_WATER_SIZE,
+          64,
+          64,
+        );
+        const stylizedWater = new THREE.Mesh(stylizedWaterGeo, matStylizedWater);
+        stylizedWater.rotation.x = -PI / 2;
+        stylizedWater.position.set(STYLIZED_WATER_X, STYLIZED_WATER_Y, STYLIZED_WATER_Z);
+        stylizedWater.renderOrder = 1000;
+        scene.add(stylizedWater);
+
         // Stairs to reach the raised pool deck (south side)
         const STAIR_N = 8;
         const STAIR_RISE = (POOL_BASE_Y - FLOOR_Y) / STAIR_N;
@@ -744,6 +933,87 @@
           stepMesh.renderOrder = 500;
           scene.add(stepMesh);
         }
+
+        // ── SPIRAL STAIRCASE TOWER ──────────────────────────────────────────────
+        // Stone column with spiral stairs wrapping around it.
+        // Step rise = 0.3 m (under the 0.35 m autostep limit in physics.js).
+        const STR_X              = 60;
+        const STR_Z              = -50;
+        const STR_COL_R          = 2.5;    // column radius (m)
+        const STR_STEP_RISE      = 0.3;    // height gained per step (must be < autostep 0.35)
+        const STR_STEP_DEPTH     = 1.2;    // radial depth of each step
+        const STR_STEP_W         = 1.8;    // arc-width (tangential) of each step
+        const STR_STEP_H         = 0.22;   // tread slab thickness
+        const STR_STEPS_PER_TURN = 16;     // steps per 360° rotation
+        const STR_TURNS          = 3.0;    // total spiral turns
+        const STR_STEP_N         = Math.round(STR_TURNS * STR_STEPS_PER_TURN); // 48
+        const STR_TOTAL_H        = STR_STEP_N * STR_STEP_RISE;   // 14.4 m
+        const STR_COL_H          = STR_TOTAL_H + 3.0;            // column extends above stairs
+        const STR_TOP_R          = STR_COL_R + STR_STEP_DEPTH + 0.4; // top platform radius
+
+        const strColMat = new THREE.MeshStandardMaterial({
+          color: 0x7a7060, roughness: 0.88, metalness: 0.04,
+        });
+        const strStepMat = new THREE.MeshStandardMaterial({
+          color: 0xa09585, roughness: 0.80, metalness: 0.03,
+        });
+
+        const strGroup = new THREE.Group();
+        strGroup.position.set(STR_X, FLOOR_Y, STR_Z);
+
+        // Column (slightly tapered base)
+        const strColMesh = new THREE.Mesh(
+          new THREE.CylinderGeometry(STR_COL_R, STR_COL_R + 0.45, STR_COL_H, 16),
+          strColMat,
+        );
+        strColMesh.position.y = STR_COL_H / 2;
+        strColMesh.castShadow = true;
+        strColMesh.receiveShadow = true;
+        strGroup.add(strColMesh);
+
+        // Spiral steps — one shared geometry, each instance rotated so its
+        // Z-axis points radially outward from the column centre.
+        const strStepGeo = new THREE.BoxGeometry(STR_STEP_W, STR_STEP_H, STR_STEP_DEPTH);
+        for (let i = 0; i < STR_STEP_N; i++) {
+          const angle = (i / STR_STEPS_PER_TURN) * 2 * PI;
+          const cx    = (STR_COL_R + STR_STEP_DEPTH * 0.5) * Math.cos(angle);
+          const cz    = (STR_COL_R + STR_STEP_DEPTH * 0.5) * Math.sin(angle);
+          const cy    = (i + 1) * STR_STEP_RISE + STR_STEP_H * 0.5;
+          const s = new THREE.Mesh(strStepGeo, strStepMat);
+          s.position.set(cx, cy, cz);
+          s.rotation.y = Math.PI / 2 - angle; // local +Z → radial outward direction
+          s.castShadow = true;
+          s.receiveShadow = true;
+          strGroup.add(s);
+        }
+
+        // Top landing platform
+        const strTopMesh = new THREE.Mesh(
+          new THREE.CylinderGeometry(STR_TOP_R, STR_TOP_R, 0.4, 20),
+          strColMat,
+        );
+        strTopMesh.position.y = STR_TOTAL_H + 0.2;
+        strTopMesh.castShadow = true;
+        strTopMesh.receiveShadow = true;
+        strGroup.add(strTopMesh);
+
+        // Battlements (crenellations) — every other merlon along the top rim
+        const BATT_N = 16;
+        const battGeo = new THREE.BoxGeometry(0.5, 0.8, 0.5);
+        for (let i = 0; i < BATT_N; i++) {
+          if (i % 2 !== 0) continue; // every other slot is open
+          const ba = (i / BATT_N) * 2 * PI;
+          const bm = new THREE.Mesh(battGeo, strColMat);
+          bm.position.set(
+            (STR_TOP_R - 0.3) * Math.cos(ba),
+            STR_TOTAL_H + 0.2 + 0.4 * 0.5 + 0.4,
+            (STR_TOP_R - 0.3) * Math.sin(ba),
+          );
+          bm.castShadow = true;
+          strGroup.add(bm);
+        }
+
+        scene.add(strGroup);
 
         // ── CHURCH (solid cube like tower, only door hole — windows later) ──
         const CHURCH_X = -40;
@@ -872,6 +1142,19 @@
         addInteriorPlane(innerS, CHURCH_H - doorH - 0.1, 0, doorH + (CHURCH_H - doorH) / 2, HS - interiorInset, 0, PI);
 
         scene.add(churchGroup);
+
+        // ── CHURCH INTERIOR SPOTLIGHT ──
+        const churchSpot = new THREE.SpotLight(0xff8833, 300);
+        churchSpot.angle = Math.PI / 3.5;
+        churchSpot.penumbra = 0.4;
+        churchSpot.decay = 2;
+        churchSpot.distance = CHURCH_H + 4;
+        churchSpot.castShadow = true;
+        // Hang from just below ceiling, slightly toward back wall
+        churchSpot.position.set(CHURCH_X, FLOOR_Y + CHURCH_H - 1.5, CHURCH_Z - 2);
+        churchSpot.target.position.set(CHURCH_X, FLOOR_Y, CHURCH_Z - 2);
+        scene.add(churchSpot);
+        scene.add(churchSpot.target);
 
         // ── SKY ──
         const sky = new SkyMesh();
@@ -1234,6 +1517,48 @@
               ),
             ),
           );
+        }
+
+        // Spiral staircase tower colliders
+        {
+          // Column — cylinder shape (Y-axis aligned in Rapier)
+          const _strColBody = physicsWorld.createRigidBody(
+            RAPIER.RigidBodyDesc.fixed().setTranslation(
+              STR_X, FLOOR_Y + STR_COL_H / 2, STR_Z,
+            ),
+          );
+          physicsWorld.createCollider(
+            RAPIER.ColliderDesc.cylinder(STR_COL_H / 2, STR_COL_R + 0.23),
+            _strColBody,
+          );
+
+          // Top landing platform
+          const _strTopBody = physicsWorld.createRigidBody(
+            RAPIER.RigidBodyDesc.fixed().setTranslation(
+              STR_X, FLOOR_Y + STR_TOTAL_H + 0.2, STR_Z,
+            ),
+          );
+          physicsWorld.createCollider(
+            RAPIER.ColliderDesc.cylinder(0.2, STR_TOP_R),
+            _strTopBody,
+          );
+
+          // Steps — cuboid per step, rotated to match visual
+          for (let i = 0; i < STR_STEP_N; i++) {
+            const angle = (i / STR_STEPS_PER_TURN) * 2 * Math.PI;
+            const cx    = STR_X + (STR_COL_R + STR_STEP_DEPTH * 0.5) * Math.cos(angle);
+            const cz    = STR_Z + (STR_COL_R + STR_STEP_DEPTH * 0.5) * Math.sin(angle);
+            const cy    = FLOOR_Y + (i + 1) * STR_STEP_RISE + STR_STEP_H * 0.5;
+            const ry    = Math.PI / 2 - angle;
+            physicsWorld.createCollider(
+              RAPIER.ColliderDesc.cuboid(STR_STEP_W / 2, STR_STEP_H / 2, STR_STEP_DEPTH / 2),
+              physicsWorld.createRigidBody(
+                RAPIER.RigidBodyDesc.fixed()
+                  .setTranslation(cx, cy, cz)
+                  .setRotation({ x: 0, y: Math.sin(ry / 2), z: 0, w: Math.cos(ry / 2) }),
+              ),
+            );
+          }
         }
 
         // Parkour platforms: one trimesh per platform (merge all meshes, like index7 ruins)
@@ -2216,6 +2541,45 @@
           step: 0.05,
           label: "exposure",
         });
+
+        const waterFolder = pane.addFolder({
+          title: "Stylized Water",
+          expanded: true,
+        });
+        waterFolder.addBinding(stylizedWaterParams, "waterColor", { view: "color" })
+          .on("change", (e) => uWaterColorSw.value.set(e.value));
+        waterFolder.addBinding(stylizedWaterParams, "deepColor", { view: "color" })
+          .on("change", (e) => uDeepColorSw.value.set(e.value));
+        waterFolder.addBinding(stylizedWaterParams, "opacity", {
+          min: 0.2, max: 1, step: 0.02,
+        }).on("change", (e) => { uOpacitySw.value = e.value; });
+        const waterWaves = waterFolder.addFolder({ title: "Waves", expanded: true });
+        waterWaves.addBinding(stylizedWaterParams, "waveSpeed", { min: 0, max: 3, step: 0.05 })
+          .on("change", (e) => { uWaveSpeedSw.value = e.value; });
+        waterWaves.addBinding(stylizedWaterParams, "waveHeight", { min: 0, max: 1, step: 0.02 })
+          .on("change", (e) => { uWaveHeightSw.value = e.value; });
+        waterWaves.addBinding(stylizedWaterParams, "waveDirection2", { min: 0, max: 1.5, step: 0.05 })
+          .on("change", (e) => { uWaveDir2Sw.value = e.value; });
+        const waterFoam = waterFolder.addFolder({ title: "Foam", expanded: true });
+        waterFoam.addBinding(stylizedWaterParams, "foamWidth", { min: 0.1, max: 5, step: 0.1 })
+          .on("change", (e) => { uFoamWidthSw.value = e.value; });
+        waterFoam.addBinding(stylizedWaterParams, "foamDistortion", { min: 0, max: 4, step: 0.1 })
+          .on("change", (e) => { uFoamDistortSw.value = e.value; });
+        waterFolder.addBinding(stylizedWaterParams, "noiseScale", { min: 0.05, max: 1, step: 0.02 })
+          .on("change", (e) => { uNoiseScaleSw.value = e.value; });
+        waterFolder.addBinding(stylizedWaterParams, "lineThinness", { min: 0.01, max: 0.2, step: 0.005 })
+          .on("change", (e) => { uLineThinnessSw.value = e.value; });
+        waterFolder.addBinding(stylizedWaterParams, "causticLayer2Scale", { min: 0, max: 0.3, step: 0.01 })
+          .on("change", (e) => { uCausticLayer2Sw.value = e.value; });
+        const waterRim = waterFolder.addFolder({ title: "Rim & Highlight", expanded: false });
+        waterRim.addBinding(stylizedWaterParams, "fresnelPower", { min: 1, max: 8, step: 0.1 })
+          .on("change", (e) => { uFresnelPowerSw.value = e.value; });
+        waterRim.addBinding(stylizedWaterParams, "fresnelStrength", { min: 0, max: 1, step: 0.02 })
+          .on("change", (e) => { uFresnelStrengthSw.value = e.value; });
+        waterRim.addBinding(stylizedWaterParams, "sunHighlightSize", { min: 0.02, max: 0.5, step: 0.01 })
+          .on("change", (e) => { uSunHighlightSizeSw.value = e.value; });
+        waterRim.addBinding(stylizedWaterParams, "sunHighlightStrength", { min: 0, max: 1, step: 0.02 })
+          .on("change", (e) => { uSunHighlightStrengthSw.value = e.value; });
 
         const hazeFolder = pane.addFolder({
           title: "Volumetric Haze",
@@ -3320,6 +3684,11 @@ moveState: ${d.moveState ?? "?"}</pre>`
             parkourParams.light.sunElevation,
           );
           dirLight.position.copy(sunDir.clone().multiplyScalar(50));
+          // Stylized water: sync time, camera, sun, and character position for foam
+          uTimeSw.value = elapsed;
+          uCameraPositionSw.value.copy(camera.position);
+          uSunDirectionSw.value.copy(sunDir);
+          characterFoamPosSw.value.set(charPos.x, 0, charPos.z);
           dirLight.color.set(parkourParams.light.dirColor);
           dirLight.intensity = parkourParams.light.dirIntensity;
           hemiLight.color.set(parkourParams.light.hemiSkyColor);

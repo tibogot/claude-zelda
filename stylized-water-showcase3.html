@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>High-End Stylized Water — WebGPU + Tweakpane</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        background: #000;
+        overflow: hidden;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.3/dist/tweakpane.min.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <script type="module">
+      import * as THREE from "three";
+      import { WebGPURenderer } from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
+      import {
+        Fn,
+        uniform,
+        float,
+        vec2,
+        vec3,
+        uv,
+        positionLocal,
+        positionWorld,
+        sin,
+        cos,
+        mix,
+        smoothstep,
+        step,
+        add,
+        sub,
+        mul,
+        div,
+        length,
+        min,
+        mx_noise_float,
+        abs,
+        pow,
+        dot,
+        normalize,
+        negate,
+      } from "three/tsl";
+
+      // --- CONFIG & TWEAKPANE ---
+      const PARAMS = {
+        materialType: "basic",
+        waterColor: "#00f2ff",
+        deepColor: "#006d77",
+        waveSpeed: 0.8,
+        waveHeight: 0.25,
+        waveDirection2: 0.7, // second wave direction strength
+        noiseScale: 0.2,
+        lineThinness: 0.04,
+        causticLayer2Scale: 0.08, // second caustic layer (0 = off)
+        foamWidth: 1.2,
+        foamDistortion: 1.5,
+        islandSize: 7,
+        opacity: 0.85,
+        fresnelPower: 3.5,
+        fresnelStrength: 0.35,
+        sunHighlightSize: 0.15,
+        sunHighlightStrength: 0.5,
+      };
+
+      const pane = new Pane({ title: "Water Controls" });
+
+      async function init() {
+        const renderer = new WebGPURenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.body.appendChild(renderer.domElement);
+        await renderer.init();
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color("#fcffdc");
+
+        const camera = new THREE.PerspectiveCamera(
+          45,
+          window.innerWidth / window.innerHeight,
+          0.1,
+          1000,
+        );
+        camera.position.set(25, 20, 25);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+
+        const sun = new THREE.DirectionalLight(0xffffff, 2.5);
+        sun.position.set(10, 20, 10);
+        scene.add(sun);
+        scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+
+        // --- UNIFORMS ---
+        const uTime = uniform(0);
+        const uWaterColor = uniform(new THREE.Color(PARAMS.waterColor));
+        const uDeepColor = uniform(new THREE.Color(PARAMS.deepColor));
+        const uWaveSpeed = uniform(PARAMS.waveSpeed);
+        const uWaveHeight = uniform(PARAMS.waveHeight);
+        const uNoiseScale = uniform(PARAMS.noiseScale);
+        const uLineThinness = uniform(PARAMS.lineThinness);
+        const uCausticLayer2 = uniform(PARAMS.causticLayer2Scale);
+        const uFoamWidth = uniform(PARAMS.foamWidth);
+        const uFoamDistort = uniform(PARAMS.foamDistortion);
+        const uFresnelPower = uniform(PARAMS.fresnelPower);
+        const uFresnelStrength = uniform(PARAMS.fresnelStrength);
+        const uSunHighlightSize = uniform(PARAMS.sunHighlightSize);
+        const uSunHighlightStrength = uniform(PARAMS.sunHighlightStrength);
+        const uWaveDir2 = uniform(PARAMS.waveDirection2);
+        const uCameraPosition = uniform(new THREE.Vector3());
+        const uSunDirection = uniform(
+          new THREE.Vector3(10, 20, 10).normalize(),
+        );
+
+        // --- OBJECTS ---
+        const objPos = [];
+        const objRad = [];
+        const stoneMat = new THREE.MeshStandardMaterial({ color: 0x555555 });
+
+        function spawn(x, z, r, isIsland = false) {
+          const geo = isIsland
+            ? new THREE.CylinderGeometry(r, r * 1.05, 5, 32)
+            : new THREE.DodecahedronGeometry(r, 0);
+          const m = new THREE.Mesh(geo, stoneMat);
+          m.position.set(x, isIsland ? 0.5 : 1.2, z);
+          scene.add(m);
+          objPos.push(uniform(new THREE.Vector3(x, 0, z)));
+          objRad.push(uniform(r));
+          return m;
+        }
+
+        const island = spawn(0, 0, PARAMS.islandSize, true);
+        spawn(14, -6, 2);
+        spawn(-12, 12, 1.5);
+
+        // --- SHARED SHADER NODES ---
+        const positionNode = Fn(() => {
+          const p = positionLocal;
+          const t = uTime.mul(uWaveSpeed);
+          const waveX = sin(p.x.mul(0.4).add(t)).mul(uWaveHeight);
+          const waveZ = sin(p.z.mul(0.35).add(t.mul(0.7)))
+            .mul(uWaveHeight)
+            .mul(uWaveDir2);
+          const yOff = waveX.add(waveZ);
+          return positionLocal.add(vec3(0, 0, yOff));
+        })();
+
+        const waterColorNode = Fn(() => {
+          const wPos = positionWorld;
+
+          const nUV = wPos.xz.mul(uNoiseScale).add(uTime.mul(0.1));
+          const n1 = mx_noise_float(nUV);
+          const n2 = mx_noise_float(nUV.add(vec2(0.5, 0.5)));
+          const combined = mix(n1, n2, 0.5);
+          const ridge = abs(sub(combined, 0.5));
+          let thinLines = smoothstep(uLineThinness, 0.0, ridge);
+          const nUV2 = wPos.xz.mul(uCausticLayer2).add(uTime.mul(0.05));
+          const r2 = abs(sub(mx_noise_float(nUV2), 0.5));
+          const layer2Strength = smoothstep(0.0, 0.05, uCausticLayer2);
+          thinLines = thinLines.add(
+            smoothstep(uLineThinness.mul(1.5), 0.0, r2)
+              .mul(0.4)
+              .mul(layer2Strength),
+          );
+          thinLines = thinLines.clamp(0, 1);
+
+          const fDistort = mx_noise_float(
+            wPos.xz.mul(0.6).add(uTime.mul(0.6)),
+          ).mul(uFoamDistort);
+          let foamMask = float(0);
+          for (let i = 0; i < objPos.length; i++) {
+            const d = length(sub(wPos.xz, objPos[i].xz));
+            const r = objRad[i];
+            const f = smoothstep(add(r, uFoamWidth), r, sub(d, fDistort));
+            foamMask = foamMask.add(f);
+          }
+          foamMask = foamMask.clamp(0, 1);
+
+          const viewDir = normalize(sub(uCameraPosition, wPos));
+          const flatNormal = vec3(0, 1, 0);
+          const NdotV = dot(flatNormal, viewDir).clamp(0, 1);
+          const fresnel = pow(sub(1.0, NdotV), uFresnelPower).mul(
+            uFresnelStrength,
+          );
+
+          const sunDir = normalize(uSunDirection);
+          const H = normalize(add(viewDir, sunDir));
+          const NdotH = dot(flatNormal, H).clamp(0, 1);
+          const sunHighlight = pow(NdotH, div(float(1), uSunHighlightSize)).mul(
+            uSunHighlightStrength,
+          );
+
+          const baseMix = smoothstep(0.0, 40.0, length(wPos.xz));
+          const waterBase = mix(uWaterColor, uDeepColor, baseMix);
+
+          let final = waterBase;
+          final = mix(final, vec3(1.0), thinLines.mul(0.6));
+          final = mix(final, vec3(1.0), foamMask);
+          final = add(final, vec3(fresnel, fresnel, fresnel));
+          final = add(final, vec3(sunHighlight, sunHighlight, sunHighlight));
+
+          return final;
+        })();
+
+        const waveNormalNode = Fn(() => {
+          const wPos = positionWorld;
+          const t = uTime.mul(uWaveSpeed);
+          const dwaveDx = cos(wPos.x.mul(0.4).add(t)).mul(0.4).mul(uWaveHeight);
+          const dwaveDz = cos(wPos.z.mul(0.35).add(t.mul(0.7)))
+            .mul(0.35)
+            .mul(uWaveHeight)
+            .mul(uWaveDir2);
+          return normalize(vec3(negate(dwaveDx), float(1), negate(dwaveDz)));
+        })();
+
+        const opacityNode = uniform(PARAMS.opacity);
+
+        // --- MATERIALS (switch via Tweakpane) ---
+        const matBasic = new THREE.MeshBasicNodeMaterial({ transparent: true });
+        matBasic.positionNode = positionNode;
+        matBasic.colorNode = waterColorNode;
+        matBasic.opacityNode = opacityNode;
+
+        const matLambert = new THREE.MeshLambertNodeMaterial({
+          transparent: true,
+        });
+        matLambert.positionNode = positionNode;
+        matLambert.colorNode = waterColorNode;
+        matLambert.normalNode = waveNormalNode;
+        matLambert.opacityNode = opacityNode;
+
+        const matStandard = new THREE.MeshStandardNodeMaterial({
+          transparent: true,
+          roughness: 0.25,
+          metalness: 0.0,
+        });
+        matStandard.positionNode = positionNode;
+        matStandard.colorNode = waterColorNode;
+        matStandard.normalNode = waveNormalNode;
+        matStandard.opacityNode = opacityNode;
+
+        const materials = {
+          basic: matBasic,
+          lambert: matLambert,
+          standard: matStandard,
+        };
+
+        const water = new THREE.Mesh(
+          new THREE.PlaneGeometry(100, 100, 256, 256),
+          materials[PARAMS.materialType],
+        );
+        water.rotation.x = -Math.PI / 2;
+        water.position.y = 1.5;
+        scene.add(water);
+
+        // --- TWEAKPANE BINDING ---
+        pane
+          .addBinding(PARAMS, "materialType", {
+            options: {
+              "Basic (unlit)": "basic",
+              "Lambert (diffuse)": "lambert",
+              "Standard (lit + specular)": "standard",
+            },
+          })
+          .on("change", (ev) => {
+            water.material = materials[ev.value];
+          });
+
+        pane
+          .addBinding(PARAMS, "waterColor")
+          .on("change", (v) => uWaterColor.value.set(v.value));
+        pane
+          .addBinding(PARAMS, "deepColor")
+          .on("change", (v) => uDeepColor.value.set(v.value));
+
+        const fNoise = pane.addFolder({ title: "Noise & Lines" });
+        fNoise
+          .addBinding(PARAMS, "noiseScale", { min: 0.05, max: 1.0 })
+          .on("change", (v) => (uNoiseScale.value = v.value));
+        fNoise
+          .addBinding(PARAMS, "lineThinness", { min: 0.01, max: 0.2 })
+          .on("change", (v) => (uLineThinness.value = v.value));
+
+        const fFoam = pane.addFolder({ title: "Foam Interaction" });
+        fFoam
+          .addBinding(PARAMS, "foamWidth", { min: 0.1, max: 5.0 })
+          .on("change", (v) => (uFoamWidth.value = v.value));
+        fFoam
+          .addBinding(PARAMS, "foamDistortion", { min: 0.0, max: 4.0 })
+          .on("change", (v) => (uFoamDistort.value = v.value));
+
+        const fWaves = pane.addFolder({ title: "Waves" });
+        fWaves
+          .addBinding(PARAMS, "waveSpeed", { min: 0.0, max: 5.0 })
+          .on("change", (v) => (uWaveSpeed.value = v.value));
+        fWaves
+          .addBinding(PARAMS, "waveHeight", { min: 0.0, max: 1.0 })
+          .on("change", (v) => (uWaveHeight.value = v.value));
+        fWaves
+          .addBinding(PARAMS, "waveDirection2", { min: 0.0, max: 1.5 })
+          .on("change", (v) => (uWaveDir2.value = v.value));
+
+        fNoise
+          .addBinding(PARAMS, "causticLayer2Scale", { min: 0.0, max: 0.3 })
+          .on("change", (v) => (uCausticLayer2.value = v.value));
+
+        const fStylize = pane.addFolder({ title: "Rim & Highlight" });
+        fStylize
+          .addBinding(PARAMS, "fresnelPower", { min: 1.0, max: 8.0 })
+          .on("change", (v) => (uFresnelPower.value = v.value));
+        fStylize
+          .addBinding(PARAMS, "fresnelStrength", { min: 0.0, max: 1.0 })
+          .on("change", (v) => (uFresnelStrength.value = v.value));
+        fStylize
+          .addBinding(PARAMS, "sunHighlightSize", { min: 0.02, max: 0.5 })
+          .on("change", (v) => (uSunHighlightSize.value = v.value));
+        fStylize
+          .addBinding(PARAMS, "sunHighlightStrength", { min: 0.0, max: 1.0 })
+          .on("change", (v) => (uSunHighlightStrength.value = v.value));
+
+        // --- ANIMATION ---
+        function animate() {
+          requestAnimationFrame(animate);
+          uTime.value = performance.now() / 1000;
+          uCameraPosition.value.copy(camera.position);
+          uSunDirection.value.copy(sun.position).normalize();
+          controls.update();
+          renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener("resize", () => {
+          camera.aspect = window.innerWidth / window.innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+      }
+
+      init();
+    </script>
+  </body>
+</html>
