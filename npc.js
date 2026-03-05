@@ -8,8 +8,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
 
 const CHAR_GLB = "models/AnimationLibrary_Godot_Standard-transformed.glb";
-const DRACO_URL =
-  "https://www.gstatic.com/draco/versioned/decoders/1.5.6/";
+const DRACO_URL = "https://www.gstatic.com/draco/versioned/decoders/1.5.6/";
 
 /**
  * @param {object} opts

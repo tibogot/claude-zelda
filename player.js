@@ -60,7 +60,9 @@ export function createPlayer(opts) {
     });
   }
 
-  const capsuleGeo = new THREE.CapsuleGeometry(0.4, 1.2, 8, 16);
+  const cylLength = capHalfH > 0 ? capHalfH * 2 : 1.2;
+  const capRadius = capR > 0 ? capR : 0.4;
+  const capsuleGeo = new THREE.CapsuleGeometry(capRadius, cylLength, 8, 16);
   const capsuleMat = new THREE.MeshStandardNodeMaterial({
     color: 0xee8833,
     roughness: 0.4,
@@ -916,6 +918,17 @@ export function createPlayer(opts) {
     physicsWorld.step();
     const playerT = playerBody.translation();
     charPos.set(playerT.x, playerT.y, playerT.z);
+    // Terrain mode: never let character sink below the heightmap (physics ground may be flat/slab)
+    if (hasSampleHeight) {
+      const terrainY = sampleHeight(charPos.x, charPos.z) + capHalfH + capR;
+      if (charPos.y < terrainY) {
+        charPos.y = terrainY;
+        playerBody.setTranslation(
+          { x: charPos.x, y: charPos.y, z: charPos.z },
+          true,
+        );
+      }
+    }
     // Post-step correction: push character out of kinematic platforms (elevators, sweepers)
     // that moved into us — Rapier KCC doesn't resolve kinematic-kinematic collisions.
     let onKinematicPlatform = false;
@@ -978,6 +991,7 @@ export function createPlayer(opts) {
       delete debugOut._result;
     }
     characterGroup.position.copy(charPos);
+    capsule.position.copy(charPos);
     characterGroup.rotation.y = state.camYaw;
     if (characterGroup.children.length > 0) {
       if (ud.initialCharHeight != null)

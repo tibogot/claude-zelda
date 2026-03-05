@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>UAL2 Character Showcase</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #87ceeb;
+        font-family: "Courier New", monospace;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        z-index: 10;
+        font:
+          12px/1.5 "SF Mono",
+          "Fira Code",
+          monospace;
+        color: #000;
+        background: rgba(255, 255, 255, 0.9);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: auto;
+        user-select: none;
+        backdrop-filter: blur(4px);
+      }
+      #info span {
+        color: #006400;
+        font-weight: 600;
+      }
+      #animation-list {
+        position: fixed;
+        top: 16px;
+        right: 16px;
+        z-index: 10;
+        font:
+          12px/1.5 "SF Mono",
+          "Fira Code",
+          monospace;
+        color: #000;
+        background: rgba(255, 255, 255, 0.9);
+        padding: 8px 12px;
+        border-radius: 6px;
+        max-width: 300px;
+        max-height: 80vh;
+        overflow-y: auto;
+        pointer-events: auto;
+        user-select: none;
+      }
+      #animation-list h3 {
+        margin: 0 0 8px 0;
+        color: #006400;
+        font-weight: bold;
+      }
+      #animation-list ul {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+      }
+      #animation-list li {
+        margin: 2px 0;
+        padding: 2px 4px;
+        border-radius: 3px;
+        cursor: pointer;
+      }
+      #animation-list li:hover {
+        background: rgba(0, 100, 0, 0.15);
+      }
+      #animation-list li.current {
+        background: rgba(0, 100, 0, 0.2);
+        font-weight: bold;
+      }
+      #controls {
+        position: fixed;
+        top: 16px;
+        left: 16px;
+        z-index: 10;
+        font:
+          12px/1.5 "SF Mono",
+          "Fira Code",
+          monospace;
+        color: #000;
+        background: rgba(255, 255, 255, 0.9);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: auto;
+        user-select: none;
+      }
+      #controls h3 {
+        margin: 0 0 8px 0;
+        color: #006400;
+        font-weight: bold;
+      }
+      #controls kbd {
+        background: rgba(0,0,0,0.08);
+        padding: 1px 4px;
+        border-radius: 3px;
+        font-size: 11px;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="controls">
+      <h3>Controls</h3>
+      <div><strong>Camera:</strong> <span id="camera-mode-label">Follow</span> — press <kbd>C</kbd> to switch to Orbit</div>
+      <div>Follow: click <em>on scene</em> to lock mouse · WASD · R: Reset</div>
+      <div>1-9, 0 or click list: Animations</div>
+    </div>
+    <div id="info">
+      UAL2 Character Showcase &mdash;
+      <span id="current-animation">Loading...</span>
+    </div>
+    <div id="animation-list">
+      <h3>Available Animations</h3>
+      <ul id="animation-names"></ul>
+    </div>
+    <script type="module">
+      console.log('Script started loading...');
+      import * as THREE from "three";
+      console.log('Three.js imported:', THREE);
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+      console.log('Loaders imported');
+
+      // Inline character loading function
+      const CHAR_GLB = "models/UAL2_Standard-transformed.glb";
+      const DRACO_URL = "https://www.gstatic.com/draco/versioned/decoders/1.5.6/";
+
+      async function createUAL2Character(scene) {
+        console.log('Starting character loading...');
+        return new Promise((resolve, reject) => {
+          // Draco loader setup (use imported DRACOLoader, not THREE.DRACOLoader)
+          const dracoLoader = new DRACOLoader();
+          dracoLoader.setDecoderPath(DRACO_URL);
+          console.log('Draco decoder path set:', DRACO_URL);
+
+          // GLTF loader (use imported GLTFLoader)
+          const loader = new GLTFLoader();
+          loader.setDRACOLoader(dracoLoader);
+          console.log('Loading model:', CHAR_GLB);
+
+          loader.load(
+            CHAR_GLB,
+            (gltf) => {
+              console.log('GLTF loaded successfully:', gltf);
+              const model = gltf.scene;
+
+              // Convert materials to MeshStandardMaterial (simplified for showcase)
+              model.traverse((o) => {
+                if (o.isMesh) {
+                  o.castShadow = true;
+                  o.receiveShadow = true;
+                  if (o.material && !o.material.isNodeMaterial) {
+                    const m = o.material;
+                    o.material = new THREE.MeshStandardMaterial({
+                      color: m.color?.getHex?.() ?? 0x888888,
+                      roughness: m.roughness ?? 0.5,
+                      metalness: m.metalness ?? 0,
+                      map: m.map || null,
+                    });
+                  }
+                }
+              });
+
+              // Scale and position like in player.js (assuming character height around 2.5)
+              const box = new THREE.Box3().setFromObject(model);
+              const size = new THREE.Vector3();
+              box.getSize(size);
+              const characterHeight = 2.5; // Similar to PARAMS.characterHeight
+              const scale = characterHeight / (size.y || 1);
+              model.scale.setScalar(scale);
+
+              // Center the model
+              box.setFromObject(model);
+              const center = new THREE.Vector3();
+              box.getCenter(center);
+              model.position.sub(center);
+
+              // Wrap in a group so we can position/rotate the character (like main player)
+              const characterGroup = new THREE.Group();
+              characterGroup.add(model);
+              scene.add(characterGroup);
+              console.log('Character added to scene, animations:', gltf.animations.length);
+
+              // Animation mixer
+              const mixer = new THREE.AnimationMixer(model);
+              const animations = gltf.animations;
+
+              // Current animation action
+              let currentAction = null;
+
+              function playAnimation(index) {
+                if (index < 0 || index >= animations.length) return;
+
+                // Stop current animation
+                if (currentAction) {
+                  currentAction.fadeOut(0.2);
+                }
+
+                // Play new animation
+                const clip = animations[index];
+                const action = mixer.clipAction(clip);
+                action.reset();
+                action.fadeIn(0.2);
+                action.play();
+
+                currentAction = action;
+              }
+
+              function update() {
+                if (mixer) {
+                  mixer.update(1 / 60); // Assume 60fps
+                }
+              }
+
+              resolve({
+                model: characterGroup,
+                mixer,
+                animations,
+                playAnimation,
+                update,
+              });
+              console.log('Character loading promise resolved');
+            },
+            (progress) => {
+              const pct = progress.total ? (progress.loaded / progress.total) * 100 : 0;
+              console.log("Loading progress:", pct + "%");
+            },
+            (error) => {
+              console.error("Error loading character model:", error);
+              reject(error);
+            },
+          );
+        });
+      }
+      console.log('Character function defined inline');
+
+      async function init() {
+        console.log('Init function started');
+        const infoEl = document.getElementById("current-animation");
+        try {
+        // Scene setup
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87ceeb);
+
+      // Camera (third-person like main game)
+      const camera = new THREE.PerspectiveCamera(
+        75,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        1000,
+      );
+      const camDist = 7;
+      const camHeight = 0;
+      const camPitchMin = -0.2;
+      const camPitchMax = 1.2;
+      const mouseSensitivity = 0.002;
+      const keyTurnSpeed = 2.2;
+      const playerSpeed = 3.2;
+      const runSpeedMultiplier = 1.95;
+      const groundHalfSize = 10; // 20x20 flat ground
+
+      const charPos = new THREE.Vector3(0, 0, 0);
+      const state = { camYaw: 0, camPitch: 0.3 };
+      const keys = { w: false, a: false, s: false, d: false, shift: false, arrowLeft: false, arrowRight: false };
+
+      camera.position.set(
+        charPos.x - Math.sin(state.camYaw) * Math.cos(state.camPitch) * camDist,
+        charPos.y + Math.sin(state.camPitch) * camDist + camHeight,
+        charPos.z - Math.cos(state.camYaw) * Math.cos(state.camPitch) * camDist,
+      );
+      camera.lookAt(charPos.x, charPos.y + 1.25, charPos.z);
+
+      // Renderer — same WebGPU setup as parkour
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      await renderer.init();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      document.body.appendChild(renderer.domElement);
+
+      // Orbit controls (used in orbit camera mode)
+      const orbitControls = new OrbitControls(camera, renderer.domElement);
+      orbitControls.enableDamping = true;
+      orbitControls.dampingFactor = 0.05;
+      orbitControls.minDistance = 2;
+      orbitControls.maxDistance = 15;
+      orbitControls.maxPolarAngle = Math.PI / 2;
+      orbitControls.target.set(0, 1.25, 0);
+      orbitControls.enabled = false;
+
+      let cameraMode = "follow"; // "follow" | "orbit"
+      const cameraModeLabel = document.getElementById("camera-mode-label");
+
+      // Pointer lock only when clicking ON THE CANVAS (not UI) and in follow mode
+      renderer.domElement.addEventListener("click", (e) => {
+        if (e.target !== renderer.domElement) return;
+        if (cameraMode === "follow") renderer.domElement.requestPointerLock();
+      });
+      document.addEventListener("mousemove", (e) => {
+        if (cameraMode !== "follow" || document.pointerLockElement !== renderer.domElement) return;
+        state.camYaw += e.movementX * mouseSensitivity;
+        state.camPitch -= e.movementY * mouseSensitivity;
+        state.camPitch = Math.max(camPitchMin, Math.min(camPitchMax, state.camPitch));
+      });
+      window.addEventListener("keydown", (e) => {
+        const k = e.key.toLowerCase();
+        if (keys[k] !== undefined) keys[k] = true;
+        if (e.key === "Shift") keys.shift = true;
+        if (e.key === "ArrowLeft") keys.arrowLeft = true;
+        if (e.key === "ArrowRight") keys.arrowRight = true;
+      });
+      window.addEventListener("keyup", (e) => {
+        const k = e.key.toLowerCase();
+        if (keys[k] !== undefined) keys[k] = false;
+        if (e.key === "Shift") keys.shift = false;
+        if (e.key === "ArrowLeft") keys.arrowLeft = false;
+        if (e.key === "ArrowRight") keys.arrowRight = false;
+      });
+
+      // Lighting — hemisphere + main key + fill (better shape and ground)
+      const hemiLight = new THREE.HemisphereLight(0xc8e0ff, 0x6b8c5a, 0.5);
+      scene.add(hemiLight);
+
+      const mainLight = new THREE.DirectionalLight(0xfff5e6, 1.0);
+      mainLight.position.set(8, 12, 6);
+      mainLight.castShadow = true;
+      mainLight.shadow.mapSize.width = 2048;
+      mainLight.shadow.mapSize.height = 2048;
+      mainLight.shadow.camera.near = 0.5;
+      mainLight.shadow.camera.far = 50;
+      mainLight.shadow.camera.left = -20;
+      mainLight.shadow.camera.right = 20;
+      mainLight.shadow.camera.top = 20;
+      mainLight.shadow.camera.bottom = -20;
+      mainLight.shadow.bias = -0.002;
+      scene.add(mainLight);
+
+      const fillLight = new THREE.DirectionalLight(0xb8d4ff, 0.25);
+      fillLight.position.set(-6, 4, -4);
+      scene.add(fillLight);
+
+      // Ground (MeshStandardMaterial like rest of scene for WebGPU)
+      const groundGeometry = new THREE.PlaneGeometry(20, 20);
+      const groundMaterial = new THREE.MeshStandardMaterial({ color: 0x90ee90, roughness: 0.8, metalness: 0 });
+      const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+      ground.rotation.x = -Math.PI / 2;
+      ground.position.y = -1.25; // Position below the character
+      ground.receiveShadow = true;
+      scene.add(ground);
+
+      // Placeholder character (empty group) so we can render and run the loop immediately
+      const placeholderGroup = new THREE.Group();
+      scene.add(placeholderGroup);
+      let character = {
+        model: placeholderGroup,
+        animations: [],
+        playAnimation() {},
+        update() {},
+      };
+      let currentAnimationIndex = 0;
+      let animationNames = [];
+
+      const animationList = document.getElementById("animation-names");
+      function updateCurrentAnimationDisplay() {
+        if (character.animations.length === 0) {
+          infoEl.textContent = "Loading character…";
+          return;
+        }
+        const currentAnim = character.animations[currentAnimationIndex];
+        infoEl.textContent = currentAnim ? currentAnim.name : "—";
+        document.querySelectorAll("#animation-names li").forEach((li, index) => {
+          li.classList.toggle("current", index === currentAnimationIndex);
+        });
+      }
+      updateCurrentAnimationDisplay();
+
+      // Load character in background; when done, replace placeholder and update UI
+      createUAL2Character(scene)
+        .then((loaded) => {
+          scene.remove(placeholderGroup);
+          character = loaded;
+          animationNames = character.animations.map((a) => a.name);
+          animationList.innerHTML = "";
+          animationNames.forEach((name, index) => {
+            const li = document.createElement("li");
+            li.textContent = `${index + 1}: ${name}`;
+            if (index === currentAnimationIndex) li.classList.add("current");
+            li.addEventListener("click", () => {
+              currentAnimationIndex = index;
+              character.playAnimation(currentAnimationIndex);
+              updateCurrentAnimationDisplay();
+            });
+            animationList.appendChild(li);
+          });
+          character.playAnimation(currentAnimationIndex);
+          updateCurrentAnimationDisplay();
+          console.log("Character created:", character);
+        })
+        .catch((err) => {
+          console.error("Character load failed:", err);
+          infoEl.textContent = "Load failed: " + (err.message || String(err));
+        });
+
+      // Keyboard: 1-9, 0 for animations; R reset camera
+      window.addEventListener("keydown", (event) => {
+        const key = event.key;
+        if (key >= "1" && key <= "9") {
+          const index = parseInt(key) - 1;
+          if (index < animationNames.length) {
+            currentAnimationIndex = index;
+            character.playAnimation(currentAnimationIndex);
+            updateCurrentAnimationDisplay();
+          }
+        } else if (key === "0") {
+          const index = 9;
+          if (index < animationNames.length) {
+            currentAnimationIndex = index;
+            character.playAnimation(currentAnimationIndex);
+            updateCurrentAnimationDisplay();
+          }
+        } else if (key === "r" || key === "R") {
+          state.camYaw = 0;
+          state.camPitch = 0.3;
+          charPos.set(0, 0, 0);
+        } else if (key === "c" || key === "C") {
+          cameraMode = cameraMode === "follow" ? "orbit" : "follow";
+          orbitControls.enabled = cameraMode === "orbit";
+          if (cameraMode === "orbit") document.exitPointerLock();
+          cameraModeLabel.textContent = cameraMode === "orbit" ? "Orbit" : "Follow";
+        }
+      });
+
+      const timer = new THREE.Timer();
+      let lastTime = 0;
+      const groundY = -1.25;
+
+      // WebGPU: compile scene before first frame (same as parkour / grass-sandbox)
+      await renderer.compileAsync(scene, camera);
+
+      // Animation loop: same pattern as parkour (setAnimationLoop + render)
+      renderer.setAnimationLoop(() => {
+        timer.update();
+        const elapsed = timer.getElapsed();
+        const dt = Math.min(elapsed - lastTime, 0.1);
+        lastTime = elapsed;
+
+        // Key turn (arrow keys / A-D style turn when not pointer locked)
+        if (keys.arrowLeft || keys.a) state.camYaw += keyTurnSpeed * dt;
+        if (keys.arrowRight || keys.d) state.camYaw -= keyTurnSpeed * dt;
+
+        // WASD movement on flat ground (same math as main player)
+        let dx = 0, dz = 0;
+        if (keys.w) dz -= 1;
+        if (keys.s) dz += 1;
+        if (keys.a) dx -= 1;
+        if (keys.d) dx += 1;
+        if (dx !== 0 || dz !== 0) {
+          const len = Math.sqrt(dx * dx + dz * dz);
+          dx /= len;
+          dz /= len;
+          const sinY = Math.sin(state.camYaw);
+          const cosY = Math.cos(state.camYaw);
+          const forwardX = sinY;
+          const forwardZ = cosY;
+          const rightX = cosY;
+          const rightZ = -sinY;
+          const mx = dx * rightX - dz * forwardX;
+          const mz = dx * rightZ - dz * forwardZ;
+          const speed = keys.shift ? playerSpeed * runSpeedMultiplier : playerSpeed;
+          charPos.x += mx * speed * dt;
+          charPos.z += mz * speed * dt;
+          charPos.x = Math.max(-groundHalfSize, Math.min(groundHalfSize, charPos.x));
+          charPos.z = Math.max(-groundHalfSize, Math.min(groundHalfSize, charPos.z));
+        }
+
+        // Character position and rotation (face camera direction)
+        character.model.position.copy(charPos);
+        character.model.rotation.y = state.camYaw;
+
+        if (cameraMode === "orbit") {
+          orbitControls.target.set(charPos.x, charPos.y + 1.25, charPos.z);
+          orbitControls.update();
+        } else {
+          // Third-person follow camera (same formula as parkour / main game)
+          const cx = charPos.x - Math.sin(state.camYaw) * Math.cos(state.camPitch) * camDist;
+          const cy = charPos.y + Math.sin(state.camPitch) * camDist + camHeight;
+          const cz = charPos.z - Math.cos(state.camYaw) * Math.cos(state.camPitch) * camDist;
+          camera.position.set(cx, Math.max(cy, groundY + 0.5), cz);
+          camera.lookAt(charPos.x, charPos.y + 1.25, charPos.z);
+        }
+
+        character.update();
+        renderer.render(scene, camera);
+      });
+
+      // Handle window resize
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+
+        } catch (err) {
+          console.error("Init failed:", err);
+          const el = document.getElementById("current-animation");
+          if (el) el.textContent = "Init failed: " + (err.message || String(err));
+        }
+      }
+
+      // Start the application
+      console.log('Calling init()...');
+      init();
+    </script>
+  </body>
+</html>

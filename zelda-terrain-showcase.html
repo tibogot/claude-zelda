@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Zelda Terrain — Terrain + Character + Lights + Sky (no grass)</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #000;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        z-index: 10;
+        font:
+          12px/1.5 "SF Mono",
+          "Fira Code",
+          monospace;
+        color: #b0d890;
+        background: rgba(0, 0, 0, 0.55);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: none;
+        user-select: none;
+      }
+      #info span {
+        color: #e0f0c0;
+        font-weight: 600;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/dist/tweakpane.min.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">
+      Zelda Terrain &mdash; <span id="backend">loading…</span> &bull;
+      <span id="stats">Terrain</span> &bull; WASD + click to look &bull; Shift run
+      &bull; Ctrl crouch &bull; F roll
+    </div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import {
+        pass,
+        uniform,
+        float,
+        vec4,
+        mix,
+        mul,
+        div,
+        sub,
+        add,
+        clamp,
+        step,
+        color,
+        fog,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+      import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
+      import RAPIER from "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.19.3/+esm";
+      import { createTerrain } from "./terrain-zelda-showcase.js";
+      import {
+        createPhysicsWorld,
+        createPlayerController,
+        createPhysicsDebug,
+      } from "./physics.js";
+      import { createPlayer } from "./player.js";
+      import { PARAMS } from "./params.js";
+      import {
+        TERRAIN_SIZE,
+        TERRAIN_RES,
+        TRAIL_RES,
+        TRAIL_SIZE,
+        PI,
+      } from "./constants.js";
+
+      const ZELDA_TERRAIN_SIZE = 1200;
+      const ZELDA_TERRAIN_HEIGHT = 480;
+
+      async function init() {
+        const Tweakpane = await import(
+          "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/dist/tweakpane.min.js"
+        );
+
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        await renderer.init();
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = PARAMS.exposure;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+        const be = renderer.backend?.constructor?.name || "?";
+        document.getElementById("backend").textContent = be.includes("WebGPU")
+          ? "WebGPU ✓"
+          : "WebGL fallback";
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(
+          60,
+          innerWidth / innerHeight,
+          0.5,
+          500000,
+        );
+        camera.position.set(0, 8, 20);
+
+        const orbitControls = new OrbitControls(camera, renderer.domElement);
+        orbitControls.target.set(0, 2, 0);
+        orbitControls.maxPolarAngle = PI * 0.48;
+        orbitControls.enableDamping = true;
+        orbitControls.dampingFactor = 0.05;
+        orbitControls.enabled = false;
+        orbitControls.update();
+
+        // ── LIGHTING ──
+        const dirLight = new THREE.DirectionalLight(
+          0xfff5e0,
+          PARAMS.sunIntensity,
+        );
+        dirLight.position.copy(
+          new THREE.Vector3(PARAMS.sunDirX, PARAMS.sunDirY, PARAMS.sunDirZ)
+            .normalize()
+            .multiplyScalar(50),
+        );
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.width = 2048;
+        dirLight.shadow.mapSize.height = 2048;
+        dirLight.shadow.camera.near = 1;
+        dirLight.shadow.camera.far = 200;
+        dirLight.shadow.bias = PARAMS.shadowBias;
+        dirLight.shadow.normalBias = PARAMS.shadowNormalBias;
+
+        const csm = new CSMShadowNode(dirLight, {
+          cascades: 3,
+          maxFar: 150,
+          mode: "practical",
+          lightMargin: 100,
+        });
+        dirLight.shadow.shadowNode = csm;
+        const shadowTarget = new THREE.Object3D();
+        shadowTarget.position.set(0, 0, 0);
+        scene.add(shadowTarget);
+        dirLight.target = shadowTarget;
+        scene.add(dirLight);
+
+        const hemiLight = new THREE.HemisphereLight(
+          0xc8e0ff,
+          0x88aa55,
+          PARAMS.sceneAmbient,
+        );
+        scene.add(hemiLight);
+
+        // ── TERRAIN ──
+        const {
+          terrain,
+          heightTex,
+          trailTex,
+          sampleHeight,
+          regenTerrain,
+          syncTerrainUniforms,
+          setTerrainHeight,
+        } = createTerrain(scene, PARAMS, {
+          TERRAIN_SIZE: ZELDA_TERRAIN_SIZE,
+          TERRAIN_RES,
+          TERRAIN_HEIGHT: ZELDA_TERRAIN_HEIGHT,
+          TRAIL_RES,
+          TRAIL_SIZE,
+        });
+
+        // ── SKY ──
+        const sky = new SkyMesh();
+        sky.scale.setScalar(450000);
+        scene.add(sky);
+        sky.turbidity.value = PARAMS.skyTurbidity;
+        sky.rayleigh.value = PARAMS.skyRayleigh;
+        sky.mieCoefficient.value = PARAMS.skyMie;
+        sky.mieDirectionalG.value = PARAMS.skyMieG;
+        const pmremGenerator = new THREE.PMREMGenerator(renderer);
+        function updateSkyParams() {
+          const sd = new THREE.Vector3(
+            PARAMS.sunDirX,
+            PARAMS.sunDirY,
+            PARAMS.sunDirZ,
+          ).normalize();
+          sky.sunPosition.value.copy(sd);
+          sky.turbidity.value = PARAMS.skyTurbidity;
+          sky.rayleigh.value = PARAMS.skyRayleigh;
+          sky.mieCoefficient.value = PARAMS.skyMie;
+          sky.mieDirectionalG.value = PARAMS.skyMieG;
+        }
+        function bakeEnvMap() {
+          const skyEnvScene = new THREE.Scene();
+          skyEnvScene.add(sky.clone());
+          const skyEnv = pmremGenerator.fromScene(skyEnvScene, 0.04).texture;
+          if (scene.environment) scene.environment.dispose();
+          scene.environment = skyEnv;
+          scene.environmentIntensity = PARAMS.environmentIntensity;
+        }
+        updateSkyParams();
+        bakeEnvMap();
+
+        scene.fogNode = null;
+
+        // ── PHYSICS ──
+        await RAPIER.init({});
+        const { physicsWorld, physicsCubes } = createPhysicsWorld(
+          RAPIER,
+          scene,
+          ZELDA_TERRAIN_SIZE,
+          sampleHeight,
+        );
+        const { physicsDebugGroup, buildRapierDebugMeshes } =
+          createPhysicsDebug(RAPIER, scene, physicsWorld);
+
+        // ── PLAYER ──
+        const charPos = new THREE.Vector3(0, 0, 0);
+        const capHalfHInit = Math.max(
+          0.1,
+          (PARAMS.characterHeight - 2 * PARAMS.capsuleRadius) / 2,
+        );
+        const spawnYOffset = 0.12; // model bbox vs visual feet + terrain interpolation
+        charPos.y =
+          sampleHeight(0, 0) +
+          capHalfHInit +
+          PARAMS.capsuleRadius +
+          spawnYOffset;
+        const { playerBody, playerCollider, characterController } =
+          createPlayerController(RAPIER, physicsWorld, charPos, PARAMS);
+        const capR = PARAMS.capsuleRadius;
+        const capHalfH = Math.max(0.1, (PARAMS.characterHeight - 2 * capR) / 2);
+        const player = createPlayer({
+          scene,
+          renderer,
+          camera,
+          PARAMS,
+          charPos,
+          playerBody,
+          playerCollider,
+          characterController,
+          physicsWorld,
+          sampleHeight,
+          capR,
+          capHalfH,
+          TERRAIN_SIZE: ZELDA_TERRAIN_SIZE,
+        });
+
+        // ── FOG (post) ──
+        const frustum = new THREE.Frustum();
+        const projMat = new THREE.Matrix4();
+
+        function srgbToLinear(hex) {
+          const c = new THREE.Color(hex);
+          c.convertSRGBToLinear();
+          return c;
+        }
+        const uFogNear = uniform(PARAMS.fogNear);
+        const uFogFar = uniform(PARAMS.fogFar);
+        const uFogCameraFar = uniform(500000);
+        const uFogIntensity = uniform(PARAMS.fogIntensity);
+        const uFogColor = uniform(srgbToLinear(PARAMS.fogColor));
+        const uFogEnabled = uniform(PARAMS.fogEnabled ? 1 : 0);
+
+        const scenePass = pass(scene, camera);
+        const sceneColor = scenePass.getTextureNode
+          ? scenePass.getTextureNode()
+          : scenePass;
+        const linearDepth = scenePass.getLinearDepthNode
+          ? scenePass.getLinearDepthNode()
+          : float(0.5);
+        const worldDepth = mul(linearDepth, uFogCameraFar);
+        const fogF = mul(
+          clamp(
+            mul(
+              div(sub(worldDepth, uFogNear), sub(uFogFar, uFogNear)),
+              uFogIntensity,
+            ),
+            0,
+            1,
+          ),
+          uFogEnabled,
+        );
+        const skyMask = step(float(0.999), linearDepth);
+        const foggedOutput = mix(
+          sceneColor,
+          vec4(uFogColor, 1),
+          mul(fogF, sub(1, skyMask)),
+        );
+        const renderPipeline = new THREE.RenderPipeline(renderer);
+        renderPipeline.outputNode = foggedOutput;
+
+        await renderer.compileAsync(scene, camera);
+
+        csm.camera = camera;
+        csm.updateFrustums();
+
+        function applySun() {
+          dirLight.position
+            .copy(
+              new THREE.Vector3(
+                PARAMS.sunDirX,
+                PARAMS.sunDirY,
+                PARAMS.sunDirZ,
+              ).normalize(),
+            )
+            .multiplyScalar(50);
+          dirLight.intensity = PARAMS.sunIntensity;
+          hemiLight.intensity = PARAMS.sceneAmbient;
+          renderer.toneMappingExposure = PARAMS.exposure;
+          updateSkyParams();
+        }
+
+        const pane = new Tweakpane.Pane({ title: "Zelda Terrain", expanded: true });
+
+        const fCamera = pane.addFolder({ title: "Camera", expanded: true });
+        fCamera.addBinding(PARAMS, "cameraMode", {
+          options: { "Third person": "thirdPerson", Orbit: "orbit" },
+        });
+        fCamera.addBinding(PARAMS, "camDist", { min: 3, max: 20, step: 0.5 });
+        fCamera.addBinding(PARAMS, "camHeight", { min: -2, max: 4, step: 0.2 });
+
+        const fSun = pane.addFolder({ title: "Sun & lighting", expanded: true });
+        fSun.addBinding(PARAMS, "sunDirX", { min: -2, max: 2, step: 0.1 }).on("change", applySun);
+        fSun.addBinding(PARAMS, "sunDirY", { min: 0.2, max: 2, step: 0.1 }).on("change", applySun);
+        fSun.addBinding(PARAMS, "sunDirZ", { min: -2, max: 2, step: 0.1 }).on("change", applySun);
+        fSun.addBinding(PARAMS, "sunIntensity", { min: 0.5, max: 5, step: 0.1 }).on("change", applySun);
+        fSun.addBinding(PARAMS, "sceneAmbient", { min: 0, max: 2, step: 0.05 }).on("change", applySun);
+        fSun.addBinding(PARAMS, "exposure", { min: 0.1, max: 2, step: 0.05 }).on("change", applySun);
+
+        const fSky = pane.addFolder({ title: "Sky", expanded: false });
+        fSky.addBinding(PARAMS, "skyTurbidity", { min: 0, max: 10, step: 0.5 }).on("change", updateSkyParams);
+        fSky.addBinding(PARAMS, "skyRayleigh", { min: 0, max: 4, step: 0.1 }).on("change", updateSkyParams);
+        fSky.addBinding(PARAMS, "skyMie", { min: 0, max: 0.1, step: 0.001 }).on("change", updateSkyParams);
+        fSky.addBinding(PARAMS, "skyMieG", { min: 0, max: 1, step: 0.05 }).on("change", updateSkyParams);
+        fSky.addBinding(PARAMS, "environmentIntensity", { min: 0, max: 2, step: 0.05 }).on("change", () => {
+          scene.environmentIntensity = PARAMS.environmentIntensity;
+          bakeEnvMap();
+        });
+
+        const fGround = pane.addFolder({ title: "Ground / terrain", expanded: true });
+        fGround.addBinding(PARAMS, "groundDirtColor");
+        fGround.addBinding(PARAMS, "groundBaseColor");
+        fGround.addBinding(PARAMS, "groundVariation");
+        fGround.addBinding(PARAMS, "texTiling", { min: 10, max: 200, step: 5 });
+        fGround.addBinding(PARAMS, "grassSlopeMin", { min: 0, max: 1, step: 0.05 });
+        fGround.addBinding(PARAMS, "grassSlopeMax", { min: 0, max: 1, step: 0.05 });
+        fGround.addBinding(PARAMS, "grassAmount", { min: 0, max: 2, step: 0.1 });
+        const zeldaTerrain = { height: ZELDA_TERRAIN_HEIGHT };
+        fGround.addBinding(zeldaTerrain, "height", { min: 100, max: 700, step: 20, label: "Terrain height (Zelda)" })
+          .on("change", (ev) => {
+            setTerrainHeight(ev.value);
+            regenTerrain();
+          });
+
+        const fFog = pane.addFolder({ title: "Fog", expanded: false });
+        fFog.addBinding(PARAMS, "fogEnabled");
+        fFog.addBinding(PARAMS, "fogNear", { min: 5, max: 200, step: 5 });
+        fFog.addBinding(PARAMS, "fogFar", { min: 50, max: 500, step: 10 });
+        fFog.addBinding(PARAMS, "fogIntensity", { min: 0, max: 1, step: 0.02 });
+        fFog.addBinding(PARAMS, "fogColor");
+
+        const fShadows = pane.addFolder({ title: "Shadows", expanded: false });
+        fShadows.addBinding(PARAMS, "shadowBias", { min: -0.01, max: 0.01, step: 0.0005 }).on("change", () => {
+          dirLight.shadow.bias = PARAMS.shadowBias;
+          dirLight.shadow.normalBias = PARAMS.shadowNormalBias;
+        });
+        fShadows.addBinding(PARAMS, "shadowNormalBias", { min: 0, max: 0.05, step: 0.002 }).on("change", () => {
+          dirLight.shadow.normalBias = PARAMS.shadowNormalBias;
+        });
+
+        const fPhysics = pane.addFolder({ title: "Physics", expanded: false });
+        fPhysics.addBinding(PARAMS, "rapierDebug");
+
+        const debug = { showCapsule: false, modelFeetOffsetY: 0 };
+        const fCharacter = pane.addFolder({ title: "Character (debug)", expanded: false });
+        fCharacter.addBinding(debug, "showCapsule", { label: "Show capsule" });
+        fCharacter.addBinding(debug, "modelFeetOffsetY", { min: -0.5, max: 0.5, step: 0.01, label: "Model feet offset (Y)" });
+
+        const timer = new THREE.Timer();
+        let lastTime = 0;
+        renderer.setAnimationLoop(() => {
+          PARAMS.characterOffsetY = debug.modelFeetOffsetY;
+          timer.update();
+          const elapsed = timer.getElapsed();
+          const dt = Math.min(elapsed - lastTime, 0.05);
+          lastTime = elapsed;
+          player.update(dt);
+
+          player.capsule.visible = debug.showCapsule || player.characterGroup.children.length === 0;
+
+          syncTerrainUniforms(PARAMS);
+          updateSkyParams();
+
+          physicsDebugGroup.visible = !!PARAMS.rapierDebug;
+          if (PARAMS.rapierDebug) buildRapierDebugMeshes();
+          for (const { body, mesh } of physicsCubes) {
+            const t = body.translation();
+            const r = body.rotation();
+            mesh.position.set(t.x, t.y, t.z);
+            mesh.quaternion.set(r.x, r.y, r.z, r.w);
+          }
+
+          if (PARAMS.cameraMode === "thirdPerson") {
+            const camDist = PARAMS.camDist;
+            const cx =
+              charPos.x -
+              Math.sin(player.state.camYaw) *
+                Math.cos(player.state.camPitch) *
+                camDist;
+            const cy =
+              charPos.y +
+              Math.sin(player.state.camPitch) * camDist +
+              PARAMS.camHeight;
+            const cz =
+              charPos.z -
+              Math.cos(player.state.camYaw) *
+                Math.cos(player.state.camPitch) *
+                camDist;
+            const camTerrainY = sampleHeight(cx, cz) + 1.5;
+            camera.position.set(cx, Math.max(cy, camTerrainY), cz);
+            camera.lookAt(charPos.x, charPos.y + 0.5, charPos.z);
+            orbitControls.enabled = false;
+          } else {
+            orbitControls.enabled = true;
+            orbitControls.update();
+          }
+
+          uFogNear.value = PARAMS.fogEnabled ? PARAMS.fogNear : 9999;
+          uFogFar.value = PARAMS.fogEnabled ? PARAMS.fogFar : 99999;
+          uFogIntensity.value = PARAMS.fogEnabled ? PARAMS.fogIntensity : 0;
+          uFogColor.value.copy(srgbToLinear(PARAMS.fogColor));
+          uFogEnabled.value = PARAMS.fogEnabled ? 1 : 0;
+
+          camera.updateMatrixWorld();
+          renderPipeline.render();
+        });
+
+        window.addEventListener("resize", () => {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(innerWidth, innerHeight);
+          if (csm.frustums) csm.updateFrustums();
+        });
+      }
+
+      init().catch((e) => {
+        console.error("Init failed:", e);
+        document.getElementById("backend").textContent = "Error: " + e.message;
+      });
+    </script>
+  </body>
+</html>

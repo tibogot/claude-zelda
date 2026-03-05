@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Folio Showcase — Terrain + Character</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { overflow: hidden; background: #111; }
+      canvas { display: block; width: 100vw; height: 100vh; }
+      #info {
+        position: fixed;
+        bottom: 12px;
+        left: 12px;
+        z-index: 10;
+        font: 12px/1.5 "SF Mono", "Fira Code", monospace;
+        color: #b0d890;
+        background: rgba(0,0,0,0.6);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: none;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">Folio Showcase — WASD move · Click to look · Shift run · Space jump</div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { pass } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
+      import RAPIER from "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.19.3/+esm";
+      import { createTerrain } from "./folio-showcase/terrain.js";
+      import { createNoiseTexture } from "./folio-showcase/noiseTexture.js";
+      import { createFoliageTexture } from "./folio-showcase/foliageTexture.js";
+      import { createWind } from "./folio-showcase/wind.js";
+      import { createBushes, createBushesFromFolio } from "./folio-showcase/bushes.js";
+      import { createTreesFromFolio, createLargeTreesFromFolio } from "./folio-showcase/trees.js";
+      import { loadFolioAssets } from "./folio-showcase/loadFolioAssets.js";
+      import {
+        createPhysicsWorld,
+        createPlayerController,
+        createPhysicsDebug,
+      } from "./physics.js";
+      import { createPlayer } from "./player.js";
+      import { PARAMS } from "./params.js";
+      import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+
+      const PI = Math.PI;
+      let scene, camera, renderer, terrain, player, renderPipeline;
+      let physicsWorld, physicsCubes, physicsDebugGroup, buildRapierDebugMeshes;
+      let charPos, orbitControls, csm, wind, bushesRef, treesRef, largeTreesRef, centerTreeRef;
+      let lastTime = 0;
+
+      async function init() {
+        renderer = new THREE.WebGPURenderer({ antialias: true });
+        await renderer.init();
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = PARAMS.exposure;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.shadowMap.transmitted = true;
+        document.body.appendChild(renderer.domElement);
+
+        scene = new THREE.Scene();
+        scene.background = null;
+        camera = new THREE.PerspectiveCamera(
+          60,
+          innerWidth / innerHeight,
+          0.5,
+          5000,
+        );
+        camera.position.set(0, 6, 18);
+
+        orbitControls = new OrbitControls(camera, renderer.domElement);
+        orbitControls.target.set(0, 2, 0);
+        orbitControls.maxPolarAngle = PI * 0.48;
+        orbitControls.enableDamping = true;
+        orbitControls.dampingFactor = 0.05;
+        orbitControls.enabled = false;
+        orbitControls.update();
+
+        const dirLight = new THREE.DirectionalLight(
+          PARAMS.folioSunColor,
+          PARAMS.sunIntensity * 1.2,
+        );
+        dirLight.position.copy(
+          new THREE.Vector3(PARAMS.sunDirX, PARAMS.sunDirY, PARAMS.sunDirZ)
+            .normalize()
+            .multiplyScalar(50),
+        );
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.width = 2048;
+        dirLight.shadow.mapSize.height = 2048;
+        dirLight.shadow.camera.near = 1;
+        dirLight.shadow.camera.far = 200;
+        dirLight.shadow.bias = PARAMS.shadowBias;
+        dirLight.shadow.normalBias = PARAMS.shadowNormalBias;
+        csm = new CSMShadowNode(dirLight, {
+          cascades: 3,
+          maxFar: 150,
+          mode: "practical",
+          lightMargin: 100,
+        });
+        dirLight.shadow.shadowNode = csm;
+        const shadowTarget = new THREE.Object3D();
+        shadowTarget.position.set(0, 0, 0);
+        scene.add(shadowTarget);
+        dirLight.target = shadowTarget;
+        scene.add(dirLight);
+
+        const hemiLight = new THREE.HemisphereLight(
+          PARAMS.folioHemiSkyColor,
+          PARAMS.folioHemiGroundColor,
+          PARAMS.sceneAmbient * 1.4,
+        );
+        scene.add(hemiLight);
+
+        const sky = new SkyMesh();
+        sky.scale.setScalar(450000);
+        scene.add(sky);
+        const pmremGenerator = new THREE.PMREMGenerator(renderer);
+        function updateSkyParams() {
+          const sd = new THREE.Vector3(
+            PARAMS.sunDirX,
+            PARAMS.sunDirY,
+            PARAMS.sunDirZ,
+          ).normalize();
+          sky.sunPosition.value.copy(sd);
+          sky.turbidity.value = PARAMS.skyTurbidity;
+          sky.rayleigh.value = PARAMS.skyRayleigh;
+          sky.mieCoefficient.value = PARAMS.skyMie;
+          sky.mieDirectionalG.value = PARAMS.skyMieG;
+        }
+        function bakeEnvMap() {
+          const skyEnvScene = new THREE.Scene();
+          skyEnvScene.add(sky.clone());
+          const skyEnv = pmremGenerator.fromScene(skyEnvScene, 0.04).texture;
+          if (scene.environment) scene.environment.dispose();
+          scene.environment = skyEnv;
+          scene.environmentIntensity = PARAMS.environmentIntensity;
+        }
+        function updateSky() {
+          updateSkyParams();
+          bakeEnvMap();
+        }
+        updateSky();
+
+        terrain = createTerrain(scene, {
+          terrainSize: 80,
+          resolution: 128,
+          heightScale: 8,
+          seed: 42,
+          groundColor: PARAMS.folioGroundColor,
+          groundNoiseColor: PARAMS.folioGroundNoiseColor,
+          groundNoiseStrength: PARAMS.folioGroundNoiseStrength,
+          groundNoiseScale: PARAMS.folioGroundNoiseScale,
+        });
+        const sampleHeight = terrain.sampleHeight;
+        const TERRAIN_SIZE = terrain.terrainSize;
+
+        const noiseTexture = createNoiseTexture(128);
+        let foliageTexture = createFoliageTexture(128);
+        try {
+          const folioSDF = await new THREE.TextureLoader().loadAsync(
+            "folio-showcase/foliageSDF.png"
+          );
+          folioSDF.wrapS = folioSDF.wrapT = THREE.RepeatWrapping;
+          folioSDF.minFilter = THREE.NearestFilter;
+          folioSDF.magFilter = THREE.NearestFilter;
+          folioSDF.generateMipmaps = false;
+          foliageTexture = folioSDF;
+        } catch (_) {
+          /* use procedural foliageTexture */
+        }
+        wind = createWind({ noiseTexture });
+        const lightDirection = new THREE.Vector3(
+          PARAMS.sunDirX,
+          PARAMS.sunDirY,
+          PARAMS.sunDirZ,
+        ).normalize();
+
+        let bushOpts, treeOpts, largeTreeOpts, folio;
+        try {
+          folio = await loadFolioAssets(renderer);
+          bushOpts = {
+            bushesReferencesGlb: folio.bushesReferences,
+            terrainMesh: terrain.mesh,
+            windOffsetNode: wind.offsetNode,
+            foliageTexture,
+            lightDirection,
+            colorA: PARAMS.foliageBushColorA,
+            colorB: PARAMS.foliageBushColorB,
+            orientationsPerInstance: PARAMS.foliageOrientations,
+            scaleMultiplier: PARAMS.foliageBushScale,
+            aoStrength: PARAMS.foliageAoStrength,
+            sssStrength: PARAMS.foliageSssStrength,
+            sssColor: PARAMS.foliageSssColor,
+            colorVariationStrength: PARAMS.foliageColorVariation,
+            conditionalDepthEnabled: PARAMS.foliageConditionalDepthEnabled,
+            depthFadeNear: PARAMS.foliageDepthFadeNear,
+            depthFadeFar: PARAMS.foliageDepthFadeFar,
+            baseContactStrength: PARAMS.foliageBaseContactStrength,
+            alphaThreshold: PARAMS.foliageAlphaThreshold,
+            alphaTest: PARAMS.foliageAlphaTest,
+            leafShapeVariation: PARAMS.foliageLeafShapeVariation,
+          };
+          const allTreeRefs = folio.oakTreesReferences.scene.children;
+          const largeTreeCount = Math.min(8, Math.max(1, Math.floor(allTreeRefs.length / 2)));
+          treeOpts = {
+            visualScene: folio.oakTreesVisual.scene,
+            referencesChildren: allTreeRefs.slice(largeTreeCount),
+            foliageTexture,
+            windOffsetNode: wind.offsetNode,
+            lightDirection,
+            terrainMesh: terrain.mesh,
+            groundOffset: 0,
+            colorA: PARAMS.foliageTreeColorA,
+            colorB: PARAMS.foliageTreeColorB,
+            orientationsPerInstance: PARAMS.foliageOrientations,
+            scaleMultiplier: PARAMS.foliageLeafScale,
+            aoStrength: PARAMS.foliageAoStrength,
+            sssStrength: PARAMS.foliageSssStrength,
+            sssColor: PARAMS.foliageSssColor,
+            colorVariationStrength: PARAMS.foliageColorVariation,
+            depthFadeNear: PARAMS.foliageDepthFadeNear,
+            depthFadeFar: PARAMS.foliageDepthFadeFar,
+            baseContactStrength: PARAMS.foliageBaseContactStrength,
+            conditionalDepthEnabled: PARAMS.foliageConditionalDepthEnabled,
+            alphaThreshold: PARAMS.foliageAlphaThreshold,
+            alphaTest: PARAMS.foliageAlphaTest,
+            leafShapeVariation: PARAMS.foliageLeafShapeVariation,
+            trunkBaseAoStrength: PARAMS.trunkBaseAoStrength,
+          };
+          largeTreeOpts = {
+            ...treeOpts,
+            referencesChildren: allTreeRefs.slice(0, largeTreeCount),
+            largeTreeScale: 2,
+            leafDensityMultiplier: 2,
+          };
+          bushesRef = createBushesFromFolio(scene, bushOpts);
+          treesRef = createTreesFromFolio(scene, treeOpts);
+          largeTreesRef = createLargeTreesFromFolio(scene, largeTreeOpts);
+          const centerRef = new THREE.Object3D();
+          centerRef.position.set(0, 0, 0);
+          centerRef.quaternion.identity();
+          centerRef.scale.setScalar(1);
+          const centerTreeOpts = {
+            ...treeOpts,
+            referencesChildren: [centerRef],
+            largeTreeScale: 4,
+            leafDensityMultiplier: 10,
+            orientationsPerInstance: 6,
+            colorA: "#c45c1a",
+            colorB: "#e8923c",
+          };
+          centerTreeRef = createLargeTreesFromFolio(scene, centerTreeOpts);
+        } catch (e) {
+          console.warn("Folio assets not found, using procedural bushes:", e);
+          bushOpts = {
+            terrainMesh: terrain.mesh,
+            terrainSize: TERRAIN_SIZE,
+            count: 100,
+            windOffsetNode: wind.offsetNode,
+            foliageTexture,
+            lightDirection,
+            colorA: PARAMS.foliageBushColorA,
+            colorB: PARAMS.foliageBushColorB,
+            orientationsPerInstance: PARAMS.foliageOrientations,
+            scaleMultiplier: PARAMS.foliageBushScale,
+            aoStrength: PARAMS.foliageAoStrength,
+            sssStrength: PARAMS.foliageSssStrength,
+            sssColor: PARAMS.foliageSssColor,
+            colorVariationStrength: PARAMS.foliageColorVariation,
+            depthFadeNear: PARAMS.foliageDepthFadeNear,
+            depthFadeFar: PARAMS.foliageDepthFadeFar,
+            baseContactStrength: PARAMS.foliageBaseContactStrength,
+            conditionalDepthEnabled: PARAMS.foliageConditionalDepthEnabled,
+            alphaThreshold: PARAMS.foliageAlphaThreshold,
+            alphaTest: PARAMS.foliageAlphaTest,
+          };
+          bushesRef = createBushes(scene, bushOpts);
+          treesRef = null;
+          largeTreesRef = null;
+          centerTreeRef = null;
+          treeOpts = null;
+          largeTreeOpts = null;
+        }
+
+        const Tweakpane = await import("https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/dist/tweakpane.min.js").then((m) => m.default ?? m);
+        const paneContainer = document.createElement("div");
+        paneContainer.style.cssText = "position:fixed;top:12px;right:12px;max-height:calc(100vh - 24px);overflow-y:auto;overflow-x:hidden;z-index:10;";
+        document.body.appendChild(paneContainer);
+        const pane = new Tweakpane.Pane({ title: "Folio Foliage", expanded: true, container: paneContainer });
+        const fGround = pane.addFolder({ title: "Ground", expanded: true });
+        fGround.addBinding(PARAMS, "folioGroundColor", { label: "Color" }).on("change", (ev) => {
+          if (terrain?.groundColorUniform) terrain.groundColorUniform.value.set(ev.value);
+        });
+        fGround.addBinding(PARAMS, "folioGroundNoiseColor", { label: "Noise color" }).on("change", (ev) => {
+          if (terrain?.groundNoiseColorUniform) terrain.groundNoiseColorUniform.value.set(ev.value);
+        });
+        fGround.addBinding(PARAMS, "folioGroundNoiseStrength", { min: 0, max: 0.6, step: 0.02, label: "Noise strength" }).on("change", (ev) => {
+          if (terrain?.groundNoiseStrengthUniform) terrain.groundNoiseStrengthUniform.value = ev.value;
+        });
+        fGround.addBinding(PARAMS, "folioGroundNoiseScale", { min: 0.01, max: 0.12, step: 0.005, label: "Noise scale" }).on("change", (ev) => {
+          if (terrain?.groundNoiseScaleUniform) terrain.groundNoiseScaleUniform.value = ev.value;
+        });
+        pane.addBinding(PARAMS, "foliageBushScale", { min: 0.5, max: 2, step: 0.05, label: "Bush scale" }).on("change", (ev) => {
+          if (bushesRef?.updateScaleMultiplier) bushesRef.updateScaleMultiplier(ev.value);
+        });
+        pane.addBinding(PARAMS, "foliageLeafScale", { min: 0.5, max: 2, step: 0.05, label: "Leaf scale" }).on("change", (ev) => {
+          if (treesRef?.leaves?.updateScaleMultiplier) treesRef.leaves.updateScaleMultiplier(ev.value);
+          if (largeTreesRef?.leaves?.updateScaleMultiplier) largeTreesRef.leaves.updateScaleMultiplier(ev.value);
+          if (centerTreeRef?.leaves?.updateScaleMultiplier) centerTreeRef.leaves.updateScaleMultiplier(ev.value);
+        });
+        pane.addBinding(PARAMS, "foliageOrientations", { min: 2, max: 6, step: 1, label: "Fluffiness" }).on("change", (ev) => {
+          if (!bushOpts) return;
+          bushOpts.orientationsPerInstance = ev.value;
+          if (bushesRef?.mesh) {
+            scene.remove(bushesRef.mesh);
+            bushesRef.mesh.geometry.dispose();
+            bushesRef.mesh.material.dispose();
+          }
+          bushesRef = bushOpts.bushesReferencesGlb ? createBushesFromFolio(scene, bushOpts) : createBushes(scene, bushOpts);
+          if (treeOpts) {
+            treeOpts.orientationsPerInstance = ev.value;
+            if (treesRef?.leaves?.mesh) {
+              scene.remove(treesRef.leaves.mesh);
+              treesRef.leaves.mesh.geometry.dispose();
+              treesRef.leaves.mesh.material.dispose();
+            }
+            if (treesRef?.bodies) scene.remove(treesRef.bodies);
+            treesRef = createTreesFromFolio(scene, treeOpts);
+            if (largeTreeOpts) {
+              largeTreeOpts.orientationsPerInstance = ev.value;
+              if (largeTreesRef?.leaves?.mesh) {
+                scene.remove(largeTreesRef.leaves.mesh);
+                largeTreesRef.leaves.mesh.geometry.dispose();
+                largeTreesRef.leaves.mesh.material.dispose();
+              }
+              if (largeTreesRef?.bodies) scene.remove(largeTreesRef.bodies);
+              largeTreesRef = createLargeTreesFromFolio(scene, largeTreeOpts);
+            }
+            if (centerTreeRef?.leaves?.mesh) {
+              scene.remove(centerTreeRef.leaves.mesh);
+              centerTreeRef.leaves.mesh.geometry.dispose();
+              centerTreeRef.leaves.mesh.material.dispose();
+            }
+            if (centerTreeRef?.bodies) scene.remove(centerTreeRef.bodies);
+            const centerRef = new THREE.Object3D();
+            centerRef.position.set(0, 0, 0);
+            centerRef.quaternion.identity();
+            centerRef.scale.setScalar(1);
+            centerTreeRef = createLargeTreesFromFolio(scene, { ...treeOpts, referencesChildren: [centerRef], largeTreeScale: 4, leafDensityMultiplier: 10, orientationsPerInstance: 6, colorA: "#c45c1a", colorB: "#e8923c" });
+          }
+        });
+        const fBush = pane.addFolder({ title: "Bushes", expanded: true });
+        fBush.addBinding(PARAMS, "foliageBushColorA", { label: "Color A" }).on("change", (ev) => { if (bushesRef?.setColorA) bushesRef.setColorA(ev.value); });
+        fBush.addBinding(PARAMS, "foliageBushColorB", { label: "Color B" }).on("change", (ev) => { if (bushesRef?.setColorB) bushesRef.setColorB(ev.value); });
+        const fTree = pane.addFolder({ title: "Trees", expanded: true });
+        fTree.addBinding(PARAMS, "foliageTreeColorA", { label: "Color A" }).on("change", (ev) => {
+          if (treesRef?.leaves?.setColorA) treesRef.leaves.setColorA(ev.value);
+          if (largeTreesRef?.leaves?.setColorA) largeTreesRef.leaves.setColorA(ev.value);
+          if (centerTreeRef?.leaves?.setColorA) centerTreeRef.leaves.setColorA(ev.value);
+        });
+        fTree.addBinding(PARAMS, "foliageTreeColorB", { label: "Color B" }).on("change", (ev) => {
+          if (treesRef?.leaves?.setColorB) treesRef.leaves.setColorB(ev.value);
+          if (largeTreesRef?.leaves?.setColorB) largeTreesRef.leaves.setColorB(ev.value);
+          if (centerTreeRef?.leaves?.setColorB) centerTreeRef.leaves.setColorB(ev.value);
+        });
+        const fRealism = pane.addFolder({ title: "Realism (AO / SSS)", expanded: true });
+        fRealism.addBinding(PARAMS, "foliageAoStrength", { min: 0, max: 1, step: 0.05, label: "AO strength" }).on("change", (ev) => {
+          if (bushesRef?.aoStrengthUniform) bushesRef.aoStrengthUniform.value = ev.value;
+          if (treesRef?.leaves?.aoStrengthUniform) treesRef.leaves.aoStrengthUniform.value = ev.value;
+          if (largeTreesRef?.leaves?.aoStrengthUniform) largeTreesRef.leaves.aoStrengthUniform.value = ev.value;
+          if (centerTreeRef?.leaves?.aoStrengthUniform) centerTreeRef.leaves.aoStrengthUniform.value = ev.value;
+        });
+        fRealism.addBinding(PARAMS, "foliageSssStrength", { min: 0, max: 0.6, step: 0.05, label: "SSS strength" }).on("change", (ev) => {
+          if (bushesRef?.sssStrengthUniform) bushesRef.sssStrengthUniform.value = ev.value;
+          if (treesRef?.leaves?.sssStrengthUniform) treesRef.leaves.sssStrengthUniform.value = ev.value;
+          if (largeTreesRef?.leaves?.sssStrengthUniform) largeTreesRef.leaves.sssStrengthUniform.value = ev.value;
+          if (centerTreeRef?.leaves?.sssStrengthUniform) centerTreeRef.leaves.sssStrengthUniform.value = ev.value;
+        });
+        fRealism.addBinding(PARAMS, "foliageSssColor", { label: "SSS color" }).on("change", (ev) => {
+          if (bushesRef?.sssColorUniform) bushesRef.sssColorUniform.value.set(ev.value);
+          if (treesRef?.leaves?.sssColorUniform) treesRef.leaves.sssColorUniform.value.set(ev.value);
+          if (largeTreesRef?.leaves?.sssColorUniform) largeTreesRef.leaves.sssColorUniform.value.set(ev.value);
+          if (centerTreeRef?.leaves?.sssColorUniform) centerTreeRef.leaves.sssColorUniform.value.set(ev.value);
+        });
+        const fVariation = pane.addFolder({ title: "Color variation", expanded: true });
+        fVariation.addBinding(PARAMS, "foliageColorVariation", { min: 0, max: 0.6, step: 0.02, label: "Strength" }).on("change", (ev) => {
+          if (bushesRef?.colorVariationStrengthUniform) bushesRef.colorVariationStrengthUniform.value = ev.value;
+          if (treesRef?.leaves?.colorVariationStrengthUniform) treesRef.leaves.colorVariationStrengthUniform.value = ev.value;
+          if (largeTreesRef?.leaves?.colorVariationStrengthUniform) largeTreesRef.leaves.colorVariationStrengthUniform.value = ev.value;
+          if (centerTreeRef?.leaves?.colorVariationStrengthUniform) centerTreeRef.leaves.colorVariationStrengthUniform.value = ev.value;
+        });
+        const fDepth = pane.addFolder({ title: "Conditional depth (inside foliage)", expanded: true });
+        fDepth.addBinding(PARAMS, "foliageConditionalDepthEnabled", { label: "Enable" }).on("change", (ev) => {
+          const v = ev.value ? 1 : 0;
+          if (bushesRef?.conditionalDepthEnabledUniform) bushesRef.conditionalDepthEnabledUniform.value = v;
+          if (treesRef?.leaves?.conditionalDepthEnabledUniform) treesRef.leaves.conditionalDepthEnabledUniform.value = v;
+          if (largeTreesRef?.leaves?.conditionalDepthEnabledUniform) largeTreesRef.leaves.conditionalDepthEnabledUniform.value = v;
+          if (centerTreeRef?.leaves?.conditionalDepthEnabledUniform) centerTreeRef.leaves.conditionalDepthEnabledUniform.value = v;
+        });
+        fDepth.addBinding(PARAMS, "foliageDepthFadeNear", { min: 0.5, max: 5, step: 0.25, label: "Fade start (m)" }).on("change", (ev) => {
+          if (bushesRef?.depthFadeNearUniform) bushesRef.depthFadeNearUniform.value = ev.value;
+          if (treesRef?.leaves?.depthFadeNearUniform) treesRef.leaves.depthFadeNearUniform.value = ev.value;
+          if (largeTreesRef?.leaves?.depthFadeNearUniform) largeTreesRef.leaves.depthFadeNearUniform.value = ev.value;
+          if (centerTreeRef?.leaves?.depthFadeNearUniform) centerTreeRef.leaves.depthFadeNearUniform.value = ev.value;
+        });
+        fDepth.addBinding(PARAMS, "foliageDepthFadeFar", { min: 2, max: 15, step: 0.5, label: "Fade end (m)" }).on("change", (ev) => {
+          if (bushesRef?.depthFadeFarUniform) bushesRef.depthFadeFarUniform.value = ev.value;
+          if (treesRef?.leaves?.depthFadeFarUniform) treesRef.leaves.depthFadeFarUniform.value = ev.value;
+          if (largeTreesRef?.leaves?.depthFadeFarUniform) largeTreesRef.leaves.depthFadeFarUniform.value = ev.value;
+          if (centerTreeRef?.leaves?.depthFadeFarUniform) centerTreeRef.leaves.depthFadeFarUniform.value = ev.value;
+        });
+        const fBaseAo = pane.addFolder({ title: "Base / ground contact AO", expanded: true });
+        fBaseAo.addBinding(PARAMS, "foliageBaseContactStrength", { min: 0, max: 0.6, step: 0.05, label: "Foliage base" }).on("change", (ev) => {
+          if (bushesRef?.baseContactStrengthUniform) bushesRef.baseContactStrengthUniform.value = ev.value;
+          if (treesRef?.leaves?.baseContactStrengthUniform) treesRef.leaves.baseContactStrengthUniform.value = ev.value;
+          if (largeTreesRef?.leaves?.baseContactStrengthUniform) largeTreesRef.leaves.baseContactStrengthUniform.value = ev.value;
+          if (centerTreeRef?.leaves?.baseContactStrengthUniform) centerTreeRef.leaves.baseContactStrengthUniform.value = ev.value;
+        });
+        fBaseAo.addBinding(PARAMS, "trunkBaseAoStrength", { min: 0, max: 0.7, step: 0.05, label: "Trunk base" }).on("change", (ev) => {
+          if (treesRef?.trunkBaseAoStrengthUniform) treesRef.trunkBaseAoStrengthUniform.value = ev.value;
+          if (largeTreesRef?.trunkBaseAoStrengthUniform) largeTreesRef.trunkBaseAoStrengthUniform.value = ev.value;
+          if (centerTreeRef?.trunkBaseAoStrengthUniform) centerTreeRef.trunkBaseAoStrengthUniform.value = ev.value;
+        });
+        const fAlpha = pane.addFolder({ title: "Alpha / transparency", expanded: true });
+        fAlpha.addBinding(PARAMS, "foliageAlphaThreshold", { min: 0.1, max: 0.6, step: 0.02, label: "SDF cutoff" }).on("change", (ev) => {
+          if (bushesRef?.alphaThresholdUniform) bushesRef.alphaThresholdUniform.value = ev.value;
+          if (treesRef?.leaves?.alphaThresholdUniform) treesRef.leaves.alphaThresholdUniform.value = ev.value;
+          if (largeTreesRef?.leaves?.alphaThresholdUniform) largeTreesRef.leaves.alphaThresholdUniform.value = ev.value;
+          if (centerTreeRef?.leaves?.alphaThresholdUniform) centerTreeRef.leaves.alphaThresholdUniform.value = ev.value;
+        });
+        fAlpha.addBinding(PARAMS, "foliageLeafShapeVariation", { min: 0, max: 0.25, step: 0.01, label: "Leaf shape variation" }).on("change", (ev) => {
+          if (bushesRef?.leafShapeVariationUniform) bushesRef.leafShapeVariationUniform.value = ev.value;
+          if (treesRef?.leaves?.leafShapeVariationUniform) treesRef.leaves.leafShapeVariationUniform.value = ev.value;
+          if (largeTreesRef?.leaves?.leafShapeVariationUniform) largeTreesRef.leaves.leafShapeVariationUniform.value = ev.value;
+          if (centerTreeRef?.leaves?.leafShapeVariationUniform) centerTreeRef.leaves.leafShapeVariationUniform.value = ev.value;
+        });
+        fAlpha.addBinding(PARAMS, "foliageAlphaTest", { min: 0.01, max: 0.25, step: 0.01, label: "Edge hardness" }).on("change", (ev) => {
+          if (bushesRef?.alphaTestUniform) {
+            bushesRef.alphaTestUniform.value = ev.value;
+            if (bushesRef?.mesh?.material) bushesRef.mesh.material.alphaTest = ev.value;
+          }
+          if (treesRef?.leaves?.alphaTestUniform) {
+            treesRef.leaves.alphaTestUniform.value = ev.value;
+            if (treesRef?.leaves?.mesh?.material) treesRef.leaves.mesh.material.alphaTest = ev.value;
+          }
+          if (largeTreesRef?.leaves?.alphaTestUniform) {
+            largeTreesRef.leaves.alphaTestUniform.value = ev.value;
+            if (largeTreesRef?.leaves?.mesh?.material) largeTreesRef.leaves.mesh.material.alphaTest = ev.value;
+          }
+          if (centerTreeRef?.leaves?.alphaTestUniform) {
+            centerTreeRef.leaves.alphaTestUniform.value = ev.value;
+            if (centerTreeRef?.leaves?.mesh?.material) centerTreeRef.leaves.mesh.material.alphaTest = ev.value;
+          }
+        });
+
+        function applyLighting() {
+          const sunDir = new THREE.Vector3(PARAMS.sunDirX, PARAMS.sunDirY, PARAMS.sunDirZ).normalize();
+          dirLight.position.copy(sunDir).multiplyScalar(50);
+          dirLight.intensity = PARAMS.sunIntensity * 1.2;
+          dirLight.color.set(PARAMS.folioSunColor);
+          hemiLight.color.set(PARAMS.folioHemiSkyColor);
+          hemiLight.groundColor.set(PARAMS.folioHemiGroundColor);
+          hemiLight.intensity = PARAMS.sceneAmbient * 1.4;
+          renderer.toneMappingExposure = PARAMS.exposure;
+          scene.environmentIntensity = PARAMS.environmentIntensity;
+          if (bushesRef?.lightDirUniform) bushesRef.lightDirUniform.value.copy(new THREE.Vector3(PARAMS.sunDirX, PARAMS.sunDirY, PARAMS.sunDirZ).normalize());
+          if (treesRef?.leaves?.lightDirUniform) treesRef.leaves.lightDirUniform.value.copy(new THREE.Vector3(PARAMS.sunDirX, PARAMS.sunDirY, PARAMS.sunDirZ).normalize());
+          if (largeTreesRef?.leaves?.lightDirUniform) largeTreesRef.leaves.lightDirUniform.value.copy(new THREE.Vector3(PARAMS.sunDirX, PARAMS.sunDirY, PARAMS.sunDirZ).normalize());
+          if (centerTreeRef?.leaves?.lightDirUniform) centerTreeRef.leaves.lightDirUniform.value.copy(new THREE.Vector3(PARAMS.sunDirX, PARAMS.sunDirY, PARAMS.sunDirZ).normalize());
+        }
+        function applySkyAndBake() {
+          updateSkyParams();
+          bakeEnvMap();
+        }
+        const fLight = pane.addFolder({ title: "Lighting & Sky", expanded: true });
+        const fSun = fLight.addFolder({ title: "Sun", expanded: true });
+        fSun.addBinding(PARAMS, "sunDirX", { min: -2, max: 2, step: 0.1, label: "Dir X" }).on("change", () => { applyLighting(); applySkyAndBake(); });
+        fSun.addBinding(PARAMS, "sunDirY", { min: 0.2, max: 2, step: 0.1, label: "Dir Y" }).on("change", () => { applyLighting(); applySkyAndBake(); });
+        fSun.addBinding(PARAMS, "sunDirZ", { min: -2, max: 2, step: 0.1, label: "Dir Z" }).on("change", () => { applyLighting(); applySkyAndBake(); });
+        fSun.addBinding(PARAMS, "sunIntensity", { min: 0, max: 5, step: 0.1, label: "Intensity" }).on("change", applyLighting);
+        fSun.addBinding(PARAMS, "folioSunColor", { label: "Color" }).on("change", applyLighting);
+        const fHemi = fLight.addFolder({ title: "Hemisphere", expanded: true });
+        fHemi.addBinding(PARAMS, "folioHemiSkyColor", { label: "Sky color" }).on("change", applyLighting);
+        fHemi.addBinding(PARAMS, "folioHemiGroundColor", { label: "Ground color" }).on("change", applyLighting);
+        fHemi.addBinding(PARAMS, "sceneAmbient", { min: 0, max: 2, step: 0.05, label: "Intensity" }).on("change", applyLighting);
+        fLight.addBinding(PARAMS, "exposure", { min: 0.1, max: 2, step: 0.05, label: "Exposure" }).on("change", applyLighting);
+        fLight.addBinding(PARAMS, "environmentIntensity", { min: 0, max: 2, step: 0.05, label: "Env (IBL)" }).on("change", applyLighting);
+        const fSky = fLight.addFolder({ title: "Sky atmosphere", expanded: false });
+        fSky.addBinding(PARAMS, "skyTurbidity", { min: 0, max: 10, step: 0.5 }).on("change", applySkyAndBake);
+        fSky.addBinding(PARAMS, "skyRayleigh", { min: 0, max: 4, step: 0.1 }).on("change", applySkyAndBake);
+        fSky.addBinding(PARAMS, "skyMie", { min: 0, max: 0.02, step: 0.001 }).on("change", applySkyAndBake);
+        fSky.addBinding(PARAMS, "skyMieG", { min: 0, max: 1, step: 0.05 }).on("change", applySkyAndBake);
+
+        await RAPIER.init({});
+        const physics = createPhysicsWorld(
+          RAPIER,
+          scene,
+          TERRAIN_SIZE,
+          sampleHeight,
+        );
+        physicsWorld = physics.physicsWorld;
+        physicsCubes = physics.physicsCubes;
+        const debug = createPhysicsDebug(RAPIER, scene, physicsWorld);
+        physicsDebugGroup = debug.physicsDebugGroup;
+        buildRapierDebugMeshes = debug.buildRapierDebugMeshes;
+
+        charPos = new THREE.Vector3(0, 0, 0);
+        charPos.y =
+          sampleHeight(0, 0) +
+          Math.max(
+            0.1,
+            (PARAMS.characterHeight - 2 * PARAMS.capsuleRadius) / 2,
+          ) +
+          PARAMS.capsuleRadius;
+
+        const { playerBody, playerCollider, characterController } =
+          createPlayerController(RAPIER, physicsWorld, charPos, PARAMS);
+
+        const capR = PARAMS.capsuleRadius;
+        const capHalfH = Math.max(
+          0.1,
+          (PARAMS.characterHeight - 2 * capR) / 2,
+        );
+
+        player = createPlayer({
+          scene,
+          renderer,
+          camera,
+          PARAMS,
+          charPos,
+          playerBody,
+          playerCollider,
+          characterController,
+          physicsWorld,
+          sampleHeight,
+          capR,
+          capHalfH,
+          TERRAIN_SIZE,
+        });
+
+        const scenePass = pass(scene, camera);
+        const outputNode = scenePass.getTextureNode("output");
+        renderPipeline = new THREE.RenderPipeline(renderer);
+        renderPipeline.outputNode = outputNode;
+
+        await renderer.compileAsync(scene, camera);
+
+        csm.camera = camera;
+        csm.updateFrustums();
+
+        renderer.setAnimationLoop(() => {
+          const elapsed = performance.now() / 1000;
+          const dt = Math.min(0.05, elapsed - lastTime);
+          lastTime = elapsed;
+
+          physicsWorld.step();
+          wind.update(dt);
+          player.update(dt);
+
+          physicsDebugGroup.visible = !!PARAMS.rapierDebug;
+          if (PARAMS.rapierDebug) buildRapierDebugMeshes();
+          for (const { body, mesh } of physicsCubes) {
+            const t = body.translation();
+            const r = body.rotation();
+            mesh.position.set(t.x, t.y, t.z);
+            mesh.quaternion.set(r.x, r.y, r.z, r.w);
+          }
+
+          if (PARAMS.cameraMode === "thirdPerson") {
+            const camDist = PARAMS.camDist;
+            const cx =
+              charPos.x -
+              Math.sin(player.state.camYaw) *
+                Math.cos(player.state.camPitch) *
+                camDist;
+            const cy =
+              charPos.y +
+              Math.sin(player.state.camPitch) * camDist +
+              PARAMS.camHeight;
+            const cz =
+              charPos.z -
+              Math.cos(player.state.camYaw) *
+                Math.cos(player.state.camPitch) *
+                camDist;
+            const camTerrainY = sampleHeight(cx, cz) + 1.5;
+            camera.position.set(cx, Math.max(cy, camTerrainY), cz);
+            camera.lookAt(charPos.x, charPos.y + 0.5, charPos.z);
+            orbitControls.enabled = false;
+          } else {
+            orbitControls.enabled = true;
+            orbitControls.update();
+          }
+
+          camera.updateMatrixWorld();
+          renderPipeline.render();
+        });
+      }
+
+      window.addEventListener("resize", () => {
+        if (!camera || !renderer) return;
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+        if (csm && csm.frustums) csm.updateFrustums();
+      });
+
+      init().catch((e) => {
+        console.error("Folio Showcase init failed:", e);
+        document.getElementById("info").textContent = "Error: " + e.message;
+      });
+    </script>
+  </body>
+</html>

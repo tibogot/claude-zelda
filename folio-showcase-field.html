@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Folio Field — LOD stress test</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { overflow: hidden; background: #111; }
+      canvas { display: block; width: 100vw; height: 100vh; }
+      #info {
+        position: fixed;
+        bottom: 12px;
+        left: 12px;
+        z-index: 10;
+        font: 12px/1.5 "SF Mono", "Fira Code", monospace;
+        color: #b0d890;
+        background: rgba(0,0,0,0.7);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: none;
+        max-width: 420px;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">Loading…</div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { pass } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
+      import RAPIER from "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.19.3/+esm";
+      import { createTerrain } from "./folio-showcase/terrain.js";
+      import { createNoiseTexture } from "./folio-showcase/noiseTexture.js";
+      import { createFoliageTexture } from "./folio-showcase/foliageTexture.js";
+      import { createWind } from "./folio-showcase/wind.js";
+      import { createFieldFoliage } from "./folio-showcase/fieldFoliage.js";
+      import { loadFolioAssets } from "./folio-showcase/loadFolioAssets.js";
+      import {
+        createPhysicsWorld,
+        createPlayerController,
+        createPhysicsDebug,
+      } from "./physics.js";
+      import { createPlayer } from "./player.js";
+      import { PARAMS } from "./params.js";
+
+      const PI = Math.PI;
+      const TERRAIN_SIZE = 220;
+      const BUSH_COUNT = 700;
+      const TREE_COUNT = 350;
+      const LOD0_RADIUS = 55;
+      const LOD1_RADIUS = 120;
+
+      let scene, camera, renderer, terrain, player, renderPipeline;
+      let physicsWorld, physicsCubes, physicsDebugGroup, buildRapierDebugMeshes;
+      let charPos, orbitControls, csm, wind, fieldRef;
+      let lastTime = 0;
+      let frameCount = 0;
+      let fpsTime = 0;
+      let fps = 0;
+
+      async function init() {
+        renderer = new THREE.WebGPURenderer({ antialias: true });
+        await renderer.init();
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.0;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.shadowMap.transmitted = true;
+        document.body.appendChild(renderer.domElement);
+
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87ceeb);
+        camera = new THREE.PerspectiveCamera(
+          60,
+          innerWidth / innerHeight,
+          0.5,
+          5000,
+        );
+        camera.position.set(0, 8, 22);
+
+        orbitControls = new OrbitControls(camera, renderer.domElement);
+        orbitControls.target.set(0, 2, 0);
+        orbitControls.maxPolarAngle = PI * 0.48;
+        orbitControls.enableDamping = true;
+        orbitControls.dampingFactor = 0.05;
+        orbitControls.enabled = false;
+
+        const dirLight = new THREE.DirectionalLight(
+          0xfff5e0,
+          PARAMS.sunIntensity * 1.2,
+        );
+        dirLight.position.copy(
+          new THREE.Vector3(PARAMS.sunDirX, PARAMS.sunDirY, PARAMS.sunDirZ)
+            .normalize()
+            .multiplyScalar(50),
+        );
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.width = 2048;
+        dirLight.shadow.mapSize.height = 2048;
+        dirLight.shadow.camera.near = 1;
+        dirLight.shadow.camera.far = 350;
+        dirLight.shadow.bias = PARAMS.shadowBias;
+        dirLight.shadow.normalBias = PARAMS.shadowNormalBias;
+        csm = new CSMShadowNode(dirLight, {
+          cascades: 3,
+          maxFar: 280,
+          mode: "practical",
+          lightMargin: 120,
+        });
+        dirLight.shadow.shadowNode = csm;
+        const shadowTarget = new THREE.Object3D();
+        shadowTarget.position.set(0, 0, 0);
+        scene.add(shadowTarget);
+        dirLight.target = shadowTarget;
+        scene.add(dirLight);
+
+        const hemiLight = new THREE.HemisphereLight(
+          0xc8e0ff,
+          0x88aa55,
+          PARAMS.sceneAmbient * 1.4,
+        );
+        scene.add(hemiLight);
+
+        terrain = createTerrain(scene, {
+          terrainSize: TERRAIN_SIZE,
+          resolution: 160,
+          heightScale: 10,
+          seed: 42,
+        });
+        const sampleHeight = terrain.sampleHeight;
+
+        const noiseTexture = createNoiseTexture(128);
+        let foliageTexture = createFoliageTexture(128);
+        try {
+          const folioSDF = await new THREE.TextureLoader().loadAsync(
+            "folio-showcase/foliageSDF.png"
+          );
+          folioSDF.wrapS = folioSDF.wrapT = THREE.RepeatWrapping;
+          folioSDF.minFilter = THREE.NearestFilter;
+          folioSDF.magFilter = THREE.NearestFilter;
+          folioSDF.generateMipmaps = false;
+          foliageTexture = folioSDF;
+        } catch (_) {}
+
+        wind = createWind({ noiseTexture });
+        const lightDirection = new THREE.Vector3(
+          PARAMS.sunDirX,
+          PARAMS.sunDirY,
+          PARAMS.sunDirZ,
+        ).normalize();
+
+        const folio = await loadFolioAssets(renderer);
+        fieldRef = createFieldFoliage(scene, {
+          terrainMesh: terrain.mesh,
+          terrainSize: TERRAIN_SIZE,
+          windOffsetNode: wind.offsetNode,
+          foliageTexture,
+          lightDirection,
+          visualScene: folio.oakTreesVisual.scene,
+          groundOffset: 0.25,
+          colorA: PARAMS.foliageBushColorA,
+          colorB: PARAMS.foliageBushColorB,
+          scaleMultiplier: PARAMS.foliageScaleMultiplier,
+          aoStrength: PARAMS.foliageAoStrength,
+          sssStrength: PARAMS.foliageSssStrength,
+          sssColor: PARAMS.foliageSssColor,
+          bushCount: BUSH_COUNT,
+          treeCount: TREE_COUNT,
+          lod0Radius: LOD0_RADIUS,
+          lod1Radius: LOD1_RADIUS,
+        });
+
+        function updateAllScale(v) {
+          for (const key of ["bushLOD0", "bushLOD1", "bushLOD2"]) {
+            if (fieldRef[key]?.updateScaleMultiplier) fieldRef[key].updateScaleMultiplier(v);
+          }
+          for (const key of ["treesLOD0", "treesLOD1", "treesLOD2"]) {
+            if (fieldRef[key]?.leaves?.updateScaleMultiplier) fieldRef[key].leaves.updateScaleMultiplier(v);
+          }
+        }
+
+        const Tweakpane = await import("https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/dist/tweakpane.min.js").then((m) => m.default ?? m);
+        const pane = new Tweakpane.Pane({ title: "Field", expanded: true });
+        pane.addBinding(PARAMS, "foliageScaleMultiplier", { min: 0.5, max: 2, step: 0.05, label: "Scale" }).on("change", (ev) => updateAllScale(ev.value));
+
+        await RAPIER.init({});
+        const physics = createPhysicsWorld(
+          RAPIER,
+          scene,
+          TERRAIN_SIZE,
+          sampleHeight,
+        );
+        physicsWorld = physics.physicsWorld;
+        physicsCubes = physics.physicsCubes;
+        const debug = createPhysicsDebug(RAPIER, scene, physicsWorld);
+        physicsDebugGroup = debug.physicsDebugGroup;
+        buildRapierDebugMeshes = debug.buildRapierDebugMeshes;
+
+        charPos = new THREE.Vector3(0, 0, 0);
+        charPos.y =
+          sampleHeight(0, 0) +
+          Math.max(0.1, (PARAMS.characterHeight - 2 * PARAMS.capsuleRadius) / 2) +
+          PARAMS.capsuleRadius;
+
+        const { playerBody, playerCollider, characterController } =
+          createPlayerController(RAPIER, physicsWorld, charPos, PARAMS);
+
+        const capR = PARAMS.capsuleRadius;
+        const capHalfH = Math.max(0.1, (PARAMS.characterHeight - 2 * capR) / 2);
+
+        player = createPlayer({
+          scene,
+          renderer,
+          camera,
+          PARAMS,
+          charPos,
+          playerBody,
+          playerCollider,
+          characterController,
+          physicsWorld,
+          sampleHeight,
+          capR,
+          capHalfH,
+          TERRAIN_SIZE,
+        });
+
+        const scenePass = pass(scene, camera);
+        const outputNode = scenePass.getTextureNode("output");
+        renderPipeline = new THREE.RenderPipeline(renderer);
+        renderPipeline.outputNode = outputNode;
+
+        await renderer.compileAsync(scene, camera);
+
+        csm.camera = camera;
+        csm.updateFrustums();
+
+        const infoEl = document.getElementById("info");
+        const s = fieldRef.stats;
+        const bushTotal = s.bushes.lod0 + s.bushes.lod1 + s.bushes.lod2;
+        const treeTotal = s.trees.lod0 + s.trees.lod1 + s.trees.lod2;
+
+        renderer.setAnimationLoop(() => {
+          const elapsed = performance.now() / 1000;
+          const dt = Math.min(0.05, elapsed - lastTime);
+          lastTime = elapsed;
+          frameCount++;
+          if (elapsed - fpsTime >= 0.5) {
+            fps = Math.round(frameCount / (elapsed - fpsTime));
+            fpsTime = elapsed;
+            frameCount = 0;
+          }
+
+          physicsWorld.step();
+          wind.update(dt);
+          player.update(dt);
+
+          physicsDebugGroup.visible = !!PARAMS.rapierDebug;
+          if (PARAMS.rapierDebug) buildRapierDebugMeshes();
+          for (const { body, mesh } of physicsCubes) {
+            const t = body.translation();
+            const r = body.rotation();
+            mesh.position.set(t.x, t.y, t.z);
+            mesh.quaternion.set(r.x, r.y, r.z, r.w);
+          }
+
+          if (PARAMS.cameraMode === "thirdPerson") {
+            const camDist = PARAMS.camDist;
+            const cx = charPos.x - Math.sin(player.state.camYaw) * Math.cos(player.state.camPitch) * camDist;
+            const cy = charPos.y + Math.sin(player.state.camPitch) * camDist + PARAMS.camHeight;
+            const cz = charPos.z - Math.cos(player.state.camYaw) * Math.cos(player.state.camPitch) * camDist;
+            const camTerrainY = sampleHeight(cx, cz) + 1.5;
+            camera.position.set(cx, Math.max(cy, camTerrainY), cz);
+            camera.lookAt(charPos.x, charPos.y + 0.5, charPos.z);
+            orbitControls.enabled = false;
+          } else {
+            orbitControls.enabled = true;
+            orbitControls.update();
+          }
+
+          camera.updateMatrixWorld();
+          renderPipeline.render();
+
+          infoEl.textContent = `FPS: ${fps} · Bushes: ${bushTotal} (LOD0: ${s.bushes.lod0} / LOD1: ${s.bushes.lod1} / LOD2: ${s.bushes.lod2}) · Trees: ${treeTotal} (LOD0: ${s.trees.lod0} / LOD1: ${s.trees.lod1} / LOD2: ${s.trees.lod2}) · WASD move · Shift run · Space jump`;
+        });
+      }
+
+      window.addEventListener("resize", () => {
+        if (!camera || !renderer) return;
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+        if (csm && csm.frustums) csm.updateFrustums();
+      });
+
+      init().catch((e) => {
+        console.error("Folio Field init failed:", e);
+        document.getElementById("info").textContent = "Error: " + e.message;
+      });
+    </script>
+  </body>
+</html>

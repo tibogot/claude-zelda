@@ -8,8 +8,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
 
 const CHAR_GLB = "models/AnimationLibrary_Godot_Standard-transformed.glb";
-const DRACO_URL =
-  "https://www.gstatic.com/draco/versioned/decoders/1.5.6/";
+const DRACO_URL = "https://www.gstatic.com/draco/versioned/decoders/1.5.6/";
 
 // Enemy tint color (dark red/maroon) - applied to model materials
 const ENEMY_COLOR = 0x8b2549;
@@ -173,9 +172,9 @@ export function createEnemy(opts) {
             const tintG = (ENEMY_COLOR >> 8) & 0xff;
             const tintB = ENEMY_COLOR & 0xff;
             const blend = 0.5; // 50% original, 50% tint
-            const finalR = Math.floor((r * 255 * (1 - blend) + tintR * blend));
-            const finalG = Math.floor((g * 255 * (1 - blend) + tintG * blend));
-            const finalB = Math.floor((b * 255 * (1 - blend) + tintB * blend));
+            const finalR = Math.floor(r * 255 * (1 - blend) + tintR * blend);
+            const finalG = Math.floor(g * 255 * (1 - blend) + tintG * blend);
+            const finalB = Math.floor(b * 255 * (1 - blend) + tintB * blend);
             const finalColor = (finalR << 16) | (finalG << 8) | finalB;
             o.material = new THREE.MeshStandardNodeMaterial({
               color: finalColor,
@@ -237,8 +236,10 @@ export function createEnemy(opts) {
           gltf.animations.find((a) => a.name === "Walk_Loop") ||
           gltf.animations.find((a) => a.name === "Jog_Fwd_Loop") ||
           gltf.animations[0];
-        const hitChestClip = gltf.animations.find((a) => a.name === "Hit_Chest") || null;
-        const hitHeadClip = gltf.animations.find((a) => a.name === "Hit_Head") || null;
+        const hitChestClip =
+          gltf.animations.find((a) => a.name === "Hit_Chest") || null;
+        const hitHeadClip =
+          gltf.animations.find((a) => a.name === "Hit_Head") || null;
         const deathClip =
           gltf.animations.find((a) => a.name === "Death01") || null;
 
@@ -371,7 +372,11 @@ export function createEnemy(opts) {
     }
 
     // Blend back from hit to walk or idle (depending on proximity)
-    const currentHitAction = hitChestAction?.isRunning?.() ? hitChestAction : hitHeadAction?.isRunning?.() ? hitHeadAction : null;
+    const currentHitAction = hitChestAction?.isRunning?.()
+      ? hitChestAction
+      : hitHeadAction?.isRunning?.()
+        ? hitHeadAction
+        : null;
     if (currentHitAction) {
       const clip = currentHitAction.getClip();
       const dur = clip?.duration ?? 0.3;
