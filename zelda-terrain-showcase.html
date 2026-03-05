@@ -39,6 +39,11 @@
         color: #e0f0c0;
         font-weight: 600;
       }
+      .tp-dfwv {
+        z-index: 20 !important;
+        max-height: 90vh !important;
+        overflow-y: auto !important;
+      }
     </style>
     <script type="importmap">
       {
@@ -88,6 +93,7 @@
       } from "./physics.js";
       import { createPlayer } from "./player.js";
       import { PARAMS } from "./params.js";
+      import { createOctahedralImpostorForest } from "./octahedralImpostor.js";
       import {
         TERRAIN_SIZE,
         TERRAIN_RES,
@@ -276,6 +282,120 @@
           c.convertSRGBToLinear();
           return c;
         }
+        function hexToVec3(hex) {
+          const c = new THREE.Color(hex);
+          return new THREE.Vector3(c.r, c.g, c.b);
+        }
+
+        // ── OCTAHEDRAL IMPOSTOR FOREST ──
+        let octahedralForest = null;
+        function syncImpostorLighting() {
+          if (!octahedralForest) return;
+          octahedralForest.updateSunColor(
+            new THREE.Vector3(
+              dirLight.color.r * dirLight.intensity,
+              dirLight.color.g * dirLight.intensity,
+              dirLight.color.b * dirLight.intensity,
+            ),
+          );
+          const hemiIntensity = hemiLight.intensity * 0.5;
+          octahedralForest.updateHemiColors(
+            new THREE.Vector3(
+              hemiLight.color.r * hemiIntensity,
+              hemiLight.color.g * hemiIntensity,
+              hemiLight.color.b * hemiIntensity,
+            ),
+            new THREE.Vector3(
+              hemiLight.groundColor.r * hemiIntensity,
+              hemiLight.groundColor.g * hemiIntensity,
+              hemiLight.groundColor.b * hemiIntensity,
+            ),
+          );
+          const ambFactor = hemiLight.intensity * 0.25;
+          octahedralForest.updateAmbColor(
+            new THREE.Vector3(
+              (hemiLight.color.r + hemiLight.groundColor.r) * 0.5 * ambFactor,
+              (hemiLight.color.g + hemiLight.groundColor.g) * 0.5 * ambFactor,
+              (hemiLight.color.b + hemiLight.groundColor.b) * 0.5 * ambFactor,
+            ),
+          );
+        }
+        async function ensureOctahedralForest() {
+          if (octahedralForest || !PARAMS.octahedralForestEnabled) return;
+          try {
+            octahedralForest = await createOctahedralImpostorForest({
+              modelPath: PARAMS.octahedralForestModelPath,
+              treeCount: PARAMS.octahedralForestTreeCount,
+              treeScale: PARAMS.octahedralForestTreeScale,
+              lodDistance: PARAMS.octahedralForestLodDist,
+              radius: 450,
+              minRadius: 20,
+              centerPosition: [0, 0, 0],
+              getTerrainHeight: sampleHeight,
+              lod0AlphaTest: PARAMS.octahedralForestLod0Alpha,
+              impostorSettings: {
+                spritesPerSide: PARAMS.octahedralForestSprites,
+                textureSize: PARAMS.octahedralForestTexSize,
+                alphaClamp: 0.1,
+                alphaTest: 0.05,
+                fadeRange: PARAMS.octahedralForestFadeRange,
+                lod2Distance: PARAMS.octahedralForestLod2Dist,
+                bakeOnlyLargestMesh: PARAMS.octahedralForestBakeSingle,
+              },
+            });
+            scene.add(octahedralForest.group);
+            octahedralForest.group.visible = PARAMS.octahedralForestEnabled;
+            octahedralForest.group.scale.setScalar(PARAMS.octahedralForestScale);
+            octahedralForest.setWireframeVisible(PARAMS.octahedralForestWireframe);
+            octahedralForest.setLodVisible(0, PARAMS.octahedralForestLod0Vis);
+            octahedralForest.setLodVisible(1, PARAMS.octahedralForestLod1Vis);
+            octahedralForest.setLodVisible(2, PARAMS.octahedralForestLod2Vis);
+            syncImpostorLighting();
+          } catch (e) {
+            console.warn("Octahedral impostor forest skipped:", e);
+          }
+        }
+        async function rebuildOctahedralForest() {
+          if (octahedralForest) {
+            octahedralForest.dispose();
+            scene.remove(octahedralForest.group);
+            octahedralForest = null;
+          }
+          if (!PARAMS.octahedralForestEnabled) return;
+          try {
+            octahedralForest = await createOctahedralImpostorForest({
+              modelPath: PARAMS.octahedralForestModelPath,
+              treeCount: PARAMS.octahedralForestTreeCount,
+              treeScale: PARAMS.octahedralForestTreeScale,
+              lodDistance: PARAMS.octahedralForestLodDist,
+              radius: 450,
+              minRadius: 20,
+              centerPosition: [0, 0, 0],
+              getTerrainHeight: sampleHeight,
+              lod0AlphaTest: PARAMS.octahedralForestLod0Alpha,
+              impostorSettings: {
+                spritesPerSide: PARAMS.octahedralForestSprites,
+                textureSize: PARAMS.octahedralForestTexSize,
+                alphaClamp: 0.1,
+                alphaTest: 0.05,
+                fadeRange: PARAMS.octahedralForestFadeRange,
+                lod2Distance: PARAMS.octahedralForestLod2Dist,
+                bakeOnlyLargestMesh: PARAMS.octahedralForestBakeSingle,
+              },
+            });
+            scene.add(octahedralForest.group);
+            octahedralForest.group.visible = PARAMS.octahedralForestEnabled;
+            octahedralForest.group.scale.setScalar(PARAMS.octahedralForestScale);
+            octahedralForest.setWireframeVisible(PARAMS.octahedralForestWireframe);
+            octahedralForest.setLodVisible(0, PARAMS.octahedralForestLod0Vis);
+            octahedralForest.setLodVisible(1, PARAMS.octahedralForestLod1Vis);
+            octahedralForest.setLodVisible(2, PARAMS.octahedralForestLod2Vis);
+            syncImpostorLighting();
+          } catch (e) {
+            console.warn("Octahedral impostor forest rebuild failed:", e);
+          }
+        }
+        await ensureOctahedralForest();
         const uFogNear = uniform(PARAMS.fogNear);
         const uFogFar = uniform(PARAMS.fogFar);
         const uFogCameraFar = uniform(500000);
@@ -330,6 +450,7 @@
           hemiLight.intensity = PARAMS.sceneAmbient;
           renderer.toneMappingExposure = PARAMS.exposure;
           updateSkyParams();
+          syncImpostorLighting();
         }
 
         const pane = new Tweakpane.Pane({ title: "Zelda Terrain", expanded: true });
@@ -393,6 +514,271 @@
         const fPhysics = pane.addFolder({ title: "Physics", expanded: false });
         fPhysics.addBinding(PARAMS, "rapierDebug");
 
+        const fOctahedralForest = pane.addFolder({
+          title: "Octahedral forest",
+          expanded: false,
+        });
+        fOctahedralForest
+          .addBinding(PARAMS, "octahedralForestEnabled", { label: "enabled" })
+          .on("change", () => {
+            if (octahedralForest)
+              octahedralForest.group.visible = PARAMS.octahedralForestEnabled;
+            else if (PARAMS.octahedralForestEnabled) ensureOctahedralForest();
+          });
+        fOctahedralForest
+          .addBinding(PARAMS, "octahedralForestScale", {
+            min: 0.2,
+            max: 2,
+            step: 0.05,
+            label: "scale",
+          })
+          .on("change", () => {
+            if (octahedralForest)
+              octahedralForest.group.scale.setScalar(PARAMS.octahedralForestScale);
+          });
+        fOctahedralForest
+          .addBinding(PARAMS, "octahedralForestAlphaClamp", {
+            min: 0.01,
+            max: 0.5,
+            step: 0.01,
+            label: "impostor alpha (LOD1/2)",
+          })
+          .on("change", () => {
+            if (octahedralForest)
+              octahedralForest.setAlphaClamp(PARAMS.octahedralForestAlphaClamp);
+          });
+        fOctahedralForest
+          .addBinding(PARAMS, "octahedralForestLod0Alpha", {
+            min: 0.01,
+            max: 0.5,
+            step: 0.01,
+            label: "LOD0 alpha (real mesh)",
+          })
+          .on("change", () => {
+            if (octahedralForest)
+              octahedralForest.setLod0AlphaTest(PARAMS.octahedralForestLod0Alpha);
+          });
+        const fOctLod = fOctahedralForest.addFolder({
+          title: "LOD Distances",
+          expanded: false,
+        });
+        fOctLod
+          .addBinding(PARAMS, "octahedralForestLodDist", {
+            min: 10,
+            max: 400,
+            step: 1,
+            label: "LOD0→LOD1 dist",
+          })
+          .on("change", () => {
+            if (octahedralForest)
+              octahedralForest.setLodDistance(PARAMS.octahedralForestLodDist);
+          });
+        fOctLod
+          .addBinding(PARAMS, "octahedralForestLod2Dist", {
+            min: 80,
+            max: 1000,
+            step: 5,
+            label: "LOD1→LOD2 dist",
+          })
+          .on("change", () => {
+            if (octahedralForest)
+              octahedralForest.setLod2Distance(PARAMS.octahedralForestLod2Dist);
+          });
+        fOctLod
+          .addBinding(PARAMS, "octahedralForestFadeRange", {
+            min: 1,
+            max: 20,
+            step: 0.5,
+            label: "fade range",
+          })
+          .on("change", () => {
+            if (octahedralForest)
+              octahedralForest.setFadeRange(PARAMS.octahedralForestFadeRange);
+          });
+        const fForestLight = fOctahedralForest.addFolder({
+          title: "Lighting",
+          expanded: false,
+        });
+        fForestLight
+          .addBinding(PARAMS, "octahedralForestSunColor", {
+            view: "color",
+            label: "sun color",
+          })
+          .on("change", () => {
+            if (octahedralForest)
+              octahedralForest.updateSunColor(
+                hexToVec3(PARAMS.octahedralForestSunColor),
+              );
+          });
+        fForestLight
+          .addBinding(PARAMS, "octahedralForestAmbColor", {
+            view: "color",
+            label: "ambient color",
+          })
+          .on("change", () => {
+            if (octahedralForest)
+              octahedralForest.updateAmbColor(
+                hexToVec3(PARAMS.octahedralForestAmbColor),
+              );
+          });
+        fForestLight
+          .addBinding(PARAMS, "octahedralForestLightScale", {
+            min: 0.5,
+            max: 3.0,
+            step: 0.05,
+            label: "light scale (brightness)",
+          })
+          .on("change", () => {
+            if (octahedralForest)
+              octahedralForest.setLightScale(PARAMS.octahedralForestLightScale);
+          });
+        const fForestWind = fOctahedralForest.addFolder({
+          title: "Wind",
+          expanded: false,
+        });
+        fForestWind
+          .addBinding(PARAMS, "octahedralForestWindStrength", {
+            min: 0,
+            max: 1.5,
+            step: 0.05,
+            label: "strength",
+          })
+          .on("change", () => {
+            if (octahedralForest)
+              octahedralForest.setWindStrength(
+                PARAMS.octahedralForestWindStrength,
+              );
+          });
+        fForestWind
+          .addBinding(PARAMS, "octahedralForestWindSpeed", {
+            min: 0.1,
+            max: 3.0,
+            step: 0.1,
+            label: "speed",
+          })
+          .on("change", () => {
+            if (octahedralForest)
+              octahedralForest.setWindSpeed(PARAMS.octahedralForestWindSpeed);
+          });
+        fForestWind
+          .addBinding(PARAMS, "octahedralForestWindDirX", {
+            min: -1,
+            max: 1,
+            step: 0.1,
+            label: "direction X",
+          })
+          .on("change", () => {
+            if (octahedralForest)
+              octahedralForest.setWindDirection(
+                PARAMS.octahedralForestWindDirX,
+                PARAMS.octahedralForestWindDirZ,
+              );
+          });
+        fForestWind
+          .addBinding(PARAMS, "octahedralForestWindDirZ", {
+            min: -1,
+            max: 1,
+            step: 0.1,
+            label: "direction Z",
+          })
+          .on("change", () => {
+            if (octahedralForest)
+              octahedralForest.setWindDirection(
+                PARAMS.octahedralForestWindDirX,
+                PARAMS.octahedralForestWindDirZ,
+              );
+          });
+        const fForestDebug = fOctahedralForest.addFolder({
+          title: "Debug",
+          expanded: false,
+        });
+        fForestDebug
+          .addBinding(PARAMS, "octahedralForestLod0Vis", {
+            label: "LOD0 (real mesh)",
+          })
+          .on("change", () => {
+            if (octahedralForest)
+              octahedralForest.setLodVisible(0, PARAMS.octahedralForestLod0Vis);
+          });
+        fForestDebug
+          .addBinding(PARAMS, "octahedralForestLod1Vis", {
+            label: "LOD1 (impostor)",
+          })
+          .on("change", () => {
+            if (octahedralForest)
+              octahedralForest.setLodVisible(1, PARAMS.octahedralForestLod1Vis);
+          });
+        fForestDebug
+          .addBinding(PARAMS, "octahedralForestLod2Vis", {
+            label: "LOD2 (mega)",
+          })
+          .on("change", () => {
+            if (octahedralForest)
+              octahedralForest.setLodVisible(2, PARAMS.octahedralForestLod2Vis);
+          });
+        fForestDebug
+          .addBinding(PARAMS, "octahedralForestWireframe", {
+            label: "wireframe (plane)",
+          })
+          .on("change", () => {
+            if (octahedralForest)
+              octahedralForest.setWireframeVisible(
+                PARAMS.octahedralForestWireframe,
+              );
+          });
+        fForestDebug.addBinding(PARAMS, "octahedralForestNearCount", {
+          readonly: true,
+          label: "near count",
+        });
+        fForestDebug.addBinding(PARAMS, "octahedralForestLod1Count", {
+          readonly: true,
+          label: "LOD1 count",
+        });
+        fForestDebug.addBinding(PARAMS, "octahedralForestLod2Count", {
+          readonly: true,
+          label: "LOD2 count",
+        });
+        const fAtlas = fOctahedralForest.addFolder({
+          title: "Atlas Quality (rebuild)",
+          expanded: false,
+        });
+        fAtlas.addBinding(PARAMS, "octahedralForestSprites", {
+          label: "sprites/side",
+          options: { "4 (low)": 4, "8 (medium)": 8, "16 (high)": 16 },
+        });
+        fAtlas.addBinding(PARAMS, "octahedralForestTexSize", {
+          label: "texture size",
+          options: { 1024: 1024, 2048: 2048, 4096: 4096 },
+        });
+        fAtlas.addBinding(PARAMS, "octahedralForestBakeSingle", {
+          label: "bake single (largest mesh)",
+        });
+        fAtlas
+          .addButton({ title: "↺ Rebuild Atlas" })
+          .on("click", rebuildOctahedralForest);
+        const fForestRebuild = fOctahedralForest.addFolder({
+          title: "Model / Forest (rebuild)",
+          expanded: false,
+        });
+        fForestRebuild.addBinding(PARAMS, "octahedralForestModelPath", {
+          label: "model path",
+        });
+        fForestRebuild.addBinding(PARAMS, "octahedralForestTreeCount", {
+          min: 200,
+          max: 5000,
+          step: 100,
+          label: "tree count",
+        });
+        fForestRebuild.addBinding(PARAMS, "octahedralForestTreeScale", {
+          min: 0.5,
+          max: 5,
+          step: 0.1,
+          label: "tree scale",
+        });
+        fForestRebuild
+          .addButton({ title: "↺ Rebuild Forest" })
+          .on("click", rebuildOctahedralForest);
+
         const debug = { showCapsule: false, modelFeetOffsetY: 0 };
         const fCharacter = pane.addFolder({ title: "Character (debug)", expanded: false });
         fCharacter.addBinding(debug, "showCapsule", { label: "Show capsule" });
@@ -412,6 +798,29 @@
 
           syncTerrainUniforms(PARAMS);
           updateSkyParams();
+
+          if (octahedralForest && PARAMS.octahedralForestEnabled) {
+            projMat.multiplyMatrices(
+              camera.projectionMatrix,
+              camera.matrixWorldInverse,
+            );
+            frustum.setFromProjectionMatrix(projMat);
+            octahedralForest.update(camera, frustum);
+            const counts = octahedralForest.getLodCounts();
+            PARAMS.octahedralForestNearCount = counts.near;
+            PARAMS.octahedralForestLod1Count = counts.lod1;
+            PARAMS.octahedralForestLod2Count = counts.lod2;
+          }
+          if (octahedralForest)
+            octahedralForest.group.visible = PARAMS.octahedralForestEnabled;
+          if (octahedralForest && PARAMS.octahedralForestEnabled) {
+            const sunDir = new THREE.Vector3(
+              PARAMS.sunDirX,
+              PARAMS.sunDirY,
+              PARAMS.sunDirZ,
+            ).normalize();
+            octahedralForest.updateSunDir(sunDir);
+          }
 
           physicsDebugGroup.visible = !!PARAMS.rapierDebug;
           if (PARAMS.rapierDebug) buildRapierDebugMeshes();

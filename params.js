@@ -125,7 +125,7 @@ export const PARAMS = {
   lakeCenterZ: -65,
   lakeRadius: 58,
   lakeDepth: 12,
-  showWater: true,
+  showWater: false,
   waterLevel: 12.0,
   waterUvScale: 2.7,
   waterNormalScale: 0.08,
