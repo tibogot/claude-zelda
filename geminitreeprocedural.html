@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Ultimate Ghibli Tree Architect — Complete Control</title>
+<style>
+    body { margin:0; overflow:hidden; background:#a4d3ff; font-family: sans-serif; }
+    #panel { position:fixed; top:20px; left:20px; z-index:10; max-height: 90vh; overflow-y: auto; }
+    #upload-container { position:fixed; bottom:20px; left:20px; z-index:10; background:rgba(255,255,255,0.8); padding:12px; border-radius:8px; backdrop-filter: blur(10px); font-size: 11px; border: 1px solid #ccc; display: flex; flex-direction: column; gap: 5px;}
+</style>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+    "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.4/dist/tweakpane.min.js"
+  }
+}
+</script>
+</head>
+<body>
+
+<div id="panel"></div>
+<div id="upload-container">
+    <div><strong>Leaf SDF:</strong> <input type="file" id="leafInput" accept="image/png"></div>
+    <div><strong>Custom Trunk:</strong> <input type="file" id="glbInput" accept=".glb"></div>
+</div>
+
+<script type="module">
+import * as THREE from 'three/webgpu';
+import { vec3, uv, positionLocal, normalLocal, uniform, sin, normalize, mix, texture, modelWorldMatrix, time, smoothstep, color, dot, cameraPosition, clamp, pow, oneMinus, normalWorld } from 'three/tsl';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { Pane } from 'tweakpane';
+
+/** 1. ENGINE SETUP **/
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.set(30, 25, 45);
+
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setAnimationLoop(animate);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 12, 0);
+controls.enableDamping = true;
+
+const sun = new THREE.DirectionalLight(0xffffff, 2.8);
+sun.position.set(15, 30, 15);
+scene.add(sun);
+scene.add(new THREE.HemisphereLight(0xdef1ff, 0x556633, 1.2));
+
+/** 2. ALL PARAMETERS RESTORED & EXPANDED **/
+const params = {
+    seed: 1234,
+    // Structure
+    levels: 3,
+    trunkHeight: 9.0,
+    trunkRadius: 0.8,
+    trunkTaper: 0.6,
+    branchMult: 0.7,
+    children: 3,
+    gnarliness: 0.45,
+    sunForce: 0.25,
+    gravity: 0.12,
+    // Canopy Shape
+    canopyWidth: 7.0,
+    canopyHeight: 12.0,
+    shapeMode: 0.5,
+    leafSize: 4.5,
+    leafDensity: 12,
+    clumpRadius: 4.0,
+    // Shading
+    alphaCutoff: 0.5,
+    normalBias: 0.8,
+    leafWarp: 0.3,
+    aoStrength: 0.65,
+    sssStrength: 0.9,
+    rimStrength: 2.0,
+    rimPower: 4.0,
+    // Wind
+    windStrength: 0.25,
+    windSpeed: 1.8,
+    // Colors
+    topColor: '#a8e360',
+    bottomColor: '#1d4d22',
+    sssColor: '#ffea00',
+    rimColor: '#ffffff',
+    useCustomTrunk: false
+};
+
+// Uniforms
+const uAlphaCutoff = uniform(params.alphaCutoff);
+const uNormalBias = uniform(params.normalBias);
+const uLeafWarp = uniform(params.leafWarp);
+const uAO = uniform(params.aoStrength);
+const uSSS = uniform(params.sssStrength);
+const uRimS = uniform(params.rimStrength);
+const uRimP = uniform(params.rimPower);
+const uWindS = uniform(params.windStrength);
+const uWindSpeed = uniform(params.windSpeed);
+const uTopC = uniform(color(params.topColor));
+const uBotC = uniform(color(params.bottomColor));
+const uSSSC = uniform(color(params.sssColor));
+const uRimC = uniform(color(params.rimColor));
+const leafMap = texture(new THREE.Texture());
+
+/** 3. THE "SUPER-SHADER" (TSL) **/
+const t = time.mul(uWindSpeed);
+const wPos = modelWorldMatrix.mul(positionLocal);
+
+// Multi-octave wind for fluttering
+const mainWave = sin(t.add(wPos.x.mul(0.12)));
+const flutter = sin(t.mul(4.5).add(wPos.y.mul(0.6))).mul(0.25);
+const windNode = positionLocal.add(vec3(mainWave.add(flutter).mul(uWindS), 0, 0).mul(uv().y));
+
+// Normal logic: Blending leaf plane normal with "Global Sphere" normal
+const canopyCenter = vec3(0, 15, 0); 
+const sphereDir = normalize(wPos.xyz.sub(canopyCenter));
+const warpedNormal = normalize(normalLocal.add(sin(uv().x.mul(10)).mul(uLeafWarp)));
+const finalNormal = normalize(mix(warpedNormal, sphereDir, uNormalBias));
+
+const leafMat = new THREE.MeshStandardNodeMaterial({ side: THREE.DoubleSide, alphaTest: 0.5, transparent: true });
+leafMat.positionNode = windNode;
+leafMat.normalNode = finalNormal;
+
+// AO, SSS, and Rim
+const distCenter = clamp(wPos.xyz.distance(canopyCenter).div(20), 0, 1);
+const ao = mix(uAO.oneMinus(), 1.0, distCenter);
+const sss = pow(clamp(dot(normalWorld, normalize(sun.position)).negate(), 0, 1), 2.0).mul(uSSS);
+const viewDir = normalize(cameraPosition.sub(wPos.xyz));
+const rim = pow(oneMinus(clamp(dot(viewDir, finalNormal), 0, 1)), uRimP).mul(uRimS).mul(uRimC);
+
+leafMat.colorNode = mix(uBotC, uTopC, uv().y).mul(ao).add(uSSSC.mul(sss)).add(rim);
+leafMat.opacityNode = smoothstep(uAlphaCutoff.sub(0.05), uAlphaCutoff.add(0.05), leafMap.r);
+
+/** 4. RECURSIVE ARCHITECT **/
+let trunkGroup = new THREE.Group();
+let leavesMesh;
+let customTrunk;
+scene.add(trunkGroup);
+
+function buildTree() {
+    trunkGroup.clear();
+    if (leavesMesh) scene.remove(leavesMesh);
+
+    let currentSeed = params.seed;
+    const random = () => {
+        const x = Math.sin(currentSeed++) * 10000;
+        return x - Math.floor(x);
+    };
+
+    const tips = [];
+
+    if (!params.useCustomTrunk) {
+        function grow(pos, dir, rad, len, lvl) {
+            if (lvl > params.levels) {
+                tips.push({ pos: pos.clone(), dir: dir.clone() });
+                return;
+            }
+            const end = pos.clone().add(dir.clone().multiplyScalar(len));
+            const geo = new THREE.CylinderGeometry(rad * params.trunkTaper, rad, len, 10);
+            const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: 0x3d2b1f }));
+            mesh.position.copy(pos.clone().add(end).multiplyScalar(0.5));
+            mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
+            trunkGroup.add(mesh);
+
+            for (let i = 0; i < params.children; i++) {
+                const nextDir = dir.clone();
+                nextDir.x += (random() - 0.5) * params.gnarliness;
+                nextDir.z += (random() - 0.5) * params.gnarliness;
+                nextDir.y += params.sunForce - (params.gravity * lvl);
+                nextDir.normalize();
+                grow(end, nextDir, rad * params.trunkTaper, len * params.branchMult, lvl + 1);
+            }
+        }
+        grow(new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 1, 0), params.trunkRadius, params.trunkHeight, 0);
+    } else if (customTrunk) {
+        trunkGroup.add(customTrunk);
+        const box = new THREE.Box3().setFromObject(customTrunk);
+        tips.push({ pos: new THREE.Vector3(0, box.max.y, 0), dir: new THREE.Vector3(0, 1, 0) });
+    }
+
+    // Leaf Spawning
+    const leafGeo = new THREE.PlaneGeometry(params.leafSize, params.leafSize);
+    leavesMesh = new THREE.InstancedMesh(leafGeo, leafMat, Math.max(1, tips.length) * params.leafDensity);
+    const dummy = new THREE.Object3D();
+    let counter = 0;
+
+    tips.forEach(tip => {
+        for(let i=0; i < params.leafDensity; i++) {
+            const angle = random() * Math.PI * 2;
+            const rBase = random() * params.clumpRadius;
+            const verticalSpread = (random() - 0.5) * params.canopyHeight;
+            const horizontalSpread = rBase * (1.0 - (Math.abs(verticalSpread) / (params.canopyHeight/2)) * params.shapeMode);
+
+            dummy.position.set(
+                tip.pos.x + Math.cos(angle) * horizontalSpread,
+                tip.pos.y + verticalSpread,
+                tip.pos.z + Math.sin(angle) * horizontalSpread
+            );
+            dummy.rotation.set(random()*Math.PI, random()*Math.PI, random()*Math.PI);
+            dummy.updateMatrix();
+            leavesMesh.setMatrixAt(counter++, dummy.matrix);
+        }
+    });
+    leavesMesh.instanceMatrix.needsUpdate = true;
+    scene.add(leavesMesh);
+}
+buildTree();
+
+/** 5. TWEAKPANE (ALL CONTROLS) **/
+const pane = new Pane({ container: document.getElementById("panel") });
+
+const fStruc = pane.addFolder({ title: 'Tree Skeleton' });
+fStruc.addBinding(params, 'seed', {min:0, max:9999, step:1}).on('change', buildTree);
+fStruc.addBinding(params, 'levels', {min:1, max:5, step:1}).on('change', buildTree);
+fStruc.addBinding(params, 'trunkHeight', {min:2, max:20}).on('change', buildTree);
+fStruc.addBinding(params, 'trunkRadius', {min:0.1, max:3}).on('change', buildTree);
+fStruc.addBinding(params, 'trunkTaper', {min:0.1, max:1}).on('change', buildTree);
+fStruc.addBinding(params, 'gnarliness', {min:0, max:2}).on('change', buildTree);
+fStruc.addBinding(params, 'sunForce', {min:0, max:1}).on('change', buildTree);
+fStruc.addBinding(params, 'gravity', {min:0, max:1}).on('change', buildTree);
+
+const fCanopy = pane.addFolder({ title: 'Canopy & Clumping' });
+fCanopy.addBinding(params, 'clumpRadius', {min:1, max:15}).on('change', buildTree);
+fCanopy.addBinding(params, 'canopyHeight', {min:1, max:20}).on('change', buildTree);
+fCanopy.addBinding(params, 'shapeMode', {min:0, max:1, label: 'Cypress Mode'}).on('change', buildTree);
+fCanopy.addBinding(params, 'leafSize', {min:1, max:12}).on('change', buildTree);
+fCanopy.addBinding(params, 'leafDensity', {min:1, max:60, step:1}).on('change', buildTree);
+
+const fShading = pane.addFolder({ title: 'Atmospheric Shading' });
+fShading.addBinding(params, 'alphaCutoff', {min:0, max:1}).on('change', v => uAlphaCutoff.value = v.value);
+fShading.addBinding(params, 'normalBias', {min:0, max:1}).on('change', v => uNormalBias.value = v.value);
+fShading.addBinding(params, 'leafWarp', {min:0, max:1}).on('change', v => uLeafWarp.value = v.value);
+fShading.addBinding(params, 'aoStrength', {min:0, max:1}).on('change', v => uAO.value = v.value);
+fShading.addBinding(params, 'sssStrength', {min:0, max:2}).on('change', v => uSSS.value = v.value);
+fShading.addBinding(params, 'rimStrength', {min:0, max:5}).on('change', v => uRimS.value = v.value);
+fShading.addBinding(params, 'rimPower', {min:1, max:10}).on('change', v => uRimP.value = v.value);
+
+const fWind = pane.addFolder({ title: 'Wind System' });
+fWind.addBinding(params, 'windStrength', {min:0, max:1}).on('change', v => uWindS.value = v.value);
+fWind.addBinding(params, 'windSpeed', {min:0, max:5}).on('change', v => uWindSpeed.value = v.value);
+
+const fColors = pane.addFolder({ title: 'Colors' });
+fColors.addBinding(params, 'topColor');
+fColors.addBinding(params, 'bottomColor');
+fColors.addBinding(params, 'sssColor');
+fColors.addBinding(params, 'rimColor');
+
+/** 6. LOADERS **/
+const loader = new GLTFLoader();
+document.getElementById("glbInput").addEventListener("change", e => {
+    const file = e.target.files[0];
+    if(!file) return;
+    loader.load(URL.createObjectURL(file), (gltf) => {
+        customTrunk = gltf.scene;
+        params.useCustomTrunk = true;
+        buildTree();
+    });
+});
+
+document.getElementById("leafInput").addEventListener("change", e => {
+    const reader = new FileReader();
+    reader.onload = ev => {
+        const img = new Image();
+        img.onload = () => {
+            const tex = new THREE.Texture(img);
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.needsUpdate = true;
+            leafMap.value = tex;
+        };
+        img.src = ev.target.result;
+    };
+    reader.readAsDataURL(e.target.files[0]);
+});
+
+function animate() {
+    controls.update();
+    uTopC.value.set(params.topColor);
+    uBotC.value.set(params.bottomColor);
+    uSSSC.value.set(params.sssColor);
+    uRimC.value.set(params.rimColor);
+    renderer.render(scene, camera);
+}
+</script>
+</body>
+</html>

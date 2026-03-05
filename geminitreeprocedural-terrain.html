@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Procedural Trees — Terrain (20 instanced)</title>
+<style>
+    body { margin:0; overflow:hidden; background:#87ceeb; font-family: sans-serif; }
+    #panel { position:fixed; top:12px; left:12px; z-index:10; max-height: 88vh; overflow-y: auto; width: 280px; font-size: 11px; }
+    #info { position:fixed; bottom:12px; left:12px; z-index:10; background:rgba(0,0,0,0.5); color:#fff; padding:8px 12px; border-radius:6px; font-size: 11px; }
+    #upload-container { position:fixed; bottom:44px; left:12px; z-index:10; background:rgba(255,255,255,0.9); padding:10px; border-radius:8px; font-size: 11px; border: 1px solid #ccc; }
+    #upload-container div { margin-bottom: 4px; }
+</style>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+    "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.4/dist/tweakpane.min.js"
+  }
+}
+</script>
+</head>
+<body>
+
+<div id="panel"></div>
+<div id="info">Trees: 20 | FPS: —</div>
+<div id="upload-container">
+    <div><strong>Leaf SDF (PNG):</strong></div>
+    <div><input type="file" id="leafInput" accept="image/png"></div>
+</div>
+
+<script type="module">
+import * as THREE from 'three/webgpu';
+import { vec3, uv, positionLocal, normalLocal, uniform, sin, normalize, mix, texture, modelWorldMatrix, time, smoothstep, color, dot, cameraPosition, clamp, pow, oneMinus, normalWorld } from 'three/tsl';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { Pane } from 'tweakpane';
+
+// ─── Engine ─────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.5, 2000);
+camera.position.set(120, 80, 120);
+
+const renderer = new THREE.WebGPURenderer({
+    antialias: true,
+    requiredLimits: { maxBufferSize: 2147483648 }
+});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setAnimationLoop(animate);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 15, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+
+const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+sun.position.set(80, 120, 60);
+scene.add(sun);
+scene.add(new THREE.HemisphereLight(0xb0d0ff, 0x3d4d2a, 1.0));
+
+let lastTime = performance.now();
+let fps = 0;
+
+const TREE_COUNT = 20;
+
+// ─── Params (terrain, template shape, color variation) ───
+const params = {
+    // Terrain
+    terrainSize: 800,
+    terrainSegments: 1,
+    terrainColor: '#5a8a4a',
+    // Placement
+    placementSeed: 42,
+    minScale: 0.6,
+    maxScale: 1.4,
+    randomRotation: true,
+    // Template tree (one canonical tree)
+    seed: 1234,
+    levels: 3,
+    trunkHeight: 8.0,
+    trunkRadius: 0.7,
+    trunkTaper: 0.6,
+    branchMult: 0.7,
+    children: 3,
+    gnarliness: 0.4,
+    sunForce: 0.22,
+    gravity: 0.1,
+    canopyHeight: 10.0,
+    clumpRadius: 3.5,
+    shapeMode: 0.5,
+    leafSize: 3.8,
+    leafDensity: 10,
+    // Color variation (ranges 0–1, applied per instance)
+    topColorMin: '#9ad96a',
+    topColorMax: '#b8e890',
+    bottomColorMin: '#1a3d1a',
+    bottomColorMax: '#2d5a2d',
+    trunkColorMin: '#2a1f18',
+    trunkColorMax: '#4a3528',
+    colorVariation: 1.0,
+    // Leaf shader
+    alphaCutoff: 0.5,
+    normalBias: 0.75,
+    leafWarp: 0.25,
+    aoStrength: 0.6,
+    sssStrength: 0.7,
+    rimStrength: 1.5,
+    rimPower: 4.0,
+    windStrength: 0.2,
+    windSpeed: 1.5,
+};
+
+// ─── Tree template: build one tree, return merged trunk geo + leaf matrices ───
+let mergedTrunkGeometry = null;
+let leafMatricesLOD0 = [];
+let trunkMaterialTemplate = null;
+
+function buildTreeTemplate() {
+    const seed = params.seed;
+    let s = seed;
+    const random = () => {
+        const x = Math.sin(s++) * 10000;
+        return x - Math.floor(x);
+    };
+
+    const trunkGeos = [];
+    const tips = [];
+
+    function grow(pos, dir, rad, len, lvl) {
+        if (lvl > params.levels) {
+            tips.push({ pos: pos.clone(), dir: dir.clone() });
+            return;
+        }
+        const end = pos.clone().add(dir.clone().multiplyScalar(len));
+        const geo = new THREE.CylinderGeometry(rad * params.trunkTaper, rad, len, 8);
+        const mid = pos.clone().add(end).multiplyScalar(0.5);
+        const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
+        const mat = new THREE.Matrix4().compose(mid, quat, new THREE.Vector3(1, 1, 1));
+        geo.applyMatrix4(mat);
+        trunkGeos.push(geo);
+
+        for (let i = 0; i < params.children; i++) {
+            const nextDir = dir.clone();
+            nextDir.x += (random() - 0.5) * params.gnarliness;
+            nextDir.z += (random() - 0.5) * params.gnarliness;
+            nextDir.y += params.sunForce - (params.gravity * lvl);
+            nextDir.normalize();
+            grow(end, nextDir, rad * params.trunkTaper, len * params.branchMult, lvl + 1);
+        }
+    }
+    grow(new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 1, 0), params.trunkRadius, params.trunkHeight, 0);
+
+    mergedTrunkGeometry = mergeGeometries(trunkGeos, true);
+
+    const leafMatricesFull = [];
+    const dummy = new THREE.Object3D();
+    tips.forEach(tip => {
+        for (let i = 0; i < params.leafDensity; i++) {
+            const angle = random() * Math.PI * 2;
+            const rBase = random() * params.clumpRadius;
+            const verticalSpread = (random() - 0.5) * params.canopyHeight;
+            const horizontalSpread = rBase * (1.0 - (Math.abs(verticalSpread) / (params.canopyHeight / 2)) * params.shapeMode);
+            dummy.position.set(
+                tip.pos.x + Math.cos(angle) * horizontalSpread,
+                tip.pos.y + verticalSpread,
+                tip.pos.z + Math.sin(angle) * horizontalSpread
+            );
+            dummy.rotation.set(random() * Math.PI, random() * Math.PI, random() * Math.PI);
+            dummy.scale.setScalar(1);
+            dummy.updateMatrix();
+            leafMatricesFull.push(dummy.matrix.clone());
+        }
+    });
+
+    leafMatricesLOD0 = leafMatricesFull;
+
+    trunkMaterialTemplate = new THREE.MeshStandardMaterial({
+        color: 0x3d2b1f,
+        flatShading: false,
+    });
+
+    return { mergedTrunkGeometry, leafMatricesLOD0 };
+}
+
+buildTreeTemplate();
+
+// ─── Terrain ─────────────────────────────────────────────────────────────
+let terrainMesh = null;
+function buildTerrain() {
+    if (terrainMesh) scene.remove(terrainMesh);
+    const geo = new THREE.PlaneGeometry(params.terrainSize, params.terrainSize, params.terrainSegments, params.terrainSegments);
+    geo.rotateX(-Math.PI / 2);
+    const mat = new THREE.MeshStandardMaterial({ color: params.terrainColor, flatShading: true });
+    terrainMesh = new THREE.Mesh(geo, mat);
+    terrainMesh.receiveShadow = true;
+    scene.add(terrainMesh);
+}
+buildTerrain();
+
+// ─── Tree instance pool ──────────────────────────────────────────────────
+const treeInstances = [];
+const _vec3 = new THREE.Vector3();
+const _quat = new THREE.Quaternion();
+const _color = new THREE.Color();
+const _mat4 = new THREE.Matrix4();
+
+function reseedTrees() {
+    treeInstances.length = 0;
+    let s = params.placementSeed;
+    const rnd = () => {
+        const x = Math.sin(s++) * 10000;
+        return x - Math.floor(x);
+    };
+    const lerpColor = (cMin, cMax, t) => {
+        _color.set(cMin).lerp(_color.clone().set(cMax), t);
+        return _color.clone();
+    };
+    for (let i = 0; i < TREE_COUNT; i++) {
+        const x = (rnd() - 0.5) * params.terrainSize * 0.9;
+        const z = (rnd() - 0.5) * params.terrainSize * 0.9;
+        const scale = params.minScale + rnd() * (params.maxScale - params.minScale);
+        const rotY = params.randomRotation ? rnd() * Math.PI * 2 : 0;
+        const topC = lerpColor(params.topColorMin, params.topColorMax, rnd() * params.colorVariation);
+        const botC = lerpColor(params.bottomColorMin, params.bottomColorMax, rnd() * params.colorVariation);
+        const trunkC = lerpColor(params.trunkColorMin, params.trunkColorMax, rnd() * params.colorVariation);
+        treeInstances.push({
+            position: new THREE.Vector3(x, 0, z),
+            quaternion: new THREE.Quaternion().setFromEuler(new THREE.Euler(0, rotY, 0)),
+            scale,
+            topColor: topC,
+            bottomColor: botC,
+            trunkColor: trunkC,
+        });
+    }
+}
+
+reseedTrees();
+
+// ─── Instanced tree meshes (no LOD) ──────────────────────────────────────
+let trunkMesh = null;
+let leavesMesh = null;
+let trunkMat = null;
+let leafMat = null;
+
+const uAlphaCutoff = uniform(params.alphaCutoff);
+const uNormalBias = uniform(params.normalBias);
+const uLeafWarp = uniform(params.leafWarp);
+const uAO = uniform(params.aoStrength);
+const uSSS = uniform(params.sssStrength);
+const uRimS = uniform(params.rimStrength);
+const uRimP = uniform(params.rimPower);
+const uWindS = uniform(params.windStrength);
+const uWindSpeed = uniform(params.windSpeed);
+const uTopC = uniform(color(params.topColorMin));
+const uBotC = uniform(color(params.bottomColorMin));
+const uSSSC = uniform(color('#ffea00'));
+const uRimC = uniform(color('#ffffff'));
+const leafMap = texture(new THREE.Texture());
+
+function buildTreeMeshes() {
+    if (trunkMesh) scene.remove(trunkMesh);
+    if (leavesMesh) scene.remove(leavesMesh);
+
+    trunkMat = trunkMaterialTemplate.clone();
+    trunkMat.color.set(params.trunkColorMin);
+
+    const t = time.mul(uWindSpeed);
+    const wPos = modelWorldMatrix.mul(positionLocal);
+    const mainWave = sin(t.add(wPos.x.mul(0.12)));
+    const flutter = sin(t.mul(4.5).add(wPos.y.mul(0.6))).mul(0.25);
+    const windNode = positionLocal.add(vec3(mainWave.add(flutter).mul(uWindS), 0, 0).mul(uv().y));
+    const canopyCenter = vec3(0, 15, 0);
+    const sphereDir = normalize(wPos.xyz.sub(canopyCenter));
+    const warpedNormal = normalize(normalLocal.add(sin(uv().x.mul(10)).mul(uLeafWarp)));
+    const finalNormal = normalize(mix(warpedNormal, sphereDir, uNormalBias));
+    const distCenter = clamp(wPos.xyz.distance(canopyCenter).div(20), 0, 1);
+    const ao = mix(uAO.oneMinus(), 1.0, distCenter);
+    const sss = pow(clamp(dot(normalWorld, normalize(sun.position)).negate(), 0, 1), 2.0).mul(uSSS);
+    const viewDir = normalize(cameraPosition.sub(wPos.xyz));
+    const rim = pow(oneMinus(clamp(dot(viewDir, finalNormal), 0, 1)), uRimP).mul(uRimS).mul(uRimC);
+
+    leafMat = new THREE.MeshStandardNodeMaterial({ side: THREE.DoubleSide, alphaTest: 0.5, transparent: true });
+    leafMat.positionNode = windNode;
+    leafMat.normalNode = finalNormal;
+    leafMat.colorNode = mix(uBotC, uTopC, uv().y).mul(ao).add(uSSSC.mul(sss)).add(rim);
+    leafMat.opacityNode = smoothstep(uAlphaCutoff.sub(0.05), uAlphaCutoff.add(0.05), leafMap.r);
+
+    const trunkGeo = mergedTrunkGeometry;
+    const leafGeo = new THREE.PlaneGeometry(params.leafSize, params.leafSize);
+    const N = TREE_COUNT;
+    const maxLeaves = N * leafMatricesLOD0.length;
+
+    trunkMesh = new THREE.InstancedMesh(trunkGeo, trunkMat, N);
+    trunkMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    trunkMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(N * 3), 3);
+    trunkMat.vertexColors = true;
+    scene.add(trunkMesh);
+
+    leavesMesh = new THREE.InstancedMesh(leafGeo, leafMat, maxLeaves);
+    leavesMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    scene.add(leavesMesh);
+
+    updateTreeMatrices();
+}
+
+function updateTreeMatrices() {
+    if (!trunkMesh || !leavesMesh || treeInstances.length === 0) return;
+    const treeMatrix = _mat4;
+    const leafLocal = new THREE.Matrix4();
+    for (let k = 0; k < treeInstances.length; k++) {
+        const t = treeInstances[k];
+        treeMatrix.compose(t.position, t.quaternion, _vec3.setScalar(t.scale));
+        trunkMesh.setMatrixAt(k, treeMatrix);
+        trunkMesh.instanceColor.setXYZ(k, t.trunkColor.r, t.trunkColor.g, t.trunkColor.b);
+    }
+    trunkMesh.instanceMatrix.needsUpdate = true;
+    trunkMesh.instanceColor.needsUpdate = true;
+
+    let leafIdx = 0;
+    for (let k = 0; k < treeInstances.length; k++) {
+        const t = treeInstances[k];
+        treeMatrix.compose(t.position, t.quaternion, _vec3.setScalar(t.scale));
+        for (let L = 0; L < leafMatricesLOD0.length; L++) {
+            leafLocal.copy(leafMatricesLOD0[L]);
+            treeMatrix.multiply(leafLocal);
+            leavesMesh.setMatrixAt(leafIdx++, treeMatrix);
+            treeMatrix.compose(t.position, t.quaternion, _vec3.setScalar(t.scale));
+        }
+    }
+    leavesMesh.instanceMatrix.needsUpdate = true;
+}
+
+buildTreeMeshes();
+
+// ─── FPS ─────────────────────────────────────────────────────────────────
+function measureFPS() {
+    const now = performance.now();
+    fps = 1000 / (now - lastTime);
+    lastTime = now;
+}
+
+// ─── Animate ──────────────────────────────────────────────────────────────
+function animate() {
+    controls.update();
+    // Push params into uniforms every frame so shader & color controls update in real time
+    uAlphaCutoff.value = params.alphaCutoff;
+    uNormalBias.value = params.normalBias;
+    uLeafWarp.value = params.leafWarp;
+    uAO.value = params.aoStrength;
+    uSSS.value = params.sssStrength;
+    uRimS.value = params.rimStrength;
+    uRimP.value = params.rimPower;
+    uWindS.value = params.windStrength;
+    uWindSpeed.value = params.windSpeed;
+    uTopC.value.set(params.topColorMin);
+    uBotC.value.set(params.bottomColorMin);
+    measureFPS();
+    document.getElementById('info').textContent = `Trees: ${TREE_COUNT} | FPS: ${fps.toFixed(0)}`;
+    renderer.render(scene, camera);
+}
+
+// ─── Tweakpane ────────────────────────────────────────────────────────────
+const pane = new Pane({ container: document.getElementById('panel') });
+
+const fTerrain = pane.addFolder({ title: 'Terrain', expanded: false });
+fTerrain.addBinding(params, 'terrainSize', { min: 100, max: 800, step: 10 }).on('change', () => { buildTerrain(); reseedTrees(); updateTreeMatrices(); });
+fTerrain.addBinding(params, 'terrainColor').on('change', () => { if (terrainMesh && terrainMesh.material) terrainMesh.material.color.set(params.terrainColor); });
+
+const fTrees = pane.addFolder({ title: 'Placement', expanded: true });
+fTrees.addBinding(params, 'placementSeed', { min: 0, max: 99999, step: 1 }).on('change', () => { reseedTrees(); updateTreeMatrices(); });
+fTrees.addBinding(params, 'minScale', { min: 0.3, max: 1.0 }).on('change', () => { reseedTrees(); updateTreeMatrices(); });
+fTrees.addBinding(params, 'maxScale', { min: 0.8, max: 2.0 }).on('change', () => { reseedTrees(); updateTreeMatrices(); });
+fTrees.addBinding(params, 'randomRotation').on('change', () => { reseedTrees(); updateTreeMatrices(); });
+fTrees.addButton({ title: 'Regenerate trees' }).on('change', () => { reseedTrees(); updateTreeMatrices(); });
+
+const fShape = pane.addFolder({ title: 'Template tree shape', expanded: false });
+fShape.addBinding(params, 'seed', { min: 0, max: 9999, step: 1 }).on('change', () => { buildTreeTemplate(); buildTreeMeshes(); });
+fShape.addBinding(params, 'levels', { min: 1, max: 5, step: 1 }).on('change', () => { buildTreeTemplate(); buildTreeMeshes(); });
+fShape.addBinding(params, 'trunkHeight', { min: 4, max: 18 }).on('change', () => { buildTreeTemplate(); buildTreeMeshes(); });
+fShape.addBinding(params, 'trunkRadius', { min: 0.2, max: 2 }).on('change', () => { buildTreeTemplate(); buildTreeMeshes(); });
+fShape.addBinding(params, 'trunkTaper', { min: 0.2, max: 1 }).on('change', () => { buildTreeTemplate(); buildTreeMeshes(); });
+fShape.addBinding(params, 'gnarliness', { min: 0, max: 1.5 }).on('change', () => { buildTreeTemplate(); buildTreeMeshes(); });
+fShape.addBinding(params, 'sunForce', { min: 0, max: 0.8 }).on('change', () => { buildTreeTemplate(); buildTreeMeshes(); });
+fShape.addBinding(params, 'gravity', { min: 0, max: 0.5 }).on('change', () => { buildTreeTemplate(); buildTreeMeshes(); });
+fShape.addBinding(params, 'canopyHeight', { min: 4, max: 18 }).on('change', () => { buildTreeTemplate(); buildTreeMeshes(); });
+fShape.addBinding(params, 'clumpRadius', { min: 1, max: 10 }).on('change', () => { buildTreeTemplate(); buildTreeMeshes(); });
+fShape.addBinding(params, 'shapeMode', { min: 0, max: 1, label: 'Cypress' }).on('change', () => { buildTreeTemplate(); buildTreeMeshes(); });
+fShape.addBinding(params, 'leafSize', { min: 1.5, max: 8 }).on('change', () => { buildTreeTemplate(); buildTreeMeshes(); });
+fShape.addBinding(params, 'leafDensity', { min: 4, max: 24, step: 1 }).on('change', () => { buildTreeTemplate(); buildTreeMeshes(); });
+
+const fColorVar = pane.addFolder({ title: 'Color variation', expanded: true });
+fColorVar.addBinding(params, 'colorVariation', { min: 0, max: 1 });
+fColorVar.addBinding(params, 'topColorMin');
+fColorVar.addBinding(params, 'topColorMax');
+fColorVar.addBinding(params, 'bottomColorMin');
+fColorVar.addBinding(params, 'bottomColorMax');
+fColorVar.addBinding(params, 'trunkColorMin');
+fColorVar.addBinding(params, 'trunkColorMax');
+
+const fShader = pane.addFolder({ title: 'Leaf shader', expanded: false });
+fShader.addBinding(params, 'alphaCutoff', { min: 0.2, max: 0.8 });
+fShader.addBinding(params, 'normalBias', { min: 0, max: 1 });
+fShader.addBinding(params, 'leafWarp', { min: 0, max: 0.6 });
+fShader.addBinding(params, 'aoStrength', { min: 0, max: 1 });
+fShader.addBinding(params, 'sssStrength', { min: 0, max: 1.5 });
+fShader.addBinding(params, 'rimStrength', { min: 0, max: 4 });
+fShader.addBinding(params, 'rimPower', { min: 2, max: 8 });
+fShader.addBinding(params, 'windStrength', { min: 0, max: 0.6 });
+fShader.addBinding(params, 'windSpeed', { min: 0.5, max: 3 });
+
+document.getElementById('leafInput').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+        const img = new Image();
+        img.onload = () => {
+            const tex = new THREE.Texture(img);
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.needsUpdate = true;
+            leafMap.value = tex;
+        };
+        img.src = ev.target.result;
+    };
+    reader.readAsDataURL(file);
+});
+
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>

@@ -945,6 +945,30 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
       label: "mieDirectional",
     })
     .on("change", bakeEnvMap);
+  fSky
+    .addBinding(PARAMS, "skyCloudCoverage", {
+      min: 0,
+      max: 1,
+      step: 0.01,
+      label: "cloud coverage",
+    })
+    .on("change", bakeEnvMap);
+  fSky
+    .addBinding(PARAMS, "skyCloudDensity", {
+      min: 0,
+      max: 1,
+      step: 0.01,
+      label: "cloud density",
+    })
+    .on("change", bakeEnvMap);
+  fSky
+    .addBinding(PARAMS, "skyCloudElevation", {
+      min: 0,
+      max: 1,
+      step: 0.01,
+      label: "cloud elevation",
+    })
+    .on("change", bakeEnvMap);
   const fPhysics = pane.addFolder({ title: "Physics", expanded: false });
   fPhysics.addBinding(PARAMS, "rapierDebug", {
     label: "Rapier debug (colliders)",
