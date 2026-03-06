@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Volumetric Clouds – Option 2: Post-Processing (No Geometry)</title>
+<style>
+  body { margin: 0; overflow: hidden; }
+  #info {
+    position: absolute; top: 10px; left: 10px;
+    color: white; font: 14px monospace;
+    text-shadow: 1px 1px 3px black;
+    pointer-events: none;
+  }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="info">
+  Option 2: Post-Processing — zero cloud geometry in scene<br>
+  Drag to orbit · Scroll to zoom
+</div>
+
+<script type="module">
+import * as THREE from "three/webgpu";
+import {
+  vec3, vec4, float, color, Fn, Loop, If,
+  cameraPosition, screenUV,
+  cameraProjectionMatrixInverse, cameraWorldMatrix,
+  mx_noise_float, uniform, normalize, time,
+  dot, pow, remap, exp, pass
+} from "three/tsl";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+if (!navigator.gpu) {
+  document.body.innerHTML = "WebGPU not supported on this browser.";
+  throw new Error("WebGPU not supported");
+}
+
+// ─── Renderer & Scene ─────────────────────────────────────────────────────────
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setClearColor(0x7ab4e8);
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x9ec8f0, 300, 900);
+
+const camera = new THREE.PerspectiveCamera(65, innerWidth / innerHeight, 0.5, 2000);
+camera.position.set(0, 18, 90);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 8, 0);
+controls.maxDistance = 500;
+controls.minDistance = 5;
+
+// ─── Lighting ─────────────────────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0xd0e8ff, 0.8));
+const sun = new THREE.DirectionalLight(0xfff8e0, 2.5);
+sun.position.set(300, 400, 150);
+scene.add(sun);
+
+// ─── Terrain (identical to Option 1) ──────────────────────────────────────────
+function terrainH(x, z) {
+  const s = 0.012;
+  return (
+    Math.sin(x * s) * Math.cos(z * s) * 20 +
+    Math.sin(x * s * 2.4 + 0.7) * Math.cos(z * s * 1.8 + 0.3) * 10 +
+    Math.sin(x * s * 5.1 + 1.1) * Math.cos(z * s * 4.3 + 0.9) * 5 +
+    Math.sin(x * s * 11.3) * Math.cos(z * s * 9.1) * 2
+  );
+}
+
+const TERRAIN_SIZE = 900, SEGS = 160;
+const tGeo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, SEGS, SEGS);
+tGeo.rotateX(-Math.PI / 2);
+const tPos = tGeo.attributes.position;
+for (let i = 0; i < tPos.count; i++) {
+  tPos.setY(i, terrainH(tPos.getX(i), tPos.getZ(i)));
+}
+tPos.needsUpdate = true;
+tGeo.computeVertexNormals();
+
+const tMat = new THREE.MeshStandardMaterial({ color: 0x4a8c3f, roughness: 0.95 });
+scene.add(new THREE.Mesh(tGeo, tMat));
+
+// ─── Cloud Shader ─────────────────────────────────────────────────────────────
+const sunDir = uniform(new THREE.Vector3(0.4, 0.85, 0.25).normalize());
+
+const CLOUD_BASE  = 70.0;
+const CLOUD_TOP   = 160.0;
+const CLOUD_STEPS = 36;
+
+const fbmCloud = Fn(({ pos }) => {
+  const p = pos.toVar();
+  const n = mx_noise_float(p).toVar();
+  n.addAssign(mx_noise_float(p.mul(2.07)).mul(0.5));
+  n.addAssign(mx_noise_float(p.mul(4.31)).mul(0.25));
+  n.addAssign(mx_noise_float(p.mul(8.73)).mul(0.125));
+  return remap(n, float(-0.6), float(1.3), float(0.0), float(1.0)).smoothstep(0.38, 1.0);
+});
+
+// Post-processing cloud composite: takes scene color, returns composited result
+// The key difference: no geometry — runs on EVERY screen pixel
+const cloudPostShader = Fn(([sceneColor]) => {
+
+  // ── Reconstruct world-space ray direction from screen UV ──────────────────
+  // screenUV: 0-1 coordinates of the current pixel
+  const sUV = screenUV;
+  const ndcX = sUV.x.mul(2.0).sub(1.0);
+  const ndcY = sUV.y.mul(2.0).sub(1.0);
+
+  // Unproject from NDC to view space using inverse projection matrix
+  const viewH  = cameraProjectionMatrixInverse.mul(vec4(ndcX, ndcY, float(0.0), float(1.0)));
+  const viewDir = viewH.xyz.div(viewH.w).normalize();
+
+  // View space → world space using camera's world matrix
+  const worldDir = cameraWorldMatrix.mul(vec4(viewDir.x, viewDir.y, viewDir.z, float(0.0))).xyz.normalize();
+
+  const rayDir    = worldDir.toVar();
+  const rayOrigin = cameraPosition.toVar();
+
+  const finalColor    = vec3(0.0).toVar();
+  const transmittance = float(1.0).toVar();
+
+  // Only raymarch into the sky (ray facing upward toward cloud layer)
+  If(rayDir.y.greaterThan(float(0.005)), () => {
+    // Ray-slab intersection: find entry and exit distances for cloud altitude band
+    const invY    = float(1.0).div(rayDir.y);
+    const tBase   = float(CLOUD_BASE).sub(rayOrigin.y).mul(invY);
+    const tTop    = float(CLOUD_TOP).sub(rayOrigin.y).mul(invY);
+    const tEntry  = tBase.min(tTop).max(float(0.0)).toVar();
+    const tExit   = tBase.max(tTop).max(float(0.0)).toVar();
+    const slabLen = tExit.sub(tEntry).max(float(0.001)).toVar();
+    const step    = slabLen.div(float(CLOUD_STEPS)).toVar();
+    const wind    = time.mul(0.22).toVar();
+
+    Loop(CLOUD_STEPS, ({ i }) => {
+      const t = tEntry.add(float(i).add(0.5).mul(step));
+      const p = rayOrigin.add(rayDir.mul(t));
+
+      const bFade = p.y.sub(float(CLOUD_BASE)).div(float(18.0)).clamp(0.0, 1.0);
+      const tFade = float(CLOUD_TOP).sub(p.y).div(float(18.0)).clamp(0.0, 1.0);
+      const hFade = bFade.mul(tFade);
+
+      const coords  = p.mul(0.007).add(vec3(wind, 0.0, 0.0));
+      const rawD    = fbmCloud({ pos: coords });
+      const density = rawD.mul(hFade).mul(0.12);
+
+      If(density.greaterThan(0.004).and(transmittance.greaterThan(0.01)), () => {
+        const shadowC = coords.add(sunDir.mul(0.55));
+        const shadowD = mx_noise_float(shadowC).remap(-0.5, 1.2, 0.0, 1.0).smoothstep(0.3, 1.0);
+        const lightE  = exp(shadowD.negate().mul(5.5));
+
+        const cosTheta = dot(rayDir, sunDir);
+        const hg = float(1.0).add(pow(cosTheta.mul(0.5).add(0.5), 7.0)).mul(1.6);
+
+        const cloudCol = color(0xfff6e0).mul(lightE).mul(hg).add(color(0x90bfe0).mul(0.3));
+
+        finalColor.addAssign(cloudCol.mul(density).mul(transmittance));
+        transmittance.mulAssign(float(1.0).sub(density));
+      });
+    });
+  });
+
+  // Composite clouds over rendered scene:
+  // where transmittance=1 (no cloud), scene shows fully
+  // where transmittance=0 (thick cloud), cloud color shows fully
+  const composited = sceneColor.rgb.mul(transmittance).add(finalColor);
+  return vec4(composited, float(1.0));
+});
+
+// ─── Post-Processing Pipeline ─────────────────────────────────────────────────
+// pass(scene, camera) renders the scene to a texture — NO cloud geometry needed
+const scenePass  = pass(scene, camera);
+const sceneColor = scenePass.getTextureNode();
+
+const postProcessing = new THREE.PostProcessing(renderer);
+postProcessing.outputNode = cloudPostShader(sceneColor);
+
+// ─── Animate ──────────────────────────────────────────────────────────────────
+function animate() {
+  controls.update();
+  postProcessing.renderAsync();
+  requestAnimationFrame(animate);
+}
+animate();
+
+window.addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>

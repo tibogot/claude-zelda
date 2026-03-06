@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Zelda-Style Volumetric Clouds & God Rays</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #87CEEB; }
+    </style>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+            "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+            "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+    }
+    </script>
+</head>
+<body>
+<script type="module">
+import * as THREE from "three/webgpu";
+import { 
+    vec3, vec4, float, color, Fn, Loop,
+    cameraPosition, positionWorld,
+    mx_noise_float, uniform, normalize, sub, time,
+    dot, pow, exp, oneMinus, If
+} from "three/tsl";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+// --- Scene Setup ---
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 2000);
+camera.position.set(0, 50, 200);
+
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x87CEEB); 
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+// --- 1. The Ground (800x800 Zelda-Style Plane) ---
+const groundGeom = new THREE.PlaneGeometry(1200, 1200); // Oversized for horizon
+const groundMat = new THREE.MeshStandardMaterial({ color: 0x4a7a4a }); // Grass green
+const ground = new THREE.Mesh(groundGeom, groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -10; 
+scene.add(ground);
+
+const sunPos = new THREE.Vector3(100, 150, 100);
+const sunDirNode = uniform(sunPos.clone().normalize());
+const light = new THREE.DirectionalLight(0xffffff, 2);
+light.position.copy(sunPos);
+scene.add(light);
+
+// --- 2. TSL Fractal Noise Function ---
+const fbmCloud = Fn(({ pos }) => {
+    const p = pos.toVar();
+    let n = mx_noise_float(p).toVar();
+    n.addAssign(mx_noise_float(p.mul(2.5)).mul(0.5));
+    n.addAssign(mx_noise_float(p.mul(5.0)).mul(0.25));
+    // Sharpness filter: remap noise to create distinct puffs
+    return n.smoothstep(-0.2, 0.8).mul(p.y.smoothstep(0.0, 1.0));
+});
+
+// --- 3. The Main Volumetric & God Ray Shader ---
+const cloudLayerShader = Fn(() => {
+    const rayDir = normalize(sub(positionWorld, cameraPosition));
+    const rayStart = cameraPosition;
+    
+    const steps = 40; 
+    const stepSize = float(4.0); // Covers more distance per step
+    const wind = time.mul(0.15);
+
+    const finalColor = vec3(0).toVar();
+    const transmittance = float(1.0).toVar();
+    const scatteringAccum = vec3(0).toVar();
+
+    // Height Mask (Limits clouds to a sky band)
+    const cloudBottom = float(80.0);
+    const cloudTop = float(150.0);
+
+    Loop(steps, ({ i }) => {
+        const p = rayStart.add(rayDir.mul(float(i).mul(stepSize)));
+        
+        // Height blending (removes the "box" edges)
+        const heightFactor = p.y.smoothstep(cloudBottom, cloudBottom.add(20))
+                             .mul(oneMinus(p.y.smoothstep(cloudTop.sub(20), cloudTop)));
+
+        const samplePos = p.mul(0.015).add(vec3(wind, 0, 0));
+        const density = fbmCloud({ pos: samplePos }).mul(heightFactor).mul(0.3);
+
+        // --- GOD RAY & LIGHTING LOGIC ---
+        // Light scattering (Henyey-Greenstein approx)
+        const cosTheta = dot(rayDir, sunDirNode);
+        const scatter = pow(cosTheta.mul(0.5).add(0.5), 10.0).mul(3.0);
+        
+        // Shadow check (sample density toward sun)
+        const lightPath = samplePos.add(sunDirNode.mul(0.1));
+        const shadow = mx_noise_float(lightPath).smoothstep(0.0, 1.0);
+        const lightEnergy = exp(shadow.negate().mul(4.0));
+
+        // Add "Air Glow" (God Rays) where density is low but light is high
+        scatteringAccum.addAssign(color(0xfff5e1).mul(lightEnergy).mul(scatter).mul(transmittance).mul(0.02));
+
+        // Add "Cloud Body"
+        If(density.greaterThan(0.01), () => {
+            const cloudCol = color(0xffffff).mul(lightEnergy);
+            finalColor.addAssign(cloudCol.mul(density).mul(transmittance));
+            transmittance.mulAssign(float(1.0).sub(density));
+        });
+    });
+
+    return vec4(finalColor.add(scatteringAccum), float(1.0).sub(transmittance).add(scatteringAccum.x));
+});
+
+// --- 4. The Sky Slab (The "Volume" container) ---
+// We make it massive to cover the whole 800x800 terrain
+const skyVolumeGeom = new THREE.BoxGeometry(2000, 150, 2000); 
+const skyVolumeMat = new THREE.MeshBasicNodeMaterial();
+skyVolumeMat.colorNode = cloudLayerShader();
+skyVolumeMat.transparent = true;
+skyVolumeMat.side = THREE.BackSide;
+skyVolumeMat.depthWrite = false;
+
+const skyMesh = new THREE.Mesh(skyVolumeGeom, skyVolumeMat);
+skyMesh.position.y = 110; // Center of the 80-150 altitude band
+scene.add(skyMesh);
+
+// --- Animation ---
+function animate() {
+    controls.update();
+    renderer.render(scene, camera);
+    requestAnimationFrame(animate);
+}
+animate();
+
+window.addEventListener("resize", () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>

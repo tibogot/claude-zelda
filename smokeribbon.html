@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Brightened Smoky Ribbons</title>
+    <style>
+      body {
+        margin: 0;
+        background: #050a10;
+        overflow: hidden;
+        font-family: sans-serif;
+      }
+      canvas {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { GUI } from "three/addons/libs/lil-gui.module.min.js";
+
+      // --- Scene ---
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0a141f); // Brighter background
+      scene.fog = new THREE.FogExp2(0x0a141f, 0.01);
+
+      const camera = new THREE.PerspectiveCamera(
+        60,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        1000,
+      );
+      camera.position.set(50, 40, 60);
+
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      document.body.appendChild(renderer.domElement);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+
+      // --- Parameters ---
+      const PARAMS = {
+        smokeCount: 12,
+        smokeSpeed: 0.4,
+        smokeWidth: 3.5,
+        shredding: 6.0,
+        terrainScale: 7.0,
+        smokeColor: "#a0e9ff",
+        // Lighting Params
+        sunIntensity: 4.0, // Doubled intensity
+        ambientIntensity: 1.5, // Higher base light
+        groundColor: "#1a2b3c",
+      };
+
+      // --- Lighting ---
+      const ambientLight = new THREE.AmbientLight(
+        0x4080ff,
+        PARAMS.ambientIntensity,
+      );
+      scene.add(ambientLight);
+
+      const sun = new THREE.DirectionalLight(0xffffff, PARAMS.sunIntensity);
+      sun.position.set(30, 60, 30);
+      sun.castShadow = true;
+      scene.add(sun);
+
+      // Add a secondary fill light from the opposite side
+      const fillLight = new THREE.PointLight(0x70d6ff, 200, 150);
+      fillLight.position.set(-40, 20, -40);
+      scene.add(fillLight);
+
+      // --- Terrain ---
+      function getH(x, z) {
+        return (
+          Math.sin(x * 0.06) * Math.cos(z * 0.06) * PARAMS.terrainScale +
+          Math.sin(x * 0.12 + z * 0.1) * (PARAMS.terrainScale * 0.4)
+        );
+      }
+
+      const terrainGeo = new THREE.PlaneGeometry(180, 180, 100, 100);
+      terrainGeo.rotateX(-Math.PI / 2);
+      const terrainMat = new THREE.MeshStandardMaterial({
+        color: PARAMS.groundColor,
+        roughness: 0.7,
+        metalness: 0.2,
+      });
+      const terrain = new THREE.Mesh(terrainGeo, terrainMat);
+      scene.add(terrain);
+
+      function updateTerrain() {
+        const pos = terrain.geometry.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+          pos.setY(i, getH(pos.getX(i), pos.getZ(i)));
+        }
+        pos.needsUpdate = true;
+        terrain.geometry.computeVertexNormals();
+      }
+      updateTerrain();
+
+      // --- Smoke Material ---
+      const smokeMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+          uTime: { value: 0 },
+          uColor: { value: new THREE.Color(PARAMS.smokeColor) },
+          uShred: { value: PARAMS.shredding },
+        },
+        vertexShader: `
+        varying vec2 vUv;
+        void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+    `,
+        fragmentShader: `
+        varying vec2 vUv;
+        uniform float uTime;
+        uniform vec3 uColor;
+        uniform float uShred;
+
+        float rand(vec2 n) { return fract(sin(dot(n, vec2(12.9898, 4.1414))) * 43758.5453); }
+        float noise(vec2 p) {
+            vec2 i = floor(p); vec2 f = fract(p);
+            f = f*f*(3.0-2.0*f);
+            return mix(mix(rand(i), rand(i + vec2(1.0, 0.0)), f.x),
+                       mix(rand(i + vec2(0.0, 1.0)), rand(i + vec2(1.0, 1.0)), f.x), f.y);
+        }
+
+        void main() {
+            float n = noise(vec2(vUv.x * uShred - uTime * 1.5, vUv.y * uShred * 0.5));
+            float headTail = smoothstep(0.0, 0.2, vUv.x) * smoothstep(1.0, 0.6, vUv.x);
+            float edges = pow(smoothstep(0.0, 0.5, vUv.y) * smoothstep(1.0, 0.5, vUv.y), 1.5);
+            
+            float alpha = n * headTail * edges * 0.9;
+            vec3 color = mix(uColor, vec3(1.0), n * 0.6);
+            gl_FragColor = vec4(color, alpha);
+        }
+    `,
+        transparent: true,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+
+      let ribbons = [];
+      const segments = 70;
+
+      function initRibbons() {
+        ribbons.forEach((r) => scene.remove(r));
+        ribbons = [];
+        for (let i = 0; i < PARAMS.smokeCount; i++) {
+          const geo = new THREE.PlaneGeometry(1, 1, segments, 1);
+          const mesh = new THREE.Mesh(geo, smokeMaterial);
+          mesh.userData = {
+            seed: Math.random() * 100,
+            speed: 0.8 + Math.random() * 0.4,
+          };
+          scene.add(mesh);
+          ribbons.push(mesh);
+        }
+      }
+      initRibbons();
+
+      // --- GUI ---
+      const gui = new GUI();
+      const lightFolder = gui.addFolder("Lighting");
+      lightFolder
+        .add(PARAMS, "sunIntensity", 0, 10)
+        .onChange((v) => (sun.intensity = v));
+      lightFolder
+        .add(PARAMS, "ambientIntensity", 0, 5)
+        .onChange((v) => (ambientLight.intensity = v));
+      lightFolder
+        .addColor(PARAMS, "groundColor")
+        .onChange((v) => terrainMat.color.set(v));
+
+      const smokeFolder = gui.addFolder("Smoke");
+      smokeFolder.add(PARAMS, "smokeCount", 1, 30, 1).onChange(initRibbons);
+      smokeFolder.add(PARAMS, "smokeWidth", 1, 10);
+      smokeFolder.addColor(PARAMS, "smokeColor");
+
+      // --- Animation ---
+      function animate(t) {
+        requestAnimationFrame(animate);
+        const time = t * 0.001;
+        smokeMaterial.uniforms.uTime.value = time;
+
+        ribbons.forEach((ribbon, id) => {
+          const pos = ribbon.geometry.attributes.position;
+          const trailTime =
+            time * PARAMS.smokeSpeed * ribbon.userData.speed +
+            ribbon.userData.seed;
+
+          for (let j = 0; j <= segments; j++) {
+            const segT = trailTime - j * 0.12;
+            const x = Math.sin(segT * 0.3) * 50.0 + Math.cos(segT * 0.5) * 15.0;
+            const z =
+              Math.cos(segT * 0.25) * 45.0 + Math.sin(segT * 0.4) * 20.0;
+            const groundY = getH(x, z);
+            const y = groundY + 2.5 + Math.sin(segT * 1.5 + id) * 1.0;
+
+            pos.setXYZ(j, x, y + PARAMS.smokeWidth / 2, z);
+            pos.setXYZ(j + (segments + 1), x, y - PARAMS.smokeWidth / 2, z);
+          }
+          pos.needsUpdate = true;
+        });
+
+        controls.update();
+        renderer.render(scene, camera);
+      }
+
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+
+      animate(0);
+    </script>
+  </body>
+</html>

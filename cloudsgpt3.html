@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebGPU TSL Clouds + Tweakpane</title>
+
+<style>
+body{margin:0;overflow:hidden;background:#87CEEB}
+</style>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.183.0/build/three.module.js",
+    "three/webgpu": "https://unpkg.com/three@0.183.0/build/three.webgpu.js",
+    "three/tsl": "https://unpkg.com/three@0.183.0/build/three.tsl.js",
+    "three/addons/": "https://unpkg.com/three@0.183.0/examples/jsm/",
+    "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.4/dist/tweakpane.min.js"
+  }
+}
+</script>
+
+</head>
+<body>
+
+<script type="module">
+
+import * as THREE from "three";
+import { WebGPURenderer, MeshBasicNodeMaterial } from "three/webgpu";
+import { texture, uv, attribute } from "three/tsl";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { Pane } from "tweakpane";
+
+
+// Scene
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87ceeb);
+
+
+// Camera
+const camera = new THREE.PerspectiveCamera(
+60,
+window.innerWidth/window.innerHeight,
+0.1,
+1000
+);
+
+camera.position.set(0,5,15);
+
+
+// Renderer
+const renderer = new WebGPURenderer({antialias:true});
+renderer.setSize(window.innerWidth,window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+
+// Controls
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+
+// Texture
+const loader = new THREE.TextureLoader();
+
+const cloudTexture = loader.load(
+"https://rawcdn.githack.com/pmndrs/drei-assets/9225a9f1fbd449d9411125c2f419b843d0308c9f/cloud.png"
+);
+
+
+// Parameters for tweakpane
+const params = {
+
+cloudCount: 200,
+cloudSize: 4,
+cloudHeight: 5,
+spread: 40,
+opacity: 1,
+speed: 1,
+verticalMotion: 0.4,
+pulse: 0.3,
+color:"#ffffff",
+autoRotate:false
+
+};
+
+
+// Geometry
+const geometry = new THREE.PlaneGeometry(1,1);
+
+let opacityArray = new Float32Array(params.cloudCount);
+
+for(let i=0;i<params.cloudCount;i++){
+opacityArray[i] = Math.random();
+}
+
+geometry.setAttribute(
+"cloudOpacity",
+new THREE.InstancedBufferAttribute(opacityArray,1)
+);
+
+
+// TSL material
+const opacityAttr = attribute("cloudOpacity");
+
+const tex = texture(cloudTexture, uv());
+
+const material = new MeshBasicNodeMaterial();
+
+material.colorNode = tex.rgb;
+material.opacityNode = tex.a.mul(opacityAttr);
+
+material.transparent = true;
+material.depthWrite = false;
+
+
+// Mesh
+let clouds = new THREE.InstancedMesh(geometry,material,params.cloudCount);
+scene.add(clouds);
+
+
+// Cloud data
+let positions = [];
+let scales = [];
+
+function generateClouds(){
+
+positions=[];
+scales=[];
+
+for(let i=0;i<params.cloudCount;i++){
+
+positions.push(
+new THREE.Vector3(
+(Math.random()-0.5)*params.spread,
+Math.random()*params.cloudHeight,
+(Math.random()-0.5)*params.spread
+)
+);
+
+scales.push(2+Math.random()*params.cloudSize);
+
+}
+
+}
+
+generateClouds();
+
+
+// Dummy
+const dummy = new THREE.Object3D();
+const clock = new THREE.Clock();
+
+
+// Animation
+function animate(){
+
+const t = clock.getElapsedTime();
+
+controls.autoRotate = params.autoRotate;
+controls.update();
+
+for(let i=0;i<params.cloudCount;i++){
+
+const p = positions[i];
+
+dummy.position.copy(p);
+
+dummy.position.y += Math.sin(t*params.speed+i)*params.verticalMotion;
+
+dummy.quaternion.copy(camera.quaternion);
+
+const s = scales[i] + Math.sin(t+i)*params.pulse;
+
+dummy.scale.setScalar(s);
+
+dummy.updateMatrix();
+
+clouds.setMatrixAt(i,dummy.matrix);
+
+}
+
+clouds.instanceMatrix.needsUpdate = true;
+
+renderer.render(scene,camera);
+
+}
+
+renderer.setAnimationLoop(animate);
+
+
+// Resize
+window.addEventListener("resize",()=>{
+
+camera.aspect = window.innerWidth/window.innerHeight;
+camera.updateProjectionMatrix();
+
+renderer.setSize(window.innerWidth,window.innerHeight);
+
+});
+
+
+// Tweakpane
+const pane = new Pane({title:"Cloud Controls"});
+
+pane.addBinding(params,"cloudCount",{min:50,max:1000,step:10})
+.on("change",()=>location.reload());
+
+pane.addBinding(params,"cloudSize",{min:1,max:10});
+
+pane.addBinding(params,"cloudHeight",{min:1,max:20});
+
+pane.addBinding(params,"spread",{min:10,max:100});
+
+pane.addBinding(params,"opacity",{min:0,max:2});
+
+pane.addBinding(params,"speed",{min:0,max:5});
+
+pane.addBinding(params,"verticalMotion",{min:0,max:2});
+
+pane.addBinding(params,"pulse",{min:0,max:2});
+
+pane.addBinding(params,"autoRotate");
+
+pane.addBinding(params,"color")
+.on("change",e=>{
+material.color.set(e.value);
+});
+
+</script>
+
+</body>
+</html>

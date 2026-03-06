@@ -1,241 +1,285 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Flowing Lines Showcase</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: #0a0e14; overflow: hidden; font-family: "SF Mono", "Fira Code", monospace; }
-    canvas { display: block; width: 100vw; height: 100vh; }
-    #info {
-      position: fixed; bottom: 12px; left: 12px; z-index: 20;
-      background: rgba(0,0,0,0.6); color: #a8d8ea;
-      padding: 8px 12px; border-radius: 6px; font-size: 11px; line-height: 1.6;
-    }
-    #info span { color: #c8e8f8; font-weight: 600; }
-  </style>
-  <script type="importmap">
-  {
-    "imports": {
-      "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
-      "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
-      "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
-      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
-    }
-  }
-  </script>
-</head>
-<body>
-<div id="info">
-  <span>Flowing Lines</span> — Ribbons following terrain<br>
-  Orbit: <span>left-drag</span> &nbsp; Zoom: <span>scroll</span>
-</div>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Flowing Lines Showcase</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        background: #0a0e14;
+        overflow: hidden;
+        font-family: "SF Mono", "Fira Code", monospace;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        bottom: 12px;
+        left: 12px;
+        z-index: 20;
+        background: rgba(0, 0, 0, 0.6);
+        color: #a8d8ea;
+        padding: 8px 12px;
+        border-radius: 6px;
+        font-size: 11px;
+        line-height: 1.6;
+      }
+      #info span {
+        color: #c8e8f8;
+        font-weight: 600;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">
+      <span>Flowing Lines</span> — Ribbons following terrain<br />
+      Orbit: <span>left-drag</span> &nbsp; Zoom: <span>scroll</span>
+    </div>
 
-<script type="module">
-import * as THREE from "three";
-import { WebGPURenderer } from "three/webgpu";
-import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import GUI from "three/addons/libs/lil-gui.module.min.js";
-import { createFlowingLines } from "./flowing-lines.js";
+    <script type="module">
+      import * as THREE from "three";
+      import { WebGPURenderer } from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import GUI from "three/addons/libs/lil-gui.module.min.js";
+      import { createFlowingLines } from "./flowing-lines.js";
 
-// ─── Terrain height (simple wave formula) ────────────────────────────────────
-function terrainHeight(x, z) {
-  return (
-    Math.sin(x * 0.25) * Math.cos(z * 0.2) * 0.5 +
-    Math.sin(x * 0.15 + z * 0.1) * 0.3 +
-    Math.cos(z * 0.3 + x * 0.05) * 0.2
-  ) * PARAMS.terrainScale;
-}
+      // ─── Terrain height (simple wave formula) ────────────────────────────────────
+      function terrainHeight(x, z) {
+        return (
+          (Math.sin(x * 0.25) * Math.cos(z * 0.2) * 0.5 +
+            Math.sin(x * 0.15 + z * 0.1) * 0.3 +
+            Math.cos(z * 0.3 + x * 0.05) * 0.2) *
+          PARAMS.terrainScale
+        );
+      }
 
-// ─── PARAMS ──────────────────────────────────────────────────────────────────
-const PARAMS = {
-  lineCount: 12,
-  lineLength: 14,
-  lineWidth: 0.18,
-  segments: 24,
-  heightOffset: 0.4,
-  verticalWave: 0.1,
-  animationSpeed: 1.2,
-  pathRadius: 30,
-  pathFrequency: 0.9,
-  lineColor: "#a8d8ea",
-  lineOpacity: 0.75,
-  terrainScale: 3,
-  groundColor: "#1a2a2a",
-  fogColor: "#0a0e14",
-  fogNear: 20,
-  fogFar: 100,
-  showGrid: true,
-};
+      // ─── PARAMS ──────────────────────────────────────────────────────────────────
+      const PARAMS = {
+        lineCount: 12,
+        lineLength: 14,
+        lineWidth: 0.18,
+        segments: 24,
+        heightOffset: 0.4,
+        verticalWave: 0.1,
+        animationSpeed: 1.2,
+        pathRadius: 30,
+        pathFrequency: 0.9,
+        lineColor: "#a8d8ea",
+        lineOpacity: 0.75,
+        terrainScale: 3,
+        groundColor: "#1a2a2a",
+        fogColor: "#0a0e14",
+        fogNear: 20,
+        fogFar: 100,
+        showGrid: true,
+      };
 
-// ─── Renderer ────────────────────────────────────────────────────────────────
-const renderer = new WebGPURenderer({ antialias: true });
-renderer.setPixelRatio(devicePixelRatio);
-renderer.setSize(window.innerWidth, window.innerHeight);
-document.body.appendChild(renderer.domElement);
-await renderer.init();
+      // ─── Renderer ────────────────────────────────────────────────────────────────
+      const renderer = new WebGPURenderer({ antialias: true });
+      renderer.setPixelRatio(devicePixelRatio);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.body.appendChild(renderer.domElement);
+      await renderer.init();
 
-// ─── Scene ───────────────────────────────────────────────────────────────────
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(PARAMS.fogColor);
-scene.fog = new THREE.Fog(PARAMS.fogColor, PARAMS.fogNear, PARAMS.fogFar);
+      // ─── Scene ───────────────────────────────────────────────────────────────────
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(PARAMS.fogColor);
+      scene.fog = new THREE.Fog(PARAMS.fogColor, PARAMS.fogNear, PARAMS.fogFar);
 
-const sun = new THREE.DirectionalLight(0xfff0d0, 1.5);
-scene.add(sun);
-const ambLight = new THREE.AmbientLight(0x6080a0, 0.6);
-scene.add(ambLight);
+      const sun = new THREE.DirectionalLight(0xfff0d0, 1.5);
+      scene.add(sun);
+      const ambLight = new THREE.AmbientLight(0x6080a0, 0.6);
+      scene.add(ambLight);
 
-// Ground plane with gentle terrain
-const groundSize = 120;
-const groundRes = 80;
-const groundGeo = new THREE.PlaneGeometry(groundSize, groundSize, groundRes, groundRes);
-groundGeo.rotateX(-Math.PI / 2);
-const posArr = groundGeo.attributes.position.array;
-for (let i = 0; i < posArr.length; i += 3) {
-  const wx = posArr[i];
-  const wz = posArr[i + 2];
-  posArr[i + 1] = terrainHeight(wx, wz);
-}
-groundGeo.computeVertexNormals();
+      // Ground plane with gentle terrain
+      const groundSize = 120;
+      const groundRes = 80;
+      const groundGeo = new THREE.PlaneGeometry(
+        groundSize,
+        groundSize,
+        groundRes,
+        groundRes,
+      );
+      groundGeo.rotateX(-Math.PI / 2);
+      const posArr = groundGeo.attributes.position.array;
+      for (let i = 0; i < posArr.length; i += 3) {
+        const wx = posArr[i];
+        const wz = posArr[i + 2];
+        posArr[i + 1] = terrainHeight(wx, wz);
+      }
+      groundGeo.computeVertexNormals();
 
-const groundMat = new THREE.MeshStandardMaterial({
-  color: PARAMS.groundColor,
-  roughness: 0.95,
-  metalness: 0,
-});
-const ground = new THREE.Mesh(groundGeo, groundMat);
-scene.add(ground);
+      const groundMat = new THREE.MeshStandardMaterial({
+        color: PARAMS.groundColor,
+        roughness: 0.95,
+        metalness: 0,
+      });
+      const ground = new THREE.Mesh(groundGeo, groundMat);
+      scene.add(ground);
 
-const grid = new THREE.GridHelper(groundSize, 20, 0x2a3a4a, 0x1a2a3a);
-grid.position.y = 0.02;
-grid.visible = PARAMS.showGrid;
-scene.add(grid);
+      const grid = new THREE.GridHelper(groundSize, 20, 0x2a3a4a, 0x1a2a3a);
+      grid.position.y = 0.02;
+      grid.visible = PARAMS.showGrid;
+      scene.add(grid);
 
-// ─── Flowing Lines ───────────────────────────────────────────────────────────
-let flowing = createFlowingLines({
-  scene,
-  getTerrainHeight: terrainHeight,
-  enabled: true,
-  lineCount: PARAMS.lineCount,
-  lineLength: PARAMS.lineLength,
-  lineWidth: PARAMS.lineWidth,
-  segments: PARAMS.segments,
-  heightOffset: PARAMS.heightOffset,
-  verticalWave: PARAMS.verticalWave,
-  animationSpeed: PARAMS.animationSpeed,
-  pathRadius: PARAMS.pathRadius,
-  pathFrequency: PARAMS.pathFrequency,
-  lineColor: PARAMS.lineColor,
-  lineOpacity: PARAMS.lineOpacity,
-});
+      // ─── Flowing Lines ───────────────────────────────────────────────────────────
+      let flowing = createFlowingLines({
+        scene,
+        getTerrainHeight: terrainHeight,
+        enabled: true,
+        lineCount: PARAMS.lineCount,
+        lineLength: PARAMS.lineLength,
+        lineWidth: PARAMS.lineWidth,
+        segments: PARAMS.segments,
+        heightOffset: PARAMS.heightOffset,
+        verticalWave: PARAMS.verticalWave,
+        animationSpeed: PARAMS.animationSpeed,
+        pathRadius: PARAMS.pathRadius,
+        pathFrequency: PARAMS.pathFrequency,
+        lineColor: PARAMS.lineColor,
+        lineOpacity: PARAMS.lineOpacity,
+      });
 
-function refreshFlowingLines() {
-  scene.remove(flowing.group);
-  const mat = flowing.linesData[0]?.mesh?.material;
-  if (mat) mat.dispose();
-  for (const line of flowing.linesData) {
-    line.mesh.geometry.dispose();
-  }
-  flowing = createFlowingLines({
-    scene,
-    getTerrainHeight: terrainHeight,
-    enabled: true,
-    lineCount: PARAMS.lineCount,
-    lineLength: PARAMS.lineLength,
-    lineWidth: PARAMS.lineWidth,
-    segments: PARAMS.segments,
-    heightOffset: PARAMS.heightOffset,
-    verticalWave: PARAMS.verticalWave,
-    animationSpeed: PARAMS.animationSpeed,
-    pathRadius: PARAMS.pathRadius,
-    pathFrequency: PARAMS.pathFrequency,
-    lineColor: PARAMS.lineColor,
-    lineOpacity: PARAMS.lineOpacity,
-  });
-}
+      function refreshFlowingLines() {
+        scene.remove(flowing.group);
+        const mat = flowing.linesData[0]?.mesh?.material;
+        if (mat) mat.dispose();
+        for (const line of flowing.linesData) {
+          line.mesh.geometry.dispose();
+        }
+        flowing = createFlowingLines({
+          scene,
+          getTerrainHeight: terrainHeight,
+          enabled: true,
+          lineCount: PARAMS.lineCount,
+          lineLength: PARAMS.lineLength,
+          lineWidth: PARAMS.lineWidth,
+          segments: PARAMS.segments,
+          heightOffset: PARAMS.heightOffset,
+          verticalWave: PARAMS.verticalWave,
+          animationSpeed: PARAMS.animationSpeed,
+          pathRadius: PARAMS.pathRadius,
+          pathFrequency: PARAMS.pathFrequency,
+          lineColor: PARAMS.lineColor,
+          lineOpacity: PARAMS.lineOpacity,
+        });
+      }
 
-// ─── Sun position ────────────────────────────────────────────────────────────
-function applySun() {
-  const az = (225 * Math.PI) / 180;
-  const el = (50 * Math.PI) / 180;
-  sun.position.set(
-    Math.cos(el) * Math.sin(az) * 80,
-    Math.sin(el) * 80,
-    Math.cos(el) * Math.cos(az) * 80,
-  );
-}
-applySun();
+      // ─── Sun position ────────────────────────────────────────────────────────────
+      function applySun() {
+        const az = (225 * Math.PI) / 180;
+        const el = (50 * Math.PI) / 180;
+        sun.position.set(
+          Math.cos(el) * Math.sin(az) * 80,
+          Math.sin(el) * 80,
+          Math.cos(el) * Math.cos(az) * 80,
+        );
+      }
+      applySun();
 
-// ─── GUI ─────────────────────────────────────────────────────────────────────
-const gui = new GUI({ title: "Flowing Lines", width: 280 });
-gui.domElement.style.cssText = "position:fixed;top:12px;right:12px;z-index:30;max-height:90vh;overflow-y:auto;";
+      // ─── GUI ─────────────────────────────────────────────────────────────────────
+      const gui = new GUI({ title: "Flowing Lines", width: 280 });
+      gui.domElement.style.cssText =
+        "position:fixed;top:12px;right:12px;z-index:30;max-height:90vh;overflow-y:auto;";
 
-const fLines = gui.addFolder("Lines");
-fLines.add({ refresh: refreshFlowingLines }, "refresh").name("Apply geometry");
-fLines.add(PARAMS, "lineCount", 1, 24, 1);
-fLines.add(PARAMS, "lineLength", 4, 30, 1);
-fLines.add(PARAMS, "lineWidth", 0.05, 0.5, 0.01);
-fLines.add(PARAMS, "segments", 8, 48, 2);
-fLines.add(PARAMS, "heightOffset", 0, 3, 0.1);
-fLines.add(PARAMS, "verticalWave", 0, 0.3, 0.01);
-fLines.add(PARAMS, "animationSpeed", 0.2, 3, 0.1);
-fLines.add(PARAMS, "pathRadius", 10, 80, 2);
-fLines.add(PARAMS, "pathFrequency", 0.2, 2, 0.05);
-fLines.addColor(PARAMS, "lineColor");
-fLines.add(PARAMS, "lineOpacity", 0.2, 1, 0.05);
+      const fLines = gui.addFolder("Lines");
+      fLines
+        .add({ refresh: refreshFlowingLines }, "refresh")
+        .name("Apply geometry");
+      fLines.add(PARAMS, "lineCount", 1, 24, 1);
+      fLines.add(PARAMS, "lineLength", 4, 30, 1);
+      fLines.add(PARAMS, "lineWidth", 0.05, 0.5, 0.01);
+      fLines.add(PARAMS, "segments", 8, 48, 2);
+      fLines.add(PARAMS, "heightOffset", 0, 3, 0.1);
+      fLines.add(PARAMS, "verticalWave", 0, 0.3, 0.01);
+      fLines.add(PARAMS, "animationSpeed", 0.2, 3, 0.1);
+      fLines.add(PARAMS, "pathRadius", 10, 80, 2);
+      fLines.add(PARAMS, "pathFrequency", 0.2, 2, 0.05);
+      fLines.addColor(PARAMS, "lineColor");
+      fLines.add(PARAMS, "lineOpacity", 0.2, 1, 0.05);
 
-const fTerrain = gui.addFolder("Terrain");
-fTerrain.add(PARAMS, "terrainScale", 0, 8, 0.5);
+      const fTerrain = gui.addFolder("Terrain");
+      fTerrain.add(PARAMS, "terrainScale", 0, 8, 0.5);
 
-const fScene = gui.addFolder("Scene");
-fScene.addColor(PARAMS, "groundColor").onChange((v) => groundMat.color.setStyle(v));
-fScene.addColor(PARAMS, "fogColor").onChange((v) => {
-  scene.background.setStyle(v);
-  scene.fog.color.setStyle(v);
-});
-fScene.add(PARAMS, "fogNear", 10, 60, 5).onChange((v) => { scene.fog.near = v; });
-fScene.add(PARAMS, "fogFar", 50, 200, 10).onChange((v) => { scene.fog.far = v; });
-fScene.add(PARAMS, "showGrid").onChange((v) => { grid.visible = v; });
+      const fScene = gui.addFolder("Scene");
+      fScene
+        .addColor(PARAMS, "groundColor")
+        .onChange((v) => groundMat.color.setStyle(v));
+      fScene.addColor(PARAMS, "fogColor").onChange((v) => {
+        scene.background.setStyle(v);
+        scene.fog.color.setStyle(v);
+      });
+      fScene.add(PARAMS, "fogNear", 10, 60, 5).onChange((v) => {
+        scene.fog.near = v;
+      });
+      fScene.add(PARAMS, "fogFar", 50, 200, 10).onChange((v) => {
+        scene.fog.far = v;
+      });
+      fScene.add(PARAMS, "showGrid").onChange((v) => {
+        grid.visible = v;
+      });
 
-// ─── Camera ─────────────────────────────────────────────────────────────────
-const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 300);
-camera.position.set(0, 8, 35);
+      // ─── Camera ─────────────────────────────────────────────────────────────────
+      const camera = new THREE.PerspectiveCamera(
+        50,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        300,
+      );
+      camera.position.set(0, 8, 35);
 
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.dampingFactor = 0.08;
-controls.target.set(0, 2, 0);
-controls.update();
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.08;
+      controls.target.set(0, 2, 0);
+      controls.update();
 
-// ─── Animation ───────────────────────────────────────────────────────────────
-const timer = new THREE.Timer();
-renderer.setAnimationLoop(() => {
-  timer.update();
-  const elapsed = timer.getElapsed();
+      // ─── Animation ───────────────────────────────────────────────────────────────
+      const timer = new THREE.Timer();
+      renderer.setAnimationLoop(() => {
+        timer.update();
+        const elapsed = timer.getElapsed();
 
-  flowing.params.heightOffset = PARAMS.heightOffset;
-  flowing.params.verticalWave = PARAMS.verticalWave;
-  flowing.params.animationSpeed = PARAMS.animationSpeed;
-  flowing.params.pathRadius = PARAMS.pathRadius;
-  flowing.params.pathFrequency = PARAMS.pathFrequency;
-  flowing.setParams({
-    lineColor: PARAMS.lineColor,
-    lineOpacity: PARAMS.lineOpacity,
-  });
-  flowing.update(elapsed);
+        flowing.params.heightOffset = PARAMS.heightOffset;
+        flowing.params.verticalWave = PARAMS.verticalWave;
+        flowing.params.animationSpeed = PARAMS.animationSpeed;
+        flowing.params.pathRadius = PARAMS.pathRadius;
+        flowing.params.pathFrequency = PARAMS.pathFrequency;
+        flowing.setParams({
+          lineColor: PARAMS.lineColor,
+          lineOpacity: PARAMS.lineOpacity,
+        });
+        flowing.update(elapsed);
 
-  controls.update();
-  renderer.render(scene, camera);
-});
+        controls.update();
+        renderer.render(scene, camera);
+      });
 
-window.addEventListener("resize", () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-});
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
 
-await renderer.compileAsync(scene, camera);
-</script>
-</body>
+      await renderer.compileAsync(scene, camera);
+    </script>
+  </body>
 </html>

@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Three WebGPU TSL Clouds</title>
+
+<style>
+body{margin:0;overflow:hidden;background:#87CEEB}
+</style>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.183.0/build/three.module.js",
+    "three/webgpu": "https://unpkg.com/three@0.183.0/build/three.webgpu.js",
+    "three/tsl": "https://unpkg.com/three@0.183.0/build/three.tsl.js"
+  }
+}
+</script>
+
+</head>
+<body>
+
+<script type="module">
+
+import * as THREE from "three";
+import { WebGPURenderer, MeshBasicNodeMaterial } from "three/webgpu";
+import { texture, uv, attribute } from "three/tsl";
+
+
+if (!navigator.gpu) {
+ document.body.innerHTML = "WebGPU not supported";
+ throw new Error("WebGPU not supported");
+}
+
+
+// Scene
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87ceeb);
+
+
+// Camera
+const camera = new THREE.PerspectiveCamera(
+60,
+window.innerWidth/window.innerHeight,
+0.1,
+1000
+);
+camera.position.set(0,2,10);
+
+
+// Renderer
+const renderer = new WebGPURenderer({antialias:true});
+renderer.setSize(window.innerWidth,window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+
+// Texture
+const loader = new THREE.TextureLoader();
+
+const cloudTexture = loader.load(
+"https://rawcdn.githack.com/pmndrs/drei-assets/9225a9f1fbd449d9411125c2f419b843d0308c9f/cloud.png"
+);
+
+
+// Geometry
+const COUNT = 200;
+
+const geometry = new THREE.PlaneGeometry(1,1);
+
+const opacityArray = new Float32Array(COUNT);
+
+for(let i=0;i<COUNT;i++){
+ opacityArray[i] = Math.random();
+}
+
+geometry.setAttribute(
+"cloudOpacity",
+new THREE.InstancedBufferAttribute(opacityArray,1)
+);
+
+
+// TSL material
+const opacityAttr = attribute("cloudOpacity");
+
+const tex = texture(cloudTexture, uv());
+
+const material = new MeshBasicNodeMaterial();
+
+material.colorNode = tex.rgb;
+material.opacityNode = tex.a.mul(opacityAttr);
+
+material.transparent = true;
+material.depthWrite = false;
+
+
+// Instanced clouds
+const clouds = new THREE.InstancedMesh(geometry,material,COUNT);
+scene.add(clouds);
+
+
+// Cloud data
+const positions = [];
+const scales = [];
+
+for(let i=0;i<COUNT;i++){
+
+positions.push(
+new THREE.Vector3(
+(Math.random()-0.5)*20,
+Math.random()*4,
+(Math.random()-0.5)*20
+)
+);
+
+scales.push(2+Math.random()*4);
+
+}
+
+
+const dummy = new THREE.Object3D();
+const clock = new THREE.Clock();
+
+
+// Animation
+function animate(){
+
+const t = clock.getElapsedTime();
+
+for(let i=0;i<COUNT;i++){
+
+const p = positions[i];
+
+dummy.position.copy(p);
+dummy.position.y += Math.sin(t*0.2+i)*0.3;
+
+// billboard
+dummy.quaternion.copy(camera.quaternion);
+
+const s = scales[i] + Math.sin(t+i)*0.2;
+dummy.scale.setScalar(s);
+
+dummy.updateMatrix();
+
+clouds.setMatrixAt(i,dummy.matrix);
+
+}
+
+clouds.instanceMatrix.needsUpdate = true;
+
+renderer.render(scene,camera);
+
+}
+
+renderer.setAnimationLoop(animate);
+
+
+// Resize
+window.addEventListener("resize",()=>{
+
+camera.aspect = window.innerWidth/window.innerHeight;
+camera.updateProjectionMatrix();
+
+renderer.setSize(window.innerWidth,window.innerHeight);
+
+});
+
+</script>
+
+</body>
+</html>

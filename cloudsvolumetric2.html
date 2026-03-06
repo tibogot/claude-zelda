@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Unreal-Style TSL Volumetric Clouds</title>
+<style>
+  body { margin: 0; overflow: hidden; background: #0a1a2f; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+
+<script type="module">
+import * as THREE from "three/webgpu";
+import { 
+    vec3, vec4, float, color, Fn, Loop,
+    cameraPosition, positionWorld,
+    mx_noise_float, uniform, normalize, sub, time,
+    dot, pow, remap, exp, If
+} from "three/tsl";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+if (!navigator.gpu) {
+    document.body.innerHTML = "WebGPU not supported on this browser.";
+    throw new Error("WebGPU not supported");
+}
+
+// --- Scene Setup ---
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.set(0, 30, 80);
+
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x87CEEB); 
+document.body.appendChild(renderer.domElement);
+
+await renderer.init(); // Rule: Always await init()
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+// --- Add the Ground Mesh ---
+const groundTexture = new THREE.TextureLoader().load("https://rawcdn.githack.com/pmndrs/drei-assets/9225a9f1fbd449d9411125c2f419b843d0308c9f/grid.png");
+groundTexture.wrapS = groundTexture.wrapT = THREE.RepeatWrapping;
+groundTexture.repeat.set(50, 50);
+
+const groundGeom = new THREE.PlaneGeometry(1000, 1000);
+const groundMat = new THREE.MeshStandardMaterial({ color: 0xcccccc, map: groundTexture });
+const groundMesh = new THREE.Mesh(groundGeom, groundMat);
+groundMesh.rotation.x = -Math.PI / 2;
+groundMesh.position.y = -50;
+scene.add(groundMesh);
+
+// Add basic lighting for the ground
+scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+const dirLight = new THREE.DirectionalLight(0xffffff, 1.5);
+dirLight.position.set(100, 100, 100);
+scene.add(dirLight);
+
+// --- TSL High-End Volumetric Shader ---
+const sunDirection = uniform(new THREE.Vector3(0.5, 0.5, 0.5).normalize());
+
+// Fractal Brownian Motion (FBM) helper Fn for detailed shapes
+const fbmCloud = Fn(({ pos }) => {
+    const scale = pos.toVar();
+    const noise = mx_noise_float(scale).toVar();
+    
+    // Octave 2 (smaller details)
+    noise.addAssign(mx_noise_float(scale.mul(2.13)).mul(0.5));
+    // Octave 3 (wispy edges)
+    noise.addAssign(mx_noise_float(scale.mul(4.55)).mul(0.25));
+    
+    // Shape the density (creates "puffs" instead of uniform fog)
+    return remap(noise, float(-0.5), float(1.2), float(0.0), float(1.0)).smoothstep(0.4, 1.0);
+});
+
+const cloudShader = Fn(() => {
+    // Manually calculate Ray Direction to avoid build errors
+    const rayDir = normalize(sub(positionWorld, cameraPosition));
+    const rayStart = cameraPosition;
+    
+    // Performance vs Quality
+    const steps = 64; 
+    const stepSize = float(1.5);
+    const wind = time.mul(0.2); // Rule: use 'time' instead of timerLocal
+
+    const finalColor = vec3(0).toVar(); // Rule: .toVar() for mutable variables
+    const transmittance = float(1.0).toVar();
+
+    // Raymarching Loop
+    Loop(steps, ({ i }) => {
+        const p = rayStart.add(rayDir.mul(float(i).mul(stepSize)));
+        
+        // Use FBM for complex shaping
+        const baseCoords = p.mul(0.05).add(vec3(wind, 0, 0));
+        const density = fbmCloud({ pos: baseCoords }).mul(0.15); // Adjust multiplier for thickness
+
+        // Optimization: Only do light math if there is density
+        If(density.greaterThan(0.01), () => {
+            
+            // Light Sampling (Self-Shadowing) toward the sun
+            const lightPos = baseCoords.add(sunDirection.mul(0.2));
+            const shadowSample = mx_noise_float(lightPos).remap(-0.5, 1.2, 0.0, 1.0).smoothstep(0.4, 1.0);
+            
+            // TSL Beer's Law (simplified): Density in light path absorbes energy
+            const lightEnergy = exp(shadowSample.negate().mul(3.0));
+            
+            // TSL Henyey-Greenstein Scattering (creates that "Silver Lining" forward scatter)
+            const cosTheta = dot(rayDir, sunDirection);
+            const scattering = float(1.0).add(pow(cosTheta.mul(0.5).add(0.5), 10.0)).mul(2.0);
+
+            const cloudCol = color(0xffffff).mul(lightEnergy).mul(scattering);
+
+            // Accumulate and Attenuate
+            finalColor.addAssign(cloudCol.mul(density).mul(transmittance));
+            transmittance.mulAssign(float(1.0).sub(density));
+        });
+    });
+
+    return vec4(finalColor, float(1.0).sub(transmittance));
+});
+
+// --- Create the Volume Box ---
+// This acts as the boundary of your atmospheric layer
+const geometry = new THREE.BoxGeometry(200, 60, 200);
+const material = new THREE.MeshBasicNodeMaterial();
+material.colorNode = cloudShader();
+material.transparent = true;
+material.side = THREE.BackSide; 
+material.depthWrite = false;
+
+const volume = new THREE.Mesh(geometry, material);
+volume.position.y = 40; 
+scene.add(volume);
+
+// --- Animation ---
+function animate() {
+    controls.update();
+    renderer.render(scene, camera);
+    requestAnimationFrame(animate);
+}
+animate();
+
+window.addEventListener("resize", () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>
