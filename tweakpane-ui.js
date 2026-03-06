@@ -1617,7 +1617,7 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
     .addButton({ title: "↺ Rebuild Forest" })
     .on("click", rebuildOctahedralForest);
 
-  const fShadows = pane.addFolder({ title: "Shadows", expanded: false });
+  const fShadows = pane.addFolder({ title: "Shadows (CSM)", expanded: false });
   fShadows.addBinding(PARAMS, "shadowBias", {
     min: -0.01,
     max: 0.01,
@@ -1629,6 +1629,33 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
     max: 0.2,
     step: 0.01,
     label: "normal bias",
+  });
+  fShadows.addBinding(PARAMS, "csmUpdateEveryFrame", {
+    label: "update every frame",
+  });
+  fShadows.addBinding(PARAMS, "csmCascades", {
+    min: 1,
+    max: 4,
+    step: 1,
+    label: "cascades",
+  });
+  fShadows.addBinding(PARAMS, "csmMaxFar", {
+    min: 50,
+    max: 500,
+    step: 10,
+    label: "maxFar",
+  });
+  fShadows.addBinding(PARAMS, "csmLightMargin", {
+    min: 0,
+    max: 300,
+    step: 10,
+    label: "lightMargin",
+  });
+  fShadows.addBinding(PARAMS, "csmMapSize", {
+    min: 512,
+    max: 4096,
+    step: 512,
+    label: "mapSize",
   });
 
   return { bNear, bLod1, bLod2 };

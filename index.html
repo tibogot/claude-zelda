@@ -354,8 +354,8 @@
           sunDirectionFromAngles(PARAMS.sunAzimuth, PARAMS.sunElevation).multiplyScalar(50),
         );
         dirLight.castShadow = true;
-        dirLight.shadow.mapSize.width = 2048;
-        dirLight.shadow.mapSize.height = 2048;
+        dirLight.shadow.mapSize.width = PARAMS.csmMapSize;
+        dirLight.shadow.mapSize.height = PARAMS.csmMapSize;
         dirLight.shadow.camera.near = 1;
         dirLight.shadow.camera.far = 200;
         dirLight.shadow.camera.left = -80;
@@ -367,11 +367,15 @@
 
         // CSM — cascaded shadow maps for quality across the full terrain
         const csm = new CSMShadowNode(dirLight, {
-          cascades: 3,
-          maxFar: 150,
+          cascades: PARAMS.csmCascades,
+          maxFar: PARAMS.csmMaxFar,
           mode: "practical",
-          lightMargin: 100,
+          lightMargin: PARAMS.csmLightMargin,
         });
+        let lastCsmCascades = PARAMS.csmCascades;
+        let lastCsmMaxFar = PARAMS.csmMaxFar;
+        let lastCsmLightMargin = PARAMS.csmLightMargin;
+        let lastCsmMapSize = PARAMS.csmMapSize;
 
         // Sphere-bounding patch: replaces AABB bounding with a rotation-invariant
         // bounding sphere so cascade projection sizes stay constant as camera rotates.
@@ -1857,6 +1861,26 @@
           if (castleExteriorGroup) checkCastleDoor(charPos);
 
           syncUniforms();
+          // Apply CSM param changes when changed (updateFrustums is expensive)
+          const csmChanged =
+            PARAMS.csmCascades !== lastCsmCascades ||
+            PARAMS.csmMaxFar !== lastCsmMaxFar ||
+            PARAMS.csmLightMargin !== lastCsmLightMargin ||
+            PARAMS.csmMapSize !== lastCsmMapSize;
+          if (csmChanged) {
+            lastCsmCascades = PARAMS.csmCascades;
+            lastCsmMaxFar = PARAMS.csmMaxFar;
+            lastCsmLightMargin = PARAMS.csmLightMargin;
+            lastCsmMapSize = PARAMS.csmMapSize;
+            csm.cascades = PARAMS.csmCascades;
+            csm.maxFar = PARAMS.csmMaxFar;
+            csm.lightMargin = PARAMS.csmLightMargin;
+            dirLight.shadow.mapSize.width = PARAMS.csmMapSize;
+            dirLight.shadow.mapSize.height = PARAMS.csmMapSize;
+            if (csm.frustums) csm.updateFrustums();
+          }
+          // Optional: update frustums every frame to avoid shadows disappearing at certain angles
+          if (PARAMS.csmUpdateEveryFrame && csm.frustums) csm.updateFrustums();
           uniforms.uTime.value = elapsed;
           uniforms.uPlayerPos.value.copy(charPos);
           uniforms.uTrailCenter.value.set(charPos.x, charPos.z);

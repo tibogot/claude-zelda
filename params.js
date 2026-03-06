@@ -259,7 +259,12 @@ export const PARAMS = {
   birdsCohesion: 30,
   shadowBias: -0.002,
   shadowNormalBias: 0.08,
-  // Folio foliage (bushes + trees) — colors and cheap realism
+  csmCascades: 3,
+  csmMaxFar: 150,
+  csmLightMargin: 100,
+  csmMapSize: 2048,
+  csmUpdateEveryFrame: false,
+  // Folio foliage
   foliageBushColorA: "#b4b536",
   foliageBushColorB: "#d8cf3b",
   foliageTreeColorA: "#8fa835",
