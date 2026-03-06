@@ -679,31 +679,51 @@ export function setupTweakpaneUI(pane, PARAMS, ctx) {
     expanded: false,
   });
   fSun
-    .addBinding(PARAMS, "sunDirX", { min: -2, max: 2, step: 0.1 })
+    .addBinding(PARAMS, "sunAzimuth", {
+      min: 0,
+      max: 360,
+      step: 1,
+      label: "sun azimuth",
+    })
     .on("change", bakeEnvMap);
   fSun
-    .addBinding(PARAMS, "sunDirY", { min: 0.1, max: 2, step: 0.05 })
-    .on("change", bakeEnvMap);
-  fSun
-    .addBinding(PARAMS, "sunDirZ", { min: -2, max: 2, step: 0.1 })
+    .addBinding(PARAMS, "sunElevation", {
+      min: -10,
+      max: 90,
+      step: 1,
+      label: "sun elevation",
+    })
     .on("change", bakeEnvMap);
   fSun.addBinding(PARAMS, "sunIntensity", {
     min: 0.5,
     max: 5,
     step: 0.25,
+    label: "sun intensity",
   });
-  fSun.addBinding(PARAMS, "sceneAmbient", {
+  fSun.addBinding(PARAMS, "dirColor", {
+    view: "color",
+    label: "sun color",
+  });
+  fSun.addBinding(PARAMS, "hemiSkyColor", {
+    view: "color",
+    label: "ambient sky",
+  });
+  fSun.addBinding(PARAMS, "hemiGroundColor", {
+    view: "color",
+    label: "ambient ground",
+  });
+  fSun.addBinding(PARAMS, "hemiIntensity", {
     min: 0,
-    max: 4,
+    max: 3,
     step: 0.1,
-    label: "ambientLight",
+    label: "ambient intensity",
   });
   fSun.addBinding(PARAMS, "exposure", { min: 0.2, max: 2, step: 0.05 });
   fSun.addBinding(PARAMS, "environmentIntensity", {
     min: 0.1,
     max: 1.5,
     step: 0.05,
-    label: "env intensity",
+    label: "env map",
   });
   const fPost = pane.addFolder({
     title: "Post Processing",

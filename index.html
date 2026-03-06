@@ -336,14 +336,22 @@
         orbitControls.update();
 
         // ── LIGHTING ──
+        function sunDirectionFromAngles(azimuthDeg, elevationDeg) {
+          const az = (azimuthDeg * Math.PI) / 180;
+          const el = (elevationDeg * Math.PI) / 180;
+          const cosEl = Math.cos(el);
+          return new THREE.Vector3(
+            cosEl * Math.cos(az),
+            Math.sin(el),
+            cosEl * Math.sin(az),
+          ).normalize();
+        }
         const dirLight = new THREE.DirectionalLight(
-          0xfff5e0,
+          PARAMS.dirColor,
           PARAMS.sunIntensity,
         );
         dirLight.position.copy(
-          new THREE.Vector3(PARAMS.sunDirX, PARAMS.sunDirY, PARAMS.sunDirZ)
-            .normalize()
-            .multiplyScalar(50),
+          sunDirectionFromAngles(PARAMS.sunAzimuth, PARAMS.sunElevation).multiplyScalar(50),
         );
         dirLight.castShadow = true;
         dirLight.shadow.mapSize.width = 2048;
@@ -420,9 +428,9 @@
         dirLight.target = shadowTarget;
 
         const hemiLight = new THREE.HemisphereLight(
-          0xc8e0ff,
-          0x88aa55,
-          PARAMS.sceneAmbient,
+          PARAMS.hemiSkyColor,
+          PARAMS.hemiGroundColor,
+          PARAMS.hemiIntensity,
         );
         scene.add(hemiLight);
 
@@ -479,7 +487,7 @@
           const uWaveDir2 = uniform(PARAMS.waterWaveDirection2);
           const uWaterCameraPosition = uniform(new THREE.Vector3());
           const uWaterSunDirection = uniform(
-            new THREE.Vector3(PARAMS.sunDirX, PARAMS.sunDirY, PARAMS.sunDirZ).normalize(),
+            sunDirectionFromAngles(PARAMS.sunAzimuth, PARAMS.sunElevation).clone(),
           );
           const uLakeCenter = uniform(new THREE.Vector2(PARAMS.lakeCenterX, PARAMS.lakeCenterZ));
           const uLakeHalfSize = uniform(PARAMS.lakeHalfSize);
@@ -601,11 +609,7 @@
         // PMREMGenerator: bakes the sky into an env map so PBR materials get IBL from the visible sky
         const pmremGenerator = new THREE.PMREMGenerator(renderer);
         function updateSkyParams() {
-          const sd = new THREE.Vector3(
-            PARAMS.sunDirX,
-            PARAMS.sunDirY,
-            PARAMS.sunDirZ,
-          ).normalize();
+          const sd = sunDirectionFromAngles(PARAMS.sunAzimuth, PARAMS.sunElevation);
           sky.sunPosition.value.copy(sd);
           sky.turbidity.value = PARAMS.skyTurbidity;
           sky.rayleigh.value = PARAMS.skyRayleigh;
@@ -1825,7 +1829,7 @@
           }
 
           // Sun is fixed in world space (no longer follows player). CSM still follows camera for shadow quality.
-          _sunDir.set(PARAMS.sunDirX, PARAMS.sunDirY, PARAMS.sunDirZ).normalize();
+          _sunDir.copy(sunDirectionFromAngles(PARAMS.sunAzimuth, PARAMS.sunElevation));
           if (octahedralForest && PARAMS.octahedralForestEnabled)
             octahedralForest.updateSunDir(_sunDir);
 
@@ -1859,7 +1863,7 @@
           if (waterMesh && waterUniforms) {
             waterUniforms.uWaterTime.value = elapsed;
             waterUniforms.uWaterCameraPosition.value.copy(camera.position);
-            waterUniforms.uWaterSunDirection.value.set(PARAMS.sunDirX, PARAMS.sunDirY, PARAMS.sunDirZ).normalize();
+            waterUniforms.uWaterSunDirection.value.copy(sunDirectionFromAngles(PARAMS.sunAzimuth, PARAMS.sunElevation));
             waterUniforms.uLakeCenter.value.set(PARAMS.lakeCenterX, PARAMS.lakeCenterZ);
             waterUniforms.uLakeHalfSize.value = PARAMS.lakeHalfSize;
             waterUniforms.uWaterColor.value.copy(new THREE.Color(PARAMS.waterColor).convertSRGBToLinear());

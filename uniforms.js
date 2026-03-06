@@ -12,6 +12,17 @@ function srgbToLinear(hex) {
   return c;
 }
 
+function sunDirectionFromAngles(azimuthDeg, elevationDeg) {
+  const az = (azimuthDeg * Math.PI) / 180;
+  const el = (elevationDeg * Math.PI) / 180;
+  const cosEl = Math.cos(el);
+  return new THREE.Vector3(
+    cosEl * Math.cos(az),
+    Math.sin(el),
+    cosEl * Math.sin(az),
+  ).normalize();
+}
+
 /**
  * @param {object} PARAMS
  * @param {number} TERRAIN_SIZE
@@ -103,11 +114,7 @@ export function createUniforms(PARAMS, TERRAIN_SIZE, NPC_COUNT) {
   const uSeasonalScale = uniform(PARAMS.seasonalScale);
   const uSeasonalDryColor = uniform(srgbToLinear(PARAMS.seasonalDryColor));
   const uSunDir = uniform(
-    new THREE.Vector3(
-      PARAMS.sunDirX,
-      PARAMS.sunDirY,
-      PARAMS.sunDirZ,
-    ).normalize(),
+    sunDirectionFromAngles(PARAMS.sunAzimuth, PARAMS.sunElevation).clone(),
   );
   const uSunIntensity = uniform(PARAMS.sunIntensity);
   const uSunScreenPos = uniform(new THREE.Vector2(0.5, 0.5));
@@ -395,11 +402,7 @@ export function createSyncUniforms(u, deps, lastState) {
     u.uSeasonalScale.value = PARAMS.seasonalScale;
     u.uSeasonalDryColor.value.copy(srgbToLinear(PARAMS.seasonalDryColor));
     syncTerrainUniforms(PARAMS);
-    const sd = new THREE.Vector3(
-      PARAMS.sunDirX,
-      PARAMS.sunDirY,
-      PARAMS.sunDirZ,
-    ).normalize();
+    const sd = sunDirectionFromAngles(PARAMS.sunAzimuth, PARAMS.sunElevation);
     u.uSunDir.value.copy(sd);
     // Sun screen position for god rays (project sun direction to NDC)
     const sunWorld = camera.position.clone().add(sd.clone().multiplyScalar(500000));
@@ -410,9 +413,12 @@ export function createSyncUniforms(u, deps, lastState) {
     const ndcY = v4.y / v4.w;
     u.uSunScreenPos.value.set(ndcX * 0.5 + 0.5, ndcY * 0.5 + 0.5);
     dirLight.position.copy(sd.clone().multiplyScalar(50));
+    dirLight.color.set(PARAMS.dirColor);
     dirLight.intensity = PARAMS.sunIntensity;
     u.uSunIntensity.value = PARAMS.sunIntensity;
-    hemiLight.intensity = PARAMS.sceneAmbient;
+    hemiLight.color.set(PARAMS.hemiSkyColor);
+    hemiLight.groundColor.set(PARAMS.hemiGroundColor);
+    hemiLight.intensity = PARAMS.hemiIntensity;
     renderer.toneMappingExposure = PARAMS.exposure;
     scene.environmentIntensity = PARAMS.environmentIntensity;
     updateSkyParams();
