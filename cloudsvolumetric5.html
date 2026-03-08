@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Volumetric Clouds – AAA Controls</title>
+<style>
+  body { margin: 0; overflow: hidden; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/tweakpane@3.1.10/dist/tweakpane.min.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<script type="module">
+import * as THREE from "three/webgpu";
+import {
+  vec3, vec4, float, color, mix, Fn, Loop, If,
+  cameraPosition, positionWorld,
+  mx_noise_float, uniform, normalize, sub, time,
+  dot, pow, remap, exp
+} from "three/tsl";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+if (!navigator.gpu) {
+  document.body.innerHTML = "WebGPU not supported.";
+  throw new Error("WebGPU not supported");
+}
+
+// ─── Renderer & Scene ─────────────────────────────────────────────────────────
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(65, innerWidth / innerHeight, 0.5, 3000);
+camera.position.set(0, 22, 110);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 8, 0);
+controls.maxDistance = 1800;
+controls.minDistance = 2;
+
+// ─── Lighting ─────────────────────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0xd0e8ff, 0.7));
+const sunLight = new THREE.DirectionalLight(0xfff8e0, 2.5);
+scene.add(sunLight);
+
+// ─── Terrain ──────────────────────────────────────────────────────────────────
+function terrainH(x, z) {
+  const s = 0.012;
+  return (
+    Math.sin(x * s)          * Math.cos(z * s)          * 20 +
+    Math.sin(x * s * 2.4 + 0.7) * Math.cos(z * s * 1.8 + 0.3) * 10 +
+    Math.sin(x * s * 5.1 + 1.1) * Math.cos(z * s * 4.3 + 0.9) * 5  +
+    Math.sin(x * s * 11.3)  * Math.cos(z * s * 9.1)     * 2
+  );
+}
+const tGeo = new THREE.PlaneGeometry(1000, 1000, 180, 180);
+tGeo.rotateX(-Math.PI / 2);
+const tPos = tGeo.attributes.position;
+for (let i = 0; i < tPos.count; i++) tPos.setY(i, terrainH(tPos.getX(i), tPos.getZ(i)));
+tPos.needsUpdate = true;
+tGeo.computeVertexNormals();
+scene.add(new THREE.Mesh(tGeo, new THREE.MeshStandardMaterial({ color: 0x4a8c3f, roughness: 0.95 })));
+
+// ─── All TSL uniforms — driven by TweakPane ────────────────────────────────────
+const sunDir          = uniform(new THREE.Vector3(0.4, 0.85, 0.25).normalize());
+const skyZenithU      = uniform(new THREE.Color(0x1a4a80));
+const skyHorizonU     = uniform(new THREE.Color(0x82c0f0));
+const cloudBaseU      = uniform(140.0);
+const cloudTopU       = uniform(280.0);
+const cloudScaleU     = uniform(0.007);
+const cloudDensityU   = uniform(0.12);
+const cloudCoverageU  = uniform(0.5);    // 0=clear sky, 1=full overcast
+const windSpeedU      = uniform(0.22);
+const vSquishU        = uniform(0.38);   // vertical noise squish → cumulus flat-bottom
+const shadowStrU      = uniform(5.5);    // self-shadow strength
+const hgPowerU        = uniform(7.0);    // HG forward-scatter sharpness
+const hgStrengthU     = uniform(1.6);    // HG overall strength
+const horizFadeMinU   = uniform(0.04);   // horizon fade start angle
+const horizFadeMaxU   = uniform(0.18);   // horizon fade end angle
+
+// ─── Cloud + Sky Shader (opaque — sky gradient baked in) ──────────────────────
+const CLOUD_STEPS = 36;
+
+const fbmCloud = Fn(({ pos }) => {
+  const p = pos.toVar();
+  const n = mx_noise_float(p).toVar();
+  n.addAssign(mx_noise_float(p.mul(2.07)).mul(0.5));
+  n.addAssign(mx_noise_float(p.mul(4.31)).mul(0.25));
+  n.addAssign(mx_noise_float(p.mul(8.73)).mul(0.125));
+  // Coverage: higher = more cloud (lower smoothstep threshold)
+  const threshold = float(1.0).sub(cloudCoverageU).mul(0.78);
+  return remap(n, float(-0.6), float(1.3), float(0.0), float(1.0)).smoothstep(threshold, float(1.0));
+});
+
+const cloudShader = Fn(() => {
+  const rd = normalize(sub(positionWorld, cameraPosition)).toVar();
+  const ro = cameraPosition.toVar();
+
+  // ── Sky gradient + sun disc (baked in so sphere is fully opaque) ──────────
+  const upT    = rd.y.mul(0.5).add(0.5).smoothstep(0.0, 0.7);
+  const skyCol = mix(skyHorizonU, skyZenithU, upT).toVar();
+
+  // Sun disc: bright point + two halo rings
+  const sd     = dot(rd, sunDir).clamp(0.0, 1.0);
+  const disc   = pow(sd, float(512.0)).mul(float(9.0));
+  const halo1  = pow(sd, float(14.0)).mul(float(1.4));
+  const halo2  = pow(sd, float(4.0)).mul(float(0.35));
+  skyCol.addAssign(color(0xfff5d0).mul(disc.add(halo1).add(halo2)));
+
+  // Horizon glow near the sun
+  const horizGlow = pow(sd.mul(float(1.0).sub(rd.y.abs())), float(5.0)).mul(float(0.5));
+  skyCol.addAssign(color(0xffcc80).mul(horizGlow));
+
+  // ── Volumetric cloud raymarch ─────────────────────────────────────────────
+  const finalColor    = vec3(0.0).toVar();
+  const transmittance = float(1.0).toVar();
+
+  If(rd.y.greaterThan(float(0.005)), () => {
+    const invY   = float(1.0).div(rd.y);
+    const tBase  = cloudBaseU.sub(ro.y).mul(invY);
+    const tTop   = cloudTopU.sub(ro.y).mul(invY);
+    const tEntry = tBase.min(tTop).max(float(0.0)).toVar();
+    const tExit  = tBase.max(tTop).max(float(0.0)).toVar();
+    const sLen   = tExit.sub(tEntry).max(float(0.001)).toVar();
+    const step   = sLen.div(float(CLOUD_STEPS)).toVar();
+    const wind   = time.mul(windSpeedU).toVar();
+
+    Loop(CLOUD_STEPS, ({ i }) => {
+      const t = tEntry.add(float(i).add(0.5).mul(step));
+      const p = ro.add(rd.mul(t));
+
+      // Cumulus profile: flat bottom (squished Y), puffy top
+      const bFade = p.y.sub(cloudBaseU).div(float(20.0)).clamp(0.0, 1.0);
+      const tFade = cloudTopU.sub(p.y).div(float(25.0)).clamp(0.0, 1.0);
+      const hFade = bFade.mul(tFade);
+
+      // vSquish < 1 = flat bottom cumulus look; = 1 = spherical blobs
+      const coords  = vec3(p.x, p.y.mul(vSquishU), p.z).mul(cloudScaleU).add(vec3(wind, float(0.0), float(0.0)));
+      const rawD    = fbmCloud({ pos: coords });
+      const density = rawD.mul(hFade).mul(cloudDensityU);
+
+      If(density.greaterThan(float(0.004)).and(transmittance.greaterThan(float(0.01))), () => {
+        // Self-shadowing toward sun (cloud AO)
+        const shadowC = coords.add(sunDir.mul(float(0.6)));
+        const shadowD = mx_noise_float(shadowC).remap(-0.5, 1.2, 0.0, 1.0).smoothstep(0.28, 1.0);
+        const lightE  = exp(shadowD.negate().mul(shadowStrU));
+
+        // Ambient occlusion: darker at flat base, brighter on top
+        const cloudAO = bFade.mul(float(0.6)).add(float(0.4));
+
+        // Henyey-Greenstein forward scattering (silver lining)
+        const cosT = dot(rd, sunDir);
+        const hg   = float(1.0).add(pow(cosT.mul(0.5).add(0.5), hgPowerU)).mul(hgStrengthU);
+
+        // Cloud color: sunlit white-warm + ambient sky bounce
+        const cloudCol = color(0xfff6e0).mul(lightE).mul(hg).mul(cloudAO)
+                          .add(mix(skyHorizonU, skyZenithU, float(0.3)).mul(float(0.3)));
+
+        finalColor.addAssign(cloudCol.mul(density).mul(transmittance));
+        transmittance.mulAssign(float(1.0).sub(density));
+      });
+    });
+  });
+
+  // ── Composite: sky * transmittance + cloud inscattering ──────────────────
+  // Horizon fade: clouds dissolve near horizon, revealing clean sky gradient
+  const hf     = rd.y.smoothstep(horizFadeMinU, horizFadeMaxU);
+  const tEff   = float(1.0).sub(hf.mul(float(1.0).sub(transmittance)));
+  const result = skyCol.mul(tEff).add(finalColor.mul(hf));
+
+  return vec4(result, float(1.0));   // fully opaque — terrain renders over this
+});
+
+// Opaque sky+cloud sphere: renders before terrain as background
+const skyGeo = new THREE.SphereGeometry(1800, 64, 32);
+const skyMat = new THREE.MeshBasicNodeMaterial();
+skyMat.colorNode = cloudShader();
+skyMat.side       = THREE.BackSide;
+skyMat.depthWrite = false;
+skyMat.depthTest  = false;   // always behind; terrain (renderOrder 0) overwrites it
+
+const skySphere       = new THREE.Mesh(skyGeo, skyMat);
+skySphere.renderOrder = -1;
+scene.add(skySphere);
+
+// ─── TweakPane ────────────────────────────────────────────────────────────────
+const params = {
+  // Cloud shape
+  cloudBase:     140,
+  cloudTop:      280,
+  cloudCoverage: 0.5,
+  cloudDensity:  0.12,
+  cloudScale:    0.007,
+  vSquish:       0.38,
+  // Wind
+  windSpeed:     0.22,
+  // Lighting
+  shadowStr:     5.5,
+  hgPower:       7.0,
+  hgStrength:    1.6,
+  // Horizon
+  horizFadeMin:  0.04,
+  horizFadeMax:  0.18,
+  // Sky
+  skyZenith:    '#1a4a80',
+  skyHorizon:   '#82c0f0',
+};
+
+const pane = new Tweakpane.Pane({ title: 'Cloud Controls' });
+
+const fShape = pane.addFolder({ title: '☁  Shape', expanded: true });
+fShape.addInput(params, 'cloudBase',    { min: 30,   max: 500,  step: 5,     label: 'Base Height'   }).on('change', ({ value }) => { cloudBaseU.value     = value; });
+fShape.addInput(params, 'cloudTop',     { min: 80,   max: 800,  step: 5,     label: 'Top Height'    }).on('change', ({ value }) => { cloudTopU.value      = value; });
+fShape.addInput(params, 'cloudCoverage',{ min: 0,    max: 1,                 label: 'Coverage'      }).on('change', ({ value }) => { cloudCoverageU.value = value; });
+fShape.addInput(params, 'cloudDensity', { min: 0.01, max: 0.5,               label: 'Density'       }).on('change', ({ value }) => { cloudDensityU.value  = value; });
+fShape.addInput(params, 'cloudScale',   { min: 0.002,max: 0.025,             label: 'Scale'         }).on('change', ({ value }) => { cloudScaleU.value    = value; });
+fShape.addInput(params, 'vSquish',      { min: 0.1,  max: 1.0,               label: 'Vertical Squish (flat-bottom ↓)' }).on('change', ({ value }) => { vSquishU.value       = value; });
+
+const fWind = pane.addFolder({ title: '💨 Wind', expanded: false });
+fWind.addInput(params, 'windSpeed', { min: 0, max: 5, label: 'Speed' }).on('change', ({ value }) => { windSpeedU.value = value; });
+
+const fLight = pane.addFolder({ title: '☀  Lighting', expanded: true });
+fLight.addInput(params, 'shadowStr',  { min: 0, max: 15, label: 'Shadow Strength'     }).on('change', ({ value }) => { shadowStrU.value  = value; });
+fLight.addInput(params, 'hgPower',    { min: 1, max: 30, label: 'Scatter Sharpness'   }).on('change', ({ value }) => { hgPowerU.value    = value; });
+fLight.addInput(params, 'hgStrength', { min: 0.5, max: 4, label: 'Scatter Strength'   }).on('change', ({ value }) => { hgStrengthU.value = value; });
+
+const fHoriz = pane.addFolder({ title: '🌅 Horizon', expanded: false });
+fHoriz.addInput(params, 'horizFadeMin', { min: 0,    max: 0.2,  label: 'Fade Start Angle' }).on('change', ({ value }) => { horizFadeMinU.value = value; });
+fHoriz.addInput(params, 'horizFadeMax', { min: 0.05, max: 0.5,  label: 'Fade End Angle'   }).on('change', ({ value }) => { horizFadeMaxU.value = value; });
+
+const fSky = pane.addFolder({ title: '🌤  Sky', expanded: false });
+fSky.addInput(params, 'skyZenith',  { view: 'color', label: 'Zenith'  }).on('change', ({ value }) => { skyZenithU.value.set(value);  });
+fSky.addInput(params, 'skyHorizon', { view: 'color', label: 'Horizon' }).on('change', ({ value }) => { skyHorizonU.value.set(value); });
+
+// ─── Animate ──────────────────────────────────────────────────────────────────
+function animate() {
+  controls.update();
+  skySphere.position.copy(camera.position); // sphere always centered on camera
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
+animate();
+
+window.addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>

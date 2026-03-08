@@ -1,0 +1,2290 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Waterfall — Voronoi Splits v2</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        background: #2a2a3e;
+        overflow: hidden;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #pane-container {
+        border-radius: 8px;
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.3/dist/tweakpane.min.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
+      import {
+        Fn,
+        uniform,
+        float,
+        vec2,
+        vec3,
+        vec4,
+        uv,
+        mix,
+        smoothstep,
+        floor,
+        fract,
+        sin,
+        cos,
+        dot,
+        length,
+        min,
+        oneMinus,
+        If,
+        positionWorld,
+        normalWorld,
+        normalize,
+        pow,
+        saturate,
+        sub,
+      } from "three/tsl";
+
+      /* ================================================================
+         NOISE
+         ================================================================ */
+
+      const gradientNoise = Fn(([p]) => {
+        const i = floor(p).toVar();
+        const f = fract(p).toVar();
+        const uu = f
+          .mul(f)
+          .mul(f)
+          .mul(f.mul(f.mul(6).sub(15)).add(10));
+        const rg = Fn(([ip]) => {
+          const a = fract(sin(dot(ip, vec2(127.1, 311.7))).mul(43758.5453)).mul(
+            Math.PI * 2,
+          );
+          return vec2(cos(a), sin(a));
+        });
+        const d00 = dot(rg(i), f);
+        const d10 = dot(rg(i.add(vec2(1, 0))), f.sub(vec2(1, 0)));
+        const d01 = dot(rg(i.add(vec2(0, 1))), f.sub(vec2(0, 1)));
+        const d11 = dot(rg(i.add(vec2(1, 1))), f.sub(vec2(1, 1)));
+        return mix(mix(d00, d10, uu.x), mix(d01, d11, uu.x), uu.y)
+          .mul(0.5)
+          .add(0.5);
+      });
+
+      const hash22 = Fn(([p]) => {
+        const px = dot(p, vec2(127.1, 311.7));
+        const py = dot(p, vec2(269.5, 183.3));
+        return fract(sin(vec2(px, py)).mul(43758.5453));
+      });
+
+      /*
+       * Voronoi F1 with jitter control.
+       * jitter: 0 = perfect grid (points at cell centers), 1 = fully random
+       * This controls how round vs geometric the shapes are.
+       */
+      const voronoiF1 = Fn(([p, jitter]) => {
+        const ip = floor(p).toVar();
+        const fp = fract(p).toVar();
+        const md = float(10.0).toVar();
+
+        const neighbors = [
+          [-1, -1],
+          [0, -1],
+          [1, -1],
+          [-1, 0],
+          [0, 0],
+          [1, 0],
+          [-1, 1],
+          [0, 1],
+          [1, 1],
+        ];
+        for (const [nx, ny] of neighbors) {
+          const cellOffset = vec2(float(nx), float(ny));
+          const rnd = hash22(ip.add(cellOffset));
+          // jitter: 0 = point at center (0.5,0.5), 1 = fully random
+          const pt = mix(vec2(0.5, 0.5), rnd, jitter);
+          const toPoint = cellOffset.add(pt).sub(fp);
+          md.assign(min(md, length(toPoint)));
+        }
+        return md;
+      });
+
+      // fBm perlin (for organic bubbles/foam)
+      const fbmPerlin = Fn(([p, octaves, lac, gain]) => {
+        const v = float(0).toVar();
+        const a = float(1.0).toVar();
+        const fr = float(1).toVar();
+        const total = float(0).toVar();
+
+        v.addAssign(a.mul(gradientNoise(p.mul(fr))));
+        total.addAssign(a);
+        fr.mulAssign(lac);
+        a.mulAssign(gain);
+
+        const d2 = smoothstep(float(1.5), float(2.0), octaves);
+        v.addAssign(a.mul(gradientNoise(p.mul(fr))).mul(d2));
+        total.addAssign(a.mul(d2));
+        fr.mulAssign(lac);
+        a.mulAssign(gain);
+
+        const d3 = smoothstep(float(2.5), float(3.0), octaves);
+        v.addAssign(a.mul(gradientNoise(p.mul(fr))).mul(d3));
+        total.addAssign(a.mul(d3));
+        fr.mulAssign(lac);
+        a.mulAssign(gain);
+
+        const d4 = smoothstep(float(3.5), float(4.0), octaves);
+        v.addAssign(a.mul(gradientNoise(p.mul(fr))).mul(d4));
+        total.addAssign(a.mul(d4));
+
+        return v.div(total);
+      });
+
+      /*
+       * Worley cell edges: returns F2-F1 (small = on edge, large = inside cell)
+       * Uses sine-based hash for smoother, more organic point distribution
+       */
+      const worleyCellEdge = Fn(([p, jitter]) => {
+        const ip = floor(p).toVar();
+        const fp = fract(p).toVar();
+        const d1 = float(10.0).toVar();
+        const d2 = float(10.0).toVar();
+
+        const neighbors = [
+          [-1, -1],
+          [0, -1],
+          [1, -1],
+          [-1, 0],
+          [0, 0],
+          [1, 0],
+          [-1, 1],
+          [0, 1],
+          [1, 1],
+        ];
+        for (const [nx, ny] of neighbors) {
+          const cellOffset = vec2(float(nx), float(ny));
+          const cellPos = ip.add(cellOffset);
+          // Better hash: two different dot products for x,y
+          const h = vec2(
+            fract(sin(dot(cellPos, vec2(127.1, 311.7))).mul(43758.5453)),
+            fract(sin(dot(cellPos, vec2(269.5, 183.3))).mul(43758.5453)),
+          );
+          const pt = mix(vec2(0.5, 0.5), h, jitter);
+          const toPoint = cellOffset.add(pt).sub(fp);
+          const dist = length(toPoint);
+          If(dist.lessThan(d1), () => {
+            d2.assign(d1);
+            d1.assign(dist);
+          }).ElseIf(dist.lessThan(d2), () => {
+            d2.assign(dist);
+          });
+        }
+        return d2.sub(d1);
+      });
+
+      // Noise selector
+      const sampleNoise = Fn(([p, noiseType, jitter]) => {
+        const voro = voronoiF1(p, jitter);
+        const perl = gradientNoise(p);
+        return mix(voro, perl, noiseType);
+      });
+
+      /* ================================================================
+         PARAMS
+         ================================================================ */
+      const WATERFALL_COLOR_PRESETS = {
+        Green: {
+          topColor: "#a0c4b4",
+          middleColor: "#1e4a42",
+          bottomColor: "#346d66",
+        },
+        Blue: {
+          topColor: "#a8c8dc",
+          middleColor: "#1a3a52",
+          bottomColor: "#2e5a7a",
+        },
+        Teal: {
+          topColor: "#88c4b8",
+          middleColor: "#1a4a4a",
+          bottomColor: "#2a6a6a",
+        },
+      };
+
+      const POOL_COLOR_PRESETS = {
+        Green: {
+          pTopColor: "#346d66",
+          pMiddleColor: "#8ca9a8",
+          pBottomColor: "#628785",
+        },
+        Blue: {
+          pTopColor: "#2e5a7a",
+          pMiddleColor: "#6a9aba",
+          pBottomColor: "#4a7a9a",
+        },
+        Teal: {
+          pTopColor: "#2a6a6a",
+          pMiddleColor: "#5a9a9a",
+          pBottomColor: "#3a7a7a",
+        },
+      };
+
+      const P = {
+        enableWaterfall: true,
+        enablePool: true,
+        wfWidth: 8,
+        wfHeight: 8,
+        wfArcReach: 3.0,
+        poolWidth: 8,
+        poolDepth: 8,
+
+        waterfallPreset: "Green",
+        topColor: "#a0c4b4",
+        middleColor: "#1e4a42",
+        bottomColor: "#346d66",
+
+        // Split 1
+        split1Position: 0.4,
+        split1NoiseAmt: 0.15,
+        split1Sharpness: 0.01,
+        split1ScaleX: 10.0,
+        split1ScaleY: 8.0,
+        split1OffsetX: 0.0,
+        split1OffsetY: 0.0,
+        split1NoiseType: 0,
+        split1Invert: true,
+        split1Jitter: 1.0,
+
+        // Foam drip mask
+        enableFoam: true,
+        foamColor: "#ffffff",
+        foamPosition: 0.12,
+        foamNoiseAmt: 0.4,
+        foamSharpness: 0.01,
+        foamScaleX: 14.0,
+        foamScaleY: 4.0,
+        foamOctaves: 3.0,
+        foamLac: 2.0,
+        foamGain: 0.5,
+        foamOffsetX: 9.2,
+        foamOffsetY: 3.7,
+        foamInvert: false,
+        foamNoiseType: 1,
+        foamJitter: 1.0,
+        foamStrength: 1.0,
+
+        // Waterfall voronoi cell foam (same controls as pool)
+        wfEnableVoroFoam: true,
+        wfVoroFoamColor: "#ffffff",
+        wfVoroFoamScale: 10.0,
+        wfVoroFoamJitter: 1.0,
+        wfVoroFoamThreshold: 0.6,
+        wfVoroFoamSharpness: 0.06,
+        wfVoroFoamStrength: 1.0,
+        wfVoroFoamOffsetX: 0.0,
+        wfVoroFoamOffsetY: 0.0,
+        wfVoroFoamFadeStart: 0.1,
+        wfVoroFoamFadeEnd: 0.9,
+        wfVoroFoamFadeSideX: 0.5,
+        wfVoroFoamFadeMode: 0,
+        wfVoroFoamFadeTopStart: 0.0,
+        wfVoroFoamFadeTopEnd: 0.08,
+        wfVoroFoamFadeBottomStart: 0.92,
+        wfVoroFoamFadeBottomEnd: 1.0,
+        wfVoroFoamWarpAmt: 1.5,
+        wfVoroFoamWarpScale: 0.8,
+        wfVoroFoamWarpAnimSpeed: 1.2,
+        wfVoroFoamWarpAnimAmt: 0.7,
+        wfVoroFoamWarpPhaseSpeed: 0.4,
+        wfVoroFoamStyle: 0,
+        wfVoroFoamScale2: 12.0,
+        wfVoroFoamStrength2: 0.6,
+        wfVoroFoamTint: 0.0,
+
+        // Waterfall vertical lines (thin almost-straight stripes, gradient fade from top)
+        wfVerticalLinesEnable: false,
+        wfVerticalLinesScale: 10.0,
+        wfVerticalLinesSlant: 0.0,
+        wfVerticalLinesStrength: 1.0,
+        wfVerticalLinesSharpness: 0.04,
+        wfVerticalLinesColor: "#1a3a35",
+        wfVerticalLinesOffsetX: 0.0,
+        wfVerticalLinesOffsetY: 0.0,
+        wfVerticalLinesFadeStart: 0.05,
+        wfVerticalLinesFadeEnd: 0.28,
+        wfVerticalLinesFadeBottomStart: 0.72,
+        wfVerticalLinesFadeBottomEnd: 0.95,
+        wfVerticalLinesWobble: 0.2,
+        wfVerticalLinesInvert: true,
+
+        // Waterfall Perlin lines (thin lines from fBm Perlin, gradient mask)
+        wfPerlinLinesEnable: false,
+        wfPerlinLinesColor: "#2a5a52",
+        wfPerlinLinesStrength: 0.4,
+        wfPerlinLinesScaleX: 12.0,
+        wfPerlinLinesScaleY: 4.0,
+        wfPerlinLinesThreshold: 0.5,
+        wfPerlinLinesSharpness: 0.06,
+        wfPerlinLinesFadeTopStart: 0.0,
+        wfPerlinLinesFadeTopEnd: 0.12,
+        wfPerlinLinesFadeBottomStart: 0.88,
+        wfPerlinLinesFadeBottomEnd: 1.0,
+        wfPerlinLinesOffsetX: 0.0,
+        wfPerlinLinesOffsetY: 0.0,
+        wfPerlinLinesOctaves: 3.0,
+        wfPerlinLinesLac: 2.0,
+        wfPerlinLinesGain: 0.5,
+        wfPerlinLinesSpeed: 0.3,
+
+        // Flowing Stream Bands — noise columns scrolling downward with the water
+        wfStreamsEnable: true,
+        wfStreamsColor: "#1a3a35",
+        wfStreamsStrength: 0.6,
+        wfStreamsScaleX: 6.0,
+        wfStreamsScaleY: 1.5,
+        wfStreamsThreshold: 0.52,
+        wfStreamsSharpness: 0.06,
+        wfStreamsSpeed: 0.5,
+        wfStreamsOctaves: 3.0,
+        wfStreamsLac: 2.0,
+        wfStreamsGain: 0.5,
+        wfStreamsWarp: 0.4,
+        wfStreamsOffsetX: 0.0,
+        wfStreamsOffsetY: 0.0,
+
+        // Bubbles (disabled by default)
+        enableBubbles: false,
+        bubbleColor: "#78b0a0",
+        bubbleScaleX: 6.0,
+        bubbleScaleY: 5.0,
+        bubbleOctaves: 2.0,
+        bubbleLac: 2.0,
+        bubbleGain: 0.5,
+        bubbleThreshold: 0.48,
+        bubbleSharpness: 0.03,
+        bubbleOffsetX: 2.5,
+        bubbleOffsetY: 1.8,
+        bubbleStrength: 0.7,
+        bubbleMaskFrom: "split1", // just a note, mask uses split1 boundary
+
+        // Split 2
+        split2Position: 0.7,
+        split2NoiseAmt: 0.12,
+        split2Sharpness: 0.01,
+        split2ScaleX: 10,
+        split2ScaleY: 8,
+        split2OffsetX: 7.3,
+        split2OffsetY: 4.1,
+        split2NoiseType: 0,
+        split2Invert: true,
+        split2Jitter: 1.0,
+
+        // === POOL PLANE ===
+        poolPreset: "Green",
+        pTopColor: "#346d66",
+        pMiddleColor: "#8ca9a8",
+        pBottomColor: "#628785",
+
+        pSplit1Position: 0.3,
+        pSplit1NoiseAmt: 0.2,
+        pSplit1Sharpness: 0.0,
+        pSplit1ScaleX: 10.28,
+        pSplit1ScaleY: 6.33,
+        pSplit1OffsetX: -1.96,
+        pSplit1OffsetY: 0.65,
+        pSplit1NoiseType: 0,
+        pSplit1Invert: true,
+        pSplit1Jitter: 1.0,
+
+        pSplit2Position: 0.66,
+        pSplit2NoiseAmt: 0.21,
+        pSplit2Sharpness: 0.0,
+        pSplit2ScaleX: 10.28,
+        pSplit2ScaleY: 8.46,
+        pSplit2OffsetX: 2.39,
+        pSplit2OffsetY: 0.43,
+        pSplit2NoiseType: 0,
+        pSplit2Invert: true,
+        pSplit2Jitter: 1.0,
+
+        pEnableFoam: false,
+        pFoamColor: "#ffffff",
+        pFoamPosition: 0.2,
+        pFoamNoiseAmt: 0.25,
+        pFoamSharpness: 0.01,
+        pFoamScaleX: 8.0,
+        pFoamScaleY: 3.0,
+        pFoamOctaves: 3.0,
+        pFoamLac: 2.0,
+        pFoamGain: 0.5,
+        pFoamOffsetX: 9.2,
+        pFoamOffsetY: 3.7,
+        pFoamInvert: false,
+        pFoamNoiseType: 1,
+        pFoamJitter: 1.0,
+        pFoamStrength: 1.0,
+
+        pEnableBubbles: false,
+        pBubbleColor: "#78b0a0",
+        pBubbleScaleX: 6.0,
+        pBubbleScaleY: 5.0,
+        pBubbleOctaves: 2.0,
+        pBubbleLac: 2.0,
+        pBubbleGain: 0.5,
+        pBubbleThreshold: 0.48,
+        pBubbleSharpness: 0.03,
+        pBubbleOffsetX: 2.5,
+        pBubbleOffsetY: 1.8,
+        pBubbleStrength: 0.7,
+
+        // Pool voronoi cell foam: style 0 = edge lines, 1 = organic blobs (cell interiors)
+        pEnableVoroFoam: true,
+        pVoroFoamColor: "#ffffff",
+        pVoroFoamScale: 14.0,
+        pVoroFoamJitter: 1.0,
+        pVoroFoamThreshold: 0.6, // edge: line threshold; blob: radius from cell center
+        pVoroFoamSharpness: 0.11, // edge: line sharpness; blob: softness of blob edge
+        pVoroFoamStrength: 1.0,
+        pVoroFoamOffsetX: 0.0,
+        pVoroFoamOffsetY: 0.0,
+        pVoroFoamFadeStart: 0.1,
+        pVoroFoamFadeEnd: 0.9,
+        pVoroFoamFadeSideX: 0.2,
+        pVoroFoamWarpAmt: 1.5, // how much noise distorts the cells
+        pVoroFoamWarpScale: 0.8, // scale of the warping noise
+        pVoroFoamWarpAnimSpeed: 1.2, // time frequency for warp amount oscillation
+        pVoroFoamWarpAnimAmt: 0.7, // amplitude of warp amount animation (organic morph)
+        pVoroFoamWarpPhaseSpeed: 0.4, // warp noise phase moves over time = visible shape morph
+        pVoroFoamStyle: 0, // 0 = edge (lines), 1 = blob (organic filled cells)
+        pVoroFoamScale2: 12.0, // second scale for varied blob sizes (0 = off)
+        pVoroFoamStrength2: 0.6, // strength of second-scale blobs
+        pVoroFoamTint: 0.0, // subtle water tint at foam edges (0–1)
+
+        // Two gradient-masked split-style layers (fBm Perlin edge, like foam drip — less rounded)
+        pLayer1Enable: true,
+        pLayer1Position: 0.7,
+        pLayer1NoiseAmt: 0.18,
+        pLayer1Sharpness: 0.01,
+        pLayer1ScaleX: 5.0,
+        pLayer1ScaleY: 6.0,
+        pLayer1OffsetX: 0.0,
+        pLayer1OffsetY: 0.0,
+        pLayer1Octaves: 3.0,
+        pLayer1Lac: 2.0,
+        pLayer1Gain: 0.5,
+        pLayer1Invert: false,
+        pLayer1GradStart: 0.2,
+        pLayer1GradEnd: 0.5,
+        pLayer1Strength: 1.0,
+        pLayer1Color: "#346d66",
+        pLayer2Enable: true,
+        pLayer2Position: 0.92,
+        pLayer2NoiseAmt: 0.15,
+        pLayer2Sharpness: 0.01,
+        pLayer2ScaleX: 6.0,
+        pLayer2ScaleY: 5.0,
+        pLayer2OffsetX: 2.0,
+        pLayer2OffsetY: 1.0,
+        pLayer2Octaves: 3.0,
+        pLayer2Lac: 2.0,
+        pLayer2Gain: 0.5,
+        pLayer2Invert: false,
+        pLayer2GradStart: 0.25,
+        pLayer2GradEnd: 0.98,
+        pLayer2Strength: 1.0,
+        pLayer2Color: "#1e4a42",
+
+        // Specs / dust: small white dots across entire pool
+        pEnableSpecs: true,
+        pSpecsColor: "#ffffff",
+        pSpecsScale: 14.89,
+        pSpecsOctaves: 2.0,
+        pSpecsThreshold: 0.69,
+        pSpecsSharpness: 0.01,
+        pSpecsStrength: 0.37,
+        pSpecsOffsetX: 0.0,
+        pSpecsOffsetY: 0.0,
+
+        // Rim / Fresnel (edge glow, view-dependent)
+        rimEnable: true,
+        rimStrength: 0.35,
+        rimPower: 2.2,
+        rimColor: "#a8cce8",
+
+        // Animation (time-based flow; speeds multiply uTime offset on noise UVs)
+        animEnable: true,
+        wfFlowSpeed: 0.5,
+        wfFoamDripSpeed: 0.55,
+        wfVoroFoamSpeed: 1.2,
+        wfVerticalLinesSpeed: 0.5,
+        pFlowSpeed: 0.12,
+        pGradientLayersSpeed: 0.15,
+        pVoroFoamSpeed: 0.5,
+        pSpecsSpeed: 0.03,
+      };
+
+      /* ================================================================
+         ARC GEOMETRY — curved waterfall ribbon
+         ================================================================ */
+      function buildArcGeo(width, height, arcReach, wSeg = 24, hSeg = 40) {
+        const geo = new THREE.BufferGeometry();
+        const positions = [];
+        const normals = [];
+        const uvs = [];
+        const indices = [];
+
+        for (let j = 0; j <= hSeg; j++) {
+          const t = j / hSeg; // 0 = top, 1 = bottom
+          // Quarter-sine arc: vertical at top, arcs forward (toward viewer) as it falls
+          const z = arcReach * Math.sin(t * Math.PI * 0.5);
+          const y = height * 0.5 - height * t;
+          // Tangent in YZ plane
+          const ty = -height;
+          const tz = arcReach * (Math.PI * 0.5) * Math.cos(t * Math.PI * 0.5);
+          // Normal = perp to tangent, pointing outward/toward viewer
+          const nLen = Math.sqrt(tz * tz + ty * ty);
+          const ny = tz / nLen;
+          const nz = -ty / nLen;
+
+          for (let i = 0; i <= wSeg; i++) {
+            const s = i / wSeg;
+            positions.push(-width * 0.5 + width * s, y, z);
+            normals.push(0, ny, nz);
+            uvs.push(s, 1 - t); // v=1 at top, v=0 at bottom (matches PlaneGeometry convention)
+          }
+        }
+
+        for (let j = 0; j < hSeg; j++) {
+          for (let i = 0; i < wSeg; i++) {
+            const a = j * (wSeg + 1) + i;
+            const b = a + 1;
+            const c = (j + 1) * (wSeg + 1) + i;
+            const d = c + 1;
+            indices.push(a, c, b, b, c, d);
+          }
+        }
+
+        geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+        geo.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+        geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+        geo.setIndex(indices);
+        return geo;
+      }
+
+      async function init() {
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        document.body.appendChild(renderer.domElement);
+        await renderer.init();
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color("#2a2a3e");
+        const camera = new THREE.PerspectiveCamera(
+          45,
+          window.innerWidth / window.innerHeight,
+          0.1,
+          500,
+        );
+        camera.position.set(0, 4, 16);
+        camera.lookAt(0, -1, 0);
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+
+        /* ---------- uniforms ---------- */
+        const u = {};
+        const mkC = (k) => {
+          u[k] = uniform(new THREE.Color(P[k]));
+        };
+        const mkF = (k) => {
+          u[k] = uniform(P[k]);
+        };
+        const mkB = (k) => {
+          u[k] = uniform(P[k] ? 1.0 : 0.0);
+        };
+
+        mkC("topColor");
+        mkC("middleColor");
+        mkC("bottomColor");
+        mkB("enableWaterfall");
+        mkB("enablePool");
+        mkF("wfWidth");
+        mkF("wfHeight");
+        mkF("poolWidth");
+        mkF("poolDepth");
+
+        mkF("split1Position");
+        mkF("split1NoiseAmt");
+        mkF("split1Sharpness");
+        mkF("split1ScaleX");
+        mkF("split1ScaleY");
+        mkF("split1OffsetX");
+        mkF("split1OffsetY");
+        mkF("split1NoiseType");
+        mkB("split1Invert");
+        mkF("split1Jitter");
+
+        mkB("enableFoam");
+        mkC("foamColor");
+        mkF("foamPosition");
+        mkF("foamNoiseAmt");
+        mkF("foamSharpness");
+        mkF("foamScaleX");
+        mkF("foamScaleY");
+        mkF("foamOctaves");
+        mkF("foamLac");
+        mkF("foamGain");
+        mkF("foamOffsetX");
+        mkF("foamOffsetY");
+        mkB("foamInvert");
+        mkF("foamNoiseType");
+        mkF("foamJitter");
+        mkF("foamStrength");
+
+        mkB("wfEnableVoroFoam");
+        mkC("wfVoroFoamColor");
+        mkF("wfVoroFoamScale");
+        mkF("wfVoroFoamJitter");
+        mkF("wfVoroFoamThreshold");
+        mkF("wfVoroFoamSharpness");
+        mkF("wfVoroFoamStrength");
+        mkF("wfVoroFoamOffsetX");
+        mkF("wfVoroFoamOffsetY");
+        mkF("wfVoroFoamFadeStart");
+        mkF("wfVoroFoamFadeEnd");
+        mkF("wfVoroFoamFadeSideX");
+        mkF("wfVoroFoamFadeMode");
+        mkF("wfVoroFoamFadeTopStart");
+        mkF("wfVoroFoamFadeTopEnd");
+        mkF("wfVoroFoamFadeBottomStart");
+        mkF("wfVoroFoamFadeBottomEnd");
+        mkF("wfVoroFoamWarpAmt");
+        mkF("wfVoroFoamWarpScale");
+        mkF("wfVoroFoamWarpAnimSpeed");
+        mkF("wfVoroFoamWarpAnimAmt");
+        mkF("wfVoroFoamWarpPhaseSpeed");
+        mkF("wfVoroFoamStyle");
+        mkF("wfVoroFoamScale2");
+        mkF("wfVoroFoamStrength2");
+        mkF("wfVoroFoamTint");
+
+        mkB("wfVerticalLinesEnable");
+        mkF("wfVerticalLinesScale");
+        mkF("wfVerticalLinesSlant");
+        mkF("wfVerticalLinesStrength");
+        mkF("wfVerticalLinesSharpness");
+        mkC("wfVerticalLinesColor");
+        mkF("wfVerticalLinesOffsetX");
+        mkF("wfVerticalLinesOffsetY");
+        mkF("wfVerticalLinesFadeStart");
+        mkF("wfVerticalLinesFadeEnd");
+        mkF("wfVerticalLinesFadeBottomStart");
+        mkF("wfVerticalLinesFadeBottomEnd");
+        mkF("wfVerticalLinesWobble");
+        mkB("wfVerticalLinesInvert");
+
+        mkB("wfPerlinLinesEnable");
+        mkC("wfPerlinLinesColor");
+        mkF("wfPerlinLinesStrength");
+        mkF("wfPerlinLinesScaleX");
+        mkF("wfPerlinLinesScaleY");
+        mkF("wfPerlinLinesThreshold");
+        mkF("wfPerlinLinesSharpness");
+        mkF("wfPerlinLinesFadeTopStart");
+        mkF("wfPerlinLinesFadeTopEnd");
+        mkF("wfPerlinLinesFadeBottomStart");
+        mkF("wfPerlinLinesFadeBottomEnd");
+        mkF("wfPerlinLinesOffsetX");
+        mkF("wfPerlinLinesOffsetY");
+        mkF("wfPerlinLinesOctaves");
+        mkF("wfPerlinLinesLac");
+        mkF("wfPerlinLinesGain");
+        mkF("wfPerlinLinesSpeed");
+
+        mkB("wfStreamsEnable");
+        mkC("wfStreamsColor");
+        mkF("wfStreamsStrength");
+        mkF("wfStreamsScaleX");
+        mkF("wfStreamsScaleY");
+        mkF("wfStreamsThreshold");
+        mkF("wfStreamsSharpness");
+        mkF("wfStreamsSpeed");
+        mkF("wfStreamsOctaves");
+        mkF("wfStreamsLac");
+        mkF("wfStreamsGain");
+        mkF("wfStreamsWarp");
+        mkF("wfStreamsOffsetX");
+        mkF("wfStreamsOffsetY");
+
+        mkB("enableBubbles");
+        mkC("bubbleColor");
+        mkF("bubbleScaleX");
+        mkF("bubbleScaleY");
+        mkF("bubbleOctaves");
+        mkF("bubbleLac");
+        mkF("bubbleGain");
+        mkF("bubbleThreshold");
+        mkF("bubbleSharpness");
+        mkF("bubbleOffsetX");
+        mkF("bubbleOffsetY");
+        mkF("bubbleStrength");
+
+        mkF("split2Position");
+        mkF("split2NoiseAmt");
+        mkF("split2Sharpness");
+        mkF("split2ScaleX");
+        mkF("split2ScaleY");
+        mkF("split2OffsetX");
+        mkF("split2OffsetY");
+        mkF("split2NoiseType");
+        mkB("split2Invert");
+        mkF("split2Jitter");
+
+        // Pool uniforms
+        mkC("pTopColor");
+        mkC("pMiddleColor");
+        mkC("pBottomColor");
+        mkF("pSplit1Position");
+        mkF("pSplit1NoiseAmt");
+        mkF("pSplit1Sharpness");
+        mkF("pSplit1ScaleX");
+        mkF("pSplit1ScaleY");
+        mkF("pSplit1OffsetX");
+        mkF("pSplit1OffsetY");
+        mkF("pSplit1NoiseType");
+        mkB("pSplit1Invert");
+        mkF("pSplit1Jitter");
+        mkF("pSplit2Position");
+        mkF("pSplit2NoiseAmt");
+        mkF("pSplit2Sharpness");
+        mkF("pSplit2ScaleX");
+        mkF("pSplit2ScaleY");
+        mkF("pSplit2OffsetX");
+        mkF("pSplit2OffsetY");
+        mkF("pSplit2NoiseType");
+        mkB("pSplit2Invert");
+        mkF("pSplit2Jitter");
+        mkB("pEnableFoam");
+        mkC("pFoamColor");
+        mkF("pFoamPosition");
+        mkF("pFoamNoiseAmt");
+        mkF("pFoamSharpness");
+        mkF("pFoamScaleX");
+        mkF("pFoamScaleY");
+        mkF("pFoamOctaves");
+        mkF("pFoamLac");
+        mkF("pFoamGain");
+        mkF("pFoamOffsetX");
+        mkF("pFoamOffsetY");
+        mkB("pFoamInvert");
+        mkF("pFoamNoiseType");
+        mkF("pFoamJitter");
+        mkF("pFoamStrength");
+        mkB("pEnableBubbles");
+        mkC("pBubbleColor");
+        mkF("pBubbleScaleX");
+        mkF("pBubbleScaleY");
+        mkF("pBubbleOctaves");
+        mkF("pBubbleLac");
+        mkF("pBubbleGain");
+        mkF("pBubbleThreshold");
+        mkF("pBubbleSharpness");
+        mkF("pBubbleOffsetX");
+        mkF("pBubbleOffsetY");
+        mkF("pBubbleStrength");
+
+        mkB("pEnableVoroFoam");
+        mkC("pVoroFoamColor");
+        mkF("pVoroFoamScale");
+        mkF("pVoroFoamJitter");
+        mkF("pVoroFoamThreshold");
+        mkF("pVoroFoamSharpness");
+        mkF("pVoroFoamStrength");
+        mkF("pVoroFoamOffsetX");
+        mkF("pVoroFoamOffsetY");
+        mkF("pVoroFoamFadeStart");
+        mkF("pVoroFoamFadeEnd");
+        mkF("pVoroFoamFadeSideX");
+        mkF("pVoroFoamWarpAmt");
+        mkF("pVoroFoamWarpScale");
+        mkF("pVoroFoamWarpAnimSpeed");
+        mkF("pVoroFoamWarpAnimAmt");
+        mkF("pVoroFoamWarpPhaseSpeed");
+        mkF("pVoroFoamStyle");
+        mkF("pVoroFoamScale2");
+        mkF("pVoroFoamStrength2");
+        mkF("pVoroFoamTint");
+
+        mkB("pLayer1Enable");
+        mkF("pLayer1Position");
+        mkF("pLayer1NoiseAmt");
+        mkF("pLayer1Sharpness");
+        mkF("pLayer1ScaleX");
+        mkF("pLayer1ScaleY");
+        mkF("pLayer1OffsetX");
+        mkF("pLayer1OffsetY");
+        mkF("pLayer1Octaves");
+        mkF("pLayer1Lac");
+        mkF("pLayer1Gain");
+        mkB("pLayer1Invert");
+        mkF("pLayer1GradStart");
+        mkF("pLayer1GradEnd");
+        mkF("pLayer1Strength");
+        mkC("pLayer1Color");
+        mkB("pLayer2Enable");
+        mkF("pLayer2Position");
+        mkF("pLayer2NoiseAmt");
+        mkF("pLayer2Sharpness");
+        mkF("pLayer2ScaleX");
+        mkF("pLayer2ScaleY");
+        mkF("pLayer2OffsetX");
+        mkF("pLayer2OffsetY");
+        mkF("pLayer2Octaves");
+        mkF("pLayer2Lac");
+        mkF("pLayer2Gain");
+        mkB("pLayer2Invert");
+        mkF("pLayer2GradStart");
+        mkF("pLayer2GradEnd");
+        mkF("pLayer2Strength");
+        mkC("pLayer2Color");
+
+        mkB("pEnableSpecs");
+        mkC("pSpecsColor");
+        mkF("pSpecsScale");
+        mkF("pSpecsOctaves");
+        mkF("pSpecsThreshold");
+        mkF("pSpecsSharpness");
+        mkF("pSpecsStrength");
+        mkF("pSpecsOffsetX");
+        mkF("pSpecsOffsetY");
+
+        mkB("animEnable");
+        mkF("wfFlowSpeed");
+        mkF("wfFoamDripSpeed");
+        mkF("wfVoroFoamSpeed");
+        mkF("wfVerticalLinesSpeed");
+        mkF("pFlowSpeed");
+        mkF("pGradientLayersSpeed");
+        mkF("pVoroFoamSpeed");
+        mkF("pSpecsSpeed");
+
+        mkB("rimEnable");
+        mkF("rimStrength");
+        mkF("rimPower");
+        mkC("rimColor");
+        u.cameraPosition = uniform(new THREE.Vector3());
+
+        u.time = uniform(0);
+
+        /* ---------- material ---------- */
+        const mat = new THREE.MeshBasicNodeMaterial({ side: THREE.DoubleSide });
+
+        mat.colorNode = Fn(() => {
+          const v = uv();
+          const y = float(1.0).sub(v.y); // 0=top, 1=bottom
+
+          const t = u.time.mul(u.animEnable);
+
+          // === SPLIT 1 ===
+          const wfFlowOff = t.mul(u.wfFlowSpeed);
+          const nUV1 = vec2(
+            v.x.mul(u.split1ScaleX).add(u.split1OffsetX),
+            y.mul(u.split1ScaleY).add(u.split1OffsetY).add(wfFlowOff),
+          );
+          const n1raw = sampleNoise(nUV1, u.split1NoiseType, u.split1Jitter);
+          // Invert: flip noise so the bumps go the other direction
+          const n1 = mix(n1raw, oneMinus(n1raw), u.split1Invert);
+          const noisyBound1 = u.split1Position.add(
+            n1.sub(0.5).mul(u.split1NoiseAmt.mul(2)),
+          );
+          const mask1 = smoothstep(
+            noisyBound1.sub(u.split1Sharpness),
+            noisyBound1.add(u.split1Sharpness),
+            y,
+          );
+
+          // === SPLIT 2 ===
+          const nUV2 = vec2(
+            v.x.mul(u.split2ScaleX).add(u.split2OffsetX),
+            y.mul(u.split2ScaleY).add(u.split2OffsetY).add(wfFlowOff),
+          );
+          const n2raw = sampleNoise(nUV2, u.split2NoiseType, u.split2Jitter);
+          const n2 = mix(n2raw, oneMinus(n2raw), u.split2Invert);
+          const noisyBound2 = u.split2Position.add(
+            n2.sub(0.5).mul(u.split2NoiseAmt.mul(2)),
+          );
+          const mask2 = smoothstep(
+            noisyBound2.sub(u.split2Sharpness),
+            noisyBound2.add(u.split2Sharpness),
+            y,
+          );
+
+          // top → middle → bottom
+          const col = mix(u.topColor, u.middleColor, mask1).toVar();
+          col.assign(mix(col, u.bottomColor, mask2));
+
+          // === BUBBLES: organic perlin, masked to top color area only ===
+          // Uses the inverse of mask1 so bubbles only show where topColor is
+          const topMask = float(1.0).sub(mask1); // 1 in top area, 0 below split1
+          const bbUV = vec2(
+            v.x.mul(u.bubbleScaleX).add(u.bubbleOffsetX),
+            y.mul(u.bubbleScaleY).add(u.bubbleOffsetY).add(wfFlowOff),
+          );
+          const bbN = fbmPerlin(
+            bbUV,
+            u.bubbleOctaves,
+            u.bubbleLac,
+            u.bubbleGain,
+          );
+          const bbNoiseMask = smoothstep(
+            u.bubbleThreshold.sub(u.bubbleSharpness),
+            u.bubbleThreshold.add(u.bubbleSharpness),
+            bbN,
+          );
+          const bbFinal = bbNoiseMask
+            .mul(topMask)
+            .mul(u.bubbleStrength)
+            .mul(u.enableBubbles);
+          col.assign(mix(col, u.bubbleColor, bbFinal));
+
+          // === FOAM DRIP: always on top of everything (scroll down = subtract time offset)
+          const fUV = vec2(
+            v.x.mul(u.foamScaleX).add(u.foamOffsetX),
+            y
+              .mul(u.foamScaleY)
+              .add(u.foamOffsetY)
+              .sub(t.mul(u.wfFoamDripSpeed)),
+          );
+          const fPerlin = fbmPerlin(fUV, u.foamOctaves, u.foamLac, u.foamGain);
+          const fVoro = voronoiF1(fUV, u.foamJitter);
+          const fNraw = mix(fVoro, fPerlin, u.foamNoiseType);
+          const fN = mix(fNraw, oneMinus(fNraw), u.foamInvert);
+          const foamBound = u.foamPosition.add(
+            fN.sub(0.5).mul(u.foamNoiseAmt.mul(2)),
+          );
+          const foamMask = smoothstep(
+            foamBound.add(u.foamSharpness),
+            foamBound.sub(u.foamSharpness),
+            y,
+          )
+            .mul(u.foamStrength)
+            .mul(u.enableFoam);
+          col.assign(mix(col, u.foamColor, foamMask));
+
+          // === WATERFALL VORONOI CELL FOAM (same as pool, all same controls) ===
+          // Fade: mode 0 = top and bottom fade, mode 1 = sphere/radial gradient
+          const wfFadeCenterX = float(0.5);
+          const wfFadeCenterY = float(0.0);
+          const wfDistFromCenter = length(
+            vec2(
+              v.x.sub(wfFadeCenterX).div(u.wfVoroFoamFadeSideX.add(0.5)),
+              y.sub(wfFadeCenterY),
+            ),
+          );
+          const wfVoroFadeRadial = smoothstep(
+            u.wfVoroFoamFadeEnd,
+            u.wfVoroFoamFadeStart,
+            wfDistFromCenter,
+          );
+          const wfVoroFadeTop = smoothstep(
+            u.wfVoroFoamFadeTopStart,
+            u.wfVoroFoamFadeTopEnd,
+            y,
+          );
+          const wfVoroFadeBottom = smoothstep(
+            u.wfVoroFoamFadeBottomEnd,
+            u.wfVoroFoamFadeBottomStart,
+            y,
+          );
+          const wfVoroFadeGrad = mix(
+            wfVoroFadeTop.mul(wfVoroFadeBottom),
+            wfVoroFadeRadial,
+            u.wfVoroFoamFadeMode,
+          );
+          const wfVoroOff = t.mul(u.wfVoroFoamSpeed);
+          const wfVoroScrollY = wfVoroOff.mul(float(-1));
+          const wfVfBaseUV = vec2(
+            v.x.mul(u.wfVoroFoamScale).add(u.wfVoroFoamOffsetX),
+            y
+              .mul(u.wfVoroFoamScale)
+              .add(u.wfVoroFoamOffsetY)
+              .add(wfVoroScrollY),
+          );
+          const wfVoroWarpPhase = u.time.mul(u.wfVoroFoamWarpPhaseSpeed);
+          const wfWarpUV = wfVfBaseUV
+            .mul(u.wfVoroFoamWarpScale)
+            .add(vec2(wfVoroWarpPhase, wfVoroWarpPhase.mul(0.7)));
+          const wfWarpN1 = gradientNoise(wfWarpUV);
+          const wfWarpN2 = gradientNoise(wfWarpUV.add(vec2(5.2, 1.3)));
+          const wfVoroWarpAmtAnim = u.wfVoroFoamWarpAmt.add(
+            sin(u.time.mul(u.wfVoroFoamWarpAnimSpeed)).mul(
+              u.wfVoroFoamWarpAnimAmt,
+            ),
+          );
+          const wfVfUV = wfVfBaseUV.add(
+            vec2(wfWarpN1, wfWarpN2).sub(0.5).mul(wfVoroWarpAmtAnim),
+          );
+          const wfVfF1 = voronoiF1(wfVfUV, u.wfVoroFoamJitter);
+          const wfThrLo = u.wfVoroFoamThreshold.sub(u.wfVoroFoamSharpness);
+          const wfThrHi = u.wfVoroFoamThreshold.add(u.wfVoroFoamSharpness);
+          const wfEdgeMask = smoothstep(wfThrLo, wfThrHi, wfVfF1);
+          const wfBlobMask = oneMinus(smoothstep(wfThrLo, wfThrHi, wfVfF1));
+          let wfVfCellMask = mix(wfEdgeMask, wfBlobMask, u.wfVoroFoamStyle);
+          const wfVfBaseUV2 = vec2(
+            v.x.mul(u.wfVoroFoamScale2).add(u.wfVoroFoamOffsetX),
+            y
+              .mul(u.wfVoroFoamScale2)
+              .add(u.wfVoroFoamOffsetY)
+              .add(wfVoroScrollY),
+          );
+          const wfWarpUV2 = wfVfBaseUV2
+            .mul(u.wfVoroFoamWarpScale)
+            .add(vec2(wfVoroWarpPhase, wfVoroWarpPhase.mul(0.7)));
+          const wfWarpN1b = gradientNoise(wfWarpUV2);
+          const wfWarpN2b = gradientNoise(wfWarpUV2.add(vec2(5.2, 1.3)));
+          const wfVfUV2 = wfVfBaseUV2.add(
+            vec2(wfWarpN1b, wfWarpN2b).sub(0.5).mul(wfVoroWarpAmtAnim),
+          );
+          const wfVfF1_2 = voronoiF1(wfVfUV2, u.wfVoroFoamJitter);
+          const wfBlob2Mask = oneMinus(
+            smoothstep(wfThrLo, wfThrHi, wfVfF1_2),
+          ).mul(u.wfVoroFoamStrength2);
+          wfVfCellMask = wfVfCellMask.add(
+            wfBlob2Mask
+              .mul(smoothstep(float(0), float(0.01), u.wfVoroFoamScale2))
+              .mul(u.wfVoroFoamStyle),
+          );
+          wfVfCellMask = min(wfVfCellMask, float(1.0));
+          wfVfCellMask = wfVfCellMask
+            .mul(wfVoroFadeGrad)
+            .mul(u.wfVoroFoamStrength)
+            .mul(u.wfEnableVoroFoam);
+          const wfFoamCol = mix(
+            u.wfVoroFoamColor,
+            col,
+            u.wfVoroFoamTint.mul(oneMinus(wfVfCellMask)),
+          );
+          col.assign(mix(col, wfFoamCol, wfVfCellMask));
+
+          // === PERLIN LINES: thin lines from fBm Perlin, gradient mask (top + bottom fade) ===
+          const plUV = vec2(
+            v.x.mul(u.wfPerlinLinesScaleX).add(u.wfPerlinLinesOffsetX).add(t.mul(u.wfPerlinLinesSpeed)),
+            y.mul(u.wfPerlinLinesScaleY).add(u.wfPerlinLinesOffsetY),
+          );
+          const plN = fbmPerlin(
+            plUV,
+            u.wfPerlinLinesOctaves,
+            u.wfPerlinLinesLac,
+            u.wfPerlinLinesGain,
+          );
+          const plLine = smoothstep(
+            u.wfPerlinLinesThreshold.sub(u.wfPerlinLinesSharpness),
+            u.wfPerlinLinesThreshold.add(u.wfPerlinLinesSharpness),
+            plN,
+          );
+          const plFadeTop = smoothstep(
+            u.wfPerlinLinesFadeTopStart,
+            u.wfPerlinLinesFadeTopEnd,
+            y,
+          );
+          const plFadeBottom = smoothstep(
+            u.wfPerlinLinesFadeBottomEnd,
+            u.wfPerlinLinesFadeBottomStart,
+            y,
+          );
+          const plMask = plLine
+            .mul(plFadeTop)
+            .mul(plFadeBottom)
+            .mul(u.wfPerlinLinesStrength)
+            .mul(u.wfPerlinLinesEnable);
+          col.assign(mix(col, u.wfPerlinLinesColor, plMask));
+
+          // === VERTICAL LINES: stripes stay in place, only wobble animates ===
+          const vlPhase = v.x
+            .mul(u.wfVerticalLinesScale)
+            .add(y.mul(u.wfVerticalLinesSlant.mul(10)))
+            .add(u.wfVerticalLinesOffsetX)
+            .add(u.wfVerticalLinesOffsetY);
+          const vlWobbleOff = t.mul(u.wfVerticalLinesSpeed);
+          const vlWobbleUV = vec2(
+            v.x.mul(4).add(u.wfVerticalLinesOffsetX).add(vlWobbleOff),
+            y.mul(3).add(u.wfVerticalLinesOffsetY).add(vlWobbleOff.mul(0.7)),
+          );
+          const vlPhaseNoisy = vlPhase.add(
+            gradientNoise(vlWobbleUV)
+              .sub(0.5)
+              .mul(u.wfVerticalLinesWobble.mul(2)),
+          );
+          const vlF = fract(vlPhaseNoisy);
+          const vlLine = min(
+            float(1),
+            smoothstep(u.wfVerticalLinesSharpness, float(0), vlF).add(
+              smoothstep(float(1), oneMinus(u.wfVerticalLinesSharpness), vlF),
+            ),
+          );
+          const vlFadeTop = smoothstep(
+            u.wfVerticalLinesFadeStart,
+            u.wfVerticalLinesFadeEnd,
+            y,
+          );
+          const vlFadeBottom = smoothstep(
+            u.wfVerticalLinesFadeBottomEnd,
+            u.wfVerticalLinesFadeBottomStart,
+            y,
+          );
+          const vlFade = vlFadeTop.mul(vlFadeBottom);
+          const vlMask = mix(vlLine, oneMinus(vlLine), u.wfVerticalLinesInvert)
+            .mul(vlFade)
+            .mul(u.wfVerticalLinesStrength)
+            .mul(u.wfVerticalLinesEnable);
+          col.assign(mix(col, u.wfVerticalLinesColor, vlMask));
+
+          // === FLOWING STREAM BANDS: noise columns scrolling downward with flow ===
+          // Y UV scrolls downward (y increases downward, so subtract time offset to move down)
+          const stOff = t.mul(u.wfStreamsSpeed);
+          const stBaseUV = vec2(
+            v.x.mul(u.wfStreamsScaleX).add(u.wfStreamsOffsetX),
+            y.mul(u.wfStreamsScaleY).add(u.wfStreamsOffsetY).sub(stOff),
+          );
+          // Slight lateral warp so bands have organic wiggle as they flow
+          const stWarpN = gradientNoise(stBaseUV.mul(0.5).add(vec2(3.1, 7.4)));
+          const stUV = vec2(
+            stBaseUV.x.add(stWarpN.sub(0.5).mul(u.wfStreamsWarp)),
+            stBaseUV.y,
+          );
+          const stN = fbmPerlin(stUV, u.wfStreamsOctaves, u.wfStreamsLac, u.wfStreamsGain);
+          const stMask = smoothstep(
+            u.wfStreamsThreshold.sub(u.wfStreamsSharpness),
+            u.wfStreamsThreshold.add(u.wfStreamsSharpness),
+            stN,
+          ).mul(u.wfStreamsStrength).mul(u.wfStreamsEnable);
+          col.assign(mix(col, u.wfStreamsColor, stMask));
+
+          // Rim / Fresnel (view-dependent edge glow)
+          const viewDir = normalize(sub(u.cameraPosition, positionWorld));
+          const NdotV = dot(normalWorld, viewDir);
+          const rim = saturate(oneMinus(NdotV));
+          const fresnel = pow(rim, u.rimPower);
+          col.assign(
+            col.add(
+              u.rimColor.mul(
+                u.rimStrength.mul(fresnel).mul(u.rimEnable),
+              ),
+            ),
+          );
+
+          return vec4(col, 1.0);
+        })();
+
+        /* ---------- POOL MATERIAL (same shader, own uniforms) ---------- */
+        const poolMat = new THREE.MeshBasicNodeMaterial({
+          side: THREE.DoubleSide,
+        });
+
+        poolMat.colorNode = Fn(() => {
+          const v = uv();
+          const y = float(1.0).sub(v.y);
+
+          const pt = u.time.mul(u.animEnable);
+          const pFlowOff = pt.mul(u.pFlowSpeed);
+          const pGradOff = pt.mul(u.pGradientLayersSpeed);
+          const pVoroOff = pt.mul(u.pVoroFoamSpeed);
+          const pSpecsOff = pt.mul(u.pSpecsSpeed);
+
+          // Split 1
+          const pnUV1 = vec2(
+            v.x.mul(u.pSplit1ScaleX).add(u.pSplit1OffsetX),
+            y.mul(u.pSplit1ScaleY).add(u.pSplit1OffsetY).add(pFlowOff),
+          );
+          const pn1raw = sampleNoise(
+            pnUV1,
+            u.pSplit1NoiseType,
+            u.pSplit1Jitter,
+          );
+          const pn1 = mix(pn1raw, oneMinus(pn1raw), u.pSplit1Invert);
+          const pBound1 = u.pSplit1Position.add(
+            pn1.sub(0.5).mul(u.pSplit1NoiseAmt.mul(2)),
+          );
+          const pMask1 = smoothstep(
+            pBound1.sub(u.pSplit1Sharpness),
+            pBound1.add(u.pSplit1Sharpness),
+            y,
+          );
+
+          // Split 2
+          const pnUV2 = vec2(
+            v.x.mul(u.pSplit2ScaleX).add(u.pSplit2OffsetX),
+            y.mul(u.pSplit2ScaleY).add(u.pSplit2OffsetY).add(pFlowOff),
+          );
+          const pn2raw = sampleNoise(
+            pnUV2,
+            u.pSplit2NoiseType,
+            u.pSplit2Jitter,
+          );
+          const pn2 = mix(pn2raw, oneMinus(pn2raw), u.pSplit2Invert);
+          const pBound2 = u.pSplit2Position.add(
+            pn2.sub(0.5).mul(u.pSplit2NoiseAmt.mul(2)),
+          );
+          const pMask2 = smoothstep(
+            pBound2.sub(u.pSplit2Sharpness),
+            pBound2.add(u.pSplit2Sharpness),
+            y,
+          );
+
+          const pCol = mix(u.pTopColor, u.pMiddleColor, pMask1).toVar();
+          pCol.assign(mix(pCol, u.pBottomColor, pMask2));
+
+          // === TWO GRADIENT-MASKED SPLIT-STYLE LAYERS (fBm Perlin edge, like foam drip — less rounded) ===
+          // Same technique as splits; noise = fbmPerlin (multi-octave) like waterfall foam drip, not single gradientNoise.
+          const pl1UV = vec2(
+            v.x.mul(u.pLayer1ScaleX).add(u.pLayer1OffsetX),
+            y.mul(u.pLayer1ScaleY).add(u.pLayer1OffsetY).add(pGradOff),
+          );
+          const pl1Nraw = fbmPerlin(
+            pl1UV,
+            u.pLayer1Octaves,
+            u.pLayer1Lac,
+            u.pLayer1Gain,
+          );
+          const pl1N = mix(pl1Nraw, oneMinus(pl1Nraw), u.pLayer1Invert);
+          const pl1Bound = u.pLayer1Position.add(
+            pl1N.sub(0.5).mul(u.pLayer1NoiseAmt.mul(2)),
+          );
+          const pl1Mask = smoothstep(
+            pl1Bound.sub(u.pLayer1Sharpness),
+            pl1Bound.add(u.pLayer1Sharpness),
+            y,
+          );
+          const pl1Grad = smoothstep(u.pLayer1GradStart, u.pLayer1GradEnd, y);
+          pCol.assign(
+            mix(
+              pCol,
+              u.pLayer1Color,
+              pl1Mask.mul(pl1Grad).mul(u.pLayer1Strength).mul(u.pLayer1Enable),
+            ),
+          );
+
+          const pl2UV = vec2(
+            v.x.mul(u.pLayer2ScaleX).add(u.pLayer2OffsetX),
+            y.mul(u.pLayer2ScaleY).add(u.pLayer2OffsetY).add(pGradOff),
+          );
+          const pl2Nraw = fbmPerlin(
+            pl2UV,
+            u.pLayer2Octaves,
+            u.pLayer2Lac,
+            u.pLayer2Gain,
+          );
+          const pl2N = mix(pl2Nraw, oneMinus(pl2Nraw), u.pLayer2Invert);
+          const pl2Bound = u.pLayer2Position.add(
+            pl2N.sub(0.5).mul(u.pLayer2NoiseAmt.mul(2)),
+          );
+          const pl2Mask = smoothstep(
+            pl2Bound.sub(u.pLayer2Sharpness),
+            pl2Bound.add(u.pLayer2Sharpness),
+            y,
+          );
+          const pl2Grad = smoothstep(u.pLayer2GradStart, u.pLayer2GradEnd, y);
+          pCol.assign(
+            mix(
+              pCol,
+              u.pLayer2Color,
+              pl2Mask.mul(pl2Grad).mul(u.pLayer2Strength).mul(u.pLayer2Enable),
+            ),
+          );
+
+          // Bubbles (masked to top area)
+          const pTopMask = float(1.0).sub(pMask1);
+          const pbUV = vec2(
+            v.x.mul(u.pBubbleScaleX).add(u.pBubbleOffsetX),
+            y.mul(u.pBubbleScaleY).add(u.pBubbleOffsetY).add(pFlowOff),
+          );
+          const pbN = fbmPerlin(
+            pbUV,
+            u.pBubbleOctaves,
+            u.pBubbleLac,
+            u.pBubbleGain,
+          );
+          const pbMask = smoothstep(
+            u.pBubbleThreshold.sub(u.pBubbleSharpness),
+            u.pBubbleThreshold.add(u.pBubbleSharpness),
+            pbN,
+          )
+            .mul(pTopMask)
+            .mul(u.pBubbleStrength)
+            .mul(u.pEnableBubbles);
+          pCol.assign(mix(pCol, u.pBubbleColor, pbMask));
+
+          // Foam drip (on top)
+          const pfUV = vec2(
+            v.x.mul(u.pFoamScaleX).add(u.pFoamOffsetX),
+            y.mul(u.pFoamScaleY).add(u.pFoamOffsetY).add(pFlowOff),
+          );
+          const pfPerlin = fbmPerlin(
+            pfUV,
+            u.pFoamOctaves,
+            u.pFoamLac,
+            u.pFoamGain,
+          );
+          const pfVoro = voronoiF1(pfUV, u.pFoamJitter);
+          const pfNraw = mix(pfVoro, pfPerlin, u.pFoamNoiseType);
+          const pfN = mix(pfNraw, oneMinus(pfNraw), u.pFoamInvert);
+          const pfBound = u.pFoamPosition.add(
+            pfN.sub(0.5).mul(u.pFoamNoiseAmt.mul(2)),
+          );
+          const pfMask = smoothstep(
+            pfBound.add(u.pFoamSharpness),
+            pfBound.sub(u.pFoamSharpness),
+            y,
+          )
+            .mul(u.pFoamStrength)
+            .mul(u.pEnableFoam);
+          pCol.assign(mix(pCol, u.pFoamColor, pfMask));
+
+          // === VORONOI CELL FOAM: style 0 = edge lines, style 1 = organic blobs (cell interiors) ===
+          // Circular fade: foam denser near waterfall (y=0 = top of plane)
+          const fadeCenterX = float(0.5);
+          const fadeCenterY = float(0.0);
+          const distFromCenter = length(
+            vec2(
+              v.x.sub(fadeCenterX).div(u.pVoroFoamFadeSideX.add(0.5)),
+              y.sub(fadeCenterY),
+            ),
+          );
+          const voroFadeGrad = smoothstep(
+            u.pVoroFoamFadeEnd,
+            u.pVoroFoamFadeStart,
+            distFromCenter,
+          );
+
+          // Domain warp UVs with noise for organic cell shapes
+          // Infinite descending: subtract pVoroOff so pattern scrolls downward; animated warp amount + phase for organic morph
+          const pVoroScrollY = pVoroOff.mul(float(-1));
+          const vfBaseUV = vec2(
+            v.x.mul(u.pVoroFoamScale).add(u.pVoroFoamOffsetX),
+            y.mul(u.pVoroFoamScale).add(u.pVoroFoamOffsetY).add(pVoroScrollY),
+          );
+          const pVoroWarpPhase = u.time.mul(u.pVoroFoamWarpPhaseSpeed);
+          const vfWarpUV = vfBaseUV
+            .mul(u.pVoroFoamWarpScale)
+            .add(vec2(pVoroWarpPhase, pVoroWarpPhase.mul(0.7)));
+          const warpN1 = gradientNoise(vfWarpUV);
+          const warpN2 = gradientNoise(vfWarpUV.add(vec2(5.2, 1.3)));
+          const pVoroWarpAmtAnim = u.pVoroFoamWarpAmt.add(
+            sin(u.time.mul(u.pVoroFoamWarpAnimSpeed)).mul(
+              u.pVoroFoamWarpAnimAmt,
+            ),
+          );
+          const vfUV = vfBaseUV.add(
+            vec2(warpN1, warpN2).sub(0.5).mul(pVoroWarpAmtAnim),
+          );
+
+          const vfF1 = voronoiF1(vfUV, u.pVoroFoamJitter);
+          const thrLo = u.pVoroFoamThreshold.sub(u.pVoroFoamSharpness);
+          const thrHi = u.pVoroFoamThreshold.add(u.pVoroFoamSharpness);
+          // Edge style: foam = lines where F1 is high (between cells)
+          const edgeMask = smoothstep(thrLo, thrHi, vfF1);
+          // Blob style: foam = filled cells where F1 is low (soft falloff from center)
+          const blobMask = oneMinus(smoothstep(thrLo, thrHi, vfF1));
+          let vfCellMask = mix(edgeMask, blobMask, u.pVoroFoamStyle);
+
+          // Multi-scale: second Voronoi layer for varied blob sizes (organic look)
+          const vfBaseUV2 = vec2(
+            v.x.mul(u.pVoroFoamScale2).add(u.pVoroFoamOffsetX),
+            y.mul(u.pVoroFoamScale2).add(u.pVoroFoamOffsetY).add(pVoroScrollY),
+          );
+          const vfWarpUV2 = vfBaseUV2
+            .mul(u.pVoroFoamWarpScale)
+            .add(vec2(pVoroWarpPhase, pVoroWarpPhase.mul(0.7)));
+          const warpN1b = gradientNoise(vfWarpUV2);
+          const warpN2b = gradientNoise(vfWarpUV2.add(vec2(5.2, 1.3)));
+          const vfUV2 = vfBaseUV2.add(
+            vec2(warpN1b, warpN2b).sub(0.5).mul(pVoroWarpAmtAnim),
+          );
+          const vfF1_2 = voronoiF1(vfUV2, u.pVoroFoamJitter);
+          const blob2Mask = oneMinus(smoothstep(thrLo, thrHi, vfF1_2)).mul(
+            u.pVoroFoamStrength2,
+          );
+          vfCellMask = vfCellMask.add(
+            blob2Mask
+              .mul(smoothstep(float(0), float(0.01), u.pVoroFoamScale2))
+              .mul(u.pVoroFoamStyle),
+          );
+          vfCellMask = min(vfCellMask, float(1.0));
+
+          vfCellMask = vfCellMask
+            .mul(voroFadeGrad)
+            .mul(u.pVoroFoamStrength)
+            .mul(u.pEnableVoroFoam);
+
+          // Optional subtle water tint at foam edges (translucent look)
+          const foamCol = mix(
+            u.pVoroFoamColor,
+            pCol,
+            u.pVoroFoamTint.mul(oneMinus(vfCellMask)),
+          );
+          pCol.assign(mix(pCol, foamCol, vfCellMask));
+
+          // === SPECS / DUST: small scattered white dots across entire pool ===
+          const spUV = vec2(
+            v.x.mul(u.pSpecsScale).add(u.pSpecsOffsetX),
+            y.mul(u.pSpecsScale).add(u.pSpecsOffsetY).add(pSpecsOff),
+          );
+          const spN = fbmPerlin(spUV, u.pSpecsOctaves, float(2.0), float(0.5));
+          const specsMask = smoothstep(
+            u.pSpecsThreshold.sub(u.pSpecsSharpness),
+            u.pSpecsThreshold.add(u.pSpecsSharpness),
+            spN,
+          )
+            .mul(u.pSpecsStrength)
+            .mul(u.pEnableSpecs);
+          pCol.assign(mix(pCol, u.pSpecsColor, specsMask));
+
+          // Rim / Fresnel (view-dependent edge glow)
+          const pViewDir = normalize(sub(u.cameraPosition, positionWorld));
+          const pNdotV = dot(normalWorld, pViewDir);
+          const pRim = saturate(oneMinus(pNdotV));
+          const pFresnel = pow(pRim, u.rimPower);
+          pCol.assign(
+            pCol.add(
+              u.rimColor.mul(
+                u.rimStrength.mul(pFresnel).mul(u.rimEnable),
+              ),
+            ),
+          );
+
+          return vec4(pCol, 1.0);
+        })();
+
+        /* ---------- meshes ---------- */
+        const wfGeo = buildArcGeo(P.wfWidth, P.wfHeight, P.wfArcReach);
+        const mesh = new THREE.Mesh(wfGeo, mat);
+        scene.add(mesh);
+
+        const poolGeo = new THREE.PlaneGeometry(P.poolWidth, P.poolDepth);
+        const poolMesh = new THREE.Mesh(poolGeo, poolMat);
+        poolMesh.rotation.x = -Math.PI / 2;
+        // Pool back edge sits at z = wfArcReach where the arc lands
+        poolMesh.position.set(0, -P.wfHeight / 2, P.wfArcReach + P.poolDepth / 2);
+        scene.add(poolMesh);
+
+        // Visibility
+        mesh.visible = P.enableWaterfall;
+        poolMesh.visible = P.enablePool;
+
+        // Update mesh sizes dynamically
+        const updateMeshes = () => {
+          mesh.geometry.dispose();
+          mesh.geometry = buildArcGeo(P.wfWidth, P.wfHeight, P.wfArcReach);
+          poolMesh.geometry.dispose();
+          poolMesh.geometry = new THREE.PlaneGeometry(P.poolWidth, P.poolDepth);
+          poolMesh.position.set(0, -P.wfHeight / 2, P.wfArcReach + P.poolDepth / 2);
+        };
+
+        /* ---------- TWEAKPANE ---------- */
+        const pc = document.createElement("div");
+        pc.id = "pane-container";
+        pc.style.cssText =
+          "position:fixed;top:8px;right:8px;max-height:calc(100vh - 16px);overflow-y:auto;overflow-x:hidden;z-index:1000;width:280px;";
+        document.body.appendChild(pc);
+        const pane = new Pane({ title: "🎨 Waterfall + Pool", container: pc });
+
+        const bF = (f, k, o = {}) =>
+          f.addBinding(P, k, o).on("change", (e) => (u[k].value = e.value));
+        const bB = (f, k, o = {}) =>
+          f
+            .addBinding(P, k, o)
+            .on("change", (e) => (u[k].value = e.value ? 1.0 : 0.0));
+        const bC = (f, k, o = {}) =>
+          f.addBinding(P, k, o).on("change", (e) => u[k].value.set(e.value));
+
+        // Visibility
+        pane
+          .addBinding(P, "enableWaterfall", { label: "Show Waterfall" })
+          .on("change", (e) => {
+            u.enableWaterfall.value = e.value ? 1 : 0;
+            mesh.visible = e.value;
+          });
+        pane
+          .addBinding(P, "enablePool", { label: "Show Pool" })
+          .on("change", (e) => {
+            u.enablePool.value = e.value ? 1 : 0;
+            poolMesh.visible = e.value;
+          });
+
+        // Size controls (waterfall and pool plane width/height)
+        const fSize = pane.addFolder({ title: "Size", expanded: true });
+        fSize
+          .addBinding(P, "wfWidth", { min: 4, max: 16, label: "WF Width" })
+          .on("change", () => updateMeshes());
+        fSize
+          .addBinding(P, "wfHeight", { min: 4, max: 16, label: "WF Height" })
+          .on("change", () => updateMeshes());
+        fSize
+          .addBinding(P, "wfArcReach", { min: 0, max: 8, step: 0.1, label: "WF Arc Reach" })
+          .on("change", () => updateMeshes());
+        fSize
+          .addBinding(P, "poolWidth", { min: 4, max: 16, label: "Pool Width" })
+          .on("change", () => updateMeshes());
+        fSize
+          .addBinding(P, "poolDepth", { min: 4, max: 16, label: "Pool Depth" })
+          .on("change", () => updateMeshes());
+
+        // Animation (flow movement; speed = time offset per second)
+        const fAnim = pane.addFolder({ title: "Animation", expanded: true });
+        bB(fAnim, "animEnable", { label: "Enable" });
+        bF(fAnim, "wfFlowSpeed", {
+          min: 0,
+          max: 1.5,
+          step: 0.01,
+          label: "WF flow",
+        });
+        bF(fAnim, "wfFoamDripSpeed", {
+          min: 0,
+          max: 1.5,
+          step: 0.01,
+          label: "WF foam drip",
+        });
+        bF(fAnim, "wfVoroFoamSpeed", {
+          min: 0,
+          max: 1.2,
+          step: 0.01,
+          label: "WF voronoi scroll",
+        });
+        bF(fAnim, "wfVerticalLinesSpeed", {
+          min: 0,
+          max: 1.5,
+          step: 0.01,
+          label: "WF vertical lines (wobble)",
+        });
+        bF(fAnim, "pFlowSpeed", {
+          min: 0,
+          max: 0.5,
+          step: 0.01,
+          label: "Pool flow",
+        });
+        bF(fAnim, "pGradientLayersSpeed", {
+          min: 0,
+          max: 0.5,
+          step: 0.01,
+          label: "Pool gradient layers",
+        });
+        bF(fAnim, "pVoroFoamSpeed", {
+          min: 0,
+          max: 1.5,
+          step: 0.01,
+          label: "Pool voronoi scroll",
+        });
+        bF(fAnim, "pSpecsSpeed", {
+          min: 0,
+          max: 0.15,
+          step: 0.01,
+          label: "Pool specs",
+        });
+
+        // Colors
+        const fc = pane.addFolder({ title: "Colors", expanded: true });
+        fc.addBinding(P, "waterfallPreset", {
+          label: "Preset",
+          options: { Green: "Green", Blue: "Blue", Teal: "Teal" },
+        }).on("change", (e) => {
+          const pr = WATERFALL_COLOR_PRESETS[e.value];
+          if (!pr) return;
+          P.topColor = pr.topColor;
+          P.middleColor = pr.middleColor;
+          P.bottomColor = pr.bottomColor;
+          u.topColor.value.setStyle(pr.topColor);
+          u.middleColor.value.setStyle(pr.middleColor);
+          u.bottomColor.value.setStyle(pr.bottomColor);
+        });
+        bC(fc, "topColor", { label: "Top" });
+        bC(fc, "middleColor", { label: "Middle" });
+        bC(fc, "bottomColor", { label: "Bottom" });
+
+        // Rim / Fresnel (edge glow on waterfall + pool)
+        const fRim = pane.addFolder({
+          title: "Rim / Fresnel",
+          expanded: true,
+        });
+        bB(fRim, "rimEnable", { label: "Enable" });
+        bC(fRim, "rimColor", { label: "Color" });
+        bF(fRim, "rimStrength", {
+          min: 0,
+          max: 1,
+          step: 0.01,
+          label: "Strength",
+        });
+        bF(fRim, "rimPower", {
+          min: 0.5,
+          max: 5,
+          step: 0.1,
+          label: "Power (falloff)",
+        });
+
+        // Split 1
+        const f1 = pane.addFolder({
+          title: "Split 1 (top → mid)",
+          expanded: true,
+        });
+        bF(f1, "split1Position", { min: 0, max: 1, label: "Position" });
+        bF(f1, "split1NoiseAmt", { min: 0, max: 0.5, label: "Noise amount" });
+        bF(f1, "split1Sharpness", {
+          min: 0.001,
+          max: 0.15,
+          label: "Edge sharpness",
+        });
+        bF(f1, "split1ScaleX", { min: 1, max: 15, label: "Scale X" });
+        bF(f1, "split1ScaleY", { min: 1, max: 15, label: "Scale Y" });
+        bF(f1, "split1OffsetX", { min: -10, max: 10, label: "Offset X" });
+        bF(f1, "split1OffsetY", { min: -10, max: 10, label: "Offset Y" });
+        bB(f1, "split1Invert", { label: "Invert" });
+        bF(f1, "split1Jitter", { min: 0, max: 1, label: "Jitter" });
+        f1.addBinding(P, "split1NoiseType", {
+          label: "Noise type",
+          options: { "Voronoi (round)": 0, "Perlin (organic)": 1 },
+        }).on("change", (e) => (u.split1NoiseType.value = e.value));
+
+        // Split 2
+        const f2 = pane.addFolder({
+          title: "Split 2 (mid → bottom)",
+          expanded: true,
+        });
+        bF(f2, "split2Position", { min: 0, max: 1, label: "Position" });
+        bF(f2, "split2NoiseAmt", { min: 0, max: 0.5, label: "Noise amount" });
+        bF(f2, "split2Sharpness", {
+          min: 0.001,
+          max: 0.15,
+          label: "Edge sharpness",
+        });
+        bF(f2, "split2ScaleX", { min: 1, max: 15, label: "Scale X" });
+        bF(f2, "split2ScaleY", { min: 1, max: 15, label: "Scale Y" });
+        bF(f2, "split2OffsetX", { min: -10, max: 10, label: "Offset X" });
+        bF(f2, "split2OffsetY", { min: -10, max: 10, label: "Offset Y" });
+        bB(f2, "split2Invert", { label: "Invert" });
+        bF(f2, "split2Jitter", { min: 0, max: 1, label: "Jitter" });
+        f2.addBinding(P, "split2NoiseType", {
+          label: "Noise type",
+          options: { "Voronoi (round)": 0, "Perlin (organic)": 1 },
+        }).on("change", (e) => (u.split2NoiseType.value = e.value));
+
+        // Foam drip
+        const ff = pane.addFolder({ title: "Foam Drip (top)", expanded: true });
+        bB(ff, "enableFoam", { label: "Enable" });
+        bC(ff, "foamColor", { label: "Color" });
+        bF(ff, "foamStrength", { min: 0, max: 1, label: "Strength" });
+        bF(ff, "foamPosition", { min: 0, max: 0.6, label: "Drip reach" });
+        bF(ff, "foamNoiseAmt", { min: 0, max: 0.5, label: "Noise amount" });
+        bF(ff, "foamSharpness", {
+          min: 0.001,
+          max: 0.15,
+          label: "Edge sharpness",
+        });
+        bF(ff, "foamScaleX", { min: 1, max: 25, label: "Scale X" });
+        bF(ff, "foamScaleY", { min: 1, max: 15, label: "Scale Y" });
+        bF(ff, "foamOctaves", { min: 1, max: 4, step: 1, label: "Octaves" });
+        bF(ff, "foamLac", { min: 1.2, max: 4, label: "Lacunarity" });
+        bF(ff, "foamGain", { min: 0.1, max: 0.8, label: "Gain" });
+        bF(ff, "foamOffsetX", { min: -10, max: 10, label: "Offset X" });
+        bF(ff, "foamOffsetY", { min: -10, max: 10, label: "Offset Y" });
+        bB(ff, "foamInvert", { label: "Invert" });
+        bF(ff, "foamJitter", { min: 0, max: 1, label: "Jitter (voronoi)" });
+        ff.addBinding(P, "foamNoiseType", {
+          label: "Noise type",
+          options: { "Voronoi (round)": 0, "Perlin (organic)": 1 },
+        }).on("change", (e) => (u.foamNoiseType.value = e.value));
+
+        // Waterfall Voronoi Cell Foam (same controls as pool)
+        const wfVf = pane.addFolder({
+          title: "Voronoi Cell Foam (waterfall)",
+          expanded: true,
+        });
+        bB(wfVf, "wfEnableVoroFoam", { label: "Enable" });
+        bF(wfVf, "wfVoroFoamSpeed", {
+          min: 0,
+          max: 1.2,
+          step: 0.01,
+          label: "Scroll speed (↓)",
+        });
+        bC(wfVf, "wfVoroFoamColor", { label: "Color" });
+        bF(wfVf, "wfVoroFoamStrength", { min: 0, max: 1, label: "Strength" });
+        bF(wfVf, "wfVoroFoamScale", { min: 2, max: 20, label: "Scale" });
+        bF(wfVf, "wfVoroFoamJitter", { min: 0, max: 1, label: "Jitter" });
+        bF(wfVf, "wfVoroFoamThreshold", {
+          min: 0.1,
+          max: 0.8,
+          label: "Threshold",
+        });
+        bF(wfVf, "wfVoroFoamSharpness", {
+          min: 0.001,
+          max: 0.35,
+          label: "Sharpness",
+        });
+        bF(wfVf, "wfVoroFoamStyle", {
+          min: 0,
+          max: 1,
+          step: 1,
+          label: "Style (0=edge 1=blob)",
+        });
+        bF(wfVf, "wfVoroFoamScale2", {
+          min: 0,
+          max: 25,
+          label: "Scale 2 (0=off)",
+        });
+        bF(wfVf, "wfVoroFoamStrength2", {
+          min: 0,
+          max: 1,
+          label: "Strength scale 2",
+        });
+        bF(wfVf, "wfVoroFoamTint", { min: 0, max: 1, label: "Edge tint" });
+        bF(wfVf, "wfVoroFoamOffsetX", { min: -10, max: 10, label: "Offset X" });
+        bF(wfVf, "wfVoroFoamOffsetY", { min: -10, max: 10, label: "Offset Y" });
+        bF(wfVf, "wfVoroFoamFadeMode", {
+          min: 0,
+          max: 1,
+          step: 1,
+          label: "Fade (0=top+bottom 1=sphere)",
+        });
+        bF(wfVf, "wfVoroFoamFadeTopStart", {
+          min: 0,
+          max: 0.5,
+          label: "Fade top start",
+        });
+        bF(wfVf, "wfVoroFoamFadeTopEnd", {
+          min: 0.05,
+          max: 0.5,
+          label: "Fade top end",
+        });
+        bF(wfVf, "wfVoroFoamFadeBottomStart", {
+          min: 0.5,
+          max: 1,
+          label: "Fade bottom start",
+        });
+        bF(wfVf, "wfVoroFoamFadeBottomEnd", {
+          min: 0.5,
+          max: 1,
+          label: "Fade bottom end",
+        });
+        bF(wfVf, "wfVoroFoamFadeStart", {
+          min: 0,
+          max: 1,
+          label: "Sphere fade start",
+        });
+        bF(wfVf, "wfVoroFoamFadeEnd", {
+          min: 0,
+          max: 1.5,
+          label: "Sphere fade end",
+        });
+        bF(wfVf, "wfVoroFoamFadeSideX", {
+          min: 0.1,
+          max: 1.5,
+          label: "Sphere fade width",
+        });
+        bF(wfVf, "wfVoroFoamWarpAmt", { min: 0, max: 4, label: "Warp amount" });
+        bF(wfVf, "wfVoroFoamWarpScale", {
+          min: 0.2,
+          max: 3,
+          label: "Warp scale",
+        });
+        bF(wfVf, "wfVoroFoamWarpAnimSpeed", {
+          min: 0,
+          max: 3,
+          step: 0.01,
+          label: "Warp anim speed",
+        });
+        bF(wfVf, "wfVoroFoamWarpAnimAmt", {
+          min: 0,
+          max: 1.5,
+          step: 0.01,
+          label: "Warp anim amount",
+        });
+        bF(wfVf, "wfVoroFoamWarpPhaseSpeed", {
+          min: 0,
+          max: 1.5,
+          step: 0.01,
+          label: "Warp phase (shape morph)",
+        });
+
+        // Perlin lines (thin noise lines on waterfall)
+        const wfPl = pane.addFolder({
+          title: "Perlin Lines",
+          expanded: false,
+        });
+        bB(wfPl, "wfPerlinLinesEnable", { label: "Enable" });
+        bC(wfPl, "wfPerlinLinesColor", { label: "Color" });
+        bF(wfPl, "wfPerlinLinesStrength", {
+          min: 0,
+          max: 1,
+          label: "Strength",
+        });
+        bF(wfPl, "wfPerlinLinesScaleX", { min: 0.5, max: 20, label: "Scale X" });
+        bF(wfPl, "wfPerlinLinesScaleY", { min: 0.5, max: 20, label: "Scale Y" });
+        bF(wfPl, "wfPerlinLinesThreshold", {
+          min: 0,
+          max: 1,
+          label: "Threshold",
+        });
+        bF(wfPl, "wfPerlinLinesSharpness", {
+          min: 0.01,
+          max: 0.3,
+          label: "Sharpness",
+        });
+        bF(wfPl, "wfPerlinLinesFadeTopStart", {
+          min: 0,
+          max: 0.5,
+          label: "Fade top start",
+        });
+        bF(wfPl, "wfPerlinLinesFadeTopEnd", {
+          min: 0.05,
+          max: 0.6,
+          label: "Fade top end",
+        });
+        bF(wfPl, "wfPerlinLinesFadeBottomStart", {
+          min: 0.4,
+          max: 1,
+          label: "Fade bottom start",
+        });
+        bF(wfPl, "wfPerlinLinesFadeBottomEnd", {
+          min: 0.4,
+          max: 1,
+          label: "Fade bottom end",
+        });
+        bF(wfPl, "wfPerlinLinesOffsetX", { min: -10, max: 10, label: "Offset X" });
+        bF(wfPl, "wfPerlinLinesOffsetY", { min: -10, max: 10, label: "Offset Y" });
+        bF(wfPl, "wfPerlinLinesOctaves", {
+          min: 1,
+          max: 6,
+          step: 1,
+          label: "Octaves",
+        });
+        bF(wfPl, "wfPerlinLinesLac", { min: 1, max: 3, label: "Lacunarity" });
+        bF(wfPl, "wfPerlinLinesGain", { min: 0.2, max: 0.9, label: "Gain" });
+        bF(wfPl, "wfPerlinLinesSpeed", {
+          min: -1,
+          max: 1,
+          label: "Scroll speed",
+        });
+
+        // Vertical lines (shape water flow)
+        const wfVl = pane.addFolder({
+          title: "Vertical Lines",
+          expanded: true,
+        });
+        bB(wfVl, "wfVerticalLinesEnable", { label: "Enable" });
+        bB(wfVl, "wfVerticalLinesInvert", { label: "Invert" });
+        bC(wfVl, "wfVerticalLinesColor", { label: "Color" });
+        bF(wfVl, "wfVerticalLinesStrength", {
+          min: 0,
+          max: 1,
+          label: "Strength",
+        });
+        bF(wfVl, "wfVerticalLinesScale", { min: 2, max: 20, label: "Scale" });
+        bF(wfVl, "wfVerticalLinesSlant", {
+          min: -0.5,
+          max: 0.5,
+          label: "Slant",
+        });
+        bF(wfVl, "wfVerticalLinesSharpness", {
+          min: 0.005,
+          max: 0.15,
+          label: "Line width",
+        });
+        bF(wfVl, "wfVerticalLinesFadeStart", {
+          min: 0,
+          max: 0.5,
+          label: "Fade start (top)",
+        });
+        bF(wfVl, "wfVerticalLinesFadeEnd", {
+          min: 0.1,
+          max: 0.6,
+          label: "Fade end (top)",
+        });
+        bF(wfVl, "wfVerticalLinesFadeBottomStart", {
+          min: 0.5,
+          max: 1,
+          label: "Fade start (bottom)",
+        });
+        bF(wfVl, "wfVerticalLinesFadeBottomEnd", {
+          min: 0.5,
+          max: 1,
+          label: "Fade end (bottom)",
+        });
+        bF(wfVl, "wfVerticalLinesWobble", {
+          min: 0,
+          max: 0.3,
+          label: "Wobble",
+        });
+        bF(wfVl, "wfVerticalLinesOffsetX", {
+          min: -10,
+          max: 10,
+          label: "Offset X",
+        });
+        bF(wfVl, "wfVerticalLinesOffsetY", {
+          min: -10,
+          max: 10,
+          label: "Offset Y",
+        });
+
+        // Flowing Stream Bands
+        const wfSt = pane.addFolder({ title: "Flowing Stream Bands", expanded: true });
+        bB(wfSt, "wfStreamsEnable", { label: "Enable" });
+        bC(wfSt, "wfStreamsColor", { label: "Band color" });
+        bF(wfSt, "wfStreamsStrength", { min: 0, max: 1, label: "Strength" });
+        bF(wfSt, "wfStreamsSpeed", { min: 0, max: 2, step: 0.01, label: "Flow speed ↓" });
+        bF(wfSt, "wfStreamsScaleX", { min: 1, max: 20, label: "Bands (scale X)" });
+        bF(wfSt, "wfStreamsScaleY", { min: 0.2, max: 6, label: "Stretch (scale Y)" });
+        bF(wfSt, "wfStreamsThreshold", { min: 0.2, max: 0.8, label: "Threshold" });
+        bF(wfSt, "wfStreamsSharpness", { min: 0.01, max: 0.3, label: "Edge softness" });
+        bF(wfSt, "wfStreamsWarp", { min: 0, max: 1.5, label: "Wiggle" });
+        bF(wfSt, "wfStreamsOctaves", { min: 1, max: 4, step: 1, label: "Octaves" });
+        bF(wfSt, "wfStreamsLac", { min: 1.2, max: 4, label: "Lacunarity" });
+        bF(wfSt, "wfStreamsGain", { min: 0.1, max: 0.8, label: "Gain" });
+        bF(wfSt, "wfStreamsOffsetX", { min: -10, max: 10, label: "Offset X" });
+        bF(wfSt, "wfStreamsOffsetY", { min: -10, max: 10, label: "Offset Y" });
+
+        // Bubbles
+        const fbb = pane.addFolder({
+          title: "Bubbles (top, masked)",
+          expanded: true,
+        });
+        bB(fbb, "enableBubbles", { label: "Enable" });
+        bC(fbb, "bubbleColor", { label: "Color" });
+        bF(fbb, "bubbleStrength", { min: 0, max: 1, label: "Strength" });
+        bF(fbb, "bubbleScaleX", { min: 1, max: 20, label: "Scale X" });
+        bF(fbb, "bubbleScaleY", { min: 1, max: 20, label: "Scale Y" });
+        bF(fbb, "bubbleOctaves", { min: 1, max: 4, step: 1, label: "Octaves" });
+        bF(fbb, "bubbleLac", { min: 1.2, max: 4, label: "Lacunarity" });
+        bF(fbb, "bubbleGain", { min: 0.1, max: 0.8, label: "Gain" });
+        bF(fbb, "bubbleThreshold", { min: 0, max: 1, label: "Threshold" });
+        bF(fbb, "bubbleSharpness", {
+          min: 0.001,
+          max: 0.2,
+          label: "Sharpness",
+        });
+        bF(fbb, "bubbleOffsetX", { min: -10, max: 10, label: "Offset X" });
+        bF(fbb, "bubbleOffsetY", { min: -10, max: 10, label: "Offset Y" });
+
+        // ========== POOL ==========
+        const poolPane = pane.addFolder({
+          title: "🌊 POOL PLANE",
+          expanded: false,
+        });
+
+        const pfc = poolPane.addFolder({ title: "Colors", expanded: true });
+        pfc.addBinding(P, "poolPreset", {
+          label: "Preset",
+          options: { Green: "Green", Blue: "Blue", Teal: "Teal" },
+        }).on("change", (e) => {
+          const pr = POOL_COLOR_PRESETS[e.value];
+          if (!pr) return;
+          P.pTopColor = pr.pTopColor;
+          P.pMiddleColor = pr.pMiddleColor;
+          P.pBottomColor = pr.pBottomColor;
+          u.pTopColor.value.setStyle(pr.pTopColor);
+          u.pMiddleColor.value.setStyle(pr.pMiddleColor);
+          u.pBottomColor.value.setStyle(pr.pBottomColor);
+        });
+        bC(pfc, "pTopColor", { label: "Top" });
+        bC(pfc, "pMiddleColor", { label: "Middle" });
+        bC(pfc, "pBottomColor", { label: "Bottom" });
+
+        const pf1 = poolPane.addFolder({ title: "Split 1" });
+        bF(pf1, "pSplit1Position", { min: 0, max: 1, label: "Position" });
+        bF(pf1, "pSplit1NoiseAmt", { min: 0, max: 0.5, label: "Noise amount" });
+        bF(pf1, "pSplit1Sharpness", {
+          min: 0.001,
+          max: 0.15,
+          label: "Sharpness",
+        });
+        bF(pf1, "pSplit1ScaleX", { min: 1, max: 15, label: "Scale X" });
+        bF(pf1, "pSplit1ScaleY", { min: 1, max: 15, label: "Scale Y" });
+        bF(pf1, "pSplit1OffsetX", { min: -10, max: 10, label: "Offset X" });
+        bF(pf1, "pSplit1OffsetY", { min: -10, max: 10, label: "Offset Y" });
+        bB(pf1, "pSplit1Invert", { label: "Invert" });
+        bF(pf1, "pSplit1Jitter", { min: 0, max: 1, label: "Jitter" });
+        pf1
+          .addBinding(P, "pSplit1NoiseType", {
+            label: "Noise type",
+            options: { Voronoi: 0, Perlin: 1 },
+          })
+          .on("change", (e) => (u.pSplit1NoiseType.value = e.value));
+
+        const pf2 = poolPane.addFolder({ title: "Split 2" });
+        bF(pf2, "pSplit2Position", { min: 0, max: 1, label: "Position" });
+        bF(pf2, "pSplit2NoiseAmt", { min: 0, max: 0.5, label: "Noise amount" });
+        bF(pf2, "pSplit2Sharpness", {
+          min: 0.001,
+          max: 0.15,
+          label: "Sharpness",
+        });
+        bF(pf2, "pSplit2ScaleX", { min: 1, max: 15, label: "Scale X" });
+        bF(pf2, "pSplit2ScaleY", { min: 1, max: 15, label: "Scale Y" });
+        bF(pf2, "pSplit2OffsetX", { min: -10, max: 10, label: "Offset X" });
+        bF(pf2, "pSplit2OffsetY", { min: -10, max: 10, label: "Offset Y" });
+        bB(pf2, "pSplit2Invert", { label: "Invert" });
+        bF(pf2, "pSplit2Jitter", { min: 0, max: 1, label: "Jitter" });
+        pf2
+          .addBinding(P, "pSplit2NoiseType", {
+            label: "Noise type",
+            options: { Voronoi: 0, Perlin: 1 },
+          })
+          .on("change", (e) => (u.pSplit2NoiseType.value = e.value));
+
+        const pff = poolPane.addFolder({ title: "Foam Drip" });
+        bB(pff, "pEnableFoam", { label: "Enable" });
+        bC(pff, "pFoamColor", { label: "Color" });
+        bF(pff, "pFoamStrength", { min: 0, max: 1, label: "Strength" });
+        bF(pff, "pFoamPosition", { min: 0, max: 0.6, label: "Drip reach" });
+        bF(pff, "pFoamNoiseAmt", { min: 0, max: 0.5, label: "Noise amount" });
+        bF(pff, "pFoamSharpness", {
+          min: 0.001,
+          max: 0.15,
+          label: "Sharpness",
+        });
+        bF(pff, "pFoamScaleX", { min: 1, max: 25, label: "Scale X" });
+        bF(pff, "pFoamScaleY", { min: 1, max: 15, label: "Scale Y" });
+        bF(pff, "pFoamOctaves", { min: 1, max: 4, step: 1, label: "Octaves" });
+        bF(pff, "pFoamLac", { min: 1.2, max: 4, label: "Lacunarity" });
+        bF(pff, "pFoamGain", { min: 0.1, max: 0.8, label: "Gain" });
+        bF(pff, "pFoamOffsetX", { min: -10, max: 10, label: "Offset X" });
+        bF(pff, "pFoamOffsetY", { min: -10, max: 10, label: "Offset Y" });
+        bB(pff, "pFoamInvert", { label: "Invert" });
+        bF(pff, "pFoamJitter", { min: 0, max: 1, label: "Jitter" });
+        pff
+          .addBinding(P, "pFoamNoiseType", {
+            label: "Noise type",
+            options: { Voronoi: 0, Perlin: 1 },
+          })
+          .on("change", (e) => (u.pFoamNoiseType.value = e.value));
+
+        const pfb = poolPane.addFolder({ title: "Bubbles" });
+        bB(pfb, "pEnableBubbles", { label: "Enable" });
+        bC(pfb, "pBubbleColor", { label: "Color" });
+        bF(pfb, "pBubbleStrength", { min: 0, max: 1, label: "Strength" });
+        bF(pfb, "pBubbleScaleX", { min: 1, max: 20, label: "Scale X" });
+        bF(pfb, "pBubbleScaleY", { min: 1, max: 20, label: "Scale Y" });
+        bF(pfb, "pBubbleOctaves", {
+          min: 1,
+          max: 4,
+          step: 1,
+          label: "Octaves",
+        });
+        bF(pfb, "pBubbleLac", { min: 1.2, max: 4, label: "Lacunarity" });
+        bF(pfb, "pBubbleGain", { min: 0.1, max: 0.8, label: "Gain" });
+        bF(pfb, "pBubbleThreshold", { min: 0, max: 1, label: "Threshold" });
+        bF(pfb, "pBubbleSharpness", {
+          min: 0.001,
+          max: 0.2,
+          label: "Sharpness",
+        });
+        bF(pfb, "pBubbleOffsetX", { min: -10, max: 10, label: "Offset X" });
+        bF(pfb, "pBubbleOffsetY", { min: -10, max: 10, label: "Offset Y" });
+
+        const pvf = poolPane.addFolder({
+          title: "Voronoi Cell Foam",
+          expanded: true,
+        });
+        bB(pvf, "pEnableVoroFoam", { label: "Enable" });
+        bF(pvf, "pVoroFoamSpeed", {
+          min: 0,
+          max: 1.5,
+          step: 0.01,
+          label: "Scroll speed (↓)",
+        });
+        bC(pvf, "pVoroFoamColor", { label: "Color" });
+        bF(pvf, "pVoroFoamStrength", { min: 0, max: 1, label: "Strength" });
+        bF(pvf, "pVoroFoamScale", { min: 2, max: 20, label: "Scale" });
+        bF(pvf, "pVoroFoamJitter", { min: 0, max: 1, label: "Jitter" });
+        bF(pvf, "pVoroFoamThreshold", {
+          min: 0.1,
+          max: 0.8,
+          label: "Threshold",
+        });
+        bF(pvf, "pVoroFoamSharpness", {
+          min: 0.001,
+          max: 0.35,
+          label: "Sharpness / blob softness",
+        });
+        bF(pvf, "pVoroFoamStyle", {
+          min: 0,
+          max: 1,
+          step: 1,
+          label: "Style (0=edge 1=blob)",
+        });
+        bF(pvf, "pVoroFoamScale2", {
+          min: 0,
+          max: 25,
+          label: "Scale 2 (0=off)",
+        });
+        bF(pvf, "pVoroFoamStrength2", {
+          min: 0,
+          max: 1,
+          label: "Strength scale 2",
+        });
+        bF(pvf, "pVoroFoamTint", {
+          min: 0,
+          max: 1,
+          label: "Edge tint (water)",
+        });
+        bF(pvf, "pVoroFoamOffsetX", { min: -10, max: 10, label: "Offset X" });
+        bF(pvf, "pVoroFoamOffsetY", { min: -10, max: 10, label: "Offset Y" });
+        bF(pvf, "pVoroFoamFadeStart", { min: 0, max: 1, label: "Fade start" });
+        bF(pvf, "pVoroFoamFadeEnd", { min: 0, max: 1.5, label: "Fade end" });
+        bF(pvf, "pVoroFoamFadeSideX", {
+          min: 0.1,
+          max: 1.5,
+          label: "Fade width",
+        });
+        bF(pvf, "pVoroFoamWarpAmt", { min: 0, max: 4, label: "Warp amount" });
+        bF(pvf, "pVoroFoamWarpScale", {
+          min: 0.2,
+          max: 3,
+          label: "Warp scale",
+        });
+        bF(pvf, "pVoroFoamWarpAnimSpeed", {
+          min: 0,
+          max: 3,
+          step: 0.01,
+          label: "Warp anim speed",
+        });
+        bF(pvf, "pVoroFoamWarpAnimAmt", {
+          min: 0,
+          max: 1.5,
+          step: 0.01,
+          label: "Warp anim amount",
+        });
+        bF(pvf, "pVoroFoamWarpPhaseSpeed", {
+          min: 0,
+          max: 1.5,
+          step: 0.01,
+          label: "Warp phase (shape morph)",
+        });
+
+        // Gradient noise layers (split-style: position + Perlin edge, gradient mask = lower only)
+        const pgl = poolPane.addFolder({
+          title: "Gradient noise layers",
+          expanded: true,
+        });
+        const pgl1 = pgl.addFolder({ title: "Layer 1" });
+        bB(pgl1, "pLayer1Enable", { label: "Enable" });
+        bF(pgl1, "pLayer1Position", { min: 0, max: 1, label: "Position" });
+        bF(pgl1, "pLayer1NoiseAmt", {
+          min: 0,
+          max: 0.5,
+          label: "Noise amount",
+        });
+        bF(pgl1, "pLayer1Sharpness", {
+          min: 0.001,
+          max: 0.1,
+          label: "Sharpness",
+        });
+        bF(pgl1, "pLayer1ScaleX", { min: 1, max: 15, label: "Scale X" });
+        bF(pgl1, "pLayer1ScaleY", { min: 1, max: 15, label: "Scale Y" });
+        bF(pgl1, "pLayer1OffsetX", { min: -10, max: 10, label: "Offset X" });
+        bF(pgl1, "pLayer1OffsetY", { min: -10, max: 10, label: "Offset Y" });
+        bF(pgl1, "pLayer1Octaves", {
+          min: 1,
+          max: 4,
+          step: 1,
+          label: "Octaves",
+        });
+        bF(pgl1, "pLayer1Lac", { min: 1.2, max: 4, label: "Lacunarity" });
+        bF(pgl1, "pLayer1Gain", { min: 0.2, max: 0.8, label: "Gain" });
+        bB(pgl1, "pLayer1Invert", { label: "Invert" });
+        bF(pgl1, "pLayer1GradStart", { min: 0, max: 1, label: "Grad start" });
+        bF(pgl1, "pLayer1GradEnd", { min: 0, max: 1, label: "Grad end" });
+        bF(pgl1, "pLayer1Strength", { min: 0, max: 1, label: "Strength" });
+        bC(pgl1, "pLayer1Color", { label: "Color" });
+        const pgl2 = pgl.addFolder({ title: "Layer 2" });
+        bB(pgl2, "pLayer2Enable", { label: "Enable" });
+        bF(pgl2, "pLayer2Position", { min: 0, max: 1, label: "Position" });
+        bF(pgl2, "pLayer2NoiseAmt", {
+          min: 0,
+          max: 0.5,
+          label: "Noise amount",
+        });
+        bF(pgl2, "pLayer2Sharpness", {
+          min: 0.001,
+          max: 0.1,
+          label: "Sharpness",
+        });
+        bF(pgl2, "pLayer2ScaleX", { min: 1, max: 15, label: "Scale X" });
+        bF(pgl2, "pLayer2ScaleY", { min: 1, max: 15, label: "Scale Y" });
+        bF(pgl2, "pLayer2OffsetX", { min: -10, max: 10, label: "Offset X" });
+        bF(pgl2, "pLayer2OffsetY", { min: -10, max: 10, label: "Offset Y" });
+        bF(pgl2, "pLayer2Octaves", {
+          min: 1,
+          max: 4,
+          step: 1,
+          label: "Octaves",
+        });
+        bF(pgl2, "pLayer2Lac", { min: 1.2, max: 4, label: "Lacunarity" });
+        bF(pgl2, "pLayer2Gain", { min: 0.2, max: 0.8, label: "Gain" });
+        bB(pgl2, "pLayer2Invert", { label: "Invert" });
+        bF(pgl2, "pLayer2GradStart", { min: 0, max: 1, label: "Grad start" });
+        bF(pgl2, "pLayer2GradEnd", { min: 0, max: 1, label: "Grad end" });
+        bF(pgl2, "pLayer2Strength", { min: 0, max: 1, label: "Strength" });
+        bC(pgl2, "pLayer2Color", { label: "Color" });
+
+        // Specs / dust
+        const pvs = poolPane.addFolder({
+          title: "Specs / Dust",
+          expanded: true,
+        });
+        bB(pvs, "pEnableSpecs", { label: "Enable" });
+        bC(pvs, "pSpecsColor", { label: "Color" });
+        bF(pvs, "pSpecsStrength", { min: 0, max: 1, label: "Strength" });
+        bF(pvs, "pSpecsScale", { min: 10, max: 60, label: "Scale" });
+        bF(pvs, "pSpecsOctaves", { min: 1, max: 4, step: 1, label: "Octaves" });
+        bF(pvs, "pSpecsThreshold", { min: 0.4, max: 0.95, label: "Threshold" });
+        bF(pvs, "pSpecsSharpness", {
+          min: 0.001,
+          max: 0.1,
+          label: "Sharpness",
+        });
+        bF(pvs, "pSpecsOffsetX", { min: -10, max: 10, label: "Offset X" });
+        bF(pvs, "pSpecsOffsetY", { min: -10, max: 10, label: "Offset Y" });
+
+        /* ---------- loop ---------- */
+        const timer = new THREE.Timer();
+        function animate(timestamp) {
+          requestAnimationFrame(animate);
+          if (typeof timestamp === "number") timer.update(timestamp);
+          u.time.value = timer.getElapsed();
+          u.cameraPosition.value.copy(camera.position);
+          controls.update();
+          renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener("resize", () => {
+          camera.aspect = window.innerWidth / window.innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+      }
+
+      init();
+    </script>
+  </body>
+</html>

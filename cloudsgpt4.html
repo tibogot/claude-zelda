@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebGPU TSL Clouds (Drei-style)</title>
+<style>
+body{margin:0;overflow:hidden;background:#87CEEB}
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.183.0/build/three.module.js",
+    "three/webgpu": "https://unpkg.com/three@0.183.0/build/three.webgpu.js",
+    "three/tsl": "https://unpkg.com/three@0.183.0/build/three.tsl.js",
+    "three/addons/": "https://unpkg.com/three@0.183.0/examples/jsm/",
+    "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.4/dist/tweakpane.min.js"
+  }
+}
+</script>
+</head>
+<body>
+
+<script type="module">
+
+import * as THREE from "three";
+import { WebGPURenderer, MeshBasicNodeMaterial } from "three/webgpu";
+import { texture, uv, attribute } from "three/tsl";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { Pane } from "tweakpane";
+
+// ─── Scene / Camera / Renderer ─────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87ceeb);
+
+const camera = new THREE.PerspectiveCamera(
+  60,
+  window.innerWidth / window.innerHeight,
+  0.1,
+  1000
+);
+camera.position.set(0, 5, 15);
+
+const renderer = new WebGPURenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+// ─── Texture (same as drei default) ────────────────────────────────────────
+const loader = new THREE.TextureLoader();
+const cloudTexture = loader.load(
+  "https://rawcdn.githack.com/pmndrs/drei-assets/9225a9f1fbd449d9411125c2f419b843d0308c9f/cloud.png"
+);
+
+// ─── Params (Drei-style: clouds = clusters of segments) ─────────────────────
+const params = {
+  cloudCount: 10,
+  segmentsPerCloud: 20,
+  boundsX: 5,
+  boundsY: 1,
+  boundsZ: 1,
+  spread: 40,
+  cloudHeight: 5,
+  volume: 6,
+  smallestVolume: 0.25,
+  speed: 1,
+  growth: 4,
+  verticalMotion: 0.4,
+  fade: 80,
+  opacity: 1,
+  color: "#ffffff",
+  autoRotate: false,
+};
+
+const LIMIT = 500;
+let totalInstances = params.cloudCount * params.segmentsPerCloud;
+totalInstances = Math.min(totalInstances, LIMIT);
+
+// ─── Geometry & opacity attribute ──────────────────────────────────────────
+const geometry = new THREE.PlaneGeometry(1, 1);
+const opacityArray = new Float32Array(LIMIT);
+geometry.setAttribute("cloudOpacity", new THREE.InstancedBufferAttribute(opacityArray, 1));
+
+// ─── TSL material ─────────────────────────────────────────────────────────
+const opacityAttr = attribute("cloudOpacity");
+const tex = texture(cloudTexture, uv());
+const material = new MeshBasicNodeMaterial();
+material.colorNode = tex.rgb;
+material.opacityNode = tex.a.mul(opacityAttr);
+material.transparent = true;
+material.depthWrite = false;
+
+const clouds = new THREE.InstancedMesh(geometry, material, LIMIT);
+scene.add(clouds);
+
+// ─── Drei-style segment data: each instance = one segment of one cloud ─────
+const cloudCenters = [];
+const segmentData = []; // { offset, volume, rotation, rotationFactor, density }
+
+function seededRandom(seed) {
+  let s = seed;
+  return function () {
+    s = Math.sin(s++) * 10000;
+    return s - Math.floor(s);
+  };
+}
+
+function generateClouds() {
+  cloudCenters.length = 0;
+  segmentData.length = 0;
+
+  for (let c = 0; c < params.cloudCount; c++) {
+    cloudCenters.push(
+      new THREE.Vector3(
+        (Math.random() - 0.5) * params.spread,
+        Math.random() * params.cloudHeight,
+        (Math.random() - 0.5) * params.spread
+      )
+    );
+  }
+
+  let segmentIndex = 0;
+  const random = seededRandom(12345);
+
+  for (let c = 0; c < params.cloudCount && segmentIndex < LIMIT; c++) {
+    for (let s = 0; s < params.segmentsPerCloud && segmentIndex < LIMIT; s++) {
+      // Distribute inside bounds (concentrate 'inside': smaller at edges)
+      const point = new THREE.Vector3(
+        random() * 2 - 1,
+        random() * 2 - 1,
+        random() * 2 - 1
+      );
+      const xDiff = Math.abs(point.x);
+      const yDiff = Math.abs(point.y);
+      const zDiff = Math.abs(point.z);
+      const max = Math.max(xDiff, yDiff, zDiff);
+      let length = 1;
+      if (max > 0) {
+        if (xDiff === max) length -= xDiff / params.boundsX;
+        if (yDiff === max) length -= yDiff / params.boundsY;
+        if (zDiff === max) length -= zDiff / params.boundsZ;
+      }
+      const vol = Math.max(params.smallestVolume, length) * params.volume;
+
+      const offset = new THREE.Vector3(
+        point.x * params.boundsX * 0.5,
+        point.y * params.boundsY * 0.5,
+        point.z * params.boundsZ * 0.5
+      );
+
+      segmentData.push({
+        cloudIndex: c,
+        offset,
+        volume: vol,
+        rotation: (s / params.segmentsPerCloud) * Math.PI,
+        rotationFactor: Math.max(0.2, 0.5 * random()) * params.speed,
+        density: Math.max(0.5, random()),
+      });
+      segmentIndex++;
+    }
+  }
+
+  totalInstances = segmentData.length;
+  clouds.count = totalInstances;
+}
+
+generateClouds();
+
+// ─── Reusable objects for animation ────────────────────────────────────────
+const dummy = new THREE.Object3D();
+const cameraPos = new THREE.Vector3();
+const spinQuat = new THREE.Quaternion();
+const axisZ = new THREE.Vector3(0, 0, 1);
+const sortList = []; // pre-allocated { matrix, opacity, dist }
+const clock = new THREE.Clock();
+
+// Pre-allocate sort list entries to avoid per-frame allocations
+for (let i = 0; i < LIMIT; i++) {
+  sortList.push({ matrix: new THREE.Matrix4(), opacity: 1, dist: 0 });
+}
+const sortIndices = new Array(LIMIT);
+for (let i = 0; i < LIMIT; i++) sortIndices[i] = i;
+
+// ─── Animation (depth-sort + billboard + spin + fade, like drei) ────────────
+function animate() {
+  const t = clock.getElapsedTime();
+  const delta = clock.getDelta();
+  controls.autoRotate = params.autoRotate;
+  controls.update();
+
+  camera.getWorldPosition(cameraPos);
+
+  for (let i = 0; i < totalInstances; i++) {
+    const seg = segmentData[i];
+    const center = cloudCenters[seg.cloudIndex];
+
+    dummy.position.copy(center).add(seg.offset);
+    dummy.position.y += Math.sin(t * params.speed + i) * params.verticalMotion;
+
+    seg.rotation += delta * seg.rotationFactor;
+    spinQuat.setFromAxisAngle(axisZ, seg.rotation);
+    dummy.quaternion.copy(camera.quaternion).multiply(spinQuat);
+
+    const growth = (1 + Math.sin(t * seg.density * params.speed)) / 2;
+    const s = seg.volume + growth * params.growth;
+    dummy.scale.setScalar(s);
+
+    dummy.updateMatrix();
+    sortList[i].matrix.copy(dummy.matrix);
+    sortList[i].dist = dummy.position.distanceTo(cameraPos);
+    sortList[i].opacity = params.opacity * (params.fade > 0 && sortList[i].dist < params.fade
+      ? sortList[i].dist / params.fade
+      : 1);
+  }
+
+  // Far-to-near so transparency order is correct (like drei)
+  for (let i = 0; i < totalInstances; i++) sortIndices[i] = i;
+  sortIndices.length = totalInstances;
+  sortIndices.sort((a, b) => sortList[b].dist - sortList[a].dist);
+
+  for (let i = 0; i < totalInstances; i++) {
+    const j = sortIndices[i];
+    clouds.setMatrixAt(i, sortList[j].matrix);
+    opacityArray[i] = sortList[j].opacity;
+  }
+  sortIndices.length = LIMIT;
+
+  clouds.instanceMatrix.needsUpdate = true;
+  clouds.geometry.attributes.cloudOpacity.needsUpdate = true;
+
+  renderer.render(scene, camera);
+}
+
+renderer.setAnimationLoop(animate);
+
+// ─── Resize ───────────────────────────────────────────────────────────────
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ─── Tweakpane ─────────────────────────────────────────────────────────────
+const pane = new Pane({ title: "Cloud Controls (Drei-style)" });
+
+pane.addBinding(params, "cloudCount", { min: 2, max: 25, step: 1 }).on("change", () => {
+  totalInstances = Math.min(params.cloudCount * params.segmentsPerCloud, LIMIT);
+  generateClouds();
+});
+
+pane.addBinding(params, "segmentsPerCloud", { min: 5, max: 30, step: 1 }).on("change", () => {
+  totalInstances = Math.min(params.cloudCount * params.segmentsPerCloud, LIMIT);
+  generateClouds();
+});
+
+pane.addBinding(params, "boundsX", { min: 1, max: 15 });
+pane.addBinding(params, "boundsY", { min: 0.5, max: 5 });
+pane.addBinding(params, "boundsZ", { min: 1, max: 15 });
+
+pane.addBinding(params, "spread", { min: 10, max: 100 });
+pane.addBinding(params, "cloudHeight", { min: 1, max: 20 });
+pane.addBinding(params, "volume", { min: 1, max: 12 });
+pane.addBinding(params, "smallestVolume", { min: 0.1, max: 1 });
+pane.addBinding(params, "speed", { min: 0, max: 5 });
+pane.addBinding(params, "growth", { min: 0, max: 8 });
+pane.addBinding(params, "verticalMotion", { min: 0, max: 2 });
+pane.addBinding(params, "fade", { min: 0, max: 150 });
+pane.addBinding(params, "opacity", { min: 0, max: 2 });
+pane.addBinding(params, "autoRotate");
+
+pane.addBinding(params, "color").on("change", (e) => {
+  material.color.set(e.value);
+});
+
+</script>
+</body>
+</html>

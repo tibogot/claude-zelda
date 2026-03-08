@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Fairy Architect — Final Scene & Shapped Shadows</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #000;
+        font-family: sans-serif;
+      }
+      #panel {
+        position: fixed;
+        top: 20px;
+        left: 20px;
+        z-index: 10;
+      }
+      #upload-container {
+        position: fixed;
+        bottom: 20px;
+        left: 20px;
+        z-index: 10;
+        background: rgba(255, 255, 255, 0.05);
+        color: #fff;
+        padding: 15px;
+        border-radius: 12px;
+        backdrop-filter: blur(15px);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+      }
+    </style>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.4/dist/tweakpane.min.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="panel"></div>
+    <div id="upload-container">
+      <strong>Wing Design (Black BG OK)</strong><br /><br />
+      <input type="file" id="wingInput" accept="image/png" />
+    </div>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import {
+        texture,
+        uv,
+        color,
+        positionLocal,
+        normalWorld,
+        cameraPosition,
+        modelWorldMatrix,
+        dot,
+        clamp,
+        oneMinus,
+        uniform,
+        time,
+        sin,
+        cos,
+        vec3,
+        pass,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
+
+      /** 1. ENGINE & SCENE **/
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color("#020408");
+      scene.fog = new THREE.Fog("#020408", 5, 30);
+
+      const camera = new THREE.PerspectiveCamera(
+        45,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        100,
+      );
+      camera.position.set(0, 7, 15);
+
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.setAnimationLoop(animate);
+      document.body.appendChild(renderer.domElement);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+
+      /** 2. LIGHTING **/
+      const ambient = new THREE.AmbientLight("#1a1a2e", 0.6);
+      scene.add(ambient);
+
+      const moon = new THREE.DirectionalLight("#ffffff", 1.2);
+      moon.position.set(5, 15, 5);
+      moon.castShadow = true;
+      moon.shadow.camera.left = -10;
+      moon.shadow.camera.right = 10;
+      moon.shadow.camera.top = 10;
+      moon.shadow.camera.bottom = -10;
+      moon.shadow.mapSize.set(2048, 2048);
+      moon.shadow.bias = -0.001;
+      scene.add(moon);
+
+      /** 3. PARAMETERS (DEFAULTS APPLIED) **/
+      const params = {
+        sphereColor: "#f0ff00",
+        sphereScale: 1.2,
+        sphereGlow: 4.0,
+        wingColor: "#f0ff00",
+        wingSize: 5.0,
+        wingGlow: 3.0,
+        wingGap: 0.15,
+        wingY: 1.05,
+        wingZ: 0.0,
+        wingTilt: 0.3,
+        flapSpeed: 18.0,
+        flapAngle: 0.7,
+        wingCurvature: 0.6,
+        bobSpeed: 2.0,
+        bobRange: 0.8,
+        jitter: 0.15,
+      };
+
+      const uSphereColor = uniform(color(params.sphereColor));
+      const uWingColor = uniform(color(params.wingColor));
+      const uFlapSpeed = uniform(params.flapSpeed);
+      const uFlapAngle = uniform(params.flapAngle);
+      const uWingTilt = uniform(params.wingTilt);
+      const uCurvature = uniform(params.wingCurvature);
+
+      /* FakeGlow (reference material) */
+      const uGlowFalloff = uniform(0.1);
+      const uGlowSharpness = uniform(0.5);
+      const uGlowInternalRadius = uniform(6.0);
+
+      /** 4. THE GROUND **/
+      const groundGeo = new THREE.PlaneGeometry(100, 100);
+      const groundMat = new THREE.MeshStandardMaterial({
+        color: "#111111",
+        roughness: 0.4,
+        metalness: 0.1,
+      });
+      const ground = new THREE.Mesh(groundGeo, groundMat);
+      ground.rotation.x = -Math.PI / 2;
+      ground.receiveShadow = true;
+      scene.add(ground);
+
+      const grid = new THREE.GridHelper(50, 50, "#222233", "#050510");
+      grid.position.y = 0.01;
+      scene.add(grid);
+
+      /** 5. THE FIREFLY **/
+      const fairyGroup = new THREE.Group();
+      scene.add(fairyGroup);
+
+      // Internal light to cast local shadows
+      const pointLight = new THREE.PointLight(params.sphereColor, 15, 20);
+      pointLight.castShadow = true;
+      pointLight.shadow.bias = -0.01;
+      fairyGroup.add(pointLight);
+
+      // Sphere Core — FakeGlow TSL material (from reference)
+      const sphereGeo = new THREE.SphereGeometry(0.4, 32, 32);
+      const sphereMat = new THREE.MeshBasicNodeMaterial({
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+
+      const worldPos = modelWorldMatrix.mul(positionLocal).xyz;
+      const viewDirection = cameraPosition.sub(worldPos).normalize();
+      const fresnelBase = clamp(dot(viewDirection, normalWorld), 0, 1);
+      const fresnel = fresnelBase.pow(uGlowInternalRadius.add(0.1));
+
+      const falloff = clamp(fresnel.div(uGlowFalloff), 0, 1);
+      const fakeGlow = fresnel.add(fresnel.mul(uGlowSharpness)).mul(falloff);
+
+      const pulse = sin(time.mul(6)).mul(0.2).add(1);
+
+      sphereMat.colorNode = uSphereColor
+        .mul(fresnel)
+        .mul(params.sphereGlow)
+        .mul(pulse);
+      sphereMat.opacityNode = clamp(fakeGlow, 0, 1);
+
+      const sphere = new THREE.Mesh(sphereGeo, sphereMat);
+      sphere.castShadow = true;
+      fairyGroup.add(sphere);
+
+      // Wings
+      const wingGeo = new THREE.PlaneGeometry(
+        params.wingSize,
+        params.wingSize,
+        12,
+        12,
+      );
+      wingGeo.translate(params.wingSize / 2, 0, 0);
+      const wingTexture = new THREE.Texture();
+
+      function createWing(isLeft) {
+        const mat = new THREE.MeshStandardNodeMaterial({
+          transparent: true,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          alphaTest: 0.1, // Critical for shadow shape — depth pass uses map/alphaMap
+        });
+
+        // So the shadow pass can cut the shadow to the wing shape (WebGPU uses .map/.alphaMap for alphaTest)
+        mat.map = wingTexture;
+        mat.alphaMap = wingTexture;
+
+        const p = positionLocal;
+        const t = time.mul(uFlapSpeed);
+        const flap = sin(t).mul(uFlapAngle);
+        const bend = sin(t.sub(0.4))
+          .mul(uCurvature)
+          .mul(p.x.div(params.wingSize));
+        const finalRot = flap.add(uWingTilt);
+
+        const rotX = p.x.mul(cos(finalRot)).sub(p.z.mul(sin(finalRot)));
+        const rotZ = p.x.mul(sin(finalRot)).add(p.z.mul(cos(finalRot)));
+
+        mat.positionNode = vec3(rotX, p.y.add(bend), rotZ);
+
+        const texNode = texture(wingTexture, uv());
+        mat.colorNode = texNode.rgb.mul(uWingColor).mul(params.wingGlow);
+
+        // Masking the shadow: use the R channel as the alpha for the shadow map
+        mat.opacityNode = texNode.r;
+
+        const mesh = new THREE.Mesh(wingGeo, mat);
+        mesh.castShadow = true;
+
+        // WebGPU requires specific depth materials to track vertex changes in shadows
+        mesh.customDepthMaterial = mat;
+
+        if (isLeft) mesh.scale.x = -1;
+        return mesh;
+      }
+
+      const rightWing = createWing(false);
+      const leftWing = createWing(true);
+      fairyGroup.add(rightWing, leftWing);
+
+      /** 6. UI **/
+      const updateFairy = () => {
+        rightWing.position.set(params.wingGap, params.wingY, params.wingZ);
+        leftWing.position.set(-params.wingGap, params.wingY, params.wingZ);
+        sphere.scale.setScalar(params.sphereScale);
+        uSphereColor.value.set(params.sphereColor);
+        uWingColor.value.set(params.wingColor);
+        pointLight.color.set(params.sphereColor);
+        uFlapSpeed.value = params.flapSpeed;
+        uFlapAngle.value = params.flapAngle;
+        uWingTilt.value = params.wingTilt;
+        uCurvature.value = params.wingCurvature;
+      };
+
+      const pane = new Pane({ container: document.getElementById("panel") });
+      const fBody = pane.addFolder({ title: "Body" });
+      fBody.addBinding(params, "sphereColor").on("change", updateFairy);
+      fBody
+        .addBinding(params, "sphereScale", { min: 0.1, max: 3 })
+        .on("change", updateFairy);
+      fBody
+        .addBinding(params, "sphereGlow", { min: 0, max: 10 })
+        .on("change", updateFairy);
+
+      const fWings = pane.addFolder({ title: "Wings Style" });
+      fWings.addBinding(params, "wingColor").on("change", updateFairy);
+      fWings
+        .addBinding(params, "wingSize", { min: 1, max: 10 })
+        .on("change", updateFairy);
+      fWings
+        .addBinding(params, "wingGlow", { min: 0, max: 10 })
+        .on("change", updateFairy);
+
+      const fAlign = pane.addFolder({ title: "Placement" });
+      fAlign
+        .addBinding(params, "wingGap", { min: -1, max: 2 })
+        .on("change", updateFairy);
+      fAlign
+        .addBinding(params, "wingY", { min: -3, max: 3 })
+        .on("change", updateFairy);
+      fAlign
+        .addBinding(params, "wingZ", { min: -3, max: 3 })
+        .on("change", updateFairy);
+      fAlign
+        .addBinding(params, "wingTilt", { min: -1.5, max: 1.5 })
+        .on("change", updateFairy);
+
+      const fMotion = pane.addFolder({ title: "Organic Motion" });
+      fMotion
+        .addBinding(params, "flapSpeed", { min: 0, max: 50 })
+        .on("change", updateFairy);
+      fMotion
+        .addBinding(params, "flapAngle", { min: 0, max: 1.5 })
+        .on("change", updateFairy);
+      fMotion
+        .addBinding(params, "wingCurvature", { min: 0, max: 2 })
+        .on("change", updateFairy);
+      fMotion.addBinding(params, "bobSpeed", { min: 0, max: 5 });
+      fMotion.addBinding(params, "bobRange", { min: 0, max: 2 });
+      fMotion.addBinding(params, "jitter", { min: 0, max: 0.5 });
+
+      updateFairy();
+
+      /** 7. LOADER **/
+      document.getElementById("wingInput").addEventListener("change", (e) => {
+        const file = e.target.files[0];
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          const img = new Image();
+          img.onload = () => {
+            wingTexture.image = img;
+            wingTexture.needsUpdate = true;
+          };
+          img.src = ev.target.result;
+        };
+        reader.readAsDataURL(file);
+      });
+
+      function animate() {
+        controls.update();
+        const t = performance.now() * 0.001;
+
+        const noise = Math.sin(t * 5.7) * Math.cos(t * 8.3) * params.jitter;
+        fairyGroup.position.y =
+          Math.sin(t * params.bobSpeed) * params.bobRange + 3.0 + noise;
+        fairyGroup.position.x = noise * 0.5;
+
+        renderer.render(scene, camera);
+      }
+
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>

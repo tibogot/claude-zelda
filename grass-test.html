@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Grass — Progressive Bend + Clumping Test</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #000;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "lil-gui": "https://cdn.jsdelivr.net/npm/lil-gui@0.19.2/dist/lil-gui.esm.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <script type="module">
+      import * as THREE from "three";
+      import {
+        Fn,
+        float,
+        vec2,
+        vec3,
+        vec4,
+        attribute,
+        varying,
+        mix,
+        smoothstep,
+        clamp,
+        abs,
+        sign,
+        sin,
+        cos,
+        pow,
+        sqrt,
+        fract,
+        floor,
+        mod,
+        dot,
+        normalize,
+        length,
+        negate,
+        add,
+        sub,
+        mul,
+        div,
+        max,
+        modelWorldMatrix,
+        cameraPosition,
+        uniform,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import GUI from "lil-gui";
+
+      // ─── TSL helpers ──────────────────────────────────────────────────────────────
+      const hash12 = Fn(([p]) =>
+        fract(sin(dot(vec2(p), vec2(127.1, 311.7))).mul(43758.5453)),
+      );
+      const noise12 = Fn(([p_in]) => {
+        const p = vec2(p_in),
+          i = floor(p),
+          f = fract(p);
+        const u = f.mul(f).mul(sub(3.0, f.mul(2.0)));
+        return mix(
+          mix(hash12(i), hash12(add(i, vec2(1, 0))), u.x),
+          mix(hash12(add(i, vec2(0, 1))), hash12(add(i, vec2(1, 1))), u.x),
+          u.y,
+        );
+      });
+      const hash42 = Fn(([p_in]) => {
+        const p = vec2(p_in);
+        const p4 = fract(
+          vec4(p.x, p.y, p.x, p.y).mul(
+            vec4(443.897, 441.423, 437.195, 429.123),
+          ),
+        );
+        const d = dot(p4, p4.wzxy.add(19.19));
+        const r = p4.add(d);
+        return fract(r.xxyz.add(r.yzzw).mul(r.zywx));
+      });
+
+      // ─── Parameters ───────────────────────────────────────────────────────────────
+      const P = {
+        // Blade shape
+        bladeHeight: 0.55,
+        bladeWidth: 0.05,
+        bladeTaperExp: 0.52, // < 1 = softer taper (GoT style), 1 = linear, > 1 = sharper
+        tipRoundness: 0.35, // 0 = sharp tip, ~0.3–0.5 = smooth rounded tip
+        baseLean: 0.28,
+        bendExponent: 2.0,
+        // Wind
+        windAngleDeg: 30,
+        windStr: 0.55,
+        windSpeed: 0.9,
+        windWaveScale: 0.28,
+        gustStr: 0.4,
+        // Visual
+        cylStr: 0.6,
+        camFix: 0.75,
+        aoIntensity: 0.72,
+        // Clumping ← new
+        clumpScale: 0.3, // spatial frequency of clumps (larger = smaller clumps)
+        clumpStr: 0.7, // how strongly blades conform to their clump lean direction
+        clumpHeightStr: 0.6, // height variation between clumps
+        clumpColorStr: 0.55, // color tint variation between clumps
+      };
+
+      // ─── Uniforms ──────────────────────────────────────────────────────────────────
+      const uTime = uniform(0);
+      const uHeight = uniform(P.bladeHeight);
+      const uWidth = uniform(P.bladeWidth);
+      const uTaperExp = uniform(P.bladeTaperExp);
+      const uTipRoundness = uniform(P.tipRoundness);
+      const uBaseLean = uniform(P.baseLean);
+      const uBendExp = uniform(P.bendExponent);
+      const uWindAngle = uniform((P.windAngleDeg * Math.PI) / 180);
+      const uWindStr = uniform(P.windStr);
+      const uWindSpeed = uniform(P.windSpeed);
+      const uWindScale = uniform(P.windWaveScale);
+      const uGustStr = uniform(P.gustStr);
+      const uCylStr = uniform(P.cylStr);
+      const uCamFix = uniform(P.camFix);
+      const uAO = uniform(P.aoIntensity);
+      const uBaseColor = uniform(new THREE.Color("#3b6b27"));
+      const uTipColor = uniform(new THREE.Color("#9ec82e"));
+      // clumping
+      const uClumpScale = uniform(P.clumpScale);
+      const uClumpStr = uniform(P.clumpStr);
+      const uClumpH = uniform(P.clumpHeightStr);
+      const uClumpColor = uniform(P.clumpColorStr);
+
+      // ─── Geometry ─────────────────────────────────────────────────────────────────
+      const SEGMENTS = 8;
+      const V = (SEGMENTS + 1) * 2;
+      const N_GRASS = 7000;
+      const FIELD = 14;
+
+      function makeGeo() {
+        const indices = [];
+        for (let i = 0; i < SEGMENTS; i++) {
+          const v = i * 2;
+          indices.push(v, v + 1, v + 2, v + 2, v + 1, v + 3);
+        }
+        const pos = new Float32Array(V * 3);
+        const nrm = new Float32Array(V * 3);
+        const vid = new Float32Array(V);
+        for (let i = 0; i < V; i++) {
+          nrm[i * 3 + 1] = 1;
+          vid[i] = i;
+        }
+
+        const side = Math.ceil(Math.sqrt(N_GRASS));
+        const cell = FIELD / side;
+        const off = new Float32Array(N_GRASS * 2);
+        let seed = 42;
+        const rand = () => {
+          seed = (seed * 1664525 + 1013904223) >>> 0;
+          return seed / 0xffffffff;
+        };
+        for (let i = 0; i < N_GRASS; i++) {
+          const col = i % side,
+            row = Math.floor(i / side);
+          off[i * 2] = -FIELD / 2 + col * cell + rand() * cell;
+          off[i * 2 + 1] = -FIELD / 2 + row * cell + rand() * cell;
+        }
+
+        const geo = new THREE.InstancedBufferGeometry();
+        geo.instanceCount = N_GRASS;
+        geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+        geo.setAttribute("normal", new THREE.Float32BufferAttribute(nrm, 3));
+        geo.setAttribute("vertIndex", new THREE.Float32BufferAttribute(vid, 1));
+        geo.setAttribute("offset", new THREE.InstancedBufferAttribute(off, 2));
+        geo.setIndex(indices);
+        geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), FIELD * 2);
+        return geo;
+      }
+
+      // ─── Material ─────────────────────────────────────────────────────────────────
+      function makeMat() {
+        const SEGS = float(SEGMENTS);
+
+        const vColor = varying(vec3(0), "v_col");
+        const vNormal = varying(vec3(0), "v_nrm");
+        const vClumpTint = varying(float(0.5), "v_ct"); // 0=dry/yellow  1=lush/green
+
+        const positionNode = Fn(() => {
+          const offsetAttr = attribute("offset", "vec2");
+          const vertIdxAttr = attribute("vertIndex", "float");
+
+          const bx = offsetAttr.x;
+          const bz = offsetAttr.y;
+          const bladeXZ = vec2(bx, bz);
+
+          // ── Per-blade random hash ──
+          const hv = hash42(bladeXZ);
+          const rawAngle = mul(hv.x, 2.0 * Math.PI);
+          const rawSA = sin(rawAngle);
+          const rawCA = cos(rawAngle);
+          const randH = add(0.72, mul(hv.y, 0.56)); // 0.72..1.28
+          const randLean = add(0.05, mul(hv.z, 0.2)); // 0.05..0.25
+
+          // ────────────────────────────────────────────────────────────────────────
+          //  CLUMPING
+          //
+          //  Low-frequency noise (controlled by clumpScale) groups nearby blades
+          //  into coherent tufts.  Three parameters are clumped:
+          //
+          //  1. LEAN DIRECTION — blades in the same clump share a preferred lean.
+          //     Two independent noise channels give a 2D direction vector for each
+          //     clump region.  Per-blade random lean blends toward this shared
+          //     direction based on clump membership strength.
+          //
+          //  2. HEIGHT — each clump has a height multiplier (0.55..1.45).
+          //     Tall and short tufts alternate naturally across the field.
+          //
+          //  3. COLOR — a third noise value drives a dry↔lush tint per clump,
+          //     passed as a varying to the fragment shader.
+          //
+          //  clumpScale controls spatial frequency:
+          //    small (0.1) → large meadow-scale regions
+          //    medium (0.3) → individual visible tufts
+          //    large (0.8) → very tight micro-clumps
+          // ────────────────────────────────────────────────────────────────────────
+          const cUV = mul(bladeXZ, uClumpScale);
+
+          // -- 1. Clump lean direction: two noise channels → 2D direction vector --
+          const cLX = sub(mul(noise12(add(cUV, vec2(31.7, 47.3))), 2.0), 1.0); // -1..1
+          const cLZ = sub(mul(noise12(add(cUV, vec2(83.1, 11.9))), 2.0), 1.0); // -1..1
+          const cLen = max(length(vec2(cLX, cLZ)), 0.001);
+          const clumpSA = div(cLX, cLen); // normalized clump lean X
+          const clumpCA = div(cLZ, cLen); // normalized clump lean Z
+
+          // Clump membership (0=outside tuft, 1=inside tuft)
+          const cMember = smoothstep(
+            0.3,
+            0.62,
+            noise12(add(cUV, vec2(7.3, 23.9))),
+          );
+          const cInf = mul(cMember, uClumpStr);
+
+          // Blend per-blade random lean toward clump shared lean, renormalize
+          const bSA = add(mul(rawSA, sub(1.0, cInf)), mul(clumpSA, cInf));
+          const bCA = add(mul(rawCA, sub(1.0, cInf)), mul(clumpCA, cInf));
+          const bLen = max(length(vec2(bSA, bCA)), 0.001);
+          const clustSA = div(bSA, bLen);
+          const clustCA = div(bCA, bLen);
+
+          // -- 2. Clump height multiplier --
+          const cHNoise = noise12(add(cUV, vec2(17.3, 59.1))); // 0..1
+          const cHMult = add(0.55, mul(cHNoise, 0.9)); // 0.55..1.45
+          const heightMul = mix(randH, mul(randH, cHMult), uClumpH);
+
+          // -- 3. Clump color tint (0=dry/yellow, 1=lush/green) --
+          vClumpTint.assign(noise12(add(cUV, vec2(97.3, 43.7))));
+
+          // ────────────────────────────────────────────────────────────────────────
+          //  CAMERA-FACING CORRECTION  (same as before, applied after clumping)
+          // ────────────────────────────────────────────────────────────────────────
+          const camToBladeX = sub(bx, cameraPosition.x);
+          const camToBladeZ = sub(bz, cameraPosition.z);
+          const camDLen = max(length(vec2(camToBladeX, camToBladeZ)), 0.001);
+          const camDirX = div(camToBladeX, camDLen);
+          const camDirZ = div(camToBladeZ, camDLen);
+
+          const edgeOnDot = add(mul(clustSA, camDirX), mul(clustCA, camDirZ));
+          const fixStr = mul(smoothstep(0.45, 0.88, abs(edgeOnDot)), uCamFix);
+
+          const perp1X = negate(camDirZ);
+          const perp1Z = camDirX;
+          const dotP1 = add(mul(clustSA, perp1X), mul(clustCA, perp1Z));
+          const tgtX = mul(perp1X, sign(dotP1));
+          const tgtZ = mul(perp1Z, sign(dotP1));
+
+          const blendX = add(mul(clustSA, sub(1.0, fixStr)), mul(tgtX, fixStr));
+          const blendZ = add(mul(clustCA, sub(1.0, fixStr)), mul(tgtZ, fixStr));
+          const blendLen = max(length(vec2(blendX, blendZ)), 0.001);
+          const finalSA = div(blendX, blendLen);
+          const finalCA = div(blendZ, blendLen);
+
+          // ── Vertex decomposition ──
+          const xSide = mod(vertIdxAttr, 2.0);
+          const row = floor(div(vertIdxAttr, 2.0));
+          const t = div(row, SEGS);
+
+          // ── Blade size (uses clumped height multiplier) ──
+          const bladeH = mul(uHeight, heightMul);
+          // Smooth blade profile: power taper + rounded tip (GoT-style, not sharp triangle)
+          const tInv = sub(1.0, t);
+          const taper = pow(max(float(0.0), tInv), uTaperExp);
+          const tipSmooth = smoothstep(float(0.0), uTipRoundness, tInv);
+          const bladeW = mul(uWidth, mul(taper, tipSmooth));
+
+          // ── Progressive bend ──
+          const bendF = pow(t, uBendExp);
+
+          // ── Base lean ──
+          const leanMag = mul(randLean, uBaseLean);
+          const leanX = mul(finalSA, leanMag, bendF);
+          const leanZ = mul(finalCA, leanMag, bendF);
+
+          // ── Wind ──
+          const wdX = sin(uWindAngle);
+          const wdZ = cos(uWindAngle);
+          const scroll = vec2(
+            mul(wdX, uWindSpeed, uTime),
+            mul(wdZ, uWindSpeed, uTime),
+          );
+          const waveUV = add(mul(bladeXZ, uWindScale), scroll);
+          const wNoise = sub(mul(noise12(waveUV), 2.0), 1.0);
+          const gustAmt = mul(
+            smoothstep(
+              0.55,
+              0.9,
+              noise12(
+                add(mul(bladeXZ, mul(uWindScale, 0.18)), mul(scroll, 0.22)),
+              ),
+            ),
+            uGustStr,
+          );
+          const windMag = mul(add(wNoise, gustAmt), uWindStr);
+          const windX = mul(wdX, windMag, bendF);
+          const windZ = mul(wdZ, windMag, bendF);
+
+          const totalX = add(leanX, windX);
+          const totalZ = add(leanZ, windZ);
+
+          // ── Height correction (exact cos / arc-length preservation) ──
+          const tipX = add(mul(finalSA, leanMag), mul(wdX, windMag));
+          const tipZ = add(mul(finalCA, leanMag), mul(wdZ, windMag));
+          const tipMag = length(vec2(tipX, tipZ));
+          const normBend = div(tipMag, max(bladeH, 0.001));
+          const bendAtV = clamp(mul(normBend, bendF), 0.0, 0.999);
+          const vertY = mul(t, bladeH, sqrt(sub(1.0, mul(bendAtV, bendAtV))));
+
+          // ── Width ──
+          const half = mul(sub(xSide, 0.5), bladeW);
+          const widX = mul(half, finalCA);
+          const widZ = mul(half, negate(finalSA));
+
+          // ── Cylindrical normal ──
+          const cylAng = mul(
+            sub(mul(xSide, 2.0), 1.0),
+            mul(Math.PI * 0.5, uCylStr),
+          );
+          const lnX = sin(cylAng);
+          const lnZ = cos(cylAng);
+          const wNX = add(mul(lnX, finalCA), mul(lnZ, finalSA));
+          const wNZ = add(mul(lnX, negate(finalSA)), mul(lnZ, finalCA));
+          vNormal.assign(normalize(vec3(wNX, float(0.12), wNZ)));
+
+          // ── Color AO ──
+          const ao = mix(sub(1.0, uAO), 1.0, smoothstep(0.0, 0.4, t));
+          vColor.assign(mul(mix(uBaseColor, uTipColor, t), ao));
+
+          return vec3(add(bx, widX, totalX), vertY, add(bz, widZ, totalZ));
+        })();
+
+        // ── Fragment: diffuse lighting + clump color tint ────────────────────────
+        const colorNode = Fn(() => {
+          const n = vNormal;
+          const sunDir = normalize(vec3(0.5, 1.2, 0.3));
+          const diffuse = max(dot(n, sunDir), 0.0);
+          const backLight = mul(max(dot(negate(n), sunDir), 0.0), 0.22);
+          const light = clamp(
+            add(float(0.38), mul(diffuse, 0.62), backLight),
+            0.0,
+            1.5,
+          );
+
+          // Clump color tint: dry (yellow) → neutral → lush (green)
+          const ct = vClumpTint;
+          const dryTint = vec3(1.15, 0.9, 0.6);
+          const lushTint = vec3(0.88, 1.06, 0.86);
+          const tint = mix(dryTint, lushTint, ct);
+
+          return mul(
+            mul(vColor, light),
+            mix(vec3(1.0, 1.0, 1.0), tint, uClumpColor),
+          );
+        })();
+
+        const mat = new THREE.MeshBasicNodeMaterial({ side: THREE.DoubleSide });
+        mat.positionNode = positionNode;
+        mat.colorNode = colorNode;
+        return mat;
+      }
+
+      // ─── Scene ────────────────────────────────────────────────────────────────────
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.setPixelRatio(devicePixelRatio);
+      renderer.setSize(innerWidth, innerHeight);
+      document.body.appendChild(renderer.domElement);
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color("#7eb897");
+
+      const camera = new THREE.PerspectiveCamera(
+        60,
+        innerWidth / innerHeight,
+        0.05,
+        200,
+      );
+      camera.position.set(0, 1.8, 7);
+      camera.lookAt(0, 0.3, 0);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 0.25, 0);
+      controls.update();
+
+      const ground = new THREE.Mesh(
+        new THREE.PlaneGeometry(FIELD + 4, FIELD + 4),
+        new THREE.MeshBasicMaterial({ color: "#2b4a1a" }),
+      );
+      ground.rotation.x = -Math.PI / 2;
+      scene.add(ground);
+
+      const geo = makeGeo();
+      const mat = makeMat();
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.frustumCulled = false;
+      scene.add(mesh);
+
+      // ─── GUI ──────────────────────────────────────────────────────────────────────
+      const gui = new GUI({ title: "Grass Test" });
+
+      const bladeF = gui.addFolder("Blade Shape");
+      bladeF
+        .add(P, "bladeHeight", 0.15, 1.5, 0.01)
+        .name("Height")
+        .onChange((v) => (uHeight.value = v));
+      bladeF
+        .add(P, "bladeWidth", 0.01, 0.2, 0.005)
+        .name("Width")
+        .onChange((v) => (uWidth.value = v));
+      bladeF
+        .add(P, "bladeTaperExp", 0.35, 1.2, 0.02)
+        .name("Taper (↓=softer tip)")
+        .onChange((v) => (uTaperExp.value = v));
+      bladeF
+        .add(P, "tipRoundness", 0.0, 0.8, 0.02)
+        .name("Tip roundness")
+        .onChange((v) => (uTipRoundness.value = v));
+      bladeF
+        .add(P, "baseLean", 0.0, 1.2, 0.01)
+        .name("Base Lean")
+        .onChange((v) => (uBaseLean.value = v));
+
+      const bendF = gui.addFolder("Bend Curve");
+      bendF
+        .add(P, "bendExponent", 1.0, 4.0, 0.05)
+        .name("Exponent (1=rod  2=arc  3=whip)")
+        .onChange((v) => (uBendExp.value = v));
+      bendF.open();
+
+      const windF = gui.addFolder("Wind");
+      windF
+        .add(P, "windAngleDeg", 0, 360, 1.0)
+        .name("Direction°")
+        .onChange((v) => (uWindAngle.value = (v * Math.PI) / 180));
+      windF
+        .add(P, "windStr", 0.0, 2.5, 0.01)
+        .name("Strength")
+        .onChange((v) => (uWindStr.value = v));
+      windF
+        .add(P, "windSpeed", 0.05, 3.0, 0.05)
+        .name("Speed")
+        .onChange((v) => (uWindSpeed.value = v));
+      windF
+        .add(P, "windWaveScale", 0.02, 1.2, 0.01)
+        .name("Wave Scale")
+        .onChange((v) => (uWindScale.value = v));
+      windF
+        .add(P, "gustStr", 0.0, 1.5, 0.01)
+        .name("Gust Strength")
+        .onChange((v) => (uGustStr.value = v));
+      windF.open();
+
+      // ── Clumping folder ──
+      const clumpF = gui.addFolder("Clumping  ← GoT technique");
+      clumpF
+        .add(P, "clumpScale", 0.05, 1.2, 0.01)
+        .name("Scale  (↓=large tufts  ↑=small)")
+        .onChange((v) => (uClumpScale.value = v));
+      clumpF
+        .add(P, "clumpStr", 0.0, 1.0, 0.01)
+        .name("Lean Strength")
+        .onChange((v) => (uClumpStr.value = v));
+      clumpF
+        .add(P, "clumpHeightStr", 0.0, 1.0, 0.01)
+        .name("Height Variation")
+        .onChange((v) => (uClumpH.value = v));
+      clumpF
+        .add(P, "clumpColorStr", 0.0, 1.0, 0.01)
+        .name("Color Variation")
+        .onChange((v) => (uClumpColor.value = v));
+      clumpF.open();
+
+      const vizF = gui.addFolder("Visual");
+      vizF
+        .add(P, "cylStr", 0.0, 1.0, 0.01)
+        .name("Cyl. Normal Strength")
+        .onChange((v) => (uCylStr.value = v));
+      vizF
+        .add(P, "camFix", 0.0, 1.0, 0.01)
+        .name("Cam-Facing Fix")
+        .onChange((v) => (uCamFix.value = v));
+      vizF
+        .add(P, "aoIntensity", 0.0, 1.0, 0.01)
+        .name("AO Intensity")
+        .onChange((v) => (uAO.value = v));
+
+      const colF = gui.addFolder("Color");
+      const colObj = { base: "#3b6b27", tip: "#9ec82e" };
+      colF
+        .addColor(colObj, "base")
+        .name("Base Color")
+        .onChange((v) => uBaseColor.value.set(v));
+      colF
+        .addColor(colObj, "tip")
+        .name("Tip Color")
+        .onChange((v) => uTipColor.value.set(v));
+
+      // ─── Loop ─────────────────────────────────────────────────────────────────────
+      renderer.setAnimationLoop((t) => {
+        uTime.value = t / 1000;
+        controls.update();
+        renderer.render(scene, camera);
+      });
+
+      window.addEventListener("resize", () => {
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+      });
+    </script>
+  </body>
+</html>
