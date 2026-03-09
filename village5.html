@@ -1,0 +1,2652 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GLB Terrain Scene</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #000;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        z-index: 10;
+        font:
+          12px/1.5 "SF Mono",
+          "Fira Code",
+          monospace;
+        color: #b0d890;
+        background: rgba(0, 0, 0, 0.55);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: none;
+        user-select: none;
+        backdrop-filter: blur(4px);
+      }
+      #info span {
+        color: #e0f0c0;
+        font-weight: 600;
+      }
+      .tp-dfwv {
+        z-index: 20 !important;
+        max-height: 90vh !important;
+        overflow-y: auto !important;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js",
+          "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.9/build/index.module.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">
+      GLB Terrain &mdash; <span id="backend">loading…</span> &bull;
+      <span id="stats">—</span> &bull; WASD + click to look &bull; Shift run
+      &bull; Ctrl crouch &bull; F roll &bull; right-click / E attack &bull;
+      Space jump &bull; Space mid-air glide
+    </div>
+    <div
+      id="platform-debug"
+      style="
+        display: none;
+        position: fixed;
+        top: 60px;
+        left: 16px;
+        z-index: 100;
+        font: 12px monospace;
+        color: #0f0;
+        background: rgba(0, 0, 0, 0.8);
+        padding: 8px;
+        border-radius: 4px;
+        max-width: 320px;
+      "
+    ></div>
+
+    <script type="module">
+      const Tweakpane =
+        await import("https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/dist/tweakpane.min.js");
+
+      import * as THREE from "three";
+      import {
+        pass,
+        color,
+        fog,
+        float,
+        mrt,
+        output,
+        emissive,
+        renderOutput,
+        positionWorld,
+        positionView,
+        positionLocal,
+        triNoise3D,
+        uniform,
+        mul,
+        div,
+        sub,
+        add,
+        clamp,
+        max,
+        mix,
+        vec2,
+        vec3,
+        vec4,
+        step,
+        abs,
+        smoothstep,
+        uv,
+        Loop,
+        Fn,
+        int,
+        convertToTexture,
+        nodeObject,
+        normalView,
+        directionToColor,
+        colorToDirection,
+        sample,
+        screenUV,
+        sin,
+        cos,
+        length,
+        pow,
+        dot,
+        normalize,
+        negate,
+        mx_noise_float,
+        texture,
+        normalMap,
+      } from "three/tsl";
+      import { bloom } from "three/addons/tsl/display/BloomNode.js";
+      import { fxaa } from "three/addons/tsl/display/FXAANode.js";
+      import { lensflare } from "three/addons/tsl/display/LensflareNode.js";
+      import { gaussianBlur } from "three/addons/tsl/display/GaussianBlurNode.js";
+      import { boxBlur } from "three/addons/tsl/display/boxBlur.js";
+      import { ao } from "three/addons/tsl/display/GTAONode.js";
+      import { denoise } from "three/addons/tsl/display/DenoiseNode.js";
+      import Stats from "stats-gl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+      import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
+      import { WaterMesh } from "three/addons/objects/Water2Mesh.js";
+      import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+      import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
+      import RAPIER from "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.19.3/+esm";
+      import {
+        createPhysicsWorld,
+        createPlayerController,
+        createPhysicsDebug,
+      } from "./physics.js";
+      import { createPlayer } from "./player-parkourtsushima.js";
+      import { createFloatingLeaves } from "./floating-leaves.js";
+      import { createFlowingLines } from "./flowing-lines.js";
+      import { PARAMS } from "./params.js";
+      import { PI, TERRAIN_SIZE } from "./constants.js";
+      import {
+        createGrassGeometry,
+        createGrassMaterial,
+        setupGrassPatches,
+        GRASS_SEGMENTS_LOW,
+        GRASS_SEGMENTS_HIGH,
+        GRASS_VERTS_LOW,
+        GRASS_VERTS_HIGH,
+        GRASS_DENSITY,
+        GRASS_PATCH_SIZE,
+        NEAR_PATCH_SIZE,
+      } from "./grass.js";
+      import { createUniforms } from "./uniforms.js";
+      import { setSeed, randRange } from "./rng.js";
+      import { MeshBVH } from "three-mesh-bvh";
+
+      const PARKOUR_SIZE = TERRAIN_SIZE;
+
+      async function init() {
+        const parkourParams = {
+          csm: {
+            cascades: 3,
+            maxFar: 150,
+            lightMargin: 100,
+            mapSize: 2048,
+            updateEveryFrame: true,
+          },
+          light: {
+            sunAzimuth: 135,
+            sunElevation: 43,
+            dirColor: "#fff5e0",
+            dirIntensity: 2.2,
+            hemiSkyColor: "#c8e0ff",
+            hemiGroundColor: "#88aa55",
+            hemiIntensity: 1,
+            envIntensity: 0.45,
+            exposure: 0.5,
+          },
+          sky: {
+            turbidity: 2,
+            rayleigh: 1.5,
+            mie: 0.005,
+            mieG: 0.8,
+            cloudCoverage: 0.4,
+            cloudDensity: 0.4,
+            cloudElevation: 0.5,
+          },
+          debug: {
+            rapierDebug: false,
+            platformDebug: false,
+          },
+          foliage: {
+            floatingLeaves: false,
+            count: 40,
+            areaSize: 25,
+            spawnHeight: 12,
+            leafSize: 0.5,
+            scale: 2,
+            opacity: 0.9,
+            windInfluence: 0.2,
+            gravity: 0.0003,
+            terminalVelocity: 0.004,
+            rotationSpeed: 0.0003,
+            airResistance: 0.995,
+            maxAge: 2000,
+            terrainFloorOffset: 2,
+            windStr: 0.08,
+            windSpeed: 0.4,
+          },
+          katana: {
+            posX: -0.085,
+            posY: 0.18,
+            posZ: -0.17,
+            rotX: -1.07,
+            rotY: 1.35,
+            rotZ: -2.21,
+          },
+          flowingLines: {
+            enabled: false,
+            lineCount: 8,
+            lineLength: 12,
+            lineWidth: 0.15,
+            segments: 20,
+            heightOffset: 0.3,
+            verticalWave: 0.08,
+            animationSpeed: 1,
+            pathRadius: 25,
+            pathFrequency: 0.8,
+            lineColor: "#a8d8ea",
+            lineOpacity: 0.7,
+          },
+        };
+        const hazeParams = {
+          enabled: false,
+          thickness: 35,
+          opacity: 0.9,
+          falloff: 2.2,
+          hazeColor: "#f5f5f0",
+          noiseScaleA: 0.004,
+          noiseScaleB: 0.008,
+          noiseAmountA: 0.22,
+          noiseAmountB: 0.18,
+          noiseDetail: 0.12,
+          noiseSpeed: 1,
+        };
+
+        // Post-processing params (enable/disable + per-effect settings)
+        const postParams = {
+          enabled: false,
+          bloom: { enabled: false, strength: 0.4, radius: 0.4, threshold: 0.6 },
+          lensflare: {
+            enabled: false,
+            bloomThreshold: 0.72,
+            threshold: 0.6,
+            ghostAttenuation: 25,
+            ghostSpacing: 0.25,
+          },
+          godRays: {
+            enabled: true,
+            strength: 0.15,
+            decay: 0.96,
+            density: 0.8,
+            samples: 32,
+          },
+          dof: {
+            enabled: false,
+            focusDistance: 25,
+            blurStart: 5,
+            blurEnd: 60,
+            blurSize: 1,
+            blurSpread: 3,
+          },
+          gtao: {
+            enabled: false,
+            intensity: 1.2,
+            radius: 1.2,
+            samples: 14,
+            resolutionScale: 0.5,
+            scale: 1,
+            distanceFallOff: 1,
+            distanceExponent: 1,
+            thickness: 1,
+            denoiseEnabled: true,
+            denoiseRadius: 5,
+            denoiseLumaPhi: 5,
+            denoiseDepthPhi: 5,
+            denoiseNormalPhi: 5,
+          },
+        };
+
+        function srgbToLinear(hex) {
+          const c = new THREE.Color(hex);
+          c.convertSRGBToLinear();
+          return c;
+        }
+
+        function sunDirectionFromAngles(azimuthDeg, elevationDeg) {
+          const az = (azimuthDeg * Math.PI) / 180;
+          const el = (elevationDeg * Math.PI) / 180;
+          const cosEl = Math.cos(el);
+          return new THREE.Vector3(
+            cosEl * Math.cos(az),
+            Math.sin(el),
+            cosEl * Math.sin(az),
+          ).normalize();
+        }
+
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        await renderer.init();
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = parkourParams.light.exposure;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+        document.getElementById("backend").textContent =
+          renderer.backend?.constructor?.name?.includes("WebGPU")
+            ? "WebGPU ✓"
+            : "WebGL fallback";
+
+        const stats = new Stats({ trackGPU: false });
+        stats.init(renderer);
+        document.body.appendChild(stats.dom);
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(
+          60,
+          innerWidth / innerHeight,
+          0.5,
+          1000,
+        );
+        camera.position.set(0, 4, 12);
+
+        const orbitControls = new OrbitControls(camera, renderer.domElement);
+        orbitControls.target.set(0, 2, 0);
+        orbitControls.maxPolarAngle = PI * 0.48;
+        orbitControls.enableDamping = true;
+        orbitControls.dampingFactor = 0.05;
+        orbitControls.enabled = false;
+        orbitControls.update();
+
+        // ── LIGHTING ──
+        const _sunDir = sunDirectionFromAngles(
+          parkourParams.light.sunAzimuth,
+          parkourParams.light.sunElevation,
+        );
+        const dirLight = new THREE.DirectionalLight(
+          parkourParams.light.dirColor,
+          parkourParams.light.dirIntensity,
+        );
+        dirLight.position.copy(_sunDir.clone().multiplyScalar(600)); // must be above terrain max Y (~322)
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.width = parkourParams.csm.mapSize;
+        dirLight.shadow.mapSize.height = parkourParams.csm.mapSize;
+        dirLight.shadow.camera.near = 1;
+        dirLight.shadow.camera.far = 200;
+        dirLight.shadow.camera.left = -80;
+        dirLight.shadow.camera.right = 80;
+        dirLight.shadow.camera.top = 80;
+        dirLight.shadow.camera.bottom = -80;
+        dirLight.shadow.bias = PARAMS.shadowBias;
+        dirLight.shadow.normalBias = PARAMS.shadowNormalBias;
+
+        const csm = new CSMShadowNode(dirLight, {
+          cascades: parkourParams.csm.cascades,
+          maxFar: parkourParams.csm.maxFar,
+          mode: "practical",
+          lightMargin: parkourParams.csm.lightMargin,
+        });
+        dirLight.shadow.shadowNode = csm;
+        scene.add(dirLight);
+
+        const shadowTarget = new THREE.Object3D();
+        scene.add(shadowTarget);
+        dirLight.target = shadowTarget;
+
+        const hemiLight = new THREE.HemisphereLight(
+          parkourParams.light.hemiSkyColor,
+          parkourParams.light.hemiGroundColor,
+          parkourParams.light.hemiIntensity,
+        );
+        scene.add(hemiLight);
+
+        // ── GLB TERRAIN ──
+        const dracoLoader = new DRACOLoader();
+        dracoLoader.setDecoderPath(
+          "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/libs/draco/",
+        );
+        const ktx2Loader = new KTX2Loader();
+        ktx2Loader.setTranscoderPath(
+          "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/libs/basis/",
+        );
+        ktx2Loader.detectSupport(renderer);
+        const gltfLoader = new GLTFLoader();
+        gltfLoader.setDRACOLoader(dracoLoader);
+        gltfLoader.setKTX2Loader(ktx2Loader);
+
+        const terrainGltf = await new Promise((resolve, reject) => {
+          gltfLoader.load(
+            "models/irradiancered.glb",
+            resolve,
+            undefined,
+            reject,
+          );
+        });
+
+        // Auto-scale terrain to fill TERRAIN_SIZE in XZ
+        {
+          const bbox = new THREE.Box3().setFromObject(terrainGltf.scene);
+          const size = bbox.getSize(new THREE.Vector3());
+          const maxXZ = Math.max(size.x, size.z);
+          if (maxXZ > 0) {
+            const autoScale = TERRAIN_SIZE / maxXZ;
+            terrainGltf.scene.scale.setScalar(autoScale);
+            // Re-center so terrain origin sits at world XZ center
+            const center = bbox.getCenter(new THREE.Vector3());
+            terrainGltf.scene.position.x -= center.x * autoScale;
+            terrainGltf.scene.position.z -= center.z * autoScale;
+          }
+        }
+
+        // Remove all lights embedded in the GLB (they kill performance)
+        const _lightsToRemove = [];
+        terrainGltf.scene.traverse((child) => {
+          if (child.isLight) _lightsToRemove.push(child);
+        });
+        _lightsToRemove.forEach((l) => l.parent?.remove(l));
+
+        // Load placement mask texture (red path) — same image as in Blender on the GLB
+        const texLoader = new THREE.TextureLoader();
+        const loadTex = (url) =>
+          new Promise((res, rej) => texLoader.load(url, res, undefined, rej));
+        const placementMaskTexture = await loadTex("textures/Frame 19.png");
+        const placementMaskTextures = [placementMaskTexture];
+        // Set to 90, 180, or 270 if path orientation doesn't match Blender
+        const PLACEMENT_UV_ROTATION = 0;
+        // Path correct but mirrored? Toggle flip U or V (or set in Debug and refresh)
+        const placementSplatUV = { flipU: false, flipV: true };
+        // Shared for instanced path spheres (one draw call)
+        const pathSphereGeo = new THREE.SphereGeometry(0.7, 6, 4);
+        const pathSphereMat = new THREE.MeshBasicMaterial({
+          color: 0xff2222,
+          transparent: true,
+          opacity: 0.85,
+        });
+
+        // Load Ground037 and Grass005 texture sets
+        const [
+          groundColorTex,
+          groundNormalTex,
+          groundAOTex,
+          groundRoughTex,
+          grassColorTex,
+          grassNormalTex,
+          grassAOTex,
+          grassRoughTex,
+        ] = await Promise.all([
+          loadTex("textures/Ground037_1K-JPG_Color.jpg"),
+          loadTex("textures/Ground037_1K-JPG_NormalGL.jpg"),
+          loadTex("textures/Ground037_1K-JPG_AmbientOcclusion.jpg"),
+          loadTex("textures/Ground037_1K-JPG_Roughness.jpg"),
+          loadTex("textures/Grass005_1K-JPG_Color.jpg"),
+          loadTex("textures/Grass005_1K-JPG_NormalGL.jpg"),
+          loadTex("textures/Grass005_1K-JPG_AmbientOcclusion.jpg"),
+          loadTex("textures/Grass005_1K-JPG_Roughness.jpg"),
+        ]);
+        const maxAnisotropy = renderer.capabilities?.getMaxAnisotropy?.() ?? 16;
+        for (const t of [
+          groundColorTex,
+          groundNormalTex,
+          groundAOTex,
+          groundRoughTex,
+          grassColorTex,
+          grassNormalTex,
+          grassAOTex,
+          grassRoughTex,
+        ]) {
+          t.wrapS = t.wrapT = THREE.RepeatWrapping;
+          if (t.anisotropy !== undefined) t.anisotropy = maxAnisotropy;
+        }
+        groundColorTex.colorSpace = THREE.SRGBColorSpace;
+        grassColorTex.colorSpace = THREE.SRGBColorSpace;
+
+        const terrainTiling = 12;
+        const uTiling = uniform(terrainTiling);
+
+        function createTextureMaterial(colorTex, normalTex, aoTex, roughTex) {
+          const mat = new THREE.MeshStandardNodeMaterial({
+            roughness: 0.8,
+            metalness: 0,
+          });
+          const tiledUV = uv().mul(uTiling);
+          mat.colorNode = texture(colorTex, tiledUV).rgb;
+          mat.normalNode = normalMap(texture(normalTex, tiledUV));
+          mat.roughnessNode = max(texture(roughTex, tiledUV).r, float(0.5));
+          mat.aoNode = mix(
+            vec3(1, 1, 1),
+            texture(aoTex, tiledUV).rgb,
+            float(0.75),
+          );
+          mat.envMapIntensity = 0.5;
+          return mat;
+        }
+
+        const groundMat = createTextureMaterial(
+          groundColorTex,
+          groundNormalTex,
+          groundAOTex,
+          groundRoughTex,
+        );
+        const grassMat = createTextureMaterial(
+          grassColorTex,
+          grassNormalTex,
+          grassAOTex,
+          grassRoughTex,
+        );
+
+        terrainGltf.scene.traverse((child) => {
+          if (child.isMesh) {
+            child.castShadow = true;
+            child.receiveShadow = true;
+            const name = (child.name || "").toLowerCase();
+            child.material = name.includes("plane") ? grassMat : groundMat;
+          }
+        });
+        scene.add(terrainGltf.scene);
+        ktx2Loader.dispose();
+
+        // Must update world matrices before building trimesh or sampleHeight
+        scene.updateMatrixWorld(true);
+
+        // ── BVH HEIGHTMAP — exact triangle-surface raycasting at 512×512 ──
+        const HM_N = 512;
+        const HM_HALF = TERRAIN_SIZE / 2;
+        const HM_STEP = TERRAIN_SIZE / HM_N;
+        const HM_DIM = HM_N + 1; // 513
+        const _heightGrid = new Float32Array(HM_DIM * HM_DIM);
+        const _placementGrid = new Float32Array(HM_DIM * HM_DIM);
+
+        let mergedGeoForPlacement = null;
+        let bvhForPlacement = null;
+
+        {
+          // Merge all terrain mesh geometry into world-space BufferGeometry for BVH (with UVs and vertex colors for placement)
+          const posList = [];
+          const uvList = [];
+          const colorList = [];
+          const idxList = [];
+          let vtxBase = 0;
+          const _v = new THREE.Vector3();
+          let hasVertexColors = false;
+          terrainGltf.scene.traverse((child) => {
+            if (!child.isMesh) return;
+            const geo = child.geometry;
+            const mat = child.matrixWorld;
+            const posAttr = geo.attributes.position;
+            const uvAttr = geo.attributes.uv;
+            const colorAttr = geo.attributes.color || geo.attributes.COLOR_0;
+            for (let i = 0; i < posAttr.count; i++) {
+              _v.fromBufferAttribute(posAttr, i).applyMatrix4(mat);
+              posList.push(_v.x, _v.y, _v.z);
+              if (uvAttr) {
+                uvList.push(uvAttr.getX(i), uvAttr.getY(i));
+              } else {
+                uvList.push(0, 0);
+              }
+              if (colorAttr) {
+                hasVertexColors = true;
+                colorList.push(
+                  colorAttr.getX(i),
+                  colorAttr.getY(i),
+                  colorAttr.getZ(i),
+                );
+              } else {
+                colorList.push(0, 0, 0);
+              }
+            }
+            if (geo.index) {
+              for (let i = 0; i < geo.index.count; i++)
+                idxList.push(geo.index.getX(i) + vtxBase);
+            } else {
+              for (let i = 0; i < posAttr.count; i++) idxList.push(i + vtxBase);
+            }
+            vtxBase += posAttr.count;
+          });
+
+          const mergedGeo = new THREE.BufferGeometry();
+          mergedGeo.setAttribute(
+            "position",
+            new THREE.Float32BufferAttribute(posList, 3),
+          );
+          mergedGeo.setAttribute(
+            "uv",
+            new THREE.Float32BufferAttribute(uvList, 2),
+          );
+          if (hasVertexColors) {
+            mergedGeo.setAttribute(
+              "color",
+              new THREE.Float32BufferAttribute(colorList, 3),
+            );
+          }
+          mergedGeo.setIndex(idxList);
+          const bvh = new MeshBVH(mergedGeo);
+          mergedGeoForPlacement = mergedGeo;
+          bvhForPlacement = bvh;
+
+          // Sample placement texture at UV (CPU read from image) — use redness (R high, G&B low) so white doesn't count
+          let placementRedBuffer = null;
+          let placementRedWidth = 0;
+          let placementRedHeight = 0;
+          if (
+            placementMaskTexture?.image?.width &&
+            placementMaskTexture.image.complete
+          ) {
+            const img = placementMaskTexture.image;
+            placementRedWidth = img.width;
+            placementRedHeight = img.height;
+            const canvas = document.createElement("canvas");
+            canvas.width = img.width;
+            canvas.height = img.height;
+            const ctx = canvas.getContext("2d");
+            ctx.drawImage(img, 0, 0);
+            const data = ctx.getImageData(0, 0, img.width, img.height).data;
+            placementRedBuffer = new Float32Array(img.width * img.height);
+            for (let i = 0; i < placementRedBuffer.length; i++) {
+              const R = data[i * 4] / 255,
+                G = data[i * 4 + 1] / 255,
+                B = data[i * 4 + 2] / 255;
+              placementRedBuffer[i] = Math.max(0, R - Math.max(G, B));
+            }
+          }
+          function samplePlacementMask(
+            placementRedBuffer,
+            placementRedWidth,
+            placementRedHeight,
+            u,
+            v,
+          ) {
+            if (!placementRedBuffer) return 0;
+            let uu = placementSplatUV.flipU ? 1 - u : u;
+            let vv = placementSplatUV.flipV ? 1 - v : v;
+            if (PLACEMENT_UV_ROTATION === 90) {
+              const t = uu;
+              uu = 1 - vv;
+              vv = t;
+            } else if (PLACEMENT_UV_ROTATION === 180) {
+              uu = 1 - uu;
+              vv = 1 - vv;
+            } else if (PLACEMENT_UV_ROTATION === 270) {
+              const t = uu;
+              uu = vv;
+              vv = 1 - t;
+            }
+            const x = Math.max(
+              0,
+              Math.min(
+                placementRedWidth - 1,
+                Math.floor(uu * placementRedWidth),
+              ),
+            );
+            const y = Math.max(
+              0,
+              Math.min(
+                placementRedHeight - 1,
+                Math.floor((1 - vv) * placementRedHeight),
+              ),
+            );
+            return placementRedBuffer[y * placementRedWidth + x];
+          }
+
+          // Barycentric weights for point p in triangle a,b,c; then interpolate UV
+          const _va = new THREE.Vector3(),
+            _vb = new THREE.Vector3(),
+            _vc = new THREE.Vector3();
+          const _pa = new THREE.Vector2(),
+            _pb = new THREE.Vector2(),
+            _pc = new THREE.Vector2();
+          function getUVAtHit(mergedGeo, faceIndex, point) {
+            const posAttr = mergedGeo.attributes.position;
+            const uvAttr = mergedGeo.attributes.uv;
+            const idx = mergedGeo.index;
+            const i0 = idx.getX(faceIndex * 3),
+              i1 = idx.getX(faceIndex * 3 + 1),
+              i2 = idx.getX(faceIndex * 3 + 2);
+            _va.set(posAttr.getX(i0), posAttr.getY(i0), posAttr.getZ(i0));
+            _vb.set(posAttr.getX(i1), posAttr.getY(i1), posAttr.getZ(i1));
+            _vc.set(posAttr.getX(i2), posAttr.getY(i2), posAttr.getZ(i2));
+            _pa.set(uvAttr.getX(i0), uvAttr.getY(i0));
+            _pb.set(uvAttr.getX(i1), uvAttr.getY(i1));
+            _pc.set(uvAttr.getX(i2), uvAttr.getY(i2));
+            const v0 = _vb.clone().sub(_va),
+              v1 = _vc.clone().sub(_va),
+              v2 = point.clone().sub(_va);
+            const d00 = v0.dot(v0),
+              d01 = v0.dot(v1),
+              d11 = v1.dot(v1),
+              d20 = v2.dot(v0),
+              d21 = v2.dot(v1);
+            const denom = d00 * d11 - d01 * d01;
+            if (Math.abs(denom) < 1e-10) return { u: 0.5, v: 0.5 };
+            const w = (d11 * d20 - d01 * d21) / denom;
+            const v = (d00 * d21 - d01 * d20) / denom;
+            const u = 1 - v - w;
+            const uvU = u * _pa.x + v * _pb.x + w * _pc.x;
+            const uvV = u * _pa.y + v * _pb.y + w * _pc.y;
+            return { u: uvU, v: uvV };
+          }
+          const colorAttr = mergedGeo.attributes.color;
+          function getVertexColorAtHit(mergedGeo, faceIndex, point) {
+            const posAttr = mergedGeo.attributes.position;
+            const idx = mergedGeo.index;
+            const i0 = idx.getX(faceIndex * 3),
+              i1 = idx.getX(faceIndex * 3 + 1),
+              i2 = idx.getX(faceIndex * 3 + 2);
+            _va.set(posAttr.getX(i0), posAttr.getY(i0), posAttr.getZ(i0));
+            _vb.set(posAttr.getX(i1), posAttr.getY(i1), posAttr.getZ(i1));
+            _vc.set(posAttr.getX(i2), posAttr.getY(i2), posAttr.getZ(i2));
+            const v0 = _vb.clone().sub(_va),
+              v1 = _vc.clone().sub(_va),
+              v2 = point.clone().sub(_va);
+            const d00 = v0.dot(v0),
+              d01 = v0.dot(v1),
+              d11 = v1.dot(v1),
+              d20 = v2.dot(v0),
+              d21 = v2.dot(v1);
+            const denom = d00 * d11 - d01 * d01;
+            if (Math.abs(denom) < 1e-10) return 0;
+            const w = (d11 * d20 - d01 * d21) / denom;
+            const v = (d00 * d21 - d01 * d20) / denom;
+            const u = 1 - v - w;
+            const r =
+              u * colorAttr.getX(i0) +
+              v * colorAttr.getX(i1) +
+              w * colorAttr.getX(i2);
+            return r;
+          }
+
+          const ray = new THREE.Ray(
+            new THREE.Vector3(),
+            new THREE.Vector3(0, -1, 0),
+          );
+          for (let r = 0; r < HM_DIM; r++) {
+            for (let c = 0; c < HM_DIM; c++) {
+              ray.origin.set(
+                c * HM_STEP - HM_HALF,
+                99999,
+                r * HM_STEP - HM_HALF,
+              );
+              const hit = bvh.raycastFirst(ray, THREE.DoubleSide);
+              _heightGrid[r * HM_DIM + c] = hit ? hit.point.y : 0;
+              if (hit) {
+                // Prefer splat map (Frame 19.png) over vertex colors when both exist
+                if (placementRedBuffer) {
+                  const { u: uu, v: vv } = getUVAtHit(
+                    mergedGeo,
+                    hit.faceIndex,
+                    hit.point,
+                  );
+                  _placementGrid[r * HM_DIM + c] = samplePlacementMask(
+                    placementRedBuffer,
+                    placementRedWidth,
+                    placementRedHeight,
+                    uu,
+                    vv,
+                  );
+                } else if (colorAttr) {
+                  _placementGrid[r * HM_DIM + c] = getVertexColorAtHit(
+                    mergedGeo,
+                    hit.faceIndex,
+                    hit.point,
+                  );
+                } else {
+                  _placementGrid[r * HM_DIM + c] = 0;
+                }
+              } else {
+                _placementGrid[r * HM_DIM + c] = 0;
+              }
+            }
+          }
+          if (placementRedBuffer || colorAttr) {
+            mergedGeo.dispose();
+            mergedGeoForPlacement = null;
+            bvhForPlacement = null;
+          } else {
+            mergedGeoForPlacement = mergedGeo;
+          }
+        }
+
+        function tryBuildPlacementSpheres() {
+          if (!mergedGeoForPlacement || !bvhForPlacement) return false;
+          const mergedGeo = mergedGeoForPlacement;
+          const bvh = bvhForPlacement;
+          const texturesToTry = placementMaskTextures.length
+            ? placementMaskTextures
+            : placementMaskTexture
+              ? [placementMaskTexture]
+              : [];
+
+          for (const tex of texturesToTry) {
+            let placementRedBuffer;
+            let placementRedWidth = 0,
+              placementRedHeight = 0;
+
+            if (tex.isDataTexture && tex.image) {
+              const d = tex.image;
+              const data = d.data || d;
+              placementRedWidth = d.width ?? tex.width ?? 0;
+              placementRedHeight = d.height ?? tex.height ?? 0;
+              if (data && placementRedWidth && placementRedHeight) {
+                placementRedBuffer = new Float32Array(
+                  placementRedWidth * placementRedHeight,
+                );
+                const len = placementRedWidth * placementRedHeight;
+                for (let i = 0; i < len; i++) {
+                  const R = (data[i * 4] ?? data[i]) / 255;
+                  const G = (data[i * 4 + 1] ?? data[i + 1]) / 255;
+                  const B = (data[i * 4 + 2] ?? data[i + 2]) / 255;
+                  placementRedBuffer[i] = Math.max(0, R - Math.max(G, B));
+                }
+              }
+            } else if (tex?.image?.width && tex.image.complete) {
+              const img = tex.image;
+              placementRedWidth = img.width;
+              placementRedHeight = img.height;
+              try {
+                const canvas = document.createElement("canvas");
+                canvas.width = img.width;
+                canvas.height = img.height;
+                const ctx = canvas.getContext("2d");
+                ctx.drawImage(img, 0, 0);
+                const data = ctx.getImageData(0, 0, img.width, img.height).data;
+                placementRedBuffer = new Float32Array(img.width * img.height);
+                for (let i = 0; i < placementRedBuffer.length; i++) {
+                  const R = data[i * 4] / 255,
+                    G = data[i * 4 + 1] / 255,
+                    B = data[i * 4 + 2] / 255;
+                  placementRedBuffer[i] = Math.max(0, R - Math.max(G, B));
+                }
+              } catch (e) {
+                continue;
+              }
+            } else {
+              continue;
+            }
+
+            if (!placementRedBuffer) continue;
+
+            const _va = new THREE.Vector3(),
+              _vb = new THREE.Vector3(),
+              _vc = new THREE.Vector3();
+            const _pa = new THREE.Vector2(),
+              _pb = new THREE.Vector2(),
+              _pc = new THREE.Vector2();
+            function getUVAtHit(mergedGeo, faceIndex, point) {
+              const posAttr = mergedGeo.attributes.position;
+              const uvAttr = mergedGeo.attributes.uv;
+              const idx = mergedGeo.index;
+              const i0 = idx.getX(faceIndex * 3),
+                i1 = idx.getX(faceIndex * 3 + 1),
+                i2 = idx.getX(faceIndex * 3 + 2);
+              _va.set(posAttr.getX(i0), posAttr.getY(i0), posAttr.getZ(i0));
+              _vb.set(posAttr.getX(i1), posAttr.getY(i1), posAttr.getZ(i1));
+              _vc.set(posAttr.getX(i2), posAttr.getY(i2), posAttr.getZ(i2));
+              _pa.set(uvAttr.getX(i0), uvAttr.getY(i0));
+              _pb.set(uvAttr.getX(i1), uvAttr.getY(i1));
+              _pc.set(uvAttr.getX(i2), uvAttr.getY(i2));
+              const v0 = _vb.clone().sub(_va),
+                v1 = _vc.clone().sub(_va),
+                v2 = point.clone().sub(_va);
+              const d00 = v0.dot(v0),
+                d01 = v0.dot(v1),
+                d11 = v1.dot(v1),
+                d20 = v2.dot(v0),
+                d21 = v2.dot(v1);
+              const denom = d00 * d11 - d01 * d01;
+              if (Math.abs(denom) < 1e-10) return { u: 0.5, v: 0.5 };
+              const w = (d11 * d20 - d01 * d21) / denom;
+              const v = (d00 * d21 - d01 * d20) / denom;
+              const u = 1 - v - w;
+              return {
+                u: u * _pa.x + v * _pb.x + w * _pc.x,
+                v: u * _pa.y + v * _pb.y + w * _pc.y,
+              };
+            }
+            function samplePlacementMask(u, v) {
+              let uu = placementSplatUV.flipU ? 1 - u : u;
+              let vv = placementSplatUV.flipV ? 1 - v : v;
+              if (PLACEMENT_UV_ROTATION === 90) {
+                const t = uu;
+                uu = 1 - vv;
+                vv = t;
+              } else if (PLACEMENT_UV_ROTATION === 180) {
+                uu = 1 - uu;
+                vv = 1 - vv;
+              } else if (PLACEMENT_UV_ROTATION === 270) {
+                const t = uu;
+                uu = vv;
+                vv = 1 - t;
+              }
+              const x = Math.max(
+                0,
+                Math.min(
+                  placementRedWidth - 1,
+                  Math.floor(uu * placementRedWidth),
+                ),
+              );
+              const y = Math.max(
+                0,
+                Math.min(
+                  placementRedHeight - 1,
+                  Math.floor((1 - vv) * placementRedHeight),
+                ),
+              );
+              return placementRedBuffer[y * placementRedWidth + x];
+            }
+
+            const ray = new THREE.Ray(
+              new THREE.Vector3(),
+              new THREE.Vector3(0, -1, 0),
+            );
+            for (let r = 0; r < HM_DIM; r++) {
+              for (let c = 0; c < HM_DIM; c++) {
+                ray.origin.set(
+                  c * HM_STEP - HM_HALF,
+                  99999,
+                  r * HM_STEP - HM_HALF,
+                );
+                const hit = bvh.raycastFirst(ray, THREE.DoubleSide);
+                if (hit) {
+                  const { u: uu, v: vv } = getUVAtHit(
+                    mergedGeo,
+                    hit.faceIndex,
+                    hit.point,
+                  );
+                  _placementGrid[r * HM_DIM + c] = samplePlacementMask(uu, vv);
+                }
+              }
+            }
+
+            placementSphereGroup.clear();
+            const positions = [];
+            for (let r = 0; r < HM_DIM; r += PLACEMENT_STEP) {
+              for (let c = 0; c < HM_DIM; c += PLACEMENT_STEP) {
+                if (_placementGrid[r * HM_DIM + c] < placementDebug.threshold)
+                  continue;
+                const x = c * HM_STEP - HM_HALF;
+                const z = r * HM_STEP - HM_HALF;
+                const y = sampleHeight(x, z);
+                positions.push(x, y + 0.7, z);
+              }
+            }
+            if (positions.length > 0) {
+              const instanced = new THREE.InstancedMesh(
+                pathSphereGeo,
+                pathSphereMat,
+                positions.length / 3,
+              );
+              const m = new THREE.Matrix4();
+              for (let i = 0; i < positions.length / 3; i++) {
+                m.makeTranslation(
+                  positions[i * 3],
+                  positions[i * 3 + 1],
+                  positions[i * 3 + 2],
+                );
+                instanced.setMatrixAt(i, m);
+              }
+              instanced.instanceMatrix.needsUpdate = true;
+              placementSphereGroup.add(instanced);
+            }
+            if (placementSphereGroup.children.length > 0) {
+              mergedGeo.dispose();
+              mergedGeoForPlacement = null;
+              bvhForPlacement = null;
+              return true;
+            }
+          }
+          return false;
+        }
+
+        // Path debug: single line along placement (replaces many spheres)
+        const placementSphereGroup = new THREE.Group();
+        scene.add(placementSphereGroup);
+
+        const PLACEMENT_STEP = 2;
+        // Only strong red (path). Tune in Debug panel if path is too wide or missing.
+        const placementDebug = { threshold: 0.5 };
+
+        function buildPlacementDebug() {
+          placementSphereGroup.clear();
+          const positions = [];
+          for (let r = 0; r < HM_DIM; r += PLACEMENT_STEP) {
+            for (let c = 0; c < HM_DIM; c += PLACEMENT_STEP) {
+              if (_placementGrid[r * HM_DIM + c] < placementDebug.threshold)
+                continue;
+              const x = c * HM_STEP - HM_HALF;
+              const z = r * HM_STEP - HM_HALF;
+              const y = sampleHeight(x, z);
+              positions.push(x, y + 0.7, z);
+            }
+          }
+          if (positions.length > 0) {
+            const instanced = new THREE.InstancedMesh(
+              pathSphereGeo,
+              pathSphereMat,
+              positions.length / 3,
+            );
+            const m = new THREE.Matrix4();
+            for (let i = 0; i < positions.length / 3; i++) {
+              m.makeTranslation(
+                positions[i * 3],
+                positions[i * 3 + 1],
+                positions[i * 3 + 2],
+              );
+              instanced.setMatrixAt(i, m);
+            }
+            instanced.instanceMatrix.needsUpdate = true;
+            placementSphereGroup.add(instanced);
+          }
+        }
+        if (mergedGeoForPlacement) {
+          if (!placementMaskTextures.length && !placementMaskTexture) {
+            const cx = 0,
+              cz = 0,
+              cy = sampleHeight(cx, cz);
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute(
+              "position",
+              new THREE.Float32BufferAttribute(
+                [cx - 2, cy, cz, cx + 2, cy, cz],
+                3,
+              ),
+            );
+            placementSphereGroup.add(
+              new THREE.Points(
+                geo,
+                new THREE.PointsMaterial({ color: 0xff0000, size: 4 }),
+              ),
+            );
+          } else {
+            function schedulePlacementSpheres() {
+              if (tryBuildPlacementSpheres()) return;
+              setTimeout(schedulePlacementSpheres, 300);
+            }
+            const anyTex = placementMaskTextures[0] || placementMaskTexture;
+            if (anyTex?.image) {
+              if (anyTex.image.complete) {
+                schedulePlacementSpheres();
+              } else {
+                anyTex.image.onload = schedulePlacementSpheres;
+                setTimeout(schedulePlacementSpheres, 400);
+                setTimeout(schedulePlacementSpheres, 1200);
+              }
+            } else {
+              setTimeout(schedulePlacementSpheres, 400);
+              setTimeout(schedulePlacementSpheres, 1200);
+            }
+            setTimeout(() => {
+              if (placementSphereGroup.children.length === 0) {
+                const cx = 0,
+                  cz = 0,
+                  cy = sampleHeight(cx, cz);
+                const geo = new THREE.BufferGeometry();
+                geo.setAttribute(
+                  "position",
+                  new THREE.Float32BufferAttribute([cx, cy, cz], 3),
+                );
+                placementSphereGroup.add(
+                  new THREE.Points(
+                    geo,
+                    new THREE.PointsMaterial({ color: 0xff0000, size: 6 }),
+                  ),
+                );
+              }
+            }, 2500);
+          }
+        } else {
+          setTimeout(() => buildPlacementDebug(), 0);
+        }
+
+        function sampleHeight(x, z) {
+          const col = (x + HM_HALF) / HM_STEP;
+          const row = (z + HM_HALF) / HM_STEP;
+          const c0 = Math.max(0, Math.min(HM_N - 1, Math.floor(col)));
+          const r0 = Math.max(0, Math.min(HM_N - 1, Math.floor(row)));
+          const c1 = c0 + 1;
+          const r1 = r0 + 1;
+          const tc = col - c0;
+          const tr = row - r0;
+          const h00 = _heightGrid[r0 * HM_DIM + c0];
+          const h10 = _heightGrid[r0 * HM_DIM + c1];
+          const h01 = _heightGrid[r1 * HM_DIM + c0];
+          const h11 = _heightGrid[r1 * HM_DIM + c1];
+          return (
+            h00 * (1 - tc) * (1 - tr) +
+            h10 * tc * (1 - tr) +
+            h01 * (1 - tc) * tr +
+            h11 * tc * tr
+          );
+        }
+
+        // shadowTarget stays at origin — terrain is scaled to Y=16-322, keep target at Y=0 so light points DOWN
+
+        // ── GRASS SETUP ──
+        // Build heightTex DataTexture from BVH _heightGrid (513×513, RGBA Float32, R = world Y)
+        const heightTexData = new Float32Array(HM_DIM * HM_DIM * 4);
+        const grassYParams = { yOffset: 0 };
+        const grassParams = { enabled: true };
+        for (let r = 0; r < HM_DIM; r++) {
+          for (let c = 0; c < HM_DIM; c++) {
+            const h = _heightGrid[r * HM_DIM + c];
+            const idx = (r * HM_DIM + c) * 4;
+            heightTexData[idx] = h;
+            heightTexData[idx + 1] = h;
+            heightTexData[idx + 2] = h;
+            heightTexData[idx + 3] = 1;
+          }
+        }
+        const heightTex = new THREE.DataTexture(
+          heightTexData,
+          HM_DIM,
+          HM_DIM,
+          THREE.RGBAFormat,
+          THREE.FloatType,
+        );
+        heightTex.wrapS = heightTex.wrapT = THREE.ClampToEdgeWrapping;
+        heightTex.magFilter = THREE.LinearFilter;
+        heightTex.minFilter = THREE.LinearFilter;
+        heightTex.needsUpdate = true;
+
+        function rebuildHeightTex(yOffset) {
+          for (let r = 0; r < HM_DIM; r++) {
+            for (let c = 0; c < HM_DIM; c++) {
+              const h = _heightGrid[r * HM_DIM + c] + yOffset;
+              const idx = (r * HM_DIM + c) * 4;
+              heightTexData[idx] = h;
+              heightTexData[idx + 1] = h;
+              heightTexData[idx + 2] = h;
+              heightTexData[idx + 3] = 1;
+            }
+          }
+          heightTex.needsUpdate = true;
+        }
+
+        // Dummy trailTex (1×1, R=1 = no trail)
+        const trailTexData = new Float32Array([1, 0, 0, 1]);
+        const trailTex = new THREE.DataTexture(
+          trailTexData,
+          1,
+          1,
+          THREE.RGBAFormat,
+          THREE.FloatType,
+        );
+        trailTex.needsUpdate = true;
+
+        const grassUniforms = createUniforms(PARAMS, TERRAIN_SIZE, 0);
+        const grassCtx = { ...grassUniforms, heightTex, trailTex, PI };
+
+        setSeed(0);
+        const geoLow = createGrassGeometry(
+          GRASS_SEGMENTS_LOW,
+          GRASS_DENSITY,
+          GRASS_PATCH_SIZE,
+          setSeed,
+          randRange,
+        );
+        setSeed(0);
+        const geoHigh = createGrassGeometry(
+          GRASS_SEGMENTS_HIGH,
+          GRASS_DENSITY,
+          GRASS_PATCH_SIZE,
+          setSeed,
+          randRange,
+        );
+        setSeed(0);
+        const geoNear = createGrassGeometry(
+          GRASS_SEGMENTS_HIGH,
+          GRASS_DENSITY,
+          NEAR_PATCH_SIZE,
+          setSeed,
+          randRange,
+        );
+
+        const matLowSimple = createGrassMaterial(
+          GRASS_SEGMENTS_LOW,
+          GRASS_VERTS_LOW,
+          false,
+          "regular",
+          grassCtx,
+        );
+        const matHighSimple = createGrassMaterial(
+          GRASS_SEGMENTS_HIGH,
+          GRASS_VERTS_HIGH,
+          false,
+          "regular",
+          grassCtx,
+        );
+        const matHighSimpleNear = createGrassMaterial(
+          GRASS_SEGMENTS_HIGH,
+          GRASS_VERTS_HIGH,
+          false,
+          "near",
+          grassCtx,
+        );
+
+        const grassGroup = new THREE.Group();
+        scene.add(grassGroup);
+        const grassPatchSystem = setupGrassPatches(
+          scene,
+          camera,
+          grassGroup,
+          {
+            geoLow,
+            geoHigh,
+            geoNear,
+            matLowSimple,
+            matHighSimple,
+            matHighSimpleNear,
+          },
+          {
+            PATCH_SPACING: GRASS_PATCH_SIZE,
+            GRID_SIZE: 18,
+            NEAR_PATCH_SIZE,
+            GRASS_DENSITY,
+            nearRingExtent: PARAMS.nearRingExtent,
+            lodDistance: PARAMS.lodDistance,
+            maxDistance: PARAMS.maxDistance,
+          },
+        );
+        const grassFrustum = new THREE.Frustum();
+        const grassProjMat = new THREE.Matrix4();
+
+        // ── SKY ──
+        const sky = new SkyMesh();
+        sky.scale.setScalar(10000);
+        scene.add(sky);
+        sky.turbidity.value = parkourParams.sky.turbidity;
+        sky.rayleigh.value = parkourParams.sky.rayleigh;
+        sky.mieCoefficient.value = parkourParams.sky.mie;
+        sky.mieDirectionalG.value = parkourParams.sky.mieG;
+        sky.cloudCoverage.value = parkourParams.sky.cloudCoverage;
+        sky.cloudDensity.value = parkourParams.sky.cloudDensity;
+        sky.cloudElevation.value = parkourParams.sky.cloudElevation;
+        sky.sunPosition.value.copy(
+          sunDirectionFromAngles(
+            parkourParams.light.sunAzimuth,
+            parkourParams.light.sunElevation,
+          ),
+        );
+
+        const pmremGenerator = new THREE.PMREMGenerator(renderer);
+        const skyEnvScene = new THREE.Scene();
+        skyEnvScene.add(sky.clone());
+        scene.environment = pmremGenerator.fromScene(skyEnvScene, 0.04).texture;
+        scene.environmentIntensity = parkourParams.light.envIntensity;
+
+        // ── VOLUMETRIC HAZE ──
+        const uHazeThickness = uniform(hazeParams.thickness);
+        const uHazeOpacity = uniform(hazeParams.opacity);
+        const uHazeFalloff = uniform(hazeParams.falloff);
+        const uHazeColor = uniform(new THREE.Color(hazeParams.hazeColor));
+        const uNoiseScaleA = uniform(hazeParams.noiseScaleA);
+        const uNoiseScaleB = uniform(hazeParams.noiseScaleB);
+        const uNoiseAmountA = uniform(hazeParams.noiseAmountA);
+        const uNoiseAmountB = uniform(hazeParams.noiseAmountB);
+        const uNoiseDetail = uniform(hazeParams.noiseDetail);
+        const uNoiseSpeed = uniform(hazeParams.noiseSpeed);
+        const hazeTimer = uniform(0).onFrameUpdate((frame) => frame.time);
+
+        function applyVolumetricHaze() {
+          if (!hazeParams.enabled) {
+            scene.fogNode = null;
+            return;
+          }
+          const fogNoiseDistance = positionView.z
+            .negate()
+            .smoothstep(0, camera.far - 200);
+          const distance = fogNoiseDistance.mul(uHazeThickness).max(8);
+          const heightAboveFloor = positionWorld.y;
+          const groundFogArea = float(distance)
+            .sub(heightAboveFloor)
+            .div(distance)
+            .pow(uHazeFalloff)
+            .saturate()
+            .mul(uHazeOpacity);
+          const fogNoiseA = triNoise3D(
+            positionWorld.mul(uNoiseScaleA),
+            uNoiseAmountA,
+            hazeTimer,
+          );
+          const fogNoiseB = triNoise3D(
+            positionWorld.mul(uNoiseScaleB),
+            uNoiseAmountB,
+            hazeTimer.mul(uNoiseSpeed),
+          );
+          const fogNoiseC = triNoise3D(
+            positionWorld.mul(0.015),
+            uNoiseDetail,
+            hazeTimer.mul(0.5),
+          );
+          const fogNoise = fogNoiseA
+            .add(fogNoiseB)
+            .add(fogNoiseC)
+            .mul(color(uHazeColor));
+          const groundColor = color(
+            new THREE.Color(parkourParams.light.hemiGroundColor),
+          );
+          scene.fogNode = fog(
+            fogNoiseDistance.oneMinus().mix(groundColor, fogNoise),
+            groundFogArea,
+          );
+        }
+        applyVolumetricHaze();
+
+        // ── FLOATING LEAVES ──
+        const windParams = {
+          uTime: { value: 0 },
+          uWindStr: { value: parkourParams.foliage.windStr },
+          uWindSpeed: { value: parkourParams.foliage.windSpeed },
+        };
+        const leaves = createFloatingLeaves({
+          scene,
+          enabled: parkourParams.foliage.floatingLeaves,
+          count: parkourParams.foliage.count,
+          maxCount: 500,
+          areaSize: parkourParams.foliage.areaSize,
+          spawnHeight: parkourParams.foliage.spawnHeight,
+          leafSize: parkourParams.foliage.leafSize,
+          scale: parkourParams.foliage.scale,
+          opacity: parkourParams.foliage.opacity,
+          windInfluence: parkourParams.foliage.windInfluence,
+          gravity: parkourParams.foliage.gravity,
+          terminalVelocity: parkourParams.foliage.terminalVelocity,
+          rotationSpeed: parkourParams.foliage.rotationSpeed,
+          airResistance: parkourParams.foliage.airResistance,
+          maxAge: parkourParams.foliage.maxAge,
+          terrainFloorOffset: parkourParams.foliage.terrainFloorOffset,
+          getTerrainHeight: (x, z) =>
+            x !== undefined && z !== undefined ? sampleHeight(x, z) : 0,
+          windParams,
+        });
+
+        // ── FLOWING LINES ──
+        const flowing = createFlowingLines({
+          scene,
+          getTerrainHeight: (x, z) =>
+            x !== undefined && z !== undefined ? sampleHeight(x, z) : 0,
+          enabled: parkourParams.flowingLines.enabled,
+          lineCount: parkourParams.flowingLines.lineCount,
+          lineLength: parkourParams.flowingLines.lineLength,
+          lineWidth: parkourParams.flowingLines.lineWidth,
+          segments: parkourParams.flowingLines.segments,
+          heightOffset: parkourParams.flowingLines.heightOffset,
+          verticalWave: parkourParams.flowingLines.verticalWave,
+          animationSpeed: parkourParams.flowingLines.animationSpeed,
+          pathRadius: parkourParams.flowingLines.pathRadius,
+          pathFrequency: parkourParams.flowingLines.pathFrequency,
+          lineColor: parkourParams.flowingLines.lineColor,
+          lineOpacity: parkourParams.flowingLines.lineOpacity,
+        });
+
+        // ── PHYSICS ──
+        await RAPIER.init({});
+        const { physicsWorld, physicsCubes } = createPhysicsWorld(
+          RAPIER,
+          scene,
+          PARKOUR_SIZE,
+          sampleHeight,
+          { noDefaultGround: true },
+        );
+
+        // ── TRIMESH COLLIDER from GLB terrain ──
+        {
+          const posArr = [];
+          const idxArr = [];
+          let vOffset = 0;
+          terrainGltf.scene.traverse((child) => {
+            if (!child.isMesh) return;
+            const geo = child.geometry;
+            const posAttr = geo.attributes.position;
+            const worldMat = child.matrixWorld;
+            for (let i = 0; i < posAttr.count; i++) {
+              const v = new THREE.Vector3(
+                posAttr.getX(i),
+                posAttr.getY(i),
+                posAttr.getZ(i),
+              );
+              v.applyMatrix4(worldMat);
+              posArr.push(v.x, v.y, v.z);
+            }
+            const idx = geo.index;
+            if (idx) {
+              for (let i = 0; i < idx.count; i++) {
+                idxArr.push(idx.getX(i) + vOffset);
+              }
+            } else {
+              for (let i = 0; i < posAttr.count; i++) {
+                idxArr.push(i + vOffset);
+              }
+            }
+            vOffset += posAttr.count;
+          });
+          const trimeshVerts = new Float32Array(posArr);
+          const trimeshIdx = new Uint32Array(idxArr);
+          const terrainBody = physicsWorld.createRigidBody(
+            RAPIER.RigidBodyDesc.fixed(),
+          );
+          physicsWorld.createCollider(
+            RAPIER.ColliderDesc.trimesh(trimeshVerts, trimeshIdx),
+            terrainBody,
+          );
+        }
+
+        // Hide the default world cubes (they spawn far away)
+        physicsCubes.forEach(({ mesh }) => {
+          mesh.visible = false;
+        });
+
+        const { physicsDebugGroup, buildRapierDebugMeshes } =
+          createPhysicsDebug(RAPIER, scene, physicsWorld);
+        physicsDebugGroup.visible = false;
+
+        // ── PLAYER ──
+        const charPos = new THREE.Vector3(0, 0, 0);
+        const capR = PARAMS.capsuleRadius;
+        const capHalfH = Math.max(0.1, (PARAMS.characterHeight - 2 * capR) / 2);
+        const spawnY = sampleHeight(0, 0);
+        charPos.y = spawnY + capHalfH + capR + 1;
+
+        const { playerBody, playerCollider, characterController } =
+          createPlayerController(RAPIER, physicsWorld, charPos, PARAMS, {
+            enableSnapToGround: true,
+            characterOffset: 0.01,
+            maxSlopeClimbAngle: (60 * Math.PI) / 180,
+            minSlopeSlideAngle: (65 * Math.PI) / 180,
+          });
+
+        const platformDebugOut = {};
+        const player = createPlayer({
+          scene,
+          renderer,
+          camera,
+          PARAMS,
+          charPos,
+          playerBody,
+          playerCollider,
+          characterController,
+          physicsWorld,
+          RAPIER,
+          // no sampleHeight → parkour mode: Rapier trimesh colliders + computedGrounded()
+          footstepSoundsPath: "sounds",
+          TERRAIN_SIZE: PARKOUR_SIZE,
+          debugOut: platformDebugOut,
+        });
+
+        // ── TWEAKPANE CONTROLS ──
+        const pane = new Tweakpane.Pane({
+          title: "GLB Terrain",
+          expanded: true,
+        });
+
+        const katanaFolder = pane.addFolder({
+          title: "Katana (in hand)",
+          expanded: true,
+        });
+        katanaFolder.addBinding(parkourParams.katana, "posX", {
+          min: -0.2,
+          max: 0.2,
+          step: 0.005,
+          label: "pos X",
+        });
+        katanaFolder.addBinding(parkourParams.katana, "posY", {
+          min: -0.2,
+          max: 0.2,
+          step: 0.005,
+          label: "pos Y",
+        });
+        katanaFolder.addBinding(parkourParams.katana, "posZ", {
+          min: -0.2,
+          max: 0.2,
+          step: 0.005,
+          label: "pos Z",
+        });
+        katanaFolder.addBinding(parkourParams.katana, "rotX", {
+          min: -Math.PI * 2,
+          max: Math.PI * 2,
+          step: 0.05,
+          label: "rot X (rad)",
+        });
+        katanaFolder.addBinding(parkourParams.katana, "rotY", {
+          min: -Math.PI * 2,
+          max: Math.PI * 2,
+          step: 0.05,
+          label: "rot Y (rad)",
+        });
+        katanaFolder.addBinding(parkourParams.katana, "rotZ", {
+          min: -Math.PI * 2,
+          max: Math.PI * 2,
+          step: 0.05,
+          label: "rot Z (rad)",
+        });
+
+        const playerCameraFolder = pane.addFolder({
+          title: "Player & Camera",
+          expanded: true,
+        });
+        playerCameraFolder.addBinding(PARAMS, "cameraMode", {
+          options: { "Third person": "thirdPerson", Orbit: "orbit" },
+          label: "camera",
+        });
+        playerCameraFolder.addBinding(PARAMS, "camDist", {
+          min: 2,
+          max: 20,
+          step: 0.5,
+          label: "camera distance",
+        });
+        playerCameraFolder.addBinding(PARAMS, "camHeight", {
+          min: -2,
+          max: 3,
+          step: 0.1,
+          label: "camera height",
+        });
+        playerCameraFolder.addBinding(PARAMS, "camPitchMin", {
+          min: -1.5,
+          max: 0.5,
+          step: 0.05,
+          label: "pitch min (rad)",
+        });
+        playerCameraFolder.addBinding(PARAMS, "camPitchMax", {
+          min: 0.5,
+          max: 2,
+          step: 0.05,
+          label: "pitch max (rad)",
+        });
+        playerCameraFolder.addBinding(PARAMS, "mouseSensitivity", {
+          min: 0.0005,
+          max: 0.01,
+          step: 0.0005,
+          label: "mouse sensitivity",
+        });
+        playerCameraFolder.addBinding(PARAMS, "keyTurnSpeed", {
+          min: 0.5,
+          max: 5,
+          step: 0.1,
+          label: "key turn speed",
+        });
+        playerCameraFolder.addBinding(PARAMS, "playerSpeed", {
+          min: 1,
+          max: 8,
+          step: 0.1,
+          label: "walk speed",
+        });
+        playerCameraFolder.addBinding(PARAMS, "runSpeedMultiplier", {
+          min: 1,
+          max: 3,
+          step: 0.05,
+          label: "run multiplier",
+        });
+        playerCameraFolder.addBinding(PARAMS, "jumpSpeed", {
+          min: 2,
+          max: 12,
+          step: 0.25,
+          label: "jump speed",
+        });
+        playerCameraFolder.addBinding(PARAMS, "gravity", {
+          min: 5,
+          max: 25,
+          step: 0.5,
+          label: "gravity",
+        });
+        playerCameraFolder.addBinding(PARAMS, "glideFallSpeed", {
+          min: 1,
+          max: 8,
+          step: 0.25,
+          label: "glide fall speed",
+        });
+        playerCameraFolder.addBinding(PARAMS, "characterHeight", {
+          min: 1.5,
+          max: 3.5,
+          step: 0.05,
+          label: "character height",
+        });
+        playerCameraFolder.addBinding(PARAMS, "capsuleRadius", {
+          min: 0.2,
+          max: 0.6,
+          step: 0.01,
+          label: "capsule radius",
+        });
+
+        const lightingFolder = pane.addFolder({
+          title: "Lighting",
+          expanded: true,
+        });
+        lightingFolder.addBinding(parkourParams.light, "sunAzimuth", {
+          min: 0,
+          max: 360,
+          step: 1,
+          label: "sun azimuth",
+        });
+        lightingFolder.addBinding(parkourParams.light, "sunElevation", {
+          min: -10,
+          max: 90,
+          step: 1,
+          label: "sun elevation",
+        });
+        lightingFolder.addBinding(parkourParams.light, "dirColor", {
+          view: "color",
+          label: "sun color",
+        });
+        lightingFolder.addBinding(parkourParams.light, "dirIntensity", {
+          min: 0,
+          max: 5,
+          step: 0.1,
+          label: "sun intensity",
+        });
+        lightingFolder.addBinding(parkourParams.light, "hemiSkyColor", {
+          view: "color",
+          label: "ambient sky",
+        });
+        lightingFolder.addBinding(parkourParams.light, "hemiGroundColor", {
+          view: "color",
+          label: "ambient ground",
+        });
+        lightingFolder.addBinding(parkourParams.light, "hemiIntensity", {
+          min: 0,
+          max: 3,
+          step: 0.1,
+          label: "ambient intensity",
+        });
+        lightingFolder.addBinding(parkourParams.light, "envIntensity", {
+          min: 0,
+          max: 2,
+          step: 0.01,
+          label: "env map",
+        });
+        lightingFolder.addBinding(parkourParams.light, "exposure", {
+          min: 0.1,
+          max: 2,
+          step: 0.05,
+          label: "exposure",
+        });
+
+        const hazeFolder = pane.addFolder({
+          title: "Volumetric Haze",
+          expanded: true,
+        });
+        hazeFolder
+          .addBinding(hazeParams, "enabled", { label: "enable" })
+          .on("change", () => applyVolumetricHaze());
+        hazeFolder
+          .addBinding(hazeParams, "thickness", {
+            min: 15,
+            max: 80,
+            step: 1,
+          })
+          .on("change", (e) => {
+            uHazeThickness.value = e.value;
+          });
+        hazeFolder
+          .addBinding(hazeParams, "opacity", {
+            min: 0.4,
+            max: 1,
+            step: 0.02,
+          })
+          .on("change", (e) => {
+            uHazeOpacity.value = e.value;
+          });
+        hazeFolder
+          .addBinding(hazeParams, "falloff", {
+            min: 1.2,
+            max: 4,
+            step: 0.1,
+          })
+          .on("change", (e) => {
+            uHazeFalloff.value = e.value;
+          });
+        hazeFolder
+          .addBinding(hazeParams, "hazeColor", {
+            view: "color",
+            label: "color",
+          })
+          .on("change", (e) => {
+            uHazeColor.value.set(e.value);
+          });
+        hazeFolder
+          .addBinding(hazeParams, "noiseScaleA", {
+            min: 0.001,
+            max: 0.02,
+            step: 0.001,
+            label: "noise scale A",
+          })
+          .on("change", (e) => {
+            uNoiseScaleA.value = e.value;
+          });
+        hazeFolder
+          .addBinding(hazeParams, "noiseScaleB", {
+            min: 0.003,
+            max: 0.02,
+            step: 0.001,
+            label: "noise scale B",
+          })
+          .on("change", (e) => {
+            uNoiseScaleB.value = e.value;
+          });
+        hazeFolder
+          .addBinding(hazeParams, "noiseAmountA", {
+            min: 0.1,
+            max: 0.5,
+            step: 0.02,
+          })
+          .on("change", (e) => {
+            uNoiseAmountA.value = e.value;
+          });
+        hazeFolder
+          .addBinding(hazeParams, "noiseAmountB", {
+            min: 0.05,
+            max: 0.4,
+            step: 0.02,
+          })
+          .on("change", (e) => {
+            uNoiseAmountB.value = e.value;
+          });
+        hazeFolder
+          .addBinding(hazeParams, "noiseDetail", {
+            min: 0,
+            max: 0.35,
+            step: 0.02,
+          })
+          .on("change", (e) => {
+            uNoiseDetail.value = e.value;
+          });
+        hazeFolder
+          .addBinding(hazeParams, "noiseSpeed", {
+            min: 0,
+            max: 2,
+            step: 0.1,
+          })
+          .on("change", (e) => {
+            uNoiseSpeed.value = e.value;
+          });
+
+        const skyFolder = pane.addFolder({ title: "Sky", expanded: true });
+        skyFolder.addBinding(parkourParams.sky, "turbidity", {
+          min: 0,
+          max: 10,
+          step: 0.1,
+        });
+        skyFolder.addBinding(parkourParams.sky, "rayleigh", {
+          min: 0,
+          max: 4,
+          step: 0.1,
+        });
+        skyFolder.addBinding(parkourParams.sky, "mie", {
+          min: 0,
+          max: 0.1,
+          step: 0.001,
+        });
+        skyFolder.addBinding(parkourParams.sky, "mieG", {
+          min: 0,
+          max: 1,
+          step: 0.01,
+          label: "mie g",
+        });
+        skyFolder.addBinding(parkourParams.sky, "cloudCoverage", {
+          min: 0,
+          max: 1,
+          step: 0.01,
+          label: "cloud coverage",
+        });
+        skyFolder.addBinding(parkourParams.sky, "cloudDensity", {
+          min: 0,
+          max: 1,
+          step: 0.01,
+          label: "cloud density",
+        });
+        skyFolder.addBinding(parkourParams.sky, "cloudElevation", {
+          min: 0,
+          max: 1,
+          step: 0.01,
+          label: "cloud elevation",
+        });
+
+        const foliageFolder = pane.addFolder({
+          title: "Foliage",
+          expanded: true,
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "floatingLeaves", {
+          label: "enable",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "count", {
+          min: 10,
+          max: 500,
+          step: 10,
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "areaSize", {
+          min: 20,
+          max: 400,
+          step: 10,
+          label: "area size",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "spawnHeight", {
+          min: 5,
+          max: 80,
+          step: 5,
+          label: "spawn height",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "leafSize", {
+          min: 0.05,
+          max: 1,
+          step: 0.05,
+          label: "leaf size",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "scale", {
+          min: 0.2,
+          max: 3,
+          step: 0.1,
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "opacity", {
+          min: 0.1,
+          max: 1,
+          step: 0.05,
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "windInfluence", {
+          min: 0,
+          max: 3,
+          step: 0.1,
+          label: "wind influence",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "windStr", {
+          min: 0,
+          max: 1,
+          step: 0.05,
+          label: "wind strength",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "windSpeed", {
+          min: 0.2,
+          max: 3,
+          step: 0.1,
+          label: "wind speed",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "gravity", {
+          min: 0,
+          max: 0.01,
+          step: 0.0005,
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "terminalVelocity", {
+          min: 0.005,
+          max: 0.1,
+          step: 0.005,
+          label: "terminal vel",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "rotationSpeed", {
+          min: 0,
+          max: 0.01,
+          step: 0.0005,
+          label: "rotation speed",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "airResistance", {
+          min: 0.9,
+          max: 1,
+          step: 0.005,
+          label: "air resistance",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "maxAge", {
+          min: 200,
+          max: 2000,
+          step: 100,
+          label: "max age (respawn)",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "terrainFloorOffset", {
+          min: 0.5,
+          max: 10,
+          step: 0.5,
+          label: "floor offset",
+        });
+
+        const flowingFolder = pane.addFolder({
+          title: "Flowing Lines",
+          expanded: true,
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "enabled", {
+          label: "enable",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "lineCount", {
+          min: 1,
+          max: 24,
+          step: 1,
+          label: "count",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "lineLength", {
+          min: 4,
+          max: 30,
+          step: 1,
+          label: "length",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "lineWidth", {
+          min: 0.05,
+          max: 0.5,
+          step: 0.01,
+          label: "width",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "segments", {
+          min: 8,
+          max: 40,
+          step: 2,
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "heightOffset", {
+          min: 0,
+          max: 2,
+          step: 0.1,
+          label: "height offset",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "verticalWave", {
+          min: 0,
+          max: 0.3,
+          step: 0.01,
+          label: "vertical wave",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "animationSpeed", {
+          min: 0.2,
+          max: 3,
+          step: 0.1,
+          label: "speed",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "pathRadius", {
+          min: 10,
+          max: 80,
+          step: 5,
+          label: "path radius",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "pathFrequency", {
+          min: 0.2,
+          max: 2,
+          step: 0.1,
+          label: "path frequency",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "lineColor", {
+          view: "color",
+          label: "color",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "lineOpacity", {
+          min: 0.2,
+          max: 1,
+          step: 0.05,
+          label: "opacity",
+        });
+
+        const debugFolder = pane.addFolder({ title: "Debug", expanded: false });
+        debugFolder.addBinding(parkourParams.debug, "rapierDebug", {
+          label: "Rapier colliders",
+        });
+        debugFolder.addBinding(parkourParams.debug, "platformDebug", {
+          label: "Platform debug",
+        });
+        debugFolder.addBinding(grassParams, "enabled", {
+          label: "Grass",
+        });
+        debugFolder
+          .addBinding(placementDebug, "threshold", {
+            min: 0.2,
+            max: 0.95,
+            step: 0.02,
+            label: "Path (red) threshold",
+          })
+          .on("change", () => buildPlacementDebug());
+        debugFolder
+          .addBinding(grassYParams, "yOffset", {
+            label: "grass Y offset",
+            min: -5,
+            max: 5,
+            step: 0.05,
+          })
+          .on("change", () => rebuildHeightTex(grassYParams.yOffset));
+
+        const lightFolder = pane.addFolder({
+          title: "Shadows (CSM)",
+          expanded: true,
+        });
+        lightFolder.addBinding(parkourParams.csm, "updateEveryFrame", {
+          label: "update every frame",
+        });
+        lightFolder.addBinding(PARAMS, "shadowBias", {
+          min: -0.01,
+          max: 0.001,
+          step: 0.0001,
+          label: "bias",
+        });
+        lightFolder.addBinding(PARAMS, "shadowNormalBias", {
+          min: 0,
+          max: 0.2,
+          step: 0.01,
+          label: "normalBias",
+        });
+        lightFolder.addBinding(parkourParams.csm, "cascades", {
+          min: 1,
+          max: 4,
+          step: 1,
+          label: "cascades",
+        });
+        lightFolder.addBinding(parkourParams.csm, "maxFar", {
+          min: 50,
+          max: 500,
+          step: 10,
+          label: "maxFar",
+        });
+        lightFolder.addBinding(parkourParams.csm, "lightMargin", {
+          min: 0,
+          max: 300,
+          step: 10,
+          label: "lightMargin",
+        });
+        lightFolder.addBinding(parkourParams.csm, "mapSize", {
+          min: 512,
+          max: 4096,
+          step: 512,
+          label: "mapSize",
+        });
+
+        // ── POST-PROCESSING ──
+        const postFolder = pane.addFolder({
+          title: "Post-Processing",
+          expanded: true,
+        });
+        postFolder.addBinding(postParams, "enabled", { label: "master" });
+
+        const postBloomFolder = postFolder.addFolder({
+          title: "Bloom",
+          expanded: false,
+        });
+        postBloomFolder.addBinding(postParams.bloom, "enabled");
+        postBloomFolder.addBinding(postParams.bloom, "strength", {
+          min: 0,
+          max: 2,
+          step: 0.05,
+        });
+        postBloomFolder.addBinding(postParams.bloom, "radius", {
+          min: 0,
+          max: 1,
+          step: 0.02,
+        });
+        postBloomFolder.addBinding(postParams.bloom, "threshold", {
+          min: 0,
+          max: 2,
+          step: 0.02,
+        });
+
+        const postLensflareFolder = postFolder.addFolder({
+          title: "Lens Flare / Sun Flare",
+          expanded: true,
+        });
+        postLensflareFolder.addBinding(postParams.lensflare, "enabled");
+        postLensflareFolder.addBinding(postParams.lensflare, "bloomThreshold", {
+          min: 0.4,
+          max: 1.2,
+          step: 0.02,
+          label: "sky bloom thresh",
+        });
+        postLensflareFolder.addBinding(postParams.lensflare, "threshold", {
+          min: 0.2,
+          max: 1,
+          step: 0.02,
+        });
+        postLensflareFolder.addBinding(
+          postParams.lensflare,
+          "ghostAttenuation",
+          {
+            min: 5,
+            max: 50,
+            step: 1,
+          },
+        );
+        postLensflareFolder.addBinding(postParams.lensflare, "ghostSpacing", {
+          min: 0.1,
+          max: 0.5,
+          step: 0.01,
+        });
+
+        const postGodRaysFolder = postFolder.addFolder({
+          title: "God Rays (Volumetric Sun)",
+          expanded: true,
+        });
+        postGodRaysFolder.addBinding(postParams.godRays, "enabled");
+        postGodRaysFolder.addBinding(postParams.godRays, "strength", {
+          min: 0,
+          max: 0.5,
+          step: 0.01,
+        });
+        postGodRaysFolder.addBinding(postParams.godRays, "decay", {
+          min: 0.9,
+          max: 0.99,
+          step: 0.005,
+        });
+        postGodRaysFolder.addBinding(postParams.godRays, "density", {
+          min: 0.2,
+          max: 1.5,
+          step: 0.05,
+        });
+        postGodRaysFolder.addBinding(postParams.godRays, "samples", {
+          min: 8,
+          max: 64,
+          step: 4,
+        });
+
+        const postDofFolder = postFolder.addFolder({
+          title: "Depth of Field",
+          expanded: false,
+        });
+        postDofFolder.addBinding(postParams.dof, "enabled");
+        postDofFolder.addBinding(postParams.dof, "focusDistance", {
+          min: 5,
+          max: 100,
+          step: 1,
+        });
+        postDofFolder.addBinding(postParams.dof, "blurStart", {
+          min: 1,
+          max: 30,
+          step: 1,
+        });
+        postDofFolder.addBinding(postParams.dof, "blurEnd", {
+          min: 30,
+          max: 150,
+          step: 5,
+        });
+        postDofFolder.addBinding(postParams.dof, "blurSize", {
+          min: 1,
+          max: 3,
+          step: 1,
+        });
+        postDofFolder.addBinding(postParams.dof, "blurSpread", {
+          min: 1,
+          max: 8,
+          step: 0.5,
+        });
+
+        const postGtaoFolder = postFolder.addFolder({
+          title: "GTAO (Ambient Occlusion)",
+          expanded: false,
+        });
+        postGtaoFolder.addBinding(postParams.gtao, "enabled");
+        postGtaoFolder.addBinding(postParams.gtao, "intensity", {
+          min: 0.5,
+          max: 2.5,
+          step: 0.1,
+        });
+        postGtaoFolder.addBinding(postParams.gtao, "radius", {
+          min: 0.5,
+          max: 2.5,
+          step: 0.1,
+        });
+        postGtaoFolder.addBinding(postParams.gtao, "samples", {
+          min: 8,
+          max: 24,
+          step: 2,
+        });
+        postGtaoFolder.addBinding(postParams.gtao, "resolutionScale", {
+          min: 0.25,
+          max: 1,
+          step: 0.05,
+          label: "resolution",
+        });
+        postGtaoFolder.addBinding(postParams.gtao, "scale", {
+          min: 0.5,
+          max: 2,
+          step: 0.1,
+        });
+        postGtaoFolder.addBinding(postParams.gtao, "denoiseEnabled", {
+          label: "denoise",
+        });
+        postGtaoFolder.addBinding(postParams.gtao, "denoiseRadius", {
+          min: 1,
+          max: 10,
+          step: 1,
+        });
+
+        // ── RENDER PIPELINE (full post-processing) ──
+        const renderPipeline = new THREE.RenderPipeline(renderer);
+        renderPipeline.outputColorTransform = false;
+        const scenePass = pass(scene, camera);
+        scenePass.setMRT(
+          mrt({
+            output,
+            emissive,
+            normal: directionToColor(normalView),
+          }),
+        );
+        const scenePassColor = scenePass.getTextureNode("output");
+        const emissivePass = scenePass.getTextureNode("emissive");
+        const scenePassDepth = scenePass.getTextureNode("depth");
+        const scenePassNormalEncoded = scenePass.getTextureNode("normal");
+        const scenePassNormal = sample((uvCoord) =>
+          colorToDirection(scenePassNormalEncoded.sample(uvCoord)),
+        );
+        const normalTexture = scenePass.getTexture("normal");
+        if (normalTexture) normalTexture.type = THREE.UnsignedByteType;
+
+        const emissiveBloomPass = bloom(emissivePass, 2);
+        let baseColor = scenePassColor.add(emissiveBloomPass);
+
+        const uGtaoEnabled = uniform(
+          postParams.enabled && postParams.gtao.enabled ? 1 : 0,
+        );
+        const uGtaoIntensity = uniform(postParams.gtao.intensity);
+        const aoPass = ao(scenePassDepth, scenePassNormal, camera);
+        aoPass.resolutionScale = postParams.gtao.resolutionScale;
+        aoPass.radius.value = postParams.gtao.radius;
+        aoPass.samples.value = postParams.gtao.samples;
+        aoPass.scale.value = postParams.gtao.scale;
+        aoPass.distanceFallOff.value = postParams.gtao.distanceFallOff;
+        aoPass.distanceExponent.value = postParams.gtao.distanceExponent;
+        aoPass.thickness.value = postParams.gtao.thickness;
+        const aoTex = aoPass.getTextureNode();
+        const denoisePass = denoise(
+          aoTex,
+          scenePassDepth,
+          scenePassNormal,
+          camera,
+        );
+        denoisePass.updateBefore = () => {};
+        denoisePass.radius.value = postParams.gtao.denoiseRadius;
+        denoisePass.lumaPhi.value = postParams.gtao.denoiseLumaPhi;
+        denoisePass.depthPhi.value = postParams.gtao.denoiseDepthPhi;
+        denoisePass.normalPhi.value = postParams.gtao.denoiseNormalPhi;
+        const uGtaoDenoiseEnabled = uniform(
+          postParams.gtao.denoiseEnabled ? 1 : 0,
+        );
+        const rawAoVal = aoTex.sample(screenUV).r;
+        const denoisedAoVal = denoisePass.r;
+        const aoVal = mix(rawAoVal, denoisedAoVal, uGtaoDenoiseEnabled);
+        baseColor = vec4(
+          baseColor.rgb.mul(
+            sub(1, mul(mul(aoVal, uGtaoIntensity), uGtaoEnabled)),
+          ),
+          baseColor.a,
+        );
+
+        const linearDepth = scenePass.getLinearDepthNode
+          ? scenePass.getLinearDepthNode()
+          : float(0.5);
+        const uCameraFar = uniform(camera.far);
+        const worldDepth = mul(linearDepth, uCameraFar);
+        const skyMask = step(float(0.999), linearDepth);
+
+        const uDofEnabled = uniform(
+          postParams.enabled && postParams.dof.enabled ? 1 : 0,
+        );
+        const uDofFocusDistance = uniform(postParams.dof.focusDistance);
+        const uDofBlurStart = uniform(postParams.dof.blurStart);
+        const uDofBlurEnd = uniform(postParams.dof.blurEnd);
+        const uDofBlurSize = uniform(postParams.dof.blurSize);
+        const uDofBlurSpread = uniform(postParams.dof.blurSpread);
+        const sceneBlurred = boxBlur(baseColor, {
+          size: uDofBlurSize,
+          separation: uDofBlurSpread,
+        });
+        const dofBlurAmount = smoothstep(
+          uDofBlurStart,
+          uDofBlurEnd,
+          abs(sub(worldDepth, uDofFocusDistance)),
+        );
+        baseColor = mix(
+          baseColor,
+          sceneBlurred,
+          mul(dofBlurAmount, uDofEnabled),
+        );
+
+        const uBloomEnabled = uniform(
+          postParams.enabled && postParams.bloom.enabled ? 1 : 0,
+        );
+        const bloomScenePass = bloom(
+          baseColor,
+          postParams.bloom.strength,
+          postParams.bloom.radius,
+          postParams.bloom.threshold,
+        );
+
+        const skyOnlyColor = mix(vec4(0, 0, 0, 0), baseColor, skyMask);
+        const skyBloomPass = bloom(
+          skyOnlyColor,
+          1,
+          0.5,
+          postParams.lensflare.bloomThreshold,
+        );
+        const flareThreshold = uniform(postParams.lensflare.threshold);
+        const flareGhostAttenuation = uniform(
+          postParams.lensflare.ghostAttenuation,
+        );
+        const flareGhostSpacing = uniform(postParams.lensflare.ghostSpacing);
+        const flarePass = lensflare(skyBloomPass, {
+          threshold: flareThreshold,
+          ghostAttenuationFactor: flareGhostAttenuation,
+          ghostSpacing: flareGhostSpacing,
+        });
+        const flareBlurPass = gaussianBlur(flarePass, null, 8);
+        const uLensflareEnabled = uniform(
+          postParams.enabled && postParams.lensflare.enabled ? 1 : 0,
+        );
+
+        const uSunScreenPos = uniform(new THREE.Vector2(0.5, 0.5));
+        const uGodRaysEnabled = uniform(
+          postParams.enabled && postParams.godRays.enabled ? 1 : 0,
+        );
+        const uGodRaysStrength = uniform(postParams.godRays.strength);
+        const uGodRaysDecay = uniform(postParams.godRays.decay);
+        const uGodRaysDensity = uniform(postParams.godRays.density);
+        const uGodRaysSamples = uniform(postParams.godRays.samples);
+        const sceneTex = convertToTexture(baseColor);
+        const godRaysFn = Fn(() => {
+          const uvNode = uv();
+          const stepUV = sub(nodeObject(uSunScreenPos), uvNode)
+            .mul(uGodRaysDensity)
+            .div(uGodRaysSamples);
+          const illumination = float(0).toVar();
+          const decayVar = float(1).toVar();
+          Loop(
+            {
+              start: int(0),
+              end: int(uGodRaysSamples),
+              type: "int",
+              condition: "<",
+            },
+            ({ i }) => {
+              const sampleUV = add(uvNode, stepUV.mul(float(i)));
+              const s = sceneTex.sample(sampleUV);
+              const lum = add(
+                add(mul(s.r, 0.299), mul(s.g, 0.587)),
+                mul(s.b, 0.114),
+              );
+              illumination.addAssign(mul(lum, decayVar));
+              decayVar.mulAssign(uGodRaysDecay);
+            },
+          );
+          const normalized = illumination.div(uGodRaysSamples);
+          return vec4(normalized, normalized, normalized, 1)
+            .mul(uGodRaysStrength)
+            .mul(uGodRaysEnabled);
+        });
+        const godRaysNode = godRaysFn();
+
+        const finalOutput = baseColor
+          .add(bloomScenePass.mul(uBloomEnabled))
+          .add(flareBlurPass.mul(uLensflareEnabled))
+          .add(godRaysNode);
+
+        renderPipeline.outputNode = fxaa(renderOutput(finalOutput));
+
+        await renderer.compileAsync(scene, camera);
+        csm.camera = camera;
+        csm.updateFrustums();
+
+        const timer = new THREE.Timer();
+        let lastTime = 0;
+        const smoothCamPos = new THREE.Vector3();
+        const smoothLookAt = new THREE.Vector3();
+        const smoothCharPos = new THREE.Vector3();
+        let camSmoothInit = false;
+        let charSmoothInit = false;
+        const CAM_SMOOTH = 12;
+        const CHAR_SMOOTH = 14;
+        let lastCsmCascades = parkourParams.csm.cascades;
+        let lastCsmMaxFar = parkourParams.csm.maxFar;
+        let lastCsmLightMargin = parkourParams.csm.lightMargin;
+        let lastCsmMapSize = parkourParams.csm.mapSize;
+
+        renderer.setAnimationLoop(() => {
+          timer.update();
+          const elapsed = timer.getElapsed();
+          const dt = Math.min(elapsed - lastTime, 0.05);
+          lastTime = elapsed;
+
+          player.update(dt);
+
+          const swordGroup = player.characterGroup.userData.sword;
+          if (swordGroup && parkourParams.katana) {
+            const k = parkourParams.katana;
+            swordGroup.position.set(k.posX, k.posY, k.posZ);
+            swordGroup.rotation.set(k.rotX, k.rotY, k.rotZ);
+          }
+
+          const pdDiv = document.getElementById("platform-debug");
+          if (parkourParams.debug.platformDebug) {
+            pdDiv.style.display = "block";
+            const d = platformDebugOut;
+            pdDiv.innerHTML = `<pre style="margin:0;font-size:11px">PLATFORM DEBUG
+  charPosY: ${d.charPosY ?? "?"}
+  isGrounded: ${d.isGrounded ?? "?"}
+  inAir: ${d.inAir ?? "?"}
+  moveState: ${d.moveState ?? "?"}</pre>`;
+          } else {
+            pdDiv.style.display = "none";
+          }
+
+          windParams.uTime.value = elapsed;
+          windParams.uWindStr.value = parkourParams.foliage.windStr;
+          windParams.uWindSpeed.value = parkourParams.foliage.windSpeed;
+          leaves.params.enabled = parkourParams.foliage.floatingLeaves;
+          leaves.params.count = parkourParams.foliage.count;
+          leaves.params.areaSize = parkourParams.foliage.areaSize;
+          leaves.params.spawnHeight = parkourParams.foliage.spawnHeight;
+          leaves.params.leafSize = parkourParams.foliage.leafSize;
+          leaves.params.scale = parkourParams.foliage.scale;
+          leaves.params.opacity = parkourParams.foliage.opacity;
+          leaves.params.windInfluence = parkourParams.foliage.windInfluence;
+          leaves.params.gravity = parkourParams.foliage.gravity;
+          leaves.params.terminalVelocity =
+            parkourParams.foliage.terminalVelocity;
+          leaves.params.rotationSpeed = parkourParams.foliage.rotationSpeed;
+          leaves.params.airResistance = parkourParams.foliage.airResistance;
+          leaves.params.maxAge = parkourParams.foliage.maxAge;
+          leaves.params.terrainFloorOffset =
+            parkourParams.foliage.terrainFloorOffset;
+          leaves.update();
+
+          flowing.params.enabled = parkourParams.flowingLines.enabled;
+          flowing.params.heightOffset = parkourParams.flowingLines.heightOffset;
+          flowing.params.verticalWave = parkourParams.flowingLines.verticalWave;
+          flowing.params.animationSpeed =
+            parkourParams.flowingLines.animationSpeed;
+          flowing.params.pathRadius = parkourParams.flowingLines.pathRadius;
+          flowing.params.pathFrequency =
+            parkourParams.flowingLines.pathFrequency;
+          flowing.group.visible = parkourParams.flowingLines.enabled;
+          flowing.setParams({
+            lineColor: parkourParams.flowingLines.lineColor,
+            lineOpacity: parkourParams.flowingLines.lineOpacity,
+          });
+          flowing.update(elapsed);
+
+          // Smooth character visual + camera
+          const inAir = !player.state.isGrounded;
+          if (!charSmoothInit) {
+            smoothCharPos.copy(charPos);
+            charSmoothInit = true;
+          }
+          if (inAir) {
+            smoothCharPos.copy(charPos);
+            player.characterGroup.position.copy(charPos);
+          } else {
+            const charAlpha = 1 - Math.exp(-CHAR_SMOOTH * dt);
+            smoothCharPos.lerp(charPos, charAlpha);
+            player.characterGroup.position.copy(smoothCharPos);
+          }
+
+          if (PARAMS.cameraMode === "thirdPerson") {
+            const camDist = PARAMS.camDist;
+            const cx =
+              smoothCharPos.x -
+              Math.sin(player.state.camYaw) *
+                Math.cos(player.state.camPitch) *
+                camDist;
+            const cy =
+              smoothCharPos.y +
+              Math.sin(player.state.camPitch) * camDist +
+              PARAMS.camHeight;
+            const cz =
+              smoothCharPos.z -
+              Math.cos(player.state.camYaw) *
+                Math.cos(player.state.camPitch) *
+                camDist;
+            const camTerrainY = sampleHeight(cx, cz) + 1.5;
+            const targetPos = new THREE.Vector3(
+              cx,
+              Math.max(cy, camTerrainY),
+              cz,
+            );
+            const targetLook = new THREE.Vector3(
+              smoothCharPos.x,
+              smoothCharPos.y + 0.5,
+              smoothCharPos.z,
+            );
+            if (!camSmoothInit) {
+              smoothCamPos.copy(targetPos);
+              smoothLookAt.copy(targetLook);
+              camSmoothInit = true;
+            }
+            const alpha = 1 - Math.exp(-CAM_SMOOTH * dt);
+            smoothCamPos.lerp(targetPos, alpha);
+            smoothLookAt.lerp(targetLook, alpha);
+            camera.position.copy(smoothCamPos);
+            camera.lookAt(smoothLookAt);
+            orbitControls.enabled = false;
+          } else {
+            orbitControls.target.set(
+              smoothCharPos.x,
+              smoothCharPos.y + 0.5,
+              smoothCharPos.z,
+            );
+            orbitControls.enabled = true;
+            orbitControls.update();
+          }
+
+          dirLight.shadow.bias = PARAMS.shadowBias;
+          dirLight.shadow.normalBias = PARAMS.shadowNormalBias;
+
+          const sunDir = sunDirectionFromAngles(
+            parkourParams.light.sunAzimuth,
+            parkourParams.light.sunElevation,
+          );
+          dirLight.position.copy(sunDir.clone().multiplyScalar(600));
+          dirLight.color.set(parkourParams.light.dirColor);
+          dirLight.intensity = parkourParams.light.dirIntensity;
+          hemiLight.color.set(parkourParams.light.hemiSkyColor);
+          hemiLight.groundColor.set(parkourParams.light.hemiGroundColor);
+          hemiLight.intensity = parkourParams.light.hemiIntensity;
+          sky.turbidity.value = parkourParams.sky.turbidity;
+          sky.rayleigh.value = parkourParams.sky.rayleigh;
+          sky.mieCoefficient.value = parkourParams.sky.mie;
+          sky.mieDirectionalG.value = parkourParams.sky.mieG;
+          sky.cloudCoverage.value = parkourParams.sky.cloudCoverage;
+          sky.cloudDensity.value = parkourParams.sky.cloudDensity;
+          sky.cloudElevation.value = parkourParams.sky.cloudElevation;
+          sky.sunPosition.value.copy(sunDir);
+          scene.environmentIntensity = parkourParams.light.envIntensity;
+          renderer.toneMappingExposure = parkourParams.light.exposure;
+
+          uGtaoEnabled.value =
+            postParams.enabled && postParams.gtao.enabled ? 1 : 0;
+          uGtaoIntensity.value = postParams.gtao.intensity;
+          aoPass.radius.value = postParams.gtao.radius;
+          aoPass.samples.value = postParams.gtao.samples;
+          aoPass.scale.value = postParams.gtao.scale;
+          aoPass.distanceFallOff.value = postParams.gtao.distanceFallOff;
+          aoPass.distanceExponent.value = postParams.gtao.distanceExponent;
+          aoPass.thickness.value = postParams.gtao.thickness;
+          denoisePass.radius.value = postParams.gtao.denoiseRadius;
+          denoisePass.lumaPhi.value = postParams.gtao.denoiseLumaPhi;
+          denoisePass.depthPhi.value = postParams.gtao.denoiseDepthPhi;
+          denoisePass.normalPhi.value = postParams.gtao.denoiseNormalPhi;
+          uGtaoDenoiseEnabled.value = postParams.gtao.denoiseEnabled ? 1 : 0;
+          if (denoisePass._resolution) {
+            const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+            denoisePass._resolution.value.set(size.x, size.y);
+          }
+
+          uDofEnabled.value =
+            postParams.enabled && postParams.dof.enabled ? 1 : 0;
+          uDofFocusDistance.value = postParams.dof.focusDistance;
+          uDofBlurStart.value = postParams.dof.blurStart;
+          uDofBlurEnd.value = postParams.dof.blurEnd;
+          uDofBlurSize.value = postParams.dof.blurSize;
+          uDofBlurSpread.value = postParams.dof.blurSpread;
+
+          uBloomEnabled.value =
+            postParams.enabled && postParams.bloom.enabled ? 1 : 0;
+          bloomScenePass.strength.value = postParams.bloom.strength;
+          bloomScenePass.radius.value = postParams.bloom.radius;
+          bloomScenePass.threshold.value = postParams.bloom.threshold;
+
+          uLensflareEnabled.value =
+            postParams.enabled && postParams.lensflare.enabled ? 1 : 0;
+          skyBloomPass.threshold.value = postParams.lensflare.bloomThreshold;
+          flareThreshold.value = postParams.lensflare.threshold;
+          flareGhostAttenuation.value = postParams.lensflare.ghostAttenuation;
+          flareGhostSpacing.value = postParams.lensflare.ghostSpacing;
+
+          uGodRaysEnabled.value =
+            postParams.enabled && postParams.godRays.enabled ? 1 : 0;
+          uGodRaysStrength.value = postParams.godRays.strength;
+          uGodRaysDecay.value = postParams.godRays.decay;
+          uGodRaysDensity.value = postParams.godRays.density;
+          uGodRaysSamples.value = postParams.godRays.samples;
+
+          const sunWorld = camera.position
+            .clone()
+            .add(sunDir.clone().multiplyScalar(500000));
+          const v4 = new THREE.Vector4(sunWorld.x, sunWorld.y, sunWorld.z, 1);
+          v4.applyMatrix4(camera.matrixWorldInverse);
+          v4.applyMatrix4(camera.projectionMatrix);
+          const ndcX = v4.x / v4.w;
+          const ndcY = v4.y / v4.w;
+          uSunScreenPos.value.set(ndcX * 0.5 + 0.5, ndcY * 0.5 + 0.5);
+
+          const csmChanged =
+            parkourParams.csm.cascades !== lastCsmCascades ||
+            parkourParams.csm.maxFar !== lastCsmMaxFar ||
+            parkourParams.csm.lightMargin !== lastCsmLightMargin ||
+            parkourParams.csm.mapSize !== lastCsmMapSize;
+          if (csmChanged) {
+            lastCsmCascades = parkourParams.csm.cascades;
+            lastCsmMaxFar = parkourParams.csm.maxFar;
+            lastCsmLightMargin = parkourParams.csm.lightMargin;
+            lastCsmMapSize = parkourParams.csm.mapSize;
+            csm.cascades = parkourParams.csm.cascades;
+            csm.maxFar = parkourParams.csm.maxFar;
+            csm.lightMargin = parkourParams.csm.lightMargin;
+            dirLight.shadow.mapSize.width = parkourParams.csm.mapSize;
+            dirLight.shadow.mapSize.height = parkourParams.csm.mapSize;
+            if (csm.frustums) csm.updateFrustums();
+          }
+
+          if (parkourParams.csm.updateEveryFrame && csm.frustums) {
+            csm.updateFrustums();
+          }
+
+          physicsDebugGroup.visible = !!parkourParams.debug.rapierDebug;
+          if (parkourParams.debug.rapierDebug) buildRapierDebugMeshes();
+
+          // Grass update
+          grassGroup.visible = grassParams.enabled;
+          grassUniforms.uTime.value = elapsed;
+          grassUniforms.uPlayerPos.value.copy(charPos);
+          grassProjMat.multiplyMatrices(
+            camera.projectionMatrix,
+            camera.matrixWorldInverse,
+          );
+          grassFrustum.setFromProjectionMatrix(grassProjMat);
+          grassPatchSystem.update(charPos, grassFrustum);
+
+          camera.updateMatrixWorld();
+          renderPipeline.render();
+          stats.update();
+        });
+
+        window.addEventListener("resize", () => {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(innerWidth, innerHeight);
+          if (csm.frustums) csm.updateFrustums();
+        });
+      }
+
+      init().catch((e) => {
+        console.error("Init failed:", e);
+        document.getElementById("backend").textContent = "Error: " + e.message;
+      });
+    </script>
+  </body>
+</html>

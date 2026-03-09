@@ -53,7 +53,8 @@
           "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
           "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
           "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
-          "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js"
+          "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js",
+          "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.9/build/index.module.js"
         }
       }
     </script>
@@ -160,6 +161,21 @@
       import { PARAMS } from "./params.js";
       import { PI, TERRAIN_SIZE } from "./constants.js";
       import { createTileMaterial } from "./tileMaterial.js";
+      import {
+        createGrassGeometry,
+        createGrassMaterial,
+        setupGrassPatches,
+        GRASS_SEGMENTS_LOW,
+        GRASS_SEGMENTS_HIGH,
+        GRASS_VERTS_LOW,
+        GRASS_VERTS_HIGH,
+        GRASS_DENSITY,
+        GRASS_PATCH_SIZE,
+        NEAR_PATCH_SIZE,
+      } from "./grass.js";
+      import { createUniforms } from "./uniforms.js";
+      import { setSeed, randRange } from "./rng.js";
+      import { MeshBVH } from "three-mesh-bvh";
 
       const PARKOUR_SIZE = TERRAIN_SIZE;
 
@@ -457,47 +473,68 @@
         // Must update world matrices before building trimesh or sampleHeight
         scene.updateMatrixWorld(true);
 
-        // ── HEIGHT GRID for fast O(1) sampleHeight (built from vertex data, no per-frame raycasting) ──
-        const HG_N = 128;
-        const HG_HALF = TERRAIN_SIZE / 2;
-        const HG_STEP = TERRAIN_SIZE / HG_N;
-        const _heightGrid = new Float32Array((HG_N + 1) * (HG_N + 1)).fill(
-          -Infinity,
-        );
+        // ── BVH HEIGHTMAP — exact triangle-surface raycasting at 512×512 ──
+        const HM_N = 512;
+        const HM_HALF = TERRAIN_SIZE / 2;
+        const HM_STEP = TERRAIN_SIZE / HM_N;
+        const HM_DIM = HM_N + 1; // 513
+        const _heightGrid = new Float32Array(HM_DIM * HM_DIM);
+
         {
+          // Merge all terrain mesh geometry into world-space BufferGeometry for BVH
+          const posList = [];
+          const idxList = [];
+          let vtxBase = 0;
           const _v = new THREE.Vector3();
           terrainGltf.scene.traverse((child) => {
             if (!child.isMesh) return;
-            const pos = child.geometry.attributes.position;
+            const geo = child.geometry;
             const mat = child.matrixWorld;
-            for (let i = 0; i < pos.count; i++) {
-              _v.set(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(mat);
-              const col = Math.round((_v.x + HG_HALF) / HG_STEP);
-              const row = Math.round((_v.z + HG_HALF) / HG_STEP);
-              if (col >= 0 && col <= HG_N && row >= 0 && row <= HG_N) {
-                const idx = row * (HG_N + 1) + col;
-                if (_v.y > _heightGrid[idx]) _heightGrid[idx] = _v.y;
-              }
+            const posAttr = geo.attributes.position;
+            for (let i = 0; i < posAttr.count; i++) {
+              _v.fromBufferAttribute(posAttr, i).applyMatrix4(mat);
+              posList.push(_v.x, _v.y, _v.z);
             }
+            if (geo.index) {
+              for (let i = 0; i < geo.index.count; i++)
+                idxList.push(geo.index.getX(i) + vtxBase);
+            } else {
+              for (let i = 0; i < posAttr.count; i++)
+                idxList.push(i + vtxBase);
+            }
+            vtxBase += posAttr.count;
           });
-          // Fill any grid cells that got no vertex with 0
-          for (let i = 0; i < _heightGrid.length; i++) {
-            if (_heightGrid[i] === -Infinity) _heightGrid[i] = 0;
+
+          const mergedGeo = new THREE.BufferGeometry();
+          mergedGeo.setAttribute("position", new THREE.Float32BufferAttribute(posList, 3));
+          mergedGeo.setIndex(idxList);
+          const bvh = new MeshBVH(mergedGeo);
+
+          // Raycast downward at every grid point to get exact surface Y
+          const ray = new THREE.Ray(new THREE.Vector3(), new THREE.Vector3(0, -1, 0));
+          for (let r = 0; r < HM_DIM; r++) {
+            for (let c = 0; c < HM_DIM; c++) {
+              ray.origin.set(c * HM_STEP - HM_HALF, 99999, r * HM_STEP - HM_HALF);
+              const hit = bvh.raycastFirst(ray, THREE.DoubleSide);
+              _heightGrid[r * HM_DIM + c] = hit ? hit.point.y : 0;
+            }
           }
+          mergedGeo.dispose();
         }
+
         function sampleHeight(x, z) {
-          const col = (x + HG_HALF) / HG_STEP;
-          const row = (z + HG_HALF) / HG_STEP;
-          const c0 = Math.max(0, Math.min(HG_N - 1, Math.floor(col)));
-          const r0 = Math.max(0, Math.min(HG_N - 1, Math.floor(row)));
+          const col = (x + HM_HALF) / HM_STEP;
+          const row = (z + HM_HALF) / HM_STEP;
+          const c0 = Math.max(0, Math.min(HM_N - 1, Math.floor(col)));
+          const r0 = Math.max(0, Math.min(HM_N - 1, Math.floor(row)));
           const c1 = c0 + 1;
           const r1 = r0 + 1;
           const tc = col - c0;
           const tr = row - r0;
-          const h00 = _heightGrid[r0 * (HG_N + 1) + c0];
-          const h10 = _heightGrid[r0 * (HG_N + 1) + c1];
-          const h01 = _heightGrid[r1 * (HG_N + 1) + c0];
-          const h11 = _heightGrid[r1 * (HG_N + 1) + c1];
+          const h00 = _heightGrid[r0 * HM_DIM + c0];
+          const h10 = _heightGrid[r0 * HM_DIM + c1];
+          const h01 = _heightGrid[r1 * HM_DIM + c0];
+          const h11 = _heightGrid[r1 * HM_DIM + c1];
           return (
             h00 * (1 - tc) * (1 - tr) +
             h10 * tc * (1 - tr) +
@@ -508,27 +545,79 @@
 
         // shadowTarget stays at origin — terrain is scaled to Y=16-322, keep target at Y=0 so light points DOWN
 
-        // ── TERRAIN MARKERS (heightmap demo) ──
-        const markerParams = { yOffset: 3 };
-        const markerMeshes = []; // { mesh, baseY }
-        {
-          const coneGeo = new THREE.ConeGeometry(1.5, 6, 8);
-          coneGeo.rotateX(Math.PI); // flip so tip points down
-          const coneMat = new THREE.MeshStandardNodeMaterial({ color: 0xff4400, roughness: 0.5, metalness: 0 });
-          const HALF = TERRAIN_SIZE / 2;
-          const STEP = 40;
-          for (let x = -HALF + STEP / 2; x < HALF; x += STEP) {
-            for (let z = -HALF + STEP / 2; z < HALF; z += STEP) {
-              const baseY = sampleHeight(x, z);
-              const cone = new THREE.Mesh(coneGeo, coneMat);
-              cone.castShadow = true;
-              cone.receiveShadow = true;
-              cone.position.set(x, baseY + markerParams.yOffset, z);
-              scene.add(cone);
-              markerMeshes.push({ mesh: cone, baseY });
-            }
+        // ── GRASS SETUP ──
+        // Build heightTex DataTexture from BVH _heightGrid (513×513, RGBA Float32, R = world Y)
+        const heightTexData = new Float32Array(HM_DIM * HM_DIM * 4);
+        const grassYParams = { yOffset: 0 };
+        const grassParams = { enabled: true };
+        for (let r = 0; r < HM_DIM; r++) {
+          for (let c = 0; c < HM_DIM; c++) {
+            const h = _heightGrid[r * HM_DIM + c];
+            const idx = (r * HM_DIM + c) * 4;
+            heightTexData[idx] = h;
+            heightTexData[idx + 1] = h;
+            heightTexData[idx + 2] = h;
+            heightTexData[idx + 3] = 1;
           }
         }
+        const heightTex = new THREE.DataTexture(
+          heightTexData, HM_DIM, HM_DIM,
+          THREE.RGBAFormat, THREE.FloatType,
+        );
+        heightTex.wrapS = heightTex.wrapT = THREE.ClampToEdgeWrapping;
+        heightTex.magFilter = THREE.LinearFilter;
+        heightTex.minFilter = THREE.LinearFilter;
+        heightTex.needsUpdate = true;
+        function rebuildHeightTex(yOffset) {
+          for (let r = 0; r < HM_DIM; r++) {
+            for (let c = 0; c < HM_DIM; c++) {
+              const h = _heightGrid[r * HM_DIM + c] + yOffset;
+              const idx = (r * HM_DIM + c) * 4;
+              heightTexData[idx] = h;
+              heightTexData[idx + 1] = h;
+              heightTexData[idx + 2] = h;
+              heightTexData[idx + 3] = 1;
+            }
+          }
+          heightTex.needsUpdate = true;
+        }
+
+        // Dummy trailTex (1×1, R=1 = no trail)
+        const trailTexData = new Float32Array([1, 0, 0, 1]);
+        const trailTex = new THREE.DataTexture(trailTexData, 1, 1, THREE.RGBAFormat, THREE.FloatType);
+        trailTex.needsUpdate = true;
+
+        const grassUniforms = createUniforms(PARAMS, TERRAIN_SIZE, 0);
+        const grassCtx = { ...grassUniforms, heightTex, trailTex, PI };
+
+        setSeed(0);
+        const geoLow = createGrassGeometry(GRASS_SEGMENTS_LOW, GRASS_DENSITY, GRASS_PATCH_SIZE, setSeed, randRange);
+        setSeed(0);
+        const geoHigh = createGrassGeometry(GRASS_SEGMENTS_HIGH, GRASS_DENSITY, GRASS_PATCH_SIZE, setSeed, randRange);
+        setSeed(0);
+        const geoNear = createGrassGeometry(GRASS_SEGMENTS_HIGH, GRASS_DENSITY, NEAR_PATCH_SIZE, setSeed, randRange);
+
+        const matLowSimple = createGrassMaterial(GRASS_SEGMENTS_LOW, GRASS_VERTS_LOW, false, "regular", grassCtx);
+        const matHighSimple = createGrassMaterial(GRASS_SEGMENTS_HIGH, GRASS_VERTS_HIGH, false, "regular", grassCtx);
+        const matHighSimpleNear = createGrassMaterial(GRASS_SEGMENTS_HIGH, GRASS_VERTS_HIGH, false, "near", grassCtx);
+
+        const grassGroup = new THREE.Group();
+        scene.add(grassGroup);
+        const grassPatchSystem = setupGrassPatches(
+          scene, camera, grassGroup,
+          { geoLow, geoHigh, geoNear, matLowSimple, matHighSimple, matHighSimpleNear },
+          {
+            PATCH_SPACING: GRASS_PATCH_SIZE,
+            GRID_SIZE: 18,
+            NEAR_PATCH_SIZE,
+            GRASS_DENSITY,
+            nearRingExtent: PARAMS.nearRingExtent,
+            lodDistance: PARAMS.lodDistance,
+            maxDistance: PARAMS.maxDistance,
+          },
+        );
+        const grassFrustum = new THREE.Frustum();
+        const grassProjMat = new THREE.Matrix4();
 
         // ── SKY ──
         const sky = new SkyMesh();
@@ -1252,13 +1341,13 @@
         debugFolder.addBinding(parkourParams.debug, "platformDebug", {
           label: "Platform debug",
         });
-        debugFolder.addBinding(markerParams, "yOffset", {
-          label: "marker Y offset",
-          min: -5, max: 10, step: 0.05,
-        }).on("change", () => {
-          for (const { mesh, baseY } of markerMeshes)
-            mesh.position.y = baseY + markerParams.yOffset;
+        debugFolder.addBinding(grassParams, "enabled", {
+          label: "Grass",
         });
+        debugFolder.addBinding(grassYParams, "yOffset", {
+          label: "grass Y offset",
+          min: -5, max: 5, step: 0.05,
+        }).on("change", () => rebuildHeightTex(grassYParams.yOffset));
 
         const lightFolder = pane.addFolder({
           title: "Shadows (CSM)",
@@ -1881,6 +1970,14 @@
 
           physicsDebugGroup.visible = !!parkourParams.debug.rapierDebug;
           if (parkourParams.debug.rapierDebug) buildRapierDebugMeshes();
+
+          // Grass update
+          grassGroup.visible = grassParams.enabled;
+          grassUniforms.uTime.value = elapsed;
+          grassUniforms.uPlayerPos.value.copy(charPos);
+          grassProjMat.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+          grassFrustum.setFromProjectionMatrix(grassProjMat);
+          grassPatchSystem.update(charPos, grassFrustum);
 
           camera.updateMatrixWorld();
           renderPipeline.render();

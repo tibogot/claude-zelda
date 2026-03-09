@@ -88,17 +88,6 @@ export function createPlayer(opts) {
     (gltf) => {
       const model = gltf.scene;
 
-      // ── UA1+UA2: log all bone/node and animation names for mapping ──
-      const nodeNames = [];
-      const boneNames = [];
-      model.traverse((o) => {
-        if (o.name) nodeNames.push({ name: o.name, type: o.type, isBone: !!o.isBone });
-        if (o.isBone) boneNames.push(o.name);
-      });
-      console.log("[UA1+UA2_compressed] Animation names:", gltf.animations.map((a) => a.name));
-      console.log("[UA1+UA2_compressed] All nodes (name, type, isBone):", nodeNames);
-      console.log("[UA1+UA2_compressed] Bone names only:", boneNames);
-
       model.traverse((o) => {
         if (o.isMesh) {
           o.castShadow = true;
@@ -300,8 +289,6 @@ export function createPlayer(opts) {
       });
       characterGroup.userData.footBoneL = _fbl;
       characterGroup.userData.footBoneR = _fbr;
-      if (_fbl) console.log("[footsteps] L bone:", _fbl.name);
-      if (_fbr) console.log("[footsteps] R bone:", _fbr.name);
 
       try {
         if (gltf.animations && gltf.animations.length) {
