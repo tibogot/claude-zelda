@@ -163,6 +163,7 @@
       import { PARAMS } from "./params.js";
       import { PI } from "./constants.js";
       import { createTileMaterial } from "./tileMaterial.js";
+      import { createDynamicLeaves } from "./dynamicLeaves.js";
 
       const PARKOUR_SIZE = 800;
 
@@ -242,6 +243,14 @@
           terrainFloorOffset: 2,
           windStr: 0.08,
           windSpeed: 0.4,
+        },
+        dynamicLeaves: {
+          enabled: false,
+          count: 600,
+          areaSize: 30,
+          interactionRange: 8,
+          pushStrength: 0.8,
+          swirlStrength: 0.5,
         },
         bridge1: { enabled: false },
         bridge2: { enabled: false },
@@ -1368,6 +1377,24 @@
           getTerrainHeight: () => FLOOR_Y,
           windParams,
         });
+
+        // ── DYNAMIC LEAVES ──
+        const _dynLeavesCharPos = new THREE.Vector3();
+        const _dynLeavesCharVel = new THREE.Vector3();
+        const _dynLeavesPrevPos = new THREE.Vector3();
+        const dynLeaves = createDynamicLeaves({
+          scene,
+          camera,
+          count: parkourParams.dynamicLeaves.count,
+          areaSize: parkourParams.dynamicLeaves.areaSize,
+          characterPosition: _dynLeavesCharPos,
+          characterVelocity: _dynLeavesCharVel,
+          getGroundHeight: () => FLOOR_Y,
+          characterInteractionRange: parkourParams.dynamicLeaves.interactionRange,
+          characterPushStrength: parkourParams.dynamicLeaves.pushStrength,
+          characterSwirlStrength: parkourParams.dynamicLeaves.swirlStrength,
+        });
+        dynLeaves.mesh.visible = false;
 
         // ── FLOWING LINES ──
         const flowing = createFlowingLines({
@@ -3376,6 +3403,28 @@
           label: "floor offset",
         });
 
+        const dynLeavesFolder = pane.addFolder({
+          title: "Dynamic Leaves",
+          expanded: false,
+        });
+        dynLeavesFolder.addBinding(parkourParams.dynamicLeaves, "enabled", {
+          label: "enable",
+        }).on("change", ({ value }) => {
+          dynLeaves.mesh.visible = value;
+        });
+        dynLeavesFolder.addBinding(parkourParams.dynamicLeaves, "interactionRange", {
+          min: 1, max: 20, step: 0.5,
+          label: "interact range",
+        });
+        dynLeavesFolder.addBinding(parkourParams.dynamicLeaves, "pushStrength", {
+          min: 0, max: 3, step: 0.1,
+          label: "push strength",
+        });
+        dynLeavesFolder.addBinding(parkourParams.dynamicLeaves, "swirlStrength", {
+          min: 0, max: 2, step: 0.05,
+          label: "swirl strength",
+        });
+
         const flowingFolder = pane.addFolder({
           title: "Flowing Lines",
           expanded: true,
@@ -4278,6 +4327,17 @@ moveState: ${d.moveState ?? "?"}</pre>`
           leaves.params.terrainFloorOffset =
             parkourParams.foliage.terrainFloorOffset;
           leaves.update();
+
+          // dynamic leaves — track charPos delta for velocity estimate
+          _dynLeavesCharPos.copy(charPos);
+          _dynLeavesCharVel.subVectors(charPos, _dynLeavesPrevPos).divideScalar(Math.max(dt, 0.001));
+          _dynLeavesPrevPos.copy(charPos);
+          if (parkourParams.dynamicLeaves.enabled) {
+            dynLeaves.params.characterInteractionRange = parkourParams.dynamicLeaves.interactionRange;
+            dynLeaves.params.characterPushStrength    = parkourParams.dynamicLeaves.pushStrength;
+            dynLeaves.params.characterSwirlStrength   = parkourParams.dynamicLeaves.swirlStrength;
+            dynLeaves.update(dt, elapsed);
+          }
 
           flowing.params.enabled = parkourParams.flowingLines.enabled;
           flowing.params.heightOffset = parkourParams.flowingLines.heightOffset;
