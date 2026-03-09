@@ -155,7 +155,7 @@
         createPlayerController,
         createPhysicsDebug,
       } from "./physics.js";
-      import { createPlayer } from "./player.js";
+      import { createPlayer } from "./player-parkourtsushima.js";
       import { createNpc } from "./npc.js";
       import { createEnemy } from "./enemy.js";
       import { createFloatingLeaves } from "./floating-leaves.js";
@@ -245,6 +245,14 @@
         },
         bridge1: { enabled: false },
         bridge2: { enabled: false },
+        katana: {
+          posX: -0.085,
+          posY: 0.180,
+          posZ: -0.170,
+          rotX: -1.07,
+          rotY: 1.35,
+          rotZ: -2.21,
+        },
         flowingLines: {
           enabled: false,
           lineCount: 8,
@@ -2949,6 +2957,134 @@
           step: 50,
         });
 
+        const katanaFolder = pane.addFolder({
+          title: "Katana (in hand)",
+          expanded: true,
+        });
+        katanaFolder.addBinding(parkourParams.katana, "posX", {
+          min: -0.2,
+          max: 0.2,
+          step: 0.005,
+          label: "pos X",
+        });
+        katanaFolder.addBinding(parkourParams.katana, "posY", {
+          min: -0.2,
+          max: 0.2,
+          step: 0.005,
+          label: "pos Y",
+        });
+        katanaFolder.addBinding(parkourParams.katana, "posZ", {
+          min: -0.2,
+          max: 0.2,
+          step: 0.005,
+          label: "pos Z",
+        });
+        katanaFolder.addBinding(parkourParams.katana, "rotX", {
+          min: -Math.PI * 2,
+          max: Math.PI * 2,
+          step: 0.05,
+          label: "rot X (rad)",
+        });
+        katanaFolder.addBinding(parkourParams.katana, "rotY", {
+          min: -Math.PI * 2,
+          max: Math.PI * 2,
+          step: 0.05,
+          label: "rot Y (rad)",
+        });
+        katanaFolder.addBinding(parkourParams.katana, "rotZ", {
+          min: -Math.PI * 2,
+          max: Math.PI * 2,
+          step: 0.05,
+          label: "rot Z (rad)",
+        });
+
+        const playerCameraFolder = pane.addFolder({
+          title: "Player & Camera",
+          expanded: true,
+        });
+        playerCameraFolder.addBinding(PARAMS, "cameraMode", {
+          options: { "Third person": "thirdPerson", Orbit: "orbit" },
+          label: "camera",
+        });
+        playerCameraFolder.addBinding(PARAMS, "camDist", {
+          min: 2,
+          max: 20,
+          step: 0.5,
+          label: "camera distance",
+        });
+        playerCameraFolder.addBinding(PARAMS, "camHeight", {
+          min: -2,
+          max: 3,
+          step: 0.1,
+          label: "camera height",
+        });
+        playerCameraFolder.addBinding(PARAMS, "camPitchMin", {
+          min: -1.5,
+          max: 0.5,
+          step: 0.05,
+          label: "pitch min (rad)",
+        });
+        playerCameraFolder.addBinding(PARAMS, "camPitchMax", {
+          min: 0.5,
+          max: 2,
+          step: 0.05,
+          label: "pitch max (rad)",
+        });
+        playerCameraFolder.addBinding(PARAMS, "mouseSensitivity", {
+          min: 0.0005,
+          max: 0.01,
+          step: 0.0005,
+          label: "mouse sensitivity",
+        });
+        playerCameraFolder.addBinding(PARAMS, "keyTurnSpeed", {
+          min: 0.5,
+          max: 5,
+          step: 0.1,
+          label: "key turn speed",
+        });
+        playerCameraFolder.addBinding(PARAMS, "playerSpeed", {
+          min: 1,
+          max: 8,
+          step: 0.1,
+          label: "walk speed",
+        });
+        playerCameraFolder.addBinding(PARAMS, "runSpeedMultiplier", {
+          min: 1,
+          max: 3,
+          step: 0.05,
+          label: "run multiplier",
+        });
+        playerCameraFolder.addBinding(PARAMS, "jumpSpeed", {
+          min: 2,
+          max: 12,
+          step: 0.25,
+          label: "jump speed",
+        });
+        playerCameraFolder.addBinding(PARAMS, "gravity", {
+          min: 5,
+          max: 25,
+          step: 0.5,
+          label: "gravity",
+        });
+        playerCameraFolder.addBinding(PARAMS, "glideFallSpeed", {
+          min: 1,
+          max: 8,
+          step: 0.25,
+          label: "glide fall speed",
+        });
+        playerCameraFolder.addBinding(PARAMS, "characterHeight", {
+          min: 1.5,
+          max: 3.5,
+          step: 0.05,
+          label: "character height",
+        });
+        playerCameraFolder.addBinding(PARAMS, "capsuleRadius", {
+          min: 0.2,
+          max: 0.6,
+          step: 0.01,
+          label: "capsule radius",
+        });
+
         const lightingFolder = pane.addFolder({
           title: "Lighting",
           expanded: true,
@@ -4131,6 +4267,13 @@
 
           player.update(dt);
 
+          const swordGroup = player.characterGroup.userData.sword;
+          if (swordGroup && parkourParams.katana) {
+            const k = parkourParams.katana;
+            swordGroup.position.set(k.posX, k.posY, k.posZ);
+            swordGroup.rotation.set(k.rotX, k.rotY, k.rotZ);
+          }
+
           npc.update(dt);
           for (const enemy of enemies) enemy.update(dt);
 
@@ -4376,6 +4519,11 @@ moveState: ${d.moveState ?? "?"}</pre>`
             camera.lookAt(smoothLookAt);
             orbitControls.enabled = false;
           } else {
+            orbitControls.target.set(
+              smoothCharPos.x,
+              smoothCharPos.y + 0.5,
+              smoothCharPos.z,
+            );
             orbitControls.enabled = true;
             orbitControls.update();
           }
