@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Game Water — TSL Ocean (Performance)</title>
+  <style>
+    @import url("https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap");
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #060a10; }
+    canvas { display: block; width: 100%; height: 100%; }
+    #controls {
+      position: fixed; top: 16px; right: 16px; width: 240px;
+      background: rgba(6, 10, 18, 0.92); backdrop-filter: blur(16px);
+      border: 1px solid rgba(82, 167, 247, 0.15); border-radius: 10px;
+      padding: 12px 14px; font-family: "DM Mono", monospace;
+      color: #c8daf0; font-size: 11px; z-index: 10;
+      max-height: calc(100vh - 32px); overflow-y: auto;
+    }
+    #controls h2 {
+      font-size: 11px; font-weight: 500; letter-spacing: 0.1em;
+      text-transform: uppercase; color: #52a7f7;
+      margin-bottom: 10px; padding-bottom: 6px;
+      border-bottom: 1px solid rgba(82, 167, 247, 0.2);
+    }
+    .ctrl-group { margin-bottom: 6px; }
+    .ctrl-group label {
+      display: flex; justify-content: space-between;
+      margin-bottom: 2px; color: #7a94b0; font-size: 10px;
+    }
+    .ctrl-group label span { color: #52a7f7; font-weight: 500; }
+    .ctrl-group input[type="range"] {
+      -webkit-appearance: none; width: 100%; height: 3px;
+      border-radius: 2px; background: rgba(82, 167, 247, 0.12); outline: none;
+    }
+    .ctrl-group input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 10px; height: 10px;
+      border-radius: 50%; background: #52a7f7; cursor: pointer;
+    }
+    .ctrl-group input[type="color"] {
+      -webkit-appearance: none; border: 1px solid rgba(82, 167, 247, 0.2);
+      border-radius: 4px; width: 100%; height: 20px; cursor: pointer; padding: 1px;
+    }
+    .ctrl-group select {
+      width: 100%; background: rgba(10, 16, 28, 0.95);
+      border: 1px solid rgba(82, 167, 247, 0.2); border-radius: 4px;
+      color: #c8daf0; font-family: "DM Mono", monospace;
+      font-size: 10px; padding: 4px 6px; cursor: pointer; outline: none;
+    }
+    .section-label {
+      font-size: 9px; text-transform: uppercase; letter-spacing: 0.12em;
+      color: rgba(82, 167, 247, 0.5); margin: 10px 0 4px;
+    }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.min.js",
+        "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.min.js",
+        "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.tsl.min.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="controls">
+    <h2>Game Water</h2>
+    <div class="section-label">Preset</div>
+    <div class="ctrl-group">
+      <label>Condition</label>
+      <select id="preset">
+        <option value="calm">Calm</option>
+        <option value="normal" selected>Normal</option>
+        <option value="storm">Storm</option>
+      </select>
+    </div>
+    <div class="section-label">Performance</div>
+    <div class="ctrl-group">
+      <label>Segments <span id="segmentsVal">64</span></label>
+      <input type="range" id="segments" min="32" max="256" step="32" value="64" />
+    </div>
+    <div class="section-label">Waves</div>
+    <div class="ctrl-group">
+      <label>Intensity <span id="waveAmpVal">1.0</span></label>
+      <input type="range" id="waveAmp" min="0.2" max="2" step="0.1" value="1" />
+    </div>
+    <div class="ctrl-group">
+      <label>Speed <span id="timeSpeedVal">5.0</span></label>
+      <input type="range" id="timeSpeed" min="1" max="15" step="0.5" value="5" />
+    </div>
+    <div class="section-label">Foam</div>
+    <div class="ctrl-group">
+      <label>Amount <span id="foamIntVal">0.7</span></label>
+      <input type="range" id="foamInt" min="0" max="1.2" step="0.05" value="0.7" />
+    </div>
+    <div class="ctrl-group">
+      <label>Slope foam <span id="slopeFoamVal">0.6</span></label>
+      <input type="range" id="slopeFoam" min="0" max="1" step="0.05" value="0.6" />
+    </div>
+    <div class="section-label">Look</div>
+    <div class="ctrl-group">
+      <label>Subsurface <span id="subsurfaceVal">0.4</span></label>
+      <input type="range" id="subsurface" min="0" max="1" step="0.05" value="0.4" />
+    </div>
+    <div class="ctrl-group">
+      <label>Distance smooth <span id="distSmoothVal">0.5</span></label>
+      <input type="range" id="distSmooth" min="0" max="1" step="0.1" value="0.5" />
+    </div>
+    <div class="ctrl-group">
+      <label>Water color</label>
+      <input type="color" id="waterColor" value="#52a7f7" />
+    </div>
+    <div class="section-label">Environment</div>
+    <div class="ctrl-group">
+      <label>Light</label>
+      <select id="envSource">
+        <option value="procedural" selected>Procedural</option>
+        <option value="hdri">HDRI</option>
+      </select>
+    </div>
+    <div class="ctrl-group">
+      <label>Mood</label>
+      <select id="sceneMood">
+        <option value="day" selected>Day</option>
+        <option value="sunset">Sunset</option>
+        <option value="night">Night</option>
+      </select>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from "three/webgpu";
+    import {
+      Fn, uniform, vec2, vec3, float, time, sin, cos, dot, floor, fract, mix,
+      abs, pow, normalize, cross, positionLocal, positionWorld, positionGeometry,
+      normalLocal, normalWorld, cameraPosition, Loop, max, min, smoothstep, select,
+      varying, vertexStage, oneMinus, clamp, length, exp,
+    } from "three/tsl";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+    import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
+
+    // ─── Uniforms (game-friendly defaults) ─────────────────────────────────
+    const uTimeSpeed = uniform(5.0);
+    const uWaveAmp = uniform(1.0);
+    const uWaveFreq = uniform(1.0);
+    const uWaterHeight = uniform(0.2);
+
+    const uWaterColor = uniform(new THREE.Color(0x52a7f7));
+    const uHighlight = uniform(new THREE.Color(0xb3ffff));
+    const uDeepColor = uniform(new THREE.Color(0x0a2a5c));
+    const uFoamColor = uniform(new THREE.Color(0xe8f4ff));
+    const uFresnelColor = uniform(new THREE.Color(0xaaeeff));
+
+    const uFoamThreshold = uniform(0.35);
+    const uFoamIntensity = uniform(0.7);
+    const uSlopeFoam = uniform(0.6);      // slope-based foam (steep = break)
+    const uSubsurface = uniform(0.4);     // subsurface scattering in peaks/troughs
+    const uDistSmooth = uniform(0.5);     // distance-based normal smoothing
+    const uBrightness = uniform(1.0);
+    const uOffset = uniform(0.4);
+    const uContrast = uniform(1.2);
+    const uDepthStrength = uniform(0.45);
+
+    const uSkyTop = uniform(new THREE.Color(0x1a6bc4));
+    const uSkyHorizon = uniform(new THREE.Color(0xaaccee));
+    const uSkyBottom = uniform(new THREE.Color(0x0a2a5c));
+    const uSunColor = uniform(new THREE.Color(0xffffee));
+    const uSunDir = uniform(new THREE.Vector3(0, 0.7, -0.7));
+    const uSunSize = uniform(0.04);
+    const uHaze = uniform(0.3);
+
+    // ─── Noise (4 octaves for perf) ────────────────────────────────────────
+    const hash21 = Fn(([p]) => fract(sin(dot(p, vec2(12.9898, 78.233))).mul(43758.5453)));
+    const valueNoise2D = Fn(([p_immutable]) => {
+      const p = p_immutable.toVar();
+      const i = floor(p).toVar();
+      const f = fract(p).toVar();
+      const u = f.mul(f).mul(float(3.0).sub(f.mul(2.0)));
+      const a = hash21(i);
+      const b = hash21(i.add(vec2(1.0, 0.0)));
+      const c = hash21(i.add(vec2(0.0, 1.0)));
+      const d = hash21(i.add(vec2(1.0, 1.0)));
+      return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+    });
+    const fbm = Fn(([p_immutable]) => {
+      const p = p_immutable.toVar();
+      const value = float(0.0).toVar();
+      const amp = float(1.0).toVar();
+      const freq = float(0.4).toVar();
+      const totalAmp = float(0.0).toVar();
+      Loop(4, () => {
+        value.addAssign(amp.mul(valueNoise2D(p.mul(freq))));
+        totalAmp.addAssign(amp);
+        freq.mulAssign(2.3);
+        amp.mulAssign(0.4);
+      });
+      return value.div(totalAmp);
+    });
+
+    // ─── Gerstner ─────────────────────────────────────────────────────────
+    const gerstnerWave = Fn(([pos, dirX, dirY, steepness_immutable, wavelength_immutable, t_immutable]) => {
+      const steepness = float(steepness_immutable).toVar();
+      const wavelength = float(wavelength_immutable).toVar();
+      const t = float(t_immutable).toVar();
+      const k = float(6.283185).div(wavelength);
+      const c = float(9.8).div(k).abs().sqrt();
+      const dir = normalize(vec2(float(dirX), float(dirY))).toVar();
+      const f = k.mul(dot(dir, vec2(pos.x, pos.y)).sub(c.mul(t)));
+      return vec3(
+        steepness.div(k).mul(dir.x).mul(cos(f)),
+        steepness.div(k).mul(sin(f)),
+        steepness.div(k).mul(dir.y).mul(cos(f))
+      );
+    });
+
+    const displace = Fn(([point_immutable]) => {
+      const point = point_immutable.toVar();
+      const t = time.div(uTimeSpeed).negate();
+      const pScrolled = vec2(point.x, point.y.add(t.mul(2.0)));
+      const n = vec3(0.0, 0.0, 0.0).toVar();
+      n.z.assign(fbm(pScrolled.add(t.mul(0.5))));
+      const wA = gerstnerWave(point, 0.0, -1.0, 0.5, float(2.0).div(uWaveFreq), t);
+      const wB = gerstnerWave(point, 0.0, 1.0, 0.25, float(4.0).div(uWaveFreq), t);
+      const wC = gerstnerWave(point, 1.0, 1.0, 0.15, float(6.0).div(uWaveFreq), t);
+      const wD = gerstnerWave(point, 1.0, 1.0, 0.4, float(2.0).div(uWaveFreq), t);
+      n.addAssign(vec3(wA.x, wA.z, wA.y));
+      n.addAssign(vec3(wB.x, wB.z, wB.y).mul(0.5));
+      n.addAssign(vec3(wC.x, wC.z, wC.y).mul(0.25));
+      n.addAssign(vec3(wD.x, wD.z, wD.y).mul(0.2));
+      n.mulAssign(uWaveAmp);
+      const topMask = smoothstep(float(0.0), float(0.05), point.z.add(uWaterHeight.mul(0.5)));
+      n.mulAssign(topMask);
+      return point.add(n);
+    });
+
+    const recalcNormals = Fn(([newPos, origPos, origNormal]) => {
+      const eps = float(0.002);
+      const tangent = normalize(select(
+        abs(origNormal.x).greaterThan(abs(origNormal.z)),
+        vec3(origNormal.y.negate(), origNormal.x, 0.0),
+        vec3(0.0, origNormal.z.negate(), origNormal.y)
+      )).toVar();
+      const bitangent = normalize(cross(origNormal, tangent)).toVar();
+      const dn1 = displace(origPos.add(tangent.mul(eps)));
+      const dn2 = displace(origPos.add(bitangent.mul(eps)));
+      return normalize(cross(dn1.sub(newPos), dn2.sub(newPos)));
+    });
+
+    // Distance-based normal smoothing: blend toward flat at far distance (perf + look)
+    const normalWithDistSmooth = Fn(() => {
+      const displaced = displace(positionLocal);
+      const N = recalcNormals(displaced, positionLocal, normalLocal);
+      const dist = length(cameraPosition.sub(positionWorld));
+      const flat = vec3(0.0, 1.0, 0.0);
+      const blend = smoothstep(float(8.0), float(32.0), dist).mul(uDistSmooth);
+      return normalize(mix(N, flat, blend));
+    });
+
+    const vHeightCalc = Fn(() => {
+      const pos = positionLocal.toVar();
+      return displace(pos).z.sub(pos.z);
+    });
+    const vHeight = varying(vertexStage(vHeightCalc()), "vHeight");
+    const vDisplacedPos = varying(vertexStage(Fn(() => displace(positionLocal))()), "vDisplacedPos");
+
+    // ─── Fragment: color (subsurface + slope foam + gradient + fresnel) ────
+    const colorShader = Fn(() => {
+      const h = vHeight.toVar();
+      const N = normalWorld;
+
+      const gradientWidth = float(0.5).div(max(uContrast, float(0.5)));
+      const mask = smoothstep(uOffset.sub(gradientWidth), uOffset.add(gradientWidth), h).clamp(0.0, 1.0);
+      let baseColor = mix(uWaterColor, uHighlight, mask).toVar();
+
+      const depthMask = oneMinus(smoothstep(float(-0.5), float(0.2), h)).mul(uDepthStrength);
+      baseColor.assign(mix(baseColor, uDeepColor, depthMask));
+
+      // Subsurface: blue-green tint in troughs / through wave (cheap approximation)
+      const subsurfaceTint = vec3(0.02, 0.06, 0.14);
+      const subsurfaceAmount = oneMinus(smoothstep(float(-0.3), float(0.15), h)).mul(uSubsurface);
+      baseColor.addAssign(subsurfaceTint.mul(subsurfaceAmount));
+
+      // Foam: height band × (1 + slope boost on steep = breaking wave)
+      const foamHeight = smoothstep(uFoamThreshold, uFoamThreshold.add(0.5), h);
+      const steepness = oneMinus(N.y).clamp(0.0, 1.0);
+      const slopeBoost = smoothstep(float(0.2), float(0.8), steepness).mul(uSlopeFoam);
+      const foamMask = foamHeight.mul(float(1.0).add(slopeBoost)).mul(uFoamIntensity).clamp(0.0, 1.0);
+      baseColor.assign(mix(baseColor, uFoamColor, foamMask));
+
+      baseColor.mulAssign(uBrightness);
+
+      const viewDir = normalize(cameraPosition.sub(positionWorld));
+      const NdotV = max(dot(N, viewDir), 0.0);
+      const fresnel = pow(oneMinus(NdotV), float(3.0)).mul(0.4);
+      baseColor.assign(mix(baseColor, uFresnelColor, fresnel.clamp(0.0, 1.0)));
+
+      return baseColor;
+    });
+
+    const opacityShader = Fn(() => {
+      const viewDir = normalize(cameraPosition.sub(positionWorld));
+      const NdotV = max(dot(normalWorld, viewDir), 0.0);
+      const edgeAlpha = pow(oneMinus(NdotV), float(2.0)).mul(0.35);
+      return clamp(float(1.0).add(edgeAlpha), 0.0, 1.0);
+    });
+
+    // ─── Scene ─────────────────────────────────────────────────────────────
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 5000);
+    camera.position.set(3, 4, 6);
+    camera.lookAt(0, 0, 0);
+
+    const renderer = new THREE.WebGPURenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.0;
+    document.body.appendChild(renderer.domElement);
+    await renderer.init();
+
+    const orbitControls = new OrbitControls(camera, renderer.domElement);
+    orbitControls.enableDamping = true;
+    orbitControls.dampingFactor = 0.05;
+    orbitControls.minDistance = 1;
+    orbitControls.maxDistance = 50;
+    orbitControls.target.set(0, 0, 0);
+
+    const ambientLight = new THREE.AmbientLight(0x8ab4d8, 0.6);
+    scene.add(ambientLight);
+    const sunLight = new THREE.DirectionalLight(0xfff5e0, 3.0);
+    sunLight.position.set(5, 10, 7);
+    scene.add(sunLight);
+
+    const skyGeo = new THREE.SphereGeometry(2000, 24, 24);
+    const skyMat = new THREE.MeshBasicNodeMaterial({ side: THREE.BackSide });
+    skyMat.colorNode = Fn(() => {
+      const dir = normalize(positionGeometry);
+      const y = dir.y;
+      const horizonMix = smoothstep(float(-0.05), float(0.0), y);
+      let skyGrad = mix(uSkyBottom, uSkyHorizon, horizonMix);
+      const zenithMix = smoothstep(float(0.0), float(0.6), y);
+      skyGrad = mix(skyGrad, uSkyTop, zenithMix);
+      const sunDot = max(dot(dir, normalize(uSunDir)), 0.0);
+      skyGrad = mix(skyGrad, uSunColor, smoothstep(oneMinus(uSunSize), float(1.0), sunDot));
+      const sunGlow = pow(max(sunDot, 0.0), float(8.0)).mul(0.5);
+      skyGrad = skyGrad.add(uSunColor.mul(sunGlow).mul(uHaze.add(0.3)));
+      const hazeAmount = exp(abs(y).negate().mul(4.0)).mul(uHaze);
+      return mix(skyGrad, mix(uSkyHorizon, uSunColor, float(0.2)), hazeAmount);
+    })();
+    const skyMesh = new THREE.Mesh(skyGeo, skyMat);
+    scene.add(skyMesh);
+
+    const pmremGen = new THREE.PMREMGenerator(renderer);
+    let proceduralEnvTexture = null;
+    let hdriEnvTexture = null;
+    let envSource = "procedural";
+
+    function updateEnvMap() {
+      if (waterMesh) waterMesh.visible = false;
+      if (proceduralEnvTexture) proceduralEnvTexture.dispose();
+      const rt = pmremGen.fromScene(scene, 0, 0.1, 5000);
+      proceduralEnvTexture = rt.texture;
+      if (waterMesh) waterMesh.visible = true;
+      if (envSource === "procedural") scene.environment = proceduralEnvTexture;
+    }
+
+    function applyEnvSource() {
+      if (envSource === "hdri" && hdriEnvTexture) {
+        scene.environment = hdriEnvTexture;
+        sunLight.intensity = 0;
+      } else if (proceduralEnvTexture) {
+        scene.environment = proceduralEnvTexture;
+        const m = moods[document.getElementById("sceneMood").value];
+        if (m) { sunLight.intensity = m.sunInt; sunLight.color.set(m.sunColor); }
+      }
+    }
+
+    const HDRI_URL = "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/lakeside_1k.hdr";
+    const hdrLoader = new HDRLoader();
+    hdrLoader.load(HDRI_URL, (tex) => {
+      tex.mapping = THREE.EquirectangularReflectionMapping;
+      const rt = pmremGen.fromEquirectangular(tex);
+      hdriEnvTexture = rt.texture;
+      rt.dispose();
+      if (envSource === "hdri") { scene.environment = hdriEnvTexture; sunLight.intensity = 0; }
+    }, undefined, () => updateEnvMap());
+
+    function updateSun(elevation, azimuth) {
+      const phi = THREE.MathUtils.degToRad(90 - elevation);
+      const theta = THREE.MathUtils.degToRad(azimuth);
+      const dir = new THREE.Vector3().setFromSphericalCoords(1, phi, theta);
+      uSunDir.value.copy(dir);
+      sunLight.position.copy(dir).multiplyScalar(100);
+      updateEnvMap();
+    }
+
+    const moods = {
+      day: { elevation: 45, azimuth: 180, haze: 0.3, skyTop: 0x1a6bc4, skyHorizon: 0xaaccee, skyBottom: 0x445577, sunColor: 0xffffee, ambientColor: 0x8ab4d8, ambientInt: 0.6, sunInt: 3.0, exposure: 1.0 },
+      sunset: { elevation: 5, azimuth: 200, haze: 0.6, skyTop: 0x1a2a6c, skyHorizon: 0xff8844, skyBottom: 0x220a00, sunColor: 0xffaa44, ambientColor: 0xcc8866, ambientInt: 0.4, sunInt: 4.0, exposure: 0.85 },
+      night: { elevation: -5, azimuth: 180, haze: 0.05, skyTop: 0x040810, skyHorizon: 0x0a1428, skyBottom: 0x020408, sunColor: 0x8899bb, ambientColor: 0x1a2a44, ambientInt: 0.3, sunInt: 0.3, exposure: 0.5 },
+    };
+
+    function setMood(name) {
+      const m = moods[name];
+      if (!m) return;
+      uSkyTop.value.set(m.skyTop);
+      uSkyHorizon.value.set(m.skyHorizon);
+      uSkyBottom.value.set(m.skyBottom);
+      uSunColor.value.set(m.sunColor);
+      uHaze.value = m.haze;
+      ambientLight.color.set(m.ambientColor);
+      ambientLight.intensity = m.ambientInt;
+      sunLight.intensity = m.sunInt;
+      sunLight.color.set(m.sunColor);
+      renderer.toneMappingExposure = m.exposure;
+      updateSun(m.elevation, m.azimuth);
+      if (envSource === "hdri") sunLight.intensity = 0;
+    }
+
+    const presets = {
+      calm: { waveAmp: 0.4, timeSpeed: 3, foamInt: 0.3, slopeFoam: 0.3, subsurface: 0.5, distSmooth: 0.7 },
+      normal: { waveAmp: 1.0, timeSpeed: 5, foamInt: 0.7, slopeFoam: 0.6, subsurface: 0.4, distSmooth: 0.5 },
+      storm: { waveAmp: 1.8, timeSpeed: 10, foamInt: 1.0, slopeFoam: 0.9, subsurface: 0.25, distSmooth: 0.3 },
+    };
+
+    function applyPreset(name) {
+      const p = presets[name];
+      if (!p) return;
+      uWaveAmp.value = p.waveAmp;
+      uTimeSpeed.value = p.timeSpeed;
+      uFoamIntensity.value = p.foamInt;
+      uSlopeFoam.value = p.slopeFoam;
+      uSubsurface.value = p.subsurface;
+      uDistSmooth.value = p.distSmooth;
+      document.getElementById("waveAmp").value = p.waveAmp;
+      document.getElementById("timeSpeed").value = p.timeSpeed;
+      document.getElementById("foamInt").value = p.foamInt;
+      document.getElementById("slopeFoam").value = p.slopeFoam;
+      document.getElementById("subsurface").value = p.subsurface;
+      document.getElementById("distSmooth").value = p.distSmooth;
+      document.getElementById("waveAmpVal").textContent = p.waveAmp.toFixed(1);
+      document.getElementById("timeSpeedVal").textContent = p.timeSpeed.toFixed(1);
+      document.getElementById("foamIntVal").textContent = p.foamInt.toFixed(2);
+      document.getElementById("slopeFoamVal").textContent = p.slopeFoam.toFixed(2);
+      document.getElementById("subsurfaceVal").textContent = p.subsurface.toFixed(2);
+      document.getElementById("distSmoothVal").textContent = p.distSmooth.toFixed(2);
+    }
+
+    let waterMesh;
+
+    function createWater() {
+      if (waterMesh) {
+        scene.remove(waterMesh);
+        waterMesh.geometry.dispose();
+        waterMesh.material.dispose();
+      }
+      const seg = Math.max(32, Math.min(256, Math.round(parseFloat(document.getElementById("segments").value) || 64)));
+      document.getElementById("segments").value = seg;
+      document.getElementById("segmentsVal").textContent = seg;
+      const geometry = new THREE.BoxGeometry(8, 8, 0.2, seg, seg, 1);
+      const material = new THREE.MeshPhysicalNodeMaterial({
+        side: THREE.DoubleSide,
+        transparent: true,
+        roughness: 0.15,
+        metalness: 0.05,
+        clearcoat: 0.25,
+        clearcoatRoughness: 0.2,
+      });
+      material.positionNode = Fn(() => displace(positionLocal))();
+      material.normalNode = normalWithDistSmooth();
+      material.colorNode = colorShader();
+      material.opacityNode = opacityShader();
+
+      waterMesh = new THREE.Mesh(geometry, material);
+      waterMesh.rotation.x = -Math.PI / 2;
+      scene.add(waterMesh);
+      updateEnvMap();
+    }
+
+    setMood("day");
+    createWater();
+
+    function bindSlider(id, valId, cb) {
+      const el = document.getElementById(id);
+      const valEl = document.getElementById(valId);
+      el.addEventListener("input", () => {
+        const v = parseFloat(el.value);
+        valEl.textContent = v.toFixed(2);
+        cb(v);
+      });
+    }
+
+    document.getElementById("preset").addEventListener("change", (e) => applyPreset(e.target.value));
+    document.getElementById("segments").addEventListener("input", () => createWater());
+    bindSlider("waveAmp", "waveAmpVal", (v) => { uWaveAmp.value = v; });
+    bindSlider("timeSpeed", "timeSpeedVal", (v) => { uTimeSpeed.value = v; });
+    bindSlider("foamInt", "foamIntVal", (v) => { uFoamIntensity.value = v; });
+    bindSlider("slopeFoam", "slopeFoamVal", (v) => { uSlopeFoam.value = v; });
+    bindSlider("subsurface", "subsurfaceVal", (v) => { uSubsurface.value = v; });
+    bindSlider("distSmooth", "distSmoothVal", (v) => { uDistSmooth.value = v; });
+    document.getElementById("waterColor").addEventListener("input", (e) => uWaterColor.value.set(e.target.value));
+
+    document.getElementById("envSource").addEventListener("change", (e) => {
+      envSource = e.target.value;
+      applyEnvSource();
+    });
+    document.getElementById("sceneMood").addEventListener("change", (e) => setMood(e.target.value));
+
+    window.addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    function animate() {
+      requestAnimationFrame(animate);
+      orbitControls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+  </script>
+</body>
+</html>

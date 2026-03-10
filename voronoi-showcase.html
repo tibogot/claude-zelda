@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Voronoi / Worley Noise — Edge vs Blob</title>
+  <style>
+    @import url("https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap");
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: auto; background: #0a0a0a; display: flex; align-items: center; justify-content: center; }
+    #view {
+      width: min(80vmin, 640px);
+      aspect-ratio: 1;
+      max-width: 100%;
+      flex-shrink: 0;
+      background: #111;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 0 0 1px rgba(120, 180, 255, 0.15);
+    }
+    #view canvas { display: block; width: 100%; height: 100%; }
+    #controls {
+      position: fixed; top: 16px; left: 16px; width: 280px;
+      background: rgba(10, 10, 18, 0.95); backdrop-filter: blur(12px);
+      border: 1px solid rgba(120, 180, 255, 0.2); border-radius: 10px;
+      padding: 14px 16px; font-family: "DM Mono", monospace;
+      color: #c8daf0; font-size: 11px; z-index: 10;
+      max-height: calc(100vh - 32px); overflow-y: auto;
+    }
+    #controls h2 {
+      font-size: 11px; font-weight: 500; letter-spacing: 0.1em;
+      text-transform: uppercase; color: #78b4ff;
+      margin-bottom: 12px; padding-bottom: 6px;
+      border-bottom: 1px solid rgba(120, 180, 255, 0.2);
+    }
+    .ctrl-group { margin-bottom: 10px; }
+    .ctrl-group label {
+      display: flex; justify-content: space-between;
+      margin-bottom: 2px; color: #8a9ab0; font-size: 10px;
+    }
+    .ctrl-group label span { color: #78b4ff; font-weight: 500; }
+    .ctrl-group input[type="range"] {
+      appearance: none; -webkit-appearance: none; width: 100%; height: 4px;
+      border-radius: 2px; background: rgba(120, 180, 255, 0.15); outline: none;
+    }
+    .ctrl-group input[type="range"]::-webkit-slider-thumb {
+      appearance: none; -webkit-appearance: none; width: 12px; height: 12px;
+      border-radius: 50%; background: #78b4ff; cursor: pointer;
+    }
+    .ctrl-group select {
+      width: 100%; background: rgba(15, 20, 35, 0.95);
+      border: 1px solid rgba(120, 180, 255, 0.25); border-radius: 6px;
+      color: #e0e8f0; font-family: "DM Mono", monospace;
+      font-size: 11px; padding: 6px 8px; cursor: pointer; outline: none;
+    }
+    .section-label {
+      font-size: 9px; text-transform: uppercase; letter-spacing: 0.12em;
+      color: rgba(120, 180, 255, 0.5); margin: 14px 0 6px;
+    }
+    .hint { font-size: 9px; color: #6a7a90; margin-top: 4px; line-height: 1.4; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.min.js",
+        "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.min.js",
+        "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.tsl.min.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="controls">
+    <h2>Voronoi / Worley</h2>
+    <p class="hint">Shape F1/F2 and edge for caustics-style foam. Export settings for reuse.</p>
+    <div class="section-label">Display mode</div>
+    <div class="ctrl-group">
+      <label>Mode</label>
+      <select id="mode">
+        <option value="cloud" selected>Cloud (FBM noise)</option>
+        <option value="foam">Foam (Voronoi layers)</option>
+        <option value="f1">F1 (min dist)</option>
+        <option value="f2">F2 (2nd min)</option>
+        <option value="f2mf1">F2 − F1 (edges)</option>
+        <option value="edge">Edge (smoothstep on F1)</option>
+        <option value="blob">Blob (cells bright)</option>
+      </select>
+    </div>
+    <p class="hint">Cloud = value noise + FBM (wispy). Foam = Voronoi layers. Others = raw Voronoi.</p>
+    <div class="section-label">Scale &amp; offset</div>
+    <div class="ctrl-group">
+      <label>Scale <span id="scaleVal">8.5</span></label>
+      <input type="range" id="scale" min="1" max="30" step="0.1" value="8.5" />
+    </div>
+    <div class="ctrl-group">
+      <label>Jitter <span id="jitterVal">1</span></label>
+      <input type="range" id="jitter" min="0" max="1" step="0.05" value="1" />
+    </div>
+    <div class="ctrl-group">
+      <label>Offset X <span id="offsetXVal">0</span></label>
+      <input type="range" id="offsetX" min="-5" max="5" step="0.1" value="0" />
+    </div>
+    <div class="ctrl-group">
+      <label>Offset Y <span id="offsetYVal">0</span></label>
+      <input type="range" id="offsetY" min="-5" max="5" step="0.1" value="0" />
+    </div>
+    <div class="section-label">Edge / blob shaping</div>
+    <div class="ctrl-group">
+      <label>Edge width <span id="edgeWidthVal">0.08</span></label>
+      <input type="range" id="edgeWidth" min="0" max="0.3" step="0.005" value="0.08" />
+    </div>
+    <div class="ctrl-group">
+      <label>Edge sharpness <span id="edgeSharpVal">0.03</span></label>
+      <input type="range" id="edgeSharp" min="0.005" max="0.2" step="0.005" value="0.03" />
+    </div>
+    <div class="ctrl-group">
+      <label>F2−F1 scale <span id="diffScaleVal">4</span></label>
+      <input type="range" id="diffScale" min="0.5" max="15" step="0.5" value="4" />
+    </div>
+    <div class="section-label">Cloud (when Mode = Cloud)</div>
+    <div class="ctrl-group">
+      <label>Cloud scale <span id="cloudScaleVal">4</span></label>
+      <input type="range" id="cloudScale" min="1" max="15" step="0.5" value="4" />
+    </div>
+    <div class="ctrl-group">
+      <label>Cloud low <span id="cloudLowVal">0.35</span></label>
+      <input type="range" id="cloudLow" min="0" max="0.8" step="0.02" value="0.35" />
+    </div>
+    <div class="ctrl-group">
+      <label>Cloud high <span id="cloudHighVal">0.65</span></label>
+      <input type="range" id="cloudHigh" min="0.2" max="1" step="0.02" value="0.65" />
+    </div>
+    <div class="section-label">Foam (when Mode = Foam)</div>
+    <div class="ctrl-group">
+      <label>Warp strength <span id="warpVal">0.35</span></label>
+      <input type="range" id="warp" min="0" max="1" step="0.05" value="0.35" />
+    </div>
+    <div class="ctrl-group">
+      <label>Foam base scale <span id="foamScaleVal">6</span></label>
+      <input type="range" id="foamScale" min="1" max="20" step="0.5" value="6" />
+    </div>
+    <div class="ctrl-group">
+      <label>Layer 2× <span id="layer2Val">0.5</span></label>
+      <input type="range" id="layer2" min="0" max="1" step="0.05" value="0.5" />
+    </div>
+    <div class="ctrl-group">
+      <label>Layer 4× <span id="layer4Val">0.25</span></label>
+      <input type="range" id="layer4" min="0" max="1" step="0.05" value="0.25" />
+    </div>
+    <div class="ctrl-group">
+      <label>Smoothstep low <span id="foamLowVal">0.15</span></label>
+      <input type="range" id="foamLow" min="0" max="0.5" step="0.01" value="0.15" />
+    </div>
+    <div class="ctrl-group">
+      <label>Smoothstep high <span id="foamHighVal">0.32</span></label>
+      <input type="range" id="foamHigh" min="0.15" max="0.7" step="0.01" value="0.32" />
+    </div>
+    <div class="ctrl-group">
+      <label>Warp speed <span id="warpSpeedVal">0.4</span></label>
+      <input type="range" id="warpSpeed" min="0" max="1.5" step="0.05" value="0.4" />
+    </div>
+    <div class="section-label">Output</div>
+    <div class="ctrl-group">
+      <label>Invert</label>
+      <select id="invert">
+        <option value="0">No</option>
+        <option value="1">Yes</option>
+      </select>
+    </div>
+    <div class="ctrl-group">
+      <label>Animate time</label>
+      <select id="animate">
+        <option value="0">Off</option>
+        <option value="1">On</option>
+      </select>
+    </div>
+  </div>
+  <div id="view"></div>
+
+  <script type="module">
+    import * as THREE from "three/webgpu";
+    import {
+      Fn, uniform, vec2, vec3, float, time, floor, fract, length, min, max, smoothstep,
+      positionLocal, oneMinus, If, mix, sin, dot, sub,
+    } from "three/tsl";
+
+    const uScale = uniform(8.5);
+    const uOffsetX = uniform(0.0);
+    const uOffsetY = uniform(0.0);
+    const uTimeAnim = uniform(0.0);
+    const uJitter = uniform(1.0);
+    const uMode = uniform(6); // 6 cloud, 5 foam, 0 f1, 1 f2, 2 f2mf1, 3 edge, 4 blob
+    const uEdgeWidth = uniform(0.08);
+    const uEdgeSharp = uniform(0.03);
+    const uDiffScale = uniform(4.0);
+    const uInvert = uniform(0.0);
+    const uWarpStrength = uniform(0.35);
+    const uFoamScale = uniform(6.0);
+    const uLayer2 = uniform(0.5);
+    const uLayer4 = uniform(0.25);
+    const uFoamLow = uniform(0.15);
+    const uFoamHigh = uniform(0.32);
+    const uWarpSpeed = uniform(0.4);
+    const uCloudScale = uniform(4.0);
+    const uCloudLow = uniform(0.35);
+    const uCloudHigh = uniform(0.65);
+
+    const NEIGHBORS = [[-1,-1],[0,-1],[1,-1],[-1,0],[0,0],[1,0],[-1,1],[0,1],[1,1]];
+
+    // Value noise (smooth interpolated hash) — for wispy FBM clouds, not Voronoi
+    const hash12 = Fn(([p]) =>
+      fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453))
+    );
+    const valueNoise = Fn(([p_in]) => {
+      const p = vec2(p_in);
+      const i = floor(p);
+      const f = fract(p);
+      const u = f.mul(f).mul(sub(3.0, f.mul(2.0)));
+      return mix(
+        mix(hash12(i), hash12(i.add(vec2(1, 0))), u.x),
+        mix(hash12(i.add(vec2(0, 1))), hash12(i.add(vec2(1, 1))), u.x),
+        u.y
+      );
+    });
+    const fbmCloud = Fn(([p_immutable]) => {
+      const p = p_immutable.toVar();
+      const n = valueNoise(p).toVar();
+      n.addAssign(valueNoise(p.mul(2.07)).mul(0.5));
+      n.addAssign(valueNoise(p.mul(4.31)).mul(0.25));
+      n.addAssign(valueNoise(p.mul(8.73)).mul(0.125));
+      n.addAssign(valueNoise(p.mul(17.17)).mul(0.0625));
+      return n;
+    });
+
+    const worleyF1F2 = Fn(([p_immutable, jitter_immutable]) => {
+      const p = p_immutable.toVar();
+      const jitter = jitter_immutable.toVar();
+      const ip = floor(p).toVar();
+      const fp = fract(p).toVar();
+      const d1 = float(10.0).toVar();
+      const d2 = float(10.0).toVar();
+
+      for (const [nx, ny] of NEIGHBORS) {
+        const cellOffset = vec2(float(nx), float(ny));
+        const cellPos = ip.add(cellOffset);
+        const h = vec2(
+          fract(sin(dot(cellPos, vec2(127.1, 311.7))).mul(43758.5453)),
+          fract(sin(dot(cellPos, vec2(269.5, 183.3))).mul(43758.5453))
+        );
+        const pt = mix(vec2(0.5, 0.5), h, jitter);
+        const toPoint = cellOffset.add(pt).sub(fp);
+        const dist = length(toPoint);
+        If(dist.lessThan(d1), () => {
+          d2.assign(d1);
+          d1.assign(dist);
+        }).ElseIf(dist.lessThan(d2), () => {
+          d2.assign(dist);
+        });
+      }
+      return vec2(d1, d2);
+    });
+
+    const domainWarp = Fn(([p_immutable]) => {
+      const p = p_immutable.toVar();
+      const t = time.mul(uWarpSpeed);
+      const w = vec2(
+        sin(p.y.mul(2).add(t)),
+        sin(p.x.mul(2).sub(t.mul(0.8)))
+      );
+      return p.add(w.mul(uWarpStrength));
+    });
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    camera.position.set(0, 0, 1);
+    camera.lookAt(0, 0, 0);
+
+    const viewEl = document.getElementById("view");
+    const renderer = new THREE.WebGPURenderer({ antialias: true });
+    viewEl.appendChild(renderer.domElement);
+    await renderer.init();
+
+    function setViewSize() {
+      const rect = viewEl.getBoundingClientRect();
+      const size = Math.max(1, Math.min(Math.floor(rect.width), Math.floor(rect.height)));
+      renderer.setSize(size, size);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      camera.left = -1;
+      camera.right = 1;
+      camera.top = 1;
+      camera.bottom = -1;
+      camera.near = 0;
+      camera.far = 1;
+      camera.updateProjectionMatrix();
+    }
+    requestAnimationFrame(() => setViewSize());
+    const ro = new ResizeObserver(() => setViewSize());
+    ro.observe(viewEl);
+
+    const geo = new THREE.PlaneGeometry(2, 2);
+    const mat = new THREE.MeshBasicNodeMaterial({
+      side: THREE.DoubleSide,
+      transparent: false,
+    });
+
+    mat.colorNode = Fn(() => {
+      const uv = positionLocal.xy.mul(0.5).add(0.5);
+      const pBase = uv.mul(uScale).add(vec2(uOffsetX, uOffsetY)).add(vec2(time.mul(uTimeAnim).mul(0.15), float(0.0)));
+
+      const pFoam = uv.mul(uFoamScale).add(vec2(uOffsetX, uOffsetY)).add(vec2(time.mul(uTimeAnim).mul(0.15), float(0.0)));
+      const pWarped = domainWarp(pFoam);
+      const F1_1 = worleyF1F2(pWarped, uJitter).x;
+      const F1_2 = worleyF1F2(pWarped.mul(2), uJitter).x;
+      const F1_4 = worleyF1F2(pWarped.mul(4), uJitter).x;
+      const vFoam = F1_1.add(F1_2.mul(uLayer2)).add(F1_4.mul(uLayer4));
+      const gFoam = smoothstep(uFoamLow, uFoamHigh, vFoam);
+
+      const pCloud = uv.mul(uCloudScale).add(vec2(uOffsetX, uOffsetY)).add(vec2(time.mul(uTimeAnim).mul(0.12), float(0.0)));
+      const pCloudWarped = domainWarp(pCloud);
+      const nCloud = fbmCloud(pCloudWarped);
+      const gCloud = smoothstep(uCloudLow, uCloudHigh, nCloud);
+
+      const F1F2 = worleyF1F2(pBase, uJitter);
+      const F1 = F1F2.x;
+      const F2 = F1F2.y;
+      const F2mF1 = F2.sub(F1);
+
+      let g = float(0.0);
+      If(uMode.equal(6), () => { g.assign(gCloud); });
+      If(uMode.equal(5), () => { g.assign(gFoam); });
+      If(uMode.equal(0), () => { g.assign(F1); });
+      If(uMode.equal(1), () => { g.assign(F2); });
+      If(uMode.equal(2), () => { g.assign(F2mF1.mul(uDiffScale).clamp(0.0, 1.0)); });
+      If(uMode.equal(3), () => {
+        g.assign(oneMinus(smoothstep(uEdgeWidth, uEdgeWidth.add(uEdgeSharp), F1)));
+      });
+      If(uMode.equal(4), () => {
+        g.assign(oneMinus(smoothstep(float(0.0), uEdgeWidth.add(uEdgeSharp), F1)));
+      });
+
+      g.assign(mix(g, float(1.0).sub(g), uInvert));
+      return vec3(g, g, g);
+    })();
+
+    const mesh = new THREE.Mesh(geo, mat);
+    scene.add(mesh);
+
+    function bindSlider(id, valId, cb, scale = 1) {
+      const el = document.getElementById(id);
+      const valEl = document.getElementById(valId);
+      if (!el || !valEl) return;
+      el.addEventListener("input", () => {
+        const v = parseFloat(el.value) * scale;
+        valEl.textContent = scale !== 1 ? v.toFixed(3) : el.value;
+        cb(v);
+      });
+    }
+
+    document.getElementById("mode").addEventListener("change", (e) => {
+      const map = { cloud: 6, foam: 5, f1: 0, f2: 1, f2mf1: 2, edge: 3, blob: 4 };
+      uMode.value = map[e.target.value];
+    });
+
+    bindSlider("scale", "scaleVal", (v) => { uScale.value = v; }, 1);
+    document.getElementById("scale").dispatchEvent(new Event("input"));
+    bindSlider("jitter", "jitterVal", (v) => { uJitter.value = v; });
+    document.getElementById("jitter").dispatchEvent(new Event("input"));
+
+    document.getElementById("offsetX").addEventListener("input", (e) => {
+      const v = parseFloat(e.target.value);
+      document.getElementById("offsetXVal").textContent = v;
+      uOffsetX.value = v;
+    });
+    document.getElementById("offsetY").addEventListener("input", (e) => {
+      const v = parseFloat(e.target.value);
+      document.getElementById("offsetYVal").textContent = v;
+      uOffsetY.value = v;
+    });
+
+    bindSlider("edgeWidth", "edgeWidthVal", (v) => { uEdgeWidth.value = v; });
+    document.getElementById("edgeWidth").dispatchEvent(new Event("input"));
+    bindSlider("edgeSharp", "edgeSharpVal", (v) => { uEdgeSharp.value = v; });
+    document.getElementById("edgeSharp").dispatchEvent(new Event("input"));
+    bindSlider("diffScale", "diffScaleVal", (v) => { uDiffScale.value = v; }, 1);
+    document.getElementById("diffScale").dispatchEvent(new Event("input"));
+
+    bindSlider("cloudScale", "cloudScaleVal", (v) => { uCloudScale.value = v; });
+    bindSlider("cloudLow", "cloudLowVal", (v) => { uCloudLow.value = v; });
+    bindSlider("cloudHigh", "cloudHighVal", (v) => { uCloudHigh.value = v; });
+    ["cloudScale", "cloudLow", "cloudHigh"].forEach(id =>
+      document.getElementById(id)?.dispatchEvent(new Event("input")));
+    bindSlider("warp", "warpVal", (v) => { uWarpStrength.value = v; });
+    bindSlider("foamScale", "foamScaleVal", (v) => { uFoamScale.value = v; });
+    bindSlider("layer2", "layer2Val", (v) => { uLayer2.value = v; });
+    bindSlider("layer4", "layer4Val", (v) => { uLayer4.value = v; });
+    bindSlider("foamLow", "foamLowVal", (v) => { uFoamLow.value = v; });
+    bindSlider("foamHigh", "foamHighVal", (v) => { uFoamHigh.value = v; });
+    bindSlider("warpSpeed", "warpSpeedVal", (v) => { uWarpSpeed.value = v; });
+    ["warp", "foamScale", "layer2", "layer4", "foamLow", "foamHigh", "warpSpeed"].forEach(id =>
+      document.getElementById(id)?.dispatchEvent(new Event("input")));
+
+    document.getElementById("invert").addEventListener("change", (e) => {
+      uInvert.value = parseInt(e.target.value, 10);
+    });
+    document.getElementById("animate").addEventListener("change", (e) => {
+      uTimeAnim.value = parseInt(e.target.value, 10);
+    });
+
+    window.addEventListener("resize", () => setViewSize());
+
+    function animate() {
+      requestAnimationFrame(animate);
+      renderer.render(scene, camera);
+    }
+    animate();
+  </script>
+</body>
+</html>
