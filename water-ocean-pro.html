@@ -133,6 +133,23 @@
       <label>Cross Waves <span id="crossWaveVal">0.0</span> <small style="color:#7a94b0">(0=calm 1=storm)</small></label>
       <input type="range" id="crossWave" min="0" max="1" step="0.01" value="0.0" />
     </div>
+    <div class="section-label">Noise displacement (FBM)</div>
+    <div class="toggle-row">
+      <span>Enable FBM height</span>
+      <div class="toggle on" id="fbmDispToggle"></div>
+    </div>
+    <div class="ctrl-group">
+      <label>FBM Amount <span id="fbmDispAmountVal">1.00</span></label>
+      <input type="range" id="fbmDispAmount" min="0" max="2" step="0.05" value="1.0" />
+    </div>
+    <div class="ctrl-group">
+      <label>FBM Scale <span id="fbmDispScaleVal">1.00</span> <small style="color:#7a94b0">(size of bumps)</small></label>
+      <input type="range" id="fbmDispScale" min="0.2" max="3" step="0.05" value="1.0" />
+    </div>
+    <div class="ctrl-group">
+      <label>FBM Speed <span id="fbmDispSpeedVal">0.50</span></label>
+      <input type="range" id="fbmDispSpeed" min="0" max="2" step="0.05" value="0.5" />
+    </div>
     <div class="section-label">Secondary Swell</div>
     <div class="ctrl-group">
       <label>Swell 2 Direction <span id="swell2DirVal">90</span>°</label>
@@ -481,6 +498,13 @@
       </select>
     </div>
     <div class="ctrl-group">
+      <label>Scene BG</label>
+      <select id="sceneBg">
+        <option value="procedural" selected>Procedural sky</option>
+        <option value="animestyled">animestyled HDR</option>
+      </select>
+    </div>
+    <div class="ctrl-group">
       <label>Scene Mood</label>
       <select id="sceneMood">
         <option value="day" selected>Day</option>
@@ -602,6 +626,11 @@
     const uSwell2Dir = uniform(Math.PI * 0.5); // 90° from primary by default
     const uSwell2Amp = uniform(0.0);            // 0 = off
     const uSwell2Freq = uniform(1.0);
+    // Value-noise FBM displacement (organic height layer on top of Gerstner)
+    const uFbmDispEnabled = uniform(1.0);
+    const uFbmDispAmount = uniform(1.0);
+    const uFbmDispScale = uniform(1.0);
+    const uFbmDispSpeed = uniform(0.5);
     // Micro-ripples (normal perturbation only, no geometry)
     const uRippleStrength = uniform(0.0);
     const uRippleScale = uniform(12.0);
@@ -629,6 +658,9 @@
     // Depth-based opacity
     const uDepthOpacity = uniform(0.0);
     const uFloorDepthAbs = uniform(3.0);  // abs(floorDepthValue), updated by slider
+
+    // Shared time for displace + floating object sync (set each frame from Clock)
+    const uTime = uniform(0.0);
 
     // ─── Noise ────────────────────────────────────────────────────────────
     const hash21 = Fn(([p]) => fract(sin(dot(p, vec2(12.9898, 78.233))).mul(43758.5453)));
@@ -733,10 +765,11 @@
 
     const displace = Fn(([point_immutable]) => {
       const point = point_immutable.toVar();
-      const t = time.div(uTimeSpeed).negate();
+      const t = uTime.div(uTimeSpeed).negate();
       const pScrolled = vec2(point.x, point.y.add(t.mul(2.0)));
       const n = vec3(0.0, 0.0, 0.0).toVar();
-      n.z.assign(fbm(pScrolled.add(t.mul(0.5))));
+      const fbmVal = fbm(pScrolled.mul(uFbmDispScale).add(t.mul(uFbmDispSpeed)));
+      n.z.assign(fbmVal.mul(uFbmDispAmount).mul(uFbmDispEnabled));
       // Primary swell — two coherent waves in the same direction (uWaveDir)
       const dA = uWaveDir;
       const dB = uWaveDir.add(float(0.12));
@@ -996,6 +1029,8 @@
     let proceduralEnvTexture = null;
     let hdriEnvTexture = null;
     let envSource = "procedural";
+    let sceneBgSource = "procedural";
+    let animestyledBgTexture = null;
 
     function updateEnvMap() {
       if (waterMesh) waterMesh.visible = false;
@@ -1018,6 +1053,16 @@
       }
     }
 
+    function applySceneBg() {
+      if (sceneBgSource === "animestyled" && animestyledBgTexture) {
+        scene.background = animestyledBgTexture;
+        skyMesh.visible = false;
+      } else {
+        scene.background = new THREE.Color(0x060a10);
+        skyMesh.visible = true;
+      }
+    }
+
     const HDRI_URL = "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/lakeside_1k.hdr";
     const hdrLoader = new HDRLoader();
     hdrLoader.load(HDRI_URL, (tex) => {
@@ -1029,6 +1074,14 @@
     }, undefined, (err) => {
       console.warn("HDRI failed, using procedural:", err);
       updateEnvMap();
+    });
+
+    hdrLoader.load("textures/animestyled_hdr.hdr", (tex) => {
+      tex.mapping = THREE.EquirectangularReflectionMapping;
+      animestyledBgTexture = tex;
+      applySceneBg();
+    }, undefined, (err) => {
+      console.warn("animestyled HDR failed:", err);
     });
 
     function updateSun(elevation, azimuth) {
@@ -1179,6 +1232,103 @@
     createWater();
     createFloor();
 
+    // ─── Floating object: sample wave height/normal in JS (same math as shader) ───
+    function fractJs(x) { return x - Math.floor(x); }
+    function waveSamplerHash21(wx, wy) { return fractJs(Math.sin(wx * 12.9898 + wy * 78.233) * 43758.5453); }
+    function waveSamplerValueNoise2D(px, py) {
+      const ix = Math.floor(px), iy = Math.floor(py);
+      const fx = fractJs(px), fy = fractJs(py);
+      const u = fx * fx * (3 - 2 * fx), v = fy * fy * (3 - 2 * fy);
+      const a = waveSamplerHash21(ix, iy), b = waveSamplerHash21(ix + 1, iy), c = waveSamplerHash21(ix, iy + 1), d = waveSamplerHash21(ix + 1, iy + 1);
+      return (1 - u) * (1 - v) * a + u * (1 - v) * b + (1 - u) * v * c + u * v * d;
+    }
+    function waveSamplerFbm(px, py) {
+      let value = 0, amp = 1, freq = 0.4, totalAmp = 0;
+      for (let i = 0; i < 5; i++) {
+        value += amp * waveSamplerValueNoise2D(px * freq, py * freq);
+        totalAmp += amp;
+        freq *= 2.3;
+        amp *= 0.4;
+      }
+      return value / totalAmp;
+    }
+    function waveSamplerGerstner(px, py, dirX, dirY, steepness, wavelength, t) {
+      const k = 6.283185 / wavelength;
+      const c = Math.sqrt(9.8 / Math.abs(k));
+      const len = Math.sqrt(dirX * dirX + dirY * dirY) || 1;
+      const dx = dirX / len, dy = dirY / len;
+      const f = k * ((dx * px + dy * py) - c * t);
+      const cosf = Math.cos(f), sinf = Math.sin(f);
+      return {
+        x: (steepness / k) * dx * cosf,
+        y: (steepness / k) * dy * cosf,
+        z: (steepness / k) * sinf
+      };
+    }
+    function getWaterDisplacementAt(worldX, worldZ, timeSec) {
+      const t = -timeSec / uTimeSpeed.value;
+      const pScrolledX = worldX;
+      const pScrolledY = worldZ + t * 2;
+      const fbmInX = pScrolledX * uFbmDispScale.value + t * uFbmDispSpeed.value;
+      const fbmInY = pScrolledY * uFbmDispScale.value + t * uFbmDispSpeed.value;
+      let nx = 0, ny = 0, nz = waveSamplerFbm(fbmInX, fbmInY) * uFbmDispAmount.value * uFbmDispEnabled.value;
+      const waveDir = uWaveDir.value;
+      const cosA = Math.cos(waveDir), sinA = Math.sin(waveDir);
+      let w = waveSamplerGerstner(worldX, worldZ, cosA, sinA, 0.55 * uWaveSteepness.value, 2.5 / uWaveFreq.value, t);
+      nx += w.x; ny += w.y; nz += w.z;
+      w = waveSamplerGerstner(worldX, worldZ, Math.cos(waveDir + 0.12), Math.sin(waveDir + 0.12), 0.28 * uWaveSteepness.value, 1.8 / uWaveFreq.value, t);
+      nx += w.x * 0.5; ny += w.y * 0.5; nz += w.z * 0.5;
+      const s2 = uSwell2Dir.value;
+      w = waveSamplerGerstner(worldX, worldZ, Math.cos(s2), Math.sin(s2), 0.45 * uWaveSteepness.value, 2.0 / uSwell2Freq.value, t);
+      nx += w.x * uSwell2Amp.value; ny += w.y * uSwell2Amp.value; nz += w.z * uSwell2Amp.value;
+      w = waveSamplerGerstner(worldX, worldZ, Math.cos(s2 + 0.1), Math.sin(s2 + 0.1), 0.22 * uWaveSteepness.value, 1.3 / uSwell2Freq.value, t);
+      nx += w.x * uSwell2Amp.value * 0.5; ny += w.y * uSwell2Amp.value * 0.5; nz += w.z * uSwell2Amp.value * 0.5;
+      const crossAmt = uCrossWaveAmt.value;
+      if (crossAmt > 0) {
+        const dirs = [
+          [Math.PI * 0.5, 0.35], [Math.PI * 0.35, 0.22], [-Math.PI * 0.3, 0.18], [Math.PI * 0.75, 0.14]
+        ];
+        const wl = [1.5, 0.9, 0.65, 0.45];
+        const mult = [0.55, 0.38, 0.30, 0.22];
+        for (let i = 0; i < 4; i++) {
+          const d = waveDir + dirs[i][0];
+          w = waveSamplerGerstner(worldX, worldZ, Math.cos(d), Math.sin(d), dirs[i][1] * uWaveSteepness.value, wl[i] / uWaveFreq.value, t);
+          nx += w.x * mult[i] * crossAmt; ny += w.y * mult[i] * crossAmt; nz += w.z * mult[i] * crossAmt;
+        }
+      }
+      nz *= uWaveAmp.value;
+      nx *= uWaveAmp.value;
+      ny *= uWaveAmp.value;
+      const topMask = Math.max(0, Math.min(1, (uWaterHeight.value * 0.5) / 0.05));
+      nz *= topMask; nx *= topMask; ny *= topMask;
+      return { nx, ny, nz };
+    }
+    function getWaterHeightAt(worldX, worldZ, timeSec) {
+      const d = getWaterDisplacementAt(worldX, worldZ, timeSec);
+      return d.nz;
+    }
+    function getWaterNormalAt(worldX, worldZ, timeSec, eps = 0.04) {
+      const h0 = getWaterHeightAt(worldX, worldZ, timeSec);
+      const hx = getWaterHeightAt(worldX + eps, worldZ, timeSec);
+      const hz = getWaterHeightAt(worldX, worldZ + eps, timeSec);
+      const nx = -(hx - h0) / eps, nz = -(hz - h0) / eps;
+      const len = Math.sqrt(nx * nx + nz * nz + 1);
+      return { x: nx / len, y: 1 / len, z: nz / len };
+    }
+
+    const floatObject = new THREE.Mesh(
+      new THREE.BoxGeometry(0.2, 0.06, 0.12),
+      new THREE.MeshStandardMaterial({ color: 0x8b4513, roughness: 0.9, metalness: 0 })
+    );
+    floatObject.position.set(1.5, 0, 0.5);
+    floatObject.userData.baseX = 1.5;
+    floatObject.userData.baseZ = 0.5;
+    floatObject.castShadow = true;
+    floatObject.receiveShadow = true;
+    scene.add(floatObject);
+
+    const _timerStart = performance.now() * 0.001;
+
     function bindSlider(id, valId, cb) {
       const el = document.getElementById(id);
       const valEl = document.getElementById(valId);
@@ -1219,6 +1369,10 @@
     });
     bindSlider("waveSteep",  "waveSteepVal",  (v) => uWaveSteepness.value = v);
     bindSlider("crossWave",  "crossWaveVal",  (v) => uCrossWaveAmt.value = v);
+    bindToggle("fbmDispToggle", (v) => uFbmDispEnabled.value = v);
+    bindSlider("fbmDispAmount", "fbmDispAmountVal", (v) => uFbmDispAmount.value = v);
+    bindSlider("fbmDispScale",   "fbmDispScaleVal",   (v) => uFbmDispScale.value = v);
+    bindSlider("fbmDispSpeed",   "fbmDispSpeedVal",   (v) => uFbmDispSpeed.value = v);
     document.getElementById("swell2Dir").addEventListener("input", (e) => {
       const deg = parseFloat(e.target.value);
       document.getElementById("swell2DirVal").textContent = deg;
@@ -1286,6 +1440,10 @@
     bindSlider("depthOpacity", "depthOpacityVal", (v) => uDepthOpacity.value = v);
     document.getElementById("deepColor").addEventListener("input", (e) => uDeepColor.value.set(e.target.value));
     document.getElementById("envSource").addEventListener("change", (e) => { envSource = e.target.value; applyEnvSource(); });
+    document.getElementById("sceneBg").addEventListener("change", (e) => {
+      sceneBgSource = e.target.value;
+      applySceneBg();
+    });
     document.getElementById("sceneMood").addEventListener("change", (e) => setMood(e.target.value));
     bindToggle("cloudsToggle", (v) => uCloudsEnabled.value = v);
     document.getElementById("sunEl").addEventListener("input", (e) => {
@@ -1338,6 +1496,26 @@
     });
     function animate() {
       requestAnimationFrame(animate);
+      const timeSec = (performance.now() * 0.001) - _timerStart;
+      uTime.value = timeSec;
+      const baseX = floatObject.userData.baseX;
+      const baseZ = floatObject.userData.baseZ;
+      // Use full wave displacement (same as water shader). Scale so cube sits half in water (was 0.2 = too low).
+      const d = getWaterDisplacementAt(baseX, -baseZ, timeSec);
+      const dispScale = 0.6;
+      const waterBaseY = 0.1;
+      const surfaceY = waterBaseY + d.nz * dispScale;
+      // Cube center at surface = half above water, half below (half in)
+      floatObject.position.set(
+        baseX + d.nx * dispScale,
+        surfaceY,
+        baseZ - d.ny * dispScale
+      );
+      const norm = getWaterNormalAt(baseX, -baseZ, timeSec);
+      floatObject.quaternion.setFromUnitVectors(
+        new THREE.Vector3(0, 1, 0),
+        new THREE.Vector3(norm.x, norm.y, norm.z)
+      );
       orbitControls.update();
       renderer.render(scene, camera);
     }

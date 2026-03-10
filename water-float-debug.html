@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Floating box debug — minimal water</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a1628; }
+    canvas { display: block; width: 100%; height: 100%; }
+  </style>
+  <script type="importmap">
+    { "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.min.js",
+      "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.min.js",
+      "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.tsl.min.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.0/examples/jsm/"
+    }}
+  </script>
+</head>
+<body>
+  <script type="module">
+    import * as THREE from "three/webgpu";
+    import {
+      Fn, uniform, vec2, vec3, float, time, sin, cos, dot, floor, fract, mix,
+      abs, normalize, cross, positionLocal, positionWorld,
+      normalLocal, normalWorld, cameraPosition, Loop, max, min, smoothstep,
+      oneMinus, length, select,
+    } from "three/tsl";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+    // ─── Same water noise technique as water-ocean-pro.html ─────────────────
+    const uTime = uniform(0.0);
+    const uTimeSpeed = uniform(4.0);
+    const uWaveAmp = uniform(0.8);
+    const uWaveFreq = uniform(1.0);
+    const uWaveDir = uniform(0.0);
+    const uWaveSteepness = uniform(0.8);
+    const uWaterHeight = uniform(0.15);
+    const uFbmDispEnabled = uniform(1.0);
+    const uFbmDispAmount = uniform(0.8);
+    const uFbmDispScale = uniform(1.0);
+    const uFbmDispSpeed = uniform(0.5);
+
+    const hash21 = Fn(([p]) => fract(sin(dot(p, vec2(12.9898, 78.233))).mul(43758.5453)));
+    const valueNoise2D = Fn(([p_immutable]) => {
+      const p = p_immutable.toVar();
+      const i = floor(p).toVar();
+      const f = fract(p).toVar();
+      const u = f.mul(f).mul(float(3.0).sub(f.mul(2.0)));
+      const a = hash21(i);
+      const b = hash21(i.add(vec2(1.0, 0.0)));
+      const c = hash21(i.add(vec2(0.0, 1.0)));
+      const d = hash21(i.add(vec2(1.0, 1.0)));
+      return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+    });
+    const fbm = Fn(([p_immutable]) => {
+      const p = p_immutable.toVar();
+      const value = float(0.0).toVar();
+      const amp = float(1.0).toVar();
+      const freq = float(0.4).toVar();
+      const totalAmp = float(0.0).toVar();
+      Loop(5, () => {
+        value.addAssign(amp.mul(valueNoise2D(p.mul(freq))));
+        totalAmp.addAssign(amp);
+        freq.mulAssign(2.3);
+        amp.mulAssign(0.4);
+      });
+      return value.div(totalAmp);
+    });
+
+    const gerstnerWave = Fn(([pos, dirX, dirY, steepness_immutable, wavelength_immutable, t_immutable]) => {
+      const steepness = float(steepness_immutable).toVar();
+      const wavelength = float(wavelength_immutable).toVar();
+      const t = float(t_immutable).toVar();
+      const k = float(6.283185).div(wavelength);
+      const c = float(9.8).div(k).abs().sqrt();
+      const dir = normalize(vec2(float(dirX), float(dirY))).toVar();
+      const f = k.mul(dot(dir, vec2(pos.x, pos.y)).sub(c.mul(t)));
+      return vec3(
+        steepness.div(k).mul(dir.x).mul(cos(f)),
+        steepness.div(k).mul(sin(f)),
+        steepness.div(k).mul(dir.y).mul(cos(f))
+      );
+    });
+
+    const displace = Fn(([point_immutable]) => {
+      const point = point_immutable.toVar();
+      const t = uTime.div(uTimeSpeed).negate();
+      const pScrolled = vec2(point.x, point.y.add(t.mul(2.0)));
+      const n = vec3(0.0, 0.0, 0.0).toVar();
+      const fbmVal = fbm(pScrolled.mul(uFbmDispScale).add(t.mul(uFbmDispSpeed)));
+      n.z.assign(fbmVal.mul(uFbmDispAmount).mul(uFbmDispEnabled));
+      const dA = uWaveDir;
+      const dB = uWaveDir.add(float(0.12));
+      const wA = gerstnerWave(point, cos(dA), sin(dA), float(0.55).mul(uWaveSteepness), float(2.5).div(uWaveFreq), t);
+      const wB = gerstnerWave(point, cos(dB), sin(dB), float(0.28).mul(uWaveSteepness), float(1.8).div(uWaveFreq), t);
+      n.addAssign(vec3(wA.x, wA.z, wA.y));
+      n.addAssign(vec3(wB.x, wB.z, wB.y).mul(0.5));
+      n.mulAssign(uWaveAmp);
+      const topMask = smoothstep(float(0.0), float(0.05), point.z.add(uWaterHeight.mul(0.5)));
+      n.mulAssign(topMask);
+      return point.add(n);
+    });
+
+    const recalcNormals = Fn(([newPos, origPos, origNormal]) => {
+      const eps = float(0.002);
+      const tangent = normalize(select(
+        abs(origNormal.x).greaterThan(abs(origNormal.z)),
+        vec3(origNormal.y.negate(), origNormal.x, 0.0),
+        vec3(0.0, origNormal.z.negate(), origNormal.y)
+      )).toVar();
+      const bitangent = normalize(cross(origNormal, tangent)).toVar();
+      const dn1 = displace(origPos.add(tangent.mul(eps)));
+      const dn2 = displace(origPos.add(bitangent.mul(eps)));
+      return normalize(cross(dn1.sub(newPos), dn2.sub(newPos)));
+    });
+
+    const waterNormalNode = Fn(() => {
+      const displaced = displace(positionLocal);
+      return recalcNormals(displaced, positionLocal, normalLocal);
+    });
+
+    const uWaterColor = uniform(new THREE.Color(0x2980b9));
+    const uFresnelColor = uniform(new THREE.Color(0x6bb3e0));
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 500);
+    camera.position.set(4, 3, 5);
+    camera.lookAt(0, 0, 0);
+    const renderer = new THREE.WebGPURenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    document.body.appendChild(renderer.domElement);
+    await renderer.init();
+
+    const orbitControls = new OrbitControls(camera, renderer.domElement);
+    orbitControls.enableDamping = true;
+    orbitControls.dampingFactor = 0.05;
+    orbitControls.target.set(0, 0, 0);
+
+    scene.add(new THREE.AmbientLight(0x6699cc, 0.8));
+    const sun = new THREE.DirectionalLight(0xffffee, 1.2);
+    sun.position.set(5, 8, 5);
+    scene.add(sun);
+
+    const waterGeo = new THREE.BoxGeometry(8, 8, 0.2, 48, 48, 1);
+    const waterMat = new THREE.MeshStandardNodeMaterial({
+      color: 0x2980b9,
+      roughness: 0.3,
+      metalness: 0.05,
+      side: THREE.DoubleSide,
+    });
+    waterMat.positionNode = Fn(() => displace(positionLocal))();
+    waterMat.normalNode = waterNormalNode();
+    waterMat.colorNode = Fn(() => {
+      const N = normalWorld;
+      const viewDir = normalize(cameraPosition.sub(positionWorld));
+      const NdotV = max(dot(N, viewDir), 0.0);
+      const fresnel = oneMinus(NdotV).mul(0.4);
+      return mix(uWaterColor, uFresnelColor, fresnel.clamp(0.0, 1.0));
+    })();
+    const waterMesh = new THREE.Mesh(waterGeo, waterMat);
+    waterMesh.rotation.x = -Math.PI / 2;
+    scene.add(waterMesh);
+
+    // ─── Physics water mesh: same displacement in JS per vertex, then raycast ───
+    // So the box follows the *actual* deformed geometry (no formula sync issues).
+    const PHYSICS_SEGMENTS = 64;
+    const physicsWaterGeo = new THREE.PlaneGeometry(8, 8, PHYSICS_SEGMENTS, PHYSICS_SEGMENTS);
+    const physicsWaterMesh = new THREE.Mesh(
+      physicsWaterGeo,
+      new THREE.MeshBasicMaterial({ visible: false })
+    );
+    physicsWaterMesh.rotation.x = -Math.PI / 2;
+    scene.add(physicsWaterMesh);
+
+    const raycaster = new THREE.Raycaster();
+    const rayOrigin = new THREE.Vector3();
+    const rayDir = new THREE.Vector3(0, -1, 0);
+    const hitNormal = new THREE.Vector3();
+    const normalMatrix = new THREE.Matrix3();
+
+    function updatePhysicsWaterMesh(timeSec) {
+      const posAttr = physicsWaterGeo.attributes.position;
+      const t = -timeSec / uTimeSpeed.value;
+      for (let i = 0; i < posAttr.count; i++) {
+        const vx = posAttr.getX(i);
+        const vy = posAttr.getY(i);
+        const px = vx;
+        const py = vy;
+        const d = getWaterDisplacementAt(px, -py, timeSec);
+        posAttr.setXYZ(i, vx + d.nx, vy + d.ny, d.nz);
+      }
+      posAttr.needsUpdate = true;
+      physicsWaterGeo.computeVertexNormals();
+    }
+
+    // ─── JS wave sampler: match shader. Water plane: world Y = local Z, world X = local X, world Z = -local Y ───
+    function fractJs(x) { return x - Math.floor(x); }
+    function hash21Js(wx, wy) { return fractJs(Math.sin(wx * 12.9898 + wy * 78.233) * 43758.5453); }
+    function valueNoise2DJs(px, py) {
+      const ix = Math.floor(px), iy = Math.floor(py);
+      const fx = fractJs(px), fy = fractJs(py);
+      const u = fx * fx * (3 - 2 * fx), v = fy * fy * (3 - 2 * fy);
+      const a = hash21Js(ix, iy), b = hash21Js(ix + 1, iy), c = hash21Js(ix, iy + 1), d = hash21Js(ix + 1, iy + 1);
+      return (1 - u) * (1 - v) * a + u * (1 - v) * b + (1 - u) * v * c + u * v * d;
+    }
+    function fbmJs(px, py) {
+      let value = 0, amp = 1, freq = 0.4, totalAmp = 0;
+      for (let i = 0; i < 5; i++) {
+        value += amp * valueNoise2DJs(px * freq, py * freq);
+        totalAmp += amp;
+        freq *= 2.3;
+        amp *= 0.4;
+      }
+      return value / totalAmp;
+    }
+    function gerstnerJs(px, py, dirX, dirY, steepness, wavelength, t) {
+      const k = 6.283185 / wavelength;
+      const c = Math.sqrt(9.8 / Math.abs(k));
+      const len = Math.sqrt(dirX * dirX + dirY * dirY) || 1;
+      const dx = dirX / len, dy = dirY / len;
+      const f = k * ((dx * px + dy * py) - c * t);
+      const cosf = Math.cos(f), sinf = Math.sin(f);
+      return {
+        x: (steepness / k) * dx * cosf,
+        y: (steepness / k) * dy * cosf,
+        z: (steepness / k) * sinf
+      };
+    }
+
+    function getWaterDisplacementAt(worldX, worldZ, timeSec) {
+      const t = -timeSec / uTimeSpeed.value;
+      const px = worldX;
+      const py = -worldZ;
+      const pScrolledY = py + t * 2;
+      const fbmInX = px * uFbmDispScale.value + t * uFbmDispSpeed.value;
+      const fbmInY = pScrolledY * uFbmDispScale.value + t * uFbmDispSpeed.value;
+      let nx = 0, ny = 0, nz = fbmJs(fbmInX, fbmInY) * uFbmDispAmount.value * uFbmDispEnabled.value;
+      const waveDir = uWaveDir.value;
+      const cosA = Math.cos(waveDir), sinA = Math.sin(waveDir);
+      let w = gerstnerJs(px, py, cosA, sinA, 0.55 * uWaveSteepness.value, 2.5 / uWaveFreq.value, t);
+      nx += w.x; ny += w.y; nz += w.z;
+      w = gerstnerJs(px, py, Math.cos(waveDir + 0.12), Math.sin(waveDir + 0.12), 0.28 * uWaveSteepness.value, 1.8 / uWaveFreq.value, t);
+      nx += w.x * 0.5; ny += w.y * 0.5; nz += w.z * 0.5;
+      nx *= uWaveAmp.value; ny *= uWaveAmp.value; nz *= uWaveAmp.value;
+      const topMask = Math.max(0, Math.min(1, (uWaterHeight.value * 0.5) / 0.05));
+      nx *= topMask; ny *= topMask; nz *= topMask;
+      return { nx, ny, nz };
+    }
+
+    function getWaterHeightAt(worldX, worldZ, timeSec) {
+      const d = getWaterDisplacementAt(worldX, worldZ, timeSec);
+      return d.nz;
+    }
+
+    function getWaterNormalAt(worldX, worldZ, timeSec, eps = 0.04) {
+      const h0 = getWaterHeightAt(worldX, worldZ, timeSec);
+      const hx = getWaterHeightAt(worldX + eps, worldZ, timeSec);
+      const hz = getWaterHeightAt(worldX, worldZ + eps, timeSec);
+      const nx = -(hx - h0) / eps, nz = -(hz - h0) / eps;
+      const len = Math.sqrt(nx * nx + nz * nz + 1);
+      return { x: nx / len, y: 1 / len, z: nz / len };
+    }
+
+    const WATER_BASE_Y = 0;
+    const BOX_HEIGHT = 0.2;
+
+    const floatBox = new THREE.Mesh(
+      new THREE.BoxGeometry(0.4, BOX_HEIGHT, 0.25),
+      new THREE.MeshStandardMaterial({ color: 0x8b4513, roughness: 0.9, metalness: 0 })
+    );
+    floatBox.position.set(1.2, WATER_BASE_Y, 0.6);
+    floatBox.userData.baseX = 1.2;
+    floatBox.userData.baseZ = 0.6;
+    scene.add(floatBox);
+
+    const timerStart = performance.now() * 0.001;
+
+    window.addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const timeSec = performance.now() * 0.001 - timerStart;
+      uTime.value = timeSec;
+
+      const baseX = floatBox.userData.baseX;
+      const baseZ = floatBox.userData.baseZ;
+
+      updatePhysicsWaterMesh(timeSec);
+
+      rayOrigin.set(baseX, 10, baseZ);
+      raycaster.set(rayOrigin, rayDir);
+      const hits = raycaster.intersectObject(physicsWaterMesh);
+      if (hits.length > 0) {
+        const hit = hits[0];
+        if (hit.face) {
+          physicsWaterMesh.updateMatrixWorld(true);
+          normalMatrix.getNormalMatrix(physicsWaterMesh.matrixWorld);
+          hitNormal.copy(hit.face.normal).applyMatrix3(normalMatrix).normalize();
+        } else {
+          hitNormal.set(0, 1, 0);
+        }
+        floatBox.position.copy(hit.point);
+        floatBox.quaternion.setFromUnitVectors(
+          new THREE.Vector3(0, 1, 0),
+          hitNormal
+        );
+      }
+
+      orbitControls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+  </script>
+</body>
+</html>
