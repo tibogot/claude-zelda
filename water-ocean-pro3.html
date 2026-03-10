@@ -110,6 +110,10 @@
       <input type="range" id="timeSpeed" min="0.5" max="20" step="0.5" value="5" />
     </div>
     <div class="ctrl-group">
+      <label>Water Height <span id="waveHeightVal">0.20</span></label>
+      <input type="range" id="waveHeight" min="0.01" max="0.8" step="0.01" value="0.2" />
+    </div>
+    <div class="ctrl-group">
       <label>Wave Amp <span id="waveAmpVal">1.00</span></label>
       <input type="range" id="waveAmp" min="0" max="3" step="0.05" value="1.0" />
     </div>
@@ -540,6 +544,7 @@
 
     // ─── Uniforms ─────────────────────────────────────────────────────────
     const uTimeSpeed = uniform(5.0);
+    const uWaterHeight = uniform(0.2);
     const uWaveAmp = uniform(1.0);
     const uWaveFreq = uniform(1.0);
     const uWaterColor = uniform(new THREE.Color(0x52a7f7));
@@ -553,11 +558,6 @@
     const uFoamIntensity = uniform(0.8);
     const uSlopeFoam = uniform(0.6);
     const uFoamColor = uniform(new THREE.Color(0xf0f8ff));
-    // Contact foam at floating object (ref/debug: bright color to verify visibility)
-    const uContactFoamCenter = uniform(new THREE.Vector2(1.5, 0.5));
-    const uContactFoamRadius = uniform(0.32);
-    const uContactFoamRefColor = uniform(new THREE.Color(0xf0f8ff));
-    const uContactFoamEnabled = uniform(1.0);
     // Voronoi A — independent layer
     const uVoroAEnabled = uniform(0.0);
     const uVoroAColor = uniform(new THREE.Color(0xf0f8ff));
@@ -798,7 +798,7 @@
       n.addAssign(vec3(wE.x, wE.z, wE.y).mul(0.30).mul(uCrossWaveAmt));
       n.addAssign(vec3(wF.x, wF.z, wF.y).mul(0.22).mul(uCrossWaveAmt));
       n.mulAssign(uWaveAmp);
-      const topMask = smoothstep(float(0.0), float(0.05), point.z.add(float(0.1)));
+      const topMask = smoothstep(float(0.0), float(0.05), point.z.add(uWaterHeight.mul(0.5)));
       n.mulAssign(topMask);
       return point.add(n);
     });
@@ -903,14 +903,6 @@
       const nFbm = fbm(fbmFoamWarped);
       const gFbm = smoothstep(uFbmFoamLow, uFbmFoamHigh, nFbm);
       baseColor.assign(mix(baseColor, uFoamColor, gFbm.mul(uFbmFoamAmount).mul(uFbmFoamEnabled).clamp(0.0, 1.0)));
-
-      // Contact foam at floating object (ref: bright color so visible for debug)
-      const fragXZ = vec2(positionWorld.x, positionWorld.z);
-      const toCenter = fragXZ.sub(uContactFoamCenter);
-      const d = length(toCenter);
-      const ringWidth = float(0.08);
-      const contactMask = oneMinus(smoothstep(uContactFoamRadius.sub(ringWidth), uContactFoamRadius, d)).mul(uContactFoamEnabled);
-      baseColor.assign(mix(baseColor, uContactFoamRefColor, contactMask.clamp(0.0, 1.0)));
 
       baseColor.mulAssign(uBrightness);
 
@@ -1188,7 +1180,7 @@
           mat = new THREE.MeshBasicNodeMaterial();
           break;
       }
-      mat.side = THREE.FrontSide;
+      mat.side = THREE.DoubleSide;
       mat.transparent = true;
       mat.envMapIntensity = parseFloat(document.getElementById("envInt")?.value || "2.0");
       mat.positionNode = Fn(() => displace(positionLocal))();
@@ -1207,11 +1199,10 @@
       const seg = Math.max(16, Math.min(512, Math.round(parseFloat(document.getElementById("segments").value) || 128)));
       document.getElementById("segments").value = seg;
       document.getElementById("segmentsVal").textContent = seg;
-      const geometry = new THREE.PlaneGeometry(8, 8, seg, seg);
+      const geometry = new THREE.BoxGeometry(8, 8, 0.2, seg, seg, 1);
       const material = createMaterial(currentMaterialType);
       waterMesh = new THREE.Mesh(geometry, material);
       waterMesh.rotation.x = -Math.PI / 2;
-      waterMesh.position.y = 0.1;
       scene.add(waterMesh);
       updateEnvMap();
     }
@@ -1308,6 +1299,8 @@
       nz *= uWaveAmp.value;
       nx *= uWaveAmp.value;
       ny *= uWaveAmp.value;
+      const topMask = Math.max(0, Math.min(1, (uWaterHeight.value * 0.5) / 0.05));
+      nz *= topMask; nx *= topMask; ny *= topMask;
       return { nx, ny, nz };
     }
     function getWaterHeightAt(worldX, worldZ, timeSec) {
@@ -1323,48 +1316,18 @@
       return { x: nx / len, y: 1 / len, z: nz / len };
     }
 
-    // Iterative Gerstner inversion: find undisplaced local (lx, ly) whose
-    // displaced world position equals (worldX, ?, worldZ). This corrects for
-    // horizontal Gerstner drift so we sample the true wave height at a fixed
-    // world XZ position rather than a drifting grid point.
-    function getWorldWaveHeightAt(worldX, worldZ, timeSec) {
-      let lx = worldX, ly = -worldZ; // initial guess = undisplaced local coords
-      for (let i = 0; i < 5; i++) {
-        const d = getWaterDisplacementAt(lx, ly, timeSec);
-        lx = worldX - d.nx;
-        ly = -worldZ - d.ny;
-      }
-      const d = getWaterDisplacementAt(lx, ly, timeSec);
-      return 0.1 + d.nz; // 0.1 = waterMesh.position.y
-    }
-    // Finite-difference surface normal at a fixed world XZ position.
-    function getWorldWaveNormalAt(worldX, worldZ, timeSec, eps = 0.06) {
-      const h0 = getWorldWaveHeightAt(worldX, worldZ, timeSec);
-      const hx = getWorldWaveHeightAt(worldX + eps, worldZ, timeSec);
-      const hz = getWorldWaveHeightAt(worldX, worldZ + eps, timeSec);
-      // World-space tangents → correct upward normal
-      const nx = -(hx - h0) / eps;
-      const nz = -(hz - h0) / eps;
-      const len = Math.sqrt(nx * nx + nz * nz + 1);
-      return { x: nx / len, y: 1 / len, z: nz / len };
-    }
-
     const floatObject = new THREE.Mesh(
-      new THREE.BoxGeometry(0.5, 0.12, 0.22),
+      new THREE.BoxGeometry(0.2, 0.06, 0.12),
       new THREE.MeshStandardMaterial({ color: 0x8b4513, roughness: 0.9, metalness: 0 })
     );
     floatObject.position.set(1.5, 0, 0.5);
     floatObject.userData.baseX = 1.5;
     floatObject.userData.baseZ = 0.5;
-    floatObject.userData.targetPos = new THREE.Vector3();
-    floatObject.userData.targetQuat = new THREE.Quaternion();
     floatObject.castShadow = true;
     floatObject.receiveShadow = true;
     scene.add(floatObject);
 
     const _timerStart = performance.now() * 0.001;
-    const FLOAT_SMOOTH_SPEED = 8;
-    let _lastTimeSec = 0;
 
     function bindSlider(id, valId, cb) {
       const el = document.getElementById(id);
@@ -1396,6 +1359,7 @@
     bindSlider("offset", "offsetVal", (v) => uOffset.value = v);
     bindSlider("contrast", "contrastVal", (v) => uContrast.value = v);
     bindSlider("timeSpeed", "timeSpeedVal", (v) => uTimeSpeed.value = v);
+    bindSlider("waveHeight", "waveHeightVal", (v) => uWaterHeight.value = v);
     bindSlider("waveAmp", "waveAmpVal", (v) => uWaveAmp.value = v);
     bindSlider("waveFreq", "waveFreqVal", (v) => uWaveFreq.value = v);
     document.getElementById("waveDir").addEventListener("input", (e) => {
@@ -1533,26 +1497,25 @@
     function animate() {
       requestAnimationFrame(animate);
       const timeSec = (performance.now() * 0.001) - _timerStart;
-      const delta = Math.min(timeSec - _lastTimeSec, 0.1);
-      _lastTimeSec = timeSec;
       uTime.value = timeSec;
       const baseX = floatObject.userData.baseX;
       const baseZ = floatObject.userData.baseZ;
-      // Use iterative inversion so the boat stays at a fixed world XZ position
-      // and bobs vertically to the true wave height there (no Gerstner drift).
-      const surfaceY = getWorldWaveHeightAt(baseX, baseZ, timeSec);
-      const norm = getWorldWaveNormalAt(baseX, baseZ, timeSec);
-      const targetPos = floatObject.userData.targetPos;
-      targetPos.set(baseX, surfaceY, baseZ);
-      const targetQuat = floatObject.userData.targetQuat;
-      targetQuat.setFromUnitVectors(
+      // Use full wave displacement (same as water shader). Scale so cube sits half in water (was 0.2 = too low).
+      const d = getWaterDisplacementAt(baseX, -baseZ, timeSec);
+      const dispScale = 0.6;
+      const waterBaseY = 0.1;
+      const surfaceY = waterBaseY + d.nz * dispScale;
+      // Cube center at surface = half above water, half below (half in)
+      floatObject.position.set(
+        baseX + d.nx * dispScale,
+        surfaceY,
+        baseZ - d.ny * dispScale
+      );
+      const norm = getWaterNormalAt(baseX, -baseZ, timeSec);
+      floatObject.quaternion.setFromUnitVectors(
         new THREE.Vector3(0, 1, 0),
         new THREE.Vector3(norm.x, norm.y, norm.z)
       );
-      const factor = 1 - Math.exp(-FLOAT_SMOOTH_SPEED * delta);
-      floatObject.position.lerp(targetPos, factor);
-      floatObject.quaternion.slerp(targetQuat, factor);
-      uContactFoamCenter.value.set(floatObject.position.x, floatObject.position.z);
       orbitControls.update();
       renderer.render(scene, camera);
     }
