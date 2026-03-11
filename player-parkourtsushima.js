@@ -308,11 +308,17 @@ export function createPlayer(opts) {
             gltf.animations.find((a) => a.name === "Sprint_Loop") ||
             gltf.animations.find((a) => a.name === "Jog_Fwd_Loop") ||
             walkClip;
-          const jumpClip =
-            gltf.animations.find((a) => a.name === "Jump_Loop_Armature") ||
+          const jumpStartClip =
             gltf.animations.find((a) => a.name === "Jump_Start_Armature") ||
-            gltf.animations.find((a) => a.name === "Jump_Loop") ||
             gltf.animations.find((a) => a.name === "Jump_Start") ||
+            idleClip;
+          const jumpLoopClip =
+            gltf.animations.find((a) => a.name === "Jump_Loop_Armature") ||
+            gltf.animations.find((a) => a.name === "Jump_Loop") ||
+            jumpStartClip;
+          const jumpLandClip =
+            gltf.animations.find((a) => a.name === "Jump_Land_Armature") ||
+            gltf.animations.find((a) => a.name === "Jump_Land") ||
             idleClip;
           const attackClip =
             gltf.animations.find((a) => a.name === "Sword_Attack_Armature") ||
@@ -342,7 +348,20 @@ export function createPlayer(opts) {
             .play();
           const walkAction = characterMixer.clipAction(walkClip).setLoop(2201);
           const runAction = characterMixer.clipAction(runClip).setLoop(2201);
-          const jumpAction = characterMixer.clipAction(jumpClip).setLoop(2201);
+          const jumpStartAction = characterMixer
+            .clipAction(jumpStartClip)
+            .setLoop(2200); // once
+          jumpStartAction.clampWhenFinished = true;
+          jumpStartAction.timeScale = 1.4; // punchy take-off
+          const jumpLoopAction = characterMixer
+            .clipAction(jumpLoopClip)
+            .setLoop(2201); // loop
+          const jumpLandAction = characterMixer
+            .clipAction(jumpLandClip)
+            .setLoop(2200); // once
+          jumpLandAction.clampWhenFinished = true;
+          jumpLandAction.timeScale = 1.8; // fast landing recovery
+          const jumpAction = jumpLoopAction; // alias kept for compat
           const attackAction = attackClip
             ? characterMixer.clipAction(attackClip).setLoop(2200)
             : null;
@@ -365,7 +384,9 @@ export function createPlayer(opts) {
           characterGroup.userData.idleAction = idleAction;
           characterGroup.userData.walkAction = walkAction;
           characterGroup.userData.runAction = runAction;
-          characterGroup.userData.jumpAction = jumpAction;
+          characterGroup.userData.jumpAction = jumpLoopAction;
+          characterGroup.userData.jumpStartAction = jumpStartAction;
+          characterGroup.userData.jumpLandAction = jumpLandAction;
           characterGroup.userData.crouchAction = crouchAction;
           characterGroup.userData.crouchWalkAction = crouchWalkAction;
           characterGroup.userData.rollAction = rollAction;
@@ -522,6 +543,8 @@ export function createPlayer(opts) {
   // Cleared immediately on intentional jump so air state engages without delay.
   let _groundGrace = 0;
   let _justJumped = false;
+  let _jumpPhase = "none"; // "none" | "start" | "loop" | "land"
+  let _lastAnimJumpPhase = "none";
   let _airFrames = 0;
   let _groundFrames = 0;
 
@@ -795,10 +818,13 @@ export function createPlayer(opts) {
       : state.isGrounded;
     let desiredY;
     if (onGround) {
-      if (keys.space && !_isCrouching) {
-        // no jumping while crouched
+      if (keys.space && !keys.spacePrev && !_isCrouching && _jumpPhase === "none") {
         state.characterVelY = PARAMS.jumpSpeed;
         _justJumped = true;
+        _jumpPhase = "start";
+        setTimeout(() => {
+          if (_jumpPhase === "start") _jumpPhase = "loop";
+        }, 200);
         desiredY = charPos.y + state.characterVelY * dt;
       } else {
         state.characterVelY = 0;
@@ -1071,17 +1097,15 @@ export function createPlayer(opts) {
     const moving = state.moveDir.length() > 0;
     const running = moving && keys.shift;
     const crouching = _isCrouching;
-    const moveState = inAir
-      ? "jump"
-      : crouching
-        ? moving
-          ? "crouch_walk"
-          : "crouch"
-        : moving
-          ? running
-            ? "run"
-            : "walk"
-          : "idle";
+    const moveState = crouching
+      ? moving
+        ? "crouch_walk"
+        : "crouch"
+      : moving
+        ? running
+          ? "run"
+          : "walk"
+        : "idle";
     // Early roll exit: if player holds a direction past 75% of the animation,
     // skip waiting for 'finished' and snap to walk/run immediately.
     if (
@@ -1113,16 +1137,95 @@ export function createPlayer(opts) {
         ud.lastMoveState = moveState; // prevent state machine double-transition
       }
     }
+    // ── JUMP PHASE: fell off ledge ────────────────────────────────────────
+    // Walking off an edge enters loop without the start wind-up.
+    if (_jumpPhase === "none" && _airFrames >= 2) {
+      _jumpPhase = "loop";
+    }
+    // ── JUMP PHASE: landing detection ─────────────────────────────────────
+    if (
+      (_jumpPhase === "start" || _jumpPhase === "loop") &&
+      state.isGrounded &&
+      _airFrames === 0
+    ) {
+      _jumpPhase = "land";
+      setTimeout(() => {
+        if (_jumpPhase === "land") _jumpPhase = "none";
+      }, 300);
+    }
+    // ── JUMP PHASE: animation transitions ─────────────────────────────────
+    // Fires once per phase change — plays the right clip and crossfades cleanly.
+    if (ud?.jumpStartAction && _jumpPhase !== _lastAnimJumpPhase) {
+      const _prev = _lastAnimJumpPhase;
+      _lastAnimJumpPhase = _jumpPhase;
+      if (_jumpPhase === "start") {
+        // Jump_Start_Armature — short take-off, played once at 1.4x speed.
+        const _from =
+          ud.lastMoveState === "run"
+            ? ud.runAction
+            : ud.lastMoveState === "walk"
+              ? ud.walkAction
+              : ud.lastMoveState === "crouch"
+                ? ud.crouchAction
+                : ud.lastMoveState === "crouch_walk"
+                  ? ud.crouchWalkAction
+                  : ud.idleAction;
+        ud.jumpStartAction.reset();
+        ud.jumpStartAction.enabled = true;
+        ud.jumpStartAction.crossFadeFrom(_from, 0.08).play();
+      } else if (_jumpPhase === "loop") {
+        // Jump_Loop_Armature — loops while airborne.
+        const _from =
+          _prev === "start" ? ud.jumpStartAction : ud.idleAction;
+        ud.jumpAction.enabled = true;
+        ud.jumpAction.crossFadeFrom(_from, 0.08).play();
+        if (_prev === "start")
+          setTimeout(() => {
+            ud.jumpStartAction.enabled = false;
+          }, 100);
+      } else if (_jumpPhase === "land") {
+        // Jump_Land_Armature — brief landing recovery, played once at 1.8x speed.
+        const _from =
+          _prev === "start" ? ud.jumpStartAction : ud.jumpAction;
+        ud.jumpLandAction.reset();
+        ud.jumpLandAction.enabled = true;
+        ud.jumpLandAction.crossFadeFrom(_from, 0.08).play();
+        setTimeout(() => {
+          if (_prev === "start") ud.jumpStartAction.enabled = false;
+          else ud.jumpAction.enabled = false;
+        }, 100);
+      } else if (_jumpPhase === "none") {
+        // Recovery — crossfade from land anim to whatever the player is doing.
+        const _mov = !!(keys.w || keys.s || keys.a || keys.d);
+        const _run = _mov && keys.shift;
+        const _target = _mov ? (_run ? "run" : "walk") : "idle";
+        const _targetAction =
+          _target === "run"
+            ? ud.runAction
+            : _target === "walk"
+              ? ud.walkAction
+              : ud.idleAction;
+        _targetAction.enabled = true;
+        _targetAction.crossFadeFrom(ud.jumpLandAction, 0.08).play();
+        setTimeout(() => {
+          ud.jumpLandAction.enabled = false;
+        }, 100);
+        ud.lastMoveState = _target;
+      }
+    }
+    // ── LOCOMOTION STATE MACHINE ───────────────────────────────────────────
+    // Blocked entirely while a jump phase is active — jump anim block above
+    // owns all transitions during that time.
     if (
       ud &&
       ud.idleAction &&
       ud.walkAction &&
       ud.runAction &&
-      ud.jumpAction &&
       ud.crouchAction &&
       ud.crouchWalkAction &&
       !ud.isAttacking &&
-      !ud.isRolling
+      !ud.isRolling &&
+      _jumpPhase === "none"
     ) {
       const skipT = 0.4;
       const last = ud.lastMoveState;
@@ -1142,11 +1245,6 @@ export function createPlayer(opts) {
           ud.idleAction.enabled = true;
           ud.idleAction.crossFadeFrom(from, 0.2).play();
         };
-        const toJump = (from) => {
-          if (ud.jumpAction.time < skipT) ud.jumpAction.time = skipT;
-          ud.jumpAction.enabled = true;
-          ud.jumpAction.crossFadeFrom(from, 0.15).play();
-        };
         const toCrouch = (from) => {
           if (ud.crouchAction.time < skipT) ud.crouchAction.time = skipT;
           ud.crouchAction.enabled = true;
@@ -1158,23 +1256,10 @@ export function createPlayer(opts) {
           ud.crouchWalkAction.enabled = true;
           ud.crouchWalkAction.crossFadeFrom(from, 0.2).play();
         };
-        if (moveState === "jump") {
-          toJump(
-            last === "idle"
-              ? ud.idleAction
-              : last === "run"
-                ? ud.runAction
-                : last === "crouch"
-                  ? ud.crouchAction
-                  : last === "crouch_walk"
-                    ? ud.crouchWalkAction
-                    : ud.walkAction,
-          );
-        } else if (moveState === "crouch") {
+        if (moveState === "crouch") {
           if (last === "idle") toCrouch(ud.idleAction);
           else if (last === "walk") toCrouch(ud.walkAction);
           else if (last === "run") toCrouch(ud.runAction);
-          else if (last === "jump") toCrouch(ud.jumpAction);
           else if (last === "crouch_walk") {
             if (ud.crouchAction.time < skipT) ud.crouchAction.time = skipT;
             ud.crouchAction.enabled = true;
@@ -1184,7 +1269,6 @@ export function createPlayer(opts) {
           if (last === "idle") toCrouchWalk(ud.idleAction);
           else if (last === "walk") toCrouchWalk(ud.walkAction);
           else if (last === "run") toCrouchWalk(ud.runAction);
-          else if (last === "jump") toCrouchWalk(ud.jumpAction);
           else if (last === "crouch") {
             if (ud.crouchWalkAction.time < skipT)
               ud.crouchWalkAction.time = skipT;
@@ -1193,7 +1277,11 @@ export function createPlayer(opts) {
           }
         } else if (moveState === "walk") {
           if (last === "idle") toWalk();
-          else if (last === "crouch") {
+          else if (last === "run") {
+            if (ud.walkAction.time < skipT) ud.walkAction.time = skipT;
+            ud.walkAction.enabled = true;
+            ud.walkAction.crossFadeFrom(ud.runAction, 0.2).play();
+          } else if (last === "crouch") {
             if (ud.walkAction.time < skipT) ud.walkAction.time = skipT;
             ud.walkAction.enabled = true;
             ud.walkAction.crossFadeFrom(ud.crouchAction, 0.2).play();
@@ -1201,18 +1289,14 @@ export function createPlayer(opts) {
             if (ud.walkAction.time < skipT) ud.walkAction.time = skipT;
             ud.walkAction.enabled = true;
             ud.walkAction.crossFadeFrom(ud.crouchWalkAction, 0.2).play();
-          } else if (last === "run") {
-            if (ud.walkAction.time < skipT) ud.walkAction.time = skipT;
-            ud.walkAction.enabled = true;
-            ud.walkAction.crossFadeFrom(ud.runAction, 0.2).play();
-          } else if (last === "jump") {
-            if (ud.walkAction.time < skipT) ud.walkAction.time = skipT;
-            ud.walkAction.enabled = true;
-            ud.walkAction.crossFadeFrom(ud.jumpAction, 0.2).play();
           }
         } else if (moveState === "run") {
           if (last === "idle") toRun();
-          else if (last === "crouch") {
+          else if (last === "walk") {
+            if (ud.runAction.time < skipT) ud.runAction.time = skipT;
+            ud.runAction.enabled = true;
+            ud.runAction.crossFadeFrom(ud.walkAction, 0.2).play();
+          } else if (last === "crouch") {
             if (ud.runAction.time < skipT) ud.runAction.time = skipT;
             ud.runAction.enabled = true;
             ud.runAction.crossFadeFrom(ud.crouchAction, 0.2).play();
@@ -1220,26 +1304,16 @@ export function createPlayer(opts) {
             if (ud.runAction.time < skipT) ud.runAction.time = skipT;
             ud.runAction.enabled = true;
             ud.runAction.crossFadeFrom(ud.crouchWalkAction, 0.2).play();
-          } else if (last === "walk") {
-            if (ud.runAction.time < skipT) ud.runAction.time = skipT;
-            ud.runAction.enabled = true;
-            ud.runAction.crossFadeFrom(ud.walkAction, 0.2).play();
-          } else if (last === "jump") {
-            if (ud.runAction.time < skipT) ud.runAction.time = skipT;
-            ud.runAction.enabled = true;
-            ud.runAction.crossFadeFrom(ud.jumpAction, 0.2).play();
           }
         } else {
           toIdle(
-            last === "jump"
-              ? ud.jumpAction
-              : last === "run"
-                ? ud.runAction
-                : last === "crouch"
-                  ? ud.crouchAction
-                  : last === "crouch_walk"
-                    ? ud.crouchWalkAction
-                    : ud.walkAction,
+            last === "run"
+              ? ud.runAction
+              : last === "crouch"
+                ? ud.crouchAction
+                : last === "crouch_walk"
+                  ? ud.crouchWalkAction
+                  : ud.walkAction,
           );
         }
         ud.lastMoveState = moveState;
