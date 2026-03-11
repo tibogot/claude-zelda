@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Waterfall Shape Lab - Three.js 181</title>
+    <style>
+      body {
+        margin: 0;
+        background: #050505;
+        overflow: hidden;
+      }
+      canvas {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.3/dist/tweakpane.min.js"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import {
+        Fn,
+        uv,
+        vec2,
+        vec3,
+        float,
+        mix,
+        smoothstep,
+        floor,
+        fract,
+        sin,
+        dot,
+        length,
+        min,
+        uniform,
+        time,
+        sub,
+        If,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
+
+      let renderer, scene, camera, mesh;
+
+      const params = {
+        width: 4,
+        totalHeight: 8,
+        topLength: 2.5,
+        radius: 1.2,
+        segments: 128,
+        wireframe: false,
+        // Voronoi + color
+        lipCyanStrength: 0.9,
+        darkR: 0.08,
+        darkG: 0.15,
+        darkB: 0.2,
+        cyanR: 0,
+        cyanG: 0.75,
+        cyanB: 0.9,
+        // Worley foam (showcase-style)
+        foamScale: 6,
+        foamWarpStrength: 0.35,
+        foamWarpSpeed: 0.4,
+        foamLayer2: 0.5,
+        foamLayer4: 0.25,
+        foamLow: 0.15,
+        foamHigh: 0.32,
+        foamJitter: 1,
+        foamOffsetX: 0,
+        foamOffsetY: 0,
+      };
+
+      const NEIGHBORS = [
+        [-1, -1],
+        [0, -1],
+        [1, -1],
+        [-1, 0],
+        [0, 0],
+        [1, 0],
+        [-1, 1],
+        [0, 1],
+        [1, 1],
+      ];
+
+      // Worley F1/F2 (like voronoi-showcase): returns vec2(F1, F2) for realistic foam
+      const worleyF1F2 = Fn(([p_immutable, jitter_immutable]) => {
+        const p = p_immutable.toVar();
+        const jitter = jitter_immutable.toVar();
+        const ip = floor(p).toVar();
+        const fp = fract(p).toVar();
+        const d1 = float(10.0).toVar();
+        const d2 = float(10.0).toVar();
+
+        for (const [nx, ny] of NEIGHBORS) {
+          const cellOffset = vec2(float(nx), float(ny));
+          const cellPos = ip.add(cellOffset);
+          const h = vec2(
+            fract(sin(dot(cellPos, vec2(127.1, 311.7))).mul(43758.5453)),
+            fract(sin(dot(cellPos, vec2(269.5, 183.3))).mul(43758.5453)),
+          );
+          const pt = mix(vec2(0.5, 0.5), h, jitter);
+          const toPoint = cellOffset.add(pt).sub(fp);
+          const dist = length(toPoint);
+          If(dist.lessThan(d1), () => {
+            d2.assign(d1);
+            d1.assign(dist);
+          }).ElseIf(dist.lessThan(d2), () => {
+            d2.assign(dist);
+          });
+        }
+        return vec2(d1, d2);
+      });
+
+      const domainWarp = Fn(([p_immutable, warpStrength, warpSpeed]) => {
+        const p = p_immutable.toVar();
+        const t = time.mul(warpSpeed);
+        const w = vec2(
+          sin(p.y.mul(2).add(t)),
+          sin(p.x.mul(2).sub(t.mul(0.8))),
+        );
+        return p.add(w.mul(warpStrength));
+      });
+
+      // Foam mask: layered Worley + warp (realistic foam like voronoi-showcase)
+      const foamMask = Fn(([uvVal, u]) => {
+        const pFoam = uvVal
+          .mul(u.foamScale)
+          .add(vec2(u.foamOffsetX, u.foamOffsetY))
+          .add(vec2(time.mul(u.foamWarpSpeed).mul(0.15), float(0)));
+        const pWarped = domainWarp(
+          pFoam,
+          u.foamWarpStrength,
+          u.foamWarpSpeed,
+        );
+        const F1_1 = worleyF1F2(pWarped, u.foamJitter).x;
+        const F1_2 = worleyF1F2(pWarped.mul(2), u.foamJitter).x;
+        const F1_4 = worleyF1F2(pWarped.mul(4), u.foamJitter).x;
+        const vFoam = F1_1
+          .add(F1_2.mul(u.foamLayer2))
+          .add(F1_4.mul(u.foamLayer4));
+        return smoothstep(u.foamLow, u.foamHigh, vFoam);
+      });
+
+      // Color: dark base, Worley foam (cyan) stronger around the lip
+      // Accepts uniform nodes so GUI can update in real time.
+      function createWaterColorNode(u) {
+        return Fn(() => {
+          const uvVal = uv();
+          const foam = foamMask(uvVal, u);
+          const lipCenter = float(0.5);
+          const lipWidth = float(0.35);
+          const lipMask = smoothstep(
+            lipCenter.sub(lipWidth),
+            lipCenter,
+            uvVal.y,
+          ).mul(smoothstep(lipCenter.add(lipWidth), lipCenter, uvVal.y));
+          const foamStrength = foam.mul(
+            lipMask.add(float(1).sub(lipMask).mul(u.lipStrength)),
+          );
+          return mix(u.dark, u.cyan, foamStrength.clamp(0, 1));
+        });
+      }
+
+      let voronoiUniforms = null;
+
+      async function init() {
+        renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        await renderer.init();
+
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(
+          45,
+          window.innerWidth / window.innerHeight,
+          0.1,
+          100,
+        );
+        camera.position.set(8, 5, 12);
+        new OrbitControls(camera, renderer.domElement);
+
+        const light = new THREE.DirectionalLight(0xffffff, 3);
+        light.position.set(5, 10, 7);
+        scene.add(light, new THREE.AmbientLight(0xffffff, 0.5));
+
+        updateGeometry();
+        setupGui();
+
+        window.addEventListener("resize", () => {
+          camera.aspect = window.innerWidth / window.innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        renderer.setAnimationLoop(render);
+      }
+
+      function updateGeometry() {
+        if (mesh) {
+          scene.remove(mesh);
+          mesh.geometry.dispose();
+        }
+
+        // Create a plane. We'll bend it along the Y axis.
+        const geo = new THREE.PlaneGeometry(
+          params.width,
+          params.totalHeight,
+          1,
+          params.segments,
+        );
+        const pos = geo.attributes.position;
+        const v = new THREE.Vector3();
+
+        for (let i = 0; i < pos.count; i++) {
+          v.fromBufferAttribute(pos, i);
+
+          // Normalize Y to start at 0 (bottom) to totalHeight (top)
+          let currentY = v.y + params.totalHeight / 2;
+
+          const dropPoint = params.totalHeight - params.topLength;
+          const curveStart = dropPoint;
+          const curveEnd = dropPoint - params.radius;
+
+          if (currentY >= curveStart) {
+            // SECTION 1: The Flat River Bed
+            v.y = currentY;
+            v.z = 0;
+          } else if (currentY < curveStart && currentY > curveEnd) {
+            // SECTION 2: The Arc (The Lip)
+            // We map the distance within the radius to a 0 to 90 degree angle (0 to PI/2)
+            const angle =
+              ((curveStart - currentY) / params.radius) * (Math.PI / 2);
+
+            v.y = curveStart - Math.sin(angle) * params.radius;
+            v.z = -(params.radius - Math.cos(angle) * params.radius);
+          } else {
+            // SECTION 3: The Vertical Drop
+            v.y = curveStart - params.radius;
+            v.z = -params.radius - (curveEnd - currentY);
+          }
+
+          pos.setXYZ(i, v.x, v.y, v.z);
+        }
+
+        geo.computeVertexNormals();
+
+        voronoiUniforms = {
+          lipStrength: uniform(params.lipCyanStrength),
+          dark: uniform(
+            new THREE.Color(params.darkR, params.darkG, params.darkB),
+          ),
+          cyan: uniform(
+            new THREE.Color(params.cyanR, params.cyanG, params.cyanB),
+          ),
+          foamScale: uniform(params.foamScale),
+          foamWarpStrength: uniform(params.foamWarpStrength),
+          foamWarpSpeed: uniform(params.foamWarpSpeed),
+          foamLayer2: uniform(params.foamLayer2),
+          foamLayer4: uniform(params.foamLayer4),
+          foamLow: uniform(params.foamLow),
+          foamHigh: uniform(params.foamHigh),
+          foamJitter: uniform(params.foamJitter),
+          foamOffsetX: uniform(params.foamOffsetX),
+          foamOffsetY: uniform(params.foamOffsetY),
+        };
+
+        const mat = new THREE.MeshBasicNodeMaterial({
+          side: THREE.DoubleSide,
+          wireframe: params.wireframe,
+        });
+        mat.colorNode = createWaterColorNode(voronoiUniforms)();
+
+        mesh = new THREE.Mesh(geo, mat);
+        // Rotate so "top" faces up
+        mesh.rotation.x = -Math.PI / 2;
+        scene.add(mesh);
+      }
+
+      function setupGui() {
+        const pane = new Pane();
+        pane
+          .addBinding(params, "topLength", { min: 0.1, max: 5, step: 0.1 })
+          .on("change", updateGeometry);
+        pane
+          .addBinding(params, "radius", { min: 0.1, max: 3, step: 0.1 })
+          .on("change", updateGeometry);
+        pane
+          .addBinding(params, "totalHeight", { min: 2, max: 15, step: 0.5 })
+          .on("change", updateGeometry);
+        pane
+          .addBinding(params, "wireframe")
+          .on("change", () => (mesh.material.wireframe = params.wireframe));
+
+        const fVoro = pane.addFolder({ title: "Voronoi / Color", expanded: true });
+        fVoro
+          .addBinding(params, "lipCyanStrength", { min: 0, max: 1, step: 0.05 })
+          .on("change", (e) => {
+            if (voronoiUniforms) voronoiUniforms.lipStrength.value = e.value;
+          });
+        fVoro
+          .addBinding(params, "foamScale", { min: 2, max: 20, step: 0.5 })
+          .on("change", (e) => {
+            if (voronoiUniforms) voronoiUniforms.foamScale.value = e.value;
+          });
+        fVoro
+          .addBinding(params, "foamWarpStrength", { min: 0, max: 1, step: 0.05 })
+          .on("change", (e) => {
+            if (voronoiUniforms)
+              voronoiUniforms.foamWarpStrength.value = e.value;
+          });
+        fVoro
+          .addBinding(params, "foamWarpSpeed", { min: 0, max: 1.5, step: 0.05 })
+          .on("change", (e) => {
+            if (voronoiUniforms)
+              voronoiUniforms.foamWarpSpeed.value = e.value;
+          });
+        fVoro
+          .addBinding(params, "foamLayer2", { min: 0, max: 1, step: 0.05 })
+          .on("change", (e) => {
+            if (voronoiUniforms) voronoiUniforms.foamLayer2.value = e.value;
+          });
+        fVoro
+          .addBinding(params, "foamLayer4", { min: 0, max: 1, step: 0.05 })
+          .on("change", (e) => {
+            if (voronoiUniforms) voronoiUniforms.foamLayer4.value = e.value;
+          });
+        fVoro
+          .addBinding(params, "foamLow", { min: 0, max: 0.5, step: 0.01 })
+          .on("change", (e) => {
+            if (voronoiUniforms) voronoiUniforms.foamLow.value = e.value;
+          });
+        fVoro
+          .addBinding(params, "foamHigh", { min: 0.15, max: 0.7, step: 0.01 })
+          .on("change", (e) => {
+            if (voronoiUniforms) voronoiUniforms.foamHigh.value = e.value;
+          });
+        fVoro
+          .addBinding(params, "foamJitter", { min: 0, max: 1, step: 0.05 })
+          .on("change", (e) => {
+            if (voronoiUniforms) voronoiUniforms.foamJitter.value = e.value;
+          });
+        fVoro
+          .addBinding(params, "foamOffsetX", { min: -5, max: 5, step: 0.1 })
+          .on("change", (e) => {
+            if (voronoiUniforms) voronoiUniforms.foamOffsetX.value = e.value;
+          });
+        fVoro
+          .addBinding(params, "foamOffsetY", { min: -5, max: 5, step: 0.1 })
+          .on("change", (e) => {
+            if (voronoiUniforms) voronoiUniforms.foamOffsetY.value = e.value;
+          });
+        fVoro
+          .addBinding(params, "darkR", { min: 0, max: 0.5, step: 0.01 })
+          .on("change", () => {
+            if (voronoiUniforms)
+              voronoiUniforms.dark.value.setRGB(
+                params.darkR,
+                params.darkG,
+                params.darkB,
+              );
+          });
+        fVoro
+          .addBinding(params, "darkG", { min: 0, max: 0.5, step: 0.01 })
+          .on("change", () => {
+            if (voronoiUniforms)
+              voronoiUniforms.dark.value.setRGB(
+                params.darkR,
+                params.darkG,
+                params.darkB,
+              );
+          });
+        fVoro
+          .addBinding(params, "darkB", { min: 0, max: 0.5, step: 0.01 })
+          .on("change", () => {
+            if (voronoiUniforms)
+              voronoiUniforms.dark.value.setRGB(
+                params.darkR,
+                params.darkG,
+                params.darkB,
+              );
+          });
+        fVoro
+          .addBinding(params, "cyanR", { min: 0, max: 1, step: 0.02 })
+          .on("change", () => {
+            if (voronoiUniforms)
+              voronoiUniforms.cyan.value.setRGB(
+                params.cyanR,
+                params.cyanG,
+                params.cyanB,
+              );
+          });
+        fVoro
+          .addBinding(params, "cyanG", { min: 0, max: 1, step: 0.02 })
+          .on("change", () => {
+            if (voronoiUniforms)
+              voronoiUniforms.cyan.value.setRGB(
+                params.cyanR,
+                params.cyanG,
+                params.cyanB,
+              );
+          });
+        fVoro
+          .addBinding(params, "cyanB", { min: 0, max: 1, step: 0.02 })
+          .on("change", () => {
+            if (voronoiUniforms)
+              voronoiUniforms.cyan.value.setRGB(
+                params.cyanR,
+                params.cyanG,
+                params.cyanB,
+              );
+          });
+      }
+
+      function render() {
+        renderer.render(scene, camera);
+      }
+
+      init();
+    </script>
+  </body>
+</html>

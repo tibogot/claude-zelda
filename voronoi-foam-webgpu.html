@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Voronoi Foam Generator — WebGPU + TSL</title>
+<style>
+  *{ margin:0; padding:0; box-sizing:border-box; }
+  body{
+    overflow:hidden;
+    background:#000;
+    font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+  }
+  #ui{
+    position:absolute;
+    top:16px;
+    left:16px;
+    color:#c8d0d8;
+    background:rgba(8,10,14,.82);
+    backdrop-filter:blur(12px);
+    -webkit-backdrop-filter:blur(12px);
+    padding:18px 22px;
+    border-radius:10px;
+    border:1px solid rgba(255,255,255,.06);
+    box-shadow:0 8px 32px rgba(0,0,0,.4);
+    z-index:10;
+    min-width:260px;
+  }
+  #ui h3{
+    font-size:11px;
+    letter-spacing:2.5px;
+    text-transform:uppercase;
+    color:#5a9fff;
+    margin-bottom:14px;
+    font-weight:500;
+  }
+  .row{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    margin-bottom:10px;
+  }
+  .row label{
+    font-size:11px;
+    color:#8090a0;
+    min-width:100px;
+  }
+  .row input[type=range]{
+    -webkit-appearance:none;
+    appearance:none;
+    width:110px;
+    height:4px;
+    border-radius:2px;
+    background:rgba(255,255,255,.08);
+    outline:none;
+    cursor:pointer;
+  }
+  .row input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none;
+    width:14px;
+    height:14px;
+    border-radius:50%;
+    background:#5a9fff;
+    box-shadow:0 0 6px rgba(90,159,255,.4);
+    cursor:pointer;
+  }
+  .val{
+    font-size:10px;
+    color:#5a9fff;
+    width:36px;
+    text-align:right;
+    font-variant-numeric:tabular-nums;
+  }
+  #fallback{
+    position:absolute;
+    inset:0;
+    background:#0a0c10;
+    color:#c8d0d8;
+    font-family:inherit;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    font-size:14px;
+    text-align:center;
+    padding:40px;
+    line-height:1.6;
+  }
+  #fallback.hidden{ display:none; }
+  canvas{ display:block; }
+</style>
+</head>
+<body>
+
+<div id="fallback">
+  Loading WebGPU renderer…<br>
+  <small style="color:#607080">If this persists, your browser may not support WebGPU.<br>Try Chrome 113+ or Edge 113+.</small>
+</div>
+
+<div id="ui">
+  <h3>Voronoi Foam · WebGPU</h3>
+  <div class="row"><label>Scale</label><input id="scale" type="range" min="1" max="20" step="0.1" value="6"><span class="val" id="scaleVal">6.0</span></div>
+  <div class="row"><label>Warp Strength</label><input id="warpStrength" type="range" min="0" max="2" step="0.01" value="0.6"><span class="val" id="warpStrengthVal">0.60</span></div>
+  <div class="row"><label>Warp Scale</label><input id="warpScale" type="range" min="0.5" max="10" step="0.1" value="3"><span class="val" id="warpScaleVal">3.0</span></div>
+  <div class="row"><label>Contrast</label><input id="contrast" type="range" min="0.2" max="4" step="0.1" value="1.5"><span class="val" id="contrastVal">1.5</span></div>
+  <div class="row"><label>Brightness</label><input id="brightness" type="range" min="0" max="2" step="0.01" value="1"><span class="val" id="brightnessVal">1.00</span></div>
+  <div class="row"><label>Threshold</label><input id="threshold" type="range" min="0" max="1" step="0.01" value="0.35"><span class="val" id="thresholdVal">0.35</span></div>
+  <div class="row"><label>Softness</label><input id="softness" type="range" min="0.01" max="0.5" step="0.01" value="0.18"><span class="val" id="softnessVal">0.18</span></div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.tsl.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three/webgpu';
+import {
+  Fn, uniform, float, vec2, vec3, vec4, uv,
+  sin, dot, fract, floor, length, min, pow, smoothstep, mix,
+  Loop
+} from 'three/tsl';
+
+// ─── Uniforms ───
+const uScale        = uniform( 6.0 );
+const uWarpStrength = uniform( 0.6 );
+const uWarpScale    = uniform( 3.0 );
+const uContrast     = uniform( 1.5 );
+const uBrightness   = uniform( 1.0 );
+const uThreshold    = uniform( 0.35 );
+const uSoftness     = uniform( 0.18 );
+const uAspect       = uniform( window.innerWidth / window.innerHeight );
+
+// ─── TSL Noise — using exact patterns from the working ocean code ───
+
+// hash22: vec2 → vec2  (identical to ocean's hash22)
+const hash22 = Fn( ( [ p ] ) => {
+  const px = dot( p, vec2( 127.1, 311.7 ) );
+  const py = dot( p, vec2( 269.5, 183.3 ) );
+  return fract( sin( vec2( px, py ) ).mul( 43758.5453 ) );
+});
+
+// hash21: vec2 → float  (identical to ocean's hash21)
+const hash21 = Fn( ( [ p ] ) => {
+  return fract( sin( dot( p, vec2( 12.9898, 78.233 ) ) ).mul( 43758.5453 ) );
+});
+
+// valueNoise2D (identical to ocean's)
+const valueNoise2D = Fn( ( [ p_immutable ] ) => {
+  const p = p_immutable.toVar();
+  const i = floor( p ).toVar();
+  const f = fract( p ).toVar();
+  const u = f.mul( f ).mul( float( 3.0 ).sub( f.mul( 2.0 ) ) );
+  const a = hash21( i );
+  const b = hash21( i.add( vec2( 1.0, 0.0 ) ) );
+  const c = hash21( i.add( vec2( 0.0, 1.0 ) ) );
+  const d = hash21( i.add( vec2( 1.0, 1.0 ) ) );
+  return mix( mix( a, b, u.x ), mix( c, d, u.x ), u.y );
+});
+
+// voronoiF1: JS-unrolled 3×3 neighbor search (identical to ocean's voronoiF1)
+// This is the critical fix — using a JavaScript for-of loop instead of TSL Loop
+// avoids the WGSL variable scoping issues that cause grid artifacts
+const voronoiF1 = Fn( ( [ p ] ) => {
+  const ip = floor( p ).toVar();
+  const fp = fract( p ).toVar();
+  const md = float( 10.0 ).toVar();
+  for ( const [ nx, ny ] of [[-1,-1],[0,-1],[1,-1],[-1,0],[0,0],[1,0],[-1,1],[0,1],[1,1]] ) {
+    const cellOffset = vec2( float( nx ), float( ny ) );
+    const rnd = hash22( ip.add( cellOffset ) );
+    md.assign( min( md, length( cellOffset.add( rnd ).sub( fp ) ) ) );
+  }
+  return md;
+});
+
+// worleyFbm: FBM of voronoi F1 — 5 octaves
+const worleyFbm = Fn( ( [ p_immutable ] ) => {
+  const p = p_immutable.toVar();
+  const value = float( 0.0 ).toVar();
+  const amp = float( 0.5 ).toVar();
+  const totalAmp = float( 0.0 ).toVar();
+  Loop( 5, () => {
+    value.addAssign( voronoiF1( p ).mul( amp ) );
+    totalAmp.addAssign( amp );
+    p.assign( p.mul( 2.0 ) );
+    amp.assign( amp.mul( 0.5 ) );
+  });
+  return value.div( totalAmp );
+});
+
+// valueFbm: FBM of value noise (identical to ocean's fbm) — for domain warp
+const valueFbm = Fn( ( [ p_immutable ] ) => {
+  const p = p_immutable.toVar();
+  const value = float( 0.0 ).toVar();
+  const amp = float( 1.0 ).toVar();
+  const totalAmp = float( 0.0 ).toVar();
+  Loop( 5, () => {
+    value.addAssign( amp.mul( valueNoise2D( p ) ) );
+    totalAmp.addAssign( amp );
+    p.assign( p.mul( 2.3 ) );
+    amp.assign( amp.mul( 0.4 ) );
+  });
+  return value.div( totalAmp );
+});
+
+// ─── Main Fragment Shader ───
+const voronoiFoam = Fn( () => {
+  // uv() gives 0..1 across the fullscreen quad, matching gl_FragCoord.xy / resolution
+  const baseUV = vec2( uv().x.mul( uAspect ), uv().y ).mul( uScale ).toVar();
+
+  // Domain warp using value-noise FBM (same technique as the ocean's domain warp)
+  const warpUV = baseUV.mul( uWarpScale ).toVar();
+  const w1 = valueFbm( warpUV );
+  const w2 = valueFbm( warpUV.add( vec2( 4.0, 4.0 ) ) );
+  baseUV.addAssign( vec2( w1.sub( 0.5 ), w2.sub( 0.5 ) ).mul( uWarpStrength ) );
+
+  // Worley FBM noise
+  const n = worleyFbm( baseUV ).toVar();
+
+  // Foam shaping: contrast + threshold
+  n.assign( pow( n, uContrast ) );
+  n.assign( smoothstep( uThreshold, uThreshold.add( uSoftness ), n ) );
+  n.mulAssign( uBrightness );
+
+  return vec4( vec3( n ), 1.0 );
+});
+
+// ─── Scene Setup ───
+const scene  = new THREE.Scene();
+const camera = new THREE.OrthographicCamera( -1, 1, 1, -1, 0, 1 );
+
+const renderer = new THREE.WebGPURenderer( { antialias: false } );
+renderer.setSize( window.innerWidth, window.innerHeight );
+renderer.setPixelRatio( window.devicePixelRatio );
+document.body.appendChild( renderer.domElement );
+
+await renderer.init();
+document.getElementById( 'fallback' ).classList.add( 'hidden' );
+
+// ─── Fullscreen Quad ───
+const material = new THREE.MeshBasicNodeMaterial();
+material.fragmentNode = voronoiFoam();
+
+const quad = new THREE.Mesh(
+  new THREE.PlaneGeometry( 2, 2 ),
+  material
+);
+scene.add( quad );
+
+// ─── Render Loop ───
+renderer.setAnimationLoop( () => {
+  renderer.render( scene, camera );
+});
+
+// ─── Resize ───
+window.addEventListener( 'resize', () => {
+  renderer.setSize( window.innerWidth, window.innerHeight );
+  uAspect.value = window.innerWidth / window.innerHeight;
+});
+
+// ─── UI Bindings ───
+function bind( id, uniRef ) {
+  const el  = document.getElementById( id );
+  const val = document.getElementById( id + 'Val' );
+  el.addEventListener( 'input', ( e ) => {
+    const v = parseFloat( e.target.value );
+    uniRef.value = v;
+    val.textContent = v.toFixed( v % 1 === 0 && v < 10 ? 1 : 2 );
+  });
+}
+
+bind( 'scale',        uScale );
+bind( 'warpStrength', uWarpStrength );
+bind( 'warpScale',    uWarpScale );
+bind( 'contrast',     uContrast );
+bind( 'brightness',   uBrightness );
+bind( 'threshold',    uThreshold );
+bind( 'softness',     uSoftness );
+
+</script>
+</body>
+</html>

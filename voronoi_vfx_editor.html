@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Voronoi VFX Editor - WebGPU TSL</title>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.3/dist/tweakpane.min.js"
+        }
+      }
+    </script>
+
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #0a0a0a;
+      }
+    </style>
+  </head>
+
+  <body>
+    <script type="module">
+      import * as THREE from "three/webgpu";
+
+      import {
+        Fn,
+        uv,
+        vec2,
+        vec3,
+        vec4,
+        float,
+        uniform,
+        fract,
+        floor,
+        sin,
+        dot,
+        length,
+        smoothstep,
+        min,
+      } from "three/tsl";
+
+      import { Pane } from "tweakpane";
+
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+      /* -----------------------------------------------------
+PARAMETERS
+----------------------------------------------------- */
+
+      const P = {
+        scale: 8,
+        speed: 1,
+        threshold: 0.4,
+        sharpness: 0.1,
+        glow: 2,
+        color: "#66ffff",
+      };
+
+      /* -----------------------------------------------------
+SCENE
+----------------------------------------------------- */
+
+      const scene = new THREE.Scene();
+
+      const camera = new THREE.PerspectiveCamera(
+        60,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        100,
+      );
+
+      camera.position.set(0, 2, 4);
+      camera.lookAt(0, 0, 0);
+
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.body.appendChild(renderer.domElement);
+      await renderer.init();
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+
+      const grid = new THREE.GridHelper(10, 10);
+      scene.add(grid);
+
+      /* -----------------------------------------------------
+UNIFORMS
+----------------------------------------------------- */
+
+      const u = {
+        time: uniform(0),
+
+        scale: uniform(P.scale),
+
+        speed: uniform(P.speed),
+
+        threshold: uniform(P.threshold),
+
+        sharpness: uniform(P.sharpness),
+
+        glow: uniform(P.glow),
+
+        color: uniform(new THREE.Color(P.color)),
+      };
+
+      /* -----------------------------------------------------
+VORONOI FUNCTION
+----------------------------------------------------- */
+
+      const voronoi = Fn(([p, scale]) => {
+        const g = p.mul(scale);
+
+        const id = floor(g);
+
+        const f = fract(g);
+
+        let minDist = float(1.0);
+
+        const sampleCell = (offset) => {
+          const cell = id.add(offset);
+          const rand = fract(
+            sin(dot(cell, vec2(127.1, 311.7))).mul(43758.5453),
+          );
+          const point = offset.add(rand);
+          const d = length(point.sub(f));
+          minDist.assign(min(minDist, d));
+        };
+
+        sampleCell(vec2(-1, -1));
+        sampleCell(vec2(-1, 0));
+        sampleCell(vec2(-1, 1));
+        sampleCell(vec2(0, -1));
+        sampleCell(vec2(0, 0));
+        sampleCell(vec2(0, 1));
+        sampleCell(vec2(1, -1));
+        sampleCell(vec2(1, 0));
+        sampleCell(vec2(1, 1));
+
+        return minDist;
+      });
+
+      /* -----------------------------------------------------
+SHADER
+----------------------------------------------------- */
+
+      const material = new THREE.MeshBasicNodeMaterial({
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+      });
+
+      material.colorNode = Fn(() => {
+        const v = uv();
+
+        const t = u.time.mul(u.speed);
+
+        const progress = fract(t);
+
+        const vf = voronoi(v, u.scale);
+
+        const inv = float(1).sub(vf);
+
+        const mask = smoothstep(
+          progress.sub(u.sharpness),
+          progress.add(u.sharpness),
+          inv,
+        );
+
+        const col = u.color.mul(mask).mul(u.glow);
+
+        return vec4(col, mask);
+      })();
+
+      /* -----------------------------------------------------
+MESH
+----------------------------------------------------- */
+
+      const geo = new THREE.PlaneGeometry(2, 2);
+
+      const mesh = new THREE.Mesh(geo, material);
+
+      scene.add(mesh);
+
+      /* -----------------------------------------------------
+UI
+----------------------------------------------------- */
+
+      const pane = new Pane({ title: "VFX Controls" });
+
+      pane
+        .addBinding(P, "scale", { min: 1, max: 20 })
+        .on("change", (e) => (u.scale.value = e.value));
+
+      pane
+        .addBinding(P, "speed", { min: 0, max: 5 })
+        .on("change", (e) => (u.speed.value = e.value));
+
+      pane
+        .addBinding(P, "threshold", { min: 0, max: 1 })
+        .on("change", (e) => (u.threshold.value = e.value));
+
+      pane
+        .addBinding(P, "sharpness", { min: 0.01, max: 0.5 })
+        .on("change", (e) => (u.sharpness.value = e.value));
+
+      pane
+        .addBinding(P, "glow", { min: 0, max: 5 })
+        .on("change", (e) => (u.glow.value = e.value));
+
+      pane
+        .addBinding(P, "color")
+        .on("change", (e) => u.color.value.set(e.value));
+
+      /* -----------------------------------------------------
+ANIMATION
+----------------------------------------------------- */
+
+      const timer = new THREE.Timer();
+
+      function animate(timestamp) {
+        requestAnimationFrame(animate);
+        if (typeof timestamp === "number") timer.update(timestamp);
+        u.time.value = timer.getElapsed();
+
+        controls.update();
+
+        renderer.render(scene, camera);
+      }
+
+      animate();
+
+      /* -----------------------------------------------------
+RESIZE
+----------------------------------------------------- */
+
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+
+        camera.updateProjectionMatrix();
+
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>
