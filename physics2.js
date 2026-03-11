@@ -25,7 +25,13 @@ const CUBE_HALF_EXTENT = 0.5;
  * @param {{ noDefaultGround?: boolean, noDefaultCubes?: boolean }} [options] - Optional. noDefaultGround: true for custom ground. noDefaultCubes: true to skip spawning default cubes.
  * @returns {{ physicsWorld: import("@dimforge/rapier3d").World, physicsCubes: Array<{ body: import("@dimforge/rapier3d").RigidBody, mesh: THREE.Mesh }> }}
  */
-export function createPhysicsWorld(RAPIER, scene, TERRAIN_SIZE, sampleHeight, options = {}) {
+export function createPhysicsWorld(
+  RAPIER,
+  scene,
+  TERRAIN_SIZE,
+  sampleHeight,
+  options = {},
+) {
   const gravity = { x: 0, y: -9.81, z: 0 };
   const physicsWorld = new RAPIER.World(gravity);
 
@@ -43,36 +49,40 @@ export function createPhysicsWorld(RAPIER, scene, TERRAIN_SIZE, sampleHeight, op
 
   const physicsCubes = [];
   if (!options.noDefaultCubes) {
-  const cubePositions = CUBE_POSITIONS.map(([x, _, z]) => [
-    x,
-    sampleHeight(x, z) + CUBE_SPAWN_HEIGHT,
-    z,
-  ]);
-  const cubeGeo = new THREE.BoxGeometry(
-    CUBE_HALF_EXTENT * 2,
-    CUBE_HALF_EXTENT * 2,
-    CUBE_HALF_EXTENT * 2,
-  );
-  const cubeMat = new THREE.MeshStandardMaterial({
-    color: 0x4488ff,
-    roughness: 0.6,
-    metalness: 0.1,
-  });
-  for (const [px, py, pz] of cubePositions) {
-    const bodyDesc = RAPIER.RigidBodyDesc.dynamic().setTranslation(px, py, pz);
-    const body = physicsWorld.createRigidBody(bodyDesc);
-    const colliderDesc = RAPIER.ColliderDesc.cuboid(
-      CUBE_HALF_EXTENT,
-      CUBE_HALF_EXTENT,
-      CUBE_HALF_EXTENT,
+    const cubePositions = CUBE_POSITIONS.map(([x, _, z]) => [
+      x,
+      sampleHeight(x, z) + CUBE_SPAWN_HEIGHT,
+      z,
+    ]);
+    const cubeGeo = new THREE.BoxGeometry(
+      CUBE_HALF_EXTENT * 2,
+      CUBE_HALF_EXTENT * 2,
+      CUBE_HALF_EXTENT * 2,
     );
-    physicsWorld.createCollider(colliderDesc, body);
-    const mesh = new THREE.Mesh(cubeGeo, cubeMat.clone());
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    scene.add(mesh);
-    physicsCubes.push({ body, mesh });
-  }
+    const cubeMat = new THREE.MeshStandardMaterial({
+      color: 0x4488ff,
+      roughness: 0.6,
+      metalness: 0.1,
+    });
+    for (const [px, py, pz] of cubePositions) {
+      const bodyDesc = RAPIER.RigidBodyDesc.dynamic().setTranslation(
+        px,
+        py,
+        pz,
+      );
+      const body = physicsWorld.createRigidBody(bodyDesc);
+      const colliderDesc = RAPIER.ColliderDesc.cuboid(
+        CUBE_HALF_EXTENT,
+        CUBE_HALF_EXTENT,
+        CUBE_HALF_EXTENT,
+      );
+      physicsWorld.createCollider(colliderDesc, body);
+      const mesh = new THREE.Mesh(cubeGeo, cubeMat.clone());
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      scene.add(mesh);
+      physicsCubes.push({ body, mesh });
+    }
   }
 
   return { physicsWorld, physicsCubes };
@@ -86,12 +96,15 @@ export function createPhysicsWorld(RAPIER, scene, TERRAIN_SIZE, sampleHeight, op
  * @param {{ enableSnapToGround?: boolean, characterOffset?: number, maxSlopeClimbAngle?: number, minSlopeSlideAngle?: number }} [options] - Optional. enableSnapToGround: false for flat terrain. maxSlopeClimbAngle/minSlopeSlideAngle in radians for slope handling.
  * @returns {{ playerBody: import("@dimforge/rapier3d").RigidBody, playerCollider: import("@dimforge/rapier3d").Collider, characterController: import("@dimforge/rapier3d").CharacterController }}
  */
-export function createPlayerController(RAPIER, physicsWorld, charPos, PARAMS, options = {}) {
+export function createPlayerController(
+  RAPIER,
+  physicsWorld,
+  charPos,
+  PARAMS,
+  options = {},
+) {
   const capR = PARAMS.capsuleRadius;
-  const capHalfH = Math.max(
-    0.1,
-    (PARAMS.characterHeight - 2 * capR) / 2,
-  );
+  const capHalfH = Math.max(0.1, (PARAMS.characterHeight - 2 * capR) / 2);
   const playerBodyDesc =
     RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(
       charPos.x,
@@ -104,7 +117,8 @@ export function createPlayerController(RAPIER, physicsWorld, charPos, PARAMS, op
     playerBody,
   );
   const characterOffset = options.characterOffset ?? 0.01;
-  const characterController = physicsWorld.createCharacterController(characterOffset);
+  const characterController =
+    physicsWorld.createCharacterController(characterOffset);
   if (options.enableSnapToGround !== false) {
     characterController.enableSnapToGround(0.5);
   }
@@ -146,17 +160,11 @@ export function createPhysicsDebug(RAPIER, scene, physicsWorld) {
           geo = new THREE.BoxGeometry(h.x * 2, h.y * 2, h.z * 2);
         } else if (shape.type === st.Ball && shape.radius != null) {
           geo = new THREE.SphereGeometry(shape.radius, 8, 6);
-        } else if (
-          shape.type === st.Capsule &&
-          shape.halfHeight != null
-        ) {
+        } else if (shape.type === st.Capsule && shape.halfHeight != null) {
           const halfH = shape.halfHeight;
           const r = shape.radius;
           geo = new THREE.CapsuleGeometry(r, halfH * 2, 4, 8);
-        } else if (
-          shape.type === st.Cylinder &&
-          shape.halfHeight != null
-        ) {
+        } else if (shape.type === st.Cylinder && shape.halfHeight != null) {
           const halfH = shape.halfHeight;
           const r = shape.radius;
           geo = new THREE.CylinderGeometry(r, r, halfH * 2, 8);
@@ -232,7 +240,9 @@ export function resolveKinematicOverlap(
   const halfH = isCrouching ? crouchHalfH : capHalfH;
   const charBottom = charPos.y - halfH - capR;
   const charRadius = 0.05;
-  let totalDx = 0, totalDy = 0, totalDz = 0;
+  let totalDx = 0,
+    totalDy = 0,
+    totalDz = 0;
   let maxPushUp = 0;
   let isOnKinematicPlatform = false;
   let snapToY = null;
@@ -249,7 +259,9 @@ export function resolveKinematicOverlap(
     if (!shape) return;
 
     const st = RAPIER.ShapeType;
-    let hx = 0, hy = 0, hz = 0;
+    let hx = 0,
+      hy = 0,
+      hz = 0;
 
     if (shape.type === st.Cuboid && shape.halfExtents) {
       hx = shape.halfExtents.x;
@@ -275,8 +287,11 @@ export function resolveKinematicOverlap(
     const platMaxZ = pos.z + hz + charRadius;
     const platTop = pos.y + hy;
 
-    const inXZ = charPos.x >= platMinX && charPos.x <= platMaxX &&
-                 charPos.z >= platMinZ && charPos.z <= platMaxZ;
+    const inXZ =
+      charPos.x >= platMinX &&
+      charPos.x <= platMaxX &&
+      charPos.z >= platMinZ &&
+      charPos.z <= platMaxZ;
     if (!inXZ) return;
 
     // Only treat platform as a floor if its top is at or below the character centre.
@@ -285,7 +300,8 @@ export function resolveKinematicOverlap(
     if (!isFloor) return;
 
     const overlapping = charBottom < platTop + 0.02;
-    const floatingAbove = charBottom > platTop + 0.02 && charBottom <= platTop + 0.05;
+    const floatingAbove =
+      charBottom > platTop + 0.02 && charBottom <= platTop + 0.05;
     if (overlapping) {
       const overlap = platTop - charBottom + 0.02;
       if (overlap > 0.03 && overlap > maxPushUp) {
@@ -308,7 +324,8 @@ export function resolveKinematicOverlap(
   if (isOnKinematicPlatform && platformBody && dt > 0) {
     const pos = platformBody.translation();
     const handle = platformBody.handle;
-    let dx = 0, dz = 0;
+    let dx = 0,
+      dz = 0;
     if (lastPlatformPos && handle in lastPlatformPos) {
       const last = lastPlatformPos[handle];
       dx = pos.x - last.x;
@@ -318,7 +335,8 @@ export function resolveKinematicOverlap(
       dx = vel.x * dt;
       dz = vel.z * dt;
     }
-    if (lastPlatformPos) lastPlatformPos[handle] = { x: pos.x, y: pos.y, z: pos.z };
+    if (lastPlatformPos)
+      lastPlatformPos[handle] = { x: pos.x, y: pos.y, z: pos.z };
     totalDx += dx;
     totalDz += dz;
   }
