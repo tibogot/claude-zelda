@@ -1,0 +1,1698 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Anime Water Scene — WebGPU + TSL</title>
+    <style>
+      @import url("https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap");
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        background: #2a3548;
+        overflow: hidden;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #controls {
+        position: fixed;
+        top: 12px;
+        right: 12px;
+        width: 240px;
+        background: rgba(20, 28, 42, 0.92);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(100, 160, 220, 0.2);
+        border-radius: 8px;
+        padding: 12px 14px;
+        font-family: "DM Mono", monospace;
+        color: #c0d4e8;
+        font-size: 11px;
+        z-index: 10;
+        max-height: calc(100vh - 24px);
+        overflow-y: auto;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(100, 160, 220, 0.25) transparent;
+      }
+      #controls::-webkit-scrollbar {
+        width: 4px;
+      }
+      #controls::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      #controls::-webkit-scrollbar-thumb {
+        background: rgba(100, 160, 220, 0.3);
+        border-radius: 2px;
+      }
+      #controls h2 {
+        font-size: 11px;
+        font-weight: 500;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: #64a0dc;
+        margin-bottom: 10px;
+        padding-bottom: 6px;
+        border-bottom: 1px solid rgba(100, 160, 220, 0.2);
+      }
+      .ctrl-group {
+        margin-bottom: 6px;
+      }
+      .ctrl-group label {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 2px;
+        color: #8a9cb0;
+        font-size: 10px;
+      }
+      .ctrl-group label span {
+        color: #64a0dc;
+        font-weight: 500;
+      }
+      .ctrl-group input[type="range"] {
+        appearance: none;
+        -webkit-appearance: none;
+        width: 100%;
+        height: 4px;
+        border-radius: 2px;
+        background: rgba(100, 160, 220, 0.15);
+        outline: none;
+      }
+      .ctrl-group input[type="range"]::-webkit-slider-thumb {
+        appearance: none;
+        -webkit-appearance: none;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #64a0dc;
+        cursor: pointer;
+      }
+      .ctrl-group input[type="color"] {
+        appearance: none;
+        -webkit-appearance: none;
+        border: 1px solid rgba(100, 160, 220, 0.25);
+        border-radius: 4px;
+        width: 100%;
+        height: 20px;
+        cursor: pointer;
+        background: transparent;
+        padding: 0;
+      }
+      .section-label {
+        font-size: 9px;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: rgba(100, 160, 220, 0.5);
+        margin: 10px 0 4px;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="controls">
+      <h2>Anime Water</h2>
+      <div class="section-label">Scene</div>
+      <div class="ctrl-group">
+        <label>Exposure <span id="exposureVal">1.40</span></label>
+        <input
+          type="range"
+          id="exposure"
+          min="0.5"
+          max="2.5"
+          step="0.05"
+          value="1.4"
+        />
+      </div>
+      <div class="ctrl-group">
+        <label>Background</label>
+        <input type="color" id="bgColor" value="#3a5070" />
+      </div>
+      <div class="section-label">Lighting</div>
+      <div class="ctrl-group">
+        <label>Ambient <span id="ambientVal">1.40</span></label>
+        <input
+          type="range"
+          id="ambient"
+          min="0"
+          max="3"
+          step="0.05"
+          value="1.4"
+        />
+      </div>
+      <div class="ctrl-group">
+        <label>Sun <span id="sunVal">5.0</span></label>
+        <input type="range" id="sun" min="0" max="12" step="0.25" value="5" />
+      </div>
+      <div class="ctrl-group">
+        <label>Fill <span id="fillVal">2.2</span></label>
+        <input type="range" id="fill" min="0" max="5" step="0.1" value="2.2" />
+      </div>
+      <div class="ctrl-group">
+        <label>Rim <span id="rimVal">2.2</span></label>
+        <input type="range" id="rim" min="0" max="5" step="0.1" value="2.2" />
+      </div>
+      <div class="section-label">Water — Noise (reduce jitter)</div>
+      <div class="ctrl-group">
+        <label>Noise time scale <span id="noiseTimeVal">0.6</span></label>
+        <input
+          type="range"
+          id="noiseTimeScale"
+          min="0.1"
+          max="1.5"
+          step="0.05"
+          value="0.6"
+        />
+      </div>
+      <div class="ctrl-group">
+        <label>Noise scale <span id="noiseScaleVal">1.52</span></label>
+        <input
+          type="range"
+          id="noiseScale"
+          min="0.3"
+          max="4"
+          step="0.02"
+          value="1.52"
+        />
+      </div>
+      <div class="ctrl-group">
+        <label>Flow Z <span id="flowZVal">0.08</span></label>
+        <input
+          type="range"
+          id="flowZ"
+          min="0"
+          max="0.3"
+          step="0.01"
+          value="0.08"
+        />
+      </div>
+      <div class="ctrl-group">
+        <label>Cell speed <span id="cellSpeedVal">0.45</span></label>
+        <input
+          type="range"
+          id="cellSpeed"
+          min="0.05"
+          max="1.2"
+          step="0.05"
+          value="0.45"
+        />
+      </div>
+      <div class="ctrl-group">
+        <label>Distort <span id="distortVal">0.35</span></label>
+        <input
+          type="range"
+          id="distort"
+          min="0"
+          max="1"
+          step="0.02"
+          value="0.35"
+        />
+      </div>
+      <div class="ctrl-group">
+        <label>Edge threshold <span id="edgeVal">0.067</span></label>
+        <input
+          type="range"
+          id="edgeThreshold"
+          min="0.02"
+          max="0.2"
+          step="0.005"
+          value="0.067"
+        />
+      </div>
+      <div class="section-label">Water — Colors</div>
+      <div class="ctrl-group">
+        <label>Deep</label>
+        <input type="color" id="deepColor" value="#3a6a8c" />
+      </div>
+      <div class="ctrl-group">
+        <label>Mid</label>
+        <input type="color" id="midColor" value="#7ed4f8" />
+      </div>
+      <div class="ctrl-group">
+        <label>Highlight</label>
+        <input type="color" id="highlightColor" value="#e8f8ff" />
+      </div>
+      <div class="ctrl-group">
+        <label>Water opacity <span id="waterOpacityVal">0.78</span></label>
+        <input
+          type="range"
+          id="waterOpacity"
+          min="0.2"
+          max="1"
+          step="0.02"
+          value="0.78"
+        />
+      </div>
+      <div class="section-label">Ripples (object touch)</div>
+      <div class="ctrl-group">
+        <label>Strength <span id="rippleStrVal">5.5</span></label>
+        <input
+          type="range"
+          id="rippleStrength"
+          min="0"
+          max="15"
+          step="0.5"
+          value="5.5"
+        />
+      </div>
+      <div class="ctrl-group">
+        <label>Width <span id="rippleWidthVal">0.12</span></label>
+        <input
+          type="range"
+          id="rippleWidth"
+          min="0.02"
+          max="0.4"
+          step="0.01"
+          value="0.12"
+        />
+      </div>
+      <div class="section-label">Waterline / Foam (object edge)</div>
+      <div class="ctrl-group">
+        <label
+          >Object contact thinness <span id="lineThinVal">0.045</span></label
+        >
+        <input
+          type="range"
+          id="lineThinness"
+          min="0.01"
+          max="0.15"
+          step="0.005"
+          value="0.045"
+        />
+      </div>
+      <div class="ctrl-group">
+        <label>Foam color (contact)</label>
+        <input type="color" id="foamColor" value="#e8f4ff" />
+      </div>
+      <div class="ctrl-group">
+        <label>Intensity <span id="waterlineIntVal">2.5</span></label>
+        <input
+          type="range"
+          id="waterlineIntensity"
+          min="0"
+          max="4"
+          step="0.1"
+          value="2.5"
+        />
+      </div>
+      <div class="ctrl-group">
+        <label>Line width <span id="lineWidthVal">0.70</span></label>
+        <input
+          type="range"
+          id="lineWidth"
+          min="0.05"
+          max="1"
+          step="0.02"
+          value="0.7"
+        />
+      </div>
+      <div class="ctrl-group">
+        <label>Glow width <span id="glowWidthVal">2.0</span></label>
+        <input
+          type="range"
+          id="glowWidth"
+          min="0.2"
+          max="5"
+          step="0.1"
+          value="2"
+        />
+      </div>
+      <div class="section-label">Wave rings (PDE)</div>
+      <div class="ctrl-group">
+        <label>Ring opacity <span id="ringOpacityVal">1.0</span></label>
+        <input
+          type="range"
+          id="ringOpacity"
+          min="0"
+          max="1.5"
+          step="0.05"
+          value="1"
+        />
+      </div>
+      <div class="ctrl-group">
+        <label>Grad scale <span id="gradScaleVal">1.5</span></label>
+        <input
+          type="range"
+          id="gradScale"
+          min="0.5"
+          max="4"
+          step="0.1"
+          value="1.5"
+        />
+      </div>
+      <div class="section-label">Sparkles</div>
+      <div class="ctrl-group">
+        <label>Intensity <span id="sparkleVal">3</span></label>
+        <input
+          type="range"
+          id="sparkleIntensity"
+          min="0"
+          max="8"
+          step="0.5"
+          value="3"
+        />
+      </div>
+    </div>
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import {
+        Fn,
+        uniform,
+        float,
+        vec2,
+        vec3,
+        vec4,
+        uv,
+        mix,
+        smoothstep,
+        step,
+        floor,
+        fract,
+        sin,
+        cos,
+        dot,
+        length,
+        min,
+        max,
+        exp,
+        abs,
+        positionWorld,
+        positionLocal,
+        positionView,
+        normalize,
+        pow,
+        saturate,
+        color,
+        clamp,
+        texture,
+        screenUV,
+        cameraPosition,
+        vertexColor,
+      } from "three/tsl";
+
+      const WATER_Y = -0.1;
+      const WAVE_RES = 512;
+      const TEXEL = 1 / WAVE_RES;
+      const MAX_RIPPLES = 8;
+      const MAX_SPARKLES = 300;
+
+      // Placeholder textures so TSL texture() always receives a valid Texture (WebGPU)
+      const placeholderDepth = new THREE.DepthTexture(2, 2);
+      const placeholderColor = new THREE.DataTexture(
+        new Uint8Array([0, 0, 0, 0]),
+        2,
+        2,
+      );
+      placeholderColor.needsUpdate = true;
+
+      // ─── Ripple store (event bus for water surface) ───────────────────────────
+      const rippleBuffer = [];
+      const rippleConfig = {
+        speed: 1.5,
+        width: 0.12,
+        decay: 1.6,
+        strength: 5.5,
+        rings: 2,
+        spacing: 1.0,
+      };
+      function rippleAdd(x, z, t) {
+        if (rippleBuffer.length >= MAX_RIPPLES) rippleBuffer.shift();
+        rippleBuffer.push({ x, z, t });
+      }
+
+      // ─── Water objects registry (for depth intersection + wave injection) ──────
+      const waterObjectsRegistry = [];
+      function registerWaterObject(entry) {
+        waterObjectsRegistry.push(entry);
+      }
+      function getWaterObjects() {
+        return waterObjectsRegistry.filter((o) => o.ref && o.ref.current);
+      }
+
+      // ─── TSL: hash and Voronoi (same style as waterfall_pool_v7) ────────────
+      const hash22 = Fn(([p]) => {
+        const px = dot(p, vec2(127.1, 311.7));
+        const py = dot(p, vec2(269.5, 183.3));
+        return fract(sin(vec2(px, py)).mul(43758.5453));
+      });
+
+      const neighbors = [
+        [-1, -1],
+        [0, -1],
+        [1, -1],
+        [-1, 0],
+        [0, 0],
+        [1, 0],
+        [-1, 1],
+        [0, 1],
+        [1, 1],
+      ];
+
+      const smin = Fn(([a, b, k]) => {
+        const h = max(k.sub(abs(a.sub(b))), float(0)).div(k);
+        return min(a, b).sub(h.mul(h).mul(h).mul(k).div(6));
+      });
+
+      const cellPt = Fn(([seed, uTime, cellSpeed]) => {
+        return float(0.5).add(
+          float(0.5).mul(
+            sin(uTime.mul(cellSpeed).add(float(6.2831).mul(seed))),
+          ),
+        );
+      });
+
+      const voronoiF1 = Fn(([p, uTime, cellSpeed]) => {
+        const ip = floor(p);
+        const fp = fract(p);
+        const md = float(10.0).toVar();
+        const neighbors = [
+          [-1, -1],
+          [0, -1],
+          [1, -1],
+          [-1, 0],
+          [0, 0],
+          [1, 0],
+          [-1, 1],
+          [0, 1],
+          [1, 1],
+        ];
+        for (const [nx, ny] of neighbors) {
+          const n = vec2(float(nx), float(ny));
+          const rnd = hash22(ip.add(n));
+          const pt = vec2(
+            cellPt(rnd.x, uTime, cellSpeed),
+            cellPt(rnd.y, uTime, cellSpeed),
+          );
+          const dist = length(n.add(pt).sub(fp));
+          md.assign(min(md, dist));
+        }
+        return md;
+      });
+
+      const voronoiSmoothF1 = Fn(([p, uTime, cellSpeed, smoothness]) => {
+        const ip = floor(p);
+        const fp = fract(p);
+        const res = float(10.0).toVar();
+        for (const [nx, ny] of neighbors) {
+          const n = vec2(float(nx), float(ny));
+          const rnd = hash22(ip.add(n));
+          const pt = vec2(
+            cellPt(rnd.x, uTime, cellSpeed),
+            cellPt(rnd.y, uTime, cellSpeed),
+          );
+          const dist = length(n.add(pt).sub(fp));
+          res.assign(smin(res, dist, smoothness));
+        }
+        return res;
+      });
+
+      const nHash = Fn(([p]) => {
+        const pp = fract(p.mul(vec2(127.1, 311.7)));
+        const d = dot(pp, pp.add(45.32));
+        return fract(pp.x.add(d).mul(pp.y.add(d)));
+      });
+
+      const vnoise2 = Fn(([p]) => {
+        const i = floor(p);
+        const f = fract(p);
+        const uu = f.mul(f).mul(float(3).sub(f.mul(2)));
+        const n00 = nHash(i);
+        const n10 = nHash(i.add(vec2(1, 0)));
+        const n01 = nHash(i.add(vec2(0, 1)));
+        const n11 = nHash(i.add(vec2(1, 1)));
+        return mix(mix(n00, n10, uu.x), mix(n01, n11, uu.x), uu.y);
+      });
+
+      const fbm2 = Fn(([p]) => {
+        const v = vnoise2(p).mul(0.5).toVar();
+        p = p.mul(2);
+        v.addAssign(vnoise2(p).mul(0.25));
+        return v;
+      });
+
+      async function init() {
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.4;
+        document.body.appendChild(renderer.domElement);
+        await renderer.init();
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color("#3a5070");
+        const camera = new THREE.PerspectiveCamera(
+          45,
+          window.innerWidth / window.innerHeight,
+          0.1,
+          500,
+        );
+        camera.position.set(2, 2, 8);
+        camera.lookAt(0, -0.5, 0);
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+
+        const clock = new THREE.Timer();
+
+        // ─── Lighting: strong so scene reads like reference (water + objects clearly lit)
+        const ambientLight = new THREE.AmbientLight(0xc8dcf8, 1.4);
+        scene.add(ambientLight);
+        const sunLight = new THREE.DirectionalLight(0xfffaf0, 5);
+        sunLight.position.set(6, 14, 8);
+        scene.add(sunLight);
+        const fillLight = new THREE.DirectionalLight(0xa0c0e8, 2.2);
+        fillLight.position.set(-6, 6, -4);
+        scene.add(fillLight);
+        const rimLight = new THREE.DirectionalLight(0xd8ecff, 2.2);
+        rimLight.position.set(0, 5, -12);
+        scene.add(rimLight);
+
+        // ─── Water surface uniforms (for TSL) ───────────────────────────────────
+        const uTime = uniform(0);
+        const uScale = uniform(0.3);
+        const uSmoothness = uniform(0.55);
+        const uEdgeThreshold = uniform(0.067);
+        const uEdgeSoftness = uniform(0.01);
+        const uFlowX = uniform(0);
+        const uFlowZ = uniform(0.08);
+        const uCellSpeed = uniform(0.45);
+        const uNoiseScale = uniform(1.52);
+        const uNoiseFlowSpeed = uniform(0.2);
+        const uNoiseTimeScale = uniform(0.6);
+        const uDistortAmount = uniform(0.35);
+        const uDeepColor = uniform(new THREE.Color("#3a6a8c"));
+        const uMidColor = uniform(new THREE.Color("#7ed4f8"));
+        const uMidPos = uniform(0.084);
+        const uHighlight = uniform(new THREE.Color("#e8f8ff"));
+        const uOpacity = uniform(1);
+        const uDeepOpacity = uniform(0.78);
+        const uFadeDistance = uniform(90);
+        const uFadeStrength = uniform(1.4);
+        const uCamXZ = uniform(new THREE.Vector2(0, 0));
+        const uRippleCenters = Array.from({ length: MAX_RIPPLES }, () =>
+          uniform(new THREE.Vector2(0, 0)),
+        );
+        const uRippleTimes = Array.from({ length: MAX_RIPPLES }, () =>
+          uniform(0),
+        );
+        const uRippleCount = uniform(0);
+        const uRippleSpeed = uniform(1.5);
+        const uRippleWidth = uniform(0.12);
+        const uRippleStrength = uniform(5.5);
+        const uRippleDecay = uniform(1.6);
+        const uRippleRings = uniform(2);
+        const uRippleSpacing = uniform(1.0);
+
+        // ─── Depth (for waterline/foam in water shader so visible from any angle) ─
+        const depthRT = new THREE.WebGLRenderTarget(512, 512);
+        depthRT.depthBuffer = true;
+        depthRT.depthTexture = new THREE.DepthTexture(512, 512);
+        depthRT.depthTexture.type = THREE.UnsignedIntType;
+        const depthScene = new THREE.Scene();
+        const depthMat = new THREE.MeshBasicNodeMaterial({
+          color: 0x000000,
+          side: THREE.FrontSide,
+        });
+        const depthGroups = new Map();
+        const depthTexNode = texture(placeholderDepth, screenUV);
+        const uDepthNear = uniform(0.1);
+        const uDepthFar = uniform(1000);
+        const uLineWidth = uniform(0.7);
+        const uGlowWidth = uniform(2.5);
+        const uWaterlineIntensity = uniform(2.5);
+        const uLineColor = uniform(new THREE.Color("#ffffff"));
+        const uGlowColor = uniform(new THREE.Color("#88ccff"));
+        // Convert raw depth [0,1] to linear view-space distance (match original WaterDepthIntersection)
+        const linearDepth = Fn(([raw, near, far]) => {
+          const z = raw.mul(2).sub(1);
+          const denom = far.add(near).sub(z.mul(far.sub(near)));
+          return float(2).mul(near).mul(far).div(denom);
+        });
+        // Per-fragment water depth: view-space Z (camera looks down -Z, so linear depth = -positionView.z)
+        const waterLinearDepth = Fn(() => positionView.z.negate());
+
+        // Contact foam on objects (baked into object shader like original DragonBalls/index.tsx)
+        const uWaterY = uniform(WATER_Y);
+        const uWaterLineThinness = uniform(0.045);
+        const uWaterLineColor = uniform(new THREE.Color("#e8f4ff"));
+        const uWaterLineGlowWidth = uniform(0.08);
+        const contactFoamBand = Fn(() => {
+          const diff = abs(positionWorld.y.sub(uWaterY));
+          const line = float(1).sub(
+            smoothstep(float(0), uWaterLineThinness, diff),
+          );
+          const glow = exp(
+            diff.div(max(uWaterLineGlowWidth, 0.001)).mul(float(-1)),
+          );
+          return max(line, glow.mul(0.6)).saturate();
+        });
+
+        // World XZ from position (water plane is XZ at Y = WATER_Y)
+        // Wrap in Fn() so .toVar() / .addAssign() have a valid TSL stack
+        const waterFrag = Fn(() => {
+          const worldXZ = positionWorld.xz;
+          const tNoise = uTime.mul(uNoiseTimeScale);
+          const noiseUV = worldXZ
+            .mul(uNoiseScale)
+            .add(vec2(tNoise.mul(uNoiseFlowSpeed), 0));
+          const noiseFac = fbm2(noiseUV);
+          const distort = vec2(noiseFac.sub(0.5), noiseFac.sub(0.5)).mul(
+            uDistortAmount,
+          );
+
+          const uvVoro = worldXZ
+            .mul(uScale)
+            .add(vec2(uFlowX.mul(tNoise), uFlowZ.mul(tNoise)))
+            .add(distort);
+          const f1 = voronoiF1(uvVoro, tNoise, uCellSpeed);
+          const sf1 = voronoiSmoothF1(uvVoro, tNoise, uCellSpeed, uSmoothness);
+          const edge = f1.sub(sf1);
+          const t = smoothstep(
+            uEdgeThreshold.sub(uEdgeSoftness),
+            uEdgeThreshold.add(uEdgeSoftness),
+            edge,
+          );
+          const safeMP = max(uMidPos, 0.0001);
+          const seg0 = clamp(t.div(safeMP), 0, 1);
+          const seg1 = clamp(
+            t.sub(safeMP).div(float(1).sub(safeMP).add(0.0001)),
+            0,
+            1,
+          );
+          const inSeg1 = smoothstep(safeMP.sub(0.001), safeMP.add(0.001), t);
+          const baseColor = mix(
+            mix(uDeepColor, uMidColor, seg0),
+            mix(uMidColor, uHighlight, seg1),
+            inSeg1,
+          );
+
+          const rippleAcc = float(0).toVar();
+          for (let i = 0; i < MAX_RIPPLES; i++) {
+            const isOn = step(float(i).add(0.5), uRippleCount);
+            const elapsed = max(uTime.sub(uRippleTimes[i]), 0);
+            const d = length(worldXZ.sub(uRippleCenters[i]));
+            for (let r = 0; r < 4; r++) {
+              const rIsOn = smoothstep(
+                float(r).sub(0.5),
+                float(r).add(0.5),
+                uRippleRings,
+              );
+              const re = max(elapsed.sub(float(r).mul(uRippleSpacing)), 0);
+              const ringR = re.mul(uRippleSpeed);
+              const ringDist = abs(d.sub(ringR));
+              const ring = float(1).sub(
+                smoothstep(float(0), uRippleWidth, ringDist),
+              );
+              const fade = exp(re.mul(float(-1).mul(uRippleDecay)));
+              rippleAcc.addAssign(ring.mul(fade).mul(isOn).mul(rIsOn));
+            }
+          }
+          const ripple = saturate(rippleAcc.mul(uRippleStrength));
+          const waterColor = mix(baseColor, uHighlight, ripple);
+
+          const distFromCam = length(worldXZ.sub(vec2(uCamXZ.x, uCamXZ.y)));
+          const fade = float(1).sub(
+            pow(saturate(distFromCam.div(uFadeDistance)), uFadeStrength),
+          );
+          const waterAlpha = mix(uDeepOpacity, 1, max(t, ripple))
+            .mul(uOpacity)
+            .mul(fade);
+
+          // Waterline/foam at object-water contact (screen-space: compare object depth to THIS fragment's depth)
+          const rawScene = depthTexNode.r;
+          const sceneD = linearDepth(rawScene, uDepthNear, uDepthFar);
+          const waterD = waterLinearDepth();
+          const diff = abs(sceneD.sub(waterD));
+          const line = float(1).sub(smoothstep(float(0), uLineWidth, diff));
+          const glow = exp(diff.div(max(uGlowWidth, 0.001)).mul(float(-1)));
+          const foamAlpha = max(line, glow.mul(0.5))
+            .saturate()
+            .mul(uWaterlineIntensity)
+            .saturate();
+          const foamCol = mix(uGlowColor, uLineColor, line);
+          const mask = smoothstep(float(0.9999), float(0.999), rawScene);
+          const finalColor = waterColor
+            .add(foamCol.mul(foamAlpha).mul(mask))
+            .saturate();
+
+          return vec4(finalColor, waterAlpha);
+        });
+
+        const fragOut = waterFrag();
+        const waterMaterial = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          depthWrite: false,
+          side: THREE.FrontSide,
+          colorNode: fragOut.rgb,
+          opacityNode: fragOut.a,
+        });
+
+        const waterPlane = new THREE.Mesh(
+          new THREE.PlaneGeometry(600, 600),
+          waterMaterial,
+        );
+        waterPlane.rotation.x = -Math.PI / 2;
+        waterPlane.position.set(0, WATER_Y, 0);
+        waterPlane.frustumCulled = false;
+        waterPlane.renderOrder = 2;
+        scene.add(waterPlane);
+
+        // ─── Wave simulation (injection + wave update + display) ─────────────────
+        const injRT = new THREE.WebGLRenderTarget(WAVE_RES, WAVE_RES, {
+          type: THREE.HalfFloatType,
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+        });
+        const injCamera = new THREE.OrthographicCamera(
+          -10,
+          10,
+          10,
+          -10,
+          0.1,
+          200,
+        );
+        injCamera.up.set(0, 0, -1);
+
+        const uInjWaterY = uniform(WATER_Y);
+        const uInjBandWidth = uniform(1.0);
+        const injMat = new THREE.MeshBasicNodeMaterial({
+          side: THREE.DoubleSide,
+          transparent: true,
+          depthWrite: true,
+        });
+        // Match original: exact silhouette at water surface — band mask (0 outside band), strength 1 at water
+        const injFrag = Fn(() => {
+          const d = abs(positionWorld.y.sub(uInjWaterY));
+          const insideBand = step(d, uInjBandWidth);
+          const s = float(1)
+            .sub(smoothstep(float(0), uInjBandWidth, d))
+            .mul(insideBand);
+          return vec4(s, float(0), float(0), float(1));
+        });
+        injMat.colorNode = injFrag().rgb;
+        injMat.opacityNode = injFrag().a;
+        const injScene = new THREE.Scene();
+        injScene.background = new THREE.Color(0x000000);
+        const injGroups = new Map();
+
+        const waveRTs = [
+          new THREE.WebGLRenderTarget(WAVE_RES, WAVE_RES, {
+            type: THREE.HalfFloatType,
+            minFilter: THREE.LinearFilter,
+            magFilter: THREE.LinearFilter,
+          }),
+          new THREE.WebGLRenderTarget(WAVE_RES, WAVE_RES, {
+            type: THREE.HalfFloatType,
+            minFilter: THREE.LinearFilter,
+            magFilter: THREE.LinearFilter,
+          }),
+        ];
+        let pingIdx = 0;
+        let lastInjectTime = -Infinity;
+        let timeAccum = 0;
+        let smoothedDispCx = 0;
+        let smoothedDispCz = 0;
+        const FIXED_STEP = 1 / 60;
+        const injectInterval = 0.05;
+        const waveSpeed = 0.04;
+        const waveDamping = 0.993;
+        const borderWidth = 0.06;
+        const injectStr = 0.25;
+        const injectAmp = 0.7;
+        const bandWidth = 0.4;
+        const waveSizeMul = 5;
+
+        const uWaveTexelSize = uniform(TEXEL);
+        const uWaveSpeed = uniform(waveSpeed);
+        const uWaveDamping = uniform(waveDamping);
+        const uWaveInjectStr = uniform(0);
+        const uWaveInjectAmp = uniform(injectAmp);
+        const uWaveBorderWidth = uniform(borderWidth);
+        // TSL: pass Texture directly; use .sample(uv) for different coords, update .value each frame
+        const waveTexNode = texture(placeholderColor, vec2(0.5, 0.5));
+        const injTexNode = texture(placeholderColor, vec2(0.5, 0.5));
+        const waveUpdateFn = Fn(() => {
+          const uv = positionLocal.xy.mul(0.5).add(0.5);
+          const cur = waveTexNode.sample(uv).r;
+          const prev = waveTexNode.sample(uv).g;
+          const left = waveTexNode.sample(
+            uv.add(vec2(float(-1).mul(uWaveTexelSize), 0)),
+          ).r;
+          const right = waveTexNode.sample(uv.add(vec2(uWaveTexelSize, 0))).r;
+          const up = waveTexNode.sample(uv.add(vec2(0, uWaveTexelSize))).r;
+          const down = waveTexNode.sample(
+            uv.add(vec2(0, float(-1).mul(uWaveTexelSize))),
+          ).r;
+          const laplacian = left.add(right).add(up).add(down).sub(cur.mul(4));
+          let next = float(2).mul(cur).sub(prev).add(uWaveSpeed.mul(laplacian));
+          next = next.mul(uWaveDamping);
+          const edge = min(
+            min(uv.x, float(1).sub(uv.x)),
+            min(uv.y, float(1).sub(uv.y)),
+          );
+          const border = smoothstep(float(0), uWaveBorderWidth, edge);
+          next = next.mul(border);
+          const inject = injTexNode.sample(uv).r;
+          next = mix(next, uWaveInjectAmp, inject.mul(uWaveInjectStr));
+          next = clamp(next, -1, 1);
+          return vec4(next, cur, 0, 1);
+        });
+        const waveUpdateMat = new THREE.MeshBasicNodeMaterial({
+          depthTest: false,
+          depthWrite: false,
+        });
+        waveUpdateMat.fragmentNode = waveUpdateFn();
+        const waveQuad = new THREE.Mesh(
+          new THREE.PlaneGeometry(2, 2),
+          waveUpdateMat,
+        );
+        const waveScene = new THREE.Scene();
+        waveScene.add(waveQuad);
+        const waveCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+        const uDispCenter = uniform(new THREE.Vector2(0, 0));
+        const uDispWaveSize = uniform(20);
+        const uDispTexelSize = uniform(TEXEL);
+        const uDispGradScale = uniform(1.5);
+        const uDispRingThreshold = uniform(0.4);
+        const uDispEdgeSharpness = uniform(1);
+        const uDispColor = uniform(new THREE.Color("#ffffff"));
+        const uDispOpacity = uniform(1);
+        const dispTexNode = texture(placeholderColor, vec2(0.5, 0.5));
+        const waveDisplayFn = Fn(() => {
+          const xz = positionWorld.xz;
+          const u = xz.x.sub(uDispCenter.x).div(uDispWaveSize.mul(2)).add(0.5);
+          const v = xz.y
+            .sub(uDispCenter.y)
+            .div(uDispWaveSize.mul(2))
+            .mul(-1)
+            .add(0.5);
+          const uv = vec2(u, v);
+          // Match original: don't sample outside simulation bounds (avoids edge wrap)
+          const inBounds = step(float(0.01), u)
+            .mul(step(float(0.01), v))
+            .mul(step(u, float(0.99)))
+            .mul(step(v, float(0.99)));
+          const dx = dispTexNode
+            .sample(uv.add(vec2(uDispTexelSize, 0)))
+            .r.sub(dispTexNode.sample(uv.sub(vec2(uDispTexelSize, 0))).r);
+          const dy = dispTexNode
+            .sample(uv.add(vec2(0, uDispTexelSize)))
+            .r.sub(dispTexNode.sample(uv.sub(vec2(0, uDispTexelSize))).r);
+          const grad = length(vec2(dx, dy)).mul(uDispGradScale);
+          const halfEdge = mix(0.35, 0.01, uDispEdgeSharpness);
+          const ring = smoothstep(
+            uDispRingThreshold.sub(halfEdge),
+            uDispRingThreshold.add(halfEdge),
+            grad,
+          ).mul(inBounds);
+          return vec4(uDispColor, ring.mul(uDispOpacity));
+        });
+        const displayMat = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+        });
+        const dispOut = waveDisplayFn();
+        displayMat.colorNode = dispOut.rgb;
+        displayMat.opacityNode = dispOut.a;
+        const waveDisplayPlane = new THREE.Mesh(
+          new THREE.PlaneGeometry(600, 600),
+          displayMat,
+        );
+        waveDisplayPlane.rotation.x = -Math.PI / 2;
+        waveDisplayPlane.position.set(0, -0.092, 0);
+        waveDisplayPlane.frustumCulled = false;
+        waveDisplayPlane.renderOrder = 6;
+        scene.add(waveDisplayPlane);
+
+        // ─── Sparkles (points with ShaderMaterial) ──────────────────────────────
+        const posArr = new Float32Array(MAX_SPARKLES * 3);
+        const lifeArr = new Float32Array(MAX_SPARKLES);
+        const maxLifeArr = new Float32Array(MAX_SPARKLES);
+        const sizeArr = new Float32Array(MAX_SPARKLES);
+        for (let i = 0; i < MAX_SPARKLES; i++) {
+          posArr[i * 3] = (Math.random() - 0.5) * 40;
+          posArr[i * 3 + 1] = WATER_Y + 0.02;
+          posArr[i * 3 + 2] = (Math.random() - 0.5) * 40;
+          maxLifeArr[i] = 0.8 + Math.random() * 2.7;
+          lifeArr[i] = Math.random() * maxLifeArr[i];
+          sizeArr[i] = 12 + Math.random() * 30;
+        }
+        const sparklesGeo = new THREE.BufferGeometry();
+        sparklesGeo.setAttribute(
+          "position",
+          new THREE.BufferAttribute(posArr, 3),
+        );
+        sparklesGeo.setAttribute(
+          "aLifetime",
+          new THREE.BufferAttribute(lifeArr, 1),
+        );
+        sparklesGeo.setAttribute(
+          "aMaxLifetime",
+          new THREE.BufferAttribute(maxLifeArr, 1),
+        );
+        sparklesGeo.setAttribute(
+          "aSize",
+          new THREE.BufferAttribute(sizeArr, 1),
+        );
+        const colorArr = new Float32Array(MAX_SPARKLES * 4);
+        for (let i = 0; i < MAX_SPARKLES; i++) {
+          colorArr[i * 4] = 1;
+          colorArr[i * 4 + 1] = 1;
+          colorArr[i * 4 + 2] = 1;
+          colorArr[i * 4 + 3] = 0.5;
+        }
+        sparklesGeo.setAttribute(
+          "color",
+          new THREE.BufferAttribute(colorArr, 4),
+        );
+        sparklesGeo.setDrawRange(0, 200);
+        const uSparkleColor = uniform(new THREE.Color("#c8f0ff"));
+        const uSparkleIntensity = uniform(3);
+        const sparklesMat = new THREE.PointsNodeMaterial({
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+          vertexColors: true,
+        });
+        sparklesMat.colorNode = vertexColor()
+          .rgb.mul(uSparkleColor)
+          .mul(uSparkleIntensity);
+        sparklesMat.opacityNode = vertexColor().a;
+        sparklesMat.sizeNode = float(28);
+        const texLoader = new THREE.TextureLoader();
+        texLoader.load("./textures/sparkle-particle.png", (sparkleTex) => {
+          sparkleTex.colorSpace = THREE.SRGBColorSpace;
+          sparklesMat.map = sparkleTex;
+        });
+        const sparkles = new THREE.Points(sparklesGeo, sparklesMat);
+        sparkles.frustumCulled = false;
+        sparkles.renderOrder = 3;
+        scene.add(sparkles);
+
+        // ─── Load Dragon Balls ─────────────────────────────────────────────────
+        let dragonBallsGroup = null;
+        const dragonBallsRef = { current: null };
+        const loader = new GLTFLoader();
+        loader.load("./models/dragon-balls-model.glb", (gltf) => {
+          const root = gltf.scene;
+          root.position.set(0.25, 0.15, -1.8);
+          root.rotation.y = -2.7;
+          root.scale.setScalar(5.15);
+          scene.add(root);
+          dragonBallsRef.current = root;
+
+          const nodes = {};
+          root.traverse((child) => {
+            if (child.isMesh) nodes[child.name] = child;
+          });
+          const meshNames = Object.keys(nodes);
+          const obj0 = meshNames.find(
+            (n) =>
+              n.includes("Object_0") && !n.includes("_1") && !n.includes("_2"),
+          )
+            ? nodes[
+                meshNames.find(
+                  (n) =>
+                    n.includes("Object_0") &&
+                    !n.includes("_1") &&
+                    !n.includes("_2"),
+                )
+              ]
+            : null;
+          const obj02 = meshNames.find((n) => n.includes("Object_0_2"))
+            ? nodes[meshNames.find((n) => n.includes("Object_0_2"))]
+            : null;
+          const obj01 = meshNames.find((n) => n.includes("Object_0_1"))
+            ? nodes[meshNames.find((n) => n.includes("Object_0_1"))]
+            : null;
+
+          const sphereMesh =
+            obj0 || (meshNames.length >= 1 ? nodes[meshNames[0]] : null);
+          const rockMesh =
+            obj02 || (meshNames.length >= 2 ? nodes[meshNames[1]] : null);
+          const starMesh =
+            obj01 || (meshNames.length >= 3 ? nodes[meshNames[2]] : null);
+
+          if (sphereMesh && sphereMesh.geometry) {
+            const glassMat = new THREE.MeshPhysicalNodeMaterial({
+              color: 0xde7d2f,
+              transparent: true,
+              depthWrite: true,
+              side: THREE.FrontSide,
+              roughness: 0.05,
+              metalness: 0,
+              transmission: 0.95,
+              thickness: 0.2,
+              ior: 1.1,
+              specularColor: 0xffc900,
+              envMapIntensity: 1,
+            });
+            glassMat.colorNode = mix(
+              color(0xde7d2f),
+              uWaterLineColor,
+              contactFoamBand(),
+            );
+            sphereMesh.material = glassMat;
+          }
+          if (rockMesh && rockMesh.geometry) {
+            const rockMat = new THREE.MeshStandardNodeMaterial({
+              color: 0x1a1a1a,
+              roughness: 0.9,
+              metalness: 0.0,
+              side: THREE.FrontSide,
+            });
+            rockMat.colorNode = mix(
+              color(0x1a1a1a),
+              uWaterLineColor,
+              contactFoamBand(),
+            );
+            rockMesh.material = rockMat;
+            rockMesh.castShadow = true;
+          }
+          if (starMesh && starMesh.geometry) {
+            const starMat = new THREE.MeshStandardNodeMaterial({
+              color: 0xffffff,
+              emissive: 0xffffff,
+              emissiveIntensity: 7,
+              roughness: 0.3,
+              metalness: 0,
+              side: THREE.FrontSide,
+            });
+            starMat.colorNode = mix(
+              color(0xffffff),
+              uWaterLineColor,
+              contactFoamBand(),
+            );
+            starMat.emissiveNode = mix(
+              vec3(1, 1, 1).mul(7),
+              uWaterLineColor,
+              contactFoamBand(),
+            );
+            starMesh.material = starMat;
+          }
+
+          const geos = [];
+          if (sphereMesh && sphereMesh.geometry) geos.push(sphereMesh.geometry);
+          if (rockMesh && rockMesh.geometry) geos.push(rockMesh.geometry);
+          if (geos.length > 0) {
+            registerWaterObject({
+              id: "dragon-balls",
+              ref: dragonBallsRef,
+              geometries: geos,
+            });
+          }
+          dragonBallsGroup = root;
+        });
+
+        // ─── Load Feather ──────────────────────────────────────────────────────
+        let featherGroup = null;
+        const featherRef = { current: null };
+        loader.load("./models/feather.glb", (gltf) => {
+          const root = gltf.scene;
+          root.scale.setScalar(9.3);
+          root.position.set(-4.3, WATER_Y + 0.05, -1.75);
+          root.rotation.y = (-27 * Math.PI) / 180;
+          scene.add(root);
+          featherRef.current = root;
+          featherGroup = root;
+          root.traverse((child) => {
+            if (child.isMesh && child.geometry) {
+              const prevMat = child.material;
+              const featherMap = prevMat && prevMat.map ? prevMat.map : null;
+              const featherMat = new THREE.MeshStandardNodeMaterial({
+                color: 0xe8e0d0,
+                transparent: true,
+                alphaTest: 0.15,
+                depthWrite: true,
+                side: THREE.FrontSide,
+                roughness: 0.8,
+                metalness: 0,
+              });
+              const baseColor = featherMap
+                ? texture(featherMap, uv()).rgb
+                : color(0xe8e0d0);
+              featherMat.colorNode = mix(
+                baseColor,
+                uWaterLineColor,
+                contactFoamBand(),
+              );
+              featherMat.opacityNode = featherMap
+                ? texture(featherMap, uv()).a
+                : float(1);
+              child.material = featherMat;
+            }
+          });
+          const featherGeos = [];
+          root.traverse((child) => {
+            if (child.isMesh && child.geometry)
+              featherGeos.push(child.geometry);
+          });
+          if (featherGeos.length > 0) {
+            registerWaterObject({
+              id: "feather",
+              ref: featherRef,
+              geometries: featherGeos,
+            });
+          }
+        });
+
+        // ─── Ripple logic: dragon balls and feather ────────────────────────────
+        const prevBottomDragon = { current: null };
+        const lastRippleDragon = { current: -99 };
+        const prevBottomFeather = { current: null };
+        const lastRippleFeather = { current: -99 };
+        const dragonRadius = 0.8;
+        const featherRadius = 0.1;
+        const periodicIntervalDragon = 1.4;
+        const periodicIntervalFeather = 2.3;
+
+        // ─── Resize ───────────────────────────────────────────────────────────
+        function onResize() {
+          const w = window.innerWidth;
+          const h = window.innerHeight;
+          camera.aspect = w / h;
+          camera.updateProjectionMatrix();
+          renderer.setSize(w, h);
+          const dpr = renderer.getPixelRatio();
+          depthRT.setSize(Math.round(w * dpr), Math.round(h * dpr));
+          depthRT.depthTexture?.dispose();
+          depthRT.depthTexture = new THREE.DepthTexture(
+            Math.round(w * dpr),
+            Math.round(h * dpr),
+          );
+          depthRT.depthTexture.type = THREE.UnsignedIntType;
+        }
+        window.addEventListener("resize", onResize);
+        onResize();
+
+        let needsWaveInit = true;
+
+        function animate(timestamp) {
+          requestAnimationFrame(animate);
+          clock.update(
+            typeof timestamp === "number" ? timestamp : performance.now(),
+          );
+          const elapsed = clock.getElapsed();
+          const delta = clock.getDelta();
+          uTime.value = elapsed;
+
+          // Keep texture nodes valid; update .value with real RT textures when available
+          depthTexNode.value = placeholderDepth;
+          waveTexNode.value = placeholderColor;
+          injTexNode.value = placeholderColor;
+          dispTexNode.value = placeholderColor;
+
+          waterPlane.position.x = camera.position.x;
+          waterPlane.position.z = camera.position.z;
+          waveDisplayPlane.position.x = camera.position.x;
+          waveDisplayPlane.position.z = camera.position.z;
+
+          uCamXZ.value.set(camera.position.x, camera.position.z);
+
+          for (let i = 0; i < MAX_RIPPLES; i++) {
+            if (rippleBuffer[i]) {
+              uRippleCenters[i].value.set(rippleBuffer[i].x, rippleBuffer[i].z);
+              uRippleTimes[i].value = rippleBuffer[i].t;
+            } else {
+              uRippleCenters[i].value.set(1e6, 1e6);
+              uRippleTimes[i].value = 0;
+            }
+          }
+          uRippleCount.value = rippleBuffer.length;
+          uRippleSpeed.value = rippleConfig.speed;
+          uRippleWidth.value = rippleConfig.width;
+          uRippleStrength.value = rippleConfig.strength;
+          uRippleDecay.value = rippleConfig.decay;
+          uRippleRings.value = rippleConfig.rings;
+          uRippleSpacing.value = rippleConfig.spacing;
+
+          if (dragonBallsRef.current) {
+            const centerY = dragonBallsRef.current.position.y;
+            const bottomY = centerY - dragonRadius;
+            if (prevBottomDragon.current === null)
+              prevBottomDragon.current = bottomY;
+            if (prevBottomDragon.current > WATER_Y && bottomY <= WATER_Y) {
+              rippleAdd(
+                dragonBallsRef.current.position.x,
+                dragonBallsRef.current.position.z,
+                elapsed,
+              );
+              lastRippleDragon.current = elapsed;
+            }
+            if (
+              bottomY < WATER_Y &&
+              elapsed - lastRippleDragon.current > periodicIntervalDragon
+            ) {
+              rippleAdd(
+                dragonBallsRef.current.position.x,
+                dragonBallsRef.current.position.z,
+                elapsed,
+              );
+              lastRippleDragon.current = elapsed;
+            }
+            prevBottomDragon.current = bottomY;
+          }
+          if (featherRef.current) {
+            const centerY = featherRef.current.position.y;
+            const bottomY = centerY - featherRadius;
+            if (prevBottomFeather.current === null)
+              prevBottomFeather.current = bottomY;
+            if (prevBottomFeather.current > WATER_Y && bottomY <= WATER_Y) {
+              rippleAdd(
+                featherRef.current.position.x,
+                featherRef.current.position.z,
+                elapsed,
+              );
+              lastRippleFeather.current = elapsed;
+            }
+            if (
+              bottomY < WATER_Y &&
+              elapsed - lastRippleFeather.current > periodicIntervalFeather
+            ) {
+              rippleAdd(
+                featherRef.current.position.x,
+                featherRef.current.position.z,
+                elapsed,
+              );
+              lastRippleFeather.current = elapsed;
+            }
+            prevBottomFeather.current = bottomY;
+            const pitch = Math.sin(elapsed * 0.5 + 0.3) * 0.06;
+            const roll =
+              Math.sin(elapsed * 0.45 + 1.1) * 0.09 +
+              Math.sin(elapsed * 1.1) * 0.02;
+            const yaw = Math.sin(elapsed * 0.28) * 0.04;
+            featherRef.current.position.set(-4.3, WATER_Y + 0.05, -1.75);
+            featherRef.current.rotation.set(
+              pitch,
+              (-27 * Math.PI) / 180 + yaw,
+              roll,
+            );
+          }
+
+          const objects = getWaterObjects();
+          const dpr = renderer.getPixelRatio();
+          const physW = Math.round(window.innerWidth * dpr);
+          const physH = Math.round(window.innerHeight * dpr);
+          if (depthRT.width !== physW || depthRT.height !== physH) {
+            depthRT.setSize(physW, physH);
+            if (depthRT.depthTexture) {
+              depthRT.depthTexture.dispose();
+              depthRT.depthTexture = new THREE.DepthTexture(physW, physH);
+              depthRT.depthTexture.type = THREE.UnsignedIntType;
+            }
+            // Keep depth texture node in sync
+            depthTexNode.value = depthRT.depthTexture || placeholderDepth;
+          }
+
+          for (const obj of objects) {
+            if (!depthGroups.has(obj.id)) {
+              const group = new THREE.Group();
+              for (const geo of obj.geometries) {
+                const mesh = new THREE.Mesh(geo, depthMat);
+                group.add(mesh);
+              }
+              depthScene.add(group);
+              depthGroups.set(obj.id, group);
+            }
+            const group = depthGroups.get(obj.id);
+            group.position.copy(obj.ref.current.position);
+            group.rotation.copy(obj.ref.current.rotation);
+            group.scale.copy(obj.ref.current.scale);
+          }
+          for (const [id, group] of depthGroups) {
+            if (!objects.find((o) => o.id === id)) {
+              depthScene.remove(group);
+              depthGroups.delete(id);
+            }
+          }
+
+          const prevRT = renderer.getRenderTarget();
+          const prevAC = renderer.autoClear;
+          renderer.autoClear = true;
+          renderer.setRenderTarget(depthRT);
+          renderer.render(depthScene, camera);
+          renderer.setRenderTarget(prevRT);
+          renderer.autoClear = prevAC;
+
+          // Only assign if valid THREE.Texture (WebGPU RT may expose different type)
+          if (depthRT.depthTexture instanceof THREE.Texture) {
+            depthTexNode.value = depthRT.depthTexture;
+          }
+          uDepthNear.value = camera.near;
+          uDepthFar.value = camera.far;
+
+          let cx = 0,
+            cz = 0,
+            maxScale = 5;
+          if (objects.length > 0) {
+            cx =
+              objects.reduce((s, o) => s + o.ref.current.position.x, 0) /
+              objects.length;
+            cz =
+              objects.reduce((s, o) => s + o.ref.current.position.z, 0) /
+              objects.length;
+            maxScale = Math.max(
+              ...objects.map((o) => o.ref.current.scale.x),
+              5,
+            );
+          }
+          const waveSize = maxScale * waveSizeMul;
+          const SMOOTH = 0.08;
+          smoothedDispCx =
+            objects.length > 0
+              ? smoothedDispCx + (cx - smoothedDispCx) * SMOOTH
+              : smoothedDispCx;
+          smoothedDispCz =
+            objects.length > 0
+              ? smoothedDispCz + (cz - smoothedDispCz) * SMOOTH
+              : smoothedDispCz;
+          uDispCenter.value.set(smoothedDispCx, smoothedDispCz);
+
+          for (const obj of objects) {
+            if (!injGroups.has(obj.id)) {
+              const group = new THREE.Group();
+              for (const geo of obj.geometries) {
+                group.add(new THREE.Mesh(geo, injMat));
+              }
+              injScene.add(group);
+              injGroups.set(obj.id, group);
+            }
+            const group = injGroups.get(obj.id);
+            group.position.copy(obj.ref.current.position);
+            group.rotation.copy(obj.ref.current.rotation);
+            group.scale.copy(obj.ref.current.scale);
+          }
+          for (const [id, group] of injGroups) {
+            if (!objects.find((o) => o.id === id)) {
+              injScene.remove(group);
+              injGroups.delete(id);
+            }
+          }
+
+          timeAccum += delta;
+          const shouldStep = timeAccum >= FIXED_STEP;
+          if (shouldStep) {
+            timeAccum -= FIXED_STEP;
+            timeAccum = Math.min(timeAccum, FIXED_STEP * 2);
+          }
+
+          if (needsWaveInit) {
+            renderer.setRenderTarget(waveRTs[0]);
+            renderer.clear(0x000000, false, false);
+            renderer.setRenderTarget(waveRTs[1]);
+            renderer.clear(0x000000, false, false);
+            needsWaveInit = false;
+          }
+
+          const shouldInject =
+            shouldStep && elapsed - lastInjectTime >= injectInterval;
+          if (shouldInject) {
+            uInjBandWidth.value = bandWidth;
+            injCamera.left = -waveSize;
+            injCamera.right = waveSize;
+            injCamera.top = waveSize;
+            injCamera.bottom = -waveSize;
+            injCamera.updateProjectionMatrix();
+            injCamera.position.set(cx, 100, cz);
+            injCamera.lookAt(cx, 0, cz);
+            renderer.setRenderTarget(injRT);
+            renderer.render(injScene, injCamera);
+            lastInjectTime = elapsed;
+          }
+
+          if (shouldStep) {
+            const readRT = waveRTs[pingIdx];
+            const writeRT = waveRTs[1 - pingIdx];
+            if (readRT.texture instanceof THREE.Texture)
+              waveTexNode.value = readRT.texture;
+            if (injRT.texture instanceof THREE.Texture)
+              injTexNode.value = injRT.texture;
+            uWaveInjectStr.value = shouldInject ? injectStr : 0;
+            renderer.setRenderTarget(writeRT);
+            renderer.render(waveScene, waveCamera);
+            pingIdx = 1 - pingIdx;
+          }
+
+          const dispTex = waveRTs[pingIdx].texture;
+          dispTexNode.value =
+            dispTex instanceof THREE.Texture ? dispTex : placeholderColor;
+          uDispWaveSize.value = waveSize;
+
+          const count = 200;
+          const waterY = WATER_Y + 0.02;
+          for (let i = 0; i < count; i++) {
+            lifeArr[i] += delta;
+            posArr[i * 3 + 1] = waterY;
+            if (lifeArr[i] >= maxLifeArr[i]) {
+              posArr[i * 3] = camera.position.x + (Math.random() - 0.5) * 60;
+              posArr[i * 3 + 1] = waterY;
+              posArr[i * 3 + 2] =
+                camera.position.z + (Math.random() - 0.5) * 60;
+              lifeArr[i] = 0;
+              maxLifeArr[i] = 0.8 + Math.random() * 2.7;
+              sizeArr[i] = 12 + Math.random() * 30;
+            }
+            const t = Math.min(lifeArr[i] / maxLifeArr[i], 1);
+            colorArr[i * 4 + 3] = Math.sin(t * Math.PI);
+          }
+          sparklesGeo.getAttribute("position").needsUpdate = true;
+          sparklesGeo.getAttribute("aLifetime").needsUpdate = true;
+          sparklesGeo.getAttribute("aMaxLifetime").needsUpdate = true;
+          sparklesGeo.getAttribute("aSize").needsUpdate = true;
+          sparklesGeo.getAttribute("color").needsUpdate = true;
+
+          // Glass is now MeshPhysicalNodeMaterial (no uTime uniform)
+          // if (dragonBallsGroup) { ... }
+
+          // Render main scene to screen (restore default framebuffer after wave/depth passes)
+          renderer.setRenderTarget(null);
+          renderer.render(scene, camera);
+        }
+
+        animate();
+
+        // ─── Control panel wiring ───────────────────────────────────────────────
+        function bindSlider(id, labelId, setter, fmt = (v) => v.toFixed(2)) {
+          const el = document.getElementById(id);
+          const label = labelId ? document.getElementById(labelId) : null;
+          if (!el) return;
+          el.addEventListener("input", () => {
+            const v = parseFloat(el.value);
+            setter(v);
+            if (label) label.textContent = fmt(v);
+          });
+          if (label) label.textContent = fmt(parseFloat(el.value));
+        }
+        function bindColor(id, setter) {
+          const el = document.getElementById(id);
+          if (!el) return;
+          el.addEventListener("input", () => setter(el.value));
+        }
+
+        bindSlider(
+          "exposure",
+          "exposureVal",
+          (v) => {
+            renderer.toneMappingExposure = v;
+          },
+          (v) => v.toFixed(2),
+        );
+        bindColor("bgColor", (hex) => {
+          scene.background.set(hex);
+        });
+
+        bindSlider(
+          "ambient",
+          "ambientVal",
+          (v) => {
+            ambientLight.intensity = v;
+          },
+          (v) => v.toFixed(2),
+        );
+        bindSlider(
+          "sun",
+          "sunVal",
+          (v) => {
+            sunLight.intensity = v;
+          },
+          (v) => v.toFixed(1),
+        );
+        bindSlider(
+          "fill",
+          "fillVal",
+          (v) => {
+            fillLight.intensity = v;
+          },
+          (v) => v.toFixed(1),
+        );
+        bindSlider(
+          "rim",
+          "rimVal",
+          (v) => {
+            rimLight.intensity = v;
+          },
+          (v) => v.toFixed(1),
+        );
+
+        bindSlider(
+          "noiseTimeScale",
+          "noiseTimeVal",
+          (v) => {
+            uNoiseTimeScale.value = v;
+          },
+          (v) => v.toFixed(2),
+        );
+        bindSlider(
+          "noiseScale",
+          "noiseScaleVal",
+          (v) => {
+            uNoiseScale.value = v;
+          },
+          (v) => v.toFixed(2),
+        );
+        bindSlider(
+          "flowZ",
+          "flowZVal",
+          (v) => {
+            uFlowZ.value = v;
+          },
+          (v) => v.toFixed(2),
+        );
+        bindSlider(
+          "cellSpeed",
+          "cellSpeedVal",
+          (v) => {
+            uCellSpeed.value = v;
+          },
+          (v) => v.toFixed(2),
+        );
+        bindSlider(
+          "distort",
+          "distortVal",
+          (v) => {
+            uDistortAmount.value = v;
+          },
+          (v) => v.toFixed(2),
+        );
+        bindSlider(
+          "edgeThreshold",
+          "edgeVal",
+          (v) => {
+            uEdgeThreshold.value = v;
+          },
+          (v) => v.toFixed(3),
+        );
+
+        bindColor("deepColor", (hex) => uDeepColor.value.set(hex));
+        bindColor("midColor", (hex) => uMidColor.value.set(hex));
+        bindColor("highlightColor", (hex) => uHighlight.value.set(hex));
+        bindSlider(
+          "waterOpacity",
+          "waterOpacityVal",
+          (v) => {
+            uDeepOpacity.value = v;
+          },
+          (v) => v.toFixed(2),
+        );
+
+        bindSlider(
+          "rippleStrength",
+          "rippleStrVal",
+          (v) => {
+            uRippleStrength.value = v;
+            rippleConfig.strength = v;
+          },
+          (v) => v.toFixed(1),
+        );
+        bindSlider(
+          "rippleWidth",
+          "rippleWidthVal",
+          (v) => {
+            uRippleWidth.value = v;
+            rippleConfig.width = v;
+          },
+          (v) => v.toFixed(2),
+        );
+
+        bindSlider(
+          "waterlineIntensity",
+          "waterlineIntVal",
+          (v) => {
+            uWaterlineIntensity.value = v;
+          },
+          (v) => v.toFixed(1),
+        );
+        bindSlider(
+          "lineWidth",
+          "lineWidthVal",
+          (v) => {
+            uLineWidth.value = v;
+          },
+          (v) => v.toFixed(2),
+        );
+        bindSlider(
+          "glowWidth",
+          "glowWidthVal",
+          (v) => {
+            uGlowWidth.value = v;
+          },
+          (v) => v.toFixed(1),
+        );
+        bindSlider(
+          "lineThinness",
+          "lineThinVal",
+          (v) => {
+            uWaterLineThinness.value = v;
+          },
+          (v) => v.toFixed(3),
+        );
+        bindColor("foamColor", (hex) => uWaterLineColor.value.set(hex));
+
+        bindSlider(
+          "ringOpacity",
+          "ringOpacityVal",
+          (v) => {
+            uDispOpacity.value = v;
+          },
+          (v) => v.toFixed(2),
+        );
+        bindSlider(
+          "gradScale",
+          "gradScaleVal",
+          (v) => {
+            uDispGradScale.value = v;
+          },
+          (v) => v.toFixed(1),
+        );
+
+        bindSlider(
+          "sparkleIntensity",
+          "sparkleVal",
+          (v) => {
+            uSparkleIntensity.value = v;
+          },
+          (v) => v.toFixed(1),
+        );
+      }
+
+      init();
+    </script>
+  </body>
+</html>
