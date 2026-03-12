@@ -38,7 +38,7 @@ export function createPlayer(opts) {
     PARAMS,
     charPos,
     playerBody,
-    playerCollider,
+    playerCollider: initialPlayerCollider,
     characterController,
     physicsWorld,
     RAPIER = null,
@@ -49,6 +49,8 @@ export function createPlayer(opts) {
     TERRAIN_SIZE,
     debugOut = null,
   } = opts;
+  // Reassignable so we can replace the capsule collider when crouching (Rapier collider swap).
+  let playerCollider = initialPlayerCollider;
   // terrain mode: Y driven by heightmap sampling; parkour mode: trimesh colliders + computedGrounded()
   const hasSampleHeight = typeof sampleHeight === "function";
 
@@ -478,6 +480,7 @@ export function createPlayer(opts) {
   let _platformBody = null; // kinematic body player stood on last frame
   /** @type {{ [handle: number]: { x: number, y: number, z: number } }} */
   const _lastPlatformPos = {}; // platform handle -> last position for velocity-from-delta
+  let _didCrouchTransitionThisFrame = false;
   let isPointerLocked = false;
 
   // Foot bone Y tracking for footstep sync
@@ -617,10 +620,30 @@ export function createPlayer(opts) {
     {
       const wantCrouch = keys.ctrl && onGroundForCrouch;
       if (wantCrouch && !_isCrouching) {
-        playerCollider.setHalfHeight(_crouchHH_c);
+        const bottomY = charPos.y - _normalHH_c - _capR_c;
+        if (RAPIER) {
+          physicsWorld.removeCollider(playerCollider);
+          playerCollider = physicsWorld.createCollider(
+            RAPIER.ColliderDesc.capsule(_crouchHH_c, _capR_c),
+            playerBody,
+          );
+        } else {
+          playerCollider.setHalfHeight(_crouchHH_c);
+        }
         _isCrouching = true;
+        _didCrouchTransitionThisFrame = true;
+        const newCenterY = bottomY + _crouchHH_c + _capR_c;
+        playerBody.setTranslation(
+          { x: charPos.x, y: newCenterY, z: charPos.z },
+          true,
+        );
+        playerBody.setNextKinematicTranslation({
+          x: charPos.x,
+          y: newCenterY,
+          z: charPos.z,
+        });
+        charPos.y = newCenterY;
       } else if (!wantCrouch && _isCrouching) {
-        // Ray upward from top of crouching capsule — check if normal height fits
         let canStand = true;
         if (RAPIER) {
           const ray = new RAPIER.Ray(
@@ -642,9 +665,30 @@ export function createPlayer(opts) {
           canStand = hit === null;
         }
         if (canStand) {
-          playerCollider.setHalfHeight(_normalHH_c);
+          const bottomY = charPos.y - _crouchHH_c - _capR_c;
+          if (RAPIER) {
+            physicsWorld.removeCollider(playerCollider);
+            playerCollider = physicsWorld.createCollider(
+              RAPIER.ColliderDesc.capsule(_normalHH_c, _capR_c),
+              playerBody,
+            );
+          } else {
+            playerCollider.setHalfHeight(_normalHH_c);
+          }
           _isCrouching = false;
-          _justStoodUp = true; // enforce min rise next frame so capsule doesn't sink
+          _justStoodUp = true;
+          _didCrouchTransitionThisFrame = true;
+          const newCenterY = bottomY + _normalHH_c + _capR_c;
+          playerBody.setTranslation(
+            { x: charPos.x, y: newCenterY, z: charPos.z },
+            true,
+          );
+          playerBody.setNextKinematicTranslation({
+            x: charPos.x,
+            y: newCenterY,
+            z: charPos.z,
+          });
+          charPos.y = newCenterY;
         }
       }
     }
@@ -764,15 +808,18 @@ export function createPlayer(opts) {
       }
       desiredY = charPos.y + state.characterVelY * dt;
     }
-    // Apply crouch Y offset every frame while crouched (terrain mode uses standing
-    // height for nextGroundY, so we must subtract _crouchShift to avoid jitter)
-    desiredY += _isCrouching ? -_crouchShift : 0;
+    // Terrain mode only: apply crouch Y offset every frame so we follow heightmap at
+    // crouch center height. Parkour mode repositions on transition only — bottom stays fixed.
+    if (hasSampleHeight) {
+      desiredY += _isCrouching ? -_crouchShift : 0;
+    }
 
     // Proactively detect kinematic platform via downward ray cast BEFORE computing
     // desired movement. MUST run every frame in parkour mode — when platform descends,
     // computedGrounded() becomes false and we'd stop inheriting velocity, leaving us floating.
     if (!hasSampleHeight && RAPIER) {
-      const capBottom = charPos.y - _normalHH_c - _capR_c;
+      const halfH = _isCrouching ? _crouchHH_c : _normalHH_c;
+      const capBottom = charPos.y - halfH - _capR_c;
       const ray = new RAPIER.Ray(
         { x: charPos.x, y: capBottom + 0.02, z: charPos.z },
         { x: 0, y: -1, z: 0 },
@@ -904,9 +951,9 @@ export function createPlayer(opts) {
     const corrected = characterController.computedMovement();
     const cur = playerBody.translation();
     let nextPosY = cur.y + corrected.y;
-    // When standing up, the KCC/snap-to-ground can reject upward movement, leaving
-    // the expanded capsule partly in the ground. Enforce minimum rise so feet stay on surface.
-    if (justStoodUp) {
+    if (_didCrouchTransitionThisFrame) {
+      nextPosY = cur.y;
+    } else if (justStoodUp) {
       nextPosY = Math.max(nextPosY, cur.y + _crouchShift);
     }
     const nextPos = {
@@ -918,6 +965,7 @@ export function createPlayer(opts) {
     physicsWorld.step();
     const playerT = playerBody.translation();
     charPos.set(playerT.x, playerT.y, playerT.z);
+    _didCrouchTransitionThisFrame = false;
     // Terrain mode: never let character sink below the heightmap (physics ground may be flat/slab)
     if (hasSampleHeight) {
       const terrainY = sampleHeight(charPos.x, charPos.z) + capHalfH + capR;

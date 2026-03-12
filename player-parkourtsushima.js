@@ -40,7 +40,7 @@ export function createPlayer(opts) {
     PARAMS,
     charPos,
     playerBody,
-    playerCollider,
+    playerCollider: initialPlayerCollider,
     characterController,
     physicsWorld,
     RAPIER = null,
@@ -51,6 +51,8 @@ export function createPlayer(opts) {
     TERRAIN_SIZE,
     debugOut = null,
   } = opts;
+  // Reassignable so we can replace the capsule collider when crouching (Rapier collider swap).
+  let playerCollider = initialPlayerCollider;
   // terrain mode: Y driven by heightmap sampling; parkour mode: trimesh colliders + computedGrounded()
   const hasSampleHeight = typeof sampleHeight === "function";
 
@@ -342,6 +344,18 @@ export function createPlayer(opts) {
             gltf.animations.find((a) => a.name === "Roll") ||
             gltf.animations.find((a) => a.name === "Roll_RM") ||
             idleClip;
+          const slideStartClip =
+            gltf.animations.find((a) => a.name === "Slide_Start_Armature") ||
+            gltf.animations.find((a) => a.name === "Slide_Start") ||
+            crouchClip;
+          const slideLoopClip =
+            gltf.animations.find((a) => a.name === "Slide_Loop_Armature") ||
+            gltf.animations.find((a) => a.name === "Slide_Loop") ||
+            slideStartClip;
+          const slideExitClip =
+            gltf.animations.find((a) => a.name === "Slide_Exit_Armature") ||
+            gltf.animations.find((a) => a.name === "Slide_Exit") ||
+            slideLoopClip;
           const idleAction = characterMixer
             .clipAction(idleClip)
             .setLoop(2201)
@@ -381,6 +395,19 @@ export function createPlayer(opts) {
             attackAction2.clampWhenFinished = true;
           if (rollAction && rollAction.clampWhenFinished !== undefined)
             rollAction.clampWhenFinished = true;
+          const slideStartAction = characterMixer
+            .clipAction(slideStartClip)
+            .setLoop(2200);
+          const slideLoopAction = characterMixer
+            .clipAction(slideLoopClip)
+            .setLoop(2201);
+          const slideExitAction = characterMixer
+            .clipAction(slideExitClip)
+            .setLoop(2200);
+          if (slideStartAction?.clampWhenFinished !== undefined)
+            slideStartAction.clampWhenFinished = true;
+          if (slideExitAction?.clampWhenFinished !== undefined)
+            slideExitAction.clampWhenFinished = true;
           characterGroup.userData.idleAction = idleAction;
           characterGroup.userData.walkAction = walkAction;
           characterGroup.userData.runAction = runAction;
@@ -392,9 +419,13 @@ export function createPlayer(opts) {
           characterGroup.userData.rollAction = rollAction;
           characterGroup.userData.attackAction = attackAction;
           characterGroup.userData.attackAction2 = attackAction2;
+          characterGroup.userData.slideStartAction = slideStartAction;
+          characterGroup.userData.slideLoopAction = slideLoopAction;
+          characterGroup.userData.slideExitAction = slideExitAction;
           characterGroup.userData.lastMoveState = "idle";
           characterGroup.userData.isAttacking = false;
           characterGroup.userData.isRolling = false;
+          characterGroup.userData.isSliding = false;
           const makeAttackFinishedHandler = (action) => () => {
             const ud = characterGroup.userData;
             ud.isAttacking = false;
@@ -498,6 +529,95 @@ export function createPlayer(opts) {
               }, 220);
             });
           }
+          const slideExitActionRef = characterGroup.userData.slideExitAction;
+          if (slideExitActionRef) {
+            characterMixer.addEventListener("finished", (e) => {
+              if (e.action !== slideExitActionRef) return;
+              const ud = characterGroup.userData;
+              ud.isSliding = false;
+              _isSliding = false;
+              _slidePhase = "none";
+              _lastAnimSlidePhase = "none";
+              if (RAPIER) {
+                const bottomY = charPos.y - _crouchHH_c - _capR_c;
+                physicsWorld.removeCollider(playerCollider);
+                playerCollider = physicsWorld.createCollider(
+                  RAPIER.ColliderDesc.capsule(_normalHH_c, _capR_c),
+                  playerBody,
+                );
+                const newCenterY = bottomY + _normalHH_c + _capR_c;
+                playerBody.setTranslation(
+                  { x: charPos.x, y: newCenterY, z: charPos.z },
+                  true,
+                );
+                playerBody.setNextKinematicTranslation({
+                  x: charPos.x,
+                  y: newCenterY,
+                  z: charPos.z,
+                });
+                charPos.y = newCenterY;
+              }
+              _isCrouching = false;
+              const moving = keys.w || keys.s;
+              const running = moving && keys.shift;
+              const crouching = keys.ctrl;
+              const targetState = crouching
+                ? moving
+                  ? "crouch_walk"
+                  : "crouch"
+                : moving
+                  ? running
+                    ? "run"
+                    : "walk"
+                  : "idle";
+              const toIdle = () => {
+                ud.idleAction.enabled = true;
+                ud.idleAction.crossFadeFrom(slideExitActionRef, 0.2).play();
+              };
+              const toWalk = () => {
+                ud.walkAction.enabled = true;
+                ud.walkAction.crossFadeFrom(slideExitActionRef, 0.2).play();
+              };
+              const toRun = () => {
+                ud.runAction.enabled = true;
+                ud.runAction.crossFadeFrom(slideExitActionRef, 0.2).play();
+              };
+              const toCrouch = () => {
+                ud.crouchAction.enabled = true;
+                ud.crouchAction.crossFadeFrom(slideExitActionRef, 0.2).play();
+              };
+              const toCrouchWalk = () => {
+                ud.crouchWalkAction.enabled = true;
+                ud.crouchWalkAction.crossFadeFrom(slideExitActionRef, 0.2).play();
+              };
+              if (targetState === "walk") toWalk();
+              else if (targetState === "run") toRun();
+              else if (targetState === "crouch") toCrouch();
+              else if (targetState === "crouch_walk") toCrouchWalk();
+              else toIdle();
+              ud.lastMoveState = targetState;
+              setTimeout(() => {
+                slideExitActionRef.enabled = false;
+              }, 220);
+            });
+          }
+          const slideStartActionRef = characterGroup.userData.slideStartAction;
+          if (slideStartActionRef) {
+            characterMixer.addEventListener("finished", (e) => {
+              if (e.action !== slideStartActionRef) return;
+              const ud = characterGroup.userData;
+              _slidePhase = "loop";
+              const slideLoopAction = ud.slideLoopAction;
+              if (slideLoopAction) {
+                slideLoopAction.reset();
+                slideLoopAction.enabled = true;
+                slideLoopAction.crossFadeFrom(slideStartActionRef, 0.1).play();
+              }
+              setTimeout(() => {
+                slideStartActionRef.enabled = false;
+              }, 100);
+            });
+          }
         }
       } catch (e) {
         console.warn("Character animations:", e);
@@ -523,10 +643,12 @@ export function createPlayer(opts) {
     d: false,
     e: false,
     f: false,
+    x: false,
     shift: false,
     ctrl: false,
     space: false,
     spacePrev: false,
+    xPrev: false,
     arrowLeft: false,
     arrowRight: false,
   };
@@ -556,11 +678,17 @@ export function createPlayer(opts) {
   const _crouchHH_c = Math.max(0.05, _normalHH_c * 0.31); // ≈50 % height
   const _crouchShift = _normalHH_c - _crouchHH_c;
   let _isCrouching = false;
+  let _isSliding = false;
+  let _slidePhase = "none"; // "none" | "start" | "loop" | "exit"
+  let _lastAnimSlidePhase = "none";
+  let _slideYaw = 0;
+  let _slideStartTime = 0;
   let _justStoodUp = false;
   let _crouchVisualT = 0; // 0 = standing, 1 = fully crouched (lerped for smooth model transition)
   let _platformBody = null; // kinematic body player stood on last frame
   /** @type {{ [handle: number]: { x: number, y: number, z: number } }} */
   const _lastPlatformPos = {}; // platform handle -> last position for velocity-from-delta
+  let _didCrouchTransitionThisFrame = false; // so we don't let controller overwrite our Y
   let isPointerLocked = false;
 
   // Foot bone Y tracking for footstep sync
@@ -583,6 +711,7 @@ export function createPlayer(opts) {
     if (e.key === "Shift") keys.shift = true;
     if (e.key === "Control") keys.ctrl = true;
     if (e.key === "f" || e.key === "F") keys.f = true;
+    if (e.key === "x" || e.key === "X") keys.x = true;
     if (e.key === " " || e.code === "Space") {
       keys.space = true;
       e.preventDefault();
@@ -610,6 +739,7 @@ export function createPlayer(opts) {
     if (e.key === "Shift") keys.shift = false;
     if (e.key === "Control") keys.ctrl = false;
     if (e.key === "f" || e.key === "F") keys.f = false;
+    if (e.key === "x" || e.key === "X") keys.x = false;
     if (e.key === " " || e.code === "Space") keys.space = false;
     if (e.key === "ArrowUp") keys.w = false;
     if (e.key === "ArrowDown") keys.s = false;
@@ -630,7 +760,7 @@ export function createPlayer(opts) {
   renderer.domElement.addEventListener("mousedown", (e) => {
     if (e.button !== 2) return;
     const ud = characterGroup.userData;
-    if (!ud.attackAction || ud.isAttacking || ud.isRolling) return;
+    if (!ud.attackAction || ud.isAttacking || ud.isRolling || ud.isSliding) return;
     ud.isAttacking = true;
     ud.preAttackState = ud.lastMoveState || "idle";
     ud.attackAction.stop();
@@ -653,7 +783,7 @@ export function createPlayer(opts) {
   window.addEventListener("keydown", (e) => {
     if (e.key.toLowerCase() !== "e" || e.repeat) return;
     const ud = characterGroup.userData;
-    if (!ud.attackAction2 || ud.isAttacking || ud.isRolling) return;
+    if (!ud.attackAction2 || ud.isAttacking || ud.isRolling || ud.isSliding) return;
     ud.isAttacking = true;
     ud.preAttackState = ud.lastMoveState || "idle";
     ud.attackAction2.stop();
@@ -694,14 +824,37 @@ export function createPlayer(opts) {
     // a tunnel.  In terrain mode, apply crouch Y offset every frame (not just on
     // transition) to avoid jitter — nextGroundY uses standing height, so we must
     // subtract _crouchShift while crouched.
+    // Skip crouch toggle while sliding (slide uses crouch capsule and owns the state).
     const onGroundForCrouch = hasSampleHeight
       ? charPos.y <= sampleHeight(charPos.x, charPos.z) + capHalfH + capR + 0.6
       : state.isGrounded;
-    {
+    if (!_isSliding) {
       const wantCrouch = keys.ctrl && onGroundForCrouch;
       if (wantCrouch && !_isCrouching) {
-        playerCollider.setHalfHeight(_crouchHH_c);
+        // Replace capsule with shorter one and reposition so the BOTTOM stays fixed (never moves down).
+        const bottomY = charPos.y - _normalHH_c - _capR_c;
+        if (RAPIER) {
+          physicsWorld.removeCollider(playerCollider);
+          playerCollider = physicsWorld.createCollider(
+            RAPIER.ColliderDesc.capsule(_crouchHH_c, _capR_c),
+            playerBody,
+          );
+        } else {
+          playerCollider.setHalfHeight(_crouchHH_c);
+        }
         _isCrouching = true;
+        _didCrouchTransitionThisFrame = true;
+        const newCenterY = bottomY + _crouchHH_c + _capR_c;
+        playerBody.setTranslation(
+          { x: charPos.x, y: newCenterY, z: charPos.z },
+          true,
+        );
+        playerBody.setNextKinematicTranslation({
+          x: charPos.x,
+          y: newCenterY,
+          z: charPos.z,
+        });
+        charPos.y = newCenterY;
       } else if (!wantCrouch && _isCrouching) {
         // Ray upward from top of crouching capsule — check if normal height fits
         let canStand = true;
@@ -725,9 +878,31 @@ export function createPlayer(opts) {
           canStand = hit === null;
         }
         if (canStand) {
-          playerCollider.setHalfHeight(_normalHH_c);
+          // Replace capsule with full-height one and reposition so the BOTTOM stays fixed.
+          const bottomY = charPos.y - _crouchHH_c - _capR_c;
+          if (RAPIER) {
+            physicsWorld.removeCollider(playerCollider);
+            playerCollider = physicsWorld.createCollider(
+              RAPIER.ColliderDesc.capsule(_normalHH_c, _capR_c),
+              playerBody,
+            );
+          } else {
+            playerCollider.setHalfHeight(_normalHH_c);
+          }
           _isCrouching = false;
-          _justStoodUp = true; // enforce min rise next frame so capsule doesn't sink
+          _justStoodUp = true;
+          _didCrouchTransitionThisFrame = true;
+          const newCenterY = bottomY + _normalHH_c + _capR_c;
+          playerBody.setTranslation(
+            { x: charPos.x, y: newCenterY, z: charPos.z },
+            true,
+          );
+          playerBody.setNextKinematicTranslation({
+            x: charPos.x,
+            y: newCenterY,
+            z: charPos.z,
+          });
+          charPos.y = newCenterY;
         }
       }
     }
@@ -747,6 +922,7 @@ export function createPlayer(opts) {
       ud &&
       ud.rollAction &&
       !ud.isRolling &&
+      !ud.isSliding &&
       !ud.isAttacking &&
       onGroundForCrouch
     ) {
@@ -772,6 +948,66 @@ export function createPlayer(opts) {
       ud.rollAction.time = 0;
       ud.rollAction.enabled = true;
       ud.rollAction.crossFadeFrom(from, 0.1).play();
+    }
+    // ── SLIDE (X): start when grounded, moving, not rolling/attacking/jumping ──
+    const slideMaxTime = (typeof PARAMS !== "undefined" && PARAMS.slideMaxTime) || 1.2;
+    const slideSpeed = (typeof PARAMS !== "undefined" && PARAMS.slideSpeed) || 7;
+    if (
+      keys.x &&
+      !keys.xPrev &&
+      ud &&
+      ud.slideStartAction &&
+      !ud.isSliding &&
+      !ud.isRolling &&
+      !ud.isAttacking &&
+      _jumpPhase === "none" &&
+      onGroundForCrouch &&
+      (keys.w || keys.s || keys.a || keys.d)
+    ) {
+      keys.x = false; // consume so we don't retrigger
+      ud.isSliding = true;
+      _isSliding = true;
+      _slidePhase = "start";
+      _slideYaw = state.camYaw;
+      _slideStartTime = performance.now();
+      if (!_isCrouching) {
+        const bottomY = charPos.y - _normalHH_c - _capR_c;
+        if (RAPIER) {
+          physicsWorld.removeCollider(playerCollider);
+          playerCollider = physicsWorld.createCollider(
+            RAPIER.ColliderDesc.capsule(_crouchHH_c, _capR_c),
+            playerBody,
+          );
+        } else {
+          playerCollider.setHalfHeight(_crouchHH_c);
+        }
+        _isCrouching = true;
+        _didCrouchTransitionThisFrame = true;
+        const newCenterY = bottomY + _crouchHH_c + _capR_c;
+        playerBody.setTranslation(
+          { x: charPos.x, y: newCenterY, z: charPos.z },
+          true,
+        );
+        playerBody.setNextKinematicTranslation({
+          x: charPos.x,
+          y: newCenterY,
+          z: charPos.z,
+        });
+        charPos.y = newCenterY;
+      }
+      const from =
+        ud.lastMoveState === "run"
+          ? ud.runAction
+          : ud.lastMoveState === "walk"
+            ? ud.walkAction
+            : ud.lastMoveState === "crouch"
+              ? ud.crouchAction
+              : ud.lastMoveState === "crouch_walk"
+                ? ud.crouchWalkAction
+                : ud.idleAction;
+      ud.slideStartAction.reset();
+      ud.slideStartAction.enabled = true;
+      ud.slideStartAction.crossFadeFrom(from, 0.1).play();
     }
     if (keys.w) state.moveDir.z -= 1;
     if (keys.s) state.moveDir.z += 1;
@@ -804,6 +1040,24 @@ export function createPlayer(opts) {
       desiredDx = sinY * rollSpeed * dt; // override WASD, no stacking
       desiredDz = cosY * rollSpeed * dt;
     }
+    if (_isSliding && ud?.slideLoopAction) {
+      const sinY = Math.sin(_slideYaw);
+      const cosY = Math.cos(_slideYaw);
+      desiredDx = sinY * slideSpeed * dt;
+      desiredDz = cosY * slideSpeed * dt;
+      if (_slidePhase === "loop") {
+        const elapsed = (performance.now() - _slideStartTime) / 1000;
+        if (elapsed >= slideMaxTime || !keys.x) {
+          _slidePhase = "exit";
+          ud.slideExitAction.reset();
+          ud.slideExitAction.enabled = true;
+          ud.slideExitAction.crossFadeFrom(ud.slideLoopAction, 0.12).play();
+          setTimeout(() => {
+            ud.slideLoopAction.enabled = false;
+          }, 120);
+        }
+      }
+    }
     const hb = TERRAIN_SIZE * 0.48;
     const nextX = Math.max(-hb, Math.min(hb, charPos.x + desiredDx));
     const nextZ = Math.max(-hb, Math.min(hb, charPos.z + desiredDz));
@@ -818,7 +1072,7 @@ export function createPlayer(opts) {
       : state.isGrounded;
     let desiredY;
     if (onGround) {
-      if (keys.space && !keys.spacePrev && !_isCrouching && _jumpPhase === "none") {
+      if (keys.space && !keys.spacePrev && !_isCrouching && !_isSliding && _jumpPhase === "none") {
         state.characterVelY = PARAMS.jumpSpeed;
         _justJumped = true;
         _jumpPhase = "start";
@@ -850,15 +1104,18 @@ export function createPlayer(opts) {
       }
       desiredY = charPos.y + state.characterVelY * dt;
     }
-    // Apply crouch Y offset every frame while crouched (terrain mode uses standing
-    // height for nextGroundY, so we must subtract _crouchShift to avoid jitter)
-    desiredY += _isCrouching ? -_crouchShift : 0;
+    // Terrain mode only: apply crouch Y offset every frame so we follow heightmap at
+    // crouch center height. Parkour mode repositions on transition only — bottom stays fixed.
+    if (hasSampleHeight) {
+      desiredY += (_isCrouching || _isSliding) ? -_crouchShift : 0;
+    }
 
     // Proactively detect kinematic platform via downward ray cast BEFORE computing
     // desired movement. MUST run every frame in parkour mode — when platform descends,
     // computedGrounded() becomes false and we'd stop inheriting velocity, leaving us floating.
     if (!hasSampleHeight && RAPIER) {
-      const capBottom = charPos.y - _normalHH_c - _capR_c;
+      const halfH = (_isCrouching || _isSliding) ? _crouchHH_c : _normalHH_c;
+      const capBottom = charPos.y - halfH - _capR_c;
       const ray = new RAPIER.Ray(
         { x: charPos.x, y: capBottom + 0.02, z: charPos.z },
         { x: 0, y: -1, z: 0 },
@@ -990,9 +1247,11 @@ export function createPlayer(opts) {
     const corrected = characterController.computedMovement();
     const cur = playerBody.translation();
     let nextPosY = cur.y + corrected.y;
-    // When standing up, the KCC/snap-to-ground can reject upward movement, leaving
-    // the expanded capsule partly in the ground. Enforce minimum rise so feet stay on surface.
-    if (justStoodUp) {
+    // After a crouch transition we already set body Y so the capsule bottom stays fixed — don't let controller overwrite it.
+    if (_didCrouchTransitionThisFrame) {
+      nextPosY = cur.y;
+    } else if (justStoodUp) {
+      // When standing up (without transition this frame), KCC can reject upward movement; enforce min rise.
       nextPosY = Math.max(nextPosY, cur.y + _crouchShift);
     }
     const nextPos = {
@@ -1004,6 +1263,7 @@ export function createPlayer(opts) {
     physicsWorld.step();
     const playerT = playerBody.translation();
     charPos.set(playerT.x, playerT.y, playerT.z);
+    _didCrouchTransitionThisFrame = false;
     // Terrain mode: never let character sink below the heightmap (physics ground may be flat/slab)
     if (hasSampleHeight) {
       const terrainY = sampleHeight(charPos.x, charPos.z) + capHalfH + capR;
@@ -1027,7 +1287,7 @@ export function createPlayer(opts) {
         charPos,
         _normalHH_c,
         _capR_c,
-        _isCrouching,
+        _isCrouching || _isSliding,
         _crouchHH_c,
         dt,
         _lastPlatformPos,
@@ -1225,6 +1485,7 @@ export function createPlayer(opts) {
       ud.crouchWalkAction &&
       !ud.isAttacking &&
       !ud.isRolling &&
+      !ud.isSliding &&
       _jumpPhase === "none"
     ) {
       const skipT = 0.4;
@@ -1322,6 +1583,7 @@ export function createPlayer(opts) {
     if (characterMixer) characterMixer.update(dt);
 
     keys.spacePrev = keys.space;
+    keys.xPrev = keys.x;
 
     // ── FOOTSTEP SYNC ─────────────────────────────────────────────────────
     // Track each foot bone's Y relative to character centre.
