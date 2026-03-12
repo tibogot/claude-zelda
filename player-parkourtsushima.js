@@ -30,6 +30,7 @@ const DRACO_URL = "https://www.gstatic.com/draco/versioned/decoders/1.5.6/";
  * @param {number} [opts.capHalfH] - Capsule half-height (required when sampleHeight provided)
  * @param {number} opts.TERRAIN_SIZE
  * @param {object} [opts.debugOut] - Optional. When provided, written each frame with platform debug info.
+ * @param {Array<{ position: { x: number, y: number, z: number }, halfExtents: { x: number, y: number, z: number } }>} [opts.climbables] - Optional. List of climbable boxes (e.g. 1m cube) for ClimbUp_1m_RM.
  * @returns {{ characterGroup: THREE.Group, capsule: THREE.Mesh, keys: object, state: { camYaw: number, camPitch: number, characterVelY: number, isGrounded: boolean, moveDir: THREE.Vector3 }, update: (dt: number) => void }}
  */
 export function createPlayer(opts) {
@@ -50,6 +51,7 @@ export function createPlayer(opts) {
     footstepSoundsPath = null,
     TERRAIN_SIZE,
     debugOut = null,
+    climbables = [],
   } = opts;
   // Reassignable so we can replace the capsule collider when crouching (Rapier collider swap).
   let playerCollider = initialPlayerCollider;
@@ -356,6 +358,16 @@ export function createPlayer(opts) {
             gltf.animations.find((a) => a.name === "Slide_Exit_Armature") ||
             gltf.animations.find((a) => a.name === "Slide_Exit") ||
             slideLoopClip;
+          const climbClip =
+            gltf.animations.find((a) => a.name === "ClimbUp_1m_RM_Armature") ||
+            gltf.animations.find((a) => a.name === "ClimbUp_1m_RM") ||
+            gltf.animations.find((a) => a.name === "ClimbUp_1m_Armature") ||
+            gltf.animations.find((a) => a.name === "ClimbUp_1m") ||
+            idleClip;
+          const ninjaJumpIdleClip =
+            gltf.animations.find((a) => a.name === "NinjaJump_Idle_Loop_Armature") ||
+            gltf.animations.find((a) => a.name === "NinjaJump_Idle_Loop") ||
+            jumpLoopClip;
           const idleAction = characterMixer
             .clipAction(idleClip)
             .setLoop(2201)
@@ -376,6 +388,9 @@ export function createPlayer(opts) {
           jumpLandAction.clampWhenFinished = true;
           jumpLandAction.timeScale = 1.8; // fast landing recovery
           const jumpAction = jumpLoopAction; // alias kept for compat
+          const ninjaJumpIdleAction = characterMixer
+            .clipAction(ninjaJumpIdleClip)
+            .setLoop(2201);
           const attackAction = attackClip
             ? characterMixer.clipAction(attackClip).setLoop(2200)
             : null;
@@ -408,12 +423,18 @@ export function createPlayer(opts) {
             slideStartAction.clampWhenFinished = true;
           if (slideExitAction?.clampWhenFinished !== undefined)
             slideExitAction.clampWhenFinished = true;
+          const climbAction = characterMixer
+            .clipAction(climbClip)
+            .setLoop(2200);
+          if (climbAction?.clampWhenFinished !== undefined)
+            climbAction.clampWhenFinished = true;
           characterGroup.userData.idleAction = idleAction;
           characterGroup.userData.walkAction = walkAction;
           characterGroup.userData.runAction = runAction;
           characterGroup.userData.jumpAction = jumpLoopAction;
           characterGroup.userData.jumpStartAction = jumpStartAction;
           characterGroup.userData.jumpLandAction = jumpLandAction;
+          characterGroup.userData.ninjaJumpIdleAction = ninjaJumpIdleAction;
           characterGroup.userData.crouchAction = crouchAction;
           characterGroup.userData.crouchWalkAction = crouchWalkAction;
           characterGroup.userData.rollAction = rollAction;
@@ -422,10 +443,12 @@ export function createPlayer(opts) {
           characterGroup.userData.slideStartAction = slideStartAction;
           characterGroup.userData.slideLoopAction = slideLoopAction;
           characterGroup.userData.slideExitAction = slideExitAction;
+          characterGroup.userData.climbAction = climbAction;
           characterGroup.userData.lastMoveState = "idle";
           characterGroup.userData.isAttacking = false;
           characterGroup.userData.isRolling = false;
           characterGroup.userData.isSliding = false;
+          characterGroup.userData.isClimbing = false;
           const makeAttackFinishedHandler = (action) => () => {
             const ud = characterGroup.userData;
             ud.isAttacking = false;
@@ -618,6 +641,45 @@ export function createPlayer(opts) {
               }, 100);
             });
           }
+          const climbActionRef = characterGroup.userData.climbAction;
+          if (climbActionRef) {
+            characterMixer.addEventListener("finished", (e) => {
+              if (e.action !== climbActionRef) return;
+              const ud = characterGroup.userData;
+              ud.isClimbing = false;
+              const land = ud.climbLandPosition;
+              if (land && playerBody && charPos) {
+                if (RAPIER) {
+                  physicsWorld.removeCollider(playerCollider);
+                  playerCollider = physicsWorld.createCollider(
+                    RAPIER.ColliderDesc.capsule(_normalHH_c, _capR_c),
+                    playerBody,
+                  );
+                }
+                _isCrouching = false;
+                playerBody.setTranslation(
+                  { x: land.x, y: land.y, z: land.z },
+                  true,
+                );
+                playerBody.setNextKinematicTranslation({
+                  x: land.x,
+                  y: land.y,
+                  z: land.z,
+                });
+                charPos.set(land.x, land.y, land.z);
+              }
+              const from = ud.lastMoveState || "idle";
+              const toIdle = () => {
+                ud.idleAction.enabled = true;
+                ud.idleAction.crossFadeFrom(climbActionRef, 0.2).play();
+              };
+              setTimeout(() => {
+                climbActionRef.enabled = false;
+              }, 200);
+              toIdle();
+              ud.lastMoveState = "idle";
+            });
+          }
         }
       } catch (e) {
         console.warn("Character animations:", e);
@@ -644,11 +706,13 @@ export function createPlayer(opts) {
     e: false,
     f: false,
     x: false,
+    r: false,
     shift: false,
     ctrl: false,
     space: false,
     spacePrev: false,
     xPrev: false,
+    rPrev: false,
     arrowLeft: false,
     arrowRight: false,
   };
@@ -667,6 +731,7 @@ export function createPlayer(opts) {
   let _justJumped = false;
   let _jumpPhase = "none"; // "none" | "start" | "loop" | "land"
   let _lastAnimJumpPhase = "none";
+  let _gliderPoseActive = false; // true when showing NinjaJump_Idle_Loop during kite
   let _airFrames = 0;
   let _groundFrames = 0;
 
@@ -712,6 +777,7 @@ export function createPlayer(opts) {
     if (e.key === "Control") keys.ctrl = true;
     if (e.key === "f" || e.key === "F") keys.f = true;
     if (e.key === "x" || e.key === "X") keys.x = true;
+    if (e.key === "r" || e.key === "R") keys.r = true;
     if (e.key === " " || e.code === "Space") {
       keys.space = true;
       e.preventDefault();
@@ -740,6 +806,7 @@ export function createPlayer(opts) {
     if (e.key === "Control") keys.ctrl = false;
     if (e.key === "f" || e.key === "F") keys.f = false;
     if (e.key === "x" || e.key === "X") keys.x = false;
+    if (e.key === "r" || e.key === "R") keys.r = false;
     if (e.key === " " || e.code === "Space") keys.space = false;
     if (e.key === "ArrowUp") keys.w = false;
     if (e.key === "ArrowDown") keys.s = false;
@@ -760,7 +827,7 @@ export function createPlayer(opts) {
   renderer.domElement.addEventListener("mousedown", (e) => {
     if (e.button !== 2) return;
     const ud = characterGroup.userData;
-    if (!ud.attackAction || ud.isAttacking || ud.isRolling || ud.isSliding) return;
+    if (!ud.attackAction || ud.isAttacking || ud.isRolling || ud.isSliding || ud.isClimbing) return;
     ud.isAttacking = true;
     ud.preAttackState = ud.lastMoveState || "idle";
     ud.attackAction.stop();
@@ -783,7 +850,7 @@ export function createPlayer(opts) {
   window.addEventListener("keydown", (e) => {
     if (e.key.toLowerCase() !== "e" || e.repeat) return;
     const ud = characterGroup.userData;
-    if (!ud.attackAction2 || ud.isAttacking || ud.isRolling || ud.isSliding) return;
+    if (!ud.attackAction2 || ud.isAttacking || ud.isRolling || ud.isSliding || ud.isClimbing) return;
     ud.isAttacking = true;
     ud.preAttackState = ud.lastMoveState || "idle";
     ud.attackAction2.stop();
@@ -923,6 +990,7 @@ export function createPlayer(opts) {
       ud.rollAction &&
       !ud.isRolling &&
       !ud.isSliding &&
+      !ud.isClimbing &&
       !ud.isAttacking &&
       onGroundForCrouch
     ) {
@@ -948,6 +1016,83 @@ export function createPlayer(opts) {
       ud.rollAction.time = 0;
       ud.rollAction.enabled = true;
       ud.rollAction.crossFadeFrom(from, 0.1).play();
+    }
+    // ── CLIMB (R): 1m climb when facing a climbable box in range ──
+    if (
+      keys.r &&
+      !keys.rPrev &&
+      ud &&
+      ud.climbAction &&
+      !ud.isClimbing &&
+      !ud.isRolling &&
+      !ud.isSliding &&
+      !ud.isAttacking &&
+      _jumpPhase === "none" &&
+      onGroundForCrouch &&
+      Array.isArray(climbables) &&
+      climbables.length > 0
+    ) {
+      const forwardX = Math.sin(state.camYaw);
+      const forwardZ = -Math.cos(state.camYaw);
+      for (const box of climbables) {
+        const dx = box.position.x - charPos.x;
+        const dz = box.position.z - charPos.z;
+        const distXZ = Math.sqrt(dx * dx + dz * dz);
+        if (distXZ > 1.5 || distXZ < 0.1) continue;
+        const invLen = 1 / distXZ;
+        const toBoxX = dx * invLen;
+        const toBoxZ = dz * invLen;
+        const facing = forwardX * toBoxX + forwardZ * toBoxZ;
+        if (facing < 0.3) continue;
+        keys.r = false;
+        ud.isClimbing = true;
+        const ledgeTopY = box.position.y + box.halfExtents.y;
+        ud.climbLandPosition = {
+          x: box.position.x,
+          y: ledgeTopY + _normalHH_c + _capR_c,
+          z: box.position.z,
+        };
+        if (!_isCrouching) {
+          const bottomY = charPos.y - _normalHH_c - _capR_c;
+          if (RAPIER) {
+            physicsWorld.removeCollider(playerCollider);
+            playerCollider = physicsWorld.createCollider(
+              RAPIER.ColliderDesc.capsule(_crouchHH_c, _capR_c),
+              playerBody,
+            );
+          } else {
+            playerCollider.setHalfHeight(_crouchHH_c);
+          }
+          _isCrouching = true;
+          _didCrouchTransitionThisFrame = true;
+          const newCenterY = bottomY + _crouchHH_c + _capR_c;
+          playerBody.setTranslation(
+            { x: charPos.x, y: newCenterY, z: charPos.z },
+            true,
+          );
+          playerBody.setNextKinematicTranslation({
+            x: charPos.x,
+            y: newCenterY,
+            z: charPos.z,
+          });
+          charPos.y = newCenterY;
+        }
+        const from =
+          ud.lastMoveState === "run"
+            ? ud.runAction
+            : ud.lastMoveState === "walk"
+              ? ud.walkAction
+              : ud.lastMoveState === "crouch"
+                ? ud.crouchAction
+                : ud.lastMoveState === "crouch_walk"
+                  ? ud.crouchWalkAction
+                  : ud.idleAction;
+        ud.climbAction.reset();
+        ud.climbAction.time = 0;
+        ud.climbAction.enabled = true;
+        ud.climbAction.crossFadeFrom(from, 0.1).play();
+        break;
+      }
     }
     // ── SLIDE (X): start when grounded, moving, not rolling/attacking/jumping ──
     const slideMaxTime = (typeof PARAMS !== "undefined" && PARAMS.slideMaxTime) || 1.2;
@@ -1058,6 +1203,10 @@ export function createPlayer(opts) {
         }
       }
     }
+    if (ud?.isClimbing) {
+      desiredDx = 0;
+      desiredDz = 0;
+    }
     const hb = TERRAIN_SIZE * 0.48;
     const nextX = Math.max(-hb, Math.min(hb, charPos.x + desiredDx));
     const nextZ = Math.max(-hb, Math.min(hb, charPos.z + desiredDz));
@@ -1072,7 +1221,7 @@ export function createPlayer(opts) {
       : state.isGrounded;
     let desiredY;
     if (onGround) {
-      if (keys.space && !keys.spacePrev && !_isCrouching && !_isSliding && _jumpPhase === "none") {
+      if (keys.space && !keys.spacePrev && !_isCrouching && !_isSliding && !ud.isClimbing && _jumpPhase === "none") {
         state.characterVelY = PARAMS.jumpSpeed;
         _justJumped = true;
         _jumpPhase = "start";
@@ -1107,14 +1256,14 @@ export function createPlayer(opts) {
     // Terrain mode only: apply crouch Y offset every frame so we follow heightmap at
     // crouch center height. Parkour mode repositions on transition only — bottom stays fixed.
     if (hasSampleHeight) {
-      desiredY += (_isCrouching || _isSliding) ? -_crouchShift : 0;
+      desiredY += (_isCrouching || _isSliding || (ud && ud.isClimbing)) ? -_crouchShift : 0;
     }
 
     // Proactively detect kinematic platform via downward ray cast BEFORE computing
     // desired movement. MUST run every frame in parkour mode — when platform descends,
     // computedGrounded() becomes false and we'd stop inheriting velocity, leaving us floating.
     if (!hasSampleHeight && RAPIER) {
-      const halfH = (_isCrouching || _isSliding) ? _crouchHH_c : _normalHH_c;
+      const halfH = (_isCrouching || _isSliding || (ud && ud.isClimbing)) ? _crouchHH_c : _normalHH_c;
       const capBottom = charPos.y - halfH - _capR_c;
       const ray = new RAPIER.Ray(
         { x: charPos.x, y: capBottom + 0.02, z: charPos.z },
@@ -1287,7 +1436,7 @@ export function createPlayer(opts) {
         charPos,
         _normalHH_c,
         _capR_c,
-        _isCrouching || _isSliding,
+        _isCrouching || _isSliding || (ud && ud.isClimbing),
         _crouchHH_c,
         dt,
         _lastPlatformPos,
@@ -1434,9 +1583,19 @@ export function createPlayer(opts) {
         ud.jumpStartAction.enabled = true;
         ud.jumpStartAction.crossFadeFrom(_from, 0.08).play();
       } else if (_jumpPhase === "loop") {
-        // Jump_Loop_Armature — loops while airborne.
+        // Jump_Loop_Armature — loops while airborne (from jump start or from falling off ledge).
         const _from =
-          _prev === "start" ? ud.jumpStartAction : ud.idleAction;
+          _prev === "start"
+            ? ud.jumpStartAction
+            : ud.lastMoveState === "run"
+              ? ud.runAction
+              : ud.lastMoveState === "walk"
+                ? ud.walkAction
+                : ud.lastMoveState === "crouch"
+                  ? ud.crouchAction
+                  : ud.lastMoveState === "crouch_walk"
+                    ? ud.crouchWalkAction
+                    : ud.idleAction;
         ud.jumpAction.enabled = true;
         ud.jumpAction.crossFadeFrom(_from, 0.08).play();
         if (_prev === "start")
@@ -1446,13 +1605,18 @@ export function createPlayer(opts) {
       } else if (_jumpPhase === "land") {
         // Jump_Land_Armature — brief landing recovery, played once at 1.8x speed.
         const _from =
-          _prev === "start" ? ud.jumpStartAction : ud.jumpAction;
+          _prev === "start"
+            ? ud.jumpStartAction
+            : _gliderPoseActive
+              ? ud.ninjaJumpIdleAction
+              : ud.jumpAction;
         ud.jumpLandAction.reset();
         ud.jumpLandAction.enabled = true;
         ud.jumpLandAction.crossFadeFrom(_from, 0.08).play();
         setTimeout(() => {
           if (_prev === "start") ud.jumpStartAction.enabled = false;
           else ud.jumpAction.enabled = false;
+          if (ud.ninjaJumpIdleAction) ud.ninjaJumpIdleAction.enabled = false;
         }, 100);
       } else if (_jumpPhase === "none") {
         // Recovery — crossfade from land anim to whatever the player is doing.
@@ -1473,6 +1637,26 @@ export function createPlayer(opts) {
         ud.lastMoveState = _target;
       }
     }
+    // When in air (loop phase): use NinjaJump_Idle_Loop while kite is open, else Jump_Loop
+    if (
+      _jumpPhase === "loop" &&
+      ud?.jumpAction &&
+      ud?.ninjaJumpIdleAction
+    ) {
+      if (state.isGliding && !_gliderPoseActive) {
+        _gliderPoseActive = true;
+        ud.ninjaJumpIdleAction.enabled = true;
+        ud.ninjaJumpIdleAction.crossFadeFrom(ud.jumpAction, 0.15).play();
+        ud.jumpAction.enabled = false;
+      } else if (!state.isGliding && _gliderPoseActive) {
+        _gliderPoseActive = false;
+        ud.jumpAction.enabled = true;
+        ud.jumpAction.crossFadeFrom(ud.ninjaJumpIdleAction, 0.15).play();
+        ud.ninjaJumpIdleAction.enabled = false;
+      }
+    } else {
+      _gliderPoseActive = false;
+    }
     // ── LOCOMOTION STATE MACHINE ───────────────────────────────────────────
     // Blocked entirely while a jump phase is active — jump anim block above
     // owns all transitions during that time.
@@ -1486,6 +1670,7 @@ export function createPlayer(opts) {
       !ud.isAttacking &&
       !ud.isRolling &&
       !ud.isSliding &&
+      !ud.isClimbing &&
       _jumpPhase === "none"
     ) {
       const skipT = 0.4;
@@ -1584,6 +1769,7 @@ export function createPlayer(opts) {
 
     keys.spacePrev = keys.space;
     keys.xPrev = keys.x;
+    keys.rPrev = keys.r;
 
     // ── FOOTSTEP SYNC ─────────────────────────────────────────────────────
     // Track each foot bone's Y relative to character centre.

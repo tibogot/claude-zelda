@@ -62,7 +62,7 @@
     <div id="info">
       Parkour &mdash; <span id="backend">loading…</span> &bull;
       <span id="stats">—</span> &bull; WASD + click to look &bull; Shift run
-      &bull; Ctrl crouch &bull; X slide &bull; F roll &bull; right-click / E attack &bull;
+      &bull; Ctrl crouch &bull; X slide &bull; F roll &bull; R climb (1m) &bull; right-click / E attack &bull;
       Space jump &bull; Space mid-air glide &bull; god
       rays
     </div>
@@ -577,6 +577,43 @@
 
         const dynamicObjects = []; // (cubes/balls/dominos removed)
 
+        // Climb debug: several cubes with different heights to test ClimbUp_1m_RM
+        const FLOOR_Y_CLIMB = FLOOR_Y;
+        const climbCubeSpecs = [
+          { half: 0.25, z: -4, color: 0xaa4488 },   // 0.5m
+          { half: 0.5,  z: -6, color: 0x8855aa },   // 1m (matches anim)
+          { half: 0.625, z: -8, color: 0x6688cc },  // 1.25m
+          { half: 0.75,  z: -10, color: 0x44aacc }, // 1.5m
+        ];
+        const climbables = [];
+        const climbCubeMat = new THREE.MeshStandardMaterial({
+          roughness: 0.6,
+          metalness: 0.1,
+        });
+        for (const spec of climbCubeSpecs) {
+          const center = { x: 0, y: FLOOR_Y_CLIMB + spec.half, z: spec.z };
+          const bodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(
+            center.x, center.y, center.z,
+          );
+          const body = physicsWorld.createRigidBody(bodyDesc);
+          physicsWorld.createCollider(
+            RAPIER.ColliderDesc.cuboid(spec.half, spec.half, spec.half),
+            body,
+          );
+          const geo = new THREE.BoxGeometry(spec.half * 2, spec.half * 2, spec.half * 2);
+          const mat = climbCubeMat.clone();
+          mat.color.setHex(spec.color);
+          const mesh = new THREE.Mesh(geo, mat);
+          mesh.position.set(center.x, center.y, center.z);
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          scene.add(mesh);
+          climbables.push({
+            position: { ...center },
+            halfExtents: { x: spec.half, y: spec.half, z: spec.half },
+          });
+        }
+
         const { physicsDebugGroup, buildRapierDebugMeshes } =
           createPhysicsDebug(RAPIER, scene, physicsWorld);
         physicsDebugGroup.visible = false;
@@ -607,10 +644,10 @@
           characterController,
           physicsWorld,
           RAPIER,
-          // no sampleHeight → parkour mode: Rapier trimesh colliders + computedGrounded()
           footstepSoundsPath: "sounds",
           TERRAIN_SIZE: PARKOUR_SIZE,
           debugOut: platformDebugOut,
+          climbables,
         });
 
         // ── TWEAKPANE CONTROLS ──
