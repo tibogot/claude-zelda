@@ -1,0 +1,2232 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Octahedral Impostor — v5</title>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.module.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+    <style>
+      @import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap");
+      :root {
+        --bg: #0d0d14;
+        --panel: rgba(10, 10, 18, 0.92);
+        --border: rgba(255, 255, 255, 0.06);
+        --accent: #4af;
+        --accent2: #5f5;
+        --accent3: #fa4;
+        --accent4: #f4a;
+        --text: #c0c8d8;
+        --text-dim: #5a6070;
+        --mono: "JetBrains Mono", "SF Mono", "Fira Code", monospace;
+        --radius: 6px;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        background: var(--bg);
+        overflow: hidden;
+        font-family: var(--mono);
+        color: var(--text);
+      }
+      canvas {
+        display: block;
+      }
+      .vl {
+        position: fixed;
+        top: 10px;
+        z-index: 20;
+        padding: 4px 14px;
+        border-radius: 3px;
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        pointer-events: none;
+      }
+      #ll {
+        left: calc(25% - 45px);
+        background: rgba(80, 255, 80, 0.12);
+        color: var(--accent2);
+        border: 1px solid rgba(80, 255, 80, 0.2);
+      }
+      #rl {
+        left: calc(75% - 52px);
+        background: rgba(68, 170, 255, 0.12);
+        color: var(--accent);
+        border: 1px solid rgba(68, 170, 255, 0.2);
+      }
+      #dv {
+        position: fixed;
+        left: 50%;
+        top: 0;
+        width: 1px;
+        height: 100vh;
+        background: linear-gradient(
+          180deg,
+          transparent 0%,
+          rgba(255, 255, 255, 0.12) 15%,
+          rgba(255, 255, 255, 0.12) 85%,
+          transparent 100%
+        );
+        pointer-events: none;
+        z-index: 5;
+      }
+      #tb {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 42px;
+        z-index: 30;
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        padding: 0 12px;
+        gap: 8px;
+        backdrop-filter: blur(12px);
+      }
+      #tb .logo {
+        font-weight: 700;
+        font-size: 13px;
+        color: var(--accent);
+        margin-right: 8px;
+        white-space: nowrap;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      #tb .logo .dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--accent);
+      }
+      #tb select,
+      #tb button {
+        font-family: var(--mono);
+        font-size: 11px;
+        border-radius: 3px;
+        border: 1px solid var(--border);
+        cursor: pointer;
+        outline: none;
+      }
+      #tb select {
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--text);
+        padding: 4px 8px;
+      }
+      #tb button {
+        padding: 4px 12px;
+        font-weight: 600;
+      }
+      .bp {
+        background: rgba(68, 170, 255, 0.15);
+        color: var(--accent);
+        border-color: rgba(68, 170, 255, 0.3);
+      }
+      .bp:hover {
+        background: rgba(68, 170, 255, 0.25);
+      }
+      .bs {
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--text);
+      }
+      .bs:hover {
+        background: rgba(255, 255, 255, 0.08);
+      }
+      .sep {
+        width: 1px;
+        height: 20px;
+        background: var(--border);
+        margin: 0 4px;
+      }
+      #ir {
+        position: fixed;
+        top: 42px;
+        left: 0;
+        right: 0;
+        height: 34px;
+        z-index: 29;
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        padding: 0 12px;
+        gap: 8px;
+        backdrop-filter: blur(12px);
+      }
+      #ir .il {
+        font-size: 10px;
+        color: var(--text-dim);
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      #ir input[type="text"] {
+        flex: 1;
+        max-width: 340px;
+        font-family: var(--mono);
+        font-size: 10px;
+        padding: 4px 8px;
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        outline: none;
+      }
+      #ir input[type="text"]:focus {
+        border-color: rgba(68, 170, 255, 0.4);
+      }
+      #ir input[type="text"]::placeholder {
+        color: var(--text-dim);
+      }
+      #ir button {
+        font-family: var(--mono);
+        font-size: 10px;
+        border-radius: 3px;
+        border: 1px solid var(--border);
+        cursor: pointer;
+        outline: none;
+        padding: 4px 10px;
+        font-weight: 600;
+      }
+      .bu {
+        background: rgba(68, 170, 255, 0.15);
+        color: var(--accent);
+        border-color: rgba(68, 170, 255, 0.3);
+      }
+      .bu:hover {
+        background: rgba(68, 170, 255, 0.25);
+      }
+      .bf {
+        background: rgba(95, 255, 95, 0.12);
+        color: var(--accent2);
+        border-color: rgba(95, 255, 95, 0.25);
+      }
+      .bf:hover {
+        background: rgba(95, 255, 95, 0.2);
+      }
+      .fn {
+        font-size: 9px;
+        color: var(--accent2);
+        max-width: 140px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #fi {
+        display: none;
+      }
+      #cp {
+        position: fixed;
+        left: 8px;
+        top: 84px;
+        z-index: 25;
+        width: 242px;
+        max-height: calc(100vh - 94px);
+        overflow-y: auto;
+        overflow-x: hidden;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        backdrop-filter: blur(12px);
+        font-size: 10px;
+      }
+      #cp::-webkit-scrollbar {
+        width: 4px;
+      }
+      #cp::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 2px;
+      }
+      .ps {
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--border);
+      }
+      .ps:last-child {
+        border-bottom: none;
+      }
+      .ps h3 {
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--text-dim);
+        margin-bottom: 6px;
+      }
+      .cr {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 4px;
+        gap: 6px;
+      }
+      .cr label {
+        flex: 0 0 auto;
+        min-width: 92px;
+        color: var(--text);
+        font-size: 10px;
+      }
+      .cr input[type="range"] {
+        flex: 1;
+        height: 3px;
+        -webkit-appearance: none;
+        appearance: none;
+        background: rgba(255, 255, 255, 0.08);
+        border-radius: 2px;
+        outline: none;
+      }
+      .cr input[type="range"]::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--accent);
+        cursor: pointer;
+      }
+      .cr .val {
+        min-width: 36px;
+        text-align: right;
+        color: var(--accent);
+        font-size: 10px;
+        font-weight: 500;
+      }
+      .cr input[type="checkbox"],
+      .cr input[type="radio"] {
+        cursor: pointer;
+        accent-color: var(--accent);
+      }
+      .cr.ck {
+        justify-content: flex-start;
+        gap: 8px;
+      }
+      .cr.ck label {
+        min-width: auto;
+        cursor: pointer;
+      }
+      #ap {
+        position: fixed;
+        right: 8px;
+        bottom: 8px;
+        z-index: 25;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        backdrop-filter: blur(12px);
+        padding: 8px;
+        display: flex;
+        gap: 6px;
+        flex-direction: column;
+      }
+      .ar {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+      .al {
+        writing-mode: vertical-lr;
+        text-orientation: mixed;
+        font-size: 9px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        color: var(--text-dim);
+        text-transform: uppercase;
+      }
+      #ap canvas {
+        border-radius: 3px;
+        border: 1px solid var(--border);
+        width: 190px;
+        height: 190px;
+        image-rendering: auto;
+        cursor: pointer;
+      }
+      #so {
+        position: fixed;
+        right: 8px;
+        top: 84px;
+        z-index: 25;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        backdrop-filter: blur(12px);
+        padding: 8px 10px;
+        font-size: 10px;
+        min-width: 185px;
+      }
+      #so h3 {
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--text-dim);
+        margin-bottom: 6px;
+      }
+      .sr {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 3px;
+      }
+      .sr .sl {
+        color: var(--text-dim);
+      }
+      .sr .sv {
+        color: var(--accent);
+        font-weight: 500;
+      }
+      .sr .sv.g {
+        color: var(--accent2);
+      }
+      .sr .sv.o {
+        color: var(--accent3);
+      }
+      .sr .sv.p {
+        color: var(--accent4);
+      }
+      #bi {
+        position: fixed;
+        bottom: 8px;
+        left: 8px;
+        z-index: 20;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        backdrop-filter: blur(12px);
+        padding: 8px 12px;
+        font-size: 10px;
+        line-height: 1.7;
+        max-width: 290px;
+      }
+      #bi .key {
+        color: var(--accent);
+        font-weight: 600;
+      }
+      #bi .dim {
+        color: var(--text-dim);
+      }
+      #ld {
+        position: fixed;
+        inset: 0;
+        background: rgba(8, 8, 16, 0.92);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 12px;
+        z-index: 100;
+        color: var(--accent);
+        font-size: 13px;
+        font-weight: 500;
+      }
+      #ld.hidden {
+        display: none;
+      }
+      .spinner {
+        width: 28px;
+        height: 28px;
+        border: 2px solid rgba(68, 170, 255, 0.15);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      .lst {
+        font-size: 11px;
+        color: var(--text-dim);
+      }
+      #cz {
+        position: fixed;
+        z-index: 50;
+        background: var(--panel);
+        border: 2px solid var(--accent);
+        border-radius: var(--radius);
+        padding: 4px;
+        display: none;
+      }
+      #cz canvas {
+        width: 200px;
+        height: 200px;
+        image-rendering: pixelated;
+        border-radius: 3px;
+      }
+      #cz .czl {
+        font-size: 9px;
+        color: var(--accent);
+        text-align: center;
+        margin-top: 2px;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.2/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.2/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="ll" class="vl">● Reference</div>
+    <div id="rl" class="vl">● Impostor</div>
+    <div id="dv"></div>
+
+    <div id="tb">
+      <div class="logo">
+        <div class="dot"></div>
+        Octahedral Impostor v4
+      </div>
+      <div class="sep"></div>
+      <select id="model-select">
+        <option value="__torusknot__" selected>TorusKnot</option>
+        <option value="__sphere__">Sphere</option>
+        <option value="__cylinder__">Cylinder+Cone</option>
+        <option value="__monkey__">Monkey</option>
+        <option value="__tree__">Stylized Tree</option>
+        <option
+          value="https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/DamagedHelmet/glTF-Binary/DamagedHelmet.glb"
+        >
+          DamagedHelmet
+        </option>
+        <option
+          value="https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/models/gltf/Flamingo.glb"
+        >
+          Flamingo
+        </option>
+        <option
+          value="https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/models/gltf/Parrot.glb"
+        >
+          Parrot
+        </option>
+        <option
+          value="https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/models/gltf/Stork.glb"
+        >
+          Stork
+        </option>
+      </select>
+      <button class="bp" id="load-btn">Bake</button>
+      <div class="sep"></div>
+      <select id="quality-select">
+        <option value="512_6">512/6×6</option>
+        <option value="1024_8" selected>1024/8×8</option>
+        <option value="1024_12">1024/12×12</option>
+        <option value="2048_8">2048/8×8 HQ</option>
+        <option value="2048_12">2048/12×12 HQ</option>
+        <option value="2048_16">2048/16×16 HQ</option>
+        <option value="4096_8">4096/8×8 Ultra</option>
+        <option value="4096_12">4096/12×12 Ultra</option>
+      </select>
+      <div class="sep"></div>
+      <button class="bs" id="cam-close">Close</button>
+      <button class="bs" id="cam-far">Far</button>
+      <button class="bs" id="cam-orbit-toggle">Auto-orbit [O]</button>
+    </div>
+
+    <div id="ir">
+      <span class="il">Import:</span>
+      <button class="bf" id="file-btn">📁 Local GLB…</button>
+      <input type="file" id="fi" accept=".glb,.gltf" />
+      <span class="fn" id="file-name"></span>
+      <div class="sep"></div>
+      <input type="text" id="url-input" placeholder="Paste GLB URL…" />
+      <button class="bu" id="url-load-btn">Load URL</button>
+    </div>
+
+    <div id="ld">
+      <div class="spinner"></div>
+      Baking…
+      <div class="lst" id="lst"></div>
+    </div>
+
+    <div id="cp">
+      <div class="ps">
+        <h3>☀ Lighting (instant)</h3>
+        <div class="cr">
+          <label>Sun azimuth</label
+          ><input
+            type="range"
+            id="sun-az"
+            min="0"
+            max="360"
+            value="225"
+            step="1"
+          /><span class="val" id="sun-az-v">225°</span>
+        </div>
+        <div class="cr">
+          <label>Sun elevation</label
+          ><input
+            type="range"
+            id="sun-el"
+            min="5"
+            max="90"
+            value="56"
+            step="1"
+          /><span class="val" id="sun-el-v">56°</span>
+        </div>
+        <div class="cr">
+          <label>Sun intensity</label
+          ><input
+            type="range"
+            id="sun-int"
+            min="0"
+            max="5"
+            value="2.0"
+            step="0.05"
+          /><span class="val" id="sun-int-v">2.00</span>
+        </div>
+        <div class="cr">
+          <label>Ambient</label
+          ><input
+            type="range"
+            id="amb-int"
+            min="0"
+            max="3"
+            value="0.6"
+            step="0.05"
+          /><span class="val" id="amb-int-v">0.60</span>
+        </div>
+      </div>
+      <div class="ps">
+        <h3>🎛 Impostor Shading</h3>
+        <div class="cr">
+          <label>Light scale</label
+          ><input
+            type="range"
+            id="light-scale"
+            min="0.1"
+            max="3"
+            value="1.0"
+            step="0.05"
+          /><span class="val" id="light-scale-v">1.00</span>
+        </div>
+        <div class="cr">
+          <label>Normal strength</label
+          ><input
+            type="range"
+            id="normal-str"
+            min="0"
+            max="2"
+            value="1.0"
+            step="0.05"
+          /><span class="val" id="normal-str-v">1.00</span>
+        </div>
+        <div class="cr">
+          <label>Alpha cutoff</label
+          ><input
+            type="range"
+            id="alpha-cut"
+            min="0.01"
+            max="0.9"
+            value="0.1"
+            step="0.01"
+          /><span class="val" id="alpha-cut-v">0.10</span>
+        </div>
+      </div>
+      <div class="ps">
+        <h3>📐 Bake (re-bake)</h3>
+        <div class="cr">
+          <label>Sphere margin</label
+          ><input
+            type="range"
+            id="sphere-margin"
+            min="1.0"
+            max="1.5"
+            value="1.08"
+            step="0.01"
+          /><span class="val" id="sphere-margin-v">1.08</span>
+        </div>
+        <div class="cr">
+          <label>Bake alpha test</label
+          ><input
+            type="range"
+            id="bake-alpha"
+            min="0.0"
+            max="0.5"
+            value="0.02"
+            step="0.01"
+          /><span class="val" id="bake-alpha-v">0.02</span>
+        </div>
+        <div class="cr">
+          <label>Cell padding</label
+          ><input
+            type="range"
+            id="cell-pad"
+            min="0"
+            max="8"
+            value="2"
+            step="1"
+          /><span class="val" id="cell-pad-v">2</span>
+        </div>
+      </div>
+      <div class="ps">
+        <h3>🔀 Blend Mode</h3>
+        <div class="cr ck">
+          <input type="radio" name="blend" id="blend-dominant" checked /><label
+            for="blend-dominant"
+            >Dominant (trees)</label
+          >
+        </div>
+        <div class="cr ck">
+          <input type="radio" name="blend" id="blend-trilinear" /><label
+            for="blend-trilinear"
+            >Trilinear (rocks)</label
+          >
+        </div>
+        <div class="cr ck">
+          <input type="radio" name="blend" id="blend-smooth" /><label
+            for="blend-smooth"
+            >Smooth (alpha-weighted)</label
+          >
+        </div>
+      </div>
+      <div class="ps">
+        <h3>🔧 Debug</h3>
+        <div class="cr ck">
+          <input type="checkbox" id="dbg-wf" /><label for="dbg-wf"
+            >Wireframe [W]</label
+          >
+        </div>
+        <div class="cr ck">
+          <input type="checkbox" id="dbg-grid" /><label for="dbg-grid"
+            >Atlas grid [G]</label
+          >
+        </div>
+        <div class="cr ck">
+          <input type="checkbox" id="dbg-norm" /><label for="dbg-norm"
+            >Normals [N]</label
+          >
+        </div>
+        <div class="cr ck">
+          <input type="checkbox" id="dbg-freeze" /><label for="dbg-freeze"
+            >Freeze angle [F]</label
+          >
+        </div>
+        <div class="cr ck">
+          <input type="checkbox" id="dbg-ground" checked /><label
+            for="dbg-ground"
+            >Ground grid</label
+          >
+        </div>
+        <div class="cr ck">
+          <input type="checkbox" id="dbg-raw" /><label for="dbg-raw"
+            >Raw atlas</label
+          >
+        </div>
+        <div class="cr ck">
+          <input type="checkbox" id="dbg-active" checked /><label
+            for="dbg-active"
+            >Active cells</label
+          >
+        </div>
+      </div>
+    </div>
+
+    <div id="so">
+      <h3>Stats</h3>
+      <div class="sr">
+        <span class="sl">FPS</span><span class="sv g" id="st-fps">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Atlas</span><span class="sv" id="st-atlas">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Grid</span><span class="sv" id="st-spr">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Cell px</span><span class="sv" id="st-csz">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Pad</span><span class="sv" id="st-pad">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Ref tris</span><span class="sv o" id="st-tri">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Imp tris</span><span class="sv g">2</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Cam dist</span><span class="sv" id="st-dist">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Angle</span><span class="sv" id="st-ang">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Active</span><span class="sv p" id="st-act">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Blend</span
+        ><span class="sv" id="st-bld">dominant</span>
+      </div>
+    </div>
+
+    <div id="ap">
+      <div class="ar">
+        <span class="al">COLOR</span
+        ><canvas id="ac" width="190" height="190"></canvas>
+      </div>
+      <div class="ar">
+        <span class="al">NORMAL</span
+        ><canvas id="an" width="190" height="190"></canvas>
+      </div>
+    </div>
+
+    <div id="cz" style="display: none">
+      <canvas id="zc" width="200" height="200"></canvas>
+      <div class="czl" id="zl">Cell</div>
+    </div>
+
+    <div id="bi">
+      <span class="key">Drag</span> orbit · <span class="key">Scroll</span> zoom
+      · <span class="key">Right-drag</span> pan<br />
+      <span class="key">W</span> wire <span class="key">N</span> normals
+      <span class="key">F</span> freeze <span class="key">G</span> grid
+      <span class="key">O</span> orbit<br />
+      <span class="dim"
+        >v5: Depth atlas · Parallax · Albedo-only bake · Binomial mipmaps · Dither · Cell-centered sampling
+        Click atlas to zoom.</span
+      >
+    </div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { WebGPURenderer, MeshBasicNodeMaterial } from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+      import {
+        Fn,
+        uniform,
+        float,
+        vec2,
+        vec3,
+        vec4,
+        positionLocal,
+        cameraPosition,
+        varying,
+        texture,
+        mix,
+        clamp,
+        saturate,
+        floor,
+        fract,
+        min,
+        max,
+        dot,
+        cross,
+        normalize,
+        sign,
+        abs,
+        length,
+        add,
+        sub,
+        mul,
+        div,
+        negate,
+        screenCoordinate,
+        uv,
+        sin,
+      } from "three/tsl";
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // HEMI-OCTAHEDRAL MAPPING (matches production TSL)
+      // ═══════════════════════════════════════════════════════════════════════
+      function hemiOctaGridToDir(gx, gy) {
+        const x = gx - gy,
+          z = -1 + gx + gy;
+        return new THREE.Vector3(
+          x,
+          1 - Math.abs(x) - Math.abs(z),
+          z,
+        ).normalize();
+      }
+      // Cell-centered sampling for stable octahedral lookup (equal-weight cells)
+      function hemiOctaCellCenterDir(col, row, N) {
+        const gx = (col + 0.5) / N,
+          gy = (row + 0.5) / N;
+        return hemiOctaGridToDir(gx, gy);
+      }
+      function hemiOctaEncode(dir) {
+        const sx = Math.sign(dir.x) || 1,
+          sy = Math.sign(dir.y) || 1,
+          sz = Math.sign(dir.z) || 1;
+        const d = dir.x * sx + dir.y * sy + dir.z * sz;
+        return {
+          u: 0.5 * (1 + dir.x / d + dir.z / d),
+          v: 0.5 * (1 + dir.z / d - dir.x / d),
+        };
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // ATLAS BAKER — uses Three.js WebGLRenderer for PBR-correct capture
+      // ═══════════════════════════════════════════════════════════════════════
+      function bakeAtlas(sourceScene, bakeRenderer, opts = {}) {
+        const {
+          textureSize = 1024,
+          spritesPerSide = 8,
+          sphereMargin = 1.08,
+          alphaTest = 0.02,
+          cellPadding = 2,
+        } = opts;
+        const N = spritesPerSide,
+          Nm1 = Math.max(1, N - 1);
+        const cellSize = textureSize / N;
+        const pad = cellPadding;
+        const innerSize = cellSize - pad * 2;
+
+        // Bounding sphere
+        const bbox = new THREE.Box3().setFromObject(sourceScene);
+        const bsphere = new THREE.Sphere();
+        bbox.getBoundingSphere(bsphere);
+        const center = bsphere.center.clone();
+        const radius = bsphere.radius * sphereMargin;
+
+        // Ortho camera
+        const half = radius;
+        const bakeCam = new THREE.OrthographicCamera(
+          -half,
+          half,
+          half,
+          -half,
+          0.001,
+          radius * 4,
+        );
+
+        // ── Bake scene — clone model, add matched lighting ──
+        const bakeScene = new THREE.Scene();
+        bakeScene.background = null; // transparent
+
+        const bakeModel = sourceScene.clone(true);
+        // Ensure all materials are set up for proper alpha in the bake
+        bakeModel.traverse((o) => {
+          if (!o.isMesh) return;
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          mats.forEach((m) => {
+            if (m.alphaTest <= 0) m.alphaTest = alphaTest;
+            // Force double-side for bake so all faces visible from all directions
+            m.side = THREE.DoubleSide;
+          });
+        });
+        bakeScene.add(bakeModel);
+
+        // ── Albedo-only color pass: no directional lights (prevents lighting mismatch at runtime)
+        // Override to MeshBasicMaterial so we capture pure albedo; runtime applies lighting via normal atlas.
+        const origMatsForColor = new Map();
+        bakeModel.traverse((o) => {
+          if (!o.isMesh) return;
+          origMatsForColor.set(o, o.material);
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          const orig = mats[0];
+          if (orig) {
+            const basic = new THREE.MeshBasicMaterial({
+              map: orig.map,
+              color: orig.color,
+              transparent: orig.transparent,
+              opacity: orig.opacity,
+              alphaTest: orig.alphaTest || alphaTest,
+              side: THREE.DoubleSide,
+            });
+            o.material = basic;
+          }
+        });
+        // No directional lights — flat ambient only for any fallback; MeshBasic ignores lights
+        bakeScene.add(new THREE.AmbientLight(0xffffff, 1.0));
+
+        // ── Normal capture: override materials with normal-encoding material ──
+        const normalMat = new THREE.ShaderMaterial({
+          vertexShader: `
+      varying vec3 vWN;
+      void main(){
+        vWN = normalize((modelMatrix * vec4(normal, 0.0)).xyz);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }`,
+          fragmentShader: `
+      varying vec3 vWN;
+      void main(){ gl_FragColor = vec4(normalize(vWN)*0.5+0.5, 1.0); }`,
+          side: THREE.DoubleSide,
+        });
+        // Alpha-tested normal material: needs the original map for alpha discard
+        function makeAlphaNormalMat(origMat) {
+          return new THREE.ShaderMaterial({
+            uniforms: {
+              uMap: { value: origMat.map },
+              uAlpha: { value: origMat.alphaTest || alphaTest },
+            },
+            vertexShader: `
+        varying vec3 vWN; varying vec2 vUv;
+        void main(){
+          vWN = normalize((modelMatrix * vec4(normal, 0.0)).xyz);
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }`,
+            fragmentShader: `
+        uniform sampler2D uMap; uniform float uAlpha;
+        varying vec3 vWN; varying vec2 vUv;
+        void main(){
+          if(texture2D(uMap, vUv).a < uAlpha) discard;
+          gl_FragColor = vec4(normalize(vWN)*0.5+0.5, 1.0);
+        }`,
+            side: THREE.DoubleSide,
+          });
+        }
+        // Depth material: view-space relative depth (0 = center plane, 1 = toward camera)
+        const depthRange = radius * 2; // camera distance at bake
+        function makeDepthMat(origMat, camDist) {
+          return new THREE.ShaderMaterial({
+            uniforms: {
+              uMap: { value: origMat.map },
+              uAlpha: { value: origMat.alphaTest || alphaTest },
+              uCamDist: { value: camDist },
+            },
+            vertexShader: `
+        varying float vViewZ; varying vec2 vUv;
+        uniform float uCamDist;
+        void main(){
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          vViewZ = mv.z;
+          vUv = uv;
+          gl_Position = projectionMatrix * mv;
+        }`,
+            fragmentShader: `
+        uniform sampler2D uMap; uniform float uAlpha; uniform float uCamDist;
+        varying float vViewZ; varying vec2 vUv;
+        void main(){
+          if(texture2D(uMap, vUv).a < uAlpha) discard;
+          float d = clamp((vViewZ + uCamDist) / uCamDist, 0.0, 1.0);
+          gl_FragColor = vec4(d, 0.0, 0.0, 1.0);
+        }`,
+            side: THREE.DoubleSide,
+          });
+        }
+        const depthMatSimple = new THREE.ShaderMaterial({
+          uniforms: { uCamDist: { value: depthRange } },
+          vertexShader: `
+        varying float vViewZ;
+        void main(){
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          vViewZ = mv.z;
+          gl_Position = projectionMatrix * mv;
+        }`,
+          fragmentShader: `
+        uniform float uCamDist;
+        varying float vViewZ;
+        void main(){
+          float d = clamp((vViewZ + uCamDist) / uCamDist, 0.0, 1.0);
+          gl_FragColor = vec4(d, 0.0, 0.0, 1.0);
+        }`,
+          side: THREE.DoubleSide,
+        });
+
+        // Render targets (RGBA, float for precision) — one large atlas-sized target
+        const colorRT = new THREE.WebGLRenderTarget(textureSize, textureSize, {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          format: THREE.RGBAFormat,
+          type: THREE.UnsignedByteType,
+          colorSpace: THREE.SRGBColorSpace, // sRGB output so atlas stores what we see
+        });
+        colorRT.texture.generateMipmaps = false;
+        const normalRT = new THREE.WebGLRenderTarget(textureSize, textureSize, {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          format: THREE.RGBAFormat,
+          type: THREE.UnsignedByteType,
+        });
+        normalRT.texture.generateMipmaps = false;
+        const depthRT = new THREE.WebGLRenderTarget(textureSize, textureSize, {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          format: THREE.RGBAFormat,
+          type: THREE.UnsignedByteType,
+        });
+        depthRT.texture.generateMipmaps = false;
+
+        // Store original renderer state
+        const origRT = bakeRenderer.getRenderTarget();
+        const origClear = bakeRenderer.getClearColor(new THREE.Color());
+        const origAlpha = bakeRenderer.getClearAlpha();
+        const origAutoC = bakeRenderer.autoClear;
+        const origTM = bakeRenderer.toneMapping;
+
+        // Disable tone mapping for bake — we want raw PBR output
+        bakeRenderer.toneMapping = THREE.NoToneMapping;
+        bakeRenderer.autoClear = false;
+
+        // ── PASS 1: Color (PBR materials, real lighting) ──
+        bakeRenderer.setRenderTarget(colorRT);
+        bakeRenderer.setClearColor(0x000000, 0);
+        bakeRenderer.clear(true, true, true);
+
+        for (let row = 0; row < N; row++) {
+          for (let col = 0; col < N; col++) {
+            const dir = hemiOctaCellCenterDir(col, row, N);
+            bakeCam.position.copy(center).addScaledVector(dir, radius * 2);
+            bakeCam.lookAt(center);
+            bakeCam.updateMatrixWorld(true);
+
+            const x0 = col * cellSize + pad;
+            const y0 = row * cellSize + pad;
+            bakeRenderer.setViewport(x0, y0, innerSize, innerSize);
+            bakeRenderer.setScissorTest(true);
+            bakeRenderer.setScissor(x0, y0, innerSize, innerSize);
+            bakeRenderer.clear(true, true, true);
+            bakeRenderer.render(bakeScene, bakeCam);
+          }
+        }
+        bakeRenderer.setScissorTest(false);
+
+        // Restore materials after albedo pass (before normal pass)
+        bakeModel.traverse((o) => {
+          if (origMatsForColor.has(o)) o.material = origMatsForColor.get(o);
+        });
+
+        // Read back color
+        const colorPixels = new Uint8Array(textureSize * textureSize * 4);
+        bakeRenderer.readRenderTargetPixels(
+          colorRT,
+          0,
+          0,
+          textureSize,
+          textureSize,
+          colorPixels,
+        );
+
+        // ── PASS 2: Normals (override materials) ──
+        const origMats = new Map();
+        bakeModel.traverse((o) => {
+          if (!o.isMesh) return;
+          origMats.set(o, o.material);
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          const orig = mats[0];
+          o.material =
+            orig && orig.map && orig.alphaTest > 0
+              ? makeAlphaNormalMat(orig)
+              : normalMat;
+        });
+
+        bakeRenderer.setRenderTarget(normalRT);
+        bakeRenderer.setClearColor(0x000000, 0);
+        bakeRenderer.clear(true, true, true);
+
+        for (let row = 0; row < N; row++) {
+          for (let col = 0; col < N; col++) {
+            const dir = hemiOctaCellCenterDir(col, row, N);
+            bakeCam.position.copy(center).addScaledVector(dir, radius * 2);
+            bakeCam.lookAt(center);
+            bakeCam.updateMatrixWorld(true);
+
+            const x0 = col * cellSize + pad;
+            const y0 = row * cellSize + pad;
+            bakeRenderer.setViewport(x0, y0, innerSize, innerSize);
+            bakeRenderer.setScissorTest(true);
+            bakeRenderer.setScissor(x0, y0, innerSize, innerSize);
+            bakeRenderer.clear(true, true, true);
+            bakeRenderer.render(bakeScene, bakeCam);
+          }
+        }
+        bakeRenderer.setScissorTest(false);
+
+        // Read back normals
+        const normalPixels = new Uint8Array(textureSize * textureSize * 4);
+        bakeRenderer.readRenderTargetPixels(
+          normalRT,
+          0,
+          0,
+          textureSize,
+          textureSize,
+          normalPixels,
+        );
+
+        // Restore materials
+        bakeModel.traverse((o) => {
+          if (origMats.has(o)) o.material = origMats.get(o);
+        });
+
+        // ── PASS 3: Depth (view-space relative depth for parallax & correct depth buffer)
+        const origMatsDepth = new Map();
+        bakeModel.traverse((o) => {
+          if (!o.isMesh) return;
+          origMatsDepth.set(o, o.material);
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          const orig = mats[0];
+          o.material =
+            orig && orig.map && orig.alphaTest > 0
+              ? makeDepthMat(orig, depthRange)
+              : depthMatSimple;
+        });
+        bakeRenderer.setRenderTarget(depthRT);
+        bakeRenderer.setClearColor(0x000000, 0);
+        bakeRenderer.clear(true, true, true);
+        for (let row = 0; row < N; row++) {
+          for (let col = 0; col < N; col++) {
+            const dir = hemiOctaCellCenterDir(col, row, N);
+            bakeCam.position.copy(center).addScaledVector(dir, radius * 2);
+            bakeCam.lookAt(center);
+            bakeCam.updateMatrixWorld(true);
+            const x0 = col * cellSize + pad;
+            const y0 = row * cellSize + pad;
+            bakeRenderer.setViewport(x0, y0, innerSize, innerSize);
+            bakeRenderer.setScissorTest(true);
+            bakeRenderer.setScissor(x0, y0, innerSize, innerSize);
+            bakeRenderer.clear(true, true, true);
+            bakeRenderer.render(bakeScene, bakeCam);
+          }
+        }
+        bakeRenderer.setScissorTest(false);
+        const depthPixels = new Uint8Array(textureSize * textureSize * 4);
+        bakeRenderer.readRenderTargetPixels(
+          depthRT,
+          0,
+          0,
+          textureSize,
+          textureSize,
+          depthPixels,
+        );
+        bakeModel.traverse((o) => {
+          if (origMatsDepth.has(o)) o.material = origMatsDepth.get(o);
+        });
+        depthRT.dispose();
+        depthMatSimple.dispose();
+
+        // Restore renderer state
+        bakeRenderer.setRenderTarget(origRT);
+        bakeRenderer.setClearColor(origClear, origAlpha);
+        bakeRenderer.autoClear = origAutoC;
+        bakeRenderer.toneMapping = origTM;
+        bakeRenderer.setViewport(0, 0, window.innerWidth, window.innerHeight);
+
+        // Cleanup
+        colorRT.dispose();
+        normalRT.dispose();
+        normalMat.dispose();
+
+        // ── Per-cell mipmap generation ──
+        // Generate mipmaps for each cell independently so neighboring cells don't bleed
+        // Color/normal: alpha-weighted binomial 3x3 for better LOD quality
+        function generatePerCellMipmaps(pixels) {
+          const levels = [pixels];
+          let prevSize = textureSize;
+          const kernel = [1, 2, 1, 2, 4, 2, 1, 2, 1];
+          const kernelSum = 16;
+          while (prevSize > 1) {
+            const nextSize = prevSize >> 1;
+            if (nextSize < 1) break;
+            const prev = levels[levels.length - 1];
+            const next = new Uint8Array(nextSize * nextSize * 4);
+            const prevCellSize = prevSize / N;
+            const nextCellSize = nextSize / N;
+            for (let row = 0; row < N; row++) {
+              for (let col = 0; col < N; col++) {
+                const nx0 = Math.floor(col * nextCellSize);
+                const ny0 = Math.floor(row * nextCellSize);
+                const nw = Math.floor((col + 1) * nextCellSize) - nx0;
+                const nh = Math.floor((row + 1) * nextCellSize) - ny0;
+                for (let dy = 0; dy < nh; dy++) {
+                  for (let dx = 0; dx < nw; dx++) {
+                    const sx = Math.floor(col * prevCellSize) + dx * 2;
+                    const sy = Math.floor(row * prevCellSize) + dy * 2;
+                    const sxMin = Math.floor(col * prevCellSize);
+                    const syMin = Math.floor(row * prevCellSize);
+                    const sxMax = Math.floor((col + 1) * prevCellSize) - 1;
+                    const syMax = Math.floor((row + 1) * prevCellSize) - 1;
+                    let r = 0, g = 0, b = 0, a = 0, wSum = 0;
+                    for (let oy = 0; oy < 3; oy++) {
+                      for (let ox = 0; ox < 3; ox++) {
+                        const px = Math.max(sxMin, Math.min(sx + ox, sxMax));
+                        const py = Math.max(syMin, Math.min(sy + oy, syMax));
+                        const idx = (py * prevSize + px) * 4;
+                        const kw = kernel[oy * 3 + ox];
+                        const sa = prev[idx + 3];
+                        if (sa > 0) {
+                          r += prev[idx] * sa * kw;
+                          g += prev[idx + 1] * sa * kw;
+                          b += prev[idx + 2] * sa * kw;
+                          a += sa * kw;
+                          wSum += kw;
+                        }
+                      }
+                    }
+                    const di = ((ny0 + dy) * nextSize + (nx0 + dx)) * 4;
+                    if (a > 0) {
+                      const ia = a / wSum;
+                      next[di] = Math.round(r / a);
+                      next[di + 1] = Math.round(g / a);
+                      next[di + 2] = Math.round(b / a);
+                      next[di + 3] = Math.round(ia);
+                    }
+                  }
+                }
+              }
+            }
+            levels.push(next);
+            prevSize = nextSize;
+          }
+          return levels;
+        }
+        // Depth mipmaps: take max (front-most) per cell to avoid losing detail
+        function generatePerCellMipmapsDepth(pixels) {
+          const levels = [pixels];
+          let prevSize = textureSize;
+          while (prevSize > 1) {
+            const nextSize = prevSize >> 1;
+            if (nextSize < 1) break;
+            const prev = levels[levels.length - 1];
+            const next = new Uint8Array(nextSize * nextSize * 4);
+            const prevCellSize = prevSize / N;
+            const nextCellSize = nextSize / N;
+            for (let row = 0; row < N; row++) {
+              for (let col = 0; col < N; col++) {
+                const nx0 = Math.floor(col * nextCellSize);
+                const ny0 = Math.floor(row * nextCellSize);
+                const nw = Math.floor((col + 1) * nextCellSize) - nx0;
+                const nh = Math.floor((row + 1) * nextCellSize) - ny0;
+                for (let dy = 0; dy < nh; dy++) {
+                  for (let dx = 0; dx < nw; dx++) {
+                    const sx = Math.floor(col * prevCellSize) + dx * 2;
+                    const sy = Math.floor(row * prevCellSize) + dy * 2;
+                    const sxMax = Math.floor((col + 1) * prevCellSize) - 1;
+                    const syMax = Math.floor((row + 1) * prevCellSize) - 1;
+                    let dMax = 0, aMax = 0;
+                    for (let oy = 0; oy < 2; oy++) {
+                      for (let ox = 0; ox < 2; ox++) {
+                        const px = Math.min(sx + ox, sxMax);
+                        const py = Math.min(sy + oy, syMax);
+                        const idx = (py * prevSize + px) * 4;
+                        const d = prev[idx];
+                        const a = prev[idx + 3];
+                        if (a > 0 && d > dMax) {
+                          dMax = d;
+                          aMax = a;
+                        }
+                      }
+                    }
+                    const di = ((ny0 + dy) * nextSize + (nx0 + dx)) * 4;
+                    next[di] = dMax;
+                    next[di + 1] = 0;
+                    next[di + 2] = 0;
+                    next[di + 3] = aMax;
+                  }
+                }
+              }
+            }
+            levels.push(next);
+            prevSize = nextSize;
+          }
+          return levels;
+        }
+
+        const colorMips = generatePerCellMipmaps(colorPixels);
+        const normalMips = generatePerCellMipmaps(normalPixels);
+        const depthMips = generatePerCellMipmapsDepth(depthPixels);
+
+        // Build Three.js textures with manual mipmaps
+        function makeTexWithMips(mipLevels) {
+          const t = new THREE.DataTexture(
+            mipLevels[0],
+            textureSize,
+            textureSize,
+            THREE.RGBAFormat,
+          );
+          t.mipmaps = [];
+          let sz = textureSize;
+          for (let i = 0; i < mipLevels.length; i++) {
+            t.mipmaps.push({ data: mipLevels[i], width: sz, height: sz });
+            sz >>= 1;
+          }
+          t.needsUpdate = true;
+          t.flipY = false;
+          t.generateMipmaps = false; // we provide our own
+          t.minFilter = THREE.LinearMipmapLinearFilter;
+          t.magFilter = THREE.LinearFilter;
+          t.wrapS = THREE.ClampToEdgeWrapping;
+          t.wrapT = THREE.ClampToEdgeWrapping;
+          // Atlas stores sRGB (baked with renderer outputColorSpace = sRGB)
+          t.colorSpace = THREE.SRGBColorSpace;
+          // Anisotropic filtering
+          t.anisotropy = bakeRenderer.capabilities.getMaxAnisotropy();
+          return t;
+        }
+
+        const colorTex = makeTexWithMips(colorMips);
+        const normalTex = makeTexWithMips(normalMips);
+        normalTex.colorSpace = THREE.LinearSRGBColorSpace; // normals are linear data
+        const depthTex = makeTexWithMips(depthMips);
+        depthTex.colorSpace = THREE.LinearSRGBColorSpace;
+
+        return {
+          colorTexture: colorTex,
+          normalTexture: normalTex,
+          depthTexture: depthTex,
+          depthRange,
+          colorPixels: colorPixels.slice(),
+          normalPixels: normalPixels.slice(),
+          depthPixels: depthPixels.slice(),
+          textureSize,
+          spritesPerSide: N,
+          cellPadding: pad,
+          boundingSphere: { center: center.clone(), radius },
+        };
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // IMPOSTOR MATERIAL — fixed gamma pipeline, proper sRGB handling
+      // ═══════════════════════════════════════════════════════════════════════
+      function createImpostorMesh(atlas, opts = {}) {
+        const {
+          alphaTest = 0.1,
+          normalStrength = 1.0,
+          lightScale = 1.0,
+        } = opts;
+        const {
+          colorTexture,
+          normalTexture,
+          depthTexture,
+          depthRange,
+          spritesPerSide: S,
+          boundingSphere,
+          cellPadding,
+          textureSize,
+        } = atlas;
+        const r = boundingSphere.radius;
+        const geo = new THREE.PlaneGeometry(r * 2, r * 2);
+
+        const colorTexNode = texture(colorTexture);
+        const uvNode = uv();
+
+        const colorNodeFn = Fn(() => {
+          const c = colorTexNode.sample(uvNode);
+          return c;
+        });
+
+        const mat = new MeshBasicNodeMaterial({ side: THREE.FrontSide, transparent: true });
+        mat.colorNode = colorNodeFn();
+        mat.alphaTest = alphaTest;
+
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.frustumCulled = false;
+        return mesh;
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // MAIN APP
+      // ═══════════════════════════════════════════════════════════════════════
+      // WebGPU renderer for on-screen view
+      const renderer = new WebGPURenderer({
+        antialias: true,
+        alpha: false,
+      });
+      await renderer.init();
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.0;
+      document.getElementById("app").appendChild(renderer.domElement);
+
+      // Separate WebGL renderer for offscreen atlas baking (needed for readRenderTargetPixels)
+      const bakeRenderer = new THREE.WebGLRenderer({
+        antialias: false,
+        alpha: true,
+        preserveDrawingBuffer: true,
+      });
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0d0d14);
+      scene.fog = new THREE.Fog(0x0d0d14, 80, 250);
+      const sun = new THREE.DirectionalLight(0xfff0d0, 2.0);
+      sun.position.set(-1, 1.5, 1);
+      scene.add(sun);
+      const ambient = new THREE.AmbientLight(0x8090b0, 0.6);
+      scene.add(ambient);
+      scene.add(new THREE.HemisphereLight(0x8090b0, 0x3a4030, 0.4));
+      const gridH = new THREE.GridHelper(120, 60, 0x1a1a30, 0x151525);
+      gridH.material.transparent = true;
+      gridH.material.opacity = 0.5;
+      scene.add(gridH);
+
+      const camera = new THREE.PerspectiveCamera(
+        45,
+        window.innerWidth / 2 / window.innerHeight,
+        0.1,
+        800,
+      );
+      camera.position.set(0, 5, 20);
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.08;
+      controls.target.set(0, 3, 0);
+      controls.update();
+
+      const draco = new DRACOLoader();
+      draco.setDecoderPath(
+        "https://www.gstatic.com/draco/versioned/decoders/1.5.6/",
+      );
+      const gltfLoader = new GLTFLoader();
+      gltfLoader.setDRACOLoader(draco);
+
+      let realGroup = null,
+        impostorMesh = null,
+        wireframeHelper = null,
+        lastAtlas = null;
+      let autoOrbit = false,
+        refTriCount = 0;
+      let frameCount = 0,
+        lastFpsTime = performance.now(),
+        currentFps = 0;
+      let activeCells = {
+        s1: [0, 0],
+        s2: [0, 0],
+        s3: [0, 0],
+        weights: [1, 0, 0],
+      };
+
+      // ── Shapes ──
+      function createShape(type) {
+        const g = new THREE.Group();
+        switch (type) {
+          case "__torusknot__": {
+            const geo = new THREE.TorusKnotGeometry(1, 0.35, 128, 20);
+            geo.computeBoundingBox();
+            const m = new THREE.Mesh(
+              geo,
+              new THREE.MeshStandardMaterial({
+                color: 0x22cc55,
+                roughness: 0.45,
+                metalness: 0.05,
+              }),
+            );
+            m.position.y = -geo.boundingBox.min.y;
+            g.add(m);
+            break;
+          }
+          case "__sphere__": {
+            const m = new THREE.Mesh(
+              new THREE.SphereGeometry(1.5, 64, 64),
+              new THREE.MeshStandardMaterial({
+                color: 0xdd4444,
+                roughness: 0.3,
+                metalness: 0.1,
+              }),
+            );
+            m.position.y = 1.5;
+            g.add(m);
+            break;
+          }
+          case "__cylinder__": {
+            const cy = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.6, 1, 3, 32),
+              new THREE.MeshStandardMaterial({
+                color: 0x4488dd,
+                roughness: 0.4,
+                metalness: 0.15,
+              }),
+            );
+            cy.position.set(0, 1.5, 0);
+            g.add(cy);
+            const cn = new THREE.Mesh(
+              new THREE.ConeGeometry(0.8, 1.5, 32),
+              new THREE.MeshStandardMaterial({
+                color: 0xddaa22,
+                roughness: 0.5,
+              }),
+            );
+            cn.position.set(0, 3.75, 0);
+            g.add(cn);
+            break;
+          }
+          case "__monkey__": {
+            const m = new THREE.Mesh(
+              new THREE.IcosahedronGeometry(1.5, 3),
+              new THREE.MeshStandardMaterial({
+                color: 0xcc8844,
+                roughness: 0.6,
+              }),
+            );
+            m.position.y = 1.5;
+            g.add(m);
+            const eg = new THREE.SphereGeometry(0.5, 16, 16),
+              em = new THREE.MeshStandardMaterial({
+                color: 0xcc8844,
+                roughness: 0.6,
+              });
+            const e1 = new THREE.Mesh(eg, em);
+            e1.position.set(-1.4, 2.5, 0);
+            e1.scale.set(1, 1.3, 0.6);
+            const e2 = e1.clone();
+            e2.position.x = 1.4;
+            g.add(e1, e2);
+            break;
+          }
+          case "__tree__": {
+            const trunk = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.12, 0.3, 3.5, 8),
+              new THREE.MeshStandardMaterial({
+                color: 0x885533,
+                roughness: 0.9,
+              }),
+            );
+            trunk.position.set(0, 1.75, 0);
+            g.add(trunk);
+            for (let i = 0; i < 5; i++) {
+              const m = new THREE.Mesh(
+                new THREE.DodecahedronGeometry(1.6 - i * 0.28, 1),
+                new THREE.MeshStandardMaterial({
+                  color: new THREE.Color().setHSL(
+                    0.28 + i * 0.015,
+                    0.7,
+                    0.32 + i * 0.04,
+                  ),
+                  roughness: 0.8,
+                }),
+              );
+              m.position.y = 2.8 + i * 0.7;
+              m.rotation.set(
+                Math.random() * 2,
+                Math.random() * 2,
+                Math.random() * 2,
+              );
+              g.add(m);
+            }
+            break;
+          }
+        }
+        return g;
+      }
+
+      function countTris(o) {
+        let c = 0;
+        o.traverse((n) => {
+          if (n.isMesh && n.geometry) {
+            const g = n.geometry;
+            c += g.index
+              ? g.index.count / 3
+              : (g.attributes.position?.count || 0) / 3;
+          }
+        });
+        return Math.round(c);
+      }
+      function disposeObj(o) {
+        if (!o) return;
+        o.traverse((n) => {
+          if (n.geometry) n.geometry.dispose();
+          if (n.material) {
+            (Array.isArray(n.material) ? n.material : [n.material]).forEach(
+              (m) => {
+                Object.values(m).forEach((v) => {
+                  if (v && v.isTexture) v.dispose();
+                });
+                m.dispose();
+              },
+            );
+          }
+        });
+      }
+      function gP(id) {
+        return +document.getElementById(id).value;
+      }
+      function getQuality() {
+        const [t, s] = document
+          .getElementById("quality-select")
+          .value.split("_");
+        return { textureSize: +t, spritesPerSide: +s };
+      }
+      function getBlendMode() {
+        return document.getElementById("blend-trilinear").checked
+          ? 1
+          : document.getElementById("blend-smooth").checked
+            ? 2
+            : 0;
+      }
+
+      function applySun() {
+        const az = (gP("sun-az") * Math.PI) / 180,
+          el = (gP("sun-el") * Math.PI) / 180;
+        sun.position.set(
+          Math.cos(el) * Math.sin(az),
+          Math.sin(el),
+          Math.cos(el) * Math.cos(az),
+        );
+        sun.intensity = gP("sun-int");
+        ambient.intensity = gP("amb-int");
+        if (!impostorMesh) return;
+        // NodeMaterial impostor currently ignores sun/ambient uniforms directly.
+        // Keep alpha test in sync with UI so cutout matches model.
+        impostorMesh.material.alphaTest = gP("alpha-cut");
+      }
+
+      function computeActiveCells() {
+        if (!lastAtlas) return;
+        const sc = lastAtlas.boundingSphere.center,
+          S = lastAtlas.spritesPerSide,
+          Nm1 = S - 1;
+        const vd = camera.position.clone().sub(sc).normalize();
+        const enc = hemiOctaEncode(vd);
+        const gx = enc.u * Nm1,
+          gy = enc.v * Nm1;
+        const fx = Math.min(Math.floor(gx), Nm1),
+          fy = Math.min(Math.floor(gy), Nm1);
+        const frx = gx - fx,
+          fry = gy - fy;
+        const wx = Math.min(1 - frx, 1 - fry),
+          wy = Math.abs(frx - fry),
+          wz = Math.min(frx, fry);
+        const ww = frx > fry ? 1 : 0;
+        activeCells = {
+          s1: [fx, fy],
+          s2: [
+            Math.min(fx + (ww ? 1 : 0), Nm1),
+            Math.min(fy + (ww ? 0 : 1), Nm1),
+          ],
+          s3: [Math.min(fx + 1, Nm1), Math.min(fy + 1, Nm1)],
+          weights: [wx, wy, wz],
+        };
+      }
+
+      function drawAtlasPreview() {
+        if (!lastAtlas) return;
+        const showGrid = document.getElementById("dbg-grid").checked;
+        const showActive = document.getElementById("dbg-active").checked;
+        const draw = (pixels, cid, wg) => {
+          const w = lastAtlas.textureSize,
+            S = lastAtlas.spritesPerSide;
+          const c = document.getElementById(cid),
+            ctx = c.getContext("2d"),
+            sz = 190;
+          const tmp = document.createElement("canvas");
+          tmp.width = w;
+          tmp.height = w;
+          tmp
+            .getContext("2d")
+            .putImageData(
+              new ImageData(new Uint8ClampedArray(pixels), w, w),
+              0,
+              0,
+            );
+          ctx.clearRect(0, 0, sz, sz);
+          ctx.save();
+          ctx.translate(0, sz);
+          ctx.scale(1, -1);
+          ctx.drawImage(tmp, 0, 0, sz, sz);
+          ctx.restore();
+          if (wg) {
+            const step = sz / S;
+            ctx.strokeStyle = "rgba(255,255,255,.3)";
+            ctx.lineWidth = 0.5;
+            for (let i = 0; i <= S; i++) {
+              const p = i * step;
+              ctx.beginPath();
+              ctx.moveTo(p, 0);
+              ctx.lineTo(p, sz);
+              ctx.stroke();
+              ctx.beginPath();
+              ctx.moveTo(0, p);
+              ctx.lineTo(sz, p);
+              ctx.stroke();
+            }
+          }
+          if (showActive) {
+            const step = sz / S;
+            const { s1, s2, s3, weights } = activeCells;
+            [
+              [s1, weights[0], "255,80,80"],
+              [s2, weights[1], "80,255,80"],
+              [s3, weights[2], "80,80,255"],
+            ].forEach(([cell, w, col]) => {
+              if (w < 0.01) return;
+              const a = 0.15 + w * 0.55;
+              const x = cell[0] * step,
+                y = (S - 1 - cell[1]) * step;
+              ctx.fillStyle = `rgba(${col},${a})`;
+              ctx.fillRect(x, y, step, step);
+              ctx.strokeStyle = `rgba(${col},.9)`;
+              ctx.lineWidth = 1.5;
+              ctx.strokeRect(x + 0.5, y + 0.5, step - 1, step - 1);
+              ctx.fillStyle = "rgba(255,255,255,.9)";
+              ctx.font = "bold 9px monospace";
+              ctx.fillText(((w * 100) | 0) + "%", x + 2, y + step - 3);
+            });
+          }
+        };
+        draw(lastAtlas.colorPixels, "ac", showGrid || showActive);
+        draw(lastAtlas.normalPixels, "an", false);
+      }
+
+      document.getElementById("ac").addEventListener("click", (e) => {
+        if (!lastAtlas) return;
+        const rect = e.target.getBoundingClientRect(),
+          x = (e.clientX - rect.left) / rect.width,
+          y = (e.clientY - rect.top) / rect.height;
+        const S = lastAtlas.spritesPerSide,
+          col = Math.floor(x * S),
+          row = S - 1 - Math.floor(y * S);
+        const panel = document.getElementById("cz"),
+          canvas = document.getElementById("zc"),
+          label = document.getElementById("zl");
+        const ctx = canvas.getContext("2d"),
+          w = lastAtlas.textureSize,
+          cs = w / S;
+        const tmp = document.createElement("canvas");
+        tmp.width = w;
+        tmp.height = w;
+        tmp
+          .getContext("2d")
+          .putImageData(
+            new ImageData(new Uint8ClampedArray(lastAtlas.colorPixels), w, w),
+            0,
+            0,
+          );
+        ctx.clearRect(0, 0, 200, 200);
+        ctx.imageSmoothingEnabled = false;
+        ctx.save();
+        ctx.translate(0, 200);
+        ctx.scale(1, -1);
+        ctx.drawImage(tmp, col * cs, row * cs, cs, cs, 0, 0, 200, 200);
+        ctx.restore();
+        const pd = lastAtlas.cellPadding,
+          pp = (pd / cs) * 200;
+        if (pp > 0) {
+          ctx.strokeStyle = "rgba(255,100,100,.7)";
+          ctx.lineWidth = 1;
+          ctx.setLineDash([3, 3]);
+          ctx.strokeRect(pp, pp, 200 - pp * 2, 200 - pp * 2);
+          ctx.setLineDash([]);
+          ctx.fillStyle = "rgba(255,100,100,.5)";
+          ctx.font = "9px monospace";
+          ctx.fillText(`pad=${pd}px`, 2, 10);
+        }
+        label.textContent = `Cell (${col},${row})`;
+        panel.style.display = "block";
+        panel.style.left = Math.min(e.clientX + 10, innerWidth - 220) + "px";
+        panel.style.top = Math.min(e.clientY + 10, innerHeight - 240) + "px";
+        setTimeout(() => {
+          panel.style.display = "none";
+        }, 4000);
+      });
+      document.addEventListener("click", (e) => {
+        if (!e.target.closest("#ap") && !e.target.closest("#cz"))
+          document.getElementById("cz").style.display = "none";
+      });
+
+      // ── Load model ──
+      async function loadModel(path) {
+        const ld = document.getElementById("ld"),
+          st = document.getElementById("lst");
+        ld.classList.remove("hidden");
+        st.textContent = "Loading…";
+        if (realGroup) {
+          scene.remove(realGroup);
+          disposeObj(realGroup);
+          realGroup = null;
+        }
+        if (impostorMesh) {
+          scene.remove(impostorMesh);
+          disposeObj(impostorMesh);
+          impostorMesh = null;
+        }
+        if (wireframeHelper) {
+          scene.remove(wireframeHelper);
+          disposeObj(wireframeHelper);
+          wireframeHelper = null;
+        }
+
+        let src;
+        if (path.startsWith("__")) src = createShape(path);
+        else {
+          try {
+            st.textContent = "Fetching GLB…";
+            const gltf = await new Promise((res, rej) => {
+              gltfLoader.load(path, res, undefined, (err) => {
+                rej(
+                  new Error(
+                    typeof err === "string"
+                      ? err
+                      : err && err.message
+                        ? err.message
+                        : "Load failed",
+                  ),
+                );
+              });
+            });
+            src = gltf.scene;
+          } catch (e) {
+            const msg = String((e && e.message) || e);
+            console.warn("Load error:", msg);
+            st.textContent = "Error: " + msg.slice(0, 80);
+            setTimeout(() => ld.classList.add("hidden"), 3000);
+            return;
+          }
+        }
+        src.updateMatrixWorld(true);
+        const rb = new THREE.Box3().setFromObject(src);
+        const rh = Math.max(rb.getSize(new THREE.Vector3()).y, 0.001);
+        const sc = 6 / rh;
+        src.scale.multiplyScalar(sc);
+        src.updateMatrixWorld(true);
+        const sb = new THREE.Box3().setFromObject(src);
+        src.position.y -= sb.min.y;
+        src.updateMatrixWorld(true);
+        refTriCount = countTris(src);
+
+        realGroup = src.clone(true);
+        scene.add(realGroup);
+
+        st.textContent = "Baking PBR atlas…";
+        await new Promise((r) => setTimeout(r, 30));
+
+        const q = getQuality();
+        lastAtlas = bakeAtlas(src, bakeRenderer, {
+          textureSize: q.textureSize,
+          spritesPerSide: q.spritesPerSide,
+          sphereMargin: gP("sphere-margin"),
+          alphaTest: gP("bake-alpha"),
+          cellPadding: gP("cell-pad"),
+        });
+
+        st.textContent = "Creating impostor…";
+        await new Promise((r) => setTimeout(r, 10));
+
+        impostorMesh = createImpostorMesh(lastAtlas, {
+          alphaTest: gP("alpha-cut"),
+          normalStrength: gP("normal-str"),
+          lightScale: gP("light-scale"),
+        });
+        scene.add(impostorMesh);
+        applySun();
+
+        // NodeMaterial impostor currently ignores debug uniforms; only alphaTest is synced via applySun().
+
+        const wr = lastAtlas.boundingSphere.radius;
+        wireframeHelper = new THREE.Mesh(
+          new THREE.PlaneGeometry(wr * 2, wr * 2),
+          new THREE.MeshBasicMaterial({
+            wireframe: true,
+            color: 0x44aaff,
+            transparent: true,
+            opacity: 0.25,
+            depthTest: false,
+          }),
+        );
+        wireframeHelper.visible = document.getElementById("dbg-wf").checked;
+        wireframeHelper.frustumCulled = false;
+        scene.add(wireframeHelper);
+
+        computeActiveCells();
+        drawAtlasPreview();
+        const fb = new THREE.Box3().setFromObject(src);
+        controls.target.set(0, (fb.min.y + fb.max.y) / 2, 0);
+        controls.update();
+        ld.classList.add("hidden");
+      }
+
+      // ── Sliders ──
+      [
+        ["sun-az", "sun-az-v", "°", 0],
+        ["sun-el", "sun-el-v", "°", 0],
+        ["sun-int", "sun-int-v", "", 2],
+        ["amb-int", "amb-int-v", "", 2],
+        ["light-scale", "light-scale-v", "", 2],
+        ["normal-str", "normal-str-v", "", 2],
+        ["alpha-cut", "alpha-cut-v", "", 2],
+        ["sphere-margin", "sphere-margin-v", "", 2],
+        ["bake-alpha", "bake-alpha-v", "", 2],
+        ["cell-pad", "cell-pad-v", "px", 0],
+      ].forEach(([id, vid, suf, dec]) => {
+        const sl = document.getElementById(id),
+          ve = document.getElementById(vid);
+        sl.addEventListener("input", () => {
+          ve.textContent = (+sl.value).toFixed(dec) + suf;
+          applySun();
+        });
+      });
+
+      // ── Blend radios ──
+      ["blend-dominant", "blend-trilinear", "blend-smooth"].forEach((id) => {
+        document.getElementById(id).addEventListener("change", () => {
+          // NodeMaterial impostor currently ignores blend mode; kept for future extension.
+          document.getElementById("st-bld").textContent = [
+            "dominant",
+            "trilinear",
+            "smooth",
+          ][getBlendMode()];
+        });
+      });
+
+      // ── Debug ──
+      document.getElementById("dbg-wf").addEventListener("change", (e) => {
+        if (wireframeHelper) wireframeHelper.visible = e.target.checked;
+      });
+      document
+        .getElementById("dbg-grid")
+        .addEventListener("change", () => drawAtlasPreview());
+      document.getElementById("dbg-norm").addEventListener("change", (e) => {
+        if (impostorMesh)
+          impostorMesh.material.uniforms.uShowNorm.value = e.target.checked
+            ? 1
+            : 0;
+      });
+      document.getElementById("dbg-freeze").addEventListener("change", (e) => {
+        if (impostorMesh) {
+          if (e.target.checked) {
+            const sc = lastAtlas.boundingSphere.center;
+            impostorMesh.material.uniforms.uFrozenDir.value
+              .copy(camera.position)
+              .sub(sc)
+              .normalize();
+          }
+          impostorMesh.material.uniforms.uFreezeAngle.value = e.target.checked
+            ? 1
+            : 0;
+        }
+      });
+      document.getElementById("dbg-ground").addEventListener("change", (e) => {
+        gridH.visible = e.target.checked;
+      });
+      document.getElementById("dbg-raw").addEventListener("change", (e) => {
+        if (impostorMesh)
+          impostorMesh.material.uniforms.uShowRaw.value = e.target.checked
+            ? 1
+            : 0;
+      });
+      document
+        .getElementById("dbg-active")
+        .addEventListener("change", () => drawAtlasPreview());
+
+      // ── Buttons ──
+      document
+        .getElementById("load-btn")
+        .addEventListener("click", () =>
+          loadModel(document.getElementById("model-select").value).catch(
+            console.error,
+          ),
+        );
+
+      let _blobUrl = null;
+      document
+        .getElementById("file-btn")
+        .addEventListener("click", () => document.getElementById("fi").click());
+      document.getElementById("fi").addEventListener("change", (e) => {
+        const f = e.target.files[0];
+        if (!f) return;
+        if (_blobUrl) URL.revokeObjectURL(_blobUrl);
+        _blobUrl = URL.createObjectURL(f);
+        document.getElementById("file-name").textContent = f.name;
+        const sel = document.getElementById("model-select");
+        let opt = sel.querySelector("option[data-cf]");
+        if (!opt) {
+          opt = document.createElement("option");
+          opt.setAttribute("data-cf", "1");
+          sel.prepend(opt);
+        }
+        opt.value = _blobUrl;
+        opt.textContent = `📁 ${f.name}`;
+        sel.value = _blobUrl;
+        loadModel(_blobUrl).catch(console.error);
+        e.target.value = "";
+      });
+
+      document.getElementById("url-load-btn").addEventListener("click", () => {
+        const url = document.getElementById("url-input").value.trim();
+        if (!url) return;
+        const sel = document.getElementById("model-select");
+        let opt = sel.querySelector(`option[value="${CSS.escape(url)}"]`);
+        if (!opt) {
+          opt = document.createElement("option");
+          const nm = url.split("/").pop().split("?")[0] || "custom";
+          opt.value = url;
+          opt.textContent = `🔗 ${nm}`;
+          sel.appendChild(opt);
+        }
+        sel.value = url;
+        loadModel(url).catch(console.error);
+      });
+      document.getElementById("url-input").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") document.getElementById("url-load-btn").click();
+      });
+
+      const appEl = document.getElementById("app");
+      appEl.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+        appEl.style.outline = "2px solid var(--accent2)";
+      });
+      appEl.addEventListener("dragleave", () => {
+        appEl.style.outline = "none";
+      });
+      appEl.addEventListener("drop", (e) => {
+        e.preventDefault();
+        appEl.style.outline = "none";
+        const f = e.dataTransfer.files[0];
+        if (!f) return;
+        const ext = f.name.split(".").pop().toLowerCase();
+        if (ext !== "glb" && ext !== "gltf") return;
+        if (_blobUrl) URL.revokeObjectURL(_blobUrl);
+        _blobUrl = URL.createObjectURL(f);
+        document.getElementById("file-name").textContent = f.name;
+        const sel = document.getElementById("model-select");
+        let opt = sel.querySelector("option[data-cf]");
+        if (!opt) {
+          opt = document.createElement("option");
+          opt.setAttribute("data-cf", "1");
+          sel.prepend(opt);
+        }
+        opt.value = _blobUrl;
+        opt.textContent = `📁 ${f.name}`;
+        sel.value = _blobUrl;
+        loadModel(_blobUrl).catch(console.error);
+      });
+
+      document.getElementById("cam-close").addEventListener("click", () => {
+        camera.position.set(0, controls.target.y * 0.5 + 2, 12);
+        controls.update();
+      });
+      document.getElementById("cam-far").addEventListener("click", () => {
+        camera.position.set(0, controls.target.y * 0.5 + 5, 80);
+        controls.update();
+      });
+      document
+        .getElementById("cam-orbit-toggle")
+        .addEventListener("click", () => {
+          autoOrbit = !autoOrbit;
+          const b = document.getElementById("cam-orbit-toggle");
+          b.textContent = autoOrbit ? "Stop orbit [O]" : "Auto-orbit [O]";
+          b.style.color = autoOrbit ? "var(--accent2)" : "var(--text)";
+        });
+
+      // ── Render ──
+      let lastACU = 0;
+      function render() {
+        controls.update();
+        frameCount++;
+        const now = performance.now();
+        if (now - lastFpsTime >= 500) {
+          currentFps = Math.round(frameCount / ((now - lastFpsTime) / 1000));
+          frameCount = 0;
+          lastFpsTime = now;
+        }
+        if (autoOrbit) {
+          const t = controls.target,
+            off = camera.position.clone().sub(t),
+            a = 0.003;
+          camera.position.set(
+            t.x + off.x * Math.cos(a) + off.z * Math.sin(a),
+            camera.position.y,
+            t.z - off.x * Math.sin(a) + off.z * Math.cos(a),
+          );
+          camera.lookAt(t);
+        }
+        if (wireframeHelper && wireframeHelper.visible && lastAtlas) {
+          wireframeHelper.position.copy(lastAtlas.boundingSphere.center);
+          wireframeHelper.lookAt(camera.position);
+        }
+        if (now - lastACU > 100) {
+          computeActiveCells();
+          if (
+            document.getElementById("dbg-active").checked ||
+            document.getElementById("dbg-grid").checked
+          )
+            drawAtlasPreview();
+          lastACU = now;
+        }
+
+        const W = window.innerWidth,
+          H = window.innerHeight,
+          half = Math.floor(W / 2);
+        camera.aspect = half / H;
+        camera.updateProjectionMatrix();
+        renderer.setScissorTest(true);
+
+        if (realGroup) realGroup.visible = true;
+        if (impostorMesh) impostorMesh.visible = false;
+        if (wireframeHelper) wireframeHelper.visible = false;
+        renderer.setViewport(0, 0, half, H);
+        renderer.setScissor(0, 0, half, H);
+        renderer.render(scene, camera);
+
+        if (realGroup) realGroup.visible = false;
+        if (impostorMesh) impostorMesh.visible = true;
+        if (wireframeHelper)
+          wireframeHelper.visible = document.getElementById("dbg-wf").checked;
+        renderer.setViewport(half, 0, W - half, H);
+        renderer.setScissor(half, 0, W - half, H);
+        renderer.render(scene, camera);
+
+        renderer.setScissorTest(false);
+        if (realGroup) realGroup.visible = true;
+        updateStats();
+      }
+
+      function updateStats() {
+        document.getElementById("st-fps").textContent = currentFps;
+        if (lastAtlas) {
+          const a = lastAtlas;
+          document.getElementById("st-atlas").textContent = `${a.textureSize}²`;
+          document.getElementById("st-spr").textContent =
+            `${a.spritesPerSide}×${a.spritesPerSide}`;
+          document.getElementById("st-csz").textContent =
+            `${Math.round(a.textureSize / a.spritesPerSide)}px`;
+          document.getElementById("st-pad").textContent = `${a.cellPadding}px`;
+        }
+        document.getElementById("st-tri").textContent =
+          refTriCount.toLocaleString();
+        const dist = camera.position.distanceTo(controls.target);
+        document.getElementById("st-dist").textContent = dist.toFixed(1);
+        const dx = camera.position.x - controls.target.x,
+          dz = camera.position.z - controls.target.z;
+        document.getElementById("st-ang").textContent =
+          `${(((Math.atan2(dx, dz) * 180) / Math.PI + 360) % 360).toFixed(0)}°`;
+        const { s1, s2, s3 } = activeCells;
+        document.getElementById("st-act").textContent = `(${s1})(${s2})(${s3})`;
+      }
+
+      renderer.setAnimationLoop(render);
+      window.addEventListener("resize", () => {
+        camera.aspect = innerWidth / 2 / innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+      });
+      window.addEventListener("keydown", (e) => {
+        const tog = (id) => {
+          const c = document.getElementById(id);
+          c.checked = !c.checked;
+          c.dispatchEvent(new Event("change"));
+        };
+        switch (e.key.toLowerCase()) {
+          case "w":
+            tog("dbg-wf");
+            break;
+          case "n":
+            tog("dbg-norm");
+            break;
+          case "f":
+            tog("dbg-freeze");
+            break;
+          case "g":
+            tog("dbg-grid");
+            break;
+          case "o":
+            document.getElementById("cam-orbit-toggle").click();
+            break;
+        }
+      });
+
+      loadModel(document.getElementById("model-select").value).catch(
+        console.error,
+      );
+    </script>
+  </body>
+</html>

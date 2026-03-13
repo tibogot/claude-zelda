@@ -1,0 +1,2475 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Octahedral Impostor Editor — WebGPU + TSL</title>
+    <style>
+      @import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap");
+      :root {
+        --bg: #0d0d14;
+        --panel: rgba(10, 10, 18, 0.92);
+        --border: rgba(255, 255, 255, 0.06);
+        --accent: #4af;
+        --accent2: #5f5;
+        --accent3: #fa4;
+        --accent4: #f4a;
+        --text: #c0c8d8;
+        --text-dim: #5a6070;
+        --mono: "JetBrains Mono", "SF Mono", "Fira Code", monospace;
+        --radius: 6px;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        background: var(--bg);
+        overflow: hidden;
+        font-family: var(--mono);
+        color: var(--text);
+      }
+      canvas {
+        display: block;
+      }
+      .vl {
+        position: fixed;
+        top: 10px;
+        z-index: 20;
+        padding: 4px 14px;
+        border-radius: 3px;
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        pointer-events: none;
+      }
+      #ll {
+        left: calc(25% - 45px);
+        background: rgba(80, 255, 80, 0.12);
+        color: var(--accent2);
+        border: 1px solid rgba(80, 255, 80, 0.2);
+      }
+      #rl {
+        left: calc(75% - 52px);
+        background: rgba(68, 170, 255, 0.12);
+        color: var(--accent);
+        border: 1px solid rgba(68, 170, 255, 0.2);
+      }
+      #dv {
+        position: fixed;
+        left: 50%;
+        top: 0;
+        width: 1px;
+        height: 100vh;
+        background: linear-gradient(
+          180deg,
+          transparent 0%,
+          rgba(255, 255, 255, 0.12) 15%,
+          rgba(255, 255, 255, 0.12) 85%,
+          transparent 100%
+        );
+        pointer-events: none;
+        z-index: 5;
+      }
+      #tb {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 42px;
+        z-index: 30;
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        padding: 0 12px;
+        gap: 8px;
+        backdrop-filter: blur(12px);
+      }
+      #tb .logo {
+        font-weight: 700;
+        font-size: 13px;
+        color: var(--accent);
+        margin-right: 8px;
+        white-space: nowrap;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      #tb .logo .dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--accent);
+      }
+      #tb select,
+      #tb button {
+        font-family: var(--mono);
+        font-size: 11px;
+        border-radius: 3px;
+        border: 1px solid var(--border);
+        cursor: pointer;
+        outline: none;
+      }
+      #tb select {
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--text);
+        padding: 4px 8px;
+      }
+      #tb button {
+        padding: 4px 12px;
+        font-weight: 600;
+      }
+      .bp {
+        background: rgba(68, 170, 255, 0.15);
+        color: var(--accent);
+        border-color: rgba(68, 170, 255, 0.3);
+      }
+      .bp:hover {
+        background: rgba(68, 170, 255, 0.25);
+      }
+      .bs {
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--text);
+      }
+      .bs:hover {
+        background: rgba(255, 255, 255, 0.08);
+      }
+      .sep {
+        width: 1px;
+        height: 20px;
+        background: var(--border);
+        margin: 0 4px;
+      }
+      #ir {
+        position: fixed;
+        top: 42px;
+        left: 0;
+        right: 0;
+        height: 34px;
+        z-index: 29;
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        padding: 0 12px;
+        gap: 8px;
+        backdrop-filter: blur(12px);
+      }
+      #ir .il {
+        font-size: 10px;
+        color: var(--text-dim);
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      #ir input[type="text"] {
+        flex: 1;
+        max-width: 340px;
+        font-family: var(--mono);
+        font-size: 10px;
+        padding: 4px 8px;
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 3px;
+        outline: none;
+      }
+      #ir input[type="text"]:focus {
+        border-color: rgba(68, 170, 255, 0.4);
+      }
+      #ir input[type="text"]::placeholder {
+        color: var(--text-dim);
+      }
+      #ir button {
+        font-family: var(--mono);
+        font-size: 10px;
+        border-radius: 3px;
+        border: 1px solid var(--border);
+        cursor: pointer;
+        outline: none;
+        padding: 4px 10px;
+        font-weight: 600;
+      }
+      .bu {
+        background: rgba(68, 170, 255, 0.15);
+        color: var(--accent);
+        border-color: rgba(68, 170, 255, 0.3);
+      }
+      .bu:hover {
+        background: rgba(68, 170, 255, 0.25);
+      }
+      .bf {
+        background: rgba(95, 255, 95, 0.12);
+        color: var(--accent2);
+        border-color: rgba(95, 255, 95, 0.25);
+      }
+      .bf:hover {
+        background: rgba(95, 255, 95, 0.2);
+      }
+      .fn {
+        font-size: 9px;
+        color: var(--accent2);
+        max-width: 140px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #fi {
+        display: none;
+      }
+      #cp {
+        position: fixed;
+        left: 8px;
+        top: 84px;
+        z-index: 25;
+        width: 242px;
+        max-height: calc(100vh - 94px);
+        overflow-y: auto;
+        overflow-x: hidden;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        backdrop-filter: blur(12px);
+        font-size: 10px;
+      }
+      #cp::-webkit-scrollbar {
+        width: 4px;
+      }
+      #cp::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 2px;
+      }
+      .ps {
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--border);
+      }
+      .ps:last-child {
+        border-bottom: none;
+      }
+      .ps h3 {
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--text-dim);
+        margin-bottom: 6px;
+      }
+      .cr {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 4px;
+        gap: 6px;
+      }
+      .cr label {
+        flex: 0 0 auto;
+        min-width: 92px;
+        color: var(--text);
+        font-size: 10px;
+      }
+      .cr input[type="range"] {
+        flex: 1;
+        height: 3px;
+        -webkit-appearance: none;
+        appearance: none;
+        background: rgba(255, 255, 255, 0.08);
+        border-radius: 2px;
+        outline: none;
+      }
+      .cr input[type="range"]::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--accent);
+        cursor: pointer;
+      }
+      .cr .val {
+        min-width: 36px;
+        text-align: right;
+        color: var(--accent);
+        font-size: 10px;
+        font-weight: 500;
+      }
+      .cr input[type="checkbox"],
+      .cr input[type="radio"] {
+        cursor: pointer;
+        accent-color: var(--accent);
+      }
+      .cr.ck {
+        justify-content: flex-start;
+        gap: 8px;
+      }
+      .cr.ck label {
+        min-width: auto;
+        cursor: pointer;
+      }
+      #ap {
+        position: fixed;
+        right: 8px;
+        bottom: 8px;
+        z-index: 25;
+        background: transparent;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 8px;
+        display: flex;
+        gap: 6px;
+        flex-direction: column;
+      }
+      .ar {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+      .al {
+        writing-mode: vertical-lr;
+        text-orientation: mixed;
+        font-size: 9px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        color: var(--text-dim);
+        text-transform: uppercase;
+      }
+      #ap canvas {
+        border-radius: 3px;
+        border: 1px solid var(--border);
+        width: 190px;
+        height: 190px;
+        image-rendering: auto;
+        cursor: pointer;
+      }
+      #so {
+        position: fixed;
+        right: 8px;
+        top: 84px;
+        z-index: 25;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        backdrop-filter: blur(12px);
+        padding: 8px 10px;
+        font-size: 10px;
+        min-width: 185px;
+      }
+      #so h3 {
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--text-dim);
+        margin-bottom: 6px;
+      }
+      .sr {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 3px;
+      }
+      .sr .sl {
+        color: var(--text-dim);
+      }
+      .sr .sv {
+        color: var(--accent);
+        font-weight: 500;
+      }
+      .sr .sv.g {
+        color: var(--accent2);
+      }
+      .sr .sv.o {
+        color: var(--accent3);
+      }
+      .sr .sv.p {
+        color: var(--accent4);
+      }
+      #bi {
+        position: fixed;
+        bottom: 8px;
+        left: 8px;
+        z-index: 20;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        backdrop-filter: blur(12px);
+        padding: 8px 12px;
+        font-size: 10px;
+        line-height: 1.7;
+        max-width: 290px;
+      }
+      #bi .key {
+        color: var(--accent);
+        font-weight: 600;
+      }
+      #bi .dim {
+        color: var(--text-dim);
+      }
+      #ld {
+        position: fixed;
+        inset: 0;
+        background: rgba(8, 8, 16, 0.92);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 12px;
+        z-index: 100;
+        color: var(--accent);
+        font-size: 13px;
+        font-weight: 500;
+      }
+      #ld.hidden {
+        display: none;
+      }
+      .spinner {
+        width: 28px;
+        height: 28px;
+        border: 2px solid rgba(68, 170, 255, 0.15);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      .lst {
+        font-size: 11px;
+        color: var(--text-dim);
+      }
+      #cz {
+        position: fixed;
+        z-index: 50;
+        background: var(--panel);
+        border: 2px solid var(--accent);
+        border-radius: var(--radius);
+        padding: 4px;
+        display: none;
+      }
+      #cz canvas {
+        width: 200px;
+        height: 200px;
+        image-rendering: pixelated;
+        border-radius: 3px;
+      }
+      #cz .czl {
+        font-size: 9px;
+        color: var(--accent);
+        text-align: center;
+        margin-top: 2px;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="ll" class="vl">● Reference</div>
+    <div id="rl" class="vl">● Impostor</div>
+    <div id="dv"></div>
+
+    <div
+      id="tp-container"
+      style="
+        position: fixed;
+        left: 8px;
+        top: 8px;
+        z-index: 25;
+        max-height: calc(100vh - 16px);
+        overflow-y: auto;
+      "
+    ></div>
+    <input type="file" id="fi" accept=".glb,.gltf" style="display: none" />
+
+    <div id="ld">
+      <div class="spinner"></div>
+      Baking…
+      <div class="lst" id="lst"></div>
+    </div>
+
+    <div id="so">
+      <h3>Stats</h3>
+      <div class="sr">
+        <span class="sl">Backend</span
+        ><span class="sv g" id="st-backend">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">FPS</span><span class="sv g" id="st-fps">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Atlas</span><span class="sv" id="st-atlas">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Grid</span><span class="sv" id="st-spr">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Cell px</span><span class="sv" id="st-csz">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Pad</span><span class="sv" id="st-pad">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Ref tris</span><span class="sv o" id="st-tri">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Imp tris</span><span class="sv g">2</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Cam dist</span><span class="sv" id="st-dist">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Angle</span><span class="sv" id="st-ang">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Active</span><span class="sv p" id="st-act">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Blend</span
+        ><span class="sv" id="st-bld">dominant</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Quad size</span><span class="sv" id="st-quad">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Bake dist</span
+        ><span class="sv" id="st-bakedist">—</span>
+      </div>
+    </div>
+
+    <div id="ap">
+      <div class="ar">
+        <span class="al">COLOR</span
+        ><canvas id="ac" width="190" height="190"></canvas>
+      </div>
+      <div class="ar">
+        <span class="al">NORMAL</span
+        ><canvas id="an" width="190" height="190"></canvas>
+      </div>
+    </div>
+
+    <div id="cz" style="display: none">
+      <canvas id="zc" width="200" height="200"></canvas>
+      <div class="czl" id="zl">Cell</div>
+    </div>
+
+    <div id="bi">
+      <span class="key">Drag</span> orbit · <span class="key">Scroll</span> zoom
+      · <span class="key">Right-drag</span> pan<br />
+      <span class="key">W</span> wire <span class="key">N</span> normals
+      <span class="key">F</span> freeze <span class="key">G</span> grid
+      <span class="key">O</span> orbit<br />
+      <span class="dim"
+        >WebGPU + TSL only. No WebGL. Bake runs on same renderer.</span
+      >
+    </div>
+
+    <script type="module">
+      import { Pane } from "https://cdn.jsdelivr.net/npm/tweakpane@4.0.3/dist/tweakpane.min.js";
+      import * as THREE from "three";
+      import {
+        Fn,
+        uniform,
+        float,
+        vec2,
+        vec3,
+        vec4,
+        positionLocal,
+        cameraPosition,
+        varying,
+        texture,
+        mix,
+        clamp,
+        saturate,
+        floor,
+        fract,
+        min,
+        max,
+        dot,
+        cross,
+        normalize,
+        sign,
+        abs,
+        length,
+        add,
+        sub,
+        mul,
+        div,
+        negate,
+        select,
+        uv,
+        normalWorld,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+
+      // ─── Hemi-octahedral mapping (matches TSL in shader) ─────────────────────────
+      function hemiOctaGridToDir(gx, gy) {
+        const x = gx - gy,
+          z = -1 + gx + gy;
+        return new THREE.Vector3(
+          x,
+          1 - Math.abs(x) - Math.abs(z),
+          z,
+        ).normalize();
+      }
+      function hemiOctaEncode(dir) {
+        const sx = Math.sign(dir.x) || 1,
+          sy = Math.sign(dir.y) || 1,
+          sz = Math.sign(dir.z) || 1;
+        const d = dir.x * sx + dir.y * sy + dir.z * sz;
+        return {
+          u: 0.5 * (1 + dir.x / d + dir.z / d),
+          v: 0.5 * (1 + dir.z / d - dir.x / d),
+        };
+      }
+
+      // ─── Verify bake: render ONE cell only (same pipeline as full bake) ───────────
+      async function bakeOneCellTest(renderer, sourceScene, opts = {}) {
+        const sphereMargin = opts.sphereMargin ?? 1.08;
+        const alphaTest = opts.alphaTest ?? 0.02;
+        const size = 256;
+
+        const bbox = new THREE.Box3().setFromObject(sourceScene);
+        const bsphere = new THREE.Sphere();
+        bbox.getBoundingSphere(bsphere);
+        const center = bsphere.center.clone();
+        const radius = bsphere.radius * sphereMargin;
+        const half = radius;
+
+        const bakeCam = new THREE.OrthographicCamera(
+          -half,
+          half,
+          half,
+          -half,
+          radius * 0.1,
+          radius * 3,
+        );
+        const bakeScene = new THREE.Scene();
+        bakeScene.background = null;
+        const bakeModel = sourceScene.clone(true);
+        bakeModel.traverse((o) => {
+          if (!o.isMesh) return;
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          mats.forEach((m) => {
+            if (m.alphaTest !== undefined && m.alphaTest <= 0)
+              m.alphaTest = alphaTest;
+            if (m.side !== undefined) m.side = THREE.DoubleSide;
+          });
+        });
+        bakeScene.add(bakeModel);
+        bakeScene.add(new THREE.DirectionalLight(0xffffff, 0.5));
+        bakeScene.add(new THREE.AmbientLight(0xffffff, 0.9));
+        bakeScene.add(new THREE.HemisphereLight(0xffffff, 0xcccccc, 0.3));
+
+        const cellRT = new THREE.RenderTarget(size, size, {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          colorSpace: THREE.SRGBColorSpace,
+          generateMipmaps: false,
+          depthBuffer: true,
+          stencilBuffer: false,
+        });
+
+        await renderer.compileAsync(bakeScene, bakeCam);
+
+        const dir = hemiOctaGridToDir(0, 0);
+        bakeCam.position.copy(center).addScaledVector(dir, radius * 2);
+        bakeCam.lookAt(center);
+        bakeCam.updateMatrixWorld(true);
+
+        renderer.setRenderTarget(cellRT);
+        renderer.setClearColor(0x000000, 0);
+        renderer.clear(true, true, true);
+        renderer.render(bakeScene, bakeCam);
+        renderer.setRenderTarget(null);
+
+        return cellRT;
+      }
+
+      // ─── WebGPU Atlas Baker (render to texture, no readback until preview) ──────
+      async function bakeAtlasWebGPU(renderer, sourceScene, opts = {}) {
+        const {
+          textureSize = 1024,
+          spritesPerSide = 8,
+          sphereMargin = 1.08,
+          alphaTest = 0.02,
+          cellPadding = 2,
+        } = opts;
+        const N = spritesPerSide,
+          Nm1 = Math.max(1, N - 1);
+        const cellSize = textureSize / N;
+        const pad = cellPadding;
+        const innerSize = Math.max(1, cellSize - pad * 2);
+
+        const bbox = new THREE.Box3().setFromObject(sourceScene);
+        const bsphere = new THREE.Sphere();
+        bbox.getBoundingSphere(bsphere);
+        const center = bsphere.center.clone();
+        const radiusTight = bsphere.radius;
+        const radius = radiusTight * sphereMargin;
+        const half = radius;
+        const bakeCam = new THREE.OrthographicCamera(
+          -half,
+          half,
+          half,
+          -half,
+          0.001,
+          radius * 4,
+        );
+
+        const bakeScene = new THREE.Scene();
+        bakeScene.background = null;
+        const bakeModel = sourceScene.clone(true);
+        bakeModel.traverse((o) => {
+          if (!o.isMesh) return;
+          const mats = Array.isArray(o.material) ? o.material : [o.material];
+          mats.forEach((m) => {
+            if (m.alphaTest !== undefined && m.alphaTest <= 0)
+              m.alphaTest = alphaTest;
+            if (m.side !== undefined) m.side = THREE.DoubleSide;
+          });
+        });
+        bakeScene.add(bakeModel);
+
+        const bakeSun = new THREE.DirectionalLight(0xffffff, 0.5);
+        bakeSun.position.set(0, 1, 0);
+        bakeScene.add(bakeSun);
+        bakeScene.add(new THREE.AmbientLight(0xffffff, 0.9));
+        bakeScene.add(new THREE.HemisphereLight(0xffffff, 0xcccccc, 0.3));
+
+        const colorRT = new THREE.RenderTarget(textureSize, textureSize, {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          colorSpace: THREE.SRGBColorSpace,
+          generateMipmaps: false,
+          depthBuffer: true,
+          stencilBuffer: false,
+        });
+        const normalRT = new THREE.RenderTarget(textureSize, textureSize, {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          colorSpace: THREE.LinearSRGBColorSpace,
+          generateMipmaps: false,
+          depthBuffer: true,
+          stencilBuffer: false,
+        });
+
+        await renderer.compileAsync(bakeScene, bakeCam);
+
+        const origRT = renderer.getRenderTarget();
+        const origViewport = renderer.getViewport(new THREE.Vector4());
+        const origScissor = renderer.getScissor(new THREE.Vector4());
+        const origScissorTest = renderer.getScissorTest();
+        const origAutoClear = renderer.autoClear;
+        const origToneMapping = renderer.toneMapping;
+        renderer.autoClear = false;
+        renderer.toneMapping = THREE.NoToneMapping;
+        renderer.setScissorTest(true);
+
+        function setCameraForCell(row, col) {
+          const dir = hemiOctaGridToDir(col / Nm1, row / Nm1);
+          bakeCam.position.copy(center).addScaledVector(dir, radius * 2);
+          bakeCam.lookAt(center);
+          bakeCam.updateMatrixWorld(true);
+        }
+
+        // Color pass: render directly into atlas per cell (reference pattern)
+        renderer.setRenderTarget(colorRT);
+        renderer.setClearColor(0x000000, 0);
+        renderer.clear(true, true, true);
+        for (let row = 0; row < N; row++) {
+          for (let col = 0; col < N; col++) {
+            const x0 = Math.floor(col * cellSize + pad);
+            const y0 = Math.floor(row * cellSize + pad);
+            setCameraForCell(row, col);
+            renderer.setViewport(x0, y0, innerSize, innerSize);
+            renderer.setScissor(x0, y0, innerSize, innerSize);
+            renderer.setClearColor(0x000000, 0);
+            renderer.clear(true, true, true);
+            renderer.render(bakeScene, bakeCam);
+          }
+        }
+
+        const normalMat = new THREE.MeshBasicNodeMaterial({
+          side: THREE.DoubleSide,
+          colorNode: vec4(mul(add(normalWorld, 1), 0.5), float(1)),
+        });
+
+        const origMats = new Map();
+        bakeModel.traverse((o) => {
+          if (!o.isMesh) return;
+          origMats.set(o, o.material);
+          o.material = normalMat;
+        });
+
+        // Normal pass: render directly into atlas per cell
+        renderer.setRenderTarget(normalRT);
+        renderer.setClearColor(0x000000, 0);
+        renderer.clear(true, true, true);
+        for (let row = 0; row < N; row++) {
+          for (let col = 0; col < N; col++) {
+            const x0 = Math.floor(col * cellSize + pad);
+            const y0 = Math.floor(row * cellSize + pad);
+            setCameraForCell(row, col);
+            renderer.setViewport(x0, y0, innerSize, innerSize);
+            renderer.setScissor(x0, y0, innerSize, innerSize);
+            renderer.setClearColor(0x000000, 0);
+            renderer.clear(true, true, true);
+            renderer.render(bakeScene, bakeCam);
+          }
+        }
+
+        bakeModel.traverse((o) => {
+          if (origMats.has(o)) o.material = origMats.get(o);
+        });
+
+        normalMat.dispose();
+        renderer.setScissorTest(false);
+        renderer.autoClear = origAutoClear;
+        renderer.toneMapping = origToneMapping;
+        renderer.setRenderTarget(origRT);
+        renderer.setViewport(origViewport);
+        renderer.setScissor(origScissor);
+        renderer.setScissorTest(origScissorTest);
+
+        const bboxSize = bbox.getSize(new THREE.Vector3());
+        const maxDim = Math.max(bboxSize.x, bboxSize.y, bboxSize.z);
+        const displayRadius = maxDim * 0.5;
+
+        const colorPixels = new Uint8Array(textureSize * textureSize * 4);
+        const normalPixels = new Uint8Array(textureSize * textureSize * 4);
+        try {
+          await renderer.readRenderTargetPixelsAsync(
+            colorRT,
+            0,
+            0,
+            textureSize,
+            textureSize,
+            colorPixels,
+          );
+          await renderer.readRenderTargetPixelsAsync(
+            normalRT,
+            0,
+            0,
+            textureSize,
+            textureSize,
+            normalPixels,
+          );
+        } catch (e) {
+          console.warn("Atlas readback failed:", e);
+        }
+
+        return {
+          colorTexture: colorRT.texture,
+          normalTexture: normalRT.texture,
+          colorRT,
+          normalRT,
+          colorPixels,
+          normalPixels,
+          textureSize,
+          spritesPerSide: N,
+          cellPadding: pad,
+          boundingSphere: { center, radius: radiusTight },
+          boundingSphereBake: { radius },
+          displayRadius,
+          cellFrac: 1 / N,
+          padFrac: pad / textureSize,
+        };
+      }
+
+      // ─── TSL Impostor Material (single mesh, no instancing) ──────────────────────
+      function createImpostorMaterialTSL(atlas, opts = {}) {
+        const {
+          colorTexture,
+          normalTexture,
+          boundingSphere,
+          spritesPerSide: S,
+          cellFrac,
+          padFrac,
+        } = atlas;
+        const r = boundingSphere.radius;
+        const alphaTest = opts.alphaTest ?? 0.1;
+        const normalStrength = opts.normalStrength ?? 1.0;
+        const lightScale = opts.lightScale ?? 1.0;
+        const blendMode = opts.blendMode ?? 0;
+
+        const uSPS = uniform(S);
+        const uSphCenter = uniform(boundingSphere.center.clone());
+        const uSphRadius = uniform(r);
+        const uAlphaTest = uniform(alphaTest);
+        const uNormStr = uniform(normalStrength);
+        const uLightScale = uniform(lightScale);
+        const uBlendMode = uniform(blendMode);
+        const uPadFrac = uniform(padFrac);
+        const uCellFrac = uniform(cellFrac);
+        const uSunDir = uniform(new THREE.Vector3(0.5, 0.7, 0.3).normalize());
+        const uSunColor = uniform(new THREE.Vector3(2.0, 1.9, 1.7));
+        const uAmbColor = uniform(new THREE.Vector3(0.3, 0.35, 0.45));
+        const uShowNorm = uniform(0);
+        const uShowRaw = uniform(0);
+        const uFreezeAngle = uniform(0);
+        const uFrozenDir = uniform(new THREE.Vector3(0, 0, 1));
+
+        const vWeight = varying(vec4(0, 0, 0, 0), "vWeight");
+        const vS1 = varying(vec2(0, 0), "vS1");
+        const vS2 = varying(vec2(0, 0), "vS2");
+        const vS3 = varying(vec2(0, 0), "vS3");
+        const vUV1 = varying(vec2(0, 0), "vUV1");
+        const vUV2 = varying(vec2(0, 0), "vUV2");
+        const vUV3 = varying(vec2(0, 0), "vUV3");
+
+        const encode = Fn(([dir]) => {
+          const s = vec3(sign(dir.x), sign(dir.y), sign(dir.z));
+          const d = dot(dir, s);
+          const oct = vec3(div(dir.x, d), div(dir.y, d), div(dir.z, d));
+          return mul(
+            vec2(add(1, add(oct.x, oct.z)), add(1, sub(oct.z, oct.x))),
+            0.5,
+          );
+        });
+
+        const decode = Fn(([gi, nm1]) => {
+          const uvVal = vec2(div(gi.x, nm1.x), div(gi.y, nm1.y));
+          const px = sub(uvVal.x, uvVal.y);
+          const pz = sub(add(uvVal.x, uvVal.y), 1);
+          const py = sub(sub(1, abs(px)), abs(pz));
+          return normalize(vec3(px, py, pz));
+        });
+
+        const planeTangent = Fn(([n]) => {
+          const up = mix(
+            vec3(0, 1, 0),
+            vec3(-1, 0, 0),
+            max(float(0), sign(sub(n.y, float(0.999)))),
+          );
+          return normalize(cross(up, n));
+        });
+        const planeBitangent = Fn(([n, t]) => cross(n, t));
+        const planeUp = Fn(([n, t]) => {
+          const worldUp = vec3(0, 1, 0);
+          const proj = sub(worldUp, mul(n, dot(n, worldUp)));
+          const len = length(proj);
+          return select(len.lessThan(float(0.001)), t, normalize(proj));
+        });
+
+        const projectVert = Fn(([n]) => {
+          const t = planeTangent(n);
+          const up = planeUp(n, t);
+          return add(mul(positionLocal.x, t), mul(positionLocal.y, up));
+        });
+
+        const planeUV = Fn(([n, t, b, camL, vd]) => {
+          const denom = dot(vd, n);
+          const tt = mul(dot(negate(camL), n), div(1, denom));
+          const hit = add(camL, mul(vd, tt));
+          const upInPlane = planeUp(n, t);
+          return add(vec2(dot(t, hit), dot(upInPlane, hit)), 0.5);
+        });
+
+        const viewDirNode = Fn(() => {
+          const frozen = uFreezeAngle.greaterThan(float(0.5));
+          return select(
+            frozen,
+            uFrozenDir,
+            normalize(sub(cameraPosition, uSphCenter)),
+          );
+        });
+
+        const positionNodeFn = Fn(() => {
+          const nm1 = vec2(sub(uSPS, float(1)), sub(uSPS, float(1)));
+          const vd = viewDirNode();
+          const camLocal = mul(
+            sub(cameraPosition, uSphCenter),
+            div(float(1), uSphRadius),
+          );
+          const camDir = normalize(camLocal);
+          const bv = projectVert(camDir);
+          const viewDir = normalize(sub(bv, camLocal));
+
+          const grid = mul(encode(camDir), nm1);
+          const gf = min(floor(grid), nm1);
+          const frac = fract(grid);
+          const w = vec4(
+            min(sub(1, frac.x), sub(1, frac.y)),
+            abs(sub(frac.x, frac.y)),
+            min(frac.x, frac.y),
+            max(float(0), sign(sub(frac.x, frac.y))),
+          );
+          vWeight.assign(w);
+          const s1 = gf;
+          const s2 = min(add(s1, mix(vec2(0, 1), vec2(1, 0), w.w)), nm1);
+          const s3 = min(add(s1, vec2(1, 1)), nm1);
+          vS1.assign(s1);
+          vS2.assign(s2);
+          vS3.assign(s3);
+
+          const pn1 = decode(s1, nm1);
+          const pt1 = planeTangent(pn1);
+          const pb1 = planeBitangent(pn1, pt1);
+          const pn2 = decode(s2, nm1);
+          const pt2 = planeTangent(pn2);
+          const pb2 = planeBitangent(pn2, pt2);
+          const pn3 = decode(s3, nm1);
+          const pt3 = planeTangent(pn3);
+          const pb3 = planeBitangent(pn3, pt3);
+          vUV1.assign(planeUV(pn1, pt1, pb1, camLocal, viewDir));
+          vUV2.assign(planeUV(pn2, pt2, pb2, camLocal, viewDir));
+          vUV3.assign(planeUV(pn3, pt3, pb3, camLocal, viewDir));
+
+          return bv;
+        });
+
+        const cellToAtlas = Fn(([cell, luv]) => {
+          const uvc = clamp(luv, 0, 1);
+          return add(
+            mul(cell, uCellFrac),
+            add(uPadFrac, mul(uvc, sub(uCellFrac, mul(float(2), uPadFrac)))),
+          );
+        });
+
+        const colorNodeFn = Fn(() => {
+          const uv1 = cellToAtlas(vS1, uv());
+          const uv2 = cellToAtlas(vS2, uv());
+          const uv3 = cellToAtlas(vS3, uv());
+
+          const c1 = texture(colorTexture, uv1);
+          const c2 = texture(colorTexture, uv2);
+          const c3 = texture(colorTexture, uv3);
+          const n1 = texture(normalTexture, uv1).xyz;
+          const n2 = texture(normalTexture, uv2).xyz;
+          const n3 = texture(normalTexture, uv3).xyz;
+
+          const wx = vWeight.x;
+          const wy = vWeight.y;
+          const wz = vWeight.z;
+
+          const dom1 = wx.greaterThanEqual(wy).and(wx.greaterThanEqual(wz));
+          const dom2 = wy.greaterThanEqual(wz);
+          const fA_dom = select(dom1, c1.a, select(dom2, c2.a, c3.a));
+          const fRgb_dom = select(dom1, c1.rgb, select(dom2, c2.rgb, c3.rgb));
+          const fN_dom = select(dom1, n1, select(dom2, n2, n3));
+
+          const ws = add(add(wx, wy), wz);
+          const fA_tri = div(
+            add(add(mul(c1.a, wx), mul(c2.a, wy)), mul(c3.a, wz)),
+            ws,
+          );
+          const fRgb_tri = div(
+            add(add(mul(c1.rgb, wx), mul(c2.rgb, wy)), mul(c3.rgb, wz)),
+            ws,
+          );
+          const fN_tri = div(
+            add(add(mul(n1, wx), mul(n2, wy)), mul(n3, wz)),
+            ws,
+          );
+
+          const aw1 = mul(wx, c1.a);
+          const aw2 = mul(wy, c2.a);
+          const aw3 = mul(wz, c3.a);
+          const awS = add(add(aw1, aw2), aw3);
+          const fA_smooth = div(awS, add(add(wx, wy), wz));
+          const fRgb_smooth = div(
+            add(add(mul(c1.rgb, aw1), mul(c2.rgb, aw2)), mul(c3.rgb, aw3)),
+            awS,
+          );
+          const fN_smooth = div(
+            add(add(mul(n1, aw1), mul(n2, aw2)), mul(n3, aw3)),
+            awS,
+          );
+
+          const fA = select(
+            uBlendMode.equal(float(0)),
+            fA_dom,
+            select(uBlendMode.equal(float(1)), fA_tri, fA_smooth),
+          );
+          const fRgb = select(
+            uBlendMode.equal(float(0)),
+            fRgb_dom,
+            select(uBlendMode.equal(float(1)), fRgb_tri, fRgb_smooth),
+          );
+          const fN = select(
+            uBlendMode.equal(float(0)),
+            fN_dom,
+            select(uBlendMode.equal(float(1)), fN_tri, fN_smooth),
+          );
+
+          const rawOut = vec4(fRgb, fA);
+          const worldNorm = normalize(sub(mul(fN, 2), 1));
+          const normOut = vec4(mul(add(worldNorm, 1), 0.5), float(1));
+          const litNorm = normalize(mix(vec3(0, 1, 0), worldNorm, uNormStr));
+          const NdL = max(dot(litNorm, uSunDir), float(0));
+          const hemiT = add(mul(litNorm.y, 0.5), 0.5);
+          const hemiAmb = mix(mul(uAmbColor, 0.5), uAmbColor, hemiT);
+          const light = mul(add(hemiAmb, mul(uSunColor, NdL)), uLightScale);
+          const lit = vec4(mul(fRgb, light), fA);
+          return select(
+            uShowRaw.greaterThan(float(0.5)),
+            rawOut,
+            select(uShowNorm.greaterThan(float(0.5)), normOut, lit),
+          );
+        });
+
+        const mat = new THREE.MeshBasicNodeMaterial({ side: THREE.FrontSide });
+        mat.positionNode = positionNodeFn();
+        mat.colorNode = colorNodeFn();
+        mat.alphaTest = alphaTest;
+        mat.depthWrite = true;
+        mat.transparent = false;
+
+        return {
+          material: mat,
+          uniforms: {
+            uSphCenter,
+            uSunDir,
+            uSunColor,
+            uAmbColor,
+            uLightScale,
+            uNormStr,
+            uAlphaTest,
+            uBlendMode,
+            uShowNorm,
+            uShowRaw,
+            uFreezeAngle,
+            uFrozenDir,
+          },
+        };
+      }
+
+      // ─── App state ──────────────────────────────────────────────────────────────
+      const draco = new DRACOLoader();
+      draco.setDecoderPath(
+        "https://www.gstatic.com/draco/versioned/decoders/1.5.6/",
+      );
+      const gltfLoader = new GLTFLoader();
+      gltfLoader.setDRACOLoader(draco);
+
+      let renderer, scene, camera, controls;
+      let realGroup = null,
+        impostorMesh = null,
+        wireframeHelper = null,
+        lastAtlas = null;
+      let bakeSphereHelper = null,
+        bakeCameraHelper = null;
+      let gridH = null;
+      let autoOrbit = false,
+        refTriCount = 0;
+      let frameCount = 0,
+        lastFpsTime = performance.now(),
+        currentFps = 0;
+      let activeCells = {
+        s1: [0, 0],
+        s2: [0, 0],
+        s3: [0, 0],
+        weights: [1, 0, 0],
+      };
+      let impostorUniforms = null;
+      let baseQuadSize = 1;
+
+      const PARAMS = {
+        model: "__torusknot__",
+        quality: "1024_8",
+        sunAz: 225,
+        sunEl: 56,
+        sunInt: 2.0,
+        ambInt: 0.6,
+        impostorScale: 1.0,
+        lightScale: 1.0,
+        normalStr: 1.0,
+        alphaCut: 0.1,
+        sphereMargin: 1.08,
+        bakeAlpha: 0.02,
+        cellPad: 2,
+        blendMode: "dominant",
+        dbgWf: false,
+        dbgGrid: false,
+        dbgNorm: false,
+        dbgFreeze: false,
+        dbgGround: true,
+        dbgRaw: false,
+        dbgActive: true,
+        dbgBakeSphere: false,
+        dbgBakeCam: false,
+        urlInput: "",
+        fileName: "",
+        autoOrbit: false,
+      };
+      let atlasPreviewScene = null,
+        atlasPreviewCamera = null,
+        atlasColorGroup = null,
+        atlasNormalGroup = null,
+        atlasGridLines = null,
+        atlasPreviewS = 0;
+      let lastTestCellRT = null;
+      let testCellPreviewScene = null;
+      const ATLAS_PREVIEW_SIZE = 190;
+      const ATLAS_PREVIEW_GAP = 8;
+
+      function createAtlasGridGeometry(S) {
+        const pts = [];
+        for (let i = 0; i <= S; i++) {
+          const x = -1 + (2 * i) / S;
+          pts.push(x, -1, 0, x, 1, 0);
+        }
+        for (let i = 0; i <= S; i++) {
+          const y = -1 + (2 * i) / S;
+          pts.push(-1, y, 0, 1, y, 0);
+        }
+        const geo = new THREE.BufferAttribute(new Float32Array(pts), 3);
+        const buf = new THREE.BufferGeometry();
+        buf.setAttribute("position", geo);
+        return buf;
+      }
+
+      function createShape(type) {
+        const g = new THREE.Group();
+        switch (type) {
+          case "__torusknot__": {
+            const geo = new THREE.TorusKnotGeometry(1, 0.35, 128, 20);
+            geo.computeBoundingBox();
+            const m = new THREE.Mesh(
+              geo,
+              new THREE.MeshStandardMaterial({
+                color: 0x22cc55,
+                roughness: 0.45,
+                metalness: 0.05,
+              }),
+            );
+            m.position.y = -geo.boundingBox.min.y;
+            g.add(m);
+            break;
+          }
+          case "__sphere__": {
+            const m = new THREE.Mesh(
+              new THREE.SphereGeometry(1.5, 64, 64),
+              new THREE.MeshStandardMaterial({
+                color: 0xdd4444,
+                roughness: 0.3,
+                metalness: 0.1,
+              }),
+            );
+            m.position.y = 1.5;
+            g.add(m);
+            break;
+          }
+          case "__cylinder__": {
+            const cy = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.6, 1, 3, 32),
+              new THREE.MeshStandardMaterial({
+                color: 0x4488dd,
+                roughness: 0.4,
+                metalness: 0.15,
+              }),
+            );
+            cy.position.set(0, 1.5, 0);
+            g.add(cy);
+            const cn = new THREE.Mesh(
+              new THREE.ConeGeometry(0.8, 1.5, 32),
+              new THREE.MeshStandardMaterial({
+                color: 0xddaa22,
+                roughness: 0.5,
+              }),
+            );
+            cn.position.set(0, 3.75, 0);
+            g.add(cn);
+            break;
+          }
+          case "__monkey__": {
+            const m = new THREE.Mesh(
+              new THREE.IcosahedronGeometry(1.5, 3),
+              new THREE.MeshStandardMaterial({
+                color: 0xcc8844,
+                roughness: 0.6,
+              }),
+            );
+            m.position.y = 1.5;
+            g.add(m);
+            break;
+          }
+          case "__tree__": {
+            const trunk = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.12, 0.3, 3.5, 8),
+              new THREE.MeshStandardMaterial({
+                color: 0x885533,
+                roughness: 0.9,
+              }),
+            );
+            trunk.position.set(0, 1.75, 0);
+            g.add(trunk);
+            for (let i = 0; i < 5; i++) {
+              const m = new THREE.Mesh(
+                new THREE.DodecahedronGeometry(1.6 - i * 0.28, 1),
+                new THREE.MeshStandardMaterial({
+                  color: new THREE.Color().setHSL(
+                    0.28 + i * 0.015,
+                    0.7,
+                    0.32 + i * 0.04,
+                  ),
+                  roughness: 0.8,
+                }),
+              );
+              m.position.y = 2.8 + i * 0.7;
+              m.rotation.set(
+                Math.random() * 2,
+                Math.random() * 2,
+                Math.random() * 2,
+              );
+              g.add(m);
+            }
+            break;
+          }
+        }
+        return g;
+      }
+
+      function countTris(o) {
+        let c = 0;
+        o.traverse((n) => {
+          if (n.isMesh && n.geometry) {
+            const g = n.geometry;
+            c += g.index
+              ? g.index.count / 3
+              : (g.attributes.position?.count || 0) / 3;
+          }
+        });
+        return Math.round(c);
+      }
+
+      function disposeObj(o) {
+        if (!o) return;
+        o.traverse((n) => {
+          if (n.geometry) n.geometry.dispose();
+          if (n.material) {
+            (Array.isArray(n.material) ? n.material : [n.material]).forEach(
+              (m) => {
+                if (m && m.dispose) m.dispose();
+              },
+            );
+          }
+        });
+      }
+
+      function getQuality() {
+        const [t, s] = PARAMS.quality.split("_");
+        return { textureSize: +t, spritesPerSide: +s };
+      }
+      function getBlendMode() {
+        return PARAMS.blendMode === "trilinear"
+          ? 1
+          : PARAMS.blendMode === "smooth"
+            ? 2
+            : 0;
+      }
+
+      function updateBlendLabel() {
+        const el = document.getElementById("st-bld");
+        if (el) el.textContent = PARAMS.blendMode;
+      }
+
+      function setupTweakpane() {
+        const container = document.getElementById("tp-container");
+        if (!container) return;
+        const pane = new Pane({ container, title: "Impostor" });
+
+        const sceneF = pane.addFolder({ title: "Scene", expanded: true });
+        sceneF
+          .addBinding(PARAMS, "model", {
+            options: {
+              TorusKnot: "__torusknot__",
+              Sphere: "__sphere__",
+              "Cylinder+Cone": "__cylinder__",
+              Monkey: "__monkey__",
+              Tree: "__tree__",
+              "Damaged Helmet":
+                "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/DamagedHelmet/glTF-Binary/DamagedHelmet.glb",
+              Flamingo:
+                "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/models/gltf/Flamingo.glb",
+              Parrot:
+                "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/models/gltf/Parrot.glb",
+              Stork:
+                "https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/models/gltf/Stork.glb",
+            },
+          })
+          .on("change", (ev) => {
+            const path = ev.value;
+            if (typeof path === "string" && path)
+              loadModel(path).catch(console.error);
+          });
+        sceneF.addBinding(PARAMS, "quality", {
+          options: {
+            "512 (6×6)": "512_6",
+            "1024 (8×8)": "1024_8",
+            "1024 (10×10)": "1024_10",
+            "2048 (10×10)": "2048_10",
+            "2048 (12×12)": "2048_12",
+            "2048 (14×14)": "2048_14",
+            "2048 (16×16)": "2048_16",
+            "4096 (12×12)": "4096_12",
+            "4096 (14×14)": "4096_14",
+            "4096 (16×16)": "4096_16",
+          },
+        });
+        sceneF.addButton({ title: "Load" }).on("click", () => {
+          const path = PARAMS.model;
+          if (typeof path !== "string" || !path) return;
+          loadModel(path).catch(console.error);
+        });
+        sceneF
+          .addButton({ title: "Re-bake" })
+          .on("click", () => reBake().catch(console.error));
+        sceneF.addButton({ title: "Cam close" }).on("click", () => {
+          if (camera && controls) {
+            camera.position.set(0, controls.target.y * 0.5 + 2, 12);
+            controls.update();
+          }
+        });
+        sceneF.addButton({ title: "Cam far" }).on("click", () => {
+          if (camera && controls) {
+            camera.position.set(0, controls.target.y * 0.5 + 5, 80);
+            controls.update();
+          }
+        });
+        sceneF
+          .addBinding(PARAMS, "autoOrbit", { label: "Auto-orbit [O]" })
+          .on("change", (v) => {
+            autoOrbit = !!v.value;
+          });
+
+        const importF = pane.addFolder({ title: "Import", expanded: true });
+        importF.addBinding(PARAMS, "urlInput", { label: "URL" });
+        importF.addButton({ title: "Load URL" }).on("click", () => {
+          const url = PARAMS.urlInput.trim();
+          if (!url) return;
+          PARAMS.model = url;
+          loadModel(url).catch(console.error);
+        });
+        importF
+          .addButton({ title: "Local GLB…" })
+          .on("click", () => document.getElementById("fi").click());
+        importF.addBinding(PARAMS, "fileName", {
+          readonly: true,
+          label: "File",
+        });
+
+        const lightF = pane.addFolder({ title: "Lighting", expanded: true });
+        lightF
+          .addBinding(PARAMS, "sunAz", {
+            min: 0,
+            max: 360,
+            step: 1,
+            label: "Sun azimuth °",
+          })
+          .on("change", () => applySun());
+        lightF
+          .addBinding(PARAMS, "sunEl", {
+            min: 5,
+            max: 90,
+            step: 1,
+            label: "Sun elevation °",
+          })
+          .on("change", () => applySun());
+        lightF
+          .addBinding(PARAMS, "sunInt", {
+            min: 0,
+            max: 5,
+            step: 0.1,
+            label: "Sun intensity",
+          })
+          .on("change", () => applySun());
+        lightF
+          .addBinding(PARAMS, "ambInt", {
+            min: 0,
+            max: 3,
+            step: 0.1,
+            label: "Ambient",
+          })
+          .on("change", () => applySun());
+
+        const impF = pane.addFolder({
+          title: "Impostor shading",
+          expanded: true,
+        });
+        impF.addBinding(PARAMS, "impostorScale", {
+          min: 0.5,
+          max: 1.5,
+          step: 0.01,
+          label: "Scale",
+        });
+        impF
+          .addBinding(PARAMS, "lightScale", { min: 0, max: 3, step: 0.05 })
+          .on("change", () => applySun());
+        impF
+          .addBinding(PARAMS, "normalStr", {
+            min: 0,
+            max: 2,
+            step: 0.05,
+            label: "Normal strength",
+          })
+          .on("change", () => applySun());
+        impF
+          .addBinding(PARAMS, "alphaCut", {
+            min: 0,
+            max: 0.5,
+            step: 0.01,
+            label: "Alpha cutoff",
+          })
+          .on("change", () => applySun());
+
+        const bakeF = pane.addFolder({ title: "Bake (re-bake)" });
+        bakeF
+          .addBinding(PARAMS, "sphereMargin", { min: 1, max: 1.5, step: 0.01 })
+          .on("change", () => applySun());
+        bakeF.addBinding(PARAMS, "bakeAlpha", {
+          min: 0,
+          max: 0.2,
+          step: 0.005,
+          label: "Alpha test",
+        });
+        bakeF.addBinding(PARAMS, "cellPad", {
+          min: 0,
+          max: 8,
+          step: 1,
+          label: "Cell padding",
+        });
+
+        const blendF = pane.addFolder({ title: "Blend mode" });
+        blendF
+          .addBinding(PARAMS, "blendMode", {
+            options: {
+              Dominant: "dominant",
+              Trilinear: "trilinear",
+              Smooth: "smooth",
+            },
+          })
+          .on("change", () => {
+            if (impostorUniforms)
+              impostorUniforms.uBlendMode.value = getBlendMode();
+            updateBlendLabel();
+          });
+
+        const dbgF = pane.addFolder({ title: "Debug" });
+        dbgF
+          .addBinding(PARAMS, "dbgWf", { label: "Wireframe [W]" })
+          .on("change", () => {
+            if (wireframeHelper) wireframeHelper.visible = PARAMS.dbgWf;
+          });
+        dbgF
+          .addBinding(PARAMS, "dbgGrid", { label: "Atlas grid [G]" })
+          .on("change", () => drawAtlasPreview());
+        dbgF
+          .addBinding(PARAMS, "dbgNorm", { label: "Normals [N]" })
+          .on("change", (e) => {
+            if (impostorUniforms)
+              impostorUniforms.uShowNorm.value = e.value ? 1 : 0;
+          });
+        dbgF
+          .addBinding(PARAMS, "dbgFreeze", { label: "Freeze angle [F]" })
+          .on("change", (e) => {
+            if (impostorUniforms && lastAtlas) {
+              if (e.value)
+                impostorUniforms.uFrozenDir.value
+                  .copy(camera.position)
+                  .sub(lastAtlas.boundingSphere.center)
+                  .normalize();
+              impostorUniforms.uFreezeAngle.value = e.value ? 1 : 0;
+            }
+          });
+        dbgF
+          .addBinding(PARAMS, "dbgGround", { label: "Ground grid" })
+          .on("change", (e) => {
+            if (gridH) gridH.visible = e.value;
+          });
+        dbgF
+          .addBinding(PARAMS, "dbgRaw", { label: "Raw atlas" })
+          .on("change", (e) => {
+            if (impostorUniforms)
+              impostorUniforms.uShowRaw.value = e.value ? 1 : 0;
+          });
+        dbgF
+          .addBinding(PARAMS, "dbgActive", { label: "Active cells" })
+          .on("change", () => drawAtlasPreview());
+        dbgF.addBinding(PARAMS, "dbgBakeSphere", { label: "Bake sphere" });
+        dbgF.addBinding(PARAMS, "dbgBakeCam", { label: "Bake camera" });
+        dbgF
+          .addButton({ title: "Verify bake (1 cell)" })
+          .on("click", async () => {
+            if (!realGroup) {
+              alert("Load a model and run Bake first.");
+              return;
+            }
+            try {
+              if (lastTestCellRT) lastTestCellRT.dispose();
+              lastTestCellRT = await bakeOneCellTest(renderer, realGroup, {
+                sphereMargin: PARAMS.sphereMargin,
+                alphaTest: PARAMS.bakeAlpha,
+              });
+            } catch (e) {
+              console.error(e);
+            }
+          });
+      }
+
+      let _blobUrlForFile = null;
+      async function reBake() {
+        if (!realGroup) {
+          alert("Load a model first.");
+          return;
+        }
+        const ld = document.getElementById("ld");
+        const st = document.getElementById("lst");
+        ld.classList.remove("hidden");
+        st.textContent = "Re-baking…";
+        await new Promise((r) => setTimeout(r, 30));
+        const q = getQuality();
+        const oldAtlas = lastAtlas;
+        try {
+          lastAtlas = await bakeAtlasWebGPU(renderer, realGroup, {
+            textureSize: q.textureSize,
+            spritesPerSide: q.spritesPerSide,
+            sphereMargin: PARAMS.sphereMargin,
+            alphaTest: PARAMS.bakeAlpha,
+            cellPadding: PARAMS.cellPad,
+          });
+        } catch (err) {
+          console.error(err);
+          st.textContent = "Re-bake failed";
+          ld.classList.add("hidden");
+          return;
+        }
+        const bbox = new THREE.Box3().setFromObject(realGroup);
+        const size = bbox.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z);
+        baseQuadSize = maxDim * 0.5;
+        if (impostorMesh) {
+          scene.remove(impostorMesh);
+          impostorMesh.material?.dispose();
+          impostorMesh.geometry?.dispose();
+        }
+        const { material, uniforms } = createImpostorMaterialTSL(lastAtlas, {
+          alphaTest: PARAMS.alphaCut,
+          normalStrength: PARAMS.normalStr,
+          lightScale: PARAMS.lightScale,
+          blendMode: getBlendMode(),
+        });
+        impostorUniforms = uniforms;
+        impostorMesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
+        impostorMesh.scale.setScalar(baseQuadSize * PARAMS.impostorScale);
+        impostorMesh.position.copy(lastAtlas.boundingSphere.center);
+        impostorMesh.frustumCulled = false;
+        scene.add(impostorMesh);
+        if (wireframeHelper) {
+          wireframeHelper.scale.setScalar(baseQuadSize * PARAMS.impostorScale);
+          wireframeHelper.visible = PARAMS.dbgWf;
+        }
+        applySun();
+        setupAtlasPreview();
+        updateAtlasPreviewTextures();
+        drawAtlasPreview();
+        ld.classList.add("hidden");
+        // Dispose old atlas only after we've switched to the new one and the current frame is done,
+        // so the renderer never submits a pass that uses the destroyed texture.
+        if (oldAtlas) {
+          requestAnimationFrame(() => {
+            oldAtlas.colorRT?.dispose();
+            oldAtlas.normalRT?.dispose();
+          });
+        }
+      }
+
+      function applySun() {
+        const az = (PARAMS.sunAz * Math.PI) / 180;
+        const el = (PARAMS.sunEl * Math.PI) / 180;
+        const sun = scene.getObjectByProperty("isDirectionalLight", true);
+        if (sun) {
+          sun.position.set(
+            Math.cos(el) * Math.sin(az),
+            Math.sin(el),
+            Math.cos(el) * Math.cos(az),
+          );
+          sun.intensity = PARAMS.sunInt;
+        }
+        const amb = scene.getObjectByProperty("isAmbientLight", true);
+        if (amb) amb.intensity = PARAMS.ambInt;
+        if (!impostorUniforms) return;
+        impostorUniforms.uSunDir.value
+          .set(
+            Math.cos(el) * Math.sin(az),
+            Math.sin(el),
+            Math.cos(el) * Math.cos(az),
+          )
+          .normalize();
+        impostorUniforms.uSunColor.value.set(
+          (sun?.color?.r ?? 1) * (sun?.intensity ?? 2),
+          (sun?.color?.g ?? 1) * (sun?.intensity ?? 2),
+          (sun?.color?.b ?? 1) * (sun?.intensity ?? 2),
+        );
+        impostorUniforms.uAmbColor.value.set(
+          (amb?.color?.r ?? 0.5) * (amb?.intensity ?? 0.6),
+          (amb?.color?.g ?? 0.5) * (amb?.intensity ?? 0.6),
+          (amb?.color?.b ?? 0.5) * (amb?.intensity ?? 0.6),
+        );
+        impostorUniforms.uLightScale.value = PARAMS.lightScale;
+        impostorUniforms.uNormStr.value = PARAMS.normalStr;
+        impostorUniforms.uAlphaTest.value = PARAMS.alphaCut;
+        impostorUniforms.uBlendMode.value = getBlendMode();
+      }
+
+      function computeActiveCells() {
+        if (!lastAtlas || !camera || !controls) return;
+        const sc = lastAtlas.boundingSphere.center;
+        const S = lastAtlas.spritesPerSide;
+        const Nm1 = S - 1;
+        const vd = camera.position.clone().sub(sc).normalize();
+        const enc = hemiOctaEncode(vd);
+        const gx = enc.u * Nm1;
+        const gy = enc.v * Nm1;
+        const fx = Math.min(Math.floor(gx), Nm1);
+        const fy = Math.min(Math.floor(gy), Nm1);
+        const frx = gx - fx;
+        const fry = gy - fy;
+        const wx = Math.min(1 - frx, 1 - fry);
+        const wy = Math.abs(frx - fry);
+        const wz = Math.min(frx, fry);
+        const ww = frx > fry ? 1 : 0;
+        activeCells = {
+          s1: [fx, fy],
+          s2: [
+            Math.min(fx + (ww ? 1 : 0), Nm1),
+            Math.min(fy + (ww ? 0 : 1), Nm1),
+          ],
+          s3: [Math.min(fx + 1, Nm1), Math.min(fy + 1, Nm1)],
+          weights: [wx, wy, wz],
+        };
+      }
+
+      function updateBakeDebug() {
+        if (!lastAtlas) return;
+        const showSphere = PARAMS.dbgBakeSphere;
+        const showCam = PARAMS.dbgBakeCam;
+        const center = lastAtlas.boundingSphere.center;
+        const rTight = lastAtlas.boundingSphere.radius;
+        const rBake = lastAtlas.boundingSphereBake.radius;
+
+        if (showSphere) {
+          if (!bakeSphereHelper) {
+            bakeSphereHelper = new THREE.Group();
+            const tightSphere = new THREE.Mesh(
+              new THREE.SphereGeometry(rTight, 16, 12),
+              new THREE.MeshBasicMaterial({
+                wireframe: true,
+                color: 0xffaa00,
+                transparent: true,
+                opacity: 0.6,
+                depthTest: false,
+              }),
+            );
+            const bakeSphere = new THREE.Mesh(
+              new THREE.SphereGeometry(rBake, 16, 12),
+              new THREE.MeshBasicMaterial({
+                wireframe: true,
+                color: 0x44aaff,
+                transparent: true,
+                opacity: 0.4,
+                depthTest: false,
+              }),
+            );
+            bakeSphereHelper.add(tightSphere);
+            bakeSphereHelper.add(bakeSphere);
+            scene.add(bakeSphereHelper);
+          }
+          bakeSphereHelper.visible = true;
+          bakeSphereHelper.position.copy(center);
+        } else {
+          if (bakeSphereHelper) bakeSphereHelper.visible = false;
+        }
+
+        if (showCam) {
+          const dir = camera.position.clone().sub(center).normalize();
+          const bakeCamPos = center.clone().addScaledVector(dir, rBake * 2);
+          if (!bakeCameraHelper) {
+            bakeCameraHelper = new THREE.Group();
+            const camPoint = new THREE.Mesh(
+              new THREE.SphereGeometry(0.3, 8, 6),
+              new THREE.MeshBasicMaterial({
+                color: 0xff4444,
+                depthTest: false,
+              }),
+            );
+            const lineGeo = new THREE.BufferGeometry().setFromPoints([
+              new THREE.Vector3(0, 0, 0),
+              new THREE.Vector3(0, 0, 1),
+            ]);
+            const line = new THREE.Line(
+              lineGeo,
+              new THREE.LineBasicMaterial({
+                color: 0xff8844,
+                depthTest: false,
+              }),
+            );
+            const viewPlane = new THREE.Mesh(
+              new THREE.PlaneGeometry(1, 1),
+              new THREE.MeshBasicMaterial({
+                color: 0x44aa44,
+                transparent: true,
+                opacity: 0.25,
+                side: THREE.DoubleSide,
+                depthTest: false,
+              }),
+            );
+            bakeCameraHelper.add(camPoint);
+            bakeCameraHelper.add(line);
+            bakeCameraHelper.add(viewPlane);
+            scene.add(bakeCameraHelper);
+          }
+          bakeCameraHelper.visible = true;
+          bakeCameraHelper.position.copy(center);
+          bakeCameraHelper.children[0].position.copy(
+            dir.clone().multiplyScalar(rBake * 2),
+          );
+          const lineSeg = bakeCameraHelper.children[1];
+          lineSeg.quaternion.setFromUnitVectors(
+            new THREE.Vector3(0, 0, 1),
+            dir,
+          );
+          lineSeg.scale.setScalar(rBake * 2);
+          const viewPlaneMesh = bakeCameraHelper.children[2];
+          viewPlaneMesh.scale.set(rBake * 2, rBake * 2, 1);
+          viewPlaneMesh.lookAt(bakeCamPos);
+        } else {
+          if (bakeCameraHelper) bakeCameraHelper.visible = false;
+        }
+      }
+
+      function setupAtlasPreview() {
+        if (atlasPreviewScene) return;
+        atlasPreviewScene = new THREE.Scene();
+        atlasPreviewCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
+        atlasColorGroup = new THREE.Group();
+        atlasNormalGroup = new THREE.Group();
+        atlasPreviewScene.add(atlasColorGroup);
+        atlasPreviewScene.add(atlasNormalGroup);
+      }
+
+      function buildAtlasPreviewCells(S, colorTexture, normalTexture) {
+        if (atlasColorGroup === null || atlasNormalGroup === null) return;
+        while (atlasColorGroup.children.length) {
+          const c = atlasColorGroup.children[0];
+          atlasColorGroup.remove(c);
+          c.geometry?.dispose();
+          c.material?.dispose();
+        }
+        while (atlasNormalGroup.children.length) {
+          const c = atlasNormalGroup.children[0];
+          atlasNormalGroup.remove(c);
+          c.geometry?.dispose();
+          c.material?.dispose();
+        }
+        // One quad showing the FULL atlas (all N×N baked views); UV 0–1 maps to full texture.
+        const fullQuad = new THREE.PlaneGeometry(2, 2);
+        const atlasUV = uv();
+        const matColor = new THREE.MeshBasicNodeMaterial({
+          colorNode: texture(colorTexture, atlasUV).rgb,
+          side: THREE.DoubleSide,
+          depthTest: false,
+        });
+        const matNormal = new THREE.MeshBasicNodeMaterial({
+          colorNode: texture(normalTexture, atlasUV).rgb,
+          side: THREE.DoubleSide,
+          depthTest: false,
+        });
+        atlasColorGroup.add(new THREE.Mesh(fullQuad, matColor));
+        atlasNormalGroup.add(new THREE.Mesh(fullQuad.clone(), matNormal));
+        atlasPreviewS = S;
+      }
+
+      function ensureAtlasGrid(S) {
+        if (!atlasPreviewScene) return;
+        if (
+          atlasGridLines &&
+          atlasGridLines.userData &&
+          atlasGridLines.userData.S === S
+        )
+          return;
+        if (atlasGridLines) {
+          atlasPreviewScene.remove(atlasGridLines);
+          atlasGridLines.geometry.dispose();
+          atlasGridLines.material.dispose();
+        }
+        const gridGeo = createAtlasGridGeometry(S);
+        atlasGridLines = new THREE.LineSegments(
+          gridGeo,
+          new THREE.LineBasicMaterial({
+            color: 0xffffff,
+            opacity: 0.4,
+            transparent: true,
+            depthTest: false,
+          }),
+        );
+        atlasGridLines.userData = { S };
+        atlasPreviewScene.add(atlasGridLines);
+      }
+
+      function updateAtlasPreviewTextures() {
+        if (!lastAtlas || !atlasColorGroup || !atlasNormalGroup) return;
+        const S = lastAtlas.spritesPerSide;
+        if (S !== atlasPreviewS) {
+          buildAtlasPreviewCells(
+            S,
+            lastAtlas.colorTexture,
+            lastAtlas.normalTexture,
+          );
+        }
+      }
+
+      function drawAtlasPreview() {
+        if (!lastAtlas) return;
+        if (lastAtlas.colorPixels && lastAtlas.normalPixels) {
+          const w = lastAtlas.textureSize;
+          const S = lastAtlas.spritesPerSide;
+          const sz = ATLAS_PREVIEW_SIZE;
+          const showGrid = PARAMS.dbgGrid || PARAMS.dbgActive;
+          const draw = (pixels, canvasId, drawGrid) => {
+            const c = document.getElementById(canvasId);
+            if (!c) return;
+            const ctx = c.getContext("2d");
+            const tmp = document.createElement("canvas");
+            tmp.width = w;
+            tmp.height = w;
+            tmp
+              .getContext("2d")
+              .putImageData(
+                new ImageData(new Uint8ClampedArray(pixels), w, w),
+                0,
+                0,
+              );
+            ctx.clearRect(0, 0, sz, sz);
+            ctx.save();
+            ctx.translate(0, sz);
+            ctx.scale(1, -1);
+            ctx.drawImage(tmp, 0, 0, sz, sz);
+            ctx.restore();
+            if (drawGrid) {
+              const step = sz / S;
+              ctx.strokeStyle = "rgba(255,255,255,.35)";
+              ctx.lineWidth = 0.5;
+              for (let i = 0; i <= S; i++) {
+                const p = i * step;
+                ctx.beginPath();
+                ctx.moveTo(p, 0);
+                ctx.lineTo(p, sz);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(0, p);
+                ctx.lineTo(sz, p);
+                ctx.stroke();
+              }
+            }
+            if (PARAMS.dbgActive) {
+              const step = sz / S;
+              const { s1, s2, s3, weights } = activeCells;
+              [
+                [s1, weights[0], "255,80,80"],
+                [s2, weights[1], "80,255,80"],
+                [s3, weights[2], "80,80,255"],
+              ].forEach(([cell, w, col]) => {
+                if (w < 0.01) return;
+                const a = 0.15 + w * 0.55;
+                const x = cell[0] * step;
+                const y = (S - 1 - cell[1]) * step;
+                ctx.fillStyle = `rgba(${col},${a})`;
+                ctx.fillRect(x, y, step, step);
+                ctx.strokeStyle = `rgba(${col},.9)`;
+                ctx.lineWidth = 1.5;
+                ctx.strokeRect(x + 0.5, y + 0.5, step - 1, step - 1);
+                ctx.fillStyle = "rgba(255,255,255,.9)";
+                ctx.font = "bold 9px monospace";
+                ctx.fillText(((w * 100) | 0) + "%", x + 2, y + step - 3);
+              });
+            }
+          };
+          draw(lastAtlas.colorPixels, "ac", showGrid);
+          draw(lastAtlas.normalPixels, "an", false);
+          return;
+        }
+        setupAtlasPreview();
+        updateAtlasPreviewTextures();
+        const c1 = document.getElementById("ac");
+        const c2 = document.getElementById("an");
+        if (c1 && c2) {
+          c1.getContext("2d").clearRect(
+            0,
+            0,
+            ATLAS_PREVIEW_SIZE,
+            ATLAS_PREVIEW_SIZE,
+          );
+          c2.getContext("2d").clearRect(
+            0,
+            0,
+            ATLAS_PREVIEW_SIZE,
+            ATLAS_PREVIEW_SIZE,
+          );
+        }
+      }
+
+      async function loadModel(path) {
+        const ld = document.getElementById("ld");
+        const st = document.getElementById("lst");
+        ld.classList.remove("hidden");
+        st.textContent = "Loading…";
+
+        if (realGroup) {
+          scene.remove(realGroup);
+          disposeObj(realGroup);
+          realGroup = null;
+        }
+        if (impostorMesh) {
+          scene.remove(impostorMesh);
+          if (impostorMesh.material?.dispose) impostorMesh.material.dispose();
+          impostorMesh.geometry?.dispose();
+          impostorMesh = null;
+        }
+        if (wireframeHelper) {
+          scene.remove(wireframeHelper);
+          disposeObj(wireframeHelper);
+          wireframeHelper = null;
+        }
+        if (bakeSphereHelper) {
+          bakeSphereHelper.traverse((o) => {
+            if (o.geometry) o.geometry.dispose();
+            if (o.material) o.material.dispose();
+          });
+          scene.remove(bakeSphereHelper);
+          bakeSphereHelper = null;
+        }
+        if (bakeCameraHelper) {
+          bakeCameraHelper.traverse((o) => {
+            if (o.geometry) o.geometry.dispose();
+            if (o.material) o.material.dispose();
+          });
+          scene.remove(bakeCameraHelper);
+          bakeCameraHelper = null;
+        }
+        if (lastAtlas?.colorRT) lastAtlas.colorRT.dispose();
+        if (lastAtlas?.normalRT) lastAtlas.normalRT.dispose();
+        lastAtlas = null;
+        if (lastTestCellRT) {
+          lastTestCellRT.dispose();
+          lastTestCellRT = null;
+        }
+        impostorUniforms = null;
+
+        let src;
+        if (path.startsWith("__")) {
+          src = createShape(path);
+        } else {
+          try {
+            st.textContent = "Fetching GLB…";
+            const gltf = await new Promise((res, rej) => {
+              gltfLoader.load(path, res, undefined, (err) =>
+                rej(err?.message || "Load failed"),
+              );
+            });
+            src = gltf.scene;
+          } catch (e) {
+            st.textContent = "Error: " + String(e).slice(0, 80);
+            ld.classList.add("hidden");
+            setTimeout(() => (st.textContent = ""), 3000);
+            return;
+          }
+        }
+
+        src.updateMatrixWorld(true);
+        const rb = new THREE.Box3().setFromObject(src);
+        const rh = Math.max(rb.getSize(new THREE.Vector3()).y, 0.001);
+        const sc = 6 / rh;
+        src.scale.multiplyScalar(sc);
+        src.updateMatrixWorld(true);
+        const sb = new THREE.Box3().setFromObject(src);
+        src.position.y -= sb.min.y;
+        src.updateMatrixWorld(true);
+        refTriCount = countTris(src);
+
+        realGroup = src.clone(true);
+        scene.add(realGroup);
+
+        st.textContent = "Baking (WebGPU)…";
+        await new Promise((r) => setTimeout(r, 30));
+
+        const q = getQuality();
+        try {
+          if (lastTestCellRT) {
+            lastTestCellRT.dispose();
+            lastTestCellRT = null;
+          }
+          lastAtlas = await bakeAtlasWebGPU(renderer, src, {
+            textureSize: q.textureSize,
+            spritesPerSide: q.spritesPerSide,
+            sphereMargin: PARAMS.sphereMargin,
+            alphaTest: PARAMS.bakeAlpha,
+            cellPadding: PARAMS.cellPad,
+          });
+        } catch (err) {
+          console.error(err);
+          st.textContent = "Bake failed: " + (err?.message || err);
+          ld.classList.add("hidden");
+          return;
+        }
+
+        st.textContent = "Creating impostor (TSL)…";
+        await new Promise((r) => setTimeout(r, 10));
+
+        const { material, uniforms } = createImpostorMaterialTSL(lastAtlas, {
+          alphaTest: PARAMS.alphaCut,
+          normalStrength: PARAMS.normalStr,
+          lightScale: PARAMS.lightScale,
+          blendMode: getBlendMode(),
+        });
+        impostorUniforms = uniforms;
+        Object.assign(
+          impostorUniforms.uSphCenter.value,
+          lastAtlas.boundingSphere.center,
+        );
+
+        const r = lastAtlas.displayRadius ?? lastAtlas.boundingSphere.radius;
+        baseQuadSize = r * 2;
+        const geo = new THREE.PlaneGeometry(1, 1);
+        impostorMesh = new THREE.Mesh(geo, material);
+        impostorMesh.position.copy(lastAtlas.boundingSphere.center);
+        impostorMesh.scale.set(baseQuadSize, baseQuadSize, baseQuadSize);
+        impostorMesh.frustumCulled = false;
+        scene.add(impostorMesh);
+
+        applySun();
+        if (PARAMS.dbgNorm) impostorUniforms.uShowNorm.value = 1;
+        if (PARAMS.dbgRaw) impostorUniforms.uShowRaw.value = 1;
+        if (PARAMS.dbgFreeze) {
+          impostorUniforms.uFrozenDir.value
+            .copy(camera.position)
+            .sub(lastAtlas.boundingSphere.center)
+            .normalize();
+          impostorUniforms.uFreezeAngle.value = 1;
+        }
+
+        wireframeHelper = new THREE.Mesh(
+          new THREE.PlaneGeometry(1, 1),
+          new THREE.MeshBasicMaterial({
+            wireframe: true,
+            color: 0x44aaff,
+            transparent: true,
+            opacity: 0.25,
+            depthTest: false,
+          }),
+        );
+        wireframeHelper.position.copy(lastAtlas.boundingSphere.center);
+        wireframeHelper.scale.set(baseQuadSize, baseQuadSize, baseQuadSize);
+        wireframeHelper.visible = PARAMS.dbgWf;
+        wireframeHelper.frustumCulled = false;
+        scene.add(wireframeHelper);
+
+        computeActiveCells();
+        setupAtlasPreview();
+        updateAtlasPreviewTextures();
+        drawAtlasPreview();
+        await renderer.compileAsync(atlasPreviewScene, atlasPreviewCamera);
+
+        controls.target.set(0, (sb.min.y + sb.max.y) * 0.5, 0);
+        controls.update();
+        ld.classList.add("hidden");
+      }
+
+      async function init() {
+        renderer = new THREE.WebGPURenderer({ antialias: true });
+        await renderer.init();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1;
+        renderer.outputColorSpace = THREE.SRGBColorSpace;
+        document.getElementById("app").appendChild(renderer.domElement);
+
+        const be = renderer.backend?.constructor?.name || "?";
+        document.getElementById("st-backend").textContent = be.includes(
+          "WebGPU",
+        )
+          ? "WebGPU ✓"
+          : be;
+
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0d0d14);
+        scene.fog = new THREE.Fog(0x0d0d14, 80, 250);
+
+        const sun = new THREE.DirectionalLight(0xfff0d0, 2);
+        sun.position.set(-1, 1.5, 1);
+        scene.add(sun);
+        scene.add(new THREE.AmbientLight(0x8090b0, 0.6));
+        scene.add(new THREE.HemisphereLight(0x8090b0, 0x3a4030, 0.4));
+
+        gridH = new THREE.GridHelper(120, 60, 0x1a1a30, 0x151525);
+        gridH.material.transparent = true;
+        gridH.material.opacity = 0.5;
+        gridH.visible = PARAMS.dbgGround;
+        scene.add(gridH);
+
+        camera = new THREE.PerspectiveCamera(
+          45,
+          window.innerWidth / 2 / window.innerHeight,
+          0.1,
+          800,
+        );
+        camera.position.set(0, 5, 20);
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.08;
+        controls.target.set(0, 3, 0);
+        controls.update();
+
+        await renderer.compileAsync(scene, camera);
+
+        setupTweakpane();
+        document.getElementById("fi").addEventListener("change", (e) => {
+          const f = e.target.files[0];
+          if (!f) return;
+          if (_blobUrlForFile) URL.revokeObjectURL(_blobUrlForFile);
+          _blobUrlForFile = URL.createObjectURL(f);
+          PARAMS.fileName = f.name;
+          loadModel(_blobUrlForFile).catch(console.error);
+          e.target.value = "";
+        });
+
+        let lastACU = 0;
+        function updateStats() {
+          document.getElementById("st-fps").textContent = currentFps;
+          if (lastAtlas) {
+            document.getElementById("st-atlas").textContent =
+              lastAtlas.textureSize + "²";
+            document.getElementById("st-spr").textContent =
+              lastAtlas.spritesPerSide + "×" + lastAtlas.spritesPerSide;
+            document.getElementById("st-csz").textContent =
+              Math.round(lastAtlas.textureSize / lastAtlas.spritesPerSide) +
+              "px";
+            document.getElementById("st-pad").textContent =
+              lastAtlas.cellPadding + "px";
+            const q = baseQuadSize * (PARAMS.impostorScale || 1);
+            document.getElementById("st-quad").textContent = q.toFixed(2);
+            document.getElementById("st-bakedist").textContent = (
+              lastAtlas.boundingSphereBake.radius * 2
+            ).toFixed(2);
+          } else {
+            document.getElementById("st-quad").textContent = "—";
+            document.getElementById("st-bakedist").textContent = "—";
+          }
+          document.getElementById("st-tri").textContent =
+            refTriCount.toLocaleString();
+          const dist = camera.position.distanceTo(controls.target);
+          document.getElementById("st-dist").textContent = dist.toFixed(1);
+          const dx = camera.position.x - controls.target.x;
+          const dz = camera.position.z - controls.target.z;
+          document.getElementById("st-ang").textContent =
+            ((((Math.atan2(dx, dz) * 180) / Math.PI + 360) % 360) | 0) + "°";
+          const { s1, s2, s3 } = activeCells;
+          document.getElementById("st-act").textContent =
+            `(${s1})(${s2})(${s3})`;
+        }
+
+        function render() {
+          controls.update();
+          frameCount++;
+          const now = performance.now();
+          if (now - lastFpsTime >= 500) {
+            currentFps = Math.round(frameCount / ((now - lastFpsTime) / 1000));
+            frameCount = 0;
+            lastFpsTime = now;
+          }
+          if (autoOrbit) {
+            const t = controls.target;
+            const off = camera.position.clone().sub(t);
+            const a = 0.003;
+            camera.position.set(
+              t.x + off.x * Math.cos(a) + off.z * Math.sin(a),
+              camera.position.y,
+              t.z - off.x * Math.sin(a) + off.z * Math.cos(a),
+            );
+            camera.lookAt(t);
+          }
+          const impostorScale = PARAMS.impostorScale || 1;
+          if (impostorMesh) {
+            impostorMesh.scale.setScalar(baseQuadSize * impostorScale);
+          }
+          if (wireframeHelper) {
+            wireframeHelper.scale.setScalar(baseQuadSize * impostorScale);
+            if (wireframeHelper.visible && lastAtlas) {
+              wireframeHelper.position.copy(lastAtlas.boundingSphere.center);
+              wireframeHelper.lookAt(camera.position);
+            }
+          }
+          if (lastAtlas) updateBakeDebug();
+          if (now - lastACU > 100) {
+            computeActiveCells();
+            if (PARAMS.dbgActive || PARAMS.dbgGrid) drawAtlasPreview();
+            lastACU = now;
+          }
+
+          const W = window.innerWidth;
+          const H = window.innerHeight;
+          const half = Math.floor(W / 2);
+          camera.aspect = half / H;
+          camera.updateProjectionMatrix();
+          renderer.setScissorTest(true);
+
+          if (realGroup) realGroup.visible = true;
+          if (impostorMesh) impostorMesh.visible = false;
+          if (wireframeHelper) wireframeHelper.visible = false;
+          renderer.setViewport(0, 0, half, H);
+          renderer.setScissor(0, 0, half, H);
+          renderer.render(scene, camera);
+
+          if (realGroup) realGroup.visible = false;
+          if (impostorMesh) impostorMesh.visible = true;
+          if (wireframeHelper) wireframeHelper.visible = PARAMS.dbgWf;
+          renderer.setViewport(half, 0, W - half, H);
+          renderer.setScissor(half, 0, W - half, H);
+          renderer.render(scene, camera);
+
+          if (lastAtlas) {
+            drawAtlasPreview();
+            if (
+              !lastAtlas.colorPixels &&
+              atlasPreviewScene &&
+              atlasPreviewCamera
+            ) {
+              updateAtlasPreviewTextures();
+              ensureAtlasGrid(lastAtlas.spritesPerSide);
+              const ac = document.getElementById("ac");
+              const an = document.getElementById("an");
+              if (ac && an) {
+                const r1 = ac.getBoundingClientRect();
+                const r2 = an.getBoundingClientRect();
+                const dpr = renderer.getPixelRatio();
+                const toVP = (rect) => ({
+                  x: Math.round(rect.left * dpr),
+                  y: Math.round(rect.top * dpr),
+                  w: Math.round(rect.width * dpr),
+                  h: Math.round(rect.height * dpr),
+                });
+                const v1 = toVP(r1);
+                const v2 = toVP(r2);
+                renderer.setScissorTest(true);
+                renderer.setClearColor(0x0d0d14, 1);
+                if (lastTestCellRT) {
+                  if (!testCellPreviewScene) {
+                    testCellPreviewScene = new THREE.Scene();
+                    const testCam = new THREE.OrthographicCamera(
+                      -1,
+                      1,
+                      1,
+                      -1,
+                      -1,
+                      1,
+                    );
+                    testCellPreviewScene.userData.camera = testCam;
+                    const quad = new THREE.Mesh(
+                      new THREE.PlaneGeometry(2, 2),
+                      new THREE.MeshBasicMaterial({
+                        side: THREE.DoubleSide,
+                        depthTest: false,
+                      }),
+                    );
+                    testCellPreviewScene.add(quad);
+                    testCellPreviewScene.userData.quad = quad;
+                  }
+                  testCellPreviewScene.userData.quad.material.map =
+                    lastTestCellRT.texture;
+                  testCellPreviewScene.userData.quad.material.needsUpdate = true;
+                  renderer.setViewport(v1.x, v1.y, v1.w, v1.h);
+                  renderer.setScissor(v1.x, v1.y, v1.w, v1.h);
+                  renderer.clear(true, true, true);
+                  renderer.render(
+                    testCellPreviewScene,
+                    testCellPreviewScene.userData.camera,
+                  );
+                } else {
+                  if (atlasColorGroup) atlasColorGroup.visible = true;
+                  if (atlasNormalGroup) atlasNormalGroup.visible = false;
+                  renderer.setViewport(v1.x, v1.y, v1.w, v1.h);
+                  renderer.setScissor(v1.x, v1.y, v1.w, v1.h);
+                  renderer.clear(true, true, true);
+                  renderer.render(atlasPreviewScene, atlasPreviewCamera);
+                }
+                if (atlasColorGroup) atlasColorGroup.visible = false;
+                if (atlasNormalGroup) atlasNormalGroup.visible = true;
+                renderer.setViewport(v2.x, v2.y, v2.w, v2.h);
+                renderer.setScissor(v2.x, v2.y, v2.w, v2.h);
+                renderer.clear(true, true, true);
+                renderer.render(atlasPreviewScene, atlasPreviewCamera);
+              }
+            }
+          }
+
+          renderer.setScissorTest(false);
+          if (realGroup) realGroup.visible = true;
+          updateStats();
+        }
+
+        renderer.setAnimationLoop(render);
+        window.addEventListener("resize", () => {
+          camera.aspect = innerWidth / 2 / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(innerWidth, innerHeight);
+        });
+        window.addEventListener("keydown", (e) => {
+          if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")
+            return;
+          switch (e.key.toLowerCase()) {
+            case "w":
+              PARAMS.dbgWf = !PARAMS.dbgWf;
+              if (wireframeHelper) wireframeHelper.visible = PARAMS.dbgWf;
+              break;
+            case "n":
+              PARAMS.dbgNorm = !PARAMS.dbgNorm;
+              if (impostorUniforms)
+                impostorUniforms.uShowNorm.value = PARAMS.dbgNorm ? 1 : 0;
+              break;
+            case "f":
+              PARAMS.dbgFreeze = !PARAMS.dbgFreeze;
+              if (impostorUniforms && lastAtlas) {
+                if (PARAMS.dbgFreeze)
+                  impostorUniforms.uFrozenDir.value
+                    .copy(camera.position)
+                    .sub(lastAtlas.boundingSphere.center)
+                    .normalize();
+                impostorUniforms.uFreezeAngle.value = PARAMS.dbgFreeze ? 1 : 0;
+              }
+              break;
+            case "g":
+              PARAMS.dbgGrid = !PARAMS.dbgGrid;
+              drawAtlasPreview();
+              break;
+            case "o":
+              autoOrbit = !autoOrbit;
+              PARAMS.autoOrbit = autoOrbit;
+              break;
+          }
+        });
+
+        await loadModel(PARAMS.model);
+      }
+
+      init().catch((e) => {
+        console.error("Init failed:", e);
+        document.getElementById("st-backend").textContent = "Error";
+        document.getElementById("ld").classList.add("hidden");
+        document.getElementById("lst").textContent = String(e).slice(0, 120);
+      });
+    </script>
+  </body>
+</html>

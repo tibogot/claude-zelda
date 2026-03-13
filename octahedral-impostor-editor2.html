@@ -1,0 +1,745 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Octahedral Impostor — Debug (minimal)</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { background: #0d0d14; color: #c0c8d8; font-family: monospace; overflow: hidden; }
+      canvas { display: block; }
+      #bar {
+        position: fixed; top: 0; left: 0; right: 0; height: 36px; z-index: 20;
+        background: rgba(10,10,18,0.95); border-bottom: 1px solid rgba(255,255,255,0.08);
+        display: flex; align-items: center; padding: 0 10px; gap: 8px;
+      }
+      #bar input[type="text"] {
+        flex: 1; max-width: 320px; padding: 4px 8px; font-size: 11px;
+        background: rgba(255,255,255,0.06); color: #c0c8d8; border: 1px solid rgba(255,255,255,0.1); border-radius: 3px;
+      }
+      #bar label { font-size: 10px; color: #6a7080; display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+      #bar input[type="checkbox"] { cursor: pointer; accent-color: #4af; }
+      #bar .dim { font-size: 9px; color: #6a7080; max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
+      #bar input[type="number"] { width: 52px; padding: 4px; font-size: 11px; background: rgba(255,255,255,0.06); color: #c0c8d8; border: 1px solid rgba(255,255,255,0.1); border-radius: 3px; }
+      #bar button {
+        padding: 4px 12px; font-size: 11px; font-weight: 600; cursor: pointer; border-radius: 3px;
+        background: rgba(68,170,255,0.2); color: #4af; border: 1px solid rgba(68,170,255,0.35);
+      }
+      #bar button:hover { background: rgba(68,170,255,0.3); }
+      #labels {
+        position: fixed; left: 0; top: 36px; right: 0; bottom: 0;
+        pointer-events: none; z-index: 5; display: flex;
+      }
+      #labels span {
+        flex: 1; display: flex; align-items: flex-start; justify-content: center;
+        padding-top: 12px; font-size: 12px; font-weight: 600;
+        letter-spacing: 0.15em; color: rgba(255,255,255,0.7);
+      }
+      #previewLabels {
+        position: fixed; right: 12px; bottom: 198px; z-index: 10;
+        font-size: 9px; color: rgba(255,255,255,0.5); pointer-events: none;
+      }
+      #ld {
+        position: fixed; inset: 0; background: rgba(8,8,16,0.9); display: flex; align-items: center; justify-content: center;
+        flex-direction: column; gap: 10px; z-index: 100; color: #4af; font-size: 12px;
+      }
+      #ld.hidden { display: none; }
+      .spinner { width: 24px; height: 24px; border: 2px solid rgba(68,170,255,0.2); border-top-color: #4af; border-radius: 50%; animation: spin 0.7s linear infinite; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="bar">
+      <input type="text" id="url" placeholder="Model URL or __torusknot__" value="__torusknot__" />
+      <label>Tex</label><input type="number" id="texSize" value="1024" min="256" max="4096" step="256" />
+      <label>Grid</label><input type="number" id="gridSize" value="8" min="4" max="16" />
+      <label><input type="checkbox" id="debugGrid" /> Magenta grid</label>
+      <span id="dbgCellLabel">Debug cell</span>
+      <label>R</label><input type="number" id="debugRow" value="0" min="0" max="7" style="width:36px" />
+      <label>C</label><input type="number" id="debugCol" value="0" min="0" max="7" style="width:36px" />
+      <label><input type="checkbox" id="singleCellOnly" /> Only this cell</label>
+      <span id="dbgDir" class="dim"></span>
+      <button id="btnLoad">Load + Bake</button>
+    </div>
+    <div id="labels">
+      <span id="labelColor">COLOR</span>
+      <span id="labelNormal">NORMAL</span>
+    </div>
+    <div id="previewLabels">
+      <span>Grid (r1c1…)</span>
+    </div>
+    <div id="ld">
+      <div class="spinner"></div>
+      <span id="lst">Loading…</span>
+    </div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import {
+        Fn, uniform, float, vec2, vec3, vec4, positionLocal, cameraPosition,
+        varying, texture, mix, clamp, floor, fract, min, max, dot, cross, normalize,
+        sign, abs, length, add, sub, mul, div, negate, select, uv, normalWorld,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+
+      // ─── STATE (single object for debug) ────────────────────────────────────────
+      const STATE = {
+        modelUrl: "__torusknot__",
+        textureSize: 1024,
+        spritesPerSide: 8,
+        atlas: null,
+      };
+
+      let renderer, scene, camera, controls;
+      let impostorMesh = null;
+      let gltfLoader;
+      let atlasDisplayScene = null;
+      let atlasDisplayCamera = null;
+      let atlasPreviewScene = null;
+      let atlasPreviewCamera = null;
+
+      // ─── Hemi-octahedral direction from grid ────────────────────────────────────
+      function hemiOctaGridToDir(gx, gy) {
+        const x = gx - gy, z = -1 + gx + gy;
+        return new THREE.Vector3(x, 1 - Math.abs(x) - Math.abs(z), z).normalize();
+      }
+
+      // ─── BAKE ATLAS (WebGPU) ────────────────────────────────────────────────────
+      async function bakeAtlasWebGPU(renderer, sourceScene, opts = {}) {
+        const textureSize = opts.textureSize ?? STATE.textureSize;
+        const spritesPerSide = opts.spritesPerSide ?? STATE.spritesPerSide;
+        const N = spritesPerSide, Nm1 = Math.max(1, N - 1);
+        const cellSize = textureSize / N;
+        const pad = opts.cellPadding ?? 2;
+        const innerSize = Math.max(1, cellSize - pad * 2);
+        const alphaTest = opts.alphaTest ?? 0.02;
+        const sphereMargin = opts.sphereMargin ?? 1.08;
+        const singleCell = opts.singleCell ?? null;
+
+        const bbox = new THREE.Box3().setFromObject(sourceScene);
+        const bsphere = new THREE.Sphere();
+        bbox.getBoundingSphere(bsphere);
+        const center = bsphere.center.clone();
+        const radiusTight = bsphere.radius;
+        const radius = radiusTight * sphereMargin;
+        const half = radius;
+        // Match reference (createTextureAtlas): one camera, position updated per cell
+        const bakeCam = new THREE.OrthographicCamera(-half, half, half, -half, 0.001, radius * 4);
+        const cameraFactor = 2;
+
+        function makeBakeScene(src) {
+          const scene = new THREE.Scene();
+          scene.background = null;
+          const model = src.clone(true);
+          model.traverse((o) => {
+            if (!o.isMesh) return;
+            const mats = Array.isArray(o.material) ? o.material : [o.material];
+            mats.forEach((m) => {
+              if (m.alphaTest !== undefined && m.alphaTest <= 0) m.alphaTest = alphaTest;
+              if (m.side !== undefined) m.side = THREE.DoubleSide;
+            });
+          });
+          scene.add(model);
+          const sun = new THREE.DirectionalLight(0xffffff, 0.5);
+          sun.position.set(0, 1, 0);
+          scene.add(sun);
+          const f1 = new THREE.DirectionalLight(0xffffff, 0.25);
+          f1.position.set(1, 0.3, 1);
+          scene.add(f1);
+          const f2 = new THREE.DirectionalLight(0xffffff, 0.25);
+          f2.position.set(-1, 0.3, -1);
+          scene.add(f2);
+          scene.add(new THREE.AmbientLight(0xffffff, 0.9));
+          scene.add(new THREE.HemisphereLight(0xffffff, 0xcccccc, 0.3));
+          return { scene, model };
+        }
+
+        // One scene (match reference: single target, camera updated per cell)
+        const { scene: bakeScene, model: bakeModel } = makeBakeScene(sourceScene);
+
+        const colorRT = new THREE.RenderTarget(textureSize, textureSize, {
+          minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+          colorSpace: THREE.SRGBColorSpace, generateMipmaps: false, depthBuffer: true, stencilBuffer: false,
+        });
+        const normalRT = new THREE.RenderTarget(textureSize, textureSize, {
+          minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+          colorSpace: THREE.LinearSRGBColorSpace, generateMipmaps: false, depthBuffer: true, stencilBuffer: false,
+        });
+
+        await renderer.compileAsync(bakeScene, bakeCam);
+
+        const origRT = renderer.getRenderTarget();
+        const origViewport = renderer.getViewport(new THREE.Vector4());
+        const origScissor = renderer.getScissor(new THREE.Vector4());
+        const origScissorTest = renderer.getScissorTest();
+        const origAutoClear = renderer.autoClear;
+        const origToneMapping = renderer.toneMapping;
+        renderer.autoClear = false;
+        renderer.toneMapping = THREE.NoToneMapping;
+        renderer.setScissorTest(true);
+
+        // Update camera for cell (row,col) — same as reference createTextureAtlas renderView()
+        function setCameraForCell(row, col) {
+          const gx = col / Nm1, gy = row / Nm1;
+          const dir = hemiOctaGridToDir(gx, gy);
+          bakeCam.position.copy(center).addScaledVector(dir, radius * cameraFactor);
+          bakeCam.lookAt(center);
+          bakeCam.updateMatrixWorld(true);
+        }
+
+        // Color pass: direct render into atlas per cell (reference pattern)
+        renderer.setRenderTarget(colorRT);
+        renderer.setClearColor(0x000000, 0);
+        renderer.clear(true, true, true);
+        for (let row = 0; row < N; row++) {
+          for (let col = 0; col < N; col++) {
+            if (singleCell && (singleCell.row !== row || singleCell.col !== col)) continue;
+            const x0 = Math.floor(col * cellSize + pad);
+            const y0 = Math.floor(row * cellSize + pad);
+            setCameraForCell(row, col);
+            renderer.setViewport(x0, y0, innerSize, innerSize);
+            renderer.setScissor(x0, y0, innerSize, innerSize);
+            renderer.setClearColor(opts.debugGrid ? 0xff00ff : 0x000000, opts.debugGrid ? 1 : 0);
+            renderer.clear(true, true, true);
+            renderer.render(bakeScene, bakeCam);
+          }
+        }
+
+        // Normal pass: override materials, same direct viewport render per cell
+        const normalMat = new THREE.MeshBasicNodeMaterial({
+          side: THREE.DoubleSide,
+          colorNode: vec4(mul(add(normalWorld, 1), 0.5), float(1)),
+        });
+        const origMats = new Map();
+        bakeModel.traverse((o) => {
+          if (!o.isMesh) return;
+          origMats.set(o, o.material);
+          o.material = normalMat;
+        });
+        renderer.setRenderTarget(normalRT);
+        renderer.setClearColor(0x000000, 0);
+        renderer.clear(true, true, true);
+        for (let row = 0; row < N; row++) {
+          for (let col = 0; col < N; col++) {
+            if (singleCell && (singleCell.row !== row || singleCell.col !== col)) continue;
+            const x0 = Math.floor(col * cellSize + pad);
+            const y0 = Math.floor(row * cellSize + pad);
+            setCameraForCell(row, col);
+            renderer.setViewport(x0, y0, innerSize, innerSize);
+            renderer.setScissor(x0, y0, innerSize, innerSize);
+            renderer.setClearColor(opts.debugGrid ? 0xff00ff : 0x000000, opts.debugGrid ? 1 : 0);
+            renderer.clear(true, true, true);
+            renderer.render(bakeScene, bakeCam);
+          }
+        }
+        bakeModel.traverse((o) => { if (origMats.has(o)) o.material = origMats.get(o); });
+        normalMat.dispose();
+        renderer.setScissorTest(false);
+
+        renderer.autoClear = origAutoClear;
+        renderer.toneMapping = origToneMapping;
+        renderer.setRenderTarget(origRT);
+        renderer.setViewport(origViewport);
+        renderer.setScissor(origScissor);
+        renderer.setScissorTest(origScissorTest);
+
+        const bboxSize = bbox.getSize(new THREE.Vector3());
+        const maxDim = Math.max(bboxSize.x, bboxSize.y, bboxSize.z);
+        const displayRadius = maxDim * 0.5;
+
+        // ─── READBACK (debug: log result or error) ─────────────────────────────────
+        let colorPixels = null, normalPixels = null;
+        if (typeof renderer.readRenderTargetPixelsAsync === "function") {
+          try {
+            const w = textureSize;
+            const colorBuf = await renderer.readRenderTargetPixelsAsync(colorRT, 0, 0, w, w);
+            const normalBuf = await renderer.readRenderTargetPixelsAsync(normalRT, 0, 0, w, w);
+            if (colorBuf) colorPixels = colorBuf instanceof Uint8Array ? colorBuf : new Uint8Array(colorBuf);
+            if (normalBuf) normalPixels = normalBuf instanceof Uint8Array ? normalBuf : new Uint8Array(normalBuf);
+            if (colorPixels) console.log("[Readback OK] color first 4 px:", colorPixels[0], colorPixels[1], colorPixels[2], colorPixels[3]);
+            else console.warn("[Readback] color buffer empty");
+          } catch (e) {
+            console.error("[Readback FAIL]", e);
+          }
+        }
+
+        return {
+          colorTexture: colorRT.texture,
+          normalTexture: normalRT.texture,
+          colorRT,
+          normalRT,
+          colorPixels,
+          normalPixels,
+          textureSize,
+          spritesPerSide: N,
+          cellPadding: pad,
+          boundingSphere: { center, radius: radiusTight },
+          boundingSphereBake: { radius },
+          displayRadius,
+          cellFrac: 1 / N,
+          padFrac: pad / textureSize,
+        };
+      }
+
+      // ─── TSL IMPOSTOR MATERIAL ─────────────────────────────────────────────────
+      function createImpostorMaterialTSL(atlas, opts = {}) {
+        const { colorTexture, normalTexture, boundingSphere, spritesPerSide: S, cellFrac, padFrac } = atlas;
+        const r = boundingSphere.radius;
+        const alphaTest = opts.alphaTest ?? 0.1;
+        const normalStrength = opts.normalStrength ?? 1.0;
+        const lightScale = opts.lightScale ?? 1.0;
+        const blendMode = opts.blendMode ?? 0;
+
+        const uSPS = uniform(S);
+        const uSphCenter = uniform(boundingSphere.center.clone());
+        const uSphRadius = uniform(r);
+        const uAlphaTest = uniform(alphaTest);
+        const uNormStr = uniform(normalStrength);
+        const uLightScale = uniform(lightScale);
+        const uBlendMode = uniform(blendMode);
+        const uPadFrac = uniform(padFrac);
+        const uCellFrac = uniform(cellFrac);
+        const uSunDir = uniform(new THREE.Vector3(0.5, 0.7, 0.3).normalize());
+        const uSunColor = uniform(new THREE.Vector3(2.0, 1.9, 1.7));
+        const uAmbColor = uniform(new THREE.Vector3(0.3, 0.35, 0.45));
+        const uShowNorm = uniform(0);
+        const uShowRaw = uniform(0);
+        const uFreezeAngle = uniform(0);
+        const uFrozenDir = uniform(new THREE.Vector3(0, 0, 1));
+
+        const vWeight = varying(vec4(0, 0, 0, 0), "vWeight");
+        const vS1 = varying(vec2(0, 0), "vS1");
+        const vS2 = varying(vec2(0, 0), "vS2");
+        const vS3 = varying(vec2(0, 0), "vS3");
+        const vUV1 = varying(vec2(0, 0), "vUV1");
+        const vUV2 = varying(vec2(0, 0), "vUV2");
+        const vUV3 = varying(vec2(0, 0), "vUV3");
+
+        const encode = Fn(([dir]) => {
+          const s = vec3(sign(dir.x), sign(dir.y), sign(dir.z));
+          const d = dot(dir, s);
+          const oct = vec3(div(dir.x, d), div(dir.y, d), div(dir.z, d));
+          return mul(vec2(add(1, add(oct.x, oct.z)), add(1, sub(oct.z, oct.x))), 0.5);
+        });
+        const decode = Fn(([gi, nm1]) => {
+          const uvVal = vec2(div(gi.x, nm1.x), div(gi.y, nm1.y));
+          const px = sub(uvVal.x, uvVal.y);
+          const pz = sub(add(uvVal.x, uvVal.y), 1);
+          const py = sub(sub(1, abs(px)), abs(pz));
+          return normalize(vec3(px, py, pz));
+        });
+        const planeTangent = Fn(([n]) => {
+          const up = mix(vec3(0, 1, 0), vec3(-1, 0, 0), max(float(0), sign(sub(n.y, float(0.999)))));
+          return normalize(cross(up, n));
+        });
+        const planeBitangent = Fn(([n, t]) => cross(n, t));
+        const planeUp = Fn(([n, t]) => {
+          const worldUp = vec3(0, 1, 0);
+          const proj = sub(worldUp, mul(n, dot(n, worldUp)));
+          const len = length(proj);
+          return select(len.lessThan(float(0.001)), t, normalize(proj));
+        });
+        const projectVert = Fn(([n]) => {
+          const t = planeTangent(n);
+          const up = planeUp(n, t);
+          return add(mul(positionLocal.x, t), mul(positionLocal.y, up));
+        });
+        const planeUV = Fn(([n, t, b, camL, vd]) => {
+          const denom = dot(vd, n);
+          const tt = mul(dot(negate(camL), n), div(1, denom));
+          const hit = add(camL, mul(vd, tt));
+          const upInPlane = planeUp(n, t);
+          return add(vec2(dot(t, hit), dot(upInPlane, hit)), 0.5);
+        });
+        const viewDirNode = Fn(() =>
+          select(uFreezeAngle.greaterThan(float(0.5)), uFrozenDir, normalize(sub(cameraPosition, uSphCenter)))
+        );
+        const positionNodeFn = Fn(() => {
+          const nm1 = vec2(sub(uSPS, float(1)), sub(uSPS, float(1)));
+          const vd = viewDirNode();
+          const camLocal = mul(sub(cameraPosition, uSphCenter), div(float(1), uSphRadius));
+          const camDir = normalize(camLocal);
+          const bv = projectVert(camDir);
+          const viewDir = normalize(sub(bv, camLocal));
+          const grid = mul(encode(camDir), nm1);
+          const gf = min(floor(grid), nm1);
+          const frac = fract(grid);
+          const w = vec4(min(sub(1, frac.x), sub(1, frac.y)), abs(sub(frac.x, frac.y)), min(frac.x, frac.y), max(float(0), sign(sub(frac.x, frac.y))));
+          vWeight.assign(w);
+          const s1 = gf;
+          const s2 = min(add(s1, mix(vec2(0, 1), vec2(1, 0), w.w)), nm1);
+          const s3 = min(add(s1, vec2(1, 1)), nm1);
+          vS1.assign(s1);
+          vS2.assign(s2);
+          vS3.assign(s3);
+          const pn1 = decode(s1, nm1), pt1 = planeTangent(pn1), pb1 = planeBitangent(pn1, pt1);
+          const pn2 = decode(s2, nm1), pt2 = planeTangent(pn2), pb2 = planeBitangent(pn2, pt2);
+          const pn3 = decode(s3, nm1), pt3 = planeTangent(pn3), pb3 = planeBitangent(pn3, pt3);
+          vUV1.assign(planeUV(pn1, pt1, pb1, camLocal, viewDir));
+          vUV2.assign(planeUV(pn2, pt2, pb2, camLocal, viewDir));
+          vUV3.assign(planeUV(pn3, pt3, pb3, camLocal, viewDir));
+          return bv;
+        });
+        const cellToAtlas = Fn(([cell, luv]) => {
+          const uvc = clamp(luv, 0, 1);
+          return add(mul(cell, uCellFrac), add(uPadFrac, mul(uvc, sub(uCellFrac, mul(float(2), uPadFrac)))));
+        });
+        const colorNodeFn = Fn(() => {
+          const uv1 = cellToAtlas(vS1, uv());
+          const uv2 = cellToAtlas(vS2, uv());
+          const uv3 = cellToAtlas(vS3, uv());
+          const c1 = texture(colorTexture, uv1);
+          const c2 = texture(colorTexture, uv2);
+          const c3 = texture(colorTexture, uv3);
+          const n1 = texture(normalTexture, uv1).xyz;
+          const n2 = texture(normalTexture, uv2).xyz;
+          const n3 = texture(normalTexture, uv3).xyz;
+          const wx = vWeight.x, wy = vWeight.y, wz = vWeight.z;
+          const dom1 = wx.greaterThanEqual(wy).and(wx.greaterThanEqual(wz));
+          const dom2 = wy.greaterThanEqual(wz);
+          const fA_dom = select(dom1, c1.a, select(dom2, c2.a, c3.a));
+          const fRgb_dom = select(dom1, c1.rgb, select(dom2, c2.rgb, c3.rgb));
+          const fN_dom = select(dom1, n1, select(dom2, n2, n3));
+          const ws = add(add(wx, wy), wz);
+          const fA_tri = div(add(add(mul(c1.a, wx), mul(c2.a, wy)), mul(c3.a, wz)), ws);
+          const fRgb_tri = div(add(add(mul(c1.rgb, wx), mul(c2.rgb, wy)), mul(c3.rgb, wz)), ws);
+          const fN_tri = div(add(add(mul(n1, wx), mul(n2, wy)), mul(n3, wz)), ws);
+          const aw1 = mul(wx, c1.a), aw2 = mul(wy, c2.a), aw3 = mul(wz, c3.a);
+          const awS = add(add(aw1, aw2), aw3);
+          const fA_smooth = div(awS, add(add(wx, wy), wz));
+          const fRgb_smooth = div(add(add(mul(c1.rgb, aw1), mul(c2.rgb, aw2)), mul(c3.rgb, aw3)), awS);
+          const fN_smooth = div(add(add(mul(n1, aw1), mul(n2, aw2), mul(n3, aw3)), awS), awS);
+          const fA = select(uBlendMode.equal(float(0)), fA_dom, select(uBlendMode.equal(float(1)), fA_tri, fA_smooth));
+          const fRgb = select(uBlendMode.equal(float(0)), fRgb_dom, select(uBlendMode.equal(float(1)), fRgb_tri, fRgb_smooth));
+          const fN = select(uBlendMode.equal(float(0)), fN_dom, select(uBlendMode.equal(float(1)), fN_tri, fN_smooth));
+          const rawOut = vec4(fRgb, fA);
+          const worldNorm = normalize(sub(mul(fN, 2), 1));
+          const normOut = vec4(mul(add(worldNorm, 1), 0.5), float(1));
+          const litNorm = normalize(mix(vec3(0, 1, 0), worldNorm, uNormStr));
+          const NdL = max(dot(litNorm, uSunDir), float(0));
+          const hemiT = add(mul(litNorm.y, 0.5), 0.5);
+          const hemiAmb = mix(mul(uAmbColor, 0.5), uAmbColor, hemiT);
+          const light = mul(add(hemiAmb, mul(uSunColor, NdL)), uLightScale);
+          const lit = vec4(mul(fRgb, light), fA);
+          return select(uShowRaw.greaterThan(float(0.5)), rawOut, select(uShowNorm.greaterThan(float(0.5)), normOut, lit));
+        });
+
+        const mat = new THREE.MeshBasicNodeMaterial({ side: THREE.FrontSide });
+        mat.positionNode = positionNodeFn();
+        mat.colorNode = colorNodeFn();
+        mat.alphaTest = alphaTest;
+        mat.depthWrite = true;
+        mat.transparent = false;
+        return {
+          material: mat,
+          uniforms: { uSphCenter, uSunDir, uSunColor, uAmbColor, uLightScale, uNormStr, uAlphaTest, uBlendMode, uShowNorm, uShowRaw, uFreezeAngle, uFrozenDir },
+        };
+      }
+
+      // ─── ATLAS DISPLAY: main view = two full quads; preview = N×N grid at bottom right ─
+      function createCellMaterial(tex, cellCol, cellRow, cellFrac, padFrac) {
+        const uCellCol = uniform(cellCol);
+        const uCellRow = uniform(cellRow);
+        const uCellFrac = uniform(cellFrac);
+        const uPadFrac = uniform(padFrac);
+        const innerFrac = sub(uCellFrac, mul(2, uPadFrac));
+        const uvAtlas = vec2(
+          add(add(mul(uCellCol, uCellFrac), uPadFrac), mul(uv().x, innerFrac)),
+          add(add(mul(uCellRow, uCellFrac), uPadFrac), mul(uv().y, innerFrac)),
+        );
+        return new THREE.MeshBasicNodeMaterial({
+          side: THREE.DoubleSide,
+          depthTest: false,
+          colorNode: texture(tex, uvAtlas).rgb,
+        });
+      }
+
+      function buildAtlasDisplay(atlas) {
+        if (!atlas?.colorTexture || !atlas?.normalTexture) return;
+        const N = atlas.spritesPerSide;
+        const cellFrac = atlas.cellFrac;
+        const padFrac = atlas.padFrac ?? (atlas.cellPadding / atlas.textureSize);
+
+        if (atlasDisplayScene) {
+          while (atlasDisplayScene.children.length) {
+            const c = atlasDisplayScene.children[0];
+            atlasDisplayScene.remove(c);
+            c.geometry?.dispose();
+            c.material?.dispose();
+          }
+        } else {
+          atlasDisplayScene = new THREE.Scene();
+          atlasDisplayCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
+        }
+        const uvNode = uv();
+        const colorMat = new THREE.MeshBasicNodeMaterial({
+          side: THREE.DoubleSide,
+          depthTest: false,
+          colorNode: texture(atlas.colorTexture, uvNode).rgb,
+        });
+        const normalMat = new THREE.MeshBasicNodeMaterial({
+          side: THREE.DoubleSide,
+          depthTest: false,
+          colorNode: texture(atlas.normalTexture, uvNode).rgb,
+        });
+        const quadW = 1, quadH = 2;
+        const geo = new THREE.PlaneGeometry(quadW, quadH);
+        const quadColor = new THREE.Mesh(geo, colorMat);
+        quadColor.position.set(-0.5, 0, 0);
+        const quadNormal = new THREE.Mesh(geo.clone(), normalMat);
+        quadNormal.position.set(0.5, 0, 0);
+        atlasDisplayScene.add(quadColor);
+        atlasDisplayScene.add(quadNormal);
+
+        if (atlasPreviewScene) {
+          while (atlasPreviewScene.children.length) {
+            const c = atlasPreviewScene.children[0];
+            atlasPreviewScene.remove(c);
+            c.geometry?.dispose();
+            c.material?.dispose();
+          }
+        } else {
+          atlasPreviewScene = new THREE.Scene();
+          atlasPreviewCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
+        }
+        const gap = 0.06;
+        const tileW = (1 / N) * (1 - gap);
+        const tileH = (2 / N) * (1 - gap);
+        for (let row = 0; row < N; row++) {
+          for (let col = 0; col < N; col++) {
+            const cxL = -1 + (col + 0.5) / N;
+            const cxR = (col + 0.5) / N;
+            const cy = 1 - (row + 0.5) * (2 / N);
+            const colorCellMat = createCellMaterial(atlas.colorTexture, col, row, cellFrac, padFrac);
+            const normalCellMat = createCellMaterial(atlas.normalTexture, col, row, cellFrac, padFrac);
+            const cellGeo = new THREE.PlaneGeometry(tileW, tileH);
+            const meshColor = new THREE.Mesh(cellGeo, colorCellMat);
+            meshColor.position.set(cxL, cy, 0);
+            const meshNormal = new THREE.Mesh(cellGeo.clone(), normalCellMat);
+            meshNormal.position.set(cxR, cy, 0);
+            atlasPreviewScene.add(meshColor);
+            atlasPreviewScene.add(meshNormal);
+          }
+        }
+      }
+
+      // ─── CREATE SHAPE (debug: torusknot only) ───────────────────────────────────
+      function createShape(type) {
+        if (type !== "__torusknot__") return new THREE.Group();
+        const g = new THREE.Group();
+        const geo = new THREE.TorusKnotGeometry(1, 0.35, 128, 20);
+        geo.computeBoundingBox();
+        const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: 0x22cc55, roughness: 0.45, metalness: 0.05 }));
+        m.position.y = -geo.boundingBox.min.y;
+        g.add(m);
+        return g;
+      }
+
+      function disposeObj(o) {
+        if (!o) return;
+        o.traverse((n) => {
+          if (n.geometry) n.geometry.dispose();
+          if (n.material) {
+            (Array.isArray(n.material) ? n.material : [n.material]).forEach((m) => { if (m?.dispose) m.dispose(); });
+          }
+        });
+      }
+
+      // ─── Bake debug: show camera direction for selected cell (matches v4 hemiOcta) ─
+      function updateBakeDebugDir() {
+        const el = document.getElementById("dbgDir");
+        if (!el) return;
+        const N = STATE.spritesPerSide ?? 8;
+        const Nm1 = Math.max(1, N - 1);
+        const r = Math.max(0, Math.min(N - 1, parseInt(document.getElementById("debugRow")?.value, 10) || 0));
+        const c = Math.max(0, Math.min(N - 1, parseInt(document.getElementById("debugCol")?.value, 10) || 0));
+        const dir = hemiOctaGridToDir(c / Nm1, r / Nm1);
+        el.textContent = `Dir(${r},${c}): (${dir.x.toFixed(2)}, ${dir.y.toFixed(2)}, ${dir.z.toFixed(2)})`;
+        const dr = document.getElementById("debugRow");
+        const dc = document.getElementById("debugCol");
+        if (dr) dr.max = N - 1;
+        if (dc) dc.max = N - 1;
+      }
+
+      // ─── LOAD MODEL ────────────────────────────────────────────────────────────
+      async function loadModel(path) {
+        const ld = document.getElementById("ld");
+        const lst = document.getElementById("lst");
+        ld.classList.remove("hidden");
+        lst.textContent = "Loading…";
+
+        if (impostorMesh) {
+          scene.remove(impostorMesh);
+          if (impostorMesh.material?.dispose) impostorMesh.material.dispose();
+          impostorMesh.geometry?.dispose();
+          impostorMesh = null;
+        }
+        const oldAtlas = STATE.atlas;
+        STATE.atlas = null;
+
+        let src;
+        if (path.startsWith("__")) {
+          src = createShape(path);
+        } else {
+          try {
+            lst.textContent = "Fetching GLB…";
+            const gltf = await new Promise((res, rej) => gltfLoader.load(path, res, undefined, (err) => rej(err?.message || "Load failed")));
+            src = gltf.scene;
+          } catch (e) {
+            lst.textContent = "Error: " + String(e).slice(0, 80);
+            ld.classList.add("hidden");
+            return;
+          }
+        }
+
+        src.updateMatrixWorld(true);
+        const rb = new THREE.Box3().setFromObject(src);
+        const rh = Math.max(rb.getSize(new THREE.Vector3()).y, 0.001);
+        src.scale.multiplyScalar(6 / rh);
+        src.updateMatrixWorld(true);
+        const sb = new THREE.Box3().setFromObject(src);
+        src.position.y -= sb.min.y;
+        src.updateMatrixWorld(true);
+
+        lst.textContent = "Baking (WebGPU)…";
+        await new Promise((r) => setTimeout(r, 30));
+        try {
+          const singleOnly = document.getElementById("singleCellOnly").checked;
+          const debugRow = parseInt(document.getElementById("debugRow").value, 10) || 0;
+          const debugCol = parseInt(document.getElementById("debugCol").value, 10) || 0;
+          STATE.atlas = await bakeAtlasWebGPU(renderer, src, {
+            textureSize: STATE.textureSize,
+            spritesPerSide: STATE.spritesPerSide,
+            sphereMargin: 1.08,
+            alphaTest: 0.02,
+            cellPadding: 2,
+            debugGrid: document.getElementById("debugGrid").checked,
+            singleCell: singleOnly ? { row: Math.max(0, Math.min(STATE.spritesPerSide - 1, debugRow)), col: Math.max(0, Math.min(STATE.spritesPerSide - 1, debugCol)) } : null,
+          });
+          updateBakeDebugDir();
+        } catch (err) {
+          console.error(err);
+          lst.textContent = "Bake failed: " + (err?.message || err);
+          ld.classList.add("hidden");
+          return;
+        }
+
+        lst.textContent = "Building atlas view…";
+        await new Promise((r) => requestAnimationFrame(r));
+        buildAtlasDisplay(STATE.atlas);
+        if (atlasDisplayScene && atlasDisplayCamera) {
+          await renderer.compileAsync(atlasDisplayScene, atlasDisplayCamera);
+        }
+        if (atlasPreviewScene && atlasPreviewCamera) {
+          await renderer.compileAsync(atlasPreviewScene, atlasPreviewCamera);
+        }
+        ld.classList.add("hidden");
+        requestAnimationFrame(() => {
+          if (oldAtlas?.colorRT) oldAtlas.colorRT.dispose();
+          if (oldAtlas?.normalRT) oldAtlas.normalRT.dispose();
+        });
+      }
+
+      // ─── INIT ──────────────────────────────────────────────────────────────────
+      async function init() {
+        renderer = new THREE.WebGPURenderer({ antialias: true });
+        await renderer.init();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1;
+        renderer.outputColorSpace = THREE.SRGBColorSpace;
+        document.getElementById("app").appendChild(renderer.domElement);
+
+        const draco = new DRACOLoader();
+        draco.setDecoderPath("https://www.gstatic.com/draco/versioned/decoders/1.5.6/");
+        gltfLoader = new GLTFLoader();
+        gltfLoader.setDRACOLoader(draco);
+
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0d0d14);
+        scene.add(new THREE.DirectionalLight(0xfff0d0, 2));
+        scene.add(new THREE.AmbientLight(0x8090b0, 0.6));
+        scene.add(new THREE.HemisphereLight(0x8090b0, 0x3a4030, 0.4));
+
+        camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 800);
+        camera.position.set(0, 5, 20);
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.08;
+        controls.target.set(0, 3, 0);
+        controls.update();
+
+        await renderer.compileAsync(scene, camera);
+
+        document.getElementById("btnLoad").addEventListener("click", () => {
+          STATE.modelUrl = document.getElementById("url").value.trim() || "__torusknot__";
+          STATE.textureSize = Math.max(256, Math.min(4096, parseInt(document.getElementById("texSize").value, 10) || 1024));
+          STATE.spritesPerSide = Math.max(4, Math.min(16, parseInt(document.getElementById("gridSize").value, 10) || 8));
+          loadModel(STATE.modelUrl).catch(console.error);
+        });
+        ["debugRow", "debugCol", "gridSize"].forEach((id) => {
+          document.getElementById(id)?.addEventListener("change", updateBakeDebugDir);
+          document.getElementById(id)?.addEventListener("input", updateBakeDebugDir);
+        });
+        updateBakeDebugDir();
+
+        function render() {
+          renderer.setRenderTarget(null);
+          renderer.setClearColor(0x0d0d14, 1);
+          renderer.clear(true, true, true);
+          if (STATE.atlas && atlasDisplayScene && atlasDisplayCamera) {
+            renderer.render(atlasDisplayScene, atlasDisplayCamera);
+            if (atlasPreviewScene && atlasPreviewCamera) {
+              const dpr = renderer.getPixelRatio();
+              const pw = 320;
+              const ph = 180;
+              const margin = 12;
+              const x = Math.round((window.innerWidth - pw - margin) * dpr);
+              const y = Math.round(margin * dpr);
+              const w = Math.round(pw * dpr);
+              const h = Math.round(ph * dpr);
+              renderer.setScissorTest(true);
+              renderer.setViewport(x, y, w, h);
+              renderer.setScissor(x, y, w, h);
+              renderer.setClearColor(0x0d0d14, 0.95);
+              renderer.clear(true, true, false);
+              renderer.render(atlasPreviewScene, atlasPreviewCamera);
+              renderer.setScissorTest(false);
+              renderer.setViewport(0, 0, window.innerWidth * dpr, window.innerHeight * dpr);
+            }
+          } else {
+            renderer.render(scene, camera);
+          }
+        }
+        renderer.setAnimationLoop(render);
+        window.addEventListener("resize", () => {
+          camera.aspect = window.innerWidth / window.innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        await loadModel(STATE.modelUrl);
+      }
+
+      init().catch((e) => {
+        console.error("Init failed:", e);
+        document.getElementById("lst").textContent = String(e).slice(0, 120);
+        document.getElementById("ld").classList.remove("hidden");
+      });
+    </script>
+  </body>
+</html>

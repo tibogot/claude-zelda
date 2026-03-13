@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Animated Octahedral Impostor — Torus Knot (WebGPU / TSL)</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { overflow: hidden; background: #0a0a0f; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #info {
+      position: fixed;
+      bottom: 12px;
+      left: 12px;
+      z-index: 10;
+      font: 12px/1.5 "SF Mono", "Fira Code", monospace;
+      color: #8a9aaa;
+      background: rgba(0,0,0,0.6);
+      padding: 8px 12px;
+      border-radius: 6px;
+      pointer-events: none;
+    }
+    #info strong { color: #c0d0e0; }
+    #bake { position: fixed; top: 12px; left: 12px; color: #8a9aaa; font: 12px monospace; z-index: 10; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+        "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+        "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="bake">Baking octahedral atlas…</div>
+  <div id="info" style="display:none;">
+    <strong>Octahedral impostor</strong> — baked torus knot. One quad, view-dependent sprites (WebGPU/TSL).<br />
+    Drag to orbit around the impostor.
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three/webgpu';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { AnimatedOctahedralImpostor } from './animated-octahedral.js';
+
+    const GRID = 16;
+    const TILE = 32;
+    const W = GRID * TILE;
+    const H = GRID * TILE;
+    const LAYERS = 1;
+
+    // Octahedral inverse: (u,v) in [0,1]² -> view direction (matches shader direction->grid)
+    function octahedralInverse(u, v) {
+      const sx = 2 * u - 1;
+      const sz = 2 * v - 1;
+      let y = 1 - Math.abs(sx) - Math.abs(sz);
+      if (y >= 0) {
+        return new THREE.Vector3(sx, y, sz).normalize();
+      }
+      const ax = (1 - Math.abs(sz)) * (sx >= 0 ? 1 : -1);
+      const az = (1 - Math.abs(sx)) * (sz >= 0 ? 1 : -1);
+      const ay = 1 - Math.abs(sx) - Math.abs(sz);
+      return new THREE.Vector3(ax, ay, az).normalize();
+    }
+
+    function bakeTorusKnotAtlas() {
+      return new Promise((resolve, reject) => {
+        import('https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.module.js')
+          .then((THREE_WEBGL) => {
+            const THREE_G = THREE_WEBGL.default || THREE_WEBGL;
+            const bakeCanvas = document.createElement('canvas');
+            bakeCanvas.width = TILE;
+            bakeCanvas.height = TILE;
+            const glRenderer = new THREE_G.WebGLRenderer({
+              canvas: bakeCanvas,
+              antialias: true,
+              alpha: true,
+              preserveDrawingBuffer: true
+            });
+            glRenderer.setSize(TILE, TILE);
+            glRenderer.setClearColor(0x000000, 0);
+
+            const bakeScene = new THREE_G.Scene();
+            const geo = new THREE_G.TorusKnotGeometry(0.4, 0.15, 128, 32, 2, 3);
+            const mat = new THREE_G.MeshBasicMaterial({
+              color: 0x88ccff,
+              transparent: false,
+              side: THREE_G.DoubleSide
+            });
+            const mesh = new THREE_G.Mesh(geo, mat);
+            bakeScene.add(mesh);
+
+            const cam = new THREE_G.PerspectiveCamera(40, 1, 0.1, 100);
+            const dist = 2.2;
+
+            const rt = new THREE_G.WebGLRenderTarget(TILE, TILE, {
+              minFilter: THREE_G.LinearFilter,
+              magFilter: THREE_G.LinearFilter,
+              format: THREE_G.RGBAFormat,
+              type: THREE_G.UnsignedByteType
+            });
+
+            const data = new Uint8Array(W * H * LAYERS * 4);
+            const pixelBuffer = new Uint8Array(TILE * TILE * 4);
+
+            for (let gy = 0; gy < GRID; gy++) {
+              for (let gx = 0; gx < GRID; gx++) {
+                const u = (gx + 0.5) / GRID;
+                const v = (gy + 0.5) / GRID;
+                const dir = octahedralInverse(u, v);
+                cam.position.copy(dir).multiplyScalar(dist);
+                cam.lookAt(0, 0, 0);
+                cam.updateMatrixWorld(true);
+
+                glRenderer.setRenderTarget(rt);
+                glRenderer.clear();
+                glRenderer.render(bakeScene, cam);
+                glRenderer.setRenderTarget(null);
+                glRenderer.readRenderTargetPixels(rt, 0, 0, TILE, TILE, pixelBuffer);
+
+                for (let py = 0; py < TILE; py++) {
+                  for (let px = 0; px < TILE; px++) {
+                    const srcRow = TILE - 1 - py;
+                    const src = (srcRow * TILE + px) * 4;
+                    const dst = ((0 * H + gy * TILE + py) * W + gx * TILE + px) * 4;
+                    data[dst] = pixelBuffer[src];
+                    data[dst + 1] = pixelBuffer[src + 1];
+                    data[dst + 2] = pixelBuffer[src + 2];
+                    data[dst + 3] = pixelBuffer[src + 3];
+                  }
+                }
+              }
+            }
+
+            rt.dispose();
+            glRenderer.dispose();
+            const tex = new THREE.DataArrayTexture(data, W, H, LAYERS);
+            tex.needsUpdate = true;
+            tex.minFilter = THREE.LinearFilter;
+            tex.magFilter = THREE.LinearFilter;
+            resolve(tex);
+          })
+          .catch(reject);
+      });
+    }
+
+    async function main() {
+      const canvas = document.createElement('canvas');
+      document.body.appendChild(canvas);
+
+      const renderer = new THREE.WebGPURenderer({ antialias: true, canvas });
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0a0a12);
+
+      const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+      camera.position.set(0, 1.2, 2.5);
+      camera.lookAt(0, 0, 0);
+
+      const controls = new OrbitControls(camera, canvas);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.05;
+      controls.target.set(0, 0, 0);
+
+      const ambient = new THREE.AmbientLight(0x404060);
+      scene.add(ambient);
+      const dirLight = new THREE.DirectionalLight(0xffffff, 0.9);
+      dirLight.position.set(2, 3, 2);
+      scene.add(dirLight);
+
+      const arrayTexture = await bakeTorusKnotAtlas();
+      document.getElementById('bake').textContent = '';
+
+      const impostor = new AnimatedOctahedralImpostor(arrayTexture, {
+        spritesPerSide: GRID,
+        frameCount: LAYERS,
+        scale: 1.2,
+        alphaClamp: 0.02,
+        transparent: true
+      });
+      impostor.position.set(0, 0, 0);
+      scene.add(impostor);
+
+      document.getElementById('info').style.display = 'block';
+
+      await renderer.init();
+      renderer.setAnimationLoop(() => {
+        impostor.setFrame(0);
+        controls.update();
+        renderer.render(scene, camera);
+      });
+
+      window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    }
+
+    main().catch(console.error);
+  </script>
+</body>
+</html>
