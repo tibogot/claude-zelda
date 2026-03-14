@@ -49,7 +49,10 @@
         display: flex;
         align-items: center;
         gap: 8px;
-        font: 11px "SF Mono", "Fira Code", monospace;
+        font:
+          11px "SF Mono",
+          "Fira Code",
+          monospace;
         color: #b0d890;
         background: rgba(0, 0, 0, 0.55);
         padding: 6px 10px;
@@ -87,7 +90,9 @@
         font: inherit;
       }
       #quality-bar input[type="file"] {
-        font: 10px "SF Mono", monospace;
+        font:
+          10px "SF Mono",
+          monospace;
         max-width: 100px;
       }
       #quality-bar .row {
@@ -128,8 +133,18 @@
           <option value="models/rock__game_asset.glb">rock</option>
           <option value="__torusknot__">TorusKnot (debug)</option>
         </select>
-        <input type="text" id="model-path-input" placeholder="or path: models/foo.glb" title="Overrides dropdown when non-empty" />
-        <input type="file" id="model-file-input" accept=".glb,.gltf" title="Load GLB/GLTF from disk" />
+        <input
+          type="text"
+          id="model-path-input"
+          placeholder="or path: models/foo.glb"
+          title="Overrides dropdown when non-empty"
+        />
+        <input
+          type="file"
+          id="model-file-input"
+          accept=".glb,.gltf"
+          title="Load GLB/GLTF from disk"
+        />
       </div>
       <div class="row">
         <label for="quality-select">Quality</label>
@@ -145,19 +160,21 @@
       </div>
     </div>
 
-  <script type="module">
-    import * as THREE from "three";
-    import { pass } from "three/tsl";
-    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-    import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
-    import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
-    import GUI from "three/addons/libs/lil-gui.module.min.js";
-    import { createOctahedralImpostorForest } from "./octahedralImpostor2.js";
+    <script type="module">
+      import * as THREE from "three";
+      import { pass } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+      import GUI from "three/addons/libs/lil-gui.module.min.js";
+      import { createOctahedralImpostorForest } from "./octahedralImpostor2.js";
 
-    const dracoLoader = new DRACOLoader();
-    dracoLoader.setDecoderPath("https://www.gstatic.com/draco/versioned/decoders/1.5.6/");
-    const gltfLoader = new GLTFLoader();
-    gltfLoader.setDRACOLoader(dracoLoader);
+      const dracoLoader = new DRACOLoader();
+      dracoLoader.setDecoderPath(
+        "https://www.gstatic.com/draco/versioned/decoders/1.5.6/",
+      );
+      const gltfLoader = new GLTFLoader();
+      gltfLoader.setDRACOLoader(dracoLoader);
 
       const renderer = new THREE.WebGPURenderer({
         antialias: true,
@@ -234,6 +251,7 @@
         lod0Visible: true,
         lod1Visible: true,
         lod2Visible: true,
+        enableAO: true,
       };
 
       function applySunToScene() {
@@ -295,6 +313,7 @@
         const b = typeof rc === "number" ? (rc & 0xff) / 255 : rc.b;
         forest.setRimColor(r, g, b);
         forest.setDiffuseWrap(PARAMS.diffuseWrap);
+        forest.setEnableAO(PARAMS.enableAO);
       }
 
       applySunToScene();
@@ -305,7 +324,9 @@
       const frustum = new THREE.Frustum();
 
       function getQuality() {
-        const [ts, sps] = document.getElementById("quality-select").value.split("_");
+        const [ts, sps] = document
+          .getElementById("quality-select")
+          .value.split("_");
         return { textureSize: +ts, spritesPerSide: +sps };
       }
 
@@ -321,7 +342,7 @@
           const url = URL.createObjectURL(fileInput.files[0]);
           try {
             const gltf = await new Promise((res, rej) =>
-              gltfLoader.load(url, res, undefined, rej)
+              gltfLoader.load(url, res, undefined, rej),
             );
             gltf.scene.updateMatrixWorld(true);
             return { modelScene: gltf.scene };
@@ -377,9 +398,14 @@
               normalStrength: PARAMS.normalStrength,
               rimStrength: PARAMS.rimStrength,
               rimPower: PARAMS.rimPower,
-              rimColor: [PARAMS.rimColor.r, PARAMS.rimColor.g, PARAMS.rimColor.b],
+              rimColor: [
+                PARAMS.rimColor.r,
+                PARAMS.rimColor.g,
+                PARAMS.rimColor.b,
+              ],
               diffuseWrap: PARAMS.diffuseWrap,
               receiveShadow: true,
+              enableAO: PARAMS.enableAO,
             },
           });
           scene.add(forest.group);
@@ -483,21 +509,34 @@
       fLod
         .add(PARAMS, "lod0Visible")
         .name("LOD0 (real mesh)")
-        .onChange((v) => { if (forest) forest.setLodVisible(0, v); });
+        .onChange((v) => {
+          if (forest) forest.setLodVisible(0, v);
+        });
       fLod
         .add(PARAMS, "lod1Visible")
         .name("LOD1 (impostor)")
-        .onChange((v) => { if (forest) forest.setLodVisible(1, v); });
+        .onChange((v) => {
+          if (forest) forest.setLodVisible(1, v);
+        });
       fLod
         .add(PARAMS, "lod2Visible")
         .name("LOD2 (mega impostor)")
-        .onChange((v) => { if (forest) forest.setLodVisible(2, v); });
+        .onChange((v) => {
+          if (forest) forest.setLodVisible(2, v);
+        });
       fLod.open();
+
+      const fAO = gui.addFolder("Baked AO (impostor)");
+      fAO
+        .add(PARAMS, "enableAO")
+        .name("Enable AO")
+        .onChange(syncForestLighting);
 
       document.getElementById("rebake-btn").addEventListener("click", () => {
         loadForest().catch((e) => {
           console.error(e);
-          document.getElementById("status").textContent = "Error: " + (e.message || e);
+          document.getElementById("status").textContent =
+            "Error: " + (e.message || e);
         });
       });
     </script>
