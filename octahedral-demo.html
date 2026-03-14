@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Octahedral Impostor — Side-by-Side Demo</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #0a0a14;
+        font-family: "SF Mono", "Fira Code", monospace;
+      }
+      canvas {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        display: block;
+      }
+
+      #status {
+        position: fixed;
+        top: 16px;
+        left: 50%;
+        transform: translateX(-50%);
+        color: #7ab0cc;
+        font-size: 13px;
+        background: rgba(0, 0, 0, 0.7);
+        padding: 6px 18px;
+        border-radius: 20px;
+        z-index: 10;
+      }
+
+      .label {
+        position: fixed;
+        pointer-events: none;
+        transform: translate(-50%, 0);
+        text-align: center;
+        z-index: 10;
+      }
+      .label .title {
+        color: #e0eeff;
+        font-size: 13px;
+        font-weight: bold;
+        background: rgba(0, 0, 0, 0.75);
+        padding: 4px 12px;
+        border-radius: 4px;
+      }
+      .label .sub {
+        color: #7ab0cc;
+        font-size: 11px;
+        margin-top: 3px;
+      }
+
+      #info {
+        position: fixed;
+        bottom: 14px;
+        left: 14px;
+        z-index: 10;
+        color: #7ab0cc;
+        font-size: 11px;
+        line-height: 1.7;
+        background: rgba(0, 0, 0, 0.65);
+        padding: 10px 14px;
+        border-radius: 6px;
+      }
+      #info strong {
+        color: #c8ddf0;
+      }
+      #info .highlight {
+        color: #88ffcc;
+      }
+
+      #controls {
+        position: fixed;
+        top: 50px;
+        right: 14px;
+        z-index: 10;
+        background: rgba(0, 0, 0, 0.75);
+        padding: 12px 14px;
+        border-radius: 8px;
+        color: #e0eeff;
+        font-size: 12px;
+        min-width: 180px;
+      }
+      #controls h3 {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #7ab0cc;
+        margin-bottom: 10px;
+        padding-bottom: 4px;
+        border-bottom: 1px solid rgba(255,255,255,0.1);
+      }
+      #controls label {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        cursor: pointer;
+        margin-bottom: 6px;
+      }
+      #controls input[type="checkbox"] {
+        width: 14px;
+        height: 14px;
+        accent-color: #55aaff;
+      }
+      #controls .row {
+        margin-top: 8px;
+        margin-bottom: 4px;
+      }
+      #controls .row label {
+        margin-bottom: 2px;
+      }
+      #controls input[type="range"] {
+        width: 100%;
+        margin-top: 4px;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="status">Baking octahedral atlas…</div>
+
+    <div class="label" id="lbl-real" style="display: none">
+      <div class="title">Real 3D Mesh</div>
+      <div class="sub">Cube · 12 triangles</div>
+    </div>
+    <div class="label" id="lbl-impostor" style="display: none">
+      <div class="title">Octahedral Impostor</div>
+      <div class="sub">One flat quad · 2 triangles</div>
+    </div>
+
+    <div id="controls" style="display: none">
+      <h3>Impostor rotation</h3>
+      <label><input type="checkbox" id="ctrl-flipX" /> Flip atlas X</label>
+      <label><input type="checkbox" id="ctrl-flipY" /> Flip atlas Y</label>
+      <label><input type="checkbox" id="ctrl-swapAxes" /> Swap atlas axes</label>
+      <label><input type="checkbox" id="ctrl-reverseLookup" /> Reverse lookup dir</label>
+      <div class="row">
+        <label>Scale</label>
+        <input type="range" id="ctrl-scale" min="0.8" max="2.5" step="0.05" value="1.35" />
+        <span id="ctrl-scale-val">1.35</span>
+      </div>
+    </div>
+
+    <div id="info" style="display: none">
+      <strong>How it works</strong><br />
+      The impostor is a single <span class="highlight">PlaneGeometry</span> (2
+      triangles).<br />
+      The shader maps the camera direction onto an<br />
+      <span class="highlight">octahedral grid</span> to pick the matching
+      pre-baked sprite.<br />
+      The quad always billboards to face the camera.<br /><br />
+      <strong>Drag</strong> to orbit — both sides look identical.
+    </div>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { AnimatedOctahedralImpostor } from "./animated-octahedral.js";
+
+      // ─── Atlas bake settings ─────────────────────────────────────────────────
+      const GRID = 16; // 16×16 = 256 octahedral viewpoints
+      const TILE = 64; // each sprite is 64×64 px
+      const W = GRID * TILE; // atlas width  = 1024
+      const H = GRID * TILE; // atlas height = 1024
+
+      // ─── Octahedral inverse: (u,v) in [0,1]² → view direction ───────────────
+      // This is the CPU-side inverse of the shader's forward mapping.
+      // Sphere of directions is projected onto a unit octahedron,
+      // then unfolded into a square atlas.
+      function octahedralToDir(u, v) {
+        const sx = 2 * u - 1;
+        const sz = 2 * v - 1;
+        const y = 1.0 - Math.abs(sx) - Math.abs(sz);
+        let x = sx,
+          z = sz;
+        if (y < 0) {
+          // Bottom hemisphere: unfold the octahedron corners
+          x = (1.0 - Math.abs(sz)) * (sx >= 0 ? 1 : -1);
+          z = (1.0 - Math.abs(sx)) * (sz >= 0 ? 1 : -1);
+        }
+        return new THREE.Vector3(x, y, z).normalize();
+      }
+
+      // ─── Bake atlas using an offscreen WebGL renderer ────────────────────────
+      // We can't read pixels back from WebGPU, so we spin up a lightweight
+      // WebGL renderer just for baking, then hand the resulting DataArrayTexture
+      // to the WebGPU scene.
+      async function bakeAtlas() {
+        const bakeCanvas = document.createElement("canvas");
+        bakeCanvas.width = TILE;
+        bakeCanvas.height = TILE;
+
+        // Import the classic WebGL build for readback support
+        const mod =
+          await import("https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.module.js");
+        const T = mod.default || mod;
+
+        const gl = new T.WebGLRenderer({
+          canvas: bakeCanvas,
+          antialias: true,
+          alpha: true,
+          preserveDrawingBuffer: true,
+        });
+        gl.setSize(TILE, TILE);
+        gl.setClearColor(0, 0);
+
+        // Build the object we want to bake (cube — easy to see which face matches)
+        const bakeScene = new T.Scene();
+        const geo = new T.BoxGeometry(0.9, 0.9, 0.9);
+        const mat = new T.MeshPhongMaterial({
+          color: 0x55aaff,
+          specular: 0x88ccff,
+          shininess: 80,
+          side: T.DoubleSide,
+        });
+        bakeScene.add(new T.Mesh(geo, mat));
+
+        // Lighting for the bake — same setup as the live scene
+        const key = new T.DirectionalLight(0xffffff, 1.5);
+        key.position.set(2, 3, 2);
+        bakeScene.add(key);
+        const fill = new T.DirectionalLight(0x3344ff, 0.5);
+        fill.position.set(-2, -1, -2);
+        bakeScene.add(fill);
+        bakeScene.add(new T.AmbientLight(0x112233, 2));
+
+        const cam = new T.PerspectiveCamera(50, 1, 0.1, 100);
+        const dist = 1.8;
+
+        const rt = new T.WebGLRenderTarget(TILE, TILE, {
+          minFilter: T.LinearFilter,
+          magFilter: T.LinearFilter,
+        });
+        const buf = new Uint8Array(TILE * TILE * 4);
+        const data = new Uint8Array(W * H * 1 * 4); // 1 animation frame
+
+        // Render the object from every octahedral viewpoint and copy into the atlas
+        for (let gy = 0; gy < GRID; gy++) {
+          for (let gx = 0; gx < GRID; gx++) {
+            const dir = octahedralToDir((gx + 0.5) / GRID, (gy + 0.5) / GRID);
+            cam.position.copy(dir).multiplyScalar(dist);
+            cam.lookAt(0, 0, 0);
+            cam.updateMatrixWorld(true);
+
+            gl.setRenderTarget(rt);
+            gl.clear();
+            gl.render(bakeScene, cam);
+            gl.readRenderTargetPixels(rt, 0, 0, TILE, TILE, buf);
+
+            // WebGL reads pixels bottom-up — flip Y so the atlas matches UV conventions
+            for (let py = 0; py < TILE; py++) {
+              for (let px = 0; px < TILE; px++) {
+                const src = ((TILE - 1 - py) * TILE + px) * 4;
+                const dst = ((gy * TILE + py) * W + gx * TILE + px) * 4;
+                data[dst] = buf[src];
+                data[dst + 1] = buf[src + 1];
+                data[dst + 2] = buf[src + 2];
+                data[dst + 3] = buf[src + 3];
+              }
+            }
+          }
+        }
+
+        rt.dispose();
+        gl.dispose();
+
+        const tex = new THREE.DataArrayTexture(data, W, H, 1);
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.needsUpdate = true;
+        return tex;
+      }
+
+      // ─── Main ────────────────────────────────────────────────────────────────
+      async function main() {
+        const canvas = document.createElement("canvas");
+        document.body.appendChild(canvas);
+
+        const renderer = new THREE.WebGPURenderer({ antialias: true, canvas });
+        renderer.setPixelRatio(devicePixelRatio);
+        renderer.setSize(innerWidth, innerHeight);
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0a0a14);
+        scene.fog = new THREE.Fog(0x0a0a14, 15, 35);
+
+        const camera = new THREE.PerspectiveCamera(
+          50,
+          innerWidth / innerHeight,
+          0.1,
+          100,
+        );
+        camera.position.set(0, 1.8, 7);
+        camera.lookAt(0, 0, 0);
+
+        const controls = new OrbitControls(camera, canvas);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.06;
+        controls.target.set(0, 0, 0);
+
+        // ── Lighting ──────────────────────────────────────────────────────────
+        scene.add(new THREE.AmbientLight(0x112233, 3));
+        const sun = new THREE.DirectionalLight(0xffffff, 2.5);
+        sun.position.set(2, 3, 2);
+        scene.add(sun);
+        const fill = new THREE.DirectionalLight(0x3344ff, 0.8);
+        fill.position.set(-2, -1, -2);
+        scene.add(fill);
+
+        // ── Floor grid ────────────────────────────────────────────────────────
+        const grid = new THREE.GridHelper(24, 24, 0x1a2a40, 0x111e30);
+        grid.position.y = -1.2;
+        scene.add(grid);
+
+        // ── LEFT — real 3D mesh ───────────────────────────────────────────────
+        const realGeo = new THREE.BoxGeometry(0.9, 0.9, 0.9);
+        const realMat = new THREE.MeshStandardMaterial({
+          color: 0x55aaff,
+          roughness: 0.35,
+          metalness: 0.1,
+        });
+        const realMesh = new THREE.Mesh(realGeo, realMat);
+        realMesh.position.set(-3, 0, 0);
+        scene.add(realMesh);
+
+        // ── Bake ──────────────────────────────────────────────────────────────
+        const arrayTex = await bakeAtlas();
+        document.getElementById("status").textContent = "";
+
+        // ── RIGHT — impostor ──────────────────────────────────────────────────
+        // AnimatedOctahedralImpostor wraps a PlaneGeometry with the TSL
+        // billboard + octahedral sprite-selection shader from animated-octahedral.ts
+        const impostor = new AnimatedOctahedralImpostor(arrayTex, {
+          spritesPerSide: GRID,
+          frameCount: 1,
+          scale: 1.35,
+          alphaClamp: 0.08,
+          transparent: true,
+        });
+        impostor.position.set(3, 0, 0);
+        impostor.setFrame(0);
+        scene.add(impostor);
+
+        // Thin cyan outline of the actual quad so you can see it edge-on when orbiting
+        const outlineGeo = new THREE.EdgesGeometry(
+          new THREE.PlaneGeometry(2, 2),
+        );
+        const outlineMat = new THREE.LineBasicMaterial({
+          color: 0x00ffaa,
+          transparent: true,
+          opacity: 0.5,
+        });
+        const outlineMesh = new THREE.LineSegments(outlineGeo, outlineMat);
+        // This outline is NOT billboarded — it stays in world space, so orbiting
+        // to the side reveals it as an edge-on flat plane.
+        outlineMesh.position.copy(impostor.position);
+        scene.add(outlineMesh);
+
+        // ── Labels ────────────────────────────────────────────────────────────
+        const lblReal = document.getElementById("lbl-real");
+        const lblImpostor = document.getElementById("lbl-impostor");
+        lblReal.style.display = "block";
+        lblImpostor.style.display = "block";
+        document.getElementById("info").style.display = "block";
+        document.getElementById("controls").style.display = "block";
+
+        const ctrlFlipX = document.getElementById("ctrl-flipX");
+        const ctrlFlipY = document.getElementById("ctrl-flipY");
+        const ctrlSwapAxes = document.getElementById("ctrl-swapAxes");
+        const ctrlReverseLookup = document.getElementById("ctrl-reverseLookup");
+        const ctrlScale = document.getElementById("ctrl-scale");
+        const ctrlScaleVal = document.getElementById("ctrl-scale-val");
+
+        function applyAtlasFlip() {
+          impostor.setAtlasFlipAndSwap({
+            flipX: ctrlFlipX.checked,
+            flipY: ctrlFlipY.checked,
+            swapAxes: ctrlSwapAxes.checked,
+          });
+        }
+        ctrlFlipX.addEventListener("change", applyAtlasFlip);
+        ctrlFlipY.addEventListener("change", applyAtlasFlip);
+        ctrlSwapAxes.addEventListener("change", applyAtlasFlip);
+        ctrlReverseLookup.addEventListener("change", () => impostor.setReverseLookupDir(ctrlReverseLookup.checked));
+        ctrlScale.addEventListener("input", () => {
+          const v = parseFloat(ctrlScale.value);
+          impostor.setScale(v);
+          ctrlScaleVal.textContent = v.toFixed(2);
+        });
+
+        const _tmp = new THREE.Vector3();
+        function updateLabel(el, worldX, worldY) {
+          _tmp.set(worldX, worldY, 0).project(camera);
+          el.style.left = (_tmp.x * 0.5 + 0.5) * innerWidth + "px";
+          el.style.top = (-_tmp.y * 0.5 + 0.5) * innerHeight + "px";
+        }
+
+        // ── Render loop ───────────────────────────────────────────────────────
+        await renderer.init();
+        renderer.setAnimationLoop(() => {
+          controls.update();
+          scene.updateMatrixWorld(true);
+          impostor.updateFromCamera(camera, realMesh);
+          updateLabel(lblReal, -3, 1.5);
+          updateLabel(lblImpostor, 3, 1.5);
+          renderer.render(scene, camera);
+        });
+
+        window.addEventListener("resize", () => {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(innerWidth, innerHeight);
+        });
+      }
+
+      main().catch(console.error);
+    </script>
+  </body>
+</html>

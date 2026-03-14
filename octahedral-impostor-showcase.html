@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Octahedral Impostor Showcase — WebGPU TSL</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #0a0a12;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        z-index: 10;
+        font: 12px/1.5 "SF Mono", "Fira Code", monospace;
+        color: #b0d890;
+        background: rgba(0, 0, 0, 0.55);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: none;
+        user-select: none;
+      }
+      #info span {
+        color: #e0f0c0;
+        font-weight: 600;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">
+      Octahedral Impostor (octahedralImpostor2.js) &mdash; <span id="backend">loading…</span> &bull; Orbit to look around
+    </div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { pass } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { createOctahedralImpostorForest } from "./octahedralImpostor2.js";
+
+      const renderer = new THREE.WebGPURenderer({
+        antialias: true,
+        requiredLimits: { maxStorageBuffersInVertexStage: 3 },
+      });
+      await renderer.init();
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1;
+      document.body.appendChild(renderer.domElement);
+
+      const be = renderer.backend?.constructor?.name || "?";
+      document.getElementById("backend").textContent = be.includes("WebGPU")
+        ? "WebGPU ✓"
+        : "WebGL fallback";
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0a0a12);
+
+      const camera = new THREE.PerspectiveCamera(
+        60,
+        innerWidth / innerHeight,
+        0.5,
+        5000
+      );
+      camera.position.set(0, 4, 18);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 2, 0);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.05;
+
+      // ── Ground plane ──
+      const groundGeo = new THREE.PlaneGeometry(200, 200);
+      const groundMat = new THREE.MeshStandardMaterial({
+        color: 0x2a3a2a,
+        roughness: 0.9,
+        metalness: 0,
+      });
+      const ground = new THREE.Mesh(groundGeo, groundMat);
+      ground.rotation.x = -Math.PI / 2;
+      scene.add(ground);
+
+      // ── Lighting (match impostor expectations) ──
+      const dirLight = new THREE.DirectionalLight(0xffeedd, 1.2);
+      dirLight.position.set(10, 20, 10);
+      scene.add(dirLight);
+
+      const hemiLight = new THREE.HemisphereLight(0x4080a0, 0x203020, 0.5);
+      scene.add(hemiLight);
+
+      // ── Forest from octahedralImpostor2.js (impostors only: lodDistance 0) ──
+      let forest = null;
+      const projMat = new THREE.Matrix4();
+      const frustum = new THREE.Frustum();
+
+      try {
+        forest = await createOctahedralImpostorForest({
+          modelPath: "models/tree.glb",
+          treeCount: 30,
+          treeScale: 1.5,
+          lodDistance: 0,
+          radius: 40,
+          minRadius: 8,
+          centerPosition: [0, 0, 0],
+          impostorSettings: {
+            spritesPerSide: 8,
+            textureSize: 2048,
+            alphaClamp: 0.1,
+            alphaTest: 0.05,
+            fadeRange: 8,
+            lod2Distance: 150,
+            bakeOnlyLargestMesh: false,
+          },
+        });
+        scene.add(forest.group);
+        forest.setLodVisible(0, false);
+      } catch (e) {
+        console.error("Octahedral forest failed:", e);
+        document.getElementById("info").innerHTML =
+          "Error loading forest: " + (e.message || e);
+      }
+
+      function syncImpostorLighting() {
+        if (!forest) return;
+        forest.updateSunDir(
+          dirLight.position.clone().sub(controls.target).normalize()
+        );
+        forest.updateSunColor(
+          new THREE.Vector3(
+            dirLight.color.r * dirLight.intensity,
+            dirLight.color.g * dirLight.intensity,
+            dirLight.color.b * dirLight.intensity
+          )
+        );
+        const hemiIntensity = hemiLight.intensity * 0.5;
+        forest.updateHemiColors(
+          new THREE.Vector3(
+            hemiLight.color.r * hemiIntensity,
+            hemiLight.color.g * hemiIntensity,
+            hemiLight.color.b * hemiIntensity
+          ),
+          new THREE.Vector3(
+            hemiLight.groundColor.r * hemiIntensity,
+            hemiLight.groundColor.g * hemiIntensity,
+            hemiLight.groundColor.b * hemiIntensity
+          )
+        );
+      }
+
+      const renderPipeline = new THREE.RenderPipeline(renderer);
+      renderPipeline.outputNode = pass(scene, camera);
+
+      await renderer.compileAsync(scene, camera);
+
+      renderer.setAnimationLoop(() => {
+        controls.update();
+        if (forest) {
+          projMat.multiplyMatrices(
+            camera.projectionMatrix,
+            camera.matrixWorldInverse
+          );
+          frustum.setFromProjectionMatrix(projMat);
+          forest.update(camera, frustum);
+          syncImpostorLighting();
+        }
+        renderPipeline.render();
+      });
+
+      window.addEventListener("resize", () => {
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+      });
+    </script>
+  </body>
+</html>

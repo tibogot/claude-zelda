@@ -9,7 +9,6 @@ import {
   Fn,
   positionLocal,
   uv,
-  cameraPosition,
   vec3,
   vec2,
   vec4,
@@ -45,10 +44,14 @@ function createAnimatedArrayOctahedralMaterial(arrayTexture, parameters, normalA
   const c0 = float(48.0); const c1 = float(38.0); const c2 = float(29.0); const c3 = float(31.0); const c4 = float(33.0);
   const b0 = float(0.0);  const b1 = float(48.0); const b2 = float(86.0); const b3 = float(115.0); const b4 = float(146.0);
   const globalScale = uniform(parameters.scale ?? 1);
+  const worldCenter = uniform(new THREE.Vector3(0, 0, 0));
+  const spriteLookupCenter = uniform(new THREE.Vector3(0, 0, 0));
+  const cameraPositionUniform = uniform(new THREE.Vector3(0, 0, 0));
   const flipYFlag = uniform(parameters.flipY ? 1 : 0);
   const flipSpriteXFlag = uniform(parameters.flipSpriteX ? 1 : 0);
   const flipSpriteYFlag = uniform(parameters.flipSpriteY ? 1 : 0);
   const swapSpriteAxesFlag = uniform(parameters.swapSpriteAxes ? 1 : 0);
+  const reverseLookupDirFlag = uniform(parameters.reverseLookupDir ? 1 : 0);
 
   const hasPalette = !!(parameters.paletteTexture || parameters.paletteData);
   const paletteSize = uniform(parameters.paletteSize ?? 32);
@@ -63,27 +66,31 @@ function createAnimatedArrayOctahedralMaterial(arrayTexture, parameters, normalA
 
   material.positionNode = Fn(() => {
     const spritesMinusOne = vec2(spritesPerSide.sub(1.0));
-    const cameraPosLocal = cameraPosition;
-    const cameraDir = normalize(vec3(cameraPosLocal.x, cameraPosLocal.y, cameraPosLocal.z));
+    const toCameraBillboard = cameraPositionUniform.sub(worldCenter);
+    const cameraDirBillboard = normalize(toCameraBillboard);
+    const toCamA = cameraPositionUniform.sub(spriteLookupCenter);
+    const toCamB = spriteLookupCenter.sub(cameraPositionUniform);
+    const toCameraLookup = mix(toCamA, toCamB, reverseLookupDirFlag);
+    const cameraDirLookup = normalize(toCameraLookup);
 
     let up = vec3(0.0, 1.0, 0.0).toVar();
     If(useHemiOctahedron, () => {
-      up.assign(mix(up, vec3(-1.0, 0.0, 0.0), step(0.999, cameraDir.y)));
+      up.assign(mix(up, vec3(-1.0, 0.0, 0.0), step(0.999, cameraDirBillboard.y)));
     }).Else(() => {
-      up.assign(mix(up, vec3(-1.0, 0.0, 0.0), step(0.999, cameraDir.y)));
-      up.assign(mix(up, vec3(1.0, 0.0, 0.0), step(cameraDir.y, -0.999)));
+      up.assign(mix(up, vec3(-1.0, 0.0, 0.0), step(0.999, cameraDirBillboard.y)));
+      up.assign(mix(up, vec3(1.0, 0.0, 0.0), step(cameraDirBillboard.y, -0.999)));
     });
 
-    const tangent = normalize(cross(up, cameraDir));
-    const bitangent = cross(cameraDir, tangent);
+    const tangent = normalize(cross(up, cameraDirBillboard));
+    const bitangent = cross(cameraDirBillboard, tangent);
     const projectedVertex = tangent.mul(positionLocal.x.mul(globalScale)).add(bitangent.mul(positionLocal.y.mul(globalScale)));
 
     const grid = vec2().toVar();
     If(useHemiOctahedron, () => {
-      const octahedron = cameraDir.div(dot(cameraDir, sign(cameraDir)));
+      const octahedron = cameraDirLookup.div(dot(cameraDirLookup, sign(cameraDirLookup)));
       grid.assign(vec2(octahedron.x.add(octahedron.z), octahedron.z.sub(octahedron.x)).add(1.0).mul(0.5));
     }).Else(() => {
-      const dir = cameraDir.div(dot(abs(cameraDir), vec3(1.0))).toVar();
+      const dir = cameraDirLookup.div(dot(abs(cameraDirLookup), vec3(1.0))).toVar();
       If(dir.y.lessThan(0.0), () => {
         const signNotZero = mix(vec2(1.0), sign(dir.xz), step(0.0, dir.xz));
         const oldX = dir.x;
@@ -197,10 +204,14 @@ function createAnimatedArrayOctahedralMaterial(arrayTexture, parameters, normalA
     alphaClamp,
     frameIndex,
     globalScale,
+    worldCenter,
+    spriteLookupCenter,
+    cameraPositionUniform,
     flipYFlag,
     flipSpriteXFlag,
     flipSpriteYFlag,
     swapSpriteAxesFlag,
+    reverseLookupDirFlag,
     paletteSize,
     paletteRows,
     paletteRowIndex,
@@ -218,6 +229,20 @@ export class AnimatedOctahedralImpostor extends THREE.Mesh {
     super(PLANE_GEOMETRY, mat);
     this.frustumCulled = false;
     this._frameCount = Math.max(1, parameters.frameCount);
+  }
+
+  updateFromCamera(camera, lookupCenter = null) {
+    const uniforms = this.material.animatedImpostorUniforms;
+    if (!uniforms) return;
+    uniforms.cameraPositionUniform.value.copy(camera.position);
+    this.getWorldPosition(uniforms.worldCenter.value);
+    if (lookupCenter instanceof THREE.Vector3) {
+      uniforms.spriteLookupCenter.value.copy(lookupCenter);
+    } else if (lookupCenter && typeof lookupCenter.getWorldPosition === 'function') {
+      lookupCenter.getWorldPosition(uniforms.spriteLookupCenter.value);
+    } else {
+      uniforms.spriteLookupCenter.value.copy(uniforms.worldCenter.value);
+    }
   }
 
   setFrame(index) {
@@ -256,6 +281,11 @@ export class AnimatedOctahedralImpostor extends THREE.Mesh {
     if (options.flipX !== undefined) uniforms.flipSpriteXFlag.value = options.flipX ? 1 : 0;
     if (options.flipY !== undefined) uniforms.flipSpriteYFlag.value = options.flipY ? 1 : 0;
     if (options.swapAxes !== undefined) uniforms.swapSpriteAxesFlag.value = options.swapAxes ? 1 : 0;
+  }
+
+  setReverseLookupDir(value) {
+    const uniforms = this.material.animatedImpostorUniforms;
+    if (uniforms) uniforms.reverseLookupDirFlag.value = value ? 1 : 0;
   }
 
   get frameCount() {

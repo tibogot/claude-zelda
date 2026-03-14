@@ -1,0 +1,1654 @@
+/**
+ * Octahedral Impostor LOD Forest — Three.js WebGPU / TSL
+ *
+ * Near trees  (< lodDistance): real GLB InstancedMesh
+ * Far trees  (>= lodDistance): baked atlas impostor InstancedMesh
+ *
+ *   const forest = await createOctahedralImpostorForest({ ... });
+ *   scene.add(forest.group);
+ *   // in animation loop:
+ *   forest.update(camera);
+ */
+
+import * as THREE from "three";
+import {
+  Fn,
+  uniform,
+  float,
+  vec2,
+  vec3,
+  vec4,
+  positionLocal,
+  positionWorld,
+  cameraPosition,
+  instancedArray,
+  instanceIndex,
+  varying,
+  texture,
+  mix,
+  clamp,
+  saturate,
+  floor,
+  fract,
+  min,
+  max,
+  dot,
+  cross,
+  normalize,
+  sign,
+  abs,
+  length,
+  add,
+  sub,
+  mul,
+  div,
+  negate,
+  select,
+  screenCoordinate,
+  uv,
+  sin,
+  cos,
+  pow,
+} from "three/tsl";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TSL helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Per-frame golden-ratio offset for temporal dithering (updated by forest.update())
+const uFrameOffset = uniform(float(0));
+
+// Wind uniforms — shared across all forest materials, updated by forest.update()
+const uWindTime = uniform(float(0));
+const uWindStrength = uniform(float(0.3));
+const uWindSpeed = uniform(float(1.0));
+const uWindDirection = uniform(vec2(1.0, 0.3));
+
+// Interleaved Gradient Noise — screen-stable dither pattern with temporal jitter
+// Returns float in [0, 1). Input: screenCoordinate.xy (raw pixel position).
+const IGN = Fn(([coord]) =>
+  fract(
+    mul(
+      float(52.9829189),
+      fract(
+        add(
+          add(mul(float(0.06711056), coord.x), mul(float(0.00583715), coord.y)),
+          uFrameOffset,
+        ),
+      ),
+    ),
+  ),
+);
+
+// Wind displacement for LOD0 vertices — uses world position for per-tree variation
+// heightFactor: 0 at base, 1 at top (normalized vertex height within tree)
+// seedOffset: per-tree random offset (e.g. tree center x+z) for variation
+const windDisplacement = Fn(([worldPos, heightFactor, seedOffset]) => {
+  const windDir = normalize(vec3(uWindDirection.x, 0, uWindDirection.y));
+  const phase = add(mul(uWindTime, uWindSpeed), mul(seedOffset, 0.1));
+  const wave1 = sin(add(phase, mul(worldPos.x, 0.5)));
+  const wave2 = sin(add(mul(phase, 1.3), mul(worldPos.z, 0.4)));
+  const wave3 = sin(
+    add(mul(phase, 0.7), mul(add(worldPos.x, worldPos.z), 0.3)),
+  );
+  const combined = mul(add(wave1, add(mul(wave2, 0.5), mul(wave3, 0.3))), 0.55);
+  const strength = mul(
+    mul(combined, uWindStrength),
+    mul(heightFactor, heightFactor),
+  );
+  return mul(windDir, strength);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Loaders
+// ─────────────────────────────────────────────────────────────────────────────
+const _draco = new DRACOLoader();
+_draco.setDecoderPath(
+  "https://www.gstatic.com/draco/versioned/decoders/1.5.6/",
+);
+const _gltf = new GLTFLoader();
+_gltf.setDRACOLoader(_draco);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+function hemiOctaGridToDir(gx, gy, out) {
+  out.set(gx - gy, 0, -1 + gx + gy);
+  out.y = 1 - Math.abs(out.x) - Math.abs(out.z);
+  return out.normalize();
+}
+
+// Returns true if the geometry is a degenerate proxy mesh (LOD card, shadow plane, billboard rect).
+// Detection uses two independent signals so it works for axis-aligned AND rotated planes:
+//   1. Very low vertex count  — a rectangle has 4 verts; any real tree mesh has hundreds.
+//   2. Bounding-box flatness  — catches axis-aligned thin planes that happen to have more verts.
+const _flatBox = new THREE.Box3();
+const _flatSz = new THREE.Vector3();
+function isFlatGeometry(g) {
+  const pos = g.attributes.position;
+  if (!pos) return false;
+  // Signal 1: suspiciously few vertices (quad = 4, simple strip = 6, etc.)
+  if (pos.count <= 16) return true;
+  // Signal 2: one bounding-box axis is tiny relative to the other two (axis-aligned planes)
+  _flatBox.setFromBufferAttribute(pos);
+  _flatBox.getSize(_flatSz);
+  const maxDim = Math.max(_flatSz.x, _flatSz.y, _flatSz.z);
+  const minDim = Math.min(_flatSz.x, _flatSz.y, _flatSz.z);
+  return maxDim > 0 && minDim / maxDim < 0.02;
+}
+
+function computeBoundingSphere(obj, out, force = false, skipFlat = false) {
+  out.makeEmpty();
+  const s = new THREE.Sphere();
+  function walk(o) {
+    if (o.isMesh && o.geometry) {
+      const g = o.geometry;
+      if (force || !g.boundingSphere) g.computeBoundingSphere();
+      if (skipFlat) {
+        const gc = g.clone();
+        gc.applyMatrix4(o.matrixWorld);
+        if (isFlatGeometry(gc)) return;
+      }
+      s.copy(g.boundingSphere).applyMatrix4(o.matrixWorld);
+      out.union(s);
+    }
+    for (const c of o.children) walk(c);
+  }
+  walk(obj);
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Atlas baking  (WebGL2 offscreen — with diffuse lighting for depth cues)
+// ─────────────────────────────────────────────────────────────────────────────
+const ATLAS_VERT = /* glsl */ `#version 300 es
+in vec3 position; in vec2 uv; in vec3 normal;
+uniform mat4 modelViewMatrix, projectionMatrix, modelMatrix;
+out vec2 vUv;
+out vec3 vWorldNormal;
+out vec3 vWorldPos;
+void main() {
+  vUv = uv;
+  // world-space normal (model matrix is orthogonal — no need for inverse transpose)
+  vWorldNormal = normalize(mat3(modelMatrix) * normal);
+  vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`;
+
+// Bakes albedo * AO only — directional lighting applied at runtime via normal atlas
+const ATLAS_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+uniform sampler2D map;
+uniform float alphaTest;
+uniform vec3 uMatColor;    // material diffuse color
+uniform vec3 uSphereCenter;
+uniform float uSphereRadius;
+in vec2 vUv;
+in vec3 vWorldNormal;
+in vec3 vWorldPos;
+out vec4 outColor;
+void main() {
+  vec4 c = texture(map, vUv);
+  if (c.a < alphaTest) discard;
+  // Convert sRGB texture + material color to linear.
+  // WebGL2 texImage2D(RGBA) returns raw bytes — no gamma decode — so game textures
+  // (which are sRGB-encoded) must be linearised here. Storing linear in the atlas
+  // means runtime lighting works in linear space; WebGPU handles final sRGB output.
+  c.rgb = pow(max(c.rgb, vec3(0.001)), vec3(2.2));
+  c.rgb *= pow(max(uMatColor, vec3(0.001)), vec3(2.2));
+  // Subtle vertical AO: slight darkening at base (was 0.6–1.0; now 0.92–1.0 to avoid shady/hollow look on rocks)
+  float baseY = uSphereCenter.y - uSphereRadius;
+  float yNorm = clamp((vWorldPos.y - baseY) / (uSphereRadius * 0.8), 0.0, 1.0);
+  float ao = mix(0.92, 1.0, yNorm);
+  outColor = vec4(c.rgb * ao, c.a);
+}`;
+
+// Normal atlas — stores world-space normals encoded to [0,1] per sprite
+const NORMAL_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+uniform sampler2D map; uniform float alphaTest;
+in vec2 vUv; in vec3 vWorldNormal;
+out vec4 outColor;
+void main() {
+  if (texture(map, vUv).a < alphaTest) discard;
+  outColor = vec4(normalize(vWorldNormal) * 0.5 + 0.5, 1.0);
+}`;
+
+// Roughness/metalness atlas — same as v8: R = roughness, G = metalness.
+// When present, roughnessMap.g and metalnessMap.b multiply the scalar values.
+const ROUGHNESS_METAL_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+uniform sampler2D map;           // alpha test (e.g. diffuse map)
+uniform sampler2D uRoughnessMap; // optional: sample .g to modulate roughness
+uniform sampler2D uMetalnessMap; // optional: sample .b to modulate metalness
+uniform float alphaTest;
+uniform float uRoughness;
+uniform float uMetalness;
+in vec2 vUv;
+out vec4 outColor;
+void main() {
+  if (texture(map, vUv).a < alphaTest) discard;
+  float r = uRoughness * texture(uRoughnessMap, vUv).g;
+  float m = uMetalness * texture(uMetalnessMap, vUv).b;
+  outColor = vec4(r, m, 0.0, 1.0);
+}`;
+
+// WeakMap so each WebGL2 context (new canvas per bake call) gets its own white texture.
+// A plain module variable would cache the texture from the first context and cause
+// "bindTexture: object does not belong to this context" on every rebake.
+const _whiteTexByCtx = new WeakMap();
+function whiteTexture(gl) {
+  if (_whiteTexByCtx.has(gl)) return _whiteTexByCtx.get(gl);
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(
+    gl.TEXTURE_2D,
+    0,
+    gl.RGBA,
+    1,
+    1,
+    0,
+    gl.RGBA,
+    gl.UNSIGNED_BYTE,
+    new Uint8Array([255, 255, 255, 255]),
+  );
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  _whiteTexByCtx.set(gl, t);
+  return t;
+}
+
+function buildProgram(gl, vs, fs) {
+  const compile = (type, src) => {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+      throw new Error("[atlas shader] " + gl.getShaderInfoLog(s));
+    return s;
+  };
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+    throw new Error("[atlas program] " + gl.getProgramInfoLog(p));
+  return p;
+}
+
+function drawMesh(gl, geo, posLoc, uvLoc, normLoc) {
+  const pa = geo.getAttribute("position");
+  const ua = geo.getAttribute("uv");
+  const na = geo.getAttribute("normal");
+  const ix = geo.index;
+  if (!pa) return;
+
+  const buf = (arr, loc, size) => {
+    if (!arr || loc < 0) {
+      if (loc >= 0) {
+        gl.disableVertexAttribArray(loc);
+        gl.vertexAttrib3f(loc, 0, 1, 0);
+      }
+      return null;
+    }
+    const b = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, b);
+    gl.bufferData(gl.ARRAY_BUFFER, arr.array, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0);
+    return b;
+  };
+
+  const b0 = buf(pa, posLoc, pa.itemSize);
+  const b1 = ua ? buf(ua, uvLoc, ua.itemSize) : null;
+  const b2 = na ? buf(na, normLoc, na.itemSize) : null;
+
+  if (!ua) {
+    gl.disableVertexAttribArray(uvLoc);
+    gl.vertexAttrib2f(uvLoc, 0, 0);
+  }
+  if (!na) {
+    gl.disableVertexAttribArray(normLoc);
+    gl.vertexAttrib3f(normLoc, 0, 1, 0);
+  }
+
+  if (ix) {
+    const bi = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bi);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, ix.array, gl.STATIC_DRAW);
+    gl.drawElements(
+      gl.TRIANGLES,
+      ix.count,
+      ix.array instanceof Uint32Array ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT,
+      0,
+    );
+    gl.deleteBuffer(bi);
+  } else {
+    gl.drawArrays(gl.TRIANGLES, 0, pa.count);
+  }
+  if (b0) gl.deleteBuffer(b0);
+  if (b1) gl.deleteBuffer(b1);
+  if (b2) gl.deleteBuffer(b2);
+}
+
+function uploadTex(gl, img) {
+  if (!img) return null;
+  const w = img.width || img.videoWidth,
+    h = img.height || img.videoHeight;
+  if (!w || !h) return null;
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  if (img.data)
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      w,
+      h,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      img.data,
+    );
+  else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+  gl.texParameteri(
+    gl.TEXTURE_2D,
+    gl.TEXTURE_MIN_FILTER,
+    gl.LINEAR_MIPMAP_LINEAR,
+  );
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.generateMipmap(gl.TEXTURE_2D);
+  return t;
+}
+
+function bakeAtlas(
+  modelScene,
+  {
+    textureSize = 2048,
+    spritesPerSide = 12,
+    alphaTest = 0.4,
+    bakeOnlyLargestMesh = false,
+    sphereMargin = 1.05, // inflate bounding sphere slightly to prevent orthographic frustum clipping
+  } = {},
+) {
+  const N = spritesPerSide;
+  const Nm1 = Math.max(1, N - 1);
+  const ss = textureSize / N;
+
+  let meshes = [];
+  modelScene.traverse((o) => {
+    if (!o.isMesh || !o.geometry) return;
+    // Skip flat/degenerate meshes (LOD cards, shadow planes) — they corrupt atlas sprites
+    const _gc = o.geometry.clone();
+    _gc.applyMatrix4(o.matrixWorld);
+    if (isFlatGeometry(_gc)) return;
+    meshes.push(o);
+  });
+  if (!meshes.length) throw new Error("[OctahedralImpostor] No meshes to bake");
+
+  // If the GLB has multiple objects (e.g. several trees), bake only the largest mesh so each cell = one object.
+  let sphere = new THREE.Sphere();
+  if (bakeOnlyLargestMesh && meshes.length > 1) {
+    let best = meshes[0];
+    let bestVol = 0;
+    const s = new THREE.Sphere();
+    for (const m of meshes) {
+      computeBoundingSphere(m, s, true);
+      const v = s.radius * s.radius * s.radius;
+      if (v > bestVol) {
+        bestVol = v;
+        best = m;
+      }
+    }
+    meshes = [best];
+    computeBoundingSphere(best, sphere, true);
+  } else {
+    sphere = computeBoundingSphere(modelScene, new THREE.Sphere(), true, true);
+  }
+
+  // Inflate bounding sphere by the margin so geometry at the sphere surface doesn't
+  // get clipped by the orthographic bake frustum (exactly sphere.radius wide).
+  // The same inflated radius is returned and used for impostorScale at runtime — both stay in sync.
+  sphere.radius *= sphereMargin;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = textureSize;
+  const gl = canvas.getContext("webgl2", {
+    alpha: true,
+    preserveDrawingBuffer: true,
+  });
+  if (!gl) throw new Error("[OctahedralImpostor] WebGL2 unavailable");
+
+  // ── Albedo program (albedo * AO — no directional light, moved to runtime) ──
+  const prog = buildProgram(gl, ATLAS_VERT, ATLAS_FRAG);
+  const posLoc = gl.getAttribLocation(prog, "position");
+  const uvLoc = gl.getAttribLocation(prog, "uv");
+  const normLoc = gl.getAttribLocation(prog, "normal");
+  const uMV = gl.getUniformLocation(prog, "modelViewMatrix");
+  const uProj = gl.getUniformLocation(prog, "projectionMatrix");
+  const uMod = gl.getUniformLocation(prog, "modelMatrix");
+  const uMap = gl.getUniformLocation(prog, "map");
+  const uAlpha = gl.getUniformLocation(prog, "alphaTest");
+  const uMatCol = gl.getUniformLocation(prog, "uMatColor");
+  const uSphCtr = gl.getUniformLocation(prog, "uSphereCenter");
+  const uSphRad = gl.getUniformLocation(prog, "uSphereRadius");
+
+  // ── Normal program (world-space normals → [0,1] RGBA) ──
+  const normProg = buildProgram(gl, ATLAS_VERT, NORMAL_FRAG);
+  const nPosLoc = gl.getAttribLocation(normProg, "position");
+  const nUvLoc = gl.getAttribLocation(normProg, "uv");
+  const nNormLoc = gl.getAttribLocation(normProg, "normal");
+  const uNMV = gl.getUniformLocation(normProg, "modelViewMatrix");
+  const uNProj = gl.getUniformLocation(normProg, "projectionMatrix");
+  const uNMod = gl.getUniformLocation(normProg, "modelMatrix");
+  const uNMap = gl.getUniformLocation(normProg, "map");
+  const uNAlpha = gl.getUniformLocation(normProg, "alphaTest");
+
+  // ── Roughness/metalness program (R = roughness, G = metalness per fragment) ──
+  const rmProg = buildProgram(gl, ATLAS_VERT, ROUGHNESS_METAL_FRAG);
+  const rPosLoc = gl.getAttribLocation(rmProg, "position");
+  const rUvLoc = gl.getAttribLocation(rmProg, "uv");
+  const rNormLoc = gl.getAttribLocation(rmProg, "normal");
+  const uRMV = gl.getUniformLocation(rmProg, "modelViewMatrix");
+  const uRProj = gl.getUniformLocation(rmProg, "projectionMatrix");
+  const uRMod = gl.getUniformLocation(rmProg, "modelMatrix");
+  const uRMap = gl.getUniformLocation(rmProg, "map");
+  const uRRoughMap = gl.getUniformLocation(rmProg, "uRoughnessMap");
+  const uRMetalMap = gl.getUniformLocation(rmProg, "uMetalnessMap");
+  const uRAlpha = gl.getUniformLocation(rmProg, "alphaTest");
+  const uRRoughness = gl.getUniformLocation(rmProg, "uRoughness");
+  const uRMetalness = gl.getUniformLocation(rmProg, "uMetalness");
+
+  // No margin — sphere already encloses all geometry for orthographic projection
+  const half = sphere.radius;
+  const cam = new THREE.OrthographicCamera(
+    -half,
+    half,
+    half,
+    -half,
+    0.001,
+    sphere.radius * 4,
+  );
+
+  const fbo = gl.createFramebuffer();
+  const depthRB = gl.createRenderbuffer();
+  gl.bindRenderbuffer(gl.RENDERBUFFER, depthRB);
+  gl.renderbufferStorage(
+    gl.RENDERBUFFER,
+    gl.DEPTH_COMPONENT16,
+    textureSize,
+    textureSize,
+  );
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferRenderbuffer(
+    gl.FRAMEBUFFER,
+    gl.DEPTH_ATTACHMENT,
+    gl.RENDERBUFFER,
+    depthRB,
+  );
+
+  gl.enable(gl.DEPTH_TEST);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+  const camPos = new THREE.Vector3();
+  const viewMat = new THREE.Matrix4();
+
+  const makeGLTex = () => {
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      textureSize,
+      textureSize,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      null,
+    );
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    return t;
+  };
+
+  // Shared sprite render loop — called once per pass.
+  // setupMesh() returns the GL texture to delete after drawing (or null).
+  const renderSprites = (prog, pL, uL, nL, setupMesh) => {
+    gl.useProgram(prog);
+    gl.clearColor(0, 0, 0, 0);
+    for (let row = 0; row < N; row++) {
+      for (let col = 0; col < N; col++) {
+        hemiOctaGridToDir(col / Nm1, row / Nm1, camPos);
+        camPos.multiplyScalar(sphere.radius * 2).add(sphere.center);
+        cam.position.copy(camPos);
+        cam.lookAt(sphere.center);
+        cam.updateMatrixWorld(true);
+        viewMat.copy(cam.matrixWorldInverse);
+        const x0 = col * ss,
+          y0 = row * ss;
+        gl.viewport(x0, y0, ss, ss);
+        gl.scissor(x0, y0, ss, ss);
+        gl.enable(gl.SCISSOR_TEST);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        for (const mesh of meshes) {
+          const mat = Array.isArray(mesh.material)
+            ? mesh.material[0]
+            : mesh.material;
+          if (!mat) continue;
+          const mv = viewMat.clone().multiply(mesh.matrixWorld);
+          const ownTex = setupMesh(mesh, mat, mv);
+          drawMesh(gl, mesh.geometry, pL, uL, nL);
+          if (ownTex) gl.deleteTexture(ownTex);
+        }
+      }
+    }
+    gl.disable(gl.SCISSOR_TEST);
+  };
+
+  // ── Pass 1: Albedo + AO ───────────────────────────────────────────────────
+  const colGLTex = makeGLTex();
+  gl.framebufferTexture2D(
+    gl.FRAMEBUFFER,
+    gl.COLOR_ATTACHMENT0,
+    gl.TEXTURE_2D,
+    colGLTex,
+    0,
+  );
+  gl.useProgram(prog);
+  gl.uniform3f(uSphCtr, sphere.center.x, sphere.center.y, sphere.center.z);
+  gl.uniform1f(uSphRad, sphere.radius);
+
+  renderSprites(prog, posLoc, uvLoc, normLoc, (mesh, mat, mv) => {
+    gl.uniformMatrix4fv(uMV, false, mv.elements);
+    gl.uniformMatrix4fv(uProj, false, cam.projectionMatrix.elements);
+    gl.uniformMatrix4fv(uMod, false, mesh.matrixWorld.elements);
+    gl.uniform1f(uAlpha, mat.alphaTest > 0 ? mat.alphaTest : alphaTest);
+    const col = mat.color;
+    const mc = col
+      ? typeof col.getHex === "function"
+        ? { r: col.r, g: col.g, b: col.b }
+        : { r: col.r ?? 1, g: col.g ?? 1, b: col.b ?? 1 }
+      : { r: 1, g: 1, b: 1 };
+    gl.uniform3f(uMatCol, mc.r, mc.g, mc.b);
+    let t = null,
+      own = false;
+    if (mat.map?.image) {
+      t = uploadTex(gl, mat.map.image);
+      own = !!t;
+    }
+    if (!t) t = whiteTexture(gl);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.uniform1i(uMap, 0);
+    return own ? t : null; // returned texture is deleted after drawMesh
+  });
+  const colorPixels = new Uint8Array(textureSize * textureSize * 4);
+  gl.readPixels(
+    0,
+    0,
+    textureSize,
+    textureSize,
+    gl.RGBA,
+    gl.UNSIGNED_BYTE,
+    colorPixels,
+  );
+
+  // Do NOT flip atlas vertically — keep native bake order: V=0 = view -Y = bottom of mesh, V=1 = top.
+  // Runtime getUV uses uvf.y directly so quad top (uvf.y=1) samples atlas V=1 = top of mesh.
+  // (Removing flipAtlasCellsVertical to avoid view-dependent vertical shift bugs.)
+  // const flipAtlasCellsVertical = (pixels) => { ... };
+  // flipAtlasCellsVertical(colorPixels);
+
+  // ── Pass 2: World-space normals ───────────────────────────────────────────
+  const normGLTex = makeGLTex();
+  gl.framebufferTexture2D(
+    gl.FRAMEBUFFER,
+    gl.COLOR_ATTACHMENT0,
+    gl.TEXTURE_2D,
+    normGLTex,
+    0,
+  );
+
+  renderSprites(normProg, nPosLoc, nUvLoc, nNormLoc, (mesh, mat, mv) => {
+    gl.uniformMatrix4fv(uNMV, false, mv.elements);
+    gl.uniformMatrix4fv(uNProj, false, cam.projectionMatrix.elements);
+    gl.uniformMatrix4fv(uNMod, false, mesh.matrixWorld.elements);
+    gl.uniform1f(uNAlpha, mat.alphaTest > 0 ? mat.alphaTest : alphaTest);
+    let t = null,
+      own = false;
+    if (mat.map?.image) {
+      t = uploadTex(gl, mat.map.image);
+      own = !!t;
+    }
+    if (!t) t = whiteTexture(gl);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.uniform1i(uNMap, 0);
+    return own ? t : null; // returned texture is deleted after drawMesh
+  });
+  const normalPixels = new Uint8Array(textureSize * textureSize * 4);
+  gl.readPixels(
+    0,
+    0,
+    textureSize,
+    textureSize,
+    gl.RGBA,
+    gl.UNSIGNED_BYTE,
+    normalPixels,
+  );
+
+  // ── Pass 3: Roughness + metalness (R and G channels) ────────────────────────
+  const rmGLTex = makeGLTex();
+  gl.framebufferTexture2D(
+    gl.FRAMEBUFFER,
+    gl.COLOR_ATTACHMENT0,
+    gl.TEXTURE_2D,
+    rmGLTex,
+    0,
+  );
+  // ── Pass 3: Roughness + metalness (v8 style: optional roughnessMap.g, metalnessMap.b) ──
+  (() => {
+    gl.useProgram(rmProg);
+    gl.clearColor(0, 0, 0, 0);
+    for (let row = 0; row < N; row++) {
+      for (let col = 0; col < N; col++) {
+        hemiOctaGridToDir(col / Nm1, row / Nm1, camPos);
+        camPos.multiplyScalar(sphere.radius * 2).add(sphere.center);
+        cam.position.copy(camPos);
+        cam.lookAt(sphere.center);
+        cam.updateMatrixWorld(true);
+        viewMat.copy(cam.matrixWorldInverse);
+        const x0 = col * ss, y0 = row * ss;
+        gl.viewport(x0, y0, ss, ss);
+        gl.scissor(x0, y0, ss, ss);
+        gl.enable(gl.SCISSOR_TEST);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        for (const mesh of meshes) {
+          const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+          if (!mat) continue;
+          const mv = viewMat.clone().multiply(mesh.matrixWorld);
+          gl.uniformMatrix4fv(uRMV, false, mv.elements);
+          gl.uniformMatrix4fv(uRProj, false, cam.projectionMatrix.elements);
+          gl.uniformMatrix4fv(uRMod, false, mesh.matrixWorld.elements);
+          gl.uniform1f(uRAlpha, mat.alphaTest > 0 ? mat.alphaTest : alphaTest);
+          gl.uniform1f(uRRoughness, typeof mat.roughness === "number" ? mat.roughness : 0.8);
+          gl.uniform1f(uRMetalness, typeof mat.metalness === "number" ? mat.metalness : 0);
+          const white = whiteTexture(gl);
+          const toDelete = [];
+          let t0 = mat.map?.image ? uploadTex(gl, mat.map.image) : null;
+          if (t0) toDelete.push(t0);
+          if (!t0) t0 = white;
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, t0);
+          gl.uniform1i(uRMap, 0);
+          let t1 = mat.roughnessMap?.image ? uploadTex(gl, mat.roughnessMap.image) : null;
+          if (t1) toDelete.push(t1);
+          if (!t1) t1 = white;
+          gl.activeTexture(gl.TEXTURE1);
+          gl.bindTexture(gl.TEXTURE_2D, t1);
+          gl.uniform1i(uRRoughMap, 1);
+          let t2 = mat.metalnessMap?.image ? uploadTex(gl, mat.metalnessMap.image) : null;
+          if (t2) toDelete.push(t2);
+          if (!t2) t2 = white;
+          gl.activeTexture(gl.TEXTURE2);
+          gl.bindTexture(gl.TEXTURE_2D, t2);
+          gl.uniform1i(uRMetalMap, 2);
+          drawMesh(gl, mesh.geometry, rPosLoc, rUvLoc, rNormLoc);
+          for (const t of toDelete) gl.deleteTexture(t);
+        }
+      }
+    }
+    gl.disable(gl.SCISSOR_TEST);
+  })();
+  const roughnessMetalPixels = new Uint8Array(textureSize * textureSize * 4);
+  gl.readPixels(
+    0,
+    0,
+    textureSize,
+    textureSize,
+    gl.RGBA,
+    gl.UNSIGNED_BYTE,
+    roughnessMetalPixels,
+  );
+
+  // ── Cleanup ───────────────────────────────────────────────────────────────
+  gl.deleteTexture(colGLTex);
+  gl.deleteTexture(normGLTex);
+  gl.deleteTexture(rmGLTex);
+  gl.deleteRenderbuffer(depthRB);
+  gl.deleteFramebuffer(fbo);
+  gl.deleteProgram(prog);
+  gl.deleteProgram(normProg);
+  gl.deleteProgram(rmProg);
+
+  const makeTex = (pixels) => {
+    const t = new THREE.DataTexture(
+      pixels,
+      textureSize,
+      textureSize,
+      THREE.RGBAFormat,
+    );
+    t.needsUpdate = true;
+    t.minFilter = THREE.LinearMipmapLinearFilter;
+    t.magFilter = THREE.LinearFilter;
+    t.generateMipmaps = true;
+    t.anisotropy = 16;
+    t.colorSpace = THREE.LinearSRGBColorSpace; // atlas stores linear (bake uses no gamma encode)
+    return t;
+  };
+  // No flipY — DataTexture row-0 = bottom matches readPixels row-0 = bottom
+  return {
+    colorTex: makeTex(colorPixels),
+    normalTex: makeTex(normalPixels),
+    roughnessMetalTex: makeTex(roughnessMetalPixels), // R = roughness, G = metalness
+    sphere,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TSL Impostor Material
+//
+// Current: Lambert + wrap diffuse, hemisphere (uAmbColor + mix(ground, sky)), GGX specular (v8),
+// normal strength (v8), rim (Fresnel-style edge glow), optional diffuse wrap for foliage.
+// Possible next: shadow receiving, baked AO channel, scene fog in fragment.
+//
+// KEY POINTS:
+//   • positionNode  — returns billboard vertex offset in LOCAL space.
+//     The renderer then applies instanceMatrix(T*S) + view + projection.
+//     This is the correct hook for custom vertex positions on InstancedMesh.
+//   • Per-instance center comes from an instancedArray storage buffer indexed
+//     by instanceIndex — the proven pattern for WebGPU custom vertex shaders.
+//   • Full ray-plane intersection for sprite UV (not flat quad UV!) gives the
+//     correct parallax that makes octahedral impostors look 3D.
+//   • varyings pass sprite indices + UVs from vertex to fragment stage.
+// ─────────────────────────────────────────────────────────────────────────────
+function createImpostorMaterial(
+  atlasTex,
+  normalTex,
+  roughnessMetalTex,
+  impostorScale,
+  centersStorage,
+  opts = {},
+) {
+  const spritesPerSide = opts.spritesPerSide ?? 12;
+  const alphaClamp = opts.alphaClamp ?? 0.4;
+  const lodDistance = opts.lodDistance ?? 80;
+  const fadeRange = opts.fadeRange ?? 8;
+  const mega = opts.mega ?? false;
+
+  const uSPS = uniform(spritesPerSide);
+  const uScale = uniform(impostorScale);
+  const uLodDist = opts.lodDistUniform ?? uniform(float(lodDistance));
+  const uFadeRange = opts.fadeRangeUniform ?? uniform(float(fadeRange));
+  // Dynamic lighting uniforms (shared via opts.sunDir etc. from forest scope)
+  const uSunDir =
+    opts.sunDir ?? uniform(new THREE.Vector3(0.5, 1.0, 0.3).normalize());
+  const uSunColor =
+    opts.sunColor ?? uniform(new THREE.Vector3(0.85, 0.78, 0.6));
+  const uAmbColor = opts.ambColor ?? uniform(new THREE.Vector3(0.35, 0.4, 0.5));
+  const uHemiSkyColor =
+    opts.hemiSkyColor ?? uniform(new THREE.Vector3(0.4, 0.45, 0.5));
+  const uHemiGroundColor =
+    opts.hemiGroundColor ?? uniform(new THREE.Vector3(0.25, 0.3, 0.2));
+  const uLightScale =
+    typeof opts.lightScale === "number"
+      ? uniform(float(opts.lightScale))
+      : (opts.lightScale ?? uniform(float(1.0))); // e.g. 0.8 for rocks to match PBR
+  // Shading uniforms: use forest-provided when present (for real-time GUI), else create local
+  const uNormStr = opts.normStrUniform ?? uniform(float(opts.normalStrength ?? 1.0));
+  const uRimStrength = opts.rimStrengthUniform ?? uniform(float(opts.rimStrength ?? 0.14));
+  const uRimPower = opts.rimPowerUniform ?? uniform(float(opts.rimPower ?? 3.0));
+  const rimColorVec =
+    opts.rimColor != null
+      ? Array.isArray(opts.rimColor)
+        ? new THREE.Vector3(opts.rimColor[0], opts.rimColor[1], opts.rimColor[2])
+        : opts.rimColor.clone()
+      : new THREE.Vector3(0.4, 0.5, 0.65); // default sky-tinted rim
+  const uRimColor = opts.rimColorUniform ?? uniform(rimColorVec);
+  const uDiffuseWrap = opts.diffuseWrapUniform ?? uniform(float(opts.diffuseWrap ?? 0.0));
+
+  const receiveShadow = opts.receiveShadow === true;
+  const inLightFactor = float(1).toVar();
+
+  // Varyings: sprite weights, indices, and pre-computed sprite UVs (vertex-stage parallax)
+  const vWeight = varying(vec4(0, 0, 0, 0), "vWeight");
+  const vS1 = varying(vec2(0, 0), "vS1");
+  const vS2 = varying(vec2(0, 0), "vS2");
+  const vS3 = varying(vec2(0, 0), "vS3");
+  const vUV1 = varying(vec2(0, 0), "vUV1"); // ray-plane UV for sprite 1 (vertex-stage)
+  const vUV2 = varying(vec2(0, 0), "vUV2"); // ray-plane UV for sprite 2
+  const vUV3 = varying(vec2(0, 0), "vUV3"); // ray-plane UV for sprite 3
+
+  // Per-instance center (world-space sphere centre) from storage buffer
+  // Read xyz from vec4 (vec3 in WebGPU storage buffers needs 16-byte/4-float alignment)
+  const centerNode = centersStorage.element(instanceIndex).xyz;
+
+  // ── Encoding / decoding (hemi-octahedron) ──────────────────────────────────
+  const encode = Fn(([dir]) => {
+    // Project unit direction onto octahedron, then remap to hemi [0,1]^2
+    const s = vec3(sign(dir.x), sign(dir.y), sign(dir.z));
+    const d = dot(dir, s); // L1 norm = |x|+|y|+|z|
+    const oct = vec3(div(dir.x, d), div(dir.y, d), div(dir.z, d));
+    return mul(vec2(add(1, add(oct.x, oct.z)), add(1, sub(oct.z, oct.x))), 0.5);
+  });
+
+  const decode = Fn(([gi, nm1]) => {
+    const uv = vec2(div(gi.x, nm1.x), div(gi.y, nm1.y));
+    const px = sub(uv.x, uv.y);
+    const pz = sub(add(uv.x, uv.y), 1);
+    const py = sub(sub(1, abs(px)), abs(pz));
+    return normalize(vec3(px, py, pz));
+  });
+
+  // ── Plane basis — degenerate-safe (mirrors TSX computePlaneBasis) ───────────
+  const planeTangent = Fn(([n]) => {
+    const up = mix(
+      vec3(0, 1, 0),
+      vec3(-1, 0, 0),
+      max(float(0), sign(sub(n.y, float(0.999)))),
+    );
+    return normalize(cross(up, n));
+  });
+  const planeBitangent = Fn(([n, t]) => cross(n, t));
+
+  // World-up in plane: matches bake camera (0,1,0) so quad and UV share same vertical axis.
+  const planeUp = Fn(([n, t]) => {
+    const worldUp = vec3(0, 1, 0);
+    const proj = sub(worldUp, mul(n, dot(n, worldUp)));
+    const len = length(proj);
+    return select(len.lessThan(float(0.001)), t, normalize(proj));
+  });
+
+  // Billboard: use planeUp for vertical so quad bottom = world bottom = mesh bottom in texture.
+  const projectVert = Fn(([n]) => {
+    const t = planeTangent(n);
+    const up = planeUp(n, t);
+    return add(mul(positionLocal.x, t), mul(positionLocal.y, up));
+  });
+
+  // Ray–plane intersection → sprite UV within a frame (same up axis as quad).
+  const planeUV = Fn(([n, t, b, camL, vd]) => {
+    const denom = dot(vd, n);
+    const tt = mul(dot(negate(camL), n), div(1, denom));
+    const hit = add(camL, mul(vd, tt));
+    const upInPlane = planeUp(n, t);
+    return add(vec2(dot(t, hit), dot(upInPlane, hit)), 0.5);
+  });
+
+  // ── Position node — billboard vertex (engine applies T*S instance matrix) ──
+  const positionNodeFn = Fn(() => {
+    const nm1 = vec2(sub(uSPS, float(1)), sub(uSPS, float(1)));
+
+    // Per-instance sphere center from storage buffer
+    const center = centerNode;
+
+    // Camera position in LOCAL space (sphere-radius-normalized)
+    const camLocal = mul(sub(cameraPosition, center), div(float(1), uScale));
+    const camDir = normalize(camLocal);
+
+    // Billboard vertex in local space (±0.5 × tangent/bitangent)
+    const bv = projectVert(camDir);
+
+    // View direction from billboard vertex toward camera (vertex-stage parallax)
+    const viewDir = normalize(sub(bv, camLocal));
+
+    // Octahedral grid lookup and trilinear blend weights
+    const grid = mul(encode(camDir), nm1);
+    const gf = min(floor(grid), nm1);
+    const frac = fract(grid);
+
+    // w.w MUST be binary: use sign() clamped to [0,1] = same as ceil(x-y) for frac ∈ [0,1)
+    const w = vec4(
+      min(sub(1, frac.x), sub(1, frac.y)),
+      abs(sub(frac.x, frac.y)),
+      min(frac.x, frac.y),
+      max(float(0), sign(sub(frac.x, frac.y))),
+    );
+    vWeight.assign(w);
+
+    const s1 = gf;
+    const s2 = min(add(s1, mix(vec2(0, 1), vec2(1, 0), w.w)), nm1);
+    const s3 = min(add(s1, vec2(1, 1)), nm1);
+    vS1.assign(s1);
+    vS2.assign(s2);
+    vS3.assign(s3);
+
+    // Compute ray-plane UVs per-vertex and pass as varyings.
+    // Vertex-stage is stable (no per-fragment divergence at oblique angles).
+    const pn1 = decode(s1, nm1);
+    const pt1 = planeTangent(pn1);
+    const pb1 = planeBitangent(pn1, pt1);
+    const pn2 = decode(s2, nm1);
+    const pt2 = planeTangent(pn2);
+    const pb2 = planeBitangent(pn2, pt2);
+    const pn3 = decode(s3, nm1);
+    const pt3 = planeTangent(pn3);
+    const pb3 = planeBitangent(pn3, pt3);
+    vUV1.assign(planeUV(pn1, pt1, pb1, camLocal, viewDir));
+    vUV2.assign(planeUV(pn2, pt2, pb2, camLocal, viewDir));
+    vUV3.assign(planeUV(pn3, pt3, pb3, camLocal, viewDir));
+
+    // Return billboard vertex offset in local space (no wind on impostor).
+    // InstancedMesh applies T(center)*S(scale) → correct world position.
+    return bv;
+  });
+
+  // ── Color node — uses vertex-stage parallax UVs (interpolated from positionNodeFn) ──
+  // Native bake: V=0 = bottom of mesh, V=1 = top. Quad top (uvf.y=1) → sample V=1 = top of mesh.
+  const getUV = Fn(([uvf, frame, fs]) =>
+    clamp(mul(fs, add(frame, clamp(vec2(uvf.x, uvf.y), 0, 1))), 0, 1),
+  );
+
+  const colorNodeFn = Fn(() => {
+    const fs = div(float(1), uSPS);
+
+    const c1 = texture(atlasTex, getUV(vUV1, vS1, fs));
+    const c2 = mega ? c1 : texture(atlasTex, getUV(vUV2, vS2, fs));
+    const c3 = mega ? c1 : texture(atlasTex, getUV(vUV3, vS3, fs));
+
+    // ── Alpha and color: dominant sprite only — avoids trunk/foliage ghosting from other views ──
+    const dominantAlpha = mega
+      ? c1.a
+      : select(
+          vWeight.x
+            .greaterThanEqual(vWeight.y)
+            .and(vWeight.x.greaterThanEqual(vWeight.z)),
+          c1.a,
+          select(vWeight.y.greaterThanEqual(vWeight.z), c2.a, c3.a),
+        );
+    const dominantRgb = mega
+      ? c1.rgb
+      : select(
+          vWeight.x
+            .greaterThanEqual(vWeight.y)
+            .and(vWeight.x.greaterThanEqual(vWeight.z)),
+          c1.rgb,
+          select(vWeight.y.greaterThanEqual(vWeight.z), c2.rgb, c3.rgb),
+        );
+    // Undo pre-multiplied alpha from atlas bake
+    let blendedRgb = mul(
+      dominantRgb,
+      div(float(1), max(dominantAlpha, float(0.001))),
+    );
+    blendedRgb = saturate(blendedRgb);
+
+    // ── Normal: match dominant sprite so lighting is consistent with color ──
+    const n1 = texture(normalTex, getUV(vUV1, vS1, fs)).xyz;
+    const n2 = mega ? n1 : texture(normalTex, getUV(vUV2, vS2, fs)).xyz;
+    const n3 = mega ? n1 : texture(normalTex, getUV(vUV3, vS3, fs)).xyz;
+    const normEnc = mega
+      ? n1
+      : select(
+          vWeight.x
+            .greaterThanEqual(vWeight.y)
+            .and(vWeight.x.greaterThanEqual(vWeight.z)),
+          n1,
+          select(vWeight.y.greaterThanEqual(vWeight.z), n2, n3),
+        );
+    const worldNormRaw = normalize(sub(mul(normEnc, float(2.0)), float(1.0)));
+    const worldNorm = normalize(mix(vec3(0, 1, 0), worldNormRaw, uNormStr));
+    // Roughness/metalness from atlas (R and G channels), same dominant-sprite selection as color/normal.
+    const rm1 = texture(roughnessMetalTex, getUV(vUV1, vS1, fs));
+    const rm2 = mega ? rm1 : texture(roughnessMetalTex, getUV(vUV2, vS2, fs));
+    const rm3 = mega ? rm1 : texture(roughnessMetalTex, getUV(vUV3, vS3, fs));
+    const sampledRoughness = mega
+      ? rm1.r
+      : select(
+          vWeight.x
+            .greaterThanEqual(vWeight.y)
+            .and(vWeight.x.greaterThanEqual(vWeight.z)),
+          rm1.r,
+          select(vWeight.y.greaterThanEqual(vWeight.z), rm2.r, rm3.r),
+        );
+    const sampledMetalness = mega
+      ? rm1.g
+      : select(
+          vWeight.x
+            .greaterThanEqual(vWeight.y)
+            .and(vWeight.x.greaterThanEqual(vWeight.z)),
+          rm1.g,
+          select(vWeight.y.greaterThanEqual(vWeight.z), rm2.g, rm3.g),
+        );
+    // Diffuse term: wrap lighting (0 = Lambert; 0.3–0.5 = softer foliage).
+    const NdotL = max(dot(worldNorm, uSunDir), float(0));
+    const NdotLWrap = div(add(NdotL, uDiffuseWrap), add(float(1), uDiffuseWrap));
+    // View direction for specular (fragment world position from billboard).
+    const viewDir = normalize(sub(cameraPosition, positionWorld));
+    const NdotV = max(dot(worldNorm, viewDir), float(0.001));
+    const halfVec = normalize(add(uSunDir, viewDir));
+    const NdotH = max(dot(worldNorm, halfVec), float(0));
+    const HdotV = max(dot(halfVec, viewDir), float(0.001));
+    const roughnessClamp = max(sampledRoughness, float(0.04));
+    // GGX specular (match octahedral-impostor-v8): additive, roughness-driven.
+    const a2 = pow(roughnessClamp, float(4));
+    const dNH = add(mul(mul(NdotH, NdotH), sub(a2, float(1))), float(1));
+    const D = div(a2, add(mul(float(3.14159), mul(dNH, dNH)), float(0.001)));
+    const F0 = mix(vec3(0.04, 0.04, 0.04), blendedRgb, sampledMetalness);
+    const F = add(F0, mul(sub(vec3(1, 1, 1), F0), pow(sub(float(1), HdotV), float(5))));
+    const k = div(mul(add(roughnessClamp, float(1)), add(roughnessClamp, float(1))), float(8));
+    const G1V = div(NdotV, add(mul(NdotV, sub(float(1), k)), k));
+    const G1L = div(NdotL, add(mul(NdotL, sub(float(1), k)), add(k, float(0.001))));
+    const G = mul(G1V, G1L);
+    const specDenom = add(mul(mul(float(4), NdotV), NdotL), float(0.001));
+    const specContrib = mul(
+      div(mul(mul(D, F), G), specDenom),
+      mul(uSunColor, select(NdotL.greaterThan(float(0)), NdotL, float(0))),
+    );
+    // Dielectric: diffuse * albedo; metal: no diffuse (only specular tinted by albedo). Use wrap for foliage.
+    const diffuseContrib = mul(
+      mul(sub(float(1), sampledMetalness), NdotLWrap),
+      mul(blendedRgb, uSunColor),
+    );
+    // Shadow: multiply sun contribution by inLightFactor (1 = lit, 0 = in shadow; set by receivedShadowNode when receiveShadow is true).
+    const sunContrib = mul(add(diffuseContrib, specContrib), inLightFactor);
+    // Hemisphere ambient (match v8): uAmbColor + mix(ground, sky, hemiT).
+    const hemiT = mul(add(worldNorm.y, 1.0), 0.5);
+    const hemiAmbient = add(uAmbColor, mix(uHemiGroundColor, uHemiSkyColor, hemiT));
+    // Combine: sun (diffuse + specular, shadowed) + hemi * albedo, then lightScale.
+    let light = add(sunContrib, mul(hemiAmbient, blendedRgb));
+    // Rim (Fresnel-style): additive edge glow at grazing angles to reduce flatness.
+    const rimFactor = mul(uRimStrength, pow(sub(float(1), NdotV), uRimPower));
+    light = add(light, mul(rimFactor, uRimColor));
+    light = mul(light, uLightScale);
+
+    // ── LOD dither fade-in ──
+    const dist = length(sub(centerNode, cameraPosition));
+    const fadeT = saturate(
+      div(sub(dist, sub(uLodDist, uFadeRange)), uFadeRange),
+    );
+    const dither = IGN(screenCoordinate.xy);
+    const alphaOut = select(
+      dither.greaterThan(fadeT),
+      float(0.0),
+      dominantAlpha,
+    );
+
+    return vec4(saturate(light), alphaOut);
+  });
+
+  // FrontSide only — avoids drawing both sides of the billboard (was causing layered/ghost look)
+  const mat = new THREE.MeshBasicNodeMaterial({ side: THREE.FrontSide });
+  mat.positionNode = positionNodeFn(); // positionNode = local-space pos, engine applies instanceMatrix
+  mat.colorNode = colorNodeFn();
+  mat.transparent = false; // alpha-tested opaque → depthWrite stays true
+  mat.alphaTest = alphaClamp;
+  mat.depthWrite = true;
+
+  if (receiveShadow) {
+    mat.receiveShadow = true;
+    mat.shadowPositionNode = Fn(() => positionWorld)();
+    mat.receivedShadowNode = Fn(([shadow]) => {
+      inLightFactor.assign(shadow.r);
+      return float(1);
+    })();
+  }
+
+  return mat;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public API
+// ─────────────────────────────────────────────────────────────────────────────
+export async function createOctahedralImpostorForest(opts = {}) {
+  const {
+    modelPath,
+    modelScene: _modelSceneOpt = null, // optional pre-built Three.js scene (skips GLTF load)
+    treeCount = 300,
+    treeScale = 1,
+    lodDistance = 80,
+    radius = 250,
+    minRadius = 30,
+    centerPosition = [0, 0, 0],
+    getTerrainHeight = null,
+    lod0AlphaTest = 0.1, // alpha test for LOD0 leaf materials
+    impostorSettings = {},
+  } = opts;
+
+  const iOpts = {
+    spritesPerSide: impostorSettings.spritesPerSide ?? 12,
+    textureSize: impostorSettings.textureSize ?? 2048,
+    alphaClamp: impostorSettings.alphaClamp ?? 0.1, // runtime discard — low to keep soft foliage
+    alphaTest: impostorSettings.alphaTest ?? 0.05, // bake discard — very low to capture full foliage
+    fadeRange: impostorSettings.fadeRange ?? 8, // crossfade half-width in world units
+    lod2Distance: impostorSettings.lod2Distance ?? 150, // mega-impostor starts here
+    lightScale: impostorSettings.lightScale ?? 1.0, // 1 = default; e.g. 0.8 for rocks to match PBR
+    bakeOnlyLargestMesh: impostorSettings.bakeOnlyLargestMesh ?? false, // if true, bake only the largest mesh (avoids "4 small + 1 big" per cell)
+    sphereMargin: impostorSettings.sphereMargin ?? 1.05, // bounding sphere inflation factor (1.05 = 5% margin)
+    // Best-looking impostor tweaks (match v8 + extra polish)
+    normalStrength: impostorSettings.normalStrength ?? 1.0, // 0 = flat up, 1 = full baked normal (v8-style)
+    rimStrength: impostorSettings.rimStrength ?? 0.14, // additive rim at grazing angles (0 = off)
+    rimPower: impostorSettings.rimPower ?? 3.0, // rim falloff (higher = tighter edge)
+    rimColor: impostorSettings.rimColor ?? null, // Vector3 or [r,g,b]; null = use hemi sky tint
+    diffuseWrap: impostorSettings.diffuseWrap ?? 0.0, // 0 = Lambert; 0.3–0.5 = softer foliage
+    receiveShadow: impostorSettings.receiveShadow ?? false, // sample scene directional light shadow map
+  };
+
+  // Dynamic lighting uniforms shared by all impostor materials (regular + mega)
+  // Initialised to match game defaults; updated via forest.updateSunDir() etc. each frame
+  const _uSunDir = uniform(new THREE.Vector3(-1.0, 0.55, 1.0).normalize());
+  const _uSunColor = uniform(new THREE.Vector3(0.85, 0.78, 0.6));
+  const _uAmbColor = uniform(new THREE.Vector3(0.35, 0.4, 0.5));
+  const _uHemiSkyColor = uniform(new THREE.Vector3(0.4, 0.45, 0.5));
+  const _uHemiGroundColor = uniform(new THREE.Vector3(0.25, 0.3, 0.2));
+
+  // LOD distance uniforms — lifted to forest scope so setters can update them at runtime
+  let _lodDist = lodDistance;
+  let _lod2Dist = iOpts.lod2Distance;
+  let _fadeRange = iOpts.fadeRange;
+  const _uLodDist = uniform(float(_lodDist));
+  const _uFadeRange = uniform(float(_fadeRange));
+  const _uLod2Dist = uniform(float(_lod2Dist));
+
+  // ── Load model ──────────────────────────────────────────────────────────────
+  let root;
+  if (_modelSceneOpt) {
+    root = _modelSceneOpt;
+  } else {
+    const gltf = await new Promise((res, rej) =>
+      _gltf.load(modelPath, res, undefined, rej),
+    );
+    root = gltf.scene;
+  }
+  root.updateMatrixWorld(true);
+
+  // ── Bake atlas (albedo+AO pass + world-normal pass) ────────────────────────
+  const bakeResult = bakeAtlas(root, {
+    textureSize: iOpts.textureSize,
+    spritesPerSide: iOpts.spritesPerSide,
+    alphaTest: iOpts.alphaTest,
+    bakeOnlyLargestMesh: iOpts.bakeOnlyLargestMesh,
+    sphereMargin: iOpts.sphereMargin,
+  });
+  const { colorTex, normalTex, roughnessMetalTex, sphere } = bakeResult;
+  // Use the same sphere the bake used (important when bakeOnlyLargestMesh: one mesh = one sphere)
+  const impostorScale = sphere.radius * 2 * treeScale;
+  const sphereCenter = sphere.center.clone().multiplyScalar(treeScale);
+
+  // ── Near-LOD geometry ──────────────────────────────────────────────────────
+  // Uniforms for dither fade-out on near LOD0 trees as they approach lodDistance
+  const uNearLodDist = uniform(float(lodDistance));
+  const uNearFadeRange = uniform(float(iOpts.fadeRange));
+
+  const leafGeos = [],
+    leafMats = [],
+    trunkGeos = [],
+    trunkMats = [];
+  root.traverse((o) => {
+    if (!o.isMesh || !o.geometry) return;
+    const g = o.geometry.clone();
+    g.applyMatrix4(o.matrixWorld);
+    // Skip flat/degenerate meshes (LOD cards, shadow planes, billboard proxies left in the export).
+    // A genuine tree mesh has significant extent in all 3 axes; a flat plane has near-zero in one.
+    if (isFlatGeometry(g)) return;
+    const m = o.material;
+    const name = (o.name + " " + (m?.name ?? "")).toLowerCase();
+    const isLeaf =
+      m?.transparent ||
+      /leaf|leave|foliage|canopy|frond|branch/i.test(name) ||
+      (m?.map && (m?.side === THREE.DoubleSide || m?.alphaTest > 0));
+    // Compute geometry bounds for wind height factor
+    g.computeBoundingBox();
+    const geoMinY = g.boundingBox.min.y;
+    const geoMaxY = g.boundingBox.max.y;
+    const geoHeight = Math.max(0.1, geoMaxY - geoMinY);
+
+    const nodeMat = new THREE.MeshStandardNodeMaterial({
+      color: m?.color?.getHex?.() ?? 0x448833,
+      roughness: m?.roughness ?? 0.8,
+      metalness: m?.metalness ?? 0,
+      map: m?.map ?? null,
+      transparent: isLeaf,
+      alphaTest: isLeaf ? lod0AlphaTest : 0.5,
+      side: isLeaf ? THREE.DoubleSide : (m?.side ?? THREE.FrontSide),
+      depthWrite: true,
+    });
+
+    // Wind displacement for leaves (trunk stays fixed)
+    if (isLeaf) {
+      const uGeoMinY = uniform(float(geoMinY));
+      const uGeoHeight = uniform(float(geoHeight));
+      nodeMat.positionNode = Fn(() => {
+        const heightFactor = saturate(
+          div(sub(positionLocal.y, uGeoMinY), uGeoHeight),
+        );
+        const seedOffset = add(positionWorld.x, positionWorld.z);
+        const windOffset = windDisplacement(
+          positionWorld,
+          heightFactor,
+          seedOffset,
+        );
+        return add(positionLocal, windOffset);
+      })();
+    }
+
+    // LOD dither fade-out: near tree disappears as it approaches lodDistance
+    // fadeT: 1=near camera (fully visible), 0=at/past lodDist (fully dithered away)
+    const matMap = m?.map ?? null;
+    nodeMat.alphaNode = Fn(() => {
+      const dist = length(sub(positionWorld, cameraPosition));
+      const fadeT = saturate(
+        div(sub(add(uNearLodDist, uNearFadeRange), dist), uNearFadeRange),
+      );
+      const dither = IGN(screenCoordinate.xy);
+      // For leaves: preserve texture alpha for leaf shape; for trunk: fully opaque when not dithered
+      const baseAlpha = matMap ? texture(matMap, uv()).a : float(1.0);
+      return select(dither.greaterThan(fadeT), float(0.0), baseAlpha);
+    })();
+
+    if (isLeaf) {
+      leafGeos.push(g);
+      leafMats.push(nodeMat);
+    } else {
+      trunkGeos.push(g);
+      trunkMats.push(nodeMat);
+    }
+  });
+
+  // ── Scatter positions ───────────────────────────────────────────────────────
+  const cx0 = centerPosition[0],
+    cz0 = centerPosition[2];
+  const posX = new Float32Array(treeCount);
+  const posY = new Float32Array(treeCount);
+  const posZ = new Float32Array(treeCount);
+  const allNearMats = new Float32Array(treeCount * 16);
+  const allImpostorMats = new Float32Array(treeCount * 16); // T(center)*S(impostorScale)
+  const allCenters = new Float32Array(treeCount * 3);
+
+  const _m = new THREE.Matrix4();
+  const _sc = new THREE.Vector3(treeScale, treeScale, treeScale);
+
+  for (let i = 0; i < treeCount; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const dist = minRadius + Math.random() * (radius - minRadius);
+    const x = cx0 + Math.cos(angle) * dist;
+    const z = cz0 + Math.sin(angle) * dist;
+    const y = getTerrainHeight ? getTerrainHeight(x, z) : centerPosition[1];
+
+    posX[i] = x;
+    posY[i] = y;
+    posZ[i] = z;
+
+    // Near: TRS with treeScale
+    _m.makeRotationY(Math.random() * Math.PI * 2)
+      .scale(_sc)
+      .setPosition(x, y, z);
+    _m.toArray(allNearMats, i * 16);
+
+    // Impostor: T(sphereCenter) * S(impostorScale).
+    // sphereCenter.y (= sphere.center.y * treeScale) matches where the bake camera aimed (sphere.center),
+    // so UV=0.5 in the atlas sprite lands at the correct world height for every model.
+    const wcx = x + sphereCenter.x;
+    const wcy = y + sphereCenter.y;
+    const wcz = z + sphereCenter.z;
+    allCenters[i * 3] = wcx;
+    allCenters[i * 3 + 1] = wcy;
+    allCenters[i * 3 + 2] = wcz;
+    _m.identity()
+      .makeScale(impostorScale, impostorScale, impostorScale)
+      .setPosition(wcx, wcy, wcz);
+    _m.toArray(allImpostorMats, i * 16);
+  }
+
+  // ── Near InstancedMeshes ────────────────────────────────────────────────────
+  const group = new THREE.Group();
+  const nearMeshes = [];
+
+  const makeNearMesh = (geos, mats) => {
+    if (!geos.length) return null;
+    const geo = mergeGeometries(geos, true);
+    geo.computeBoundingSphere();
+    const im = new THREE.InstancedMesh(
+      geo,
+      mats.length === 1 ? mats[0] : mats,
+      treeCount,
+    );
+    im.castShadow = true;
+    im.frustumCulled = false;
+    for (let i = 0; i < treeCount; i++) {
+      _m.fromArray(allNearMats, i * 16);
+      im.setMatrixAt(i, _m);
+    }
+    im.instanceMatrix.needsUpdate = true;
+    im.count = treeCount;
+    group.add(im);
+    nearMeshes.push(im);
+    return im;
+  };
+  makeNearMesh(trunkGeos, trunkMats);
+  makeNearMesh(leafGeos, leafMats);
+
+  // ── Impostor InstancedMesh ─────────────────────────────────────────────────
+  const planeGeo = new THREE.PlaneGeometry(1, 1);
+
+  // Storage buffer for per-instance center positions (compacted each frame)
+  // IMPORTANT: WebGPU storage buffers require 16-byte (vec4) alignment for vec3 data.
+  // Using vec4 with 4th component = 0 padding to avoid per-instance read misalignment.
+  const compactCenters = new Float32Array(treeCount * 4); // 4 floats per entry
+  const centersStorage = instancedArray(compactCenters, "vec4").setName(
+    "impostorCenters",
+  );
+
+  // Shared lightScale uniform — both materials use the same node so one setter updates both
+  const _uLightScale = uniform(float(iOpts.lightScale ?? 1.0));
+  // Shading uniforms — shared so GUI can tweak in real time
+  const _uNormStr = uniform(float(iOpts.normalStrength ?? 1.0));
+  const _uRimStrength = uniform(float(iOpts.rimStrength ?? 0.14));
+  const _uRimPower = uniform(float(iOpts.rimPower ?? 3.0));
+  const _rimColorVec =
+    iOpts.rimColor != null
+      ? Array.isArray(iOpts.rimColor)
+        ? new THREE.Vector3(iOpts.rimColor[0], iOpts.rimColor[1], iOpts.rimColor[2])
+        : iOpts.rimColor.clone()
+      : new THREE.Vector3(0.4, 0.5, 0.65);
+  const _uRimColor = uniform(_rimColorVec);
+  const _uDiffuseWrap = uniform(float(iOpts.diffuseWrap ?? 0.0));
+
+  const _sunOpts = {
+    sunDir: _uSunDir,
+    sunColor: _uSunColor,
+    ambColor: _uAmbColor,
+    hemiSkyColor: _uHemiSkyColor,
+    hemiGroundColor: _uHemiGroundColor,
+    lightScale: _uLightScale,
+    normStrUniform: _uNormStr,
+    rimStrengthUniform: _uRimStrength,
+    rimPowerUniform: _uRimPower,
+    rimColorUniform: _uRimColor,
+    diffuseWrapUniform: _uDiffuseWrap,
+  };
+  const impostorMat = createImpostorMaterial(
+    colorTex,
+    normalTex,
+    roughnessMetalTex,
+    impostorScale,
+    centersStorage,
+    {
+      ...iOpts,
+      lodDistance,
+      ..._sunOpts,
+      lodDistUniform: _uLodDist,
+      fadeRangeUniform: _uFadeRange,
+    },
+  );
+  const impostorMesh = new THREE.InstancedMesh(
+    planeGeo,
+    impostorMat,
+    treeCount,
+  );
+  impostorMesh.castShadow = false;
+  impostorMesh.frustumCulled = false;
+  impostorMesh.count = 0;
+  group.add(impostorMesh);
+
+  // ── Wireframe overlay for debug (same geometry + instance matrices as LOD1 impostor)
+  const wireframeMat = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    wireframe: true,
+    depthTest: true,
+    depthWrite: false,
+  });
+  const wireframeMesh = new THREE.InstancedMesh(
+    planeGeo,
+    wireframeMat,
+    treeCount,
+  );
+  wireframeMesh.castShadow = false;
+  wireframeMesh.frustumCulled = false;
+  wireframeMesh.count = 0;
+  wireframeMesh.visible = false;
+  group.add(wireframeMesh);
+
+  // ── LOD3 Mega-impostor (single-sprite, beyond lod2Distance) ────────────────
+  const compactCenters2 = new Float32Array(treeCount * 4);
+  const centersStorage2 = instancedArray(compactCenters2, "vec4").setName(
+    "megaCenters",
+  );
+  const megaMat = createImpostorMaterial(
+    colorTex,
+    normalTex,
+    roughnessMetalTex,
+    impostorScale,
+    centersStorage2,
+    {
+      ...iOpts,
+      lodDistance: iOpts.lod2Distance,
+      mega: true,
+      ..._sunOpts,
+      lodDistUniform: _uLod2Dist,
+      fadeRangeUniform: _uFadeRange,
+    },
+  );
+  const megaMesh = new THREE.InstancedMesh(planeGeo, megaMat, treeCount);
+  megaMesh.castShadow = false;
+  megaMesh.frustumCulled = false;
+  megaMesh.count = 0;
+  group.add(megaMesh);
+
+  // ── LOD update ─────────────────────────────────────────────────────────────
+  const _compactNear = new Float32Array(treeCount * 16);
+  const _cullSphere = new THREE.Sphere(
+    new THREE.Vector3(),
+    impostorScale * 0.5,
+  );
+
+  // LOD overlap zones — mutable so setters can update them at runtime
+  let innerDistSq, outerDistSq, inner2DistSq, outer2DistSq;
+  function _recomputeThresholds() {
+    innerDistSq = (_lodDist - _fadeRange) ** 2;
+    outerDistSq = (_lodDist + _fadeRange) ** 2;
+    inner2DistSq = (_lod2Dist - _fadeRange) ** 2;
+    outer2DistSq = (_lod2Dist + _fadeRange) ** 2;
+  }
+  _recomputeThresholds();
+
+  let _frameCount = 0;
+  // LOD count monitors — updated every frame, read by getLodCounts()
+  let _lastNearCount = 0,
+    _lastLod1Count = 0,
+    _lastLod2Count = 0;
+
+  let _lastTime = performance.now();
+
+  function update(camera, frustum) {
+    // Temporal dithering: advance golden-ratio frame offset for IGN jitter
+    _frameCount++;
+    uFrameOffset.value = (_frameCount * 0.6180339887) % 1.0;
+
+    // Wind time — accumulates real elapsed time for smooth animation
+    const now = performance.now();
+    const dt = (now - _lastTime) / 1000;
+    _lastTime = now;
+    uWindTime.value += dt;
+
+    const cpx = camera.position.x;
+    const cpy = camera.position.y;
+    const cpz = camera.position.z;
+
+    let nearCount = 0,
+      farCount = 0,
+      megaCount = 0;
+
+    for (let i = 0; i < treeCount; i++) {
+      // Frustum cull first — skips invisible trees cheaply
+      if (frustum) {
+        _cullSphere.center.set(posX[i], posY[i], posZ[i]);
+        if (!frustum.intersectsSphere(_cullSphere)) continue;
+      }
+
+      const dx = posX[i] - cpx,
+        dy = posY[i] - cpy,
+        dz = posZ[i] - cpz;
+      const distSq = dx * dx + dy * dy + dz * dz;
+
+      // LOD0: real model — shown up to (lodDist + fadeRange) for smooth crossfade
+      if (distSq < outerDistSq) {
+        for (let j = 0; j < 16; j++)
+          _compactNear[nearCount * 16 + j] = allNearMats[i * 16 + j];
+        nearCount++;
+      }
+
+      // LOD1: standard impostor — only before mega starts (no overlap = no double-drawn layer)
+      if (distSq >= innerDistSq && distSq < inner2DistSq) {
+        _m.fromArray(allImpostorMats, i * 16);
+        impostorMesh.setMatrixAt(farCount, _m);
+        compactCenters[farCount * 4] = allCenters[i * 3];
+        compactCenters[farCount * 4 + 1] = allCenters[i * 3 + 1];
+        compactCenters[farCount * 4 + 2] = allCenters[i * 3 + 2];
+        farCount++;
+      }
+
+      // LOD2: mega-impostor (single sprite) — shown from (lod2Dist - fadeRange) outward
+      if (distSq >= inner2DistSq) {
+        _m.fromArray(allImpostorMats, i * 16);
+        megaMesh.setMatrixAt(megaCount, _m);
+        compactCenters2[megaCount * 4] = allCenters[i * 3];
+        compactCenters2[megaCount * 4 + 1] = allCenters[i * 3 + 1];
+        compactCenters2[megaCount * 4 + 2] = allCenters[i * 3 + 2];
+        megaCount++;
+      }
+    }
+
+    // Near meshes
+    for (const nm of nearMeshes) {
+      nm.instanceMatrix.array.set(_compactNear.subarray(0, nearCount * 16));
+      nm.count = nearCount;
+      nm.instanceMatrix.needsUpdate = true;
+    }
+
+    // LOD1 impostors
+    impostorMesh.count = farCount;
+    impostorMesh.instanceMatrix.needsUpdate = true;
+    centersStorage.value.needsUpdate = true;
+
+    // Wireframe overlay: same count and matrices as LOD1
+    wireframeMesh.count = farCount;
+    for (let i = 0; i < farCount; i++) {
+      impostorMesh.getMatrixAt(i, _m);
+      wireframeMesh.setMatrixAt(i, _m);
+    }
+    wireframeMesh.instanceMatrix.needsUpdate = true;
+
+    // LOD2 mega-impostors
+    megaMesh.count = megaCount;
+    megaMesh.instanceMatrix.needsUpdate = true;
+    centersStorage2.value.needsUpdate = true;
+
+    // Store counts for external monitors
+    _lastNearCount = nearCount;
+    _lastLod1Count = farCount;
+    _lastLod2Count = megaCount;
+  }
+
+  function dispose() {
+    for (const nm of nearMeshes) {
+      nm.geometry.dispose();
+      group.remove(nm);
+    }
+    planeGeo.dispose();
+    impostorMat.dispose();
+    megaMat.dispose();
+    wireframeMat.dispose();
+    colorTex.dispose();
+    normalTex.dispose();
+    roughnessMetalTex.dispose();
+    group.remove(impostorMesh);
+    group.remove(wireframeMesh);
+    group.remove(megaMesh);
+  }
+
+  return {
+    group,
+    update,
+    dispose,
+    impostorMesh,
+    // Lighting (instant)
+    updateSunDir: (v3) => _uSunDir.value.copy(v3),
+    updateSunColor: (v3) => _uSunColor.value.copy(v3),
+    updateAmbColor: (v3) => _uAmbColor.value.copy(v3),
+    updateHemiColors: (skyV3, groundV3) => {
+      _uHemiSkyColor.value.copy(skyV3);
+      _uHemiGroundColor.value.copy(groundV3);
+    },
+    setLightScale: (v) => {
+      _uLightScale.value = v;
+    },
+    // Impostor shading (instant — for GUI fine-tuning)
+    setNormalStrength: (v) => {
+      _uNormStr.value = v;
+    },
+    setRimStrength: (v) => {
+      _uRimStrength.value = v;
+    },
+    setRimPower: (v) => {
+      _uRimPower.value = v;
+    },
+    setRimColor: (r, g, b) => {
+      _uRimColor.value.set(r, g, b);
+    },
+    setDiffuseWrap: (v) => {
+      _uDiffuseWrap.value = v;
+    },
+    // LOD distances (instant — updates uniforms + recomputes JS thresholds)
+    setLodDistance: (d) => {
+      _lodDist = d;
+      _uLodDist.value = d;
+      _recomputeThresholds();
+    },
+    setLod2Distance: (d) => {
+      _lod2Dist = d;
+      _uLod2Dist.value = d;
+      _recomputeThresholds();
+    },
+    setFadeRange: (f) => {
+      _fadeRange = f;
+      _uFadeRange.value = f;
+      _recomputeThresholds();
+    },
+    // Alpha cutout on impostor materials (instant)
+    setAlphaClamp: (v) => {
+      impostorMat.alphaTest = v;
+      megaMat.alphaTest = v;
+    },
+    // Alpha test on LOD0 real mesh leaf materials (instant)
+    setLod0AlphaTest: (v) => {
+      leafMats.forEach((mat) => {
+        mat.alphaTest = v;
+      });
+    },
+    // Light scale multiplier for impostor brightness (instant)
+    setLightScale: (v) => {
+      _uLightScale.value = v;
+    },
+    // Wind controls (instant)
+    setWindStrength: (v) => {
+      uWindStrength.value = v;
+    },
+    setWindSpeed: (v) => {
+      uWindSpeed.value = v;
+    },
+    setWindDirection: (x, z) => {
+      uWindDirection.value.set(x, z);
+    },
+    // Debug: show wireframe of impostor plane(s)
+    setWireframeVisible: (v) => {
+      wireframeMesh.visible = !!v;
+    },
+    // Per-LOD visibility for debug isolation
+    setLodVisible: (tier, v) => {
+      if (tier === 0) nearMeshes.forEach((m) => (m.visible = v));
+      else if (tier === 1) impostorMesh.visible = v;
+      else if (tier === 2) megaMesh.visible = v;
+    },
+    // Frame counts for monitors
+    getLodCounts: () => ({
+      near: _lastNearCount,
+      lod1: _lastLod1Count,
+      lod2: _lastLod2Count,
+    }),
+  };
+}

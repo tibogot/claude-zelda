@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Octahedral Forest — PBR Impostors (WebGPU / TSL)</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #05060a;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        bottom: 12px;
+        left: 12px;
+        z-index: 10;
+        font:
+          12px/1.5 "SF Mono",
+          "Fira Code",
+          monospace;
+        color: #8a9aaa;
+        background: rgba(0, 0, 0, 0.6);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: none;
+      }
+      #info strong {
+        color: #c0d0e0;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">
+      <strong>Octahedral forest impostors</strong> — near = real PBR trees, far
+      = PBR impostor quads (WebGPU / TSL, shadows on).<br />
+      Drag to orbit, scroll to zoom.
+    </div>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { createOctahedralImpostorForest } from "./octahedralImpostor2.js";
+      import { Pane } from "https://cdn.jsdelivr.net/npm/tweakpane@4.0.2/dist/tweakpane.min.js";
+
+      async function main() {
+        const canvas = document.createElement("canvas");
+        document.body.appendChild(canvas);
+
+        const renderer = new THREE.WebGPURenderer({
+          antialias: true,
+          canvas,
+        });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.5;
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x87c8ff);
+
+        const camera = new THREE.PerspectiveCamera(
+          55,
+          window.innerWidth / window.innerHeight,
+          0.1,
+          800,
+        );
+        camera.position.set(0, 40, 120);
+
+        const controls = new OrbitControls(camera, canvas);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.target.set(0, 0, 0);
+
+        // Ground plane to catch shadows
+      const groundGeo = new THREE.PlaneGeometry(800, 800);
+      const groundMat = new THREE.MeshStandardNodeMaterial({
+        color: 0x4c6a3a,
+          roughness: 0.75,
+          metalness: 0.0,
+        });
+        const ground = new THREE.Mesh(groundGeo, groundMat);
+        ground.rotation.x = -Math.PI / 2;
+        ground.position.y = 0;
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        // Lighting with shadows
+        const hemi = new THREE.HemisphereLight(0xb0c8ff, 0x444422, 0.8);
+        scene.add(hemi);
+
+        const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+        sun.position.set(80, 120, 60);
+        sun.castShadow = true;
+        sun.shadow.mapSize.set(2048, 2048);
+        const d = 260;
+        sun.shadow.camera.left = -d;
+        sun.shadow.camera.right = d;
+        sun.shadow.camera.top = d;
+        sun.shadow.camera.bottom = -d;
+        sun.shadow.camera.near = 10;
+        sun.shadow.camera.far = 400;
+        scene.add(sun);
+
+        // Simple environment-like fill using a big sphere
+        const skyGeo = new THREE.SphereGeometry(600, 32, 16);
+        const skyMat = new THREE.MeshBasicMaterial({
+          color: 0xd0ecff,
+          side: THREE.BackSide,
+        });
+        const sky = new THREE.Mesh(skyGeo, skyMat);
+        scene.add(sky);
+
+        // Forest impostor setup
+        const forest = await createOctahedralImpostorForest({
+          modelPath: "./models/tree.glb",
+          treeCount: 400,
+          treeScale: 1.0,
+          lodDistance: 60,
+          radius: 220,
+          minRadius: 30,
+          centerPosition: [0, 0, 0],
+          impostorSettings: {
+            spritesPerSide: 12,
+            textureSize: 2048,
+            fadeRange: 10,
+            lod2Distance: 140,
+            lightScale: 1.4,
+            bakeOnlyLargestMesh: true,
+            sphereMargin: 1.05,
+          },
+          // Flat terrain so trees sit exactly on the ground plane at y=0
+          getTerrainHeight: (x, z) => 0,
+        });
+
+        scene.add(forest.group);
+
+        await renderer.init();
+
+        // ─────────────────────────────────────────────────────────────────
+        // Tweakpane controls
+        // ─────────────────────────────────────────────────────────────────
+        const pane = new Pane();
+        const params = {
+          exposure: renderer.toneMappingExposure,
+          hemiIntensity: hemi.intensity,
+          sunIntensity: sun.intensity,
+          sunX: sun.position.x,
+          sunY: sun.position.y,
+          sunZ: sun.position.z,
+          lightScale: 1.4,
+          lodDistance: 60,
+          lod2Distance: 140,
+          fadeRange: 10,
+          alphaClamp: 0.1,
+          lod0Alpha: 0.1,
+          windStrength: 0.0,
+          windSpeed: 1.0,
+          showNear: true,
+          showLod1: true,
+          showLod2: true,
+          wireframeImpostor: false,
+        };
+
+        const fScene = pane.addFolder({ title: "Scene / Lighting" });
+        fScene
+          .addBinding(params, "exposure", { min: 0.2, max: 3.0, step: 0.05 })
+          .on("change", (ev) => {
+            renderer.toneMappingExposure = ev.value;
+          });
+        fScene
+          .addBinding(params, "hemiIntensity", { min: 0, max: 2, step: 0.05 })
+          .on("change", (ev) => {
+            hemi.intensity = ev.value;
+          });
+        fScene
+          .addBinding(params, "sunIntensity", { min: 0, max: 4, step: 0.05 })
+          .on("change", (ev) => {
+            sun.intensity = ev.value;
+            const dir = new THREE.Vector3(
+              params.sunX,
+              params.sunY,
+              params.sunZ,
+            ).normalize();
+            forest.updateSunDir(dir);
+          });
+        fScene
+          .addBinding(params, "sunX", { min: -200, max: 200, step: 1 })
+          .on("change", () => {
+            sun.position.set(params.sunX, params.sunY, params.sunZ);
+            const dir = new THREE.Vector3(
+              params.sunX,
+              params.sunY,
+              params.sunZ,
+            ).normalize();
+            forest.updateSunDir(dir);
+          });
+        fScene
+          .addBinding(params, "sunY", { min: 10, max: 200, step: 1 })
+          .on("change", () => {
+            sun.position.set(params.sunX, params.sunY, params.sunZ);
+            const dir = new THREE.Vector3(
+              params.sunX,
+              params.sunY,
+              params.sunZ,
+            ).normalize();
+            forest.updateSunDir(dir);
+          });
+        fScene
+          .addBinding(params, "sunZ", { min: -200, max: 200, step: 1 })
+          .on("change", () => {
+            sun.position.set(params.sunX, params.sunY, params.sunZ);
+            const dir = new THREE.Vector3(
+              params.sunX,
+              params.sunY,
+              params.sunZ,
+            ).normalize();
+            forest.updateSunDir(dir);
+          });
+
+        const fImpostor = pane.addFolder({ title: "Impostor / LOD" });
+        fImpostor
+          .addBinding(params, "lightScale", { min: 0.2, max: 3.0, step: 0.05 })
+          .on("change", (ev) => {
+            forest.setLightScale(ev.value);
+          });
+        fImpostor
+          .addBinding(params, "lodDistance", { min: 10, max: 200, step: 1 })
+          .on("change", (ev) => {
+            forest.setLodDistance(ev.value);
+          });
+        fImpostor
+          .addBinding(params, "lod2Distance", { min: 50, max: 400, step: 1 })
+          .on("change", (ev) => {
+            forest.setLod2Distance(ev.value);
+          });
+        fImpostor
+          .addBinding(params, "fadeRange", { min: 2, max: 50, step: 1 })
+          .on("change", (ev) => {
+            forest.setFadeRange(ev.value);
+          });
+        fImpostor
+          .addBinding(params, "alphaClamp", { min: 0.0, max: 0.5, step: 0.01 })
+          .on("change", (ev) => {
+            forest.setAlphaClamp(ev.value);
+          });
+        fImpostor
+          .addBinding(params, "lod0Alpha", { min: 0.0, max: 0.5, step: 0.01 })
+          .on("change", (ev) => {
+            forest.setLod0AlphaTest(ev.value);
+          });
+
+        const fWind = pane.addFolder({ title: "Wind" });
+        fWind
+          .addBinding(params, "windStrength", {
+            min: 0.0,
+            max: 1.5,
+            step: 0.05,
+          })
+          .on("change", (ev) => {
+            forest.setWindStrength(ev.value);
+          });
+        fWind
+          .addBinding(params, "windSpeed", { min: 0.0, max: 4.0, step: 0.05 })
+          .on("change", (ev) => {
+            forest.setWindSpeed(ev.value);
+          });
+
+        const fDebug = pane.addFolder({ title: "Debug" });
+        fDebug
+          .addBinding(params, "showNear")
+          .on("change", (ev) => forest.setLodVisible(0, ev.value));
+        fDebug
+          .addBinding(params, "showLod1")
+          .on("change", (ev) => forest.setLodVisible(1, ev.value));
+        fDebug
+          .addBinding(params, "showLod2")
+          .on("change", (ev) => forest.setLodVisible(2, ev.value));
+        fDebug
+          .addBinding(params, "wireframeImpostor")
+          .on("change", (ev) => forest.setWireframeVisible(ev.value));
+
+        function onResize() {
+          const w = window.innerWidth;
+          const h = window.innerHeight;
+          camera.aspect = w / h;
+          camera.updateProjectionMatrix();
+          renderer.setSize(w, h);
+        }
+        window.addEventListener("resize", onResize);
+
+        renderer.setAnimationLoop(() => {
+          controls.update();
+          forest.update(camera);
+          renderer.render(scene, camera);
+        });
+      }
+
+      main().catch(console.error);
+    </script>
+  </body>
+</html>
