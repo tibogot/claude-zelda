@@ -230,6 +230,9 @@ const PARAMS = {
   rimColor:       { r: 0.4, g: 0.5, b: 0.65 }, // sky-tinted rim
   diffuseWrap:    0.0,  // 0 = Lambert; 0.3–0.5 = softer foliage
   receiveShadow:  true, // impostor receives shadow from directional light
+  // Edge AA (instant)
+  edgeSmoothScale: 1.5, // fwidth multiplier — 0 = hard cutout, 1–2 = smooth band
+  alphaClamp:      0.1, // smoothstep center (same as old alphaTest)
   // Bake (applied on next Load click)
   sphereMargin:  1.05,  // inflate bounding sphere to prevent frustum clip
   alphaTest:     0.05,  // discard threshold during bake
@@ -385,7 +388,8 @@ async function loadModel(path) {
     getTerrainHeight: () => 0,
     impostorSettings: {
       ...getQuality(),
-      alphaClamp:          0.1,
+      alphaClamp:          PARAMS.alphaClamp,
+      edgeSmoothScale:     PARAMS.edgeSmoothScale,
       alphaTest:           PARAMS.alphaTest,
       sphereMargin:        PARAMS.sphereMargin,
       lightScale:          PARAMS.lightScale,
@@ -506,6 +510,12 @@ fShade.addColor(PARAMS, "rimColor").name("Rim color").onChange(applyLightingToFo
 fShade.add(PARAMS, "diffuseWrap", 0, 0.8, 0.02).name("Diffuse wrap (foliage)").onChange(applyLightingToForest);
 fShade.add(PARAMS, "receiveShadow").name("Receive shadow (reload to apply)");
 fShade.open();
+
+// Edge AA folder — instant, no re-bake
+const fEdge = gui.addFolder("Edge AA (instant)");
+fEdge.add(PARAMS, "edgeSmoothScale", 0, 4, 0.1).name("Smooth scale").onChange(() => { if (forest) forest.setEdgeSmoothScale(PARAMS.edgeSmoothScale); });
+fEdge.add(PARAMS, "alphaClamp", 0.01, 0.5, 0.01).name("Alpha cutoff").onChange(() => { if (forest) forest.setAlphaClamp(PARAMS.alphaClamp); });
+fEdge.open();
 
 // Bake folder — applied on next Load
 const fBake = gui.addFolder("Bake (reload to apply)");

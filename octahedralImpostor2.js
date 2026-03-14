@@ -50,6 +50,7 @@ import {
   cos,
   pow,
   smoothstep,
+  fwidth,
 } from "three/tsl";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
@@ -905,6 +906,11 @@ function createImpostorMaterial(
   // Baked AO (optional): multiply ambient by AO for cavity darkening; enable/disable for debug.
   const aoTex = opts.aoTex ?? null;
   const uEnableAO = opts.enableAOUniform ?? uniform(float(0));
+  // Edge anti-aliasing: smoothstep over a fwidth-sized band around the alpha cutoff.
+  // uEdgeSmoothScale = 0 disables (pure hard cutoff), 1–2 = smooth 1–2 pixel band.
+  const uEdgeSmoothScale = opts.edgeSmoothUniform ?? uniform(float(1.5));
+  // uAlphaClamp: center of the smoothstep edge band (mirrors the old hard alphaTest value).
+  const uAlphaClamp = opts.alphaClampUniform ?? uniform(float(alphaClamp));
 
   // Varyings: sprite weights, indices, and pre-computed sprite UVs (vertex-stage parallax)
   const vWeight = varying(vec4(0, 0, 0, 0), "vWeight");
@@ -1061,6 +1067,18 @@ function createImpostorMaterial(
           c1.rgb,
           select(vWeight.y.greaterThanEqual(vWeight.z), c2.rgb, c3.rgb),
         );
+    // Edge anti-aliasing: smoothstep over a screen-derivative-sized band around the cutoff.
+    // fwidth gives the 1-pixel derivative of alpha — smoothstep over [cutoff-w, cutoff+w]
+    // turns the hard jagged silhouette into a 1-2 pixel soft gradient that feeds into
+    // the existing IGN dither, giving temporally anti-aliased edges at zero extra cost.
+    // Set uEdgeSmoothScale=0 to revert to hard alpha-test behavior.
+    const edgeW = mul(fwidth(dominantAlpha), uEdgeSmoothScale);
+    const smoothedAlpha = smoothstep(
+      sub(uAlphaClamp, edgeW),
+      add(uAlphaClamp, edgeW),
+      dominantAlpha,
+    );
+
     // Undo pre-multiplied alpha from atlas bake
     let blendedRgb = mul(
       dominantRgb,
@@ -1191,7 +1209,7 @@ function createImpostorMaterial(
     const ditheredAlpha = select(
       dither.greaterThan(fadeTSoft),
       float(0.0),
-      dominantAlpha,
+      smoothedAlpha,
     );
     // Ramp impostor in over the transition band so overall visibility blends smoothly
     const ramp = smoothstep(sub(uLodDist, uFadeRange), uLodDist, dist);
@@ -1205,7 +1223,7 @@ function createImpostorMaterial(
   mat.positionNode = positionNodeFn(); // positionNode = local-space pos, engine applies instanceMatrix
   mat.colorNode = colorNodeFn();
   mat.transparent = false; // alpha-tested opaque → depthWrite stays true
-  mat.alphaTest = alphaClamp;
+  mat.alphaTest = 0.005; // very low — smoothedAlpha handles the real cutoff in-shader
   mat.depthWrite = true;
 
   if (receiveShadow) {
@@ -1492,6 +1510,9 @@ export async function createOctahedralImpostorForest(opts = {}) {
   const _uDiffuseWrap = uniform(float(iOpts.diffuseWrap ?? 0.0));
 
   const _uEnableAO = uniform(float(iOpts.enableAO ? 1 : 0));
+  // Edge AA uniforms — shared by LOD1 and mega materials so one setter updates both
+  const _uEdgeSmoothScale = uniform(float(iOpts.edgeSmoothScale ?? 1.5));
+  const _uAlphaClamp = uniform(float(iOpts.alphaClamp ?? 0.1));
 
   const _sunOpts = {
     sunDir: _uSunDir,
@@ -1508,6 +1529,8 @@ export async function createOctahedralImpostorForest(opts = {}) {
     aoTex,
     enableAOUniform: _uEnableAO,
     enableAO: iOpts.enableAO,
+    edgeSmoothUniform: _uEdgeSmoothScale,
+    alphaClampUniform: _uAlphaClamp,
   };
   const impostorMat = createImpostorMaterial(
     colorTex,
@@ -1762,10 +1785,14 @@ export async function createOctahedralImpostorForest(opts = {}) {
       _uFadeRange.value = f;
       _recomputeThresholds();
     },
-    // Alpha cutout on impostor materials (instant)
+    // Alpha cutout center for the smooth edge band (instant).
+    // Also sets mat.alphaTest as a fallback floor when edgeSmoothScale is 0.
     setAlphaClamp: (v) => {
-      impostorMat.alphaTest = v;
-      megaMat.alphaTest = v;
+      _uAlphaClamp.value = v;
+    },
+    // Edge anti-aliasing width (instant). 0 = hard cutout, 1 = ~1px smooth, 2 = ~2px smooth.
+    setEdgeSmoothScale: (v) => {
+      _uEdgeSmoothScale.value = v;
     },
     // Alpha test on LOD0 real mesh leaf materials (instant)
     setLod0AlphaTest: (v) => {
