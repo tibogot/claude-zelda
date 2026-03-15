@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Wave PDE — Showcase</title>
+  <style>
+    @import url("https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap");
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: auto; background: #0a0a0a; display: flex; align-items: center; justify-content: center; }
+    #view {
+      width: min(80vmin, 640px);
+      aspect-ratio: 1;
+      max-width: 100%;
+      flex-shrink: 0;
+      background: #000;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 0 0 1px rgba(120, 180, 255, 0.15);
+      cursor: crosshair;
+    }
+    #view canvas { display: block; width: 100%; height: 100%; }
+    #controls {
+      position: fixed; top: 16px; left: 16px; width: 260px;
+      background: rgba(10, 10, 18, 0.95); backdrop-filter: blur(12px);
+      border: 1px solid rgba(120, 180, 255, 0.2); border-radius: 10px;
+      padding: 14px 16px; font-family: "DM Mono", monospace;
+      color: #c8daf0; font-size: 11px; z-index: 10;
+      max-height: calc(100vh - 32px); overflow-y: auto;
+    }
+    #controls h2 {
+      font-size: 11px; font-weight: 500; letter-spacing: 0.1em;
+      text-transform: uppercase; color: #78b4ff;
+      margin-bottom: 10px; padding-bottom: 6px;
+      border-bottom: 1px solid rgba(120, 180, 255, 0.2);
+    }
+    .ctrl-group { margin-bottom: 8px; }
+    .ctrl-group label {
+      display: flex; justify-content: space-between;
+      margin-bottom: 2px; color: #8a9ab0; font-size: 10px;
+    }
+    .ctrl-group label span { color: #78b4ff; font-weight: 500; }
+    .ctrl-group input[type="range"] {
+      appearance: none; -webkit-appearance: none; width: 100%; height: 4px;
+      border-radius: 2px; background: rgba(120, 180, 255, 0.15); outline: none;
+    }
+    .ctrl-group input[type="range"]::-webkit-slider-thumb {
+      appearance: none; -webkit-appearance: none; width: 12px; height: 12px;
+      border-radius: 50%; background: #78b4ff; cursor: pointer;
+    }
+    .ctrl-group input[type="color"] {
+      appearance: none; -webkit-appearance: none;
+      border: 1px solid rgba(120, 180, 255, 0.25); border-radius: 4px;
+      width: 100%; height: 20px; cursor: pointer; background: transparent; padding: 0;
+    }
+    .ctrl-group select {
+      width: 100%; background: rgba(15, 20, 35, 0.95);
+      border: 1px solid rgba(120, 180, 255, 0.25); border-radius: 6px;
+      color: #e0e8f0; font-family: "DM Mono", monospace;
+      font-size: 11px; padding: 5px 8px; cursor: pointer; outline: none;
+    }
+    .section-label {
+      font-size: 9px; text-transform: uppercase; letter-spacing: 0.12em;
+      color: rgba(120, 180, 255, 0.5); margin: 12px 0 5px;
+    }
+    button {
+      width: 100%; padding: 6px; margin-top: 4px;
+      background: rgba(120, 180, 255, 0.12);
+      border: 1px solid rgba(120, 180, 255, 0.3);
+      border-radius: 6px; color: #78b4ff;
+      font-family: "DM Mono", monospace; font-size: 10px;
+      cursor: pointer; letter-spacing: 0.05em;
+    }
+    button:hover { background: rgba(120, 180, 255, 0.22); }
+    .hint { font-size: 9px; color: #6a7a90; margin-top: 4px; line-height: 1.4; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.min.js",
+        "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.min.js",
+        "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.tsl.min.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="controls">
+    <h2>Wave PDE</h2>
+    <p class="hint">Click / drag on the canvas to inject waves.</p>
+
+    <div class="section-label">Wave equation</div>
+    <div class="ctrl-group">
+      <label>Speed (c²) <span id="speedVal">0.040</span></label>
+      <input type="range" id="speed" min="0.005" max="0.12" step="0.001" value="0.04" />
+    </div>
+    <div class="ctrl-group">
+      <label>Damping <span id="dampVal">0.993</span></label>
+      <input type="range" id="damp" min="0.95" max="0.9995" step="0.0005" value="0.993" />
+    </div>
+    <div class="ctrl-group">
+      <label>Border absorb <span id="borderVal">0.060</span></label>
+      <input type="range" id="border" min="0.01" max="0.25" step="0.005" value="0.06" />
+    </div>
+
+    <div class="section-label">Injection</div>
+    <div class="ctrl-group">
+      <label>Strength <span id="injStrVal">0.80</span></label>
+      <input type="range" id="injStr" min="0" max="1" step="0.02" value="0.8" />
+    </div>
+    <div class="ctrl-group">
+      <label>Amplitude <span id="injAmpVal">0.90</span></label>
+      <input type="range" id="injAmp" min="0" max="1" step="0.02" value="0.9" />
+    </div>
+    <div class="ctrl-group">
+      <label>Radius <span id="injRadVal">0.030</span></label>
+      <input type="range" id="injRad" min="0.005" max="0.15" step="0.005" value="0.03" />
+    </div>
+    <div class="ctrl-group">
+      <label>Auto-inject</label>
+      <select id="autoInject">
+        <option value="0" selected>Off</option>
+        <option value="1">Random</option>
+        <option value="2">Center</option>
+      </select>
+    </div>
+    <div class="ctrl-group">
+      <label>Auto interval (s) <span id="autoIntVal">1.0</span></label>
+      <input type="range" id="autoInt" min="0.2" max="4" step="0.1" value="1" />
+    </div>
+
+    <div class="section-label">Display</div>
+    <div class="ctrl-group">
+      <label>Mode</label>
+      <select id="displayMode">
+        <option value="rings" selected>Gradient rings</option>
+        <option value="raw">Raw height</option>
+        <option value="both">Rings + height tint</option>
+      </select>
+    </div>
+    <div class="ctrl-group">
+      <label>Grad scale <span id="gradVal">1.5</span></label>
+      <input type="range" id="gradScale" min="0.2" max="8" step="0.1" value="1.5" />
+    </div>
+    <div class="ctrl-group">
+      <label>Ring threshold <span id="threshVal">0.40</span></label>
+      <input type="range" id="thresh" min="0.05" max="0.9" step="0.01" value="0.4" />
+    </div>
+    <div class="ctrl-group">
+      <label>Edge sharpness <span id="sharpVal">1.00</span></label>
+      <input type="range" id="sharp" min="0" max="1" step="0.01" value="1" />
+    </div>
+    <div class="ctrl-group">
+      <label>Ring opacity <span id="ringOpVal">1.00</span></label>
+      <input type="range" id="ringOp" min="0" max="1" step="0.02" value="1" />
+    </div>
+
+    <div class="section-label">Colors</div>
+    <div class="ctrl-group">
+      <label>Background</label>
+      <input type="color" id="bgColor" value="#000814" />
+    </div>
+    <div class="ctrl-group">
+      <label>Ring color</label>
+      <input type="color" id="ringColor" value="#ffffff" />
+    </div>
+
+    <div class="section-label">Simulation</div>
+    <div class="ctrl-group">
+      <label>Resolution</label>
+      <select id="res">
+        <option value="256">256</option>
+        <option value="512" selected>512</option>
+        <option value="1024">1024</option>
+      </select>
+    </div>
+    <div class="ctrl-group">
+      <label>Steps/frame <span id="stepsVal">1</span></label>
+      <input type="range" id="steps" min="1" max="8" step="1" value="1" />
+    </div>
+    <button id="clearBtn">Clear</button>
+  </div>
+
+  <div id="view"></div>
+
+  <script type="module">
+    import * as THREE from "three/webgpu";
+    import {
+      Fn, uniform, vec2, vec3, vec4, float,
+      positionLocal, smoothstep, mix, length,
+      min, max, clamp, texture,
+    } from "three/tsl";
+
+    let WAVE_RES = 512;
+    let TEXEL = 1 / WAVE_RES;
+
+    // ── Uniforms ──────────────────────────────────────────────────────────────
+    const uSpeed      = uniform(0.04);
+    const uDamping    = uniform(0.993);
+    const uBorder     = uniform(0.06);
+    const uInjStr     = uniform(0.8);
+    const uInjAmp     = uniform(0.9);
+    const uInjRadius  = uniform(0.03);
+    const uClickPos   = uniform(new THREE.Vector2(0.5, 0.5));
+    const uClickOn    = uniform(0);            // 1 while mouse held
+    const uTexelSize  = uniform(TEXEL);
+    const uGradScale  = uniform(1.5);
+    const uThresh     = uniform(0.4);
+    const uSharpness  = uniform(1.0);
+    const uRingOp     = uniform(1.0);
+    const uDisplayMode = uniform(0);          // 0=rings 1=raw 2=both
+    const uBgColor    = uniform(new THREE.Color("#000814"));
+    const uRingColor  = uniform(new THREE.Color("#ffffff"));
+
+    // ── Renderer + scene ──────────────────────────────────────────────────────
+    const viewEl   = document.getElementById("view");
+    const renderer = new THREE.WebGPURenderer({ antialias: false });
+    viewEl.appendChild(renderer.domElement);
+    await renderer.init();
+
+    const orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    orthoCamera.position.set(0, 0, 1);
+
+    function setViewSize() {
+      const rect = viewEl.getBoundingClientRect();
+      const size = Math.max(1, Math.min(Math.floor(rect.width), Math.floor(rect.height)));
+      renderer.setSize(size, size);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    }
+    requestAnimationFrame(setViewSize);
+    new ResizeObserver(setViewSize).observe(viewEl);
+    window.addEventListener("resize", setViewSize);
+
+    // ── Render targets (ping-pong) ────────────────────────────────────────────
+    function makeRT(res) {
+      return new THREE.WebGLRenderTarget(res, res, {
+        type: THREE.HalfFloatType,
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        depthBuffer: false,
+      });
+    }
+
+    let waveRTs = [makeRT(WAVE_RES), makeRT(WAVE_RES)];
+    let pingIdx = 0;
+
+    const placeholder = new THREE.DataTexture(new Uint8Array([0, 0, 0, 0]), 2, 2);
+    placeholder.needsUpdate = true;
+
+    // ── Wave update pass ──────────────────────────────────────────────────────
+    const waveTexNode = texture(placeholder, vec2(0.5, 0.5));
+
+    const waveUpdateFn = Fn(() => {
+      const uv = positionLocal.xy.mul(0.5).add(0.5);
+      const cur  = waveTexNode.sample(uv).r;
+      const prev = waveTexNode.sample(uv).g;
+
+      const left  = waveTexNode.sample(uv.add(vec2(uTexelSize.negate(), 0))).r;
+      const right = waveTexNode.sample(uv.add(vec2(uTexelSize, 0))).r;
+      const up    = waveTexNode.sample(uv.add(vec2(0, uTexelSize))).r;
+      const down  = waveTexNode.sample(uv.add(vec2(0, uTexelSize.negate()))).r;
+      const laplacian = left.add(right).add(up).add(down).sub(cur.mul(4));
+
+      let next = float(2).mul(cur).sub(prev).add(uSpeed.mul(laplacian));
+      next = next.mul(uDamping);
+
+      // Absorbing boundary
+      const edge   = min(min(uv.x, float(1).sub(uv.x)), min(uv.y, float(1).sub(uv.y)));
+      const border = smoothstep(float(0), uBorder, edge);
+      next = next.mul(border);
+
+      // Inject at click position (GPU-side circle)
+      const d      = length(uv.sub(uClickPos));
+      const inject = float(1).sub(smoothstep(float(0), uInjRadius, d)).mul(uClickOn);
+      next = mix(next, uInjAmp, inject.mul(uInjStr));
+      next = clamp(next, float(-1), float(1));
+
+      return vec4(next, cur, float(0), float(1));
+    });
+
+    const waveUpdateMat = new THREE.MeshBasicNodeMaterial({ depthTest: false, depthWrite: false });
+    waveUpdateMat.fragmentNode = waveUpdateFn();
+
+    const quadGeo  = new THREE.PlaneGeometry(2, 2);
+    const waveQuad = new THREE.Mesh(quadGeo, waveUpdateMat);
+    const waveScene = new THREE.Scene();
+    waveScene.add(waveQuad);
+
+    // ── Display pass ──────────────────────────────────────────────────────────
+    const dispTexNode = texture(placeholder, vec2(0.5, 0.5));
+
+    const displayFn = Fn(() => {
+      const uv = positionLocal.xy.mul(0.5).add(0.5);
+      const h  = dispTexNode.sample(uv).r;
+
+      // Gradient magnitude
+      const dx = dispTexNode.sample(uv.add(vec2(uTexelSize, 0))).r
+               .sub(dispTexNode.sample(uv.sub(vec2(uTexelSize, 0))).r);
+      const dy = dispTexNode.sample(uv.add(vec2(0, uTexelSize))).r
+               .sub(dispTexNode.sample(uv.sub(vec2(0, uTexelSize))).r);
+      const grad = length(vec2(dx, dy)).mul(uGradScale);
+
+      const halfEdge = mix(float(0.35), float(0.01), uSharpness);
+      const ring = smoothstep(uThresh.sub(halfEdge), uThresh.add(halfEdge), grad).mul(uRingOp);
+
+      // Raw height remap [−1,1] → [0,1]
+      const rawH = h.mul(0.5).add(0.5);
+
+      // Background stays bgColor; rings show ringColor
+      const ringsOnly = mix(uBgColor, uRingColor, ring);
+
+      // Raw mode: map height to a blue-cyan-white gradient
+      const rawColor = mix(
+        mix(vec3(0.0, 0.05, 0.15), vec3(0.05, 0.4, 0.8), rawH),
+        vec3(1.0, 1.0, 1.0),
+        rawH.mul(rawH),
+      );
+
+      // Both: tint background by raw height, overlay rings
+      const bothColor = mix(
+        mix(uBgColor, vec3(0.0, 0.15, 0.35), rawH.abs().mul(2).clamp(0, 1)),
+        uRingColor,
+        ring,
+      );
+
+      // Select display mode
+      let col = ringsOnly.toVar();
+      // mode 1 = raw
+      col.assign(mix(col, rawColor, float(uDisplayMode.equal(1))));
+      // mode 2 = both
+      col.assign(mix(col, bothColor, float(uDisplayMode.equal(2))));
+
+      return vec4(col, float(1));
+    });
+
+    const displayMat = new THREE.MeshBasicNodeMaterial({ depthTest: false, depthWrite: false });
+    displayMat.colorNode = displayFn();
+
+    const displayQuad  = new THREE.Mesh(quadGeo, displayMat);
+    const displayScene = new THREE.Scene();
+    displayScene.add(displayQuad);
+
+    // ── Clear helper ──────────────────────────────────────────────────────────
+    function clearWave() {
+      const prev = renderer.getRenderTarget();
+      renderer.setRenderTarget(waveRTs[0]);
+      renderer.clearColor();
+      renderer.setRenderTarget(waveRTs[1]);
+      renderer.clearColor();
+      renderer.setRenderTarget(prev);
+      pingIdx = 0;
+    }
+
+    // ── Click / drag injection ────────────────────────────────────────────────
+    let isPointerDown = false;
+
+    function canvasUV(e) {
+      const rect = viewEl.getBoundingClientRect();
+      const x = (e.clientX - rect.left) / rect.width;
+      const y = 1.0 - (e.clientY - rect.top) / rect.height;
+      return new THREE.Vector2(x, y);
+    }
+
+    viewEl.addEventListener("pointerdown", (e) => {
+      isPointerDown = true;
+      uClickPos.value.copy(canvasUV(e));
+      uClickOn.value = 1;
+    });
+    viewEl.addEventListener("pointermove", (e) => {
+      if (!isPointerDown) return;
+      uClickPos.value.copy(canvasUV(e));
+    });
+    viewEl.addEventListener("pointerup",     () => { isPointerDown = false; uClickOn.value = 0; });
+    viewEl.addEventListener("pointerleave",  () => { isPointerDown = false; uClickOn.value = 0; });
+
+    // ── Auto-inject ───────────────────────────────────────────────────────────
+    let autoMode     = 0;
+    let autoInterval = 1.0;
+    let autoTimer    = 0;
+    let autoActive   = false;
+
+    // ── Render loop ───────────────────────────────────────────────────────────
+    let stepsPerFrame = 1;
+    let lastT = performance.now();
+
+    function step() {
+      const read  = waveRTs[pingIdx];
+      const write = waveRTs[1 - pingIdx];
+
+      if (read.texture instanceof THREE.Texture)  waveTexNode.value = read.texture;
+
+      // Keep click on for one step if auto-injecting
+      if (autoActive) {
+        uClickOn.value = 1;
+      }
+
+      const prevRT = renderer.getRenderTarget();
+      renderer.setRenderTarget(write);
+      renderer.render(waveScene, orthoCamera);
+      renderer.setRenderTarget(prevRT);
+
+      if (autoActive) uClickOn.value = 0;
+
+      pingIdx = 1 - pingIdx;
+    }
+
+    function animate(ts) {
+      requestAnimationFrame(animate);
+      const dt = Math.min((ts - lastT) / 1000, 0.05);
+      lastT = ts;
+
+      // Auto-inject logic
+      if (autoMode > 0) {
+        autoTimer += dt;
+        if (autoTimer >= autoInterval) {
+          autoTimer = 0;
+          if (autoMode === 1) {
+            uClickPos.value.set(0.1 + Math.random() * 0.8, 0.1 + Math.random() * 0.8);
+          } else {
+            uClickPos.value.set(0.5, 0.5);
+          }
+          autoActive = true;
+        } else {
+          autoActive = false;
+        }
+      } else {
+        autoActive = false;
+      }
+
+      // Wave steps
+      for (let i = 0; i < stepsPerFrame; i++) step();
+
+      // Display
+      const dispTex = waveRTs[pingIdx].texture;
+      if (dispTex instanceof THREE.Texture) dispTexNode.value = dispTex;
+
+      renderer.setRenderTarget(null);
+      renderer.render(displayScene, orthoCamera);
+    }
+
+    animate(performance.now());
+
+    // ── Controls wiring ───────────────────────────────────────────────────────
+    function bind(id, valId, setter, fmt = v => v.toFixed(3)) {
+      const el  = document.getElementById(id);
+      const lbl = valId ? document.getElementById(valId) : null;
+      if (!el) return;
+      el.addEventListener("input", () => {
+        const v = parseFloat(el.value);
+        setter(v);
+        if (lbl) lbl.textContent = fmt(v);
+      });
+      el.dispatchEvent(new Event("input"));
+    }
+
+    bind("speed",    "speedVal",  v => { uSpeed.value = v; },          v => v.toFixed(3));
+    bind("damp",     "dampVal",   v => { uDamping.value = v; },        v => v.toFixed(4));
+    bind("border",   "borderVal", v => { uBorder.value = v; },         v => v.toFixed(3));
+    bind("injStr",   "injStrVal", v => { uInjStr.value = v; },         v => v.toFixed(2));
+    bind("injAmp",   "injAmpVal", v => { uInjAmp.value = v; },         v => v.toFixed(2));
+    bind("injRad",   "injRadVal", v => { uInjRadius.value = v; },      v => v.toFixed(3));
+    bind("autoInt",  "autoIntVal",v => { autoInterval = v; },          v => v.toFixed(1));
+    bind("gradScale","gradVal",   v => { uGradScale.value = v; },      v => v.toFixed(1));
+    bind("thresh",   "threshVal", v => { uThresh.value = v; },         v => v.toFixed(2));
+    bind("sharp",    "sharpVal",  v => { uSharpness.value = v; },      v => v.toFixed(2));
+    bind("ringOp",   "ringOpVal", v => { uRingOp.value = v; },         v => v.toFixed(2));
+    bind("steps",    "stepsVal",  v => { stepsPerFrame = v; },         v => v.toFixed(0));
+
+    document.getElementById("bgColor").addEventListener("input", e => uBgColor.value.set(e.target.value));
+    document.getElementById("ringColor").addEventListener("input", e => uRingColor.value.set(e.target.value));
+
+    document.getElementById("displayMode").addEventListener("change", e => {
+      uDisplayMode.value = { rings: 0, raw: 1, both: 2 }[e.target.value];
+    });
+
+    document.getElementById("autoInject").addEventListener("change", e => {
+      autoMode  = parseInt(e.target.value);
+      autoTimer = 0;
+    });
+
+    document.getElementById("res").addEventListener("change", e => {
+      WAVE_RES = parseInt(e.target.value);
+      TEXEL = 1 / WAVE_RES;
+      uTexelSize.value = TEXEL;
+      waveRTs[0].dispose();
+      waveRTs[1].dispose();
+      waveRTs = [makeRT(WAVE_RES), makeRT(WAVE_RES)];
+      pingIdx = 0;
+      waveTexNode.value = placeholder;
+      dispTexNode.value = placeholder;
+    });
+
+    document.getElementById("clearBtn").addEventListener("click", clearWave);
+  </script>
+</body>
+</html>
