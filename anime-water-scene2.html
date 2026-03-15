@@ -352,6 +352,27 @@
           value="1.5"
         />
       </div>
+      <div class="section-label">Seabed Floor</div>
+      <div class="ctrl-group">
+        <label>Deep</label>
+        <input type="color" id="seabedDeep" value="#1a3a52" />
+      </div>
+      <div class="ctrl-group">
+        <label>Highlight</label>
+        <input type="color" id="seabedHighlight" value="#4eb8e0" />
+      </div>
+      <div class="ctrl-group">
+        <label>Scale <span id="seabedScaleVal">0.30</span></label>
+        <input type="range" id="seabedScale" min="0.1" max="1" step="0.02" value="0.3" />
+      </div>
+      <div class="ctrl-group">
+        <label>Flow Z <span id="seabedFlowVal">0.04</span></label>
+        <input type="range" id="seabedFlow" min="0" max="0.2" step="0.005" value="0.04" />
+      </div>
+      <div class="ctrl-group">
+        <label>Cell speed <span id="seabedSpeedVal">0.20</span></label>
+        <input type="range" id="seabedSpeed" min="0.02" max="0.8" step="0.02" value="0.2" />
+      </div>
       <div class="section-label">Sparkles</div>
       <div class="ctrl-group">
         <label>Intensity <span id="sparkleVal">3</span></label>
@@ -402,6 +423,7 @@
         screenUV,
         cameraPosition,
         vertexColor,
+        attribute,
       } from "three/tsl";
 
       const WATER_Y = -0.1;
@@ -621,7 +643,7 @@
         const depthRT = new THREE.WebGLRenderTarget(512, 512);
         depthRT.depthBuffer = true;
         depthRT.depthTexture = new THREE.DepthTexture(512, 512);
-        depthRT.depthTexture.type = THREE.UnsignedIntType;
+        depthRT.depthTexture.type = THREE.UnsignedShortType;
         const depthScene = new THREE.Scene();
         const depthMat = new THREE.MeshBasicNodeMaterial({
           color: 0x000000,
@@ -770,6 +792,58 @@
         waterPlane.frustumCulled = false;
         waterPlane.renderOrder = 2;
         scene.add(waterPlane);
+
+        // ─── Seabed Floor (renderOrder=0) — slower Voronoi for parallax depth ──
+        const uSeabedScale = uniform(0.3);
+        const uSeabedCellSpeed = uniform(0.2);   // slower than water surface
+        const uSeabedFlowX = uniform(0);
+        const uSeabedFlowZ = uniform(0.04);       // slower flow
+        const uSeabedEdgeThreshold = uniform(0.067);
+        const uSeabedEdgeSoftness = uniform(0.01);
+        const uSeabedDeepColor = uniform(new THREE.Color("#1a3a52"));
+        const uSeabedHighlight = uniform(new THREE.Color("#4eb8e0"));
+        const uSeabedFadeDistance = uniform(60);
+        const uSeabedFadeStrength = uniform(1.4);
+
+        const seabedFrag = Fn(() => {
+          const worldXZ = positionWorld.xz;
+          const uvSea = worldXZ
+            .mul(uSeabedScale)
+            .add(vec2(uSeabedFlowX.mul(uTime), uSeabedFlowZ.mul(uTime)));
+          const f1s = voronoiF1(uvSea, uTime, uSeabedCellSpeed);
+          const sf1s = voronoiSmoothF1(uvSea, uTime, uSeabedCellSpeed, float(0.4));
+          const edgeSea = f1s.sub(sf1s);
+          const tSea = smoothstep(
+            uSeabedEdgeThreshold.sub(uSeabedEdgeSoftness),
+            uSeabedEdgeThreshold.add(uSeabedEdgeSoftness),
+            edgeSea,
+          );
+          const seaColor = mix(uSeabedDeepColor, uSeabedHighlight, tSea);
+          const distSea = length(worldXZ.sub(vec2(uCamXZ.x, uCamXZ.y)));
+          const fadeSea = float(1).sub(
+            pow(saturate(distSea.div(uSeabedFadeDistance)), uSeabedFadeStrength),
+          );
+          return vec4(seaColor, fadeSea);
+        });
+
+        const seabedOut = seabedFrag();
+        const seabedMaterial = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          depthWrite: false,
+          side: THREE.FrontSide,
+          colorNode: seabedOut.rgb,
+          opacityNode: seabedOut.a,
+        });
+        const SEABED_Y = WATER_Y - 3;
+        const seabedPlane = new THREE.Mesh(
+          new THREE.PlaneGeometry(600, 600),
+          seabedMaterial,
+        );
+        seabedPlane.rotation.x = -Math.PI / 2;
+        seabedPlane.position.set(0, SEABED_Y, 0);
+        seabedPlane.frustumCulled = false;
+        seabedPlane.renderOrder = 0;
+        scene.add(seabedPlane);
 
         // ─── Wave simulation (injection + wave update + display) ─────────────────
         const injRT = new THREE.WebGLRenderTarget(WAVE_RES, WAVE_RES, {
@@ -970,36 +1044,44 @@
           "aSize",
           new THREE.BufferAttribute(sizeArr, 1),
         );
-        const colorArr = new Float32Array(MAX_SPARKLES * 4);
-        for (let i = 0; i < MAX_SPARKLES; i++) {
-          colorArr[i * 4] = 1;
-          colorArr[i * 4 + 1] = 1;
-          colorArr[i * 4 + 2] = 1;
-          colorArr[i * 4 + 3] = 0.5;
-        }
-        sparklesGeo.setAttribute(
-          "color",
-          new THREE.BufferAttribute(colorArr, 4),
-        );
         sparklesGeo.setDrawRange(0, 200);
         const uSparkleColor = uniform(new THREE.Color("#c8f0ff"));
         const uSparkleIntensity = uniform(3);
+        const uArmSharpness = uniform(8);
+        const uArmFalloff = uniform(2);
+        const uGlowRadius = uniform(4);
+
+        // Alpha fade: computed from lifetime attributes in vertex stage,
+        // TSL auto-promotes it to a varying for the fragment stage
+        const tLife = clamp(
+          attribute("aLifetime").div(attribute("aMaxLifetime")),
+          0,
+          1,
+        );
+        const sparkleAlpha = sin(tLife.mul(Math.PI));
+
+        // Procedural 4-pointed star via gl_PointCoord (uv() = pointCoord in PointsNodeMaterial)
+        const sparkleUV = uv().mul(2).sub(vec2(1, 1));
+        const hArm = exp(abs(sparkleUV.y).mul(float(-1)).mul(uArmSharpness)).mul(
+          exp(abs(sparkleUV.x).mul(float(-1)).mul(uArmFalloff)),
+        );
+        const vArm = exp(abs(sparkleUV.x).mul(float(-1)).mul(uArmSharpness)).mul(
+          exp(abs(sparkleUV.y).mul(float(-1)).mul(uArmFalloff)),
+        );
+        const glowShape = exp(length(sparkleUV).mul(float(-1)).mul(uGlowRadius));
+        const starShape = max(max(hArm, vArm), glowShape);
+
         const sparklesMat = new THREE.PointsNodeMaterial({
           transparent: true,
           depthWrite: false,
           blending: THREE.AdditiveBlending,
-          vertexColors: true,
         });
-        sparklesMat.colorNode = vertexColor()
-          .rgb.mul(uSparkleColor)
-          .mul(uSparkleIntensity);
-        sparklesMat.opacityNode = vertexColor().a;
-        sparklesMat.sizeNode = float(28);
-        const texLoader = new THREE.TextureLoader();
-        texLoader.load("./textures/sparkle-particle.png", (sparkleTex) => {
-          sparkleTex.colorSpace = THREE.SRGBColorSpace;
-          sparklesMat.map = sparkleTex;
-        });
+        sparklesMat.colorNode = uSparkleColor.mul(uSparkleIntensity);
+        sparklesMat.opacityNode = starShape.mul(sparkleAlpha);
+        // Perspective-correct point size (matches original gl_PointSize formula)
+        sparklesMat.sizeNode = attribute("aSize")
+          .mul(300)
+          .div(max(positionView.z.negate(), float(4)));
         const sparkles = new THREE.Points(sparklesGeo, sparklesMat);
         sparkles.frustumCulled = false;
         sparkles.renderOrder = 3;
@@ -1196,7 +1278,7 @@
             Math.round(w * dpr),
             Math.round(h * dpr),
           );
-          depthRT.depthTexture.type = THREE.UnsignedIntType;
+          depthRT.depthTexture.type = THREE.UnsignedShortType;
         }
         window.addEventListener("resize", onResize);
         onResize();
@@ -1220,6 +1302,8 @@
 
           waterPlane.position.x = camera.position.x;
           waterPlane.position.z = camera.position.z;
+          seabedPlane.position.x = camera.position.x;
+          seabedPlane.position.z = camera.position.z;
           waveDisplayPlane.position.x = camera.position.x;
           waveDisplayPlane.position.z = camera.position.z;
 
@@ -1315,7 +1399,7 @@
             if (depthRT.depthTexture) {
               depthRT.depthTexture.dispose();
               depthRT.depthTexture = new THREE.DepthTexture(physW, physH);
-              depthRT.depthTexture.type = THREE.UnsignedIntType;
+              depthRT.depthTexture.type = THREE.UnsignedShortType;
             }
             // Keep depth texture node in sync
             depthTexNode.value = depthRT.depthTexture || placeholderDepth;
@@ -1469,14 +1553,11 @@
               maxLifeArr[i] = 0.8 + Math.random() * 2.7;
               sizeArr[i] = 12 + Math.random() * 30;
             }
-            const t = Math.min(lifeArr[i] / maxLifeArr[i], 1);
-            colorArr[i * 4 + 3] = Math.sin(t * Math.PI);
           }
           sparklesGeo.getAttribute("position").needsUpdate = true;
           sparklesGeo.getAttribute("aLifetime").needsUpdate = true;
           sparklesGeo.getAttribute("aMaxLifetime").needsUpdate = true;
           sparklesGeo.getAttribute("aSize").needsUpdate = true;
-          sparklesGeo.getAttribute("color").needsUpdate = true;
 
           // Glass is now MeshPhysicalNodeMaterial (no uTime uniform)
           // if (dragonBallsGroup) { ... }
@@ -1689,6 +1770,27 @@
             uSparkleIntensity.value = v;
           },
           (v) => v.toFixed(1),
+        );
+
+        bindColor("seabedDeep", (hex) => uSeabedDeepColor.value.set(hex));
+        bindColor("seabedHighlight", (hex) => uSeabedHighlight.value.set(hex));
+        bindSlider(
+          "seabedScale",
+          "seabedScaleVal",
+          (v) => { uSeabedScale.value = v; },
+          (v) => v.toFixed(2),
+        );
+        bindSlider(
+          "seabedFlow",
+          "seabedFlowVal",
+          (v) => { uSeabedFlowZ.value = v; },
+          (v) => v.toFixed(3),
+        );
+        bindSlider(
+          "seabedSpeed",
+          "seabedSpeedVal",
+          (v) => { uSeabedCellSpeed.value = v; },
+          (v) => v.toFixed(2),
         );
       }
 
