@@ -375,15 +375,28 @@
       </div>
       <div class="section-label">Sparkles</div>
       <div class="ctrl-group">
-        <label>Intensity <span id="sparkleVal">3</span></label>
-        <input
-          type="range"
-          id="sparkleIntensity"
-          min="0"
-          max="8"
-          step="0.5"
-          value="3"
-        />
+        <label>Color</label>
+        <input type="color" id="sparkleColor" value="#c8f0ff" />
+      </div>
+      <div class="ctrl-group">
+        <label>Intensity <span id="sparkleIntensityVal">3.0</span></label>
+        <input type="range" id="sparkleIntensity" min="0" max="8" step="0.1" value="3" />
+      </div>
+      <div class="ctrl-group">
+        <label>Size <span id="sparkleSizeVal">0.040</span></label>
+        <input type="range" id="sparkleSize" min="0.005" max="0.15" step="0.005" value="0.04" />
+      </div>
+      <div class="ctrl-group">
+        <label>Arm sharpness <span id="sparkleArmVal">8.0</span></label>
+        <input type="range" id="sparkleArm" min="1" max="20" step="0.5" value="8" />
+      </div>
+      <div class="ctrl-group">
+        <label>Arm falloff <span id="sparkleFalloffVal">2.0</span></label>
+        <input type="range" id="sparkleFalloff" min="0.2" max="10" step="0.1" value="2" />
+      </div>
+      <div class="ctrl-group">
+        <label>Glow radius <span id="sparkleGlowVal">4.0</span></label>
+        <input type="range" id="sparkleGlow" min="0.5" max="12" step="0.1" value="4" />
       </div>
     </div>
     <script type="module">
@@ -1014,45 +1027,36 @@
         waveDisplayPlane.renderOrder = 6;
         scene.add(waveDisplayPlane);
 
-        // ─── Sparkles (points with ShaderMaterial) ──────────────────────────────
-        const posArr = new Float32Array(MAX_SPARKLES * 3);
-        const lifeArr = new Float32Array(MAX_SPARKLES);
+        // ─── Sparkles (InstancedMesh billboard quads) ───────────────────────────
+        // WebGPU/WGSL has no gl_PointCoord, so we use PlaneGeometry quads
+        // that always face the camera (billboard), giving us real UVs.
+        const posArr     = new Float32Array(MAX_SPARKLES * 3);
+        const lifeArr    = new Float32Array(MAX_SPARKLES);
         const maxLifeArr = new Float32Array(MAX_SPARKLES);
-        const sizeArr = new Float32Array(MAX_SPARKLES);
+        const sizeArr    = new Float32Array(MAX_SPARKLES);
         for (let i = 0; i < MAX_SPARKLES; i++) {
-          posArr[i * 3] = (Math.random() - 0.5) * 40;
+          posArr[i * 3]     = (Math.random() - 0.5) * 40;
           posArr[i * 3 + 1] = WATER_Y + 0.02;
           posArr[i * 3 + 2] = (Math.random() - 0.5) * 40;
           maxLifeArr[i] = 0.8 + Math.random() * 2.7;
-          lifeArr[i] = Math.random() * maxLifeArr[i];
-          sizeArr[i] = 12 + Math.random() * 30;
+          lifeArr[i]    = Math.random() * maxLifeArr[i];
+          sizeArr[i]    = 12 + Math.random() * 30;
         }
-        const sparklesGeo = new THREE.BufferGeometry();
-        sparklesGeo.setAttribute(
-          "position",
-          new THREE.BufferAttribute(posArr, 3),
-        );
-        sparklesGeo.setAttribute(
-          "aLifetime",
-          new THREE.BufferAttribute(lifeArr, 1),
-        );
-        sparklesGeo.setAttribute(
-          "aMaxLifetime",
-          new THREE.BufferAttribute(maxLifeArr, 1),
-        );
-        sparklesGeo.setAttribute(
-          "aSize",
-          new THREE.BufferAttribute(sizeArr, 1),
-        );
-        sparklesGeo.setDrawRange(0, 200);
-        const uSparkleColor = uniform(new THREE.Color("#c8f0ff"));
-        const uSparkleIntensity = uniform(3);
-        const uArmSharpness = uniform(8);
-        const uArmFalloff = uniform(2);
-        const uGlowRadius = uniform(4);
+        // PlaneGeometry has a built-in uv attribute — use it for the star shape
+        const sparklesGeo = new THREE.PlaneGeometry(1, 1);
+        const lifeAttr    = new THREE.InstancedBufferAttribute(lifeArr, 1);
+        const maxLifeAttr = new THREE.InstancedBufferAttribute(maxLifeArr, 1);
+        sparklesGeo.setAttribute("aLifetime",    lifeAttr);
+        sparklesGeo.setAttribute("aMaxLifetime", maxLifeAttr);
 
-        // Alpha fade: computed from lifetime attributes in vertex stage,
-        // TSL auto-promotes it to a varying for the fragment stage
+        const uSparkleColor     = uniform(new THREE.Color("#c8f0ff"));
+        const uSparkleIntensity = uniform(3);
+        const uArmSharpness     = uniform(8);
+        const uArmFalloff       = uniform(2);
+        const uGlowRadius       = uniform(4);
+        let sparkleWorldScale   = 0.04; // world-space quad size per aSize unit
+
+        // Alpha fade via lifetime (same logic as before)
         const tLife = clamp(
           attribute("aLifetime").div(attribute("aMaxLifetime")),
           0,
@@ -1060,32 +1064,35 @@
         );
         const sparkleAlpha = sin(tLife.mul(Math.PI));
 
-        // Procedural 4-pointed star via gl_PointCoord (uv() = pointCoord in PointsNodeMaterial)
+        // Procedural 4-pointed star — uv() now correctly reads PlaneGeometry's UV
         const sparkleUV = uv().mul(2).sub(vec2(1, 1));
-        const hArm = exp(abs(sparkleUV.y).mul(float(-1)).mul(uArmSharpness)).mul(
-          exp(abs(sparkleUV.x).mul(float(-1)).mul(uArmFalloff)),
-        );
-        const vArm = exp(abs(sparkleUV.x).mul(float(-1)).mul(uArmSharpness)).mul(
-          exp(abs(sparkleUV.y).mul(float(-1)).mul(uArmFalloff)),
-        );
+        const hArm = exp(abs(sparkleUV.y).mul(float(-1)).mul(uArmSharpness))
+                       .mul(exp(abs(sparkleUV.x).mul(float(-1)).mul(uArmFalloff)));
+        const vArm = exp(abs(sparkleUV.x).mul(float(-1)).mul(uArmSharpness))
+                       .mul(exp(abs(sparkleUV.y).mul(float(-1)).mul(uArmFalloff)));
         const glowShape = exp(length(sparkleUV).mul(float(-1)).mul(uGlowRadius));
         const starShape = max(max(hArm, vArm), glowShape);
 
-        const sparklesMat = new THREE.PointsNodeMaterial({
+        const sparklesMat = new THREE.MeshBasicNodeMaterial({
           transparent: true,
           depthWrite: false,
           blending: THREE.AdditiveBlending,
+          side: THREE.DoubleSide,
+          alphaTest: 0.005,
         });
-        sparklesMat.colorNode = uSparkleColor.mul(uSparkleIntensity);
+        sparklesMat.colorNode   = uSparkleColor.mul(uSparkleIntensity);
         sparklesMat.opacityNode = starShape.mul(sparkleAlpha);
-        // Perspective-correct point size (matches original gl_PointSize formula)
-        sparklesMat.sizeNode = attribute("aSize")
-          .mul(300)
-          .div(max(positionView.z.negate(), float(4)));
-        const sparkles = new THREE.Points(sparklesGeo, sparklesMat);
+
+        const sparkles = new THREE.InstancedMesh(sparklesGeo, sparklesMat, MAX_SPARKLES);
         sparkles.frustumCulled = false;
-        sparkles.renderOrder = 3;
+        sparkles.renderOrder   = 3;
         scene.add(sparkles);
+
+        // Reusable objects for billboard matrix composition (allocated once)
+        const _sparkleQ = new THREE.Quaternion();
+        const _sparkleS = new THREE.Vector3();
+        const _sparkleM = new THREE.Matrix4();
+        const _sparkleP = new THREE.Vector3();
 
         // ─── Load Dragon Balls ─────────────────────────────────────────────────
         let dragonBallsGroup = null;
@@ -1539,25 +1546,30 @@
             dispTex instanceof THREE.Texture ? dispTex : placeholderColor;
           uDispWaveSize.value = waveSize;
 
-          const count = 200;
+          const count  = 200;
           const waterY = WATER_Y + 0.02;
+          // Camera quaternion for billboard (all quads face camera)
+          camera.getWorldQuaternion(_sparkleQ);
           for (let i = 0; i < count; i++) {
             lifeArr[i] += delta;
-            posArr[i * 3 + 1] = waterY;
             if (lifeArr[i] >= maxLifeArr[i]) {
-              posArr[i * 3] = camera.position.x + (Math.random() - 0.5) * 60;
+              posArr[i * 3]     = camera.position.x + (Math.random() - 0.5) * 60;
               posArr[i * 3 + 1] = waterY;
-              posArr[i * 3 + 2] =
-                camera.position.z + (Math.random() - 0.5) * 60;
-              lifeArr[i] = 0;
+              posArr[i * 3 + 2] = camera.position.z + (Math.random() - 0.5) * 60;
+              lifeArr[i]    = 0;
               maxLifeArr[i] = 0.8 + Math.random() * 2.7;
-              sizeArr[i] = 12 + Math.random() * 30;
+              sizeArr[i]    = 12 + Math.random() * 30;
             }
+            // Compose billboard matrix: position + camera rotation + size
+            _sparkleP.set(posArr[i * 3], posArr[i * 3 + 1], posArr[i * 3 + 2]);
+            const s = sizeArr[i] * sparkleWorldScale;
+            _sparkleS.set(s, s, s);
+            _sparkleM.compose(_sparkleP, _sparkleQ, _sparkleS);
+            sparkles.setMatrixAt(i, _sparkleM);
           }
-          sparklesGeo.getAttribute("position").needsUpdate = true;
-          sparklesGeo.getAttribute("aLifetime").needsUpdate = true;
-          sparklesGeo.getAttribute("aMaxLifetime").needsUpdate = true;
-          sparklesGeo.getAttribute("aSize").needsUpdate = true;
+          sparkles.instanceMatrix.needsUpdate = true;
+          lifeAttr.needsUpdate    = true;
+          maxLifeAttr.needsUpdate = true;
 
           // Glass is now MeshPhysicalNodeMaterial (no uTime uniform)
           // if (dragonBallsGroup) { ... }
@@ -1763,15 +1775,6 @@
           (v) => v.toFixed(1),
         );
 
-        bindSlider(
-          "sparkleIntensity",
-          "sparkleVal",
-          (v) => {
-            uSparkleIntensity.value = v;
-          },
-          (v) => v.toFixed(1),
-        );
-
         bindColor("seabedDeep", (hex) => uSeabedDeepColor.value.set(hex));
         bindColor("seabedHighlight", (hex) => uSeabedHighlight.value.set(hex));
         bindSlider(
@@ -1792,6 +1795,13 @@
           (v) => { uSeabedCellSpeed.value = v; },
           (v) => v.toFixed(2),
         );
+
+        bindColor("sparkleColor", (hex) => uSparkleColor.value.set(hex));
+        bindSlider("sparkleIntensity", "sparkleIntensityVal", (v) => { uSparkleIntensity.value = v; }, (v) => v.toFixed(1));
+        bindSlider("sparkleSize",      "sparkleSizeVal",      (v) => { sparkleWorldScale = v; },         (v) => v.toFixed(3));
+        bindSlider("sparkleArm",       "sparkleArmVal",       (v) => { uArmSharpness.value = v; },       (v) => v.toFixed(1));
+        bindSlider("sparkleFalloff",   "sparkleFalloffVal",   (v) => { uArmFalloff.value = v; },         (v) => v.toFixed(1));
+        bindSlider("sparkleGlow",      "sparkleGlowVal",      (v) => { uGlowRadius.value = v; },         (v) => v.toFixed(1));
       }
 
       init();

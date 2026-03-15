@@ -134,8 +134,9 @@
     <div class="ctrl-group">
       <label>Mode</label>
       <select id="displayMode">
-        <option value="rings" selected>Normal</option>
-        <option value="raw">Debug — raw height</option>
+        <option value="rings" selected>Gradient rings</option>
+        <option value="raw">Raw height</option>
+        <option value="both">Rings + height tint</option>
       </select>
     </div>
     <div class="ctrl-group">
@@ -165,64 +166,6 @@
       <input type="color" id="ringColor" value="#ffffff" />
     </div>
 
-    <div class="section-label">Wavefront shape</div>
-    <p class="hint">Noise multiplies the wave energy — ring only appears where noise is bright. 0 = perfect circle, 1 = fully noise-shaped.</p>
-    <div class="ctrl-group">
-      <label>Noise type</label>
-      <select id="noiseType">
-        <option value="0" selected>Off — circle</option>
-        <option value="1">FBM — explosion / wisps</option>
-        <option value="2">Voronoi F1 — cellular blobs</option>
-        <option value="3">Voronoi F2−F1 — shard edges</option>
-        <option value="4">Voronoi caustic — energy spikes</option>
-      </select>
-    </div>
-    <div class="ctrl-group">
-      <label>Noise mix <span id="noiseMixVal">0.80</span></label>
-      <input type="range" id="noiseMix" min="0" max="1" step="0.02" value="0.8" />
-    </div>
-    <div class="ctrl-group">
-      <label>Noise scale <span id="noiseScaleVal">4.0</span></label>
-      <input type="range" id="noiseScale" min="0.5" max="20" step="0.1" value="4" />
-    </div>
-    <div class="ctrl-group">
-      <label>Offset X <span id="noiseOffXVal">0.00</span></label>
-      <input type="range" id="noiseOffX" min="-5" max="5" step="0.05" value="0" />
-    </div>
-    <div class="ctrl-group">
-      <label>Offset Y <span id="noiseOffYVal">0.00</span></label>
-      <input type="range" id="noiseOffY" min="-5" max="5" step="0.05" value="0" />
-    </div>
-    <div class="ctrl-group">
-      <label>Jitter (Voronoi) <span id="jitterVal">1.00</span></label>
-      <input type="range" id="jitter" min="0" max="1" step="0.02" value="1" />
-    </div>
-    <div class="ctrl-group">
-      <label>FBM octaves <span id="octavesVal">4</span></label>
-      <input type="range" id="octaves" min="1" max="6" step="1" value="4" />
-    </div>
-
-    <div class="section-label">Propagation noise</div>
-    <p class="hint">Varies wave speed per-pixel — rings physically stretch/bulge instead of just looking different.</p>
-    <div class="ctrl-group">
-      <label>Noise type</label>
-      <select id="propNoiseType">
-        <option value="0" selected>Off (uniform)</option>
-        <option value="1">FBM (wispy)</option>
-        <option value="2">Voronoi F1 (cells)</option>
-        <option value="3">Voronoi F2−F1 (edges)</option>
-        <option value="4">Voronoi caustic</option>
-      </select>
-    </div>
-    <div class="ctrl-group">
-      <label>Speed variance <span id="propVarVal">0.00</span></label>
-      <input type="range" id="propVar" min="0" max="5" step="0.05" value="0" />
-    </div>
-    <div class="ctrl-group">
-      <label>Noise scale <span id="propScaleVal">3.0</span></label>
-      <input type="range" id="propScale" min="0.5" max="20" step="0.1" value="3" />
-    </div>
-
     <div class="section-label">Simulation</div>
     <div class="ctrl-group">
       <label>Resolution</label>
@@ -247,43 +190,30 @@
       Fn, uniform, vec2, vec3, vec4, float,
       positionLocal, smoothstep, mix, length,
       min, max, clamp, texture,
-      sin, dot, fract, floor, If, abs,
     } from "three/tsl";
 
     let WAVE_RES = 512;
     let TEXEL = 1 / WAVE_RES;
 
     // ── Uniforms ──────────────────────────────────────────────────────────────
-    const uSpeed       = uniform(0.04);
-    const uDamping     = uniform(0.993);
-    const uBorder      = uniform(0.06);
-    const uInjStr      = uniform(0.8);
-    const uInjAmp      = uniform(0.9);
-    const uInjRadius   = uniform(0.03);
-    const uClickPos    = uniform(new THREE.Vector2(0.5, 0.5));
-    const uClickOn     = uniform(0);
-    const uTexelSize   = uniform(TEXEL);
-    const uGradScale   = uniform(1.5);
-    const uThresh      = uniform(0.4);
-    const uSharpness   = uniform(1.0);
-    const uRingOp      = uniform(1.0);
-    const uDisplayMode = uniform(0);
-    const uBgColor     = uniform(new THREE.Color("#000814"));
-    const uRingColor   = uniform(new THREE.Color("#ffffff"));
-    // Wavefront shape noise
-    const uNoiseMode  = uniform(0);    // 0=off 1=fbm 2=voroF1 3=voroF2mF1 4=caustic
-    const uNoiseMix   = uniform(0.8);  // 0=circle, 1=fully noise-shaped ring
-    const uNoiseScale = uniform(4.0);
-    const uNoiseOffX  = uniform(0.0);
-    const uNoiseOffY  = uniform(0.0);
-    const uJitter     = uniform(1.0);
-    const uOctaves    = uniform(4);
-    // Propagation noise — varies the wave speed spatially so rings physically deform
-    const uPropNoiseType  = uniform(0);   // 0=off 1=fbm 2=voroF1 3=voroF2mF1 4=caustic
-    const uPropNoiseScale = uniform(3.0);
-    const uPropSpeedVar   = uniform(0.0); // how much speed varies (0=uniform, 3=wild)
+    const uSpeed      = uniform(0.04);
+    const uDamping    = uniform(0.993);
+    const uBorder     = uniform(0.06);
+    const uInjStr     = uniform(0.8);
+    const uInjAmp     = uniform(0.9);
+    const uInjRadius  = uniform(0.03);
+    const uClickPos   = uniform(new THREE.Vector2(0.5, 0.5));
+    const uClickOn    = uniform(0);            // 1 while mouse held
+    const uTexelSize  = uniform(TEXEL);
+    const uGradScale  = uniform(1.5);
+    const uThresh     = uniform(0.4);
+    const uSharpness  = uniform(1.0);
+    const uRingOp     = uniform(1.0);
+    const uDisplayMode = uniform(0);          // 0=rings 1=raw 2=both
+    const uBgColor    = uniform(new THREE.Color("#000814"));
+    const uRingColor  = uniform(new THREE.Color("#ffffff"));
 
-    // ── Renderer ──────────────────────────────────────────────────────────────
+    // ── Renderer + scene ──────────────────────────────────────────────────────
     const viewEl   = document.getElementById("view");
     const renderer = new THREE.WebGPURenderer({ antialias: false });
     viewEl.appendChild(renderer.domElement);
@@ -302,7 +232,7 @@
     new ResizeObserver(setViewSize).observe(viewEl);
     window.addEventListener("resize", setViewSize);
 
-    // ── Render targets ────────────────────────────────────────────────────────
+    // ── Render targets (ping-pong) ────────────────────────────────────────────
     function makeRT(res) {
       return new THREE.WebGLRenderTarget(res, res, {
         type: THREE.HalfFloatType,
@@ -311,77 +241,18 @@
         depthBuffer: false,
       });
     }
+
     let waveRTs = [makeRT(WAVE_RES), makeRT(WAVE_RES)];
     let pingIdx = 0;
 
     const placeholder = new THREE.DataTexture(new Uint8Array([0, 0, 0, 0]), 2, 2);
     placeholder.needsUpdate = true;
 
-    // ── Noise functions ───────────────────────────────────────────────────────
-
-    // Value noise hash (scalar output)
-    const hash21 = Fn(([p]) =>
-      fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453))
-    );
-
-    // Hash (vec2 output) for Voronoi
-    const hash22 = Fn(([p]) =>
-      fract(sin(vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)))).mul(43758.5453))
-    );
-
-    // Smooth value noise
-    const vnoise = Fn(([p]) => {
-      const i = floor(p);
-      const f = fract(p);
-      const u = f.mul(f).mul(float(3).sub(f.mul(2)));
-      return mix(
-        mix(hash21(i),             hash21(i.add(vec2(1, 0))), u.x),
-        mix(hash21(i.add(vec2(0,1))), hash21(i.add(vec2(1,1))), u.x),
-        u.y
-      );
-    });
-
-    // FBM — up to 6 octaves driven by uOctaves uniform
-    const fbm = Fn(([p_in]) => {
-      const p   = p_in.toVar();
-      const v   = float(0).toVar();
-      const amp = float(0.5).toVar();
-      // Unroll 6 octaves; each one masked by whether the octave index < uOctaves
-      for (let i = 0; i < 6; i++) {
-        const mask = smoothstep(float(i), float(i + 0.5), uOctaves);
-        v.addAssign(vnoise(p).mul(amp).mul(mask));
-        p.assign(p.mul(2.07));
-        amp.assign(amp.mul(0.5));
-      }
-      return v;
-    });
-
-    // Voronoi F1 + F2
-    const NBRS = [[-1,-1],[0,-1],[1,-1],[-1,0],[0,0],[1,0],[-1,1],[0,1],[1,1]];
-    const voronoiF1F2 = Fn(([p_in, jitter]) => {
-      const ip = floor(p_in);
-      const fp = fract(p_in);
-      const d1 = float(10).toVar();
-      const d2 = float(10).toVar();
-      for (const [nx, ny] of NBRS) {
-        const off = vec2(float(nx), float(ny));
-        const h   = mix(vec2(0.5, 0.5), hash22(ip.add(off)), jitter);
-        const pt  = off.add(h).sub(fp);
-        const d   = length(pt);
-        If(d.lessThan(d1), () => {
-          d2.assign(d1);
-          d1.assign(d);
-        }).ElseIf(d.lessThan(d2), () => {
-          d2.assign(d);
-        });
-      }
-      return vec2(d1, d2);
-    });
-
     // ── Wave update pass ──────────────────────────────────────────────────────
     const waveTexNode = texture(placeholder, vec2(0.5, 0.5));
 
     const waveUpdateFn = Fn(() => {
+      // Flip Y to match WebGPU render-target convention (Y=0 at top)
       const uv = vec2(
         positionLocal.x.mul(0.5).add(0.5),
         float(1).sub(positionLocal.y.mul(0.5).add(0.5)),
@@ -395,35 +266,15 @@
       const down  = waveTexNode.sample(uv.add(vec2(0, uTexelSize))).r;
       const laplacian = left.add(right).add(up).add(down).sub(cur.mul(4));
 
-      // ── Spatially-varying propagation speed ──────────────────────────────────
-      // Noise field sampled at this pixel drives local c² — wave physically deforms
-      const propUV    = uv.mul(uPropNoiseScale);
-      const propNoise = float(0).toVar();
-      If(uPropNoiseType.equal(1), () => {
-        propNoise.assign(fbm(propUV));
-      });
-      If(uPropNoiseType.equal(2), () => {
-        propNoise.assign(voronoiF1F2(propUV, float(1)).x);
-      });
-      If(uPropNoiseType.equal(3), () => {
-        const f1f2 = voronoiF1F2(propUV, float(1));
-        propNoise.assign(f1f2.y.sub(f1f2.x).mul(4).clamp(0, 1));
-      });
-      If(uPropNoiseType.equal(4), () => {
-        // Caustic: bright at Voronoi centres — makes wave pool at cell centres
-        const f1 = voronoiF1F2(propUV, float(1)).x;
-        propNoise.assign(float(1).sub(f1.mul(2).clamp(0, 1)));
-      });
-      // localSpeed = uSpeed * (1 + noiseVal * uPropSpeedVar)
-      const localSpeed = uSpeed.mul(float(1).add(propNoise.mul(uPropSpeedVar)));
-
-      let next = float(2).mul(cur).sub(prev).add(localSpeed.mul(laplacian));
+      let next = float(2).mul(cur).sub(prev).add(uSpeed.mul(laplacian));
       next = next.mul(uDamping);
 
+      // Absorbing boundary
       const edge   = min(min(uv.x, float(1).sub(uv.x)), min(uv.y, float(1).sub(uv.y)));
       const border = smoothstep(float(0), uBorder, edge);
       next = next.mul(border);
 
+      // Inject at click position — uClickPos is also in RT UV space (y=0 at top)
       const d      = length(uv.sub(uClickPos));
       const inject = float(1).sub(smoothstep(float(0), uInjRadius, d)).mul(uClickOn);
       next = mix(next, uInjAmp, inject.mul(uInjStr));
@@ -435,8 +286,8 @@
     const waveUpdateMat = new THREE.MeshBasicNodeMaterial({ depthTest: false, depthWrite: false });
     waveUpdateMat.fragmentNode = waveUpdateFn();
 
-    const quadGeo   = new THREE.PlaneGeometry(2, 2);
-    const waveQuad  = new THREE.Mesh(quadGeo, waveUpdateMat);
+    const quadGeo  = new THREE.PlaneGeometry(2, 2);
+    const waveQuad = new THREE.Mesh(quadGeo, waveUpdateMat);
     const waveScene = new THREE.Scene();
     waveScene.add(waveQuad);
 
@@ -447,89 +298,91 @@
       const uv = positionLocal.xy.mul(0.5).add(0.5);
       const h  = dispTexNode.sample(uv).r;
 
-      // Wave gradient — magnitude = wave energy at this pixel
+      // Gradient magnitude
       const dx = dispTexNode.sample(uv.add(vec2(uTexelSize, 0))).r
                .sub(dispTexNode.sample(uv.sub(vec2(uTexelSize, 0))).r);
       const dy = dispTexNode.sample(uv.add(vec2(0, uTexelSize))).r
                .sub(dispTexNode.sample(uv.sub(vec2(0, uTexelSize))).r);
       const grad = length(vec2(dx, dy)).mul(uGradScale);
 
-      // ── Wavefront shape via noise ───────────────────────────────────────────
-      // Noise is sampled at the pixel's UV (fixed in space, not wave-warped).
-      // It multiplies the wave energy before thresholding — so the ring only
-      // appears where BOTH wave energy AND noise are high.
-      // Result: ring takes the shape of the noise pattern as it expands.
-      // FBM  → wispy explosion / smoke ring
-      // Voronoi caustic → energy spikes / impact burst
-      // F2-F1 → shattered shards
-      const noiseUV = uv.mul(uNoiseScale).add(vec2(uNoiseOffX, uNoiseOffY));
-
-      const noiseVal = float(1.0).toVar(); // default 1 = no shaping (circle)
-      If(uNoiseMode.equal(1), () => {
-        noiseVal.assign(fbm(noiseUV));
-      });
-      If(uNoiseMode.equal(2), () => {
-        noiseVal.assign(voronoiF1F2(noiseUV, uJitter).x);
-      });
-      If(uNoiseMode.equal(3), () => {
-        const f1f2 = voronoiF1F2(noiseUV, uJitter);
-        noiseVal.assign(f1f2.y.sub(f1f2.x).mul(4).clamp(0, 1));
-      });
-      If(uNoiseMode.equal(4), () => {
-        const f1 = voronoiF1F2(noiseUV, uJitter).x;
-        noiseVal.assign(float(1).sub(f1.mul(2).clamp(0, 1)));
-      });
-
-      // Mix between pure grad (circle) and noise-modulated grad (shaped ring)
-      const shapedGrad = grad.mul(mix(float(1), noiseVal, uNoiseMix));
-
-      // Threshold → ring
       const halfEdge = mix(float(0.35), float(0.01), uSharpness);
-      const ring = smoothstep(uThresh.sub(halfEdge), uThresh.add(halfEdge), shapedGrad)
-                    .mul(uRingOp);
+      const ring = smoothstep(uThresh.sub(halfEdge), uThresh.add(halfEdge), grad).mul(uRingOp);
 
-      // ── Output — black bg, ring color shaped by noise ───────────────────────
-      const col = mix(uBgColor, uRingColor, ring).toVar();
-      If(uDisplayMode.equal(1), () => {
-        // Debug: raw wave height
-        col.assign(mix(uBgColor, uRingColor, h.mul(0.5).add(0.5)));
-      });
+      // Raw height remap [−1,1] → [0,1]
+      const rawH = h.mul(0.5).add(0.5);
+
+      // Background stays bgColor; rings show ringColor
+      const ringsOnly = mix(uBgColor, uRingColor, ring);
+
+      // Raw mode: map height to a blue-cyan-white gradient
+      const rawColor = mix(
+        mix(vec3(0.0, 0.05, 0.15), vec3(0.05, 0.4, 0.8), rawH),
+        vec3(1.0, 1.0, 1.0),
+        rawH.mul(rawH),
+      );
+
+      // Both: tint background by raw height, overlay rings
+      const bothColor = mix(
+        mix(uBgColor, vec3(0.0, 0.15, 0.35), rawH.abs().mul(2).clamp(0, 1)),
+        uRingColor,
+        ring,
+      );
+
+      // Select display mode
+      let col = ringsOnly.toVar();
+      // mode 1 = raw
+      col.assign(mix(col, rawColor, float(uDisplayMode.equal(1))));
+      // mode 2 = both
+      col.assign(mix(col, bothColor, float(uDisplayMode.equal(2))));
 
       return vec4(col, float(1));
     });
 
-    const displayMat   = new THREE.MeshBasicNodeMaterial({ depthTest: false, depthWrite: false });
+    const displayMat = new THREE.MeshBasicNodeMaterial({ depthTest: false, depthWrite: false });
     displayMat.colorNode = displayFn();
 
     const displayQuad  = new THREE.Mesh(quadGeo, displayMat);
     const displayScene = new THREE.Scene();
     displayScene.add(displayQuad);
 
-    // ── Clear ─────────────────────────────────────────────────────────────────
+    // ── Clear helper ──────────────────────────────────────────────────────────
     function clearWave() {
       const prev = renderer.getRenderTarget();
-      renderer.setRenderTarget(waveRTs[0]); renderer.clearColor();
-      renderer.setRenderTarget(waveRTs[1]); renderer.clearColor();
+      renderer.setRenderTarget(waveRTs[0]);
+      renderer.clearColor();
+      renderer.setRenderTarget(waveRTs[1]);
+      renderer.clearColor();
       renderer.setRenderTarget(prev);
       pingIdx = 0;
     }
 
-    // ── Pointer injection ─────────────────────────────────────────────────────
+    // ── Click / drag injection ────────────────────────────────────────────────
     let isPointerDown = false;
+
     function canvasUV(e) {
       const rect = viewEl.getBoundingClientRect();
-      return new THREE.Vector2(
-        (e.clientX - rect.left) / rect.width,
-        1.0 - (e.clientY - rect.top) / rect.height,
-      );
+      const x = (e.clientX - rect.left) / rect.width;
+      const y = 1.0 - (e.clientY - rect.top) / rect.height;
+      return new THREE.Vector2(x, y);
     }
-    viewEl.addEventListener("pointerdown",  (e) => { isPointerDown = true;  uClickPos.value.copy(canvasUV(e)); uClickOn.value = 1; });
-    viewEl.addEventListener("pointermove",  (e) => { if (!isPointerDown) return; uClickPos.value.copy(canvasUV(e)); });
-    viewEl.addEventListener("pointerup",    ()  => { isPointerDown = false; uClickOn.value = 0; });
-    viewEl.addEventListener("pointerleave", ()  => { isPointerDown = false; uClickOn.value = 0; });
+
+    viewEl.addEventListener("pointerdown", (e) => {
+      isPointerDown = true;
+      uClickPos.value.copy(canvasUV(e));
+      uClickOn.value = 1;
+    });
+    viewEl.addEventListener("pointermove", (e) => {
+      if (!isPointerDown) return;
+      uClickPos.value.copy(canvasUV(e));
+    });
+    viewEl.addEventListener("pointerup",     () => { isPointerDown = false; uClickOn.value = 0; });
+    viewEl.addEventListener("pointerleave",  () => { isPointerDown = false; uClickOn.value = 0; });
 
     // ── Auto-inject ───────────────────────────────────────────────────────────
-    let autoMode = 0, autoInterval = 1.0, autoTimer = 0, autoActive = false;
+    let autoMode     = 0;
+    let autoInterval = 1.0;
+    let autoTimer    = 0;
+    let autoActive   = false;
 
     // ── Render loop ───────────────────────────────────────────────────────────
     let stepsPerFrame = 1;
@@ -538,13 +391,21 @@
     function step() {
       const read  = waveRTs[pingIdx];
       const write = waveRTs[1 - pingIdx];
-      if (read.texture instanceof THREE.Texture) waveTexNode.value = read.texture;
-      if (autoActive) uClickOn.value = 1;
+
+      if (read.texture instanceof THREE.Texture)  waveTexNode.value = read.texture;
+
+      // Keep click on for one step if auto-injecting
+      if (autoActive) {
+        uClickOn.value = 1;
+      }
+
       const prevRT = renderer.getRenderTarget();
       renderer.setRenderTarget(write);
       renderer.render(waveScene, orthoCamera);
       renderer.setRenderTarget(prevRT);
+
       if (autoActive) uClickOn.value = 0;
+
       pingIdx = 1 - pingIdx;
     }
 
@@ -553,22 +414,31 @@
       const dt = Math.min((ts - lastT) / 1000, 0.05);
       lastT = ts;
 
+      // Auto-inject logic
       if (autoMode > 0) {
         autoTimer += dt;
         if (autoTimer >= autoInterval) {
           autoTimer = 0;
-          uClickPos.value.set(
-            autoMode === 1 ? 0.1 + Math.random() * 0.8 : 0.5,
-            autoMode === 1 ? 0.1 + Math.random() * 0.8 : 0.5,
-          );
+          if (autoMode === 1) {
+            uClickPos.value.set(0.1 + Math.random() * 0.8, 0.1 + Math.random() * 0.8);
+          } else {
+            uClickPos.value.set(0.5, 0.5);
+          }
           autoActive = true;
-        } else { autoActive = false; }
-      } else { autoActive = false; }
+        } else {
+          autoActive = false;
+        }
+      } else {
+        autoActive = false;
+      }
 
+      // Wave steps
       for (let i = 0; i < stepsPerFrame; i++) step();
 
+      // Display
       const dispTex = waveRTs[pingIdx].texture;
       if (dispTex instanceof THREE.Texture) dispTexNode.value = dispTex;
+
       renderer.setRenderTarget(null);
       renderer.render(displayScene, orthoCamera);
     }
@@ -588,51 +458,43 @@
       el.dispatchEvent(new Event("input"));
     }
 
-    bind("speed",     "speedVal",    v => { uSpeed.value = v; },         v => v.toFixed(3));
-    bind("damp",      "dampVal",     v => { uDamping.value = v; },       v => v.toFixed(4));
-    bind("border",    "borderVal",   v => { uBorder.value = v; },        v => v.toFixed(3));
-    bind("injStr",    "injStrVal",   v => { uInjStr.value = v; },        v => v.toFixed(2));
-    bind("injAmp",    "injAmpVal",   v => { uInjAmp.value = v; },        v => v.toFixed(2));
-    bind("injRad",    "injRadVal",   v => { uInjRadius.value = v; },     v => v.toFixed(3));
-    bind("autoInt",   "autoIntVal",  v => { autoInterval = v; },         v => v.toFixed(1));
-    bind("gradScale", "gradVal",     v => { uGradScale.value = v; },     v => v.toFixed(1));
-    bind("thresh",    "threshVal",   v => { uThresh.value = v; },        v => v.toFixed(2));
-    bind("sharp",     "sharpVal",    v => { uSharpness.value = v; },     v => v.toFixed(2));
-    bind("ringOp",    "ringOpVal",   v => { uRingOp.value = v; },        v => v.toFixed(2));
-    bind("steps",     "stepsVal",    v => { stepsPerFrame = v; },        v => v.toFixed(0));
-    bind("noiseMix",  "noiseMixVal",  v => { uNoiseMix.value = v; },      v => v.toFixed(2));
-    bind("noiseScale","noiseScaleVal",v => { uNoiseScale.value = v; },   v => v.toFixed(1));
-    bind("noiseOffX", "noiseOffXVal",v => { uNoiseOffX.value = v; },     v => v.toFixed(2));
-    bind("noiseOffY", "noiseOffYVal",v => { uNoiseOffY.value = v; },     v => v.toFixed(2));
-    bind("jitter",    "jitterVal",   v => { uJitter.value = v; },        v => v.toFixed(2));
-    bind("octaves",   "octavesVal",  v => { uOctaves.value = v; },       v => v.toFixed(0));
+    bind("speed",    "speedVal",  v => { uSpeed.value = v; },          v => v.toFixed(3));
+    bind("damp",     "dampVal",   v => { uDamping.value = v; },        v => v.toFixed(4));
+    bind("border",   "borderVal", v => { uBorder.value = v; },         v => v.toFixed(3));
+    bind("injStr",   "injStrVal", v => { uInjStr.value = v; },         v => v.toFixed(2));
+    bind("injAmp",   "injAmpVal", v => { uInjAmp.value = v; },         v => v.toFixed(2));
+    bind("injRad",   "injRadVal", v => { uInjRadius.value = v; },      v => v.toFixed(3));
+    bind("autoInt",  "autoIntVal",v => { autoInterval = v; },          v => v.toFixed(1));
+    bind("gradScale","gradVal",   v => { uGradScale.value = v; },      v => v.toFixed(1));
+    bind("thresh",   "threshVal", v => { uThresh.value = v; },         v => v.toFixed(2));
+    bind("sharp",    "sharpVal",  v => { uSharpness.value = v; },      v => v.toFixed(2));
+    bind("ringOp",   "ringOpVal", v => { uRingOp.value = v; },         v => v.toFixed(2));
+    bind("steps",    "stepsVal",  v => { stepsPerFrame = v; },         v => v.toFixed(0));
 
-    document.getElementById("bgColor").addEventListener("input",   e => uBgColor.value.set(e.target.value));
-    document.getElementById("ringColor").addEventListener("input",  e => uRingColor.value.set(e.target.value));
+    document.getElementById("bgColor").addEventListener("input", e => uBgColor.value.set(e.target.value));
+    document.getElementById("ringColor").addEventListener("input", e => uRingColor.value.set(e.target.value));
+
     document.getElementById("displayMode").addEventListener("change", e => {
       uDisplayMode.value = { rings: 0, raw: 1, both: 2 }[e.target.value];
     });
+
     document.getElementById("autoInject").addEventListener("change", e => {
-      autoMode = parseInt(e.target.value); autoTimer = 0;
+      autoMode  = parseInt(e.target.value);
+      autoTimer = 0;
     });
-    document.getElementById("noiseType").addEventListener("change", e => {
-      uNoiseMode.value = parseInt(e.target.value);
-    });
-    bind("propVar",   "propVarVal",   v => { uPropSpeedVar.value = v; },   v => v.toFixed(2));
-    bind("propScale", "propScaleVal", v => { uPropNoiseScale.value = v; }, v => v.toFixed(1));
-    document.getElementById("propNoiseType").addEventListener("change", e => {
-      uPropNoiseType.value = parseInt(e.target.value);
-    });
+
     document.getElementById("res").addEventListener("change", e => {
       WAVE_RES = parseInt(e.target.value);
       TEXEL = 1 / WAVE_RES;
       uTexelSize.value = TEXEL;
-      waveRTs[0].dispose(); waveRTs[1].dispose();
+      waveRTs[0].dispose();
+      waveRTs[1].dispose();
       waveRTs = [makeRT(WAVE_RES), makeRT(WAVE_RES)];
       pingIdx = 0;
       waveTexNode.value = placeholder;
       dispTexNode.value = placeholder;
     });
+
     document.getElementById("clearBtn").addEventListener("click", clearWave);
   </script>
 </body>
