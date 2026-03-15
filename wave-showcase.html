@@ -252,14 +252,18 @@
     const waveTexNode = texture(placeholder, vec2(0.5, 0.5));
 
     const waveUpdateFn = Fn(() => {
-      const uv = positionLocal.xy.mul(0.5).add(0.5);
+      // Flip Y to match WebGPU render-target convention (Y=0 at top)
+      const uv = vec2(
+        positionLocal.x.mul(0.5).add(0.5),
+        float(1).sub(positionLocal.y.mul(0.5).add(0.5)),
+      );
       const cur  = waveTexNode.sample(uv).r;
       const prev = waveTexNode.sample(uv).g;
 
       const left  = waveTexNode.sample(uv.add(vec2(uTexelSize.negate(), 0))).r;
       const right = waveTexNode.sample(uv.add(vec2(uTexelSize, 0))).r;
-      const up    = waveTexNode.sample(uv.add(vec2(0, uTexelSize))).r;
-      const down  = waveTexNode.sample(uv.add(vec2(0, uTexelSize.negate()))).r;
+      const up    = waveTexNode.sample(uv.add(vec2(0, uTexelSize.negate()))).r;
+      const down  = waveTexNode.sample(uv.add(vec2(0, uTexelSize))).r;
       const laplacian = left.add(right).add(up).add(down).sub(cur.mul(4));
 
       let next = float(2).mul(cur).sub(prev).add(uSpeed.mul(laplacian));
@@ -270,7 +274,7 @@
       const border = smoothstep(float(0), uBorder, edge);
       next = next.mul(border);
 
-      // Inject at click position (GPU-side circle)
+      // Inject at click position — uClickPos is also in RT UV space (y=0 at top)
       const d      = length(uv.sub(uClickPos));
       const inject = float(1).sub(smoothstep(float(0), uInjRadius, d)).mul(uClickOn);
       next = mix(next, uInjAmp, inject.mul(uInjStr));
