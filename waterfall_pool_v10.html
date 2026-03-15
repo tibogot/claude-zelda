@@ -1,0 +1,632 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Waterfall v9</title>
+    <style>
+      body {
+        margin: 0;
+        background: #050505;
+        overflow: hidden;
+      }
+      canvas {
+        display: block;
+      }
+      .tp-dfwv {
+        max-height: calc(100vh - 32px) !important;
+        overflow-y: auto !important;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+      }
+      .tp-dfwv::-webkit-scrollbar {
+        width: 4px;
+      }
+      .tp-dfwv::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      .tp-dfwv::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.2);
+        border-radius: 2px;
+      }
+    </style>
+  </head>
+  <body>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.3/dist/tweakpane.min.js"
+        }
+      }
+    </script>
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import {
+        Fn,
+        uv,
+        vec2,
+        float,
+        mix,
+        smoothstep,
+        floor,
+        fract,
+        sin,
+        cos,
+        dot,
+        min,
+        length,
+        uniform,
+        pow,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
+
+      // ── Mesh (same as v8) ─────────────────────────────────────────────────
+      const MESH = {
+        width: 4,
+        totalHeight: 8,
+        topLength: 2.5,
+        radius: 1.2,
+        segments: 128,
+      };
+
+      // ── Gradient noise (v7) ───────────────────────────────────────────────
+      const gradientNoise = Fn(([p]) => {
+        const i = floor(p).toVar();
+        const f = fract(p).toVar();
+        const uu = f
+          .mul(f)
+          .mul(f)
+          .mul(f.mul(f.mul(6).sub(15)).add(10));
+        const rg = Fn(([ip]) => {
+          const a = fract(sin(dot(ip, vec2(127.1, 311.7))).mul(43758.5453)).mul(
+            Math.PI * 2,
+          );
+          return vec2(cos(a), sin(a));
+        });
+        const d00 = dot(rg(i), f);
+        const d10 = dot(rg(i.add(vec2(1, 0))), f.sub(vec2(1, 0)));
+        const d01 = dot(rg(i.add(vec2(0, 1))), f.sub(vec2(0, 1)));
+        const d11 = dot(rg(i.add(vec2(1, 1))), f.sub(vec2(1, 1)));
+        return mix(mix(d00, d10, uu.x), mix(d01, d11, uu.x), uu.y)
+          .mul(0.5)
+          .add(0.5);
+      });
+
+      // ── Voronoi F1 ────────────────────────────────────────────────────────
+      const NEIGHBORS = [
+        [-1, -1],
+        [0, -1],
+        [1, -1],
+        [-1, 0],
+        [0, 0],
+        [1, 0],
+        [-1, 1],
+        [0, 1],
+        [1, 1],
+      ];
+      const voronoiF1 = Fn(([p, jitter]) => {
+        const ip = floor(p).toVar();
+        const fp = fract(p).toVar();
+        const md = float(10.0).toVar();
+        for (const [nx, ny] of NEIGHBORS) {
+          const off = vec2(float(nx), float(ny));
+          const h = vec2(
+            fract(sin(dot(ip.add(off), vec2(127.1, 311.7))).mul(43758.5453)),
+            fract(sin(dot(ip.add(off), vec2(269.5, 183.3))).mul(43758.5453)),
+          );
+          md.assign(
+            min(md, length(off.add(mix(vec2(0.5), h, jitter)).sub(fp))),
+          );
+        }
+        return md;
+      });
+
+      // ── Voronoi FBM — up to 6 octaves, continuous via smoothstep blending ─
+      const voronoiFbm = Fn(([p_in, jitter, octaves, lac, gain]) => {
+        const p = p_in.toVar();
+        const val = float(0).toVar();
+        const amp = float(1.0).toVar();
+        const total = float(0).toVar();
+        val.addAssign(amp.mul(voronoiF1(p, jitter)));
+        total.addAssign(amp);
+        p.mulAssign(lac);
+        amp.mulAssign(gain);
+        const d2 = smoothstep(float(1), float(2), octaves);
+        val.addAssign(amp.mul(voronoiF1(p, jitter)).mul(d2));
+        total.addAssign(amp.mul(d2));
+        p.mulAssign(lac);
+        amp.mulAssign(gain);
+        const d3 = smoothstep(float(2), float(3), octaves);
+        val.addAssign(amp.mul(voronoiF1(p, jitter)).mul(d3));
+        total.addAssign(amp.mul(d3));
+        p.mulAssign(lac);
+        amp.mulAssign(gain);
+        const d4 = smoothstep(float(3), float(4), octaves);
+        val.addAssign(amp.mul(voronoiF1(p, jitter)).mul(d4));
+        total.addAssign(amp.mul(d4));
+        p.mulAssign(lac);
+        amp.mulAssign(gain);
+        const d5 = smoothstep(float(4), float(5), octaves);
+        val.addAssign(amp.mul(voronoiF1(p, jitter)).mul(d5));
+        total.addAssign(amp.mul(d5));
+        p.mulAssign(lac);
+        amp.mulAssign(gain);
+        const d6 = smoothstep(float(5), float(6), octaves);
+        val.addAssign(amp.mul(voronoiF1(p, jitter)).mul(d6));
+        total.addAssign(amp.mul(d6));
+        return val.div(total);
+      });
+
+      // ── Band mask helper (noisy edges, v7 pattern) ────────────────────────
+      // Returns 0 outside band, 1 inside; both edges shaped by the provided noise sample
+      const bandMask = Fn(([y, low, high, n, noiseAmt, sharpness]) => {
+        const nLow = low.add(n.sub(0.5).mul(noiseAmt.mul(2)));
+        const nHigh = high.add(n.sub(0.5).mul(noiseAmt.mul(2)));
+        return smoothstep(nLow.sub(sharpness), nLow.add(sharpness), y).mul(
+          smoothstep(nHigh.add(sharpness), nHigh.sub(sharpness), y),
+        );
+      });
+
+      // ── Uniforms ──────────────────────────────────────────────────────────
+      const u = {
+        // ── Layer 0: base body ────────────────────────────────────────────
+        darkColor: uniform(new THREE.Color(0x041820)),
+        bodyColor: uniform(new THREE.Color(0x0d5a6a)),
+        depthScaleX: uniform(2.5),
+        depthScaleY: uniform(0.8),
+        depthStrength: uniform(0.55),
+        bodyBrightness: uniform(1.0),
+        bodyContrast: uniform(1.0),
+
+        // ── Layer 1: cyan lip (same as foam lip, below it) ───────────────
+        cyan_enabled: uniform(1.0),
+        cyan_bandLow: uniform(0.56),
+        cyan_bandHigh: uniform(0.78),
+        cyan_nScaleX: uniform(6.0),
+        cyan_nScaleY: uniform(3.0),
+        cyan_noiseAmt: uniform(0.22),
+        cyan_bandSharp: uniform(0.03),
+        cyan_scaleX: uniform(5.0),
+        cyan_scaleY: uniform(4.0),
+        cyan_offsetX: uniform(0.0),
+        cyan_offsetY: uniform(0.0),
+        cyan_jitter: uniform(1.0),
+        cyan_octaves: uniform(3.0),
+        cyan_lac: uniform(2.0),
+        cyan_gain: uniform(0.45),
+        cyan_warpStr: uniform(0.5),
+        cyan_warpScale: uniform(2.5),
+        cyan_contrast: uniform(2.5),
+        cyan_threshold: uniform(0.38),
+        cyan_sharpness: uniform(0.05),
+        cyan_color: uniform(new THREE.Color(0x00c8d8)),
+        cyan_strength: uniform(1.0),
+
+        // ── Layer 2: foam lip (voronoi fbm at bend) ───────────────────────
+        lip_enabled: uniform(1.0),
+        lip_bandLow: uniform(0.56),
+        lip_bandHigh: uniform(0.78),
+        lip_nScaleX: uniform(6.0),
+        lip_nScaleY: uniform(3.0),
+        lip_noiseAmt: uniform(0.22),
+        lip_bandSharp: uniform(0.03),
+        lip_scaleX: uniform(5.0),
+        lip_scaleY: uniform(4.0),
+        lip_offsetX: uniform(0.0),
+        lip_offsetY: uniform(0.0),
+        lip_jitter: uniform(1.0),
+        lip_octaves: uniform(3.0),
+        lip_lac: uniform(2.0),
+        lip_gain: uniform(0.45),
+        lip_warpStr: uniform(0.5),
+        lip_warpScale: uniform(2.5),
+        lip_contrast: uniform(2.5),
+        lip_threshold: uniform(0.38),
+        lip_sharpness: uniform(0.05),
+        lip_color: uniform(new THREE.Color(0xffffff)),
+        lip_strength: uniform(1.0),
+
+        // ── Layer 2: drip streaks (stretched voronoi, tall band) ──────────
+        drip_enabled: uniform(0.0),
+        drip_bandLow: uniform(0.05),
+        drip_bandHigh: uniform(0.73),
+        drip_nScaleX: uniform(6.0),
+        drip_nScaleY: uniform(2.0),
+        drip_noiseAmt: uniform(0.08),
+        drip_bandSharp: uniform(0.04),
+        drip_scaleX: uniform(14.0),
+        drip_scaleY: uniform(1.8),
+        drip_offsetX: uniform(0.0),
+        drip_offsetY: uniform(0.0),
+        drip_jitter: uniform(1.0),
+        drip_octaves: uniform(2.0),
+        drip_lac: uniform(2.0),
+        drip_gain: uniform(0.4),
+        drip_warpStr: uniform(0.25),
+        drip_warpScale: uniform(1.5),
+        drip_contrast: uniform(4.0),
+        drip_threshold: uniform(0.12),
+        drip_sharpness: uniform(0.03),
+        drip_color: uniform(new THREE.Color(0xffffff)),
+        drip_strength: uniform(0.9),
+
+        // ── Layer 3: fine detail foam (small voronoi at lip only) ─────────
+        det_enabled: uniform(0.0),
+        det_bandLow: uniform(0.58),
+        det_bandHigh: uniform(0.8),
+        det_nScaleX: uniform(6.0),
+        det_nScaleY: uniform(3.0),
+        det_noiseAmt: uniform(0.18),
+        det_bandSharp: uniform(0.03),
+        det_scaleX: uniform(11.0),
+        det_scaleY: uniform(9.0),
+        det_offsetX: uniform(2.3),
+        det_offsetY: uniform(1.7),
+        det_jitter: uniform(1.0),
+        det_octaves: uniform(2.0),
+        det_lac: uniform(2.0),
+        det_gain: uniform(0.5),
+        det_warpStr: uniform(0.3),
+        det_warpScale: uniform(3.0),
+        det_contrast: uniform(3.0),
+        det_threshold: uniform(0.28),
+        det_sharpness: uniform(0.03),
+        det_color: uniform(new THREE.Color(0xffffff)),
+        det_strength: uniform(0.65),
+      };
+
+      // ── Shared voronoi layer builder ──────────────────────────────────────
+      const voroLayer = Fn(
+        ([
+          v,
+          scaleX,
+          scaleY,
+          offX,
+          offY,
+          jitter,
+          octaves,
+          lac,
+          gain,
+          warpStr,
+          warpScale,
+          contrast,
+        ]) => {
+          const p = vec2(
+            v.x.mul(scaleX).add(offX),
+            v.y.mul(scaleY).add(offY),
+          ).toVar();
+          const wx = gradientNoise(p.mul(warpScale)).sub(0.5);
+          const wy = gradientNoise(p.mul(warpScale).add(vec2(3.7, 8.3))).sub(
+            0.5,
+          );
+          p.addAssign(vec2(wx, wy).mul(warpStr));
+          return pow(voronoiFbm(p, jitter, octaves, lac, gain), contrast);
+        },
+      );
+
+      // ── Color shader ──────────────────────────────────────────────────────
+      const colorNode = Fn(() => {
+        const v = uv();
+
+        // ── Layer 0: body — dark base + horizontal depth bands ────────────
+        const depthN = gradientNoise(
+          vec2(v.x.mul(u.depthScaleX), v.y.mul(u.depthScaleY)),
+        );
+        const col = mix(
+          u.darkColor,
+          u.bodyColor,
+          depthN.mul(u.depthStrength),
+        ).toVar();
+        col.assign(
+          col
+            .sub(0.5)
+            .mul(u.bodyContrast)
+            .add(0.5)
+            .mul(u.bodyBrightness)
+            .clamp(0, 1),
+        );
+
+        // ── Layer 1: cyan lip ────────────────────────────────────────────
+        const cyanN = gradientNoise(
+          vec2(v.x.mul(u.cyan_nScaleX), v.y.mul(u.cyan_nScaleY)),
+        );
+        const cyanBand = bandMask(
+          v.y,
+          u.cyan_bandLow,
+          u.cyan_bandHigh,
+          cyanN,
+          u.cyan_noiseAmt,
+          u.cyan_bandSharp,
+        );
+        const cyanF1 = voroLayer(
+          v,
+          u.cyan_scaleX,
+          u.cyan_scaleY,
+          u.cyan_offsetX,
+          u.cyan_offsetY,
+          u.cyan_jitter,
+          u.cyan_octaves,
+          u.cyan_lac,
+          u.cyan_gain,
+          u.cyan_warpStr,
+          u.cyan_warpScale,
+          u.cyan_contrast,
+        );
+        const cyanFoam = smoothstep(
+          u.cyan_threshold.add(u.cyan_sharpness),
+          u.cyan_threshold.sub(u.cyan_sharpness),
+          cyanF1,
+        );
+        col.assign(
+          mix(
+            col,
+            u.cyan_color,
+            cyanFoam
+              .mul(cyanBand)
+              .mul(u.cyan_strength)
+              .mul(u.cyan_enabled)
+              .clamp(0, 1),
+          ),
+        );
+
+        // ── Layer 2: lip foam ─────────────────────────────────────────────
+        const lipN = gradientNoise(
+          vec2(v.x.mul(u.lip_nScaleX), v.y.mul(u.lip_nScaleY)),
+        );
+        const lipBand = bandMask(
+          v.y,
+          u.lip_bandLow,
+          u.lip_bandHigh,
+          lipN,
+          u.lip_noiseAmt,
+          u.lip_bandSharp,
+        );
+        const lipF1 = voroLayer(
+          v,
+          u.lip_scaleX,
+          u.lip_scaleY,
+          u.lip_offsetX,
+          u.lip_offsetY,
+          u.lip_jitter,
+          u.lip_octaves,
+          u.lip_lac,
+          u.lip_gain,
+          u.lip_warpStr,
+          u.lip_warpScale,
+          u.lip_contrast,
+        );
+        const lipFoam = smoothstep(
+          u.lip_threshold.add(u.lip_sharpness),
+          u.lip_threshold.sub(u.lip_sharpness),
+          lipF1,
+        );
+        col.assign(
+          mix(
+            col,
+            u.lip_color,
+            lipFoam
+              .mul(lipBand)
+              .mul(u.lip_strength)
+              .mul(u.lip_enabled)
+              .clamp(0, 1),
+          ),
+        );
+
+        // ── Layer 2: drip streaks ─────────────────────────────────────────
+        const dripN = gradientNoise(
+          vec2(v.x.mul(u.drip_nScaleX), v.y.mul(u.drip_nScaleY)),
+        );
+        const dripBand = bandMask(
+          v.y,
+          u.drip_bandLow,
+          u.drip_bandHigh,
+          dripN,
+          u.drip_noiseAmt,
+          u.drip_bandSharp,
+        );
+        const dripF1 = voroLayer(
+          v,
+          u.drip_scaleX,
+          u.drip_scaleY,
+          u.drip_offsetX,
+          u.drip_offsetY,
+          u.drip_jitter,
+          u.drip_octaves,
+          u.drip_lac,
+          u.drip_gain,
+          u.drip_warpStr,
+          u.drip_warpScale,
+          u.drip_contrast,
+        );
+        const dripFoam = smoothstep(
+          u.drip_threshold.sub(u.drip_sharpness),
+          u.drip_threshold.add(u.drip_sharpness),
+          dripF1,
+        );
+        col.assign(
+          mix(
+            col,
+            u.drip_color,
+            dripFoam
+              .mul(dripBand)
+              .mul(u.drip_strength)
+              .mul(u.drip_enabled)
+              .clamp(0, 1),
+          ),
+        );
+
+        // ── Layer 3: fine detail foam at lip ──────────────────────────────
+        const detN = gradientNoise(
+          vec2(v.x.mul(u.det_nScaleX), v.y.mul(u.det_nScaleY)),
+        );
+        const detBand = bandMask(
+          v.y,
+          u.det_bandLow,
+          u.det_bandHigh,
+          detN,
+          u.det_noiseAmt,
+          u.det_bandSharp,
+        );
+        const detF1 = voroLayer(
+          v,
+          u.det_scaleX,
+          u.det_scaleY,
+          u.det_offsetX,
+          u.det_offsetY,
+          u.det_jitter,
+          u.det_octaves,
+          u.det_lac,
+          u.det_gain,
+          u.det_warpStr,
+          u.det_warpScale,
+          u.det_contrast,
+        );
+        const detFoam = smoothstep(
+          u.det_threshold.add(u.det_sharpness),
+          u.det_threshold.sub(u.det_sharpness),
+          detF1,
+        );
+        col.assign(
+          mix(
+            col,
+            u.det_color,
+            detFoam
+              .mul(detBand)
+              .mul(u.det_strength)
+              .mul(u.det_enabled)
+              .clamp(0, 1),
+          ),
+        );
+
+        return col;
+      })();
+
+      // ── Geometry ──────────────────────────────────────────────────────────
+      function buildGeo() {
+        const { width, totalHeight, topLength, radius, segments } = MESH;
+        const geo = new THREE.PlaneGeometry(width, totalHeight, 1, segments);
+        const pos = geo.attributes.position;
+        const vv = new THREE.Vector3();
+        const curveStart = totalHeight - topLength;
+        const curveEnd = curveStart - radius;
+        for (let i = 0; i < pos.count; i++) {
+          vv.fromBufferAttribute(pos, i);
+          let cy = vv.y + totalHeight / 2;
+          if (cy >= curveStart) {
+            vv.y = cy;
+            vv.z = 0;
+          } else if (cy > curveEnd) {
+            const a = ((curveStart - cy) / radius) * (Math.PI / 2);
+            vv.y = curveStart - Math.sin(a) * radius;
+            vv.z = -(radius - Math.cos(a) * radius);
+          } else {
+            vv.y = curveStart - radius;
+            vv.z = -radius - (curveEnd - cy);
+          }
+          pos.setXYZ(i, vv.x, vv.y, vv.z);
+        }
+        geo.computeVertexNormals();
+        return geo;
+      }
+
+      // ── Init ──────────────────────────────────────────────────────────────
+      async function init() {
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+        await renderer.init();
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(
+          45,
+          window.innerWidth / window.innerHeight,
+          0.1,
+          100,
+        );
+        camera.position.set(8, 5, 12);
+        new OrbitControls(camera, renderer.domElement);
+
+        const mat = new THREE.MeshBasicNodeMaterial({ side: THREE.DoubleSide });
+        mat.colorNode = colorNode;
+        scene.add(new THREE.Mesh(buildGeo(), mat).rotateX(-Math.PI / 2));
+
+        window.addEventListener("resize", () => {
+          camera.aspect = window.innerWidth / window.innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // ── Tweakpane ──────────────────────────────────────────────────────
+        const pane = new Pane({ title: "Waterfall v9" });
+
+        const mkColor = (folder, label, key, hex) => {
+          const obj = { color: hex };
+          folder
+            .addBinding(obj, "color", { label })
+            .on("change", ({ value }) => u[key].value.set(value));
+        };
+        const mkF = (folder, label, key, min, max, step) =>
+          folder.addBinding(u[key], "value", { label, min, max, step });
+
+        // Body
+        const b0 = pane.addFolder({ title: "Body" });
+        mkColor(b0, "Dark", "darkColor", "#041820");
+        mkColor(b0, "Body Teal", "bodyColor", "#0d5a6a");
+        mkF(b0, "Depth Sc X", "depthScaleX", 0.5, 8, 0.1);
+        mkF(b0, "Depth Sc Y", "depthScaleY", 0.1, 4, 0.05);
+        mkF(b0, "Strength", "depthStrength", 0, 1, 0.01);
+        mkF(b0, "Brightness", "bodyBrightness", 0, 3, 0.01);
+        mkF(b0, "Contrast", "bodyContrast", 0, 4, 0.05);
+
+        // Lip foam
+        const addLayer = (title, prefix, hex, defaultEnabled = true) => {
+          const f = pane.addFolder({ title });
+          const enabledObj = { enabled: defaultEnabled };
+          f.addBinding(enabledObj, "enabled", { label: "Enable" }).on(
+            "change",
+            ({ value }) => {
+              u[`${prefix}_enabled`].value = value ? 1.0 : 0.0;
+            },
+          );
+          const fb = f.addFolder({ title: "Band" });
+          mkF(fb, "Low", `${prefix}_bandLow`, 0, 1, 0.01);
+          mkF(fb, "High", `${prefix}_bandHigh`, 0, 1, 0.01);
+          mkF(fb, "Noise ScX", `${prefix}_nScaleX`, 0.5, 20, 0.1);
+          mkF(fb, "Noise ScY", `${prefix}_nScaleY`, 0.5, 20, 0.1);
+          mkF(fb, "Noise Amt", `${prefix}_noiseAmt`, 0, 0.5, 0.01);
+          mkF(fb, "Sharpness", `${prefix}_bandSharp`, 0.005, 0.15, 0.005);
+          const fs = f.addFolder({ title: "Shape" });
+          mkF(fs, "Scale X", `${prefix}_scaleX`, 0.5, 30, 0.5);
+          mkF(fs, "Scale Y", `${prefix}_scaleY`, 0.5, 30, 0.5);
+          mkF(fs, "Offset X", `${prefix}_offsetX`, -10, 10, 0.1);
+          mkF(fs, "Offset Y", `${prefix}_offsetY`, -10, 10, 0.1);
+          mkF(fs, "Jitter", `${prefix}_jitter`, 0, 1, 0.01);
+          mkF(fs, "Octaves", `${prefix}_octaves`, 1, 6, 0.1);
+          mkF(fs, "Lacunarity", `${prefix}_lac`, 1.2, 4, 0.05);
+          mkF(fs, "Gain", `${prefix}_gain`, 0.1, 0.9, 0.01);
+          mkF(fs, "Warp Str", `${prefix}_warpStr`, 0, 2, 0.01);
+          mkF(fs, "Warp Scale", `${prefix}_warpScale`, 0.5, 10, 0.1);
+          mkF(fs, "Contrast", `${prefix}_contrast`, 0.2, 6, 0.05);
+          mkF(fs, "Threshold", `${prefix}_threshold`, 0.05, 0.8, 0.01);
+          mkF(fs, "Sharpness", `${prefix}_sharpness`, 0.005, 0.2, 0.005);
+          mkColor(f, "Color", `${prefix}_color`, hex);
+          mkF(f, "Strength", `${prefix}_strength`, 0, 1, 0.01);
+        };
+
+        addLayer("Cyan Lip", "cyan", "#00c8d8", true);
+        addLayer("Foam Lip", "lip", "#ffffff", true);
+        addLayer("Drip Streaks", "drip", "#ffffff", false);
+        addLayer("Detail Foam", "det", "#ffffff", false);
+
+        renderer.setAnimationLoop(() => renderer.render(scene, camera));
+      }
+
+      init();
+    </script>
+  </body>
+</html>

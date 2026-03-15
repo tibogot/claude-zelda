@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TSL Shader Showcase — Glowing Vortex</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { overflow: hidden; background: #0a0a0c; }
+      canvas { display: block; width: 100vw; height: 100vh; }
+      #info {
+        position: fixed; bottom: 16px; left: 16px; z-index: 10;
+        font: 12px/1.5 "SF Mono", "Fira Code", monospace;
+        color: #b0d890; background: rgba(0,0,0,0.6);
+        padding: 8px 12px; border-radius: 6px;
+        pointer-events: none; user-select: none; backdrop-filter: blur(4px);
+      }
+      #info span { color: #e0f0c0; font-weight: 600; }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">
+      TSL Shader Showcase &mdash; <span id="backend">loading…</span> &bull;
+      Drag to orbit &bull; Scroll to zoom
+    </div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import {
+        Fn,
+        positionLocal,
+        uv,
+        uniform,
+        float,
+        vec2,
+        vec3,
+        sin,
+        cos,
+        add,
+        mul,
+        mix,
+        smoothstep,
+        length,
+        atan,
+        color,
+        pass,
+        abs,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { bloom } from "three/addons/tsl/display/BloomNode.js";
+
+      // ─── Vortex ribbon geometry: spiral strands, hourglass shape ───
+      function createVortexRibbonGeometry(opts = {}) {
+        const numStrands = opts.strands ?? 36;
+        const segmentsPerStrand = opts.segments ?? 24;
+        const height = opts.height ?? 2.5;
+        const maxRadius = opts.maxRadius ?? 0.8;
+        const ribbonWidth = opts.ribbonWidth ?? 0.08;
+        const twistTurns = opts.twistTurns ?? 3;
+
+        const positions = [];
+        const uvs = [];
+        const indices = [];
+
+        for (let s = 0; s < numStrands; s++) {
+          const baseAngle = (s / numStrands) * Math.PI * 2;
+          const phase = (s / numStrands) * Math.PI * 4;
+          for (let i = 0; i <= segmentsPerStrand; i++) {
+            const t = i / segmentsPerStrand;
+            const y = (t - 0.5) * height;
+            const turn = baseAngle + t * twistTurns * Math.PI * 2;
+            const wave = 1 + 0.06 * Math.sin(phase + t * Math.PI * 6);
+            const r = maxRadius * Math.sin(t * Math.PI) * wave;
+            const x = r * Math.cos(turn);
+            const z = r * Math.sin(turn);
+            const nx = -ribbonWidth * Math.sin(turn);
+            const nz = ribbonWidth * Math.cos(turn);
+            positions.push(x + nx, y, z + nz, x - nx, y, z - nz);
+            uvs.push(0, t, 1, t);
+          }
+          const base = s * (segmentsPerStrand + 1) * 2;
+          for (let i = 0; i < segmentsPerStrand; i++) {
+            const a = base + i * 2;
+            indices.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+          }
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+        geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+        geo.setIndex(indices);
+        geo.computeVertexNormals();
+        return geo;
+      }
+
+      async function init() {
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        await renderer.init();
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        document.body.appendChild(renderer.domElement);
+        document.getElementById("backend").textContent =
+          renderer.backend?.constructor?.name?.includes("WebGPU") ? "WebGPU ✓" : "WebGL fallback";
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0a0a0c);
+
+        const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 100);
+        camera.position.set(0, 0, 4.5);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.target.set(0, 0, 0);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.4);
+        dirLight.position.set(2, 3, 2);
+        scene.add(dirLight);
+        scene.add(new THREE.AmbientLight(0x222244, 0.3));
+
+        // Grid floor (subtle, like reference)
+        const gridGeo = new THREE.PlaneGeometry(20, 20, 20, 20);
+        const gridMat = new THREE.MeshBasicMaterial({
+          color: 0x18181c,
+          wireframe: true,
+          transparent: true,
+          opacity: 0.4,
+        });
+        const grid = new THREE.Mesh(gridGeo, gridMat);
+        grid.rotation.x = -Math.PI / 2;
+        scene.add(grid);
+
+        // Uniforms: twist + time (from your graph)
+        const parabolStrength = uniform(1.2);
+        const parabolOffset = uniform(0);
+        const parabolAmplitude = uniform(1.5);
+        const timeScale = uniform(1);
+        const timeNode = uniform(0);
+        let clock = 0;
+
+        const twistedPosition = Fn(() => {
+          const p = positionLocal;
+          const x = p.x;
+          const y = p.y;
+          const z = p.z;
+          const angle = atan(z, x);
+          const radius = length(vec2(x, z));
+          const t = timeNode.mul(timeScale);
+          const twist = add(add(parabolOffset, mul(parabolAmplitude, t)), mul(parabolStrength, y));
+          const newAngle = add(angle, twist);
+          return vec3(mul(cos(newAngle), radius), y, mul(sin(newAngle), radius));
+        })();
+
+        // Each ruban = one thin glowing line (bright only along center of ribbon)
+        const colorNode = Fn(() => {
+          const u = uv();
+          const v = u.y;
+          const distFromCenter = abs(u.x.sub(0.5));
+          const lineWidth = float(0.04);
+          const lineBright = float(1).sub(smoothstep(lineWidth.mul(0.5), lineWidth, distFromCenter));
+          const core = float(1).sub(v.mul(0.3));
+          const bright = mul(lineBright, core);
+          const fire = mix(
+            color(0xbb2200),
+            mix(color(0xff6600), color(0xffdd33), smoothstep(float(0.2), float(0.8), v)),
+            bright
+          );
+          return fire.mul(bright.mul(3).add(0.4));
+        })();
+
+        const material = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
+        material.positionNode = twistedPosition;
+        material.colorNode = colorNode;
+
+        const vortexGeo = createVortexRibbonGeometry({
+          strands: 100,
+          segments: 36,
+          height: 2.8,
+          maxRadius: 0.88,
+          ribbonWidth: 0.022,
+          twistTurns: 2.8,
+        });
+        const mesh = new THREE.Mesh(vortexGeo, material);
+        scene.add(mesh);
+
+        // Post-processing: bloom (from your graph: radius 0.1, strength 1, threshold 1)
+        const scenePass = pass(scene, camera);
+        const sceneColor = scenePass.getTextureNode ? scenePass.getTextureNode("output") : scenePass;
+        const bloomPass = bloom(sceneColor, 1, 0.1, 0.35);
+        const renderPipeline = new THREE.RenderPipeline(renderer);
+        renderPipeline.outputNode = sceneColor.add(bloomPass);
+
+        await renderer.compileAsync(scene, camera);
+
+        function animate() {
+          requestAnimationFrame(animate);
+          clock += 0.016;
+          timeNode.value = clock;
+          controls.update();
+          renderPipeline.render();
+        }
+        animate();
+
+        window.addEventListener("resize", () => {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(innerWidth, innerHeight);
+        });
+      }
+
+      init().catch((err) => {
+        console.error(err);
+        document.getElementById("info").textContent = "Error: " + err.message;
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TSL Texture Editor — Terrain (Masked Noise Layers)</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1a1a1e; overflow: hidden; font-family: "SF Mono", "Fira Code", monospace; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #info {
+      position: fixed; bottom: 12px; left: 12px; z-index: 10;
+      background: rgba(0,0,0,0.6); color: #a0c8a0;
+      padding: 8px 12px; border-radius: 6px; font-size: 11px; line-height: 1.6;
+    }
+    #info span { color: #c8e8c8; font-weight: 600; }
+    #tweakpane-container {
+      max-height: 90vh;
+      overflow-y: auto;
+      overflow-x: hidden;
+    }
+    #tweakpane-container::-webkit-scrollbar { width: 8px; }
+    #tweakpane-container::-webkit-scrollbar-track { background: rgba(0,0,0,0.2); border-radius: 4px; }
+    #tweakpane-container::-webkit-scrollbar-thumb { background: rgba(160,200,160,0.5); border-radius: 4px; }
+    #tweakpane-container::-webkit-scrollbar-thumb:hover { background: rgba(160,200,160,0.7); }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+      "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+      "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+      "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.4/dist/tweakpane.min.js"
+    }
+  }
+  </script>
+</head>
+<body>
+<div id="info">
+  <span>TSL Texture Editor</span> — Terrain: base color + masked noise on top of masked noise (no position, just noise-band mask).
+</div>
+<div id="tweakpane-container"></div>
+
+<script type="module">
+import * as THREE from "three";
+import { WebGPURenderer } from "three/webgpu";
+import {
+  Fn,
+  uv,
+  uniform,
+  float,
+  vec2,
+  vec3,
+  mix,
+  smoothstep,
+  add,
+  sub,
+  mul,
+  clamp,
+  step,
+  pow,
+} from "three/tsl";
+import {
+  valueNoise2D,
+  perlinNoise2D,
+  simplexNoise2D,
+  fbmPerlin2D,
+  voronoiF1Normalized,
+  whiteNoise2D,
+} from "./tsl-noise.js";
+import { Pane } from "tweakpane";
+
+function hexToVec3(hexOrObj) {
+  let c;
+  if (hexOrObj && typeof hexOrObj === "object" && "r" in hexOrObj) {
+    c = new THREE.Color(hexOrObj.r, hexOrObj.g, hexOrObj.b);
+  } else {
+    c = new THREE.Color(hexOrObj);
+  }
+  c.convertSRGBToLinear();
+  return new THREE.Vector3(c.r, c.g, c.b);
+}
+
+function noiseTypeToIndex(s) {
+  const map = { value: 0, perlin: 1, simplex: 2, voronoi: 3, white: 4 };
+  return map[s] ?? 0;
+}
+
+// Presets (e.g. "Photoshop-style" two greens + clouds + contrast)
+const PRESETS = {
+  "Default (terrain)": null,
+  "Clouds (two greens)": {
+    uvScale: 5,
+    brightness: 1.4,
+    contrast: 1.5,
+    gamma: 2.2,
+    baseColor: "#3a5530",
+    layer1: {
+      enable: true,
+      noiseType: "perlin",
+      color: "#6b8a5c",
+      strength: 0.88,
+      useFbm: true,
+      octaves: 3,
+      lacunarity: 2,
+      gain: 0.5,
+      scale: 4.5,
+      offsetX: 0,
+      offsetY: 0,
+      invert: false,
+      maskLow: 0,
+      maskHigh: 1,
+      maskSharpness: 0.55,
+      voronoiJitter: 0.8,
+    },
+    layer2: {
+      enable: false,
+      noiseType: "simplex",
+      color: "#4a6b38",
+      strength: 0.4,
+      useFbm: true,
+      octaves: 2.5,
+      lacunarity: 2.2,
+      gain: 0.5,
+      scale: 8,
+      offsetX: 13.7,
+      offsetY: 31.1,
+      invert: false,
+      maskLow: 0.4,
+      maskHigh: 0.75,
+      maskSharpness: 1,
+      voronoiJitter: 0.7,
+    },
+  },
+};
+
+// Terrain: base + 2 masked noise layers (noise band only — masked layer on top of masked layer)
+const PARAMS = {
+  uvScale: 5,
+  brightness: 1,
+  contrast: 1,
+  gamma: 2.2,
+  baseColor: "#3d5c2e",
+  layer1: {
+    enable: true,
+    noiseType: "perlin",
+    color: "#2d4a20",
+    strength: 0.5,
+    useFbm: true,
+    octaves: 3,
+    lacunarity: 2,
+    gain: 0.5,
+    scale: 4,
+    offsetX: 0,
+    offsetY: 0,
+    invert: false,
+    maskLow: 0.35,
+    maskHigh: 0.7,
+    maskSharpness: 1,
+    voronoiJitter: 0.8,
+  },
+  layer2: {
+    enable: true,
+    noiseType: "simplex",
+    color: "#4a6b38",
+    strength: 0.4,
+    useFbm: true,
+    octaves: 2.5,
+    lacunarity: 2.2,
+    gain: 0.5,
+    scale: 8,
+    offsetX: 13.7,
+    offsetY: 31.1,
+    invert: false,
+    maskLow: 0.4,
+    maskHigh: 0.75,
+    maskSharpness: 1,
+    voronoiJitter: 0.7,
+  },
+};
+
+function layerUniforms(L) {
+  return {
+    noiseType: uniform(noiseTypeToIndex(L.noiseType)),
+    color: uniform(hexToVec3(L.color)),
+    strength: uniform(L.strength),
+    useFbm: uniform(L.useFbm ? 1 : 0),
+    octaves: uniform(L.octaves),
+    lacunarity: uniform(L.lacunarity),
+    gain: uniform(L.gain),
+    scale: uniform(L.scale),
+    offsetX: uniform(L.offsetX),
+    offsetY: uniform(L.offsetY),
+    invert: uniform(L.invert ? 1 : 0),
+    maskLow: uniform(L.maskLow),
+    maskHigh: uniform(L.maskHigh),
+    maskSharpness: uniform(L.maskSharpness),
+    voronoiJitter: uniform(L.voronoiJitter),
+    enable: uniform(L.enable ? 1 : 0),
+  };
+}
+
+const uUvScale = uniform(PARAMS.uvScale);
+const uBrightness = uniform(PARAMS.brightness);
+const uContrast = uniform(PARAMS.contrast);
+const uGamma = uniform(PARAMS.gamma);
+const uBaseColor = uniform(hexToVec3(PARAMS.baseColor));
+const U1 = layerUniforms(PARAMS.layer1);
+const U2 = layerUniforms(PARAMS.layer2);
+
+function applyPreset(presetObj) {
+  if (!presetObj) return;
+  PARAMS.uvScale = presetObj.uvScale;
+  PARAMS.brightness = presetObj.brightness ?? PARAMS.brightness;
+  PARAMS.contrast = presetObj.contrast;
+  PARAMS.gamma = presetObj.gamma ?? PARAMS.gamma;
+  PARAMS.baseColor = presetObj.baseColor;
+  Object.assign(PARAMS.layer1, presetObj.layer1);
+  Object.assign(PARAMS.layer2, presetObj.layer2);
+  uUvScale.value = PARAMS.uvScale;
+  uBrightness.value = PARAMS.brightness;
+  uContrast.value = PARAMS.contrast;
+  uGamma.value = PARAMS.gamma;
+  uBaseColor.value.copy(hexToVec3(PARAMS.baseColor));
+  U1.noiseType.value = noiseTypeToIndex(PARAMS.layer1.noiseType);
+  U1.color.value.copy(hexToVec3(PARAMS.layer1.color));
+  U1.strength.value = PARAMS.layer1.strength;
+  U1.useFbm.value = PARAMS.layer1.useFbm ? 1 : 0;
+  U1.octaves.value = PARAMS.layer1.octaves;
+  U1.lacunarity.value = PARAMS.layer1.lacunarity;
+  U1.gain.value = PARAMS.layer1.gain;
+  U1.scale.value = PARAMS.layer1.scale;
+  U1.offsetX.value = PARAMS.layer1.offsetX;
+  U1.offsetY.value = PARAMS.layer1.offsetY;
+  U1.invert.value = PARAMS.layer1.invert ? 1 : 0;
+  U1.maskLow.value = PARAMS.layer1.maskLow;
+  U1.maskHigh.value = PARAMS.layer1.maskHigh;
+  U1.maskSharpness.value = PARAMS.layer1.maskSharpness;
+  U1.voronoiJitter.value = PARAMS.layer1.voronoiJitter;
+  U1.enable.value = PARAMS.layer1.enable ? 1 : 0;
+  U2.noiseType.value = noiseTypeToIndex(PARAMS.layer2.noiseType);
+  U2.color.value.copy(hexToVec3(PARAMS.layer2.color));
+  U2.strength.value = PARAMS.layer2.strength;
+  U2.useFbm.value = PARAMS.layer2.useFbm ? 1 : 0;
+  U2.octaves.value = PARAMS.layer2.octaves;
+  U2.lacunarity.value = PARAMS.layer2.lacunarity;
+  U2.gain.value = PARAMS.layer2.gain;
+  U2.scale.value = PARAMS.layer2.scale;
+  U2.offsetX.value = PARAMS.layer2.offsetX;
+  U2.offsetY.value = PARAMS.layer2.offsetY;
+  U2.invert.value = PARAMS.layer2.invert ? 1 : 0;
+  U2.maskLow.value = PARAMS.layer2.maskLow;
+  U2.maskHigh.value = PARAMS.layer2.maskHigh;
+  U2.maskSharpness.value = PARAMS.layer2.maskSharpness;
+  U2.voronoiJitter.value = PARAMS.layer2.voronoiJitter;
+  U2.enable.value = PARAMS.layer2.enable ? 1 : 0;
+}
+
+function selectNoise(nVal, nPerlin, nSimplex, nVoronoi, nWhite, uType) {
+  let n = nVal;
+  n = mix(n, nPerlin, step(0.5, uType));
+  n = mix(n, nSimplex, step(1.5, uType));
+  n = mix(n, nVoronoi, step(2.5, uType));
+  n = mix(n, nWhite, step(3.5, uType));
+  return n;
+}
+
+// Terrain layer: noise → mask = smoothstep(low, high, noise) * strength * enable (no position, no grad band)
+function terrainLayerMask(U, uvScaled) {
+  const p = vec2(uvScaled.x.mul(U.scale).add(U.offsetX), uvScaled.y.mul(U.scale).add(U.offsetY));
+  const nVal = valueNoise2D(p);
+  const nPerlSingle = perlinNoise2D(p);
+  const nPerlFbm = fbmPerlin2D(p, U.octaves, U.lacunarity, U.gain);
+  const nPerl = mix(nPerlSingle, nPerlFbm, U.useFbm);
+  const nSim = simplexNoise2D(p);
+  const nVoro = voronoiF1Normalized(p, U.voronoiJitter);
+  const nWhite = whiteNoise2D(p);
+  let n = selectNoise(nVal, nPerl, nSim, nVoro, nWhite, U.noiseType);
+  n = mix(n, sub(1, n), U.invert);
+  const raw = smoothstep(U.maskLow, U.maskHigh, n);
+  const mask = pow(raw.max(0.0001), U.maskSharpness).mul(U.strength).mul(U.enable);
+  return mask;
+}
+
+function createTerrainColorNode() {
+  return Fn(() => {
+    const uvScaled = uv().mul(uUvScale);
+    let col = uBaseColor;
+    col = mix(col, U1.color, terrainLayerMask(U1, uvScaled));
+    col = mix(col, U2.color, terrainLayerMask(U2, uvScaled));
+    col = clamp(col.sub(0.5).mul(uContrast).add(0.5).mul(uBrightness), 0, 1);
+    col = pow(col.max(0.0001), float(1).div(uGamma));
+    return vec3(col);
+  })();
+}
+
+const renderer = new WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a1e);
+
+const quadGeo = new THREE.PlaneGeometry(2, 2, 1, 1);
+const quadMat = new THREE.MeshBasicNodeMaterial({
+  colorNode: createTerrainColorNode(),
+  side: THREE.DoubleSide,
+});
+const quad = new THREE.Mesh(quadGeo, quadMat);
+scene.add(quad);
+
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+camera.position.z = 1;
+
+const paneContainer = document.getElementById("tweakpane-container");
+paneContainer.style.cssText = "position:fixed;top:12px;right:12px;z-index:30;";
+const pane = new Pane({ title: "Terrain Texture", expanded: true, container: paneContainer });
+
+PARAMS.preset = "Default (terrain)";
+
+const presetOptions = Object.keys(PRESETS).reduce((o, k) => ({ ...o, [k]: k }), {});
+
+pane.addBinding(PARAMS, "preset", { options: presetOptions, label: "Preset" }).on("change", (e) => {
+  const presetObj = PRESETS[e.value];
+  if (presetObj) {
+    applyPreset(presetObj);
+    pane.refresh();
+  }
+});
+
+const noiseTypeOptions = { Value: "value", Perlin: "perlin", Simplex: "simplex", Voronoi: "voronoi", White: "white" };
+
+function bindLayer(folder, L, U) {
+  folder.addBinding(L, "enable", { label: "On" }).on("change", (e) => { U.enable.value = e.value ? 1 : 0; });
+  folder.addBinding(L, "color", { view: "color" }).on("change", (e) => { U.color.value.copy(hexToVec3(e.value)); });
+  folder.addBinding(L, "strength", { min: 0, max: 1, step: 0.01 }).on("change", (e) => { U.strength.value = e.value; });
+  folder.addBinding(L, "noiseType", { options: noiseTypeOptions }).on("change", (e) => { U.noiseType.value = noiseTypeToIndex(e.value); });
+  folder.addBinding(L, "useFbm", { label: "FBM" }).on("change", (e) => { U.useFbm.value = e.value ? 1 : 0; });
+  folder.addBinding(L, "octaves", { min: 1, max: 4, step: 0.5 }).on("change", (e) => { U.octaves.value = e.value; });
+  folder.addBinding(L, "lacunarity", { min: 1.2, max: 4, step: 0.1 }).on("change", (e) => { U.lacunarity.value = e.value; });
+  folder.addBinding(L, "gain", { min: 0.1, max: 0.9, step: 0.05 }).on("change", (e) => { U.gain.value = e.value; });
+  folder.addBinding(L, "scale", { min: 0.5, max: 25, step: 0.5 }).on("change", (e) => { U.scale.value = e.value; });
+  folder.addBinding(L, "offsetX", { min: -20, max: 20, step: 0.5 }).on("change", (e) => { U.offsetX.value = e.value; });
+  folder.addBinding(L, "offsetY", { min: -20, max: 20, step: 0.5 }).on("change", (e) => { U.offsetY.value = e.value; });
+  folder.addBinding(L, "invert", { label: "Invert noise" }).on("change", (e) => { U.invert.value = e.value ? 1 : 0; });
+  folder.addBinding(L, "maskLow", { min: 0, max: 1, step: 0.01, label: "Mask low" }).on("change", (e) => { U.maskLow.value = e.value; });
+  folder.addBinding(L, "maskHigh", { min: 0, max: 1, step: 0.01, label: "Mask high" }).on("change", (e) => { U.maskHigh.value = e.value; });
+  folder.addBinding(L, "maskSharpness", { min: 0.2, max: 3, step: 0.05, label: "Mask sharpness" }).on("change", (e) => { U.maskSharpness.value = e.value; });
+  folder.addBinding(L, "voronoiJitter", { min: 0, max: 1, step: 0.01, label: "Voronoi jitter" }).on("change", (e) => { U.voronoiJitter.value = e.value; });
+}
+
+const fGlobal = pane.addFolder({ title: "Global", expanded: true });
+fGlobal.addBinding(PARAMS, "uvScale", { min: 0.5, max: 20, step: 0.5 }).on("change", (e) => { uUvScale.value = e.value; });
+fGlobal.addBinding(PARAMS, "brightness", { min: 0.2, max: 2, step: 0.05 }).on("change", (e) => { uBrightness.value = e.value; });
+fGlobal.addBinding(PARAMS, "contrast", { min: 0.2, max: 3, step: 0.05 }).on("change", (e) => { uContrast.value = e.value; });
+fGlobal.addBinding(PARAMS, "gamma", { min: 1, max: 2.5, step: 0.1, label: "Display gamma" }).on("change", (e) => { uGamma.value = e.value; });
+fGlobal.addBinding(PARAMS, "baseColor", { view: "color" }).on("change", (e) => { uBaseColor.value.copy(hexToVec3(e.value)); });
+
+bindLayer(pane.addFolder({ title: "Layer 1", expanded: true }), PARAMS.layer1, U1);
+bindLayer(pane.addFolder({ title: "Layer 2", expanded: true }), PARAMS.layer2, U2);
+
+renderer.setAnimationLoop(() => { renderer.render(scene, camera); });
+window.addEventListener("resize", () => { renderer.setSize(window.innerWidth, window.innerHeight); });
+</script>
+</body>
+</html>
