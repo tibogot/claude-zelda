@@ -1,0 +1,626 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Splatmap Painter</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { overflow: hidden; background: #000; }
+      canvas { display: block; width: 100vw; height: 100vh; }
+
+      #ui {
+        position: fixed;
+        top: 16px;
+        left: 16px;
+        z-index: 20;
+        font: 13px/1.6 "SF Mono", "Fira Code", monospace;
+        color: #e0f0c0;
+        background: rgba(0,0,0,0.6);
+        padding: 12px 16px;
+        border-radius: 8px;
+        backdrop-filter: blur(4px);
+        user-select: none;
+        min-width: 220px;
+      }
+      #ui h3 { color: #fff; margin-bottom: 8px; font-size: 14px; letter-spacing: 0.05em; }
+
+      .biome-row {
+        display: flex;
+        gap: 6px;
+        margin-bottom: 10px;
+        flex-wrap: wrap;
+      }
+      .biome-btn {
+        padding: 4px 10px;
+        border-radius: 4px;
+        border: 2px solid transparent;
+        cursor: pointer;
+        font: 12px "SF Mono", monospace;
+        font-weight: 600;
+        color: #fff;
+        background: rgba(255,255,255,0.1);
+        transition: border-color 0.15s;
+      }
+      .biome-btn.active { border-color: #fff; }
+      .biome-btn[data-biome="forest"]    { background: rgba(40,140,40,0.7); }
+      .biome-btn[data-biome="grass"]     { background: rgba(180,200,60,0.7); }
+      .biome-btn[data-biome="village"]   { background: rgba(60,120,200,0.7); }
+      .biome-btn[data-biome="erase"]     { background: rgba(80,80,80,0.7); }
+
+      .slider-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 6px;
+      }
+      .slider-row label { width: 70px; font-size: 11px; color: #aaa; }
+      .slider-row input[type=range] { flex: 1; }
+      .slider-row span { width: 30px; text-align: right; font-size: 11px; }
+
+      .action-row {
+        display: flex;
+        gap: 6px;
+        margin-top: 10px;
+        flex-wrap: wrap;
+      }
+      .action-btn {
+        padding: 5px 12px;
+        border-radius: 4px;
+        border: none;
+        cursor: pointer;
+        font: 12px "SF Mono", monospace;
+        font-weight: 600;
+        color: #fff;
+        background: rgba(255,255,255,0.15);
+        transition: background 0.15s;
+      }
+      .action-btn:hover { background: rgba(255,255,255,0.3); }
+      .action-btn.generate { background: rgba(255,160,0,0.7); }
+      .action-btn.generate:hover { background: rgba(255,160,0,0.9); }
+      .action-btn.clear { background: rgba(180,40,40,0.7); }
+      .action-btn.clear:hover { background: rgba(180,40,40,0.9); }
+
+      #info {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        z-index: 10;
+        font: 12px/1.5 "SF Mono", monospace;
+        color: #b0d890;
+        background: rgba(0,0,0,0.55);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: none;
+        backdrop-filter: blur(4px);
+      }
+      #info span { color: #e0f0c0; font-weight: 600; }
+
+      #mode-badge {
+        position: fixed;
+        top: 16px;
+        right: 16px;
+        z-index: 20;
+        font: bold 13px "SF Mono", monospace;
+        padding: 6px 14px;
+        border-radius: 6px;
+        pointer-events: none;
+        transition: background 0.2s, color 0.2s;
+      }
+      #mode-badge.view  { background: rgba(40,40,40,0.8); color: #888; }
+      #mode-badge.paint { background: rgba(40,160,80,0.9); color: #fff; }
+
+      /* mini splatmap preview */
+      #splatmap-preview {
+        position: fixed;
+        bottom: 16px;
+        right: 16px;
+        z-index: 20;
+        border: 2px solid rgba(255,255,255,0.3);
+        border-radius: 6px;
+        image-rendering: pixelated;
+        width: 128px;
+        height: 128px;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+
+    <!-- ── UI PANEL ── -->
+    <div id="ui">
+      <h3>Splatmap Painter</h3>
+
+      <div style="font-size:11px; color:#aaa; margin-bottom:8px;">
+        Press <b style="color:#fff">P</b> to toggle paint mode<br>
+        Orbit: middle-mouse / alt+drag
+      </div>
+
+      <div class="biome-row">
+        <button class="biome-btn active" data-biome="forest">Forest</button>
+        <button class="biome-btn" data-biome="grass">Grass</button>
+        <button class="biome-btn" data-biome="village">Village</button>
+        <button class="biome-btn" data-biome="erase">Erase</button>
+      </div>
+
+      <div class="slider-row">
+        <label>Size</label>
+        <input type="range" id="brush-size" min="2" max="80" value="20" step="1">
+        <span id="brush-size-val">20</span>
+      </div>
+      <div class="slider-row">
+        <label>Strength</label>
+        <input type="range" id="brush-str" min="5" max="100" value="60" step="1">
+        <span id="brush-str-val">60</span>
+      </div>
+
+      <div class="action-row">
+        <button class="action-btn generate" id="btn-generate">Generate (G)</button>
+        <button class="action-btn clear" id="btn-clear">Clear</button>
+        <button class="action-btn" id="btn-save">Save PNG</button>
+        <button class="action-btn" id="btn-load">Load PNG</button>
+        <input type="file" id="file-input" accept="image/png" style="display:none">
+      </div>
+    </div>
+
+    <div id="mode-badge" class="view">VIEW MODE</div>
+
+    <div id="info">
+      Splatmap Painter &mdash; <span id="backend">loading…</span>
+      &bull; <span id="sphere-count">0 spheres</span>
+    </div>
+
+    <!-- mini preview of splatmap -->
+    <canvas id="splatmap-preview" width="128" height="128"></canvas>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import Stats from "stats-gl";
+      import { createTileMaterial } from "./tileMaterial.js";
+
+      // ── Constants ──
+      const GROUND_SIZE   = 200;   // world units
+      const FLOOR_Y       = 0;
+      const SPLAT_RES     = 512;   // splatmap canvas resolution
+      const PI            = Math.PI;
+
+      // Biome → RGBA color painted on splatmap canvas
+      const BIOME_COLORS = {
+        forest:  { r: 180, g: 60,  b: 40,  a: 255 },  // red-dominant → R channel
+        grass:   { r: 40,  g: 180, b: 40,  a: 255 },  // green-dominant → G channel
+        village: { r: 40,  g: 60,  b: 200, a: 255 },  // blue-dominant → B channel
+        erase:   { r: 0,   g: 0,   b: 0,   a: 255 },
+      };
+
+      // Which biome channel drives sphere generation (Red = forest)
+      const SPHERE_BIOME = "forest";
+      const SPHERE_THRESHOLD = 80; // 0–255, red channel must be >= this
+
+      // ── State ──
+      let paintMode    = false;
+      let isMouseDown  = false;
+      let currentBiome = "forest";
+      let brushSize    = 20;   // in splatmap pixels
+      let brushStr     = 60;   // 0–100 opacity
+      let instancedSpheres = null;
+
+      // ── Splatmap canvas (offscreen) ──
+      const splatCanvas = document.createElement("canvas");
+      splatCanvas.width  = SPLAT_RES;
+      splatCanvas.height = SPLAT_RES;
+      const splatCtx = splatCanvas.getContext("2d");
+      // Fill black initially
+      splatCtx.fillStyle = "#000";
+      splatCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+
+      // Mini preview sync
+      const previewCanvas = document.getElementById("splatmap-preview");
+      const previewCtx    = previewCanvas.getContext("2d");
+
+      function syncPreview() {
+        previewCtx.drawImage(splatCanvas, 0, 0, 128, 128);
+      }
+      syncPreview();
+
+      // ── Coordinate helpers ──
+      // World XZ → splatmap UV [0,1]
+      function worldToUV(wx, wz) {
+        return {
+          u: (wx + GROUND_SIZE / 2) / GROUND_SIZE,
+          v: (wz + GROUND_SIZE / 2) / GROUND_SIZE,
+        };
+      }
+      // Splatmap UV → world XZ
+      function uvToWorld(u, v) {
+        return {
+          x: u * GROUND_SIZE - GROUND_SIZE / 2,
+          z: v * GROUND_SIZE - GROUND_SIZE / 2,
+        };
+      }
+      // World XZ → splatmap pixel (ix,iy)
+      function worldToPixel(wx, wz) {
+        const { u, v } = worldToUV(wx, wz);
+        return {
+          ix: Math.floor(u * SPLAT_RES),
+          iy: Math.floor(v * SPLAT_RES),
+        };
+      }
+
+      // ── Paint on splatmap ──
+      function paintAt(wx, wz) {
+        const { u, v } = worldToUV(wx, wz);
+        const cx = u * SPLAT_RES;
+        const cy = v * SPLAT_RES;
+        const col = BIOME_COLORS[currentBiome];
+
+        // Soft brush using radial gradient
+        const grad = splatCtx.createRadialGradient(cx, cy, 0, cx, cy, brushSize);
+        const alpha = brushStr / 100;
+        grad.addColorStop(0,   `rgba(${col.r},${col.g},${col.b},${alpha})`);
+        grad.addColorStop(0.5, `rgba(${col.r},${col.g},${col.b},${alpha * 0.6})`);
+        grad.addColorStop(1,   `rgba(${col.r},${col.g},${col.b},0)`);
+
+        splatCtx.globalCompositeOperation = currentBiome === "erase"
+          ? "destination-out"
+          : "source-over";
+
+        // For erase, paint black explicitly instead
+        if (currentBiome === "erase") {
+          splatCtx.globalCompositeOperation = "source-over";
+          const eraseGrad = splatCtx.createRadialGradient(cx, cy, 0, cx, cy, brushSize);
+          eraseGrad.addColorStop(0,   `rgba(0,0,0,${alpha})`);
+          eraseGrad.addColorStop(0.5, `rgba(0,0,0,${alpha * 0.6})`);
+          eraseGrad.addColorStop(1,   `rgba(0,0,0,0)`);
+          splatCtx.fillStyle = eraseGrad;
+        } else {
+          splatCtx.fillStyle = grad;
+        }
+
+        splatCtx.beginPath();
+        splatCtx.arc(cx, cy, brushSize, 0, PI * 2);
+        splatCtx.fill();
+
+        splatCtx.globalCompositeOperation = "source-over";
+        syncPreview();
+        // Keep splatmap texture in sync
+        if (splatTex) splatTex.needsUpdate = true;
+      }
+
+      // ── Generate instanced spheres from splatmap ──
+      function generateSpheres(scene) {
+        // Remove old spheres
+        if (instancedSpheres) {
+          scene.remove(instancedSpheres);
+          instancedSpheres.geometry.dispose();
+          instancedSpheres.material.dispose();
+          instancedSpheres = null;
+        }
+
+        const pixels = splatCtx.getImageData(0, 0, SPLAT_RES, SPLAT_RES).data;
+        const positions = [];
+
+        // Sample every Nth pixel to control density
+        const STEP = 4; // sample every 4 pixels
+        for (let iy = 0; iy < SPLAT_RES; iy += STEP) {
+          for (let ix = 0; ix < SPLAT_RES; ix += STEP) {
+            const idx = (iy * SPLAT_RES + ix) * 4;
+            const r = pixels[idx];
+            const g = pixels[idx + 1];
+            const b = pixels[idx + 2];
+
+            // Forest = high red, low green/blue
+            // We look for dominant red channel
+            if (r >= SPHERE_THRESHOLD && r > g + 20 && r > b + 20) {
+              const u = ix / SPLAT_RES;
+              const v = iy / SPLAT_RES;
+              const { x, z } = uvToWorld(u, v);
+              // Random jitter within the pixel's world area
+              const cellSize = GROUND_SIZE / (SPLAT_RES / STEP);
+              const jx = (Math.random() - 0.5) * cellSize;
+              const jz = (Math.random() - 0.5) * cellSize;
+              positions.push(new THREE.Vector3(x + jx, FLOOR_Y, z + jz));
+            }
+          }
+        }
+
+        if (positions.length === 0) {
+          document.getElementById("sphere-count").textContent = "0 spheres";
+          return;
+        }
+
+        const geo = new THREE.SphereGeometry(0.4, 8, 6);
+        const mat = new THREE.MeshStandardMaterial({
+          color: 0x2d8c2d,
+          roughness: 0.8,
+          metalness: 0.0,
+        });
+        instancedSpheres = new THREE.InstancedMesh(geo, mat, positions.length);
+        instancedSpheres.castShadow = true;
+        instancedSpheres.receiveShadow = true;
+
+        const dummy = new THREE.Object3D();
+        positions.forEach((pos, i) => {
+          dummy.position.copy(pos);
+          dummy.position.y += 0.4; // sit on ground
+          dummy.scale.setScalar(0.6 + Math.random() * 0.8);
+          dummy.updateMatrix();
+          instancedSpheres.setMatrixAt(i, dummy.matrix);
+        });
+        instancedSpheres.instanceMatrix.needsUpdate = true;
+
+        scene.add(instancedSpheres);
+        document.getElementById("sphere-count").textContent =
+          `${positions.length.toLocaleString()} spheres`;
+      }
+
+      // ── Save splatmap as PNG ──
+      function saveSplatmap() {
+        const link = document.createElement("a");
+        link.download = "splatmap.png";
+        link.href = splatCanvas.toDataURL("image/png");
+        link.click();
+      }
+
+      // ── Load splatmap from PNG ──
+      function loadSplatmap(file) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const img = new Image();
+          img.onload = () => {
+            splatCtx.clearRect(0, 0, SPLAT_RES, SPLAT_RES);
+            splatCtx.drawImage(img, 0, 0, SPLAT_RES, SPLAT_RES);
+            syncPreview();
+            if (splatTex) splatTex.needsUpdate = true;
+          };
+          img.src = e.target.result;
+        };
+        reader.readAsDataURL(file);
+      }
+
+      // ── Splatmap as Three.js texture (for future material use) ──
+      let splatTex = null;
+
+      // ── MAIN ──
+      async function init() {
+        // Renderer
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        await renderer.init();
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 0.5;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+        document.getElementById("backend").textContent =
+          renderer.backend?.constructor?.name?.includes("WebGPU")
+            ? "WebGPU ✓"
+            : "WebGL fallback";
+
+        const stats = new Stats({ trackGPU: false });
+        stats.init(renderer);
+        document.body.appendChild(stats.dom);
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87ceeb);
+
+        const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.5, 2000);
+        camera.position.set(0, 80, 120);
+        camera.lookAt(0, 0, 0);
+
+        // Orbit controls (view mode only)
+        const orbit = new OrbitControls(camera, renderer.domElement);
+        orbit.target.set(0, 0, 0);
+        orbit.maxPolarAngle = PI * 0.48;
+        orbit.enableDamping = true;
+        orbit.dampingFactor = 0.05;
+        orbit.update();
+
+        // ── LIGHTING (same as parkourtsushima) ──
+        function sunDirFromAngles(azDeg, elDeg) {
+          const az = azDeg * PI / 180, el = elDeg * PI / 180;
+          return new THREE.Vector3(
+            Math.cos(el) * Math.cos(az),
+            Math.sin(el),
+            Math.cos(el) * Math.sin(az)
+          ).normalize();
+        }
+
+        const sunDir = sunDirFromAngles(135, 43);
+        const dirLight = new THREE.DirectionalLight("#fff5e0", 2.2);
+        dirLight.position.copy(sunDir.clone().multiplyScalar(100));
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.set(2048, 2048);
+        dirLight.shadow.camera.near = 1;
+        dirLight.shadow.camera.far = 400;
+        dirLight.shadow.camera.left   = -GROUND_SIZE * 0.6;
+        dirLight.shadow.camera.right  =  GROUND_SIZE * 0.6;
+        dirLight.shadow.camera.top    =  GROUND_SIZE * 0.6;
+        dirLight.shadow.camera.bottom = -GROUND_SIZE * 0.6;
+        dirLight.shadow.bias = -0.0005;
+        scene.add(dirLight);
+
+        const shadowTarget = new THREE.Object3D();
+        shadowTarget.position.set(0, FLOOR_Y, 0);
+        scene.add(shadowTarget);
+        dirLight.target = shadowTarget;
+
+        const hemi = new THREE.HemisphereLight("#c8e0ff", "#88aa55", 1);
+        scene.add(hemi);
+
+        // ── GROUND (tile material, same as parkourtsushima) ──
+        const groundGeo = new THREE.PlaneGeometry(GROUND_SIZE, GROUND_SIZE, 1, 1);
+        groundGeo.rotateX(-PI / 2);
+        const groundMat = createTileMaterial({
+          textureScale: 1500,
+          gradientIntensity: 0.5,
+          gradientBias: 0.1,
+          tileColor: "#d4d4d4",
+          gridColor: "#707070",
+          gridLineColor: "#404040",
+          roughness: 1,
+          metalness: 0,
+        });
+        const ground = new THREE.Mesh(groundGeo, groundMat);
+        ground.position.y = FLOOR_Y;
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        // Create splatmap texture for future material reads
+        splatTex = new THREE.CanvasTexture(splatCanvas);
+        splatTex.wrapS = splatTex.wrapT = THREE.ClampToEdgeWrapping;
+
+        // ── BRUSH RING (world-space decal ring that follows cursor) ──
+        const brushRingGeo = new THREE.RingGeometry(1, 1.05, 48);
+        brushRingGeo.rotateX(-PI / 2);
+        const brushRingMat = new THREE.MeshBasicMaterial({
+          color: 0xffffff,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+          transparent: true,
+          opacity: 0.9,
+        });
+        const brushRing = new THREE.Mesh(brushRingGeo, brushRingMat);
+        brushRing.visible = false;
+        brushRing.position.y = FLOOR_Y + 0.02;
+        brushRing.renderOrder = 1;
+        scene.add(brushRing);
+
+        // ── Raycaster for ground hit ──
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -FLOOR_Y);
+        const hitPoint = new THREE.Vector3();
+
+        function getGroundHit(event) {
+          const rect = renderer.domElement.getBoundingClientRect();
+          mouse.x =  ((event.clientX - rect.left) / rect.width)  * 2 - 1;
+          mouse.y = -((event.clientY - rect.top)  / rect.height) * 2 + 1;
+          raycaster.setFromCamera(mouse, camera);
+          const hit = raycaster.ray.intersectPlane(groundPlane, hitPoint);
+          return hit ? hitPoint.clone() : null;
+        }
+
+        // ── Brush size world units (for ring visual) ──
+        function brushWorldRadius() {
+          // brushSize is in splatmap pixels → convert to world units
+          return (brushSize / SPLAT_RES) * GROUND_SIZE;
+        }
+
+        function updateBrushRing(pos) {
+          if (!pos) { brushRing.visible = false; return; }
+          brushRing.visible = true;
+          brushRing.position.set(pos.x, FLOOR_Y + 0.02, pos.z);
+          const r = brushWorldRadius();
+          brushRing.scale.setScalar(r);
+        }
+
+        // ── Paint mode toggle ──
+        function setPaintMode(on) {
+          paintMode = on;
+          orbit.enabled = !on;
+          const badge = document.getElementById("mode-badge");
+          badge.textContent = on ? "PAINT MODE" : "VIEW MODE";
+          badge.className = on ? "paint" : "view";
+          renderer.domElement.style.cursor = on ? "crosshair" : "default";
+          if (!on) brushRing.visible = false;
+        }
+
+        // ── Keyboard ──
+        window.addEventListener("keydown", (e) => {
+          if (e.code === "KeyP") setPaintMode(!paintMode);
+          if (e.code === "KeyG") generateSpheres(scene);
+        });
+
+        // ── Mouse events ──
+        renderer.domElement.addEventListener("mousemove", (e) => {
+          if (!paintMode) return;
+          const pos = getGroundHit(e);
+          updateBrushRing(pos);
+          if (isMouseDown && pos) paintAt(pos.x, pos.z);
+        });
+
+        renderer.domElement.addEventListener("mousedown", (e) => {
+          if (!paintMode || e.button !== 0) return;
+          isMouseDown = true;
+          const pos = getGroundHit(e);
+          if (pos) paintAt(pos.x, pos.z);
+        });
+
+        renderer.domElement.addEventListener("mouseup", () => { isMouseDown = false; });
+        renderer.domElement.addEventListener("mouseleave", () => {
+          isMouseDown = false;
+          brushRing.visible = false;
+        });
+
+        // ── UI: biome buttons ──
+        document.querySelectorAll(".biome-btn").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            document.querySelectorAll(".biome-btn").forEach(b => b.classList.remove("active"));
+            btn.classList.add("active");
+            currentBiome = btn.dataset.biome;
+          });
+        });
+
+        // ── UI: sliders ──
+        const brushSizeSlider = document.getElementById("brush-size");
+        const brushSizeVal    = document.getElementById("brush-size-val");
+        brushSizeSlider.addEventListener("input", () => {
+          brushSize = parseInt(brushSizeSlider.value);
+          brushSizeVal.textContent = brushSize;
+        });
+
+        const brushStrSlider = document.getElementById("brush-str");
+        const brushStrVal    = document.getElementById("brush-str-val");
+        brushStrSlider.addEventListener("input", () => {
+          brushStr = parseInt(brushStrSlider.value);
+          brushStrVal.textContent = brushStr;
+        });
+
+        // ── UI: action buttons ──
+        document.getElementById("btn-generate").addEventListener("click", () => generateSpheres(scene));
+        document.getElementById("btn-clear").addEventListener("click", () => {
+          splatCtx.fillStyle = "#000";
+          splatCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+          syncPreview();
+          if (splatTex) splatTex.needsUpdate = true;
+          generateSpheres(scene); // clears spheres too
+        });
+        document.getElementById("btn-save").addEventListener("click", saveSplatmap);
+        document.getElementById("btn-load").addEventListener("click", () => {
+          document.getElementById("file-input").click();
+        });
+        document.getElementById("file-input").addEventListener("change", (e) => {
+          if (e.target.files[0]) loadSplatmap(e.target.files[0]);
+        });
+
+        // ── Resize ──
+        window.addEventListener("resize", () => {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(innerWidth, innerHeight);
+        });
+
+        // ── Render loop ──
+        renderer.setAnimationLoop(() => {
+          orbit.update();
+          stats.update();
+          renderer.render(scene, camera);
+        });
+      }
+
+      init();
+    </script>
+  </body>
+</html>
