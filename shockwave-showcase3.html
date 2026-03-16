@@ -1,0 +1,809 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Polar Voronoi — Shockwave</title>
+    <style>
+      @import url("https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap");
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        overflow: auto;
+        background: #0a0a0a;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      #view {
+        width: min(80vmin, 640px);
+        aspect-ratio: 1;
+        max-width: 100%;
+        flex-shrink: 0;
+        background: #000;
+        border-radius: 50%;
+        overflow: hidden;
+        box-shadow:
+          0 0 40px rgba(120, 180, 255, 0.08),
+          0 0 0 1px rgba(120, 180, 255, 0.12);
+      }
+      #view canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+      #controls {
+        position: fixed;
+        top: 16px;
+        left: 16px;
+        width: 260px;
+        background: rgba(10, 10, 18, 0.95);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(120, 180, 255, 0.2);
+        border-radius: 10px;
+        padding: 14px 16px;
+        font-family: "DM Mono", monospace;
+        color: #c8daf0;
+        font-size: 11px;
+        z-index: 10;
+        max-height: calc(100vh - 32px);
+        overflow-y: auto;
+      }
+      #controls h2 {
+        font-size: 11px;
+        font-weight: 500;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: #78b4ff;
+        margin-bottom: 10px;
+        padding-bottom: 6px;
+        border-bottom: 1px solid rgba(120, 180, 255, 0.2);
+      }
+      .ctrl-group {
+        margin-bottom: 8px;
+      }
+      .ctrl-group label {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 2px;
+        color: #8a9ab0;
+        font-size: 10px;
+      }
+      .ctrl-group label span {
+        color: #78b4ff;
+        font-weight: 500;
+      }
+      .ctrl-group input[type="range"] {
+        appearance: none;
+        -webkit-appearance: none;
+        width: 100%;
+        height: 4px;
+        border-radius: 2px;
+        background: rgba(120, 180, 255, 0.15);
+        outline: none;
+      }
+      .ctrl-group input[type="range"]::-webkit-slider-thumb {
+        appearance: none;
+        -webkit-appearance: none;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: #78b4ff;
+        cursor: pointer;
+      }
+      .ctrl-group input[type="color"] {
+        appearance: none;
+        -webkit-appearance: none;
+        border: 1px solid rgba(120, 180, 255, 0.25);
+        border-radius: 4px;
+        width: 100%;
+        height: 20px;
+        cursor: pointer;
+        background: transparent;
+        padding: 0;
+      }
+      .ctrl-group select {
+        width: 100%;
+        background: rgba(15, 20, 35, 0.95);
+        border: 1px solid rgba(120, 180, 255, 0.25);
+        border-radius: 6px;
+        color: #e0e8f0;
+        font-family: "DM Mono", monospace;
+        font-size: 11px;
+        padding: 5px 8px;
+        cursor: pointer;
+        outline: none;
+      }
+      .section-label {
+        font-size: 9px;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: rgba(120, 180, 255, 0.5);
+        margin: 12px 0 5px;
+      }
+      button {
+        width: 100%;
+        padding: 6px;
+        margin-top: 4px;
+        background: rgba(120, 180, 255, 0.12);
+        border: 1px solid rgba(120, 180, 255, 0.3);
+        border-radius: 6px;
+        color: #78b4ff;
+        font-family: "DM Mono", monospace;
+        font-size: 10px;
+        cursor: pointer;
+        letter-spacing: 0.05em;
+      }
+      button:hover {
+        background: rgba(120, 180, 255, 0.22);
+      }
+      .hint {
+        font-size: 9px;
+        color: #6a7a90;
+        margin-top: 4px;
+        line-height: 1.4;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.min.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.webgpu.min.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.tsl.min.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.0/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="controls">
+      <h2>Polar Voronoi</h2>
+      <p class="hint">
+        Voronoi cells arranged in polar space — scrolls radially to create
+        shockwave / impact shapes.
+      </p>
+
+      <div class="section-label">Animation</div>
+      <div class="ctrl-group">
+        <label>Speed <span id="speedVal">0.15</span></label>
+        <input
+          type="range"
+          id="speed"
+          min="0"
+          max="1"
+          step="0.005"
+          value="0.15"
+        />
+      </div>
+      <div class="ctrl-group">
+        <label>Direction</label>
+        <select id="direction">
+          <option value="1" selected>Outward (expand)</option>
+          <option value="-1">Inward (collapse)</option>
+        </select>
+      </div>
+      <div class="ctrl-group">
+        <label>Mode</label>
+        <select id="pulseMode">
+          <option value="0" selected>Continuous scroll</option>
+          <option value="1">Repeating pulses</option>
+        </select>
+      </div>
+      <div class="ctrl-group">
+        <label>Pulse density <span id="pulseDensityVal">3.0</span></label>
+        <input
+          type="range"
+          id="pulseDensity"
+          min="1"
+          max="12"
+          step="0.5"
+          value="3"
+        />
+      </div>
+      <button id="pauseBtn">Pause</button>
+
+      <div class="section-label">Polar UV</div>
+      <div class="ctrl-group">
+        <label>Wrap count <span id="wrapVal">8</span></label>
+        <input type="range" id="wrap" min="1" max="32" step="1" value="8" />
+      </div>
+      <div class="ctrl-group">
+        <label>Scale <span id="scaleVal">2.50</span></label>
+        <input
+          type="range"
+          id="scale"
+          min="0.1"
+          max="8"
+          step="0.05"
+          value="2.5"
+        />
+      </div>
+      <div class="ctrl-group">
+        <label>Radial mode</label>
+        <select id="radialMode">
+          <option value="2" selected>Log — conformal (round cells)</option>
+          <option value="1">Power law</option>
+          <option value="0">Linear</option>
+        </select>
+      </div>
+      <div class="ctrl-group" id="radialExpGroup" style="display: none">
+        <label>Radial curve <span id="radialExpVal">1.00</span></label>
+        <input
+          type="range"
+          id="radialExp"
+          min="0.2"
+          max="2"
+          step="0.05"
+          value="1"
+        />
+      </div>
+      <p class="hint">
+        Log mode: more Scale = more radial rows = less visible ring layering.
+        FBM warp breaks rings up organically.
+      </p>
+
+      <div class="section-label">Cell style</div>
+      <div class="ctrl-group">
+        <label>Style</label>
+        <select id="cellStyle">
+          <option value="0" selected>F2−F1 (classic boundaries)</option>
+          <option value="1">Two-scale interference</option>
+          <option value="2">F1 filled</option>
+        </select>
+      </div>
+      <div id="interferenceGroup" style="display: none">
+        <p class="hint">
+          Two F1 Voronoi at different scales, subtracted — creates the
+          alternating cell interference pattern.
+        </p>
+        <div class="ctrl-group">
+          <label>Sub scale <span id="subScaleVal">1.80</span></label>
+          <input
+            type="range"
+            id="subScale"
+            min="0.5"
+            max="4"
+            step="0.05"
+            value="1.8"
+          />
+        </div>
+        <div class="ctrl-group">
+          <label>Sub mix <span id="subMixVal">0.80</span></label>
+          <input
+            type="range"
+            id="subMix"
+            min="0"
+            max="2"
+            step="0.02"
+            value="0.8"
+          />
+        </div>
+      </div>
+      <div class="ctrl-group">
+        <label>Jitter <span id="jitterVal">1.00</span></label>
+        <input type="range" id="jitter" min="0" max="1" step="0.02" value="1" />
+      </div>
+
+      <div class="section-label">Color ramp</div>
+      <div class="ctrl-group">
+        <label>Threshold <span id="threshVal">0.30</span></label>
+        <input
+          type="range"
+          id="thresh"
+          min="0"
+          max="1"
+          step="0.01"
+          value="0.3"
+        />
+      </div>
+      <div class="ctrl-group">
+        <label>Softness <span id="softnessVal">0.05</span></label>
+        <input
+          type="range"
+          id="softness"
+          min="0.001"
+          max="0.3"
+          step="0.005"
+          value="0.05"
+        />
+      </div>
+      <div class="ctrl-group">
+        <label>Invert</label>
+        <select id="invert">
+          <option value="0" selected>Off</option>
+          <option value="1">On</option>
+        </select>
+      </div>
+
+      <div class="section-label">Radial mask</div>
+      <div class="ctrl-group">
+        <label>Inner fade <span id="innerFadeVal">0.15</span></label>
+        <input
+          type="range"
+          id="innerFade"
+          min="0"
+          max="0.6"
+          step="0.01"
+          value="0.15"
+        />
+      </div>
+      <div class="ctrl-group">
+        <label>Outer fade <span id="outerFadeVal">0.92</span></label>
+        <input
+          type="range"
+          id="outerFade"
+          min="0.5"
+          max="1"
+          step="0.01"
+          value="0.92"
+        />
+      </div>
+
+      <div class="section-label">FBM warp</div>
+      <p class="hint">
+        Fractal noise distorts the polar UV for organic / explosion look.
+      </p>
+      <div class="ctrl-group">
+        <label>Strength <span id="fbmWarpVal">0.00</span></label>
+        <input
+          type="range"
+          id="fbmWarp"
+          min="0"
+          max="1"
+          step="0.02"
+          value="0"
+        />
+      </div>
+      <div class="ctrl-group">
+        <label>Scale <span id="fbmScaleVal">3.0</span></label>
+        <input
+          type="range"
+          id="fbmScale"
+          min="0.5"
+          max="10"
+          step="0.1"
+          value="3"
+        />
+      </div>
+      <div class="ctrl-group">
+        <label>Octaves <span id="octavesVal">4</span></label>
+        <input type="range" id="octaves" min="1" max="6" step="1" value="4" />
+      </div>
+
+      <div class="section-label">Colors</div>
+      <div class="ctrl-group">
+        <label>Background</label>
+        <input type="color" id="bgColor" value="#000000" />
+      </div>
+      <div class="ctrl-group">
+        <label>Cell color</label>
+        <input type="color" id="cellColor" value="#ffffff" />
+      </div>
+    </div>
+
+    <div id="view"></div>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import {
+        Fn,
+        uniform,
+        vec2,
+        vec3,
+        vec4,
+        float,
+        positionLocal,
+        smoothstep,
+        mix,
+        length,
+        min,
+        max,
+        clamp,
+        If,
+        abs,
+        mod,
+        sin,
+        cos,
+        dot,
+        fract,
+        floor,
+        atan,
+        pow,
+        log,
+      } from "three/tsl";
+
+      // ── Uniforms ──────────────────────────────────────────────────────────────
+      const uTime = uniform(0);
+      const uSpeed = uniform(0.15);
+      const uDirection = uniform(1);
+      const uPulseMode = uniform(0);
+      const uPulseDensity = uniform(3.0);
+      const uWrapCount = uniform(8);
+      const uScale = uniform(2.5);
+      const uRadialMode = uniform(2); // 0=linear 1=power 2=log(conformal)
+      const uRadialExp = uniform(1.0);
+      const uCellStyle = uniform(0); // 0=F2-F1 classic  1=F1a-F1b interference  2=F1 filled
+      const uSubScale = uniform(1.8);
+      const uSubMix = uniform(0.8);
+      const uJitter = uniform(1.0);
+      const uThresh = uniform(0.3);
+      const uSoftness = uniform(0.05);
+      const uInvert = uniform(0);
+      const uInnerFade = uniform(0.15);
+      const uOuterFade = uniform(0.92);
+      const uFbmWarp = uniform(0.0);
+      const uFbmScale = uniform(3.0);
+      const uOctaves = uniform(4);
+      const uBgColor = uniform(new THREE.Color("#000000"));
+      const uCellColor = uniform(new THREE.Color("#ffffff"));
+
+      // ── Renderer ──────────────────────────────────────────────────────────────
+      const viewEl = document.getElementById("view");
+      const renderer = new THREE.WebGPURenderer({ antialias: false });
+      viewEl.appendChild(renderer.domElement);
+      await renderer.init();
+
+      const orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+      orthoCamera.position.set(0, 0, 1);
+
+      function setViewSize() {
+        const rect = viewEl.getBoundingClientRect();
+        const size = Math.max(
+          1,
+          Math.min(Math.floor(rect.width), Math.floor(rect.height)),
+        );
+        renderer.setSize(size, size);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      }
+      requestAnimationFrame(setViewSize);
+      new ResizeObserver(setViewSize).observe(viewEl);
+      window.addEventListener("resize", setViewSize);
+
+      // ── Noise functions ───────────────────────────────────────────────────────
+
+      const hash22 = Fn(([p]) =>
+        fract(
+          sin(vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)))).mul(
+            43758.5453,
+          ),
+        ),
+      );
+
+      // Voronoi F1 + F2 with seamless X wrapping (period = wrapPeriod).
+      // Wrapping the cell X index in the hash ensures left/right edges of the
+      // circle share identical cell seeds → no seam at angle 0/2π.
+      const NBRS = [
+        [-1, -1],
+        [0, -1],
+        [1, -1],
+        [-1, 0],
+        [0, 0],
+        [1, 0],
+        [-1, 1],
+        [0, 1],
+        [1, 1],
+      ];
+      const voronoiPolar = Fn(([p_in, jitter, wrapPeriod]) => {
+        const ip = floor(p_in);
+        const fp = fract(p_in);
+        const d1 = float(10).toVar();
+        const d2 = float(10).toVar();
+        for (const [nx, ny] of NBRS) {
+          const off = vec2(float(nx), float(ny));
+          // Wrap the cell's X index so cells at angle≈0 and angle≈1 match
+          const cellX = mod(ip.x.add(float(nx)), wrapPeriod);
+          const cellY = ip.y.add(float(ny));
+          const h = mix(vec2(0.5, 0.5), hash22(vec2(cellX, cellY)), jitter);
+          const pt = off.add(h).sub(fp);
+          const d = length(pt);
+          If(d.lessThan(d1), () => {
+            d2.assign(d1);
+            d1.assign(d);
+          }).ElseIf(d.lessThan(d2), () => {
+            d2.assign(d);
+          });
+        }
+        return vec2(d1, d2);
+      });
+
+      // Value noise + FBM for warp
+      const hash21 = Fn(([p]) =>
+        fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453)),
+      );
+      const vnoise = Fn(([p]) => {
+        const i = floor(p);
+        const f = fract(p);
+        const u = f.mul(f).mul(float(3).sub(f.mul(2)));
+        return mix(
+          mix(hash21(i), hash21(i.add(vec2(1, 0))), u.x),
+          mix(hash21(i.add(vec2(0, 1))), hash21(i.add(vec2(1, 1))), u.x),
+          u.y,
+        );
+      });
+      const fbm = Fn(([p_in]) => {
+        const p = p_in.toVar();
+        const v = float(0).toVar();
+        const amp = float(0.5).toVar();
+        for (let i = 0; i < 6; i++) {
+          const mask = smoothstep(float(i), float(i + 0.5), uOctaves);
+          v.addAssign(vnoise(p).mul(amp).mul(mask));
+          p.assign(p.mul(2.07));
+          amp.assign(amp.mul(0.5));
+        }
+        return v;
+      });
+
+      // ── Display shader ────────────────────────────────────────────────────────
+      const displayFn = Fn(() => {
+        const uv = positionLocal.xy.mul(0.5).add(0.5);
+        const centered = uv.sub(vec2(0.5, 0.5));
+
+        // ── Polar conversion ──────────────────────────────────────────────────
+        // angle: 0..1 around the circle (wraps seamlessly)
+        // radius: 0 at center, 1 at edge of canvas half-extent
+        const angle = atan(centered.y, centered.x)
+          .add(Math.PI)
+          .div(Math.PI * 2); // [0, 1]
+        const radius = length(centered).mul(2.0); // [0, 1]
+
+        // ── Radial scroll ─────────────────────────────────────────────────────
+        // Subtract time from radius → cells appear to move outward.
+        // Negate direction → inward.
+        const scrolledR = radius.sub(uTime.mul(uSpeed).mul(uDirection)).toVar();
+
+        // Pulse mode: fract creates N repeating concentric rings
+        If(uPulseMode.equal(1), () => {
+          scrolledR.assign(
+            fract(
+              radius.mul(uPulseDensity).sub(uTime.mul(uSpeed).mul(uDirection)),
+            ),
+          );
+        });
+
+        // ── Optional FBM warp ─────────────────────────────────────────────────
+        const warpedAngle = angle.toVar();
+        const warpedRadius = scrolledR.toVar();
+        If(uFbmWarp.greaterThan(0.001), () => {
+          // Map angle → (cos θ, sin θ) so the FBM input is seamlessly periodic:
+          // cos(0) = cos(2π) and sin(0) = sin(2π), so angle=0 and angle=1
+          // evaluate to the same FBM value → no seam possible.
+          const theta = angle.mul(Math.PI * 2);
+          const warpUV = vec2(cos(theta).add(1), sin(theta).add(1))
+            .mul(radius)
+            .mul(uFbmScale);
+          const warpA = fbm(warpUV).sub(0.5).mul(uFbmWarp).mul(0.15);
+          const warpR = fbm(warpUV.add(vec2(5.2, 1.3)))
+            .sub(0.5)
+            .mul(uFbmWarp);
+          warpedAngle.assign(angle.add(warpA));
+          warpedRadius.assign(scrolledR.add(warpR));
+        });
+
+        // ── Polar UV for Voronoi ──────────────────────────────────────────────
+        // Angular axis: angle * wrapCount → always goes exactly 0..wrapCount.
+        // The wrap period is wrapCount (integer), so the hash wraps seamlessly.
+        // Radial axis: scrolledR * scale — controls cell density radially.
+        // Both Voronoi calls share the same angular period for consistent wrapping.
+        const angularUV = warpedAngle.mul(uWrapCount); // 0..wrapCount
+
+        // ── Radial UV mode ────────────────────────────────────────────────────
+        // Log (conformal): cells are the same apparent size at every radius.
+        //   radialUV = log(radius / 0.5) * scale  → zero at radius 0.5 (view centre)
+        //   For isotropic cells: scale ≈ wrapCount / (2π)
+        // Power law: pow(r, exp) * scale — exp<1 stretches inner region
+        // Linear: r * scale
+        const rawR = warpedRadius.max(0.0001);
+        const radialUV = float(0).toVar();
+        If(uRadialMode.equal(0), () => {
+          radialUV.assign(rawR.mul(uScale));
+        })
+          .ElseIf(uRadialMode.equal(1), () => {
+            radialUV.assign(pow(rawR, uRadialExp).mul(uScale));
+          })
+          .ElseIf(uRadialMode.equal(2), () => {
+            // log1p: log(1 + r * k) — smooth at r=0, no clamp needed, no singularity.
+            // k=6 → half-radius maps to ~log(4)≈1.4, full radius to ~log(7)≈1.95
+            // Multiply by scale for cell density. innerFade hides the tiny inner cells.
+            radialUV.assign(log(float(1).add(rawR.mul(6.0))).mul(uScale));
+          });
+
+        const polarUV = vec2(angularUV, radialUV);
+
+        // ── Cell style ────────────────────────────────────────────────────────
+        const voro1 = voronoiPolar(polarUV, uJitter, uWrapCount);
+        const diff = float(0).toVar();
+        If(uCellStyle.equal(0), () => {
+          // F2 − F1: distance to 2nd nearest minus nearest → classic crisp cell boundaries
+          diff.assign(voro1.y.sub(voro1.x));
+        })
+          .ElseIf(uCellStyle.equal(1), () => {
+            // Two-scale F1 interference (original mode)
+            const polarUVSub = vec2(angularUV, radialUV.mul(uSubScale));
+            const f1b = voronoiPolar(polarUVSub, uJitter, uWrapCount).x;
+            diff.assign(voro1.x.sub(f1b.mul(uSubMix)));
+          })
+          .ElseIf(uCellStyle.equal(2), () => {
+            // F1 only — smooth gradient from cell centres
+            diff.assign(voro1.x);
+          });
+
+        // ── Color ramp ────────────────────────────────────────────────────────
+        const cellBase = smoothstep(
+          uThresh.sub(uSoftness),
+          uThresh.add(uSoftness),
+          diff,
+        );
+        const cell = mix(cellBase, float(1).sub(cellBase), uInvert);
+
+        // ── Radial mask (inner + outer fade) ─────────────────────────────────
+        const innerFade = smoothstep(float(0), uInnerFade, radius);
+        const outerFade = float(1).sub(
+          smoothstep(uOuterFade, float(1.0), radius),
+        );
+
+        const brightness = cell.mul(innerFade).mul(outerFade);
+
+        return vec4(mix(uBgColor, uCellColor, brightness), float(1));
+      });
+
+      const displayMat = new THREE.MeshBasicNodeMaterial({
+        depthTest: false,
+        depthWrite: false,
+      });
+      displayMat.colorNode = displayFn();
+
+      const quadGeo = new THREE.PlaneGeometry(2, 2);
+      const displayQuad = new THREE.Mesh(quadGeo, displayMat);
+      const displayScene = new THREE.Scene();
+      displayScene.add(displayQuad);
+
+      // ── Render loop ───────────────────────────────────────────────────────────
+      let paused = false;
+      let lastT = performance.now();
+      let elapsed = 0;
+
+      function animate(ts) {
+        requestAnimationFrame(animate);
+        const dt = Math.min((ts - lastT) / 1000, 0.05);
+        lastT = ts;
+        if (!paused) {
+          elapsed += dt;
+          uTime.value = elapsed;
+        }
+        renderer.setRenderTarget(null);
+        renderer.render(displayScene, orthoCamera);
+      }
+
+      animate(performance.now());
+
+      // ── Controls ──────────────────────────────────────────────────────────────
+      function bind(id, valId, setter, fmt = (v) => v.toFixed(2)) {
+        const el = document.getElementById(id);
+        const lbl = valId ? document.getElementById(valId) : null;
+        if (!el) return;
+        el.addEventListener("input", () => {
+          const v = parseFloat(el.value);
+          setter(v);
+          if (lbl) lbl.textContent = fmt(v);
+        });
+        el.dispatchEvent(new Event("input"));
+      }
+
+      bind("speed", "speedVal", (v) => {
+        uSpeed.value = v;
+      });
+      bind(
+        "pulseDensity",
+        "pulseDensityVal",
+        (v) => {
+          uPulseDensity.value = v;
+        },
+        (v) => v.toFixed(1),
+      );
+      bind(
+        "wrap",
+        "wrapVal",
+        (v) => {
+          uWrapCount.value = v;
+        },
+        (v) => v.toFixed(0),
+      );
+      bind(
+        "scale",
+        "scaleVal",
+        (v) => {
+          uScale.value = v;
+        },
+        (v) => v.toFixed(2),
+      );
+      bind("radialExp", "radialExpVal", (v) => {
+        uRadialExp.value = v;
+      });
+
+      document.getElementById("radialMode").addEventListener("change", (e) => {
+        const v = parseInt(e.target.value);
+        uRadialMode.value = v;
+        document.getElementById("radialExpGroup").style.display =
+          v === 1 ? "" : "none";
+      });
+      document.getElementById("radialMode").dispatchEvent(new Event("change"));
+
+      document.getElementById("cellStyle").addEventListener("change", (e) => {
+        const v = parseInt(e.target.value);
+        uCellStyle.value = v;
+        document.getElementById("interferenceGroup").style.display =
+          v === 1 ? "" : "none";
+      });
+      document.getElementById("cellStyle").dispatchEvent(new Event("change"));
+
+      bind("subScale", "subScaleVal", (v) => {
+        uSubScale.value = v;
+      });
+      bind("subMix", "subMixVal", (v) => {
+        uSubMix.value = v;
+      });
+      bind("jitter", "jitterVal", (v) => {
+        uJitter.value = v;
+      });
+      bind("thresh", "threshVal", (v) => {
+        uThresh.value = v;
+      });
+      bind("softness", "softnessVal", (v) => {
+        uSoftness.value = v;
+      });
+      document.getElementById("invert").addEventListener("change", (e) => {
+        uInvert.value = parseInt(e.target.value);
+      });
+      bind("innerFade", "innerFadeVal", (v) => {
+        uInnerFade.value = v;
+      });
+      bind("outerFade", "outerFadeVal", (v) => {
+        uOuterFade.value = v;
+      });
+      bind("fbmWarp", "fbmWarpVal", (v) => {
+        uFbmWarp.value = v;
+      });
+      bind(
+        "fbmScale",
+        "fbmScaleVal",
+        (v) => {
+          uFbmScale.value = v;
+        },
+        (v) => v.toFixed(1),
+      );
+      bind(
+        "octaves",
+        "octavesVal",
+        (v) => {
+          uOctaves.value = v;
+        },
+        (v) => v.toFixed(0),
+      );
+
+      document.getElementById("direction").addEventListener("change", (e) => {
+        uDirection.value = parseInt(e.target.value);
+      });
+      document.getElementById("pulseMode").addEventListener("change", (e) => {
+        uPulseMode.value = parseInt(e.target.value);
+      });
+      document
+        .getElementById("bgColor")
+        .addEventListener("input", (e) => uBgColor.value.set(e.target.value));
+      document
+        .getElementById("cellColor")
+        .addEventListener("input", (e) => uCellColor.value.set(e.target.value));
+
+      const pauseBtn = document.getElementById("pauseBtn");
+      pauseBtn.addEventListener("click", () => {
+        paused = !paused;
+        pauseBtn.textContent = paused ? "Resume" : "Pause";
+      });
+    </script>
+  </body>
+</html>
