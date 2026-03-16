@@ -12,6 +12,17 @@ function srgbToLinear(hex) {
   return c;
 }
 
+function sunDirectionFromAngles(azimuthDeg, elevationDeg) {
+  const az = (azimuthDeg * Math.PI) / 180;
+  const el = (elevationDeg * Math.PI) / 180;
+  const cosEl = Math.cos(el);
+  return new THREE.Vector3(
+    cosEl * Math.cos(az),
+    Math.sin(el),
+    cosEl * Math.sin(az),
+  ).normalize();
+}
+
 export function createUniforms(PARAMS, TERRAIN_SIZE, NPC_COUNT) {
   const uTime = uniform(0);
   const uPlayerPos = uniform(new THREE.Vector3(0, 0, 0));
@@ -86,11 +97,7 @@ export function createUniforms(PARAMS, TERRAIN_SIZE, NPC_COUNT) {
   const uSeasonalScale = uniform(PARAMS.seasonalScale);
   const uSeasonalDryColor = uniform(srgbToLinear(PARAMS.seasonalDryColor));
   const uSunDir = uniform(
-    new THREE.Vector3(
-      PARAMS.sunDirX,
-      PARAMS.sunDirY,
-      PARAMS.sunDirZ,
-    ).normalize(),
+    sunDirectionFromAngles(PARAMS.sunAzimuth, PARAMS.sunElevation),
   );
   const uTerrainSize = uniform(TERRAIN_SIZE);
   const uTrailCenter = uniform(new THREE.Vector2());
@@ -226,11 +233,7 @@ export function createSyncUniforms(u, deps) {
     u.uSeasonalScale.value = PARAMS.seasonalScale;
     u.uSeasonalDryColor.value.copy(srgbToLinear(PARAMS.seasonalDryColor));
     if (syncTerrainUniforms) syncTerrainUniforms(PARAMS);
-    const sd = new THREE.Vector3(
-      PARAMS.sunDirX,
-      PARAMS.sunDirY,
-      PARAMS.sunDirZ,
-    ).normalize();
+    const sd = sunDirectionFromAngles(PARAMS.sunAzimuth, PARAMS.sunElevation);
     u.uSunDir.value.copy(sd);
     dirLight.position.copy(sd.clone().multiplyScalar(50));
     dirLight.intensity = PARAMS.sunIntensity;
