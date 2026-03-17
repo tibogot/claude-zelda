@@ -800,6 +800,11 @@
         splatTex = new THREE.CanvasTexture(splatCanvas);
         splatTex.wrapS = splatTex.wrapT = THREE.ClampToEdgeWrapping;
 
+        // ── COLOR HELPER — hex sRGB → linear THREE.Color (matches testtsushimaplayer2) ──
+        function toLinear(hex) {
+          return new THREE.Color(hex).convertSRGBToLinear();
+        }
+
         // ── PROCEDURAL GROUND SHADER (lush green FBM + domain warp) ──────
         const gU = {
           warpScale: uniform(0.012), warpAmt: uniform(3.5),
@@ -808,11 +813,11 @@
           w1: uniform(0.40),  w2: uniform(0.26),  w3: uniform(0.16),
           w4: uniform(0.10),  w5: uniform(0.05),  w6: uniform(0.03),
           contrast: uniform(1.7), bias: uniform(0.0),
-          col0: uniform(new THREE.Color('#0d1f04')),
-          col1: uniform(new THREE.Color('#1b4409')),
-          col2: uniform(new THREE.Color('#326b15')),
-          col3: uniform(new THREE.Color('#509826')),
-          col4: uniform(new THREE.Color('#72b83a')),
+          col0: uniform(toLinear('#0d1f04')),
+          col1: uniform(toLinear('#1b4409')),
+          col2: uniform(toLinear('#326b15')),
+          col3: uniform(toLinear('#509826')),
+          col4: uniform(toLinear('#72b83a')),
           stop1: uniform(0.25), stop2: uniform(0.50), stop3: uniform(0.75),
         };
         const groundProc = Fn(() => {
@@ -840,9 +845,9 @@
           s1: uniform(0.008), s2: uniform(0.04), s3: uniform(0.18),
           w1: uniform(0.55),  w2: uniform(0.30), w3: uniform(0.15),
           contrast: uniform(1.6), bias: uniform(0.05),
-          col0: uniform(new THREE.Color('#3d2408')),
-          col1: uniform(new THREE.Color('#7a5228')),
-          col2: uniform(new THREE.Color('#b8874a')),
+          col0: uniform(toLinear('#3d2408')),
+          col1: uniform(toLinear('#7a5228')),
+          col2: uniform(toLinear('#b8874a')),
           stop1: uniform(0.35), stop2: uniform(0.72),
         };
         const pathProc = Fn(() => {
@@ -862,12 +867,13 @@
         const uSlopeStart  = uniform(PARAMS.slopeStart);
         const uSlopeEnd    = uniform(PARAMS.slopeEnd);
         const uDebugMode   = uniform(0);
+        const uRockCol     = uniform(toLinear('#7a7870'));
 
         const getSplatUV    = () => positionWorld.xz.add(uTerrainHalf).div(uTerrainSize);
         const getFlatness   = () => clamp(dot(normalWorld, vec3(0, 1, 0)), float(0), float(1));
         const getSlopeMask  = () => smoothstep(uSlopeStart, uSlopeEnd, getFlatness());
         const getHeightMask = () => smoothstep(float(HEIGHT_SCALE * 0.65), float(HEIGHT_SCALE * 0.92), positionWorld.y);
-        const getWetMask    = () => smoothstep(float(3.5), float(0.0), positionWorld.y);
+        const getWetMask    = () => smoothstep(float(0.0), float(-3.0), positionWorld.y);
 
         const splatMat = new MeshStandardNodeMaterial({ roughness: 0.9, metalness: 0 });
 
@@ -875,22 +881,21 @@
           const splat   = texture(splatTex, getSplatUV());
           const terrain = groundProc();
           const path    = pathProc();
-          const rock    = terrain.mul(float(0.40));
           const wet     = path.mul(float(0.55));
-          // Debug: replace procedural with flat colors to see zone masks
-          const tCol = mix(terrain, vec3(0.30, 0.78, 0.20), uDebugMode);
-          const pCol = mix(path,    vec3(0.72, 0.48, 0.22), uDebugMode);
-          const rCol = mix(rock,    vec3(0.18, 0.14, 0.10), uDebugMode);
-          const wCol = mix(wet,     vec3(0.10, 0.08, 0.05), uDebugMode);
+          // Debug: replace with flat colors to see zone masks
+          const tCol = mix(terrain,  vec3(0.30, 0.78, 0.20), uDebugMode);
+          const pCol = mix(path,     vec3(0.72, 0.48, 0.22), uDebugMode);
+          const rCol = mix(uRockCol, vec3(0.35, 0.34, 0.32), uDebugMode);
+          const wCol = mix(wet,      vec3(0.10, 0.08, 0.05), uDebugMode);
           // Auto layers first — fill unpainted areas
           let col = tCol;
           col = mix(rCol, col, getSlopeMask());
           col = mix(col, tCol.mul(float(0.65)), getHeightMask());
           col = mix(col, wCol, getWetMask());
           // Manual paint always wins on top
-          col = mix(col, tCol,               splat.r);
+          col = mix(col, tCol,                splat.r);
           col = mix(col, tCol.mul(float(1.1)), splat.g);
-          col = mix(col, pCol,               splat.b);
+          col = mix(col, pCol,                splat.b);
           return col;
         })();
         terrain.material.dispose();
@@ -1133,17 +1138,27 @@
           });
         matFolder.addBlade({ view: "separator" });
 
+        // Color proxy helpers — picker shows sRGB, uniform stores linear
+        function bindColor(folder, label, colUniform) {
+          const srgb = colUniform.value.clone().convertLinearToSRGB();
+          const proxy = { col: { r: srgb.r, g: srgb.g, b: srgb.b } };
+          folder.addBinding(proxy, "col", { label, color: { type: "float" } })
+            .on("change", (ev) => {
+              colUniform.value.setRGB(ev.value.r, ev.value.g, ev.value.b).convertSRGBToLinear();
+            });
+        }
+
         // ── Ground procedural folder ──
         const groundProcFolder = matFolder.addFolder({ title: "Ground (green)", expanded: false });
-        groundProcFolder.addBinding(gU.warpScale, "value", { label: "Warp scale", min: 0.001, max: 0.05, step: 0.001 });
-        groundProcFolder.addBinding(gU.warpAmt,   "value", { label: "Warp amount", min: 0, max: 10, step: 0.1 });
+        groundProcFolder.addBinding(gU.warpScale, "value", { label: "Warp scale",  min: 0.001, max: 0.05, step: 0.001 });
+        groundProcFolder.addBinding(gU.warpAmt,   "value", { label: "Warp amount", min: 0,     max: 10,   step: 0.1   });
         groundProcFolder.addBlade({ view: "separator" });
-        groundProcFolder.addBinding(gU.s1, "value", { label: "Scale 1", min: 0.001, max: 0.05,  step: 0.001 });
-        groundProcFolder.addBinding(gU.s2, "value", { label: "Scale 2", min: 0.005, max: 0.1,   step: 0.001 });
-        groundProcFolder.addBinding(gU.s3, "value", { label: "Scale 3", min: 0.01,  max: 0.3,   step: 0.005 });
-        groundProcFolder.addBinding(gU.s4, "value", { label: "Scale 4", min: 0.05,  max: 1.0,   step: 0.01  });
-        groundProcFolder.addBinding(gU.s5, "value", { label: "Scale 5", min: 0.1,   max: 3.0,   step: 0.05  });
-        groundProcFolder.addBinding(gU.s6, "value", { label: "Scale 6", min: 0.5,   max: 8.0,   step: 0.1   });
+        groundProcFolder.addBinding(gU.s1, "value", { label: "Scale 1", min: 0.001, max: 0.05, step: 0.001 });
+        groundProcFolder.addBinding(gU.s2, "value", { label: "Scale 2", min: 0.005, max: 0.1,  step: 0.001 });
+        groundProcFolder.addBinding(gU.s3, "value", { label: "Scale 3", min: 0.01,  max: 0.3,  step: 0.005 });
+        groundProcFolder.addBinding(gU.s4, "value", { label: "Scale 4", min: 0.05,  max: 1.0,  step: 0.01  });
+        groundProcFolder.addBinding(gU.s5, "value", { label: "Scale 5", min: 0.1,   max: 3.0,  step: 0.05  });
+        groundProcFolder.addBinding(gU.s6, "value", { label: "Scale 6", min: 0.5,   max: 8.0,  step: 0.1   });
         groundProcFolder.addBlade({ view: "separator" });
         groundProcFolder.addBinding(gU.w1, "value", { label: "Weight 1", min: 0, max: 1, step: 0.01 });
         groundProcFolder.addBinding(gU.w2, "value", { label: "Weight 2", min: 0, max: 1, step: 0.01 });
@@ -1155,11 +1170,11 @@
         groundProcFolder.addBinding(gU.contrast, "value", { label: "Contrast", min: 0.5, max: 4, step: 0.05 });
         groundProcFolder.addBinding(gU.bias,     "value", { label: "Bias",     min: -1,  max: 1, step: 0.01 });
         groundProcFolder.addBlade({ view: "separator" });
-        groundProcFolder.addBinding(gU.col0, "value", { label: "Color 0", color: { type: "float" } });
-        groundProcFolder.addBinding(gU.col1, "value", { label: "Color 1", color: { type: "float" } });
-        groundProcFolder.addBinding(gU.col2, "value", { label: "Color 2", color: { type: "float" } });
-        groundProcFolder.addBinding(gU.col3, "value", { label: "Color 3", color: { type: "float" } });
-        groundProcFolder.addBinding(gU.col4, "value", { label: "Color 4", color: { type: "float" } });
+        bindColor(groundProcFolder, "Color 0", gU.col0);
+        bindColor(groundProcFolder, "Color 1", gU.col1);
+        bindColor(groundProcFolder, "Color 2", gU.col2);
+        bindColor(groundProcFolder, "Color 3", gU.col3);
+        bindColor(groundProcFolder, "Color 4", gU.col4);
         groundProcFolder.addBlade({ view: "separator" });
         groundProcFolder.addBinding(gU.stop1, "value", { label: "Stop 1", min: 0, max: 1, step: 0.01 });
         groundProcFolder.addBinding(gU.stop2, "value", { label: "Stop 2", min: 0, max: 1, step: 0.01 });
@@ -1167,9 +1182,9 @@
 
         // ── Path procedural folder ──
         const pathProcFolder = matFolder.addFolder({ title: "Path (yellow-brown)", expanded: false });
-        pathProcFolder.addBinding(pU.s1, "value", { label: "Scale 1", min: 0.001, max: 0.05,  step: 0.001 });
-        pathProcFolder.addBinding(pU.s2, "value", { label: "Scale 2", min: 0.005, max: 0.2,   step: 0.005 });
-        pathProcFolder.addBinding(pU.s3, "value", { label: "Scale 3", min: 0.05,  max: 0.8,   step: 0.01  });
+        pathProcFolder.addBinding(pU.s1, "value", { label: "Scale 1", min: 0.001, max: 0.05, step: 0.001 });
+        pathProcFolder.addBinding(pU.s2, "value", { label: "Scale 2", min: 0.005, max: 0.2,  step: 0.005 });
+        pathProcFolder.addBinding(pU.s3, "value", { label: "Scale 3", min: 0.05,  max: 0.8,  step: 0.01  });
         pathProcFolder.addBlade({ view: "separator" });
         pathProcFolder.addBinding(pU.w1, "value", { label: "Weight 1", min: 0, max: 1, step: 0.01 });
         pathProcFolder.addBinding(pU.w2, "value", { label: "Weight 2", min: 0, max: 1, step: 0.01 });
@@ -1178,9 +1193,9 @@
         pathProcFolder.addBinding(pU.contrast, "value", { label: "Contrast", min: 0.5, max: 4, step: 0.05 });
         pathProcFolder.addBinding(pU.bias,     "value", { label: "Bias",     min: -1,  max: 1, step: 0.01 });
         pathProcFolder.addBlade({ view: "separator" });
-        pathProcFolder.addBinding(pU.col0, "value", { label: "Color 0", color: { type: "float" } });
-        pathProcFolder.addBinding(pU.col1, "value", { label: "Color 1", color: { type: "float" } });
-        pathProcFolder.addBinding(pU.col2, "value", { label: "Color 2", color: { type: "float" } });
+        bindColor(pathProcFolder, "Color 0", pU.col0);
+        bindColor(pathProcFolder, "Color 1", pU.col1);
+        bindColor(pathProcFolder, "Color 2", pU.col2);
         pathProcFolder.addBlade({ view: "separator" });
         pathProcFolder.addBinding(pU.stop1, "value", { label: "Stop 1", min: 0, max: 1, step: 0.01 });
         pathProcFolder.addBinding(pU.stop2, "value", { label: "Stop 2", min: 0, max: 1, step: 0.01 });
@@ -1206,6 +1221,7 @@
           .on("change", (ev) => {
             uSlopeEnd.value = ev.value;
           });
+        bindColor(matFolder, "Rock color", uRockCol);
 
         pane.addBlade({ view: "separator" });
 
