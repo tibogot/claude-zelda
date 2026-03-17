@@ -181,8 +181,18 @@
         smoothstep,
         normalMap,
         clamp,
+        step,
+        pow,
         mx_noise_float,
       } from "three/tsl";
+      import {
+        valueNoise2D,
+        perlinNoise2D,
+        simplexNoise2D,
+        fbmPerlin2D,
+        voronoiF1Normalized,
+        whiteNoise2D,
+      } from "./tsl-noise.js";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { TransformControls } from "three/addons/controls/TransformControls.js";
       import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
@@ -838,64 +848,131 @@
           return new THREE.Color(hex).convertSRGBToLinear();
         }
 
-        // ── PROCEDURAL GROUND SHADER (lush green FBM + domain warp) ──────
-        const gU = {
-          warpScale: uniform(0.009),
-          warpAmt: uniform(1.8),
-          s1: uniform(0.01),
-          s2: uniform(0.038),
-          s3: uniform(0.11),
-          s4: uniform(0.34),
-          s5: uniform(1.0),
-          s6: uniform(2.8),
-          w1: uniform(0.44),
-          w2: uniform(0.28),
-          w3: uniform(0.16),
-          w4: uniform(0.08),
-          w5: uniform(0.03),
-          w6: uniform(0.01),
-          contrast: uniform(1.25),
-          bias: uniform(0.12),
-          col0: uniform(toLinear("#3a7812")),
-          col1: uniform(toLinear("#4f9a1e")),
-          col2: uniform(toLinear("#64b228")),
-          col3: uniform(toLinear("#78c832")),
-          col4: uniform(toLinear("#88d63c")),
-          stop1: uniform(0.25),
-          stop2: uniform(0.5),
-          stop3: uniform(0.75),
+        // ── PROCEDURAL GROUND SHADER — same layer system as tsl-texture-editor ──
+        function noiseTypeToIndex(s) {
+          return (
+            { value: 0, perlin: 1, simplex: 2, voronoi: 3, white: 4 }[s] ?? 0
+          );
+        }
+
+        function selectGroundNoise(nVal, nPerl, nSim, nVoro, nWhite, uType) {
+          let n = nVal;
+          n = mix(n, nPerl, step(float(0.5), uType));
+          n = mix(n, nSim, step(float(1.5), uType));
+          n = mix(n, nVoro, step(float(2.5), uType));
+          n = mix(n, nWhite, step(float(3.5), uType));
+          return n;
+        }
+
+        function groundLayerUniforms(L) {
+          return {
+            enable: uniform(L.enable ? 1 : 0),
+            noiseType: uniform(noiseTypeToIndex(L.noiseType)),
+            color: uniform(new THREE.Color(L.color).convertSRGBToLinear()),
+            strength: uniform(L.strength, "float"),
+            useFbm: uniform(L.useFbm ? 1 : 0),
+            octaves: uniform(L.octaves, "float"),
+            lacunarity: uniform(L.lacunarity, "float"),
+            gain: uniform(L.gain, "float"),
+            scale: uniform(L.scale, "float"),
+            offsetX: uniform(L.offsetX, "float"),
+            offsetY: uniform(L.offsetY, "float"),
+            invert: uniform(L.invert ? 1 : 0),
+            maskLow: uniform(L.maskLow, "float"),
+            maskHigh: uniform(L.maskHigh, "float"),
+            maskSharpness: uniform(L.maskSharpness, "float"),
+            voronoiJitter: uniform(L.voronoiJitter, "float"),
+          };
+        }
+
+        const gPARAMS = {
+          brightness: 1.0,
+          contrast: 1.0,
+          baseColor: "#3a5a25",
+          layer1: {
+            enable: true,
+            noiseType: "perlin",
+            color: "#2a4518",
+            strength: 0.6,
+            useFbm: true,
+            octaves: 3,
+            lacunarity: 2.0,
+            gain: 0.5,
+            scale: 0.015,
+            offsetX: 0,
+            offsetY: 0,
+            invert: false,
+            maskLow: 0.35,
+            maskHigh: 0.7,
+            maskSharpness: 1.0,
+            voronoiJitter: 0.8,
+          },
+          layer2: {
+            enable: false,
+            noiseType: "perlin",
+            color: "#5aaa30",
+            strength: 0.4,
+            useFbm: true,
+            octaves: 2.5,
+            lacunarity: 2.2,
+            gain: 0.5,
+            scale: 0.04,
+            offsetX: 13.7,
+            offsetY: 31.1,
+            invert: false,
+            maskLow: 0.4,
+            maskHigh: 0.75,
+            maskSharpness: 1.0,
+            voronoiJitter: 0.7,
+          },
         };
+
+        const gBase = uniform(
+          new THREE.Color(gPARAMS.baseColor).convertSRGBToLinear(),
+        );
+        const gContrast = uniform(gPARAMS.contrast, "float");
+        const gBrightness = uniform(gPARAMS.brightness, "float");
+        const gL1 = groundLayerUniforms(gPARAMS.layer1);
+        const gL2 = groundLayerUniforms(gPARAMS.layer2);
+
+        function groundLayerMask(U) {
+          const p = vec2(
+            positionWorld.x.mul(U.scale).add(U.offsetX),
+            positionWorld.z.mul(U.scale).add(U.offsetY),
+          );
+          const nVal = valueNoise2D(p);
+          const nPerlS = perlinNoise2D(p);
+          const nPerlF = fbmPerlin2D(p, U.octaves, U.lacunarity, U.gain);
+          const nPerl = mix(nPerlS, nPerlF, U.useFbm);
+          const nSim = simplexNoise2D(p);
+          const nVoro = voronoiF1Normalized(p, U.voronoiJitter);
+          const nWhite = whiteNoise2D(p);
+          let n = selectGroundNoise(
+            nVal,
+            nPerl,
+            nSim,
+            nVoro,
+            nWhite,
+            U.noiseType,
+          );
+          n = mix(n, float(1).sub(n), U.invert);
+          const raw = smoothstep(U.maskLow, U.maskHigh, n);
+          const mask = pow(raw.max(float(0.0001)), U.maskSharpness)
+            .mul(U.strength)
+            .mul(U.enable);
+          return mask;
+        }
+
         const groundProc = Fn(() => {
-          const p = positionWorld.xz;
-          const wx = mx_noise_float(p.mul(gU.warpScale).add(vec2(1.7, 9.2)));
-          const wz = mx_noise_float(p.mul(gU.warpScale).add(vec2(8.3, 2.8)));
-          const wp = p.add(vec2(wx, wz).mul(gU.warpAmt));
-          const n1 = mx_noise_float(wp.mul(gU.s1));
-          const n2 = mx_noise_float(wp.mul(gU.s2).add(vec2(31.4, 17.8)));
-          const n3 = mx_noise_float(wp.mul(gU.s3).add(vec2(57.2, 43.1)));
-          const n4 = mx_noise_float(wp.mul(gU.s4).add(vec2(89.5, 71.3)));
-          const n5 = mx_noise_float(wp.mul(gU.s5).add(vec2(121.7, 97.4)));
-          const n6 = mx_noise_float(wp.mul(gU.s6).add(vec2(153.9, 119.6)));
-          const fbm = n1
-            .mul(gU.w1)
-            .add(n2.mul(gU.w2))
-            .add(n3.mul(gU.w3))
-            .add(n4.mul(gU.w4))
-            .add(n5.mul(gU.w5))
-            .add(n6.mul(gU.w6));
-          const t = clamp(
-            fbm.mul(gU.contrast).add(float(0.5).add(gU.bias)),
-            0.0,
-            1.0,
+          let col = gBase;
+          col = mix(col, gL1.color, groundLayerMask(gL1));
+          col = mix(col, gL2.color, groundLayerMask(gL2));
+          col = clamp(
+            col.sub(float(0.5)).mul(gContrast).add(float(0.5)).mul(gBrightness),
+            0,
+            1,
           );
-          const c01 = mix(
-            gU.col0,
-            gU.col1,
-            smoothstep(float(0.0), gU.stop1, t),
-          );
-          const c12 = mix(c01, gU.col2, smoothstep(gU.stop1, gU.stop2, t));
-          const c23 = mix(c12, gU.col3, smoothstep(gU.stop2, gU.stop3, t));
-          return mix(c23, gU.col4, smoothstep(gU.stop3, float(1.0), t));
+          return col;
         });
 
         // ── PROCEDURAL PATH SHADER (warm yellow-brown earthy tones) ──────
@@ -1262,134 +1339,124 @@
         }
 
         // ── Ground procedural folder ──
+        const noiseTypeOptions = {
+          Value: "value",
+          Perlin: "perlin",
+          Simplex: "simplex",
+          Voronoi: "voronoi",
+          White: "white",
+        };
+
+        function bindGroundLayer(folder, L, U) {
+          folder.addBinding(L, "enable", { label: "On" }).on("change", (e) => {
+            U.enable.value = e.value ? 1 : 0;
+          });
+          bindColor(folder, "Color", U.color);
+          folder
+            .addBinding(L, "strength", { min: 0, max: 1, step: 0.01 })
+            .on("change", (e) => {
+              U.strength.value = e.value;
+            });
+          folder
+            .addBinding(L, "noiseType", { options: noiseTypeOptions })
+            .on("change", (e) => {
+              U.noiseType.value = noiseTypeToIndex(e.value);
+            });
+          folder.addBinding(L, "useFbm", { label: "FBM" }).on("change", (e) => {
+            U.useFbm.value = e.value ? 1 : 0;
+          });
+          folder
+            .addBinding(L, "octaves", { min: 1, max: 6, step: 0.5 })
+            .on("change", (e) => {
+              U.octaves.value = e.value;
+            });
+          folder
+            .addBinding(L, "lacunarity", { min: 1.2, max: 4, step: 0.1 })
+            .on("change", (e) => {
+              U.lacunarity.value = e.value;
+            });
+          folder
+            .addBinding(L, "gain", { min: 0.1, max: 0.9, step: 0.05 })
+            .on("change", (e) => {
+              U.gain.value = e.value;
+            });
+          folder
+            .addBinding(L, "scale", { min: 0.001, max: 0.1, step: 0.001 })
+            .on("change", (e) => {
+              U.scale.value = e.value;
+            });
+          folder
+            .addBinding(L, "offsetX", { min: -100, max: 100, step: 1 })
+            .on("change", (e) => {
+              U.offsetX.value = e.value;
+            });
+          folder
+            .addBinding(L, "offsetY", { min: -100, max: 100, step: 1 })
+            .on("change", (e) => {
+              U.offsetY.value = e.value;
+            });
+          folder
+            .addBinding(L, "invert", { label: "Invert" })
+            .on("change", (e) => {
+              U.invert.value = e.value ? 1 : 0;
+            });
+          folder
+            .addBinding(L, "maskLow", {
+              min: 0,
+              max: 1,
+              step: 0.01,
+              label: "Mask low",
+            })
+            .on("change", (e) => {
+              U.maskLow.value = e.value;
+            });
+          folder
+            .addBinding(L, "maskHigh", {
+              min: 0,
+              max: 1,
+              step: 0.01,
+              label: "Mask high",
+            })
+            .on("change", (e) => {
+              U.maskHigh.value = e.value;
+            });
+          folder
+            .addBinding(L, "maskSharpness", {
+              min: 0.2,
+              max: 3,
+              step: 0.05,
+              label: "Sharpness",
+            })
+            .on("change", (e) => {
+              U.maskSharpness.value = e.value;
+            });
+        }
+
         const groundProcFolder = matFolder.addFolder({
-          title: "Ground (green)",
+          title: "Ground",
           expanded: false,
         });
-        groundProcFolder.addBinding(gU.warpScale, "value", {
-          label: "Warp scale",
-          min: 0.001,
-          max: 0.05,
-          step: 0.001,
-        });
-        groundProcFolder.addBinding(gU.warpAmt, "value", {
-          label: "Warp amount",
-          min: 0,
-          max: 10,
-          step: 0.1,
-        });
-        groundProcFolder.addBlade({ view: "separator" });
-        groundProcFolder.addBinding(gU.s1, "value", {
-          label: "Scale 1",
-          min: 0.001,
-          max: 0.05,
-          step: 0.001,
-        });
-        groundProcFolder.addBinding(gU.s2, "value", {
-          label: "Scale 2",
-          min: 0.005,
-          max: 0.1,
-          step: 0.001,
-        });
-        groundProcFolder.addBinding(gU.s3, "value", {
-          label: "Scale 3",
-          min: 0.01,
-          max: 0.3,
-          step: 0.005,
-        });
-        groundProcFolder.addBinding(gU.s4, "value", {
-          label: "Scale 4",
-          min: 0.05,
-          max: 1.0,
-          step: 0.01,
-        });
-        groundProcFolder.addBinding(gU.s5, "value", {
-          label: "Scale 5",
-          min: 0.1,
-          max: 3.0,
-          step: 0.05,
-        });
-        groundProcFolder.addBinding(gU.s6, "value", {
-          label: "Scale 6",
-          min: 0.5,
-          max: 8.0,
-          step: 0.1,
-        });
-        groundProcFolder.addBlade({ view: "separator" });
-        groundProcFolder.addBinding(gU.w1, "value", {
-          label: "Weight 1",
-          min: 0,
-          max: 1,
-          step: 0.01,
-        });
-        groundProcFolder.addBinding(gU.w2, "value", {
-          label: "Weight 2",
-          min: 0,
-          max: 1,
-          step: 0.01,
-        });
-        groundProcFolder.addBinding(gU.w3, "value", {
-          label: "Weight 3",
-          min: 0,
-          max: 1,
-          step: 0.01,
-        });
-        groundProcFolder.addBinding(gU.w4, "value", {
-          label: "Weight 4",
-          min: 0,
-          max: 1,
-          step: 0.01,
-        });
-        groundProcFolder.addBinding(gU.w5, "value", {
-          label: "Weight 5",
-          min: 0,
-          max: 1,
-          step: 0.01,
-        });
-        groundProcFolder.addBinding(gU.w6, "value", {
-          label: "Weight 6",
-          min: 0,
-          max: 1,
-          step: 0.01,
-        });
-        groundProcFolder.addBlade({ view: "separator" });
-        groundProcFolder.addBinding(gU.contrast, "value", {
-          label: "Contrast",
-          min: 0.5,
-          max: 4,
-          step: 0.05,
-        });
-        groundProcFolder.addBinding(gU.bias, "value", {
-          label: "Bias",
-          min: -1,
-          max: 1,
-          step: 0.01,
-        });
-        groundProcFolder.addBlade({ view: "separator" });
-        bindColor(groundProcFolder, "Color 0", gU.col0);
-        bindColor(groundProcFolder, "Color 1", gU.col1);
-        bindColor(groundProcFolder, "Color 2", gU.col2);
-        bindColor(groundProcFolder, "Color 3", gU.col3);
-        bindColor(groundProcFolder, "Color 4", gU.col4);
-        groundProcFolder.addBlade({ view: "separator" });
-        groundProcFolder.addBinding(gU.stop1, "value", {
-          label: "Stop 1",
-          min: 0,
-          max: 1,
-          step: 0.01,
-        });
-        groundProcFolder.addBinding(gU.stop2, "value", {
-          label: "Stop 2",
-          min: 0,
-          max: 1,
-          step: 0.01,
-        });
-        groundProcFolder.addBinding(gU.stop3, "value", {
-          label: "Stop 3",
-          min: 0,
-          max: 1,
-          step: 0.01,
-        });
+        bindColor(groundProcFolder, "Base color", gBase);
+        groundProcFolder
+          .addBinding(gPARAMS, "contrast", { min: 0.2, max: 3, step: 0.05 })
+          .on("change", (e) => {
+            gContrast.value = e.value;
+          });
+        groundProcFolder
+          .addBinding(gPARAMS, "brightness", { min: 0.2, max: 2, step: 0.05 })
+          .on("change", (e) => {
+            gBrightness.value = e.value;
+          });
+        bindGroundLayer(
+          groundProcFolder.addFolder({ title: "Layer 1", expanded: true }),
+          gPARAMS.layer1,
+          gL1,
+        );
+        bindGroundLayer(
+          groundProcFolder.addFolder({ title: "Layer 2", expanded: false }),
+          gPARAMS.layer2,
+          gL2,
+        );
 
         // ── Path procedural folder ──
         const pathProcFolder = matFolder.addFolder({

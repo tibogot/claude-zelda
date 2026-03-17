@@ -59,6 +59,8 @@
         background: rgba(200, 120, 40, 0.9);
         color: #fff;
       }
+      #mode-badge.grass  { background: rgba(60,160,60,0.85); color: #fff; }
+      #mode-badge.trees  { background: rgba(20,80,20,0.92);  color: #ccffcc; }
       #mode-badge.place {
         background: rgba(180, 60, 200, 0.9);
         color: #fff;
@@ -197,6 +199,16 @@
       import { TransformControls } from "three/addons/controls/TransformControls.js";
       import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+      import {
+        createGrassGeometry, createGrassMaterial, setupGrassPatches,
+        GRASS_SEGMENTS_LOW, GRASS_SEGMENTS_MID, GRASS_SEGMENTS_HIGH,
+        GRASS_VERTS_LOW, GRASS_VERTS_MID, GRASS_VERTS_HIGH,
+        GRASS_PATCH_SIZE, GRASS_DENSITY, GRASS_DENSITY_LOW, GRASS_DENSITY_MID,
+        NEAR_PATCH_SIZE,
+      } from "./grass-painter7.js";
+      import { createUniforms } from "./uniforms-sandbox.js";
+      import { setSeed, randRange } from "./rng.js";
+      import { createTreeSystem } from "./tree-painter7.js";
       import { Pane } from "tweakpane";
       import Stats from "stats-gl";
 
@@ -305,6 +317,13 @@
       splatCtx.fillStyle = "#000";
       splatCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
 
+      // ─── GRASS DENSITY CANVAS ─────────────────
+      const grassDensityCanvas = document.createElement("canvas");
+      grassDensityCanvas.width = grassDensityCanvas.height = SPLAT_RES;
+      const grassDensityCtx = grassDensityCanvas.getContext("2d");
+      grassDensityCtx.fillStyle = "#000";
+      grassDensityCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+
       const previewCanvas = document.getElementById("splatmap-preview");
       const previewCtx = previewCanvas.getContext("2d");
       function syncPreview() {
@@ -394,6 +413,15 @@
       let brushStr = 60;
       let instancedObjs = null;
       let splatTex = null;
+      let grassDensityTex = null;
+      let heightTex = null;
+      let grassPatchSystem = null;
+      let grassUniforms = null;
+      let grassEraseMode = false;
+      let syncHeightTex = null; // assigned inside init once heightTex is created
+      let treeSystem = null;
+      let treeEraseMode = false;
+      const treeParams = { treesPerStroke: 3, minSpacing: 8, scaleMin: 0.8, scaleMax: 1.4 };
       let terrainGeo = null; // set in init, needed by sculpt
 
       // ─── CLIFF STATE ─────────────────────────
@@ -472,6 +500,43 @@
         splatCtx.fill();
         syncPreview();
         if (splatTex) splatTex.needsUpdate = true;
+      }
+
+      // ─── GRASS DENSITY PAINT ─────────────────
+      function paintGrassAt(wx, wz, erase) {
+        const { u, v } = worldToUV(wx, wz);
+        const cx = u * SPLAT_RES, cy = v * SPLAT_RES;
+        const alpha = brushStr / 100;
+        const grad = grassDensityCtx.createRadialGradient(cx, cy, 0, cx, cy, brushSize);
+        if (erase) {
+          grad.addColorStop(0,   `rgba(0,0,0,${alpha})`);
+          grad.addColorStop(0.5, `rgba(0,0,0,${alpha * 0.55})`);
+          grad.addColorStop(1,   `rgba(0,0,0,0)`);
+          grassDensityCtx.globalCompositeOperation = "source-over";
+        } else {
+          grad.addColorStop(0,   `rgba(255,255,255,${alpha})`);
+          grad.addColorStop(0.5, `rgba(255,255,255,${alpha * 0.55})`);
+          grad.addColorStop(1,   `rgba(255,255,255,0)`);
+          grassDensityCtx.globalCompositeOperation = "source-over";
+        }
+        grassDensityCtx.fillStyle = grad;
+        grassDensityCtx.beginPath();
+        grassDensityCtx.arc(cx, cy, brushSize, 0, PI * 2);
+        grassDensityCtx.fill();
+        if (grassDensityTex) grassDensityTex.needsUpdate = true;
+      }
+
+      // ─── TREE PAINT ──────────────────────────
+      function paintTreesAt(wx, wz, erase) {
+        if (!treeSystem) return;
+        const radius = brushWorldRadius();
+        if (erase) {
+          treeSystem.removeInBrush(wx, wz, radius);
+        } else {
+          treeSystem.addInBrush(wx, wz, radius,
+            treeParams.treesPerStroke, treeParams.minSpacing,
+            treeParams.scaleMin, treeParams.scaleMax);
+        }
       }
 
       // ─── BRUSH RADIUS (module-level so sculptAt + paintAt can use it) ───
@@ -832,6 +897,90 @@
         splatTex = new THREE.CanvasTexture(splatCanvas);
         splatTex.wrapS = splatTex.wrapT = THREE.ClampToEdgeWrapping;
 
+        // ── GRASS DENSITY TEX ─────────────────────────────────────────────
+        grassDensityTex = new THREE.CanvasTexture(grassDensityCanvas);
+        grassDensityTex.wrapS = grassDensityTex.wrapT = THREE.ClampToEdgeWrapping;
+
+        // ── HEIGHT TEX (for grass blade positioning) ──────────────────────
+        const HTEX_RES = 512;
+        const heightTexData = new Float32Array(HTEX_RES * HTEX_RES * 4);
+        heightTex = new THREE.DataTexture(heightTexData, HTEX_RES, HTEX_RES, THREE.RGBAFormat, THREE.FloatType);
+        heightTex.wrapS = heightTex.wrapT = THREE.ClampToEdgeWrapping;
+        heightTex.magFilter = heightTex.minFilter = THREE.LinearFilter;
+        syncHeightTex = function() {
+          for (let iz = 0; iz < HTEX_RES; iz++) {
+            for (let ix = 0; ix < HTEX_RES; ix++) {
+              const wx = (-0.5 + ix / HTEX_RES) * TERRAIN_SIZE;
+              const wz = (-0.5 + iz / HTEX_RES) * TERRAIN_SIZE;
+              const h = sampleHeight(wx, wz);
+              const idx = (iz * HTEX_RES + ix) * 4;
+              heightTexData[idx] = heightTexData[idx+1] = heightTexData[idx+2] = h;
+              heightTexData[idx+3] = 1;
+            }
+          }
+          heightTex.needsUpdate = true;
+        };
+        syncHeightTex();
+
+        // ── DUMMY TRAIL TEX ───────────────────────────────────────────────
+        const trailTex = new THREE.DataTexture(new Float32Array(4), 1, 1, THREE.RGBAFormat, THREE.FloatType);
+        trailTex.needsUpdate = true;
+
+        // ── GRASS SETUP ───────────────────────────────────────────────────
+        const grassParams = {
+          grassWidth: 0.08, grassHeight: 0.7,
+          lodDistance: 28, maxDistance: 80, lodBlendStart: 0.35,
+          nearRingExtent: 3, nearFadeRange: 8,
+          grassBladesRegular: 1.0, grassBladesNear: 1.0,
+          gradientCurve: 2.0,
+          baseColor1: '#143210', baseColor2: '#183a12',
+          tipColor1: '#a6cc40', tipColor2: '#cce666',
+          colorVariation: 0.3, lushColor: '#1a4a0a', bleachedColor: '#d4cc80',
+          windSpeed: 1.0, windStrength: 0.4, windWaveScale: 0.08,
+          windDir: 0.7, windGust: 0.3, windMicroSway: 0.15,
+          interactionRange: 1.8, interactionStrength: 0.35,
+          interactionHeightThreshold: 1.5,
+          minSkyBlend: 0.55, maxSkyBlend: 0.7,
+          aoEnabled: true, aoIntensity: 1.0,
+          bsIntensity: 0.4, bsColor: '#51cc66', bsPower: 2.0,
+          frontScatter: 0.3, rimSSS: 0.4,
+          specV1Enabled: false, specV1Intensity: 1.5, specV1Color: '#ffffff',
+          specV1DirX: -1.0, specV1DirY: 1.0, specV1DirZ: 0.5,
+          specV2Enabled: false, specV2Intensity: 1.0, specV2Color: '#ffffff',
+          specV2DirX: -1.0, specV2DirY: 0.45, specV2DirZ: 1.0,
+          specV2NoiseScale: 3.0, specV2NoiseStr: 0.6, specV2Power: 12.0, specV2TipBias: 0.5,
+          seasonalScale: 0.02, seasonalDryColor: '#8b7d3c',
+          sunAzimuth: PARAMS.light.sunAzimuth, sunElevation: PARAMS.light.sunElevation,
+        };
+        grassUniforms = createUniforms(grassParams, TERRAIN_SIZE, 1);
+        const grassCtx = {
+          ...grassUniforms,
+          heightTex, grassDensityTex, trailTex,
+          PI: Math.PI,
+        };
+        const PATCH_SPACING = GRASS_PATCH_SIZE;
+        const GRID_SIZE = 12;
+        const geoLow  = createGrassGeometry(GRASS_SEGMENTS_LOW,  GRASS_DENSITY_LOW, GRASS_PATCH_SIZE, setSeed, randRange);
+        const geoMid  = createGrassGeometry(GRASS_SEGMENTS_MID,  GRASS_DENSITY_MID, GRASS_PATCH_SIZE, setSeed, randRange);
+        const geoHigh = createGrassGeometry(GRASS_SEGMENTS_HIGH, GRASS_DENSITY,     GRASS_PATCH_SIZE, setSeed, randRange);
+        const geoNear = createGrassGeometry(GRASS_SEGMENTS_HIGH, GRASS_DENSITY,     NEAR_PATCH_SIZE,  setSeed, randRange);
+        const matLow  = createGrassMaterial(GRASS_SEGMENTS_LOW,  GRASS_VERTS_LOW,  false, 'regular', grassCtx);
+        const matMid  = createGrassMaterial(GRASS_SEGMENTS_MID,  GRASS_VERTS_MID,  false, 'regular', grassCtx);
+        const matHigh = createGrassMaterial(GRASS_SEGMENTS_HIGH, GRASS_VERTS_HIGH, false, 'regular', grassCtx);
+        const matNear = createGrassMaterial(GRASS_SEGMENTS_HIGH, GRASS_VERTS_HIGH, false, 'near',    grassCtx);
+        const grassGroup = new THREE.Group();
+        scene.add(grassGroup);
+        grassPatchSystem = setupGrassPatches(scene, camera, grassGroup,
+          { geoLow, geoMid, geoHigh, geoNear,
+            matLowSimple: matLow, matMidSimple: matMid,
+            matHighSimple: matHigh, matHighSimpleNear: matNear },
+          { PATCH_SPACING, GRID_SIZE, NEAR_PATCH_SIZE,
+            nearRingExtent: grassParams.nearRingExtent,
+            lodDistance: grassParams.lodDistance,
+            lodDistanceMid: grassParams.lodDistance * 1.4,
+            maxDistance: grassParams.maxDistance },
+        );
+
         // ── COLOR HELPER — hex sRGB → linear THREE.Color (matches testtsushimaplayer2) ──
         function toLinear(hex) {
           return new THREE.Color(hex).convertSRGBToLinear();
@@ -1050,6 +1199,12 @@
           }),
         );
 
+        // ── TREE SYSTEM ──
+        treeSystem = createTreeSystem(scene, sampleHeight);
+        gltfLoader.loadAsync("models/pine2.glb").then((gltf) => {
+          treeSystem.setModel(gltf);
+        }).catch(() => console.warn("pine2.glb not found — trees mode active but no model loaded"));
+
         // ── TRANSFORM CONTROLS ──
         transformControls = new TransformControls(camera, renderer.domElement);
         transformControls.addEventListener("dragging-changed", (e) => {
@@ -1168,7 +1323,8 @@
           brushRing.visible = true;
           // Color: white for paint, orange for sculpt
           brushRing.material.color.set(
-            currentMode === "sculpt" ? 0xff9900 : 0xffffff,
+            currentMode === "sculpt" ? 0xff9900 :
+            currentMode === "trees"  ? 0x44aa44 : 0xffffff,
           );
           brushRing.position.set(p.x, p.y + 0.15, p.z);
           brushRing.scale.setScalar(brushWorldRadius());
@@ -1185,6 +1341,8 @@
             Paint: "paint",
             Sculpt: "sculpt",
             Place: "place",
+            Grass: "grass",
+            Trees: "trees",
           },
         });
         modeBinding.on("change", (ev) => setMode(ev.value));
@@ -1434,6 +1592,84 @@
             document.getElementById("cliffs-file-input").click(),
           );
 
+        // ── Grass folder ──
+        const grassFolder = pane.addFolder({ title: "Grass  [ G ]", expanded: true });
+        const grassDensityFileInput = document.createElement("input");
+        grassDensityFileInput.type = "file"; grassDensityFileInput.accept = "image/png";
+        grassDensityFileInput.style.display = "none";
+        document.body.appendChild(grassDensityFileInput);
+        const grassErasePARAMS = { erase: false };
+        grassFolder.addBinding(grassErasePARAMS, "erase", { label: "Erase (or Shift)" })
+          .on("change", (e) => { grassEraseMode = e.value; });
+        grassFolder.addButton({ title: "Clear grass" }).on("click", () => {
+          grassDensityCtx.fillStyle = "#000";
+          grassDensityCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+          if (grassDensityTex) grassDensityTex.needsUpdate = true;
+        });
+        grassFolder.addButton({ title: "Fill all grass" }).on("click", () => {
+          grassDensityCtx.fillStyle = "#fff";
+          grassDensityCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+          if (grassDensityTex) grassDensityTex.needsUpdate = true;
+        });
+        grassFolder.addButton({ title: "Save density map" }).on("click", () => {
+          const a = document.createElement("a");
+          a.download = "grass-density.png";
+          a.href = grassDensityCanvas.toDataURL("image/png");
+          a.click();
+        });
+        grassFolder.addButton({ title: "Load density map" })
+          .on("click", () => grassDensityFileInput.click());
+        grassDensityFileInput.addEventListener("change", (e) => {
+          if (!e.target.files[0]) return;
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            const img = new Image();
+            img.onload = () => {
+              grassDensityCtx.clearRect(0, 0, SPLAT_RES, SPLAT_RES);
+              grassDensityCtx.drawImage(img, 0, 0, SPLAT_RES, SPLAT_RES);
+              if (grassDensityTex) grassDensityTex.needsUpdate = true;
+            };
+            img.src = ev.target.result;
+          };
+          reader.readAsDataURL(e.target.files[0]);
+        });
+
+        // ── Trees folder ──
+        const treesFolder = pane.addFolder({ title: "Trees  [ T ]", expanded: true });
+        const treeErasePARAMS = { erase: false };
+        treesFolder.addBinding(treeErasePARAMS, "erase", { label: "Erase (or Shift)" })
+          .on("change", (e) => { treeEraseMode = e.value; });
+        treesFolder.addBinding(treeParams, "treesPerStroke", { label: "Per stroke", min: 1, max: 20, step: 1 });
+        treesFolder.addBinding(treeParams, "minSpacing",     { label: "Min spacing", min: 1, max: 40, step: 0.5 });
+        treesFolder.addBinding(treeParams, "scaleMin",       { label: "Scale min",   min: 0.1, max: 3, step: 0.05 });
+        treesFolder.addBinding(treeParams, "scaleMax",       { label: "Scale max",   min: 0.1, max: 3, step: 0.05 });
+        treesFolder.addButton({ title: "Clear all trees" }).on("click", () => {
+          if (treeSystem) treeSystem.clear();
+        });
+        treesFolder.addButton({ title: "Save trees JSON" }).on("click", () => {
+          if (!treeSystem) return;
+          const blob = new Blob([JSON.stringify(treeSystem.getPositions(), null, 2)], { type: "application/json" });
+          const a = document.createElement("a");
+          a.download = "trees.json";
+          a.href = URL.createObjectURL(blob);
+          a.click();
+        });
+        const treeFileInput = document.createElement("input");
+        treeFileInput.type = "file"; treeFileInput.accept = ".json";
+        treeFileInput.style.display = "none";
+        document.body.appendChild(treeFileInput);
+        treesFolder.addButton({ title: "Load trees JSON" }).on("click", () => treeFileInput.click());
+        treeFileInput.addEventListener("change", (e) => {
+          if (!e.target.files[0] || !treeSystem) return;
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            try {
+              treeSystem.setPositions(JSON.parse(ev.target.result));
+            } catch (err) { console.error("Failed to load trees.json", err); }
+          };
+          reader.readAsText(e.target.files[0]);
+        });
+
         // Wire up file inputs
         document
           .getElementById("file-input")
@@ -1462,6 +1698,8 @@
           paintFolder.hidden = mode !== "paint";
           sculptFolder.hidden = mode !== "sculpt";
           placeFolder.hidden = mode !== "place";
+          grassFolder.hidden = mode !== "grass";
+          treesFolder.hidden = mode !== "trees";
           brushFolder.hidden = mode === "view" || mode === "place";
 
           if (mode !== "place" && transformControls) {
@@ -1475,13 +1713,12 @@
 
           const badge = document.getElementById("mode-badge");
           badge.textContent =
-            mode === "view"
-              ? "VIEW MODE"
-              : mode === "paint"
-                ? "PAINT MODE"
-                : mode === "sculpt"
-                  ? "SCULPT MODE"
-                  : "PLACE MODE";
+            mode === "view"   ? "VIEW MODE"   :
+            mode === "paint"  ? "PAINT MODE"  :
+            mode === "sculpt" ? "SCULPT MODE" :
+            mode === "grass"  ? "GRASS MODE"  :
+            mode === "trees"  ? "TREES MODE"  :
+                                "PLACE MODE";
           badge.className = mode;
           renderer.domElement.style.cursor =
             mode === "view" ? "default" : "crosshair";
@@ -1497,6 +1734,10 @@
             setMode(currentMode === "sculpt" ? "view" : "sculpt");
           if (e.code === "KeyO")
             setMode(currentMode === "place" ? "view" : "place");
+          if (e.code === "KeyG")
+            setMode(currentMode === "grass" ? "view" : "grass");
+          if (e.code === "KeyT")
+            setMode(currentMode === "trees" ? "view" : "trees");
           if (e.code === "Escape") setMode("view");
           if (currentMode === "place") {
             if (e.code === "KeyW") {
@@ -1531,6 +1772,8 @@
           if (!isMouseDown || !p) return;
           if (currentMode === "paint") paintAt(p.x, p.z);
           if (currentMode === "sculpt") sculptAt(p.x, p.z, e);
+          if (currentMode === "grass") paintGrassAt(p.x, p.z, grassEraseMode || e.shiftKey);
+          if (currentMode === "trees") paintTreesAt(p.x, p.z, treeEraseMode || e.shiftKey);
         });
 
         renderer.domElement.addEventListener("mousedown", (e) => {
@@ -1570,6 +1813,7 @@
             flattenTargetY = sampleHeight(p.x, p.z);
           if (currentMode === "paint") paintAt(p.x, p.z);
           if (currentMode === "sculpt") sculptAt(p.x, p.z, e);
+          if (currentMode === "trees") paintTreesAt(p.x, p.z, treeEraseMode || e.shiftKey);
         });
 
         renderer.domElement.addEventListener("mouseup", () => {
@@ -1577,6 +1821,10 @@
           isMouseDown = false;
           if (currentMode === "paint" || currentMode === "sculpt") {
             generateObjects(scene);
+          }
+          if (currentMode === "sculpt") {
+            if (syncHeightTex) syncHeightTex();
+            if (treeSystem) treeSystem.syncHeights();
           }
         });
 
@@ -1593,7 +1841,19 @@
         });
 
         // ── RENDER LOOP ──
+        const clock = new THREE.Timer();
+        const _grassFrustum = new THREE.Frustum();
+        const _grassProjMatrix = new THREE.Matrix4();
         renderer.setAnimationLoop(() => {
+          clock.update();
+          const elapsed = clock.getElapsed();
+          if (grassUniforms) grassUniforms.uTime.value = elapsed;
+          if (grassPatchSystem) {
+            camera.updateMatrixWorld();
+            _grassProjMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+            _grassFrustum.setFromProjectionMatrix(_grassProjMatrix);
+            grassPatchSystem.update(camera.position, _grassFrustum);
+          }
           // Sync lighting & sky from PARAMS every frame
           const sunDir = sunDirectionFromAngles(PARAMS.light.sunAzimuth, PARAMS.light.sunElevation);
           dirLight.position.copy(sunDir.clone().multiplyScalar(600));
