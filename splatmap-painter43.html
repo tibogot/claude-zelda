@@ -1,0 +1,751 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Splatmap Painter 4 — Sculpt + Live Foliage</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { overflow: hidden; background: #000; }
+      canvas { display: block; width: 100vw; height: 100vh; }
+
+      #ui {
+        position: fixed; top: 16px; left: 16px; z-index: 20;
+        font: 13px/1.6 "SF Mono","Fira Code",monospace;
+        color: #e0f0c0; background: rgba(0,0,0,0.6);
+        padding: 12px 16px; border-radius: 8px;
+        backdrop-filter: blur(4px); user-select: none; min-width: 230px;
+      }
+      #ui h3 { color: #fff; margin-bottom: 6px; font-size: 14px; letter-spacing:.05em; }
+
+      .mode-row { display:flex; gap:6px; margin-bottom:10px; }
+      .mode-btn {
+        flex:1; padding:5px 0; border-radius:4px; border:2px solid transparent;
+        cursor:pointer; font:12px "SF Mono",monospace; font-weight:600; color:#fff;
+        background:rgba(255,255,255,0.1); transition:border-color .15s;
+      }
+      .mode-btn.active { border-color:#fff; }
+      .mode-btn[data-mode="paint"]  { background:rgba(40,160,80,0.7); }
+      .mode-btn[data-mode="sculpt"] { background:rgba(200,120,40,0.7); }
+
+      .biome-row { display:flex; gap:6px; margin-bottom:10px; flex-wrap:wrap; }
+      .biome-btn {
+        padding:4px 10px; border-radius:4px; border:2px solid transparent;
+        cursor:pointer; font:12px "SF Mono",monospace; font-weight:600; color:#fff;
+        transition:border-color .15s;
+      }
+      .biome-btn.active { border-color:#fff; }
+      .biome-btn[data-biome="forest"]  { background:rgba(160,60,40,0.8); }
+      .biome-btn[data-biome="grass"]   { background:rgba(40,160,40,0.8); }
+      .biome-btn[data-biome="village"] { background:rgba(40,80,200,0.8); }
+      .biome-btn[data-biome="erase"]   { background:rgba(80,80,80,0.8); }
+
+      .sculpt-row { display:flex; gap:6px; margin-bottom:10px; }
+      .sculpt-btn {
+        flex:1; padding:4px 0; border-radius:4px; border:2px solid transparent;
+        cursor:pointer; font:12px "SF Mono",monospace; font-weight:600; color:#fff;
+        background:rgba(255,255,255,0.1); transition:border-color .15s;
+      }
+      .sculpt-btn.active { border-color:#fff; }
+      .sculpt-btn[data-sculpt="raise"]  { background:rgba(220,160,40,0.7); }
+      .sculpt-btn[data-sculpt="lower"]  { background:rgba(80,140,220,0.7); }
+      .sculpt-btn[data-sculpt="smooth"] { background:rgba(160,80,200,0.7); }
+
+      .slider-row { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+      .slider-row label { width:70px; font-size:11px; color:#aaa; }
+      .slider-row input[type=range] { flex:1; }
+      .slider-row span { width:30px; text-align:right; font-size:11px; }
+
+      .action-row { display:flex; gap:6px; margin-top:10px; flex-wrap:wrap; }
+      .action-btn {
+        padding:5px 12px; border-radius:4px; border:none; cursor:pointer;
+        font:12px "SF Mono",monospace; font-weight:600; color:#fff;
+        background:rgba(255,255,255,0.15); transition:background .15s;
+      }
+      .action-btn:hover { background:rgba(255,255,255,0.3); }
+      .action-btn.clear { background:rgba(180,40,40,0.7); }
+      .action-btn.clear:hover { background:rgba(180,40,40,0.9); }
+
+      #section-sculpt { display:none; }
+
+      #info {
+        position:fixed; bottom:16px; left:16px; z-index:10;
+        font:12px/1.5 "SF Mono",monospace; color:#b0d890;
+        background:rgba(0,0,0,0.55); padding:8px 12px;
+        border-radius:6px; pointer-events:none; backdrop-filter:blur(4px);
+      }
+      #info span { color:#e0f0c0; font-weight:600; }
+
+      #mode-badge {
+        position:fixed; top:16px; right:16px; z-index:20;
+        font:bold 13px "SF Mono",monospace; padding:6px 14px;
+        border-radius:6px; pointer-events:none; transition:background .2s,color .2s;
+      }
+      #mode-badge.view   { background:rgba(40,40,40,0.8);   color:#888; }
+      #mode-badge.paint  { background:rgba(40,160,80,0.9);  color:#fff; }
+      #mode-badge.sculpt { background:rgba(200,120,40,0.9); color:#fff; }
+
+      #splatmap-preview {
+        position:fixed; bottom:16px; right:16px; z-index:20;
+        border:2px solid rgba(255,255,255,0.3); border-radius:6px;
+        image-rendering:pixelated; width:128px; height:128px;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three":          "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu":   "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl":      "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/":  "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "stats-gl":       "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+
+    <div id="ui">
+      <h3>Terrain Editor</h3>
+      <div style="font-size:11px;color:#aaa;margin-bottom:8px;">
+        <b style="color:#fff">P</b> paint &nbsp;
+        <b style="color:#fff">S</b> sculpt &nbsp;
+        <b style="color:#fff">Esc</b> view &nbsp;|&nbsp; Orbit: alt+drag<br>
+        Sculpt: <b style="color:#fff">drag</b> raise &nbsp;
+        <b style="color:#fff">shift+drag</b> lower &nbsp;
+        <b style="color:#fff">ctrl+drag</b> smooth
+      </div>
+
+      <!-- Mode toggle -->
+      <div class="mode-row">
+        <button class="mode-btn" data-mode="paint">Paint</button>
+        <button class="mode-btn" data-mode="sculpt">Sculpt</button>
+      </div>
+
+      <!-- PAINT section -->
+      <div id="section-paint">
+        <div class="biome-row">
+          <button class="biome-btn active" data-biome="forest">Forest</button>
+          <button class="biome-btn" data-biome="grass">Grass</button>
+          <button class="biome-btn" data-biome="village">Village</button>
+          <button class="biome-btn" data-biome="erase">Erase</button>
+        </div>
+        <div class="action-row" style="margin-top:0;margin-bottom:8px;">
+          <button class="action-btn clear" id="btn-clear">Clear map</button>
+          <button class="action-btn" id="btn-save">Save PNG</button>
+          <button class="action-btn" id="btn-load">Load PNG</button>
+          <input type="file" id="file-input" accept="image/png" style="display:none">
+        </div>
+      </div>
+
+      <!-- SCULPT section -->
+      <div id="section-sculpt">
+        <div class="sculpt-row">
+          <button class="sculpt-btn active" data-sculpt="raise">Raise</button>
+          <button class="sculpt-btn" data-sculpt="lower">Lower</button>
+          <button class="sculpt-btn" data-sculpt="smooth">Smooth</button>
+        </div>
+      </div>
+
+      <!-- Shared sliders -->
+      <div class="slider-row">
+        <label>Size</label>
+        <input type="range" id="brush-size" min="2" max="80" value="20" step="1">
+        <span id="brush-size-val">20</span>
+      </div>
+      <div class="slider-row">
+        <label>Strength</label>
+        <input type="range" id="brush-str" min="5" max="100" value="60" step="1">
+        <span id="brush-str-val">60</span>
+      </div>
+    </div>
+
+    <div id="mode-badge" class="view">VIEW MODE</div>
+
+    <div id="info">
+      Terrain Editor &mdash; <span id="backend">loading…</span>
+      &bull; <span id="obj-count">0 objects</span>
+    </div>
+
+    <canvas id="splatmap-preview" width="128" height="128"></canvas>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { MeshStandardNodeMaterial } from "three";
+      import {
+        texture, vec3, float, mix, positionWorld, Fn,
+        normalWorld, dot, smoothstep, normalMap, clamp,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import Stats from "stats-gl";
+
+      // ─── NOISE ───────────────────────────────
+      function hash(x, y) {
+        const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+        return n - Math.floor(n);
+      }
+      function smoothNoise(x, y) {
+        const ix = Math.floor(x), iy = Math.floor(y);
+        const fx = x-ix, fy = y-iy;
+        const ux = fx*fx*(3-2*fx), uy = fy*fy*(3-2*fy);
+        const a = hash(ix,iy), b = hash(ix+1,iy);
+        const c = hash(ix,iy+1), d = hash(ix+1,iy+1);
+        return a+(b-a)*ux+(c-a)*uy+(a-b-c+d)*ux*uy;
+      }
+      function fbm(x, y, oct=6) {
+        let v=0,amp=1,freq=1,tot=0;
+        for(let i=0;i<oct;i++){v+=smoothNoise(x*freq,y*freq)*amp;tot+=amp;amp*=.5;freq*=2.1;}
+        return v/tot;
+      }
+      function ridged(x, y, oct=4) {
+        let v=0,amp=1,freq=1,tot=0;
+        for(let i=0;i<oct;i++){
+          let n=smoothNoise(x*freq,y*freq); n=1-Math.abs(n*2-1); n*=n;
+          v+=n*amp;tot+=amp;amp*=.5;freq*=2.1;
+        }
+        return v/tot;
+      }
+
+      // ─── CONSTANTS ───────────────────────────
+      const TERRAIN_SIZE = 200;
+      const TERRAIN_RES  = 128;
+      const HEIGHT_SCALE = 22;
+      const NOISE_FREQ   = 0.018;
+      const SPLAT_RES    = 512;
+      const VERTS        = TERRAIN_RES + 1;   // vertices per side
+      const PI           = Math.PI;
+
+      // ─── HEIGHT DATA (mutable, drives both geometry and sampleHeight) ───
+      const heightData = new Float32Array(VERTS * VERTS);
+
+      function buildHeightData() {
+        for (let iz = 0; iz < VERTS; iz++) {
+          for (let ix = 0; ix < VERTS; ix++) {
+            const wx = (-0.5 + ix / TERRAIN_RES) * TERRAIN_SIZE;
+            const wz = (-0.5 + iz / TERRAIN_RES) * TERRAIN_SIZE;
+            const nx = wx * NOISE_FREQ, nz = wz * NOISE_FREQ;
+            const base   = fbm(nx, nz, 6);
+            const detail = ridged(nx*2.5, nz*2.5, 4) * 0.25;
+            const d2 = Math.min(1, (wx*wx+wz*wz)/(TERRAIN_SIZE*TERRAIN_SIZE*0.12));
+            heightData[iz * VERTS + ix] = (base + detail) * HEIGHT_SCALE * d2;
+          }
+        }
+      }
+      buildHeightData();
+
+      // Bilinear sample from heightData — used for sphere placement + sculpt falloff
+      function sampleHeight(wx, wz) {
+        const fx = (wx / TERRAIN_SIZE + 0.5) * TERRAIN_RES;
+        const fz = (wz / TERRAIN_SIZE + 0.5) * TERRAIN_RES;
+        const ix0 = Math.max(0, Math.min(TERRAIN_RES-1, Math.floor(fx)));
+        const iz0 = Math.max(0, Math.min(TERRAIN_RES-1, Math.floor(fz)));
+        const ix1 = Math.min(TERRAIN_RES, ix0+1);
+        const iz1 = Math.min(TERRAIN_RES, iz0+1);
+        const tx = fx-ix0, tz = fz-iz0;
+        const h00 = heightData[iz0*VERTS+ix0], h10 = heightData[iz0*VERTS+ix1];
+        const h01 = heightData[iz1*VERTS+ix0], h11 = heightData[iz1*VERTS+ix1];
+        return h00+(h10-h00)*tx+(h01-h00)*tz+(h00-h10-h01+h11)*tx*tz;
+      }
+
+      // ─── BIOME COLORS ────────────────────────
+      const BIOME_COLORS = {
+        forest:  { r:180, g:60,  b:40  },
+        grass:   { r:40,  g:180, b:40  },
+        village: { r:40,  g:60,  b:200 },
+        erase:   { r:0,   g:0,   b:0   },
+      };
+      const SPHERE_THRESHOLD = 80;
+
+      // ─── SPLATMAP CANVAS ─────────────────────
+      const splatCanvas = document.createElement("canvas");
+      splatCanvas.width = splatCanvas.height = SPLAT_RES;
+      const splatCtx = splatCanvas.getContext("2d");
+      splatCtx.fillStyle = "#000";
+      splatCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+
+      const previewCanvas = document.getElementById("splatmap-preview");
+      const previewCtx    = previewCanvas.getContext("2d");
+      function syncPreview() { previewCtx.drawImage(splatCanvas, 0, 0, 128, 128); }
+      syncPreview();
+
+      // ─── COORDINATE HELPERS ──────────────────
+      function worldToUV(wx, wz) {
+        return {
+          u:       (wx + TERRAIN_SIZE/2) / TERRAIN_SIZE,
+          v: 1.0 - (wz + TERRAIN_SIZE/2) / TERRAIN_SIZE,
+        };
+      }
+      function uvToWorld(u, v) {
+        return {
+          x:        u       * TERRAIN_SIZE - TERRAIN_SIZE/2,
+          z: (1.0 - v)      * TERRAIN_SIZE - TERRAIN_SIZE/2,
+        };
+      }
+
+      // ─── STATE ───────────────────────────────
+      let currentMode   = "view";   // "view" | "paint" | "sculpt"
+      let isMouseDown   = false;
+      let currentBiome  = "forest";
+      let sculptMode    = "raise";  // "raise" | "lower" | "smooth"
+      let brushSize     = 20;
+      let brushStr      = 60;
+      let instancedObjs = null;
+      let splatTex      = null;
+      let terrainGeo    = null;     // set in init, needed by sculpt
+
+      // ─── PAINT ───────────────────────────────
+      function paintAt(wx, wz) {
+        const { u, v } = worldToUV(wx, wz);
+        const cx = u * SPLAT_RES, cy = v * SPLAT_RES;
+        const col = BIOME_COLORS[currentBiome];
+        const alpha = brushStr / 100;
+        const grad = splatCtx.createRadialGradient(cx,cy,0,cx,cy,brushSize);
+        grad.addColorStop(0,   `rgba(${col.r},${col.g},${col.b},${alpha})`);
+        grad.addColorStop(0.5, `rgba(${col.r},${col.g},${col.b},${alpha*0.55})`);
+        grad.addColorStop(1,   `rgba(${col.r},${col.g},${col.b},0)`);
+        splatCtx.globalCompositeOperation = "source-over";
+        splatCtx.fillStyle = grad;
+        splatCtx.beginPath();
+        splatCtx.arc(cx, cy, brushSize, 0, PI*2);
+        splatCtx.fill();
+        syncPreview();
+        if (splatTex) splatTex.needsUpdate = true;
+      }
+
+      // ─── BRUSH RADIUS (module-level so sculptAt + paintAt can use it) ───
+      function brushWorldRadius() {
+        return (brushSize / SPLAT_RES) * TERRAIN_SIZE;
+      }
+
+      // ─── SCULPT ──────────────────────────────
+      // plain drag = raise | shift+drag = lower | ctrl+drag = smooth
+      function sculptAt(wx, wz, e) {
+        if (!terrainGeo) return;
+        const mode = e?.ctrlKey ? "smooth" : e?.shiftKey ? "lower" : "raise";
+        const radius    = brushWorldRadius();
+        const radiusSq  = radius * radius;
+        const strength  = (brushStr / 100) * 0.4;
+
+        // Limit iteration to affected grid region
+        const cellSize  = TERRAIN_SIZE / TERRAIN_RES;
+        const gridR     = Math.ceil(radius / cellSize) + 1;
+        const cx = Math.round((wx / TERRAIN_SIZE + 0.5) * TERRAIN_RES);
+        const cz = Math.round((wz / TERRAIN_SIZE + 0.5) * TERRAIN_RES);
+        const ixMin = Math.max(0, cx - gridR), ixMax = Math.min(TERRAIN_RES, cx + gridR);
+        const izMin = Math.max(0, cz - gridR), izMax = Math.min(TERRAIN_RES, cz + gridR);
+
+        if (mode === "smooth") {
+          // Two-pass: read then write to avoid order dependency
+          const scratch = new Float32Array((ixMax-ixMin+1) * (izMax-izMin+1));
+          let si = 0;
+          for (let iz = izMin; iz <= izMax; iz++) {
+            for (let ix = ixMin; ix <= ixMax; ix++) {
+              const vx = (-0.5 + ix/TERRAIN_RES) * TERRAIN_SIZE;
+              const vz = (-0.5 + iz/TERRAIN_RES) * TERRAIN_SIZE;
+              const distSq = (vx-wx)*(vx-wx) + (vz-wz)*(vz-wz);
+              if (distSq > radiusSq) { scratch[si++] = heightData[iz*VERTS+ix]; continue; }
+              // Average 3x3 neighbors
+              let sum = 0, count = 0;
+              for (let dz=-1; dz<=1; dz++) for (let dx=-1; dx<=1; dx++) {
+                const nx2 = Math.max(0, Math.min(TERRAIN_RES, ix+dx));
+                const nz2 = Math.max(0, Math.min(TERRAIN_RES, iz+dz));
+                sum += heightData[nz2*VERTS+nx2]; count++;
+              }
+              const falloff = 1 - Math.sqrt(distSq)/radius;
+              const avg = sum / count;
+              scratch[si++] = heightData[iz*VERTS+ix] + (avg - heightData[iz*VERTS+ix]) * falloff * strength * 2;
+            }
+          }
+          si = 0;
+          for (let iz = izMin; iz <= izMax; iz++)
+            for (let ix = ixMin; ix <= ixMax; ix++)
+              heightData[iz*VERTS+ix] = scratch[si++];
+        } else {
+          const dir = mode === "raise" ? 1 : -1;
+          for (let iz = izMin; iz <= izMax; iz++) {
+            for (let ix = ixMin; ix <= ixMax; ix++) {
+              const vx = (-0.5 + ix/TERRAIN_RES) * TERRAIN_SIZE;
+              const vz = (-0.5 + iz/TERRAIN_RES) * TERRAIN_SIZE;
+              const distSq = (vx-wx)*(vx-wx) + (vz-wz)*(vz-wz);
+              if (distSq > radiusSq) continue;
+              const falloff = 1 - Math.sqrt(distSq)/radius;
+              const smooth  = falloff * falloff;
+              heightData[iz*VERTS+ix] += dir * smooth * strength;
+              if (dir < 0) heightData[iz*VERTS+ix] = Math.max(0, heightData[iz*VERTS+ix]);
+            }
+          }
+        }
+        syncGeometry();
+      }
+
+      function syncGeometry() {
+        if (!terrainGeo) return;
+        const pos = terrainGeo.attributes.position;
+        for (let i = 0; i < pos.count; i++) pos.setY(i, heightData[i]);
+        pos.needsUpdate = true;
+        terrainGeo.computeVertexNormals();
+      }
+
+      // ─── LIVE FOLIAGE ────────────────────────
+      function generateObjects(scene) {
+        if (instancedObjs) {
+          scene.remove(instancedObjs);
+          instancedObjs.geometry.dispose();
+          instancedObjs.material.dispose();
+          instancedObjs = null;
+        }
+
+        const pixels = splatCtx.getImageData(0, 0, SPLAT_RES, SPLAT_RES).data;
+        const positions = [];
+        const STEP = 4;
+
+        for (let iy = 0; iy < SPLAT_RES; iy += STEP) {
+          for (let ix = 0; ix < SPLAT_RES; ix += STEP) {
+            const idx = (iy * SPLAT_RES + ix) * 4;
+            const r = pixels[idx], g = pixels[idx+1], b = pixels[idx+2];
+            if (r >= SPHERE_THRESHOLD && r > g+20 && r > b+20) {
+              const { x, z } = uvToWorld(ix/SPLAT_RES, iy/SPLAT_RES);
+              const cellSize = TERRAIN_SIZE / (SPLAT_RES/STEP);
+              const jx = (Math.random()-0.5)*cellSize;
+              const jz = (Math.random()-0.5)*cellSize;
+              const wx = x+jx, wz = z+jz;
+              // Slope exclusion: skip steep faces
+              const eps = 1.5;
+              const dydx = (sampleHeight(wx+eps,wz) - sampleHeight(wx-eps,wz)) / (2*eps);
+              const dydz = (sampleHeight(wx,wz+eps) - sampleHeight(wx,wz-eps)) / (2*eps);
+              const slope = Math.sqrt(dydx*dydx + dydz*dydz);
+              if (slope > 1.2) continue; // skip cliffs
+              positions.push(new THREE.Vector3(wx, sampleHeight(wx,wz), wz));
+            }
+          }
+        }
+
+        if (positions.length === 0) {
+          document.getElementById("obj-count").textContent = "0 objects";
+          return;
+        }
+
+        const geo = new THREE.SphereGeometry(0.5, 8, 6);
+        const mat = new THREE.MeshStandardMaterial({ color: 0x2d8c2d, roughness: 0.8 });
+        instancedObjs = new THREE.InstancedMesh(geo, mat, positions.length);
+        instancedObjs.castShadow = true;
+        instancedObjs.receiveShadow = true;
+
+        const dummy = new THREE.Object3D();
+        positions.forEach((pos, i) => {
+          dummy.position.set(pos.x, pos.y + 0.5, pos.z);
+          dummy.scale.setScalar(0.5 + Math.random()*0.9);
+          dummy.updateMatrix();
+          instancedObjs.setMatrixAt(i, dummy.matrix);
+        });
+        instancedObjs.instanceMatrix.needsUpdate = true;
+        scene.add(instancedObjs);
+        document.getElementById("obj-count").textContent =
+          `${positions.length.toLocaleString()} objects`;
+      }
+
+      // ─── SAVE / LOAD ─────────────────────────
+      function saveSplatmap() {
+        const a = document.createElement("a");
+        a.download = "splatmap.png";
+        a.href = splatCanvas.toDataURL("image/png");
+        a.click();
+      }
+      function loadSplatmap(file) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const img = new Image();
+          img.onload = () => {
+            splatCtx.clearRect(0,0,SPLAT_RES,SPLAT_RES);
+            splatCtx.drawImage(img,0,0,SPLAT_RES,SPLAT_RES);
+            syncPreview();
+            if (splatTex) splatTex.needsUpdate = true;
+          };
+          img.src = e.target.result;
+        };
+        reader.readAsDataURL(file);
+      }
+
+      // ─── MAIN ────────────────────────────────
+      async function init() {
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        await renderer.init();
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 0.5;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+        document.getElementById("backend").textContent =
+          renderer.backend?.constructor?.name?.includes("WebGPU") ? "WebGPU ✓" : "WebGL fallback";
+
+        const stats = new Stats({ trackGPU: false });
+        stats.init(renderer);
+        document.body.appendChild(stats.dom);
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87ceeb);
+        scene.fog = new THREE.Fog(0x87ceeb, 150, 350);
+
+        const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.5, 2000);
+        camera.position.set(0, 60, 100);
+        camera.lookAt(0, 0, 0);
+
+        const orbit = new OrbitControls(camera, renderer.domElement);
+        orbit.target.set(0, 5, 0);
+        orbit.maxPolarAngle = PI * 0.48;
+        orbit.enableDamping = true;
+        orbit.dampingFactor = 0.05;
+        orbit.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+        orbit.update();
+
+        // ── LIGHTING ──
+        function sunDir(azDeg, elDeg) {
+          const az = azDeg*PI/180, el = elDeg*PI/180;
+          return new THREE.Vector3(Math.cos(el)*Math.cos(az), Math.sin(el), Math.cos(el)*Math.sin(az)).normalize();
+        }
+        const sun = sunDir(135, 43);
+        const dirLight = new THREE.DirectionalLight("#fff5e0", 2.2);
+        dirLight.position.copy(sun.clone().multiplyScalar(200));
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.set(2048, 2048);
+        dirLight.shadow.camera.near = 1; dirLight.shadow.camera.far = 600;
+        dirLight.shadow.camera.left = dirLight.shadow.camera.bottom = -TERRAIN_SIZE*0.7;
+        dirLight.shadow.camera.right = dirLight.shadow.camera.top = TERRAIN_SIZE*0.7;
+        dirLight.shadow.bias = -0.0005;
+        scene.add(dirLight);
+        const shadowTarget = new THREE.Object3D();
+        scene.add(shadowTarget);
+        dirLight.target = shadowTarget;
+        scene.add(new THREE.HemisphereLight("#c8e0ff", "#88aa55", 1));
+
+        // ── TERRAIN GEOMETRY ──
+        terrainGeo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, TERRAIN_RES, TERRAIN_RES);
+        terrainGeo.rotateX(-PI/2);
+        syncGeometry(); // apply initial heightData
+
+        const terrain = new THREE.Mesh(terrainGeo,
+          new THREE.MeshStandardMaterial({ color: 0x4a6a30, roughness: 0.95 }));
+        terrain.receiveShadow = true;
+        scene.add(terrain);
+
+        splatTex = new THREE.CanvasTexture(splatCanvas);
+        splatTex.wrapS = splatTex.wrapT = THREE.ClampToEdgeWrapping;
+
+        // ── LOAD TEXTURES ──
+        const texLoader = new THREE.TextureLoader();
+        const loadTex = (url) => new Promise((res,rej) => texLoader.load(url,res,undefined,rej));
+        const [grassColorTex, groundColorTex, grassNormalTex, groundNormalTex] = await Promise.all([
+          loadTex("textures/Grass005_1K-JPG_Color.jpg"),
+          loadTex("textures/Ground037_1K-JPG_Color.jpg"),
+          loadTex("textures/Grass005_1K-JPG_NormalGL.jpg"),
+          loadTex("textures/Ground037_1K-JPG_NormalGL.jpg"),
+        ]);
+        for (const t of [grassColorTex, groundColorTex]) {
+          t.wrapS = t.wrapT = THREE.RepeatWrapping;
+          t.colorSpace = THREE.SRGBColorSpace;
+        }
+        for (const t of [grassNormalTex, groundNormalTex])
+          t.wrapS = t.wrapT = THREE.RepeatWrapping;
+
+        // ── TSL SPLAT MATERIAL ──
+        const uTerrainHalf = float(TERRAIN_SIZE * 0.5);
+        const uTerrainSize = float(TERRAIN_SIZE);
+        const uTileScale   = float(0.05);
+
+        const getSplatUV  = () => positionWorld.xz.add(uTerrainHalf).div(uTerrainSize);
+        const getTiledUV  = () => positionWorld.xz.mul(uTileScale);
+        const getFlatness = () => clamp(dot(normalWorld, vec3(0,1,0)), float(0), float(1));
+        const getSlopeMask  = () => smoothstep(float(0.72), float(0.88), getFlatness());
+        const getHeightMask = () => smoothstep(float(HEIGHT_SCALE*0.65), float(HEIGHT_SCALE*0.92), positionWorld.y);
+
+        const splatMat = new MeshStandardNodeMaterial({ roughness: 0.9, metalness: 0 });
+        splatMat.colorNode = Fn(() => {
+          const splat     = texture(splatTex,       getSplatUV());
+          const tiledUV   = getTiledUV();
+          const grassCol  = texture(grassColorTex,  tiledUV).rgb;
+          const groundCol = texture(groundColorTex, tiledUV).rgb;
+          const rockCol   = groundCol.mul(float(0.65));
+          const baseCol   = vec3(0.28, 0.32, 0.22);
+          let col = mix(baseCol,  grassCol,                splat.r);
+          col     = mix(col,      grassCol.mul(float(1.1)), splat.g);
+          col     = mix(col,      groundCol,               splat.b);
+          col     = mix(rockCol,  col,   getSlopeMask());
+          col     = mix(col, groundCol.mul(float(0.75)), getHeightMask());
+          return col;
+        })();
+        splatMat.normalNode = Fn(() => {
+          const splat      = texture(splatTex,        getSplatUV());
+          const tiledUV    = getTiledUV();
+          const grassNorm  = texture(grassNormalTex,  tiledUV);
+          const groundNorm = texture(groundNormalTex, tiledUV);
+          let blended = mix(grassNorm, groundNorm, splat.b);
+          blended = mix(groundNorm, blended, getSlopeMask());
+          blended = mix(blended, groundNorm, getHeightMask());
+          return normalMap(blended);
+        })();
+        terrain.material.dispose();
+        terrain.material = splatMat;
+
+        // ── BRUSH RING ──
+        const brushRingGeo = new THREE.RingGeometry(1, 1.06, 48);
+        brushRingGeo.rotateX(-PI/2);
+        const brushRing = new THREE.Mesh(brushRingGeo, new THREE.MeshBasicMaterial({
+          color: 0xffffff, side: THREE.DoubleSide,
+          depthWrite: false, transparent: true, opacity: 0.9,
+        }));
+        brushRing.visible = false;
+        brushRing.renderOrder = 2;
+        scene.add(brushRing);
+
+        // ── RAYCASTER ──
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        function getTerrainHit(event) {
+          const rect = renderer.domElement.getBoundingClientRect();
+          mouse.x =  ((event.clientX - rect.left) / rect.width)  * 2 - 1;
+          mouse.y = -((event.clientY - rect.top)  / rect.height) * 2 + 1;
+          raycaster.setFromCamera(mouse, camera);
+          const hits = raycaster.intersectObject(terrain);
+          return hits.length > 0 ? hits[0].point : null;
+        }
+
+        function updateBrushRing(p) {
+          if (!p) { brushRing.visible = false; return; }
+          brushRing.visible = true;
+          // Color: white for paint, orange for sculpt
+          brushRing.material.color.set(currentMode === "sculpt" ? 0xff9900 : 0xffffff);
+          brushRing.position.set(p.x, p.y + 0.15, p.z);
+          brushRing.scale.setScalar(brushWorldRadius());
+        }
+
+        // ── MODE SYSTEM ──
+        function setMode(mode) {
+          currentMode = mode;
+          orbit.enabled = (mode === "view");
+
+          const badge = document.getElementById("mode-badge");
+          badge.textContent = mode === "view"   ? "VIEW MODE"
+                            : mode === "paint"  ? "PAINT MODE"
+                            :                     "SCULPT MODE";
+          badge.className = mode;
+          renderer.domElement.style.cursor = mode === "view" ? "default" : "crosshair";
+          if (mode === "view") brushRing.visible = false;
+
+          document.getElementById("section-paint").style.display  = mode === "paint"  ? "" : "none";
+          document.getElementById("section-sculpt").style.display = mode === "sculpt" ? "" : "none";
+
+          document.querySelectorAll(".mode-btn").forEach(b => {
+            b.classList.toggle("active", b.dataset.mode === mode);
+          });
+        }
+        setMode("view");
+
+        // ── KEYBOARD ──
+        window.addEventListener("keydown", (e) => {
+          if (e.code === "KeyP")     setMode(currentMode === "paint"  ? "view" : "paint");
+          if (e.code === "KeyS")     setMode(currentMode === "sculpt" ? "view" : "sculpt");
+          if (e.code === "Escape")   setMode("view");
+        });
+
+        // ── MOUSE ──
+        renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
+
+        renderer.domElement.addEventListener("mousemove", (e) => {
+          if (currentMode === "view") return;
+          const p = getTerrainHit(e);
+          updateBrushRing(p);
+          if (!isMouseDown || !p) return;
+          if (currentMode === "paint")  paintAt(p.x, p.z);
+          if (currentMode === "sculpt") sculptAt(p.x, p.z, e);
+        });
+
+        renderer.domElement.addEventListener("mousedown", (e) => {
+          if (currentMode === "view" || e.button !== 0) return;
+          isMouseDown = true;
+          const p = getTerrainHit(e);
+          if (!p) return;
+          if (currentMode === "paint")  paintAt(p.x, p.z);
+          if (currentMode === "sculpt") sculptAt(p.x, p.z, e);
+        });
+
+        renderer.domElement.addEventListener("mouseup", () => {
+          if (!isMouseDown) return;
+          isMouseDown = false;
+          // Live foliage: regenerate after each stroke (paint or sculpt)
+          if (currentMode === "paint" || currentMode === "sculpt") {
+            generateObjects(scene);
+          }
+        });
+
+        renderer.domElement.addEventListener("mouseleave", () => {
+          isMouseDown = false;
+          brushRing.visible = false;
+        });
+
+        // ── UI: mode buttons ──
+        document.querySelectorAll(".mode-btn").forEach(btn => {
+          btn.addEventListener("click", () => setMode(btn.dataset.mode));
+        });
+
+        // ── UI: biome buttons ──
+        document.querySelectorAll(".biome-btn").forEach(btn => {
+          btn.addEventListener("click", () => {
+            document.querySelectorAll(".biome-btn").forEach(b => b.classList.remove("active"));
+            btn.classList.add("active");
+            currentBiome = btn.dataset.biome;
+          });
+        });
+
+        // ── UI: sculpt buttons ──
+        document.querySelectorAll(".sculpt-btn").forEach(btn => {
+          btn.addEventListener("click", () => {
+            document.querySelectorAll(".sculpt-btn").forEach(b => b.classList.remove("active"));
+            btn.classList.add("active");
+            sculptMode = btn.dataset.sculpt;
+          });
+        });
+
+        // ── UI: sliders ──
+        const szSlider = document.getElementById("brush-size");
+        const szVal    = document.getElementById("brush-size-val");
+        szSlider.addEventListener("input", () => { brushSize = +szSlider.value; szVal.textContent = brushSize; });
+        const stSlider = document.getElementById("brush-str");
+        const stVal    = document.getElementById("brush-str-val");
+        stSlider.addEventListener("input", () => { brushStr = +stSlider.value; stVal.textContent = brushStr; });
+
+        // ── UI: action buttons ──
+        document.getElementById("btn-clear").addEventListener("click", () => {
+          splatCtx.fillStyle = "#000";
+          splatCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+          syncPreview();
+          if (splatTex) splatTex.needsUpdate = true;
+          generateObjects(scene);
+        });
+        document.getElementById("btn-save").addEventListener("click", saveSplatmap);
+        document.getElementById("btn-load").addEventListener("click", () => document.getElementById("file-input").click());
+        document.getElementById("file-input").addEventListener("change", (e) => {
+          if (e.target.files[0]) loadSplatmap(e.target.files[0]);
+        });
+
+        // ── RESIZE ──
+        window.addEventListener("resize", () => {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(innerWidth, innerHeight);
+        });
+
+        // ── RENDER LOOP ──
+        renderer.setAnimationLoop(() => {
+          orbit.update();
+          stats.update();
+          renderer.render(scene, camera);
+        });
+      }
+
+      init();
+    </script>
+  </body>
+</html>
