@@ -129,10 +129,30 @@
   </head>
   <body>
     <!-- hidden file inputs -->
-    <input type="file" id="tex-grass-color"  accept="image/*" style="display:none" />
-    <input type="file" id="tex-grass-normal" accept="image/*" style="display:none" />
-    <input type="file" id="tex-ground-color"  accept="image/*" style="display:none" />
-    <input type="file" id="tex-ground-normal" accept="image/*" style="display:none" />
+    <input
+      type="file"
+      id="tex-grass-color"
+      accept="image/*"
+      style="display: none"
+    />
+    <input
+      type="file"
+      id="tex-grass-normal"
+      accept="image/*"
+      style="display: none"
+    />
+    <input
+      type="file"
+      id="tex-ground-color"
+      accept="image/*"
+      style="display: none"
+    />
+    <input
+      type="file"
+      id="tex-ground-normal"
+      accept="image/*"
+      style="display: none"
+    />
     <input
       type="file"
       id="file-input"
@@ -170,7 +190,6 @@
       import {
         texture,
         vec3,
-        vec4,
         float,
         uniform,
         mix,
@@ -351,7 +370,6 @@
         tileGround: 0.03,
         slopeStart: 0.72,
         slopeEnd: 0.88,
-        debugColors: false,
       };
 
       // ─── STATE ───────────────────────────────
@@ -829,7 +847,6 @@
         const uTileScaleGround = uniform(PARAMS.tileGround);
         const uSlopeStart = uniform(PARAMS.slopeStart);
         const uSlopeEnd = uniform(PARAMS.slopeEnd);
-        const uDebugMode = uniform(0);
 
         const getSplatUV = () =>
           positionWorld.xz.add(uTerrainHalf).div(uTerrainSize);
@@ -856,33 +873,26 @@
 
         splatMat.colorNode = Fn(() => {
           const splat = texture(splatTex, getSplatUV());
-          const grassCol  = mix(texture(grassColorTex,  getGrassUV()).rgb,  vec3(0.3,  0.78, 0.2),  uDebugMode);
-          const groundCol = mix(texture(groundColorTex, getGroundUV()).rgb, vec3(0.72, 0.48, 0.22), uDebugMode);
+          const grassCol = texture(grassColorTex, getGrassUV()).rgb;
+          const groundCol = texture(groundColorTex, getGroundUV()).rgb;
           const rockCol = groundCol.mul(float(0.65));
           const wetCol = groundCol.mul(float(0.35)); // dark wet sand
           const baseCol = vec3(0.28, 0.32, 0.22);
-          // Auto layers first — fill unpainted areas
-          let col = baseCol;
-          col = mix(rockCol, col, getSlopeMask());
-          col = mix(col, groundCol.mul(float(0.75)), getHeightMask());
-          col = mix(col, wetCol, getWetMask());
-          // Manual paint always wins on top
-          col = mix(col, grassCol, splat.r);
+          let col = mix(baseCol, grassCol, splat.r);
           col = mix(col, grassCol.mul(float(1.1)), splat.g);
           col = mix(col, groundCol, splat.b);
+          col = mix(rockCol, col, getSlopeMask());
+          col = mix(col, groundCol.mul(float(0.75)), getHeightMask());
+          col = mix(col, wetCol, getWetMask()); // shoreline wet blend
           return col;
         })();
         splatMat.normalNode = Fn(() => {
           const splat = texture(splatTex, getSplatUV());
           const grassNorm = texture(grassNormalTex, getGrassUV());
           const groundNorm = texture(groundNormalTex, getGroundUV());
-          // Auto layers first
-          let blended = grassNorm;
+          let blended = mix(grassNorm, groundNorm, splat.b);
           blended = mix(groundNorm, blended, getSlopeMask());
           blended = mix(blended, groundNorm, getHeightMask());
-          // Manual paint wins on top
-          blended = mix(blended, groundNorm, splat.b);
-          blended = mix(blended, vec4(0.5, 0.5, 1.0, 1.0), uDebugMode);
           return normalMap(blended);
         })();
         terrain.material.dispose();
@@ -1119,10 +1129,6 @@
           expanded: false,
         });
         matFolder
-          .addBinding(PARAMS, "debugColors", { label: "Debug colors" })
-          .on("change", (ev) => { uDebugMode.value = ev.value ? 1 : 0; });
-        matFolder.addBlade({ view: "separator" });
-        matFolder
           .addBinding(PARAMS, "tileGrass", {
             label: "Grass tile",
             min: 0.005,
@@ -1163,22 +1169,40 @@
             if (e.target.files[0]) swapTex(tex, e.target.files[0], isSRGB);
           });
         }
-        bindTexInput("tex-grass-color",   grassColorTex,  true);
-        bindTexInput("tex-grass-normal",  grassNormalTex, false);
-        bindTexInput("tex-ground-color",  groundColorTex, true);
+        bindTexInput("tex-grass-color", grassColorTex, true);
+        bindTexInput("tex-grass-normal", grassNormalTex, false);
+        bindTexInput("tex-ground-color", groundColorTex, true);
         bindTexInput("tex-ground-normal", groundNormalTex, false);
 
-        const grassFolder  = matFolder.addFolder({ title: "Grass textures",  expanded: true });
-        grassFolder.addButton({ title: "Load color map" })
-          .on("click", () => document.getElementById("tex-grass-color").click());
-        grassFolder.addButton({ title: "Load normal map" })
-          .on("click", () => document.getElementById("tex-grass-normal").click());
+        const grassFolder = matFolder.addFolder({
+          title: "Grass textures",
+          expanded: true,
+        });
+        grassFolder
+          .addButton({ title: "Load color map" })
+          .on("click", () =>
+            document.getElementById("tex-grass-color").click(),
+          );
+        grassFolder
+          .addButton({ title: "Load normal map" })
+          .on("click", () =>
+            document.getElementById("tex-grass-normal").click(),
+          );
 
-        const groundFolder = matFolder.addFolder({ title: "Ground textures", expanded: true });
-        groundFolder.addButton({ title: "Load color map" })
-          .on("click", () => document.getElementById("tex-ground-color").click());
-        groundFolder.addButton({ title: "Load normal map" })
-          .on("click", () => document.getElementById("tex-ground-normal").click());
+        const groundFolder = matFolder.addFolder({
+          title: "Ground textures",
+          expanded: true,
+        });
+        groundFolder
+          .addButton({ title: "Load color map" })
+          .on("click", () =>
+            document.getElementById("tex-ground-color").click(),
+          );
+        groundFolder
+          .addButton({ title: "Load normal map" })
+          .on("click", () =>
+            document.getElementById("tex-ground-normal").click(),
+          );
 
         matFolder.addBlade({ view: "separator" });
         matFolder

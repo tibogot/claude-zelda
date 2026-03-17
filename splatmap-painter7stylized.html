@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Splatmap Painter 4 — Sculpt + Live Foliage</title>
+    <title>Splatmap Painter 7 — Stylized Procedural</title>
     <style>
       * {
         margin: 0;
@@ -129,10 +129,6 @@
   </head>
   <body>
     <!-- hidden file inputs -->
-    <input type="file" id="tex-grass-color"  accept="image/*" style="display:none" />
-    <input type="file" id="tex-grass-normal" accept="image/*" style="display:none" />
-    <input type="file" id="tex-ground-color"  accept="image/*" style="display:none" />
-    <input type="file" id="tex-ground-normal" accept="image/*" style="display:none" />
     <input
       type="file"
       id="file-input"
@@ -169,6 +165,7 @@
       import { MeshStandardNodeMaterial } from "three";
       import {
         texture,
+        vec2,
         vec3,
         vec4,
         float,
@@ -181,6 +178,7 @@
         smoothstep,
         normalMap,
         clamp,
+        mx_noise_float,
       } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { TransformControls } from "three/addons/controls/TransformControls.js";
@@ -347,8 +345,6 @@
         sinkOffset: 2,
         brushSize: 20,
         brushStrength: 60,
-        tileGrass: 0.05,
-        tileGround: 0.03,
         slopeStart: 0.72,
         slopeEnd: 0.88,
         debugColors: false,
@@ -804,86 +800,98 @@
         splatTex = new THREE.CanvasTexture(splatCanvas);
         splatTex.wrapS = splatTex.wrapT = THREE.ClampToEdgeWrapping;
 
-        // ── LOAD TEXTURES ──
-        const texLoader = new THREE.TextureLoader();
-        const loadTex = (url) =>
-          new Promise((res, rej) => texLoader.load(url, res, undefined, rej));
-        const [grassColorTex, groundColorTex, grassNormalTex, groundNormalTex] =
-          await Promise.all([
-            loadTex("textures/Grass005_1K-JPG_Color.jpg"),
-            loadTex("textures/Ground037_1K-JPG_Color.jpg"),
-            loadTex("textures/Grass005_1K-JPG_NormalGL.jpg"),
-            loadTex("textures/Ground037_1K-JPG_NormalGL.jpg"),
-          ]);
-        for (const t of [grassColorTex, groundColorTex]) {
-          t.wrapS = t.wrapT = THREE.RepeatWrapping;
-          t.colorSpace = THREE.SRGBColorSpace;
-        }
-        for (const t of [grassNormalTex, groundNormalTex])
-          t.wrapS = t.wrapT = THREE.RepeatWrapping;
+        // ── PROCEDURAL GROUND SHADER (lush green FBM + domain warp) ──────
+        const gU = {
+          warpScale: uniform(0.012), warpAmt: uniform(3.5),
+          s1: uniform(0.006), s2: uniform(0.025), s3: uniform(0.080),
+          s4: uniform(0.260), s5: uniform(0.800), s6: uniform(2.400),
+          w1: uniform(0.40),  w2: uniform(0.26),  w3: uniform(0.16),
+          w4: uniform(0.10),  w5: uniform(0.05),  w6: uniform(0.03),
+          contrast: uniform(1.7), bias: uniform(0.0),
+          col0: uniform(new THREE.Color('#0d1f04')),
+          col1: uniform(new THREE.Color('#1b4409')),
+          col2: uniform(new THREE.Color('#326b15')),
+          col3: uniform(new THREE.Color('#509826')),
+          col4: uniform(new THREE.Color('#72b83a')),
+          stop1: uniform(0.25), stop2: uniform(0.50), stop3: uniform(0.75),
+        };
+        const groundProc = Fn(() => {
+          const p  = positionWorld.xz;
+          const wx = mx_noise_float(p.mul(gU.warpScale).add(vec2(1.7, 9.2)));
+          const wz = mx_noise_float(p.mul(gU.warpScale).add(vec2(8.3, 2.8)));
+          const wp = p.add(vec2(wx, wz).mul(gU.warpAmt));
+          const n1 = mx_noise_float(wp.mul(gU.s1));
+          const n2 = mx_noise_float(wp.mul(gU.s2).add(vec2(31.4, 17.8)));
+          const n3 = mx_noise_float(wp.mul(gU.s3).add(vec2(57.2, 43.1)));
+          const n4 = mx_noise_float(wp.mul(gU.s4).add(vec2(89.5, 71.3)));
+          const n5 = mx_noise_float(wp.mul(gU.s5).add(vec2(121.7, 97.4)));
+          const n6 = mx_noise_float(wp.mul(gU.s6).add(vec2(153.9, 119.6)));
+          const fbm = n1.mul(gU.w1).add(n2.mul(gU.w2)).add(n3.mul(gU.w3))
+            .add(n4.mul(gU.w4)).add(n5.mul(gU.w5)).add(n6.mul(gU.w6));
+          const t = clamp(fbm.mul(gU.contrast).add(float(0.5).add(gU.bias)), 0.0, 1.0);
+          const c01 = mix(gU.col0, gU.col1, smoothstep(float(0.0), gU.stop1, t));
+          const c12 = mix(c01,    gU.col2, smoothstep(gU.stop1,   gU.stop2, t));
+          const c23 = mix(c12,    gU.col3, smoothstep(gU.stop2,   gU.stop3, t));
+          return     mix(c23,    gU.col4, smoothstep(gU.stop3,   float(1.0), t));
+        });
 
-        // ── TSL SPLAT MATERIAL ──
+        // ── PROCEDURAL PATH SHADER (warm yellow-brown earthy tones) ──────
+        const pU = {
+          s1: uniform(0.008), s2: uniform(0.04), s3: uniform(0.18),
+          w1: uniform(0.55),  w2: uniform(0.30), w3: uniform(0.15),
+          contrast: uniform(1.6), bias: uniform(0.05),
+          col0: uniform(new THREE.Color('#3d2408')),
+          col1: uniform(new THREE.Color('#7a5228')),
+          col2: uniform(new THREE.Color('#b8874a')),
+          stop1: uniform(0.35), stop2: uniform(0.72),
+        };
+        const pathProc = Fn(() => {
+          const p  = positionWorld.xz;
+          const n1 = mx_noise_float(p.mul(pU.s1));
+          const n2 = mx_noise_float(p.mul(pU.s2).add(vec2(41.3, 28.7)));
+          const n3 = mx_noise_float(p.mul(pU.s3).add(vec2(73.5, 52.1)));
+          const fbm = n1.mul(pU.w1).add(n2.mul(pU.w2)).add(n3.mul(pU.w3));
+          const t = clamp(fbm.mul(pU.contrast).add(float(0.5).add(pU.bias)), 0.0, 1.0);
+          const c01 = mix(pU.col0, pU.col1, smoothstep(float(0.0), pU.stop1, t));
+          return     mix(c01,    pU.col2, smoothstep(pU.stop1,   pU.stop2, t));
+        });
+
+        // ── TSL SPLAT MATERIAL ────────────────────────────────────────────
         const uTerrainHalf = float(TERRAIN_SIZE * 0.5);
         const uTerrainSize = float(TERRAIN_SIZE);
-        const uTileScaleGrass = uniform(PARAMS.tileGrass);
-        const uTileScaleGround = uniform(PARAMS.tileGround);
-        const uSlopeStart = uniform(PARAMS.slopeStart);
-        const uSlopeEnd = uniform(PARAMS.slopeEnd);
-        const uDebugMode = uniform(0);
+        const uSlopeStart  = uniform(PARAMS.slopeStart);
+        const uSlopeEnd    = uniform(PARAMS.slopeEnd);
+        const uDebugMode   = uniform(0);
 
-        const getSplatUV = () =>
-          positionWorld.xz.add(uTerrainHalf).div(uTerrainSize);
-        const getGrassUV = () => positionWorld.xz.mul(uTileScaleGrass);
-        const getGroundUV = () => positionWorld.xz.mul(uTileScaleGround);
-        const getFlatness = () =>
-          clamp(dot(normalWorld, vec3(0, 1, 0)), float(0), float(1));
-        const getSlopeMask = () =>
-          smoothstep(uSlopeStart, uSlopeEnd, getFlatness());
-        const getHeightMask = () =>
-          smoothstep(
-            float(HEIGHT_SCALE * 0.65),
-            float(HEIGHT_SCALE * 0.92),
-            positionWorld.y,
-          );
+        const getSplatUV    = () => positionWorld.xz.add(uTerrainHalf).div(uTerrainSize);
+        const getFlatness   = () => clamp(dot(normalWorld, vec3(0, 1, 0)), float(0), float(1));
+        const getSlopeMask  = () => smoothstep(uSlopeStart, uSlopeEnd, getFlatness());
+        const getHeightMask = () => smoothstep(float(HEIGHT_SCALE * 0.65), float(HEIGHT_SCALE * 0.92), positionWorld.y);
+        const getWetMask    = () => smoothstep(float(3.5), float(0.0), positionWorld.y);
 
-        const splatMat = new MeshStandardNodeMaterial({
-          roughness: 0.9,
-          metalness: 0,
-        });
-        // Wet zone: terrain near/below water level gets dark wet sand color
-        const getWetMask = () =>
-          smoothstep(float(3.5), float(0.0), positionWorld.y);
+        const splatMat = new MeshStandardNodeMaterial({ roughness: 0.9, metalness: 0 });
 
         splatMat.colorNode = Fn(() => {
-          const splat = texture(splatTex, getSplatUV());
-          const grassCol  = mix(texture(grassColorTex,  getGrassUV()).rgb,  vec3(0.3,  0.78, 0.2),  uDebugMode);
-          const groundCol = mix(texture(groundColorTex, getGroundUV()).rgb, vec3(0.72, 0.48, 0.22), uDebugMode);
-          const rockCol = groundCol.mul(float(0.65));
-          const wetCol = groundCol.mul(float(0.35)); // dark wet sand
-          const baseCol = vec3(0.28, 0.32, 0.22);
+          const splat   = texture(splatTex, getSplatUV());
+          const terrain = groundProc();
+          const path    = pathProc();
+          const rock    = terrain.mul(float(0.40));
+          const wet     = path.mul(float(0.55));
+          // Debug: replace procedural with flat colors to see zone masks
+          const tCol = mix(terrain, vec3(0.30, 0.78, 0.20), uDebugMode);
+          const pCol = mix(path,    vec3(0.72, 0.48, 0.22), uDebugMode);
+          const rCol = mix(rock,    vec3(0.18, 0.14, 0.10), uDebugMode);
+          const wCol = mix(wet,     vec3(0.10, 0.08, 0.05), uDebugMode);
           // Auto layers first — fill unpainted areas
-          let col = baseCol;
-          col = mix(rockCol, col, getSlopeMask());
-          col = mix(col, groundCol.mul(float(0.75)), getHeightMask());
-          col = mix(col, wetCol, getWetMask());
+          let col = tCol;
+          col = mix(rCol, col, getSlopeMask());
+          col = mix(col, tCol.mul(float(0.65)), getHeightMask());
+          col = mix(col, wCol, getWetMask());
           // Manual paint always wins on top
-          col = mix(col, grassCol, splat.r);
-          col = mix(col, grassCol.mul(float(1.1)), splat.g);
-          col = mix(col, groundCol, splat.b);
+          col = mix(col, tCol,               splat.r);
+          col = mix(col, tCol.mul(float(1.1)), splat.g);
+          col = mix(col, pCol,               splat.b);
           return col;
-        })();
-        splatMat.normalNode = Fn(() => {
-          const splat = texture(splatTex, getSplatUV());
-          const grassNorm = texture(grassNormalTex, getGrassUV());
-          const groundNorm = texture(groundNormalTex, getGroundUV());
-          // Auto layers first
-          let blended = grassNorm;
-          blended = mix(groundNorm, blended, getSlopeMask());
-          blended = mix(blended, groundNorm, getHeightMask());
-          // Manual paint wins on top
-          blended = mix(blended, groundNorm, splat.b);
-          blended = mix(blended, vec4(0.5, 0.5, 1.0, 1.0), uDebugMode);
-          return normalMap(blended);
         })();
         terrain.material.dispose();
         terrain.material = splatMat;
@@ -1120,65 +1128,62 @@
         });
         matFolder
           .addBinding(PARAMS, "debugColors", { label: "Debug colors" })
-          .on("change", (ev) => { uDebugMode.value = ev.value ? 1 : 0; });
-        matFolder.addBlade({ view: "separator" });
-        matFolder
-          .addBinding(PARAMS, "tileGrass", {
-            label: "Grass tile",
-            min: 0.005,
-            max: 0.2,
-            step: 0.001,
-          })
           .on("change", (ev) => {
-            uTileScaleGrass.value = ev.value;
-          });
-        matFolder
-          .addBinding(PARAMS, "tileGround", {
-            label: "Ground tile",
-            min: 0.005,
-            max: 0.2,
-            step: 0.001,
-          })
-          .on("change", (ev) => {
-            uTileScaleGround.value = ev.value;
+            uDebugMode.value = ev.value ? 1 : 0;
           });
         matFolder.addBlade({ view: "separator" });
 
-        // ── texture swap helpers ──
-        function swapTex(tex, file, isSRGB) {
-          const reader = new FileReader();
-          reader.onload = (e) => {
-            const img = new Image();
-            img.onload = () => {
-              tex.image = img;
-              if (isSRGB) tex.colorSpace = THREE.SRGBColorSpace;
-              tex.needsUpdate = true;
-            };
-            img.src = e.target.result;
-          };
-          reader.readAsDataURL(file);
-        }
-        function bindTexInput(inputId, tex, isSRGB) {
-          document.getElementById(inputId).addEventListener("change", (e) => {
-            if (e.target.files[0]) swapTex(tex, e.target.files[0], isSRGB);
-          });
-        }
-        bindTexInput("tex-grass-color",   grassColorTex,  true);
-        bindTexInput("tex-grass-normal",  grassNormalTex, false);
-        bindTexInput("tex-ground-color",  groundColorTex, true);
-        bindTexInput("tex-ground-normal", groundNormalTex, false);
+        // ── Ground procedural folder ──
+        const groundProcFolder = matFolder.addFolder({ title: "Ground (green)", expanded: false });
+        groundProcFolder.addBinding(gU.warpScale, "value", { label: "Warp scale", min: 0.001, max: 0.05, step: 0.001 });
+        groundProcFolder.addBinding(gU.warpAmt,   "value", { label: "Warp amount", min: 0, max: 10, step: 0.1 });
+        groundProcFolder.addBlade({ view: "separator" });
+        groundProcFolder.addBinding(gU.s1, "value", { label: "Scale 1", min: 0.001, max: 0.05,  step: 0.001 });
+        groundProcFolder.addBinding(gU.s2, "value", { label: "Scale 2", min: 0.005, max: 0.1,   step: 0.001 });
+        groundProcFolder.addBinding(gU.s3, "value", { label: "Scale 3", min: 0.01,  max: 0.3,   step: 0.005 });
+        groundProcFolder.addBinding(gU.s4, "value", { label: "Scale 4", min: 0.05,  max: 1.0,   step: 0.01  });
+        groundProcFolder.addBinding(gU.s5, "value", { label: "Scale 5", min: 0.1,   max: 3.0,   step: 0.05  });
+        groundProcFolder.addBinding(gU.s6, "value", { label: "Scale 6", min: 0.5,   max: 8.0,   step: 0.1   });
+        groundProcFolder.addBlade({ view: "separator" });
+        groundProcFolder.addBinding(gU.w1, "value", { label: "Weight 1", min: 0, max: 1, step: 0.01 });
+        groundProcFolder.addBinding(gU.w2, "value", { label: "Weight 2", min: 0, max: 1, step: 0.01 });
+        groundProcFolder.addBinding(gU.w3, "value", { label: "Weight 3", min: 0, max: 1, step: 0.01 });
+        groundProcFolder.addBinding(gU.w4, "value", { label: "Weight 4", min: 0, max: 1, step: 0.01 });
+        groundProcFolder.addBinding(gU.w5, "value", { label: "Weight 5", min: 0, max: 1, step: 0.01 });
+        groundProcFolder.addBinding(gU.w6, "value", { label: "Weight 6", min: 0, max: 1, step: 0.01 });
+        groundProcFolder.addBlade({ view: "separator" });
+        groundProcFolder.addBinding(gU.contrast, "value", { label: "Contrast", min: 0.5, max: 4, step: 0.05 });
+        groundProcFolder.addBinding(gU.bias,     "value", { label: "Bias",     min: -1,  max: 1, step: 0.01 });
+        groundProcFolder.addBlade({ view: "separator" });
+        groundProcFolder.addBinding(gU.col0, "value", { label: "Color 0", color: { type: "float" } });
+        groundProcFolder.addBinding(gU.col1, "value", { label: "Color 1", color: { type: "float" } });
+        groundProcFolder.addBinding(gU.col2, "value", { label: "Color 2", color: { type: "float" } });
+        groundProcFolder.addBinding(gU.col3, "value", { label: "Color 3", color: { type: "float" } });
+        groundProcFolder.addBinding(gU.col4, "value", { label: "Color 4", color: { type: "float" } });
+        groundProcFolder.addBlade({ view: "separator" });
+        groundProcFolder.addBinding(gU.stop1, "value", { label: "Stop 1", min: 0, max: 1, step: 0.01 });
+        groundProcFolder.addBinding(gU.stop2, "value", { label: "Stop 2", min: 0, max: 1, step: 0.01 });
+        groundProcFolder.addBinding(gU.stop3, "value", { label: "Stop 3", min: 0, max: 1, step: 0.01 });
 
-        const grassFolder  = matFolder.addFolder({ title: "Grass textures",  expanded: true });
-        grassFolder.addButton({ title: "Load color map" })
-          .on("click", () => document.getElementById("tex-grass-color").click());
-        grassFolder.addButton({ title: "Load normal map" })
-          .on("click", () => document.getElementById("tex-grass-normal").click());
-
-        const groundFolder = matFolder.addFolder({ title: "Ground textures", expanded: true });
-        groundFolder.addButton({ title: "Load color map" })
-          .on("click", () => document.getElementById("tex-ground-color").click());
-        groundFolder.addButton({ title: "Load normal map" })
-          .on("click", () => document.getElementById("tex-ground-normal").click());
+        // ── Path procedural folder ──
+        const pathProcFolder = matFolder.addFolder({ title: "Path (yellow-brown)", expanded: false });
+        pathProcFolder.addBinding(pU.s1, "value", { label: "Scale 1", min: 0.001, max: 0.05,  step: 0.001 });
+        pathProcFolder.addBinding(pU.s2, "value", { label: "Scale 2", min: 0.005, max: 0.2,   step: 0.005 });
+        pathProcFolder.addBinding(pU.s3, "value", { label: "Scale 3", min: 0.05,  max: 0.8,   step: 0.01  });
+        pathProcFolder.addBlade({ view: "separator" });
+        pathProcFolder.addBinding(pU.w1, "value", { label: "Weight 1", min: 0, max: 1, step: 0.01 });
+        pathProcFolder.addBinding(pU.w2, "value", { label: "Weight 2", min: 0, max: 1, step: 0.01 });
+        pathProcFolder.addBinding(pU.w3, "value", { label: "Weight 3", min: 0, max: 1, step: 0.01 });
+        pathProcFolder.addBlade({ view: "separator" });
+        pathProcFolder.addBinding(pU.contrast, "value", { label: "Contrast", min: 0.5, max: 4, step: 0.05 });
+        pathProcFolder.addBinding(pU.bias,     "value", { label: "Bias",     min: -1,  max: 1, step: 0.01 });
+        pathProcFolder.addBlade({ view: "separator" });
+        pathProcFolder.addBinding(pU.col0, "value", { label: "Color 0", color: { type: "float" } });
+        pathProcFolder.addBinding(pU.col1, "value", { label: "Color 1", color: { type: "float" } });
+        pathProcFolder.addBinding(pU.col2, "value", { label: "Color 2", color: { type: "float" } });
+        pathProcFolder.addBlade({ view: "separator" });
+        pathProcFolder.addBinding(pU.stop1, "value", { label: "Stop 1", min: 0, max: 1, step: 0.01 });
+        pathProcFolder.addBinding(pU.stop2, "value", { label: "Stop 2", min: 0, max: 1, step: 0.01 });
 
         matFolder.addBlade({ view: "separator" });
         matFolder
