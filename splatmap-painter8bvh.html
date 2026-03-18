@@ -204,6 +204,9 @@
         step,
         pow,
         mx_noise_float,
+        exponentialHeightFogFactor,
+        densityFogFactor,
+        fog,
       } from "three/tsl";
       import {
         valueNoise2D,
@@ -438,6 +441,13 @@
           cloudCoverage: 0.4,
           cloudDensity: 0.4,
           cloudElevation: 0.5,
+        },
+        fog: {
+          enabled: true,
+          type: "height",  // "height" | "distance"
+          color: "#c2d8f0",
+          density: 0.04,
+          height: 2.0,
         },
       };
 
@@ -1553,6 +1563,7 @@
         // ── SKY ──
         const sky = new SkyMesh();
         sky.scale.setScalar(10000);
+        sky.material.fog = false;
         scene.add(sky);
         sky.turbidity.value = PARAMS.sky.turbidity;
         sky.rayleigh.value = PARAMS.sky.rayleigh;
@@ -1585,14 +1596,36 @@
           transparent: true,
           depthWrite: false,
         });
-        waterMat.colorNode = vec3(0.05, 0.28, 0.55);
         waterMat.opacityNode = float(0.82);
         waterMat.roughnessNode = float(0.15);
         waterMat.metalnessNode = float(0.0);
+        waterMat.fog = false; // fog applied manually below after fog uniforms exist
         const water = new THREE.Mesh(waterGeo, waterMat);
         water.position.y = -0.5;
         water.renderOrder = 1;
         scene.add(water);
+
+        // ── FOG (height + distance) ──
+        const uFogColor   = uniform(new THREE.Color(PARAMS.fog.color).convertSRGBToLinear());
+        const uFogDensity = uniform(PARAMS.fog.density);
+        const uFogHeight  = uniform(PARAMS.fog.height);
+
+        const _heightFogNode   = fog(uFogColor, exponentialHeightFogFactor(uFogDensity, uFogHeight));
+        const _distanceFogNode = fog(uFogColor, densityFogFactor(uFogDensity));
+
+        // Inject fog into water colorNode manually (transparent material needs this)
+        const _waterBase = vec3(0.05, 0.28, 0.55);
+        const _waterFogFactor = exponentialHeightFogFactor(uFogDensity, uFogHeight);
+        waterMat.colorNode = mix(_waterBase, uFogColor, _waterFogFactor);
+
+        function syncFog() {
+          uFogColor.value.set(PARAMS.fog.color).convertSRGBToLinear();
+          uFogDensity.value = PARAMS.fog.density;
+          uFogHeight.value  = PARAMS.fog.height;
+          if (!PARAMS.fog.enabled) { scene.fogNode = null; return; }
+          scene.fogNode = PARAMS.fog.type === "height" ? _heightFogNode : _distanceFogNode;
+        }
+        syncFog();
 
         // ── CLIFF TEMPLATES ──
         const gltfLoader = new GLTFLoader();
@@ -2437,6 +2470,24 @@
           max: 1,
           step: 0.01,
         });
+
+        const fogFolder = pane.addFolder({ title: "Fog", expanded: false });
+        fogFolder.addBinding(PARAMS.fog, "enabled", { label: "Enabled" })
+          .on("change", syncFog);
+        fogFolder.addBinding(PARAMS.fog, "type", {
+          label: "Type",
+          options: { "Height fog": "height", "Distance fog": "distance" },
+        }).on("change", syncFog);
+        fogFolder.addBinding(PARAMS.fog, "color", { label: "Color" })
+          .on("change", syncFog);
+        fogFolder.addBinding(PARAMS.fog, "density", {
+          label: "Density",
+          min: 0.001, max: 0.1, step: 0.001,
+        }).on("change", syncFog);
+        fogFolder.addBinding(PARAMS.fog, "height", {
+          label: "Height",
+          min: -5, max: 20, step: 0.5,
+        }).on("change", syncFog);
 
         pane.addBlade({ view: "separator" });
 
