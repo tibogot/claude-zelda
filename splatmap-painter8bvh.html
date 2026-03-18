@@ -327,6 +327,7 @@
         forest: { r: 180, g: 60, b: 40 },
         grass: { r: 40, g: 180, b: 40 },
         village: { r: 40, g: 60, b: 200 },
+        meadow: { r: 220, g: 200, b: 50 }, // used only as fallback; painting goes to meadowCtx
         erase: { r: 0, g: 0, b: 0 },
       };
       const SPHERE_THRESHOLD = 80;
@@ -344,6 +345,13 @@
       const grassDensityCtx = grassDensityCanvas.getContext("2d");
       grassDensityCtx.fillStyle = "#000";
       grassDensityCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+
+      // ─── MEADOW DENSITY CANVAS ────────────────
+      const meadowCanvas = document.createElement("canvas");
+      meadowCanvas.width = meadowCanvas.height = SPLAT_RES;
+      const meadowCtx = meadowCanvas.getContext("2d");
+      meadowCtx.fillStyle = "#000";
+      meadowCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
 
       const previewCanvas = document.getElementById("splatmap-preview");
       const previewCtx = previewCanvas.getContext("2d");
@@ -439,6 +447,7 @@
       let grassPatchSystem = null;
       let grassUniforms = null;
       let grassEraseMode = false;
+      let meadowDensityTex = null;
       let syncHeightTex = null; // kept but replaced by bakeBVH
       let bakeBVH = null;       // assigned inside init
       let treeSystem = null;
@@ -537,8 +546,26 @@
         const { u, v } = worldToUV(wx, wz);
         const cx = u * SPLAT_RES,
           cy = v * SPLAT_RES;
-        const col = BIOME_COLORS[currentBiome];
         const alpha = brushStr / 100;
+
+        // Meadow uses its own density canvas (like grass), not the splatmap
+        if (currentBiome === "meadow") {
+          const erase = false; // shift-erase not yet wired for meadow in paint mode
+          const col = erase ? "0,0,0" : "255,255,255";
+          const grad = meadowCtx.createRadialGradient(cx, cy, 0, cx, cy, brushSize);
+          grad.addColorStop(0, `rgba(${col},${alpha})`);
+          grad.addColorStop(0.5, `rgba(${col},${alpha * 0.55})`);
+          grad.addColorStop(1, `rgba(${col},0)`);
+          meadowCtx.globalCompositeOperation = "source-over";
+          meadowCtx.fillStyle = grad;
+          meadowCtx.beginPath();
+          meadowCtx.arc(cx, cy, brushSize, 0, PI * 2);
+          meadowCtx.fill();
+          if (meadowDensityTex) meadowDensityTex.needsUpdate = true;
+          return;
+        }
+
+        const col = BIOME_COLORS[currentBiome];
         const grad = splatCtx.createRadialGradient(
           cx,
           cy,
@@ -988,6 +1015,11 @@
         grassDensityTex.wrapS = grassDensityTex.wrapT =
           THREE.ClampToEdgeWrapping;
 
+        // ── MEADOW DENSITY TEX ────────────────────────────────────────────
+        meadowDensityTex = new THREE.CanvasTexture(meadowCanvas);
+        meadowDensityTex.wrapS = meadowDensityTex.wrapT =
+          THREE.ClampToEdgeWrapping;
+
         // ── HEIGHT TEX (for grass blade positioning) ──────────────────────
         const heightTexData = new Float32Array(HTEX_RES * HTEX_RES * 4);
         heightTex = new THREE.DataTexture(
@@ -1355,6 +1387,66 @@
           return col;
         });
 
+        // ── PROCEDURAL MEADOW SHADER — yellowish variant of groundProc ──
+        const sPARAMS = {
+          brightness: 1.05,
+          contrast: 1.1,
+          baseColor: "#c8a832",
+          layer1: {
+            enable: true,
+            noiseType: "perlin",
+            color: "#a07818",
+            strength: 0.55,
+            useFbm: true,
+            octaves: 3,
+            lacunarity: 2.0,
+            gain: 0.5,
+            scale: 0.018,
+            offsetX: 17.3,
+            offsetY: 42.6,
+            invert: false,
+            maskLow: 0.3,
+            maskHigh: 0.65,
+            maskSharpness: 1.0,
+            voronoiJitter: 0.8,
+          },
+          layer2: {
+            enable: true,
+            noiseType: "perlin",
+            color: "#e0c850",
+            strength: 0.35,
+            useFbm: true,
+            octaves: 2.5,
+            lacunarity: 2.2,
+            gain: 0.5,
+            scale: 0.045,
+            offsetX: 88.1,
+            offsetY: 16.4,
+            invert: false,
+            maskLow: 0.45,
+            maskHigh: 0.78,
+            maskSharpness: 1.0,
+            voronoiJitter: 0.7,
+          },
+        };
+        const sBase = uniform(new THREE.Color(sPARAMS.baseColor).convertSRGBToLinear());
+        const sContrast = uniform(sPARAMS.contrast, "float");
+        const sBrightness = uniform(sPARAMS.brightness, "float");
+        const sL1 = groundLayerUniforms(sPARAMS.layer1);
+        const sL2 = groundLayerUniforms(sPARAMS.layer2);
+
+        const meadowProc = Fn(() => {
+          let col = sBase;
+          col = mix(col, sL1.color, groundLayerMask(sL1));
+          col = mix(col, sL2.color, groundLayerMask(sL2));
+          col = clamp(
+            col.sub(float(0.5)).mul(sContrast).add(float(0.5)).mul(sBrightness),
+            0,
+            1,
+          );
+          return col;
+        });
+
         // ── PROCEDURAL PATH SHADER (warm yellow-brown earthy tones) ──────
         const pU = {
           s1: uniform(0.008),
@@ -1437,6 +1529,7 @@
           col = mix(col, tCol, splat.r);
           col = mix(col, tCol.mul(float(1.1)), splat.g);
           col = mix(col, pCol, splat.b);
+          col = mix(col, meadowProc(), texture(meadowDensityTex, getSplatUV()).r);
           return col;
         })();
         terrain.material.dispose();
@@ -1928,6 +2021,28 @@
           gL2,
         );
 
+        const meadowProcFolder = matFolder.addFolder({
+          title: "Meadow",
+          expanded: false,
+        });
+        bindColor(meadowProcFolder, "Base color", sBase);
+        meadowProcFolder
+          .addBinding(sPARAMS, "contrast", { min: 0.2, max: 3, step: 0.05 })
+          .on("change", (e) => { sContrast.value = e.value; });
+        meadowProcFolder
+          .addBinding(sPARAMS, "brightness", { min: 0.2, max: 2, step: 0.05 })
+          .on("change", (e) => { sBrightness.value = e.value; });
+        bindGroundLayer(
+          meadowProcFolder.addFolder({ title: "Layer 1", expanded: true }),
+          sPARAMS.layer1,
+          sL1,
+        );
+        bindGroundLayer(
+          meadowProcFolder.addFolder({ title: "Layer 2", expanded: false }),
+          sPARAMS.layer2,
+          sL2,
+        );
+
         // ── Path procedural folder ──
         const pathProcFolder = matFolder.addFolder({
           title: "Path (yellow-brown)",
@@ -2135,6 +2250,7 @@
               Forest: "forest",
               Grass: "grass",
               Village: "village",
+              Meadow: "meadow",
               Erase: "erase",
             },
           })
@@ -2147,6 +2263,11 @@
           syncPreview();
           if (splatTex) splatTex.needsUpdate = true;
           generateObjects(scene);
+        });
+        paintFolder.addButton({ title: "Clear Meadow" }).on("click", () => {
+          meadowCtx.fillStyle = "#000";
+          meadowCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+          if (meadowDensityTex) meadowDensityTex.needsUpdate = true;
         });
         paintFolder
           .addButton({ title: "Save Splatmap" })
