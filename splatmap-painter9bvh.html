@@ -491,6 +491,8 @@
         path: {
           flattenStrength: 0.5,
         },
+        ao: { intensity: 0.85 },
+        normalMap: { scale: 2.0 },
         erosion: {
           iterations: 30000,
           erosionRate: 0.3,
@@ -515,6 +517,8 @@
       let splatTex = null;
       let grassDensityTex = null;
       let heightTex = null;
+      let aoTex = null;
+      let normalMapTex = null;
       let grassPatchSystem = null;
       let grassUniforms = null;
       let grassEraseMode = false;
@@ -534,6 +538,8 @@
       // ─── BVH HEIGHT GRID ─────────────────────
       const HTEX_RES = 512;
       const bvhGrid = new Float32Array(HTEX_RES * HTEX_RES); // baked heights: terrain + cliffs
+      const aoData  = new Float32Array(HTEX_RES * HTEX_RES * 4);
+      const nmData  = new Float32Array(HTEX_RES * HTEX_RES * 4);
 
       function bvhHeight(wx, wz) {
         // Bilinear sample from baked BVH grid — falls back to heightData before first bake
@@ -953,6 +959,71 @@
           }
         }
         syncGeometry();
+      }
+
+      // ─── NORMAL MAP BAKE ─────────────────────────────────────────────
+      function bakeNormalMap() {
+        const N = HTEX_RES;
+        const cellW = TERRAIN_SIZE / N;
+        // For terrain tangent=(1,0,0), bitangent=(0,0,-1) due to V=1-z/TS mapping.
+        // Tangent-space encoding: R=-dH/dx, G=dH/dz (V-flip), B=up
+        for (let iz = 0; iz < N; iz++) {
+          for (let ix = 0; ix < N; ix++) {
+            const wx = (-0.5 + ix / N) * TERRAIN_SIZE;
+            const wz = (-0.5 + iz / N) * TERRAIN_SIZE;
+            const hR = sampleHeight(wx + cellW, wz);
+            const hL = sampleHeight(wx - cellW, wz);
+            const hU = sampleHeight(wx, wz + cellW);
+            const hD = sampleHeight(wx, wz - cellW);
+            const dxH = (hR - hL) / (2 * cellW);
+            const dzH = (hU - hD) / (2 * cellW);
+            const mag = Math.sqrt(dxH*dxH + dzH*dzH + 1);
+            const idx = (iz * N + ix) * 4;
+            nmData[idx]   = (-dxH / mag) * 0.5 + 0.5; // R — tangent X
+            nmData[idx+1] = ( dzH / mag) * 0.5 + 0.5; // G — bitangent (V-flipped Z)
+            nmData[idx+2] = (1    / mag) * 0.5 + 0.5; // B — up
+            nmData[idx+3] = 1;
+          }
+        }
+        normalMapTex.needsUpdate = true;
+      }
+
+      // ─── AO BAKE ─────────────────────────────────────────────────────
+      function bakeAO() {
+        const N = HTEX_RES;
+        const NUM_DIRS = 8;
+        const MAX_STEPS = 24;
+        const stepDist = TERRAIN_SIZE / N; // world units per AO step
+        const halfPI = Math.PI / 2;
+
+        for (let iz = 0; iz < N; iz++) {
+          for (let ix = 0; ix < N; ix++) {
+            const wx = (-0.5 + ix / N) * TERRAIN_SIZE;
+            const wz = (-0.5 + iz / N) * TERRAIN_SIZE;
+            const curH = sampleHeight(wx, wz);
+            let totalOcc = 0;
+            for (let d = 0; d < NUM_DIRS; d++) {
+              const angle = (d / NUM_DIRS) * Math.PI * 2;
+              const dX = Math.cos(angle), dZ = Math.sin(angle);
+              let maxElev = 0;
+              for (let s = 1; s <= MAX_STEPS; s++) {
+                const sx = wx + dX * s * stepDist;
+                const sz = wz + dZ * s * stepDist;
+                if (sx < -TERRAIN_SIZE * 0.5 || sx > TERRAIN_SIZE * 0.5 ||
+                    sz < -TERRAIN_SIZE * 0.5 || sz > TERRAIN_SIZE * 0.5) break;
+                const elev = Math.atan2(sampleHeight(sx, sz) - curH, s * stepDist);
+                if (elev > maxElev) maxElev = elev;
+              }
+              totalOcc += Math.max(0, maxElev) / halfPI;
+            }
+            // ao=1 → fully lit, ao=0 → fully occluded; apply gentle power curve
+            const ao = Math.pow(Math.max(0, 1 - totalOcc / NUM_DIRS), 1.4);
+            const idx = (iz * N + ix) * 4;
+            aoData[idx] = aoData[idx+1] = aoData[idx+2] = ao;
+            aoData[idx+3] = 1;
+          }
+        }
+        aoTex.needsUpdate = true;
       }
 
       // ─── HYDRAULIC EROSION ───────────────────────────────────────────
@@ -1463,6 +1534,22 @@
         );
         heightTex.wrapS = heightTex.wrapT = THREE.ClampToEdgeWrapping;
         heightTex.magFilter = heightTex.minFilter = THREE.LinearFilter;
+
+        // ── AO + NORMAL MAP TEXTURES ──────────────────────────────────────────
+        // Fill AO with 1.0 (no occlusion) and NM with flat (0.5, 0.5, 1.0) until baked
+        for (let i = 0; i < HTEX_RES * HTEX_RES; i++) {
+          aoData[i*4] = aoData[i*4+1] = aoData[i*4+2] = 1; aoData[i*4+3] = 1;
+          nmData[i*4] = 0.5; nmData[i*4+1] = 0.5; nmData[i*4+2] = 1; nmData[i*4+3] = 1;
+        }
+        aoTex = new THREE.DataTexture(aoData, HTEX_RES, HTEX_RES, THREE.RGBAFormat, THREE.FloatType);
+        aoTex.wrapS = aoTex.wrapT = THREE.ClampToEdgeWrapping;
+        aoTex.magFilter = aoTex.minFilter = THREE.LinearFilter;
+        aoTex.needsUpdate = true;
+
+        normalMapTex = new THREE.DataTexture(nmData, HTEX_RES, HTEX_RES, THREE.RGBAFormat, THREE.FloatType);
+        normalMapTex.wrapS = normalMapTex.wrapT = THREE.ClampToEdgeWrapping;
+        normalMapTex.magFilter = normalMapTex.minFilter = THREE.LinearFilter;
+        normalMapTex.needsUpdate = true;
 
         // ── BVH BAKE — cliff objects only; terrain uses full-res sampleHeight ──
         // Raycasting the 128-vertex terrain mesh introduces triangle-diagonal interpolation
@@ -2000,7 +2087,9 @@
         const uTerrainSize = float(TERRAIN_SIZE);
         const uSlopeStart = uniform(PARAMS.slopeStart); // flatness where cliff = 100%
         const uSlopeEnd = uniform(PARAMS.slopeEnd); // flatness where cliff = 0%
-        const uDebugMode = uniform(0);
+        const uDebugMode    = uniform(0);
+        const uAOIntensity  = uniform(PARAMS.ao.intensity);
+        const uNormalScale  = uniform(PARAMS.normalMap.scale);
         const uRockCol = uniform(toLinear("#7a7870")); // kept for debug mode only
 
         const getSplatUV = () =>
@@ -2076,8 +2165,15 @@
             meadowProc(),
             texture(meadowDensityTex, getSplatUV()).r,
           );
+          // Baked AO — multiply into base color (affects both direct and indirect)
+          const ao = mix(float(1), texture(aoTex, getSplatUV()).r, uAOIntensity);
+          col = col.mul(ao);
           return col;
         })();
+        splatMat.normalNode = normalMap(
+          texture(normalMapTex, getSplatUV()),
+          vec2(uNormalScale, uNormalScale),
+        );
         terrain.material.dispose();
         terrain.material = splatMat;
 
@@ -2872,6 +2968,24 @@
           label: "Brush radius", min: 1, max: 6, step: 0.5,
         });
         erosionFolder.addButton({ title: "▶ Run Erosion" }).on("click", runErosion);
+
+        // AO + Normal Map bake
+        const bakeFolder = pane.addFolder({ title: "AO & Normal Map", expanded: false });
+        bakeFolder.addBinding(PARAMS.ao, "intensity", {
+          label: "AO intensity", min: 0, max: 1, step: 0.01,
+        }).on("change", (ev) => { uAOIntensity.value = ev.value; });
+        bakeFolder.addButton({ title: "▶ Bake AO  (~1–2s)" }).on("click", bakeAO);
+        bakeFolder.addBlade({ view: "separator" });
+        bakeFolder.addBinding(PARAMS.normalMap, "scale", {
+          label: "Normal scale", min: 0.1, max: 8, step: 0.1,
+        }).on("change", (ev) => { uNormalScale.value = ev.value; });
+        bakeFolder.addButton({ title: "▶ Bake Normal Map  (<0.1s)" }).on("click", bakeNormalMap);
+        bakeFolder.addButton({ title: "Reset Normal Map" }).on("click", () => {
+          for (let i = 0; i < HTEX_RES * HTEX_RES; i++) {
+            nmData[i*4] = 0.5; nmData[i*4+1] = 0.5; nmData[i*4+2] = 1; nmData[i*4+3] = 1;
+          }
+          normalMapTex.needsUpdate = true;
+        });
 
         // Material (always visible, collapsed by default)
         const matFolder = pane.addFolder({
