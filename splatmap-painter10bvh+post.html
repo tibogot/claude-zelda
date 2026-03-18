@@ -150,7 +150,8 @@
           "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
           "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js",
           "tweakpane": "https://esm.sh/tweakpane@4.0.4",
-          "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.9/build/index.module.js"
+          "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.9/build/index.module.js",
+          "jszip": "https://esm.sh/jszip@3.10.1"
         }
       }
     </script>
@@ -191,7 +192,7 @@
     <input
       type="file"
       id="scene-file-input"
-      accept=".json"
+      accept=".zip"
       style="display: none"
     />
     <input
@@ -299,6 +300,7 @@
       import { MeshBVH } from "three-mesh-bvh";
       import { Pane } from "tweakpane";
       import Stats from "stats-gl";
+      import JSZip from "jszip";
 
       // ─── NOISE ───────────────────────────────
       function hash(x, y) {
@@ -2776,160 +2778,100 @@
           reader.readAsText(file);
         }
 
-        // ── SCENE SAVE / LOAD ─────────────────────────────────────────────
-        function saveScene() {
-          // Encode heightData as greyscale PNG (same format loadHeightmap reads)
-          const hmC = document.createElement("canvas");
-          hmC.width = hmC.height = VERTS;
-          const hmCtx = hmC.getContext("2d");
-          const imgData = hmCtx.createImageData(VERTS, VERTS);
-          for (let i = 0; i < heightData.length; i++) {
-            const v = Math.max(
-              0,
-              Math.min(
-                255,
-                Math.round(
-                  ((heightData[i] + HEIGHT_SCALE) / (HEIGHT_SCALE * 2)) * 255,
-                ),
-              ),
-            );
-            imgData.data[i * 4 + 0] = v;
-            imgData.data[i * 4 + 1] = v;
-            imgData.data[i * 4 + 2] = v;
-            imgData.data[i * 4 + 3] = 255;
-          }
-          hmCtx.putImageData(imgData, 0, 0);
+        // ── SCENE SAVE / LOAD (zip-based, lossless) ──────────────────────
+        function _canvasToRawBin(canvas, ctx) {
+          return ctx.getImageData(0, 0, canvas.width, canvas.height).data.buffer;
+        }
+        function _rawBinToCanvas(buffer, canvas, ctx, tex) {
+          const loaded = new Uint8ClampedArray(buffer);
+          const imgData = ctx.createImageData(canvas.width, canvas.height);
+          imgData.data.set(loaded.subarray(0, imgData.data.length));
+          ctx.putImageData(imgData, 0, 0);
+          if (tex) tex.needsUpdate = true;
+        }
 
-          const data = {
-            version: 1,
-            heightmap: hmC.toDataURL("image/png"),
-            splatmap: splatCanvas.toDataURL("image/png"),
-            grassDensity: grassDensityCanvas.toDataURL("image/png"),
-            meadow: meadowCanvas.toDataURL("image/png"),
+        async function saveScene() {
+          const zip = new JSZip();
+
+          // Lossless binary blobs
+          zip.file("heightmap.bin", heightData.buffer);
+          zip.file("splatmap.bin", _canvasToRawBin(splatCanvas, splatCtx));
+          zip.file("grass-density.bin", _canvasToRawBin(grassDensityCanvas, grassDensityCtx));
+          zip.file("meadow.bin", _canvasToRawBin(meadowCanvas, meadowCtx));
+
+          // JSON for object positions (already lossless)
+          const meta = {
+            version: 2,
             trees: treeSystem ? treeSystem.getPositions() : [],
             cliffs: cliffObjects.map((root) => ({
               modelIndex: root.userData.modelIndex ?? 0,
-              x: root.position.x,
-              y: root.position.y,
-              z: root.position.z,
-              rx: root.rotation.x,
-              ry: root.rotation.y,
-              rz: root.rotation.z,
-              sx: root.scale.x,
-              sy: root.scale.y,
-              sz: root.scale.z,
+              x: root.position.x, y: root.position.y, z: root.position.z,
+              rx: root.rotation.x, ry: root.rotation.y, rz: root.rotation.z,
+              sx: root.scale.x, sy: root.scale.y, sz: root.scale.z,
             })),
             props: propObjects.map((root) => ({
               propName: root.userData.propName ?? "unknown",
-              x: root.position.x,
-              y: root.position.y,
-              z: root.position.z,
-              rx: root.rotation.x,
-              ry: root.rotation.y,
-              rz: root.rotation.z,
-              sx: root.scale.x,
-              sy: root.scale.y,
-              sz: root.scale.z,
+              x: root.position.x, y: root.position.y, z: root.position.z,
+              rx: root.rotation.x, ry: root.rotation.y, rz: root.rotation.z,
+              sx: root.scale.x, sy: root.scale.y, sz: root.scale.z,
             })),
             waterBodies: waterObjects.map((m) => ({
-              x: m.position.x,
-              y: m.position.y,
-              z: m.position.z,
-              rx: m.rotation.x,
-              ry: m.rotation.y,
-              rz: m.rotation.z,
-              sx: m.scale.x,
-              sy: m.scale.y,
-              sz: m.scale.z,
+              x: m.position.x, y: m.position.y, z: m.position.z,
+              rx: m.rotation.x, ry: m.rotation.y, rz: m.rotation.z,
+              sx: m.scale.x, sy: m.scale.y, sz: m.scale.z,
             })),
           };
-          const blob = new Blob([JSON.stringify(data)], {
-            type: "application/json",
-          });
+          zip.file("scene.json", JSON.stringify(meta, null, 2));
+
+          const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
           const a = document.createElement("a");
-          a.download = "scene.json";
+          a.download = "scene.zip";
           a.href = URL.createObjectURL(blob);
           a.click();
         }
 
-        function applyCanvasDataURL(dataURL, canvas, ctx, tex) {
-          return new Promise((resolve) => {
-            const img = new Image();
-            img.onload = () => {
-              ctx.clearRect(0, 0, canvas.width, canvas.height);
-              ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-              if (tex) tex.needsUpdate = true;
-              resolve();
-            };
-            img.src = dataURL;
-          });
-        }
+        async function loadScene(file) {
+          try {
+            const zip = await JSZip.loadAsync(file);
 
-        function loadScene(file) {
-          const reader = new FileReader();
-          reader.onload = async (ev) => {
-            try {
-              const data = JSON.parse(ev.target.result);
-
-              // Heightmap
-              if (data.heightmap) {
-                await new Promise((resolve) => {
-                  const img = new Image();
-                  img.onload = () => {
-                    const c = document.createElement("canvas");
-                    c.width = c.height = VERTS;
-                    const ctx2 = c.getContext("2d");
-                    ctx2.drawImage(img, 0, 0, VERTS, VERTS);
-                    const pixels = ctx2.getImageData(0, 0, VERTS, VERTS).data;
-                    for (let i = 0; i < heightData.length; i++) {
-                      heightData[i] =
-                        (pixels[i * 4] / 255) * HEIGHT_SCALE * 2 - HEIGHT_SCALE;
-                    }
-                    syncGeometry();
-                    if (bakeBVH) bakeBVH();
-                    resolve();
-                  };
-                  img.src = data.heightmap;
-                });
-              }
-
-              // Canvases
-              if (data.splatmap)
-                await applyCanvasDataURL(
-                  data.splatmap,
-                  splatCanvas,
-                  splatCtx,
-                  splatTex,
-                );
-              if (data.grassDensity)
-                await applyCanvasDataURL(
-                  data.grassDensity,
-                  grassDensityCanvas,
-                  grassDensityCtx,
-                  grassDensityTex,
-                );
-              if (data.meadow)
-                await applyCanvasDataURL(
-                  data.meadow,
-                  meadowCanvas,
-                  meadowCtx,
-                  meadowDensityTex,
-                );
-
-              // Trees
-              if (data.trees && treeSystem) treeSystem.setPositions(data.trees);
-
-              // Cliffs
-              if (data.cliffs) applyCliffs(data.cliffs);
-
-              // Props (models must already be in library)
-              if (data.props) applyProps(data.props);
-              if (data.waterBodies) applyWaterBodies(data.waterBodies);
-            } catch (err) {
-              console.error("Failed to load scene.json", err);
+            // Heightmap
+            const hmFile = zip.file("heightmap.bin");
+            if (hmFile) {
+              const buf = await hmFile.async("arraybuffer");
+              const loaded = new Float32Array(buf);
+              heightData.set(loaded.subarray(0, heightData.length));
+              syncGeometry();
+              syncHeightmapPreview();
+              if (bakeBVH) bakeBVH();
+              if (treeSystem) treeSystem.syncHeights();
             }
-          };
-          reader.readAsText(file);
+
+            // Canvases
+            const splatFile = zip.file("splatmap.bin");
+            if (splatFile) {
+              _rawBinToCanvas(await splatFile.async("arraybuffer"), splatCanvas, splatCtx, splatTex);
+              syncPreview();
+            }
+            const grassFile = zip.file("grass-density.bin");
+            if (grassFile)
+              _rawBinToCanvas(await grassFile.async("arraybuffer"), grassDensityCanvas, grassDensityCtx, grassDensityTex);
+
+            const meadowFile = zip.file("meadow.bin");
+            if (meadowFile)
+              _rawBinToCanvas(await meadowFile.async("arraybuffer"), meadowCanvas, meadowCtx, meadowDensityTex);
+
+            // Object positions
+            const metaFile = zip.file("scene.json");
+            if (metaFile) {
+              const meta = JSON.parse(await metaFile.async("string"));
+              if (meta.trees && treeSystem) treeSystem.setPositions(meta.trees);
+              if (meta.cliffs) applyCliffs(meta.cliffs);
+              if (meta.props) applyProps(meta.props);
+              if (meta.waterBodies) applyWaterBodies(meta.waterBodies);
+            }
+          } catch (err) {
+            console.error("Failed to load scene.zip", err);
+          }
         }
 
         // ── BRUSH RING ──
