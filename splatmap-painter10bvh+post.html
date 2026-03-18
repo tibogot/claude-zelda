@@ -160,7 +160,7 @@
     <input
       type="file"
       id="file-input"
-      accept="image/png"
+      accept=".bin,image/png"
       style="display: none"
     />
     <input
@@ -1367,24 +1367,24 @@
 
       // ─── SAVE / LOAD ─────────────────────────
       function saveSplatmap() {
+        const pixels = splatCtx.getImageData(0, 0, SPLAT_RES, SPLAT_RES).data;
+        const blob = new Blob([pixels.buffer], { type: "application/octet-stream" });
         const a = document.createElement("a");
-        a.download = "splatmap.png";
-        a.href = splatCanvas.toDataURL("image/png");
+        a.download = "splatmap.bin";
+        a.href = URL.createObjectURL(blob);
         a.click();
       }
       function loadSplatmap(file) {
         const reader = new FileReader();
         reader.onload = (e) => {
-          const img = new Image();
-          img.onload = () => {
-            splatCtx.clearRect(0, 0, SPLAT_RES, SPLAT_RES);
-            splatCtx.drawImage(img, 0, 0, SPLAT_RES, SPLAT_RES);
-            syncPreview();
-            if (splatTex) splatTex.needsUpdate = true;
-          };
-          img.src = e.target.result;
+          const loaded = new Uint8ClampedArray(e.target.result);
+          const imgData = splatCtx.createImageData(SPLAT_RES, SPLAT_RES);
+          imgData.data.set(loaded.subarray(0, imgData.data.length));
+          splatCtx.putImageData(imgData, 0, 0);
+          syncPreview();
+          if (splatTex) splatTex.needsUpdate = true;
         };
-        reader.readAsDataURL(file);
+        reader.readAsArrayBuffer(file);
       }
 
       // ─── HEIGHTMAP SAVE / LOAD ───────────────
@@ -3780,7 +3780,7 @@
         });
         const grassDensityFileInput = document.createElement("input");
         grassDensityFileInput.type = "file";
-        grassDensityFileInput.accept = "image/png";
+        grassDensityFileInput.accept = ".bin,image/png";
         grassDensityFileInput.style.display = "none";
         document.body.appendChild(grassDensityFileInput);
         const grassErasePARAMS = { erase: false };
@@ -3800,9 +3800,11 @@
           if (grassDensityTex) grassDensityTex.needsUpdate = true;
         });
         grassFolder.addButton({ title: "Save density map" }).on("click", () => {
+          const pixels = grassDensityCtx.getImageData(0, 0, SPLAT_RES, SPLAT_RES).data;
+          const blob = new Blob([pixels.buffer], { type: "application/octet-stream" });
           const a = document.createElement("a");
-          a.download = "grass-density.png";
-          a.href = grassDensityCanvas.toDataURL("image/png");
+          a.download = "grass-density.bin";
+          a.href = URL.createObjectURL(blob);
           a.click();
         });
         grassFolder
@@ -3812,15 +3814,13 @@
           if (!e.target.files[0]) return;
           const reader = new FileReader();
           reader.onload = (ev) => {
-            const img = new Image();
-            img.onload = () => {
-              grassDensityCtx.clearRect(0, 0, SPLAT_RES, SPLAT_RES);
-              grassDensityCtx.drawImage(img, 0, 0, SPLAT_RES, SPLAT_RES);
-              if (grassDensityTex) grassDensityTex.needsUpdate = true;
-            };
-            img.src = ev.target.result;
+            const loaded = new Uint8ClampedArray(ev.target.result);
+            const imgData = grassDensityCtx.createImageData(SPLAT_RES, SPLAT_RES);
+            imgData.data.set(loaded.subarray(0, imgData.data.length));
+            grassDensityCtx.putImageData(imgData, 0, 0);
+            if (grassDensityTex) grassDensityTex.needsUpdate = true;
           };
-          reader.readAsDataURL(e.target.files[0]);
+          reader.readAsArrayBuffer(e.target.files[0]);
         });
 
         // ── Trees folder ──
