@@ -368,6 +368,26 @@
       buildHeightData();
 
       // Bilinear sample from heightData — used for sphere placement + sculpt falloff
+      // Samples height using the same DISPLAY_RES (128) grid the visual mesh uses.
+      // Used for heightTex so grass sits flush with what you actually see, not the
+      // finer 512-res heightData which the mesh smooths over.
+      function sampleHeightDisplay(wx, wz) {
+        const fx = (wx / TERRAIN_SIZE + 0.5) * DISPLAY_RES;
+        const fz = (wz / TERRAIN_SIZE + 0.5) * DISPLAY_RES;
+        const ix0 = Math.max(0, Math.min(DISPLAY_RES - 1, Math.floor(fx)));
+        const iz0 = Math.max(0, Math.min(DISPLAY_RES - 1, Math.floor(fz)));
+        const ix1 = Math.min(DISPLAY_RES, ix0 + 1);
+        const iz1 = Math.min(DISPLAY_RES, iz0 + 1);
+        const tx = fx - ix0, tz = fz - iz0;
+        const wx00 = (-0.5 + ix0 / DISPLAY_RES) * TERRAIN_SIZE;
+        const wx10 = (-0.5 + ix1 / DISPLAY_RES) * TERRAIN_SIZE;
+        const wz00 = (-0.5 + iz0 / DISPLAY_RES) * TERRAIN_SIZE;
+        const wz01 = (-0.5 + iz1 / DISPLAY_RES) * TERRAIN_SIZE;
+        const h00 = sampleHeight(wx00, wz00), h10 = sampleHeight(wx10, wz00);
+        const h01 = sampleHeight(wx00, wz01), h11 = sampleHeight(wx10, wz01);
+        return h00 + (h10 - h00) * tx + (h01 - h00) * tz + (h00 - h10 - h01 + h11) * tx * tz;
+      }
+
       function sampleHeight(wx, wz) {
         const fx = (wx / TERRAIN_SIZE + 0.5) * TERRAIN_RES;
         const fz = (wz / TERRAIN_SIZE + 0.5) * TERRAIN_RES;
@@ -1763,23 +1783,41 @@
             // mergedGeo can be GC'd after MeshBVH stores its internal data
           }
 
-          // Fill heightTex: terrain baseline from sampleHeight (512-res), override with cliff top if higher
+          // Build a BVH from the actual terrain mesh geometry so heightTexData
+          // gets the exact same triangle-interpolated heights the GPU renders.
+          // This is the village5.html approach and is the only way to be exact.
+          const terrainBvh = new MeshBVH(terrainGeo);
+          const _terrainRay = new THREE.Ray(
+            new THREE.Vector3(0, 99999, 0),
+            new THREE.Vector3(0, -1, 0),
+          );
+
           for (let iz = 0; iz < HTEX_RES; iz++) {
             for (let ix = 0; ix < HTEX_RES; ix++) {
+              // CPU grid positions for bvhGrid (bilinear lookup — no half-texel needed)
               const wx = (-0.5 + ix / HTEX_RES) * TERRAIN_SIZE;
               const wz = (-0.5 + iz / HTEX_RES) * TERRAIN_SIZE;
-              let h = sampleHeight(wx, wz); // always start from accurate terrain data
+              // GPU texel-center positions for heightTexData (LinearFilter reads centers)
+              const wxG = (-0.5 + (ix + 0.5) / HTEX_RES) * TERRAIN_SIZE;
+              const wzG = (-0.5 + (iz + 0.5) / HTEX_RES) * TERRAIN_SIZE;
+
+              // Exact terrain surface height from mesh BVH (matches rendered triangles)
+              _terrainRay.origin.set(wxG, 99999, wzG);
+              const terrainHit = terrainBvh.raycastFirst(_terrainRay, THREE.DoubleSide);
+              let hGpu = terrainHit ? terrainHit.point.y : sampleHeight(wxG, wzG);
+
+              // CPU height for bvhGrid (trees/props — bilinear is fine here)
+              let hCpu = sampleHeight(wx, wz);
+
               if (cliffBvh) {
                 _bvhRay.origin.set(wx, 99999, wz);
                 const hit = cliffBvh.raycastFirst(_bvhRay, THREE.DoubleSide);
-                if (hit && hit.point.y > h) h = hit.point.y; // cliff top above terrain
+                if (hit && hit.point.y > hCpu) { hCpu = hit.point.y; hGpu = hit.point.y; }
               }
-              bvhGrid[iz * HTEX_RES + ix] = h;
+
+              bvhGrid[iz * HTEX_RES + ix] = hCpu;
               const i4 = (iz * HTEX_RES + ix) * 4;
-              heightTexData[i4] =
-                heightTexData[i4 + 1] =
-                heightTexData[i4 + 2] =
-                  h;
+              heightTexData[i4] = heightTexData[i4 + 1] = heightTexData[i4 + 2] = hGpu;
               heightTexData[i4 + 3] = 1;
             }
           }
@@ -3161,6 +3199,16 @@
           title: "AO & Normal Map",
           expanded: false,
         });
+        bakeFolder
+          .addButton({ title: "▶ Rebake BVH  (cliffs + grass + trees)" })
+          .on("click", () => {
+            if (bakeBVH) bakeBVH();
+            if (treeSystem) treeSystem.syncHeights();
+            propObjects.forEach((r) => {
+              r.position.y = bvhHeight(r.position.x, r.position.z);
+            });
+          });
+        bakeFolder.addBlade({ view: "separator" });
         bakeFolder.addBinding(PARAMS.ao, "reach", {
           label: "AO reach (steps)",
           min: 4,
