@@ -484,6 +484,15 @@
           density: 0.04,
           height: 2.0,
         },
+        erosion: {
+          iterations: 30000,
+          erosionRate: 0.3,
+          depositionRate: 0.3,
+          evaporation: 0.015,
+          inertia: 0.1,
+          capacity: 6,
+          radius: 3,
+        },
       };
 
       // ─── STATE ───────────────────────────────
@@ -902,6 +911,130 @@
           }
         }
         syncGeometry();
+      }
+
+      // ─── HYDRAULIC EROSION ───────────────────────────────────────────
+      function runErosion() {
+        pushUndo();
+        const N    = PARAMS.erosion.iterations;
+        const Ke   = PARAMS.erosion.erosionRate;
+        const Kd   = PARAMS.erosion.depositionRate;
+        const Kev  = PARAMS.erosion.evaporation;
+        const Kin  = PARAMS.erosion.inertia;
+        const Kc   = PARAMS.erosion.capacity;
+        const erRad = PARAMS.erosion.radius;
+        const G    = 4;       // gravity strength
+        const maxSteps = 80;
+        const minSlope = 0.001;
+
+        // Precompute soft erosion brush (offsets + normalized weights)
+        const r = Math.ceil(erRad);
+        const bOffX = [], bOffZ = [], bW = [];
+        let totalW = 0;
+        for (let dz = -r; dz <= r; dz++) {
+          for (let dx = -r; dx <= r; dx++) {
+            const dist = Math.sqrt(dx * dx + dz * dz);
+            if (dist >= erRad) continue;
+            const w = erRad - dist;
+            bOffX.push(dx); bOffZ.push(dz); bW.push(w);
+            totalW += w;
+          }
+        }
+        for (let i = 0; i < bW.length; i++) bW[i] /= totalW;
+
+        // Bilinear sample → height + gradient (in grid-cell units)
+        function sampleHG(px, pz) {
+          const x0 = Math.floor(px), z0 = Math.floor(pz);
+          const x1 = Math.min(TERRAIN_RES, x0 + 1);
+          const z1 = Math.min(TERRAIN_RES, z0 + 1);
+          const tx = px - x0, tz = pz - z0;
+          const h00 = heightData[z0*VERTS+x0], h10 = heightData[z0*VERTS+x1];
+          const h01 = heightData[z1*VERTS+x0], h11 = heightData[z1*VERTS+x1];
+          return {
+            h:  h00*(1-tx)*(1-tz) + h10*tx*(1-tz) + h01*(1-tx)*tz + h11*tx*tz,
+            gx: (h10-h00)*(1-tz) + (h11-h01)*tz,
+            gz: (h01-h00)*(1-tx) + (h11-h10)*tx,
+          };
+        }
+
+        // Bilinear deposit at droplet position
+        function deposit(px, pz, amt) {
+          const x0 = Math.floor(px), z0 = Math.floor(pz);
+          const x1 = Math.min(TERRAIN_RES, x0+1), z1 = Math.min(TERRAIN_RES, z0+1);
+          const tx = px - x0, tz = pz - z0;
+          heightData[z0*VERTS+x0] += amt*(1-tx)*(1-tz);
+          heightData[z0*VERTS+x1] += amt*tx*(1-tz);
+          heightData[z1*VERTS+x0] += amt*(1-tx)*tz;
+          heightData[z1*VERTS+x1] += amt*tx*tz;
+        }
+
+        // Soft-brush erode centred at droplet position
+        function erode(px, pz, amt) {
+          const cx = Math.floor(px), cz = Math.floor(pz);
+          for (let i = 0; i < bW.length; i++) {
+            const nx = cx + bOffX[i], nz = cz + bOffZ[i];
+            if (nx < 0 || nx >= VERTS || nz < 0 || nz >= VERTS) continue;
+            heightData[nz*VERTS+nx] -= amt * bW[i];
+          }
+        }
+
+        // Simulate droplets
+        for (let iter = 0; iter < N; iter++) {
+          let px = 1 + Math.random() * (VERTS - 3);
+          let pz = 1 + Math.random() * (VERTS - 3);
+          let dx = 0, dz = 0;
+          let speed = 1, water = 1, sediment = 0;
+
+          for (let step = 0; step < maxSteps; step++) {
+            const { h, gx, gz } = sampleHG(px, pz);
+
+            // Direction: blend inertia + downhill gradient
+            dx = dx * Kin - gx * (1 - Kin);
+            dz = dz * Kin - gz * (1 - Kin);
+            const len = Math.sqrt(dx*dx + dz*dz) || 1;
+            dx /= len; dz /= len;
+
+            const nx = px + dx, nz = pz + dz;
+            if (nx < 0 || nx >= VERTS-1 || nz < 0 || nz >= VERTS-1) break;
+
+            const newH = sampleHG(nx, nz).h;
+            const dh = newH - h;
+
+            // Sediment capacity: higher on steep fast-moving slopes
+            const slope = Math.max(minSlope, -dh);
+            const cap = slope * speed * water * Kc;
+
+            if (sediment > cap || dh > 0) {
+              // Slow/uphill → deposit
+              const amt = dh > 0
+                ? Math.min(sediment, dh)        // fill hollow just enough
+                : (sediment - cap) * Kd;
+              sediment -= amt;
+              deposit(px, pz, amt);
+            } else {
+              // Fast downhill → erode (capped by available height drop)
+              const amt = Math.min((cap - sediment) * Ke, -dh + 0.001);
+              sediment += amt;
+              erode(px, pz, amt);
+            }
+
+            speed = Math.sqrt(Math.max(0, speed*speed - dh * G));
+            speed = Math.min(speed, 8);   // cap runaway speed
+            water *= (1 - Kev);
+            if (water < 0.005) break;
+            px = nx; pz = nz;
+          }
+
+          // Deposit remaining carried sediment
+          deposit(px, pz, sediment * Kd);
+        }
+
+        syncGeometry();
+        if (treeSystem) treeSystem.syncHeights();
+        propObjects.forEach((root) => {
+          root.position.y = bvhHeight(root.position.x, root.position.z);
+        });
+        if (bakeBVH) bakeBVH();
       }
 
       function syncGeometry() {
@@ -2671,6 +2804,31 @@
           redo();
           generateObjects(scene);
         });
+
+        // Erosion (always visible, collapsed by default)
+        const erosionFolder = pane.addFolder({ title: "Erosion", expanded: false });
+        erosionFolder.addBinding(PARAMS.erosion, "iterations", {
+          label: "Droplets", min: 5000, max: 100000, step: 5000,
+        });
+        erosionFolder.addBinding(PARAMS.erosion, "erosionRate", {
+          label: "Erosion", min: 0.05, max: 0.9, step: 0.01,
+        });
+        erosionFolder.addBinding(PARAMS.erosion, "depositionRate", {
+          label: "Deposition", min: 0.05, max: 0.9, step: 0.01,
+        });
+        erosionFolder.addBinding(PARAMS.erosion, "evaporation", {
+          label: "Evaporation", min: 0.005, max: 0.05, step: 0.001,
+        });
+        erosionFolder.addBinding(PARAMS.erosion, "inertia", {
+          label: "Inertia", min: 0.01, max: 0.5, step: 0.01,
+        });
+        erosionFolder.addBinding(PARAMS.erosion, "capacity", {
+          label: "Capacity", min: 1, max: 20, step: 0.5,
+        });
+        erosionFolder.addBinding(PARAMS.erosion, "radius", {
+          label: "Brush radius", min: 1, max: 6, step: 0.5,
+        });
+        erosionFolder.addButton({ title: "▶ Run Erosion" }).on("click", runErosion);
 
         // Material (always visible, collapsed by default)
         const matFolder = pane.addFolder({
