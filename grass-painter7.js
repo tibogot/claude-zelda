@@ -494,6 +494,14 @@ export function createGrassMaterial(
     );
     const finalVert = add(grassMat.mul(localVert), grassOffset);
 
+    // Sample terrain height at this vertex's world XZ (not just the blade base).
+    // Each vertex stays finalVert.y above the terrain surface beneath it,
+    // so the blade never clips through the terrain on slopes regardless of lean direction.
+    const vertWorldX = add(finalVert.x, sub(bladeWorld.x, grassOffset.x));
+    const vertWorldZ = add(finalVert.z, sub(bladeWorld.z, grassOffset.z));
+    const vertTerrainUV = add(div(vec2(vertWorldX, vertWorldZ), uTerrainSize), vec2(0.5));
+    const vertTerrainH = texture(heightTex, vertTerrainUV).r;
+
     const cn1 = noise12(mul(bladeWorld.xz, 0.015)),
       cn2 = noise12(mul(bladeWorld.xz, 0.04)),
       cn3 = noise12(mul(bladeWorld.xz, 0.1));
@@ -543,7 +551,7 @@ export function createGrassMaterial(
 
     const worldFinal = vec3(
       finalVert.x,
-      add(finalVert.y, terrainH),
+      add(finalVert.y, vertTerrainH),
       finalVert.z,
     );
     vWorldPos.assign(modelWorldMatrix.mul(vec4(worldFinal, 1)).xyz);

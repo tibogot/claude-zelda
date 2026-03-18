@@ -1000,13 +1000,17 @@
         heightTex.wrapS = heightTex.wrapT = THREE.ClampToEdgeWrapping;
         heightTex.magFilter = heightTex.minFilter = THREE.LinearFilter;
 
-        // ── BVH BAKE — merges terrain + cliffs, raycasts down to build heightTex + bvhGrid ──
+        // ── BVH BAKE — cliff objects only; terrain uses full-res sampleHeight ──
+        // Raycasting the 128-vertex terrain mesh introduces triangle-diagonal interpolation
+        // errors on steep slopes (one slope under-sampled → grass goes underground).
+        // Fix: use sampleHeight (512-res heightData) as baseline; only raycast cliffs
+        // to detect surfaces above the terrain, then take max(terrain, cliff).
         const _bvhV = new THREE.Vector3();
         const _bvhRay = new THREE.Ray(new THREE.Vector3(), new THREE.Vector3(0, -1, 0));
         bakeBVH = function () {
           scene.updateMatrixWorld(true);
 
-          // Merge terrain + cliff meshes into one world-space geometry
+          // Build BVH from cliff objects only (not terrain mesh)
           const positions = [], idxList = [];
           let vOffset = 0;
           function addMesh(mesh) {
@@ -1025,22 +1029,29 @@
             }
             vOffset += posAttr.count;
           }
-          addMesh(terrain);
           cliffObjects.forEach(root => root.traverse(o => { if (o.isMesh) addMesh(o); }));
 
-          const mergedGeo = new THREE.BufferGeometry();
-          mergedGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
-          mergedGeo.setIndex(new THREE.BufferAttribute(new Uint32Array(idxList), 1));
-          const bvh = new MeshBVH(mergedGeo);
+          // Build cliff BVH only if there are any cliff meshes
+          let cliffBvh = null;
+          if (positions.length > 0) {
+            const mergedGeo = new THREE.BufferGeometry();
+            mergedGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+            mergedGeo.setIndex(new THREE.BufferAttribute(new Uint32Array(idxList), 1));
+            cliffBvh = new MeshBVH(mergedGeo);
+            // mergedGeo can be GC'd after MeshBVH stores its internal data
+          }
 
-          // Raycast straight down at every grid cell
+          // Fill heightTex: terrain baseline from sampleHeight (512-res), override with cliff top if higher
           for (let iz = 0; iz < HTEX_RES; iz++) {
             for (let ix = 0; ix < HTEX_RES; ix++) {
               const wx = (-0.5 + ix / HTEX_RES) * TERRAIN_SIZE;
               const wz = (-0.5 + iz / HTEX_RES) * TERRAIN_SIZE;
-              _bvhRay.origin.set(wx, 99999, wz);
-              const hit = bvh.raycastFirst(_bvhRay, THREE.DoubleSide);
-              const h = hit ? hit.point.y : sampleHeight(wx, wz);
+              let h = sampleHeight(wx, wz); // always start from accurate terrain data
+              if (cliffBvh) {
+                _bvhRay.origin.set(wx, 99999, wz);
+                const hit = cliffBvh.raycastFirst(_bvhRay, THREE.DoubleSide);
+                if (hit && hit.point.y > h) h = hit.point.y; // cliff top above terrain
+              }
               bvhGrid[iz * HTEX_RES + ix] = h;
               const i4 = (iz * HTEX_RES + ix) * 4;
               heightTexData[i4] = heightTexData[i4 + 1] = heightTexData[i4 + 2] = h;
@@ -1048,7 +1059,6 @@
             }
           }
           heightTex.needsUpdate = true;
-          mergedGeo.dispose();
         };
         bakeBVH();
 
