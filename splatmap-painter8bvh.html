@@ -419,8 +419,8 @@
         activePropName: "None",
         brushSize: 20,
         brushStrength: 60,
-        slopeStart: 0.72,
-        slopeEnd: 0.88,
+        slopeStart: 0.05,
+        slopeEnd: 0.70,
         debugColors: false,
         light: {
           sunAzimuth: 135,
@@ -443,7 +443,7 @@
           cloudElevation: 0.5,
         },
         fog: {
-          enabled: true,
+          enabled: false,
           type: "height",  // "height" | "distance"
           color: "#c2d8f0",
           density: 0.04,
@@ -1551,6 +1551,65 @@
           return col;
         });
 
+        // ── PROCEDURAL CLIFF SHADER — rocky grey-brown for steep slopes ──
+        const cPARAMS = {
+          brightness: 1.0,
+          contrast: 1.2,
+          baseColor: "#6b5e52",
+          layer1: {
+            enable: true,
+            noiseType: "voronoi",
+            color: "#3d3228",
+            strength: 0.7,
+            useFbm: false,
+            octaves: 3,
+            lacunarity: 2.0,
+            gain: 0.5,
+            scale: 0.03,
+            offsetX: 5.3,
+            offsetY: 9.7,
+            invert: false,
+            maskLow: 0.3,
+            maskHigh: 0.65,
+            maskSharpness: 1.4,
+            voronoiJitter: 0.9,
+          },
+          layer2: {
+            enable: true,
+            noiseType: "perlin",
+            color: "#9a8e80",
+            strength: 0.35,
+            useFbm: true,
+            octaves: 3,
+            lacunarity: 2.1,
+            gain: 0.45,
+            scale: 0.055,
+            offsetX: 62.4,
+            offsetY: 28.9,
+            invert: false,
+            maskLow: 0.5,
+            maskHigh: 0.80,
+            maskSharpness: 1.0,
+            voronoiJitter: 0.7,
+          },
+        };
+        const cBase       = uniform(new THREE.Color(cPARAMS.baseColor).convertSRGBToLinear());
+        const cContrast   = uniform(cPARAMS.contrast, "float");
+        const cBrightness = uniform(cPARAMS.brightness, "float");
+        const cL1 = groundLayerUniforms(cPARAMS.layer1);
+        const cL2 = groundLayerUniforms(cPARAMS.layer2);
+
+        const cliffProc = Fn(() => {
+          let col = cBase;
+          col = mix(col, cL1.color, groundLayerMask(cL1));
+          col = mix(col, cL2.color, groundLayerMask(cL2));
+          col = clamp(
+            col.sub(float(0.5)).mul(cContrast).add(float(0.5)).mul(cBrightness),
+            0, 1,
+          );
+          return col;
+        });
+
         // ── PROCEDURAL PATH SHADER (warm yellow-brown earthy tones) ──────
         const pU = {
           s1: uniform(0.008),
@@ -1589,17 +1648,34 @@
         // ── TSL SPLAT MATERIAL ────────────────────────────────────────────
         const uTerrainHalf = float(TERRAIN_SIZE * 0.5);
         const uTerrainSize = float(TERRAIN_SIZE);
-        const uSlopeStart = uniform(PARAMS.slopeStart);
-        const uSlopeEnd = uniform(PARAMS.slopeEnd);
+        const uSlopeStart = uniform(PARAMS.slopeStart); // flatness where cliff = 100%
+        const uSlopeEnd   = uniform(PARAMS.slopeEnd);   // flatness where cliff = 0%
         const uDebugMode = uniform(0);
-        const uRockCol = uniform(toLinear("#7a7870"));
+        const uRockCol = uniform(toLinear("#7a7870")); // kept for debug mode only
 
         const getSplatUV = () =>
           positionWorld.xz.add(uTerrainHalf).div(uTerrainSize);
-        const getFlatness = () =>
-          clamp(dot(normalWorld, vec3(0, 1, 0)), float(0), float(1));
+
+        // Sample heightTex at ±1 texel to compute true 512-res slope via finite differences.
+        // dh/dx and dh/dz give the gradient; steepness = length(gradient) relative to cell size.
+        // flatness = 1/(1 + steepness) — 1.0 = perfectly flat, ~0 = near-vertical cliff.
+        const uHeightTexStep = uniform(4.0 / HTEX_RES); // 4-texel step — straddles cliff shoulder
+        const uHeightToWorld = uniform(4.0 * TERRAIN_SIZE / HTEX_RES); // corresponding world distance
+        const getHeightTexFlatness = () => {
+          const uv = getSplatUV();
+          const hR = texture(heightTex, uv.add(vec2(uHeightTexStep, float(0)))).r;
+          const hL = texture(heightTex, uv.add(vec2(uHeightTexStep.negate(), float(0)))).r;
+          const hU = texture(heightTex, uv.add(vec2(float(0), uHeightTexStep))).r;
+          const hD = texture(heightTex, uv.add(vec2(float(0), uHeightTexStep.negate()))).r;
+          // Gradient in world units: heightTex stores raw height (not normalised)
+          const dhdx = hR.sub(hL).div(uHeightToWorld.mul(float(2)));
+          const dhdz = hU.sub(hD).div(uHeightToWorld.mul(float(2)));
+          const steepness = dhdx.mul(dhdx).add(dhdz.mul(dhdz)).sqrt();
+          // flatness: 1 = flat, approaches 0 for near-vertical
+          return float(1).div(float(1).add(steepness));
+        };
         const getSlopeMask = () =>
-          smoothstep(uSlopeStart, uSlopeEnd, getFlatness());
+          smoothstep(uSlopeStart, uSlopeEnd, getHeightTexFlatness());
         const getHeightMask = () =>
           smoothstep(
             float(HEIGHT_SCALE * 0.65),
@@ -1622,7 +1698,7 @@
           // Debug: replace with flat colors to see zone masks
           const tCol = mix(terrain, vec3(0.3, 0.78, 0.2), uDebugMode);
           const pCol = mix(path, vec3(0.72, 0.48, 0.22), uDebugMode);
-          const rCol = mix(uRockCol, vec3(0.35, 0.34, 0.32), uDebugMode);
+          const rCol = mix(cliffProc(), vec3(0.35, 0.34, 0.32), uDebugMode);
           const wCol = mix(wet, vec3(0.1, 0.08, 0.05), uDebugMode);
           // Auto layers first — fill unpainted areas
           let col = tCol;
@@ -2354,6 +2430,36 @@
           sL2,
         );
 
+        const cliffProcFolder = matFolder.addFolder({ title: "Auto-Cliff", expanded: false });
+        bindColor(cliffProcFolder, "Base color", cBase);
+        cliffProcFolder
+          .addBinding(cPARAMS, "contrast", { min: 0.2, max: 3, step: 0.05 })
+          .on("change", (e) => { cContrast.value = e.value; });
+        cliffProcFolder
+          .addBinding(cPARAMS, "brightness", { min: 0.2, max: 2, step: 0.05 })
+          .on("change", (e) => { cBrightness.value = e.value; });
+        bindGroundLayer(
+          cliffProcFolder.addFolder({ title: "Layer 1", expanded: true }),
+          cPARAMS.layer1, cL1,
+        );
+        bindGroundLayer(
+          cliffProcFolder.addFolder({ title: "Layer 2", expanded: false }),
+          cPARAMS.layer2, cL2,
+        );
+        cliffProcFolder.addBlade({ view: "separator" });
+        cliffProcFolder
+          .addBinding(PARAMS, "slopeStart", {
+            label: "Cliff start (steep)",
+            min: 0.0, max: 0.99, step: 0.01,
+          })
+          .on("change", (ev) => { uSlopeStart.value = ev.value; });
+        cliffProcFolder
+          .addBinding(PARAMS, "slopeEnd", {
+            label: "Cliff end (blend)",
+            min: 0.01, max: 1.0, step: 0.01,
+          })
+          .on("change", (ev) => { uSlopeEnd.value = ev.value; });
+
         // ── Path procedural folder ──
         const pathProcFolder = matFolder.addFolder({
           title: "Path (yellow-brown)",
@@ -2427,28 +2533,6 @@
           step: 0.01,
         });
 
-        matFolder.addBlade({ view: "separator" });
-        matFolder
-          .addBinding(PARAMS, "slopeStart", {
-            label: "Rock start",
-            min: 0,
-            max: 1,
-            step: 0.01,
-          })
-          .on("change", (ev) => {
-            uSlopeStart.value = ev.value;
-          });
-        matFolder
-          .addBinding(PARAMS, "slopeEnd", {
-            label: "Rock end",
-            min: 0,
-            max: 1,
-            step: 0.01,
-          })
-          .on("change", (ev) => {
-            uSlopeEnd.value = ev.value;
-          });
-        bindColor(matFolder, "Rock color", uRockCol);
 
         pane.addBlade({ view: "separator" });
 
