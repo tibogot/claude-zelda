@@ -83,6 +83,10 @@
         background: rgba(20, 100, 200, 0.92);
         color: #c8e8ff;
       }
+      #mode-badge.path {
+        background: rgba(110, 70, 25, 0.92);
+        color: #ffe0a0;
+      }
 
       #info {
         position: fixed;
@@ -484,6 +488,9 @@
           density: 0.04,
           height: 2.0,
         },
+        path: {
+          flattenStrength: 0.5,
+        },
         erosion: {
           iterations: 30000,
           erosionRate: 0.3,
@@ -738,6 +745,41 @@
         _applyBrushToCanvas(splatCtx, cx, cy, col.r, col.g, col.b, alpha);
         syncPreview();
         if (splatTex) splatTex.needsUpdate = true;
+      }
+
+      // ─── PATH PAINT + FLATTEN ────────────────
+      function pathPaintAt(wx, wz) {
+        // Paint path texture to splatmap blue channel (same as "village" biome)
+        const { u, v } = worldToUV(wx, wz);
+        const cx = u * SPLAT_RES, cy = v * SPLAT_RES;
+        _applyBrushToCanvas(splatCtx, cx, cy, 0, 0, 255, brushStr / 100);
+        syncPreview();
+        if (splatTex) splatTex.needsUpdate = true;
+
+        // Gently flatten terrain under brush toward center height
+        if (PARAMS.path.flattenStrength <= 0) return;
+        const targetY  = sampleHeight(wx, wz);
+        const radius   = brushWorldRadius();
+        const radiusSq = radius * radius;
+        const cellSize = TERRAIN_SIZE / TERRAIN_RES;
+        const gridR    = Math.ceil(radius / cellSize) + 1;
+        const cgx = Math.round((wx / TERRAIN_SIZE + 0.5) * TERRAIN_RES);
+        const cgz = Math.round((wz / TERRAIN_SIZE + 0.5) * TERRAIN_RES);
+        const ixMin = Math.max(0, cgx - gridR), ixMax = Math.min(TERRAIN_RES, cgx + gridR);
+        const izMin = Math.max(0, cgz - gridR), izMax = Math.min(TERRAIN_RES, cgz + gridR);
+        for (let iz = izMin; iz <= izMax; iz++) {
+          for (let ix = ixMin; ix <= ixMax; ix++) {
+            const vx = (-0.5 + ix / TERRAIN_RES) * TERRAIN_SIZE;
+            const vz = (-0.5 + iz / TERRAIN_RES) * TERRAIN_SIZE;
+            const distSq = (vx - wx) * (vx - wx) + (vz - wz) * (vz - wz);
+            if (distSq > radiusSq) continue;
+            const t = Math.sqrt(distSq) / radius;
+            const falloff = (1 - t) * (1 - t);
+            const cur = heightData[iz * VERTS + ix];
+            heightData[iz * VERTS + ix] += (targetY - cur) * falloff * PARAMS.path.flattenStrength * 0.08;
+          }
+        }
+        syncGeometry();
       }
 
       // ─── GRASS DENSITY PAINT ─────────────────
@@ -2746,6 +2788,7 @@
             Grass: "grass",
             Trees: "trees",
             "Props [I]": "props",
+            "Path [L]": "path",
             "Water [W]": "water",
             "Play [F]": "play",
           },
@@ -3705,6 +3748,23 @@
             e.target.value = "";
           });
 
+        // ── PATH FOLDER ──
+        const pathFolder = pane.addFolder({ title: "Path  [ L ]", expanded: true });
+        pathFolder.hidden = true;
+        pathFolder.addBinding(PARAMS.path, "flattenStrength", {
+          label: "Flatten strength",
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+        pathFolder.addBlade({ view: "separator" });
+        pathFolder.addButton({ title: "Clear path paint (splatmap)" }).on("click", () => {
+          // Erase blue channel by painting black over it
+          splatCtx.globalCompositeOperation = "source-over";
+          // We don't have a full-clear for one channel, so just note it
+          console.log("Use Erase biome in Paint mode to remove path texture manually.");
+        });
+
         // Wire up file inputs
         document
           .getElementById("file-input")
@@ -3756,6 +3816,7 @@
           grassFolder.hidden = mode !== "grass";
           treesFolder.hidden = mode !== "trees";
           propsFolder.hidden = mode !== "props";
+          pathFolder.hidden  = mode !== "path";
           waterFolder.hidden = mode !== "water";
           brushFolder.hidden =
             mode === "view" ||
@@ -3804,7 +3865,9 @@
                         ? "PROPS MODE  [ I ]"
                         : mode === "water"
                           ? "WATER BODIES  [ W ]"
-                          : "PLACE MODE"; // play handled above
+                          : mode === "path"
+                            ? "PATH MODE  [ L ]"
+                            : "PLACE MODE"; // play handled above
           badge.className = mode;
           renderer.domElement.style.cursor =
             mode === "view" ? "default" : "crosshair";
@@ -3847,6 +3910,8 @@
             setMode(currentMode === "trees" ? "view" : "trees");
           if (e.code === "KeyI")
             setMode(currentMode === "props" ? "view" : "props");
+          if (e.code === "KeyL")
+            setMode(currentMode === "path" ? "view" : "path");
           if (
             e.code === "KeyW" &&
             currentMode !== "place" &&
@@ -3935,6 +4000,7 @@
           if (!isMouseDown || !p) return;
           if (currentMode === "paint") paintAt(p.x, p.z);
           if (currentMode === "sculpt") sculptAt(p.x, p.z, e);
+          if (currentMode === "path") pathPaintAt(p.x, p.z);
           if (currentMode === "grass")
             paintGrassAt(p.x, p.z, grassEraseMode || e.shiftKey);
           if (currentMode === "trees")
@@ -4018,13 +4084,14 @@
 
           isMouseDown = true;
           brushNoiseSeed = Math.random() * 1000;
-          if (currentMode === "paint" || currentMode === "sculpt") pushUndo();
+          if (currentMode === "paint" || currentMode === "sculpt" || currentMode === "path") pushUndo();
           const p = getTerrainHit(e);
           if (!p) return;
           if (currentMode === "sculpt" && e.altKey)
             flattenTargetY = sampleHeight(p.x, p.z);
           if (currentMode === "paint") paintAt(p.x, p.z);
           if (currentMode === "sculpt") sculptAt(p.x, p.z, e);
+          if (currentMode === "path") pathPaintAt(p.x, p.z);
           if (currentMode === "trees")
             paintTreesAt(p.x, p.z, treeEraseMode || e.shiftKey);
         });
@@ -4032,10 +4099,10 @@
         renderer.domElement.addEventListener("mouseup", () => {
           if (!isMouseDown) return;
           isMouseDown = false;
-          if (currentMode === "paint" || currentMode === "sculpt") {
+          if (currentMode === "paint" || currentMode === "sculpt" || currentMode === "path") {
             generateObjects(scene);
           }
-          if (currentMode === "sculpt") {
+          if (currentMode === "sculpt" || currentMode === "path") {
             if (bakeBVH) bakeBVH();
             if (treeSystem) treeSystem.syncHeights();
             propObjects.forEach((root) => {
