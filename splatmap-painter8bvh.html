@@ -504,7 +504,9 @@
         scaleMin: 0.8,
         scaleMax: 1.4,
       };
-      let terrainGeo = null; // set in init, needed by sculpt
+      let terrainGeo = null;  // set in init, needed by sculpt
+      let skirtGeo   = null;  // edge skirt geometry, updated with terrain
+      const skirtEdgeXZ = []; // [{wx,wz}] for each skirt top vertex (4 * DISPLAY_VERTS)
 
       // ─── PLAY MODE STATE ─────────────────────
       const PLAYER_SPEED = 12;
@@ -774,6 +776,21 @@
         }
         pos.needsUpdate = true;
         terrainGeo.computeVertexNormals();
+
+        // Update skirt top vertices to match terrain edges
+        if (skirtGeo && skirtEdgeXZ.length > 0) {
+          const sp = skirtGeo.attributes.position;
+          const NV = DISPLAY_VERTS;
+          for (let s = 0; s < 4; s++) {
+            for (let i = 0; i < NV; i++) {
+              const { wx, wz } = skirtEdgeXZ[s * NV + i];
+              sp.setY(s * NV * 2 + i * 2, sampleHeight(wx, wz)); // top vertex
+            }
+          }
+          sp.needsUpdate = true;
+          skirtGeo.computeVertexNormals();
+        }
+
         syncHeightmapPreview();
       }
 
@@ -1031,6 +1048,68 @@
         );
         terrain.receiveShadow = true;
         scene.add(terrain);
+
+        // ── TERRAIN EDGE SKIRT ──
+        {
+          const N  = DISPLAY_RES;
+          const NV = DISPLAY_VERTS;
+          const SKIRT_BOTTOM = -(HEIGHT_SCALE + 20);
+
+          // Build edge XZ lookup (4 sides, traversed so each side faces outward)
+          // Side 0: North  (z=-half, x left→right)
+          // Side 1: East   (x=+half, z top→bottom)
+          // Side 2: South  (z=+half, x right→left — reversed for outward winding)
+          // Side 3: West   (x=-half, z bottom→top — reversed)
+          const half = TERRAIN_SIZE / 2;
+          for (let i = 0; i < NV; i++) {
+            skirtEdgeXZ.push({ wx: (-0.5 + i / N) * TERRAIN_SIZE, wz: -half }); // North
+          }
+          for (let i = 0; i < NV; i++) {
+            skirtEdgeXZ.push({ wx: half,  wz: (-0.5 + i / N) * TERRAIN_SIZE }); // East
+          }
+          for (let i = 0; i < NV; i++) {
+            skirtEdgeXZ.push({ wx: (0.5 - i / N) * TERRAIN_SIZE, wz: half });   // South (reversed)
+          }
+          for (let i = 0; i < NV; i++) {
+            skirtEdgeXZ.push({ wx: -half, wz: (0.5 - i / N) * TERRAIN_SIZE });  // West (reversed)
+          }
+
+          // Vertex buffer: per side, NV top + NV bottom interleaved: [top0, bot0, top1, bot1, ...]
+          const skirtPos = new Float32Array(4 * NV * 2 * 3);
+          const skirtIdx = [];
+
+          for (let s = 0; s < 4; s++) {
+            for (let i = 0; i < NV; i++) {
+              const { wx, wz } = skirtEdgeXZ[s * NV + i];
+              const hy = sampleHeight(wx, wz);
+              const vi = (s * NV * 2 + i * 2) * 3;
+              // top
+              skirtPos[vi]     = wx; skirtPos[vi + 1] = hy;           skirtPos[vi + 2] = wz;
+              // bottom
+              skirtPos[vi + 3] = wx; skirtPos[vi + 4] = SKIRT_BOTTOM; skirtPos[vi + 5] = wz;
+            }
+            // Quad indices for this side
+            const base = s * NV * 2;
+            for (let i = 0; i < N; i++) {
+              const tl = base + i * 2,     bl = base + i * 2 + 1;
+              const tr = base + (i+1) * 2, br = base + (i+1) * 2 + 1;
+              skirtIdx.push(tl, bl, tr,  bl, br, tr);
+            }
+          }
+
+          skirtGeo = new THREE.BufferGeometry();
+          skirtGeo.setAttribute('position', new THREE.BufferAttribute(skirtPos, 3));
+          skirtGeo.setIndex(skirtIdx);
+          skirtGeo.computeVertexNormals();
+
+          const skirtMesh = new THREE.Mesh(
+            skirtGeo,
+            new THREE.MeshStandardMaterial({ color: 0x5a4a3a, roughness: 0.95, side: THREE.DoubleSide }),
+          );
+          skirtMesh.castShadow = true;
+          skirtMesh.receiveShadow = true;
+          scene.add(skirtMesh);
+        }
 
         splatTex = new THREE.CanvasTexture(splatCanvas);
         splatTex.wrapS = splatTex.wrapT = THREE.ClampToEdgeWrapping;
