@@ -167,8 +167,9 @@
       accept=".json"
       style="display: none"
     />
-    <input type="file" id="prop-glb-input"   accept=".glb"  style="display:none" />
-    <input type="file" id="props-json-input" accept=".json" style="display:none" multiple />
+    <input type="file" id="prop-glb-input"    accept=".glb"  style="display:none" />
+    <input type="file" id="props-json-input"  accept=".json" style="display:none" multiple />
+    <input type="file" id="scene-file-input"  accept=".json" style="display:none" />
 
     <div id="mode-badge" class="view">VIEW MODE</div>
 
@@ -1684,37 +1685,29 @@
           if (bakeBVH) bakeBVH();
         }
 
+        function applyCliffs(data) {
+          cliffObjects.forEach((r) => scene.remove(r));
+          cliffObjects = [];
+          selectCliff(null);
+          data.forEach((d) => {
+            const idx = Math.max(0, Math.min(cliffTemplates.length - 1, d.modelIndex ?? 0));
+            const root = cliffTemplates[idx].clone();
+            root.position.set(d.x, d.y, d.z);
+            root.rotation.set(d.rx, d.ry, d.rz);
+            root.scale.set(d.sx, d.sy, d.sz);
+            root.userData.modelIndex = idx;
+            root.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+            scene.add(root);
+            cliffObjects.push(root);
+          });
+          if (bakeBVH) bakeBVH();
+        }
+
         function loadCliffs(file) {
           const reader = new FileReader();
           reader.onload = (ev) => {
-            try {
-              const data = JSON.parse(ev.target.result);
-              cliffObjects.forEach((r) => scene.remove(r));
-              cliffObjects = [];
-              selectCliff(null);
-              data.forEach((d) => {
-                const idx = Math.max(
-                  0,
-                  Math.min(cliffTemplates.length - 1, d.modelIndex ?? 0),
-                );
-                const root = cliffTemplates[idx].clone();
-                root.position.set(d.x, d.y, d.z);
-                root.rotation.set(d.rx, d.ry, d.rz);
-                root.scale.set(d.sx, d.sy, d.sz);
-                root.userData.modelIndex = idx;
-                root.traverse((o) => {
-                  if (o.isMesh) {
-                    o.castShadow = true;
-                    o.receiveShadow = true;
-                  }
-                });
-                scene.add(root);
-                cliffObjects.push(root);
-              });
-              if (bakeBVH) bakeBVH();
-            } catch (err) {
-              console.error("Failed to load cliffs.json", err);
-            }
+            try { applyCliffs(JSON.parse(ev.target.result)); }
+            catch (err) { console.error("Failed to load cliffs.json", err); }
           };
           reader.readAsText(file);
         }
@@ -1768,32 +1761,136 @@
           a.click();
         }
 
+        function applyProps(data) {
+          propObjects.forEach((r) => scene.remove(r));
+          propObjects = [];
+          selectProp(null);
+          data.forEach((d) => {
+            const entry = propLibrary.find((e) => e.name === d.propName);
+            if (!entry) {
+              console.warn(`Props: model "${d.propName}" not in library — import it first`);
+              return;
+            }
+            const root = entry.scene.clone();
+            root.position.set(d.x, d.y, d.z);
+            root.rotation.set(d.rx, d.ry, d.rz);
+            root.scale.set(d.sx, d.sy, d.sz);
+            root.userData.propName = d.propName;
+            root.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+            scene.add(root);
+            propObjects.push(root);
+          });
+        }
+
         function loadPropsJson(file) {
           const reader = new FileReader();
           reader.onload = (ev) => {
+            try { applyProps(JSON.parse(ev.target.result)); }
+            catch (err) { console.error("Failed to load props.json", err); }
+          };
+          reader.readAsText(file);
+        }
+
+        // ── SCENE SAVE / LOAD ─────────────────────────────────────────────
+        function saveScene() {
+          // Encode heightData as greyscale PNG (same format loadHeightmap reads)
+          const hmC = document.createElement("canvas");
+          hmC.width = hmC.height = VERTS;
+          const hmCtx = hmC.getContext("2d");
+          const imgData = hmCtx.createImageData(VERTS, VERTS);
+          for (let i = 0; i < heightData.length; i++) {
+            const v = Math.max(0, Math.min(255, Math.round(
+              ((heightData[i] + HEIGHT_SCALE) / (HEIGHT_SCALE * 2)) * 255
+            )));
+            imgData.data[i * 4 + 0] = v;
+            imgData.data[i * 4 + 1] = v;
+            imgData.data[i * 4 + 2] = v;
+            imgData.data[i * 4 + 3] = 255;
+          }
+          hmCtx.putImageData(imgData, 0, 0);
+
+          const data = {
+            version: 1,
+            heightmap:    hmC.toDataURL("image/png"),
+            splatmap:     splatCanvas.toDataURL("image/png"),
+            grassDensity: grassDensityCanvas.toDataURL("image/png"),
+            meadow:       meadowCanvas.toDataURL("image/png"),
+            trees:  treeSystem ? treeSystem.getPositions() : [],
+            cliffs: cliffObjects.map((root) => ({
+              modelIndex: root.userData.modelIndex ?? 0,
+              x: root.position.x, y: root.position.y, z: root.position.z,
+              rx: root.rotation.x, ry: root.rotation.y, rz: root.rotation.z,
+              sx: root.scale.x, sy: root.scale.y, sz: root.scale.z,
+            })),
+            props: propObjects.map((root) => ({
+              propName: root.userData.propName ?? "unknown",
+              x: root.position.x, y: root.position.y, z: root.position.z,
+              rx: root.rotation.x, ry: root.rotation.y, rz: root.rotation.z,
+              sx: root.scale.x, sy: root.scale.y, sz: root.scale.z,
+            })),
+          };
+          const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
+          const a = document.createElement("a");
+          a.download = "scene.json";
+          a.href = URL.createObjectURL(blob);
+          a.click();
+        }
+
+        function applyCanvasDataURL(dataURL, canvas, ctx, tex) {
+          return new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => {
+              ctx.clearRect(0, 0, canvas.width, canvas.height);
+              ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+              if (tex) tex.needsUpdate = true;
+              resolve();
+            };
+            img.src = dataURL;
+          });
+        }
+
+        function loadScene(file) {
+          const reader = new FileReader();
+          reader.onload = async (ev) => {
             try {
               const data = JSON.parse(ev.target.result);
-              propObjects.forEach((r) => scene.remove(r));
-              propObjects = [];
-              selectProp(null);
-              data.forEach((d) => {
-                const entry = propLibrary.find((e) => e.name === d.propName);
-                if (!entry) {
-                  console.warn(`Props: model "${d.propName}" not in library — import it first`);
-                  return;
-                }
-                const root = entry.scene.clone();
-                root.position.set(d.x, d.y, d.z);
-                root.rotation.set(d.rx, d.ry, d.rz);
-                root.scale.set(d.sx, d.sy, d.sz);
-                root.userData.propName = d.propName;
-                root.traverse((o) => {
-                  if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; }
+
+              // Heightmap
+              if (data.heightmap) {
+                await new Promise((resolve) => {
+                  const img = new Image();
+                  img.onload = () => {
+                    const c = document.createElement("canvas");
+                    c.width = c.height = VERTS;
+                    const ctx2 = c.getContext("2d");
+                    ctx2.drawImage(img, 0, 0, VERTS, VERTS);
+                    const pixels = ctx2.getImageData(0, 0, VERTS, VERTS).data;
+                    for (let i = 0; i < heightData.length; i++) {
+                      heightData[i] = (pixels[i * 4] / 255) * HEIGHT_SCALE * 2 - HEIGHT_SCALE;
+                    }
+                    syncGeometry();
+                    if (bakeBVH) bakeBVH();
+                    resolve();
+                  };
+                  img.src = data.heightmap;
                 });
-                scene.add(root);
-                propObjects.push(root);
-              });
-            } catch (err) { console.error("Failed to load props.json", err); }
+              }
+
+              // Canvases
+              if (data.splatmap)     await applyCanvasDataURL(data.splatmap,     splatCanvas,        splatCtx,        splatTex);
+              if (data.grassDensity) await applyCanvasDataURL(data.grassDensity, grassDensityCanvas, grassDensityCtx, grassDensityTex);
+              if (data.meadow)       await applyCanvasDataURL(data.meadow,       meadowCanvas,       meadowCtx,       meadowDensityTex);
+
+              // Trees
+              if (data.trees && treeSystem) treeSystem.setPositions(data.trees);
+
+              // Cliffs
+              if (data.cliffs) applyCliffs(data.cliffs);
+
+              // Props (models must already be in library)
+              if (data.props) applyProps(data.props);
+
+            } catch (err) { console.error("Failed to load scene.json", err); }
           };
           reader.readAsText(file);
         }
@@ -1916,6 +2013,14 @@
 
         // ── TWEAKPANE ──
         const pane = new Pane({ title: "Terrain Editor" });
+
+        // ── SCENE SAVE / LOAD FOLDER ──
+        const sceneFolder = pane.addFolder({ title: "Scene", expanded: true });
+        sceneFolder.addButton({ title: "💾  Save All" }).on("click", saveScene);
+        sceneFolder.addButton({ title: "📂  Load All…" }).on("click", () =>
+          document.getElementById("scene-file-input").click()
+        );
+        pane.addBlade({ view: "separator" });
 
         // Mode selector
         const modeBinding = pane.addBinding(PARAMS, "mode", {
@@ -2712,6 +2817,11 @@
           .getElementById("cliffs-file-input")
           .addEventListener("change", (e) => {
             if (e.target.files[0]) loadCliffs(e.target.files[0]);
+          });
+        document
+          .getElementById("scene-file-input")
+          .addEventListener("change", (e) => {
+            if (e.target.files[0]) { loadScene(e.target.files[0]); e.target.value = ""; }
           });
 
         // ── MODE SYSTEM ──
