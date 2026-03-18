@@ -166,7 +166,7 @@
     <input
       type="file"
       id="hmap-file-input"
-      accept="image/png"
+      accept=".bin,image/png"
       style="display: none"
     />
     <input
@@ -1388,46 +1388,35 @@
       }
 
       // ─── HEIGHTMAP SAVE / LOAD ───────────────
+      // Saves raw Float32Array as .bin — perfectly lossless, no PNG gamma issues.
       function saveHeightmap() {
-        const c = document.createElement("canvas");
-        c.width = c.height = VERTS;
-        const ctx = c.getContext("2d");
-        const imgData = ctx.createImageData(VERTS, VERTS);
-        for (let i = 0; i < heightData.length; i++) {
-          const v = Math.round(
-            ((heightData[i] + HEIGHT_SCALE) / (HEIGHT_SCALE * 2)) * 255,
-          );
-          imgData.data[i * 4 + 0] = Math.max(0, Math.min(255, v));
-          imgData.data[i * 4 + 1] = Math.max(0, Math.min(255, v));
-          imgData.data[i * 4 + 2] = Math.max(0, Math.min(255, v));
-          imgData.data[i * 4 + 3] = 255;
-        }
-        ctx.putImageData(imgData, 0, 0);
+        const blob = new Blob([heightData.buffer], {
+          type: "application/octet-stream",
+        });
         const a = document.createElement("a");
-        a.download = "heightmap.png";
-        a.href = c.toDataURL("image/png");
+        a.download = "heightmap.bin";
+        a.href = URL.createObjectURL(blob);
         a.click();
       }
       function loadHeightmap(file) {
         const reader = new FileReader();
         reader.onload = (e) => {
-          const img = new Image();
-          img.onload = () => {
-            const c = document.createElement("canvas");
-            c.width = c.height = VERTS;
-            const ctx = c.getContext("2d");
-            ctx.drawImage(img, 0, 0, VERTS, VERTS);
-            const pixels = ctx.getImageData(0, 0, VERTS, VERTS).data;
-            for (let i = 0; i < heightData.length; i++) {
-              heightData[i] =
-                (pixels[i * 4] / 255) * HEIGHT_SCALE * 2 - HEIGHT_SCALE;
-            }
-            syncGeometry();
-            if (bakeBVH) bakeBVH();
-          };
-          img.src = e.target.result;
+          const loaded = new Float32Array(e.target.result);
+          if (loaded.length === heightData.length) {
+            heightData.set(loaded);
+          } else {
+            console.warn(
+              `Heightmap size mismatch: got ${loaded.length}, expected ${heightData.length}`,
+            );
+            // Copy as much as fits
+            heightData.set(loaded.subarray(0, Math.min(loaded.length, heightData.length)));
+          }
+          syncGeometry();
+          syncHeightmapPreview();
+          if (bakeBVH) bakeBVH();
+          if (treeSystem) treeSystem.syncHeights();
         };
-        reader.readAsDataURL(file);
+        reader.readAsArrayBuffer(file);
       }
 
       // ─── CLIFF SAVE ──────────────────────────
