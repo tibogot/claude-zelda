@@ -491,7 +491,7 @@
         path: {
           flattenStrength: 0.5,
         },
-        ao: { intensity: 0.85 },
+        ao: { intensity: 0.85, reach: 24, bias: 0.05, contrast: 1.4 },
         normalMap: { scale: 2.0 },
         erosion: {
           iterations: 30000,
@@ -990,11 +990,13 @@
 
       // ─── AO BAKE ─────────────────────────────────────────────────────
       function bakeAO() {
-        const N = HTEX_RES;
+        const N        = HTEX_RES;
         const NUM_DIRS = 8;
-        const MAX_STEPS = 24;
-        const stepDist = TERRAIN_SIZE / N; // world units per AO step
-        const halfPI = Math.PI / 2;
+        const MAX_STEPS = Math.max(1, Math.round(PARAMS.ao.reach));
+        const stepDist  = TERRAIN_SIZE / N;           // world units per step
+        const biasRad   = PARAMS.ao.bias * Math.PI / 2; // ignore angles below this
+        const halfPI    = Math.PI / 2;
+        const contrast  = PARAMS.ao.contrast;
 
         for (let iz = 0; iz < N; iz++) {
           for (let ix = 0; ix < N; ix++) {
@@ -1014,10 +1016,12 @@
                 const elev = Math.atan2(sampleHeight(sx, sz) - curH, s * stepDist);
                 if (elev > maxElev) maxElev = elev;
               }
-              totalOcc += Math.max(0, maxElev) / halfPI;
+              // Bias: subtract threshold angle — shallow horizons don't contribute
+              totalOcc += Math.max(0, maxElev - biasRad) / (halfPI - biasRad);
             }
-            // ao=1 → fully lit, ao=0 → fully occluded; apply gentle power curve
-            const ao = Math.pow(Math.max(0, 1 - totalOcc / NUM_DIRS), 1.4);
+            // Raw AO 0-1, then power-curve for contrast
+            const raw = Math.max(0, 1 - totalOcc / NUM_DIRS);
+            const ao  = Math.pow(raw, contrast);
             const idx = (iz * N + ix) * 4;
             aoData[idx] = aoData[idx+1] = aoData[idx+2] = ao;
             aoData[idx+3] = 1;
@@ -2971,6 +2975,15 @@
 
         // AO + Normal Map bake
         const bakeFolder = pane.addFolder({ title: "AO & Normal Map", expanded: false });
+        bakeFolder.addBinding(PARAMS.ao, "reach", {
+          label: "AO reach (steps)", min: 4, max: 64, step: 1,
+        });
+        bakeFolder.addBinding(PARAMS.ao, "bias", {
+          label: "AO bias", min: 0, max: 0.4, step: 0.01,
+        });
+        bakeFolder.addBinding(PARAMS.ao, "contrast", {
+          label: "AO contrast", min: 0.5, max: 4, step: 0.05,
+        });
         bakeFolder.addBinding(PARAMS.ao, "intensity", {
           label: "AO intensity", min: 0, max: 1, step: 0.01,
         }).on("change", (ev) => { uAOIntensity.value = ev.value; });
