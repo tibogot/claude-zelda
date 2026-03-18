@@ -79,6 +79,10 @@
         background: rgba(210, 110, 20, 0.92);
         color: #fff5e0;
       }
+      #mode-badge.water {
+        background: rgba(20, 100, 200, 0.92);
+        color: #c8e8ff;
+      }
 
       #info {
         position: fixed;
@@ -170,6 +174,7 @@
     <input type="file" id="prop-glb-input"    accept=".glb"  style="display:none" />
     <input type="file" id="props-json-input"  accept=".json" style="display:none" multiple />
     <input type="file" id="scene-file-input"  accept=".json" style="display:none" />
+    <input type="file" id="water-json-input"  accept=".json" style="display:none" />
 
     <div id="mode-badge" class="view">VIEW MODE</div>
 
@@ -442,6 +447,13 @@
           cloudDensity: 0.4,
           cloudElevation: 0.5,
         },
+        water: {
+          color:      "#3ab0d8",
+          opacity:    0.72,
+          roughness:  0.05,
+          sinkOffset: -0.05,
+          preset:     "Small lake",
+        },
         fog: {
           enabled: false,
           type: "height",  // "height" | "distance"
@@ -473,6 +485,8 @@
       let selectedProp = null;   // currently selected prop root
       let propLibrary = [];      // [{ name, scene }] loaded GLBs
       let activePropIndex = -1;  // index into propLibrary
+      let waterObjects = [];     // placed water body meshes
+      let selectedWater = null;  // currently selected water body
       let syncHeightTex = null; // kept but replaced by bakeBVH
       let bakeBVH = null;       // assigned inside init
       let treeSystem = null;
@@ -1782,6 +1796,97 @@
         }
         syncFog();
 
+        // ── WATER BODIES ──────────────────────────────────────────────────
+        const WATER_PRESETS = {
+          "Puddle":      { w: 3,  l: 3  },
+          "Small lake":  { w: 20, l: 20 },
+          "Large lake":  { w: 60, l: 60 },
+          "River strip": { w: 8,  l: 50 },
+        };
+
+        const uWaterColor    = uniform(new THREE.Color(PARAMS.water.color).convertSRGBToLinear());
+        const uWaterOpacity  = uniform(PARAMS.water.opacity);
+        const uWaterRoughness = uniform(PARAMS.water.roughness);
+
+        const waterBodyMat = new MeshStandardNodeMaterial({
+          transparent: true,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
+        waterBodyMat.colorNode     = uWaterColor;
+        waterBodyMat.opacityNode   = uWaterOpacity;
+        waterBodyMat.roughnessNode = uWaterRoughness;
+        waterBodyMat.metalnessNode = float(0.0);
+        waterBodyMat.fog = false;
+
+        function syncWaterMat() {
+          uWaterColor.value.set(PARAMS.water.color).convertSRGBToLinear();
+          uWaterOpacity.value   = PARAMS.water.opacity;
+          uWaterRoughness.value = PARAMS.water.roughness;
+        }
+
+        function getWaterRoot(object) {
+          let obj = object;
+          while (obj) {
+            if (waterObjects.includes(obj)) return obj;
+            obj = obj.parent;
+          }
+          return null;
+        }
+
+        function selectWater(mesh) {
+          selectedWater = mesh;
+          if (mesh) {
+            tcHelper.visible = true;
+            transformControls.attach(mesh);
+          } else {
+            tcHelper.visible = false;
+            transformControls.detach();
+          }
+        }
+
+        function placeWater(wx, wy, wz) {
+          const preset = WATER_PRESETS[PARAMS.water.preset] ?? WATER_PRESETS["Small lake"];
+          const geo = new THREE.PlaneGeometry(preset.w, preset.l);
+          geo.rotateX(-Math.PI / 2);
+          const mesh = new THREE.Mesh(geo, waterBodyMat);
+          mesh.position.set(wx, wy + PARAMS.water.sinkOffset, wz);
+          mesh.renderOrder = 2;
+          scene.add(mesh);
+          waterObjects.push(mesh);
+          selectWater(mesh);
+        }
+
+        function applyWaterBodies(data) {
+          waterObjects.forEach((m) => scene.remove(m));
+          waterObjects = [];
+          selectWater(null);
+          data.forEach((d) => {
+            const geo = new THREE.PlaneGeometry(1, 1);
+            geo.rotateX(-Math.PI / 2);
+            const mesh = new THREE.Mesh(geo, waterBodyMat);
+            mesh.position.set(d.x, d.y, d.z);
+            mesh.rotation.set(d.rx, d.ry, d.rz);
+            mesh.scale.set(d.sx, d.sy, d.sz);
+            mesh.renderOrder = 2;
+            scene.add(mesh);
+            waterObjects.push(mesh);
+          });
+        }
+
+        function saveWaterBodies() {
+          const data = waterObjects.map((m) => ({
+            x: m.position.x, y: m.position.y, z: m.position.z,
+            rx: m.rotation.x, ry: m.rotation.y, rz: m.rotation.z,
+            sx: m.scale.x, sy: m.scale.y, sz: m.scale.z,
+          }));
+          const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+          const a = document.createElement("a");
+          a.download = "water-bodies.json";
+          a.href = URL.createObjectURL(blob);
+          a.click();
+        }
+
         // ── CLIFF TEMPLATES ──
         const gltfLoader = new GLTFLoader();
         const CLIFF_FALLBACK_COLORS = [0x8a7a6a, 0x6a5a4a, 0x7a6858];
@@ -2016,6 +2121,11 @@
               rx: root.rotation.x, ry: root.rotation.y, rz: root.rotation.z,
               sx: root.scale.x, sy: root.scale.y, sz: root.scale.z,
             })),
+            waterBodies: waterObjects.map((m) => ({
+              x: m.position.x, y: m.position.y, z: m.position.z,
+              rx: m.rotation.x, ry: m.rotation.y, rz: m.rotation.z,
+              sx: m.scale.x, sy: m.scale.y, sz: m.scale.z,
+            })),
           };
           const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
           const a = document.createElement("a");
@@ -2077,6 +2187,7 @@
 
               // Props (models must already be in library)
               if (data.props) applyProps(data.props);
+              if (data.waterBodies) applyWaterBodies(data.waterBodies);
 
             } catch (err) { console.error("Failed to load scene.json", err); }
           };
@@ -2221,6 +2332,7 @@
             Grass: "grass",
             Trees: "trees",
             "Props [I]": "props",
+            "Water [W]": "water",
             "Play [F]": "play",
           },
         });
@@ -3016,6 +3128,54 @@
             e.target.value = "";
           });
 
+        // ── WATER BODIES FOLDER ──
+        const waterFolder = pane.addFolder({ title: "Water Bodies  [ W ]", expanded: true });
+        waterFolder.hidden = true;
+
+        waterFolder.addBinding(PARAMS.water, "color", { label: "Color" })
+          .on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "opacity", { label: "Opacity", min: 0.1, max: 1, step: 0.01 })
+          .on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "roughness", { label: "Roughness", min: 0, max: 1, step: 0.01 })
+          .on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "sinkOffset", { label: "Sink offset", min: -2, max: 2, step: 0.01 });
+        waterFolder.addBinding(PARAMS.water, "preset", {
+          label: "Size preset",
+          options: {
+            "Puddle": "Puddle",
+            "Small lake": "Small lake",
+            "Large lake": "Large lake",
+            "River strip": "River strip",
+          },
+        });
+        waterFolder.addBlade({ view: "separator" });
+        waterFolder.addButton({ title: "Save water JSON" }).on("click", saveWaterBodies);
+        waterFolder.addButton({ title: "Load water JSON…" }).on("click", () =>
+          document.getElementById("water-json-input").click()
+        );
+        waterFolder.addButton({ title: "Delete selected (Del)" }).on("click", () => {
+          if (!selectedWater) return;
+          scene.remove(selectedWater);
+          waterObjects = waterObjects.filter((m) => m !== selectedWater);
+          selectWater(null);
+        });
+        waterFolder.addButton({ title: "Clear all water bodies" }).on("click", () => {
+          waterObjects.forEach((m) => scene.remove(m));
+          waterObjects = [];
+          selectWater(null);
+        });
+
+        document.getElementById("water-json-input").addEventListener("change", (e) => {
+          if (!e.target.files[0]) return;
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            try { applyWaterBodies(JSON.parse(ev.target.result)); }
+            catch (err) { console.error("Failed to load water-bodies.json", err); }
+          };
+          reader.readAsText(e.target.files[0]);
+          e.target.value = "";
+        });
+
         // Wire up file inputs
         document
           .getElementById("file-input")
@@ -3064,20 +3224,22 @@
           grassFolder.hidden = mode !== "grass";
           treesFolder.hidden = mode !== "trees";
           propsFolder.hidden = mode !== "props";
-          brushFolder.hidden = mode === "view" || mode === "place" || mode === "props";
+          waterFolder.hidden = mode !== "water";
+          brushFolder.hidden = mode === "view" || mode === "place" || mode === "props" || mode === "water";
 
-          const usingTC = mode === "place" || mode === "props";
+          const usingTC = mode === "place" || mode === "props" || mode === "water";
           if (!usingTC && transformControls) {
             if (tcHelper) tcHelper.visible = false;
             transformControls.enabled = false;
             transformControls.detach();
             selectedCliff = null;
             selectedProp = null;
+            selectWater(null);
           } else if (usingTC && transformControls) {
             transformControls.enabled = true;
-            // When switching between place and props, clear the other's selection
-            if (mode === "place") { selectedProp = null; }
-            if (mode === "props") { selectedCliff = null; }
+            if (mode === "place") { selectedProp = null; selectWater(null); }
+            if (mode === "props") { selectedCliff = null; selectWater(null); }
+            if (mode === "water") { selectedCliff = null; selectedProp = null; }
           }
 
           const badge = document.getElementById("mode-badge");
@@ -3094,11 +3256,13 @@
                       ? "TREES MODE"
                       : mode === "props"
                         ? "PROPS MODE  [ I ]"
-                        : "PLACE MODE"; // play handled above
+                        : mode === "water"
+                          ? "WATER BODIES  [ W ]"
+                          : "PLACE MODE"; // play handled above
           badge.className = mode;
           renderer.domElement.style.cursor =
             mode === "view" ? "default" : "crosshair";
-          if (mode === "view" || mode === "place" || mode === "props") brushRing.visible = false;
+          if (mode === "view" || mode === "place" || mode === "props" || mode === "water") brushRing.visible = false;
         }
         setMode("view");
 
@@ -3127,10 +3291,14 @@
             setMode(currentMode === "place" ? "view" : "place");
           if (e.code === "KeyG")
             setMode(currentMode === "grass" ? "view" : "grass");
-          if (e.code === "KeyT")
+          if (e.code === "KeyT" && currentMode !== "water")
             setMode(currentMode === "trees" ? "view" : "trees");
           if (e.code === "KeyI")
             setMode(currentMode === "props" ? "view" : "props");
+          if (e.code === "KeyW" && currentMode !== "place" && currentMode !== "props" && currentMode !== "water")
+            setMode("water");
+          else if (e.code === "KeyW" && currentMode === "water")
+            setMode("view");
           if (e.code === "Escape") setMode("view");
           if (currentMode === "place") {
             if (e.code === "KeyW") {
@@ -3171,6 +3339,25 @@
               selectProp(null);
             }
           }
+          if (currentMode === "water") {
+            if (e.code === "KeyE") {
+              e.preventDefault();
+              transformControls.setMode("translate");
+            }
+            if (e.code === "KeyR") {
+              e.preventDefault();
+              transformControls.setMode("rotate");
+            }
+            if (e.code === "KeyT") {
+              e.preventDefault();
+              transformControls.setMode("scale");
+            }
+            if (e.code === "Delete" && selectedWater) {
+              scene.remove(selectedWater);
+              waterObjects = waterObjects.filter((m) => m !== selectedWater);
+              selectWater(null);
+            }
+          }
         });
 
         // ── MOUSE ──
@@ -3179,7 +3366,7 @@
         );
 
         renderer.domElement.addEventListener("mousemove", (e) => {
-          if (currentMode === "view" || currentMode === "place" || currentMode === "props") return;
+          if (currentMode === "view" || currentMode === "place" || currentMode === "props" || currentMode === "water") return;
           const p = getTerrainHit(e);
           updateBrushRing(p);
           if (!isMouseDown || !p) return;
@@ -3238,6 +3425,24 @@
             // Click on terrain → place new prop
             const pt = getTerrainHit(e);
             if (pt) placeProp(pt.x, pt.y, pt.z);
+            return;
+          }
+
+          if (currentMode === "water") {
+            if (transformControls.axis !== null) return;
+            const rect = renderer.domElement.getBoundingClientRect();
+            mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            // Try hitting an existing water body first
+            const waterHits = raycaster.intersectObjects(waterObjects, false);
+            if (waterHits.length > 0) {
+              selectWater(getWaterRoot(waterHits[0].object) ?? waterHits[0].object);
+              return;
+            }
+            // Click on terrain → place new water body
+            const pt = getTerrainHit(e);
+            if (pt) placeWater(pt.x, pt.y, pt.z);
             return;
           }
 
