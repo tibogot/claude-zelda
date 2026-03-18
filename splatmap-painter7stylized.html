@@ -61,6 +61,7 @@
       }
       #mode-badge.grass  { background: rgba(60,160,60,0.85); color: #fff; }
       #mode-badge.trees  { background: rgba(20,80,20,0.92);  color: #ccffcc; }
+      #mode-badge.play   { background: rgba(20,20,180,0.92); color: #aaccff; }
       #mode-badge.place {
         background: rgba(180, 60, 200, 0.9);
         color: #fff;
@@ -423,6 +424,15 @@
       let treeEraseMode = false;
       const treeParams = { treesPerStroke: 3, minSpacing: 8, scaleMin: 0.8, scaleMax: 1.4 };
       let terrainGeo = null; // set in init, needed by sculpt
+
+      // ─── PLAY MODE STATE ─────────────────────
+      const PLAYER_SPEED = 12;
+      const PLAYER_CAP_R = 0.4, PLAYER_CAP_H = 1.2; // capsule radius + length
+      const CAM_DIST = 8;
+      const playerPos = new THREE.Vector3();
+      let camYaw = 0, camPitch = 0.35;
+      const keysHeld = {};
+      let savedCamPos = null, savedOrbitTarget = null;
 
       // ─── CLIFF STATE ─────────────────────────
       const CLIFF_MODELS = [
@@ -1302,6 +1312,60 @@
         brushRing.renderOrder = 2;
         scene.add(brushRing);
 
+        // ── PLAY MODE CAPSULE ──
+        const capsuleGeo = new THREE.CapsuleGeometry(PLAYER_CAP_R, PLAYER_CAP_H, 4, 8);
+        const capsuleMat = new THREE.MeshStandardMaterial({ color: 0xff6633, roughness: 0.7 });
+        const capsuleMesh = new THREE.Mesh(capsuleGeo, capsuleMat);
+        capsuleMesh.castShadow = true;
+        capsuleMesh.visible = false;
+        scene.add(capsuleMesh);
+
+        function enterPlayMode() {
+          savedCamPos = camera.position.clone();
+          savedOrbitTarget = orbit.target.clone();
+          // Spawn at orbit target, snapped to terrain
+          playerPos.set(orbit.target.x, 0, orbit.target.z);
+          playerPos.y = sampleHeight(playerPos.x, playerPos.z);
+          camYaw = 0; camPitch = 0.35;
+          capsuleMesh.visible = true;
+          orbit.enabled = false;
+          // Hide editor UI
+          const tpEl = document.querySelector('.tp-dfwv');
+          if (tpEl) tpEl.style.display = 'none';
+          document.getElementById('info').style.display = 'none';
+          document.getElementById('heightmap-preview').style.display = 'none';
+          document.getElementById('splatmap-preview').style.display = 'none';
+          document.querySelectorAll('.preview-label').forEach(el => el.style.display = 'none');
+          brushRing.visible = false;
+          renderer.domElement.requestPointerLock();
+        }
+
+        function exitPlayMode() {
+          capsuleMesh.visible = false;
+          if (savedCamPos) camera.position.copy(savedCamPos);
+          if (savedOrbitTarget) orbit.target.copy(savedOrbitTarget);
+          camera.lookAt(orbit.target);
+          // Restore editor UI
+          const tpEl = document.querySelector('.tp-dfwv');
+          if (tpEl) tpEl.style.display = '';
+          document.getElementById('info').style.display = '';
+          document.getElementById('heightmap-preview').style.display = '';
+          document.getElementById('splatmap-preview').style.display = '';
+          document.querySelectorAll('.preview-label').forEach(el => el.style.display = '');
+          if (document.pointerLockElement) document.exitPointerLock();
+        }
+
+        // Mouse look (pointer lock)
+        document.addEventListener('mousemove', (e) => {
+          if (currentMode !== 'play' || !document.pointerLockElement) return;
+          camYaw   -= e.movementX * 0.002;
+          camPitch += e.movementY * 0.002;
+          camPitch  = Math.max(0.05, Math.min(PI * 0.45, camPitch));
+        });
+        document.addEventListener('pointerlockchange', () => {
+          if (!document.pointerLockElement && currentMode === 'play') setMode('view');
+        });
+
         // ── RAYCASTER ──
         const raycaster = new THREE.Raycaster();
         const mouse = new THREE.Vector2();
@@ -1343,6 +1407,7 @@
             Place: "place",
             Grass: "grass",
             Trees: "trees",
+            "Play [F]": "play",
           },
         });
         modeBinding.on("change", (ev) => setMode(ev.value));
@@ -1689,10 +1754,22 @@
 
         // ── MODE SYSTEM ──
         function setMode(mode) {
+          const leavingPlay = currentMode === 'play' && mode !== 'play';
           currentMode = mode;
           PARAMS.mode = mode;
-          pane.refresh();
 
+          if (leavingPlay) exitPlayMode();
+
+          if (mode === 'play') {
+            enterPlayMode();
+            const badge = document.getElementById("mode-badge");
+            badge.textContent = "PLAY MODE  [ F / Esc to exit ]";
+            badge.className = "play";
+            renderer.domElement.style.cursor = "none";
+            return;
+          }
+
+          pane.refresh();
           orbit.enabled = mode === "view";
 
           paintFolder.hidden = mode !== "paint";
@@ -1718,7 +1795,7 @@
             mode === "sculpt" ? "SCULPT MODE" :
             mode === "grass"  ? "GRASS MODE"  :
             mode === "trees"  ? "TREES MODE"  :
-                                "PLACE MODE";
+                                "PLACE MODE";  // play handled above
           badge.className = mode;
           renderer.domElement.style.cursor =
             mode === "view" ? "default" : "crosshair";
@@ -1727,7 +1804,17 @@
         setMode("view");
 
         // ── KEYBOARD ──
+        window.addEventListener("keyup", (e) => { keysHeld[e.code] = false; });
+
         window.addEventListener("keydown", (e) => {
+          // Play mode: track WASD, only allow exit keys
+          if (currentMode === "play") {
+            keysHeld[e.code] = true;
+            if (e.code.startsWith("Arrow")) e.preventDefault();
+            if (e.code === "Escape" || e.code === "KeyF") setMode("view");
+            return;
+          }
+          if (e.code === "KeyF") { setMode("play"); return; }
           if (e.code === "KeyP")
             setMode(currentMode === "paint" ? "view" : "paint");
           if (e.code === "KeyS" && currentMode !== "place")
@@ -1847,6 +1934,43 @@
         renderer.setAnimationLoop(() => {
           clock.update();
           const elapsed = clock.getElapsed();
+          const dt = clock.getDelta();
+
+          // ── PLAY MODE UPDATE ──
+          if (currentMode === 'play') {
+            // WASD movement relative to camera yaw
+            let mx = 0, mz = 0;
+            if (keysHeld['KeyW'] || keysHeld['ArrowUp'])    { mx -= Math.sin(camYaw); mz -= Math.cos(camYaw); }
+            if (keysHeld['KeyS'] || keysHeld['ArrowDown'])  { mx += Math.sin(camYaw); mz += Math.cos(camYaw); }
+            if (keysHeld['KeyA'] || keysHeld['ArrowLeft'])  { mx -= Math.cos(camYaw); mz += Math.sin(camYaw); }
+            if (keysHeld['KeyD'] || keysHeld['ArrowRight']) { mx += Math.cos(camYaw); mz -= Math.sin(camYaw); }
+            const mlen = Math.sqrt(mx * mx + mz * mz);
+            if (mlen > 0) {
+              playerPos.x += (mx / mlen) * PLAYER_SPEED * dt;
+              playerPos.z += (mz / mlen) * PLAYER_SPEED * dt;
+              playerPos.x = Math.max(-TERRAIN_SIZE / 2, Math.min(TERRAIN_SIZE / 2, playerPos.x));
+              playerPos.z = Math.max(-TERRAIN_SIZE / 2, Math.min(TERRAIN_SIZE / 2, playerPos.z));
+            }
+            // Snap Y to terrain
+            playerPos.y = sampleHeight(playerPos.x, playerPos.z);
+            const capsuleCY = playerPos.y + PLAYER_CAP_R + PLAYER_CAP_H * 0.5;
+            capsuleMesh.position.set(playerPos.x, capsuleCY, playerPos.z);
+            // Face direction of movement
+            if (mlen > 0) capsuleMesh.rotation.y = Math.atan2(mx, mz) + PI;
+            // Third-person camera
+            const lookAtY = capsuleCY + 0.6;
+            const hDist = CAM_DIST * Math.cos(camPitch);
+            const vDist = CAM_DIST * Math.sin(camPitch);
+            camera.position.set(
+              playerPos.x + Math.sin(camYaw) * hDist,
+              lookAtY + vDist,
+              playerPos.z + Math.cos(camYaw) * hDist,
+            );
+            camera.lookAt(playerPos.x, lookAtY, playerPos.z);
+            // Feed player pos to grass interaction
+            if (grassUniforms) grassUniforms.uPlayerPos.value.set(playerPos.x, playerPos.y, playerPos.z);
+          }
+
           if (grassUniforms) grassUniforms.uTime.value = elapsed;
           if (grassPatchSystem) {
             camera.updateMatrixWorld();
@@ -1873,7 +1997,7 @@
           scene.environmentIntensity = PARAMS.light.envIntensity;
           renderer.toneMappingExposure = PARAMS.light.exposure;
 
-          orbit.update();
+          if (currentMode !== 'play') orbit.update();
           stats.update();
           renderer.render(scene, camera);
         });
