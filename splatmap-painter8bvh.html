@@ -75,6 +75,10 @@
         background: rgba(180, 60, 200, 0.9);
         color: #fff;
       }
+      #mode-badge.props {
+        background: rgba(210, 110, 20, 0.92);
+        color: #fff5e0;
+      }
 
       #info {
         position: fixed;
@@ -163,6 +167,8 @@
       accept=".json"
       style="display: none"
     />
+    <input type="file" id="prop-glb-input"   accept=".glb"  style="display:none" />
+    <input type="file" id="props-json-input" accept=".json" style="display:none" multiple />
 
     <div id="mode-badge" class="view">VIEW MODE</div>
 
@@ -405,6 +411,8 @@
         sculptTool: "raise",
         cliffModel: 0,
         sinkOffset: 2,
+        propSinkOffset: 0,
+        activePropName: "None",
         brushSize: 20,
         brushStrength: 60,
         slopeStart: 0.72,
@@ -448,6 +456,12 @@
       let grassUniforms = null;
       let grassEraseMode = false;
       let meadowDensityTex = null;
+
+      // ─── PROPS STATE ─────────────────────────
+      let propObjects = [];      // placed prop roots in scene
+      let selectedProp = null;   // currently selected prop root
+      let propLibrary = [];      // [{ name, scene }] loaded GLBs
+      let activePropIndex = -1;  // index into propLibrary
       let syncHeightTex = null; // kept but replaced by bakeBVH
       let bakeBVH = null;       // assigned inside init
       let treeSystem = null;
@@ -1705,6 +1719,85 @@
           reader.readAsText(file);
         }
 
+        // ── PROPS FUNCTIONS ──────────────────────────────────────────────
+
+        function getPropRoot(object) {
+          let obj = object;
+          while (obj) {
+            if (propObjects.includes(obj)) return obj;
+            obj = obj.parent;
+          }
+          return null;
+        }
+
+        function selectProp(root) {
+          selectedProp = root;
+          if (root) {
+            tcHelper.visible = true;
+            transformControls.attach(root);
+          } else {
+            tcHelper.visible = false;
+            transformControls.detach();
+          }
+        }
+
+        function placeProp(wx, wy, wz) {
+          if (activePropIndex < 0 || activePropIndex >= propLibrary.length) return;
+          const root = propLibrary[activePropIndex].scene.clone();
+          root.position.set(wx, wy + PARAMS.propSinkOffset, wz);
+          root.userData.propName = propLibrary[activePropIndex].name;
+          root.traverse((o) => {
+            if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; }
+          });
+          scene.add(root);
+          propObjects.push(root);
+          selectProp(root);
+        }
+
+        function saveProps() {
+          const data = propObjects.map((root) => ({
+            propName: root.userData.propName ?? "unknown",
+            x: root.position.x, y: root.position.y, z: root.position.z,
+            rx: root.rotation.x, ry: root.rotation.y, rz: root.rotation.z,
+            sx: root.scale.x, sy: root.scale.y, sz: root.scale.z,
+          }));
+          const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+          const a = document.createElement("a");
+          a.download = "props.json";
+          a.href = URL.createObjectURL(blob);
+          a.click();
+        }
+
+        function loadPropsJson(file) {
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            try {
+              const data = JSON.parse(ev.target.result);
+              propObjects.forEach((r) => scene.remove(r));
+              propObjects = [];
+              selectProp(null);
+              data.forEach((d) => {
+                const entry = propLibrary.find((e) => e.name === d.propName);
+                if (!entry) {
+                  console.warn(`Props: model "${d.propName}" not in library — import it first`);
+                  return;
+                }
+                const root = entry.scene.clone();
+                root.position.set(d.x, d.y, d.z);
+                root.rotation.set(d.rx, d.ry, d.rz);
+                root.scale.set(d.sx, d.sy, d.sz);
+                root.userData.propName = d.propName;
+                root.traverse((o) => {
+                  if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; }
+                });
+                scene.add(root);
+                propObjects.push(root);
+              });
+            } catch (err) { console.error("Failed to load props.json", err); }
+          };
+          reader.readAsText(file);
+        }
+
         // ── BRUSH RING ──
         const brushRingGeo = new THREE.RingGeometry(1, 1.06, 48);
         brushRingGeo.rotateX(-PI / 2);
@@ -1834,6 +1927,7 @@
             Place: "place",
             Grass: "grass",
             Trees: "trees",
+            "Props [I]": "props",
             "Play [F]": "play",
           },
         });
@@ -2457,6 +2551,152 @@
           reader.readAsText(e.target.files[0]);
         });
 
+        // ── PROPS FOLDER ──
+        const propsFolder = pane.addFolder({
+          title: "Props  [ I ]",
+          expanded: true,
+        });
+        propsFolder.hidden = true;
+
+        const propActivePARAMS = { name: "None" };
+        propsFolder.addBinding(propActivePARAMS, "name", {
+          label: "Active model",
+          readonly: true,
+        });
+
+        // Project model picker
+        const PROJECT_MODELS = [
+          "low_poly_fern.glb",
+          "rock__game_asset.glb",
+          "ruined_elden_ring_church.glb",
+          "japanese_cherry_tree.glb",
+        ];
+        const projectPickPARAMS = { model: "— pick a model —" };
+        function loadProjectModel(filename) {
+          const url = `models/${filename}`;
+          const name = filename.replace(/\.glb$/i, "");
+          gltfLoader.loadAsync(url).then((gltf) => {
+            gltf.scene.traverse((o) => {
+              if (o.isMesh) {
+                o.castShadow = true;
+                o.receiveShadow = true;
+                if (o.material && (o.material.transparent || o.material.alphaTest > 0)) {
+                  const m = o.material.clone();
+                  m.transparent = false;
+                  m.alphaTest = 0.5;
+                  m.depthWrite = true;
+                  o.material = m;
+                }
+              }
+            });
+            const existing = propLibrary.findIndex((en) => en.name === name);
+            if (existing >= 0) {
+              propLibrary[existing] = { name, scene: gltf.scene };
+              activePropIndex = existing;
+            } else {
+              propLibrary.push({ name, scene: gltf.scene });
+              activePropIndex = propLibrary.length - 1;
+            }
+            propActivePARAMS.name = name;
+            PARAMS.activePropName = name;
+            pane.refresh();
+          }).catch((err) => console.error(`Failed to load ${url}`, err));
+        }
+        propsFolder.addBinding(projectPickPARAMS, "model", {
+          label: "Project model",
+          options: Object.fromEntries(
+            ["— pick a model —", ...PROJECT_MODELS].map((m) => [m, m])
+          ),
+        }).on("change", (ev) => {
+          if (ev.value !== "— pick a model —") loadProjectModel(ev.value);
+        });
+
+        propsFolder
+          .addButton({ title: "Import GLB…" })
+          .on("click", () =>
+            document.getElementById("prop-glb-input").click(),
+          );
+
+        propsFolder.addBinding(PARAMS, "propSinkOffset", {
+          label: "Sink offset",
+          min: -2,
+          max: 2,
+          step: 0.01,
+        });
+
+        propsFolder
+          .addButton({ title: "Save props JSON" })
+          .on("click", saveProps);
+
+        propsFolder
+          .addButton({ title: "Load props JSON…" })
+          .on("click", () =>
+            document.getElementById("props-json-input").click(),
+          );
+
+        propsFolder
+          .addButton({ title: "Delete selected (Del)" })
+          .on("click", () => {
+            if (!selectedProp) return;
+            scene.remove(selectedProp);
+            propObjects = propObjects.filter((p) => p !== selectedProp);
+            selectProp(null);
+          });
+
+        propsFolder
+          .addButton({ title: "Clear all props" })
+          .on("click", () => {
+            propObjects.forEach((r) => scene.remove(r));
+            propObjects = [];
+            selectProp(null);
+          });
+
+        // ── PROP FILE INPUTS ──
+        document
+          .getElementById("prop-glb-input")
+          .addEventListener("change", (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const url = URL.createObjectURL(file);
+            const name = file.name.replace(/\.glb$/i, "");
+            gltfLoader.loadAsync(url).then((gltf) => {
+              // Normalize materials (alpha-test like trees)
+              gltf.scene.traverse((o) => {
+                if (o.isMesh) {
+                  o.castShadow = true;
+                  o.receiveShadow = true;
+                  if (o.material && (o.material.transparent || o.material.alphaTest > 0)) {
+                    const m = o.material.clone();
+                    m.transparent = false;
+                    m.alphaTest = 0.5;
+                    m.depthWrite = true;
+                    o.material = m;
+                  }
+                }
+              });
+              const existing = propLibrary.findIndex((en) => en.name === name);
+              if (existing >= 0) {
+                propLibrary[existing] = { name, scene: gltf.scene };
+                activePropIndex = existing;
+              } else {
+                propLibrary.push({ name, scene: gltf.scene });
+                activePropIndex = propLibrary.length - 1;
+              }
+              PARAMS.activePropName = name;
+              propActivePARAMS.name = name;
+              pane.refresh();
+              e.target.value = "";
+            });
+          });
+
+        document
+          .getElementById("props-json-input")
+          .addEventListener("change", (e) => {
+            const files = Array.from(e.target.files);
+            files.forEach((f) => loadPropsJson(f));
+            e.target.value = "";
+          });
+
         // Wire up file inputs
         document
           .getElementById("file-input")
@@ -2499,15 +2739,21 @@
           placeFolder.hidden = mode !== "place";
           grassFolder.hidden = mode !== "grass";
           treesFolder.hidden = mode !== "trees";
-          brushFolder.hidden = mode === "view" || mode === "place";
+          propsFolder.hidden = mode !== "props";
+          brushFolder.hidden = mode === "view" || mode === "place" || mode === "props";
 
-          if (mode !== "place" && transformControls) {
+          const usingTC = mode === "place" || mode === "props";
+          if (!usingTC && transformControls) {
             if (tcHelper) tcHelper.visible = false;
             transformControls.enabled = false;
             transformControls.detach();
             selectedCliff = null;
-          } else if (mode === "place" && transformControls) {
+            selectedProp = null;
+          } else if (usingTC && transformControls) {
             transformControls.enabled = true;
+            // When switching between place and props, clear the other's selection
+            if (mode === "place") { selectedProp = null; }
+            if (mode === "props") { selectedCliff = null; }
           }
 
           const badge = document.getElementById("mode-badge");
@@ -2522,11 +2768,13 @@
                     ? "GRASS MODE"
                     : mode === "trees"
                       ? "TREES MODE"
-                      : "PLACE MODE"; // play handled above
+                      : mode === "props"
+                        ? "PROPS MODE  [ I ]"
+                        : "PLACE MODE"; // play handled above
           badge.className = mode;
           renderer.domElement.style.cursor =
             mode === "view" ? "default" : "crosshair";
-          if (mode === "view" || mode === "place") brushRing.visible = false;
+          if (mode === "view" || mode === "place" || mode === "props") brushRing.visible = false;
         }
         setMode("view");
 
@@ -2557,6 +2805,8 @@
             setMode(currentMode === "grass" ? "view" : "grass");
           if (e.code === "KeyT")
             setMode(currentMode === "trees" ? "view" : "trees");
+          if (e.code === "KeyI")
+            setMode(currentMode === "props" ? "view" : "props");
           if (e.code === "Escape") setMode("view");
           if (currentMode === "place") {
             if (e.code === "KeyW") {
@@ -2578,6 +2828,25 @@
               if (bakeBVH) bakeBVH();
             }
           }
+          if (currentMode === "props") {
+            if (e.code === "KeyW") {
+              e.preventDefault();
+              transformControls.setMode("translate");
+            }
+            if (e.code === "KeyE") {
+              e.preventDefault();
+              transformControls.setMode("rotate");
+            }
+            if (e.code === "KeyR") {
+              e.preventDefault();
+              transformControls.setMode("scale");
+            }
+            if (e.code === "Delete" && selectedProp) {
+              scene.remove(selectedProp);
+              propObjects = propObjects.filter((p) => p !== selectedProp);
+              selectProp(null);
+            }
+          }
         });
 
         // ── MOUSE ──
@@ -2586,7 +2855,7 @@
         );
 
         renderer.domElement.addEventListener("mousemove", (e) => {
-          if (currentMode === "view" || currentMode === "place") return;
+          if (currentMode === "view" || currentMode === "place" || currentMode === "props") return;
           const p = getTerrainHit(e);
           updateBrushRing(p);
           if (!isMouseDown || !p) return;
@@ -2627,6 +2896,27 @@
             return;
           }
 
+          if (currentMode === "props") {
+            if (transformControls.axis !== null) return;
+            const rect = renderer.domElement.getBoundingClientRect();
+            mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            const propMeshes = [];
+            propObjects.forEach((root) =>
+              root.traverse((o) => { if (o.isMesh) propMeshes.push(o); }),
+            );
+            const propHits = raycaster.intersectObjects(propMeshes, false);
+            if (propHits.length > 0) {
+              const root = getPropRoot(propHits[0].object);
+              if (root) { selectProp(root); return; }
+            }
+            // Click on terrain → place new prop
+            const pt = getTerrainHit(e);
+            if (pt) placeProp(pt.x, pt.y, pt.z);
+            return;
+          }
+
           isMouseDown = true;
           if (currentMode === "paint" || currentMode === "sculpt") pushUndo();
           const p = getTerrainHit(e);
@@ -2648,6 +2938,9 @@
           if (currentMode === "sculpt") {
             if (bakeBVH) bakeBVH();
             if (treeSystem) treeSystem.syncHeights();
+            propObjects.forEach((root) => {
+              root.position.y = bvhHeight(root.position.x, root.position.z);
+            });
           }
         });
 
