@@ -1,0 +1,3995 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Splatmap Painter 7 — Stylized Procedural</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #000;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+
+      /* Tweakpane — anchor top-left */
+      .tp-dfwv {
+        position: fixed !important;
+        top: 16px !important;
+        left: 16px !important;
+        width: 270px !important;
+        z-index: 20;
+        max-height: calc(100vh - 32px) !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+      }
+
+      #mode-badge {
+        position: fixed;
+        top: 16px;
+        right: 16px;
+        z-index: 20;
+        font:
+          bold 13px "SF Mono",
+          monospace;
+        padding: 6px 14px;
+        border-radius: 6px;
+        pointer-events: none;
+        transition:
+          background 0.2s,
+          color 0.2s;
+      }
+      #mode-badge.view {
+        background: rgba(40, 40, 40, 0.8);
+        color: #888;
+      }
+      #mode-badge.paint {
+        background: rgba(40, 160, 80, 0.9);
+        color: #fff;
+      }
+      #mode-badge.sculpt {
+        background: rgba(200, 120, 40, 0.9);
+        color: #fff;
+      }
+      #mode-badge.grass {
+        background: rgba(60, 160, 60, 0.85);
+        color: #fff;
+      }
+      #mode-badge.trees {
+        background: rgba(20, 80, 20, 0.92);
+        color: #ccffcc;
+      }
+      #mode-badge.play {
+        background: rgba(20, 20, 180, 0.92);
+        color: #aaccff;
+      }
+      #mode-badge.place {
+        background: rgba(180, 60, 200, 0.9);
+        color: #fff;
+      }
+      #mode-badge.props {
+        background: rgba(210, 110, 20, 0.92);
+        color: #fff5e0;
+      }
+      #mode-badge.water {
+        background: rgba(20, 100, 200, 0.92);
+        color: #c8e8ff;
+      }
+
+      #info {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        z-index: 10;
+        font:
+          12px/1.5 "SF Mono",
+          monospace;
+        color: #b0d890;
+        background: rgba(0, 0, 0, 0.55);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: none;
+        backdrop-filter: blur(4px);
+      }
+      #info span {
+        color: #e0f0c0;
+        font-weight: 600;
+      }
+
+      #splatmap-preview {
+        position: fixed;
+        bottom: 16px;
+        right: 16px;
+        z-index: 20;
+        border: 2px solid rgba(255, 255, 255, 0.3);
+        border-radius: 6px;
+        image-rendering: pixelated;
+        width: 128px;
+        height: 128px;
+      }
+      #heightmap-preview {
+        position: fixed;
+        bottom: 16px;
+        right: 156px;
+        z-index: 20;
+        border: 2px solid rgba(255, 220, 100, 0.4);
+        border-radius: 6px;
+        image-rendering: pixelated;
+        width: 128px;
+        height: 128px;
+      }
+      .preview-label {
+        position: fixed;
+        bottom: 148px;
+        z-index: 21;
+        font:
+          10px "SF Mono",
+          monospace;
+        color: rgba(255, 255, 255, 0.5);
+        pointer-events: none;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js",
+          "tweakpane": "https://esm.sh/tweakpane@4.0.4",
+          "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.9/build/index.module.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <!-- hidden file inputs -->
+    <input
+      type="file"
+      id="file-input"
+      accept="image/png"
+      style="display: none"
+    />
+    <input
+      type="file"
+      id="hmap-file-input"
+      accept="image/png"
+      style="display: none"
+    />
+    <input
+      type="file"
+      id="cliffs-file-input"
+      accept=".json"
+      style="display: none"
+    />
+    <input
+      type="file"
+      id="prop-glb-input"
+      accept=".glb"
+      style="display: none"
+    />
+    <input
+      type="file"
+      id="props-json-input"
+      accept=".json"
+      style="display: none"
+      multiple
+    />
+    <input
+      type="file"
+      id="scene-file-input"
+      accept=".json"
+      style="display: none"
+    />
+    <input
+      type="file"
+      id="water-json-input"
+      accept=".json"
+      style="display: none"
+    />
+
+    <div id="mode-badge" class="view">VIEW MODE</div>
+
+    <div id="info">
+      Terrain Editor &mdash; <span id="backend">loading…</span> &bull;
+      <span id="obj-count">0 objects</span>
+    </div>
+
+    <canvas id="heightmap-preview" width="128" height="128"></canvas>
+    <div class="preview-label" style="right: 156px">Heightmap</div>
+    <canvas id="splatmap-preview" width="128" height="128"></canvas>
+    <div class="preview-label" style="right: 16px">Splatmap</div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { MeshStandardNodeMaterial } from "three";
+      import {
+        texture,
+        vec2,
+        vec3,
+        vec4,
+        float,
+        uniform,
+        mix,
+        positionWorld,
+        Fn,
+        normalWorld,
+        dot,
+        smoothstep,
+        normalMap,
+        clamp,
+        step,
+        pow,
+        mx_noise_float,
+        exponentialHeightFogFactor,
+        densityFogFactor,
+        fog,
+      } from "three/tsl";
+      import {
+        valueNoise2D,
+        perlinNoise2D,
+        simplexNoise2D,
+        fbmPerlin2D,
+        voronoiF1Normalized,
+        whiteNoise2D,
+      } from "./tsl-noise.js";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { TransformControls } from "three/addons/controls/TransformControls.js";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+      import {
+        createGrassGeometry,
+        createGrassMaterial,
+        setupGrassPatches,
+        GRASS_SEGMENTS_LOW,
+        GRASS_SEGMENTS_MID,
+        GRASS_SEGMENTS_HIGH,
+        GRASS_VERTS_LOW,
+        GRASS_VERTS_MID,
+        GRASS_VERTS_HIGH,
+        GRASS_PATCH_SIZE,
+        GRASS_DENSITY,
+        GRASS_DENSITY_LOW,
+        GRASS_DENSITY_MID,
+        NEAR_PATCH_SIZE,
+      } from "./grass-painter7.js";
+      import { createUniforms } from "./uniforms-sandbox.js";
+      import { setSeed, randRange } from "./rng.js";
+      import { createTreeSystem } from "./tree-painter7.js";
+      import { MeshBVH } from "three-mesh-bvh";
+      import { Pane } from "tweakpane";
+      import Stats from "stats-gl";
+
+      // ─── NOISE ───────────────────────────────
+      function hash(x, y) {
+        const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+        return n - Math.floor(n);
+      }
+      function smoothNoise(x, y) {
+        const ix = Math.floor(x),
+          iy = Math.floor(y);
+        const fx = x - ix,
+          fy = y - iy;
+        const ux = fx * fx * (3 - 2 * fx),
+          uy = fy * fy * (3 - 2 * fy);
+        const a = hash(ix, iy),
+          b = hash(ix + 1, iy);
+        const c = hash(ix, iy + 1),
+          d = hash(ix + 1, iy + 1);
+        return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+      }
+      function fbm(x, y, oct = 6) {
+        let v = 0,
+          amp = 1,
+          freq = 1,
+          tot = 0;
+        for (let i = 0; i < oct; i++) {
+          v += smoothNoise(x * freq, y * freq) * amp;
+          tot += amp;
+          amp *= 0.5;
+          freq *= 2.1;
+        }
+        return v / tot;
+      }
+      function ridged(x, y, oct = 4) {
+        let v = 0,
+          amp = 1,
+          freq = 1,
+          tot = 0;
+        for (let i = 0; i < oct; i++) {
+          let n = smoothNoise(x * freq, y * freq);
+          n = 1 - Math.abs(n * 2 - 1);
+          n *= n;
+          v += n * amp;
+          tot += amp;
+          amp *= 0.5;
+          freq *= 2.1;
+        }
+        return v / tot;
+      }
+
+      // ─── CONSTANTS ───────────────────────────
+      const TERRAIN_SIZE = 800;
+      const TERRAIN_RES = 512; // data resolution — heightData array + saved PNG
+      const DISPLAY_RES = 128; // display resolution — visible mesh (fast to render)
+      const HEIGHT_SCALE = 40;
+      const NOISE_FREQ = 0.0045;
+      const SPLAT_RES = 512;
+      const VERTS = TERRAIN_RES + 1; // 513 — heightData dimensions
+      const DISPLAY_VERTS = DISPLAY_RES + 1; // 129 — geometry vertex count per side
+      const PI = Math.PI;
+
+      // ─── HEIGHT DATA (mutable, drives both geometry and sampleHeight) ───
+      const heightData = new Float32Array(VERTS * VERTS);
+
+      function buildHeightData() {
+        heightData.fill(0);
+      }
+      buildHeightData();
+
+      // Bilinear sample from heightData — used for sphere placement + sculpt falloff
+      function sampleHeight(wx, wz) {
+        const fx = (wx / TERRAIN_SIZE + 0.5) * TERRAIN_RES;
+        const fz = (wz / TERRAIN_SIZE + 0.5) * TERRAIN_RES;
+        const ix0 = Math.max(0, Math.min(TERRAIN_RES - 1, Math.floor(fx)));
+        const iz0 = Math.max(0, Math.min(TERRAIN_RES - 1, Math.floor(fz)));
+        const ix1 = Math.min(TERRAIN_RES, ix0 + 1);
+        const iz1 = Math.min(TERRAIN_RES, iz0 + 1);
+        const tx = fx - ix0,
+          tz = fz - iz0;
+        const h00 = heightData[iz0 * VERTS + ix0],
+          h10 = heightData[iz0 * VERTS + ix1];
+        const h01 = heightData[iz1 * VERTS + ix0],
+          h11 = heightData[iz1 * VERTS + ix1];
+        return (
+          h00 +
+          (h10 - h00) * tx +
+          (h01 - h00) * tz +
+          (h00 - h10 - h01 + h11) * tx * tz
+        );
+      }
+
+      // ─── BIOME COLORS ────────────────────────
+      const BIOME_COLORS = {
+        forest: { r: 180, g: 60, b: 40 },
+        grass: { r: 40, g: 180, b: 40 },
+        village: { r: 40, g: 60, b: 200 },
+        meadow: { r: 220, g: 200, b: 50 }, // used only as fallback; painting goes to meadowCtx
+        erase: { r: 0, g: 0, b: 0 },
+      };
+      const SPHERE_THRESHOLD = 80;
+
+      // ─── SPLATMAP CANVAS ─────────────────────
+      const splatCanvas = document.createElement("canvas");
+      splatCanvas.width = splatCanvas.height = SPLAT_RES;
+      const splatCtx = splatCanvas.getContext("2d");
+      splatCtx.fillStyle = "#000";
+      splatCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+
+      // ─── GRASS DENSITY CANVAS ─────────────────
+      const grassDensityCanvas = document.createElement("canvas");
+      grassDensityCanvas.width = grassDensityCanvas.height = SPLAT_RES;
+      const grassDensityCtx = grassDensityCanvas.getContext("2d");
+      grassDensityCtx.fillStyle = "#000";
+      grassDensityCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+
+      // ─── MEADOW DENSITY CANVAS ────────────────
+      const meadowCanvas = document.createElement("canvas");
+      meadowCanvas.width = meadowCanvas.height = SPLAT_RES;
+      const meadowCtx = meadowCanvas.getContext("2d");
+      meadowCtx.fillStyle = "#000";
+      meadowCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+
+      const previewCanvas = document.getElementById("splatmap-preview");
+      const previewCtx = previewCanvas.getContext("2d");
+      function syncPreview() {
+        previewCtx.drawImage(splatCanvas, 0, 0, 128, 128);
+      }
+      syncPreview();
+
+      const hmapCanvas = document.getElementById("heightmap-preview");
+      const hmapCtx = hmapCanvas.getContext("2d");
+      const hmapImg = hmapCtx.createImageData(128, 128);
+      function syncHeightmapPreview() {
+        for (let py = 0; py < 128; py++) {
+          for (let px = 0; px < 128; px++) {
+            // sample heightData with bilinear interpolation via sampleHeight
+            const wx = (px / 127) * TERRAIN_SIZE - TERRAIN_SIZE / 2;
+            const wz = (py / 127) * TERRAIN_SIZE - TERRAIN_SIZE / 2;
+            const h = sampleHeight(wx, wz);
+            const v = Math.round(
+              ((h + HEIGHT_SCALE) / (HEIGHT_SCALE * 2)) * 255,
+            );
+            const c = Math.max(0, Math.min(255, v));
+            const i = (py * 128 + px) * 4;
+            hmapImg.data[i] = c;
+            hmapImg.data[i + 1] = c;
+            hmapImg.data[i + 2] = c;
+            hmapImg.data[i + 3] = 255;
+          }
+        }
+        hmapCtx.putImageData(hmapImg, 0, 0);
+      }
+
+      // ─── COORDINATE HELPERS ──────────────────
+      function worldToUV(wx, wz) {
+        return {
+          u: (wx + TERRAIN_SIZE / 2) / TERRAIN_SIZE,
+          v: 1.0 - (wz + TERRAIN_SIZE / 2) / TERRAIN_SIZE,
+        };
+      }
+      function uvToWorld(u, v) {
+        return {
+          x: u * TERRAIN_SIZE - TERRAIN_SIZE / 2,
+          z: (1.0 - v) * TERRAIN_SIZE - TERRAIN_SIZE / 2,
+        };
+      }
+
+      // ─── TWEAKPANE PARAMS ────────────────────
+      const PARAMS = {
+        mode: "view",
+        biome: "forest",
+        sculptTool: "raise",
+        cliffModel: 0,
+        sinkOffset: 2,
+        propSinkOffset: 0,
+        activePropName: "None",
+        brushSize: 20,
+        brushStrength: 60,
+        sculptBrush: "smooth",
+        paintBrush: "smooth",
+        slopeStart: 0.05,
+        slopeEnd: 0.7,
+        debugColors: false,
+        light: {
+          sunAzimuth: 135,
+          sunElevation: 43,
+          dirColor: "#fff5e0",
+          dirIntensity: 2.2,
+          hemiSkyColor: "#c8e0ff",
+          hemiGroundColor: "#88aa55",
+          hemiIntensity: 1.0,
+          envIntensity: 0.45,
+          exposure: 0.5,
+        },
+        sky: {
+          turbidity: 2,
+          rayleigh: 1.5,
+          mie: 0.005,
+          mieG: 0.8,
+          cloudCoverage: 0.4,
+          cloudDensity: 0.4,
+          cloudElevation: 0.5,
+        },
+        water: {
+          color: "#3ab0d8",
+          opacity: 0.72,
+          roughness: 0.05,
+          sinkOffset: -0.05,
+          preset: "Small lake",
+        },
+        fog: {
+          enabled: false,
+          type: "height", // "height" | "distance"
+          color: "#c2d8f0",
+          density: 0.04,
+          height: 2.0,
+        },
+      };
+
+      // ─── STATE ───────────────────────────────
+      let currentMode = "view"; // "view" | "paint" | "sculpt"
+      let isMouseDown = false;
+      let currentBiome = "forest";
+      let sculptMode = "raise"; // "raise" | "lower" | "smooth"
+      let flattenTargetY = 0; // sampled on mousedown when alt+drag
+      let brushSize = 20;
+      let brushStr = 60;
+      let brushNoiseSeed = 0;
+      let instancedObjs = null;
+      let splatTex = null;
+      let grassDensityTex = null;
+      let heightTex = null;
+      let grassPatchSystem = null;
+      let grassUniforms = null;
+      let grassEraseMode = false;
+      let meadowDensityTex = null;
+
+      // ─── PROPS STATE ─────────────────────────
+      let propObjects = []; // placed prop roots in scene
+      let selectedProp = null; // currently selected prop root
+      let propLibrary = []; // [{ name, scene }] loaded GLBs
+      let activePropIndex = -1; // index into propLibrary
+      let waterObjects = []; // placed water body meshes
+      let selectedWater = null; // currently selected water body
+      let syncHeightTex = null; // kept but replaced by bakeBVH
+      let bakeBVH = null; // assigned inside init
+      let treeSystem = null;
+
+      // ─── BVH HEIGHT GRID ─────────────────────
+      const HTEX_RES = 512;
+      const bvhGrid = new Float32Array(HTEX_RES * HTEX_RES); // baked heights: terrain + cliffs
+
+      function bvhHeight(wx, wz) {
+        // Bilinear sample from baked BVH grid — falls back to heightData before first bake
+        if (!bakeBVH) return sampleHeight(wx, wz);
+        const fx = (wx / TERRAIN_SIZE + 0.5) * HTEX_RES;
+        const fz = (wz / TERRAIN_SIZE + 0.5) * HTEX_RES;
+        const ix0 = Math.max(0, Math.min(HTEX_RES - 1, Math.floor(fx)));
+        const iz0 = Math.max(0, Math.min(HTEX_RES - 1, Math.floor(fz)));
+        const ix1 = Math.min(HTEX_RES - 1, ix0 + 1);
+        const iz1 = Math.min(HTEX_RES - 1, iz0 + 1);
+        const tx = fx - ix0,
+          tz = fz - iz0;
+        const h00 = bvhGrid[iz0 * HTEX_RES + ix0];
+        const h10 = bvhGrid[iz0 * HTEX_RES + ix1];
+        const h01 = bvhGrid[iz1 * HTEX_RES + ix0];
+        const h11 = bvhGrid[iz1 * HTEX_RES + ix1];
+        return (
+          h00 +
+          (h10 - h00) * tx +
+          (h01 - h00) * tz +
+          (h00 - h10 - h01 + h11) * tx * tz
+        );
+      }
+      let treeEraseMode = false;
+      const treeParams = {
+        treesPerStroke: 3,
+        minSpacing: 8,
+        scaleMin: 0.8,
+        scaleMax: 1.4,
+      };
+      let terrainGeo = null; // set in init, needed by sculpt
+      let skirtGeo = null; // edge skirt geometry, updated with terrain
+      const skirtEdgeXZ = []; // [{wx,wz}] for each skirt top vertex (4 * DISPLAY_VERTS)
+
+      // ─── PLAY MODE STATE ─────────────────────
+      const PLAYER_SPEED = 12;
+      const PLAYER_CAP_R = 0.4,
+        PLAYER_CAP_H = 1.2; // capsule radius + length
+      const CAM_DIST = 8;
+      const playerPos = new THREE.Vector3();
+      let camYaw = 0,
+        camPitch = 0.35;
+      const keysHeld = {};
+      let savedCamPos = null,
+        savedOrbitTarget = null;
+
+      // ─── CLIFF STATE ─────────────────────────
+      const CLIFF_MODELS = [
+        "models/cliff1.glb",
+        "models/cliff2.glb",
+        "models/cliff3.glb",
+      ];
+      let cliffTemplates = [];
+      let cliffObjects = [];
+      let selectedCliff = null;
+      let activeCliffModel = 0;
+      let cliffSinkOffset = 2;
+      let transformControls = null;
+      let tcHelper = null;
+
+      // ─── UNDO / REDO ─────────────────────────
+      const MAX_UNDO = 30;
+      const undoStack = [];
+      const redoStack = [];
+
+      function snapshotState() {
+        return {
+          height: heightData.slice(),
+          splat: splatCtx.getImageData(0, 0, SPLAT_RES, SPLAT_RES),
+        };
+      }
+      function pushUndo() {
+        undoStack.push(snapshotState());
+        if (undoStack.length > MAX_UNDO) undoStack.shift();
+        redoStack.length = 0; // new action clears redo
+      }
+      function applySnapshot(snap) {
+        heightData.set(snap.height);
+        syncGeometry();
+        splatCtx.putImageData(snap.splat, 0, 0);
+        syncPreview();
+        if (splatTex) splatTex.needsUpdate = true;
+      }
+      function undo() {
+        if (!undoStack.length) return;
+        redoStack.push(snapshotState());
+        applySnapshot(undoStack.pop());
+      }
+      function redo() {
+        if (!redoStack.length) return;
+        undoStack.push(snapshotState());
+        applySnapshot(redoStack.pop());
+      }
+
+      // ─── PAINT ───────────────────────────────
+      // ─── NOISE / FBM (CPU, used by sculpt + paint brushes) ──────────
+      function _h2(x, y) {
+        const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+        return n - Math.floor(n);
+      }
+      function _sn2(x, y) {
+        const ix = Math.floor(x), iy = Math.floor(y);
+        const fx = x - ix, fy = y - iy;
+        const u = fx * fx * (3 - 2 * fx), v = fy * fy * (3 - 2 * fy);
+        return (
+          _h2(ix,   iy)   * (1-u) * (1-v) +
+          _h2(ix+1, iy)   *  u    * (1-v) +
+          _h2(ix,   iy+1) * (1-u) *  v    +
+          _h2(ix+1, iy+1) *  u    *  v
+        );
+      }
+      function _fbm(x, y, oct = 5) {
+        let s = 0, a = 0.5, f = 1, m = 0;
+        for (let i = 0; i < oct; i++) { s += _sn2(x*f, y*f)*a; m += a; a *= 0.5; f *= 2; }
+        return s / m;
+      }
+
+      // ─── PAINT BRUSH HELPERS ────────────────────────────────────────
+      function _paintSmooth(ctx, cx, cy, r, g, b, alpha) {
+        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, brushSize);
+        grad.addColorStop(0,   `rgba(${r},${g},${b},${alpha})`);
+        grad.addColorStop(0.5, `rgba(${r},${g},${b},${alpha * 0.55})`);
+        grad.addColorStop(1,   `rgba(${r},${g},${b},0)`);
+        ctx.globalCompositeOperation = "source-over";
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(cx, cy, brushSize, 0, PI * 2);
+        ctx.fill();
+      }
+
+      function _paintFbmSplat(ctx, cx, cy, r, g, b, alpha) {
+        const rad = Math.ceil(brushSize) + 1;
+        const oc = document.createElement("canvas");
+        oc.width = oc.height = rad * 2;
+        const octx = oc.getContext("2d");
+        const imgData = octx.createImageData(rad * 2, rad * 2);
+        const data = imgData.data;
+        const sc = 4.0 / brushSize;
+        for (let py = 0; py < rad * 2; py++) {
+          for (let px = 0; px < rad * 2; px++) {
+            const dx = px - rad, dy = py - rad;
+            const t = Math.sqrt(dx*dx + dy*dy) / brushSize;
+            if (t >= 1) continue;
+            const n = _fbm(dx * sc + brushNoiseSeed, dy * sc + brushNoiseSeed + 77, 4);
+            const blend = Math.max(0, (t - 0.4) / 0.6);
+            const edgeMod = (1 - blend) + blend * (0.3 + n * 1.6);
+            const base = Math.max(0, (1 - t) * (1 - t));
+            const w = Math.min(1, Math.max(0, base * edgeMod)) * alpha;
+            const idx = (py * rad * 2 + px) * 4;
+            data[idx] = r; data[idx+1] = g; data[idx+2] = b;
+            data[idx+3] = Math.round(w * 255);
+          }
+        }
+        octx.putImageData(imgData, 0, 0);
+        ctx.globalCompositeOperation = "source-over";
+        ctx.drawImage(oc, cx - rad, cy - rad);
+      }
+
+      function _paintScatter(ctx, cx, cy, r, g, b, alpha) {
+        const count = Math.round(brushSize * 0.25 + 4);
+        const dotR  = Math.max(2, brushSize * 0.12);
+        ctx.globalCompositeOperation = "source-over";
+        for (let i = 0; i < count; i++) {
+          const angle = Math.random() * PI * 2;
+          const dist  = Math.random() * brushSize * 0.85;
+          const dx = cx + Math.cos(angle) * dist;
+          const dy = cy + Math.sin(angle) * dist;
+          const a  = alpha * (0.5 + Math.random() * 0.5);
+          const grad = ctx.createRadialGradient(dx, dy, 0, dx, dy, dotR);
+          grad.addColorStop(0, `rgba(${r},${g},${b},${a})`);
+          grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+          ctx.fillStyle = grad;
+          ctx.beginPath();
+          ctx.arc(dx, dy, dotR, 0, PI * 2);
+          ctx.fill();
+        }
+      }
+
+      function _applyBrushToCanvas(ctx, cx, cy, r, g, b, alpha) {
+        if (PARAMS.paintBrush === "fbm_splat")  _paintFbmSplat(ctx, cx, cy, r, g, b, alpha);
+        else if (PARAMS.paintBrush === "scatter") _paintScatter(ctx, cx, cy, r, g, b, alpha);
+        else                                      _paintSmooth(ctx, cx, cy, r, g, b, alpha);
+      }
+
+      function paintAt(wx, wz) {
+        const { u, v } = worldToUV(wx, wz);
+        const cx = u * SPLAT_RES,
+          cy = v * SPLAT_RES;
+        const alpha = brushStr / 100;
+
+        // Meadow uses its own density canvas (like grass), not the splatmap
+        if (currentBiome === "meadow") {
+          _applyBrushToCanvas(meadowCtx, cx, cy, 255, 255, 255, alpha);
+          if (meadowDensityTex) meadowDensityTex.needsUpdate = true;
+          return;
+        }
+
+        const col = BIOME_COLORS[currentBiome];
+        _applyBrushToCanvas(splatCtx, cx, cy, col.r, col.g, col.b, alpha);
+        syncPreview();
+        if (splatTex) splatTex.needsUpdate = true;
+      }
+
+      // ─── GRASS DENSITY PAINT ─────────────────
+      function paintGrassAt(wx, wz, erase) {
+        const { u, v } = worldToUV(wx, wz);
+        const cx = u * SPLAT_RES,
+          cy = v * SPLAT_RES;
+        const alpha = brushStr / 100;
+        const grad = grassDensityCtx.createRadialGradient(
+          cx,
+          cy,
+          0,
+          cx,
+          cy,
+          brushSize,
+        );
+        if (erase) {
+          grad.addColorStop(0, `rgba(0,0,0,${alpha})`);
+          grad.addColorStop(0.5, `rgba(0,0,0,${alpha * 0.55})`);
+          grad.addColorStop(1, `rgba(0,0,0,0)`);
+          grassDensityCtx.globalCompositeOperation = "source-over";
+        } else {
+          grad.addColorStop(0, `rgba(255,255,255,${alpha})`);
+          grad.addColorStop(0.5, `rgba(255,255,255,${alpha * 0.55})`);
+          grad.addColorStop(1, `rgba(255,255,255,0)`);
+          grassDensityCtx.globalCompositeOperation = "source-over";
+        }
+        grassDensityCtx.fillStyle = grad;
+        grassDensityCtx.beginPath();
+        grassDensityCtx.arc(cx, cy, brushSize, 0, PI * 2);
+        grassDensityCtx.fill();
+        if (grassDensityTex) grassDensityTex.needsUpdate = true;
+      }
+
+      // ─── TREE PAINT ──────────────────────────
+      function paintTreesAt(wx, wz, erase) {
+        if (!treeSystem) return;
+        const radius = brushWorldRadius();
+        if (erase) {
+          treeSystem.removeInBrush(wx, wz, radius);
+        } else {
+          treeSystem.addInBrush(
+            wx,
+            wz,
+            radius,
+            treeParams.treesPerStroke,
+            treeParams.minSpacing,
+            treeParams.scaleMin,
+            treeParams.scaleMax,
+          );
+        }
+      }
+
+      // ─── BRUSH RADIUS (module-level so sculptAt + paintAt can use it) ───
+      function brushWorldRadius() {
+        return (brushSize / SPLAT_RES) * TERRAIN_SIZE;
+      }
+
+      // ─── SCULPT ──────────────────────────────
+      // plain drag = raise | shift+drag = lower | ctrl+drag = smooth
+      function sculptAt(wx, wz, e) {
+        if (!terrainGeo) return;
+        const mode = e?.altKey
+          ? "flatten"
+          : e?.ctrlKey
+            ? "smooth"
+            : e?.shiftKey
+              ? "lower"
+              : "raise";
+        const radius = brushWorldRadius();
+        const radiusSq = radius * radius;
+        const strength = (brushStr / 100) * 0.4;
+
+        // Limit iteration to affected grid region
+        const cellSize = TERRAIN_SIZE / TERRAIN_RES;
+        const gridR = Math.ceil(radius / cellSize) + 1;
+        const cx = Math.round((wx / TERRAIN_SIZE + 0.5) * TERRAIN_RES);
+        const cz = Math.round((wz / TERRAIN_SIZE + 0.5) * TERRAIN_RES);
+        const ixMin = Math.max(0, cx - gridR),
+          ixMax = Math.min(TERRAIN_RES, cx + gridR);
+        const izMin = Math.max(0, cz - gridR),
+          izMax = Math.min(TERRAIN_RES, cz + gridR);
+
+        if (mode === "smooth") {
+          // Two-pass: read then write to avoid order dependency
+          const scratch = new Float32Array(
+            (ixMax - ixMin + 1) * (izMax - izMin + 1),
+          );
+          let si = 0;
+          for (let iz = izMin; iz <= izMax; iz++) {
+            for (let ix = ixMin; ix <= ixMax; ix++) {
+              const vx = (-0.5 + ix / TERRAIN_RES) * TERRAIN_SIZE;
+              const vz = (-0.5 + iz / TERRAIN_RES) * TERRAIN_SIZE;
+              const distSq = (vx - wx) * (vx - wx) + (vz - wz) * (vz - wz);
+              if (distSq > radiusSq) {
+                scratch[si++] = heightData[iz * VERTS + ix];
+                continue;
+              }
+              // Average 3x3 neighbors
+              let sum = 0,
+                count = 0;
+              for (let dz = -1; dz <= 1; dz++)
+                for (let dx = -1; dx <= 1; dx++) {
+                  const nx2 = Math.max(0, Math.min(TERRAIN_RES, ix + dx));
+                  const nz2 = Math.max(0, Math.min(TERRAIN_RES, iz + dz));
+                  sum += heightData[nz2 * VERTS + nx2];
+                  count++;
+                }
+              const falloff = 1 - Math.sqrt(distSq) / radius;
+              const avg = sum / count;
+              scratch[si++] =
+                heightData[iz * VERTS + ix] +
+                (avg - heightData[iz * VERTS + ix]) * falloff * strength * 2;
+            }
+          }
+          si = 0;
+          for (let iz = izMin; iz <= izMax; iz++)
+            for (let ix = ixMin; ix <= ixMax; ix++)
+              heightData[iz * VERTS + ix] = scratch[si++];
+        } else if (mode === "flatten") {
+          for (let iz = izMin; iz <= izMax; iz++) {
+            for (let ix = ixMin; ix <= ixMax; ix++) {
+              const vx = (-0.5 + ix / TERRAIN_RES) * TERRAIN_SIZE;
+              const vz = (-0.5 + iz / TERRAIN_RES) * TERRAIN_SIZE;
+              const distSq = (vx - wx) * (vx - wx) + (vz - wz) * (vz - wz);
+              if (distSq > radiusSq) continue;
+              const falloff = 1 - Math.sqrt(distSq) / radius;
+              const smooth = falloff * falloff;
+              const current = heightData[iz * VERTS + ix];
+              heightData[iz * VERTS + ix] +=
+                (flattenTargetY - current) * smooth * strength * 2;
+            }
+          }
+        } else {
+          const dir = mode === "raise" ? 1 : -1;
+          const brush = PARAMS.sculptBrush;
+          const sc = 3.0 / radius; // FBM frequency scale
+          for (let iz = izMin; iz <= izMax; iz++) {
+            for (let ix = ixMin; ix <= ixMax; ix++) {
+              const vx = (-0.5 + ix / TERRAIN_RES) * TERRAIN_SIZE;
+              const vz = (-0.5 + iz / TERRAIN_RES) * TERRAIN_SIZE;
+              const distSq = (vx - wx) * (vx - wx) + (vz - wz) * (vz - wz);
+              if (distSq > radiusSq) continue;
+              const t = Math.sqrt(distSq) / radius;
+              let delta = 0;
+              if (brush === "fbm_peak") {
+                const base = Math.max(0, (1 - t) * (1 - t));
+                const n = _fbm((vx - wx) * sc + brushNoiseSeed, (vz - wz) * sc + brushNoiseSeed, 5);
+                const blend = Math.min(1, t * 2);
+                const mod = Math.max(0, (1 - blend) + blend * n * 2.2);
+                delta = dir * base * mod * strength * 1.3;
+              } else if (brush === "crater") {
+                const rim = Math.exp(-Math.pow(t - 0.55, 2) / 0.04) * 1.2;
+                const pit = Math.max(0, 1 - t * 4) * 0.6;
+                delta = dir * (rim - pit) * strength * 0.8;
+              } else if (brush === "plateau") {
+                const flat = Math.max(0, 1 - Math.pow(Math.max(0, t - 0.6) / 0.4, 2));
+                delta = dir * flat * strength * 0.7;
+              } else {
+                // smooth (default)
+                const f = 1 - t;
+                delta = dir * f * f * strength;
+              }
+              heightData[iz * VERTS + ix] += delta;
+            }
+          }
+        }
+        syncGeometry();
+      }
+
+      function syncGeometry() {
+        if (!terrainGeo) return;
+        const pos = terrainGeo.attributes.position;
+        for (let iz = 0; iz <= DISPLAY_RES; iz++) {
+          for (let ix = 0; ix <= DISPLAY_RES; ix++) {
+            const wx = (-0.5 + ix / DISPLAY_RES) * TERRAIN_SIZE;
+            const wz = (-0.5 + iz / DISPLAY_RES) * TERRAIN_SIZE;
+            pos.setY(iz * DISPLAY_VERTS + ix, sampleHeight(wx, wz));
+          }
+        }
+        pos.needsUpdate = true;
+        terrainGeo.computeVertexNormals();
+
+        // Update skirt top vertices to match terrain edges
+        if (skirtGeo && skirtEdgeXZ.length > 0) {
+          const sp = skirtGeo.attributes.position;
+          const NV = DISPLAY_VERTS;
+          for (let s = 0; s < 4; s++) {
+            for (let i = 0; i < NV; i++) {
+              const { wx, wz } = skirtEdgeXZ[s * NV + i];
+              sp.setY(s * NV * 2 + i * 2, sampleHeight(wx, wz)); // top vertex
+            }
+          }
+          sp.needsUpdate = true;
+          skirtGeo.computeVertexNormals();
+        }
+
+        syncHeightmapPreview();
+      }
+
+      // ─── LIVE FOLIAGE ────────────────────────
+      function generateObjects(scene) {
+        if (instancedObjs) {
+          scene.remove(instancedObjs);
+          instancedObjs.geometry.dispose();
+          instancedObjs.material.dispose();
+          instancedObjs = null;
+        }
+
+        const pixels = splatCtx.getImageData(0, 0, SPLAT_RES, SPLAT_RES).data;
+        const positions = [];
+        const STEP = 4;
+
+        for (let iy = 0; iy < SPLAT_RES; iy += STEP) {
+          for (let ix = 0; ix < SPLAT_RES; ix += STEP) {
+            const idx = (iy * SPLAT_RES + ix) * 4;
+            const r = pixels[idx],
+              g = pixels[idx + 1],
+              b = pixels[idx + 2];
+            if (r >= SPHERE_THRESHOLD && r > g + 20 && r > b + 20) {
+              const { x, z } = uvToWorld(ix / SPLAT_RES, iy / SPLAT_RES);
+              const cellSize = TERRAIN_SIZE / (SPLAT_RES / STEP);
+              const jx = (Math.random() - 0.5) * cellSize;
+              const jz = (Math.random() - 0.5) * cellSize;
+              const wx = x + jx,
+                wz = z + jz;
+              // Slope exclusion: skip steep faces
+              const eps = 1.5;
+              const dydx =
+                (sampleHeight(wx + eps, wz) - sampleHeight(wx - eps, wz)) /
+                (2 * eps);
+              const dydz =
+                (sampleHeight(wx, wz + eps) - sampleHeight(wx, wz - eps)) /
+                (2 * eps);
+              const slope = Math.sqrt(dydx * dydx + dydz * dydz);
+              if (slope > 1.2) continue; // skip cliffs
+              positions.push(new THREE.Vector3(wx, sampleHeight(wx, wz), wz));
+            }
+          }
+        }
+
+        if (positions.length === 0) {
+          document.getElementById("obj-count").textContent = "0 objects";
+          return;
+        }
+
+        const geo = new THREE.SphereGeometry(0.5, 8, 6);
+        const mat = new THREE.MeshStandardMaterial({
+          color: 0x2d8c2d,
+          roughness: 0.8,
+        });
+        instancedObjs = new THREE.InstancedMesh(geo, mat, positions.length);
+        instancedObjs.castShadow = true;
+        instancedObjs.receiveShadow = true;
+
+        const dummy = new THREE.Object3D();
+        positions.forEach((pos, i) => {
+          dummy.position.set(pos.x, pos.y + 0.5, pos.z);
+          dummy.scale.setScalar(0.5 + Math.random() * 0.9);
+          dummy.updateMatrix();
+          instancedObjs.setMatrixAt(i, dummy.matrix);
+        });
+        instancedObjs.instanceMatrix.needsUpdate = true;
+        scene.add(instancedObjs);
+        document.getElementById("obj-count").textContent =
+          `${positions.length.toLocaleString()} objects`;
+      }
+
+      // ─── SAVE / LOAD ─────────────────────────
+      function saveSplatmap() {
+        const a = document.createElement("a");
+        a.download = "splatmap.png";
+        a.href = splatCanvas.toDataURL("image/png");
+        a.click();
+      }
+      function loadSplatmap(file) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const img = new Image();
+          img.onload = () => {
+            splatCtx.clearRect(0, 0, SPLAT_RES, SPLAT_RES);
+            splatCtx.drawImage(img, 0, 0, SPLAT_RES, SPLAT_RES);
+            syncPreview();
+            if (splatTex) splatTex.needsUpdate = true;
+          };
+          img.src = e.target.result;
+        };
+        reader.readAsDataURL(file);
+      }
+
+      // ─── HEIGHTMAP SAVE / LOAD ───────────────
+      function saveHeightmap() {
+        const c = document.createElement("canvas");
+        c.width = c.height = VERTS;
+        const ctx = c.getContext("2d");
+        const imgData = ctx.createImageData(VERTS, VERTS);
+        for (let i = 0; i < heightData.length; i++) {
+          const v = Math.round(
+            ((heightData[i] + HEIGHT_SCALE) / (HEIGHT_SCALE * 2)) * 255,
+          );
+          imgData.data[i * 4 + 0] = Math.max(0, Math.min(255, v));
+          imgData.data[i * 4 + 1] = Math.max(0, Math.min(255, v));
+          imgData.data[i * 4 + 2] = Math.max(0, Math.min(255, v));
+          imgData.data[i * 4 + 3] = 255;
+        }
+        ctx.putImageData(imgData, 0, 0);
+        const a = document.createElement("a");
+        a.download = "heightmap.png";
+        a.href = c.toDataURL("image/png");
+        a.click();
+      }
+      function loadHeightmap(file) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const img = new Image();
+          img.onload = () => {
+            const c = document.createElement("canvas");
+            c.width = c.height = VERTS;
+            const ctx = c.getContext("2d");
+            ctx.drawImage(img, 0, 0, VERTS, VERTS);
+            const pixels = ctx.getImageData(0, 0, VERTS, VERTS).data;
+            for (let i = 0; i < heightData.length; i++) {
+              heightData[i] =
+                (pixels[i * 4] / 255) * HEIGHT_SCALE * 2 - HEIGHT_SCALE;
+            }
+            syncGeometry();
+            if (bakeBVH) bakeBVH();
+          };
+          img.src = e.target.result;
+        };
+        reader.readAsDataURL(file);
+      }
+
+      // ─── CLIFF SAVE ──────────────────────────
+      function saveCliffs() {
+        const data = cliffObjects.map((root) => ({
+          modelIndex: root.userData.modelIndex ?? 0,
+          x: root.position.x,
+          y: root.position.y,
+          z: root.position.z,
+          rx: root.rotation.x,
+          ry: root.rotation.y,
+          rz: root.rotation.z,
+          sx: root.scale.x,
+          sy: root.scale.y,
+          sz: root.scale.z,
+        }));
+        const blob = new Blob([JSON.stringify(data, null, 2)], {
+          type: "application/json",
+        });
+        const a = document.createElement("a");
+        a.download = "cliffs.json";
+        a.href = URL.createObjectURL(blob);
+        a.click();
+      }
+
+      // ─── MAIN ────────────────────────────────
+      async function init() {
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        await renderer.init();
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 0.5;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+        document.getElementById("backend").textContent =
+          renderer.backend?.constructor?.name?.includes("WebGPU")
+            ? "WebGPU ✓"
+            : "WebGL fallback";
+
+        const stats = new Stats({ trackGPU: false });
+        stats.init(renderer);
+        document.body.appendChild(stats.dom);
+
+        const scene = new THREE.Scene();
+
+        const camera = new THREE.PerspectiveCamera(
+          60,
+          innerWidth / innerHeight,
+          0.5,
+          6000,
+        );
+        camera.position.set(0, 250, 450);
+        camera.lookAt(0, 0, 0);
+
+        const orbit = new OrbitControls(camera, renderer.domElement);
+        orbit.target.set(0, 10, 0);
+        orbit.maxPolarAngle = PI * 0.48;
+        orbit.enableDamping = true;
+        orbit.dampingFactor = 0.05;
+        orbit.mouseButtons = {
+          LEFT: THREE.MOUSE.ROTATE,
+          MIDDLE: THREE.MOUSE.DOLLY,
+          RIGHT: THREE.MOUSE.PAN,
+        };
+        orbit.update();
+
+        // ── LIGHTING ──
+        function sunDirectionFromAngles(azDeg, elDeg) {
+          const az = (azDeg * PI) / 180,
+            el = (elDeg * PI) / 180;
+          return new THREE.Vector3(
+            Math.cos(el) * Math.cos(az),
+            Math.sin(el),
+            Math.cos(el) * Math.sin(az),
+          ).normalize();
+        }
+        const _sunDir = sunDirectionFromAngles(
+          PARAMS.light.sunAzimuth,
+          PARAMS.light.sunElevation,
+        );
+        const dirLight = new THREE.DirectionalLight(
+          PARAMS.light.dirColor,
+          PARAMS.light.dirIntensity,
+        );
+        dirLight.position.copy(_sunDir.clone().multiplyScalar(600));
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.set(2048, 2048);
+        dirLight.shadow.camera.near = 1;
+        dirLight.shadow.camera.far = 1500;
+        dirLight.shadow.camera.left = dirLight.shadow.camera.bottom =
+          -TERRAIN_SIZE * 0.7;
+        dirLight.shadow.camera.right = dirLight.shadow.camera.top =
+          TERRAIN_SIZE * 0.7;
+        dirLight.shadow.bias = -0.0005;
+        scene.add(dirLight);
+        const shadowTarget = new THREE.Object3D();
+        scene.add(shadowTarget);
+        dirLight.target = shadowTarget;
+        const hemiLight = new THREE.HemisphereLight(
+          PARAMS.light.hemiSkyColor,
+          PARAMS.light.hemiGroundColor,
+          PARAMS.light.hemiIntensity,
+        );
+        scene.add(hemiLight);
+
+        // ── TERRAIN GEOMETRY ──
+        terrainGeo = new THREE.PlaneGeometry(
+          TERRAIN_SIZE,
+          TERRAIN_SIZE,
+          DISPLAY_RES,
+          DISPLAY_RES,
+        );
+        terrainGeo.rotateX(-PI / 2);
+        syncGeometry(); // apply initial heightData
+
+        const terrain = new THREE.Mesh(
+          terrainGeo,
+          new THREE.MeshStandardMaterial({ color: 0x4a6a30, roughness: 0.95 }),
+        );
+        terrain.receiveShadow = true;
+        scene.add(terrain);
+
+        // ── TERRAIN EDGE SKIRT ──
+        {
+          const N = DISPLAY_RES;
+          const NV = DISPLAY_VERTS;
+          const SKIRT_BOTTOM = -(HEIGHT_SCALE + 20);
+
+          // Build edge XZ lookup (4 sides, traversed so each side faces outward)
+          // Side 0: North  (z=-half, x left→right)
+          // Side 1: East   (x=+half, z top→bottom)
+          // Side 2: South  (z=+half, x right→left — reversed for outward winding)
+          // Side 3: West   (x=-half, z bottom→top — reversed)
+          const half = TERRAIN_SIZE / 2;
+          for (let i = 0; i < NV; i++) {
+            skirtEdgeXZ.push({ wx: (-0.5 + i / N) * TERRAIN_SIZE, wz: -half }); // North
+          }
+          for (let i = 0; i < NV; i++) {
+            skirtEdgeXZ.push({ wx: half, wz: (-0.5 + i / N) * TERRAIN_SIZE }); // East
+          }
+          for (let i = 0; i < NV; i++) {
+            skirtEdgeXZ.push({ wx: (0.5 - i / N) * TERRAIN_SIZE, wz: half }); // South (reversed)
+          }
+          for (let i = 0; i < NV; i++) {
+            skirtEdgeXZ.push({ wx: -half, wz: (0.5 - i / N) * TERRAIN_SIZE }); // West (reversed)
+          }
+
+          // Vertex buffer: per side, NV top + NV bottom interleaved: [top0, bot0, top1, bot1, ...]
+          const skirtPos = new Float32Array(4 * NV * 2 * 3);
+          const skirtIdx = [];
+
+          for (let s = 0; s < 4; s++) {
+            for (let i = 0; i < NV; i++) {
+              const { wx, wz } = skirtEdgeXZ[s * NV + i];
+              const hy = sampleHeight(wx, wz);
+              const vi = (s * NV * 2 + i * 2) * 3;
+              // top
+              skirtPos[vi] = wx;
+              skirtPos[vi + 1] = hy;
+              skirtPos[vi + 2] = wz;
+              // bottom
+              skirtPos[vi + 3] = wx;
+              skirtPos[vi + 4] = SKIRT_BOTTOM;
+              skirtPos[vi + 5] = wz;
+            }
+            // Quad indices for this side
+            const base = s * NV * 2;
+            for (let i = 0; i < N; i++) {
+              const tl = base + i * 2,
+                bl = base + i * 2 + 1;
+              const tr = base + (i + 1) * 2,
+                br = base + (i + 1) * 2 + 1;
+              skirtIdx.push(tl, bl, tr, bl, br, tr);
+            }
+          }
+
+          skirtGeo = new THREE.BufferGeometry();
+          skirtGeo.setAttribute(
+            "position",
+            new THREE.BufferAttribute(skirtPos, 3),
+          );
+          skirtGeo.setIndex(skirtIdx);
+          skirtGeo.computeVertexNormals();
+
+          const skirtMesh = new THREE.Mesh(
+            skirtGeo,
+            new THREE.MeshStandardMaterial({
+              color: 0x5a4a3a,
+              roughness: 0.95,
+              side: THREE.DoubleSide,
+            }),
+          );
+          skirtMesh.castShadow = true;
+          skirtMesh.receiveShadow = true;
+          scene.add(skirtMesh);
+        }
+
+        splatTex = new THREE.CanvasTexture(splatCanvas);
+        splatTex.wrapS = splatTex.wrapT = THREE.ClampToEdgeWrapping;
+
+        // ── GRASS DENSITY TEX ─────────────────────────────────────────────
+        grassDensityTex = new THREE.CanvasTexture(grassDensityCanvas);
+        grassDensityTex.wrapS = grassDensityTex.wrapT =
+          THREE.ClampToEdgeWrapping;
+
+        // ── MEADOW DENSITY TEX ────────────────────────────────────────────
+        meadowDensityTex = new THREE.CanvasTexture(meadowCanvas);
+        meadowDensityTex.wrapS = meadowDensityTex.wrapT =
+          THREE.ClampToEdgeWrapping;
+
+        // ── HEIGHT TEX (for grass blade positioning) ──────────────────────
+        const heightTexData = new Float32Array(HTEX_RES * HTEX_RES * 4);
+        heightTex = new THREE.DataTexture(
+          heightTexData,
+          HTEX_RES,
+          HTEX_RES,
+          THREE.RGBAFormat,
+          THREE.FloatType,
+        );
+        heightTex.wrapS = heightTex.wrapT = THREE.ClampToEdgeWrapping;
+        heightTex.magFilter = heightTex.minFilter = THREE.LinearFilter;
+
+        // ── BVH BAKE — cliff objects only; terrain uses full-res sampleHeight ──
+        // Raycasting the 128-vertex terrain mesh introduces triangle-diagonal interpolation
+        // errors on steep slopes (one slope under-sampled → grass goes underground).
+        // Fix: use sampleHeight (512-res heightData) as baseline; only raycast cliffs
+        // to detect surfaces above the terrain, then take max(terrain, cliff).
+        const _bvhV = new THREE.Vector3();
+        const _bvhRay = new THREE.Ray(
+          new THREE.Vector3(),
+          new THREE.Vector3(0, -1, 0),
+        );
+        bakeBVH = function () {
+          scene.updateMatrixWorld(true);
+
+          // Build BVH from cliff objects only (not terrain mesh)
+          const positions = [],
+            idxList = [];
+          let vOffset = 0;
+          function addMesh(mesh) {
+            const geo = mesh.geometry;
+            const posAttr = geo.attributes.position;
+            const mat = mesh.matrixWorld;
+            for (let i = 0; i < posAttr.count; i++) {
+              _bvhV.fromBufferAttribute(posAttr, i).applyMatrix4(mat);
+              positions.push(_bvhV.x, _bvhV.y, _bvhV.z);
+            }
+            if (geo.index) {
+              const idx = geo.index.array;
+              for (let i = 0; i < idx.length; i++)
+                idxList.push(idx[i] + vOffset);
+            } else {
+              for (let i = 0; i < posAttr.count; i++) idxList.push(i + vOffset);
+            }
+            vOffset += posAttr.count;
+          }
+          cliffObjects.forEach((root) =>
+            root.traverse((o) => {
+              if (o.isMesh) addMesh(o);
+            }),
+          );
+
+          // Build cliff BVH only if there are any cliff meshes
+          let cliffBvh = null;
+          if (positions.length > 0) {
+            const mergedGeo = new THREE.BufferGeometry();
+            mergedGeo.setAttribute(
+              "position",
+              new THREE.BufferAttribute(new Float32Array(positions), 3),
+            );
+            mergedGeo.setIndex(
+              new THREE.BufferAttribute(new Uint32Array(idxList), 1),
+            );
+            cliffBvh = new MeshBVH(mergedGeo);
+            // mergedGeo can be GC'd after MeshBVH stores its internal data
+          }
+
+          // Fill heightTex: terrain baseline from sampleHeight (512-res), override with cliff top if higher
+          for (let iz = 0; iz < HTEX_RES; iz++) {
+            for (let ix = 0; ix < HTEX_RES; ix++) {
+              const wx = (-0.5 + ix / HTEX_RES) * TERRAIN_SIZE;
+              const wz = (-0.5 + iz / HTEX_RES) * TERRAIN_SIZE;
+              let h = sampleHeight(wx, wz); // always start from accurate terrain data
+              if (cliffBvh) {
+                _bvhRay.origin.set(wx, 99999, wz);
+                const hit = cliffBvh.raycastFirst(_bvhRay, THREE.DoubleSide);
+                if (hit && hit.point.y > h) h = hit.point.y; // cliff top above terrain
+              }
+              bvhGrid[iz * HTEX_RES + ix] = h;
+              const i4 = (iz * HTEX_RES + ix) * 4;
+              heightTexData[i4] =
+                heightTexData[i4 + 1] =
+                heightTexData[i4 + 2] =
+                  h;
+              heightTexData[i4 + 3] = 1;
+            }
+          }
+          heightTex.needsUpdate = true;
+        };
+        bakeBVH();
+
+        // ── DUMMY TRAIL TEX ───────────────────────────────────────────────
+        const trailTex = new THREE.DataTexture(
+          new Float32Array(4),
+          1,
+          1,
+          THREE.RGBAFormat,
+          THREE.FloatType,
+        );
+        trailTex.needsUpdate = true;
+
+        // ── GRASS SETUP ───────────────────────────────────────────────────
+        const grassParams = {
+          grassWidth: 0.08,
+          grassHeight: 0.7,
+          lodDistance: 28,
+          maxDistance: 80,
+          lodBlendStart: 0.35,
+          nearRingExtent: 3,
+          nearFadeRange: 8,
+          grassBladesRegular: 1.0,
+          grassBladesNear: 1.0,
+          gradientCurve: 2.0,
+          baseColor1: "#143210",
+          baseColor2: "#183a12",
+          tipColor1: "#a6cc40",
+          tipColor2: "#cce666",
+          colorVariation: 0.3,
+          lushColor: "#1a4a0a",
+          bleachedColor: "#d4cc80",
+          windSpeed: 1.0,
+          windStrength: 0.4,
+          windWaveScale: 0.08,
+          windDir: 0.7,
+          windGust: 0.3,
+          windMicroSway: 0.15,
+          interactionRange: 1.8,
+          interactionStrength: 0.35,
+          interactionHeightThreshold: 1.5,
+          minSkyBlend: 0.55,
+          maxSkyBlend: 0.7,
+          aoEnabled: true,
+          aoIntensity: 1.0,
+          bsIntensity: 0.4,
+          bsColor: "#51cc66",
+          bsPower: 2.0,
+          frontScatter: 0.3,
+          rimSSS: 0.4,
+          specV1Enabled: false,
+          specV1Intensity: 1.5,
+          specV1Color: "#ffffff",
+          specV1DirX: -1.0,
+          specV1DirY: 1.0,
+          specV1DirZ: 0.5,
+          specV2Enabled: false,
+          specV2Intensity: 1.0,
+          specV2Color: "#ffffff",
+          specV2DirX: -1.0,
+          specV2DirY: 0.45,
+          specV2DirZ: 1.0,
+          specV2NoiseScale: 3.0,
+          specV2NoiseStr: 0.6,
+          specV2Power: 12.0,
+          specV2TipBias: 0.5,
+          seasonalScale: 0.02,
+          seasonalDryColor: "#8b7d3c",
+          sunAzimuth: PARAMS.light.sunAzimuth,
+          sunElevation: PARAMS.light.sunElevation,
+        };
+        grassUniforms = createUniforms(grassParams, TERRAIN_SIZE, 1);
+        const grassCtx = {
+          ...grassUniforms,
+          heightTex,
+          grassDensityTex,
+          trailTex,
+          PI: Math.PI,
+        };
+        const PATCH_SPACING = GRASS_PATCH_SIZE;
+        const GRID_SIZE = 12;
+        const geoLow = createGrassGeometry(
+          GRASS_SEGMENTS_LOW,
+          GRASS_DENSITY_LOW,
+          GRASS_PATCH_SIZE,
+          setSeed,
+          randRange,
+        );
+        const geoMid = createGrassGeometry(
+          GRASS_SEGMENTS_MID,
+          GRASS_DENSITY_MID,
+          GRASS_PATCH_SIZE,
+          setSeed,
+          randRange,
+        );
+        const geoHigh = createGrassGeometry(
+          GRASS_SEGMENTS_HIGH,
+          GRASS_DENSITY,
+          GRASS_PATCH_SIZE,
+          setSeed,
+          randRange,
+        );
+        const geoNear = createGrassGeometry(
+          GRASS_SEGMENTS_HIGH,
+          GRASS_DENSITY,
+          NEAR_PATCH_SIZE,
+          setSeed,
+          randRange,
+        );
+        const matLow = createGrassMaterial(
+          GRASS_SEGMENTS_LOW,
+          GRASS_VERTS_LOW,
+          false,
+          "regular",
+          grassCtx,
+        );
+        const matMid = createGrassMaterial(
+          GRASS_SEGMENTS_MID,
+          GRASS_VERTS_MID,
+          false,
+          "regular",
+          grassCtx,
+        );
+        const matHigh = createGrassMaterial(
+          GRASS_SEGMENTS_HIGH,
+          GRASS_VERTS_HIGH,
+          false,
+          "regular",
+          grassCtx,
+        );
+        const matNear = createGrassMaterial(
+          GRASS_SEGMENTS_HIGH,
+          GRASS_VERTS_HIGH,
+          false,
+          "near",
+          grassCtx,
+        );
+        const grassGroup = new THREE.Group();
+        scene.add(grassGroup);
+        grassPatchSystem = setupGrassPatches(
+          scene,
+          camera,
+          grassGroup,
+          {
+            geoLow,
+            geoMid,
+            geoHigh,
+            geoNear,
+            matLowSimple: matLow,
+            matMidSimple: matMid,
+            matHighSimple: matHigh,
+            matHighSimpleNear: matNear,
+          },
+          {
+            PATCH_SPACING,
+            GRID_SIZE,
+            NEAR_PATCH_SIZE,
+            nearRingExtent: grassParams.nearRingExtent,
+            lodDistance: grassParams.lodDistance,
+            lodDistanceMid: grassParams.lodDistance * 1.4,
+            maxDistance: grassParams.maxDistance,
+          },
+        );
+
+        // ── COLOR HELPER — hex sRGB → linear THREE.Color (matches testtsushimaplayer2) ──
+        function toLinear(hex) {
+          return new THREE.Color(hex).convertSRGBToLinear();
+        }
+
+        // ── PROCEDURAL GROUND SHADER — same layer system as tsl-texture-editor ──
+        function noiseTypeToIndex(s) {
+          return (
+            { value: 0, perlin: 1, simplex: 2, voronoi: 3, white: 4 }[s] ?? 0
+          );
+        }
+
+        function selectGroundNoise(nVal, nPerl, nSim, nVoro, nWhite, uType) {
+          let n = nVal;
+          n = mix(n, nPerl, step(float(0.5), uType));
+          n = mix(n, nSim, step(float(1.5), uType));
+          n = mix(n, nVoro, step(float(2.5), uType));
+          n = mix(n, nWhite, step(float(3.5), uType));
+          return n;
+        }
+
+        function groundLayerUniforms(L) {
+          return {
+            enable: uniform(L.enable ? 1 : 0),
+            noiseType: uniform(noiseTypeToIndex(L.noiseType)),
+            color: uniform(new THREE.Color(L.color).convertSRGBToLinear()),
+            strength: uniform(L.strength, "float"),
+            useFbm: uniform(L.useFbm ? 1 : 0),
+            octaves: uniform(L.octaves, "float"),
+            lacunarity: uniform(L.lacunarity, "float"),
+            gain: uniform(L.gain, "float"),
+            scale: uniform(L.scale, "float"),
+            offsetX: uniform(L.offsetX, "float"),
+            offsetY: uniform(L.offsetY, "float"),
+            invert: uniform(L.invert ? 1 : 0),
+            maskLow: uniform(L.maskLow, "float"),
+            maskHigh: uniform(L.maskHigh, "float"),
+            maskSharpness: uniform(L.maskSharpness, "float"),
+            voronoiJitter: uniform(L.voronoiJitter, "float"),
+          };
+        }
+
+        const gPARAMS = {
+          brightness: 1.0,
+          contrast: 1.0,
+          baseColor: "#3a5a25",
+          layer1: {
+            enable: true,
+            noiseType: "perlin",
+            color: "#2a4518",
+            strength: 0.6,
+            useFbm: true,
+            octaves: 3,
+            lacunarity: 2.0,
+            gain: 0.5,
+            scale: 0.015,
+            offsetX: 0,
+            offsetY: 0,
+            invert: false,
+            maskLow: 0.35,
+            maskHigh: 0.7,
+            maskSharpness: 1.0,
+            voronoiJitter: 0.8,
+          },
+          layer2: {
+            enable: false,
+            noiseType: "perlin",
+            color: "#5aaa30",
+            strength: 0.4,
+            useFbm: true,
+            octaves: 2.5,
+            lacunarity: 2.2,
+            gain: 0.5,
+            scale: 0.04,
+            offsetX: 13.7,
+            offsetY: 31.1,
+            invert: false,
+            maskLow: 0.4,
+            maskHigh: 0.75,
+            maskSharpness: 1.0,
+            voronoiJitter: 0.7,
+          },
+        };
+
+        const gBase = uniform(
+          new THREE.Color(gPARAMS.baseColor).convertSRGBToLinear(),
+        );
+        const gContrast = uniform(gPARAMS.contrast, "float");
+        const gBrightness = uniform(gPARAMS.brightness, "float");
+        const gL1 = groundLayerUniforms(gPARAMS.layer1);
+        const gL2 = groundLayerUniforms(gPARAMS.layer2);
+
+        function groundLayerMask(U) {
+          const p = vec2(
+            positionWorld.x.mul(U.scale).add(U.offsetX),
+            positionWorld.z.mul(U.scale).add(U.offsetY),
+          );
+          const nVal = valueNoise2D(p);
+          const nPerlS = perlinNoise2D(p);
+          const nPerlF = fbmPerlin2D(p, U.octaves, U.lacunarity, U.gain);
+          const nPerl = mix(nPerlS, nPerlF, U.useFbm);
+          const nSim = simplexNoise2D(p);
+          const nVoro = voronoiF1Normalized(p, U.voronoiJitter);
+          const nWhite = whiteNoise2D(p);
+          let n = selectGroundNoise(
+            nVal,
+            nPerl,
+            nSim,
+            nVoro,
+            nWhite,
+            U.noiseType,
+          );
+          n = mix(n, float(1).sub(n), U.invert);
+          const raw = smoothstep(U.maskLow, U.maskHigh, n);
+          const mask = pow(raw.max(float(0.0001)), U.maskSharpness)
+            .mul(U.strength)
+            .mul(U.enable);
+          return mask;
+        }
+
+        const groundProc = Fn(() => {
+          let col = gBase;
+          col = mix(col, gL1.color, groundLayerMask(gL1));
+          col = mix(col, gL2.color, groundLayerMask(gL2));
+          col = clamp(
+            col.sub(float(0.5)).mul(gContrast).add(float(0.5)).mul(gBrightness),
+            0,
+            1,
+          );
+          return col;
+        });
+
+        // ── PROCEDURAL MEADOW SHADER — yellowish variant of groundProc ──
+        const sPARAMS = {
+          brightness: 1.05,
+          contrast: 1.1,
+          baseColor: "#c8a832",
+          layer1: {
+            enable: true,
+            noiseType: "perlin",
+            color: "#a07818",
+            strength: 0.55,
+            useFbm: true,
+            octaves: 3,
+            lacunarity: 2.0,
+            gain: 0.5,
+            scale: 0.018,
+            offsetX: 17.3,
+            offsetY: 42.6,
+            invert: false,
+            maskLow: 0.3,
+            maskHigh: 0.65,
+            maskSharpness: 1.0,
+            voronoiJitter: 0.8,
+          },
+          layer2: {
+            enable: true,
+            noiseType: "perlin",
+            color: "#e0c850",
+            strength: 0.35,
+            useFbm: true,
+            octaves: 2.5,
+            lacunarity: 2.2,
+            gain: 0.5,
+            scale: 0.045,
+            offsetX: 88.1,
+            offsetY: 16.4,
+            invert: false,
+            maskLow: 0.45,
+            maskHigh: 0.78,
+            maskSharpness: 1.0,
+            voronoiJitter: 0.7,
+          },
+        };
+        const sBase = uniform(
+          new THREE.Color(sPARAMS.baseColor).convertSRGBToLinear(),
+        );
+        const sContrast = uniform(sPARAMS.contrast, "float");
+        const sBrightness = uniform(sPARAMS.brightness, "float");
+        const sL1 = groundLayerUniforms(sPARAMS.layer1);
+        const sL2 = groundLayerUniforms(sPARAMS.layer2);
+
+        const meadowProc = Fn(() => {
+          let col = sBase;
+          col = mix(col, sL1.color, groundLayerMask(sL1));
+          col = mix(col, sL2.color, groundLayerMask(sL2));
+          col = clamp(
+            col.sub(float(0.5)).mul(sContrast).add(float(0.5)).mul(sBrightness),
+            0,
+            1,
+          );
+          return col;
+        });
+
+        // ── PROCEDURAL CLIFF SHADER — rocky grey-brown for steep slopes ──
+        const cPARAMS = {
+          brightness: 1.0,
+          contrast: 1.2,
+          baseColor: "#6b5e52",
+          layer1: {
+            enable: true,
+            noiseType: "voronoi",
+            color: "#3d3228",
+            strength: 0.7,
+            useFbm: false,
+            octaves: 3,
+            lacunarity: 2.0,
+            gain: 0.5,
+            scale: 0.03,
+            offsetX: 5.3,
+            offsetY: 9.7,
+            invert: false,
+            maskLow: 0.3,
+            maskHigh: 0.65,
+            maskSharpness: 1.4,
+            voronoiJitter: 0.9,
+          },
+          layer2: {
+            enable: true,
+            noiseType: "perlin",
+            color: "#9a8e80",
+            strength: 0.35,
+            useFbm: true,
+            octaves: 3,
+            lacunarity: 2.1,
+            gain: 0.45,
+            scale: 0.055,
+            offsetX: 62.4,
+            offsetY: 28.9,
+            invert: false,
+            maskLow: 0.5,
+            maskHigh: 0.8,
+            maskSharpness: 1.0,
+            voronoiJitter: 0.7,
+          },
+        };
+        const cBase = uniform(
+          new THREE.Color(cPARAMS.baseColor).convertSRGBToLinear(),
+        );
+        const cContrast = uniform(cPARAMS.contrast, "float");
+        const cBrightness = uniform(cPARAMS.brightness, "float");
+        const cL1 = groundLayerUniforms(cPARAMS.layer1);
+        const cL2 = groundLayerUniforms(cPARAMS.layer2);
+
+        const cliffProc = Fn(() => {
+          let col = cBase;
+          col = mix(col, cL1.color, groundLayerMask(cL1));
+          col = mix(col, cL2.color, groundLayerMask(cL2));
+          col = clamp(
+            col.sub(float(0.5)).mul(cContrast).add(float(0.5)).mul(cBrightness),
+            0,
+            1,
+          );
+          return col;
+        });
+
+        // ── PROCEDURAL PATH SHADER (warm yellow-brown earthy tones) ──────
+        const pU = {
+          s1: uniform(0.008),
+          s2: uniform(0.04),
+          s3: uniform(0.18),
+          w1: uniform(0.55),
+          w2: uniform(0.3),
+          w3: uniform(0.15),
+          contrast: uniform(1.6),
+          bias: uniform(0.05),
+          col0: uniform(toLinear("#3d2408")),
+          col1: uniform(toLinear("#7a5228")),
+          col2: uniform(toLinear("#b8874a")),
+          stop1: uniform(0.35),
+          stop2: uniform(0.72),
+        };
+        const pathProc = Fn(() => {
+          const p = positionWorld.xz;
+          const n1 = mx_noise_float(p.mul(pU.s1));
+          const n2 = mx_noise_float(p.mul(pU.s2).add(vec2(41.3, 28.7)));
+          const n3 = mx_noise_float(p.mul(pU.s3).add(vec2(73.5, 52.1)));
+          const fbm = n1.mul(pU.w1).add(n2.mul(pU.w2)).add(n3.mul(pU.w3));
+          const t = clamp(
+            fbm.mul(pU.contrast).add(float(0.5).add(pU.bias)),
+            0.0,
+            1.0,
+          );
+          const c01 = mix(
+            pU.col0,
+            pU.col1,
+            smoothstep(float(0.0), pU.stop1, t),
+          );
+          return mix(c01, pU.col2, smoothstep(pU.stop1, pU.stop2, t));
+        });
+
+        // ── TSL SPLAT MATERIAL ────────────────────────────────────────────
+        const uTerrainHalf = float(TERRAIN_SIZE * 0.5);
+        const uTerrainSize = float(TERRAIN_SIZE);
+        const uSlopeStart = uniform(PARAMS.slopeStart); // flatness where cliff = 100%
+        const uSlopeEnd = uniform(PARAMS.slopeEnd); // flatness where cliff = 0%
+        const uDebugMode = uniform(0);
+        const uRockCol = uniform(toLinear("#7a7870")); // kept for debug mode only
+
+        const getSplatUV = () =>
+          positionWorld.xz.add(uTerrainHalf).div(uTerrainSize);
+
+        // Sample heightTex at ±1 texel to compute true 512-res slope via finite differences.
+        // dh/dx and dh/dz give the gradient; steepness = length(gradient) relative to cell size.
+        // flatness = 1/(1 + steepness) — 1.0 = perfectly flat, ~0 = near-vertical cliff.
+        const uHeightTexStep = uniform(4.0 / HTEX_RES); // 4-texel step — straddles cliff shoulder
+        const uHeightToWorld = uniform((4.0 * TERRAIN_SIZE) / HTEX_RES); // corresponding world distance
+        const getHeightTexFlatness = () => {
+          const uv = getSplatUV();
+          const hR = texture(
+            heightTex,
+            uv.add(vec2(uHeightTexStep, float(0))),
+          ).r;
+          const hL = texture(
+            heightTex,
+            uv.add(vec2(uHeightTexStep.negate(), float(0))),
+          ).r;
+          const hU = texture(
+            heightTex,
+            uv.add(vec2(float(0), uHeightTexStep)),
+          ).r;
+          const hD = texture(
+            heightTex,
+            uv.add(vec2(float(0), uHeightTexStep.negate())),
+          ).r;
+          // Gradient in world units: heightTex stores raw height (not normalised)
+          const dhdx = hR.sub(hL).div(uHeightToWorld.mul(float(2)));
+          const dhdz = hU.sub(hD).div(uHeightToWorld.mul(float(2)));
+          const steepness = dhdx.mul(dhdx).add(dhdz.mul(dhdz)).sqrt();
+          // flatness: 1 = flat, approaches 0 for near-vertical
+          return float(1).div(float(1).add(steepness));
+        };
+        const getSlopeMask = () =>
+          smoothstep(uSlopeStart, uSlopeEnd, getHeightTexFlatness());
+        const getHeightMask = () =>
+          smoothstep(
+            float(HEIGHT_SCALE * 0.65),
+            float(HEIGHT_SCALE * 0.92),
+            positionWorld.y,
+          );
+        const getWetMask = () =>
+          smoothstep(float(0.0), float(-3.0), positionWorld.y);
+
+        const splatMat = new MeshStandardNodeMaterial({
+          roughness: 0.9,
+          metalness: 0,
+        });
+
+        splatMat.colorNode = Fn(() => {
+          const splat = texture(splatTex, getSplatUV());
+          const terrain = groundProc();
+          const path = pathProc();
+          const wet = path.mul(float(0.55));
+          // Debug: replace with flat colors to see zone masks
+          const tCol = mix(terrain, vec3(0.3, 0.78, 0.2), uDebugMode);
+          const pCol = mix(path, vec3(0.72, 0.48, 0.22), uDebugMode);
+          const rCol = mix(cliffProc(), vec3(0.35, 0.34, 0.32), uDebugMode);
+          const wCol = mix(wet, vec3(0.1, 0.08, 0.05), uDebugMode);
+          // Auto layers first — fill unpainted areas
+          let col = tCol;
+          col = mix(rCol, col, getSlopeMask());
+          col = mix(col, tCol.mul(float(0.65)), getHeightMask());
+          col = mix(col, wCol, getWetMask());
+          // Manual paint always wins on top
+          col = mix(col, tCol, splat.r);
+          col = mix(col, tCol.mul(float(1.1)), splat.g);
+          col = mix(col, pCol, splat.b);
+          col = mix(
+            col,
+            meadowProc(),
+            texture(meadowDensityTex, getSplatUV()).r,
+          );
+          return col;
+        })();
+        terrain.material.dispose();
+        terrain.material = splatMat;
+
+        // ── SKY ──
+        const sky = new SkyMesh();
+        sky.scale.setScalar(10000);
+        sky.material.fog = false;
+        scene.add(sky);
+        sky.turbidity.value = PARAMS.sky.turbidity;
+        sky.rayleigh.value = PARAMS.sky.rayleigh;
+        sky.mieCoefficient.value = PARAMS.sky.mie;
+        sky.mieDirectionalG.value = PARAMS.sky.mieG;
+        sky.cloudCoverage.value = PARAMS.sky.cloudCoverage;
+        sky.cloudDensity.value = PARAMS.sky.cloudDensity;
+        sky.cloudElevation.value = PARAMS.sky.cloudElevation;
+        sky.sunPosition.value.copy(
+          sunDirectionFromAngles(
+            PARAMS.light.sunAzimuth,
+            PARAMS.light.sunElevation,
+          ),
+        );
+
+        const pmremGenerator = new THREE.PMREMGenerator(renderer);
+        const skyEnvScene = new THREE.Scene();
+        skyEnvScene.add(sky.clone());
+        scene.environment = pmremGenerator.fromScene(skyEnvScene, 0.04).texture;
+        scene.environmentIntensity = PARAMS.light.envIntensity;
+        renderer.toneMappingExposure = PARAMS.light.exposure;
+
+        // ── WATER PLANE ──
+        const waterGeo = new THREE.PlaneGeometry(
+          TERRAIN_SIZE * 4,
+          TERRAIN_SIZE * 4,
+        );
+        waterGeo.rotateX(-PI / 2);
+        const waterMat = new MeshStandardNodeMaterial({
+          transparent: true,
+          depthWrite: false,
+        });
+        waterMat.opacityNode = float(0.82);
+        waterMat.roughnessNode = float(0.15);
+        waterMat.metalnessNode = float(0.0);
+        waterMat.fog = false; // fog applied manually below after fog uniforms exist
+        const water = new THREE.Mesh(waterGeo, waterMat);
+        water.position.y = -0.5;
+        water.renderOrder = 1;
+        scene.add(water);
+
+        // ── FOG (height + distance) ──
+        const uFogColor = uniform(
+          new THREE.Color(PARAMS.fog.color).convertSRGBToLinear(),
+        );
+        const uFogDensity = uniform(PARAMS.fog.density);
+        const uFogHeight = uniform(PARAMS.fog.height);
+
+        const _heightFogNode = fog(
+          uFogColor,
+          exponentialHeightFogFactor(uFogDensity, uFogHeight),
+        );
+        const _distanceFogNode = fog(uFogColor, densityFogFactor(uFogDensity));
+
+        // Inject fog into water colorNode manually (transparent material needs this)
+        const _waterBase = vec3(0.05, 0.28, 0.55);
+        const _waterFogFactor = exponentialHeightFogFactor(
+          uFogDensity,
+          uFogHeight,
+        );
+        waterMat.colorNode = mix(_waterBase, uFogColor, _waterFogFactor);
+
+        function syncFog() {
+          uFogColor.value.set(PARAMS.fog.color).convertSRGBToLinear();
+          uFogDensity.value = PARAMS.fog.density;
+          uFogHeight.value = PARAMS.fog.height;
+          if (!PARAMS.fog.enabled) {
+            scene.fogNode = null;
+            return;
+          }
+          scene.fogNode =
+            PARAMS.fog.type === "height" ? _heightFogNode : _distanceFogNode;
+        }
+        syncFog();
+
+        // ── WATER BODIES ──────────────────────────────────────────────────
+        const WATER_PRESETS = {
+          Puddle: { w: 3, l: 3 },
+          "Small lake": { w: 20, l: 20 },
+          "Large lake": { w: 60, l: 60 },
+          "River strip": { w: 8, l: 50 },
+        };
+
+        const uWaterColor = uniform(
+          new THREE.Color(PARAMS.water.color).convertSRGBToLinear(),
+        );
+        const uWaterOpacity = uniform(PARAMS.water.opacity);
+        const uWaterRoughness = uniform(PARAMS.water.roughness);
+
+        const waterBodyMat = new MeshStandardNodeMaterial({
+          transparent: true,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
+        waterBodyMat.colorNode = uWaterColor;
+        waterBodyMat.opacityNode = uWaterOpacity;
+        waterBodyMat.roughnessNode = uWaterRoughness;
+        waterBodyMat.metalnessNode = float(0.0);
+        waterBodyMat.fog = false;
+
+        function syncWaterMat() {
+          uWaterColor.value.set(PARAMS.water.color).convertSRGBToLinear();
+          uWaterOpacity.value = PARAMS.water.opacity;
+          uWaterRoughness.value = PARAMS.water.roughness;
+        }
+
+        function getWaterRoot(object) {
+          let obj = object;
+          while (obj) {
+            if (waterObjects.includes(obj)) return obj;
+            obj = obj.parent;
+          }
+          return null;
+        }
+
+        function selectWater(mesh) {
+          selectedWater = mesh;
+          if (mesh) {
+            tcHelper.visible = true;
+            transformControls.attach(mesh);
+          } else {
+            tcHelper.visible = false;
+            transformControls.detach();
+          }
+        }
+
+        function placeWater(wx, wy, wz) {
+          const preset =
+            WATER_PRESETS[PARAMS.water.preset] ?? WATER_PRESETS["Small lake"];
+          const geo = new THREE.PlaneGeometry(preset.w, preset.l);
+          geo.rotateX(-Math.PI / 2);
+          const mesh = new THREE.Mesh(geo, waterBodyMat);
+          mesh.position.set(wx, wy + PARAMS.water.sinkOffset, wz);
+          mesh.renderOrder = 2;
+          scene.add(mesh);
+          waterObjects.push(mesh);
+          selectWater(mesh);
+        }
+
+        function applyWaterBodies(data) {
+          waterObjects.forEach((m) => scene.remove(m));
+          waterObjects = [];
+          selectWater(null);
+          data.forEach((d) => {
+            const geo = new THREE.PlaneGeometry(1, 1);
+            geo.rotateX(-Math.PI / 2);
+            const mesh = new THREE.Mesh(geo, waterBodyMat);
+            mesh.position.set(d.x, d.y, d.z);
+            mesh.rotation.set(d.rx, d.ry, d.rz);
+            mesh.scale.set(d.sx, d.sy, d.sz);
+            mesh.renderOrder = 2;
+            scene.add(mesh);
+            waterObjects.push(mesh);
+          });
+        }
+
+        function saveWaterBodies() {
+          const data = waterObjects.map((m) => ({
+            x: m.position.x,
+            y: m.position.y,
+            z: m.position.z,
+            rx: m.rotation.x,
+            ry: m.rotation.y,
+            rz: m.rotation.z,
+            sx: m.scale.x,
+            sy: m.scale.y,
+            sz: m.scale.z,
+          }));
+          const blob = new Blob([JSON.stringify(data, null, 2)], {
+            type: "application/json",
+          });
+          const a = document.createElement("a");
+          a.download = "water-bodies.json";
+          a.href = URL.createObjectURL(blob);
+          a.click();
+        }
+
+        // ── CLIFF TEMPLATES ──
+        const gltfLoader = new GLTFLoader();
+        const CLIFF_FALLBACK_COLORS = [0x8a7a6a, 0x6a5a4a, 0x7a6858];
+        cliffTemplates = await Promise.all(
+          CLIFF_MODELS.map(async (url, i) => {
+            try {
+              const gltf = await gltfLoader.loadAsync(url);
+              gltf.scene.traverse((o) => {
+                if (o.isMesh) {
+                  o.castShadow = true;
+                  o.receiveShadow = true;
+                }
+              });
+              return gltf.scene;
+            } catch {
+              const mesh = new THREE.Mesh(
+                new THREE.BoxGeometry(10, 15, 8),
+                new THREE.MeshStandardMaterial({
+                  color: CLIFF_FALLBACK_COLORS[i],
+                  roughness: 0.9,
+                }),
+              );
+              mesh.castShadow = true;
+              mesh.receiveShadow = true;
+              const g = new THREE.Group();
+              g.add(mesh);
+              return g;
+            }
+          }),
+        );
+
+        // ── TREE SYSTEM ──
+        treeSystem = createTreeSystem(scene, bvhHeight);
+        gltfLoader
+          .loadAsync("models/pine2.glb")
+          .then((gltf) => {
+            treeSystem.setModel(gltf);
+          })
+          .catch(() =>
+            console.warn(
+              "pine2.glb not found — trees mode active but no model loaded",
+            ),
+          );
+
+        // ── TRANSFORM CONTROLS ──
+        transformControls = new TransformControls(camera, renderer.domElement);
+        transformControls.addEventListener("dragging-changed", (e) => {
+          orbit.enabled = e.value ? false : currentMode === "view";
+        });
+        transformControls.enabled = false;
+        tcHelper = transformControls.getHelper();
+        tcHelper.visible = false;
+        scene.add(tcHelper);
+
+        // ── CLIFF HELPERS ──
+        function getCliffRoot(object) {
+          let obj = object;
+          while (obj) {
+            if (cliffObjects.includes(obj)) return obj;
+            obj = obj.parent;
+          }
+          return null;
+        }
+
+        function selectCliff(root) {
+          selectedCliff = root;
+          if (root) {
+            tcHelper.visible = true;
+            transformControls.attach(root);
+          } else {
+            tcHelper.visible = false;
+            transformControls.detach();
+          }
+        }
+
+        function placeCliff(wx, wy, wz, modelIndex) {
+          const root = cliffTemplates[modelIndex].clone();
+          root.position.set(wx, wy - cliffSinkOffset, wz);
+          root.userData.modelIndex = modelIndex;
+          root.traverse((o) => {
+            if (o.isMesh) {
+              o.castShadow = true;
+              o.receiveShadow = true;
+            }
+          });
+          scene.add(root);
+          cliffObjects.push(root);
+          selectCliff(root);
+          if (bakeBVH) bakeBVH();
+        }
+
+        function applyCliffs(data) {
+          cliffObjects.forEach((r) => scene.remove(r));
+          cliffObjects = [];
+          selectCliff(null);
+          data.forEach((d) => {
+            const idx = Math.max(
+              0,
+              Math.min(cliffTemplates.length - 1, d.modelIndex ?? 0),
+            );
+            const root = cliffTemplates[idx].clone();
+            root.position.set(d.x, d.y, d.z);
+            root.rotation.set(d.rx, d.ry, d.rz);
+            root.scale.set(d.sx, d.sy, d.sz);
+            root.userData.modelIndex = idx;
+            root.traverse((o) => {
+              if (o.isMesh) {
+                o.castShadow = true;
+                o.receiveShadow = true;
+              }
+            });
+            scene.add(root);
+            cliffObjects.push(root);
+          });
+          if (bakeBVH) bakeBVH();
+        }
+
+        function loadCliffs(file) {
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            try {
+              applyCliffs(JSON.parse(ev.target.result));
+            } catch (err) {
+              console.error("Failed to load cliffs.json", err);
+            }
+          };
+          reader.readAsText(file);
+        }
+
+        // ── PROPS FUNCTIONS ──────────────────────────────────────────────
+
+        function getPropRoot(object) {
+          let obj = object;
+          while (obj) {
+            if (propObjects.includes(obj)) return obj;
+            obj = obj.parent;
+          }
+          return null;
+        }
+
+        function selectProp(root) {
+          selectedProp = root;
+          if (root) {
+            tcHelper.visible = true;
+            transformControls.attach(root);
+          } else {
+            tcHelper.visible = false;
+            transformControls.detach();
+          }
+        }
+
+        function placeProp(wx, wy, wz) {
+          if (activePropIndex < 0 || activePropIndex >= propLibrary.length)
+            return;
+          const root = propLibrary[activePropIndex].scene.clone();
+          root.position.set(wx, wy + PARAMS.propSinkOffset, wz);
+          root.userData.propName = propLibrary[activePropIndex].name;
+          root.traverse((o) => {
+            if (o.isMesh) {
+              o.castShadow = true;
+              o.receiveShadow = true;
+            }
+          });
+          scene.add(root);
+          propObjects.push(root);
+          selectProp(root);
+        }
+
+        function saveProps() {
+          const data = propObjects.map((root) => ({
+            propName: root.userData.propName ?? "unknown",
+            x: root.position.x,
+            y: root.position.y,
+            z: root.position.z,
+            rx: root.rotation.x,
+            ry: root.rotation.y,
+            rz: root.rotation.z,
+            sx: root.scale.x,
+            sy: root.scale.y,
+            sz: root.scale.z,
+          }));
+          const blob = new Blob([JSON.stringify(data, null, 2)], {
+            type: "application/json",
+          });
+          const a = document.createElement("a");
+          a.download = "props.json";
+          a.href = URL.createObjectURL(blob);
+          a.click();
+        }
+
+        function applyProps(data) {
+          propObjects.forEach((r) => scene.remove(r));
+          propObjects = [];
+          selectProp(null);
+          data.forEach((d) => {
+            const entry = propLibrary.find((e) => e.name === d.propName);
+            if (!entry) {
+              console.warn(
+                `Props: model "${d.propName}" not in library — import it first`,
+              );
+              return;
+            }
+            const root = entry.scene.clone();
+            root.position.set(d.x, d.y, d.z);
+            root.rotation.set(d.rx, d.ry, d.rz);
+            root.scale.set(d.sx, d.sy, d.sz);
+            root.userData.propName = d.propName;
+            root.traverse((o) => {
+              if (o.isMesh) {
+                o.castShadow = true;
+                o.receiveShadow = true;
+              }
+            });
+            scene.add(root);
+            propObjects.push(root);
+          });
+        }
+
+        function loadPropsJson(file) {
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            try {
+              applyProps(JSON.parse(ev.target.result));
+            } catch (err) {
+              console.error("Failed to load props.json", err);
+            }
+          };
+          reader.readAsText(file);
+        }
+
+        // ── SCENE SAVE / LOAD ─────────────────────────────────────────────
+        function saveScene() {
+          // Encode heightData as greyscale PNG (same format loadHeightmap reads)
+          const hmC = document.createElement("canvas");
+          hmC.width = hmC.height = VERTS;
+          const hmCtx = hmC.getContext("2d");
+          const imgData = hmCtx.createImageData(VERTS, VERTS);
+          for (let i = 0; i < heightData.length; i++) {
+            const v = Math.max(
+              0,
+              Math.min(
+                255,
+                Math.round(
+                  ((heightData[i] + HEIGHT_SCALE) / (HEIGHT_SCALE * 2)) * 255,
+                ),
+              ),
+            );
+            imgData.data[i * 4 + 0] = v;
+            imgData.data[i * 4 + 1] = v;
+            imgData.data[i * 4 + 2] = v;
+            imgData.data[i * 4 + 3] = 255;
+          }
+          hmCtx.putImageData(imgData, 0, 0);
+
+          const data = {
+            version: 1,
+            heightmap: hmC.toDataURL("image/png"),
+            splatmap: splatCanvas.toDataURL("image/png"),
+            grassDensity: grassDensityCanvas.toDataURL("image/png"),
+            meadow: meadowCanvas.toDataURL("image/png"),
+            trees: treeSystem ? treeSystem.getPositions() : [],
+            cliffs: cliffObjects.map((root) => ({
+              modelIndex: root.userData.modelIndex ?? 0,
+              x: root.position.x,
+              y: root.position.y,
+              z: root.position.z,
+              rx: root.rotation.x,
+              ry: root.rotation.y,
+              rz: root.rotation.z,
+              sx: root.scale.x,
+              sy: root.scale.y,
+              sz: root.scale.z,
+            })),
+            props: propObjects.map((root) => ({
+              propName: root.userData.propName ?? "unknown",
+              x: root.position.x,
+              y: root.position.y,
+              z: root.position.z,
+              rx: root.rotation.x,
+              ry: root.rotation.y,
+              rz: root.rotation.z,
+              sx: root.scale.x,
+              sy: root.scale.y,
+              sz: root.scale.z,
+            })),
+            waterBodies: waterObjects.map((m) => ({
+              x: m.position.x,
+              y: m.position.y,
+              z: m.position.z,
+              rx: m.rotation.x,
+              ry: m.rotation.y,
+              rz: m.rotation.z,
+              sx: m.scale.x,
+              sy: m.scale.y,
+              sz: m.scale.z,
+            })),
+          };
+          const blob = new Blob([JSON.stringify(data)], {
+            type: "application/json",
+          });
+          const a = document.createElement("a");
+          a.download = "scene.json";
+          a.href = URL.createObjectURL(blob);
+          a.click();
+        }
+
+        function applyCanvasDataURL(dataURL, canvas, ctx, tex) {
+          return new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => {
+              ctx.clearRect(0, 0, canvas.width, canvas.height);
+              ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+              if (tex) tex.needsUpdate = true;
+              resolve();
+            };
+            img.src = dataURL;
+          });
+        }
+
+        function loadScene(file) {
+          const reader = new FileReader();
+          reader.onload = async (ev) => {
+            try {
+              const data = JSON.parse(ev.target.result);
+
+              // Heightmap
+              if (data.heightmap) {
+                await new Promise((resolve) => {
+                  const img = new Image();
+                  img.onload = () => {
+                    const c = document.createElement("canvas");
+                    c.width = c.height = VERTS;
+                    const ctx2 = c.getContext("2d");
+                    ctx2.drawImage(img, 0, 0, VERTS, VERTS);
+                    const pixels = ctx2.getImageData(0, 0, VERTS, VERTS).data;
+                    for (let i = 0; i < heightData.length; i++) {
+                      heightData[i] =
+                        (pixels[i * 4] / 255) * HEIGHT_SCALE * 2 - HEIGHT_SCALE;
+                    }
+                    syncGeometry();
+                    if (bakeBVH) bakeBVH();
+                    resolve();
+                  };
+                  img.src = data.heightmap;
+                });
+              }
+
+              // Canvases
+              if (data.splatmap)
+                await applyCanvasDataURL(
+                  data.splatmap,
+                  splatCanvas,
+                  splatCtx,
+                  splatTex,
+                );
+              if (data.grassDensity)
+                await applyCanvasDataURL(
+                  data.grassDensity,
+                  grassDensityCanvas,
+                  grassDensityCtx,
+                  grassDensityTex,
+                );
+              if (data.meadow)
+                await applyCanvasDataURL(
+                  data.meadow,
+                  meadowCanvas,
+                  meadowCtx,
+                  meadowDensityTex,
+                );
+
+              // Trees
+              if (data.trees && treeSystem) treeSystem.setPositions(data.trees);
+
+              // Cliffs
+              if (data.cliffs) applyCliffs(data.cliffs);
+
+              // Props (models must already be in library)
+              if (data.props) applyProps(data.props);
+              if (data.waterBodies) applyWaterBodies(data.waterBodies);
+            } catch (err) {
+              console.error("Failed to load scene.json", err);
+            }
+          };
+          reader.readAsText(file);
+        }
+
+        // ── BRUSH RING ──
+        const brushRingGeo = new THREE.RingGeometry(1, 1.06, 48);
+        brushRingGeo.rotateX(-PI / 2);
+        const brushRing = new THREE.Mesh(
+          brushRingGeo,
+          new THREE.MeshBasicMaterial({
+            color: 0xffffff,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+            transparent: true,
+            opacity: 0.9,
+          }),
+        );
+        brushRing.visible = false;
+        brushRing.renderOrder = 2;
+        scene.add(brushRing);
+
+        // ── PLAY MODE CAPSULE ──
+        const capsuleGeo = new THREE.CapsuleGeometry(
+          PLAYER_CAP_R,
+          PLAYER_CAP_H,
+          4,
+          8,
+        );
+        const capsuleMat = new THREE.MeshStandardMaterial({
+          color: 0xff6633,
+          roughness: 0.7,
+        });
+        const capsuleMesh = new THREE.Mesh(capsuleGeo, capsuleMat);
+        capsuleMesh.castShadow = true;
+        capsuleMesh.visible = false;
+        scene.add(capsuleMesh);
+
+        function enterPlayMode() {
+          savedCamPos = camera.position.clone();
+          savedOrbitTarget = orbit.target.clone();
+          // Spawn at orbit target, snapped to terrain
+          playerPos.set(orbit.target.x, 0, orbit.target.z);
+          playerPos.y = bvhHeight(playerPos.x, playerPos.z);
+          camYaw = 0;
+          camPitch = 0.35;
+          capsuleMesh.visible = true;
+          orbit.enabled = false;
+          // Hide editor UI
+          const tpEl = document.querySelector(".tp-dfwv");
+          if (tpEl) tpEl.style.display = "none";
+          document.getElementById("info").style.display = "none";
+          document.getElementById("heightmap-preview").style.display = "none";
+          document.getElementById("splatmap-preview").style.display = "none";
+          document
+            .querySelectorAll(".preview-label")
+            .forEach((el) => (el.style.display = "none"));
+          brushRing.visible = false;
+          renderer.domElement.requestPointerLock();
+        }
+
+        function exitPlayMode() {
+          capsuleMesh.visible = false;
+          if (savedCamPos) camera.position.copy(savedCamPos);
+          if (savedOrbitTarget) orbit.target.copy(savedOrbitTarget);
+          camera.lookAt(orbit.target);
+          // Restore editor UI
+          const tpEl = document.querySelector(".tp-dfwv");
+          if (tpEl) tpEl.style.display = "";
+          document.getElementById("info").style.display = "";
+          document.getElementById("heightmap-preview").style.display = "";
+          document.getElementById("splatmap-preview").style.display = "";
+          document
+            .querySelectorAll(".preview-label")
+            .forEach((el) => (el.style.display = ""));
+          if (document.pointerLockElement) document.exitPointerLock();
+        }
+
+        // Mouse look (pointer lock)
+        document.addEventListener("mousemove", (e) => {
+          if (currentMode !== "play" || !document.pointerLockElement) return;
+          camYaw -= e.movementX * 0.002;
+          camPitch += e.movementY * 0.002;
+          camPitch = Math.max(0.05, Math.min(PI * 0.45, camPitch));
+        });
+        document.addEventListener("pointerlockchange", () => {
+          if (!document.pointerLockElement && currentMode === "play")
+            setMode("view");
+        });
+
+        // ── RAYCASTER ──
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        function getTerrainHit(event) {
+          const rect = renderer.domElement.getBoundingClientRect();
+          mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+          mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+          raycaster.setFromCamera(mouse, camera);
+          const hits = raycaster.intersectObject(terrain);
+          return hits.length > 0 ? hits[0].point : null;
+        }
+
+        function updateBrushRing(p) {
+          if (!p) {
+            brushRing.visible = false;
+            return;
+          }
+          brushRing.visible = true;
+          // Color: white for paint, orange for sculpt
+          brushRing.material.color.set(
+            currentMode === "sculpt"
+              ? 0xff9900
+              : currentMode === "trees"
+                ? 0x44aa44
+                : 0xffffff,
+          );
+          brushRing.position.set(p.x, p.y + 0.15, p.z);
+          brushRing.scale.setScalar(brushWorldRadius());
+        }
+
+        // ── TWEAKPANE ──
+        const pane = new Pane({ title: "Terrain Editor" });
+
+        // ── SCENE SAVE / LOAD FOLDER ──
+        const sceneFolder = pane.addFolder({ title: "Scene", expanded: true });
+        sceneFolder.addButton({ title: "💾  Save All" }).on("click", saveScene);
+        sceneFolder
+          .addButton({ title: "📂  Load All…" })
+          .on("click", () =>
+            document.getElementById("scene-file-input").click(),
+          );
+        pane.addBlade({ view: "separator" });
+
+        // Mode selector
+        const modeBinding = pane.addBinding(PARAMS, "mode", {
+          label: "Mode",
+          options: {
+            View: "view",
+            Paint: "paint",
+            Sculpt: "sculpt",
+            Place: "place",
+            Grass: "grass",
+            Trees: "trees",
+            "Props [I]": "props",
+            "Water [W]": "water",
+            "Play [F]": "play",
+          },
+        });
+        modeBinding.on("change", (ev) => setMode(ev.value));
+
+        pane.addBlade({ view: "separator" });
+
+        // Brush (always visible)
+        const brushFolder = pane.addFolder({ title: "Brush", expanded: true });
+        brushFolder
+          .addBinding(PARAMS, "brushSize", {
+            label: "Size",
+            min: 2,
+            max: 80,
+            step: 1,
+          })
+          .on("change", (ev) => {
+            brushSize = ev.value;
+          });
+        brushFolder
+          .addBinding(PARAMS, "brushStrength", {
+            label: "Strength",
+            min: 5,
+            max: 100,
+            step: 1,
+          })
+          .on("change", (ev) => {
+            brushStr = ev.value;
+          });
+        brushFolder.addBinding(PARAMS, "sculptBrush", {
+          label: "Sculpt shape",
+          options: {
+            Smooth: "smooth",
+            "FBM Peak": "fbm_peak",
+            Crater: "crater",
+            Plateau: "plateau",
+          },
+        });
+        brushFolder.addBinding(PARAMS, "paintBrush", {
+          label: "Paint shape",
+          options: {
+            Smooth: "smooth",
+            "FBM Splat": "fbm_splat",
+            Scatter: "scatter",
+          },
+        });
+
+        // History (always visible)
+        const histFolder = pane.addFolder({ title: "History", expanded: true });
+        histFolder.addButton({ title: "↩ Undo" }).on("click", () => {
+          undo();
+          generateObjects(scene);
+        });
+        histFolder.addButton({ title: "↪ Redo" }).on("click", () => {
+          redo();
+          generateObjects(scene);
+        });
+
+        // Material (always visible, collapsed by default)
+        const matFolder = pane.addFolder({
+          title: "Material",
+          expanded: false,
+        });
+        matFolder
+          .addBinding(PARAMS, "debugColors", { label: "Debug colors" })
+          .on("change", (ev) => {
+            uDebugMode.value = ev.value ? 1 : 0;
+          });
+        matFolder.addBlade({ view: "separator" });
+
+        // Color proxy helpers — picker shows sRGB hex, uniform stores linear
+        function bindColor(folder, label, colUniform) {
+          const proxy = {
+            col:
+              "#" +
+              colUniform.value.clone().convertLinearToSRGB().getHexString(),
+          };
+          folder
+            .addBinding(proxy, "col", { label, view: "color" })
+            .on("change", (ev) => {
+              colUniform.value.set(ev.value).convertSRGBToLinear();
+            });
+        }
+
+        // ── Ground procedural folder ──
+        const noiseTypeOptions = {
+          Value: "value",
+          Perlin: "perlin",
+          Simplex: "simplex",
+          Voronoi: "voronoi",
+          White: "white",
+        };
+
+        function bindGroundLayer(folder, L, U) {
+          folder.addBinding(L, "enable", { label: "On" }).on("change", (e) => {
+            U.enable.value = e.value ? 1 : 0;
+          });
+          bindColor(folder, "Color", U.color);
+          folder
+            .addBinding(L, "strength", { min: 0, max: 1, step: 0.01 })
+            .on("change", (e) => {
+              U.strength.value = e.value;
+            });
+          folder
+            .addBinding(L, "noiseType", { options: noiseTypeOptions })
+            .on("change", (e) => {
+              U.noiseType.value = noiseTypeToIndex(e.value);
+            });
+          folder.addBinding(L, "useFbm", { label: "FBM" }).on("change", (e) => {
+            U.useFbm.value = e.value ? 1 : 0;
+          });
+          folder
+            .addBinding(L, "octaves", { min: 1, max: 6, step: 0.5 })
+            .on("change", (e) => {
+              U.octaves.value = e.value;
+            });
+          folder
+            .addBinding(L, "lacunarity", { min: 1.2, max: 4, step: 0.1 })
+            .on("change", (e) => {
+              U.lacunarity.value = e.value;
+            });
+          folder
+            .addBinding(L, "gain", { min: 0.1, max: 0.9, step: 0.05 })
+            .on("change", (e) => {
+              U.gain.value = e.value;
+            });
+          folder
+            .addBinding(L, "scale", { min: 0.001, max: 0.1, step: 0.001 })
+            .on("change", (e) => {
+              U.scale.value = e.value;
+            });
+          folder
+            .addBinding(L, "offsetX", { min: -100, max: 100, step: 1 })
+            .on("change", (e) => {
+              U.offsetX.value = e.value;
+            });
+          folder
+            .addBinding(L, "offsetY", { min: -100, max: 100, step: 1 })
+            .on("change", (e) => {
+              U.offsetY.value = e.value;
+            });
+          folder
+            .addBinding(L, "invert", { label: "Invert" })
+            .on("change", (e) => {
+              U.invert.value = e.value ? 1 : 0;
+            });
+          folder
+            .addBinding(L, "maskLow", {
+              min: 0,
+              max: 1,
+              step: 0.01,
+              label: "Mask low",
+            })
+            .on("change", (e) => {
+              U.maskLow.value = e.value;
+            });
+          folder
+            .addBinding(L, "maskHigh", {
+              min: 0,
+              max: 1,
+              step: 0.01,
+              label: "Mask high",
+            })
+            .on("change", (e) => {
+              U.maskHigh.value = e.value;
+            });
+          folder
+            .addBinding(L, "maskSharpness", {
+              min: 0.2,
+              max: 3,
+              step: 0.05,
+              label: "Sharpness",
+            })
+            .on("change", (e) => {
+              U.maskSharpness.value = e.value;
+            });
+        }
+
+        const groundProcFolder = matFolder.addFolder({
+          title: "Ground",
+          expanded: false,
+        });
+        bindColor(groundProcFolder, "Base color", gBase);
+        groundProcFolder
+          .addBinding(gPARAMS, "contrast", { min: 0.2, max: 3, step: 0.05 })
+          .on("change", (e) => {
+            gContrast.value = e.value;
+          });
+        groundProcFolder
+          .addBinding(gPARAMS, "brightness", { min: 0.2, max: 2, step: 0.05 })
+          .on("change", (e) => {
+            gBrightness.value = e.value;
+          });
+        bindGroundLayer(
+          groundProcFolder.addFolder({ title: "Layer 1", expanded: true }),
+          gPARAMS.layer1,
+          gL1,
+        );
+        bindGroundLayer(
+          groundProcFolder.addFolder({ title: "Layer 2", expanded: false }),
+          gPARAMS.layer2,
+          gL2,
+        );
+
+        const meadowProcFolder = matFolder.addFolder({
+          title: "Meadow",
+          expanded: false,
+        });
+        bindColor(meadowProcFolder, "Base color", sBase);
+        meadowProcFolder
+          .addBinding(sPARAMS, "contrast", { min: 0.2, max: 3, step: 0.05 })
+          .on("change", (e) => {
+            sContrast.value = e.value;
+          });
+        meadowProcFolder
+          .addBinding(sPARAMS, "brightness", { min: 0.2, max: 2, step: 0.05 })
+          .on("change", (e) => {
+            sBrightness.value = e.value;
+          });
+        bindGroundLayer(
+          meadowProcFolder.addFolder({ title: "Layer 1", expanded: true }),
+          sPARAMS.layer1,
+          sL1,
+        );
+        bindGroundLayer(
+          meadowProcFolder.addFolder({ title: "Layer 2", expanded: false }),
+          sPARAMS.layer2,
+          sL2,
+        );
+
+        const cliffProcFolder = matFolder.addFolder({
+          title: "Auto-Cliff",
+          expanded: false,
+        });
+        bindColor(cliffProcFolder, "Base color", cBase);
+        cliffProcFolder
+          .addBinding(cPARAMS, "contrast", { min: 0.2, max: 3, step: 0.05 })
+          .on("change", (e) => {
+            cContrast.value = e.value;
+          });
+        cliffProcFolder
+          .addBinding(cPARAMS, "brightness", { min: 0.2, max: 2, step: 0.05 })
+          .on("change", (e) => {
+            cBrightness.value = e.value;
+          });
+        bindGroundLayer(
+          cliffProcFolder.addFolder({ title: "Layer 1", expanded: true }),
+          cPARAMS.layer1,
+          cL1,
+        );
+        bindGroundLayer(
+          cliffProcFolder.addFolder({ title: "Layer 2", expanded: false }),
+          cPARAMS.layer2,
+          cL2,
+        );
+        cliffProcFolder.addBlade({ view: "separator" });
+        cliffProcFolder
+          .addBinding(PARAMS, "slopeStart", {
+            label: "Cliff start (steep)",
+            min: 0.0,
+            max: 0.99,
+            step: 0.01,
+          })
+          .on("change", (ev) => {
+            uSlopeStart.value = ev.value;
+          });
+        cliffProcFolder
+          .addBinding(PARAMS, "slopeEnd", {
+            label: "Cliff end (blend)",
+            min: 0.01,
+            max: 1.0,
+            step: 0.01,
+          })
+          .on("change", (ev) => {
+            uSlopeEnd.value = ev.value;
+          });
+
+        // ── Path procedural folder ──
+        const pathProcFolder = matFolder.addFolder({
+          title: "Path (yellow-brown)",
+          expanded: false,
+        });
+        pathProcFolder.addBinding(pU.s1, "value", {
+          label: "Scale 1",
+          min: 0.001,
+          max: 0.05,
+          step: 0.001,
+        });
+        pathProcFolder.addBinding(pU.s2, "value", {
+          label: "Scale 2",
+          min: 0.005,
+          max: 0.2,
+          step: 0.005,
+        });
+        pathProcFolder.addBinding(pU.s3, "value", {
+          label: "Scale 3",
+          min: 0.05,
+          max: 0.8,
+          step: 0.01,
+        });
+        pathProcFolder.addBlade({ view: "separator" });
+        pathProcFolder.addBinding(pU.w1, "value", {
+          label: "Weight 1",
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+        pathProcFolder.addBinding(pU.w2, "value", {
+          label: "Weight 2",
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+        pathProcFolder.addBinding(pU.w3, "value", {
+          label: "Weight 3",
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+        pathProcFolder.addBlade({ view: "separator" });
+        pathProcFolder.addBinding(pU.contrast, "value", {
+          label: "Contrast",
+          min: 0.5,
+          max: 4,
+          step: 0.05,
+        });
+        pathProcFolder.addBinding(pU.bias, "value", {
+          label: "Bias",
+          min: -1,
+          max: 1,
+          step: 0.01,
+        });
+        pathProcFolder.addBlade({ view: "separator" });
+        bindColor(pathProcFolder, "Color 0", pU.col0);
+        bindColor(pathProcFolder, "Color 1", pU.col1);
+        bindColor(pathProcFolder, "Color 2", pU.col2);
+        pathProcFolder.addBlade({ view: "separator" });
+        pathProcFolder.addBinding(pU.stop1, "value", {
+          label: "Stop 1",
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+        pathProcFolder.addBinding(pU.stop2, "value", {
+          label: "Stop 2",
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+
+        pane.addBlade({ view: "separator" });
+
+        // ── LIGHTING FOLDER ──
+        const lightFolder = pane.addFolder({
+          title: "Lighting",
+          expanded: false,
+        });
+        lightFolder.addBinding(PARAMS.light, "sunAzimuth", {
+          label: "Sun azimuth",
+          min: 0,
+          max: 360,
+          step: 1,
+        });
+        lightFolder.addBinding(PARAMS.light, "sunElevation", {
+          label: "Sun elevation",
+          min: -10,
+          max: 90,
+          step: 1,
+        });
+        lightFolder.addBinding(PARAMS.light, "dirColor", {
+          label: "Sun color",
+          view: "color",
+        });
+        lightFolder.addBinding(PARAMS.light, "dirIntensity", {
+          label: "Sun intensity",
+          min: 0,
+          max: 5,
+          step: 0.1,
+        });
+        lightFolder.addBlade({ view: "separator" });
+        lightFolder.addBinding(PARAMS.light, "hemiSkyColor", {
+          label: "Ambient sky",
+          view: "color",
+        });
+        lightFolder.addBinding(PARAMS.light, "hemiGroundColor", {
+          label: "Ambient ground",
+          view: "color",
+        });
+        lightFolder.addBinding(PARAMS.light, "hemiIntensity", {
+          label: "Ambient intensity",
+          min: 0,
+          max: 3,
+          step: 0.1,
+        });
+        lightFolder.addBlade({ view: "separator" });
+        lightFolder.addBinding(PARAMS.light, "envIntensity", {
+          label: "Env map",
+          min: 0,
+          max: 2,
+          step: 0.01,
+        });
+        lightFolder.addBinding(PARAMS.light, "exposure", {
+          label: "Exposure",
+          min: 0.1,
+          max: 2,
+          step: 0.05,
+        });
+
+        // ── SKY FOLDER ──
+        const skyFolder = pane.addFolder({ title: "Sky", expanded: false });
+        skyFolder.addBinding(PARAMS.sky, "turbidity", {
+          min: 0,
+          max: 10,
+          step: 0.1,
+        });
+        skyFolder.addBinding(PARAMS.sky, "rayleigh", {
+          min: 0,
+          max: 4,
+          step: 0.1,
+        });
+        skyFolder.addBinding(PARAMS.sky, "mie", {
+          min: 0,
+          max: 0.1,
+          step: 0.001,
+        });
+        skyFolder.addBinding(PARAMS.sky, "mieG", {
+          label: "mie g",
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+        skyFolder.addBinding(PARAMS.sky, "cloudCoverage", {
+          label: "cloud coverage",
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+        skyFolder.addBinding(PARAMS.sky, "cloudDensity", {
+          label: "cloud density",
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+        skyFolder.addBinding(PARAMS.sky, "cloudElevation", {
+          label: "cloud elevation",
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+
+        const fogFolder = pane.addFolder({ title: "Fog", expanded: false });
+        fogFolder
+          .addBinding(PARAMS.fog, "enabled", { label: "Enabled" })
+          .on("change", syncFog);
+        fogFolder
+          .addBinding(PARAMS.fog, "type", {
+            label: "Type",
+            options: { "Height fog": "height", "Distance fog": "distance" },
+          })
+          .on("change", syncFog);
+        fogFolder
+          .addBinding(PARAMS.fog, "color", { label: "Color" })
+          .on("change", syncFog);
+        fogFolder
+          .addBinding(PARAMS.fog, "density", {
+            label: "Density",
+            min: 0.001,
+            max: 0.1,
+            step: 0.001,
+          })
+          .on("change", syncFog);
+        fogFolder
+          .addBinding(PARAMS.fog, "height", {
+            label: "Height",
+            min: -5,
+            max: 20,
+            step: 0.5,
+          })
+          .on("change", syncFog);
+
+        pane.addBlade({ view: "separator" });
+
+        // Paint folder
+        const paintFolder = pane.addFolder({ title: "Paint", expanded: true });
+        paintFolder
+          .addBinding(PARAMS, "biome", {
+            label: "Biome",
+            options: {
+              Forest: "forest",
+              Grass: "grass",
+              Village: "village",
+              Meadow: "meadow",
+              Erase: "erase",
+            },
+          })
+          .on("change", (ev) => {
+            currentBiome = ev.value;
+          });
+        paintFolder.addButton({ title: "Clear Map" }).on("click", () => {
+          splatCtx.fillStyle = "#000";
+          splatCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+          syncPreview();
+          if (splatTex) splatTex.needsUpdate = true;
+          generateObjects(scene);
+        });
+        paintFolder.addButton({ title: "Clear Meadow" }).on("click", () => {
+          meadowCtx.fillStyle = "#000";
+          meadowCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+          if (meadowDensityTex) meadowDensityTex.needsUpdate = true;
+        });
+        paintFolder
+          .addButton({ title: "Save Splatmap" })
+          .on("click", saveSplatmap);
+        paintFolder
+          .addButton({ title: "Load Splatmap" })
+          .on("click", () => document.getElementById("file-input").click());
+
+        // Sculpt folder
+        const sculptFolder = pane.addFolder({
+          title: "Sculpt",
+          expanded: true,
+        });
+        sculptFolder
+          .addBinding(PARAMS, "sculptTool", {
+            label: "Tool",
+            options: { Raise: "raise", Lower: "lower", Smooth: "smooth" },
+          })
+          .on("change", (ev) => {
+            sculptMode = ev.value;
+          });
+        sculptFolder.addButton({ title: "Reset Terrain" }).on("click", () => {
+          pushUndo();
+          buildHeightData();
+          syncGeometry();
+          generateObjects(scene);
+          if (bakeBVH) bakeBVH();
+        });
+        sculptFolder
+          .addButton({ title: "Save Heightmap" })
+          .on("click", saveHeightmap);
+        sculptFolder
+          .addButton({ title: "Load Heightmap" })
+          .on("click", () =>
+            document.getElementById("hmap-file-input").click(),
+          );
+
+        // Place folder
+        const placeFolder = pane.addFolder({
+          title: "Place  [ W move · E rotate · R scale · Del remove ]",
+          expanded: true,
+        });
+        placeFolder
+          .addBinding(PARAMS, "cliffModel", {
+            label: "Model",
+            options: { "Cliff 1": 0, "Cliff 2": 1, "Cliff 3": 2 },
+          })
+          .on("change", (ev) => {
+            activeCliffModel = ev.value;
+          });
+        placeFolder
+          .addBinding(PARAMS, "sinkOffset", {
+            label: "Sink",
+            min: 0,
+            max: 20,
+            step: 0.5,
+          })
+          .on("change", (ev) => {
+            cliffSinkOffset = ev.value;
+          });
+        placeFolder
+          .addButton({ title: "Save Cliffs JSON" })
+          .on("click", saveCliffs);
+        placeFolder
+          .addButton({ title: "Load Cliffs JSON" })
+          .on("click", () =>
+            document.getElementById("cliffs-file-input").click(),
+          );
+
+        // ── Grass folder ──
+        const grassFolder = pane.addFolder({
+          title: "Grass  [ G ]",
+          expanded: true,
+        });
+        const grassDensityFileInput = document.createElement("input");
+        grassDensityFileInput.type = "file";
+        grassDensityFileInput.accept = "image/png";
+        grassDensityFileInput.style.display = "none";
+        document.body.appendChild(grassDensityFileInput);
+        const grassErasePARAMS = { erase: false };
+        grassFolder
+          .addBinding(grassErasePARAMS, "erase", { label: "Erase (or Shift)" })
+          .on("change", (e) => {
+            grassEraseMode = e.value;
+          });
+        grassFolder.addButton({ title: "Clear grass" }).on("click", () => {
+          grassDensityCtx.fillStyle = "#000";
+          grassDensityCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+          if (grassDensityTex) grassDensityTex.needsUpdate = true;
+        });
+        grassFolder.addButton({ title: "Fill all grass" }).on("click", () => {
+          grassDensityCtx.fillStyle = "#fff";
+          grassDensityCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+          if (grassDensityTex) grassDensityTex.needsUpdate = true;
+        });
+        grassFolder.addButton({ title: "Save density map" }).on("click", () => {
+          const a = document.createElement("a");
+          a.download = "grass-density.png";
+          a.href = grassDensityCanvas.toDataURL("image/png");
+          a.click();
+        });
+        grassFolder
+          .addButton({ title: "Load density map" })
+          .on("click", () => grassDensityFileInput.click());
+        grassDensityFileInput.addEventListener("change", (e) => {
+          if (!e.target.files[0]) return;
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            const img = new Image();
+            img.onload = () => {
+              grassDensityCtx.clearRect(0, 0, SPLAT_RES, SPLAT_RES);
+              grassDensityCtx.drawImage(img, 0, 0, SPLAT_RES, SPLAT_RES);
+              if (grassDensityTex) grassDensityTex.needsUpdate = true;
+            };
+            img.src = ev.target.result;
+          };
+          reader.readAsDataURL(e.target.files[0]);
+        });
+
+        // ── Trees folder ──
+        const treesFolder = pane.addFolder({
+          title: "Trees  [ T ]",
+          expanded: true,
+        });
+        const treeErasePARAMS = { erase: false };
+        treesFolder
+          .addBinding(treeErasePARAMS, "erase", { label: "Erase (or Shift)" })
+          .on("change", (e) => {
+            treeEraseMode = e.value;
+          });
+        treesFolder.addBinding(treeParams, "treesPerStroke", {
+          label: "Per stroke",
+          min: 1,
+          max: 20,
+          step: 1,
+        });
+        treesFolder.addBinding(treeParams, "minSpacing", {
+          label: "Min spacing",
+          min: 1,
+          max: 40,
+          step: 0.5,
+        });
+        treesFolder.addBinding(treeParams, "scaleMin", {
+          label: "Scale min",
+          min: 0.1,
+          max: 3,
+          step: 0.05,
+        });
+        treesFolder.addBinding(treeParams, "scaleMax", {
+          label: "Scale max",
+          min: 0.1,
+          max: 3,
+          step: 0.05,
+        });
+        treesFolder.addButton({ title: "Clear all trees" }).on("click", () => {
+          if (treeSystem) treeSystem.clear();
+        });
+        treesFolder.addButton({ title: "Save trees JSON" }).on("click", () => {
+          if (!treeSystem) return;
+          const blob = new Blob(
+            [JSON.stringify(treeSystem.getPositions(), null, 2)],
+            { type: "application/json" },
+          );
+          const a = document.createElement("a");
+          a.download = "trees.json";
+          a.href = URL.createObjectURL(blob);
+          a.click();
+        });
+        const treeFileInput = document.createElement("input");
+        treeFileInput.type = "file";
+        treeFileInput.accept = ".json";
+        treeFileInput.style.display = "none";
+        document.body.appendChild(treeFileInput);
+        treesFolder
+          .addButton({ title: "Load trees JSON" })
+          .on("click", () => treeFileInput.click());
+        treeFileInput.addEventListener("change", (e) => {
+          if (!e.target.files[0] || !treeSystem) return;
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            try {
+              treeSystem.setPositions(JSON.parse(ev.target.result));
+            } catch (err) {
+              console.error("Failed to load trees.json", err);
+            }
+          };
+          reader.readAsText(e.target.files[0]);
+        });
+
+        // ── PROPS FOLDER ──
+        const propsFolder = pane.addFolder({
+          title: "Props  [ I ]",
+          expanded: true,
+        });
+        propsFolder.hidden = true;
+
+        const propActivePARAMS = { name: "None" };
+        propsFolder.addBinding(propActivePARAMS, "name", {
+          label: "Active model",
+          readonly: true,
+        });
+
+        // Project model picker
+        const PROJECT_MODELS = [
+          "low_poly_fern.glb",
+          "rock__game_asset.glb",
+          "ruined_elden_ring_church.glb",
+          "japanese_cherry_tree.glb",
+        ];
+        const projectPickPARAMS = { model: "— pick a model —" };
+        function loadProjectModel(filename) {
+          const url = `models/${filename}`;
+          const name = filename.replace(/\.glb$/i, "");
+          gltfLoader
+            .loadAsync(url)
+            .then((gltf) => {
+              gltf.scene.traverse((o) => {
+                if (o.isMesh) {
+                  o.castShadow = true;
+                  o.receiveShadow = true;
+                  if (
+                    o.material &&
+                    (o.material.transparent || o.material.alphaTest > 0)
+                  ) {
+                    const m = o.material.clone();
+                    m.transparent = false;
+                    m.alphaTest = 0.5;
+                    m.depthWrite = true;
+                    o.material = m;
+                  }
+                }
+              });
+              const existing = propLibrary.findIndex((en) => en.name === name);
+              if (existing >= 0) {
+                propLibrary[existing] = { name, scene: gltf.scene };
+                activePropIndex = existing;
+              } else {
+                propLibrary.push({ name, scene: gltf.scene });
+                activePropIndex = propLibrary.length - 1;
+              }
+              propActivePARAMS.name = name;
+              PARAMS.activePropName = name;
+              pane.refresh();
+            })
+            .catch((err) => console.error(`Failed to load ${url}`, err));
+        }
+        propsFolder
+          .addBinding(projectPickPARAMS, "model", {
+            label: "Project model",
+            options: Object.fromEntries(
+              ["— pick a model —", ...PROJECT_MODELS].map((m) => [m, m]),
+            ),
+          })
+          .on("change", (ev) => {
+            if (ev.value !== "— pick a model —") loadProjectModel(ev.value);
+          });
+
+        propsFolder
+          .addButton({ title: "Import GLB…" })
+          .on("click", () => document.getElementById("prop-glb-input").click());
+
+        propsFolder.addBinding(PARAMS, "propSinkOffset", {
+          label: "Sink offset",
+          min: -2,
+          max: 2,
+          step: 0.01,
+        });
+
+        propsFolder
+          .addButton({ title: "Save props JSON" })
+          .on("click", saveProps);
+
+        propsFolder
+          .addButton({ title: "Load props JSON…" })
+          .on("click", () =>
+            document.getElementById("props-json-input").click(),
+          );
+
+        propsFolder
+          .addButton({ title: "Delete selected (Del)" })
+          .on("click", () => {
+            if (!selectedProp) return;
+            scene.remove(selectedProp);
+            propObjects = propObjects.filter((p) => p !== selectedProp);
+            selectProp(null);
+          });
+
+        propsFolder.addButton({ title: "Clear all props" }).on("click", () => {
+          propObjects.forEach((r) => scene.remove(r));
+          propObjects = [];
+          selectProp(null);
+        });
+
+        // ── PROP FILE INPUTS ──
+        document
+          .getElementById("prop-glb-input")
+          .addEventListener("change", (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const url = URL.createObjectURL(file);
+            const name = file.name.replace(/\.glb$/i, "");
+            gltfLoader.loadAsync(url).then((gltf) => {
+              // Normalize materials (alpha-test like trees)
+              gltf.scene.traverse((o) => {
+                if (o.isMesh) {
+                  o.castShadow = true;
+                  o.receiveShadow = true;
+                  if (
+                    o.material &&
+                    (o.material.transparent || o.material.alphaTest > 0)
+                  ) {
+                    const m = o.material.clone();
+                    m.transparent = false;
+                    m.alphaTest = 0.5;
+                    m.depthWrite = true;
+                    o.material = m;
+                  }
+                }
+              });
+              const existing = propLibrary.findIndex((en) => en.name === name);
+              if (existing >= 0) {
+                propLibrary[existing] = { name, scene: gltf.scene };
+                activePropIndex = existing;
+              } else {
+                propLibrary.push({ name, scene: gltf.scene });
+                activePropIndex = propLibrary.length - 1;
+              }
+              PARAMS.activePropName = name;
+              propActivePARAMS.name = name;
+              pane.refresh();
+              e.target.value = "";
+            });
+          });
+
+        document
+          .getElementById("props-json-input")
+          .addEventListener("change", (e) => {
+            const files = Array.from(e.target.files);
+            files.forEach((f) => loadPropsJson(f));
+            e.target.value = "";
+          });
+
+        // ── WATER BODIES FOLDER ──
+        const waterFolder = pane.addFolder({
+          title: "Water Bodies  [ W ]",
+          expanded: true,
+        });
+        waterFolder.hidden = true;
+
+        waterFolder
+          .addBinding(PARAMS.water, "color", { label: "Color" })
+          .on("change", syncWaterMat);
+        waterFolder
+          .addBinding(PARAMS.water, "opacity", {
+            label: "Opacity",
+            min: 0.1,
+            max: 1,
+            step: 0.01,
+          })
+          .on("change", syncWaterMat);
+        waterFolder
+          .addBinding(PARAMS.water, "roughness", {
+            label: "Roughness",
+            min: 0,
+            max: 1,
+            step: 0.01,
+          })
+          .on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "sinkOffset", {
+          label: "Sink offset",
+          min: -2,
+          max: 2,
+          step: 0.01,
+        });
+        waterFolder.addBinding(PARAMS.water, "preset", {
+          label: "Size preset",
+          options: {
+            Puddle: "Puddle",
+            "Small lake": "Small lake",
+            "Large lake": "Large lake",
+            "River strip": "River strip",
+          },
+        });
+        waterFolder.addBlade({ view: "separator" });
+        waterFolder
+          .addButton({ title: "Save water JSON" })
+          .on("click", saveWaterBodies);
+        waterFolder
+          .addButton({ title: "Load water JSON…" })
+          .on("click", () =>
+            document.getElementById("water-json-input").click(),
+          );
+        waterFolder
+          .addButton({ title: "Delete selected (Del)" })
+          .on("click", () => {
+            if (!selectedWater) return;
+            scene.remove(selectedWater);
+            waterObjects = waterObjects.filter((m) => m !== selectedWater);
+            selectWater(null);
+          });
+        waterFolder
+          .addButton({ title: "Clear all water bodies" })
+          .on("click", () => {
+            waterObjects.forEach((m) => scene.remove(m));
+            waterObjects = [];
+            selectWater(null);
+          });
+
+        document
+          .getElementById("water-json-input")
+          .addEventListener("change", (e) => {
+            if (!e.target.files[0]) return;
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+              try {
+                applyWaterBodies(JSON.parse(ev.target.result));
+              } catch (err) {
+                console.error("Failed to load water-bodies.json", err);
+              }
+            };
+            reader.readAsText(e.target.files[0]);
+            e.target.value = "";
+          });
+
+        // Wire up file inputs
+        document
+          .getElementById("file-input")
+          .addEventListener("change", (e) => {
+            if (e.target.files[0]) loadSplatmap(e.target.files[0]);
+          });
+        document
+          .getElementById("hmap-file-input")
+          .addEventListener("change", (e) => {
+            if (e.target.files[0]) loadHeightmap(e.target.files[0]);
+          });
+        document
+          .getElementById("cliffs-file-input")
+          .addEventListener("change", (e) => {
+            if (e.target.files[0]) loadCliffs(e.target.files[0]);
+          });
+        document
+          .getElementById("scene-file-input")
+          .addEventListener("change", (e) => {
+            if (e.target.files[0]) {
+              loadScene(e.target.files[0]);
+              e.target.value = "";
+            }
+          });
+
+        // ── MODE SYSTEM ──
+        function setMode(mode) {
+          const leavingPlay = currentMode === "play" && mode !== "play";
+          currentMode = mode;
+          PARAMS.mode = mode;
+
+          if (leavingPlay) exitPlayMode();
+
+          if (mode === "play") {
+            enterPlayMode();
+            const badge = document.getElementById("mode-badge");
+            badge.textContent = "PLAY MODE  [ F / Esc to exit ]";
+            badge.className = "play";
+            renderer.domElement.style.cursor = "none";
+            return;
+          }
+
+          pane.refresh();
+          orbit.enabled = mode === "view";
+
+          paintFolder.hidden = mode !== "paint";
+          sculptFolder.hidden = mode !== "sculpt";
+          placeFolder.hidden = mode !== "place";
+          grassFolder.hidden = mode !== "grass";
+          treesFolder.hidden = mode !== "trees";
+          propsFolder.hidden = mode !== "props";
+          waterFolder.hidden = mode !== "water";
+          brushFolder.hidden =
+            mode === "view" ||
+            mode === "place" ||
+            mode === "props" ||
+            mode === "water";
+
+          const usingTC =
+            mode === "place" || mode === "props" || mode === "water";
+          if (!usingTC && transformControls) {
+            if (tcHelper) tcHelper.visible = false;
+            transformControls.enabled = false;
+            transformControls.detach();
+            selectedCliff = null;
+            selectedProp = null;
+            selectWater(null);
+          } else if (usingTC && transformControls) {
+            transformControls.enabled = true;
+            if (mode === "place") {
+              selectedProp = null;
+              selectWater(null);
+            }
+            if (mode === "props") {
+              selectedCliff = null;
+              selectWater(null);
+            }
+            if (mode === "water") {
+              selectedCliff = null;
+              selectedProp = null;
+            }
+          }
+
+          const badge = document.getElementById("mode-badge");
+          badge.textContent =
+            mode === "view"
+              ? "VIEW MODE"
+              : mode === "paint"
+                ? "PAINT MODE"
+                : mode === "sculpt"
+                  ? "SCULPT MODE"
+                  : mode === "grass"
+                    ? "GRASS MODE"
+                    : mode === "trees"
+                      ? "TREES MODE"
+                      : mode === "props"
+                        ? "PROPS MODE  [ I ]"
+                        : mode === "water"
+                          ? "WATER BODIES  [ W ]"
+                          : "PLACE MODE"; // play handled above
+          badge.className = mode;
+          renderer.domElement.style.cursor =
+            mode === "view" ? "default" : "crosshair";
+          if (
+            mode === "view" ||
+            mode === "place" ||
+            mode === "props" ||
+            mode === "water"
+          )
+            brushRing.visible = false;
+        }
+        setMode("view");
+
+        // ── KEYBOARD ──
+        window.addEventListener("keyup", (e) => {
+          keysHeld[e.code] = false;
+        });
+
+        window.addEventListener("keydown", (e) => {
+          // Play mode: track WASD, only allow exit keys
+          if (currentMode === "play") {
+            keysHeld[e.code] = true;
+            if (e.code.startsWith("Arrow")) e.preventDefault();
+            if (e.code === "Escape" || e.code === "KeyF") setMode("view");
+            return;
+          }
+          if (e.code === "KeyF") {
+            setMode("play");
+            return;
+          }
+          if (e.code === "KeyP")
+            setMode(currentMode === "paint" ? "view" : "paint");
+          if (e.code === "KeyS" && currentMode !== "place")
+            setMode(currentMode === "sculpt" ? "view" : "sculpt");
+          if (e.code === "KeyO")
+            setMode(currentMode === "place" ? "view" : "place");
+          if (e.code === "KeyG")
+            setMode(currentMode === "grass" ? "view" : "grass");
+          if (e.code === "KeyT" && currentMode !== "water")
+            setMode(currentMode === "trees" ? "view" : "trees");
+          if (e.code === "KeyI")
+            setMode(currentMode === "props" ? "view" : "props");
+          if (
+            e.code === "KeyW" &&
+            currentMode !== "place" &&
+            currentMode !== "props" &&
+            currentMode !== "water"
+          )
+            setMode("water");
+          else if (e.code === "KeyW" && currentMode === "water")
+            setMode("view");
+          if (e.code === "Escape") setMode("view");
+          if (currentMode === "place") {
+            if (e.code === "KeyW") {
+              e.preventDefault();
+              transformControls.setMode("translate");
+            }
+            if (e.code === "KeyE") {
+              e.preventDefault();
+              transformControls.setMode("rotate");
+            }
+            if (e.code === "KeyR") {
+              e.preventDefault();
+              transformControls.setMode("scale");
+            }
+            if (e.code === "Delete" && selectedCliff) {
+              scene.remove(selectedCliff);
+              cliffObjects = cliffObjects.filter((c) => c !== selectedCliff);
+              selectCliff(null);
+              if (bakeBVH) bakeBVH();
+            }
+          }
+          if (currentMode === "props") {
+            if (e.code === "KeyW") {
+              e.preventDefault();
+              transformControls.setMode("translate");
+            }
+            if (e.code === "KeyE") {
+              e.preventDefault();
+              transformControls.setMode("rotate");
+            }
+            if (e.code === "KeyR") {
+              e.preventDefault();
+              transformControls.setMode("scale");
+            }
+            if (e.code === "Delete" && selectedProp) {
+              scene.remove(selectedProp);
+              propObjects = propObjects.filter((p) => p !== selectedProp);
+              selectProp(null);
+            }
+          }
+          if (currentMode === "water") {
+            if (e.code === "KeyE") {
+              e.preventDefault();
+              transformControls.setMode("translate");
+            }
+            if (e.code === "KeyR") {
+              e.preventDefault();
+              transformControls.setMode("rotate");
+            }
+            if (e.code === "KeyT") {
+              e.preventDefault();
+              transformControls.setMode("scale");
+            }
+            if (e.code === "Delete" && selectedWater) {
+              scene.remove(selectedWater);
+              waterObjects = waterObjects.filter((m) => m !== selectedWater);
+              selectWater(null);
+            }
+          }
+        });
+
+        // ── MOUSE ──
+        renderer.domElement.addEventListener("contextmenu", (e) =>
+          e.preventDefault(),
+        );
+
+        renderer.domElement.addEventListener("mousemove", (e) => {
+          if (
+            currentMode === "view" ||
+            currentMode === "place" ||
+            currentMode === "props" ||
+            currentMode === "water"
+          )
+            return;
+          const p = getTerrainHit(e);
+          updateBrushRing(p);
+          if (!isMouseDown || !p) return;
+          if (currentMode === "paint") paintAt(p.x, p.z);
+          if (currentMode === "sculpt") sculptAt(p.x, p.z, e);
+          if (currentMode === "grass")
+            paintGrassAt(p.x, p.z, grassEraseMode || e.shiftKey);
+          if (currentMode === "trees")
+            paintTreesAt(p.x, p.z, treeEraseMode || e.shiftKey);
+        });
+
+        renderer.domElement.addEventListener("mousedown", (e) => {
+          if (e.button !== 0) return;
+          if (currentMode === "view") return;
+
+          if (currentMode === "place") {
+            if (transformControls.axis !== null) return; // clicking gizmo handle
+            const rect = renderer.domElement.getBoundingClientRect();
+            mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            const cliffMeshes = [];
+            cliffObjects.forEach((root) =>
+              root.traverse((o) => {
+                if (o.isMesh) cliffMeshes.push(o);
+              }),
+            );
+            const cliffHits = raycaster.intersectObjects(cliffMeshes, false);
+            if (cliffHits.length > 0) {
+              const root = getCliffRoot(cliffHits[0].object);
+              if (root) {
+                selectCliff(root);
+                return;
+              }
+            }
+            const p = getTerrainHit(e);
+            if (p) placeCliff(p.x, p.y, p.z, activeCliffModel);
+            return;
+          }
+
+          if (currentMode === "props") {
+            if (transformControls.axis !== null) return;
+            const rect = renderer.domElement.getBoundingClientRect();
+            mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            const propMeshes = [];
+            propObjects.forEach((root) =>
+              root.traverse((o) => {
+                if (o.isMesh) propMeshes.push(o);
+              }),
+            );
+            const propHits = raycaster.intersectObjects(propMeshes, false);
+            if (propHits.length > 0) {
+              const root = getPropRoot(propHits[0].object);
+              if (root) {
+                selectProp(root);
+                return;
+              }
+            }
+            // Click on terrain → place new prop
+            const pt = getTerrainHit(e);
+            if (pt) placeProp(pt.x, pt.y, pt.z);
+            return;
+          }
+
+          if (currentMode === "water") {
+            if (transformControls.axis !== null) return;
+            const rect = renderer.domElement.getBoundingClientRect();
+            mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            // Try hitting an existing water body first
+            const waterHits = raycaster.intersectObjects(waterObjects, false);
+            if (waterHits.length > 0) {
+              selectWater(
+                getWaterRoot(waterHits[0].object) ?? waterHits[0].object,
+              );
+              return;
+            }
+            // Click on terrain → place new water body
+            const pt = getTerrainHit(e);
+            if (pt) placeWater(pt.x, pt.y, pt.z);
+            return;
+          }
+
+          isMouseDown = true;
+          brushNoiseSeed = Math.random() * 1000;
+          if (currentMode === "paint" || currentMode === "sculpt") pushUndo();
+          const p = getTerrainHit(e);
+          if (!p) return;
+          if (currentMode === "sculpt" && e.altKey)
+            flattenTargetY = sampleHeight(p.x, p.z);
+          if (currentMode === "paint") paintAt(p.x, p.z);
+          if (currentMode === "sculpt") sculptAt(p.x, p.z, e);
+          if (currentMode === "trees")
+            paintTreesAt(p.x, p.z, treeEraseMode || e.shiftKey);
+        });
+
+        renderer.domElement.addEventListener("mouseup", () => {
+          if (!isMouseDown) return;
+          isMouseDown = false;
+          if (currentMode === "paint" || currentMode === "sculpt") {
+            generateObjects(scene);
+          }
+          if (currentMode === "sculpt") {
+            if (bakeBVH) bakeBVH();
+            if (treeSystem) treeSystem.syncHeights();
+            propObjects.forEach((root) => {
+              root.position.y = bvhHeight(root.position.x, root.position.z);
+            });
+          }
+        });
+
+        renderer.domElement.addEventListener("mouseleave", () => {
+          isMouseDown = false;
+          brushRing.visible = false;
+        });
+
+        // ── RESIZE ──
+        window.addEventListener("resize", () => {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(innerWidth, innerHeight);
+        });
+
+        // ── RENDER LOOP ──
+        const clock = new THREE.Timer();
+        const _grassFrustum = new THREE.Frustum();
+        const _grassProjMatrix = new THREE.Matrix4();
+        renderer.setAnimationLoop(() => {
+          clock.update();
+          const elapsed = clock.getElapsed();
+          const dt = clock.getDelta();
+
+          // ── PLAY MODE UPDATE ──
+          if (currentMode === "play") {
+            // WASD movement relative to camera yaw
+            let mx = 0,
+              mz = 0;
+            if (keysHeld["KeyW"] || keysHeld["ArrowUp"]) {
+              mx -= Math.sin(camYaw);
+              mz -= Math.cos(camYaw);
+            }
+            if (keysHeld["KeyS"] || keysHeld["ArrowDown"]) {
+              mx += Math.sin(camYaw);
+              mz += Math.cos(camYaw);
+            }
+            if (keysHeld["KeyA"] || keysHeld["ArrowLeft"]) {
+              mx -= Math.cos(camYaw);
+              mz += Math.sin(camYaw);
+            }
+            if (keysHeld["KeyD"] || keysHeld["ArrowRight"]) {
+              mx += Math.cos(camYaw);
+              mz -= Math.sin(camYaw);
+            }
+            const mlen = Math.sqrt(mx * mx + mz * mz);
+            if (mlen > 0) {
+              playerPos.x += (mx / mlen) * PLAYER_SPEED * dt;
+              playerPos.z += (mz / mlen) * PLAYER_SPEED * dt;
+              playerPos.x = Math.max(
+                -TERRAIN_SIZE / 2,
+                Math.min(TERRAIN_SIZE / 2, playerPos.x),
+              );
+              playerPos.z = Math.max(
+                -TERRAIN_SIZE / 2,
+                Math.min(TERRAIN_SIZE / 2, playerPos.z),
+              );
+            }
+            // Snap Y to terrain (bvhHeight includes cliff surfaces)
+            playerPos.y = bvhHeight(playerPos.x, playerPos.z);
+            const capsuleCY = playerPos.y + PLAYER_CAP_R + PLAYER_CAP_H * 0.5;
+            capsuleMesh.position.set(playerPos.x, capsuleCY, playerPos.z);
+            // Face direction of movement
+            if (mlen > 0) capsuleMesh.rotation.y = Math.atan2(mx, mz) + PI;
+            // Third-person camera
+            const lookAtY = capsuleCY + 0.6;
+            const hDist = CAM_DIST * Math.cos(camPitch);
+            const vDist = CAM_DIST * Math.sin(camPitch);
+            camera.position.set(
+              playerPos.x + Math.sin(camYaw) * hDist,
+              lookAtY + vDist,
+              playerPos.z + Math.cos(camYaw) * hDist,
+            );
+            camera.lookAt(playerPos.x, lookAtY, playerPos.z);
+            // Feed player pos to grass interaction
+            if (grassUniforms)
+              grassUniforms.uPlayerPos.value.set(
+                playerPos.x,
+                playerPos.y,
+                playerPos.z,
+              );
+          }
+
+          if (grassUniforms) grassUniforms.uTime.value = elapsed;
+          if (grassPatchSystem) {
+            camera.updateMatrixWorld();
+            _grassProjMatrix.multiplyMatrices(
+              camera.projectionMatrix,
+              camera.matrixWorldInverse,
+            );
+            _grassFrustum.setFromProjectionMatrix(_grassProjMatrix);
+            grassPatchSystem.update(camera.position, _grassFrustum);
+          }
+          // Sync lighting & sky from PARAMS every frame
+          const sunDir = sunDirectionFromAngles(
+            PARAMS.light.sunAzimuth,
+            PARAMS.light.sunElevation,
+          );
+          dirLight.position.copy(sunDir.clone().multiplyScalar(600));
+          dirLight.color.set(PARAMS.light.dirColor);
+          dirLight.intensity = PARAMS.light.dirIntensity;
+          hemiLight.color.set(PARAMS.light.hemiSkyColor);
+          hemiLight.groundColor.set(PARAMS.light.hemiGroundColor);
+          hemiLight.intensity = PARAMS.light.hemiIntensity;
+          sky.turbidity.value = PARAMS.sky.turbidity;
+          sky.rayleigh.value = PARAMS.sky.rayleigh;
+          sky.mieCoefficient.value = PARAMS.sky.mie;
+          sky.mieDirectionalG.value = PARAMS.sky.mieG;
+          sky.cloudCoverage.value = PARAMS.sky.cloudCoverage;
+          sky.cloudDensity.value = PARAMS.sky.cloudDensity;
+          sky.cloudElevation.value = PARAMS.sky.cloudElevation;
+          sky.sunPosition.value.copy(sunDir);
+          scene.environmentIntensity = PARAMS.light.envIntensity;
+          renderer.toneMappingExposure = PARAMS.light.exposure;
+
+          if (currentMode !== "play") orbit.update();
+          stats.update();
+          renderer.render(scene, camera);
+        });
+      }
+
+      init();
+    </script>
+  </body>
+</html>
