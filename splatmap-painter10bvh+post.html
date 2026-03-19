@@ -1792,14 +1792,15 @@
               const wxG = (-0.5 + (ix + 0.5) / HTEX_RES) * TERRAIN_SIZE;
               const wzG = (-0.5 + (iz + 0.5) / HTEX_RES) * TERRAIN_SIZE;
 
-              // Exact terrain surface height from mesh BVH (matches rendered triangles)
+              // GPU: raycast at texel-center — matches LinearFilter reads in grass shader
               _terrainRay.origin.set(wxG, 99999, wzG);
-              const terrainHit = terrainBvh.raycastFirst(_terrainRay, THREE.DoubleSide);
-              let hGpu = terrainHit ? terrainHit.point.y : sampleHeight(wxG, wzG);
+              const terrainHitG = terrainBvh.raycastFirst(_terrainRay, THREE.DoubleSide);
+              let hGpu = terrainHitG ? terrainHitG.point.y : sampleHeight(wxG, wzG);
 
-              // CPU height for bvhGrid — same raycast result as GPU so trees
-              // sit on the same rendered triangles as grass (avoids 512→128 mismatch)
-              let hCpu = hGpu;
+              // CPU: raycast at grid-corner — matches bvhHeight() bilinear lookup positions
+              _terrainRay.origin.set(wx, 99999, wz);
+              const terrainHitC = terrainBvh.raycastFirst(_terrainRay, THREE.DoubleSide);
+              let hCpu = terrainHitC ? terrainHitC.point.y : sampleHeight(wx, wz);
 
               if (cliffBvh) {
                 _bvhRay.origin.set(wx, 99999, wz);

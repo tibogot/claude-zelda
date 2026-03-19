@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Flower Maker — Petal prototype</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #9ec8e8;
+        font-family: system-ui, sans-serif;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #hint {
+        position: fixed;
+        bottom: 14px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 5;
+        font-size: 12px;
+        color: rgba(30, 50, 80, 0.75);
+        pointer-events: none;
+      }
+      #title {
+        position: fixed;
+        top: 12px;
+        left: 300px;
+        z-index: 5;
+        font-size: 14px;
+        font-weight: 600;
+        color: rgba(40, 60, 100, 0.85);
+        pointer-events: none;
+      }
+      .tp-dfwv {
+        position: fixed !important;
+        top: 12px !important;
+        left: 12px !important;
+        width: 292px !important;
+        max-height: calc(100vh - 24px) !important;
+        overflow-y: auto !important;
+        z-index: 20 !important;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://esm.sh/tweakpane@4.0.4"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="title">Flower Maker — sculpt petal</div>
+    <div id="hint">Orbit · scroll zoom · panel left</div>
+    <script type="module">
+      import * as THREE from "three";
+      import { MeshStandardNodeMaterial } from "three";
+      import {
+        float,
+        uniform,
+        vec3,
+        normalWorld,
+        positionWorld,
+        cameraPosition,
+        pow,
+        max,
+        dot,
+        mix,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
+
+      const DEG = Math.PI / 180;
+
+      function warpV(v, power) {
+        if (power === 1) return v;
+        const t = v * 2 - 1;
+        const s = t >= 0 ? 1 : -1;
+        const a = Math.pow(Math.abs(t), power);
+        return (s * a + 1) * 0.5;
+      }
+
+      /**
+       * Petal = tapered patch on ellipsoid + twist, asymmetric options.
+       */
+      function createPetalGeometry(segU, segV, o) {
+        const {
+          rx,
+          ry,
+          rz,
+          phi0,
+          phi1,
+          phiCurve,
+          spreadMax,
+          spreadMin,
+          taperPower,
+          taperAsym,
+          tipPinch,
+          basePinch,
+          twist,
+          vCurve,
+          centerX,
+          centerY,
+          centerZ,
+          bulgeU,
+        } = o;
+
+        const positions = [];
+        const uvs = [];
+        const indices = [];
+        const nx = segU + 1;
+        const ny = segV + 1;
+
+        for (let j = 0; j <= segV; j++) {
+          const v = warpV(j / segV, vCurve);
+          for (let i = 0; i <= segU; i++) {
+            const u = i / segU;
+            const uphi = Math.pow(u, phiCurve);
+            const phi = phi0 + uphi * (phi1 - phi0);
+
+            let env = Math.pow(Math.sin(Math.PI * u), taperPower);
+            env *= 1 + taperAsym * (u - 0.5);
+            env *= 1 + bulgeU * Math.sin(Math.PI * u) * Math.sin(Math.PI * u);
+            env *= 1 + basePinch * (1 - u);
+            env *= 1 + tipPinch * u;
+            env = Math.max(0.001, env);
+
+            const halfAngle = spreadMin + spreadMax * env;
+            let theta = (v - 0.5) * 2 * halfAngle + twist * u;
+
+            const sx = centerX + rx * Math.sin(phi) * Math.sin(theta);
+            const sy = centerY + ry * Math.cos(phi);
+            const sz = centerZ + rz * Math.sin(phi) * Math.cos(theta);
+
+            positions.push(sx, sy, sz);
+            uvs.push(u, v);
+          }
+        }
+
+        for (let j = 0; j < segV; j++) {
+          for (let i = 0; i < segU; i++) {
+            const a = j * nx + i;
+            const b = a + 1;
+            const c = a + nx;
+            const d = c + 1;
+            indices.push(a, c, b, b, c, d);
+          }
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+        geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+        geo.setIndex(indices);
+        geo.computeVertexNormals();
+        return geo;
+      }
+
+      (async () => {
+        const params = {
+          ellipsoid: {
+            rx: 1.12,
+            ry: 1.38,
+            rz: 1.1,
+          },
+          spine: {
+            phi0Deg: 11.5,
+            phi1Deg: 58.5,
+            phiCurve: 1,
+          },
+          width: {
+            spreadMaxDeg: 22.9,
+            spreadMinDeg: 0,
+            taperPower: 1.32,
+            taperAsym: 0,
+            tipPinch: 0,
+            basePinch: 0,
+            bulgeU: 0,
+            twistDeg: 0,
+            vCurve: 1,
+          },
+          placement: {
+            centerX: 0,
+            centerY: -0.7,
+            centerZ: 0,
+            scale: 1,
+          },
+          mesh: {
+            segU: 56,
+            segV: 28,
+            rotXDeg: 0,
+            rotYDeg: -20,
+            rotZDeg: 6.9,
+          },
+          material: {
+            base: { r: 107, g: 46, b: 158 },
+            rim: { r: 184, g: 122, b: 235 },
+            fresnelPower: 2.4,
+            fresnelMix: 0.35,
+            roughness: 0.38,
+            metalness: 0,
+          },
+          scene: {
+            bg: { r: 158, g: 200, b: 232 },
+            amb: 0.55,
+            key: 1.15,
+          },
+        };
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(
+          params.scene.bg.r / 255,
+          params.scene.bg.g / 255,
+          params.scene.bg.b / 255
+        );
+
+        const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.05, 200);
+        camera.position.set(1.8, 0.85, 2.4);
+
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+        await renderer.init();
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.target.set(0, 0.15, 0);
+        controls.enableDamping = true;
+        controls.update();
+
+        const ambient = new THREE.AmbientLight(0xc8d8f0, params.scene.amb);
+        scene.add(ambient);
+
+        const key = new THREE.DirectionalLight(0xfff5e8, params.scene.key);
+        key.position.set(2.5, 4, 3);
+        key.castShadow = true;
+        scene.add(key);
+
+        const fill = new THREE.DirectionalLight(0xa8b8e8, 0.45);
+        fill.position.set(-3, 1.5, -2);
+        scene.add(fill);
+
+        const rimLt = new THREE.DirectionalLight(0xe8e0ff, 0.35);
+        rimLt.position.set(-1, -0.5, 4);
+        scene.add(rimLt);
+
+        const uBase = uniform(new THREE.Vector3(107 / 255, 46 / 255, 158 / 255));
+        const uRim = uniform(new THREE.Vector3(184 / 255, 122 / 255, 235 / 255));
+        const uFresnelPow = uniform(2.4);
+        const uFresnelMix = uniform(0.35);
+        const uRough = uniform(0.38);
+        const uMetal = uniform(0);
+
+        const viewDir = cameraPosition.sub(positionWorld).normalize();
+        const ndotv = max(dot(normalWorld, viewDir), float(0));
+        const fresnel = pow(float(1).sub(ndotv), uFresnelPow);
+        const albedo = mix(uBase, uRim, fresnel.mul(uFresnelMix));
+
+        const petalMat = new MeshStandardNodeMaterial({ side: THREE.DoubleSide });
+        petalMat.colorNode = albedo;
+        petalMat.roughnessNode = uRough;
+        petalMat.metalnessNode = uMetal;
+
+        let petalGeo = null;
+        const petal = new THREE.Mesh(undefined, petalMat);
+        petal.castShadow = true;
+        petal.receiveShadow = true;
+        scene.add(petal);
+
+        function geomOpts() {
+          const e = params.ellipsoid;
+          const s = params.spine;
+          const w = params.width;
+          const p = params.placement;
+          return {
+            rx: e.rx * p.scale,
+            ry: e.ry * p.scale,
+            rz: e.rz * p.scale,
+            phi0: s.phi0Deg * DEG,
+            phi1: s.phi1Deg * DEG,
+            phiCurve: Math.max(0.15, s.phiCurve),
+            spreadMax: w.spreadMaxDeg * DEG,
+            spreadMin: w.spreadMinDeg * DEG,
+            taperPower: Math.max(0.05, w.taperPower),
+            taperAsym: w.taperAsym,
+            tipPinch: w.tipPinch,
+            basePinch: w.basePinch,
+            bulgeU: w.bulgeU,
+            twist: w.twistDeg * DEG,
+            vCurve: Math.max(0.2, w.vCurve),
+            centerX: p.centerX * p.scale,
+            centerY: p.centerY * p.scale,
+            centerZ: p.centerZ * p.scale,
+          };
+        }
+
+        function rebuildGeometry() {
+          const m = params.mesh;
+          const su = Math.max(8, Math.round(m.segU));
+          const sv = Math.max(4, Math.round(m.segV));
+          const next = createPetalGeometry(su, sv, geomOpts());
+          if (petalGeo) petalGeo.dispose();
+          petalGeo = next;
+          petal.geometry = petalGeo;
+        }
+
+        function applyMeshTransform() {
+          const m = params.mesh;
+          petal.rotation.set(m.rotXDeg * DEG, m.rotYDeg * DEG, m.rotZDeg * DEG);
+        }
+
+        function syncMaterial() {
+          const mat = params.material;
+          uBase.value.set(mat.base.r / 255, mat.base.g / 255, mat.base.b / 255);
+          uRim.value.set(mat.rim.r / 255, mat.rim.g / 255, mat.rim.b / 255);
+          uFresnelPow.value = Math.max(0.1, mat.fresnelPower);
+          uFresnelMix.value = THREE.MathUtils.clamp(mat.fresnelMix, 0, 1);
+          uRough.value = THREE.MathUtils.clamp(mat.roughness, 0, 1);
+          uMetal.value = THREE.MathUtils.clamp(mat.metalness, 0, 1);
+        }
+
+        function syncScene() {
+          const sc = params.scene;
+          scene.background.setRGB(sc.bg.r / 255, sc.bg.g / 255, sc.bg.b / 255);
+          ambient.intensity = sc.amb;
+          key.intensity = sc.key;
+        }
+
+        rebuildGeometry();
+        applyMeshTransform();
+        syncMaterial();
+
+        const pane = new Pane({ title: "Petal sculpt" });
+
+        const fEll = pane.addFolder({ title: "Ellipsoid radii", expanded: true });
+        fEll.addBinding(params.ellipsoid, "rx", { min: 0.2, max: 3, step: 0.01 });
+        fEll.addBinding(params.ellipsoid, "ry", { min: 0.2, max: 3, step: 0.01 });
+        fEll.addBinding(params.ellipsoid, "rz", { min: 0.2, max: 3, step: 0.01 });
+
+        const fSpine = pane.addFolder({ title: "Spine (length / curl)", expanded: true });
+        fSpine.addBinding(params.spine, "phi0Deg", { min: 0, max: 90, step: 0.5, label: "φ start °" });
+        fSpine.addBinding(params.spine, "phi1Deg", { min: 5, max: 150, step: 0.5, label: "φ end °" });
+        fSpine.addBinding(params.spine, "phiCurve", {
+          min: 0.2,
+          max: 3,
+          step: 0.02,
+          label: "φ ease (<1 base, >1 tip)",
+        });
+
+        const fWidth = pane.addFolder({ title: "Width & silhouette", expanded: true });
+        fWidth.addBinding(params.width, "spreadMaxDeg", { min: 2, max: 80, step: 0.5, label: "max width °" });
+        fWidth.addBinding(params.width, "spreadMinDeg", { min: 0, max: 30, step: 0.2, label: "min width °" });
+        fWidth.addBinding(params.width, "taperPower", {
+          min: 0.2,
+          max: 4,
+          step: 0.02,
+          label: "end pinch",
+        });
+        fWidth.addBinding(params.width, "taperAsym", { min: -2, max: 2, step: 0.02, label: "width asym" });
+        fWidth.addBinding(params.width, "basePinch", { min: -0.95, max: 2, step: 0.02, label: "base flare" });
+        fWidth.addBinding(params.width, "tipPinch", { min: -0.95, max: 2, step: 0.02, label: "tip sharpen" });
+        fWidth.addBinding(params.width, "bulgeU", { min: -1, max: 2, step: 0.02, label: "mid bulge" });
+        fWidth.addBinding(params.width, "twistDeg", { min: -120, max: 120, step: 0.5, label: "twist °" });
+        fWidth.addBinding(params.width, "vCurve", {
+          min: 0.25,
+          max: 3,
+          step: 0.02,
+          label: "cross-sect (>1 fuller)",
+        });
+
+        const fPlace = pane.addFolder({ title: "Placement & scale", expanded: false });
+        fPlace.addBinding(params.placement, "centerX", { min: -2, max: 2, step: 0.01 });
+        fPlace.addBinding(params.placement, "centerY", { min: -3, max: 2, step: 0.01 });
+        fPlace.addBinding(params.placement, "centerZ", { min: -2, max: 2, step: 0.01 });
+        fPlace.addBinding(params.placement, "scale", { min: 0.15, max: 3, step: 0.01 });
+
+        const fMesh = pane.addFolder({ title: "Mesh", expanded: false });
+        fMesh.addBinding(params.mesh, "segU", { min: 12, max: 200, step: 1, label: "segments U" });
+        fMesh.addBinding(params.mesh, "segV", { min: 6, max: 100, step: 1, label: "segments V" });
+        fMesh.addBinding(params.mesh, "rotXDeg", { min: -180, max: 180, step: 0.5, label: "rot X °" });
+        fMesh.addBinding(params.mesh, "rotYDeg", { min: -180, max: 180, step: 0.5, label: "rot Y °" });
+        fMesh.addBinding(params.mesh, "rotZDeg", { min: -180, max: 180, step: 0.5, label: "rot Z °" });
+
+        const fMat = pane.addFolder({ title: "Material (TSL)", expanded: false });
+        fMat.addBinding(params.material, "base", { view: "color", label: "base" });
+        fMat.addBinding(params.material, "rim", { view: "color", label: "rim" });
+        fMat.addBinding(params.material, "fresnelPower", { min: 0.5, max: 6, step: 0.05 });
+        fMat.addBinding(params.material, "fresnelMix", { min: 0, max: 1, step: 0.01 });
+        fMat.addBinding(params.material, "roughness", { min: 0, max: 1, step: 0.01 });
+        fMat.addBinding(params.material, "metalness", { min: 0, max: 1, step: 0.01 });
+
+        const fScene = pane.addFolder({ title: "Scene & lights", expanded: false });
+        fScene.addBinding(params.scene, "bg", { view: "color", label: "background" });
+        fScene.addBinding(params.scene, "amb", { min: 0, max: 1.5, step: 0.02, label: "ambient" });
+        fScene.addBinding(params.scene, "key", { min: 0, max: 2.5, step: 0.02, label: "key light" });
+
+        const GEOM_KEYS = new Set([
+          "rx", "ry", "rz",
+          "phi0Deg", "phi1Deg", "phiCurve",
+          "spreadMaxDeg", "spreadMinDeg", "taperPower", "taperAsym",
+          "tipPinch", "basePinch", "bulgeU", "twistDeg", "vCurve",
+          "centerX", "centerY", "centerZ", "scale",
+          "segU", "segV",
+        ]);
+        const ROT_KEYS = new Set(["rotXDeg", "rotYDeg", "rotZDeg"]);
+        const MAT_KEYS = new Set(["base", "rim", "fresnelPower", "fresnelMix", "roughness", "metalness"]);
+        const SCENE_KEYS = new Set(["bg", "amb", "key"]);
+
+        pane.on("change", (ev) => {
+          const key = ev.target.key;
+          if (GEOM_KEYS.has(key)) rebuildGeometry();
+          else if (ROT_KEYS.has(key)) applyMeshTransform();
+          else if (MAT_KEYS.has(key) || key === "r" || key === "g" || key === "b") {
+            syncMaterial();
+            syncScene();
+          } else if (SCENE_KEYS.has(key)) syncScene();
+        });
+
+        function onResize() {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(innerWidth, innerHeight);
+        }
+        addEventListener("resize", onResize);
+
+        function tick() {
+          requestAnimationFrame(tick);
+          controls.update();
+          renderer.render(scene, camera);
+        }
+        tick();
+      })();
+    </script>
+  </body>
+</html>
