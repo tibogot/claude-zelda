@@ -756,7 +756,7 @@ export function setupGrassPatches(
         const geo = useLow ? geoLow : useMid ? geoMid : geoHigh;
         const mesh = getMesh(pool, geo, mat);
         mesh.material = mat;
-        mesh.receiveShadow = useHigh;
+        mesh.receiveShadow = useHigh || useMid;
         mesh.position.set(cellPos.x, 0, cellPos.z);
         mesh.visible = true;
         patchCount++;
