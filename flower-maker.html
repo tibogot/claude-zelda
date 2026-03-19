@@ -63,8 +63,8 @@
     </script>
   </head>
   <body>
-    <div id="title">Flower Maker — sculpt petal</div>
-    <div id="hint">Orbit · scroll zoom · panel left</div>
+    <div id="title">Flower Maker — one sculpt, N copies around Y</div>
+    <div id="hint">Radial petals = same mesh, rotated · panel left</div>
     <script type="module">
       import * as THREE from "three";
       import { MeshStandardNodeMaterial } from "three";
@@ -217,6 +217,13 @@
             amb: 0.55,
             key: 1.15,
           },
+          /** Same geometry, evenly spaced around Y — how real radial flowers work */
+          flower: {
+            count: 8,
+            ringOffsetDeg: 0,
+            tiltXDeg: 0,
+            tiltZDeg: 0,
+          },
         };
 
         const scene = new THREE.Scene();
@@ -275,10 +282,14 @@
         petalMat.metalnessNode = uMetal;
 
         let petalGeo = null;
-        const petal = new THREE.Mesh(undefined, petalMat);
-        petal.castShadow = true;
-        petal.receiveShadow = true;
-        scene.add(petal);
+        let instancedPetals = null;
+        const flowerHolder = new THREE.Group();
+        scene.add(flowerHolder);
+
+        const _matPetal = new THREE.Matrix4();
+        const _matRing = new THREE.Matrix4();
+        const _matFinal = new THREE.Matrix4();
+        const _eulerPetal = new THREE.Euler();
 
         function geomOpts() {
           const e = params.ellipsoid;
@@ -307,6 +318,10 @@
           };
         }
 
+        function petalCount() {
+          return Math.max(1, Math.min(64, Math.round(params.flower.count)));
+        }
+
         function rebuildGeometry() {
           const m = params.mesh;
           const su = Math.max(8, Math.round(m.segU));
@@ -314,12 +329,57 @@
           const next = createPetalGeometry(su, sv, geomOpts());
           if (petalGeo) petalGeo.dispose();
           petalGeo = next;
-          petal.geometry = petalGeo;
+          const n = petalCount();
+          if (instancedPetals && instancedPetals.count === n) {
+            instancedPetals.geometry = petalGeo;
+          } else {
+            refreshInstancedPetals();
+          }
+        }
+
+        function refreshInstancedPetals() {
+          const n = petalCount();
+          if (!petalGeo) return;
+          if (instancedPetals) {
+            flowerHolder.remove(instancedPetals);
+            instancedPetals.geometry = null;
+            instancedPetals.material = null;
+            instancedPetals.dispose();
+            instancedPetals = null;
+          }
+          instancedPetals = new THREE.InstancedMesh(petalGeo, petalMat, n);
+          instancedPetals.castShadow = true;
+          instancedPetals.receiveShadow = true;
+          flowerHolder.add(instancedPetals);
+          updateFlowerMatrices();
+        }
+
+        /** Each instance: rotate petal (sculpt pose), then place on ring around Y */
+        function updateFlowerMatrices() {
+          if (!instancedPetals) return;
+          const n = instancedPetals.count;
+          const m = params.mesh;
+          const f = params.flower;
+          _eulerPetal.set(m.rotXDeg * DEG, m.rotYDeg * DEG, m.rotZDeg * DEG, "XYZ");
+          _matPetal.makeRotationFromEuler(_eulerPetal);
+          const base = f.ringOffsetDeg * DEG;
+          const step = (Math.PI * 2) / n;
+          for (let i = 0; i < n; i++) {
+            _matRing.makeRotationY(base + i * step);
+            _matFinal.multiplyMatrices(_matRing, _matPetal);
+            instancedPetals.setMatrixAt(i, _matFinal);
+          }
+          instancedPetals.instanceMatrix.needsUpdate = true;
+        }
+
+        function applyFlowerHolderTilt() {
+          const f = params.flower;
+          flowerHolder.rotation.x = f.tiltXDeg * DEG;
+          flowerHolder.rotation.z = f.tiltZDeg * DEG;
         }
 
         function applyMeshTransform() {
-          const m = params.mesh;
-          petal.rotation.set(m.rotXDeg * DEG, m.rotYDeg * DEG, m.rotZDeg * DEG);
+          updateFlowerMatrices();
         }
 
         function syncMaterial() {
@@ -340,10 +400,40 @@
         }
 
         rebuildGeometry();
+        applyFlowerHolderTilt();
         applyMeshTransform();
         syncMaterial();
 
-        const pane = new Pane({ title: "Petal sculpt" });
+        const pane = new Pane({ title: "Flower Maker" });
+
+        const fFlower = pane.addFolder({
+          title: "Radial ring (same petal × N)",
+          expanded: true,
+        });
+        fFlower.addBinding(params.flower, "count", {
+          min: 1,
+          max: 48,
+          step: 1,
+          label: "petal count",
+        });
+        fFlower.addBinding(params.flower, "ringOffsetDeg", {
+          min: -180,
+          max: 180,
+          step: 0.5,
+          label: "ring spin °",
+        });
+        fFlower.addBinding(params.flower, "tiltXDeg", {
+          min: -60,
+          max: 60,
+          step: 0.5,
+          label: "tilt bloom X°",
+        });
+        fFlower.addBinding(params.flower, "tiltZDeg", {
+          min: -45,
+          max: 45,
+          step: 0.5,
+          label: "tilt bloom Z°",
+        });
 
         const fEll = pane.addFolder({ title: "Ellipsoid radii", expanded: true });
         fEll.addBinding(params.ellipsoid, "rx", { min: 0.2, max: 3, step: 0.01 });
@@ -416,13 +506,20 @@
           "segU", "segV",
         ]);
         const ROT_KEYS = new Set(["rotXDeg", "rotYDeg", "rotZDeg"]);
+        const FLOWER_KEYS = new Set(["count", "ringOffsetDeg", "tiltXDeg", "tiltZDeg"]);
         const MAT_KEYS = new Set(["base", "rim", "fresnelPower", "fresnelMix", "roughness", "metalness"]);
         const SCENE_KEYS = new Set(["bg", "amb", "key"]);
 
         pane.on("change", (ev) => {
           const key = ev.target.key;
           if (GEOM_KEYS.has(key)) rebuildGeometry();
-          else if (ROT_KEYS.has(key)) applyMeshTransform();
+          else if (FLOWER_KEYS.has(key)) {
+            if (key === "count") refreshInstancedPetals();
+            else {
+              if (key === "tiltXDeg" || key === "tiltZDeg") applyFlowerHolderTilt();
+              updateFlowerMatrices();
+            }
+          } else if (ROT_KEYS.has(key)) applyMeshTransform();
           else if (MAT_KEYS.has(key) || key === "r" || key === "g" || key === "b") {
             syncMaterial();
             syncScene();
