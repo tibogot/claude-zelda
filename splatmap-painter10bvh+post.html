@@ -297,6 +297,7 @@
       import { createUniforms } from "./uniforms-sandbox.js";
       import { setSeed, randRange } from "./rng.js";
       import { createTreeSystem } from "./tree-painter7.js";
+      import { createFoliageSlot } from "./foliage-painter.js";
       import { MeshBVH } from "three-mesh-bvh";
       import { Pane } from "tweakpane";
       import Stats from "stats-gl";
@@ -583,6 +584,20 @@
       let syncHeightTex = null; // kept but replaced by bakeBVH
       let bakeBVH = null; // assigned inside init
       let treeSystem = null;
+
+      // ─── FOLIAGE SYSTEM ──────────────────────
+      const FOLIAGE_SLOTS = [
+        { name: "Cherry Tree", modelPath: "models/japanese_cherry_tree.glb", castShadow: true,  perStroke: 2, minSpacing: 6,   scaleMin: 0.8, scaleMax: 1.3, system: null },
+        { name: "Fern",        modelPath: "models/low_poly_fern.glb",         castShadow: false, perStroke: 5, minSpacing: 2,   scaleMin: 0.6, scaleMax: 1.2, system: null },
+        { name: "Reed",        modelPath: "models/reedplant.glb",             castShadow: false, perStroke: 4, minSpacing: 2,   scaleMin: 0.8, scaleMax: 1.4, system: null },
+        { name: "Rock",        modelPath: "models/rock__game_asset.glb",      castShadow: true,  perStroke: 3, minSpacing: 3,   scaleMin: 0.5, scaleMax: 1.5, system: null },
+        { name: "Stone",       modelPath: "models/stone_low-poly.glb",        castShadow: true,  perStroke: 4, minSpacing: 2,   scaleMin: 0.4, scaleMax: 1.2, system: null },
+        { name: "Pine 3",      modelPath: "models/pine3.glb",                 castShadow: true,  perStroke: 2, minSpacing: 5,   scaleMin: 0.7, scaleMax: 1.5, system: null },
+        { name: "Palm Tree",   modelPath: "models/realistic_palm_tree_4_free.glb", castShadow: true,  perStroke: 2, minSpacing: 6,   scaleMin: 0.8, scaleMax: 1.4, system: null },
+        { name: "Cylinder",    modelPath: "models/cylinder.glb",              castShadow: true,  perStroke: 3, minSpacing: 3,   scaleMin: 0.5, scaleMax: 1.5, system: null },
+      ];
+      let activeFoliageSlot = 0;
+      let foliageEraseMode = false;
 
       // ─── BVH HEIGHT GRID ─────────────────────
       const HTEX_RES = 512;
@@ -914,6 +929,17 @@
             treeParams.scaleMin,
             treeParams.scaleMax,
           );
+        }
+      }
+
+      function paintFoliageAt(wx, wz, erase) {
+        const slot = FOLIAGE_SLOTS[activeFoliageSlot];
+        if (!slot.system) return;
+        const radius = brushWorldRadius();
+        if (erase) {
+          slot.system.removeInBrush(wx, wz, radius);
+        } else {
+          slot.system.addInBrush(wx, wz, radius, slot.perStroke, slot.minSpacing, slot.scaleMin, slot.scaleMax);
         }
       }
 
@@ -1264,6 +1290,7 @@
         syncGeometry();
         if (bakeBVH) bakeBVH();
         if (treeSystem) treeSystem.syncHeights();
+        FOLIAGE_SLOTS.forEach((s) => { if (s.system) s.system.syncHeights(); });
         propObjects.forEach((root) => {
           root.position.y = bvhHeight(root.position.x, root.position.z);
         });
@@ -1417,6 +1444,7 @@
           syncHeightmapPreview();
           if (bakeBVH) bakeBVH();
           if (treeSystem) treeSystem.syncHeights();
+          FOLIAGE_SLOTS.forEach((s) => { if (s.system) s.system.syncHeights(); });
         };
         reader.readAsArrayBuffer(file);
       }
@@ -2594,6 +2622,17 @@
             ),
           );
 
+        // ── FOLIAGE SYSTEMS ──
+        FOLIAGE_SLOTS.forEach((slot) => {
+          slot.system = createFoliageSlot(scene, bvhHeight);
+          slot.system.setCastShadow(slot.castShadow);
+          if (slot.modelPath) {
+            gltfLoader.loadAsync(slot.modelPath)
+              .then((gltf) => { slot.system.setModel(gltf); })
+              .catch(() => console.warn(`Foliage: ${slot.modelPath} not found — slot active but no model`));
+          }
+        });
+
         // ── TRANSFORM CONTROLS ──
         transformControls = new TransformControls(camera, renderer.domElement);
         transformControls.addEventListener("dragging-changed", (e) => {
@@ -2805,6 +2844,10 @@
           const meta = {
             version: 2,
             trees: treeSystem ? treeSystem.getPositions() : [],
+            foliage: FOLIAGE_SLOTS.map((s) => ({
+              name: s.name,
+              positions: s.system ? s.system.getPositions() : [],
+            })),
             cliffs: cliffObjects.map((root) => ({
               modelIndex: root.userData.modelIndex ?? 0,
               x: root.position.x, y: root.position.y, z: root.position.z,
@@ -2846,6 +2889,7 @@
               syncHeightmapPreview();
               if (bakeBVH) bakeBVH();
               if (treeSystem) treeSystem.syncHeights();
+              FOLIAGE_SLOTS.forEach((s) => { if (s.system) s.system.syncHeights(); });
             }
 
             // Canvases
@@ -2867,6 +2911,12 @@
             if (metaFile) {
               const meta = JSON.parse(await metaFile.async("string"));
               if (meta.trees && treeSystem) treeSystem.setPositions(meta.trees);
+              if (meta.foliage) {
+                meta.foliage.forEach((fd, idx) => {
+                  if (idx < FOLIAGE_SLOTS.length && FOLIAGE_SLOTS[idx].system && fd.positions)
+                    FOLIAGE_SLOTS[idx].system.setPositions(fd.positions);
+                });
+              }
               if (meta.cliffs) applyCliffs(meta.cliffs);
               if (meta.props) applyProps(meta.props);
               if (meta.waterBodies) applyWaterBodies(meta.waterBodies);
@@ -2986,7 +3036,9 @@
               ? 0xff9900
               : currentMode === "trees"
                 ? 0x44aa44
-                : 0xffffff,
+                : currentMode === "foliage"
+                  ? 0xaaff44
+                  : 0xffffff,
           );
           brushRing.position.set(p.x, p.y + 0.15, p.z);
           brushRing.scale.setScalar(brushWorldRadius());
@@ -3015,6 +3067,7 @@
             Place: "place",
             Grass: "grass",
             Trees: "trees",
+            "Foliage [N]": "foliage",
             "Props [I]": "props",
             "Path [L]": "path",
             "Water [W]": "water",
@@ -3133,10 +3186,11 @@
           expanded: false,
         });
         bakeFolder
-          .addButton({ title: "▶ Rebake BVH  (cliffs + grass + trees)" })
+          .addButton({ title: "▶ Rebake BVH  (cliffs + grass + trees + foliage)" })
           .on("click", () => {
             if (bakeBVH) bakeBVH();
             if (treeSystem) treeSystem.syncHeights();
+            FOLIAGE_SLOTS.forEach((s) => { if (s.system) s.system.syncHeights(); });
             propObjects.forEach((r) => {
               r.position.y = bvhHeight(r.position.x, r.position.z);
             });
@@ -3837,6 +3891,53 @@
           reader.readAsText(e.target.files[0]);
         });
 
+        // ── FOLIAGE FOLDER ──
+        const foliageFolder = pane.addFolder({ title: "Foliage  [ N ]", expanded: true });
+        foliageFolder.hidden = true;
+
+        const foliageActiveParams = { slotIndex: 0 };
+        const foliageSlotOptions = {};
+        FOLIAGE_SLOTS.forEach((s, i) => { foliageSlotOptions[s.name] = i; });
+        foliageFolder.addBinding(foliageActiveParams, "slotIndex", {
+          label: "Active slot",
+          options: foliageSlotOptions,
+        }).on("change", (e) => { activeFoliageSlot = e.value; });
+
+        const foliageErasePARAMS = { erase: false };
+        foliageFolder.addBinding(foliageErasePARAMS, "erase", { label: "Erase (or Shift)" })
+          .on("change", (e) => { foliageEraseMode = e.value; });
+
+        FOLIAGE_SLOTS.forEach((slot, idx) => {
+          const sf = foliageFolder.addFolder({ title: slot.name, expanded: idx === 0 });
+
+          // Load custom GLB
+          const ffi = document.createElement("input");
+          ffi.type = "file"; ffi.accept = ".glb"; ffi.style.display = "none";
+          document.body.appendChild(ffi);
+          sf.addButton({ title: "Load GLB…" }).on("click", () => ffi.click());
+          ffi.addEventListener("change", (e) => {
+            if (!e.target.files[0]) return;
+            const url = URL.createObjectURL(e.target.files[0]);
+            gltfLoader.loadAsync(url).then((gltf) => {
+              slot.system.setModel(gltf);
+              slot.system.setCastShadow(slot.castShadow);
+            }).catch((err) => console.error("Foliage: failed to load GLB", err));
+            e.target.value = "";
+          });
+
+          sf.addBinding(slot, "perStroke",  { label: "Per stroke",  min: 1,    max: 20,  step: 1 });
+          sf.addBinding(slot, "minSpacing", { label: "Min spacing", min: 0.5,  max: 40,  step: 0.5 });
+          sf.addBinding(slot, "scaleMin",   { label: "Scale min",   min: 0.05, max: 5,   step: 0.05 });
+          sf.addBinding(slot, "scaleMax",   { label: "Scale max",   min: 0.05, max: 5,   step: 0.05 });
+          sf.addBinding(slot, "castShadow", { label: "Cast shadow" }).on("change", (e) => {
+            slot.castShadow = e.value;
+            if (slot.system) slot.system.setCastShadow(e.value);
+          });
+          sf.addButton({ title: "Clear slot" }).on("click", () => {
+            if (slot.system) slot.system.clear();
+          });
+        });
+
         // ── PROPS FOLDER ──
         const propsFolder = pane.addFolder({
           title: "Props  [ I ]",
@@ -4188,6 +4289,7 @@
           placeFolder.hidden = mode !== "place";
           grassFolder.hidden = mode !== "grass";
           treesFolder.hidden = mode !== "trees";
+          foliageFolder.hidden = mode !== "foliage";
           propsFolder.hidden = mode !== "props";
           pathFolder.hidden = mode !== "path";
           waterFolder.hidden = mode !== "water";
@@ -4234,7 +4336,9 @@
                     ? "GRASS MODE"
                     : mode === "trees"
                       ? "TREES MODE"
-                      : mode === "props"
+                      : mode === "foliage"
+                        ? "FOLIAGE MODE  [ N ]"
+                        : mode === "props"
                         ? "PROPS MODE  [ I ]"
                         : mode === "water"
                           ? "WATER BODIES  [ W ]"
@@ -4281,6 +4385,8 @@
             setMode(currentMode === "grass" ? "view" : "grass");
           if (e.code === "KeyT" && currentMode !== "water")
             setMode(currentMode === "trees" ? "view" : "trees");
+          if (e.code === "KeyN")
+            setMode(currentMode === "foliage" ? "view" : "foliage");
           if (e.code === "KeyI")
             setMode(currentMode === "props" ? "view" : "props");
           if (e.code === "KeyL")
@@ -4378,6 +4484,8 @@
             paintGrassAt(p.x, p.z, grassEraseMode || e.shiftKey);
           if (currentMode === "trees")
             paintTreesAt(p.x, p.z, treeEraseMode || e.shiftKey);
+          if (currentMode === "foliage")
+            paintFoliageAt(p.x, p.z, foliageEraseMode || e.shiftKey);
         });
 
         renderer.domElement.addEventListener("mousedown", (e) => {
@@ -4472,6 +4580,8 @@
           if (currentMode === "path") pathPaintAt(p.x, p.z);
           if (currentMode === "trees")
             paintTreesAt(p.x, p.z, treeEraseMode || e.shiftKey);
+          if (currentMode === "foliage")
+            paintFoliageAt(p.x, p.z, foliageEraseMode || e.shiftKey);
         });
 
         renderer.domElement.addEventListener("mouseup", () => {
@@ -4487,6 +4597,7 @@
           if (currentMode === "sculpt" || currentMode === "path") {
             if (bakeBVH) bakeBVH();
             if (treeSystem) treeSystem.syncHeights();
+            FOLIAGE_SLOTS.forEach((s) => { if (s.system) s.system.syncHeights(); });
             propObjects.forEach((root) => {
               root.position.y = bvhHeight(root.position.x, root.position.z);
             });
