@@ -394,22 +394,14 @@
         const iz0 = Math.max(0, Math.min(DISPLAY_RES - 1, Math.floor(fz)));
         const ix1 = Math.min(DISPLAY_RES, ix0 + 1);
         const iz1 = Math.min(DISPLAY_RES, iz0 + 1);
-        const tx = fx - ix0,
-          tz = fz - iz0;
+        const tx = fx - ix0, tz = fz - iz0;
         const wx00 = (-0.5 + ix0 / DISPLAY_RES) * TERRAIN_SIZE;
         const wx10 = (-0.5 + ix1 / DISPLAY_RES) * TERRAIN_SIZE;
         const wz00 = (-0.5 + iz0 / DISPLAY_RES) * TERRAIN_SIZE;
         const wz01 = (-0.5 + iz1 / DISPLAY_RES) * TERRAIN_SIZE;
-        const h00 = sampleHeight(wx00, wz00),
-          h10 = sampleHeight(wx10, wz00);
-        const h01 = sampleHeight(wx00, wz01),
-          h11 = sampleHeight(wx10, wz01);
-        return (
-          h00 +
-          (h10 - h00) * tx +
-          (h01 - h00) * tz +
-          (h00 - h10 - h01 + h11) * tx * tz
-        );
+        const h00 = sampleHeight(wx00, wz00), h10 = sampleHeight(wx10, wz00);
+        const h01 = sampleHeight(wx00, wz01), h11 = sampleHeight(wx10, wz01);
+        return h00 + (h10 - h00) * tx + (h01 - h00) * tz + (h00 - h10 - h01 + h11) * tx * tz;
       }
 
       function sampleHeight(wx, wz) {
@@ -446,34 +438,23 @@
       // ─── SPLATMAP CANVAS ─────────────────────
       const splatCanvas = document.createElement("canvas");
       splatCanvas.width = splatCanvas.height = SPLAT_RES;
-      const splatCtx = splatCanvas.getContext("2d", {
-        willReadFrequently: true,
-      });
+      const splatCtx = splatCanvas.getContext("2d", { willReadFrequently: true });
       splatCtx.fillStyle = "#000";
       splatCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
 
       // ─── GRASS DENSITY CANVAS ─────────────────
       const grassDensityCanvas = document.createElement("canvas");
       grassDensityCanvas.width = grassDensityCanvas.height = SPLAT_RES;
-      const grassDensityCtx = grassDensityCanvas.getContext("2d", {
-        willReadFrequently: true,
-      });
+      const grassDensityCtx = grassDensityCanvas.getContext("2d", { willReadFrequently: true });
       grassDensityCtx.fillStyle = "#000";
       grassDensityCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
 
       // ─── MEADOW DENSITY CANVAS ────────────────
       const meadowCanvas = document.createElement("canvas");
       meadowCanvas.width = meadowCanvas.height = SPLAT_RES;
-      const meadowCtx = meadowCanvas.getContext("2d", {
-        willReadFrequently: true,
-      });
+      const meadowCtx = meadowCanvas.getContext("2d", { willReadFrequently: true });
       meadowCtx.fillStyle = "#000";
       meadowCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
-
-      // ─── IMAGE TEXTURE SPLATMAP ──────────────
-      // Uint8Array avoids canvas premultiplied-alpha zeroing our channels (R*alpha=0 bug)
-      // RGBA: R=slot0 weight, G=slot1, B=slot2, A=slot3
-      const imgSplatData = new Uint8Array(SPLAT_RES * SPLAT_RES * 4); // all zeros
 
       const previewCanvas = document.getElementById("splatmap-preview");
       const previewCtx = previewCanvas.getContext("2d");
@@ -550,7 +531,7 @@
         csm: {
           enabled: true,
           cascades: 3,
-          maxFar: 600,
+          maxFar: 200,
           lightMargin: 150,
           mapSize: 2048,
           updateEveryFrame: true,
@@ -568,32 +549,32 @@
         },
         water: {
           // ── Voronoi surface ──
-          scale: 0.3,
-          cellSpeed: 0.45,
-          noiseScale: 1.52,
+          scale:          0.3,
+          cellSpeed:      0.45,
+          noiseScale:     1.52,
           noiseTimeScale: 0.6,
-          distort: 0.35,
-          flowZ: 0.08,
-          edgeThreshold: 0.067,
-          deepColor: "#3a6a8c",
-          midColor: "#7ed4f8",
+          distort:        0.35,
+          flowZ:          0.08,
+          edgeThreshold:  0.067,
+          deepColor:      "#3a6a8c",
+          midColor:       "#7ed4f8",
           highlightColor: "#e8f8ff",
-          opacity: 0.78,
+          opacity:        0.78,
           // ── Shore foam ──
-          foamColor: "#e8f4ff",
-          lineWidth: 0.5,
-          glowWidth: 2.0,
+          foamColor:      "#e8f4ff",
+          lineWidth:      0.5,
+          glowWidth:      2.0,
           waterlineIntensity: 2.5,
           // ── Ripples ──
           rippleStrength: 5.5,
-          rippleWidth: 0.12,
+          rippleWidth:    0.12,
           // ── Placement ──
-          sinkOffset: -0.05,
-          preset: "Small lake",
+          sinkOffset:     -0.05,
+          preset:         "Small lake",
           // ── Reflections ──
-          stylized: false,
-          reflections: false,
-          reflectionScale: 0.35,
+          stylized:          false,
+          reflections:       false,
+          reflectionScale:   0.35,
           reflectionStrength: 0.35,
         },
         fog: {
@@ -652,162 +633,17 @@
 
       // ─── FOLIAGE SYSTEM ──────────────────────
       const FOLIAGE_SLOTS = [
-        {
-          name: "Cherry Tree",
-          modelPath: "models/japanese_cherry_tree.glb",
-          castShadow: true,
-          perStroke: 2,
-          minSpacing: 6,
-          scaleMin: 0.8,
-          scaleMax: 1.3,
-          system: null,
-        },
-        {
-          name: "Fern",
-          modelPath: "models/low_poly_fern.glb",
-          castShadow: false,
-          perStroke: 5,
-          minSpacing: 2,
-          scaleMin: 0.6,
-          scaleMax: 1.2,
-          system: null,
-        },
-        {
-          name: "Reed",
-          modelPath: "models/reedplant.glb",
-          castShadow: false,
-          perStroke: 4,
-          minSpacing: 2,
-          scaleMin: 0.8,
-          scaleMax: 1.4,
-          system: null,
-        },
-        {
-          name: "Rock",
-          modelPath: "models/rock__game_asset.glb",
-          castShadow: true,
-          perStroke: 3,
-          minSpacing: 3,
-          scaleMin: 0.5,
-          scaleMax: 1.5,
-          system: null,
-        },
-        {
-          name: "Stone",
-          modelPath: "models/stone_low-poly.glb",
-          castShadow: true,
-          perStroke: 4,
-          minSpacing: 2,
-          scaleMin: 0.4,
-          scaleMax: 1.2,
-          system: null,
-        },
-        {
-          name: "Pine 3",
-          modelPath: "models/pine3.glb",
-          castShadow: true,
-          perStroke: 2,
-          minSpacing: 5,
-          scaleMin: 0.7,
-          scaleMax: 1.5,
-          system: null,
-        },
-        {
-          name: "Palm Tree",
-          modelPath: "models/realistic_palm_tree_4_free.glb",
-          castShadow: true,
-          perStroke: 2,
-          minSpacing: 6,
-          scaleMin: 0.8,
-          scaleMax: 1.4,
-          system: null,
-        },
-        {
-          name: "Cylinder",
-          modelPath: "models/cylinder.glb",
-          castShadow: true,
-          perStroke: 3,
-          minSpacing: 3,
-          scaleMin: 0.5,
-          scaleMax: 1.5,
-          system: null,
-        },
+        { name: "Cherry Tree", modelPath: "models/japanese_cherry_tree.glb", castShadow: true,  perStroke: 2, minSpacing: 6,   scaleMin: 0.8, scaleMax: 1.3, system: null },
+        { name: "Fern",        modelPath: "models/low_poly_fern.glb",         castShadow: false, perStroke: 5, minSpacing: 2,   scaleMin: 0.6, scaleMax: 1.2, system: null },
+        { name: "Reed",        modelPath: "models/reedplant.glb",             castShadow: false, perStroke: 4, minSpacing: 2,   scaleMin: 0.8, scaleMax: 1.4, system: null },
+        { name: "Rock",        modelPath: "models/rock__game_asset.glb",      castShadow: true,  perStroke: 3, minSpacing: 3,   scaleMin: 0.5, scaleMax: 1.5, system: null },
+        { name: "Stone",       modelPath: "models/stone_low-poly.glb",        castShadow: true,  perStroke: 4, minSpacing: 2,   scaleMin: 0.4, scaleMax: 1.2, system: null },
+        { name: "Pine 3",      modelPath: "models/pine3.glb",                 castShadow: true,  perStroke: 2, minSpacing: 5,   scaleMin: 0.7, scaleMax: 1.5, system: null },
+        { name: "Palm Tree",   modelPath: "models/realistic_palm_tree_4_free.glb", castShadow: true,  perStroke: 2, minSpacing: 6,   scaleMin: 0.8, scaleMax: 1.4, system: null },
+        { name: "Cylinder",    modelPath: "models/cylinder.glb",              castShadow: true,  perStroke: 3, minSpacing: 3,   scaleMin: 0.5, scaleMax: 1.5, system: null },
       ];
       let activeFoliageSlot = 0;
       let foliageEraseMode = false;
-
-      // ─── IMAGE TEXTURE SLOTS ─────────────────
-      // Use THREE.Texture(canvas) — NOT DataTexture — so image reassignment works in WebGPU
-      const _makeSlotTex = (r, g, b) => {
-        const canvas = document.createElement("canvas");
-        canvas.width = canvas.height = 4;
-        const ctx2d = canvas.getContext("2d");
-        ctx2d.fillStyle = `rgb(${r},${g},${b})`;
-        ctx2d.fillRect(0, 0, 4, 4);
-        const t = new THREE.Texture(canvas);
-        t.wrapS = t.wrapT = THREE.RepeatWrapping;
-        t.needsUpdate = true;
-        return t;
-      };
-      const IMG_TEX_SLOTS = [
-        {
-          name: "Ground 037",
-          uvScale: 3.0,
-          initAlbedo: "textures/Ground037_1K-JPG_Color.jpg",
-          initNormal: "textures/Ground037_1K-JPG_NormalGL.jpg",
-          albedoTex: _makeSlotTex(180, 140, 100),
-          normalTex: _makeSlotTex(128, 128, 255),
-          ormTex: _makeSlotTex(255, 128, 0),
-          uUVScale: uniform(3.0),
-          uHasAlbedo: uniform(1),
-          uHasNormal: uniform(0),
-          uHasORM: uniform(0),
-        },
-        {
-          name: "Grass 005",
-          uvScale: 3.0,
-          initAlbedo: "textures/Grass005_1K-JPG_Color.jpg",
-          initNormal: "textures/Grass005_1K-JPG_NormalGL.jpg",
-          albedoTex: _makeSlotTex(80, 140, 60),
-          normalTex: _makeSlotTex(128, 128, 255),
-          ormTex: _makeSlotTex(255, 128, 0),
-          uUVScale: uniform(3.0),
-          uHasAlbedo: uniform(1),
-          uHasNormal: uniform(0),
-          uHasORM: uniform(0),
-        },
-        {
-          name: "Concrete 030",
-          uvScale: 3.0,
-          initAlbedo:
-            "textures/Concrete030_1K-JPG/Concrete030_1K-JPG_Color.jpg",
-          initNormal:
-            "textures/Concrete030_1K-JPG/Concrete030_1K-JPG_NormalGL.jpg",
-          albedoTex: _makeSlotTex(160, 160, 160),
-          normalTex: _makeSlotTex(128, 128, 255),
-          ormTex: _makeSlotTex(255, 128, 0),
-          uUVScale: uniform(3.0),
-          uHasAlbedo: uniform(1),
-          uHasNormal: uniform(0),
-          uHasORM: uniform(0),
-        },
-        {
-          name: "Custom",
-          uvScale: 2.0,
-          initAlbedo: null,
-          initNormal: null,
-          albedoTex: _makeSlotTex(255, 255, 255),
-          normalTex: _makeSlotTex(128, 128, 255),
-          ormTex: _makeSlotTex(255, 128, 0),
-          uUVScale: uniform(2.0),
-          uHasAlbedo: uniform(1),
-          uHasNormal: uniform(0),
-          uHasORM: uniform(0),
-        },
-      ];
-      let imgSplatTex = null;
-      let activeImgSlot = 0;
-      let imgEraseMode = false;
 
       // ─── BVH HEIGHT GRID ─────────────────────
       const HTEX_RES = 512;
@@ -1046,13 +882,6 @@
           return;
         }
 
-        // Image texture slots — write to imgSplatCanvas specific channel
-        if (currentBiome.startsWith("img")) {
-          const slotIdx = parseInt(currentBiome[3]);
-          paintImgAt(wx, wz, slotIdx, imgEraseMode);
-          return;
-        }
-
         const col = BIOME_COLORS[currentBiome];
         _applyBrushToCanvas(splatCtx, cx, cy, col.r, col.g, col.b, alpha);
         syncPreview();
@@ -1156,51 +985,8 @@
         if (erase) {
           slot.system.removeInBrush(wx, wz, radius);
         } else {
-          slot.system.addInBrush(
-            wx,
-            wz,
-            radius,
-            slot.perStroke,
-            slot.minSpacing,
-            slot.scaleMin,
-            slot.scaleMax,
-          );
+          slot.system.addInBrush(wx, wz, radius, slot.perStroke, slot.minSpacing, slot.scaleMin, slot.scaleMax);
         }
-      }
-
-      // ─── IMAGE TEXTURE PAINT ─────────────────────────────────────────────
-      // Direct Uint8Array write — no canvas premultiplied-alpha issues
-      function paintImgAt(wx, wz, slotIdx, erase) {
-        const { u, v } = worldToUV(wx, wz);
-        const cx = Math.floor(u * SPLAT_RES);
-        const cy = Math.floor(v * SPLAT_RES);
-        const rad = Math.ceil(brushSize);
-        const alpha = brushStr / 100;
-        for (let py = cy - rad; py <= cy + rad; py++) {
-          for (let px = cx - rad; px <= cx + rad; px++) {
-            if (px < 0 || px >= SPLAT_RES || py < 0 || py >= SPLAT_RES)
-              continue;
-            const dx = px - cx,
-              dy = py - cy;
-            const t = Math.sqrt(dx * dx + dy * dy) / brushSize;
-            if (t >= 1) continue;
-            const falloff = (1 - t) * (1 - t);
-            const idx = (py * SPLAT_RES + px) * 4 + slotIdx; // R=0, G=1, B=2, A=3
-            const cur = imgSplatData[idx] / 255;
-            if (erase) {
-              imgSplatData[idx] = Math.max(
-                0,
-                Math.round((cur - falloff * alpha) * 255),
-              );
-            } else {
-              imgSplatData[idx] = Math.min(
-                255,
-                Math.round((cur + falloff * alpha) * 255),
-              );
-            }
-          }
-        }
-        if (imgSplatTex) imgSplatTex.needsUpdate = true;
       }
 
       // ─── BRUSH RADIUS (module-level so sculptAt + paintAt can use it) ───
@@ -1550,9 +1336,7 @@
         syncGeometry();
         if (bakeBVH) bakeBVH();
         if (treeSystem) treeSystem.syncHeights();
-        FOLIAGE_SLOTS.forEach((s) => {
-          if (s.system) s.system.syncHeights();
-        });
+        FOLIAGE_SLOTS.forEach((s) => { if (s.system) s.system.syncHeights(); });
         propObjects.forEach((root) => {
           root.position.y = bvhHeight(root.position.x, root.position.z);
         });
@@ -1659,9 +1443,7 @@
       // ─── SAVE / LOAD ─────────────────────────
       function saveSplatmap() {
         const pixels = splatCtx.getImageData(0, 0, SPLAT_RES, SPLAT_RES).data;
-        const blob = new Blob([pixels.buffer], {
-          type: "application/octet-stream",
-        });
+        const blob = new Blob([pixels.buffer], { type: "application/octet-stream" });
         const a = document.createElement("a");
         a.download = "splatmap.bin";
         a.href = URL.createObjectURL(blob);
@@ -1702,17 +1484,13 @@
               `Heightmap size mismatch: got ${loaded.length}, expected ${heightData.length}`,
             );
             // Copy as much as fits
-            heightData.set(
-              loaded.subarray(0, Math.min(loaded.length, heightData.length)),
-            );
+            heightData.set(loaded.subarray(0, Math.min(loaded.length, heightData.length)));
           }
           syncGeometry();
           syncHeightmapPreview();
           if (bakeBVH) bakeBVH();
           if (treeSystem) treeSystem.syncHeights();
-          FOLIAGE_SLOTS.forEach((s) => {
-            if (s.system) s.system.syncHeights();
-          });
+          FOLIAGE_SLOTS.forEach((s) => { if (s.system) s.system.syncHeights(); });
         };
         reader.readAsArrayBuffer(file);
       }
@@ -1786,10 +1564,7 @@
 
       // ─── MAIN ────────────────────────────────
       async function init() {
-        const renderer = new THREE.WebGPURenderer({
-          antialias: true,
-          requiredLimits: { maxSampledTexturesPerShaderStage: 32 },
-        });
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
         await renderer.init();
         renderer.setSize(innerWidth, innerHeight);
         renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -1824,7 +1599,8 @@
         orbit.enableDamping = true;
         orbit.dampingFactor = 0.05;
         orbit.mouseButtons = {
-          MIDDLE: THREE.MOUSE.ROTATE,
+          LEFT: THREE.MOUSE.ROTATE,
+          MIDDLE: THREE.MOUSE.DOLLY,
           RIGHT: THREE.MOUSE.PAN,
         };
         orbit.update();
@@ -1972,39 +1748,6 @@
 
         splatTex = new THREE.CanvasTexture(splatCanvas);
         splatTex.wrapS = splatTex.wrapT = THREE.ClampToEdgeWrapping;
-        imgSplatTex = new THREE.DataTexture(
-          imgSplatData,
-          SPLAT_RES,
-          SPLAT_RES,
-          THREE.RGBAFormat,
-        );
-        imgSplatTex.wrapS = imgSplatTex.wrapT = THREE.ClampToEdgeWrapping;
-        imgSplatTex.needsUpdate = true;
-
-        // ── Auto-load project textures into image slots ───────────────────
-        const _slotLoader = new THREE.TextureLoader();
-        IMG_TEX_SLOTS.forEach((slot) => {
-          if (slot.initAlbedo) {
-            _slotLoader.load(slot.initAlbedo, (tex) => {
-              slot.albedoTex.image = tex.image;
-              slot.albedoTex.colorSpace = THREE.SRGBColorSpace;
-              slot.albedoTex.wrapS = slot.albedoTex.wrapT =
-                THREE.RepeatWrapping;
-              slot.albedoTex.needsUpdate = true;
-              slot.uHasAlbedo.value = 1;
-            });
-          }
-          if (slot.initNormal) {
-            _slotLoader.load(slot.initNormal, (tex) => {
-              slot.normalTex.image = tex.image;
-              slot.normalTex.colorSpace = THREE.LinearSRGBColorSpace;
-              slot.normalTex.wrapS = slot.normalTex.wrapT =
-                THREE.RepeatWrapping;
-              slot.normalTex.needsUpdate = true;
-              slot.uHasNormal.value = 1;
-            });
-          }
-        });
 
         // ── GRASS DENSITY TEX ─────────────────────────────────────────────
         grassDensityTex = new THREE.CanvasTexture(grassDensityCanvas);
@@ -2135,39 +1878,23 @@
 
               // GPU: raycast at texel-center — matches LinearFilter reads in grass shader
               _terrainRay.origin.set(wxG, 99999, wzG);
-              const terrainHitG = terrainBvh.raycastFirst(
-                _terrainRay,
-                THREE.DoubleSide,
-              );
-              let hGpu = terrainHitG
-                ? terrainHitG.point.y
-                : sampleHeight(wxG, wzG);
+              const terrainHitG = terrainBvh.raycastFirst(_terrainRay, THREE.DoubleSide);
+              let hGpu = terrainHitG ? terrainHitG.point.y : sampleHeight(wxG, wzG);
 
               // CPU: raycast at grid-corner — matches bvhHeight() bilinear lookup positions
               _terrainRay.origin.set(wx, 99999, wz);
-              const terrainHitC = terrainBvh.raycastFirst(
-                _terrainRay,
-                THREE.DoubleSide,
-              );
-              let hCpu = terrainHitC
-                ? terrainHitC.point.y
-                : sampleHeight(wx, wz);
+              const terrainHitC = terrainBvh.raycastFirst(_terrainRay, THREE.DoubleSide);
+              let hCpu = terrainHitC ? terrainHitC.point.y : sampleHeight(wx, wz);
 
               if (cliffBvh) {
                 _bvhRay.origin.set(wx, 99999, wz);
                 const hit = cliffBvh.raycastFirst(_bvhRay, THREE.DoubleSide);
-                if (hit && hit.point.y > hCpu) {
-                  hCpu = hit.point.y;
-                  hGpu = hit.point.y;
-                }
+                if (hit && hit.point.y > hCpu) { hCpu = hit.point.y; hGpu = hit.point.y; }
               }
 
               bvhGrid[iz * HTEX_RES + ix] = hCpu;
               const i4 = (iz * HTEX_RES + ix) * 4;
-              heightTexData[i4] =
-                heightTexData[i4 + 1] =
-                heightTexData[i4 + 2] =
-                  hGpu;
+              heightTexData[i4] = heightTexData[i4 + 1] = heightTexData[i4 + 2] = hGpu;
               heightTexData[i4 + 3] = 1;
             }
           }
@@ -2717,47 +2444,12 @@
             uAOIntensity,
           );
           col = col.mul(ao);
-          // ── Image texture slots (albedo) — highest priority, paint on top ──
-          const imgSplat = texture(imgSplatTex, getSplatUV());
-          const s0 = IMG_TEX_SLOTS[0],
-            s1 = IMG_TEX_SLOTS[1],
-            s2 = IMG_TEX_SLOTS[2],
-            s3 = IMG_TEX_SLOTS[3];
-          const iuv0 = positionWorld.xz.mul(s0.uUVScale);
-          const iuv1 = positionWorld.xz.mul(s1.uUVScale);
-          const iuv2 = positionWorld.xz.mul(s2.uUVScale);
-          const iuv3 = positionWorld.xz.mul(s3.uUVScale);
-          col = mix(
-            col,
-            texture(s0.albedoTex, iuv0).rgb,
-            imgSplat.r.mul(s0.uHasAlbedo),
-          );
-          col = mix(
-            col,
-            texture(s1.albedoTex, iuv1).rgb,
-            imgSplat.g.mul(s1.uHasAlbedo),
-          );
-          col = mix(
-            col,
-            texture(s2.albedoTex, iuv2).rgb,
-            imgSplat.b.mul(s2.uHasAlbedo),
-          );
-          col = mix(
-            col,
-            texture(s3.albedoTex, iuv3).rgb,
-            imgSplat.a.mul(s3.uHasAlbedo),
-          );
           return col;
         })();
-
-        // ── Normal node — terrain baked normal only (image normal blending disabled: saves 5 GPU sampler slots) ──
         splatMat.normalNode = normalMap(
           texture(normalMapTex, getSplatUV()),
           vec2(uNormalScale, uNormalScale),
         );
-
-        // roughnessNode omitted for now (saves 4 GPU sampler slots — ORM.g blending can be added later)
-
         terrain.material.dispose();
         terrain.material = splatMat;
 
@@ -2798,25 +2490,13 @@
           return min(a, b).sub(h.mul(h).mul(h).mul(k).div(6));
         });
         const _wCellPt = Fn(([seed, t, spd]) =>
-          float(0.5).add(
-            float(0.5).mul(sin(t.mul(spd).add(float(6.2831).mul(seed)))),
-          ),
+          float(0.5).add(float(0.5).mul(sin(t.mul(spd).add(float(6.2831).mul(seed))))),
         );
         const _wVoroF1 = Fn(([p, t, spd]) => {
           const ip = floor(p);
           const fp = fract(p);
           const md = float(10).toVar();
-          for (const [nx, ny] of [
-            [-1, -1],
-            [0, -1],
-            [1, -1],
-            [-1, 0],
-            [0, 0],
-            [1, 0],
-            [-1, 1],
-            [0, 1],
-            [1, 1],
-          ]) {
+          for (const [nx, ny] of [[-1,-1],[0,-1],[1,-1],[-1,0],[0,0],[1,0],[-1,1],[0,1],[1,1]]) {
             const n = vec2(float(nx), float(ny));
             const rnd = _wHash22(ip.add(n));
             const pt = vec2(_wCellPt(rnd.x, t, spd), _wCellPt(rnd.y, t, spd));
@@ -2828,17 +2508,7 @@
           const ip = floor(p);
           const fp = fract(p);
           const res = float(10).toVar();
-          for (const [nx, ny] of [
-            [-1, -1],
-            [0, -1],
-            [1, -1],
-            [-1, 0],
-            [0, 0],
-            [1, 0],
-            [-1, 1],
-            [0, 1],
-            [1, 1],
-          ]) {
+          for (const [nx, ny] of [[-1,-1],[0,-1],[1,-1],[-1,0],[0,0],[1,0],[-1,1],[0,1],[1,1]]) {
             const n = vec2(float(nx), float(ny));
             const rnd = _wHash22(ip.add(n));
             const pt = vec2(_wCellPt(rnd.x, t, spd), _wCellPt(rnd.y, t, spd));
@@ -2857,8 +2527,8 @@
           const f = fract(p);
           const uu = f.mul(f).mul(float(3).sub(f.mul(2)));
           return mix(
-            mix(_wNHash(i), _wNHash(i.add(vec2(1, 0))), uu.x),
-            mix(_wNHash(i.add(vec2(0, 1))), _wNHash(i.add(vec2(1, 1))), uu.x),
+            mix(_wNHash(i), _wNHash(i.add(vec2(1,0))), uu.x),
+            mix(_wNHash(i.add(vec2(0,1))), _wNHash(i.add(vec2(1,1))), uu.x),
             uu.y,
           );
         });
@@ -2869,10 +2539,7 @@
         });
 
         // ── SEABED (opaque colored floor — gives water its blue color) ────
-        const seabedGeo = new THREE.PlaneGeometry(
-          TERRAIN_SIZE * 4,
-          TERRAIN_SIZE * 4,
-        );
+        const seabedGeo = new THREE.PlaneGeometry(TERRAIN_SIZE * 4, TERRAIN_SIZE * 4);
         seabedGeo.rotateX(-PI / 2);
         const seabedMat = new MeshBasicNodeMaterial({ color: 0x1a3a52 });
         const seabed = new THREE.Mesh(seabedGeo, seabedMat);
@@ -2889,15 +2556,9 @@
         });
 
         // ── WATER PLANE ──
-        const waterGeo = new THREE.PlaneGeometry(
-          TERRAIN_SIZE * 4,
-          TERRAIN_SIZE * 4,
-        );
+        const waterGeo = new THREE.PlaneGeometry(TERRAIN_SIZE * 4, TERRAIN_SIZE * 4);
         waterGeo.rotateX(-PI / 2);
-        const waterMat = new MeshBasicNodeMaterial({
-          transparent: true,
-          depthWrite: false,
-        });
+        const waterMat = new MeshBasicNodeMaterial({ transparent: true, depthWrite: false });
         const water = new THREE.Mesh(waterGeo, waterMat);
         water.position.y = -0.5;
         water.renderOrder = 1;
@@ -2905,9 +2566,7 @@
         scene.add(water);
 
         // ── WATER REFLECTOR (WebGPU planar reflection) ────────────────────
-        const waterReflector = reflector({
-          resolutionScale: PARAMS.water.reflectionScale,
-        });
+        const waterReflector = reflector({ resolutionScale: PARAMS.water.reflectionScale });
         water.add(waterReflector.target);
 
         // ── FOG (height + distance) ──
@@ -2924,46 +2583,40 @@
         const _distanceFogNode = fog(uFogColor, densityFogFactor(uFogDensity));
 
         // ── ANIME WATER UNIFORMS ──────────────────────────────────────────
-        const uWaterTime = uniform(0.0);
-        const uWScale = uniform(PARAMS.water.scale);
-        const uWSmoothness = uniform(0.55);
-        const uWEdgeThresh = uniform(PARAMS.water.edgeThreshold);
-        const uWEdgeSoft = uniform(0.01);
-        const uWFlowZ = uniform(PARAMS.water.flowZ);
-        const uWCellSpeed = uniform(PARAMS.water.cellSpeed);
-        const uWNoiseScale = uniform(PARAMS.water.noiseScale);
-        const uWNoiseFlow = uniform(0.2);
-        const uWNoiseTime = uniform(PARAMS.water.noiseTimeScale);
-        const uWDistort = uniform(PARAMS.water.distort);
-        const uWDeepColor = uniform(new THREE.Color(PARAMS.water.deepColor));
-        const uWMidColor = uniform(new THREE.Color(PARAMS.water.midColor));
-        const uWMidPos = uniform(0.084);
-        const uWHighlight = uniform(
-          new THREE.Color(PARAMS.water.highlightColor),
-        );
-        const uWOpacity = uniform(PARAMS.water.opacity);
+        const uWaterTime     = uniform(0.0);
+        const uWScale        = uniform(PARAMS.water.scale);
+        const uWSmoothness   = uniform(0.55);
+        const uWEdgeThresh   = uniform(PARAMS.water.edgeThreshold);
+        const uWEdgeSoft     = uniform(0.01);
+        const uWFlowZ        = uniform(PARAMS.water.flowZ);
+        const uWCellSpeed    = uniform(PARAMS.water.cellSpeed);
+        const uWNoiseScale   = uniform(PARAMS.water.noiseScale);
+        const uWNoiseFlow    = uniform(0.2);
+        const uWNoiseTime    = uniform(PARAMS.water.noiseTimeScale);
+        const uWDistort      = uniform(PARAMS.water.distort);
+        const uWDeepColor    = uniform(new THREE.Color(PARAMS.water.deepColor));
+        const uWMidColor     = uniform(new THREE.Color(PARAMS.water.midColor));
+        const uWMidPos       = uniform(0.084);
+        const uWHighlight    = uniform(new THREE.Color(PARAMS.water.highlightColor));
+        const uWOpacity      = uniform(PARAMS.water.opacity);
         const uWFadeDistance = uniform(400.0);
         const uWFadeStrength = uniform(1.4);
-        const uWCamXZ = uniform(new THREE.Vector2(0, 0));
+        const uWCamXZ        = uniform(new THREE.Vector2(0, 0));
         // Shore foam
-        const uWLineWidth = uniform(PARAMS.water.lineWidth);
-        const uWGlowWidth = uniform(PARAMS.water.glowWidth);
-        const uWLineIntensity = uniform(PARAMS.water.waterlineIntensity);
-        const uWLineColor = uniform(new THREE.Color(PARAMS.water.foamColor));
-        const uWGlowColor = uniform(new THREE.Color("#88ccff"));
+        const uWLineWidth    = uniform(PARAMS.water.lineWidth);
+        const uWGlowWidth    = uniform(PARAMS.water.glowWidth);
+        const uWLineIntensity= uniform(PARAMS.water.waterlineIntensity);
+        const uWLineColor    = uniform(new THREE.Color(PARAMS.water.foamColor));
+        const uWGlowColor    = uniform(new THREE.Color("#88ccff"));
         // Ripples (8 slots)
         const MAX_RIPPLES_W = 8;
-        const uRippleCenters = Array.from({ length: MAX_RIPPLES_W }, () =>
-          uniform(new THREE.Vector2(0, 0)),
-        );
-        const uRippleTimes = Array.from({ length: MAX_RIPPLES_W }, () =>
-          uniform(0.0),
-        );
-        const uRippleCount = uniform(0.0);
-        const uRippleSpeed = uniform(1.5);
-        const uRippleWidth = uniform(PARAMS.water.rippleWidth);
-        const uRippleStr = uniform(PARAMS.water.rippleStrength);
-        const uRippleDecay = uniform(1.6);
+        const uRippleCenters = Array.from({ length: MAX_RIPPLES_W }, () => uniform(new THREE.Vector2(0, 0)));
+        const uRippleTimes   = Array.from({ length: MAX_RIPPLES_W }, () => uniform(0.0));
+        const uRippleCount   = uniform(0.0);
+        const uRippleSpeed   = uniform(1.5);
+        const uRippleWidth   = uniform(PARAMS.water.rippleWidth);
+        const uRippleStr     = uniform(PARAMS.water.rippleStrength);
+        const uRippleDecay   = uniform(1.6);
 
         // ── SHORE DEPTH (heightTex approach — no depth render pass needed) ─
         // Returns how far terrain is ABOVE the water surface at this XZ.
@@ -2986,10 +2639,7 @@
           uRippleCount.value = _rippleBuffer.length;
           for (let i = 0; i < MAX_RIPPLES_W; i++) {
             if (i < _rippleBuffer.length) {
-              uRippleCenters[i].value.set(
-                _rippleBuffer[i].x,
-                _rippleBuffer[i].z,
-              );
+              uRippleCenters[i].value.set(_rippleBuffer[i].x, _rippleBuffer[i].z);
               uRippleTimes[i].value = _rippleBuffer[i].t;
             }
           }
@@ -2997,36 +2647,23 @@
 
         // ── VORONOI WATER FRAG ────────────────────────────────────────────
         const buildWaterFrag = Fn(() => {
-          const worldXZ = positionWorld.xz;
-          const tNoise = uWaterTime.mul(uWNoiseTime);
-          const noiseUV = worldXZ
-            .mul(uWNoiseScale)
-            .add(vec2(tNoise.mul(uWNoiseFlow), float(0)));
+          const worldXZ  = positionWorld.xz;
+          const tNoise   = uWaterTime.mul(uWNoiseTime);
+          const noiseUV  = worldXZ.mul(uWNoiseScale).add(vec2(tNoise.mul(uWNoiseFlow), float(0)));
           const noiseFac = _wFbm2(noiseUV);
-          const distort = vec2(noiseFac.sub(0.5), noiseFac.sub(0.5)).mul(
-            uWDistort,
-          );
+          const distort  = vec2(noiseFac.sub(0.5), noiseFac.sub(0.5)).mul(uWDistort);
 
-          const uvVoro = worldXZ
-            .mul(uWScale)
+          const uvVoro = worldXZ.mul(uWScale)
             .add(vec2(float(0), uWFlowZ.mul(tNoise)))
             .add(distort);
-          const f1 = _wVoroF1(uvVoro, tNoise, uWCellSpeed);
+          const f1  = _wVoroF1(uvVoro, tNoise, uWCellSpeed);
           const sf1 = _wVoroSmooth(uvVoro, tNoise, uWCellSpeed, uWSmoothness);
           const edge = f1.sub(sf1);
-          const t = smoothstep(
-            uWEdgeThresh.sub(uWEdgeSoft),
-            uWEdgeThresh.add(uWEdgeSoft),
-            edge,
-          );
+          const t = smoothstep(uWEdgeThresh.sub(uWEdgeSoft), uWEdgeThresh.add(uWEdgeSoft), edge);
 
           const safeMP = max(uWMidPos, float(0.0001));
           const seg0 = clamp(t.div(safeMP), float(0), float(1));
-          const seg1 = clamp(
-            t.sub(safeMP).div(float(1).sub(safeMP).add(float(0.0001))),
-            float(0),
-            float(1),
-          );
+          const seg1 = clamp(t.sub(safeMP).div(float(1).sub(safeMP).add(float(0.0001))), float(0), float(1));
           const inSeg1 = smoothstep(safeMP.sub(0.001), safeMP.add(0.001), t);
           const baseColor = mix(
             mix(uWDeepColor, uWMidColor, seg0),
@@ -3037,45 +2674,32 @@
           // Ripple rings
           const rippleAcc = float(0).toVar();
           for (let i = 0; i < MAX_RIPPLES_W; i++) {
-            const isOn = step(float(i + 0.5), uRippleCount);
-            const elap = max(uWaterTime.sub(uRippleTimes[i]), float(0));
-            const d = length(worldXZ.sub(uRippleCenters[i]));
-            const ringR = elap.mul(uRippleSpeed);
-            const rdist = abs(d.sub(ringR));
-            const ring = float(1).sub(
-              smoothstep(float(0), uRippleWidth, rdist),
-            );
-            const fade = exp(elap.mul(float(-1).mul(uRippleDecay)));
+            const isOn   = step(float(i + 0.5), uRippleCount);
+            const elap   = max(uWaterTime.sub(uRippleTimes[i]), float(0));
+            const d      = length(worldXZ.sub(uRippleCenters[i]));
+            const ringR  = elap.mul(uRippleSpeed);
+            const rdist  = abs(d.sub(ringR));
+            const ring   = float(1).sub(smoothstep(float(0), uRippleWidth, rdist));
+            const fade   = exp(elap.mul(float(-1).mul(uRippleDecay)));
             rippleAcc.addAssign(ring.mul(fade).mul(isOn));
           }
-          const ripple = saturate(rippleAcc.mul(uRippleStr));
+          const ripple     = saturate(rippleAcc.mul(uRippleStr));
           const waterColor = mix(baseColor, uWHighlight, ripple);
 
           // Distance fade
-          const distCam = length(worldXZ.sub(uWCamXZ));
-          const distFade = float(1).sub(
-            pow(saturate(distCam.div(uWFadeDistance)), uWFadeStrength),
-          );
-          const waterAlpha = mix(float(0.6), float(1), max(t, ripple))
-            .mul(uWOpacity)
-            .mul(distFade);
+          const distCam  = length(worldXZ.sub(uWCamXZ));
+          const distFade = float(1).sub(pow(saturate(distCam.div(uWFadeDistance)), uWFadeStrength));
+          const waterAlpha = mix(float(0.6), float(1), max(t, ripple)).mul(uWOpacity).mul(distFade);
 
           // Shore foam (using heightTex depth)
           // Shore foam: appears where terrain is slightly above water (0..lineWidth).
           // Negative = open water (ocean/lake center) → no foam.
           const terrainAbove = _shoreAboveFn();
-          const onShore = step(float(0), terrainAbove); // 1 if terrain above water, 0 if below
-          const line = sub(
-            float(1),
-            smoothstep(float(0), uWLineWidth, terrainAbove),
-          ).mul(onShore);
-          const glow = exp(
-            terrainAbove.div(max(uWGlowWidth, float(0.001))).mul(float(-1)),
-          ).mul(onShore);
-          const foamAlpha = saturate(
-            max(line, glow.mul(float(0.5))).mul(uWLineIntensity),
-          );
-          const foamCol = mix(uWGlowColor, uWLineColor, line);
+          const onShore  = step(float(0), terrainAbove); // 1 if terrain above water, 0 if below
+          const line     = sub(float(1), smoothstep(float(0), uWLineWidth, terrainAbove)).mul(onShore);
+          const glow     = exp(terrainAbove.div(max(uWGlowWidth, float(0.001))).mul(float(-1))).mul(onShore);
+          const foamAlpha = saturate(max(line, glow.mul(float(0.5))).mul(uWLineIntensity));
+          const foamCol   = mix(uWGlowColor, uWLineColor, line);
           const finalColor = saturate(waterColor.add(foamCol.mul(foamAlpha)));
 
           return vec4(finalColor, waterAlpha);
@@ -3088,24 +2712,15 @@
           const base = buildWaterFrag();
           const viewDir = normalize(sub(cameraPosition, positionWorld));
           // Fresnel capped by reflectionStrength so Voronoi blue stays visible
-          const fresnel = pow(
-            clamp(
-              sub(float(1), dot(viewDir, vec3(0, 1, 0))),
-              float(0),
-              float(1),
-            ),
-            float(3),
-          ).mul(uReflStrength);
+          const fresnel = pow(clamp(sub(float(1), dot(viewDir, vec3(0, 1, 0))), float(0), float(1)), float(3)).mul(uReflStrength);
           const reflected = mix(base.rgb, waterReflector.rgb, fresnel);
           return vec4(reflected, base.a);
         });
 
         function setWaterReflections(enabled) {
           if (!PARAMS.water.stylized) return; // reflections only apply in stylized mode
-          const frag = enabled
-            ? buildWaterFragWithReflection()
-            : buildWaterFrag();
-          waterMat.colorNode = frag.rgb;
+          const frag = enabled ? buildWaterFragWithReflection() : buildWaterFrag();
+          waterMat.colorNode   = frag.rgb;
           waterMat.opacityNode = frag.a;
           waterMat.needsUpdate = true;
           waterReflector.target.visible = enabled;
@@ -3114,10 +2729,8 @@
         function setWaterStyle(stylized) {
           if (stylized) {
             // Full anime Voronoi shader
-            const frag = PARAMS.water.reflections
-              ? buildWaterFragWithReflection()
-              : buildWaterFrag();
-            waterMat.colorNode = frag.rgb;
+            const frag = PARAMS.water.reflections ? buildWaterFragWithReflection() : buildWaterFrag();
+            waterMat.colorNode   = frag.rgb;
             waterMat.opacityNode = frag.a;
             water.material = waterMat;
             waterReflector.target.visible = PARAMS.water.reflections;
@@ -3132,10 +2745,8 @@
 
         // Init: apply based on default
         {
-          const frag = PARAMS.water.reflections
-            ? buildWaterFragWithReflection()
-            : buildWaterFrag();
-          waterMat.colorNode = frag.rgb;
+          const frag = PARAMS.water.reflections ? buildWaterFragWithReflection() : buildWaterFrag();
+          waterMat.colorNode   = frag.rgb;
           waterMat.opacityNode = frag.a;
         }
         setWaterStyle(PARAMS.water.stylized);
@@ -3169,28 +2780,28 @@
         });
         {
           const bFrag = buildWaterFrag();
-          waterBodyMat.colorNode = bFrag.rgb;
+          waterBodyMat.colorNode   = bFrag.rgb;
           waterBodyMat.opacityNode = bFrag.a;
         }
 
         function syncWaterMat() {
-          uWScale.value = PARAMS.water.scale;
-          uWEdgeThresh.value = PARAMS.water.edgeThreshold;
-          uWFlowZ.value = PARAMS.water.flowZ;
-          uWCellSpeed.value = PARAMS.water.cellSpeed;
-          uWNoiseScale.value = PARAMS.water.noiseScale;
-          uWNoiseTime.value = PARAMS.water.noiseTimeScale;
-          uWDistort.value = PARAMS.water.distort;
+          uWScale.value        = PARAMS.water.scale;
+          uWEdgeThresh.value   = PARAMS.water.edgeThreshold;
+          uWFlowZ.value        = PARAMS.water.flowZ;
+          uWCellSpeed.value    = PARAMS.water.cellSpeed;
+          uWNoiseScale.value   = PARAMS.water.noiseScale;
+          uWNoiseTime.value    = PARAMS.water.noiseTimeScale;
+          uWDistort.value      = PARAMS.water.distort;
           uWDeepColor.value.set(PARAMS.water.deepColor);
           uWMidColor.value.set(PARAMS.water.midColor);
           uWHighlight.value.set(PARAMS.water.highlightColor);
-          uWOpacity.value = PARAMS.water.opacity;
-          uWLineWidth.value = PARAMS.water.lineWidth;
-          uWGlowWidth.value = PARAMS.water.glowWidth;
-          uWLineIntensity.value = PARAMS.water.waterlineIntensity;
+          uWOpacity.value      = PARAMS.water.opacity;
+          uWLineWidth.value    = PARAMS.water.lineWidth;
+          uWGlowWidth.value    = PARAMS.water.glowWidth;
+          uWLineIntensity.value= PARAMS.water.waterlineIntensity;
           uWLineColor.value.set(PARAMS.water.foamColor);
-          uRippleWidth.value = PARAMS.water.rippleWidth;
-          uRippleStr.value = PARAMS.water.rippleStrength;
+          uRippleWidth.value   = PARAMS.water.rippleWidth;
+          uRippleStr.value     = PARAMS.water.rippleStrength;
         }
 
         function getWaterRoot(object) {
@@ -3313,23 +2924,16 @@
           slot.system = createFoliageSlot(scene, bvhHeight);
           slot.system.setCastShadow(slot.castShadow);
           if (slot.modelPath) {
-            gltfLoader
-              .loadAsync(slot.modelPath)
-              .then((gltf) => {
-                slot.system.setModel(gltf);
-              })
-              .catch(() =>
-                console.warn(
-                  `Foliage: ${slot.modelPath} not found — slot active but no model`,
-                ),
-              );
+            gltfLoader.loadAsync(slot.modelPath)
+              .then((gltf) => { slot.system.setModel(gltf); })
+              .catch(() => console.warn(`Foliage: ${slot.modelPath} not found — slot active but no model`));
           }
         });
 
         // ── TRANSFORM CONTROLS ──
         transformControls = new TransformControls(camera, renderer.domElement);
         transformControls.addEventListener("dragging-changed", (e) => {
-          orbit.enabled = e.value ? false : currentMode !== "play";
+          orbit.enabled = e.value ? false : currentMode === "view";
         });
         transformControls.enabled = false;
         tcHelper = transformControls.getHelper();
@@ -3514,8 +3118,7 @@
 
         // ── SCENE SAVE / LOAD (zip-based, lossless) ──────────────────────
         function _canvasToRawBin(canvas, ctx) {
-          return ctx.getImageData(0, 0, canvas.width, canvas.height).data
-            .buffer;
+          return ctx.getImageData(0, 0, canvas.width, canvas.height).data.buffer;
         }
         function _rawBinToCanvas(buffer, canvas, ctx, tex) {
           const loaded = new Uint8ClampedArray(buffer);
@@ -3531,12 +3134,8 @@
           // Lossless binary blobs
           zip.file("heightmap.bin", heightData.buffer);
           zip.file("splatmap.bin", _canvasToRawBin(splatCanvas, splatCtx));
-          zip.file(
-            "grass-density.bin",
-            _canvasToRawBin(grassDensityCanvas, grassDensityCtx),
-          );
+          zip.file("grass-density.bin", _canvasToRawBin(grassDensityCanvas, grassDensityCtx));
           zip.file("meadow.bin", _canvasToRawBin(meadowCanvas, meadowCtx));
-          zip.file("img-splat.bin", imgSplatData.buffer);
 
           // JSON for object positions (already lossless)
           const meta = {
@@ -3548,46 +3147,25 @@
             })),
             cliffs: cliffObjects.map((root) => ({
               modelIndex: root.userData.modelIndex ?? 0,
-              x: root.position.x,
-              y: root.position.y,
-              z: root.position.z,
-              rx: root.rotation.x,
-              ry: root.rotation.y,
-              rz: root.rotation.z,
-              sx: root.scale.x,
-              sy: root.scale.y,
-              sz: root.scale.z,
+              x: root.position.x, y: root.position.y, z: root.position.z,
+              rx: root.rotation.x, ry: root.rotation.y, rz: root.rotation.z,
+              sx: root.scale.x, sy: root.scale.y, sz: root.scale.z,
             })),
             props: propObjects.map((root) => ({
               propName: root.userData.propName ?? "unknown",
-              x: root.position.x,
-              y: root.position.y,
-              z: root.position.z,
-              rx: root.rotation.x,
-              ry: root.rotation.y,
-              rz: root.rotation.z,
-              sx: root.scale.x,
-              sy: root.scale.y,
-              sz: root.scale.z,
+              x: root.position.x, y: root.position.y, z: root.position.z,
+              rx: root.rotation.x, ry: root.rotation.y, rz: root.rotation.z,
+              sx: root.scale.x, sy: root.scale.y, sz: root.scale.z,
             })),
             waterBodies: waterObjects.map((m) => ({
-              x: m.position.x,
-              y: m.position.y,
-              z: m.position.z,
-              rx: m.rotation.x,
-              ry: m.rotation.y,
-              rz: m.rotation.z,
-              sx: m.scale.x,
-              sy: m.scale.y,
-              sz: m.scale.z,
+              x: m.position.x, y: m.position.y, z: m.position.z,
+              rx: m.rotation.x, ry: m.rotation.y, rz: m.rotation.z,
+              sx: m.scale.x, sy: m.scale.y, sz: m.scale.z,
             })),
           };
           zip.file("scene.json", JSON.stringify(meta, null, 2));
 
-          const blob = await zip.generateAsync({
-            type: "blob",
-            compression: "DEFLATE",
-          });
+          const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
           const a = document.createElement("a");
           a.download = "scene.zip";
           a.href = URL.createObjectURL(blob);
@@ -3608,46 +3186,22 @@
               syncHeightmapPreview();
               if (bakeBVH) bakeBVH();
               if (treeSystem) treeSystem.syncHeights();
-              FOLIAGE_SLOTS.forEach((s) => {
-                if (s.system) s.system.syncHeights();
-              });
+              FOLIAGE_SLOTS.forEach((s) => { if (s.system) s.system.syncHeights(); });
             }
 
             // Canvases
             const splatFile = zip.file("splatmap.bin");
             if (splatFile) {
-              _rawBinToCanvas(
-                await splatFile.async("arraybuffer"),
-                splatCanvas,
-                splatCtx,
-                splatTex,
-              );
+              _rawBinToCanvas(await splatFile.async("arraybuffer"), splatCanvas, splatCtx, splatTex);
               syncPreview();
             }
             const grassFile = zip.file("grass-density.bin");
             if (grassFile)
-              _rawBinToCanvas(
-                await grassFile.async("arraybuffer"),
-                grassDensityCanvas,
-                grassDensityCtx,
-                grassDensityTex,
-              );
+              _rawBinToCanvas(await grassFile.async("arraybuffer"), grassDensityCanvas, grassDensityCtx, grassDensityTex);
 
             const meadowFile = zip.file("meadow.bin");
             if (meadowFile)
-              _rawBinToCanvas(
-                await meadowFile.async("arraybuffer"),
-                meadowCanvas,
-                meadowCtx,
-                meadowDensityTex,
-              );
-            const imgSplatFile = zip.file("img-splat.bin");
-            if (imgSplatFile) {
-              imgSplatData.set(
-                new Uint8Array(await imgSplatFile.async("arraybuffer")),
-              );
-              if (imgSplatTex) imgSplatTex.needsUpdate = true;
-            }
+              _rawBinToCanvas(await meadowFile.async("arraybuffer"), meadowCanvas, meadowCtx, meadowDensityTex);
 
             // Object positions
             const metaFile = zip.file("scene.json");
@@ -3656,11 +3210,7 @@
               if (meta.trees && treeSystem) treeSystem.setPositions(meta.trees);
               if (meta.foliage) {
                 meta.foliage.forEach((fd, idx) => {
-                  if (
-                    idx < FOLIAGE_SLOTS.length &&
-                    FOLIAGE_SLOTS[idx].system &&
-                    fd.positions
-                  )
+                  if (idx < FOLIAGE_SLOTS.length && FOLIAGE_SLOTS[idx].system && fd.positions)
                     FOLIAGE_SLOTS[idx].system.setPositions(fd.positions);
                 });
               }
@@ -3808,12 +3358,12 @@
         const modeBinding = pane.addBinding(PARAMS, "mode", {
           label: "Mode",
           options: {
-            "View [Esc]": "view",
-            "Paint [P]": "paint",
-            "Sculpt [S]": "sculpt",
-            "Place [O]": "place",
-            "Grass [G]": "grass",
-            "Trees [T]": "trees",
+            View: "view",
+            Paint: "paint",
+            Sculpt: "sculpt",
+            Place: "place",
+            Grass: "grass",
+            Trees: "trees",
             "Foliage [N]": "foliage",
             "Props [I]": "props",
             "Path [L]": "path",
@@ -3933,15 +3483,11 @@
           expanded: false,
         });
         bakeFolder
-          .addButton({
-            title: "▶ Rebake BVH  (cliffs + grass + trees + foliage)",
-          })
+          .addButton({ title: "▶ Rebake BVH  (cliffs + grass + trees + foliage)" })
           .on("click", () => {
             if (bakeBVH) bakeBVH();
             if (treeSystem) treeSystem.syncHeights();
-            FOLIAGE_SLOTS.forEach((s) => {
-              if (s.system) s.system.syncHeights();
-            });
+            FOLIAGE_SLOTS.forEach((s) => { if (s.system) s.system.syncHeights(); });
             propObjects.forEach((r) => {
               r.position.y = bvhHeight(r.position.x, r.position.z);
             });
@@ -4352,51 +3898,27 @@
           step: 0.05,
         });
         lightFolder.addBlade({ view: "separator" });
-        const csmFolder = lightFolder.addFolder({
-          title: "Shadows (CSM)",
-          expanded: false,
-        });
-        csmFolder
-          .addBinding(PARAMS.csm, "enabled", { label: "CSM enabled" })
+        const csmFolder = lightFolder.addFolder({ title: "Shadows (CSM)", expanded: false });
+        csmFolder.addBinding(PARAMS.csm, "enabled", { label: "CSM enabled" })
           .on("change", ({ value }) => setCsmEnabled(value));
-        csmFolder.addBinding(PARAMS.csm, "updateEveryFrame", {
-          label: "Update every frame",
-        });
+        csmFolder.addBinding(PARAMS.csm, "updateEveryFrame", { label: "Update every frame" });
         csmFolder.addBinding(PARAMS, "shadowBias", {
-          label: "Bias",
-          min: -0.01,
-          max: 0.001,
-          step: 0.0001,
+          label: "Bias", min: -0.01, max: 0.001, step: 0.0001,
         });
         csmFolder.addBinding(PARAMS, "shadowNormalBias", {
-          label: "Normal bias",
-          min: 0,
-          max: 0.2,
-          step: 0.001,
+          label: "Normal bias", min: 0, max: 0.2, step: 0.001,
         });
         csmFolder.addBinding(PARAMS.csm, "cascades", {
-          label: "Cascades",
-          min: 1,
-          max: 4,
-          step: 1,
+          label: "Cascades", min: 1, max: 4, step: 1,
         });
         csmFolder.addBinding(PARAMS.csm, "maxFar", {
-          label: "Max far",
-          min: 30,
-          max: 600,
-          step: 10,
+          label: "Max far", min: 30, max: 600, step: 10,
         });
         csmFolder.addBinding(PARAMS.csm, "lightMargin", {
-          label: "Light margin",
-          min: 0,
-          max: 400,
-          step: 10,
+          label: "Light margin", min: 0, max: 400, step: 10,
         });
         csmFolder.addBinding(PARAMS.csm, "mapSize", {
-          label: "Map size",
-          min: 512,
-          max: 4096,
-          step: 512,
+          label: "Map size", min: 512, max: 4096, step: 512,
         });
 
         // ── SKY FOLDER ──
@@ -4508,94 +4030,6 @@
           .addButton({ title: "Load Splatmap" })
           .on("click", () => document.getElementById("file-input").click());
 
-        // ── Image Textures folder ──────────────────────────────────────────
-        const imgTexFolder = paintFolder.addFolder({
-          title: "Image Textures",
-          expanded: false,
-        });
-
-        // Helper: load a texture file into a slot's mutable texture object
-        function _loadImgTex(slotTex, colorSpace, onDone) {
-          const inp = document.createElement("input");
-          inp.type = "file";
-          inp.accept = "image/*";
-          inp.onchange = (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
-            const url = URL.createObjectURL(file);
-            new THREE.TextureLoader().load(url, (loaded) => {
-              // slotTex is THREE.Texture(canvas) — safe to reassign image (not DataTexture)
-              slotTex.image = loaded.image;
-              slotTex.colorSpace = colorSpace;
-              slotTex.wrapS = slotTex.wrapT = THREE.RepeatWrapping;
-              slotTex.flipY = loaded.flipY;
-              slotTex.needsUpdate = true;
-              URL.revokeObjectURL(url);
-              if (onDone) onDone();
-            });
-          };
-          inp.click();
-        }
-
-        IMG_TEX_SLOTS.forEach((slot, i) => {
-          const channels = ["r", "g", "b", "a"];
-          const biomeId = `img${i}`;
-          const f = imgTexFolder.addFolder({
-            title: slot.name,
-            expanded: i === 0,
-          });
-
-          f.addButton({ title: `▶ Paint Slot ${i + 1}` }).on("click", () => {
-            currentBiome = biomeId;
-            imgEraseMode = false;
-            setMode("paint");
-          });
-          f.addButton({ title: `✕ Erase Slot ${i + 1}` }).on("click", () => {
-            currentBiome = biomeId;
-            imgEraseMode = true;
-            setMode("paint");
-          });
-          f.addButton({ title: "Clear slot paint" }).on("click", () => {
-            for (let p = i; p < imgSplatData.length; p += 4)
-              imgSplatData[p] = 0;
-            if (imgSplatTex) imgSplatTex.needsUpdate = true;
-          });
-
-          f.addBlade({ view: "separator" });
-
-          f.addButton({ title: "Load Albedo (color)" }).on("click", () => {
-            _loadImgTex(slot.albedoTex, THREE.SRGBColorSpace, () => {
-              slot.uHasAlbedo.value = 1;
-            });
-          });
-          f.addButton({ title: "Load Normal map (stored)" }).on("click", () => {
-            _loadImgTex(slot.normalTex, THREE.LinearSRGBColorSpace, () => {
-              slot.uHasNormal.value = 1;
-              // Normal blending is disabled to stay under GPU sampler limit (16)
-            });
-          });
-          f.addButton({ title: "Load ORM (AO/Rough/Metal)" }).on(
-            "click",
-            () => {
-              _loadImgTex(slot.ormTex, THREE.LinearSRGBColorSpace, () => {
-                slot.uHasORM.value = 1;
-                // roughnessNode is disabled for now — ORM stored but roughness not applied yet
-              });
-            },
-          );
-
-          f.addBlade({ view: "separator" });
-
-          f.addBinding(slot, "uvScale", {
-            label: "UV Scale",
-            min: 0.1,
-            max: 30,
-            step: 0.1,
-          }).on("change", (ev) => {
-            slot.uUVScale.value = ev.value;
-          });
-        });
-
         // Sculpt folder
         const sculptFolder = pane.addFolder({
           title: "Sculpt",
@@ -4684,15 +4118,8 @@
           if (grassDensityTex) grassDensityTex.needsUpdate = true;
         });
         grassFolder.addButton({ title: "Save density map" }).on("click", () => {
-          const pixels = grassDensityCtx.getImageData(
-            0,
-            0,
-            SPLAT_RES,
-            SPLAT_RES,
-          ).data;
-          const blob = new Blob([pixels.buffer], {
-            type: "application/octet-stream",
-          });
+          const pixels = grassDensityCtx.getImageData(0, 0, SPLAT_RES, SPLAT_RES).data;
+          const blob = new Blob([pixels.buffer], { type: "application/octet-stream" });
           const a = document.createElement("a");
           a.download = "grass-density.bin";
           a.href = URL.createObjectURL(blob);
@@ -4706,10 +4133,7 @@
           const reader = new FileReader();
           reader.onload = (ev) => {
             const loaded = new Uint8ClampedArray(ev.target.result);
-            const imgData = grassDensityCtx.createImageData(
-              SPLAT_RES,
-              SPLAT_RES,
-            );
+            const imgData = grassDensityCtx.createImageData(SPLAT_RES, SPLAT_RES);
             imgData.data.set(loaded.subarray(0, imgData.data.length));
             grassDensityCtx.putImageData(imgData, 0, 0);
             if (grassDensityTex) grassDensityTex.needsUpdate = true;
@@ -4788,94 +4212,47 @@
         });
 
         // ── FOLIAGE FOLDER ──
-        const foliageFolder = pane.addFolder({
-          title: "Foliage  [ N ]",
-          expanded: true,
-        });
+        const foliageFolder = pane.addFolder({ title: "Foliage  [ N ]", expanded: true });
         foliageFolder.hidden = true;
 
         const foliageActiveParams = { slotIndex: 0 };
         const foliageSlotOptions = {};
-        FOLIAGE_SLOTS.forEach((s, i) => {
-          foliageSlotOptions[s.name] = i;
-        });
-        foliageFolder
-          .addBinding(foliageActiveParams, "slotIndex", {
-            label: "Active slot",
-            options: foliageSlotOptions,
-          })
-          .on("change", (e) => {
-            activeFoliageSlot = e.value;
-          });
+        FOLIAGE_SLOTS.forEach((s, i) => { foliageSlotOptions[s.name] = i; });
+        foliageFolder.addBinding(foliageActiveParams, "slotIndex", {
+          label: "Active slot",
+          options: foliageSlotOptions,
+        }).on("change", (e) => { activeFoliageSlot = e.value; });
 
         const foliageErasePARAMS = { erase: false };
-        foliageFolder
-          .addBinding(foliageErasePARAMS, "erase", {
-            label: "Erase (or Shift)",
-          })
-          .on("change", (e) => {
-            foliageEraseMode = e.value;
-          });
+        foliageFolder.addBinding(foliageErasePARAMS, "erase", { label: "Erase (or Shift)" })
+          .on("change", (e) => { foliageEraseMode = e.value; });
 
         FOLIAGE_SLOTS.forEach((slot, idx) => {
-          const sf = foliageFolder.addFolder({
-            title: slot.name,
-            expanded: idx === 0,
-          });
+          const sf = foliageFolder.addFolder({ title: slot.name, expanded: idx === 0 });
 
           // Load custom GLB
           const ffi = document.createElement("input");
-          ffi.type = "file";
-          ffi.accept = ".glb";
-          ffi.style.display = "none";
+          ffi.type = "file"; ffi.accept = ".glb"; ffi.style.display = "none";
           document.body.appendChild(ffi);
           sf.addButton({ title: "Load GLB…" }).on("click", () => ffi.click());
           ffi.addEventListener("change", (e) => {
             if (!e.target.files[0]) return;
             const url = URL.createObjectURL(e.target.files[0]);
-            gltfLoader
-              .loadAsync(url)
-              .then((gltf) => {
-                slot.system.setModel(gltf);
-                slot.system.setCastShadow(slot.castShadow);
-              })
-              .catch((err) =>
-                console.error("Foliage: failed to load GLB", err),
-              );
+            gltfLoader.loadAsync(url).then((gltf) => {
+              slot.system.setModel(gltf);
+              slot.system.setCastShadow(slot.castShadow);
+            }).catch((err) => console.error("Foliage: failed to load GLB", err));
             e.target.value = "";
           });
 
-          sf.addBinding(slot, "perStroke", {
-            label: "Per stroke",
-            min: 1,
-            max: 20,
-            step: 1,
+          sf.addBinding(slot, "perStroke",  { label: "Per stroke",  min: 1,    max: 20,  step: 1 });
+          sf.addBinding(slot, "minSpacing", { label: "Min spacing", min: 0.5,  max: 40,  step: 0.5 });
+          sf.addBinding(slot, "scaleMin",   { label: "Scale min",   min: 0.05, max: 5,   step: 0.05 });
+          sf.addBinding(slot, "scaleMax",   { label: "Scale max",   min: 0.05, max: 5,   step: 0.05 });
+          sf.addBinding(slot, "castShadow", { label: "Cast shadow" }).on("change", (e) => {
+            slot.castShadow = e.value;
+            if (slot.system) slot.system.setCastShadow(e.value);
           });
-          sf.addBinding(slot, "minSpacing", {
-            label: "Min spacing",
-            min: 0.5,
-            max: 40,
-            step: 0.5,
-          });
-          sf.addBinding(slot, "scaleMin", {
-            label: "Scale min",
-            min: 0.05,
-            max: 5,
-            step: 0.05,
-          });
-          sf.addBinding(slot, "scaleMax", {
-            label: "Scale max",
-            min: 0.05,
-            max: 5,
-            step: 0.05,
-          });
-          sf.addBinding(slot, "castShadow", { label: "Cast shadow" }).on(
-            "change",
-            (e) => {
-              slot.castShadow = e.value;
-              if (slot.system) slot.system.setCastShadow(e.value);
-            },
-          );
           sf.addButton({ title: "Clear slot" }).on("click", () => {
             if (slot.system) slot.system.clear();
           });
@@ -5042,135 +4419,32 @@
         waterFolder.hidden = true;
 
         waterFolder
-          .addBinding(PARAMS.water, "stylized", {
-            label: "Stylized water (perf heavy)",
-          })
+          .addBinding(PARAMS.water, "stylized", { label: "Stylized water (perf heavy)" })
           .on("change", ({ value }) => setWaterStyle(value));
         waterFolder.addBlade({ view: "separator" });
         // ── Voronoi surface ──
-        waterFolder
-          .addBinding(PARAMS.water, "deepColor", { label: "Deep colour" })
-          .on("change", syncWaterMat);
-        waterFolder
-          .addBinding(PARAMS.water, "midColor", { label: "Mid colour" })
-          .on("change", syncWaterMat);
-        waterFolder
-          .addBinding(PARAMS.water, "highlightColor", {
-            label: "Highlight colour",
-          })
-          .on("change", syncWaterMat);
-        waterFolder
-          .addBinding(PARAMS.water, "opacity", {
-            label: "Opacity",
-            min: 0.1,
-            max: 1,
-            step: 0.01,
-          })
-          .on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "deepColor",      { label: "Deep colour"      }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "midColor",       { label: "Mid colour"       }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "highlightColor", { label: "Highlight colour" }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "opacity",        { label: "Opacity",         min: 0.1, max: 1,    step: 0.01 }).on("change", syncWaterMat);
         waterFolder.addBlade({ view: "separator" });
-        waterFolder
-          .addBinding(PARAMS.water, "scale", {
-            label: "Cell scale",
-            min: 0.05,
-            max: 2,
-            step: 0.01,
-          })
-          .on("change", syncWaterMat);
-        waterFolder
-          .addBinding(PARAMS.water, "cellSpeed", {
-            label: "Cell speed",
-            min: 0.05,
-            max: 1.5,
-            step: 0.05,
-          })
-          .on("change", syncWaterMat);
-        waterFolder
-          .addBinding(PARAMS.water, "noiseScale", {
-            label: "Noise scale",
-            min: 0.3,
-            max: 4,
-            step: 0.02,
-          })
-          .on("change", syncWaterMat);
-        waterFolder
-          .addBinding(PARAMS.water, "noiseTimeScale", {
-            label: "Noise time",
-            min: 0.1,
-            max: 1.5,
-            step: 0.05,
-          })
-          .on("change", syncWaterMat);
-        waterFolder
-          .addBinding(PARAMS.water, "distort", {
-            label: "Distort",
-            min: 0,
-            max: 1,
-            step: 0.02,
-          })
-          .on("change", syncWaterMat);
-        waterFolder
-          .addBinding(PARAMS.water, "flowZ", {
-            label: "Flow Z",
-            min: 0,
-            max: 0.3,
-            step: 0.01,
-          })
-          .on("change", syncWaterMat);
-        waterFolder
-          .addBinding(PARAMS.water, "edgeThreshold", {
-            label: "Edge threshold",
-            min: 0.02,
-            max: 0.2,
-            step: 0.005,
-          })
-          .on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "scale",          { label: "Cell scale",      min: 0.05, max: 2,   step: 0.01 }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "cellSpeed",      { label: "Cell speed",      min: 0.05, max: 1.5, step: 0.05 }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "noiseScale",     { label: "Noise scale",     min: 0.3,  max: 4,   step: 0.02 }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "noiseTimeScale", { label: "Noise time",      min: 0.1,  max: 1.5, step: 0.05 }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "distort",        { label: "Distort",         min: 0,    max: 1,   step: 0.02 }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "flowZ",          { label: "Flow Z",          min: 0,    max: 0.3, step: 0.01 }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "edgeThreshold",  { label: "Edge threshold",  min: 0.02, max: 0.2, step: 0.005 }).on("change", syncWaterMat);
         waterFolder.addBlade({ view: "separator" });
         // ── Shore foam ──
-        waterFolder
-          .addBinding(PARAMS.water, "foamColor", { label: "Foam colour" })
-          .on("change", syncWaterMat);
-        waterFolder
-          .addBinding(PARAMS.water, "lineWidth", {
-            label: "Foam width",
-            min: 0.05,
-            max: 5,
-            step: 0.05,
-          })
-          .on("change", syncWaterMat);
-        waterFolder
-          .addBinding(PARAMS.water, "glowWidth", {
-            label: "Foam glow",
-            min: 0.2,
-            max: 10,
-            step: 0.1,
-          })
-          .on("change", syncWaterMat);
-        waterFolder
-          .addBinding(PARAMS.water, "waterlineIntensity", {
-            label: "Foam intensity",
-            min: 0,
-            max: 5,
-            step: 0.1,
-          })
-          .on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "foamColor",          { label: "Foam colour"     }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "lineWidth",          { label: "Foam width",      min: 0.05, max: 5,   step: 0.05 }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "glowWidth",          { label: "Foam glow",       min: 0.2,  max: 10,  step: 0.1  }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "waterlineIntensity", { label: "Foam intensity",  min: 0,    max: 5,   step: 0.1  }).on("change", syncWaterMat);
         waterFolder.addBlade({ view: "separator" });
         // ── Ripples ──
-        waterFolder
-          .addBinding(PARAMS.water, "rippleStrength", {
-            label: "Ripple strength",
-            min: 0,
-            max: 15,
-            step: 0.5,
-          })
-          .on("change", syncWaterMat);
-        waterFolder
-          .addBinding(PARAMS.water, "rippleWidth", {
-            label: "Ripple width",
-            min: 0.02,
-            max: 0.4,
-            step: 0.01,
-          })
-          .on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "rippleStrength", { label: "Ripple strength", min: 0, max: 15, step: 0.5 }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "rippleWidth",    { label: "Ripple width",    min: 0.02, max: 0.4, step: 0.01 }).on("change", syncWaterMat);
         waterFolder.addBlade({ view: "separator" });
         waterFolder.addBinding(PARAMS.water, "sinkOffset", {
           label: "Sink offset",
@@ -5189,20 +4463,11 @@
         });
         waterFolder.addBlade({ view: "separator" });
         waterFolder
-          .addBinding(PARAMS.water, "reflections", {
-            label: "Reflections (ocean)",
-          })
+          .addBinding(PARAMS.water, "reflections", { label: "Reflections (ocean)" })
           .on("change", ({ value }) => setWaterReflections(value));
         waterFolder
-          .addBinding(PARAMS.water, "reflectionStrength", {
-            label: "Refl. strength",
-            min: 0,
-            max: 1,
-            step: 0.01,
-          })
-          .on("change", ({ value }) => {
-            uReflStrength.value = value;
-          });
+          .addBinding(PARAMS.water, "reflectionStrength", { label: "Refl. strength", min: 0, max: 1, step: 0.01 })
+          .on("change", ({ value }) => { uReflStrength.value = value; });
         waterFolder.addBlade({ view: "separator" });
         waterFolder
           .addButton({ title: "Save water JSON" })
@@ -5269,159 +4534,46 @@
           });
 
         // ── POST-PROCESSING TWEAKPANE ──
-        const postFolder = pane.addFolder({
-          title: "Post-FX",
-          expanded: false,
-        });
-        postFolder.addBinding(postParams, "enabled", {
-          label: "master on/off",
-        });
+        const postFolder = pane.addFolder({ title: "Post-FX", expanded: false });
+        postFolder.addBinding(postParams, "enabled", { label: "master on/off" });
 
-        const postBloomFolder = postFolder.addFolder({
-          title: "Bloom",
-          expanded: false,
-        });
+        const postBloomFolder = postFolder.addFolder({ title: "Bloom", expanded: false });
         postBloomFolder.addBinding(postParams.bloom, "enabled");
-        postBloomFolder.addBinding(postParams.bloom, "strength", {
-          min: 0,
-          max: 2,
-          step: 0.05,
-        });
-        postBloomFolder.addBinding(postParams.bloom, "radius", {
-          min: 0,
-          max: 1,
-          step: 0.02,
-        });
-        postBloomFolder.addBinding(postParams.bloom, "threshold", {
-          min: 0,
-          max: 2,
-          step: 0.02,
-        });
+        postBloomFolder.addBinding(postParams.bloom, "strength", { min: 0, max: 2, step: 0.05 });
+        postBloomFolder.addBinding(postParams.bloom, "radius", { min: 0, max: 1, step: 0.02 });
+        postBloomFolder.addBinding(postParams.bloom, "threshold", { min: 0, max: 2, step: 0.02 });
 
-        const postLensflareFolder = postFolder.addFolder({
-          title: "Lens Flare",
-          expanded: false,
-        });
+        const postLensflareFolder = postFolder.addFolder({ title: "Lens Flare", expanded: false });
         postLensflareFolder.addBinding(postParams.lensflare, "enabled");
-        postLensflareFolder.addBinding(postParams.lensflare, "bloomThreshold", {
-          min: 0.4,
-          max: 1.2,
-          step: 0.02,
-          label: "sky bloom thresh",
-        });
-        postLensflareFolder.addBinding(postParams.lensflare, "threshold", {
-          min: 0.2,
-          max: 1,
-          step: 0.02,
-        });
-        postLensflareFolder.addBinding(
-          postParams.lensflare,
-          "ghostAttenuation",
-          { min: 5, max: 50, step: 1 },
-        );
-        postLensflareFolder.addBinding(postParams.lensflare, "ghostSpacing", {
-          min: 0.1,
-          max: 0.5,
-          step: 0.01,
-        });
+        postLensflareFolder.addBinding(postParams.lensflare, "bloomThreshold", { min: 0.4, max: 1.2, step: 0.02, label: "sky bloom thresh" });
+        postLensflareFolder.addBinding(postParams.lensflare, "threshold", { min: 0.2, max: 1, step: 0.02 });
+        postLensflareFolder.addBinding(postParams.lensflare, "ghostAttenuation", { min: 5, max: 50, step: 1 });
+        postLensflareFolder.addBinding(postParams.lensflare, "ghostSpacing", { min: 0.1, max: 0.5, step: 0.01 });
 
-        const postGodRaysFolder = postFolder.addFolder({
-          title: "God Rays",
-          expanded: true,
-        });
+        const postGodRaysFolder = postFolder.addFolder({ title: "God Rays", expanded: true });
         postGodRaysFolder.addBinding(postParams.godRays, "enabled");
-        postGodRaysFolder.addBinding(postParams.godRays, "strength", {
-          min: 0,
-          max: 0.5,
-          step: 0.01,
-        });
-        postGodRaysFolder.addBinding(postParams.godRays, "decay", {
-          min: 0.9,
-          max: 0.99,
-          step: 0.005,
-        });
-        postGodRaysFolder.addBinding(postParams.godRays, "density", {
-          min: 0.2,
-          max: 1.5,
-          step: 0.05,
-        });
-        postGodRaysFolder.addBinding(postParams.godRays, "samples", {
-          min: 8,
-          max: 64,
-          step: 4,
-        });
+        postGodRaysFolder.addBinding(postParams.godRays, "strength", { min: 0, max: 0.5, step: 0.01 });
+        postGodRaysFolder.addBinding(postParams.godRays, "decay", { min: 0.9, max: 0.99, step: 0.005 });
+        postGodRaysFolder.addBinding(postParams.godRays, "density", { min: 0.2, max: 1.5, step: 0.05 });
+        postGodRaysFolder.addBinding(postParams.godRays, "samples", { min: 8, max: 64, step: 4 });
 
-        const postDofFolder = postFolder.addFolder({
-          title: "Depth of Field",
-          expanded: false,
-        });
+        const postDofFolder = postFolder.addFolder({ title: "Depth of Field", expanded: false });
         postDofFolder.addBinding(postParams.dof, "enabled");
-        postDofFolder.addBinding(postParams.dof, "focusDistance", {
-          min: 5,
-          max: 300,
-          step: 5,
-        });
-        postDofFolder.addBinding(postParams.dof, "blurStart", {
-          min: 1,
-          max: 50,
-          step: 1,
-        });
-        postDofFolder.addBinding(postParams.dof, "blurEnd", {
-          min: 30,
-          max: 300,
-          step: 10,
-        });
-        postDofFolder.addBinding(postParams.dof, "blurSize", {
-          min: 1,
-          max: 3,
-          step: 1,
-        });
-        postDofFolder.addBinding(postParams.dof, "blurSpread", {
-          min: 1,
-          max: 8,
-          step: 0.5,
-        });
+        postDofFolder.addBinding(postParams.dof, "focusDistance", { min: 5, max: 300, step: 5 });
+        postDofFolder.addBinding(postParams.dof, "blurStart", { min: 1, max: 50, step: 1 });
+        postDofFolder.addBinding(postParams.dof, "blurEnd", { min: 30, max: 300, step: 10 });
+        postDofFolder.addBinding(postParams.dof, "blurSize", { min: 1, max: 3, step: 1 });
+        postDofFolder.addBinding(postParams.dof, "blurSpread", { min: 1, max: 8, step: 0.5 });
 
-        const postGtaoFolder = postFolder.addFolder({
-          title: "GTAO (Screen-Space AO)",
-          expanded: false,
-        });
+        const postGtaoFolder = postFolder.addFolder({ title: "GTAO (Screen-Space AO)", expanded: false });
         postGtaoFolder.addBinding(postParams.gtao, "enabled");
-        postGtaoFolder.addBinding(postParams.gtao, "intensity", {
-          min: 0.5,
-          max: 3,
-          step: 0.05,
-        });
-        postGtaoFolder.addBinding(postParams.gtao, "radius", {
-          min: 0.5,
-          max: 20,
-          step: 0.5,
-          label: "radius (world units)",
-        });
-        postGtaoFolder.addBinding(postParams.gtao, "samples", {
-          min: 8,
-          max: 32,
-          step: 2,
-        });
-        postGtaoFolder.addBinding(postParams.gtao, "resolutionScale", {
-          min: 0.25,
-          max: 1,
-          step: 0.25,
-          label: "resolution",
-        });
-        postGtaoFolder.addBinding(postParams.gtao, "scale", {
-          min: 0.5,
-          max: 3,
-          step: 0.1,
-        });
-        postGtaoFolder.addBinding(postParams.gtao, "denoiseEnabled", {
-          label: "denoise",
-        });
-        postGtaoFolder.addBinding(postParams.gtao, "denoiseRadius", {
-          min: 1,
-          max: 10,
-          step: 1,
-        });
+        postGtaoFolder.addBinding(postParams.gtao, "intensity", { min: 0.5, max: 3, step: 0.05 });
+        postGtaoFolder.addBinding(postParams.gtao, "radius", { min: 0.5, max: 20, step: 0.5, label: "radius (world units)" });
+        postGtaoFolder.addBinding(postParams.gtao, "samples", { min: 8, max: 32, step: 2 });
+        postGtaoFolder.addBinding(postParams.gtao, "resolutionScale", { min: 0.25, max: 1, step: 0.25, label: "resolution" });
+        postGtaoFolder.addBinding(postParams.gtao, "scale", { min: 0.5, max: 3, step: 0.1 });
+        postGtaoFolder.addBinding(postParams.gtao, "denoiseEnabled", { label: "denoise" });
+        postGtaoFolder.addBinding(postParams.gtao, "denoiseRadius", { min: 1, max: 10, step: 1 });
 
         // Wire up file inputs
         document
@@ -5466,7 +4618,7 @@
           }
 
           pane.refresh();
-          orbit.enabled = mode !== "play";
+          orbit.enabled = mode === "view";
 
           paintFolder.hidden = mode !== "paint";
           sculptFolder.hidden = mode !== "sculpt";
@@ -5523,12 +4675,12 @@
                       : mode === "foliage"
                         ? "FOLIAGE MODE  [ N ]"
                         : mode === "props"
-                          ? "PROPS MODE  [ I ]"
-                          : mode === "water"
-                            ? "WATER BODIES  [ W ]"
-                            : mode === "path"
-                              ? "PATH MODE  [ L ]"
-                              : "PLACE MODE"; // play handled above
+                        ? "PROPS MODE  [ I ]"
+                        : mode === "water"
+                          ? "WATER BODIES  [ W ]"
+                          : mode === "path"
+                            ? "PATH MODE  [ L ]"
+                            : "PLACE MODE"; // play handled above
           badge.className = mode;
           renderer.domElement.style.cursor =
             mode === "view" ? "default" : "crosshair";
@@ -5672,23 +4824,6 @@
             paintFoliageAt(p.x, p.z, foliageEraseMode || e.shiftKey);
         });
 
-        // ── BRUSH SCROLL SHORTCUTS ──────────────────────────────────────
-        // Shift + scroll = radius  |  Alt + scroll = strength
-        renderer.domElement.addEventListener("wheel", (e) => {
-          if (!e.shiftKey && !e.altKey) return; // let OrbitControls handle plain scroll
-          e.preventDefault();
-          e.stopPropagation();
-          const dir = e.deltaY < 0 ? 1 : -1;
-          if (e.shiftKey) {
-            PARAMS.brushSize = Math.min(80, Math.max(2, PARAMS.brushSize + dir * 2));
-            brushSize = PARAMS.brushSize;
-          } else {
-            PARAMS.brushStrength = Math.min(100, Math.max(5, PARAMS.brushStrength + dir * 5));
-            brushStr = PARAMS.brushStrength;
-          }
-          pane.refresh();
-        }, { passive: false, capture: true });
-
         renderer.domElement.addEventListener("mousedown", (e) => {
           if (e.button !== 0) return;
           // Ripple on ocean water click (any mode)
@@ -5807,9 +4942,7 @@
           if (currentMode === "sculpt" || currentMode === "path") {
             if (bakeBVH) bakeBVH();
             if (treeSystem) treeSystem.syncHeights();
-            FOLIAGE_SLOTS.forEach((s) => {
-              if (s.system) s.system.syncHeights();
-            });
+            FOLIAGE_SLOTS.forEach((s) => { if (s.system) s.system.syncHeights(); });
             propObjects.forEach((root) => {
               root.position.y = bvhHeight(root.position.x, root.position.z);
             });
@@ -5856,9 +4989,7 @@
         let postBaseColor = scenePassColor.add(emissiveBloomPass);
 
         // GTAO (screen-space ambient occlusion)
-        const uGtaoEnabled = uniform(
-          postParams.enabled && postParams.gtao.enabled ? 1 : 0,
-        );
+        const uGtaoEnabled = uniform(postParams.enabled && postParams.gtao.enabled ? 1 : 0);
         const uGtaoIntensity = uniform(postParams.gtao.intensity);
         const gtaoPass = gtaoEffect(scenePassDepth, scenePassNormal, camera);
         gtaoPass.resolutionScale = postParams.gtao.resolutionScale;
@@ -5869,27 +5000,18 @@
         gtaoPass.distanceExponent.value = postParams.gtao.distanceExponent;
         gtaoPass.thickness.value = postParams.gtao.thickness;
         const gtaoTex = gtaoPass.getTextureNode();
-        const denoisePass = denoise(
-          gtaoTex,
-          scenePassDepth,
-          scenePassNormal,
-          camera,
-        );
+        const denoisePass = denoise(gtaoTex, scenePassDepth, scenePassNormal, camera);
         denoisePass.updateBefore = () => {};
         denoisePass.radius.value = postParams.gtao.denoiseRadius;
         denoisePass.lumaPhi.value = postParams.gtao.denoiseLumaPhi;
         denoisePass.depthPhi.value = postParams.gtao.denoiseDepthPhi;
         denoisePass.normalPhi.value = postParams.gtao.denoiseNormalPhi;
-        const uGtaoDenoiseEnabled = uniform(
-          postParams.gtao.denoiseEnabled ? 1 : 0,
-        );
+        const uGtaoDenoiseEnabled = uniform(postParams.gtao.denoiseEnabled ? 1 : 0);
         const rawAoVal = gtaoTex.sample(screenUV).r;
         const denoisedAoVal = denoisePass.r;
         const aoVal = mix(rawAoVal, denoisedAoVal, uGtaoDenoiseEnabled);
         postBaseColor = vec4(
-          postBaseColor.rgb.mul(
-            sub(1, mul(mul(aoVal, uGtaoIntensity), uGtaoEnabled)),
-          ),
+          postBaseColor.rgb.mul(sub(1, mul(mul(aoVal, uGtaoIntensity), uGtaoEnabled))),
           postBaseColor.a,
         );
 
@@ -5902,52 +5024,25 @@
         const skyMask = step(float(0.999), linearDepth);
 
         // Depth of Field
-        const uDofEnabled = uniform(
-          postParams.enabled && postParams.dof.enabled ? 1 : 0,
-        );
+        const uDofEnabled = uniform(postParams.enabled && postParams.dof.enabled ? 1 : 0);
         const uDofFocusDistance = uniform(postParams.dof.focusDistance);
         const uDofBlurStart = uniform(postParams.dof.blurStart);
         const uDofBlurEnd = uniform(postParams.dof.blurEnd);
         const uDofBlurSize = uniform(postParams.dof.blurSize);
         const uDofBlurSpread = uniform(postParams.dof.blurSpread);
-        const sceneBlurred = boxBlur(postBaseColor, {
-          size: uDofBlurSize,
-          separation: uDofBlurSpread,
-        });
-        const dofBlurAmount = smoothstep(
-          uDofBlurStart,
-          uDofBlurEnd,
-          abs(sub(worldDepth, uDofFocusDistance)),
-        );
-        postBaseColor = mix(
-          postBaseColor,
-          sceneBlurred,
-          mul(dofBlurAmount, uDofEnabled),
-        );
+        const sceneBlurred = boxBlur(postBaseColor, { size: uDofBlurSize, separation: uDofBlurSpread });
+        const dofBlurAmount = smoothstep(uDofBlurStart, uDofBlurEnd, abs(sub(worldDepth, uDofFocusDistance)));
+        postBaseColor = mix(postBaseColor, sceneBlurred, mul(dofBlurAmount, uDofEnabled));
 
         // Scene Bloom
-        const uBloomEnabled = uniform(
-          postParams.enabled && postParams.bloom.enabled ? 1 : 0,
-        );
-        const bloomScenePass = bloom(
-          postBaseColor,
-          postParams.bloom.strength,
-          postParams.bloom.radius,
-          postParams.bloom.threshold,
-        );
+        const uBloomEnabled = uniform(postParams.enabled && postParams.bloom.enabled ? 1 : 0);
+        const bloomScenePass = bloom(postBaseColor, postParams.bloom.strength, postParams.bloom.radius, postParams.bloom.threshold);
 
         // Lens Flare (sky-only bloom → lensflare)
         const skyOnlyColor = mix(vec4(0, 0, 0, 0), postBaseColor, skyMask);
-        const skyBloomPass = bloom(
-          skyOnlyColor,
-          1,
-          0.5,
-          postParams.lensflare.bloomThreshold,
-        );
+        const skyBloomPass = bloom(skyOnlyColor, 1, 0.5, postParams.lensflare.bloomThreshold);
         const flareThreshold = uniform(postParams.lensflare.threshold);
-        const flareGhostAttenuation = uniform(
-          postParams.lensflare.ghostAttenuation,
-        );
+        const flareGhostAttenuation = uniform(postParams.lensflare.ghostAttenuation);
         const flareGhostSpacing = uniform(postParams.lensflare.ghostSpacing);
         const flarePass = lensflare(skyBloomPass, {
           threshold: flareThreshold,
@@ -5955,15 +5050,11 @@
           ghostSpacing: flareGhostSpacing,
         });
         const flareBlurPass = gaussianBlur(flarePass, null, 8);
-        const uLensflareEnabled = uniform(
-          postParams.enabled && postParams.lensflare.enabled ? 1 : 0,
-        );
+        const uLensflareEnabled = uniform(postParams.enabled && postParams.lensflare.enabled ? 1 : 0);
 
         // God Rays (volumetric sunlight radial blur)
         const uSunScreenPos = uniform(new THREE.Vector2(0.5, 0.5));
-        const uGodRaysEnabled = uniform(
-          postParams.enabled && postParams.godRays.enabled ? 1 : 0,
-        );
+        const uGodRaysEnabled = uniform(postParams.enabled && postParams.godRays.enabled ? 1 : 0);
         const uGodRaysStrength = uniform(postParams.godRays.strength);
         const uGodRaysDecay = uniform(postParams.godRays.decay);
         const uGodRaysDensity = uniform(postParams.godRays.density);
@@ -5971,33 +5062,18 @@
         const sceneTex = convertToTexture(postBaseColor);
         const godRaysFn = Fn(() => {
           const uvNode = uv();
-          const stepUV = sub(nodeObject(uSunScreenPos), uvNode)
-            .mul(uGodRaysDensity)
-            .div(uGodRaysSamples);
+          const stepUV = sub(nodeObject(uSunScreenPos), uvNode).mul(uGodRaysDensity).div(uGodRaysSamples);
           const illumination = float(0).toVar();
           const decayVar = float(1).toVar();
-          Loop(
-            {
-              start: int(0),
-              end: int(uGodRaysSamples),
-              type: "int",
-              condition: "<",
-            },
-            ({ i }) => {
-              const sampleUV = add(uvNode, stepUV.mul(float(i)));
-              const s = sceneTex.sample(sampleUV);
-              const lum = add(
-                add(mul(s.r, 0.299), mul(s.g, 0.587)),
-                mul(s.b, 0.114),
-              );
-              illumination.addAssign(mul(lum, decayVar));
-              decayVar.mulAssign(uGodRaysDecay);
-            },
-          );
+          Loop({ start: int(0), end: int(uGodRaysSamples), type: "int", condition: "<" }, ({ i }) => {
+            const sampleUV = add(uvNode, stepUV.mul(float(i)));
+            const s = sceneTex.sample(sampleUV);
+            const lum = add(add(mul(s.r, 0.299), mul(s.g, 0.587)), mul(s.b, 0.114));
+            illumination.addAssign(mul(lum, decayVar));
+            decayVar.mulAssign(uGodRaysDecay);
+          });
           const normalized = illumination.div(uGodRaysSamples);
-          return vec4(normalized, normalized, normalized, 1)
-            .mul(uGodRaysStrength)
-            .mul(uGodRaysEnabled);
+          return vec4(normalized, normalized, normalized, 1).mul(uGodRaysStrength).mul(uGodRaysEnabled);
         });
         const godRaysNode = godRaysFn();
 
@@ -6014,10 +5090,10 @@
         const _grassFrustum = new THREE.Frustum();
         const _grassProjMatrix = new THREE.Matrix4();
         // _init() is called by the renderer on first render — mainFrustum is null until then
-        let _lastCsmCascades = PARAMS.csm.cascades;
-        let _lastCsmMaxFar = PARAMS.csm.maxFar;
-        let _lastCsmMargin = PARAMS.csm.lightMargin;
-        let _lastCsmMapSize = PARAMS.csm.mapSize;
+        let _lastCsmCascades   = PARAMS.csm.cascades;
+        let _lastCsmMaxFar     = PARAMS.csm.maxFar;
+        let _lastCsmMargin     = PARAMS.csm.lightMargin;
+        let _lastCsmMapSize    = PARAMS.csm.mapSize;
         renderer.setAnimationLoop(() => {
           clock.update();
           const elapsed = clock.getElapsed();
@@ -6107,29 +5183,23 @@
           dirLight.shadow.normalBias = PARAMS.shadowNormalBias;
 
           // CSM: rebuild cascades if params changed
-          const _csmChanged =
-            PARAMS.csm.enabled &&
-            (PARAMS.csm.cascades !== _lastCsmCascades ||
-              PARAMS.csm.maxFar !== _lastCsmMaxFar ||
-              PARAMS.csm.lightMargin !== _lastCsmMargin ||
-              PARAMS.csm.mapSize !== _lastCsmMapSize);
+          const _csmChanged = PARAMS.csm.enabled && (
+            PARAMS.csm.cascades    !== _lastCsmCascades ||
+            PARAMS.csm.maxFar      !== _lastCsmMaxFar   ||
+            PARAMS.csm.lightMargin !== _lastCsmMargin   ||
+            PARAMS.csm.mapSize     !== _lastCsmMapSize);
           if (csm.mainFrustum && _csmChanged) {
             _lastCsmCascades = PARAMS.csm.cascades;
-            _lastCsmMaxFar = PARAMS.csm.maxFar;
-            _lastCsmMargin = PARAMS.csm.lightMargin;
-            _lastCsmMapSize = PARAMS.csm.mapSize;
-            csm.cascades = PARAMS.csm.cascades;
-            csm.maxFar = PARAMS.csm.maxFar;
-            csm.lightMargin = PARAMS.csm.lightMargin;
+            _lastCsmMaxFar   = PARAMS.csm.maxFar;
+            _lastCsmMargin   = PARAMS.csm.lightMargin;
+            _lastCsmMapSize  = PARAMS.csm.mapSize;
+            csm.cascades     = PARAMS.csm.cascades;
+            csm.maxFar       = PARAMS.csm.maxFar;
+            csm.lightMargin  = PARAMS.csm.lightMargin;
             dirLight.shadow.mapSize.set(PARAMS.csm.mapSize, PARAMS.csm.mapSize);
             csm.updateFrustums();
           }
-          if (
-            csm.mainFrustum &&
-            PARAMS.csm.enabled &&
-            PARAMS.csm.updateEveryFrame
-          )
-            csm.updateFrustums();
+          if (csm.mainFrustum && PARAMS.csm.enabled && PARAMS.csm.updateEveryFrame) csm.updateFrustums();
           hemiLight.color.set(PARAMS.light.hemiSkyColor);
           hemiLight.groundColor.set(PARAMS.light.hemiGroundColor);
           hemiLight.intensity = PARAMS.light.hemiIntensity;
@@ -6147,8 +5217,7 @@
           if (currentMode !== "play") orbit.update();
 
           // Post-processing uniform sync
-          uGtaoEnabled.value =
-            postParams.enabled && postParams.gtao.enabled ? 1 : 0;
+          uGtaoEnabled.value = postParams.enabled && postParams.gtao.enabled ? 1 : 0;
           uGtaoIntensity.value = postParams.gtao.intensity;
           gtaoPass.radius.value = postParams.gtao.radius;
           gtaoPass.samples.value = postParams.gtao.samples;
@@ -6166,50 +5235,36 @@
             denoisePass._resolution.value.set(_sz.x, _sz.y);
           }
 
-          uDofEnabled.value =
-            postParams.enabled && postParams.dof.enabled ? 1 : 0;
+          uDofEnabled.value = postParams.enabled && postParams.dof.enabled ? 1 : 0;
           uDofFocusDistance.value = postParams.dof.focusDistance;
           uDofBlurStart.value = postParams.dof.blurStart;
           uDofBlurEnd.value = postParams.dof.blurEnd;
           uDofBlurSize.value = postParams.dof.blurSize;
           uDofBlurSpread.value = postParams.dof.blurSpread;
 
-          uBloomEnabled.value =
-            postParams.enabled && postParams.bloom.enabled ? 1 : 0;
+          uBloomEnabled.value = postParams.enabled && postParams.bloom.enabled ? 1 : 0;
           bloomScenePass.strength.value = postParams.bloom.strength;
           bloomScenePass.radius.value = postParams.bloom.radius;
           bloomScenePass.threshold.value = postParams.bloom.threshold;
 
-          uLensflareEnabled.value =
-            postParams.enabled && postParams.lensflare.enabled ? 1 : 0;
+          uLensflareEnabled.value = postParams.enabled && postParams.lensflare.enabled ? 1 : 0;
           skyBloomPass.threshold.value = postParams.lensflare.bloomThreshold;
           flareThreshold.value = postParams.lensflare.threshold;
           flareGhostAttenuation.value = postParams.lensflare.ghostAttenuation;
           flareGhostSpacing.value = postParams.lensflare.ghostSpacing;
 
-          uGodRaysEnabled.value =
-            postParams.enabled && postParams.godRays.enabled ? 1 : 0;
+          uGodRaysEnabled.value = postParams.enabled && postParams.godRays.enabled ? 1 : 0;
           uGodRaysStrength.value = postParams.godRays.strength;
           uGodRaysDecay.value = postParams.godRays.decay;
           uGodRaysDensity.value = postParams.godRays.density;
           uGodRaysSamples.value = postParams.godRays.samples;
 
           // Project sun direction to screen space for god rays
-          const _sunWorld = camera.position
-            .clone()
-            .add(sunDir.clone().multiplyScalar(500000));
-          const _v4 = new THREE.Vector4(
-            _sunWorld.x,
-            _sunWorld.y,
-            _sunWorld.z,
-            1,
-          );
+          const _sunWorld = camera.position.clone().add(sunDir.clone().multiplyScalar(500000));
+          const _v4 = new THREE.Vector4(_sunWorld.x, _sunWorld.y, _sunWorld.z, 1);
           _v4.applyMatrix4(camera.matrixWorldInverse);
           _v4.applyMatrix4(camera.projectionMatrix);
-          uSunScreenPos.value.set(
-            (_v4.x / _v4.w) * 0.5 + 0.5,
-            (_v4.y / _v4.w) * 0.5 + 0.5,
-          );
+          uSunScreenPos.value.set(_v4.x / _v4.w * 0.5 + 0.5, _v4.y / _v4.w * 0.5 + 0.5);
           uCameraFar.value = camera.far;
 
           stats.update();
