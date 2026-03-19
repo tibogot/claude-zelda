@@ -63,8 +63,8 @@
     </script>
   </head>
   <body>
-    <div id="title">Flower Maker — one sculpt, N copies around Y</div>
-    <div id="hint">Radial petals = same mesh, rotated · panel left</div>
+    <div id="title">Flower Maker — outer + inner ring</div>
+    <div id="hint">Outer sculpt · inner = smaller, cupped variant · panel left</div>
     <script type="module">
       import * as THREE from "three";
       import { MeshStandardNodeMaterial } from "three";
@@ -224,6 +224,21 @@
             tiltXDeg: 0,
             tiltZDeg: 0,
           },
+          /** Smaller, tighter cup — derived from outer sculpt */
+          innerRing: {
+            count: 6,
+            ringOffsetDeg: 22.5,
+            relativeScale: 0.58,
+            liftY: 0.14,
+            openFactor: 0.76,
+            phiCurveMul: 1.32,
+            spreadFactor: 0.68,
+            phi0ExtraDeg: 7,
+            taperMul: 1.08,
+            rotXAddDeg: 10,
+            rotYAddDeg: 0,
+            rotZAddDeg: 0,
+          },
         };
 
         const scene = new THREE.Scene();
@@ -282,7 +297,9 @@
         petalMat.metalnessNode = uMetal;
 
         let petalGeo = null;
+        let petalGeoInner = null;
         let instancedPetals = null;
+        let instancedInner = null;
         const flowerHolder = new THREE.Group();
         scene.add(flowerHolder);
 
@@ -322,19 +339,63 @@
           return Math.max(1, Math.min(64, Math.round(params.flower.count)));
         }
 
+        function innerCount() {
+          return Math.max(0, Math.min(48, Math.round(params.innerRing.count)));
+        }
+
+        function geomOptsInner() {
+          const b = geomOpts();
+          const ir = params.innerRing;
+          const rel = Math.max(0.15, ir.relativeScale);
+          const span = b.phi1 - b.phi0;
+          const phi0i = b.phi0 + ir.phi0ExtraDeg * DEG;
+          const open = THREE.MathUtils.clamp(ir.openFactor, 0.15, 1.2);
+          const phi1i = phi0i + span * open;
+          return {
+            ...b,
+            rx: b.rx * rel,
+            ry: b.ry * rel,
+            rz: b.rz * rel,
+            centerX: b.centerX * rel,
+            centerY: b.centerY * rel + ir.liftY,
+            centerZ: b.centerZ * rel,
+            phi0: phi0i,
+            phi1: Math.min(phi1i, Math.PI - 0.05),
+            phiCurve: Math.max(0.12, b.phiCurve * ir.phiCurveMul),
+            spreadMax: b.spreadMax * ir.spreadFactor,
+            spreadMin: b.spreadMin * ir.spreadFactor,
+            taperPower: Math.max(0.05, b.taperPower * ir.taperMul),
+          };
+        }
+
+        function disposeInnerGeo() {
+          if (petalGeoInner) {
+            petalGeoInner.dispose();
+            petalGeoInner = null;
+          }
+        }
+
         function rebuildGeometry() {
           const m = params.mesh;
           const su = Math.max(8, Math.round(m.segU));
           const sv = Math.max(4, Math.round(m.segV));
-          const next = createPetalGeometry(su, sv, geomOpts());
           if (petalGeo) petalGeo.dispose();
-          petalGeo = next;
+          petalGeo = createPetalGeometry(su, sv, geomOpts());
+
+          disposeInnerGeo();
+          const ic = innerCount();
+          if (ic > 0) {
+            petalGeoInner = createPetalGeometry(su, sv, geomOptsInner());
+          }
+
           const n = petalCount();
           if (instancedPetals && instancedPetals.count === n) {
             instancedPetals.geometry = petalGeo;
           } else {
             refreshInstancedPetals();
           }
+
+          refreshInnerInstancedPetals();
         }
 
         function refreshInstancedPetals() {
@@ -372,6 +433,45 @@
           instancedPetals.instanceMatrix.needsUpdate = true;
         }
 
+        function refreshInnerInstancedPetals() {
+          const ic = innerCount();
+          if (instancedInner) {
+            flowerHolder.remove(instancedInner);
+            instancedInner.geometry = null;
+            instancedInner.material = null;
+            instancedInner.dispose();
+            instancedInner = null;
+          }
+          if (ic === 0 || !petalGeoInner) return;
+          instancedInner = new THREE.InstancedMesh(petalGeoInner, petalMat, ic);
+          instancedInner.castShadow = true;
+          instancedInner.receiveShadow = true;
+          flowerHolder.add(instancedInner);
+          updateInnerMatrices();
+        }
+
+        function updateInnerMatrices() {
+          if (!instancedInner) return;
+          const n = instancedInner.count;
+          const m = params.mesh;
+          const ir = params.innerRing;
+          _eulerPetal.set(
+            (m.rotXDeg + ir.rotXAddDeg) * DEG,
+            (m.rotYDeg + ir.rotYAddDeg) * DEG,
+            (m.rotZDeg + ir.rotZAddDeg) * DEG,
+            "XYZ"
+          );
+          _matPetal.makeRotationFromEuler(_eulerPetal);
+          const base = ir.ringOffsetDeg * DEG;
+          const step = (Math.PI * 2) / n;
+          for (let i = 0; i < n; i++) {
+            _matRing.makeRotationY(base + i * step);
+            _matFinal.multiplyMatrices(_matRing, _matPetal);
+            instancedInner.setMatrixAt(i, _matFinal);
+          }
+          instancedInner.instanceMatrix.needsUpdate = true;
+        }
+
         function applyFlowerHolderTilt() {
           const f = params.flower;
           flowerHolder.rotation.x = f.tiltXDeg * DEG;
@@ -380,6 +480,7 @@
 
         function applyMeshTransform() {
           updateFlowerMatrices();
+          updateInnerMatrices();
         }
 
         function syncMaterial() {
@@ -407,7 +508,7 @@
         const pane = new Pane({ title: "Flower Maker" });
 
         const fFlower = pane.addFolder({
-          title: "Radial ring (same petal × N)",
+          title: "Outer ring",
           expanded: true,
         });
         fFlower.addBinding(params.flower, "count", {
@@ -433,6 +534,109 @@
           max: 45,
           step: 0.5,
           label: "tilt bloom Z°",
+        });
+        fFlower.on("change", (ev) => {
+          const key = ev.target.key;
+          if (key === "count") refreshInstancedPetals();
+          else {
+            if (key === "tiltXDeg" || key === "tiltZDeg") applyFlowerHolderTilt();
+            updateFlowerMatrices();
+          }
+        });
+
+        const fInner = pane.addFolder({
+          title: "Inner ring (smaller, more cupped)",
+          expanded: true,
+        });
+        fInner.addBinding(params.innerRing, "count", {
+          min: 0,
+          max: 24,
+          step: 1,
+          label: "count (0=off)",
+        });
+        fInner.addBinding(params.innerRing, "ringOffsetDeg", {
+          min: -180,
+          max: 180,
+          step: 0.5,
+          label: "ring spin °",
+        });
+        fInner.addBinding(params.innerRing, "relativeScale", {
+          min: 0.25,
+          max: 1,
+          step: 0.01,
+          label: "size vs outer",
+        });
+        fInner.addBinding(params.innerRing, "liftY", {
+          min: -0.5,
+          max: 0.6,
+          step: 0.01,
+          label: "lift Y (toward center)",
+        });
+        fInner.addBinding(params.innerRing, "openFactor", {
+          min: 0.35,
+          max: 1.15,
+          step: 0.01,
+          label: "open vs outer (↓=cupped)",
+        });
+        fInner.addBinding(params.innerRing, "phiCurveMul", {
+          min: 0.5,
+          max: 2.5,
+          step: 0.02,
+          label: "curl (φ ease ×)",
+        });
+        fInner.addBinding(params.innerRing, "spreadFactor", {
+          min: 0.35,
+          max: 1.2,
+          step: 0.01,
+          label: "width vs outer",
+        });
+        fInner.addBinding(params.innerRing, "phi0ExtraDeg", {
+          min: -15,
+          max: 35,
+          step: 0.5,
+          label: "base angle +°",
+        });
+        fInner.addBinding(params.innerRing, "taperMul", {
+          min: 0.7,
+          max: 1.6,
+          step: 0.02,
+          label: "pinch ×",
+        });
+        fInner.addBinding(params.innerRing, "rotXAddDeg", {
+          min: -40,
+          max: 40,
+          step: 0.5,
+          label: "extra rot X°",
+        });
+        fInner.addBinding(params.innerRing, "rotYAddDeg", {
+          min: -45,
+          max: 45,
+          step: 0.5,
+          label: "extra rot Y°",
+        });
+        fInner.addBinding(params.innerRing, "rotZAddDeg", {
+          min: -30,
+          max: 30,
+          step: 0.5,
+          label: "extra rot Z°",
+        });
+        fInner.on("change", (ev) => {
+          const key = ev.target.key;
+          if (key === "count") {
+            const ic = innerCount();
+            if (ic > 0 && !petalGeoInner) rebuildGeometry();
+            else if (ic === 0) {
+              disposeInnerGeo();
+              refreshInnerInstancedPetals();
+            } else refreshInnerInstancedPetals();
+          } else if (
+            key === "ringOffsetDeg" ||
+            key === "rotXAddDeg" ||
+            key === "rotYAddDeg" ||
+            key === "rotZAddDeg"
+          ) {
+            updateInnerMatrices();
+          }
         });
 
         const fEll = pane.addFolder({ title: "Ellipsoid radii", expanded: true });
@@ -506,20 +710,23 @@
           "segU", "segV",
         ]);
         const ROT_KEYS = new Set(["rotXDeg", "rotYDeg", "rotZDeg"]);
-        const FLOWER_KEYS = new Set(["count", "ringOffsetDeg", "tiltXDeg", "tiltZDeg"]);
+        const INNER_GEOM_KEYS = new Set([
+          "relativeScale",
+          "liftY",
+          "openFactor",
+          "phiCurveMul",
+          "spreadFactor",
+          "phi0ExtraDeg",
+          "taperMul",
+        ]);
         const MAT_KEYS = new Set(["base", "rim", "fresnelPower", "fresnelMix", "roughness", "metalness"]);
         const SCENE_KEYS = new Set(["bg", "amb", "key"]);
 
         pane.on("change", (ev) => {
           const key = ev.target.key;
           if (GEOM_KEYS.has(key)) rebuildGeometry();
-          else if (FLOWER_KEYS.has(key)) {
-            if (key === "count") refreshInstancedPetals();
-            else {
-              if (key === "tiltXDeg" || key === "tiltZDeg") applyFlowerHolderTilt();
-              updateFlowerMatrices();
-            }
-          } else if (ROT_KEYS.has(key)) applyMeshTransform();
+          else if (INNER_GEOM_KEYS.has(key)) rebuildGeometry();
+          else if (ROT_KEYS.has(key)) applyMeshTransform();
           else if (MAT_KEYS.has(key) || key === "r" || key === "g" || key === "b") {
             syncMaterial();
             syncScene();
