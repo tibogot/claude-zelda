@@ -216,7 +216,7 @@
 
     <script type="module">
       import * as THREE from "three";
-      import { MeshStandardNodeMaterial } from "three";
+      import { MeshStandardNodeMaterial, MeshBasicNodeMaterial } from "three";
       import {
         texture,
         vec2,
@@ -258,6 +258,18 @@
         colorToDirection,
         sample,
         screenUV,
+        reflector,
+        cameraPosition,
+        normalize,
+        floor,
+        fract,
+        sin,
+        cos,
+        length,
+        min,
+        max,
+        exp,
+        saturate,
       } from "three/tsl";
       import { bloom } from "three/addons/tsl/display/BloomNode.js";
       import { fxaa } from "three/addons/tsl/display/FXAANode.js";
@@ -517,6 +529,7 @@
           exposure: 0.5,
         },
         csm: {
+          enabled: true,
           cascades: 3,
           maxFar: 200,
           lightMargin: 150,
@@ -535,18 +548,34 @@
           cloudElevation: 0.5,
         },
         water: {
-          color: "#3ab0d8",
-          opacity: 0.72,
-          roughness: 0.05,
-          sinkOffset: -0.05,
-          preset: "Small lake",
-          shallowColor: "#40dde0",
-          deepColor:    "#062650",
-          foamColor:    "#ddf4ff",
-          depthFade:    6.0,
-          foamDepth:    1.4,
-          waveSpeed:    0.35,
-          waveScale:    0.12,
+          // ── Voronoi surface ──
+          scale:          0.3,
+          cellSpeed:      0.45,
+          noiseScale:     1.52,
+          noiseTimeScale: 0.6,
+          distort:        0.35,
+          flowZ:          0.08,
+          edgeThreshold:  0.067,
+          deepColor:      "#3a6a8c",
+          midColor:       "#7ed4f8",
+          highlightColor: "#e8f8ff",
+          opacity:        0.78,
+          // ── Shore foam ──
+          foamColor:      "#e8f4ff",
+          lineWidth:      0.5,
+          glowWidth:      2.0,
+          waterlineIntensity: 2.5,
+          // ── Ripples ──
+          rippleStrength: 5.5,
+          rippleWidth:    0.12,
+          // ── Placement ──
+          sinkOffset:     -0.05,
+          preset:         "Small lake",
+          // ── Reflections ──
+          stylized:          false,
+          reflections:       false,
+          reflectionScale:   0.35,
+          reflectionStrength: 0.35,
         },
         fog: {
           enabled: false,
@@ -1609,7 +1638,11 @@
           mode: "practical",
           lightMargin: PARAMS.csm.lightMargin,
         });
-        dirLight.shadow.shadowNode = csm;
+        if (PARAMS.csm.enabled) dirLight.shadow.shadowNode = csm;
+
+        function setCsmEnabled(on) {
+          dirLight.shadow.shadowNode = on ? csm : null;
+        }
         scene.add(dirLight);
         const shadowTarget = new THREE.Object3D();
         scene.add(shadowTarget);
@@ -2446,23 +2479,95 @@
         scene.environmentIntensity = PARAMS.light.envIntensity;
         renderer.toneMappingExposure = PARAMS.light.exposure;
 
-        // ── WATER PLANE ──
-        const waterGeo = new THREE.PlaneGeometry(
-          TERRAIN_SIZE * 4,
-          TERRAIN_SIZE * 4,
-        );
-        waterGeo.rotateX(-PI / 2);
-        const waterMat = new MeshStandardNodeMaterial({
-          transparent: true,
-          depthWrite: false,
+        // ── ANIME WATER — Voronoi helper Fn's ─────────────────────────────
+        const _wHash22 = Fn(([p]) => {
+          const px = dot(p, vec2(127.1, 311.7));
+          const py = dot(p, vec2(269.5, 183.3));
+          return fract(sin(vec2(px, py)).mul(43758.5453));
         });
-        waterMat.roughnessNode = float(0.08);
-        waterMat.metalnessNode = float(0.0);
-        waterMat.fog = false; // fog applied manually in colorNode below
+        const _wSmin = Fn(([a, b, k]) => {
+          const h = max(k.sub(abs(a.sub(b))), float(0)).div(k);
+          return min(a, b).sub(h.mul(h).mul(h).mul(k).div(6));
+        });
+        const _wCellPt = Fn(([seed, t, spd]) =>
+          float(0.5).add(float(0.5).mul(sin(t.mul(spd).add(float(6.2831).mul(seed))))),
+        );
+        const _wVoroF1 = Fn(([p, t, spd]) => {
+          const ip = floor(p);
+          const fp = fract(p);
+          const md = float(10).toVar();
+          for (const [nx, ny] of [[-1,-1],[0,-1],[1,-1],[-1,0],[0,0],[1,0],[-1,1],[0,1],[1,1]]) {
+            const n = vec2(float(nx), float(ny));
+            const rnd = _wHash22(ip.add(n));
+            const pt = vec2(_wCellPt(rnd.x, t, spd), _wCellPt(rnd.y, t, spd));
+            md.assign(min(md, length(n.add(pt).sub(fp))));
+          }
+          return md;
+        });
+        const _wVoroSmooth = Fn(([p, t, spd, sm]) => {
+          const ip = floor(p);
+          const fp = fract(p);
+          const res = float(10).toVar();
+          for (const [nx, ny] of [[-1,-1],[0,-1],[1,-1],[-1,0],[0,0],[1,0],[-1,1],[0,1],[1,1]]) {
+            const n = vec2(float(nx), float(ny));
+            const rnd = _wHash22(ip.add(n));
+            const pt = vec2(_wCellPt(rnd.x, t, spd), _wCellPt(rnd.y, t, spd));
+            const d = length(n.add(pt).sub(fp));
+            res.assign(_wSmin(res, d, sm));
+          }
+          return res;
+        });
+        const _wNHash = Fn(([p]) => {
+          const pp = fract(p.mul(vec2(127.1, 311.7)));
+          const d = dot(pp, pp.add(45.32));
+          return fract(pp.x.add(d).mul(pp.y.add(d)));
+        });
+        const _wVNoise = Fn(([p]) => {
+          const i = floor(p);
+          const f = fract(p);
+          const uu = f.mul(f).mul(float(3).sub(f.mul(2)));
+          return mix(
+            mix(_wNHash(i), _wNHash(i.add(vec2(1,0))), uu.x),
+            mix(_wNHash(i.add(vec2(0,1))), _wNHash(i.add(vec2(1,1))), uu.x),
+            uu.y,
+          );
+        });
+        const _wFbm2 = Fn(([p]) => {
+          const v = _wVNoise(p).mul(0.5).toVar();
+          v.addAssign(_wVNoise(p.mul(2)).mul(0.25));
+          return v;
+        });
+
+        // ── SEABED (opaque colored floor — gives water its blue color) ────
+        const seabedGeo = new THREE.PlaneGeometry(TERRAIN_SIZE * 4, TERRAIN_SIZE * 4);
+        seabedGeo.rotateX(-PI / 2);
+        const seabedMat = new MeshBasicNodeMaterial({ color: 0x1a3a52 });
+        const seabed = new THREE.Mesh(seabedGeo, seabedMat);
+        seabed.position.y = -4.0; // 3.5 units below water surface
+        seabed.renderOrder = 0;
+        seabed.frustumCulled = false;
+        scene.add(seabed);
+
+        // ── SIMPLE WATER (default — near-zero perf cost) ─────────────────
+        const simpleWaterMat = new THREE.MeshBasicMaterial({
+          color: 0x2a6080,
+          transparent: true,
+          opacity: 0.88,
+        });
+
+        // ── WATER PLANE ──
+        const waterGeo = new THREE.PlaneGeometry(TERRAIN_SIZE * 4, TERRAIN_SIZE * 4);
+        waterGeo.rotateX(-PI / 2);
+        const waterMat = new MeshBasicNodeMaterial({ transparent: true, depthWrite: false });
         const water = new THREE.Mesh(waterGeo, waterMat);
         water.position.y = -0.5;
         water.renderOrder = 1;
+        water.frustumCulled = false;
         scene.add(water);
+
+        // ── WATER REFLECTOR (WebGPU planar reflection) ────────────────────
+        const waterReflector = reflector({ resolutionScale: PARAMS.water.reflectionScale });
+        water.add(waterReflector.target);
 
         // ── FOG (height + distance) ──
         const uFogColor = uniform(
@@ -2477,79 +2582,174 @@
         );
         const _distanceFogNode = fog(uFogColor, densityFogFactor(uFogDensity));
 
-        // ── DEPTH-BASED WATER ─────────────────────────────────────────────
-        // Shared time uniform (updated in render loop)
-        const uWaterTime = uniform(0.0);
+        // ── ANIME WATER UNIFORMS ──────────────────────────────────────────
+        const uWaterTime     = uniform(0.0);
+        const uWScale        = uniform(PARAMS.water.scale);
+        const uWSmoothness   = uniform(0.55);
+        const uWEdgeThresh   = uniform(PARAMS.water.edgeThreshold);
+        const uWEdgeSoft     = uniform(0.01);
+        const uWFlowZ        = uniform(PARAMS.water.flowZ);
+        const uWCellSpeed    = uniform(PARAMS.water.cellSpeed);
+        const uWNoiseScale   = uniform(PARAMS.water.noiseScale);
+        const uWNoiseFlow    = uniform(0.2);
+        const uWNoiseTime    = uniform(PARAMS.water.noiseTimeScale);
+        const uWDistort      = uniform(PARAMS.water.distort);
+        const uWDeepColor    = uniform(new THREE.Color(PARAMS.water.deepColor));
+        const uWMidColor     = uniform(new THREE.Color(PARAMS.water.midColor));
+        const uWMidPos       = uniform(0.084);
+        const uWHighlight    = uniform(new THREE.Color(PARAMS.water.highlightColor));
+        const uWOpacity      = uniform(PARAMS.water.opacity);
+        const uWFadeDistance = uniform(400.0);
+        const uWFadeStrength = uniform(1.4);
+        const uWCamXZ        = uniform(new THREE.Vector2(0, 0));
+        // Shore foam
+        const uWLineWidth    = uniform(PARAMS.water.lineWidth);
+        const uWGlowWidth    = uniform(PARAMS.water.glowWidth);
+        const uWLineIntensity= uniform(PARAMS.water.waterlineIntensity);
+        const uWLineColor    = uniform(new THREE.Color(PARAMS.water.foamColor));
+        const uWGlowColor    = uniform(new THREE.Color("#88ccff"));
+        // Ripples (8 slots)
+        const MAX_RIPPLES_W = 8;
+        const uRippleCenters = Array.from({ length: MAX_RIPPLES_W }, () => uniform(new THREE.Vector2(0, 0)));
+        const uRippleTimes   = Array.from({ length: MAX_RIPPLES_W }, () => uniform(0.0));
+        const uRippleCount   = uniform(0.0);
+        const uRippleSpeed   = uniform(1.5);
+        const uRippleWidth   = uniform(PARAMS.water.rippleWidth);
+        const uRippleStr     = uniform(PARAMS.water.rippleStrength);
+        const uRippleDecay   = uniform(1.6);
 
-        // Color / look uniforms
-        const uWaterShallow  = uniform(new THREE.Color(PARAMS.water.shallowColor).convertSRGBToLinear());
-        const uWaterDeep     = uniform(new THREE.Color(PARAMS.water.deepColor).convertSRGBToLinear());
-        const uWaterFoamCol  = uniform(new THREE.Color(PARAMS.water.foamColor).convertSRGBToLinear());
-        const uWaterDepthFade = uniform(PARAMS.water.depthFade);
-        const uWaterFoamDepth = uniform(PARAMS.water.foamDepth);
-        const uWaterWaveSpeed = uniform(PARAMS.water.waveSpeed);
-        const uWaterWaveScale = uniform(PARAMS.water.waveScale);
-
-        // Compute world-column depth: water surface Y − terrain height below
-        const _wDepthFn = Fn(() => {
+        // ── SHORE DEPTH (heightTex approach — no depth render pass needed) ─
+        // Returns how far terrain is ABOVE the water surface at this XZ.
+        // Positive = terrain above water (potential shore); negative = terrain below water (open water).
+        const _shoreAboveFn = Fn(() => {
           const hUV = vec2(
             add(div(positionWorld.x, float(TERRAIN_SIZE)), float(0.5)),
             add(div(positionWorld.z, float(TERRAIN_SIZE)), float(0.5)),
           );
-          return clamp(sub(positionWorld.y, texture(heightTex, hUV).r), float(0.001), float(60));
+          return sub(texture(heightTex, hUV).r, positionWorld.y); // terrainH - waterY
         });
 
-        // Full water color node (shared by ocean + water bodies)
-        const buildWaterColor = Fn(() => {
-          const wDepth  = _wDepthFn();
-          const dFactor = smoothstep(float(0), uWaterDepthFade, wDepth);
+        // ── CPU RIPPLE BUFFER ─────────────────────────────────────────────
+        const _rippleBuffer = [];
+        function rippleAdd(x, z) {
+          if (_rippleBuffer.length >= MAX_RIPPLES_W) _rippleBuffer.shift();
+          _rippleBuffer.push({ x, z, t: uWaterTime.value });
+        }
+        function _syncRipples() {
+          uRippleCount.value = _rippleBuffer.length;
+          for (let i = 0; i < MAX_RIPPLES_W; i++) {
+            if (i < _rippleBuffer.length) {
+              uRippleCenters[i].value.set(_rippleBuffer[i].x, _rippleBuffer[i].z);
+              uRippleTimes[i].value = _rippleBuffer[i].t;
+            }
+          }
+        }
 
-          // Shallow → deep colour
-          const baseColor = mix(uWaterShallow, uWaterDeep, dFactor);
+        // ── VORONOI WATER FRAG ────────────────────────────────────────────
+        const buildWaterFrag = Fn(() => {
+          const worldXZ  = positionWorld.xz;
+          const tNoise   = uWaterTime.mul(uWNoiseTime);
+          const noiseUV  = worldXZ.mul(uWNoiseScale).add(vec2(tNoise.mul(uWNoiseFlow), float(0)));
+          const noiseFac = _wFbm2(noiseUV);
+          const distort  = vec2(noiseFac.sub(0.5), noiseFac.sub(0.5)).mul(uWDistort);
 
-          // Wave shimmer via noise
-          const shimmer = mul(
-            float(0.07),
-            add(
-              mx_noise_float(vec3(
-                add(mul(positionWorld.x, uWaterWaveScale),          mul(uWaterTime, uWaterWaveSpeed)),
-                float(0),
-                add(mul(positionWorld.z, mul(uWaterWaveScale, float(0.8))), mul(uWaterTime, mul(uWaterWaveSpeed, float(1.3)))),
-              )),
-              float(1),
-            ),
+          const uvVoro = worldXZ.mul(uWScale)
+            .add(vec2(float(0), uWFlowZ.mul(tNoise)))
+            .add(distort);
+          const f1  = _wVoroF1(uvVoro, tNoise, uWCellSpeed);
+          const sf1 = _wVoroSmooth(uvVoro, tNoise, uWCellSpeed, uWSmoothness);
+          const edge = f1.sub(sf1);
+          const t = smoothstep(uWEdgeThresh.sub(uWEdgeSoft), uWEdgeThresh.add(uWEdgeSoft), edge);
+
+          const safeMP = max(uWMidPos, float(0.0001));
+          const seg0 = clamp(t.div(safeMP), float(0), float(1));
+          const seg1 = clamp(t.sub(safeMP).div(float(1).sub(safeMP).add(float(0.0001))), float(0), float(1));
+          const inSeg1 = smoothstep(safeMP.sub(0.001), safeMP.add(0.001), t);
+          const baseColor = mix(
+            mix(uWDeepColor, uWMidColor, seg0),
+            mix(uWMidColor, uWHighlight, seg1),
+            inSeg1,
           );
-          const shimmered = add(baseColor, vec3(shimmer, mul(shimmer, float(0.7)), float(0)));
 
-          // Foam: noisy mask only where very shallow
-          const foamMask = smoothstep(uWaterFoamDepth, float(0.05), wDepth);
-          const foamNoise = mul(
-            float(0.5),
-            add(
-              mx_noise_float(vec3(
-                add(mul(positionWorld.x, float(0.55)), mul(uWaterTime, uWaterWaveSpeed)),
-                float(1),
-                add(mul(positionWorld.z, float(0.45)), mul(uWaterTime, mul(uWaterWaveSpeed, float(0.8)))),
-              )),
-              float(1),
-            ),
-          );
-          const foam = clamp(mul(foamMask, foamNoise), float(0), float(1));
-          const withFoam = mix(shimmered, uWaterFoamCol, foam);
+          // Ripple rings
+          const rippleAcc = float(0).toVar();
+          for (let i = 0; i < MAX_RIPPLES_W; i++) {
+            const isOn   = step(float(i + 0.5), uRippleCount);
+            const elap   = max(uWaterTime.sub(uRippleTimes[i]), float(0));
+            const d      = length(worldXZ.sub(uRippleCenters[i]));
+            const ringR  = elap.mul(uRippleSpeed);
+            const rdist  = abs(d.sub(ringR));
+            const ring   = float(1).sub(smoothstep(float(0), uRippleWidth, rdist));
+            const fade   = exp(elap.mul(float(-1).mul(uRippleDecay)));
+            rippleAcc.addAssign(ring.mul(fade).mul(isOn));
+          }
+          const ripple     = saturate(rippleAcc.mul(uRippleStr));
+          const waterColor = mix(baseColor, uWHighlight, ripple);
 
-          // Fog
-          return mix(withFoam, uFogColor, exponentialHeightFogFactor(uFogDensity, uFogHeight));
+          // Distance fade
+          const distCam  = length(worldXZ.sub(uWCamXZ));
+          const distFade = float(1).sub(pow(saturate(distCam.div(uWFadeDistance)), uWFadeStrength));
+          const waterAlpha = mix(float(0.6), float(1), max(t, ripple)).mul(uWOpacity).mul(distFade);
+
+          // Shore foam (using heightTex depth)
+          // Shore foam: appears where terrain is slightly above water (0..lineWidth).
+          // Negative = open water (ocean/lake center) → no foam.
+          const terrainAbove = _shoreAboveFn();
+          const onShore  = step(float(0), terrainAbove); // 1 if terrain above water, 0 if below
+          const line     = sub(float(1), smoothstep(float(0), uWLineWidth, terrainAbove)).mul(onShore);
+          const glow     = exp(terrainAbove.div(max(uWGlowWidth, float(0.001))).mul(float(-1))).mul(onShore);
+          const foamAlpha = saturate(max(line, glow.mul(float(0.5))).mul(uWLineIntensity));
+          const foamCol   = mix(uWGlowColor, uWLineColor, line);
+          const finalColor = saturate(waterColor.add(foamCol.mul(foamAlpha)));
+
+          return vec4(finalColor, waterAlpha);
         });
 
-        // Depth-based opacity: shallow → transparent, deep → opaque
-        const buildWaterOpacity = Fn(() => {
-          const wDepth  = _wDepthFn();
-          const dFactor = smoothstep(float(0), uWaterDepthFade, wDepth);
-          return mix(float(0.42), float(0.92), dFactor);
+        const uReflStrength = uniform(PARAMS.water.reflectionStrength);
+
+        // With Fresnel reflection blended on top
+        const buildWaterFragWithReflection = Fn(() => {
+          const base = buildWaterFrag();
+          const viewDir = normalize(sub(cameraPosition, positionWorld));
+          // Fresnel capped by reflectionStrength so Voronoi blue stays visible
+          const fresnel = pow(clamp(sub(float(1), dot(viewDir, vec3(0, 1, 0))), float(0), float(1)), float(3)).mul(uReflStrength);
+          const reflected = mix(base.rgb, waterReflector.rgb, fresnel);
+          return vec4(reflected, base.a);
         });
 
-        waterMat.colorNode   = buildWaterColor();
-        waterMat.opacityNode = buildWaterOpacity();
+        function setWaterReflections(enabled) {
+          if (!PARAMS.water.stylized) return; // reflections only apply in stylized mode
+          const frag = enabled ? buildWaterFragWithReflection() : buildWaterFrag();
+          waterMat.colorNode   = frag.rgb;
+          waterMat.opacityNode = frag.a;
+          waterMat.needsUpdate = true;
+          waterReflector.target.visible = enabled;
+        }
+
+        function setWaterStyle(stylized) {
+          if (stylized) {
+            // Full anime Voronoi shader
+            const frag = PARAMS.water.reflections ? buildWaterFragWithReflection() : buildWaterFrag();
+            waterMat.colorNode   = frag.rgb;
+            waterMat.opacityNode = frag.a;
+            water.material = waterMat;
+            waterReflector.target.visible = PARAMS.water.reflections;
+            seabed.visible = true;
+          } else {
+            // Simple flat color — near-zero cost
+            water.material = simpleWaterMat;
+            waterReflector.target.visible = false;
+            seabed.visible = false;
+          }
+        }
+
+        // Init: apply based on default
+        {
+          const frag = PARAMS.water.reflections ? buildWaterFragWithReflection() : buildWaterFrag();
+          waterMat.colorNode   = frag.rgb;
+          waterMat.opacityNode = frag.a;
+        }
+        setWaterStyle(PARAMS.water.stylized);
 
         function syncFog() {
           uFogColor.value.set(PARAMS.fog.color).convertSRGBToLinear();
@@ -2572,34 +2772,36 @@
           "River strip": { w: 8, l: 50 },
         };
 
-        const uWaterColor = uniform(
-          new THREE.Color(PARAMS.water.color).convertSRGBToLinear(),
-        );
-        const uWaterOpacity = uniform(PARAMS.water.opacity);
-        const uWaterRoughness = uniform(PARAMS.water.roughness);
-
-        const waterBodyMat = new MeshStandardNodeMaterial({
+        // Water bodies use the same anime Voronoi shader (no reflector)
+        const waterBodyMat = new MeshBasicNodeMaterial({
           transparent: true,
           depthWrite: false,
           side: THREE.DoubleSide,
         });
-        waterBodyMat.colorNode   = buildWaterColor();
-        waterBodyMat.opacityNode = buildWaterOpacity();
-        waterBodyMat.roughnessNode = uWaterRoughness;
-        waterBodyMat.metalnessNode = float(0.0);
-        waterBodyMat.fog = false;
+        {
+          const bFrag = buildWaterFrag();
+          waterBodyMat.colorNode   = bFrag.rgb;
+          waterBodyMat.opacityNode = bFrag.a;
+        }
 
         function syncWaterMat() {
-          uWaterColor.value.set(PARAMS.water.color).convertSRGBToLinear();
-          uWaterOpacity.value = PARAMS.water.opacity;
-          uWaterRoughness.value = PARAMS.water.roughness;
-          uWaterShallow.value.set(PARAMS.water.shallowColor).convertSRGBToLinear();
-          uWaterDeep.value.set(PARAMS.water.deepColor).convertSRGBToLinear();
-          uWaterFoamCol.value.set(PARAMS.water.foamColor).convertSRGBToLinear();
-          uWaterDepthFade.value = PARAMS.water.depthFade;
-          uWaterFoamDepth.value = PARAMS.water.foamDepth;
-          uWaterWaveSpeed.value = PARAMS.water.waveSpeed;
-          uWaterWaveScale.value = PARAMS.water.waveScale;
+          uWScale.value        = PARAMS.water.scale;
+          uWEdgeThresh.value   = PARAMS.water.edgeThreshold;
+          uWFlowZ.value        = PARAMS.water.flowZ;
+          uWCellSpeed.value    = PARAMS.water.cellSpeed;
+          uWNoiseScale.value   = PARAMS.water.noiseScale;
+          uWNoiseTime.value    = PARAMS.water.noiseTimeScale;
+          uWDistort.value      = PARAMS.water.distort;
+          uWDeepColor.value.set(PARAMS.water.deepColor);
+          uWMidColor.value.set(PARAMS.water.midColor);
+          uWHighlight.value.set(PARAMS.water.highlightColor);
+          uWOpacity.value      = PARAMS.water.opacity;
+          uWLineWidth.value    = PARAMS.water.lineWidth;
+          uWGlowWidth.value    = PARAMS.water.glowWidth;
+          uWLineIntensity.value= PARAMS.water.waterlineIntensity;
+          uWLineColor.value.set(PARAMS.water.foamColor);
+          uRippleWidth.value   = PARAMS.water.rippleWidth;
+          uRippleStr.value     = PARAMS.water.rippleStrength;
         }
 
         function getWaterRoot(object) {
@@ -3697,6 +3899,8 @@
         });
         lightFolder.addBlade({ view: "separator" });
         const csmFolder = lightFolder.addFolder({ title: "Shadows (CSM)", expanded: false });
+        csmFolder.addBinding(PARAMS.csm, "enabled", { label: "CSM enabled" })
+          .on("change", ({ value }) => setCsmEnabled(value));
         csmFolder.addBinding(PARAMS.csm, "updateEveryFrame", { label: "Update every frame" });
         csmFolder.addBinding(PARAMS, "shadowBias", {
           label: "Bias", min: -0.01, max: 0.001, step: 0.0001,
@@ -4215,32 +4419,32 @@
         waterFolder.hidden = true;
 
         waterFolder
-          .addBinding(PARAMS.water, "color", { label: "Color" })
-          .on("change", syncWaterMat);
-        waterFolder
-          .addBinding(PARAMS.water, "opacity", {
-            label: "Opacity",
-            min: 0.1,
-            max: 1,
-            step: 0.01,
-          })
-          .on("change", syncWaterMat);
-        waterFolder
-          .addBinding(PARAMS.water, "roughness", {
-            label: "Roughness",
-            min: 0,
-            max: 1,
-            step: 0.01,
-          })
-          .on("change", syncWaterMat);
+          .addBinding(PARAMS.water, "stylized", { label: "Stylized water (perf heavy)" })
+          .on("change", ({ value }) => setWaterStyle(value));
         waterFolder.addBlade({ view: "separator" });
-        waterFolder.addBinding(PARAMS.water, "shallowColor", { label: "Shallow colour" }).on("change", syncWaterMat);
-        waterFolder.addBinding(PARAMS.water, "deepColor",    { label: "Deep colour"    }).on("change", syncWaterMat);
-        waterFolder.addBinding(PARAMS.water, "foamColor",    { label: "Foam colour"    }).on("change", syncWaterMat);
-        waterFolder.addBinding(PARAMS.water, "depthFade",  { label: "Depth fade",  min: 0.5, max: 30,  step: 0.1 }).on("change", syncWaterMat);
-        waterFolder.addBinding(PARAMS.water, "foamDepth",  { label: "Foam depth",  min: 0.1, max: 10,  step: 0.1 }).on("change", syncWaterMat);
-        waterFolder.addBinding(PARAMS.water, "waveSpeed",  { label: "Wave speed",  min: 0,   max: 2,   step: 0.01 }).on("change", syncWaterMat);
-        waterFolder.addBinding(PARAMS.water, "waveScale",  { label: "Wave scale",  min: 0,   max: 1,   step: 0.01 }).on("change", syncWaterMat);
+        // ── Voronoi surface ──
+        waterFolder.addBinding(PARAMS.water, "deepColor",      { label: "Deep colour"      }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "midColor",       { label: "Mid colour"       }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "highlightColor", { label: "Highlight colour" }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "opacity",        { label: "Opacity",         min: 0.1, max: 1,    step: 0.01 }).on("change", syncWaterMat);
+        waterFolder.addBlade({ view: "separator" });
+        waterFolder.addBinding(PARAMS.water, "scale",          { label: "Cell scale",      min: 0.05, max: 2,   step: 0.01 }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "cellSpeed",      { label: "Cell speed",      min: 0.05, max: 1.5, step: 0.05 }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "noiseScale",     { label: "Noise scale",     min: 0.3,  max: 4,   step: 0.02 }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "noiseTimeScale", { label: "Noise time",      min: 0.1,  max: 1.5, step: 0.05 }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "distort",        { label: "Distort",         min: 0,    max: 1,   step: 0.02 }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "flowZ",          { label: "Flow Z",          min: 0,    max: 0.3, step: 0.01 }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "edgeThreshold",  { label: "Edge threshold",  min: 0.02, max: 0.2, step: 0.005 }).on("change", syncWaterMat);
+        waterFolder.addBlade({ view: "separator" });
+        // ── Shore foam ──
+        waterFolder.addBinding(PARAMS.water, "foamColor",          { label: "Foam colour"     }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "lineWidth",          { label: "Foam width",      min: 0.05, max: 5,   step: 0.05 }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "glowWidth",          { label: "Foam glow",       min: 0.2,  max: 10,  step: 0.1  }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "waterlineIntensity", { label: "Foam intensity",  min: 0,    max: 5,   step: 0.1  }).on("change", syncWaterMat);
+        waterFolder.addBlade({ view: "separator" });
+        // ── Ripples ──
+        waterFolder.addBinding(PARAMS.water, "rippleStrength", { label: "Ripple strength", min: 0, max: 15, step: 0.5 }).on("change", syncWaterMat);
+        waterFolder.addBinding(PARAMS.water, "rippleWidth",    { label: "Ripple width",    min: 0.02, max: 0.4, step: 0.01 }).on("change", syncWaterMat);
         waterFolder.addBlade({ view: "separator" });
         waterFolder.addBinding(PARAMS.water, "sinkOffset", {
           label: "Sink offset",
@@ -4257,6 +4461,13 @@
             "River strip": "River strip",
           },
         });
+        waterFolder.addBlade({ view: "separator" });
+        waterFolder
+          .addBinding(PARAMS.water, "reflections", { label: "Reflections (ocean)" })
+          .on("change", ({ value }) => setWaterReflections(value));
+        waterFolder
+          .addBinding(PARAMS.water, "reflectionStrength", { label: "Refl. strength", min: 0, max: 1, step: 0.01 })
+          .on("change", ({ value }) => { uReflStrength.value = value; });
         waterFolder.addBlade({ view: "separator" });
         waterFolder
           .addButton({ title: "Save water JSON" })
@@ -4615,6 +4826,15 @@
 
         renderer.domElement.addEventListener("mousedown", (e) => {
           if (e.button !== 0) return;
+          // Ripple on ocean water click (any mode)
+          {
+            const rect = renderer.domElement.getBoundingClientRect();
+            const mx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            const my = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+            raycaster.setFromCamera(new THREE.Vector2(mx, my), camera);
+            const wHit = raycaster.intersectObject(water, false);
+            if (wHit.length > 0) rippleAdd(wHit[0].point.x, wHit[0].point.z);
+          }
           if (currentMode === "view") return;
 
           if (currentMode === "place") {
@@ -4940,6 +5160,8 @@
 
           if (grassUniforms) grassUniforms.uTime.value = elapsed;
           uWaterTime.value = elapsed;
+          uWCamXZ.value.set(camera.position.x, camera.position.z);
+          _syncRipples();
           if (grassPatchSystem) {
             camera.updateMatrixWorld();
             _grassProjMatrix.multiplyMatrices(
@@ -4961,11 +5183,11 @@
           dirLight.shadow.normalBias = PARAMS.shadowNormalBias;
 
           // CSM: rebuild cascades if params changed
-          const _csmChanged =
+          const _csmChanged = PARAMS.csm.enabled && (
             PARAMS.csm.cascades    !== _lastCsmCascades ||
             PARAMS.csm.maxFar      !== _lastCsmMaxFar   ||
             PARAMS.csm.lightMargin !== _lastCsmMargin   ||
-            PARAMS.csm.mapSize     !== _lastCsmMapSize;
+            PARAMS.csm.mapSize     !== _lastCsmMapSize);
           if (csm.mainFrustum && _csmChanged) {
             _lastCsmCascades = PARAMS.csm.cascades;
             _lastCsmMaxFar   = PARAMS.csm.maxFar;
@@ -4977,7 +5199,7 @@
             dirLight.shadow.mapSize.set(PARAMS.csm.mapSize, PARAMS.csm.mapSize);
             csm.updateFrustums();
           }
-          if (csm.mainFrustum && PARAMS.csm.updateEveryFrame) csm.updateFrustums();
+          if (csm.mainFrustum && PARAMS.csm.enabled && PARAMS.csm.updateEveryFrame) csm.updateFrustums();
           hemiLight.color.set(PARAMS.light.hemiSkyColor);
           hemiLight.groundColor.set(PARAMS.light.hemiGroundColor);
           hemiLight.intensity = PARAMS.light.hemiIntensity;
