@@ -180,6 +180,11 @@
           <option value="erosionDissolve">Erosion Dissolve</option>
           <option value="spinSlashArc">Spin Slash Arc</option>
           <option value="bladeSlashTrail">Blade Slash Trail</option>
+          <option value="runDust">Run Dust (Particles)</option>
+          <option value="landingDust">Landing Dust (Particles)</option>
+          <option value="swimSplash">Swim Splash (Particles)</option>
+          <option value="waterMist">Water Mist (Particles)</option>
+          <option value="bubbleTrail">Bubble Trail (Particles)</option>
           <option value="holyBurst">Holy Burst</option>
           <option value="lightningBurst">Lightning Ring</option>
           <option value="waterBurst">Water Burst</option>
@@ -281,6 +286,13 @@
       let floorMaterials = {};
       let emissiveMaterials = {};
       let darkMaterials = {};
+      let particlePoints = null;
+      let particleMaterial = null;
+      let particleState = null;
+      let particleSpawnCarry = 0;
+      let particleTextures = null;
+      let particleColorStart = new THREE.Color("#c9b9a0");
+      let particleColorEnd = new THREE.Color("#3a322b");
 
       const params = {
         // Effect identity
@@ -306,6 +318,25 @@
         arcCenter: 0.5,
         arcWidth: 0.18,
         arcRotationSpeed: 1.0,
+
+        // Particle mode (locomotion FX)
+        particleEnabled: false,
+        particleSpawnRate: 120,
+        particleBurst: 14,
+        particleLifetime: 0.7,
+        particleLifetimeJitter: 0.35,
+        particleSpeed: 1.0,
+        particleSpeedJitter: 0.7,
+        particleSpread: 1.1,
+        particleUpBias: 0.8,
+        particleGravity: -2.3,
+        particleDrag: 2.0,
+        particleSize: 0.11,
+        particleArea: 0.18,
+        particleAdditive: false,
+        particleStyle: "dust",
+        particleColorA: "#c9b9a0",
+        particleColorB: "#3a322b",
 
         // Layers
         floorEnabled: true,
@@ -426,6 +457,213 @@
         }
       }
 
+      function makeSoftParticleTexture() {
+        const size = 128;
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        const g = ctx.createRadialGradient(size * 0.5, size * 0.5, 0, size * 0.5, size * 0.5, size * 0.5);
+        g.addColorStop(0.0, "rgba(255,255,255,1)");
+        g.addColorStop(0.35, "rgba(255,255,255,0.7)");
+        g.addColorStop(1.0, "rgba(255,255,255,0)");
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, size, size);
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        return tex;
+      }
+
+      function makeRingParticleTexture() {
+        const size = 128;
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        const cx = size * 0.5;
+        const cy = size * 0.5;
+        const r = size * 0.36;
+        ctx.clearRect(0, 0, size, size);
+        ctx.strokeStyle = "rgba(255,255,255,1)";
+        ctx.lineWidth = size * 0.13;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.stroke();
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        return tex;
+      }
+
+      function makeSplashParticleTexture() {
+        const size = 128;
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, size, size);
+        ctx.translate(size * 0.5, size * 0.5);
+        ctx.rotate(-Math.PI * 0.35);
+        const g = ctx.createLinearGradient(-size * 0.35, 0, size * 0.35, 0);
+        g.addColorStop(0.0, "rgba(255,255,255,0)");
+        g.addColorStop(0.45, "rgba(255,255,255,0.9)");
+        g.addColorStop(1.0, "rgba(255,255,255,0)");
+        ctx.fillStyle = g;
+        ctx.fillRect(-size * 0.4, -size * 0.09, size * 0.8, size * 0.18);
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        return tex;
+      }
+
+      function makeSparkParticleTexture() {
+        const size = 128;
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, size, size);
+        ctx.translate(size * 0.5, size * 0.5);
+        ctx.fillStyle = "rgba(255,255,255,1)";
+        for (let i = 0; i < 6; i++) {
+          ctx.rotate(Math.PI / 3);
+          ctx.fillRect(size * 0.02, -size * 0.045, size * 0.33, size * 0.09);
+        }
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        return tex;
+      }
+
+      function initParticleSystem(sceneRef) {
+        const maxParticles = 2000;
+        const positions = new Float32Array(maxParticles * 3);
+        const colors = new Float32Array(maxParticles * 3);
+        const uvs = new Float32Array(maxParticles * 2);
+        const life = new Float32Array(maxParticles);
+        const maxLife = new Float32Array(maxParticles);
+        const vel = new Float32Array(maxParticles * 3);
+        const alive = new Uint8Array(maxParticles);
+
+        // WebGPU points path may request uv; provide a valid attribute for all particles.
+        for (let i = 0; i < maxParticles; i++) {
+          const ui = i * 2;
+          uvs[ui + 0] = 0.5;
+          uvs[ui + 1] = 0.5;
+        }
+
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+        geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+
+        particleTextures = {
+          dust: makeSoftParticleTexture(),
+          mist: makeSoftParticleTexture(),
+          bubble: makeRingParticleTexture(),
+          splash: makeSplashParticleTexture(),
+          spark: makeSparkParticleTexture()
+        };
+
+        particleMaterial = new THREE.PointsMaterial({
+          map: particleTextures.dust,
+          transparent: true,
+          depthWrite: false,
+          sizeAttenuation: true,
+          size: params.particleSize,
+          vertexColors: true,
+          opacity: 0.9,
+          blending: THREE.NormalBlending
+        });
+
+        particlePoints = new THREE.Points(geometry, particleMaterial);
+        particlePoints.visible = false;
+        sceneRef.add(particlePoints);
+
+        particleState = { maxParticles, positions, colors, life, maxLife, vel, alive, geometry };
+      }
+
+      function spawnParticles(count) {
+        if (!particleState || !params.particleEnabled) return;
+        const { maxParticles, positions, colors, life, maxLife, vel, alive } = particleState;
+
+        for (let s = 0; s < count; s++) {
+          let i = -1;
+          for (let k = 0; k < maxParticles; k++) {
+            if (!alive[k]) {
+              i = k;
+              break;
+            }
+          }
+          if (i < 0) return;
+
+          alive[i] = 1;
+          const li = i * 3;
+          const ang = Math.random() * Math.PI * 2;
+          const r = Math.sqrt(Math.random()) * params.particleArea;
+
+          positions[li + 0] = Math.cos(ang) * r;
+          positions[li + 1] = 0.02 + Math.random() * 0.03;
+          positions[li + 2] = Math.sin(ang) * r;
+
+          const speed =
+            params.particleSpeed + (Math.random() * 2 - 1) * params.particleSpeed * params.particleSpeedJitter;
+          vel[li + 0] = Math.cos(ang) * params.particleSpread * speed;
+          vel[li + 1] = params.particleUpBias * speed * (0.7 + Math.random() * 0.6);
+          vel[li + 2] = Math.sin(ang) * params.particleSpread * speed;
+
+          const lifeTime =
+            params.particleLifetime +
+            (Math.random() * 2 - 1) * params.particleLifetime * params.particleLifetimeJitter;
+          maxLife[i] = Math.max(0.05, lifeTime);
+          life[i] = maxLife[i];
+        }
+      }
+
+      function updateParticles(dt) {
+        if (!particleState || !particlePoints) return;
+        particlePoints.visible = params.particleEnabled;
+        if (!params.particleEnabled) return;
+
+        const { maxParticles, positions, colors, life, maxLife, vel, alive, geometry } = particleState;
+        const drag = Math.max(0, 1 - params.particleDrag * dt);
+
+        particleSpawnCarry += params.particleSpawnRate * dt;
+        const spawnCount = Math.floor(particleSpawnCarry);
+        particleSpawnCarry -= spawnCount;
+        if (spawnCount > 0) spawnParticles(spawnCount);
+
+        for (let i = 0; i < maxParticles; i++) {
+          if (!alive[i]) continue;
+          const li = i * 3;
+
+          life[i] -= dt;
+          if (life[i] <= 0) {
+            alive[i] = 0;
+            colors[li + 0] = 0;
+            colors[li + 1] = 0;
+            colors[li + 2] = 0;
+            continue;
+          }
+
+          vel[li + 1] += params.particleGravity * dt;
+          vel[li + 0] *= drag;
+          vel[li + 1] *= drag;
+          vel[li + 2] *= drag;
+
+          positions[li + 0] += vel[li + 0] * dt;
+          positions[li + 1] += vel[li + 1] * dt;
+          positions[li + 2] += vel[li + 2] * dt;
+
+          const t = 1 - life[i] / maxLife[i];
+          const fade = (1 - t) * (1 - t);
+          const c = particleColorStart.clone().lerp(particleColorEnd, t);
+          colors[li + 0] = c.r * fade;
+          colors[li + 1] = c.g * fade;
+          colors[li + 2] = c.b * fade;
+        }
+
+        geometry.attributes.position.needsUpdate = true;
+        geometry.attributes.color.needsUpdate = true;
+      }
+
       function applyEffectDefaults(effectType) {
         // Note: keep this list small & gameplay-oriented. Users can tune everything afterwards.
         if (effectType === "tornado") {
@@ -451,6 +689,7 @@
           params.floorAlphaWidth = 0.01;
           params.columnAlphaWidth = 0.1;
           params.darkAlphaWidth = 0.01;
+          params.particleEnabled = false;
           return;
         }
 
@@ -460,6 +699,7 @@
         params.arcCenter = 0.5;
         params.arcWidth = 0.18;
         params.arcRotationSpeed = 1.0;
+        params.particleEnabled = false;
 
         if (effectType === "shockwave") {
           params.emissiveColor = "#66ffff";
@@ -838,6 +1078,126 @@
           return;
         }
 
+        if (effectType === "runDust") {
+          params.floorEnabled = false;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+          params.particleEnabled = true;
+          params.particleSpawnRate = 220;
+          params.particleBurst = 16;
+          params.particleLifetime = 0.55;
+          params.particleLifetimeJitter = 0.35;
+          params.particleSpeed = 1.0;
+          params.particleSpeedJitter = 0.6;
+          params.particleSpread = 1.4;
+          params.particleUpBias = 0.75;
+          params.particleGravity = -2.8;
+          params.particleDrag = 2.6;
+          params.particleSize = 0.12;
+          params.particleArea = 0.22;
+          params.particleAdditive = false;
+          params.particleStyle = "dust";
+          params.particleColorA = "#c9b9a0";
+          params.particleColorB = "#3a322b";
+          return;
+        }
+
+        if (effectType === "landingDust") {
+          params.floorEnabled = false;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+          params.particleEnabled = true;
+          params.particleSpawnRate = 40;
+          params.particleBurst = 70;
+          params.particleLifetime = 0.72;
+          params.particleLifetimeJitter = 0.25;
+          params.particleSpeed = 1.6;
+          params.particleSpeedJitter = 0.8;
+          params.particleSpread = 1.8;
+          params.particleUpBias = 1.1;
+          params.particleGravity = -3.6;
+          params.particleDrag = 2.1;
+          params.particleSize = 0.13;
+          params.particleArea = 0.3;
+          params.particleAdditive = false;
+          params.particleStyle = "dust";
+          params.particleColorA = "#d1c5b0";
+          params.particleColorB = "#3c352c";
+          return;
+        }
+
+        if (effectType === "swimSplash") {
+          params.floorEnabled = false;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+          params.particleEnabled = true;
+          params.particleSpawnRate = 180;
+          params.particleBurst = 26;
+          params.particleLifetime = 0.62;
+          params.particleLifetimeJitter = 0.35;
+          params.particleSpeed = 1.35;
+          params.particleSpeedJitter = 0.55;
+          params.particleSpread = 1.25;
+          params.particleUpBias = 1.35;
+          params.particleGravity = -4.2;
+          params.particleDrag = 2.6;
+          params.particleSize = 0.11;
+          params.particleArea = 0.22;
+          params.particleAdditive = false;
+          params.particleStyle = "splash";
+          params.particleColorA = "#ccefff";
+          params.particleColorB = "#4a6f82";
+          return;
+        }
+
+        if (effectType === "waterMist") {
+          params.floorEnabled = false;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+          params.particleEnabled = true;
+          params.particleSpawnRate = 260;
+          params.particleBurst = 18;
+          params.particleLifetime = 1.1;
+          params.particleLifetimeJitter = 0.45;
+          params.particleSpeed = 0.62;
+          params.particleSpeedJitter = 0.45;
+          params.particleSpread = 0.95;
+          params.particleUpBias = 0.7;
+          params.particleGravity = -0.7;
+          params.particleDrag = 3.4;
+          params.particleSize = 0.16;
+          params.particleArea = 0.28;
+          params.particleAdditive = false;
+          params.particleStyle = "mist";
+          params.particleColorA = "#e9fbff";
+          params.particleColorB = "#6f95a2";
+          return;
+        }
+
+        if (effectType === "bubbleTrail") {
+          params.floorEnabled = false;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+          params.particleEnabled = true;
+          params.particleSpawnRate = 160;
+          params.particleBurst = 12;
+          params.particleLifetime = 1.3;
+          params.particleLifetimeJitter = 0.35;
+          params.particleSpeed = 0.45;
+          params.particleSpeedJitter = 0.35;
+          params.particleSpread = 0.45;
+          params.particleUpBias = 1.6;
+          params.particleGravity = 0.25;
+          params.particleDrag = 1.2;
+          params.particleSize = 0.09;
+          params.particleArea = 0.16;
+          params.particleAdditive = true;
+          params.particleStyle = "bubble";
+          params.particleColorA = "#d8fcff";
+          params.particleColorB = "#7ec2d1";
+          return;
+        }
+
         if (effectType === "firePillar") {
           params.emissiveColor = "#ff8b4d";
           params.timeScale = 0.25;
@@ -898,6 +1258,9 @@
         if (darkMesh) darkMesh.material = darkMaterials[effectType] || darkMaterials.tornado;
 
         applyParamsToEngine();
+        if (params.particleEnabled && params.particleBurst > 0) {
+          spawnParticles(params.particleBurst);
+        }
         if (pane) pane.refresh();
       }
 
@@ -918,6 +1281,8 @@
         controls.enableDamping = true;
         controls.minDistance = 0.1;
         controls.maxDistance = 50;
+
+        initParticleSystem(scene);
 
         // Load noise texture used by the shader
         const perlinTexture = await loadTexture("./textures/noises/rgb-256x256.png");
@@ -1625,6 +1990,39 @@
           .addBinding(params, "bloomThreshold", { min: 0, max: 2, step: 0.01 })
           .on("change", syncFromParams);
 
+        const fParticles = pane.addFolder({ title: "Particles" });
+        fParticles.addBinding(params, "particleEnabled").on("change", syncFromParams);
+        fParticles.addBinding(params, "particleSpawnRate", { min: 0, max: 500, step: 1 }).on("change", syncFromParams);
+        fParticles.addBinding(params, "particleBurst", { min: 0, max: 120, step: 1 }).on("change", syncFromParams);
+        fParticles.addBinding(params, "particleLifetime", { min: 0.05, max: 3, step: 0.01 }).on("change", syncFromParams);
+        fParticles
+          .addBinding(params, "particleLifetimeJitter", { min: 0, max: 1, step: 0.01 })
+          .on("change", syncFromParams);
+        fParticles.addBinding(params, "particleSpeed", { min: 0, max: 8, step: 0.01 }).on("change", syncFromParams);
+        fParticles
+          .addBinding(params, "particleSpeedJitter", { min: 0, max: 1, step: 0.01 })
+          .on("change", syncFromParams);
+        fParticles.addBinding(params, "particleSpread", { min: 0, max: 3, step: 0.01 }).on("change", syncFromParams);
+        fParticles.addBinding(params, "particleUpBias", { min: 0, max: 4, step: 0.01 }).on("change", syncFromParams);
+        fParticles.addBinding(params, "particleGravity", { min: -12, max: 4, step: 0.01 }).on("change", syncFromParams);
+        fParticles.addBinding(params, "particleDrag", { min: 0, max: 10, step: 0.01 }).on("change", syncFromParams);
+        fParticles.addBinding(params, "particleSize", { min: 0.01, max: 0.5, step: 0.005 }).on("change", syncFromParams);
+        fParticles.addBinding(params, "particleArea", { min: 0.01, max: 2, step: 0.01 }).on("change", syncFromParams);
+        fParticles.addBinding(params, "particleAdditive").on("change", syncFromParams);
+        fParticles
+          .addBinding(params, "particleStyle", {
+            options: {
+              Dust: "dust",
+              Mist: "mist",
+              Splash: "splash",
+              Bubble: "bubble",
+              Spark: "spark"
+            }
+          })
+          .on("change", syncFromParams);
+        fParticles.addBinding(params, "particleColorA").on("change", syncFromParams);
+        fParticles.addBinding(params, "particleColorB").on("change", syncFromParams);
+
         applyParamsToEngine();
         pane.refresh();
 
@@ -1654,49 +2052,53 @@
         btnReset.addEventListener("click", () => {
           elapsed = 0;
           u.time.value = 0;
+          if (params.particleEnabled) spawnParticles(params.particleBurst);
         });
 
         // Preset buttons
         const presets = loadPresets();
 
-        // Seed starter presets once (so the dropdown immediately shows lots of options).
-        if (Object.keys(presets).length === 0) {
-          const originalEffect = params.effectType;
+        // Ensure built-in starter presets exist (without overwriting user-edited ones).
+        const originalEffect = params.effectType;
+        const addPresetIfMissing = (name, effectType) => {
+          if (presets[name]) return;
+          setEffectType(effectType, true);
+          presets[name] = getPresetData();
+        };
 
-          const addPreset = (name, effectType) => {
-            setEffectType(effectType, true);
-            presets[name] = getPresetData();
-          };
+        addPresetIfMissing("Tornado", "tornado");
+        addPresetIfMissing("Ground Shockwave", "shockwave");
+        addPresetIfMissing("Ice Nova", "iceNova");
+        addPresetIfMissing("Charge Aura", "chargeAura");
+        addPresetIfMissing("Shadow Burst", "shadowBurst");
+        addPresetIfMissing("Spin Slash Arc", "spinSlashArc");
+        addPresetIfMissing("Blade Slash Trail", "bladeSlashTrail");
 
-          addPreset("Tornado", "tornado");
-          addPreset("Ground Shockwave", "shockwave");
-          addPreset("Ice Nova", "iceNova");
-          addPreset("Charge Aura", "chargeAura");
-          addPreset("Shadow Burst", "shadowBurst");
-          addPreset("Spin Slash Arc", "spinSlashArc");
-          addPreset("Blade Slash Trail", "bladeSlashTrail");
+        addPresetIfMissing("Holy Burst", "holyBurst");
+        addPresetIfMissing("Lightning Ring", "lightningBurst");
+        addPresetIfMissing("Water Burst", "waterBurst");
+        addPresetIfMissing("Fire Explosion", "fireExplosion");
+        addPresetIfMissing("Sand Dust Impact", "sandDustImpact");
+        addPresetIfMissing("Poison Aura", "poisonBurst");
+        addPresetIfMissing("Portal Ring", "portalRing");
+        addPresetIfMissing("Wind Slash Arc", "windSlashArc");
+        addPresetIfMissing("Shadow Crescent", "shadowCrescent");
+        addPresetIfMissing("Frost Nova", "frostNova");
 
-          addPreset("Holy Burst", "holyBurst");
-          addPreset("Lightning Ring", "lightningBurst");
-          addPreset("Water Burst", "waterBurst");
-          addPreset("Fire Explosion", "fireExplosion");
-          addPreset("Sand Dust Impact", "sandDustImpact");
-          addPreset("Poison Aura", "poisonBurst");
-          addPreset("Portal Ring", "portalRing");
-          addPreset("Wind Slash Arc", "windSlashArc");
-          addPreset("Shadow Crescent", "shadowCrescent");
-          addPreset("Frost Nova", "frostNova");
+        addPresetIfMissing("Fire Pillar", "firePillar");
+        addPresetIfMissing("Ice Pillar", "icePillar");
 
-          addPreset("Fire Pillar", "firePillar");
-          addPreset("Ice Pillar", "icePillar");
+        addPresetIfMissing("Voronoi Crack Impact", "voronoiCrackImpact");
+        addPresetIfMissing("Erosion Dissolve", "erosionDissolve");
+        addPresetIfMissing("Run Dust (Particles)", "runDust");
+        addPresetIfMissing("Landing Dust (Particles)", "landingDust");
+        addPresetIfMissing("Swim Splash (Particles)", "swimSplash");
+        addPresetIfMissing("Water Mist (Particles)", "waterMist");
+        addPresetIfMissing("Bubble Trail (Particles)", "bubbleTrail");
 
-          addPreset("Voronoi Crack Impact", "voronoiCrackImpact");
-          addPreset("Erosion Dissolve", "erosionDissolve");
-
-          // Restore whatever the UI started on.
-          setEffectType(originalEffect, true);
-          savePresets(presets);
-        }
+        // Restore whatever the UI started on.
+        setEffectType(originalEffect, true);
+        savePresets(presets);
 
         populatePresetSelect(presets);
         const presetSelect = document.getElementById("presetSelect");
@@ -1756,6 +2158,7 @@
           if (playing) elapsed += dt;
           u.time.value = elapsed;
 
+          updateParticles(Math.min(dt, 0.05));
           controls.update();
           renderPipeline.render();
         }
@@ -1818,6 +2221,22 @@
           bloomPass.radius.value = params.bloomRadius;
           bloomPass.threshold.value = params.bloomThreshold;
         }
+
+        if (particleMaterial) {
+          particleMaterial.size = params.particleSize;
+          particleMaterial.blending = params.particleAdditive
+            ? THREE.AdditiveBlending
+            : THREE.NormalBlending;
+          particleMaterial.opacity = params.particleAdditive ? 0.75 : 0.95;
+          if (particleTextures) {
+            particleMaterial.map = particleTextures[params.particleStyle] || particleTextures.dust;
+          }
+          particleMaterial.needsUpdate = true;
+        }
+
+        particleColorStart.set(params.particleColorA);
+        particleColorEnd.set(params.particleColorB);
+        if (particlePoints) particlePoints.visible = params.particleEnabled;
       }
 
       init().catch((err) => {

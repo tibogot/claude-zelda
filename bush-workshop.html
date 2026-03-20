@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Bush Workshop (Leaves Only)</title>
+    <link rel="icon" href="data:," />
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; }
       body { overflow: hidden; background: #000; }
@@ -40,6 +41,7 @@
       {
         "imports": {
           "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
           "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
           "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
           "tweakpane": "https://esm.sh/tweakpane@4.0.4"
@@ -312,7 +314,7 @@
             .sub(effectiveThreshold);
           const alphaNormal = foliageSDF.sub(effectiveThreshold);
           return mix(alphaSeeThrough, alphaNormal, float(1).sub(seeThroughUniform));
-        });
+        })();
 
         const colorNode = Fn(() => {
           const NdotL = normalWorld.dot(lightDirUniform);
@@ -343,7 +345,7 @@
           col = clamp(col.mul(brightness).add(tint), 0, 1);
 
           return col;
-        });
+        })();
 
         const material = new THREE.MeshLambertNodeMaterial({
           transparent: true,
@@ -357,28 +359,21 @@
         material.outputNode = Fn(() => {
           alphaNode.lessThan(alphaTestUniform).discard();
           return vec4(colorNode, alphaNode);
-        });
+        })();
 
         material.depthNode = Fn(() => {
           const dist = length(sub(positionWorld, cameraPosition));
           const fade = smoothstep(depthFadeNearUniform, depthFadeFarUniform, dist);
           const conditionalDepth = mix(float(1), depth, fade);
           return mix(depth, conditionalDepth, conditionalDepthEnabledUniform);
-        });
+        })();
 
-        // Shadow pass uses SDF alpha threshold so shadows match leaf silhouette.
-        material.castShadowNode = Fn(() => {
-          const thresholdOffset = hash(instanceIndex).sub(0.5).mul(2).mul(leafShapeVariationUniform);
-          const effectiveThreshold = alphaThresholdUniform.add(thresholdOffset);
-          const shadowAlpha = foliageAlpha().sub(effectiveThreshold);
-          shadowAlpha.lessThan(alphaTestUniform).discard();
-          return vec4(0, 0, 0, 1);
-        });
+        // NOTE: disabled custom castShadowNode for stability on some WebGPU builds.
 
         const count = references.length * Math.max(1, orientationsPerInstance);
         const mesh = new THREE.InstancedMesh(geometry, material, count);
         mesh.receiveShadow = true;
-        mesh.castShadow = true;
+        mesh.castShadow = false;
         mesh.frustumCulled = false;
 
         const instanceMatrixAttr = new THREE.InstancedBufferAttribute(new Float32Array(count * 16), 16);
@@ -416,7 +411,7 @@
         material.positionNode = Fn(({ object }) => {
           instance(object.count, instanceMatrixAttr).toStack();
           return positionLocal;
-        });
+        })();
 
         scene.add(mesh);
 
@@ -668,7 +663,7 @@
       let bushFoliage = null;
       let foliageTexture = null;
 
-      const clock = new THREE.Clock();
+      const clock = new THREE.Timer();
 
       const DEFAULT_TEXTURE_URL = "textures/image 128.png";
 
@@ -682,7 +677,7 @@
         sssColor: "#60b830",
 
         // Mask / leaf shape
-        alphaThresh: 0.22,
+        alphaThresh: 0.35,
         alphaTest: 0.08,
         shapeVar: 0.10,
         baseContact: 0.40,
@@ -744,11 +739,13 @@
 
       function setTextureFilters(t) {
         // We want crisp SDF/alpha edges: Nearest + no mipmaps (like folio).
-        t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+        // Repeat wrapping avoids edge-smear artifacts when UVs are rotated for wind.
+        t.wrapS = t.wrapT = THREE.RepeatWrapping;
         t.minFilter = THREE.NearestFilter;
         t.magFilter = THREE.NearestFilter;
         t.generateMipmaps = false;
         if (t.colorSpace !== undefined) t.colorSpace = THREE.NoColorSpace;
+        t.premultiplyAlpha = false;
         t.needsUpdate = true;
       }
 
@@ -1083,6 +1080,7 @@
         // Render loop
         wind.strength.value = BUSH.windStrength;
         renderer.setAnimationLoop(() => {
+          clock.update();
           const delta = clock.getDelta();
           wind.update(delta);
           orbit.update();
