@@ -3,30 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Bush Workshop Simple</title>
+    <title>Bush Workshop</title>
     <link rel="icon" href="data:," />
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; }
       body { overflow: hidden; background: #000; }
       canvas { display: block; width: 100vw; height: 100vh; }
       .tp-dfwv {
-        position: fixed !important;
-        top: 14px !important;
-        right: 14px !important;
-        width: 300px !important;
-        z-index: 30;
-        max-height: calc(100vh - 28px) !important;
-        overflow-y: auto !important;
+        position: fixed !important; top: 14px !important; right: 14px !important;
+        width: 300px !important; z-index: 30;
+        max-height: calc(100vh - 28px) !important; overflow-y: auto !important;
       }
       #info {
-        position: fixed;
-        left: 14px;
-        bottom: 14px;
-        color: #b8e7a8;
-        background: rgba(0, 0, 0, 0.58);
-        padding: 8px 11px;
-        border-radius: 6px;
-        font: 12px/1.5 Consolas, monospace;
+        position: fixed; left: 14px; bottom: 14px; color: #b8e7a8;
+        background: rgba(0,0,0,0.55); padding: 8px 11px; border-radius: 6px;
+        font: 12px/1.5 Consolas, monospace; pointer-events: none;
       }
     </style>
     <script type="importmap">
@@ -46,101 +37,112 @@
     <script type="module">
       import * as THREE from "three";
       import {
-        uniform, Fn, vec2, vec3,
-        uv, sin, cos, mix, clamp, length, texture,
-        positionLocal, normalLocal, positionWorld, normalWorld
+        uniform, Fn, vec2, vec3, float,
+        uv, sin, cos, mix, clamp, length, smoothstep,
+        normalize, dot, pow, oneMinus, texture,
+        positionLocal, normalLocal, positionWorld, normalWorld,
+        cameraPosition, modelWorldMatrix, color
       } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { Pane } from "tweakpane";
 
       const PI = Math.PI;
 
-      // ─── Shape / card params (changing any of these requires a mesh rebuild) ──────
+      // ─── Parameters (rebuild on shape/card changes) ───────────────────────────────
       const PARAMS = {
-        seed: 42,
-        cards: 450,
-        radius: 2.5,
-        height: 2.0,
-        cardW: 1.3,
-        cardH: 1.0,
-        sizeJitter: 0.55,
-        pitchJitter: 0.4,
-        topTint: "#78d438",
-        bottomTint: "#1e5c0d",
-        colorVar: 0.12,
-        alphaCutoff: 0.42,
-        doubleSide: true,
-        // Live (no rebuild needed — drives TSL uniforms directly)
-        normalBlend:  1.0,
-        alphaCutoff:  0.42,
+        seed:         42,
+        cards:        500,
+        radius:       2.5,
+        height:       2.0,
+        cardW:        1.1,
+        cardH:        0.9,
+        sizeJitter:   0.5,
+        pitchJitter:  0.3,
+        doubleSide:   true,
+        // Colors — live uniforms
+        topTint:      "#a8e040",
+        midTint:      "#4a9a18",
+        bottomTint:   "#162e08",
+        // Alpha — live uniforms
+        alphaCutoff:  0.35,
         alphaBoost:   1.0,
         alphaPower:   1.0,
+        // Normals — live uniforms
+        normalBlend:  1.0,
+        leafWarp:     0.2,
+        // Lighting FX — live uniforms
+        aoStrength:   0.55,
+        sssStrength:  0.7,
+        sssColor:     "#ffe840",
+        rimStrength:  1.8,
+        rimPower:     3.5,
+        rimColor:     "#c8ffb0",
+        // Wind / Inflate — live uniforms
         effectBlend:  1.0,
-        inflateScale: 0.32,  // how far corners are pushed out (inflate radius)
-        inflate:      0.0,   // push along card normal (thickness)
-        windStrength: 0.07,  // sway amplitude
-        windSpeed:    1.0,   // how fast the cycle runs
+        inflateScale: 0.28,
+        inflate:      0.0,
+        windStrength: 0.06,
+        windSpeed:    1.0,
       };
 
-      // ─── TSL uniforms (persistent — survive mesh rebuilds) ────────────────────────
+      // ─── TSL uniforms (survive mesh rebuilds) ─────────────────────────────────────
       const uEffectBlend  = uniform(PARAMS.effectBlend);
       const uInflateScale = uniform(PARAMS.inflateScale);
       const uInflate      = uniform(PARAMS.inflate);
       const uWindStrength = uniform(PARAMS.windStrength);
       const uWindTime     = uniform(0.0);
-      const uNormalBlend  = uniform(1.0);
+
+      const uNormalBlend  = uniform(PARAMS.normalBlend);
+      const uLeafWarp     = uniform(PARAMS.leafWarp);
+
       const uAlphaCutoff  = uniform(PARAMS.alphaCutoff);
-      const uAlphaBoost   = uniform(1.0);  // multiplies alpha before test — raises/lowers density
-      const uAlphaPower   = uniform(1.0);  // power curve — >1 crisper edges, <1 softer/fuzzier
+      const uAlphaBoost   = uniform(PARAMS.alphaBoost);
+      const uAlphaPower   = uniform(PARAMS.alphaPower);
 
-      // ─── Vertex position node ─────────────────────────────────────────────────────
-      // Built once, reused on every material. TSL compiles it to WGSL/GLSL shader.
-      // Fn() defines a TSL function factory — calling it with () produces the node.
+      const uTopC         = uniform(color(PARAMS.topTint));
+      const uMidC         = uniform(color(PARAMS.midTint));
+      const uBotC         = uniform(color(PARAMS.bottomTint));
+
+      const uAO           = uniform(PARAMS.aoStrength);
+      const uSSS          = uniform(PARAMS.sssStrength);
+      const uSSSC         = uniform(color(PARAMS.sssColor));
+      const uRimS         = uniform(PARAMS.rimStrength);
+      const uRimP         = uniform(PARAMS.rimPower);
+      const uRimC         = uniform(color(PARAMS.rimColor));
+
+      // Sun direction matches our directional light position
+      const uSunDir       = uniform(new THREE.Vector3(8, 22, 10).normalize());
+      const uBushRadius   = uniform(PARAMS.radius);
+
+      // ─── Vertex position node (wind + UV-inflate) ─────────────────────────────────
       const bushPositionNode = Fn(() => {
-
-        // 1. UV INFLATE — the key trick from the reference shader
-        //    Remap UV [0,1] → [-1,1], flip X, normalize → unit direction per vertex.
-        //    Multiplying by inflateScale pushes each vertex outward from the card center
-        //    in local XY (card face plane). With enough inflate, a flat square becomes a
-        //    puffy hemisphere silhouette from any view angle.
-        const uvRaw     = uv().mul(2.0).sub(1.0);
-        const uvFlipped = vec2(uvRaw.x.negate(), uvRaw.y);
-        const uvDir     = uvFlipped.div(length(uvFlipped).max(0.001));
+        // UV inflate: remap UV [0,1]→[-1,1], flip X, normalize → per-vertex outward dir
+        // Multiplied by inflateScale → pushes corners out in card plane (billboard puff)
+        const uvRaw    = uv().mul(2.0).sub(1.0);
+        const uvDir    = vec2(uvRaw.x.negate(), uvRaw.y).div(length(vec2(uvRaw.x.negate(), uvRaw.y)).max(0.001));
         const inflateXY = uvDir.mul(uInflateScale);
-
-        const inflateVec = vec3(inflateXY.x, inflateXY.y, 0.0)
+        const inflateVec = vec3(inflateXY.x, inflateXY.y, float(0.0))
                             .add(normalLocal.mul(uInflate));
-
         const pos = positionLocal.add(mix(vec3(0.0), inflateVec, uEffectBlend));
 
-        // 2. WIND — adapted from the reference shader
-        //    a) posXZ phase stagger: world XZ → unique time offset per card instance.
-        //    b) vertex height weight: bottom barely moves, top swings (pendulum).
-        //    c) sin + cos 90° out of phase: two-frequency = natural complex motion.
+        // Wind: phase-staggered by world XZ so cards don't sync,
+        // weighted by local Y so bottom is anchored, top swings freely
         const phase   = positionWorld.x.add(positionWorld.z);
         const t       = uWindTime.add(phase);
         const vHeight = clamp(positionLocal.y.add(0.5), 0.0, 1.0);
+        const swingX  = sin(t).mul(uWindStrength).mul(vHeight);
+        const swingZ  = cos(t.mul(0.73)).mul(uWindStrength).mul(0.4).mul(vHeight);
 
-        const swingX = sin(t)           .mul(uWindStrength).mul(vHeight);
-        const swingZ = cos(t.mul(0.73)) .mul(uWindStrength).mul(0.4).mul(vHeight);
+        return pos.add(vec3(swingX, float(0.0), swingZ));
+      })();
 
-        return pos.add(vec3(swingX, 0.0, swingZ));
-      })(); // <-- invoke immediately to produce the node
-
-      // ─── Deterministic RNG ────────────────────────────────────────────────────────
+      // ─── RNG ──────────────────────────────────────────────────────────────────────
       function rng(seed) {
         let s = seed >>> 0;
-        return () => {
-          s = (1664525 * s + 1013904223) >>> 0;
-          return (s & 0xffffffff) / 0x100000000;
-        };
+        return () => { s = (1664525 * s + 1013904223) >>> 0; return (s & 0xffffffff) / 0x100000000; };
       }
 
-      function makeCardGeometry(w, h) {
-        return new THREE.PlaneGeometry(w, h);
-      }
-
-      // ─── Procedural fallback leaf-cluster mask ────────────────────────────────────
+      // ─── Procedural leaf cluster fallback mask ────────────────────────────────────
       function makeLeafClusterTexture(size = 256) {
         const canvas = document.createElement("canvas");
         canvas.width = canvas.height = size;
@@ -152,15 +154,15 @@
           const a = (i / lobes) * PI * 2 + 0.3;
           const lx = cx + Math.cos(a) * spread, ly = cy + Math.sin(a) * spread;
           const g = ctx.createRadialGradient(lx, ly, 0, lx, ly, lobeR);
-          g.addColorStop(0,    "rgba(255,255,255,1)");
+          g.addColorStop(0, "rgba(255,255,255,1)");
           g.addColorStop(0.55, "rgba(255,255,255,0.92)");
           g.addColorStop(0.85, "rgba(255,255,255,0.25)");
-          g.addColorStop(1,    "rgba(255,255,255,0)");
+          g.addColorStop(1,   "rgba(255,255,255,0)");
           ctx.fillStyle = g;
           ctx.beginPath(); ctx.arc(lx, ly, lobeR, 0, PI * 2); ctx.fill();
         }
         const cg = ctx.createRadialGradient(cx, cy, 0, cx, cy, size * 0.22);
-        cg.addColorStop(0, "rgba(255,255,255,1)");
+        cg.addColorStop(0,   "rgba(255,255,255,1)");
         cg.addColorStop(0.7, "rgba(255,255,255,0.88)");
         cg.addColorStop(1,   "rgba(255,255,255,0)");
         ctx.fillStyle = cg;
@@ -175,41 +177,72 @@
       }
 
       // ─── Material ─────────────────────────────────────────────────────────────────
-      // MeshStandardNodeMaterial = TSL-compatible version of MeshStandardMaterial.
-      // positionNode plugs our vertex shader in. Everything else (lighting, shadows,
-      // instance color) works exactly the same as before.
       function makeBushMaterial() {
-        // Sample alpha manually so we can apply boost + power curve as live uniforms.
-        // boost: raise/lower overall leaf density
-        // power: >1 = crisper defined edges, <1 = soft painterly bleed
-        const alpha = texture(leafTex, uv()).r
-                        .mul(uAlphaBoost)
-                        .clamp(0.0, 1.0)
-                        .pow(uAlphaPower);
+
+        // ── Alpha ──
+        // Raw alpha from texture, boosted and power-curved for density/sharpness control.
+        // smoothstep creates a soft transition zone around the cutoff (no hard jagged edges).
+        const rawAlpha  = texture(leafTex, uv()).r.mul(uAlphaBoost).clamp(0.0, 1.0).pow(uAlphaPower);
+        const softAlpha = smoothstep(uAlphaCutoff.sub(0.06), uAlphaCutoff.add(0.06), rawAlpha);
+
+        // ── Normals ──
+        // Leaf warp: sin ripple across UV adds organic micro-detail to the surface.
+        // Sphere blend: lerp from card's own normal → direction from bush center outward.
+        // Result: the whole bush shades as one solid sphere instead of 500 random flat cards.
+        const warpOffset   = sin(uv().x.mul(10.0)).mul(uLeafWarp);
+        const warpedNorm   = normalize(normalWorld.add(vec3(warpOffset, warpOffset, float(0.0))));
+        const sphereNorm   = normalize(mix(warpedNorm, normalize(positionWorld), uNormalBlend));
+
+        // ── Base color: 3-stop height gradient ──
+        // Bottom → mid → top driven by world Y so gradient follows the actual bush dome,
+        // not the individual card orientation.
+        const yNorm     = clamp(positionWorld.y.div(PARAMS.height), 0.0, 1.0);
+        const lower     = mix(uBotC, uMidC, clamp(yNorm.mul(2.0), 0.0, 1.0));
+        const gradColor = mix(lower, uTopC, clamp(yNorm.sub(0.5).mul(2.0), 0.0, 1.0));
+
+        // ── AO ──
+        // Leaves near the center of the bush are slightly darker (interior shadow).
+        // distNorm = 0 at center, 1 at outer shell → interior multiplied by (1 - aoStrength).
+        const distNorm  = clamp(positionWorld.length().div(uBushRadius), 0.0, 1.0);
+        const aoMult    = mix(oneMinus(uAO), float(1.0), distNorm);
+
+        // ── SSS (subsurface scattering approximation) ──
+        // Surfaces facing AWAY from the sun catch transmitted light → warm glow from behind.
+        // dot(normal, sunDir).negate() → 1 when backlit, 0 when frontlit.
+        // This is what gives Zelda/Genshin leaves their warm translucent look.
+        const sssAmt    = pow(clamp(dot(sphereNorm, uSunDir).negate(), 0.0, 1.0), float(2.0))
+                            .mul(uSSS);
+
+        // ── Rim ──
+        // Fresnel halo: bright ring around silhouette edges when viewed at grazing angle.
+        // Visible as the white/green highlight around the bush edge in Genshin.
+        const viewDir   = normalize(cameraPosition.sub(positionWorld));
+        const rimAmt    = pow(oneMinus(clamp(dot(viewDir, sphereNorm), 0.0, 1.0)), uRimP)
+                            .mul(uRimS);
 
         const mat = new THREE.MeshStandardNodeMaterial({
-          color: 0xffffff,
-          transparent: false,
+          transparent: true,
           side: PARAMS.doubleSide ? THREE.DoubleSide : THREE.FrontSide,
-          depthWrite: true,
-          depthTest: true,
-          roughness: 0.88,
-          metalness: 0.0,
+          depthWrite:  true,
+          roughness:   0.85,
+          metalness:   0.0,
         });
+
         mat.positionNode  = bushPositionNode;
-        mat.opacityNode   = alpha;
-        mat.alphaTestNode = uAlphaCutoff;
-        // Spherical normals: direction from bush center → fragment world position.
-        // Makes the whole bush shade as one solid sphere instead of 450 random flat cards.
-        mat.normalNode = mix(normalWorld, positionWorld.normalize(), uNormalBlend);
+        mat.normalNode    = sphereNorm;
+        // Base diffuse gets PBR lit normally. SSS + Rim go into emissiveNode
+        // so they're additive and unaffected by the scene light direction.
+        mat.colorNode     = gradColor.mul(aoMult);
+        mat.emissiveNode  = uSSSC.mul(sssAmt).add(uRimC.mul(rimAmt));
+        mat.opacityNode   = softAlpha;
+        mat.alphaTestNode = float(0.01); // hard-discard truly invisible pixels (perf only)
+
         return mat;
       }
 
       // ─── Scene state ──────────────────────────────────────────────────────────────
       let scene, camera, renderer, controls;
-      let bushMesh = null;
-      let cardGeo  = null;
-      let leafTex  = null;
+      let bushMesh = null, cardGeo = null, leafTex = null;
 
       function disposeBush() {
         if (!bushMesh) return;
@@ -218,56 +251,38 @@
         bushMesh = null;
       }
 
-      // ─── Core rebuild ─────────────────────────────────────────────────────────────
       function rebuildBush() {
         disposeBush();
         if (cardGeo) { cardGeo.dispose(); cardGeo = null; }
-        cardGeo = makeCardGeometry(PARAMS.cardW, PARAMS.cardH);
+        cardGeo = new THREE.PlaneGeometry(PARAMS.cardW, PARAMS.cardH);
+        uBushRadius.value = PARAMS.radius;
 
         const count = Math.max(1, Math.floor(PARAMS.cards));
         const mesh  = new THREE.InstancedMesh(cardGeo, makeBushMaterial(), count);
         mesh.frustumCulled = false;
         mesh.castShadow    = true;
-        mesh.receiveShadow = false; // self-shadowing on dense cards = banding artifacts
+        mesh.receiveShadow = false; // prevents banding from self-shadowing
 
-        const rand   = rng(PARAMS.seed);
-        const d      = new THREE.Object3D();
-        const botC   = new THREE.Color(PARAMS.bottomTint);
-        const topC   = new THREE.Color(PARAMS.topTint);
-        const iColor = new THREE.Color();
+        const rand = rng(PARAMS.seed);
+        const d    = new THREE.Object3D();
 
         for (let i = 0; i < count; i++) {
-          // Dome volume: uniform disk XZ + spherical cap on Y
-          const a      = rand() * PI * 2;
-          const rXZ    = Math.sqrt(rand()) * PARAMS.radius;
-          const domeCap = PARAMS.height * Math.sqrt(Math.max(0, 1 - (rXZ / PARAMS.radius) ** 2));
-          const x = Math.cos(a) * rXZ;
-          const z = Math.sin(a) * rXZ;
-          const y = rand() * domeCap;
-
-          // Upright card, random yaw, small lean
+          // Hemisphere dome volume: uniform disk in XZ, spherical cap constrains Y
+          const a     = rand() * PI * 2;
+          const rXZ   = Math.sqrt(rand()) * PARAMS.radius;
+          const domeH = PARAMS.height * Math.sqrt(Math.max(0, 1 - (rXZ / PARAMS.radius) ** 2));
+          d.position.set(Math.cos(a) * rXZ, rand() * domeH, Math.sin(a) * rXZ);
+          // Random yaw (full 360°) + small lean — cards stay upright like real foliage
           d.rotation.set(
             (rand() - 0.5) * PARAMS.pitchJitter,
             rand() * PI * 2,
             (rand() - 0.5) * PARAMS.pitchJitter * 0.5
           );
-
-          const s = 1.0 + (rand() - 0.5) * PARAMS.sizeJitter;
-          d.position.set(x, y, z);
-          d.scale.setScalar(s);
+          d.scale.setScalar(1.0 + (rand() - 0.5) * PARAMS.sizeJitter);
           d.updateMatrix();
           mesh.setMatrixAt(i, d.matrix);
-
-          // Height-based color gradient: dark at base, bright at crown
-          const yNorm = Math.min(1, Math.max(0, y / PARAMS.height));
-          iColor.copy(botC).lerp(topC, yNorm);
-          iColor.offsetHSL(0, 0, (rand() - 0.5) * PARAMS.colorVar);
-          mesh.setColorAt(i, iColor);
         }
-
         mesh.instanceMatrix.needsUpdate = true;
-        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-
         bushMesh = mesh;
         scene.add(mesh);
       }
@@ -277,60 +292,56 @@
         const pane = new Pane({ title: "Bush Workshop" });
 
         const fShape = pane.addFolder({ title: "Shape", expanded: true });
-        fShape.addBinding(PARAMS, "seed",         { min: 0,   max: 9999, step: 1    }).on("change", rebuildBush);
-        fShape.addBinding(PARAMS, "cards",        { min: 40,  max: 1500, step: 1    }).on("change", rebuildBush);
-        fShape.addBinding(PARAMS, "radius",       { min: 0.5, max: 8,    step: 0.05 }).on("change", rebuildBush);
-        fShape.addBinding(PARAMS, "height",       { min: 0.2, max: 6,    step: 0.05 }).on("change", rebuildBush);
+        fShape.addBinding(PARAMS, "seed",       { min: 0,   max: 9999, step: 1    }).on("change", rebuildBush);
+        fShape.addBinding(PARAMS, "cards",      { min: 50,  max: 1500, step: 1    }).on("change", rebuildBush);
+        fShape.addBinding(PARAMS, "radius",     { min: 0.5, max: 8,    step: 0.05 }).on("change", rebuildBush);
+        fShape.addBinding(PARAMS, "height",     { min: 0.2, max: 6,    step: 0.05 }).on("change", rebuildBush);
 
         const fCard = pane.addFolder({ title: "Card", expanded: true });
-        fCard.addBinding(PARAMS, "cardW",         { min: 0.2, max: 3,   step: 0.05 }).on("change", rebuildBush);
-        fCard.addBinding(PARAMS, "cardH",         { min: 0.2, max: 3,   step: 0.05 }).on("change", rebuildBush);
-        fCard.addBinding(PARAMS, "sizeJitter",    { min: 0,   max: 1.5, step: 0.01 }).on("change", rebuildBush);
-        fCard.addBinding(PARAMS, "pitchJitter",   { min: 0,   max: PI,  step: 0.01, label: "lean jitter" }).on("change", rebuildBush);
+        fCard.addBinding(PARAMS, "cardW",       { min: 0.2, max: 3,   step: 0.05              }).on("change", rebuildBush);
+        fCard.addBinding(PARAMS, "cardH",       { min: 0.2, max: 3,   step: 0.05              }).on("change", rebuildBush);
+        fCard.addBinding(PARAMS, "sizeJitter",  { min: 0,   max: 1.5, step: 0.01              }).on("change", rebuildBush);
+        fCard.addBinding(PARAMS, "pitchJitter", { min: 0,   max: 1.5, step: 0.01, label: "lean" }).on("change", rebuildBush);
 
         const fColor = pane.addFolder({ title: "Color", expanded: true });
-        fColor.addBinding(PARAMS, "topTint").on("change",     rebuildBush);
-        fColor.addBinding(PARAMS, "bottomTint").on("change",  rebuildBush);
-        fColor.addBinding(PARAMS, "colorVar", { min: 0, max: 0.5, step: 0.01 }).on("change", rebuildBush);
+        fColor.addBinding(PARAMS, "topTint",    { label: "top"    }).on("change", ({ value }) => { uTopC.value.set(value); });
+        fColor.addBinding(PARAMS, "midTint",    { label: "mid"    }).on("change", ({ value }) => { uMidC.value.set(value); });
+        fColor.addBinding(PARAMS, "bottomTint", { label: "bottom" }).on("change", ({ value }) => { uBotC.value.set(value); });
 
-        // Alpha — live, no rebuild
         const fAlpha = pane.addFolder({ title: "Alpha", expanded: true });
-        fAlpha.addBinding(PARAMS, "alphaCutoff", { min: 0.0, max: 0.99, step: 0.01, label: "cutoff"        })
-              .on("change", ({ value }) => { uAlphaCutoff.value = value; });
-        fAlpha.addBinding(PARAMS, "alphaBoost",  { min: 0.1, max: 4.0,  step: 0.01, label: "boost"         })
-              .on("change", ({ value }) => { uAlphaBoost.value  = value; });
-        fAlpha.addBinding(PARAMS, "alphaPower",  { min: 0.1, max: 4.0,  step: 0.01, label: "edge sharpness" })
-              .on("change", ({ value }) => { uAlphaPower.value  = value; });
+        fAlpha.addBinding(PARAMS, "alphaCutoff", { min: 0.0, max: 0.99, step: 0.01, label: "cutoff"    }).on("change", ({ value }) => { uAlphaCutoff.value = value; });
+        fAlpha.addBinding(PARAMS, "alphaBoost",  { min: 0.1, max: 4.0,  step: 0.01, label: "boost"     }).on("change", ({ value }) => { uAlphaBoost.value  = value; });
+        fAlpha.addBinding(PARAMS, "alphaPower",  { min: 0.1, max: 4.0,  step: 0.01, label: "sharpness" }).on("change", ({ value }) => { uAlphaPower.value  = value; });
 
-        // Spherical normals: live, no rebuild
         const fNormals = pane.addFolder({ title: "Normals", expanded: true });
-        fNormals.addBinding({ normalBlend: 1.0 }, "normalBlend", { min: 0, max: 1, step: 0.01, label: "sphere normals" })
-                .on("change", ({ value }) => { uNormalBlend.value = value; });
+        fNormals.addBinding(PARAMS, "normalBlend", { min: 0, max: 1, step: 0.01, label: "sphere blend" }).on("change", ({ value }) => { uNormalBlend.value = value; });
+        fNormals.addBinding(PARAMS, "leafWarp",    { min: 0, max: 1, step: 0.01, label: "leaf warp"    }).on("change", ({ value }) => { uLeafWarp.value    = value; });
 
-        // Wind + inflate: live uniform updates, NO rebuild needed
-        const fWind = pane.addFolder({ title: "Wind / Inflate", expanded: true });
-        fWind.addBinding(PARAMS, "effectBlend",  { min: 0,   max: 1,   step: 0.01, label: "inflate blend"  })
-             .on("change", ({ value }) => { uEffectBlend.value  = value; });
-        fWind.addBinding(PARAMS, "inflateScale", { min: 0,   max: 0.8, step: 0.01, label: "inflate size"   })
-             .on("change", ({ value }) => { uInflateScale.value = value; });
-        fWind.addBinding(PARAMS, "inflate",      { min: 0,   max: 0.3, step: 0.01, label: "normal push"    })
-             .on("change", ({ value }) => { uInflate.value      = value; });
-        fWind.addBinding(PARAMS, "windStrength", { min: 0,   max: 0.3, step: 0.005 })
-             .on("change", ({ value }) => { uWindStrength.value = value; });
-        fWind.addBinding(PARAMS, "windSpeed",    { min: 0,   max: 4,   step: 0.1  });
+        const fFX = pane.addFolder({ title: "Lighting FX", expanded: true });
+        fFX.addBinding(PARAMS, "aoStrength",  { min: 0, max: 1,  step: 0.01, label: "AO"         }).on("change", ({ value }) => { uAO.value   = value; });
+        fFX.addBinding(PARAMS, "sssStrength", { min: 0, max: 2,  step: 0.01, label: "SSS amount" }).on("change", ({ value }) => { uSSS.value  = value; });
+        fFX.addBinding(PARAMS, "sssColor",    { label: "SSS color" }).on("change", ({ value }) => { uSSSC.value.set(value); });
+        fFX.addBinding(PARAMS, "rimStrength", { min: 0, max: 5,  step: 0.01, label: "rim amount" }).on("change", ({ value }) => { uRimS.value = value; });
+        fFX.addBinding(PARAMS, "rimPower",    { min: 1, max: 10, step: 0.1,  label: "rim falloff"}).on("change", ({ value }) => { uRimP.value = value; });
+        fFX.addBinding(PARAMS, "rimColor",    { label: "rim color" }).on("change", ({ value }) => { uRimC.value.set(value); });
+
+        const fWind = pane.addFolder({ title: "Wind / Inflate", expanded: false });
+        fWind.addBinding(PARAMS, "effectBlend",  { min: 0,   max: 1,   step: 0.01, label: "inflate blend" }).on("change", ({ value }) => { uEffectBlend.value  = value; });
+        fWind.addBinding(PARAMS, "inflateScale", { min: 0,   max: 0.8, step: 0.01, label: "inflate size"  }).on("change", ({ value }) => { uInflateScale.value = value; });
+        fWind.addBinding(PARAMS, "inflate",      { min: 0,   max: 0.3, step: 0.01, label: "normal push"   }).on("change", ({ value }) => { uInflate.value      = value; });
+        fWind.addBinding(PARAMS, "windStrength", { min: 0,   max: 0.3, step: 0.005                        }).on("change", ({ value }) => { uWindStrength.value = value; });
+        fWind.addBinding(PARAMS, "windSpeed",    { min: 0,   max: 4,   step: 0.1                          });
 
         const fRender = pane.addFolder({ title: "Render", expanded: false });
         fRender.addBinding(PARAMS, "doubleSide").on("change", rebuildBush);
 
         pane.addBlade({ view: "separator" });
-
         pane.addButton({ title: "Load Mask PNG" }).on("click", () => {
           const inp = document.createElement("input");
           inp.type = "file"; inp.accept = "image/*";
           inp.onchange = (e) => {
             const f = e.target.files?.[0]; if (!f) return;
-            const url = URL.createObjectURL(f);
-            new THREE.TextureLoader().load(url, (t) => {
+            new THREE.TextureLoader().load(URL.createObjectURL(f), (t) => {
               t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
               t.minFilter = THREE.LinearMipmapLinearFilter;
               t.magFilter = THREE.LinearFilter;
@@ -338,14 +349,11 @@
               if (t.colorSpace !== undefined) t.colorSpace = THREE.NoColorSpace;
               t.needsUpdate = true;
               if (leafTex) leafTex.dispose();
-              leafTex = t;
-              rebuildBush();
-              URL.revokeObjectURL(url);
+              leafTex = t; rebuildBush();
             });
           };
           inp.click();
         });
-
         pane.addButton({ title: "Regen Procedural Mask" }).on("click", () => {
           if (leafTex) leafTex.dispose();
           leafTex = makeLeafClusterTexture(256);
@@ -362,46 +370,51 @@
         renderer.shadowMap.enabled = true;
         renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        renderer.toneMappingExposure = 1.05;
+        renderer.toneMappingExposure = 1.1;
         document.body.appendChild(renderer.domElement);
 
         scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x9ab8c6);
-        scene.fog = new THREE.Fog(0x9ab8c6, 25, 90);
+        scene.background = new THREE.Color(0x7ab8e8);
+        scene.fog = new THREE.Fog(0x7ab8e8, 30, 100);
 
         camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 300);
-        camera.position.set(0, 6, 12);
+        camera.position.set(0, 4.5, 10);
 
         controls = new OrbitControls(camera, renderer.domElement);
-        controls.target.set(0, 1.8, 0);
+        controls.target.set(0, 1.5, 0);
         controls.enableDamping = true;
         controls.dampingFactor = 0.06;
         controls.maxPolarAngle = PI * 0.48;
         controls.mouseButtons = { MIDDLE: THREE.MOUSE.ROTATE, RIGHT: THREE.MOUSE.PAN };
         controls.update();
 
-        const sun = new THREE.DirectionalLight(0xfff5d8, 2.4);
-        sun.position.set(10, 20, 8);
+        // Strong warm sun from upper-front-right — the key to SSS backlight on the far side
+        const sun = new THREE.DirectionalLight(0xfffae0, 3.8);
+        sun.position.set(8, 22, 10);
         sun.castShadow = true;
         sun.shadow.mapSize.set(2048, 2048);
         sun.shadow.camera.left = sun.shadow.camera.bottom = -20;
         sun.shadow.camera.right = sun.shadow.camera.top = 20;
-        sun.shadow.camera.near = 1; sun.shadow.camera.far = 80;
+        sun.shadow.camera.near = 1;
+        sun.shadow.camera.far = 80;
+        sun.shadow.bias = -0.001;
         scene.add(sun);
-        scene.add(new THREE.HemisphereLight(0xadd8f0, 0x163d08, 0.9));
-        scene.add(new THREE.AmbientLight(0x8faab5, 0.45));
 
+        // Hemisphere: cool blue sky top, warm green bounce from ground
+        // Much stronger than before — this is what was making the scene dark
+        scene.add(new THREE.HemisphereLight(0x99ccff, 0x4a8c22, 2.0));
+
+        // Ground
         const ground = new THREE.Mesh(
           new THREE.PlaneGeometry(120, 120).rotateX(-PI / 2),
-          new THREE.MeshStandardMaterial({ color: 0x14511a, roughness: 0.95, metalness: 0 })
+          new THREE.MeshStandardMaterial({ color: 0x1a5c22, roughness: 0.95, metalness: 0 })
         );
         ground.receiveShadow = true;
         scene.add(ground);
 
-        // Try to load the user's leaf mask; fall back to procedural
-        const loader = new THREE.TextureLoader();
+        // Load alpha mask or fall back to procedural
         leafTex = await new Promise((resolve) => {
-          loader.load("textures/image 128.png", (t) => {
+          new THREE.TextureLoader().load("textures/image 128.png", (t) => {
             t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
             t.minFilter = THREE.LinearMipmapLinearFilter;
             t.magFilter = THREE.LinearFilter;
@@ -424,7 +437,6 @@
         const timer = new THREE.Timer();
         renderer.setAnimationLoop(() => {
           const delta = timer.getDelta();
-          // Advance wind time — separate from strength so speed and amplitude are independent
           uWindTime.value += delta * PARAMS.windSpeed;
           controls.update();
           renderer.render(scene, camera);

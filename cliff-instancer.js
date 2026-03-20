@@ -30,6 +30,10 @@ export function createCliffInstancer(scene, options = {}) {
 
   const dummy = new THREE.Object3D();
 
+  // Proxy Object3D that TransformControls can attach to for the selected instance.
+  // Position/rotation/scale always reflect the selected instance in world space.
+  const proxyObj = new THREE.Object3D();
+
   function computeInstanceMatrix(inst) {
     dummy.position.set(inst.px, inst.py, inst.pz);
     dummy.rotation.order = "XYZ";
@@ -173,8 +177,37 @@ export function createCliffInstancer(scene, options = {}) {
     selectInstance(typeIdx, instIdx) {
       selectedTypeIdx = typeIdx;
       selectedInstIdx = instIdx;
-      moveMarker(types[typeIdx]?.instances[instIdx] ?? null);
+      const inst = types[typeIdx]?.instances[instIdx] ?? null;
+      moveMarker(inst);
+      if (inst) {
+        proxyObj.position.set(inst.px, inst.py, inst.pz);
+        proxyObj.rotation.set(inst.rx * DEG, inst.ry * DEG, inst.rz * DEG);
+        proxyObj.scale.set(inst.sx, inst.sy, inst.sz);
+        proxyObj.updateMatrix();
+      }
     },
+
+    // Read back from proxyObj into the selected instance (called on TC change event)
+    syncFromProxy() {
+      if (selectedTypeIdx < 0 || selectedInstIdx < 0) return;
+      const type = types[selectedTypeIdx];
+      if (!type) return;
+      const inst = type.instances[selectedInstIdx];
+      if (!inst) return;
+      inst.px = proxyObj.position.x;
+      inst.py = proxyObj.position.y;
+      inst.pz = proxyObj.position.z;
+      inst.rx = proxyObj.rotation.x / DEG;
+      inst.ry = proxyObj.rotation.y / DEG;
+      inst.rz = proxyObj.rotation.z / DEG;
+      inst.sx = proxyObj.scale.x;
+      inst.sy = proxyObj.scale.y;
+      inst.sz = proxyObj.scale.z;
+      setAllMatrices(type, selectedInstIdx);
+      moveMarker(inst);
+    },
+
+    get proxyObject() { return proxyObj; },
 
     clearSelection() {
       selectedTypeIdx = -1;

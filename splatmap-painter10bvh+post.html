@@ -3418,6 +3418,16 @@
         transformControls = new TransformControls(camera, renderer.domElement);
         transformControls.addEventListener("dragging-changed", (e) => {
           orbit.enabled = e.value ? false : currentMode !== "play";
+          // On drag end in cliffs mode: refresh panel sliders to match final position
+          if (!e.value && currentMode === "cliffs") {
+            ciRefreshProxy();
+            pane.refresh();
+          }
+        });
+        transformControls.addEventListener("change", () => {
+          if (currentMode === "cliffs" && cliffInstancer.hasSelection()) {
+            cliffInstancer.syncFromProxy();
+          }
         });
         transformControls.enabled = false;
         tcHelper = transformControls.getHelper();
@@ -5753,7 +5763,7 @@
             mode === "cliffs";
 
           const usingTC =
-            mode === "place" || mode === "props" || mode === "water";
+            mode === "place" || mode === "props" || mode === "water" || mode === "cliffs";
           if (!usingTC && transformControls) {
             if (tcHelper) tcHelper.visible = false;
             transformControls.enabled = false;
@@ -5774,6 +5784,19 @@
             if (mode === "water") {
               selectedCliff = null;
               selectedProp = null;
+            }
+            if (mode === "cliffs") {
+              selectedCliff = null;
+              selectedProp = null;
+              selectWater(null);
+              // Re-attach gizmo if an instance was already selected
+              if (cliffInstancer.hasSelection()) {
+                transformControls.attach(cliffInstancer.proxyObject);
+                tcHelper.visible = true;
+              } else {
+                transformControls.detach();
+                tcHelper.visible = false;
+              }
             }
           }
 
@@ -5860,10 +5883,17 @@
           if (e.code === "Backquote") toggleTerrainMat();
           if (e.code === "KeyC")
             setMode(currentMode === "cliffs" ? "view" : "cliffs");
-          if (currentMode === "cliffs" && e.code === "Delete") {
-            cliffInstancer.deleteSelected();
-            ciRefreshProxy();
-            pane.refresh();
+          if (currentMode === "cliffs") {
+            if (e.code === "KeyW") { e.preventDefault(); transformControls.setMode("translate"); }
+            if (e.code === "KeyE") { e.preventDefault(); transformControls.setMode("rotate"); }
+            if (e.code === "KeyR") { e.preventDefault(); transformControls.setMode("scale"); }
+            if (e.code === "Delete") {
+              cliffInstancer.deleteSelected();
+              transformControls.detach();
+              if (tcHelper) tcHelper.visible = false;
+              ciRefreshProxy();
+              pane.refresh();
+            }
           }
           if (currentMode === "place") {
             if (e.code === "KeyW") {
@@ -5937,10 +5967,14 @@
           const ciHit = cliffInstancer.raycastInstances(raycaster);
           if (ciHit) {
             cliffInstancer.selectInstance(ciHit.typeIdx, ciHit.instIdx);
+            transformControls.attach(cliffInstancer.proxyObject);
+            tcHelper.visible = true;
             ciRefreshProxy();
             pane.refresh();
           } else {
             cliffInstancer.clearSelection();
+            transformControls.detach();
+            tcHelper.visible = false;
             ciRefreshProxy();
             pane.refresh();
           }
