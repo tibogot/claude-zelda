@@ -87,6 +87,10 @@
         background: rgba(110, 70, 25, 0.92);
         color: #ffe0a0;
       }
+      #mode-badge.cliffs {
+        background: rgba(80, 60, 40, 0.95);
+        color: #f0d8b0;
+      }
 
       #info {
         position: fixed;
@@ -207,6 +211,12 @@
       accept=".hdr"
       style="display: none"
     />
+    <input
+      type="file"
+      id="cliff-inst-glb-input"
+      accept=".glb"
+      style="display: none"
+    />
 
     <div id="mode-badge" class="view">VIEW MODE</div>
 
@@ -325,6 +335,7 @@
       import Stats from "stats-gl";
       import JSZip from "jszip";
       import { createTileMaterial } from "./tileMaterial.js";
+      import { createCliffInstancer } from "./cliff-instancer.js";
       import { createStylizedSky } from "./stylized-sky.js";
 
       // ─── NOISE ───────────────────────────────
@@ -3647,6 +3658,7 @@
               sy: root.scale.y,
               sz: root.scale.z,
             })),
+            cliffInstances: cliffInstancer.exportData(),
             waterBodies: waterObjects.map((m) => ({
               x: m.position.x,
               y: m.position.y,
@@ -3742,6 +3754,7 @@
                 });
               }
               if (meta.cliffs) applyCliffs(meta.cliffs);
+              if (meta.cliffInstances) cliffInstancer.importData(meta.cliffInstances);
               if (meta.props) applyProps(meta.props);
               if (meta.waterBodies) applyWaterBodies(meta.waterBodies);
             }
@@ -3839,6 +3852,47 @@
         const raycaster = new THREE.Raycaster();
         const mouse = new THREE.Vector2();
 
+        // ── CLIFF INSTANCER ──
+        const cliffInstancer = createCliffInstancer(scene, { maxInstances: 500 });
+        // Proxy for per-instance sliders
+        const ciProxy = { px: 0, py: 0, pz: 0, rx: 0, ry: 0, rz: 0, sx: 1, sy: 1, sz: 1 };
+        let ciActiveLabel = "none";
+        let ciCount = 0;
+        let ciPaneBindings = null; // will hold refs to refresh
+
+        function ciRefreshProxy() {
+          const sel = cliffInstancer.getSelected();
+          if (sel) {
+            ciProxy.px = +sel.px.toFixed(2); ciProxy.py = +sel.py.toFixed(2); ciProxy.pz = +sel.pz.toFixed(2);
+            ciProxy.rx = +sel.rx.toFixed(1); ciProxy.ry = +sel.ry.toFixed(1); ciProxy.rz = +sel.rz.toFixed(1);
+            ciProxy.sx = +sel.sx.toFixed(3); ciProxy.sy = +sel.sy.toFixed(3); ciProxy.sz = +sel.sz.toFixed(3);
+          }
+          ciCount = cliffInstancer.getTotalCount();
+          const types = cliffInstancer.getTypes();
+          const active = types[cliffInstancer.getActiveTypeIdx()];
+          ciActiveLabel = active ? `${active.name}  (${active.count} placed)` : "— none loaded —";
+          if (ciPaneBindings) ciPaneBindings.pane.refresh();
+        }
+
+        // Load default cliff at startup
+        gltfLoader.load("models/cliff1.glb", (gltf) => {
+          cliffInstancer.loadGLB(gltf, "cliff1");
+          ciRefreshProxy();
+        });
+
+        document.getElementById("cliff-inst-glb-input").addEventListener("change", (e) => {
+          const file = e.target.files[0];
+          if (!file) return;
+          const url = URL.createObjectURL(file);
+          const name = file.name.replace(/\.glb$/i, "");
+          gltfLoader.load(url, (gltf) => {
+            cliffInstancer.loadGLB(gltf, name);
+            ciRefreshProxy();
+            URL.revokeObjectURL(url);
+          });
+          e.target.value = "";
+        });
+
         function getTerrainHit(event) {
           const rect = renderer.domElement.getBoundingClientRect();
           mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
@@ -3895,6 +3949,7 @@
             "Props [I]": "props",
             "Path [L]": "path",
             "Water [W]": "water",
+            "Cliffs [C]": "cliffs",
             "Play [F]": "play",
           },
         });
@@ -5400,6 +5455,62 @@
             e.target.value = "";
           });
 
+        // ── CLIFFS INSTANCER FOLDER ──
+        const cliffsFolder = pane.addFolder({ title: "Cliffs  [ C ]", expanded: true });
+        cliffsFolder.hidden = true;
+
+        const ciActiveDisplay = { label: ciActiveLabel };
+        cliffsFolder.addBinding(ciActiveDisplay, "label", { label: "Active type", readonly: true });
+        cliffsFolder.addButton({ title: "📂 Load Cliff GLB…" })
+          .on("click", () => document.getElementById("cliff-inst-glb-input").click());
+        cliffsFolder.addBlade({ view: "separator" });
+
+        const ciSelLabel = { label: "— click a cliff to select —" };
+        cliffsFolder.addBinding(ciSelLabel, "label", { label: "Selected", readonly: true });
+        cliffsFolder.addBlade({ view: "separator" });
+
+        // Position
+        const ciPosFolder = cliffsFolder.addFolder({ title: "Position", expanded: true });
+        ciPosFolder.addBinding(ciProxy, "px", { label: "X", min: -600, max: 600, step: 0.1 })
+          .on("change", ev => cliffInstancer.updateSelected({ px: ev.value }));
+        ciPosFolder.addBinding(ciProxy, "py", { label: "Y", min: -100, max: 300, step: 0.1 })
+          .on("change", ev => cliffInstancer.updateSelected({ py: ev.value }));
+        ciPosFolder.addBinding(ciProxy, "pz", { label: "Z", min: -600, max: 600, step: 0.1 })
+          .on("change", ev => cliffInstancer.updateSelected({ pz: ev.value }));
+
+        // Rotation
+        const ciRotFolder = cliffsFolder.addFolder({ title: "Rotation (deg)", expanded: true });
+        ciRotFolder.addBinding(ciProxy, "rx", { label: "X", min: -180, max: 180, step: 1 })
+          .on("change", ev => cliffInstancer.updateSelected({ rx: ev.value }));
+        ciRotFolder.addBinding(ciProxy, "ry", { label: "Y", min: -180, max: 180, step: 1 })
+          .on("change", ev => cliffInstancer.updateSelected({ ry: ev.value }));
+        ciRotFolder.addBinding(ciProxy, "rz", { label: "Z", min: -180, max: 180, step: 1 })
+          .on("change", ev => cliffInstancer.updateSelected({ rz: ev.value }));
+
+        // Scale
+        const ciScaleFolder = cliffsFolder.addFolder({ title: "Scale", expanded: true });
+        ciScaleFolder.addBinding(ciProxy, "sx", { label: "X", min: 0.05, max: 15, step: 0.05 })
+          .on("change", ev => cliffInstancer.updateSelected({ sx: ev.value }));
+        ciScaleFolder.addBinding(ciProxy, "sy", { label: "Y", min: 0.05, max: 15, step: 0.05 })
+          .on("change", ev => cliffInstancer.updateSelected({ sy: ev.value }));
+        ciScaleFolder.addBinding(ciProxy, "sz", { label: "Z", min: 0.05, max: 15, step: 0.05 })
+          .on("change", ev => cliffInstancer.updateSelected({ sz: ev.value }));
+
+        cliffsFolder.addBlade({ view: "separator" });
+        cliffsFolder.addButton({ title: "🗑 Delete selected  [Del]" })
+          .on("click", () => { cliffInstancer.deleteSelected(); ciRefreshProxy(); pane.refresh(); });
+        cliffsFolder.addButton({ title: "Clear all cliffs" })
+          .on("click", () => {
+            const types = cliffInstancer.getTypes();
+            types.forEach(t => { for (let i = t.count - 1; i >= 0; i--) {
+              cliffInstancer.selectInstance(t.idx, i);
+              cliffInstancer.deleteSelected();
+            }});
+            ciRefreshProxy(); pane.refresh();
+          });
+
+        ciPaneBindings = { pane };
+
         // ── PATH FOLDER ──
         const pathFolder = pane.addFolder({
           title: "Path  [ L ]",
@@ -5633,11 +5744,13 @@
           propsFolder.hidden = mode !== "props";
           pathFolder.hidden = mode !== "path";
           waterFolder.hidden = mode !== "water";
+          cliffsFolder.hidden = mode !== "cliffs";
           brushFolder.hidden =
             mode === "view" ||
             mode === "place" ||
             mode === "props" ||
-            mode === "water";
+            mode === "water" ||
+            mode === "cliffs";
 
           const usingTC =
             mode === "place" || mode === "props" || mode === "water";
@@ -5684,7 +5797,9 @@
                             ? "WATER BODIES  [ W ]"
                             : mode === "path"
                               ? "PATH MODE  [ L ]"
-                              : "PLACE MODE"; // play handled above
+                              : mode === "cliffs"
+                                ? "CLIFFS MODE  [ C ]"
+                                : "PLACE MODE"; // play handled above
           badge.className = mode;
           renderer.domElement.style.cursor =
             mode === "view" ? "default" : "crosshair";
@@ -5692,7 +5807,8 @@
             mode === "view" ||
             mode === "place" ||
             mode === "props" ||
-            mode === "water"
+            mode === "water" ||
+            mode === "cliffs"
           )
             brushRing.visible = false;
         }
@@ -5742,6 +5858,13 @@
             setMode("view");
           if (e.code === "Escape") setMode("view");
           if (e.code === "Backquote") toggleTerrainMat();
+          if (e.code === "KeyC")
+            setMode(currentMode === "cliffs" ? "view" : "cliffs");
+          if (currentMode === "cliffs" && e.code === "Delete") {
+            cliffInstancer.deleteSelected();
+            ciRefreshProxy();
+            pane.refresh();
+          }
           if (currentMode === "place") {
             if (e.code === "KeyW") {
               e.preventDefault();
@@ -5803,16 +5926,33 @@
         });
 
         // ── MOUSE ──
-        renderer.domElement.addEventListener("contextmenu", (e) =>
-          e.preventDefault(),
-        );
+        renderer.domElement.addEventListener("contextmenu", (e) => {
+          e.preventDefault();
+          if (currentMode !== "cliffs") return;
+          // Right click = select existing instance
+          const rect = renderer.domElement.getBoundingClientRect();
+          mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+          mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+          raycaster.setFromCamera(mouse, camera);
+          const ciHit = cliffInstancer.raycastInstances(raycaster);
+          if (ciHit) {
+            cliffInstancer.selectInstance(ciHit.typeIdx, ciHit.instIdx);
+            ciRefreshProxy();
+            pane.refresh();
+          } else {
+            cliffInstancer.clearSelection();
+            ciRefreshProxy();
+            pane.refresh();
+          }
+        });
 
         renderer.domElement.addEventListener("mousemove", (e) => {
           if (
             currentMode === "view" ||
             currentMode === "place" ||
             currentMode === "props" ||
-            currentMode === "water"
+            currentMode === "water" ||
+            currentMode === "cliffs"
           )
             return;
           const p = getTerrainHit(e);
@@ -5907,6 +6047,16 @@
             // Click on terrain → place new prop
             const pt = getTerrainHit(e);
             if (pt) placeProp(pt.x, pt.y, pt.z);
+            return;
+          }
+
+          if (currentMode === "cliffs") {
+            // Left click = place new instance on terrain
+            const pt = getTerrainHit(e);
+            if (pt) {
+              cliffInstancer.placeAt(pt.x, pt.y, pt.z);
+              ciRefreshProxy();
+            }
             return;
           }
 
