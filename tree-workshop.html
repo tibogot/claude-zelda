@@ -1,0 +1,694 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tree Workshop</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { overflow: hidden; background: #000; }
+      canvas { display: block; width: 100vw; height: 100vh; }
+      .tp-dfwv {
+        position: fixed !important;
+        top: 16px !important;
+        right: 16px !important;
+        width: 285px !important;
+        z-index: 20;
+        max-height: calc(100vh - 32px) !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+      }
+      #info {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        font: 12px/1.6 "SF Mono", monospace;
+        color: #8dc878;
+        background: rgba(0,0,0,0.6);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: none;
+      }
+      #slots-bar {
+        position: fixed;
+        bottom: 16px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        gap: 8px;
+        z-index: 20;
+      }
+      .slot-badge {
+        font: bold 11px "SF Mono", monospace;
+        padding: 5px 12px;
+        border-radius: 5px;
+        border: 2px solid #555;
+        color: #888;
+        background: rgba(0,0,0,0.7);
+        cursor: default;
+        transition: all 0.2s;
+      }
+      .slot-badge.baked   { border-color: #4a9; color: #8ef; background: rgba(0,60,40,0.8); }
+      .slot-badge.active  { border-color: #fa0; color: #fa0; }
+    </style>
+    <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+        "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+        "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+        "tweakpane": "https://esm.sh/tweakpane@4.0.4"
+      }
+    }
+    </script>
+  </head>
+  <body>
+    <div id="info">MMB = orbit &nbsp;·&nbsp; RMB = pan &nbsp;·&nbsp; Scroll = zoom</div>
+    <div id="slots-bar">
+      <div class="slot-badge active" id="badge-0">S1</div>
+      <div class="slot-badge" id="badge-1">S2</div>
+      <div class="slot-badge" id="badge-2">S3</div>
+      <div class="slot-badge" id="badge-3">S4</div>
+      <div class="slot-badge" id="badge-4">S5</div>
+    </div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { MeshStandardNodeMaterial } from "three";
+      import {
+        uniform, Fn, mix, float, vec3, color,
+        positionLocal, positionWorld, normalWorld,
+        sin, smoothstep,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+      import { createFoliage } from "./folio-showcase/foliage.js";
+      import { createWind } from "./folio-showcase/wind.js";
+      import { createNoiseTexture } from "./folio-showcase/noiseTexture.js";
+      import { createFoliageTexture } from "./folio-showcase/foliageTexture.js";
+      import { Pane } from "tweakpane";
+
+      const PI = Math.PI;
+
+      // ── DEFAULT PARAMS ───────────────────────────────────────────────────
+      function defaultParams() {
+        return {
+          // Trunk skeleton
+          seed:        1234,
+          levels:         3,
+          trunkHeight:  7.0,
+          trunkRadius:  0.65,
+          trunkTaper:   0.62,
+          branchMult:   0.72,
+          children:       3,
+          gnarliness:  0.40,
+          sunForce:    0.22,
+          gravity:     0.10,
+          // Trunk shading
+          barkDark:   "#2a1505",
+          barkLight:  "#6b3a18",
+          barkAO:      0.65,
+          // Leaves
+          leafClusterScale: 1.0,
+          orientations:       5,
+          colorA:       "#2a5c1a",
+          colorB:       "#6aae2a",
+          colorVar:      0.18,
+          aoStrength:    0.50,
+          sssStrength:   0.30,
+          sssColor:    "#7abf3a",
+          alphaThresh:   0.28,
+          alphaTest:     0.10,
+          shapeVar:      0.08,
+          baseContact:   0.25,
+          // Wind
+          windStrength:  0.50,
+        };
+      }
+
+      // ── 5 SLOTS ──────────────────────────────────────────────────────────
+      // Preview (active slot editing) lives at center. Baked trees offset behind.
+      const SLOT_X = [-28, -14, 0, 14, 28];
+      const SLOT_Z_BAKED = -22;
+
+      const slots = Array.from({ length: 5 }, (_, i) => ({
+        params:  defaultParams(),
+        trunkMesh:  null,
+        foliage:    null,
+        baked:      false,
+        x: SLOT_X[i],
+      }));
+
+      let activeSlot = 0;
+      // EDIT mirrors slots[activeSlot].params — Tweakpane binds to this
+      const EDIT = defaultParams();
+
+      // ── MODULE-LEVEL TRUNK UNIFORMS (shared across rebuilds) ─────────────
+      const uBarkDark  = uniform(new THREE.Color(EDIT.barkDark));
+      const uBarkLight = uniform(new THREE.Color(EDIT.barkLight));
+      const uBarkAO    = uniform(EDIT.barkAO);
+      const uSunDir    = uniform(new THREE.Vector3(0.6, 1.0, 0.5).normalize());
+
+      // ── SCENE GLOBALS ────────────────────────────────────────────────────
+      let scene, renderer, camera, orbit, sunLight;
+      let wind, foliageTexture, bushLeafTexture;
+      let bushFoliage = null;
+      const clock = new THREE.Timer();
+
+      // ── BUSH PARAMS ──────────────────────────────────────────────────────
+      const BUSH = {
+        colorA:       "#1e4a10",
+        colorB:       "#4ea020",
+        colorVar:      0.22,
+        orientations:     6,
+        clusterScale:  0.55,
+        aoStrength:    0.60,
+        sssStrength:   0.20,
+        sssColor:    "#60b830",
+        alphaThresh:   0.22,
+        alphaTest:     0.08,
+        shapeVar:      0.10,
+        baseContact:   0.40,
+      };
+
+      // Scattered ground positions — fixed ring + random spread
+      const BUSH_REFS = (() => {
+        const rand = makeRng(99);
+        const refs = [];
+        for (let i = 0; i < 14; i++) {
+          const a = (i / 14) * PI * 2 + rand() * 0.5;
+          const r = 8 + rand() * 10;
+          refs.push({
+            position: new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r),
+            scale: 0.40 + rand() * 0.45,
+          });
+        }
+        return refs;
+      })();
+
+      // ── SEEDED RNG ───────────────────────────────────────────────────────
+      function makeRng(seed) {
+        let s = seed;
+        return () => { s = (s * 9301 + 49297) % 233280; return s / 233280; };
+      }
+
+      // ── TRUNK GEOMETRY BUILDER (recursive L-system → merged) ─────────────
+      function buildTrunkGeo(p) {
+        const rand   = makeRng(p.seed);
+        const segs   = [];
+        const tips   = [];
+        const up     = new THREE.Vector3(0, 1, 0);
+        const tmpQ   = new THREE.Quaternion();
+        const tmpM   = new THREE.Matrix4();
+
+        function grow(pos, dir, rad, len, lvl) {
+          if (lvl > p.levels) {
+            tips.push({ position: pos.clone(), scale: p.leafClusterScale });
+            return;
+          }
+          const end = pos.clone().addScaledVector(dir, len);
+          const mid = pos.clone().lerp(end, 0.5);
+
+          // Build cylinder segment in world space
+          const geo = new THREE.CylinderGeometry(rad * p.trunkTaper, rad, len, 8, 1);
+          tmpQ.setFromUnitVectors(up, dir.clone().normalize());
+          tmpM.compose(mid, tmpQ, new THREE.Vector3(1, 1, 1));
+          geo.applyMatrix4(tmpM);
+          segs.push(geo);
+
+          for (let i = 0; i < p.children; i++) {
+            const nd = dir.clone();
+            nd.x += (rand() - 0.5) * p.gnarliness;
+            nd.z += (rand() - 0.5) * p.gnarliness;
+            nd.y += p.sunForce - p.gravity * lvl;
+            nd.normalize();
+            grow(end, nd, rad * p.trunkTaper, len * p.branchMult, lvl + 1);
+          }
+        }
+
+        grow(new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 1, 0),
+          p.trunkRadius, p.trunkHeight, 0);
+
+        const geometry = segs.length > 1 ? mergeGeometries(segs) : segs[0];
+        segs.forEach(g => { if (g !== geometry) g.dispose(); });
+        return { geometry, tips };
+      }
+
+      // ── TRUNK MATERIAL (uses module-level uniforms) ───────────────────────
+      function buildTrunkMat() {
+        return new MeshStandardNodeMaterial({
+          roughness: 0.92, metalness: 0.0,
+          colorNode: Fn(() => {
+            const t = positionWorld.y.div(25).clamp(0, 1);
+            let col = mix(uBarkDark, uBarkLight, t.smoothstep(0, 0.45));
+            col = mix(col, col.mul(0.82), t.smoothstep(0.60, 1.0));
+            // Cel NdotL
+            const NdotL = normalWorld.dot(uSunDir).clamp(0, 1);
+            col = mix(col.mul(0.62), col, NdotL.smoothstep(0.0, 0.22));
+            // Base AO
+            const baseBlend = positionWorld.y.div(2.5).clamp(0, 1).smoothstep(0, 1);
+            col = mix(col.mul(float(1).sub(uBarkAO)), col, baseBlend);
+            // Bark stripe (cheap procedural variation)
+            const stripe = sin(positionWorld.x.mul(9).add(positionWorld.z.mul(6))).mul(0.5).add(0.5);
+            col = col.mul(float(1).sub(stripe.mul(0.07)));
+            return col;
+          })(),
+        });
+      }
+
+      // ── SYNC TRUNK UNIFORMS FROM EDIT ────────────────────────────────────
+      function syncTrunkUniforms() {
+        uBarkDark.value.set(EDIT.barkDark);
+        uBarkLight.value.set(EDIT.barkLight);
+        uBarkAO.value = EDIT.barkAO;
+      }
+
+      // ── DISPOSE SLOT ─────────────────────────────────────────────────────
+      function disposeSlot(slot) {
+        if (slot.trunkMesh) {
+          slot.trunkMesh.geometry.dispose();
+          slot.trunkMesh.material.dispose();
+          scene.remove(slot.trunkMesh);
+          slot.trunkMesh = null;
+        }
+        if (slot.foliage) {
+          slot.foliage.mesh.geometry.dispose();
+          slot.foliage.mesh.material.dispose();
+          scene.remove(slot.foliage.mesh);
+          slot.foliage = null;
+        }
+      }
+
+      // ── BUILD ONE SLOT AT WORLD POSITION ─────────────────────────────────
+      function buildSlot(slot, p, worldX, worldZ) {
+        disposeSlot(slot);
+
+        const { geometry, tips } = buildTrunkGeo(p);
+
+        const mat   = buildTrunkMat();
+        const mesh  = new THREE.Mesh(geometry, mat);
+        mesh.position.set(worldX, 0, worldZ);
+        mesh.castShadow = mesh.receiveShadow = true;
+        scene.add(mesh);
+        slot.trunkMesh = mesh;
+
+        // Offset tips to world position
+        const worldTips = tips.map(t => ({
+          position: t.position.clone().add(new THREE.Vector3(worldX, 0, worldZ)),
+          scale: t.scale,
+        }));
+
+        const lightDir = uSunDir.value.clone();
+        const foliage  = createFoliage(scene, worldTips, {
+          windOffsetNode:        wind.offsetNode,
+          foliageTexture:        foliageTexture,
+          lightDirection:        lightDir,
+          colorA:                p.colorA,
+          colorB:                p.colorB,
+          orientationsPerInstance: p.orientations,
+          scaleMultiplier:       p.leafClusterScale,
+          aoStrength:            p.aoStrength,
+          sssStrength:           p.sssStrength,
+          sssColor:              p.sssColor,
+          colorVariationStrength: p.colorVar,
+          alphaThreshold:        p.alphaThresh,
+          alphaTest:             p.alphaTest,
+          leafShapeVariation:    p.shapeVar,
+          baseContactStrength:   p.baseContact,
+          seeThrough:            false,
+        });
+
+        slot.foliage = foliage;
+        slot.params  = JSON.parse(JSON.stringify(p));
+      }
+
+      // ── REBUILD ACTIVE (PREVIEW) SLOT ─────────────────────────────────────
+      function rebuild() {
+        Object.assign(slots[activeSlot].params, EDIT);
+        buildSlot(slots[activeSlot], EDIT, 0, 0);
+      }
+
+      // ── SYNC FOLIAGE UNIFORMS (no geometry rebuild) ───────────────────────
+      function syncFoliage() {
+        const f = slots[activeSlot].foliage;
+        if (!f) return;
+        f.setColorA(EDIT.colorA);
+        f.setColorB(EDIT.colorB);
+        f.colorVariationStrengthUniform.value  = EDIT.colorVar;
+        f.aoStrengthUniform.value              = EDIT.aoStrength;
+        f.sssStrengthUniform.value             = EDIT.sssStrength;
+        f.sssColorUniform.value.set(EDIT.sssColor);
+        f.alphaThresholdUniform.value          = EDIT.alphaThresh;
+        f.alphaTestUniform.value               = EDIT.alphaTest;
+        f.leafShapeVariationUniform.value      = EDIT.shapeVar;
+        f.baseContactStrengthUniform.value     = EDIT.baseContact;
+      }
+
+      // ── SWITCH ACTIVE SLOT ────────────────────────────────────────────────
+      function switchSlot(idx) {
+        // Move current active tree to its baked position
+        const prev = slots[activeSlot];
+        if (prev.trunkMesh) {
+          prev.trunkMesh.position.set(SLOT_X[activeSlot], 0, SLOT_Z_BAKED);
+          // shift foliage instances
+          if (prev.foliage) {
+            const dx = SLOT_X[activeSlot];
+            const dz = SLOT_Z_BAKED;
+            const count = prev.foliage.mesh.count;
+            const dummy = new THREE.Object3D();
+            const m = new THREE.Matrix4();
+            for (let i = 0; i < count; i++) {
+              prev.foliage.mesh.getMatrixAt(i, m);
+              const pos = new THREE.Vector3();
+              pos.setFromMatrixPosition(m);
+              pos.x += (dx - 0);
+              pos.z += (dz - 0);
+              dummy.position.copy(pos);
+              dummy.scale.setFromMatrixScale(m);
+              const q = new THREE.Quaternion();
+              q.setFromRotationMatrix(m);
+              dummy.quaternion.copy(q);
+              dummy.updateMatrix();
+              prev.foliage.mesh.setMatrixAt(i, dummy.matrix);
+            }
+            prev.foliage.mesh.instanceMatrix.needsUpdate = true;
+          }
+        }
+
+        activeSlot = idx;
+        updateBadges();
+
+        // Load slot's params into EDIT
+        Object.assign(EDIT, JSON.parse(JSON.stringify(slots[idx].params)));
+        pane.refresh();
+
+        // Build the active slot at center
+        buildSlot(slots[idx], EDIT, 0, 0);
+      }
+
+      // ── BADGE UPDATE ──────────────────────────────────────────────────────
+      function updateBadges() {
+        for (let i = 0; i < 5; i++) {
+          const b = document.getElementById(`badge-${i}`);
+          b.className = "slot-badge";
+          if (slots[i].baked) b.classList.add("baked");
+          if (i === activeSlot) b.classList.add("active");
+        }
+      }
+
+      // ── TWEAKPANE (declared here so switchSlot can call pane.refresh()) ───
+      let pane;
+
+      // ── BUSH BUILD / SYNC ────────────────────────────────────────────────
+      function buildBushes() {
+        if (bushFoliage) {
+          bushFoliage.mesh.geometry.dispose();
+          bushFoliage.mesh.material.dispose();
+          scene.remove(bushFoliage.mesh);
+          bushFoliage = null;
+        }
+        bushFoliage = createFoliage(scene, BUSH_REFS, {
+          windOffsetNode:          wind.offsetNode,
+          foliageTexture:          bushLeafTexture,
+          lightDirection:          uSunDir.value.clone(),
+          colorA:                  BUSH.colorA,
+          colorB:                  BUSH.colorB,
+          orientationsPerInstance: BUSH.orientations,
+          scaleMultiplier:         BUSH.clusterScale,
+          aoStrength:              BUSH.aoStrength,
+          sssStrength:             BUSH.sssStrength,
+          sssColor:                BUSH.sssColor,
+          colorVariationStrength:  BUSH.colorVar,
+          alphaThreshold:          BUSH.alphaThresh,
+          alphaTest:               BUSH.alphaTest,
+          leafShapeVariation:      BUSH.shapeVar,
+          baseContactStrength:     BUSH.baseContact,
+          seeThrough:              false,
+        });
+      }
+
+      function syncBushFoliage() {
+        if (!bushFoliage) return;
+        bushFoliage.setColorA(BUSH.colorA);
+        bushFoliage.setColorB(BUSH.colorB);
+        bushFoliage.colorVariationStrengthUniform.value = BUSH.colorVar;
+        bushFoliage.aoStrengthUniform.value             = BUSH.aoStrength;
+        bushFoliage.sssStrengthUniform.value            = BUSH.sssStrength;
+        bushFoliage.sssColorUniform.value.set(BUSH.sssColor);
+        bushFoliage.alphaThresholdUniform.value         = BUSH.alphaThresh;
+        bushFoliage.alphaTestUniform.value              = BUSH.alphaTest;
+        bushFoliage.leafShapeVariationUniform.value     = BUSH.shapeVar;
+        bushFoliage.baseContactStrengthUniform.value    = BUSH.baseContact;
+      }
+
+      // ── INIT ─────────────────────────────────────────────────────────────
+      async function init() {
+        renderer = new THREE.WebGPURenderer({ antialias: true });
+        await renderer.init();
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.1;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.shadowMap.transmitted = true;
+        document.body.appendChild(renderer.domElement);
+
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x8ec8e8);
+        scene.fog = new THREE.Fog(0x8ec8e8, 60, 160);
+
+        camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.3, 500);
+        camera.position.set(0, 12, 32);
+
+        orbit = new OrbitControls(camera, renderer.domElement);
+        orbit.target.set(0, 5, 0);
+        orbit.maxPolarAngle = PI * 0.48;
+        orbit.enableDamping = true;
+        orbit.dampingFactor = 0.05;
+        orbit.mouseButtons = { MIDDLE: THREE.MOUSE.ROTATE, RIGHT: THREE.MOUSE.PAN };
+        orbit.update();
+
+        // Scroll shortcuts
+        renderer.domElement.addEventListener("wheel", (e) => {
+          if (!e.shiftKey && !e.altKey) return;
+          e.preventDefault(); e.stopPropagation();
+        }, { passive: false, capture: true });
+
+        // Lighting
+        sunLight = new THREE.DirectionalLight(0xfff4d8, 2.2);
+        sunLight.position.set(18, 30, 12);
+        sunLight.castShadow = true;
+        sunLight.shadow.mapSize.set(2048, 2048);
+        sunLight.shadow.camera.near = 1;
+        sunLight.shadow.camera.far  = 150;
+        sunLight.shadow.camera.left = sunLight.shadow.camera.bottom = -40;
+        sunLight.shadow.camera.right = sunLight.shadow.camera.top  =  40;
+        scene.add(sunLight);
+        scene.add(new THREE.AmbientLight(0x405070, 0.9));
+        scene.add(new THREE.HemisphereLight(0x87ceeb, 0x3a5520, 0.65));
+
+        // Ground
+        const gGeo = new THREE.PlaneGeometry(200, 200);
+        gGeo.rotateX(-PI / 2);
+        const gMat = new MeshStandardNodeMaterial({
+          roughness: 0.9, metalness: 0.0,
+          colorNode: color(0.12, 0.25, 0.08),
+        });
+        const ground = new THREE.Mesh(gGeo, gMat);
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        // Slot marker planes (subtle ground circles)
+        for (let i = 0; i < 5; i++) {
+          const cGeo = new THREE.CircleGeometry(3, 24);
+          cGeo.rotateX(-PI / 2);
+          const cMat = new MeshStandardNodeMaterial({
+            roughness: 1, metalness: 0,
+            colorNode: i === activeSlot ? color(0.25, 0.5, 0.18) : color(0.16, 0.30, 0.10),
+          });
+          const circle = new THREE.Mesh(cGeo, cMat);
+          circle.position.set(SLOT_X[i], 0.01, SLOT_Z_BAKED);
+          circle.receiveShadow = true;
+          scene.add(circle);
+        }
+
+        // Wind + foliage textures
+        const noiseTexture = createNoiseTexture(128);
+        wind            = createWind({ noiseTexture });
+        foliageTexture  = createFoliageTexture(128);
+        bushLeafTexture = createFoliageTexture(128);
+
+        // Build first tree slot at center + bushes
+        buildSlot(slots[0], EDIT, 0, 0);
+        buildBushes();
+
+        // ── TWEAKPANE ────────────────────────────────────────────────────
+        pane = new Pane({ title: "Tree Workshop" });
+
+        // Slot selector
+        const slotNames = {};
+        for (let i = 0; i < 5; i++) slotNames[`Slot ${i + 1}`] = i;
+        const slotBind = { active: 0 };
+        pane.addBinding(slotBind, "active", { label: "Edit Slot", options: slotNames })
+          .on("change", (ev) => switchSlot(ev.value));
+
+        pane.addBlade({ view: "separator" });
+
+        // ── Trunk Shape ──
+        const tF = pane.addFolder({ title: "Trunk Shape", expanded: true });
+        tF.addBinding(EDIT, "seed",        { min: 0, max: 9999, step: 1   }).on("change", rebuild);
+        tF.addBinding(EDIT, "levels",      { min: 1, max: 5,    step: 1   }).on("change", rebuild);
+        tF.addBinding(EDIT, "trunkHeight", { label: "Height",    min: 1, max: 18,  step: 0.1 }).on("change", rebuild);
+        tF.addBinding(EDIT, "trunkRadius", { label: "Base radius", min: 0.1, max: 2, step: 0.02 }).on("change", rebuild);
+        tF.addBinding(EDIT, "trunkTaper",  { label: "Taper",     min: 0.1, max: 0.95, step: 0.01 }).on("change", rebuild);
+        tF.addBinding(EDIT, "branchMult",  { label: "Branch len", min: 0.3, max: 0.95, step: 0.01 }).on("change", rebuild);
+        tF.addBinding(EDIT, "children",    { label: "Branches",   min: 1, max: 5, step: 1 }).on("change", rebuild);
+        tF.addBinding(EDIT, "gnarliness",  { min: 0, max: 2,    step: 0.01 }).on("change", rebuild);
+        tF.addBinding(EDIT, "sunForce",    { label: "Sun force",  min: 0, max: 1, step: 0.01 }).on("change", rebuild);
+        tF.addBinding(EDIT, "gravity",     { min: 0, max: 1,    step: 0.01 }).on("change", rebuild);
+
+        pane.addBlade({ view: "separator" });
+
+        // ── Trunk Shading ──
+        const tsF = pane.addFolder({ title: "Trunk Shading", expanded: false });
+        tsF.addBinding(EDIT, "barkDark",  { label: "Dark bark"  }).on("change", syncTrunkUniforms);
+        tsF.addBinding(EDIT, "barkLight", { label: "Light bark" }).on("change", syncTrunkUniforms);
+        tsF.addBinding(EDIT, "barkAO",    { label: "Base AO", min: 0, max: 1, step: 0.01 }).on("change", () => { uBarkAO.value = EDIT.barkAO; });
+
+        pane.addBlade({ view: "separator" });
+
+        // ── Leaves ──
+        const lF = pane.addFolder({ title: "Leaves", expanded: true });
+        lF.addBinding(EDIT, "leafClusterScale", { label: "Cluster size", min: 0.2, max: 3, step: 0.05 }).on("change", rebuild);
+        lF.addBinding(EDIT, "orientations",     { label: "Orientations", min: 1, max: 8, step: 1 }).on("change", rebuild);
+        lF.addBinding(EDIT, "colorA",           { label: "Shadow color" }).on("change", syncFoliage);
+        lF.addBinding(EDIT, "colorB",           { label: "Lit color"    }).on("change", syncFoliage);
+        lF.addBinding(EDIT, "colorVar",         { label: "Color var",    min: 0, max: 0.5, step: 0.01 }).on("change", syncFoliage);
+        lF.addBinding(EDIT, "aoStrength",       { label: "AO",           min: 0, max: 1, step: 0.01 }).on("change", syncFoliage);
+        lF.addBinding(EDIT, "sssStrength",      { label: "SSS strength", min: 0, max: 1, step: 0.01 }).on("change", syncFoliage);
+        lF.addBinding(EDIT, "sssColor",         { label: "SSS color"    }).on("change", syncFoliage);
+        lF.addBinding(EDIT, "alphaThresh",      { label: "Alpha cutoff", min: 0, max: 0.7, step: 0.01 }).on("change", syncFoliage);
+        lF.addBinding(EDIT, "alphaTest",        { label: "Alpha test",   min: 0, max: 0.5, step: 0.01 }).on("change", syncFoliage);
+        lF.addBinding(EDIT, "shapeVar",         { label: "Shape var",    min: 0, max: 0.3, step: 0.01 }).on("change", syncFoliage);
+        lF.addBinding(EDIT, "baseContact",      { label: "Base contact", min: 0, max: 1, step: 0.01 }).on("change", syncFoliage);
+        lF.addButton({ title: "Load leaf texture (PNG)" }).on("click", () => {
+          const inp = document.createElement("input");
+          inp.type = "file"; inp.accept = "image/*";
+          inp.onchange = (e) => {
+            const f = e.target.files[0]; if (!f) return;
+            const url = URL.createObjectURL(f);
+            new THREE.TextureLoader().load(url, (t) => {
+              foliageTexture.image = t.image;
+              foliageTexture.needsUpdate = true;
+              URL.revokeObjectURL(url);
+            });
+          };
+          inp.click();
+        });
+
+        pane.addBlade({ view: "separator" });
+
+        // ── Wind ──
+        const wF = pane.addFolder({ title: "Wind", expanded: false });
+        wF.addBinding(EDIT, "windStrength", { label: "Strength", min: 0, max: 2, step: 0.01 })
+          .on("change", () => { wind.strength.value = EDIT.windStrength; });
+
+        pane.addBlade({ view: "separator" });
+
+        // ── Bushes ──
+        const buF = pane.addFolder({ title: "Bushes", expanded: false });
+        buF.addBinding(BUSH, "colorA",      { label: "Shadow color" }).on("change", syncBushFoliage);
+        buF.addBinding(BUSH, "colorB",      { label: "Lit color"    }).on("change", syncBushFoliage);
+        buF.addBinding(BUSH, "colorVar",    { label: "Color var",     min: 0, max: 0.5,  step: 0.01 }).on("change", syncBushFoliage);
+        buF.addBinding(BUSH, "clusterScale",{ label: "Cluster size",  min: 0.1, max: 2,  step: 0.02 }).on("change", buildBushes);
+        buF.addBinding(BUSH, "orientations",{ label: "Orientations",  min: 1, max: 10, step: 1     }).on("change", buildBushes);
+        buF.addBinding(BUSH, "aoStrength",  { label: "AO",            min: 0, max: 1,    step: 0.01 }).on("change", syncBushFoliage);
+        buF.addBinding(BUSH, "sssStrength", { label: "SSS strength",  min: 0, max: 1,    step: 0.01 }).on("change", syncBushFoliage);
+        buF.addBinding(BUSH, "sssColor",    { label: "SSS color"     }).on("change", syncBushFoliage);
+        buF.addBinding(BUSH, "alphaThresh", { label: "Alpha cutoff",  min: 0, max: 0.7,  step: 0.01 }).on("change", syncBushFoliage);
+        buF.addBinding(BUSH, "alphaTest",   { label: "Alpha test",    min: 0, max: 0.5,  step: 0.01 }).on("change", syncBushFoliage);
+        buF.addBinding(BUSH, "shapeVar",    { label: "Shape var",     min: 0, max: 0.3,  step: 0.01 }).on("change", syncBushFoliage);
+        buF.addBinding(BUSH, "baseContact", { label: "Base contact",  min: 0, max: 1,    step: 0.01 }).on("change", syncBushFoliage);
+        buF.addButton({ title: "Load bush leaf texture (PNG)" }).on("click", () => {
+          const inp = document.createElement("input");
+          inp.type = "file"; inp.accept = "image/*";
+          inp.onchange = (e) => {
+            const f = e.target.files[0]; if (!f) return;
+            const url = URL.createObjectURL(f);
+            new THREE.TextureLoader().load(url, (t) => {
+              bushLeafTexture.image = t.image;
+              bushLeafTexture.needsUpdate = true;
+              URL.revokeObjectURL(url);
+            });
+          };
+          inp.click();
+        });
+        buF.addButton({ title: "Rebuild bushes" }).on("click", buildBushes);
+
+        pane.addBlade({ view: "separator" });
+
+        // ── Bake / Slots ──
+        const bF = pane.addFolder({ title: "Bake Variants", expanded: true });
+        bF.addButton({ title: "Bake current → active slot" }).on("click", () => {
+          const s = slots[activeSlot];
+          s.baked = true;
+          Object.assign(s.params, JSON.parse(JSON.stringify(EDIT)));
+          // Rebuild baked slot at its offset position
+          buildSlot(s, EDIT, SLOT_X[activeSlot], SLOT_Z_BAKED);
+          // Also keep preview at center — rebuild
+          buildSlot(slots[activeSlot], EDIT, 0, 0);
+          updateBadges();
+        });
+        bF.addButton({ title: "Clear active slot" }).on("click", () => {
+          const s = slots[activeSlot];
+          disposeSlot(s);
+          s.baked = false;
+          Object.assign(s.params, defaultParams());
+          Object.assign(EDIT, defaultParams());
+          pane.refresh();
+          rebuild();
+          updateBadges();
+        });
+        bF.addButton({ title: "Reset to defaults" }).on("click", () => {
+          Object.assign(EDIT, defaultParams());
+          pane.refresh();
+          rebuild();
+        });
+
+        pane.addBlade({ view: "separator" });
+
+        // ── Export ──
+        pane.addButton({ title: "⬇ Export all baked slots (JSON)" }).on("click", () => {
+          const out = slots
+            .filter(s => s.baked)
+            .map((s, i) => ({ slot: i + 1, params: s.params }));
+          const blob = new Blob([JSON.stringify(out, null, 2)], { type: "application/json" });
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = "tree-variants.json";
+          a.click();
+        });
+
+        // ── RESIZE ──
+        window.addEventListener("resize", () => {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(innerWidth, innerHeight);
+        });
+
+        // ── RENDER LOOP ──
+        renderer.setAnimationLoop(() => {
+          clock.update();
+          const delta = clock.getDelta();
+          wind.update(delta);
+          orbit.update();
+          renderer.render(scene, camera);
+        });
+      }
+
+      init();
+    </script>
+  </body>
+</html>
