@@ -32,7 +32,9 @@ export function createCliffInstancer(scene, options = {}) {
 
   // Proxy Object3D that TransformControls can attach to for the selected instance.
   // Position/rotation/scale always reflect the selected instance in world space.
+  // Must be in the scene graph for TransformControls to work.
   const proxyObj = new THREE.Object3D();
+  scene.add(proxyObj);
 
   function computeInstanceMatrix(inst) {
     dummy.position.set(inst.px, inst.py, inst.pz);
