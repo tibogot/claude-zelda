@@ -201,6 +201,12 @@
       accept=".json"
       style="display: none"
     />
+    <input
+      type="file"
+      id="hdr-file-input"
+      accept=".hdr"
+      style="display: none"
+    />
 
     <div id="mode-badge" class="view">VIEW MODE</div>
 
@@ -293,6 +299,7 @@
       import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
       import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+      import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
       import {
         createGrassGeometry,
         createGrassMaterial,
@@ -317,6 +324,8 @@
       import { Pane } from "tweakpane";
       import Stats from "stats-gl";
       import JSZip from "jszip";
+      import { createTileMaterial } from "./tileMaterial.js";
+      import { createStylizedSky } from "./stylized-sky.js";
 
       // ─── NOISE ───────────────────────────────
       function hash(x, y) {
@@ -1897,6 +1906,17 @@
         terrain.receiveShadow = true;
         scene.add(terrain);
 
+        // ── TILE MATERIAL (default view — toggle with ~ key) ──
+        const tileMat = createTileMaterial({
+          roughness: 0.95,
+          textureScale: 400,
+          tileColor: 0x999999,
+          gridColor: 0x444444,
+          gridLineColor: 0x111111,
+        });
+        terrain.material = tileMat;
+        let usingTileMat = true;
+
         // ── TERRAIN EDGE SKIRT ──
         {
           const N = DISPLAY_RES;
@@ -2760,8 +2780,11 @@
 
         // roughnessNode omitted for now (saves 4 GPU sampler slots — ORM.g blending can be added later)
 
-        terrain.material.dispose();
-        terrain.material = splatMat;
+        // splatMat ready — tile grid is the default view. Toggle with ~ key.
+        const toggleTerrainMat = () => {
+          usingTileMat = !usingTileMat;
+          terrain.material = usingTileMat ? tileMat : splatMat;
+        };
 
         // ── SKY ──
         const sky = new SkyMesh();
@@ -2783,11 +2806,56 @@
         );
 
         const pmremGenerator = new THREE.PMREMGenerator(renderer);
-        const skyEnvScene = new THREE.Scene();
-        skyEnvScene.add(sky.clone());
-        scene.environment = pmremGenerator.fromScene(skyEnvScene, 0.04).texture;
+        const rebuildSkyEnv = () => {
+          const envScene = new THREE.Scene();
+          envScene.add(sky.clone());
+          scene.environment = pmremGenerator.fromScene(envScene, 0.04).texture;
+        };
+        rebuildSkyEnv();
         scene.environmentIntensity = PARAMS.light.envIntensity;
         renderer.toneMappingExposure = PARAMS.light.exposure;
+
+        // ── STYLIZED SKY ──
+        const stylizedSky = createStylizedSky();
+        scene.add(stylizedSky.mesh);
+
+        // ── SKY MODE SWITCH ──
+        let skyMode = "physical";
+        let hdrTexture = null;
+        const setSkyMode = (mode) => {
+          skyMode = mode;
+          sky.visible = false;
+          stylizedSky.mesh.visible = false;
+          scene.background = null;
+          if (mode === "physical") {
+            sky.visible = true;
+            rebuildSkyEnv();
+          } else if (mode === "stylized") {
+            stylizedSky.mesh.visible = true;
+            // Keep physical PMREM for terrain lighting — good enough approximation
+          } else if (mode === "hdr") {
+            if (hdrTexture) {
+              scene.background = hdrTexture;
+              scene.environment = hdrTexture;
+            }
+          }
+        };
+        const rgbeLoader = new HDRLoader();
+        document.getElementById("hdr-file-input").addEventListener("change", (e) => {
+          const file = e.target.files[0];
+          if (!file) return;
+          const url = URL.createObjectURL(file);
+          rgbeLoader.load(url, (tex) => {
+            tex.mapping = THREE.EquirectangularReflectionMapping;
+            if (hdrTexture) hdrTexture.dispose();
+            hdrTexture = tex;
+            if (skyMode === "hdr") {
+              scene.background = hdrTexture;
+              scene.environment = hdrTexture;
+            }
+            URL.revokeObjectURL(url);
+          });
+        });
 
         // ── ANIME WATER — Voronoi helper Fn's ─────────────────────────────
         const _wHash22 = Fn(([p]) => {
@@ -4017,6 +4085,31 @@
           expanded: false,
         });
         matFolder
+          .addButton({ title: "⬜ Tile Grid  /  Terrain  [~]" })
+          .on("click", toggleTerrainMat);
+        const tileScaleProxy = { scale: 400 };
+        matFolder
+          .addBinding(tileScaleProxy, "scale", { label: "Tile scale", min: 5, max: 600, step: 1 })
+          .on("change", (ev) => { tileMat._tileUniforms.textureScale.value = ev.value; });
+        const tileColorProxy = {
+          tile: "#" + tileMat._tileUniforms.tileColor.value.clone().convertLinearToSRGB().getHexString(),
+          grid: "#" + tileMat._tileUniforms.gridColor.value.clone().convertLinearToSRGB().getHexString(),
+          line: "#" + tileMat._tileUniforms.gridLineColor.value.clone().convertLinearToSRGB().getHexString(),
+        };
+        matFolder.addBinding(tileColorProxy, "tile", { label: "Tile color", view: "color" })
+          .on("change", (ev) => { tileMat._tileUniforms.tileColor.value.set(ev.value).convertSRGBToLinear(); });
+        matFolder.addBinding(tileColorProxy, "grid", { label: "Grid color", view: "color" })
+          .on("change", (ev) => { tileMat._tileUniforms.gridColor.value.set(ev.value).convertSRGBToLinear(); });
+        matFolder.addBinding(tileColorProxy, "line", { label: "Line color", view: "color" })
+          .on("change", (ev) => { tileMat._tileUniforms.gridLineColor.value.set(ev.value).convertSRGBToLinear(); });
+        matFolder
+          .addBinding({ v: 0.5 }, "v", { label: "Tile variation", min: 0, max: 2, step: 0.05 })
+          .on("change", (ev) => { tileMat._tileUniforms.gradientIntensity.value = ev.value; });
+        matFolder
+          .addBinding({ v: 0.0 }, "v", { label: "Tile brightness", min: -0.5, max: 0.5, step: 0.01 })
+          .on("change", (ev) => { tileMat._tileUniforms.gradientBias.value = ev.value; });
+        matFolder.addBlade({ view: "separator" });
+        matFolder
           .addBinding(PARAMS, "debugColors", { label: "Debug colors" })
           .on("change", (ev) => {
             uDebugMode.value = ev.value ? 1 : 0;
@@ -4410,6 +4503,60 @@
 
         // ── SKY FOLDER ──
         const skyFolder = pane.addFolder({ title: "Sky", expanded: false });
+        PARAMS.sky.mode = "physical";
+        skyFolder
+          .addBinding(PARAMS.sky, "mode", {
+            label: "Sky type",
+            options: { Physical: "physical", Stylized: "stylized", HDR: "hdr" },
+          })
+          .on("change", (ev) => setSkyMode(ev.value));
+        skyFolder
+          .addButton({ title: "📂 Load HDR…" })
+          .on("click", () => document.getElementById("hdr-file-input").click());
+        skyFolder.addBlade({ view: "separator" });
+
+        // ── Stylized sky controls ──
+        const sSky = stylizedSky.uniforms;
+        function bindSkyColor(folder, label, uni) {
+          const proxy = { col: "#" + uni.value.clone().convertLinearToSRGB().getHexString() };
+          folder.addBinding(proxy, "col", { label, view: "color" })
+            .on("change", ev => uni.value.set(ev.value).convertSRGBToLinear());
+        }
+        const stylizedFolder = skyFolder.addFolder({ title: "Stylized Sky", expanded: false });
+        const sGrad = stylizedFolder.addFolder({ title: "Gradient", expanded: true });
+        bindSkyColor(sGrad, "Zenith",  sSky.zenithColor);
+        bindSkyColor(sGrad, "Sky",     sSky.skyColor);
+        bindSkyColor(sGrad, "Horizon", sSky.horizonColor);
+        bindSkyColor(sGrad, "Sunset",  sSky.sunsetColor);
+        bindSkyColor(sGrad, "Ground",  sSky.groundColor);
+        const sSun = stylizedFolder.addFolder({ title: "Sun", expanded: true });
+        bindSkyColor(sSun, "Sun color", sSky.sunColor);
+        sSun.addBinding({ v: sSky.sunSize.value },         "v", { label: "Sun size",      min: 0.001, max: 0.03,  step: 0.001 }).on("change", ev => sSky.sunSize.value = ev.value);
+        sSun.addBinding({ v: sSky.sunGlowPower.value },    "v", { label: "Glow sharpness",min: 4,     max: 128,   step: 1     }).on("change", ev => sSky.sunGlowPower.value = ev.value);
+        sSun.addBinding({ v: sSky.sunGlowStrength.value }, "v", { label: "Glow strength", min: 0,     max: 2,     step: 0.05  }).on("change", ev => sSky.sunGlowStrength.value = ev.value);
+        const sC1 = stylizedFolder.addFolder({ title: "Clouds (low)", expanded: false });
+        sC1.addBinding({ v: sSky.c1Coverage.value }, "v", { label: "Coverage", min: 0, max: 1,    step: 0.01 }).on("change", ev => sSky.c1Coverage.value = ev.value);
+        sC1.addBinding({ v: sSky.c1Softness.value }, "v", { label: "Softness", min: 0, max: 0.5,  step: 0.01 }).on("change", ev => sSky.c1Softness.value = ev.value);
+        sC1.addBinding({ v: sSky.c1Scale.value },    "v", { label: "Scale",    min: 0.1, max: 4,  step: 0.05 }).on("change", ev => sSky.c1Scale.value = ev.value);
+        sC1.addBinding({ v: sSky.c1Speed.value },    "v", { label: "Speed",    min: 0, max: 0.05, step: 0.001}).on("change", ev => sSky.c1Speed.value = ev.value);
+        sC1.addBinding({ v: sSky.c1Height.value },   "v", { label: "Height",   min: 0.2, max: 5,  step: 0.1  }).on("change", ev => sSky.c1Height.value = ev.value);
+        const sC2 = stylizedFolder.addFolder({ title: "Clouds (high)", expanded: false });
+        sC2.addBinding({ v: sSky.c2Coverage.value }, "v", { label: "Coverage", min: 0, max: 1,    step: 0.01 }).on("change", ev => sSky.c2Coverage.value = ev.value);
+        sC2.addBinding({ v: sSky.c2Softness.value }, "v", { label: "Softness", min: 0, max: 0.5,  step: 0.01 }).on("change", ev => sSky.c2Softness.value = ev.value);
+        sC2.addBinding({ v: sSky.c2Scale.value },    "v", { label: "Scale",    min: 0.1, max: 4,  step: 0.05 }).on("change", ev => sSky.c2Scale.value = ev.value);
+        sC2.addBinding({ v: sSky.c2Speed.value },    "v", { label: "Speed",    min: 0, max: 0.05, step: 0.001}).on("change", ev => sSky.c2Speed.value = ev.value);
+        sC2.addBinding({ v: sSky.c2Height.value },   "v", { label: "Height",   min: 0.2, max: 8,  step: 0.1  }).on("change", ev => sSky.c2Height.value = ev.value);
+        const sCCol = stylizedFolder.addFolder({ title: "Cloud Colors", expanded: false });
+        bindSkyColor(sCCol, "Lit",         sSky.cloudLit);
+        bindSkyColor(sCCol, "Shadow",      sSky.cloudShadow);
+        bindSkyColor(sCCol, "Sunset tint", sSky.cloudSunset);
+        sCCol.addBinding({ v: sSky.cloudShadowStr.value }, "v", { label: "Shadow strength", min: 0, max: 1, step: 0.01 }).on("change", ev => sSky.cloudShadowStr.value = ev.value);
+        const sStars = stylizedFolder.addFolder({ title: "Stars", expanded: false });
+        sStars.addBinding({ v: sSky.starsDensity.value },    "v", { label: "Density",    min: 10, max: 200, step: 1    }).on("change", ev => sSky.starsDensity.value = ev.value);
+        sStars.addBinding({ v: sSky.starsSize.value },       "v", { label: "Size",       min: 0.01, max: 0.3, step: 0.01 }).on("change", ev => sSky.starsSize.value = ev.value);
+        sStars.addBinding({ v: sSky.starsBrightness.value }, "v", { label: "Brightness", min: 0, max: 2, step: 0.05 }).on("change", ev => sSky.starsBrightness.value = ev.value);
+
+        skyFolder.addBlade({ view: "separator" });
         skyFolder.addBinding(PARAMS.sky, "turbidity", {
           min: 0,
           max: 10,
@@ -5594,6 +5741,7 @@
           else if (e.code === "KeyW" && currentMode === "water")
             setMode("view");
           if (e.code === "Escape") setMode("view");
+          if (e.code === "Backquote") toggleTerrainMat();
           if (currentMode === "place") {
             if (e.code === "KeyW") {
               e.preventDefault();
@@ -6142,14 +6290,17 @@
           hemiLight.color.set(PARAMS.light.hemiSkyColor);
           hemiLight.groundColor.set(PARAMS.light.hemiGroundColor);
           hemiLight.intensity = PARAMS.light.hemiIntensity;
-          sky.turbidity.value = PARAMS.sky.turbidity;
-          sky.rayleigh.value = PARAMS.sky.rayleigh;
-          sky.mieCoefficient.value = PARAMS.sky.mie;
-          sky.mieDirectionalG.value = PARAMS.sky.mieG;
-          sky.cloudCoverage.value = PARAMS.sky.cloudCoverage;
-          sky.cloudDensity.value = PARAMS.sky.cloudDensity;
-          sky.cloudElevation.value = PARAMS.sky.cloudElevation;
-          sky.sunPosition.value.copy(sunDir);
+          if (skyMode === "physical") {
+            sky.turbidity.value = PARAMS.sky.turbidity;
+            sky.rayleigh.value = PARAMS.sky.rayleigh;
+            sky.mieCoefficient.value = PARAMS.sky.mie;
+            sky.mieDirectionalG.value = PARAMS.sky.mieG;
+            sky.cloudCoverage.value = PARAMS.sky.cloudCoverage;
+            sky.cloudDensity.value = PARAMS.sky.cloudDensity;
+            sky.cloudElevation.value = PARAMS.sky.cloudElevation;
+            sky.sunPosition.value.copy(sunDir);
+          }
+          stylizedSky.update(sunDir, camera.position);
           scene.environmentIntensity = PARAMS.light.envIntensity;
           renderer.toneMappingExposure = PARAMS.light.exposure;
 

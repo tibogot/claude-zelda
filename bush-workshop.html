@@ -1,0 +1,1097 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bush Workshop (Leaves Only)</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { overflow: hidden; background: #000; }
+      canvas { display: block; width: 100vw; height: 100vh; }
+      .tp-dfwv {
+        position: fixed !important;
+        top: 16px !important;
+        right: 16px !important;
+        width: 320px !important;
+        z-index: 20;
+        max-height: calc(100vh - 32px) !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+      }
+      #info {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        font: 12px/1.6 "SF Mono", monospace;
+        color: #8dc878;
+        background: rgba(0,0,0,0.6);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: none;
+        z-index: 10;
+      }
+      #helpLine2 {
+        display: block;
+        margin-top: 4px;
+        color: rgba(141, 200, 120, 0.9);
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://esm.sh/tweakpane@4.0.4"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">
+      MMB orbit &nbsp;·&nbsp; RMB pan &nbsp;·&nbsp; Scroll zoom
+      <span id="helpLine2">Enable Sculpt to paint bush density (hold LMB)</span>
+    </div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import {
+        uniform,
+        mix,
+        float,
+        Fn,
+        positionLocal,
+        normalWorld,
+        uv,
+        texture,
+        rotateUV,
+        vec2,
+        vec4,
+        vec3,
+        instance,
+        mul,
+        add,
+        sub,
+        smoothstep,
+        screenUV,
+        screenSize,
+        instanceIndex,
+        hash,
+        positionWorld,
+        cameraPosition,
+        length,
+        depth,
+        clamp
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+      import { Pane } from "tweakpane";
+
+      const PI = Math.PI;
+
+      // ─────────────────────────────────────────────────────────────────────────────
+      // Deterministic RNG
+      function seededRandom(seed) {
+        let s = seed;
+        return () => {
+          s = (s * 9301 + 49297) % 233280;
+          return s / 233280;
+        };
+      }
+
+      // ─────────────────────────────────────────────────────────────────────────────
+      // Wind (same idea as tree-workshop: UV wobble using a noise texture)
+      function createNoiseTexture(size = 128) {
+        function hash(x, y) {
+          const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+          return n - Math.floor(n);
+        }
+        function valueNoise(x, y) {
+          const ix = Math.floor(x);
+          const iy = Math.floor(y);
+          const fx = x - ix;
+          const fy = y - iy;
+          const ux = fx * fx * (3 - 2 * fx);
+          const uy = fy * fy * (3 - 2 * fy);
+          const a = hash(ix, iy);
+          const b = hash(ix + 1, iy);
+          const c = hash(ix, iy + 1);
+          const d = hash(ix + 1, iy + 1);
+          return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+        }
+
+        const data = new Uint8Array(size * size * 4);
+        const scale = 4;
+        for (let y = 0; y < size; y++) {
+          for (let x = 0; x < size; x++) {
+            const nx = (x / size) * scale;
+            const ny = (y / size) * scale;
+            const v = valueNoise(nx, ny);
+            const i = (y * size + x) * 4;
+            data[i] = data[i + 1] = data[i + 2] = Math.floor(v * 255);
+            data[i + 3] = 255;
+          }
+        }
+        const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.needsUpdate = true;
+        return tex;
+      }
+
+      function createWind({ noiseTexture }) {
+        const angle = Math.PI * 0.6;
+        const direction = uniform(vec2(Math.sin(angle), Math.cos(angle)));
+        const positionFrequency = uniform(0.5);
+        const strength = uniform(0.5);
+        const localTime = uniform(0);
+        const timeFrequency = 0.1;
+
+        const offsetNode = Fn(([position]) => {
+          const remapedPosition = position.mul(positionFrequency);
+          const noiseUv1 = remapedPosition.xy.mul(0.2).add(direction.mul(localTime)).xy;
+          const noise1 = texture(noiseTexture, noiseUv1).r.sub(0.5);
+          const noiseUv2 = remapedPosition.xy.mul(0.1).add(direction.mul(localTime.mul(0.2))).xy;
+          const noise2 = texture(noiseTexture, noiseUv2).r.sub(0.5);
+          const intensity = noise2.add(noise1);
+          return vec2(direction.mul(intensity).mul(strength));
+        });
+
+        function update(delta) {
+          localTime.value += delta * timeFrequency * strength.value;
+        }
+
+        return { offsetNode, update, direction, strength };
+      }
+
+      // ─────────────────────────────────────────────────────────────────────────────
+      // Procedural fallback mask (sharp-ish edge for crisp alpha-test)
+      function createFoliageTexture(size = 128) {
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        const cx = size / 2;
+        const cy = size / 2;
+
+        const r = size * 0.35;
+        const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+        gradient.addColorStop(0, "#fff");
+        gradient.addColorStop(0.2, "#fff");
+        gradient.addColorStop(0.35, "rgba(255,255,255,0.5)");
+        gradient.addColorStop(0.5, "#000");
+        gradient.addColorStop(1, "#000");
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, size, size);
+
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.minFilter = THREE.NearestFilter;
+        tex.magFilter = THREE.NearestFilter;
+        tex.generateMipmaps = false;
+        tex.needsUpdate = true;
+        return tex;
+      }
+
+      // ─────────────────────────────────────────────────────────────────────────────
+      // Foliage blob instancing (inline version of folio-showcase/foliage.js)
+      function createFoliage(scene, references, options) {
+        const {
+          windOffsetNode,
+          foliageTexture,
+          lightDirection,
+          colorA = "#b4b536",
+          colorB = "#d8cf3b",
+          orientationsPerInstance = 5,
+          scaleMultiplier = 1,
+          aoStrength = 0.35,
+          sssStrength = 0.25,
+          sssColor = "#6b8c3a",
+          seeThrough = false,
+          seeThroughMultiplier = 1, // currently unused (kept for parity)
+          colorVariationStrength = 0.15,
+          conditionalDepthEnabled = false,
+          depthFadeNear = 2,
+          depthFadeFar = 6,
+          baseContactStrength = 0.25,
+          alphaThreshold = 0.3,
+          alphaTest = 0.1,
+          leafShapeVariation = 0.08,
+          // Workshop-only knobs:
+          planeCount = 100,
+          planeSize = 0.85,
+          normalLerp = 0.82,
+          sampleAlpha = 0 // 0 = .r, 1 = .a
+        } = options;
+
+        const rng = seededRandom(12345);
+        const planes = [];
+
+        for (let i = 0; i < planeCount; i++) {
+          const plane = new THREE.PlaneGeometry(planeSize, planeSize);
+          const spherical = new THREE.Spherical(
+            1 - Math.pow(rng(), 2.5),
+            Math.PI * 2 * rng(),
+            Math.PI * rng()
+          );
+          const position = new THREE.Vector3().setFromSpherical(spherical);
+          plane.rotateZ(rng() * 9999);
+          plane.translate(position.x, position.y, position.z);
+          const normal = position.clone().normalize();
+
+          const normalArray = new Float32Array(12);
+          for (let v = 0; v < 4; v++) {
+            const i3 = v * 3;
+            const pos = new THREE.Vector3(
+              plane.attributes.position.array[i3],
+              plane.attributes.position.array[i3 + 1],
+              plane.attributes.position.array[i3 + 2]
+            );
+            const mixedNormal = pos.lerp(normal, normalLerp);
+            normalArray[i3] = mixedNormal.x;
+            normalArray[i3 + 1] = mixedNormal.y;
+            normalArray[i3 + 2] = mixedNormal.z;
+          }
+          plane.setAttribute("normal", new THREE.BufferAttribute(normalArray, 3));
+          planes.push(plane);
+        }
+
+        const geometry = mergeGeometries(planes);
+        geometry.computeBoundingBox();
+        const blobMinY = geometry.boundingBox.min.y;
+        const blobMaxY = geometry.boundingBox.max.y;
+        const blobHeight = blobMaxY - blobMinY;
+
+        const lightDirUniform = uniform(
+          new THREE.Vector3(lightDirection.x, lightDirection.y, lightDirection.z).normalize()
+        );
+        const colorAUniform = uniform(new THREE.Color(colorA));
+        const colorBUniform = uniform(new THREE.Color(colorB));
+        const blobMinYUniform = uniform(blobMinY);
+        const aoStrengthUniform = uniform(aoStrength);
+        const sssStrengthUniform = uniform(sssStrength);
+        const sssColorUniform = uniform(new THREE.Color(sssColor));
+        const seeThroughUniform = uniform(seeThrough ? 1 : 0);
+        const seeThroughPositionUniform = uniform(new THREE.Vector2(0.5, 0.5));
+        const seeThroughEdgeMinUniform = uniform(0.11);
+        const seeThroughEdgeMaxUniform = uniform(0.57);
+        const colorVariationStrengthUniform = uniform(colorVariationStrength);
+        const conditionalDepthEnabledUniform = uniform(conditionalDepthEnabled ? 1 : 0);
+        const depthFadeNearUniform = uniform(depthFadeNear);
+        const depthFadeFarUniform = uniform(depthFadeFar);
+        const baseContactStrengthUniform = uniform(baseContactStrength);
+        const alphaThresholdUniform = uniform(alphaThreshold);
+        const alphaTestUniform = uniform(alphaTest);
+        const leafShapeVariationUniform = uniform(leafShapeVariation);
+        const useAlphaChannelUniform = uniform(sampleAlpha);
+
+        const BASE_CONTACT_RANGE = 0.15; // bottom 15% of blob height
+
+        const foliageAlpha = Fn(() => {
+          const windOffset = windOffsetNode(positionLocal.xz);
+          const rotAngle = windOffset.length().mul(2.2);
+          const rotatedUv = rotateUV(uv(), rotAngle, vec2(0.5));
+          const samp = texture(foliageTexture, rotatedUv);
+          // IMPORTANT: some masks are stored in RGB, others in alpha. Let user choose.
+          return mix(samp.r, samp.a, useAlphaChannelUniform);
+        });
+
+        const alphaNode = Fn(() => {
+          const foliageSDF = foliageAlpha();
+          const thresholdOffset = hash(instanceIndex).sub(0.5).mul(2).mul(leafShapeVariationUniform);
+          const effectiveThreshold = alphaThresholdUniform.add(thresholdOffset);
+
+          const toPlayer = screenUV.sub(seeThroughPositionUniform);
+          const toPlayerAspect = mul(toPlayer, vec2(screenSize.x.div(screenSize.y), float(1)));
+          const distanceToPlayer = toPlayerAspect.length();
+          const distanceFade = smoothstep(seeThroughEdgeMinUniform, seeThroughEdgeMaxUniform, distanceToPlayer);
+
+          const alphaSeeThrough = foliageSDF
+            .mul(distanceFade.mul(float(1).sub(effectiveThreshold)).add(effectiveThreshold))
+            .sub(effectiveThreshold);
+          const alphaNormal = foliageSDF.sub(effectiveThreshold);
+          return mix(alphaSeeThrough, alphaNormal, float(1).sub(seeThroughUniform));
+        });
+
+        const colorNode = Fn(() => {
+          const NdotL = normalWorld.dot(lightDirUniform);
+          const mixStrength = NdotL.smoothstep(0, 1);
+          let col = mix(colorAUniform, colorBUniform, mixStrength);
+
+          // Fake AO: darken base of blob (blend over bottom 40% of height)
+          const aoBlend = positionLocal.y.sub(blobMinYUniform).div(float(blobHeight * 0.4)).smoothstep(0, 1);
+          col = mix(col.mul(float(1).sub(aoStrengthUniform)), col, aoBlend);
+
+          // Ground-contact AO: extra darkening at the very base (bottom 15%)
+          const baseContactBlend = positionLocal.y
+            .sub(blobMinYUniform)
+            .div(float(blobHeight * BASE_CONTACT_RANGE))
+            .smoothstep(0, 1);
+          col = mix(col.mul(float(1).sub(baseContactStrengthUniform)), col, baseContactBlend);
+
+          // Fake SSS when back-lit.
+          const backLit = NdotL.smoothstep(-1, 0);
+          col = col.add(mul(sssColorUniform, sssStrengthUniform, backLit));
+
+          // Per-instance color variation
+          const r0 = hash(instanceIndex);
+          const r1 = hash(instanceIndex.add(1));
+          const r2 = hash(instanceIndex.add(2));
+          const brightness = float(1).add(r0.sub(0.5).mul(2).mul(colorVariationStrengthUniform));
+          const tint = vec3(r0.sub(0.5), r1.sub(0.5), r2.sub(0.5)).mul(colorVariationStrengthUniform);
+          col = clamp(col.mul(brightness).add(tint), 0, 1);
+
+          return col;
+        });
+
+        const material = new THREE.MeshLambertNodeMaterial({
+          transparent: true,
+          alphaTest: alphaTest,
+          depthWrite: true,
+          side: THREE.DoubleSide
+        });
+
+        material.alphaNode = alphaNode;
+        material.colorNode = colorNode;
+        material.outputNode = Fn(() => {
+          alphaNode.lessThan(alphaTestUniform).discard();
+          return vec4(colorNode, alphaNode);
+        });
+
+        material.depthNode = Fn(() => {
+          const dist = length(sub(positionWorld, cameraPosition));
+          const fade = smoothstep(depthFadeNearUniform, depthFadeFarUniform, dist);
+          const conditionalDepth = mix(float(1), depth, fade);
+          return mix(depth, conditionalDepth, conditionalDepthEnabledUniform);
+        });
+
+        // Shadow pass uses SDF alpha threshold so shadows match leaf silhouette.
+        material.castShadowNode = Fn(() => {
+          const thresholdOffset = hash(instanceIndex).sub(0.5).mul(2).mul(leafShapeVariationUniform);
+          const effectiveThreshold = alphaThresholdUniform.add(thresholdOffset);
+          const shadowAlpha = foliageAlpha().sub(effectiveThreshold);
+          shadowAlpha.lessThan(alphaTestUniform).discard();
+          return vec4(0, 0, 0, 1);
+        });
+
+        const count = references.length * Math.max(1, orientationsPerInstance);
+        const mesh = new THREE.InstancedMesh(geometry, material, count);
+        mesh.receiveShadow = true;
+        mesh.castShadow = true;
+        mesh.frustumCulled = false;
+
+        const instanceMatrixAttr = new THREE.InstancedBufferAttribute(new Float32Array(count * 16), 16);
+        instanceMatrixAttr.setUsage(THREE.DynamicDrawUsage);
+
+        const nOri = Math.max(1, orientationsPerInstance);
+        const instanceData = [];
+        for (let i = 0; i < count; i++) {
+          const refIndex = Math.floor(i / nOri);
+          const oriIndex = i % nOri;
+          const ref = references[refIndex];
+          const refScale =
+            typeof ref.scale === "number" ? ref.scale : ref.scale?.x != null ? ref.scale.x : 1;
+          const yaw = (oriIndex / nOri) * Math.PI * 2;
+          instanceData.push({ position: ref.position.clone(), refScale, yaw });
+        }
+
+        function updateInstanceMatrices(mult) {
+          const dummy = new THREE.Object3D();
+          for (let i = 0; i < count; i++) {
+            const d = instanceData[i];
+            const scale = d.refScale * mult;
+            const baseY = d.position.y - blobMinY * scale;
+            dummy.position.set(d.position.x, baseY, d.position.z);
+            dummy.scale.setScalar(scale);
+            dummy.quaternion.setFromEuler(new THREE.Euler(0, d.yaw, 0));
+            dummy.updateMatrix();
+            dummy.matrix.toArray(instanceMatrixAttr.array, i * 16);
+          }
+          instanceMatrixAttr.needsUpdate = true;
+        }
+
+        updateInstanceMatrices(scaleMultiplier);
+
+        material.positionNode = Fn(({ object }) => {
+          instance(object.count, instanceMatrixAttr).toStack();
+          return positionLocal;
+        });
+
+        scene.add(mesh);
+
+        function setColorA(c) { colorAUniform.value.set(c); }
+        function setColorB(c) { colorBUniform.value.set(c); }
+
+        return {
+          mesh,
+          setColorA,
+          setColorB,
+          updateScaleMultiplier: updateInstanceMatrices,
+
+          // Expose uniforms for fast updates (no geometry rebuild needed).
+          colorAUniform,
+          colorBUniform,
+          lightDirUniform,
+          aoStrengthUniform,
+          sssStrengthUniform,
+          sssColorUniform,
+          colorVariationStrengthUniform,
+          conditionalDepthEnabledUniform,
+          depthFadeNearUniform,
+          depthFadeFarUniform,
+          baseContactStrengthUniform,
+          alphaThresholdUniform,
+          alphaTestUniform,
+          leafShapeVariationUniform,
+          useAlphaChannelUniform
+        };
+      }
+
+      // ─────────────────────────────────────────────────────────────────────────────
+      // Density map (paintable sculpt)
+      const GRID = 48;
+      const density = new Float32Array(GRID * GRID);
+      function idx(i, j) { return j * GRID + i; }
+      function clamp01(x) { return Math.max(0, Math.min(1, x)); }
+
+      function smoothstepJS(a, b, x) {
+        const t = clamp01((x - a) / (b - a));
+        return t * t * (3 - 2 * t);
+      }
+
+      let paintExtent = 16; // world-space half-size for sculpt grid
+      function gridToWorld(i, j) {
+        const x = (i / (GRID - 1) - 0.5) * (paintExtent * 2);
+        const z = (j / (GRID - 1) - 0.5) * (paintExtent * 2);
+        return { x, z };
+      }
+
+      function densityAtWorld(x, z) {
+        // Sample using nearest cell (fast enough for rebuild loops).
+        const u = (x / (paintExtent * 2) + 0.5) * (GRID - 1);
+        const v = (z / (paintExtent * 2) + 0.5) * (GRID - 1);
+        const i = Math.max(0, Math.min(GRID - 1, Math.floor(u)));
+        const j = Math.max(0, Math.min(GRID - 1, Math.floor(v)));
+        return density[idx(i, j)];
+      }
+
+      function densityAtWorldBilinear(x, z) {
+        // For painting, bilinear feels nicer; for rebuild we use nearest to keep it fast.
+        const u = (x / (paintExtent * 2) + 0.5) * (GRID - 1);
+        const v = (z / (paintExtent * 2) + 0.5) * (GRID - 1);
+        const i0 = Math.floor(u);
+        const j0 = Math.floor(v);
+        const i1 = i0 + 1;
+        const j1 = j0 + 1;
+        const fu = u - i0;
+        const fv = v - j0;
+        if (i0 < 0 || j0 < 0 || i1 >= GRID || j1 >= GRID) return 0;
+        const d00 = density[idx(i0, j0)];
+        const d10 = density[idx(i1, j0)];
+        const d01 = density[idx(i0, j1)];
+        const d11 = density[idx(i1, j1)];
+        return (1 - fu) * (1 - fv) * d00 + fu * (1 - fv) * d10 + (1 - fu) * fv * d01 + fu * fv * d11;
+      }
+
+      function setDensityFromProcedural(shape) {
+        const r0 = Math.max(0.001, shape.baseRadius);
+        const r1 = Math.max(0.001, shape.topRadius);
+        const s = shape.seed;
+        const rand = seededRandom(9000 + s);
+
+        for (let j = 0; j < GRID; j++) {
+          for (let i = 0; i < GRID; i++) {
+            const { x, z } = gridToWorld(i, j);
+            const r = Math.hypot(x, z);
+            const radial = 1 - r / r0;
+            const base = smoothstepJS(0, 1, radial);
+            // Add subtle breakup so bushes don't look like perfect spheres.
+            const breakup = 0.85 + rand() * 0.3;
+            const value = clamp01(base * breakup);
+            density[idx(i, j)] = value;
+          }
+        }
+
+        // A soft clamp to prevent "square edges" in the density map.
+        for (let j = 0; j < GRID; j++) {
+          for (let i = 0; i < GRID; i++) {
+            const { x, z } = gridToWorld(i, j);
+            const r = Math.hypot(x, z);
+            const hard = 1 - Math.max(0, r - r0) / (r0 * 0.35 + 0.0001);
+            density[idx(i, j)] *= clamp01(hard);
+          }
+        }
+      }
+
+      // Re-sample density map when paint extent changes.
+      function resampleDensityToNewExtent(newExtent) {
+        const old = new Float32Array(density);
+        const oldExtent = paintExtent;
+        paintExtent = newExtent;
+
+        // Temporarily override with old samples.
+        function oldDensityAt(x, z) {
+          const u = (x / (oldExtent * 2) + 0.5) * (GRID - 1);
+          const v = (z / (oldExtent * 2) + 0.5) * (GRID - 1);
+          const i0 = Math.floor(u);
+          const j0 = Math.floor(v);
+          const i1 = i0 + 1;
+          const j1 = j0 + 1;
+          const fu = u - i0;
+          const fv = v - j0;
+          if (i0 < 0 || j0 < 0 || i1 >= GRID || j1 >= GRID) return 0;
+          const d00 = old[idx(i0, j0)];
+          const d10 = old[idx(i1, j0)];
+          const d01 = old[idx(i0, j1)];
+          const d11 = old[idx(i1, j1)];
+          return (1 - fu) * (1 - fv) * d00 + fu * (1 - fv) * d10 + (1 - fu) * fv * d01 + fu * fv * d11;
+        }
+
+        for (let j = 0; j < GRID; j++) {
+          for (let i = 0; i < GRID; i++) {
+            const { x, z } = gridToWorld(i, j);
+            density[idx(i, j)] = clamp01(oldDensityAt(x, z));
+          }
+        }
+      }
+
+      function clearDensity() {
+        density.fill(0);
+      }
+
+      function applyBrush(hitX, hitZ, brushRadius, strength, mode) {
+        // mode: +1 add, -1 erase
+        const rWorld = brushRadius;
+        const r2 = rWorld * rWorld;
+        const extent = paintExtent;
+
+        const u0 = ((hitX - rWorld) / (extent * 2) + 0.5) * (GRID - 1);
+        const v0 = ((hitZ - rWorld) / (extent * 2) + 0.5) * (GRID - 1);
+        const u1 = ((hitX + rWorld) / (extent * 2) + 0.5) * (GRID - 1);
+        const v1 = ((hitZ + rWorld) / (extent * 2) + 0.5) * (GRID - 1);
+
+        const iMin = Math.max(0, Math.floor(Math.min(u0, u1)));
+        const iMax = Math.min(GRID - 1, Math.ceil(Math.max(u0, u1)));
+        const jMin = Math.max(0, Math.floor(Math.min(v0, v1)));
+        const jMax = Math.min(GRID - 1, Math.ceil(Math.max(v0, v1)));
+
+        for (let j = jMin; j <= jMax; j++) {
+          for (let i = iMin; i <= iMax; i++) {
+            const { x, z } = gridToWorld(i, j);
+            const dx = x - hitX;
+            const dz = z - hitZ;
+            const d2 = dx * dx + dz * dz;
+            if (d2 > r2) continue;
+            const t = 1 - d2 / r2;
+            const falloff = t * t * (3 - 2 * t); // smooth
+            const delta = strength * falloff * mode;
+            density[idx(i, j)] = clamp01(density[idx(i, j)] + delta);
+          }
+        }
+      }
+
+      // ─────────────────────────────────────────────────────────────────────────────
+      // Bush generator (creates foliage references from density map)
+      function generateBushReferences(shape) {
+        const {
+          anchorCount,
+          seed,
+          baseRadius,
+          topRadius,
+          radiusCurve,
+          anchorLift,
+          liftBias,
+          scaleVar,
+          jitterXZ,
+          jitterY,
+          densityBias
+        } = shape;
+
+        const rand = seededRandom(seed);
+        const refs = [];
+
+        const maxAttempts = anchorCount * 200;
+        let attempts = 0;
+
+        // Keep it deterministic and "bushy": accept/reject by density + silhouette constraints.
+        while (refs.length < anchorCount && attempts < maxAttempts) {
+          attempts++;
+
+          const a = rand() * PI * 2;
+          const r = baseRadius * Math.sqrt(rand()); // uniform disk
+          const x = Math.cos(a) * r;
+          const z = Math.sin(a) * r;
+
+          // density map decides how much foliage lives at this xz
+          let d = densityAtWorld(x, z);
+          d = clamp01(d * densityBias);
+
+          if (rand() > d) continue;
+
+          const t = Math.pow(d, liftBias); // lift/volume factor
+
+          // Anchor "base contact" stays close to ground by default.
+          const lift = anchorLift * t * (0.6 + 0.8 * rand());
+          let y = lift + (rand() - 0.5) * jitterY;
+
+          // Radius shrink/expand with height (topRadius helps shape).
+          const heightT = clamp01(t);
+          const allowedR =
+            baseRadius +
+            (topRadius - baseRadius) * Math.pow(heightT, radiusCurve);
+
+          // reject if outside allowed silhouette
+          const rr = Math.hypot(x, z);
+          if (rr > allowedR) continue;
+
+          const localScale =
+            0.65 +
+            scaleVar * d +
+            (rand() - 0.5) * scaleVar;
+
+          const jx = (rand() - 0.5) * jitterXZ;
+          const jz = (rand() - 0.5) * jitterXZ;
+
+          refs.push({
+            position: new THREE.Vector3(x + jx, y, z + jz),
+            scale: localScale
+          });
+        }
+
+        return refs;
+      }
+
+      // ─────────────────────────────────────────────────────────────────────────────
+      // App + UI
+      let scene, renderer, camera, orbit, wind;
+      let bushFoliage = null;
+      let foliageTexture = null;
+
+      const clock = new THREE.Clock();
+
+      const DEFAULT_TEXTURE_URL = "textures/image 128.png";
+
+      const BUSH = {
+        // Colors / shading
+        colorA: "#1e4a10",
+        colorB: "#4ea020",
+        colorVar: 0.22,
+        aoStrength: 0.60,
+        sssStrength: 0.20,
+        sssColor: "#60b830",
+
+        // Mask / leaf shape
+        alphaThresh: 0.22,
+        alphaTest: 0.08,
+        shapeVar: 0.10,
+        baseContact: 0.40,
+        sampleAlpha: 1, // 1 = texture alpha channel (.a), 0 = red channel (.r)
+
+        // Size / volume
+        orientations: 6,
+        clusterScale: 0.55,
+
+        // Quality (rebuild needed)
+        planeCount: 110,
+        normalLerp: 0.80,
+
+        // Generation / anchors
+        anchorCount: 26,
+        seed: 123,
+        baseRadius: 6.5,
+        topRadius: 4.4,
+        radiusCurve: 1.25,
+        anchorLift: 0.20,
+        liftBias: 1.1,
+        scaleVar: 0.55,
+        densityBias: 1.05,
+        jitterXZ: 0.25,
+        jitterY: 0.04,
+
+        // Wind
+        windStrength: 0.50,
+
+        // Sculpt controls
+        sculptEnabled: false,
+        brushRadius: 1.9,
+        brushStrength: 0.45,
+        brushMode: "add" // "add" or "erase"
+      };
+
+      function disposeBush() {
+        if (!bushFoliage) return;
+        scene.remove(bushFoliage.mesh);
+        bushFoliage.mesh.geometry.dispose();
+        bushFoliage.mesh.material.dispose();
+        bushFoliage = null;
+      }
+
+      function syncBushUniforms() {
+        if (!bushFoliage) return;
+        bushFoliage.setColorA(BUSH.colorA);
+        bushFoliage.setColorB(BUSH.colorB);
+        bushFoliage.colorVariationStrengthUniform.value = BUSH.colorVar;
+        bushFoliage.aoStrengthUniform.value = BUSH.aoStrength;
+        bushFoliage.sssStrengthUniform.value = BUSH.sssStrength;
+        bushFoliage.sssColorUniform.value.set(BUSH.sssColor);
+        bushFoliage.alphaThresholdUniform.value = BUSH.alphaThresh;
+        bushFoliage.alphaTestUniform.value = BUSH.alphaTest;
+        bushFoliage.leafShapeVariationUniform.value = BUSH.shapeVar;
+        bushFoliage.baseContactStrengthUniform.value = BUSH.baseContact;
+        bushFoliage.useAlphaChannelUniform.value = BUSH.sampleAlpha;
+      }
+
+      function setTextureFilters(t) {
+        // We want crisp SDF/alpha edges: Nearest + no mipmaps (like folio).
+        t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+        t.minFilter = THREE.NearestFilter;
+        t.magFilter = THREE.NearestFilter;
+        t.generateMipmaps = false;
+        if (t.colorSpace !== undefined) t.colorSpace = THREE.NoColorSpace;
+        t.needsUpdate = true;
+      }
+
+      async function loadTextureFromUrl(url) {
+        const loader = new THREE.TextureLoader();
+        return new Promise((resolve) => {
+          loader.load(
+            url,
+            (t) => {
+              resolve(t);
+            },
+            undefined,
+            () => {
+              resolve(null);
+            }
+          );
+        });
+      }
+
+      async function applyFoliageTexture(url) {
+        const t = await loadTextureFromUrl(url);
+        if (!t) {
+          console.warn("Texture load failed:", url);
+          return;
+        }
+        // Reuse the current texture object if it exists, so the TSL graph keeps references.
+        if (!foliageTexture) foliageTexture = t;
+        else {
+          foliageTexture.image = t.image;
+          foliageTexture.needsUpdate = true;
+          t.dispose?.();
+        }
+        setTextureFilters(foliageTexture);
+
+        // Force a rebuild so alpha-channel sampling matches the new texture.
+        // (Uniform updates handle the channel, but rebuild ensures consistent atlas state.)
+        rebuildBush();
+      }
+
+      function rebuildDensityForShapeIfNeeded() {
+        // Keep sculpt grid reasonably aligned with bush size.
+        const newExtent = Math.max(4, Math.max(BUSH.baseRadius, BUSH.topRadius) * 1.65);
+        if (Math.abs(newExtent - paintExtent) > 0.001) {
+          resampleDensityToNewExtent(newExtent);
+        }
+        setDensityFromProcedural(BUSH);
+      }
+
+      function rebuildBush() {
+        disposeBush();
+        const references = generateBushReferences(BUSH);
+        bushFoliage = createFoliage(scene, references, {
+          windOffsetNode: wind.offsetNode,
+          foliageTexture,
+          lightDirection: uSunDir.value.clone(),
+          colorA: BUSH.colorA,
+          colorB: BUSH.colorB,
+          orientationsPerInstance: BUSH.orientations,
+          scaleMultiplier: BUSH.clusterScale,
+          aoStrength: BUSH.aoStrength,
+          sssStrength: BUSH.sssStrength,
+          sssColor: BUSH.sssColor,
+          colorVariationStrength: BUSH.colorVar,
+          alphaThreshold: BUSH.alphaThresh,
+          alphaTest: BUSH.alphaTest,
+          leafShapeVariation: BUSH.shapeVar,
+          baseContactStrength: BUSH.baseContact,
+          seeThrough: false,
+          conditionalDepthEnabled: false,
+          planeCount: BUSH.planeCount,
+          normalLerp: BUSH.normalLerp,
+          sampleAlpha: BUSH.sampleAlpha
+        });
+        // Ensure uniforms match current UI values.
+        syncBushUniforms();
+      }
+
+      // Rebuild only if density map/sculpt changed meaningfully.
+      // (We keep this simple: most sculpt/shape changes do call rebuildBush.)
+
+      const uSunDir = uniform(new THREE.Vector3(0.6, 1.0, 0.5).normalize());
+
+      function initDensity() {
+        clearDensity();
+        setDensityFromProcedural(BUSH);
+      }
+
+      // ─────────────────────────────────────────────────────────────────────────────
+      // Boot
+      async function init() {
+        renderer = new THREE.WebGPURenderer({ antialias: true });
+        await renderer.init();
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.05;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.shadowMap.transmitted = true;
+        document.body.appendChild(renderer.domElement);
+
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x8ec8e8);
+        scene.fog = new THREE.Fog(0x8ec8e8, 50, 140);
+
+        camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.3, 500);
+        camera.position.set(0, 10, 24);
+
+        orbit = new OrbitControls(camera, renderer.domElement);
+        orbit.target.set(0, 3.5, 0);
+        orbit.maxPolarAngle = PI * 0.48;
+        orbit.enableDamping = true;
+        orbit.dampingFactor = 0.05;
+        orbit.mouseButtons = { MIDDLE: THREE.MOUSE.ROTATE, RIGHT: THREE.MOUSE.PAN };
+        orbit.update();
+
+        // Lighting
+        const sunLight = new THREE.DirectionalLight(0xfff4d8, 2.25);
+        sunLight.position.set(18, 30, 12);
+        sunLight.castShadow = true;
+        sunLight.shadow.mapSize.set(2048, 2048);
+        sunLight.shadow.camera.near = 1;
+        sunLight.shadow.camera.far = 180;
+        sunLight.shadow.camera.left = sunLight.shadow.camera.bottom = -40;
+        sunLight.shadow.camera.right = sunLight.shadow.camera.top = 40;
+        scene.add(sunLight);
+        scene.add(new THREE.AmbientLight(0x405070, 0.95));
+        scene.add(new THREE.HemisphereLight(0x87ceeb, 0x3a5520, 0.65));
+
+        // Ground
+        const groundGeo = new THREE.PlaneGeometry(200, 200);
+        groundGeo.rotateX(-PI / 2);
+        const groundMat = new THREE.MeshStandardMaterial({
+          roughness: 0.95,
+          metalness: 0.0,
+          color: new THREE.Color(0x194a17)
+        });
+        const ground = new THREE.Mesh(groundGeo, groundMat);
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        // Subtle guide circle for center bush area
+        const circleBaseRadius = Math.max(2, BUSH.baseRadius);
+        const circleGeo = new THREE.CircleGeometry(circleBaseRadius, 64);
+        const circleMat = new THREE.MeshBasicMaterial({ color: 0x1f6e23, wireframe: true, transparent: true, opacity: 0.25 });
+        const circle = new THREE.Mesh(circleGeo, circleMat);
+        circle.rotateX(-PI / 2);
+        circle.position.y = 0.01;
+        scene.add(circle);
+
+        // Create foliage textures (start with procedural, then load your alpha mask)
+        wind = createWind({ noiseTexture: createNoiseTexture(128) });
+        foliageTexture = createFoliageTexture(128);
+        setTextureFilters(foliageTexture);
+
+        // Initialize density + initial bush
+        paintExtent = Math.max(4, Math.max(BUSH.baseRadius, BUSH.topRadius) * 1.65);
+        initDensity();
+        rebuildBush();
+
+        // Load your default mask texture
+        await applyFoliageTexture(DEFAULT_TEXTURE_URL);
+
+        // ── Sculpt input
+        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+        const raycaster = new THREE.Raycaster();
+        const mouseNdc = new THREE.Vector2();
+        const hit = new THREE.Vector3();
+
+        const onPointer = (ev) => {
+          if (!BUSH.sculptEnabled) return;
+          if (!(ev.buttons & 1)) return; // LMB only
+
+          mouseNdc.x = (ev.clientX / innerWidth) * 2 - 1;
+          mouseNdc.y = -(ev.clientY / innerHeight) * 2 + 1;
+
+          raycaster.setFromCamera(mouseNdc, camera);
+          const ok = raycaster.ray.intersectPlane(plane, hit);
+          if (!ok) return;
+
+          const mode = BUSH.brushMode === "erase" ? -1 : 1;
+          applyBrush(hit.x, hit.z, BUSH.brushRadius, BUSH.brushStrength, mode);
+          // Rebuild quickly while painting. If you want less CPU, we can debounce later.
+          rebuildBush();
+        };
+
+        window.addEventListener("pointermove", onPointer, { passive: true });
+
+        // ── Tweakpane UI
+        const pane = new Pane({ title: "Bush Workshop" });
+
+        // Texture controls
+        const tf = pane.addFolder({ title: "Texture", expanded: true });
+        const textureUrl = { url: DEFAULT_TEXTURE_URL };
+
+        tf.addBinding(BUSH, "sampleAlpha", { label: "Sample mask from", options: { "Alpha (A)": 1, "Red (R)": 0 } })
+          .on("change", () => {
+            syncBushUniforms();
+          });
+
+        const loadBtn = tf.addButton({ title: "Load Texture (URL)" });
+        loadBtn.on("click", async () => {
+          await applyFoliageTexture(textureUrl.url);
+        });
+
+        tf.addBlade({ view: "separator" });
+        tf.addBinding(textureUrl, "url", { label: "Texture URL" });
+
+        tf.addButton({ title: "Load Texture (PNG file)" }).on("click", () => {
+          const inp = document.createElement("input");
+          inp.type = "file";
+          inp.accept = "image/*";
+          inp.onchange = (e) => {
+            const f = e.target.files?.[0];
+            if (!f) return;
+            const url = URL.createObjectURL(f);
+            const loader = new THREE.TextureLoader();
+            loader.load(url, (t) => {
+              // Swap in-place so the node graph keeps using the same texture object.
+              if (!foliageTexture) foliageTexture = t;
+              else {
+                foliageTexture.image = t.image;
+                foliageTexture.needsUpdate = true;
+              }
+              setTextureFilters(foliageTexture);
+              URL.revokeObjectURL(url);
+              rebuildBush();
+            });
+          };
+          inp.click();
+        });
+
+        tf.addButton({ title: "Use Procedural SDF Mask" }).on("click", () => {
+          foliageTexture = createFoliageTexture(128);
+          setTextureFilters(foliageTexture);
+          rebuildBush();
+        });
+
+        tf.addBlade({ view: "separator" });
+
+        // Shape/sculpt
+        const sf = pane.addFolder({ title: "Sculpt & Shape", expanded: true });
+        sf.addBinding(BUSH, "sculptEnabled", { label: "Sculpt mode (paint)" }).on("change", (ev) => {
+          // If sculpt mode is on, we allow painting with LMB (OrbitControls still works with MMB/RMB).
+          // This avoids having to temporarily disable controls.
+        });
+        sf.addBinding(BUSH, "brushRadius", { label: "Brush radius", min: 0.2, max: 5, step: 0.05 });
+        sf.addBinding(BUSH, "brushStrength", { label: "Brush strength", min: 0.05, max: 1.0, step: 0.01 });
+        sf.addBinding(BUSH, "brushMode", { label: "Brush mode", options: { add: "add", erase: "erase" } });
+
+        sf.addBlade({ view: "separator" });
+        sf.addBinding(BUSH, "anchorCount", { label: "Anchors", min: 6, max: 90, step: 1 }).on("change", rebuildBush);
+        sf.addBinding(BUSH, "seed", { label: "Seed", min: 0, max: 9999, step: 1 }).on("change", rebuildBush);
+        sf.addBinding(BUSH, "baseRadius", { label: "Base radius", min: 1, max: 18, step: 0.1 }).on("change", () => {
+          circle.scale.setScalar(BUSH.baseRadius / circleBaseRadius);
+          // Rebuild density so sculpt matches new bush footprint.
+          rebuildDensityForShapeIfNeeded();
+          rebuildBush();
+        });
+        sf.addBinding(BUSH, "topRadius", { label: "Top radius", min: 0.2, max: 18, step: 0.1 }).on("change", () => {
+          rebuildDensityForShapeIfNeeded();
+          rebuildBush();
+        });
+        sf.addBinding(BUSH, "radiusCurve", { label: "Radius curve", min: 0.2, max: 3, step: 0.01 }).on("change", rebuildBush);
+        sf.addBinding(BUSH, "anchorLift", { label: "Anchor lift", min: 0, max: 1.2, step: 0.01 }).on("change", rebuildBush);
+        sf.addBinding(BUSH, "liftBias", { label: "Lift bias", min: 0.2, max: 3, step: 0.01 }).on("change", rebuildBush);
+        sf.addBinding(BUSH, "scaleVar", { label: "Scale variance", min: 0, max: 1.6, step: 0.01 }).on("change", rebuildBush);
+        sf.addBinding(BUSH, "densityBias", { label: "Density bias", min: 0.2, max: 2.0, step: 0.01 }).on("change", rebuildBush);
+        sf.addBinding(BUSH, "jitterXZ", { label: "XZ jitter", min: 0, max: 1.2, step: 0.01 }).on("change", rebuildBush);
+        sf.addBinding(BUSH, "jitterY", { label: "Y jitter", min: 0, max: 0.3, step: 0.005 }).on("change", rebuildBush);
+
+        sf.addBlade({ view: "separator" });
+        sf.addButton({ title: "Reset Sculpt (procedural)" }).on("click", () => {
+          // Use current shape params to re-seed density map.
+          rebuildDensityForShapeIfNeeded();
+          rebuildBush();
+        });
+        sf.addButton({ title: "Clear Sculpt" }).on("click", () => {
+          clearDensity();
+          rebuildBush();
+        });
+
+        // Leaves shading
+        const lf = pane.addFolder({ title: "Leaves Shading", expanded: true });
+        lf.addBinding(BUSH, "colorA", { label: "Shadow color" }).on("change", syncBushUniforms);
+        lf.addBinding(BUSH, "colorB", { label: "Lit color" }).on("change", syncBushUniforms);
+        lf.addBinding(BUSH, "colorVar", { label: "Color var", min: 0, max: 0.6, step: 0.01 }).on("change", syncBushUniforms);
+        lf.addBinding(BUSH, "aoStrength", { label: "AO", min: 0, max: 1, step: 0.01 }).on("change", syncBushUniforms);
+        lf.addBinding(BUSH, "sssStrength", { label: "SSS strength", min: 0, max: 1, step: 0.01 }).on("change", syncBushUniforms);
+        lf.addBinding(BUSH, "sssColor", { label: "SSS color" }).on("change", syncBushUniforms);
+        lf.addBinding(BUSH, "baseContact", { label: "Base contact", min: 0, max: 1, step: 0.01 }).on("change", syncBushUniforms);
+
+        lf.addBlade({ view: "separator" });
+        lf.addBinding(BUSH, "alphaThresh", { label: "Alpha cutoff", min: 0, max: 0.7, step: 0.01 }).on("change", syncBushUniforms);
+        lf.addBinding(BUSH, "alphaTest", { label: "Alpha test", min: 0, max: 0.5, step: 0.01 }).on("change", syncBushUniforms);
+        lf.addBinding(BUSH, "shapeVar", { label: "Shape var", min: 0, max: 0.3, step: 0.01 }).on("change", syncBushUniforms);
+
+        // Volume / quality
+        const qf = pane.addFolder({ title: "Volume & Quality", expanded: true });
+        qf.addBinding(BUSH, "orientations", { label: "Orientations", min: 1, max: 12, step: 1 }).on("change", rebuildBush);
+        qf.addBinding(BUSH, "clusterScale", { label: "Cluster scale", min: 0.1, max: 1.6, step: 0.01 }).on("change", () => {
+          if (!bushFoliage) return;
+          bushFoliage.updateScaleMultiplier(BUSH.clusterScale);
+        });
+        qf.addBlade({ view: "separator" });
+        qf.addBinding(BUSH, "planeCount", { label: "Planes", min: 60, max: 160, step: 1 }).on("change", rebuildBush);
+        qf.addBinding(BUSH, "normalLerp", { label: "Normal blend", min: 0.65, max: 0.95, step: 0.005 }).on("change", rebuildBush);
+
+        // Wind
+        const wf = pane.addFolder({ title: "Wind", expanded: true });
+        wf.addBinding(BUSH, "windStrength", { label: "Strength", min: 0, max: 2, step: 0.01 }).on("change", () => {
+          wind.strength.value = BUSH.windStrength;
+        });
+
+        // Prevent accidental scroll capture like tree-workshop (only if you use shift/alt)
+        renderer.domElement.addEventListener(
+          "wheel",
+          (e) => {
+            if (!e.shiftKey && !e.altKey) return;
+            e.preventDefault();
+            e.stopPropagation();
+          },
+          { passive: false, capture: true }
+        );
+
+        window.addEventListener("resize", () => {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(innerWidth, innerHeight);
+        });
+
+        // Render loop
+        wind.strength.value = BUSH.windStrength;
+        renderer.setAnimationLoop(() => {
+          const delta = clock.getDelta();
+          wind.update(delta);
+          orbit.update();
+          renderer.render(scene, camera);
+        });
+      }
+
+      init();
+    </script>
+  </body>
+</html>
+
