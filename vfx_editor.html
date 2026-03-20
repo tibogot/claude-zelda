@@ -1,0 +1,1830 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VFX Editor (TSL WebGPU) - Multi VFX</title>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.3/dist/tweakpane.min.js"
+        }
+      }
+    </script>
+
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #070707;
+        color: #d7ffd0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+          "Courier New", monospace;
+      }
+
+      #ui {
+        position: absolute;
+        left: 0;
+        top: 0;
+        z-index: 10;
+        width: 360px;
+        max-width: 85vw;
+        height: 100%;
+        overflow: auto;
+        padding: 12px;
+        box-sizing: border-box;
+        background: rgba(0, 0, 0, 0.35);
+        backdrop-filter: blur(6px);
+        border-right: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      #panel {
+        margin-bottom: 12px;
+      }
+
+      .row {
+        display: flex;
+        gap: 8px;
+        margin: 8px 0;
+      }
+
+      .row > * {
+        flex: 1;
+      }
+
+      label {
+        display: block;
+        font-size: 12px;
+        opacity: 0.9;
+        margin: 8px 0 6px;
+      }
+
+      input[type="text"] {
+        width: 100%;
+        padding: 8px 10px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 8px;
+        color: inherit;
+        box-sizing: border-box;
+      }
+
+      textarea {
+        width: 100%;
+        min-height: 110px;
+        padding: 10px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 10px;
+        color: #d7ffd0;
+        box-sizing: border-box;
+        font-family: inherit;
+        resize: vertical;
+      }
+
+      button {
+        width: 100%;
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        background: rgba(255, 255, 255, 0.08);
+        color: inherit;
+        cursor: pointer;
+      }
+
+      button:hover {
+        background: rgba(255, 255, 255, 0.12);
+      }
+
+      .sectionTitle {
+        font-weight: 800;
+        font-size: 12px;
+        opacity: 0.95;
+        margin: 10px 0 6px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+
+      #hint {
+        font-size: 12px;
+        opacity: 0.85;
+        line-height: 1.35;
+      }
+
+      input[type="color"] {
+        width: 52px;
+        height: 36px;
+        padding: 0;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        background: transparent;
+        border-radius: 10px;
+      }
+
+      /* Make dropdowns readable (browser-native select styles can vary). */
+      #ui select {
+        background: rgba(0, 0, 0, 0.55) !important;
+        color: #d7ffd0 !important;
+        border: 1px solid rgba(255, 255, 255, 0.22) !important;
+      }
+
+      #ui option {
+        background: #0b0b0b !important;
+        color: #d7ffd0 !important;
+      }
+
+      #viewport {
+        position: absolute;
+        inset: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="ui">
+      <div class="sectionTitle">VFX Editor</div>
+      <div id="panel"></div>
+
+      <div class="sectionTitle">Playback</div>
+      <div class="row">
+        <button id="btnPlayPause">Pause</button>
+        <button id="btnReset">Reset Time</button>
+      </div>
+
+      <div class="sectionTitle">Effect</div>
+      <div class="row">
+        <select
+          id="effectSelect"
+          style="
+            flex: 1;
+            width: 100%;
+            padding: 10px 12px;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.16);
+            background: rgba(255, 255, 255, 0.06);
+            color: inherit;
+          "
+        >
+          <option value="tornado">Tornado</option>
+          <option value="shockwave">Ground Shockwave</option>
+          <option value="iceNova">Ice Nova</option>
+          <option value="chargeAura">Charge Aura</option>
+          <option value="shadowBurst">Shadow Burst</option>
+          <option value="voronoiCrackImpact">Voronoi Crack Impact</option>
+          <option value="erosionDissolve">Erosion Dissolve</option>
+          <option value="spinSlashArc">Spin Slash Arc</option>
+          <option value="bladeSlashTrail">Blade Slash Trail</option>
+          <option value="holyBurst">Holy Burst</option>
+          <option value="lightningBurst">Lightning Ring</option>
+          <option value="waterBurst">Water Burst</option>
+          <option value="fireExplosion">Fire Explosion</option>
+          <option value="sandDustImpact">Sand Dust Impact</option>
+          <option value="poisonBurst">Poison Aura</option>
+          <option value="portalRing">Portal Ring</option>
+          <option value="windSlashArc">Wind Slash Arc</option>
+          <option value="shadowCrescent">Shadow Crescent</option>
+          <option value="frostNova">Frost Nova</option>
+          <option value="firePillar">Fire Pillar</option>
+          <option value="icePillar">Ice Pillar</option>
+        </select>
+      </div>
+
+      <div class="sectionTitle">Color</div>
+      <div class="row" style="align-items: center">
+        <label style="margin: 0; flex: 1">Emissive</label>
+        <input id="emissiveColorInput" type="color" value="#ff8b4d" />
+      </div>
+
+      <div class="sectionTitle">Presets</div>
+      <label>Preset name</label>
+      <div class="row">
+        <input id="presetNameInput" type="text" placeholder="e.g. FireSpinSlash" />
+      </div>
+      <div class="row">
+        <button id="btnSavePreset">Save</button>
+      </div>
+      <div class="row">
+        <select
+          id="presetSelect"
+          style="
+            width: 100%;
+            padding: 10px 12px;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.16);
+            background: rgba(255, 255, 255, 0.06);
+            color: inherit;
+          "
+        ></select>
+      </div>
+      <div class="row">
+        <button id="btnLoadPreset">Load</button>
+        <button id="btnDeletePreset">Delete</button>
+      </div>
+
+      <div class="sectionTitle">Export / Import</div>
+      <div class="row">
+        <button id="btnExport">Export JSON</button>
+      </div>
+      <div class="row">
+        <button id="btnImport">Import JSON</button>
+      </div>
+      <textarea id="exportArea" spellcheck="false"></textarea>
+
+      <div id="hint" style="margin-top: 10px">
+        V1 + multi-effect shaders. Use the dropdown to preview different attack/spell styles.
+      </div>
+    </div>
+
+    <div id="viewport"></div>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import {
+        Fn,
+        uv,
+        vec2,
+        vec3,
+        vec4,
+        uniform,
+        color,
+        atan,
+        abs,
+        fract,
+        PI,
+        TWO_PI,
+        dot,
+        floor,
+        float,
+        positionLocal,
+        sin,
+        cos,
+        min,
+        luminance,
+        texture,
+        pass
+      } from "three/tsl";
+      import { bloom } from "three/addons/tsl/display/BloomNode.js";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
+
+      const PRESET_KEY = "zelda_vfx_presets_v1";
+
+      let camera, scene, renderer, renderPipeline, controls;
+      let bloomPass;
+      let floorMesh, emissiveMesh, darkMesh;
+      let floorMaterials = {};
+      let emissiveMaterials = {};
+      let darkMaterials = {};
+
+      const params = {
+        // Effect identity
+        effectType: "tornado",
+
+        // Motion / deformation
+        timeScale: 0.2,
+        parabolStrength: 1.0,
+        parabolOffset: 0.3,
+        parabolAmplitude: 0.2,
+        turbulenceStrength: 0.05,
+        turbulenceFreq: 20.0,
+        turbulenceAngleMult: 2.0,
+
+        // Generic ground / arc timing & shape
+        ringSpeed: 2.2,
+        ringWidth: 0.035,
+        ringMaxRadius: 0.72,
+        ringNoiseStrength: 0.25,
+        ringNoiseScale: 6.0,
+
+        // Sector / arc shaping (0..1 around full circle)
+        arcCenter: 0.5,
+        arcWidth: 0.18,
+        arcRotationSpeed: 1.0,
+
+        // Layers
+        floorEnabled: true,
+        emissiveEnabled: true,
+        darkEnabled: true,
+        floorScale: 1.0,
+        columnHeight: 1.0,
+
+        // Look / brightness
+        floorIntensity: 3.0,
+        emissiveIntensity: 1.2,
+
+        // Alpha shaping
+        floorGlowStep: 0.2,
+        floorAlphaWidth: 0.01,
+        columnAlphaWidth: 0.1,
+        darkAlphaWidth: 0.01,
+
+        // Bloom
+        bloomStrength: 1.0,
+        bloomRadius: 0.1,
+        bloomThreshold: 1.0,
+
+        // Color (synced with HTML color input)
+        emissiveColor: "#ff8b4d"
+      };
+
+      const u = {
+        // time is our own uniform so we can pause precisely
+        time: uniform(0),
+        timeScale: uniform(params.timeScale),
+
+        parabolStrength: uniform(params.parabolStrength),
+        parabolOffset: uniform(params.parabolOffset),
+        parabolAmplitude: uniform(params.parabolAmplitude),
+
+        turbulenceStrength: uniform(params.turbulenceStrength),
+        turbulenceFreq: uniform(params.turbulenceFreq),
+        turbulenceAngleMult: uniform(params.turbulenceAngleMult),
+
+        ringSpeed: uniform(params.ringSpeed),
+        ringWidth: uniform(params.ringWidth),
+        ringMaxRadius: uniform(params.ringMaxRadius),
+        ringNoiseStrength: uniform(params.ringNoiseStrength),
+        ringNoiseScale: uniform(params.ringNoiseScale),
+
+        arcCenter: uniform(params.arcCenter),
+        arcWidth: uniform(params.arcWidth),
+        arcRotationSpeed: uniform(params.arcRotationSpeed),
+
+        emissiveColor: uniform(color(params.emissiveColor)),
+
+        floorEnable: uniform(1),
+        emissiveEnable: uniform(1),
+        darkEnable: uniform(1),
+
+        floorIntensity: uniform(params.floorIntensity),
+        emissiveIntensity: uniform(params.emissiveIntensity),
+
+        floorGlowStep: uniform(params.floorGlowStep),
+        floorAlphaWidth: uniform(params.floorAlphaWidth),
+        columnAlphaWidth: uniform(params.columnAlphaWidth),
+        darkAlphaWidth: uniform(params.darkAlphaWidth)
+      };
+
+      function loadTexture(url) {
+        return new Promise((resolve, reject) => {
+          const loader = new THREE.TextureLoader();
+          loader.load(
+            url,
+            (tex) => resolve(tex),
+            undefined,
+            (err) => reject(err)
+          );
+        });
+      }
+
+      function getPresetData() {
+        return {
+          version: 1,
+          effectType: params.effectType,
+          params: { ...params }
+        };
+      }
+
+      function applyPresetData(data) {
+        if (!data || !data.params) return;
+        Object.assign(params, data.params);
+
+        // Sync HTML color input
+        document.getElementById("emissiveColorInput").value = params.emissiveColor;
+
+        setEffectType(params.effectType || "tornado", false);
+        if (pane) pane.refresh();
+      }
+
+      function loadPresets() {
+        try {
+          return JSON.parse(localStorage.getItem(PRESET_KEY) || "{}");
+        } catch {
+          return {};
+        }
+      }
+
+      function savePresets(presets) {
+        localStorage.setItem(PRESET_KEY, JSON.stringify(presets));
+      }
+
+      function populatePresetSelect(presets) {
+        const select = document.getElementById("presetSelect");
+        select.innerHTML = "";
+        const names = Object.keys(presets).sort((a, b) => a.localeCompare(b));
+        for (const name of names) {
+          const opt = document.createElement("option");
+          opt.value = name;
+          opt.textContent = name;
+          select.appendChild(opt);
+        }
+      }
+
+      function applyEffectDefaults(effectType) {
+        // Note: keep this list small & gameplay-oriented. Users can tune everything afterwards.
+        if (effectType === "tornado") {
+          params.emissiveColor = "#ff8b4d";
+          params.timeScale = 0.2;
+          params.parabolStrength = 1.0;
+          params.parabolOffset = 0.3;
+          params.parabolAmplitude = 0.2;
+          params.turbulenceStrength = 0.05;
+          params.turbulenceFreq = 20.0;
+          params.turbulenceAngleMult = 2.0;
+
+          params.floorEnabled = true;
+          params.emissiveEnabled = true;
+          params.darkEnabled = true;
+          params.floorScale = 1.0;
+          params.columnHeight = 1.0;
+
+          params.floorIntensity = 3.0;
+          params.emissiveIntensity = 1.2;
+
+          params.floorGlowStep = 0.2;
+          params.floorAlphaWidth = 0.01;
+          params.columnAlphaWidth = 0.1;
+          params.darkAlphaWidth = 0.01;
+          return;
+        }
+
+        // Shared-ish ground timings
+        params.ringNoiseStrength = 0.25;
+        params.ringNoiseScale = 6.0;
+        params.arcCenter = 0.5;
+        params.arcWidth = 0.18;
+        params.arcRotationSpeed = 1.0;
+
+        if (effectType === "shockwave") {
+          params.emissiveColor = "#66ffff";
+          params.timeScale = 0.25;
+
+          params.floorEnabled = true;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+
+          params.floorScale = 1.35;
+          params.floorIntensity = 5.0;
+          params.floorGlowStep = 0.4;
+          params.floorAlphaWidth = 0.2;
+
+          params.ringSpeed = 2.2;
+          params.ringWidth = 0.045;
+          params.ringMaxRadius = 0.72;
+          return;
+        }
+
+        if (effectType === "holyBurst") {
+          params.emissiveColor = "#f7f2a0";
+          params.timeScale = 0.24;
+
+          params.floorEnabled = true;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+
+          params.floorScale = 1.35;
+          params.floorIntensity = 5.5;
+          params.floorGlowStep = 0.35;
+          params.floorAlphaWidth = 0.22;
+
+          params.ringSpeed = 2.0;
+          params.ringWidth = 0.04;
+          params.ringMaxRadius = 0.72;
+          params.ringNoiseStrength = 0.18;
+          return;
+        }
+
+        if (effectType === "lightningBurst") {
+          params.emissiveColor = "#ffd84d";
+          params.timeScale = 0.27;
+
+          params.floorEnabled = true;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+
+          params.floorScale = 1.3;
+          params.floorIntensity = 6.0;
+          params.floorGlowStep = 0.42;
+          params.floorAlphaWidth = 0.2;
+
+          params.ringSpeed = 2.5;
+          params.ringWidth = 0.03;
+          params.ringMaxRadius = 0.72;
+          params.ringNoiseStrength = 0.55;
+          return;
+        }
+
+        if (effectType === "waterBurst") {
+          params.emissiveColor = "#4dc6ff";
+          params.timeScale = 0.22;
+
+          params.floorEnabled = true;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+
+          params.floorScale = 1.35;
+          params.floorIntensity = 5.0;
+          params.floorGlowStep = 0.35;
+          params.floorAlphaWidth = 0.2;
+
+          params.ringSpeed = 2.1;
+          params.ringWidth = 0.04;
+          params.ringMaxRadius = 0.72;
+          params.ringNoiseStrength = 0.32;
+          return;
+        }
+
+        if (effectType === "fireExplosion") {
+          params.emissiveColor = "#ff6a3d";
+          params.timeScale = 0.25;
+
+          params.floorEnabled = true;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+
+          params.floorScale = 1.35;
+          params.floorIntensity = 6.0;
+          params.floorGlowStep = 0.3;
+          params.floorAlphaWidth = 0.2;
+
+          params.ringSpeed = 3.0;
+          params.ringWidth = 0.035;
+          params.ringMaxRadius = 0.72;
+          params.ringNoiseStrength = 0.38;
+          return;
+        }
+
+        if (effectType === "sandDustImpact") {
+          params.emissiveColor = "#e3c38a";
+          params.timeScale = 0.22;
+
+          params.floorEnabled = true;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+
+          params.floorScale = 1.4;
+          params.floorIntensity = 2.8;
+          params.floorGlowStep = 0.15;
+          params.floorAlphaWidth = 0.26;
+
+          params.ringSpeed = 2.2;
+          params.ringWidth = 0.05;
+          params.ringMaxRadius = 0.76;
+          params.ringNoiseStrength = 0.22;
+          return;
+        }
+
+        if (effectType === "iceNova") {
+          params.emissiveColor = "#bfe8ff";
+          params.timeScale = 0.23;
+
+          params.floorEnabled = true;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+
+          params.floorScale = 1.25;
+          params.floorIntensity = 5.0;
+          params.floorGlowStep = 0.48;
+          params.floorAlphaWidth = 0.22;
+
+          params.ringSpeed = 2.0;
+          params.ringWidth = 0.04;
+          params.ringMaxRadius = 0.7;
+          params.ringNoiseStrength = 0.32;
+          return;
+        }
+
+        if (effectType === "frostNova") {
+          params.emissiveColor = "#d8f6ff";
+          params.timeScale = 0.22;
+
+          params.floorEnabled = true;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+
+          params.floorScale = 1.25;
+          params.floorIntensity = 5.3;
+          params.floorGlowStep = 0.5;
+          params.floorAlphaWidth = 0.22;
+
+          params.ringSpeed = 2.0;
+          params.ringWidth = 0.041;
+          params.ringMaxRadius = 0.7;
+          params.ringNoiseStrength = 0.36;
+          return;
+        }
+
+        if (effectType === "chargeAura") {
+          params.emissiveColor = "#caff7a";
+          params.timeScale = 0.18;
+
+          params.floorEnabled = true;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+
+          params.floorScale = 1.35;
+          params.floorIntensity = 3.2;
+          params.floorGlowStep = 0.25;
+          params.floorAlphaWidth = 0.18;
+
+          params.ringSpeed = 1.4;
+          params.ringWidth = 0.07;
+          params.ringMaxRadius = 0.7;
+          params.ringNoiseStrength = 0.25;
+          return;
+        }
+
+        if (effectType === "poisonBurst") {
+          params.emissiveColor = "#a2ff44";
+          params.timeScale = 0.18;
+
+          params.floorEnabled = true;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+
+          params.floorScale = 1.35;
+          params.floorIntensity = 3.5;
+          params.floorGlowStep = 0.22;
+          params.floorAlphaWidth = 0.2;
+
+          params.ringSpeed = 1.25;
+          params.ringWidth = 0.075;
+          params.ringMaxRadius = 0.7;
+          params.ringNoiseStrength = 0.25;
+          return;
+        }
+
+        if (effectType === "portalRing") {
+          params.emissiveColor = "#a98bff";
+          params.timeScale = 0.17;
+
+          params.floorEnabled = true;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+
+          params.floorScale = 1.4;
+          params.floorIntensity = 3.8;
+          params.floorGlowStep = 0.28;
+          params.floorAlphaWidth = 0.2;
+
+          params.ringSpeed = 1.6;
+          params.ringWidth = 0.06;
+          params.ringMaxRadius = 0.72;
+          params.ringNoiseStrength = 0.25;
+          return;
+        }
+
+        if (effectType === "shadowBurst") {
+          params.emissiveColor = "#9b5cff"; // mostly ignored (shader outputs black)
+          params.timeScale = 0.22;
+
+          params.floorEnabled = true;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+
+          params.floorScale = 1.35;
+          params.floorIntensity = 1.0;
+          params.floorGlowStep = 0.2;
+          params.floorAlphaWidth = 0.28;
+
+          params.ringSpeed = 2.2;
+          params.ringWidth = 0.05;
+          params.ringMaxRadius = 0.72;
+          params.ringNoiseStrength = 0.18;
+          return;
+        }
+
+        if (effectType === "voronoiCrackImpact") {
+          params.emissiveColor = "#bfe8ff";
+          params.timeScale = 0.25;
+
+          params.floorEnabled = true;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+
+          params.floorScale = 1.45;
+          params.floorIntensity = 5.2;
+          params.floorGlowStep = 0.33;
+          params.floorAlphaWidth = 0.12;
+
+          params.ringSpeed = 2.6;
+          params.ringWidth = 0.04;
+          params.ringMaxRadius = 0.72;
+          params.ringNoiseStrength = 0.25;
+          params.ringNoiseScale = 10.0;
+          return;
+        }
+
+        if (effectType === "erosionDissolve") {
+          params.emissiveColor = "#ff6a3d";
+          params.timeScale = 0.24;
+
+          params.floorEnabled = true;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+
+          params.floorScale = 1.4;
+          params.floorIntensity = 5.0;
+          params.floorGlowStep = 0.38;
+          params.floorAlphaWidth = 0.10;
+
+          params.ringSpeed = 2.8;
+          params.ringWidth = 0.038;
+          params.ringMaxRadius = 0.72;
+          params.ringNoiseStrength = 0.25;
+          params.ringNoiseScale = 12.0;
+          return;
+        }
+
+        if (effectType === "spinSlashArc") {
+          params.emissiveColor = "#ffd37a";
+          params.timeScale = 0.22;
+
+          params.floorEnabled = true;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+
+          params.floorScale = 1.25;
+          params.floorIntensity = 4.2;
+          params.floorGlowStep = 0.28;
+          params.floorAlphaWidth = 0.2;
+
+          params.ringSpeed = 3.2;
+          params.ringWidth = 0.028;
+          params.ringMaxRadius = 0.72;
+          params.ringNoiseStrength = 0.25;
+
+          params.arcCenter = 0.45;
+          params.arcWidth = 0.2;
+          params.arcRotationSpeed = 1.6;
+          return;
+        }
+
+        if (effectType === "windSlashArc") {
+          params.emissiveColor = "#b7fffb";
+          params.timeScale = 0.22;
+
+          params.floorEnabled = true;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+
+          params.floorScale = 1.25;
+          params.floorIntensity = 4.2;
+          params.floorGlowStep = 0.22;
+          params.floorAlphaWidth = 0.2;
+
+          params.ringSpeed = 3.6;
+          params.ringWidth = 0.028;
+          params.ringMaxRadius = 0.72;
+          params.ringNoiseStrength = 0.28;
+
+          params.arcCenter = 0.45;
+          params.arcWidth = 0.22;
+          params.arcRotationSpeed = 1.9;
+          return;
+        }
+
+        if (effectType === "shadowCrescent") {
+          params.emissiveColor = "#b07cff";
+          params.timeScale = 0.22;
+
+          params.floorEnabled = true;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+
+          params.floorScale = 1.3;
+          params.floorIntensity = 2.2;
+          params.floorGlowStep = 0.16;
+          params.floorAlphaWidth = 0.28;
+
+          params.ringSpeed = 3.0;
+          params.ringWidth = 0.03;
+          params.ringMaxRadius = 0.72;
+          params.ringNoiseStrength = 0.14;
+
+          params.arcCenter = 0.48;
+          params.arcWidth = 0.22;
+          params.arcRotationSpeed = 1.5;
+          return;
+        }
+
+        if (effectType === "bladeSlashTrail") {
+          params.emissiveColor = "#66ffff";
+          params.timeScale = 0.22;
+
+          params.floorEnabled = true;
+          params.emissiveEnabled = false;
+          params.darkEnabled = false;
+
+          params.floorScale = 1.4;
+          params.floorIntensity = 3.0;
+          params.floorGlowStep = 0.18;
+          params.floorAlphaWidth = 0.18;
+
+          params.ringSpeed = 6.0;
+          params.ringWidth = 0.02;
+          params.ringMaxRadius = 0.76;
+          params.ringNoiseStrength = 0.35;
+
+          params.arcCenter = 0.52;
+          params.arcWidth = 0.14;
+          params.arcRotationSpeed = 2.0;
+          return;
+        }
+
+        if (effectType === "firePillar") {
+          params.emissiveColor = "#ff8b4d";
+          params.timeScale = 0.25;
+
+          params.floorEnabled = false;
+          params.emissiveEnabled = true;
+          params.darkEnabled = true;
+
+          params.columnHeight = 1.3;
+          params.emissiveIntensity = 1.5;
+          params.columnAlphaWidth = 0.12;
+          params.darkAlphaWidth = 0.02;
+
+          params.parabolStrength = 1.0;
+          params.parabolOffset = 0.3;
+          params.parabolAmplitude = 0.2;
+          params.turbulenceStrength = 0.05;
+          params.turbulenceFreq = 20.0;
+          params.turbulenceAngleMult = 2.0;
+          return;
+        }
+
+        if (effectType === "icePillar") {
+          params.emissiveColor = "#69d6ff";
+          params.timeScale = 0.25;
+
+          params.floorEnabled = false;
+          params.emissiveEnabled = true;
+          params.darkEnabled = true;
+
+          params.columnHeight = 1.3;
+          params.emissiveIntensity = 1.3;
+          params.columnAlphaWidth = 0.1;
+          params.darkAlphaWidth = 0.02;
+
+          params.turbulenceStrength = 0.035;
+          params.turbulenceFreq = 22.0;
+          return;
+        }
+      }
+
+      function setEffectType(effectType, applyDefaults) {
+        params.effectType = effectType;
+
+        const select = document.getElementById("effectSelect");
+        if (select) select.value = effectType;
+
+        if (applyDefaults) {
+          applyEffectDefaults(effectType);
+          // Ensure HTML picker follows params updates.
+          const colorInput = document.getElementById("emissiveColorInput");
+          if (colorInput) colorInput.value = params.emissiveColor;
+        }
+
+        // Swap shader materials (if the effect provides them).
+        if (floorMesh) floorMesh.material = floorMaterials[effectType] || floorMaterials.tornado;
+        if (emissiveMesh) emissiveMesh.material = emissiveMaterials[effectType] || emissiveMaterials.tornado;
+        if (darkMesh) darkMesh.material = darkMaterials[effectType] || darkMaterials.tornado;
+
+        applyParamsToEngine();
+        if (pane) pane.refresh();
+      }
+
+      async function init() {
+        camera = new THREE.PerspectiveCamera(25, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(1, 1, 3);
+
+        scene = new THREE.Scene();
+
+        renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.getElementById("viewport").appendChild(renderer.domElement);
+        await renderer.init();
+
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.target.y = 0.4;
+        controls.enableDamping = true;
+        controls.minDistance = 0.1;
+        controls.maxDistance = 50;
+
+        // Load noise texture used by the shader
+        const perlinTexture = await loadTexture("./textures/noises/rgb-256x256.png");
+        perlinTexture.wrapS = THREE.RepeatWrapping;
+        perlinTexture.wrapT = THREE.RepeatWrapping;
+
+        // ---------------------------------------------------------------------
+        // TSL: helper functions (based on your tornado template)
+        // ---------------------------------------------------------------------
+        const toRadialUv = Fn(([uvNode, multiplier, rotation, offset]) => {
+          const centeredUv = uvNode.sub(0.5).toVar();
+          const distanceToCenter = centeredUv.length();
+          const angle = atan(centeredUv.y, centeredUv.x);
+          const radialUv = vec2(angle.add(PI).div(TWO_PI), distanceToCenter).toVar();
+          radialUv.mulAssign(multiplier);
+          radialUv.x.addAssign(rotation);
+          radialUv.y.addAssign(offset);
+          return radialUv;
+        });
+
+        const toSkewedUv = Fn(([uvNode, skew]) => {
+          return vec2(
+            uvNode.x.add(uvNode.y.mul(skew.x)),
+            uvNode.y.add(uvNode.x.mul(skew.y))
+          );
+        });
+
+        const twistedCylinder = Fn(([
+          position,
+          parabolStrength,
+          parabolOffset,
+          parabolAmplitude,
+          timeNode,
+          turbulenceStrength,
+          turbulenceFreq,
+          turbulenceAngleMult
+        ]) => {
+          const angle = atan(position.z, position.x).toVar();
+          const elevation = position.y;
+
+          // parabol
+          const radius = parabolStrength
+            .mul(position.y.sub(parabolOffset))
+            .pow(2)
+            .add(parabolAmplitude)
+            .toVar();
+
+          // turbulences
+          radius.addAssign(
+            sin(elevation.sub(timeNode).mul(turbulenceFreq).add(angle.mul(turbulenceAngleMult))).mul(
+              turbulenceStrength
+            )
+          );
+
+          const twistedPosition = vec3(
+            cos(angle).mul(radius),
+            elevation,
+            sin(angle).mul(radius)
+          );
+
+          return twistedPosition;
+        });
+
+        // ---------------------------------------------------------------------
+        // Materials / meshes
+        // ---------------------------------------------------------------------
+        // A few reusable masks for floor-based effects
+        const ringBand = Fn(([distToCenter, radius, width]) => {
+          const core = abs(distToCenter.sub(radius));
+          return core.smoothstep(width, width.mul(1.6)).oneMinus();
+        });
+
+        const sectorMask = Fn(([angle01, center01, width]) => {
+          const delta = abs(angle01.sub(center01));
+          const wrapped = min(delta, delta.oneMinus());
+          return wrapped.smoothstep(width.mul(0.4), width).oneMinus();
+        });
+
+        // 2D Voronoi cellular distance (min distance to random points in neighboring cells)
+        const voronoiMinDist2D = Fn(([p, scale]) => {
+          const g = p.mul(scale);
+          const id = floor(g);
+          const f = fract(g);
+          let minDist = float(1.0);
+
+          const sampleCell = (offset) => {
+            const cell = id.add(offset);
+            const rand = fract(
+              sin(dot(cell, vec2(127.1, 311.7))).mul(43758.5453)
+            );
+            const point = offset.add(rand);
+            const d = point.sub(f).length();
+            minDist.assign(min(minDist, d));
+          };
+
+          sampleCell(vec2(-1, -1));
+          sampleCell(vec2(-1, 0));
+          sampleCell(vec2(-1, 1));
+          sampleCell(vec2(0, -1));
+          sampleCell(vec2(0, 0));
+          sampleCell(vec2(0, 1));
+          sampleCell(vec2(1, -1));
+          sampleCell(vec2(1, 0));
+          sampleCell(vec2(1, 1));
+
+          return minDist;
+        });
+
+        // --- Floor shader set -------------------------------------------------
+        const floorMaterialTornado = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          wireframe: false,
+          depthWrite: false
+        });
+        floorMaterialTornado.outputNode = Fn(() => {
+          const scaledTime = u.time.mul(u.timeScale);
+
+          // noise 1
+          const noise1Uv = toRadialUv(uv(), vec2(0.5, 0.5), scaledTime, scaledTime);
+          noise1Uv.assign(toSkewedUv(noise1Uv, vec2(-1, 0)));
+          noise1Uv.mulAssign(vec2(4, 1));
+          const noise1 = texture(perlinTexture, noise1Uv, 1).r.remap(0.45, 0.7);
+
+          // noise 2
+          const noise2Uv = toRadialUv(uv(), vec2(2, 8), scaledTime.mul(2), scaledTime.mul(8));
+          noise2Uv.assign(toSkewedUv(noise2Uv, vec2(-0.25, 0)));
+          noise2Uv.mulAssign(vec2(2, 0.25));
+          const noise2 = texture(perlinTexture, noise2Uv, 1).b.remap(0.45, 0.7);
+
+          // outer fade
+          const distanceToCenter = uv().sub(0.5).toVar();
+          const outerFade = min(
+            distanceToCenter.length().oneMinus().smoothstep(0.5, 0.9),
+            distanceToCenter.length().smoothstep(0, 0.2)
+          );
+
+          const effect = noise1.mul(noise2).mul(outerFade).toVar();
+          const glowMask = effect.step(u.floorGlowStep);
+          const alphaMask = effect.smoothstep(0, u.floorAlphaWidth);
+
+          return vec4(
+            u.emissiveColor.mul(glowMask).mul(u.floorIntensity).mul(u.floorEnable),
+            alphaMask.mul(u.floorEnable)
+          );
+        })();
+        floorMaterials.tornado = floorMaterialTornado;
+
+        const floorMaterialShockwave = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          wireframe: false,
+          depthWrite: false
+        });
+        floorMaterialShockwave.outputNode = Fn(() => {
+          const centeredUv = uv().sub(0.5).toVar();
+          const distToCenter = centeredUv.length();
+
+          const scaledTime = u.time.mul(u.timeScale);
+          const t = scaledTime.mul(u.ringSpeed);
+          const pulse = fract(t);
+          const targetR = pulse.mul(u.ringMaxRadius);
+
+          const ring = ringBand(distToCenter, targetR, u.ringWidth);
+
+          const noiseUv = uv().mul(vec2(u.ringNoiseScale, u.ringNoiseScale)).add(vec2(t, t.negate()));
+          const noise = texture(perlinTexture, noiseUv, 1).r.remap(0.4, 1.0);
+
+          const noisyRing = ring.mul(noise.mul(u.ringNoiseStrength).add(u.ringNoiseStrength.oneMinus()));
+
+          const glowMask = noisyRing.step(u.floorGlowStep);
+          const alphaMask = noisyRing.smoothstep(0, u.floorAlphaWidth);
+
+          const emissiveColorLuminance = luminance(u.emissiveColor);
+          return vec4(
+            u.emissiveColor.mul(u.floorIntensity).div(emissiveColorLuminance).mul(glowMask).mul(u.floorEnable),
+            alphaMask.mul(u.floorEnable)
+          );
+        })();
+        floorMaterials.shockwave = floorMaterialShockwave;
+        floorMaterials.holyBurst = floorMaterialShockwave;
+        floorMaterials.lightningBurst = floorMaterialShockwave;
+        floorMaterials.waterBurst = floorMaterialShockwave;
+        floorMaterials.fireExplosion = floorMaterialShockwave;
+        floorMaterials.sandDustImpact = floorMaterialShockwave;
+
+        const floorMaterialIceNova = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          wireframe: false,
+          depthWrite: false
+        });
+        floorMaterialIceNova.outputNode = Fn(() => {
+          const centeredUv = uv().sub(0.5).toVar();
+          const distToCenter = centeredUv.length();
+
+          const scaledTime = u.time.mul(u.timeScale);
+          const t = scaledTime.mul(u.ringSpeed);
+          const pulse = fract(t);
+          const targetR = pulse.mul(u.ringMaxRadius);
+
+          const ringMain = ringBand(distToCenter, targetR, u.ringWidth);
+          const ringOuter = ringBand(distToCenter, targetR.mul(1.07), u.ringWidth.mul(0.7));
+
+          const noiseUv = uv().mul(vec2(u.ringNoiseScale, u.ringNoiseScale)).add(vec2(t, t.negate()));
+          const noise = texture(perlinTexture, noiseUv, 1).g.remap(0.2, 1.0);
+          const spark = noise.remap(0.7, 1.0).step(u.floorGlowStep);
+
+          const ring = ringMain
+            .mul(u.ringNoiseStrength.oneMinus())
+            .add(ringOuter.mul(u.ringNoiseStrength));
+          const iced = ring.mul(spark.mul(0.6).add(0.4));
+          const glowMask = iced.step(u.floorGlowStep.mul(0.9));
+          const alphaMask = iced.smoothstep(0, u.floorAlphaWidth);
+
+          const emissiveColorLuminance = luminance(u.emissiveColor);
+          return vec4(
+            u.emissiveColor.mul(u.floorIntensity).div(emissiveColorLuminance).mul(glowMask).mul(u.floorEnable),
+            alphaMask.mul(u.floorEnable)
+          );
+        })();
+        floorMaterials.iceNova = floorMaterialIceNova;
+        floorMaterials.frostNova = floorMaterialIceNova;
+
+        const floorMaterialChargeAura = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          wireframe: false,
+          depthWrite: false
+        });
+        floorMaterialChargeAura.outputNode = Fn(() => {
+          const centeredUv = uv().sub(0.5).toVar();
+          const distToCenter = centeredUv.length();
+
+          const scaledTime = u.time.mul(u.timeScale);
+          const t = scaledTime.mul(u.ringSpeed);
+          const pulse = fract(t);
+          const targetR = pulse.mul(u.ringMaxRadius);
+
+          const ring = ringBand(distToCenter, targetR, u.ringWidth);
+
+          // reuse tornado radial noise, then multiply by expanding ring
+          const noise1Uv = toRadialUv(uv(), vec2(0.5, 0.5), scaledTime, scaledTime);
+          noise1Uv.assign(toSkewedUv(noise1Uv, vec2(-1, 0)));
+          noise1Uv.mulAssign(vec2(4, 1));
+          const noise1 = texture(perlinTexture, noise1Uv, 1).r.remap(0.45, 0.7);
+
+          const noise2Uv = toRadialUv(uv(), vec2(2, 8), scaledTime.mul(2), scaledTime.mul(8));
+          noise2Uv.assign(toSkewedUv(noise2Uv, vec2(-0.25, 0)));
+          noise2Uv.mulAssign(vec2(2, 0.25));
+          const noise2 = texture(perlinTexture, noise2Uv, 1).b.remap(0.45, 0.7);
+
+          const effect = noise1.mul(noise2).mul(ring);
+          const glowMask = effect.step(u.floorGlowStep);
+          const alphaMask = effect.smoothstep(0, u.floorAlphaWidth);
+
+          return vec4(
+            u.emissiveColor.mul(glowMask).mul(u.floorIntensity).mul(u.floorEnable),
+            alphaMask.mul(u.floorEnable)
+          );
+        })();
+        floorMaterials.chargeAura = floorMaterialChargeAura;
+        floorMaterials.portalRing = floorMaterialChargeAura;
+        floorMaterials.poisonBurst = floorMaterialChargeAura;
+
+        const floorMaterialShadowBurst = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          wireframe: false,
+          depthWrite: false
+        });
+        floorMaterialShadowBurst.outputNode = Fn(() => {
+          const centeredUv = uv().sub(0.5).toVar();
+          const distToCenter = centeredUv.length();
+
+          const scaledTime = u.time.mul(u.timeScale);
+          const t = scaledTime.mul(u.ringSpeed);
+          const pulse = fract(t);
+          const targetR = pulse.mul(u.ringMaxRadius);
+
+          const ring = ringBand(distToCenter, targetR, u.ringWidth);
+          const innerCut = distToCenter.oneMinus().smoothstep(0.0, 0.25);
+
+          const noiseUv = uv().mul(vec2(u.ringNoiseScale, u.ringNoiseScale)).add(vec2(t, t.negate()));
+          const noise = texture(perlinTexture, noiseUv, 1).r.remap(0.4, 1.0);
+          const faded = ring.mul(noise.mul(0.5).add(0.5)).mul(innerCut);
+
+          const alphaMask = faded.smoothstep(0, u.floorAlphaWidth).mul(u.floorEnable);
+          return vec4(vec3(0), alphaMask);
+        })();
+        floorMaterials.shadowBurst = floorMaterialShadowBurst;
+        floorMaterials.smokeImpact = floorMaterialShadowBurst;
+
+        // Voronoi crack impact (cellular distance mask + expanding ring front)
+        const floorMaterialVoronoiCrack = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          wireframe: false,
+          depthWrite: false
+        });
+        floorMaterialVoronoiCrack.outputNode = Fn(() => {
+          const centeredUv = uv().sub(0.5).toVar();
+          const distToCenter = centeredUv.length();
+
+          const scaledTime = u.time.mul(u.timeScale);
+          const t = scaledTime.mul(u.ringSpeed);
+          const pulse = fract(t);
+          const targetR = pulse.mul(u.ringMaxRadius);
+
+          const front = ringBand(distToCenter, targetR, u.ringWidth);
+
+          const cellMinDist = voronoiMinDist2D(centeredUv, u.ringNoiseScale);
+          const cellDist01 = cellMinDist.remap(0.0, 0.6);
+
+          // Crack edges: emphasize mid distances (not the cell centers).
+          const crackEdge = cellDist01.smoothstep(
+            u.floorGlowStep.mul(0.7),
+            u.floorGlowStep.mul(0.9)
+          );
+          const glow = front.mul(crackEdge);
+          const alpha = glow.smoothstep(0, u.floorAlphaWidth);
+
+          const emissiveColorLuminance = luminance(u.emissiveColor);
+          return vec4(
+            u.emissiveColor.mul(u.floorIntensity).div(emissiveColorLuminance).mul(glow).mul(u.floorEnable),
+            alpha.mul(u.floorEnable)
+          );
+        })();
+        floorMaterials.voronoiCrackImpact = floorMaterialVoronoiCrack;
+
+        // Perlin erosion dissolve (noise threshold + animated ring front)
+        const floorMaterialErosionDissolve = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          wireframe: false,
+          depthWrite: false
+        });
+        floorMaterialErosionDissolve.outputNode = Fn(() => {
+          const centeredUv = uv().sub(0.5).toVar();
+          const distToCenter = centeredUv.length();
+
+          const scaledTime = u.time.mul(u.timeScale);
+          const t = scaledTime.mul(u.ringSpeed);
+          const pulse = fract(t);
+          const targetR = pulse.mul(u.ringMaxRadius);
+
+          const front = ringBand(distToCenter, targetR, u.ringWidth);
+
+          const noiseUv = uv()
+            .mul(vec2(u.ringNoiseScale, u.ringNoiseScale))
+            .add(vec2(t, t.negate()));
+          const n = texture(perlinTexture, noiseUv, 1).r.remap(0.0, 1.0);
+
+          // Thresholds define how "burn away" the front looks.
+          const reveal = n.smoothstep(u.floorGlowStep, u.floorGlowStep.add(u.floorAlphaWidth));
+          const edge = n.smoothstep(
+            u.floorGlowStep.sub(u.floorAlphaWidth),
+            u.floorGlowStep
+          );
+
+          const glow = front.mul(edge);
+          const alpha = front.mul(reveal);
+
+          const emissiveColorLuminance = luminance(u.emissiveColor);
+          return vec4(
+            u.emissiveColor.mul(u.floorIntensity).div(emissiveColorLuminance).mul(glow).mul(u.floorEnable),
+            alpha.mul(u.floorEnable)
+          );
+        })();
+        floorMaterials.erosionDissolve = floorMaterialErosionDissolve;
+        floorMaterials.maskedNoiseEffect = floorMaterialErosionDissolve;
+
+        const floorMaterialSpinSlashArc = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          wireframe: false,
+          depthWrite: false
+        });
+        floorMaterialSpinSlashArc.outputNode = Fn(() => {
+          const centeredUv = uv().sub(0.5).toVar();
+          const distToCenter = centeredUv.length();
+
+          const scaledTime = u.time.mul(u.timeScale);
+          const t = scaledTime.mul(u.ringSpeed);
+          const pulse = fract(t);
+          const targetR = pulse.mul(u.ringMaxRadius);
+
+          const ring = ringBand(distToCenter, targetR, u.ringWidth);
+
+          const angle = atan(centeredUv.y, centeredUv.x);
+          const angle01 = angle.add(PI).div(TWO_PI).toVar();
+
+          const arcCenter01 = fract(u.arcCenter.add(scaledTime.mul(u.arcRotationSpeed)));
+          const sector = sectorMask(angle01, arcCenter01, u.arcWidth);
+
+          const noiseUv = uv().mul(vec2(u.ringNoiseScale, u.ringNoiseScale)).add(vec2(t, t.negate()));
+          const noise = texture(perlinTexture, noiseUv, 1).r.remap(0.4, 1.0);
+
+          const streak = ring.mul(sector).mul(noise.mul(u.ringNoiseStrength).add(u.ringNoiseStrength.oneMinus()));
+
+          const glowMask = streak.step(u.floorGlowStep);
+          const alphaMask = streak.smoothstep(0, u.floorAlphaWidth);
+
+          const emissiveColorLuminance = luminance(u.emissiveColor);
+          return vec4(
+            u.emissiveColor.mul(u.floorIntensity).div(emissiveColorLuminance).mul(glowMask).mul(u.floorEnable),
+            alphaMask.mul(u.floorEnable)
+          );
+        })();
+        floorMaterials.spinSlashArc = floorMaterialSpinSlashArc;
+        floorMaterials.windSlashArc = floorMaterialSpinSlashArc;
+        floorMaterials.shadowCrescent = floorMaterialSpinSlashArc;
+
+        // Blade trail is basically a tighter arc mask (different defaults via applyEffectDefaults)
+        const floorMaterialBladeSlashTrail = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          wireframe: false,
+          depthWrite: false
+        });
+        floorMaterialBladeSlashTrail.outputNode = Fn(() => {
+          const centeredUv = uv().sub(0.5).toVar();
+          const distToCenter = centeredUv.length();
+
+          const scaledTime = u.time.mul(u.timeScale);
+          const t = scaledTime.mul(u.ringSpeed);
+          const pulse = fract(t);
+          const targetR = pulse.mul(u.ringMaxRadius);
+
+          const ring = ringBand(distToCenter, targetR, u.ringWidth.mul(0.85));
+
+          const angle = atan(centeredUv.y, centeredUv.x);
+          const angle01 = angle.add(PI).div(TWO_PI).toVar();
+
+          const arcCenter01 = fract(u.arcCenter.add(scaledTime.mul(u.arcRotationSpeed)));
+          const sector = sectorMask(angle01, arcCenter01, u.arcWidth.mul(0.75));
+
+          const noiseUv = uv().mul(vec2(u.ringNoiseScale, u.ringNoiseScale)).add(vec2(t, t.negate()));
+          const noise = texture(perlinTexture, noiseUv, 1).b.remap(0.3, 1.0);
+
+          const streak = ring.mul(sector).mul(noise.mul(u.ringNoiseStrength).add(u.ringNoiseStrength.oneMinus()));
+
+          const glowMask = streak.step(u.floorGlowStep.mul(0.8));
+          const alphaMask = streak.smoothstep(0, u.floorAlphaWidth);
+
+          const emissiveColorLuminance = luminance(u.emissiveColor);
+          return vec4(
+            u.emissiveColor.mul(u.floorIntensity).div(emissiveColorLuminance).mul(glowMask).mul(u.floorEnable),
+            alphaMask.mul(u.floorEnable)
+          );
+        })();
+        floorMaterials.bladeSlashTrail = floorMaterialBladeSlashTrail;
+        floorMaterials.waterSlashTrail = floorMaterialBladeSlashTrail;
+
+        // --- Cylinder shader set ---------------------------------------------
+        const emissiveMaterialTornado = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          side: THREE.DoubleSide,
+          wireframe: false,
+          depthWrite: false
+        });
+
+        emissiveMaterialTornado.positionNode = twistedCylinder(
+          positionLocal,
+          u.parabolStrength,
+          u.parabolOffset,
+          u.parabolAmplitude.sub(0.05),
+          u.time.mul(u.timeScale),
+          u.turbulenceStrength,
+          u.turbulenceFreq,
+          u.turbulenceAngleMult
+        );
+
+        emissiveMaterialTornado.outputNode = Fn(() => {
+          const scaledTime = u.time.mul(u.timeScale);
+
+          const noise1Uv = uv().add(vec2(scaledTime, scaledTime.negate())).toVar();
+          noise1Uv.assign(toSkewedUv(noise1Uv, vec2(-1, 0)));
+          noise1Uv.mulAssign(vec2(2, 0.25));
+          const noise1 = texture(perlinTexture, noise1Uv, 1).r.remap(0.45, 0.7);
+
+          const noise2Uv = uv().add(vec2(scaledTime.mul(0.5), scaledTime.negate())).toVar();
+          noise2Uv.assign(toSkewedUv(noise2Uv, vec2(-1, 0)));
+          noise2Uv.mulAssign(vec2(5, 1));
+          const noise2 = texture(perlinTexture, noise2Uv, 1).g.remap(0.45, 0.7);
+
+          const outerFade = min(
+            uv().y.smoothstep(0, 0.1),
+            uv().y.oneMinus().smoothstep(0, 0.4)
+          );
+
+          const effect = noise1.mul(noise2).mul(outerFade);
+          const emissiveColorLuminance = luminance(u.emissiveColor);
+
+          return vec4(
+            u.emissiveColor.mul(u.emissiveIntensity).div(emissiveColorLuminance).mul(u.emissiveEnable),
+            effect.smoothstep(0, u.columnAlphaWidth).mul(u.emissiveEnable)
+          );
+        })();
+        emissiveMaterials.tornado = emissiveMaterialTornado;
+
+        const emissiveMaterialPillar = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          side: THREE.DoubleSide,
+          wireframe: false,
+          depthWrite: false
+        });
+        emissiveMaterialPillar.positionNode = positionLocal;
+        emissiveMaterialPillar.outputNode = Fn(() => {
+          const scaledTime = u.time.mul(u.timeScale);
+
+          const noise1Uv = uv().add(vec2(scaledTime, scaledTime.negate())).toVar();
+          noise1Uv.assign(toSkewedUv(noise1Uv, vec2(-1, 0)));
+          noise1Uv.mulAssign(vec2(2, 0.25));
+          const noise1 = texture(perlinTexture, noise1Uv, 1).r.remap(0.45, 0.7);
+
+          const noise2Uv = uv().add(vec2(scaledTime.mul(0.5), scaledTime.negate())).toVar();
+          noise2Uv.assign(toSkewedUv(noise2Uv, vec2(-1, 0)));
+          noise2Uv.mulAssign(vec2(5, 1));
+          const noise2 = texture(perlinTexture, noise2Uv, 1).g.remap(0.45, 0.7);
+
+          const outerFade = min(
+            uv().y.smoothstep(0, 0.12),
+            uv().y.oneMinus().smoothstep(0, 0.45)
+          );
+
+          const flicker = sin(scaledTime.mul(10)).mul(0.08).add(0.92);
+          const effect = noise1.mul(noise2).mul(outerFade).mul(flicker);
+
+          const emissiveColorLuminance = luminance(u.emissiveColor);
+          return vec4(
+            u.emissiveColor.mul(u.emissiveIntensity).div(emissiveColorLuminance).mul(u.emissiveEnable),
+            effect.smoothstep(0, u.columnAlphaWidth).mul(u.emissiveEnable)
+          );
+        })();
+        emissiveMaterials.firePillar = emissiveMaterialPillar;
+        emissiveMaterials.icePillar = emissiveMaterialPillar;
+
+        const darkMaterialTornado = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          side: THREE.DoubleSide,
+          wireframe: false,
+          depthWrite: false
+        });
+        darkMaterialTornado.positionNode = twistedCylinder(
+          positionLocal,
+          u.parabolStrength,
+          u.parabolOffset,
+          u.parabolAmplitude,
+          u.time.mul(u.timeScale).add(0.0),
+          u.turbulenceStrength,
+          u.turbulenceFreq,
+          u.turbulenceAngleMult
+        );
+        darkMaterialTornado.outputNode = Fn(() => {
+          const scaledTime = u.time.mul(u.timeScale).add(123.4);
+
+          const noise1Uv = uv().add(vec2(scaledTime, scaledTime.negate())).toVar();
+          noise1Uv.assign(toSkewedUv(noise1Uv, vec2(-1, 0)));
+          noise1Uv.mulAssign(vec2(2, 0.25));
+          const noise1 = texture(perlinTexture, noise1Uv, 1).g.remap(0.45, 0.7);
+
+          const noise2Uv = uv().add(vec2(scaledTime.mul(0.5), scaledTime.negate())).toVar();
+          noise2Uv.assign(toSkewedUv(noise2Uv, vec2(-1, 0)));
+          noise2Uv.mulAssign(vec2(5, 1));
+          const noise2 = texture(perlinTexture, noise2Uv, 1).b.remap(0.45, 0.7);
+
+          const outerFade = min(
+            uv().y.smoothstep(0, 0.2),
+            uv().y.oneMinus().smoothstep(0, 0.4)
+          );
+
+          const effect = noise1.mul(noise2).mul(outerFade);
+          return vec4(vec3(0), effect.smoothstep(0, u.darkAlphaWidth).mul(u.darkEnable));
+        })();
+        darkMaterials.tornado = darkMaterialTornado;
+
+        const darkMaterialPillar = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          side: THREE.DoubleSide,
+          wireframe: false,
+          depthWrite: false
+        });
+        darkMaterialPillar.positionNode = positionLocal;
+        darkMaterialPillar.outputNode = Fn(() => {
+          const scaledTime = u.time.mul(u.timeScale).add(123.4);
+
+          const noise1Uv = uv().add(vec2(scaledTime, scaledTime.negate())).toVar();
+          noise1Uv.assign(toSkewedUv(noise1Uv, vec2(-1, 0)));
+          noise1Uv.mulAssign(vec2(2, 0.25));
+          const noise1 = texture(perlinTexture, noise1Uv, 1).g.remap(0.45, 0.7);
+
+          const noise2Uv = uv().add(vec2(scaledTime.mul(0.5), scaledTime.negate())).toVar();
+          noise2Uv.assign(toSkewedUv(noise2Uv, vec2(-1, 0)));
+          noise2Uv.mulAssign(vec2(5, 1));
+          const noise2 = texture(perlinTexture, noise2Uv, 1).b.remap(0.45, 0.7);
+
+          const outerFade = min(
+            uv().y.smoothstep(0, 0.14),
+            uv().y.oneMinus().smoothstep(0, 0.45)
+          );
+
+          const flicker = sin(scaledTime.mul(9)).mul(0.07).add(0.93);
+          const effect = noise1.mul(noise2).mul(outerFade).mul(flicker);
+
+          return vec4(vec3(0), effect.smoothstep(0, u.darkAlphaWidth).mul(u.darkEnable));
+        })();
+        darkMaterials.firePillar = darkMaterialPillar;
+        darkMaterials.icePillar = darkMaterialPillar;
+
+        // Create meshes once; effect switching only swaps materials + enables.
+        floorMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), floorMaterials.tornado);
+        floorMesh.rotation.x = -Math.PI * 0.5;
+        floorMesh.scale.setScalar(params.floorScale);
+        scene.add(floorMesh);
+
+        emissiveMesh = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 20, 20, true), emissiveMaterials.tornado);
+        emissiveMesh.geometry.translate(0, 0.5, 0);
+        emissiveMesh.scale.y = params.columnHeight;
+        emissiveMesh.scale.x = 1;
+        emissiveMesh.scale.z = 1;
+        scene.add(emissiveMesh);
+
+        darkMesh = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 20, 20, true), darkMaterials.tornado);
+        darkMesh.geometry.translate(0, 0.5, 0);
+        darkMesh.scale.y = params.columnHeight;
+        scene.add(darkMesh);
+
+        // Render pipeline + bloom
+        renderPipeline = new THREE.RenderPipeline(renderer);
+        const scenePass = pass(scene, camera);
+        const sceneColor = scenePass.getTextureNode ? scenePass.getTextureNode("output") : scenePass;
+        bloomPass = bloom(sceneColor, params.bloomStrength, params.bloomRadius, params.bloomThreshold);
+        renderPipeline.outputNode = sceneColor.add(bloomPass);
+
+        await renderer.compileAsync(scene, camera);
+
+        // ---------------------------------------------------------------------
+        // UI
+        // ---------------------------------------------------------------------
+        const paneEl = document.getElementById("panel");
+        pane = new Pane({ container: paneEl, title: "VFX Controls" });
+
+        const syncFromParams = () => applyParamsToEngine();
+
+        // Effect type switching (also controls what shader materials are active).
+        const effectSelect = document.getElementById("effectSelect");
+        if (effectSelect) {
+          effectSelect.value = params.effectType;
+          effectSelect.addEventListener("change", () => {
+            setEffectType(effectSelect.value, true);
+          });
+        }
+        setEffectType(params.effectType || "tornado", false);
+
+        pane.addBinding(params, "timeScale", { min: -1, max: 1, step: 0.01 }).on("change", syncFromParams);
+
+        const fT = pane.addFolder({ title: "Deformation" });
+        fT.addBinding(params, "parabolStrength", { min: 0, max: 2, step: 0.01 }).on("change", syncFromParams);
+        fT.addBinding(params, "parabolOffset", { min: 0, max: 1, step: 0.01 }).on("change", syncFromParams);
+        fT.addBinding(params, "parabolAmplitude", { min: 0, max: 2, step: 0.01 }).on("change", syncFromParams);
+        fT
+          .addBinding(params, "turbulenceStrength", { min: 0, max: 0.25, step: 0.001 })
+          .on("change", syncFromParams);
+        fT.addBinding(params, "turbulenceFreq", { min: 0, max: 60, step: 0.1 }).on("change", syncFromParams);
+        fT
+          .addBinding(params, "turbulenceAngleMult", { min: 0, max: 8, step: 0.1 })
+          .on("change", syncFromParams);
+
+        const fShape = pane.addFolder({ title: "Ring / Arc Shape" });
+        fShape
+          .addBinding(params, "ringSpeed", { min: 0, max: 10, step: 0.01 })
+          .on("change", syncFromParams);
+        fShape.addBinding(params, "ringWidth", { min: 0.001, max: 0.2, step: 0.001 }).on("change", syncFromParams);
+        fShape
+          .addBinding(params, "ringMaxRadius", { min: 0.2, max: 0.95, step: 0.01 })
+          .on("change", syncFromParams);
+        fShape
+          .addBinding(params, "ringNoiseStrength", { min: 0, max: 1, step: 0.01 })
+          .on("change", syncFromParams);
+        fShape.addBinding(params, "ringNoiseScale", { min: 1, max: 30, step: 0.1 }).on("change", syncFromParams);
+
+        fShape.addBinding(params, "arcCenter", { min: 0, max: 1, step: 0.01 }).on("change", syncFromParams);
+        fShape.addBinding(params, "arcWidth", { min: 0.01, max: 0.5, step: 0.01 }).on("change", syncFromParams);
+        fShape
+          .addBinding(params, "arcRotationSpeed", { min: -5, max: 5, step: 0.01 })
+          .on("change", syncFromParams);
+
+        const fL = pane.addFolder({ title: "Layers & Size" });
+        fL.addBinding(params, "floorEnabled").on("change", syncFromParams);
+        fL.addBinding(params, "emissiveEnabled").on("change", syncFromParams);
+        fL.addBinding(params, "darkEnabled").on("change", syncFromParams);
+        fL.addBinding(params, "floorScale", { min: 0.3, max: 3.0, step: 0.01 }).on("change", syncFromParams);
+        fL.addBinding(params, "columnHeight", { min: 0.2, max: 3.0, step: 0.01 }).on("change", syncFromParams);
+
+        const fLook = pane.addFolder({ title: "Glow & Alpha" });
+        fLook.addBinding(params, "floorIntensity", { min: 0, max: 10, step: 0.01 }).on("change", syncFromParams);
+        fLook
+          .addBinding(params, "emissiveIntensity", { min: 0, max: 5, step: 0.01 })
+          .on("change", syncFromParams);
+        fLook.addBinding(params, "floorGlowStep", { min: 0, max: 1, step: 0.01 }).on("change", syncFromParams);
+        fLook.addBinding(params, "floorAlphaWidth", { min: 0.001, max: 0.1, step: 0.001 }).on("change", syncFromParams);
+        fLook.addBinding(params, "columnAlphaWidth", { min: 0.01, max: 0.5, step: 0.01 }).on("change", syncFromParams);
+        fLook.addBinding(params, "darkAlphaWidth", { min: 0.001, max: 0.1, step: 0.001 }).on("change", syncFromParams);
+
+        const fBloom = pane.addFolder({ title: "Bloom" });
+        fBloom
+          .addBinding(params, "bloomStrength", { min: 0, max: 10, step: 0.01 })
+          .on("change", syncFromParams);
+        fBloom
+          .addBinding(params, "bloomRadius", { min: 0, max: 1, step: 0.01 })
+          .on("change", syncFromParams);
+        fBloom
+          .addBinding(params, "bloomThreshold", { min: 0, max: 2, step: 0.01 })
+          .on("change", syncFromParams);
+
+        applyParamsToEngine();
+        pane.refresh();
+
+        // Color input binding
+        const colorInput = document.getElementById("emissiveColorInput");
+        colorInput.addEventListener("input", () => {
+          params.emissiveColor = colorInput.value;
+          // Keep Tweakpane params updated too
+          applyParamsToEngine();
+          pane.refresh();
+        });
+
+        // Playback buttons
+        const btnPlayPause = document.getElementById("btnPlayPause");
+        const btnReset = document.getElementById("btnReset");
+        let playing = true;
+        let elapsed = 0;
+        let lastNow = performance.now();
+
+        btnPlayPause.addEventListener("click", () => {
+          playing = !playing;
+          btnPlayPause.textContent = playing ? "Pause" : "Play";
+          // avoid a huge dt when resuming
+          lastNow = performance.now();
+        });
+
+        btnReset.addEventListener("click", () => {
+          elapsed = 0;
+          u.time.value = 0;
+        });
+
+        // Preset buttons
+        const presets = loadPresets();
+
+        // Seed starter presets once (so the dropdown immediately shows lots of options).
+        if (Object.keys(presets).length === 0) {
+          const originalEffect = params.effectType;
+
+          const addPreset = (name, effectType) => {
+            setEffectType(effectType, true);
+            presets[name] = getPresetData();
+          };
+
+          addPreset("Tornado", "tornado");
+          addPreset("Ground Shockwave", "shockwave");
+          addPreset("Ice Nova", "iceNova");
+          addPreset("Charge Aura", "chargeAura");
+          addPreset("Shadow Burst", "shadowBurst");
+          addPreset("Spin Slash Arc", "spinSlashArc");
+          addPreset("Blade Slash Trail", "bladeSlashTrail");
+
+          addPreset("Holy Burst", "holyBurst");
+          addPreset("Lightning Ring", "lightningBurst");
+          addPreset("Water Burst", "waterBurst");
+          addPreset("Fire Explosion", "fireExplosion");
+          addPreset("Sand Dust Impact", "sandDustImpact");
+          addPreset("Poison Aura", "poisonBurst");
+          addPreset("Portal Ring", "portalRing");
+          addPreset("Wind Slash Arc", "windSlashArc");
+          addPreset("Shadow Crescent", "shadowCrescent");
+          addPreset("Frost Nova", "frostNova");
+
+          addPreset("Fire Pillar", "firePillar");
+          addPreset("Ice Pillar", "icePillar");
+
+          addPreset("Voronoi Crack Impact", "voronoiCrackImpact");
+          addPreset("Erosion Dissolve", "erosionDissolve");
+
+          // Restore whatever the UI started on.
+          setEffectType(originalEffect, true);
+          savePresets(presets);
+        }
+
+        populatePresetSelect(presets);
+        const presetSelect = document.getElementById("presetSelect");
+        const presetNameInput = document.getElementById("presetNameInput");
+
+        document.getElementById("btnSavePreset").addEventListener("click", () => {
+          const name = (presetNameInput.value || "").trim();
+          if (!name) {
+            alert("Enter a preset name first.");
+            return;
+          }
+          presets[name] = getPresetData();
+          savePresets(presets);
+          populatePresetSelect(presets);
+          presetSelect.value = name;
+        });
+
+        document.getElementById("btnLoadPreset").addEventListener("click", () => {
+          const name = presetSelect.value;
+          if (!name || !presets[name]) return;
+          applyPresetData(presets[name]);
+        });
+
+        document.getElementById("btnDeletePreset").addEventListener("click", () => {
+          const name = presetSelect.value;
+          if (!name || !presets[name]) return;
+          if (!confirm(`Delete preset "${name}"?`)) return;
+          delete presets[name];
+          savePresets(presets);
+          populatePresetSelect(presets);
+        });
+
+        // Export / Import
+        const exportArea = document.getElementById("exportArea");
+
+        document.getElementById("btnExport").addEventListener("click", () => {
+          exportArea.value = JSON.stringify(getPresetData(), null, 2);
+        });
+
+        document.getElementById("btnImport").addEventListener("click", () => {
+          try {
+            const data = JSON.parse(exportArea.value || "{}");
+            applyPresetData(data);
+          } catch (e) {
+            alert("Invalid JSON: " + (e?.message || e));
+          }
+        });
+
+        // ---------------------------------------------------------------------
+        // Animation loop (also renders when paused)
+        // ---------------------------------------------------------------------
+        function animate(now) {
+          requestAnimationFrame(animate);
+
+          const dt = Math.max(0, now - lastNow) / 1000;
+          lastNow = now;
+          if (playing) elapsed += dt;
+          u.time.value = elapsed;
+
+          controls.update();
+          renderPipeline.render();
+        }
+
+        requestAnimationFrame(animate);
+
+        window.addEventListener("resize", () => {
+          camera.aspect = window.innerWidth / window.innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+      }
+
+      let pane;
+      function applyParamsToEngine() {
+        u.timeScale.value = params.timeScale;
+
+        u.parabolStrength.value = params.parabolStrength;
+        u.parabolOffset.value = params.parabolOffset;
+        u.parabolAmplitude.value = params.parabolAmplitude;
+
+        u.turbulenceStrength.value = params.turbulenceStrength;
+        u.turbulenceFreq.value = params.turbulenceFreq;
+        u.turbulenceAngleMult.value = params.turbulenceAngleMult;
+
+        u.ringSpeed.value = params.ringSpeed;
+        u.ringWidth.value = params.ringWidth;
+        u.ringMaxRadius.value = params.ringMaxRadius;
+        u.ringNoiseStrength.value = params.ringNoiseStrength;
+        u.ringNoiseScale.value = params.ringNoiseScale;
+
+        u.arcCenter.value = params.arcCenter;
+        u.arcWidth.value = params.arcWidth;
+        u.arcRotationSpeed.value = params.arcRotationSpeed;
+
+        u.emissiveColor.value.set(params.emissiveColor);
+
+        u.floorEnable.value = params.floorEnabled ? 1 : 0;
+        u.emissiveEnable.value = params.emissiveEnabled ? 1 : 0;
+        u.darkEnable.value = params.darkEnabled ? 1 : 0;
+
+        if (floorMesh) floorMesh.visible = params.floorEnabled;
+        if (emissiveMesh) emissiveMesh.visible = params.emissiveEnabled;
+        if (darkMesh) darkMesh.visible = params.darkEnabled;
+
+        u.floorIntensity.value = params.floorIntensity;
+        u.emissiveIntensity.value = params.emissiveIntensity;
+
+        u.floorGlowStep.value = params.floorGlowStep;
+        u.floorAlphaWidth.value = params.floorAlphaWidth;
+        u.columnAlphaWidth.value = params.columnAlphaWidth;
+        u.darkAlphaWidth.value = params.darkAlphaWidth;
+
+        if (floorMesh) floorMesh.scale.setScalar(params.floorScale);
+        if (emissiveMesh) emissiveMesh.scale.y = params.columnHeight;
+        if (darkMesh) darkMesh.scale.y = params.columnHeight;
+
+        if (bloomPass) {
+          bloomPass.strength.value = params.bloomStrength;
+          bloomPass.radius.value = params.bloomRadius;
+          bloomPass.threshold.value = params.bloomThreshold;
+        }
+      }
+
+      init().catch((err) => {
+        console.error(err);
+        const el = document.getElementById("hint");
+        if (el) el.textContent = "Error: " + (err?.message || err);
+      });
+    </script>
+  </body>
+</html>
