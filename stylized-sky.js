@@ -17,7 +17,7 @@ import {
   mix, smoothstep, clamp, pow, dot, abs, cos, atan,
   normalize, floor, fract, step,
   time, positionLocal, length,
-  mx_noise_float,
+  mx_noise_float, Loop, Var,
 } from "three/tsl";
 
 export function createStylizedSky() {
@@ -26,7 +26,9 @@ export function createStylizedSky() {
   const uZenithColor  = uniform(new THREE.Color().setHex(0x0c3fbf).convertSRGBToLinear());
   const uSkyColor     = uniform(new THREE.Color().setHex(0x3ea8f5).convertSRGBToLinear());
   const uHorizonColor = uniform(new THREE.Color().setHex(0xb8deff).convertSRGBToLinear());
-  const uSunsetColor  = uniform(new THREE.Color().setHex(0xff6820).convertSRGBToLinear());
+  const uSunsetColor  = uniform(new THREE.Color().setHex(0xff6820).convertSRGBToLinear()); // mid orange
+  const uSunsetLow    = uniform(new THREE.Color().setHex(0xaa1500).convertSRGBToLinear()); // deep crimson at horizon
+  const uSunsetHigh   = uniform(new THREE.Color().setHex(0xffd580).convertSRGBToLinear()); // pale amber upper band
   const uGroundColor  = uniform(new THREE.Color().setHex(0x2e4418).convertSRGBToLinear());
 
   // ── Sun ──
@@ -45,6 +47,11 @@ export function createStylizedSky() {
   const uSunRayStr       = uniform(0.45);
   const uSunRaySharp     = uniform(6.0);     // higher = thinner rays
   const uSunRayLen       = uniform(0.22);    // how far rays extend from disc
+
+  // ── Moon ──
+  const uMoonColor     = uniform(new THREE.Color().setHex(0xc8deff).convertSRGBToLinear());
+  const uMoonGlowStr   = uniform(0.18);  // soft halo brightness
+  const uMoonGlowPower = uniform(14.0);  // lower = wider halo
 
   // ── Horizon luminosity ring ──
   const uHorizonRingStr   = uniform(0.22);
@@ -85,6 +92,10 @@ export function createStylizedSky() {
   const uCloudVertStr      = uniform(0.0); // vertical top-to-bottom gradient strength
   const uCloudGradientDark = uniform(new THREE.Color().setHex(0x8aaabb).convertSRGBToLinear()); // dark color for gradient/bumps (independent of directional shadow)
 
+  // ── God rays ──
+  const uGodRayStr   = uniform(0.0);   // overall brightness (0 = off)
+  const uGodRayDecay = uniform(0.94);  // how fast each step fades (higher = longer rays)
+
   // ── Stars ──
   const uStarsDensity    = uniform(60.0);
   const uStarsSize       = uniform(0.08);
@@ -97,6 +108,13 @@ export function createStylizedSky() {
     const n3 = mx_noise_float(vec3(p.mul(4.31), float(2.70))).mul(0.250);
     const n4 = mx_noise_float(vec3(p.mul(8.73), float(4.10))).mul(0.125);
     return clamp(n1.add(n2).add(n3).add(n4).mul(0.533).add(0.5), 0, 1);
+  });
+
+  // ── 2-octave fBm (cheaper, used for god ray march) ──
+  const fbmCloudFast = Fn(([p]) => {
+    const n1 = mx_noise_float(vec3(p, float(0.00)));
+    const n2 = mx_noise_float(vec3(p.mul(2.07), float(1.30))).mul(0.500);
+    return clamp(n1.add(n2).mul(0.667).add(0.5), 0, 1);
   });
 
   // ── Cloud layer: returns vec4(rgb, alpha) ──
@@ -149,11 +167,21 @@ export function createStylizedSky() {
     const nightBlend  = smoothstep(float(0.05), float(-0.08), sunEl);
 
     // ── Sky gradient ──
-    const horizCol  = mix(uHorizonColor, uSunsetColor, sunsetBlend.mul(0.85));
-    const midCol    = mix(uSkyColor, mix(uSkyColor, uSunsetColor, float(0.5)), sunsetBlend.mul(0.4));
+    // Daytime 3-stop gradient
     const aboveHoriz = smoothstep(float(-0.02), float(0.20), upDot);
-    const toZenith   = smoothstep(float(0.15), float(0.90), upDot);
-    let col = mix(horizCol, mix(midCol, uZenithColor, toZenith), aboveHoriz);
+    const toZenith   = smoothstep(float(0.15),  float(0.90), upDot);
+    const dayGrad    = mix(uHorizonColor, mix(uSkyColor, uZenithColor, toZenith), aboveHoriz);
+
+    // Multi-stop sunset gradient: crimson → orange → amber → deep blue zenith
+    const sT1 = smoothstep(float(0.0),  float(0.10), upDot);
+    const sT2 = smoothstep(float(0.08), float(0.28), upDot);
+    const sT3 = smoothstep(float(0.22), float(0.65), upDot);
+    let sunsetGrad = vec3(uSunsetLow);
+    sunsetGrad = mix(sunsetGrad, vec3(uSunsetColor), sT1);
+    sunsetGrad = mix(sunsetGrad, vec3(uSunsetHigh),  sT2);
+    sunsetGrad = mix(sunsetGrad, vec3(uZenithColor), sT3);
+
+    let col = mix(dayGrad, sunsetGrad, sunsetBlend);
     col = mix(col, uGroundColor, smoothstep(float(0.0), float(-0.14), upDot));
 
     // ── Atmospheric horizon scatter (orange ring around sun) ──
@@ -221,8 +249,12 @@ export function createStylizedSky() {
     // ── Moon ──
     const moonDir  = uSunDir.negate();
     const moonDot  = clamp(dot(dir, moonDir), 0, 1);
-    const moonDisc = smoothstep(float(0.9975), float(0.9992), moonDot);
-    col = col.add(vec3(float(0.92), float(0.96), float(1.00)).mul(moonDisc.mul(nightBlend)));
+    const moonDisc = smoothstep(float(0.9972), float(0.9990), moonDot);
+    const moonGlow = pow(moonDot, uMoonGlowPower).mul(uMoonGlowStr);
+    // Halo ring just outside the disc
+    const moonHaloDist = abs(moonDot.sub(float(0.9960)));
+    const moonHalo     = smoothstep(float(0.0012), float(0.0), moonHaloDist).mul(0.12);
+    col = col.add(vec3(uMoonColor).mul(moonDisc.add(moonGlow).add(moonHalo)).mul(nightBlend));
 
     // ── Horizontal sun direction (for cloud shadow offset) ──
     const sunHoriz = normalize(vec2(uSunDir.x, uSunDir.z));
@@ -255,6 +287,25 @@ export function createStylizedSky() {
     const litCol2  = mix(vec3(uCloudLit), vec3(uCloudSunset), sunsetBlend.mul(0.35));
     const c2       = cloudLayer(warpedUV2, uC2Coverage, uC2Softness, sunHoriz, litCol2, hMask2, uC2Contrast, upDot);
     col = mix(col, c2.xyz, c2.w.mul(0.7).mul(nightBlend.oneMinus()));
+
+    // ── God rays: march from current cloud UV toward sun's cloud UV ──
+    const grSunUV  = uSunDir.xz.div(uSunDir.y.max(float(0.08)).mul(uC1Height)).mul(uC1Scale).add(time.mul(uC1WindDir));
+    const grBaseUV = cloudUV1; // already computed above (no warp, just projection)
+    const grStep   = grSunUV.sub(grBaseUV).mul(float(1.0 / 8.0));
+    const c1Thresh = float(1.0).sub(uC1Coverage);
+    const grUVPos  = Var(grBaseUV.toVar());
+    const grAcc    = Var(float(0.0));
+    const grDecay  = Var(float(1.0));
+    Loop(8, () => {
+      grUVPos.addAssign(grStep);
+      const s        = fbmCloudFast(grUVPos);
+      const occluded = smoothstep(c1Thresh, c1Thresh.add(uC1Softness), s);
+      grAcc.addAssign(float(1.0).sub(occluded).mul(grDecay));
+      grDecay.mulAssign(uGodRayDecay);
+    });
+    const grVis  = smoothstep(float(0.05), float(0.22), upDot); // fade matches cloud hMask1 — prevents horizon stretch artifacts
+    const grFinal = grAcc.div(float(8.0)).mul(uGodRayStr).mul(nightBlend.oneMinus()).mul(grVis);
+    col = col.add(vec3(uSunColor).mul(grFinal));
 
     // ── Stars ──
     const starUV   = dir.xz.div(dir.y.max(float(0.01))).mul(uStarsDensity);
@@ -322,6 +373,8 @@ export function createStylizedSky() {
       skyColor:          uSkyColor,
       horizonColor:      uHorizonColor,
       sunsetColor:       uSunsetColor,
+      sunsetLow:         uSunsetLow,
+      sunsetHigh:        uSunsetHigh,
       groundColor:       uGroundColor,
       // Sun
       sunColor:          uSunColor,
@@ -363,8 +416,15 @@ export function createStylizedSky() {
       cloudRimWidth:      uCloudRimWidth,
       cloudVertStr:       uCloudVertStr,
       cloudGradientDark:  uCloudGradientDark,
+      // God rays
+      godRayStr:          uGodRayStr,
+      godRayDecay:        uGodRayDecay,
       cloudGradientStr:   uCloudGradientStr,
       cloudDetailScale:   uCloudDetailScale,
+      // Moon
+      moonColor:         uMoonColor,
+      moonGlowStr:       uMoonGlowStr,
+      moonGlowPower:     uMoonGlowPower,
       // Stars
       starsDensity:      uStarsDensity,
       starsSize:         uStarsSize,
