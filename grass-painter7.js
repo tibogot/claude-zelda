@@ -31,6 +31,7 @@ import {
   mul,
   div,
   max,
+  min,
   pow,
   modelWorldMatrix,
   cameraPosition,
@@ -244,6 +245,20 @@ export function createGrassMaterial(
     } else {
       bladeVisible = step(hv.x, uBladeDensity.mul(paintedDensity)).mul(hasDensity);
     }
+    // Slope suppression: hide grass on steep terrain (sculpted cliffs, near-vertical slopes).
+    // Sample heightTex at ±1 texel to get height gradient. For a 45° slope,
+    // the gradient magnitude ≈ 2.0 (2 texels span 2 world units, height diff = 2*tan(45°)=2).
+    // Blades on slopes steeper than ~45° are suppressed.
+    const sStep = float(1.0 / 512.0);
+    const hRs = texture(heightTex, terrainUV.add(vec2(sStep, float(0.0)))).r;
+    const hLs = texture(heightTex, terrainUV.sub(vec2(sStep, float(0.0)))).r;
+    const hUs = texture(heightTex, terrainUV.add(vec2(float(0.0), sStep))).r;
+    const hDs = texture(heightTex, terrainUV.sub(vec2(float(0.0), sStep))).r;
+    const dXs = hRs.sub(hLs);
+    const dZs = hUs.sub(hDs);
+    const slopeMag = dXs.mul(dXs).add(dZs.mul(dZs)).sqrt();
+    bladeVisible = bladeVisible.mul(sub(float(1.0), step(float(2.0), slopeMag)));
+
     const totalWidthVis = mul(totalWidth, bladeVisible);
     const totalHeightVis = mul(totalHeight, bladeVisible);
     const x = mul(sub(xSide, 0.5), totalWidthVis),
@@ -494,13 +509,12 @@ export function createGrassMaterial(
     );
     const finalVert = add(grassMat.mul(localVert), grassOffset);
 
-    // Sample terrain height at this vertex's world XZ (not just the blade base).
-    // Each vertex stays finalVert.y above the terrain surface beneath it,
-    // so the blade never clips through the terrain on slopes regardless of lean direction.
-    const vertWorldX = add(finalVert.x, sub(bladeWorld.x, grassOffset.x));
-    const vertWorldZ = add(finalVert.z, sub(bladeWorld.z, grassOffset.z));
-    const vertTerrainUV = add(div(vec2(vertWorldX, vertWorldZ), uTerrainSize), vec2(0.5));
-    const vertTerrainH = texture(heightTex, vertTerrainUV).r;
+    // All vertices use the blade root's terrain height (terrainH).
+    // Per-vertex sampling caused blades near cliff edges to stretch up to cliff-top
+    // height when a vertex XZ landed above the cliff interior. Using root height
+    // for all vertices eliminates this — the tiny slope-following trade-off is
+    // imperceptible for grass blades (< 2m wide).
+    const vertTerrainH = terrainH;
 
     const cn1 = noise12(mul(bladeWorld.xz, 0.015)),
       cn2 = noise12(mul(bladeWorld.xz, 0.04)),

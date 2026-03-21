@@ -30,7 +30,7 @@
 
 <script type="module">
 import * as THREE from 'three/webgpu';
-import { vec3, uv, positionLocal, normalLocal, uniform, sin, normalize, mix, texture, modelWorldMatrix, time, smoothstep, color, dot, cameraPosition, clamp, pow, oneMinus, normalWorld } from 'three/tsl';
+import { vec3, uv, positionLocal, normalLocal, uniform, sin, normalize, mix, texture, modelWorldMatrix, time, smoothstep, color, dot, cameraPosition, clamp, pow, oneMinus, normalWorld, instanceIndex, fract, float } from 'three/tsl';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { Pane } from 'tweakpane';
 
@@ -60,12 +60,24 @@ const params = {
     radiusSquash: 1.0,
     leafCount: 420,
     leafSize: 1.1,
+    shellBias: 0.55,
+    shellThickness: 0.42,
+    lobeAmount: 0.32,
     verticalBias: 0.35,
+    varAmount: 0.065,
+    scaleVar: 0.16,
+    leafRoughness: 0.88,
+    orientationMode: 'yawTilt',
+    maxTiltDeg: 32,
+    randomOutlier: 0.08,
     alphaCutoff: 0.5,
     normalBias: 0.8,
     leafWarp: 0.3,
     aoStrength: 0.65,
     sssStrength: 0,
+    groundEnabled: true,
+    groundStrength: 0.38,
+    groundFalloff: 0.55,
     rimEnabled: false,
     rimStrength: 2.0,
     rimPower: 4.0,
@@ -94,7 +106,18 @@ const uRimC = uniform(color(params.rimColor));
 const uBushMidY = uniform(1.2);
 const uCanopyCenter = vec3(0, uBushMidY, 0);
 const uAOFalloff = uniform(4.5);
+const uGroundStrength = uniform(params.groundStrength);
+const uGroundFalloff = uniform(Math.max(0.05, params.groundFalloff));
+const uVarAmount = uniform(params.varAmount);
 const leafMap = texture(new THREE.Texture());
+
+const idf = float(instanceIndex);
+const hA = fract(sin(idf.mul(127.1)).mul(311.7));
+const hB = fract(sin(idf.mul(269.5).add(hA)).mul(183.3));
+const hC = fract(sin(idf.mul(419.2).add(hB)).mul(271.9));
+const varLo = oneMinus(uVarAmount);
+const varHi = uVarAmount.add(1);
+const instTint = vec3(mix(varLo, varHi, hA), mix(varLo, varHi, hB), mix(varLo, varHi, hC));
 
 const t = time.mul(uWindSpeed);
 const wPos = modelWorldMatrix.mul(positionLocal);
@@ -108,26 +131,44 @@ const warpedNormal = normalize(normalLocal.add(sin(uv().x.mul(10)).mul(uLeafWarp
 const finalNormal = normalize(mix(warpedNormal, sphereDir, uNormalBias));
 
 const leafMat = new THREE.MeshStandardNodeMaterial({ side: THREE.DoubleSide, alphaTest: 0.5, transparent: true });
+leafMat.metalness = 0;
+leafMat.roughness = params.leafRoughness;
 leafMat.positionNode = windNode;
 leafMat.normalNode = finalNormal;
 
 const distCenter = clamp(wPos.xyz.distance(uCanopyCenter).div(uAOFalloff), 0, 1);
 const ao = mix(uAO.oneMinus(), 1.0, distCenter);
+const groundBlend = smoothstep(0, uGroundFalloff, wPos.y);
+const groundMul = mix(oneMinus(uGroundStrength), 1.0, groundBlend);
 const sss = pow(clamp(dot(normalWorld, normalize(sun.position)).negate(), 0, 1), 2.0).mul(uSSS);
 const viewDir = normalize(cameraPosition.sub(wPos.xyz));
 const rim = pow(oneMinus(clamp(dot(viewDir, finalNormal), 0, 1)), uRimP).mul(uRimS).mul(uRimC);
 
-leafMat.colorNode = mix(uBotC, uTopC, uv().y).mul(ao).add(uSSSC.mul(sss)).add(rim);
+const baseLeafCol = mix(uBotC, uTopC, uv().y).mul(instTint);
+leafMat.colorNode = baseLeafCol.mul(ao).mul(groundMul).add(uSSSC.mul(sss)).add(rim);
 leafMat.opacityNode = smoothstep(uAlphaCutoff.sub(0.05), uAlphaCutoff.add(0.05), leafMap.r);
 
 let leavesMesh;
 
-function sampleEllipsoid(rx, ry, rz, rnd, biasUp) {
-    for (;;) {
-        const x = (rnd() * 2 - 1) * rx;
-        const y = (rnd() * 2 - 1) * ry;
-        const z = (rnd() * 2 - 1) * rz;
-        if ((x / rx) ** 2 + (y / ry) ** 2 + (z / rz) ** 2 > 1) continue;
+function sampleEllipsoid(rx, ry, rz, rnd, biasUp, shellBias, shellThickness, lobeAmount, seedOff) {
+    const innerR = Math.max(0.001, 1 - shellThickness * shellBias);
+    for (let k = 0; k < 280; k++) {
+        let x = (rnd() * 2 - 1) * rx;
+        let y = (rnd() * 2 - 1) * ry;
+        let z = (rnd() * 2 - 1) * rz;
+        if (lobeAmount > 0.001) {
+            const lob = Math.floor(rnd() * 3);
+            const ang = lob * (Math.PI * 2 / 3) + seedOff * 0.01;
+            const lr = Math.min(rx, rz) * 0.32 * lobeAmount;
+            x += Math.cos(ang) * lr;
+            z += Math.sin(ang) * lr;
+        }
+        const d = Math.sqrt((x / rx) ** 2 + (y / ry) ** 2 + (z / rz) ** 2);
+        if (d > 1) continue;
+        if (shellBias > 0.001 && d < innerR) {
+            const keepInterior = 0.06 + 0.35 * (1 - shellBias);
+            if (rnd() > keepInterior) continue;
+        }
         const u = rnd();
         const skew = 1 / (1 + biasUp * 3);
         const t = Math.pow(u, skew);
@@ -135,6 +176,30 @@ function sampleEllipsoid(rx, ry, rz, rnd, biasUp) {
         const yOut = y * (1 - biasUp) + yLift * biasUp;
         return new THREE.Vector3(x, yOut, z);
     }
+    return new THREE.Vector3(0, ry * 0.5, 0);
+}
+
+const TAU = Math.PI * 2;
+
+function applyLeafOrientation(dummy, rnd) {
+    const outlier = params.randomOutlier > 0 && rnd() < params.randomOutlier;
+    if (outlier || params.orientationMode === 'random') {
+        dummy.rotation.order = 'XYZ';
+        dummy.rotation.set(rnd() * TAU, rnd() * TAU, rnd() * TAU);
+        return;
+    }
+    if (params.orientationMode === 'yawOnly') {
+        dummy.rotation.order = 'XYZ';
+        dummy.rotation.set(0, rnd() * TAU, 0);
+        return;
+    }
+    const maxT = (params.maxTiltDeg * Math.PI) / 180;
+    dummy.rotation.order = 'YXZ';
+    dummy.rotation.set(
+        (rnd() - 0.5) * 2 * maxT,
+        rnd() * TAU,
+        (rnd() - 0.5) * 2 * maxT
+    );
 }
 
 function buildBush() {
@@ -163,13 +228,22 @@ function buildBush() {
     leavesMesh = new THREE.InstancedMesh(leafGeo, leafMat, n);
     const dummy = new THREE.Object3D();
 
+    const sv = params.scaleVar;
     for (let i = 0; i < n; i++) {
-        const p = sampleEllipsoid(rx, ry, rz, rnd, params.verticalBias);
+        const p = sampleEllipsoid(
+            rx, ry, rz, rnd, params.verticalBias,
+            params.shellBias, params.shellThickness, params.lobeAmount, params.seed
+        );
         dummy.position.set(p.x, p.y + centerY, p.z);
-        dummy.rotation.set(rnd() * Math.PI * 2, rnd() * Math.PI * 2, rnd() * Math.PI * 2);
+        applyLeafOrientation(dummy, rnd);
+        const sc = 1 + (rnd() - 0.5) * 2 * sv;
+        dummy.scale.setScalar(Math.max(0.35, sc));
         dummy.updateMatrix();
         leavesMesh.setMatrixAt(i, dummy.matrix);
     }
+    dummy.scale.set(1, 1, 1);
+    dummy.rotation.order = 'XYZ';
+    dummy.rotation.set(0, 0, 0);
     leavesMesh.instanceMatrix.needsUpdate = true;
     scene.add(leavesMesh);
 }
@@ -184,15 +258,34 @@ fVol.addBinding(params, 'bushHeight', { min: 0.3, max: 6 }).on('change', buildBu
 fVol.addBinding(params, 'radiusSquash', { min: 0.35, max: 2.5, label: 'XZ squash' }).on('change', buildBush);
 fVol.addBinding(params, 'leafCount', { min: 40, max: 4000, step: 10 }).on('change', buildBush);
 fVol.addBinding(params, 'verticalBias', { min: 0, max: 1, label: 'Lift to top' }).on('change', buildBush);
+fVol.addBinding(params, 'shellBias', { min: 0, max: 1, label: 'Shell (surface)' }).on('change', buildBush);
+fVol.addBinding(params, 'shellThickness', { min: 0.12, max: 0.85, label: 'Shell depth' }).on('change', buildBush);
+fVol.addBinding(params, 'lobeAmount', { min: 0, max: 1, label: 'Lobe spread' }).on('change', buildBush);
 
 const fCards = pane.addFolder({ title: 'Leaf cards' });
 fCards.addBinding(params, 'leafSize', { min: 0.3, max: 6 }).on('change', buildBush);
+fCards.addBinding(params, 'scaleVar', { min: 0, max: 0.45, label: 'Size jitter' }).on('change', buildBush);
+fCards.addBinding(params, 'varAmount', { min: 0, max: 0.2, label: 'RGB variation' }).on('change', () => { uVarAmount.value = params.varAmount; });
+fCards.addBinding(params, 'leafRoughness', { min: 0.35, max: 1, label: 'Roughness' });
+fCards.addBinding(params, 'orientationMode', {
+    label: 'Orientation',
+    options: {
+        Random: 'random',
+        'Yaw only': 'yawOnly',
+        'Yaw + tilt': 'yawTilt',
+    },
+}).on('change', buildBush);
+fCards.addBinding(params, 'maxTiltDeg', { min: 0, max: 75, label: 'Max tilt (°)' }).on('change', buildBush);
+fCards.addBinding(params, 'randomOutlier', { min: 0, max: 0.35, label: 'Random outlier' }).on('change', buildBush);
 
 const fShading = pane.addFolder({ title: 'Atmospheric shading' });
 fShading.addBinding(params, 'alphaCutoff', { min: 0, max: 1 }).on('change', v => { uAlphaCutoff.value = v.value; });
 fShading.addBinding(params, 'normalBias', { min: 0, max: 1 }).on('change', v => { uNormalBias.value = v.value; });
 fShading.addBinding(params, 'leafWarp', { min: 0, max: 1 }).on('change', v => { uLeafWarp.value = v.value; });
 fShading.addBinding(params, 'aoStrength', { min: 0, max: 1 }).on('change', v => { uAO.value = v.value; });
+fShading.addBinding(params, 'groundEnabled', { label: 'Ground dark' });
+fShading.addBinding(params, 'groundStrength', { min: 0, max: 0.85 });
+fShading.addBinding(params, 'groundFalloff', { min: 0.08, max: 2.5, label: 'Ground fade (Y)' });
 fShading.addBinding(params, 'sssStrength', { min: 0, max: 2 }).on('change', v => { uSSS.value = v.value; });
 fShading.addBinding(params, 'rimEnabled', { label: 'Rim on' });
 fShading.addBinding(params, 'rimStrength', { min: 0, max: 5 });
@@ -236,6 +329,10 @@ function animate() {
     controls.update();
     uWindS.value = params.windEnabled ? params.windStrength : 0;
     uRimS.value = params.rimEnabled ? params.rimStrength : 0;
+    uGroundStrength.value = params.groundEnabled ? params.groundStrength : 0;
+    uGroundFalloff.value = Math.max(0.05, params.groundFalloff);
+    uVarAmount.value = params.varAmount;
+    leafMat.roughness = params.leafRoughness;
     uTopC.value.set(params.topColor);
     uBotC.value.set(params.bottomColor);
     uSSSC.value.set(params.sssColor);
