@@ -634,11 +634,17 @@
           reflectionStrength: 0.35,
         },
         fog: {
-          enabled: false,
-          type: "height", // "height" | "distance"
-          color: "#c2d8f0",
-          density: 0.04,
-          height: 2.0,
+          height: {
+            enabled: false,
+            color: "#a8c4e0",
+            density: 0.05,
+            height: 2.0,
+          },
+          distance: {
+            enabled: false,
+            color: "#d0e4f0",
+            density: 0.006,
+          },
         },
         path: {
           flattenStrength: 0.5,
@@ -3305,18 +3311,25 @@
         });
         water.add(waterReflector.target);
 
-        // ── FOG (height + distance) ──
-        const uFogColor = uniform(
-          new THREE.Color(PARAMS.fog.color).convertSRGBToLinear(),
-        );
-        const uFogDensity = uniform(PARAMS.fog.density);
-        const uFogHeight = uniform(PARAMS.fog.height);
+        // ── FOG (height + distance — both active simultaneously) ──
+        const uHFogEnabled = uniform(PARAMS.fog.height.enabled ? 1 : 0);
+        const uHFogColor = uniform(new THREE.Color(PARAMS.fog.height.color).convertSRGBToLinear());
+        const uHFogDensity = uniform(PARAMS.fog.height.density);
+        const uHFogHeight = uniform(PARAMS.fog.height.height);
 
-        const _heightFogNode = fog(
-          uFogColor,
-          exponentialHeightFogFactor(uFogDensity, uFogHeight),
-        );
-        const _distanceFogNode = fog(uFogColor, densityFogFactor(uFogDensity));
+        const uDFogEnabled = uniform(PARAMS.fog.distance.enabled ? 1 : 0);
+        const uDFogColor = uniform(new THREE.Color(PARAMS.fog.distance.color).convertSRGBToLinear());
+        const uDFogDensity = uniform(PARAMS.fog.distance.density);
+
+        // Combined fog: both layers contribute simultaneously with independent colors.
+        // Blend color is weighted by each layer's factor so height fog dominates near ground
+        // and distance fog dominates far away.
+        const _hFactor = exponentialHeightFogFactor(uHFogDensity, uHFogHeight).mul(uHFogEnabled);
+        const _dFactor = densityFogFactor(uDFogDensity).mul(uDFogEnabled);
+        const _combinedFactor = clamp(_hFactor.add(_dFactor), 0, 1);
+        const _totalW = _hFactor.add(_dFactor).add(0.0001);
+        const _blendedFogColor = mix(uHFogColor, uDFogColor, _dFactor.div(_totalW));
+        const _combinedFogNode = fog(_blendedFogColor, _combinedFactor);
 
         // ── ANIME WATER UNIFORMS ──────────────────────────────────────────
         const uWaterTime = uniform(0.0);
@@ -3536,15 +3549,15 @@
         setWaterStyle(PARAMS.water.stylized);
 
         function syncFog() {
-          uFogColor.value.set(PARAMS.fog.color).convertSRGBToLinear();
-          uFogDensity.value = PARAMS.fog.density;
-          uFogHeight.value = PARAMS.fog.height;
-          if (!PARAMS.fog.enabled) {
-            scene.fogNode = null;
-            return;
-          }
-          scene.fogNode =
-            PARAMS.fog.type === "height" ? _heightFogNode : _distanceFogNode;
+          uHFogEnabled.value = PARAMS.fog.height.enabled ? 1 : 0;
+          uHFogColor.value.set(PARAMS.fog.height.color).convertSRGBToLinear();
+          uHFogDensity.value = PARAMS.fog.height.density;
+          uHFogHeight.value = PARAMS.fog.height.height;
+          uDFogEnabled.value = PARAMS.fog.distance.enabled ? 1 : 0;
+          uDFogColor.value.set(PARAMS.fog.distance.color).convertSRGBToLinear();
+          uDFogDensity.value = PARAMS.fog.distance.density;
+          const anyEnabled = PARAMS.fog.height.enabled || PARAMS.fog.distance.enabled;
+          scene.fogNode = anyEnabled ? _combinedFogNode : null;
         }
         syncFog();
 
@@ -4996,32 +5009,38 @@
         });
 
         const fogFolder = pane.addFolder({ title: "Fog", expanded: false });
-        fogFolder
-          .addBinding(PARAMS.fog, "enabled", { label: "Enabled" })
+
+        const hFogFolder = fogFolder.addFolder({ title: "Height Fog", expanded: true });
+        hFogFolder
+          .addBinding(PARAMS.fog.height, "enabled", { label: "Enabled" })
           .on("change", syncFog);
-        fogFolder
-          .addBinding(PARAMS.fog, "type", {
-            label: "Type",
-            options: { "Height fog": "height", "Distance fog": "distance" },
-          })
+        hFogFolder
+          .addBinding(PARAMS.fog.height, "color", { label: "Color" })
           .on("change", syncFog);
-        fogFolder
-          .addBinding(PARAMS.fog, "color", { label: "Color" })
-          .on("change", syncFog);
-        fogFolder
-          .addBinding(PARAMS.fog, "density", {
+        hFogFolder
+          .addBinding(PARAMS.fog.height, "density", {
             label: "Density",
-            min: 0.001,
-            max: 0.1,
-            step: 0.001,
+            min: 0.001, max: 0.3, step: 0.001,
           })
           .on("change", syncFog);
-        fogFolder
-          .addBinding(PARAMS.fog, "height", {
-            label: "Height",
-            min: -5,
-            max: 20,
-            step: 0.5,
+        hFogFolder
+          .addBinding(PARAMS.fog.height, "height", {
+            label: "Base height",
+            min: -10, max: 40, step: 0.5,
+          })
+          .on("change", syncFog);
+
+        const dFogFolder = fogFolder.addFolder({ title: "Distance Fog", expanded: true });
+        dFogFolder
+          .addBinding(PARAMS.fog.distance, "enabled", { label: "Enabled" })
+          .on("change", syncFog);
+        dFogFolder
+          .addBinding(PARAMS.fog.distance, "color", { label: "Color" })
+          .on("change", syncFog);
+        dFogFolder
+          .addBinding(PARAMS.fog.distance, "density", {
+            label: "Density",
+            min: 0.0001, max: 0.05, step: 0.0001,
           })
           .on("change", syncFog);
 
