@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bruneton sky · Three.js r183 WebGPU</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #050508;
+      }
+      canvas#view {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        z-index: 10;
+        max-width: min(420px, calc(100vw - 32px));
+        font: 12px/1.5 "SF Mono", "Fira Code", ui-monospace, monospace;
+        color: #c8d0d8;
+        background: rgba(8, 10, 14, 0.82);
+        padding: 10px 14px;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        pointer-events: none;
+        user-select: none;
+      }
+      #info strong {
+        color: #7ec8ff;
+        font-weight: 600;
+      }
+      #panel {
+        position: fixed;
+        top: 16px;
+        right: 16px;
+        z-index: 10;
+        width: 220px;
+        font: 11px/1.4 "SF Mono", "Fira Code", ui-monospace, monospace;
+        color: #c8d0d8;
+        background: rgba(8, 10, 14, 0.88);
+        backdrop-filter: blur(10px);
+        padding: 14px 16px;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+      }
+      #panel h3 {
+        font-size: 10px;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        color: #5a9fff;
+        margin-bottom: 12px;
+        font-weight: 600;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 10px;
+      }
+      .row label {
+        color: #8090a0;
+        flex: 0 0 88px;
+      }
+      .row input[type="range"] {
+        flex: 1;
+        min-width: 0;
+        accent-color: #5a9fff;
+      }
+      .row .val {
+        flex: 0 0 36px;
+        text-align: right;
+        color: #5a9fff;
+        font-variant-numeric: tabular-nums;
+      }
+      #fallback {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #0a0c10;
+        color: #c8d0d8;
+        font: 14px/1.6 system-ui, sans-serif;
+        text-align: center;
+        padding: 40px;
+        z-index: 100;
+      }
+      #fallback.hidden {
+        display: none;
+      }
+      #fallback small {
+        display: block;
+        margin-top: 12px;
+        color: #607080;
+        font-size: 12px;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="fallback">
+      Initializing WebGPU…
+      <small
+        >If this stays visible, try Chrome 113+ or Edge 113+ with WebGPU
+        enabled.</small
+      >
+    </div>
+
+    <div id="panel">
+      <h3>Bruneton sky</h3>
+      <div class="row">
+        <label>Exposure</label
+        ><input id="exposure" type="range" min="1" max="30" step="0.5" value="10" /><span
+          class="val"
+          id="exposureVal"
+          >10</span
+        >
+      </div>
+      <div class="row">
+        <label>Sun azimuth</label
+        ><input id="azimuth" type="range" min="0" max="360" step="1" value="135" /><span
+          class="val"
+          id="azimuthVal"
+          >135</span
+        >
+      </div>
+      <div class="row">
+        <label>Sun elevation</label
+        ><input
+          id="elevation"
+          type="range"
+          min="-5"
+          max="85"
+          step="1"
+          value="35"
+        /><span class="val" id="elevationVal">35</span>
+      </div>
+      <p
+        id="brunetonStatus"
+        style="
+          margin-top: 12px;
+          font-size: 10px;
+          color: #8090a0;
+          line-height: 1.4;
+        "
+      >
+        Bruneton: loading assets…
+      </p>
+    </div>
+
+    <div id="info">
+      <strong>Hybrid pipeline:</strong> WebGPU mutates the main camera to
+      <strong>WebGPUCoordinateSystem</strong>; Bruneton’s GLSL needs
+      <strong>WebGL</strong> projection, so a separate <code>brunetonCamera</code> runs the
+      sky pass. Pixels: <code>readPixels</code> → <strong>DataTexture</strong>.
+      Drag to orbit · scroll to zoom.
+    </div>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { texture, screenUV } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { initBrunetonSky } from "./bruneton-sky.js";
+
+      const params = {
+        exposure: 10,
+        sunAzimuth: 135,
+        sunElevation: 35,
+      };
+
+      function sunDirectionFromAngles(azimuthDeg, elevationDeg) {
+        const az = (azimuthDeg * Math.PI) / 180;
+        const el = (elevationDeg * Math.PI) / 180;
+        const cosEl = Math.cos(el);
+        return new THREE.Vector3(
+          cosEl * Math.cos(az),
+          Math.sin(el),
+          cosEl * Math.sin(az),
+        ).normalize();
+      }
+
+      function bindRange(id, key, fmt = (v) => String(Math.round(v))) {
+        const input = document.getElementById(id);
+        const out = document.getElementById(id + "Val");
+        input.addEventListener("input", () => {
+          const v = parseFloat(input.value);
+          params[key] = v;
+          out.textContent = fmt(v);
+        });
+      }
+
+      bindRange("exposure", "exposure", (v) => v.toFixed(1));
+      bindRange("azimuth", "sunAzimuth");
+      bindRange("elevation", "sunElevation");
+
+      const skyCanvas = document.createElement("canvas");
+      skyCanvas.width = innerWidth;
+      skyCanvas.height = innerHeight;
+      // Detached canvases can fail WebGPU copyExternalImageToTexture in some browsers;
+      // match village.html by keeping the WebGL2 sky canvas in the document (hidden).
+      skyCanvas.style.cssText =
+        "position:fixed;inset:0;width:100%;height:100%;opacity:0;pointer-events:none;z-index:-1;";
+      document.body.appendChild(skyCanvas);
+
+      let brunetonSky = {
+        ready: false,
+        draw: () => {},
+        resize: () => {},
+      };
+      let brunetonTexture = null;
+      /** @type {WebGL2RenderingContext | null} */
+      let skyGl = null;
+      /** @type {Uint8Array | null} */
+      let skyRowScratch = null;
+
+      function flipRowsRGBA(pixels, w, h, scratch) {
+        const rb = w * 4;
+        const half = h >> 1;
+        for (let y = 0; y < half; y++) {
+          const y2 = h - 1 - y;
+          const a = y * rb;
+          const b = y2 * rb;
+          scratch.set(pixels.subarray(a, a + rb));
+          pixels.copyWithin(a, b, b + rb);
+          pixels.set(scratch, b);
+        }
+      }
+
+      const brunetonStatusEl = document.getElementById("brunetonStatus");
+
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 0.85;
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(
+        55,
+        innerWidth / innerHeight,
+        0.1,
+        200,
+      );
+      camera.position.set(8, 5, 12);
+
+      // Never pass this to WebGPURenderer — WebGPU patches camera.coordinateSystem and
+      // projection; Bruneton’s shader expects WebGL/OpenGL NDC + projection inverse.
+      const brunetonCamera = new THREE.PerspectiveCamera(
+        camera.fov,
+        camera.aspect,
+        camera.near,
+        camera.far,
+      );
+
+      function syncBrunetonCameraFromMain() {
+        brunetonCamera.position.copy(camera.position);
+        brunetonCamera.quaternion.copy(camera.quaternion);
+        brunetonCamera.scale.copy(camera.scale);
+        brunetonCamera.fov = camera.fov;
+        brunetonCamera.aspect = camera.aspect;
+        brunetonCamera.near = camera.near;
+        brunetonCamera.far = camera.far;
+        brunetonCamera.zoom = camera.zoom;
+        brunetonCamera.coordinateSystem = THREE.WebGLCoordinateSystem;
+        brunetonCamera._reversedDepth = false;
+        brunetonCamera.updateProjectionMatrix();
+        brunetonCamera.updateMatrixWorld();
+      }
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 1.2, 0);
+      controls.enableDamping = true;
+      controls.minDistance = 4;
+      controls.maxDistance = 40;
+      controls.maxPolarAngle = Math.PI * 0.49;
+
+      const ground = new THREE.Mesh(
+        new THREE.CircleGeometry(18, 64),
+        new THREE.MeshStandardMaterial({
+          color: 0x2a3238,
+          roughness: 0.92,
+          metalness: 0.05,
+        }),
+      );
+      ground.rotation.x = -Math.PI / 2;
+      ground.receiveShadow = true;
+      scene.add(ground);
+
+      const podium = new THREE.Mesh(
+        new THREE.CylinderGeometry(1.2, 1.4, 0.35, 48),
+        new THREE.MeshStandardMaterial({
+          color: 0x3d454c,
+          roughness: 0.65,
+          metalness: 0.2,
+        }),
+      );
+      podium.position.y = 0.175;
+      podium.castShadow = true;
+      podium.receiveShadow = true;
+      scene.add(podium);
+
+      const statue = new THREE.Mesh(
+        new THREE.TorusKnotGeometry(0.85, 0.22, 128, 16),
+        new THREE.MeshStandardMaterial({
+          color: 0xc9b8a0,
+          roughness: 0.35,
+          metalness: 0.65,
+        }),
+      );
+      statue.position.y = 1.35;
+      statue.castShadow = true;
+      statue.receiveShadow = true;
+      scene.add(statue);
+
+      const hemi = new THREE.HemisphereLight(0xa8c8ff, 0x3a4038, 0.35);
+      scene.add(hemi);
+
+      const dirLight = new THREE.DirectionalLight(0xfff5e6, 2.2);
+      dirLight.castShadow = true;
+      dirLight.shadow.mapSize.set(2048, 2048);
+      dirLight.shadow.camera.near = 0.5;
+      dirLight.shadow.camera.far = 60;
+      dirLight.shadow.camera.left = -20;
+      dirLight.shadow.camera.right = 20;
+      dirLight.shadow.camera.top = 20;
+      dirLight.shadow.camera.bottom = -20;
+      scene.add(dirLight);
+
+      renderer.domElement.id = "view";
+      document.body.appendChild(renderer.domElement);
+
+      try {
+        await renderer.init();
+      } catch (e) {
+        document.getElementById("fallback").innerHTML =
+          "WebGPU failed to initialize.<br><small>" +
+          String(e?.message || e) +
+          "</small>";
+        throw e;
+      }
+
+      document.getElementById("fallback").classList.add("hidden");
+
+      function attachBrunetonBackgroundNode() {
+        if (!brunetonTexture) return;
+        scene.background = null;
+        const outSpace = renderer.outputColorSpace || THREE.SRGBColorSpace;
+        scene.backgroundNode = texture(brunetonTexture, screenUV.flipY())
+          .setUpdateMatrix(true)
+          .renderOutput(THREE.NoToneMapping, outSpace);
+      }
+
+      function rebuildSkyDataTexture(dw, dh) {
+        if (dw <= 0 || dh <= 0) return;
+        if (brunetonTexture) brunetonTexture.dispose();
+        const data = new Uint8Array(dw * dh * 4);
+        brunetonTexture = new THREE.DataTexture(
+          data,
+          dw,
+          dh,
+          THREE.RGBAFormat,
+          THREE.UnsignedByteType,
+        );
+        brunetonTexture.colorSpace = THREE.SRGBColorSpace;
+        brunetonTexture.flipY = false;
+        brunetonTexture.minFilter = THREE.LinearFilter;
+        brunetonTexture.magFilter = THREE.LinearFilter;
+        brunetonTexture.generateMipmaps = false;
+        brunetonTexture.unpackAlignment = 1;
+        skyRowScratch = new Uint8Array(dw * 4);
+        attachBrunetonBackgroundNode();
+      }
+
+      initBrunetonSky(skyCanvas).then((api) => {
+        brunetonSky = api;
+        if (api.ready) {
+          skyGl = skyCanvas.getContext("webgl2");
+          const dw = skyGl ? skyGl.drawingBufferWidth : skyCanvas.width;
+          const dh = skyGl ? skyGl.drawingBufferHeight : skyCanvas.height;
+          rebuildSkyDataTexture(dw, dh);
+          brunetonStatusEl.textContent =
+            "Bruneton: active · WebGL camera + readPixels→DataTexture.";
+          brunetonStatusEl.style.color = "#7ec8ff";
+        } else {
+          brunetonStatusEl.textContent =
+            "Bruneton: unavailable (no WebGL2 or shader compile failed — check console).";
+          brunetonStatusEl.style.color = "#ff8a7a";
+        }
+      });
+
+      function onResize() {
+        const w = innerWidth;
+        const h = innerHeight;
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+        renderer.setSize(w, h);
+        brunetonSky.resize(w, h);
+        if (brunetonSky.ready && skyGl) {
+          const dw = skyGl.drawingBufferWidth;
+          const dh = skyGl.drawingBufferHeight;
+          if (
+            dw > 0 &&
+            dh > 0 &&
+            (!brunetonTexture ||
+              brunetonTexture.image.width !== dw ||
+              brunetonTexture.image.height !== dh)
+          ) {
+            rebuildSkyDataTexture(dw, dh);
+          }
+        }
+      }
+
+      window.addEventListener("resize", onResize);
+      onResize();
+
+      const fallbackBackground = new THREE.Color(0x1a2030);
+      scene.background = fallbackBackground;
+
+      renderer.setAnimationLoop(() => {
+        controls.update();
+        // Bruneton reads projectionMatrixInverse + matrixWorldInverse; refresh before draw
+        // (WebGPURenderer normally updates the camera later during render()).
+        camera.updateMatrixWorld();
+
+        const sunDir = sunDirectionFromAngles(
+          params.sunAzimuth,
+          params.sunElevation,
+        );
+        dirLight.position.copy(sunDir).multiplyScalar(40);
+
+        if (brunetonSky.ready && brunetonTexture && skyGl && skyRowScratch) {
+          camera.updateProjectionMatrix();
+          syncBrunetonCameraFromMain();
+          brunetonSky.draw(brunetonCamera, sunDir, params.exposure);
+          skyGl.finish();
+          const dw = skyGl.drawingBufferWidth;
+          const dh = skyGl.drawingBufferHeight;
+          const data = brunetonTexture.image.data;
+          if (data && data.length === dw * dh * 4) {
+            skyGl.readPixels(0, 0, dw, dh, skyGl.RGBA, skyGl.UNSIGNED_BYTE, data);
+            flipRowsRGBA(data, dw, dh, skyRowScratch);
+            brunetonTexture.needsUpdate = true;
+          }
+        } else {
+          scene.backgroundNode = null;
+          scene.background = fallbackBackground;
+        }
+
+        renderer.render(scene, camera);
+      });
+    </script>
+  </body>
+</html>

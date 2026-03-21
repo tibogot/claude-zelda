@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rectangle plane — alpha-card shaping</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #9ec8e8;
+        font-family: system-ui, sans-serif;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #hint {
+        position: fixed;
+        bottom: 14px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 5;
+        font-size: 12px;
+        color: rgba(30, 50, 80, 0.75);
+        pointer-events: none;
+        text-align: center;
+        max-width: 92vw;
+      }
+      #title {
+        position: fixed;
+        top: 12px;
+        left: 300px;
+        z-index: 5;
+        font-size: 14px;
+        font-weight: 600;
+        color: rgba(40, 60, 100, 0.85);
+        pointer-events: none;
+      }
+      .tp-dfwv {
+        position: fixed !important;
+        top: 12px !important;
+        left: 12px !important;
+        width: 292px !important;
+        max-height: calc(100vh - 24px) !important;
+        overflow-y: auto !important;
+        z-index: 20 !important;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://esm.sh/tweakpane@4.0.4"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="title">Rectangle plane — for alpha textures (pine cards later)</div>
+    <div id="hint">
+      Flat subdivided rectangle. B&amp;W masks: set cutout to “red channel” — Three.js uses map alpha for RGBA PNGs only.
+    </div>
+    <script type="module">
+      import * as THREE from "three";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
+
+      const DEG = Math.PI / 180;
+
+      /**
+       * Rectangle in XY (default Three plane), facing +Z. Optional parabolic bend and skew.
+       */
+      function createRectangleGeometry(w, h, segX, segY, shape) {
+        const {
+          bendX,
+          bendY,
+          skewX,
+          skewY,
+          taperX,
+        } = shape;
+        const geo = new THREE.PlaneGeometry(w, h, segX, segY);
+        const pos = geo.attributes.position;
+        const hw = w * 0.5;
+        const hh = h * 0.5;
+        for (let i = 0; i < pos.count; i++) {
+          let x = pos.getX(i);
+          let y = pos.getY(i);
+          const nx = hw > 1e-6 ? x / hw : 0;
+          const ny = hh > 1e-6 ? y / hh : 0;
+          const scaleX = 1 + taperX * ny;
+          x *= scaleX;
+          x += skewX * ny * hh;
+          y += skewY * nx * hw;
+          let z = pos.getZ(i);
+          z -= bendX * nx * nx;
+          z -= bendY * ny * ny;
+          pos.setXYZ(i, x, y, z);
+        }
+        pos.needsUpdate = true;
+        geo.computeVertexNormals();
+        return geo;
+      }
+
+      function makeCheckerTexture() {
+        const t = new THREE.CanvasTexture(
+          (() => {
+            const c = document.createElement("canvas");
+            c.width = c.height = 256;
+            const g = c.getContext("2d");
+            const n = 8;
+            const s = 256 / n;
+            for (let j = 0; j < n; j++) {
+              for (let i = 0; i < n; i++) {
+                g.fillStyle = (i + j) % 2 ? "#c8d8e8" : "#f0f4f8";
+                g.fillRect(i * s, j * s, s, s);
+              }
+            }
+            g.strokeStyle = "rgba(60,80,120,0.35)";
+            g.lineWidth = 1;
+            for (let k = 0; k <= n; k++) {
+              g.beginPath();
+              g.moveTo(0, k * s);
+              g.lineTo(256, k * s);
+              g.stroke();
+              g.beginPath();
+              g.moveTo(k * s, 0);
+              g.lineTo(k * s, 256);
+              g.stroke();
+            }
+            return c;
+          })()
+        );
+        t.wrapS = t.wrapT = THREE.RepeatWrapping;
+        t.repeat.set(4, 4);
+        t.colorSpace = THREE.SRGBColorSpace;
+        t.needsUpdate = true;
+        return t;
+      }
+
+      (async () => {
+        const params = {
+          rect: {
+            width: 2,
+            height: 1.5,
+          },
+          grid: {
+            segX: 32,
+            segY: 24,
+          },
+          shape: {
+            bendX: 0,
+            bendY: 0,
+            skewX: 0,
+            skewY: 0,
+            taperX: 0,
+          },
+          transform: {
+            posX: 0,
+            posY: 0,
+            posZ: 0,
+            rotXDeg: 0,
+            rotYDeg: -18,
+            rotZDeg: 0,
+          },
+          material: {
+            color: "#ffffff",
+            roughness: 0.55,
+            metalness: 0,
+            useChecker: true,
+            alphaTest: 0.45,
+            depthWrite: false,
+            uploadName: "(none)",
+            /** 'alpha' = map RGBA; 'luminance' = alphaMap (red channel) for B&amp;W / grayscale masks */
+            maskMode: "alpha",
+          },
+          scene: {
+            bg: "#9ec8e8",
+            amb: 0.55,
+            key: 1.1,
+          },
+          debug: {
+            wireframe: false,
+          },
+        };
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(params.scene.bg);
+
+        const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.05, 200);
+        camera.position.set(1.6, 0.9, 2.2);
+
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.setSize(innerWidth, innerHeight);
+        document.body.appendChild(renderer.domElement);
+        await renderer.init();
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.target.set(0, 0.05, 0);
+        controls.enableDamping = true;
+        controls.update();
+
+        const ambient = new THREE.AmbientLight(0xc8d8f0, params.scene.amb);
+        scene.add(ambient);
+        const key = new THREE.DirectionalLight(0xfff5e8, params.scene.key);
+        key.position.set(2.5, 4, 2.5);
+        scene.add(key);
+        scene.add(new THREE.DirectionalLight(0xa8b8e8, 0.35).translateX(-3).translateY(2));
+
+        const checker = makeCheckerTexture();
+        let uploadedTex = null;
+
+        const mat = new THREE.MeshStandardMaterial({
+          color: params.material.color,
+          roughness: params.material.roughness,
+          metalness: params.material.metalness,
+          side: THREE.DoubleSide,
+          map: params.material.useChecker ? checker : null,
+          wireframe: params.debug.wireframe,
+          transparent: false,
+          alphaTest: 0,
+        });
+
+        let geo = null;
+        const mesh = new THREE.Mesh();
+        scene.add(mesh);
+
+        const fileInput = document.createElement("input");
+        fileInput.type = "file";
+        fileInput.accept = "image/png,image/jpeg,image/webp,image/*";
+        fileInput.style.display = "none";
+        document.body.appendChild(fileInput);
+
+        const texLoader = new THREE.TextureLoader();
+
+        function disposeUploadedTexture() {
+          if (uploadedTex) {
+            uploadedTex.dispose();
+            uploadedTex = null;
+          }
+        }
+
+        function syncMaterial() {
+          mat.color.set(params.material.color);
+          mat.roughness = params.material.roughness;
+          mat.metalness = params.material.metalness;
+          mat.wireframe = params.debug.wireframe;
+
+          if (uploadedTex) {
+            mat.map = uploadedTex;
+            mat.transparent = true;
+            mat.alphaTest = params.material.alphaTest;
+            mat.depthWrite = params.material.depthWrite;
+            /* B&W masks usually have A=255 everywhere; alphaMap uses the red channel for cutout. */
+            mat.alphaMap = params.material.maskMode === "luminance" ? uploadedTex : null;
+          } else {
+            mat.map = params.material.useChecker ? checker : null;
+            mat.alphaMap = null;
+            mat.transparent = false;
+            mat.alphaTest = 0;
+            mat.depthWrite = true;
+          }
+
+          mat.needsUpdate = true;
+        }
+
+        function applyTransform() {
+          const t = params.transform;
+          mesh.position.set(t.posX, t.posY, t.posZ);
+          mesh.rotation.set(t.rotXDeg * DEG, t.rotYDeg * DEG, t.rotZDeg * DEG, "XYZ");
+        }
+
+        function rebuildGeometry() {
+          const r = params.rect;
+          const g = params.grid;
+          const w = Math.max(0.05, r.width);
+          const h = Math.max(0.05, r.height);
+          const sx = Math.max(1, Math.round(g.segX));
+          const sy = Math.max(1, Math.round(g.segY));
+          if (geo) geo.dispose();
+          geo = createRectangleGeometry(w, h, sx, sy, params.shape);
+          mesh.geometry = geo;
+          mesh.material = mat;
+        }
+
+        function syncScene() {
+          scene.background.set(params.scene.bg);
+          ambient.intensity = params.scene.amb;
+          key.intensity = params.scene.key;
+        }
+
+        rebuildGeometry();
+        applyTransform();
+        syncMaterial();
+        syncScene();
+
+        const pane = new Pane({ title: "Rectangle plane" });
+
+        fileInput.addEventListener("change", () => {
+          const file = fileInput.files?.[0];
+          if (!file) return;
+          const url = URL.createObjectURL(file);
+          texLoader.load(
+            url,
+            (tex) => {
+              URL.revokeObjectURL(url);
+              tex.colorSpace = THREE.SRGBColorSpace;
+              tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+              tex.premultiplyAlpha = false;
+              tex.needsUpdate = true;
+              disposeUploadedTexture();
+              uploadedTex = tex;
+              params.material.uploadName = file.name;
+              syncMaterial();
+              pane.refresh();
+            },
+            undefined,
+            () => {
+              URL.revokeObjectURL(url);
+            }
+          );
+        });
+
+        function clearUploadedTexture() {
+          fileInput.value = "";
+          disposeUploadedTexture();
+          params.material.uploadName = "(none)";
+          syncMaterial();
+          pane.refresh();
+        }
+
+        const fRect = pane.addFolder({ title: "Rectangle", expanded: true });
+        fRect.addBinding(params.rect, "width", { min: 0.1, max: 8, step: 0.05 });
+        fRect.addBinding(params.rect, "height", { min: 0.1, max: 8, step: 0.05 });
+
+        const fGrid = pane.addFolder({ title: "Subdivision (UV grid)", expanded: true });
+        fGrid.addBinding(params.grid, "segX", { min: 1, max: 128, step: 1, label: "segments X" });
+        fGrid.addBinding(params.grid, "segY", { min: 1, max: 128, step: 1, label: "segments Y" });
+
+        const fShape = pane.addFolder({ title: "Shape (still a rectangle)", expanded: true });
+        fShape.addBinding(params.shape, "bendX", {
+          min: -2,
+          max: 2,
+          step: 0.02,
+          label: "cup along width (Z)",
+        });
+        fShape.addBinding(params.shape, "bendY", {
+          min: -2,
+          max: 2,
+          step: 0.02,
+          label: "cup along height (Z)",
+        });
+        fShape.addBinding(params.shape, "skewX", {
+          min: -1,
+          max: 1,
+          step: 0.02,
+          label: "shear X by Y",
+        });
+        fShape.addBinding(params.shape, "skewY", {
+          min: -1,
+          max: 1,
+          step: 0.02,
+          label: "shear Y by X",
+        });
+        fShape.addBinding(params.shape, "taperX", {
+          min: -0.85,
+          max: 0.85,
+          step: 0.02,
+          label: "width taper vs Y",
+        });
+
+        const fXf = pane.addFolder({ title: "Transform", expanded: true });
+        fXf.addBinding(params.transform, "posX", { min: -4, max: 4, step: 0.02 });
+        fXf.addBinding(params.transform, "posY", { min: -4, max: 4, step: 0.02 });
+        fXf.addBinding(params.transform, "posZ", { min: -4, max: 4, step: 0.02 });
+        fXf.addBinding(params.transform, "rotXDeg", { min: -180, max: 180, step: 0.5, label: "rot X °" });
+        fXf.addBinding(params.transform, "rotYDeg", { min: -180, max: 180, step: 0.5, label: "rot Y °" });
+        fXf.addBinding(params.transform, "rotZDeg", { min: -180, max: 180, step: 0.5, label: "rot Z °" });
+
+        const fMat = pane.addFolder({ title: "Material", expanded: false });
+        fMat.addBinding(params.material, "color");
+        fMat.addBinding(params.material, "roughness", { min: 0, max: 1, step: 0.02 });
+        fMat.addBinding(params.material, "metalness", { min: 0, max: 1, step: 0.02 });
+        fMat.addBinding(params.material, "useChecker", { label: "checker (UV preview)" });
+
+        const fTex = pane.addFolder({ title: "Texture / alpha", expanded: true });
+        fTex.addBinding(params.material, "uploadName", {
+          readonly: true,
+          label: "current file",
+        });
+        fTex.addButton({ title: "Upload image…" }).on("click", () => fileInput.click());
+        fTex.addButton({ title: "Clear uploaded" }).on("click", () => clearUploadedTexture());
+        fTex.addBinding(params.material, "maskMode", {
+          label: "cutout from",
+          options: {
+            "PNG alpha (RGBA)": "alpha",
+            "B&W / gray (red channel)": "luminance",
+          },
+        });
+        fTex.addBinding(params.material, "alphaTest", {
+          min: 0,
+          max: 0.99,
+          step: 0.01,
+          label: "alpha test",
+        });
+        fTex.addBinding(params.material, "depthWrite", { label: "depth write" });
+
+        const fSc = pane.addFolder({ title: "Scene", expanded: false });
+        fSc.addBinding(params.scene, "bg");
+        fSc.addBinding(params.scene, "amb", { min: 0, max: 1.5, step: 0.02, label: "ambient" });
+        fSc.addBinding(params.scene, "key", { min: 0, max: 2.5, step: 0.02, label: "key" });
+
+        const fDbg = pane.addFolder({ title: "Debug", expanded: false });
+        fDbg.addBinding(params.debug, "wireframe");
+
+        const GEOM_KEYS = new Set([
+          "width",
+          "height",
+          "segX",
+          "segY",
+          "bendX",
+          "bendY",
+          "skewX",
+          "skewY",
+          "taperX",
+        ]);
+        const XF_KEYS = new Set(["posX", "posY", "posZ", "rotXDeg", "rotYDeg", "rotZDeg"]);
+        const MAT_KEYS = new Set(["color", "roughness", "metalness", "useChecker"]);
+        const TEX_KEYS = new Set(["alphaTest", "depthWrite", "maskMode"]);
+        const SCENE_KEYS = new Set(["bg", "amb", "key"]);
+        const DBG_KEYS = new Set(["wireframe"]);
+
+        pane.on("change", (ev) => {
+          const k = ev.target.key;
+          if (GEOM_KEYS.has(k)) rebuildGeometry();
+          else if (XF_KEYS.has(k)) applyTransform();
+          else if (MAT_KEYS.has(k)) syncMaterial();
+          else if (TEX_KEYS.has(k)) syncMaterial();
+          else if (SCENE_KEYS.has(k)) syncScene();
+          else if (DBG_KEYS.has(k)) syncMaterial();
+        });
+
+        addEventListener("resize", () => {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(innerWidth, innerHeight);
+        });
+
+        function tick() {
+          requestAnimationFrame(tick);
+          controls.update();
+          renderer.render(scene, camera);
+        }
+        tick();
+      })();
+    </script>
+  </body>
+</html>
