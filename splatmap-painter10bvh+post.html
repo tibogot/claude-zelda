@@ -690,6 +690,7 @@
       let selectedWater = null; // currently selected water body
       let syncHeightTex = null; // kept but replaced by bakeBVH
       let bakeBVH = null; // assigned inside init
+      let cliffInstancer = null; // assigned inside init (after bakeBVH)
       let treeSystem = null;
 
       // ─── FOLIAGE SYSTEM ──────────────────────
@@ -2351,11 +2352,29 @@
             }
             vOffset += posAttr.count;
           }
+          function addGeoWithMatrix(geo, mat) {
+            const posAttr = geo.attributes.position;
+            for (let i = 0; i < posAttr.count; i++) {
+              _bvhV.fromBufferAttribute(posAttr, i).applyMatrix4(mat);
+              positions.push(_bvhV.x, _bvhV.y, _bvhV.z);
+            }
+            if (geo.index) {
+              const idx = geo.index.array;
+              for (let i = 0; i < idx.length; i++)
+                idxList.push(idx[i] + vOffset);
+            } else {
+              for (let i = 0; i < posAttr.count; i++) idxList.push(i + vOffset);
+            }
+            vOffset += posAttr.count;
+          }
           cliffObjects.forEach((root) =>
             root.traverse((o) => {
               if (o.isMesh) addMesh(o);
             }),
           );
+          // Also include all instances from the Cliffs Mode instancer
+          if (cliffInstancer)
+            cliffInstancer.forEachMeshInstance((geo, mat) => addGeoWithMatrix(geo, mat));
 
           // Build cliff BVH only if there are any cliff meshes
           let cliffBvh = null;
@@ -4167,7 +4186,7 @@
         const mouse = new THREE.Vector2();
 
         // ── CLIFF INSTANCER ──
-        const cliffInstancer = createCliffInstancer(scene, { maxInstances: 500 });
+        cliffInstancer = createCliffInstancer(scene, { maxInstances: 500 });
         // Proxy for per-instance sliders
         const ciProxy = { px: 0, py: 0, pz: 0, rx: 0, ry: 0, rz: 0, sx: 1, sy: 1, sz: 1 };
         let ciActiveLabel = "none";

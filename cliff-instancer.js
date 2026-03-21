@@ -317,6 +317,21 @@ export function createCliffInstancer(scene, options = {}) {
       return types.reduce((s, t) => s + t.instances.length, 0);
     },
 
+    // Iterate every (geometry, worldMatrix) pair for every instance of every type.
+    // Used by bakeBVH to expand instanced cliffs into the merged BVH geometry.
+    forEachMeshInstance(cb) {
+      const mat = new THREE.Matrix4();
+      for (const type of types) {
+        for (let i = 0; i < type.instances.length; i++) {
+          const M = computeInstanceMatrix(type.instances[i]);
+          for (const { im, localMatrix } of type.entries) {
+            mat.multiplyMatrices(M, localMatrix);
+            cb(im.geometry, mat);
+          }
+        }
+      }
+    },
+
     exportData() {
       return types.map((t) => ({
         name: t.name,
