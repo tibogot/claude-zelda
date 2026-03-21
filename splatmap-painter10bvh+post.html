@@ -1246,7 +1246,9 @@
               ? "lower"
               : sculptMode === "noise"
                 ? "noise"
-                : "raise";
+                : sculptMode === "erosion"
+                  ? "erosion"
+                  : "raise";
         const radius = brushWorldRadius();
         const radiusSq = radius * radius;
         const strength = (brushStr / 100) * 0.4;
@@ -1310,6 +1312,96 @@
               heightData[iz * VERTS + ix] +=
                 (flattenTargetY - current) * smooth * strength * 2;
             }
+          }
+        } else if (mode === "erosion") {
+          // Hydraulic erosion brush — same physics as full bake, local droplets only
+          const Ke = PARAMS.erosion.erosionRate;
+          const Kd = PARAMS.erosion.depositionRate;
+          const Kev = PARAMS.erosion.evaporation;
+          const Kin = PARAMS.erosion.inertia;
+          const Kc = PARAMS.erosion.capacity;
+          const erRad = PARAMS.erosion.radius;
+          const G = 4, maxSteps = 60, minSlope = 0.001;
+          const N = Math.max(1, Math.round(brushStr * 1.5));
+
+          // Brush center in grid space
+          const gcx = (wx / TERRAIN_SIZE + 0.5) * TERRAIN_RES;
+          const gcz = (wz / TERRAIN_SIZE + 0.5) * TERRAIN_RES;
+          const gridR = (radius / TERRAIN_SIZE) * TERRAIN_RES;
+
+          // Precompute soft erode kernel
+          const er = Math.ceil(erRad);
+          const bOX = [], bOZ = [], bWt = [];
+          let totW = 0;
+          for (let dz2 = -er; dz2 <= er; dz2++) {
+            for (let dx2 = -er; dx2 <= er; dx2++) {
+              const d = Math.sqrt(dx2 * dx2 + dz2 * dz2);
+              if (d >= erRad) continue;
+              const w = erRad - d; bOX.push(dx2); bOZ.push(dz2); bWt.push(w); totW += w;
+            }
+          }
+          for (let i = 0; i < bWt.length; i++) bWt[i] /= totW;
+
+          const sHG = (px, pz) => {
+            const x0 = Math.floor(px), z0 = Math.floor(pz);
+            const x1 = Math.min(TERRAIN_RES, x0+1), z1 = Math.min(TERRAIN_RES, z0+1);
+            const tx = px-x0, tz = pz-z0;
+            const h00=heightData[z0*VERTS+x0], h10=heightData[z0*VERTS+x1];
+            const h01=heightData[z1*VERTS+x0], h11=heightData[z1*VERTS+x1];
+            return {
+              h:  h00*(1-tx)*(1-tz)+h10*tx*(1-tz)+h01*(1-tx)*tz+h11*tx*tz,
+              gx: (h10-h00)*(1-tz)+(h11-h01)*tz,
+              gz: (h01-h00)*(1-tx)+(h11-h10)*tx,
+            };
+          };
+          const dep = (px, pz, amt) => {
+            const x0=Math.floor(px), z0=Math.floor(pz);
+            const x1=Math.min(TERRAIN_RES,x0+1), z1=Math.min(TERRAIN_RES,z0+1);
+            const tx=px-x0, tz=pz-z0;
+            heightData[z0*VERTS+x0]+=amt*(1-tx)*(1-tz);
+            heightData[z0*VERTS+x1]+=amt*tx*(1-tz);
+            heightData[z1*VERTS+x0]+=amt*(1-tx)*tz;
+            heightData[z1*VERTS+x1]+=amt*tx*tz;
+          };
+
+          for (let iter = 0; iter < N; iter++) {
+            // Uniform disk sampling within brush radius
+            const angle = Math.random() * 2 * Math.PI;
+            const rr = Math.sqrt(Math.random()) * gridR;
+            let px = gcx + Math.cos(angle) * rr;
+            let pz = gcz + Math.sin(angle) * rr;
+            if (px < 1 || px >= VERTS-2 || pz < 1 || pz >= VERTS-2) continue;
+
+            let ddx=0, ddz=0, speed=1, water=1, sediment=0;
+            for (let step = 0; step < maxSteps; step++) {
+              const { h, gx, gz } = sHG(px, pz);
+              ddx = ddx*Kin - gx*(1-Kin);
+              ddz = ddz*Kin - gz*(1-Kin);
+              const len = Math.sqrt(ddx*ddx+ddz*ddz) || 1;
+              ddx /= len; ddz /= len;
+              const nx2=px+ddx, nz2=pz+ddz;
+              if (nx2<0||nx2>=VERTS-1||nz2<0||nz2>=VERTS-1) break;
+              const dh = sHG(nx2, nz2).h - h;
+              const cap = Math.max(minSlope,-dh)*speed*water*Kc;
+              if (sediment > cap || dh > 0) {
+                const amt = dh>0 ? Math.min(sediment,dh) : (sediment-cap)*Kd;
+                sediment -= amt; dep(px, pz, amt);
+              } else {
+                const amt = Math.min((cap-sediment)*Ke, -dh+0.001);
+                sediment += amt;
+                const cx2=Math.floor(px), cz2=Math.floor(pz);
+                for (let i=0; i<bWt.length; i++) {
+                  const ex=cx2+bOX[i], ez=cz2+bOZ[i];
+                  if (ex<0||ex>=VERTS||ez<0||ez>=VERTS) continue;
+                  heightData[ez*VERTS+ex] -= amt*bWt[i];
+                }
+              }
+              speed = Math.min(8, Math.sqrt(Math.max(0, speed*speed-dh*G)));
+              water *= 1-Kev;
+              if (water < 0.005) break;
+              px=nx2; pz=nz2;
+            }
+            dep(px, pz, sediment*Kd);
           }
         } else if (mode === "noise") {
           const freq = PARAMS.noiseScale / radius;
@@ -4901,7 +4993,7 @@
         sculptFolder
           .addBinding(PARAMS, "sculptTool", {
             label: "Tool",
-            options: { Raise: "raise", Lower: "lower", Smooth: "smooth", Noise: "noise", Ramp: "ramp" },
+            options: { Raise: "raise", Lower: "lower", Smooth: "smooth", Noise: "noise", Ramp: "ramp", Erosion: "erosion" },
           })
           .on("change", (ev) => {
             sculptMode = ev.value;
