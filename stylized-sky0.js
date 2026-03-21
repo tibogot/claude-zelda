@@ -85,15 +85,19 @@ export function createStylizedSky() {
   const uC1Coverage = uniform(0.48);
   const uC1Softness = uniform(0.18);
   const uC1Scale = uniform(1.0);
-  const uC1Speed = uniform(0.006);
+  const uC1WindDir = uniform(new THREE.Vector2(0.005, 0.002)); // x/z wind speed
   const uC1Height = uniform(1.0);
+  const uC1WarpStr = uniform(0.35); // domain warp strength
+  const uC1WarpScale = uniform(0.4); // warp noise scale (lower = bigger blobs)
 
   // ── Cloud layer 2 (high, small, faster) ──
   const uC2Coverage = uniform(0.32);
   const uC2Softness = uniform(0.22);
   const uC2Scale = uniform(0.42);
-  const uC2Speed = uniform(0.003);
+  const uC2WindDir = uniform(new THREE.Vector2(-0.003, 0.001)); // opposite direction
   const uC2Height = uniform(2.6);
+  const uC2WarpStr = uniform(0.2);
+  const uC2WarpScale = uniform(0.6);
 
   // ── Cloud colors ──
   const uCloudLit = uniform(
@@ -106,6 +110,13 @@ export function createStylizedSky() {
   const uCloudSunset = uniform(
     new THREE.Color().setHex(0xff9060).convertSRGBToLinear(),
   );
+
+  // ── Cloud contrast + silver lining + internal gradient ──
+  const uC1Contrast = uniform(1.0); // 1 = unchanged, >1 = punchier edges
+  const uC2Contrast = uniform(1.0);
+  const uCloudRimStr = uniform(0.3); // silver lining brightness
+  const uCloudRimWidth = uniform(0.15); // how far to look toward sun for the rim
+  const uCloudGradientStr = uniform(0.0); // internal density gradient: 0=off, 1=full Ghibli gradient
 
   // ── Stars ──
   const uStarsDensity = uniform(60.0);
@@ -123,25 +134,54 @@ export function createStylizedSky() {
 
   // ── Cloud layer: returns vec4(rgb, alpha) ──
   const cloudLayer = Fn(
-    ([uvBase, coverage, softness, sunHoriz, litColor, horizMask]) => {
+    ([uvBase, coverage, softness, sunHoriz, litColor, horizMask, contrast]) => {
       const threshold = float(1.0).sub(coverage);
       const noise = fbmCloud(uvBase);
       const shadowUV = uvBase.add(sunHoriz.mul(0.2));
       const shadowNoise = fbmCloud(shadowUV);
-      const density = smoothstep(threshold, threshold.add(softness), noise).mul(
-        horizMask,
-      );
+      const rawDensity = smoothstep(threshold, threshold.add(softness), noise);
+      // Contrast: pushes cloud density toward 0/1 — punchier edges above 1.0
+      const density = clamp(
+        rawDensity.sub(float(0.5)).mul(contrast).add(float(0.5)),
+        float(0),
+        float(1),
+      ).mul(horizMask);
       const inShadow = smoothstep(
         threshold.sub(0.05),
         threshold.add(softness),
         shadowNoise,
       );
-      const cloudCol = mix(
-        vec3(litColor),
-        vec3(uCloudShadow),
-        inShadow.mul(uCloudShadowStr),
+      // Density-based internal gradient: 0 at cloud edge, 1 at thick center
+      const densityGrad = clamp(
+        noise.sub(threshold).div(float(1.0).sub(threshold).max(float(0.01))),
+        float(0),
+        float(1),
       );
-      return vec4(cloudCol, density);
+      const internalShade = float(1.0).sub(densityGrad); // 1=edge (dark), 0=center (bright)
+      // Combine directional shadow + internal gradient, both push toward shadow color
+      const shadowBlend = clamp(
+        inShadow.mul(uCloudShadowStr).add(internalShade.mul(uCloudGradientStr)),
+        float(0),
+        float(1),
+      );
+      const cloudCol = mix(vec3(litColor), vec3(uCloudShadow), shadowBlend);
+      // Silver lining: bright rim on sun-facing cloud edges
+      const rimUV = uvBase.sub(sunHoriz.mul(uCloudRimWidth));
+      const rimNoise = fbmCloud(rimUV);
+      const rimSolid = smoothstep(
+        threshold.sub(float(0.02)),
+        threshold.add(softness),
+        rimNoise,
+      );
+      // Rim appears where sun-side is solid but current pixel is outside the cloud
+      const rimFactor = rimSolid
+        .mul(rawDensity.oneMinus())
+        .mul(uCloudRimStr)
+        .mul(horizMask);
+      const cloudColRim = cloudCol.add(
+        vec3(float(1.0), float(0.98), float(0.92)).mul(rimFactor),
+      );
+      return vec4(cloudColRim, density);
     },
   );
 
@@ -251,45 +291,55 @@ export function createStylizedSky() {
     const sunHoriz = normalize(vec2(uSunDir.x, uSunDir.z));
 
     // ── Cloud layer 1 ──
-    const hMask1 = smoothstep(float(0.0), float(0.13), upDot);
+    const hMask1 = smoothstep(float(0.05), float(0.22), upDot);
     const cloudUV1 = dir.xz
-      .div(upDot.max(float(0.05)).mul(uC1Height))
+      .div(upDot.max(float(0.06)).mul(uC1Height))
       .mul(uC1Scale)
-      .add(time.mul(uC1Speed));
+      .add(time.mul(uC1WindDir));
+    // Domain warp: distort UV with low-freq noise before sampling cloud shape
+    const w1a = mx_noise_float(vec3(cloudUV1.mul(uC1WarpScale), float(0.0)));
+    const w1b = mx_noise_float(vec3(cloudUV1.mul(uC1WarpScale), float(3.7)));
+    const warpedUV1 = cloudUV1.add(vec2(w1a, w1b).mul(uC1WarpStr));
     const litCol1 = mix(
       vec3(uCloudLit),
       vec3(uCloudSunset),
       sunsetBlend.mul(0.55),
     );
     const c1 = cloudLayer(
-      cloudUV1,
+      warpedUV1,
       uC1Coverage,
       uC1Softness,
       sunHoriz,
       litCol1,
       hMask1,
+      uC1Contrast,
     );
     col = mix(col, c1.xyz, c1.w.mul(nightBlend.oneMinus()));
 
     // ── Cloud layer 2 ──
-    const hMask2 = smoothstep(float(0.04), float(0.22), upDot);
+    const hMask2 = smoothstep(float(0.07), float(0.26), upDot);
     const cloudUV2 = dir.xz
-      .div(upDot.max(float(0.08)).mul(uC2Height))
+      .div(upDot.max(float(0.06)).mul(uC2Height))
       .mul(uC2Scale)
-      .add(time.mul(uC2Speed))
+      .add(time.mul(uC2WindDir))
       .add(vec2(float(17.3), float(31.7)));
+    // Domain warp for layer 2
+    const w2a = mx_noise_float(vec3(cloudUV2.mul(uC2WarpScale), float(1.5)));
+    const w2b = mx_noise_float(vec3(cloudUV2.mul(uC2WarpScale), float(5.2)));
+    const warpedUV2 = cloudUV2.add(vec2(w2a, w2b).mul(uC2WarpStr));
     const litCol2 = mix(
       vec3(uCloudLit),
       vec3(uCloudSunset),
       sunsetBlend.mul(0.35),
     );
     const c2 = cloudLayer(
-      cloudUV2,
+      warpedUV2,
       uC2Coverage,
       uC2Softness,
       sunHoriz,
       litCol2,
       hMask2,
+      uC2Contrast,
     );
     col = mix(col, c2.xyz, c2.w.mul(0.7).mul(nightBlend.oneMinus()));
 
@@ -324,6 +374,27 @@ export function createStylizedSky() {
   mesh.frustumCulled = false;
   mesh.visible = false;
 
+  // ── Wind direction helpers (angle in degrees + speed → vec2) ──
+  const windState = {
+    c1Angle: 20,
+    c1Speed: 0.008,
+    c2Angle: 160,
+    c2Speed: 0.004,
+  };
+  const _updateWind = () => {
+    const r1 = (windState.c1Angle * Math.PI) / 180;
+    uC1WindDir.value.set(
+      Math.cos(r1) * windState.c1Speed,
+      Math.sin(r1) * windState.c1Speed,
+    );
+    const r2 = (windState.c2Angle * Math.PI) / 180;
+    uC2WindDir.value.set(
+      Math.cos(r2) * windState.c2Speed,
+      Math.sin(r2) * windState.c2Speed,
+    );
+  };
+  _updateWind();
+
   // Compute perpendicular axes for sun ray calculation — updated each frame
   const _worldUp = new THREE.Vector3(0, 1, 0);
   const _sunRight = new THREE.Vector3();
@@ -346,6 +417,8 @@ export function createStylizedSky() {
   return {
     mesh,
     update,
+    windState,
+    updateWind: _updateWind,
     uniforms: {
       // Gradient
       zenithColor: uZenithColor,
@@ -372,19 +445,26 @@ export function createStylizedSky() {
       c1Coverage: uC1Coverage,
       c1Softness: uC1Softness,
       c1Scale: uC1Scale,
-      c1Speed: uC1Speed,
       c1Height: uC1Height,
+      c1WarpStr: uC1WarpStr,
+      c1WarpScale: uC1WarpScale,
+      c1Contrast: uC1Contrast,
       // Cloud layer 2
       c2Coverage: uC2Coverage,
       c2Softness: uC2Softness,
       c2Scale: uC2Scale,
-      c2Speed: uC2Speed,
       c2Height: uC2Height,
+      c2WarpStr: uC2WarpStr,
+      c2WarpScale: uC2WarpScale,
+      c2Contrast: uC2Contrast,
       // Cloud colors
       cloudLit: uCloudLit,
       cloudShadow: uCloudShadow,
       cloudShadowStr: uCloudShadowStr,
       cloudSunset: uCloudSunset,
+      cloudRimStr: uCloudRimStr,
+      cloudRimWidth: uCloudRimWidth,
+      cloudGradientStr: uCloudGradientStr,
       // Stars
       starsDensity: uStarsDensity,
       starsSize: uStarsSize,
