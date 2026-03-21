@@ -554,8 +554,6 @@
         brushSize: 20,
         brushStrength: 60,
         sculptBrush: "smooth",
-        noiseScale: 2.5,
-        noiseOctaves: 2,
         paintBrush: "smooth",
         slopeStart: 0.05,
         slopeEnd: 0.7,
@@ -649,7 +647,6 @@
       let currentBiome = "forest";
       let sculptMode = "raise"; // "raise" | "lower" | "smooth"
       let flattenTargetY = 0; // sampled on mousedown when alt+drag
-      let rampPointA = null;  // first click of ramp tool { x, y, z }
       let brushSize = 20;
       let brushStr = 60;
       let brushNoiseSeed = 0;
@@ -1237,16 +1234,13 @@
       // plain drag = raise | shift+drag = lower | ctrl+drag = smooth
       function sculptAt(wx, wz, e) {
         if (!terrainGeo) return;
-        if (sculptMode === "ramp") return; // ramp is click-click, not drag
         const mode = e?.altKey
           ? "flatten"
           : e?.ctrlKey
             ? "smooth"
             : e?.shiftKey
               ? "lower"
-              : sculptMode === "noise"
-                ? "noise"
-                : "raise";
+              : "raise";
         const radius = brushWorldRadius();
         const radiusSq = radius * radius;
         const strength = (brushStr / 100) * 0.4;
@@ -1311,26 +1305,6 @@
                 (flattenTargetY - current) * smooth * strength * 2;
             }
           }
-        } else if (mode === "noise") {
-          const freq = PARAMS.noiseScale / radius;
-          const oct = Math.round(PARAMS.noiseOctaves);
-          for (let iz = izMin; iz <= izMax; iz++) {
-            for (let ix = ixMin; ix <= ixMax; ix++) {
-              const vx = (-0.5 + ix / TERRAIN_RES) * TERRAIN_SIZE;
-              const vz = (-0.5 + iz / TERRAIN_RES) * TERRAIN_SIZE;
-              const distSq = (vx - wx) * (vx - wx) + (vz - wz) * (vz - wz);
-              if (distSq > radiusSq) continue;
-              const t = Math.sqrt(distSq) / radius;
-              const falloff = (1 - t) * (1 - t);
-              // _fbm returns [0,1] — subtract 0.5 for bipolar [-0.5, 0.5]
-              const n = _fbm(
-                vx * freq + brushNoiseSeed,
-                vz * freq + brushNoiseSeed * 1.3,
-                oct
-              ) - 0.5;
-              heightData[iz * VERTS + ix] += n * falloff * strength * 4;
-            }
-          }
         } else {
           const dir = mode === "raise" ? 1 : -1;
           const brush = PARAMS.sculptBrush;
@@ -1372,47 +1346,6 @@
               }
               heightData[iz * VERTS + ix] += delta;
             }
-          }
-        }
-        syncGeometry();
-      }
-
-      // ─── RAMP TOOL ───────────────────────────
-      function applyRamp(ptA, ptB) {
-        const dx = ptB.x - ptA.x;
-        const dz = ptB.z - ptA.z;
-        const lenSq = dx * dx + dz * dz;
-        if (lenSq < 0.001) return;
-        const radius = brushWorldRadius();
-        const radiusSq = radius * radius;
-        const strength = brushStr / 100;
-
-        const minX = Math.min(ptA.x, ptB.x) - radius;
-        const maxX = Math.max(ptA.x, ptB.x) + radius;
-        const minZ = Math.min(ptA.z, ptB.z) - radius;
-        const maxZ = Math.max(ptA.z, ptB.z) + radius;
-        const ixMin = Math.max(0, Math.floor((minX / TERRAIN_SIZE + 0.5) * TERRAIN_RES));
-        const ixMax = Math.min(TERRAIN_RES, Math.ceil((maxX / TERRAIN_SIZE + 0.5) * TERRAIN_RES));
-        const izMin = Math.max(0, Math.floor((minZ / TERRAIN_SIZE + 0.5) * TERRAIN_RES));
-        const izMax = Math.min(TERRAIN_RES, Math.ceil((maxZ / TERRAIN_SIZE + 0.5) * TERRAIN_RES));
-
-        for (let iz = izMin; iz <= izMax; iz++) {
-          for (let ix = ixMin; ix <= ixMax; ix++) {
-            const vx = (-0.5 + ix / TERRAIN_RES) * TERRAIN_SIZE;
-            const vz = (-0.5 + iz / TERRAIN_RES) * TERRAIN_SIZE;
-            // Project vertex onto A→B line, get t [0,1]
-            const t = Math.max(0, Math.min(1,
-              ((vx - ptA.x) * dx + (vz - ptA.z) * dz) / lenSq
-            ));
-            // Perpendicular distance from the A→B line
-            const perpX = ptA.x + t * dx - vx;
-            const perpZ = ptA.z + t * dz - vz;
-            const perpSq = perpX * perpX + perpZ * perpZ;
-            if (perpSq > radiusSq) continue;
-            const falloff = Math.pow(1 - Math.sqrt(perpSq) / radius, 2);
-            const targetY = ptA.y + t * (ptB.y - ptA.y);
-            const current = heightData[iz * VERTS + ix];
-            heightData[iz * VERTS + ix] += (targetY - current) * falloff * strength;
           }
         }
         syncGeometry();
@@ -3857,15 +3790,6 @@
         brushRing.renderOrder = 2;
         scene.add(brushRing);
 
-        // ── RAMP POINT-A MARKER ──
-        const rampMarker = new THREE.Mesh(
-          new THREE.SphereGeometry(0.6, 10, 8),
-          new THREE.MeshBasicMaterial({ color: 0xff6600, depthTest: false })
-        );
-        rampMarker.visible = false;
-        rampMarker.renderOrder = 999;
-        scene.add(rampMarker);
-
         // ── PLAY MODE CAPSULE ──
         const capsuleGeo = new THREE.CapsuleGeometry(
           PLAYER_CAP_R,
@@ -4901,17 +4825,11 @@
         sculptFolder
           .addBinding(PARAMS, "sculptTool", {
             label: "Tool",
-            options: { Raise: "raise", Lower: "lower", Smooth: "smooth", Noise: "noise", Ramp: "ramp" },
+            options: { Raise: "raise", Lower: "lower", Smooth: "smooth" },
           })
           .on("change", (ev) => {
             sculptMode = ev.value;
           });
-        sculptFolder.addBinding(PARAMS, "noiseScale", {
-          label: "Noise scale", min: 0.3, max: 10, step: 0.1,
-        });
-        sculptFolder.addBinding(PARAMS, "noiseOctaves", {
-          label: "Noise octaves", min: 1, max: 4, step: 1,
-        });
         sculptFolder.addButton({ title: "Reset Terrain" }).on("click", () => {
           pushUndo();
           buildHeightData();
@@ -5962,10 +5880,7 @@
             setMode("water");
           else if (e.code === "KeyW" && currentMode === "water")
             setMode("view");
-          if (e.code === "Escape") {
-            if (rampPointA) { rampPointA = null; rampMarker.visible = false; }
-            else setMode("view");
-          }
+          if (e.code === "Escape") setMode("view");
           if (e.code === "Backquote") toggleTerrainMat();
           if (e.code === "KeyC")
             setMode(currentMode === "cliffs" ? "view" : "cliffs");
@@ -6211,18 +6126,6 @@
             pushUndo();
           const p = getTerrainHit(e);
           if (!p) return;
-          if (currentMode === "sculpt" && sculptMode === "ramp") {
-            if (!rampPointA) {
-              rampPointA = { x: p.x, y: sampleHeight(p.x, p.z), z: p.z };
-              rampMarker.position.set(p.x, rampPointA.y + 1, p.z);
-              rampMarker.visible = true;
-            } else {
-              applyRamp(rampPointA, { x: p.x, y: sampleHeight(p.x, p.z), z: p.z });
-              rampPointA = null;
-              rampMarker.visible = false;
-            }
-            return;
-          }
           if (currentMode === "sculpt" && e.altKey)
             flattenTargetY = sampleHeight(p.x, p.z);
           if (currentMode === "paint") paintAt(p.x, p.z);
