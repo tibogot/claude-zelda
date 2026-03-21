@@ -91,6 +91,10 @@
         background: rgba(80, 60, 40, 0.95);
         color: #f0d8b0;
       }
+      #mode-badge.cliffgrass {
+        background: rgba(50, 90, 35, 0.95);
+        color: #d0f0a0;
+      }
 
       #info {
         position: fixed;
@@ -492,6 +496,15 @@
       meadowCtx.fillStyle = "#000";
       meadowCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
 
+      // ─── CLIFF GRASS DENSITY CANVAS ──────────
+      const cliffDensityCanvas = document.createElement("canvas");
+      cliffDensityCanvas.width = cliffDensityCanvas.height = SPLAT_RES;
+      const cliffDensityCtx = cliffDensityCanvas.getContext("2d", {
+        willReadFrequently: true,
+      });
+      cliffDensityCtx.fillStyle = "#000";
+      cliffDensityCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+
       // ─── IMAGE TEXTURE SPLATMAP ──────────────
       // Uint8Array avoids canvas premultiplied-alpha zeroing our channels (R*alpha=0 bug)
       // RGBA: R=slot0 weight, G=slot1, B=slot2, A=slot3
@@ -663,6 +676,10 @@
       let grassUniforms = null;
       let grassEraseMode = false;
       let meadowDensityTex = null;
+      let cliffDensityTex = null;
+      let cliffHeightTex = null;
+      let cliffGrassPatchSystem = null;
+      let cliffGrassEraseMode = false;
 
       // ─── PROPS STATE ─────────────────────────
       let propObjects = []; // placed prop roots in scene
@@ -1153,6 +1170,31 @@
         grassDensityCtx.arc(cx, cy, brushSize, 0, PI * 2);
         grassDensityCtx.fill();
         if (grassDensityTex) grassDensityTex.needsUpdate = true;
+      }
+
+      // ─── CLIFF GRASS DENSITY PAINT ───────────
+      function paintCliffGrassAt(wx, wz, erase) {
+        const { u, v } = worldToUV(wx, wz);
+        const cx = u * SPLAT_RES,
+          cy = v * SPLAT_RES;
+        const alpha = brushStr / 100;
+        const grad = cliffDensityCtx.createRadialGradient(cx, cy, 0, cx, cy, brushSize);
+        if (erase) {
+          grad.addColorStop(0, `rgba(0,0,0,${alpha})`);
+          grad.addColorStop(0.5, `rgba(0,0,0,${alpha * 0.55})`);
+          grad.addColorStop(1, `rgba(0,0,0,0)`);
+          cliffDensityCtx.globalCompositeOperation = "source-over";
+        } else {
+          grad.addColorStop(0, `rgba(255,255,255,${alpha})`);
+          grad.addColorStop(0.5, `rgba(255,255,255,${alpha * 0.55})`);
+          grad.addColorStop(1, `rgba(255,255,255,0)`);
+          cliffDensityCtx.globalCompositeOperation = "source-over";
+        }
+        cliffDensityCtx.fillStyle = grad;
+        cliffDensityCtx.beginPath();
+        cliffDensityCtx.arc(cx, cy, brushSize, 0, PI * 2);
+        cliffDensityCtx.fill();
+        if (cliffDensityTex) cliffDensityTex.needsUpdate = true;
       }
 
       // ─── TREE PAINT ──────────────────────────
@@ -2208,6 +2250,11 @@
         meadowDensityTex.wrapS = meadowDensityTex.wrapT =
           THREE.ClampToEdgeWrapping;
 
+        // ── CLIFF DENSITY TEX ─────────────────────────────────────────────
+        cliffDensityTex = new THREE.CanvasTexture(cliffDensityCanvas);
+        cliffDensityTex.wrapS = cliffDensityTex.wrapT =
+          THREE.ClampToEdgeWrapping;
+
         // ── HEIGHT TEX (for grass blade positioning) ──────────────────────
         const heightTexData = new Float32Array(HTEX_RES * HTEX_RES * 4);
         heightTex = new THREE.DataTexture(
@@ -2219,6 +2266,24 @@
         );
         heightTex.wrapS = heightTex.wrapT = THREE.ClampToEdgeWrapping;
         heightTex.magFilter = heightTex.minFilter = THREE.LinearFilter;
+
+        // ── CLIFF HEIGHT TEX (cliff-only flat surfaces; -9999 where no cliff) ──
+        const cliffHeightTexData = new Float32Array(HTEX_RES * HTEX_RES * 4);
+        // Pre-fill with -9999 so grass blades go underground and are invisible by default
+        for (let i = 0; i < HTEX_RES * HTEX_RES; i++) {
+          cliffHeightTexData[i * 4] = cliffHeightTexData[i * 4 + 1] =
+            cliffHeightTexData[i * 4 + 2] = -9999;
+          cliffHeightTexData[i * 4 + 3] = 1;
+        }
+        cliffHeightTex = new THREE.DataTexture(
+          cliffHeightTexData,
+          HTEX_RES,
+          HTEX_RES,
+          THREE.RGBAFormat,
+          THREE.FloatType,
+        );
+        cliffHeightTex.wrapS = cliffHeightTex.wrapT = THREE.ClampToEdgeWrapping;
+        cliffHeightTex.magFilter = cliffHeightTex.minFilter = THREE.LinearFilter;
 
         // ── AO + NORMAL MAP TEXTURES ──────────────────────────────────────────
         // Fill AO with 1.0 (no occlusion) and NM with flat (0.5, 0.5, 1.0) until baked
@@ -2350,10 +2415,8 @@
                 const hit = cliffBvh.raycastFirst(_bvhRay, THREE.DoubleSide);
                 if (hit && hit.point.y > hCpu) {
                   hCpu = hit.point.y; // bvhGrid always gets cliff height (props/trees/player)
-                  // Only lift grass heightTex for roughly flat surfaces (cliff tops).
-                  // Steep/vertical faces (face.normal.y < 0.5) must not affect grass Y —
-                  // that causes blades to stretch up cliff sides and edges.
-                  if (hit.face.normal.y > 0.5) hGpu = hit.point.y;
+                  // NOTE: terrain heightTex (hGpu) intentionally NOT updated with cliff height.
+                  // Layer 1 (terrain grass) ignores cliffs entirely — cliff mesh naturally occludes it.
                 }
               }
 
@@ -2364,9 +2427,29 @@
                 heightTexData[i4 + 2] =
                   hGpu;
               heightTexData[i4 + 3] = 1;
+
+              // ── CLIFF HEIGHT TEX: only flat cliff surfaces (face.normal.y > 0.3) ──
+              // Blades positioned here root at the cliff top. All other positions = -9999
+              // so blades stay underground (invisible) without needing a density mask.
+              {
+                const cliffI4 = (iz * HTEX_RES + ix) * 4;
+                let cliffH = -9999;
+                if (cliffBvh) {
+                  _bvhRay.origin.set(wxG, 99999, wzG);
+                  const cliffHit = cliffBvh.raycastFirst(_bvhRay, THREE.DoubleSide);
+                  if (cliffHit && cliffHit.face.normal.y > 0.3) {
+                    cliffH = cliffHit.point.y;
+                  }
+                }
+                cliffHeightTexData[cliffI4] =
+                  cliffHeightTexData[cliffI4 + 1] =
+                  cliffHeightTexData[cliffI4 + 2] = cliffH;
+                cliffHeightTexData[cliffI4 + 3] = 1;
+              }
             }
           }
           heightTex.needsUpdate = true;
+          cliffHeightTex.needsUpdate = true;
         };
         bakeBVH();
 
@@ -2519,6 +2602,56 @@
             matMidSimple: matMid,
             matHighSimple: matHigh,
             matHighSimpleNear: matNear,
+          },
+          {
+            PATCH_SPACING,
+            GRID_SIZE,
+            NEAR_PATCH_SIZE,
+            nearRingExtent: grassParams.nearRingExtent,
+            lodDistance: grassParams.lodDistance,
+            lodDistanceMid: grassParams.lodDistance * 1.4,
+            maxDistance: grassParams.maxDistance,
+          },
+        );
+
+        // ── CLIFF GRASS PATCH SYSTEM (Layer 2) ───────────────────────────────
+        // Reuses the same geometry and uniforms as terrain grass but with
+        // cliffHeightTex (flat cliff surfaces only) and cliffDensityTex.
+        // Blades underground (-9999) are invisible — opaque cliff mesh occludes terrain grass below.
+        const cliffGrassCtx = {
+          ...grassUniforms,
+          heightTex: cliffHeightTex,
+          grassDensityTex: cliffDensityTex,
+          trailTex,
+          PI: Math.PI,
+        };
+        const cliffMatLow = createGrassMaterial(
+          GRASS_SEGMENTS_LOW, GRASS_VERTS_LOW, false, "regular", cliffGrassCtx,
+        );
+        const cliffMatMid = createGrassMaterial(
+          GRASS_SEGMENTS_MID, GRASS_VERTS_MID, false, "regular", cliffGrassCtx,
+        );
+        const cliffMatHigh = createGrassMaterial(
+          GRASS_SEGMENTS_HIGH, GRASS_VERTS_HIGH, false, "regular", cliffGrassCtx,
+        );
+        const cliffMatNear = createGrassMaterial(
+          GRASS_SEGMENTS_HIGH, GRASS_VERTS_HIGH, false, "near", cliffGrassCtx,
+        );
+        const cliffGrassGroup = new THREE.Group();
+        scene.add(cliffGrassGroup);
+        cliffGrassPatchSystem = setupGrassPatches(
+          scene,
+          camera,
+          cliffGrassGroup,
+          {
+            geoLow,
+            geoMid,
+            geoHigh,
+            geoNear,
+            matLowSimple: cliffMatLow,
+            matMidSimple: cliffMatMid,
+            matHighSimple: cliffMatHigh,
+            matHighSimpleNear: cliffMatNear,
           },
           {
             PATCH_SPACING,
@@ -5115,6 +5248,29 @@
           reader.readAsArrayBuffer(e.target.files[0]);
         });
 
+        // ── Cliff Grass folder ──
+        const cliffGrassErasePARAMS = { erase: false };
+        const cliffGrassFolder = pane.addFolder({
+          title: "Cliff Grass",
+          expanded: true,
+        });
+        cliffGrassFolder.addButton({ title: "Enter Cliff Grass Mode" }).on("click", () => {
+          setMode(currentMode === "cliffgrass" ? "view" : "cliffgrass");
+        });
+        cliffGrassFolder
+          .addBinding(cliffGrassErasePARAMS, "erase", { label: "Erase (or Shift)" })
+          .on("change", (e) => { cliffGrassEraseMode = e.value; });
+        cliffGrassFolder.addButton({ title: "Clear cliff grass" }).on("click", () => {
+          cliffDensityCtx.fillStyle = "#000";
+          cliffDensityCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+          if (cliffDensityTex) cliffDensityTex.needsUpdate = true;
+        });
+        cliffGrassFolder.addButton({ title: "Fill all cliff grass" }).on("click", () => {
+          cliffDensityCtx.fillStyle = "#fff";
+          cliffDensityCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+          if (cliffDensityTex) cliffDensityTex.needsUpdate = true;
+        });
+
         // ── Trees folder ──
         const treesFolder = pane.addFolder({
           title: "Trees  [ T ]",
@@ -5999,7 +6155,9 @@
                               ? "PATH MODE  [ L ]"
                               : mode === "cliffs"
                                 ? "CLIFFS MODE  [ C ]"
-                                : "PLACE MODE"; // play handled above
+                                : mode === "cliffgrass"
+                                  ? "CLIFF GRASS MODE"
+                                  : "PLACE MODE"; // play handled above
           badge.className = mode;
           renderer.domElement.style.cursor =
             mode === "view" ? "default" : "crosshair";
@@ -6011,6 +6169,8 @@
             mode === "cliffs"
           )
             brushRing.visible = false;
+          else if (mode === "cliffgrass")
+            brushRing.visible = true;
         }
         setMode("view");
 
@@ -6178,6 +6338,8 @@
           if (currentMode === "path") pathPaintAt(p.x, p.z);
           if (currentMode === "grass")
             paintGrassAt(p.x, p.z, grassEraseMode || e.shiftKey);
+          if (currentMode === "cliffgrass")
+            paintCliffGrassAt(p.x, p.z, cliffGrassEraseMode || e.shiftKey);
           if (currentMode === "trees")
             paintTreesAt(p.x, p.z, treeEraseMode || e.shiftKey);
           if (currentMode === "foliage")
@@ -6621,14 +6783,17 @@
           uWaterTime.value = elapsed;
           uWCamXZ.value.set(camera.position.x, camera.position.z);
           _syncRipples();
-          if (grassPatchSystem) {
+          if (grassPatchSystem || cliffGrassPatchSystem) {
             camera.updateMatrixWorld();
             _grassProjMatrix.multiplyMatrices(
               camera.projectionMatrix,
               camera.matrixWorldInverse,
             );
             _grassFrustum.setFromProjectionMatrix(_grassProjMatrix);
-            grassPatchSystem.update(camera.position, _grassFrustum);
+            if (grassPatchSystem)
+              grassPatchSystem.update(camera.position, _grassFrustum);
+            if (cliffGrassPatchSystem)
+              cliffGrassPatchSystem.update(camera.position, _grassFrustum);
           }
           // Sync lighting & sky from PARAMS every frame
           const sunDir = sunDirectionFromAngles(

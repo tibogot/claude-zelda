@@ -245,19 +245,6 @@ export function createGrassMaterial(
     } else {
       bladeVisible = step(hv.x, uBladeDensity.mul(paintedDensity)).mul(hasDensity);
     }
-    // Slope suppression: hide grass on steep terrain (sculpted cliffs, near-vertical slopes).
-    // Sample heightTex at ±1 texel to get height gradient. For a 45° slope,
-    // the gradient magnitude ≈ 2.0 (2 texels span 2 world units, height diff = 2*tan(45°)=2).
-    // Blades on slopes steeper than ~45° are suppressed.
-    const sStep = float(1.0 / 512.0);
-    const hRs = texture(heightTex, terrainUV.add(vec2(sStep, float(0.0)))).r;
-    const hLs = texture(heightTex, terrainUV.sub(vec2(sStep, float(0.0)))).r;
-    const hUs = texture(heightTex, terrainUV.add(vec2(float(0.0), sStep))).r;
-    const hDs = texture(heightTex, terrainUV.sub(vec2(float(0.0), sStep))).r;
-    const dXs = hRs.sub(hLs);
-    const dZs = hUs.sub(hDs);
-    const slopeMag = dXs.mul(dXs).add(dZs.mul(dZs)).sqrt();
-    bladeVisible = bladeVisible.mul(sub(float(1.0), step(float(2.0), slopeMag)));
 
     const totalWidthVis = mul(totalWidth, bladeVisible);
     const totalHeightVis = mul(totalHeight, bladeVisible);
