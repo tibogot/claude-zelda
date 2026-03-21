@@ -569,6 +569,8 @@
         sculptBrush: "smooth",
         noiseScale: 2.5,
         noiseOctaves: 2,
+        terraceStep: 8,
+        terraceSharpness: 0.7,
         paintBrush: "smooth",
         slopeStart: 0.05,
         slopeEnd: 0.7,
@@ -1297,7 +1299,9 @@
                 ? "noise"
                 : sculptMode === "erosion"
                   ? "erosion"
-                  : "raise";
+                  : sculptMode === "terrace"
+                    ? "terrace"
+                    : "raise";
         const radius = brushWorldRadius();
         const radiusSq = radius * radius;
         const strength = (brushStr / 100) * 0.4;
@@ -1451,6 +1455,29 @@
               px=nx2; pz=nz2;
             }
             dep(px, pz, sediment*Kd);
+          }
+        } else if (mode === "terrace") {
+          const step = PARAMS.terraceStep;
+          const sharpness = PARAMS.terraceSharpness; // 0=smooth blend, 1=hard snap
+          for (let iz = izMin; iz <= izMax; iz++) {
+            for (let ix = ixMin; ix <= ixMax; ix++) {
+              const vx = (-0.5 + ix / TERRAIN_RES) * TERRAIN_SIZE;
+              const vz = (-0.5 + iz / TERRAIN_RES) * TERRAIN_SIZE;
+              const distSq = (vx - wx) * (vx - wx) + (vz - wz) * (vz - wz);
+              if (distSq > radiusSq) continue;
+              const t = Math.sqrt(distSq) / radius;
+              const falloff = (1 - t * t) * (1 - t * t); // smooth quartic falloff
+              const h = heightData[iz * VERTS + ix];
+              // Snap height to nearest multiple of step, with sharpness controlling blend
+              const floored = Math.floor(h / step) * step;
+              const frac = (h - floored) / step; // 0..1 within the step
+              // Sharpness curves the fraction: at 1.0 everything snaps to floor except near the top
+              const curved = frac < sharpness
+                ? frac * (1 - sharpness) / sharpness
+                : (frac - sharpness) / (1 - sharpness) * sharpness + (1 - sharpness);
+              const snapped = floored + curved * step;
+              heightData[iz * VERTS + ix] += (snapped - h) * falloff * strength * 3;
+            }
           }
         } else if (mode === "noise") {
           const freq = PARAMS.noiseScale / radius;
@@ -5210,7 +5237,7 @@
         sculptFolder
           .addBinding(PARAMS, "sculptTool", {
             label: "Tool",
-            options: { Raise: "raise", Lower: "lower", Smooth: "smooth", Noise: "noise", Ramp: "ramp", Erosion: "erosion" },
+            options: { Raise: "raise", Lower: "lower", Smooth: "smooth", Noise: "noise", Ramp: "ramp", Erosion: "erosion", Terrace: "terrace" },
           })
           .on("change", (ev) => {
             sculptMode = ev.value;
@@ -5220,6 +5247,12 @@
         });
         sculptFolder.addBinding(PARAMS, "noiseOctaves", {
           label: "Noise octaves", min: 1, max: 4, step: 1,
+        });
+        sculptFolder.addBinding(PARAMS, "terraceStep", {
+          label: "Terrace step", min: 1, max: 40, step: 0.5,
+        });
+        sculptFolder.addBinding(PARAMS, "terraceSharpness", {
+          label: "Terrace sharpness", min: 0.05, max: 0.95, step: 0.01,
         });
         sculptFolder.addButton({ title: "Reset Terrain" }).on("click", () => {
           pushUndo();
