@@ -167,7 +167,8 @@ export function createStylizedSky() {
     const radDist   = length(vec2(dx, dy));
     const rayFalloff = smoothstep(uSunRayLen, uSunSize.mul(2.0), radDist)
                          .mul(smoothstep(uSunSize.mul(0.9), uSunSize.mul(1.4), radDist));
-    const sunRays   = rayPat.mul(rayFalloff).mul(uSunRayStr);
+    // Multiply by sunDot so rays only appear on the sun-facing hemisphere (not anti-sun)
+    const sunRays   = rayPat.mul(rayFalloff).mul(uSunRayStr).mul(sunDot);
 
     // Combine — core is slightly brighter/whiter than disc color
     const sunBaseCol = vec3(uSunColor);
