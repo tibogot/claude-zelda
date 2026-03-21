@@ -3,25 +3,18 @@
  *
  * Features:
  *  - Multi-stop gradient (zenith → mid → horizon) driven by sun elevation
- *  - Stylized sun disc + soft glow halo
+ *  - Zelda-style sun: large disc + overexposed core + halo ring + radial rays
  *  - Atmospheric horizon scatter (golden/orange ring around sun at sunset)
+ *  - Full 360° horizon luminosity band (warm glow all around the horizon)
  *  - Two cloud layers: 2D perspective-projected fBm, directional self-shadow, sunset tint
  *  - Stars (hash grid) + moon disc at night
- *
- * Usage:
- *   import { createStylizedSky } from "./stylized-sky.js";
- *   const sky = createStylizedSky();
- *   scene.add(sky.mesh);
- *   // each frame:
- *   sky.update(sunDir, camera.position);
- *   // uniforms for Tweakpane are in sky.uniforms
  */
 
 import * as THREE from "three";
 import { MeshBasicNodeMaterial } from "three";
 import {
   Fn, uniform, vec2, vec3, vec4, float,
-  mix, smoothstep, clamp, pow, dot,
+  mix, smoothstep, clamp, pow, dot, abs, cos, atan,
   normalize, floor, fract, step,
   time, positionLocal, length,
   mx_noise_float,
@@ -38,10 +31,25 @@ export function createStylizedSky() {
 
   // ── Sun ──
   const uSunDir          = uniform(new THREE.Vector3(0.5, 0.8, 0.3).normalize());
+  const uSunRight        = uniform(new THREE.Vector3(1, 0, 0)); // perpendicular axis — updated CPU-side
+  const uSunUp           = uniform(new THREE.Vector3(0, 1, 0)); // perpendicular axis — updated CPU-side
   const uSunColor        = uniform(new THREE.Color().setHex(0xfffde0).convertSRGBToLinear());
-  const uSunSize         = uniform(0.005);
-  const uSunGlowPower    = uniform(48.0);
-  const uSunGlowStrength = uniform(0.5);
+  const uSunSize         = uniform(0.015);   // larger than before
+  const uSunGlowPower    = uniform(8.0);     // lower = wider glow
+  const uSunGlowStrength = uniform(1.5);     // stronger corona
+  // Halo ring just outside the disc
+  const uSunHaloStr      = uniform(0.35);
+  const uSunHaloRadius   = uniform(2.2);     // ring at sunSize * this
+  // Radial rays
+  const uSunRayCount     = uniform(8.0);     // number of ray pairs
+  const uSunRayStr       = uniform(0.45);
+  const uSunRaySharp     = uniform(6.0);     // higher = thinner rays
+  const uSunRayLen       = uniform(0.22);    // how far rays extend from disc
+
+  // ── Horizon luminosity ring ──
+  const uHorizonRingStr   = uniform(0.22);
+  const uHorizonRingWidth = uniform(0.12);   // angular thickness of the band
+  const uHorizonRingColor = uniform(new THREE.Color().setHex(0xfff0d0).convertSRGBToLinear());
 
   // ── Cloud layer 1 (low, large, slow) ──
   const uC1Coverage = uniform(0.48);
@@ -68,65 +76,107 @@ export function createStylizedSky() {
   const uStarsSize       = uniform(0.08);
   const uStarsBrightness = uniform(1.0);
 
-  // ── 4-octave fBm (each octave uses a unique Z offset to avoid correlation) ──
+  // ── 4-octave fBm ──
   const fbmCloud = Fn(([p]) => {
     const n1 = mx_noise_float(vec3(p, float(0.00)));
     const n2 = mx_noise_float(vec3(p.mul(2.07), float(1.30))).mul(0.500);
     const n3 = mx_noise_float(vec3(p.mul(4.31), float(2.70))).mul(0.250);
     const n4 = mx_noise_float(vec3(p.mul(8.73), float(4.10))).mul(0.125);
-    // sum range ≈ [-1.875, 1.875]; mul(0.533)+0.5 → [-0.5, 1.5] → clamp [0,1]
     return clamp(n1.add(n2).add(n3).add(n4).mul(0.533).add(0.5), 0, 1);
   });
 
   // ── Cloud layer: returns vec4(rgb, alpha) ──
   const cloudLayer = Fn(([uvBase, coverage, softness, sunHoriz, litColor, horizMask]) => {
-    const threshold  = float(1.0).sub(coverage);
-    const noise      = fbmCloud(uvBase);
-    // Directional shadow: sample shifted toward sun on the cloud plane
-    const shadowUV   = uvBase.add(sunHoriz.mul(0.2));
+    const threshold   = float(1.0).sub(coverage);
+    const noise       = fbmCloud(uvBase);
+    const shadowUV    = uvBase.add(sunHoriz.mul(0.2));
     const shadowNoise = fbmCloud(shadowUV);
-    const density    = smoothstep(threshold, threshold.add(softness), noise).mul(horizMask);
-    const inShadow   = smoothstep(threshold.sub(0.05), threshold.add(softness), shadowNoise);
-    const cloudCol   = mix(vec3(litColor), vec3(uCloudShadow), inShadow.mul(uCloudShadowStr));
+    const density     = smoothstep(threshold, threshold.add(softness), noise).mul(horizMask);
+    const inShadow    = smoothstep(threshold.sub(0.05), threshold.add(softness), shadowNoise);
+    const cloudCol    = mix(vec3(litColor), vec3(uCloudShadow), inShadow.mul(uCloudShadowStr));
     return vec4(cloudCol, density);
   });
 
   // ── Main sky color node ──
   const skyColorNode = Fn(() => {
 
-    const dir    = normalize(positionLocal);
-    const upDot  = dir.y; // -1 = nadir, 0 = horizon, +1 = zenith
+    const dir   = normalize(positionLocal);
+    const upDot = dir.y;
 
-    // Sun elevation drives all day/night transitions
     const sunEl       = uSunDir.y;
-    const sunsetBlend = smoothstep(float(0.28), float(-0.05), sunEl);  // 0=day 1=sunset
-    const nightBlend  = smoothstep(float(0.05), float(-0.08), sunEl);  // 0=day 1=night
+    const sunsetBlend = smoothstep(float(0.28), float(-0.05), sunEl);
+    const nightBlend  = smoothstep(float(0.05), float(-0.08), sunEl);
 
     // ── Sky gradient ──
-    const horizCol = mix(uHorizonColor, uSunsetColor, sunsetBlend.mul(0.85));
-    const midCol   = mix(uSkyColor, mix(uSkyColor, uSunsetColor, float(0.5)), sunsetBlend.mul(0.4));
+    const horizCol  = mix(uHorizonColor, uSunsetColor, sunsetBlend.mul(0.85));
+    const midCol    = mix(uSkyColor, mix(uSkyColor, uSunsetColor, float(0.5)), sunsetBlend.mul(0.4));
     const aboveHoriz = smoothstep(float(-0.02), float(0.20), upDot);
     const toZenith   = smoothstep(float(0.15), float(0.90), upDot);
     let col = mix(horizCol, mix(midCol, uZenithColor, toZenith), aboveHoriz);
-    // Below horizon → ground color
     col = mix(col, uGroundColor, smoothstep(float(0.0), float(-0.14), upDot));
 
-    // ── Atmospheric horizon scatter (orange ring around sun at low angles) ──
-    const dirH    = normalize(vec3(dir.x, float(0.0), dir.z));
-    const sunH    = normalize(vec3(uSunDir.x, float(0.0), uSunDir.z));
-    const hGlow   = pow(clamp(dot(dirH, sunH), 0, 1), float(6.0))
-                      .mul(smoothstep(float(0.10), float(-0.06), upDot))
-                      .mul(sunsetBlend)
-                      .mul(0.75);
+    // ── Atmospheric horizon scatter (orange ring around sun) ──
+    const dirH  = normalize(vec3(dir.x, float(0.0), dir.z));
+    const sunH  = normalize(vec3(uSunDir.x, float(0.0), uSunDir.z));
+    const hGlow = pow(clamp(dot(dirH, sunH), 0, 1), float(6.0))
+                    .mul(smoothstep(float(0.10), float(-0.06), upDot))
+                    .mul(sunsetBlend)
+                    .mul(0.75);
     col = col.add(vec3(uSunsetColor).mul(hGlow));
 
-    // ── Sun disc + glow ──
-    const sunDot  = clamp(dot(dir, uSunDir), 0, 1);
-    const sunDisc = smoothstep(float(1.0).sub(uSunSize), float(1.0).sub(uSunSize.mul(0.08)), sunDot);
-    const sunGlow = pow(sunDot, uSunGlowPower).mul(uSunGlowStrength);
-    col = col.add(vec3(uSunColor).mul(sunDisc.add(sunGlow)).mul(nightBlend.oneMinus()));
+    // ── Full 360° horizon luminosity ring ──
+    // Peaks at upDot = 0, only above horizon, with slight sun-side warmth
+    const horizBand = smoothstep(uHorizonRingWidth, float(0.0), abs(upDot))
+                        .mul(smoothstep(float(0.0), float(0.015), upDot));
+    const sunSideBoost = dot(dirH, sunH).mul(0.25).add(0.75); // 0.75..1.0
+    const horizDayCol  = mix(uHorizonRingColor, uSunsetColor, sunsetBlend.mul(0.6));
+    const horizNightCol = vec3(float(0.08), float(0.12), float(0.22));
+    const horizFinalCol = mix(horizDayCol, horizNightCol, nightBlend);
+    col = col.add(vec3(horizFinalCol).mul(horizBand).mul(uHorizonRingStr).mul(sunSideBoost));
 
-    // ── Moon (opposite sun) ──
+    // ── Sun: core + disc + wide corona + halo ring + radial rays ──
+    const sunDot = clamp(dot(dir, uSunDir), 0, 1);
+
+    // Wide soft corona glow
+    const sunGlow = pow(sunDot, uSunGlowPower).mul(uSunGlowStrength);
+
+    // Main disc
+    const sunDisc = smoothstep(
+      float(1.0).sub(uSunSize),
+      float(1.0).sub(uSunSize.mul(0.15)),
+      sunDot,
+    );
+
+    // Overexposed bright core (smaller, pure white)
+    const sunCore = smoothstep(
+      float(1.0).sub(uSunSize.mul(0.35)),
+      float(1.0).sub(uSunSize.mul(0.04)),
+      sunDot,
+    );
+
+    // Halo ring just outside the disc
+    const haloCenter = float(1.0).sub(uSunSize.mul(uSunHaloRadius));
+    const haloDist   = abs(sunDot.sub(haloCenter));
+    const sunHalo    = smoothstep(uSunSize.mul(0.7), float(0.0), haloDist).mul(uSunHaloStr);
+
+    // Radial rays — project dir onto the plane perpendicular to sunDir
+    const dx        = dot(dir, uSunRight);
+    const dy        = dot(dir, uSunUp);
+    const rayAngle  = atan(dy, dx);
+    const rayPat    = pow(abs(cos(rayAngle.mul(uSunRayCount))), uSunRaySharp);
+    const radDist   = length(vec2(dx, dy));
+    const rayFalloff = smoothstep(uSunRayLen, uSunSize.mul(2.0), radDist)
+                         .mul(smoothstep(uSunSize.mul(0.9), uSunSize.mul(1.4), radDist));
+    const sunRays   = rayPat.mul(rayFalloff).mul(uSunRayStr);
+
+    // Combine — core is slightly brighter/whiter than disc color
+    const sunBaseCol = vec3(uSunColor);
+    const sunCoreCol = sunBaseCol.add(float(0.4)); // slightly overexposed white
+    const sunFinal   = sunBaseCol.mul(sunGlow.add(sunDisc).add(sunHalo).add(sunRays))
+                         .add(sunCoreCol.mul(sunCore));
+    col = col.add(sunFinal.mul(nightBlend.oneMinus()));
+
+    // ── Moon ──
     const moonDir  = uSunDir.negate();
     const moonDot  = clamp(dot(dir, moonDir), 0, 1);
     const moonDisc = smoothstep(float(0.9975), float(0.9992), moonDot);
@@ -136,24 +186,24 @@ export function createStylizedSky() {
     const sunHoriz = normalize(vec2(uSunDir.x, uSunDir.z));
 
     // ── Cloud layer 1 ──
-    const hMask1    = smoothstep(float(0.0), float(0.13), upDot);
-    const cloudUV1  = dir.xz
-                        .div(upDot.max(float(0.05)).mul(uC1Height))
-                        .mul(uC1Scale)
-                        .add(time.mul(uC1Speed));
-    const litCol1   = mix(vec3(uCloudLit), vec3(uCloudSunset), sunsetBlend.mul(0.55));
-    const c1        = cloudLayer(cloudUV1, uC1Coverage, uC1Softness, sunHoriz, litCol1, hMask1);
+    const hMask1   = smoothstep(float(0.0), float(0.13), upDot);
+    const cloudUV1 = dir.xz
+                       .div(upDot.max(float(0.05)).mul(uC1Height))
+                       .mul(uC1Scale)
+                       .add(time.mul(uC1Speed));
+    const litCol1  = mix(vec3(uCloudLit), vec3(uCloudSunset), sunsetBlend.mul(0.55));
+    const c1       = cloudLayer(cloudUV1, uC1Coverage, uC1Softness, sunHoriz, litCol1, hMask1);
     col = mix(col, c1.xyz, c1.w.mul(nightBlend.oneMinus()));
 
     // ── Cloud layer 2 ──
-    const hMask2    = smoothstep(float(0.04), float(0.22), upDot);
-    const cloudUV2  = dir.xz
-                        .div(upDot.max(float(0.08)).mul(uC2Height))
-                        .mul(uC2Scale)
-                        .add(time.mul(uC2Speed))
-                        .add(vec2(float(17.3), float(31.7)));
-    const litCol2   = mix(vec3(uCloudLit), vec3(uCloudSunset), sunsetBlend.mul(0.35));
-    const c2        = cloudLayer(cloudUV2, uC2Coverage, uC2Softness, sunHoriz, litCol2, hMask2);
+    const hMask2   = smoothstep(float(0.04), float(0.22), upDot);
+    const cloudUV2 = dir.xz
+                       .div(upDot.max(float(0.08)).mul(uC2Height))
+                       .mul(uC2Scale)
+                       .add(time.mul(uC2Speed))
+                       .add(vec2(float(17.3), float(31.7)));
+    const litCol2  = mix(vec3(uCloudLit), vec3(uCloudSunset), sunsetBlend.mul(0.35));
+    const c2       = cloudLayer(cloudUV2, uC2Coverage, uC2Softness, sunHoriz, litCol2, hMask2);
     col = mix(col, c2.xyz, c2.w.mul(0.7).mul(nightBlend.oneMinus()));
 
     // ── Stars ──
@@ -182,10 +232,23 @@ export function createStylizedSky() {
   mesh.frustumCulled = false;
   mesh.visible = false;
 
-  // Call each frame — syncs sun direction and keeps sphere centered on camera
+  // Compute perpendicular axes for sun ray calculation — updated each frame
+  const _worldUp  = new THREE.Vector3(0, 1, 0);
+  const _sunRight = new THREE.Vector3();
+  const _sunUp    = new THREE.Vector3();
+
   const update = (sunDir, cameraPos) => {
     uSunDir.value.copy(sunDir);
     if (cameraPos) mesh.position.copy(cameraPos);
+    // Build two axes perpendicular to sunDir for the ray angle calculation
+    if (Math.abs(sunDir.y) > 0.95) {
+      _sunRight.set(1, 0, 0);
+    } else {
+      _sunRight.crossVectors(_worldUp, sunDir).normalize();
+    }
+    _sunUp.crossVectors(sunDir, _sunRight).normalize();
+    uSunRight.value.copy(_sunRight);
+    uSunUp.value.copy(_sunUp);
   };
 
   return {
@@ -203,6 +266,16 @@ export function createStylizedSky() {
       sunSize:           uSunSize,
       sunGlowPower:      uSunGlowPower,
       sunGlowStrength:   uSunGlowStrength,
+      sunHaloStr:        uSunHaloStr,
+      sunHaloRadius:     uSunHaloRadius,
+      sunRayCount:       uSunRayCount,
+      sunRayStr:         uSunRayStr,
+      sunRaySharp:       uSunRaySharp,
+      sunRayLen:         uSunRayLen,
+      // Horizon ring
+      horizonRingStr:    uHorizonRingStr,
+      horizonRingWidth:  uHorizonRingWidth,
+      horizonRingColor:  uHorizonRingColor,
       // Cloud layer 1
       c1Coverage:        uC1Coverage,
       c1Softness:        uC1Softness,
