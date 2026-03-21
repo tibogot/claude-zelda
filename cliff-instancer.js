@@ -6,12 +6,17 @@
  * matrix (relative to the GLB root), and instance matrices are composed as
  *   finalMatrix = instanceTransform * submeshLocalMatrix
  * This matches exactly what Place mode does when it adds gltf.scene to the scene.
+ *
+ * Selection raycasting uses an invisible BoxGeometry hitbox (sized to the GLB
+ * bounding box) so any click anywhere on the object registers — not just
+ * precise triangle hits on the real geometry.
  */
 
 import * as THREE from "three";
 
 const DEG = Math.PI / 180;
 const _tmp = new THREE.Matrix4();
+const _hitboxMat = new THREE.MeshBasicMaterial({ visible: false });
 
 export function createCliffInstancer(scene, options = {}) {
   const MAX = options.maxInstances ?? 500;
@@ -20,7 +25,9 @@ export function createCliffInstancer(scene, options = {}) {
    * types[i] = {
    *   name: string,
    *   entries: [{ im: InstancedMesh, localMatrix: Matrix4 }],
-   *   instances: [{ px,py,pz, rx,ry,rz, sx,sy,sz }]
+   *   instances: [{ px,py,pz, rx,ry,rz, sx,sy,sz }],
+   *   hitboxIM: InstancedMesh,       // invisible box for easy raycasting
+   *   boxCenterMatrix: Matrix4,      // translation by bounding box center offset
    * }
    */
   const types = [];
@@ -31,7 +38,6 @@ export function createCliffInstancer(scene, options = {}) {
   const dummy = new THREE.Object3D();
 
   // Proxy Object3D that TransformControls can attach to for the selected instance.
-  // Position/rotation/scale always reflect the selected instance in world space.
   // Must be in the scene graph for TransformControls to work.
   const proxyObj = new THREE.Object3D();
   scene.add(proxyObj);
@@ -53,6 +59,11 @@ export function createCliffInstancer(scene, options = {}) {
       im.setMatrixAt(instIdx, _tmp);
       im.instanceMatrix.needsUpdate = true;
     }
+    if (type.hitboxIM) {
+      _tmp.multiplyMatrices(M, type.boxCenterMatrix);
+      type.hitboxIM.setMatrixAt(instIdx, _tmp);
+      type.hitboxIM.instanceMatrix.needsUpdate = true;
+    }
   }
 
   function rebuildAll(type) {
@@ -65,6 +76,15 @@ export function createCliffInstancer(scene, options = {}) {
         im.setMatrixAt(i, _tmp);
       }
       im.instanceMatrix.needsUpdate = true;
+    }
+    if (type.hitboxIM) {
+      type.hitboxIM.count = n;
+      for (let i = 0; i < n; i++) {
+        const M = computeInstanceMatrix(type.instances[i]);
+        _tmp.multiplyMatrices(M, type.boxCenterMatrix);
+        type.hitboxIM.setMatrixAt(i, _tmp);
+      }
+      type.hitboxIM.instanceMatrix.needsUpdate = true;
     }
   }
 
@@ -97,15 +117,23 @@ export function createCliffInstancer(scene, options = {}) {
         .copy(gltfData.scene.matrixWorld)
         .invert();
 
+      // Merged bounding box in GLB root space (for hitbox sizing)
+      const mergedBox = new THREE.Box3();
+
       gltfData.scene.traverse((child) => {
         if (!child.isMesh) return;
 
-        // Local matrix of this submesh relative to GLB root (preserves all
-        // parent-chain offsets, rotations, scales from the GLB hierarchy).
+        // Local matrix of this submesh relative to GLB root
         const localMatrix = new THREE.Matrix4().multiplyMatrices(
           rootInv,
           child.matrixWorld
         );
+
+        // Expand bounding box in root space
+        const geo = child.geometry;
+        if (!geo.boundingBox) geo.computeBoundingBox();
+        const localBox = geo.boundingBox.clone().applyMatrix4(localMatrix);
+        mergedBox.union(localBox);
 
         const mat = child.material; // keep original material incl. textures
 
@@ -123,7 +151,24 @@ export function createCliffInstancer(scene, options = {}) {
         return -1;
       }
 
-      const type = { name, entries, instances: [] };
+      // Build invisible hitbox InstancedMesh for easy selection raycasting
+      const boxSize = new THREE.Vector3();
+      const boxCenter = new THREE.Vector3();
+      mergedBox.getSize(boxSize);
+      mergedBox.getCenter(boxCenter);
+
+      const hitboxGeo = new THREE.BoxGeometry(boxSize.x, boxSize.y, boxSize.z);
+      const hitboxIM = new THREE.InstancedMesh(hitboxGeo, _hitboxMat, MAX);
+      hitboxIM.count = 0;
+      hitboxIM.frustumCulled = false;
+      scene.add(hitboxIM);
+
+      // Translation matrix for the box center offset (applied per instance)
+      const boxCenterMatrix = new THREE.Matrix4().makeTranslation(
+        boxCenter.x, boxCenter.y, boxCenter.z
+      );
+
+      const type = { name, entries, instances: [], hitboxIM, boxCenterMatrix };
       types.push(type);
       activeTypeIdx = types.length - 1;
       return activeTypeIdx;
@@ -156,21 +201,26 @@ export function createCliffInstancer(scene, options = {}) {
         im.setMatrixAt(idx, _tmp);
         im.instanceMatrix.needsUpdate = true;
       }
+      if (type.hitboxIM) {
+        type.hitboxIM.count = type.instances.length;
+        _tmp.multiplyMatrices(M, type.boxCenterMatrix);
+        type.hitboxIM.setMatrixAt(idx, _tmp);
+        type.hitboxIM.instanceMatrix.needsUpdate = true;
+      }
       return true;
     },
 
-    // ── Raycast all types, return closest hit ──
+    // ── Raycast all types using invisible hitboxes — returns closest hit ──
     raycastInstances(raycaster) {
       let best = null;
       let bestDist = Infinity;
       for (let ti = 0; ti < types.length; ti++) {
-        for (const { im } of types[ti].entries) {
-          if (im.count === 0) continue;
-          const hits = raycaster.intersectObject(im, false);
-          if (hits.length > 0 && hits[0].distance < bestDist) {
-            bestDist = hits[0].distance;
-            best = { typeIdx: ti, instIdx: hits[0].instanceId };
-          }
+        const { hitboxIM } = types[ti];
+        if (!hitboxIM || hitboxIM.count === 0) continue;
+        const hits = raycaster.intersectObject(hitboxIM, false);
+        if (hits.length > 0 && hits[0].distance < bestDist) {
+          bestDist = hits[0].distance;
+          best = { typeIdx: ti, instIdx: hits[0].instanceId };
         }
       }
       return best;
@@ -285,12 +335,12 @@ export function createCliffInstancer(scene, options = {}) {
 
     dispose() {
       for (const type of types) {
-        for (const { im } of type.entries) {
-          scene.remove(im);
-        }
+        for (const { im } of type.entries) scene.remove(im);
+        if (type.hitboxIM) scene.remove(type.hitboxIM);
       }
       types.length = 0;
       scene.remove(marker);
+      scene.remove(proxyObj);
     },
   };
 }
