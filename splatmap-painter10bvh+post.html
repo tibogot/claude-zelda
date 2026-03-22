@@ -672,6 +672,13 @@
         path: {
           flattenStrength: 0.5,
         },
+        spline: {
+          objectType: "trees",
+          spacing: 4,
+          scaleMin: 1.0,
+          scaleMax: 1.0,
+          alignToPath: true,
+        },
         ao: { intensity: 0.85, reach: 24, bias: 0.05, contrast: 1.4 },
         normalMap: { scale: 2.0 },
         erosion: {
@@ -4433,6 +4440,8 @@
         // ── SPLINE VISUALIZATION ──
         splineGroup = new THREE.Group();
         scene.add(splineGroup);
+        const splinePreviewGroup = new THREE.Group();
+        scene.add(splinePreviewGroup);
 
         // ── PLAY MODE CAPSULE ──
         const capsuleGeo = new THREE.CapsuleGeometry(
@@ -6415,12 +6424,52 @@
         // ── SPLINE FOLDER ──
         const splineFolder = pane.addFolder({ title: "Spline  [ K ]", expanded: true });
         splineFolder.hidden = true;
+
+        // Path editing controls
         splineFolder.addButton({ title: "Delete selected point  [ Del ]" }).on("click", () => {
           splineDeleteSelected();
         });
-        splineFolder.addBlade({ view: "separator" });
         splineFolder.addButton({ title: "Clear all points" }).on("click", () => {
           splineClearAll();
+        });
+
+        splineFolder.addBlade({ view: "separator" });
+
+        // Object picker — built from treeSystem + FOLIAGE_SLOTS
+        const splineObjOptions = { "Trees": "trees" };
+        FOLIAGE_SLOTS.forEach((slot, i) => {
+          splineObjOptions[`Foliage: ${slot.name}`] = `foliage${i}`;
+        });
+        splineFolder.addBinding(PARAMS.spline, "objectType", {
+          label: "Place object",
+          options: splineObjOptions,
+        });
+        splineFolder.addBinding(PARAMS.spline, "spacing", {
+          label: "Spacing (m)",
+          min: 0.5, max: 30, step: 0.5,
+        });
+        splineFolder.addBinding(PARAMS.spline, "scaleMin", {
+          label: "Scale min",
+          min: 0.05, max: 5, step: 0.05,
+        });
+        splineFolder.addBinding(PARAMS.spline, "scaleMax", {
+          label: "Scale max",
+          min: 0.05, max: 5, step: 0.05,
+        });
+        splineFolder.addBinding(PARAMS.spline, "alignToPath", {
+          label: "Align to path",
+        });
+
+        splineFolder.addBlade({ view: "separator" });
+
+        splineFolder.addButton({ title: "Preview" }).on("click", () => {
+          splinePreview();
+        });
+        splineFolder.addButton({ title: "▶ Bake to scene" }).on("click", () => {
+          splineBake();
+        });
+        splineFolder.addButton({ title: "Clear preview" }).on("click", () => {
+          splineClearPreview();
         });
 
         // ── POST-PROCESSING TWEAKPANE ──
@@ -6666,6 +6715,7 @@
           splineSelectedIdx = -1;
           splineDragging = false;
           splineRebuildVisual();
+          splineClearPreview();
         }
 
         function splinePickPoint(e) {
@@ -6676,6 +6726,80 @@
           const hits = raycaster.intersectObjects(splinePointMeshes, false);
           if (hits.length > 0) return splinePointMeshes.indexOf(hits[0].object);
           return -1;
+        }
+
+        function splineClearPreview() {
+          while (splinePreviewGroup.children.length) {
+            const child = splinePreviewGroup.children[0];
+            splinePreviewGroup.remove(child);
+            if (child.geometry) child.geometry.dispose();
+            if (child.material) child.material.dispose();
+          }
+        }
+
+        function splineGetSamples() {
+          if (splinePoints.length < 2) return [];
+          const curve = new THREE.CatmullRomCurve3(splinePoints, false, "catmullrom", 0.5);
+          const totalLength = curve.getLength();
+          const count = Math.max(1, Math.floor(totalLength / PARAMS.spline.spacing));
+          const samples = [];
+          for (let i = 0; i <= count; i++) {
+            const t = i / count;
+            const pos = curve.getPoint(t);
+            const tangent = curve.getTangent(t);
+            const angleY = Math.atan2(tangent.x, tangent.z);
+            samples.push({ pos, angleY });
+          }
+          return samples;
+        }
+
+        function splinePreview() {
+          splineClearPreview();
+          const samples = splineGetSamples();
+          if (samples.length === 0) return;
+          const geo = new THREE.SphereGeometry(0.35, 6, 4);
+          const mat = new THREE.MeshBasicMaterial({ color: 0x00ff88, depthTest: false });
+          samples.forEach(({ pos }) => {
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(pos.x, pos.y + 0.5, pos.z);
+            mesh.renderOrder = 101;
+            splinePreviewGroup.add(mesh);
+          });
+        }
+
+        function splineBake() {
+          const samples = splineGetSamples();
+          if (samples.length === 0) return;
+          const type = PARAMS.spline.objectType;
+          const scaleRange = PARAMS.spline.scaleMax - PARAMS.spline.scaleMin;
+
+          if (type === "trees" && treeSystem) {
+            const existing = treeSystem.getPositions();
+            samples.forEach(({ pos, angleY }) => {
+              const scale = PARAMS.spline.scaleMin + Math.random() * scaleRange;
+              const rot = PARAMS.spline.alignToPath ? angleY : Math.random() * Math.PI * 2;
+              existing.push({ x: pos.x, z: pos.z, rot, scale });
+            });
+            treeSystem.setPositions(existing);
+            if (treeSystem.syncHeights) treeSystem.syncHeights();
+          } else if (type.startsWith("foliage")) {
+            const slotIdx = parseInt(type.replace("foliage", ""));
+            const slot = FOLIAGE_SLOTS[slotIdx];
+            if (slot && slot.system) {
+              const existing = slot.system.getPositions();
+              samples.forEach(({ pos, angleY }) => {
+                const scale = PARAMS.spline.scaleMin + Math.random() * scaleRange;
+                const rot = PARAMS.spline.alignToPath ? angleY : Math.random() * Math.PI * 2;
+                existing.push({ x: pos.x, z: pos.z, rot, scale });
+              });
+              slot.system.setPositions(existing);
+              if (slot.system.syncHeights) slot.system.syncHeights();
+            }
+          }
+
+          splineClearPreview();
+          splineClearAll();
+          if (bakeBVH) bakeBVH();
         }
 
         function setMode(mode) {
@@ -6706,6 +6830,7 @@
           propsFolder.hidden = mode !== "props";
           pathFolder.hidden = mode !== "path";
           splineFolder.hidden = mode !== "spline";
+          if (mode !== "spline") splineClearPreview();
           waterFolder.hidden = mode !== "water";
           cliffsFolder.hidden = mode !== "cliffs";
           brushFolder.hidden =
