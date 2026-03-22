@@ -692,6 +692,12 @@
       let sculptMode = "raise"; // "raise" | "lower" | "smooth"
       let flattenTargetY = 0; // sampled on mousedown when alt+drag
       let rampPointA = null;  // first click of ramp tool { x, y, z }
+      // ── SPLINE STATE ──
+      let splinePoints = [];       // Array of THREE.Vector3
+      let splineSelectedIdx = -1;  // Index of selected control point (-1 = none)
+      let splineDragging = false;  // Currently dragging a control point
+      let splinePointMeshes = [];  // Sphere meshes for each control point
+      let splineGroup = null;      // Group containing all spline visuals
       let brushSize = 20;
       let brushStr = 60;
       let brushNoiseSeed = 0;
@@ -4424,6 +4430,10 @@
         rampMarker.renderOrder = 999;
         scene.add(rampMarker);
 
+        // ── SPLINE VISUALIZATION ──
+        splineGroup = new THREE.Group();
+        scene.add(splineGroup);
+
         // ── PLAY MODE CAPSULE ──
         const capsuleGeo = new THREE.CapsuleGeometry(
           PLAYER_CAP_R,
@@ -4592,6 +4602,7 @@
             "Foliage [N]": "foliage",
             "Props [I]": "props",
             "Path [L]": "path",
+            "Spline [K]": "spline",
             "Water [W]": "water",
             "Cliffs [C]": "cliffs",
             "Flowers [B]": "flowers",
@@ -6401,6 +6412,17 @@
             );
           });
 
+        // ── SPLINE FOLDER ──
+        const splineFolder = pane.addFolder({ title: "Spline  [ K ]", expanded: true });
+        splineFolder.hidden = true;
+        splineFolder.addButton({ title: "Delete selected point  [ Del ]" }).on("click", () => {
+          splineDeleteSelected();
+        });
+        splineFolder.addBlade({ view: "separator" });
+        splineFolder.addButton({ title: "Clear all points" }).on("click", () => {
+          splineClearAll();
+        });
+
         // ── POST-PROCESSING TWEAKPANE ──
         const postFolder = pane.addFolder({
           title: "Post-FX",
@@ -6582,6 +6604,80 @@
           });
 
         // ── MODE SYSTEM ──
+        // ── SPLINE FUNCTIONS ──────────────────────────────────────────────
+        function splineRebuildVisual() {
+          // Dispose and remove old children
+          while (splineGroup.children.length) {
+            const child = splineGroup.children[0];
+            splineGroup.remove(child);
+            if (child.geometry) child.geometry.dispose();
+            if (child.material) child.material.dispose();
+          }
+          splinePointMeshes = [];
+          if (splinePoints.length === 0) return;
+
+          // Draw curve line if 2+ points
+          if (splinePoints.length >= 2) {
+            const curve = new THREE.CatmullRomCurve3(splinePoints, false, "catmullrom", 0.5);
+            const pts = curve.getPoints(Math.max(60, splinePoints.length * 20));
+            const geo = new THREE.BufferGeometry().setFromPoints(pts);
+            const mat = new THREE.LineBasicMaterial({ color: 0x00ccff, depthTest: false });
+            const line = new THREE.Line(geo, mat);
+            line.renderOrder = 99;
+            splineGroup.add(line);
+          }
+
+          // Draw control point spheres on top of line
+          splinePoints.forEach((pt, i) => {
+            const geo = new THREE.SphereGeometry(0.45, 8, 6);
+            const mat = new THREE.MeshBasicMaterial({
+              color: i === splineSelectedIdx ? 0xffff00 : 0xff4400,
+              depthTest: false,
+            });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.copy(pt);
+            mesh.renderOrder = 100;
+            splineGroup.add(mesh);
+            splinePointMeshes.push(mesh);
+          });
+        }
+
+        function splineAddPoint(pos) {
+          splinePoints.push(pos.clone());
+          splineSelectedIdx = splinePoints.length - 1;
+          splineRebuildVisual();
+        }
+
+        function splineMoveSelected(pos) {
+          if (splineSelectedIdx < 0) return;
+          splinePoints[splineSelectedIdx].copy(pos);
+          splineRebuildVisual();
+        }
+
+        function splineDeleteSelected() {
+          if (splineSelectedIdx < 0 || splinePoints.length === 0) return;
+          splinePoints.splice(splineSelectedIdx, 1);
+          splineSelectedIdx = Math.min(splineSelectedIdx, splinePoints.length - 1);
+          splineRebuildVisual();
+        }
+
+        function splineClearAll() {
+          splinePoints = [];
+          splineSelectedIdx = -1;
+          splineDragging = false;
+          splineRebuildVisual();
+        }
+
+        function splinePickPoint(e) {
+          const rect = renderer.domElement.getBoundingClientRect();
+          const mx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+          const my = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+          raycaster.setFromCamera(new THREE.Vector2(mx, my), camera);
+          const hits = raycaster.intersectObjects(splinePointMeshes, false);
+          if (hits.length > 0) return splinePointMeshes.indexOf(hits[0].object);
+          return -1;
+        }
+
         function setMode(mode) {
           const leavingPlay = currentMode === "play" && mode !== "play";
           currentMode = mode;
@@ -6609,6 +6705,7 @@
           foliageFolder.hidden = mode !== "foliage";
           propsFolder.hidden = mode !== "props";
           pathFolder.hidden = mode !== "path";
+          splineFolder.hidden = mode !== "spline";
           waterFolder.hidden = mode !== "water";
           cliffsFolder.hidden = mode !== "cliffs";
           brushFolder.hidden =
@@ -6616,7 +6713,8 @@
             mode === "place" ||
             mode === "props" ||
             mode === "water" ||
-            mode === "cliffs";
+            mode === "cliffs" ||
+            mode === "spline";
 
           const usingTC =
             mode === "place" || mode === "props" || mode === "water" || mode === "cliffs";
@@ -6680,7 +6778,9 @@
                                 ? "CLIFFS MODE  [ C ]"
                                 : mode === "cliffgrass"
                                   ? "CLIFF GRASS MODE"
-                                  : "PLACE MODE"; // play handled above
+                                  : mode === "spline"
+                                    ? "SPLINE MODE  [ K ]"
+                                    : "PLACE MODE"; // play handled above
           badge.className = mode;
           renderer.domElement.style.cursor =
             mode === "view" ? "default" : "crosshair";
@@ -6689,7 +6789,8 @@
             mode === "place" ||
             mode === "props" ||
             mode === "water" ||
-            mode === "cliffs"
+            mode === "cliffs" ||
+            mode === "spline"
           )
             brushRing.visible = false;
           else if (mode === "cliffgrass")
@@ -6732,6 +6833,8 @@
             setMode(currentMode === "props" ? "view" : "props");
           if (e.code === "KeyL")
             setMode(currentMode === "path" ? "view" : "path");
+          if (e.code === "KeyK")
+            setMode(currentMode === "spline" ? "view" : "spline");
           if (
             e.code === "KeyW" &&
             currentMode !== "place" &&
@@ -6744,11 +6847,13 @@
             setMode("view");
           if (e.code === "Escape") {
             if (rampPointA) { rampPointA = null; rampMarker.visible = false; }
+            else if (currentMode === "spline" && splineSelectedIdx >= 0) { splineSelectedIdx = -1; splineRebuildVisual(); }
             else setMode("view");
           }
           if (e.code === "Backquote") toggleTerrainMat();
           if (e.code === "KeyC")
             setMode(currentMode === "cliffs" ? "view" : "cliffs");
+          if (currentMode === "spline" && e.code === "Delete") splineDeleteSelected();
           if (currentMode === "cliffs") {
             if (e.code === "KeyW") { e.preventDefault(); transformControls.setMode("translate"); }
             if (e.code === "KeyE") { e.preventDefault(); transformControls.setMode("rotate"); }
@@ -6847,12 +6952,19 @@
         });
 
         renderer.domElement.addEventListener("mousemove", (e) => {
+          // Spline: drag selected point along terrain
+          if (currentMode === "spline" && splineDragging && splineSelectedIdx >= 0) {
+            const p = getTerrainHit(e);
+            if (p) splineMoveSelected(p);
+            return;
+          }
           if (
             currentMode === "view" ||
             currentMode === "place" ||
             currentMode === "props" ||
             currentMode === "water" ||
-            currentMode === "cliffs"
+            currentMode === "cliffs" ||
+            currentMode === "spline"
           )
             return;
           const p = getTerrainHit(e);
@@ -6985,6 +7097,22 @@
             return;
           }
 
+          if (currentMode === "spline") {
+            const picked = splinePickPoint(e);
+            if (picked >= 0) {
+              // Select and start dragging existing point
+              splineSelectedIdx = picked;
+              splineDragging = true;
+              orbit.enabled = false;
+              splineRebuildVisual();
+            } else {
+              // Add new point at terrain hit
+              const p = getTerrainHit(e);
+              if (p) splineAddPoint(p);
+            }
+            return;
+          }
+
           isMouseDown = true;
           brushNoiseSeed = Math.random() * 1000;
           if (
@@ -7019,6 +7147,11 @@
         });
 
         renderer.domElement.addEventListener("mouseup", () => {
+          if (splineDragging) {
+            splineDragging = false;
+            orbit.enabled = true;
+            return;
+          }
           if (!isMouseDown) return;
           isMouseDown = false;
           if (
@@ -7043,6 +7176,7 @@
         renderer.domElement.addEventListener("mouseleave", () => {
           isMouseDown = false;
           brushRing.visible = false;
+          if (splineDragging) { splineDragging = false; orbit.enabled = true; }
         });
 
         // ── RESIZE ──
