@@ -791,10 +791,10 @@
       // Use THREE.Texture(canvas) — NOT DataTexture — so image reassignment works in WebGPU
       const _makeSlotTex = (r, g, b) => {
         const canvas = document.createElement("canvas");
-        canvas.width = canvas.height = 4;
+        canvas.width = canvas.height = 256; // fixed size — avoids GPU texture recreation on load
         const ctx2d = canvas.getContext("2d");
         ctx2d.fillStyle = `rgb(${r},${g},${b})`;
-        ctx2d.fillRect(0, 0, 4, 4);
+        ctx2d.fillRect(0, 0, 256, 256);
         const t = new THREE.Texture(canvas);
         t.wrapS = t.wrapT = THREE.RepeatWrapping;
         t.needsUpdate = true;
@@ -828,16 +828,14 @@
           uHasORM: uniform(0),
         },
         {
-          name: "Concrete 030",
-          uvScale: 3.0,
-          initAlbedo:
-            "textures/Concrete030_1K-JPG/Concrete030_1K-JPG_Color.jpg",
-          initNormal:
-            "textures/Concrete030_1K-JPG/Concrete030_1K-JPG_NormalGL.jpg",
-          albedoTex: _makeSlotTex(160, 160, 160),
+          name: "Rock",
+          uvScale: 20.0,
+          initAlbedo: "textures/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_basecolor.png",
+          initNormal: "textures/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_normal.png",
+          albedoTex: _makeSlotTex(120, 100, 80),
           normalTex: _makeSlotTex(128, 128, 255),
           ormTex: _makeSlotTex(255, 128, 0),
-          uUVScale: uniform(3.0),
+          uUVScale: uniform(20.0),
           uHasAlbedo: uniform(1),
           uHasNormal: uniform(0),
           uHasORM: uniform(0),
@@ -1097,6 +1095,12 @@
           return;
         }
 
+        // Rock biome — paints into image slot 2 (blue channel of imgSplatTex)
+        if (currentBiome === "rock") {
+          paintImgAt(wx, wz, 2, imgEraseMode);
+          return;
+        }
+
         // Image texture slots — write to imgSplatCanvas specific channel
         if (currentBiome.startsWith("img")) {
           const slotIdx = parseInt(currentBiome[3]);
@@ -1249,7 +1253,9 @@
       function paintImgAt(wx, wz, slotIdx, erase) {
         const { u, v } = worldToUV(wx, wz);
         const cx = Math.floor(u * SPLAT_RES);
-        const cy = Math.floor(v * SPLAT_RES);
+        // DataTexture has flipY=false unlike CanvasTexture (flipY=true),
+        // so invert cy to cancel the double-flip mismatch
+        const cy = SPLAT_RES - 1 - Math.floor(v * SPLAT_RES);
         const rad = Math.ceil(brushSize);
         const alpha = brushStr / 100;
         for (let py = cy - rad; py <= cy + rad; py++) {
@@ -2247,28 +2253,31 @@
           THREE.RGBAFormat,
         );
         imgSplatTex.wrapS = imgSplatTex.wrapT = THREE.ClampToEdgeWrapping;
+        imgSplatTex.minFilter = imgSplatTex.magFilter = THREE.LinearFilter;
         imgSplatTex.needsUpdate = true;
 
         // ── Auto-load project textures into image slots ───────────────────
         const _slotLoader = new THREE.TextureLoader();
+        // Draw loaded image onto the existing canvas — keeps same source type
+        // so WebGPU re-uploads correctly (replacing .image breaks WebGPU upload)
+        const _drawOntoTex = (slotTex, imgEl, colorSpace) => {
+          const canvas = slotTex.image;
+          // Draw scaled into existing fixed-size canvas — no resize = no GPU texture recreation
+          canvas.getContext("2d").drawImage(imgEl, 0, 0, canvas.width, canvas.height);
+          slotTex.colorSpace = colorSpace;
+          slotTex.wrapS = slotTex.wrapT = THREE.RepeatWrapping;
+          slotTex.needsUpdate = true;
+        };
         IMG_TEX_SLOTS.forEach((slot) => {
           if (slot.initAlbedo) {
             _slotLoader.load(slot.initAlbedo, (tex) => {
-              slot.albedoTex.image = tex.image;
-              slot.albedoTex.colorSpace = THREE.SRGBColorSpace;
-              slot.albedoTex.wrapS = slot.albedoTex.wrapT =
-                THREE.RepeatWrapping;
-              slot.albedoTex.needsUpdate = true;
+              _drawOntoTex(slot.albedoTex, tex.image, THREE.SRGBColorSpace);
               slot.uHasAlbedo.value = 1;
             });
           }
           if (slot.initNormal) {
             _slotLoader.load(slot.initNormal, (tex) => {
-              slot.normalTex.image = tex.image;
-              slot.normalTex.colorSpace = THREE.LinearSRGBColorSpace;
-              slot.normalTex.wrapS = slot.normalTex.wrapT =
-                THREE.RepeatWrapping;
-              slot.normalTex.needsUpdate = true;
+              _drawOntoTex(slot.normalTex, tex.image, THREE.LinearSRGBColorSpace);
               slot.uHasNormal.value = 1;
             });
           }
@@ -3103,10 +3112,12 @@
             s1 = IMG_TEX_SLOTS[1],
             s2 = IMG_TEX_SLOTS[2],
             s3 = IMG_TEX_SLOTS[3];
-          const iuv0 = positionWorld.xz.mul(s0.uUVScale);
-          const iuv1 = positionWorld.xz.mul(s1.uUVScale);
-          const iuv2 = positionWorld.xz.mul(s2.uUVScale);
-          const iuv3 = positionWorld.xz.mul(s3.uUVScale);
+          // Divide by TERRAIN_SIZE so uUVScale = tiles across terrain (e.g. 10 = 10 tiles)
+          const _terrainScale = float(1.0 / TERRAIN_SIZE);
+          const iuv0 = positionWorld.xz.mul(_terrainScale).mul(s0.uUVScale);
+          const iuv1 = positionWorld.xz.mul(_terrainScale).mul(s1.uUVScale);
+          const iuv2 = positionWorld.xz.mul(_terrainScale).mul(s2.uUVScale);
+          const iuv3 = positionWorld.xz.mul(_terrainScale).mul(s3.uUVScale);
           col = mix(
             col,
             texture(s0.albedoTex, iuv0).rgb,
@@ -3130,11 +3141,17 @@
           return col;
         })();
 
-        // ── Normal node — terrain baked normal only (image normal blending disabled: saves 5 GPU sampler slots) ──
-        splatMat.normalNode = normalMap(
-          texture(normalMapTex, getSplatUV()),
-          vec2(uNormalScale, uNormalScale),
-        );
+        // ── Normal node — terrain baked normal blended with Rock image normal ──
+        splatMat.normalNode = (() => {
+          const _s2 = IMG_TEX_SLOTS[2];
+          const _terrainScaleN = float(1.0 / TERRAIN_SIZE);
+          const iuv2n = positionWorld.xz.mul(_terrainScaleN).mul(_s2.uUVScale);
+          const imgSplatN = texture(imgSplatTex, getSplatUV());
+          const terrainNm = texture(normalMapTex, getSplatUV());
+          const rockNm = texture(_s2.normalTex, iuv2n);
+          const rockWeight = imgSplatN.b.mul(_s2.uHasNormal);
+          return normalMap(mix(terrainNm, rockNm, rockWeight), vec2(uNormalScale, uNormalScale));
+        })();
 
         // roughnessNode omitted for now (saves 4 GPU sampler slots — ORM.g blending can be added later)
 
@@ -5116,12 +5133,58 @@
               Grass: "grass",
               Village: "village",
               Meadow: "meadow",
+              Rock: "rock",
               Erase: "erase",
             },
           })
           .on("change", (ev) => {
             currentBiome = ev.value;
+            if (ev.value === "rock") imgEraseMode = false;
           });
+        // ── Rock texture controls ──────────────────────────────────────────
+        const rockFolder = paintFolder.addFolder({ title: "Rock Texture", expanded: true });
+        const _rockSlot = IMG_TEX_SLOTS[2];
+        rockFolder.addButton({ title: "Load Albedo (color)" }).on("click", () => {
+          const inp = document.createElement("input");
+          inp.type = "file"; inp.accept = "image/*";
+          inp.onchange = (e) => {
+            const file = e.target.files[0]; if (!file) return;
+            const url = URL.createObjectURL(file);
+            new THREE.TextureLoader().load(url, (loaded) => {
+              _drawOntoTex(_rockSlot.albedoTex, loaded.image, THREE.SRGBColorSpace);
+              _rockSlot.uHasAlbedo.value = 1;
+              URL.revokeObjectURL(url);
+            });
+          };
+          inp.click();
+        });
+        rockFolder.addButton({ title: "Load Normal map" }).on("click", () => {
+          const inp = document.createElement("input");
+          inp.type = "file"; inp.accept = "image/*";
+          inp.onchange = (e) => {
+            const file = e.target.files[0]; if (!file) return;
+            const url = URL.createObjectURL(file);
+            new THREE.TextureLoader().load(url, (loaded) => {
+              _drawOntoTex(_rockSlot.normalTex, loaded.image, THREE.LinearSRGBColorSpace);
+              _rockSlot.uHasNormal.value = 1;
+              URL.revokeObjectURL(url);
+            });
+          };
+          inp.click();
+        });
+        rockFolder.addBinding(_rockSlot, "uvScale", {
+          label: "UV Scale", min: 0.1, max: 30, step: 0.1,
+        }).on("change", (ev) => { _rockSlot.uUVScale.value = ev.value; });
+        rockFolder.addButton({ title: "Erase Rock" }).on("click", () => {
+          currentBiome = "rock";
+          imgEraseMode = true;
+          setMode("paint");
+        });
+        rockFolder.addButton({ title: "Clear Rock paint" }).on("click", () => {
+          for (let p = 2; p < imgSplatData.length; p += 4) imgSplatData[p] = 0;
+          if (imgSplatTex) imgSplatTex.needsUpdate = true;
+        });
+
         paintFolder.addButton({ title: "Clear Map" }).on("click", () => {
           splatCtx.fillStyle = "#000";
           splatCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
