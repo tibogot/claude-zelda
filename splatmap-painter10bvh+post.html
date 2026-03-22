@@ -678,6 +678,7 @@
           scaleMin: 1.0,
           scaleMax: 1.0,
           alignToPath: true,
+          selectedPointY: 0,
         },
         ao: { intensity: 0.85, reach: 24, bias: 0.05, contrast: 1.4 },
         normalMap: { scale: 2.0 },
@@ -6433,6 +6434,18 @@
           splineClearAll();
         });
 
+        // Selected point Y — click a point (yellow) then drag this to lift it
+        splineFolder.addBlade({ view: "separator" });
+        splineFolder.addBinding(PARAMS.spline, "selectedPointY", {
+          label: "Selected Y height",
+          min: -20, max: 300, step: 0.5,
+        }).on("change", (ev) => {
+          if (splineSelectedIdx >= 0 && splineSelectedIdx < splinePoints.length) {
+            splinePoints[splineSelectedIdx].y = ev.value;
+            splineRebuildVisual();
+          }
+        });
+
         splineFolder.addBlade({ view: "separator" });
 
         // Object picker — built from treeSystem + FOLIAGE_SLOTS
@@ -6695,12 +6708,22 @@
           splinePoints.push(pos.clone());
           splineSelectedIdx = splinePoints.length - 1;
           splineRebuildVisual();
+          splineUpdateSelectedYParam();
         }
 
         function splineMoveSelected(pos) {
           if (splineSelectedIdx < 0) return;
+          const currentY = splinePoints[splineSelectedIdx].y;
           splinePoints[splineSelectedIdx].copy(pos);
+          splinePoints[splineSelectedIdx].y = currentY; // preserve custom height
           splineRebuildVisual();
+        }
+
+        function splineUpdateSelectedYParam() {
+          if (splineSelectedIdx >= 0 && splineSelectedIdx < splinePoints.length) {
+            PARAMS.spline.selectedPointY = splinePoints[splineSelectedIdx].y;
+          }
+          pane.refresh();
         }
 
         function splineDeleteSelected() {
@@ -6708,6 +6731,7 @@
           splinePoints.splice(splineSelectedIdx, 1);
           splineSelectedIdx = Math.min(splineSelectedIdx, splinePoints.length - 1);
           splineRebuildVisual();
+          splineUpdateSelectedYParam();
         }
 
         function splineClearAll() {
@@ -7230,6 +7254,7 @@
               splineDragging = true;
               orbit.enabled = false;
               splineRebuildVisual();
+              splineUpdateSelectedYParam();
             } else {
               // Add new point at terrain hit
               const p = getTerrainHit(e);
