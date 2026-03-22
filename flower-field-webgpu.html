@@ -43,8 +43,10 @@ import {
   attribute, varying, uniform,
   texture, normalMap,
   mix, max, clamp, sin, cos, fract, pow,
-  dot,
-  positionLocal, normalWorld,
+  dot, length, normalize, smoothstep,
+  positionLocal, positionWorld, normalWorld,
+  modelWorldMatrix,
+  cameraPosition,
   time, uv,
 } from "three/tsl";
 
@@ -89,6 +91,11 @@ const PARAMS = {
   groundColorBleed: 0.15,
   petalGradientBlend: 1.0,
   petalNoiseStr: 0.08,
+  petalColorAlt: "#ff8800",
+  colorVariation: 0.5,
+  interactionRange: 2.5,
+  interactionStrength: 0.6,
+  lodDistance: 10,
   showGrid: false,
 };
 
@@ -110,12 +117,19 @@ const uCenterColor      = uniform(new THREE.Color(PARAMS.centerColor));
 const uStemColorBase    = uniform(new THREE.Color(PARAMS.stemColor));
 const uStemColorTop     = uniform(new THREE.Color(PARAMS.stemColorTop));
 const uStemBaseBend     = uniform(PARAMS.stemBaseBend);
+const uPetalColorAlt    = uniform(new THREE.Color(PARAMS.petalColorAlt));
+const uColorVarStr      = uniform(PARAMS.colorVariation);
+const uPlayerPos        = uniform(new THREE.Vector3(0, 100, 0)); // y=100 = no interaction until set
+const uInteractionRange = uniform(PARAMS.interactionRange);
+const uInteractionStr   = uniform(PARAMS.interactionStrength);
+const uLodDist          = uniform(PARAMS.lodDistance);
 
 // ─── Module-level varyings (declared once, shared across material rebuilds) ───
 // These pass per-instance / per-vertex data from vertex stage to fragment stage.
 const vPetalHeightNorm = varying(float(0), "v_phn");
 const vPetalRadialNorm = varying(float(0), "v_prn");
 const vStemHeightNorm  = varying(float(0), "v_shn");
+const vColorVar        = varying(float(0), "v_cv");
 
 // ─── Procedural dome normal map ───────────────────────────────────────────────
 function createPetalNormalMap(size = 64, domeStrength = 0.2) {
@@ -210,6 +224,7 @@ function getInstancedPositions(numFlowers, patchSize) {
   const flowerHeight  = new Float32Array(numFlowers);
   const petalCounts   = new Float32Array(numFlowers);
   const flowerRotation = new Float32Array(numFlowers);
+  const colorVar      = new Float32Array(numFlowers);
   const pcMin = Math.floor(PARAMS.petalCountMin);
   const pcMax = Math.floor(PARAMS.petalCountMax);
   for (let i = 0; i < numFlowers; i++) {
@@ -221,8 +236,9 @@ function getInstancedPositions(numFlowers, patchSize) {
     flowerHeight[i]   = PARAMS.flowerHeight * (0.85 + hash(i*17) * 0.3);
     petalCounts[i]    = pcMin + Math.floor(hash(i*19) * (pcMax - pcMin + 1));
     flowerRotation[i] = hash(i*23) * Math.PI * 2;
+    colorVar[i]       = hash(i*61); // 0-1, per-flower color variety
   }
-  return { off, flowerIndex, flowerHeight, petalCounts, flowerRotation, count: numFlowers };
+  return { off, flowerIndex, flowerHeight, petalCounts, flowerRotation, colorVar, count: numFlowers };
 }
 
 // ─── TSL Material: Petals ─────────────────────────────────────────────────────
@@ -233,33 +249,51 @@ function getInstancedPositions(numFlowers, patchSize) {
 // opacityNode + alphaTestNode: alpha-cutout from texture
 
 function makePetalMaterial(petalTex) {
-  // Wind displacement + set varyings in vertex stage
+  // Wind displacement + player interaction + LOD + set varyings in vertex stage
   const windPosFn = Fn(() => {
     const flowerIdx = attribute("aFlowerIndex", "float");
     const flowerH   = attribute("aFlowerHeight", "float");
     const radialN   = attribute("aRadialNorm",   "float");
+    const colorV    = attribute("aColorVar",     "float");
 
-    // Set varyings so fragment stage can read them
+    // Set varyings
     vPetalHeightNorm.assign(flowerH.div(uMaxHeight).clamp(0, 1));
     vPetalRadialNorm.assign(radialN);
+    vColorVar.assign(colorV);
 
-    // Wind: primary sine + micro-tremor, scaled by flower height (taller = more sway)
+    // Wind: primary sine + micro-tremor, scaled by flower height
     const phase  = time.mul(uWindSpeed).add(flowerIdx.mul(0.5)).add(uWindDir);
     const bend   = phase.sin().mul(uWindStr).mul(flowerH);
     const micro  = phase.mul(2.3).add(flowerIdx).sin().mul(0.2).mul(uWindStr).mul(flowerH);
-    const amount = bend.add(micro);
+    const windAmount = bend.add(micro);
+
+    // Player interaction: lean away from player position
+    const worldPos   = positionWorld;
+    const toPlayer   = vec3(uPlayerPos.x.sub(worldPos.x), 0, uPlayerPos.z.sub(worldPos.z));
+    const pDist      = length(toPlayer);
+    const pFalloff   = smoothstep(uInteractionRange, float(0.3), pDist); // 1 = very close, 0 = far
+    const pDir       = normalize(toPlayer.mul(-1)); // direction away from player
+    const pLean      = pFalloff.mul(uInteractionStr).mul(flowerH);
 
     const pos = positionLocal.toVar();
-    pos.x.addAssign(uWindDir.cos().mul(amount));
-    pos.z.addAssign(uWindDir.sin().mul(amount));
+    pos.x.addAssign(uWindDir.cos().mul(windAmount).add(pDir.x.mul(pLean)));
+    pos.z.addAssign(uWindDir.sin().mul(windAmount).add(pDir.z.mul(pLean)));
+
+    // LOD: scale petals toward pivot when far from camera (vertex-shader fade)
+    const camDist = length(cameraPosition.xz.sub(worldPos.xz));
+    const lodFade = smoothstep(uLodDist, uLodDist.mul(1.4), camDist); // 0=near, 1=far
+    pos.mulAssign(float(1).sub(lodFade));
+
     return pos;
   });
 
-  // Color: gradient + occlusion + ground bleed + noise
+  // Color: per-flower variety + gradient + occlusion + ground bleed + noise
   const colorFn = Fn(() => {
-    // Gradient base→tip (explicit mix() function — method form is unreliable in TSL)
-    const gradColor = mix(uPetalColorBase, uPetalColorTip, vPetalRadialNorm);
-    const baseCol   = mix(uPetalColorBase, gradColor, uGradientBlend);
+    // Per-flower color variety: blend base color toward alt color
+    const variedBase = mix(uPetalColorBase, uPetalColorAlt, vColorVar.mul(uColorVarStr));
+    // Gradient center→tip (explicit mix() — method form unreliable in TSL)
+    const gradColor = mix(variedBase, uPetalColorTip, vPetalRadialNorm);
+    const baseCol   = mix(variedBase, gradColor, uGradientBlend);
 
     // Ground occlusion (darkens petals near ground)
     const occ    = float(1).sub(uGroundOccStr.mul(float(1).sub(vPetalHeightNorm)));
@@ -280,8 +314,9 @@ function makePetalMaterial(petalTex) {
   // Subsurface scattering: brightens downward-facing normals (light shines through petals)
   const sssFn = Fn(() => {
     const backlight  = normalWorld.y.negate().max(0.0);
-    const gradColor  = mix(uPetalColorBase, uPetalColorTip, vPetalRadialNorm);
-    const baseCol    = mix(uPetalColorBase, gradColor, uGradientBlend);
+    const variedBase = mix(uPetalColorBase, uPetalColorAlt, vColorVar.mul(uColorVarStr));
+    const gradColor  = mix(variedBase, uPetalColorTip, vPetalRadialNorm);
+    const baseCol    = mix(variedBase, gradColor, uGradientBlend);
     return baseCol.mul(backlight).mul(uSubsurfaceStr);
   });
 
@@ -450,7 +485,7 @@ function rebuildFlowers() {
   if (stemMesh)   { scene.remove(stemMesh);   stemMesh.geometry.dispose(); }
   if (leafMesh)   { scene.remove(leafMesh);   leafMesh.geometry.dispose(); }
 
-  const { off, flowerIndex, flowerHeight, petalCounts, flowerRotation, count } =
+  const { off, flowerIndex, flowerHeight, petalCounts, flowerRotation, colorVar, count } =
     getInstancedPositions(PARAMS.flowerDensity, PARAMS.fieldSize);
 
   uMaxHeight.value = Math.max(...Array.from(flowerHeight));
@@ -474,10 +509,12 @@ function rebuildFlowers() {
 
     const idxArr = new Float32Array(indices.length);
     const hArr   = new Float32Array(indices.length);
-    indices.forEach((ii, j) => { idxArr[j] = flowerIndex[ii]; hArr[j] = flowerHeight[ii]; });
+    const cvArr  = new Float32Array(indices.length);
+    indices.forEach((ii, j) => { idxArr[j] = flowerIndex[ii]; hArr[j] = flowerHeight[ii]; cvArr[j] = colorVar[ii]; });
 
     instGeo.setAttribute("aFlowerIndex",  new THREE.InstancedBufferAttribute(idxArr, 1));
     instGeo.setAttribute("aFlowerHeight", new THREE.InstancedBufferAttribute(hArr,   1));
+    instGeo.setAttribute("aColorVar",     new THREE.InstancedBufferAttribute(cvArr,  1));
 
     const mesh = new THREE.InstancedMesh(instGeo, _petalMat, indices.length);
     mesh.frustumCulled = false;
@@ -623,6 +660,8 @@ fFlower.add(PARAMS, "centerRadius", 0.04, 0.15, 0.01).onChange(onRebuild);
 fFlower.add(PARAMS, "centerDomeHeight", 0.01, 0.06, 0.005).onChange(onRebuild);
 fFlower.addColor(PARAMS, "petalColorBase").onChange(v => uPetalColorBase.value.set(v));
 fFlower.addColor(PARAMS, "petalColorTip").onChange(v => uPetalColorTip.value.set(v));
+fFlower.addColor(PARAMS, "petalColorAlt").onChange(v => uPetalColorAlt.value.set(v));
+fFlower.add(PARAMS, "colorVariation", 0, 1, 0.05).onChange(v => { uColorVarStr.value = v; });
 fFlower.add(PARAMS, "petalGradientBlend", 0, 1, 0.05).onChange(v => { uGradientBlend.value = v; });
 fFlower.addColor(PARAMS, "centerColor").onChange(v => uCenterColor.value.set(v));
 fFlower.add(PARAMS, "stemRadius", 0.005, 0.03, 0.002).onChange(onRebuild);
@@ -650,10 +689,19 @@ fWind.add(PARAMS, "windDir",   0, Math.PI * 2, 0.1).onChange(v => { uWindDir.val
 fWind.add(PARAMS, "windSpeed", 0.2, 3, 0.1)         .onChange(v => { uWindSpeed.value = v; });
 fWind.add(PARAMS, "windStr",   0, 0.4, 0.02)         .onChange(v => { uWindStr.value   = v; });
 
+const fInteract = gui.addFolder("Interaction");
+fInteract.add(PARAMS, "interactionRange",   0.5, 6, 0.1).onChange(v => { uInteractionRange.value = v; });
+fInteract.add(PARAMS, "interactionStrength", 0, 1.5, 0.05).onChange(v => { uInteractionStr.value  = v; });
+
+const fLOD = gui.addFolder("LOD");
+fLOD.add(PARAMS, "lodDistance", 4, 30, 1).onChange(v => { uLodDist.value = v; });
+
 // ─── Render loop ──────────────────────────────────────────────────────────────
-// No manual uniform updates needed — TSL time auto-ticks, others update on GUI change
+// Update player pos each frame — in the showcase the camera IS the player
+// In splatmap-painter, replace with actual playerPos uniform
 renderer.setAnimationLoop(() => {
   controls.update();
+  uPlayerPos.value.copy(camera.position);
   renderer.render(scene, camera);
 });
 
