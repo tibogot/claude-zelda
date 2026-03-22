@@ -221,6 +221,7 @@
       accept=".glb"
       style="display: none"
     />
+    <input type="file" id="decal-json-input" accept=".json" style="display: none" />
 
     <div id="mode-badge" class="view">VIEW MODE</div>
 
@@ -672,6 +673,10 @@
         path: {
           flattenStrength: 0.5,
         },
+        decal: {
+          opacity: 1.0,
+          heightOffset: 0.05,
+        },
         spline: {
           objectType: "trees",
           spacing: 4,
@@ -732,6 +737,12 @@
       let cliffHeightTex = null;
       let cliffGrassPatchSystem = null;
       let cliffGrassEraseMode = false;
+
+      // ─── DECAL STATE ──────────────────────────
+      let decalObjects = [];    // placed decal meshes
+      let selectedDecal = null; // currently selected decal mesh
+      let decalTexture = null;  // active THREE.Texture for placement
+      let decalTextureUrl = null; // data URL of active texture (for saving)
 
       // ─── PROPS STATE ─────────────────────────
       let propObjects = []; // placed prop roots in scene
@@ -4626,6 +4637,7 @@
             "Props [I]": "props",
             "Path [L]": "path",
             "Spline [K]": "spline",
+            "Decal [D]": "decal",
             "Water [W]": "water",
             "Cliffs [C]": "cliffs",
             "Flowers [B]": "flowers",
@@ -6145,6 +6157,14 @@
             e.target.value = "";
           });
 
+        document
+          .getElementById("decal-json-input")
+          .addEventListener("change", (e) => {
+            const file = e.target.files[0];
+            if (file) loadDecalsJson(file);
+            e.target.value = "";
+          });
+
         // ── WATER BODIES FOLDER ──
         const waterFolder = pane.addFolder({
           title: "Water Bodies  [ W ]",
@@ -6512,6 +6532,36 @@
           min: 0.1, max: 10, step: 0.1,
         });
 
+        // ── DECAL FOLDER ──
+        const decalFolder = pane.addFolder({ title: "Decal  [ D ]", expanded: true });
+        decalFolder.hidden = true;
+        decalFolder.addButton({ title: "Load PNG image…" }).on("click", loadDecalPng);
+        decalFolder.addBlade({ view: "separator" });
+        decalFolder.addBinding(PARAMS.decal, "opacity", {
+          label: "Opacity", min: 0.1, max: 1, step: 0.01,
+        }).on("change", (ev) => {
+          if (selectedDecal) selectedDecal.material.opacity = ev.value;
+        });
+        decalFolder.addBinding(PARAMS.decal, "heightOffset", {
+          label: "Height offset", min: -2, max: 5, step: 0.01,
+        });
+        decalFolder.addButton({ title: "Refit to terrain" }).on("click", refitDecalToTerrain);
+        decalFolder.addBlade({ view: "separator" });
+        decalFolder.addButton({ title: "Delete selected  [Del]" }).on("click", () => {
+          if (!selectedDecal) return;
+          scene.remove(selectedDecal);
+          selectedDecal.geometry.dispose();
+          selectedDecal.material.dispose();
+          decalObjects = decalObjects.filter((d) => d !== selectedDecal);
+          selectDecal(null);
+        });
+        decalFolder.addButton({ title: "Clear all decals" }).on("click", clearDecals);
+        decalFolder.addBlade({ view: "separator" });
+        decalFolder.addButton({ title: "Save decals JSON" }).on("click", saveDecals);
+        decalFolder.addButton({ title: "Load decals JSON…" }).on("click", () =>
+          document.getElementById("decal-json-input").click()
+        );
+
         // ── POST-PROCESSING TWEAKPANE ──
         const postFolder = pane.addFolder({
           title: "Post-FX",
@@ -6693,6 +6743,161 @@
           });
 
         // ── MODE SYSTEM ──
+        // ── DECAL FUNCTIONS ───────────────────────────────────────────────
+        function selectDecal(obj) {
+          selectedDecal = obj;
+          if (obj) {
+            tcHelper.visible = true;
+            transformControls.attach(obj);
+          } else {
+            tcHelper.visible = false;
+            transformControls.detach();
+          }
+        }
+
+        function placeDecal(x, y, z) {
+          if (!decalTexture) {
+            console.warn("Load a PNG image first");
+            return;
+          }
+          const geo = new THREE.PlaneGeometry(1, 1);
+          geo.rotateX(-Math.PI / 2);
+          const mat = new THREE.MeshBasicMaterial({
+            map: decalTexture,
+            transparent: true,
+            alphaTest: 0.01,
+            depthWrite: false,
+            polygonOffset: true,
+            polygonOffsetFactor: -4,
+            polygonOffsetUnits: -4,
+            side: THREE.DoubleSide,
+            opacity: PARAMS.decal.opacity,
+          });
+          const mesh = new THREE.Mesh(geo, mat);
+          mesh.position.set(x, y + PARAMS.decal.heightOffset, z);
+          mesh.scale.set(4, 1, 4); // default 4×4 metres
+          mesh.renderOrder = 3;
+          mesh.userData.decalTextureUrl = decalTextureUrl;
+          mesh.userData.isDecal = true;
+          scene.add(mesh);
+          decalObjects.push(mesh);
+          selectDecal(mesh);
+        }
+
+        function loadDecalPng() {
+          const inp = document.createElement("input");
+          inp.type = "file";
+          inp.accept = "image/*";
+          inp.onchange = (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+              decalTextureUrl = ev.target.result;
+              new THREE.TextureLoader().load(decalTextureUrl, (tex) => {
+                tex.colorSpace = THREE.SRGBColorSpace;
+                if (decalTexture) decalTexture.dispose();
+                decalTexture = tex;
+              });
+            };
+            reader.readAsDataURL(file);
+          };
+          inp.click();
+        }
+
+        function saveDecals() {
+          const data = decalObjects.map((obj) => ({
+            x: obj.position.x, y: obj.position.y, z: obj.position.z,
+            rx: obj.rotation.x, ry: obj.rotation.y, rz: obj.rotation.z,
+            sx: obj.scale.x, sy: obj.scale.y, sz: obj.scale.z,
+            opacity: obj.material.opacity,
+            textureUrl: obj.userData.decalTextureUrl,
+          }));
+          const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+          const a = document.createElement("a");
+          a.download = "decals.json";
+          a.href = URL.createObjectURL(blob);
+          a.click();
+        }
+
+        function applyDecals(data) {
+          data.forEach((item) => {
+            new THREE.TextureLoader().load(item.textureUrl, (tex) => {
+              tex.colorSpace = THREE.SRGBColorSpace;
+              const geo = new THREE.PlaneGeometry(1, 1);
+              geo.rotateX(-Math.PI / 2);
+              const mat = new THREE.MeshBasicMaterial({
+                map: tex,
+                transparent: true,
+                alphaTest: 0.01,
+                depthWrite: false,
+                polygonOffset: true,
+                polygonOffsetFactor: -4,
+                polygonOffsetUnits: -4,
+                side: THREE.DoubleSide,
+                opacity: item.opacity ?? 1.0,
+              });
+              const mesh = new THREE.Mesh(geo, mat);
+              mesh.position.set(item.x, item.y, item.z);
+              mesh.rotation.set(item.rx, item.ry, item.rz);
+              mesh.scale.set(item.sx, item.sy, item.sz);
+              mesh.renderOrder = 3;
+              mesh.userData.decalTextureUrl = item.textureUrl;
+              mesh.userData.isDecal = true;
+              scene.add(mesh);
+              decalObjects.push(mesh);
+            });
+          });
+        }
+
+        function loadDecalsJson(file) {
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            try { applyDecals(JSON.parse(ev.target.result)); }
+            catch (err) { console.error("Failed to load decals.json", err); }
+          };
+          reader.readAsText(file);
+        }
+
+        function clearDecals() {
+          decalObjects.forEach((obj) => {
+            scene.remove(obj);
+            obj.geometry.dispose();
+            obj.material.dispose();
+          });
+          decalObjects = [];
+          selectDecal(null);
+        }
+
+        function refitDecalToTerrain() {
+          if (!selectedDecal) return;
+          const mesh = selectedDecal;
+          mesh.updateMatrixWorld(true);
+
+          // Build subdivided geometry — 32×32 gives smooth draping
+          const newGeo = new THREE.PlaneGeometry(1, 1, 32, 32);
+          newGeo.rotateX(-Math.PI / 2); // lie flat
+
+          const pos = newGeo.attributes.position;
+          for (let i = 0; i < pos.count; i++) {
+            // Local vertex → world space
+            const v = new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i));
+            mesh.localToWorld(v);
+
+            // Snap world Y to terrain + height offset
+            v.y = sampleHeight(v.x, v.z) + PARAMS.decal.heightOffset;
+
+            // World space → back to local
+            mesh.worldToLocal(v);
+            pos.setXYZ(i, v.x, v.y, v.z);
+          }
+          pos.needsUpdate = true;
+          newGeo.computeVertexNormals();
+
+          mesh.geometry.dispose();
+          mesh.geometry = newGeo;
+        }
+
         // ── SPLINE FUNCTIONS ──────────────────────────────────────────────
         function splineRebuildVisual() {
           // Dispose and remove old children
@@ -6882,6 +7087,7 @@
           pathFolder.hidden = mode !== "path";
           splineFolder.hidden = mode !== "spline";
           if (mode !== "spline") splineClearPreview();
+          decalFolder.hidden = mode !== "decal";
           waterFolder.hidden = mode !== "water";
           cliffsFolder.hidden = mode !== "cliffs";
           brushFolder.hidden =
@@ -6890,10 +7096,11 @@
             mode === "props" ||
             mode === "water" ||
             mode === "cliffs" ||
-            mode === "spline";
+            mode === "spline" ||
+            mode === "decal";
 
           const usingTC =
-            mode === "place" || mode === "props" || mode === "water" || mode === "cliffs";
+            mode === "place" || mode === "props" || mode === "water" || mode === "cliffs" || mode === "decal";
           if (!usingTC && transformControls) {
             if (tcHelper) tcHelper.visible = false;
             transformControls.enabled = false;
@@ -6901,24 +7108,35 @@
             selectedCliff = null;
             selectedProp = null;
             selectWater(null);
+            selectDecal(null);
           } else if (usingTC && transformControls) {
             transformControls.enabled = true;
             if (mode === "place") {
               selectedProp = null;
               selectWater(null);
+              selectDecal(null);
             }
             if (mode === "props") {
               selectedCliff = null;
               selectWater(null);
+              selectDecal(null);
             }
             if (mode === "water") {
               selectedCliff = null;
               selectedProp = null;
+              selectDecal(null);
+            }
+            if (mode === "decal") {
+              selectedCliff = null;
+              selectedProp = null;
+              selectWater(null);
+              selectDecal(selectedDecal); // re-attach if already selected
             }
             if (mode === "cliffs") {
               selectedCliff = null;
               selectedProp = null;
               selectWater(null);
+              selectDecal(null);
               // Re-attach gizmo if an instance was already selected
               if (cliffInstancer.hasSelection()) {
                 transformControls.attach(cliffInstancer.proxyObject);
@@ -6956,7 +7174,9 @@
                                   ? "CLIFF GRASS MODE"
                                   : mode === "spline"
                                     ? "SPLINE MODE  [ K ]"
-                                    : "PLACE MODE"; // play handled above
+                                    : mode === "decal"
+                                      ? "DECAL MODE  [ D ]"
+                                      : "PLACE MODE"; // play handled above
           badge.className = mode;
           renderer.domElement.style.cursor =
             mode === "view" ? "default" : "crosshair";
@@ -6966,7 +7186,8 @@
             mode === "props" ||
             mode === "water" ||
             mode === "cliffs" ||
-            mode === "spline"
+            mode === "spline" ||
+            mode === "decal"
           )
             brushRing.visible = false;
           else if (mode === "cliffgrass")
@@ -7011,11 +7232,14 @@
             setMode(currentMode === "path" ? "view" : "path");
           if (e.code === "KeyK")
             setMode(currentMode === "spline" ? "view" : "spline");
+          if (e.code === "KeyD")
+            setMode(currentMode === "decal" ? "view" : "decal");
           if (
             e.code === "KeyW" &&
             currentMode !== "place" &&
             currentMode !== "props" &&
             currentMode !== "cliffs" &&
+            currentMode !== "decal" &&
             currentMode !== "water"
           )
             setMode("water");
@@ -7030,6 +7254,18 @@
           if (e.code === "KeyC")
             setMode(currentMode === "cliffs" ? "view" : "cliffs");
           if (currentMode === "spline" && e.code === "Delete") splineDeleteSelected();
+          if (currentMode === "decal") {
+            if (e.code === "KeyW") { e.preventDefault(); transformControls.setMode("translate"); }
+            if (e.code === "KeyE") { e.preventDefault(); transformControls.setMode("rotate"); }
+            if (e.code === "KeyR") { e.preventDefault(); transformControls.setMode("scale"); }
+            if (e.code === "Delete" && selectedDecal) {
+              scene.remove(selectedDecal);
+              selectedDecal.geometry.dispose();
+              selectedDecal.material.dispose();
+              decalObjects = decalObjects.filter((d) => d !== selectedDecal);
+              selectDecal(null);
+            }
+          }
           if (currentMode === "cliffs") {
             if (e.code === "KeyW") { e.preventDefault(); transformControls.setMode("translate"); }
             if (e.code === "KeyE") { e.preventDefault(); transformControls.setMode("rotate"); }
@@ -7270,6 +7506,22 @@
             // Click on terrain → place new water body
             const pt = getTerrainHit(e);
             if (pt) placeWater(pt.x, pt.y, pt.z);
+            return;
+          }
+
+          if (currentMode === "decal") {
+            if (transformControls.axis !== null) return;
+            const rect = renderer.domElement.getBoundingClientRect();
+            mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            const hits = raycaster.intersectObjects(decalObjects, false);
+            if (hits.length > 0) {
+              selectDecal(hits[0].object);
+              return;
+            }
+            const pt = getTerrainHit(e);
+            if (pt) placeDecal(pt.x, pt.y, pt.z);
             return;
           }
 
