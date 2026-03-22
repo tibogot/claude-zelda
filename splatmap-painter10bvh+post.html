@@ -1111,8 +1111,82 @@
         }
       }
 
+      // ─── SMEAR / BLUR BRUSH ─────────────────────────────────────────
+      // Reads existing canvas pixels, blurs them in-place weighted by brush falloff
+      function _smearCanvas(ctx, cx, cy) {
+        const rad = Math.ceil(brushSize);
+        const cw = ctx.canvas.width, ch = ctx.canvas.height;
+        const x0 = Math.max(0, Math.floor(cx - rad));
+        const y0 = Math.max(0, Math.floor(cy - rad));
+        const x1 = Math.min(cw, Math.ceil(cx + rad));
+        const y1 = Math.min(ch, Math.ceil(cy + rad));
+        const w = x1 - x0, h = y1 - y0;
+        if (w <= 0 || h <= 0) return;
+        const imgData = ctx.getImageData(x0, y0, w, h);
+        const src = new Uint8ClampedArray(imgData.data); // read-only copy
+        const dst = imgData.data;
+        const alpha = brushStr / 100;
+        const kr = Math.max(1, Math.round(brushSize * 0.18)); // blur kernel radius
+        for (let py = 0; py < h; py++) {
+          for (let px = 0; px < w; px++) {
+            const dx = (x0 + px) - cx, dy = (y0 + py) - cy;
+            const t = Math.sqrt(dx * dx + dy * dy) / brushSize;
+            if (t >= 1) continue;
+            const str = brushFalloff(t) * alpha;
+            let r = 0, g = 0, b = 0, a = 0, n = 0;
+            for (let ky = -kr; ky <= kr; ky++) {
+              for (let kx = -kr; kx <= kr; kx++) {
+                const nx = Math.max(0, Math.min(w - 1, px + kx));
+                const ny = Math.max(0, Math.min(h - 1, py + ky));
+                const ni = (ny * w + nx) * 4;
+                r += src[ni]; g += src[ni+1]; b += src[ni+2]; a += src[ni+3]; n++;
+              }
+            }
+            const i = (py * w + px) * 4;
+            dst[i]   = src[i]   + (r/n - src[i])   * str;
+            dst[i+1] = src[i+1] + (g/n - src[i+1]) * str;
+            dst[i+2] = src[i+2] + (b/n - src[i+2]) * str;
+            dst[i+3] = src[i+3] + (a/n - src[i+3]) * str;
+          }
+        }
+        ctx.putImageData(imgData, x0, y0);
+      }
+
+      // Smear imgSplatData (DataTexture) — only blurs the target slot channel
+      function _smearImgSlot(cx, cy, slotIdx) {
+        const rad = Math.ceil(brushSize);
+        const alpha = brushStr / 100;
+        const kr = Math.max(1, Math.round(brushSize * 0.18));
+        const x0 = Math.max(0, Math.floor(cx - rad));
+        const y0 = Math.max(0, Math.floor(cy - rad));
+        const x1 = Math.min(SPLAT_RES - 1, Math.ceil(cx + rad));
+        const y1 = Math.min(SPLAT_RES - 1, Math.ceil(cy + rad));
+        const copy = imgSplatData.slice(); // read-only snapshot
+        for (let py = y0; py <= y1; py++) {
+          for (let px = x0; px <= x1; px++) {
+            const dx = px - cx, dy = py - cy;
+            const t = Math.sqrt(dx * dx + dy * dy) / brushSize;
+            if (t >= 1) continue;
+            const str = brushFalloff(t) * alpha;
+            let sum = 0, n = 0;
+            for (let ky = -kr; ky <= kr; ky++) {
+              for (let kx = -kr; kx <= kr; kx++) {
+                const nx = Math.max(0, Math.min(SPLAT_RES - 1, px + kx));
+                const ny = Math.max(0, Math.min(SPLAT_RES - 1, py + ky));
+                sum += copy[(ny * SPLAT_RES + nx) * 4 + slotIdx]; n++;
+              }
+            }
+            const i = (py * SPLAT_RES + px) * 4 + slotIdx;
+            imgSplatData[i] = Math.round(copy[i] + (sum/n - copy[i]) * str);
+          }
+        }
+        if (imgSplatTex) imgSplatTex.needsUpdate = true;
+      }
+
       function _applyBrushToCanvas(ctx, cx, cy, r, g, b, alpha) {
-        if (PARAMS.paintBrush === "fbm_splat")
+        if (PARAMS.paintBrush === "smear")
+          _smearCanvas(ctx, cx, cy);
+        else if (PARAMS.paintBrush === "fbm_splat")
           _paintFbmSplat(ctx, cx, cy, r, g, b, alpha);
         else if (PARAMS.paintBrush === "scatter")
           _paintScatter(ctx, cx, cy, r, g, b, alpha);
@@ -1134,7 +1208,12 @@
 
         // Rock biome — paints into image slot 2 (blue channel of imgSplatTex)
         if (currentBiome === "rock") {
-          paintImgAt(wx, wz, 2, imgEraseMode);
+          if (PARAMS.paintBrush === "smear") {
+            const { u, v } = worldToUV(wx, wz);
+            _smearImgSlot(Math.floor(u * SPLAT_RES), SPLAT_RES - 1 - Math.floor(v * SPLAT_RES), 2);
+          } else {
+            paintImgAt(wx, wz, 2, imgEraseMode);
+          }
           return;
         }
 
@@ -1193,30 +1272,36 @@
       // ─── GRASS DENSITY PAINT ─────────────────
       function paintGrassAt(wx, wz, erase) {
         const { u, v } = worldToUV(wx, wz);
-        const cx = u * SPLAT_RES,
-          cy = v * SPLAT_RES;
-        const alpha = brushStr / 100;
-        const [gr, gg, gb] = erase ? [0, 0, 0] : [255, 255, 255];
-        grassDensityCtx.globalCompositeOperation = "source-over";
-        grassDensityCtx.fillStyle = _radialGrad(grassDensityCtx, cx, cy, gr, gg, gb, alpha);
-        grassDensityCtx.beginPath();
-        grassDensityCtx.arc(cx, cy, brushSize, 0, PI * 2);
-        grassDensityCtx.fill();
+        const cx = u * SPLAT_RES, cy = v * SPLAT_RES;
+        if (PARAMS.paintBrush === "smear") {
+          _smearCanvas(grassDensityCtx, cx, cy);
+        } else {
+          const alpha = brushStr / 100;
+          const [gr, gg, gb] = erase ? [0, 0, 0] : [255, 255, 255];
+          grassDensityCtx.globalCompositeOperation = "source-over";
+          grassDensityCtx.fillStyle = _radialGrad(grassDensityCtx, cx, cy, gr, gg, gb, alpha);
+          grassDensityCtx.beginPath();
+          grassDensityCtx.arc(cx, cy, brushSize, 0, PI * 2);
+          grassDensityCtx.fill();
+        }
         if (grassDensityTex) grassDensityTex.needsUpdate = true;
       }
 
       // ─── CLIFF GRASS DENSITY PAINT ───────────
       function paintCliffGrassAt(wx, wz, erase) {
         const { u, v } = worldToUV(wx, wz);
-        const cx = u * SPLAT_RES,
-          cy = v * SPLAT_RES;
-        const alpha = brushStr / 100;
-        const [cr, cg, cb] = erase ? [0, 0, 0] : [255, 255, 255];
-        cliffDensityCtx.globalCompositeOperation = "source-over";
-        cliffDensityCtx.fillStyle = _radialGrad(cliffDensityCtx, cx, cy, cr, cg, cb, alpha);
-        cliffDensityCtx.beginPath();
-        cliffDensityCtx.arc(cx, cy, brushSize, 0, PI * 2);
-        cliffDensityCtx.fill();
+        const cx = u * SPLAT_RES, cy = v * SPLAT_RES;
+        if (PARAMS.paintBrush === "smear") {
+          _smearCanvas(cliffDensityCtx, cx, cy);
+        } else {
+          const alpha = brushStr / 100;
+          const [cr, cg, cb] = erase ? [0, 0, 0] : [255, 255, 255];
+          cliffDensityCtx.globalCompositeOperation = "source-over";
+          cliffDensityCtx.fillStyle = _radialGrad(cliffDensityCtx, cx, cy, cr, cg, cb, alpha);
+          cliffDensityCtx.beginPath();
+          cliffDensityCtx.arc(cx, cy, brushSize, 0, PI * 2);
+          cliffDensityCtx.fill();
+        }
         if (cliffDensityTex) cliffDensityTex.needsUpdate = true;
       }
 
@@ -4484,6 +4569,7 @@
             Smooth: "smooth",
             "FBM Splat": "fbm_splat",
             Scatter: "scatter",
+            Smear: "smear",
           },
         });
         brushFolder.addBinding(PARAMS, "brushFalloff", {
