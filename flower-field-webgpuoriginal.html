@@ -1,0 +1,916 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Flower Field — WebGPU + TSL</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        background: #1a1a2e;
+        overflow: hidden;
+        font-family: "SF Mono", "Fira Code", monospace;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        bottom: 12px;
+        left: 12px;
+        z-index: 20;
+        background: rgba(0, 0, 0, 0.6);
+        color: #b0d890;
+        padding: 8px 12px;
+        border-radius: 6px;
+        font-size: 11px;
+        line-height: 1.6;
+      }
+      #info span {
+        color: #e0f0c0;
+        font-weight: 600;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">
+      <span>Flower Field</span> — WebGPU + TSL<br />
+      Orbit: <span>left-drag</span> &nbsp; Zoom: <span>scroll</span>
+    </div>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+      import GUI from "three/addons/libs/lil-gui.module.min.js";
+      import {
+        Fn,
+        float,
+        vec2,
+        vec3,
+        attribute,
+        varying,
+        uniform,
+        texture,
+        normalMap,
+        mix,
+        max,
+        clamp,
+        sin,
+        cos,
+        fract,
+        pow,
+        dot,
+        positionLocal,
+        normalWorld,
+        time,
+        uv,
+      } from "three/tsl";
+
+      // ─── Hash (JS-side random) ────────────────────────────────────────────────────
+      function hash(i) {
+        let h = (i * 2654435761) >>> 0;
+        return (h % 10000) / 10000;
+      }
+
+      // ─── PARAMS ───────────────────────────────────────────────────────────────────
+      const PARAMS = {
+        petalCountMin: 4,
+        petalCountMax: 7,
+        petalScale: 0.22,
+        petalTilt: 0.25,
+        petalVariation: 0.06,
+        normalBend: 0.25,
+        petalColorBase: "#ff0000",
+        petalColorTip: "#0000ff",
+        centerColor: "#ffdd44",
+        centerRadius: 0.08,
+        centerDomeHeight: 0.02,
+        stemColor: "#4a7c3e",
+        stemColorTop: "#5a9c4e",
+        stemRadius: 0.012,
+        stemBaseBend: 0.08,
+        stemLeafScale: 0.15,
+        flowerDensity: 40 * 40 * 4,
+        fieldSize: 20,
+        flowerHeight: 0.7,
+        normalMapStrength: 0.3,
+        subsurfaceStrength: 0.35,
+        sunAzimuth: 225,
+        sunElevation: 50,
+        sunIntensity: 2.0,
+        fillLightIntensity: 0.4,
+        ambIntensity: 0.7,
+        windDir: 0.7,
+        windSpeed: 1.2,
+        windStr: 0.1,
+        groundOcclusionStr: 0.4,
+        groundColorBleed: 0.15,
+        petalGradientBlend: 1.0,
+        petalNoiseStr: 0.08,
+        showGrid: false,
+      };
+
+      // ─── TSL uniforms (live-update via .value, no rebuild needed) ─────────────────
+      const uWindDir = uniform(PARAMS.windDir);
+      const uWindSpeed = uniform(PARAMS.windSpeed);
+      const uWindStr = uniform(PARAMS.windStr);
+      const uMaxHeight = uniform(PARAMS.flowerHeight * 1.5);
+      const uSubsurfaceStr = uniform(PARAMS.subsurfaceStrength);
+      const uGroundOccStr = uniform(PARAMS.groundOcclusionStr);
+      const uGroundBleed = uniform(PARAMS.groundColorBleed);
+      const uGroundColor = uniform(new THREE.Color(0x3d5a3d));
+      const uPetalColorBase = uniform(new THREE.Color(PARAMS.petalColorBase));
+      const uPetalColorTip = uniform(new THREE.Color(PARAMS.petalColorTip));
+      const uGradientBlend = uniform(PARAMS.petalGradientBlend);
+      const uPetalNoiseStr = uniform(PARAMS.petalNoiseStr);
+      const uNormalMapStr = uniform(PARAMS.normalMapStrength);
+      const uCenterColor = uniform(new THREE.Color(PARAMS.centerColor));
+      const uStemColorBase = uniform(new THREE.Color(PARAMS.stemColor));
+      const uStemColorTop = uniform(new THREE.Color(PARAMS.stemColorTop));
+      const uStemBaseBend = uniform(PARAMS.stemBaseBend);
+
+      // ─── Module-level varyings (declared once, shared across material rebuilds) ───
+      // These pass per-instance / per-vertex data from vertex stage to fragment stage.
+      const vPetalHeightNorm = varying(float(0), "v_phn");
+      const vPetalRadialNorm = varying(float(0), "v_prn");
+      const vStemHeightNorm = varying(float(0), "v_shn");
+
+      // ─── Procedural dome normal map ───────────────────────────────────────────────
+      function createPetalNormalMap(size = 64, domeStrength = 0.2) {
+        const data = new Uint8Array(size * size * 4);
+        const half = size / 2;
+        for (let y = 0; y < size; y++) {
+          for (let x = 0; x < size; x++) {
+            const u = (x - half) / half;
+            const v = (y - half) / half;
+            const nx = -u * domeStrength;
+            const ny = -v * domeStrength;
+            const nz = Math.sqrt(Math.max(0, 1 - nx * nx - ny * ny));
+            const i = (y * size + x) * 4;
+            data[i] = Math.round((nx * 0.5 + 0.5) * 255);
+            data[i + 1] = Math.round((ny * 0.5 + 0.5) * 255);
+            data[i + 2] = Math.round((nz * 0.5 + 0.5) * 255);
+            data[i + 3] = 255;
+          }
+        }
+        const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.needsUpdate = true;
+        return tex;
+      }
+      const petalNormalTex = createPetalNormalMap();
+
+      // ─── Build merged petal head geometry for a given petal count ─────────────────
+      const _basePetalGeo = new THREE.PlaneGeometry(1, 1, 1, 1);
+
+      function buildFlowerHeadGeometry(petalCount) {
+        const pc = Math.max(3, Math.min(12, Math.floor(petalCount)));
+        const group = new THREE.Group();
+        const geos = [];
+        for (let i = 0; i < pc; i++) {
+          const vary = ((i * 7) % 100) / 100;
+          const angle =
+            (i / pc) * Math.PI * 2 + (vary - 0.5) * 2 * PARAMS.petalVariation;
+          const scaleMul = 1 + (vary - 0.5) * 2 * PARAMS.petalVariation;
+          const petalGroup = new THREE.Group();
+          petalGroup.rotation.y = angle;
+          const petal = new THREE.Mesh(
+            _basePetalGeo.clone(),
+            new THREE.MeshBasicMaterial(),
+          );
+          petal.scale.set(
+            PARAMS.petalScale * scaleMul,
+            PARAMS.petalScale * scaleMul,
+            1,
+          );
+          petal.rotation.x = -Math.PI / 2 - PARAMS.petalTilt;
+          petal.position.set(0, 0.001, 0.5 * PARAMS.petalScale);
+          petalGroup.add(petal);
+          group.add(petalGroup);
+        }
+        group.updateMatrixWorld(true);
+        const groupInv = group.matrixWorld.clone().invert();
+        group.traverse((child) => {
+          if (child.isMesh) {
+            geos.push(
+              child.geometry
+                .clone()
+                .applyMatrix4(groupInv.clone().multiply(child.matrixWorld)),
+            );
+          }
+        });
+        const merged = mergeGeometries(geos);
+        geos.forEach((g) => g.dispose());
+
+        // Per-vertex radial distance (0 = center, 1 = tip) — used for gradient
+        const pos = merged.attributes.position;
+        const maxR = PARAMS.petalScale * 1.2;
+        const radialNorm = new Float32Array(pos.count);
+        for (let i = 0; i < pos.count; i++) {
+          const x = pos.getX(i),
+            z = pos.getZ(i);
+          radialNorm[i] = Math.min(1, Math.sqrt(x * x + z * z) / maxR);
+        }
+        merged.setAttribute(
+          "aRadialNorm",
+          new THREE.BufferAttribute(radialNorm, 1),
+        );
+
+        // Bend normals toward radial direction for rounder look
+        const norm = merged.attributes.normal;
+        const flatUp = new THREE.Vector3(0, 1, 0);
+        const v = new THREE.Vector3(),
+          n = new THREE.Vector3();
+        for (let i = 0; i < pos.count; i++) {
+          v.fromBufferAttribute(pos, i);
+          if (v.length() > 0.01) {
+            n.fromBufferAttribute(norm, i);
+            n.lerpVectors(
+              flatUp,
+              v.clone().normalize(),
+              PARAMS.normalBend,
+            ).normalize();
+            norm.setXYZ(i, n.x, n.y, n.z);
+          }
+        }
+        norm.needsUpdate = true;
+        return merged;
+      }
+
+      // ─── Grid placement with jitter (same strategy as grass.js) ──────────────────
+      function getInstancedPositions(numFlowers, patchSize) {
+        let numCellsX = Math.floor(Math.sqrt(numFlowers));
+        while (numFlowers % numCellsX !== 0) numCellsX--;
+        const numCellsZ = numFlowers / numCellsX;
+        const cellW = patchSize / numCellsX;
+        const cellH = patchSize / numCellsZ;
+        const off = new Float32Array(numFlowers * 3);
+        const flowerIndex = new Float32Array(numFlowers);
+        const flowerHeight = new Float32Array(numFlowers);
+        const petalCounts = new Float32Array(numFlowers);
+        const flowerRotation = new Float32Array(numFlowers);
+        const pcMin = Math.floor(PARAMS.petalCountMin);
+        const pcMax = Math.floor(PARAMS.petalCountMax);
+        for (let i = 0; i < numFlowers; i++) {
+          const col = i % numCellsX,
+            row = Math.floor(i / numCellsX);
+          off[i * 3] = -patchSize * 0.5 + col * cellW + hash(i * 11) * cellW;
+          off[i * 3 + 1] =
+            -patchSize * 0.5 + row * cellH + hash(i * 13) * cellH;
+          off[i * 3 + 2] = 0;
+          flowerIndex[i] = i;
+          flowerHeight[i] = PARAMS.flowerHeight * (0.85 + hash(i * 17) * 0.3);
+          petalCounts[i] =
+            pcMin + Math.floor(hash(i * 19) * (pcMax - pcMin + 1));
+          flowerRotation[i] = hash(i * 23) * Math.PI * 2;
+        }
+        return {
+          off,
+          flowerIndex,
+          flowerHeight,
+          petalCounts,
+          flowerRotation,
+          count: numFlowers,
+        };
+      }
+
+      // ─── TSL Material: Petals ─────────────────────────────────────────────────────
+      // positionNode: wind sway + sets varyings for fragment stage
+      // colorNode: base→tip gradient + ground occlusion + color bleed + noise
+      // emissiveNode: subsurface scattering approximation
+      // normalNode: dome normal map
+      // opacityNode + alphaTestNode: alpha-cutout from texture
+
+      function makePetalMaterial(petalTex) {
+        // Wind displacement + set varyings in vertex stage
+        const windPosFn = Fn(() => {
+          const flowerIdx = attribute("aFlowerIndex", "float");
+          const flowerH = attribute("aFlowerHeight", "float");
+          const radialN = attribute("aRadialNorm", "float");
+
+          // Set varyings so fragment stage can read them
+          vPetalHeightNorm.assign(flowerH.div(uMaxHeight).clamp(0, 1));
+          vPetalRadialNorm.assign(radialN);
+
+          // Wind: primary sine + micro-tremor, scaled by flower height (taller = more sway)
+          const phase = time
+            .mul(uWindSpeed)
+            .add(flowerIdx.mul(0.5))
+            .add(uWindDir);
+          const bend = phase.sin().mul(uWindStr).mul(flowerH);
+          const micro = phase
+            .mul(2.3)
+            .add(flowerIdx)
+            .sin()
+            .mul(0.2)
+            .mul(uWindStr)
+            .mul(flowerH);
+          const amount = bend.add(micro);
+
+          const pos = positionLocal.toVar();
+          pos.x.addAssign(uWindDir.cos().mul(amount));
+          pos.z.addAssign(uWindDir.sin().mul(amount));
+          return pos;
+        });
+
+        // Color: gradient + occlusion + ground bleed + noise
+        const colorFn = Fn(() => {
+          // Gradient base→tip (explicit mix() function — method form is unreliable in TSL)
+          const gradColor = mix(
+            uPetalColorBase,
+            uPetalColorTip,
+            vPetalRadialNorm,
+          );
+          const baseCol = mix(uPetalColorBase, gradColor, uGradientBlend);
+
+          // Ground occlusion (darkens petals near ground)
+          const occ = float(1).sub(
+            uGroundOccStr.mul(float(1).sub(vPetalHeightNorm)),
+          );
+          // Ground color bleed (tints toward ground color near ground)
+          const bleedT = uGroundBleed
+            .mul(float(1).sub(vPetalHeightNorm))
+            .clamp(0, 1);
+          // Organic petal noise — manual dot avoids potential vec2 dot quirks
+          const noiseUV = uv().mul(8.0);
+          const noiseVal = noiseUV.x
+            .mul(12.9898)
+            .add(noiseUV.y.mul(78.233))
+            .sin()
+            .mul(43758.5453)
+            .fract();
+          const noiseScale = float(1).add(
+            noiseVal.sub(0.5).mul(2.0).mul(uPetalNoiseStr),
+          );
+
+          // Use explicit mix() function (not method) to ensure correct arg order: mix(a, b, t)
+          const occluded = baseCol.mul(occ);
+          const blended = mix(occluded, uGroundColor, bleedT);
+          const noised = blended.mul(noiseScale);
+          return noised;
+        });
+
+        // Subsurface scattering: brightens downward-facing normals (light shines through petals)
+        const sssFn = Fn(() => {
+          const backlight = normalWorld.y.negate().max(0.0);
+          const gradColor = mix(
+            uPetalColorBase,
+            uPetalColorTip,
+            vPetalRadialNorm,
+          );
+          const baseCol = mix(uPetalColorBase, gradColor, uGradientBlend);
+          return baseCol.mul(backlight).mul(uSubsurfaceStr);
+        });
+
+        const mat = new THREE.MeshStandardNodeMaterial();
+        mat.side = THREE.DoubleSide;
+        mat.transparent = true;
+        mat.depthWrite = true;
+        mat.roughness = 0.85;
+        mat.metalness = 0;
+        mat.positionNode = windPosFn();
+        mat.colorNode = colorFn();
+        mat.emissiveNode = sssFn();
+        mat.normalNode = normalMap(
+          texture(petalNormalTex),
+          vec2(uNormalMapStr, uNormalMapStr),
+        );
+        if (petalTex) {
+          mat.opacityNode = texture(petalTex).r; // petal-alpha.png encodes mask in R channel
+          mat.alphaTestNode = float(0.02);
+          mat.alphaToCoverage = true;
+        }
+        return mat;
+      }
+
+      // ─── TSL Material: Center dome ────────────────────────────────────────────────
+      function makeCenterMaterial() {
+        const windPosFn = Fn(() => {
+          const flowerIdx = attribute("aFlowerIndex", "float");
+          const flowerH = attribute("aFlowerHeight", "float");
+          const phase = time
+            .mul(uWindSpeed)
+            .add(flowerIdx.mul(0.5))
+            .add(uWindDir);
+          const bend = phase.sin().mul(uWindStr).mul(flowerH);
+          const micro = phase
+            .mul(2.3)
+            .add(flowerIdx)
+            .sin()
+            .mul(0.2)
+            .mul(uWindStr)
+            .mul(flowerH);
+          const amount = bend.add(micro);
+          const pos = positionLocal.toVar();
+          pos.x.addAssign(uWindDir.cos().mul(amount));
+          pos.z.addAssign(uWindDir.sin().mul(amount));
+          return pos;
+        });
+
+        const mat = new THREE.MeshStandardNodeMaterial();
+        mat.side = THREE.DoubleSide;
+        mat.roughness = 0.9;
+        mat.metalness = 0;
+        mat.colorNode = uCenterColor;
+        mat.normalNode = normalMap(
+          texture(petalNormalTex),
+          vec2(uNormalMapStr.mul(0.5), uNormalMapStr.mul(0.5)),
+        );
+        mat.positionNode = windPosFn();
+        return mat;
+      }
+
+      // ─── TSL Material: Stems ──────────────────────────────────────────────────────
+      // positionNode: base lean + wind sway increasing toward top
+      // colorNode: bottom→top green gradient
+
+      function makeStemMaterial() {
+        const stemPosFn = Fn(() => {
+          const stemIdx = attribute("aStemIndex", "float");
+          const stemH = attribute("aStemHeight", "float");
+
+          // CylinderGeometry local Y: -0.5 (bottom) to +0.5 (top) → remap to 0..1
+          const heightPct = positionLocal.y.add(0.5).clamp(0, 1);
+          vStemHeightNorm.assign(heightPct);
+
+          // Permanent base lean (curved outward near ground)
+          const baseBend = float(1)
+            .sub(heightPct)
+            .pow(2)
+            .mul(uStemBaseBend)
+            .mul(stemH);
+          // Dynamic wind sway (stronger toward top)
+          const phase = time
+            .mul(uWindSpeed)
+            .add(stemIdx.mul(0.5))
+            .add(uWindDir);
+          const bend = phase
+            .sin()
+            .mul(uWindStr)
+            .mul(stemH)
+            .mul(heightPct.pow(2));
+          const micro = phase
+            .mul(2.3)
+            .add(stemIdx)
+            .sin()
+            .mul(0.15)
+            .mul(uWindStr)
+            .mul(stemH)
+            .mul(heightPct);
+          const total = baseBend.add(bend).add(micro);
+
+          const pos = positionLocal.toVar();
+          // Base lean is slightly off-axis from wind for natural look
+          pos.x.addAssign(
+            uWindDir
+              .add(0.5)
+              .cos()
+              .mul(baseBend)
+              .add(uWindDir.cos().mul(bend.add(micro))),
+          );
+          pos.z.addAssign(
+            uWindDir
+              .add(0.5)
+              .sin()
+              .mul(baseBend)
+              .add(uWindDir.sin().mul(bend.add(micro))),
+          );
+          return pos;
+        });
+
+        const colorFn = Fn(() =>
+          uStemColorBase.mix(uStemColorTop, vStemHeightNorm),
+        );
+
+        const mat = new THREE.MeshStandardNodeMaterial();
+        mat.roughness = 0.95;
+        mat.metalness = 0;
+        mat.positionNode = stemPosFn();
+        mat.colorNode = colorFn();
+        return mat;
+      }
+
+      // ─── TSL Material: Leaves ─────────────────────────────────────────────────────
+      function makeLeafMaterial(petalTex) {
+        const mat = new THREE.MeshStandardNodeMaterial();
+        mat.side = THREE.DoubleSide;
+        mat.transparent = true;
+        mat.roughness = 0.95;
+        mat.metalness = 0;
+        mat.colorNode = uStemColorBase;
+        if (petalTex) {
+          mat.opacityNode = texture(petalTex).r;
+          mat.alphaTestNode = float(0.01);
+        }
+        return mat;
+      }
+
+      // ─── Renderer ─────────────────────────────────────────────────────────────────
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.body.appendChild(renderer.domElement);
+      await renderer.init();
+
+      // ─── Scene ────────────────────────────────────────────────────────────────────
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x2a3a4a);
+      scene.fog = new THREE.Fog(0x2a3a4a, 25, 80);
+
+      const sun = new THREE.DirectionalLight(0xfff0d0, PARAMS.sunIntensity);
+      scene.add(sun);
+      const fillLight = new THREE.DirectionalLight(
+        0xa0c0ff,
+        PARAMS.fillLightIntensity,
+      );
+      fillLight.position.set(-15, 10, -20);
+      scene.add(fillLight);
+      const ambLight = new THREE.AmbientLight(0x8090b0, PARAMS.ambIntensity);
+      scene.add(ambLight);
+
+      function applySun() {
+        const az = (PARAMS.sunAzimuth * Math.PI) / 180;
+        const el = (PARAMS.sunElevation * Math.PI) / 180;
+        sun.position.set(
+          Math.cos(el) * Math.sin(az) * 50,
+          Math.sin(el) * 50,
+          Math.cos(el) * Math.cos(az) * 50,
+        );
+        sun.intensity = PARAMS.sunIntensity;
+        fillLight.intensity = PARAMS.fillLightIntensity;
+        ambLight.intensity = PARAMS.ambIntensity;
+      }
+      applySun();
+
+      const groundMat = new THREE.MeshStandardNodeMaterial({
+        roughness: 0.95,
+        metalness: 0,
+      });
+      groundMat.colorNode = uGroundColor;
+      const ground = new THREE.Mesh(new THREE.PlaneGeometry(80, 80), groundMat);
+      ground.rotation.x = -Math.PI / 2;
+      scene.add(ground);
+
+      const grid = new THREE.GridHelper(80, 40, 0x4a5a6a, 0x3a4a5a);
+      grid.position.y = 0.01;
+      scene.add(grid);
+      grid.visible = PARAMS.showGrid;
+
+      // ─── Flower instanced mesh state ──────────────────────────────────────────────
+      let flowerHeadMeshes = [];
+      let centerMesh = null,
+        stemMesh = null,
+        leafMesh = null;
+      let _petalMat = null,
+        _centerMat = null,
+        _stemMat = null,
+        _leafMat = null;
+      let _petalTex = null;
+
+      // Call once after texture loads; subsequent calls just rebuild geometry
+      function initMaterials() {
+        _petalMat = makePetalMaterial(_petalTex);
+        _centerMat = makeCenterMaterial();
+        _stemMat = makeStemMaterial();
+        _leafMat = makeLeafMaterial(_petalTex);
+      }
+
+      function rebuildFlowers() {
+        if (!_petalMat) return; // materials not ready yet
+
+        // ── Dispose old geometry (not materials — those are reused) ────────────────
+        flowerHeadMeshes.forEach((m) => {
+          scene.remove(m);
+          m.geometry.dispose();
+        });
+        flowerHeadMeshes = [];
+        if (centerMesh) {
+          scene.remove(centerMesh);
+          centerMesh.geometry.dispose();
+        }
+        if (stemMesh) {
+          scene.remove(stemMesh);
+          stemMesh.geometry.dispose();
+        }
+        if (leafMesh) {
+          scene.remove(leafMesh);
+          leafMesh.geometry.dispose();
+        }
+
+        const {
+          off,
+          flowerIndex,
+          flowerHeight,
+          petalCounts,
+          flowerRotation,
+          count,
+        } = getInstancedPositions(PARAMS.flowerDensity, PARAMS.fieldSize);
+
+        uMaxHeight.value = Math.max(...Array.from(flowerHeight));
+
+        const dummy = new THREE.Object3D();
+
+        // Group instances by petal count (one InstancedMesh per unique count = one draw call each)
+        const byPetalCount = {};
+        for (let i = 0; i < count; i++) {
+          const pc = Math.floor(petalCounts[i]);
+          if (!byPetalCount[pc]) byPetalCount[pc] = [];
+          byPetalCount[pc].push(i);
+        }
+
+        // ── Petal head meshes (one per petal count) ────────────────────────────────
+        for (const [pcStr, indices] of Object.entries(byPetalCount)) {
+          const pc = parseInt(pcStr);
+          const baseGeo = buildFlowerHeadGeometry(pc);
+          const instGeo = new THREE.InstancedBufferGeometry().copy(baseGeo);
+          instGeo.instanceCount = indices.length;
+
+          const idxArr = new Float32Array(indices.length);
+          const hArr = new Float32Array(indices.length);
+          indices.forEach((ii, j) => {
+            idxArr[j] = flowerIndex[ii];
+            hArr[j] = flowerHeight[ii];
+          });
+
+          instGeo.setAttribute(
+            "aFlowerIndex",
+            new THREE.InstancedBufferAttribute(idxArr, 1),
+          );
+          instGeo.setAttribute(
+            "aFlowerHeight",
+            new THREE.InstancedBufferAttribute(hArr, 1),
+          );
+
+          const mesh = new THREE.InstancedMesh(
+            instGeo,
+            _petalMat,
+            indices.length,
+          );
+          mesh.frustumCulled = false;
+          mesh.renderOrder = 1;
+          indices.forEach((ii, j) => {
+            dummy.position.set(off[ii * 3], flowerHeight[ii], off[ii * 3 + 1]);
+            dummy.rotation.set(0, flowerRotation[ii], 0);
+            dummy.scale.setScalar(1);
+            dummy.updateMatrix();
+            mesh.setMatrixAt(j, dummy.matrix);
+          });
+          mesh.instanceMatrix.needsUpdate = true;
+          scene.add(mesh);
+          flowerHeadMeshes.push(mesh);
+          baseGeo.dispose();
+        }
+
+        // ── Center domes ──────────────────────────────────────────────────────────
+        const cRadius = PARAMS.centerRadius;
+        const cDomeH = PARAMS.centerDomeHeight;
+        const cGeo = new THREE.SphereGeometry(
+          cRadius,
+          12,
+          6,
+          0,
+          Math.PI * 2,
+          0,
+          Math.PI * 0.5,
+        );
+        cGeo.scale(1, Math.max(0.1, cDomeH / Math.max(cRadius, 0.01)), 1);
+        cGeo.translate(0, 0.0005, 0);
+        const cInstGeo = new THREE.InstancedBufferGeometry().copy(cGeo);
+        cInstGeo.instanceCount = count;
+        cInstGeo.setAttribute(
+          "aFlowerIndex",
+          new THREE.InstancedBufferAttribute(flowerIndex.slice(), 1),
+        );
+        cInstGeo.setAttribute(
+          "aFlowerHeight",
+          new THREE.InstancedBufferAttribute(flowerHeight.slice(), 1),
+        );
+        centerMesh = new THREE.InstancedMesh(cInstGeo, _centerMat, count);
+        centerMesh.frustumCulled = false;
+        centerMesh.renderOrder = -1;
+        for (let i = 0; i < count; i++) {
+          dummy.position.set(off[i * 3], flowerHeight[i], off[i * 3 + 1]);
+          dummy.rotation.set(0, flowerRotation[i], 0);
+          dummy.scale.setScalar(1);
+          dummy.updateMatrix();
+          centerMesh.setMatrixAt(i, dummy.matrix);
+        }
+        centerMesh.instanceMatrix.needsUpdate = true;
+        scene.add(centerMesh);
+        cGeo.dispose();
+
+        // ── Stems ─────────────────────────────────────────────────────────────────
+        const sGeo = new THREE.CylinderGeometry(
+          PARAMS.stemRadius * 1.1,
+          PARAMS.stemRadius,
+          1,
+          6,
+          16,
+        );
+        const sInstGeo = new THREE.InstancedBufferGeometry().copy(sGeo);
+        sInstGeo.instanceCount = count;
+        sInstGeo.setAttribute(
+          "aStemIndex",
+          new THREE.InstancedBufferAttribute(flowerIndex.slice(), 1),
+        );
+        sInstGeo.setAttribute(
+          "aStemHeight",
+          new THREE.InstancedBufferAttribute(flowerHeight.slice(), 1),
+        );
+        stemMesh = new THREE.InstancedMesh(sInstGeo, _stemMat, count);
+        stemMesh.frustumCulled = false;
+        for (let i = 0; i < count; i++) {
+          const h = flowerHeight[i];
+          dummy.position.set(off[i * 3], h * 0.5, off[i * 3 + 1]);
+          dummy.scale.set(1, h, 1);
+          dummy.rotation.set(0, flowerRotation[i], 0);
+          dummy.updateMatrix();
+          stemMesh.setMatrixAt(i, dummy.matrix);
+        }
+        stemMesh.instanceMatrix.needsUpdate = true;
+        scene.add(stemMesh);
+        sGeo.dispose();
+
+        // ── Leaves (2 per flower) ─────────────────────────────────────────────────
+        const lScale = Math.max(0.01, PARAMS.stemLeafScale);
+        const lGeo = new THREE.PlaneGeometry(1, 1, 1, 1);
+        lGeo.scale(lScale * 0.4, lScale, 1);
+        lGeo.translate(0, -0.5 * lScale, 0);
+        lGeo.rotateX(-Math.PI / 2);
+        const lInstGeo = new THREE.InstancedBufferGeometry().copy(lGeo);
+        lInstGeo.instanceCount = count * 2;
+        leafMesh = new THREE.InstancedMesh(lInstGeo, _leafMat, count * 2);
+        leafMesh.frustumCulled = false;
+        leafMesh.renderOrder = 0;
+        const stemR = PARAMS.stemRadius * 1.05;
+        for (let i = 0; i < count; i++) {
+          const h = flowerHeight[i];
+          for (let L = 0; L < 2; L++) {
+            const angle = hash(i * 47 + L * 13) * Math.PI * 2;
+            const stemY = h * (0.12 + hash(i * 53 + L * 17) * 0.38);
+            const tilt = (hash(i * 59 + L * 19) - 0.5) * 0.5;
+            dummy.position.set(
+              off[i * 3] + stemR * Math.cos(angle),
+              stemY,
+              off[i * 3 + 1] + stemR * Math.sin(angle),
+            );
+            dummy.rotation.set(tilt, angle, 0);
+            dummy.scale.setScalar(1);
+            dummy.updateMatrix();
+            leafMesh.setMatrixAt(i * 2 + L, dummy.matrix);
+          }
+        }
+        leafMesh.instanceMatrix.needsUpdate = true;
+        scene.add(leafMesh);
+        lGeo.dispose();
+      }
+
+      // ─── Load petal texture → init materials → first build ───────────────────────
+      const texLoader = new THREE.TextureLoader();
+      texLoader.load(
+        "./textures/petal-alpha.png",
+        (tex) => {
+          _petalTex = tex;
+          initMaterials();
+          rebuildFlowers();
+        },
+        undefined,
+        (err) => {
+          console.warn("Petal texture failed, using fallback:", err);
+          _petalTex = null;
+          initMaterials();
+          rebuildFlowers();
+        },
+      );
+
+      // ─── Camera ───────────────────────────────────────────────────────────────────
+      const camera = new THREE.PerspectiveCamera(
+        50,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        200,
+      );
+      camera.position.set(3, 1.8, 7);
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.08;
+      controls.target.set(0, 0, 0);
+      controls.update();
+
+      // ─── GUI ──────────────────────────────────────────────────────────────────────
+      const gui = new GUI({ title: "Flower Field — WebGPU", width: 280 });
+      gui.domElement.style.cssText =
+        "position:fixed;top:12px;right:12px;z-index:30;max-height:90vh;overflow-y:auto;";
+
+      // Helpers: some changes need a full geometry rebuild; others just update uniforms
+      const onRebuild = () => rebuildFlowers();
+      const onGround = (v) => uGroundColor.value.set(v);
+
+      const fField = gui.addFolder("Field");
+      fField.add(PARAMS, "flowerDensity", 1000, 15000, 500).onChange(onRebuild);
+      fField.add(PARAMS, "fieldSize", 10, 40, 2).onChange(onRebuild);
+      fField.add(PARAMS, "flowerHeight", 0.4, 1.5, 0.05).onChange(onRebuild);
+      fField.add(PARAMS, "showGrid").onChange((v) => {
+        grid.visible = v;
+      });
+
+      const fFlower = gui.addFolder("Flower");
+      fFlower.add(PARAMS, "petalCountMin", 3, 8, 1).onChange(onRebuild);
+      fFlower.add(PARAMS, "petalCountMax", 4, 12, 1).onChange(onRebuild);
+      fFlower.add(PARAMS, "petalScale", 0.12, 0.4, 0.02).onChange(onRebuild);
+      fFlower.add(PARAMS, "petalTilt", 0, 0.6, 0.02).onChange(onRebuild);
+      fFlower.add(PARAMS, "centerRadius", 0.04, 0.15, 0.01).onChange(onRebuild);
+      fFlower
+        .add(PARAMS, "centerDomeHeight", 0.01, 0.06, 0.005)
+        .onChange(onRebuild);
+      fFlower
+        .addColor(PARAMS, "petalColorBase")
+        .onChange((v) => uPetalColorBase.value.set(v));
+      fFlower
+        .addColor(PARAMS, "petalColorTip")
+        .onChange((v) => uPetalColorTip.value.set(v));
+      fFlower.add(PARAMS, "petalGradientBlend", 0, 1, 0.05).onChange((v) => {
+        uGradientBlend.value = v;
+      });
+      fFlower
+        .addColor(PARAMS, "centerColor")
+        .onChange((v) => uCenterColor.value.set(v));
+      fFlower.add(PARAMS, "stemRadius", 0.005, 0.03, 0.002).onChange(onRebuild);
+      fFlower.add(PARAMS, "stemBaseBend", 0, 0.2, 0.01).onChange((v) => {
+        uStemBaseBend.value = v;
+      });
+      fFlower.add(PARAMS, "stemLeafScale", 0, 0.3, 0.02).onChange(onRebuild);
+      fFlower
+        .addColor(PARAMS, "stemColor")
+        .onChange((v) => uStemColorBase.value.set(v));
+      fFlower
+        .addColor(PARAMS, "stemColorTop")
+        .onChange((v) => uStemColorTop.value.set(v));
+
+      const fLight = gui.addFolder("Lighting");
+      fLight.add(PARAMS, "sunAzimuth", 0, 360, 5).onChange(applySun);
+      fLight.add(PARAMS, "sunElevation", 0, 90, 2).onChange(applySun);
+      fLight.add(PARAMS, "sunIntensity", 0.5, 4, 0.1).onChange(applySun);
+      fLight.add(PARAMS, "fillLightIntensity", 0, 1.5, 0.1).onChange(applySun);
+      fLight.add(PARAMS, "ambIntensity", 0.2, 1.5, 0.1).onChange(applySun);
+
+      const fRealism = gui.addFolder("Realism");
+      fRealism.add(PARAMS, "subsurfaceStrength", 0, 0.8, 0.05).onChange((v) => {
+        uSubsurfaceStr.value = v;
+      });
+      fRealism.add(PARAMS, "groundOcclusionStr", 0, 0.8, 0.05).onChange((v) => {
+        uGroundOccStr.value = v;
+      });
+      fRealism.add(PARAMS, "groundColorBleed", 0, 0.4, 0.02).onChange((v) => {
+        uGroundBleed.value = v;
+      });
+      fRealism.add(PARAMS, "petalNoiseStr", 0, 0.2, 0.01).onChange((v) => {
+        uPetalNoiseStr.value = v;
+      });
+      fRealism.add(PARAMS, "normalMapStrength", 0, 1, 0.05).onChange((v) => {
+        uNormalMapStr.value = v;
+      });
+
+      const fWind = gui.addFolder("Wind");
+      fWind.add(PARAMS, "windDir", 0, Math.PI * 2, 0.1).onChange((v) => {
+        uWindDir.value = v;
+      });
+      fWind.add(PARAMS, "windSpeed", 0.2, 3, 0.1).onChange((v) => {
+        uWindSpeed.value = v;
+      });
+      fWind.add(PARAMS, "windStr", 0, 0.4, 0.02).onChange((v) => {
+        uWindStr.value = v;
+      });
+
+      // ─── Render loop ──────────────────────────────────────────────────────────────
+      // No manual uniform updates needed — TSL time auto-ticks, others update on GUI change
+      renderer.setAnimationLoop(() => {
+        controls.update();
+        renderer.render(scene, camera);
+      });
+
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>
