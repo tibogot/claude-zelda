@@ -290,6 +290,7 @@
         max,
         exp,
         saturate,
+        sqrt,
       } from "three/tsl";
       import { bloom } from "three/addons/tsl/display/BloomNode.js";
       import { fxaa } from "three/addons/tsl/display/FXAANode.js";
@@ -792,7 +793,7 @@
       const _makeSlotTex = (r, g, b) => {
         const canvas = document.createElement("canvas");
         canvas.width = canvas.height = 256; // fixed size — avoids GPU texture recreation on load
-        const ctx2d = canvas.getContext("2d");
+        const ctx2d = canvas.getContext("2d", { willReadFrequently: true });
         ctx2d.fillStyle = `rgb(${r},${g},${b})`;
         ctx2d.fillRect(0, 0, 256, 256);
         const t = new THREE.Texture(canvas);
@@ -827,19 +828,36 @@
           uHasNormal: uniform(0),
           uHasORM: uniform(0),
         },
-        {
-          name: "Rock",
-          uvScale: 20.0,
-          initAlbedo: "textures/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_basecolor.png",
-          initNormal: "textures/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_normal.png",
-          albedoTex: _makeSlotTex(120, 100, 80),
-          normalTex: _makeSlotTex(128, 128, 255),
-          ormTex: _makeSlotTex(255, 128, 0),
-          uUVScale: uniform(20.0),
-          uHasAlbedo: uniform(1),
-          uHasNormal: uniform(0),
-          uHasORM: uniform(0),
-        },
+        (() => {
+          // Rock ORM DataTexture: R=AO, G=roughness, B=normalX, A=normalY
+          // DataTexture avoids canvas premultiplied-alpha corrupting BA channels
+          const _d = new Uint8Array(256 * 256 * 4);
+          for (let i = 0; i < _d.length; i += 4) {
+            _d[i] = 255; _d[i+1] = 200; _d[i+2] = 128; _d[i+3] = 128;
+          }
+          const _ot = new THREE.DataTexture(_d, 256, 256, THREE.RGBAFormat);
+          _ot.wrapS = _ot.wrapT = THREE.RepeatWrapping;
+          _ot.minFilter = _ot.magFilter = THREE.LinearFilter;
+          _ot.needsUpdate = true;
+          return {
+            name: "Rock",
+            uvScale: 20.0,
+            normalStr: 1.0,
+            initAlbedo: "textures/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_basecolor.png",
+            initNormal: "textures/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_normal.png",
+            initAO: "textures/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_ambientOcclusion.png",
+            initRoughness: "textures/Cobblestone_Irregular_Floor_001_SD/Cobblestone_Irregular_Floor_001_roughness.png",
+            albedoTex: _makeSlotTex(120, 100, 80),
+            ormTex: _ot, // RGBA: R=AO, G=roughness, B=normalX(0-1), A=normalY(0-1)
+            uUVScale: uniform(20.0),
+            uNormalStr: uniform(1.0),
+            uHasAlbedo: uniform(1),
+            uHasNormal: uniform(0),
+            uHasAO: uniform(0),
+            uHasRough: uniform(0),
+            uHasORM: uniform(0),
+          };
+        })(),
         {
           name: "Custom",
           uvScale: 2.0,
@@ -2268,6 +2286,52 @@
           slotTex.wrapS = slotTex.wrapT = THREE.RepeatWrapping;
           slotTex.needsUpdate = true;
         };
+        // Pack a greyscale image into one channel of a DataTexture (avoids premult-alpha issues)
+        const _packChannelIntoDT = (dt, imgEl, channelIdx) => {
+          const size = dt.image.width;
+          const tmp = document.createElement("canvas");
+          tmp.width = tmp.height = size;
+          const tmpCtx = tmp.getContext("2d", { willReadFrequently: true });
+          tmpCtx.drawImage(imgEl, 0, 0, size, size);
+          const src = tmpCtx.getImageData(0, 0, size, size).data;
+          const dst = dt.image.data;
+          for (let i = 0, n = dst.length >> 2; i < n; i++)
+            dst[i * 4 + channelIdx] = src[i * 4];
+          dt.needsUpdate = true;
+        };
+        // Pack a normal map (RG→BA) into a DataTexture, reconstructing Z in shader later
+        const _packNormalIntoDT = (dt, imgEl) => {
+          const size = dt.image.width;
+          const tmp = document.createElement("canvas");
+          tmp.width = tmp.height = size;
+          const tmpCtx = tmp.getContext("2d", { willReadFrequently: true });
+          tmpCtx.drawImage(imgEl, 0, 0, size, size);
+          const src = tmpCtx.getImageData(0, 0, size, size).data;
+          const dst = dt.image.data;
+          for (let i = 0, n = dst.length >> 2; i < n; i++) {
+            dst[i * 4 + 2] = src[i * 4];     // normal R → B
+            dst[i * 4 + 3] = src[i * 4 + 1]; // normal G → A
+          }
+          dt.needsUpdate = true;
+        };
+        // Pack a greyscale image into one channel (0=R,1=G,2=B) of an existing canvas texture
+        const _packChannelIntoTex = (slotTex, imgEl, channelIdx) => {
+          const canvas = slotTex.image;
+          const size = canvas.width;
+          const ctx2d = canvas.getContext("2d");
+          const tmp = document.createElement("canvas");
+          tmp.width = tmp.height = size;
+          const tmpCtx = tmp.getContext("2d", { willReadFrequently: true });
+          tmpCtx.drawImage(imgEl, 0, 0, size, size);
+          const src = tmpCtx.getImageData(0, 0, size, size);
+          const dst = ctx2d.getImageData(0, 0, size, size);
+          for (let i = 0; i < dst.data.length; i += 4)
+            dst.data[i + channelIdx] = src.data[i]; // copy R of src → target channel
+          ctx2d.putImageData(dst, 0, 0);
+          slotTex.colorSpace = THREE.LinearSRGBColorSpace;
+          slotTex.wrapS = slotTex.wrapT = THREE.RepeatWrapping;
+          slotTex.needsUpdate = true;
+        };
         IMG_TEX_SLOTS.forEach((slot) => {
           if (slot.initAlbedo) {
             _slotLoader.load(slot.initAlbedo, (tex) => {
@@ -2277,8 +2341,26 @@
           }
           if (slot.initNormal) {
             _slotLoader.load(slot.initNormal, (tex) => {
-              _drawOntoTex(slot.normalTex, tex.image, THREE.LinearSRGBColorSpace);
+              if (slot.ormTex?.isDataTexture) {
+                _packNormalIntoDT(slot.ormTex, tex.image); // normal RG → ormTex BA
+              } else if (slot.normalTex) {
+                _drawOntoTex(slot.normalTex, tex.image, THREE.LinearSRGBColorSpace);
+              }
               slot.uHasNormal.value = 1;
+            });
+          }
+          if (slot.initAO && slot.ormTex) {
+            _slotLoader.load(slot.initAO, (tex) => {
+              if (slot.ormTex.isDataTexture) _packChannelIntoDT(slot.ormTex, tex.image, 0);
+              else _packChannelIntoTex(slot.ormTex, tex.image, 0);
+              slot.uHasAO.value = 1;
+            });
+          }
+          if (slot.initRoughness && slot.ormTex) {
+            _slotLoader.load(slot.initRoughness, (tex) => {
+              if (slot.ormTex.isDataTexture) _packChannelIntoDT(slot.ormTex, tex.image, 1);
+              else _packChannelIntoTex(slot.ormTex, tex.image, 1);
+              slot.uHasRough.value = 1;
             });
           }
         });
@@ -3138,22 +3220,39 @@
             texture(s3.albedoTex, iuv3).rgb,
             imgSplat.a.mul(s3.uHasAlbedo),
           );
+          // ── Rock ORM — R=AO darkens crevices, G=roughness used in roughnessNode ──
+          const rockAO = texture(s2.ormTex, iuv2).r;
+          col = col.mul(mix(float(1.0), rockAO, imgSplat.b.mul(s2.uHasAO)));
           return col;
         })();
 
-        // ── Normal node — terrain baked normal blended with Rock image normal ──
+        // ── Normal node — terrain baked normal blended with Rock normal (packed into ormTex.ba) ──
         splatMat.normalNode = (() => {
           const _s2 = IMG_TEX_SLOTS[2];
           const _terrainScaleN = float(1.0 / TERRAIN_SIZE);
           const iuv2n = positionWorld.xz.mul(_terrainScaleN).mul(_s2.uUVScale);
           const imgSplatN = texture(imgSplatTex, getSplatUV());
           const terrainNm = texture(normalMapTex, getSplatUV());
-          const rockNm = texture(_s2.normalTex, iuv2n);
-          const rockWeight = imgSplatN.b.mul(_s2.uHasNormal);
-          return normalMap(mix(terrainNm, rockNm, rockWeight), vec2(uNormalScale, uNormalScale));
+          // Decode normal XY from ormTex.ba (0-1 → -1..+1), reconstruct Z
+          const ormS = texture(_s2.ormTex, iuv2n);
+          const nmX = ormS.b.mul(2.0).sub(1.0);
+          const nmY = ormS.a.mul(2.0).sub(1.0);
+          const nmZ = sqrt(max(float(0.0), float(1.0).sub(nmX.mul(nmX)).sub(nmY.mul(nmY))));
+          // Re-encode to 0-1 for normalMap()
+          const rockNm = vec4(nmX.mul(0.5).add(0.5), nmY.mul(0.5).add(0.5), nmZ.mul(0.5).add(0.5), float(1.0));
+          const rockWeight = imgSplatN.b.mul(_s2.uHasNormal).mul(_s2.uNormalStr);
+          return normalMap(mix(terrainNm, rockNm.xyz, rockWeight), vec2(uNormalScale, uNormalScale));
         })();
 
-        // roughnessNode omitted for now (saves 4 GPU sampler slots — ORM.g blending can be added later)
+        // ── Roughness node — terrain default blended with Rock roughness map ──
+        splatMat.roughnessNode = (() => {
+          const _s2 = IMG_TEX_SLOTS[2];
+          const _terrainScaleR = float(1.0 / TERRAIN_SIZE);
+          const iuv2r = positionWorld.xz.mul(_terrainScaleR).mul(_s2.uUVScale);
+          const imgSplatR = texture(imgSplatTex, getSplatUV());
+          const rockRough = texture(_s2.ormTex, iuv2r).g; // G channel = roughness
+          return mix(float(0.85), rockRough, imgSplatR.b.mul(_s2.uHasRough));
+        })();
 
         // splatMat ready — tile grid is the default view. Toggle with ~ key.
         const toggleTerrainMat = () => {
@@ -5165,15 +5264,46 @@
             const file = e.target.files[0]; if (!file) return;
             const url = URL.createObjectURL(file);
             new THREE.TextureLoader().load(url, (loaded) => {
-              _drawOntoTex(_rockSlot.normalTex, loaded.image, THREE.LinearSRGBColorSpace);
+              _packNormalIntoDT(_rockSlot.ormTex, loaded.image); // RG → ormTex.ba
               _rockSlot.uHasNormal.value = 1;
               URL.revokeObjectURL(url);
             });
           };
           inp.click();
         });
+        rockFolder.addBinding(_rockSlot, "normalStr", {
+          label: "Normal strength", min: 0, max: 3, step: 0.05,
+        }).on("change", (ev) => { _rockSlot.uNormalStr.value = ev.value; });
+        rockFolder.addButton({ title: "Load AO map" }).on("click", () => {
+          const inp = document.createElement("input");
+          inp.type = "file"; inp.accept = "image/*";
+          inp.onchange = (e) => {
+            const file = e.target.files[0]; if (!file) return;
+            const url = URL.createObjectURL(file);
+            new THREE.TextureLoader().load(url, (loaded) => {
+              _packChannelIntoDT(_rockSlot.ormTex, loaded.image, 0); // AO → R
+              _rockSlot.uHasAO.value = 1;
+              URL.revokeObjectURL(url);
+            });
+          };
+          inp.click();
+        });
+        rockFolder.addButton({ title: "Load Roughness map" }).on("click", () => {
+          const inp = document.createElement("input");
+          inp.type = "file"; inp.accept = "image/*";
+          inp.onchange = (e) => {
+            const file = e.target.files[0]; if (!file) return;
+            const url = URL.createObjectURL(file);
+            new THREE.TextureLoader().load(url, (loaded) => {
+              _packChannelIntoDT(_rockSlot.ormTex, loaded.image, 1); // roughness → G
+              _rockSlot.uHasRough.value = 1;
+              URL.revokeObjectURL(url);
+            });
+          };
+          inp.click();
+        });
         rockFolder.addBinding(_rockSlot, "uvScale", {
-          label: "UV Scale", min: 0.1, max: 30, step: 0.1,
+          label: "UV Scale", min: 0.1, max: 100, step: 0.1,
         }).on("change", (ev) => { _rockSlot.uUVScale.value = ev.value; });
         rockFolder.addButton({ title: "Erase Rock" }).on("click", () => {
           currentBiome = "rock";
