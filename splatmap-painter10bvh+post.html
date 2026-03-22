@@ -331,6 +331,16 @@
         GRASS_DENSITY_MID,
         NEAR_PATCH_SIZE,
       } from "./grass-painter7.js";
+      import {
+        createFlowerUniforms,
+        createFlowerGeometry,
+        createFlowerMaterials,
+        setupFlowerPatches,
+        FLOWER_PATCH_SIZE,
+        FLOWER_DENSITY,
+        FLOWER_GRID_SIZE,
+        FLOWER_MAX_DIST,
+      } from "./flowers.js";
       import { createUniforms } from "./uniforms-sandbox.js";
       import { setSeed, randRange } from "./rng.js";
       import { createTreeSystem } from "./tree-painter7.js";
@@ -487,6 +497,15 @@
       });
       grassDensityCtx.fillStyle = "#000";
       grassDensityCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+
+      // ─── FLOWER DENSITY CANVAS ────────────────
+      const flowerDensityCanvas = document.createElement("canvas");
+      flowerDensityCanvas.width = flowerDensityCanvas.height = SPLAT_RES;
+      const flowerDensityCtx = flowerDensityCanvas.getContext("2d", {
+        willReadFrequently: true,
+      });
+      flowerDensityCtx.fillStyle = "#000";
+      flowerDensityCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
 
       // ─── MEADOW DENSITY CANVAS ────────────────
       const meadowCanvas = document.createElement("canvas");
@@ -685,6 +704,10 @@
       let grassPatchSystem = null;
       let grassUniforms = null;
       let grassEraseMode = false;
+      let flowerDensityTex = null;
+      let flowerPatchSystem = null;
+      let flowerCtx = null;
+      let flowerEraseMode = false;
       let meadowDensityTex = null;
       let cliffDensityTex = null;
       let cliffHeightTex = null;
@@ -1285,6 +1308,24 @@
           grassDensityCtx.fill();
         }
         if (grassDensityTex) grassDensityTex.needsUpdate = true;
+      }
+
+      // ─── FLOWER DENSITY PAINT ────────────────
+      function paintFlowersAt(wx, wz, erase) {
+        const { u, v } = worldToUV(wx, wz);
+        const cx = u * SPLAT_RES, cy = v * SPLAT_RES;
+        if (PARAMS.paintBrush === "smear") {
+          _smearCanvas(flowerDensityCtx, cx, cy);
+        } else {
+          const alpha = brushStr / 100;
+          const [fr, fg, fb] = erase ? [0, 0, 0] : [255, 255, 255];
+          flowerDensityCtx.globalCompositeOperation = "source-over";
+          flowerDensityCtx.fillStyle = _radialGrad(flowerDensityCtx, cx, cy, fr, fg, fb, alpha);
+          flowerDensityCtx.beginPath();
+          flowerDensityCtx.arc(cx, cy, brushSize, 0, PI * 2);
+          flowerDensityCtx.fill();
+        }
+        if (flowerDensityTex) flowerDensityTex.needsUpdate = true;
       }
 
       // ─── CLIFF GRASS DENSITY PAINT ───────────
@@ -2451,6 +2492,11 @@
         meadowDensityTex.wrapS = meadowDensityTex.wrapT =
           THREE.ClampToEdgeWrapping;
 
+        // ── FLOWER DENSITY TEX ────────────────────────────────────────────
+        flowerDensityTex = new THREE.CanvasTexture(flowerDensityCanvas);
+        flowerDensityTex.wrapS = flowerDensityTex.wrapT =
+          THREE.ClampToEdgeWrapping;
+
         // ── CLIFF DENSITY TEX ─────────────────────────────────────────────
         cliffDensityTex = new THREE.CanvasTexture(cliffDensityCanvas);
         cliffDensityTex.wrapS = cliffDensityTex.wrapT =
@@ -2832,6 +2878,29 @@
             maxDistance: grassParams.maxDistance,
           },
         );
+
+        // ── FLOWER PATCH SYSTEM ───────────────────────────────────────────────
+        {
+          const petalTex = new THREE.TextureLoader().load("./textures/petal-alpha.png");
+          flowerCtx = createFlowerUniforms({ terrainSize: TERRAIN_SIZE });
+          flowerCtx.uHeightTex  = heightTex;
+          flowerCtx.uDensityTex = flowerDensityTex;
+          const flowerGeos = createFlowerGeometry(FLOWER_DENSITY, FLOWER_PATCH_SIZE);
+          const flowerMats = createFlowerMaterials(petalTex, flowerCtx);
+          const flowerGroup = new THREE.Group();
+          scene.add(flowerGroup);
+          flowerPatchSystem = setupFlowerPatches(
+            scene,
+            camera,
+            flowerGroup,
+            { ...flowerGeos, ...flowerMats },
+            {
+              PATCH_SIZE: FLOWER_PATCH_SIZE,
+              GRID_SIZE: FLOWER_GRID_SIZE,
+              MAX_DIST: FLOWER_MAX_DIST,
+            },
+          );
+        }
 
         // ── CLIFF GRASS PATCH SYSTEM (Layer 2) ───────────────────────────────
         // Reuses the same geometry and uniforms as terrain grass but with
@@ -4525,6 +4594,7 @@
             "Path [L]": "path",
             "Water [W]": "water",
             "Cliffs [C]": "cliffs",
+            "Flowers [B]": "flowers",
             "Play [F]": "play",
           },
         });
@@ -5641,6 +5711,66 @@
           reader.readAsArrayBuffer(e.target.files[0]);
         });
 
+        // ── Flowers folder ──
+        const flowerFolder = pane.addFolder({
+          title: "Flowers  [ B ]",
+          expanded: true,
+        });
+        const flowerDensityFileInput = document.createElement("input");
+        flowerDensityFileInput.type = "file";
+        flowerDensityFileInput.accept = ".bin,image/png";
+        flowerDensityFileInput.style.display = "none";
+        document.body.appendChild(flowerDensityFileInput);
+        const flowerErasePARAMS = { erase: false };
+        flowerFolder
+          .addBinding(flowerErasePARAMS, "erase", { label: "Erase (or Shift)" })
+          .on("change", (e) => {
+            flowerEraseMode = e.value;
+          });
+        flowerFolder.addButton({ title: "Clear flowers" }).on("click", () => {
+          flowerDensityCtx.fillStyle = "#000";
+          flowerDensityCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+          if (flowerDensityTex) flowerDensityTex.needsUpdate = true;
+        });
+        flowerFolder.addButton({ title: "Fill all flowers" }).on("click", () => {
+          flowerDensityCtx.fillStyle = "#fff";
+          flowerDensityCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+          if (flowerDensityTex) flowerDensityTex.needsUpdate = true;
+        });
+        flowerFolder.addButton({ title: "Save density map" }).on("click", () => {
+          const pixels = flowerDensityCtx.getImageData(
+            0,
+            0,
+            SPLAT_RES,
+            SPLAT_RES,
+          ).data;
+          const blob = new Blob([pixels.buffer], {
+            type: "application/octet-stream",
+          });
+          const a = document.createElement("a");
+          a.download = "flower-density.bin";
+          a.href = URL.createObjectURL(blob);
+          a.click();
+        });
+        flowerFolder
+          .addButton({ title: "Load density map" })
+          .on("click", () => flowerDensityFileInput.click());
+        flowerDensityFileInput.addEventListener("change", (e) => {
+          if (!e.target.files[0]) return;
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            const loaded = new Uint8ClampedArray(ev.target.result);
+            const imgData = flowerDensityCtx.createImageData(
+              SPLAT_RES,
+              SPLAT_RES,
+            );
+            imgData.data.set(loaded.subarray(0, imgData.data.length));
+            flowerDensityCtx.putImageData(imgData, 0, 0);
+            if (flowerDensityTex) flowerDensityTex.needsUpdate = true;
+          };
+          reader.readAsArrayBuffer(e.target.files[0]);
+        });
+
         // ── Cliff Grass folder ──
         const cliffGrassErasePARAMS = { erase: false };
         const cliffGrassFolder = pane.addFolder({
@@ -6592,6 +6722,8 @@
             setMode(currentMode === "place" ? "view" : "place");
           if (e.code === "KeyG")
             setMode(currentMode === "grass" ? "view" : "grass");
+          if (e.code === "KeyB")
+            setMode(currentMode === "flowers" ? "view" : "flowers");
           if (e.code === "KeyT" && currentMode !== "water")
             setMode(currentMode === "trees" ? "view" : "trees");
           if (e.code === "KeyN")
@@ -6731,6 +6863,8 @@
           if (currentMode === "path") pathPaintAt(p.x, p.z);
           if (currentMode === "grass")
             paintGrassAt(p.x, p.z, grassEraseMode || e.shiftKey);
+          if (currentMode === "flowers")
+            paintFlowersAt(p.x, p.z, flowerEraseMode || e.shiftKey);
           if (currentMode === "cliffgrass")
             paintCliffGrassAt(p.x, p.z, cliffGrassEraseMode || e.shiftKey);
           if (currentMode === "trees")
@@ -7170,13 +7304,20 @@
                 playerPos.y,
                 playerPos.z,
               );
+            // Feed player pos to flower interaction
+            if (flowerCtx)
+              flowerCtx.uPlayerPos.value.set(
+                playerPos.x,
+                playerPos.y,
+                playerPos.z,
+              );
           }
 
           if (grassUniforms) grassUniforms.uTime.value = elapsed;
           uWaterTime.value = elapsed;
           uWCamXZ.value.set(camera.position.x, camera.position.z);
           _syncRipples();
-          if (grassPatchSystem || cliffGrassPatchSystem) {
+          if (grassPatchSystem || cliffGrassPatchSystem || flowerPatchSystem) {
             camera.updateMatrixWorld();
             _grassProjMatrix.multiplyMatrices(
               camera.projectionMatrix,
@@ -7187,6 +7328,8 @@
               grassPatchSystem.update(camera.position, _grassFrustum);
             if (cliffGrassPatchSystem)
               cliffGrassPatchSystem.update(camera.position, _grassFrustum);
+            if (flowerPatchSystem)
+              flowerPatchSystem.update(camera.position, _grassFrustum);
           }
           // Sync lighting & sky from PARAMS every frame
           const sunDir = sunDirectionFromAngles(
