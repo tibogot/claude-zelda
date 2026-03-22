@@ -573,6 +573,7 @@
         terraceStep: 8,
         terraceSharpness: 0.7,
         paintBrush: "smooth",
+        brushFalloff: "smooth", // "smooth" | "linear" | "sphere" | "hard"
         slopeStart: 0.05,
         slopeEnd: 0.7,
         debugColors: false,
@@ -1024,14 +1025,32 @@
         return s / m;
       }
 
+      // ─── UNIVERSAL FALLOFF ───────────────────────────────────────────
+      function brushFalloff(t) {
+        if (t >= 1) return 0;
+        if (t <= 0) return 1;
+        switch (PARAMS.brushFalloff) {
+          case "linear": return 1 - t;
+          case "sphere": return Math.sqrt(1 - t * t);
+          case "hard":   return 1; // constant, sharp edge
+          default:       return (1 + Math.cos(t * Math.PI)) * 0.5; // smooth cosine
+        }
+      }
+
+      // Build a radial gradient using the current falloff curve
+      function _radialGrad(ctx, cx, cy, r, g, b, alpha) {
+        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, brushSize);
+        [0, 0.25, 0.5, 0.75, 0.95].forEach(t => {
+          grad.addColorStop(t, `rgba(${r},${g},${b},${alpha * brushFalloff(t)})`);
+        });
+        grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+        return grad;
+      }
+
       // ─── PAINT BRUSH HELPERS ────────────────────────────────────────
       function _paintSmooth(ctx, cx, cy, r, g, b, alpha) {
-        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, brushSize);
-        grad.addColorStop(0, `rgba(${r},${g},${b},${alpha})`);
-        grad.addColorStop(0.5, `rgba(${r},${g},${b},${alpha * 0.55})`);
-        grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
         ctx.globalCompositeOperation = "source-over";
-        ctx.fillStyle = grad;
+        ctx.fillStyle = _radialGrad(ctx, cx, cy, r, g, b, alpha);
         ctx.beginPath();
         ctx.arc(cx, cy, brushSize, 0, PI * 2);
         ctx.fill();
@@ -1177,26 +1196,9 @@
         const cx = u * SPLAT_RES,
           cy = v * SPLAT_RES;
         const alpha = brushStr / 100;
-        const grad = grassDensityCtx.createRadialGradient(
-          cx,
-          cy,
-          0,
-          cx,
-          cy,
-          brushSize,
-        );
-        if (erase) {
-          grad.addColorStop(0, `rgba(0,0,0,${alpha})`);
-          grad.addColorStop(0.5, `rgba(0,0,0,${alpha * 0.55})`);
-          grad.addColorStop(1, `rgba(0,0,0,0)`);
-          grassDensityCtx.globalCompositeOperation = "source-over";
-        } else {
-          grad.addColorStop(0, `rgba(255,255,255,${alpha})`);
-          grad.addColorStop(0.5, `rgba(255,255,255,${alpha * 0.55})`);
-          grad.addColorStop(1, `rgba(255,255,255,0)`);
-          grassDensityCtx.globalCompositeOperation = "source-over";
-        }
-        grassDensityCtx.fillStyle = grad;
+        const [gr, gg, gb] = erase ? [0, 0, 0] : [255, 255, 255];
+        grassDensityCtx.globalCompositeOperation = "source-over";
+        grassDensityCtx.fillStyle = _radialGrad(grassDensityCtx, cx, cy, gr, gg, gb, alpha);
         grassDensityCtx.beginPath();
         grassDensityCtx.arc(cx, cy, brushSize, 0, PI * 2);
         grassDensityCtx.fill();
@@ -1209,19 +1211,9 @@
         const cx = u * SPLAT_RES,
           cy = v * SPLAT_RES;
         const alpha = brushStr / 100;
-        const grad = cliffDensityCtx.createRadialGradient(cx, cy, 0, cx, cy, brushSize);
-        if (erase) {
-          grad.addColorStop(0, `rgba(0,0,0,${alpha})`);
-          grad.addColorStop(0.5, `rgba(0,0,0,${alpha * 0.55})`);
-          grad.addColorStop(1, `rgba(0,0,0,0)`);
-          cliffDensityCtx.globalCompositeOperation = "source-over";
-        } else {
-          grad.addColorStop(0, `rgba(255,255,255,${alpha})`);
-          grad.addColorStop(0.5, `rgba(255,255,255,${alpha * 0.55})`);
-          grad.addColorStop(1, `rgba(255,255,255,0)`);
-          cliffDensityCtx.globalCompositeOperation = "source-over";
-        }
-        cliffDensityCtx.fillStyle = grad;
+        const [cr, cg, cb] = erase ? [0, 0, 0] : [255, 255, 255];
+        cliffDensityCtx.globalCompositeOperation = "source-over";
+        cliffDensityCtx.fillStyle = _radialGrad(cliffDensityCtx, cx, cy, cr, cg, cb, alpha);
         cliffDensityCtx.beginPath();
         cliffDensityCtx.arc(cx, cy, brushSize, 0, PI * 2);
         cliffDensityCtx.fill();
@@ -1284,7 +1276,7 @@
               dy = py - cy;
             const t = Math.sqrt(dx * dx + dy * dy) / brushSize;
             if (t >= 1) continue;
-            const falloff = (1 - t) * (1 - t);
+            const falloff = brushFalloff(t);
             const idx = (py * SPLAT_RES + px) * 4 + slotIdx; // R=0, G=1, B=2, A=3
             const cur = imgSplatData[idx] / 255;
             if (erase) {
@@ -1558,9 +1550,8 @@
                 );
                 delta = dir * flat * strength * 0.7;
               } else {
-                // smooth (default)
-                const f = 1 - t;
-                delta = dir * f * f * strength;
+                // raise/lower — respects brushFalloff curve
+                delta = dir * brushFalloff(t) * strength;
               }
               heightData[iz * VERTS + ix] += delta;
             }
@@ -4493,6 +4484,15 @@
             Smooth: "smooth",
             "FBM Splat": "fbm_splat",
             Scatter: "scatter",
+          },
+        });
+        brushFolder.addBinding(PARAMS, "brushFalloff", {
+          label: "Falloff",
+          options: {
+            Smooth: "smooth",
+            Linear: "linear",
+            Sphere: "sphere",
+            Hard: "hard",
           },
         });
 
