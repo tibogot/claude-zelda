@@ -718,6 +718,19 @@
           trainSpeed: 8,
           trainScale: 1,
         },
+        river: {
+          width: 8,
+          segments: 80,
+          flowSpeed: 0.15,
+          deepColor: "#1a4a6a",
+          shallowColor: "#5dbfaa",
+          highlightColor: "#c8ecff",
+          foamColor: "#ffffff",
+          foamWidth: 0.18,
+          opacity: 0.88,
+          heightOffset: 0.05,
+          selectedPointY: 0,
+        },
         ao: { intensity: 0.85, reach: 24, bias: 0.05, contrast: 1.4 },
         normalMap: { scale: 2.0 },
         erosion: {
@@ -745,6 +758,13 @@
       let splinePointMeshes = [];  // Sphere meshes for each control point
       let splineGroup = null;      // Group containing all spline visuals
       let splineTrainT = 0;        // Current position along curve (0–1)
+      // ── RIVER STATE ──
+      let riverPoints = [];
+      let riverSelectedIdx = -1;
+      let riverDragging = false;
+      let riverPointMeshes = [];
+      let riverGroup = null;
+      let riverMesh = null;
       let brushSize = 20;
       let brushStr = 60;
       let brushNoiseSeed = 0;
@@ -3737,6 +3757,16 @@
         const uWBLineIntensity = uniform(PARAMS.water.waterlineIntensity);
         const uWBLineColor   = uniform(new THREE.Color(PARAMS.water.foamColor));
 
+        // ── RIVER UNIFORMS ────────────────────────────────────────────────
+        const uRiverTime        = uniform(0.0);
+        const uRiverFlowSpeed   = uniform(PARAMS.river.flowSpeed);
+        const uRiverDeepColor   = uniform(new THREE.Color(PARAMS.river.deepColor));
+        const uRiverShallowColor= uniform(new THREE.Color(PARAMS.river.shallowColor));
+        const uRiverHighlight   = uniform(new THREE.Color(PARAMS.river.highlightColor));
+        const uRiverFoamColor   = uniform(new THREE.Color(PARAMS.river.foamColor));
+        const uRiverFoamWidth   = uniform(PARAMS.river.foamWidth);
+        const uRiverOpacity     = uniform(PARAMS.river.opacity);
+
         // ── SHORE DEPTH (heightTex approach — no depth render pass needed) ─
         // Returns how far terrain is ABOVE the water surface at this XZ.
         // Positive = terrain above water (potential shore); negative = terrain below water (open water).
@@ -3922,6 +3952,30 @@
           return vec4(finalColor, waterAlpha);
         });
 
+        // ── RIVER FRAG (UV-based directional flow) ───────────────────────
+        const buildRiverFrag = Fn(() => {
+          const uvCoord = uv();
+          // Flow: animate U axis downstream
+          const flowU  = uvCoord.x.sub(uRiverTime.mul(uRiverFlowSpeed));
+          const animUV = vec2(flowU, uvCoord.y);
+          // Two FBM layers for surface shimmer
+          const wave1 = _wFbm2(animUV.mul(6.0));
+          const wave2 = _wFbm2(animUV.mul(3.0).add(vec2(1.7, 3.1)));
+          const wave  = wave1.mul(0.6).add(wave2.mul(0.4));
+          // Depth colour: deep at centre (V=0.5), shallow at banks
+          const centerDist = abs(uvCoord.y.sub(0.5)).mul(2.0);
+          const depthColor = mix(uRiverDeepColor, uRiverShallowColor, pow(centerDist, float(0.6)));
+          // Shimmer
+          const shimmer = wave.sub(0.5).mul(0.18);
+          const surfaceColor = mix(depthColor, uRiverHighlight, clamp(shimmer.add(0.5), float(0), float(1)));
+          // Bank foam at V=0 and V=1 edges
+          const leftFoam  = smoothstep(uRiverFoamWidth, float(0), uvCoord.y);
+          const rightFoam = smoothstep(float(1).sub(uRiverFoamWidth), float(1), uvCoord.y);
+          const bankFoam  = max(leftFoam, rightFoam);
+          const finalColor = mix(surfaceColor, uRiverFoamColor, bankFoam.mul(0.85));
+          return vec4(finalColor, uRiverOpacity);
+        });
+
         const uReflStrength = uniform(PARAMS.ocean.reflectionStrength);
 
         // With Fresnel reflection blended on top
@@ -4013,6 +4067,10 @@
           return (style === "Lake" ? waterLakeTemplateMat : waterOceanTemplateMat).clone();
         }
 
+        // River material — uses UV-based directional flow shader
+        const riverMat = new MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide });
+        { const f = buildRiverFrag(); riverMat.colorNode = f.rgb; riverMat.opacityNode = f.a; }
+
         function syncOceanMat() {
           uWScale.value = PARAMS.ocean.scale;
           uWEdgeThresh.value = PARAMS.ocean.edgeThreshold;
@@ -4049,6 +4107,119 @@
           uWBGlowWidth.value     = PARAMS.water.glowWidth;
           uWBLineIntensity.value = PARAMS.water.waterlineIntensity;
           uWBLineColor.value.set(PARAMS.water.foamColor);
+        }
+
+        function syncRiverMat() {
+          uRiverFlowSpeed.value    = PARAMS.river.flowSpeed;
+          uRiverDeepColor.value.set(PARAMS.river.deepColor);
+          uRiverShallowColor.value.set(PARAMS.river.shallowColor);
+          uRiverHighlight.value.set(PARAMS.river.highlightColor);
+          uRiverFoamColor.value.set(PARAMS.river.foamColor);
+          uRiverFoamWidth.value    = PARAMS.river.foamWidth;
+          uRiverOpacity.value      = PARAMS.river.opacity;
+        }
+
+        function generateRiverMesh(curve, width, segments, heightOffset) {
+          const pts  = curve.getPoints(segments);
+          const positions = [], uvs = [], indices = [];
+          for (let i = 0; i <= segments; i++) {
+            const t    = i / segments;
+            const pos  = pts[i];
+            const tan  = curve.getTangent(t);
+            const perp = new THREE.Vector3(-tan.z, 0, tan.x).normalize();
+            const half = width / 2;
+            const lx = pos.x - perp.x * half, lz = pos.z - perp.z * half;
+            const rx = pos.x + perp.x * half, rz = pos.z + perp.z * half;
+            positions.push(lx, sampleHeight(lx, lz) + heightOffset, lz);
+            positions.push(rx, sampleHeight(rx, rz) + heightOffset, rz);
+            uvs.push(t, 0, t, 1);
+            if (i < segments) {
+              const b = i * 2;
+              indices.push(b, b + 2, b + 1, b + 1, b + 2, b + 3);
+            }
+          }
+          const geo = new THREE.BufferGeometry();
+          geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+          geo.setAttribute("uv",       new THREE.Float32BufferAttribute(uvs, 2));
+          geo.setIndex(indices);
+          geo.computeVertexNormals();
+          return geo;
+        }
+
+        function riverRebuildVisual() {
+          riverPointMeshes.forEach(m => riverGroup.remove(m));
+          riverPointMeshes = [];
+          riverPoints.forEach((pt, i) => {
+            const sphere = new THREE.Mesh(
+              new THREE.SphereGeometry(0.5, 8, 8),
+              new THREE.MeshBasicMaterial({ color: i === riverSelectedIdx ? 0xffff00 : 0x0088ff })
+            );
+            sphere.position.copy(pt);
+            riverGroup.add(sphere);
+            riverPointMeshes.push(sphere);
+          });
+          if (riverPoints.length >= 2) {
+            const curve  = new THREE.CatmullRomCurve3(riverPoints, false, "catmullrom", 0.5);
+            const lineGeo = new THREE.BufferGeometry().setFromPoints(curve.getPoints(60));
+            const line = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0x00aaff }));
+            riverGroup.add(line);
+            riverPointMeshes.push(line);
+          }
+        }
+
+        function riverAddPoint(p) {
+          riverPoints.push(p.clone());
+          riverSelectedIdx = riverPoints.length - 1;
+          riverRebuildVisual();
+          riverUpdateSelectedYParam();
+        }
+
+        function riverDeleteSelected() {
+          if (riverSelectedIdx < 0 || riverPoints.length === 0) return;
+          riverPoints.splice(riverSelectedIdx, 1);
+          riverSelectedIdx = Math.min(riverSelectedIdx, riverPoints.length - 1);
+          riverRebuildVisual();
+        }
+
+        function riverPickPoint(e) {
+          const rect = renderer.domElement.getBoundingClientRect();
+          raycaster.setFromCamera(
+            new THREE.Vector2(
+              ((e.clientX - rect.left) / rect.width) * 2 - 1,
+              -((e.clientY - rect.top) / rect.height) * 2 + 1
+            ), camera
+          );
+          const hits = raycaster.intersectObjects(riverPointMeshes.filter(m => m.isMesh), false);
+          if (hits.length === 0) return -1;
+          return riverPointMeshes.indexOf(hits[0].object);
+        }
+
+        function riverMoveSelected(pos) {
+          if (riverSelectedIdx < 0) return;
+          const currentY = riverPoints[riverSelectedIdx].y;
+          riverPoints[riverSelectedIdx].copy(pos);
+          riverPoints[riverSelectedIdx].y = currentY;
+          riverRebuildVisual();
+        }
+
+        function riverClearMesh() {
+          if (riverMesh) { scene.remove(riverMesh); riverMesh.geometry.dispose(); riverMesh = null; }
+        }
+
+        function riverGenerate() {
+          if (riverPoints.length < 2) return;
+          riverClearMesh();
+          const curve = new THREE.CatmullRomCurve3(riverPoints, false, "catmullrom", 0.5);
+          const geo   = generateRiverMesh(curve, PARAMS.river.width, PARAMS.river.segments, PARAMS.river.heightOffset);
+          riverMesh = new THREE.Mesh(geo, riverMat);
+          riverMesh.renderOrder = 2;
+          scene.add(riverMesh);
+        }
+
+        function riverUpdateSelectedYParam() {
+          if (riverSelectedIdx >= 0 && riverSelectedIdx < riverPoints.length)
+            PARAMS.river.selectedPointY = riverPoints[riverSelectedIdx].y;
+          pane.refresh();
         }
 
         function getWaterRoot(object) {
@@ -4592,6 +4763,9 @@
         // ── SPLINE VISUALIZATION ──
         splineGroup = new THREE.Group();
         scene.add(splineGroup);
+        // ── RIVER VISUALIZATION ──
+        riverGroup = new THREE.Group();
+        scene.add(riverGroup);
         const splinePreviewGroup = new THREE.Group();
         scene.add(splinePreviewGroup);
 
@@ -6487,6 +6661,36 @@
             );
           });
 
+        // ── RIVER FOLDER ──
+        const riverFolder = pane.addFolder({ title: "River  [ V ]", expanded: true });
+        riverFolder.hidden = true;
+
+        riverFolder.addButton({ title: "Delete selected point  [ Del ]" }).on("click", riverDeleteSelected);
+        riverFolder.addButton({ title: "Clear all points" }).on("click", () => {
+          riverPoints = []; riverSelectedIdx = -1; riverRebuildVisual();
+        });
+        riverFolder.addBlade({ view: "separator" });
+        riverFolder.addBinding(PARAMS.river, "selectedPointY", { label: "Selected Y height", min: -50, max: 200, step: 0.5 })
+          .on("change", ({ value }) => {
+            if (riverSelectedIdx >= 0 && riverSelectedIdx < riverPoints.length) {
+              riverPoints[riverSelectedIdx].y = value;
+              riverRebuildVisual();
+            }
+          });
+        riverFolder.addBlade({ view: "separator" });
+        riverFolder.addBinding(PARAMS.river, "width",     { label: "River width", min: 1, max: 60, step: 0.5 });
+        riverFolder.addBinding(PARAMS.river, "flowSpeed", { label: "Flow speed",  min: 0, max: 1,  step: 0.01 }).on("change", syncRiverMat);
+        riverFolder.addBlade({ view: "separator" });
+        riverFolder.addBinding(PARAMS.river, "deepColor",    { label: "Deep colour",    view: "color" }).on("change", syncRiverMat);
+        riverFolder.addBinding(PARAMS.river, "shallowColor", { label: "Shallow colour", view: "color" }).on("change", syncRiverMat);
+        riverFolder.addBinding(PARAMS.river, "highlightColor",{ label: "Highlight",     view: "color" }).on("change", syncRiverMat);
+        riverFolder.addBinding(PARAMS.river, "foamColor",    { label: "Foam colour",    view: "color" }).on("change", syncRiverMat);
+        riverFolder.addBinding(PARAMS.river, "foamWidth",    { label: "Bank foam width",min: 0, max: 0.45, step: 0.01 }).on("change", syncRiverMat);
+        riverFolder.addBinding(PARAMS.river, "opacity",      { label: "Opacity",        min: 0, max: 1,    step: 0.01 }).on("change", syncRiverMat);
+        riverFolder.addBlade({ view: "separator" });
+        riverFolder.addButton({ title: "▶ Generate river" }).on("click", riverGenerate);
+        riverFolder.addButton({ title: "Clear river mesh"  }).on("click", riverClearMesh);
+
         // ── SPLINE FOLDER ──
         const splineFolder = pane.addFolder({ title: "Spline  [ K ]", expanded: true });
         splineFolder.hidden = true;
@@ -7119,6 +7323,7 @@
           pathFolder.hidden = mode !== "path";
           splineFolder.hidden = mode !== "spline";
           if (mode !== "spline") splineClearPreview();
+          riverFolder.hidden = mode !== "river";
           decalFolder.hidden = mode !== "decal";
           waterFolder.hidden = mode !== "water";
           cliffsFolder.hidden = mode !== "cliffs";
@@ -7208,7 +7413,9 @@
                                     ? "SPLINE MODE  [ K ]"
                                     : mode === "decal"
                                       ? "DECAL MODE  [ D ]"
-                                      : "PLACE MODE"; // play handled above
+                                      : mode === "river"
+                                        ? "RIVER MODE  [ V ]"
+                                        : "PLACE MODE"; // play handled above
           badge.className = mode;
           renderer.domElement.style.cursor =
             mode === "view" ? "default" : "crosshair";
@@ -7219,6 +7426,7 @@
             mode === "water" ||
             mode === "cliffs" ||
             mode === "spline" ||
+            mode === "river" ||
             mode === "decal"
           )
             brushRing.visible = false;
@@ -7264,6 +7472,8 @@
             setMode(currentMode === "path" ? "view" : "path");
           if (e.code === "KeyK")
             setMode(currentMode === "spline" ? "view" : "spline");
+          if (e.code === "KeyV")
+            setMode(currentMode === "river" ? "view" : "river");
           if (e.code === "KeyD")
             setMode(currentMode === "decal" ? "view" : "decal");
           if (
@@ -7280,12 +7490,14 @@
           if (e.code === "Escape") {
             if (rampPointA) { rampPointA = null; rampMarker.visible = false; }
             else if (currentMode === "spline" && splineSelectedIdx >= 0) { splineSelectedIdx = -1; splineRebuildVisual(); }
+            else if (currentMode === "river" && riverSelectedIdx >= 0) { riverSelectedIdx = -1; riverRebuildVisual(); }
             else setMode("view");
           }
           if (e.code === "Backquote") toggleTerrainMat();
           if (e.code === "KeyC")
             setMode(currentMode === "cliffs" ? "view" : "cliffs");
           if (currentMode === "spline" && e.code === "Delete") splineDeleteSelected();
+          if (currentMode === "river"  && e.code === "Delete") riverDeleteSelected();
           if (currentMode === "decal") {
             if (e.code === "KeyW") { e.preventDefault(); transformControls.setMode("translate"); }
             if (e.code === "KeyE") { e.preventDefault(); transformControls.setMode("rotate"); }
@@ -7400,6 +7612,12 @@
           if (currentMode === "spline" && splineDragging && splineSelectedIdx >= 0) {
             const p = getTerrainHit(e);
             if (p) splineMoveSelected(p);
+            return;
+          }
+          // River: drag selected point along terrain
+          if (currentMode === "river" && riverDragging && riverSelectedIdx >= 0) {
+            const p = getTerrainHit(e);
+            if (p) riverMoveSelected(p);
             return;
           }
           if (
@@ -7557,6 +7775,21 @@
             return;
           }
 
+          if (currentMode === "river") {
+            const picked = riverPickPoint(e);
+            if (picked >= 0) {
+              riverSelectedIdx = picked;
+              riverDragging = true;
+              orbit.enabled = false;
+              riverRebuildVisual();
+              riverUpdateSelectedYParam();
+            } else {
+              const p = getTerrainHit(e);
+              if (p) riverAddPoint(p);
+            }
+            return;
+          }
+
           if (currentMode === "spline") {
             const picked = splinePickPoint(e);
             if (picked >= 0) {
@@ -7608,11 +7841,8 @@
         });
 
         renderer.domElement.addEventListener("mouseup", () => {
-          if (splineDragging) {
-            splineDragging = false;
-            orbit.enabled = true;
-            return;
-          }
+          if (splineDragging) { splineDragging = false; orbit.enabled = true; return; }
+          if (riverDragging)  { riverDragging  = false; orbit.enabled = true; return; }
           if (!isMouseDown) return;
           isMouseDown = false;
           if (
@@ -7638,6 +7868,7 @@
           isMouseDown = false;
           brushRing.visible = false;
           if (splineDragging) { splineDragging = false; orbit.enabled = true; }
+          if (riverDragging)  { riverDragging  = false; orbit.enabled = true; }
         });
 
         // ── RESIZE ──
@@ -8046,6 +8277,9 @@
             (_v4.y / _v4.w) * 0.5 + 0.5,
           );
           uCameraFar.value = camera.far;
+
+          // ── RIVER TIME ──
+          uRiverTime.value += dt;
 
           // ── SPLINE TRAIN UPDATE ──
           if (PARAMS.spline.showTrain && splinePoints.length >= 2) {
