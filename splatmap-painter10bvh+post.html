@@ -679,6 +679,10 @@
           scaleMax: 1.0,
           alignToPath: true,
           selectedPointY: 0,
+          closed: false,
+          showTrain: false,
+          trainSpeed: 8,
+          trainScale: 1,
         },
         ao: { intensity: 0.85, reach: 24, bias: 0.05, contrast: 1.4 },
         normalMap: { scale: 2.0 },
@@ -706,6 +710,7 @@
       let splineDragging = false;  // Currently dragging a control point
       let splinePointMeshes = [];  // Sphere meshes for each control point
       let splineGroup = null;      // Group containing all spline visuals
+      let splineTrainT = 0;        // Current position along curve (0–1)
       let brushSize = 20;
       let brushStr = 60;
       let brushNoiseSeed = 0;
@@ -4444,6 +4449,14 @@
         const splinePreviewGroup = new THREE.Group();
         scene.add(splinePreviewGroup);
 
+        // ── SPLINE TRAIN (debug follower) ──
+        const trainMesh = new THREE.Mesh(
+          new THREE.BoxGeometry(1.2, 0.8, 2.4),
+          new THREE.MeshBasicMaterial({ color: 0xff2200, depthTest: true })
+        );
+        trainMesh.visible = false;
+        scene.add(trainMesh);
+
         // ── PLAY MODE CAPSULE ──
         const capsuleGeo = new THREE.CapsuleGeometry(
           PLAYER_CAP_R,
@@ -6445,6 +6458,9 @@
             splineRebuildVisual();
           }
         });
+        splineFolder.addBinding(PARAMS.spline, "closed", {
+          label: "Close path (loop)",
+        }).on("change", () => splineRebuildVisual());
 
         splineFolder.addBlade({ view: "separator" });
 
@@ -6483,6 +6499,17 @@
         });
         splineFolder.addButton({ title: "Clear preview" }).on("click", () => {
           splineClearPreview();
+        });
+
+        splineFolder.addBlade({ view: "separator" });
+        splineFolder.addBinding(PARAMS.spline, "showTrain", { label: "Show train" });
+        splineFolder.addBinding(PARAMS.spline, "trainSpeed", {
+          label: "Train speed",
+          min: 0.5, max: 60, step: 0.5,
+        });
+        splineFolder.addBinding(PARAMS.spline, "trainScale", {
+          label: "Train scale",
+          min: 0.1, max: 10, step: 0.1,
         });
 
         // ── POST-PROCESSING TWEAKPANE ──
@@ -6680,7 +6707,7 @@
 
           // Draw curve line if 2+ points
           if (splinePoints.length >= 2) {
-            const curve = new THREE.CatmullRomCurve3(splinePoints, false, "catmullrom", 0.5);
+            const curve = new THREE.CatmullRomCurve3(splinePoints, PARAMS.spline.closed, "catmullrom", 0.5);
             const pts = curve.getPoints(Math.max(60, splinePoints.length * 20));
             const geo = new THREE.BufferGeometry().setFromPoints(pts);
             const mat = new THREE.LineBasicMaterial({ color: 0x00ccff, depthTest: false });
@@ -6763,7 +6790,7 @@
 
         function splineGetSamples() {
           if (splinePoints.length < 2) return [];
-          const curve = new THREE.CatmullRomCurve3(splinePoints, false, "catmullrom", 0.5);
+          const curve = new THREE.CatmullRomCurve3(splinePoints, PARAMS.spline.closed, "catmullrom", 0.5);
           const totalLength = curve.getLength();
           const count = Math.max(1, Math.floor(totalLength / PARAMS.spline.spacing));
           const samples = [];
@@ -7735,6 +7762,23 @@
             (_v4.y / _v4.w) * 0.5 + 0.5,
           );
           uCameraFar.value = camera.far;
+
+          // ── SPLINE TRAIN UPDATE ──
+          if (PARAMS.spline.showTrain && splinePoints.length >= 2) {
+            const trainCurve = new THREE.CatmullRomCurve3(splinePoints, PARAMS.spline.closed, "catmullrom", 0.5);
+            const len = trainCurve.getLength();
+            if (len > 0) {
+              splineTrainT = (splineTrainT + dt * PARAMS.spline.trainSpeed / len) % 1;
+              const pos = trainCurve.getPoint(splineTrainT);
+              const tangent = trainCurve.getTangent(splineTrainT);
+              trainMesh.position.copy(pos);
+              trainMesh.scale.setScalar(PARAMS.spline.trainScale);
+              trainMesh.lookAt(pos.x + tangent.x, pos.y + tangent.y, pos.z + tangent.z);
+              trainMesh.visible = true;
+            }
+          } else {
+            trainMesh.visible = false;
+          }
 
           stats.update();
           renderPipeline.render();
