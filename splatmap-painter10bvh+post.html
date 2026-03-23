@@ -83,6 +83,10 @@
         background: rgba(20, 100, 200, 0.92);
         color: #c8e8ff;
       }
+      #mode-badge.waterfall {
+        background: rgba(0, 120, 160, 0.92);
+        color: #b0f0ff;
+      }
       #mode-badge.path {
         background: rgba(110, 70, 25, 0.92);
         color: #ffe0a0;
@@ -4120,6 +4124,174 @@
           return (style === "Lake" ? waterLakeTemplateMat : waterOceanTemplateMat).clone();
         }
 
+        // ── WATERFALL (H mode) ────────────────────────────────────────────────
+
+        // TSL helpers (prefixed _wf to avoid conflicts)
+        const _wfGradientNoise = Fn(([p]) => {
+          const i = floor(p).toVar(), f = fract(p).toVar();
+          const uu = f.mul(f).mul(f).mul(f.mul(f.mul(6).sub(15)).add(10));
+          const rg = Fn(([ip]) => { const a = fract(sin(dot(ip, vec2(127.1, 311.7))).mul(43758.5453)).mul(Math.PI*2); return vec2(cos(a), sin(a)); });
+          return mix(mix(dot(rg(i),f), dot(rg(i.add(vec2(1,0))),f.sub(vec2(1,0))), uu.x),
+                     mix(dot(rg(i.add(vec2(0,1))),f.sub(vec2(0,1))), dot(rg(i.add(vec2(1,1))),f.sub(vec2(1,1))), uu.x), uu.y).mul(0.5).add(0.5);
+        });
+        const _wfVoroF1 = Fn(([p, jitter]) => {
+          const ip = floor(p).toVar(), fp = fract(p).toVar(), md = float(10).toVar();
+          for (const [nx,ny] of [[-1,-1],[0,-1],[1,-1],[-1,0],[0,0],[1,0],[-1,1],[0,1],[1,1]]) {
+            const off = vec2(float(nx),float(ny));
+            const h = vec2(fract(sin(dot(ip.add(off),vec2(127.1,311.7))).mul(43758.5453)), fract(sin(dot(ip.add(off),vec2(269.5,183.3))).mul(43758.5453)));
+            md.assign(min(md, length(off.add(mix(vec2(0.5),h,jitter)).sub(fp))));
+          }
+          return md;
+        });
+        const _wfVoroFbm = Fn(([p_in, jitter, octaves, lac, gain]) => {
+          const p = p_in.toVar(), val = float(0).toVar(), amp = float(1).toVar(), total = float(0).toVar();
+          val.addAssign(amp.mul(_wfVoroF1(p, jitter))); total.addAssign(amp); p.mulAssign(lac); amp.mulAssign(gain);
+          const d2=smoothstep(float(1),float(2),octaves); val.addAssign(amp.mul(_wfVoroF1(p,jitter)).mul(d2)); total.addAssign(amp.mul(d2)); p.mulAssign(lac); amp.mulAssign(gain);
+          const d3=smoothstep(float(2),float(3),octaves); val.addAssign(amp.mul(_wfVoroF1(p,jitter)).mul(d3)); total.addAssign(amp.mul(d3)); p.mulAssign(lac); amp.mulAssign(gain);
+          const d4=smoothstep(float(3),float(4),octaves); val.addAssign(amp.mul(_wfVoroF1(p,jitter)).mul(d4)); total.addAssign(amp.mul(d4));
+          return val.div(total);
+        });
+        const _wfBandMask = Fn(([y, low, high, n, noiseAmt, sharpness]) => {
+          const nLow = low.add(n.sub(0.5).mul(noiseAmt.mul(2))), nHigh = high.add(n.sub(0.5).mul(noiseAmt.mul(2)));
+          return smoothstep(nLow.sub(sharpness), nLow.add(sharpness), y).mul(smoothstep(nHigh.add(sharpness), nHigh.sub(sharpness), y));
+        });
+        const _wfVoroLayer = Fn(([v, scaleX, scaleY, offX, offY, jitter, octaves, lac, gain, warpStr, warpScale, contrast]) => {
+          const p = vec2(v.x.mul(scaleX).add(offX), v.y.mul(scaleY).add(offY)).toVar();
+          const wx = _wfGradientNoise(p.mul(warpScale)).sub(0.5);
+          const wy = _wfGradientNoise(p.mul(warpScale).add(vec2(3.7,8.3))).sub(0.5);
+          p.addAssign(vec2(wx,wy).mul(warpStr));
+          return pow(_wfVoroFbm(p, jitter, octaves, lac, gain), contrast);
+        });
+
+        // Waterfall uniforms
+        const wfU = {
+          darkColor:      uniform(new THREE.Color(0x041820)),
+          bodyColor:      uniform(new THREE.Color(0x30989f)),
+          depthScaleX:    uniform(2.5), depthScaleY: uniform(0.8), depthStrength: uniform(0.55),
+          bodyBrightness: uniform(1.0), bodyContrast: uniform(1.0),
+          cyan_enabled: uniform(1.0), cyan_bandLow: uniform(0.30), cyan_bandHigh: uniform(0.80),
+          cyan_nScaleX: uniform(12.0), cyan_nScaleY: uniform(12.0), cyan_noiseAmt: uniform(0.30),
+          cyan_bandSharp: uniform(0.020), cyan_color: uniform(new THREE.Color("#00fff4")),
+          cyan_strength: uniform(0.10), cyan_flowSpeed: uniform(3.0),
+          red_enabled: uniform(1.0), red_bandLow: uniform(0.35), red_bandHigh: uniform(0.93),
+          red_nScaleX: uniform(6.0), red_nScaleY: uniform(3.0), red_noiseAmt: uniform(0.22), red_bandSharp: uniform(0.03),
+          red_scaleX: uniform(7.0), red_scaleY: uniform(4.0), red_offsetX: uniform(0.0), red_offsetY: uniform(0.0),
+          red_jitter: uniform(0.55), red_octaves: uniform(3.0), red_lac: uniform(2.35), red_gain: uniform(0.41),
+          red_warpStr: uniform(0.83), red_warpScale: uniform(1.6), red_contrast: uniform(1.20),
+          red_threshold: uniform(0.12), red_sharpness: uniform(0.020),
+          red_color: uniform(new THREE.Color("#c8f0ee")), red_strength: uniform(0.3),
+          green_enabled: uniform(1.0), green_bandLow: uniform(0.45), green_bandHigh: uniform(0.82),
+          green_scaleX: uniform(7.0), green_scaleY: uniform(4.0), green_offsetX: uniform(0.0), green_offsetY: uniform(0.0),
+          green_jitter: uniform(0.55), green_octaves: uniform(3.0), green_lac: uniform(2.35), green_gain: uniform(0.41),
+          green_warpStr: uniform(0.83), green_warpScale: uniform(1.6), green_contrast: uniform(1.20),
+          green_threshold: uniform(0.12), green_sharpness: uniform(0.020),
+          green_color: uniform(new THREE.Color("#ffffff")), green_strength: uniform(1.0),
+          drip_enabled: uniform(1.0), drip_bandLow: uniform(0.0), drip_bandHigh: uniform(1.0),
+          drip_nScaleX: uniform(6.0), drip_nScaleY: uniform(2.0), drip_noiseAmt: uniform(0.08), drip_bandSharp: uniform(0.04),
+          drip_scaleX: uniform(14.0), drip_scaleY: uniform(1.8), drip_offsetX: uniform(0.0), drip_offsetY: uniform(0.0),
+          drip_jitter: uniform(1.0), drip_octaves: uniform(2.0), drip_lac: uniform(2.0), drip_gain: uniform(0.4),
+          drip_warpStr: uniform(0.25), drip_warpScale: uniform(1.5), drip_contrast: uniform(4.0),
+          drip_threshold: uniform(0.12), drip_sharpness: uniform(0.03),
+          drip_color: uniform(new THREE.Color(0xffffff)), drip_strength: uniform(0.9),
+          wfFlowTime: uniform(0.0), wfFlowSpeed: uniform(0.5),
+        };
+
+        // Waterfall color node
+        const _buildWaterfallColorNode = () => Fn(() => {
+          const v = uv();
+          const depthN = _wfGradientNoise(vec2(v.x.mul(wfU.depthScaleX), v.y.mul(wfU.depthScaleY).add(wfU.wfFlowTime.mul(float(0.5)))));
+          const col = mix(wfU.darkColor, wfU.bodyColor, depthN.mul(wfU.depthStrength)).toVar();
+          col.assign(col.sub(0.5).mul(wfU.bodyContrast).add(0.5).mul(wfU.bodyBrightness).clamp(0,1));
+          // Cyan lip
+          const cyanN = _wfGradientNoise(vec2(v.x.mul(wfU.cyan_nScaleX), v.y.mul(wfU.cyan_nScaleY).add(wfU.wfFlowTime.mul(wfU.cyan_flowSpeed))));
+          const cyanBand = _wfBandMask(v.y, wfU.cyan_bandLow, wfU.cyan_bandHigh, cyanN, wfU.cyan_noiseAmt, wfU.cyan_bandSharp);
+          col.assign(mix(col, wfU.cyan_color, cyanBand.mul(wfU.cyan_strength).mul(wfU.cyan_enabled).clamp(0,1)));
+          // Corner Foam A
+          const redCorner = smoothstep(wfU.red_bandLow, wfU.red_bandHigh, v.y).mul(smoothstep(wfU.red_bandHigh, wfU.red_bandLow, v.y)).mul(4.0).clamp(0,1);
+          const redDynThresh = mix(float(1.2), wfU.red_threshold, redCorner);
+          const redF1 = _wfVoroLayer(v, wfU.red_scaleX, wfU.red_scaleY, wfU.red_offsetX, wfU.red_offsetY.add(wfU.wfFlowTime), wfU.red_jitter, wfU.red_octaves, wfU.red_lac, wfU.red_gain, wfU.red_warpStr, wfU.red_warpScale, wfU.red_contrast);
+          const redFoam = smoothstep(redDynThresh.sub(wfU.red_sharpness), redDynThresh.add(wfU.red_sharpness), redF1);
+          col.assign(mix(col, wfU.red_color, redFoam.mul(wfU.red_strength).mul(wfU.red_enabled).clamp(0,1)));
+          // Corner Foam B
+          const greenCorner = smoothstep(wfU.green_bandLow, wfU.green_bandHigh, v.y).mul(smoothstep(wfU.green_bandHigh, wfU.green_bandLow, v.y)).mul(4.0).clamp(0,1);
+          const greenDynThresh = mix(float(1.2), wfU.green_threshold, greenCorner);
+          const greenF1 = _wfVoroLayer(v, wfU.green_scaleX, wfU.green_scaleY, wfU.green_offsetX, wfU.green_offsetY.add(wfU.wfFlowTime), wfU.green_jitter, wfU.green_octaves, wfU.green_lac, wfU.green_gain, wfU.green_warpStr, wfU.green_warpScale, wfU.green_contrast);
+          const greenFoam = smoothstep(greenDynThresh.sub(wfU.green_sharpness), greenDynThresh.add(wfU.green_sharpness), greenF1);
+          col.assign(mix(col, wfU.green_color, greenFoam.mul(wfU.green_strength).mul(wfU.green_enabled).clamp(0,1)));
+          // Drip streaks
+          const dripN = _wfGradientNoise(vec2(v.x.mul(wfU.drip_nScaleX), v.y.mul(wfU.drip_nScaleY)));
+          const dripBand = _wfBandMask(v.y, wfU.drip_bandLow, wfU.drip_bandHigh, dripN, wfU.drip_noiseAmt, wfU.drip_bandSharp);
+          const dripF1 = _wfVoroLayer(v, wfU.drip_scaleX, wfU.drip_scaleY, wfU.drip_offsetX, wfU.drip_offsetY.add(wfU.wfFlowTime), wfU.drip_jitter, wfU.drip_octaves, wfU.drip_lac, wfU.drip_gain, wfU.drip_warpStr, wfU.drip_warpScale, wfU.drip_contrast);
+          const dripFoam = smoothstep(wfU.drip_threshold.sub(wfU.drip_sharpness), wfU.drip_threshold.add(wfU.drip_sharpness), dripF1);
+          col.assign(mix(col, wfU.drip_color, dripFoam.mul(dripBand).mul(wfU.drip_strength).mul(wfU.drip_enabled).clamp(0,1)));
+          return col;
+        })();
+
+        // Geometry builder (matches waterfall-unreal.html)
+        const WF_MESH = { width: 4, totalHeight: 8, topLength: 2.5, radius: 1.2, segments: 128 };
+        function buildWaterfallGeo() {
+          const { width, totalHeight, topLength, radius, segments } = WF_MESH;
+          const geo = new THREE.PlaneGeometry(width, totalHeight, 1, segments);
+          const pos = geo.attributes.position;
+          const vv = new THREE.Vector3();
+          const curveStart = totalHeight - topLength, curveEnd = curveStart - radius;
+          for (let i = 0; i < pos.count; i++) {
+            vv.fromBufferAttribute(pos, i);
+            let cy = vv.y + totalHeight / 2;
+            if (cy >= curveStart) { vv.y = cy; vv.z = 0; }
+            else if (cy > curveEnd) { const a = ((curveStart - cy) / radius) * (Math.PI / 2); vv.y = curveStart - Math.sin(a) * radius; vv.z = -(radius - Math.cos(a) * radius); }
+            else { vv.y = curveStart - radius; vv.z = -radius - (curveEnd - cy); }
+            pos.setXYZ(i, vv.x, vv.y, vv.z);
+          }
+          geo.computeVertexNormals();
+          return geo;
+        }
+
+        // Template material (shared, cloned per placed waterfall)
+        const waterfallTemplateMat = new THREE.MeshStandardNodeMaterial({ side: THREE.DoubleSide, roughness: 1.0, metalness: 0.0 });
+        waterfallTemplateMat.colorNode = _buildWaterfallColorNode();
+
+        // State
+        let waterfallObjects = [];
+        let selectedWaterfall = null;
+
+        function selectWaterfall(mesh) {
+          selectedWaterfall = mesh;
+          if (mesh) { tcHelper.visible = true; transformControls.attach(mesh); }
+          else { tcHelper.visible = false; transformControls.detach(); }
+        }
+
+        function placeWaterfall(wx, wy, wz) {
+          const mesh = new THREE.Mesh(buildWaterfallGeo(), waterfallTemplateMat.clone());
+          mesh.rotation.x = -Math.PI / 2;
+          mesh.position.set(wx, wy, wz);
+          mesh.renderOrder = 2;
+          scene.add(mesh);
+          waterfallObjects.push(mesh);
+          selectWaterfall(mesh);
+        }
+
+        function applyWaterfalls(data) {
+          waterfallObjects.forEach(m => scene.remove(m));
+          waterfallObjects = [];
+          selectWaterfall(null);
+          data.forEach(d => {
+            const mesh = new THREE.Mesh(buildWaterfallGeo(), waterfallTemplateMat.clone());
+            mesh.position.set(d.x, d.y, d.z);
+            mesh.rotation.set(d.rx, d.ry, d.rz);
+            mesh.scale.set(d.sx, d.sy, d.sz);
+            mesh.renderOrder = 2;
+            scene.add(mesh);
+            waterfallObjects.push(mesh);
+          });
+        }
+
+        function saveWaterfalls() {
+          const data = waterfallObjects.map(m => ({ x:m.position.x, y:m.position.y, z:m.position.z, rx:m.rotation.x, ry:m.rotation.y, rz:m.rotation.z, sx:m.scale.x, sy:m.scale.y, sz:m.scale.z }));
+          const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+          const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "waterfalls.json"; a.click();
+        }
+
         // River material — uses UV-based directional flow shader
         const riverMat = new MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide });
         { const f = buildRiverFrag(); riverMat.colorNode = f.rgb; riverMat.opacityNode = f.a; }
@@ -5003,6 +5175,8 @@
             "Water [W]": "water",
             "Cliffs [C]": "cliffs",
             "Flowers [B]": "flowers",
+            "River [V]": "river",
+            "Waterfall [H]": "waterfall",
             "Play [F]": "play",
           },
         });
@@ -6854,6 +7028,74 @@
         });
 
         // ── DECAL FOLDER ──
+        // ── Waterfall folder [ H ] ────────────────────────────────────────────
+        const waterfallFolder = pane.addFolder({ title: "Waterfall  [ H ]", expanded: true });
+        waterfallFolder.hidden = true;
+        {
+          const wfMkColor = (folder, label, key) => {
+            const hex = "#" + wfU[key].value.getHexString();
+            const obj = { color: hex };
+            folder.addBinding(obj, "color", { label }).on("change", ({ value }) => wfU[key].value.set(value));
+          };
+          const wfMkF = (folder, label, key, mn, mx, step) =>
+            folder.addBinding(wfU[key], "value", { label, min: mn, max: mx, step });
+
+          // Body
+          const bodyF = waterfallFolder.addFolder({ title: "Body" });
+          wfMkColor(bodyF, "Dark", "darkColor");
+          wfMkColor(bodyF, "Teal", "bodyColor");
+          wfMkF(bodyF, "Depth Strength", "depthStrength", 0, 1, 0.01);
+          wfMkF(bodyF, "Brightness", "bodyBrightness", 0, 3, 0.01);
+          wfMkF(bodyF, "Contrast", "bodyContrast", 0, 4, 0.05);
+
+          // Animation
+          const animF = waterfallFolder.addFolder({ title: "Animation" });
+          wfMkF(animF, "Flow Speed", "wfFlowSpeed", 0, 2, 0.01);
+
+          // Cyan Lip
+          const cyanF = waterfallFolder.addFolder({ title: "Cyan Lip" });
+          const cyanEO = { enabled: true };
+          cyanF.addBinding(cyanEO, "enabled", { label: "Enable" }).on("change", ({ value }) => { wfU.cyan_enabled.value = value ? 1 : 0; });
+          wfMkColor(cyanF, "Color", "cyan_color");
+          wfMkF(cyanF, "Strength", "cyan_strength", 0, 1, 0.01);
+          wfMkF(cyanF, "Flow Speed", "cyan_flowSpeed", 0, 5, 0.05);
+
+          // Corner Foam A
+          const foamAF = waterfallFolder.addFolder({ title: "Corner Foam A" });
+          const foamAEO = { enabled: true };
+          foamAF.addBinding(foamAEO, "enabled", { label: "Enable" }).on("change", ({ value }) => { wfU.red_enabled.value = value ? 1 : 0; });
+          wfMkColor(foamAF, "Color", "red_color");
+          wfMkF(foamAF, "Strength", "red_strength", 0, 1, 0.01);
+
+          // Corner Foam B
+          const foamBF = waterfallFolder.addFolder({ title: "Corner Foam B" });
+          const foamBEO = { enabled: true };
+          foamBF.addBinding(foamBEO, "enabled", { label: "Enable" }).on("change", ({ value }) => { wfU.green_enabled.value = value ? 1 : 0; });
+          wfMkColor(foamBF, "Color", "green_color");
+          wfMkF(foamBF, "Strength", "green_strength", 0, 1, 0.01);
+
+          // Drip Streaks
+          const dripF = waterfallFolder.addFolder({ title: "Drip Streaks" });
+          const dripEO = { enabled: true };
+          dripF.addBinding(dripEO, "enabled", { label: "Enable" }).on("change", ({ value }) => { wfU.drip_enabled.value = value ? 1 : 0; });
+          wfMkColor(dripF, "Color", "drip_color");
+          wfMkF(dripF, "Strength", "drip_strength", 0, 1, 0.01);
+
+          waterfallFolder.addBlade({ view: "separator" });
+          waterfallFolder.addButton({ title: "Save waterfalls JSON" }).on("click", saveWaterfalls);
+          waterfallFolder.addButton({ title: "Delete selected  [ Del ]" }).on("click", () => {
+            if (!selectedWaterfall) return;
+            scene.remove(selectedWaterfall);
+            waterfallObjects = waterfallObjects.filter(m => m !== selectedWaterfall);
+            selectWaterfall(null);
+          });
+          waterfallFolder.addButton({ title: "Clear all waterfalls" }).on("click", () => {
+            waterfallObjects.forEach(m => scene.remove(m));
+            waterfallObjects = [];
+            selectWaterfall(null);
+          });
+        }
+
         const decalFolder = pane.addFolder({ title: "Decal  [ D ]", expanded: true });
         decalFolder.hidden = true;
         decalFolder.addButton({ title: "Load PNG image…" }).on("click", loadDecalPng);
@@ -7411,18 +7653,20 @@
           riverFolder.hidden = mode !== "river";
           decalFolder.hidden = mode !== "decal";
           waterFolder.hidden = mode !== "water";
+          waterfallFolder.hidden = mode !== "waterfall";
           cliffsFolder.hidden = mode !== "cliffs";
           brushFolder.hidden =
             mode === "view" ||
             mode === "place" ||
             mode === "props" ||
             mode === "water" ||
+            mode === "waterfall" ||
             mode === "cliffs" ||
             mode === "spline" ||
             mode === "decal";
 
           const usingTC =
-            mode === "place" || mode === "props" || mode === "water" || mode === "cliffs" || mode === "decal";
+            mode === "place" || mode === "props" || mode === "water" || mode === "waterfall" || mode === "cliffs" || mode === "decal";
           if (!usingTC && transformControls) {
             if (tcHelper) tcHelper.visible = false;
             transformControls.enabled = false;
@@ -7430,34 +7674,46 @@
             selectedCliff = null;
             selectedProp = null;
             selectWater(null);
+            selectWaterfall(null);
             selectDecal(null);
           } else if (usingTC && transformControls) {
             transformControls.enabled = true;
             if (mode === "place") {
               selectedProp = null;
               selectWater(null);
+              selectWaterfall(null);
               selectDecal(null);
             }
             if (mode === "props") {
               selectedCliff = null;
               selectWater(null);
+              selectWaterfall(null);
               selectDecal(null);
             }
             if (mode === "water") {
               selectedCliff = null;
               selectedProp = null;
+              selectWaterfall(null);
+              selectDecal(null);
+            }
+            if (mode === "waterfall") {
+              selectedCliff = null;
+              selectedProp = null;
+              selectWater(null);
               selectDecal(null);
             }
             if (mode === "decal") {
               selectedCliff = null;
               selectedProp = null;
               selectWater(null);
+              selectWaterfall(null);
               selectDecal(selectedDecal); // re-attach if already selected
             }
             if (mode === "cliffs") {
               selectedCliff = null;
               selectedProp = null;
               selectWater(null);
+              selectWaterfall(null);
               selectDecal(null);
               // Re-attach gizmo if an instance was already selected
               if (cliffInstancer.hasSelection()) {
@@ -7500,7 +7756,9 @@
                                       ? "DECAL MODE  [ D ]"
                                       : mode === "river"
                                         ? "RIVER MODE  [ V ]"
-                                        : "PLACE MODE"; // play handled above
+                                        : mode === "waterfall"
+                                          ? "WATERFALL MODE  [ H ]"
+                                          : "PLACE MODE"; // play handled above
           badge.className = mode;
           renderer.domElement.style.cursor =
             mode === "view" ? "default" : "crosshair";
@@ -7509,6 +7767,7 @@
             mode === "place" ||
             mode === "props" ||
             mode === "water" ||
+            mode === "waterfall" ||
             mode === "cliffs" ||
             mode === "spline" ||
             mode === "river" ||
@@ -7559,6 +7818,8 @@
             setMode(currentMode === "spline" ? "view" : "spline");
           if (e.code === "KeyV")
             setMode(currentMode === "river" ? "view" : "river");
+          if (e.code === "KeyH")
+            setMode(currentMode === "waterfall" ? "view" : "waterfall");
           if (e.code === "KeyD")
             setMode(currentMode === "decal" ? "view" : "decal");
           if (
@@ -7663,6 +7924,11 @@
               scene.remove(selectedWater);
               waterObjects = waterObjects.filter((m) => m !== selectedWater);
               selectWater(null);
+            }
+            if (e.code === "Delete" && selectedWaterfall) {
+              scene.remove(selectedWaterfall);
+              waterfallObjects = waterfallObjects.filter(m => m !== selectedWaterfall);
+              selectWaterfall(null);
             }
           }
         });
@@ -7841,6 +8107,19 @@
             // Click on terrain → place new water body
             const pt = getTerrainHit(e);
             if (pt) placeWater(pt.x, pt.y, pt.z);
+            return;
+          }
+
+          if (currentMode === "waterfall") {
+            if (transformControls.axis !== null) return;
+            const rect = renderer.domElement.getBoundingClientRect();
+            mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            const wfHits = raycaster.intersectObjects(waterfallObjects, false);
+            if (wfHits.length > 0) { selectWaterfall(wfHits[0].object); return; }
+            const pt = getTerrainHit(e);
+            if (pt) placeWaterfall(pt.x, pt.y, pt.z);
             return;
           }
 
@@ -8226,6 +8505,7 @@
 
           if (grassUniforms) grassUniforms.uTime.value = elapsed;
           uWaterTime.value = elapsed;
+          if (waterfallObjects.length > 0) wfU.wfFlowTime.value += dt * wfU.wfFlowSpeed.value;
           uWCamXZ.value.set(camera.position.x, camera.position.z);
           _syncRipples();
           if (grassPatchSystem || cliffGrassPatchSystem || flowerPatchSystem) {
