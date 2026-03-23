@@ -2591,6 +2591,27 @@
           }
         });
 
+        // ── ROCK028 SLOPE TEXTURES ───────────────────────────────────────────
+        // WebGPU limit: 16 samplers/stage. Pack rough+AO+normalXY into one DataTexture.
+        const uRockScale = uniform(0.05); // world-space tile frequency (higher = smaller tiles)
+        const _rockLoader = new THREE.TextureLoader();
+
+        // Color (sRGB, stays separate)
+        const rock028ColorTex = _rockLoader.load("textures/Rock028/Rock028_2K-JPG_Color.jpg");
+        rock028ColorTex.wrapS = rock028ColorTex.wrapT = THREE.RepeatWrapping;
+        rock028ColorTex.colorSpace = THREE.SRGBColorSpace;
+
+        // Packed linear DataTexture: R=roughness, G=AO, B=normalX, A=normalY
+        const _rock028Res = 1024;
+        const rock028DataTex = new THREE.DataTexture(
+          new Uint8Array(_rock028Res * _rock028Res * 4),
+          _rock028Res, _rock028Res, THREE.RGBAFormat);
+        rock028DataTex.wrapS = rock028DataTex.wrapT = THREE.RepeatWrapping;
+        rock028DataTex.colorSpace = THREE.LinearSRGBColorSpace;
+        _rockLoader.load("textures/Rock028/Rock028_2K-JPG_Roughness.jpg",         (t) => { _packChannelIntoDT(rock028DataTex, t.image, 0); }); // R
+        _rockLoader.load("textures/Rock028/Rock028_2K-JPG_AmbientOcclusion.jpg",  (t) => { _packChannelIntoDT(rock028DataTex, t.image, 1); }); // G
+        _rockLoader.load("textures/Rock028/Rock028_2K-JPG_NormalGL.jpg",          (t) => { _packNormalIntoDT(rock028DataTex, t.image); });      // BA
+
         // ── GRASS DENSITY TEX ─────────────────────────────────────────────
         grassDensityTex = new THREE.CanvasTexture(grassDensityCanvas);
         grassDensityTex.wrapS = grassDensityTex.wrapT =
@@ -3416,14 +3437,18 @@
           const terrain = groundProc();
           const path = pathProc();
           const wet = path.mul(float(0.55));
+          // Rock028 slope texture — tiled by world XZ position
+          const rockUV = positionWorld.xz.mul(uRockScale);
+          const rockAlbedo = texture(rock028ColorTex, rockUV).rgb;
           // Debug: replace with flat colors to see zone masks
           const tCol = mix(terrain, vec3(0.3, 0.78, 0.2), uDebugMode);
           const pCol = mix(path, vec3(0.72, 0.48, 0.22), uDebugMode);
-          const rCol = mix(cliffProc(), vec3(0.35, 0.34, 0.32), uDebugMode);
+          const rCol = mix(rockAlbedo, vec3(0.35, 0.34, 0.32), uDebugMode);
           const wCol = mix(wet, vec3(0.1, 0.08, 0.05), uDebugMode);
           // Auto layers first — fill unpainted areas
           let col = tCol;
-          col = mix(rCol, col, getSlopeMask());
+          const slopeMask = getSlopeMask();
+          col = mix(rCol, col, slopeMask);
           col = mix(col, tCol.mul(float(0.65)), getHeightMask());
           col = mix(col, wCol, getWetMask());
           // Manual paint always wins on top
@@ -3435,25 +3460,17 @@
             meadowProc(),
             texture(meadowDensityTex, getSplatUV()).r,
           );
-          // Baked AO — multiply into base color (affects both direct and indirect)
-          const ao = mix(
-            float(1),
-            texture(aoTex, getSplatUV()).r,
-            uAOIntensity,
-          );
-          col = col.mul(ao);
           // ── Image texture slots (albedo) — highest priority, paint on top ──
+          // NOTE: aoTex (baked AO) and s3 (slot 4) removed from shader — WebGPU 16-sampler limit.
           const imgSplat = texture(imgSplatTex, getSplatUV());
           const s0 = IMG_TEX_SLOTS[0],
             s1 = IMG_TEX_SLOTS[1],
-            s2 = IMG_TEX_SLOTS[2],
-            s3 = IMG_TEX_SLOTS[3];
+            s2 = IMG_TEX_SLOTS[2];
           // Divide by TERRAIN_SIZE so uUVScale = tiles across terrain (e.g. 10 = 10 tiles)
           const _terrainScale = float(1.0 / TERRAIN_SIZE);
           const iuv0 = positionWorld.xz.mul(_terrainScale).mul(s0.uUVScale);
           const iuv1 = positionWorld.xz.mul(_terrainScale).mul(s1.uUVScale);
           const iuv2 = positionWorld.xz.mul(_terrainScale).mul(s2.uUVScale);
-          const iuv3 = positionWorld.xz.mul(_terrainScale).mul(s3.uUVScale);
           col = mix(
             col,
             texture(s0.albedoTex, iuv0).rgb,
@@ -3469,14 +3486,12 @@
             texture(s2.albedoTex, iuv2).rgb,
             imgSplat.b.mul(s2.uHasAlbedo),
           );
-          col = mix(
-            col,
-            texture(s3.albedoTex, iuv3).rgb,
-            imgSplat.a.mul(s3.uHasAlbedo),
-          );
           // ── Rock ORM — R=AO darkens crevices, G=roughness used in roughnessNode ──
           const rockAO = texture(s2.ormTex, iuv2).r;
           col = col.mul(mix(float(1.0), rockAO, imgSplat.b.mul(s2.uHasAO)));
+          // ── Rock028 AO — darken cliff crevices on steep faces (from packed DataTexture .g) ──
+          const rock028AO = texture(rock028DataTex, rockUV).g;
+          col = col.mul(mix(rock028AO, float(1.0), slopeMask));
           return col;
         })();
 
@@ -3494,8 +3509,16 @@
           const nmZ = sqrt(max(float(0.0), float(1.0).sub(nmX.mul(nmX)).sub(nmY.mul(nmY))));
           // Re-encode to 0-1 for normalMap()
           const rockNm = vec4(nmX.mul(0.5).add(0.5), nmY.mul(0.5).add(0.5), nmZ.mul(0.5).add(0.5), float(1.0));
+          // Blend Rock028 normal on steep faces — decode from packed DataTexture BA
+          const rock028DataN = texture(rock028DataTex, positionWorld.xz.mul(uRockScale));
+          const rock028NmX = rock028DataN.b.mul(2.0).sub(1.0);
+          const rock028NmY = rock028DataN.a.mul(2.0).sub(1.0);
+          const rock028NmZ = sqrt(max(float(0.0), float(1.0).sub(rock028NmX.mul(rock028NmX)).sub(rock028NmY.mul(rock028NmY))));
+          const rock028NmRGB = vec3(rock028NmX.mul(0.5).add(0.5), rock028NmY.mul(0.5).add(0.5), rock028NmZ.mul(0.5).add(0.5));
+          const autoNm = mix(rock028NmRGB, terrainNm.rgb, getSlopeMask());
+          // Painted slot 2 normal wins on top
           const rockWeight = imgSplatN.b.mul(_s2.uHasNormal).mul(_s2.uNormalStr);
-          return normalMap(mix(terrainNm, rockNm.xyz, rockWeight), vec2(uNormalScale, uNormalScale));
+          return normalMap(mix(autoNm, rockNm.xyz, rockWeight), vec2(uNormalScale, uNormalScale));
         })();
 
         // ── Roughness node — terrain default blended with Rock roughness map ──
@@ -3505,7 +3528,10 @@
           const iuv2r = positionWorld.xz.mul(_terrainScaleR).mul(_s2.uUVScale);
           const imgSplatR = texture(imgSplatTex, getSplatUV());
           const rockRough = texture(_s2.ormTex, iuv2r).g; // G channel = roughness
-          return mix(float(0.85), rockRough, imgSplatR.b.mul(_s2.uHasRough));
+          const baseRough = mix(float(0.85), rockRough, imgSplatR.b.mul(_s2.uHasRough));
+          // Blend Rock028 roughness on steep faces — R channel of packed DataTexture
+          const rock028Rough = texture(rock028DataTex, positionWorld.xz.mul(uRockScale)).r;
+          return mix(rock028Rough, baseRough, getSlopeMask()); // steep=0 → rock028, flat=1 → base
         })();
 
         // splatMat ready — tile grid is the default view. Toggle with ~ key.
@@ -5811,6 +5837,17 @@
           })
           .on("change", (ev) => {
             uSlopeEnd.value = ev.value;
+          });
+        cliffProcFolder.addBlade({ view: "separator" });
+        cliffProcFolder
+          .addBinding({ scale: 0.05 }, "scale", {
+            label: "Rock028 tile scale",
+            min: 0.01,
+            max: 0.3,
+            step: 0.005,
+          })
+          .on("change", (ev) => {
+            uRockScale.value = ev.value;
           });
 
         // ── Path procedural folder ──
