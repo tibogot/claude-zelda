@@ -3424,12 +3424,29 @@
         };
         const getSlopeMask = () =>
           smoothstep(uSlopeStart, uSlopeEnd, getHeightTexFlatness());
-        const getHeightMask = () =>
-          smoothstep(
-            float(HEIGHT_SCALE * 0.65),
-            float(HEIGHT_SCALE * 0.92),
-            positionWorld.y,
-          );
+
+        // ── SNOW UNIFORMS ─────────────────────────────────────────────────
+        const uSnowEnabled    = uniform(1.0);
+        const uSnowAltStart   = uniform(HEIGHT_SCALE * 0.88);
+        const uSnowAltEnd     = uniform(HEIGHT_SCALE * 0.97);
+        const uSnowColor      = uniform(new THREE.Color(0.88, 0.92, 0.98));
+        const uSnowNoiseScale = uniform(0.018);
+        const uSnowNoiseStr   = uniform(0.05);
+        const uSnowSlopeMin   = uniform(0.25); // min snow coverage on steep cliff faces
+        const uSnowRoughness  = uniform(0.95);
+
+        // Noisy height-based snow mask, slope-attenuated but never fully zero on cliffs
+        const getSnowMask = () => {
+          const p  = positionWorld.xz.mul(uSnowNoiseScale);
+          const n1 = mx_noise_float(p);
+          const n2 = mx_noise_float(p.mul(float(4.0)));
+          const noise = n1.mul(float(0.7)).add(n2.mul(float(0.3)));
+          const noisedY = positionWorld.y.add(noise.mul(uSnowNoiseStr).mul(float(HEIGHT_SCALE)));
+          const heightSnow = smoothstep(uSnowAltStart, uSnowAltEnd, noisedY);
+          const slopeAtten = mix(uSnowSlopeMin, float(1.0), getSlopeMask());
+          return heightSnow.mul(slopeAtten).mul(uSnowEnabled);
+        };
+
         const getWetMask = () =>
           smoothstep(float(0.0), float(-3.0), positionWorld.y);
 
@@ -3459,8 +3476,11 @@
           // Auto layers first — fill unpainted areas
           let col = tCol;
           col = mix(rCol, col, slopeMask);
-          col = mix(col, tCol.mul(float(0.65)), getHeightMask());
           col = mix(col, wCol, getWetMask());
+          // ── Procedural snow — noisy edge, slope-attenuated ──
+          const snowFineNoise = mx_noise_float(positionWorld.xz.mul(uSnowNoiseScale.mul(float(8.0)))).mul(float(0.035));
+          const snowCol = clamp(uSnowColor.add(vec3(snowFineNoise, snowFineNoise, snowFineNoise)), 0.0, 1.0);
+          col = mix(col, snowCol, getSnowMask());
           // Manual paint always wins on top
           col = mix(col, tCol, splat.r);
           col = mix(col, tCol.mul(float(1.1)), splat.g);
@@ -3544,7 +3564,9 @@
           const baseRough = mix(float(0.85), rockRough, imgSplatR.b.mul(_s2.uHasRough));
           // Blend Rock028 roughness on steep faces — R channel of packed DataTexture
           const rock028Rough = texture(rock028DataTex, positionWorld.xz.mul(uRockScale)).r.mul(uRockRoughMul);
-          return mix(clamp(rock028Rough, 0.0, 1.0), baseRough, getSlopeMask().pow(uRockBlendSharp));
+          const afterRock = mix(clamp(rock028Rough, 0.0, 1.0), baseRough, getSlopeMask().pow(uRockBlendSharp));
+          // Snow is very matte — override roughness where snow appears
+          return mix(afterRock, uSnowRoughness, getSnowMask());
         })();
 
         // splatMat ready — tile grid is the default view. Toggle with ~ key.
@@ -5882,6 +5904,33 @@
           .on("change", (ev) => { uRockRoughMul.value = ev.value; });
 
         // ── Path procedural folder ──
+        // ── Snow folder ──
+        const snowFolder = matFolder.addFolder({ title: "Snow", expanded: false });
+        snowFolder
+          .addBinding({ enabled: true }, "enabled", { label: "Enabled" })
+          .on("change", (ev) => { uSnowEnabled.value = ev.value ? 1 : 0; });
+        snowFolder
+          .addBinding({ v: HEIGHT_SCALE * 0.88 }, "v", { label: "Alt start", min: 0, max: HEIGHT_SCALE * 1.5, step: 0.5 })
+          .on("change", (ev) => { uSnowAltStart.value = ev.value; });
+        snowFolder
+          .addBinding({ v: HEIGHT_SCALE * 0.97 }, "v", { label: "Alt end (full)", min: 0, max: HEIGHT_SCALE * 1.5, step: 0.5 })
+          .on("change", (ev) => { uSnowAltEnd.value = ev.value; });
+        snowFolder
+          .addBinding({ color: { r: 224, g: 235, b: 250 } }, "color", { label: "Snow color", view: "color" })
+          .on("change", (ev) => { uSnowColor.value.setRGB(ev.value.r / 255, ev.value.g / 255, ev.value.b / 255); });
+        snowFolder
+          .addBinding({ v: 0.018 }, "v", { label: "Edge noise scale", min: 0.001, max: 0.1, step: 0.001 })
+          .on("change", (ev) => { uSnowNoiseScale.value = ev.value; });
+        snowFolder
+          .addBinding({ v: 0.05 }, "v", { label: "Edge noise strength", min: 0.0, max: 0.6, step: 0.01 })
+          .on("change", (ev) => { uSnowNoiseStr.value = ev.value; });
+        snowFolder
+          .addBinding({ v: 0.25 }, "v", { label: "Min on cliffs", min: 0.0, max: 1.0, step: 0.01 })
+          .on("change", (ev) => { uSnowSlopeMin.value = ev.value; });
+        snowFolder
+          .addBinding({ v: 0.95 }, "v", { label: "Roughness", min: 0.0, max: 1.0, step: 0.01 })
+          .on("change", (ev) => { uSnowRoughness.value = ev.value; });
+
         const pathProcFolder = matFolder.addFolder({
           title: "Path (yellow-brown)",
           expanded: false,
