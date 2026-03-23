@@ -731,6 +731,11 @@
           heightOffset: 0.05,
           selectedPointY: 0,
         },
+        dayNight: {
+          time: 12,   // hours 0-24
+          speed: 1,   // multiplier (1 = full day in ~24 min)
+          enabled: false,
+        },
         ao: { intensity: 0.85, reach: 24, bias: 0.05, contrast: 1.4 },
         normalMap: { scale: 2.0 },
         erosion: {
@@ -4048,6 +4053,54 @@
         }
         syncFog();
 
+        // ── DAY / NIGHT CYCLE ─────────────────────────────────────────────
+        const _dnC0 = new THREE.Color(), _dnC1 = new THREE.Color();
+        // Keyframes: [hour, dirColor, dirIntensity, hemiSkyColor, hemiGroundColor, hemiIntensity, exposure]
+        const DN_KEYS = [
+          { h:  0, dc:"#203060", di:0,   sk:"#1e2845", gr:"#0d1018", hi:0.10, ex:0.28 },
+          { h:  6, dc:"#ff9060", di:0.6, sk:"#ffb068", gr:"#553322", hi:0.20, ex:0.45 },
+          { h:  9, dc:"#ffe8c0", di:2.0, sk:"#c8e0ff", gr:"#887055", hi:0.35, ex:0.50 },
+          { h: 12, dc:"#ffffff", di:2.5, sk:"#c8e0ff", gr:"#88aa55", hi:0.40, ex:0.55 },
+          { h: 15, dc:"#ffe8c0", di:2.0, sk:"#c8d8ff", gr:"#887055", hi:0.35, ex:0.50 },
+          { h: 18, dc:"#ff6030", di:0.6, sk:"#ff9050", gr:"#441818", hi:0.20, ex:0.44 },
+          { h: 21, dc:"#1a2050", di:0,   sk:"#1a2040", gr:"#0d1015", hi:0.12, ex:0.28 },
+          { h: 24, dc:"#203060", di:0,   sk:"#1e2845", gr:"#0d1018", hi:0.10, ex:0.28 },
+        ];
+        function syncDayNight(hours) {
+          const h = ((hours % 24) + 24) % 24;
+          // Sun angles — rawElev is uncapped so we can use it for the gradual twilight fade
+          const rawElev = Math.sin(((h - 6) / 12) * Math.PI) * 85;
+          PARAMS.light.sunAzimuth = (h / 24) * 360;
+          PARAMS.light.sunElevation = Math.max(-10, rawElev);
+          // Find bracketing keyframes
+          let k0 = DN_KEYS[0], k1 = DN_KEYS[1];
+          for (let i = 0; i < DN_KEYS.length - 1; i++) {
+            if (h >= DN_KEYS[i].h && h < DN_KEYS[i + 1].h) {
+              k0 = DN_KEYS[i]; k1 = DN_KEYS[i + 1]; break;
+            }
+          }
+          const t = (h - k0.h) / (k1.h - k0.h);
+          const lrp = (a, b) => a + (b - a) * t;
+          const lrpCol = (a, b) => "#" + _dnC0.set(a).lerp(_dnC1.set(b), t).getHexString();
+          PARAMS.light.dirColor        = lrpCol(k0.dc, k1.dc);
+          PARAMS.light.dirIntensity    = lrp(k0.di, k1.di);
+          PARAMS.light.hemiSkyColor    = lrpCol(k0.sk, k1.sk);
+          PARAMS.light.hemiGroundColor = lrpCol(k0.gr, k1.gr);
+          PARAMS.light.hemiIntensity   = lrp(k0.hi, k1.hi);
+          PARAMS.light.exposure        = lrp(k0.ex, k1.ex);
+          // Deep-night sky: lerp the sunset gradient uniforms toward dark blue/black.
+          // rawElev = -5° starts the transition, -30° = fully dark night.
+          // Using uncapped rawElev gives a gradual civil-twilight fade (~30 min before sunrise).
+          const dnf = Math.max(0, Math.min(1, (-rawElev - 5) / 25));
+          const su = stylizedSky.uniforms;
+          const lrpSky = (a, b) => _dnC0.set(a).lerp(_dnC1.set(b), dnf).convertSRGBToLinear();
+          su.sunsetLow.value.copy(  lrpSky("#aa1500", "#020408"));
+          su.sunsetColor.value.copy(lrpSky("#ff6820", "#060a14"));
+          su.sunsetHigh.value.copy( lrpSky("#ffd580", "#0c1828"));
+          su.zenithColor.value.copy(lrpSky("#0c3fbf", "#010306"));
+          su.horizonRingStr.value = 0.22 * (1 - dnf);
+        }
+
         // ── WATER BODIES ──────────────────────────────────────────────────
         const WATER_PRESETS = {
           Puddle: { w: 3, l: 3 },
@@ -5564,6 +5617,38 @@
           min: 512,
           max: 4096,
           step: 512,
+        });
+
+        // ── DAY / NIGHT FOLDER ──
+        const dnFolder = pane.addFolder({ title: "Day / Night", expanded: false });
+        const dnTimeBinding = dnFolder.addBinding(PARAMS.dayNight, "time", {
+          label: "Time of day",
+          min: 0, max: 24, step: 0.01,
+        }).on("change", ({ value }) => {
+          if (!PARAMS.dayNight.enabled) syncDayNight(value);
+        });
+        dnFolder.addBinding(PARAMS.dayNight, "speed", {
+          label: "Speed  (×)",
+          min: 0, max: 20, step: 0.1,
+        });
+        dnFolder.addBinding(PARAMS.dayNight, "enabled", { label: "Animate" })
+          .on("change", ({ value }) => {
+            if (!value) stylizedSky.updateWind(); // restore base wind speed when stopped
+          });
+        dnFolder.addButton({ title: "Set to Noon" }).on("click", () => {
+          PARAMS.dayNight.time = 12;
+          syncDayNight(12);
+          dnTimeBinding.refresh();
+        });
+        dnFolder.addButton({ title: "Set to Sunset" }).on("click", () => {
+          PARAMS.dayNight.time = 18;
+          syncDayNight(18);
+          dnTimeBinding.refresh();
+        });
+        dnFolder.addButton({ title: "Set to Night" }).on("click", () => {
+          PARAMS.dayNight.time = 0;
+          syncDayNight(0);
+          dnTimeBinding.refresh();
         });
 
         // ── SKY FOLDER ──
@@ -8157,6 +8242,11 @@
             if (flowerPatchSystem)
               flowerPatchSystem.update(camera.position, _grassFrustum);
           }
+          // Day/night cycle animation
+          if (PARAMS.dayNight.enabled) {
+            PARAMS.dayNight.time = ((PARAMS.dayNight.time + dt * PARAMS.dayNight.speed * (1 / 60)) % 24 + 24) % 24;
+            syncDayNight(PARAMS.dayNight.time);
+          }
           // Sync lighting & sky from PARAMS every frame
           shadowTarget.position.set(camera.position.x, 0, camera.position.z);
           const sunDir = sunDirectionFromAngles(
@@ -8207,6 +8297,15 @@
             sky.sunPosition.value.copy(sunDir);
           }
           stylizedSky.update(sunDir, camera.position);
+          // Scale cloud wind speed with day/night animation speed (timelapse effect)
+          if (PARAMS.dayNight.enabled) {
+            const ws = stylizedSky.windState;
+            const s1 = ws.c1Speed, s2 = ws.c2Speed;
+            ws.c1Speed = s1 * PARAMS.dayNight.speed;
+            ws.c2Speed = s2 * PARAMS.dayNight.speed;
+            stylizedSky.updateWind();
+            ws.c1Speed = s1; ws.c2Speed = s2;
+          }
           scene.environmentIntensity = PARAMS.light.envIntensity;
           renderer.toneMappingExposure = PARAMS.light.exposure;
 
