@@ -181,5 +181,22 @@ export function createFoliageSlot(scene, sampleHeight) {
 
   function clear() { positions = []; rebuild(); }
 
-  return { setModel, addInBrush, removeInBrush, syncHeights, setCastShadow, dispose, getPositions, setPositions, getCount, clear };
+  // ── Chunk visibility stats for debug overlay ──────────────────────────
+  const _frustum = new THREE.Frustum();
+  const _projScreenMatrix = new THREE.Matrix4();
+
+  function getChunkStats(camera) {
+    if (chunks.size === 0) return { visible: 0, total: 0 };
+    _projScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    _frustum.setFromProjectionMatrix(_projScreenMatrix);
+    let visible = 0;
+    for (const chunk of chunks.values()) {
+      const im = chunk.ims[0];
+      if (!im || im.count === 0) continue;
+      if (im.boundingSphere && _frustum.intersectsSphere(im.boundingSphere)) visible++;
+    }
+    return { visible, total: chunks.size };
+  }
+
+  return { setModel, addInBrush, removeInBrush, syncHeights, setCastShadow, dispose, getPositions, setPositions, getCount, clear, getChunkStats };
 }
