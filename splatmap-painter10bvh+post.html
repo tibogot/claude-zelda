@@ -4982,6 +4982,19 @@
               sy: m.scale.y,
               sz: m.scale.z,
             })),
+            settings: {
+              light:           JSON.parse(JSON.stringify(PARAMS.light)),
+              sky:             JSON.parse(JSON.stringify(PARAMS.sky)),
+              skyMode:         skyMode,
+              ocean:           JSON.parse(JSON.stringify(PARAMS.ocean)),
+              fog:             JSON.parse(JSON.stringify(PARAMS.fog)),
+              slopeStart:      PARAMS.slopeStart,
+              slopeEnd:        PARAMS.slopeEnd,
+              shadowBias:      PARAMS.shadowBias,
+              shadowNormalBias: PARAMS.shadowNormalBias,
+              csm:             JSON.parse(JSON.stringify(PARAMS.csm)),
+              postFx:          JSON.parse(JSON.stringify(postParams)),
+            },
           };
           zip.file("scene.json", JSON.stringify(meta, null, 2));
 
@@ -5077,6 +5090,36 @@
               if (meta.cliffInstances) cliffInstancer.importData(meta.cliffInstances);
               if (meta.props) applyProps(meta.props);
               if (meta.waterBodies) applyWaterBodies(meta.waterBodies);
+              if (meta.settings) {
+                const s = meta.settings;
+                if (s.light)  Object.assign(PARAMS.light, s.light);
+                if (s.sky)    Object.assign(PARAMS.sky, s.sky);
+                if (s.ocean) {
+                  Object.assign(PARAMS.ocean, s.ocean);
+                  syncOceanMat();
+                  setWaterStyle(PARAMS.ocean.stylized);
+                }
+                if (s.fog) {
+                  Object.assign(PARAMS.fog.height,   s.fog.height   ?? {});
+                  Object.assign(PARAMS.fog.distance, s.fog.distance ?? {});
+                  syncFog();
+                }
+                if (s.slopeStart != null) { PARAMS.slopeStart = s.slopeStart; uSlopeStart.value = s.slopeStart; }
+                if (s.slopeEnd   != null) { PARAMS.slopeEnd   = s.slopeEnd;   uSlopeEnd.value   = s.slopeEnd; }
+                if (s.shadowBias      != null) PARAMS.shadowBias      = s.shadowBias;
+                if (s.shadowNormalBias != null) PARAMS.shadowNormalBias = s.shadowNormalBias;
+                if (s.csm) Object.assign(PARAMS.csm, s.csm);
+                if (s.postFx) {
+                  postParams.enabled = s.postFx.enabled ?? postParams.enabled;
+                  if (s.postFx.bloom)     Object.assign(postParams.bloom,     s.postFx.bloom);
+                  if (s.postFx.lensflare) Object.assign(postParams.lensflare, s.postFx.lensflare);
+                  if (s.postFx.godRays)   Object.assign(postParams.godRays,   s.postFx.godRays);
+                  if (s.postFx.dof)       Object.assign(postParams.dof,       s.postFx.dof);
+                  if (s.postFx.gtao)      Object.assign(postParams.gtao,      s.postFx.gtao);
+                }
+                if (s.skyMode) setSkyMode(s.skyMode);
+                pane.refresh();
+              }
               if (bakeBVH) bakeBVH();
             }
           } catch (err) {
