@@ -17,7 +17,7 @@ import {
   mix, smoothstep, clamp, pow, dot, abs, cos, atan,
   normalize, floor, fract, step,
   time, positionLocal, length,
-  mx_noise_float, Loop, Var,
+  mx_noise_float, Loop, Var, If,
 } from "three/tsl";
 
 export function createStylizedSky() {
@@ -134,18 +134,18 @@ export function createStylizedSky() {
     const vertGrad = smoothstep(float(0.05), float(0.40), upDotParam);
     const vertCol  = mix(vec3(uCloudGradientDark), vec3(litColor), vertGrad);
 
-    // ── Internal bump detail: separate finer FBm as bump height field ──
-    const detailUV    = uvBase.mul(uCloudDetailScale).add(vec2(float(5.73), float(3.17)));
-    const bumpHeight  = fbmCloud(detailUV); // 0=valley, 1=peak
-    // Multiply macro gradient × bump height → top-lit round puffs
-    // Peak at top = very bright highlight; valley at bottom = deep shadow
-    const bumpLit  = vertGrad.mul(float(0.5).add(bumpHeight.mul(float(0.5))));
-    const bumpCol  = mix(vec3(uCloudGradientDark), vec3(litColor), clamp(bumpLit, float(0), float(1)));
+    // Blend layers: directional → add vert gradient
+    const cloudColVar = Var(mix(directionalCol, vertCol, uCloudVertStr));
 
-    // Blend layers: directional → add vert gradient → add bump detail
-    let cloudCol = directionalCol;
-    cloudCol = mix(cloudCol, vertCol, uCloudVertStr);
-    cloudCol = mix(cloudCol, bumpCol, uCloudGradientStr);
+    // ── Internal bump detail (skipped when strength = 0 — saves 4 noise samples per layer) ──
+    If(uCloudGradientStr.greaterThan(float(0.001)), () => {
+      const detailUV   = uvBase.mul(uCloudDetailScale).add(vec2(float(5.73), float(3.17)));
+      const bumpHeight = fbmCloud(detailUV);
+      const bumpLit    = vertGrad.mul(float(0.5).add(bumpHeight.mul(float(0.5))));
+      const bumpCol    = mix(vec3(uCloudGradientDark), vec3(litColor), clamp(bumpLit, float(0), float(1)));
+      cloudColVar.assign(mix(cloudColVar, bumpCol, uCloudGradientStr));
+    });
+    let cloudCol = cloudColVar;
     // Silver lining: bright rim on sun-facing cloud edges
     const rimUV     = uvBase.sub(sunHoriz.mul(uCloudRimWidth));
     const rimNoise  = fbmCloud(rimUV);
@@ -288,24 +288,27 @@ export function createStylizedSky() {
     const c2       = cloudLayer(warpedUV2, uC2Coverage, uC2Softness, sunHoriz, litCol2, hMask2, uC2Contrast, upDot);
     col = mix(col, c2.xyz, c2.w.mul(0.7).mul(nightBlend.oneMinus()));
 
-    // ── God rays: march from current cloud UV toward sun's cloud UV ──
-    const grSunUV  = uSunDir.xz.div(uSunDir.y.max(float(0.08)).mul(uC1Height)).mul(uC1Scale).add(time.mul(uC1WindDir));
-    const grBaseUV = cloudUV1; // already computed above (no warp, just projection)
-    const grStep   = grSunUV.sub(grBaseUV).mul(float(1.0 / 8.0));
-    const c1Thresh = float(1.0).sub(uC1Coverage);
-    const grUVPos  = Var(grBaseUV.toVar());
-    const grAcc    = Var(float(0.0));
-    const grDecay  = Var(float(1.0));
-    Loop(8, () => {
-      grUVPos.addAssign(grStep);
-      const s        = fbmCloudFast(grUVPos);
-      const occluded = smoothstep(c1Thresh, c1Thresh.add(uC1Softness), s);
-      grAcc.addAssign(float(1.0).sub(occluded).mul(grDecay));
-      grDecay.mulAssign(uGodRayDecay);
+    // ── God rays (skipped entirely when strength = 0 — saves 16 noise samples per pixel) ──
+    const grContrib = Var(vec3(0.0, 0.0, 0.0));
+    If(uGodRayStr.greaterThan(float(0.001)), () => {
+      const grSunUV  = uSunDir.xz.div(uSunDir.y.max(float(0.08)).mul(uC1Height)).mul(uC1Scale).add(time.mul(uC1WindDir));
+      const grBaseUV = cloudUV1;
+      const grStep   = grSunUV.sub(grBaseUV).mul(float(1.0 / 8.0));
+      const c1Thresh = float(1.0).sub(uC1Coverage);
+      const grUVPos  = Var(grBaseUV.toVar());
+      const grAcc    = Var(float(0.0));
+      const grDecay  = Var(float(1.0));
+      Loop(8, () => {
+        grUVPos.addAssign(grStep);
+        const s        = fbmCloudFast(grUVPos);
+        const occluded = smoothstep(c1Thresh, c1Thresh.add(uC1Softness), s);
+        grAcc.addAssign(float(1.0).sub(occluded).mul(grDecay));
+        grDecay.mulAssign(uGodRayDecay);
+      });
+      const grVis = smoothstep(float(0.05), float(0.22), upDot);
+      grContrib.assign(vec3(uSunColor).mul(grAcc.div(float(8.0)).mul(uGodRayStr).mul(nightBlend.oneMinus()).mul(grVis)));
     });
-    const grVis  = smoothstep(float(0.05), float(0.22), upDot); // fade matches cloud hMask1 — prevents horizon stretch artifacts
-    const grFinal = grAcc.div(float(8.0)).mul(uGodRayStr).mul(nightBlend.oneMinus()).mul(grVis);
-    col = col.add(vec3(uSunColor).mul(grFinal));
+    col = col.add(grContrib);
 
     // ── Stars ──
     const starUV   = dir.xz.div(dir.y.max(float(0.01))).mul(uStarsDensity);
