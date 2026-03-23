@@ -2593,7 +2593,13 @@
 
         // ── ROCK028 SLOPE TEXTURES ───────────────────────────────────────────
         // WebGPU limit: 16 samplers/stage. Pack rough+AO+normalXY into one DataTexture.
-        const uRockScale = uniform(0.05); // world-space tile frequency (higher = smaller tiles)
+        const uRockScale       = uniform(0.05);
+        const uRockBrightness  = uniform(0.85);
+        const uRockContrast    = uniform(1.1);
+        const uRockTint        = uniform(new THREE.Color(1.0, 1.0, 1.0));
+        const uRockNormalStr   = uniform(1.0);
+        const uRockBlendSharp  = uniform(1.0); // exponent on slope mask: >1 = sharper edge
+        const uRockRoughMul    = uniform(1.0);
         const _rockLoader = new THREE.TextureLoader();
 
         // Color (sRGB, stays separate)
@@ -3439,7 +3445,12 @@
           const wet = path.mul(float(0.55));
           // Rock028 slope texture — tiled by world XZ position
           const rockUV = positionWorld.xz.mul(uRockScale);
-          const rockAlbedo = texture(rock028ColorTex, rockUV).rgb;
+          // Rock028 albedo — brightness, contrast, tint applied
+          const rawRock = texture(rock028ColorTex, rockUV).rgb;
+          const contrastedRock = clamp(rawRock.sub(float(0.5)).mul(uRockContrast).add(float(0.5)), 0.0, 1.0);
+          const rockAlbedo = contrastedRock.mul(uRockBrightness).mul(uRockTint);
+          // Slope mask with sharpness exponent
+          const slopeMask = getSlopeMask().pow(uRockBlendSharp);
           // Debug: replace with flat colors to see zone masks
           const tCol = mix(terrain, vec3(0.3, 0.78, 0.2), uDebugMode);
           const pCol = mix(path, vec3(0.72, 0.48, 0.22), uDebugMode);
@@ -3447,7 +3458,6 @@
           const wCol = mix(wet, vec3(0.1, 0.08, 0.05), uDebugMode);
           // Auto layers first — fill unpainted areas
           let col = tCol;
-          const slopeMask = getSlopeMask();
           col = mix(rCol, col, slopeMask);
           col = mix(col, tCol.mul(float(0.65)), getHeightMask());
           col = mix(col, wCol, getWetMask());
@@ -3515,7 +3525,10 @@
           const rock028NmY = rock028DataN.a.mul(2.0).sub(1.0);
           const rock028NmZ = sqrt(max(float(0.0), float(1.0).sub(rock028NmX.mul(rock028NmX)).sub(rock028NmY.mul(rock028NmY))));
           const rock028NmRGB = vec3(rock028NmX.mul(0.5).add(0.5), rock028NmY.mul(0.5).add(0.5), rock028NmZ.mul(0.5).add(0.5));
-          const autoNm = mix(rock028NmRGB, terrainNm.rgb, getSlopeMask());
+          // Normal strength: blend toward flat (0.5,0.5,1.0) when strength < 1
+          const flatNm = vec3(0.5, 0.5, 1.0);
+          const rock028NmStrength = mix(flatNm, rock028NmRGB, uRockNormalStr);
+          const autoNm = mix(rock028NmStrength, terrainNm.rgb, getSlopeMask().pow(uRockBlendSharp));
           // Painted slot 2 normal wins on top
           const rockWeight = imgSplatN.b.mul(_s2.uHasNormal).mul(_s2.uNormalStr);
           return normalMap(mix(autoNm, rockNm.xyz, rockWeight), vec2(uNormalScale, uNormalScale));
@@ -3530,8 +3543,8 @@
           const rockRough = texture(_s2.ormTex, iuv2r).g; // G channel = roughness
           const baseRough = mix(float(0.85), rockRough, imgSplatR.b.mul(_s2.uHasRough));
           // Blend Rock028 roughness on steep faces — R channel of packed DataTexture
-          const rock028Rough = texture(rock028DataTex, positionWorld.xz.mul(uRockScale)).r;
-          return mix(rock028Rough, baseRough, getSlopeMask()); // steep=0 → rock028, flat=1 → base
+          const rock028Rough = texture(rock028DataTex, positionWorld.xz.mul(uRockScale)).r.mul(uRockRoughMul);
+          return mix(clamp(rock028Rough, 0.0, 1.0), baseRough, getSlopeMask().pow(uRockBlendSharp));
         })();
 
         // splatMat ready — tile grid is the default view. Toggle with ~ key.
@@ -5846,9 +5859,27 @@
             max: 0.3,
             step: 0.005,
           })
+          .on("change", (ev) => { uRockScale.value = ev.value; });
+        cliffProcFolder
+          .addBinding({ v: 0.85 }, "v", { label: "Rock028 brightness", min: 0.0, max: 2.0, step: 0.01 })
+          .on("change", (ev) => { uRockBrightness.value = ev.value; });
+        cliffProcFolder
+          .addBinding({ v: 1.1 }, "v", { label: "Rock028 contrast", min: 0.2, max: 3.0, step: 0.05 })
+          .on("change", (ev) => { uRockContrast.value = ev.value; });
+        cliffProcFolder
+          .addBinding({ color: { r: 255, g: 255, b: 255 } }, "color", { label: "Rock028 tint", view: "color" })
           .on("change", (ev) => {
-            uRockScale.value = ev.value;
+            uRockTint.value.setRGB(ev.value.r / 255, ev.value.g / 255, ev.value.b / 255);
           });
+        cliffProcFolder
+          .addBinding({ v: 1.0 }, "v", { label: "Rock028 normal str", min: 0.0, max: 2.0, step: 0.05 })
+          .on("change", (ev) => { uRockNormalStr.value = ev.value; });
+        cliffProcFolder
+          .addBinding({ v: 1.0 }, "v", { label: "Rock028 blend sharp", min: 0.1, max: 5.0, step: 0.1 })
+          .on("change", (ev) => { uRockBlendSharp.value = ev.value; });
+        cliffProcFolder
+          .addBinding({ v: 1.0 }, "v", { label: "Rock028 roughness x", min: 0.0, max: 2.0, step: 0.05 })
+          .on("change", (ev) => { uRockRoughMul.value = ev.value; });
 
         // ── Path procedural folder ──
         const pathProcFolder = matFolder.addFolder({
