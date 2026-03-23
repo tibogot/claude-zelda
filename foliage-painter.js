@@ -2,22 +2,48 @@
  * foliage-painter.js
  * Generic instanced foliage slot — brush-paint any GLB as instanced mesh.
  * Used by splatmap-painter10bvh+post.html for multi-type foliage mode.
+ * - Chunk-based InstancedMesh: world divided into CHUNK_SIZE×CHUNK_SIZE cells,
+ *   each chunk gets its own InstancedMesh with frustumCulled=true so Three.js
+ *   automatically skips draw calls for chunks outside the camera frustum.
  */
 
 import * as THREE from "three";
 
 const MAX_INSTANCES = 6000;
+const CHUNK_SIZE = 64; // world-units per chunk side
 
 export function createFoliageSlot(scene, sampleHeight) {
-  let positions = []; // { x, z, rot, scale }
-  let instanceMeshes = [];
+  let positions  = []; // { x, z, rot, scale }
+  let meshParts  = []; // [{ geometry, material }] — shared across chunks
   let _castShadow = false;
-  const dummy = new THREE.Object3D();
+  const dummy    = new THREE.Object3D();
 
-  // ── Load model parts into InstancedMeshes ─────────────────────────────
+  // chunks: Map<"cx,cz", { ims: InstancedMesh[], capacity: number }>
+  const chunks = new Map();
+
+  // ── helpers ───────────────────────────────────────────────────────────
+  function chunkKey(cx, cz) { return `${cx},${cz}`; }
+  function posToChunk(x, z) {
+    return { cx: Math.floor(x / CHUNK_SIZE), cz: Math.floor(z / CHUNK_SIZE) };
+  }
+
+  function makeChunkIMs(capacity) {
+    return meshParts.map(({ geometry, material }) => {
+      const im = new THREE.InstancedMesh(geometry, material, capacity);
+      im.castShadow = _castShadow;
+      im.receiveShadow = true;
+      im.frustumCulled = true; // Three.js culls this chunk when outside camera frustum
+      im.count = 0;
+      scene.add(im);
+      return im;
+    });
+  }
+
+  // ── Load model parts into shared geometry/material refs ───────────────
   function setModel(gltf) {
-    instanceMeshes.forEach((m) => scene.remove(m));
-    instanceMeshes = [];
+    for (const chunk of chunks.values()) chunk.ims.forEach(im => scene.remove(im));
+    chunks.clear();
+    meshParts = [];
 
     const parts = [];
     gltf.scene.traverse((o) => { if (o.isMesh) parts.push(o); });
@@ -31,33 +57,61 @@ export function createFoliageSlot(scene, sampleHeight) {
         mat.alphaTest = 0.5;
         mat.depthWrite = true;
       }
-      const im = new THREE.InstancedMesh(part.geometry, mat, MAX_INSTANCES);
-      im.castShadow = _castShadow;
-      im.receiveShadow = true;
-      im.frustumCulled = false;
-      im.count = 0;
-      scene.add(im);
-      instanceMeshes.push(im);
+      meshParts.push({ geometry: part.geometry, material: mat });
     });
 
     rebuild();
   }
 
-  // ── Rebuild all instance matrices ─────────────────────────────────────
+  // ── Rebuild chunk InstancedMeshes from positions array ────────────────
   function rebuild() {
-    const count = positions.length;
-    instanceMeshes.forEach((im) => {
-      im.count = count;
+    if (meshParts.length === 0) return;
+
+    // Group position indices by chunk
+    const chunkGroups = new Map();
+    positions.forEach((pos, idx) => {
+      const { cx, cz } = posToChunk(pos.x, pos.z);
+      const key = chunkKey(cx, cz);
+      if (!chunkGroups.has(key)) chunkGroups.set(key, []);
+      chunkGroups.get(key).push(idx);
+    });
+
+    // Remove chunks that no longer have any instances
+    for (const key of [...chunks.keys()]) {
+      if (!chunkGroups.has(key)) {
+        chunks.get(key).ims.forEach(im => scene.remove(im));
+        chunks.delete(key);
+      }
+    }
+
+    // Update or create each occupied chunk
+    for (const [key, posIndices] of chunkGroups) {
+      const count = posIndices.length;
+      let chunk = chunks.get(key);
+
+      if (!chunk || count > chunk.capacity) {
+        if (chunk) chunk.ims.forEach(im => scene.remove(im));
+        const capacity = count + 64;
+        const ims = makeChunkIMs(capacity);
+        chunk = { ims, capacity };
+        chunks.set(key, chunk);
+      }
+
+      chunk.ims.forEach(im => { im.count = count; });
       for (let i = 0; i < count; i++) {
-        const { x, z, rot, scale } = positions[i];
+        const { x, z, rot, scale } = positions[posIndices[i]];
         dummy.position.set(x, sampleHeight(x, z), z);
         dummy.rotation.set(0, rot, 0);
         dummy.scale.setScalar(scale);
         dummy.updateMatrix();
-        im.setMatrixAt(i, dummy.matrix);
+        chunk.ims.forEach(im => im.setMatrixAt(i, dummy.matrix));
       }
-      im.instanceMatrix.needsUpdate = true;
-    });
+
+      chunk.ims.forEach(im => {
+        im.instanceMatrix.needsUpdate = true;
+        im.computeBoundingSphere();
+      });
+    }
   }
 
   // ── Scatter instances randomly within a brush circle ──────────────────
@@ -77,11 +131,7 @@ export function createFoliageSlot(scene, sampleHeight) {
       }
       if (tooClose) continue;
 
-      positions.push({
-        x, z,
-        rot: Math.random() * Math.PI * 2,
-        scale: scaleMin + Math.random() * (scaleMax - scaleMin),
-      });
+      positions.push({ x, z, rot: Math.random() * Math.PI * 2, scale: scaleMin + Math.random() * (scaleMax - scaleMin) });
       added++;
       if (positions.length >= MAX_INSTANCES) break;
     }
@@ -103,16 +153,17 @@ export function createFoliageSlot(scene, sampleHeight) {
   // ── Snap all instances to current terrain heights ─────────────────────
   function syncHeights() { rebuild(); }
 
-  // ── Toggle shadow casting on all instance meshes ──────────────────────
+  // ── Toggle shadow casting on all chunk meshes ─────────────────────────
   function setCastShadow(val) {
     _castShadow = val;
-    instanceMeshes.forEach((im) => { im.castShadow = val; });
+    for (const chunk of chunks.values()) chunk.ims.forEach(im => { im.castShadow = val; });
   }
 
-  // ── Dispose all instance meshes from scene ────────────────────────────
+  // ── Dispose all chunk meshes from scene ───────────────────────────────
   function dispose() {
-    instanceMeshes.forEach((m) => scene.remove(m));
-    instanceMeshes = [];
+    for (const chunk of chunks.values()) chunk.ims.forEach(im => scene.remove(im));
+    chunks.clear();
+    meshParts = [];
     positions = [];
   }
 

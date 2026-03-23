@@ -4,37 +4,54 @@
  * - Paint mode: scatter trees randomly within brush radius
  * - Erase mode: remove trees within brush radius
  * - Y is always locked to sampleHeight(x, z)
+ * - Chunk-based InstancedMesh: world divided into CHUNK_SIZE×CHUNK_SIZE cells,
+ *   each chunk gets its own InstancedMesh with frustumCulled=true so Three.js
+ *   automatically skips draw calls for chunks outside the camera frustum.
  */
 
 import * as THREE from "three";
 
 const MAX_TREES = 8000;
+const CHUNK_SIZE = 64; // world-units per chunk side
 
 export function createTreeSystem(scene, sampleHeight) {
   let positions = []; // { x, z, rot, scale }
-  let instanceMeshes = []; // one InstancedMesh per GLB mesh part
-  const dummy = new THREE.Object3D();
+  let meshParts  = []; // [{ geometry, material }] — shared across chunks
+  const dummy    = new THREE.Object3D();
 
-  // ── Load model parts into InstancedMeshes ──────────────────────────────
-  function setModel(gltf) {
-    // Remove old meshes
-    instanceMeshes.forEach((m) => scene.remove(m));
-    instanceMeshes = [];
+  // chunks: Map<"cx,cz", { ims: InstancedMesh[], capacity: number }>
+  const chunks = new Map();
 
-    // Collect all meshes from GLB
-    const parts = [];
-    gltf.scene.traverse((o) => {
-      if (o.isMesh) parts.push(o);
+  // ── helpers ───────────────────────────────────────────────────────────
+  function chunkKey(cx, cz) { return `${cx},${cz}`; }
+  function posToChunk(x, z) {
+    return { cx: Math.floor(x / CHUNK_SIZE), cz: Math.floor(z / CHUNK_SIZE) };
+  }
+
+  function makeChunkIMs(capacity) {
+    return meshParts.map(({ geometry, material }) => {
+      const im = new THREE.InstancedMesh(geometry, material, capacity);
+      im.castShadow = true;
+      im.receiveShadow = true;
+      im.frustumCulled = true; // Three.js culls this chunk when outside camera frustum
+      im.count = 0;
+      scene.add(im);
+      return im;
     });
+  }
 
+  // ── Load model parts into shared geometry/material refs ───────────────
+  function setModel(gltf) {
+    // Remove all existing chunk meshes
+    for (const chunk of chunks.values()) chunk.ims.forEach(im => scene.remove(im));
+    chunks.clear();
+    meshParts = [];
+
+    const parts = [];
+    gltf.scene.traverse((o) => { if (o.isMesh) parts.push(o); });
     if (parts.length === 0) return;
 
-    // One InstancedMesh per part
     parts.forEach((part) => {
-      // Foliage uses alpha-blend by default, which causes two problems:
-      // 1. Water bleeds through leaves (no depth write)
-      // 2. Trees behind other trees lose foliage (broken instanced sorting)
-      // Fix: convert to alpha-test — pixels are opaque or discarded, no sorting needed.
       let mat = part.material;
       if (mat.transparent || mat.alphaTest > 0) {
         mat = mat.clone();
@@ -42,53 +59,76 @@ export function createTreeSystem(scene, sampleHeight) {
         mat.alphaTest = 0.5;
         mat.depthWrite = true;
       }
-      const im = new THREE.InstancedMesh(
-        part.geometry,
-        mat,
-        MAX_TREES,
-      );
-      im.castShadow = true;
-      im.receiveShadow = true;
-      im.frustumCulled = false; // bounding sphere covers only one tree, not all instances
-      im.count = 0;
-      scene.add(im);
-      instanceMeshes.push(im);
+      meshParts.push({ geometry: part.geometry, material: mat });
     });
 
     rebuild();
   }
 
-  // ── Rebuild all instance matrices from positions array ─────────────────
+  // ── Rebuild chunk InstancedMeshes from positions array ────────────────
   function rebuild() {
-    const count = positions.length;
-    instanceMeshes.forEach((im) => {
-      im.count = count;
+    if (meshParts.length === 0) return;
+
+    // Group position indices by chunk
+    const chunkGroups = new Map(); // key -> number[]
+    positions.forEach((pos, idx) => {
+      const { cx, cz } = posToChunk(pos.x, pos.z);
+      const key = chunkKey(cx, cz);
+      if (!chunkGroups.has(key)) chunkGroups.set(key, []);
+      chunkGroups.get(key).push(idx);
+    });
+
+    // Remove chunks that no longer have any trees
+    for (const key of [...chunks.keys()]) {
+      if (!chunkGroups.has(key)) {
+        chunks.get(key).ims.forEach(im => scene.remove(im));
+        chunks.delete(key);
+      }
+    }
+
+    // Update or create each occupied chunk
+    for (const [key, posIndices] of chunkGroups) {
+      const count = posIndices.length;
+      let chunk = chunks.get(key);
+
+      if (!chunk || count > chunk.capacity) {
+        // Create (or recreate with larger capacity)
+        if (chunk) chunk.ims.forEach(im => scene.remove(im));
+        const capacity = count + 64;
+        const ims = makeChunkIMs(capacity);
+        chunk = { ims, capacity };
+        chunks.set(key, chunk);
+      }
+
+      // Write matrices
+      chunk.ims.forEach(im => { im.count = count; });
       for (let i = 0; i < count; i++) {
-        const { x, z, rot, scale } = positions[i];
-        const y = sampleHeight(x, z);
-        dummy.position.set(x, y, z);
+        const { x, z, rot, scale } = positions[posIndices[i]];
+        dummy.position.set(x, sampleHeight(x, z), z);
         dummy.rotation.set(0, rot, 0);
         dummy.scale.setScalar(scale);
         dummy.updateMatrix();
-        im.setMatrixAt(i, dummy.matrix);
+        chunk.ims.forEach(im => im.setMatrixAt(i, dummy.matrix));
       }
-      im.instanceMatrix.needsUpdate = true;
-    });
+
+      // Finalize — computeBoundingSphere gives a tight sphere per chunk so
+      // Three.js frustum-culling works correctly at chunk granularity
+      chunk.ims.forEach(im => {
+        im.instanceMatrix.needsUpdate = true;
+        im.computeBoundingSphere();
+      });
+    }
   }
 
   // ── Add trees randomly within a brush circle ───────────────────────────
-  // treesPerStroke: how many attempts per call
-  // minSpacing: minimum world-space distance between any two trees
   function addInBrush(cx, cz, radius, treesPerStroke, minSpacing, scaleMin, scaleMax) {
     let added = 0;
     for (let attempt = 0; attempt < treesPerStroke * 4 && added < treesPerStroke; attempt++) {
-      // Random point inside circle
       const angle = Math.random() * Math.PI * 2;
-      const r = Math.sqrt(Math.random()) * radius; // sqrt for uniform distribution
+      const r = Math.sqrt(Math.random()) * radius;
       const x = cx + Math.cos(angle) * r;
       const z = cz + Math.sin(angle) * r;
 
-      // Check minimum spacing against all existing trees
       let tooClose = false;
       const minSq = minSpacing * minSpacing;
       for (let i = 0; i < positions.length; i++) {
@@ -98,13 +138,8 @@ export function createTreeSystem(scene, sampleHeight) {
       }
       if (tooClose) continue;
 
-      positions.push({
-        x, z,
-        rot: Math.random() * Math.PI * 2,
-        scale: scaleMin + Math.random() * (scaleMax - scaleMin),
-      });
+      positions.push({ x, z, rot: Math.random() * Math.PI * 2, scale: scaleMin + Math.random() * (scaleMax - scaleMin) });
       added++;
-
       if (positions.length >= MAX_TREES) break;
     }
     if (added > 0) rebuild();
@@ -123,9 +158,7 @@ export function createTreeSystem(scene, sampleHeight) {
   }
 
   // ── Sync Y positions when terrain is sculpted ─────────────────────────
-  function syncHeights() {
-    rebuild(); // just re-reads sampleHeight for all positions
-  }
+  function syncHeights() { rebuild(); }
 
   // ── Save / Load ───────────────────────────────────────────────────────
   function getPositions() {
