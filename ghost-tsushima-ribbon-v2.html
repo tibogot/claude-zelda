@@ -71,10 +71,26 @@
       controls.update();
 
       // ─── Lighting ────────────────────────────────────────────────────────────────
-      scene.add(new THREE.HemisphereLight(0x6080c0, 0x0a0e18, 0.5));
-      const moon = new THREE.DirectionalLight(0xb0c8f0, 0.95);
+      const ambientLight = new THREE.AmbientLight(0x405878, 0.45);
+      scene.add(ambientLight);
+
+      const hemiLight = new THREE.HemisphereLight(0x6080c0, 0x0a0e18, 0.65);
+      scene.add(hemiLight);
+
+      const moon = new THREE.DirectionalLight(0xb0c8f0, 1.15);
       moon.position.set(-14, 20, 8);
       scene.add(moon);
+
+      function applyLighting() {
+        ambientLight.color.set(PARAMS.ambientColor);
+        ambientLight.intensity = PARAMS.ambientIntensity;
+        hemiLight.color.set(PARAMS.hemiSky);
+        hemiLight.groundColor.set(PARAMS.hemiGround);
+        hemiLight.intensity = PARAMS.hemiIntensity;
+        moon.color.set(PARAMS.dirColor);
+        moon.intensity = PARAMS.dirIntensity;
+        moon.position.set(PARAMS.dirX, PARAMS.dirY, PARAMS.dirZ);
+      }
 
       // ─── Terrain heightmap ───────────────────────────────────────────────────────
       function terrainH(x, z) {
@@ -145,6 +161,18 @@
         // Scene
         fogNear:  30,
         fogFar:   95,
+
+        // Lighting (ambient + hemisphere + directional “moon”)
+        ambientColor:      '#405878',
+        ambientIntensity:  0.45,
+        hemiSky:           '#6080c0',
+        hemiGround:        '#0a0e18',
+        hemiIntensity:       0.65,
+        dirColor:          '#b0c8f0',
+        dirIntensity:        1.15,
+        dirX:              -14,
+        dirY:               20,
+        dirZ:                8,
       };
 
       // ─── Wind vectors (derived from PARAMS.windAngle) ────────────────────────────
@@ -156,6 +184,7 @@
         pX = wZ;          pZ = -wX; // perpendicular in XZ
       }
       applyWindAngle();
+      applyLighting();
 
       // ─── TSL FBM smoke shader ────────────────────────────────────────────────────
       const hash2 = Fn(([p]) =>
@@ -453,6 +482,31 @@
         .on('change', () => updateShaderUniforms());
       fShader.addBinding(PARAMS, 'shaderSpeedMult', { min: 0.1, max: 5,   step: 0.05, label: 'Shader Speed ×' })
         .on('change', () => updateShaderUniforms());
+
+      // ── LIGHTING ─────────────────────────────────────────────────────────────────
+      const fLight = pane.addFolder({ title: 'Lighting', expanded: true });
+      fLight.addBinding(PARAMS, 'ambientColor', { label: 'Ambient Color' })
+        .on('change', () => applyLighting());
+      fLight.addBinding(PARAMS, 'ambientIntensity', { min: 0, max: 3, step: 0.02, label: 'Ambient Intensity' })
+        .on('change', () => applyLighting());
+      fLight.addBlade({ view: 'separator' });
+      fLight.addBinding(PARAMS, 'hemiSky', { label: 'Hemisphere Sky' })
+        .on('change', () => applyLighting());
+      fLight.addBinding(PARAMS, 'hemiGround', { label: 'Hemisphere Ground' })
+        .on('change', () => applyLighting());
+      fLight.addBinding(PARAMS, 'hemiIntensity', { min: 0, max: 3, step: 0.02, label: 'Hemisphere Intensity' })
+        .on('change', () => applyLighting());
+      fLight.addBlade({ view: 'separator' });
+      fLight.addBinding(PARAMS, 'dirColor', { label: 'Directional (moon) Color' })
+        .on('change', () => applyLighting());
+      fLight.addBinding(PARAMS, 'dirIntensity', { min: 0, max: 4, step: 0.02, label: 'Directional Intensity' })
+        .on('change', () => applyLighting());
+      fLight.addBinding(PARAMS, 'dirX', { min: -80, max: 80, step: 0.5, label: 'Dir. position X' })
+        .on('change', () => applyLighting());
+      fLight.addBinding(PARAMS, 'dirY', { min: 0, max: 120, step: 0.5, label: 'Dir. position Y' })
+        .on('change', () => applyLighting());
+      fLight.addBinding(PARAMS, 'dirZ', { min: -80, max: 80, step: 0.5, label: 'Dir. position Z' })
+        .on('change', () => applyLighting());
 
       // ── SCENE ───────────────────────────────────────────────────────────────────
       const fScene = pane.addFolder({ title: 'Scene', expanded: false });

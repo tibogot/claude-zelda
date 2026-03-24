@@ -1,0 +1,2191 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Inside 2.5D Flow — Chunk stream test</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #1a2e22;
+        font-family: "SF Mono", "Fira Code", monospace;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        left: 12px;
+        bottom: 12px;
+        z-index: 20;
+        color: #c8d7f6;
+        background: rgba(4, 8, 14, 0.6);
+        border: 1px solid rgba(175, 195, 255, 0.22);
+        border-radius: 8px;
+        padding: 10px 12px;
+        font-size: 11px;
+        line-height: 1.55;
+        user-select: none;
+      }
+      #info b {
+        color: #eef5ff;
+      }
+      #hallDbg {
+        position: fixed;
+        top: 10px;
+        left: 10px;
+        z-index: 30;
+        margin: 0;
+        padding: 8px 10px;
+        font: 11px/1.45 ui-monospace, monospace;
+        color: #b8ffc8;
+        background: rgba(0, 12, 8, 0.72);
+        border: 1px solid rgba(100, 200, 140, 0.35);
+        border-radius: 6px;
+        max-width: min(420px, 92vw);
+        white-space: pre-wrap;
+        pointer-events: none;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">
+      <b>Inside 2.5D Flow Prototype</b><br />
+      Move: <b>A/D</b> or <b>Left/Right</b> · Jump: <b>Space</b><br />
+      Depth-locked 2.5D lane · ambience: <b id="biomeLabel">—</b> · hall <b>28–88</b><br />
+      <span style="opacity: 0.85">Use <b>inside-25d-flow-prototypechunks.html</b> · Wider hall + camera-side cutaway (2.5D) · Tweakpane → Hall debug</span>
+    </div>
+    <pre id="hallDbg"></pre>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
+      import { Pane } from "https://esm.sh/tweakpane@4.0.4";
+
+      const LANE_Z = 0;
+      const DEFAULT_GRAVITY = 30;
+      const DEFAULT_MOVE_SPEED = 7.8;
+      const DEFAULT_JUMP_SPEED = 11.5;
+
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 0.92;
+      document.body.appendChild(renderer.domElement);
+      await renderer.init();
+
+      const scene = new THREE.Scene();
+      // Linear fog (WebGPURenderer uses scene.fog on standard materials). Stronger in the distance so
+      // hills read larger; lane / obstacles keep fog:false so gameplay stays clear.
+      scene.fog = new THREE.Fog(0xa8c2b4, 28, 138);
+
+      const hdrLoader = new HDRLoader();
+      /** Kept so ambience presets can switch between HDR sky and solid colors. */
+      let hdrBackgroundTexture = null;
+      try {
+        const hdrTexture = await hdrLoader.loadAsync(
+          "./textures/animestyled_hdr.hdr",
+        );
+        hdrTexture.mapping = THREE.EquirectangularReflectionMapping;
+        hdrBackgroundTexture = hdrTexture;
+        scene.background = hdrTexture;
+        try {
+          const pmremGenerator = new THREE.PMREMGenerator(renderer);
+          scene.environment =
+            pmremGenerator.fromEquirectangular(hdrTexture).texture;
+          scene.environmentIntensity = 0.72;
+          pmremGenerator.dispose();
+        } catch (e2) {
+          console.warn("PMREM bake failed (IBL may be missing):", e2);
+        }
+      } catch (e) {
+        console.warn("HDR load failed, using solid fallback:", e);
+        scene.background = new THREE.Color(0xb8d4f0);
+      }
+
+      const camera = new THREE.PerspectiveCamera(
+        42,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        300,
+      );
+      camera.position.set(0, 7.2, 21);
+      camera.lookAt(0, 3.2, LANE_Z);
+
+      const hemi = new THREE.HemisphereLight(0xd8ead8, 0x3d5238, 0.85);
+      scene.add(hemi);
+
+      const sun = new THREE.DirectionalLight(0xfff4e6, 1.65);
+      sun.position.set(18, 22, 10);
+      scene.add(sun);
+
+      const skyFill = new THREE.DirectionalLight(0xc8d8ce, 0.22);
+      skyFill.position.set(-12, 14, 6);
+      scene.add(skyFill);
+
+      const rim = new THREE.DirectionalLight(0xfff0e0, 0.28);
+      rim.position.set(-6, 8, 16);
+      scene.add(rim);
+
+      const grassSun = new THREE.DirectionalLight(0xe8ffd8, 0.55);
+      grassSun.position.set(6, 4, 18);
+      scene.add(grassSun);
+
+      /** Ghost-shore style: warm fire pool (intensity driven by ambience ghost blend). */
+      const warmFire = new THREE.PointLight(0xffb789, 0, 48, 2);
+      warmFire.position.set(0, 3.85, -7);
+      scene.add(warmFire);
+
+      /** World slices along X; only `2 * radius + 1` chunks stay mounted for culling / perf. */
+      const CHUNK_WIDTH = 40;
+      const CHUNK_LOAD_RADIUS = 2;
+      const worldRoot = new THREE.Group();
+      scene.add(worldRoot);
+
+      /** Lane obstacles must not overlap the walkable hall (otherwise the capsule “sticks”). */
+      const HALL_X0 = 28;
+      const HALL_X1 = 88;
+      /** Half-width of the hall in Z; must match the great-hall mesh below. Used by chunks (trees/rocks). */
+      const HALL_ZW = 14.25;
+      function laneObstacleOverlapsHall(worldX, halfW) {
+        return worldX + halfW > HALL_X0 - 2 && worldX - halfW < HALL_X1 + 2;
+      }
+      /** Trees & props: no spawns inside the house footprint (X band + shallow Z near the lane). */
+      function inHallSpawnExclusion(worldX, z) {
+        const mx0 = HALL_X0 - 2.5;
+        const mx1 = HALL_X1 + 2.5;
+        if (worldX <= mx0 || worldX >= mx1) return false;
+        const mz = HALL_ZW + 2.8;
+        return z > -mz && z < mz;
+      }
+
+      function groundHeight(x) {
+        return (
+          Math.sin(x * 0.17) * 0.45 +
+          Math.sin(x * 0.55 + 1.2) * 0.15 +
+          Math.cos(x * 0.09 - 0.7) * 0.35
+        );
+      }
+
+      /** Same base surface as the lane (x + small z ripple). */
+      function surfaceY(x, z) {
+        return groundHeight(x) + Math.sin(z * 2.2) * 0.03;
+      }
+
+      /**
+       * Procedural hills behind the lane: extra undulation only far in -Z so trees sit on real grass,
+       * not empty sky / HDR.
+       */
+      function terrainHeight(x, z) {
+        const base = surfaceY(x, z);
+        const depth = -z;
+        const t = THREE.MathUtils.smoothstep(3, 22, depth);
+        const extra =
+          Math.sin(z * 0.082) * 1.05 +
+          Math.cos(x * 0.062 + z * 0.052) * 0.62 +
+          Math.sin(x * 0.11 + z * 0.068) * 0.42;
+        return base + extra * t;
+      }
+
+      const hillZMin = -54;
+      const hillZMax = -2;
+      const hillDepth = hillZMax - hillZMin;
+      const hillZCenter = (hillZMin + hillZMax) * 0.5;
+      const hillSegZ = 96;
+      const segXForChunk = Math.max(
+        28,
+        Math.round((CHUNK_WIDTH * 380) / 220),
+      );
+
+      const textureLoader = new THREE.TextureLoader();
+      const grassColor = textureLoader.load(
+        "./textures/Grass005_1K-JPG_Color.jpg",
+      );
+      const grassRough = textureLoader.load(
+        "./textures/Grass005_1K-JPG_Roughness.jpg",
+      );
+      const grassNormal = textureLoader.load(
+        "./textures/Grass005_1K-JPG_NormalGL.jpg",
+      );
+      for (const t of [grassColor, grassRough, grassNormal]) {
+        t.wrapS = THREE.RepeatWrapping;
+        t.wrapT = THREE.RepeatWrapping;
+        t.repeat.set(14, 2.8);
+      }
+      grassColor.colorSpace = THREE.SRGBColorSpace;
+
+      const floorMat = new THREE.MeshStandardMaterial({
+        color: 0x7ab86a,
+        map: grassColor,
+        roughnessMap: grassRough,
+        normalMap: grassNormal,
+        normalScale: new THREE.Vector2(0.55, 0.55),
+        roughness: 0.96,
+        metalness: 0,
+        fog: false,
+        envMapIntensity: 0,
+      });
+
+      const hillMat = floorMat.clone();
+      hillMat.fog = true;
+      hillMat.envMapIntensity = 0;
+      for (const key of ["map", "roughnessMap", "normalMap"]) {
+        const tex = hillMat[key];
+        if (tex) {
+          const tc = tex.clone();
+          tc.wrapS = THREE.RepeatWrapping;
+          tc.wrapT = THREE.RepeatWrapping;
+          tc.repeat.set(16, 12);
+          if (key === "map" && grassColor.colorSpace)
+            tc.colorSpace = grassColor.colorSpace;
+          hillMat[key] = tc;
+        }
+      }
+      const underSoilMat = new THREE.MeshStandardMaterial({
+        color: 0x1e2e22,
+        roughness: 1,
+        metalness: 0,
+        fog: false,
+        envMapIntensity: 0,
+      });
+
+      const obstacleMat = new THREE.MeshStandardMaterial({
+        color: 0x3d5238,
+        roughnessMap: grassRough,
+        map: grassColor,
+        roughness: 0.92,
+        metalness: 0.03,
+        fog: false,
+        envMapIntensity: 0,
+      });
+      const gateMat = new THREE.MeshStandardMaterial({
+        color: 0x1d242d,
+        roughness: 0.9,
+        fog: true,
+        envMapIntensity: 0.35,
+      });
+      const gatePostGeo = new THREE.BoxGeometry(0.58, 3.4, 0.52);
+      const gateBeamGeo = new THREE.BoxGeometry(5.2, 0.46, 0.72);
+      const gateTopGeo = new THREE.BoxGeometry(6.7, 0.36, 0.95);
+
+      const propMatMid = new THREE.MeshStandardMaterial({
+        color: 0x18212b,
+        roughness: 0.93,
+        fog: true,
+        envMapIntensity: 0.25,
+      });
+      const propMatFront = new THREE.MeshStandardMaterial({
+        color: 0x0b1016,
+        roughness: 1.0,
+        fog: true,
+        envMapIntensity: 0.2,
+      });
+
+      const fgCompose = new THREE.Matrix4();
+      const fgPos = new THREE.Vector3();
+      const fgQuat = new THREE.Quaternion();
+      const fgScale = new THREE.Vector3();
+      const fgYAxis = new THREE.Vector3(0, 1, 0);
+      const fgGrassMat = new THREE.MeshStandardMaterial({
+        color: 0x2d5238,
+        roughness: 0.94,
+        metalness: 0,
+        fog: false,
+        envMapIntensity: 0,
+      });
+      const fgGrassGeo = new THREE.ConeGeometry(0.07, 0.52, 4);
+      fgGrassGeo.translate(0, 0.26, 0);
+      const fgPebbleMat = new THREE.MeshStandardMaterial({
+        color: 0x2a3830,
+        roughness: 1,
+        metalness: 0,
+        fog: false,
+        envMapIntensity: 0,
+      });
+      const fgPebbleGeo = new THREE.DodecahedronGeometry(0.11, 0);
+      const fgLogMat = new THREE.MeshStandardMaterial({
+        color: 0x243228,
+        roughness: 0.96,
+        metalness: 0,
+        fog: false,
+        envMapIntensity: 0,
+      });
+      const fgLogGeo = new THREE.CapsuleGeometry(0.14, 0.55, 4, 8);
+      fgLogGeo.rotateZ(Math.PI * 0.5);
+
+      const obstacleColliders = [];
+      const obstacleEntries = [];
+      const chunks = new Map();
+
+      function mulberry32(seed) {
+        return function () {
+          let t = (seed += 0x6d2b79f5);
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+
+      const gltfLoader = new GLTFLoader();
+      const tempBox = new THREE.Box3();
+      function loadGltf(url) {
+        return new Promise((resolve, reject) => {
+          gltfLoader.load(url, resolve, undefined, reject);
+        });
+      }
+      function loadSceneModel(url) {
+        return new Promise((resolve, reject) => {
+          gltfLoader.load(
+            url,
+            (gltf) => resolve(gltf.scene),
+            undefined,
+            (err) => reject(err),
+          );
+        });
+      }
+      function fitObjectHeight(object3d, targetHeight) {
+        tempBox.setFromObject(object3d);
+        const size = tempBox.getSize(new THREE.Vector3());
+        const currentHeight = Math.max(size.y, 1e-4);
+        const scale = targetHeight / currentHeight;
+        object3d.scale.multiplyScalar(scale);
+      }
+
+      /** Alpha-blended foliage + InstancedMesh breaks depth sorting; use cutout + solid depth. */
+      function materialForInstancedFoliage(src) {
+        const m = src.clone();
+        const needsCutout =
+          src.transparent || src.opacity < 0.999 || !!src.alphaMap;
+        m.transparent = false;
+        m.opacity = 1;
+        m.depthWrite = true;
+        m.depthTest = true;
+        m.alphaTest = needsCutout ? 0.42 : 0;
+        m.side = needsCutout ? THREE.DoubleSide : THREE.FrontSide;
+        m.polygonOffset = true;
+        m.polygonOffsetFactor = 1;
+        m.polygonOffsetUnits = 1;
+        m.envMapIntensity = (m.envMapIntensity ?? 1) * 0.55;
+        m.fog = true;
+        return m;
+      }
+
+      function fixGltfTransparencyForDepth(root) {
+        root.traverse((child) => {
+          if (child.isMesh && child.material) {
+            const mats = Array.isArray(child.material)
+              ? child.material
+              : [child.material];
+            const next = mats.map((mat) => {
+              const m = mat.clone();
+              const needsCutout =
+                m.transparent || m.opacity < 0.999 || m.alphaMap;
+              if (needsCutout) {
+                m.transparent = false;
+                m.opacity = 1;
+                m.depthWrite = true;
+                m.alphaTest = 0.42;
+                m.side = THREE.DoubleSide;
+              }
+              m.depthWrite = true;
+              m.fog = true;
+              return m;
+            });
+            child.material = next.length === 1 ? next[0] : next;
+          }
+        });
+      }
+
+      const dummyTree = new THREE.Object3D();
+      const chunkAssets = { pineScene: null, rockBase: null };
+      const TREE_Z_BANDS = [-6.5, -13.5, -24];
+      const GATE_WORLD_X = 22;
+      const PINES_PER_CHUNK = 22;
+      let currentTreeScale = 1;
+      let currentObstacleHeightScale = 1;
+
+      /**
+       * Only disposes mesh geometries. Do NOT dispose GLTF materials/textures here: clones and
+       * Material.clone() share Texture instances; disposing them breaks other chunks still drawing
+       * (WebGPU: "Destroyed texture used in a submit" + freeze).
+       */
+      function disposeObjectGeometries(root) {
+        root.traverse((o) => {
+          if (o.geometry) o.geometry.dispose();
+        });
+      }
+
+      function addPinesToWrapper(
+        pineWrapper,
+        gltfScene,
+        rng,
+        x0,
+        x1,
+        count,
+        zBands,
+      ) {
+        const root = gltfScene.clone(true);
+        fitObjectHeight(root, 7.2);
+        root.updateMatrixWorld(true);
+        const parts = [];
+        root.traverse((child) => {
+          if (child.isMesh) {
+            const geom = child.geometry.clone();
+            geom.applyMatrix4(child.matrixWorld);
+            geom.computeVertexNormals();
+            const raw = Array.isArray(child.material)
+              ? child.material[0]
+              : child.material;
+            parts.push({
+              geometry: geom,
+              material: materialForInstancedFoliage(raw),
+            });
+          }
+        });
+        if (parts.length === 0) return [];
+
+        const combined = new THREE.Box3();
+        for (const p of parts) {
+          combined.union(
+            new THREE.Box3().setFromBufferAttribute(
+              p.geometry.attributes.position,
+            ),
+          );
+        }
+        const groundYOffset = -combined.min.y;
+        const matrices = [];
+        for (let i = 0; i < count; i++) {
+          let worldX;
+          let zCenter;
+          let z;
+          let ok = false;
+          for (let t = 0; t < 60; t++) {
+            worldX = x0 + rng() * (x1 - x0);
+            zCenter = zBands[(rng() * zBands.length) | 0];
+            z = zCenter + (rng() - 0.5) * 1.35;
+            if (!inHallSpawnExclusion(worldX, z)) {
+              ok = true;
+              break;
+            }
+          }
+          if (!ok) {
+            worldX = THREE.MathUtils.clamp(
+              rng() < 0.5 ? HALL_X0 - 3.2 - rng() * 2.5 : HALL_X1 + 3.2 + rng() * 2.5,
+              x0 + 0.4,
+              x1 - 0.4,
+            );
+            zCenter = -22 - rng() * 5;
+            z = zCenter + (rng() - 0.5) * 1.1;
+          }
+          const s = 1.05 + rng() * 0.95;
+          dummyTree.position.set(
+            worldX,
+            terrainHeight(worldX, z) + groundYOffset,
+            z,
+          );
+          dummyTree.rotation.set(
+            (rng() - 0.5) * 0.05,
+            rng() * Math.PI * 2,
+            (rng() - 0.5) * 0.06,
+          );
+          dummyTree.scale.setScalar(s);
+          dummyTree.updateMatrix();
+          matrices.push(dummyTree.matrix.clone());
+        }
+        const out = [];
+        for (const p of parts) {
+          const inst = new THREE.InstancedMesh(p.geometry, p.material, count);
+          for (let i = 0; i < count; i++) inst.setMatrixAt(i, matrices[i]);
+          inst.instanceMatrix.needsUpdate = true;
+          pineWrapper.add(inst);
+          out.push(inst);
+        }
+        disposeObjectGeometries(root);
+        return out;
+      }
+
+      function rebuildObstacleLists() {
+        obstacleColliders.length = 0;
+        obstacleEntries.length = 0;
+        for (const c of chunks.values()) {
+          obstacleColliders.push(...c.colliders);
+          obstacleEntries.push(...c.obstacleEntries);
+        }
+      }
+
+      function setObstacleHeightScale(scale) {
+        currentObstacleHeightScale = scale;
+        for (const e of obstacleEntries) {
+          const h = e.baseH * scale;
+          e.mesh.scale.y = scale;
+          e.mesh.position.y = e.gy + h * 0.5;
+          e.collider.minY = e.gy;
+          e.collider.maxY = e.gy + h;
+        }
+      }
+
+      function disposeChunk(chunkIndex) {
+        const c = chunks.get(chunkIndex);
+        if (!c) return;
+        worldRoot.remove(c.group);
+        for (const g of c.ownedGeometries) g.dispose();
+        for (const r of c.gltfRoots) disposeObjectGeometries(r);
+        for (const inst of c.pineInstancers) {
+          inst.geometry.dispose();
+        }
+        chunks.delete(chunkIndex);
+      }
+
+      function buildChunk(chunkIndex) {
+        if (chunks.has(chunkIndex)) return;
+        const rng = mulberry32(chunkIndex * 9781 + 62773);
+        const x0 = chunkIndex * CHUNK_WIDTH;
+        const x1 = x0 + CHUNK_WIDTH;
+        const cx = x0 + CHUNK_WIDTH * 0.5;
+
+        const group = new THREE.Group();
+        group.name = `chunk_${chunkIndex}`;
+        const ownedGeometries = new Set();
+        const gltfRoots = [];
+        const colliders = [];
+        const chunkObstacleEntries = [];
+        const pineInstancers = [];
+
+        const hillGeo = new THREE.PlaneGeometry(
+          CHUNK_WIDTH,
+          hillDepth,
+          segXForChunk,
+          hillSegZ,
+        );
+        hillGeo.rotateX(-Math.PI / 2);
+        const hp = hillGeo.attributes.position.array;
+        for (let i = 0; i < hp.length; i += 3) {
+          const lx = hp[i];
+          const lz = hp[i + 2];
+          hp[i + 1] = terrainHeight(cx + lx, lz);
+        }
+        hillGeo.computeVertexNormals();
+        ownedGeometries.add(hillGeo);
+        const hillMesh = new THREE.Mesh(hillGeo, hillMat);
+        hillMesh.position.set(cx, 0, hillZCenter);
+        group.add(hillMesh);
+
+        const laneGeo = new THREE.PlaneGeometry(CHUNK_WIDTH, 5.6, segXForChunk, 8);
+        laneGeo.rotateX(-Math.PI / 2);
+        const lp = laneGeo.attributes.position.array;
+        for (let i = 0; i < lp.length; i += 3) {
+          const lx = lp[i];
+          const lz = lp[i + 2];
+          lp[i + 1] =
+            groundHeight(cx + lx) + Math.sin(lz * 2.2) * 0.03;
+        }
+        laneGeo.computeVertexNormals();
+        ownedGeometries.add(laneGeo);
+        const laneMesh = new THREE.Mesh(laneGeo, floorMat);
+        laneMesh.position.set(cx, 0, LANE_Z);
+        group.add(laneMesh);
+
+        const underGeo = new THREE.BoxGeometry(CHUNK_WIDTH, 6, 14);
+        ownedGeometries.add(underGeo);
+        const underMesh = new THREE.Mesh(underGeo, underSoilMat);
+        underMesh.position.set(cx, -3.2, LANE_Z);
+        group.add(underMesh);
+
+        const nObs = rng() < 0.12 ? 0 : rng() < 0.55 ? 1 : 2;
+        for (let o = 0; o < nObs; o++) {
+          const w = 1.15 + rng() * 0.45;
+          const h = 0.5 + rng() * 0.75;
+          const d = 1.2 + rng() * 0.35;
+          const margin = w * 0.5 + 0.6;
+          const halfW = w * 0.5;
+          let worldX = x0 + margin + rng() * (CHUNK_WIDTH - margin * 2);
+          let tries = 0;
+          while (laneObstacleOverlapsHall(worldX, halfW) && tries < 18) {
+            worldX = x0 + margin + rng() * (CHUNK_WIDTH - margin * 2);
+            tries++;
+          }
+          if (laneObstacleOverlapsHall(worldX, halfW)) continue;
+          const gy = groundHeight(worldX);
+          const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), obstacleMat);
+          mesh.position.set(worldX, gy + h * 0.5, LANE_Z);
+          group.add(mesh);
+          ownedGeometries.add(mesh.geometry);
+          const collider = {
+            minX: worldX - w * 0.5,
+            maxX: worldX + w * 0.5,
+            minY: gy,
+            maxY: gy + h,
+            minZ: LANE_Z - d * 0.5,
+            maxZ: LANE_Z + d * 0.5,
+          };
+          colliders.push(collider);
+          chunkObstacleEntries.push({ mesh, gy, baseH: h, collider });
+        }
+
+        if (GATE_WORLD_X >= x0 && GATE_WORLD_X < x1) {
+          const gate = new THREE.Group();
+          const postL = new THREE.Mesh(gatePostGeo, gateMat);
+          const postR = new THREE.Mesh(gatePostGeo, gateMat);
+          const beam = new THREE.Mesh(gateBeamGeo, gateMat);
+          const top = new THREE.Mesh(gateTopGeo, gateMat);
+          postL.position.set(-1.95, 1.7, 0);
+          postR.position.set(1.95, 1.7, 0);
+          beam.position.set(0, 3.15, 0);
+          top.position.set(0, 3.58, -0.1);
+          gate.add(postL, postR, beam, top);
+          gate.position.set(
+            GATE_WORLD_X,
+            terrainHeight(GATE_WORLD_X, -5.8),
+            -5.8,
+          );
+          group.add(gate);
+        }
+
+        const nRocks = 5 + ((rng() * 5) | 0);
+        for (let i = 0; i < nRocks; i++) {
+          let worldX;
+          let rz;
+          let rockTries = 0;
+          do {
+            worldX = x0 + rng() * CHUNK_WIDTH;
+            const zBand = i % 3 === 0 ? -2.4 : i % 3 === 1 ? -6.5 : 2.4;
+            rz = zBand + (rng() - 0.5) * 1.6;
+            rockTries++;
+          } while (inHallSpawnExclusion(worldX, rz) && rockTries < 24);
+          if (inHallSpawnExclusion(worldX, rz)) continue;
+          const rock = new THREE.Mesh(
+            new THREE.DodecahedronGeometry(0.22 + rng() * 0.42),
+            i % 2 === 0 ? propMatMid : propMatFront,
+          );
+          rock.scale.y *= 0.55 + rng() * 0.45;
+          rock.position.set(
+            worldX,
+            terrainHeight(worldX, rz) - 0.12 + rng() * 0.12,
+            rz,
+          );
+          group.add(rock);
+          ownedGeometries.add(rock.geometry);
+        }
+
+        const fgGrassCount = 28;
+        const fgGrass = new THREE.InstancedMesh(
+          fgGrassGeo,
+          fgGrassMat,
+          fgGrassCount,
+        );
+        let fgi = 0;
+        for (let i = 0; i < fgGrassCount; i++) {
+          const left = i % 2 === 0;
+          const worldX = left
+            ? x0 + rng() * (CHUNK_WIDTH * 0.48)
+            : x0 + CHUNK_WIDTH * 0.52 + rng() * (CHUNK_WIDTH * 0.48);
+          const z = 0.22 + rng() * 0.38;
+          const y = surfaceY(worldX, z) - 0.02;
+          fgPos.set(worldX, y, z);
+          fgQuat.setFromAxisAngle(fgYAxis, rng() * Math.PI * 2);
+          const sc = 0.75 + rng() * 1.15;
+          const sy = 0.7 + rng() * 0.65;
+          fgScale.set(sc * 0.35, sc * sy, sc * 0.35);
+          fgCompose.compose(fgPos, fgQuat, fgScale);
+          fgGrass.setMatrixAt(fgi++, fgCompose);
+        }
+        fgGrass.instanceMatrix.needsUpdate = true;
+        group.add(fgGrass);
+
+        const fgPebbleCount = 12;
+        const fgPebbles = new THREE.InstancedMesh(
+          fgPebbleGeo,
+          fgPebbleMat,
+          fgPebbleCount,
+        );
+        fgi = 0;
+        for (let i = 0; i < fgPebbleCount; i++) {
+          const left = i % 2 === 0;
+          const worldX = left
+            ? x0 + rng() * (CHUNK_WIDTH * 0.48)
+            : x0 + CHUNK_WIDTH * 0.52 + rng() * (CHUNK_WIDTH * 0.48);
+          const z = 0.18 + rng() * 0.42;
+          fgPos.set(worldX, surfaceY(worldX, z) + 0.04, z);
+          fgQuat.setFromAxisAngle(fgYAxis, rng() * Math.PI * 2);
+          const sc = 0.55 + rng() * 0.95;
+          fgScale.set(sc, sc * (0.35 + rng() * 0.25), sc);
+          fgCompose.compose(fgPos, fgQuat, fgScale);
+          fgPebbles.setMatrixAt(fgi++, fgCompose);
+        }
+        fgPebbles.instanceMatrix.needsUpdate = true;
+        group.add(fgPebbles);
+
+        const fgLogCount = 5;
+        const fgLogs = new THREE.InstancedMesh(fgLogGeo, fgLogMat, fgLogCount);
+        fgi = 0;
+        for (let i = 0; i < fgLogCount; i++) {
+          const left = i % 2 === 0;
+          const worldX = left
+            ? x0 + rng() * (CHUNK_WIDTH * 0.48)
+            : x0 + CHUNK_WIDTH * 0.52 + rng() * (CHUNK_WIDTH * 0.48);
+          const z = 0.32 + rng() * 0.45;
+          fgPos.set(worldX, surfaceY(worldX, z) + 0.1, z);
+          fgQuat.setFromAxisAngle(fgYAxis, (rng() - 0.5) * 0.8);
+          const sc = 0.9 + rng() * 1.1;
+          fgScale.set(sc, sc, sc);
+          fgCompose.compose(fgPos, fgQuat, fgScale);
+          fgLogs.setMatrixAt(fgi++, fgCompose);
+        }
+        fgLogs.instanceMatrix.needsUpdate = true;
+        group.add(fgLogs);
+
+        if (chunkAssets.rockBase) {
+          const nGltfRocks = 1 + ((rng() * 3) | 0);
+          for (let r = 0; r < nGltfRocks; r++) {
+            const rock = chunkAssets.rockBase.clone(true);
+            fixGltfTransparencyForDepth(rock);
+            let worldX;
+            let z;
+            let grTries = 0;
+            do {
+              worldX = x0 + rng() * CHUNK_WIDTH;
+              z =
+                rng() < 0.55
+                  ? 1.6 + rng() * 1.4
+                  : -2.4 - rng() * 4.2;
+              grTries++;
+            } while (inHallSpawnExclusion(worldX, z) && grTries < 28);
+            if (inHallSpawnExclusion(worldX, z)) {
+              disposeObjectGeometries(rock);
+              continue;
+            }
+            const targetRockHeight = 0.24 + rng() * 0.42;
+            fitObjectHeight(rock, targetRockHeight);
+            rock.position.set(worldX, terrainHeight(worldX, z) - 0.08, z);
+            rock.rotation.y = rng() * Math.PI * 2;
+            group.add(rock);
+            gltfRoots.push(rock);
+          }
+        }
+
+        const pineWrapper = new THREE.Group();
+        pineWrapper.scale.setScalar(currentTreeScale);
+        group.add(pineWrapper);
+        if (chunkAssets.pineScene) {
+          pineInstancers.push(
+            ...addPinesToWrapper(
+              pineWrapper,
+              chunkAssets.pineScene,
+              rng,
+              x0,
+              x1,
+              PINES_PER_CHUNK,
+              TREE_Z_BANDS,
+            ),
+          );
+        }
+
+        worldRoot.add(group);
+        chunks.set(chunkIndex, {
+          group,
+          colliders,
+          obstacleEntries: chunkObstacleEntries,
+          ownedGeometries,
+          gltfRoots,
+          pineInstancers,
+          pineWrapper,
+        });
+      }
+
+      function syncChunksAround(playerX) {
+        const ci = Math.floor(playerX / CHUNK_WIDTH);
+        const need = new Set();
+        for (let d = -CHUNK_LOAD_RADIUS; d <= CHUNK_LOAD_RADIUS; d++) {
+          need.add(ci + d);
+        }
+        let changed = false;
+        for (const idx of [...chunks.keys()]) {
+          if (!need.has(idx)) {
+            disposeChunk(idx);
+            changed = true;
+          }
+        }
+        for (const idx of need) {
+          if (!chunks.has(idx)) {
+            buildChunk(idx);
+            changed = true;
+          }
+        }
+        if (changed) {
+          rebuildObstacleLists();
+          setObstacleHeightScale(currentObstacleHeightScale);
+        }
+      }
+
+      function setAllPineScales(scale) {
+        currentTreeScale = scale;
+        for (const c of chunks.values()) {
+          c.pineWrapper.scale.setScalar(scale);
+        }
+      }
+
+      try {
+        const [pineGltf, rockBase] = await Promise.all([
+          loadGltf("./models/pine2.glb"),
+          loadSceneModel("./models/rock_boulder.glb"),
+        ]);
+        chunkAssets.pineScene = pineGltf.scene;
+        chunkAssets.rockBase = rockBase;
+      } catch (error) {
+        console.warn("Optional GLB props could not be loaded:", error);
+      }
+
+      syncChunksAround(-8);
+
+      // Sparse drifting particles for atmosphere.
+      const dustCount = 320;
+      const dustPos = new Float32Array(dustCount * 3);
+      const dustSeed = new Float32Array(dustCount);
+      for (let i = 0; i < dustCount; i++) {
+        const x = -112 + Math.random() * 224;
+        const y = 0.5 + Math.random() * 9.5;
+        const z = -2 - Math.random() * 26;
+        dustPos[i * 3 + 0] = x;
+        dustPos[i * 3 + 1] = y;
+        dustPos[i * 3 + 2] = z;
+        dustSeed[i] = Math.random() * 100;
+      }
+      const dustGeo = new THREE.BufferGeometry();
+      dustGeo.setAttribute("position", new THREE.BufferAttribute(dustPos, 3));
+      const dust = new THREE.Points(
+        dustGeo,
+        new THREE.PointsMaterial({
+          color: 0xeef6ff,
+          size: 0.045,
+          transparent: true,
+          opacity: 0.28,
+          depthWrite: false,
+        }),
+      );
+      scene.add(dust);
+
+      // Ghost-flow style: layered mist (like showcase) — wide slabs, billboards, stronger opacity + additive halo.
+      const ghostMistGroup = new THREE.Group();
+      ghostMistGroup.name = "ghostMist";
+      const mistSlabs = [];
+      const mistBaseOpacity = 0.22;
+      const mistAddOpacity = 0.14;
+      const mistW = 165;
+      const mistH = 26;
+      for (let i = 0; i < 8; i++) {
+        const mat = new THREE.MeshBasicMaterial({
+          color: 0x9ec4ea,
+          transparent: true,
+          opacity: mistBaseOpacity,
+          depthWrite: false,
+          depthTest: true,
+          side: THREE.DoubleSide,
+        });
+        const slab = new THREE.Mesh(new THREE.PlaneGeometry(mistW, mistH), mat);
+        slab.position.set(0, 2.0 + i * 0.65, -12 - i * 6.8);
+        slab.renderOrder = 4;
+        ghostMistGroup.add(slab);
+        mistSlabs.push(slab);
+
+        const matAdd = mat.clone();
+        matAdd.color.setHex(0xb8d9ff);
+        matAdd.opacity = mistAddOpacity;
+        matAdd.blending = THREE.AdditiveBlending;
+        const halo = new THREE.Mesh(new THREE.PlaneGeometry(mistW * 1.08, mistH * 1.12), matAdd);
+        halo.position.copy(slab.position);
+        halo.position.z -= 0.35;
+        halo.renderOrder = 5;
+        ghostMistGroup.add(halo);
+        mistSlabs.push(halo);
+      }
+      scene.add(ghostMistGroup);
+
+      // Larger embers than ghost-tsushima-flow-showcase (was 0.12); follow player X.
+      const emberCount = 220;
+      const emberSize = 0.3;
+      const emberPos = new Float32Array(emberCount * 3);
+      const emberSeed = new Float32Array(emberCount);
+      for (let i = 0; i < emberCount; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const r = 2.2 + Math.random() * 16;
+        emberPos[i * 3 + 0] = Math.cos(a) * r;
+        emberPos[i * 3 + 1] = 0.55 + Math.random() * 5.8;
+        emberPos[i * 3 + 2] = -11 + Math.sin(a) * r * 0.35 + Math.random() * 4;
+        emberSeed[i] = Math.random() * 100;
+      }
+      const emberGeo = new THREE.BufferGeometry();
+      emberGeo.setAttribute("position", new THREE.BufferAttribute(emberPos, 3));
+      const emberMat = new THREE.PointsMaterial({
+        color: 0xffbb8f,
+        size: emberSize,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        sizeAttenuation: true,
+      });
+      const emberFire = new THREE.Points(emberGeo, emberMat);
+      emberFire.name = "emberFire";
+      scene.add(emberFire);
+
+      /** HALL_ZW is defined with HALL_X0 / HALL_X1 (chunk tree exclusion uses the same value). */
+      const hallCenterX = (HALL_X0 + HALL_X1) * 0.5;
+      const hallFloorY = groundHeight(hallCenterX);
+      const hallWallH = 7.85;
+      const hallMat = new THREE.MeshStandardMaterial({
+        color: 0x4a3d32,
+        roughness: 0.88,
+        metalness: 0.04,
+        fog: false,
+        envMapIntensity: 0.52,
+      });
+      /** Toggle in Tweakpane — transparent + DoubleSide so camera/angle bugs read as geometry, not “mystery black”. */
+      const hallXRayMat = new THREE.MeshStandardMaterial({
+        color: 0x5a78a0,
+        roughness: 0.55,
+        metalness: 0.02,
+        transparent: true,
+        opacity: 0.34,
+        depthWrite: true,
+        side: THREE.DoubleSide,
+        fog: false,
+        envMapIntensity: 0.25,
+      });
+      const hallTrimMat = new THREE.MeshStandardMaterial({
+        color: 0x45362a,
+        roughness: 0.86,
+        metalness: 0.06,
+        fog: false,
+        envMapIntensity: 0.38,
+      });
+      const hallPropMat = new THREE.MeshStandardMaterial({
+        color: 0x4a3c2e,
+        roughness: 0.88,
+        metalness: 0.02,
+        fog: false,
+        envMapIntensity: 0.32,
+      });
+      const hallFloorPlankMat = new THREE.MeshStandardMaterial({
+        color: 0x6e5644,
+        roughness: 0.9,
+        metalness: 0.02,
+        fog: false,
+        envMapIntensity: 0.22,
+      });
+      const hallBeamMat = new THREE.MeshStandardMaterial({
+        color: 0x322820,
+        roughness: 0.84,
+        metalness: 0.04,
+        fog: false,
+        envMapIntensity: 0.42,
+      });
+      const hallStoneMat = new THREE.MeshStandardMaterial({
+        color: 0x5c554c,
+        roughness: 0.93,
+        metalness: 0.03,
+        fog: false,
+        envMapIntensity: 0.2,
+      });
+      const hallFabricMat = new THREE.MeshStandardMaterial({
+        color: 0x4d3c32,
+        roughness: 0.98,
+        metalness: 0,
+        fog: false,
+        envMapIntensity: 0.08,
+        side: THREE.DoubleSide,
+      });
+      const hallRoot = new THREE.Group();
+      hallRoot.name = "greatHall";
+      hallRoot.position.set(hallCenterX, hallFloorY, 0);
+      const hallLen = HALL_X1 - HALL_X0;
+      const hallLeft = new THREE.Mesh(
+        new THREE.BoxGeometry(hallLen, hallWallH, 0.45),
+        hallMat,
+      );
+      hallLeft.position.set(0, hallWallH * 0.5, -HALL_ZW);
+      const hallRight = new THREE.Mesh(
+        new THREE.BoxGeometry(hallLen, hallWallH, 0.45),
+        hallMat,
+      );
+      hallRight.position.set(0, hallWallH * 0.5, HALL_ZW);
+      hallRight.name = "hallWallCameraSide";
+      const hallBack = new THREE.Mesh(
+        new THREE.BoxGeometry(0.48, hallWallH, HALL_ZW * 2 + 0.35),
+        hallMat,
+      );
+      hallBack.position.set(hallLen * 0.5, hallWallH * 0.5, 0);
+      const hallRoof = new THREE.Mesh(
+        new THREE.BoxGeometry(hallLen + 0.35, 0.52, HALL_ZW * 2 + 1.5),
+        hallMat,
+      );
+      /** Lifted so the follow-cam never sits inside the roof slab (back-face cull → black void). */
+      const hallRoofCenterY = hallWallH + 1.55;
+      hallRoof.position.set(0, hallRoofCenterY, 0);
+      const HALL_CAM_Y_CEILING =
+        hallFloorY + hallRoofCenterY - 0.26 - 0.55;
+      const hallFloorSlab = new THREE.Mesh(
+        new THREE.BoxGeometry(hallLen - 0.15, 0.12, HALL_ZW * 2 + 0.2),
+        hallFloorPlankMat,
+      );
+      hallFloorSlab.position.set(0, 0.06, 0);
+      hallRoot.add(hallLeft, hallRight, hallBack, hallRoof, hallFloorSlab);
+
+      for (let bz = -11; bz <= 11; bz += 5.5) {
+        const beam = new THREE.Mesh(
+          new THREE.BoxGeometry(hallLen - 1.15, 0.24, 0.42),
+          hallBeamMat,
+        );
+        beam.position.set(0, hallWallH + 0.4, bz);
+        hallRoot.add(beam);
+      }
+
+      const wainL = new THREE.Mesh(
+        new THREE.BoxGeometry(hallLen - 0.5, 0.38, 0.08),
+        hallTrimMat,
+      );
+      wainL.position.set(0, 1.05, -HALL_ZW + 0.32);
+      hallRoot.add(wainL);
+      const wainB = new THREE.Mesh(
+        new THREE.BoxGeometry(0.1, 0.38, HALL_ZW * 2 - 0.5),
+        hallTrimMat,
+      );
+      wainB.position.set(hallLen * 0.5 - 0.28, 1.05, 0);
+      hallRoot.add(wainB);
+
+      /** Same cutaway as hallRight — posts on the +Z side can block the frustum the same way. */
+      const hallCameraSideOccluders = [hallRight];
+
+      for (let i = 0; i < 5; i++) {
+        const px = -hallLen * 0.42 + i * (hallLen * 0.2);
+        const post = new THREE.Mesh(
+          new THREE.BoxGeometry(0.42, hallWallH, 0.42),
+          hallTrimMat,
+        );
+        post.position.set(px, hallWallH * 0.5, -HALL_ZW + 0.55);
+        hallRoot.add(post);
+        const postR = post.clone();
+        postR.name = "hallPostCameraSide";
+        postR.position.set(px, hallWallH * 0.5, HALL_ZW - 0.55);
+        hallRoot.add(postR);
+        hallCameraSideOccluders.push(postR);
+      }
+
+      function addCrate(px, py, pz, sx, sy, sz) {
+        const m = new THREE.Mesh(
+          new THREE.BoxGeometry(sx, sy, sz),
+          hallPropMat,
+        );
+        m.position.set(px, py + sy * 0.5, pz);
+        hallRoot.add(m);
+      }
+      addCrate(-22, 0, -4.8, 1.1, 1.05, 1.05);
+      addCrate(-20.5, 1.05, -4.9, 0.95, 0.85, 0.95);
+      addCrate(-24, 0, 3.2, 1.35, 0.95, 1.15);
+      const barrel = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.55, 0.52, 1.15, 14),
+        hallPropMat,
+      );
+      barrel.position.set(-16.5, 0.58, 4.4);
+      hallRoot.add(barrel);
+      const tableTop = new THREE.Mesh(
+        new THREE.BoxGeometry(4.6, 0.14, 2.4),
+        hallTrimMat,
+      );
+      tableTop.position.set(8, 0.82, -2.6);
+      hallRoot.add(tableTop);
+      for (const lx of [-1.65, 1.65]) {
+        const leg = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.1, 0.12, 0.78, 8),
+          hallPropMat,
+        );
+        leg.position.set(8 + lx, 0.39, -2.6 + 0.85);
+        hallRoot.add(leg);
+        const leg2 = leg.clone();
+        leg2.position.set(8 + lx, 0.39, -2.6 - 0.85);
+        hallRoot.add(leg2);
+      }
+      const bench = new THREE.Mesh(
+        new THREE.BoxGeometry(5.2, 0.35, 1.1),
+        hallPropMat,
+      );
+      bench.position.set(15, 0.4, 5.1);
+      hallRoot.add(bench);
+      const rug = new THREE.Mesh(
+        new THREE.PlaneGeometry(22, 13),
+        new THREE.MeshStandardMaterial({
+          color: 0x5a2824,
+          roughness: 1,
+          metalness: 0,
+          fog: false,
+          envMapIntensity: 0.1,
+          side: THREE.DoubleSide,
+        }),
+      );
+      rug.rotation.x = -Math.PI / 2;
+      rug.position.set(5, 0.115, 0.2);
+      hallRoot.add(rug);
+      const shelf = new THREE.Mesh(
+        new THREE.BoxGeometry(0.22, 2.6, 5.5),
+        hallTrimMat,
+      );
+      shelf.position.set(hallLen * 0.5 - 0.85, 2.1, 0);
+      hallRoot.add(shelf);
+      const shelfPlank = new THREE.Mesh(
+        new THREE.BoxGeometry(0.72, 0.14, 5.2),
+        hallPropMat,
+      );
+      shelfPlank.position.set(hallLen * 0.5 - 1.1, 1.15, 0);
+      hallRoot.add(shelfPlank);
+      const shelfPlank2 = shelfPlank.clone();
+      shelfPlank2.position.set(hallLen * 0.5 - 1.1, 2.65, 0);
+      hallRoot.add(shelfPlank2);
+      const hay = new THREE.Mesh(
+        new THREE.BoxGeometry(2.8, 1.15, 1.9),
+        new THREE.MeshStandardMaterial({
+          color: 0x5a4a28,
+          roughness: 1,
+          metalness: 0,
+          fog: false,
+          envMapIntensity: 0.1,
+        }),
+      );
+      hay.position.set(-8.5, 0.58, 5.2);
+      hallRoot.add(hay);
+      const lanternG = new THREE.Mesh(
+        new THREE.SphereGeometry(0.28, 10, 8),
+        new THREE.MeshStandardMaterial({
+          color: 0x1a1008,
+          emissive: 0xffa048,
+          emissiveIntensity: 1.15,
+          roughness: 0.45,
+          metalness: 0.2,
+          fog: false,
+        }),
+      );
+      lanternG.position.set(2, 2.35, -6.2);
+      hallRoot.add(lanternG);
+
+      const lanternPl = new THREE.PointLight(0xffaa66, 0, 16, 2);
+      lanternPl.position.copy(lanternG.position);
+      hallRoot.add(lanternPl);
+
+      /** MeshBasic “glass” — visible even if Standard lighting fails (WebGPU / culling debug). */
+      const winMat = new THREE.MeshBasicMaterial({ color: 0x9ecfff, fog: false });
+      const winGeo = new THREE.PlaneGeometry(2.4, 3.1);
+      for (const wz of [-3.6, 0, 3.6]) {
+        const w = new THREE.Mesh(winGeo, winMat);
+        w.position.set(hallLen * 0.5 - 0.22, 3.5, wz);
+        w.rotation.y = -Math.PI / 2;
+        hallRoot.add(w);
+      }
+
+      const bedMat = new THREE.MeshStandardMaterial({
+        color: 0x6b5344,
+        roughness: 0.94,
+        metalness: 0,
+        fog: false,
+        envMapIntensity: 0.35,
+      });
+      const bedBase = new THREE.Mesh(
+        new THREE.BoxGeometry(3.8, 0.42, 2.6),
+        bedMat,
+      );
+      bedBase.position.set(-14, 0.21, -5.8);
+      hallRoot.add(bedBase);
+      const bedMatt = new THREE.Mesh(
+        new THREE.BoxGeometry(3.65, 0.35, 2.45),
+        new THREE.MeshStandardMaterial({
+          color: 0x8a3038,
+          roughness: 0.98,
+          fog: false,
+          envMapIntensity: 0.12,
+        }),
+      );
+      bedMatt.position.set(-14, 0.58, -5.8);
+      hallRoot.add(bedMatt);
+      const pillow = new THREE.Mesh(
+        new THREE.BoxGeometry(1.1, 0.28, 0.55),
+        new THREE.MeshStandardMaterial({
+          color: 0xd8dce8,
+          roughness: 0.9,
+          fog: false,
+          envMapIntensity: 0.18,
+        }),
+      );
+      pillow.position.set(-14, 0.82, -6.75);
+      hallRoot.add(pillow);
+
+      const stove = new THREE.Mesh(
+        new THREE.BoxGeometry(1.15, 1.35, 1.15),
+        new THREE.MeshStandardMaterial({
+          color: 0x3a3a42,
+          roughness: 0.45,
+          metalness: 0.35,
+          fog: false,
+          envMapIntensity: 0.55,
+        }),
+      );
+      stove.position.set(-26, 0.68, -5.9);
+      hallRoot.add(stove);
+      const fireGlow = new THREE.MeshBasicMaterial({
+        color: 0xff6622,
+        fog: false,
+      });
+      const fireQuad = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.55, 0.55),
+        fireGlow,
+      );
+      fireQuad.position.set(-26, 0.95, -5.28);
+      hallRoot.add(fireQuad);
+
+      const hearth = new THREE.Mesh(
+        new THREE.BoxGeometry(2.35, 0.14, 1.65),
+        hallStoneMat,
+      );
+      hearth.position.set(-26, 0.07, -5.9);
+      hallRoot.add(hearth);
+      const chimneyStack = new THREE.Mesh(
+        new THREE.BoxGeometry(0.42, 3.35, 1.5),
+        hallStoneMat,
+      );
+      chimneyStack.position.set(-27.15, 1.82, -5.9);
+      hallRoot.add(chimneyStack);
+      const mantle = new THREE.Mesh(
+        new THREE.BoxGeometry(2.5, 0.16, 0.38),
+        hallBeamMat,
+      );
+      mantle.position.set(-26.2, 2.65, -5.15);
+      hallRoot.add(mantle);
+
+      const chRing = new THREE.Mesh(
+        new THREE.TorusGeometry(0.58, 0.055, 8, 22),
+        hallTrimMat,
+      );
+      chRing.rotation.x = Math.PI / 2;
+      chRing.position.set(3.5, 5.92, 0);
+      hallRoot.add(chRing);
+      for (let ci = 0; ci < 4; ci++) {
+        const a = (ci / 4) * Math.PI * 2;
+        const cb = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.035, 0.04, 0.42, 6),
+          hallTrimMat,
+        );
+        cb.position.set(3.5 + Math.cos(a) * 0.52, 6.28, Math.sin(a) * 0.52);
+        hallRoot.add(cb);
+      }
+
+      const winX = hallLen * 0.5 - 0.52;
+      for (const wz of [-3.6, 0, 3.6]) {
+        for (const side of [-1, 1]) {
+          const cur = new THREE.Mesh(
+            new THREE.PlaneGeometry(0.7, 3.05),
+            hallFabricMat,
+          );
+          cur.position.set(winX, 3.45, wz + side * 1.42);
+          cur.rotation.y = side > 0 ? 0.12 : -0.12;
+          hallRoot.add(cur);
+        }
+      }
+
+      const roundTableTop = new THREE.Mesh(
+        new THREE.CylinderGeometry(1.38, 1.38, 0.11, 22),
+        hallTrimMat,
+      );
+      roundTableTop.position.set(3.8, 0.79, 3.6);
+      hallRoot.add(roundTableTop);
+      const tableCloth = new THREE.Mesh(
+        new THREE.CylinderGeometry(1.48, 1.48, 0.05, 22),
+        new THREE.MeshStandardMaterial({
+          color: 0x5c3842,
+          roughness: 0.98,
+          fog: false,
+          envMapIntensity: 0.06,
+        }),
+      );
+      tableCloth.position.set(3.8, 0.88, 3.6);
+      hallRoot.add(tableCloth);
+      for (const ta of [0, (Math.PI * 2) / 3, (Math.PI * 4) / 3]) {
+        const leg = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.07, 0.09, 0.72, 8),
+          hallPropMat,
+        );
+        leg.position.set(
+          3.8 + Math.cos(ta) * 0.85,
+          0.36,
+          3.6 + Math.sin(ta) * 0.85,
+        );
+        hallRoot.add(leg);
+      }
+
+      const hutch = new THREE.Mesh(
+        new THREE.BoxGeometry(2.85, 2.05, 0.52),
+        hallPropMat,
+      );
+      hutch.position.set(-28.4, 1.18, 0);
+      hallRoot.add(hutch);
+      const hutchCrown = new THREE.Mesh(
+        new THREE.BoxGeometry(3.05, 0.22, 0.62),
+        hallBeamMat,
+      );
+      hutchCrown.position.set(-28.4, 2.32, 0);
+      hallRoot.add(hutchCrown);
+
+      scene.add(hallRoot);
+
+      const hallShellMeshes = [hallLeft, hallRight, hallBack, hallRoof];
+
+      /** Fills hall StandardMaterials so a slow `interiorBlend` ramp cannot read as a black frame. */
+      const hallAmbient = new THREE.AmbientLight(0xc8b8a8, 0);
+      scene.add(hallAmbient);
+
+      /**
+       * WebGPU: keep hall point lights under scene with hall’s world offset (avoids nested-group quirks).
+       */
+      const hallLightGroup = new THREE.Group();
+      hallLightGroup.position.set(hallCenterX, hallFloorY, 0);
+      scene.add(hallLightGroup);
+      const hallLightSetup = [
+        { x: -20, y: 5.75, z: 0, c: 0xffdcb0, i: 3.2, d: 55 },
+        { x: -4, y: 5.5, z: -3.8, c: 0xffcf9a, i: 2.85, d: 52 },
+        { x: 12, y: 5.55, z: 4.2, c: 0xffd4aa, i: 2.95, d: 55 },
+        { x: 22, y: 5.05, z: -2, c: 0xffe2c4, i: 2.6, d: 50 },
+        { x: 6, y: 4.95, z: 0, c: 0xffb870, i: 2.35, d: 45 },
+        { x: -14, y: 7.15, z: 0, c: 0xfff4e8, i: 2.8, d: 48 },
+        { x: 2, y: 7.05, z: -5, c: 0xffeed8, i: 2.5, d: 44 },
+        { x: 10, y: 7.1, z: 4, c: 0xfff0e0, i: 2.6, d: 46 },
+      ];
+      for (const Ls of hallLightSetup) {
+        const pl = new THREE.PointLight(Ls.c, 0, Ls.d, 2);
+        pl.position.set(Ls.x, Ls.y, Ls.z);
+        pl.userData.baseI = Ls.i;
+        hallLightGroup.add(pl);
+      }
+
+      const hallSunFill = new THREE.DirectionalLight(0xffecd8, 0);
+      hallSunFill.position.set(
+        hallCenterX - 12,
+        hallFloorY + 16,
+        18,
+      );
+      hallSunFill.target.position.set(hallCenterX, hallFloorY + 2.2, 0);
+      scene.add(hallSunFill);
+      scene.add(hallSunFill.target);
+
+      const interiorFogWarm = new THREE.Color(0x4a3d34);
+      const interiorFogMixScratch = new THREE.Color();
+
+      let interiorBlendSmoothed = 0;
+
+      // Capsule avatar (no full character yet)
+      const capsuleGroup = new THREE.Group();
+      scene.add(capsuleGroup);
+      const capsuleMat = new THREE.MeshStandardMaterial({
+        color: 0xd9e4f4,
+        roughness: 0.56,
+        metalness: 0.06,
+        fog: false,
+        envMapIntensity: 0.35,
+      });
+      const body = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.36, 0.95, 8, 14),
+        capsuleMat,
+      );
+      body.castShadow = false;
+      body.position.y = 1.1;
+      capsuleGroup.add(body);
+
+      const eyeGlow = new THREE.PointLight(0xd7ebff, 0.35, 2.4, 2);
+      eyeGlow.position.set(0.17, 1.34, 0.23);
+      capsuleGroup.add(eyeGlow);
+
+      // Tweakpane controls for look-dev while building gameplay.
+      const look = {
+        exposure: renderer.toneMappingExposure,
+        envIntensity: scene.environmentIntensity ?? 0.72,
+        fogEnabled: true,
+        fogColor: "#a8c2b4",
+        fogNear: scene.fog.near,
+        fogFar: scene.fog.far,
+        hemiIntensity: hemi.intensity,
+        hemiSkyColor: "#d8ead8",
+        hemiGroundColor: "#3d5238",
+        sunIntensity: sun.intensity,
+        sunColor: "#fff4e6",
+        skyFillIntensity: skyFill.intensity,
+        rimIntensity: rim.intensity,
+        grassSunIntensity: grassSun.intensity,
+        treeScale: 1.0,
+        moveSpeed: DEFAULT_MOVE_SPEED,
+        jumpSpeed: DEFAULT_JUMP_SPEED,
+        gravity: DEFAULT_GRAVITY,
+        groundAccel: 22,
+        airAccel: 10,
+        camFollow: 4.8,
+        camHeight: 7.2,
+        camOffsetX: 2.6,
+        obstacleHeightScale: 1.0,
+        hallXRayWalls: false,
+        showHallDebugHud: true,
+        /** 2.5D “dollhouse”: hide +Z wall/posts while inside so the camera never fills with one slab. */
+        hallCutawayCameraSide: true,
+      };
+
+      function applyHallXRay() {
+        for (const m of hallShellMeshes) {
+          m.material = look.hallXRayWalls ? hallXRayMat : hallMat;
+        }
+      }
+
+      const pane = new Pane({ title: "Lookdev Controls" });
+      const fRender = pane.addFolder({ title: "Render" });
+      fRender
+        .addBinding(look, "exposure", { min: 0.3, max: 1.8, step: 0.01 })
+        .on("change", (ev) => {
+          renderer.toneMappingExposure = ev.value;
+        });
+      fRender
+        .addBinding(look, "envIntensity", { min: 0, max: 2, step: 0.01 })
+        .on("change", (ev) => {
+          scene.environmentIntensity = ev.value;
+        });
+
+      const fFog = pane.addFolder({ title: "Fog" });
+      fFog.addBinding(look, "fogEnabled").on("change", (ev) => {
+        scene.fog = ev.value
+          ? new THREE.Fog(
+              new THREE.Color(look.fogColor),
+              look.fogNear,
+              look.fogFar,
+            )
+          : null;
+      });
+      fFog
+        .addBinding(look, "fogColor", { view: "color" })
+        .on("change", (ev) => {
+          if (scene.fog) scene.fog.color.set(ev.value);
+        });
+      fFog
+        .addBinding(look, "fogNear", { min: 0, max: 200, step: 1 })
+        .on("change", (ev) => {
+          if (scene.fog) scene.fog.near = ev.value;
+        });
+      fFog
+        .addBinding(look, "fogFar", { min: 20, max: 280, step: 1 })
+        .on("change", (ev) => {
+          if (scene.fog) scene.fog.far = ev.value;
+        });
+
+      const fLights = pane.addFolder({ title: "Lights" });
+      fLights
+        .addBinding(look, "hemiIntensity", { min: 0, max: 2, step: 0.01 })
+        .on("change", (ev) => (hemi.intensity = ev.value));
+      fLights
+        .addBinding(look, "hemiSkyColor", { view: "color" })
+        .on("change", (ev) => {
+          hemi.color.set(ev.value);
+        });
+      fLights
+        .addBinding(look, "hemiGroundColor", { view: "color" })
+        .on("change", (ev) => {
+          hemi.groundColor.set(ev.value);
+        });
+      fLights
+        .addBinding(look, "sunIntensity", { min: 0, max: 3, step: 0.01 })
+        .on("change", (ev) => (sun.intensity = ev.value));
+      fLights
+        .addBinding(look, "sunColor", { view: "color" })
+        .on("change", (ev) => {
+          sun.color.set(ev.value);
+        });
+      fLights
+        .addBinding(look, "skyFillIntensity", { min: 0, max: 2, step: 0.01 })
+        .on("change", (ev) => (skyFill.intensity = ev.value));
+      fLights
+        .addBinding(look, "rimIntensity", { min: 0, max: 2, step: 0.01 })
+        .on("change", (ev) => (rim.intensity = ev.value));
+      fLights
+        .addBinding(look, "grassSunIntensity", { min: 0, max: 2, step: 0.01 })
+        .on("change", (ev) => (grassSun.intensity = ev.value));
+
+      const fScene = pane.addFolder({ title: "Scene" });
+      fScene
+        .addBinding(look, "treeScale", { min: 0.6, max: 2.2, step: 0.01 })
+        .on("change", (ev) => {
+          setAllPineScales(ev.value);
+        });
+      fScene
+        .addBinding(look, "obstacleHeightScale", {
+          min: 0.5,
+          max: 2.5,
+          step: 0.01,
+        })
+        .on("change", (ev) => {
+          setObstacleHeightScale(ev.value);
+        });
+
+      const fGameplay = pane.addFolder({ title: "Gameplay Debug" });
+      fGameplay.addBinding(look, "moveSpeed", { min: 2, max: 14, step: 0.1 });
+      fGameplay.addBinding(look, "jumpSpeed", { min: 4, max: 20, step: 0.1 });
+      fGameplay.addBinding(look, "gravity", { min: 8, max: 60, step: 0.5 });
+      fGameplay.addBinding(look, "groundAccel", { min: 2, max: 40, step: 0.5 });
+      fGameplay.addBinding(look, "airAccel", { min: 1, max: 25, step: 0.5 });
+      fGameplay.addBinding(look, "camFollow", { min: 1, max: 12, step: 0.1 });
+      fGameplay.addBinding(look, "camHeight", { min: 4, max: 13, step: 0.1 });
+      fGameplay.addBinding(look, "camOffsetX", { min: 0, max: 8, step: 0.1 });
+
+      const fHallDbg = pane.addFolder({ title: "Hall debug" });
+      fHallDbg
+        .addBinding(look, "hallXRayWalls")
+        .on("change", applyHallXRay);
+      fHallDbg.addBinding(look, "showHallDebugHud");
+      fHallDbg.addBinding(look, "hallCutawayCameraSide");
+
+      const biomeLabelEl = document.getElementById("biomeLabel");
+      const hallDbgEl = document.getElementById("hallDbg");
+      const ambTmpColor = new THREE.Color();
+      const interiorBgLiftScratch = new THREE.Color();
+      const dbgPush = {
+        ib: 0,
+        hg: false,
+        mist: false,
+        hallPl: 0,
+        preset: "",
+        bgHdr: false,
+      };
+      const ambSunDay = new THREE.Vector3(18, 22, 10);
+      const ambSunGhost = new THREE.Vector3();
+
+      /**
+       * Cycles every N chunks. “Ghost shore” matches ghost-tsushima-flow-showcase mood
+       * (dark sea, moon key, warm fire, mist slabs + embers) — terrain unchanged.
+       */
+      const AMBIENCE_PRESETS = [
+        {
+          label: "Forest",
+          ghostVfx: 0,
+          fogColor: 0xa8c2b4,
+          fogNear: 28,
+          fogFar: 138,
+          exposure: 0.92,
+          envIntensity: 0.72,
+          hemiSky: 0xd8ead8,
+          hemiGround: 0x3d5238,
+          hemiIntensity: 0.85,
+          sunColor: 0xfff4e6,
+          sunIntensity: 1.65,
+          skyFill: 0xc8d8ce,
+          skyFillInt: 0.22,
+          rim: 0xfff0e0,
+          rimInt: 0.28,
+          grassSun: 0xe8ffd8,
+          grassSunInt: 0.55,
+          useHdrBackground: true,
+          solidBg: 0x8eb9d4,
+          dustColor: 0xeef6ff,
+          dustOpacity: 0.28,
+        },
+        {
+          label: "Desert haze",
+          ghostVfx: 0,
+          fogColor: 0xd4b896,
+          fogNear: 22,
+          fogFar: 120,
+          exposure: 1.02,
+          envIntensity: 0.42,
+          hemiSky: 0xf5e6cc,
+          hemiGround: 0x8b6914,
+          hemiIntensity: 0.95,
+          sunColor: 0xffecd0,
+          sunIntensity: 1.95,
+          skyFill: 0xffb366,
+          skyFillInt: 0.35,
+          rim: 0xffdcb0,
+          rimInt: 0.22,
+          grassSun: 0xffe0a8,
+          grassSunInt: 0.65,
+          useHdrBackground: false,
+          solidBg: 0xe8cfa4,
+          dustColor: 0xfff0dd,
+          dustOpacity: 0.35,
+        },
+        {
+          label: "Indigo night",
+          ghostVfx: 0,
+          fogColor: 0x4a5568,
+          fogNear: 18,
+          fogFar: 100,
+          exposure: 0.65,
+          envIntensity: 0.35,
+          hemiSky: 0x6b7cb0,
+          hemiGround: 0x1a1f2e,
+          hemiIntensity: 0.55,
+          sunColor: 0xb8c8ff,
+          sunIntensity: 0.45,
+          skyFill: 0x8899cc,
+          skyFillInt: 0.15,
+          rim: 0xaabbff,
+          rimInt: 0.38,
+          grassSun: 0x8899ee,
+          grassSunInt: 0.2,
+          useHdrBackground: false,
+          solidBg: 0x2d3a55,
+          dustColor: 0xaab8ee,
+          dustOpacity: 0.22,
+        },
+        {
+          label: "Coastal mist",
+          ghostVfx: 0,
+          fogColor: 0xb8d4e0,
+          fogNear: 20,
+          fogFar: 128,
+          exposure: 0.88,
+          envIntensity: 0.8,
+          hemiSky: 0xe8f4fc,
+          hemiGround: 0x4a7a6a,
+          hemiIntensity: 0.8,
+          sunColor: 0xfffcf5,
+          sunIntensity: 1.35,
+          skyFill: 0xc0e8f5,
+          skyFillInt: 0.38,
+          rim: 0xffffff,
+          rimInt: 0.35,
+          grassSun: 0xd0f0e8,
+          grassSunInt: 0.48,
+          useHdrBackground: true,
+          solidBg: 0xa8cce8,
+          dustColor: 0xffffff,
+          dustOpacity: 0.32,
+        },
+        {
+          label: "Ghost shore",
+          ghostVfx: 1,
+          fogColor: 0x0a111d,
+          fogNear: 24,
+          fogFar: 120,
+          exposure: 0.76,
+          envIntensity: 0.36,
+          hemiSky: 0x7f9ad4,
+          hemiGround: 0x141a1f,
+          hemiIntensity: 0.6,
+          sunColor: 0xaec7ff,
+          sunIntensity: 1.15,
+          skyFill: 0x3d4a5c,
+          skyFillInt: 0.1,
+          rim: 0x8fa8d8,
+          rimInt: 0.24,
+          grassSun: 0x4a5a6e,
+          grassSunInt: 0.14,
+          useHdrBackground: false,
+          solidBg: 0x080e18,
+          dustColor: 0x6a7a99,
+          dustOpacity: 0.1,
+        },
+      ];
+
+      let ambienceTargetIndex = 0;
+      let ambienceSnapOnce = true;
+
+      const ambState = {
+        fog: new THREE.Color(0xa8c2b4),
+        fogNear: 28,
+        fogFar: 138,
+        exposure: 0.92,
+        envIntensity: 0.72,
+        hemiSky: new THREE.Color(0xd8ead8),
+        hemiGround: new THREE.Color(0x3d5238),
+        hemiIntensity: 0.85,
+        sunColor: new THREE.Color(0xfff4e6),
+        sunIntensity: 1.65,
+        skyFillColor: new THREE.Color(0xc8d8ce),
+        skyFillIntensity: 0.22,
+        rimColor: new THREE.Color(0xfff0e0),
+        rimIntensity: 0.28,
+        grassSunColor: new THREE.Color(0xe8ffd8),
+        grassSunIntensity: 0.55,
+        solidBg: new THREE.Color(0x8eb9d4),
+        dustColor: new THREE.Color(0xeef6ff),
+        dustOpacity: 0.28,
+        hdrMix: 1,
+        ghostVfx: 0,
+      };
+
+      function getPresetIndexForWorldX(x) {
+        const ci = Math.floor(x / CHUNK_WIDTH);
+        const n = AMBIENCE_PRESETS.length;
+        return ((ci % n) + n) % n;
+      }
+
+      function snapAmbienceToPreset(index) {
+        const p = AMBIENCE_PRESETS[index];
+        if (!p) return;
+        ambState.fog.setHex(p.fogColor);
+        ambState.fogNear = p.fogNear;
+        ambState.fogFar = p.fogFar;
+        ambState.exposure = p.exposure;
+        ambState.envIntensity = p.envIntensity;
+        ambState.hemiSky.setHex(p.hemiSky);
+        ambState.hemiGround.setHex(p.hemiGround);
+        ambState.hemiIntensity = p.hemiIntensity;
+        ambState.sunColor.setHex(p.sunColor);
+        ambState.sunIntensity = p.sunIntensity;
+        ambState.skyFillColor.setHex(p.skyFill);
+        ambState.skyFillIntensity = p.skyFillInt;
+        ambState.rimColor.setHex(p.rim);
+        ambState.rimIntensity = p.rimInt;
+        ambState.grassSunColor.setHex(p.grassSun);
+        ambState.grassSunIntensity = p.grassSunInt;
+        ambState.solidBg.setHex(p.solidBg);
+        ambState.dustColor.setHex(p.dustColor);
+        ambState.dustOpacity = p.dustOpacity;
+        ambState.hdrMix = p.useHdrBackground && hdrBackgroundTexture ? 1 : 0;
+        ambState.ghostVfx = p.ghostVfx ?? 0;
+      }
+
+      function updateAmbienceTargetIndex(x) {
+        ambienceTargetIndex = getPresetIndexForWorldX(x);
+      }
+
+      function smoothAmbienceTowardTarget(dt) {
+        const p = AMBIENCE_PRESETS[ambienceTargetIndex];
+        if (!p) return;
+        const a = 1 - Math.exp(-2.05 * dt);
+        ambTmpColor.setHex(p.fogColor);
+        ambState.fog.lerp(ambTmpColor, a);
+        ambState.fogNear += (p.fogNear - ambState.fogNear) * a;
+        ambState.fogFar += (p.fogFar - ambState.fogFar) * a;
+        ambState.exposure += (p.exposure - ambState.exposure) * a;
+        ambState.envIntensity += (p.envIntensity - ambState.envIntensity) * a;
+        ambTmpColor.setHex(p.hemiSky);
+        ambState.hemiSky.lerp(ambTmpColor, a);
+        ambTmpColor.setHex(p.hemiGround);
+        ambState.hemiGround.lerp(ambTmpColor, a);
+        ambState.hemiIntensity += (p.hemiIntensity - ambState.hemiIntensity) * a;
+        ambTmpColor.setHex(p.sunColor);
+        ambState.sunColor.lerp(ambTmpColor, a);
+        ambState.sunIntensity += (p.sunIntensity - ambState.sunIntensity) * a;
+        ambTmpColor.setHex(p.skyFill);
+        ambState.skyFillColor.lerp(ambTmpColor, a);
+        ambState.skyFillIntensity +=
+          (p.skyFillInt - ambState.skyFillIntensity) * a;
+        ambTmpColor.setHex(p.rim);
+        ambState.rimColor.lerp(ambTmpColor, a);
+        ambState.rimIntensity += (p.rimInt - ambState.rimIntensity) * a;
+        ambTmpColor.setHex(p.grassSun);
+        ambState.grassSunColor.lerp(ambTmpColor, a);
+        ambState.grassSunIntensity +=
+          (p.grassSunInt - ambState.grassSunIntensity) * a;
+        ambTmpColor.setHex(p.solidBg);
+        ambState.solidBg.lerp(ambTmpColor, a);
+        ambTmpColor.setHex(p.dustColor);
+        ambState.dustColor.lerp(ambTmpColor, a);
+        ambState.dustOpacity += (p.dustOpacity - ambState.dustOpacity) * a;
+        const tgtHdr = p.useHdrBackground && hdrBackgroundTexture ? 1 : 0;
+        ambState.hdrMix += (tgtHdr - ambState.hdrMix) * a;
+        const tgtGhost = p.ghostVfx ?? 0;
+        ambState.ghostVfx += (tgtGhost - ambState.ghostVfx) * a;
+      }
+
+      function pushAmbienceToScene(playerX, interiorBlend) {
+        const p = AMBIENCE_PRESETS[ambienceTargetIndex];
+        const ib = interiorBlend;
+        const hallGeomLit =
+          playerX > HALL_X0 - 0.8 && playerX < HALL_X1 + 0.8;
+        const nearHallForMist =
+          playerX > HALL_X0 - 32 && playerX < HALL_X1 + 32;
+
+        renderer.toneMappingExposure = Math.max(
+          hallGeomLit ? 0.74 : 0.48,
+          ambState.exposure * (1 - 0.09 * ib),
+        );
+        scene.environmentIntensity = Math.max(
+          0.28,
+          ambState.envIntensity * (1 - 0.2 * ib),
+        );
+        look.exposure = renderer.toneMappingExposure;
+        look.envIntensity = scene.environmentIntensity;
+
+        let fogFarForUi = ambState.fogFar * (1 - 0.12 * ib);
+        if (look.fogEnabled) {
+          fogFarForUi = Math.max(42, fogFarForUi * (1 - 0.05 * ib));
+          if (hallGeomLit) fogFarForUi = Math.max(fogFarForUi, 185);
+          const fogNearAdj = ambState.fogNear * (1 + 0.08 * ib);
+          interiorFogMixScratch.copy(ambState.fog).lerp(interiorFogWarm, ib * 0.42);
+          if (!scene.fog) {
+            scene.fog = new THREE.Fog(
+              interiorFogMixScratch.clone(),
+              fogNearAdj,
+              fogFarForUi,
+            );
+          } else {
+            scene.fog.color.copy(interiorFogMixScratch);
+            scene.fog.near = fogNearAdj;
+            scene.fog.far = fogFarForUi;
+          }
+        }
+        look.fogColor = "#" + ambState.fog.getHexString();
+        look.fogNear = ambState.fogNear * (1 + 0.08 * ib);
+        look.fogFar = fogFarForUi;
+
+        hemi.color.copy(ambState.hemiSky);
+        interiorFogMixScratch.copy(ambState.hemiGround);
+        interiorFogMixScratch.lerp(new THREE.Color(0x2c2218), ib * 0.22);
+        hemi.groundColor.copy(interiorFogMixScratch);
+        hemi.intensity = ambState.hemiIntensity * (1 - 0.14 * ib);
+        look.hemiSkyColor = "#" + hemi.color.getHexString();
+        look.hemiGroundColor = "#" + hemi.groundColor.getHexString();
+        look.hemiIntensity = hemi.intensity;
+
+        sun.color.copy(ambState.sunColor);
+        sun.intensity = ambState.sunIntensity * (1 - 0.12 * ib);
+        look.sunColor = "#" + sun.color.getHexString();
+        look.sunIntensity = sun.intensity;
+
+        ambSunGhost.set(playerX - 14, 17, 10);
+        sun.position.lerpVectors(ambSunDay, ambSunGhost, ambState.ghostVfx);
+
+        skyFill.color.copy(ambState.skyFillColor);
+        skyFill.intensity = ambState.skyFillIntensity * (1 - 0.12 * ib);
+        look.skyFillIntensity = skyFill.intensity;
+
+        rim.color.copy(ambState.rimColor);
+        rim.intensity = ambState.rimIntensity * (1 - 0.1 * ib);
+        look.rimIntensity = rim.intensity;
+
+        grassSun.color.copy(ambState.grassSunColor);
+        grassSun.intensity = ambState.grassSunIntensity * (1 - 0.12 * ib);
+        look.grassSunIntensity = grassSun.intensity;
+
+        if (ambState.hdrMix > 0.88 && hdrBackgroundTexture) {
+          scene.background = hdrBackgroundTexture;
+        } else {
+          interiorBgLiftScratch.copy(ambState.solidBg);
+          if (hallGeomLit && ib > 0.04) {
+            interiorBgLiftScratch.lerp(new THREE.Color(0x3d4d62), 0.38 + ib * 0.32);
+          }
+          scene.background = interiorBgLiftScratch;
+        }
+
+        const dustMul = 1 - ambState.ghostVfx * 0.72;
+        dust.material.color.copy(ambState.dustColor);
+        dust.material.opacity = ambState.dustOpacity * dustMul;
+
+        warmFire.position.set(playerX + 0.35, 3.85, -7);
+        warmFire.intensity = ambState.ghostVfx * 1.45 * (1 - ib * 0.85);
+
+        const hallLightIb = hallGeomLit ? Math.max(ib, 0.88) : ib;
+        hallAmbient.intensity = hallGeomLit ? 0.58 + ib * 0.42 : ib * 0.35;
+        hallSunFill.intensity = hallGeomLit ? 3.1 * Math.max(ib, 0.5) : 0;
+        lanternPl.intensity = 5.8 * hallLightIb;
+        for (const L of hallLightGroup.children) {
+          if (L.isPointLight)
+            L.intensity = L.userData.baseI * hallLightIb * 1.85;
+        }
+
+        ghostMistGroup.position.x = playerX;
+        const gv = ambState.ghostVfx;
+        for (const mesh of mistSlabs) {
+          const isAdd = mesh.material.blending === THREE.AdditiveBlending;
+          mesh.material.opacity = (isAdd ? mistAddOpacity : mistBaseOpacity) * gv;
+        }
+        ghostMistGroup.visible = !nearHallForMist && gv > 0.015;
+
+        emberMat.opacity = 0.88 * gv;
+        emberFire.visible = gv > 0.015;
+        emberFire.position.x = playerX;
+
+        if (biomeLabelEl && p) {
+          biomeLabelEl.textContent =
+            ib > 0.25 ? `${p.label} · great hall` : p.label;
+        }
+
+        dbgPush.ib = ib;
+        dbgPush.hg = hallGeomLit;
+        dbgPush.mist = ghostMistGroup.visible;
+        dbgPush.preset = p?.label ?? "—";
+        dbgPush.bgHdr =
+          ambState.hdrMix > 0.88 && Boolean(hdrBackgroundTexture);
+        let hp = 0;
+        for (const c of hallLightGroup.children) {
+          if (c.isPointLight) {
+            hp = c.intensity;
+            break;
+          }
+        }
+        dbgPush.hallPl = hp;
+      }
+
+      function stepAmbience(playerX, dt) {
+        updateAmbienceTargetIndex(playerX);
+        const insideTarget =
+          playerX > HALL_X0 + 0.45 && playerX < HALL_X1 - 0.45 ? 1 : 0;
+        interiorBlendSmoothed +=
+          (insideTarget - interiorBlendSmoothed) * (1 - Math.exp(-5.2 * dt));
+        if (ambienceSnapOnce) {
+          ambienceSnapOnce = false;
+          snapAmbienceToPreset(ambienceTargetIndex);
+        } else {
+          smoothAmbienceTowardTarget(dt);
+        }
+        pushAmbienceToScene(playerX, interiorBlendSmoothed);
+      }
+
+      // World-space bottom of capsule mesh (group at player.y - 1.02, body local y 1.1, capsule half-height 0.835).
+      const CAPSULE_RADIUS = 0.36;
+      const FEET_Y_OFFSET = 0.755;
+
+      function feetWorldY() {
+        return player.y - FEET_Y_OFFSET;
+      }
+
+      function headWorldY() {
+        return player.y + 0.915;
+      }
+
+      function playerAabb() {
+        return {
+          minX: player.x - CAPSULE_RADIUS,
+          maxX: player.x + CAPSULE_RADIUS,
+          minY: feetWorldY(),
+          maxY: headWorldY(),
+          minZ: LANE_Z - CAPSULE_RADIUS,
+          maxZ: LANE_Z + CAPSULE_RADIUS,
+        };
+      }
+
+      function aabbOverlap2D(a, b) {
+        return (
+          a.minX < b.maxX &&
+          a.maxX > b.minX &&
+          a.minZ < b.maxZ &&
+          a.maxZ > b.minZ
+        );
+      }
+
+      function aabbOverlap3D(a, b) {
+        return (
+          a.minX < b.maxX &&
+          a.maxX > b.minX &&
+          a.minY < b.maxY &&
+          a.maxY > b.minY &&
+          a.minZ < b.maxZ &&
+          a.maxZ > b.minZ
+        );
+      }
+
+      const player = {
+        x: -8,
+        y: groundHeight(-8) + 1.03,
+        vz: 0,
+        vx: 0,
+        vy: 0,
+        grounded: true,
+      };
+
+      stepAmbience(player.x, 0);
+
+      function feetOverSupport() {
+        const fy = feetWorldY();
+        const g = groundHeight(player.x);
+        if (Math.abs(fy - (g + 0.275)) < 0.18) return true;
+        for (const box of obstacleColliders) {
+          const onTop = Math.abs(fy - box.maxY) < 0.14;
+          const overX =
+            player.x >= box.minX - CAPSULE_RADIUS * 0.9 &&
+            player.x <= box.maxX + CAPSULE_RADIUS * 0.9;
+          if (onTop && overX) return true;
+        }
+        return false;
+      }
+
+      const keys = {
+        left: false,
+        right: false,
+        jump: false,
+      };
+
+      function onKey(event, down) {
+        const k = event.key.toLowerCase();
+        if (k === "a" || event.key === "ArrowLeft") keys.left = down;
+        if (k === "d" || event.key === "ArrowRight") keys.right = down;
+        if (k === " " || event.code === "Space") keys.jump = down;
+      }
+      window.addEventListener("keydown", (e) => onKey(e, true));
+      window.addEventListener("keyup", (e) => onKey(e, false));
+
+      const timer = new THREE.Timer();
+      renderer.setAnimationLoop(() => {
+        timer.update();
+        const dt = Math.min(timer.getDelta(), 1 / 30);
+        const elapsed = timer.getElapsed();
+
+        // 2.5D lane movement: only X movement is allowed, Z is locked.
+        const axis = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+        const targetVx = axis * look.moveSpeed;
+        const accel = player.grounded ? look.groundAccel : look.airAccel;
+        player.vx += (targetVx - player.vx) * Math.min(accel * dt, 1);
+
+        if (keys.jump && player.grounded) {
+          player.vy = look.jumpSpeed;
+          player.grounded = false;
+        }
+
+        player.vy -= look.gravity * dt;
+
+        const prevX = player.x;
+        const prevFeetY = feetWorldY();
+
+        player.x += player.vx * dt;
+        player.y += player.vy * dt;
+
+        // Keep scene finite for now.
+        player.x = THREE.MathUtils.clamp(player.x, -8000, 8000);
+
+        syncChunksAround(player.x);
+        stepAmbience(player.x, dt);
+
+        const ibCut = interiorBlendSmoothed;
+        if (look.hallCutawayCameraSide) {
+          const showCameraSideShell = ibCut < 0.26;
+          for (const m of hallCameraSideOccluders) m.visible = showCameraSideShell;
+        } else {
+          for (const m of hallCameraSideOccluders) m.visible = true;
+        }
+
+        // Obstacles: land on top when falling, otherwise push out horizontally.
+        let onObstacleTop = false;
+        for (const box of obstacleColliders) {
+          const p = playerAabb();
+          if (!aabbOverlap2D(p, box)) continue;
+
+          if (feetWorldY() > box.maxY + 0.1) continue;
+
+          const landing =
+            player.vy <= 0 &&
+            prevFeetY >= box.maxY - 0.12 &&
+            feetWorldY() <= box.maxY + 0.15;
+
+          if (landing) {
+            player.y = box.maxY + FEET_Y_OFFSET;
+            player.vy = 0;
+            player.grounded = true;
+            onObstacleTop = true;
+            break;
+          }
+
+          if (aabbOverlap3D(p, box)) {
+            const penLeft = p.maxX - box.minX;
+            const penRight = box.maxX - p.minX;
+            if (penLeft < penRight) {
+              player.x = box.minX - CAPSULE_RADIUS - 0.02;
+            } else {
+              player.x = box.maxX + CAPSULE_RADIUS + 0.02;
+            }
+            if (prevX !== player.x) player.vx = 0;
+          }
+        }
+
+        const floorY = groundHeight(player.x) + 1.03;
+        if (!onObstacleTop && player.y <= floorY) {
+          player.y = floorY;
+          player.vy = 0;
+          player.grounded = true;
+        }
+
+        if (player.grounded && player.y > floorY + 0.02 && !feetOverSupport()) {
+          player.grounded = false;
+        }
+
+        capsuleGroup.position.set(player.x, player.y - 1.02, LANE_Z);
+        capsuleGroup.rotation.y = axis !== 0 ? (axis > 0 ? -0.16 : 0.16) : 0;
+        body.rotation.z =
+          Math.sin(elapsed * 10 + player.x * 0.2) * Math.abs(player.vx) * 0.01;
+
+        // Camera follow — pull Z + adjust height inside the hall so the room + player read.
+        const ibc = interiorBlendSmoothed;
+        const camTargetX = player.x + look.camOffsetX;
+        const camZTarget = THREE.MathUtils.lerp(21, 16.25, ibc);
+        let camYTarget = look.camHeight * THREE.MathUtils.lerp(1, 0.9, ibc);
+        if (ibc > 0.04) {
+          camYTarget = Math.min(camYTarget, HALL_CAM_Y_CEILING);
+        }
+        const lookY = THREE.MathUtils.lerp(2.85, 2.55, ibc);
+        const lookXOff = THREE.MathUtils.lerp(2.2, 2.05, ibc);
+        camera.position.x +=
+          (camTargetX - camera.position.x) * Math.min(look.camFollow * dt, 1);
+        camera.position.y +=
+          (camYTarget - camera.position.y) * Math.min(2.6 * dt, 1);
+        camera.position.z +=
+          (camZTarget - camera.position.z) * Math.min(2.9 * dt, 1);
+        camera.lookAt(player.x + lookXOff, lookY, LANE_Z);
+
+        if (ghostMistGroup.visible) {
+          for (const m of mistSlabs) {
+            m.lookAt(camera.position);
+          }
+        }
+
+        const dustArray = dust.geometry.attributes.position.array;
+        for (let i = 0; i < dustCount; i++) {
+          const idx = i * 3;
+          dustArray[idx + 0] += Math.sin(elapsed * 0.25 + dustSeed[i]) * 0.003;
+          dustArray[idx + 1] +=
+            0.002 + Math.sin(elapsed * 0.45 + dustSeed[i] * 2.0) * 0.0012;
+          if (dustArray[idx + 1] > 10.6)
+            dustArray[idx + 1] = 0.35 + Math.random() * 0.8;
+        }
+        dust.geometry.attributes.position.needsUpdate = true;
+
+        if (emberFire.visible) {
+          const ep = emberGeo.attributes.position.array;
+          for (let i = 0; i < emberCount; i++) {
+            const idx = i * 3;
+            ep[idx + 0] +=
+              Math.sin(elapsed * 0.62 + emberSeed[i] * 0.7) * 0.0016;
+            ep[idx + 1] +=
+              0.0024 + Math.sin(elapsed * 0.88 + emberSeed[i]) * 0.0005;
+            if (ep[idx + 1] > 6.6)
+              ep[idx + 1] = 0.45 + Math.random() * 0.65;
+          }
+          emberGeo.attributes.position.needsUpdate = true;
+        }
+
+        if (hallDbgEl) {
+          hallDbgEl.style.display = look.showHallDebugHud ? "block" : "none";
+          if (look.showHallDebugHud) {
+            hallDbgEl.textContent = [
+              `preset ${dbgPush.preset}  ib ${dbgPush.ib.toFixed(2)}  hallBand ${dbgPush.hg ? "yes" : "no"}`,
+              `mist ${dbgPush.mist ? "on" : "off"}  hallPt0 ${dbgPush.hallPl.toFixed(2)}  bgHDR ${dbgPush.bgHdr ? "yes" : "no"}`,
+              `cam ${camera.position.x.toFixed(1)}, ${camera.position.y.toFixed(1)}, ${camera.position.z.toFixed(1)}`,
+              `exp ${renderer.toneMappingExposure.toFixed(2)}  hallSunFill ${hallSunFill.intensity.toFixed(2)}`,
+            ].join("\n");
+          }
+        }
+
+        renderer.render(scene, camera);
+      });
+
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>
