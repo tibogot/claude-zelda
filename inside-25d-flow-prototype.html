@@ -1,0 +1,810 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Inside 2.5D Flow Prototype (TSL + WebGPU)</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #1a2e22;
+        font-family: "SF Mono", "Fira Code", monospace;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        left: 12px;
+        bottom: 12px;
+        z-index: 20;
+        color: #c8d7f6;
+        background: rgba(4, 8, 14, 0.6);
+        border: 1px solid rgba(175, 195, 255, 0.22);
+        border-radius: 8px;
+        padding: 10px 12px;
+        font-size: 11px;
+        line-height: 1.55;
+        user-select: none;
+      }
+      #info b {
+        color: #eef5ff;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">
+      <b>Inside 2.5D Flow Prototype</b><br />
+      Move: <b>A/D</b> or <b>Left/Right</b> · Jump: <b>Space</b><br />
+      Camera and movement are depth-locked (2.5D lane)
+    </div>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
+
+      const LANE_Z = 0;
+      const GRAVITY = 30;
+      const MOVE_SPEED = 7.8;
+      const JUMP_SPEED = 11.5;
+
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 0.92;
+      document.body.appendChild(renderer.domElement);
+      await renderer.init();
+
+      const scene = new THREE.Scene();
+      // Linear fog (WebGPURenderer uses scene.fog on standard materials). Stronger in the distance so
+      // hills read larger; lane / obstacles keep fog:false so gameplay stays clear.
+      scene.fog = new THREE.Fog(0xa8c2b4, 28, 138);
+
+      const hdrLoader = new HDRLoader();
+      try {
+        const hdrTexture = await hdrLoader.loadAsync("./textures/animestyled_hdr.hdr");
+        hdrTexture.mapping = THREE.EquirectangularReflectionMapping;
+        scene.background = hdrTexture;
+        try {
+          const pmremGenerator = new THREE.PMREMGenerator(renderer);
+          scene.environment = pmremGenerator.fromEquirectangular(hdrTexture).texture;
+          scene.environmentIntensity = 0.72;
+          pmremGenerator.dispose();
+        } catch (e2) {
+          console.warn("PMREM bake failed (IBL may be missing):", e2);
+        }
+      } catch (e) {
+        console.warn("HDR load failed, using solid fallback:", e);
+        scene.background = new THREE.Color(0xb8d4f0);
+      }
+
+      const camera = new THREE.PerspectiveCamera(
+        42,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        300,
+      );
+      camera.position.set(0, 7.2, 21);
+      camera.lookAt(0, 3.2, LANE_Z);
+
+      const hemi = new THREE.HemisphereLight(0xd8ead8, 0x3d5238, 0.85);
+      scene.add(hemi);
+
+      const sun = new THREE.DirectionalLight(0xfff4e6, 1.65);
+      sun.position.set(18, 22, 10);
+      scene.add(sun);
+
+      const skyFill = new THREE.DirectionalLight(0xc8d8ce, 0.22);
+      skyFill.position.set(-12, 14, 6);
+      scene.add(skyFill);
+
+      const rim = new THREE.DirectionalLight(0xfff0e0, 0.28);
+      rim.position.set(-6, 8, 16);
+      scene.add(rim);
+
+      const grassSun = new THREE.DirectionalLight(0xe8ffd8, 0.55);
+      grassSun.position.set(6, 4, 18);
+      scene.add(grassSun);
+
+      function groundHeight(x) {
+        return (
+          Math.sin(x * 0.17) * 0.45 +
+          Math.sin(x * 0.55 + 1.2) * 0.15 +
+          Math.cos(x * 0.09 - 0.7) * 0.35
+        );
+      }
+
+      /** Same base surface as the lane (x + small z ripple). */
+      function surfaceY(x, z) {
+        return groundHeight(x) + Math.sin(z * 2.2) * 0.03;
+      }
+
+      /**
+       * Procedural hills behind the lane: extra undulation only far in -Z so trees sit on real grass,
+       * not empty sky / HDR.
+       */
+      function terrainHeight(x, z) {
+        const base = surfaceY(x, z);
+        const depth = -z;
+        const t = THREE.MathUtils.smoothstep(3, 22, depth);
+        const extra =
+          Math.sin(z * 0.082) * 1.05 +
+          Math.cos(x * 0.062 + z * 0.052) * 0.62 +
+          Math.sin(x * 0.11 + z * 0.068) * 0.42;
+        return base + extra * t;
+      }
+
+      const floorLen = 220;
+
+      // Background hill terrain (covers tree bands; lane is a separate narrow strip on top)
+      const hillZMin = -54;
+      const hillZMax = -2;
+      const hillDepth = hillZMax - hillZMin;
+      const hillZCenter = (hillZMin + hillZMax) * 0.5;
+      const hillSegZ = 96;
+      const hillGeo = new THREE.PlaneGeometry(floorLen, hillDepth, 380, hillSegZ);
+      hillGeo.rotateX(-Math.PI / 2);
+      const hillPos = hillGeo.attributes.position.array;
+      for (let i = 0; i < hillPos.length; i += 3) {
+        const x = hillPos[i];
+        const z = hillPos[i + 2];
+        hillPos[i + 1] = terrainHeight(x, z);
+      }
+      hillGeo.computeVertexNormals();
+
+      // Gameplay floor (the lane the capsule walks on)
+      const floorGeo = new THREE.PlaneGeometry(floorLen, 5.6, 380, 8);
+      floorGeo.rotateX(-Math.PI / 2);
+      const floorPos = floorGeo.attributes.position.array;
+      for (let i = 0; i < floorPos.length; i += 3) {
+        const x = floorPos[i];
+        const z = floorPos[i + 2];
+        floorPos[i + 1] = groundHeight(x) + Math.sin(z * 2.2) * 0.03;
+      }
+      floorGeo.computeVertexNormals();
+      const textureLoader = new THREE.TextureLoader();
+      const grassColor = textureLoader.load("./textures/Grass005_1K-JPG_Color.jpg");
+      const grassRough = textureLoader.load("./textures/Grass005_1K-JPG_Roughness.jpg");
+      const grassNormal = textureLoader.load("./textures/Grass005_1K-JPG_NormalGL.jpg");
+      for (const t of [grassColor, grassRough, grassNormal]) {
+        t.wrapS = THREE.RepeatWrapping;
+        t.wrapT = THREE.RepeatWrapping;
+        t.repeat.set(14, 2.8);
+      }
+      grassColor.colorSpace = THREE.SRGBColorSpace;
+
+      const floorMat = new THREE.MeshStandardMaterial({
+        color: 0x7ab86a,
+        map: grassColor,
+        roughnessMap: grassRough,
+        normalMap: grassNormal,
+        normalScale: new THREE.Vector2(0.55, 0.55),
+        roughness: 0.96,
+        metalness: 0,
+        fog: false,
+        envMapIntensity: 0,
+      });
+
+      const hillMat = floorMat.clone();
+      hillMat.fog = true;
+      hillMat.envMapIntensity = 0;
+      for (const key of ["map", "roughnessMap", "normalMap"]) {
+        const tex = hillMat[key];
+        if (tex) {
+          const tc = tex.clone();
+          tc.wrapS = THREE.RepeatWrapping;
+          tc.wrapT = THREE.RepeatWrapping;
+          tc.repeat.set(16, 12);
+          if (key === "map" && grassColor.colorSpace) tc.colorSpace = grassColor.colorSpace;
+          hillMat[key] = tc;
+        }
+      }
+      const hillFloor = new THREE.Mesh(hillGeo, hillMat);
+      hillFloor.position.z = hillZCenter;
+      scene.add(hillFloor);
+
+      const laneFloor = new THREE.Mesh(floorGeo, floorMat);
+      laneFloor.position.z = LANE_Z;
+      scene.add(laneFloor);
+
+      const underSoil = new THREE.Mesh(
+        new THREE.BoxGeometry(floorLen, 6, 14),
+        new THREE.MeshStandardMaterial({
+          color: 0x1e2e22,
+          roughness: 1,
+          metalness: 0,
+          fog: false,
+          envMapIntensity: 0,
+        }),
+      );
+      underSoil.position.set(0, -3.2, LANE_Z);
+      scene.add(underSoil);
+
+      // Lane obstacles (same Z as player); AABBs filled after meshes are placed.
+      const obstacleMat = new THREE.MeshStandardMaterial({
+        color: 0x3d5238,
+        roughnessMap: grassRough,
+        map: grassColor,
+        roughness: 0.92,
+        metalness: 0.03,
+        fog: false,
+        envMapIntensity: 0,
+      });
+      const obstacleColliders = [];
+      const obstacleConfigs = [
+        { x: -52, w: 1.35, h: 0.55, d: 1.35 },
+        { x: -38, w: 1.5, h: 0.95, d: 1.45 },
+        { x: -22, w: 1.25, h: 0.5, d: 1.3 },
+        { x: -6, w: 1.4, h: 1.15, d: 1.35 },
+        { x: 8, w: 1.2, h: 0.6, d: 1.25 },
+        { x: 24, w: 1.55, h: 0.85, d: 1.5 },
+        { x: 40, w: 1.3, h: 1.35, d: 1.35 },
+        { x: 58, w: 1.45, h: 0.55, d: 1.4 },
+        { x: 72, w: 1.35, h: 0.9, d: 1.35 },
+        { x: -68, w: 1.2, h: 0.65, d: 1.2 },
+      ];
+      for (const cfg of obstacleConfigs) {
+        const { x, w, h, d } = cfg;
+        const gy = groundHeight(x);
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), obstacleMat);
+        mesh.position.set(x, gy + h * 0.5, LANE_Z);
+        scene.add(mesh);
+        obstacleColliders.push({
+          minX: x - w * 0.5,
+          maxX: x + w * 0.5,
+          minY: gy,
+          maxY: gy + h,
+          minZ: LANE_Z - d * 0.5,
+          maxZ: LANE_Z + d * 0.5,
+        });
+      }
+
+      // Architecture silhouette
+      const gate = new THREE.Group();
+      const gateMat = new THREE.MeshStandardMaterial({
+        color: 0x1d242d,
+        roughness: 0.9,
+        fog: true,
+        envMapIntensity: 0.35,
+      });
+      const postGeo = new THREE.BoxGeometry(0.58, 3.4, 0.52);
+      const beamGeo = new THREE.BoxGeometry(5.2, 0.46, 0.72);
+      const topGeo = new THREE.BoxGeometry(6.7, 0.36, 0.95);
+      const postL = new THREE.Mesh(postGeo, gateMat);
+      const postR = new THREE.Mesh(postGeo, gateMat);
+      const beam = new THREE.Mesh(beamGeo, gateMat);
+      const top = new THREE.Mesh(topGeo, gateMat);
+      postL.position.set(-1.95, 1.7, 0);
+      postR.position.set(1.95, 1.7, 0);
+      beam.position.set(0, 3.15, 0);
+      top.position.set(0, 3.58, -0.1);
+      gate.add(postL, postR, beam, top);
+      gate.position.set(22, terrainHeight(22, -5.8), -5.8);
+      scene.add(gate);
+
+      // Mid/foreground props to make traversal read better.
+      const propMatMid = new THREE.MeshStandardMaterial({
+        color: 0x18212b,
+        roughness: 0.93,
+        fog: true,
+        envMapIntensity: 0.25,
+      });
+      const propMatFront = new THREE.MeshStandardMaterial({
+        color: 0x0b1016,
+        roughness: 1.0,
+        fog: true,
+        envMapIntensity: 0.2,
+      });
+      for (let i = 0; i < 55; i++) {
+        const x = -102 + Math.random() * 204;
+        const rock = new THREE.Mesh(
+          new THREE.DodecahedronGeometry(0.22 + Math.random() * 0.42),
+          i % 2 === 0 ? propMatMid : propMatFront,
+        );
+        const zBand = i % 3 === 0 ? -2.4 : i % 3 === 1 ? -6.5 : 2.4;
+        rock.scale.y *= 0.55 + Math.random() * 0.45;
+        const rz = zBand + (Math.random() - 0.5) * 1.6;
+        rock.position.set(
+          x,
+          terrainHeight(x, rz) - 0.12 + Math.random() * 0.12,
+          rz,
+        );
+        scene.add(rock);
+      }
+
+      // Low foreground framing (lane edges, slightly toward camera): grass tufts, pebbles, logs — not on the walk strip.
+      const fgCompose = new THREE.Matrix4();
+      const fgPos = new THREE.Vector3();
+      const fgQuat = new THREE.Quaternion();
+      const fgScale = new THREE.Vector3();
+      const fgYAxis = new THREE.Vector3(0, 1, 0);
+
+      const fgGrassMat = new THREE.MeshStandardMaterial({
+        color: 0x2d5238,
+        roughness: 0.94,
+        metalness: 0,
+        fog: false,
+        envMapIntensity: 0,
+      });
+      const fgGrassGeo = new THREE.ConeGeometry(0.07, 0.52, 4);
+      fgGrassGeo.translate(0, 0.26, 0);
+      const fgGrassCount = 160;
+      const fgGrass = new THREE.InstancedMesh(fgGrassGeo, fgGrassMat, fgGrassCount);
+      let fgi = 0;
+      for (let i = 0; i < fgGrassCount; i++) {
+        const left = i % 2 === 0;
+        const x = left
+          ? -108 + Math.random() * 78
+          : 22 + Math.random() * 86;
+        const z = 0.22 + Math.random() * 0.38;
+        const y = surfaceY(x, z) - 0.02;
+        fgPos.set(x, y, z);
+        fgQuat.setFromAxisAngle(fgYAxis, Math.random() * Math.PI * 2);
+        const sc = 0.75 + Math.random() * 1.15;
+        const sy = 0.7 + Math.random() * 0.65;
+        fgScale.set(sc * 0.35, sc * sy, sc * 0.35);
+        fgCompose.compose(fgPos, fgQuat, fgScale);
+        fgGrass.setMatrixAt(fgi++, fgCompose);
+      }
+      fgGrass.instanceMatrix.needsUpdate = true;
+      scene.add(fgGrass);
+
+      const fgPebbleMat = new THREE.MeshStandardMaterial({
+        color: 0x2a3830,
+        roughness: 1,
+        metalness: 0,
+        fog: false,
+        envMapIntensity: 0,
+      });
+      const fgPebbleGeo = new THREE.DodecahedronGeometry(0.11, 0);
+      const fgPebbleCount = 48;
+      const fgPebbles = new THREE.InstancedMesh(fgPebbleGeo, fgPebbleMat, fgPebbleCount);
+      fgi = 0;
+      for (let i = 0; i < fgPebbleCount; i++) {
+        const left = i % 2 === 0;
+        const x = left ? -102 + Math.random() * 72 : 26 + Math.random() * 80;
+        const z = 0.18 + Math.random() * 0.42;
+        const y = surfaceY(x, z) + 0.04;
+        fgPos.set(x, y, z);
+        fgQuat.setFromAxisAngle(fgYAxis, Math.random() * Math.PI * 2);
+        const sc = 0.55 + Math.random() * 0.95;
+        fgScale.set(sc, sc * (0.35 + Math.random() * 0.25), sc);
+        fgCompose.compose(fgPos, fgQuat, fgScale);
+        fgPebbles.setMatrixAt(fgi++, fgCompose);
+      }
+      fgPebbles.instanceMatrix.needsUpdate = true;
+      scene.add(fgPebbles);
+
+      const fgLogMat = new THREE.MeshStandardMaterial({
+        color: 0x243228,
+        roughness: 0.96,
+        metalness: 0,
+        fog: false,
+        envMapIntensity: 0,
+      });
+      const fgLogGeo = new THREE.CapsuleGeometry(0.14, 0.55, 4, 8);
+      fgLogGeo.rotateZ(Math.PI * 0.5);
+      const fgLogCount = 22;
+      const fgLogs = new THREE.InstancedMesh(fgLogGeo, fgLogMat, fgLogCount);
+      fgi = 0;
+      for (let i = 0; i < fgLogCount; i++) {
+        const left = i % 2 === 0;
+        const x = left ? -98 + Math.random() * 70 : 28 + Math.random() * 76;
+        const z = 0.32 + Math.random() * 0.45;
+        const y = surfaceY(x, z) + 0.1;
+        fgPos.set(x, y, z);
+        fgQuat.setFromAxisAngle(fgYAxis, (Math.random() - 0.5) * 0.8);
+        const sc = 0.9 + Math.random() * 1.1;
+        fgScale.set(sc, sc, sc);
+        fgCompose.compose(fgPos, fgQuat, fgScale);
+        fgLogs.setMatrixAt(fgi++, fgCompose);
+      }
+      fgLogs.instanceMatrix.needsUpdate = true;
+      scene.add(fgLogs);
+
+      // No fake smoke layers now: atmosphere is driven by real scene fog + lights.
+
+      const gltfLoader = new GLTFLoader();
+      const tempBox = new THREE.Box3();
+      function loadGltf(url) {
+        return new Promise((resolve, reject) => {
+          gltfLoader.load(url, resolve, undefined, reject);
+        });
+      }
+      function loadSceneModel(url) {
+        return new Promise((resolve, reject) => {
+          gltfLoader.load(
+            url,
+            (gltf) => resolve(gltf.scene),
+            undefined,
+            (err) => reject(err),
+          );
+        });
+      }
+      function fitObjectHeight(object3d, targetHeight) {
+        tempBox.setFromObject(object3d);
+        const size = tempBox.getSize(new THREE.Vector3());
+        const currentHeight = Math.max(size.y, 1e-4);
+        const scale = targetHeight / currentHeight;
+        object3d.scale.multiplyScalar(scale);
+      }
+
+      /** Alpha-blended foliage + InstancedMesh breaks depth sorting; use cutout + solid depth. */
+      function materialForInstancedFoliage(src) {
+        const m = src.clone();
+        const needsCutout =
+          src.transparent || src.opacity < 0.999 || !!src.alphaMap;
+        m.transparent = false;
+        m.opacity = 1;
+        m.depthWrite = true;
+        m.depthTest = true;
+        m.alphaTest = needsCutout ? 0.42 : 0;
+        m.side = needsCutout ? THREE.DoubleSide : THREE.FrontSide;
+        m.polygonOffset = true;
+        m.polygonOffsetFactor = 1;
+        m.polygonOffsetUnits = 1;
+        m.envMapIntensity = (m.envMapIntensity ?? 1) * 0.55;
+        m.fog = true;
+        return m;
+      }
+
+      function fixGltfTransparencyForDepth(root) {
+        root.traverse((child) => {
+          if (child.isMesh && child.material) {
+            const mats = Array.isArray(child.material) ? child.material : [child.material];
+            const next = mats.map((mat) => {
+              const m = mat.clone();
+              const needsCutout =
+                m.transparent || m.opacity < 0.999 || m.alphaMap;
+              if (needsCutout) {
+                m.transparent = false;
+                m.opacity = 1;
+                m.depthWrite = true;
+                m.alphaTest = 0.42;
+                m.side = THREE.DoubleSide;
+              }
+              m.depthWrite = true;
+              m.fog = true;
+              return m;
+            });
+            child.material = next.length === 1 ? next[0] : next;
+          }
+        });
+      }
+
+      const dummyTree = new THREE.Object3D();
+      function addInstancedPinesFromGltf(gltfScene, instanceCount, zBands) {
+        const root = gltfScene.clone(true);
+        fitObjectHeight(root, 7.2);
+        root.updateMatrixWorld(true);
+        const parts = [];
+        root.traverse((child) => {
+          if (child.isMesh) {
+            const geom = child.geometry.clone();
+            geom.applyMatrix4(child.matrixWorld);
+            geom.computeVertexNormals();
+            const raw = Array.isArray(child.material) ? child.material[0] : child.material;
+            parts.push({ geometry: geom, material: materialForInstancedFoliage(raw) });
+          }
+        });
+        if (parts.length === 0) return;
+
+        const combined = new THREE.Box3();
+        for (const p of parts) {
+          const bb = new THREE.Box3().setFromBufferAttribute(p.geometry.attributes.position);
+          combined.union(bb);
+        }
+        const groundYOffset = -combined.min.y;
+
+        const perBand = Math.floor(instanceCount / zBands.length);
+        let idx = 0;
+        const matrices = [];
+        for (let b = 0; b < zBands.length; b++) {
+          const zCenter = zBands[b];
+          for (let j = 0; j < perBand; j++) {
+            const x = -104 + Math.random() * 208;
+            const z = zCenter + (Math.random() - 0.5) * 1.35;
+            const s = 1.05 + Math.random() * 0.95;
+            dummyTree.position.set(x, terrainHeight(x, z) + groundYOffset, z);
+            dummyTree.rotation.set(
+              (Math.random() - 0.5) * 0.05,
+              Math.random() * Math.PI * 2,
+              (Math.random() - 0.5) * 0.06,
+            );
+            dummyTree.scale.setScalar(s);
+            dummyTree.updateMatrix();
+            matrices.push(dummyTree.matrix.clone());
+            idx++;
+          }
+        }
+        while (idx < instanceCount) {
+          const zCenter = zBands[(Math.random() * zBands.length) | 0];
+          const x = -104 + Math.random() * 208;
+          const z = zCenter + (Math.random() - 0.5) * 1.35;
+          const s = 1.05 + Math.random() * 0.95;
+          dummyTree.position.set(x, terrainHeight(x, z) + groundYOffset, z);
+          dummyTree.rotation.set(
+            (Math.random() - 0.5) * 0.05,
+            Math.random() * Math.PI * 2,
+            (Math.random() - 0.5) * 0.06,
+          );
+          dummyTree.scale.setScalar(s);
+          dummyTree.updateMatrix();
+          matrices.push(dummyTree.matrix.clone());
+          idx++;
+        }
+
+        for (const p of parts) {
+          const inst = new THREE.InstancedMesh(p.geometry, p.material, instanceCount);
+          for (let i = 0; i < instanceCount; i++) {
+            inst.setMatrixAt(i, matrices[i]);
+          }
+          inst.instanceMatrix.needsUpdate = true;
+          scene.add(inst);
+        }
+      }
+
+      try {
+        const [pineGltf, rockBase] = await Promise.all([
+          loadGltf("./models/pine2.glb"),
+          loadSceneModel("./models/rock_boulder.glb"),
+        ]);
+        addInstancedPinesFromGltf(pineGltf.scene, 240, [-6.5, -13.5, -24]);
+
+        for (let i = 0; i < 26; i++) {
+          const rock = rockBase.clone(true);
+          fixGltfTransparencyForDepth(rock);
+          const x = -104 + Math.random() * 208;
+          const z = Math.random() < 0.55 ? 1.6 + Math.random() * 1.4 : -2.4 - Math.random() * 4.2;
+          const targetRockHeight = 0.24 + Math.random() * 0.42;
+          fitObjectHeight(rock, targetRockHeight);
+          rock.position.set(x, terrainHeight(x, z) - 0.08, z);
+          rock.rotation.y = Math.random() * Math.PI * 2;
+          scene.add(rock);
+        }
+      } catch (error) {
+        console.warn("Optional GLB props could not be loaded:", error);
+      }
+
+      // Sparse drifting particles for atmosphere.
+      const dustCount = 320;
+      const dustPos = new Float32Array(dustCount * 3);
+      const dustSeed = new Float32Array(dustCount);
+      for (let i = 0; i < dustCount; i++) {
+        const x = -112 + Math.random() * 224;
+        const y = 0.5 + Math.random() * 9.5;
+        const z = -2 - Math.random() * 26;
+        dustPos[i * 3 + 0] = x;
+        dustPos[i * 3 + 1] = y;
+        dustPos[i * 3 + 2] = z;
+        dustSeed[i] = Math.random() * 100;
+      }
+      const dustGeo = new THREE.BufferGeometry();
+      dustGeo.setAttribute("position", new THREE.BufferAttribute(dustPos, 3));
+      const dust = new THREE.Points(
+        dustGeo,
+        new THREE.PointsMaterial({
+          color: 0xeef6ff,
+          size: 0.045,
+          transparent: true,
+          opacity: 0.28,
+          depthWrite: false,
+        }),
+      );
+      scene.add(dust);
+
+      // Capsule avatar (no full character yet)
+      const capsuleGroup = new THREE.Group();
+      scene.add(capsuleGroup);
+      const capsuleMat = new THREE.MeshStandardMaterial({
+        color: 0xd9e4f4,
+        roughness: 0.56,
+        metalness: 0.06,
+        fog: false,
+        envMapIntensity: 0.35,
+      });
+      const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.36, 0.95, 8, 14), capsuleMat);
+      body.castShadow = false;
+      body.position.y = 1.1;
+      capsuleGroup.add(body);
+
+      const eyeGlow = new THREE.PointLight(0xd7ebff, 0.35, 2.4, 2);
+      eyeGlow.position.set(0.17, 1.34, 0.23);
+      capsuleGroup.add(eyeGlow);
+
+      // World-space bottom of capsule mesh (group at player.y - 1.02, body local y 1.1, capsule half-height 0.835).
+      const CAPSULE_RADIUS = 0.36;
+      const FEET_Y_OFFSET = 0.755;
+
+      function feetWorldY() {
+        return player.y - FEET_Y_OFFSET;
+      }
+
+      function headWorldY() {
+        return player.y + 0.915;
+      }
+
+      function playerAabb() {
+        return {
+          minX: player.x - CAPSULE_RADIUS,
+          maxX: player.x + CAPSULE_RADIUS,
+          minY: feetWorldY(),
+          maxY: headWorldY(),
+          minZ: LANE_Z - CAPSULE_RADIUS,
+          maxZ: LANE_Z + CAPSULE_RADIUS,
+        };
+      }
+
+      function aabbOverlap2D(a, b) {
+        return a.minX < b.maxX && a.maxX > b.minX && a.minZ < b.maxZ && a.maxZ > b.minZ;
+      }
+
+      function aabbOverlap3D(a, b) {
+        return (
+          a.minX < b.maxX &&
+          a.maxX > b.minX &&
+          a.minY < b.maxY &&
+          a.maxY > b.minY &&
+          a.minZ < b.maxZ &&
+          a.maxZ > b.minZ
+        );
+      }
+
+      const player = {
+        x: -8,
+        y: groundHeight(-8) + 1.03,
+        vz: 0,
+        vx: 0,
+        vy: 0,
+        grounded: true,
+      };
+
+      function feetOverSupport() {
+        const fy = feetWorldY();
+        const g = groundHeight(player.x);
+        if (Math.abs(fy - (g + 0.275)) < 0.18) return true;
+        for (const box of obstacleColliders) {
+          const onTop = Math.abs(fy - box.maxY) < 0.14;
+          const overX =
+            player.x >= box.minX - CAPSULE_RADIUS * 0.9 &&
+            player.x <= box.maxX + CAPSULE_RADIUS * 0.9;
+          if (onTop && overX) return true;
+        }
+        return false;
+      }
+
+      const keys = {
+        left: false,
+        right: false,
+        jump: false,
+      };
+
+      function onKey(event, down) {
+        const k = event.key.toLowerCase();
+        if (k === "a" || event.key === "ArrowLeft") keys.left = down;
+        if (k === "d" || event.key === "ArrowRight") keys.right = down;
+        if (k === " " || event.code === "Space") keys.jump = down;
+      }
+      window.addEventListener("keydown", (e) => onKey(e, true));
+      window.addEventListener("keyup", (e) => onKey(e, false));
+
+      const timer = new THREE.Timer();
+      renderer.setAnimationLoop(() => {
+        timer.update();
+        const dt = Math.min(timer.getDelta(), 1 / 30);
+        const elapsed = timer.getElapsed();
+
+        // 2.5D lane movement: only X movement is allowed, Z is locked.
+        const axis = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+        const targetVx = axis * MOVE_SPEED;
+        const accel = player.grounded ? 22 : 10;
+        player.vx += (targetVx - player.vx) * Math.min(accel * dt, 1);
+
+        if (keys.jump && player.grounded) {
+          player.vy = JUMP_SPEED;
+          player.grounded = false;
+        }
+
+        player.vy -= GRAVITY * dt;
+
+        const prevX = player.x;
+        const prevFeetY = feetWorldY();
+
+        player.x += player.vx * dt;
+        player.y += player.vy * dt;
+
+        // Keep scene finite for now.
+        player.x = THREE.MathUtils.clamp(player.x, -102, 102);
+
+        // Obstacles: land on top when falling, otherwise push out horizontally.
+        let onObstacleTop = false;
+        for (const box of obstacleColliders) {
+          const p = playerAabb();
+          if (!aabbOverlap2D(p, box)) continue;
+
+          if (feetWorldY() > box.maxY + 0.1) continue;
+
+          const landing =
+            player.vy <= 0 &&
+            prevFeetY >= box.maxY - 0.12 &&
+            feetWorldY() <= box.maxY + 0.15;
+
+          if (landing) {
+            player.y = box.maxY + FEET_Y_OFFSET;
+            player.vy = 0;
+            player.grounded = true;
+            onObstacleTop = true;
+            break;
+          }
+
+          if (aabbOverlap3D(p, box)) {
+            const penLeft = p.maxX - box.minX;
+            const penRight = box.maxX - p.minX;
+            if (penLeft < penRight) {
+              player.x = box.minX - CAPSULE_RADIUS - 0.02;
+            } else {
+              player.x = box.maxX + CAPSULE_RADIUS + 0.02;
+            }
+            if (prevX !== player.x) player.vx = 0;
+          }
+        }
+
+        const floorY = groundHeight(player.x) + 1.03;
+        if (!onObstacleTop && player.y <= floorY) {
+          player.y = floorY;
+          player.vy = 0;
+          player.grounded = true;
+        }
+
+        if (player.grounded && player.y > floorY + 0.02 && !feetOverSupport()) {
+          player.grounded = false;
+        }
+
+        capsuleGroup.position.set(player.x, player.y - 1.02, LANE_Z);
+        capsuleGroup.rotation.y = axis !== 0 ? (axis > 0 ? -0.16 : 0.16) : 0;
+        body.rotation.z = Math.sin(elapsed * 10 + player.x * 0.2) * Math.abs(player.vx) * 0.01;
+
+        // Camera follow with mild damping while keeping side framing.
+        const camTargetX = player.x + 2.6;
+        camera.position.x += (camTargetX - camera.position.x) * Math.min(4.8 * dt, 1);
+        camera.position.y += (7.2 - camera.position.y) * Math.min(2.6 * dt, 1);
+        camera.lookAt(player.x + 2.2, 2.8, LANE_Z);
+
+        const dustArray = dust.geometry.attributes.position.array;
+        for (let i = 0; i < dustCount; i++) {
+          const idx = i * 3;
+          dustArray[idx + 0] += Math.sin(elapsed * 0.25 + dustSeed[i]) * 0.003;
+          dustArray[idx + 1] += 0.002 + Math.sin(elapsed * 0.45 + dustSeed[i] * 2.0) * 0.0012;
+          if (dustArray[idx + 1] > 10.6) dustArray[idx + 1] = 0.35 + Math.random() * 0.8;
+        }
+        dust.geometry.attributes.position.needsUpdate = true;
+
+        renderer.render(scene, camera);
+      });
+
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>

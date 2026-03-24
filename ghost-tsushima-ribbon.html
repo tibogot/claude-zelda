@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ghost Tsushima Ribbon</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body { overflow: hidden; background: #06090f; font-family: "SF Mono", monospace; }
+      canvas { display: block; width: 100vw; height: 100vh; }
+      #hud {
+        position: fixed; left: 12px; bottom: 12px; z-index: 20;
+        font-size: 11px; line-height: 1.6; color: #c8deff;
+        background: rgba(4, 7, 14, 0.6);
+        border: 1px solid rgba(160, 190, 255, 0.22);
+        border-radius: 8px; padding: 10px 14px;
+      }
+      #hud b { color: #eef4ff; }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="hud">
+      <b>Ghost Tsushima Ribbon</b><br />
+      3D smoke bands — Frenet frame + vertical drift<br />
+      Orbit: <b>left-drag</b> &nbsp; Zoom: <b>wheel</b>
+    </div>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import {
+        Fn, uv, vec2, float, mix, smoothstep,
+        floor, fract, sin, dot, time, uniform,
+      } from "three/tsl";
+
+      // ─── Renderer ────────────────────────────────────────────────────────────────
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.body.appendChild(renderer.domElement);
+      await renderer.init();
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x060a10);
+      scene.fog = new THREE.Fog(0x07091a, 30, 100);
+
+      const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 200);
+      camera.position.set(18, 7, 22);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.06;
+      controls.target.set(0, 3, -2);
+      controls.maxPolarAngle = Math.PI * 0.52;
+      controls.minDistance = 6;
+      controls.maxDistance = 60;
+      controls.update();
+
+      // ─── Lighting ────────────────────────────────────────────────────────────────
+      scene.add(new THREE.HemisphereLight(0x7090c8, 0x0a0e18, 0.5));
+      const moon = new THREE.DirectionalLight(0xb0c8f0, 0.9);
+      moon.position.set(-12, 18, 6);
+      scene.add(moon);
+
+      // ─── Ground ──────────────────────────────────────────────────────────────────
+      const ground = new THREE.Mesh(
+        new THREE.PlaneGeometry(150, 150),
+        new THREE.MeshStandardMaterial({ color: 0x0c111a, roughness: 0.97 }),
+      );
+      ground.rotation.x = -Math.PI / 2;
+      scene.add(ground);
+
+      // ─── Tree silhouettes ────────────────────────────────────────────────────────
+      const treeMat = new THREE.MeshStandardMaterial({ color: 0x090d14, roughness: 1 });
+      for (let i = 0; i < 60; i++) {
+        const x = (Math.random() - 0.5) * 90;
+        const z = (Math.random() - 0.5) * 90;
+        if (Math.abs(x) < 16 && z > -22 && z < 16) continue;
+        const h = 3 + Math.random() * 5;
+        const trunk = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.07, 0.14, h, 6),
+          treeMat,
+        );
+        trunk.position.set(x, h * 0.5, z);
+        trunk.rotation.z = (Math.random() - 0.5) * 0.1;
+        scene.add(trunk);
+      }
+
+      // ─── TSL FBM smoke shader ────────────────────────────────────────────────────
+      const hash2 = Fn(([p]) =>
+        vec2(
+          fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453)),
+          fract(sin(dot(p, vec2(269.5, 183.3))).mul(43758.5453)),
+        ),
+      );
+
+      const gradNoise = Fn(([p]) => {
+        const i = floor(p).toVar();
+        const f = fract(p).toVar();
+        const u = f.mul(f).mul(float(3).sub(f.mul(2))).toVar();
+        const g00 = hash2(i).mul(2).sub(1);
+        const g10 = hash2(i.add(vec2(1, 0))).mul(2).sub(1);
+        const g01 = hash2(i.add(vec2(0, 1))).mul(2).sub(1);
+        const g11 = hash2(i.add(vec2(1, 1))).mul(2).sub(1);
+        const d00 = dot(g00, f);
+        const d10 = dot(g10, f.sub(vec2(1, 0)));
+        const d01 = dot(g01, f.sub(vec2(0, 1)));
+        const d11 = dot(g11, f.sub(vec2(1, 1)));
+        return mix(mix(d00, d10, u.x), mix(d01, d11, u.x), u.y).mul(0.5).add(0.5);
+      });
+
+      const fbm5 = Fn(([p]) => {
+        let v = gradNoise(p).mul(0.54);
+        v = v.add(gradNoise(p.mul(2.03)).mul(0.25));
+        v = v.add(gradNoise(p.mul(4.17)).mul(0.12));
+        v = v.add(gradNoise(p.mul(8.21)).mul(0.06));
+        v = v.add(gradNoise(p.mul(16.4)).mul(0.03));
+        return v;
+      });
+
+      function createFogLineMaterial(seed) {
+        const uSpeed     = uniform(0.28 + Math.random() * 0.18);
+        const uWidthSoft = uniform(1.6  + Math.random() * 0.4);
+        const uDensity   = uniform(1.1  + Math.random() * 0.45);
+        const uStretchX  = uniform(11   + Math.random() * 8);
+        const uStretchY  = uniform(2.0  + Math.random() * 1.0); // tighter vertically
+        const uWarp      = uniform(0.38 + Math.random() * 0.28);
+        const uSeed      = uniform(seed);
+        const uBaseColor = uniform(new THREE.Color(0xaacfff));
+        const uHotColor  = uniform(new THREE.Color(0xffd0a0));
+
+        const mat = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
+
+        const st = uv();
+        const t  = time.mul(uSpeed);
+        const p0 = vec2(
+          st.x.mul(uStretchX).add(t.mul(1.3)).add(uSeed),
+          st.y.sub(0.5).mul(uStretchY).sub(t.mul(0.15)),
+        ).toVar();
+
+        const warpX = fbm5(p0.mul(0.6).add(vec2(0.0,  t.mul(0.45)))).sub(0.5);
+        const warpY = fbm5(p0.mul(0.8).sub(vec2(t.mul(0.35), 0.0))).sub(0.5);
+        const p     = p0.add(vec2(warpX, warpY).mul(uWarp)).toVar();
+
+        const n1 = fbm5(p).toVar();
+        const n2 = fbm5(p.mul(2.5).add(vec2(t.mul(0.28), t.mul(-0.22)))).toVar();
+        const n3 = fbm5(vec2(p.x.mul(0.35), p.y.mul(2.45).add(n1.mul(1.7)))).toVar();
+
+        const center = float(1.0).sub(st.y.sub(0.5).abs().mul(uWidthSoft))
+          .saturate().pow(1.4).toVar();
+        const tips = smoothstep(0.02, 0.14, st.x)
+          .mul(smoothstep(0.02, 0.2, float(1.0).sub(st.x))).toVar();
+
+        const wisps     = smoothstep(0.44, 0.9, n1.mul(0.8).add(n2.mul(0.72))).toVar();
+        const filaments = float(1.0).sub(n3.sub(0.5).abs().mul(2.0)).pow(2.1).toVar();
+        const alpha     = center.mul(tips)
+          .mul(wisps.mul(0.85).add(filaments.mul(0.52)))
+          .mul(uDensity).saturate().toVar();
+
+        const glowMask = smoothstep(0.72, 1.0, n2).mul(0.34);
+        const col = mix(uBaseColor, uHotColor, glowMask.add(alpha.mul(0.3)))
+          .mul(alpha.mul(1.1).add(glowMask.mul(0.8)));
+
+        mat.colorNode  = col;
+        mat.opacityNode = alpha;
+        return mat;
+      }
+
+      // ─── Ribbon geometry with tiltable Frenet frame ──────────────────────────────
+      //
+      // tilt = 0 → side vector is horizontal (flat carpet, like showcase2)
+      // tilt = 1 → side vector is world-up (vertical curtain)
+      // GoT feel: tilt ~ 0.55–0.85 — bands hang like floating sheets in space
+      //
+      function buildRibbonGeometry(points, width, tilt) {
+        const n = points.length;
+        const vertices = new Float32Array(n * 2 * 3);
+        const uvs      = new Float32Array(n * 2 * 2);
+        const indices  = [];
+
+        let totalLen = 0;
+        const lens = [0];
+        for (let i = 1; i < n; i++) {
+          totalLen += points[i].distanceTo(points[i - 1]);
+          lens.push(totalLen);
+        }
+        const inv = totalLen > 0 ? 1 / totalLen : 1;
+
+        const worldUp = new THREE.Vector3(0, 1, 0);
+
+        for (let i = 0; i < n; i++) {
+          const p    = points[i];
+          const prev = points[Math.max(0, i - 1)];
+          const next = points[Math.min(n - 1, i + 1)];
+
+          // Tangent along the curve
+          const tangent = new THREE.Vector3().subVectors(next, prev).normalize();
+
+          // Horizontal side (perpendicular to tangent, projected onto XZ)
+          const horizSide = new THREE.Vector3(-tangent.z, 0, tangent.x);
+          if (horizSide.lengthSq() < 0.0001) horizSide.set(0, 0, 1);
+          horizSide.normalize();
+
+          // Blend toward worldUp based on tilt: this tilts the ribbon from
+          // lying flat (carpet) to standing upright (curtain of mist)
+          const side = new THREE.Vector3()
+            .lerpVectors(horizSide, worldUp, tilt)
+            .normalize();
+
+          const hw = width * 0.5;
+          const left  = p.clone().addScaledVector(side, -hw);
+          const right = p.clone().addScaledVector(side,  hw);
+
+          const vi = i * 2;
+          vertices.set([left.x,  left.y,  left.z],  vi * 3);
+          vertices.set([right.x, right.y, right.z], (vi + 1) * 3);
+
+          const u = lens[i] * inv;
+          uvs.set([u, 0], vi * 2);
+          uvs.set([u, 1], (vi + 1) * 2);
+        }
+
+        for (let i = 0; i < n - 1; i++) {
+          const a = i * 2, b = a + 1, c = a + 2, d = a + 3;
+          indices.push(a, c, b, b, c, d);
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.BufferAttribute(vertices, 3));
+        geo.setAttribute("uv",       new THREE.BufferAttribute(uvs,      2));
+        geo.setIndex(indices);
+        geo.computeVertexNormals();
+        return geo;
+      }
+
+      // ─── Spawn a smoke ribbon using a smooth CatmullRom path ─────────────────────
+      //
+      // Each ribbon gets random control points with vertical Y variation so paths
+      // drift up and down in 3D — this is the key missing from showcase2.
+      //
+      const WIND = new THREE.Vector3(1, 0, -0.14).normalize();
+      const PERP = new THREE.Vector3(WIND.z, 0, -WIND.x); // horizontal perpendicular
+
+      function buildSmokeRibbon({ cx, cz, baseY, length, width, tilt, seed }) {
+        const rng = seededRng(seed);
+        const nCtrl = 9;
+        const ctrlPts = [];
+
+        for (let i = 0; i < nCtrl; i++) {
+          const t       = i / (nCtrl - 1);
+          const along   = (t - 0.5) * length;
+          const lateral = (rng() - 0.5) * 3.8;            // XZ meander
+          const vert    = (rng() - 0.5) * 1.8             // slow vertical drift
+                        + Math.sin(t * Math.PI * 2.5 + seed) * 0.6; // undulation
+
+          ctrlPts.push(new THREE.Vector3(
+            cx + WIND.x * along + PERP.x * lateral,
+            baseY + vert,
+            cz + WIND.z * along + PERP.z * lateral,
+          ));
+        }
+
+        const curve  = new THREE.CatmullRomCurve3(ctrlPts);
+        const points = curve.getPoints(63);  // 64 smooth samples
+
+        const geo  = buildRibbonGeometry(points, width, tilt);
+        const mesh = new THREE.Mesh(geo, createFogLineMaterial(seed));
+        mesh.renderOrder = 40;
+        return mesh;
+      }
+
+      // ─── Simple seeded RNG (mulberry32) ──────────────────────────────────────────
+      function seededRng(seed) {
+        let s = (seed * 9301 + 49297) | 0;
+        return () => {
+          s = (s + 0x6D2B79F5) | 0;
+          let t = Math.imul(s ^ (s >>> 15), 1 | s);
+          t = t + Math.imul(t ^ (t >>> 7), 61 | t) ^ t;
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+
+      // ─── Build the band grid ─────────────────────────────────────────────────────
+      //
+      // 5 altitude layers, each with 5 ribbons spread across the scene.
+      // Heights go from near-ground to ~5.5 units up.
+      // Tilt varies per ribbon: lower bands tend more horizontal, higher ones more
+      // curtain-like, matching GoT's layered atmospheric look.
+      //
+      const bandGroup = new THREE.Group();
+      scene.add(bandGroup);
+
+      const HEIGHTS = [0.35, 1.5, 2.8, 4.0, 5.4];
+      const BASE_TILTS = [0.35, 0.50, 0.62, 0.72, 0.82];
+
+      let idx = 0;
+      for (let row = 0; row < HEIGHTS.length; row++) {
+        const perRow = 5;
+        for (let col = 0; col < perRow; col++) {
+          const rng   = seededRng(idx * 37 + 11);
+          const cx    = (col - (perRow - 1) * 0.5) * 7.2 + (rng() - 0.5) * 2.0;
+          const cz    = -4 - row * 5.5 + (rng() - 0.5) * 2.4;
+          const baseY = HEIGHTS[row] + (rng() - 0.5) * 0.5;
+          const tilt  = BASE_TILTS[row] + (rng() - 0.5) * 0.22;
+          const width  = 1.1 + rng() * 0.9;
+          const length = 38 + rng() * 14;
+
+          const band = buildSmokeRibbon({ cx, cz, baseY, length, width, tilt, seed: idx * 0.137 + 0.03 });
+          bandGroup.add(band);
+          idx++;
+        }
+      }
+
+      // ─── Render loop ─────────────────────────────────────────────────────────────
+      renderer.setAnimationLoop(() => {
+        controls.update();
+        renderer.render(scene, camera);
+      });
+
+      window.addEventListener("resize", () => {
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+      });
+    </script>
+  </body>
+</html>
