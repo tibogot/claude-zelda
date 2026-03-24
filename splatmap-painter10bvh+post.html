@@ -806,6 +806,9 @@
       let splineSelectedIdx = -1;  // Index of selected control point (-1 = none)
       let splineDragging = false;  // Currently dragging a control point
       let splinePointMeshes = [];  // Sphere meshes for each control point
+      let glowOrbPositions = [];   // {x,y,z,scale} placed via spline bake
+      let glowOrbMesh      = null;
+      let _rebuildGlowOrbs = () => {};
       let splineGroup = null;      // Group containing all spline visuals
       let splineTrainT = 0;        // Current position along curve (0–1)
       // ── RIVER STATE ──
@@ -4580,6 +4583,34 @@
         const riverMat = new MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
         { const f = buildRiverFrag(); riverMat.colorNode = f.rgb; riverMat.opacityNode = f.a; }
 
+        // ── Glow Orbs (spline-placeable, bloom-compatible) ────────────────────
+        {
+          const _orbGeo = new THREE.SphereGeometry(0.5, 10, 8);
+          const _orbColor = color(0xffdd00);
+          const _orbIntensity = uniform(4.0);
+          const _orbMat = new MeshBasicNodeMaterial();
+          _orbMat.colorNode = _orbColor.div(luminance(_orbColor)).mul(_orbIntensity);
+
+          const ORB_MAX = 4096;
+          glowOrbMesh = new THREE.InstancedMesh(_orbGeo, _orbMat, ORB_MAX);
+          glowOrbMesh.count = 0;
+          glowOrbMesh.frustumCulled = false;
+          scene.add(glowOrbMesh);
+
+          const _orbDummy = new THREE.Object3D();
+          _rebuildGlowOrbs = function() {
+            glowOrbMesh.count = Math.min(glowOrbPositions.length, ORB_MAX);
+            for (let i = 0; i < glowOrbMesh.count; i++) {
+              const { x, y, z, scale } = glowOrbPositions[i];
+              _orbDummy.position.set(x, y, z);
+              _orbDummy.scale.setScalar(scale);
+              _orbDummy.updateMatrix();
+              glowOrbMesh.setMatrixAt(i, _orbDummy.matrix);
+            }
+            glowOrbMesh.instanceMatrix.needsUpdate = true;
+          };
+        }
+
         function syncOceanMat() {
           uWScale.value = PARAMS.ocean.scale;
           uWEdgeThresh.value = PARAMS.ocean.edgeThreshold;
@@ -5232,6 +5263,7 @@
             })),
             cliffInstances: cliffInstancer.exportData(),
             waterfalls: waterfallObjects.map(m => ({ x:m.position.x, y:m.position.y, z:m.position.z, rx:m.rotation.x, ry:m.rotation.y, rz:m.rotation.z, sx:m.scale.x, sy:m.scale.y, sz:m.scale.z })),
+            glowOrbs: glowOrbPositions,
             riverPoints: riverPoints.map(p => ({ x:p.x, y:p.y, z:p.z })),
             splinePoints: splinePoints.map(p => ({ x:p.x, y:p.y, z:p.z })),
             waterBodies: waterObjects.map((m) => ({
@@ -5373,6 +5405,10 @@
               if (meta.props) applyProps(meta.props);
               if (meta.waterBodies) applyWaterBodies(meta.waterBodies);
               if (meta.waterfalls) applyWaterfalls(meta.waterfalls);
+              if (meta.glowOrbs) {
+                glowOrbPositions = meta.glowOrbs;
+                _rebuildGlowOrbs();
+              }
               if (meta.riverPoints) {
                 riverPoints = meta.riverPoints.map(p => new THREE.Vector3(p.x, p.y, p.z));
                 riverSelectedIdx = -1;
@@ -7644,7 +7680,7 @@
         splineFolder.addBlade({ view: "separator" });
 
         // Object picker — built from treeSystem + FOLIAGE_SLOTS
-        const splineObjOptions = { "Trees": "trees" };
+        const splineObjOptions = { "Trees": "trees", "Glow Orbs": "glorborbs" };
         FOLIAGE_SLOTS.forEach((slot, i) => {
           splineObjOptions[`Foliage: ${slot.name}`] = `foliage${i}`;
         });
@@ -8265,6 +8301,12 @@
             });
             treeSystem.setPositions(existing);
             if (treeSystem.syncHeights) treeSystem.syncHeights();
+          } else if (type === "glorborbs") {
+            samples.forEach(({ pos }) => {
+              const scale = PARAMS.spline.scaleMin + Math.random() * scaleRange;
+              glowOrbPositions.push({ x: pos.x, y: pos.y + scale * 0.5, z: pos.z, scale });
+            });
+            _rebuildGlowOrbs();
           } else if (type.startsWith("foliage")) {
             const slotIdx = parseInt(type.replace("foliage", ""));
             const slot = FOLIAGE_SLOTS[slotIdx];
