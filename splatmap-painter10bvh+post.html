@@ -778,16 +778,18 @@
       // ─── STATE ───────────────────────────────
       let currentMode = "view"; // "view" | "paint" | "sculpt"
 
-      // ── PINE LOD TEST ────────────────────────────────────────────────────
-      let lodPositions        = [];        // [{x,y,z,scale}] all painted positions
-      let lodModelsReady      = false;
-      let _lod0Defs           = null;      // [{geometry, material, localMatrix}]
-      let _lod1Defs           = null;
-      const LOD_CHUNK_SIZE        = 64;    // world-units per chunk side
-      const LOD_MAX_PER_CHUNK     = 512;   // max trees per chunk IM
-      const lodChunks         = new Map(); // "cx,cz" → {positions,sphere,lod0ims,lod1ims}
-      let _rebuildLODChunks   = () => {};  // assigned inside init() once scene is ready
-      const lodParams = { threshold: 80, count0: 0, count1: 0, chunks: 0, chunksVisible: 0 };
+      // ── TREE LOD — multi-slot instanced tree system ───────────────────────
+      const LOD_SLOTS = [
+        { name: "Pine",   modelPath: "models/pine2.glb", lod1Path: "models/pine2LODtest.glb", lodThreshold: 80,  positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
+        { name: "Oak",    modelPath: null,                lod1Path: null,                       lodThreshold: 60,  positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
+        { name: "Dead",   modelPath: null,                lod1Path: null,                       lodThreshold: 50,  positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
+        { name: "Palm",   modelPath: null,                lod1Path: null,                       lodThreshold: 60,  positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
+      ];
+      let activeLodSlot       = 0;
+      const LOD_CHUNK_SIZE    = 64;      // world-units per chunk side
+      const LOD_MAX_PER_CHUNK = 512;     // max trees per chunk IM
+      let _rebuildLODChunks   = (_slot) => {}; // assigned inside init() once scene is ready
+      const lodParams = { slotName: "Pine", threshold: 80, count0: 0, count1: 0, totalTrees: 0, chunks: 0, chunksVisible: 0 };
       let lodFolder = null;
       const _lodDummy    = new THREE.Object3D();
       const _lodFinalMat = new THREE.Matrix4();
@@ -1511,11 +1513,22 @@
         }
       }
 
-      // ─── PINE LOD TEST PAINT ─────────────────────────────────────────────
+      // ─── TREE LOD HEIGHT SYNC — re-sample Y after terrain sculpt ────────
+      function syncLODHeights() {
+        LOD_SLOTS.forEach(slot => {
+          if (!slot.ready || slot.positions.length === 0) return;
+          slot.positions.forEach(p => { p.y = sampleHeight(p.x, p.z); });
+          _rebuildLODChunks(slot);
+        });
+      }
+
+      // ─── TREE LOD PAINT ──────────────────────────────────────────────────
       function paintLODAt(wx, wz, erase) {
+        const slot = LOD_SLOTS[activeLodSlot];
+        if (!slot.ready) return;
         if (erase) {
           const r2 = brushSize * brushSize;
-          lodPositions = lodPositions.filter(
+          slot.positions = slot.positions.filter(
             (p) => (p.x - wx) ** 2 + (p.z - wz) ** 2 > r2,
           );
         } else {
@@ -1526,10 +1539,10 @@
             const x = wx + Math.cos(angle) * dist;
             const z = wz + Math.sin(angle) * dist;
             const y = sampleHeight(x, z);
-            lodPositions.push({ x, y, z, scale: 0.8 + Math.random() * 0.6 });
+            slot.positions.push({ x, y, z, scale: 0.8 + Math.random() * 0.6 });
           }
         }
-        _rebuildLODChunks();
+        _rebuildLODChunks(slot);
       }
 
       // ─── IMAGE TEXTURE PAINT ─────────────────────────────────────────────
@@ -2096,6 +2109,7 @@
         syncGeometry();
         if (bakeBVH) bakeBVH();
         if (treeSystem) treeSystem.syncHeights();
+        syncLODHeights();
         FOLIAGE_SLOTS.forEach((s) => {
           if (s.system) s.system.syncHeights();
         });
@@ -2256,6 +2270,7 @@
           syncHeightmapPreview();
           if (bakeBVH) bakeBVH();
           if (treeSystem) treeSystem.syncHeights();
+          syncLODHeights();
           FOLIAGE_SLOTS.forEach((s) => {
             if (s.system) s.system.syncHeights();
           });
@@ -4835,7 +4850,7 @@
             ),
           );
 
-        // ── PINE LOD TEST — chunk-based model loading ─────────────────────
+        // ── TREE LOD — slot-based chunk instancing ────────────────────────
         function _extractLODDefs(gltf) {
           const defs = [];
           gltf.scene.updateMatrixWorld(true);
@@ -4859,54 +4874,66 @@
             im.count = 0;
             im.castShadow = true;
             im.receiveShadow = true;
-            im.frustumCulled = false; // culled manually per-chunk
+            im.frustumCulled = false;
             scene.add(im);
             return { im, localMatrix };
           });
         }
-        _rebuildLODChunks = function() {
-          if (!lodModelsReady) return;
-          // Group positions into chunks
+        _rebuildLODChunks = function(slot) {
+          if (!slot || !slot.ready) return;
           const byChunk = new Map();
-          lodPositions.forEach(pos => {
+          slot.positions.forEach(pos => {
             const key = `${Math.floor(pos.x / LOD_CHUNK_SIZE)},${Math.floor(pos.z / LOD_CHUNK_SIZE)}`;
             if (!byChunk.has(key)) byChunk.set(key, []);
             byChunk.get(key).push(pos);
           });
           // Remove dead chunks
-          for (const key of [...lodChunks.keys()]) {
+          for (const key of [...slot.chunks.keys()]) {
             if (!byChunk.has(key)) {
-              const c = lodChunks.get(key);
+              const c = slot.chunks.get(key);
               c.lod0ims.forEach(g => scene.remove(g.im));
-              c.lod1ims.forEach(g => scene.remove(g.im));
-              lodChunks.delete(key);
+              if (c.lod1ims) c.lod1ims.forEach(g => scene.remove(g.im));
+              slot.chunks.delete(key);
             }
           }
           // Update / create chunks
           for (const [key, positions] of byChunk) {
-            let chunk = lodChunks.get(key);
+            let chunk = slot.chunks.get(key);
             if (!chunk) {
-              chunk = { positions: [], sphere: new THREE.Sphere(), lod0ims: _makeChunkIMs(_lod0Defs), lod1ims: _makeChunkIMs(_lod1Defs) };
-              lodChunks.set(key, chunk);
+              chunk = {
+                positions: [],
+                sphere: new THREE.Sphere(),
+                lod0ims: _makeChunkIMs(slot.lod0Defs),
+                lod1ims: slot.lod1Defs ? _makeChunkIMs(slot.lod1Defs) : null,
+              };
+              slot.chunks.set(key, chunk);
             }
             chunk.positions = positions;
-            // Compute bounding sphere from position centroids
             let cx = 0, cy = 0, cz = 0;
             positions.forEach(p => { cx += p.x; cy += p.y; cz += p.z; });
             cx /= positions.length; cy /= positions.length; cz /= positions.length;
             let r = 0;
             positions.forEach(p => { const d = Math.sqrt((p.x-cx)**2+(p.y-cy)**2+(p.z-cz)**2); if (d > r) r = d; });
-            chunk.sphere.set(new THREE.Vector3(cx, cy, cz), r + 20); // +20 for tree height
+            chunk.sphere.set(new THREE.Vector3(cx, cy, cz), r + 20);
           }
-          lodParams.chunks = lodChunks.size;
+        };
+        function _tryBuildSlot(slot) {
+          if (!slot.lod0Defs) return;
+          slot.ready = true;
+          _rebuildLODChunks(slot); // apply positions loaded before model
         }
-        function _tryBuildLOD() {
-          if (!_lod0Defs || !_lod1Defs) return;
-          lodModelsReady = true;
-          _rebuildLODChunks(); // apply if positions loaded before models
-        }
-        gltfLoader.load("models/pine2.glb",        (g) => { _lod0Defs = _extractLODDefs(g); _tryBuildLOD(); });
-        gltfLoader.load("models/pine2LODtest.glb", (g) => { _lod1Defs = _extractLODDefs(g); _tryBuildLOD(); });
+        // Load models for all slots that have a modelPath
+        LOD_SLOTS.forEach(slot => {
+          if (!slot.modelPath) return;
+          gltfLoader.load(slot.modelPath, (g) => {
+            slot.lod0Defs = _extractLODDefs(g);
+            if (slot.lod1Path) {
+              gltfLoader.load(slot.lod1Path, (g2) => { slot.lod1Defs = _extractLODDefs(g2); _tryBuildSlot(slot); });
+            } else {
+              _tryBuildSlot(slot);
+            }
+          });
+        });
 
         // ── FOLIAGE SYSTEMS ──
         FOLIAGE_SLOTS.forEach((slot) => {
@@ -5154,6 +5181,7 @@
           const meta = {
             version: 2,
             trees: treeSystem ? treeSystem.getPositions() : [],
+            lodSlots: LOD_SLOTS.map(s => ({ name: s.name, positions: s.positions })),
             foliage: FOLIAGE_SLOTS.map((s) => ({
               name: s.name,
               positions: s.system ? s.system.getPositions() : [],
@@ -5239,6 +5267,7 @@
               syncHeightmapPreview();
               if (bakeBVH) bakeBVH();
               if (treeSystem) treeSystem.syncHeights();
+              syncLODHeights();
               FOLIAGE_SLOTS.forEach((s) => {
                 if (s.system) s.system.syncHeights();
               });
@@ -5301,6 +5330,14 @@
             if (metaFile) {
               const meta = JSON.parse(await metaFile.async("string"));
               if (meta.trees && treeSystem) treeSystem.setPositions(meta.trees);
+              if (meta.lodSlots) {
+                meta.lodSlots.forEach((saved, i) => {
+                  if (i < LOD_SLOTS.length) {
+                    LOD_SLOTS[i].positions = saved.positions || [];
+                    _rebuildLODChunks(LOD_SLOTS[i]);
+                  }
+                });
+              }
               if (meta.foliage) {
                 meta.foliage.forEach((fd, idx) => {
                   if (
@@ -5715,6 +5752,7 @@
           .on("click", () => {
             if (bakeBVH) bakeBVH();
             if (treeSystem) treeSystem.syncHeights();
+            syncLODHeights();
             FOLIAGE_SLOTS.forEach((s) => {
               if (s.system) s.system.syncHeights();
             });
@@ -6977,15 +7015,36 @@
           reader.readAsText(e.target.files[0]);
         });
 
-        // ── PINE LOD TEST FOLDER ──
-        lodFolder = pane.addFolder({ title: "PineLOD Test  [ J ]", expanded: true });
+        // ── TREE LOD FOLDER ──
+        lodFolder = pane.addFolder({ title: "Tree LOD  [ J ]", expanded: true });
         lodFolder.hidden = true;
-        lodFolder.addBinding(lodParams, "threshold", { label: "LOD switch dist", min: 5, max: 300, step: 1 });
-        lodFolder.addBinding(lodParams, "count0", { label: "LOD0 visible trees", readonly: true });
-        lodFolder.addBinding(lodParams, "count1", { label: "LOD1 visible trees", readonly: true });
+        // Slot selector
+        const _lodSlotFolder = lodFolder.addFolder({ title: "Active slot  [ 1–4 ]", expanded: true });
+        LOD_SLOTS.forEach((slot, i) => {
+          const label = `${i + 1}: ${slot.name}${slot.modelPath ? '' : '  (no model)'}`;
+          _lodSlotFolder.addButton({ title: label }).on("click", () => {
+            activeLodSlot = i;
+            lodParams.slotName  = slot.name;
+            lodParams.threshold = slot.lodThreshold;
+            if (lodFolder) pane.refresh();
+          });
+        });
+        lodFolder.addBinding(lodParams, "slotName",  { label: "Painting slot", readonly: true });
+        lodFolder.addBinding(lodParams, "threshold", { label: "LOD switch dist", min: 5, max: 300, step: 1 })
+          .on("change", (ev) => { LOD_SLOTS[activeLodSlot].lodThreshold = ev.value; });
+        lodFolder.addBinding(lodParams, "count0",      { label: "LOD0 visible", readonly: true });
+        lodFolder.addBinding(lodParams, "count1",      { label: "LOD1 visible", readonly: true });
+        lodFolder.addBinding(lodParams, "totalTrees",  { label: "Total trees",  readonly: true });
         lodFolder.addBinding(lodParams, "chunksVisible", { label: "Chunks visible", readonly: true });
-        lodFolder.addBinding(lodParams, "chunks", { label: "Chunks total", readonly: true });
-        lodFolder.addButton({ title: "Clear all LOD trees" }).on("click", () => { lodPositions = []; _rebuildLODChunks(); });
+        lodFolder.addBinding(lodParams, "chunks",      { label: "Chunks total",  readonly: true });
+        lodFolder.addButton({ title: "Clear active slot" }).on("click", () => {
+          const slot = LOD_SLOTS[activeLodSlot];
+          slot.positions = [];
+          _rebuildLODChunks(slot);
+        });
+        lodFolder.addButton({ title: "Clear ALL slots" }).on("click", () => {
+          LOD_SLOTS.forEach(slot => { slot.positions = []; _rebuildLODChunks(slot); });
+        });
 
         // ── FOLIAGE FOLDER ──
         const foliageFolder = pane.addFolder({
@@ -8293,7 +8352,7 @@
                                         : mode === "waterfall"
                                           ? "WATERFALL MODE  [ H ]"
                                           : mode === "pinelod"
-                                            ? "PINE LOD TEST  [ J ]"
+                                            ? "TREE LOD  [ J ]"
                                             : "PLACE MODE"; // play handled above
           badge.className = mode;
           renderer.domElement.style.cursor =
@@ -8348,6 +8407,13 @@
             setMode(currentMode === "foliage" ? "view" : "foliage");
           if (e.code === "KeyJ")
             setMode(currentMode === "pinelod" ? "view" : "pinelod");
+          if (currentMode === "pinelod" && e.code.match(/^Digit[1-4]$/)) {
+            const idx = parseInt(e.code[5]) - 1;
+            activeLodSlot = idx;
+            lodParams.slotName  = LOD_SLOTS[idx].name;
+            lodParams.threshold = LOD_SLOTS[idx].lodThreshold;
+            if (lodFolder) pane.refresh();
+          }
           if (e.code === "KeyI")
             setMode(currentMode === "props" ? "view" : "props");
           if (e.code === "KeyL")
@@ -8765,6 +8831,7 @@
           if (currentMode === "sculpt" || currentMode === "path") {
             if (bakeBVH) bakeBVH();
             if (treeSystem) treeSystem.syncHeights();
+            syncLODHeights();
             FOLIAGE_SLOTS.forEach((s) => {
               if (s.system) s.system.syncHeights();
             });
@@ -8982,41 +9049,52 @@
         let _lastCsmMaxFar = PARAMS.csm.maxFar;
         let _lastCsmMargin = PARAMS.csm.lightMargin;
         let _lastCsmMapSize = PARAMS.csm.mapSize;
-        // ── PINE LOD TEST — per-frame chunk-culled instance update ───────────
+        // ── TREE LOD — per-frame chunk-culled multi-slot update ──────────────
         function updateLODInstances() {
-          if (!lodModelsReady || lodChunks.size === 0) return;
+          if (!LOD_SLOTS.some(s => s.ready && s.chunks.size > 0)) return;
           _lodCamPos.copy(camera.position);
           _lodProjMat.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
           _lodFrustum.setFromProjectionMatrix(_lodProjMat);
-          const thr = lodParams.threshold;
-          let visibleChunks = 0, count0 = 0, count1 = 0;
-          for (const chunk of lodChunks.values()) {
-            const inFrustum = _lodFrustum.intersectsSphere(chunk.sphere);
-            chunk.lod0ims.forEach(g => { g.im.count = 0; });
-            chunk.lod1ims.forEach(g => { g.im.count = 0; });
-            if (!inFrustum) continue;
-            visibleChunks++;
-            for (const { x, y, z, scale } of chunk.positions) {
-              const dx = x - _lodCamPos.x, dy = y - _lodCamPos.y, dz = z - _lodCamPos.z;
-              const groups = Math.sqrt(dx*dx + dy*dy + dz*dz) < thr ? chunk.lod0ims : chunk.lod1ims;
-              _lodDummy.position.set(x, y, z);
-              _lodDummy.scale.setScalar(scale);
-              _lodDummy.rotation.set(0, Math.PI * 2 * ((x * 13.7 + z * 7.3) % 1), 0);
-              _lodDummy.updateMatrix();
-              groups.forEach(({ im, localMatrix }) => {
-                if (im.count >= LOD_MAX_PER_CHUNK) return;
-                _lodFinalMat.multiplyMatrices(_lodDummy.matrix, localMatrix);
-                im.setMatrixAt(im.count++, _lodFinalMat);
-              });
+          let totalVisible = 0, totalChunks = 0, count0 = 0, count1 = 0, totalTrees = 0;
+          for (const slot of LOD_SLOTS) {
+            if (!slot.ready) continue;
+            totalTrees += slot.positions.length;
+            const thr = slot.lodThreshold;
+            for (const chunk of slot.chunks.values()) {
+              totalChunks++;
+              const inFrustum = _lodFrustum.intersectsSphere(chunk.sphere);
+              chunk.lod0ims.forEach(g => { g.im.count = 0; });
+              if (chunk.lod1ims) chunk.lod1ims.forEach(g => { g.im.count = 0; });
+              if (!inFrustum) continue;
+              totalVisible++;
+              for (const { x, y, z, scale } of chunk.positions) {
+                const dx = x - _lodCamPos.x, dy = y - _lodCamPos.y, dz = z - _lodCamPos.z;
+                const useLod1 = chunk.lod1ims && Math.sqrt(dx*dx + dy*dy + dz*dz) >= thr;
+                const groups = useLod1 ? chunk.lod1ims : chunk.lod0ims;
+                _lodDummy.position.set(x, y, z);
+                _lodDummy.scale.setScalar(scale);
+                _lodDummy.rotation.set(0, Math.PI * 2 * ((x * 13.7 + z * 7.3) % 1), 0);
+                _lodDummy.updateMatrix();
+                groups.forEach(({ im, localMatrix }) => {
+                  if (im.count >= LOD_MAX_PER_CHUNK) return;
+                  _lodFinalMat.multiplyMatrices(_lodDummy.matrix, localMatrix);
+                  im.setMatrixAt(im.count++, _lodFinalMat);
+                });
+              }
+              chunk.lod0ims.forEach(g => { if (g.im.count > 0) g.im.instanceMatrix.needsUpdate = true; });
+              if (chunk.lod1ims) chunk.lod1ims.forEach(g => { if (g.im.count > 0) g.im.instanceMatrix.needsUpdate = true; });
+              count0 += chunk.lod0ims[0]?.im.count ?? 0;
+              if (chunk.lod1ims) count1 += chunk.lod1ims[0]?.im.count ?? 0;
             }
-            chunk.lod0ims.forEach(g => { if (g.im.count > 0) g.im.instanceMatrix.needsUpdate = true; });
-            chunk.lod1ims.forEach(g => { if (g.im.count > 0) g.im.instanceMatrix.needsUpdate = true; });
-            count0 += chunk.lod0ims[0]?.im.count ?? 0;
-            count1 += chunk.lod1ims[0]?.im.count ?? 0;
           }
-          lodParams.count0 = count0;
-          lodParams.count1 = count1;
-          lodParams.chunksVisible = visibleChunks;
+          const active = LOD_SLOTS[activeLodSlot];
+          lodParams.slotName  = active.name;
+          lodParams.threshold = active.lodThreshold;
+          lodParams.count0    = count0;
+          lodParams.count1    = count1;
+          lodParams.totalTrees = totalTrees;
+          lodParams.chunks    = totalChunks;
+          lodParams.chunksVisible = totalVisible;
           if (lodFolder) pane.refresh();
         }
 
@@ -9283,7 +9361,8 @@
               }
             });
             if (ft > 0) lines.push(`Foliage: ${fv}/${ft} chunks`);
-            if (lodChunks.size > 0) lines.push(`PineLOD: ${lodParams.chunksVisible}/${lodParams.chunks} chunks`);
+            const _totalLodChunks = LOD_SLOTS.reduce((s, sl) => s + sl.chunks.size, 0);
+            if (_totalLodChunks > 0) lines.push(`TreeLOD: ${lodParams.chunksVisible}/${_totalLodChunks} chunks`);
             chunkInfoDiv.textContent = lines.length ? lines.join('\n') : '';
           }
         });
