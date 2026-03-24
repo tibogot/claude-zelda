@@ -43,7 +43,8 @@
           "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
           "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
           "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
-          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.4/dist/tweakpane.min.js"
         }
       }
     </script>
@@ -58,6 +59,7 @@
     <script type="module">
       import * as THREE from "three/webgpu";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
       import {
         Fn,
         uv,
@@ -73,6 +75,71 @@
         uniform,
       } from "three/tsl";
 
+      const PARAMS = {
+        // layout
+        rows: 4,
+        perRow: 6,
+        rowSpacing: 7.2,
+        xSpacing: 6.8,
+        centerZ: -3.0,
+        posJitterX: 1.4,
+        posJitterZ: 1.8,
+        samples: 56,
+        lengthBase: 38.0,
+        lengthVar: 12.0,
+        widthBase: 0.75,
+        widthVar: 0.62,
+        yOffset: 0.55,
+        yArch: 0.15,
+
+        // path shape
+        windDirX: 1.0,
+        windDirZ: -0.18,
+        driftAmp: 1.1,
+        driftFreq: 8.0,
+        microAmp: 0.22,
+        microFreq: 31.0,
+
+        // shader base
+        speedBase: 0.33,
+        speedVar: 0.18,
+        widthSoftBase: 1.7,
+        widthSoftVar: 0.35,
+        densityBase: 1.1,
+        densityVar: 0.4,
+        stretchXBase: 12.0,
+        stretchXVar: 8.0,
+        stretchYBase: 2.7,
+        stretchYVar: 1.2,
+        warpBase: 0.42,
+        warpVar: 0.3,
+        baseColor: "#a9d4ff",
+        hotColor: "#ffc695",
+        opacityMul: 1.0,
+        glowMul: 1.0,
+
+        // scene
+        bgColor: "#080f19",
+        fogColor: "#0a1320",
+        fogNear: 22,
+        fogFar: 120,
+        groundColor: "#121a24",
+        hemiSky: "#8da8de",
+        hemiGround: "#121820",
+        hemiIntensity: 0.56,
+        moonColor: "#aec7ff",
+        moonIntensity: 1.0,
+        fireColor: "#ffb886",
+        fireIntensity: 1.1,
+        fireDistance: 28,
+
+        regenerate: () => rebuildWindBands(true),
+        resetDefaults: () => resetDefaults(),
+      };
+
+      const DEFAULTS = JSON.parse(JSON.stringify(PARAMS));
+      const rng = Math.random;
+
       const renderer = new THREE.WebGPURenderer({ antialias: true });
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       renderer.setSize(window.innerWidth, window.innerHeight);
@@ -80,8 +147,8 @@
       await renderer.init();
 
       const scene = new THREE.Scene();
-      scene.background = new THREE.Color(0x080f19);
-      scene.fog = new THREE.Fog(0x0a1320, 22, 120);
+      scene.background = new THREE.Color(PARAMS.bgColor);
+      scene.fog = new THREE.Fog(PARAMS.fogColor, PARAMS.fogNear, PARAMS.fogFar);
 
       const camera = new THREE.PerspectiveCamera(
         45,
@@ -100,12 +167,21 @@
       controls.maxDistance = 56;
       controls.update();
 
-      const hemi = new THREE.HemisphereLight(0x8da8de, 0x121820, 0.56);
+      const hemi = new THREE.HemisphereLight(
+        PARAMS.hemiSky,
+        PARAMS.hemiGround,
+        PARAMS.hemiIntensity,
+      );
       scene.add(hemi);
-      const moon = new THREE.DirectionalLight(0xaec7ff, 1.0);
+      const moon = new THREE.DirectionalLight(PARAMS.moonColor, PARAMS.moonIntensity);
       moon.position.set(-15, 13, 8);
       scene.add(moon);
-      const fire = new THREE.PointLight(0xffb886, 1.1, 28, 2);
+      const fire = new THREE.PointLight(
+        PARAMS.fireColor,
+        PARAMS.fireIntensity,
+        PARAMS.fireDistance,
+        2,
+      );
       fire.position.set(0, 2.5, -8);
       scene.add(fire);
 
@@ -127,7 +203,7 @@
       const ground = new THREE.Mesh(
         groundGeo,
         new THREE.MeshStandardMaterial({
-          color: 0x121a24,
+          color: PARAMS.groundColor,
           roughness: 0.96,
           metalness: 0.02,
         }),
@@ -180,7 +256,6 @@
         geo.setAttribute("position", new THREE.BufferAttribute(vertices, 3));
         geo.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
         geo.setIndex(indices);
-        geo.computeVertexNormals();
         return geo;
       }
 
@@ -221,16 +296,36 @@
         return v;
       });
 
-      function createFogLineMaterial(seed) {
-        const uSpeed = uniform(0.33 + Math.random() * 0.18);
-        const uWidthSoft = uniform(1.7 + Math.random() * 0.35);
-        const uDensity = uniform(1.1 + Math.random() * 0.4);
-        const uStretchX = uniform(12 + Math.random() * 8);
-        const uStretchY = uniform(2.7 + Math.random() * 1.2);
-        const uWarp = uniform(0.42 + Math.random() * 0.3);
-        const uSeed = uniform(seed);
-        const uBaseColor = uniform(new THREE.Color(0xa9d4ff));
-        const uHotColor = uniform(new THREE.Color(0xffc695));
+      function randWithVariation(base, variation) {
+        return base + rng() * variation;
+      }
+
+      const SHADER_U = {
+        uSpeedBase: uniform(PARAMS.speedBase),
+        uSpeedVar: uniform(PARAMS.speedVar),
+        uWidthSoftBase: uniform(PARAMS.widthSoftBase),
+        uWidthSoftVar: uniform(PARAMS.widthSoftVar),
+        uDensityBase: uniform(PARAMS.densityBase),
+        uDensityVar: uniform(PARAMS.densityVar),
+        uStretchXBase: uniform(PARAMS.stretchXBase),
+        uStretchXVar: uniform(PARAMS.stretchXVar),
+        uStretchYBase: uniform(PARAMS.stretchYBase),
+        uStretchYVar: uniform(PARAMS.stretchYVar),
+        uWarpBase: uniform(PARAMS.warpBase),
+        uWarpVar: uniform(PARAMS.warpVar),
+        uBaseColor: uniform(new THREE.Color(PARAMS.baseColor)),
+        uHotColor: uniform(new THREE.Color(PARAMS.hotColor)),
+        uOpacityMul: uniform(PARAMS.opacityMul),
+        uGlowMul: uniform(PARAMS.glowMul),
+      };
+
+      function createFogLineMaterial() {
+        const uSpeed = SHADER_U.uSpeedBase;
+        const uWidthSoft = SHADER_U.uWidthSoftBase;
+        const uDensity = SHADER_U.uDensityBase;
+        const uStretchX = SHADER_U.uStretchXBase;
+        const uStretchY = SHADER_U.uStretchYBase;
+        const uWarp = SHADER_U.uWarpBase;
 
         const mat = new THREE.MeshBasicNodeMaterial({
           transparent: true,
@@ -242,7 +337,7 @@
         const st = uv();
         const t = time.mul(uSpeed);
         const p0 = vec2(
-          st.x.mul(uStretchX).add(t.mul(1.3)).add(uSeed),
+          st.x.mul(uStretchX).add(t.mul(1.3)),
           st.y.sub(0.5).mul(uStretchY).sub(t.mul(0.15)),
         ).toVar();
 
@@ -272,35 +367,40 @@
           .mul(tips)
           .mul(wisps.mul(0.85).add(filaments.mul(0.52)))
           .mul(uDensity)
+          .mul(SHADER_U.uOpacityMul)
           .saturate()
           .toVar();
 
         const glowMask = smoothstep(0.72, 1.0, n2).mul(0.34);
-        const col = mix(uBaseColor, uHotColor, glowMask.add(alpha.mul(0.3)))
-          .mul(alpha.mul(1.1).add(glowMask.mul(0.8)));
+        const col = mix(SHADER_U.uBaseColor, SHADER_U.uHotColor, glowMask.add(alpha.mul(0.3)))
+          .mul(alpha.mul(1.1).add(glowMask.mul(0.8)))
+          .mul(SHADER_U.uGlowMul);
 
         mat.colorNode = col;
         mat.opacityNode = alpha;
         return mat;
       }
 
+      const sharedFogLineMaterial = createFogLineMaterial();
+
       function buildWindRibbon(centerX, centerZ, length, width, seed) {
         const points = [];
-        const samples = 56;
-        const windDir = new THREE.Vector3(1, 0, -0.18).normalize();
+        const samples = Math.max(8, Math.floor(PARAMS.samples));
+        const windDir = new THREE.Vector3(PARAMS.windDirX, 0, PARAMS.windDirZ).normalize();
         const side = new THREE.Vector3(-windDir.z, 0, windDir.x);
         for (let i = 0; i < samples; i++) {
           const u = i / (samples - 1);
           const along = (u - 0.5) * length;
-          const drift = Math.sin(u * 8 + seed * 7.3) * 1.1;
-          const micro = Math.sin(u * 31 + seed * 13.7) * 0.22;
+          const drift = Math.sin(u * PARAMS.driftFreq + seed * 7.3) * PARAMS.driftAmp;
+          const micro = Math.sin(u * PARAMS.microFreq + seed * 13.7) * PARAMS.microAmp;
           const x = centerX + windDir.x * along + side.x * (drift + micro);
           const z = centerZ + windDir.z * along + side.z * (drift + micro);
-          const y = terrainHeight(x, z) + 0.55 + Math.sin(u * Math.PI) * 0.15;
+          const y =
+            terrainHeight(x, z) + PARAMS.yOffset + Math.sin(u * Math.PI) * PARAMS.yArch;
           points.push(new THREE.Vector3(x, y, z));
         }
         const geo = createRibbonGeometry(points, width);
-        const mesh = new THREE.Mesh(geo, createFogLineMaterial(seed));
+        const mesh = new THREE.Mesh(geo, sharedFogLineMaterial);
         mesh.renderOrder = 40;
         return mesh;
       }
@@ -308,20 +408,108 @@
       const bandGroup = new THREE.Group();
       scene.add(bandGroup);
 
-      const rows = 4;
-      const perRow = 6;
-      let index = 0;
-      for (let r = 0; r < rows; r++) {
-        for (let i = 0; i < perRow; i++) {
-          const fx = (i - (perRow - 1) * 0.5) * 6.8 + (Math.random() - 0.5) * 1.4;
-          const fz = -3 - r * 7.2 + (Math.random() - 0.5) * 1.8;
-          const length = 38 + Math.random() * 12;
-          const width = 0.75 + Math.random() * 0.62;
-          const band = buildWindRibbon(fx, fz, length, width, index * 0.171);
-          bandGroup.add(band);
-          index++;
+      const ribbons = [];
+
+      function disposeRibbon(mesh) {
+        if (mesh.geometry) mesh.geometry.dispose();
+      }
+
+      function clearBands() {
+        for (const mesh of ribbons) disposeRibbon(mesh);
+        ribbons.length = 0;
+        bandGroup.clear();
+      }
+
+      let rebuildTimer = null;
+      let rebuildQueued = false;
+
+      function doRebuildWindBands() {
+        clearBands();
+        const rows = Math.max(1, Math.floor(PARAMS.rows));
+        const perRow = Math.max(1, Math.floor(PARAMS.perRow));
+        let index = 0;
+        for (let r = 0; r < rows; r++) {
+          for (let i = 0; i < perRow; i++) {
+            const fx =
+              (i - (perRow - 1) * 0.5) * PARAMS.xSpacing +
+              (rng() - 0.5) * PARAMS.posJitterX;
+            const fz =
+              PARAMS.centerZ - r * PARAMS.rowSpacing + (rng() - 0.5) * PARAMS.posJitterZ;
+            const length = randWithVariation(PARAMS.lengthBase, PARAMS.lengthVar);
+            const width = randWithVariation(PARAMS.widthBase, PARAMS.widthVar);
+            const band = buildWindRibbon(fx, fz, length, width, index * 0.171);
+            ribbons.push(band);
+            bandGroup.add(band);
+            index++;
+          }
         }
       }
+
+      function rebuildWindBands(immediate = false) {
+        if (immediate) {
+          if (rebuildTimer) {
+            clearTimeout(rebuildTimer);
+            rebuildTimer = null;
+          }
+          rebuildQueued = false;
+          doRebuildWindBands();
+          return;
+        }
+
+        rebuildQueued = true;
+        if (rebuildTimer) clearTimeout(rebuildTimer);
+        rebuildTimer = setTimeout(() => {
+          rebuildTimer = null;
+          if (!rebuildQueued) return;
+          rebuildQueued = false;
+          doRebuildWindBands();
+        }, 120);
+      }
+
+      function applyShaderToExistingBands() {
+        SHADER_U.uBaseColor.value.set(PARAMS.baseColor);
+        SHADER_U.uHotColor.value.set(PARAMS.hotColor);
+        SHADER_U.uOpacityMul.value = PARAMS.opacityMul;
+        SHADER_U.uGlowMul.value = PARAMS.glowMul;
+        SHADER_U.uSpeedBase.value = PARAMS.speedBase;
+        SHADER_U.uSpeedVar.value = PARAMS.speedVar;
+        SHADER_U.uWidthSoftBase.value = PARAMS.widthSoftBase;
+        SHADER_U.uWidthSoftVar.value = PARAMS.widthSoftVar;
+        SHADER_U.uDensityBase.value = PARAMS.densityBase;
+        SHADER_U.uDensityVar.value = PARAMS.densityVar;
+        SHADER_U.uStretchXBase.value = PARAMS.stretchXBase;
+        SHADER_U.uStretchXVar.value = PARAMS.stretchXVar;
+        SHADER_U.uStretchYBase.value = PARAMS.stretchYBase;
+        SHADER_U.uStretchYVar.value = PARAMS.stretchYVar;
+        SHADER_U.uWarpBase.value = PARAMS.warpBase;
+        SHADER_U.uWarpVar.value = PARAMS.warpVar;
+      }
+
+      function applySceneParams() {
+        scene.background.set(PARAMS.bgColor);
+        scene.fog.color.set(PARAMS.fogColor);
+        scene.fog.near = PARAMS.fogNear;
+        scene.fog.far = PARAMS.fogFar;
+        ground.material.color.set(PARAMS.groundColor);
+        hemi.color.set(PARAMS.hemiSky);
+        hemi.groundColor.set(PARAMS.hemiGround);
+        hemi.intensity = PARAMS.hemiIntensity;
+        moon.color.set(PARAMS.moonColor);
+        moon.intensity = PARAMS.moonIntensity;
+        fire.color.set(PARAMS.fireColor);
+        fire.intensity = PARAMS.fireIntensity;
+        fire.distance = PARAMS.fireDistance;
+      }
+
+      function resetDefaults() {
+        Object.assign(PARAMS, JSON.parse(JSON.stringify(DEFAULTS)));
+        pane.refresh();
+        applyShaderToExistingBands();
+        applySceneParams();
+        rebuildWindBands(true);
+      }
+
+      rebuildWindBands(true);
 
       // Background silhouettes
       const treeMat = new THREE.MeshStandardMaterial({
@@ -360,6 +548,160 @@
       b.position.set(0, 2.8, 0);
       t.position.set(0, 3.2, -0.08);
       gate.add(p1, p2, b, t);
+
+      // ---- Tweakpane controls ----
+      const pane = new Pane({ title: "Ghost Fog Lines Controls" });
+      const onRebuildLast = (ev) => {
+        if (!ev.last) return;
+        rebuildWindBands(true);
+      };
+
+      const fActions = pane.addFolder({ title: "Actions", expanded: true });
+      fActions
+        .addButton({ title: "Regenerate Bands" })
+        .on("click", () => PARAMS.regenerate());
+      fActions
+        .addButton({ title: "Reset Defaults" })
+        .on("click", () => PARAMS.resetDefaults());
+
+      const fLayout = pane.addFolder({ title: "Layout", expanded: false });
+      fLayout
+        .addBinding(PARAMS, "rows", { min: 1, max: 10, step: 1 })
+        .on("change", onRebuildLast);
+      fLayout
+        .addBinding(PARAMS, "perRow", { min: 1, max: 20, step: 1 })
+        .on("change", onRebuildLast);
+      fLayout
+        .addBinding(PARAMS, "rowSpacing", { min: 2, max: 14, step: 0.1 })
+        .on("change", onRebuildLast);
+      fLayout
+        .addBinding(PARAMS, "xSpacing", { min: 2, max: 12, step: 0.1 })
+        .on("change", onRebuildLast);
+      fLayout
+        .addBinding(PARAMS, "centerZ", { min: -30, max: 20, step: 0.1 })
+        .on("change", onRebuildLast);
+      fLayout
+        .addBinding(PARAMS, "posJitterX", { min: 0, max: 6, step: 0.1 })
+        .on("change", onRebuildLast);
+      fLayout
+        .addBinding(PARAMS, "posJitterZ", { min: 0, max: 6, step: 0.1 })
+        .on("change", onRebuildLast);
+      fLayout
+        .addBinding(PARAMS, "samples", { min: 8, max: 120, step: 1 })
+        .on("change", onRebuildLast);
+      fLayout
+        .addBinding(PARAMS, "lengthBase", { min: 6, max: 120, step: 0.1 })
+        .on("change", onRebuildLast);
+      fLayout
+        .addBinding(PARAMS, "lengthVar", { min: 0, max: 80, step: 0.1 })
+        .on("change", onRebuildLast);
+      fLayout
+        .addBinding(PARAMS, "widthBase", { min: 0.1, max: 5, step: 0.01 })
+        .on("change", onRebuildLast);
+      fLayout
+        .addBinding(PARAMS, "widthVar", { min: 0, max: 4, step: 0.01 })
+        .on("change", onRebuildLast);
+      fLayout
+        .addBinding(PARAMS, "yOffset", { min: 0, max: 4, step: 0.01 })
+        .on("change", onRebuildLast);
+      fLayout
+        .addBinding(PARAMS, "yArch", { min: 0, max: 2, step: 0.01 })
+        .on("change", onRebuildLast);
+
+      const fPath = pane.addFolder({ title: "Wind Path", expanded: false });
+      fPath
+        .addBinding(PARAMS, "windDirX", { min: -2, max: 2, step: 0.01 })
+        .on("change", onRebuildLast);
+      fPath
+        .addBinding(PARAMS, "windDirZ", { min: -2, max: 2, step: 0.01 })
+        .on("change", onRebuildLast);
+      fPath
+        .addBinding(PARAMS, "driftAmp", { min: 0, max: 4, step: 0.01 })
+        .on("change", onRebuildLast);
+      fPath
+        .addBinding(PARAMS, "driftFreq", { min: 0, max: 24, step: 0.1 })
+        .on("change", onRebuildLast);
+      fPath
+        .addBinding(PARAMS, "microAmp", { min: 0, max: 2, step: 0.01 })
+        .on("change", onRebuildLast);
+      fPath
+        .addBinding(PARAMS, "microFreq", { min: 0, max: 72, step: 0.1 })
+        .on("change", onRebuildLast);
+
+      const fShader = pane.addFolder({ title: "Shader (Regenerate)", expanded: false });
+      fShader
+        .addBinding(PARAMS, "speedBase", { min: 0, max: 2, step: 0.01 })
+        .on("change", applyShaderToExistingBands);
+      fShader
+        .addBinding(PARAMS, "speedVar", { min: 0, max: 2, step: 0.01 })
+        .on("change", applyShaderToExistingBands);
+      fShader
+        .addBinding(PARAMS, "widthSoftBase", { min: 0.2, max: 4, step: 0.01 })
+        .on("change", applyShaderToExistingBands);
+      fShader
+        .addBinding(PARAMS, "widthSoftVar", { min: 0, max: 2, step: 0.01 })
+        .on("change", applyShaderToExistingBands);
+      fShader
+        .addBinding(PARAMS, "densityBase", { min: 0, max: 4, step: 0.01 })
+        .on("change", applyShaderToExistingBands);
+      fShader
+        .addBinding(PARAMS, "densityVar", { min: 0, max: 3, step: 0.01 })
+        .on("change", applyShaderToExistingBands);
+      fShader
+        .addBinding(PARAMS, "stretchXBase", { min: 1, max: 40, step: 0.1 })
+        .on("change", applyShaderToExistingBands);
+      fShader
+        .addBinding(PARAMS, "stretchXVar", { min: 0, max: 20, step: 0.1 })
+        .on("change", applyShaderToExistingBands);
+      fShader
+        .addBinding(PARAMS, "stretchYBase", { min: 0.2, max: 12, step: 0.1 })
+        .on("change", applyShaderToExistingBands);
+      fShader
+        .addBinding(PARAMS, "stretchYVar", { min: 0, max: 8, step: 0.1 })
+        .on("change", applyShaderToExistingBands);
+      fShader
+        .addBinding(PARAMS, "warpBase", { min: 0, max: 3, step: 0.01 })
+        .on("change", applyShaderToExistingBands);
+      fShader
+        .addBinding(PARAMS, "warpVar", { min: 0, max: 3, step: 0.01 })
+        .on("change", applyShaderToExistingBands);
+
+      const fLook = pane.addFolder({ title: "Look (Live)", expanded: false });
+      fLook.addBinding(PARAMS, "baseColor").on("change", applyShaderToExistingBands);
+      fLook.addBinding(PARAMS, "hotColor").on("change", applyShaderToExistingBands);
+      fLook
+        .addBinding(PARAMS, "opacityMul", { min: 0, max: 3, step: 0.01 })
+        .on("change", applyShaderToExistingBands);
+      fLook
+        .addBinding(PARAMS, "glowMul", { min: 0, max: 3, step: 0.01 })
+        .on("change", applyShaderToExistingBands);
+
+      const fScene = pane.addFolder({ title: "Scene", expanded: false });
+      fScene.addBinding(PARAMS, "bgColor").on("change", applySceneParams);
+      fScene.addBinding(PARAMS, "fogColor").on("change", applySceneParams);
+      fScene
+        .addBinding(PARAMS, "fogNear", { min: 1, max: 200, step: 1 })
+        .on("change", applySceneParams);
+      fScene
+        .addBinding(PARAMS, "fogFar", { min: 5, max: 300, step: 1 })
+        .on("change", applySceneParams);
+      fScene.addBinding(PARAMS, "groundColor").on("change", applySceneParams);
+      fScene.addBinding(PARAMS, "hemiSky").on("change", applySceneParams);
+      fScene.addBinding(PARAMS, "hemiGround").on("change", applySceneParams);
+      fScene
+        .addBinding(PARAMS, "hemiIntensity", { min: 0, max: 3, step: 0.01 })
+        .on("change", applySceneParams);
+      fScene.addBinding(PARAMS, "moonColor").on("change", applySceneParams);
+      fScene
+        .addBinding(PARAMS, "moonIntensity", { min: 0, max: 3, step: 0.01 })
+        .on("change", applySceneParams);
+      fScene.addBinding(PARAMS, "fireColor").on("change", applySceneParams);
+      fScene
+        .addBinding(PARAMS, "fireIntensity", { min: 0, max: 4, step: 0.01 })
+        .on("change", applySceneParams);
+      fScene
+        .addBinding(PARAMS, "fireDistance", { min: 0, max: 80, step: 0.1 })
+        .on("change", applySceneParams);
 
       renderer.setAnimationLoop(() => {
         controls.update();
