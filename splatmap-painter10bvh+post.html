@@ -2642,6 +2642,7 @@
         const uRockNormalStr   = uniform(1.0);
         const uRockBlendSharp  = uniform(1.0); // exponent on slope mask: >1 = sharper edge
         const uRockRoughMul    = uniform(1.0);
+        const uTriplanarSharp  = uniform(4.0); // triplanar blend sharpness: higher = harder axis transitions
         const _rockLoader = new THREE.TextureLoader();
 
         // Color (sRGB, stays separate)
@@ -3502,10 +3503,16 @@
           const terrain = groundProc();
           const path = pathProc();
           const wet = path.mul(float(0.55));
-          // Rock028 slope texture — tiled by world XZ position
-          const rockUV = positionWorld.xz.mul(uRockScale);
-          // Rock028 albedo — brightness, contrast, tint applied
-          const rawRock = texture(rock028ColorTex, rockUV).rgb;
+          // Rock028 — triplanar UVs (3 world-space projections, no stretch on cliff faces)
+          const rockUV_XZ = positionWorld.xz.mul(uRockScale); // top/bottom (Y-dominant)
+          const rockUV_XY = positionWorld.xy.mul(uRockScale); // Z-facing sides
+          const rockUV_ZY = positionWorld.zy.mul(uRockScale); // X-facing sides
+          const _triWRaw = normalWorld.abs().pow(uTriplanarSharp);
+          const _triW = _triWRaw.div(_triWRaw.x.add(_triWRaw.y).add(_triWRaw.z));
+          // Rock028 albedo — triplanar blend, brightness/contrast/tint applied
+          const rawRock = texture(rock028ColorTex, rockUV_XZ).rgb.mul(_triW.y)
+            .add(texture(rock028ColorTex, rockUV_XY).rgb.mul(_triW.z))
+            .add(texture(rock028ColorTex, rockUV_ZY).rgb.mul(_triW.x));
           const contrastedRock = clamp(rawRock.sub(float(0.5)).mul(uRockContrast).add(float(0.5)), 0.0, 1.0);
           const rockAlbedo = contrastedRock.mul(uRockBrightness).mul(uRockTint);
           // Slope mask with sharpness exponent
@@ -3561,8 +3568,10 @@
           // ── Rock ORM — R=AO darkens crevices, G=roughness used in roughnessNode ──
           const rockAO = texture(s2.ormTex, iuv2).r;
           col = col.mul(mix(float(1.0), rockAO, imgSplat.b.mul(s2.uHasAO)));
-          // ── Rock028 AO — darken cliff crevices on steep faces (from packed DataTexture .g) ──
-          const rock028AO = texture(rock028DataTex, rockUV).g;
+          // ── Rock028 AO — triplanar, darken cliff crevices on steep faces (.g channel) ──
+          const rock028AO = texture(rock028DataTex, rockUV_XZ).g.mul(_triW.y)
+            .add(texture(rock028DataTex, rockUV_XY).g.mul(_triW.z))
+            .add(texture(rock028DataTex, rockUV_ZY).g.mul(_triW.x));
           col = col.mul(mix(rock028AO, float(1.0), slopeMask));
           return col;
         })();
@@ -3581,12 +3590,28 @@
           const nmZ = sqrt(max(float(0.0), float(1.0).sub(nmX.mul(nmX)).sub(nmY.mul(nmY))));
           // Re-encode to 0-1 for normalMap()
           const rockNm = vec4(nmX.mul(0.5).add(0.5), nmY.mul(0.5).add(0.5), nmZ.mul(0.5).add(0.5), float(1.0));
-          // Blend Rock028 normal on steep faces — decode from packed DataTexture BA
-          const rock028DataN = texture(rock028DataTex, positionWorld.xz.mul(uRockScale));
-          const rock028NmX = rock028DataN.b.mul(2.0).sub(1.0);
-          const rock028NmY = rock028DataN.a.mul(2.0).sub(1.0);
-          const rock028NmZ = sqrt(max(float(0.0), float(1.0).sub(rock028NmX.mul(rock028NmX)).sub(rock028NmY.mul(rock028NmY))));
-          const rock028NmRGB = vec3(rock028NmX.mul(0.5).add(0.5), rock028NmY.mul(0.5).add(0.5), rock028NmZ.mul(0.5).add(0.5));
+          // Rock028 triplanar normal — 3 projections, reoriented to world space, blended
+          const _nuvXZ = positionWorld.xz.mul(uRockScale);
+          const _nuvXY = positionWorld.xy.mul(uRockScale);
+          const _nuvZY = positionWorld.zy.mul(uRockScale);
+          const _ntWRaw = normalWorld.abs().pow(uTriplanarSharp);
+          const _ntW = _ntWRaw.div(_ntWRaw.x.add(_ntWRaw.y).add(_ntWRaw.z));
+          const _dXZ = texture(rock028DataTex, _nuvXZ);
+          const _dXY = texture(rock028DataTex, _nuvXY);
+          const _dZY = texture(rock028DataTex, _nuvZY);
+          // Decode tangent-space XY, reconstruct Z for each projection
+          const _nxXZ = _dXZ.b.mul(2.0).sub(1.0), _nyXZ = _dXZ.a.mul(2.0).sub(1.0);
+          const _nzXZ = sqrt(max(float(0.0), float(1.0).sub(_nxXZ.mul(_nxXZ)).sub(_nyXZ.mul(_nyXZ))));
+          const _nxXY = _dXY.b.mul(2.0).sub(1.0), _nyXY = _dXY.a.mul(2.0).sub(1.0);
+          const _nzXY = sqrt(max(float(0.0), float(1.0).sub(_nxXY.mul(_nxXY)).sub(_nyXY.mul(_nyXY))));
+          const _nxZY = _dZY.b.mul(2.0).sub(1.0), _nyZY = _dZY.a.mul(2.0).sub(1.0);
+          const _nzZY = sqrt(max(float(0.0), float(1.0).sub(_nxZY.mul(_nxZY)).sub(_nyZY.mul(_nyZY))));
+          // Reorient each projection's tangent normal to world space, then blend
+          const _nWXZ = vec3(_nxXZ, _nzXZ, _nyXZ); // Y-face: tanX→worldX, tanY→worldZ, tanZ→worldY
+          const _nWXY = vec3(_nxXY, _nyXY, _nzXY); // Z-face: tangent aligns directly to XY
+          const _nWZY = vec3(_nzZY, _nyZY, _nxZY); // X-face: tanX→worldZ, tanY→worldY, tanZ→worldX
+          const _nBlend = _nWXZ.mul(_ntW.y).add(_nWXY.mul(_ntW.z)).add(_nWZY.mul(_ntW.x)).normalize();
+          const rock028NmRGB = _nBlend.mul(0.5).add(0.5);
           // Normal strength: blend toward flat (0.5,0.5,1.0) when strength < 1
           const flatNm = vec3(0.5, 0.5, 1.0);
           const rock028NmStrength = mix(flatNm, rock028NmRGB, uRockNormalStr);
@@ -3604,8 +3629,16 @@
           const imgSplatR = texture(imgSplatTex, getSplatUV());
           const rockRough = texture(_s2.ormTex, iuv2r).g; // G channel = roughness
           const baseRough = mix(float(0.85), rockRough, imgSplatR.b.mul(_s2.uHasRough));
-          // Blend Rock028 roughness on steep faces — R channel of packed DataTexture
-          const rock028Rough = texture(rock028DataTex, positionWorld.xz.mul(uRockScale)).r.mul(uRockRoughMul);
+          // Rock028 roughness — triplanar blend of R channel
+          const _rrXZ = positionWorld.xz.mul(uRockScale);
+          const _rrXY = positionWorld.xy.mul(uRockScale);
+          const _rrZY = positionWorld.zy.mul(uRockScale);
+          const _rtWRaw = normalWorld.abs().pow(uTriplanarSharp);
+          const _rtW = _rtWRaw.div(_rtWRaw.x.add(_rtWRaw.y).add(_rtWRaw.z));
+          const rock028Rough = texture(rock028DataTex, _rrXZ).r.mul(_rtW.y)
+            .add(texture(rock028DataTex, _rrXY).r.mul(_rtW.z))
+            .add(texture(rock028DataTex, _rrZY).r.mul(_rtW.x))
+            .mul(uRockRoughMul);
           const afterRock = mix(clamp(rock028Rough, 0.0, 1.0), baseRough, getSlopeMask().pow(uRockBlendSharp));
           // Snow is very matte — override roughness where snow appears
           return mix(afterRock, uSnowRoughness, getSnowMask());
@@ -6017,6 +6050,9 @@
         cliffProcFolder
           .addBinding({ v: 1.0 }, "v", { label: "Rock028 roughness x", min: 0.0, max: 2.0, step: 0.05 })
           .on("change", (ev) => { uRockRoughMul.value = ev.value; });
+        cliffProcFolder
+          .addBinding({ v: 4.0 }, "v", { label: "Triplanar sharpness", min: 1.0, max: 16.0, step: 0.5 })
+          .on("change", (ev) => { uTriplanarSharp.value = ev.value; });
 
         // ── Path procedural folder ──
         // ── Snow folder ──
