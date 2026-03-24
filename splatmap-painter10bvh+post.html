@@ -99,6 +99,10 @@
         background: rgba(50, 90, 35, 0.95);
         color: #d0f0a0;
       }
+      #mode-badge.pinelod {
+        background: rgba(140, 40, 180, 0.95);
+        color: #f0d0ff;
+      }
 
       #chunk-info {
         position: fixed;
@@ -773,6 +777,23 @@
 
       // ─── STATE ───────────────────────────────
       let currentMode = "view"; // "view" | "paint" | "sculpt"
+
+      // ── PINE LOD TEST ────────────────────────────────────────────────────
+      let lodPositions        = [];        // [{x,y,z,scale}] all painted positions
+      let lodModelsReady      = false;
+      let _lod0Defs           = null;      // [{geometry, material, localMatrix}]
+      let _lod1Defs           = null;
+      const LOD_CHUNK_SIZE        = 64;    // world-units per chunk side
+      const LOD_MAX_PER_CHUNK     = 512;   // max trees per chunk IM
+      const lodChunks         = new Map(); // "cx,cz" → {positions,sphere,lod0ims,lod1ims}
+      let _rebuildLODChunks   = () => {};  // assigned inside init() once scene is ready
+      const lodParams = { threshold: 80, count0: 0, count1: 0, chunks: 0, chunksVisible: 0 };
+      let lodFolder = null;
+      const _lodDummy    = new THREE.Object3D();
+      const _lodFinalMat = new THREE.Matrix4();
+      const _lodCamPos   = new THREE.Vector3();
+      const _lodFrustum  = new THREE.Frustum();
+      const _lodProjMat  = new THREE.Matrix4();
       let isMouseDown = false;
       let currentBiome = "forest";
       let sculptMode = "raise"; // "raise" | "lower" | "smooth"
@@ -1488,6 +1509,27 @@
             slot.scaleMax,
           );
         }
+      }
+
+      // ─── PINE LOD TEST PAINT ─────────────────────────────────────────────
+      function paintLODAt(wx, wz, erase) {
+        if (erase) {
+          const r2 = brushSize * brushSize;
+          lodPositions = lodPositions.filter(
+            (p) => (p.x - wx) ** 2 + (p.z - wz) ** 2 > r2,
+          );
+        } else {
+          const count = Math.max(1, Math.round(brushSize * 0.25));
+          for (let i = 0; i < count; i++) {
+            const angle = Math.random() * Math.PI * 2;
+            const dist = Math.random() * brushSize;
+            const x = wx + Math.cos(angle) * dist;
+            const z = wz + Math.sin(angle) * dist;
+            const y = sampleHeight(x, z);
+            lodPositions.push({ x, y, z, scale: 0.8 + Math.random() * 0.6 });
+          }
+        }
+        _rebuildLODChunks();
       }
 
       // ─── IMAGE TEXTURE PAINT ─────────────────────────────────────────────
@@ -4760,6 +4802,79 @@
             ),
           );
 
+        // ── PINE LOD TEST — chunk-based model loading ─────────────────────
+        function _extractLODDefs(gltf) {
+          const defs = [];
+          gltf.scene.updateMatrixWorld(true);
+          gltf.scene.traverse((child) => {
+            if (child.isMesh) {
+              let mat = child.material;
+              if (mat && (mat.transparent || mat.alphaTest > 0)) {
+                mat = mat.clone();
+                mat.transparent = false;
+                mat.alphaTest = 0.5;
+                mat.depthWrite = true;
+              }
+              defs.push({ geometry: child.geometry, material: mat, localMatrix: child.matrixWorld.clone() });
+            }
+          });
+          return defs;
+        }
+        function _makeChunkIMs(defs) {
+          return defs.map(({ geometry, material, localMatrix }) => {
+            const im = new THREE.InstancedMesh(geometry, material, LOD_MAX_PER_CHUNK);
+            im.count = 0;
+            im.castShadow = true;
+            im.receiveShadow = true;
+            im.frustumCulled = false; // culled manually per-chunk
+            scene.add(im);
+            return { im, localMatrix };
+          });
+        }
+        _rebuildLODChunks = function() {
+          if (!lodModelsReady) return;
+          // Group positions into chunks
+          const byChunk = new Map();
+          lodPositions.forEach(pos => {
+            const key = `${Math.floor(pos.x / LOD_CHUNK_SIZE)},${Math.floor(pos.z / LOD_CHUNK_SIZE)}`;
+            if (!byChunk.has(key)) byChunk.set(key, []);
+            byChunk.get(key).push(pos);
+          });
+          // Remove dead chunks
+          for (const key of [...lodChunks.keys()]) {
+            if (!byChunk.has(key)) {
+              const c = lodChunks.get(key);
+              c.lod0ims.forEach(g => scene.remove(g.im));
+              c.lod1ims.forEach(g => scene.remove(g.im));
+              lodChunks.delete(key);
+            }
+          }
+          // Update / create chunks
+          for (const [key, positions] of byChunk) {
+            let chunk = lodChunks.get(key);
+            if (!chunk) {
+              chunk = { positions: [], sphere: new THREE.Sphere(), lod0ims: _makeChunkIMs(_lod0Defs), lod1ims: _makeChunkIMs(_lod1Defs) };
+              lodChunks.set(key, chunk);
+            }
+            chunk.positions = positions;
+            // Compute bounding sphere from position centroids
+            let cx = 0, cy = 0, cz = 0;
+            positions.forEach(p => { cx += p.x; cy += p.y; cz += p.z; });
+            cx /= positions.length; cy /= positions.length; cz /= positions.length;
+            let r = 0;
+            positions.forEach(p => { const d = Math.sqrt((p.x-cx)**2+(p.y-cy)**2+(p.z-cz)**2); if (d > r) r = d; });
+            chunk.sphere.set(new THREE.Vector3(cx, cy, cz), r + 20); // +20 for tree height
+          }
+          lodParams.chunks = lodChunks.size;
+        }
+        function _tryBuildLOD() {
+          if (!_lod0Defs || !_lod1Defs) return;
+          lodModelsReady = true;
+          _rebuildLODChunks(); // apply if positions loaded before models
+        }
+        gltfLoader.load("models/pine2.glb",        (g) => { _lod0Defs = _extractLODDefs(g); _tryBuildLOD(); });
+        gltfLoader.load("models/pine2LODtest.glb", (g) => { _lod1Defs = _extractLODDefs(g); _tryBuildLOD(); });
+
         // ── FOLIAGE SYSTEMS ──
         FOLIAGE_SLOTS.forEach((slot) => {
           slot.system = createFoliageSlot(scene, bvhHeight);
@@ -6826,6 +6941,16 @@
           reader.readAsText(e.target.files[0]);
         });
 
+        // ── PINE LOD TEST FOLDER ──
+        lodFolder = pane.addFolder({ title: "PineLOD Test  [ J ]", expanded: true });
+        lodFolder.hidden = true;
+        lodFolder.addBinding(lodParams, "threshold", { label: "LOD switch dist", min: 5, max: 300, step: 1 });
+        lodFolder.addBinding(lodParams, "count0", { label: "LOD0 visible trees", readonly: true });
+        lodFolder.addBinding(lodParams, "count1", { label: "LOD1 visible trees", readonly: true });
+        lodFolder.addBinding(lodParams, "chunksVisible", { label: "Chunks visible", readonly: true });
+        lodFolder.addBinding(lodParams, "chunks", { label: "Chunks total", readonly: true });
+        lodFolder.addButton({ title: "Clear all LOD trees" }).on("click", () => { lodPositions = []; _rebuildLODChunks(); });
+
         // ── FOLIAGE FOLDER ──
         const foliageFolder = pane.addFolder({
           title: "Foliage  [ N ]",
@@ -8017,6 +8142,7 @@
           placeFolder.hidden = mode !== "place";
           grassFolder.hidden = mode !== "grass";
           treesFolder.hidden = mode !== "trees";
+          if (lodFolder) lodFolder.hidden = mode !== "pinelod";
           foliageFolder.hidden = mode !== "foliage";
           propsFolder.hidden = mode !== "props";
           pathFolder.hidden = mode !== "path";
@@ -8130,7 +8256,9 @@
                                         ? "RIVER MODE  [ V ]"
                                         : mode === "waterfall"
                                           ? "WATERFALL MODE  [ H ]"
-                                          : "PLACE MODE"; // play handled above
+                                          : mode === "pinelod"
+                                            ? "PINE LOD TEST  [ J ]"
+                                            : "PLACE MODE"; // play handled above
           badge.className = mode;
           renderer.domElement.style.cursor =
             mode === "view" ? "default" : "crosshair";
@@ -8146,7 +8274,7 @@
             mode === "decal"
           )
             brushRing.visible = false;
-          else if (mode === "cliffgrass")
+          else if (mode === "cliffgrass" || mode === "pinelod")
             brushRing.visible = true;
         }
         setMode("view");
@@ -8182,6 +8310,8 @@
             setMode(currentMode === "trees" ? "view" : "trees");
           if (e.code === "KeyN")
             setMode(currentMode === "foliage" ? "view" : "foliage");
+          if (e.code === "KeyJ")
+            setMode(currentMode === "pinelod" ? "view" : "pinelod");
           if (e.code === "KeyI")
             setMode(currentMode === "props" ? "view" : "props");
           if (e.code === "KeyL")
@@ -8374,6 +8504,8 @@
             paintTreesAt(p.x, p.z, treeEraseMode || e.shiftKey);
           if (currentMode === "foliage")
             paintFoliageAt(p.x, p.z, foliageEraseMode || e.shiftKey);
+          if (currentMode === "pinelod")
+            paintLODAt(p.x, p.z, e.shiftKey);
         });
 
         // ── BRUSH SCROLL SHORTCUTS ──────────────────────────────────────
@@ -8814,6 +8946,44 @@
         let _lastCsmMaxFar = PARAMS.csm.maxFar;
         let _lastCsmMargin = PARAMS.csm.lightMargin;
         let _lastCsmMapSize = PARAMS.csm.mapSize;
+        // ── PINE LOD TEST — per-frame chunk-culled instance update ───────────
+        function updateLODInstances() {
+          if (!lodModelsReady || lodChunks.size === 0) return;
+          _lodCamPos.copy(camera.position);
+          _lodProjMat.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+          _lodFrustum.setFromProjectionMatrix(_lodProjMat);
+          const thr = lodParams.threshold;
+          let visibleChunks = 0, count0 = 0, count1 = 0;
+          for (const chunk of lodChunks.values()) {
+            const inFrustum = _lodFrustum.intersectsSphere(chunk.sphere);
+            chunk.lod0ims.forEach(g => { g.im.count = 0; });
+            chunk.lod1ims.forEach(g => { g.im.count = 0; });
+            if (!inFrustum) continue;
+            visibleChunks++;
+            for (const { x, y, z, scale } of chunk.positions) {
+              const dx = x - _lodCamPos.x, dy = y - _lodCamPos.y, dz = z - _lodCamPos.z;
+              const groups = Math.sqrt(dx*dx + dy*dy + dz*dz) < thr ? chunk.lod0ims : chunk.lod1ims;
+              _lodDummy.position.set(x, y, z);
+              _lodDummy.scale.setScalar(scale);
+              _lodDummy.rotation.set(0, Math.PI * 2 * ((x * 13.7 + z * 7.3) % 1), 0);
+              _lodDummy.updateMatrix();
+              groups.forEach(({ im, localMatrix }) => {
+                if (im.count >= LOD_MAX_PER_CHUNK) return;
+                _lodFinalMat.multiplyMatrices(_lodDummy.matrix, localMatrix);
+                im.setMatrixAt(im.count++, _lodFinalMat);
+              });
+            }
+            chunk.lod0ims.forEach(g => { if (g.im.count > 0) g.im.instanceMatrix.needsUpdate = true; });
+            chunk.lod1ims.forEach(g => { if (g.im.count > 0) g.im.instanceMatrix.needsUpdate = true; });
+            count0 += chunk.lod0ims[0]?.im.count ?? 0;
+            count1 += chunk.lod1ims[0]?.im.count ?? 0;
+          }
+          lodParams.count0 = count0;
+          lodParams.count1 = count1;
+          lodParams.chunksVisible = visibleChunks;
+          if (lodFolder) pane.refresh();
+        }
+
         renderer.setAnimationLoop(() => {
           clock.update();
           const elapsed = clock.getElapsed();
@@ -9060,6 +9230,7 @@
             trainMesh.visible = false;
           }
 
+          updateLODInstances();
           stats.update();
           (postParams.enabled ? renderPipeline : simplePipeline).render();
           {
@@ -9076,6 +9247,7 @@
               }
             });
             if (ft > 0) lines.push(`Foliage: ${fv}/${ft} chunks`);
+            if (lodChunks.size > 0) lines.push(`PineLOD: ${lodParams.chunksVisible}/${lodParams.chunks} chunks`);
             chunkInfoDiv.textContent = lines.length ? lines.join('\n') : '';
           }
         });
