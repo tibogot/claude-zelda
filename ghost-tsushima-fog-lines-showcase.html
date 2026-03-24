@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ghost Fog Lines Showcase</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        overflow: hidden;
+        background: #070d17;
+        font-family: "SF Mono", "Fira Code", monospace;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #hud {
+        position: fixed;
+        left: 12px;
+        bottom: 12px;
+        z-index: 20;
+        font-size: 11px;
+        line-height: 1.5;
+        color: #d5e3ff;
+        background: rgba(4, 8, 14, 0.58);
+        border: 1px solid rgba(170, 196, 255, 0.28);
+        border-radius: 8px;
+        padding: 10px 12px;
+      }
+      #hud b {
+        color: #f0f5ff;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="hud">
+      <b>Ghost Fog Lines</b><br />
+      Long smoky wind bands for 3D gameplay<br />
+      Orbit: <b>left-drag</b> · Zoom: <b>wheel</b>
+    </div>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import {
+        Fn,
+        uv,
+        vec2,
+        float,
+        mix,
+        smoothstep,
+        floor,
+        fract,
+        sin,
+        dot,
+        time,
+        uniform,
+      } from "three/tsl";
+
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.body.appendChild(renderer.domElement);
+      await renderer.init();
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x080f19);
+      scene.fog = new THREE.Fog(0x0a1320, 22, 120);
+
+      const camera = new THREE.PerspectiveCamera(
+        45,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        300,
+      );
+      camera.position.set(0, 8, 28);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.06;
+      controls.target.set(0, 2.5, -3);
+      controls.maxPolarAngle = Math.PI * 0.47;
+      controls.minDistance = 8;
+      controls.maxDistance = 56;
+      controls.update();
+
+      const hemi = new THREE.HemisphereLight(0x8da8de, 0x121820, 0.56);
+      scene.add(hemi);
+      const moon = new THREE.DirectionalLight(0xaec7ff, 1.0);
+      moon.position.set(-15, 13, 8);
+      scene.add(moon);
+      const fire = new THREE.PointLight(0xffb886, 1.1, 28, 2);
+      fire.position.set(0, 2.5, -8);
+      scene.add(fire);
+
+      function terrainHeight(x, z) {
+        return (
+          Math.sin(x * 0.16) * 0.34 +
+          Math.cos(z * 0.12 + x * 0.06) * 0.29 +
+          Math.sin(z * 0.08 - x * 0.05) * 0.21
+        );
+      }
+
+      const groundGeo = new THREE.PlaneGeometry(140, 140, 120, 120);
+      groundGeo.rotateX(-Math.PI / 2);
+      const gPos = groundGeo.attributes.position.array;
+      for (let i = 0; i < gPos.length; i += 3) {
+        gPos[i + 1] = terrainHeight(gPos[i], gPos[i + 2]);
+      }
+      groundGeo.computeVertexNormals();
+      const ground = new THREE.Mesh(
+        groundGeo,
+        new THREE.MeshStandardMaterial({
+          color: 0x121a24,
+          roughness: 0.96,
+          metalness: 0.02,
+        }),
+      );
+      scene.add(ground);
+
+      function createRibbonGeometry(points, width = 0.8) {
+        const pointCount = points.length;
+        const vertices = new Float32Array(pointCount * 2 * 3);
+        const uvs = new Float32Array(pointCount * 2 * 2);
+        const indices = [];
+
+        let totalLen = 0;
+        const lens = [0];
+        for (let i = 1; i < pointCount; i++) {
+          totalLen += points[i].distanceTo(points[i - 1]);
+          lens.push(totalLen);
+        }
+        const invLen = totalLen > 0 ? 1 / totalLen : 1;
+
+        for (let i = 0; i < pointCount; i++) {
+          const p = points[i];
+          const prev = points[Math.max(0, i - 1)];
+          const next = points[Math.min(pointCount - 1, i + 1)];
+          const tangent = next.clone().sub(prev).normalize();
+          const side = new THREE.Vector3(-tangent.z, 0, tangent.x).normalize();
+          const halfW = width * 0.5;
+
+          const left = p.clone().addScaledVector(side, -halfW);
+          const right = p.clone().addScaledVector(side, halfW);
+
+          const vIndex = i * 2;
+          vertices.set([left.x, left.y, left.z], vIndex * 3);
+          vertices.set([right.x, right.y, right.z], (vIndex + 1) * 3);
+
+          const u = lens[i] * invLen;
+          uvs.set([u, 0], vIndex * 2);
+          uvs.set([u, 1], (vIndex + 1) * 2);
+        }
+
+        for (let i = 0; i < pointCount - 1; i++) {
+          const a = i * 2;
+          const b = a + 1;
+          const c = a + 2;
+          const d = a + 3;
+          indices.push(a, c, b, b, c, d);
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.BufferAttribute(vertices, 3));
+        geo.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+        geo.setIndex(indices);
+        geo.computeVertexNormals();
+        return geo;
+      }
+
+      // TSL smoke-like line texture
+      const hash2 = Fn(([p]) => {
+        return vec2(
+          fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453)),
+          fract(sin(dot(p, vec2(269.5, 183.3))).mul(43758.5453)),
+        );
+      });
+
+      const gradNoise = Fn(([p]) => {
+        const i = floor(p).toVar();
+        const f = fract(p).toVar();
+        const u = f.mul(f).mul(float(3).sub(f.mul(2))).toVar();
+
+        const g00 = hash2(i).mul(2).sub(1);
+        const g10 = hash2(i.add(vec2(1, 0))).mul(2).sub(1);
+        const g01 = hash2(i.add(vec2(0, 1))).mul(2).sub(1);
+        const g11 = hash2(i.add(vec2(1, 1))).mul(2).sub(1);
+
+        const d00 = dot(g00, f);
+        const d10 = dot(g10, f.sub(vec2(1, 0)));
+        const d01 = dot(g01, f.sub(vec2(0, 1)));
+        const d11 = dot(g11, f.sub(vec2(1, 1)));
+
+        return mix(mix(d00, d10, u.x), mix(d01, d11, u.x), u.y)
+          .mul(0.5)
+          .add(0.5);
+      });
+
+      const fbm5 = Fn(([p]) => {
+        let v = gradNoise(p).mul(0.54);
+        v = v.add(gradNoise(p.mul(2.03)).mul(0.25));
+        v = v.add(gradNoise(p.mul(4.17)).mul(0.12));
+        v = v.add(gradNoise(p.mul(8.21)).mul(0.06));
+        v = v.add(gradNoise(p.mul(16.4)).mul(0.03));
+        return v;
+      });
+
+      function createFogLineMaterial(seed) {
+        const uSpeed = uniform(0.33 + Math.random() * 0.18);
+        const uWidthSoft = uniform(1.7 + Math.random() * 0.35);
+        const uDensity = uniform(1.1 + Math.random() * 0.4);
+        const uStretchX = uniform(12 + Math.random() * 8);
+        const uStretchY = uniform(2.7 + Math.random() * 1.2);
+        const uWarp = uniform(0.42 + Math.random() * 0.3);
+        const uSeed = uniform(seed);
+        const uBaseColor = uniform(new THREE.Color(0xa9d4ff));
+        const uHotColor = uniform(new THREE.Color(0xffc695));
+
+        const mat = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
+
+        const st = uv();
+        const t = time.mul(uSpeed);
+        const p0 = vec2(
+          st.x.mul(uStretchX).add(t.mul(1.3)).add(uSeed),
+          st.y.sub(0.5).mul(uStretchY).sub(t.mul(0.15)),
+        ).toVar();
+
+        const warpX = fbm5(p0.mul(0.6).add(vec2(0.0, t.mul(0.45)))).sub(0.5);
+        const warpY = fbm5(p0.mul(0.8).sub(vec2(t.mul(0.35), 0.0))).sub(0.5);
+        const p = p0.add(vec2(warpX, warpY).mul(uWarp)).toVar();
+
+        const n1 = fbm5(p).toVar();
+        const n2 = fbm5(p.mul(2.5).add(vec2(t.mul(0.28), t.mul(-0.22)))).toVar();
+        const n3 = fbm5(vec2(p.x.mul(0.35), p.y.mul(2.45).add(n1.mul(1.7)))).toVar();
+
+        const center = float(1.0)
+          .sub(st.y.sub(0.5).abs().mul(uWidthSoft))
+          .saturate()
+          .pow(1.4)
+          .toVar();
+        const tips = smoothstep(0.02, 0.14, st.x)
+          .mul(smoothstep(0.02, 0.2, float(1.0).sub(st.x)))
+          .toVar();
+
+        const wisps = smoothstep(0.44, 0.9, n1.mul(0.8).add(n2.mul(0.72))).toVar();
+        const filaments = float(1.0)
+          .sub(n3.sub(0.5).abs().mul(2.0))
+          .pow(2.1)
+          .toVar();
+        const alpha = center
+          .mul(tips)
+          .mul(wisps.mul(0.85).add(filaments.mul(0.52)))
+          .mul(uDensity)
+          .saturate()
+          .toVar();
+
+        const glowMask = smoothstep(0.72, 1.0, n2).mul(0.34);
+        const col = mix(uBaseColor, uHotColor, glowMask.add(alpha.mul(0.3)))
+          .mul(alpha.mul(1.1).add(glowMask.mul(0.8)));
+
+        mat.colorNode = col;
+        mat.opacityNode = alpha;
+        return mat;
+      }
+
+      function buildWindRibbon(centerX, centerZ, length, width, seed) {
+        const points = [];
+        const samples = 56;
+        const windDir = new THREE.Vector3(1, 0, -0.18).normalize();
+        const side = new THREE.Vector3(-windDir.z, 0, windDir.x);
+        for (let i = 0; i < samples; i++) {
+          const u = i / (samples - 1);
+          const along = (u - 0.5) * length;
+          const drift = Math.sin(u * 8 + seed * 7.3) * 1.1;
+          const micro = Math.sin(u * 31 + seed * 13.7) * 0.22;
+          const x = centerX + windDir.x * along + side.x * (drift + micro);
+          const z = centerZ + windDir.z * along + side.z * (drift + micro);
+          const y = terrainHeight(x, z) + 0.55 + Math.sin(u * Math.PI) * 0.15;
+          points.push(new THREE.Vector3(x, y, z));
+        }
+        const geo = createRibbonGeometry(points, width);
+        const mesh = new THREE.Mesh(geo, createFogLineMaterial(seed));
+        mesh.renderOrder = 40;
+        return mesh;
+      }
+
+      const bandGroup = new THREE.Group();
+      scene.add(bandGroup);
+
+      const rows = 4;
+      const perRow = 6;
+      let index = 0;
+      for (let r = 0; r < rows; r++) {
+        for (let i = 0; i < perRow; i++) {
+          const fx = (i - (perRow - 1) * 0.5) * 6.8 + (Math.random() - 0.5) * 1.4;
+          const fz = -3 - r * 7.2 + (Math.random() - 0.5) * 1.8;
+          const length = 38 + Math.random() * 12;
+          const width = 0.75 + Math.random() * 0.62;
+          const band = buildWindRibbon(fx, fz, length, width, index * 0.171);
+          bandGroup.add(band);
+          index++;
+        }
+      }
+
+      // Background silhouettes
+      const treeMat = new THREE.MeshStandardMaterial({
+        color: 0x0d1218,
+        roughness: 1.0,
+      });
+      const trunkGeo = new THREE.CylinderGeometry(0.06, 0.12, 4.2, 7);
+      for (let i = 0; i < 95; i++) {
+        const x = (Math.random() - 0.5) * 110;
+        const z = (Math.random() - 0.5) * 110;
+        if (Math.abs(x) < 12 && z > -35 && z < 18) continue;
+        const h = 2.6 + Math.random() * 5.2;
+        const t = new THREE.Mesh(trunkGeo, treeMat);
+        t.scale.y = h / 4.2;
+        t.position.set(x, terrainHeight(x, z) + h * 0.5, z);
+        t.rotation.z = (Math.random() - 0.5) * 0.12;
+        scene.add(t);
+      }
+
+      const gateMat = new THREE.MeshStandardMaterial({
+        color: 0x20262e,
+        roughness: 0.9,
+      });
+      const gate = new THREE.Group();
+      gate.position.set(0, terrainHeight(0, -8), -8);
+      scene.add(gate);
+      const post = new THREE.BoxGeometry(0.5, 3.0, 0.5);
+      const beam = new THREE.BoxGeometry(5.2, 0.38, 0.68);
+      const top = new THREE.BoxGeometry(6.4, 0.32, 0.9);
+      const p1 = new THREE.Mesh(post, gateMat);
+      const p2 = new THREE.Mesh(post, gateMat);
+      const b = new THREE.Mesh(beam, gateMat);
+      const t = new THREE.Mesh(top, gateMat);
+      p1.position.set(-1.9, 1.5, 0);
+      p2.position.set(1.9, 1.5, 0);
+      b.position.set(0, 2.8, 0);
+      t.position.set(0, 3.2, -0.08);
+      gate.add(p1, p2, b, t);
+
+      renderer.setAnimationLoop(() => {
+        controls.update();
+        renderer.render(scene, camera);
+      });
+
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>

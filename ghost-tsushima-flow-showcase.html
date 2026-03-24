@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ghost Flow Showcase (TSL + WebGPU)</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #070c14;
+        font-family: "SF Mono", "Fira Code", monospace;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        left: 12px;
+        bottom: 12px;
+        z-index: 20;
+        color: #c8d7f6;
+        background: rgba(4, 8, 14, 0.58);
+        border: 1px solid rgba(175, 195, 255, 0.2);
+        border-radius: 8px;
+        padding: 10px 12px;
+        font-size: 11px;
+        line-height: 1.55;
+      }
+      #info b {
+        color: #e8f1ff;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">
+      <b>Ghost Flow Showcase</b><br />
+      TSL smoky line with stretched fBm + warped wisps<br />
+      Orbit: <b>left-drag</b> · Zoom: <b>wheel</b>
+    </div>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import {
+        Fn,
+        uv,
+        vec2,
+        vec3,
+        float,
+        mix,
+        smoothstep,
+        floor,
+        fract,
+        sin,
+        dot,
+        min,
+        max,
+        length,
+        time,
+        uniform,
+      } from "three/tsl";
+
+      // Renderer
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.body.appendChild(renderer.domElement);
+      await renderer.init();
+
+      // Scene
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x080e18);
+      scene.fog = new THREE.Fog(0x0a111d, 24, 120);
+
+      const camera = new THREE.PerspectiveCamera(
+        45,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        300,
+      );
+      camera.position.set(0, 7.5, 29);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.065;
+      controls.target.set(0, 3.8, 0);
+      controls.minDistance = 10;
+      controls.maxDistance = 55;
+      controls.maxPolarAngle = Math.PI * 0.48;
+      controls.update();
+
+      // Lighting + mood
+      const hemi = new THREE.HemisphereLight(0x7f9ad4, 0x141a1f, 0.6);
+      scene.add(hemi);
+
+      const moon = new THREE.DirectionalLight(0xaec7ff, 1.15);
+      moon.position.set(-16, 15, 10);
+      scene.add(moon);
+
+      const warmCore = new THREE.PointLight(0xffb789, 1.45, 34, 2);
+      warmCore.position.set(0, 3.5, -8);
+      scene.add(warmCore);
+
+      // Ground
+      function terrainHeight(x, z) {
+        return (
+          Math.sin(x * 0.22) * 0.45 +
+          Math.sin(z * 0.17 + x * 0.08) * 0.35 +
+          Math.cos(z * 0.11 - x * 0.06) * 0.28
+        );
+      }
+
+      const groundGeo = new THREE.PlaneGeometry(150, 150, 160, 160);
+      groundGeo.rotateX(-Math.PI / 2);
+      const gPos = groundGeo.attributes.position.array;
+      for (let i = 0; i < gPos.length; i += 3) {
+        const x = gPos[i];
+        const z = gPos[i + 2];
+        gPos[i + 1] = terrainHeight(x, z);
+      }
+      groundGeo.computeVertexNormals();
+
+      const groundMat = new THREE.MeshStandardMaterial({
+        color: 0x121922,
+        roughness: 0.97,
+        metalness: 0.02,
+      });
+      const ground = new THREE.Mesh(groundGeo, groundMat);
+      scene.add(ground);
+
+      // Silhouette trees for depth read
+      const treeGroup = new THREE.Group();
+      scene.add(treeGroup);
+      const trunkGeo = new THREE.CylinderGeometry(0.06, 0.12, 4.5, 7);
+      const branchGeo = new THREE.CylinderGeometry(0.02, 0.045, 2.4, 6);
+      const treeMat = new THREE.MeshStandardMaterial({
+        color: 0x0d1218,
+        roughness: 1.0,
+        metalness: 0.0,
+      });
+      const treeCount = 140;
+      for (let i = 0; i < treeCount; i++) {
+        const x = (Math.random() - 0.5) * 120;
+        const z = (Math.random() - 0.5) * 120;
+        const h = 2.6 + Math.random() * 5.4;
+        const y = terrainHeight(x, z);
+        if (Math.abs(x) < 8 && z > -25 && z < 15) continue;
+        if (Math.hypot(x, z + 7) < 4.8) continue;
+
+        const trunk = new THREE.Mesh(trunkGeo, treeMat);
+        trunk.scale.y = h / 4.5;
+        trunk.position.set(x, y + h * 0.5, z);
+        trunk.rotation.z = (Math.random() - 0.5) * 0.14;
+        trunk.rotation.x = (Math.random() - 0.5) * 0.05;
+        treeGroup.add(trunk);
+
+        const branches = 1 + Math.floor(Math.random() * 3);
+        for (let b = 0; b < branches; b++) {
+          const branch = new THREE.Mesh(branchGeo, treeMat);
+          const by = y + h * (0.55 + Math.random() * 0.35);
+          const side = Math.random() < 0.5 ? -1 : 1;
+          branch.position.set(x + side * (0.2 + Math.random() * 0.45), by, z);
+          branch.rotation.z = side * (0.8 + Math.random() * 0.8);
+          branch.rotation.y = Math.random() * Math.PI * 2;
+          treeGroup.add(branch);
+        }
+      }
+
+      // Small shrine-like gate silhouette
+      const gateMat = new THREE.MeshStandardMaterial({
+        color: 0x1f242b,
+        roughness: 0.9,
+      });
+      const gate = new THREE.Group();
+      scene.add(gate);
+      gate.position.set(0, terrainHeight(0, -8), -8);
+      const postGeo = new THREE.BoxGeometry(0.5, 3.2, 0.5);
+      const beamGeo = new THREE.BoxGeometry(4.8, 0.42, 0.68);
+      const topGeo = new THREE.BoxGeometry(6.2, 0.32, 0.9);
+      const postL = new THREE.Mesh(postGeo, gateMat);
+      const postR = new THREE.Mesh(postGeo, gateMat);
+      const beam = new THREE.Mesh(beamGeo, gateMat);
+      const top = new THREE.Mesh(topGeo, gateMat);
+      postL.position.set(-1.8, 1.6, 0);
+      postR.position.set(1.8, 1.6, 0);
+      beam.position.set(0, 3.0, 0);
+      top.position.set(0, 3.45, -0.08);
+      gate.add(postL, postR, beam, top);
+
+      // ---- TSL noise stack for smoky "Ghost-like" flowing line ----
+      const hash2 = Fn(([p]) => {
+        return vec2(
+          fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453)),
+          fract(sin(dot(p, vec2(269.5, 183.3))).mul(43758.5453)),
+        );
+      });
+
+      const gradientNoise = Fn(([p]) => {
+        const i = floor(p).toVar();
+        const f = fract(p).toVar();
+        const u = f
+          .mul(f)
+          .mul(f.mul(float(3).sub(f.mul(2))));
+
+        const g00 = hash2(i).mul(2).sub(1);
+        const g10 = hash2(i.add(vec2(1, 0))).mul(2).sub(1);
+        const g01 = hash2(i.add(vec2(0, 1))).mul(2).sub(1);
+        const g11 = hash2(i.add(vec2(1, 1))).mul(2).sub(1);
+
+        const d00 = dot(g00, f);
+        const d10 = dot(g10, f.sub(vec2(1, 0)));
+        const d01 = dot(g01, f.sub(vec2(0, 1)));
+        const d11 = dot(g11, f.sub(vec2(1, 1)));
+
+        return mix(mix(d00, d10, u.x), mix(d01, d11, u.x), u.y)
+          .mul(0.5)
+          .add(0.5);
+      });
+
+      const fbm5 = Fn(([p]) => {
+        const v = float(0).toVar();
+        const amp = float(0.5).toVar();
+        const freq = float(1.0).toVar();
+        for (let i = 0; i < 5; i++) {
+          v.addAssign(amp.mul(gradientNoise(p.mul(freq))));
+          freq.mulAssign(2.02);
+          amp.mulAssign(0.52);
+        }
+        return v;
+      });
+
+      const ridge = Fn(([n]) => {
+        return float(1.0).sub(n.sub(0.5).abs().mul(2.0));
+      });
+
+      const uFlowSpeed = uniform(0.26);
+      const uStretchX = uniform(9.6);
+      const uStretchY = uniform(3.8);
+      const uWarpStrength = uniform(0.62);
+      const uDensity = uniform(1.24);
+      const uOpacity = uniform(0.94);
+      const uGlow = uniform(1.35);
+      const uColorCold = uniform(new THREE.Color(0xaed9ff));
+      const uColorWarm = uniform(new THREE.Color(0xffcc98));
+
+      const smokePlaneMat = new THREE.MeshBasicNodeMaterial({
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      });
+
+      const st = uv().toVar();
+      const t = time.mul(uFlowSpeed);
+
+      const p0 = vec2(
+        st.x.mul(uStretchX).add(t.mul(1.25)),
+        st.y.mul(uStretchY).sub(t.mul(0.18)),
+      ).toVar();
+
+      const warpN1 = fbm5(p0.mul(0.65).add(vec2(0.0, t.mul(0.38)))).toVar();
+      const warpN2 = fbm5(p0.mul(0.9).sub(vec2(t.mul(0.42), 0.0))).toVar();
+      const warp = vec2(warpN1.sub(0.5), warpN2.sub(0.5)).mul(uWarpStrength).toVar();
+
+      const p = p0.add(warp).toVar();
+      const baseFbm = fbm5(p).toVar();
+      const detail = fbm5(p.mul(2.75).add(vec2(t.mul(0.3), t.mul(-0.16)))).toVar();
+      const stretched = fbm5(
+        vec2(p.x.mul(0.28).add(t.mul(0.24)), p.y.mul(2.65).sub(baseFbm.mul(2.2))),
+      ).toVar();
+
+      const wisps = smoothstep(0.46, 0.88, baseFbm.mul(0.78).add(detail.mul(0.72))).toVar();
+      const filament = ridge(stretched).pow(2.1).toVar();
+
+      const centerBand = float(1.0)
+        .sub(st.y.sub(0.53).abs().mul(2.4))
+        .saturate()
+        .pow(1.55)
+        .toVar();
+
+      const edgeFadeX = smoothstep(0.02, 0.16, st.x)
+        .mul(smoothstep(0.02, 0.2, float(1.0).sub(st.x)))
+        .toVar();
+
+      const density = wisps
+        .mul(filament.mul(0.8).add(0.28))
+        .mul(centerBand)
+        .mul(edgeFadeX)
+        .mul(uDensity)
+        .toVar();
+
+      const sparkle = smoothstep(0.76, 1.0, detail).mul(0.22).toVar();
+      const finalAlpha = density.mul(uOpacity).saturate();
+      const colorMix = density.add(sparkle).saturate();
+      const finalColor = mix(uColorCold, uColorWarm, colorMix.pow(1.4))
+        .mul(density.mul(0.9).add(sparkle))
+        .mul(uGlow);
+
+      smokePlaneMat.colorNode = finalColor;
+      smokePlaneMat.opacityNode = finalAlpha;
+
+      // Main beam + broad ghosty halo
+      const smokeMain = new THREE.Mesh(
+        new THREE.PlaneGeometry(126, 11, 1, 1),
+        smokePlaneMat,
+      );
+      smokeMain.position.set(0, 5.3, -5.8);
+      scene.add(smokeMain);
+
+      const haloMat = smokePlaneMat.clone();
+      haloMat.colorNode = finalColor.mul(0.46);
+      haloMat.opacityNode = finalAlpha.mul(0.45);
+      const smokeHalo = new THREE.Mesh(
+        new THREE.PlaneGeometry(136, 17, 1, 1),
+        haloMat,
+      );
+      smokeHalo.position.set(0, 5.42, -6.2);
+      scene.add(smokeHalo);
+
+      // Soft volumetric-ish mist slabs
+      const mistMat = new THREE.MeshBasicMaterial({
+        color: 0x91b9df,
+        transparent: true,
+        opacity: 0.06,
+        depthWrite: false,
+      });
+      for (let i = 0; i < 7; i++) {
+        const slab = new THREE.Mesh(new THREE.PlaneGeometry(100, 18), mistMat);
+        slab.position.set(0, 2.2 + i * 0.7, -16 - i * 7.5);
+        scene.add(slab);
+      }
+
+      // Embers near gate to mimic screenshot warmth
+      const embers = new THREE.Points(
+        new THREE.BufferGeometry(),
+        new THREE.PointsMaterial({
+          color: 0xffbb8f,
+          size: 0.12,
+          transparent: true,
+          opacity: 0.88,
+          depthWrite: false,
+        }),
+      );
+      const eCount = 140;
+      const ePos = new Float32Array(eCount * 3);
+      for (let i = 0; i < eCount; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const r = Math.random() * 2.5;
+        ePos[i * 3 + 0] = Math.cos(a) * r * 1.2;
+        ePos[i * 3 + 1] = 1.6 + Math.random() * 2.8;
+        ePos[i * 3 + 2] = -8 + Math.sin(a) * r * 0.8;
+      }
+      embers.geometry.setAttribute("position", new THREE.BufferAttribute(ePos, 3));
+      scene.add(embers);
+
+      const timer = new THREE.Timer();
+      renderer.setAnimationLoop(() => {
+        timer.update();
+        const elapsed = timer.getElapsed();
+        controls.update();
+
+        // Mild drift for embers (CPU side, cheap + stylized)
+        const pos = embers.geometry.attributes.position.array;
+        for (let i = 0; i < eCount; i++) {
+          const idx = i * 3;
+          pos[idx + 0] += Math.sin(elapsed * 0.6 + i * 0.7) * 0.0012;
+          pos[idx + 1] += 0.002 + Math.sin(elapsed * 0.9 + i) * 0.00045;
+          if (pos[idx + 1] > 5.4) pos[idx + 1] = 1.5 + Math.random() * 0.55;
+        }
+        embers.geometry.attributes.position.needsUpdate = true;
+
+        renderer.render(scene, camera);
+      });
+
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>

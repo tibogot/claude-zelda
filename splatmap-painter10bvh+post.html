@@ -745,7 +745,7 @@
         },
         river: {
           width: 8,
-          segments: 80,
+          segments: 200,
           flowSpeed: 0.15,
           deepColor: "#1a4a6a",
           shallowColor: "#5dbfaa",
@@ -4629,9 +4629,10 @@
         }
 
         function generateRiverMesh(curve, width, segments, heightOffset) {
-          const pts  = curve.getPoints(segments);
-          // Arc-length parameterization: accumulate actual distances so UV.x
-          // maps evenly to world distance rather than spline parameter t.
+          // getSpacedPoints distributes vertices evenly by arc-length so bends
+          // get the same polygon density as straight sections — no more faceted corners.
+          const pts = curve.getSpacedPoints(segments);
+          // Accumulate arc-length for UV.x so texture doesn't stretch on bends.
           const arcLen = [0];
           for (let i = 1; i <= segments; i++) {
             arcLen.push(arcLen[i - 1] + pts[i].distanceTo(pts[i - 1]));
@@ -4639,10 +4640,12 @@
           const totalLen = arcLen[segments] || 1;
           const positions = [], uvs = [], indices = [];
           for (let i = 0; i <= segments; i++) {
-            const t    = i / segments;
-            const u    = arcLen[i] / totalLen;   // arc-length U, no stretch on bends
-            const pos  = pts[i];
-            const tan  = curve.getTangent(t);
+            const u   = arcLen[i] / totalLen;
+            const pos = pts[i];
+            // Tangent from adjacent points — works with any spacing, never undefined.
+            const prev = pts[Math.max(0, i - 1)];
+            const next = pts[Math.min(segments, i + 1)];
+            const tan  = next.clone().sub(prev).normalize();
             const perp = new THREE.Vector3(-tan.z, 0, tan.x).normalize();
             const half = width / 2;
             const lx = pos.x - perp.x * half, lz = pos.z - perp.z * half;
@@ -7539,7 +7542,8 @@
           riverRebuildVisual();
         });
         riverFolder.addBlade({ view: "separator" });
-        riverFolder.addBinding(PARAMS.river, "width",     { label: "River width", min: 1, max: 60, step: 0.5 }).on("change", () => { if (riverPoints.length >= 2) riverGenerate(); });
+        riverFolder.addBinding(PARAMS.river, "width",    { label: "River width",    min: 1,  max: 60,  step: 0.5 }).on("change", () => { if (riverPoints.length >= 2) riverGenerate(); });
+        riverFolder.addBinding(PARAMS.river, "segments", { label: "Mesh segments",  min: 40, max: 600, step: 10  }).on("change", () => { if (riverPoints.length >= 2) riverGenerate(); });
         riverFolder.addBinding(PARAMS.river, "shaderStyle", {
           label: "Shader",
           options: { "Basic": "Basic", "Stylized": "Stylized" },
