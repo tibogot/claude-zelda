@@ -780,16 +780,16 @@
 
       // ── TREE LOD — multi-slot instanced tree system ───────────────────────
       const LOD_SLOTS = [
-        { name: "Pine",   modelPath: "models/pine2.glb", lod1Path: "models/pine2LODtest.glb", lodThreshold: 80,  positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
-        { name: "Oak",    modelPath: null,                lod1Path: null,                       lodThreshold: 60,  positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
-        { name: "Dead",   modelPath: null,                lod1Path: null,                       lodThreshold: 50,  positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
-        { name: "Palm",   modelPath: null,                lod1Path: null,                       lodThreshold: 60,  positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
+        { name: "Pine", modelPath: "models/pine2.glb", lod1Path: "models/pine2LODtest.glb", lodThreshold: 80, minSpacing: 3,  scaleMin: 0.8, scaleMax: 1.4, density: 0.25, treesPerStroke: 3, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
+        { name: "Oak",  modelPath: null,               lod1Path: null,                       lodThreshold: 60, minSpacing: 4,  scaleMin: 0.9, scaleMax: 1.6, density: 0.2,  treesPerStroke: 3, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
+        { name: "Dead", modelPath: null,               lod1Path: null,                       lodThreshold: 50, minSpacing: 2,  scaleMin: 0.7, scaleMax: 1.2, density: 0.3,  treesPerStroke: 3, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
+        { name: "Palm", modelPath: null,               lod1Path: null,                       lodThreshold: 60, minSpacing: 5,  scaleMin: 1.0, scaleMax: 2.0, density: 0.15, treesPerStroke: 3, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
       ];
       let activeLodSlot       = 0;
       const LOD_CHUNK_SIZE    = 64;      // world-units per chunk side
       const LOD_MAX_PER_CHUNK = 512;     // max trees per chunk IM
       let _rebuildLODChunks   = (_slot) => {}; // assigned inside init() once scene is ready
-      const lodParams = { slotName: "Pine", threshold: 80, count0: 0, count1: 0, totalTrees: 0, chunks: 0, chunksVisible: 0 };
+      const lodParams = { slotName: "Pine", threshold: 80, minSpacing: 3, scaleMin: 0.8, scaleMax: 1.4, density: 0.25, treesPerStroke: 3, count0: 0, count1: 0, totalTrees: 0, chunks: 0, chunksVisible: 0 };
       let lodFolder = null;
       const _lodDummy    = new THREE.Object3D();
       const _lodFinalMat = new THREE.Matrix4();
@@ -1526,20 +1526,26 @@
       function paintLODAt(wx, wz, erase) {
         const slot = LOD_SLOTS[activeLodSlot];
         if (!slot.ready) return;
+        const radius = brushWorldRadius();
         if (erase) {
-          const r2 = brushSize * brushSize;
+          const r2 = radius * radius;
           slot.positions = slot.positions.filter(
             (p) => (p.x - wx) ** 2 + (p.z - wz) ** 2 > r2,
           );
         } else {
-          const count = Math.max(1, Math.round(brushSize * 0.25));
-          for (let i = 0; i < count; i++) {
+          const target = slot.treesPerStroke;
+          const ms2 = slot.minSpacing * slot.minSpacing;
+          let added = 0;
+          for (let attempt = 0; attempt < target * 4 && added < target; attempt++) {
             const angle = Math.random() * Math.PI * 2;
-            const dist = Math.random() * brushSize;
+            const dist = Math.sqrt(Math.random()) * radius;
             const x = wx + Math.cos(angle) * dist;
             const z = wz + Math.sin(angle) * dist;
+            if (ms2 > 0 && slot.positions.some(p => (p.x - x) ** 2 + (p.z - z) ** 2 < ms2)) continue;
             const y = sampleHeight(x, z);
-            slot.positions.push({ x, y, z, scale: 0.8 + Math.random() * 0.6 });
+            const scale = slot.scaleMin + Math.random() * (slot.scaleMax - slot.scaleMin);
+            slot.positions.push({ x, y, z, scale });
+            added++;
           }
         }
         _rebuildLODChunks(slot);
@@ -7024,14 +7030,23 @@
           const label = `${i + 1}: ${slot.name}${slot.modelPath ? '' : '  (no model)'}`;
           _lodSlotFolder.addButton({ title: label }).on("click", () => {
             activeLodSlot = i;
-            lodParams.slotName  = slot.name;
-            lodParams.threshold = slot.lodThreshold;
+            lodParams.slotName   = slot.name;
+            lodParams.threshold  = slot.lodThreshold;
+            lodParams.minSpacing = slot.minSpacing;
+            lodParams.scaleMin   = slot.scaleMin;
+            lodParams.scaleMax   = slot.scaleMax;
+            lodParams.density        = slot.density;
+            lodParams.treesPerStroke = slot.treesPerStroke;
             if (lodFolder) pane.refresh();
           });
         });
         lodFolder.addBinding(lodParams, "slotName",  { label: "Painting slot", readonly: true });
-        lodFolder.addBinding(lodParams, "threshold", { label: "LOD switch dist", min: 5, max: 300, step: 1 })
-          .on("change", (ev) => { LOD_SLOTS[activeLodSlot].lodThreshold = ev.value; });
+        lodFolder.addBinding(lodParams, "threshold",  { label: "LOD switch dist",  min: 5,    max: 300, step: 1    }).on("change", (ev) => { LOD_SLOTS[activeLodSlot].lodThreshold = ev.value; });
+        lodFolder.addBinding(lodParams, "minSpacing", { label: "Min spacing",       min: 0,    max: 20,  step: 0.5  }).on("change", (ev) => { LOD_SLOTS[activeLodSlot].minSpacing  = ev.value; });
+        lodFolder.addBinding(lodParams, "scaleMin",   { label: "Scale min",         min: 0.1,  max: 5.0, step: 0.05 }).on("change", (ev) => { LOD_SLOTS[activeLodSlot].scaleMin    = ev.value; });
+        lodFolder.addBinding(lodParams, "scaleMax",   { label: "Scale max",         min: 0.1,  max: 5.0, step: 0.05 }).on("change", (ev) => { LOD_SLOTS[activeLodSlot].scaleMax    = ev.value; });
+        lodFolder.addBinding(lodParams, "density",        { label: "Brush density",     min: 0.05, max: 2.0, step: 0.05 }).on("change", (ev) => { LOD_SLOTS[activeLodSlot].density        = ev.value; });
+        lodFolder.addBinding(lodParams, "treesPerStroke", { label: "Trees per stroke",  min: 1,    max: 20,  step: 1    }).on("change", (ev) => { LOD_SLOTS[activeLodSlot].treesPerStroke = ev.value; });
         lodFolder.addBinding(lodParams, "count0",      { label: "LOD0 visible", readonly: true });
         lodFolder.addBinding(lodParams, "count1",      { label: "LOD1 visible", readonly: true });
         lodFolder.addBinding(lodParams, "totalTrees",  { label: "Total trees",  readonly: true });
@@ -7045,6 +7060,39 @@
         lodFolder.addButton({ title: "Clear ALL slots" }).on("click", () => {
           LOD_SLOTS.forEach(slot => { slot.positions = []; _rebuildLODChunks(slot); });
         });
+        // ── Per-slot JSON export / import ──
+        lodFolder.addButton({ title: "Export slot JSON" }).on("click", () => {
+          const slot = LOD_SLOTS[activeLodSlot];
+          const blob = new Blob(
+            [JSON.stringify({ name: slot.name, positions: slot.positions }, null, 2)],
+            { type: "application/json" },
+          );
+          const a = document.createElement("a");
+          a.download = `lod-${slot.name.toLowerCase()}.json`;
+          a.href = URL.createObjectURL(blob);
+          a.click();
+        });
+        const _lodFileInput = document.createElement("input");
+        _lodFileInput.type = "file";
+        _lodFileInput.accept = ".json";
+        _lodFileInput.style.display = "none";
+        document.body.appendChild(_lodFileInput);
+        _lodFileInput.addEventListener("change", (e) => {
+          const file = e.target.files[0];
+          if (!file) return;
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            try {
+              const data = JSON.parse(ev.target.result);
+              const slot = LOD_SLOTS[activeLodSlot];
+              slot.positions = Array.isArray(data) ? data : (data.positions || []);
+              _rebuildLODChunks(slot);
+            } catch (err) { console.error("Failed to load LOD JSON", err); }
+          };
+          reader.readAsText(file);
+          _lodFileInput.value = "";
+        });
+        lodFolder.addButton({ title: "Import slot JSON" }).on("click", () => { _lodFileInput.click(); });
 
         // ── FOLIAGE FOLDER ──
         const foliageFolder = pane.addFolder({
@@ -8410,8 +8458,14 @@
           if (currentMode === "pinelod" && e.code.match(/^Digit[1-4]$/)) {
             const idx = parseInt(e.code[5]) - 1;
             activeLodSlot = idx;
-            lodParams.slotName  = LOD_SLOTS[idx].name;
-            lodParams.threshold = LOD_SLOTS[idx].lodThreshold;
+            const _s = LOD_SLOTS[idx];
+            lodParams.slotName   = _s.name;
+            lodParams.threshold  = _s.lodThreshold;
+            lodParams.minSpacing = _s.minSpacing;
+            lodParams.scaleMin   = _s.scaleMin;
+            lodParams.scaleMax   = _s.scaleMax;
+            lodParams.density        = _s.density;
+            lodParams.treesPerStroke = _s.treesPerStroke;
             if (lodFolder) pane.refresh();
           }
           if (e.code === "KeyI")
@@ -8812,6 +8866,8 @@
           if (currentMode === "path") pathPaintAt(p.x, p.z);
           if (currentMode === "trees")
             paintTreesAt(p.x, p.z, treeEraseMode || e.shiftKey);
+          if (currentMode === "pinelod")
+            paintLODAt(p.x, p.z, e.shiftKey);
           if (currentMode === "foliage")
             paintFoliageAt(p.x, p.z, foliageEraseMode || e.shiftKey);
         });
@@ -9088,8 +9144,13 @@
             }
           }
           const active = LOD_SLOTS[activeLodSlot];
-          lodParams.slotName  = active.name;
-          lodParams.threshold = active.lodThreshold;
+          lodParams.slotName   = active.name;
+          lodParams.threshold  = active.lodThreshold;
+          lodParams.minSpacing = active.minSpacing;
+          lodParams.scaleMin   = active.scaleMin;
+          lodParams.scaleMax   = active.scaleMax;
+          lodParams.density        = active.density;
+          lodParams.treesPerStroke = active.treesPerStroke;
           lodParams.count0    = count0;
           lodParams.count1    = count1;
           lodParams.totalTrees = totalTrees;
