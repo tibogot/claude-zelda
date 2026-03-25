@@ -19,8 +19,6 @@ import {
   abs,
   sin,
   cos,
-  fract,
-  floor,
   mod,
   dot,
   normalize,
@@ -212,7 +210,8 @@ export function createGrassMaterial(
     const trailScale = float(1);
 
     const hv = hash42(bladeWorld.xz),
-      hv2 = hash22(bladeWorld.xz);
+      hv2 = hash22(bladeWorld.xz),
+      hv3 = hash22(add(bladeWorld.xz, vec2(5.7, 11.2)));
     const distXZ = length(sub(cameraPosition.xz, bladeWorld.xz));
     const highLODOut = smoothstep(
       mul(uLodDist, uLodBlendStart),
@@ -239,10 +238,12 @@ export function createGrassMaterial(
       clumpHeight,
       mix(1, 0, lodFadeIn),
     );
-    const randomLean = remap(hv.w, 0, 1, 0.1, 0.3);
+    const randomLean      = remap(hv.w, 0, 1, 0.1, 0.3);
+    // GoT per-blade cubic Bezier shape properties
+    const randomBend      = remap(hv3.x, 0, 1, 0.25, 1.0);   // stiffness: low=stiff, high=floppy
+    const randomSideCurve = remap(hv3.y, 0, 1, -0.28, 0.28); // lateral twist, ± perpendicular to lean
 
     const vertID = mod(vertIdxAttr, NVERTS);
-    const zSide = negate(sub(mul(floor(div(vertIdxAttr, NVERTS)), 2), 1));
     const xSide = mod(vertID, 2);
     const heightPct = div(sub(vertID, xSide), mul(SEGS, 2));
     const totalHeight = mul(uGrassHeight, randomHeight, trailScale);
@@ -267,7 +268,18 @@ export function createGrassMaterial(
       bladeVisible = step(hv.x, uBladeDensity.mul(paintedDensity)).mul(hasDensity);
     }
 
-    const totalWidthVis = mul(totalWidth, bladeVisible);
+    // View thickening: widen blades up to 2× when viewed edge-on so they don't disappear.
+    // Blade width direction in XZ = (cos(randomAngle), -sin(randomAngle))
+    const bwdX = cos(randomAngle);
+    const bwdZ = negate(sin(randomAngle));
+    const ctbLen = add(length(sub(bladeWorld.xz, cameraPosition.xz)), float(0.0001));
+    const ctbX = div(sub(bladeWorld.x, cameraPosition.x), ctbLen);
+    const ctbZ = div(sub(bladeWorld.z, cameraPosition.z), ctbLen);
+    // edgeDot ≈ 1 when face-on, ≈ 0 when edge-on → widen when edge-on
+    const edgeDot = abs(add(mul(bwdX, ctbX), mul(bwdZ, ctbZ)));
+    const viewThicken = mix(float(2.0), float(1.0), edgeDot);
+
+    const totalWidthVis = mul(totalWidth, bladeVisible, viewThicken);
     const totalHeightVis = mul(totalHeight, bladeVisible);
     const x = mul(sub(xSide, 0.5), totalWidthVis),
       y = mul(heightPct, totalHeightVis);
@@ -292,8 +304,10 @@ export function createGrassMaterial(
     const windLeanFull = mul(add(wave1, wave2, gustStr), uWindStr);
     const windLeanSimple = mul(wave1, uWindStr);
     const windLean = mix(windLeanSimple, windLeanFull, highLODOut);
-    // GoT-style: bobbing is a separate high-frequency tip flutter, not baked into lean angle
-    const bobbingPhase = add(mul(hv.x, 6.28318), mul(uTime, 5.5));
+    // GoT-style: bobbing is a separate high-frequency tip flutter, not baked into lean angle.
+    // Use a decorrelated per-blade random so blades with the same yaw don't flutter in sync.
+    const bobbingRand  = hash22(add(bladeWorld.xz, vec2(17.3, 4.1))).x;
+    const bobbingPhase = add(mul(bobbingRand, 6.28318), mul(uTime, 5.5));
     const bobbingAmt   = mul(sin(bobbingPhase), uWindMicro);
 
     // Raw cross-wind noise for lateral Bezier tip displacement
@@ -526,27 +540,45 @@ export function createGrassMaterial(
     const p2y = mul(totalHeightVis, p2scale);
     const p2z = mul(p2zRaw, p2scale);
 
-    // Mid control point P1: 20% of tip XZ at 70% height
-    // Keeps blade nearly vertical at base, then curves hard near tip — GoT shape
-    const p1x = mul(p2x, 0.2);
-    const p1y = mul(p2y, 0.7);
-    const p1z = mul(p2z, 0.2);
+    // ── GoT cubic Bezier (4 control points: P0=root, P1, P2, P3=tip) ───────────
+    // P3 = tip (chord-conserved, already computed above as p2x/p2y/p2z)
+    const p3x = p2x, p3y = p2y, p3z = p2z;
 
-    // Evaluate quadratic Bezier at t = heightPct:  B(t) = 2t(1-t)·P1 + t²·P2
-    const bt    = heightPct;
-    const bt2   = mul(bt, bt);
-    const btmt2 = mul(2, bt, sub(1, bt));
+    // P1 = lower control — nearly vertical at base, XZ scaled by randomBend
+    // Low randomBend = stiff (blade shoots straight up before arcing)
+    // High randomBend = floppy (blade curves from the root)
+    const p1x = mul(p3x, mul(randomBend, 0.08));
+    const p1y = mul(p3y, 0.3);
+    const p1z = mul(p3z, mul(randomBend, 0.08));
 
-    const spineX = add(mul(btmt2, p1x), mul(bt2, p2x));
-    const spineY = add(mul(btmt2, p1y), mul(bt2, p2y));
-    const spineZ = add(mul(btmt2, p1z), mul(bt2, p2z));
+    // P2 = mid control — 55% toward tip XZ + per-blade side curve (lateral drift)
+    // Side curve direction = perpendicular to lean direction in XZ
+    // Lean dir: (cos θ, -sin θ)  →  Perp: (sin θ, cos θ)
+    const sideAmt = mul(randomSideCurve, totalHeightVis);
+    const p2cx = add(mul(p3x, 0.55), mul(sin(randomAngle), sideAmt));
+    const p2cy = mul(p3y, 0.65);
+    const p2cz = add(mul(p3z, 0.55), mul(cos(randomAngle), sideAmt));
 
-    // Bezier tangent (derivative):  B'(t) = 2(1-t)·P1 + 2t·(P2 - P1)
-    const bmt2d = mul(2, sub(1, bt));
-    const bt2d  = mul(2, bt);
-    const dtX = add(mul(bmt2d, p1x), mul(bt2d, sub(p2x, p1x)));
-    const dtY = add(mul(bmt2d, p1y), mul(bt2d, sub(p2y, p1y)));
-    const dtZ = add(mul(bmt2d, p1z), mul(bt2d, sub(p2z, p1z)));
+    // Cubic Bezier: B(t) = 3(1-t)²t·P1 + 3(1-t)t²·P2 + t³·P3   (P0 = origin)
+    const bt   = heightPct;
+    const bt2  = mul(bt, bt);
+    const bt3  = mul(bt2, bt);
+    const omt  = sub(1, bt);
+    const omt2 = mul(omt, omt);
+    const c1   = mul(3, omt2, bt);   // 3(1-t)²t
+    const c2   = mul(3, omt,  bt2);  // 3(1-t)t²
+
+    const spineX = add(mul(c1, p1x), mul(c2, p2cx), mul(bt3, p3x));
+    const spineY = add(mul(c1, p1y), mul(c2, p2cy), mul(bt3, p3y));
+    const spineZ = add(mul(c1, p1z), mul(c2, p2cz), mul(bt3, p3z));
+
+    // Cubic tangent: B'(t) = 3(1-t)²·P1 + 6(1-t)t·(P2-P1) + 3t²·(P3-P2)
+    const d1 = mul(3, omt2);
+    const d2 = mul(6, omt, bt);
+    const d3 = mul(3, bt2);
+    const dtX = add(mul(d1, p1x), mul(d2, sub(p2cx, p1x)), mul(d3, sub(p3x, p2cx)));
+    const dtY = add(mul(d1, p1y), mul(d2, sub(p2cy, p1y)), mul(d3, sub(p3y, p2cy)));
+    const dtZ = add(mul(d1, p1z), mul(d2, sub(p2cz, p1z)), mul(d3, sub(p3z, p2cz)));
 
     // Normalise tangent (guard zero-length for invisible blades)
     const dtLen = add(length(vec3(dtX, dtY, dtZ)), float(0.0001));
@@ -593,12 +625,11 @@ export function createGrassMaterial(
     // rotateY(-PI*0.3)
     const r2x = sub(mul(fnxN, c03), mul(fnzN, s03));
     const r2z = add(mul(fnxN, s03), mul(fnzN, c03));
-    // mix by xSide (widthPercent): left edge → r1, right edge → r2
-    // zSide flips the normal for the back-face copy of the blade
-    const bladeNormal = mul(
-      normalize(mix(vec3(r1x, fnyN, r1z), vec3(r2x, fnyN, r2z), xSide)),
-      zSide,
-    );
+    // mix by xSide (widthPercent): left edge → r1, right edge → r2.
+    // No zSide flip — grass blades are thin/translucent. DoubleSide material handles
+    // back-face winding in the fragment shader; flipping the normal here would make
+    // back-face blades lose sky contribution and appear dark.
+    const bladeNormal = normalize(mix(vec3(r1x, fnyN, r1z), vec3(r2x, fnyN, r2z), xSide));
 
     const skyFade = mix(uMinSkyBlend, uMaxSkyBlend, highLODOut);
     const mixed = mix(bladeNormal, vec3(0, 1, 0), skyFade);
@@ -659,7 +690,7 @@ export function createGrassMaterial(
     );
     const aoBase = max(sub(1.0, mul(uAoIntensity, 0.65)), 0.2);
     const aoLod = mul(aoBase, mix(0.5, 1.0, highLODOut));
-    const ao = mix(aoLod, 1.0, smoothstep(0.0, 0.5, heightPct));
+    const ao = mix(aoLod, 1.0, smoothstep(0.0, 0.22, heightPct));
     const fadeFactor = sub(1, smoothstep(0.4, 1, lodFadeIn));
     vGrassColor.assign(
       mul(grassCol, ao, mul(fadeFactor, fadeFactor), bladeVisible),
