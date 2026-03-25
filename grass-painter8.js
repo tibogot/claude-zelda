@@ -271,12 +271,12 @@ export function createGrassMaterial(
     const windLeanFull = mul(add(wave1, wave2, gustStr), uWindStr);
     const windLeanSimple = mul(wave1, uWindStr);
     const windLean = mix(windLeanSimple, windLeanFull, highLODOut);
-    const microPhase = add(mul(hv.x, 6.28), mul(uTime, 2.5));
-    const micro = mul(sin(microPhase), uWindMicro, 0.3);
-    const crossSway = mul(wave2, 0.3, uWindStr, heightPct, highLODOut);
-    const totalWindLean = mul(add(windLean, mul(micro, highLODOut)), heightPct);
-    const windAxis = uWindAxis;
-    const crossAxis = uCrossAxis;
+    // GoT-style: bobbing is a separate high-frequency tip flutter, not baked into lean angle
+    const bobbingPhase = add(mul(hv.x, 6.28318), mul(uTime, 5.5));
+    const bobbingAmt   = mul(sin(bobbingPhase), uWindMicro);
+
+    // Raw cross-wind noise for lateral Bezier tip displacement
+    const crossDisplace = mul(wave2, 0.3);
 
     const bladeY = add(bladeWorld.y, terrainH);
     const repulseCenterXZ = uTrailCenter;
@@ -456,45 +456,110 @@ export function createGrassMaterial(
     const pAxis = normalize(mix(vec3(1, 0, 0), sumAxis, hasInteraction));
     const pAngle = mul(mul(sumAngle, invTotal), hasInteraction);
 
-    const easedH = mix(easeIn(heightPct, 2), 1, highLODOut);
-    const curveAmt = mul(negate(randomLean), easedH);
-    const grassMat = rotateAxis_mat(pAxis, pAngle)
-      .mul(rotateAxis_mat(windAxis, totalWindLean))
-      .mul(rotateAxis_mat(crossAxis, crossSway))
-      .mul(rotateY_mat(randomAngle));
+    // ── GoT-style Bezier blade spine ─────────────────────────────────────────
+    // All displacements are world-space tip offsets (units), not rotation angles.
+    // This eliminates the "crooked hook" artifact that occurs when stacking
+    // rotation matrices at high wind angles.
 
-    const nc1 = curveAmt;
-    const _hp01 = add(heightPct, 0.01);
-    const n1p = vec3(0, mul(_hp01, cos(nc1)), mul(_hp01, sin(nc1)));
-    const _nc09 = mul(nc1, 0.9);
-    const n2p = vec3(
-      0,
-      mul(mul(_hp01, 0.9), cos(_nc09)),
-      mul(mul(_hp01, 0.9), sin(_nc09)),
+    // Wind tip displacement along wind direction
+    const windTip    = mul(windLean, totalHeightVis);
+    // Cross-wind tip displacement (perpendicular to wind)
+    const crossTip   = mul(crossDisplace, totalHeightVis);
+    // Bobbing: independent high-freq flutter added to wind tip
+    const bobbingTip = mul(bobbingAmt, totalHeightVis, 0.2);
+    // Natural per-blade lean: small random tilt in the blade's own width direction
+    const naturalTip = mul(randomLean, totalHeightVis, 0.4);
+    // Player/NPC interaction: tip displacement in pTo direction (negative pAngle = repel)
+    const interactionTip = mul(pAngle, totalHeightVis, hasInteraction);
+
+    // Bezier tip control point P2 (world-space, relative to blade root)
+    //   wind + bobbing → wind direction
+    //   cross          → perpendicular to wind
+    //   natural lean   → blade's own width axis (varies with randomAngle)
+    //   interaction    → toward/away from entity
+    const p2x = add(
+      mul(uWindDirX,         add(windTip, bobbingTip)),
+      mul(negate(uWindDirZ), crossTip),
+      mul(cos(randomAngle),  naturalTip),
+      mul(pTo.x,             interactionTip),
     );
-    const ncurve = normalize(sub(n1p, n2p));
-    const gvn = vec3(0, negate(ncurve.z), ncurve.y);
-    const gvn1 = mul(
-      grassMat,
-      rotateY_mat(mul(PI, 0.3, zSide)).mul(gvn),
-    ).mul(zSide);
-    const gvn2 = mul(
-      grassMat,
-      rotateY_mat(mul(PI, -0.3, zSide)).mul(gvn),
-    ).mul(zSide);
-    const blendedNormal = normalize(mix(gvn1, gvn2, xSide));
+    const p2y = totalHeightVis;
+    const p2z = add(
+      mul(uWindDirZ,        add(windTip, bobbingTip)),
+      mul(uWindDirX,        crossTip),
+      mul(negate(sin(randomAngle)), naturalTip),
+      mul(pTo.z,            interactionTip),
+    );
+
+    // Mid control point P1: 40% of tip XZ displacement at 50% height
+    const p1x = mul(p2x, 0.4);
+    const p1y = mul(p2y, 0.5);
+    const p1z = mul(p2z, 0.4);
+
+    // Evaluate quadratic Bezier at t = heightPct:  B(t) = 2t(1-t)·P1 + t²·P2
+    const bt    = heightPct;
+    const bt2   = mul(bt, bt);
+    const btmt2 = mul(2, bt, sub(1, bt));
+
+    const spineX = add(mul(btmt2, p1x), mul(bt2, p2x));
+    const spineY = add(mul(btmt2, p1y), mul(bt2, p2y));
+    const spineZ = add(mul(btmt2, p1z), mul(bt2, p2z));
+
+    // Bezier tangent (derivative):  B'(t) = 2(1-t)·P1 + 2t·(P2 - P1)
+    const bmt2d = mul(2, sub(1, bt));
+    const bt2d  = mul(2, bt);
+    const dtX = add(mul(bmt2d, p1x), mul(bt2d, sub(p2x, p1x)));
+    const dtY = add(mul(bmt2d, p1y), mul(bt2d, sub(p2y, p1y)));
+    const dtZ = add(mul(bmt2d, p1z), mul(bt2d, sub(p2z, p1z)));
+
+    // Normalise tangent (guard zero-length for invisible blades)
+    const dtLen = add(length(vec3(dtX, dtY, dtZ)), float(0.0001));
+    const tanX  = div(dtX, dtLen);
+    const tanY  = div(dtY, dtLen);
+    const tanZ  = div(dtZ, dtLen);
+
+    // Blade width direction in world XZ (random yaw)
+    const wdx = cos(randomAngle);
+    const wdz = negate(sin(randomAngle));
+
+    // Vertex position = spine + width step  (GoT: "step vertex in width direction")
+    const widthStep = mul(sub(xSide, 0.5), totalWidthVis);
+    const finalVert = add(
+      vec3(add(spineX, mul(wdx, widthStep)), spineY, add(spineZ, mul(wdz, widthStep))),
+      grassOffset,
+    );
+
+    // ── GoT rounded normals ───────────────────────────────────────────────────
+    // Flat blade normal = cross(widthDir, tangent), computed manually:
+    //   cross((wdx, 0, wdz), (tanX, tanY, tanZ))
+    //     x = 0·tanZ  − wdz·tanY  = −wdz·tanY
+    //     y = wdz·tanX − wdx·tanZ
+    //     z = wdx·tanY − 0·tanX   =  wdx·tanY
+    const fnx  = negate(mul(wdz, tanY));
+    const fny  = sub(mul(wdz, tanX), mul(wdx, tanZ));
+    const fnz  = mul(wdx, tanY);
+    const fnLen = add(length(vec3(fnx, fny, fnz)), float(0.0001));
+    const fnxN  = div(fnx, fnLen);
+    const fnyN  = div(fny, fnLen);
+    const fnzN  = div(fnz, fnLen);
+
+    // Cylindrical rounding: tilt edge normals outward from blade centre axis
+    // xBias: −1 at left edge, 0 at centre, +1 at right edge
+    const xBias    = sub(mul(xSide, 2), 1);
+    const roundStr = float(0.7);
+    const rnx = add(fnxN, mul(wdx, xBias, roundStr));
+    const rny = fnyN;
+    const rnz = add(fnzN, mul(wdz, xBias, roundStr));
+    const rnLen = add(length(vec3(rnx, rny, rnz)), float(0.0001));
+    // zSide flips the normal for the back-face copy of the blade
+    const bladeNormal = mul(
+      vec3(div(rnx, rnLen), div(rny, rnLen), div(rnz, rnLen)),
+      zSide,
+    );
+
     const skyFade = mix(uMinSkyBlend, uMaxSkyBlend, highLODOut);
-    const finalNormal = normalize(
-      mix(blendedNormal, vec3(0, 1, 0), skyFade),
-    );
+    const finalNormal = normalize(mix(bladeNormal, vec3(0, 1, 0), skyFade));
     normalLocal.assign(finalNormal);
-
-    const localVert = vec3(
-      x,
-      mul(y, cos(curveAmt)),
-      mul(y, sin(curveAmt)),
-    );
-    const finalVert = add(grassMat.mul(localVert), grassOffset);
 
     // All vertices use the blade root's terrain height (terrainH).
     // Per-vertex sampling caused blades near cliff edges to stretch up to cliff-top
