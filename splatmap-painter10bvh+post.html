@@ -606,6 +606,8 @@
         mode: "view",
         biome: "forest",
         sculptTool: "raise",
+        stampBlendMode: "add",  // "add" | "replace"
+        stampRotation: 0,
         cliffModel: 0,
         sinkOffset: 2,
         propSinkOffset: 0,
@@ -801,6 +803,7 @@
       let sculptMode = "raise"; // "raise" | "lower" | "smooth"
       let flattenTargetY = 0; // sampled on mousedown when alt+drag
       let rampPointA = null;  // first click of ramp tool { x, y, z }
+      let stampImageData = null; // grayscale PNG loaded for heightmap stamping
       // ── SPLINE STATE ──
       let splinePoints = [];       // Array of THREE.Vector3
       let splineSelectedIdx = -1;  // Index of selected control point (-1 = none)
@@ -1600,7 +1603,8 @@
       // plain drag = raise | shift+drag = lower | ctrl+drag = smooth
       function sculptAt(wx, wz, e) {
         if (!terrainGeo) return;
-        if (sculptMode === "ramp") return; // ramp is click-click, not drag
+        if (sculptMode === "ramp")  return; // ramp is click-click, not drag
+        if (sculptMode === "stamp") return; // stamp is click-only, handled in mousedown
         const mode = e?.altKey
           ? "flatten"
           : e?.ctrlKey
@@ -1854,6 +1858,68 @@
           }
         }
         syncGeometry();
+      }
+
+      // ─── STAMP TOOL ──────────────────────────
+      function sampleStamp(u, v) {
+        if (!stampImageData) return 0;
+        const w = stampImageData.width, h = stampImageData.height;
+        const px = Math.max(0, Math.min(w - 1, u * (w - 1)));
+        const py = Math.max(0, Math.min(h - 1, v * (h - 1)));
+        const x0 = Math.floor(px), x1 = Math.min(x0 + 1, w - 1);
+        const y0 = Math.floor(py), y1 = Math.min(y0 + 1, h - 1);
+        const fx = px - x0, fy = py - y0;
+        const d = stampImageData.data;
+        const s = (xi, yi) => d[(yi * w + xi) * 4] / 255; // red channel = grayscale
+        return (s(x0,y0)*(1-fx) + s(x1,y0)*fx) * (1-fy)
+             + (s(x0,y1)*(1-fx) + s(x1,y1)*fx) * fy;
+      }
+
+      function applyStamp(wx, wz) {
+        if (!stampImageData || !terrainGeo) return;
+        const radius    = brushWorldRadius();
+        const radiusSq  = radius * radius;
+        const cellSize  = TERRAIN_SIZE / TERRAIN_RES;
+        const gridR     = Math.ceil(radius / cellSize) + 1;
+        const cx        = Math.round((wx / TERRAIN_SIZE + 0.5) * TERRAIN_RES);
+        const cz        = Math.round((wz / TERRAIN_SIZE + 0.5) * TERRAIN_RES);
+        const cos       = Math.cos(PARAMS.stampRotation);
+        const sin       = Math.sin(PARAMS.stampRotation);
+        const strength  = brushStr / 100;
+
+        for (let dz = -gridR; dz <= gridR; dz++) {
+          for (let dx = -gridR; dx <= gridR; dx++) {
+            const gx = cx + dx, gz = cz + dz;
+            if (gx < 0 || gx >= VERTS || gz < 0 || gz >= VERTS) continue;
+            const vx = (-0.5 + gx / TERRAIN_RES) * TERRAIN_SIZE;
+            const vz = (-0.5 + gz / TERRAIN_RES) * TERRAIN_SIZE;
+            const lx = vx - wx, lz = vz - wz;
+            const distSq = lx * lx + lz * lz;
+            if (distSq > radiusSq) continue;
+
+            // Rotate into stamp local space
+            const rx = lx * cos - lz * sin;
+            const rz = lx * sin + lz * cos;
+
+            // Smooth radial falloff at edges so stamp blends into existing terrain
+            const t = Math.sqrt(distSq) / radius;
+            const falloff = 1 - t * t;
+
+            // Sample stamp grayscale (0=black/low, 1=white/high) with bilinear filter
+            const stampH = sampleStamp(rx / radius * 0.5 + 0.5, rz / radius * 0.5 + 0.5);
+
+            const idx = gz * VERTS + gx;
+            if (PARAMS.stampBlendMode === "add") {
+              heightData[idx] += stampH * falloff * strength * HEIGHT_SCALE;
+            } else {
+              // Replace: lerp current height toward the stamp target height
+              const targetH = stampH * HEIGHT_SCALE * strength;
+              heightData[idx] += (targetH - heightData[idx]) * falloff * strength;
+            }
+          }
+        }
+        syncGeometry();
+        if (bakeBVH) bakeBVH();
       }
 
       // ─── RAMP TOOL ───────────────────────────
@@ -2263,6 +2329,10 @@
       function loadHeightmap(file) {
         const reader = new FileReader();
         reader.onload = (e) => {
+          if (e.target.result.byteLength % 4 !== 0) {
+            alert("Heightmap load failed: file is not a valid .bin heightmap.\nUse the Stamp tool to load PNG images as stamps instead.");
+            return;
+          }
           const loaded = new Float32Array(e.target.result);
           if (loaded.length === heightData.length) {
             heightData.set(loaded);
@@ -6793,7 +6863,7 @@
         sculptFolder
           .addBinding(PARAMS, "sculptTool", {
             label: "Tool",
-            options: { Raise: "raise", Lower: "lower", Smooth: "smooth", Noise: "noise", Ramp: "ramp", Erosion: "erosion", Terrace: "terrace" },
+            options: { Raise: "raise", Lower: "lower", Smooth: "smooth", Noise: "noise", Ramp: "ramp", Erosion: "erosion", Terrace: "terrace", Stamp: "stamp" },
           })
           .on("change", (ev) => {
             sculptMode = ev.value;
@@ -6810,6 +6880,38 @@
         sculptFolder.addBinding(PARAMS, "terraceSharpness", {
           label: "Terrace sharpness", min: 0.05, max: 0.95, step: 0.01,
         });
+        // ── Stamp sub-folder ──
+        const stampFolder = sculptFolder.addFolder({ title: "Stamp settings", expanded: false });
+        const _stampStatus = { label: "No image loaded" };
+        stampFolder.addBinding(_stampStatus, "label", { label: "Stamp image", readonly: true });
+        stampFolder.addBinding(PARAMS, "stampBlendMode", {
+          label: "Blend mode",
+          options: { "Add (raise)": "add", "Replace (sculpt)": "replace" },
+        });
+        stampFolder.addBinding(PARAMS, "stampRotation", {
+          label: "Rotation (rad)", min: 0, max: Math.PI * 2, step: 0.05,
+        });
+        stampFolder.addButton({ title: "Load stamp image (PNG/JPG)" }).on("click", () => {
+          const inp = document.createElement("input");
+          inp.type = "file"; inp.accept = "image/*";
+          inp.onchange = () => {
+            const file = inp.files[0]; if (!file) return;
+            const url = URL.createObjectURL(file);
+            const img = new Image();
+            img.onload = () => {
+              const cv = document.createElement("canvas");
+              cv.width = img.width; cv.height = img.height;
+              cv.getContext("2d").drawImage(img, 0, 0);
+              stampImageData = cv.getContext("2d").getImageData(0, 0, img.width, img.height);
+              _stampStatus.label = `${file.name} (${img.width}×${img.height})`;
+              stampFolder.refresh();
+              URL.revokeObjectURL(url);
+            };
+            img.src = url;
+          };
+          inp.click();
+        });
+
         sculptFolder.addButton({ title: "Reset Terrain" }).on("click", () => {
           pushUndo();
           buildHeightData();
@@ -8923,6 +9025,10 @@
               rampPointA = null;
               rampMarker.visible = false;
             }
+            return;
+          }
+          if (currentMode === "sculpt" && sculptMode === "stamp") {
+            applyStamp(p.x, p.z);
             return;
           }
           if (currentMode === "sculpt" && e.altKey)

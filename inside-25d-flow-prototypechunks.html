@@ -1031,15 +1031,16 @@
         hallMat,
       );
       hallBack.position.set(hallLen * 0.5, hallWallH * 0.5, 0);
+      const hallRoofThick = 0.48;
       const hallRoof = new THREE.Mesh(
-        new THREE.BoxGeometry(hallLen + 0.35, 0.52, HALL_ZW * 2 + 1.5),
+        new THREE.BoxGeometry(hallLen + 0.35, hallRoofThick, HALL_ZW * 2 + 1.5),
         hallMat,
       );
-      /** Lifted so the follow-cam never sits inside the roof slab (back-face cull → black void). */
-      const hallRoofCenterY = hallWallH + 1.55;
+      /** Roof slab bottom flush with wall tops (local y = hallWallH); center = top + half thickness. */
+      const hallRoofCenterY = hallWallH + hallRoofThick * 0.5;
       hallRoof.position.set(0, hallRoofCenterY, 0);
       const HALL_CAM_Y_CEILING =
-        hallFloorY + hallRoofCenterY - 0.26 - 0.55;
+        hallFloorY + hallWallH - 0.48;
       const hallFloorSlab = new THREE.Mesh(
         new THREE.BoxGeometry(hallLen - 0.15, 0.12, HALL_ZW * 2 + 0.2),
         hallFloorPlankMat,
@@ -1049,10 +1050,10 @@
 
       for (let bz = -11; bz <= 11; bz += 5.5) {
         const beam = new THREE.Mesh(
-          new THREE.BoxGeometry(hallLen - 1.15, 0.24, 0.42),
+          new THREE.BoxGeometry(hallLen - 1.15, 0.16, 0.38),
           hallBeamMat,
         );
-        beam.position.set(0, hallWallH + 0.4, bz);
+        beam.position.set(0, hallWallH - 0.06, bz);
         hallRoot.add(beam);
       }
 
@@ -1560,7 +1561,6 @@
       const biomeLabelEl = document.getElementById("biomeLabel");
       const hallDbgEl = document.getElementById("hallDbg");
       const ambTmpColor = new THREE.Color();
-      const interiorBgLiftScratch = new THREE.Color();
       const dbgPush = {
         ib: 0,
         hg: false,
@@ -1727,9 +1727,8 @@
       };
 
       function getPresetIndexForWorldX(x) {
-        const ci = Math.floor(x / CHUNK_WIDTH);
-        const n = AMBIENCE_PRESETS.length;
-        return ((ci % n) + n) % n;
+        void x;
+        return 0;
       }
 
       function snapAmbienceToPreset(index) {
@@ -1804,14 +1803,15 @@
 
       function pushAmbienceToScene(playerX, interiorBlend) {
         const p = AMBIENCE_PRESETS[ambienceTargetIndex];
-        const ib = interiorBlend;
+        const ibHall = interiorBlend;
+        const ib = 0;
         const hallGeomLit =
           playerX > HALL_X0 - 0.8 && playerX < HALL_X1 + 0.8;
         const nearHallForMist =
           playerX > HALL_X0 - 32 && playerX < HALL_X1 + 32;
 
         renderer.toneMappingExposure = Math.max(
-          hallGeomLit ? 0.74 : 0.48,
+          0.48,
           ambState.exposure * (1 - 0.09 * ib),
         );
         scene.environmentIntensity = Math.max(
@@ -1824,7 +1824,7 @@
         let fogFarForUi = ambState.fogFar * (1 - 0.12 * ib);
         if (look.fogEnabled) {
           fogFarForUi = Math.max(42, fogFarForUi * (1 - 0.05 * ib));
-          if (hallGeomLit) fogFarForUi = Math.max(fogFarForUi, 185);
+          if (hallGeomLit) fogFarForUi = Math.max(fogFarForUi, 160);
           const fogNearAdj = ambState.fogNear * (1 + 0.08 * ib);
           interiorFogMixScratch.copy(ambState.fog).lerp(interiorFogWarm, ib * 0.42);
           if (!scene.fog) {
@@ -1875,11 +1875,7 @@
         if (ambState.hdrMix > 0.88 && hdrBackgroundTexture) {
           scene.background = hdrBackgroundTexture;
         } else {
-          interiorBgLiftScratch.copy(ambState.solidBg);
-          if (hallGeomLit && ib > 0.04) {
-            interiorBgLiftScratch.lerp(new THREE.Color(0x3d4d62), 0.38 + ib * 0.32);
-          }
-          scene.background = interiorBgLiftScratch;
+          scene.background = ambState.solidBg;
         }
 
         const dustMul = 1 - ambState.ghostVfx * 0.72;
@@ -1889,9 +1885,9 @@
         warmFire.position.set(playerX + 0.35, 3.85, -7);
         warmFire.intensity = ambState.ghostVfx * 1.45 * (1 - ib * 0.85);
 
-        const hallLightIb = hallGeomLit ? Math.max(ib, 0.88) : ib;
-        hallAmbient.intensity = hallGeomLit ? 0.58 + ib * 0.42 : ib * 0.35;
-        hallSunFill.intensity = hallGeomLit ? 3.1 * Math.max(ib, 0.5) : 0;
+        const hallLightIb = hallGeomLit ? Math.max(ibHall, 0.88) : ibHall;
+        hallAmbient.intensity = hallGeomLit ? 0.58 + ibHall * 0.42 : ibHall * 0.35;
+        hallSunFill.intensity = hallGeomLit ? 3.1 * Math.max(ibHall, 0.5) : 0;
         lanternPl.intensity = 5.8 * hallLightIb;
         for (const L of hallLightGroup.children) {
           if (L.isPointLight)
@@ -1912,10 +1908,10 @@
 
         if (biomeLabelEl && p) {
           biomeLabelEl.textContent =
-            ib > 0.25 ? `${p.label} · great hall` : p.label;
+            ibHall > 0.25 ? `${p.label} · great hall` : p.label;
         }
 
-        dbgPush.ib = ib;
+        dbgPush.ib = ibHall;
         dbgPush.hg = hallGeomLit;
         dbgPush.mist = ghostMistGroup.visible;
         dbgPush.preset = p?.label ?? "—";

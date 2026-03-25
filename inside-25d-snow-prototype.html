@@ -106,14 +106,17 @@
       const scene = new THREE.Scene();
       scene.fog = new THREE.FogExp2(0xd8e4f0, 0.012);
 
-      // Procedural winter sky — SkyMesh is the WebGPU/TSL version of Sky
+      // Procedural winter sky — same SkyMesh approach as parkourtsushima
       const sky = new SkyMesh();
       sky.scale.setScalar(10000);
       scene.add(sky);
-      sky.turbidity.value = 3.2;
-      sky.rayleigh.value = 0.52;
-      sky.mieCoefficient.value = 0.003;
-      sky.mieDirectionalG.value = 0.93;
+      sky.turbidity.value      = 2.2;
+      sky.rayleigh.value       = 1.8;
+      sky.mieCoefficient.value = 0.004;
+      sky.mieDirectionalG.value = 0.88;
+      if (sky.cloudCoverage  !== undefined) sky.cloudCoverage.value  = 0.15;
+      if (sky.cloudDensity   !== undefined) sky.cloudDensity.value   = 0.5;
+      if (sky.cloudElevation !== undefined) sky.cloudElevation.value = 2000;
       sky.sunPosition.value.set(18, 22, 10).normalize();
 
       // Bake sky into env map for material reflections
@@ -124,13 +127,13 @@
       scene.environmentIntensity = 0.6;
 
       const camera = new THREE.PerspectiveCamera(42, window.innerWidth / window.innerHeight, 0.1, 300);
-      camera.position.set(0, 7.3, 21);
-      camera.lookAt(0, 3.2, LANE_Z);
+      camera.position.set(0, 4.0, 16);
+      camera.lookAt(0, 1.8, LANE_Z);
 
-      const hemi = new THREE.HemisphereLight(0xeef6ff, 0x7b8a95, 0.95);
+      const hemi = new THREE.HemisphereLight(0xeef6ff, 0x7b8a95, 0.42);
       scene.add(hemi);
 
-      const sun = new THREE.DirectionalLight(0xf8fbff, 1.45);
+      const sun = new THREE.DirectionalLight(0xfff8f0, 1.8);
       sun.position.set(18, 22, 10);
       sun.castShadow = true;
       sun.shadow.mapSize.set(2048, 2048);
@@ -142,18 +145,15 @@
       sun.shadow.camera.far    = 180;
       sun.shadow.bias = -0.001;
       scene.add(sun);
+      scene.add(sun.target);
 
-      const skyFill = new THREE.DirectionalLight(0xd9e9ff, 0.35);
+      const skyFill = new THREE.DirectionalLight(0xc8deff, 0.18);
       skyFill.position.set(-12, 14, 6);
       scene.add(skyFill);
 
-      const rim = new THREE.DirectionalLight(0xf0f7ff, 0.32);
+      const rim = new THREE.DirectionalLight(0xe8f4ff, 0.14);
       rim.position.set(-6, 8, 16);
       scene.add(rim);
-
-      const coldBounce = new THREE.DirectionalLight(0xd4ecff, 0.45);
-      coldBounce.position.set(6, 4, 18);
-      scene.add(coldBounce);
 
       function groundHeight(x) {
         return (
@@ -208,8 +208,9 @@
       const snow10Color  = tx.load("./textures/Snow010A/Snow010A_1K-JPG_Color.jpg");
       const snow10Normal = tx.load("./textures/Snow010A/Snow010A_1K-JPG_NormalGL.jpg");
       const snow10Rough  = tx.load("./textures/Snow010A/Snow010A_1K-JPG_Roughness.jpg");
+      const snow10AO     = tx.load("./textures/Snow010A/Snow010A_1K-JPG_AmbientOcclusion.jpg");
       snow10Color.colorSpace = THREE.SRGBColorSpace;
-      for (const t of [snow10Color, snow10Normal, snow10Rough]) {
+      for (const t of [snow10Color, snow10Normal, snow10Rough, snow10AO]) {
         t.wrapS = THREE.RepeatWrapping;
         t.wrapT = THREE.RepeatWrapping;
         t.repeat.set(16, 3.2);
@@ -218,8 +219,10 @@
       const snowMat = new THREE.MeshStandardMaterial({
         map: snow10Color,
         normalMap: snow10Normal,
-        normalScale: new THREE.Vector2(0.38, 0.38),
+        normalScale: new THREE.Vector2(0.9, 0.9),
         roughnessMap: snow10Rough,
+        aoMap: snow10AO,
+        aoMapIntensity: 1.4,
         roughness: 0.88,
         metalness: 0,
         envMapIntensity: 0.22,
@@ -297,9 +300,44 @@
         scene.add(mesh);
       }
 
-      addMountainLayer({ z: -68,  width: floorLen * 1.3, baseY: 1,  amp: 13,  jagged: 0.5,  seed: 1.0 });
-      addMountainLayer({ z: -112, width: floorLen * 1.4, baseY: -1, amp: 20,  jagged: 0.85, seed: 2.8 });
-      addMountainLayer({ z: -162, width: floorLen * 1.5, baseY: -3, amp: 28,  jagged: 1.15, seed: 5.3 });
+      // z=-68: 3D displaced ridge (closest mountain layer, needs real depth)
+      function add3DRidge({ z, zDepth, amp, seed, fogVal = true }) {
+        const geo = new THREE.PlaneGeometry(floorLen * 1.35, zDepth, 300, 48);
+        geo.rotateX(-Math.PI / 2);
+        const pos = geo.attributes.position.array;
+        for (let i = 0; i < pos.length; i += 3) {
+          const x  = pos[i];
+          const zl = pos[i + 2];
+          const n  =   Math.max(0, Math.sin(x * 0.028 + seed * 1.7) * 0.9
+                               + Math.sin(x * 0.065 - seed * 2.3) * 0.5
+                               + Math.sin(x * 0.14  + seed * 0.8) * 0.25
+                               + Math.sin(x * 0.24  + seed * 1.1) * 0.14) * amp;
+          const nz = (Math.sin(zl * 0.12 + seed * 0.9) * 0.5 + 0.5) * amp * 0.35;
+          pos[i + 1] = 0.5 + n + nz;
+        }
+        geo.computeVertexNormals();
+        const pa    = geo.attributes.position;
+        const vcArr = new Float32Array(pa.count * 3);
+        const rockC = new THREE.Color(0x48545f);
+        const snowC = new THREE.Color(0xecf4fb);
+        const tmp   = new THREE.Color();
+        for (let i = 0; i < pa.count; i++) {
+          const t = THREE.MathUtils.smoothstep(pa.getY(i), amp * 0.15, amp * 0.6);
+          tmp.lerpColors(rockC, snowC, t);
+          vcArr[i * 3] = tmp.r; vcArr[i * 3 + 1] = tmp.g; vcArr[i * 3 + 2] = tmp.b;
+        }
+        geo.setAttribute('color', new THREE.BufferAttribute(vcArr, 3));
+        const mat  = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.93, metalness: 0, fog: fogVal, envMapIntensity: 0.15 });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.z = z;
+        mesh.receiveShadow = true;
+        scene.add(mesh);
+      }
+      add3DRidge({ z: -68,  zDepth: 32, amp: 13, seed: 1.0 });
+      add3DRidge({ z: -100, zDepth: 42, amp: 20, seed: 2.8 });
+
+      // Far layers stay as flat silhouettes — enough fog they read as atmospheric depth
+      addMountainLayer({ z: -148, width: floorLen * 1.5, baseY: -3, amp: 28,  jagged: 1.15, seed: 5.3 });
 
       // Backdrop fill behind mountain strips to prevent sky leaking between layers.
       const farBackdrop = new THREE.Mesh(
@@ -499,6 +537,28 @@
         }
       }
 
+      // Foreground rocks — scattered boulders near camera, ground the scene
+      const rockMat = new THREE.MeshStandardMaterial({ color: 0x3a4048, roughness: 0.94, metalness: 0.04, fog: false, envMapIntensity: 0.08 });
+      const fgRockDefs = [
+        { x: -52, z: 5.5, sx: 1.8, sy: 1.1, sz: 1.5 },
+        { x:  44, z: 6.2, sx: 2.1, sy: 1.3, sz: 1.7 },
+        { x: -80, z: 7.8, sx: 1.4, sy: 0.9, sz: 1.2 },
+        { x:  68, z: 5.0, sx: 1.6, sy: 1.0, sz: 1.4 },
+        { x:  15, z: 9.5, sx: 2.4, sy: 1.5, sz: 2.0 },
+        { x: -30, z: 8.0, sx: 1.0, sy: 0.7, sz: 0.9 },
+      ];
+      const rockGeo = new THREE.IcosahedronGeometry(1, 1);
+      for (const r of fgRockDefs) {
+        const m = new THREE.Mesh(rockGeo, rockMat);
+        m.scale.set(r.sx, r.sy, r.sz);
+        const gy = surfaceY(r.x, r.z);
+        m.position.set(r.x, gy + r.sy * 0.45, r.z);
+        m.rotation.y = Math.random() * Math.PI;
+        m.castShadow = true;
+        m.receiveShadow = true;
+        scene.add(m);
+      }
+
       const gate = new THREE.Group();
       const gateMat = new THREE.MeshStandardMaterial({
         color: 0x202a34,
@@ -629,6 +689,8 @@
         const count = Math.max(0, Math.floor(look.treeCount));
         if (count === 0) return;
         addInstancedPinesFromGltf(pineSourceScene, count, look.treeNearZ, look.treeFarZ);
+        // Sparse foreground trees — frame bottom of screen, don't crowd center lane
+        addInstancedPinesFromGltf(pineSourceScene, 10, 8, 4);
       }
 
       try {
@@ -654,7 +716,7 @@
         snowGeo,
         new THREE.PointsMaterial({
           color: 0xf8fdff,
-          size: 0.21,
+          size: 0.32,
           sizeAttenuation: true,
           transparent: true,
           opacity: 0.88,
@@ -688,7 +750,6 @@
         sunIntensity: sun.intensity,
         skyFillIntensity: skyFill.intensity,
         rimIntensity: rim.intensity,
-        coldBounceIntensity: coldBounce.intensity,
         treeScale: 1.0,
         treesEnabled: true,
         treeCount: 260,
@@ -701,7 +762,7 @@
         groundAccel: 22,
         airAccel: 10,
         camFollow: 4.8,
-        camHeight: 7.3,
+        camHeight: 4.0,
         camOffsetX: 2.6,
         obstacleHeightScale: 1.0,
       };
@@ -734,7 +795,6 @@
       fLights.addBinding(look, "sunIntensity", { min: 0, max: 3, step: 0.01 }).on("change", (ev) => (sun.intensity = ev.value));
       fLights.addBinding(look, "skyFillIntensity", { min: 0, max: 2, step: 0.01 }).on("change", (ev) => (skyFill.intensity = ev.value));
       fLights.addBinding(look, "rimIntensity", { min: 0, max: 2, step: 0.01 }).on("change", (ev) => (rim.intensity = ev.value));
-      fLights.addBinding(look, "coldBounceIntensity", { min: 0, max: 2, step: 0.01 }).on("change", (ev) => (coldBounce.intensity = ev.value));
 
       const fScene = pane.addFolder({ title: "Scene" });
       fScene.addBinding(look, "treeScale", { min: 0.6, max: 2.4, step: 0.01 }).on("change", (ev) => {
@@ -874,7 +934,12 @@
         const camTargetX = player.x + look.camOffsetX;
         camera.position.x += (camTargetX - camera.position.x) * Math.min(look.camFollow * dt, 1);
         camera.position.y += (look.camHeight - camera.position.y) * Math.min(2.6 * dt, 1);
-        camera.lookAt(player.x + 2.2, 2.8, LANE_Z);
+        camera.lookAt(player.x + 2.2, 1.8, LANE_Z);
+
+        // Shadow camera follows player X — keeps tight frustum for sharp shadows
+        sun.position.set(player.x + 18, 22, 10);
+        sun.target.position.set(player.x, 0, 0);
+        sun.target.updateMatrixWorld();
 
         const arr = snow.geometry.attributes.position.array;
         for (let i = 0; i < snowCount; i++) {
