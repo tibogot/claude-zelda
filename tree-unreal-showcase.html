@@ -53,6 +53,7 @@ import {
 } from "three/tsl";
 import { MeshStandardNodeMaterial } from "three";
 import { GLTFLoader }   from "three/addons/loaders/GLTFLoader.js";
+import { DRACOLoader }  from "three/addons/loaders/DRACOLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { Pane }          from "tweakpane";
 
@@ -62,6 +63,8 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+// Required when any material uses `castShadowNode` (alpha-tested leaf shadows).
+renderer.shadowMap.transmitted = true;
 document.body.appendChild(renderer.domElement);
 await renderer.init();
 
@@ -227,6 +230,12 @@ leafMat.positionNode = positionNode;
 leafMat.colorNode    = colorNode;
 leafMat.opacityNode  = opacityNode;
 leafMat.envMapIntensity = 0;
+// Shadow pass must discard the same texels as the color pass; default depth shader only sees the quad.
+leafMat.castShadowNode = Fn(() => {
+  const a = smoothstep(uAlphaCutoff.sub(0.05), uAlphaCutoff.add(0.05), leafMapNode.r);
+  a.lessThan(float(0.5)).discard();
+  return vec4(0, 0, 0, 1);
+})();
 
 // ─── CLUSTER DEFINITIONS ─────────────────────────────────────────────────────
 // Each cluster = one ellipsoid of leaf planes, independently positioned on trunk
@@ -363,7 +372,12 @@ function updateClusterHelpers() {
 updateClusterHelpers();
 
 // ─── TRUNK GLB LOADER ────────────────────────────────────────────────────────
+const dracoLoader = new DRACOLoader();
+dracoLoader.setDecoderPath(
+  "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/libs/draco/",
+);
 const gltfLoader = new GLTFLoader();
+gltfLoader.setDRACOLoader(dracoLoader);
 let trunkScale = 1.0;
 
 function loadTrunk(file) {
