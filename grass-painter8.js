@@ -52,10 +52,11 @@ import {
 export const GRASS_PATCH_SIZE = 10;
 export const GRASS_SEGMENTS_LOW = 1;
 export const GRASS_SEGMENTS_MID = 3;
-export const GRASS_SEGMENTS_HIGH = 6;
-export const GRASS_VERTS_LOW = (GRASS_SEGMENTS_LOW + 1) * 2;
-export const GRASS_VERTS_MID = (GRASS_SEGMENTS_MID + 1) * 2;
-export const GRASS_VERTS_HIGH = (GRASS_SEGMENTS_HIGH + 1) * 2;
+export const GRASS_SEGMENTS_HIGH = 7;  // 7 segs + 1 tip = 15 verts — exact GoT high LOD
+// Pointed-tip blades: segments×2 pairs + 1 single tip vertex
+export const GRASS_VERTS_LOW  = GRASS_SEGMENTS_LOW  * 2 + 1;  // 3
+export const GRASS_VERTS_MID  = GRASS_SEGMENTS_MID  * 2 + 1;  // 7  — exact GoT low LOD
+export const GRASS_VERTS_HIGH = GRASS_SEGMENTS_HIGH * 2 + 1;  // 15 — exact GoT high LOD
 export const NEAR_PATCH_SIZE = 5;
 export const GRASS_DENSITY = 40 * 40 * 3;
 export const GRASS_DENSITY_LOW = 24 * 24 * 3;
@@ -69,15 +70,22 @@ export function createGrassGeometry(
   randRange,
 ) {
   setSeed(0);
-  const V = (segments + 1) * 2,
+  // segments×2 paired verts + 1 single tip vertex, duplicated for back-face copy
+  const V = segments * 2 + 1,
     T = V * 2,
     indices = [];
-  for (let i = 0; i < segments; i++) {
+  // All segments except the last: normal quads
+  for (let i = 0; i < segments - 1; i++) {
     const v = i * 2;
     indices.push(v, v + 1, v + 2, v + 2, v + 1, v + 3);
     const f = V + v;
     indices.push(f + 2, f + 1, f, f + 3, f + 1, f + 2);
   }
+  // Last segment: triangle converging to single tip vertex (pointed tip)
+  const lb  = (segments - 1) * 2;  // last base pair
+  const tip = segments * 2;         // single tip vertex = V - 1
+  indices.push(lb, lb + 1, tip);             // front face triangle
+  indices.push(V + tip, V + lb + 1, V + lb); // back face triangle (reversed winding)
   const pos = new Float32Array(T * 3),
     nrm = new Float32Array(T * 3),
     vid = new Float32Array(T),
@@ -214,8 +222,21 @@ export function createGrassMaterial(
     const lodFadeIn = smoothstep(uLodDist, uMaxDist, distXZ);
     const randomAngle = mul(hv.x, 2 * PI),
       randomShade = remap(hv.y, -1, 1, 0.75, 1);
+
+    // ── GoT-style clumping: low-freq world noise groups nearby blades ─────────
+    // Same UV for all three samples so height + lean are spatially coherent.
+    const clumpUV     = mul(bladeWorld.xz, 0.18);
+    const clumpN      = noise12(clumpUV);                                          // 0..1
+    const clumpLx     = sub(mul(noise12(add(clumpUV, vec2(3.7, 1.2))), 2), 1);    // −1..1
+    const clumpLz     = sub(mul(noise12(add(clumpUV, vec2(8.1, 5.3))), 2), 1);    // −1..1
+    // Height: clump areas vary 85%–115% on top of per-blade randomHeight
+    const clumpHeight = remap(clumpN, 0, 1, 0.85, 1.15);
+    // Lean: strength of shared-direction pull within a clump (~0.35 units of tip offset)
+    const clumpLeanStr = float(0.35);
+
     const randomHeight = mul(
       remap(hv.z, 0, 1, 0.75, 1.5),
+      clumpHeight,
       mix(1, 0, lodFadeIn),
     );
     const randomLean = remap(hv.w, 0, 1, 0.1, 0.3);
@@ -473,17 +494,29 @@ export function createGrassMaterial(
     const interactionTip = mul(pAngle, totalHeightVis, hasInteraction);
 
     // Bezier tip control point P2 — compute horizontal displacement first
+    const clumpLeanX = mul(clumpLx, mul(totalHeightVis, clumpLeanStr));
+    const clumpLeanZ = mul(clumpLz, mul(totalHeightVis, clumpLeanStr));
     const p2xRaw = add(
-      mul(uWindDirX,         add(windTip, bobbingTip)),
-      mul(negate(uWindDirZ), crossTip),
-      mul(cos(randomAngle),  naturalTip),
-      mul(pTo.x,             interactionTip),
+      add(
+        mul(uWindDirX,         add(windTip, bobbingTip)),
+        mul(negate(uWindDirZ), crossTip),
+      ),
+      add(
+        mul(cos(randomAngle),  naturalTip),
+        mul(pTo.x,             interactionTip),
+      ),
+      clumpLeanX,
     );
     const p2zRaw = add(
-      mul(uWindDirZ,        add(windTip, bobbingTip)),
-      mul(uWindDirX,        crossTip),
-      mul(negate(sin(randomAngle)), naturalTip),
-      mul(pTo.z,            interactionTip),
+      add(
+        mul(uWindDirZ,               add(windTip, bobbingTip)),
+        mul(uWindDirX,               crossTip),
+      ),
+      add(
+        mul(negate(sin(randomAngle)), naturalTip),
+        mul(pTo.z,                   interactionTip),
+      ),
+      clumpLeanZ,
     );
     // Chord-length conservation: keep root→tip distance = totalHeightVis.
     // As blade leans, p2y drops so the tip "falls" instead of stretching upward.
@@ -568,7 +601,9 @@ export function createGrassMaterial(
     );
 
     const skyFade = mix(uMinSkyBlend, uMaxSkyBlend, highLODOut);
-    const finalNormal = normalize(mix(bladeNormal, vec3(0, 1, 0), skyFade));
+    const mixed = mix(bladeNormal, vec3(0, 1, 0), skyFade);
+    // Clamp Y so no blade normal points into the ground
+    const finalNormal = normalize(vec3(mixed.x, max(mixed.y, float(0)), mixed.z));
     normalLocal.assign(finalNormal);
 
     // All vertices use the blade root's terrain height (terrainH).
@@ -609,6 +644,12 @@ export function createGrassMaterial(
       grassCol,
       mul(uBleachedColor, randomShade),
       mul(smoothstep(0.7, 0.9, colorMix), colorVarLod, 0.3),
+    );
+    // Clump-scale color: lush-green patches vs slightly warm/dry — matches GoT large color clusters
+    grassCol = mix(
+      grassCol,
+      mul(uLushColor, randomShade),
+      mul(smoothstep(0.62, 0.82, clumpN), colorVarLod, 0.45),
     );
     grassCol = mix(grassCol, uSeasonalDryColor, seasonFactor);
     grassCol = mix(
@@ -657,8 +698,8 @@ export function createGrassMaterial(
       0,
       1,
     );
-    const sssLod = mul(totalSSS, smoothstep(0.2, 0.5, vPacked.z));
-    col = add(col, mul(transmitCol, 0.35, sssLod, uBsIntensity));
+    // SSS always active — no LOD gate (GoT lights all blades from all angles)
+    col = add(col, mul(transmitCol, 0.35, totalSSS, uBsIntensity));
 
     const sceneDepth = length(sub(cameraPosition, vWorldPos));
     const specNormal = normalize(n);
@@ -669,7 +710,7 @@ export function createGrassMaterial(
     const specDot = pow(max(dot(viewDir, specReflect), 0.0), 25.6);
     const specDistFade = smoothstep(2.0, 10.0, sceneDepth);
     const specTipFade = smoothstep(0.5, 1.0, heightPct);
-    const specLod = smoothstep(0.2, 0.5, vPacked.z);
+    const specLod = smoothstep(0.0, 0.3, vPacked.z);
     const specV1 = mul(
       uSpecV1Color,
       specDot,

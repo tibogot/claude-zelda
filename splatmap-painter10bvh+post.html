@@ -103,6 +103,10 @@
         background: rgba(140, 40, 180, 0.95);
         color: #f0d0ff;
       }
+      #mode-badge.ftrees {
+        background: rgba(20, 110, 60, 0.95);
+        color: #b0ffd0;
+      }
 
       #chunk-info {
         position: fixed;
@@ -317,6 +321,9 @@
         sqrt,
         luminance,
         color,
+        attribute,
+        positionLocal,
+        negate,
       } from "three/tsl";
       import { bloom } from "three/addons/tsl/display/BloomNode.js";
       import { fxaa } from "three/addons/tsl/display/FXAANode.js";
@@ -795,6 +802,61 @@
       let _rebuildLODChunks   = (_slot) => {}; // assigned inside init() once scene is ready
       const lodParams = { slotName: "Pine", threshold: 80, minSpacing: 3, scaleMin: 0.8, scaleMax: 1.4, density: 0.25, treesPerStroke: 3, count0: 0, count1: 0, totalTrees: 0, chunks: 0, chunksVisible: 0 };
       let lodFolder = null;
+
+      // ─── FOLIAGE TREE SYSTEM (trunk GLB + TSL leaf planes) ───────────────────
+      const FTREE_CLUSTER_DEAD = {
+        clusters: [
+          { enabled: true,  x: 0,   y: 6.8, z: 0,   rx: 2.4, ry: 2.4, count: 500,
+            leafSize: 1,    scaleVar: 0.35, shell: 0.5,  shellThick: 0.45, tiltMax: 35 },
+          { enabled: false, x: 1.1, y: 2.8, z: 0.4, rx: 1.3, ry: 0.9, count: 200,
+            leafSize: 0.85, scaleVar: 0.3,  shell: 0.45, shellThick: 0.4,  tiltMax: 40 },
+          { enabled: false, x: 0,   y: 5.6, z: 0,   rx: 1.0, ry: 0.7, count: 140,
+            leafSize: 0.75, scaleVar: 0.25, shell: 0.55, shellThick: 0.35, tiltMax: 28 },
+        ],
+        material: {
+          bottomColor: "#2d5a1b", topColor: "#5aaa2a", colorVar: 0.12, roughness: 0.88,
+          alphaCutoff: 0.45, sssColor: "#ffee55", sssStr: 0.55, sssPow: 2,
+          rimColor: "#c8ffaa", rimStr: 0.38, rimPow: 2.5, aoStr: 0.45,
+        },
+        wind: { windSpeed: 0.9, windStr: 0.13, windMicro: 0.04 },
+        trunkScale: 0.1,
+      };
+      const FTREE_SLOTS = [
+        { name: "Dead",   trunkPath: "models/low_poly_dead_tree_compressed.glb",
+          leafTexPath: "textures/leaves/foliage_alpha3.png", clusterPreset: FTREE_CLUSTER_DEAD,
+          lodThreshold: 60, minSpacing: 2, scaleMin: 0.9, scaleMax: 1.1,
+          density: 0.2,  treesPerStroke: 2,
+          positions: [], chunks: new Map(), trunkDefs: null,
+          leafMat: null, leafMapNode: null, leafMesh: null, uniforms: null, ready: false },
+        { name: "Slot 2", trunkPath: null, leafTexPath: null, clusterPreset: null,
+          lodThreshold: 60, minSpacing: 2, scaleMin: 0.8, scaleMax: 1.2,
+          density: 0.2,  treesPerStroke: 2,
+          positions: [], chunks: new Map(), trunkDefs: null,
+          leafMat: null, leafMapNode: null, leafMesh: null, uniforms: null, ready: false },
+        { name: "Slot 3", trunkPath: null, leafTexPath: null, clusterPreset: null,
+          lodThreshold: 60, minSpacing: 2, scaleMin: 0.8, scaleMax: 1.2,
+          density: 0.2,  treesPerStroke: 2,
+          positions: [], chunks: new Map(), trunkDefs: null,
+          leafMat: null, leafMapNode: null, leafMesh: null, uniforms: null, ready: false },
+        { name: "Slot 4", trunkPath: null, leafTexPath: null, clusterPreset: null,
+          lodThreshold: 60, minSpacing: 2, scaleMin: 0.8, scaleMax: 1.2,
+          density: 0.2,  treesPerStroke: 2,
+          positions: [], chunks: new Map(), trunkDefs: null,
+          leafMat: null, leafMapNode: null, leafMesh: null, uniforms: null, ready: false },
+      ];
+      let activeFTreeSlot       = 0;
+      const FTREE_CHUNK_SIZE    = 64;
+      const FTREE_MAX_PER_CHUNK = 256;
+      let _rebuildFTreeChunks   = (_slot) => {};  // assigned inside init()
+      let _ftreeRebuildLeaves   = (_slot) => {};  // assigned inside init()
+      const ftreeParams = { slotName: "Dead", threshold: 60, minSpacing: 2, scaleMin: 0.9, scaleMax: 1.1, density: 0.2, treesPerStroke: 2, totalTrunks: 0, totalLeaves: 0, chunksVisible: 0, chunks: 0 };
+      let ftreeFolder = null;
+      const uFTreeTime    = uniform(0.0);
+      const _ftreeDummy   = new THREE.Object3D();
+      const _ftreeFinalMat = new THREE.Matrix4();
+      const _ftreeCamPos  = new THREE.Vector3();
+      const _ftreeFrustum = new THREE.Frustum();
+      const _ftreeProjMat = new THREE.Matrix4();
       const _lodDummy    = new THREE.Object3D();
       const _lodFinalMat = new THREE.Matrix4();
       const _lodCamPos   = new THREE.Vector3();
@@ -1543,6 +1605,139 @@
         });
       }
 
+      // ─── FTREE HELPERS ───────────────────────────────────────────────────
+      // LCG cluster sampler — pure JS, same as sandbox
+      function _ftreeSampleClusters(preset) {
+        const all = [];
+        preset.clusters.forEach((c, ci) => {
+          if (!c.enabled) return;
+          let lcg = ((ci * 999983 + 12345) >>> 0);
+          lcg = ((lcg * 1664525 + 1013904223) >>> 0);
+          const rng = () => { lcg = (lcg * 1664525 + 1013904223) >>> 0; return lcg / 0xffffffff; };
+          const maxTry = c.count * 12;
+          let tries = 0, added = 0;
+          while (added < c.count && tries++ < maxTry) {
+            const rx = rng() * 2 - 1;
+            const ry = rng() * 2 - 1;
+            const rz = rng() * 2 - 1;
+            const d  = Math.sqrt(rx*rx + ry*ry + rz*rz);
+            if (d > 1.0) continue;
+            const innerR = 1.0 - c.shellThick;
+            if (d < innerR && rng() < c.shell) continue;
+            all.push({ lx: c.x + rx * c.rx, ly: c.y + ry * c.ry, lz: c.z + rz * c.rx,
+                       leafSize: c.leafSize, scaleVar: c.scaleVar, tiltMax: c.tiltMax });
+            added++;
+          }
+        });
+        return all;
+      }
+
+      // Build TSL leaf material for a slot from its clusterPreset
+      function _ftreeBuildLeafMat(slot) {
+        const m = slot.clusterPreset.material;
+        const w = slot.clusterPreset.wind;
+        const mapNode = texture(new THREE.Texture());
+        slot.leafMapNode = mapNode;
+        const u = {
+          yMin:        uniform(0.0),
+          yMax:        uniform(10.0),
+          bottomColor: uniform(new THREE.Color(m.bottomColor)),
+          topColor:    uniform(new THREE.Color(m.topColor)),
+          colorVar:    uniform(m.colorVar),
+          alphaCutoff: uniform(m.alphaCutoff),
+          sssColor:    uniform(new THREE.Color(m.sssColor)),
+          sssStr:      uniform(m.sssStr),
+          sssPow:      uniform(m.sssPow),
+          rimColor:    uniform(new THREE.Color(m.rimColor)),
+          rimStr:      uniform(m.rimStr),
+          rimPow:      uniform(m.rimPow),
+          aoStr:       uniform(m.aoStr),
+          sunDir:      uniform(new THREE.Vector3(5, 12, 4).normalize()),
+          windSpeed:   uniform(w.windSpeed),
+          windStr:     uniform(w.windStr),
+          windMicro:   uniform(w.windMicro),
+        };
+        slot.uniforms = u;
+        const aRand = attribute("aRand", "vec2");
+        const positionNode = Fn(() => {
+          const phase     = aRand.x.mul(6.2832);
+          const tipFactor = positionLocal.y.add(0.5);
+          const sway      = sin(uFTreeTime.mul(u.windSpeed).add(phase)).mul(u.windStr).mul(tipFactor);
+          const micro     = sin(uFTreeTime.mul(3.1).add(phase.mul(2.6))).mul(u.windMicro).mul(tipFactor);
+          const swayZ     = cos(uFTreeTime.mul(u.windSpeed.mul(0.8)).add(phase.mul(1.3))).mul(u.windStr.mul(0.5)).mul(tipFactor);
+          return positionLocal.add(vec3(sway.add(micro), float(0), swayZ));
+        })();
+        const colorNode = Fn(() => {
+          const h1 = aRand.x;
+          const h2 = aRand.y;
+          const heightFactor = clamp(
+            positionWorld.y.sub(u.yMin).div(max(u.yMax.sub(u.yMin), float(0.001))),
+            float(0), float(1)
+          );
+          let col = mix(u.bottomColor, u.topColor, heightFactor);
+          col = col.mul(h1.mul(u.colorVar.mul(2.0)).add(float(1.0).sub(u.colorVar)));
+          const hueShift = h2.sub(0.5).mul(u.colorVar.mul(0.4));
+          col = vec3(col.x.add(hueShift.mul(0.3)), col.y, col.z.sub(hueShift.mul(0.2)));
+          col = col.mul(mix(float(1.0).sub(u.aoStr), float(1.0), heightFactor.mul(0.8).add(0.2)));
+          const viewDir = normalize(cameraPosition.sub(positionWorld));
+          const n       = normalWorld;
+          const sss     = pow(max(dot(negate(u.sunDir), n), float(0)), u.sssPow).mul(u.sssStr);
+          col = col.add(u.sssColor.mul(sss));
+          const rim = pow(float(1.0).sub(max(dot(n, viewDir), float(0))), u.rimPow).mul(u.rimStr);
+          col = col.add(u.rimColor.mul(rim));
+          return clamp(col, float(0), float(2));
+        })();
+        const opacityNode = Fn(() =>
+          smoothstep(u.alphaCutoff.sub(0.05), u.alphaCutoff.add(0.05), mapNode.r)
+        )();
+        const mat = new MeshStandardNodeMaterial({
+          side: THREE.DoubleSide, transparent: false, alphaTest: 0.5,
+          roughness: m.roughness, metalness: 0.0, depthWrite: true,
+        });
+        mat.positionNode = positionNode;
+        mat.colorNode    = colorNode;
+        mat.opacityNode  = opacityNode;
+        slot.leafMat = mat;
+      }
+
+      function syncFTreeHeights() {
+        FTREE_SLOTS.forEach(slot => {
+          if (slot.positions.length === 0) return;
+          slot.positions.forEach(p => { p.y = sampleHeight(p.x, p.z); });
+          _rebuildFTreeChunks(slot);
+          _ftreeRebuildLeaves(slot);
+        });
+      }
+
+      function paintFTreeAt(wx, wz, erase) {
+        const slot = FTREE_SLOTS[activeFTreeSlot];
+        if (!slot.clusterPreset && !slot.trunkPath) return; // empty slot
+        const radius = brushWorldRadius();
+        if (erase) {
+          const r2 = radius * radius;
+          slot.positions = slot.positions.filter(
+            p => (p.x - wx) ** 2 + (p.z - wz) ** 2 > r2
+          );
+        } else {
+          const target = slot.treesPerStroke;
+          const ms2    = slot.minSpacing * slot.minSpacing;
+          let added    = 0;
+          for (let attempt = 0; attempt < target * 4 && added < target; attempt++) {
+            const angle = Math.random() * Math.PI * 2;
+            const dist  = Math.sqrt(Math.random()) * radius;
+            const x = wx + Math.cos(angle) * dist;
+            const z = wz + Math.sin(angle) * dist;
+            if (ms2 > 0 && slot.positions.some(p => (p.x - x) ** 2 + (p.z - z) ** 2 < ms2)) continue;
+            const y     = sampleHeight(x, z);
+            const scale = slot.scaleMin + Math.random() * (slot.scaleMax - slot.scaleMin);
+            slot.positions.push({ x, y, z, scale });
+            added++;
+          }
+        }
+        if (slot.ready) _rebuildFTreeChunks(slot);
+        _ftreeRebuildLeaves(slot);
+      }
+
       // ─── TREE LOD PAINT ──────────────────────────────────────────────────
       function paintLODAt(wx, wz, erase) {
         const slot = LOD_SLOTS[activeLodSlot];
@@ -2200,6 +2395,7 @@
         if (bakeBVH) bakeBVH();
         if (treeSystem) treeSystem.syncHeights();
         syncLODHeights();
+        syncFTreeHeights();
         FOLIAGE_SLOTS.forEach((s) => {
           if (s.system) s.system.syncHeights();
         });
@@ -2365,6 +2561,7 @@
           if (bakeBVH) bakeBVH();
           if (treeSystem) treeSystem.syncHeights();
           syncLODHeights();
+          syncFTreeHeights();
           FOLIAGE_SLOTS.forEach((s) => {
             if (s.system) s.system.syncHeights();
           });
@@ -5092,6 +5289,121 @@
           }
         });
 
+        // ── FTREE INIT ──
+        // Build leaf materials for slots that have a preset
+        FTREE_SLOTS.forEach(slot => {
+          if (slot.clusterPreset) _ftreeBuildLeafMat(slot);
+        });
+
+        // Real _ftreeRebuildLeaves — needs scene in scope
+        _ftreeRebuildLeaves = function(slot) {
+          if (slot.leafMesh) {
+            scene.remove(slot.leafMesh);
+            slot.leafMesh.geometry.dispose();
+            slot.leafMesh = null;
+          }
+          if (!slot.leafMat || !slot.clusterPreset || slot.positions.length === 0) return;
+          const localLeaves = _ftreeSampleClusters(slot.clusterPreset);
+          if (localLeaves.length === 0) return;
+          const n = slot.positions.length * localLeaves.length;
+          // Update Y range for gradient uniform
+          let yMin = Infinity, yMax = -Infinity;
+          slot.positions.forEach(p => {
+            localLeaves.forEach(l => {
+              const wy = p.y + l.ly * p.scale;
+              if (wy < yMin) yMin = wy;
+              if (wy > yMax) yMax = wy;
+            });
+          });
+          if (slot.uniforms) { slot.uniforms.yMin.value = yMin - 0.3; slot.uniforms.yMax.value = yMax + 0.5; }
+          const geo      = new THREE.PlaneGeometry(1, 1);
+          const randData = new Float32Array(n * 2);
+          for (let i = 0; i < n; i++) { randData[i*2] = Math.random(); randData[i*2+1] = Math.random(); }
+          geo.setAttribute("aRand", new THREE.InstancedBufferAttribute(randData, 2));
+          const mesh = new THREE.InstancedMesh(geo, slot.leafMat, n);
+          mesh.frustumCulled = false;
+          mesh.castShadow    = true;
+          mesh.receiveShadow = false;
+          const dummy   = new THREE.Object3D();
+          const DEG2RAD = Math.PI / 180;
+          let idx = 0;
+          slot.positions.forEach(p => {
+            localLeaves.forEach(l => {
+              dummy.position.set(p.x + l.lx * p.scale, p.y + l.ly * p.scale, p.z + l.lz * p.scale);
+              dummy.rotation.order = "YXZ";
+              dummy.rotation.y = Math.random() * Math.PI * 2;
+              dummy.rotation.x = (Math.random() - 0.5) * l.tiltMax * DEG2RAD * 2;
+              dummy.rotation.z = (Math.random() - 0.5) * l.tiltMax * DEG2RAD * 2;
+              const s = Math.max(0.05, l.leafSize * p.scale * (1 + (Math.random() - 0.5) * 2 * l.scaleVar));
+              dummy.scale.setScalar(s);
+              dummy.updateMatrix();
+              mesh.setMatrixAt(idx++, dummy.matrix);
+            });
+          });
+          mesh.instanceMatrix.needsUpdate = true;
+          scene.add(mesh);
+          slot.leafMesh = mesh;
+        };
+
+        // Real _rebuildFTreeChunks — needs scene + _makeChunkIMs in scope
+        _rebuildFTreeChunks = function(slot) {
+          if (!slot || !slot.ready || !slot.trunkDefs) return;
+          const byChunk = new Map();
+          slot.positions.forEach(pos => {
+            const key = `${Math.floor(pos.x / FTREE_CHUNK_SIZE)},${Math.floor(pos.z / FTREE_CHUNK_SIZE)}`;
+            if (!byChunk.has(key)) byChunk.set(key, []);
+            byChunk.get(key).push(pos);
+          });
+          for (const key of [...slot.chunks.keys()]) {
+            if (!byChunk.has(key)) {
+              slot.chunks.get(key).ims.forEach(g => scene.remove(g.im));
+              slot.chunks.delete(key);
+            }
+          }
+          for (const [key, positions] of byChunk) {
+            let chunk = slot.chunks.get(key);
+            if (!chunk) {
+              chunk = { positions: [], sphere: new THREE.Sphere(), ims: _makeChunkIMs(slot.trunkDefs) };
+              slot.chunks.set(key, chunk);
+            }
+            chunk.positions = positions;
+            let cx = 0, cy = 0, cz = 0;
+            positions.forEach(p => { cx += p.x; cy += p.y; cz += p.z; });
+            cx /= positions.length; cy /= positions.length; cz /= positions.length;
+            let r = 0;
+            positions.forEach(p => { const d = Math.sqrt((p.x-cx)**2+(p.y-cy)**2+(p.z-cz)**2); if (d > r) r = d; });
+            chunk.sphere.set(new THREE.Vector3(cx, cy, cz), r + 20);
+          }
+        };
+
+        // Load leaf texture from path if specified
+        function _ftreeLoadLeafTex(slot) {
+          if (!slot.leafTexPath || !slot.leafMapNode) return;
+          new THREE.TextureLoader().load(slot.leafTexPath, tex => {
+            tex.colorSpace = THREE.SRGBColorSpace;
+            slot.leafMapNode.value = tex;
+          });
+        }
+
+        // Load trunk GLBs
+        FTREE_SLOTS.forEach(slot => {
+          if (!slot.trunkPath) {
+            slot.ready = true; // bush / no trunk — ready immediately
+            return;
+          }
+          gltfLoader.load(slot.trunkPath, g => {
+            slot.trunkDefs = _extractLODDefs(g);
+            slot.ready = true;
+            _rebuildFTreeChunks(slot);
+            _ftreeRebuildLeaves(slot);
+          }, undefined, () => {
+            console.warn(`FTree: ${slot.trunkPath} not found — leaves only`);
+            slot.ready = true;
+            _ftreeRebuildLeaves(slot);
+          });
+          _ftreeLoadLeafTex(slot);
+        });
+
         // ── TRANSFORM CONTROLS ──
         transformControls = new TransformControls(camera, renderer.domElement);
         transformControls.addEventListener("dragging-changed", (e) => {
@@ -5320,7 +5632,8 @@
           const meta = {
             version: 2,
             trees: treeSystem ? treeSystem.getPositions() : [],
-            lodSlots: LOD_SLOTS.map(s => ({ name: s.name, positions: s.positions })),
+            lodSlots:   LOD_SLOTS.map(s   => ({ name: s.name, positions: s.positions })),
+            ftreeSlots: FTREE_SLOTS.map(s  => ({ name: s.name, positions: s.positions })),
             foliage: FOLIAGE_SLOTS.map((s) => ({
               name: s.name,
               positions: s.system ? s.system.getPositions() : [],
@@ -5408,6 +5721,7 @@
               if (bakeBVH) bakeBVH();
               if (treeSystem) treeSystem.syncHeights();
               syncLODHeights();
+              syncFTreeHeights();
               FOLIAGE_SLOTS.forEach((s) => {
                 if (s.system) s.system.syncHeights();
               });
@@ -5475,6 +5789,15 @@
                   if (i < LOD_SLOTS.length) {
                     LOD_SLOTS[i].positions = saved.positions || [];
                     _rebuildLODChunks(LOD_SLOTS[i]);
+                  }
+                });
+              }
+              if (meta.ftreeSlots) {
+                meta.ftreeSlots.forEach((saved, i) => {
+                  if (i < FTREE_SLOTS.length) {
+                    FTREE_SLOTS[i].positions = saved.positions || [];
+                    _rebuildFTreeChunks(FTREE_SLOTS[i]);
+                    _ftreeRebuildLeaves(FTREE_SLOTS[i]);
                   }
                 });
               }
@@ -5756,6 +6079,7 @@
             "Grass [G]": "grass",
             "Trees [T]": "trees",
             "Tree LOD [J]": "pinelod",
+            "Foliage Trees [U]": "ftrees",
             "Foliage [N]": "foliage",
             "Props [I]": "props",
             "Path [L]": "path",
@@ -5898,6 +6222,7 @@
             if (bakeBVH) bakeBVH();
             if (treeSystem) treeSystem.syncHeights();
             syncLODHeights();
+            syncFTreeHeights();
             FOLIAGE_SLOTS.forEach((s) => {
               if (s.system) s.system.syncHeights();
             });
@@ -7265,6 +7590,74 @@
         });
         lodFolder.addButton({ title: "Import slot JSON" }).on("click", () => { _lodFileInput.click(); });
 
+        // ── FTREE FOLDER ──
+        ftreeFolder = pane.addFolder({ title: "Foliage Trees  [ U ]", expanded: true });
+        ftreeFolder.hidden = true;
+
+        const _ftreeSlotFolder = ftreeFolder.addFolder({ title: "Active slot  [ 1–4 ]", expanded: true });
+        FTREE_SLOTS.forEach((slot, i) => {
+          const label = `${i + 1}: ${slot.name}${slot.trunkPath ? '' : '  (no trunk)'}`;
+          _ftreeSlotFolder.addButton({ title: label }).on("click", () => {
+            activeFTreeSlot = i;
+            ftreeParams.slotName      = slot.name;
+            ftreeParams.threshold     = slot.lodThreshold;
+            ftreeParams.minSpacing    = slot.minSpacing;
+            ftreeParams.scaleMin      = slot.scaleMin;
+            ftreeParams.scaleMax      = slot.scaleMax;
+            ftreeParams.density       = slot.density;
+            ftreeParams.treesPerStroke = slot.treesPerStroke;
+            if (ftreeFolder) pane.refresh();
+          });
+        });
+        ftreeFolder.addBinding(ftreeParams, "slotName",       { label: "Painting slot",    readonly: true });
+        ftreeFolder.addBinding(ftreeParams, "minSpacing",     { label: "Min spacing",      min: 0,   max: 20,  step: 0.5  }).on("change", ev => { FTREE_SLOTS[activeFTreeSlot].minSpacing     = ev.value; });
+        ftreeFolder.addBinding(ftreeParams, "scaleMin",       { label: "Scale min",        min: 0.1, max: 5.0, step: 0.05 }).on("change", ev => { FTREE_SLOTS[activeFTreeSlot].scaleMin       = ev.value; });
+        ftreeFolder.addBinding(ftreeParams, "scaleMax",       { label: "Scale max",        min: 0.1, max: 5.0, step: 0.05 }).on("change", ev => { FTREE_SLOTS[activeFTreeSlot].scaleMax       = ev.value; });
+        ftreeFolder.addBinding(ftreeParams, "density",        { label: "Brush density",    min: 0.05, max: 2.0, step: 0.05 }).on("change", ev => { FTREE_SLOTS[activeFTreeSlot].density        = ev.value; });
+        ftreeFolder.addBinding(ftreeParams, "treesPerStroke", { label: "Trees per stroke", min: 1,   max: 20,  step: 1    }).on("change", ev => { FTREE_SLOTS[activeFTreeSlot].treesPerStroke = ev.value; });
+        ftreeFolder.addBinding(ftreeParams, "totalTrunks",    { label: "Total trunks",     readonly: true });
+        ftreeFolder.addBinding(ftreeParams, "totalLeaves",    { label: "Total leaves",     readonly: true });
+        ftreeFolder.addBinding(ftreeParams, "chunksVisible",  { label: "Chunks visible",   readonly: true });
+        ftreeFolder.addBinding(ftreeParams, "chunks",         { label: "Chunks total",     readonly: true });
+
+        // Load leaf texture per slot
+        ftreeFolder.addButton({ title: "Load Leaf Texture (active slot)" }).on("click", () => {
+          const inp = document.createElement("input");
+          inp.type = "file"; inp.accept = "image/*";
+          inp.onchange = () => {
+            if (!inp.files[0]) return;
+            const slot = FTREE_SLOTS[activeFTreeSlot];
+            if (!slot.leafMapNode) return;
+            const reader = new FileReader();
+            reader.onload = ev => {
+              const img = new Image();
+              img.onload = () => {
+                const tex = new THREE.Texture(img);
+                tex.colorSpace = THREE.SRGBColorSpace;
+                tex.needsUpdate = true;
+                slot.leafMapNode.value = tex;
+              };
+              img.src = ev.target.result;
+            };
+            reader.readAsDataURL(inp.files[0]);
+          };
+          inp.click();
+        });
+
+        ftreeFolder.addButton({ title: "Clear active slot" }).on("click", () => {
+          const slot = FTREE_SLOTS[activeFTreeSlot];
+          slot.positions = [];
+          _rebuildFTreeChunks(slot);
+          _ftreeRebuildLeaves(slot);
+        });
+        ftreeFolder.addButton({ title: "Clear ALL slots" }).on("click", () => {
+          FTREE_SLOTS.forEach(slot => {
+            slot.positions = [];
+            _rebuildFTreeChunks(slot);
+            _ftreeRebuildLeaves(slot);
+          });
+        });
+
         // ── FOLIAGE FOLDER ──
         const foliageFolder = pane.addFolder({
           title: "Foliage  [ N ]",
@@ -8484,7 +8877,8 @@
           placeFolder.hidden = mode !== "place";
           grassFolder.hidden = mode !== "grass";
           treesFolder.hidden = mode !== "trees";
-          if (lodFolder) lodFolder.hidden = mode !== "pinelod";
+          if (lodFolder)    lodFolder.hidden    = mode !== "pinelod";
+          if (ftreeFolder)  ftreeFolder.hidden  = mode !== "ftrees";
           foliageFolder.hidden = mode !== "foliage";
           propsFolder.hidden = mode !== "props";
           pathFolder.hidden = mode !== "path";
@@ -8600,7 +8994,9 @@
                                           ? "WATERFALL MODE  [ H ]"
                                           : mode === "pinelod"
                                             ? "TREE LOD  [ J ]"
-                                            : "PLACE MODE"; // play handled above
+                                            : mode === "ftrees"
+                                              ? "FOLIAGE TREES  [ U ]"
+                                              : "PLACE MODE"; // play handled above
           badge.className = mode;
           renderer.domElement.style.cursor =
             mode === "view" ? "default" : "crosshair";
@@ -8666,6 +9062,21 @@
             lodParams.density        = _s.density;
             lodParams.treesPerStroke = _s.treesPerStroke;
             if (lodFolder) pane.refresh();
+          }
+          if (e.code === "KeyU")
+            setMode(currentMode === "ftrees" ? "view" : "ftrees");
+          if (currentMode === "ftrees" && e.code.match(/^Digit[1-4]$/)) {
+            const idx = parseInt(e.code[5]) - 1;
+            activeFTreeSlot = idx;
+            const _s = FTREE_SLOTS[idx];
+            ftreeParams.slotName       = _s.name;
+            ftreeParams.threshold      = _s.lodThreshold;
+            ftreeParams.minSpacing     = _s.minSpacing;
+            ftreeParams.scaleMin       = _s.scaleMin;
+            ftreeParams.scaleMax       = _s.scaleMax;
+            ftreeParams.density        = _s.density;
+            ftreeParams.treesPerStroke = _s.treesPerStroke;
+            if (ftreeFolder) pane.refresh();
           }
           if (e.code === "KeyI")
             setMode(currentMode === "props" ? "view" : "props");
@@ -8861,6 +9272,8 @@
             paintFoliageAt(p.x, p.z, foliageEraseMode || e.shiftKey);
           if (currentMode === "pinelod")
             paintLODAt(p.x, p.z, e.shiftKey);
+          if (currentMode === "ftrees")
+            paintFTreeAt(p.x, p.z, e.shiftKey);
         });
 
         // ── BRUSH SCROLL SHORTCUTS ──────────────────────────────────────
@@ -9071,6 +9484,8 @@
             paintTreesAt(p.x, p.z, treeEraseMode || e.shiftKey);
           if (currentMode === "pinelod")
             paintLODAt(p.x, p.z, e.shiftKey);
+          if (currentMode === "ftrees")
+            paintFTreeAt(p.x, p.z, e.shiftKey);
           if (currentMode === "foliage")
             paintFoliageAt(p.x, p.z, foliageEraseMode || e.shiftKey);
         });
@@ -9091,6 +9506,7 @@
             if (bakeBVH) bakeBVH();
             if (treeSystem) treeSystem.syncHeights();
             syncLODHeights();
+            syncFTreeHeights();
             FOLIAGE_SLOTS.forEach((s) => {
               if (s.system) s.system.syncHeights();
             });
@@ -9362,6 +9778,50 @@
           if (lodFolder) pane.refresh();
         }
 
+        function updateFTreeInstances() {
+          if (!FTREE_SLOTS.some(s => s.ready && s.chunks.size > 0)) return;
+          _ftreeCamPos.copy(camera.position);
+          _ftreeProjMat.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+          _ftreeFrustum.setFromProjectionMatrix(_ftreeProjMat);
+          let totalVisible = 0, totalChunks = 0, totalTrunks = 0, totalLeaves = 0;
+          for (const slot of FTREE_SLOTS) {
+            if (!slot.ready || !slot.trunkDefs) continue;
+            totalTrunks += slot.positions.length;
+            const ts = slot.clusterPreset ? slot.clusterPreset.trunkScale : 1.0;
+            for (const chunk of slot.chunks.values()) {
+              totalChunks++;
+              chunk.ims.forEach(g => { g.im.count = 0; });
+              if (!_ftreeFrustum.intersectsSphere(chunk.sphere)) continue;
+              totalVisible++;
+              for (const { x, y, z, scale } of chunk.positions) {
+                _ftreeDummy.position.set(x, y, z);
+                _ftreeDummy.scale.setScalar(scale * ts);
+                _ftreeDummy.rotation.set(0, Math.PI * 2 * ((x * 13.7 + z * 7.3) % 1), 0);
+                _ftreeDummy.updateMatrix();
+                chunk.ims.forEach(({ im, localMatrix }) => {
+                  if (im.count >= FTREE_MAX_PER_CHUNK) return;
+                  _ftreeFinalMat.multiplyMatrices(_ftreeDummy.matrix, localMatrix);
+                  im.setMatrixAt(im.count++, _ftreeFinalMat);
+                });
+              }
+              chunk.ims.forEach(g => { if (g.im.count > 0) g.im.instanceMatrix.needsUpdate = true; });
+            }
+            if (slot.leafMesh) totalLeaves += slot.leafMesh.count;
+          }
+          const active = FTREE_SLOTS[activeFTreeSlot];
+          ftreeParams.slotName       = active.name;
+          ftreeParams.minSpacing     = active.minSpacing;
+          ftreeParams.scaleMin       = active.scaleMin;
+          ftreeParams.scaleMax       = active.scaleMax;
+          ftreeParams.density        = active.density;
+          ftreeParams.treesPerStroke = active.treesPerStroke;
+          ftreeParams.totalTrunks    = totalTrunks;
+          ftreeParams.totalLeaves    = totalLeaves;
+          ftreeParams.chunks         = totalChunks;
+          ftreeParams.chunksVisible  = totalVisible;
+          if (ftreeFolder) pane.refresh();
+        }
+
         renderer.setAnimationLoop(() => {
           clock.update();
           const elapsed = clock.getElapsed();
@@ -9627,7 +10087,9 @@
             trainMesh.visible = false;
           }
 
+          uFTreeTime.value = elapsed;
           updateLODInstances();
+          updateFTreeInstances();
           stats.update();
           (postParams.enabled ? renderPipeline : simplePipeline).render();
           {
