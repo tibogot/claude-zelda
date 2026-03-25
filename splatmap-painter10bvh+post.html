@@ -1075,10 +1075,23 @@
       const skirtEdgeXZ = []; // [{wx,wz}] for each skirt top vertex (4 * DISPLAY_VERTS)
 
       // ─── PLAY MODE STATE ─────────────────────
-      const PLAYER_SPEED = 12;
       const PLAYER_CAP_R = 0.4,
         PLAYER_CAP_H = 1.2; // capsule radius + length
-      const CAM_DIST = 8;
+      const playParams = {
+        speed:        12,
+        camDist:       8,
+        camSensX:      0.002,
+        camSensY:      0.002,
+        collisionGap:  0.4,
+        collisionMin:  0.5,
+      };
+      // Camera collision BVH refs — set inside bakeBVH, used in play loop
+      let _camTerrainBvh = null;
+      let _camCliffBvh   = null;
+      // Pre-allocated to avoid GC per frame
+      const _camRay    = new THREE.Ray();
+      const _camTarget = new THREE.Vector3();
+      const _camDir    = new THREE.Vector3();
       const playerPos = new THREE.Vector3();
       let camYaw = 0,
         camPitch = 0.35;
@@ -2988,6 +3001,9 @@
           }
           heightTex.needsUpdate = true;
           cliffHeightTex.needsUpdate = true;
+          // Expose for play-mode camera collision (directional raycast, not vertical)
+          _camTerrainBvh = terrainBvh;
+          _camCliffBvh   = cliffBvh; // may be null if no cliffs placed
         };
         bakeBVH();
 
@@ -5631,8 +5647,8 @@
         // Mouse look (pointer lock)
         document.addEventListener("mousemove", (e) => {
           if (currentMode !== "play" || !document.pointerLockElement) return;
-          camYaw -= e.movementX * 0.002;
-          camPitch += e.movementY * 0.002;
+          camYaw -= e.movementX * playParams.camSensX;
+          camPitch += e.movementY * playParams.camSensY;
           camPitch = Math.max(0.05, Math.min(PI * 0.45, camPitch));
         });
         document.addEventListener("pointerlockchange", () => {
@@ -7655,6 +7671,17 @@
             );
           });
 
+        // ── PLAY FOLDER ──
+        const playFolder = pane.addFolder({ title: "Play  [ F ]", expanded: true });
+        playFolder.hidden = false;
+        playFolder.addBinding(playParams, "speed",        { label: "Move speed",      min: 1,    max: 60,   step: 0.5 });
+        playFolder.addBinding(playParams, "camDist",      { label: "Camera distance", min: 2,    max: 40,   step: 0.5 });
+        playFolder.addBinding(playParams, "camSensX",     { label: "Mouse sens X",    min: 0.0005, max: 0.008, step: 0.0005 });
+        playFolder.addBinding(playParams, "camSensY",     { label: "Mouse sens Y",    min: 0.0005, max: 0.008, step: 0.0005 });
+        playFolder.addBlade({ view: "separator" });
+        playFolder.addBinding(playParams, "collisionGap", { label: "Collision gap",   min: 0.0,  max: 2.0,  step: 0.05 });
+        playFolder.addBinding(playParams, "collisionMin", { label: "Min cam dist",    min: 0.1,  max: 3.0,  step: 0.1  });
+
         // ── RIVER FOLDER ──
         const riverFolder = pane.addFolder({ title: "River  [ V ]", expanded: true });
         riverFolder.hidden = true;
@@ -8448,6 +8475,7 @@
           pane.refresh();
           orbit.enabled = mode !== "play";
 
+          playFolder.hidden = mode !== "view";
           paintFolder.hidden = mode !== "paint";
           sculptFolder.hidden = mode !== "sculpt";
           placeFolder.hidden = mode !== "place";
@@ -9360,8 +9388,8 @@
             }
             const mlen = Math.sqrt(mx * mx + mz * mz);
             if (mlen > 0) {
-              playerPos.x += (mx / mlen) * PLAYER_SPEED * dt;
-              playerPos.z += (mz / mlen) * PLAYER_SPEED * dt;
+              playerPos.x += (mx / mlen) * playParams.speed * dt;
+              playerPos.z += (mz / mlen) * playParams.speed * dt;
               playerPos.x = Math.max(
                 -TERRAIN_SIZE / 2,
                 Math.min(TERRAIN_SIZE / 2, playerPos.x),
@@ -9379,13 +9407,32 @@
             if (mlen > 0) capsuleMesh.rotation.y = Math.atan2(mx, mz) + PI;
             // Third-person camera
             const lookAtY = capsuleCY + 0.6;
-            const hDist = CAM_DIST * Math.cos(camPitch);
-            const vDist = CAM_DIST * Math.sin(camPitch);
+            const hDist = playParams.camDist * Math.cos(camPitch);
+            const vDist = playParams.camDist * Math.sin(camPitch);
             camera.position.set(
               playerPos.x + Math.sin(camYaw) * hDist,
               lookAtY + vDist,
               playerPos.z + Math.cos(camYaw) * hDist,
             );
+            // Camera collision — raycast from lookAt point toward desired camera position.
+            // Pulls camera in if terrain or cliffs are in the way. Zero allocs per frame.
+            if (_camTerrainBvh) {
+              _camTarget.set(playerPos.x, lookAtY, playerPos.z);
+              _camDir.subVectors(camera.position, _camTarget);
+              const desiredDist = _camDir.length();
+              _camDir.divideScalar(desiredDist); // normalize in-place
+              _camRay.set(_camTarget, _camDir);
+              let nearestDist = desiredDist;
+              const tHit = _camTerrainBvh.raycastFirst(_camRay, THREE.DoubleSide);
+              if (tHit && tHit.distance < nearestDist) nearestDist = tHit.distance - playParams.collisionGap;
+              if (_camCliffBvh) {
+                const cHit = _camCliffBvh.raycastFirst(_camRay, THREE.DoubleSide);
+                if (cHit && cHit.distance < nearestDist) nearestDist = cHit.distance - playParams.collisionGap;
+              }
+              if (nearestDist < playParams.collisionMin) nearestDist = playParams.collisionMin;
+              if (nearestDist < desiredDist)
+                camera.position.copy(_camTarget).addScaledVector(_camDir, nearestDist);
+            }
             camera.lookAt(playerPos.x, lookAtY, playerPos.z);
             // Feed player pos to grass interaction
             if (grassUniforms)
