@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Unreal Grass — Dev Scene</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { overflow: hidden; background: #000; }
+      canvas { display: block; width: 100vw; height: 100vh; }
+      #ui {
+        position: fixed; top: 16px; right: 16px; z-index: 10;
+        font: 12px/2 "SF Mono", "Fira Code", monospace;
+        color: #ccc;
+        background: rgba(0, 0, 0, 0.6);
+        padding: 10px 16px;
+        border-radius: 6px;
+        backdrop-filter: blur(4px);
+        display: flex; flex-direction: column; gap: 2px;
+        min-width: 280px;
+      }
+      #ui label {
+        display: flex; justify-content: space-between;
+        align-items: center; gap: 10px;
+      }
+      #ui input[type=range] { width: 130px; cursor: pointer; }
+      #ui .val { min-width: 38px; text-align: right; color: #8df; }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="ui">
+      <label>Wind Strength <input id="windStr" type="range" min="0" max="1.5" step="0.01" value="0.4"><span class="val" id="windStrV">0.40</span></label>
+      <label>Wind Speed    <input id="windSpd" type="range" min="0" max="3"   step="0.05" value="1.0"><span class="val" id="windSpdV">1.00</span></label>
+      <label>Sun Elevation <input id="sunEl"   type="range" min="5" max="85"  step="1"    value="43" ><span class="val" id="sunElV">43</span></label>
+    </div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { uniform, vec2 } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import Stats from "stats-gl";
+      import { createTileMaterial } from "./tileMaterial.js";
+      import {
+        createGrassGeometry,
+        createGrassMaterial,
+        GRASS_SEGMENTS_HIGH,
+        GRASS_VERTS_HIGH,
+        GRASS_DENSITY,
+        GRASS_PATCH_SIZE,
+      } from "./grass-painter8.js";
+
+      // ── Renderer ────────────────────────────────────────────────────────────
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.setPixelRatio(devicePixelRatio);
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.0;
+      document.body.appendChild(renderer.domElement);
+      await renderer.init();
+
+      // ── Scene & Camera ───────────────────────────────────────────────────────
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x7ab0d8);
+
+      const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 500);
+      camera.position.set(4, 2.5, 8);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 0.5, 0);
+      controls.update();
+
+      // ── Stats ────────────────────────────────────────────────────────────────
+      const stats = new Stats({ trackGPU: true });
+      stats.init(renderer);
+      document.body.appendChild(stats.dom);
+
+      // ── Lights ───────────────────────────────────────────────────────────────
+      const sunCfg = { azimuth: 135, elevation: 43 };
+      function makeSunDir() {
+        const az = (sunCfg.azimuth * Math.PI) / 180;
+        const el = (sunCfg.elevation * Math.PI) / 180;
+        return new THREE.Vector3(
+          Math.cos(el) * Math.cos(az),
+          Math.sin(el),
+          Math.cos(el) * Math.sin(az),
+        ).normalize();
+      }
+      const dirLight = new THREE.DirectionalLight(0xfff5e0, 2.2);
+      dirLight.castShadow = false;
+      scene.add(dirLight);
+      const hemi = new THREE.HemisphereLight(0xc8e0ff, 0x88aa55, 1.0);
+      scene.add(hemi);
+
+      // ── Flat 1×1 DataTextures (height=0, density=full) ───────────────────────
+      function flat1x1(r, g, b) {
+        const data = new Uint8Array([r, g, b, 255]);
+        const t = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat);
+        t.needsUpdate = true;
+        return t;
+      }
+      const heightTex       = flat1x1(0, 0, 0);     // terrain height = 0 everywhere
+      const grassDensityTex = flat1x1(255, 0, 0);   // full density everywhere
+      const trailTex        = flat1x1(255, 255, 255);
+
+      // ── Grass Uniforms ────────────────────────────────────────────────────────
+      function srgb(hex) {
+        const c = new THREE.Color(hex);
+        c.convertSRGBToLinear();
+        return c;
+      }
+      const windDir = 0.7;
+
+      const uTime               = uniform(0);
+      const uPlayerPos          = uniform(new THREE.Vector3(9999, 0, 9999));
+      const uNpcPos             = [uniform(new THREE.Vector3(9999, 0, 9999))];
+
+      const uGrassWidth         = uniform(0.08);
+      const uGrassHeight        = uniform(0.7);
+
+      // uLodDist small so highLODOut → 1 at normal viewing distances,
+      // enabling SSS, specular, crossSway, and micro flutter.
+      const uLodDist            = uniform(3);
+      const uMaxDist            = uniform(9999);
+      const uLodBlendStart      = uniform(0.35);
+
+      const uBladeDensityRegular = uniform(1.0);
+      const uBladeDensityNear   = uniform(1.0);
+      const uNearFadeEnd        = uniform(999);
+      const uNearFadeRange      = uniform(8);
+
+      const uBaseColor1         = uniform(srgb("#143210"));
+      const uBaseColor2         = uniform(srgb("#183a12"));
+      const uTipColor1          = uniform(srgb("#a6cc40"));
+      const uTipColor2          = uniform(srgb("#cce666"));
+      const uGradientCurve      = uniform(2.0);
+      const uColorVariation     = uniform(0.3);
+      const uLushColor          = uniform(srgb("#1a4a0a"));
+      const uBleachedColor      = uniform(srgb("#d4cc80"));
+
+      const uWindSpeed          = uniform(1.0);
+      const uWindStr            = uniform(0.4);
+      const uWindWaveScale      = uniform(0.08);
+      const uWindDirX           = uniform(Math.cos(windDir));
+      const uWindDirZ           = uniform(Math.sin(windDir));
+      const uWindAxis           = uniform(new THREE.Vector3( Math.sin(windDir), 0, -Math.cos(windDir)));
+      const uCrossAxis          = uniform(new THREE.Vector3( Math.cos(windDir), 0,  Math.sin(windDir)));
+      const uWindGust           = uniform(0.3);
+      const uWindMicro          = uniform(0.15);
+
+      const uInteractionRange   = uniform(999);
+      const uInteractionStrength = uniform(0);
+      const uInteractionHThresh = uniform(1.5);
+      const uInteractionRepel   = uniform(1.0);
+
+      const uMinSkyBlend        = uniform(0.55);
+      const uMaxSkyBlend        = uniform(0.7);
+      const uAoIntensity        = uniform(1.0);
+
+      const uBsIntensity        = uniform(0.4);
+      const uBsColor            = uniform(srgb("#51cc66"));
+      const uBsPower            = uniform(2.0);
+      const uFrontScatter       = uniform(0.3);
+      const uRimSSS             = uniform(0.4);
+
+      const uSpecV1Intensity    = uniform(0);
+      const uSpecV1Color        = uniform(srgb("#ffffff"));
+      const uSpecV1Dir          = uniform(new THREE.Vector3(-1, 1, 0.5).normalize());
+      const uSpecV2Intensity    = uniform(0);
+      const uSpecV2Color        = uniform(srgb("#ffffff"));
+      const uSpecV2Dir          = uniform(new THREE.Vector3(-1, 0.45, 1).normalize());
+      const uSpecV2NoiseScale   = uniform(3.0);
+      const uSpecV2NoiseStr     = uniform(0.6);
+      const uSpecV2Power        = uniform(12.0);
+      const uSpecV2TipBias      = uniform(0.5);
+
+      const uSeasonalStr        = uniform(0);
+      const uSeasonalScale      = uniform(0.02);
+      const uSeasonalDryColor   = uniform(srgb("#8b7d3c"));
+
+      const uSunDir             = uniform(makeSunDir());
+      const uTerrainSize        = uniform(100);
+      const uTrailCenter        = uniform(new THREE.Vector2(9999, 9999));
+      const uTrailSize          = uniform(60);
+
+      const grassCtx = {
+        uTime, uPlayerPos, uNpcPos,
+        uGrassWidth, uGrassHeight,
+        uLodDist, uMaxDist, uLodBlendStart,
+        uBladeDensityRegular, uBladeDensityNear, uNearFadeEnd, uNearFadeRange,
+        uBaseColor1, uBaseColor2, uTipColor1, uTipColor2,
+        uGradientCurve, uColorVariation, uLushColor, uBleachedColor,
+        uWindSpeed, uWindStr, uWindWaveScale,
+        uWindDirX, uWindDirZ, uWindAxis, uCrossAxis,
+        uWindGust, uWindMicro,
+        uInteractionRange, uInteractionStrength, uInteractionHThresh, uInteractionRepel,
+        uMinSkyBlend, uMaxSkyBlend, uAoIntensity,
+        uBsIntensity, uBsColor, uBsPower, uFrontScatter, uRimSSS,
+        uSpecV1Intensity, uSpecV1Color, uSpecV1Dir,
+        uSpecV2Intensity, uSpecV2Color, uSpecV2Dir,
+        uSpecV2NoiseScale, uSpecV2NoiseStr, uSpecV2Power, uSpecV2TipBias,
+        uSeasonalStr, uSeasonalScale, uSeasonalDryColor,
+        uSunDir, uTerrainSize, uTrailCenter, uTrailSize,
+        heightTex, grassDensityTex, trailTex,
+        PI: Math.PI,
+      };
+
+      // ── Grass Geometry & Material (single patch, high LOD only) ───────────────
+      let _seed = 0;
+      function setSeed(s) { _seed = s; }
+      function randRange(lo, hi) {
+        _seed = (_seed * 1664525 + 1013904223) & 0xffffffff;
+        const t = (_seed >>> 0) / 0xffffffff;
+        return lo + t * (hi - lo);
+      }
+
+      const grassGeo = createGrassGeometry(
+        GRASS_SEGMENTS_HIGH,
+        GRASS_DENSITY,
+        GRASS_PATCH_SIZE,
+        setSeed,
+        randRange,
+      );
+      const grassMat = createGrassMaterial(
+        GRASS_SEGMENTS_HIGH,
+        GRASS_VERTS_HIGH,
+        false,      // no NPC interaction
+        "regular",
+        grassCtx,
+      );
+      const grassMesh = new THREE.Mesh(grassGeo, grassMat);
+      grassMesh.frustumCulled = false;
+      scene.add(grassMesh);
+
+      // ── Floor (tile material, same as parkourtsushima) ────────────────────────
+      const floorGeo = new THREE.PlaneGeometry(100, 100);
+      floorGeo.rotateX(-Math.PI / 2);
+      const floorMat = createTileMaterial({
+        textureScale: 1500,
+        gradientIntensity: 0.5,
+        gradientBias: 0.1,
+        tileColor: "#d4d4d4",
+        gridColor: "#707070",
+        gridLineColor: "#404040",
+        roughness: 1,
+        metalness: 0,
+      });
+      const floor = new THREE.Mesh(floorGeo, floorMat);
+      scene.add(floor);
+
+      // ── UI Sliders ────────────────────────────────────────────────────────────
+      function bindSlider(id, valId, decimals, onChange) {
+        const el = document.getElementById(id);
+        const vl = document.getElementById(valId);
+        el.addEventListener("input", () => {
+          const v = parseFloat(el.value);
+          vl.textContent = v.toFixed(decimals);
+          onChange(v);
+        });
+      }
+      bindSlider("windStr", "windStrV", 2, v => { uWindStr.value = v; });
+      bindSlider("windSpd", "windSpdV", 2, v => { uWindSpeed.value = v; });
+      bindSlider("sunEl",   "sunElV",   0, v => {
+        sunCfg.elevation = v;
+        const sd = makeSunDir();
+        dirLight.position.copy(sd.clone().multiplyScalar(50));
+        uSunDir.value.copy(sd);
+      });
+
+      // init sun position
+      const initSd = makeSunDir();
+      dirLight.position.copy(initSd.clone().multiplyScalar(50));
+
+      // ── Resize ────────────────────────────────────────────────────────────────
+      window.addEventListener("resize", () => {
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+      });
+
+      // ── Render Loop ───────────────────────────────────────────────────────────
+      const clock = new THREE.Clock();
+      renderer.setAnimationLoop(() => {
+        uTime.value = clock.getElapsedTime();
+        controls.update();
+        stats.update();
+        renderer.render(scene, camera);
+      });
+    </script>
+  </body>
+</html>
