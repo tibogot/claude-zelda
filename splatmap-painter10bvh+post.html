@@ -804,52 +804,31 @@
       let lodFolder = null;
 
       // ─── FOLIAGE TREE SYSTEM (trunk GLB + TSL leaf planes) ───────────────────
-      const FTREE_CLUSTER_DEAD = {
-        clusters: [
-          { enabled: true,  x: 0,   y: 6.8, z: 0,   rx: 2.4, ry: 2.4, count: 500,
-            leafSize: 1,    scaleVar: 0.35, shell: 0.5,  shellThick: 0.45, tiltMax: 35 },
-          { enabled: false, x: 1.1, y: 2.8, z: 0.4, rx: 1.3, ry: 0.9, count: 200,
-            leafSize: 0.85, scaleVar: 0.3,  shell: 0.45, shellThick: 0.4,  tiltMax: 40 },
-          { enabled: false, x: 0,   y: 5.6, z: 0,   rx: 1.0, ry: 0.7, count: 140,
-            leafSize: 0.75, scaleVar: 0.25, shell: 0.55, shellThick: 0.35, tiltMax: 28 },
-        ],
-        material: {
-          bottomColor: "#2d5a1b", topColor: "#5aaa2a", colorVar: 0.12, roughness: 0.88,
-          alphaCutoff: 0.45, sssColor: "#ffee55", sssStr: 0.55, sssPow: 2,
-          rimColor: "#c8ffaa", rimStr: 0.38, rimPow: 2.5, aoStr: 0.45,
-        },
-        wind: { windSpeed: 0.9, windStr: 0.13, windMicro: 0.04 },
-        trunkScale: 0.1,
-      };
+      // Trunk A — shared by slots 1-3. Trunk B — shared by slots 4-6 (assign when ready).
+      const FTREE_TRUNK_A = "models/low_poly_dead_tree_compressed.glb";
+      const FTREE_TRUNK_B = null; // set to a GLB path when you have a second trunk
+      const _ftreeSlot = (name, trunk, file) => ({
+        name, trunkPath: trunk, presetFile: file,
+        leafTexPath: null, clusterPreset: null,
+        lodThreshold: 60, minSpacing: 2, scaleMin: 0.9, scaleMax: 1.1,
+        density: 0.2, treesPerStroke: 2,
+        positions: [], chunks: new Map(), trunkDefs: null,
+        leafMat: null, leafMapNode: null, leafMesh: null, uniforms: null, ready: false,
+      });
       const FTREE_SLOTS = [
-        { name: "Dead",   trunkPath: "models/low_poly_dead_tree_compressed.glb",
-          leafTexPath: "textures/leaves/foliage_alpha3.png", clusterPreset: FTREE_CLUSTER_DEAD,
-          lodThreshold: 60, minSpacing: 2, scaleMin: 0.9, scaleMax: 1.1,
-          density: 0.2,  treesPerStroke: 2,
-          positions: [], chunks: new Map(), trunkDefs: null,
-          leafMat: null, leafMapNode: null, leafMesh: null, uniforms: null, ready: false },
-        { name: "Slot 2", trunkPath: null, leafTexPath: null, clusterPreset: null,
-          lodThreshold: 60, minSpacing: 2, scaleMin: 0.8, scaleMax: 1.2,
-          density: 0.2,  treesPerStroke: 2,
-          positions: [], chunks: new Map(), trunkDefs: null,
-          leafMat: null, leafMapNode: null, leafMesh: null, uniforms: null, ready: false },
-        { name: "Slot 3", trunkPath: null, leafTexPath: null, clusterPreset: null,
-          lodThreshold: 60, minSpacing: 2, scaleMin: 0.8, scaleMax: 1.2,
-          density: 0.2,  treesPerStroke: 2,
-          positions: [], chunks: new Map(), trunkDefs: null,
-          leafMat: null, leafMapNode: null, leafMesh: null, uniforms: null, ready: false },
-        { name: "Slot 4", trunkPath: null, leafTexPath: null, clusterPreset: null,
-          lodThreshold: 60, minSpacing: 2, scaleMin: 0.8, scaleMax: 1.2,
-          density: 0.2,  treesPerStroke: 2,
-          positions: [], chunks: new Map(), trunkDefs: null,
-          leafMat: null, leafMapNode: null, leafMesh: null, uniforms: null, ready: false },
+        _ftreeSlot("Tree A1", FTREE_TRUNK_A, "slot1.json"),
+        _ftreeSlot("Tree A2", FTREE_TRUNK_A, "slot2.json"),
+        _ftreeSlot("Tree A3", FTREE_TRUNK_A, "slot3.json"),
+        _ftreeSlot("Tree B1", FTREE_TRUNK_B, "slot4.json"),
+        _ftreeSlot("Tree B2", FTREE_TRUNK_B, "slot5.json"),
+        _ftreeSlot("Tree B3", FTREE_TRUNK_B, "slot6.json"),
       ];
       let activeFTreeSlot       = 0;
       const FTREE_CHUNK_SIZE    = 64;
       const FTREE_MAX_PER_CHUNK = 256;
       let _rebuildFTreeChunks   = (_slot) => {};  // assigned inside init()
       let _ftreeRebuildLeaves   = (_slot) => {};  // assigned inside init()
-      const ftreeParams = { slotName: "Dead", threshold: 60, minSpacing: 2, scaleMin: 0.9, scaleMax: 1.1, density: 0.2, treesPerStroke: 2, totalTrunks: 0, totalLeaves: 0, chunksVisible: 0, chunks: 0 };
+      const ftreeParams = { slotName: "Tree A1", threshold: 60, minSpacing: 2, scaleMin: 0.9, scaleMax: 1.1, density: 0.2, treesPerStroke: 2, totalTrunks: 0, totalLeaves: 0, chunksVisible: 0, chunks: 0 };
       let ftreeFolder = null;
       const uFTreeTime    = uniform(0.0);
       const _ftreeDummy   = new THREE.Object3D();
@@ -5290,9 +5269,21 @@
         });
 
         // ── FTREE INIT ──
-        // Build leaf materials for slots that have a preset
-        FTREE_SLOTS.forEach(slot => {
-          if (slot.clusterPreset) _ftreeBuildLeafMat(slot);
+        // Auto-fetch preset files: tree-presets/slot1.json … slot6.json
+        FTREE_SLOTS.forEach((slot, i) => {
+          fetch(`tree-presets/${slot.presetFile}`)
+            .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+            .then(data => {
+              slot.clusterPreset = data;
+              slot.leafTexPath = data.leafTexFile
+                ? `textures/leaves/${data.leafTexFile}`
+                : "textures/leaves/foliage_alpha3.png";
+              _ftreeBuildLeafMat(slot);
+              _ftreeLoadLeafTex(slot);
+              if (slot.positions.length > 0) _ftreeRebuildLeaves(slot);
+              console.log(`FTree slot ${i + 1} (${slot.name}): preset loaded`);
+            })
+            .catch(() => { /* silent — slot stays empty until preset file is saved */ });
         });
 
         // Real _ftreeRebuildLeaves — needs scene in scope
@@ -5305,12 +5296,18 @@
           if (!slot.leafMat || !slot.clusterPreset || slot.positions.length === 0) return;
           const localLeaves = _ftreeSampleClusters(slot.clusterPreset);
           if (localLeaves.length === 0) return;
+          // Bush presets: shift leaves down so bottom of cluster sits at ground
+          let yGroundShift = 0;
+          if (slot.clusterPreset.bushMode) {
+            const minLy = Math.min(...localLeaves.map(l => l.ly));
+            yGroundShift = -Math.max(0, minLy);
+          }
           const n = slot.positions.length * localLeaves.length;
           // Update Y range for gradient uniform
           let yMin = Infinity, yMax = -Infinity;
           slot.positions.forEach(p => {
             localLeaves.forEach(l => {
-              const wy = p.y + l.ly * p.scale;
+              const wy = p.y + (l.ly + yGroundShift) * p.scale;
               if (wy < yMin) yMin = wy;
               if (wy > yMax) yMax = wy;
             });
@@ -5329,7 +5326,7 @@
           let idx = 0;
           slot.positions.forEach(p => {
             localLeaves.forEach(l => {
-              dummy.position.set(p.x + l.lx * p.scale, p.y + l.ly * p.scale, p.z + l.lz * p.scale);
+              dummy.position.set(p.x + l.lx * p.scale, p.y + (l.ly + yGroundShift) * p.scale, p.z + l.lz * p.scale);
               dummy.rotation.order = "YXZ";
               dummy.rotation.y = Math.random() * Math.PI * 2;
               dummy.rotation.x = (Math.random() - 0.5) * l.tiltMax * DEG2RAD * 2;
@@ -5380,7 +5377,10 @@
         function _ftreeLoadLeafTex(slot) {
           if (!slot.leafTexPath || !slot.leafMapNode) return;
           new THREE.TextureLoader().load(slot.leafTexPath, tex => {
-            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.colorSpace        = THREE.SRGBColorSpace;
+            tex.generateMipmaps   = false;
+            tex.minFilter         = THREE.LinearFilter;
+            tex.needsUpdate       = true;
             slot.leafMapNode.value = tex;
           });
         }
@@ -7620,6 +7620,54 @@
         ftreeFolder.addBinding(ftreeParams, "chunksVisible",  { label: "Chunks visible",   readonly: true });
         ftreeFolder.addBinding(ftreeParams, "chunks",         { label: "Chunks total",     readonly: true });
 
+        // Load preset JSON per slot
+        ftreeFolder.addButton({ title: "Load Preset JSON (active slot)" }).on("click", () => {
+          const inp = document.createElement("input");
+          inp.type = "file"; inp.accept = ".json";
+          inp.onchange = () => {
+            if (!inp.files[0]) return;
+            const slot = FTREE_SLOTS[activeFTreeSlot];
+            const reader = new FileReader();
+            reader.onload = ev => {
+              try {
+                slot.clusterPreset = JSON.parse(ev.target.result);
+                slot.presetPath = null; // file loaded manually — no auto-reload
+                // Fallback leaf texture if slot has none
+                if (!slot.leafTexPath) slot.leafTexPath = "textures/leaves/foliage_alpha3.png";
+                _ftreeBuildLeafMat(slot);
+                _ftreeLoadLeafTex(slot);
+                if (slot.positions.length > 0) _ftreeRebuildLeaves(slot);
+                alert("Preset applied to slot: " + slot.name);
+              } catch(e) { alert("Invalid preset JSON: " + e.message); }
+            };
+            reader.readAsText(inp.files[0]);
+          };
+          inp.click();
+        });
+
+        // Load trunk GLB per slot
+        ftreeFolder.addButton({ title: "Load Trunk GLB (active slot)" }).on("click", () => {
+          const inp = document.createElement("input");
+          inp.type = "file"; inp.accept = ".glb,.gltf";
+          inp.onchange = () => {
+            if (!inp.files[0]) return;
+            const slot = FTREE_SLOTS[activeFTreeSlot];
+            const url = URL.createObjectURL(inp.files[0]);
+            gltfLoader.load(url, g => {
+              slot.trunkDefs = _extractLODDefs(g);
+              slot.trunkPath = inp.files[0].name;
+              slot.ready = true;
+              URL.revokeObjectURL(url);
+              _rebuildFTreeChunks(slot);
+              _ftreeRebuildLeaves(slot);
+            }, undefined, err => {
+              URL.revokeObjectURL(url);
+              console.error("Trunk load error:", err);
+            });
+          };
+          inp.click();
+        });
+
         // Load leaf texture per slot
         ftreeFolder.addButton({ title: "Load Leaf Texture (active slot)" }).on("click", () => {
           const inp = document.createElement("input");
@@ -9065,7 +9113,7 @@
           }
           if (e.code === "KeyU")
             setMode(currentMode === "ftrees" ? "view" : "ftrees");
-          if (currentMode === "ftrees" && e.code.match(/^Digit[1-4]$/)) {
+          if (currentMode === "ftrees" && e.code.match(/^Digit[1-6]$/)) {
             const idx = parseInt(e.code[5]) - 1;
             activeFTreeSlot = idx;
             const _s = FTREE_SLOTS[idx];

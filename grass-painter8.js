@@ -238,9 +238,9 @@ export function createGrassMaterial(
       clumpHeight,
       mix(1, 0, lodFadeIn),
     );
-    const randomLean      = remap(hv.w, 0, 1, 0.1, 0.3);
+    const randomLean      = remap(hv.w, 0, 1, 0.15, 0.45);
     // GoT per-blade cubic Bezier shape properties
-    const randomBend      = remap(hv3.x, 0, 1, 0.25, 1.0);   // stiffness: low=stiff, high=floppy
+    const randomBend      = remap(hv3.x, 0, 1, 0.5, 1.0);    // all blades have visible arc, no stick-straights
     const randomSideCurve = remap(hv3.y, 0, 1, -0.28, 0.28); // lateral twist, ± perpendicular to lean
 
     const vertID = mod(vertIdxAttr, NVERTS);
@@ -306,9 +306,11 @@ export function createGrassMaterial(
     const windLean = mix(windLeanSimple, windLeanFull, highLODOut);
     // GoT-style: bobbing is a separate high-frequency tip flutter, not baked into lean angle.
     // Use a decorrelated per-blade random so blades with the same yaw don't flutter in sync.
+    // Scale flutter amplitude by current wind lean — high wind = violent tip shaking, not more tilt.
     const bobbingRand  = hash22(add(bladeWorld.xz, vec2(17.3, 4.1))).x;
     const bobbingPhase = add(mul(bobbingRand, 6.28318), mul(uTime, 5.5));
-    const bobbingAmt   = mul(sin(bobbingPhase), uWindMicro);
+    const windFlutterScale = add(float(1), mul(abs(windLean), 2.0));
+    const bobbingAmt   = mul(sin(bobbingPhase), uWindMicro, windFlutterScale);
 
     // Raw cross-wind noise for lateral Bezier tip displacement
     const crossDisplace = mul(wave2, 0.3);
@@ -496,8 +498,11 @@ export function createGrassMaterial(
     // This eliminates the "crooked hook" artifact that occurs when stacking
     // rotation matrices at high wind angles.
 
-    // Wind tip displacement along wind direction (×1.8 for GoT-style visible lean)
-    const windTip    = mul(windLean, totalHeightVis, 1.8);
+    // Soft-saturate wind lean so blades never go horizontal at high wind.
+    // x / (1 + |x|) is an algebraic sigmoid: reaches ±1 asymptotically.
+    // At windLean=1.0 → 0.5 lean; at windLean=2.0 → 0.67 lean (never fully flat).
+    const windLeanSat = div(windLean, add(float(1), abs(windLean)));
+    const windTip     = mul(windLeanSat, totalHeightVis, 1.1);
     // Cross-wind tip displacement (perpendicular to wind)
     const crossTip   = mul(crossDisplace, totalHeightVis);
     // Bobbing: independent high-freq flutter added to wind tip
@@ -592,8 +597,13 @@ export function createGrassMaterial(
 
     // Vertex position = spine + width step  (GoT: "step vertex in width direction")
     const widthStep = mul(sub(xSide, 0.5), totalWidthVis);
+    // V-crease: both edge verts dip below the implied spine center.
+    // Both xSide values are 0.5 from center, so dip is equal on each side.
+    // Combined with rounded normals (left/right halves angled differently)
+    // this produces a V-shaped cross-section catch-light.
+    const vCreaseY = mul(negate(float(0.25)), totalWidthVis, sub(1, mul(heightPct, 0.7)));
     const finalVert = add(
-      vec3(add(spineX, mul(wdx, widthStep)), spineY, add(spineZ, mul(wdz, widthStep))),
+      vec3(add(spineX, mul(wdx, widthStep)), add(spineY, vCreaseY), add(spineZ, mul(wdz, widthStep))),
       grassOffset,
     );
 
@@ -692,8 +702,11 @@ export function createGrassMaterial(
     const aoLod = mul(aoBase, mix(0.5, 1.0, highLODOut));
     const ao = mix(aoLod, 1.0, smoothstep(0.0, 0.22, heightPct));
     const fadeFactor = sub(1, smoothstep(0.4, 1, lodFadeIn));
+    // Gust wave: blades in strong-gust zones lean away from sun → darken.
+    // gustStr travels with the wind, creating GoT's rolling shadow sweep.
+    const gustShadow = sub(1, mul(gustStr, 0.45));
     vGrassColor.assign(
-      mul(grassCol, ao, mul(fadeFactor, fadeFactor), bladeVisible),
+      mul(grassCol, ao, gustShadow, mul(fadeFactor, fadeFactor), bladeVisible),
     );
     vPacked.assign(vec3(heightPct, xSide, highLODOut));
 

@@ -379,6 +379,7 @@ dracoLoader.setDecoderPath(
 const gltfLoader = new GLTFLoader();
 gltfLoader.setDRACOLoader(dracoLoader);
 let trunkScale = 1.0;
+let _bushYShift = 0; // tracks how much cluster Y was shifted when entering bush mode
 
 function loadTrunk(file) {
   const url = URL.createObjectURL(file);
@@ -462,6 +463,9 @@ const params = {
   windSpeed:       0.9,
   windStr:         0.13,
   windMicro:       0.04,
+  // Preset
+  presetName:      "my_preset",
+  leafTexFile:     "",
   // Stats (readonly)
   trunkTris:       0,
   totalLeaves:     0,
@@ -478,6 +482,119 @@ function updateStats() {
 function applyBushMode(enabled) {
   defaultTrunk.visible = !enabled && !trunkRoot;
   if (trunkRoot) trunkRoot.visible = !enabled;
+
+  if (enabled) {
+    // Shift all clusters down so the bottom of the lowest cluster sits at Y=0
+    const enabledClusters = clusterDefs.filter(c => c.enabled);
+    const minBottom = enabledClusters.length
+      ? Math.min(...enabledClusters.map(c => c.y - c.ry))
+      : 0;
+    _bushYShift = Math.max(0, minBottom);
+    if (_bushYShift > 0) {
+      clusterDefs.forEach(c => { c.y -= _bushYShift; });
+      buildFoliage();
+      pane?.refresh();
+    }
+  } else {
+    // Restore original Y values
+    if (_bushYShift > 0) {
+      clusterDefs.forEach(c => { c.y += _bushYShift; });
+      _bushYShift = 0;
+      buildFoliage();
+      pane?.refresh();
+    }
+  }
+}
+
+// ─── PRESET SAVE / LOAD ──────────────────────────────────────────────────────
+function buildPresetData() {
+  return {
+    presetName: params.presetName,
+    clusters: clusterDefs.map(c => ({ ...c })),
+    material: {
+      bottomColor: params.bottomColor, topColor: params.topColor,
+      colorVar: params.colorVar, roughness: params.roughness,
+      alphaCutoff: params.alphaCutoff,
+      sssColor: params.sssColor, sssStr: params.sssStr, sssPow: params.sssPow,
+      rimColor: params.rimColor, rimStr: params.rimStr, rimPow: params.rimPow,
+      aoStr: params.aoStr,
+    },
+    wind: { windSpeed: params.windSpeed, windStr: params.windStr, windMicro: params.windMicro },
+    trunkScale: params.trunkScale,
+    leafTexFile: params.leafTexFile,
+    bushMode: params.bushMode,
+  };
+}
+
+async function savePreset() {
+  const json = JSON.stringify(buildPresetData(), null, 2);
+  const name = (params.presetName || "preset").replace(/[^a-z0-9_\-]/gi, "_");
+  if (window.showSaveFilePicker) {
+    try {
+      const handle = await showSaveFilePicker({
+        suggestedName: name + ".json",
+        types: [{ description: "JSON preset", accept: { "application/json": [".json"] } }],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(json);
+      await writable.close();
+      alert("Preset saved!");
+    } catch (e) { if (e.name !== "AbortError") console.error(e); }
+  } else {
+    // Fallback: trigger download
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([json], { type: "application/json" }));
+    a.download = name + ".json";
+    a.click();
+  }
+}
+
+function applyPresetData(data) {
+  if (data.clusters) data.clusters.forEach((c, i) => { if (i < clusterDefs.length) Object.assign(clusterDefs[i], c); });
+  if (data.material) {
+    const m = data.material;
+    if (m.bottomColor) { params.bottomColor = m.bottomColor; uBottomColor.value.set(m.bottomColor); }
+    if (m.topColor)    { params.topColor    = m.topColor;    uTopColor.value.set(m.topColor); }
+    if (m.colorVar    != null) { params.colorVar    = m.colorVar;    uColorVar.value    = m.colorVar; }
+    if (m.roughness   != null) { params.roughness   = m.roughness; }
+    if (m.alphaCutoff != null) { params.alphaCutoff = m.alphaCutoff; uAlphaCutoff.value = m.alphaCutoff; }
+    if (m.sssColor) { params.sssColor = m.sssColor; uSssColor.value.set(m.sssColor); }
+    if (m.sssStr  != null) { params.sssStr  = m.sssStr;  uSssStr.value  = m.sssStr; }
+    if (m.sssPow  != null) { params.sssPow  = m.sssPow;  uSssPow.value  = m.sssPow; }
+    if (m.rimColor) { params.rimColor = m.rimColor; uRimColor.value.set(m.rimColor); }
+    if (m.rimStr  != null) { params.rimStr  = m.rimStr;  uRimStr.value  = m.rimStr; }
+    if (m.rimPow  != null) { params.rimPow  = m.rimPow;  uRimPow.value  = m.rimPow; }
+    if (m.aoStr   != null) { params.aoStr   = m.aoStr;   uAoStr.value   = m.aoStr; }
+  }
+  if (data.wind) {
+    const w = data.wind;
+    if (w.windSpeed != null) { params.windSpeed = w.windSpeed; uWindSpeed.value = w.windSpeed; }
+    if (w.windStr   != null) { params.windStr   = w.windStr;   uWindStr.value   = w.windStr; }
+    if (w.windMicro != null) { params.windMicro = w.windMicro; uWindMicro.value = w.windMicro; }
+  }
+  if (data.trunkScale != null) {
+    params.trunkScale = data.trunkScale;
+    trunkScale = data.trunkScale;
+    (trunkRoot || defaultTrunk).scale.setScalar(data.trunkScale);
+  }
+  if (data.presetName) params.presetName = data.presetName;
+  if (data.bushMode != null) {
+    params.bushMode = data.bushMode;
+    applyBushMode(data.bushMode);
+  }
+  pane.refresh();
+  buildFoliage();
+}
+
+function loadPresetFromFile(file) {
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      applyPresetData(JSON.parse(ev.target.result));
+      alert("Preset loaded!");
+    } catch (e) { alert("Invalid preset file: " + e.message); }
+  };
+  reader.readAsText(file);
 }
 
 // ─── UI ──────────────────────────────────────────────────────────────────────
@@ -513,7 +630,7 @@ const leafTexF = pane.addFolder({ title: "🍃  Leaf Texture", expanded: true })
 leafTexF.addButton({ title: "Load Leaf PNG / JPG" }).on("click", () => {
   const i = document.createElement("input");
   i.type = "file"; i.accept = "image/*";
-  i.onchange = () => i.files[0] && loadLeafTex(i.files[0]);
+  i.onchange = () => { if (i.files[0]) { params.leafTexFile = i.files[0].name; loadLeafTex(i.files[0]); } };
   i.click();
 });
 leafTexF.addButton({ title: "Reset to solid (no texture)" }).on("click", () => {
@@ -600,37 +717,26 @@ statsF.addBinding(params, "totalLeafTris", { label: "Leaf triangles",   readonly
 // ── Actions
 pane.addBlade({ view: "separator" });
 pane.addButton({ title: "🔄  Rebuild Foliage" }).on("click", buildFoliage);
-pane.addButton({ title: "📋  Copy Settings JSON" }).on("click", () => {
-  const data = {
-    clusters: clusterDefs.map(c => ({ ...c })),
-    material: {
-      bottomColor:  params.bottomColor,
-      topColor:     params.topColor,
-      colorVar:     params.colorVar,
-      roughness:    params.roughness,
-      alphaCutoff:  params.alphaCutoff,
-      sssColor:     params.sssColor,
-      sssStr:       params.sssStr,
-      sssPow:       params.sssPow,
-      rimColor:     params.rimColor,
-      rimStr:       params.rimStr,
-      rimPow:       params.rimPow,
-      aoStr:        params.aoStr,
-    },
-    wind: {
-      windSpeed:  params.windSpeed,
-      windStr:    params.windStr,
-      windMicro:  params.windMicro,
-    },
-    trunkScale: params.trunkScale,
-  };
-  navigator.clipboard
-    .writeText(JSON.stringify(data, null, 2))
+
+// ── Preset Save / Load
+pane.addBlade({ view: "separator" });
+const presetF = pane.addFolder({ title: "💾  Presets", expanded: true });
+presetF.addBinding(params, "presetName", { label: "Preset name" });
+presetF.addButton({ title: "💾  Save Preset to File" }).on("click", savePreset);
+presetF.addButton({ title: "📂  Load Preset from File" }).on("click", () => {
+  const i = document.createElement("input");
+  i.type = "file"; i.accept = ".json";
+  i.onchange = () => i.files[0] && loadPresetFromFile(i.files[0]);
+  i.click();
+});
+presetF.addBlade({ view: "separator" });
+presetF.addButton({ title: "📋  Copy to Clipboard" }).on("click", () => {
+  const json = JSON.stringify(buildPresetData(), null, 2);
+  navigator.clipboard.writeText(json)
     .then(() => alert("Settings copied to clipboard!"))
     .catch(() => {
-      // Fallback if clipboard not available
       const ta = document.createElement("textarea");
-      ta.value = JSON.stringify(data, null, 2);
+      ta.value = json;
       document.body.appendChild(ta); ta.select();
       document.execCommand("copy");
       document.body.removeChild(ta);

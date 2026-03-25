@@ -65,13 +65,14 @@
       renderer.setPixelRatio(devicePixelRatio);
       renderer.setSize(innerWidth, innerHeight);
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 1.0;
+      renderer.toneMappingExposure = 1.15;
       document.body.appendChild(renderer.domElement);
       await renderer.init();
 
       // ── Scene & Camera ───────────────────────────────────────────────────────
       const scene = new THREE.Scene();
-      scene.background = new THREE.Color(0x7ab0d8);
+      scene.background = new THREE.Color(0x9ecde8);
+      scene.fog = new THREE.FogExp2(0x9ecde8, 0.018);
 
       const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 500);
       camera.position.set(4, 2.5, 8);
@@ -96,10 +97,12 @@
           Math.cos(el) * Math.sin(az),
         ).normalize();
       }
-      const dirLight = new THREE.DirectionalLight(0xfff5e0, 2.2);
+      const dirLight = new THREE.DirectionalLight(0xfff5e0, 3.2);
       dirLight.castShadow = false;
+      dirLight.position.copy(makeSunDir().multiplyScalar(50));
       scene.add(dirLight);
-      const hemi = new THREE.HemisphereLight(0xc8e0ff, 0x88aa55, 1.0);
+      // Ground hemisphere color = dark soil, not bright green
+      const hemi = new THREE.HemisphereLight(0xc8e0ff, 0x1a0e04, 0.9);
       scene.add(hemi);
 
       // ── Flat 1×1 DataTextures (height=0, density=full) ───────────────────────
@@ -109,9 +112,45 @@
         t.needsUpdate = true;
         return t;
       }
-      const heightTex       = flat1x1(0, 0, 0);     // terrain height = 0 everywhere
-      const grassDensityTex = flat1x1(255, 0, 0);   // full density everywhere
-      const trailTex        = flat1x1(255, 255, 255);
+      const heightTex = flat1x1(0, 0, 0);
+      const trailTex  = flat1x1(255, 255, 255);
+
+      // Noise-based density texture: organic bare patches + dense clumps
+      function makeNoiseDensityTex(size = 128) {
+        // Value noise on a grid
+        const grid = (ix, iy) => {
+          let n = ((ix * 1619 + iy * 31337) ^ 0x4e6d2ef7) >>> 0;
+          n = Math.imul(n ^ (n >>> 16), 0x45d9f3b) >>> 0;
+          return (n >>> 0) / 0xffffffff;
+        };
+        const smooth = t => t * t * (3 - 2 * t);
+        const vnoise = (x, y) => {
+          const ix = Math.floor(x), iy = Math.floor(y);
+          const fx = x - ix, fy = y - iy;
+          const sx = smooth(fx), sy = smooth(fy);
+          return grid(ix,iy)*(1-sx)*(1-sy) + grid(ix+1,iy)*sx*(1-sy)
+               + grid(ix,iy+1)*(1-sx)*sy   + grid(ix+1,iy+1)*sx*sy;
+        };
+        const data = new Uint8Array(size * size * 4);
+        for (let y = 0; y < size; y++) {
+          for (let x = 0; x < size; x++) {
+            const fx = x / size, fy = y / size;
+            // Two octaves: medium clumps + fine detail
+            const n = vnoise(fx * 10, fy * 10) * 0.65
+                    + vnoise(fx * 22, fy * 22) * 0.35;
+            // Floor at 0.4 — no fully bare areas, just sparse-to-dense variation
+            const density = 0.4 + Math.max(0, Math.min(0.6, (n - 0.1) / 0.75));
+            const i = (y * size + x) * 4;
+            data[i] = Math.round(density * 255);
+            data[i+3] = 255;
+          }
+        }
+        const t = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+        t.wrapS = t.wrapT = THREE.RepeatWrapping;
+        t.needsUpdate = true;
+        return t;
+      }
+      const grassDensityTex = makeNoiseDensityTex();
 
       // ── Grass Uniforms ────────────────────────────────────────────────────────
       function srgb(hex) {
@@ -125,8 +164,8 @@
       const uPlayerPos          = uniform(new THREE.Vector3(9999, 0, 9999));
       const uNpcPos             = [uniform(new THREE.Vector3(9999, 0, 9999))];
 
-      const uGrassWidth         = uniform(0.08);
-      const uGrassHeight        = uniform(0.7);
+      const uGrassWidth         = uniform(0.055);
+      const uGrassHeight        = uniform(0.78);
 
       // uLodDist small so highLODOut → 1 at normal viewing distances,
       // enabling SSS, specular, crossSway, and micro flutter.
@@ -139,14 +178,14 @@
       const uNearFadeEnd        = uniform(999);
       const uNearFadeRange      = uniform(8);
 
-      const uBaseColor1         = uniform(srgb("#143210"));
-      const uBaseColor2         = uniform(srgb("#183a12"));
-      const uTipColor1          = uniform(srgb("#a6cc40"));
-      const uTipColor2          = uniform(srgb("#cce666"));
-      const uGradientCurve      = uniform(2.0);
-      const uColorVariation     = uniform(0.3);
-      const uLushColor          = uniform(srgb("#1a4a0a"));
-      const uBleachedColor      = uniform(srgb("#d4cc80"));
+      const uBaseColor1         = uniform(srgb("#0b1e07"));  // deep dark base
+      const uBaseColor2         = uniform(srgb("#0e2809"));  // slight variation
+      const uTipColor1          = uniform(srgb("#bcd82a"));  // bright yellow-green tip
+      const uTipColor2          = uniform(srgb("#d4f045"));  // lighter tip variant
+      const uGradientCurve      = uniform(3.2);              // sharp base-dark / tip-bright split
+      const uColorVariation     = uniform(0.45);
+      const uLushColor          = uniform(srgb("#163d08"));
+      const uBleachedColor      = uniform(srgb("#dcd87a"));
 
       const uWindSpeed          = uniform(1.0);
       const uWindStr            = uniform(0.4);
@@ -155,7 +194,7 @@
       const uWindDirZ           = uniform(Math.sin(windDir));
       const uWindAxis           = uniform(new THREE.Vector3( Math.sin(windDir), 0, -Math.cos(windDir)));
       const uCrossAxis          = uniform(new THREE.Vector3( Math.cos(windDir), 0,  Math.sin(windDir)));
-      const uWindGust           = uniform(0.3);
+      const uWindGust           = uniform(0.55);
       const uWindMicro          = uniform(0.15);
 
       const uInteractionRange   = uniform(999);
@@ -167,16 +206,16 @@
       const uMaxSkyBlend        = uniform(0.7);
       const uAoIntensity        = uniform(1.0);
 
-      const uBsIntensity        = uniform(0.4);
-      const uBsColor            = uniform(srgb("#51cc66"));
-      const uBsPower            = uniform(2.0);
-      const uFrontScatter       = uniform(0.3);
-      const uRimSSS             = uniform(0.4);
+      const uBsIntensity        = uniform(0.9);
+      const uBsColor            = uniform(srgb("#c8e840"));  // warm yellow-green tip glow
+      const uBsPower            = uniform(1.4);              // softer falloff = more spread glow
+      const uFrontScatter       = uniform(0.55);
+      const uRimSSS             = uniform(0.65);
 
-      const uSpecV1Intensity    = uniform(0);
-      const uSpecV1Color        = uniform(srgb("#ffffff"));
+      const uSpecV1Intensity    = uniform(0.5);
+      const uSpecV1Color        = uniform(srgb("#fffde8"));
       const uSpecV1Dir          = uniform(new THREE.Vector3(-1, 1, 0.5).normalize());
-      const uSpecV2Intensity    = uniform(0);
+      const uSpecV2Intensity    = uniform(0.25);
       const uSpecV2Color        = uniform(srgb("#ffffff"));
       const uSpecV2Dir          = uniform(new THREE.Vector3(-1, 0.45, 1).normalize());
       const uSpecV2NoiseScale   = uniform(3.0);
@@ -224,9 +263,12 @@
         return lo + t * (hi - lo);
       }
 
+      // Single geometry shared across all patches — blade layout repeats but
+      // shader hash (bladeWorld.xz) gives each blade unique color/height/lean.
+      // Density bumped to 7500 for a denser field.
       const grassGeo = createGrassGeometry(
         GRASS_SEGMENTS_HIGH,
-        GRASS_DENSITY,
+        7500,
         GRASS_PATCH_SIZE,
         setSeed,
         randRange,
@@ -234,24 +276,31 @@
       const grassMat = createGrassMaterial(
         GRASS_SEGMENTS_HIGH,
         GRASS_VERTS_HIGH,
-        false,      // no NPC interaction
+        false,
         "regular",
         grassCtx,
       );
-      const grassMesh = new THREE.Mesh(grassGeo, grassMat);
-      grassMesh.frustumCulled = false;
-      scene.add(grassMesh);
 
-      // ── Floor (tile material, same as parkourtsushima) ────────────────────────
-      const floorGeo = new THREE.PlaneGeometry(100, 100);
+      // 6×6 grid → 36 patches covering 60×60 units
+      const GRID = 6;
+      for (let ix = 0; ix < GRID; ix++) {
+        for (let iz = 0; iz < GRID; iz++) {
+          const mesh = new THREE.Mesh(grassGeo, grassMat);
+          mesh.position.set(
+            (ix - (GRID - 1) * 0.5) * GRASS_PATCH_SIZE,
+            0,
+            (iz - (GRID - 1) * 0.5) * GRASS_PATCH_SIZE,
+          );
+          mesh.frustumCulled = false;
+          scene.add(mesh);
+        }
+      }
+
+      // ── Floor — dark soil so tile grid doesn't show through grass ────────────
+      const floorGeo = new THREE.PlaneGeometry(200, 200);
       floorGeo.rotateX(-Math.PI / 2);
-      const floorMat = createTileMaterial({
-        textureScale: 1500,
-        gradientIntensity: 0.5,
-        gradientBias: 0.1,
-        tileColor: "#d4d4d4",
-        gridColor: "#707070",
-        gridLineColor: "#404040",
+      const floorMat = new THREE.MeshStandardMaterial({
+        color: new THREE.Color(0x0e0a05),
         roughness: 1,
         metalness: 0,
       });
@@ -275,11 +324,13 @@
         const sd = makeSunDir();
         dirLight.position.copy(sd.clone().multiplyScalar(50));
         uSunDir.value.copy(sd);
+        uSpecV1Dir.value.copy(sd);
       });
 
-      // init sun position
+      // init sun position + specular direction
       const initSd = makeSunDir();
       dirLight.position.copy(initSd.clone().multiplyScalar(50));
+      uSpecV1Dir.value.copy(initSd);
 
       // ── Resize ────────────────────────────────────────────────────────────────
       window.addEventListener("resize", () => {
