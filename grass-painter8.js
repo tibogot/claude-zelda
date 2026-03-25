@@ -472,24 +472,26 @@ export function createGrassMaterial(
     // Player/NPC interaction: tip displacement in pTo direction (negative pAngle = repel)
     const interactionTip = mul(pAngle, totalHeightVis, hasInteraction);
 
-    // Bezier tip control point P2 (world-space, relative to blade root)
-    //   wind + bobbing → wind direction
-    //   cross          → perpendicular to wind
-    //   natural lean   → blade's own width axis (varies with randomAngle)
-    //   interaction    → toward/away from entity
-    const p2x = add(
+    // Bezier tip control point P2 — compute horizontal displacement first
+    const p2xRaw = add(
       mul(uWindDirX,         add(windTip, bobbingTip)),
       mul(negate(uWindDirZ), crossTip),
       mul(cos(randomAngle),  naturalTip),
       mul(pTo.x,             interactionTip),
     );
-    const p2y = totalHeightVis;
-    const p2z = add(
+    const p2zRaw = add(
       mul(uWindDirZ,        add(windTip, bobbingTip)),
       mul(uWindDirX,        crossTip),
       mul(negate(sin(randomAngle)), naturalTip),
       mul(pTo.z,            interactionTip),
     );
+    // Chord-length conservation: keep root→tip distance = totalHeightVis.
+    // As blade leans, p2y drops so the tip "falls" instead of stretching upward.
+    const p2rawLen = add(length(vec3(p2xRaw, totalHeightVis, p2zRaw)), float(0.0001));
+    const p2scale  = div(totalHeightVis, p2rawLen);
+    const p2x = mul(p2xRaw, p2scale);
+    const p2y = mul(totalHeightVis, p2scale);
+    const p2z = mul(p2zRaw, p2scale);
 
     // Mid control point P1: 20% of tip XZ at 70% height
     // Keeps blade nearly vertical at base, then curves hard near tip — GoT shape
