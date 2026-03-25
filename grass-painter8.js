@@ -461,14 +461,14 @@ export function createGrassMaterial(
     // This eliminates the "crooked hook" artifact that occurs when stacking
     // rotation matrices at high wind angles.
 
-    // Wind tip displacement along wind direction
-    const windTip    = mul(windLean, totalHeightVis);
+    // Wind tip displacement along wind direction (×1.8 for GoT-style visible lean)
+    const windTip    = mul(windLean, totalHeightVis, 1.8);
     // Cross-wind tip displacement (perpendicular to wind)
     const crossTip   = mul(crossDisplace, totalHeightVis);
     // Bobbing: independent high-freq flutter added to wind tip
     const bobbingTip = mul(bobbingAmt, totalHeightVis, 0.2);
-    // Natural per-blade lean: small random tilt in the blade's own width direction
-    const naturalTip = mul(randomLean, totalHeightVis, 0.4);
+    // Natural per-blade lean: random tilt in blade's own width direction (×1.8 for visible droop)
+    const naturalTip = mul(randomLean, totalHeightVis, 1.8);
     // Player/NPC interaction: tip displacement in pTo direction (negative pAngle = repel)
     const interactionTip = mul(pAngle, totalHeightVis, hasInteraction);
 
@@ -491,10 +491,11 @@ export function createGrassMaterial(
       mul(pTo.z,            interactionTip),
     );
 
-    // Mid control point P1: 40% of tip XZ displacement at 50% height
-    const p1x = mul(p2x, 0.4);
-    const p1y = mul(p2y, 0.5);
-    const p1z = mul(p2z, 0.4);
+    // Mid control point P1: 20% of tip XZ at 70% height
+    // Keeps blade nearly vertical at base, then curves hard near tip — GoT shape
+    const p1x = mul(p2x, 0.2);
+    const p1y = mul(p2y, 0.7);
+    const p1z = mul(p2z, 0.2);
 
     // Evaluate quadratic Bezier at t = heightPct:  B(t) = 2t(1-t)·P1 + t²·P2
     const bt    = heightPct;
@@ -543,17 +544,24 @@ export function createGrassMaterial(
     const fnyN  = div(fny, fnLen);
     const fnzN  = div(fnz, fnLen);
 
-    // Cylindrical rounding: tilt edge normals outward from blade centre axis
-    // xBias: −1 at left edge, 0 at centre, +1 at right edge
-    const xBias    = sub(mul(xSide, 2), 1);
-    const roundStr = float(0.7);
-    const rnx = add(fnxN, mul(wdx, xBias, roundStr));
-    const rny = fnyN;
-    const rnz = add(fnzN, mul(wdz, xBias, roundStr));
-    const rnLen = add(length(vec3(rnx, rny, rnz)), float(0.0001));
+    // GoT exact normal technique (from GDC talk):
+    //   rotatedNormal1 = rotateY(+PI*0.3) * grassVertexNormal
+    //   rotatedNormal2 = rotateY(-PI*0.3) * grassVertexNormal
+    //   normal = mix(rotatedNormal1, rotatedNormal2, widthPercent)
+    // Rotations are around world Y. Three.js convention:
+    //   x' = nx*cos + nz*sin,  z' = -nx*sin + nz*cos
+    const c03 = Math.cos(0.3 * Math.PI);  // ≈ 0.5878
+    const s03 = Math.sin(0.3 * Math.PI);  // ≈ 0.8090
+    // rotateY(+PI*0.3)
+    const r1x = add(mul(fnxN, c03), mul(fnzN, s03));
+    const r1z = add(mul(negate(fnxN), s03), mul(fnzN, c03));
+    // rotateY(-PI*0.3)
+    const r2x = sub(mul(fnxN, c03), mul(fnzN, s03));
+    const r2z = add(mul(fnxN, s03), mul(fnzN, c03));
+    // mix by xSide (widthPercent): left edge → r1, right edge → r2
     // zSide flips the normal for the back-face copy of the blade
     const bladeNormal = mul(
-      vec3(div(rnx, rnLen), div(rny, rnLen), div(rnz, rnLen)),
+      normalize(mix(vec3(r1x, fnyN, r1z), vec3(r2x, fnyN, r2z), xSide)),
       zSide,
     );
 
