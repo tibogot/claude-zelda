@@ -63,6 +63,7 @@ renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
+await renderer.init();
 
 // ─── SCENE / CAMERA ──────────────────────────────────────────────────────────
 const scene  = new THREE.Scene();
@@ -126,11 +127,8 @@ scene.add(defaultTrunk);
 let trunkRoot = null; // loaded GLB
 
 // ─── LEAF TEXTURE ────────────────────────────────────────────────────────────
-// Default: 1×1 white canvas → alpha = 1 everywhere → solid quads until a PNG is loaded
-const _defCanvas = Object.assign(document.createElement("canvas"), { width: 1, height: 1 });
-_defCanvas.getContext("2d").fillStyle = "white";
-_defCanvas.getContext("2d").fillRect(0, 0, 1, 1);
-const leafTex = new THREE.CanvasTexture(_defCanvas);
+// TextureNode with swappable .value — same pattern as geminibushes
+const leafMapNode = texture(new THREE.Texture());
 
 // ─── MATERIAL UNIFORMS ───────────────────────────────────────────────────────
 const uTime        = uniform(0.0);
@@ -214,17 +212,16 @@ const colorNode = Fn(() => {
 })();
 
 const opacityNode = Fn(() => {
-  const leafSample = texture(leafTex, uv()).r;
-  return smoothstep(uAlphaCutoff.sub(0.05), uAlphaCutoff.add(0.05), leafSample);
+  return smoothstep(uAlphaCutoff.sub(0.05), uAlphaCutoff.add(0.05), leafMapNode.r);
 })();
 
 const leafMat = new MeshStandardNodeMaterial({
   side:        THREE.DoubleSide,
-  transparent: true,
-  alphaTest:   0.3,
+  transparent: false,
+  alphaTest:   0.5,
   roughness:   0.88,
   metalness:   0.0,
-  depthWrite:  false,
+  depthWrite:  true,
 });
 leafMat.positionNode = positionNode;
 leafMat.colorNode    = colorNode;
@@ -403,14 +400,18 @@ function loadTrunk(file) {
 
 // ─── LEAF TEXTURE LOADER ─────────────────────────────────────────────────────
 function loadLeafTex(file) {
-  const url = URL.createObjectURL(file);
-  const img = new Image();
-  img.onload = () => {
-    leafTex.image = img;
-    leafTex.needsUpdate = true;
-    URL.revokeObjectURL(url);
+  const reader = new FileReader();
+  reader.onload = ev => {
+    const img = new Image();
+    img.onload = () => {
+      const tex = new THREE.Texture(img);
+      tex.colorSpace  = THREE.SRGBColorSpace;
+      tex.needsUpdate = true;
+      leafMapNode.value = tex; // swap on the node — WebGPU picks it up immediately
+    };
+    img.src = ev.target.result;
   };
-  img.src = url;
+  reader.readAsDataURL(file);
 }
 
 // ─── PARAMS ──────────────────────────────────────────────────────────────────
@@ -492,11 +493,7 @@ leafTexF.addButton({ title: "Load Leaf PNG / JPG" }).on("click", () => {
   i.click();
 });
 leafTexF.addButton({ title: "Reset to solid (no texture)" }).on("click", () => {
-  const cv = Object.assign(document.createElement("canvas"), { width: 1, height: 1 });
-  cv.getContext("2d").fillStyle = "white";
-  cv.getContext("2d").fillRect(0, 0, 1, 1);
-  leafTex.image = cv;
-  leafTex.needsUpdate = true;
+  leafMapNode.value = new THREE.Texture(); // blank → alpha = 1 → solid quads
 });
 leafTexF.addBinding(params, "alphaCutoff", { label: "Alpha cutoff", min: 0, max: 1, step: 0.01 })
   .on("change", ev => uAlphaCutoff.value = ev.value);
@@ -624,11 +621,12 @@ const infoEl = document.getElementById("info");
 buildFoliage();
 
 // ─── RENDER LOOP ─────────────────────────────────────────────────────────────
-const clock = new THREE.Clock();
-renderer.setAnimationLoop(async () => {
-  uTime.value = clock.getElapsedTime();
+const timer = new THREE.Timer();
+renderer.setAnimationLoop(() => {
+  timer.update();
+  uTime.value = timer.getElapsed();
   controls.update();
-  await renderer.renderAsync(scene, camera);
+  renderer.render(scene, camera);
 });
 
 // ─── RESIZE ──────────────────────────────────────────────────────────────────
