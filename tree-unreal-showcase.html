@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Tree Showcase — Trunk + Foliage Sandbox</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #1a3020; }
+  canvas { display: block; }
+  #ui {
+    position: fixed; top: 8px; right: 8px; z-index: 10;
+    max-height: calc(100vh - 16px); overflow-y: auto;
+    scrollbar-width: thin;
+  }
+  #info {
+    position: fixed; bottom: 8px; left: 8px; color: #ddd;
+    font: 11px/1.8 monospace; background: rgba(0,0,0,0.55);
+    padding: 5px 10px; border-radius: 4px; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="ui"></div>
+<div id="info">Drag to orbit · Scroll to zoom · Middle-drag to pan</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three":        "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+    "three/tsl":    "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+    "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+    "tweakpane":    "https://esm.sh/tweakpane@4.0.4"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from "three";
+import {
+  Fn, float, vec2, vec3, vec4,
+  uniform, attribute, varying,
+  texture, uv,
+  mix, step, smoothstep, clamp,
+  sin, cos, abs, fract, floor,
+  dot, normalize, length,
+  add, sub, mul, div, max, min, pow,
+  positionLocal, positionWorld,
+  normalLocal, normalWorld,
+  cameraPosition,
+  modelWorldMatrix,
+  negate,
+} from "three/tsl";
+import { MeshStandardNodeMaterial } from "three";
+import { GLTFLoader }   from "three/addons/loaders/GLTFLoader.js";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { Pane }          from "tweakpane";
+
+// ─── RENDERER ────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+// ─── SCENE / CAMERA ──────────────────────────────────────────────────────────
+const scene  = new THREE.Scene();
+scene.background = new THREE.Color("#87ceeb");
+scene.fog        = new THREE.FogExp2("#acd8f0", 0.018);
+
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 500);
+camera.position.set(7, 5, 10);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 3, 0);
+controls.enableDamping  = true;
+controls.dampingFactor  = 0.08;
+controls.update();
+
+// ─── LIGHTING ────────────────────────────────────────────────────────────────
+const hemi = new THREE.HemisphereLight("#b8dfff", "#3d6b20", 0.8);
+scene.add(hemi);
+
+const sun = new THREE.DirectionalLight("#fff8e8", 2.2);
+sun.position.set(5, 12, 4);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.near   = 0.5;
+sun.shadow.camera.far    = 60;
+sun.shadow.camera.left   = -12;
+sun.shadow.camera.right  = 12;
+sun.shadow.camera.top    = 12;
+sun.shadow.camera.bottom = -12;
+sun.shadow.bias          = -0.001;
+scene.add(sun);
+
+// ─── GROUND ──────────────────────────────────────────────────────────────────
+const groundGeo = new THREE.CircleGeometry(30, 72);
+const groundMat = new THREE.MeshStandardMaterial({ color: "#4a7c2a", roughness: 0.92, metalness: 0 });
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// Small pebbles for scale reference
+const pebbleGeo = new THREE.SphereGeometry(0.12, 5, 3);
+const pebbleMat = new THREE.MeshStandardMaterial({ color: "#888", roughness: 0.95 });
+[[-1.8, 0, 1.4], [2.2, 0, 0.9], [-0.5, 0, 2.3], [1.5, 0, -1.7]].forEach(([x, y, z]) => {
+  const p = new THREE.Mesh(pebbleGeo, pebbleMat);
+  p.position.set(x, 0.07, z);
+  p.scale.y = 0.5 + Math.random() * 0.5;
+  scene.add(p);
+});
+
+// ─── DEFAULT TRUNK PLACEHOLDER ───────────────────────────────────────────────
+// Shown when no GLB is loaded — tapered cylinder as stand-in
+const defTrunkGeo = new THREE.CylinderGeometry(0.10, 0.30, 5.0, 10, 3);
+const defTrunkMat = new THREE.MeshStandardMaterial({ color: 0x5c3a1e, roughness: 0.95 });
+const defaultTrunk = new THREE.Mesh(defTrunkGeo, defTrunkMat);
+defaultTrunk.position.y = 2.5;
+defaultTrunk.castShadow  = true;
+defaultTrunk.receiveShadow = true;
+scene.add(defaultTrunk);
+
+let trunkRoot = null; // loaded GLB
+
+// ─── LEAF TEXTURE ────────────────────────────────────────────────────────────
+// Default: 1×1 white canvas → alpha = 1 everywhere → solid quads until a PNG is loaded
+const _defCanvas = Object.assign(document.createElement("canvas"), { width: 1, height: 1 });
+_defCanvas.getContext("2d").fillStyle = "white";
+_defCanvas.getContext("2d").fillRect(0, 0, 1, 1);
+const leafTex = new THREE.CanvasTexture(_defCanvas);
+
+// ─── MATERIAL UNIFORMS ───────────────────────────────────────────────────────
+const uTime        = uniform(0.0);
+const uYMin        = uniform(0.0);
+const uYMax        = uniform(8.0);
+const uBottomColor = uniform(new THREE.Color("#2d5a1b"));
+const uTopColor    = uniform(new THREE.Color("#5aaa2a"));
+const uColorVar    = uniform(0.12);
+const uAlphaCutoff = uniform(0.45);
+const uSssColor    = uniform(new THREE.Color("#ffee55"));
+const uSssStr      = uniform(0.55);
+const uSssPow      = uniform(2.0);
+const uRimColor    = uniform(new THREE.Color("#c8ffaa"));
+const uRimStr      = uniform(0.38);
+const uRimPow      = uniform(2.5);
+const uAoStr       = uniform(0.45);
+const uSunDir      = uniform(new THREE.Vector3(5, 12, 4).normalize());
+const uWindSpeed   = uniform(0.9);
+const uWindStr     = uniform(0.13);
+const uWindMicro   = uniform(0.04);
+
+// ─── LEAF MATERIAL (TSL) ─────────────────────────────────────────────────────
+// Per-instance random attribute: .x = random phase, .y = random color seed
+const aRand = attribute("aRand", "vec2");
+
+// Vertex: wind sway — tip of plane sways more than base
+const positionNode = Fn(() => {
+  const phase      = aRand.x.mul(6.2832); // unique phase per leaf instance
+  const tipFactor  = positionLocal.y.add(0.5); // 0 = base, 1 = tip of plane
+  const sway       = sin(uTime.mul(uWindSpeed).add(phase)).mul(uWindStr).mul(tipFactor);
+  const micro      = sin(uTime.mul(3.1).add(phase.mul(2.6))).mul(uWindMicro).mul(tipFactor);
+  const swayZ      = cos(uTime.mul(uWindSpeed.mul(0.8)).add(phase.mul(1.3))).mul(uWindStr.mul(0.5)).mul(tipFactor);
+  return positionLocal.add(vec3(sway.add(micro), float(0), swayZ));
+})();
+
+// Fragment: gradient + per-leaf tint + AO + SSS + rim
+const colorNode = Fn(() => {
+  const h1 = aRand.x; // 0–1 random per leaf
+  const h2 = aRand.y; // 0–1 random per leaf
+
+  // Vertical gradient across whole canopy
+  const heightFactor = clamp(
+    positionWorld.y.sub(uYMin).div(max(uYMax.sub(uYMin), float(0.001))),
+    float(0), float(1)
+  );
+
+  // Base color: gradient from root zone to canopy top
+  let col = mix(uBottomColor, uTopColor, heightFactor);
+
+  // Per-leaf color variation (brightness jitter)
+  const varMul = h1.mul(uColorVar.mul(2.0)).add(float(1.0).sub(uColorVar));
+  col = col.mul(varMul);
+
+  // Per-leaf hue variation (slight warm/cool offset)
+  const hueShift = h2.sub(0.5).mul(uColorVar.mul(0.4));
+  col = vec3(
+    col.x.add(hueShift.mul(0.3)),
+    col.y,
+    col.z.sub(hueShift.mul(0.2))
+  );
+
+  // Ambient occlusion: inner/low leaves slightly darker
+  const ao = mix(float(1.0).sub(uAoStr), float(1.0), heightFactor.mul(0.8).add(0.2));
+  col = col.mul(ao);
+
+  // View direction for lighting
+  const viewDir = normalize(cameraPosition.sub(positionWorld));
+  const n = normalWorld;
+
+  // SSS — warm backlit glow through leaf
+  const backDot = max(dot(negate(uSunDir), n), float(0));
+  const sss     = pow(backDot, uSssPow).mul(uSssStr);
+  col = col.add(uSssColor.mul(sss));
+
+  // Rim light — bright edge catch against sky
+  const rimDot = float(1.0).sub(max(dot(n, viewDir), float(0)));
+  const rim    = pow(rimDot, uRimPow).mul(uRimStr);
+  col = col.add(uRimColor.mul(rim));
+
+  return clamp(col, float(0), float(2)); // allow slight HDR bloom
+})();
+
+const opacityNode = Fn(() => {
+  const leafSample = texture(leafTex, uv()).r;
+  return smoothstep(uAlphaCutoff.sub(0.05), uAlphaCutoff.add(0.05), leafSample);
+})();
+
+const leafMat = new MeshStandardNodeMaterial({
+  side:        THREE.DoubleSide,
+  transparent: true,
+  alphaTest:   0.3,
+  roughness:   0.88,
+  metalness:   0.0,
+  depthWrite:  false,
+});
+leafMat.positionNode = positionNode;
+leafMat.colorNode    = colorNode;
+leafMat.opacityNode  = opacityNode;
+leafMat.envMapIntensity = 0;
+
+// ─── CLUSTER DEFINITIONS ─────────────────────────────────────────────────────
+// Each cluster = one ellipsoid of leaf planes, independently positioned on trunk
+const clusterDefs = [
+  // Main canopy — sits on top of trunk
+  { enabled: true,  x: 0,    y: 4.2, z: 0,    rx: 2.4, ry: 1.6,
+    count: 500, leafSize: 1.0, scaleVar: 0.35, shell: 0.5, shellThick: 0.45, tiltMax: 35 },
+  // Side cluster — lower branch accent
+  { enabled: false, x: 1.1,  y: 2.8, z: 0.4,  rx: 1.3, ry: 0.9,
+    count: 200, leafSize: 0.85, scaleVar: 0.3,  shell: 0.45, shellThick: 0.4, tiltMax: 40 },
+  // Top accent — tight tuft at very top
+  { enabled: false, x: 0,    y: 5.6, z: 0,    rx: 1.0, ry: 0.7,
+    count: 140, leafSize: 0.75, scaleVar: 0.25, shell: 0.55, shellThick: 0.35, tiltMax: 28 },
+];
+
+// ─── ELLIPSOID SAMPLER ───────────────────────────────────────────────────────
+function sampleCluster(c, seedOffset) {
+  // Deterministic LCG so rebuild always gives same result for same params
+  let lcg = (seedOffset * 1664525 + 1013904223) >>> 0;
+  const rng = () => { lcg = (lcg * 1664525 + 1013904223) >>> 0; return lcg / 0xffffffff; };
+
+  const positions = [];
+  const maxTry    = c.count * 12;
+  let   tries     = 0;
+
+  while (positions.length < c.count && tries++ < maxTry) {
+    // Uniform point inside unit sphere via rejection
+    const rx = rng() * 2 - 1;
+    const ry = rng() * 2 - 1;
+    const rz = rng() * 2 - 1;
+    const d  = Math.sqrt(rx*rx + ry*ry + rz*rz);
+    if (d > 1.0) continue;
+
+    // Shell: hollow out interior — concentrates leaves on the surface
+    const innerR = 1.0 - c.shellThick;
+    if (d < innerR && rng() < c.shell) continue;
+
+    positions.push({
+      x: c.x + rx * c.rx,
+      y: c.y + ry * c.ry,
+      z: c.z + rz * c.rx,
+      leafSize: c.leafSize,
+      scaleVar: c.scaleVar,
+      tiltMax:  c.tiltMax,
+    });
+  }
+  return positions;
+}
+
+// ─── FOLIAGE MESH ────────────────────────────────────────────────────────────
+let leavesMesh = null;
+
+function buildFoliage() {
+  if (leavesMesh) {
+    scene.remove(leavesMesh);
+    leavesMesh.geometry.dispose();
+    leavesMesh = null;
+  }
+
+  // Collect all positions from all enabled clusters
+  const allPos   = [];
+  const allRands = [];
+
+  clusterDefs.forEach((c, ci) => {
+    if (!c.enabled) return;
+    sampleCluster(c, ci * 999983 + 12345).forEach(p => {
+      allPos.push(p);
+      allRands.push(Math.random(), Math.random());
+    });
+  });
+
+  const n = allPos.length;
+  if (n === 0) { updateStats(); updateClusterHelpers(); return; }
+
+  // Compute gradient Y range for shader
+  let yMin = Infinity, yMax = -Infinity;
+  allPos.forEach(p => { if (p.y < yMin) yMin = p.y; if (p.y > yMax) yMax = p.y; });
+  uYMin.value = yMin - 0.3;
+  uYMax.value = yMax + 0.5;
+
+  // Build geometry with per-instance random attribute
+  const geo      = new THREE.PlaneGeometry(1, 1);
+  const randData = new Float32Array(allRands);
+  geo.setAttribute("aRand", new THREE.InstancedBufferAttribute(randData, 2));
+
+  leavesMesh = new THREE.InstancedMesh(geo, leafMat, n);
+  leavesMesh.frustumCulled  = false;
+  leavesMesh.castShadow     = true;
+  leavesMesh.receiveShadow  = false;
+
+  const dummy   = new THREE.Object3D();
+  const DEG2RAD = Math.PI / 180;
+
+  allPos.forEach((p, i) => {
+    dummy.position.set(p.x, p.y, p.z);
+    dummy.rotation.order = "YXZ";
+    dummy.rotation.y = Math.random() * Math.PI * 2;
+    dummy.rotation.x = (Math.random() - 0.5) * p.tiltMax * DEG2RAD * 2;
+    dummy.rotation.z = (Math.random() - 0.5) * p.tiltMax * DEG2RAD * 2;
+    const s = Math.max(0.05, p.leafSize * (1 + (Math.random() - 0.5) * 2 * p.scaleVar));
+    dummy.scale.setScalar(s);
+    dummy.updateMatrix();
+    leavesMesh.setMatrixAt(i, dummy.matrix);
+  });
+
+  leavesMesh.instanceMatrix.needsUpdate = true;
+  scene.add(leavesMesh);
+
+  updateStats();
+  updateClusterHelpers();
+}
+
+// ─── CLUSTER WIREFRAME HELPERS ───────────────────────────────────────────────
+const HELPER_COLORS = [0xffff00, 0x00ffff, 0xff8800];
+let showHelpers = true;
+
+const clusterHelpers = clusterDefs.map((c, i) => {
+  const sGeo  = new THREE.SphereGeometry(1, 14, 7);
+  const wfGeo = new THREE.WireframeGeometry(sGeo);
+  const line  = new THREE.LineSegments(wfGeo, new THREE.LineBasicMaterial({
+    color: HELPER_COLORS[i], transparent: true, opacity: 0.22,
+  }));
+  scene.add(line);
+  return line;
+});
+
+function updateClusterHelpers() {
+  clusterDefs.forEach((c, i) => {
+    clusterHelpers[i].position.set(c.x, c.y, c.z);
+    clusterHelpers[i].scale.set(c.rx, c.ry, c.rx);
+    clusterHelpers[i].visible = showHelpers && c.enabled;
+  });
+}
+updateClusterHelpers();
+
+// ─── TRUNK GLB LOADER ────────────────────────────────────────────────────────
+const gltfLoader = new GLTFLoader();
+let trunkScale = 1.0;
+
+function loadTrunk(file) {
+  const url = URL.createObjectURL(file);
+  gltfLoader.load(url, (gltf) => {
+    if (trunkRoot) scene.remove(trunkRoot);
+    defaultTrunk.visible = false;
+    trunkRoot = gltf.scene;
+    trunkRoot.scale.setScalar(trunkScale);
+    trunkRoot.traverse(o => {
+      if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; }
+    });
+    scene.add(trunkRoot);
+    URL.revokeObjectURL(url);
+
+    // Auto-detect trunk height from bounding box for positioning hint
+    const box = new THREE.Box3().setFromObject(trunkRoot);
+    const h   = box.max.y - box.min.y;
+    infoEl.textContent =
+      `Trunk loaded — height: ${h.toFixed(2)} units  |  ` +
+      `Tip Y ≈ ${box.max.y.toFixed(2)}  |  ` +
+      `Suggested Cluster 1 Y: ${(box.max.y * 0.85).toFixed(2)}`;
+
+    let tris = 0;
+    trunkRoot.traverse(o => {
+      if (o.isMesh && o.geometry.index) tris += o.geometry.index.count / 3;
+    });
+    params.trunkTris = Math.round(tris);
+    pane?.refresh();
+  }, undefined, (err) => {
+    console.error("Trunk load error:", err);
+  });
+}
+
+// ─── LEAF TEXTURE LOADER ─────────────────────────────────────────────────────
+function loadLeafTex(file) {
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = () => {
+    leafTex.image = img;
+    leafTex.needsUpdate = true;
+    URL.revokeObjectURL(url);
+  };
+  img.src = url;
+}
+
+// ─── PARAMS ──────────────────────────────────────────────────────────────────
+const params = {
+  // Scene
+  bgColor:         "#87ceeb",
+  sunIntensity:    2.2,
+  ambientInt:      0.8,
+  sunX:            5,
+  sunY:            12,
+  sunZ:            4,
+  showGround:      true,
+  showHelpers:     true,
+  trunkScale:      1.0,
+  // Leaf Material
+  bottomColor:     "#2d5a1b",
+  topColor:        "#5aaa2a",
+  colorVar:        0.12,
+  roughness:       0.88,
+  alphaCutoff:     0.45,
+  // SSS
+  sssColor:        "#ffee55",
+  sssStr:          0.55,
+  sssPow:          2.0,
+  // Rim
+  rimColor:        "#c8ffaa",
+  rimStr:          0.38,
+  rimPow:          2.5,
+  // AO
+  aoStr:           0.45,
+  // Wind
+  windSpeed:       0.9,
+  windStr:         0.13,
+  windMicro:       0.04,
+  // Stats (readonly)
+  trunkTris:       0,
+  totalLeaves:     0,
+  totalLeafTris:   0,
+};
+
+function updateStats() {
+  const n = leavesMesh ? leavesMesh.count : 0;
+  params.totalLeaves   = n;
+  params.totalLeafTris = n * 2;
+  pane?.refresh();
+}
+
+// ─── UI ──────────────────────────────────────────────────────────────────────
+const pane = new Pane({ title: "Tree Sandbox", container: document.getElementById("ui") });
+
+// ── Trunk
+const trunkF = pane.addFolder({ title: "🪵  Trunk", expanded: true });
+trunkF.addButton({ title: "Load Trunk GLB" }).on("click", () => {
+  const i = document.createElement("input");
+  i.type = "file"; i.accept = ".glb,.gltf";
+  i.onchange = () => i.files[0] && loadTrunk(i.files[0]);
+  i.click();
+});
+trunkF.addButton({ title: "Reset to default cylinder" }).on("click", () => {
+  if (trunkRoot) { scene.remove(trunkRoot); trunkRoot = null; }
+  defaultTrunk.visible = true;
+  params.trunkTris = 0;
+  pane.refresh();
+  infoEl.textContent = "Drag to orbit · Scroll to zoom · Middle-drag to pan";
+});
+trunkF.addBinding(params, "trunkScale", { label: "Trunk scale", min: 0.01, max: 8, step: 0.01 })
+  .on("change", ev => {
+    trunkScale = ev.value;
+    (trunkRoot || defaultTrunk).scale.setScalar(ev.value);
+  });
+trunkF.addBinding(params, "trunkTris", { label: "Trunk triangles", readonly: true });
+
+// ── Leaf Texture
+const leafTexF = pane.addFolder({ title: "🍃  Leaf Texture", expanded: true });
+leafTexF.addButton({ title: "Load Leaf PNG / JPG" }).on("click", () => {
+  const i = document.createElement("input");
+  i.type = "file"; i.accept = "image/*";
+  i.onchange = () => i.files[0] && loadLeafTex(i.files[0]);
+  i.click();
+});
+leafTexF.addButton({ title: "Reset to solid (no texture)" }).on("click", () => {
+  const cv = Object.assign(document.createElement("canvas"), { width: 1, height: 1 });
+  cv.getContext("2d").fillStyle = "white";
+  cv.getContext("2d").fillRect(0, 0, 1, 1);
+  leafTex.image = cv;
+  leafTex.needsUpdate = true;
+});
+leafTexF.addBinding(params, "alphaCutoff", { label: "Alpha cutoff", min: 0, max: 1, step: 0.01 })
+  .on("change", ev => uAlphaCutoff.value = ev.value);
+
+// ── Clusters
+const CLUSTER_NAMES = ["Main Canopy  (yellow helper)", "Side Cluster  (cyan helper)", "Top Accent  (orange helper)"];
+clusterDefs.forEach((c, ci) => {
+  const cf = pane.addFolder({ title: `Cluster ${ci + 1}: ${CLUSTER_NAMES[ci]}`, expanded: ci === 0 });
+
+  cf.addBinding(c, "enabled",    { label: "Enabled" }).on("change", buildFoliage);
+  cf.addBlade({ view: "separator" });
+  cf.addBinding(c, "x",          { label: "Position X",      min: -8,   max: 8,    step: 0.05 }).on("change", buildFoliage);
+  cf.addBinding(c, "y",          { label: "Position Y",      min: 0,    max: 15,   step: 0.05 }).on("change", buildFoliage);
+  cf.addBinding(c, "z",          { label: "Position Z",      min: -8,   max: 8,    step: 0.05 }).on("change", buildFoliage);
+  cf.addBlade({ view: "separator" });
+  cf.addBinding(c, "rx",         { label: "Radius XZ",       min: 0.2,  max: 8,    step: 0.05 }).on("change", buildFoliage);
+  cf.addBinding(c, "ry",         { label: "Radius Y",        min: 0.2,  max: 6,    step: 0.05 }).on("change", buildFoliage);
+  cf.addBlade({ view: "separator" });
+  cf.addBinding(c, "count",      { label: "Leaf count",      min: 10,   max: 2000, step: 10   }).on("change", buildFoliage);
+  cf.addBinding(c, "leafSize",   { label: "Leaf size",       min: 0.05, max: 4,    step: 0.05 }).on("change", buildFoliage);
+  cf.addBinding(c, "scaleVar",   { label: "Scale variation", min: 0,    max: 0.9,  step: 0.01 }).on("change", buildFoliage);
+  cf.addBlade({ view: "separator" });
+  cf.addBinding(c, "shell",      { label: "Shell bias",      min: 0,    max: 1,    step: 0.01 }).on("change", buildFoliage);
+  cf.addBinding(c, "shellThick", { label: "Shell thickness", min: 0.05, max: 0.98, step: 0.01 }).on("change", buildFoliage);
+  cf.addBinding(c, "tiltMax",   { label: "Max tilt (°)",    min: 0,    max: 90,   step: 1    }).on("change", buildFoliage);
+});
+
+// ── Leaf Material
+const matF = pane.addFolder({ title: "🎨  Leaf Colors", expanded: false });
+matF.addBinding(params, "bottomColor", { label: "Base color",  view: "color" }).on("change", ev => uBottomColor.value.set(ev.value));
+matF.addBinding(params, "topColor",    { label: "Top color",   view: "color" }).on("change", ev => uTopColor.value.set(ev.value));
+matF.addBinding(params, "colorVar",    { label: "Tint variation", min: 0, max: 0.6, step: 0.01 }).on("change", ev => uColorVar.value = ev.value);
+matF.addBinding(params, "roughness",   { label: "Roughness",   min: 0, max: 1, step: 0.01 })
+  .on("change", ev => { if (leavesMesh) leavesMesh.material.roughness = ev.value; });
+
+// ── SSS & Rim
+const lightF = pane.addFolder({ title: "💡  SSS & Rim Light", expanded: false });
+lightF.addBinding(params, "sssColor", { label: "SSS color",    view: "color" }).on("change", ev => uSssColor.value.set(ev.value));
+lightF.addBinding(params, "sssStr",   { label: "SSS strength", min: 0, max: 2,   step: 0.01 }).on("change", ev => uSssStr.value = ev.value);
+lightF.addBinding(params, "sssPow",   { label: "SSS falloff",  min: 0.5, max: 10, step: 0.1  }).on("change", ev => uSssPow.value = ev.value);
+lightF.addBlade({ view: "separator" });
+lightF.addBinding(params, "rimColor", { label: "Rim color",    view: "color" }).on("change", ev => uRimColor.value.set(ev.value));
+lightF.addBinding(params, "rimStr",   { label: "Rim strength", min: 0, max: 2,   step: 0.01 }).on("change", ev => uRimStr.value = ev.value);
+lightF.addBinding(params, "rimPow",   { label: "Rim sharpness",min: 0.5, max: 10, step: 0.1 }).on("change", ev => uRimPow.value = ev.value);
+lightF.addBlade({ view: "separator" });
+lightF.addBinding(params, "aoStr",    { label: "AO strength",  min: 0, max: 1,   step: 0.01 }).on("change", ev => uAoStr.value = ev.value);
+
+// ── Wind
+const windF = pane.addFolder({ title: "💨  Wind", expanded: false });
+windF.addBinding(params, "windSpeed", { label: "Speed",    min: 0, max: 5,   step: 0.05 }).on("change", ev => uWindSpeed.value = ev.value);
+windF.addBinding(params, "windStr",   { label: "Strength", min: 0, max: 0.8, step: 0.005 }).on("change", ev => uWindStr.value = ev.value);
+windF.addBinding(params, "windMicro", { label: "Micro sway",min: 0, max: 0.3, step: 0.005 }).on("change", ev => uWindMicro.value = ev.value);
+
+// ── Scene & Lighting
+const sceneF = pane.addFolder({ title: "🌤  Scene", expanded: false });
+sceneF.addBinding(params, "bgColor",      { label: "Sky color",    view: "color" })
+  .on("change", ev => { scene.background.set(ev.value); scene.fog.color.set(ev.value); });
+sceneF.addBinding(params, "sunIntensity", { label: "Sun intensity", min: 0, max: 6,   step: 0.05 }).on("change", ev => sun.intensity = ev.value);
+sceneF.addBinding(params, "ambientInt",   { label: "Ambient light", min: 0, max: 3,   step: 0.05 }).on("change", ev => hemi.intensity = ev.value);
+sceneF.addBlade({ view: "separator" });
+const syncSun = () => {
+  sun.position.set(params.sunX, params.sunY, params.sunZ);
+  uSunDir.value.set(params.sunX, params.sunY, params.sunZ);
+  uSunDir.value.normalize();
+};
+sceneF.addBinding(params, "sunX", { label: "Sun X", min: -20, max: 20, step: 0.5 }).on("change", syncSun);
+sceneF.addBinding(params, "sunY", { label: "Sun Y", min: 0.5, max: 20, step: 0.5 }).on("change", syncSun);
+sceneF.addBinding(params, "sunZ", { label: "Sun Z", min: -20, max: 20, step: 0.5 }).on("change", syncSun);
+sceneF.addBlade({ view: "separator" });
+sceneF.addBinding(params, "showGround",  { label: "Show ground"  }).on("change", ev => ground.visible = ev.value);
+sceneF.addBinding(params, "showHelpers", { label: "Show cluster helpers" })
+  .on("change", ev => { showHelpers = ev.value; updateClusterHelpers(); });
+
+// ── Stats
+const statsF = pane.addFolder({ title: "📊  Stats", expanded: true });
+statsF.addBinding(params, "trunkTris",     { label: "Trunk triangles",  readonly: true });
+statsF.addBinding(params, "totalLeaves",   { label: "Leaf instances",   readonly: true });
+statsF.addBinding(params, "totalLeafTris", { label: "Leaf triangles",   readonly: true });
+
+// ── Actions
+pane.addBlade({ view: "separator" });
+pane.addButton({ title: "🔄  Rebuild Foliage" }).on("click", buildFoliage);
+pane.addButton({ title: "📋  Copy Settings JSON" }).on("click", () => {
+  const data = {
+    clusters: clusterDefs.map(c => ({ ...c })),
+    material: {
+      bottomColor:  params.bottomColor,
+      topColor:     params.topColor,
+      colorVar:     params.colorVar,
+      roughness:    params.roughness,
+      alphaCutoff:  params.alphaCutoff,
+      sssColor:     params.sssColor,
+      sssStr:       params.sssStr,
+      sssPow:       params.sssPow,
+      rimColor:     params.rimColor,
+      rimStr:       params.rimStr,
+      rimPow:       params.rimPow,
+      aoStr:        params.aoStr,
+    },
+    wind: {
+      windSpeed:  params.windSpeed,
+      windStr:    params.windStr,
+      windMicro:  params.windMicro,
+    },
+    trunkScale: params.trunkScale,
+  };
+  navigator.clipboard
+    .writeText(JSON.stringify(data, null, 2))
+    .then(() => alert("Settings copied to clipboard!"))
+    .catch(() => {
+      // Fallback if clipboard not available
+      const ta = document.createElement("textarea");
+      ta.value = JSON.stringify(data, null, 2);
+      document.body.appendChild(ta); ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      alert("Settings copied!");
+    });
+});
+
+// ─── INFO BAR ────────────────────────────────────────────────────────────────
+const infoEl = document.getElementById("info");
+
+// ─── INITIAL BUILD ───────────────────────────────────────────────────────────
+buildFoliage();
+
+// ─── RENDER LOOP ─────────────────────────────────────────────────────────────
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(async () => {
+  uTime.value = clock.getElapsedTime();
+  controls.update();
+  await renderer.renderAsync(scene, camera);
+});
+
+// ─── RESIZE ──────────────────────────────────────────────────────────────────
+window.addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
