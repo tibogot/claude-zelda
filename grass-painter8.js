@@ -31,6 +31,7 @@ import {
   max,
   min,
   pow,
+  sqrt,
   modelWorldMatrix,
   cameraPosition,
   normalLocal,
@@ -179,7 +180,6 @@ export function createGrassMaterial(
     uBsIntensity,
     uSpecV1Intensity,
     uSpecV1Color,
-    uSpecV1Dir,
     uSpecV2Intensity,
     uSpecV2Color,
     uSpecV2Dir,
@@ -195,8 +195,9 @@ export function createGrassMaterial(
   const uBladeDensity =
     densityKey === "near" ? uBladeDensityNear : uBladeDensityRegular;
   const vGrassColor = varying(vec3(0), "v_gc");
-  const vPacked = varying(vec3(0), "v_pk");
-  const vWorldPos = varying(vec3(0), "v_wp");
+  const vPacked    = varying(vec3(0), "v_pk");
+  const vWorldPos  = varying(vec3(0), "v_wp");
+  const vTangent   = varying(vec3(0), "v_tan");
 
   const positionNode = Fn(() => {
     const offsetAttr = attribute("offset", "vec3"),
@@ -590,6 +591,9 @@ export function createGrassMaterial(
     const tanX  = div(dtX, dtLen);
     const tanY  = div(dtY, dtLen);
     const tanZ  = div(dtZ, dtLen);
+    // Pass world-space tangent to fragment shader for anisotropic specular.
+    // Mesh has no rotation/scale so local tangent = world tangent.
+    vTangent.assign(vec3(tanX, tanY, tanZ));
 
     // Blade width direction in world XZ (random yaw)
     const wdx = cos(randomAngle);
@@ -746,23 +750,27 @@ export function createGrassMaterial(
     col = add(col, mul(transmitCol, 0.35, totalSSS, uBsIntensity));
 
     const sceneDepth = length(sub(cameraPosition, vWorldPos));
-    const specNormal = normalize(n);
-    const specReflect = sub(
-      uSpecV1Dir,
-      mul(specNormal, mul(2.0, dot(uSpecV1Dir, specNormal))),
-    );
-    const specDot = pow(max(dot(viewDir, specReflect), 0.0), 25.6);
-    const specDistFade = smoothstep(2.0, 10.0, sceneDepth);
-    const specTipFade = smoothstep(0.5, 1.0, heightPct);
+    const specTipFade = smoothstep(0.3, 1.0, heightPct);
     const specLod = smoothstep(0.0, 0.3, vPacked.z);
+    // ── Kajiya-Kay anisotropic specular along blade tangent ───────────────────
+    // Produces an elongated streak highlight running up the blade length,
+    // like light glancing off a grass fibre — vs the round Phong spot.
+    // Formula: spec = pow( sin(angle(T, H)), power ) = pow( sqrt(1 - (T·H)²), power )
+    const bladeTan  = normalize(vTangent);
+    const halfVec   = normalize(add(uSunDir, viewDir));
+    const TdotH     = dot(bladeTan, halfVec);
+    const sinTH     = sqrt(max(sub(float(1), mul(TdotH, TdotH)), float(0.001)));
+    const anisoSpec = pow(sinTH, 18.0);
+    // Fade with distance (visible up close, dissolves beyond 30 units)
+    const specDistFade = sub(float(1), smoothstep(15.0, 35.0, sceneDepth));
     const specV1 = mul(
       uSpecV1Color,
-      specDot,
+      anisoSpec,
       uSpecV1Intensity,
       specDistFade,
       specTipFade,
       specLod,
-      3.0,
+      2.5,
     );
     col = add(col, specV1);
 
