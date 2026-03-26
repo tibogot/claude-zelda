@@ -194,7 +194,6 @@
 
       const uSpecV1Intensity    = uniform(0.5);
       const uSpecV1Color        = uniform(srgb("#fffde8"));
-      const uSpecV1Dir          = uniform(new THREE.Vector3(-1, 1, 0.5).normalize());
       const uSpecV2Intensity    = uniform(0.25);
       const uSpecV2Color        = uniform(srgb("#ffffff"));
       const uSpecV2Dir          = uniform(new THREE.Vector3(-1, 0.45, 1).normalize());
@@ -225,7 +224,7 @@
         uInteractionRange, uInteractionStrength, uInteractionHThresh, uInteractionRepel,
         uMinSkyBlend, uMaxSkyBlend, uAoIntensity,
         uBsIntensity, uBsColor, uBsPower, uFrontScatter, uRimSSS,
-        uSpecV1Intensity, uSpecV1Color, uSpecV1Dir,
+        uSpecV1Intensity, uSpecV1Color,
         uSpecV2Intensity, uSpecV2Color, uSpecV2Dir,
         uSpecV2NoiseScale, uSpecV2NoiseStr, uSpecV2Power, uSpecV2TipBias,
         uSeasonalStr, uSeasonalScale, uSeasonalDryColor,
@@ -287,30 +286,101 @@
       const floor = new THREE.Mesh(floorGeo, floorMat);
       scene.add(floor);
 
-      // ── UI Sliders ────────────────────────────────────────────────────────────
-      function bindSlider(id, valId, decimals, onChange) {
-        const el = document.getElementById(id);
-        const vl = document.getElementById(valId);
-        el.addEventListener("input", () => {
-          const v = parseFloat(el.value);
-          vl.textContent = v.toFixed(decimals);
-          onChange(v);
-        });
-      }
-      bindSlider("windStr", "windStrV", 2, v => { uWindStr.value = v; });
-      bindSlider("windSpd", "windSpdV", 2, v => { uWindSpeed.value = v; });
-      bindSlider("sunEl",   "sunElV",   0, v => {
-        sunCfg.elevation = v;
+      // ── Tweakpane UI ─────────────────────────────────────────────────────────
+      // Color helpers: Tweakpane uses sRGB hex, Three.js uniforms store linear.
+      const toHex = c => '#' + c.clone().convertLinearToSRGB().getHexString();
+      const fromHex = (hex, u) => u.value.set(hex).convertSRGBToLinear();
+
+      const pane = new Pane({ title: 'Grass Controls' });
+
+      // ── Sun ──────────────────────────────────────────────────────────────────
+      const sunF = pane.addFolder({ title: 'Sun', expanded: true });
+      const sunP = { elevation: 43, azimuth: 135 };
+      function updateSun() {
+        sunCfg.elevation = sunP.elevation;
+        sunCfg.azimuth   = sunP.azimuth;
         const sd = makeSunDir();
         dirLight.position.copy(sd.clone().multiplyScalar(50));
         uSunDir.value.copy(sd);
-        uSpecV1Dir.value.copy(sd);
-      });
+      }
+      sunF.addBinding(sunP, 'elevation', { label: 'Elevation', min: 5,   max: 85,  step: 1   }).on('change', updateSun);
+      sunF.addBinding(sunP, 'azimuth',   { label: 'Azimuth',   min: 0,   max: 360, step: 1   }).on('change', updateSun);
 
-      // init sun position + specular direction
-      const initSd = makeSunDir();
-      dirLight.position.copy(initSd.clone().multiplyScalar(50));
-      uSpecV1Dir.value.copy(initSd);
+      // ── Wind ─────────────────────────────────────────────────────────────────
+      const windF = pane.addFolder({ title: 'Wind', expanded: true });
+      const windP = { strength: 0.4, speed: 1.0, gust: 0.55, flutter: 0.15 };
+      windF.addBinding(windP, 'strength', { label: 'Strength', min: 0, max: 2,   step: 0.01 }).on('change', v => { uWindStr.value   = v.value; });
+      windF.addBinding(windP, 'speed',    { label: 'Speed',    min: 0, max: 4,   step: 0.05 }).on('change', v => { uWindSpeed.value  = v.value; });
+      windF.addBinding(windP, 'gust',     { label: 'Gust',     min: 0, max: 1.5, step: 0.01 }).on('change', v => { uWindGust.value   = v.value; });
+      windF.addBinding(windP, 'flutter',  { label: 'Flutter',  min: 0, max: 0.5, step: 0.01 }).on('change', v => { uWindMicro.value  = v.value; });
+
+      // ── Grass Shape ───────────────────────────────────────────────────────────
+      const shapeF = pane.addFolder({ title: 'Blade Shape', expanded: false });
+      const shapeP = { width: 0.055, height: 0.78 };
+      shapeF.addBinding(shapeP, 'width',  { label: 'Width',  min: 0.01, max: 0.2,  step: 0.001 }).on('change', v => { uGrassWidth.value  = v.value; });
+      shapeF.addBinding(shapeP, 'height', { label: 'Height', min: 0.2,  max: 2.0,  step: 0.01  }).on('change', v => { uGrassHeight.value = v.value; });
+
+      // ── Colors ───────────────────────────────────────────────────────────────
+      const colF = pane.addFolder({ title: 'Colors', expanded: false });
+      const colP = {
+        base1: toHex(uBaseColor1.value),  base2: toHex(uBaseColor2.value),
+        tip1:  toHex(uTipColor1.value),   tip2:  toHex(uTipColor2.value),
+        lush:  toHex(uLushColor.value),   bleach: toHex(uBleachedColor.value),
+        gradient: 3.2, variation: 0.45,
+      };
+      colF.addBinding(colP, 'base1',    { label: 'Base 1',    view: 'color' }).on('change', v => fromHex(v.value, uBaseColor1));
+      colF.addBinding(colP, 'base2',    { label: 'Base 2',    view: 'color' }).on('change', v => fromHex(v.value, uBaseColor2));
+      colF.addBinding(colP, 'tip1',     { label: 'Tip 1',     view: 'color' }).on('change', v => fromHex(v.value, uTipColor1));
+      colF.addBinding(colP, 'tip2',     { label: 'Tip 2',     view: 'color' }).on('change', v => fromHex(v.value, uTipColor2));
+      colF.addBinding(colP, 'lush',     { label: 'Lush',      view: 'color' }).on('change', v => fromHex(v.value, uLushColor));
+      colF.addBinding(colP, 'bleach',   { label: 'Bleached',  view: 'color' }).on('change', v => fromHex(v.value, uBleachedColor));
+      colF.addBinding(colP, 'gradient', { label: 'Gradient',  min: 1, max: 6,  step: 0.1 }).on('change', v => { uGradientCurve.value  = v.value; });
+      colF.addBinding(colP, 'variation',{ label: 'Variation', min: 0, max: 1,  step: 0.01}).on('change', v => { uColorVariation.value = v.value; });
+
+      // ── SSS ───────────────────────────────────────────────────────────────────
+      const sssF = pane.addFolder({ title: 'SSS / Translucency', expanded: false });
+      const sssP = {
+        intensity: 0.9, color: toHex(uBsColor.value),
+        power: 1.4, front: 0.55, rim: 0.65,
+      };
+      sssF.addBinding(sssP, 'intensity',  { label: 'Intensity',  min: 0, max: 2,   step: 0.01 }).on('change', v => { uBsIntensity.value   = v.value; });
+      sssF.addBinding(sssP, 'color',      { label: 'Color',      view: 'color'                }).on('change', v => fromHex(v.value, uBsColor));
+      sssF.addBinding(sssP, 'power',      { label: 'Power',      min: 0.5, max: 5, step: 0.05 }).on('change', v => { uBsPower.value       = v.value; });
+      sssF.addBinding(sssP, 'front',      { label: 'Front Scat', min: 0, max: 1,   step: 0.01 }).on('change', v => { uFrontScatter.value  = v.value; });
+      sssF.addBinding(sssP, 'rim',        { label: 'Rim',        min: 0, max: 1,   step: 0.01 }).on('change', v => { uRimSSS.value        = v.value; });
+
+      // ── Specular V1 (anisotropic) ──────────────────────────────────────────────
+      const sp1F = pane.addFolder({ title: 'Specular (Anisotropic)', expanded: false });
+      const sp1P = { enabled: true, intensity: 0.5, color: toHex(uSpecV1Color.value) };
+      sp1F.addBinding(sp1P, 'enabled',   { label: 'Enable' }).on('change', v => {
+        uSpecV1Intensity.value = v.value ? sp1P.intensity : 0;
+      });
+      sp1F.addBinding(sp1P, 'intensity', { label: 'Intensity', min: 0, max: 3, step: 0.01 }).on('change', v => {
+        if (sp1P.enabled) uSpecV1Intensity.value = v.value;
+      });
+      sp1F.addBinding(sp1P, 'color',     { label: 'Color', view: 'color' }).on('change', v => fromHex(v.value, uSpecV1Color));
+
+      // ── Specular V2 (scattered noise) ─────────────────────────────────────────
+      const sp2F = pane.addFolder({ title: 'Specular (Scattered)', expanded: false });
+      const sp2P = { enabled: true, intensity: 0.25, color: toHex(uSpecV2Color.value), power: 12.0 };
+      sp2F.addBinding(sp2P, 'enabled',   { label: 'Enable' }).on('change', v => {
+        uSpecV2Intensity.value = v.value ? sp2P.intensity : 0;
+      });
+      sp2F.addBinding(sp2P, 'intensity', { label: 'Intensity', min: 0, max: 3,  step: 0.01 }).on('change', v => {
+        if (sp2P.enabled) uSpecV2Intensity.value = v.value;
+      });
+      sp2F.addBinding(sp2P, 'color',     { label: 'Color',     view: 'color'               }).on('change', v => fromHex(v.value, uSpecV2Color));
+      sp2F.addBinding(sp2P, 'power',     { label: 'Power',     min: 1, max: 40, step: 0.5  }).on('change', v => { uSpecV2Power.value = v.value; });
+
+      // ── Environment ───────────────────────────────────────────────────────────
+      const envF = pane.addFolder({ title: 'Environment', expanded: false });
+      const envP = { ao: 1.0, skyMin: 0.55, skyMax: 0.7 };
+      envF.addBinding(envP, 'ao',     { label: 'AO Intensity', min: 0, max: 2,  step: 0.01 }).on('change', v => { uAoIntensity.value   = v.value; });
+      envF.addBinding(envP, 'skyMin', { label: 'Sky Blend Min',min: 0, max: 1,  step: 0.01 }).on('change', v => { uMinSkyBlend.value   = v.value; });
+      envF.addBinding(envP, 'skyMax', { label: 'Sky Blend Max',min: 0, max: 1,  step: 0.01 }).on('change', v => { uMaxSkyBlend.value   = v.value; });
+
+      // init sun
+      updateSun();
 
       // ── Resize ────────────────────────────────────────────────────────────────
       window.addEventListener("resize", () => {
