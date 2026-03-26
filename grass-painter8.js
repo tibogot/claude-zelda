@@ -17,6 +17,7 @@ import {
   smoothstep,
   clamp,
   abs,
+  sign,
   sin,
   cos,
   mod,
@@ -184,6 +185,9 @@ export function createGrassMaterial(
     uSpecV2NoiseStr,
     uSpecV2Power,
     uSpecV2TipBias,
+    uSunWrap,
+    uNormalRound,
+    uViewThicken,
     PI,
   } = ctx;
 
@@ -214,7 +218,8 @@ export function createGrassMaterial(
     // All tiers compute highLODOut from distance — quality must be identical at
     // patch borders so snapping between rings causes no visible pop.
     const highLODOut = smoothstep(mul(uLodDist, uLodBlendStart), uLodDist, distXZ);
-    const lodFadeIn  = smoothstep(uLodDist, uMaxDist, distXZ);
+    // Fade blades only near the far edge — start at 80% of uMaxDist so LOD2 is fully visible.
+    const lodFadeIn  = smoothstep(mul(uMaxDist, 0.8), uMaxDist, distXZ);
 
     // LOD tiers differ in vertex count and shader quality only — blades are never
     // collapsed by distance. Collapsing by distance creates gaps at patch borders
@@ -234,7 +239,7 @@ export function createGrassMaterial(
     // Height: clump areas vary 85%–115% on top of per-blade randomHeight
     const clumpHeight = remap(clumpN, 0, 1, 0.85, 1.15);
     // Lean: strength of shared-direction pull within a clump (~0.35 units of tip offset)
-    const clumpLeanStr = float(0.35);
+    const clumpLeanStr = float(0.55);
 
     const randomHeight = mul(
       remap(hv.z, 0, 1, 0.75, 1.5),
@@ -242,8 +247,8 @@ export function createGrassMaterial(
     );
     const randomLean      = remap(hv.w, 0, 1, 0.15, 0.45);
     // GoT per-blade cubic Bezier shape properties
-    const randomBend      = remap(hv3.x, 0, 1, 0.5, 1.0);    // all blades have visible arc, no stick-straights
-    const randomSideCurve = remap(hv3.y, 0, 1, -0.28, 0.28); // lateral twist, ± perpendicular to lean
+    const randomBend      = remap(hv3.x, 0, 1, 0.7, 1.0);    // all blades have visible arc, no stick-straights
+    const randomSideCurve = remap(hv3.y, 0, 1, -0.45, 0.45); // lateral twist — wider range for more organic variety
 
     const vertID = mod(vertIdxAttr, NVERTS);
     const xSide = mod(vertID, 2);
@@ -279,7 +284,7 @@ export function createGrassMaterial(
     const ctbZ = div(sub(bladeWorld.z, cameraPosition.z), ctbLen);
     // edgeDot ≈ 1 when face-on, ≈ 0 when edge-on → widen when edge-on
     const edgeDot = abs(add(mul(bwdX, ctbX), mul(bwdZ, ctbZ)));
-    const viewThicken = mix(float(2.0), float(1.0), edgeDot);
+    const viewThicken = mix(uViewThicken, float(1.0), edgeDot);
 
     const totalWidthVis  = mul(totalWidth,  bladeVisible, viewThicken);
     const totalHeightVis = mul(totalHeight, bladeVisible);
@@ -509,8 +514,10 @@ export function createGrassMaterial(
     const crossTip   = mul(crossDisplace, totalHeightVis);
     // Bobbing: independent high-freq flutter added to wind tip
     const bobbingTip = mul(bobbingAmt, totalHeightVis, 0.2);
-    // Natural per-blade lean: random tilt in blade's own width direction (×1.8 for visible droop)
-    const naturalTip = mul(randomLean, totalHeightVis, 1.8);
+    // Natural per-blade lean: random tilt in blade's own width direction.
+    // MUST stay below wind lean (~0.23 u) so opposite-facing blades (θ+180°) don't
+    // lean strongly against the wind — that created "wrong direction" dark blades.
+    const naturalTip = mul(randomLean, totalHeightVis, 0.3);
     // Player/NPC interaction: tip displacement in pTo direction (negative pAngle = repel)
     const interactionTip = mul(pAngle, totalHeightVis, hasInteraction);
 
@@ -551,19 +558,18 @@ export function createGrassMaterial(
     // P3 = tip (chord-conserved, already computed above as p2x/p2y/p2z)
     const p3x = p2x, p3y = p2y, p3z = p2z;
 
-    // P1 = lower control — nearly vertical at base, XZ scaled by randomBend
-    // Low randomBend = stiff (blade shoots straight up before arcing)
-    // High randomBend = floppy (blade curves from the root)
-    const p1x = mul(p3x, mul(randomBend, 0.08));
-    const p1y = mul(p3y, 0.3);
-    const p1z = mul(p3z, mul(randomBend, 0.08));
+    // P1 = lower control — how early the blade starts arcing from vertical.
+    // 0.08 = nearly straight up at base (stiff), 0.30 = curves from the root (GoT floppy).
+    const p1x = mul(p3x, mul(randomBend, 0.30));
+    const p1y = mul(p3y, 0.12);   // low P1 height = arc starts near the ground
+    const p1z = mul(p3z, mul(randomBend, 0.30));
 
-    // P2 = mid control — 55% toward tip XZ + per-blade side curve (lateral drift)
+    // P2 = mid control — lower p2cy = more pronounced sweep along the whole blade
     // Side curve direction = perpendicular to lean direction in XZ
     // Lean dir: (cos θ, -sin θ)  →  Perp: (sin θ, cos θ)
     const sideAmt = mul(randomSideCurve, totalHeightVis);
     const p2cx = add(mul(p3x, 0.55), mul(sin(randomAngle), sideAmt));
-    const p2cy = mul(p3y, 0.65);
+    const p2cy = mul(p3y, 0.45);   // was 0.65 — lower = more swept arc, less upright
     const p2cz = add(mul(p3z, 0.55), mul(cos(randomAngle), sideAmt));
 
     // Cubic Bezier: B(t) = 3(1-t)²t·P1 + 3(1-t)t²·P2 + t³·P3   (P0 = origin)
@@ -626,29 +632,48 @@ export function createGrassMaterial(
     const fnyN  = div(fny, fnLen);
     const fnzN  = div(fnz, fnLen);
 
+    // Grass blades are thin and DoubleSide — a blade at angle θ has flat normal
+    // cross(widthDir, tangent) = (sin θ, 0, cos θ), and the same blade rotated 180°
+    // produces (-sin θ, 0, -cos θ). With a directional sun, the 180°-rotated blades
+    // receive ~6× less Lambert light → VERY dark "wrong direction" blades.
+    // Fix: flip the flat normal to always face the sun's hemisphere before applying
+    // the GoT ±54° rotation. SSS / sky-blend handle the soft back-lit appearance.
+    const dotWithSun = dot(vec3(fnxN, fnyN, fnzN), uSunDir);
+    const sunFlip    = sign(add(dotWithSun, float(0.001)));  // +1 or −1, never 0
+    const fnxS = mul(fnxN, sunFlip);
+    const fnyS = mul(fnyN, sunFlip);
+    const fnzS = mul(fnzN, sunFlip);
+
     // GoT exact normal technique (from GDC talk):
     //   rotatedNormal1 = rotateY(+PI*0.3) * grassVertexNormal
     //   rotatedNormal2 = rotateY(-PI*0.3) * grassVertexNormal
     //   normal = mix(rotatedNormal1, rotatedNormal2, widthPercent)
     // Rotations are around world Y. Three.js convention:
     //   x' = nx*cos + nz*sin,  z' = -nx*sin + nz*cos
-    const c03 = Math.cos(0.3 * Math.PI);  // ≈ 0.5878
-    const s03 = Math.sin(0.3 * Math.PI);  // ≈ 0.8090
-    // rotateY(+PI*0.3)
-    const r1x = add(mul(fnxN, c03), mul(fnzN, s03));
-    const r1z = add(mul(negate(fnxN), s03), mul(fnzN, c03));
-    // rotateY(-PI*0.3)
-    const r2x = sub(mul(fnxN, c03), mul(fnzN, s03));
-    const r2z = add(mul(fnxN, s03), mul(fnzN, c03));
-    // mix by xSide (widthPercent): left edge → r1, right edge → r2.
-    // No zSide flip — grass blades are thin/translucent. DoubleSide material handles
-    // back-face winding in the fragment shader; flipping the normal here would make
-    // back-face blades lose sky contribution and appear dark.
-    const bladeNormal = normalize(mix(vec3(r1x, fnyN, r1z), vec3(r2x, fnyN, r2z), xSide));
+    const nrAngle = mul(uNormalRound, PI);
+    const c03 = cos(nrAngle);
+    const s03 = sin(nrAngle);
+    // rotateY(+angle)
+    const r1x = add(mul(fnxS, c03), mul(fnzS, s03));
+    const r1z = add(mul(negate(fnxS), s03), mul(fnzS, c03));
+    // rotateY(-angle)
+    const r2x = sub(mul(fnxS, c03), mul(fnzS, s03));
+    const r2z = add(mul(fnxS, s03), mul(fnzS, c03));
+    // mix by xSide: left edge → r1, right edge → r2
+    const bladeNormal = normalize(mix(vec3(r1x, fnyS, r1z), vec3(r2x, fnyS, r2z), xSide));
 
+    // Bake directional sun shading into vGrassColor using the GoT blade normal.
+    // uSunWrap=0 → full directional (darkest blades get 0%),
+    // uSunWrap=1 → fully flat (all blades equal brightness, Zelda/Genshin style).
+    // This decouples the "directional look" from Three.js PBR, so color controls
+    // actually work and no blade goes near-black just from its orientation.
+    const sunDot   = max(float(0), dot(bladeNormal, uSunDir));
+    const sunShade = add(mul(sunDot, sub(float(1), uSunWrap)), uSunWrap);
+
+    // Pass a near-up normal to Three.js PBR so it contributes a uniform ambient
+    // across all blades instead of wildly varying per-blade diffuse.
     const skyFade = mix(uMinSkyBlend, uMaxSkyBlend, highLODOut);
     const mixed = mix(bladeNormal, vec3(0, 1, 0), skyFade);
-    // Clamp Y so no blade normal points into the ground
     const finalNormal = normalize(vec3(mixed.x, max(mixed.y, float(0)), mixed.z));
     normalLocal.assign(finalNormal);
 
@@ -706,12 +731,12 @@ export function createGrassMaterial(
     const aoBase = max(sub(1.0, mul(uAoIntensity, 0.65)), 0.2);
     const aoLod = mul(aoBase, mix(0.5, 1.0, highLODOut));
     const ao = mix(aoLod, 1.0, smoothstep(0.0, 0.22, heightPct));
-    const fadeFactor = sub(1, smoothstep(0.4, 1, lodFadeIn));
+    const fadeFactor = sub(1, lodFadeIn);  // 1.0 until 80% of maxDist, then linear to 0
     // Gust wave: blades in strong-gust zones lean away from sun → darken.
     // gustStr travels with the wind, creating GoT's rolling shadow sweep.
     const gustShadow = sub(1, mul(gustStr, 0.45));
     vGrassColor.assign(
-      mul(grassCol, ao, gustShadow, mul(fadeFactor, fadeFactor), bladeVisible),
+      mul(grassCol, ao, sunShade, gustShadow, fadeFactor, bladeVisible),
     );
     vPacked.assign(vec3(heightPct, xSide, highLODOut));
 

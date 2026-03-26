@@ -31,6 +31,7 @@
       import { uniform, vec2 } from "three/tsl";
       import { Pane } from "tweakpane";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { SkyMesh } from "three/addons/objects/SkyMesh.js";
       import Stats from "stats-gl";
       import { createTileMaterial } from "./tileMaterial.js";
       import {
@@ -54,8 +55,20 @@
 
       // ── Scene & Camera ───────────────────────────────────────────────────────
       const scene = new THREE.Scene();
-      scene.background = new THREE.Color(0x9ecde8);
       scene.fog = new THREE.FogExp2(0x9ecde8, 0.018);
+
+      // ── Sky ─────────────────────────────────────────────────────────────────
+      const sky = new SkyMesh();
+      sky.scale.setScalar(10000);
+      sky.turbidity.value        = 2;
+      sky.rayleigh.value         = 1.5;
+      sky.mieCoefficient.value   = 0.005;
+      sky.mieDirectionalG.value  = 0.8;
+      sky.cloudCoverage.value    = 0.4;
+      sky.cloudDensity.value     = 0.4;
+      sky.cloudElevation.value   = 0.5;
+      sky.material.fog = false;  // fog must not affect the sky dome
+      scene.add(sky);
 
       const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 500);
       camera.position.set(0, 3, -10);
@@ -145,6 +158,7 @@
         return c;
       }
       const windDir = 0.7;
+      let windBaseRad = windDir;  // updated by Tweakpane direction control
 
       const uTime               = uniform(0);
       const uPlayerPos          = uniform(new THREE.Vector3(9999, 0, 9999));
@@ -156,7 +170,7 @@
       // Quality blend completes at exactly 10 units = LOD0 patch border,
       // so both LOD0 and LOD1 materials are identical quality at the snap boundary.
       const uLodDist            = uniform(10);
-      const uMaxDist            = uniform(50);
+      const uMaxDist            = uniform(90);
       const uLodBlendStart      = uniform(0.5);
       // LOD tier crossfade distances. Blades shrink to zero at boundaries.
       const uLod0Dist           = uniform(12);  // LOD0 → LOD1 crossfade center
@@ -217,6 +231,9 @@
       const uSeasonalDryColor   = uniform(srgb("#8b7d3c"));
 
       const uSunDir             = uniform(makeSunDir());
+      const uSunWrap            = uniform(0.45);  // 0=full directional, 1=flat (Zelda/Genshin)
+      const uNormalRound        = uniform(0.3);   // GoT rounded normals rotation (fraction of PI). 0=flat, 0.5=perpendicular
+      const uViewThicken        = uniform(2.0);   // max width multiplier when blade is viewed edge-on
       const uTerrainSize        = uniform(100);
       const uTrailCenter        = uniform(new THREE.Vector2(9999, 9999));
       const uTrailSize          = uniform(60);
@@ -239,7 +256,7 @@
         uSpecV2Intensity, uSpecV2Color, uSpecV2Dir,
         uSpecV2NoiseScale, uSpecV2NoiseStr, uSpecV2Power, uSpecV2TipBias,
         uSeasonalStr, uSeasonalScale, uSeasonalDryColor,
-        uSunDir, uTerrainSize, uTrailCenter, uTrailSize,
+        uSunDir, uSunWrap, uNormalRound, uViewThicken, uTerrainSize, uTrailCenter, uTrailSize,
         heightTex, grassDensityTex, trailTex,
         PI: Math.PI,
       };
@@ -285,7 +302,7 @@
         }
         return p;
       }
-      const GRID_HALF = 5;                        // ±5 patches = ±50 units
+      const GRID_HALF = 9;                        // ±9 patches = ±90 units
       const NEAR_GRID = 2;                        // ±2 near patches = ±10 units
       // Extend each LOD zone by half the patch diagonal so that even the nearest-edge
       // blades inside the outgoing LOD0 patch have highLODOut=1 before the geometry
@@ -295,7 +312,7 @@
       const poolN = makePool(geoN, matN, 25);     // near 5-unit patches (dist < ~14)
       const poolH = makePool(geoH, matH, 16);     // dist < uLodDist  + halfDiag
       const poolM = makePool(geoM, matM, 40);     // dist < uLod1Dist + halfDiag
-      const poolL = makePool(geoM, matL, 80);     // dist < uMaxDist
+      const poolL = makePool(geoM, matL, 200);    // dist < uMaxDist (large pool for ±90 grid)
 
       const _frustum       = new THREE.Frustum();
       const _projScreenMat = new THREE.Matrix4();
@@ -328,11 +345,56 @@
       });
       window.addEventListener('keyup', e => { keys[e.code] = false; });
 
-      // ── Floor — dark soil so tile grid doesn't show through grass ────────────
+      // ── Floor — procedural soil texture ──────────────────────────────────────
+      function makeSoilTex(size = 256) {
+        const grid = (ix, iy) => {
+          let n = ((ix * 1619 + iy * 31337) ^ 0x4e6d2ef7) >>> 0;
+          n = Math.imul(n ^ (n >>> 16), 0x45d9f3b) >>> 0;
+          return (n >>> 0) / 0xffffffff;
+        };
+        const smooth = t => t * t * (3 - 2 * t);
+        const vnoise = (x, y) => {
+          const ix = Math.floor(x), iy = Math.floor(y);
+          const fx = x - ix, fy = y - iy;
+          const sx = smooth(fx), sy = smooth(fy);
+          return grid(ix,iy)*(1-sx)*(1-sy) + grid(ix+1,iy)*sx*(1-sy)
+               + grid(ix,iy+1)*(1-sx)*sy   + grid(ix+1,iy+1)*sx*sy;
+        };
+        // Three soil colours from dark to light (sRGB, will be interpreted by renderer)
+        const dark  = [0.13, 0.08, 0.03];  // dark damp earth
+        const mid   = [0.22, 0.14, 0.06];  // dry soil
+        const light = [0.32, 0.22, 0.10];  // pale dry patch
+        const data = new Uint8Array(size * size * 4);
+        for (let y = 0; y < size; y++) {
+          for (let x = 0; x < size; x++) {
+            const fx = x / size * 12, fy = y / size * 12;
+            const n = vnoise(fx, fy) * 0.6
+                    + vnoise(fx * 2.7, fy * 2.7) * 0.28
+                    + vnoise(fx * 7.1, fy * 7.1) * 0.12;
+            // blend between dark → mid → light based on noise
+            const t = Math.min(1, Math.max(0, n));
+            const c = t < 0.5
+              ? dark.map((d,i)  => d + (mid[i]   - d)   * (t * 2))
+              : mid.map((d,i)   => d + (light[i]  - d)  * ((t - 0.5) * 2));
+            const i4 = (y * size + x) * 4;
+            data[i4]   = Math.round(c[0] * 255);
+            data[i4+1] = Math.round(c[1] * 255);
+            data[i4+2] = Math.round(c[2] * 255);
+            data[i4+3] = 255;
+          }
+        }
+        const t = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+        t.wrapS = t.wrapT = THREE.RepeatWrapping;
+        t.needsUpdate = true;
+        return t;
+      }
+      const soilTex = makeSoilTex();
+      soilTex.repeat.set(40, 40);
+
       const floorGeo = new THREE.PlaneGeometry(1000, 1000);
       floorGeo.rotateX(-Math.PI / 2);
       const floorMat = new THREE.MeshStandardMaterial({
-        color: new THREE.Color(0x0e0a05),
+        map: soilTex,
         roughness: 1,
         metalness: 0,
       });
@@ -348,35 +410,55 @@
 
       // ── Sun ──────────────────────────────────────────────────────────────────
       const sunF = pane.addFolder({ title: 'Sun', expanded: true });
-      const sunP = { elevation: 43, azimuth: 135 };
+      const sunP = { elevation: 43, azimuth: 135, wrap: 0.45 };
       function updateSun() {
         sunCfg.elevation = sunP.elevation;
         sunCfg.azimuth   = sunP.azimuth;
         const sd = makeSunDir();
         dirLight.position.copy(sd.clone().multiplyScalar(50));
         uSunDir.value.copy(sd);
+        sky.sunPosition.value.copy(sd);
+        // Tint fog toward horizon sky colour (rough approximation of sky at horizon)
+        const t = Math.max(0, Math.min(1, sunCfg.elevation / 60));
+        const fogCol = new THREE.Color().lerpColors(new THREE.Color(0xd4a57a), new THREE.Color(0x9ecde8), t);
+        if (scene.fog) scene.fog.color.copy(fogCol);
       }
       sunF.addBinding(sunP, 'elevation', { label: 'Elevation', min: 5,   max: 85,  step: 1   }).on('change', updateSun);
       sunF.addBinding(sunP, 'azimuth',   { label: 'Azimuth',   min: 0,   max: 360, step: 1   }).on('change', updateSun);
+      sunF.addBinding(sunP, 'wrap',      { label: 'Light Wrap', min: 0,  max: 1,   step: 0.01 }).on('change', v => { uSunWrap.value = v.value; });
 
       // ── Wind ─────────────────────────────────────────────────────────────────
-      const windF = pane.addFolder({ title: 'Wind', expanded: true });
-      const windP = { strength: 0.4, speed: 1.0, gust: 0.55, flutter: 0.15, direction: 40 };
-      windF.addBinding(windP, 'strength',  { label: 'Strength',   min: 0, max: 2,   step: 0.01  }).on('change', v => { uWindStr.value    = v.value; });
-      windF.addBinding(windP, 'speed',     { label: 'Speed',      min: 0, max: 4,   step: 0.05  }).on('change', v => { uWindSpeed.value  = v.value; });
-      windF.addBinding(windP, 'gust',      { label: 'Gust',       min: 0, max: 1.5, step: 0.01  }).on('change', v => { uWindGust.value   = v.value; });
-      windF.addBinding(windP, 'flutter',   { label: 'Flutter',    min: 0, max: 0.5, step: 0.01  }).on('change', v => { uWindMicro.value  = v.value; });
-      windF.addBinding(windP, 'direction', { label: 'Direction °', min: 0, max: 360, step: 1    }).on('change', v => {
-        const rad = v.value * Math.PI / 180;
+      function applyWindDir(rad) {
         uWindDirX.value = Math.cos(rad);
         uWindDirZ.value = Math.sin(rad);
+        uWindAxis.value.set( Math.sin(rad), 0, -Math.cos(rad));
+        uCrossAxis.value.set(Math.cos(rad), 0,  Math.sin(rad));
+      }
+      const windF = pane.addFolder({ title: 'Wind', expanded: true });
+      const windP = { strength: 0.4, speed: 1.0, gust: 0.55, flutter: 0.15, direction: 40, drift: true, driftSpeed: 0.08, driftRange: 20 };
+      windF.addBinding(windP, 'strength',   { label: 'Strength',    min: 0,   max: 2,   step: 0.01 }).on('change', v => { uWindStr.value   = v.value; });
+      windF.addBinding(windP, 'speed',      { label: 'Speed',       min: 0,   max: 4,   step: 0.05 }).on('change', v => { uWindSpeed.value = v.value; });
+      windF.addBinding(windP, 'gust',       { label: 'Gust',        min: 0,   max: 1.5, step: 0.01 }).on('change', v => { uWindGust.value  = v.value; });
+      windF.addBinding(windP, 'flutter',    { label: 'Flutter',     min: 0,   max: 0.5, step: 0.01 }).on('change', v => { uWindMicro.value = v.value; });
+      windF.addBinding(windP, 'direction',  { label: 'Direction °', min: 0,   max: 360, step: 1    }).on('change', v => {
+        windBaseRad = v.value * Math.PI / 180;
+        if (!windP.drift) applyWindDir(windBaseRad);
       });
+      windF.addBinding(windP, 'drift',      { label: 'Dir Drift' });
+      windF.addBinding(windP, 'driftSpeed', { label: 'Drift Speed', min: 0.01, max: 0.5, step: 0.01 });
+      windF.addBinding(windP, 'driftRange', { label: 'Drift Range°', min: 1,  max: 60,  step: 1    });
 
       // ── Grass Shape ───────────────────────────────────────────────────────────
       const shapeF = pane.addFolder({ title: 'Blade Shape', expanded: false });
-      const shapeP = { width: 0.055, height: 0.78 };
-      shapeF.addBinding(shapeP, 'width',  { label: 'Width',  min: 0.01, max: 0.2,  step: 0.001 }).on('change', v => { uGrassWidth.value  = v.value; });
-      shapeF.addBinding(shapeP, 'height', { label: 'Height', min: 0.2,  max: 2.0,  step: 0.01  }).on('change', v => { uGrassHeight.value = v.value; });
+      const shapeP = { width: 0.055, height: 0.78, density: 1.0, normalRound: 0.3, viewThicken: 2.0 };
+      shapeF.addBinding(shapeP, 'width',        { label: 'Width',         min: 0.01, max: 0.2,  step: 0.001 }).on('change', v => { uGrassWidth.value    = v.value; });
+      shapeF.addBinding(shapeP, 'height',       { label: 'Height',        min: 0.2,  max: 2.0,  step: 0.01  }).on('change', v => { uGrassHeight.value   = v.value; });
+      shapeF.addBinding(shapeP, 'density',      { label: 'Density',       min: 0.1,  max: 2.0,  step: 0.05  }).on('change', v => {
+        uBladeDensityRegular.value = v.value;
+        uBladeDensityNear.value    = v.value;
+      });
+      shapeF.addBinding(shapeP, 'normalRound',  { label: 'Normal Round',  min: 0,    max: 0.5,  step: 0.01  }).on('change', v => { uNormalRound.value   = v.value; });
+      shapeF.addBinding(shapeP, 'viewThicken',  { label: 'View Thicken',  min: 1.0,  max: 4.0,  step: 0.05  }).on('change', v => { uViewThicken.value   = v.value; });
 
       // ── Colors ───────────────────────────────────────────────────────────────
       const colF = pane.addFolder({ title: 'Colors', expanded: false });
@@ -432,7 +514,7 @@
 
       // ── LOD ───────────────────────────────────────────────────────────────────
       const lodF = pane.addFolder({ title: 'LOD', expanded: true });
-      const lodP = { lod0Dist: 10, lod1Dist: 24, fadeRange: 3, maxDist: 45 };
+      const lodP = { lod0Dist: 10, lod1Dist: 24, fadeRange: 3, maxDist: 90 };
       lodF.addBinding(lodP, 'lod0Dist',  { label: 'LOD0→1 Dist',  min: 5,  max: 30,  step: 0.5 }).on('change', v => { uLod0Dist.value    = v.value; uLodDist.value = v.value; });
       lodF.addBinding(lodP, 'lod1Dist',  { label: 'LOD1→2 Dist',  min: 10, max: 60,  step: 0.5 }).on('change', v => { uLod1Dist.value    = v.value; });
       lodF.addBinding(lodP, 'fadeRange', { label: 'Fade Range',   min: 0.5, max: 10, step: 0.5 }).on('change', v => { uLodFadeRange.value = v.value; });
@@ -440,16 +522,32 @@
 
       // ── Environment ───────────────────────────────────────────────────────────
       const envF = pane.addFolder({ title: 'Environment', expanded: false });
-      const envP = { ao: 1.0, skyMin: 0.55, skyMax: 0.7, fog: true, fogDensity: 0.018 };
+      const envP = { ao: 1.0, skyMin: 0.55, skyMax: 0.7, fog: true, fogDensity: 0.018,
+                     groundColor: '#ffffff' };
       envF.addBinding(envP, 'ao',     { label: 'AO Intensity', min: 0, max: 2,  step: 0.01 }).on('change', v => { uAoIntensity.value   = v.value; });
       envF.addBinding(envP, 'skyMin', { label: 'Sky Blend Min',min: 0, max: 1,  step: 0.01 }).on('change', v => { uMinSkyBlend.value   = v.value; });
       envF.addBinding(envP, 'skyMax', { label: 'Sky Blend Max',min: 0, max: 1,  step: 0.01 }).on('change', v => { uMaxSkyBlend.value   = v.value; });
+      // Mutate fog density in-place — never create a new FogExp2 (that recompiles all shaders → freeze)
       envF.addBinding(envP, 'fog',        { label: 'Fog' }).on('change', v => {
-        scene.fog = v.value ? new THREE.FogExp2(0x9ecde8, envP.fogDensity) : null;
+        scene.fog.density = v.value ? envP.fogDensity : 0;
       });
-      envF.addBinding(envP, 'fogDensity', { label: 'Fog Density', min: 0.001, max: 0.06, step: 0.001 }).on('change', v => {
-        if (envP.fog) scene.fog = new THREE.FogExp2(0x9ecde8, v.value);
+      envF.addBinding(envP, 'fogDensity', { label: 'Fog Density', min: 0, max: 0.06, step: 0.001 }).on('change', v => {
+        if (envP.fog) scene.fog.density = v.value;
       });
+      envF.addBinding(envP, 'groundColor', { label: 'Ground Color', view: 'color' }).on('change', v => {
+        floorMat.color.set(v.value);
+      });
+
+      // ── Interaction ───────────────────────────────────────────────────────────
+      const iactF = pane.addFolder({ title: 'Interaction', expanded: false });
+      const iactP = { enabled: false, range: 1.8, strength: 1.2 };
+      function applyInteract() {
+        uInteractionRange.value    = iactP.enabled ? iactP.range    : 999;
+        uInteractionStrength.value = iactP.enabled ? iactP.strength : 0;
+      }
+      iactF.addBinding(iactP, 'enabled',  { label: 'Enable' }).on('change', applyInteract);
+      iactF.addBinding(iactP, 'range',    { label: 'Range',    min: 0.5, max: 5,  step: 0.1 }).on('change', applyInteract);
+      iactF.addBinding(iactP, 'strength', { label: 'Strength', min: 0,   max: 3,  step: 0.1 }).on('change', applyInteract);
 
       // init sun
       updateSun();
@@ -480,6 +578,13 @@
         timer.update();
         const dt = Math.min(timer.getDelta(), 0.05);
         uTime.value = timer.getElapsed();
+
+        // ── Wind direction drift ────────────────────────────────────────────────
+        if (windP.drift) {
+          const elapsed = uTime.value;
+          const driftRad = windBaseRad + Math.sin(elapsed * windP.driftSpeed) * (windP.driftRange * Math.PI / 180);
+          applyWindDir(driftRad);
+        }
 
         // ── WASD movement ───────────────────────────────────────────────────────
         _move.set(0, 0, 0);
