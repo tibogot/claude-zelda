@@ -69,22 +69,19 @@ export function createGrassGeometry(
   randRange,
 ) {
   setSeed(0);
-  // segments×2 paired verts + 1 single tip vertex, duplicated for back-face copy
+  // segments×2 paired verts + 1 single tip vertex. DoubleSide handles back-face — no copy needed.
   const V = segments * 2 + 1,
-    T = V * 2,
+    T = V,
     indices = [];
   // All segments except the last: normal quads
   for (let i = 0; i < segments - 1; i++) {
     const v = i * 2;
     indices.push(v, v + 1, v + 2, v + 2, v + 1, v + 3);
-    const f = V + v;
-    indices.push(f + 2, f + 1, f, f + 3, f + 1, f + 2);
   }
   // Last segment: triangle converging to single tip vertex (pointed tip)
   const lb  = (segments - 1) * 2;  // last base pair
   const tip = segments * 2;         // single tip vertex = V - 1
-  indices.push(lb, lb + 1, tip);             // front face triangle
-  indices.push(V + tip, V + lb + 1, V + lb); // back face triangle (reversed winding)
+  indices.push(lb, lb + 1, tip);
   const pos = new Float32Array(T * 3),
     nrm = new Float32Array(T * 3),
     vid = new Float32Array(T),
