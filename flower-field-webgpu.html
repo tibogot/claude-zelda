@@ -60,6 +60,12 @@ function hash(i) {
 const PARAMS = {
   petalCountMin: 4,
   petalCountMax: 7,
+  /** Distance from flower center to petal attachment (local +Z); keeps bloom size when petal count changes */
+  bloomRadius: 0.11,
+  /** When true, petal plane scale is derived from petal count so petals stay in a ring without overlapping */
+  autoFitPetals: true,
+  /** Fraction of each angular slot kept as gap (0 = tight, ~0.15 = visible spacing) */
+  petalFitGap: 0.03,
   petalScale: 0.22,
   petalTilt: 0.25,
   petalVariation: 0.06,
@@ -156,13 +162,41 @@ function createPetalNormalMap(size = 64, domeStrength = 0.2) {
 }
 const petalNormalTex = createPetalNormalMap();
 
+/** Reference petalScale for auto-fit: at this value, fitted size matches the geometric budget exactly */
+const PETAL_SCALE_REF = 0.22;
+
 // ─── Build merged petal head geometry for a given petal count ─────────────────
 const _basePetalGeo = new THREE.PlaneGeometry(1, 1, 1, 1);
 
+/**
+ * Base plane scale (before per-petal scaleMul) so pc petals fit around bloomRadius without overlap.
+ * Uses worst-case scaleMul = 1 + petalVariation and tilts plane footprint via petalTilt.
+ */
+function computeAutoPetalBaseScale(pc) {
+  const R = Math.max(0.02, PARAMS.bloomRadius);
+  const tilt = PARAMS.petalTilt;
+  const pv = Math.max(0, PARAMS.petalVariation);
+  const gap = Math.max(0, Math.min(0.45, PARAMS.petalFitGap));
+  // Petal center-to-center angular half-slot is pi/pc. Each petal can occupy
+  // alpha radians within that half-slot (minus the requested gap).
+  const slotHalf = Math.PI / pc;
+  const alpha = Math.max(0.02, slotHalf * (1 - gap));
+  // Tilt slightly inflates the effective footprint; keep this correction small.
+  const tiltSpread = 1 + 0.08 * Math.sin(Math.abs(tilt));
+  // Base petal width is sized to fill the angular budget. (petalVariation is
+  // handled as a worst-case scale multiplier via the (1 + pv) denominator.)
+  const sFit = (2 * R * Math.tan(alpha)) / ((1 + pv) * tiltSpread);
+  return sFit * (PARAMS.petalScale / PETAL_SCALE_REF);
+}
+
 function buildFlowerHeadGeometry(petalCount) {
   const pc = Math.max(3, Math.min(12, Math.floor(petalCount)));
+  const auto = PARAMS.autoFitPetals;
+  const zPetal = auto ? PARAMS.bloomRadius : 0.5 * PARAMS.petalScale;
+  const baseS = auto ? computeAutoPetalBaseScale(pc) : PARAMS.petalScale;
   const group = new THREE.Group();
   const geos  = [];
+  let maxS = 0;
   for (let i = 0; i < pc; i++) {
     const vary        = ((i * 7) % 100) / 100;
     const angle       = (i / pc) * Math.PI * 2 + (vary - 0.5) * 2 * PARAMS.petalVariation;
@@ -170,9 +204,11 @@ function buildFlowerHeadGeometry(petalCount) {
     const petalGroup  = new THREE.Group();
     petalGroup.rotation.y = angle;
     const petal = new THREE.Mesh(_basePetalGeo.clone(), new THREE.MeshBasicMaterial());
-    petal.scale.set(PARAMS.petalScale * scaleMul, PARAMS.petalScale * scaleMul, 1);
+    const s = baseS * scaleMul;
+    maxS = Math.max(maxS, s);
+    petal.scale.set(s, s, 1);
     petal.rotation.x = -Math.PI / 2 - PARAMS.petalTilt;
-    petal.position.set(0, 0.001, 0.5 * PARAMS.petalScale);
+    petal.position.set(0, 0.001, zPetal);
     petalGroup.add(petal);
     group.add(petalGroup);
   }
@@ -188,7 +224,8 @@ function buildFlowerHeadGeometry(petalCount) {
 
   // Per-vertex radial distance (0 = center, 1 = tip) — used for gradient
   const pos = merged.attributes.position;
-  const maxR = PARAMS.petalScale * 1.2;
+  const ringR = auto ? PARAMS.bloomRadius : 0.5 * PARAMS.petalScale;
+  const maxR = Math.max(0.04, ringR + maxS * 0.55 * (1 + PARAMS.petalVariation));
   const radialNorm = new Float32Array(pos.count);
   for (let i = 0; i < pos.count; i++) {
     const x = pos.getX(i), z = pos.getZ(i);
@@ -654,8 +691,12 @@ fField.add(PARAMS, "showGrid").onChange(v => { grid.visible = v; });
 const fFlower = gui.addFolder("Flower");
 fFlower.add(PARAMS, "petalCountMin", 3, 8, 1).onChange(onRebuild);
 fFlower.add(PARAMS, "petalCountMax", 4, 12, 1).onChange(onRebuild);
+fFlower.add(PARAMS, "autoFitPetals").onChange(onRebuild);
+fFlower.add(PARAMS, "bloomRadius", 0.04, 0.22, 0.005).onChange(onRebuild);
+fFlower.add(PARAMS, "petalFitGap", 0, 0.35, 0.01).onChange(onRebuild);
 fFlower.add(PARAMS, "petalScale", 0.12, 0.4, 0.02).onChange(onRebuild);
 fFlower.add(PARAMS, "petalTilt", 0, 0.6, 0.02).onChange(onRebuild);
+fFlower.add(PARAMS, "petalVariation", 0, 0.2, 0.01).onChange(onRebuild);
 fFlower.add(PARAMS, "centerRadius", 0.04, 0.15, 0.01).onChange(onRebuild);
 fFlower.add(PARAMS, "centerDomeHeight", 0.01, 0.06, 0.005).onChange(onRebuild);
 fFlower.addColor(PARAMS, "petalColorBase").onChange(v => uPetalColorBase.value.set(v));

@@ -9,6 +9,7 @@
       body { overflow: hidden; background: #000; }
       canvas { display: block; width: 100vw; height: 100vh; }
       .tp-dfwv { position: fixed !important; top: 12px !important; right: 12px !important; width: 300px !important; z-index: 10; }
+      #hints { position: fixed; bottom: 14px; left: 14px; color: rgba(255,255,255,0.6); font: 13px/1.8 monospace; pointer-events: none; }
     </style>
     <script type="importmap">
       {
@@ -24,6 +25,7 @@
     </script>
   </head>
   <body>
+    <div id="hints">WASD / Arrows — move &nbsp;|&nbsp; V — toggle follow / orbit camera &nbsp;|&nbsp; Mouse drag — orbit (orbit mode)</div>
     <script type="module">
       import * as THREE from "three";
       import { uniform, vec2 } from "three/tsl";
@@ -56,10 +58,13 @@
       scene.fog = new THREE.FogExp2(0x9ecde8, 0.018);
 
       const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 500);
-      camera.position.set(4, 2.5, 8);
+      camera.position.set(0, 3, -10);
 
       const controls = new OrbitControls(camera, renderer.domElement);
-      controls.target.set(0, 0.5, 0);
+      controls.target.set(0, 1, 0);
+      controls.minDistance = 3;
+      controls.maxDistance = 60;
+      controls.maxPolarAngle = Math.PI * 0.48;
       controls.update();
 
       // ── Stats ────────────────────────────────────────────────────────────────
@@ -148,8 +153,9 @@
       const uGrassWidth         = uniform(0.055);
       const uGrassHeight        = uniform(0.78);
 
-      // Quality blend: degrades from full to simplified within LOD0 range.
-      const uLodDist            = uniform(12);
+      // Quality blend completes at exactly 10 units = LOD0 patch border,
+      // so both LOD0 and LOD1 materials are identical quality at the snap boundary.
+      const uLodDist            = uniform(10);
       const uMaxDist            = uniform(50);
       const uLodBlendStart      = uniform(0.5);
       // LOD tier crossfade distances. Blades shrink to zero at boundaries.
@@ -247,51 +253,83 @@
         return lo + t * (hi - lo);
       }
 
-      // LOD0 — 7 segs / 15 verts, full quality, inner 2×2 patches (0–12 units)
+      // Near ring — 15 verts, dense, 5-unit patches right under the player.
+      // Smaller patch size = much denser ground coverage close up, exactly like grass.js.
+      const NEAR_SIZE = 5;
+      const geoN = createGrassGeometry(GRASS_SEGMENTS_HIGH, 2000, NEAR_SIZE, setSeed, randRange);
+      const matN = createGrassMaterial(GRASS_SEGMENTS_HIGH, GRASS_VERTS_HIGH, false, "near", grassCtx);
+
+      // LOD0 — 15 verts, full quality, 10-unit patches
       const geoH = createGrassGeometry(GRASS_SEGMENTS_HIGH, 5000, GRASS_PATCH_SIZE, setSeed, randRange);
-      const matH = createGrassMaterial(GRASS_SEGMENTS_HIGH, GRASS_VERTS_HIGH, false, "regular", grassCtx, 0);
+      const matH = createGrassMaterial(GRASS_SEGMENTS_HIGH, GRASS_VERTS_HIGH, false, "regular", grassCtx);
 
-      // LOD1 — 3 segs / 7 verts, simplified, middle ring (12–24 units)
+      // LOD1 — 7 verts, simplified, 10-unit patches
       const geoM = createGrassGeometry(GRASS_SEGMENTS_MID, 3000, GRASS_PATCH_SIZE, setSeed, randRange);
-      const matM = createGrassMaterial(GRASS_SEGMENTS_MID, GRASS_VERTS_MID, false, "regular", grassCtx, 1);
+      const matM = createGrassMaterial(GRASS_SEGMENTS_MID, GRASS_VERTS_MID, false, "regular", grassCtx);
 
-      // LOD2 — 3 segs / 7 verts, 60% height, outer ring (24–30 units)
-      // Shares geoM geometry; different material (tier=2) handles height scale + fade.
-      const matL = createGrassMaterial(GRASS_SEGMENTS_MID, GRASS_VERTS_MID, false, "regular", grassCtx, 2);
+      // LOD2 — 7 verts, far ring (shares geoM, separate material for future tuning)
+      const matL = createGrassMaterial(GRASS_SEGMENTS_MID, GRASS_VERTS_MID, false, "regular", grassCtx);
 
-      // Camera-following grid: patches store their offset from the snap origin.
-      // Each frame the grid snaps to camera XZ so LOD distance bands are always
-      // correct relative to the camera — avoids the "dark gap" artifact.
-      const grassPatches = [];
-      function addPatch(geo, mat, gridSize, ix, iz) {
-        const mesh = new THREE.Mesh(geo, mat);
-        const baseX = (ix - (gridSize - 1) * 0.5) * GRASS_PATCH_SIZE;
-        const baseZ = (iz - (gridSize - 1) * 0.5) * GRASS_PATCH_SIZE;
-        mesh.position.set(baseX, 0, baseZ);
-        mesh.frustumCulled = false;
-        scene.add(mesh);
-        grassPatches.push({ mesh, baseX, baseZ });
+      // ── Grass patch pools — dynamic LOD, no fixed rings, no pop ─────────────
+      // Every frame: hide all → iterate grid around capsule → assign from pool
+      // by live distance. LOD switch fires at exactly uLodDist / uLod1Dist where
+      // the shader output is identical for both geometry types → invisible swap.
+      function makePool(geo, mat, n) {
+        const p = [];
+        for (let i = 0; i < n; i++) {
+          const m = new THREE.Mesh(geo, mat);
+          m.visible = false;
+          m.frustumCulled = false;
+          scene.add(m);
+          p.push(m);
+        }
+        return p;
       }
+      const GRID_HALF = 5;                        // ±5 patches = ±50 units
+      const NEAR_GRID = 2;                        // ±2 near patches = ±10 units
+      // Extend each LOD zone by half the patch diagonal so that even the nearest-edge
+      // blades inside the outgoing LOD0 patch have highLODOut=1 before the geometry
+      // switches — this eliminates the color/shape change at the transition.
+      const HALF_DIAG      = GRASS_PATCH_SIZE * Math.SQRT2 * 0.5; // ≈7.07
+      const HALF_DIAG_NEAR = NEAR_SIZE         * Math.SQRT2 * 0.5; // ≈3.54
+      const poolN = makePool(geoN, matN, 25);     // near 5-unit patches (dist < ~14)
+      const poolH = makePool(geoH, matH, 16);     // dist < uLodDist  + halfDiag
+      const poolM = makePool(geoM, matM, 40);     // dist < uLod1Dist + halfDiag
+      const poolL = makePool(geoM, matL, 80);     // dist < uMaxDist
 
-      // LOD0: inner 2×2 → 4 patches, covers −10…+10 units from grid center
-      for (let ix = 0; ix < 2; ix++)
-        for (let iz = 0; iz < 2; iz++)
-          addPatch(geoH, matH, 2, ix, iz);
+      const _frustum       = new THREE.Frustum();
+      const _projScreenMat = new THREE.Matrix4();
+      const _patchBox      = new THREE.Box3();
+      const _bMin          = new THREE.Vector3();
+      const _bMax          = new THREE.Vector3();
+      let   _iN = 0, _iH = 0, _iM = 0, _iL = 0;
 
-      // LOD1: 4×4 minus inner 2×2 → 12 patches, covers −20…+20 units
-      for (let ix = 0; ix < 4; ix++)
-        for (let iz = 0; iz < 4; iz++)
-          if (!(ix >= 1 && ix < 3 && iz >= 1 && iz < 3))
-            addPatch(geoM, matM, 4, ix, iz);
+      // ── Capsule player ────────────────────────────────────────────────────────
+      const capsule = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.35, 1.0, 4, 8),
+        new THREE.MeshStandardMaterial({ color: 0x7744cc, roughness: 0.6 }),
+      );
+      capsule.position.set(0, 0.85, 0);
+      scene.add(capsule);
 
-      // LOD2: 6×6 minus inner 4×4 → 20 patches, covers −30…+30 units
-      for (let ix = 0; ix < 6; ix++)
-        for (let iz = 0; iz < 6; iz++)
-          if (!(ix >= 1 && ix < 5 && iz >= 1 && iz < 5))
-            addPatch(geoM, matL, 6, ix, iz);
+      // WASD key state
+      const keys = {};
+      window.addEventListener('keydown', e => {
+        keys[e.code] = true;
+        if (e.code === 'KeyV') {
+          followCam = !followCam;
+          if (!followCam) {
+            // Restore OrbitControls from current camera state so it doesn't snap
+            controls.target.copy(capsule.position);
+            controls.update();
+          }
+        }
+        e.preventDefault();
+      });
+      window.addEventListener('keyup', e => { keys[e.code] = false; });
 
       // ── Floor — dark soil so tile grid doesn't show through grass ────────────
-      const floorGeo = new THREE.PlaneGeometry(200, 200);
+      const floorGeo = new THREE.PlaneGeometry(1000, 1000);
       floorGeo.rotateX(-Math.PI / 2);
       const floorMat = new THREE.MeshStandardMaterial({
         color: new THREE.Color(0x0e0a05),
@@ -394,7 +432,7 @@
 
       // ── LOD ───────────────────────────────────────────────────────────────────
       const lodF = pane.addFolder({ title: 'LOD', expanded: true });
-      const lodP = { lod0Dist: 12, lod1Dist: 24, fadeRange: 3, maxDist: 50 };
+      const lodP = { lod0Dist: 10, lod1Dist: 24, fadeRange: 3, maxDist: 45 };
       lodF.addBinding(lodP, 'lod0Dist',  { label: 'LOD0→1 Dist',  min: 5,  max: 30,  step: 0.5 }).on('change', v => { uLod0Dist.value    = v.value; uLodDist.value = v.value; });
       lodF.addBinding(lodP, 'lod1Dist',  { label: 'LOD1→2 Dist',  min: 10, max: 60,  step: 0.5 }).on('change', v => { uLod1Dist.value    = v.value; });
       lodF.addBinding(lodP, 'fadeRange', { label: 'Fade Range',   min: 0.5, max: 10, step: 0.5 }).on('change', v => { uLodFadeRange.value = v.value; });
@@ -402,10 +440,16 @@
 
       // ── Environment ───────────────────────────────────────────────────────────
       const envF = pane.addFolder({ title: 'Environment', expanded: false });
-      const envP = { ao: 1.0, skyMin: 0.55, skyMax: 0.7 };
+      const envP = { ao: 1.0, skyMin: 0.55, skyMax: 0.7, fog: true, fogDensity: 0.018 };
       envF.addBinding(envP, 'ao',     { label: 'AO Intensity', min: 0, max: 2,  step: 0.01 }).on('change', v => { uAoIntensity.value   = v.value; });
       envF.addBinding(envP, 'skyMin', { label: 'Sky Blend Min',min: 0, max: 1,  step: 0.01 }).on('change', v => { uMinSkyBlend.value   = v.value; });
       envF.addBinding(envP, 'skyMax', { label: 'Sky Blend Max',min: 0, max: 1,  step: 0.01 }).on('change', v => { uMaxSkyBlend.value   = v.value; });
+      envF.addBinding(envP, 'fog',        { label: 'Fog' }).on('change', v => {
+        scene.fog = v.value ? new THREE.FogExp2(0x9ecde8, envP.fogDensity) : null;
+      });
+      envF.addBinding(envP, 'fogDensity', { label: 'Fog Density', min: 0.001, max: 0.06, step: 0.001 }).on('change', v => {
+        if (envP.fog) scene.fog = new THREE.FogExp2(0x9ecde8, v.value);
+      });
 
       // init sun
       updateSun();
@@ -417,20 +461,149 @@
         renderer.setSize(innerWidth, innerHeight);
       });
 
+      // ── Camera modes ─────────────────────────────────────────────────────────
+      // V key toggles between free-orbit and auto-follow
+      let followCam = false;
+      const FOLLOW_OFFSET = new THREE.Vector3(0, 3.5, -9); // behind + above capsule
+      const _followTarget = new THREE.Vector3();
+      const _followPos    = new THREE.Vector3();
+      const _euler        = new THREE.Euler(0, 0, 0, 'YXZ');
+
       // ── Render Loop ───────────────────────────────────────────────────────────
       const timer = new THREE.Timer();
+      const _camFwd   = new THREE.Vector3();
+      const _camRight = new THREE.Vector3();
+      const _move     = new THREE.Vector3();
+      const WALK_SPEED = 8;
+
       renderer.setAnimationLoop(() => {
         timer.update();
+        const dt = Math.min(timer.getDelta(), 0.05);
         uTime.value = timer.getElapsed();
-        controls.update();
 
-        // Snap patch grid to camera XZ — keeps LOD distance bands centred on camera
-        const snapX = Math.round(camera.position.x / GRASS_PATCH_SIZE) * GRASS_PATCH_SIZE;
-        const snapZ = Math.round(camera.position.z / GRASS_PATCH_SIZE) * GRASS_PATCH_SIZE;
-        for (const { mesh, baseX, baseZ } of grassPatches) {
-          mesh.position.x = snapX + baseX;
-          mesh.position.z = snapZ + baseZ;
+        // ── WASD movement ───────────────────────────────────────────────────────
+        _move.set(0, 0, 0);
+
+        if (followCam) {
+          // Follow mode: A/D rotate capsule, W/S walk forward/back along its facing.
+          // Never strafe — strafe changes facing via atan2 which causes spin.
+          const TURN_SPEED = 2.2;
+          if (keys['KeyA'] || keys['ArrowLeft'])  capsule.rotation.y += TURN_SPEED * dt;
+          if (keys['KeyD'] || keys['ArrowRight']) capsule.rotation.y -= TURN_SPEED * dt;
+
+          _camFwd.set(Math.sin(capsule.rotation.y), 0, Math.cos(capsule.rotation.y));
+          if (keys['KeyW'] || keys['ArrowUp'])   _move.addScaledVector(_camFwd,  1);
+          if (keys['KeyS'] || keys['ArrowDown']) _move.addScaledVector(_camFwd, -1);
+
+          if (_move.lengthSq() > 0) {
+            _move.normalize().multiplyScalar(WALK_SPEED * dt);
+            capsule.position.add(_move);
+            capsule.position.y = 0.85;
+          }
+        } else {
+          // Orbit mode: strafe in all 4 dirs relative to camera, capsule faces movement.
+          camera.getWorldDirection(_camFwd);
+          _camFwd.y = 0;
+          _camFwd.normalize();
+          _camRight.crossVectors(_camFwd, new THREE.Vector3(0, 1, 0));
+
+          if (keys['KeyW'] || keys['ArrowUp'])    _move.addScaledVector(_camFwd,   1);
+          if (keys['KeyS'] || keys['ArrowDown'])  _move.addScaledVector(_camFwd,  -1);
+          if (keys['KeyA'] || keys['ArrowLeft'])  _move.addScaledVector(_camRight,-1);
+          if (keys['KeyD'] || keys['ArrowRight']) _move.addScaledVector(_camRight, 1);
+
+          if (_move.lengthSq() > 0) {
+            _move.normalize().multiplyScalar(WALK_SPEED * dt);
+            capsule.position.add(_move);
+            capsule.position.y = 0.85;
+            capsule.rotation.y = Math.atan2(_move.x, _move.z);
+          }
         }
+
+        // ── Camera update ───────────────────────────────────────────────────────
+        if (followCam) {
+          // Auto-follow: camera sits behind+above capsule, smoothly lerps in
+          controls.enabled = false;
+          _euler.set(0, capsule.rotation.y, 0);
+          _followPos.copy(FOLLOW_OFFSET).applyEuler(_euler).add(capsule.position);
+          camera.position.lerp(_followPos, 0.1);
+          _followTarget.copy(capsule.position).add(new THREE.Vector3(0, 0.8, 0));
+          camera.lookAt(_followTarget);
+        } else {
+          // Free orbit: OrbitControls takes over, target tracks capsule
+          controls.enabled = true;
+          controls.target.lerp(capsule.position, 0.15);
+          controls.update();
+        }
+
+        // ── Grass pool update ─────────────────────────────────────────────────
+        for (let i = 0; i < poolN.length; i++) poolN[i].visible = false;
+        for (let i = 0; i < poolH.length; i++) poolH[i].visible = false;
+        for (let i = 0; i < poolM.length; i++) poolM[i].visible = false;
+        for (let i = 0; i < poolL.length; i++) poolL[i].visible = false;
+        _iN = 0; _iH = 0; _iM = 0; _iL = 0;
+
+        _projScreenMat.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+        _frustum.setFromProjectionMatrix(_projScreenMat);
+
+        // Near ring: 5-unit patches snapped in 5-unit steps for dense up-close coverage
+        const snapNX = Math.round(capsule.position.x / NEAR_SIZE) * NEAR_SIZE;
+        const snapNZ = Math.round(capsule.position.z / NEAR_SIZE) * NEAR_SIZE;
+        const halfN = NEAR_SIZE * 0.5;
+        for (let ix = -NEAR_GRID; ix <= NEAR_GRID; ix++) {
+          for (let iz = -NEAR_GRID; iz <= NEAR_GRID; iz++) {
+            const px = snapNX + ix * NEAR_SIZE;
+            const pz = snapNZ + iz * NEAR_SIZE;
+            _bMin.set(px - halfN, -0.5, pz - halfN);
+            _bMax.set(px + halfN,  2.5, pz + halfN);
+            _patchBox.set(_bMin, _bMax);
+            if (!_frustum.intersectsBox(_patchBox)) continue;
+            if (_iN < poolN.length) {
+              poolN[_iN].position.set(px, 0, pz);
+              poolN[_iN].visible = true;
+              _iN++;
+            }
+          }
+        }
+
+        // Main grid: 10-unit patches with LOD switching
+        const SNAP = GRASS_PATCH_SIZE;
+        const snapX = Math.round(capsule.position.x / SNAP) * SNAP;
+        const snapZ = Math.round(capsule.position.z / SNAP) * SNAP;
+        const halfP = GRASS_PATCH_SIZE * 0.5;
+
+        for (let ix = -GRID_HALF; ix <= GRID_HALF; ix++) {
+          for (let iz = -GRID_HALF; iz <= GRID_HALF; iz++) {
+            const px = snapX + ix * GRASS_PATCH_SIZE;
+            const pz = snapZ + iz * GRASS_PATCH_SIZE;
+            const dx = px - capsule.position.x;
+            const dz = pz - capsule.position.z;
+            const dist = Math.sqrt(dx * dx + dz * dz);
+            if (dist >= uMaxDist.value) continue;
+
+            _bMin.set(px - halfP, -0.5, pz - halfP);
+            _bMax.set(px + halfP,  2.5, pz + halfP);
+            _patchBox.set(_bMin, _bMax);
+            if (!_frustum.intersectsBox(_patchBox)) continue;
+
+            // Switch geometry only when the patch is far enough that ALL its blades
+            // (including nearest-corner ones) have highLODOut=1. This prevents the
+            // color/shape change that occurs when close-range blades suddenly go from
+            // 15-vert to 7-vert with highLODOut still near 0.
+            let mesh = null;
+            if      (dist < uLodDist.value  + HALF_DIAG) { if (_iH < poolH.length) mesh = poolH[_iH++]; }
+            else if (dist < uLod1Dist.value + HALF_DIAG) { if (_iM < poolM.length) mesh = poolM[_iM++]; }
+            else                                          { if (_iL < poolL.length) mesh = poolL[_iL++]; }
+
+            if (mesh) {
+              mesh.position.set(px, 0, pz);
+              mesh.visible = true;
+            }
+          }
+        }
+
+        // Keep player pos uniform in sync for grass interaction
+        uPlayerPos.value.copy(capsule.position);
 
         stats.update();
         renderer.render(scene, camera);

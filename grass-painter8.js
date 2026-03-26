@@ -122,7 +122,6 @@ export function createGrassMaterial(
   useNpcInteraction,
   densityKey,
   ctx,
-  lodTier = 0, // kept for caller compatibility — controls shader quality tier only
 ) {
   const {
     heightTex,
@@ -212,12 +211,10 @@ export function createGrassMaterial(
       hv2 = hash22(bladeWorld.xz),
       hv3 = hash22(add(bladeWorld.xz, vec2(5.7, 11.2)));
     const distXZ = length(sub(cameraPosition.xz, bladeWorld.xz));
-    // LOD1/LOD2 patches are always beyond the quality-blend distance, so skip
-    // the smoothstep and bake highLODOut=1 directly — saves per-vertex math.
-    const highLODOut = lodTier === 0
-      ? smoothstep(mul(uLodDist, uLodBlendStart), uLodDist, distXZ)
-      : float(1);
-    const lodFadeIn = smoothstep(uLodDist, uMaxDist, distXZ);
+    // All tiers compute highLODOut from distance — quality must be identical at
+    // patch borders so snapping between rings causes no visible pop.
+    const highLODOut = smoothstep(mul(uLodDist, uLodBlendStart), uLodDist, distXZ);
+    const lodFadeIn  = smoothstep(uLodDist, uMaxDist, distXZ);
 
     // LOD tiers differ in vertex count and shader quality only — blades are never
     // collapsed by distance. Collapsing by distance creates gaps at patch borders
