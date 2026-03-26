@@ -122,6 +122,7 @@ export function createGrassMaterial(
   useNpcInteraction,
   densityKey,
   ctx,
+  lodTier = 0, // kept for caller compatibility — controls shader quality tier only
 ) {
   const {
     heightTex,
@@ -211,12 +212,19 @@ export function createGrassMaterial(
       hv2 = hash22(bladeWorld.xz),
       hv3 = hash22(add(bladeWorld.xz, vec2(5.7, 11.2)));
     const distXZ = length(sub(cameraPosition.xz, bladeWorld.xz));
-    const highLODOut = smoothstep(
-      mul(uLodDist, uLodBlendStart),
-      uLodDist,
-      distXZ,
-    );
+    // LOD1/LOD2 patches are always beyond the quality-blend distance, so skip
+    // the smoothstep and bake highLODOut=1 directly — saves per-vertex math.
+    const highLODOut = lodTier === 0
+      ? smoothstep(mul(uLodDist, uLodBlendStart), uLodDist, distXZ)
+      : float(1);
     const lodFadeIn = smoothstep(uLodDist, uMaxDist, distXZ);
+
+    // LOD tiers differ in vertex count and shader quality only — blades are never
+    // collapsed by distance. Collapsing by distance creates gaps at patch borders
+    // that shift visibly when the camera-following grid snaps. This matches the
+    // approach in grass.js / grass-painter7.js: use fadeFactor for far darkening,
+    // highLODOut for quality blend, geometry tiers for vert-count savings.
+
     const randomAngle = mul(hv.x, 2 * PI),
       randomShade = remap(hv.y, -1, 1, 0.75, 1);
 
@@ -234,7 +242,6 @@ export function createGrassMaterial(
     const randomHeight = mul(
       remap(hv.z, 0, 1, 0.75, 1.5),
       clumpHeight,
-      mix(1, 0, lodFadeIn),
     );
     const randomLean      = remap(hv.w, 0, 1, 0.15, 0.45);
     // GoT per-blade cubic Bezier shape properties
@@ -277,7 +284,7 @@ export function createGrassMaterial(
     const edgeDot = abs(add(mul(bwdX, ctbX), mul(bwdZ, ctbZ)));
     const viewThicken = mix(float(2.0), float(1.0), edgeDot);
 
-    const totalWidthVis = mul(totalWidth, bladeVisible, viewThicken);
+    const totalWidthVis  = mul(totalWidth,  bladeVisible, viewThicken);
     const totalHeightVis = mul(totalHeight, bladeVisible);
     const x = mul(sub(xSide, 0.5), totalWidthVis),
       y = mul(heightPct, totalHeightVis);

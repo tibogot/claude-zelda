@@ -36,7 +36,8 @@
         createGrassMaterial,
         GRASS_SEGMENTS_HIGH,
         GRASS_VERTS_HIGH,
-        GRASS_DENSITY,
+        GRASS_SEGMENTS_MID,
+        GRASS_VERTS_MID,
         GRASS_PATCH_SIZE,
       } from "./grass-painter8.js";
 
@@ -147,11 +148,14 @@
       const uGrassWidth         = uniform(0.055);
       const uGrassHeight        = uniform(0.78);
 
-      // uLodDist small so highLODOut → 1 at normal viewing distances,
-      // enabling SSS, specular, crossSway, and micro flutter.
-      const uLodDist            = uniform(3);
-      const uMaxDist            = uniform(9999);
-      const uLodBlendStart      = uniform(0.35);
+      // Quality blend: degrades from full to simplified within LOD0 range.
+      const uLodDist            = uniform(12);
+      const uMaxDist            = uniform(50);
+      const uLodBlendStart      = uniform(0.5);
+      // LOD tier crossfade distances. Blades shrink to zero at boundaries.
+      const uLod0Dist           = uniform(12);  // LOD0 → LOD1 crossfade center
+      const uLod1Dist           = uniform(24);  // LOD1 → LOD2 crossfade center
+      const uLodFadeRange       = uniform(3);   // half-width of each crossfade band
 
       const uBladeDensityRegular = uniform(1.0);
       const uBladeDensityNear   = uniform(1.0);
@@ -215,6 +219,7 @@
         uTime, uPlayerPos, uNpcPos,
         uGrassWidth, uGrassHeight,
         uLodDist, uMaxDist, uLodBlendStart,
+        uLod0Dist, uLod1Dist, uLodFadeRange,
         uBladeDensityRegular, uBladeDensityNear, uNearFadeEnd, uNearFadeRange,
         uBaseColor1, uBaseColor2, uTipColor1, uTipColor2,
         uGradientCurve, uColorVariation, uLushColor, uBleachedColor,
@@ -233,7 +238,7 @@
         PI: Math.PI,
       };
 
-      // ── Grass Geometry & Material (single patch, high LOD only) ───────────────
+      // ── Grass Geometry & Materials — three LOD tiers ─────────────────────────
       let _seed = 0;
       function setSeed(s) { _seed = s; }
       function randRange(lo, hi) {
@@ -242,38 +247,48 @@
         return lo + t * (hi - lo);
       }
 
-      // Single geometry shared across all patches — blade layout repeats but
-      // shader hash (bladeWorld.xz) gives each blade unique color/height/lean.
-      // Density bumped to 7500 for a denser field.
-      const grassGeo = createGrassGeometry(
-        GRASS_SEGMENTS_HIGH,
-        7500,
-        GRASS_PATCH_SIZE,
-        setSeed,
-        randRange,
-      );
-      const grassMat = createGrassMaterial(
-        GRASS_SEGMENTS_HIGH,
-        GRASS_VERTS_HIGH,
-        false,
-        "regular",
-        grassCtx,
-      );
+      // LOD0 — 7 segs / 15 verts, full quality, inner 2×2 patches (0–12 units)
+      const geoH = createGrassGeometry(GRASS_SEGMENTS_HIGH, 5000, GRASS_PATCH_SIZE, setSeed, randRange);
+      const matH = createGrassMaterial(GRASS_SEGMENTS_HIGH, GRASS_VERTS_HIGH, false, "regular", grassCtx, 0);
 
-      // 6×6 grid → 36 patches covering 60×60 units
-      const GRID = 6;
-      for (let ix = 0; ix < GRID; ix++) {
-        for (let iz = 0; iz < GRID; iz++) {
-          const mesh = new THREE.Mesh(grassGeo, grassMat);
-          mesh.position.set(
-            (ix - (GRID - 1) * 0.5) * GRASS_PATCH_SIZE,
-            0,
-            (iz - (GRID - 1) * 0.5) * GRASS_PATCH_SIZE,
-          );
-          mesh.frustumCulled = false;
-          scene.add(mesh);
-        }
+      // LOD1 — 3 segs / 7 verts, simplified, middle ring (12–24 units)
+      const geoM = createGrassGeometry(GRASS_SEGMENTS_MID, 3000, GRASS_PATCH_SIZE, setSeed, randRange);
+      const matM = createGrassMaterial(GRASS_SEGMENTS_MID, GRASS_VERTS_MID, false, "regular", grassCtx, 1);
+
+      // LOD2 — 3 segs / 7 verts, 60% height, outer ring (24–30 units)
+      // Shares geoM geometry; different material (tier=2) handles height scale + fade.
+      const matL = createGrassMaterial(GRASS_SEGMENTS_MID, GRASS_VERTS_MID, false, "regular", grassCtx, 2);
+
+      // Camera-following grid: patches store their offset from the snap origin.
+      // Each frame the grid snaps to camera XZ so LOD distance bands are always
+      // correct relative to the camera — avoids the "dark gap" artifact.
+      const grassPatches = [];
+      function addPatch(geo, mat, gridSize, ix, iz) {
+        const mesh = new THREE.Mesh(geo, mat);
+        const baseX = (ix - (gridSize - 1) * 0.5) * GRASS_PATCH_SIZE;
+        const baseZ = (iz - (gridSize - 1) * 0.5) * GRASS_PATCH_SIZE;
+        mesh.position.set(baseX, 0, baseZ);
+        mesh.frustumCulled = false;
+        scene.add(mesh);
+        grassPatches.push({ mesh, baseX, baseZ });
       }
+
+      // LOD0: inner 2×2 → 4 patches, covers −10…+10 units from grid center
+      for (let ix = 0; ix < 2; ix++)
+        for (let iz = 0; iz < 2; iz++)
+          addPatch(geoH, matH, 2, ix, iz);
+
+      // LOD1: 4×4 minus inner 2×2 → 12 patches, covers −20…+20 units
+      for (let ix = 0; ix < 4; ix++)
+        for (let iz = 0; iz < 4; iz++)
+          if (!(ix >= 1 && ix < 3 && iz >= 1 && iz < 3))
+            addPatch(geoM, matM, 4, ix, iz);
+
+      // LOD2: 6×6 minus inner 4×4 → 20 patches, covers −30…+30 units
+      for (let ix = 0; ix < 6; ix++)
+        for (let iz = 0; iz < 6; iz++)
+          if (!(ix >= 1 && ix < 5 && iz >= 1 && iz < 5))
+            addPatch(geoM, matL, 6, ix, iz);
 
       // ── Floor — dark soil so tile grid doesn't show through grass ────────────
       const floorGeo = new THREE.PlaneGeometry(200, 200);
@@ -377,6 +392,14 @@
       sp2F.addBinding(sp2P, 'color',     { label: 'Color',     view: 'color'               }).on('change', v => fromHex(v.value, uSpecV2Color));
       sp2F.addBinding(sp2P, 'power',     { label: 'Power',     min: 1, max: 40, step: 0.5  }).on('change', v => { uSpecV2Power.value = v.value; });
 
+      // ── LOD ───────────────────────────────────────────────────────────────────
+      const lodF = pane.addFolder({ title: 'LOD', expanded: true });
+      const lodP = { lod0Dist: 12, lod1Dist: 24, fadeRange: 3, maxDist: 50 };
+      lodF.addBinding(lodP, 'lod0Dist',  { label: 'LOD0→1 Dist',  min: 5,  max: 30,  step: 0.5 }).on('change', v => { uLod0Dist.value    = v.value; uLodDist.value = v.value; });
+      lodF.addBinding(lodP, 'lod1Dist',  { label: 'LOD1→2 Dist',  min: 10, max: 60,  step: 0.5 }).on('change', v => { uLod1Dist.value    = v.value; });
+      lodF.addBinding(lodP, 'fadeRange', { label: 'Fade Range',   min: 0.5, max: 10, step: 0.5 }).on('change', v => { uLodFadeRange.value = v.value; });
+      lodF.addBinding(lodP, 'maxDist',   { label: 'Max Dist',     min: 20, max: 150, step: 1   }).on('change', v => { uMaxDist.value      = v.value; });
+
       // ── Environment ───────────────────────────────────────────────────────────
       const envF = pane.addFolder({ title: 'Environment', expanded: false });
       const envP = { ao: 1.0, skyMin: 0.55, skyMax: 0.7 };
@@ -400,6 +423,15 @@
         timer.update();
         uTime.value = timer.getElapsed();
         controls.update();
+
+        // Snap patch grid to camera XZ — keeps LOD distance bands centred on camera
+        const snapX = Math.round(camera.position.x / GRASS_PATCH_SIZE) * GRASS_PATCH_SIZE;
+        const snapZ = Math.round(camera.position.z / GRASS_PATCH_SIZE) * GRASS_PATCH_SIZE;
+        for (const { mesh, baseX, baseZ } of grassPatches) {
+          mesh.position.x = snapX + baseX;
+          mesh.position.z = snapZ + baseZ;
+        }
+
         stats.update();
         renderer.render(scene, camera);
       });
