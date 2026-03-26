@@ -731,23 +731,32 @@ export function createGrassMaterial(
     const backScat = max(dot(negate(uSunDir), n), 0),
       frontScat = max(dot(uSunDir, n), 0);
     const rim = sub(1, max(dot(n, viewDir), 0));
+    // thickness: 1.0 at base (opaque), 0.3 at tip (thin)
     const thickness = add(mul(sub(1, heightPct), 0.7), 0.3);
+    // thinness: inverse — tip is thin so transmits MORE light (GoT tip glow)
+    const thinness  = add(mul(heightPct, 0.7), 0.3);
     const transmitCol = mix(
       uBsColor,
       mul(uBsColor, vec3(1.3, 1.1, 0.7)),
-      sub(1, thickness),
+      thinness,
     );
     const totalSSS = clamp(
       add(
-        mul(pow(backScat, uBsPower), thickness),
-        mul(pow(frontScat, 1.5), thickness, uFrontScatter),
-        mul(pow(pow(rim, 1.5), 2), thickness, uRimSSS),
+        mul(pow(backScat, uBsPower), thinness),           // tip glows brighter (thin)
+        mul(pow(frontScat, 1.5), thinness, uFrontScatter),
+        mul(pow(pow(rim, 1.5), 2), thickness, uRimSSS),   // rim: keep thickness (silhouette darkens at base)
       ),
       0,
       1,
     );
     // SSS always active — no LOD gate (GoT lights all blades from all angles)
     col = add(col, mul(transmitCol, 0.35, totalSSS, uBsIntensity));
+
+    // Surface micro-noise: fibrous vein texture along blade length
+    // Offset UV by heightPct so pattern runs along blade, not world-aligned
+    const fiberUV = add(mul(vWorldPos.xz, 11.0), mul(heightPct, vec2(1.7, 2.3)));
+    const microN  = add(mul(noise12(fiberUV), 0.22), 0.89);  // 0.89–1.11 (±11%)
+    col = mul(col, microN);
 
     const sceneDepth = length(sub(cameraPosition, vWorldPos));
     const specTipFade = smoothstep(0.3, 1.0, heightPct);
@@ -808,9 +817,13 @@ export function createGrassMaterial(
     side: THREE.DoubleSide,
     roughness: 0.85,
     metalness: 0.0,
+    transparent: true,
+    depthWrite: true,  // keep correct depth occlusion between blades
   });
   mat.positionNode = positionNode;
-  mat.colorNode = colorNode;
+  mat.colorNode    = colorNode;
+  // Tip alpha fade: dissolve top 18% of blade — organic tip instead of hard geometric point
+  mat.opacityNode  = sub(float(1), smoothstep(float(0.82), float(1.0), vPacked.x));
   mat.envMapIntensity = 0;
   return mat;
 }

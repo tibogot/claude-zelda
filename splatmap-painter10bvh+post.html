@@ -2598,6 +2598,12 @@
           blurSize: 1,
           blurSpread: 3,
         },
+        outline: {
+          enabled: false,
+          thickness: 1.0,
+          strength: 0.8,
+          depthThreshold: 0.003,
+        },
         gtao: {
           enabled: false,
           intensity: 1.2,
@@ -8555,6 +8561,12 @@
           step: 1,
         });
 
+        const postOutlineFolder = postFolder.addFolder({ title: "Outline", expanded: false });
+        postOutlineFolder.addBinding(postParams.outline, "enabled");
+        postOutlineFolder.addBinding(postParams.outline, "thickness",      { min: 0.5, max: 4.0, step: 0.1 });
+        postOutlineFolder.addBinding(postParams.outline, "strength",       { min: 0.0, max: 2.0, step: 0.05 });
+        postOutlineFolder.addBinding(postParams.outline, "depthThreshold", { min: 0.0001, max: 0.005, step: 0.0001, label: "depth thresh" });
+
         // Wire up file inputs
         document
           .getElementById("file-input")
@@ -9677,6 +9689,27 @@
           mul(dofBlurAmount, uDofEnabled),
         );
 
+        // Screen-space outline (depth edge detection)
+        const uOutlineEnabled    = uniform(0);
+        const uOutlineThickness  = uniform(postParams.outline.thickness);
+        const uOutlineStrength   = uniform(postParams.outline.strength);
+        const uOutlineDepthThresh = uniform(postParams.outline.depthThreshold);
+        const uOutlineRes = uniform(new THREE.Vector2(innerWidth, innerHeight));
+
+        // Returns a 0–1 darkening factor — 0 = no outline, 1 = full black
+        const outlineEdge = Fn(() => {
+          const px = uOutlineThickness.div(uOutlineRes.x);
+          const py = uOutlineThickness.div(uOutlineRes.y);
+          const d  = scenePassDepth.sample(screenUV).r;
+          const dR = scenePassDepth.sample(vec2(screenUV.x.add(px), screenUV.y)).r;
+          const dL = scenePassDepth.sample(vec2(screenUV.x.sub(px), screenUV.y)).r;
+          const dU = scenePassDepth.sample(vec2(screenUV.x, screenUV.y.add(py))).r;
+          const dD = scenePassDepth.sample(vec2(screenUV.x, screenUV.y.sub(py))).r;
+          const diff = abs(d.sub(dR)).add(abs(d.sub(dL))).add(abs(d.sub(dU))).add(abs(d.sub(dD)));
+          return smoothstep(uOutlineDepthThresh, uOutlineDepthThresh.mul(float(4)), diff)
+            .mul(uOutlineStrength).mul(uOutlineEnabled).clamp(float(0), float(1));
+        })();
+
         // Scene Bloom
         const uBloomEnabled = uniform(
           postParams.enabled && postParams.bloom.enabled ? 1 : 0,
@@ -9755,6 +9788,7 @@
 
         // Final composite
         const finalOutput = postBaseColor
+          .mul(float(1).sub(outlineEdge))
           .add(bloomScenePass.mul(uBloomEnabled))
           .add(flareBlurPass.mul(uLensflareEnabled))
           .add(godRaysNode);
@@ -10108,6 +10142,12 @@
           uGodRaysDecay.value = postParams.godRays.decay;
           uGodRaysDensity.value = postParams.godRays.density;
           uGodRaysSamples.value = postParams.godRays.samples;
+
+          uOutlineEnabled.value = postParams.enabled && postParams.outline.enabled ? 1 : 0;
+          uOutlineThickness.value = postParams.outline.thickness;
+          uOutlineStrength.value = postParams.outline.strength;
+          uOutlineDepthThresh.value = postParams.outline.depthThreshold;
+          uOutlineRes.value.set(renderer.domElement.width, renderer.domElement.height);
 
           // Project sun direction to screen space for god rays
           const _sunWorld = camera.position
