@@ -453,6 +453,43 @@
       }
       buildHeightData();
 
+      function generateTerrainNoise() {
+        const g = PARAMS.gen;
+        const sc = g.scale;
+        const oct = Math.round(g.octaves);
+        const H = g.height;
+        const seed = g.seed * 100;
+        const warp = g.domainWarp;
+        const drop = g.dropoff;
+
+        for (let iz = 0; iz < VERTS; iz++) {
+          for (let ix = 0; ix < VERTS; ix++) {
+            // Normalised [0,1] coords centred at 0.5
+            const nx = ix / (VERTS - 1);
+            const nz = iz / (VERTS - 1);
+
+            // Domain warp: offset sample coords with a second FBM layer
+            const wx = warp > 0 ? _fbm(nx * sc * 3 + seed + 31.7, nz * sc * 3 + seed + 17.3, 4) * warp * 0.08 : 0;
+            const wz = warp > 0 ? _fbm(nx * sc * 3 + seed + 55.1, nz * sc * 3 + seed + 89.2, 4) * warp * 0.08 : 0;
+
+            const sx = nx * sc + seed + wx;
+            const sz = nz * sc + seed + wz;
+
+            const raw = g.mode === "ridge"
+              ? _fbmRidge(sx, sz, oct)
+              : _fbm(sx, sz, oct);
+
+            // Radial dropoff so borders stay at 0
+            const dx = (nx - 0.5) * 2;
+            const dz = (nz - 0.5) * 2;
+            const r = Math.sqrt(dx * dx + dz * dz);
+            const falloff = Math.max(0, 1 - Math.pow(r, drop));
+
+            heightData[iz * VERTS + ix] = raw * H * falloff;
+          }
+        }
+      }
+
       // Bilinear sample from heightData — used for sphere placement + sculpt falloff
       // Samples height using the same DISPLAY_RES (128) grid the visual mesh uses.
       // Used for heightTex so grass sits flush with what you actually see, not the
@@ -625,6 +662,15 @@
         noiseScale: 2.5,
         noiseOctaves: 2,
         terraceStep: 8,
+        gen: {
+          mode: "ridge",        // "fbm" | "ridge"
+          scale: 4.0,
+          octaves: 6,
+          height: 120,
+          seed: 0,
+          domainWarp: 0.5,
+          dropoff: 1.2,
+        },
         terraceSharpness: 0.7,
         paintBrush: "smooth",
         brushFalloff: "smooth", // "smooth" | "linear" | "sphere" | "hard"
@@ -7262,6 +7308,26 @@
             img.src = url;
           };
           inp.click();
+        });
+
+        // ── Terrain Generator ──
+        const genFolder = sculptFolder.addFolder({ title: "Terrain Generator", expanded: false });
+        genFolder.addBinding(PARAMS.gen, "mode", {
+          label: "Mode",
+          options: { "Ridge (sharp peaks)": "ridge", "FBM (rolling hills)": "fbm" },
+        });
+        genFolder.addBinding(PARAMS.gen, "scale",   { label: "Scale",       min: 0.5,   max: 12,    step: 0.1   });
+        genFolder.addBinding(PARAMS.gen, "octaves", { label: "Octaves",     min: 1,     max: 8,     step: 1     });
+        genFolder.addBinding(PARAMS.gen, "height",  { label: "Height",      min: 10,    max: 300,   step: 1     });
+        genFolder.addBinding(PARAMS.gen, "seed",    { label: "Seed",        min: 0,     max: 999,   step: 1     });
+        genFolder.addBinding(PARAMS.gen, "domainWarp", { label: "Domain Warp",  min: 0, max: 2,     step: 0.05  });
+        genFolder.addBinding(PARAMS.gen, "dropoff", { label: "Edge Dropoff", min: 0.3, max: 4,     step: 0.05  });
+        genFolder.addButton({ title: "▶  Generate Terrain" }).on("click", () => {
+          pushUndo();
+          generateTerrainNoise();
+          syncGeometry();
+          generateObjects(scene);
+          if (bakeBVH) bakeBVH();
         });
 
         sculptFolder.addButton({ title: "Reset Terrain" }).on("click", () => {
