@@ -1129,8 +1129,9 @@
         collisionMin:  0.5,
       };
       // Camera collision BVH refs — set inside bakeBVH, used in play loop
-      let _camTerrainBvh = null;
-      let _camCliffBvh   = null;
+      let _camTerrainBvh  = null;
+      let _camCliffBvh    = null;
+      let _camCurrentDist = 8; // smoothed actual camera distance (lerped toward target)
       // Pre-allocated to avoid GC per frame
       const _camRay    = new THREE.Ray();
       const _camTarget = new THREE.Vector3();
@@ -5937,6 +5938,7 @@
           playerPos.y = bvhHeight(playerPos.x, playerPos.z);
           camYaw = 0;
           camPitch = 0.35;
+          _camCurrentDist = playParams.camDist;
           capsuleMesh.visible = true;
           orbit.enabled = false;
           // Hide editor UI
@@ -9926,23 +9928,33 @@
               playerPos.z + Math.cos(camYaw) * hDist,
             );
             // Camera collision — raycast from lookAt point toward desired camera position.
-            // Pulls camera in if terrain or cliffs are in the way. Zero allocs per frame.
-            if (_camTerrainBvh) {
+            // Lerps in fast on hit, eases back out slowly when clear. Zero allocs per frame.
+            {
               _camTarget.set(playerPos.x, lookAtY, playerPos.z);
               _camDir.subVectors(camera.position, _camTarget);
-              const desiredDist = _camDir.length();
-              _camDir.divideScalar(desiredDist); // normalize in-place
-              _camRay.set(_camTarget, _camDir);
-              let nearestDist = desiredDist;
-              const tHit = _camTerrainBvh.raycastFirst(_camRay, THREE.DoubleSide);
-              if (tHit && tHit.distance < nearestDist) nearestDist = tHit.distance - playParams.collisionGap;
-              if (_camCliffBvh) {
-                const cHit = _camCliffBvh.raycastFirst(_camRay, THREE.DoubleSide);
-                if (cHit && cHit.distance < nearestDist) nearestDist = cHit.distance - playParams.collisionGap;
+              const desiredDist = playParams.camDist;
+              _camDir.set(
+                Math.sin(camYaw) * Math.cos(camPitch),
+                Math.sin(camPitch),
+                Math.cos(camYaw) * Math.cos(camPitch)
+              ).negate();
+              let targetDist = desiredDist;
+              if (_camTerrainBvh) {
+                _camRay.set(_camTarget, _camDir);
+                const tHit = _camTerrainBvh.raycastFirst(_camRay, THREE.DoubleSide);
+                if (tHit && tHit.distance - playParams.collisionGap < targetDist)
+                  targetDist = tHit.distance - playParams.collisionGap;
+                if (_camCliffBvh) {
+                  const cHit = _camCliffBvh.raycastFirst(_camRay, THREE.DoubleSide);
+                  if (cHit && cHit.distance - playParams.collisionGap < targetDist)
+                    targetDist = cHit.distance - playParams.collisionGap;
+                }
               }
-              if (nearestDist < playParams.collisionMin) nearestDist = playParams.collisionMin;
-              if (nearestDist < desiredDist)
-                camera.position.copy(_camTarget).addScaledVector(_camDir, nearestDist);
+              if (targetDist < playParams.collisionMin) targetDist = playParams.collisionMin;
+              // Fast lerp when pushing in (avoid clipping), slow lerp when pulling back out
+              const lerpRate = targetDist < _camCurrentDist ? 25 : 5;
+              _camCurrentDist += (targetDist - _camCurrentDist) * Math.min(1, lerpRate * dt);
+              camera.position.copy(_camTarget).addScaledVector(_camDir, _camCurrentDist);
             }
             camera.lookAt(playerPos.x, lookAtY, playerPos.z);
             // Feed player pos to grass interaction
