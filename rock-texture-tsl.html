@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Advanced TSL Painterly Rock</title>
+    <style>
+      body {
+        margin: 0;
+        background-color: #111;
+        overflow: hidden;
+        font-family: sans-serif;
+      }
+      canvas {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/+esm"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import {
+        color,
+        float,
+        vec3,
+        positionLocal,
+        mix,
+        step,
+        uniform,
+        mx_worley_noise_float,
+        mx_fractal_noise_float,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
+
+      let camera, scene, renderer, controls;
+
+      init();
+
+      async function init() {
+        scene = new THREE.Scene();
+        renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        camera = new THREE.PerspectiveCamera(
+          45,
+          window.innerWidth / window.innerHeight,
+          0.1,
+          100,
+        );
+        camera.position.set(0, 3, 6);
+        controls = new OrbitControls(camera, renderer.domElement);
+
+        const material = new THREE.MeshStandardNodeMaterial();
+
+        // --- THE "TOO MANY CONTROLS" UNIFORMS ---
+        const params = {
+          scale: 2.0,
+          warpFreq: 1.2,
+          warpStrength: 0.5,
+          fbmOctaves: 3,
+          fbmLacunarity: 2.0,
+          fbmGain: 0.5,
+          microScale: 15.0,
+          microOctaves: 2,
+          microGain: 0.5,
+          microAmount: 0.02,
+          normalStrength: 2.5,
+          edgeSharpness: 0.1,
+          cavityDepth: 0.4,
+          brightness: 1.0,
+          contrast: 1.05,
+          saturation: 0.9,
+          baseCol: "#555555",
+          highCol: "#aaaaaa",
+          crackCol: "#111111",
+          roughness: 0.78,
+          sunIntensity: 2.5,
+          ambientIntensity: 0.2,
+        };
+
+        const uScale = uniform(float(params.scale));
+        const uWarpFreq = uniform(float(params.warpFreq));
+        const uWarpStr = uniform(float(params.warpStrength));
+        const uOctaves = uniform(float(params.fbmOctaves));
+        const uLacunarity = uniform(float(params.fbmLacunarity));
+        const uGain = uniform(float(params.fbmGain));
+        const uMicroScale = uniform(float(params.microScale));
+        const uMicroOctaves = uniform(float(params.microOctaves));
+        const uMicroGain = uniform(float(params.microGain));
+        const uMicroAmount = uniform(float(params.microAmount));
+        const uNormalStr = uniform(float(params.normalStrength));
+        const uEdgeSharp = uniform(float(params.edgeSharpness));
+        const uCavityDepth = uniform(float(params.cavityDepth));
+        const uBrightness = uniform(float(params.brightness));
+        const uContrast = uniform(float(params.contrast));
+        const uSaturation = uniform(float(params.saturation));
+
+        const uBaseCol = uniform(color(params.baseCol));
+        const uHighCol = uniform(color(params.highCol));
+        const uCrackCol = uniform(color(params.crackCol));
+
+        // --- SHADER LOGIC ---
+        const getComplexRockHeight = (pos) => {
+          // Warp Position with Fractal Noise
+          const warp = mx_fractal_noise_float(
+            pos.mul(uWarpFreq),
+            uOctaves,
+            uLacunarity,
+            uGain,
+          );
+          const warpedPos = pos.add(warp.mul(uWarpStr));
+
+          // Main Voronoi Cells
+          const cells = mx_worley_noise_float(warpedPos.mul(uScale), 1.0, 0);
+
+          // Micro-detail overlay
+          const microRaw = mx_fractal_noise_float(
+            pos.mul(uMicroScale),
+            uMicroOctaves,
+            2.0,
+            uMicroGain,
+          );
+          // Center around zero so micro detail carves and raises equally.
+          const micro = microRaw.sub(0.5).mul(uMicroAmount);
+
+          return cells.add(micro);
+        };
+
+        const p = positionLocal;
+        const h = getComplexRockHeight(p);
+
+        // Gradient for Normals
+        const eps = 0.015;
+        const hX = getComplexRockHeight(p.add(vec3(eps, 0, 0)));
+        const hY = getComplexRockHeight(p.add(vec3(0, eps, 0)));
+        const dx = hX.sub(h).div(eps);
+        const dy = hY.sub(h).div(eps);
+
+        material.normalNode = vec3(
+          dx.mul(uNormalStr).negate(),
+          dy.mul(uNormalStr).negate(),
+          1.0,
+        ).normalize();
+
+        // Advanced Coloring
+        const crackMask = step(uCavityDepth, h);
+        const edgeMask = step(uEdgeSharp, h);
+
+        const faceColor = mix(uBaseCol, uHighCol, h);
+        const crackedColor = mix(uCrackCol, faceColor, crackMask);
+        const baseColor = mix(uCrackCol, crackedColor, edgeMask);
+        const luma = baseColor.dot(vec3(0.2126, 0.7152, 0.0722));
+        const gradedSat = mix(vec3(luma), baseColor, uSaturation);
+        const gradedContrast = gradedSat.sub(0.5).mul(uContrast).add(0.5);
+        material.colorNode = gradedContrast.mul(uBrightness).saturate();
+
+        material.roughness = params.roughness;
+
+        // --- MESH & LIGHTS ---
+        const geometry = new THREE.IcosahedronGeometry(2, 64);
+        const rock = new THREE.Mesh(geometry, material);
+        scene.add(rock);
+
+        const sun = new THREE.DirectionalLight(0xffffff, 2.5);
+        sun.position.set(5, 5, 5);
+        const ambient = new THREE.AmbientLight(0xffffff, params.ambientIntensity);
+        scene.add(sun, ambient);
+
+        // --- TWEAKPANE SETUP ---
+        const pane = new Pane({ title: "Master Rock Tweaker" });
+
+        const f1 = pane.addFolder({ title: "Brush/Stroke Warp" });
+        f1.addBinding(uScale, "value", {
+          min: 0.1,
+          max: 10,
+          label: "Cell Scale",
+        });
+        f1.addBinding(uWarpFreq, "value", {
+          min: 0.1,
+          max: 5,
+          label: "Warp Frequency",
+        });
+        f1.addBinding(uWarpStr, "value", {
+          min: 0,
+          max: 2,
+          label: "Warp Strength",
+        });
+
+        const f2 = pane.addFolder({ title: "FBM Complexity" });
+        f2.addBinding(uOctaves, "value", {
+          min: 1,
+          max: 8,
+          step: 1,
+          label: "Octaves",
+        });
+        f2.addBinding(uLacunarity, "value", {
+          min: 1,
+          max: 4,
+          label: "Lacunarity",
+        });
+        f2.addBinding(uGain, "value", {
+          min: 0,
+          max: 1,
+          label: "Gain (Persistence)",
+        });
+        f2.addBinding(uMicroScale, "value", {
+          min: 1,
+          max: 50,
+          label: "Micro Scale",
+        });
+        f2.addBinding(uMicroOctaves, "value", {
+          min: 1,
+          max: 6,
+          step: 1,
+          label: "Micro Octaves",
+        });
+        f2.addBinding(uMicroGain, "value", {
+          min: 0,
+          max: 1,
+          label: "Micro Gain",
+        });
+        f2.addBinding(uMicroAmount, "value", {
+          min: 0,
+          max: 0.1,
+          label: "Micro Amount",
+        });
+
+        const f3 = pane.addFolder({ title: "Shaping & Edges" });
+        f3.addBinding(uNormalStr, "value", {
+          min: 0,
+          max: 10,
+          label: "Chisel Force",
+        });
+        f3.addBinding(uEdgeSharp, "value", {
+          min: 0,
+          max: 0.5,
+          label: "Edge Mask",
+        });
+        f3.addBinding(uCavityDepth, "value", {
+          min: 0,
+          max: 1,
+          label: "Cavity Threshold",
+        });
+
+        const f4 = pane.addFolder({ title: "Colors" });
+        f4.addBinding(params, "baseCol", { label: "Mid Tone" }).on(
+          "change",
+          (e) => uBaseCol.value.set(e.value),
+        );
+        f4.addBinding(params, "highCol", { label: "Highlight" }).on(
+          "change",
+          (e) => uHighCol.value.set(e.value),
+        );
+        f4.addBinding(params, "crackCol", { label: "Deep Crack" }).on(
+          "change",
+          (e) => uCrackCol.value.set(e.value),
+        );
+
+        const f5 = pane.addFolder({ title: "Color Grading" });
+        f5.addBinding(uBrightness, "value", {
+          min: 0.4,
+          max: 2.0,
+          label: "Brightness",
+        });
+        f5.addBinding(uContrast, "value", {
+          min: 0.4,
+          max: 2.0,
+          label: "Contrast",
+        });
+        f5.addBinding(uSaturation, "value", {
+          min: 0,
+          max: 2.0,
+          label: "Saturation",
+        });
+
+        const f6 = pane.addFolder({ title: "Material / Light" });
+        f6.addBinding(params, "roughness", {
+          min: 0,
+          max: 1,
+          label: "Roughness",
+        }).on("change", (e) => {
+          material.roughness = e.value;
+        });
+        f6.addBinding(params, "sunIntensity", {
+          min: 0,
+          max: 5,
+          label: "Sun",
+        }).on("change", (e) => {
+          sun.intensity = e.value;
+        });
+        f6.addBinding(params, "ambientIntensity", {
+          min: 0,
+          max: 2,
+          label: "Ambient",
+        }).on("change", (e) => {
+          ambient.intensity = e.value;
+        });
+
+        renderer.setAnimationLoop(() => {
+          controls.update();
+          renderer.render(scene, camera);
+        });
+      }
+    </script>
+  </body>
+</html>
