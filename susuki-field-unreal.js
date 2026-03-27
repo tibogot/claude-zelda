@@ -5,13 +5,13 @@
  */
 import * as THREE from "three";
 import { uniform } from "three/tsl";
-import { setSeed, randRange } from "./rng.js";
+import { setSeed, randRange } from "./rng-unreal.js";
 import {
   createSusukiStemGeometry,
   createSusukiBandGeometry,
   createSusukiStemMaterial,
   createSusukiBandMaterial,
-} from "./susuki.js";
+} from "./susuki-unreal.js";
 
 // ─── Constants (sparser than grass: taller plants, fewer per patch) ───
 export const SUSUKI_FIELD_PATCH_SIZE = 20;
