@@ -1,0 +1,658 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Genshin Flower - Artifact Fix</title>
+    <style>
+      body {
+        margin: 0;
+        background-color: #a8e6cf;
+        overflow: hidden;
+        font-family: sans-serif;
+      }
+      canvas {
+        display: block;
+      }
+      #label {
+        position: absolute;
+        top: 20px;
+        width: 100%;
+        text-align: center;
+        color: #2d5a27;
+        pointer-events: none;
+        text-shadow: 1px 1px 0px white;
+      }
+      .tp-dfwv {
+        max-height: calc(100vh - 24px);
+        overflow-y: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="label">
+      <h1>Stylized Flower</h1>
+      Clean Alpha Projection
+    </div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/+esm"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import {
+        and,
+        color,
+        cos,
+        float,
+        mix,
+        normalWorld,
+        smoothstep,
+        step,
+        sin,
+        texture,
+        uniform,
+        uv,
+        vec2,
+        vec3,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
+
+      let camera, scene, renderer, controls;
+
+      init();
+
+      async function init() {
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0xd4f1f4);
+
+        camera = new THREE.PerspectiveCamera(
+          45,
+          window.innerWidth / window.innerHeight,
+          0.1,
+          100,
+        );
+        camera.position.set(0, 5, 8);
+
+        renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.body.appendChild(renderer.domElement);
+
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+
+        const SHAPE = {
+          /** 2–4 octagonal rings around the center (ultra low-poly = 2). */
+          ringCount: 2,
+          centerY: 0.60,
+          r1: 0.42,
+          r2: 0.86,
+          r3: 1.32,
+          r4: 1.88,
+          y1: 0.18,
+          y2: 0.00,
+          y3: -0.02,
+          y4: -0.24,
+        };
+
+        const UV_CONFIG = { scale: 1.0, rotate: 0, offsetX: 0.5, offsetY: 0.5 };
+        const SHADING = {
+          colorSource: "procedural",
+          colorPreset: "main",
+          centerX: 0.5,
+          centerY: 0.5,
+          procInner: "#fff4b8",
+          procOuter: "#fb8da0",
+          centerGlow: 0.28,
+          centerLayerEnabled: false,
+          centerLayerColor: "#fffde0",
+          centerLayerRadius: 0.22,
+          centerLayerSoftness: 0.12,
+          centerLayerIntensity: 0.45,
+          veinsEnabled: false,
+          veinStrength: 0.22,
+          veinFrequency: 8.0,
+          veinSoftness: 0.2,
+          veinTwist: 0.35,
+          lightEnabled: true,
+          ambientLift: 0.4,
+          diffuseStrength: 0.6,
+          backlightStrength: 0.65,
+          backlightTint: "#fff4d0",
+          alphaCutoff: 0.35,
+          alphaSoftness: 0.08,
+          edgeDebug: false,
+        };
+
+        function createBloomGeometry(shape) {
+          const sides = 8;
+          const nRings = Math.min(4, Math.max(2, shape.ringCount | 0) || 4);
+          const ringR = [0.0];
+          const ringY = [shape.centerY];
+          for (let i = 1; i <= nRings; i++) {
+            ringR.push(shape[`r${i}`]);
+            ringY.push(shape[`y${i}`]);
+          }
+          const rOuter = shape[`r${nRings}`] || shape.r4;
+
+          const positions = [],
+            uvs = [],
+            indices = [];
+
+          positions.push(0, ringY[0], 0);
+          uvs.push(0.5, 0.5);
+
+          const ringStart = [];
+          let vertexCount = 1;
+          for (let r = 1; r < ringR.length; r++) {
+            ringStart[r] = vertexCount;
+            for (let s = 0; s < sides; s++) {
+              const a = (s / sides) * Math.PI * 2 + Math.PI / 8;
+              const px = Math.cos(a) * ringR[r];
+              const pz = Math.sin(a) * ringR[r];
+              positions.push(px, ringY[r], pz);
+              uvs.push(px / (rOuter * 2) + 0.5, pz / (rOuter * 2) + 0.5);
+              vertexCount++;
+            }
+          }
+
+          const idx = (r, s) => ringStart[r] + (s % sides);
+          for (let s = 0; s < sides; s++)
+            indices.push(0, idx(1, s + 1), idx(1, s));
+          for (let r = 1; r < ringR.length - 1; r++) {
+            for (let s = 0; s < sides; s++) {
+              const a = idx(r, s),
+                b = idx(r, s + 1),
+                c = idx(r + 1, s),
+                d = idx(r + 1, s + 1);
+              indices.push(a, b, c, b, d, c);
+            }
+          }
+
+          const geo = new THREE.BufferGeometry();
+          geo.setAttribute(
+            "position",
+            new THREE.Float32BufferAttribute(positions, 3),
+          );
+          geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+          geo.setIndex(indices);
+          geo.computeVertexNormals();
+          return geo;
+        }
+
+        // Unlit: same brightness on front/back (no N·L). Fits texture-driven flowers; avoids
+        // DoubleSide + Standard shading issues (back dark) and fragile normalNode overrides.
+        const material = new THREE.MeshBasicNodeMaterial();
+        const flowerTex = new THREE.Texture();
+        flowerTex.colorSpace = THREE.SRGBColorSpace;
+        // CRITICAL: Stop the texture from repeating
+        flowerTex.wrapS = THREE.ClampToEdgeWrapping;
+        flowerTex.wrapT = THREE.ClampToEdgeWrapping;
+        flowerTex.minFilter = THREE.LinearMipmapLinearFilter;
+        flowerTex.magFilter = THREE.LinearFilter;
+        flowerTex.generateMipmaps = true;
+
+        const uPivot = uniform(vec2(0.5, 0.5));
+        const uScale = uniform(float(1.0));
+        const uRotation = uniform(float(0.0));
+        const uUseMap = uniform(0);
+        const uColorMode = uniform(1); // 0 = PNG color, 1 = procedural color
+        const uShaderCenter = uniform(vec2(SHADING.centerX, SHADING.centerY));
+        const uProcInner = uniform(new THREE.Color(SHADING.procInner));
+        const uProcOuter = uniform(new THREE.Color(SHADING.procOuter));
+        const uCenterGlow = uniform(float(SHADING.centerGlow));
+        const uCenterLayerEnabled = uniform(0);
+        const uCenterLayerColor = uniform(new THREE.Color(SHADING.centerLayerColor));
+        const uCenterLayerRadius = uniform(float(SHADING.centerLayerRadius));
+        const uCenterLayerSoftness = uniform(float(SHADING.centerLayerSoftness));
+        const uCenterLayerIntensity = uniform(float(SHADING.centerLayerIntensity));
+        const uVeinsEnabled = uniform(0);
+        const uVeinStrength = uniform(float(SHADING.veinStrength));
+        const uVeinFrequency = uniform(float(SHADING.veinFrequency));
+        const uVeinSoftness = uniform(float(SHADING.veinSoftness));
+        const uVeinTwist = uniform(float(SHADING.veinTwist));
+        const uLightEnabled = uniform(1);
+        const uAmbientLift = uniform(float(SHADING.ambientLift));
+        const uDiffuseStrength = uniform(float(SHADING.diffuseStrength));
+        const uBacklightStrength = uniform(float(SHADING.backlightStrength));
+        const uBacklightTint = uniform(new THREE.Color(SHADING.backlightTint));
+        const uLightDir = uniform(new THREE.Vector3(5, 10, 5).normalize());
+        const uAlphaCutoff = uniform(float(SHADING.alphaCutoff));
+        const uAlphaSoftness = uniform(float(SHADING.alphaSoftness));
+        const uEdgeDebug = uniform(0); // 0 normal shading, 1 visualize mask edges
+
+        const baseUV = uv().sub(uPivot);
+        const rotatedUV = vec2(
+          baseUV.x.mul(cos(uRotation)).sub(baseUV.y.mul(sin(uRotation))),
+          baseUV.x.mul(sin(uRotation)).add(baseUV.y.mul(cos(uRotation))),
+        );
+        const finalUV = rotatedUV.div(uScale).add(uPivot);
+
+        const texSample = texture(flowerTex, finalUV);
+
+        // EXTRA SAFETY: Force transparency if UV is outside [0, 1] frame
+        const inBounds = and(
+          finalUV.x.greaterThan(0),
+          finalUV.x.lessThan(1),
+          finalUV.y.greaterThan(0),
+          finalUV.y.lessThan(1),
+        );
+        const rgbMax = texSample.r.max(texSample.g).max(texSample.b);
+        const alphaFromTex = texSample.a.add(
+          rgbMax.mul(float(1).sub(step(float(0.001), texSample.a))),
+        );
+        const safeAlpha = inBounds.select(alphaFromTex, float(0));
+        const softMask = smoothstep(
+          uAlphaCutoff.sub(uAlphaSoftness),
+          uAlphaCutoff.add(uAlphaSoftness),
+          safeAlpha,
+        );
+
+        const radial = finalUV.sub(uShaderCenter).length().mul(2).clamp(0, 1);
+        const baseProcColor = mix(uProcInner, uProcOuter, radial);
+        const centerMask = smoothstep(float(1.0), float(0.0), radial);
+        const centerBoost = mix(
+          float(1),
+          float(1.6),
+          centerMask.mul(uCenterGlow),
+        );
+        const centerLayerMask = smoothstep(
+          uCenterLayerRadius.add(uCenterLayerSoftness),
+          uCenterLayerRadius,
+          radial,
+        );
+        const centerLayerMix = centerLayerMask
+          .mul(uCenterLayerIntensity)
+          .mul(uCenterLayerEnabled);
+        const p = finalUV.sub(uShaderCenter);
+        const pLen = p.length().max(float(0.0001));
+        const dir = p.div(pLen);
+        const twistPhase = radial.mul(uVeinTwist).mul(float(6.28318));
+        const spoke = dir.x
+          .mul(cos(twistPhase))
+          .add(dir.y.mul(sin(twistPhase)));
+        const veinWave = sin(
+          spoke
+            .mul(uVeinFrequency)
+            .mul(float(3.14159))
+            .add(radial.mul(float(4.0))),
+        ).abs();
+        const veinMask = smoothstep(
+          float(1.0).sub(uVeinSoftness),
+          float(1.0),
+          veinWave,
+        );
+        const veinBand = smoothstep(float(0.05), float(0.92), radial);
+        const veinBoost = mix(
+          float(1.0),
+          float(1.0).add(uVeinStrength.mul(veinMask).mul(veinBand)),
+          uVeinsEnabled,
+        );
+        const proceduralBase = baseProcColor.mul(centerBoost).mul(veinBoost);
+        const proceduralColor = mix(
+          proceduralBase,
+          mix(proceduralBase, uCenterLayerColor, centerLayerMix),
+          uCenterLayerEnabled,
+        );
+
+        const noMapColor = mix(color(0xfb8da0), proceduralColor, uColorMode);
+        const withMapColor = mix(texSample.rgb, proceduralColor, uColorMode);
+        const debugEdgeColor = mix(color(0x151515), color(0xffffff), softMask);
+
+        const baseColorOut = mix(noMapColor, withMapColor, uUseMap);
+        const nDotL = normalWorld
+          .normalize()
+          .dot(uLightDir.normalize())
+          .toVar();
+        const frontLight = nDotL.max(float(0.0));
+        const backLight = nDotL.mul(float(-1.0)).max(float(0.0));
+        const litFactor = uAmbientLift
+          .add(frontLight.mul(uDiffuseStrength))
+          .add(backLight.mul(uBacklightStrength));
+        const frontLitColor = baseColorOut.mul(litFactor);
+        const backTintColor = mix(
+          baseColorOut,
+          uBacklightTint,
+          backLight.mul(float(0.5)),
+        );
+        const litColor = mix(
+          frontLitColor,
+          backTintColor,
+          backLight.mul(float(0.6)),
+        );
+        const finalShadedColor = mix(baseColorOut, litColor, uLightEnabled);
+        material.colorNode = mix(finalShadedColor, debugEdgeColor, uEdgeDebug);
+        material.opacityNode = uUseMap.mix(float(1), softMask);
+        material.alphaTestNode = float(0.02);
+        material.transparent = true;
+        material.side = THREE.DoubleSide;
+
+        let flowerHead = new THREE.Mesh(createBloomGeometry(SHAPE), material);
+        flowerHead.rotation.x = Math.PI;
+        scene.add(flowerHead);
+
+        function rebuild() {
+          flowerHead.geometry.dispose();
+          flowerHead.geometry = createBloomGeometry(SHAPE);
+        }
+
+        const pane = new Pane({ title: "Flower Editor" });
+        const shapeFolder = pane.addFolder({ title: "Bloom Shape" });
+        shapeFolder
+          .addBinding(SHAPE, "ringCount", {
+            label: "Octagon rings",
+            min: 2,
+            max: 4,
+            step: 1,
+          })
+          .on("change", rebuild);
+        ["r1", "r2", "r3", "r4"].forEach((k) =>
+          shapeFolder
+            .addBinding(SHAPE, k, { min: 0.1, max: 3, label: k })
+            .on("change", rebuild),
+        );
+        ["centerY", "y1", "y2", "y3", "y4"].forEach((k) =>
+          shapeFolder
+            .addBinding(SHAPE, k, { min: -1, max: 1, label: k })
+            .on("change", rebuild),
+        );
+
+        const pngFolder = pane.addFolder({ title: "PNG Alignment" });
+        pngFolder
+          .addBinding(UV_CONFIG, "scale", {
+            min: 0.1,
+            max: 5,
+            label: "Global Scale",
+          })
+          .on("change", (e) => (uScale.value = e.value));
+        pngFolder
+          .addBinding(UV_CONFIG, "rotate", {
+            min: -Math.PI,
+            max: Math.PI,
+            label: "Rotate",
+          })
+          .on("change", (e) => (uRotation.value = e.value));
+        pngFolder
+          .addBinding(UV_CONFIG, "offsetX", {
+            min: 0,
+            max: 1,
+            label: "Offset X",
+          })
+          .on("change", (e) => (uPivot.value.x = e.value));
+        pngFolder
+          .addBinding(UV_CONFIG, "offsetY", {
+            min: 0,
+            max: 1,
+            label: "Offset Y",
+          })
+          .on("change", (e) => (uPivot.value.y = e.value));
+
+        const shadingFolder = pane.addFolder({ title: "Color Shading" });
+        const PRESETS = {
+          main: {
+            procInner: "#fff4b8",
+            procOuter: "#fb8da0",
+            centerGlow: 0.28,
+          },
+          sakura: {
+            procInner: "#ffd9ea",
+            procOuter: "#ff7ab2",
+            centerGlow: 0.32,
+          },
+          zeldaBlue: {
+            procInner: "#e8fbff",
+            procOuter: "#7db8ff",
+            centerGlow: 0.24,
+          },
+          sunflower: {
+            procInner: "#ffe78c",
+            procOuter: "#ff9f40",
+            centerGlow: 0.26,
+          },
+        };
+
+        const applyPreset = (key) => {
+          const p = PRESETS[key] || PRESETS.main;
+          SHADING.procInner = p.procInner;
+          SHADING.procOuter = p.procOuter;
+          SHADING.centerGlow = p.centerGlow;
+          uProcInner.value.set(p.procInner);
+          uProcOuter.value.set(p.procOuter);
+          uCenterGlow.value = p.centerGlow;
+          pane.refresh();
+        };
+
+        shadingFolder
+          .addBinding(SHADING, "colorSource", {
+            label: "Color source",
+            options: { "PNG Color": "png", "TSL Procedural": "procedural" },
+          })
+          .on("change", (e) => {
+            uColorMode.value = e.value === "procedural" ? 1 : 0;
+          });
+        shadingFolder
+          .addBinding(SHADING, "centerX", {
+            min: 0,
+            max: 1,
+            step: 0.001,
+            label: "Shader center X",
+          })
+          .on("change", (e) => {
+            uShaderCenter.value.x = e.value;
+          });
+        shadingFolder
+          .addBinding(SHADING, "centerY", {
+            min: 0,
+            max: 1,
+            step: 0.001,
+            label: "Shader center Y",
+          })
+          .on("change", (e) => {
+            uShaderCenter.value.y = e.value;
+          });
+        shadingFolder
+          .addButton({ title: "Snap center to PNG pivot" })
+          .on("click", () => {
+            SHADING.centerX = UV_CONFIG.offsetX;
+            SHADING.centerY = UV_CONFIG.offsetY;
+            uShaderCenter.value.x = SHADING.centerX;
+            uShaderCenter.value.y = SHADING.centerY;
+            pane.refresh();
+          });
+        shadingFolder
+          .addBinding(SHADING, "colorPreset", {
+            label: "Color preset",
+            options: {
+              "Main (default)": "main",
+              Sakura: "sakura",
+              "Zelda Blue": "zeldaBlue",
+              Sunflower: "sunflower",
+            },
+          })
+          .on("change", (e) => applyPreset(e.value));
+        shadingFolder
+          .addBinding(SHADING, "procInner", { label: "Center color" })
+          .on("change", (e) => {
+            SHADING.colorPreset = "main";
+            uProcInner.value.set(e.value);
+          });
+        shadingFolder
+          .addBinding(SHADING, "procOuter", { label: "Edge color" })
+          .on("change", (e) => {
+            SHADING.colorPreset = "main";
+            uProcOuter.value.set(e.value);
+          });
+        shadingFolder
+          .addBinding(SHADING, "centerGlow", {
+            min: 0,
+            max: 1,
+            step: 0.01,
+            label: "Center glow",
+          })
+          .on("change", (e) => {
+            SHADING.colorPreset = "main";
+            uCenterGlow.value = e.value;
+          });
+        shadingFolder
+          .addBinding(SHADING, "centerLayerEnabled", { label: "Enable center layer" })
+          .on("change", (e) => {
+            uCenterLayerEnabled.value = e.value ? 1 : 0;
+          });
+        shadingFolder
+          .addBinding(SHADING, "centerLayerColor", { label: "Center layer color" })
+          .on("change", (e) => {
+            uCenterLayerColor.value.set(e.value);
+          });
+        shadingFolder
+          .addBinding(SHADING, "centerLayerRadius", { min: 0.01, max: 0.7, step: 0.01, label: "Center radius" })
+          .on("change", (e) => {
+            uCenterLayerRadius.value = e.value;
+          });
+        shadingFolder
+          .addBinding(SHADING, "centerLayerSoftness", { min: 0.005, max: 0.4, step: 0.005, label: "Center softness" })
+          .on("change", (e) => {
+            uCenterLayerSoftness.value = e.value;
+          });
+        shadingFolder
+          .addBinding(SHADING, "centerLayerIntensity", { min: 0, max: 1, step: 0.01, label: "Center intensity" })
+          .on("change", (e) => {
+            uCenterLayerIntensity.value = e.value;
+          });
+        shadingFolder
+          .addBinding(SHADING, "veinsEnabled", { label: "Enable veins" })
+          .on("change", (e) => {
+            uVeinsEnabled.value = e.value ? 1 : 0;
+          });
+        shadingFolder
+          .addBinding(SHADING, "veinStrength", {
+            min: 0,
+            max: 1,
+            step: 0.01,
+            label: "Vein strength",
+          })
+          .on("change", (e) => (uVeinStrength.value = e.value));
+        shadingFolder
+          .addBinding(SHADING, "veinFrequency", {
+            min: 2,
+            max: 20,
+            step: 0.1,
+            label: "Vein frequency",
+          })
+          .on("change", (e) => (uVeinFrequency.value = e.value));
+        shadingFolder
+          .addBinding(SHADING, "veinSoftness", {
+            min: 0.01,
+            max: 0.6,
+            step: 0.01,
+            label: "Vein softness",
+          })
+          .on("change", (e) => (uVeinSoftness.value = e.value));
+        shadingFolder
+          .addBinding(SHADING, "veinTwist", {
+            min: 0,
+            max: 2,
+            step: 0.01,
+            label: "Vein twist",
+          })
+          .on("change", (e) => (uVeinTwist.value = e.value));
+        shadingFolder
+          .addBinding(SHADING, "lightEnabled", { label: "Enable backlight" })
+          .on("change", (e) => (uLightEnabled.value = e.value ? 1 : 0));
+        shadingFolder
+          .addBinding(SHADING, "ambientLift", {
+            min: 0,
+            max: 1.5,
+            step: 0.01,
+            label: "Ambient lift",
+          })
+          .on("change", (e) => (uAmbientLift.value = e.value));
+        shadingFolder
+          .addBinding(SHADING, "diffuseStrength", {
+            min: 0,
+            max: 2,
+            step: 0.01,
+            label: "Diffuse strength",
+          })
+          .on("change", (e) => (uDiffuseStrength.value = e.value));
+        shadingFolder
+          .addBinding(SHADING, "backlightStrength", {
+            min: 0,
+            max: 2,
+            step: 0.01,
+            label: "Backlight strength",
+          })
+          .on("change", (e) => (uBacklightStrength.value = e.value));
+        shadingFolder
+          .addBinding(SHADING, "backlightTint", { label: "Backlight tint" })
+          .on("change", (e) => uBacklightTint.value.set(e.value));
+        shadingFolder
+          .addBinding(SHADING, "alphaCutoff", {
+            min: 0.01,
+            max: 0.95,
+            step: 0.01,
+            label: "Alpha cutoff",
+          })
+          .on("change", (e) => (uAlphaCutoff.value = e.value));
+        shadingFolder
+          .addBinding(SHADING, "alphaSoftness", {
+            min: 0.001,
+            max: 0.3,
+            step: 0.001,
+            label: "Alpha softness",
+          })
+          .on("change", (e) => (uAlphaSoftness.value = e.value));
+        shadingFolder
+          .addBinding(SHADING, "edgeDebug", { label: "Edge debug" })
+          .on("change", (e) => (uEdgeDebug.value = e.value ? 1 : 0));
+
+        const fileInput = document.createElement("input");
+        fileInput.type = "file";
+        fileInput.accept = "image/png";
+        pngFolder
+          .addButton({ title: "Upload PNG" })
+          .on("click", () => fileInput.click());
+        fileInput.addEventListener("change", () => {
+          const file = fileInput.files?.[0];
+          if (file) {
+            const img = new Image();
+            img.src = URL.createObjectURL(file);
+            img.onload = () => {
+              flowerTex.image = img;
+              flowerTex.needsUpdate = true;
+              uUseMap.value = 1;
+            };
+          }
+        });
+
+        // Load default flower texture at startup.
+        const defaultImg = new Image();
+        defaultImg.src = "textures/flowers/Flower32.png";
+        defaultImg.onload = () => {
+          flowerTex.image = defaultImg;
+          flowerTex.needsUpdate = true;
+          uUseMap.value = 1;
+        };
+
+        scene.add(
+          new THREE.DirectionalLight(0xffffff, 2.5),
+          new THREE.AmbientLight(0xffffff, 0.4),
+        );
+        renderer.setAnimationLoop(() => {
+          controls.update();
+          renderer.render(scene, camera);
+        });
+      }
+    </script>
+  </body>
+</html>

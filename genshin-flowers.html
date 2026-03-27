@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TSL Stylized Octagon Flower</title>
+    <style>
+      body {
+        margin: 0;
+        background-color: #a8e6cf;
+        overflow: hidden;
+        font-family: sans-serif;
+      }
+      canvas {
+        display: block;
+      }
+      #label {
+        position: absolute;
+        top: 20px;
+        width: 100%;
+        text-align: center;
+        color: #2d5a27;
+        pointer-events: none;
+        text-shadow: 1px 1px 0px white;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="label">
+      <h1>Stylized TSL Flower</h1>
+      Procedural Octagon Bloom Study
+    </div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/+esm"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { color, float, mix, step, texture, uniform, uv } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
+
+      let camera, scene, renderer, controls;
+
+      init();
+
+      async function init() {
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0xd4f1f4);
+
+        camera = new THREE.PerspectiveCamera(
+          45,
+          window.innerWidth / window.innerHeight,
+          0.1,
+          100,
+        );
+        camera.position.set(0, 5, 8);
+
+        // Using WebGPURenderer is the best way to use TSL features
+        renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.body.appendChild(renderer.domElement);
+
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+
+        const SHAPE = {
+          centerY: 0.26,
+          r1: 0.42,
+          r2: 0.86,
+          r3: 1.32,
+          r4: 1.88,
+          y1: 0.18,
+          y2: 0.09,
+          y3: -0.02,
+          y4: -0.24, // outer ring droops downward
+        };
+
+        // --- 1. OCTAGON BLOOM TOPOLOGY ---
+        // Custom topology: center vertex + concentric octagon loops,
+        // matching the Blender-style bloom mesh structure.
+        function createBloomGeometry(shape) {
+          const sides = 8;
+          const ringR = [0.0, shape.r1, shape.r2, shape.r3, shape.r4];
+          const ringY = [shape.centerY, shape.y1, shape.y2, shape.y3, shape.y4];
+
+          const positions = [];
+          const uvs = [];
+          const indices = [];
+
+          // Center vertex
+          positions.push(0, ringY[0], 0);
+          uvs.push(0.5, 0.0);
+
+          const ringStart = [];
+          let vertexCount = 1;
+
+          for (let r = 1; r < ringR.length; r++) {
+            ringStart[r] = vertexCount;
+            const v = r / (ringR.length - 1);
+            for (let s = 0; s < sides; s++) {
+              const a = (s / sides) * Math.PI * 2 + Math.PI / 8;
+              const x = Math.cos(a) * ringR[r];
+              const z = Math.sin(a) * ringR[r];
+              positions.push(x, ringY[r], z);
+              uvs.push(s / sides, v);
+              vertexCount++;
+            }
+          }
+
+          const idx = (r, s) => ringStart[r] + ((s + sides) % sides);
+
+          // Fan from center to first ring
+          for (let s = 0; s < sides; s++) {
+            indices.push(0, idx(1, s + 1), idx(1, s));
+          }
+
+          // Quad strips between octagon rings
+          for (let r = 1; r < ringR.length - 1; r++) {
+            for (let s = 0; s < sides; s++) {
+              const a = idx(r, s);
+              const b = idx(r, s + 1);
+              const c = idx(r + 1, s);
+              const d = idx(r + 1, s + 1);
+              indices.push(a, b, c);
+              indices.push(b, d, c);
+            }
+          }
+
+          const geo = new THREE.BufferGeometry();
+          geo.setAttribute(
+            "position",
+            new THREE.Float32BufferAttribute(positions, 3),
+          );
+          geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+          geo.setIndex(indices);
+          geo.computeVertexNormals();
+          geo.computeBoundingSphere();
+          return geo;
+        }
+
+        const flowerGeo = createBloomGeometry(SHAPE);
+
+        // --- 2. THE TSL SHADER MATERIAL ---
+        const material = new THREE.MeshStandardNodeMaterial();
+
+        // 1×1 placeholder until a PNG is imported (procedural shows when uUseMap = 0)
+        const flowerTexPlaceholder = document.createElement("canvas");
+        flowerTexPlaceholder.width = 1;
+        flowerTexPlaceholder.height = 1;
+        const phCtx = flowerTexPlaceholder.getContext("2d");
+        phCtx.fillStyle = "#ffffff";
+        phCtx.fillRect(0, 0, 1, 1);
+
+        const flowerTex = new THREE.Texture(flowerTexPlaceholder);
+        flowerTex.colorSpace = THREE.SRGBColorSpace;
+        flowerTex.needsUpdate = true;
+
+        const uUseMap = uniform(0); // 0 = procedural gradient, 1 = PNG (RGB + alpha)
+
+        const colorInner = color(0xffffff);
+        const colorOuter = color(0xfb8da0);
+        const procedural = mix(colorInner, colorOuter, uv().y);
+        const texSample = texture(flowerTex, uv());
+        const finalBaseColor = mix(procedural, texSample.rgb, uUseMap);
+
+        // PNG alpha alone makes RGB-only / no-alpha PNGs fully invisible (a = 0 everywhere).
+        // If alpha is ~0 but RGB has paint, fall back to max(R,G,B) as a cutout mask.
+        const rgbMax = texSample.r.max(texSample.g).max(texSample.b);
+        const opacityFromTex = texSample.a.add(
+          rgbMax.mul(float(1).sub(step(float(0.001), texSample.a))),
+        );
+
+        material.colorNode = finalBaseColor;
+        material.opacityNode = mix(float(1), opacityFromTex, uUseMap);
+        material.transparent = true;
+        material.depthWrite = false;
+
+        // Critical for stylized look:
+        material.flatShading = true; // Makes it look like the faceted mesh in your screenshot
+        material.side = THREE.DoubleSide; // See inside the cup
+
+        // --- 3. SCENE CONSTRUCTION ---
+        // Single bloom only, so shape edits are easier to evaluate
+        const flowerHead = new THREE.Mesh(flowerGeo, material);
+        flowerHead.rotation.x = Math.PI; // Flip it open
+        scene.add(flowerHead);
+
+        function rebuildBloomGeometry() {
+          flowerHead.geometry.dispose();
+          flowerHead.geometry = createBloomGeometry(SHAPE);
+        }
+
+        // --- 4. SHAPE CONTROLS (Tweakpane) ---
+        const pane = new Pane({ title: "Bloom Shape" });
+        const radii = pane.addFolder({
+          title: "Radii (4 octagonal rings)",
+          expanded: true,
+        });
+        const heights = pane.addFolder({ title: "Heights", expanded: true });
+
+        radii
+          .addBinding(SHAPE, "r1", {
+            min: 0.1,
+            max: 1.2,
+            step: 0.01,
+            label: "Radius 1",
+          })
+          .on("change", rebuildBloomGeometry);
+        radii
+          .addBinding(SHAPE, "r2", {
+            min: 0.2,
+            max: 2.0,
+            step: 0.01,
+            label: "Radius 2",
+          })
+          .on("change", rebuildBloomGeometry);
+        radii
+          .addBinding(SHAPE, "r3", {
+            min: 0.3,
+            max: 2.6,
+            step: 0.01,
+            label: "Radius 3",
+          })
+          .on("change", rebuildBloomGeometry);
+        radii
+          .addBinding(SHAPE, "r4", {
+            min: 0.4,
+            max: 3.4,
+            step: 0.01,
+            label: "Radius 4",
+          })
+          .on("change", rebuildBloomGeometry);
+
+        heights
+          .addBinding(SHAPE, "centerY", {
+            min: -0.4,
+            max: 0.6,
+            step: 0.01,
+            label: "Center Y",
+          })
+          .on("change", rebuildBloomGeometry);
+        heights
+          .addBinding(SHAPE, "y1", {
+            min: -0.6,
+            max: 0.6,
+            step: 0.01,
+            label: "Ring 1 Y",
+          })
+          .on("change", rebuildBloomGeometry);
+        heights
+          .addBinding(SHAPE, "y2", {
+            min: -0.8,
+            max: 0.5,
+            step: 0.01,
+            label: "Ring 2 Y",
+          })
+          .on("change", rebuildBloomGeometry);
+        heights
+          .addBinding(SHAPE, "y3", {
+            min: -1.0,
+            max: 0.4,
+            step: 0.01,
+            label: "Ring 3 Y",
+          })
+          .on("change", rebuildBloomGeometry);
+        heights
+          .addBinding(SHAPE, "y4", {
+            min: -1.4,
+            max: 0.2,
+            step: 0.01,
+            label: "Ring 4 Y (drop)",
+          })
+          .on("change", rebuildBloomGeometry);
+
+        // --- 5. TEXTURE (import PNG onto bloom UVs) ---
+        const fileInput = document.createElement("input");
+        fileInput.type = "file";
+        fileInput.accept = "image/png,image/webp,image/jpeg";
+        fileInput.style.display = "none";
+        document.body.appendChild(fileInput);
+
+        const texFolder = pane.addFolder({
+          title: "Flower texture",
+          expanded: true,
+        });
+        texFolder
+          .addButton({ title: "Import PNG" })
+          .on("click", () => fileInput.click());
+        texFolder.addButton({ title: "Clear texture" }).on("click", () => {
+          uUseMap.value = 0;
+          flowerTex.image = flowerTexPlaceholder;
+          flowerTex.needsUpdate = true;
+          fileInput.value = "";
+        });
+
+        fileInput.addEventListener("change", () => {
+          const file = fileInput.files?.[0];
+          if (!file) return;
+          const url = URL.createObjectURL(file);
+          const img = new Image();
+          img.onload = () => {
+            flowerTex.image = img;
+            flowerTex.needsUpdate = true;
+            uUseMap.value = 1;
+            URL.revokeObjectURL(url);
+          };
+          img.onerror = () => {
+            URL.revokeObjectURL(url);
+          };
+          img.src = url;
+        });
+
+        // Lighting
+        const sun = new THREE.DirectionalLight(0xffffff, 2.5);
+        sun.position.set(5, 10, 5);
+        scene.add(sun);
+        scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+
+        window.addEventListener("resize", onWindowResize);
+
+        // Start the loop
+        renderer.setAnimationLoop(animate);
+      }
+
+      function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      }
+
+      function animate() {
+        controls.update();
+        renderer.render(scene, camera);
+      }
+    </script>
+  </body>
+</html>

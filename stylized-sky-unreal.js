@@ -10,8 +10,8 @@
  *  - Stars (hash grid) + moon disc at night
  */
 
-import * as THREE from "three";
-import { MeshBasicNodeMaterial } from "three";
+import * as THREE from "three/webgpu";
+import { MeshBasicNodeMaterial } from "three/webgpu";
 import {
   Fn,
   uniform,
@@ -36,7 +36,6 @@ import {
   length,
   mx_noise_float,
   Loop,
-  Var,
   If,
 } from "three/tsl";
 
@@ -208,7 +207,7 @@ export function createStylizedSky() {
       const vertCol = mix(vec3(uCloudGradientDark), vec3(litColor), vertGrad);
 
       // Blend layers: directional → add vert gradient
-      const cloudColVar = Var(mix(directionalCol, vertCol, uCloudVertStr));
+      const cloudColVar = mix(directionalCol, vertCol, uCloudVertStr).toVar();
 
       // ── Internal bump detail (skipped when strength = 0 — saves 4 noise samples per layer) ──
       If(uCloudGradientStr.greaterThan(float(0.001)), () => {
@@ -426,7 +425,7 @@ export function createStylizedSky() {
     col = mix(col, c2.xyz, c2.w.mul(0.7).mul(nightBlend.oneMinus()));
 
     // ── God rays (skipped entirely when strength = 0 — saves 16 noise samples per pixel) ──
-    const grContrib = Var(vec3(0.0, 0.0, 0.0));
+    const grContrib = vec3(0.0, 0.0, 0.0).toVar();
     If(uGodRayStr.greaterThan(float(0.001)), () => {
       const grSunUV = uSunDir.xz
         .div(uSunDir.y.max(float(0.08)).mul(uC1Height))
@@ -435,9 +434,9 @@ export function createStylizedSky() {
       const grBaseUV = cloudUV1;
       const grStep = grSunUV.sub(grBaseUV).mul(float(1.0 / 8.0));
       const c1Thresh = float(1.0).sub(uC1Coverage);
-      const grUVPos = Var(grBaseUV.toVar());
-      const grAcc = Var(float(0.0));
-      const grDecay = Var(float(1.0));
+      const grUVPos = grBaseUV.toVar();
+      const grAcc = float(0.0).toVar();
+      const grDecay = float(1.0).toVar();
       Loop(8, () => {
         grUVPos.addAssign(grStep);
         const s = fbmCloudFast(grUVPos);
