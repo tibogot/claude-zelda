@@ -378,6 +378,7 @@
       import { setSeed, randRange } from "./rng.js";
       import { createTreeSystem } from "./tree-painter7.js";
       import { createFoliageSlot } from "./foliage-painter.js";
+      import { createFleurSystem, FLEUR_PRESETS } from "./fleur-painter.js";
       import { MeshBVH } from "three-mesh-bvh";
       import { Pane } from "tweakpane";
       import Stats from "stats-gl";
@@ -907,6 +908,7 @@
       let _ftreeRebuildLeaves   = (_slot) => {};  // assigned inside init()
       const ftreeParams = { slotName: "Tree A1", threshold: 60, minSpacing: 2, scaleMin: 0.9, scaleMax: 1.1, density: 0.2, treesPerStroke: 2, totalTrunks: 0, totalLeaves: 0, chunksVisible: 0, chunks: 0 };
       let ftreeFolder = null;
+      let fleurFolder = null;
       const uFTreeTime    = uniform(0.0);
       const _ftreeDummy   = new THREE.Object3D();
       const _ftreeFinalMat = new THREE.Matrix4();
@@ -1190,6 +1192,22 @@
         scaleMin: 0.8,
         scaleMax: 1.4,
       };
+
+      // ─── FLEUR STATE ─────────────────────────────────────────────────────
+      let fleurSystem    = null;
+      let fleurEraseMode = false;
+      let fleurActiveSlot = 0; // 0 = color A, 1 = color B
+      const fleurParams = {
+        perStroke:     8,
+        minSpacing:    1.2,
+        scaleMin:      0.4,
+        scaleMax:      0.7,
+        hoverBase:     0.15,
+        hoverVariance: 0.08,
+      };
+      const fleurColorA = { preset: "main",   inner: FLEUR_PRESETS.main.inner,   outer: FLEUR_PRESETS.main.outer,   glow: FLEUR_PRESETS.main.glow   };
+      const fleurColorB = { preset: "sakura", inner: FLEUR_PRESETS.sakura.inner, outer: FLEUR_PRESETS.sakura.outer, glow: FLEUR_PRESETS.sakura.glow };
+
       let terrainGeo = null; // set in init, needed by sculpt
       let skirtGeo = null; // edge skirt geometry, updated with terrain
       const skirtEdgeXZ = []; // [{wx,wz}] for each skirt top vertex (4 * DISPLAY_VERTS)
@@ -1649,6 +1667,25 @@
             slot.minSpacing,
             slot.scaleMin,
             slot.scaleMax,
+          );
+        }
+      }
+
+      function paintFleurAt(wx, wz, erase) {
+        if (!fleurSystem) return;
+        const radius = brushWorldRadius();
+        if (erase) {
+          fleurSystem.removeInBrush(wx, wz, radius);
+        } else {
+          fleurSystem.addInBrush(
+            wx, wz, radius,
+            fleurParams.perStroke,
+            fleurParams.minSpacing,
+            fleurParams.scaleMin,
+            fleurParams.scaleMax,
+            fleurParams.hoverBase,
+            fleurParams.hoverVariance,
+            fleurActiveSlot,
           );
         }
       }
@@ -2456,6 +2493,7 @@
         FOLIAGE_SLOTS.forEach((s) => {
           if (s.system) s.system.syncHeights();
         });
+        if (fleurSystem) fleurSystem.syncHeights();
         propObjects.forEach((root) => {
           root.position.y = bvhHeight(root.position.x, root.position.z);
         });
@@ -2622,6 +2660,7 @@
           FOLIAGE_SLOTS.forEach((s) => {
             if (s.system) s.system.syncHeights();
           });
+          if (fleurSystem) fleurSystem.syncHeights();
         };
         reader.readAsArrayBuffer(file);
       }
@@ -5236,6 +5275,9 @@
           }),
         );
 
+        // ── FLEUR SYSTEM ──
+        fleurSystem = createFleurSystem(scene, bvhHeight);
+
         // ── TREE SYSTEM ──
         treeSystem = createTreeSystem(scene, bvhHeight);
         gltfLoader
@@ -5716,6 +5758,7 @@
           const meta = {
             version: 2,
             trees: treeSystem ? treeSystem.getPositions() : [],
+            fleurs: fleurSystem ? fleurSystem.getPositions() : [],
             lodSlots:   LOD_SLOTS.map(s   => ({ name: s.name, positions: s.positions })),
             ftreeSlots: FTREE_SLOTS.map(s  => ({ name: s.name, positions: s.positions })),
             foliage: FOLIAGE_SLOTS.map((s) => ({
@@ -5867,7 +5910,8 @@
             const metaFile = zip.file("scene.json");
             if (metaFile) {
               const meta = JSON.parse(await metaFile.async("string"));
-              if (meta.trees && treeSystem) treeSystem.setPositions(meta.trees);
+              if (meta.trees  && treeSystem)  treeSystem.setPositions(meta.trees);
+              if (meta.fleurs && fleurSystem) fleurSystem.setPositions(meta.fleurs);
               if (meta.lodSlots) {
                 meta.lodSlots.forEach((saved, i) => {
                   if (i < LOD_SLOTS.length) {
@@ -6173,6 +6217,7 @@
             "Water [W]": "water",
             "Cliffs [C]": "cliffs",
             "Flowers [B]": "flowers",
+            "Fleurs [M]":  "fleurs",
             "River [V]": "river",
             "Waterfall [H]": "waterfall",
             "Play [F]": "play",
@@ -7539,6 +7584,96 @@
             if (flowerDensityTex) flowerDensityTex.needsUpdate = true;
           };
           reader.readAsArrayBuffer(e.target.files[0]);
+        });
+
+        // ── Fleurs folder ──
+        fleurFolder = pane.addFolder({ title: "Fleurs  [ M ]", expanded: true });
+        fleurFolder.hidden = true;
+
+        // helper: apply a preset to slot A or B and update the system
+        function _applyFleurPreset(slot, key) {
+          const p = FLEUR_PRESETS[key];
+          if (!p) return;
+          if (slot === "A") {
+            fleurColorA.inner = p.inner; fleurColorA.outer = p.outer; fleurColorA.glow = p.glow;
+            if (fleurSystem) fleurSystem.setColorA(p.inner, p.outer, p.glow);
+          } else {
+            fleurColorB.inner = p.inner; fleurColorB.outer = p.outer; fleurColorB.glow = p.glow;
+            if (fleurSystem) fleurSystem.setColorB(p.inner, p.outer, p.glow);
+          }
+        }
+
+        const fleurErasePARAMS = { erase: false };
+        fleurFolder.addBinding(fleurErasePARAMS, "erase", { label: "Erase (or Shift)" })
+          .on("change", (e) => { fleurEraseMode = e.value; });
+
+        const fleurSlotPARAMS = { slot: "A" };
+        fleurFolder.addBinding(fleurSlotPARAMS, "slot", {
+          label: "Paint color",
+          options: { "Color A": "A", "Color B": "B" },
+        }).on("change", (e) => { fleurActiveSlot = e.value === "A" ? 0 : 1; });
+
+        // ── Color A ──
+        const fleurAFolder = fleurFolder.addFolder({ title: "Color A", expanded: true });
+        fleurAFolder.addBinding(fleurColorA, "preset", {
+          label: "Preset",
+          options: { Main: "main", Sakura: "sakura", "Zelda Blue": "zeldaBlue", Sunflower: "sunflower" },
+        }).on("change", (e) => { fleurColorA.preset = e.value; _applyFleurPreset("A", e.value); fleurFolder.refresh(); });
+        fleurAFolder.addBinding(fleurColorA, "inner", { label: "Center color" })
+          .on("change", (e) => { if (fleurSystem) fleurSystem.setColorA(e.value, fleurColorA.outer, fleurColorA.glow); });
+        fleurAFolder.addBinding(fleurColorA, "outer", { label: "Edge color" })
+          .on("change", (e) => { if (fleurSystem) fleurSystem.setColorA(fleurColorA.inner, e.value, fleurColorA.glow); });
+        fleurAFolder.addBinding(fleurColorA, "glow", { label: "Center glow", min: 0, max: 1, step: 0.01 })
+          .on("change", (e) => { if (fleurSystem) fleurSystem.setColorA(fleurColorA.inner, fleurColorA.outer, e.value); });
+
+        // ── Color B ──
+        const fleurBFolder = fleurFolder.addFolder({ title: "Color B", expanded: true });
+        fleurBFolder.addBinding(fleurColorB, "preset", {
+          label: "Preset",
+          options: { Main: "main", Sakura: "sakura", "Zelda Blue": "zeldaBlue", Sunflower: "sunflower" },
+        }).on("change", (e) => { fleurColorB.preset = e.value; _applyFleurPreset("B", e.value); fleurFolder.refresh(); });
+        fleurBFolder.addBinding(fleurColorB, "inner", { label: "Center color" })
+          .on("change", (e) => { if (fleurSystem) fleurSystem.setColorB(e.value, fleurColorB.outer, fleurColorB.glow); });
+        fleurBFolder.addBinding(fleurColorB, "outer", { label: "Edge color" })
+          .on("change", (e) => { if (fleurSystem) fleurSystem.setColorB(fleurColorB.inner, e.value, fleurColorB.glow); });
+        fleurBFolder.addBinding(fleurColorB, "glow", { label: "Center glow", min: 0, max: 1, step: 0.01 })
+          .on("change", (e) => { if (fleurSystem) fleurSystem.setColorB(fleurColorB.inner, fleurColorB.outer, e.value); });
+
+        // ── Brush params ──
+        fleurFolder.addBinding(fleurParams, "perStroke",     { label: "Per stroke",     min: 1,   max: 30,  step: 1 });
+        fleurFolder.addBinding(fleurParams, "minSpacing",    { label: "Min spacing",    min: 0.2, max: 8,   step: 0.1 });
+        fleurFolder.addBinding(fleurParams, "scaleMin",      { label: "Scale min",      min: 0.1, max: 3,   step: 0.05 });
+        fleurFolder.addBinding(fleurParams, "scaleMax",      { label: "Scale max",      min: 0.1, max: 3,   step: 0.05 });
+        fleurFolder.addBinding(fleurParams, "hoverBase",     { label: "Hover height",   min: 0.0, max: 1.0, step: 0.01 });
+        fleurFolder.addBinding(fleurParams, "hoverVariance", { label: "Hover variance", min: 0.0, max: 0.5, step: 0.01 });
+
+        fleurFolder.addButton({ title: "Clear all fleurs" }).on("click", () => {
+          if (fleurSystem) fleurSystem.clear();
+        });
+
+        fleurFolder.addButton({ title: "Save fleurs JSON" }).on("click", () => {
+          if (!fleurSystem) return;
+          const blob = new Blob([JSON.stringify(fleurSystem.getPositions(), null, 2)], { type: "application/json" });
+          const a = document.createElement("a");
+          a.download = "fleurs.json";
+          a.href = URL.createObjectURL(blob);
+          a.click();
+        });
+
+        const fleurFileInput = document.createElement("input");
+        fleurFileInput.type = "file";
+        fleurFileInput.accept = ".json";
+        fleurFileInput.style.display = "none";
+        document.body.appendChild(fleurFileInput);
+        fleurFolder.addButton({ title: "Load fleurs JSON" }).on("click", () => fleurFileInput.click());
+        fleurFileInput.addEventListener("change", (e) => {
+          if (!e.target.files[0] || !fleurSystem) return;
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            try { fleurSystem.setPositions(JSON.parse(ev.target.result)); }
+            catch (err) { console.error("Failed to load fleurs.json", err); }
+          };
+          reader.readAsText(e.target.files[0]);
         });
 
         // ── Cliff Grass folder ──
@@ -9060,6 +9195,7 @@
           waterFolder.hidden = mode !== "water";
           waterfallFolder.hidden = mode !== "waterfall";
           cliffsFolder.hidden = mode !== "cliffs";
+          if (fleurFolder) fleurFolder.hidden = mode !== "fleurs";
           brushFolder.hidden =
             mode === "view" ||
             mode === "place" ||
@@ -9215,6 +9351,8 @@
             setMode(currentMode === "grass" ? "view" : "grass");
           if (e.code === "KeyB")
             setMode(currentMode === "flowers" ? "view" : "flowers");
+          if (e.code === "KeyM")
+            setMode(currentMode === "fleurs" ? "view" : "fleurs");
           if (e.code === "KeyT" && currentMode !== "water")
             setMode(currentMode === "trees" ? "view" : "trees");
           if (e.code === "KeyN")
@@ -9441,6 +9579,8 @@
             paintTreesAt(p.x, p.z, treeEraseMode || e.shiftKey);
           if (currentMode === "foliage")
             paintFoliageAt(p.x, p.z, foliageEraseMode || e.shiftKey);
+          if (currentMode === "fleurs")
+            paintFleurAt(p.x, p.z, fleurEraseMode || e.shiftKey);
           if (currentMode === "pinelod")
             paintLODAt(p.x, p.z, e.shiftKey);
           if (currentMode === "ftrees")
@@ -9659,6 +9799,8 @@
             paintFTreeAt(p.x, p.z, e.shiftKey);
           if (currentMode === "foliage")
             paintFoliageAt(p.x, p.z, foliageEraseMode || e.shiftKey);
+          if (currentMode === "fleurs")
+            paintFleurAt(p.x, p.z, fleurEraseMode || e.shiftKey);
         });
 
         renderer.domElement.addEventListener("mouseup", () => {
