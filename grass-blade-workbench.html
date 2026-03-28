@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Grass Blade Workbench</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { overflow: hidden; background: #0d1a0d; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    .tp-dfwv { position: fixed !important; top: 12px !important; right: 12px !important; width: 280px !important; z-index: 10; }
+    #info { position: fixed; bottom: 14px; left: 14px; color: rgba(255,255,255,0.5); font: 12px/1.8 monospace; pointer-events: none; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three":          "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+        "three/webgpu":   "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+        "three/tsl":      "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+        "three/addons/":  "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+        "tweakpane":      "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/dist/tweakpane.js"
+      }
+    }
+  </script>
+</head>
+<body>
+<div id="info">Orbit — drag &nbsp;|&nbsp; Zoom — scroll &nbsp;|&nbsp; Pan — right-drag</div>
+<script type="module">
+import * as THREE from 'three';
+import {
+  Fn, float, vec2, vec3,
+  attribute, varying, uniform,
+  mix, smoothstep, clamp, pow, max,
+  sin, cos, add, sub, mul, div,
+  dot, normalize, negate, sign, floor, length,
+  normalLocal,
+} from 'three/tsl';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { Pane } from 'tweakpane';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Renderer
+// ─────────────────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scene / Camera / Controls
+// ─────────────────────────────────────────────────────────────────────────────
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x7ab0cc);
+scene.fog = new THREE.FogExp2(0x7ab0cc, 0.06);
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.01, 200);
+camera.position.set(0, 0.7, 2.2);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0.4, 0);
+controls.update();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Lights
+// ─────────────────────────────────────────────────────────────────────────────
+const sunCfg = { azimuth: 135, elevation: 45 };
+
+function makeSunDir() {
+  const az = sunCfg.azimuth * Math.PI / 180;
+  const el = sunCfg.elevation * Math.PI / 180;
+  return new THREE.Vector3(
+    Math.cos(el) * Math.cos(az),
+    Math.sin(el),
+    Math.cos(el) * Math.sin(az),
+  ).normalize();
+}
+
+const dirLight = new THREE.DirectionalLight(0xfff5e0, 3.0);
+dirLight.position.copy(makeSunDir().multiplyScalar(10));
+scene.add(dirLight);
+scene.add(new THREE.HemisphereLight(0xc8e0ff, 0x1a1208, 0.8));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Ground
+// ─────────────────────────────────────────────────────────────────────────────
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(20, 20),
+  new THREE.MeshStandardMaterial({ color: 0x2a1a08, roughness: 0.9, metalness: 0 }),
+);
+ground.rotation.x = -Math.PI / 2;
+scene.add(ground);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Blade Geometry  (7 segments = 15 verts, pointed tip)
+// ─────────────────────────────────────────────────────────────────────────────
+const SEGMENTS  = 7;
+const VERTS     = SEGMENTS * 2 + 1;   // 15  — exact GoT high LOD vertex count
+const NUM_BLADES = 9;                  // 3×3 grid
+
+function buildBladeGeo() {
+  // ── Index buffer ────────────────────────────────────────────────────────
+  const indices = [];
+  for (let i = 0; i < SEGMENTS - 1; i++) {
+    const v = i * 2;
+    indices.push(v, v+1, v+2,  v+2, v+1, v+3);
+  }
+  // Last triangle: penultimate pair → single tip vertex
+  const lp = (SEGMENTS - 1) * 2;
+  indices.push(lp, lp + 1, VERTS - 1);
+
+  // ── Per-vertex attributes ───────────────────────────────────────────────
+  const vertIdxArr = new Float32Array(VERTS);
+  const xSideArr   = new Float32Array(VERTS);
+  for (let i = 0; i < SEGMENTS; i++) {
+    vertIdxArr[i*2]   = i*2;     xSideArr[i*2]   = 0.0;  // left edge
+    vertIdxArr[i*2+1] = i*2+1;   xSideArr[i*2+1] = 1.0;  // right edge
+  }
+  vertIdxArr[VERTS-1] = VERTS-1; xSideArr[VERTS-1] = 0.5; // tip, center
+
+  // ── Per-instance attributes ─────────────────────────────────────────────
+  // 9 blades spread in a 3×3 grid, with evenly distributed yaw angles
+  // so you can see every orientation from any camera position.
+  const offsets = new Float32Array(NUM_BLADES * 3);
+  const angles  = new Float32Array(NUM_BLADES);
+  const cols    = Math.round(Math.sqrt(NUM_BLADES));  // 3
+  const spacing = 0.32;
+
+  // Simple seeded random so blades look the same every reload
+  let seed = 42;
+  const rng = () => { seed = (seed * 1664525 + 1013904223) & 0xffffffff; return (seed >>> 0) / 0xffffffff; };
+
+  const leanAngles  = new Float32Array(NUM_BLADES);  // direction blade leans toward
+  const leanAmounts = new Float32Array(NUM_BLADES);  // 0=upright, 1=max lean
+
+  for (let i = 0; i < NUM_BLADES; i++) {
+    const row = Math.floor(i / cols);
+    const col = i % cols;
+    offsets[i*3]   = (col - (cols-1) / 2) * spacing;
+    offsets[i*3+1] = 0;
+    offsets[i*3+2] = (row - (cols-1) / 2) * spacing;
+    angles[i]       = (i / NUM_BLADES) * Math.PI * 2;
+    leanAngles[i]   = rng() * Math.PI * 2;   // random lean direction
+    leanAmounts[i]  = rng() * 0.6 + 0.4;    // random lean amount 0.4–1.0 (no near-upright blades)
+  }
+
+  const geo = new THREE.InstancedBufferGeometry();
+  geo.instanceCount = NUM_BLADES;
+  geo.setAttribute('position',    new THREE.Float32BufferAttribute(new Float32Array(VERTS * 3), 3));
+  geo.setAttribute('normal',      new THREE.Float32BufferAttribute(new Float32Array(VERTS * 3), 3));
+  geo.setAttribute('vertIndex',   new THREE.Float32BufferAttribute(vertIdxArr, 1));
+  geo.setAttribute('xSide',       new THREE.Float32BufferAttribute(xSideArr, 1));
+  geo.setAttribute('bladeAngle',  new THREE.InstancedBufferAttribute(angles, 1));
+  geo.setAttribute('bladeOffset', new THREE.InstancedBufferAttribute(offsets, 3));
+  geo.setAttribute('leanAngle',   new THREE.InstancedBufferAttribute(leanAngles, 1));
+  geo.setAttribute('leanAmount',  new THREE.InstancedBufferAttribute(leanAmounts, 1));
+  geo.setIndex(indices);
+  geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 10);
+  return geo;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Uniforms
+// ─────────────────────────────────────────────────────────────────────────────
+function srgb(hex)       { const c = new THREE.Color(hex); c.convertSRGBToLinear(); return c; }
+function toHex(c)        { return '#' + new THREE.Color(c.r, c.g, c.b).convertLinearToSRGB().getHexString(); }
+function fromHex(hex, u) { u.value.copy(new THREE.Color(hex).convertSRGBToLinear()); }
+
+const uWidth        = uniform(0.060);
+const uHeight       = uniform(0.85);
+const uLeafPeak     = uniform(0.65);
+const uTipSharp     = uniform(1.0);
+const uLeanStr      = uniform(0.7);   // max static lean angle (radians) — 0=upright, ~1.57=horizontal
+const uBendExp      = uniform(2.0);   // bend curve exponent — higher = stiffer base, more tip whip
+const uNormalRound  = uniform(0.3);
+const uSunWrap      = uniform(0.6);
+const uBaseColor    = uniform(srgb('#1a3a0a'));
+const uTipColor     = uniform(srgb('#c8e020'));
+const uGradient     = uniform(2.5);
+const uSunDir       = uniform(makeSunDir());
+const uTime         = uniform(0);
+const uSwayAmp      = uniform(0.08);  // sway angle (radians)
+const uSwayFreq     = uniform(0.8);   // oscillations per second
+const uWindDir      = uniform(new THREE.Vector2(1, 0));  // normalized XZ direction
+const uWindStr      = uniform(0.3);   // wind bend angle (radians)
+const uWindSpeed    = uniform(2.0);   // how fast the noise field travels
+const uWindWave     = uniform(2.5);   // spatial scale — larger = broader gusts
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TSL Shader
+// ─────────────────────────────────────────────────────────────────────────────
+const vColor = varying(vec3(0, 0, 0));
+const PI_F   = Math.PI;
+
+const positionNode = Fn(() => {
+  const vi      = attribute('vertIndex');
+  const xSide   = attribute('xSide');
+  const bAngle  = attribute('bladeAngle');
+  const bOffset = attribute('bladeOffset');
+
+  // ── Height along blade: 0 at root → 1 at tip ──────────────────────────
+  // Paired verts share a segment index = floor(vertIndex / 2)
+  const segIdx    = floor(div(vi, float(2)));
+  const heightPct = clamp(div(segIdx, float(SEGMENTS)), float(0), float(1));
+
+  // ── Blade width direction in world XZ ─────────────────────────────────
+  const wdx = cos(bAngle);
+  const wdz = negate(sin(bAngle));
+
+  // ── Blade width profile ────────────────────────────────────────────────
+  // Default: constant width all the way up — tip triangle is purely geometric.
+  // The single tip vertex (xSide=0.5 → widthStep=0) creates the point, exactly
+  // like GoT. The tip triangle size = 1/SEGMENTS of blade height.
+  // uLeafPeak + uTipSharp add an OPTIONAL taper above that height if desired.
+  // uRootWidth narrows only the base (bottom 15% of blade).
+  // Constant width up to uLeafPeak, then converges to tip point.
+  const tipTaper = sub(float(1), pow(smoothstep(uLeafPeak, float(1), heightPct), uTipSharp));
+  const profile  = tipTaper;
+
+  const widthStep = mul(sub(xSide, float(0.5)), uWidth, profile);
+
+  // ── Arc spine — angle-based bending (your technique, physically correct) ──
+  const lAngle  = attribute('leanAngle');
+  const lAmount = attribute('leanAmount');
+
+  // Lean direction in world XZ
+  const leanDirX = cos(lAngle);
+  const leanDirZ = negate(sin(lAngle));
+
+  // Arc length from root to this vertex
+  const L = mul(heightPct, uHeight);
+
+  // Bend curve: scales 0→1 with height. uBendExp controls shape:
+  // exp=1 → linear (even bend), exp=2 → base stiff / tip whips, exp=3 → very floppy tip
+  const bendCurve = pow(heightPct, uBendExp);
+
+  // Static lean per instance (radians)
+  const staticAngle = mul(lAmount, uLeanStr);
+
+  // Ambient sway — per-blade bobbing, phase offset = bladeAngle so no two blades sync
+  const swayT     = add(mul(uTime, uSwayFreq), bAngle);
+  const swayAngle = mul(uSwayAmp, sin(swayT));
+
+  // Noise wind — 3-octave sines travelling in wind direction
+  // uWindWave = spatial scale, uWindSpeed = travel speed
+  const sampleX = add(div(bOffset.x, uWindWave), mul(uWindDir.x, uTime, uWindSpeed));
+  const sampleZ = add(div(bOffset.z, uWindWave), mul(uWindDir.y, uTime, uWindSpeed));
+  const n1 = mul(float(0.500), sin(add(mul(sampleX, float(2.3)), mul(sampleZ, float(1.7)))));
+  const n2 = mul(float(0.250), sin(add(mul(sampleX, float(4.1)), mul(sampleZ, float(3.3)))));
+  const n3 = mul(float(0.125), sin(add(mul(sampleX, float(7.7)), mul(sampleZ, float(6.1)))));
+  const windAngle = mul(add(n1, n2, n3), uWindStr);
+
+  // Total bending angle at this vertex, scaled by bend curve.
+  // Root barely moves (bendCurve≈0), tip bends fully (bendCurve=1) → floppy physics.
+  const totalAngle = mul(add(staticAngle, swayAngle, windAngle), bendCurve);
+
+  // Circular arc projection — sin/cos naturally preserves arc length, zero stretch.
+  // This is exactly what you discovered in your test: sin(angle)*L, cos(angle)*L.
+  const spineForward = mul(sin(totalAngle), L);
+  const spineY       = mul(cos(totalAngle), L);
+  const spineX       = add(mul(spineForward, leanDirX), bOffset.x);
+  const spineZ       = add(mul(spineForward, leanDirZ), bOffset.z);
+
+  // Tangent direction along arc — (sin(a)*leanDir, cos(a)) is already unit length
+  // At a=0: (0,1,0) straight up. At a=PI/2: lean direction, horizontal.
+  const tnX = mul(sin(totalAngle), leanDirX);
+  const tnY = cos(totalAngle);
+  const tnZ = mul(sin(totalAngle), leanDirZ);
+
+  const localPos = vec3(
+    add(spineX, mul(wdx, widthStep)),
+    spineY,
+    add(spineZ, mul(wdz, widthStep)),
+  );
+
+  // ── Flat blade normal = cross(widthDir, tangent) ──────────────────────
+  // widthDir = (wdx, 0, wdz),  tangent = (tnX, tnY, tnZ)
+  // cross: x = -wdz*tnY,  y = wdz*tnX - wdx*tnZ,  z = wdx*tnY
+  const fnx = negate(mul(wdz, tnY));
+  const fny = sub(mul(wdz, tnX), mul(wdx, tnZ));
+  const fnz = mul(wdx, tnY);
+
+  // Sun flip: ensure flat normal faces the sun's hemisphere.
+  // Prevents ~50% of blades from receiving near-zero diffuse.
+  const dotSun = dot(vec3(fnx, fny, fnz), uSunDir);
+  const flip   = sign(add(dotSun, float(0.001)));
+  const fnxF   = mul(fnx, flip);
+  const fnzF   = mul(fnz, flip);
+
+  // ── GoT rounded normals ───────────────────────────────────────────────
+  // GDC technique: rotate flat normal ±(uNormalRound × PI) around Y,
+  // mix left/right halves → rounded V-cross-section catch-light.
+  const nrAngle = mul(uNormalRound, float(PI_F));
+  const c03 = cos(nrAngle);
+  const s03 = sin(nrAngle);
+
+  const r1x = add(mul(fnxF, c03), mul(fnzF, s03));
+  const r1z = add(mul(negate(fnxF), s03), mul(fnzF, c03));
+  const r2x = sub(mul(fnxF, c03), mul(fnzF, s03));
+  const r2z = add(mul(fnxF, s03), mul(fnzF, c03));
+
+  const fnyF = mul(fny, flip);
+  const bladeNormal = normalize(
+    mix(vec3(r1x, fnyF, r1z), vec3(r2x, fnyF, r2z), xSide),
+  );
+  normalLocal.assign(bladeNormal);
+
+  // ── Sun shading ───────────────────────────────────────────────────────
+  // sunWrap=0 → full directional (away-facing blades = dark)
+  // sunWrap=1 → flat (all blades equal brightness)
+  const sunDot   = max(float(0), dot(bladeNormal, uSunDir));
+  const sunShade = add(mul(sunDot, sub(float(1), uSunWrap)), uSunWrap);
+
+  // ── Color gradient (root → tip) ───────────────────────────────────────
+  const t        = pow(heightPct, uGradient);
+  const grassCol = mix(uBaseColor, uTipColor, t);
+
+  vColor.assign(mul(grassCol, sunShade));
+
+  return localPos;
+})();
+
+const colorNode = Fn(() => vColor)();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Material + Mesh
+// ─────────────────────────────────────────────────────────────────────────────
+const geo = buildBladeGeo();
+const mat = new THREE.MeshBasicNodeMaterial({ side: THREE.DoubleSide, depthWrite: true });
+mat.positionNode = positionNode;
+mat.colorNode    = colorNode;
+
+scene.add(new THREE.Mesh(geo, mat));
+
+// ── Wireframe overlay (same positionNode → exact same GPU positions) ──────────
+const wireMat = new THREE.MeshBasicNodeMaterial({ color: 0x000000, wireframe: true });
+wireMat.positionNode = positionNode;
+const wireMesh = new THREE.Mesh(geo, wireMat);
+wireMesh.visible = false;
+scene.add(wireMesh);
+
+// ── Vertex dots (Points with same positionNode → one dot per vertex) ──────────
+const ptsMat = new THREE.PointsNodeMaterial({ color: 0xff2200, size: 6, sizeAttenuation: false });
+ptsMat.positionNode = positionNode;
+const ptsMesh = new THREE.Points(geo, ptsMat);
+ptsMesh.visible = false;
+scene.add(ptsMesh);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tweakpane
+// ─────────────────────────────────────────────────────────────────────────────
+const pane = new Pane({ title: 'Blade Workbench' });
+
+// ── Blade Shape ──────────────────────────────────────────────────────────────
+const shapeF = pane.addFolder({ title: 'Blade Shape', expanded: true });
+const shapeP = { width: 0.060, height: 0.85, leafPeak: 0.65, tipSharp: 1.0 };
+shapeF.addBinding(shapeP, 'width',    { label: 'Width',      min: 0.01, max: 0.3,  step: 0.001 }).on('change', v => { uWidth.value    = v.value; });
+shapeF.addBinding(shapeP, 'height',   { label: 'Height',     min: 0.1,  max: 2.5,  step: 0.01  }).on('change', v => { uHeight.value   = v.value; });
+shapeF.addBinding(shapeP, 'leafPeak', { label: 'Leaf Peak',  min: 0.0,  max: 0.95, step: 0.01  }).on('change', v => { uLeafPeak.value  = v.value; });
+shapeF.addBinding(shapeP, 'tipSharp', { label: 'Tip Sharp',  min: 0.3,  max: 10.0, step: 0.1   }).on('change', v => { uTipSharp.value  = v.value; });
+
+// ── Natural Lean ──────────────────────────────────────────────────────────────
+const leanF = pane.addFolder({ title: 'Natural Lean', expanded: true });
+const leanP = { leanStr: 0.7, bendExp: 2.0 };
+leanF.addBinding(leanP, 'leanStr', { label: 'Lean Angle',   min: 0.0, max: 1.57, step: 0.01 }).on('change', v => { uLeanStr.value = v.value; });
+leanF.addBinding(leanP, 'bendExp', { label: 'Bend Exponent', min: 0.5, max: 5.0,  step: 0.1  }).on('change', v => { uBendExp.value = v.value; });
+
+// ── Normals & Sun ─────────────────────────────────────────────────────────────
+const normF = pane.addFolder({ title: 'Normals & Sun', expanded: true });
+const normP = { normalRound: 0.3, sunWrap: 0.6, azimuth: 135, elevation: 45 };
+normF.addBinding(normP, 'normalRound', { label: 'Normal Round',  min: 0,   max: 0.5, step: 0.01 }).on('change', v => { uNormalRound.value = v.value; });
+normF.addBinding(normP, 'sunWrap',     { label: 'Sun Wrap',      min: 0,   max: 1.0, step: 0.01 }).on('change', v => { uSunWrap.value     = v.value; });
+normF.addBinding(normP, 'azimuth',     { label: 'Sun Azimuth',   min: 0,   max: 360, step: 1    }).on('change', v => {
+  sunCfg.azimuth = v.value;
+  uSunDir.value.copy(makeSunDir());
+  dirLight.position.copy(makeSunDir().multiplyScalar(10));
+});
+normF.addBinding(normP, 'elevation',   { label: 'Sun Elevation', min: 5,   max: 89,  step: 1    }).on('change', v => {
+  sunCfg.elevation = v.value;
+  uSunDir.value.copy(makeSunDir());
+  dirLight.position.copy(makeSunDir().multiplyScalar(10));
+});
+
+// ── Colors ────────────────────────────────────────────────────────────────────
+const colF = pane.addFolder({ title: 'Colors', expanded: false });
+const colP = { base: toHex(uBaseColor.value), tip: toHex(uTipColor.value), gradient: 2.5 };
+colF.addBinding(colP, 'base',     { label: 'Base Color', view: 'color' }).on('change', v => fromHex(v.value, uBaseColor));
+colF.addBinding(colP, 'tip',      { label: 'Tip Color',  view: 'color' }).on('change', v => fromHex(v.value, uTipColor));
+colF.addBinding(colP, 'gradient', { label: 'Gradient',   min: 0.5, max: 6.0, step: 0.1 }).on('change', v => { uGradient.value = v.value; });
+
+// ── Wind ──────────────────────────────────────────────────────────────────────
+const windCfg = { azimuth: 0 };
+function updateWindDir() {
+  const az = windCfg.azimuth * Math.PI / 180;
+  uWindDir.value.set(Math.cos(az), Math.sin(az));
+}
+
+const windF = pane.addFolder({ title: 'Wind', expanded: true });
+const windP = { azimuth: 0, strength: 0.2, speed: 2.0, wavelength: 2.5 };
+windF.addBinding(windP, 'azimuth',    { label: 'Direction',   min: 0,   max: 360, step: 1    }).on('change', v => { windCfg.azimuth = v.value; updateWindDir(); });
+windF.addBinding(windP, 'strength',   { label: 'Strength',    min: 0.0, max: 0.8, step: 0.01 }).on('change', v => { uWindStr.value   = v.value; });
+windF.addBinding(windP, 'speed',      { label: 'Speed',       min: 0.0, max: 8.0, step: 0.1  }).on('change', v => { uWindSpeed.value = v.value; });
+windF.addBinding(windP, 'wavelength', { label: 'Wave Length',  min: 0.5, max: 10., step: 0.1  }).on('change', v => { uWindWave.value  = v.value; });
+
+// ── Ambient Sway ──────────────────────────────────────────────────────────────
+const swayF = pane.addFolder({ title: 'Ambient Sway', expanded: true });
+const swayP = { amp: 0.05, freq: 0.8 };
+swayF.addBinding(swayP, 'amp',  { label: 'Amplitude', min: 0.0, max: 0.3, step: 0.005 }).on('change', v => { uSwayAmp.value  = v.value; });
+swayF.addBinding(swayP, 'freq', { label: 'Speed',     min: 0.0, max: 3.0, step: 0.05  }).on('change', v => { uSwayFreq.value = v.value; });
+
+// ── Debug ─────────────────────────────────────────────────────────────────────
+const dbgF = pane.addFolder({ title: 'Debug', expanded: true });
+const dbgP = { wireframe: false, vertices: false };
+dbgF.addBinding(dbgP, 'wireframe', { label: 'Wireframe' }).on('change', v => { wireMesh.visible = v.value; });
+dbgF.addBinding(dbgP, 'vertices',  { label: 'Vertices'  }).on('change', v => { ptsMesh.visible  = v.value; });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Resize
+// ─────────────────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Render loop
+// ─────────────────────────────────────────────────────────────────────────────
+const timer = new THREE.Timer();
+renderer.setAnimationLoop(() => {
+  timer.update();
+  uTime.value = timer.getElapsed();
+  controls.update();
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>

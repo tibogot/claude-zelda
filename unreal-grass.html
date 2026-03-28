@@ -75,9 +75,6 @@
 
       const controls = new OrbitControls(camera, renderer.domElement);
       controls.target.set(0, 1, 0);
-      controls.minDistance = 3;
-      controls.maxDistance = 60;
-      controls.maxPolarAngle = Math.PI * 0.48;
       controls.update();
 
       // ── Stats ────────────────────────────────────────────────────────────────
@@ -231,9 +228,11 @@
       const uSeasonalDryColor   = uniform(srgb("#8b7d3c"));
 
       const uSunDir             = uniform(makeSunDir());
-      const uSunWrap            = uniform(0.45);  // 0=full directional, 1=flat (Zelda/Genshin)
+      const uSunWrap            = uniform(0.60);  // 0=full directional, 1=flat (Zelda/Genshin)
       const uNormalRound        = uniform(0.3);   // GoT rounded normals rotation (fraction of PI). 0=flat, 0.5=perpendicular
       const uViewThicken        = uniform(2.0);   // max width multiplier when blade is viewed edge-on
+      const uLeafPeak           = uniform(0.25);  // height fraction where blade is widest (0=wide at base, 0.5=wide at mid)
+      const uTipSharp           = uniform(1.0);   // tip convergence (0.4=blunt, 1.0=natural, 2.5=needle)
       const uTerrainSize        = uniform(100);
       const uTrailCenter        = uniform(new THREE.Vector2(9999, 9999));
       const uTrailSize          = uniform(60);
@@ -256,7 +255,7 @@
         uSpecV2Intensity, uSpecV2Color, uSpecV2Dir,
         uSpecV2NoiseScale, uSpecV2NoiseStr, uSpecV2Power, uSpecV2TipBias,
         uSeasonalStr, uSeasonalScale, uSeasonalDryColor,
-        uSunDir, uSunWrap, uNormalRound, uViewThicken, uTerrainSize, uTrailCenter, uTrailSize,
+        uSunDir, uSunWrap, uNormalRound, uViewThicken, uLeafPeak, uTipSharp, uTerrainSize, uTrailCenter, uTrailSize,
         heightTex, grassDensityTex, trailTex,
         PI: Math.PI,
       };
@@ -450,7 +449,7 @@
 
       // ── Grass Shape ───────────────────────────────────────────────────────────
       const shapeF = pane.addFolder({ title: 'Blade Shape', expanded: false });
-      const shapeP = { width: 0.055, height: 0.78, density: 1.0, normalRound: 0.3, viewThicken: 2.0 };
+      const shapeP = { width: 0.055, height: 0.78, density: 1.0, normalRound: 0.3, viewThicken: 2.0, leafPeak: 0.25, tipSharp: 1.0 };
       shapeF.addBinding(shapeP, 'width',        { label: 'Width',         min: 0.01, max: 0.2,  step: 0.001 }).on('change', v => { uGrassWidth.value    = v.value; });
       shapeF.addBinding(shapeP, 'height',       { label: 'Height',        min: 0.2,  max: 2.0,  step: 0.01  }).on('change', v => { uGrassHeight.value   = v.value; });
       shapeF.addBinding(shapeP, 'density',      { label: 'Density',       min: 0.1,  max: 2.0,  step: 0.05  }).on('change', v => {
@@ -459,6 +458,8 @@
       });
       shapeF.addBinding(shapeP, 'normalRound',  { label: 'Normal Round',  min: 0,    max: 0.5,  step: 0.01  }).on('change', v => { uNormalRound.value   = v.value; });
       shapeF.addBinding(shapeP, 'viewThicken',  { label: 'View Thicken',  min: 1.0,  max: 4.0,  step: 0.05  }).on('change', v => { uViewThicken.value   = v.value; });
+      shapeF.addBinding(shapeP, 'leafPeak',     { label: 'Leaf Peak',       min: 0.0, max: 0.6,  step: 0.01 }).on('change', v => { uLeafPeak.value  = v.value; });
+      shapeF.addBinding(shapeP, 'tipSharp',     { label: 'Tip Sharpness',   min: 0.3, max: 3.0,  step: 0.05 }).on('change', v => { uTipSharp.value  = v.value; });
 
       // ── Colors ───────────────────────────────────────────────────────────────
       const colF = pane.addFolder({ title: 'Colors', expanded: false });

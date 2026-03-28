@@ -188,6 +188,8 @@ export function createGrassMaterial(
     uSunWrap,
     uNormalRound,
     uViewThicken,
+    uLeafPeak,
+    uTipSharp,
     PI,
   } = ctx;
 
@@ -560,16 +562,16 @@ export function createGrassMaterial(
 
     // P1 = lower control — how early the blade starts arcing from vertical.
     // 0.08 = nearly straight up at base (stiff), 0.30 = curves from the root (GoT floppy).
-    const p1x = mul(p3x, mul(randomBend, 0.30));
-    const p1y = mul(p3y, 0.12);   // low P1 height = arc starts near the ground
-    const p1z = mul(p3z, mul(randomBend, 0.30));
+    const p1x = mul(p3x, mul(randomBend, 0.50));
+    const p1y = mul(p3y, 0.05);   // very low P1 height = arc starts right at the ground
+    const p1z = mul(p3z, mul(randomBend, 0.50));
 
     // P2 = mid control — lower p2cy = more pronounced sweep along the whole blade
     // Side curve direction = perpendicular to lean direction in XZ
     // Lean dir: (cos θ, -sin θ)  →  Perp: (sin θ, cos θ)
     const sideAmt = mul(randomSideCurve, totalHeightVis);
     const p2cx = add(mul(p3x, 0.55), mul(sin(randomAngle), sideAmt));
-    const p2cy = mul(p3y, 0.45);   // was 0.65 — lower = more swept arc, less upright
+    const p2cy = mul(p3y, 0.20);   // very low = full GoT-style sweep arc along the whole blade
     const p2cz = add(mul(p3z, 0.55), mul(cos(randomAngle), sideAmt));
 
     // Cubic Bezier: B(t) = 3(1-t)²t·P1 + 3(1-t)t²·P2 + t³·P3   (P0 = origin)
@@ -607,7 +609,13 @@ export function createGrassMaterial(
     const wdz = negate(sin(randomAngle));
 
     // Vertex position = spine + width step  (GoT: "step vertex in width direction")
-    const widthStep = mul(sub(xSide, 0.5), totalWidthVis);
+    // Leaf profile: blade starts at ~35% width at root, rises to full width at uLeafPeak,
+    // then tapers to a point at the tip. uTipSharp controls how quickly it converges
+    // (0.4=blunt/rounded, 1.0=natural, 2.5=needle-sharp).
+    const rise        = smoothstep(0.0, uLeafPeak, heightPct);
+    const fall        = sub(1.0, pow(smoothstep(uLeafPeak, 1.0, heightPct), uTipSharp));
+    const widthProfile = mul(mix(float(0.35), float(1.0), rise), fall);
+    const widthStep   = mul(sub(xSide, 0.5), totalWidthVis, widthProfile);
     // V-crease: both edge verts dip below the implied spine center.
     // Both xSide values are 0.5 from center, so dip is equal on each side.
     // Combined with rounded normals (left/right halves angled differently)
@@ -728,13 +736,9 @@ export function createGrassMaterial(
       mul(grassCol, vec3(1.1, 1.05, 0.85)),
       mul(sub(1, trailScale), 0.4),
     );
-    const aoBase = max(sub(1.0, mul(uAoIntensity, 0.65)), 0.2);
-    const aoLod = mul(aoBase, mix(0.5, 1.0, highLODOut));
-    const ao = mix(aoLod, 1.0, smoothstep(0.0, 0.22, heightPct));
+    const ao = float(1.0);         // AO disabled — stripping to clean baseline
     const fadeFactor = sub(1, lodFadeIn);  // 1.0 until 80% of maxDist, then linear to 0
-    // Gust wave: blades in strong-gust zones lean away from sun → darken.
-    // gustStr travels with the wind, creating GoT's rolling shadow sweep.
-    const gustShadow = sub(1, mul(gustStr, 0.45));
+    const gustShadow = float(1.0); // gust shadow disabled — stripping to clean baseline
     vGrassColor.assign(
       mul(grassCol, ao, sunShade, gustShadow, fadeFactor, bladeVisible),
     );
@@ -750,107 +754,24 @@ export function createGrassMaterial(
   })();
 
   const colorNode = Fn(() => {
-    const heightPct = vPacked.x;
-    let col = vGrassColor;
-    const viewDir = normalize(sub(cameraPosition, vWorldPos));
-    const n = normalLocal;
-    const backScat = max(dot(negate(uSunDir), n), 0),
-      frontScat = max(dot(uSunDir, n), 0);
-    const rim = sub(1, max(dot(n, viewDir), 0));
-    // thickness: 1.0 at base (opaque), 0.3 at tip (thin)
-    const thickness = add(mul(sub(1, heightPct), 0.7), 0.3);
-    // thinness: inverse — tip is thin so transmits MORE light (GoT tip glow)
-    const thinness  = add(mul(heightPct, 0.7), 0.3);
-    const transmitCol = mix(
-      uBsColor,
-      mul(uBsColor, vec3(1.3, 1.1, 0.7)),
-      thinness,
-    );
-    const totalSSS = clamp(
-      add(
-        mul(pow(backScat, uBsPower), thinness),           // tip glows brighter (thin)
-        mul(pow(frontScat, 1.5), thinness, uFrontScatter),
-        mul(pow(pow(rim, 1.5), 2), thickness, uRimSSS),   // rim: keep thickness (silhouette darkens at base)
-      ),
-      0,
-      1,
-    );
-    // SSS always active — no LOD gate (GoT lights all blades from all angles)
-    col = add(col, mul(transmitCol, 0.35, totalSSS, uBsIntensity));
-
-    // Surface micro-noise: fibrous vein texture along blade length
-    // Offset UV by heightPct so pattern runs along blade, not world-aligned
-    const fiberUV = add(mul(vWorldPos.xz, 11.0), mul(heightPct, vec2(1.7, 2.3)));
-    const microN  = add(mul(noise12(fiberUV), 0.22), 0.89);  // 0.89–1.11 (±11%)
-    col = mul(col, microN);
-
-    const sceneDepth = length(sub(cameraPosition, vWorldPos));
-    const specTipFade = smoothstep(0.3, 1.0, heightPct);
-    const specLod = smoothstep(0.0, 0.3, vPacked.z);
-    // ── Kajiya-Kay anisotropic specular along blade tangent ───────────────────
-    // Produces an elongated streak highlight running up the blade length,
-    // like light glancing off a grass fibre — vs the round Phong spot.
-    // Formula: spec = pow( sin(angle(T, H)), power ) = pow( sqrt(1 - (T·H)²), power )
-    const bladeTan  = normalize(vTangent);
-    const halfVec   = normalize(add(uSunDir, viewDir));
-    const TdotH     = dot(bladeTan, halfVec);
-    const sinTH     = sqrt(max(sub(float(1), mul(TdotH, TdotH)), float(0.001)));
-    const anisoSpec = pow(sinTH, 18.0);
-    // Fade with distance (visible up close, dissolves beyond 30 units)
-    const specDistFade = sub(float(1), smoothstep(15.0, 35.0, sceneDepth));
-    const specV1 = mul(
-      uSpecV1Color,
-      anisoSpec,
-      uSpecV1Intensity,
-      specDistFade,
-      specTipFade,
-      specLod,
-      2.5,
-    );
-    col = add(col, specV1);
-
-    const noiseUV = mul(vWorldPos.xz, uSpecV2NoiseScale);
-    const n1v2 = sub(mul(noise12(noiseUV), 2.0), 1.0);
-    const n2v2 = sub(mul(noise12(add(noiseUV, vec2(73.7, 157.3))), 2.0), 1.0);
-    const n3v2 = sub(
-      mul(noise12(add(mul(noiseUV, 2.7), vec2(31.1, 97.5))), 2.0),
-      1.0,
-    );
-    const perturbedN = normalize(
-      add(n, mul(vec3(n1v2, mul(n3v2, 0.3), n2v2), uSpecV2NoiseStr)),
-    );
-    const v2Reflect = sub(
-      uSpecV2Dir,
-      mul(perturbedN, mul(2.0, dot(uSpecV2Dir, perturbedN))),
-    );
-    const v2Spec = pow(max(dot(viewDir, v2Reflect), 0.0), uSpecV2Power);
-    const v2DistFade = smoothstep(2.0, 10.0, sceneDepth);
-    const v2TipFade = smoothstep(sub(1.0, uSpecV2TipBias), 1.0, heightPct);
-    const specV2 = mul(
-      uSpecV2Color,
-      v2Spec,
-      uSpecV2Intensity,
-      v2DistFade,
-      v2TipFade,
-      specLod,
-    );
-    col = add(col, specV2);
-
-    return col;
+    // Stripped to clean baseline — no SSS, no specular, no micro-noise.
+    // Get shape and color right first, then layer effects back one by one.
+    return vGrassColor;
   })();
 
-  const mat = new THREE.MeshStandardNodeMaterial({
+  // MeshBasicNodeMaterial: colorNode is the final pixel color, no PBR lighting applied.
+  // This gives us full control — vGrassColor IS the output, no Lambert darkening on top.
+  // alphaTest replaces transparent alpha-blend so tips cut clean with no depth-sort artefacts.
+  const mat = new THREE.MeshBasicNodeMaterial({
     side: THREE.DoubleSide,
-    roughness: 0.85,
-    metalness: 0.0,
-    transparent: true,
-    depthWrite: true,  // keep correct depth occlusion between blades
+    alphaTest: 0.5,
+    depthWrite: true,
   });
   mat.positionNode = positionNode;
   mat.colorNode    = colorNode;
-  // Tip alpha fade: dissolve top 18% of blade — organic tip instead of hard geometric point
-  mat.opacityNode  = sub(float(1), smoothstep(float(0.82), float(1.0), vPacked.x));
-  mat.envMapIntensity = 0;
+  // No alpha fade — the widthTaper geometry already creates a sharp pointed tip.
+  // Keeping alphaTest active (required by MeshBasicNodeMaterial alphaTest mode) but always passing.
+  mat.opacityNode  = float(1.0);
   return mat;
 }
 

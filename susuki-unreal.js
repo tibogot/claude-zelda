@@ -33,6 +33,7 @@ import {
   div,
   max,
   pow,
+  step,
   modelWorldMatrix,
   cameraPosition,
   normalLocal,
@@ -49,11 +50,47 @@ import {
 
 const PI = Math.PI;
 
+/** 1×1 white — default plume alpha mask (multiply, no cutout). */
+const _plumeMaskWhite = new Uint8Array([255, 255, 255, 255]);
+export const SUSUKI_DEFAULT_PLUME_MASK_TEX = new THREE.DataTexture(
+  _plumeMaskWhite,
+  1,
+  1,
+  THREE.RGBAFormat,
+);
+SUSUKI_DEFAULT_PLUME_MASK_TEX.needsUpdate = true;
+SUSUKI_DEFAULT_PLUME_MASK_TEX.colorSpace = THREE.NoColorSpace;
+SUSUKI_DEFAULT_PLUME_MASK_TEX.name = "susukiPlumeMaskDefault";
+
 export const SUSUKI_PATCH_SIZE = 20;
 export const SUSUKI_STEM_SEGMENTS = 6;
 export const SUSUKI_BAND_SEGMENTS = 8;
 export const SUSUKI_BANDS_PER_PLANT = 8;
 export const SUSUKI_COUNT = 800;
+
+function makeTriPrismGeometry(segments) {
+  const SIDES = 3;
+  const V = (segments + 1) * SIDES;
+  const indices = [];
+  for (let i = 0; i < segments; i++) {
+    for (let s = 0; s < SIDES; s++) {
+      const a = i * SIDES + s;
+      const b = i * SIDES + (s + 1) % SIDES;
+      const c = (i + 1) * SIDES + s;
+      const d = (i + 1) * SIDES + (s + 1) % SIDES;
+      indices.push(a, b, c);
+      indices.push(b, d, c);
+    }
+  }
+  const pos = new Float32Array(V * 3);
+  const nrm = new Float32Array(V * 3);
+  const vid = new Float32Array(V);
+  for (let i = 0; i < V; i++) {
+    nrm[i * 3 + 1] = 1;
+    vid[i] = i;
+  }
+  return { indices, pos, nrm, vid, V };
+}
 
 function makeRibbonGeometry(segments) {
   const V = (segments + 1) * 2,
@@ -83,7 +120,7 @@ export function createSusukiStemGeometry(
   randRange,
 ) {
   setSeed(42);
-  const { indices, pos, nrm, vid, T } = makeRibbonGeometry(segments);
+  const { indices, pos, nrm, vid, V } = makeTriPrismGeometry(segments);
   const off = new Float32Array(numPlants * 3);
   let numCellsX = Math.floor(Math.sqrt(numPlants));
   while (numPlants % numCellsX !== 0) numCellsX--;
@@ -219,8 +256,7 @@ export function createSusukiStemMaterial(segments, verts, ctx) {
     uSpecV2TipBias,
   } = ctx;
 
-  const SEGS = float(segments),
-    NVERTS = float(verts);
+  const SEGS = float(segments);
   const vColor = varying(vec3(0), "v_col");
   const vPacked = varying(vec3(0), "v_pk");
   const vWorldPos = varying(vec3(0), "v_wp");
@@ -240,15 +276,16 @@ export function createSusukiStemMaterial(segments, verts, ctx) {
     const randomHeight = remap(hv.z, 0, 1, 0.85, 1.15);
     const randomLean = remap(hv.w, 0, 1, 0.05, 0.15);
 
-    const vertID = mod(vertIdxAttr, NVERTS);
-    const zSide = negate(sub(mul(floor(div(vertIdxAttr, NVERTS)), 2), 1));
-    const xSide = mod(vertID, 2);
-    const heightPct = div(sub(vertID, xSide), mul(SEGS, 2));
+    // 3-sided prism: 3 vertices per ring level
+    const sideIdx = mod(vertIdxAttr, float(3));
+    const heightPct = div(floor(div(vertIdxAttr, float(3))), SEGS);
 
     const totalHeight = mul(uStemHeight, randomHeight, uPlumeStart);
 
-    const totalWidth = uStemWidth;
-    const x = mul(sub(xSide, 0.5), totalWidth);
+    const angle = mul(sideIdx, float((2 * PI) / 3));
+    const cosA = cos(angle);
+    const sinA = sin(angle);
+    const radius = mul(uStemWidth, float(0.5));
     const y = mul(heightPct, totalHeight);
 
     const windDirVec = vec2(uWindDirX, uWindDirZ);
@@ -311,27 +348,13 @@ export function createSusukiStemMaterial(segments, verts, ctx) {
       .mul(rotateAxis_mat(uCrossAxis, crossSway))
       .mul(rotateY_mat(randomAngle));
 
-    const nc1 = curveAmt;
-    const _hp01 = add(heightPct, 0.01);
-    const n1p = vec3(0, mul(_hp01, cos(nc1)), mul(_hp01, sin(nc1)));
-    const _nc09 = mul(nc1, 0.9);
-    const n2p = vec3(
-      0,
-      mul(mul(_hp01, 0.9), cos(_nc09)),
-      mul(mul(_hp01, 0.9), sin(_nc09)),
-    );
-    const ncurve = normalize(sub(n1p, n2p));
-    const gvn = vec3(0, negate(ncurve.z), ncurve.y);
-    const gvn1 = mul(grassMat, rotateY_mat(mul(PI, 0.3, zSide)).mul(gvn)).mul(
-      zSide,
-    );
-    const gvn2 = mul(grassMat, rotateY_mat(mul(PI, -0.3, zSide)).mul(gvn)).mul(
-      zSide,
-    );
-    const blendedNormal = normalize(mix(gvn1, gvn2, xSide));
-    normalLocal.assign(blendedNormal);
+    normalLocal.assign(normalize(grassMat.mul(vec3(cosA, float(0), sinA))));
 
-    const localVert = vec3(x, mul(y, cos(curveAmt)), mul(y, sin(curveAmt)));
+    const localVert = vec3(
+      mul(cosA, radius),
+      mul(y, cos(curveAmt)),
+      add(mul(sinA, radius), mul(y, sin(curveAmt))),
+    );
     const finalVert = add(grassMat.mul(localVert), plantOffset);
 
     const randomShade = remap(hv2.x, 0, 1, 0.9, 1.05);
@@ -339,7 +362,7 @@ export function createSusukiStemMaterial(segments, verts, ctx) {
     const aoBase = max(sub(1.0, mul(uAoIntensity, 0.65)), 0.2);
     const ao = mix(aoBase, 1.0, smoothstep(0.0, 0.4, heightPct));
     vColor.assign(mul(plantCol, ao));
-    vPacked.assign(vec3(heightPct, xSide, 1));
+    vPacked.assign(vec3(heightPct, float(0), float(1)));
 
     const worldFinal = vec3(
       finalVert.x,
@@ -440,7 +463,6 @@ export function createSusukiBandMaterial(segments, verts, ctx) {
     uStemHeight,
     uPlumeStart,
     uSusukiPlumeFlex = float(0.2),
-    uSusukiPlumeSoftEdge = float(0),
     uTrailCenter = uniform(new THREE.Vector2(9999, 9999)),
     uPlayerPos = uniform(new THREE.Vector3(9999, 0, 9999)),
     uInteractionRange = uniform(9999),
@@ -483,7 +505,6 @@ export function createSusukiBandMaterial(segments, verts, ctx) {
   const vColor = varying(vec3(0), "v_col");
   const vPacked = varying(vec3(0), "v_pk");
   const vWorldPos = varying(vec3(0), "v_wp");
-  const vEdgeFade = varying(float(1), "v_ef");
 
   const positionNode = Fn(() => {
     const offsetAttr = attribute("offset", "vec3"),
@@ -512,14 +533,11 @@ export function createSusukiBandMaterial(segments, verts, ctx) {
     const heightPct = div(sub(vertID, xSide), mul(SEGS, 2));
 
     const totalWidth = uBandWidth;
-    const x = mul(sub(xSide, 0.5), totalWidth);
-    const y = mul(heightPct, bandLength);
-
-    const tipFade = sub(
-      1,
-      mul(uSusukiPlumeSoftEdge, smoothstep(0.5, 0.95, heightPct)),
+    const x = mul(
+      sub(xSide, 0.5),
+      mul(totalWidth, sub(float(1), smoothstep(float(0.8), float(1.0), heightPct))),
     );
-    vEdgeFade.assign(tipFade);
+    const y = mul(heightPct, bandLength);
 
     const windDirVec = vec2(uWindDirX, uWindDirZ);
     const windScroll = mul(windDirVec, mul(uTime, uWindSpeed));
@@ -709,6 +727,10 @@ export function createSusukiBandMaterial(segments, verts, ctx) {
     return col;
   })();
 
+  const alphaNode = Fn(() => {
+    return sub(float(1), smoothstep(float(0.92), float(1.0), vPacked.x));
+  })();
+
   const mat = new THREE.MeshStandardNodeMaterial({
     side: THREE.DoubleSide,
     roughness: 0.85,
@@ -719,7 +741,7 @@ export function createSusukiBandMaterial(segments, verts, ctx) {
   });
   mat.positionNode = positionNode;
   mat.colorNode = colorNode;
-  mat.alphaNode = vEdgeFade;
+  mat.opacityNode = alphaNode;
   mat.envMapIntensity = 0;
   return mat;
 }

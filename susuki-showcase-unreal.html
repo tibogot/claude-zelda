@@ -29,7 +29,12 @@
 <body>
 <div id="info">
   <span>Susuki Grass</span> — Unreal look-dev (same field path as grass-sandbox)<br>
-  Orbit: <span>left-drag</span> &nbsp; Zoom: <span>scroll</span>
+  Orbit: <span>left-drag</span> &nbsp; Zoom: <span>scroll</span><br>
+  Default mask: <span style="color:#a8c0d8;">textures/susuki.jpg</span><br>
+  <label style="display:inline-block;margin-top:6px;cursor:pointer;">
+    <span style="color:#e0f0c0;">Plume mask (override)</span>
+    <input type="file" id="plumeMaskFile" accept="image/png,image/jpeg,image/jpg,image/webp" style="max-width:220px;font-size:10px;" />
+  </label>
 </div>
 
 <script type="module">
@@ -107,6 +112,13 @@ const PARAMS = {
   fogColor: "#a8c0d8",
   groundColor: "#3d5a3d",
   showGrid: true,
+  plumeMaskBlend: 1,
+  plumeMaskUvScaleX: 1,
+  plumeMaskUvScaleY: 1,
+  plumeMaskUvOffsetX: 0,
+  plumeMaskUvOffsetY: 0,
+  plumeMaskInvert: false,
+  plumeAlphaTest: 0.05,
 };
 
 function sunDirectionFromAngles(azimuthDeg, elevationDeg) {
@@ -308,6 +320,52 @@ const uInteractionStrength = uniform(0);
 const uInteractionHThresh = uniform(2);
 const uInteractionRepel = uniform(1);
 
+/** Same pattern as genshin-flowers2.html: persistent THREE.Texture, assign .image (file or URL). */
+const PLUME_MASK_URL = "./textures/susuki.jpg";
+
+function configurePlumeMaskTexture(tex) {
+  tex.colorSpace = THREE.NoColorSpace;
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = true;
+  tex.needsUpdate = true;
+}
+
+function loadPlumeMaskImageUrl(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error(`Failed to load ${url}`));
+    img.src = url;
+  });
+}
+
+const plumeMaskTex = new THREE.Texture();
+const plumeMaskDefaultCanvas = document.createElement("canvas");
+plumeMaskDefaultCanvas.width = plumeMaskDefaultCanvas.height = 1;
+plumeMaskDefaultCanvas.getContext("2d").fillStyle = "#ffffff";
+plumeMaskDefaultCanvas.getContext("2d").fillRect(0, 0, 1, 1);
+plumeMaskTex.image = plumeMaskDefaultCanvas;
+configurePlumeMaskTexture(plumeMaskTex);
+
+try {
+  const img = await loadPlumeMaskImageUrl(PLUME_MASK_URL);
+  plumeMaskTex.image = img;
+  configurePlumeMaskTexture(plumeMaskTex);
+} catch (e) {
+  console.warn("[Susuki] Plume mask not loaded, using white:", PLUME_MASK_URL, e);
+}
+const uPlumeMaskUvScale = uniform(
+  new THREE.Vector2(PARAMS.plumeMaskUvScaleX, PARAMS.plumeMaskUvScaleY),
+);
+const uPlumeMaskUvOffset = uniform(
+  new THREE.Vector2(PARAMS.plumeMaskUvOffsetX, PARAMS.plumeMaskUvOffsetY),
+);
+const uPlumeMaskBlend = uniform(PARAMS.plumeMaskBlend);
+const uPlumeMaskInvert = uniform(PARAMS.plumeMaskInvert ? 1 : 0);
+
 const susukiCtx = buildSusukiCtx({
   uniforms: {
     uTime,
@@ -356,6 +414,14 @@ const susukiCtx = buildSusukiCtx({
   params: SUSUKI_FIELD_PARAMS,
 });
 
+Object.assign(susukiCtx, {
+  plumeMaskTex,
+  uPlumeMaskUvScale,
+  uPlumeMaskUvOffset,
+  uPlumeMaskBlend,
+  uPlumeMaskInvert,
+});
+
 const susukiResources = createSusukiSingleFieldResources(susukiCtx);
 const susukiGroup = new THREE.Group();
 scene.add(susukiGroup);
@@ -373,6 +439,35 @@ const susukiPatchSystem = setupSusukiSingleField(susukiGroup, susukiResources, {
 const gui = new GUI({ title: "Susuki Grass", width: 260 });
 gui.domElement.style.cssText = "position:fixed;top:12px;right:12px;z-index:30;max-height:90vh;overflow-y:auto;";
 
+function applyPlumeMaskUv() {
+  uPlumeMaskUvScale.value.set(PARAMS.plumeMaskUvScaleX, PARAMS.plumeMaskUvScaleY);
+  uPlumeMaskUvOffset.value.set(PARAMS.plumeMaskUvOffsetX, PARAMS.plumeMaskUvOffsetY);
+}
+
+function applyPlumeAlphaTest() {
+  susukiResources.bandMatHigh.alphaTest = PARAMS.plumeAlphaTest;
+  susukiResources.bandMatLow.alphaTest = PARAMS.plumeAlphaTest;
+}
+
+function bumpPlumeBandMaterials() {
+  if (!susukiResources) return;
+  susukiResources.bandMatHigh.needsUpdate = true;
+  susukiResources.bandMatLow.needsUpdate = true;
+}
+
+document.getElementById("plumeMaskFile").addEventListener("change", (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  const img = new Image();
+  img.onload = () => {
+    URL.revokeObjectURL(img.src);
+    plumeMaskTex.image = img;
+    configurePlumeMaskTexture(plumeMaskTex);
+    bumpPlumeBandMaterials();
+  };
+  img.src = URL.createObjectURL(file);
+});
+
 const fPlant = gui.addFolder("Plant");
 fPlant.add(PARAMS, "stemHeight", 0.2, 3, 0.05).onChange((v) => { uSusukiStemHeight.value = v; });
 fPlant.add(PARAMS, "stemWidth", 0.01, 0.15, 0.005).onChange((v) => { uSusukiStemWidth.value = v; });
@@ -380,6 +475,34 @@ fPlant.add(PARAMS, "bandWidth", 0.01, 0.15, 0.005).onChange((v) => { uSusukiBand
 fPlant.add(PARAMS, "plumeStart", 0.4, 0.9, 0.05).onChange((v) => { uSusukiPlumeStart.value = v; });
 fPlant.add(PARAMS, "plumeFlex", 0, 1, 0.05).onChange((v) => { uSusukiPlumeFlex.value = v; });
 fPlant.add(PARAMS, "plumeSoftEdge", 0, 1, 0.05).onChange((v) => { uSusukiPlumeSoftEdge.value = v; });
+
+const fPlumeMask = gui.addFolder("Plume mask (UV)");
+fPlumeMask.add(PARAMS, "plumeMaskBlend", 0, 1, 0.05).onChange((v) => { uPlumeMaskBlend.value = v; });
+fPlumeMask.add(PARAMS, "plumeMaskUvScaleX", -4, 4, 0.05).onChange(applyPlumeMaskUv);
+fPlumeMask.add(PARAMS, "plumeMaskUvScaleY", -4, 4, 0.05).onChange(applyPlumeMaskUv);
+fPlumeMask.add(PARAMS, "plumeMaskUvOffsetX", -2, 2, 0.02).onChange(applyPlumeMaskUv);
+fPlumeMask.add(PARAMS, "plumeMaskUvOffsetY", -2, 2, 0.02).onChange(applyPlumeMaskUv);
+fPlumeMask.add(PARAMS, "plumeMaskInvert").onChange((v) => { uPlumeMaskInvert.value = v ? 1 : 0; });
+fPlumeMask.add(PARAMS, "plumeAlphaTest", 0, 0.5, 0.01).onChange(applyPlumeAlphaTest);
+fPlumeMask.add(
+  {
+    resetMask() {
+      loadPlumeMaskImageUrl(PLUME_MASK_URL)
+        .then((img) => {
+          plumeMaskTex.image = img;
+          configurePlumeMaskTexture(plumeMaskTex);
+          bumpPlumeBandMaterials();
+        })
+        .catch(() => {
+          plumeMaskTex.image = plumeMaskDefaultCanvas;
+          configurePlumeMaskTexture(plumeMaskTex);
+          bumpPlumeBandMaterials();
+        });
+      document.getElementById("plumeMaskFile").value = "";
+    },
+  },
+  "resetMask",
+).name("Reset mask texture");
 
 const fColors = gui.addFolder("Colors");
 fColors.addColor(PARAMS, "stemColor").onChange(applyColors);
@@ -449,6 +572,7 @@ bakeEnvMap();
 applyWind();
 applySpecDirs();
 applyColors();
+applyPlumeAlphaTest();
 
 const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.5, 500000);
 camera.position.set(0, 4, 18);

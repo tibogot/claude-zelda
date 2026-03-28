@@ -1,0 +1,608 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Arc-Control Floppy Grass</title>
+    <style>
+      body {
+        margin: 0;
+        background-color: #020406;
+        overflow: hidden;
+        font-family: sans-serif;
+      }
+      canvas {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/+esm"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three";
+      import {
+        float,
+        vec3,
+        Fn,
+        positionLocal,
+        normalLocal,
+        time,
+        sin,
+        cos,
+        uv,
+        mix,
+        uniform,
+        attribute,
+        mx_noise_float,
+        smoothstep,
+        normalize,
+        sub,
+        min,
+        max,
+        negate,
+        abs,
+        dot,
+        atan,
+        vec2,
+        vec4,
+        fract,
+        PI,
+        modelWorldMatrix,
+        modelWorldMatrixInverse,
+        cameraPosition,
+        length,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+      import { Pane } from "tweakpane";
+
+      let camera, scene, renderer, controls;
+
+      init();
+
+      async function init() {
+        scene = new THREE.Scene();
+
+        renderer = new THREE.WebGPURenderer({ antialias: true });
+        await renderer.init();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1;
+        document.body.appendChild(renderer.domElement);
+
+        camera = new THREE.PerspectiveCamera(
+          45,
+          window.innerWidth / window.innerHeight,
+          0.1,
+          500000,
+        );
+        camera.position.set(0, 5, 15);
+
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+
+        const params = {
+          windSpeed: 0.6,
+          windStrength: 1.4,
+          bendFocus: 2.5, // The 'Curve' control
+          stiffness: 0.2, // How much of the base is 'unbendable'
+          bladeHeight: 10,
+          bladeWidth: 0.8,
+          tipTaperStart: 0.7,
+          bladeYSegments: 8,
+          bladeColor: "#0e300e",
+          tipColor: "#eaff00",
+          roundCrossSection: 1.0, // 0 = bend-aware ribbon, 1 = full rounded fan
+          viewThicken: 0.45, // yaw toward camera when edge-on (0 = off)
+          sunIntensity: 3,
+          sunColor: "#ffffff",
+          sunX: 5,
+          sunY: 10,
+          sunZ: 5,
+          ambientIntensity: 0.2,
+          ambientColor: "#ffffff",
+          skyTurbidity: 2,
+          skyRayleigh: 1.5,
+          skyMie: 0.005,
+          skyMieG: 0.8,
+          environmentIntensity: 0.45,
+          fieldSize: 26,
+          grassCount: 720,
+        };
+
+        const uWindSpeed = uniform(params.windSpeed);
+        const uWindStrength = uniform(params.windStrength);
+        const uBendFocus = uniform(params.bendFocus);
+        const uStiffness = uniform(params.stiffness);
+        const uBladeCol = uniform(new THREE.Color(params.bladeColor));
+        const uTipCol = uniform(new THREE.Color(params.tipColor));
+        const uRoundCross = uniform(params.roundCrossSection);
+        const uViewThicken = uniform(params.viewThicken);
+        const uBladeHeight = uniform(params.bladeHeight);
+
+        const material = new THREE.MeshStandardNodeMaterial({
+          side: THREE.DoubleSide,
+        });
+
+        const vUv = uv();
+
+        const rotY = (ang, v) => {
+          const c = cos(ang),
+            s = sin(ang);
+          return vec3(
+            v.x.mul(c).add(v.z.mul(s)),
+            v.y,
+            negate(v.x).mul(s).add(v.z.mul(c)),
+          );
+        };
+
+        // Bend-aware “rounded blade” normals: tangent along spine, ribbon normal,
+        // then yaw ±spread across width (grass-sandbox style), spread scaled by UI.
+        material.positionNode = Fn(() => {
+          const off = attribute("offset", "vec3");
+          const aPhase = attribute("aPhase", "float");
+          const tBlade = time.mul(uWindSpeed).add(aPhase);
+
+          // Per-blade variation from ground XZ (same idea as grass-sandbox hash42(bladeWorld.xz))
+          const bladeXZ = vec2(off.x, off.z);
+          const h0 = fract(
+            sin(dot(bladeXZ, vec2(127.1, 311.7))).mul(float(43758.5453)),
+          );
+          const h1 = fract(
+            sin(dot(bladeXZ, vec2(269.5, 183.3))).mul(float(43758.5453)),
+          );
+          const h2 = fract(
+            sin(dot(bladeXZ, vec2(419.2, 371.9))).mul(float(43758.5453)),
+          );
+          const h3 = fract(
+            sin(dot(bladeXZ, vec2(371.2, 113.7))).mul(float(43758.5453)),
+          );
+          const randomYaw = h0.mul(PI.mul(2));
+          const hScale = mix(float(0.75), float(1.5), h2);
+          const leanBias = mix(float(0.06), float(0.32), h3);
+          const bladeH = uBladeHeight.mul(hScale);
+
+          const baseStiffness = smoothstep(0.0, uStiffness, vUv.y);
+          const curveWeight = vUv.y.pow(uBendFocus).mul(baseStiffness);
+
+          const windBase = mx_noise_float(tBlade).add(0.4);
+          const windGust = mx_noise_float(tBlade.mul(3.0)).mul(0.3);
+          const totalWindForce = windBase.add(windGust).mul(uWindStrength);
+          const angle = totalWindForce.mul(curveWeight).add(leanBias.mul(vUv.y));
+
+          const L = vUv.y.mul(bladeH);
+          const arcX = sin(angle).mul(L);
+          const arcY = cos(angle).mul(L);
+          const zRollPhase = mx_noise_float(tBlade.add(5.0)).mul(0.2);
+          const arcZ = sin(zRollPhase).mul(L).mul(curveWeight).mul(0.2);
+
+          const ty = vUv.y;
+          const eps = float(0.02);
+          const tp = min(ty.add(eps), float(1));
+          const tm = max(ty.sub(eps), float(0));
+
+          const bsP = smoothstep(0.0, uStiffness, tp);
+          const cwP = tp.pow(uBendFocus).mul(bsP);
+          const angP = totalWindForce.mul(cwP).add(leanBias.mul(tp));
+          const lenP = tp.mul(bladeH);
+          const sP = vec3(
+            sin(angP).mul(lenP),
+            cos(angP).mul(lenP),
+            sin(zRollPhase).mul(lenP).mul(cwP).mul(0.2),
+          );
+
+          const bsM = smoothstep(0.0, uStiffness, tm);
+          const cwM = tm.pow(uBendFocus).mul(bsM);
+          const angM = totalWindForce.mul(cwM).add(leanBias.mul(tm));
+          const lenM = tm.mul(bladeH);
+          const sM = vec3(
+            sin(angM).mul(lenM),
+            cos(angM).mul(lenM),
+            sin(zRollPhase).mul(lenM).mul(cwM).mul(0.2),
+          );
+
+          const T = normalize(sub(sP, sM));
+          const gvn = normalize(vec3(float(0), negate(T.z), T.y));
+          const spread = uRoundCross.mul(float(Math.PI * 0.3));
+          const nL = normalize(rotY(spread, gvn));
+          const nR = normalize(rotY(negate(spread), gvn));
+          const fanN = normalize(mix(nL, nR, vUv.x));
+
+          const midLocal = vec3(off.x, bladeH.mul(float(0.5)), off.z);
+          const worldMid = modelWorldMatrix.mul(vec4(midLocal, 1)).xyz;
+          const toCamW = normalize(sub(cameraPosition, worldMid));
+          const viewL = normalize(
+            modelWorldMatrixInverse.mul(vec4(toCamW, float(0))).xyz,
+          );
+          const lenXZ = length(vec2(viewL.x, viewL.z));
+          const faceZ = abs(dot(viewL, vec3(float(0), float(0), float(1))));
+          const edgeOn = smoothstep(float(0.12), float(0.55), sub(1, faceZ)).mul(
+            smoothstep(float(0.08), float(0.35), lenXZ),
+          );
+          const yawMax = float(0.55);
+          const deltaYaw = uViewThicken
+            .mul(edgeOn)
+            .mul(yawMax)
+            .mul(atan(viewL.x, viewL.z));
+
+          const pArc = vec3(
+            arcX.add(positionLocal.x),
+            arcY,
+            arcZ.add(positionLocal.z),
+          );
+          const pYaw = rotY(randomYaw, pArc);
+          const nYaw = normalize(rotY(randomYaw, fanN));
+          const pOut = rotY(deltaYaw, pYaw);
+          const nOut = normalize(rotY(deltaYaw, nYaw));
+          normalLocal.assign(nOut);
+
+          return vec3(
+            pOut.x.add(off.x),
+            pOut.y,
+            pOut.z.add(off.z),
+          );
+        })();
+        material.colorNode = Fn(() => {
+          const off = attribute("offset", "vec3");
+          const bladeXZ = vec2(off.x, off.z);
+          const h1 = fract(
+            sin(dot(bladeXZ, vec2(269.5, 183.3))).mul(float(43758.5453)),
+          );
+          const randomShade = mix(float(0.75), float(1.0), h1);
+          return mix(uBladeCol, uTipCol, vUv.y).mul(vec3(randomShade));
+        })();
+
+        // --- GEOMETRY ---
+        // Tapered blade: full width at base, smooth narrowing in the upper segment,
+        // single apex vertex at the tip (triangular cap, not a flat quad top).
+        function createBladeGeometry(
+          height,
+          baseWidth,
+          ySegments,
+          taperStart = 0.7,
+        ) {
+          const taper = THREE.MathUtils.clamp(taperStart, 0.05, 0.999);
+          const baseHalf = baseWidth * 0.5;
+          const positions = [];
+          const uvs = [];
+          const indices = [];
+          const rowVertCount = [];
+          const rowBase = [];
+          let v = 0;
+
+          for (let j = 0; j <= ySegments; j++) {
+            const t = j / ySegments;
+            const y = t * height;
+            rowBase[j] = v;
+
+            if (j === ySegments) {
+              positions.push(0, y, 0);
+              uvs.push(0.5, t);
+              rowVertCount.push(1);
+              v += 1;
+            } else {
+              const s = THREE.MathUtils.smoothstep(t, taper, 1);
+              const w = baseHalf * (1 - s);
+              positions.push(-w, y, 0, w, y, 0);
+              uvs.push(0, t, 1, t);
+              rowVertCount.push(2);
+              v += 2;
+            }
+          }
+
+          for (let j = 0; j < ySegments; j++) {
+            const a0 = rowBase[j];
+            const a1 = rowBase[j] + 1;
+            const b0 = rowBase[j + 1];
+            if (rowVertCount[j + 1] === 2) {
+              const b1 = b0 + 1;
+              indices.push(a0, a1, b1, a0, b1, b0);
+            } else {
+              indices.push(a0, a1, b0);
+            }
+          }
+
+          const geo = new THREE.BufferGeometry();
+          geo.setAttribute(
+            "position",
+            new THREE.Float32BufferAttribute(positions, 3),
+          );
+          geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+          geo.setIndex(indices);
+          geo.computeVertexNormals();
+          return geo;
+        }
+
+        // Instanced field: grid + jitter like grass-sandbox createGrassGeometry (no LOD).
+        function createFieldInstancedGeometry(
+          baseBlade,
+          patchSize,
+          numGrass,
+          bladeHeight,
+        ) {
+          const numCellsX = Math.max(1, Math.ceil(Math.sqrt(numGrass)));
+          const numCellsZ = Math.max(1, Math.ceil(numGrass / numCellsX));
+          const cellW = patchSize / numCellsX;
+          const cellH = patchSize / numCellsZ;
+          const offsets = new Float32Array(numGrass * 3);
+          const phases = new Float32Array(numGrass);
+          for (let i = 0; i < numGrass; i++) {
+            const col = i % numCellsX;
+            const row = Math.floor(i / numCellsX);
+            offsets[i * 3] =
+              -patchSize * 0.5 + col * cellW + Math.random() * cellW;
+            offsets[i * 3 + 1] = 0;
+            offsets[i * 3 + 2] =
+              -patchSize * 0.5 + row * cellH + Math.random() * cellH;
+            phases[i] = Math.random() * Math.PI * 2;
+          }
+          const ig = new THREE.InstancedBufferGeometry();
+          if (baseBlade.index) ig.index = baseBlade.index.clone();
+          ig.setAttribute("position", baseBlade.attributes.position.clone());
+          ig.setAttribute("uv", baseBlade.attributes.uv.clone());
+          if (baseBlade.attributes.normal) {
+            ig.setAttribute("normal", baseBlade.attributes.normal.clone());
+          }
+          ig.setAttribute(
+            "offset",
+            new THREE.InstancedBufferAttribute(offsets, 3),
+          );
+          ig.setAttribute(
+            "aPhase",
+            new THREE.InstancedBufferAttribute(phases, 1),
+          );
+          ig.instanceCount = numGrass;
+          const half = patchSize * 0.5;
+          const r =
+            Math.sqrt(half * half * 2 + bladeHeight * bladeHeight) + 2;
+          ig.boundingSphere = new THREE.Sphere(
+            new THREE.Vector3(0, bladeHeight * 0.5, 0),
+            r,
+          );
+          return ig;
+        }
+
+        function buildGrassGeometry() {
+          const base = createBladeGeometry(
+            params.bladeHeight,
+            params.bladeWidth,
+            Math.max(2, Math.round(params.bladeYSegments)),
+            params.tipTaperStart,
+          );
+          const field = createFieldInstancedGeometry(
+            base,
+            params.fieldSize,
+            Math.max(1, Math.round(params.grassCount)),
+            params.bladeHeight,
+          );
+          base.dispose();
+          return field;
+        }
+
+        const geometry = buildGrassGeometry();
+
+        const grass = new THREE.Mesh(geometry, material);
+        grass.frustumCulled = false;
+        scene.add(grass);
+
+        function grassRebuildKey() {
+          return [
+            params.bladeHeight,
+            params.bladeWidth,
+            params.tipTaperStart,
+            Math.round(params.bladeYSegments),
+            params.fieldSize,
+            Math.round(params.grassCount),
+          ].join("|");
+        }
+        let lastGrassRebuildKey = grassRebuildKey();
+
+        // Ground/Lights
+        const floorMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0a });
+        const floor = new THREE.Mesh(
+          new THREE.PlaneGeometry(
+            Math.max(12, params.fieldSize + 8),
+            Math.max(12, params.fieldSize + 8),
+          ),
+          floorMat,
+        );
+        floor.rotation.x = -Math.PI / 2;
+        scene.add(floor);
+        const sun = new THREE.DirectionalLight(params.sunColor, params.sunIntensity);
+        sun.position.set(params.sunX, params.sunY, params.sunZ);
+        const ambient = new THREE.AmbientLight(
+          params.ambientColor,
+          params.ambientIntensity,
+        );
+        scene.add(sun, ambient);
+
+        // ── Sky (WebGPU SkyMesh + PMREM env), same pattern as grass-sandbox.html ──
+        const sky = new SkyMesh();
+        sky.scale.setScalar(450000);
+        scene.add(sky);
+        const pmremGenerator = new THREE.PMREMGenerator(renderer);
+
+        function updateSkyParams() {
+          const sunDir = new THREE.Vector3(
+            params.sunX,
+            params.sunY,
+            params.sunZ,
+          ).normalize();
+          sky.sunPosition.value.copy(sunDir);
+          sky.turbidity.value = params.skyTurbidity;
+          sky.rayleigh.value = params.skyRayleigh;
+          sky.mieCoefficient.value = params.skyMie;
+          sky.mieDirectionalG.value = params.skyMieG;
+        }
+
+        function bakeSkyEnvironment() {
+          const skyEnvScene = new THREE.Scene();
+          skyEnvScene.add(sky.clone());
+          const skyEnv = pmremGenerator.fromScene(skyEnvScene, 0.04).texture;
+          if (scene.environment) scene.environment.dispose();
+          scene.environment = skyEnv;
+          scene.environmentIntensity = params.environmentIntensity;
+        }
+
+        updateSkyParams();
+        bakeSkyEnvironment();
+
+        // --- GUI ---
+        const pane = new Pane({ title: "Arc Shape Controller" });
+        pane.addBinding(params, "bendFocus", {
+          min: 0.5,
+          max: 5.0,
+          label: "Bend Focus (Tip vs Root)",
+        });
+        pane.addBinding(params, "stiffness", {
+          min: 0.0,
+          max: 0.8,
+          label: "Root Stiffness",
+        });
+        pane.addBinding(params, "windStrength", { min: 0, max: 5 });
+        pane.addBinding(params, "windSpeed", { min: 0.1, max: 3 });
+        pane.addBinding(params, "roundCrossSection", {
+          min: 0,
+          max: 1,
+          label: "Rounded normals",
+        });
+        pane.addBinding(params, "viewThicken", {
+          min: 0,
+          max: 1,
+          label: "View thicken",
+        });
+
+        const bladeFolder = pane.addFolder({ title: "Blade shape" });
+        bladeFolder.addBinding(params, "bladeHeight", {
+          min: 1,
+          max: 25,
+          step: 0.1,
+          label: "Height",
+        });
+        bladeFolder.addBinding(params, "bladeWidth", {
+          min: 0.05,
+          max: 3,
+          step: 0.01,
+          label: "Width",
+        });
+        bladeFolder.addBinding(params, "tipTaperStart", {
+          min: 0.2,
+          max: 0.98,
+          step: 0.01,
+          label: "Tip taper starts (UV y)",
+        });
+        bladeFolder.addBinding(params, "bladeYSegments", {
+          min: 2,
+          max: 32,
+          step: 1,
+          label: "Height segments",
+        });
+        bladeFolder.addBinding(params, "bladeColor", { label: "Base color" });
+        bladeFolder.addBinding(params, "tipColor", { label: "Tip color" });
+
+        const fieldFolder = pane.addFolder({ title: "Field" });
+        fieldFolder.addBinding(params, "fieldSize", {
+          min: 4,
+          max: 60,
+          step: 0.5,
+          label: "Patch size",
+        });
+        fieldFolder.addBinding(params, "grassCount", {
+          min: 32,
+          max: 12000,
+          step: 32,
+          label: "Grass count",
+        });
+
+        const lightFolder = pane.addFolder({ title: "Lighting" });
+        lightFolder.addBinding(params, "sunIntensity", {
+          min: 0,
+          max: 8,
+          label: "Sun intensity",
+        });
+        lightFolder.addBinding(params, "sunColor", { label: "Sun color" });
+        lightFolder.addBinding(params, "sunX", { min: -30, max: 30 });
+        lightFolder.addBinding(params, "sunY", { min: 0, max: 40 });
+        lightFolder.addBinding(params, "sunZ", { min: -30, max: 30 });
+        lightFolder.addBinding(params, "ambientIntensity", {
+          min: 0,
+          max: 1.5,
+          label: "Ambient intensity",
+        });
+        lightFolder.addBinding(params, "ambientColor", {
+          label: "Ambient color",
+        });
+
+        const skyFolder = pane.addFolder({ title: "Sky" });
+        skyFolder.addBinding(params, "skyTurbidity", {
+          min: 0,
+          max: 20,
+          label: "Turbidity",
+        });
+        skyFolder.addBinding(params, "skyRayleigh", {
+          min: 0,
+          max: 4,
+          label: "Rayleigh",
+        });
+        skyFolder.addBinding(params, "skyMie", {
+          min: 0,
+          max: 0.1,
+          label: "Mie coeff.",
+        });
+        skyFolder.addBinding(params, "skyMieG", {
+          min: 0,
+          max: 1,
+          label: "Mie dir. G",
+        });
+        skyFolder.addBinding(params, "environmentIntensity", {
+          min: 0,
+          max: 2,
+          label: "Env intensity",
+        });
+
+        renderer.setAnimationLoop(() => {
+          const gk = grassRebuildKey();
+          if (gk !== lastGrassRebuildKey) {
+            lastGrassRebuildKey = gk;
+            grass.geometry.dispose();
+            grass.geometry = buildGrassGeometry();
+            const fs = Math.max(12, params.fieldSize + 8);
+            floor.geometry.dispose();
+            floor.geometry = new THREE.PlaneGeometry(fs, fs);
+          }
+
+          uBendFocus.value = params.bendFocus;
+          uStiffness.value = params.stiffness;
+          uWindStrength.value = params.windStrength;
+          uWindSpeed.value = params.windSpeed;
+          uBladeHeight.value = params.bladeHeight;
+          uRoundCross.value = params.roundCrossSection;
+          uViewThicken.value = params.viewThicken;
+          uBladeCol.value.set(params.bladeColor);
+          uTipCol.value.set(params.tipColor);
+          sun.intensity = params.sunIntensity;
+          sun.color.set(params.sunColor);
+          sun.position.set(params.sunX, params.sunY, params.sunZ);
+          ambient.intensity = params.ambientIntensity;
+          ambient.color.set(params.ambientColor);
+          updateSkyParams();
+          scene.environmentIntensity = params.environmentIntensity;
+          controls.update();
+          renderer.render(scene, camera);
+        });
+      }
+    </script>
+  </body>
+</html>
