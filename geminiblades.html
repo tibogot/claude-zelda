@@ -130,6 +130,11 @@
           clumpScale: 5.0,    // world-unit radius of each clump
           clumpStrength: 0.7, // 0 = fully random, 1 = fully clumped
           crossed: false,     // add a second ribbon rotated 90° per blade
+          colorVariation: true,       // enable hue/saturation variation
+          cvHueSpread: 0.08,          // max hue shift from base (0 = no hue change)
+          cvSatSpread: 0.3,           // saturation variation range (0 = uniform)
+          cvDryAmount: 0.15,          // fraction of blades that turn dry/yellow
+          cvDryColor: "#8a7a3a",      // dry/dead blade tint
           aoBase: 0.25,       // brightness at blade base (0 = black, 1 = no AO)
           aoPower: 2.0,       // curve — higher = AO more concentrated near base
           windAngle: 0,       // degrees — direction the wind travels (0 = +X)
@@ -162,6 +167,8 @@
           skyMie: 0.005,
           skyMieG: 0.8,
           environmentIntensity: 0.45,
+          groundPlane: true,          // show ground plane under grass
+          groundColor: "#1a2e0a",    // dark earthy green
           fieldSize: 20,    // size of ONE patch (world units)
           gridSize: 7,      // patches per side → total field = fieldSize * gridSize
           grassCount: 300,  // blades per patch (total = gridSize² × grassCount)
@@ -174,6 +181,11 @@
         const uClumpScale = uniform(params.clumpScale);
         const uClumpStrength = uniform(params.clumpStrength);
         const uCrossed = uniform(0);
+        const uColorVar = uniform(params.colorVariation ? 1.0 : 0.0);
+        const uCvHueSpread = uniform(params.cvHueSpread);
+        const uCvSatSpread = uniform(params.cvSatSpread);
+        const uCvDryAmount = uniform(params.cvDryAmount);
+        const uCvDryCol = uniform(new THREE.Color(params.cvDryColor));
         const uAoBase = uniform(params.aoBase);
         const uAoPower = uniform(params.aoPower);
         const uWindDirX = uniform(1.0);
@@ -194,6 +206,8 @@
         const uSunDir = uniform(new THREE.Vector3(params.sunX, params.sunY, params.sunZ).normalize());
         const vCustomNormal = varying(vec3(0, 1, 0), 'vCN');
         const vClumpShade = varying(float(1), 'vCS');
+        const vColorTint = varying(vec3(1, 1, 1), 'vCT');  // warm/cool tint target
+        const vDryBlend = varying(float(0), 'vDB');         // dry blade factor
         const uBssCol = uniform(new THREE.Color(params.bssColor));
         const uBssIntensity = uniform(params.bssIntensity);
         const uBssPower = uniform(params.bssPower);
@@ -273,6 +287,17 @@
           const crossedBladeH = bladeH.mul(mix(float(1.0), uCrossed, aIsCross));
           // Clump color tint — passed to colorNode via varying
           vClumpShade.assign(mix(float(1.0), mix(float(0.82), float(1.18), cB), clumpInfluence));
+
+          // Color variation hashes — computed here (vertex) to avoid fragment precision issues
+          const h4 = fract(sin(dot(bladeXZ, vec2(537.3, 197.1))).mul(float(43758.5453)));
+          const h5 = fract(sin(dot(bladeXZ, vec2(419.7, 631.2))).mul(float(43758.5453)));
+          // Warm/cool tint target per blade
+          const warmCol = vec3(0.18, 0.28, 0.02);
+          const coolCol = vec3(0.02, 0.18, 0.08);
+          vColorTint.assign(mix(warmCol, coolCol, h4));
+          // Dry blade factor: blades with h5 < dryAmount become dry
+          const isDry = smoothstep(uCvDryAmount, float(0.0), h5);
+          vDryBlend.assign(isDry);
 
           const baseStiffness = smoothstep(0.0, uStiffness, vUv.y);
           const curveWeight = vUv.y.pow(uBendFocus).mul(baseStiffness);
@@ -385,9 +410,26 @@
           );
           const randomShade = mix(float(0.75), float(1.0), h1);
           // AO: base of blade is darkened by neighboring blades, tip is fully lit.
-          // mix(aoBase, 1.0, uvY^power) — dark at root, bright at tip.
           const ao = mix(uAoBase, float(1.0), pow(vUv.y, uAoPower));
-          return mix(uBladeCol, uTipCol, vUv.y).mul(vec3(randomShade.mul(vClumpShade).mul(ao)));
+          const baseCol = mix(uBladeCol, uTipCol, vUv.y);
+
+          // --- Color variation (hashes computed in vertex via varyings) ---
+          // Warm/cool tint from vColorTint varying
+          const hueCol = mix(baseCol, vColorTint, uCvHueSpread);
+
+          // Saturation variation
+          const lum = dot(hueCol, vec3(0.299, 0.587, 0.114));
+          const satFactor = float(1.0).sub(h1.mul(uCvSatSpread));
+          const satCol = mix(vec3(lum, lum, lum), hueCol, satFactor);
+
+          // Dry blades from vDryBlend varying — stronger at root, fades at tip
+          const dryBlend = vDryBlend.mul(float(1.0).sub(vUv.y).mul(float(0.5)).add(float(0.5)));
+          const dryCol = mix(satCol, uCvDryCol, dryBlend);
+
+          // Final: apply variation only when enabled
+          const variedCol = mix(baseCol, dryCol, uColorVar);
+
+          return variedCol.mul(vec3(randomShade.mul(vClumpShade).mul(ao)));
         })();
 
         // SSS as emissiveNode — added AFTER PBR lighting, so the dark side
@@ -568,12 +610,13 @@
         function totalFieldSize() {
           return Math.max(1, Math.round(params.gridSize)) * params.fieldSize;
         }
-        const floorMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0a });
+        const floorMat = new THREE.MeshStandardMaterial({ color: params.groundColor });
         const floor = new THREE.Mesh(
           new THREE.PlaneGeometry(totalFieldSize() + 8, totalFieldSize() + 8),
           floorMat,
         );
         floor.rotation.x = -Math.PI / 2;
+        floor.visible = params.groundPlane;
         scene.add(floor);
         const sun = new THREE.DirectionalLight(
           params.sunColor,
@@ -643,6 +686,11 @@
         pane.addBinding(params, "aoPower", { min: 0.5, max: 6, label: "AO curve" });
         pane.addBinding(params, "windAngle", { min: 0, max: 360, step: 1, label: "Wind angle (°)" });
         pane.addBinding(params, "windWaveScale", { min: 0.01, max: 0.8, label: "Wave scale" });
+        pane.addBinding(params, "colorVariation", { label: "Color variation" });
+        pane.addBinding(params, "cvHueSpread", { min: 0, max: 0.3, label: "Hue spread" });
+        pane.addBinding(params, "cvSatSpread", { min: 0, max: 1, label: "Saturation spread" });
+        pane.addBinding(params, "cvDryAmount", { min: 0, max: 0.5, label: "Dry blade amount" });
+        pane.addBinding(params, "cvDryColor", { label: "Dry blade color" });
         pane.addBinding(params, "doubleSide", { label: "Double side" });
         pane.addBinding(params, "crossed", { label: "Crossed ribbons" });
         pane.addBinding(params, "skyBlend", { min: 0, max: 1, label: "Sky normal blend" });
@@ -700,6 +748,8 @@
           step: 32,
           label: "Blades per patch",
         });
+        fieldFolder.addBinding(params, "groundPlane", { label: "Ground plane" });
+        fieldFolder.addBinding(params, "groundColor", { label: "Ground color" });
 
         const lightFolder = pane.addFolder({ title: "Lighting" });
         lightFolder.addBinding(params, "sunIntensity", {
@@ -781,8 +831,15 @@
           uSkyBlend.value = params.skyBlend;
           uCylindrical.value = params.cylindrical;
           uCrossed.value = params.crossed ? 1.0 : 0.0;
+          uColorVar.value = params.colorVariation ? 1.0 : 0.0;
+          uCvHueSpread.value = params.cvHueSpread;
+          uCvSatSpread.value = params.cvSatSpread;
+          uCvDryAmount.value = params.cvDryAmount;
+          uCvDryCol.value.set(params.cvDryColor);
           material.side = params.doubleSide ? THREE.DoubleSide : THREE.FrontSide;
           material.needsUpdate = true;
+          floor.visible = params.groundPlane;
+          floorMat.color.set(params.groundColor);
           uViewThicken.value = params.viewThicken;
           uBladeCol.value.set(params.bladeColor);
           uTipCol.value.set(params.tipColor);
