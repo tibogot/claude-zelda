@@ -129,8 +129,8 @@
           naturalLean: 0.9,   // max resting lean (each blade gets 0..this randomly)
           clumpScale: 5.0,    // world-unit radius of each clump
           clumpStrength: 0.7, // 0 = fully random, 1 = fully clumped
-          crossed: false,     // add a second ribbon rotated 90° per blade
-          colorVariation: true,       // enable hue/saturation variation
+          crossed: true,      // add a second ribbon rotated 90° per blade
+          colorVariation: false,      // enable hue/saturation variation
           cvHueSpread: 0.08,          // max hue shift from base (0 = no hue change)
           cvSatSpread: 0.3,           // saturation variation range (0 = uniform)
           cvDryAmount: 0.15,          // fraction of blades that turn dry/yellow
@@ -147,7 +147,7 @@
           bladeYSegments: 8,
           bladeColor: "#0e300e",
           tipColor: "#004d05",
-          doubleSide: true,
+          doubleSide: false,
           bssIntensity: 1.2,    // backscatter strength
           bssPower: 2.0,        // falloff sharpness (lower = wider glow)
           bssColor: "#2d7a2d",  // transmitted light color
@@ -167,6 +167,9 @@
           skyMie: 0.005,
           skyMieG: 0.8,
           environmentIntensity: 0.45,
+          specular: false,            // enable waxy specular sheen
+          specRoughness: 0.55,       // blade roughness when specular is on
+          specEnvIntensity: 0.15,    // env map reflection when specular is on
           groundPlane: true,          // show ground plane under grass
           groundColor: "#1a2e0a",    // dark earthy green
           fieldSize: 20,    // size of ONE patch (world units)
@@ -180,8 +183,8 @@
         const uNaturalLean = uniform(params.naturalLean);
         const uClumpScale = uniform(params.clumpScale);
         const uClumpStrength = uniform(params.clumpStrength);
-        const uCrossed = uniform(0);
-        const uColorVar = uniform(params.colorVariation ? 1.0 : 0.0);
+        const uCrossed = uniform(1);
+        const uColorVar = uniform(0);
         const uCvHueSpread = uniform(params.cvHueSpread);
         const uCvSatSpread = uniform(params.cvSatSpread);
         const uCvDryAmount = uniform(params.cvDryAmount);
@@ -215,7 +218,7 @@
         // High roughness + no env specular: thin DoubleSide blades otherwise pick up
         // sharp IBL streaks and floor Z-fight shimmer that read as “weird lines” up close.
         const material = new THREE.MeshStandardNodeMaterial({
-          side: THREE.DoubleSide,
+          side: THREE.FrontSide,
           roughness: 0.92,
           metalness: 0,
         });
@@ -775,6 +778,11 @@
         bssFolder.addBinding(params, "bssPower", { min: 0.5, max: 8, label: "Sharpness" });
         bssFolder.addBinding(params, "bssColor", { label: "Glow color" });
 
+        const specFolder = pane.addFolder({ title: "Specular" });
+        specFolder.addBinding(params, "specular", { label: "Enable specular" });
+        specFolder.addBinding(params, "specRoughness", { min: 0.1, max: 0.92, label: "Roughness" });
+        specFolder.addBinding(params, "specEnvIntensity", { min: 0, max: 1, label: "Env reflection" });
+
         const skyFolder = pane.addFolder({ title: "Sky" });
         skyFolder.addBinding(params, "skyTurbidity", {
           min: 0,
@@ -840,6 +848,8 @@
           material.needsUpdate = true;
           floor.visible = params.groundPlane;
           floorMat.color.set(params.groundColor);
+          material.roughness = params.specular ? params.specRoughness : 0.92;
+          material.envMapIntensity = params.specular ? params.specEnvIntensity : 0;
           uViewThicken.value = params.viewThicken;
           uBladeCol.value.set(params.bladeColor);
           uTipCol.value.set(params.tipColor);
