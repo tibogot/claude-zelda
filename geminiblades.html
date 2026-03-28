@@ -139,7 +139,9 @@
           bssIntensity: 1.2,    // backscatter strength
           bssPower: 2.0,        // falloff sharpness (lower = wider glow)
           bssColor: "#2d7a2d",  // transmitted light color
-          roundCrossSection: 0, // 0 = bend-aware ribbon, 1 = full rounded fan
+          skyBlend: 0.35,       // blend normal toward (0,1,0) — fixes dark side
+          cylindrical: 0.3,     // fan normals across blade width (cylinder illusion)
+          roundCrossSection: 0, // legacy, keep for compat
           viewThicken: 0.45, // yaw toward camera when edge-on (0 = off)
           sunIntensity: 3,
           sunColor: "#ffffff",
@@ -168,6 +170,8 @@
         const uBladeCol = uniform(new THREE.Color(params.bladeColor));
         const uTipCol = uniform(new THREE.Color(params.tipColor));
         const uRoundCross = uniform(params.roundCrossSection);
+        const uSkyBlend = uniform(params.skyBlend);
+        const uCylindrical = uniform(params.cylindrical);
         const uViewThicken = uniform(params.viewThicken);
         const uBladeHeight = uniform(params.bladeHeight);
         const uSunDir = uniform(new THREE.Vector3(params.sunX, params.sunY, params.sunZ).normalize());
@@ -288,9 +292,11 @@
 
           const T = normalize(sub(sP, sM));
           const gvn = normalize(vec3(float(0), negate(T.z), T.y));
-          const spread = uRoundCross.mul(float(Math.PI * 0.3));
-          const nL = normalize(rotY(spread, gvn));
-          const nR = normalize(rotY(negate(spread), gvn));
+          // Cylindrical normals: fan left/right across blade width so it
+          // catches light from multiple directions like a rounded surface.
+          const cylSpread = uCylindrical.mul(float(Math.PI * 0.5));
+          const nL = normalize(rotY(cylSpread, gvn));
+          const nR = normalize(rotY(negate(cylSpread), gvn));
           const fanN = normalize(mix(nL, nR, vUv.x));
 
           const midLocal = vec3(off.x, bladeH.mul(float(0.5)), off.z);
@@ -321,8 +327,11 @@
           const nYaw = normalize(rotY(randomYaw, fanN));
           const pOut = rotY(deltaYaw, pYaw);
           const nOut = normalize(rotY(deltaYaw, nYaw));
-          normalLocal.assign(nOut);
-          vCustomNormal.assign(nOut);
+          // Sky blend: tilt normals toward up so blades catch overhead light
+          // from all sides — this is what eliminates the dark-side problem.
+          const nFinal = normalize(mix(nOut, vec3(float(0), float(1), float(0)), uSkyBlend));
+          normalLocal.assign(nFinal);
+          vCustomNormal.assign(nFinal);
 
           return vec3(pOut.x.add(off.x), pOut.y, pOut.z.add(off.z));
         })();
@@ -582,11 +591,8 @@
         pane.addBinding(params, "windAngle", { min: 0, max: 360, step: 1, label: "Wind angle (°)" });
         pane.addBinding(params, "windWaveScale", { min: 0.01, max: 0.8, label: "Wave scale" });
         pane.addBinding(params, "doubleSide", { label: "Double side" });
-        pane.addBinding(params, "roundCrossSection", {
-          min: 0,
-          max: 1,
-          label: "Rounded normals",
-        });
+        pane.addBinding(params, "skyBlend", { min: 0, max: 1, label: "Sky normal blend" });
+        pane.addBinding(params, "cylindrical", { min: 0, max: 1, label: "Cylindrical normals" });
         pane.addBinding(params, "viewThicken", {
           min: 0,
           max: 1,
@@ -712,6 +718,8 @@
           uWindWaveScale.value = params.windWaveScale;
           uBladeHeight.value = params.bladeHeight;
           uRoundCross.value = params.roundCrossSection;
+          uSkyBlend.value = params.skyBlend;
+          uCylindrical.value = params.cylindrical;
           material.side = params.doubleSide ? THREE.DoubleSide : THREE.FrontSide;
           material.needsUpdate = true;
           uViewThicken.value = params.viewThicken;
