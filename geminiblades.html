@@ -108,7 +108,7 @@
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         renderer.toneMapping = THREE.ACESFilmicToneMapping;
         renderer.toneMappingExposure = 1;
-        renderer.shadowMap.enabled = false;
+        renderer.shadowMap.enabled = true;
         document.body.appendChild(renderer.domElement);
 
         camera = new THREE.PerspectiveCamera(
@@ -167,6 +167,9 @@
           skyMie: 0.005,
           skyMieG: 0.8,
           environmentIntensity: 0.45,
+          grassReceiveShadow: true,   // grass receives shadows from other objects
+          grassCastShadow: false,     // grass casts shadows (expensive)
+          shadowDebug: false,         // show torusknot to test shadow receiving
           specular: false,            // enable waxy specular sheen
           specRoughness: 0.55,       // blade roughness when specular is on
           specEnvIntensity: 0.15,    // env map reflection when specular is on
@@ -589,6 +592,8 @@
             for (let c = 0; c < G; c++) {
               const m = new THREE.Mesh(sharedPatchGeo, material);
               m.frustumCulled = false;
+              m.receiveShadow = params.grassReceiveShadow;
+              m.castShadow = params.grassCastShadow;
               m.position.set(c * params.fieldSize - half, 0, r * params.fieldSize - half);
               grassGroup.add(m);
             }
@@ -619,6 +624,7 @@
           floorMat,
         );
         floor.rotation.x = -Math.PI / 2;
+        floor.receiveShadow = true;
         floor.visible = params.groundPlane;
         scene.add(floor);
         const sun = new THREE.DirectionalLight(
@@ -626,12 +632,31 @@
           params.sunIntensity,
         );
         sun.position.set(params.sunX, params.sunY, params.sunZ);
-        sun.castShadow = false;
+        sun.castShadow = true;
+        sun.shadow.mapSize.width = 2048;
+        sun.shadow.mapSize.height = 2048;
+        sun.shadow.camera.near = 0.5;
+        sun.shadow.camera.far = 200;
+        const shadowExtent = totalFieldSize() * 0.6;
+        sun.shadow.camera.left = -shadowExtent;
+        sun.shadow.camera.right = shadowExtent;
+        sun.shadow.camera.top = shadowExtent;
+        sun.shadow.camera.bottom = -shadowExtent;
         const ambient = new THREE.AmbientLight(
           params.ambientColor,
           params.ambientIntensity,
         );
         scene.add(sun, ambient);
+
+        // Shadow debug mesh — torusknot floating above the field
+        const debugKnot = new THREE.Mesh(
+          new THREE.TorusKnotGeometry(8, 2.5, 100, 16),
+          new THREE.MeshStandardMaterial({ color: 0x888888 }),
+        );
+        debugKnot.position.set(0, 25, 0);
+        debugKnot.castShadow = true;
+        debugKnot.visible = false;
+        scene.add(debugKnot);
 
         // ── Sky (WebGPU SkyMesh + PMREM env), same pattern as grass-sandbox.html ──
         const sky = new SkyMesh();
@@ -753,6 +778,9 @@
         });
         fieldFolder.addBinding(params, "groundPlane", { label: "Ground plane" });
         fieldFolder.addBinding(params, "groundColor", { label: "Ground color" });
+        fieldFolder.addBinding(params, "grassReceiveShadow", { label: "Receive shadow" });
+        fieldFolder.addBinding(params, "grassCastShadow", { label: "Cast shadow" });
+        fieldFolder.addBinding(params, "shadowDebug", { label: "Shadow debug mesh" });
 
         const lightFolder = pane.addFolder({ title: "Lighting" });
         lightFolder.addBinding(params, "sunIntensity", {
@@ -850,6 +878,11 @@
           floorMat.color.set(params.groundColor);
           material.roughness = params.specular ? params.specRoughness : 0.92;
           material.envMapIntensity = params.specular ? params.specEnvIntensity : 0;
+          grassGroup.children.forEach(m => {
+            m.receiveShadow = params.grassReceiveShadow;
+            m.castShadow = params.grassCastShadow;
+          });
+          debugKnot.visible = params.shadowDebug;
           uViewThicken.value = params.viewThicken;
           uBladeCol.value.set(params.bladeColor);
           uTipCol.value.set(params.tipColor);
