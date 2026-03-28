@@ -125,6 +125,8 @@
         const params = {
           windSpeed: 0.2,
           windStrength: 1.4,
+          maxAngle: 1.4,      // safe max total bend — no blade ever exceeds this
+          naturalLean: 0.9,   // max resting lean (each blade gets 0..this randomly)
           windAngle: 0,       // degrees — direction the wind travels (0 = +X)
           windWaveScale: 0.12, // spatial frequency: larger = tighter waves
           bendFocus: 1.0, // The 'Curve' control
@@ -162,6 +164,8 @@
 
         const uWindSpeed = uniform(params.windSpeed);
         const uWindStrength = uniform(params.windStrength);
+        const uMaxAngle = uniform(params.maxAngle);
+        const uNaturalLean = uniform(params.naturalLean);
         const uWindDirX = uniform(1.0);
         const uWindDirZ = uniform(0.0);
         const uWindWaveScale = uniform(params.windWaveScale);
@@ -231,7 +235,7 @@
           );
           const randomYaw = h0.mul(PI.mul(2));
           const hScale = mix(float(0.75), float(1.5), h2);
-          const leanBias = mix(float(0.06), float(0.32), h3);
+          const naturalLean = h3.mul(uNaturalLean);
           const bladeH = uBladeHeight.mul(hScale);
 
           const baseStiffness = smoothstep(0.0, uStiffness, vUv.y);
@@ -245,13 +249,14 @@
             bladeWorld.z.mul(uWindWaveScale).add(uWindDirZ.mul(tBase)),
           );
           const wave = mx_noise_float(waveUV);
-          const windBase = wave.add(float(0.4)); // same remap as original — range preserved
-          // small per-blade micro-flutter keeps individual life
+          const windBase = wave.add(float(0.4));
           const windMicro = mx_noise_float(tBlade.mul(float(4.0))).mul(float(0.15));
-          const totalWindForce = windBase.add(windMicro).mul(uWindStrength);
-          const angle = totalWindForce
-            .mul(curveWeight)
-            .add(leanBias.mul(vUv.y));
+          // Available room shrinks as naturalLean grows toward maxAngle.
+          // Heavily-leaned blades quiver (small amplitude), upright blades do big sweeps.
+          const room = max(float(0), uMaxAngle.sub(naturalLean));
+          const windScaled = windBase.add(windMicro).mul(uWindStrength).mul(room.div(uMaxAngle));
+          const totalForce = naturalLean.add(windScaled);
+          const angle = totalForce.mul(curveWeight);
 
           const L = vUv.y.mul(bladeH);
           const arcX = sin(angle).mul(L);
@@ -272,7 +277,7 @@
 
           const bsP = smoothstep(0.0, uStiffness, tp);
           const cwP = tp.pow(uBendFocus).mul(bsP);
-          const angP = totalWindForce.mul(cwP).add(leanBias.mul(tp));
+          const angP = totalForce.mul(cwP);
           const lenP = tp.mul(bladeH);
           const sP = vec3(
             sin(angP).mul(lenP),
@@ -282,7 +287,7 @@
 
           const bsM = smoothstep(0.0, uStiffness, tm);
           const cwM = tm.pow(uBendFocus).mul(bsM);
-          const angM = totalWindForce.mul(cwM).add(leanBias.mul(tm));
+          const angM = totalForce.mul(cwM);
           const lenM = tm.mul(bladeH);
           const sM = vec3(
             sin(angM).mul(lenM),
@@ -588,6 +593,8 @@
         });
         pane.addBinding(params, "windStrength", { min: 0, max: 5 });
         pane.addBinding(params, "windSpeed", { min: 0.1, max: 3 });
+        pane.addBinding(params, "maxAngle", { min: 0.5, max: 2.5, label: "Max bend angle" });
+        pane.addBinding(params, "naturalLean", { min: 0, max: 1.5, label: "Natural lean" });
         pane.addBinding(params, "windAngle", { min: 0, max: 360, step: 1, label: "Wind angle (°)" });
         pane.addBinding(params, "windWaveScale", { min: 0.01, max: 0.8, label: "Wave scale" });
         pane.addBinding(params, "doubleSide", { label: "Double side" });
@@ -712,6 +719,8 @@
           uStiffness.value = params.stiffness;
           uWindStrength.value = params.windStrength;
           uWindSpeed.value = params.windSpeed;
+          uMaxAngle.value = params.maxAngle;
+          uNaturalLean.value = params.naturalLean;
           const windRad = params.windAngle * (Math.PI / 180);
           uWindDirX.value = Math.cos(windRad);
           uWindDirZ.value = Math.sin(windRad);
