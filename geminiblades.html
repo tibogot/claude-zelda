@@ -14,9 +14,34 @@
       canvas {
         display: block;
       }
+      #tweakpane-scroll {
+        position: fixed;
+        top: 0;
+        right: 0;
+        width: 300px;
+        height: 100vh;
+        max-height: 100vh;
+        overflow-x: hidden;
+        overflow-y: auto;
+        z-index: 100;
+        pointer-events: auto;
+        box-sizing: border-box;
+        overscroll-behavior: contain;
+      }
+      #tweakpane-scroll::-webkit-scrollbar {
+        width: 10px;
+      }
+      #tweakpane-scroll::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.22);
+        border-radius: 5px;
+      }
+      #tweakpane-scroll::-webkit-scrollbar-track {
+        background: rgba(0, 0, 0, 0.2);
+      }
     </style>
   </head>
   <body>
+    <div id="tweakpane-scroll" aria-label="Settings panel"></div>
     <script type="importmap">
       {
         "imports": {
@@ -62,6 +87,9 @@
         modelWorldMatrixInverse,
         cameraPosition,
         length,
+        pow,
+        clamp,
+        varying,
       } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
@@ -80,6 +108,7 @@
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         renderer.toneMapping = THREE.ACESFilmicToneMapping;
         renderer.toneMappingExposure = 1;
+        renderer.shadowMap.enabled = false;
         document.body.appendChild(renderer.domElement);
 
         camera = new THREE.PerspectiveCamera(
@@ -88,23 +117,29 @@
           0.1,
           500000,
         );
-        camera.position.set(0, 5, 15);
+        camera.position.set(0, 40, 100);
 
         controls = new OrbitControls(camera, renderer.domElement);
         controls.enableDamping = true;
 
         const params = {
-          windSpeed: 0.6,
+          windSpeed: 0.2,
           windStrength: 1.4,
-          bendFocus: 2.5, // The 'Curve' control
+          windAngle: 0,       // degrees — direction the wind travels (0 = +X)
+          windWaveScale: 0.12, // spatial frequency: larger = tighter waves
+          bendFocus: 1.0, // The 'Curve' control
           stiffness: 0.2, // How much of the base is 'unbendable'
           bladeHeight: 10,
           bladeWidth: 0.8,
           tipTaperStart: 0.7,
           bladeYSegments: 8,
           bladeColor: "#0e300e",
-          tipColor: "#eaff00",
-          roundCrossSection: 1.0, // 0 = bend-aware ribbon, 1 = full rounded fan
+          tipColor: "#004d05",
+          doubleSide: true,
+          bssIntensity: 1.2,    // backscatter strength
+          bssPower: 2.0,        // falloff sharpness (lower = wider glow)
+          bssColor: "#2d7a2d",  // transmitted light color
+          roundCrossSection: 0, // 0 = bend-aware ribbon, 1 = full rounded fan
           viewThicken: 0.45, // yaw toward camera when edge-on (0 = off)
           sunIntensity: 3,
           sunColor: "#ffffff",
@@ -114,16 +149,20 @@
           ambientIntensity: 0.2,
           ambientColor: "#ffffff",
           skyTurbidity: 2,
-          skyRayleigh: 1.5,
+          skyRayleigh: 0.5,
           skyMie: 0.005,
           skyMieG: 0.8,
           environmentIntensity: 0.45,
-          fieldSize: 26,
-          grassCount: 720,
+          fieldSize: 20,    // size of ONE patch (world units)
+          gridSize: 7,      // patches per side → total field = fieldSize * gridSize
+          grassCount: 300,  // blades per patch (total = gridSize² × grassCount)
         };
 
         const uWindSpeed = uniform(params.windSpeed);
         const uWindStrength = uniform(params.windStrength);
+        const uWindDirX = uniform(1.0);
+        const uWindDirZ = uniform(0.0);
+        const uWindWaveScale = uniform(params.windWaveScale);
         const uBendFocus = uniform(params.bendFocus);
         const uStiffness = uniform(params.stiffness);
         const uBladeCol = uniform(new THREE.Color(params.bladeColor));
@@ -131,10 +170,23 @@
         const uRoundCross = uniform(params.roundCrossSection);
         const uViewThicken = uniform(params.viewThicken);
         const uBladeHeight = uniform(params.bladeHeight);
+        const uSunDir = uniform(new THREE.Vector3(params.sunX, params.sunY, params.sunZ).normalize());
+        const vCustomNormal = varying(vec3(0, 1, 0), 'vCN');
+        const uBssCol = uniform(new THREE.Color(params.bssColor));
+        const uBssIntensity = uniform(params.bssIntensity);
+        const uBssPower = uniform(params.bssPower);
 
+        // High roughness + no env specular: thin DoubleSide blades otherwise pick up
+        // sharp IBL streaks and floor Z-fight shimmer that read as “weird lines” up close.
         const material = new THREE.MeshStandardNodeMaterial({
           side: THREE.DoubleSide,
+          roughness: 0.92,
+          metalness: 0,
         });
+        material.envMapIntensity = 0;
+        material.polygonOffset = true;
+        material.polygonOffsetFactor = 1;
+        material.polygonOffsetUnits = 1;
 
         const vUv = uv();
 
@@ -153,10 +205,14 @@
         material.positionNode = Fn(() => {
           const off = attribute("offset", "vec3");
           const aPhase = attribute("aPhase", "float");
-          const tBlade = time.mul(uWindSpeed).add(aPhase);
+          const tBase = time.mul(uWindSpeed);
+          const tBlade = tBase.add(aPhase);
 
-          // Per-blade variation from ground XZ (same idea as grass-sandbox hash42(bladeWorld.xz))
-          const bladeXZ = vec2(off.x, off.z);
+          // World-space blade base — used for wave UV and per-blade hashes.
+          // Using world position means patches share a seamless wave and
+          // blades at the same local offset in different patches look different.
+          const bladeWorld = modelWorldMatrix.mul(vec4(off.x, float(0), off.z, float(1))).xyz;
+          const bladeXZ = vec2(bladeWorld.x, bladeWorld.z);
           const h0 = fract(
             sin(dot(bladeXZ, vec2(127.1, 311.7))).mul(float(43758.5453)),
           );
@@ -177,15 +233,32 @@
           const baseStiffness = smoothstep(0.0, uStiffness, vUv.y);
           const curveWeight = vUv.y.pow(uBendFocus).mul(baseStiffness);
 
-          const windBase = mx_noise_float(tBlade).add(0.4);
-          const windGust = mx_noise_float(tBlade.mul(3.0)).mul(0.3);
-          const totalWindForce = windBase.add(windGust).mul(uWindStrength);
-          const angle = totalWindForce.mul(curveWeight).add(leanBias.mul(vUv.y));
+          // Traveling wave: noise sampled at world XZ + windDir*time
+          // so blades at different positions feel different force → rolling wave
+          const waveUV = vec3(
+            bladeWorld.x.mul(uWindWaveScale).add(uWindDirX.mul(tBase)),
+            float(0),
+            bladeWorld.z.mul(uWindWaveScale).add(uWindDirZ.mul(tBase)),
+          );
+          const wave = mx_noise_float(waveUV);
+          const windBase = wave.add(float(0.4)); // same remap as original — range preserved
+          // small per-blade micro-flutter keeps individual life
+          const windMicro = mx_noise_float(tBlade.mul(float(4.0))).mul(float(0.15));
+          const totalWindForce = windBase.add(windMicro).mul(uWindStrength);
+          const angle = totalWindForce
+            .mul(curveWeight)
+            .add(leanBias.mul(vUv.y));
 
           const L = vUv.y.mul(bladeH);
           const arcX = sin(angle).mul(L);
           const arcY = cos(angle).mul(L);
-          const zRollPhase = mx_noise_float(tBlade.add(5.0)).mul(0.2);
+          // cross-direction sway also travels as a wave (perpendicular to wind dir)
+          const zWaveUV = vec3(
+            bladeWorld.z.mul(uWindWaveScale).add(uWindDirZ.mul(tBase)).add(float(17.3)),
+            float(0),
+            bladeWorld.x.mul(uWindWaveScale).sub(uWindDirX.mul(tBase)).add(float(31.7)),
+          );
+          const zRollPhase = mx_noise_float(zWaveUV).mul(float(0.4)).sub(float(0.2));
           const arcZ = sin(zRollPhase).mul(L).mul(curveWeight).mul(0.2);
 
           const ty = vUv.y;
@@ -228,9 +301,11 @@
           );
           const lenXZ = length(vec2(viewL.x, viewL.z));
           const faceZ = abs(dot(viewL, vec3(float(0), float(0), float(1))));
-          const edgeOn = smoothstep(float(0.12), float(0.55), sub(1, faceZ)).mul(
-            smoothstep(float(0.08), float(0.35), lenXZ),
-          );
+          const edgeOn = smoothstep(
+            float(0.12),
+            float(0.55),
+            sub(1, faceZ),
+          ).mul(smoothstep(float(0.08), float(0.35), lenXZ));
           const yawMax = float(0.55);
           const deltaYaw = uViewThicken
             .mul(edgeOn)
@@ -247,21 +322,27 @@
           const pOut = rotY(deltaYaw, pYaw);
           const nOut = normalize(rotY(deltaYaw, nYaw));
           normalLocal.assign(nOut);
+          vCustomNormal.assign(nOut);
 
-          return vec3(
-            pOut.x.add(off.x),
-            pOut.y,
-            pOut.z.add(off.z),
-          );
+          return vec3(pOut.x.add(off.x), pOut.y, pOut.z.add(off.z));
         })();
         material.colorNode = Fn(() => {
           const off = attribute("offset", "vec3");
-          const bladeXZ = vec2(off.x, off.z);
+          const bladeWorldC = modelWorldMatrix.mul(vec4(off.x, float(0), off.z, float(1))).xyz;
+          const bladeXZ = vec2(bladeWorldC.x, bladeWorldC.z);
           const h1 = fract(
             sin(dot(bladeXZ, vec2(269.5, 183.3))).mul(float(43758.5453)),
           );
           const randomShade = mix(float(0.75), float(1.0), h1);
           return mix(uBladeCol, uTipCol, vUv.y).mul(vec3(randomShade));
+        })();
+
+        // SSS as emissiveNode — added AFTER PBR lighting, so the dark side
+        // gets the glow regardless of ambient factor (unlike colorNode which is albedo).
+        material.emissiveNode = Fn(() => {
+          const backScat = max(dot(negate(uSunDir), normalize(vCustomNormal)), float(0));
+          const sss = clamp(pow(backScat, uBssPower).mul(uBssIntensity), float(0), float(1));
+          return uBssCol.mul(sss);
         })();
 
         // --- GEOMETRY ---
@@ -365,8 +446,7 @@
           );
           ig.instanceCount = numGrass;
           const half = patchSize * 0.5;
-          const r =
-            Math.sqrt(half * half * 2 + bladeHeight * bladeHeight) + 2;
+          const r = Math.sqrt(half * half * 2 + bladeHeight * bladeHeight) + 2;
           ig.boundingSphere = new THREE.Sphere(
             new THREE.Vector3(0, bladeHeight * 0.5, 0),
             r,
@@ -374,7 +454,7 @@
           return ig;
         }
 
-        function buildGrassGeometry() {
+        function buildPatchGeometry() {
           const base = createBladeGeometry(
             params.bladeHeight,
             params.bladeWidth,
@@ -391,11 +471,29 @@
           return field;
         }
 
-        const geometry = buildGrassGeometry();
+        // Grid of patch meshes — all share one geometry, each positioned at its cell center.
+        const grassGroup = new THREE.Group();
+        scene.add(grassGroup);
+        let sharedPatchGeo = null;
 
-        const grass = new THREE.Mesh(geometry, material);
-        grass.frustumCulled = false;
-        scene.add(grass);
+        function buildGrassField() {
+          // Dispose old meshes + geometry
+          while (grassGroup.children.length) grassGroup.remove(grassGroup.children[0]);
+          if (sharedPatchGeo) { sharedPatchGeo.dispose(); sharedPatchGeo = null; }
+
+          sharedPatchGeo = buildPatchGeometry();
+          const G = Math.max(1, Math.round(params.gridSize));
+          const half = (G - 1) * 0.5 * params.fieldSize;
+          for (let r = 0; r < G; r++) {
+            for (let c = 0; c < G; c++) {
+              const m = new THREE.Mesh(sharedPatchGeo, material);
+              m.frustumCulled = false;
+              m.position.set(c * params.fieldSize - half, 0, r * params.fieldSize - half);
+              grassGroup.add(m);
+            }
+          }
+        }
+        buildGrassField();
 
         function grassRebuildKey() {
           return [
@@ -405,23 +503,28 @@
             Math.round(params.bladeYSegments),
             params.fieldSize,
             Math.round(params.grassCount),
+            Math.round(params.gridSize),
           ].join("|");
         }
         let lastGrassRebuildKey = grassRebuildKey();
 
         // Ground/Lights
+        function totalFieldSize() {
+          return Math.max(1, Math.round(params.gridSize)) * params.fieldSize;
+        }
         const floorMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0a });
         const floor = new THREE.Mesh(
-          new THREE.PlaneGeometry(
-            Math.max(12, params.fieldSize + 8),
-            Math.max(12, params.fieldSize + 8),
-          ),
+          new THREE.PlaneGeometry(totalFieldSize() + 8, totalFieldSize() + 8),
           floorMat,
         );
         floor.rotation.x = -Math.PI / 2;
         scene.add(floor);
-        const sun = new THREE.DirectionalLight(params.sunColor, params.sunIntensity);
+        const sun = new THREE.DirectionalLight(
+          params.sunColor,
+          params.sunIntensity,
+        );
         sun.position.set(params.sunX, params.sunY, params.sunZ);
+        sun.castShadow = false;
         const ambient = new THREE.AmbientLight(
           params.ambientColor,
           params.ambientIntensity,
@@ -460,7 +563,10 @@
         bakeSkyEnvironment();
 
         // --- GUI ---
-        const pane = new Pane({ title: "Arc Shape Controller" });
+        const pane = new Pane({
+          title: "Arc Shape Controller",
+          container: document.getElementById("tweakpane-scroll"),
+        });
         pane.addBinding(params, "bendFocus", {
           min: 0.5,
           max: 5.0,
@@ -473,6 +579,9 @@
         });
         pane.addBinding(params, "windStrength", { min: 0, max: 5 });
         pane.addBinding(params, "windSpeed", { min: 0.1, max: 3 });
+        pane.addBinding(params, "windAngle", { min: 0, max: 360, step: 1, label: "Wind angle (°)" });
+        pane.addBinding(params, "windWaveScale", { min: 0.01, max: 0.8, label: "Wave scale" });
+        pane.addBinding(params, "doubleSide", { label: "Double side" });
         pane.addBinding(params, "roundCrossSection", {
           min: 0,
           max: 1,
@@ -513,17 +622,23 @@
         bladeFolder.addBinding(params, "tipColor", { label: "Tip color" });
 
         const fieldFolder = pane.addFolder({ title: "Field" });
+        fieldFolder.addBinding(params, "gridSize", {
+          min: 1,
+          max: 15,
+          step: 1,
+          label: "Grid size (NxN patches)",
+        });
         fieldFolder.addBinding(params, "fieldSize", {
           min: 4,
-          max: 60,
+          max: 120,
           step: 0.5,
           label: "Patch size",
         });
         fieldFolder.addBinding(params, "grassCount", {
           min: 32,
-          max: 12000,
+          max: 4000,
           step: 32,
-          label: "Grass count",
+          label: "Blades per patch",
         });
 
         const lightFolder = pane.addFolder({ title: "Lighting" });
@@ -544,6 +659,11 @@
         lightFolder.addBinding(params, "ambientColor", {
           label: "Ambient color",
         });
+
+        const bssFolder = pane.addFolder({ title: "Backscatter (SSS)" });
+        bssFolder.addBinding(params, "bssIntensity", { min: 0, max: 3, label: "Intensity" });
+        bssFolder.addBinding(params, "bssPower", { min: 0.5, max: 8, label: "Sharpness" });
+        bssFolder.addBinding(params, "bssColor", { label: "Glow color" });
 
         const skyFolder = pane.addFolder({ title: "Sky" });
         skyFolder.addBinding(params, "skyTurbidity", {
@@ -576,9 +696,8 @@
           const gk = grassRebuildKey();
           if (gk !== lastGrassRebuildKey) {
             lastGrassRebuildKey = gk;
-            grass.geometry.dispose();
-            grass.geometry = buildGrassGeometry();
-            const fs = Math.max(12, params.fieldSize + 8);
+            buildGrassField();
+            const fs = totalFieldSize() + 8;
             floor.geometry.dispose();
             floor.geometry = new THREE.PlaneGeometry(fs, fs);
           }
@@ -587,14 +706,24 @@
           uStiffness.value = params.stiffness;
           uWindStrength.value = params.windStrength;
           uWindSpeed.value = params.windSpeed;
+          const windRad = params.windAngle * (Math.PI / 180);
+          uWindDirX.value = Math.cos(windRad);
+          uWindDirZ.value = Math.sin(windRad);
+          uWindWaveScale.value = params.windWaveScale;
           uBladeHeight.value = params.bladeHeight;
           uRoundCross.value = params.roundCrossSection;
+          material.side = params.doubleSide ? THREE.DoubleSide : THREE.FrontSide;
+          material.needsUpdate = true;
           uViewThicken.value = params.viewThicken;
           uBladeCol.value.set(params.bladeColor);
           uTipCol.value.set(params.tipColor);
           sun.intensity = params.sunIntensity;
           sun.color.set(params.sunColor);
           sun.position.set(params.sunX, params.sunY, params.sunZ);
+          uSunDir.value.set(params.sunX, params.sunY, params.sunZ).normalize();
+          uBssCol.value.set(params.bssColor);
+          uBssIntensity.value = params.bssIntensity;
+          uBssPower.value = params.bssPower;
           ambient.intensity = params.ambientIntensity;
           ambient.color.set(params.ambientColor);
           updateSkyParams();
