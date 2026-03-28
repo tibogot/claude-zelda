@@ -129,6 +129,7 @@
           naturalLean: 0.9,   // max resting lean (each blade gets 0..this randomly)
           clumpScale: 5.0,    // world-unit radius of each clump
           clumpStrength: 0.7, // 0 = fully random, 1 = fully clumped
+          crossed: false,     // add a second ribbon rotated 90° per blade
           aoBase: 0.25,       // brightness at blade base (0 = black, 1 = no AO)
           aoPower: 2.0,       // curve — higher = AO more concentrated near base
           windAngle: 0,       // degrees — direction the wind travels (0 = +X)
@@ -172,6 +173,7 @@
         const uNaturalLean = uniform(params.naturalLean);
         const uClumpScale = uniform(params.clumpScale);
         const uClumpStrength = uniform(params.clumpStrength);
+        const uCrossed = uniform(0);
         const uAoBase = uniform(params.aoBase);
         const uAoPower = uniform(params.aoPower);
         const uWindDirX = uniform(1.0);
@@ -225,6 +227,7 @@
         material.positionNode = Fn(() => {
           const off = attribute("offset", "vec3");
           const aPhase = attribute("aPhase", "float");
+          const aIsCross = attribute("aIsCross", "float");
           const tBase = time.mul(uWindSpeed);
           const tBlade = tBase.add(aPhase);
 
@@ -265,6 +268,9 @@
           const clumpHeightScale = mix(float(0.6), float(1.4), cA);
           const naturalLean = mix(h3.mul(uNaturalLean), cD.mul(uNaturalLean), clumpInfluence);
           const bladeH = uBladeHeight.mul(mix(hScale, clumpHeightScale, clumpInfluence));
+          // Cross ribbon: +90° yaw, collapsed to zero height when uCrossed=0
+          const crossedYaw = randomYaw.add(aIsCross.mul(PI.mul(0.5)));
+          const crossedBladeH = bladeH.mul(mix(float(1.0), uCrossed, aIsCross));
           // Clump color tint — passed to colorNode via varying
           vClumpShade.assign(mix(float(1.0), mix(float(0.82), float(1.18), cB), clumpInfluence));
 
@@ -288,7 +294,7 @@
           const totalForce = naturalLean.add(windScaled);
           const angle = totalForce.mul(curveWeight);
 
-          const L = vUv.y.mul(bladeH);
+          const L = vUv.y.mul(crossedBladeH);
           const arcX = sin(angle).mul(L);
           const arcY = cos(angle).mul(L);
           // cross-direction sway also travels as a wave (perpendicular to wind dir)
@@ -308,7 +314,7 @@
           const bsP = smoothstep(0.0, uStiffness, tp);
           const cwP = tp.pow(uBendFocus).mul(bsP);
           const angP = totalForce.mul(cwP);
-          const lenP = tp.mul(bladeH);
+          const lenP = tp.mul(crossedBladeH);
           const sP = vec3(
             sin(angP).mul(lenP),
             cos(angP).mul(lenP),
@@ -318,7 +324,7 @@
           const bsM = smoothstep(0.0, uStiffness, tm);
           const cwM = tm.pow(uBendFocus).mul(bsM);
           const angM = totalForce.mul(cwM);
-          const lenM = tm.mul(bladeH);
+          const lenM = tm.mul(crossedBladeH);
           const sM = vec3(
             sin(angM).mul(lenM),
             cos(angM).mul(lenM),
@@ -334,7 +340,7 @@
           const nR = normalize(rotY(negate(cylSpread), gvn));
           const fanN = normalize(mix(nL, nR, vUv.x));
 
-          const midLocal = vec3(off.x, bladeH.mul(float(0.5)), off.z);
+          const midLocal = vec3(off.x, crossedBladeH.mul(float(0.5)), off.z);
           const worldMid = modelWorldMatrix.mul(vec4(midLocal, 1)).xyz;
           const toCamW = normalize(sub(cameraPosition, worldMid));
           const viewL = normalize(
@@ -358,8 +364,8 @@
             arcY,
             arcZ.add(positionLocal.z),
           );
-          const pYaw = rotY(randomYaw, pArc);
-          const nYaw = normalize(rotY(randomYaw, fanN));
+          const pYaw = rotY(crossedYaw, pArc);
+          const nYaw = normalize(rotY(crossedYaw, fanN));
           const pOut = rotY(deltaYaw, pYaw);
           const nOut = normalize(rotY(deltaYaw, nYaw));
           // Sky blend: tilt normals toward up so blades catch overhead light
@@ -464,17 +470,25 @@
           const numCellsZ = Math.max(1, Math.ceil(numGrass / numCellsX));
           const cellW = patchSize / numCellsX;
           const cellH = patchSize / numCellsZ;
-          const offsets = new Float32Array(numGrass * 3);
-          const phases = new Float32Array(numGrass);
+          // Always generate 2× instances: first half = normal blades,
+          // second half = cross blades (+90° yaw in shader, hidden when uCrossed=0).
+          const total = numGrass * 2;
+          const offsets = new Float32Array(total * 3);
+          const phases = new Float32Array(total);
+          const isCrossArr = new Float32Array(total);
           for (let i = 0; i < numGrass; i++) {
             const col = i % numCellsX;
             const row = Math.floor(i / numCellsX);
-            offsets[i * 3] =
-              -patchSize * 0.5 + col * cellW + Math.random() * cellW;
-            offsets[i * 3 + 1] = 0;
-            offsets[i * 3 + 2] =
-              -patchSize * 0.5 + row * cellH + Math.random() * cellH;
-            phases[i] = Math.random() * Math.PI * 2;
+            const x = -patchSize * 0.5 + col * cellW + Math.random() * cellW;
+            const z = -patchSize * 0.5 + row * cellH + Math.random() * cellH;
+            const phase = Math.random() * Math.PI * 2;
+            offsets[i * 3] = x;     offsets[i * 3 + 1] = 0;  offsets[i * 3 + 2] = z;
+            phases[i] = phase;      isCrossArr[i] = 0;
+            offsets[(i + numGrass) * 3] = x;
+            offsets[(i + numGrass) * 3 + 1] = 0;
+            offsets[(i + numGrass) * 3 + 2] = z;
+            phases[i + numGrass] = phase;
+            isCrossArr[i + numGrass] = 1;
           }
           const ig = new THREE.InstancedBufferGeometry();
           if (baseBlade.index) ig.index = baseBlade.index.clone();
@@ -483,15 +497,10 @@
           if (baseBlade.attributes.normal) {
             ig.setAttribute("normal", baseBlade.attributes.normal.clone());
           }
-          ig.setAttribute(
-            "offset",
-            new THREE.InstancedBufferAttribute(offsets, 3),
-          );
-          ig.setAttribute(
-            "aPhase",
-            new THREE.InstancedBufferAttribute(phases, 1),
-          );
-          ig.instanceCount = numGrass;
+          ig.setAttribute("offset", new THREE.InstancedBufferAttribute(offsets, 3));
+          ig.setAttribute("aPhase", new THREE.InstancedBufferAttribute(phases, 1));
+          ig.setAttribute("aIsCross", new THREE.InstancedBufferAttribute(isCrossArr, 1));
+          ig.instanceCount = total;
           const half = patchSize * 0.5;
           const r = Math.sqrt(half * half * 2 + bladeHeight * bladeHeight) + 2;
           ig.boundingSphere = new THREE.Sphere(
@@ -635,6 +644,7 @@
         pane.addBinding(params, "windAngle", { min: 0, max: 360, step: 1, label: "Wind angle (°)" });
         pane.addBinding(params, "windWaveScale", { min: 0.01, max: 0.8, label: "Wave scale" });
         pane.addBinding(params, "doubleSide", { label: "Double side" });
+        pane.addBinding(params, "crossed", { label: "Crossed ribbons" });
         pane.addBinding(params, "skyBlend", { min: 0, max: 1, label: "Sky normal blend" });
         pane.addBinding(params, "cylindrical", { min: 0, max: 1, label: "Cylindrical normals" });
         pane.addBinding(params, "viewThicken", {
@@ -770,6 +780,7 @@
           uRoundCross.value = params.roundCrossSection;
           uSkyBlend.value = params.skyBlend;
           uCylindrical.value = params.cylindrical;
+          uCrossed.value = params.crossed ? 1.0 : 0.0;
           material.side = params.doubleSide ? THREE.DoubleSide : THREE.FrontSide;
           material.needsUpdate = true;
           uViewThicken.value = params.viewThicken;
