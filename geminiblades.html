@@ -127,6 +127,10 @@
           windStrength: 1.4,
           maxAngle: 1.4,      // safe max total bend — no blade ever exceeds this
           naturalLean: 0.9,   // max resting lean (each blade gets 0..this randomly)
+          clumpScale: 5.0,    // world-unit radius of each clump
+          clumpStrength: 0.7, // 0 = fully random, 1 = fully clumped
+          aoBase: 0.25,       // brightness at blade base (0 = black, 1 = no AO)
+          aoPower: 2.0,       // curve — higher = AO more concentrated near base
           windAngle: 0,       // degrees — direction the wind travels (0 = +X)
           windWaveScale: 0.12, // spatial frequency: larger = tighter waves
           bendFocus: 1.0, // The 'Curve' control
@@ -166,6 +170,10 @@
         const uWindStrength = uniform(params.windStrength);
         const uMaxAngle = uniform(params.maxAngle);
         const uNaturalLean = uniform(params.naturalLean);
+        const uClumpScale = uniform(params.clumpScale);
+        const uClumpStrength = uniform(params.clumpStrength);
+        const uAoBase = uniform(params.aoBase);
+        const uAoPower = uniform(params.aoPower);
         const uWindDirX = uniform(1.0);
         const uWindDirZ = uniform(0.0);
         const uWindWaveScale = uniform(params.windWaveScale);
@@ -175,11 +183,15 @@
         const uTipCol = uniform(new THREE.Color(params.tipColor));
         const uRoundCross = uniform(params.roundCrossSection);
         const uSkyBlend = uniform(params.skyBlend);
+        // Terrain normal — (0,1,0) on flat ground, replace with sampled heightmap
+        // normal when porting to index.html. Interface is ready, value changes later.
+        const uGroundNormal = uniform(new THREE.Vector3(0, 1, 0));
         const uCylindrical = uniform(params.cylindrical);
         const uViewThicken = uniform(params.viewThicken);
         const uBladeHeight = uniform(params.bladeHeight);
         const uSunDir = uniform(new THREE.Vector3(params.sunX, params.sunY, params.sunZ).normalize());
         const vCustomNormal = varying(vec3(0, 1, 0), 'vCN');
+        const vClumpShade = varying(float(1), 'vCS');
         const uBssCol = uniform(new THREE.Color(params.bssColor));
         const uBssIntensity = uniform(params.bssIntensity);
         const uBssPower = uniform(params.bssPower);
@@ -233,10 +245,28 @@
           const h3 = fract(
             sin(dot(bladeXZ, vec2(371.2, 113.7))).mul(float(43758.5453)),
           );
-          const randomYaw = h0.mul(PI.mul(2));
+          // --- Clump cell (Voronoi-style) ---
+          // Divide world into cells; each cell has a random center = the clump center.
+          // Blades near that center inherit the clump's personality.
+          const cellP = bladeXZ.div(uClumpScale);
+          const cellID = cellP.floor();
+          const cellFrac = fract(cellP);
+          const cA = fract(sin(dot(cellID, vec2(127.1, 311.7))).mul(float(43758.5453)));
+          const cB = fract(sin(dot(cellID, vec2(269.5, 183.3))).mul(float(43758.5453)));
+          const cC = fract(sin(dot(cellID, vec2(419.2, 371.9))).mul(float(43758.5453)));
+          const cD = fract(sin(dot(cellID, vec2(113.5, 271.9))).mul(float(43758.5453)));
+          // How close this blade is to its clump center (1 = at center, 0 = at edge)
+          const clumpDist = length(vec2(cA, cB).sub(cellFrac));
+          const clumpInfluence = smoothstep(float(0.75), float(0.05), clumpDist).mul(uClumpStrength);
+
+          // Blend individual random values toward clump values
+          const randomYaw = mix(h0.mul(PI.mul(2)), cC.mul(PI.mul(2)), clumpInfluence);
           const hScale = mix(float(0.75), float(1.5), h2);
-          const naturalLean = h3.mul(uNaturalLean);
-          const bladeH = uBladeHeight.mul(hScale);
+          const clumpHeightScale = mix(float(0.6), float(1.4), cA);
+          const naturalLean = mix(h3.mul(uNaturalLean), cD.mul(uNaturalLean), clumpInfluence);
+          const bladeH = uBladeHeight.mul(mix(hScale, clumpHeightScale, clumpInfluence));
+          // Clump color tint — passed to colorNode via varying
+          vClumpShade.assign(mix(float(1.0), mix(float(0.82), float(1.18), cB), clumpInfluence));
 
           const baseStiffness = smoothstep(0.0, uStiffness, vUv.y);
           const curveWeight = vUv.y.pow(uBendFocus).mul(baseStiffness);
@@ -334,7 +364,7 @@
           const nOut = normalize(rotY(deltaYaw, nYaw));
           // Sky blend: tilt normals toward up so blades catch overhead light
           // from all sides — this is what eliminates the dark-side problem.
-          const nFinal = normalize(mix(nOut, vec3(float(0), float(1), float(0)), uSkyBlend));
+          const nFinal = normalize(mix(nOut, uGroundNormal, uSkyBlend));
           normalLocal.assign(nFinal);
           vCustomNormal.assign(nFinal);
 
@@ -348,7 +378,10 @@
             sin(dot(bladeXZ, vec2(269.5, 183.3))).mul(float(43758.5453)),
           );
           const randomShade = mix(float(0.75), float(1.0), h1);
-          return mix(uBladeCol, uTipCol, vUv.y).mul(vec3(randomShade));
+          // AO: base of blade is darkened by neighboring blades, tip is fully lit.
+          // mix(aoBase, 1.0, uvY^power) — dark at root, bright at tip.
+          const ao = mix(uAoBase, float(1.0), pow(vUv.y, uAoPower));
+          return mix(uBladeCol, uTipCol, vUv.y).mul(vec3(randomShade.mul(vClumpShade).mul(ao)));
         })();
 
         // SSS as emissiveNode — added AFTER PBR lighting, so the dark side
@@ -595,6 +628,10 @@
         pane.addBinding(params, "windSpeed", { min: 0.1, max: 3 });
         pane.addBinding(params, "maxAngle", { min: 0.5, max: 2.5, label: "Max bend angle" });
         pane.addBinding(params, "naturalLean", { min: 0, max: 1.5, label: "Natural lean" });
+        pane.addBinding(params, "clumpScale", { min: 1, max: 20, label: "Clump size" });
+        pane.addBinding(params, "clumpStrength", { min: 0, max: 1, label: "Clump strength" });
+        pane.addBinding(params, "aoBase", { min: 0, max: 1, label: "AO base darkness" });
+        pane.addBinding(params, "aoPower", { min: 0.5, max: 6, label: "AO curve" });
         pane.addBinding(params, "windAngle", { min: 0, max: 360, step: 1, label: "Wind angle (°)" });
         pane.addBinding(params, "windWaveScale", { min: 0.01, max: 0.8, label: "Wave scale" });
         pane.addBinding(params, "doubleSide", { label: "Double side" });
@@ -721,6 +758,10 @@
           uWindSpeed.value = params.windSpeed;
           uMaxAngle.value = params.maxAngle;
           uNaturalLean.value = params.naturalLean;
+          uClumpScale.value = params.clumpScale;
+          uClumpStrength.value = params.clumpStrength;
+          uAoBase.value = params.aoBase;
+          uAoPower.value = params.aoPower;
           const windRad = params.windAngle * (Math.PI / 180);
           uWindDirX.value = Math.cos(windRad);
           uWindDirZ.value = Math.sin(windRad);
