@@ -79,7 +79,6 @@
         screenUV,
         cameraPosition,
         mx_noise_float,
-        Loop,
       } from "three/tsl";
 
       const WATER_Y = -0.1;
@@ -190,12 +189,8 @@
         const sigma2 = 2 * o.bowlSigma * o.bowlSigma;
         const bowl = -o.bowlDepth * Math.exp(-d2 / sigma2);
         const macro =
-          fbmPerlin(
-            x * o.macroScale,
-            z * o.macroScale,
-            permMacro,
-            4,
-          ) * o.mountainAmp;
+          fbmPerlin(x * o.macroScale, z * o.macroScale, permMacro, 4) *
+          o.mountainAmp;
         const hills =
           fbmPerlin(x * o.noiseScale, z * o.noiseScale, perm, o.octaves) *
           o.hillAmp;
@@ -249,9 +244,8 @@
             uvs[ui++] = tv;
             const hN = (y - minY) / ySpan;
             const distL = Math.hypot(x, z);
-            const wetNear = Math.exp(
-              -(distL * distL) / (2 * 44 * 44),
-            ) * (1 - hN * 0.75);
+            const wetNear =
+              Math.exp(-(distL * distL) / (2 * 44 * 44)) * (1 - hN * 0.75);
             const patch =
               0.88 +
               0.12 *
@@ -296,9 +290,8 @@
             const slope = Math.sqrt(sx * sx + sz * sz);
             const hN = (y - minY) / ySpan;
             const distL2 = Math.hypot(x, z);
-            const wetNear = Math.exp(
-              -(distL2 * distL2) / (2 * 44 * 44),
-            ) * (1 - hN * 0.75);
+            const wetNear =
+              Math.exp(-(distL2 * distL2) / (2 * 44 * 44)) * (1 - hN * 0.75);
             const rockW = Math.min(
               1,
               slope * 1.15 + hN * hN * 0.35 + Math.min(slope, 0.35) * hN,
@@ -316,7 +309,8 @@
             r = lerp1(r, rockR, rockBlend);
             g = lerp1(g, rockG, rockBlend);
             b = lerp1(b, rockB, rockBlend);
-            const dirtBlend = Math.max(0, slope - 0.45) * 1.1 * (1 - wetNear * 0.5);
+            const dirtBlend =
+              Math.max(0, slope - 0.45) * 1.1 * (1 - wetNear * 0.5);
             r = lerp1(r, dirtR, Math.min(1, dirtBlend));
             g = lerp1(g, dirtG, Math.min(1, dirtBlend));
             b = lerp1(b, dirtB, Math.min(1, dirtBlend));
@@ -473,49 +467,6 @@
         return v;
       });
 
-      /** Organic jitter Voronoi F1 (water-ocean-pro style); `jitter` 0 = grid, 1 = irregular. */
-      const voronoiF1Jitter = Fn(([p, jitter]) => {
-        const ip = floor(p);
-        const fp = fract(p);
-        const md = float(10.0).toVar();
-        for (const [nx, ny] of neighbors) {
-          const cellOffset = vec2(float(nx), float(ny));
-          const rnd = hash22(ip.add(cellOffset));
-          const pt = mix(vec2(0.5, 0.5), rnd, jitter);
-          md.assign(min(md, length(cellOffset.add(pt).sub(fp))));
-        }
-        return md;
-      });
-
-      const valueFbm5 = Fn(([p_immutable]) => {
-        const p = p_immutable.toVar();
-        const value = float(0.0).toVar();
-        const amp = float(1.0).toVar();
-        const totalAmp = float(0.0).toVar();
-        Loop(5, () => {
-          value.addAssign(amp.mul(vnoise2(p)));
-          totalAmp.addAssign(amp);
-          p.assign(p.mul(2.3));
-          amp.assign(amp.mul(0.4));
-        });
-        return value.div(max(totalAmp, float(1e-4)));
-      });
-
-      /** FBM of jitter Voronoi F1 — same idea as `worleyFbm` in water-ocean-pro.html */
-      const worleyFbm5 = Fn(([p_immutable, jitter]) => {
-        const p = p_immutable.toVar();
-        const value = float(0.0).toVar();
-        const amp = float(0.5).toVar();
-        const totalAmp = float(0.0).toVar();
-        Loop(5, () => {
-          value.addAssign(voronoiF1Jitter(p, jitter).mul(amp));
-          totalAmp.addAssign(amp);
-          p.assign(p.mul(2.0));
-          amp.assign(amp.mul(0.5));
-        });
-        return value.div(max(totalAmp, float(1e-4)));
-      });
-
       async function init() {
         const renderer = new THREE.WebGPURenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
@@ -587,9 +538,9 @@
           gradScale: 1.5,
           terrainSeed: 90210,
           terrainSegments: 128,
-          terrainMountainAmp: 20,
-          terrainMacroScale: 0.013,
-          terrainHillAmp: 9,
+          terrainMountainAmp: 9.5,
+          terrainMacroScale: 0.0072,
+          terrainHillAmp: 3.8,
           terrainNoiseScale: 0.055,
           terrainOctaves: 6,
           terrainBowlSigma: 46,
@@ -599,8 +550,7 @@
           terrainMetalness: 0.04,
           heightmapShoreFoam: true,
           shoreFoamWidth: 0.55,
-          /** How much Perlin/Worley modulates the distance band (multiplicative). */
-          shoreFoamNoise: 0.35,
+          shoreFoamNoise: 0.2,
           shoreFoamIntensity: 1.15,
           /** >1 = thinner / sharper contact band (pow on falloff). */
           shoreFoamSharpness: 1.35,
@@ -615,18 +565,13 @@
           shoreNoiseFineScale: 26,
           shoreNoiseFineAmt: 0.14,
           shoreNoiseFineSpeed: 1.2,
+          /** step() threshold for jagged breakup (lower = sparser). */
+          shoreJaggedCutoff: 0.48,
           /**
-           * Center of a smooth ramp on unified foam (0–1). With transition width,
-           * replaces hard `step` so noise + distance read as one layer.
+           * Shore jagged band + inward pulse ring modulation: `perlin` = `mx_noise_float`;
+           * `voronoiFbm` = Voronoi F1−smoothF1 × `fbm2` (same Voronoi folder sliders).
            */
-          shoreJaggedCutoff: 0.42,
-          /** Half-width of smoothstep band (higher = softer edge, less speckle). */
-          shoreFoamTransitionWidth: 0.14,
-          /**
-           * Primary shoreline jagged band: `perlin` vs `voronoiFbm` (Voronoi folder).
-           * Pulse ring noise is separate (`shorePulseNoiseStyle`).
-           */
-          shoreFoamNoiseStyle: "voronoiFbm",
+          shoreFoamNoiseStyle: "perlin",
           /** Voronoi smooth-min width (smaller = crisper cells). */
           shoreFoamVoroSmoothness: 0.11,
           /** Feature point drift speed inside Voronoi cells. */
@@ -635,58 +580,27 @@
           shoreFoamVoroEdgeGain: 3.2,
           /** How much `fbm2` blends into the Voronoi edge mask. */
           shoreFoamVoroFbmWeight: 0.72,
-          /** World XZ stretch for shore noise (≠1 = elongated cells / streaks). */
-          shoreNoiseAnisoX: 1,
-          shoreNoiseAnisoZ: 1,
-          /** Same for pulse ring noise UVs only. */
-          shorePulseNoiseAnisoX: 1,
-          shorePulseNoiseAnisoZ: 1,
-          /** Worley FBM foam (water-ocean-pro): organic cells + domain warp. */
-          shoreWorleyJitter: 0.85,
-          shoreWorleyWarpScale: 3,
-          shoreWorleyWarpStrength: 0.55,
-          shoreWorleyContrast: 1.5,
-          shoreWorleyThreshold: 0.35,
-          shoreWorleySoftness: 0.18,
-          shoreWorleyBrightness: 1,
-          /** Blend toward solid pulse color (1 = opaque tint at full mask). */
-          shorePulseOpacity: 1,
-          shorePulse2Opacity: 1,
           shorePrimaryFoamColor: "#ffffff",
           shorePulseFoamColor: "#c9ebff",
-          /** Second inward pulse ring (B); independent of ring A. */
-          shorePulse2FoamColor: "#a8d8ff",
-          /** Pulse ring noise (wiggle): `perlin` vs `voronoiFbm` — independent of shoreline. */
-          shorePulseNoiseStyle: "voronoiFbm",
           shorePulseEnabled: true,
           /** Inward pulse cycle speed (how fast rings travel / repeat). */
           shorePulseAnimSpeed: 0.38,
           /** How far into the lake (water-depth proxy) the ring travels (world units). */
           shorePulseMaxRange: 3.2,
-          /** >1 pushes the traveling front faster late in the cycle (non-linear motion). */
-          shorePulseTravelPower: 1,
-          /** Minimum water depth (proxy) before pulse draws; higher = only deeper water. */
-          shorePulseMinDist: 0.02,
           shorePulseRingWidth: 0.11,
-          /** Ring B thickness multiplier vs ring A. */
-          shorePulseRing2WidthMul: 1,
           shorePulseIntensity: 0.72,
           /** Higher = ring fades out faster as it travels. */
           shorePulseFade: 1.65,
           /** Second ring offset 0–1 (0.5 = staggered). */
           shorePulseStagger: 0.5,
           shorePulse2Intensity: 0.45,
-          /** Ring B edge pow (separate from ring A). */
-          shorePulseRing2Sharpness: 1.15,
-          /** Ring B travel fade (vs `shorePulseFade` for A). */
-          shorePulse2Fade: 1.65,
           /** Break up pulse rings with animated noise (0 = smooth ring). */
           shorePulseNoiseAmt: 0.35,
           shorePulseNoiseScale: 9,
           shorePulseNoiseAnimSpeed: 0.55,
           /** >1 = thinner brighter pulse band. */
           shorePulseRingSharpness: 1.15,
-          objectFoamFromDepth: false,
+          objectFoamFromDepth: true,
           dragonVisible: true,
           gizmoEnabled: true,
           /** World-space shore-style foam on dragon (noise + pulse); scales mix to foam color. */
@@ -786,7 +700,8 @@
         );
         heightmapDataTex.magFilter = THREE.LinearFilter;
         heightmapDataTex.minFilter = THREE.LinearFilter;
-        heightmapDataTex.wrapS = heightmapDataTex.wrapT = THREE.ClampToEdgeWrapping;
+        heightmapDataTex.wrapS = heightmapDataTex.wrapT =
+          THREE.ClampToEdgeWrapping;
         heightmapDataTex.flipY = false;
         heightmapDataTex.needsUpdate = true;
 
@@ -860,9 +775,12 @@
               renderer.domElement,
             );
             dragonTransformControls.setSize(1.15);
-            dragonTransformControls.addEventListener("dragging-changed", (ev) => {
-              controls.enabled = !ev.value;
-            });
+            dragonTransformControls.addEventListener(
+              "dragging-changed",
+              (ev) => {
+                controls.enabled = !ev.value;
+              },
+            );
             scene.add(dragonTransformControls.getHelper());
             dragonTransformControls.attach(dragonModelRoot);
             applyDragonVisibility();
@@ -905,48 +823,32 @@
           uShoreNoiseFineAmt.value = params.shoreNoiseFineAmt;
           uShoreNoiseFineSpeed.value = params.shoreNoiseFineSpeed;
           uShoreJaggedCutoff.value = params.shoreJaggedCutoff;
-          uShoreFoamTransitionWidth.value = params.shoreFoamTransitionWidth;
           uShoreFoamNoiseMode.value =
             params.shoreFoamNoiseStyle === "voronoiFbm" ? 1 : 0;
-          uShorePulseNoiseMode.value =
-            params.shorePulseNoiseStyle === "voronoiFbm" ? 1 : 0;
           uShoreFoamVoroSmoothness.value = params.shoreFoamVoroSmoothness;
           uShoreFoamVoroCellSpeed.value = params.shoreFoamVoroCellSpeed;
           uShoreFoamVoroEdgeGain.value = params.shoreFoamVoroEdgeGain;
           uShoreFoamVoroFbmWeight.value = params.shoreFoamVoroFbmWeight;
-          uShoreNoiseAnisoX.value = params.shoreNoiseAnisoX;
-          uShoreNoiseAnisoZ.value = params.shoreNoiseAnisoZ;
-          uShorePulseNoiseAnisoX.value = params.shorePulseNoiseAnisoX;
-          uShorePulseNoiseAnisoZ.value = params.shorePulseNoiseAnisoZ;
-          uShoreWorleyJitter.value = params.shoreWorleyJitter;
-          uShoreWorleyWarpScale.value = params.shoreWorleyWarpScale;
-          uShoreWorleyWarpStrength.value = params.shoreWorleyWarpStrength;
-          uShoreWorleyContrast.value = params.shoreWorleyContrast;
-          uShoreWorleyThreshold.value = params.shoreWorleyThreshold;
-          uShoreWorleySoftness.value = params.shoreWorleySoftness;
-          uShoreWorleyBrightness.value = params.shoreWorleyBrightness;
-          uShorePulseOpacity.value = params.shorePulseOpacity;
-          uShorePulse2Opacity.value = params.shorePulse2Opacity;
-          applyPaneColor(params.shorePrimaryFoamColor, uShorePrimaryFoamColor.value);
-          applyPaneColor(params.shorePulseFoamColor, uShorePulseFoamColor.value);
-          applyPaneColor(params.shorePulse2FoamColor, uShorePulse2FoamColor.value);
+          applyPaneColor(
+            params.shorePrimaryFoamColor,
+            uShorePrimaryFoamColor.value,
+          );
+          applyPaneColor(
+            params.shorePulseFoamColor,
+            uShorePulseFoamColor.value,
+          );
           uShorePulseEnabled.value = params.shorePulseEnabled ? 1 : 0;
           uShorePulseAnimSpeed.value = params.shorePulseAnimSpeed;
           uShorePulseMaxRange.value = params.shorePulseMaxRange;
-          uShorePulseTravelPower.value = params.shorePulseTravelPower;
-          uShorePulseMinDist.value = params.shorePulseMinDist;
           uShorePulseRingWidth.value = params.shorePulseRingWidth;
-          uShorePulseRing2WidthMul.value = params.shorePulseRing2WidthMul;
           uShorePulseIntensity.value = params.shorePulseIntensity;
           uShorePulseFade.value = params.shorePulseFade;
           uShorePulseStagger.value = params.shorePulseStagger;
           uShorePulse2Intensity.value = params.shorePulse2Intensity;
-          uShorePulse2Fade.value = params.shorePulse2Fade;
           uShorePulseNoiseAmt.value = params.shorePulseNoiseAmt;
           uShorePulseNoiseScale.value = params.shorePulseNoiseScale;
           uShorePulseNoiseAnimSpeed.value = params.shorePulseNoiseAnimSpeed;
           uShorePulseRingSharpness.value = params.shorePulseRingSharpness;
-          uShorePulseRing2Sharpness.value = params.shorePulseRing2Sharpness;
           uHeightmapFoamEnabled.value = params.heightmapShoreFoam ? 1 : 0;
           uObjectFoamFromDepth.value = params.objectFoamFromDepth ? 1 : 0;
           uDragonMeshFoam.value = params.dragonWaterFoam;
@@ -967,58 +869,43 @@
         const uShoreNoiseFineAmt = uniform(params.shoreNoiseFineAmt);
         const uShoreNoiseFineSpeed = uniform(params.shoreNoiseFineSpeed);
         const uShoreJaggedCutoff = uniform(params.shoreJaggedCutoff);
-        const uShoreFoamTransitionWidth = uniform(params.shoreFoamTransitionWidth);
         const uShoreFoamNoiseMode = uniform(
           params.shoreFoamNoiseStyle === "voronoiFbm" ? 1 : 0,
         );
-        const uShorePulseNoiseMode = uniform(
-          params.shorePulseNoiseStyle === "voronoiFbm" ? 1 : 0,
+        const uShoreFoamVoroSmoothness = uniform(
+          params.shoreFoamVoroSmoothness,
         );
-        const uShoreFoamVoroSmoothness = uniform(params.shoreFoamVoroSmoothness);
         const uShoreFoamVoroCellSpeed = uniform(params.shoreFoamVoroCellSpeed);
         const uShoreFoamVoroEdgeGain = uniform(params.shoreFoamVoroEdgeGain);
         const uShoreFoamVoroFbmWeight = uniform(params.shoreFoamVoroFbmWeight);
-        const uShoreNoiseAnisoX = uniform(params.shoreNoiseAnisoX);
-        const uShoreNoiseAnisoZ = uniform(params.shoreNoiseAnisoZ);
-        const uShorePulseNoiseAnisoX = uniform(params.shorePulseNoiseAnisoX);
-        const uShorePulseNoiseAnisoZ = uniform(params.shorePulseNoiseAnisoZ);
-        const uShoreWorleyJitter = uniform(params.shoreWorleyJitter);
-        const uShoreWorleyWarpScale = uniform(params.shoreWorleyWarpScale);
-        const uShoreWorleyWarpStrength = uniform(params.shoreWorleyWarpStrength);
-        const uShoreWorleyContrast = uniform(params.shoreWorleyContrast);
-        const uShoreWorleyThreshold = uniform(params.shoreWorleyThreshold);
-        const uShoreWorleySoftness = uniform(params.shoreWorleySoftness);
-        const uShoreWorleyBrightness = uniform(params.shoreWorleyBrightness);
-        const uShorePulseOpacity = uniform(params.shorePulseOpacity);
-        const uShorePulse2Opacity = uniform(params.shorePulse2Opacity);
         const uShorePrimaryFoamColor = uniform(
           new THREE.Color(params.shorePrimaryFoamColor),
         );
         const uShorePulseFoamColor = uniform(
           new THREE.Color(params.shorePulseFoamColor),
         );
-        const uShorePulse2FoamColor = uniform(
-          new THREE.Color(params.shorePulse2FoamColor),
-        );
         const uShorePulseEnabled = uniform(params.shorePulseEnabled ? 1 : 0);
         const uShorePulseAnimSpeed = uniform(params.shorePulseAnimSpeed);
         const uShorePulseMaxRange = uniform(params.shorePulseMaxRange);
-        const uShorePulseTravelPower = uniform(params.shorePulseTravelPower);
-        const uShorePulseMinDist = uniform(params.shorePulseMinDist);
         const uShorePulseRingWidth = uniform(params.shorePulseRingWidth);
-        const uShorePulseRing2WidthMul = uniform(params.shorePulseRing2WidthMul);
         const uShorePulseIntensity = uniform(params.shorePulseIntensity);
         const uShorePulseFade = uniform(params.shorePulseFade);
         const uShorePulseStagger = uniform(params.shorePulseStagger);
         const uShorePulse2Intensity = uniform(params.shorePulse2Intensity);
-        const uShorePulse2Fade = uniform(params.shorePulse2Fade);
         const uShorePulseNoiseAmt = uniform(params.shorePulseNoiseAmt);
         const uShorePulseNoiseScale = uniform(params.shorePulseNoiseScale);
-        const uShorePulseNoiseAnimSpeed = uniform(params.shorePulseNoiseAnimSpeed);
-        const uShorePulseRingSharpness = uniform(params.shorePulseRingSharpness);
-        const uShorePulseRing2Sharpness = uniform(params.shorePulseRing2Sharpness);
-        const uHeightmapFoamEnabled = uniform(params.heightmapShoreFoam ? 1 : 0);
-        const uObjectFoamFromDepth = uniform(params.objectFoamFromDepth ? 1 : 0);
+        const uShorePulseNoiseAnimSpeed = uniform(
+          params.shorePulseNoiseAnimSpeed,
+        );
+        const uShorePulseRingSharpness = uniform(
+          params.shorePulseRingSharpness,
+        );
+        const uHeightmapFoamEnabled = uniform(
+          params.heightmapShoreFoam ? 1 : 0,
+        );
+        const uObjectFoamFromDepth = uniform(
+          params.objectFoamFromDepth ? 1 : 0,
+        );
 
         const depthTexNode = texture(placeholderDepth, screenUV);
         const uDepthNear = uniform(0.1);
@@ -1052,10 +939,7 @@
         const uDragonMeshFoam = uniform(params.dragonWaterFoam);
         const uDragonPulseRangeMul = uniform(params.dragonPulseRangeMul);
 
-        /**
-         * `vec3`: primary mask, pulse ring A, pulse ring B (each × `uShorePulseEnabled`).
-         * `pulseRangeMul` = 1 lake, dragon scale on props.
-         */
+        /** Shared: primary jagged band + pulse rings (noise-modulated). `pulseRangeMul` = 1 lake, dragon scale on props. */
         const shoreFoamLayerMasks = Fn(([wXZ, distS, pulseRangeMul]) => {
           const absD = abs(distS);
           const foamBase = float(1).sub(
@@ -1069,12 +953,8 @@
             uTime.mul(uShoreNoiseAnimSpeed),
             uTime.mul(uShoreNoiseAnimSpeed.mul(uShoreNoiseScrollV)),
           );
-          const wAniso = vec2(
-            wXZ.x.mul(uShoreNoiseAnisoX),
-            wXZ.y.mul(uShoreNoiseAnisoZ),
-          );
-          const shoreUVMain = wAniso.mul(uShoreNoiseWorldScale).add(shoreScroll);
-          const shoreUVFine = wAniso
+          const shoreUVMain = wXZ.mul(uShoreNoiseWorldScale).add(shoreScroll);
+          const shoreUVFine = wXZ
             .mul(uShoreNoiseFineScale)
             .add(
               vec2(
@@ -1087,34 +967,27 @@
           const foamNPerlin = foamN0
             .add(foamN1.mul(uShoreNoiseFineAmt))
             .mul(uShoreNoiseContrast);
-          const uvWorPri = shoreUVMain.toVar();
-          const wWarpP = uvWorPri.mul(uShoreWorleyWarpScale);
-          const sw1 = valueFbm5(wWarpP);
-          const sw2 = valueFbm5(wWarpP.add(vec2(4, 4)));
-          uvWorPri.addAssign(
-            vec2(sw1.sub(0.5), sw2.sub(0.5)).mul(uShoreWorleyWarpStrength),
+          const tVoro = uTime.mul(uShoreNoiseAnimSpeed);
+          const f1v = voronoiF1(shoreUVMain, tVoro, uShoreFoamVoroCellSpeed);
+          const sf1v = voronoiSmoothF1(
+            shoreUVMain,
+            tVoro,
+            uShoreFoamVoroCellSpeed,
+            uShoreFoamVoroSmoothness,
           );
-          const nWorPri = worleyFbm5(uvWorPri, uShoreWorleyJitter).toVar();
-          nWorPri.assign(pow(nWorPri, uShoreWorleyContrast));
-          nWorPri.assign(
-            smoothstep(
-              uShoreWorleyThreshold,
-              uShoreWorleyThreshold.add(uShoreWorleySoftness),
-              nWorPri,
-            ),
+          const edgeV = saturate(f1v.sub(sf1v).mul(uShoreFoamVoroEdgeGain));
+          const fb = fbm2(shoreUVFine);
+          const foamNVoro = edgeV
+            .mul(float(1.12))
+            .add(fb.mul(uShoreFoamVoroFbmWeight))
+            .sub(float(0.42))
+            .mul(uShoreNoiseContrast);
+          const foamN = mix(foamNPerlin, foamNVoro, uShoreFoamNoiseMode);
+          const jaggedFoam = step(
+            uShoreJaggedCutoff,
+            foamShaped.add(foamN.mul(uShoreFoamNoiseAmt)),
           );
-          nWorPri.mulAssign(uShoreWorleyBrightness);
-          const worleyFoam01 = nWorPri.saturate();
-          const perlinFoam01 = foamNPerlin.mul(0.5).add(0.5).saturate();
-          const foamNoise01 = mix(perlinFoam01, worleyFoam01, uShoreFoamNoiseMode);
-          const noiseBlend = mix(float(1), foamNoise01, uShoreFoamNoiseAmt);
-          const unifiedFoam = foamShaped.mul(noiseBlend).saturate();
-          const tw = max(uShoreFoamTransitionWidth, float(0.02));
-          const bandLo = max(uShoreJaggedCutoff.sub(tw), float(0));
-          const bandHi = min(uShoreJaggedCutoff.add(tw), float(1));
-          const shorePrimaryA = smoothstep(bandLo, bandHi, unifiedFoam)
-            .mul(uShoreFoamIntensity)
-            .saturate();
+          const shorePrimaryA = jaggedFoam.mul(uShoreFoamIntensity);
 
           const distInLake = max(float(0), distS);
           const pulseRange = uShorePulseMaxRange.mul(pulseRangeMul);
@@ -1122,42 +995,41 @@
             uTime.mul(uShorePulseNoiseAnimSpeed),
             uTime.mul(uShorePulseNoiseAnimSpeed.mul(float(0.72))),
           );
-          const wPAniso = vec2(
-            wXZ.x.mul(uShorePulseNoiseAnisoX),
-            wXZ.y.mul(uShorePulseNoiseAnisoZ),
-          );
-          const pulseUVMain = wPAniso.mul(uShorePulseNoiseScale).add(pulseNoiseXY);
+          const pulseUVMain = wXZ.mul(uShorePulseNoiseScale).add(pulseNoiseXY);
           const pulseNPerlin = mx_noise_float(pulseUVMain);
-          const uvWorA = pulseUVMain.toVar();
-          const wWarpA = uvWorA.mul(uShoreWorleyWarpScale);
-          const sa1 = valueFbm5(wWarpA);
-          const sa2 = valueFbm5(wWarpA.add(vec2(4, 4)));
-          uvWorA.addAssign(
-            vec2(sa1.sub(0.5), sa2.sub(0.5)).mul(uShoreWorleyWarpStrength),
+          const pulseFineMul = uShoreNoiseFineScale.div(
+            max(uShoreNoiseWorldScale, float(0.01)),
           );
-          const nWorA = worleyFbm5(uvWorA, uShoreWorleyJitter).toVar();
-          nWorA.assign(pow(nWorA, uShoreWorleyContrast));
-          nWorA.assign(
-            smoothstep(
-              uShoreWorleyThreshold,
-              uShoreWorleyThreshold.add(uShoreWorleySoftness),
-              nWorA,
-            ),
+          const pulseUVFine = wXZ
+            .mul(uShorePulseNoiseScale.mul(pulseFineMul))
+            .add(
+              vec2(
+                uTime.mul(uShorePulseNoiseAnimSpeed.mul(float(1.1))),
+                uTime.mul(uShorePulseNoiseAnimSpeed.mul(float(0.79))),
+              ),
+            );
+          const tPulse = uTime.mul(uShorePulseNoiseAnimSpeed);
+          const f1p = voronoiF1(pulseUVMain, tPulse, uShoreFoamVoroCellSpeed);
+          const sf1p = voronoiSmoothF1(
+            pulseUVMain,
+            tPulse,
+            uShoreFoamVoroCellSpeed,
+            uShoreFoamVoroSmoothness,
           );
-          nWorA.mulAssign(uShoreWorleyBrightness);
-          const pulseNWorley = nWorA;
-          const pulseModN = mix(
-            pulseNPerlin.mul(0.5).add(0.5),
-            pulseNWorley,
-            uShorePulseNoiseMode,
+          const edgeP = saturate(f1p.sub(sf1p).mul(uShoreFoamVoroEdgeGain));
+          const fbp = fbm2(pulseUVFine);
+          const pulseNVoro = edgeP
+            .mul(float(1.12))
+            .add(fbp.mul(uShoreFoamVoroFbmWeight))
+            .sub(float(0.42));
+          const pulseN = mix(pulseNPerlin, pulseNVoro, uShoreFoamNoiseMode);
+          const pulseMod = mix(
+            float(1),
+            pulseN.mul(0.5).add(0.5),
+            uShorePulseNoiseAmt,
           );
-          const pulseMod = mix(float(1), pulseModN, uShorePulseNoiseAmt);
 
-          const pulseT0 = fract(uTime.mul(uShorePulseAnimSpeed));
-          const pulseT = pow(
-            pulseT0,
-            max(uShorePulseTravelPower, float(0.001)),
-          );
+          const pulseT = fract(uTime.mul(uShorePulseAnimSpeed));
           const pulseFront = pulseT.mul(pulseRange);
           const pulseRingRaw = float(1).sub(
             smoothstep(
@@ -1170,68 +1042,66 @@
             max(pulseRingRaw.mul(pulseMod), float(0.0001)),
             uShorePulseRingSharpness,
           );
-          const pulseFade = pow(float(1).sub(pulseT0), uShorePulseFade);
+          const pulseFade = pow(float(1).sub(pulseT), uShorePulseFade);
           const pulseA = pulseRing
             .mul(pulseFade)
             .mul(uShorePulseIntensity)
-            .mul(step(uShorePulseMinDist, distInLake));
+            .mul(step(float(0.02), distInLake));
 
-          const pulseT02 = fract(
+          const pulseT2 = fract(
             uTime.mul(uShorePulseAnimSpeed).add(uShorePulseStagger),
           );
-          const pulseT2 = pow(
-            pulseT02,
-            max(uShorePulseTravelPower, float(0.001)),
-          );
           const pulseFront2 = pulseT2.mul(pulseRange);
-          const ringW2 = uShorePulseRingWidth.mul(uShorePulseRing2WidthMul);
           const pulseRing2Raw = float(1).sub(
-            smoothstep(float(0), ringW2, abs(distInLake.sub(pulseFront2))),
+            smoothstep(
+              float(0),
+              uShorePulseRingWidth,
+              abs(distInLake.sub(pulseFront2)),
+            ),
           );
-          const pulseUVMain2 = wPAniso
+          const pulseUVMain2 = wXZ
             .mul(uShorePulseNoiseScale.mul(float(1.07)))
             .add(pulseNoiseXY.mul(float(1.03)));
           const pulseN2Perlin = mx_noise_float(pulseUVMain2);
-          const uvWorB = pulseUVMain2.toVar();
-          const wWarpB = uvWorB.mul(uShoreWorleyWarpScale);
-          const sb1 = valueFbm5(wWarpB);
-          const sb2 = valueFbm5(wWarpB.add(vec2(4, 4)));
-          uvWorB.addAssign(
-            vec2(sb1.sub(0.5), sb2.sub(0.5)).mul(uShoreWorleyWarpStrength),
+          const pulseUVFine2 = wXZ
+            .mul(uShorePulseNoiseScale.mul(float(1.07)).mul(pulseFineMul))
+            .add(
+              vec2(
+                uTime.mul(uShorePulseNoiseAnimSpeed.mul(float(1.13))),
+                uTime.mul(uShorePulseNoiseAnimSpeed.mul(float(0.81))),
+              ),
+            );
+          const f1p2 = voronoiF1(pulseUVMain2, tPulse, uShoreFoamVoroCellSpeed);
+          const sf1p2 = voronoiSmoothF1(
+            pulseUVMain2,
+            tPulse,
+            uShoreFoamVoroCellSpeed,
+            uShoreFoamVoroSmoothness,
           );
-          const nWorB = worleyFbm5(uvWorB, uShoreWorleyJitter).toVar();
-          nWorB.assign(pow(nWorB, uShoreWorleyContrast));
-          nWorB.assign(
-            smoothstep(
-              uShoreWorleyThreshold,
-              uShoreWorleyThreshold.add(uShoreWorleySoftness),
-              nWorB,
-            ),
+          const edgeP2 = saturate(f1p2.sub(sf1p2).mul(uShoreFoamVoroEdgeGain));
+          const fbp2 = fbm2(pulseUVFine2);
+          const pulseN2Voro = edgeP2
+            .mul(float(1.12))
+            .add(fbp2.mul(uShoreFoamVoroFbmWeight))
+            .sub(float(0.42));
+          const pulseN2 = mix(pulseN2Perlin, pulseN2Voro, uShoreFoamNoiseMode);
+          const pulseMod2 = mix(
+            float(1),
+            pulseN2.mul(0.5).add(0.5),
+            uShorePulseNoiseAmt,
           );
-          nWorB.mulAssign(uShoreWorleyBrightness);
-          const pulseN2Worley = nWorB;
-          const pulseMod2N = mix(
-            pulseN2Perlin.mul(0.5).add(0.5),
-            pulseN2Worley,
-            uShorePulseNoiseMode,
-          );
-          const pulseMod2 = mix(float(1), pulseMod2N, uShorePulseNoiseAmt);
           const pulseRing2 = pow(
             max(pulseRing2Raw.mul(pulseMod2), float(0.0001)),
-            uShorePulseRing2Sharpness,
+            uShorePulseRingSharpness,
           );
-          const pulseFade2 = pow(float(1).sub(pulseT02), uShorePulse2Fade);
+          const pulseFade2 = pow(float(1).sub(pulseT2), uShorePulseFade);
           const pulseB = pulseRing2
             .mul(pulseFade2)
             .mul(uShorePulse2Intensity)
-            .mul(step(uShorePulseMinDist, distInLake));
+            .mul(step(float(0.02), distInLake));
 
-          const en = uShorePulseEnabled;
-          return vec3(
-            shorePrimaryA,
-            pulseA.mul(en),
-            pulseB.mul(en),
-          );
+          const shorePulseA = pulseA.add(pulseB).mul(uShorePulseEnabled);
+          return vec2(shorePrimaryA, shorePulseA);
         });
 
         const dragonShoreFoamLayers = Fn(() => {
@@ -1245,7 +1115,9 @@
         function applyDragonWaterlineMaterials(root) {
           root.traverse((obj) => {
             if (!obj.isMesh) return;
-            const list = Array.isArray(obj.material) ? obj.material : [obj.material];
+            const list = Array.isArray(obj.material)
+              ? obj.material
+              : [obj.material];
             const next = list.map((src) => {
               const mat = new THREE.MeshStandardNodeMaterial();
               if (obj.isSkinnedMesh) mat.skinning = true;
@@ -1265,8 +1137,7 @@
               }
               if (src.emissiveMap) mat.emissiveMap = src.emissiveMap;
               mat.emissiveIntensity = src.emissiveIntensity ?? 0;
-              if (src.emissive)
-                mat.emissive.copy(src.emissive);
+              if (src.emissive) mat.emissive.copy(src.emissive);
               const base = src.map
                 ? texture(src.map, uv()).rgb
                 : vec3(
@@ -1276,25 +1147,10 @@
                   );
               const dLayers = dragonShoreFoamLayers();
               const str = uDragonMeshFoam;
-              const dPri = base.add(
-                uShorePrimaryFoamColor.mul(dLayers.x.mul(str)),
-              );
-              const dA = mix(
-                dPri,
-                uShorePulseFoamColor,
-                min(
-                  float(1),
-                  dLayers.y.mul(str).mul(uShorePulseOpacity),
-                ),
-              );
-              mat.colorNode = mix(
-                dA,
-                uShorePulse2FoamColor,
-                min(
-                  float(1),
-                  dLayers.z.mul(str).mul(uShorePulse2Opacity),
-                ),
-              ).saturate();
+              mat.colorNode = base
+                .add(uShorePrimaryFoamColor.mul(dLayers.x.mul(str)))
+                .add(uShorePulseFoamColor.mul(dLayers.y.mul(str)))
+                .saturate();
               if (src.map) mat.map = null;
               src.dispose();
               return mat;
@@ -1420,27 +1276,17 @@
           const distShore = uWaterY.sub(terrainWorldY);
           const shoreLayers = shoreFoamLayerMasks(worldXZ, distShore, float(1));
           const shorePrimaryA = shoreLayers.x;
-          const pulseAMask = shoreLayers.y;
-          const pulseBMask = shoreLayers.z;
+          const shorePulseA = shoreLayers.y;
           const pMask = shorePrimaryA.mul(inHm).mul(uHeightmapFoamEnabled);
-          const sMaskA = pulseAMask.mul(inHm).mul(uHeightmapFoamEnabled);
-          const sMaskB = pulseBMask.mul(inHm).mul(uHeightmapFoamEnabled);
+          const sMask = shorePulseA.mul(inHm).mul(uHeightmapFoamEnabled);
           const depthContrib = foamAlphaDepth
             .mul(geoMask)
             .mul(uObjectFoamFromDepth);
-          const shoreBaseCol = waterColor
+          const finalColor = waterColor
             .add(foamCol.mul(depthContrib))
-            .add(uShorePrimaryFoamColor.mul(pMask));
-          const afterPulseA = mix(
-            shoreBaseCol,
-            uShorePulseFoamColor,
-            min(float(1), sMaskA.mul(uShorePulseOpacity)),
-          );
-          const finalColor = mix(
-            afterPulseA,
-            uShorePulse2FoamColor,
-            min(float(1), sMaskB.mul(uShorePulse2Opacity)),
-          ).saturate();
+            .add(uShorePrimaryFoamColor.mul(pMask))
+            .add(uShorePulseFoamColor.mul(sMask))
+            .saturate();
 
           return vec4(finalColor, waterAlpha);
         });
@@ -1451,9 +1297,7 @@
           const wxz = wp.xz;
           const t = uTime.mul(uSurfRippleSpeed);
           const w1 = sin(wxz.x.mul(uSurfRippleFreq).add(t));
-          const w2 = cos(
-            wxz.y.mul(uSurfRippleFreq.mul(1.17)).sub(t.mul(0.82)),
-          );
+          const w2 = cos(wxz.y.mul(uSurfRippleFreq.mul(1.17)).sub(t.mul(0.82)));
           const h = w1
             .add(w2.mul(0.55))
             .mul(uSurfRippleAmp)
@@ -1649,11 +1493,7 @@
           displayMat,
         );
         waveDisplayPlane.rotation.x = -Math.PI / 2;
-        waveDisplayPlane.position.set(
-          0,
-          WATER_Y + WAVE_DISPLAY_Y_OFFSET,
-          0,
-        );
+        waveDisplayPlane.position.set(0, WATER_Y + WAVE_DISPLAY_Y_OFFSET, 0);
         waveDisplayPlane.frustumCulled = false;
         waveDisplayPlane.renderOrder = 6;
         scene.add(waveDisplayPlane);
@@ -1688,16 +1528,14 @@
           const delta = clock.getDelta();
           uTime.value = elapsed;
 
-          const bob1 =
-            params.waterBobEnabled
-              ? Math.sin(elapsed * Math.PI * 2 * params.waterBobHz) *
-                params.waterBobAmplitude
-              : 0;
+          const bob1 = params.waterBobEnabled
+            ? Math.sin(elapsed * Math.PI * 2 * params.waterBobHz) *
+              params.waterBobAmplitude
+            : 0;
           const bob2 =
             params.waterBobEnabled && params.waterBobSecondaryAmp > 0
-              ? Math.sin(
-                  elapsed * Math.PI * 2 * params.waterBobSecondaryHz,
-                ) * params.waterBobSecondaryAmp
+              ? Math.sin(elapsed * Math.PI * 2 * params.waterBobSecondaryHz) *
+                params.waterBobSecondaryAmp
               : 0;
           const liveWaterY = WATER_Y + bob1 + bob2;
           uWaterY.value = liveWaterY;
@@ -1921,7 +1759,9 @@
           expanded: false,
         });
         fDragon
-          .addBinding(params, "dragonVisible", { label: "Show in scene + depth" })
+          .addBinding(params, "dragonVisible", {
+            label: "Show in scene + depth",
+          })
           .on("change", applyDragonVisibility);
         fDragon
           .addBinding(params, "gizmoEnabled", {
@@ -2163,9 +2003,9 @@
           step: 0.02,
         });
         fFoam.addBinding(params, "shoreFoamNoise", {
-          label: "Noise in band (× distance, one layer)",
+          label: "Noise → jagged mix",
           min: 0,
-          max: 1,
+          max: 0.5,
           step: 0.02,
         });
         fFoam.addBinding(params, "shoreFoamIntensity", {
@@ -2181,61 +2021,45 @@
           step: 0.05,
         });
         fFoam.addBinding(params, "shoreFoamNoiseStyle", {
-          label: "Primary shoreline noise",
+          label: "Shore + pulse noise",
           options: {
             "Perlin (MaterialX)": "perlin",
             "Voronoi + FBM": "voronoiFbm",
           },
         });
         const fShoreVoro = fFoam.addFolder({
-          title: "Worley FBM (ocean-style, when Voronoi+FBM)",
+          title: "Shore / pulse — Voronoi + FBM",
           expanded: false,
         });
-        fShoreVoro.addBinding(params, "shoreWorleyJitter", {
-          label: "Cell organicity",
+        fShoreVoro.addBinding(params, "shoreFoamVoroSmoothness", {
+          label: "Cell smoothness",
+          min: 0.02,
+          max: 0.45,
+          step: 0.01,
+        });
+        fShoreVoro.addBinding(params, "shoreFoamVoroCellSpeed", {
+          label: "Point drift speed",
           min: 0,
-          max: 1,
+          max: 2,
           step: 0.02,
         });
-        fShoreVoro.addBinding(params, "shoreWorleyWarpScale", {
-          label: "Domain warp scale",
+        fShoreVoro.addBinding(params, "shoreFoamVoroEdgeGain", {
+          label: "Edge gain",
           min: 0.5,
-          max: 12,
+          max: 8,
           step: 0.1,
         });
-        fShoreVoro.addBinding(params, "shoreWorleyWarpStrength", {
-          label: "Domain warp strength",
+        fShoreVoro.addBinding(params, "shoreFoamVoroFbmWeight", {
+          label: "FBM blend",
           min: 0,
-          max: 2,
-          step: 0.02,
-        });
-        fShoreVoro.addBinding(params, "shoreWorleyContrast", {
-          label: "Contrast (pow)",
-          min: 0.3,
-          max: 4,
-          step: 0.05,
-        });
-        fShoreVoro.addBinding(params, "shoreWorleyThreshold", {
-          label: "Coverage threshold",
-          min: 0.05,
-          max: 0.95,
-          step: 0.01,
-        });
-        fShoreVoro.addBinding(params, "shoreWorleySoftness", {
-          label: "Coverage softness",
-          min: 0.02,
-          max: 0.6,
-          step: 0.01,
-        });
-        fShoreVoro.addBinding(params, "shoreWorleyBrightness", {
-          label: "Brightness",
-          min: 0.2,
-          max: 2,
+          max: 1.5,
           step: 0.02,
         });
         fFoam.addBinding(params, "shorePrimaryFoamColor", {
           label: "Primary foam color",
-          view: "color",
+        });
+        fFoam.addBinding(params, "shorePulseFoamColor", {
+          label: "Pulse ring color",
         });
 
         const fShoreNoise = fFoam.addFolder({
@@ -2266,18 +2090,6 @@
           max: 48,
           step: 0.5,
         });
-        fShoreNoise.addBinding(params, "shoreNoiseAnisoX", {
-          label: "Stretch noise along world X",
-          min: 0.25,
-          max: 4,
-          step: 0.05,
-        });
-        fShoreNoise.addBinding(params, "shoreNoiseAnisoZ", {
-          label: "Stretch noise along world Z",
-          min: 0.25,
-          max: 4,
-          step: 0.05,
-        });
         fShoreNoise.addBinding(params, "shoreNoiseFineScale", {
           label: "Fine noise scale",
           min: 4,
@@ -2297,16 +2109,10 @@
           step: 0.05,
         });
         fShoreNoise.addBinding(params, "shoreJaggedCutoff", {
-          label: "Foam coverage center (0–1)",
-          min: 0.1,
-          max: 0.9,
+          label: "Jagged threshold (shape)",
+          min: 0.15,
+          max: 0.85,
           step: 0.02,
-        });
-        fShoreNoise.addBinding(params, "shoreFoamTransitionWidth", {
-          label: "Edge softness (anti-speckle)",
-          min: 0.04,
-          max: 0.35,
-          step: 0.01,
         });
 
         const fShorePulse = fFoam.addFolder({
@@ -2316,32 +2122,11 @@
         fShorePulse.addBinding(params, "shorePulseEnabled", {
           label: "Enable pulse rings",
         });
-        fShorePulse.addBinding(params, "shorePulseNoiseStyle", {
-          label: "Pulse ring noise (wiggle)",
-          options: {
-            "Perlin (MaterialX)": "perlin",
-            "Voronoi + FBM": "voronoiFbm",
-          },
-        });
-        fShorePulse.addBinding(params, "shorePulseFoamColor", {
-          label: "Ring A color",
-          view: "color",
-        });
-        fShorePulse.addBinding(params, "shorePulse2FoamColor", {
-          label: "Ring B color",
-          view: "color",
-        });
         fShorePulse.addBinding(params, "shorePulseAnimSpeed", {
           label: "Pulse cycle speed (rings/sec feel)",
           min: 0.05,
           max: 2,
           step: 0.02,
-        });
-        fShorePulse.addBinding(params, "shorePulseTravelPower", {
-          label: "Travel easing (1=linear, >1=late surge)",
-          min: 0.35,
-          max: 4,
-          step: 0.05,
         });
         fShorePulse.addBinding(params, "shorePulseMaxRange", {
           label: "Travel distance (world)",
@@ -2349,44 +2134,20 @@
           max: 12,
           step: 0.1,
         });
-        fShorePulse.addBinding(params, "shorePulseMinDist", {
-          label: "Min depth for pulse (world)",
-          min: 0,
-          max: 1.5,
-          step: 0.01,
-        });
         fShorePulse.addBinding(params, "shorePulseRingWidth", {
-          label: "Ring A thickness",
+          label: "Ring thickness",
           min: 0.03,
           max: 0.45,
           step: 0.01,
         });
-        fShorePulse.addBinding(params, "shorePulseRing2WidthMul", {
-          label: "Ring B thickness ×",
-          min: 0.25,
-          max: 2.5,
-          step: 0.05,
-        });
         fShorePulse.addBinding(params, "shorePulseRingSharpness", {
-          label: "Ring A edge sharpness (pow)",
-          min: 0.35,
-          max: 3,
-          step: 0.05,
-        });
-        fShorePulse.addBinding(params, "shorePulseRing2Sharpness", {
-          label: "Ring B edge sharpness (pow)",
+          label: "Ring edge sharpness (pow)",
           min: 0.35,
           max: 3,
           step: 0.05,
         });
         fShorePulse.addBinding(params, "shorePulseFade", {
-          label: "Ring A fade while traveling",
-          min: 0.5,
-          max: 4,
-          step: 0.05,
-        });
-        fShorePulse.addBinding(params, "shorePulse2Fade", {
-          label: "Ring B fade while traveling",
+          label: "Fade-out while traveling (power)",
           min: 0.5,
           max: 4,
           step: 0.05,
@@ -2402,18 +2163,6 @@
           min: 2,
           max: 32,
           step: 0.5,
-        });
-        fShorePulse.addBinding(params, "shorePulseNoiseAnisoX", {
-          label: "Pulse noise stretch X",
-          min: 0.25,
-          max: 4,
-          step: 0.05,
-        });
-        fShorePulse.addBinding(params, "shorePulseNoiseAnisoZ", {
-          label: "Pulse noise stretch Z",
-          min: 0.25,
-          max: 4,
-          step: 0.05,
         });
         fShorePulse.addBinding(params, "shorePulseNoiseAnimSpeed", {
           label: "Ring noise anim speed",
@@ -2437,18 +2186,6 @@
           label: "Ring B phase (0–1)",
           min: 0,
           max: 1,
-          step: 0.02,
-        });
-        fShorePulse.addBinding(params, "shorePulseOpacity", {
-          label: "Ring A color strength (1 = solid)",
-          min: 0,
-          max: 1.5,
-          step: 0.02,
-        });
-        fShorePulse.addBinding(params, "shorePulse2Opacity", {
-          label: "Ring B color strength (1 = solid)",
-          min: 0,
-          max: 1.5,
           step: 0.02,
         });
         fFoam.addBinding(params, "objectFoamFromDepth", {
@@ -2482,10 +2219,7 @@
           step: 0.00005,
         });
 
-        const fRings = pane.addFolder({
-          title: "Wave rings",
-          expanded: false,
-        });
+        const fRings = pane.addFolder({ title: "Wave rings" });
         fRings.addBinding(params, "ringOpacity", {
           min: 0,
           max: 1.5,
@@ -2532,9 +2266,14 @@
           uWaterLineThinness.value = params.lineThinness;
           uDragonMeshFoam.value = params.dragonWaterFoam;
           applyPaneColor(params.foamColor, uWaterLineColor.value);
-          applyPaneColor(params.shorePrimaryFoamColor, uShorePrimaryFoamColor.value);
-          applyPaneColor(params.shorePulseFoamColor, uShorePulseFoamColor.value);
-          applyPaneColor(params.shorePulse2FoamColor, uShorePulse2FoamColor.value);
+          applyPaneColor(
+            params.shorePrimaryFoamColor,
+            uShorePrimaryFoamColor.value,
+          );
+          applyPaneColor(
+            params.shorePulseFoamColor,
+            uShorePulseFoamColor.value,
+          );
           uWaterlineIntensity.value = params.waterlineIntensity;
           uLineWidth.value = params.lineWidth;
           uGlowWidth.value = params.glowWidth;
