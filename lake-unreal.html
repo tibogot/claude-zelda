@@ -1,0 +1,2040 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lake — WebGPU + TSL</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        background: #2a3548;
+        overflow: hidden;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      /* Tweakpane root: cap height + vertical scroll (same as genshin-flowers2.html) */
+      .tp-dfwv {
+        max-height: calc(100vh - 24px);
+        overflow-y: auto;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/+esm"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { TransformControls } from "three/addons/controls/TransformControls.js";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { Pane } from "tweakpane";
+      import {
+        Fn,
+        uniform,
+        float,
+        vec2,
+        vec3,
+        vec4,
+        uv,
+        mix,
+        smoothstep,
+        step,
+        floor,
+        fract,
+        sin,
+        cos,
+        dot,
+        length,
+        min,
+        max,
+        exp,
+        abs,
+        positionWorld,
+        positionLocal,
+        positionView,
+        normalize,
+        pow,
+        saturate,
+        color,
+        clamp,
+        texture,
+        screenUV,
+        cameraPosition,
+        mx_noise_float,
+      } from "three/tsl";
+
+      const WATER_Y = -0.1;
+      /** Base size for water + wave-display planes; actual extent = this × scale (see `lakeSize`). */
+      const LAKE_PLANE_BASE = 100;
+      /** Land around the lake (world units); lake stays centered at origin on XZ. */
+      const TERRAIN_SIZE = 220;
+      /** Heightmap resolution (same data → CPU mesh + GPU sample for shore foam). */
+      const HEIGHTMAP_RES = 256;
+
+      function mulberry32(a) {
+        return function () {
+          let t = (a += 0x6d2b79f5);
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+
+      function buildPermutation(seed) {
+        const rnd = mulberry32(seed >>> 0);
+        const p = new Uint8Array(512);
+        for (let i = 0; i < 256; i++) p[i] = i;
+        for (let i = 255; i > 0; i--) {
+          const j = (rnd() * (i + 1)) | 0;
+          const t = p[i];
+          p[i] = p[j];
+          p[j] = t;
+        }
+        for (let i = 0; i < 256; i++) p[256 + i] = p[i];
+        return p;
+      }
+
+      function fadePerlin(t) {
+        return t * t * t * (t * (t * 6 - 15) + 10);
+      }
+
+      function lerp1(a, b, t) {
+        return a + t * (b - a);
+      }
+
+      function grad2(hash, x, y) {
+        const h = hash & 3;
+        const u = h < 2 ? x : y;
+        const v = h < 2 ? y : x;
+        return ((h & 1) === 0 ? u : -u) + ((h & 2) === 0 ? v : -v);
+      }
+
+      function perlin2(x, y, perm) {
+        const xi = Math.floor(x) & 255;
+        const yi = Math.floor(y) & 255;
+        const xf = x - Math.floor(x);
+        const yf = y - Math.floor(y);
+        const u = fadePerlin(xf);
+        const v = fadePerlin(yf);
+        const aa = perm[xi + perm[yi]];
+        const ab = perm[xi + perm[yi + 1]];
+        const ba = perm[xi + 1 + perm[yi]];
+        const bb = perm[xi + 1 + perm[yi + 1]];
+        const x1 = lerp1(grad2(aa, xf, yf), grad2(ba, xf - 1, yf), u);
+        const x2 = lerp1(grad2(ab, xf, yf - 1), grad2(bb, xf - 1, yf - 1), u);
+        return lerp1(x1, x2, v);
+      }
+
+      function fbmPerlin(wx, wz, perm, octaves) {
+        let sum = 0;
+        let amp = 1;
+        let freq = 1;
+        let norm = 0;
+        for (let o = 0; o < octaves; o++) {
+          sum += amp * perlin2(wx * freq, wz * freq, perm);
+          norm += amp;
+          amp *= 0.5;
+          freq *= 2;
+        }
+        return sum / norm;
+      }
+
+      function sampleHeightBilinear(data, RES, tu, tv) {
+        const u = THREE.MathUtils.clamp(tu, 0, 1);
+        const v = THREE.MathUtils.clamp(tv, 0, 1);
+        const fx = u * (RES - 1);
+        const fy = v * (RES - 1);
+        const i0 = Math.floor(fx);
+        const j0 = Math.floor(fy);
+        const t = fx - i0;
+        const w = fy - j0;
+        const i1 = Math.min(i0 + 1, RES - 1);
+        const j1 = Math.min(j0 + 1, RES - 1);
+        const h00 = data[j0 * RES + i0];
+        const h10 = data[j0 * RES + i1];
+        const h01 = data[j1 * RES + i0];
+        const h11 = data[j1 * RES + i1];
+        return THREE.MathUtils.lerp(
+          THREE.MathUtils.lerp(h00, h10, t),
+          THREE.MathUtils.lerp(h01, h11, t),
+          w,
+        );
+      }
+
+      function heightmapHeightAtWorld(x, z, o, perm) {
+        const permMacro = buildPermutation(o.seed + 401);
+        const d2 = x * x + z * z;
+        const sigma2 = 2 * o.bowlSigma * o.bowlSigma;
+        const bowl = -o.bowlDepth * Math.exp(-d2 / sigma2);
+        const macro =
+          fbmPerlin(
+            x * o.macroScale,
+            z * o.macroScale,
+            permMacro,
+            4,
+          ) * o.mountainAmp;
+        const hills =
+          fbmPerlin(x * o.noiseScale, z * o.noiseScale, perm, o.octaves) *
+          o.hillAmp;
+        return bowl + macro + hills + o.verticalBias;
+      }
+
+      /** World-space heights in [texel] — same numbers the water shader samples (via texture). */
+      function buildHeightmapFloatData(o) {
+        const RES = HEIGHTMAP_RES;
+        const half = TERRAIN_SIZE * 0.5;
+        const perm = buildPermutation(o.seed);
+        const data = new Float32Array(RES * RES);
+        for (let j = 0; j < RES; j++) {
+          for (let i = 0; i < RES; i++) {
+            const x = (i / (RES - 1)) * TERRAIN_SIZE - half;
+            const z = (j / (RES - 1)) * TERRAIN_SIZE - half;
+            data[j * RES + i] = heightmapHeightAtWorld(x, z, o, perm);
+          }
+        }
+        return data;
+      }
+
+      function buildTerrainGeometryFromHeightmap(data, segments) {
+        const RES = HEIGHTMAP_RES;
+        const half = TERRAIN_SIZE * 0.5;
+        const seg = Math.max(8, Math.floor(segments));
+        let minY = Infinity;
+        let maxY = -Infinity;
+        for (let i = 0; i < data.length; i++) {
+          minY = Math.min(minY, data[i]);
+          maxY = Math.max(maxY, data[i]);
+        }
+        const ySpan = maxY - minY + 1e-6;
+        const vtx = (seg + 1) * (seg + 1);
+        const positions = new Float32Array(vtx * 3);
+        const colors = new Float32Array(vtx * 3);
+        const uvs = new Float32Array(vtx * 2);
+        let pi = 0;
+        let ui = 0;
+        for (let j = 0; j <= seg; j++) {
+          const tv = j / seg;
+          const z = tv * TERRAIN_SIZE - half;
+          for (let i = 0; i <= seg; i++) {
+            const tu = i / seg;
+            const x = tu * TERRAIN_SIZE - half;
+            const y = sampleHeightBilinear(data, RES, tu, tv);
+            positions[pi++] = x;
+            positions[pi++] = y;
+            positions[pi++] = z;
+            uvs[ui++] = tu;
+            uvs[ui++] = tv;
+            const hN = (y - minY) / ySpan;
+            const distL = Math.hypot(x, z);
+            const wetNear = Math.exp(
+              -(distL * distL) / (2 * 44 * 44),
+            ) * (1 - hN * 0.75);
+            const patch =
+              0.88 +
+              0.12 *
+                Math.sin(x * 0.07 + z * 0.05) *
+                Math.cos(z * 0.09 - x * 0.04);
+            const gr = lerp1(0.32, 0.24, hN);
+            const gg = lerp1(0.56, 0.46, hN);
+            const gb = lerp1(0.14, 0.12, hN);
+            const dampR = 0.1;
+            const dampG = 0.38;
+            const dampB = 0.2;
+            let r = gr * patch;
+            let g = gg * patch;
+            let b = gb * patch;
+            const w = wetNear * 0.55;
+            r = lerp1(r, dampR, w);
+            g = lerp1(g, dampG, w);
+            b = lerp1(b, dampB, w);
+            colors[pi - 3] = r;
+            colors[pi - 2] = g;
+            colors[pi - 1] = b;
+          }
+        }
+        pi = 0;
+        const step = TERRAIN_SIZE / seg;
+        const eps = Math.max(step * 0.5, 0.06);
+        for (let j = 0; j <= seg; j++) {
+          const tv = j / seg;
+          const z = tv * TERRAIN_SIZE - half;
+          for (let i = 0; i <= seg; i++) {
+            const tu = i / seg;
+            const x = tu * TERRAIN_SIZE - half;
+            const y = positions[pi + 1];
+            const sx =
+              (sampleHeightBilinear(data, RES, tu + eps / TERRAIN_SIZE, tv) -
+                sampleHeightBilinear(data, RES, tu - eps / TERRAIN_SIZE, tv)) /
+              (2 * eps);
+            const sz =
+              (sampleHeightBilinear(data, RES, tu, tv + eps / TERRAIN_SIZE) -
+                sampleHeightBilinear(data, RES, tu, tv - eps / TERRAIN_SIZE)) /
+              (2 * eps);
+            const slope = Math.sqrt(sx * sx + sz * sz);
+            const hN = (y - minY) / ySpan;
+            const distL2 = Math.hypot(x, z);
+            const wetNear = Math.exp(
+              -(distL2 * distL2) / (2 * 44 * 44),
+            ) * (1 - hN * 0.75);
+            const rockW = Math.min(
+              1,
+              slope * 1.15 + hN * hN * 0.35 + Math.min(slope, 0.35) * hN,
+            );
+            const rockR = 0.5;
+            const rockG = 0.44;
+            const rockB = 0.36;
+            const dirtR = 0.38;
+            const dirtG = 0.32;
+            const dirtB = 0.22;
+            let r = colors[pi];
+            let g = colors[pi + 1];
+            let b = colors[pi + 2];
+            const rockBlend = rockW * 0.42;
+            r = lerp1(r, rockR, rockBlend);
+            g = lerp1(g, rockG, rockBlend);
+            b = lerp1(b, rockB, rockBlend);
+            const dirtBlend = Math.max(0, slope - 0.45) * 1.1 * (1 - wetNear * 0.5);
+            r = lerp1(r, dirtR, Math.min(1, dirtBlend));
+            g = lerp1(g, dirtG, Math.min(1, dirtBlend));
+            b = lerp1(b, dirtB, Math.min(1, dirtBlend));
+            colors[pi] = r;
+            colors[pi + 1] = g;
+            colors[pi + 2] = b;
+            pi += 3;
+          }
+        }
+        const indices = [];
+        for (let jj = 0; jj < seg; jj++) {
+          for (let ii = 0; ii < seg; ii++) {
+            const a = jj * (seg + 1) + ii;
+            const b = a + 1;
+            const c = a + seg + 1;
+            const d = c + 1;
+            indices.push(a, c, b, b, c, d);
+          }
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+        geo.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+        geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+        geo.setIndex(indices);
+        geo.computeVertexNormals();
+        return geo;
+      }
+      const WAVE_RES = 512;
+      const TEXEL = 1 / WAVE_RES;
+      const MAX_RIPPLES = 8;
+
+      // Placeholder textures so TSL texture() always receives a valid Texture (WebGPU)
+      const placeholderDepth = new THREE.DepthTexture(2, 2);
+      const placeholderColor = new THREE.DataTexture(
+        new Uint8Array([0, 0, 0, 0]),
+        2,
+        2,
+      );
+      placeholderColor.needsUpdate = true;
+
+      // ─── Ripple store (event bus for water surface) ───────────────────────────
+      const rippleBuffer = [];
+      const rippleConfig = {
+        speed: 1.5,
+        width: 0.12,
+        decay: 1.6,
+        strength: 5.5,
+        rings: 2,
+        spacing: 1.0,
+      };
+      function rippleAdd(x, z, t) {
+        if (rippleBuffer.length >= MAX_RIPPLES) rippleBuffer.shift();
+        rippleBuffer.push({ x, z, t });
+      }
+
+      // ─── TSL: hash and Voronoi (same style as waterfall_pool_v7) ────────────
+      const hash22 = Fn(([p]) => {
+        const px = dot(p, vec2(127.1, 311.7));
+        const py = dot(p, vec2(269.5, 183.3));
+        return fract(sin(vec2(px, py)).mul(43758.5453));
+      });
+
+      const neighbors = [
+        [-1, -1],
+        [0, -1],
+        [1, -1],
+        [-1, 0],
+        [0, 0],
+        [1, 0],
+        [-1, 1],
+        [0, 1],
+        [1, 1],
+      ];
+
+      const smin = Fn(([a, b, k]) => {
+        const h = max(k.sub(abs(a.sub(b))), float(0)).div(k);
+        return min(a, b).sub(h.mul(h).mul(h).mul(k).div(6));
+      });
+
+      const cellPt = Fn(([seed, uTime, cellSpeed]) => {
+        return float(0.5).add(
+          float(0.5).mul(
+            sin(uTime.mul(cellSpeed).add(float(6.2831).mul(seed))),
+          ),
+        );
+      });
+
+      const voronoiF1 = Fn(([p, uTime, cellSpeed]) => {
+        const ip = floor(p);
+        const fp = fract(p);
+        const md = float(10.0).toVar();
+        const neighbors = [
+          [-1, -1],
+          [0, -1],
+          [1, -1],
+          [-1, 0],
+          [0, 0],
+          [1, 0],
+          [-1, 1],
+          [0, 1],
+          [1, 1],
+        ];
+        for (const [nx, ny] of neighbors) {
+          const n = vec2(float(nx), float(ny));
+          const rnd = hash22(ip.add(n));
+          const pt = vec2(
+            cellPt(rnd.x, uTime, cellSpeed),
+            cellPt(rnd.y, uTime, cellSpeed),
+          );
+          const dist = length(n.add(pt).sub(fp));
+          md.assign(min(md, dist));
+        }
+        return md;
+      });
+
+      const voronoiSmoothF1 = Fn(([p, uTime, cellSpeed, smoothness]) => {
+        const ip = floor(p);
+        const fp = fract(p);
+        const res = float(10.0).toVar();
+        for (const [nx, ny] of neighbors) {
+          const n = vec2(float(nx), float(ny));
+          const rnd = hash22(ip.add(n));
+          const pt = vec2(
+            cellPt(rnd.x, uTime, cellSpeed),
+            cellPt(rnd.y, uTime, cellSpeed),
+          );
+          const dist = length(n.add(pt).sub(fp));
+          res.assign(smin(res, dist, smoothness));
+        }
+        return res;
+      });
+
+      const nHash = Fn(([p]) => {
+        const pp = fract(p.mul(vec2(127.1, 311.7)));
+        const d = dot(pp, pp.add(45.32));
+        return fract(pp.x.add(d).mul(pp.y.add(d)));
+      });
+
+      const vnoise2 = Fn(([p]) => {
+        const i = floor(p);
+        const f = fract(p);
+        const uu = f.mul(f).mul(float(3).sub(f.mul(2)));
+        const n00 = nHash(i);
+        const n10 = nHash(i.add(vec2(1, 0)));
+        const n01 = nHash(i.add(vec2(0, 1)));
+        const n11 = nHash(i.add(vec2(1, 1)));
+        return mix(mix(n00, n10, uu.x), mix(n01, n11, uu.x), uu.y);
+      });
+
+      const fbm2 = Fn(([p]) => {
+        const v = vnoise2(p).mul(0.5).toVar();
+        p = p.mul(2);
+        v.addAssign(vnoise2(p).mul(0.25));
+        return v;
+      });
+
+      async function init() {
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.05;
+        document.body.appendChild(renderer.domElement);
+        await renderer.init();
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color("#6d7f72");
+        const camera = new THREE.PerspectiveCamera(
+          45,
+          window.innerWidth / window.innerHeight,
+          0.05,
+          8000,
+        );
+        camera.position.set(48, 36, 58);
+        camera.lookAt(0, 5, 0);
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.target.set(0, 5, 0);
+        controls.minDistance = 0.6;
+        controls.maxDistance = 1200;
+        controls.maxPolarAngle = Math.PI * 0.495;
+        controls.update();
+
+        const params = {
+          exposure: 1.05,
+          lakeSize: 100,
+          bgColor: "#6d7f72",
+          ambient: 0.52,
+          sun: 3.2,
+          fill: 0.95,
+          rim: 0.62,
+          noiseTimeScale: 0.6,
+          noiseScale: 1.52,
+          waterNoise: false,
+          waterCells: false,
+          flowZ: 0.08,
+          cellSpeed: 0.45,
+          distort: 0.35,
+          edgeThreshold: 0.067,
+          deepColor: "#153a48",
+          midColor: "#2a5f72",
+          highlightColor: "#4a90a8",
+          waterOpacity: 0.72,
+          rippleStrength: 5.5,
+          rippleWidth: 0.12,
+          lineThinness: 0.045,
+          foamColor: "#e8f4ff",
+          waterlineIntensity: 1.35,
+          lineWidth: 0.42,
+          glowWidth: 1.35,
+          foamDistanceScale: 0.00105,
+          ringOpacity: 1,
+          gradScale: 1.5,
+          terrainSeed: 90210,
+          terrainSegments: 128,
+          terrainMountainAmp: 9.5,
+          terrainMacroScale: 0.0072,
+          terrainHillAmp: 3.8,
+          terrainNoiseScale: 0.055,
+          terrainOctaves: 6,
+          terrainBowlSigma: 46,
+          terrainBowlDepth: 3.15,
+          terrainVerticalBias: 2.25,
+          terrainRoughness: 0.88,
+          terrainMetalness: 0.04,
+          heightmapShoreFoam: true,
+          shoreFoamWidth: 0.55,
+          shoreFoamNoise: 0.2,
+          shoreFoamIntensity: 1.15,
+          /** >1 = thinner / sharper contact band (pow on falloff). */
+          shoreFoamSharpness: 1.35,
+          shoreNoiseWorldScale: 14,
+          /** Speed of shore Perlin / noise scroll (XZ animation). */
+          shoreNoiseAnimSpeed: 1.0,
+          /** V-axis scroll vs U (0.68 = diagonal drift). */
+          shoreNoiseScrollV: 0.68,
+          /** Multiplies combined noise before jagged step (>1 = harsher chunks). */
+          shoreNoiseContrast: 1.0,
+          /** Fine-detail noise layer scale (world XZ). */
+          shoreNoiseFineScale: 26,
+          shoreNoiseFineAmt: 0.14,
+          shoreNoiseFineSpeed: 1.2,
+          /** step() threshold for jagged breakup (lower = sparser). */
+          shoreJaggedCutoff: 0.48,
+          shorePrimaryFoamColor: "#ffffff",
+          shorePulseFoamColor: "#c9ebff",
+          shorePulseEnabled: true,
+          /** Inward pulse cycle speed (how fast rings travel / repeat). */
+          shorePulseAnimSpeed: 0.38,
+          /** How far into the lake (water-depth proxy) the ring travels (world units). */
+          shorePulseMaxRange: 3.2,
+          shorePulseRingWidth: 0.11,
+          shorePulseIntensity: 0.72,
+          /** Higher = ring fades out faster as it travels. */
+          shorePulseFade: 1.65,
+          /** Second ring offset 0–1 (0.5 = staggered). */
+          shorePulseStagger: 0.5,
+          shorePulse2Intensity: 0.45,
+          /** Break up pulse rings with animated noise (0 = smooth ring). */
+          shorePulseNoiseAmt: 0.35,
+          shorePulseNoiseScale: 9,
+          shorePulseNoiseAnimSpeed: 0.55,
+          /** >1 = thinner brighter pulse band. */
+          shorePulseRingSharpness: 1.15,
+          objectFoamFromDepth: true,
+          dragonVisible: true,
+          gizmoEnabled: true,
+          /** World-space shore-style foam on dragon (noise + pulse); scales mix to foam color. */
+          dragonWaterFoam: 0.85,
+          /** Multiplies inward pulse travel on dragon (props are smaller than the lake). */
+          dragonPulseRangeMul: 0.42,
+        };
+
+        function heightmapOptsFromParams(p) {
+          return {
+            seed: Math.floor(p.terrainSeed),
+            bowlSigma: p.terrainBowlSigma,
+            bowlDepth: p.terrainBowlDepth,
+            mountainAmp: p.terrainMountainAmp,
+            macroScale: p.terrainMacroScale,
+            hillAmp: p.terrainHillAmp,
+            noiseScale: p.terrainNoiseScale,
+            verticalBias: p.terrainVerticalBias,
+            octaves: Math.max(3, Math.min(10, Math.round(p.terrainOctaves))),
+          };
+        }
+
+        const clock = new THREE.Timer();
+
+        // Warm daylight + soft fill — cool ambient was washing all albedo toward cyan.
+        const ambientLight = new THREE.AmbientLight(0xf2f5ef, 0.52);
+        scene.add(ambientLight);
+        const sunLight = new THREE.DirectionalLight(0xfff6e8, 3.2);
+        sunLight.position.set(6, 14, 8);
+        scene.add(sunLight);
+        const fillLight = new THREE.DirectionalLight(0xb8c8d8, 0.95);
+        fillLight.position.set(-6, 6, -4);
+        scene.add(fillLight);
+        const rimLight = new THREE.DirectionalLight(0xffe8d0, 0.62);
+        rimLight.position.set(0, 5, -12);
+        scene.add(rimLight);
+
+        // ─── Water surface uniforms (for TSL) ───────────────────────────────────
+        const uTime = uniform(0);
+        const uScale = uniform(0.3);
+        const uSmoothness = uniform(0.55);
+        const uEdgeThreshold = uniform(0.067);
+        const uEdgeSoftness = uniform(0.01);
+        const uFlowX = uniform(0);
+        const uFlowZ = uniform(0.08);
+        const uCellSpeed = uniform(0.45);
+        const uNoiseScale = uniform(1.52);
+        const uNoiseFlowSpeed = uniform(0.2);
+        const uNoiseTimeScale = uniform(0.6);
+        const uDistortAmount = uniform(0.35);
+        const uWaterNoiseEnabled = uniform(0);
+        const uWaterCellsEnabled = uniform(0);
+        const uDeepColor = uniform(new THREE.Color("#153a48"));
+        const uMidColor = uniform(new THREE.Color("#2a5f72"));
+        const uMidPos = uniform(0.12);
+        const uHighlight = uniform(new THREE.Color("#4a90a8"));
+        const uOpacity = uniform(1);
+        const uDeepOpacity = uniform(0.78);
+        /** Soft edge at the lake quad border (world XZ); not camera-based — zoom no longer erases water. */
+        const uLakeHalfExtent = uniform(LAKE_PLANE_BASE * 0.5);
+        const uFadeStrength = uniform(1.4);
+        const uRippleCenters = Array.from({ length: MAX_RIPPLES }, () =>
+          uniform(new THREE.Vector2(0, 0)),
+        );
+        const uRippleTimes = Array.from({ length: MAX_RIPPLES }, () =>
+          uniform(0),
+        );
+        const uRippleCount = uniform(0);
+        const uRippleSpeed = uniform(1.5);
+        const uRippleWidth = uniform(0.12);
+        const uRippleStrength = uniform(5.5);
+        const uRippleDecay = uniform(1.6);
+        const uRippleRings = uniform(2);
+        const uRippleSpacing = uniform(1.0);
+
+        // ─── Depth (for waterline/foam in water shader so visible from any angle) ─
+        const depthRT = new THREE.WebGLRenderTarget(512, 512);
+        depthRT.depthBuffer = true;
+        depthRT.depthTexture = new THREE.DepthTexture(512, 512);
+        depthRT.depthTexture.type = THREE.UnsignedShortType;
+        const depthScene = new THREE.Scene();
+        const depthMat = new THREE.MeshBasicNodeMaterial({
+          color: 0x000000,
+          side: THREE.FrontSide,
+        });
+        const depthGroups = new Map();
+
+        let lastTerrainGeoSig = "";
+        const heightOptsInit = heightmapOptsFromParams(params);
+        let heightmapFloatData = buildHeightmapFloatData(heightOptsInit);
+        const heightmapDataTex = new THREE.DataTexture(
+          heightmapFloatData,
+          HEIGHTMAP_RES,
+          HEIGHTMAP_RES,
+          THREE.RedFormat,
+          THREE.FloatType,
+        );
+        heightmapDataTex.magFilter = THREE.LinearFilter;
+        heightmapDataTex.minFilter = THREE.LinearFilter;
+        heightmapDataTex.wrapS = heightmapDataTex.wrapT = THREE.ClampToEdgeWrapping;
+        heightmapDataTex.flipY = false;
+        heightmapDataTex.needsUpdate = true;
+
+        const terrainMaterial = new THREE.MeshStandardMaterial({
+          color: 0xffffff,
+          roughness: params.terrainRoughness,
+          metalness: params.terrainMetalness,
+          vertexColors: true,
+          flatShading: false,
+        });
+
+        const terrainGeometry = buildTerrainGeometryFromHeightmap(
+          heightmapFloatData,
+          params.terrainSegments,
+        );
+        lastTerrainGeoSig =
+          JSON.stringify(heightOptsInit) + "_" + params.terrainSegments;
+
+        const terrainMesh = new THREE.Mesh(terrainGeometry, terrainMaterial);
+        terrainMesh.receiveShadow = true;
+        terrainMesh.castShadow = false;
+        terrainMesh.renderOrder = 1;
+        scene.add(terrainMesh);
+
+        const terrainDepthMesh = new THREE.Mesh(terrainGeometry, depthMat);
+        terrainDepthMesh.renderOrder = 1;
+        depthScene.add(terrainDepthMesh);
+
+        let dragonModelRoot = null;
+        let dragonDepthRoot = null;
+        let dragonTransformControls = null;
+
+        function applyDragonVisibility() {
+          if (dragonModelRoot) dragonModelRoot.visible = params.dragonVisible;
+          if (dragonDepthRoot) dragonDepthRoot.visible = params.dragonVisible;
+        }
+
+        function applyDragonGizmoState() {
+          if (!dragonTransformControls) return;
+          dragonTransformControls.enabled = params.gizmoEnabled;
+          const helper = dragonTransformControls.getHelper();
+          if (helper) helper.visible = params.gizmoEnabled;
+          if (!params.gizmoEnabled) controls.enabled = true;
+        }
+
+        const gltfLoader = new GLTFLoader();
+        gltfLoader.load(
+          "./models/dragon-balls-model.glb",
+          (gltf) => {
+            dragonModelRoot = gltf.scene;
+            dragonModelRoot.position.set(14, 0.12, 4);
+            dragonModelRoot.scale.setScalar(4.5);
+            dragonModelRoot.rotation.y = -1.1;
+            scene.add(dragonModelRoot);
+
+            dragonDepthRoot = dragonModelRoot.clone(true);
+            dragonDepthRoot.traverse((obj) => {
+              if (obj.isMesh) {
+                const m = obj.material;
+                obj.material = Array.isArray(m)
+                  ? m.map(() => depthMat)
+                  : depthMat;
+              }
+            });
+            depthScene.add(dragonDepthRoot);
+
+            applyDragonWaterlineMaterials(dragonModelRoot);
+
+            dragonTransformControls = new TransformControls(
+              camera,
+              renderer.domElement,
+            );
+            dragonTransformControls.setSize(1.15);
+            dragonTransformControls.addEventListener("dragging-changed", (ev) => {
+              controls.enabled = !ev.value;
+            });
+            scene.add(dragonTransformControls.getHelper());
+            dragonTransformControls.attach(dragonModelRoot);
+            applyDragonVisibility();
+            applyDragonGizmoState();
+          },
+          undefined,
+          (err) => {
+            console.warn("dragon-balls-model.glb load failed:", err);
+          },
+        );
+
+        function rebuildTerrainFromParams() {
+          const o = heightmapOptsFromParams(params);
+          const gSig = JSON.stringify(o) + "_" + params.terrainSegments;
+          if (gSig !== lastTerrainGeoSig) {
+            lastTerrainGeoSig = gSig;
+            heightmapFloatData = buildHeightmapFloatData(o);
+            heightmapDataTex.image.data = heightmapFloatData;
+            heightmapDataTex.needsUpdate = true;
+            const newGeo = buildTerrainGeometryFromHeightmap(
+              heightmapFloatData,
+              params.terrainSegments,
+            );
+            const oldGeo = terrainMesh.geometry;
+            terrainMesh.geometry = newGeo;
+            terrainDepthMesh.geometry = newGeo;
+            oldGeo.dispose();
+          }
+          terrainMaterial.roughness = params.terrainRoughness;
+          terrainMaterial.metalness = params.terrainMetalness;
+          uShoreFoamWidth.value = params.shoreFoamWidth;
+          uShoreFoamNoiseAmt.value = params.shoreFoamNoise;
+          uShoreFoamIntensity.value = params.shoreFoamIntensity;
+          uShoreFoamSharpness.value = params.shoreFoamSharpness;
+          uShoreNoiseWorldScale.value = params.shoreNoiseWorldScale;
+          uShoreNoiseAnimSpeed.value = params.shoreNoiseAnimSpeed;
+          uShoreNoiseScrollV.value = params.shoreNoiseScrollV;
+          uShoreNoiseContrast.value = params.shoreNoiseContrast;
+          uShoreNoiseFineScale.value = params.shoreNoiseFineScale;
+          uShoreNoiseFineAmt.value = params.shoreNoiseFineAmt;
+          uShoreNoiseFineSpeed.value = params.shoreNoiseFineSpeed;
+          uShoreJaggedCutoff.value = params.shoreJaggedCutoff;
+          applyPaneColor(params.shorePrimaryFoamColor, uShorePrimaryFoamColor.value);
+          applyPaneColor(params.shorePulseFoamColor, uShorePulseFoamColor.value);
+          uShorePulseEnabled.value = params.shorePulseEnabled ? 1 : 0;
+          uShorePulseAnimSpeed.value = params.shorePulseAnimSpeed;
+          uShorePulseMaxRange.value = params.shorePulseMaxRange;
+          uShorePulseRingWidth.value = params.shorePulseRingWidth;
+          uShorePulseIntensity.value = params.shorePulseIntensity;
+          uShorePulseFade.value = params.shorePulseFade;
+          uShorePulseStagger.value = params.shorePulseStagger;
+          uShorePulse2Intensity.value = params.shorePulse2Intensity;
+          uShorePulseNoiseAmt.value = params.shorePulseNoiseAmt;
+          uShorePulseNoiseScale.value = params.shorePulseNoiseScale;
+          uShorePulseNoiseAnimSpeed.value = params.shorePulseNoiseAnimSpeed;
+          uShorePulseRingSharpness.value = params.shorePulseRingSharpness;
+          uHeightmapFoamEnabled.value = params.heightmapShoreFoam ? 1 : 0;
+          uObjectFoamFromDepth.value = params.objectFoamFromDepth ? 1 : 0;
+          uDragonMeshFoam.value = params.dragonWaterFoam;
+          uDragonPulseRangeMul.value = params.dragonPulseRangeMul;
+        }
+
+        const heightTexNode = texture(heightmapDataTex, vec2(0.5, 0.5));
+        const uTerrainWorldSize = uniform(TERRAIN_SIZE);
+        const uShoreFoamWidth = uniform(params.shoreFoamWidth);
+        const uShoreFoamNoiseAmt = uniform(params.shoreFoamNoise);
+        const uShoreFoamIntensity = uniform(params.shoreFoamIntensity);
+        const uShoreFoamSharpness = uniform(params.shoreFoamSharpness);
+        const uShoreNoiseWorldScale = uniform(params.shoreNoiseWorldScale);
+        const uShoreNoiseAnimSpeed = uniform(params.shoreNoiseAnimSpeed);
+        const uShoreNoiseScrollV = uniform(params.shoreNoiseScrollV);
+        const uShoreNoiseContrast = uniform(params.shoreNoiseContrast);
+        const uShoreNoiseFineScale = uniform(params.shoreNoiseFineScale);
+        const uShoreNoiseFineAmt = uniform(params.shoreNoiseFineAmt);
+        const uShoreNoiseFineSpeed = uniform(params.shoreNoiseFineSpeed);
+        const uShoreJaggedCutoff = uniform(params.shoreJaggedCutoff);
+        const uShorePrimaryFoamColor = uniform(
+          new THREE.Color(params.shorePrimaryFoamColor),
+        );
+        const uShorePulseFoamColor = uniform(
+          new THREE.Color(params.shorePulseFoamColor),
+        );
+        const uShorePulseEnabled = uniform(params.shorePulseEnabled ? 1 : 0);
+        const uShorePulseAnimSpeed = uniform(params.shorePulseAnimSpeed);
+        const uShorePulseMaxRange = uniform(params.shorePulseMaxRange);
+        const uShorePulseRingWidth = uniform(params.shorePulseRingWidth);
+        const uShorePulseIntensity = uniform(params.shorePulseIntensity);
+        const uShorePulseFade = uniform(params.shorePulseFade);
+        const uShorePulseStagger = uniform(params.shorePulseStagger);
+        const uShorePulse2Intensity = uniform(params.shorePulse2Intensity);
+        const uShorePulseNoiseAmt = uniform(params.shorePulseNoiseAmt);
+        const uShorePulseNoiseScale = uniform(params.shorePulseNoiseScale);
+        const uShorePulseNoiseAnimSpeed = uniform(params.shorePulseNoiseAnimSpeed);
+        const uShorePulseRingSharpness = uniform(params.shorePulseRingSharpness);
+        const uHeightmapFoamEnabled = uniform(params.heightmapShoreFoam ? 1 : 0);
+        const uObjectFoamFromDepth = uniform(params.objectFoamFromDepth ? 1 : 0);
+
+        const depthTexNode = texture(placeholderDepth, screenUV);
+        const uDepthNear = uniform(0.1);
+        const uDepthFar = uniform(1000);
+        const uLineWidth = uniform(0.42);
+        const uGlowWidth = uniform(1.35);
+        /** Scales foam band with eye distance so contact line stays ~constant in world space (fixes zoom-out blowout). */
+        const uFoamDistanceScale = uniform(0.00105);
+        const uWaterlineIntensity = uniform(1.35);
+        const uLineColor = uniform(new THREE.Color("#ffffff"));
+        const uGlowColor = uniform(new THREE.Color("#88ccff"));
+        // Convert raw depth [0,1] to linear view-space distance (match original WaterDepthIntersection)
+        const linearDepth = Fn(([raw, near, far]) => {
+          const z = raw.mul(2).sub(1);
+          const denom = far.add(near).sub(z.mul(far.sub(near)));
+          return float(2).mul(near).mul(far).div(denom);
+        });
+        // Per-fragment water depth: view-space Z (camera looks down -Z, so linear depth = -positionView.z)
+        const waterLinearDepth = Fn(() => positionView.z.negate());
+
+        // Contact foam on objects (baked into object shader like original DragonBalls/index.tsx)
+        const uWaterY = uniform(WATER_Y);
+        const uWaterLineThinness = uniform(0.045);
+        const uWaterLineColor = uniform(new THREE.Color("#e8f4ff"));
+        const uDragonMeshFoam = uniform(params.dragonWaterFoam);
+        const uDragonPulseRangeMul = uniform(params.dragonPulseRangeMul);
+
+        /** Shared: primary jagged band + pulse rings (noise-modulated). `pulseRangeMul` = 1 lake, dragon scale on props. */
+        const shoreFoamLayerMasks = Fn(([wXZ, distS, pulseRangeMul]) => {
+          const absD = abs(distS);
+          const foamBase = float(1).sub(
+            smoothstep(float(0), uShoreFoamWidth, absD),
+          );
+          const foamShaped = pow(
+            max(foamBase, float(0.0001)),
+            uShoreFoamSharpness,
+          );
+          const foamN0 = mx_noise_float(
+            wXZ
+              .mul(uShoreNoiseWorldScale)
+              .add(
+                vec2(
+                  uTime.mul(uShoreNoiseAnimSpeed),
+                  uTime.mul(uShoreNoiseAnimSpeed.mul(uShoreNoiseScrollV)),
+                ),
+              ),
+          );
+          const foamN1 = mx_noise_float(
+            wXZ
+              .mul(uShoreNoiseFineScale)
+              .add(
+                vec2(
+                  uTime.mul(uShoreNoiseFineSpeed),
+                  uTime.mul(uShoreNoiseFineSpeed.mul(float(0.71))),
+                ),
+              ),
+          );
+          const foamN = foamN0
+            .add(foamN1.mul(uShoreNoiseFineAmt))
+            .mul(uShoreNoiseContrast);
+          const jaggedFoam = step(
+            uShoreJaggedCutoff,
+            foamShaped.add(foamN.mul(uShoreFoamNoiseAmt)),
+          );
+          const shorePrimaryA = jaggedFoam.mul(uShoreFoamIntensity);
+
+          const distInLake = max(float(0), distS);
+          const pulseRange = uShorePulseMaxRange.mul(pulseRangeMul);
+          const pulseNoiseXY = vec2(
+            uTime.mul(uShorePulseNoiseAnimSpeed),
+            uTime.mul(uShorePulseNoiseAnimSpeed.mul(float(0.72))),
+          );
+          const pulseN = mx_noise_float(
+            wXZ.mul(uShorePulseNoiseScale).add(pulseNoiseXY),
+          );
+          const pulseMod = mix(
+            float(1),
+            pulseN.mul(0.5).add(0.5),
+            uShorePulseNoiseAmt,
+          );
+
+          const pulseT = fract(uTime.mul(uShorePulseAnimSpeed));
+          const pulseFront = pulseT.mul(pulseRange);
+          const pulseRingRaw = float(1).sub(
+            smoothstep(
+              float(0),
+              uShorePulseRingWidth,
+              abs(distInLake.sub(pulseFront)),
+            ),
+          );
+          const pulseRing = pow(
+            max(pulseRingRaw.mul(pulseMod), float(0.0001)),
+            uShorePulseRingSharpness,
+          );
+          const pulseFade = pow(float(1).sub(pulseT), uShorePulseFade);
+          const pulseA = pulseRing
+            .mul(pulseFade)
+            .mul(uShorePulseIntensity)
+            .mul(step(float(0.02), distInLake));
+
+          const pulseT2 = fract(
+            uTime.mul(uShorePulseAnimSpeed).add(uShorePulseStagger),
+          );
+          const pulseFront2 = pulseT2.mul(pulseRange);
+          const pulseRing2Raw = float(1).sub(
+            smoothstep(
+              float(0),
+              uShorePulseRingWidth,
+              abs(distInLake.sub(pulseFront2)),
+            ),
+          );
+          const pulseN2 = mx_noise_float(
+            wXZ
+              .mul(uShorePulseNoiseScale.mul(float(1.07)))
+              .add(pulseNoiseXY.mul(float(1.03))),
+          );
+          const pulseMod2 = mix(
+            float(1),
+            pulseN2.mul(0.5).add(0.5),
+            uShorePulseNoiseAmt,
+          );
+          const pulseRing2 = pow(
+            max(pulseRing2Raw.mul(pulseMod2), float(0.0001)),
+            uShorePulseRingSharpness,
+          );
+          const pulseFade2 = pow(float(1).sub(pulseT2), uShorePulseFade);
+          const pulseB = pulseRing2
+            .mul(pulseFade2)
+            .mul(uShorePulse2Intensity)
+            .mul(step(float(0.02), distInLake));
+
+          const shorePulseA = pulseA.add(pulseB).mul(uShorePulseEnabled);
+          return vec2(shorePrimaryA, shorePulseA);
+        });
+
+        const dragonShoreFoamLayers = Fn(() => {
+          return shoreFoamLayerMasks(
+            positionWorld.xz,
+            uWaterY.sub(positionWorld.y),
+            uDragonPulseRangeMul,
+          );
+        });
+
+        function applyDragonWaterlineMaterials(root) {
+          root.traverse((obj) => {
+            if (!obj.isMesh) return;
+            const list = Array.isArray(obj.material) ? obj.material : [obj.material];
+            const next = list.map((src) => {
+              const mat = new THREE.MeshStandardNodeMaterial();
+              if (obj.isSkinnedMesh) mat.skinning = true;
+              mat.side = src.side;
+              mat.transparent = src.transparent;
+              mat.opacity = src.opacity;
+              mat.alphaTest = src.alphaTest;
+              mat.depthWrite = src.depthWrite;
+              mat.depthTest = src.depthTest;
+              mat.roughness = src.roughness ?? 0.5;
+              mat.metalness = src.metalness ?? 0;
+              if (src.normalMap) {
+                mat.normalMap = src.normalMap;
+                mat.normalScale.copy(
+                  src.normalScale || new THREE.Vector2(1, 1),
+                );
+              }
+              if (src.emissiveMap) mat.emissiveMap = src.emissiveMap;
+              mat.emissiveIntensity = src.emissiveIntensity ?? 0;
+              if (src.emissive)
+                mat.emissive.copy(src.emissive);
+              const base = src.map
+                ? texture(src.map, uv()).rgb
+                : vec3(
+                    float(src.color.r),
+                    float(src.color.g),
+                    float(src.color.b),
+                  );
+              const dLayers = dragonShoreFoamLayers();
+              const str = uDragonMeshFoam;
+              mat.colorNode = base
+                .add(uShorePrimaryFoamColor.mul(dLayers.x.mul(str)))
+                .add(uShorePulseFoamColor.mul(dLayers.y.mul(str)))
+                .saturate();
+              if (src.map) mat.map = null;
+              src.dispose();
+              return mat;
+            });
+            obj.material = next.length === 1 ? next[0] : next;
+          });
+        }
+
+        // World XZ from position (water plane is XZ at Y = WATER_Y)
+        // Wrap in Fn() so .toVar() / .addAssign() have a valid TSL stack
+        const waterFrag = Fn(() => {
+          const worldXZ = positionWorld.xz;
+          const tNoise = uTime.mul(uNoiseTimeScale);
+          const noiseUV = worldXZ
+            .mul(uNoiseScale)
+            .add(vec2(tNoise.mul(uNoiseFlowSpeed), 0));
+          const noiseFac = fbm2(noiseUV);
+          const noiseFacBlend = mix(float(0.5), noiseFac, uWaterNoiseEnabled);
+          const distort = vec2(
+            noiseFacBlend.sub(0.5),
+            noiseFacBlend.sub(0.5),
+          ).mul(uDistortAmount);
+
+          const tNoiseActive = tNoise.mul(uWaterNoiseEnabled);
+          const uvVoro = worldXZ
+            .mul(uScale)
+            .add(vec2(uFlowX.mul(tNoiseActive), uFlowZ.mul(tNoiseActive)))
+            .add(distort);
+          const f1 = voronoiF1(uvVoro, tNoiseActive, uCellSpeed);
+          const sf1 = voronoiSmoothF1(
+            uvVoro,
+            tNoiseActive,
+            uCellSpeed,
+            uSmoothness,
+          );
+          const edge = f1.sub(sf1);
+          const t = smoothstep(
+            uEdgeThreshold.sub(uEdgeSoftness),
+            uEdgeThreshold.add(uEdgeSoftness),
+            edge,
+          );
+          const safeMP = max(uMidPos, 0.0001);
+          const seg0 = clamp(t.div(safeMP), 0, 1);
+          const seg1 = clamp(
+            t.sub(safeMP).div(float(1).sub(safeMP).add(0.0001)),
+            0,
+            1,
+          );
+          const inSeg1 = smoothstep(safeMP.sub(0.001), safeMP.add(0.001), t);
+          const baseColorCells = mix(
+            mix(uDeepColor, uMidColor, seg0),
+            mix(uMidColor, uHighlight, seg1),
+            inSeg1,
+          );
+          const baseColorFlat = mix(uDeepColor, uMidColor, uMidPos);
+          const baseColor = mix(
+            baseColorFlat,
+            baseColorCells,
+            uWaterCellsEnabled,
+          );
+
+          const rippleAcc = float(0).toVar();
+          for (let i = 0; i < MAX_RIPPLES; i++) {
+            const isOn = step(float(i).add(0.5), uRippleCount);
+            const elapsed = max(uTime.sub(uRippleTimes[i]), 0);
+            const d = length(worldXZ.sub(uRippleCenters[i]));
+            for (let r = 0; r < 4; r++) {
+              const rIsOn = smoothstep(
+                float(r).sub(0.5),
+                float(r).add(0.5),
+                uRippleRings,
+              );
+              const re = max(elapsed.sub(float(r).mul(uRippleSpacing)), 0);
+              const ringR = re.mul(uRippleSpeed);
+              const ringDist = abs(d.sub(ringR));
+              const ring = float(1).sub(
+                smoothstep(float(0), uRippleWidth, ringDist),
+              );
+              const fade = exp(re.mul(float(-1).mul(uRippleDecay)));
+              rippleAcc.addAssign(ring.mul(fade).mul(isOn).mul(rIsOn));
+            }
+          }
+          const ripple = saturate(rippleAcc.mul(uRippleStrength));
+          const waterColor = mix(baseColor, uHighlight, ripple);
+
+          const bx = abs(worldXZ.x);
+          const bz = abs(worldXZ.y);
+          const boxR = max(bx, bz).div(max(uLakeHalfExtent, float(0.001)));
+          const fade = float(1).sub(pow(saturate(boxR), uFadeStrength));
+          const tForAlpha = t.mul(uWaterCellsEnabled);
+          const waterAlpha = mix(uDeepOpacity, 1, max(tForAlpha, ripple))
+            .mul(uOpacity)
+            .mul(fade);
+
+          // Waterline/foam: depth prepass vs water — band thickness scales with view distance (not fixed linear ε).
+          const rawScene = depthTexNode.r;
+          const sceneD = linearDepth(rawScene, uDepthNear, uDepthFar);
+          const waterD = waterLinearDepth();
+          const diff = abs(sceneD.sub(waterD));
+          const refD = max(max(waterD, sceneD), float(0.12));
+          const distScale = refD.mul(uFoamDistanceScale);
+          const lineW = max(uLineWidth.mul(distScale), float(0.0005));
+          const glowW = max(uGlowWidth.mul(distScale), float(0.0007));
+          const lineInner = lineW.mul(0.25);
+          const line = float(1).sub(smoothstep(lineInner, lineW, diff));
+          const glow = exp(diff.div(max(glowW, float(1e-4))).mul(float(-1)));
+          const foamAlphaDepth = max(line, glow.mul(0.45))
+            .saturate()
+            .mul(uWaterlineIntensity)
+            .saturate();
+          const foamCol = mix(uGlowColor, uLineColor, line);
+          const geoMask = float(1).sub(step(float(0.9999), rawScene));
+
+          const hmHalf = uTerrainWorldSize.mul(float(0.5));
+          const hmU = worldXZ.x.add(hmHalf).div(uTerrainWorldSize);
+          const hmV = worldXZ.y.add(hmHalf).div(uTerrainWorldSize);
+          const hmUVc = vec2(hmU, hmV);
+          const inHm = step(float(0.001), hmU)
+            .mul(step(hmU, float(0.999)))
+            .mul(step(float(0.001), hmV))
+            .mul(step(hmV, float(0.999)));
+          const terrainWorldY = heightTexNode.sample(hmUVc).r;
+          const distShore = uWaterY.sub(terrainWorldY);
+          const shoreLayers = shoreFoamLayerMasks(worldXZ, distShore, float(1));
+          const shorePrimaryA = shoreLayers.x;
+          const shorePulseA = shoreLayers.y;
+          const pMask = shorePrimaryA.mul(inHm).mul(uHeightmapFoamEnabled);
+          const sMask = shorePulseA.mul(inHm).mul(uHeightmapFoamEnabled);
+          const depthContrib = foamAlphaDepth
+            .mul(geoMask)
+            .mul(uObjectFoamFromDepth);
+          const finalColor = waterColor
+            .add(foamCol.mul(depthContrib))
+            .add(uShorePrimaryFoamColor.mul(pMask))
+            .add(uShorePulseFoamColor.mul(sMask))
+            .saturate();
+
+          return vec4(finalColor, waterAlpha);
+        });
+
+        const fragOut = waterFrag();
+        const waterMaterial = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          depthWrite: false,
+          side: THREE.FrontSide,
+          colorNode: fragOut.rgb,
+          opacityNode: fragOut.a,
+        });
+
+        const waterPlane = new THREE.Mesh(
+          new THREE.PlaneGeometry(LAKE_PLANE_BASE, LAKE_PLANE_BASE),
+          waterMaterial,
+        );
+        waterPlane.rotation.x = -Math.PI / 2;
+        waterPlane.position.set(0, WATER_Y, 0);
+        waterPlane.frustumCulled = false;
+        waterPlane.renderOrder = 2;
+        scene.add(waterPlane);
+
+        // ─── Wave simulation (injection + wave update + display) ─────────────────
+        const injRT = new THREE.WebGLRenderTarget(WAVE_RES, WAVE_RES, {
+          type: THREE.HalfFloatType,
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+        });
+        const injCamera = new THREE.OrthographicCamera(
+          -10,
+          10,
+          10,
+          -10,
+          0.1,
+          200,
+        );
+        injCamera.up.set(0, 0, -1);
+
+        const uInjWaterY = uniform(WATER_Y);
+        const uInjBandWidth = uniform(1.0);
+        const injMat = new THREE.MeshBasicNodeMaterial({
+          side: THREE.DoubleSide,
+          transparent: true,
+          depthWrite: true,
+        });
+        // Match original: exact silhouette at water surface — band mask (0 outside band), strength 1 at water
+        const injFrag = Fn(() => {
+          const d = abs(positionWorld.y.sub(uInjWaterY));
+          const insideBand = step(d, uInjBandWidth);
+          const s = float(1)
+            .sub(smoothstep(float(0), uInjBandWidth, d))
+            .mul(insideBand);
+          return vec4(s, float(0), float(0), float(1));
+        });
+        injMat.colorNode = injFrag().rgb;
+        injMat.opacityNode = injFrag().a;
+        const injScene = new THREE.Scene();
+        injScene.background = new THREE.Color(0x000000);
+        const injGroups = new Map();
+
+        const waveRTs = [
+          new THREE.WebGLRenderTarget(WAVE_RES, WAVE_RES, {
+            type: THREE.HalfFloatType,
+            minFilter: THREE.LinearFilter,
+            magFilter: THREE.LinearFilter,
+          }),
+          new THREE.WebGLRenderTarget(WAVE_RES, WAVE_RES, {
+            type: THREE.HalfFloatType,
+            minFilter: THREE.LinearFilter,
+            magFilter: THREE.LinearFilter,
+          }),
+        ];
+        let pingIdx = 0;
+        let lastInjectTime = -Infinity;
+        let timeAccum = 0;
+        let smoothedDispCx = 0;
+        let smoothedDispCz = 0;
+        const FIXED_STEP = 1 / 60;
+        const injectInterval = 0.05;
+        const waveSpeed = 0.04;
+        const waveDamping = 0.993;
+        const borderWidth = 0.06;
+        const injectStr = 0.25;
+        const injectAmp = 0.7;
+        const bandWidth = 0.4;
+        const waveSizeMul = 5;
+
+        const uWaveTexelSize = uniform(TEXEL);
+        const uWaveSpeed = uniform(waveSpeed);
+        const uWaveDamping = uniform(waveDamping);
+        const uWaveInjectStr = uniform(0);
+        const uWaveInjectAmp = uniform(injectAmp);
+        const uWaveBorderWidth = uniform(borderWidth);
+        // TSL: pass Texture directly; use .sample(uv) for different coords, update .value each frame
+        const waveTexNode = texture(placeholderColor, vec2(0.5, 0.5));
+        const injTexNode = texture(placeholderColor, vec2(0.5, 0.5));
+        const waveUpdateFn = Fn(() => {
+          const uv = positionLocal.xy.mul(0.5).add(0.5);
+          const cur = waveTexNode.sample(uv).r;
+          const prev = waveTexNode.sample(uv).g;
+          const left = waveTexNode.sample(
+            uv.add(vec2(float(-1).mul(uWaveTexelSize), 0)),
+          ).r;
+          const right = waveTexNode.sample(uv.add(vec2(uWaveTexelSize, 0))).r;
+          const up = waveTexNode.sample(uv.add(vec2(0, uWaveTexelSize))).r;
+          const down = waveTexNode.sample(
+            uv.add(vec2(0, float(-1).mul(uWaveTexelSize))),
+          ).r;
+          const laplacian = left.add(right).add(up).add(down).sub(cur.mul(4));
+          let next = float(2).mul(cur).sub(prev).add(uWaveSpeed.mul(laplacian));
+          next = next.mul(uWaveDamping);
+          const edge = min(
+            min(uv.x, float(1).sub(uv.x)),
+            min(uv.y, float(1).sub(uv.y)),
+          );
+          const border = smoothstep(float(0), uWaveBorderWidth, edge);
+          next = next.mul(border);
+          const inject = injTexNode.sample(uv).r;
+          next = mix(next, uWaveInjectAmp, inject.mul(uWaveInjectStr));
+          next = clamp(next, -1, 1);
+          return vec4(next, cur, 0, 1);
+        });
+        const waveUpdateMat = new THREE.MeshBasicNodeMaterial({
+          depthTest: false,
+          depthWrite: false,
+        });
+        waveUpdateMat.fragmentNode = waveUpdateFn();
+        const waveQuad = new THREE.Mesh(
+          new THREE.PlaneGeometry(2, 2),
+          waveUpdateMat,
+        );
+        const waveScene = new THREE.Scene();
+        waveScene.add(waveQuad);
+        const waveCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+        const uDispCenter = uniform(new THREE.Vector2(0, 0));
+        const uDispWaveSize = uniform(20);
+        const uDispTexelSize = uniform(TEXEL);
+        const uDispGradScale = uniform(1.5);
+        const uDispRingThreshold = uniform(0.4);
+        const uDispEdgeSharpness = uniform(1);
+        const uDispColor = uniform(new THREE.Color("#ffffff"));
+        const uDispOpacity = uniform(1);
+        const dispTexNode = texture(placeholderColor, vec2(0.5, 0.5));
+        const waveDisplayFn = Fn(() => {
+          const xz = positionWorld.xz;
+          const u = xz.x.sub(uDispCenter.x).div(uDispWaveSize.mul(2)).add(0.5);
+          const v = xz.y
+            .sub(uDispCenter.y)
+            .div(uDispWaveSize.mul(2))
+            .mul(-1)
+            .add(0.5);
+          const uv = vec2(u, v);
+          // Match original: don't sample outside simulation bounds (avoids edge wrap)
+          const inBounds = step(float(0.01), u)
+            .mul(step(float(0.01), v))
+            .mul(step(u, float(0.99)))
+            .mul(step(v, float(0.99)));
+          const dx = dispTexNode
+            .sample(uv.add(vec2(uDispTexelSize, 0)))
+            .r.sub(dispTexNode.sample(uv.sub(vec2(uDispTexelSize, 0))).r);
+          const dy = dispTexNode
+            .sample(uv.add(vec2(0, uDispTexelSize)))
+            .r.sub(dispTexNode.sample(uv.sub(vec2(0, uDispTexelSize))).r);
+          const grad = length(vec2(dx, dy)).mul(uDispGradScale);
+          const halfEdge = mix(0.35, 0.01, uDispEdgeSharpness);
+          const ring = smoothstep(
+            uDispRingThreshold.sub(halfEdge),
+            uDispRingThreshold.add(halfEdge),
+            grad,
+          ).mul(inBounds);
+          return vec4(uDispColor, ring.mul(uDispOpacity));
+        });
+        const displayMat = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+        });
+        const dispOut = waveDisplayFn();
+        displayMat.colorNode = dispOut.rgb;
+        displayMat.opacityNode = dispOut.a;
+        const waveDisplayPlane = new THREE.Mesh(
+          new THREE.PlaneGeometry(LAKE_PLANE_BASE, LAKE_PLANE_BASE),
+          displayMat,
+        );
+        waveDisplayPlane.rotation.x = -Math.PI / 2;
+        waveDisplayPlane.position.set(0, -0.092, 0);
+        waveDisplayPlane.frustumCulled = false;
+        waveDisplayPlane.renderOrder = 6;
+        scene.add(waveDisplayPlane);
+
+        // ─── Resize ───────────────────────────────────────────────────────────
+        function onResize() {
+          const w = window.innerWidth;
+          const h = window.innerHeight;
+          camera.aspect = w / h;
+          camera.updateProjectionMatrix();
+          renderer.setSize(w, h);
+          const dpr = renderer.getPixelRatio();
+          depthRT.setSize(Math.round(w * dpr), Math.round(h * dpr));
+          depthRT.depthTexture?.dispose();
+          depthRT.depthTexture = new THREE.DepthTexture(
+            Math.round(w * dpr),
+            Math.round(h * dpr),
+          );
+          depthRT.depthTexture.type = THREE.UnsignedShortType;
+        }
+        window.addEventListener("resize", onResize);
+        onResize();
+
+        let needsWaveInit = true;
+
+        function animate(timestamp) {
+          requestAnimationFrame(animate);
+          clock.update(
+            typeof timestamp === "number" ? timestamp : performance.now(),
+          );
+          const elapsed = clock.getElapsed();
+          const delta = clock.getDelta();
+          uTime.value = elapsed;
+
+          // Keep texture nodes valid; update .value with real RT textures when available
+          depthTexNode.value = placeholderDepth;
+          waveTexNode.value = placeholderColor;
+          injTexNode.value = placeholderColor;
+          dispTexNode.value = placeholderColor;
+
+          for (let i = 0; i < MAX_RIPPLES; i++) {
+            if (rippleBuffer[i]) {
+              uRippleCenters[i].value.set(rippleBuffer[i].x, rippleBuffer[i].z);
+              uRippleTimes[i].value = rippleBuffer[i].t;
+            } else {
+              uRippleCenters[i].value.set(1e6, 1e6);
+              uRippleTimes[i].value = 0;
+            }
+          }
+          uRippleCount.value = rippleBuffer.length;
+          uRippleSpeed.value = rippleConfig.speed;
+          uRippleWidth.value = rippleConfig.width;
+          uRippleStrength.value = rippleConfig.strength;
+          uRippleDecay.value = rippleConfig.decay;
+          uRippleRings.value = rippleConfig.rings;
+          uRippleSpacing.value = rippleConfig.spacing;
+
+          const objects = [];
+          const dpr = renderer.getPixelRatio();
+          const physW = Math.round(window.innerWidth * dpr);
+          const physH = Math.round(window.innerHeight * dpr);
+          if (depthRT.width !== physW || depthRT.height !== physH) {
+            depthRT.setSize(physW, physH);
+            if (depthRT.depthTexture) {
+              depthRT.depthTexture.dispose();
+              depthRT.depthTexture = new THREE.DepthTexture(physW, physH);
+              depthRT.depthTexture.type = THREE.UnsignedShortType;
+            }
+            // Keep depth texture node in sync
+            depthTexNode.value = depthRT.depthTexture || placeholderDepth;
+          }
+
+          for (const obj of objects) {
+            if (!depthGroups.has(obj.id)) {
+              const group = new THREE.Group();
+              for (const geo of obj.geometries) {
+                const mesh = new THREE.Mesh(geo, depthMat);
+                group.add(mesh);
+              }
+              depthScene.add(group);
+              depthGroups.set(obj.id, group);
+            }
+            const group = depthGroups.get(obj.id);
+            group.position.copy(obj.ref.current.position);
+            group.rotation.copy(obj.ref.current.rotation);
+            group.scale.copy(obj.ref.current.scale);
+          }
+          for (const [id, group] of depthGroups) {
+            if (!objects.find((o) => o.id === id)) {
+              depthScene.remove(group);
+              depthGroups.delete(id);
+            }
+          }
+
+          if (dragonModelRoot && dragonDepthRoot) {
+            dragonDepthRoot.position.copy(dragonModelRoot.position);
+            dragonDepthRoot.quaternion.copy(dragonModelRoot.quaternion);
+            dragonDepthRoot.scale.copy(dragonModelRoot.scale);
+          }
+
+          const prevRT = renderer.getRenderTarget();
+          const prevAC = renderer.autoClear;
+          renderer.autoClear = true;
+          renderer.setRenderTarget(depthRT);
+          renderer.render(depthScene, camera);
+          renderer.setRenderTarget(prevRT);
+          renderer.autoClear = prevAC;
+
+          // Only assign if valid THREE.Texture (WebGPU RT may expose different type)
+          if (depthRT.depthTexture instanceof THREE.Texture) {
+            depthTexNode.value = depthRT.depthTexture;
+          }
+          uDepthNear.value = camera.near;
+          uDepthFar.value = camera.far;
+
+          let cx = 0,
+            cz = 0,
+            maxScale = 5;
+          if (objects.length > 0) {
+            cx =
+              objects.reduce((s, o) => s + o.ref.current.position.x, 0) /
+              objects.length;
+            cz =
+              objects.reduce((s, o) => s + o.ref.current.position.z, 0) /
+              objects.length;
+            maxScale = Math.max(
+              ...objects.map((o) => o.ref.current.scale.x),
+              5,
+            );
+          }
+          const waveSize = maxScale * waveSizeMul;
+          const SMOOTH = 0.08;
+          smoothedDispCx =
+            objects.length > 0
+              ? smoothedDispCx + (cx - smoothedDispCx) * SMOOTH
+              : smoothedDispCx;
+          smoothedDispCz =
+            objects.length > 0
+              ? smoothedDispCz + (cz - smoothedDispCz) * SMOOTH
+              : smoothedDispCz;
+          uDispCenter.value.set(smoothedDispCx, smoothedDispCz);
+
+          for (const obj of objects) {
+            if (!injGroups.has(obj.id)) {
+              const group = new THREE.Group();
+              for (const geo of obj.geometries) {
+                group.add(new THREE.Mesh(geo, injMat));
+              }
+              injScene.add(group);
+              injGroups.set(obj.id, group);
+            }
+            const group = injGroups.get(obj.id);
+            group.position.copy(obj.ref.current.position);
+            group.rotation.copy(obj.ref.current.rotation);
+            group.scale.copy(obj.ref.current.scale);
+          }
+          for (const [id, group] of injGroups) {
+            if (!objects.find((o) => o.id === id)) {
+              injScene.remove(group);
+              injGroups.delete(id);
+            }
+          }
+
+          timeAccum += delta;
+          const shouldStep = timeAccum >= FIXED_STEP;
+          if (shouldStep) {
+            timeAccum -= FIXED_STEP;
+            timeAccum = Math.min(timeAccum, FIXED_STEP * 2);
+          }
+
+          if (needsWaveInit) {
+            renderer.setRenderTarget(waveRTs[0]);
+            renderer.clear(0x000000, false, false);
+            renderer.setRenderTarget(waveRTs[1]);
+            renderer.clear(0x000000, false, false);
+            needsWaveInit = false;
+          }
+
+          const shouldInject =
+            shouldStep && elapsed - lastInjectTime >= injectInterval;
+          if (shouldInject) {
+            uInjBandWidth.value = bandWidth;
+            injCamera.left = -waveSize;
+            injCamera.right = waveSize;
+            injCamera.top = waveSize;
+            injCamera.bottom = -waveSize;
+            injCamera.updateProjectionMatrix();
+            injCamera.position.set(cx, 100, cz);
+            injCamera.lookAt(cx, 0, cz);
+            renderer.setRenderTarget(injRT);
+            renderer.render(injScene, injCamera);
+            lastInjectTime = elapsed;
+          }
+
+          if (shouldStep) {
+            const readRT = waveRTs[pingIdx];
+            const writeRT = waveRTs[1 - pingIdx];
+            if (readRT.texture instanceof THREE.Texture)
+              waveTexNode.value = readRT.texture;
+            if (injRT.texture instanceof THREE.Texture)
+              injTexNode.value = injRT.texture;
+            uWaveInjectStr.value = shouldInject ? injectStr : 0;
+            renderer.setRenderTarget(writeRT);
+            renderer.render(waveScene, waveCamera);
+            pingIdx = 1 - pingIdx;
+          }
+
+          const dispTex = waveRTs[pingIdx].texture;
+          dispTexNode.value =
+            dispTex instanceof THREE.Texture ? dispTex : placeholderColor;
+          uDispWaveSize.value = waveSize;
+
+          // Render main scene to screen (restore default framebuffer after wave/depth passes)
+          renderer.setRenderTarget(null);
+          controls.update();
+          dragonTransformControls?.update();
+          renderer.render(scene, camera);
+        }
+
+        animate();
+
+        // ─── Tweakpane ─────────────────────────────────────────────────────────
+        function applyPaneColor(c, target) {
+          if (typeof c === "string") {
+            target.set(c);
+          } else if (c && typeof c.r === "number") {
+            target.setRGB(c.r, c.g, c.b);
+          }
+        }
+
+        const pane = new Pane({ title: "Lake" });
+        const fScene = pane.addFolder({ title: "Scene" });
+        fScene.addBinding(params, "exposure", {
+          min: 0.5,
+          max: 2.5,
+          step: 0.05,
+        });
+        fScene.addBinding(params, "bgColor");
+        fScene.addBinding(params, "lakeSize", {
+          label: "Lake size (square)",
+          min: 10,
+          max: 400,
+          step: 5,
+        });
+
+        const fDragon = pane.addFolder({
+          title: "Dragon (gizmo) — foam updates live while dragging",
+          expanded: false,
+        });
+        fDragon
+          .addBinding(params, "dragonVisible", { label: "Show in scene + depth" })
+          .on("change", applyDragonVisibility);
+        fDragon
+          .addBinding(params, "gizmoEnabled", {
+            label: "Gizmo on (off = easy orbit)",
+          })
+          .on("change", applyDragonGizmoState);
+        fDragon.addBinding(params, "dragonWaterFoam", {
+          label: "Shore-style foam strength (mesh)",
+          min: 0,
+          max: 1.5,
+          step: 0.05,
+        });
+        fDragon.addBinding(params, "dragonPulseRangeMul", {
+          label: "Pulse travel × (vs lake)",
+          min: 0.08,
+          max: 1.5,
+          step: 0.02,
+        });
+        fDragon.addButton({ title: "Move (key 1)" }).on("click", () => {
+          dragonTransformControls?.setMode("translate");
+        });
+        fDragon.addButton({ title: "Rotate (key 2)" }).on("click", () => {
+          dragonTransformControls?.setMode("rotate");
+        });
+        fDragon.addButton({ title: "Scale (key 3)" }).on("click", () => {
+          dragonTransformControls?.setMode("scale");
+        });
+
+        window.addEventListener("keydown", (e) => {
+          if (e.target.closest(".tp-dfwv")) return;
+          if (!dragonTransformControls) return;
+          if (e.repeat) return;
+          if (e.key === "1") dragonTransformControls.setMode("translate");
+          if (e.key === "2") dragonTransformControls.setMode("rotate");
+          if (e.key === "3") dragonTransformControls.setMode("scale");
+          if (e.key === "g" || e.key === "G") {
+            params.gizmoEnabled = !params.gizmoEnabled;
+            applyDragonGizmoState();
+            pane.refresh();
+          }
+        });
+
+        const fTerrain = pane.addFolder({
+          title: "Terrain (heightmap → mesh + shore)",
+          expanded: true,
+        });
+        fTerrain.addBinding(params, "terrainSeed", {
+          label: "Seed",
+          min: 1,
+          max: 999999,
+          step: 1,
+        });
+        fTerrain.addBinding(params, "terrainSegments", {
+          label: "Mesh subdiv",
+          min: 48,
+          max: 192,
+          step: 8,
+        });
+        fTerrain.addBinding(params, "terrainMountainAmp", {
+          label: "Mountains (large relief)",
+          min: 0,
+          max: 22,
+          step: 0.25,
+        });
+        fTerrain.addBinding(params, "terrainMacroScale", {
+          label: "Mountain scale (UV)",
+          min: 0.002,
+          max: 0.02,
+          step: 0.0002,
+        });
+        fTerrain.addBinding(params, "terrainHillAmp", {
+          label: "Hills (detail)",
+          min: 0,
+          max: 12,
+          step: 0.1,
+        });
+        fTerrain.addBinding(params, "terrainNoiseScale", {
+          label: "Detail frequency",
+          min: 0.02,
+          max: 0.12,
+          step: 0.002,
+        });
+        fTerrain.addBinding(params, "terrainOctaves", {
+          label: "fBm octaves",
+          min: 3,
+          max: 10,
+          step: 1,
+        });
+        fTerrain.addBinding(params, "terrainBowlSigma", {
+          label: "Lake bowl width",
+          min: 18,
+          max: 70,
+          step: 1,
+        });
+        fTerrain.addBinding(params, "terrainBowlDepth", {
+          label: "Lake bowl depth",
+          min: 1,
+          max: 6,
+          step: 0.05,
+        });
+        fTerrain.addBinding(params, "terrainVerticalBias", {
+          label: "Height bias",
+          min: -1,
+          max: 4,
+          step: 0.05,
+        });
+        fTerrain.addBinding(params, "terrainRoughness", {
+          label: "Roughness",
+          min: 0.2,
+          max: 1,
+          step: 0.02,
+        });
+        fTerrain.addBinding(params, "terrainMetalness", {
+          label: "Metalness",
+          min: 0,
+          max: 0.35,
+          step: 0.01,
+        });
+        fTerrain.addButton({ title: "Random seed" }).on("click", () => {
+          params.terrainSeed = (Math.random() * 999998 + 1) | 0;
+          pane.refresh();
+          syncPaneToScene();
+        });
+
+        const fLight = pane.addFolder({ title: "Lighting" });
+        fLight.addBinding(params, "ambient", { min: 0, max: 3, step: 0.05 });
+        fLight.addBinding(params, "sun", { min: 0, max: 12, step: 0.25 });
+        fLight.addBinding(params, "fill", { min: 0, max: 5, step: 0.1 });
+        fLight.addBinding(params, "rim", { min: 0, max: 5, step: 0.1 });
+
+        const fNoise = pane.addFolder({ title: "Water — noise" });
+        fNoise.addBinding(params, "waterNoise", { label: "Motion & FBM" });
+        fNoise.addBinding(params, "waterCells", { label: "Cell pattern" });
+        fNoise.addBinding(params, "noiseTimeScale", {
+          min: 0.1,
+          max: 1.5,
+          step: 0.05,
+        });
+        fNoise.addBinding(params, "noiseScale", {
+          min: 0.3,
+          max: 4,
+          step: 0.02,
+        });
+        fNoise.addBinding(params, "flowZ", { min: 0, max: 0.3, step: 0.01 });
+        fNoise.addBinding(params, "cellSpeed", {
+          min: 0.05,
+          max: 1.2,
+          step: 0.05,
+        });
+        fNoise.addBinding(params, "distort", { min: 0, max: 1, step: 0.02 });
+        fNoise.addBinding(params, "edgeThreshold", {
+          min: 0.02,
+          max: 0.2,
+          step: 0.005,
+        });
+
+        const fWaterCol = pane.addFolder({ title: "Water — colors" });
+        fWaterCol.addBinding(params, "deepColor");
+        fWaterCol.addBinding(params, "midColor");
+        fWaterCol.addBinding(params, "highlightColor");
+        fWaterCol.addBinding(params, "waterOpacity", {
+          min: 0.2,
+          max: 1,
+          step: 0.02,
+        });
+
+        const fRipple = pane.addFolder({ title: "Ripples" });
+        fRipple.addBinding(params, "rippleStrength", {
+          min: 0,
+          max: 15,
+          step: 0.5,
+        });
+        fRipple.addBinding(params, "rippleWidth", {
+          min: 0.02,
+          max: 0.4,
+          step: 0.01,
+        });
+
+        const fFoam = pane.addFolder({ title: "Waterline / foam" });
+        fFoam.addBinding(params, "heightmapShoreFoam", {
+          label: "Shore foam (heightmap vs water Y)",
+        });
+        fFoam.addBinding(params, "shoreFoamWidth", {
+          label: "Shore band width (world)",
+          min: 0.08,
+          max: 2,
+          step: 0.02,
+        });
+        fFoam.addBinding(params, "shoreFoamNoise", {
+          label: "Noise → jagged mix",
+          min: 0,
+          max: 0.5,
+          step: 0.02,
+        });
+        fFoam.addBinding(params, "shoreFoamIntensity", {
+          label: "Primary layer intensity",
+          min: 0,
+          max: 2.5,
+          step: 0.05,
+        });
+        fFoam.addBinding(params, "shoreFoamSharpness", {
+          label: "Primary band sharpness (pow)",
+          min: 0.4,
+          max: 3.5,
+          step: 0.05,
+        });
+        fFoam.addBinding(params, "shorePrimaryFoamColor", {
+          label: "Primary foam color",
+        });
+        fFoam.addBinding(params, "shorePulseFoamColor", {
+          label: "Pulse ring color",
+        });
+
+        const fShoreNoise = fFoam.addFolder({
+          title: "Shore — Perlin / noise motion",
+          expanded: true,
+        });
+        fShoreNoise.addBinding(params, "shoreNoiseAnimSpeed", {
+          label: "Noise scroll speed",
+          min: 0,
+          max: 4,
+          step: 0.05,
+        });
+        fShoreNoise.addBinding(params, "shoreNoiseScrollV", {
+          label: "V drift vs U (diagonal)",
+          min: 0,
+          max: 2,
+          step: 0.02,
+        });
+        fShoreNoise.addBinding(params, "shoreNoiseContrast", {
+          label: "Noise contrast / gain",
+          min: 0.2,
+          max: 3,
+          step: 0.05,
+        });
+        fShoreNoise.addBinding(params, "shoreNoiseWorldScale", {
+          label: "Main noise scale (world XZ)",
+          min: 2,
+          max: 48,
+          step: 0.5,
+        });
+        fShoreNoise.addBinding(params, "shoreNoiseFineScale", {
+          label: "Fine noise scale",
+          min: 4,
+          max: 80,
+          step: 0.5,
+        });
+        fShoreNoise.addBinding(params, "shoreNoiseFineAmt", {
+          label: "Fine noise blend",
+          min: 0,
+          max: 0.6,
+          step: 0.02,
+        });
+        fShoreNoise.addBinding(params, "shoreNoiseFineSpeed", {
+          label: "Fine noise speed",
+          min: 0,
+          max: 4,
+          step: 0.05,
+        });
+        fShoreNoise.addBinding(params, "shoreJaggedCutoff", {
+          label: "Jagged threshold (shape)",
+          min: 0.15,
+          max: 0.85,
+          step: 0.02,
+        });
+
+        const fShorePulse = fFoam.addFolder({
+          title: "Shore — inward pulse (travel + fade)",
+          expanded: false,
+        });
+        fShorePulse.addBinding(params, "shorePulseEnabled", {
+          label: "Enable pulse rings",
+        });
+        fShorePulse.addBinding(params, "shorePulseAnimSpeed", {
+          label: "Pulse cycle speed (rings/sec feel)",
+          min: 0.05,
+          max: 2,
+          step: 0.02,
+        });
+        fShorePulse.addBinding(params, "shorePulseMaxRange", {
+          label: "Travel distance (world)",
+          min: 0.5,
+          max: 12,
+          step: 0.1,
+        });
+        fShorePulse.addBinding(params, "shorePulseRingWidth", {
+          label: "Ring thickness",
+          min: 0.03,
+          max: 0.45,
+          step: 0.01,
+        });
+        fShorePulse.addBinding(params, "shorePulseRingSharpness", {
+          label: "Ring edge sharpness (pow)",
+          min: 0.35,
+          max: 3,
+          step: 0.05,
+        });
+        fShorePulse.addBinding(params, "shorePulseFade", {
+          label: "Fade-out while traveling (power)",
+          min: 0.5,
+          max: 4,
+          step: 0.05,
+        });
+        fShorePulse.addBinding(params, "shorePulseNoiseAmt", {
+          label: "Ring noise wiggle",
+          min: 0,
+          max: 1,
+          step: 0.02,
+        });
+        fShorePulse.addBinding(params, "shorePulseNoiseScale", {
+          label: "Ring noise scale (world)",
+          min: 2,
+          max: 32,
+          step: 0.5,
+        });
+        fShorePulse.addBinding(params, "shorePulseNoiseAnimSpeed", {
+          label: "Ring noise anim speed",
+          min: 0,
+          max: 3,
+          step: 0.05,
+        });
+        fShorePulse.addBinding(params, "shorePulseIntensity", {
+          label: "Ring A intensity",
+          min: 0,
+          max: 2,
+          step: 0.05,
+        });
+        fShorePulse.addBinding(params, "shorePulse2Intensity", {
+          label: "Ring B intensity",
+          min: 0,
+          max: 2,
+          step: 0.05,
+        });
+        fShorePulse.addBinding(params, "shorePulseStagger", {
+          label: "Ring B phase (0–1)",
+          min: 0,
+          max: 1,
+          step: 0.02,
+        });
+        fFoam.addBinding(params, "objectFoamFromDepth", {
+          label: "Foam on props (depth prepass)",
+        });
+        fFoam.addBinding(params, "lineThinness", {
+          min: 0.01,
+          max: 0.15,
+          step: 0.005,
+        });
+        fFoam.addBinding(params, "foamColor", { view: "color" });
+        fFoam.addBinding(params, "waterlineIntensity", {
+          min: 0,
+          max: 4,
+          step: 0.1,
+        });
+        fFoam.addBinding(params, "lineWidth", {
+          min: 0.05,
+          max: 1,
+          step: 0.02,
+        });
+        fFoam.addBinding(params, "glowWidth", {
+          min: 0.2,
+          max: 5,
+          step: 0.1,
+        });
+        fFoam.addBinding(params, "foamDistanceScale", {
+          label: "Foam vs distance",
+          min: 0.0003,
+          max: 0.004,
+          step: 0.00005,
+        });
+
+        const fRings = pane.addFolder({ title: "Wave rings" });
+        fRings.addBinding(params, "ringOpacity", {
+          min: 0,
+          max: 1.5,
+          step: 0.05,
+        });
+        fRings.addBinding(params, "gradScale", {
+          min: 0.5,
+          max: 4,
+          step: 0.1,
+        });
+
+        function applyLakeSize() {
+          const f = params.lakeSize / LAKE_PLANE_BASE;
+          waterPlane.scale.set(f, 1, f);
+          waveDisplayPlane.scale.set(f, 1, f);
+          uLakeHalfExtent.value = params.lakeSize * 0.5;
+        }
+
+        function syncPaneToScene() {
+          rebuildTerrainFromParams();
+          renderer.toneMappingExposure = params.exposure;
+          applyPaneColor(params.bgColor, scene.background);
+          applyLakeSize();
+          ambientLight.intensity = params.ambient;
+          sunLight.intensity = params.sun;
+          fillLight.intensity = params.fill;
+          rimLight.intensity = params.rim;
+          uNoiseTimeScale.value = params.noiseTimeScale;
+          uNoiseScale.value = params.noiseScale;
+          uWaterNoiseEnabled.value = params.waterNoise ? 1 : 0;
+          uWaterCellsEnabled.value = params.waterCells ? 1 : 0;
+          uFlowZ.value = params.flowZ;
+          uCellSpeed.value = params.cellSpeed;
+          uDistortAmount.value = params.distort;
+          uEdgeThreshold.value = params.edgeThreshold;
+          applyPaneColor(params.deepColor, uDeepColor.value);
+          applyPaneColor(params.midColor, uMidColor.value);
+          applyPaneColor(params.highlightColor, uHighlight.value);
+          uDeepOpacity.value = params.waterOpacity;
+          uRippleStrength.value = params.rippleStrength;
+          rippleConfig.strength = params.rippleStrength;
+          uRippleWidth.value = params.rippleWidth;
+          rippleConfig.width = params.rippleWidth;
+          uWaterLineThinness.value = params.lineThinness;
+          uDragonMeshFoam.value = params.dragonWaterFoam;
+          applyPaneColor(params.foamColor, uWaterLineColor.value);
+          applyPaneColor(params.shorePrimaryFoamColor, uShorePrimaryFoamColor.value);
+          applyPaneColor(params.shorePulseFoamColor, uShorePulseFoamColor.value);
+          uWaterlineIntensity.value = params.waterlineIntensity;
+          uLineWidth.value = params.lineWidth;
+          uGlowWidth.value = params.glowWidth;
+          uFoamDistanceScale.value = params.foamDistanceScale;
+          uDispOpacity.value = params.ringOpacity;
+          uDispGradScale.value = params.gradScale;
+        }
+
+        pane.on("change", syncPaneToScene);
+        syncPaneToScene();
+      }
+
+      init();
+    </script>
+  </body>
+</html>
