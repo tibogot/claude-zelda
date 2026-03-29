@@ -107,6 +107,10 @@
         background: rgba(20, 110, 60, 0.95);
         color: #b0ffd0;
       }
+      #mode-badge.ambientfx {
+        background: rgba(0, 160, 180, 0.92);
+        color: #c0fffa;
+      }
 
       #chunk-info {
         position: fixed;
@@ -379,6 +383,7 @@
       import { createTreeSystem } from "./tree-painter7.js";
       import { createFoliageSlot } from "./foliage-painter.js";
       import { createFleurSystem, FLEUR_PRESETS } from "./fleur-painter.js";
+      import { createAmbientFXSystem } from "./ambientfx-painter.js";
       import { MeshBVH } from "three-mesh-bvh";
       import { Pane } from "tweakpane";
       import Stats from "stats-gl";
@@ -1208,6 +1213,23 @@
       const fleurColorA = { preset: "main",   inner: FLEUR_PRESETS.main.inner,   outer: FLEUR_PRESETS.main.outer,   glow: FLEUR_PRESETS.main.glow   };
       const fleurColorB = { preset: "sakura", inner: FLEUR_PRESETS.sakura.inner, outer: FLEUR_PRESETS.sakura.outer, glow: FLEUR_PRESETS.sakura.glow };
 
+      // ─── AMBIENT FX STATE ──────────────────────────────────────────────
+      let ambientFXSystem  = null;
+      let ambientFXErase   = false;
+      let ambientFXFolder  = null;
+      const ambientFXParams = {
+        effectType:  "butterflies",
+        emitterRadius: 12,
+        density:     3,
+        flapSpeed:   8.0,
+        flapAngle:   0.8,
+        glideRatio:  0.45,
+        showRings:   true,
+        windX:       1.0,
+        windZ:       0.3,
+        windStrength: 1.0,
+      };
+
       let terrainGeo = null; // set in init, needed by sculpt
       let skirtGeo = null; // edge skirt geometry, updated with terrain
       const skirtEdgeXZ = []; // [{wx,wz}] for each skirt top vertex (4 * DISPLAY_VERTS)
@@ -1686,6 +1708,20 @@
             fleurParams.hoverBase,
             fleurParams.hoverVariance,
             fleurActiveSlot,
+          );
+        }
+      }
+
+      function paintAmbientFXAt(wx, wz, erase) {
+        if (!ambientFXSystem) return;
+        if (erase) {
+          ambientFXSystem.removeInBrush(wx, wz, ambientFXParams.emitterRadius);
+        } else {
+          ambientFXSystem.addInBrush(
+            wx, wz,
+            ambientFXParams.emitterRadius,
+            ambientFXParams.effectType,
+            ambientFXParams.density,
           );
         }
       }
@@ -2494,6 +2530,7 @@
           if (s.system) s.system.syncHeights();
         });
         if (fleurSystem) fleurSystem.syncHeights();
+        if (ambientFXSystem) ambientFXSystem.syncHeights();
         propObjects.forEach((root) => {
           root.position.y = bvhHeight(root.position.x, root.position.z);
         });
@@ -2661,6 +2698,7 @@
             if (s.system) s.system.syncHeights();
           });
           if (fleurSystem) fleurSystem.syncHeights();
+          if (ambientFXSystem) ambientFXSystem.syncHeights();
         };
         reader.readAsArrayBuffer(file);
       }
@@ -5278,6 +5316,9 @@
         // ── FLEUR SYSTEM ──
         fleurSystem = createFleurSystem(scene, bvhHeight);
 
+        // ── AMBIENT FX SYSTEM ──
+        ambientFXSystem = createAmbientFXSystem(scene, bvhHeight);
+
         // ── TREE SYSTEM ──
         treeSystem = createTreeSystem(scene, bvhHeight);
         gltfLoader
@@ -5759,6 +5800,7 @@
             version: 2,
             trees: treeSystem ? treeSystem.getPositions() : [],
             fleurs: fleurSystem ? fleurSystem.getPositions() : [],
+            ambientFX: ambientFXSystem ? ambientFXSystem.getEmitters() : [],
             lodSlots:   LOD_SLOTS.map(s   => ({ name: s.name, positions: s.positions })),
             ftreeSlots: FTREE_SLOTS.map(s  => ({ name: s.name, positions: s.positions })),
             foliage: FOLIAGE_SLOTS.map((s) => ({
@@ -5853,6 +5895,7 @@
                 if (s.system) s.system.syncHeights();
               });
               if (fleurSystem) fleurSystem.syncHeights();
+              if (ambientFXSystem) ambientFXSystem.syncHeights();
             }
 
             // Canvases
@@ -5913,6 +5956,7 @@
               const meta = JSON.parse(await metaFile.async("string"));
               if (meta.trees  && treeSystem)  treeSystem.setPositions(meta.trees);
               if (meta.fleurs && fleurSystem) fleurSystem.setPositions(meta.fleurs);
+              if (meta.ambientFX && ambientFXSystem) ambientFXSystem.setEmitters(meta.ambientFX);
               if (meta.lodSlots) {
                 meta.lodSlots.forEach((saved, i) => {
                   if (i < LOD_SLOTS.length) {
@@ -6219,6 +6263,7 @@
             "Cliffs [C]": "cliffs",
             "Flowers [B]": "flowers",
             "Fleurs [M]":  "fleurs",
+            "Ambient FX [X]": "ambientfx",
             "River [V]": "river",
             "Waterfall [H]": "waterfall",
             "Play [F]": "play",
@@ -6358,6 +6403,7 @@
               if (s.system) s.system.syncHeights();
             });
             if (fleurSystem) fleurSystem.syncHeights();
+            if (ambientFXSystem) ambientFXSystem.syncHeights();
             propObjects.forEach((r) => {
               r.position.y = bvhHeight(r.position.x, r.position.z);
             });
@@ -7676,6 +7722,64 @@
             catch (err) { console.error("Failed to load fleurs.json", err); }
           };
           reader.readAsText(e.target.files[0]);
+        });
+
+        // ── Ambient FX folder ──
+        ambientFXFolder = pane.addFolder({ title: "Ambient FX  [ X ]", expanded: true });
+        ambientFXFolder.hidden = true;
+
+        const ambientFXErasePARAMS = { erase: false };
+        ambientFXFolder.addBinding(ambientFXErasePARAMS, "erase", { label: "Erase (or Shift)" })
+          .on("change", (e) => { ambientFXErase = e.value; });
+
+        ambientFXFolder.addBinding(ambientFXParams, "effectType", {
+          label: "Effect",
+          options: {
+            "Butterflies": "butterflies",
+          },
+        });
+
+        ambientFXFolder.addBlade({ view: "separator" });
+
+        ambientFXFolder.addBinding(ambientFXParams, "emitterRadius", {
+          label: "Emitter radius", min: 4, max: 40, step: 1,
+        });
+        ambientFXFolder.addBinding(ambientFXParams, "density", {
+          label: "Density", min: 1, max: 12, step: 1,
+        });
+
+        ambientFXFolder.addBlade({ view: "separator" });
+
+        const ambientFXButterflyFolder = ambientFXFolder.addFolder({ title: "Butterfly params", expanded: false });
+        ambientFXButterflyFolder.addBinding(ambientFXParams, "flapSpeed", {
+          label: "Flap Speed", min: 2, max: 20, step: 0.5,
+        }).on("change", (e) => { if (ambientFXSystem) ambientFXSystem.setFlapSpeed(e.value); });
+        ambientFXButterflyFolder.addBinding(ambientFXParams, "flapAngle", {
+          label: "Flap Angle", min: 0.1, max: 1.5, step: 0.05,
+        }).on("change", (e) => { if (ambientFXSystem) ambientFXSystem.setFlapAngle(e.value); });
+        ambientFXButterflyFolder.addBinding(ambientFXParams, "glideRatio", {
+          label: "Glide Ratio", min: 0, max: 0.8, step: 0.05,
+        }).on("change", (e) => { if (ambientFXSystem) ambientFXSystem.setGlideRatio(e.value); });
+
+        ambientFXFolder.addBlade({ view: "separator" });
+
+        ambientFXFolder.addBinding(ambientFXParams, "windStrength", {
+          label: "Wind Strength", min: 0, max: 3, step: 0.1,
+        });
+        ambientFXFolder.addBinding(ambientFXParams, "windX", {
+          label: "Wind X", min: -3, max: 3, step: 0.1,
+        });
+        ambientFXFolder.addBinding(ambientFXParams, "windZ", {
+          label: "Wind Z", min: -3, max: 3, step: 0.1,
+        });
+
+        ambientFXFolder.addBlade({ view: "separator" });
+
+        ambientFXFolder.addBinding(ambientFXParams, "showRings", { label: "Show emitter rings" })
+          .on("change", (e) => { if (ambientFXSystem) ambientFXSystem.setRingsVisible(e.value); });
+
+        ambientFXFolder.addButton({ title: "Clear all emitters" }).on("click", () => {
+          if (ambientFXSystem) ambientFXSystem.clear();
         });
 
         // ── Cliff Grass folder ──
@@ -9198,6 +9302,8 @@
           waterfallFolder.hidden = mode !== "waterfall";
           cliffsFolder.hidden = mode !== "cliffs";
           if (fleurFolder) fleurFolder.hidden = mode !== "fleurs";
+          if (ambientFXFolder) ambientFXFolder.hidden = mode !== "ambientfx";
+          if (ambientFXSystem) ambientFXSystem.setRingsVisible(mode === "ambientfx");
           brushFolder.hidden =
             mode === "view" ||
             mode === "place" ||
@@ -9305,7 +9411,9 @@
                                             ? "TREE LOD  [ J ]"
                                             : mode === "ftrees"
                                               ? "FOLIAGE TREES  [ U ]"
-                                              : "PLACE MODE"; // play handled above
+                                              : mode === "ambientfx"
+                                                ? "AMBIENT FX  [ X ]"
+                                                : "PLACE MODE"; // play handled above
           badge.className = mode;
           renderer.domElement.style.cursor =
             mode === "view" ? "default" : "crosshair";
@@ -9355,6 +9463,8 @@
             setMode(currentMode === "flowers" ? "view" : "flowers");
           if (e.code === "KeyM")
             setMode(currentMode === "fleurs" ? "view" : "fleurs");
+          if (e.code === "KeyX")
+            setMode(currentMode === "ambientfx" ? "view" : "ambientfx");
           if (e.code === "KeyT" && currentMode !== "water")
             setMode(currentMode === "trees" ? "view" : "trees");
           if (e.code === "KeyN")
@@ -9583,6 +9693,8 @@
             paintFoliageAt(p.x, p.z, foliageEraseMode || e.shiftKey);
           if (currentMode === "fleurs")
             paintFleurAt(p.x, p.z, fleurEraseMode || e.shiftKey);
+          if (currentMode === "ambientfx")
+            paintAmbientFXAt(p.x, p.z, ambientFXErase || e.shiftKey);
           if (currentMode === "pinelod")
             paintLODAt(p.x, p.z, e.shiftKey);
           if (currentMode === "ftrees")
@@ -9803,6 +9915,8 @@
             paintFoliageAt(p.x, p.z, foliageEraseMode || e.shiftKey);
           if (currentMode === "fleurs")
             paintFleurAt(p.x, p.z, fleurEraseMode || e.shiftKey);
+          if (currentMode === "ambientfx")
+            paintAmbientFXAt(p.x, p.z, ambientFXErase || e.shiftKey);
         });
 
         renderer.domElement.addEventListener("mouseup", () => {
@@ -9826,6 +9940,7 @@
               if (s.system) s.system.syncHeights();
             });
             if (fleurSystem) fleurSystem.syncHeights();
+            if (ambientFXSystem) ambientFXSystem.syncHeights();
             propObjects.forEach((root) => {
               root.position.y = bvhHeight(root.position.x, root.position.z);
             });
@@ -10165,6 +10280,11 @@
           const elapsed = clock.getElapsed();
           const dt = clock.getDelta();
 
+          // ── AMBIENT FX UPDATE ──
+          if (ambientFXSystem) {
+            ambientFXSystem.update(dt, elapsed,
+              ambientFXParams.windX, ambientFXParams.windZ, ambientFXParams.windStrength);
+          }
 
           // ── PLAY MODE UPDATE ──
           if (currentMode === "play") {
