@@ -68,6 +68,8 @@
         positionWorld,
         positionLocal,
         positionView,
+        modelWorldMatrix,
+        modelWorldMatrixInverse,
         normalize,
         pow,
         saturate,
@@ -80,6 +82,10 @@
       } from "three/tsl";
 
       const WATER_Y = -0.1;
+      /** Wave debug plane sits slightly above the water surface (world Y). */
+      const WAVE_DISPLAY_Y_OFFSET = 0.008;
+      /** Subdivisions for water mesh (vertex ripples need tessellation). */
+      const WATER_PLANE_SEGMENTS = 112;
       /** Base size for water + wave-display planes; actual extent = this × scale (see `lakeSize`). */
       const LAKE_PLANE_BASE = 100;
       /** Land around the lake (world units); lake stays centered at origin on XZ. */
@@ -513,6 +519,18 @@
           midColor: "#2a5f72",
           highlightColor: "#4a90a8",
           waterOpacity: 0.72,
+          /** Whole-lake vertical bob: foam & shore follow `uWaterY` (same as mesh Y). */
+          waterBobEnabled: true,
+          waterBobAmplitude: 0.038,
+          waterBobHz: 0.42,
+          /** Second sine (slightly faster) for less “perfect” bob. */
+          waterBobSecondaryAmp: 0.012,
+          waterBobSecondaryHz: 0.86,
+          /** Small vertex displacement; needs subdivided plane (see `WATER_PLANE_SEGMENTS`). */
+          waterSurfRippleEnabled: true,
+          waterSurfRippleAmp: 0.014,
+          waterSurfRippleFreq: 0.36,
+          waterSurfRippleSpeed: 1.05,
           rippleStrength: 5.5,
           rippleWidth: 0.12,
           lineThinness: 0.045,
@@ -554,6 +572,19 @@
           shoreNoiseFineSpeed: 1.2,
           /** step() threshold for jagged breakup (lower = sparser). */
           shoreJaggedCutoff: 0.48,
+          /**
+           * Shore jagged band + inward pulse ring modulation: `perlin` = `mx_noise_float`;
+           * `voronoiFbm` = Voronoi F1−smoothF1 × `fbm2` (same Voronoi folder sliders).
+           */
+          shoreFoamNoiseStyle: "perlin",
+          /** Voronoi smooth-min width (smaller = crisper cells). */
+          shoreFoamVoroSmoothness: 0.11,
+          /** Feature point drift speed inside Voronoi cells. */
+          shoreFoamVoroCellSpeed: 0.48,
+          /** Multiplies cell-edge signal before mixing with FBM. */
+          shoreFoamVoroEdgeGain: 3.2,
+          /** How much `fbm2` blends into the Voronoi edge mask. */
+          shoreFoamVoroFbmWeight: 0.72,
           shorePrimaryFoamColor: "#ffffff",
           shorePulseFoamColor: "#c9ebff",
           shorePulseEnabled: true,
@@ -793,6 +824,12 @@
           uShoreNoiseFineAmt.value = params.shoreNoiseFineAmt;
           uShoreNoiseFineSpeed.value = params.shoreNoiseFineSpeed;
           uShoreJaggedCutoff.value = params.shoreJaggedCutoff;
+          uShoreFoamNoiseMode.value =
+            params.shoreFoamNoiseStyle === "voronoiFbm" ? 1 : 0;
+          uShoreFoamVoroSmoothness.value = params.shoreFoamVoroSmoothness;
+          uShoreFoamVoroCellSpeed.value = params.shoreFoamVoroCellSpeed;
+          uShoreFoamVoroEdgeGain.value = params.shoreFoamVoroEdgeGain;
+          uShoreFoamVoroFbmWeight.value = params.shoreFoamVoroFbmWeight;
           applyPaneColor(params.shorePrimaryFoamColor, uShorePrimaryFoamColor.value);
           applyPaneColor(params.shorePulseFoamColor, uShorePulseFoamColor.value);
           uShorePulseEnabled.value = params.shorePulseEnabled ? 1 : 0;
@@ -827,6 +864,13 @@
         const uShoreNoiseFineAmt = uniform(params.shoreNoiseFineAmt);
         const uShoreNoiseFineSpeed = uniform(params.shoreNoiseFineSpeed);
         const uShoreJaggedCutoff = uniform(params.shoreJaggedCutoff);
+        const uShoreFoamNoiseMode = uniform(
+          params.shoreFoamNoiseStyle === "voronoiFbm" ? 1 : 0,
+        );
+        const uShoreFoamVoroSmoothness = uniform(params.shoreFoamVoroSmoothness);
+        const uShoreFoamVoroCellSpeed = uniform(params.shoreFoamVoroCellSpeed);
+        const uShoreFoamVoroEdgeGain = uniform(params.shoreFoamVoroEdgeGain);
+        const uShoreFoamVoroFbmWeight = uniform(params.shoreFoamVoroFbmWeight);
         const uShorePrimaryFoamColor = uniform(
           new THREE.Color(params.shorePrimaryFoamColor),
         );
@@ -869,6 +913,12 @@
 
         // Contact foam on objects (baked into object shader like original DragonBalls/index.tsx)
         const uWaterY = uniform(WATER_Y);
+        const uSurfRippleAmp = uniform(params.waterSurfRippleAmp);
+        const uSurfRippleFreq = uniform(params.waterSurfRippleFreq);
+        const uSurfRippleSpeed = uniform(params.waterSurfRippleSpeed);
+        const uSurfRippleEnabled = uniform(
+          params.waterSurfRippleEnabled ? 1 : 0,
+        );
         const uWaterLineThinness = uniform(0.045);
         const uWaterLineColor = uniform(new THREE.Color("#e8f4ff"));
         const uDragonMeshFoam = uniform(params.dragonWaterFoam);
@@ -884,29 +934,40 @@
             max(foamBase, float(0.0001)),
             uShoreFoamSharpness,
           );
-          const foamN0 = mx_noise_float(
-            wXZ
-              .mul(uShoreNoiseWorldScale)
-              .add(
-                vec2(
-                  uTime.mul(uShoreNoiseAnimSpeed),
-                  uTime.mul(uShoreNoiseAnimSpeed.mul(uShoreNoiseScrollV)),
-                ),
-              ),
+          const shoreScroll = vec2(
+            uTime.mul(uShoreNoiseAnimSpeed),
+            uTime.mul(uShoreNoiseAnimSpeed.mul(uShoreNoiseScrollV)),
           );
-          const foamN1 = mx_noise_float(
-            wXZ
-              .mul(uShoreNoiseFineScale)
-              .add(
-                vec2(
-                  uTime.mul(uShoreNoiseFineSpeed),
-                  uTime.mul(uShoreNoiseFineSpeed.mul(float(0.71))),
-                ),
+          const shoreUVMain = wXZ.mul(uShoreNoiseWorldScale).add(shoreScroll);
+          const shoreUVFine = wXZ
+            .mul(uShoreNoiseFineScale)
+            .add(
+              vec2(
+                uTime.mul(uShoreNoiseFineSpeed),
+                uTime.mul(uShoreNoiseFineSpeed.mul(float(0.71))),
               ),
-          );
-          const foamN = foamN0
+            );
+          const foamN0 = mx_noise_float(shoreUVMain);
+          const foamN1 = mx_noise_float(shoreUVFine);
+          const foamNPerlin = foamN0
             .add(foamN1.mul(uShoreNoiseFineAmt))
             .mul(uShoreNoiseContrast);
+          const tVoro = uTime.mul(uShoreNoiseAnimSpeed);
+          const f1v = voronoiF1(shoreUVMain, tVoro, uShoreFoamVoroCellSpeed);
+          const sf1v = voronoiSmoothF1(
+            shoreUVMain,
+            tVoro,
+            uShoreFoamVoroCellSpeed,
+            uShoreFoamVoroSmoothness,
+          );
+          const edgeV = saturate(f1v.sub(sf1v).mul(uShoreFoamVoroEdgeGain));
+          const fb = fbm2(shoreUVFine);
+          const foamNVoro = edgeV
+            .mul(float(1.12))
+            .add(fb.mul(uShoreFoamVoroFbmWeight))
+            .sub(float(0.42))
+            .mul(uShoreNoiseContrast);
+          const foamN = mix(foamNPerlin, foamNVoro, uShoreFoamNoiseMode);
           const jaggedFoam = step(
             uShoreJaggedCutoff,
             foamShaped.add(foamN.mul(uShoreFoamNoiseAmt)),
@@ -919,9 +980,34 @@
             uTime.mul(uShorePulseNoiseAnimSpeed),
             uTime.mul(uShorePulseNoiseAnimSpeed.mul(float(0.72))),
           );
-          const pulseN = mx_noise_float(
-            wXZ.mul(uShorePulseNoiseScale).add(pulseNoiseXY),
+          const pulseUVMain = wXZ.mul(uShorePulseNoiseScale).add(pulseNoiseXY);
+          const pulseNPerlin = mx_noise_float(pulseUVMain);
+          const pulseFineMul = uShoreNoiseFineScale.div(
+            max(uShoreNoiseWorldScale, float(0.01)),
           );
+          const pulseUVFine = wXZ
+            .mul(uShorePulseNoiseScale.mul(pulseFineMul))
+            .add(
+              vec2(
+                uTime.mul(uShorePulseNoiseAnimSpeed.mul(float(1.1))),
+                uTime.mul(uShorePulseNoiseAnimSpeed.mul(float(0.79))),
+              ),
+            );
+          const tPulse = uTime.mul(uShorePulseNoiseAnimSpeed);
+          const f1p = voronoiF1(pulseUVMain, tPulse, uShoreFoamVoroCellSpeed);
+          const sf1p = voronoiSmoothF1(
+            pulseUVMain,
+            tPulse,
+            uShoreFoamVoroCellSpeed,
+            uShoreFoamVoroSmoothness,
+          );
+          const edgeP = saturate(f1p.sub(sf1p).mul(uShoreFoamVoroEdgeGain));
+          const fbp = fbm2(pulseUVFine);
+          const pulseNVoro = edgeP
+            .mul(float(1.12))
+            .add(fbp.mul(uShoreFoamVoroFbmWeight))
+            .sub(float(0.42));
+          const pulseN = mix(pulseNPerlin, pulseNVoro, uShoreFoamNoiseMode);
           const pulseMod = mix(
             float(1),
             pulseN.mul(0.5).add(0.5),
@@ -958,11 +1044,32 @@
               abs(distInLake.sub(pulseFront2)),
             ),
           );
-          const pulseN2 = mx_noise_float(
-            wXZ
-              .mul(uShorePulseNoiseScale.mul(float(1.07)))
-              .add(pulseNoiseXY.mul(float(1.03))),
+          const pulseUVMain2 = wXZ
+            .mul(uShorePulseNoiseScale.mul(float(1.07)))
+            .add(pulseNoiseXY.mul(float(1.03)));
+          const pulseN2Perlin = mx_noise_float(pulseUVMain2);
+          const pulseUVFine2 = wXZ
+            .mul(uShorePulseNoiseScale.mul(float(1.07)).mul(pulseFineMul))
+            .add(
+              vec2(
+                uTime.mul(uShorePulseNoiseAnimSpeed.mul(float(1.13))),
+                uTime.mul(uShorePulseNoiseAnimSpeed.mul(float(0.81))),
+              ),
+            );
+          const f1p2 = voronoiF1(pulseUVMain2, tPulse, uShoreFoamVoroCellSpeed);
+          const sf1p2 = voronoiSmoothF1(
+            pulseUVMain2,
+            tPulse,
+            uShoreFoamVoroCellSpeed,
+            uShoreFoamVoroSmoothness,
           );
+          const edgeP2 = saturate(f1p2.sub(sf1p2).mul(uShoreFoamVoroEdgeGain));
+          const fbp2 = fbm2(pulseUVFine2);
+          const pulseN2Voro = edgeP2
+            .mul(float(1.12))
+            .add(fbp2.mul(uShoreFoamVoroFbmWeight))
+            .sub(float(0.42));
+          const pulseN2 = mix(pulseN2Perlin, pulseN2Voro, uShoreFoamNoiseMode);
           const pulseMod2 = mix(
             float(1),
             pulseN2.mul(0.5).add(0.5),
@@ -1169,16 +1276,37 @@
         });
 
         const fragOut = waterFrag();
+        const waterVert = Fn(() => {
+          const wp = modelWorldMatrix.mul(vec4(positionLocal, 1)).xyz;
+          const wxz = wp.xz;
+          const t = uTime.mul(uSurfRippleSpeed);
+          const w1 = sin(wxz.x.mul(uSurfRippleFreq).add(t));
+          const w2 = cos(
+            wxz.y.mul(uSurfRippleFreq.mul(1.17)).sub(t.mul(0.82)),
+          );
+          const h = w1
+            .add(w2.mul(0.55))
+            .mul(uSurfRippleAmp)
+            .mul(uSurfRippleEnabled);
+          const wNew = wp.add(vec3(0, h, 0));
+          return modelWorldMatrixInverse.mul(vec4(wNew, 1)).xyz;
+        });
         const waterMaterial = new THREE.MeshBasicNodeMaterial({
           transparent: true,
           depthWrite: false,
           side: THREE.FrontSide,
+          positionNode: waterVert(),
           colorNode: fragOut.rgb,
           opacityNode: fragOut.a,
         });
 
         const waterPlane = new THREE.Mesh(
-          new THREE.PlaneGeometry(LAKE_PLANE_BASE, LAKE_PLANE_BASE),
+          new THREE.PlaneGeometry(
+            LAKE_PLANE_BASE,
+            LAKE_PLANE_BASE,
+            WATER_PLANE_SEGMENTS,
+            WATER_PLANE_SEGMENTS,
+          ),
           waterMaterial,
         );
         waterPlane.rotation.x = -Math.PI / 2;
@@ -1351,7 +1479,11 @@
           displayMat,
         );
         waveDisplayPlane.rotation.x = -Math.PI / 2;
-        waveDisplayPlane.position.set(0, -0.092, 0);
+        waveDisplayPlane.position.set(
+          0,
+          WATER_Y + WAVE_DISPLAY_Y_OFFSET,
+          0,
+        );
         waveDisplayPlane.frustumCulled = false;
         waveDisplayPlane.renderOrder = 6;
         scene.add(waveDisplayPlane);
@@ -1385,6 +1517,23 @@
           const elapsed = clock.getElapsed();
           const delta = clock.getDelta();
           uTime.value = elapsed;
+
+          const bob1 =
+            params.waterBobEnabled
+              ? Math.sin(elapsed * Math.PI * 2 * params.waterBobHz) *
+                params.waterBobAmplitude
+              : 0;
+          const bob2 =
+            params.waterBobEnabled && params.waterBobSecondaryAmp > 0
+              ? Math.sin(
+                  elapsed * Math.PI * 2 * params.waterBobSecondaryHz,
+                ) * params.waterBobSecondaryAmp
+              : 0;
+          const liveWaterY = WATER_Y + bob1 + bob2;
+          uWaterY.value = liveWaterY;
+          uInjWaterY.value = liveWaterY;
+          waterPlane.position.y = liveWaterY;
+          waveDisplayPlane.position.y = liveWaterY + WAVE_DISPLAY_Y_OFFSET;
 
           // Keep texture nodes valid; update .value with real RT textures when available
           depthTexNode.value = placeholderDepth;
@@ -1768,6 +1917,58 @@
           max: 1,
           step: 0.02,
         });
+        const fWaterBob = pane.addFolder({
+          title: "Water — vertical bob (foam follows)",
+          expanded: false,
+        });
+        fWaterBob.addBinding(params, "waterBobEnabled", {
+          label: "Enable bob",
+        });
+        fWaterBob.addBinding(params, "waterBobAmplitude", {
+          label: "Amplitude (world Y)",
+          min: 0,
+          max: 0.25,
+          step: 0.002,
+        });
+        fWaterBob.addBinding(params, "waterBobHz", {
+          label: "Frequency (cycles / sec)",
+          min: 0.02,
+          max: 2,
+          step: 0.02,
+        });
+        fWaterBob.addBinding(params, "waterBobSecondaryAmp", {
+          label: "2nd wave amp (chop)",
+          min: 0,
+          max: 0.08,
+          step: 0.001,
+        });
+        fWaterBob.addBinding(params, "waterBobSecondaryHz", {
+          label: "2nd wave Hz",
+          min: 0.05,
+          max: 3,
+          step: 0.02,
+        });
+        fWaterBob.addBinding(params, "waterSurfRippleEnabled", {
+          label: "GPU surface ripples",
+        });
+        fWaterBob.addBinding(params, "waterSurfRippleAmp", {
+          label: "Ripple height (world Y)",
+          min: 0,
+          max: 0.06,
+          step: 0.001,
+        });
+        fWaterBob.addBinding(params, "waterSurfRippleFreq", {
+          label: "Ripple spatial freq",
+          min: 0.05,
+          max: 1.2,
+          step: 0.01,
+        });
+        fWaterBob.addBinding(params, "waterSurfRippleSpeed", {
+          label: "Ripple anim speed",
+          min: 0,
+          max: 4,
+          step: 0.05,
+        });
 
         const fRipple = pane.addFolder({ title: "Ripples" });
         fRipple.addBinding(params, "rippleStrength", {
@@ -1808,6 +2009,41 @@
           min: 0.4,
           max: 3.5,
           step: 0.05,
+        });
+        fFoam.addBinding(params, "shoreFoamNoiseStyle", {
+          label: "Shore + pulse noise",
+          options: {
+            "Perlin (MaterialX)": "perlin",
+            "Voronoi + FBM": "voronoiFbm",
+          },
+        });
+        const fShoreVoro = fFoam.addFolder({
+          title: "Shore / pulse — Voronoi + FBM",
+          expanded: false,
+        });
+        fShoreVoro.addBinding(params, "shoreFoamVoroSmoothness", {
+          label: "Cell smoothness",
+          min: 0.02,
+          max: 0.45,
+          step: 0.01,
+        });
+        fShoreVoro.addBinding(params, "shoreFoamVoroCellSpeed", {
+          label: "Point drift speed",
+          min: 0,
+          max: 2,
+          step: 0.02,
+        });
+        fShoreVoro.addBinding(params, "shoreFoamVoroEdgeGain", {
+          label: "Edge gain",
+          min: 0.5,
+          max: 8,
+          step: 0.1,
+        });
+        fShoreVoro.addBinding(params, "shoreFoamVoroFbmWeight", {
+          label: "FBM blend",
+          min: 0,
+          max: 1.5,
+          step: 0.02,
         });
         fFoam.addBinding(params, "shorePrimaryFoamColor", {
           label: "Primary foam color",
@@ -2028,6 +2264,10 @@
           uFoamDistanceScale.value = params.foamDistanceScale;
           uDispOpacity.value = params.ringOpacity;
           uDispGradScale.value = params.gradScale;
+          uSurfRippleAmp.value = params.waterSurfRippleAmp;
+          uSurfRippleFreq.value = params.waterSurfRippleFreq;
+          uSurfRippleSpeed.value = params.waterSurfRippleSpeed;
+          uSurfRippleEnabled.value = params.waterSurfRippleEnabled ? 1 : 0;
         }
 
         pane.on("change", syncPaneToScene);
