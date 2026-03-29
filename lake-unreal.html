@@ -527,6 +527,11 @@
 
         const scene = new THREE.Scene();
         scene.background = new THREE.Color("#6d7f72");
+        /** Always on `scene.fog` with density 0 above water avoids a GPU hitch when crossing the surface. */
+        const underwaterFog = new THREE.FogExp2(0x1a4d5c, 0);
+        scene.fog = underwaterFog;
+        const ORBIT_MAX_SURFACE = Math.PI * 0.495;
+        const ORBIT_MAX_UNDERWATER = Math.PI * 0.998;
         const camera = new THREE.PerspectiveCamera(
           45,
           window.innerWidth / window.innerHeight,
@@ -540,7 +545,7 @@
         controls.target.set(0, 5, 0);
         controls.minDistance = 0.6;
         controls.maxDistance = 1200;
-        controls.maxPolarAngle = Math.PI * 0.495;
+        controls.maxPolarAngle = ORBIT_MAX_SURFACE;
         controls.update();
 
         const params = {
@@ -693,6 +698,16 @@
           dragonWaterFoam: 0.85,
           /** Multiplies inward pulse travel on dragon (props are smaller than the lake). */
           dragonPulseRangeMul: 0.42,
+          /** Below-surface: double-sided water, fog, orbit can tilt past horizon while submerged. */
+          underwaterEnabled: true,
+          /** Camera Y must be this far below the live water plane to count as underwater. */
+          underwaterEyeOffset: 0.12,
+          underwaterFogDensity: 0.032,
+          underwaterFogColor: "#1a4d5c",
+          /** 0–1: extra teal absorption on the water surface when viewed from below. */
+          underwaterSurfaceTint: 0.28,
+          /** Higher = faster transition (still no fog on/off hitch). */
+          underwaterTransitionSpeed: 10,
         };
 
         function heightmapOptsFromParams(p) {
@@ -951,6 +966,7 @@
           uObjectFoamFromDepth.value = params.objectFoamFromDepth ? 1 : 0;
           uDragonMeshFoam.value = params.dragonWaterFoam;
           uDragonPulseRangeMul.value = params.dragonPulseRangeMul;
+          uUnderwaterSurfaceTint.value = params.underwaterSurfaceTint;
         }
 
         const heightTexNode = texture(heightmapDataTex, vec2(0.5, 0.5));
@@ -1041,6 +1057,8 @@
 
         // Contact foam on objects (baked into object shader like original DragonBalls/index.tsx)
         const uWaterY = uniform(WATER_Y);
+        const uCameraUnderwater = uniform(0);
+        const uUnderwaterSurfaceTint = uniform(params.underwaterSurfaceTint);
         const uSurfRippleAmp = uniform(params.waterSurfRippleAmp);
         const uSurfRippleFreq = uniform(params.waterSurfRippleFreq);
         const uSurfRippleSpeed = uniform(params.waterSurfRippleSpeed);
@@ -1422,12 +1440,15 @@
           const shorePrimaryA = shoreLayers.x;
           const pulseAMask = shoreLayers.y;
           const pulseBMask = shoreLayers.z;
-          const pMask = shorePrimaryA.mul(inHm).mul(uHeightmapFoamEnabled);
-          const sMaskA = pulseAMask.mul(inHm).mul(uHeightmapFoamEnabled);
-          const sMaskB = pulseBMask.mul(inHm).mul(uHeightmapFoamEnabled);
+          const uw = uCameraUnderwater;
+          const foamLandMul = float(1).sub(uw.mul(0.9));
+          const pMask = shorePrimaryA.mul(inHm).mul(uHeightmapFoamEnabled).mul(foamLandMul);
+          const sMaskA = pulseAMask.mul(inHm).mul(uHeightmapFoamEnabled).mul(foamLandMul);
+          const sMaskB = pulseBMask.mul(inHm).mul(uHeightmapFoamEnabled).mul(foamLandMul);
           const depthContrib = foamAlphaDepth
             .mul(geoMask)
-            .mul(uObjectFoamFromDepth);
+            .mul(uObjectFoamFromDepth)
+            .mul(float(1).sub(uw.mul(0.65)));
           const shoreBaseCol = waterColor
             .add(foamCol.mul(depthContrib))
             .add(uShorePrimaryFoamColor.mul(pMask));
@@ -1441,8 +1462,14 @@
             uShorePulse2FoamColor,
             min(float(1), sMaskB.mul(uShorePulse2Opacity)),
           ).saturate();
+          const underTint = vec3(0.52, 0.78, 0.9);
+          const finalTinted = mix(
+            finalColor,
+            finalColor.mul(underTint),
+            uw.mul(uUnderwaterSurfaceTint),
+          ).saturate();
 
-          return vec4(finalColor, waterAlpha);
+          return vec4(finalTinted, waterAlpha);
         });
 
         const fragOut = waterFrag();
@@ -1464,7 +1491,7 @@
         const waterMaterial = new THREE.MeshBasicNodeMaterial({
           transparent: true,
           depthWrite: false,
-          side: THREE.FrontSide,
+          side: THREE.DoubleSide,
           positionNode: waterVert(),
           colorNode: fragOut.rgb,
           opacityNode: fragOut.a,
@@ -1678,6 +1705,8 @@
         onResize();
 
         let needsWaveInit = true;
+        let underwaterFogDensitySm = 0;
+        let underwaterUwSm = 0;
 
         function animate(timestamp) {
           requestAnimationFrame(animate);
@@ -1704,6 +1733,27 @@
           uInjWaterY.value = liveWaterY;
           waterPlane.position.y = liveWaterY;
           waveDisplayPlane.position.y = liveWaterY + WAVE_DISPLAY_Y_OFFSET;
+
+          const subU =
+            params.underwaterEnabled &&
+            camera.position.y < liveWaterY - params.underwaterEyeOffset;
+          const fogTarget = subU ? params.underwaterFogDensity : 0;
+          const uwTarget = subU ? 1 : 0;
+          const k = Math.min(
+            28,
+            Math.max(0.5, params.underwaterTransitionSpeed),
+          );
+          const blend = Math.min(1, 1 - Math.exp(-delta * k));
+          underwaterFogDensitySm +=
+            (fogTarget - underwaterFogDensitySm) * blend;
+          underwaterUwSm += (uwTarget - underwaterUwSm) * blend;
+          underwaterFog.density = underwaterFogDensitySm;
+          uCameraUnderwater.value = underwaterUwSm;
+
+          const orbitBlend = underwaterUwSm * (params.underwaterEnabled ? 1 : 0);
+          controls.maxPolarAngle =
+            ORBIT_MAX_SURFACE +
+            (ORBIT_MAX_UNDERWATER - ORBIT_MAX_SURFACE) * orbitBlend;
 
           // Keep texture nodes valid; update .value with real RT textures when available
           depthTexNode.value = placeholderDepth;
@@ -1914,6 +1964,41 @@
           min: 10,
           max: 400,
           step: 5,
+        });
+        const fUnderwater = fScene.addFolder({
+          title: "Underwater (camera below surface)",
+          expanded: false,
+        });
+        fUnderwater.addBinding(params, "underwaterEnabled", {
+          label: "Enable (fog + see surface from below)",
+        });
+        fUnderwater.addBinding(params, "underwaterEyeOffset", {
+          label: "Eye vs surface (m)",
+          min: 0,
+          max: 0.8,
+          step: 0.02,
+        });
+        fUnderwater.addBinding(params, "underwaterFogDensity", {
+          label: "Fog density",
+          min: 0,
+          max: 0.12,
+          step: 0.002,
+        });
+        fUnderwater.addBinding(params, "underwaterFogColor", {
+          label: "Fog color",
+          view: "color",
+        });
+        fUnderwater.addBinding(params, "underwaterSurfaceTint", {
+          label: "Surface teal tint (from below)",
+          min: 0,
+          max: 0.65,
+          step: 0.02,
+        });
+        fUnderwater.addBinding(params, "underwaterTransitionSpeed", {
+          label: "Crossing smoothness",
+          min: 2,
+          max: 24,
+          step: 0.5,
         });
 
         const fDragon = pane.addFolder({
@@ -2508,6 +2593,7 @@
           rebuildTerrainFromParams();
           renderer.toneMappingExposure = params.exposure;
           applyPaneColor(params.bgColor, scene.background);
+          applyPaneColor(params.underwaterFogColor, underwaterFog.color);
           applyLakeSize();
           ambientLight.intensity = params.ambient;
           sunLight.intensity = params.sun;
