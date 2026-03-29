@@ -23,6 +23,7 @@
       .tp-dfwv {
         max-height: calc(100vh - 24px);
         overflow-y: auto;
+        z-index: 20;
       }
     </style>
     <script type="importmap">
@@ -32,7 +33,8 @@
           "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
           "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
           "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
-          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/+esm"
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/+esm",
+          "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js"
         }
       }
     </script>
@@ -43,7 +45,9 @@
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { TransformControls } from "three/addons/controls/TransformControls.js";
       import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { SkyMesh } from "three/addons/objects/SkyMesh.js";
       import { Pane } from "tweakpane";
+      import Stats from "stats-gl";
       import {
         Fn,
         uniform,
@@ -80,6 +84,7 @@
         cameraPosition,
         mx_noise_float,
         Loop,
+        uniformTexture,
       } from "three/tsl";
 
       const WATER_Y = -0.1;
@@ -93,6 +98,7 @@
       const TERRAIN_SIZE = 220;
       /** Heightmap resolution (same data → CPU mesh + GPU sample for shore foam). */
       const HEIGHTMAP_RES = 256;
+      const MAX_FOREST_TREES = 400;
 
       function mulberry32(a) {
         return function () {
@@ -123,6 +129,17 @@
 
       function lerp1(a, b, t) {
         return a + t * (b - a);
+      }
+
+      function sunDirectionFromAngles(azimuthDeg, elevationDeg) {
+        const az = (azimuthDeg * Math.PI) / 180;
+        const el = (elevationDeg * Math.PI) / 180;
+        const cosEl = Math.cos(el);
+        return new THREE.Vector3(
+          cosEl * Math.cos(az),
+          Math.sin(el),
+          cosEl * Math.sin(az),
+        ).normalize();
       }
 
       function grad2(hash, x, y) {
@@ -253,13 +270,14 @@
               -(distL * distL) / (2 * 44 * 44),
             ) * (1 - hN * 0.75);
             const patch =
-              0.88 +
-              0.12 *
-                Math.sin(x * 0.07 + z * 0.05) *
-                Math.cos(z * 0.09 - x * 0.04);
-            const gr = lerp1(0.32, 0.24, hN);
-            const gg = lerp1(0.56, 0.46, hN);
-            const gb = lerp1(0.14, 0.12, hN);
+              0.9 +
+              0.1 *
+                Math.sin(x * 0.038 + z * 0.028) *
+                Math.cos(z * 0.048 - x * 0.021);
+            const hGrass = Math.max(0, Math.min(1, hN * 1.15));
+            const gr = lerp1(lerp1(0.34, 0.26, hGrass), 0.2, Math.max(0, (hN - 0.5) * 2));
+            const gg = lerp1(lerp1(0.58, 0.5, hGrass), 0.4, Math.max(0, (hN - 0.5) * 2));
+            const gb = lerp1(lerp1(0.13, 0.11, hGrass), 0.085, Math.max(0, (hN - 0.5) * 2));
             const dampR = 0.1;
             const dampG = 0.38;
             const dampB = 0.2;
@@ -301,22 +319,29 @@
             ) * (1 - hN * 0.75);
             const rockW = Math.min(
               1,
-              slope * 1.15 + hN * hN * 0.35 + Math.min(slope, 0.35) * hN,
+              slope * 1.28 + hN * hN * 0.42 + Math.min(slope, 0.4) * hN,
             );
-            const rockR = 0.5;
-            const rockG = 0.44;
-            const rockB = 0.36;
-            const dirtR = 0.38;
-            const dirtG = 0.32;
-            const dirtB = 0.22;
+            const rockR = 0.48;
+            const rockG = 0.42;
+            const rockB = 0.35;
+            const dirtR = 0.36;
+            const dirtG = 0.3;
+            const dirtB = 0.2;
             let r = colors[pi];
             let g = colors[pi + 1];
             let b = colors[pi + 2];
-            const rockBlend = rockW * 0.42;
+            const mossW = Math.min(
+              1,
+              (1 - hN * 0.85) * Math.max(0, slope - 0.06) * 0.55,
+            );
+            r = lerp1(r, 0.16, mossW * 0.35);
+            g = lerp1(g, 0.4, mossW * 0.4);
+            b = lerp1(b, 0.2, mossW * 0.35);
+            const rockBlend = rockW * 0.48;
             r = lerp1(r, rockR, rockBlend);
             g = lerp1(g, rockG, rockBlend);
             b = lerp1(b, rockB, rockBlend);
-            const dirtBlend = Math.max(0, slope - 0.45) * 1.1 * (1 - wetNear * 0.5);
+            const dirtBlend = Math.max(0, slope - 0.38) * 1.05 * (1 - wetNear * 0.5);
             r = lerp1(r, dirtR, Math.min(1, dirtBlend));
             g = lerp1(g, dirtG, Math.min(1, dirtBlend));
             b = lerp1(b, dirtB, Math.min(1, dirtBlend));
@@ -521,12 +546,17 @@
         renderer.setSize(window.innerWidth, window.innerHeight);
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        renderer.toneMappingExposure = 1.05;
         document.body.appendChild(renderer.domElement);
         await renderer.init();
 
+        const stats = new Stats({ trackGPU: false });
+        stats.init(renderer);
+        stats.dom.style.cssText =
+          "position:fixed;top:0;left:0;z-index:25;cursor:pointer";
+        document.body.appendChild(stats.dom);
+
         const scene = new THREE.Scene();
-        scene.background = new THREE.Color("#6d7f72");
+        scene.background = null;
         /** Always on `scene.fog` with density 0 above water avoids a GPU hitch when crossing the surface. */
         const underwaterFog = new THREE.FogExp2(0x1a4d5c, 0);
         scene.fog = underwaterFog;
@@ -549,13 +579,25 @@
         controls.update();
 
         const params = {
-          exposure: 1.05,
+          exposure: 0.72,
           lakeSize: 100,
           bgColor: "#6d7f72",
-          ambient: 0.52,
-          sun: 3.2,
-          fill: 0.95,
-          rim: 0.62,
+          ambient: 0.34,
+          sun: 1.75,
+          fill: 0.62,
+          rim: 0.42,
+          /** Sun direction for sky + directional light (degrees). */
+          sunAzimuth: 135,
+          sunElevation: 43,
+          /** Scene IBL strength (PMREM from sky). Lower = dimmer reflections / fill. */
+          envIntensity: 0.2,
+          skyTurbidity: 2,
+          skyRayleigh: 1.5,
+          skyMie: 0.005,
+          skyMieG: 0.8,
+          skyCloudCoverage: 0.4,
+          skyCloudDensity: 0.4,
+          skyCloudElevation: 0.5,
           noiseTimeScale: 0.6,
           noiseScale: 1.52,
           waterNoise: false,
@@ -568,6 +610,49 @@
           midColor: "#2a5f72",
           highlightColor: "#4a90a8",
           waterOpacity: 0.72,
+          /** View-thickness → deep color (TSL `exp(-k·thickness)`). Higher = faster shift to deep teal. */
+          waterDepthAbsorb: 0.38,
+          /** Shallow band: add this much pale lift (RGB) near shore / thin water. */
+          waterShallowPale: 0.55,
+          /** Dual-layer procedural surface noise (world XZ scale). */
+          waterSurfNoiseScale1: 0.4,
+          waterSurfNoiseScale2: 1.18,
+          waterSurfNoiseSpeed1: 0.1,
+          waterSurfNoiseSpeed2: -0.078,
+          /** Multiplies all procedural water noise scroll (fragment normals + vertex). Crank up to see motion. */
+          waterProcNoiseSpeed: 8,
+          /** Perturbs world normal for Fresnel + ripple read (Genshin-like soft glints). */
+          waterSurfNormalStrength: 0.32,
+          waterFresnelExp: 4.2,
+          /** Grazing-angle sky / highlight mix (0 = off). */
+          waterFresnelSky: 0.48,
+          /** Shallow water multiplies final alpha (more see-through near shore). */
+          waterShallowAlpha: 0.5,
+          /** Extra Y displacement from `mx_noise_float` on the subdivided plane. */
+          waterVertNoiseAmp: 0.018,
+          /** World XZ scale for vertex noise sampling. */
+          waterVertNoiseScale: 0.48,
+          /** UV scroll for vertex noise (world units / sec via `uTime`). Independent of sine ripples. */
+          waterVertNoiseSpeedX: 0.24,
+          waterVertNoiseSpeedZ: -0.19,
+          /** Planar reflection RT: half-res, no sky in pass — trees + terrain in water. */
+          reflectEnabled: true,
+          reflectStrength: 0.52,
+          reflectDistort: 0.034,
+          /** RT size = screen × this (0.25–1). Lower = faster. */
+          reflectResScale: 0.5,
+          /** Instanced low-poly trees on heightmap (outside lake radius). */
+          treesEnabled: true,
+          treeCount: 170,
+          lakeTreeClearRadius: 24,
+          /** Chrome-style sphere: proves `scene.environment` (IBL). */
+          debugReflectOrb: true,
+          debugReflectOrbSize: 2.6,
+          debugReflectOrbX: 16,
+          debugReflectOrbY: 5.8,
+          debugReflectOrbZ: 12,
+          debugReflectRoughness: 0.05,
+          debugReflectEnvBoost: 1.55,
           /** Whole-lake vertical bob: foam & shore follow `uWaterY` (same as mesh Y). */
           waterBobEnabled: true,
           waterBobAmplitude: 0.038,
@@ -584,7 +669,7 @@
           rippleWidth: 0.12,
           lineThinness: 0.045,
           foamColor: "#e8f4ff",
-          waterlineIntensity: 1.35,
+          waterlineIntensity: 0,
           lineWidth: 0.42,
           glowWidth: 1.35,
           foamDistanceScale: 0.00105,
@@ -593,16 +678,16 @@
           terrainSeed: 90210,
           terrainSegments: 128,
           terrainMountainAmp: 20,
-          terrainMacroScale: 0.013,
-          terrainHillAmp: 9,
+          terrainMacroScale: 0.02,
+          terrainHillAmp: 3,
           terrainNoiseScale: 0.055,
           terrainOctaves: 6,
           terrainBowlSigma: 46,
           terrainBowlDepth: 3.15,
           terrainVerticalBias: 2.25,
-          terrainRoughness: 0.88,
-          terrainMetalness: 0.04,
-          heightmapShoreFoam: true,
+          terrainRoughness: 0.78,
+          terrainMetalness: 0.02,
+          heightmapShoreFoam: false,
           shoreFoamWidth: 0.55,
           /** How much Perlin/Worley modulates the distance band (multiplicative). */
           shoreFoamNoise: 0.35,
@@ -663,7 +748,7 @@
           shorePulse2FoamColor: "#a8d8ff",
           /** Pulse ring noise (wiggle): `perlin` vs `voronoiFbm` — independent of shoreline. */
           shorePulseNoiseStyle: "voronoiFbm",
-          shorePulseEnabled: true,
+          shorePulseEnabled: false,
           /** Inward pulse cycle speed (how fast rings travel / repeat). */
           shorePulseAnimSpeed: 0.38,
           /** How far into the lake (water-depth proxy) the ring travels (world units). */
@@ -710,6 +795,8 @@
           underwaterTransitionSpeed: 10,
         };
 
+        renderer.toneMappingExposure = params.exposure;
+
         function heightmapOptsFromParams(p) {
           return {
             seed: Math.floor(p.terrainSeed),
@@ -726,12 +813,55 @@
 
         const clock = new THREE.Timer();
 
-        // Warm daylight + soft fill — cool ambient was washing all albedo toward cyan.
-        const ambientLight = new THREE.AmbientLight(0xf2f5ef, 0.52);
+        // Hemisphere + directional sun aligned with procedural sky (same setup as parkourtsushima.html).
+        const ambientLight = new THREE.HemisphereLight(
+          0xc8e0ff,
+          0x7a9070,
+          params.ambient,
+        );
         scene.add(ambientLight);
-        const sunLight = new THREE.DirectionalLight(0xfff6e8, 3.2);
-        sunLight.position.set(6, 14, 8);
+        const sunLight = new THREE.DirectionalLight(0xfff5e0, params.sun);
         scene.add(sunLight);
+        scene.add(sunLight.target);
+
+        const sky = new SkyMesh();
+        sky.scale.setScalar(10000);
+        scene.add(sky);
+
+        const pmremGenerator = new THREE.PMREMGenerator(renderer);
+
+        function applySkyFromParams() {
+          sky.turbidity.value = params.skyTurbidity;
+          sky.rayleigh.value = params.skyRayleigh;
+          sky.mieCoefficient.value = params.skyMie;
+          sky.mieDirectionalG.value = params.skyMieG;
+          sky.cloudCoverage.value = params.skyCloudCoverage;
+          sky.cloudDensity.value = params.skyCloudDensity;
+          sky.cloudElevation.value = params.skyCloudElevation;
+          const sunUnit = sunDirectionFromAngles(
+            params.sunAzimuth,
+            params.sunElevation,
+          );
+          sky.sunPosition.value.copy(sunUnit);
+          sunLight.position.copy(sunUnit).multiplyScalar(220);
+          sunLight.target.position.set(0, 0, 0);
+          scene.environmentIntensity = params.envIntensity;
+        }
+
+        applySkyFromParams();
+
+        function rebuildSkyEnvironmentMap() {
+          const prev = scene.environment;
+          const skyEnvScene = new THREE.Scene();
+          skyEnvScene.add(sky.clone());
+          const envTex = pmremGenerator.fromScene(skyEnvScene, 0.04).texture;
+          scene.environment = envTex;
+          if (prev && prev !== envTex && typeof prev.dispose === "function") {
+            prev.dispose();
+          }
+        }
+
+        rebuildSkyEnvironmentMap();
         const fillLight = new THREE.DirectionalLight(0xb8c8d8, 0.95);
         fillLight.position.set(-6, 6, -4);
         scene.add(fillLight);
@@ -782,6 +912,29 @@
         depthRT.depthBuffer = true;
         depthRT.depthTexture = new THREE.DepthTexture(512, 512);
         depthRT.depthTexture.type = THREE.UnsignedShortType;
+        const reflectRT = new THREE.WebGLRenderTarget(4, 4, {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          depthBuffer: true,
+        });
+        reflectRT.texture.name = "LakePlanarReflect";
+        const reflectCamera = new THREE.PerspectiveCamera(45, 1, 0.05, 8000);
+        const uReflectVPHelper = new THREE.Matrix4();
+        const reflectClearColor = new THREE.Color(0x1a3048);
+        function updateReflectCamera(refCam, srcCam, waterY, target, aspect) {
+          refCam.fov = srcCam.fov;
+          refCam.aspect = aspect;
+          refCam.near = srcCam.near;
+          refCam.far = srcCam.far;
+          refCam.updateProjectionMatrix();
+          refCam.position.copy(srcCam.position);
+          refCam.position.y = 2 * waterY - srcCam.position.y;
+          const t = target.clone();
+          t.y = 2 * waterY - t.y;
+          refCam.up.set(0, -1, 0);
+          refCam.lookAt(t);
+          refCam.updateMatrixWorld(true);
+        }
         const depthScene = new THREE.Scene();
         const depthMat = new THREE.MeshBasicNodeMaterial({
           color: 0x000000,
@@ -790,6 +943,17 @@
         const depthGroups = new Map();
 
         let lastTerrainGeoSig = "";
+        let lastForestSig = "";
+        const _treeTrunkGeo = new THREE.CylinderGeometry(0.1, 0.14, 1.15, 5, 1, true);
+        _treeTrunkGeo.translate(0, 0.575, 0);
+        const _treeLeafGeo = new THREE.ConeGeometry(0.68, 1.75, 5);
+        _treeLeafGeo.translate(0, 1.45, 0);
+        let treeTrunkMatForest = null;
+        let treeLeafMatForest = null;
+        let treeTrunksIM = null;
+        let treeLeavesIM = null;
+        let treeTrunksDIM = null;
+        let treeLeavesDIM = null;
         const heightOptsInit = heightmapOptsFromParams(params);
         let heightmapFloatData = buildHeightmapFloatData(heightOptsInit);
         const heightmapDataTex = new THREE.DataTexture(
@@ -812,6 +976,7 @@
           vertexColors: true,
           flatShading: false,
         });
+        terrainMaterial.envMapIntensity = 0.9;
 
         const terrainGeometry = buildTerrainGeometryFromHeightmap(
           heightmapFloatData,
@@ -829,6 +994,112 @@
         const terrainDepthMesh = new THREE.Mesh(terrainGeometry, depthMat);
         terrainDepthMesh.renderOrder = 1;
         depthScene.add(terrainDepthMesh);
+
+        function ensureForestInstancedMeshes() {
+          if (treeTrunksIM) return;
+          treeTrunkMatForest = new THREE.MeshStandardMaterial({
+            color: 0x5a3c24,
+            roughness: 0.9,
+            metalness: 0,
+            envMapIntensity: 0.38,
+          });
+          treeLeafMatForest = new THREE.MeshStandardMaterial({
+            color: 0x2a6a3c,
+            roughness: 0.88,
+            metalness: 0,
+            envMapIntensity: 0.42,
+          });
+          treeTrunksIM = new THREE.InstancedMesh(
+            _treeTrunkGeo,
+            treeTrunkMatForest,
+            MAX_FOREST_TREES,
+          );
+          treeLeavesIM = new THREE.InstancedMesh(
+            _treeLeafGeo,
+            treeLeafMatForest,
+            MAX_FOREST_TREES,
+          );
+          treeTrunksDIM = new THREE.InstancedMesh(
+            _treeTrunkGeo,
+            depthMat,
+            MAX_FOREST_TREES,
+          );
+          treeLeavesDIM = new THREE.InstancedMesh(
+            _treeLeafGeo,
+            depthMat,
+            MAX_FOREST_TREES,
+          );
+          for (const im of [treeTrunksIM, treeLeavesIM, treeTrunksDIM, treeLeavesDIM]) {
+            im.frustumCulled = false;
+            im.renderOrder = 1;
+          }
+          scene.add(treeTrunksIM, treeLeavesIM);
+          depthScene.add(treeTrunksDIM, treeLeavesDIM);
+        }
+
+        function rebuildForestInstanced() {
+          ensureForestInstancedMeshes();
+          const n = params.treesEnabled
+            ? Math.max(0, Math.min(MAX_FOREST_TREES, Math.round(params.treeCount)))
+            : 0;
+          const clearR = Math.max(6, params.lakeTreeClearRadius);
+          treeTrunksIM.count = n;
+          treeLeavesIM.count = n;
+          treeTrunksDIM.count = n;
+          treeLeavesDIM.count = n;
+          const show = n > 0;
+          treeTrunksIM.visible = show;
+          treeLeavesIM.visible = show;
+          treeTrunksDIM.visible = show;
+          treeLeavesDIM.visible = show;
+          if (n === 0) return;
+          const rnd = mulberry32((params.terrainSeed ^ 0x5f356495) >>> 0);
+          const half = TERRAIN_SIZE * 0.5;
+          const minY = WATER_Y + 0.35;
+          const m4 = new THREE.Matrix4();
+          const pos = new THREE.Vector3();
+          const quat = new THREE.Quaternion();
+          const scale = new THREE.Vector3();
+          const yAxis = new THREE.Vector3(0, 1, 0);
+          for (let i = 0; i < n; i++) {
+            let ok = false;
+            let x = 0;
+            let z = 0;
+            let y = 0;
+            for (let tryn = 0; tryn < 52 && !ok; tryn++) {
+              x = (rnd() - 0.5) * 2 * half * 0.94;
+              z = (rnd() - 0.5) * 2 * half * 0.94;
+              if (Math.hypot(x, z) < clearR) continue;
+              const u = (x + half) / TERRAIN_SIZE;
+              const v = (z + half) / TERRAIN_SIZE;
+              y = sampleHeightBilinear(heightmapFloatData, HEIGHTMAP_RES, u, v);
+              if (y < minY) continue;
+              ok = true;
+            }
+            if (!ok) {
+              pos.set(1e4, -800, 1e4);
+              scale.setScalar(0.001);
+              quat.identity();
+            } else {
+              const sc = 0.62 + rnd() * 0.58;
+              pos.set(x, y, z);
+              quat.setFromAxisAngle(yAxis, rnd() * Math.PI * 2);
+              scale.set(sc, sc, sc);
+            }
+            m4.compose(pos, quat, scale);
+            treeTrunksIM.setMatrixAt(i, m4);
+            treeLeavesIM.setMatrixAt(i, m4);
+            treeTrunksDIM.setMatrixAt(i, m4);
+            treeLeavesDIM.setMatrixAt(i, m4);
+          }
+          treeTrunksIM.instanceMatrix.needsUpdate = true;
+          treeLeavesIM.instanceMatrix.needsUpdate = true;
+          treeTrunksDIM.instanceMatrix.needsUpdate = true;
+          treeLeavesDIM.instanceMatrix.needsUpdate = true;
+        }
+
+        rebuildForestInstanced();
+        lastForestSig = `${lastTerrainGeoSig}|${params.treeCount}|${params.treesEnabled}|${params.lakeTreeClearRadius}`;
 
         let dragonModelRoot = null;
         let dragonDepthRoot = null;
@@ -967,6 +1238,11 @@
           uDragonMeshFoam.value = params.dragonWaterFoam;
           uDragonPulseRangeMul.value = params.dragonPulseRangeMul;
           uUnderwaterSurfaceTint.value = params.underwaterSurfaceTint;
+          const forestSig = `${lastTerrainGeoSig}|${params.treeCount}|${params.treesEnabled}|${params.lakeTreeClearRadius}`;
+          if (forestSig !== lastForestSig) {
+            lastForestSig = forestSig;
+            rebuildForestInstanced();
+          }
         }
 
         const heightTexNode = texture(heightmapDataTex, vec2(0.5, 0.5));
@@ -1037,13 +1313,33 @@
         const uObjectFoamFromDepth = uniform(params.objectFoamFromDepth ? 1 : 0);
 
         const depthTexNode = texture(placeholderDepth, screenUV);
+        const uReflectTex = uniformTexture(placeholderColor);
+        const uReflectVP = uniform(new THREE.Matrix4());
+        const uReflectStrength = uniform(params.reflectStrength);
+        const uReflectDistort = uniform(params.reflectDistort);
+        const uReflectEnabled = uniform(params.reflectEnabled ? 1 : 0);
         const uDepthNear = uniform(0.1);
         const uDepthFar = uniform(1000);
         const uLineWidth = uniform(0.42);
         const uGlowWidth = uniform(1.35);
         /** Scales foam band with eye distance so contact line stays ~constant in world space (fixes zoom-out blowout). */
         const uFoamDistanceScale = uniform(0.00105);
-        const uWaterlineIntensity = uniform(1.35);
+        const uWaterlineIntensity = uniform(params.waterlineIntensity);
+        const uWaterDepthAbsorb = uniform(params.waterDepthAbsorb);
+        const uWaterShallowPale = uniform(params.waterShallowPale);
+        const uWaterSurfNoiseScale1 = uniform(params.waterSurfNoiseScale1);
+        const uWaterSurfNoiseScale2 = uniform(params.waterSurfNoiseScale2);
+        const uWaterSurfNoiseSpeed1 = uniform(params.waterSurfNoiseSpeed1);
+        const uWaterSurfNoiseSpeed2 = uniform(params.waterSurfNoiseSpeed2);
+        const uWaterSurfNormalStrength = uniform(params.waterSurfNormalStrength);
+        const uWaterFresnelExp = uniform(params.waterFresnelExp);
+        const uWaterFresnelSky = uniform(params.waterFresnelSky);
+        const uWaterShallowAlpha = uniform(params.waterShallowAlpha);
+        const uWaterVertNoiseAmp = uniform(params.waterVertNoiseAmp);
+        const uWaterVertNoiseScale = uniform(params.waterVertNoiseScale);
+        const uWaterVertNoiseSpeedX = uniform(params.waterVertNoiseSpeedX);
+        const uWaterVertNoiseSpeedZ = uniform(params.waterVertNoiseSpeedZ);
+        const uWaterProcNoiseSpeed = uniform(params.waterProcNoiseSpeed);
         const uLineColor = uniform(new THREE.Color("#ffffff"));
         const uGlowColor = uniform(new THREE.Color("#88ccff"));
         // Convert raw depth [0,1] to linear view-space distance (match original WaterDepthIntersection)
@@ -1398,19 +1694,85 @@
           const ripple = saturate(rippleAcc.mul(uRippleStrength));
           const waterColor = mix(baseColor, uHighlight, ripple);
 
+          const rawSceneDepth = depthTexNode.r;
+          const sceneLinD = linearDepth(rawSceneDepth, uDepthNear, uDepthFar);
+          const waterLinD = waterLinearDepth();
+          const thicknessW = max(float(0), sceneLinD.sub(waterLinD));
+          const thickness = min(thicknessW, float(28));
+          const depthBlend = float(1)
+            .sub(exp(thickness.mul(uWaterDepthAbsorb).negate()))
+            .saturate();
+          const paleLift = vec3(0.12, 0.19, 0.21);
+          const waterPale = waterColor.add(paleLift.mul(uWaterShallowPale)).saturate();
+          const absorptionBase = mix(waterPale, waterColor, depthBlend);
+
+          const nSpd = max(uWaterProcNoiseSpeed, float(0.001));
+          const scrollN1 = vec2(
+            uTime.mul(uWaterSurfNoiseSpeed1.mul(nSpd)),
+            uTime.mul(uWaterSurfNoiseSpeed1.mul(0.71).mul(nSpd)),
+          );
+          const scrollN2 = vec2(
+            uTime.mul(uWaterSurfNoiseSpeed2.mul(nSpd)),
+            uTime.mul(uWaterSurfNoiseSpeed2.mul(-0.63).mul(nSpd)),
+          );
+          const uvN1 = worldXZ.mul(uWaterSurfNoiseScale1).add(scrollN1);
+          const uvN2 = worldXZ.mul(uWaterSurfNoiseScale2).add(scrollN2);
+          const epsN = float(0.065);
+          const s10 = mx_noise_float(uvN1);
+          const s1px = mx_noise_float(uvN1.add(vec2(epsN, 0)));
+          const s1pz = mx_noise_float(uvN1.add(vec2(0, epsN)));
+          const s20 = mx_noise_float(uvN2);
+          const s2px = mx_noise_float(uvN2.add(vec2(epsN.mul(1.15), 0)));
+          const s2pz = mx_noise_float(uvN2.add(vec2(0, epsN.mul(1.15))));
+          const g1x = s1px.sub(s10);
+          const g1z = s1pz.sub(s10);
+          const g2x = s2px.sub(s20);
+          const g2z = s2pz.sub(s20);
+          const dnx = g1x.add(g2x.mul(0.62)).mul(uWaterSurfNormalStrength);
+          const dnz = g1z.add(g2z.mul(0.62)).mul(uWaterSurfNormalStrength);
+          const worldN = normalize(vec3(dnx.negate(), float(1), dnz.negate()));
+          const viewDir = normalize(cameraPosition.sub(positionWorld));
+          const NdotV = max(dot(worldN, viewDir), float(0.001));
+          const fresnel = pow(float(1).sub(saturate(NdotV)), uWaterFresnelExp);
+          const absorptionSky = absorptionBase.add(
+            uHighlight.mul(fresnel).mul(uWaterFresnelSky),
+          );
+          const clipR = uReflectVP.mul(vec4(positionWorld, float(1)));
+          const wClip = clipR.w;
+          const ndcR = clipR.xy.div(max(abs(wClip), float(1e-4)));
+          const uvR0 = ndcR.mul(0.5).add(0.5);
+          const uvR = vec2(uvR0.x, float(1).sub(uvR0.y)).add(
+            vec2(dnx, dnz).mul(uReflectDistort),
+          );
+          const uvRc = vec2(
+            clamp(uvR.x, float(0.02), float(0.98)),
+            clamp(uvR.y, float(0.02), float(0.98)),
+          );
+          const reflSample = texture(uReflectTex, uvRc).rgb;
+          const reflFront = step(float(0), wClip);
+          const reflDepthW = smoothstep(float(0.06), float(2.4), thickness);
+          const reflAmt = fresnel
+            .mul(uReflectStrength)
+            .mul(reflDepthW)
+            .mul(reflFront)
+            .mul(uReflectEnabled);
+          const absorptionCol = mix(absorptionSky, reflSample, reflAmt);
+
           const bx = abs(worldXZ.x);
           const bz = abs(worldXZ.y);
           const boxR = max(bx, bz).div(max(uLakeHalfExtent, float(0.001)));
           const fade = float(1).sub(pow(saturate(boxR), uFadeStrength));
           const tForAlpha = t.mul(uWaterCellsEnabled);
+          const alphaDepthThin = mix(uWaterShallowAlpha, float(1), depthBlend);
           const waterAlpha = mix(uDeepOpacity, 1, max(tForAlpha, ripple))
             .mul(uOpacity)
-            .mul(fade);
+            .mul(fade)
+            .mul(alphaDepthThin);
 
           // Waterline/foam: depth prepass vs water — band thickness scales with view distance (not fixed linear ε).
-          const rawScene = depthTexNode.r;
-          const sceneD = linearDepth(rawScene, uDepthNear, uDepthFar);
-          const waterD = waterLinearDepth();
+          const rawScene = rawSceneDepth;
+          const sceneD = sceneLinD;
+          const waterD = waterLinD;
           const diff = abs(sceneD.sub(waterD));
           const refD = max(max(waterD, sceneD), float(0.12));
           const distScale = refD.mul(uFoamDistanceScale);
@@ -1449,7 +1811,7 @@
             .mul(geoMask)
             .mul(uObjectFoamFromDepth)
             .mul(float(1).sub(uw.mul(0.65)));
-          const shoreBaseCol = waterColor
+          const shoreBaseCol = absorptionCol
             .add(foamCol.mul(depthContrib))
             .add(uShorePrimaryFoamColor.mul(pMask));
           const afterPulseA = mix(
@@ -1481,10 +1843,33 @@
           const w2 = cos(
             wxz.y.mul(uSurfRippleFreq.mul(1.17)).sub(t.mul(0.82)),
           );
-          const h = w1
+          const hWave = w1
             .add(w2.mul(0.55))
             .mul(uSurfRippleAmp)
             .mul(uSurfRippleEnabled);
+          const vnSpd = max(uWaterProcNoiseSpeed, float(0.001));
+          const vertNoiseScroll = vec2(
+            uTime.mul(uWaterVertNoiseSpeedX.mul(vnSpd)),
+            uTime.mul(uWaterVertNoiseSpeedZ.mul(vnSpd)),
+          );
+          const vertNoiseUV = wxz.mul(uWaterVertNoiseScale).add(vertNoiseScroll);
+          const nA = mx_noise_float(vertNoiseUV);
+          const nB = mx_noise_float(
+            vertNoiseUV
+              .mul(float(1.73))
+              .add(
+                vec2(
+                  uTime.mul(float(0.11).mul(vnSpd)),
+                  uTime.mul(float(-0.15).mul(vnSpd)),
+                ),
+              ),
+          );
+          const hNoise = nA
+            .sub(float(0.5))
+            .mul(float(0.62))
+            .add(nB.sub(float(0.5)).mul(float(0.38)))
+            .mul(uWaterVertNoiseAmp);
+          const h = hWave.add(hNoise);
           const wNew = wp.add(vec3(0, h, 0));
           return modelWorldMatrixInverse.mul(vec4(wNew, 1)).xyz;
         });
@@ -1511,6 +1896,38 @@
         waterPlane.frustumCulled = false;
         waterPlane.renderOrder = 2;
         scene.add(waterPlane);
+
+        const dbgReflectBaseR = 1;
+        const debugReflectGeo = new THREE.SphereGeometry(dbgReflectBaseR, 40, 32);
+        const debugReflectMat = new THREE.MeshStandardMaterial({
+          color: 0xffffff,
+          metalness: 1,
+          roughness: params.debugReflectRoughness,
+          envMapIntensity: params.debugReflectEnvBoost,
+        });
+        const debugReflectOrb = new THREE.Mesh(debugReflectGeo, debugReflectMat);
+        debugReflectOrb.name = "DebugReflectOrb";
+        const debugReflectDepth = new THREE.Mesh(debugReflectGeo, depthMat);
+        debugReflectDepth.name = "DebugReflectOrbDepth";
+        depthScene.add(debugReflectDepth);
+        scene.add(debugReflectOrb);
+
+        function applyDebugReflectOrb() {
+          debugReflectOrb.visible = params.debugReflectOrb;
+          debugReflectDepth.visible = params.debugReflectOrb;
+          debugReflectOrb.position.set(
+            params.debugReflectOrbX,
+            params.debugReflectOrbY,
+            params.debugReflectOrbZ,
+          );
+          debugReflectDepth.position.copy(debugReflectOrb.position);
+          debugReflectDepth.quaternion.copy(debugReflectOrb.quaternion);
+          const s = params.debugReflectOrbSize / dbgReflectBaseR;
+          debugReflectOrb.scale.setScalar(s);
+          debugReflectDepth.scale.copy(debugReflectOrb.scale);
+          debugReflectMat.roughness = params.debugReflectRoughness;
+          debugReflectMat.envMapIntensity = params.debugReflectEnvBoost;
+        }
 
         // ─── Wave simulation (injection + wave update + display) ─────────────────
         const injRT = new THREE.WebGLRenderTarget(WAVE_RES, WAVE_RES, {
@@ -1793,6 +2210,57 @@
             depthTexNode.value = depthRT.depthTexture || placeholderDepth;
           }
 
+          if (params.reflectEnabled) {
+            const rs = Math.max(0.22, Math.min(1, params.reflectResScale));
+            const rrw = Math.max(2, Math.floor(physW * rs));
+            const rrh = Math.max(2, Math.floor(physH * rs));
+            if (reflectRT.width !== rrw || reflectRT.height !== rrh) {
+              reflectRT.setSize(rrw, rrh);
+            }
+            updateReflectCamera(
+              reflectCamera,
+              camera,
+              liveWaterY,
+              controls.target,
+              rrw / rrh,
+            );
+            uReflectVPHelper.multiplyMatrices(
+              reflectCamera.projectionMatrix,
+              reflectCamera.matrixWorldInverse,
+            );
+            uReflectVP.value.copy(uReflectVPHelper);
+            const prevBgR = scene.background;
+            const wVis = waterPlane.visible;
+            const wdVis = waveDisplayPlane.visible;
+            const skyVis = sky.visible;
+            const gizmoHelper = dragonTransformControls?.getHelper();
+            const gizmoVis = gizmoHelper ? gizmoHelper.visible : true;
+            waterPlane.visible = false;
+            waveDisplayPlane.visible = false;
+            sky.visible = false;
+            if (gizmoHelper) gizmoHelper.visible = false;
+            scene.background = reflectClearColor;
+            const prevTR = renderer.getRenderTarget();
+            const prevAutoR = renderer.autoClear;
+            renderer.autoClear = true;
+            renderer.setRenderTarget(reflectRT);
+            renderer.render(scene, reflectCamera);
+            renderer.setRenderTarget(prevTR);
+            renderer.autoClear = prevAutoR;
+            scene.background = prevBgR;
+            waterPlane.visible = wVis;
+            waveDisplayPlane.visible = wdVis;
+            sky.visible = skyVis;
+            if (gizmoHelper) gizmoHelper.visible = gizmoVis;
+            if (reflectRT.texture instanceof THREE.Texture) {
+              uReflectTex.value = reflectRT.texture;
+            }
+            uReflectEnabled.value = 1;
+          } else {
+            uReflectEnabled.value = 0;
+            uReflectTex.value = placeholderColor;
+          }
+
           for (const obj of objects) {
             if (!depthGroups.has(obj.id)) {
               const group = new THREE.Group();
@@ -1938,6 +2406,7 @@
           controls.update();
           dragonTransformControls?.update();
           renderer.render(scene, camera);
+          stats.update();
         }
 
         animate();
@@ -1954,9 +2423,10 @@
         const pane = new Pane({ title: "Lake" });
         const fScene = pane.addFolder({ title: "Scene" });
         fScene.addBinding(params, "exposure", {
-          min: 0.5,
+          label: "Exposure (tone map)",
+          min: 0.35,
           max: 2.5,
-          step: 0.05,
+          step: 0.02,
         });
         fScene.addBinding(params, "bgColor");
         fScene.addBinding(params, "lakeSize", {
@@ -1999,6 +2469,50 @@
           min: 2,
           max: 24,
           step: 0.5,
+        });
+
+        const fDbgReflect = fScene.addFolder({
+          title: "Debug — IBL chrome ball (water uses planar RT)",
+          expanded: false,
+        });
+        fDbgReflect.addBinding(params, "debugReflectOrb", {
+          label: "Show chrome sphere",
+        });
+        fDbgReflect.addBinding(params, "debugReflectOrbSize", {
+          label: "Radius (world)",
+          min: 0.4,
+          max: 8,
+          step: 0.1,
+        });
+        fDbgReflect.addBinding(params, "debugReflectOrbX", {
+          label: "Position X",
+          min: -80,
+          max: 80,
+          step: 0.5,
+        });
+        fDbgReflect.addBinding(params, "debugReflectOrbY", {
+          label: "Position Y",
+          min: -5,
+          max: 40,
+          step: 0.25,
+        });
+        fDbgReflect.addBinding(params, "debugReflectOrbZ", {
+          label: "Position Z",
+          min: -80,
+          max: 80,
+          step: 0.5,
+        });
+        fDbgReflect.addBinding(params, "debugReflectRoughness", {
+          label: "Roughness (0 = mirror)",
+          min: 0,
+          max: 0.5,
+          step: 0.01,
+        });
+        fDbgReflect.addBinding(params, "debugReflectEnvBoost", {
+          label: "Env map intensity",
+          min: 0,
+          max: 3,
+          step: 0.05,
         });
 
         const fDragon = pane.addFolder({
@@ -2074,7 +2588,7 @@
         fTerrain.addBinding(params, "terrainMacroScale", {
           label: "Mountain scale (UV)",
           min: 0.002,
-          max: 0.02,
+          max: 0.04,
           step: 0.0002,
         });
         fTerrain.addBinding(params, "terrainHillAmp", {
@@ -2131,11 +2645,129 @@
           syncPaneToScene();
         });
 
+        const fForest = pane.addFolder({
+          title: "Forest (for lake reflection)",
+          expanded: true,
+        });
+        fForest.addBinding(params, "treesEnabled", { label: "Show instanced trees" });
+        fForest.addBinding(params, "treeCount", {
+          label: "Tree count",
+          min: 0,
+          max: MAX_FOREST_TREES,
+          step: 5,
+        });
+        fForest.addBinding(params, "lakeTreeClearRadius", {
+          label: "Lake clear radius (no trees)",
+          min: 10,
+          max: 60,
+          step: 1,
+        });
+
+        const fReflect = pane.addFolder({
+          title: "Water — planar reflection (optimized)",
+          expanded: true,
+        });
+        fReflect.addBinding(params, "reflectEnabled", {
+          label: "Enable half-res RT pass",
+        });
+        fReflect.addBinding(params, "reflectStrength", {
+          label: "Reflection mix (× Fresnel)",
+          min: 0,
+          max: 1.25,
+          step: 0.02,
+        });
+        fReflect.addBinding(params, "reflectDistort", {
+          label: "Normal UV distortion",
+          min: 0,
+          max: 0.14,
+          step: 0.002,
+        });
+        fReflect.addBinding(params, "reflectResScale", {
+          label: "RT size × screen (lower=faster)",
+          min: 0.22,
+          max: 1,
+          step: 0.02,
+        });
+
         const fLight = pane.addFolder({ title: "Lighting" });
-        fLight.addBinding(params, "ambient", { min: 0, max: 3, step: 0.05 });
+        fLight.addBinding(params, "ambient", {
+          label: "Hemisphere",
+          min: 0,
+          max: 3,
+          step: 0.05,
+        });
         fLight.addBinding(params, "sun", { min: 0, max: 12, step: 0.25 });
         fLight.addBinding(params, "fill", { min: 0, max: 5, step: 0.1 });
         fLight.addBinding(params, "rim", { min: 0, max: 5, step: 0.1 });
+
+        const fSky = pane.addFolder({ title: "Sky & IBL", expanded: true });
+        fSky.addBinding(params, "envIntensity", {
+          label: "IBL strength",
+          min: 0,
+          max: 1.2,
+          step: 0.02,
+        });
+        fSky.addBinding(params, "sunAzimuth", {
+          label: "Sun azimuth °",
+          min: 0,
+          max: 360,
+          step: 1,
+        });
+        fSky.addBinding(params, "sunElevation", {
+          label: "Sun elevation °",
+          min: -5,
+          max: 85,
+          step: 1,
+        });
+        fSky.addBinding(params, "skyTurbidity", {
+          label: "Turbidity",
+          min: 0,
+          max: 20,
+          step: 0.1,
+        });
+        fSky.addBinding(params, "skyRayleigh", {
+          label: "Rayleigh",
+          min: 0,
+          max: 6,
+          step: 0.05,
+        });
+        fSky.addBinding(params, "skyMie", {
+          label: "Mie",
+          min: 0,
+          max: 0.05,
+          step: 0.0005,
+        });
+        fSky.addBinding(params, "skyMieG", {
+          label: "Mie G",
+          min: 0,
+          max: 1,
+          step: 0.02,
+        });
+        fSky.addBinding(params, "skyCloudCoverage", {
+          label: "Cloud coverage",
+          min: 0,
+          max: 1,
+          step: 0.02,
+        });
+        fSky.addBinding(params, "skyCloudDensity", {
+          label: "Cloud density",
+          min: 0,
+          max: 1,
+          step: 0.02,
+        });
+        fSky.addBinding(params, "skyCloudElevation", {
+          label: "Cloud elevation",
+          min: 0,
+          max: 1,
+          step: 0.02,
+        });
+        fSky
+          .addButton({
+            title: "Rebuild IBL (match sky → reflections)",
+          })
+          .on("click", () => {
+            rebuildSkyEnvironmentMap();
+          });
 
         const fNoise = pane.addFolder({ title: "Water — noise" });
         fNoise.addBinding(params, "waterNoise", { label: "Motion & FBM" });
@@ -2171,6 +2803,100 @@
           min: 0.2,
           max: 1,
           step: 0.02,
+        });
+        const fWaterTsl = pane.addFolder({
+          title: "Water — TSL surface (depth + noise)",
+          expanded: true,
+        });
+        fWaterTsl.addBinding(params, "waterProcNoiseSpeed", {
+          label: "All noise scroll × (normals + waves)",
+          min: 0,
+          max: 24,
+          step: 0.25,
+        });
+        fWaterTsl.addBinding(params, "waterDepthAbsorb", {
+          label: "Depth → deep color",
+          min: 0.05,
+          max: 1.2,
+          step: 0.02,
+        });
+        fWaterTsl.addBinding(params, "waterShallowPale", {
+          label: "Shallow pale lift",
+          min: 0,
+          max: 1.2,
+          step: 0.02,
+        });
+        fWaterTsl.addBinding(params, "waterShallowAlpha", {
+          label: "Shallow alpha (see-through)",
+          min: 0.15,
+          max: 1,
+          step: 0.02,
+        });
+        fWaterTsl.addBinding(params, "waterSurfNoiseScale1", {
+          label: "Noise layer A scale",
+          min: 0.05,
+          max: 1.5,
+          step: 0.01,
+        });
+        fWaterTsl.addBinding(params, "waterSurfNoiseScale2", {
+          label: "Noise layer B scale",
+          min: 0.1,
+          max: 3,
+          step: 0.02,
+        });
+        fWaterTsl.addBinding(params, "waterSurfNoiseSpeed1", {
+          label: "Layer A scroll speed",
+          min: -0.35,
+          max: 0.35,
+          step: 0.005,
+        });
+        fWaterTsl.addBinding(params, "waterSurfNoiseSpeed2", {
+          label: "Layer B scroll speed",
+          min: -0.35,
+          max: 0.35,
+          step: 0.005,
+        });
+        fWaterTsl.addBinding(params, "waterSurfNormalStrength", {
+          label: "Normal / Fresnel strength",
+          min: 0,
+          max: 1.2,
+          step: 0.02,
+        });
+        fWaterTsl.addBinding(params, "waterFresnelExp", {
+          label: "Fresnel exponent",
+          min: 1,
+          max: 10,
+          step: 0.1,
+        });
+        fWaterTsl.addBinding(params, "waterFresnelSky", {
+          label: "Grazing highlight mix",
+          min: 0,
+          max: 1.5,
+          step: 0.02,
+        });
+        fWaterTsl.addBinding(params, "waterVertNoiseAmp", {
+          label: "Vertex noise height",
+          min: 0,
+          max: 0.06,
+          step: 0.001,
+        });
+        fWaterTsl.addBinding(params, "waterVertNoiseScale", {
+          label: "Vertex noise scale (world)",
+          min: 0.08,
+          max: 1.5,
+          step: 0.01,
+        });
+        fWaterTsl.addBinding(params, "waterVertNoiseSpeedX", {
+          label: "Vertex noise drift X",
+          min: -0.8,
+          max: 0.8,
+          step: 0.01,
+        });
+        fWaterTsl.addBinding(params, "waterVertNoiseSpeedZ", {
+          label: "Vertex noise drift Z",
+          min: -0.8,
+          max: 0.8,
+          step: 0.01,
         });
         const fWaterBob = pane.addFolder({
           title: "Water — vertical bob (foam follows)",
@@ -2592,11 +3318,12 @@
         function syncPaneToScene() {
           rebuildTerrainFromParams();
           renderer.toneMappingExposure = params.exposure;
-          applyPaneColor(params.bgColor, scene.background);
+          applyPaneColor(params.bgColor, ambientLight.groundColor);
           applyPaneColor(params.underwaterFogColor, underwaterFog.color);
           applyLakeSize();
           ambientLight.intensity = params.ambient;
           sunLight.intensity = params.sun;
+          applySkyFromParams();
           fillLight.intensity = params.fill;
           rimLight.intensity = params.rim;
           uNoiseTimeScale.value = params.noiseTimeScale;
@@ -2631,6 +3358,24 @@
           uSurfRippleFreq.value = params.waterSurfRippleFreq;
           uSurfRippleSpeed.value = params.waterSurfRippleSpeed;
           uSurfRippleEnabled.value = params.waterSurfRippleEnabled ? 1 : 0;
+          uWaterDepthAbsorb.value = params.waterDepthAbsorb;
+          uWaterShallowPale.value = params.waterShallowPale;
+          uWaterSurfNoiseScale1.value = params.waterSurfNoiseScale1;
+          uWaterSurfNoiseScale2.value = params.waterSurfNoiseScale2;
+          uWaterSurfNoiseSpeed1.value = params.waterSurfNoiseSpeed1;
+          uWaterSurfNoiseSpeed2.value = params.waterSurfNoiseSpeed2;
+          uWaterSurfNormalStrength.value = params.waterSurfNormalStrength;
+          uWaterFresnelExp.value = params.waterFresnelExp;
+          uWaterFresnelSky.value = params.waterFresnelSky;
+          uWaterShallowAlpha.value = params.waterShallowAlpha;
+          uWaterVertNoiseAmp.value = params.waterVertNoiseAmp;
+          uWaterVertNoiseScale.value = params.waterVertNoiseScale;
+          uWaterVertNoiseSpeedX.value = params.waterVertNoiseSpeedX;
+          uWaterVertNoiseSpeedZ.value = params.waterVertNoiseSpeedZ;
+          uWaterProcNoiseSpeed.value = params.waterProcNoiseSpeed;
+          uReflectStrength.value = params.reflectStrength;
+          uReflectDistort.value = params.reflectDistort;
+          applyDebugReflectOrb();
         }
 
         pane.on("change", syncPaneToScene);
