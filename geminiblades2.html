@@ -131,19 +131,19 @@
         const params = {
           windSpeed: 0.2,
           windStrength: 1.4,
-          maxAngle: 1.4,      // safe max total bend — no blade ever exceeds this
-          naturalLean: 0.9,   // max resting lean (each blade gets 0..this randomly)
-          clumpScale: 5.0,    // world-unit radius of each clump
+          maxAngle: 1.4, // safe max total bend — no blade ever exceeds this
+          naturalLean: 0.9, // max resting lean (each blade gets 0..this randomly)
+          clumpScale: 5.0, // world-unit radius of each clump
           clumpStrength: 0.7, // 0 = fully random, 1 = fully clumped
-          crossed: true,      // add a second ribbon rotated 90° per blade
-          colorVariation: false,      // enable hue/saturation variation
-          cvHueSpread: 0.08,          // max hue shift from base (0 = no hue change)
-          cvSatSpread: 0.3,           // saturation variation range (0 = uniform)
-          cvDryAmount: 0.15,          // fraction of blades that turn dry/yellow
-          cvDryColor: "#8a7a3a",      // dry/dead blade tint
-          aoBase: 0.25,       // brightness at blade base (0 = black, 1 = no AO)
-          aoPower: 2.0,       // curve — higher = AO more concentrated near base
-          windAngle: 0,       // degrees — direction the wind travels (0 = +X)
+          crossed: true, // add a second ribbon rotated 90° per blade
+          colorVariation: false, // enable hue/saturation variation
+          cvHueSpread: 0.08, // max hue shift from base (0 = no hue change)
+          cvSatSpread: 0.3, // saturation variation range (0 = uniform)
+          cvDryAmount: 0.15, // fraction of blades that turn dry/yellow
+          cvDryColor: "#8a7a3a", // dry/dead blade tint
+          aoBase: 0.25, // brightness at blade base (0 = black, 1 = no AO)
+          aoPower: 2.0, // curve — higher = AO more concentrated near base
+          windAngle: 0, // degrees — direction the wind travels (0 = +X)
           windWaveScale: 0.12, // spatial frequency: larger = tighter waves
           bendFocus: 1.0, // The 'Curve' control
           stiffness: 0.2, // How much of the base is 'unbendable'
@@ -154,11 +154,11 @@
           bladeColor: "#0e300e",
           tipColor: "#004d05",
           doubleSide: false,
-          bssIntensity: 1.2,    // backscatter strength
-          bssPower: 2.0,        // falloff sharpness (lower = wider glow)
-          bssColor: "#2d7a2d",  // transmitted light color
-          skyBlend: 0.35,       // blend normal toward (0,1,0) — fixes dark side
-          cylindrical: 0.3,     // fan normals across blade width (cylinder illusion)
+          bssIntensity: 1.2, // backscatter strength
+          bssPower: 2.0, // falloff sharpness (lower = wider glow)
+          bssColor: "#2d7a2d", // transmitted light color
+          skyBlend: 0.35, // blend normal toward (0,1,0) — fixes dark side
+          cylindrical: 0.3, // fan normals across blade width (cylinder illusion)
           roundCrossSection: 0, // legacy, keep for compat
           viewThicken: 0.45, // yaw toward camera when edge-on (0 = off)
           sunIntensity: 3,
@@ -173,30 +173,22 @@
           skyMie: 0.005,
           skyMieG: 0.8,
           environmentIntensity: 0.45,
-          grassReceiveShadow: true,   // grass receives shadows from other objects
-          grassCastShadow: false,     // grass casts shadows (expensive)
-          shadowDebug: false,         // show torusknot to test shadow receiving
-          specular: false,            // enable waxy specular sheen
-          specRoughness: 0.55,       // blade roughness when specular is on
-          specEnvIntensity: 0.15,    // env map reflection when specular is on
-          groundPlane: true,          // show ground plane under grass
-          groundColor: "#1a2e0a",    // dark earthy green
-          fieldSize: 10,    // size of ONE patch (world units)
-          grassCount: 300,  // blades per patch HIGH
-          lodEnabled: false,       // enable LOD system (camera-relative grid)
-          lodDistance: 60,         // high→low geometry swap distance
-          lodMaxDistance: 150,     // max render distance (blades fade out)
-          lodLowSegments: 3,      // segment count for far LOD geometry
-          lodLowGrassCount: 150,  // blades per patch LOW (fewer = faster)
-          lodDebug: false,         // tint high=green, low=red to visualize LOD zones
-          // Camera / player
-          cameraMode: "orbit",       // "orbit" or "follow"
-          playerSpeed: 30,           // world units per second
-          playerSprintMul: 2.5,      // speed multiplier when holding Shift
-          camFollowHeight: 12,       // Y offset above capsule
-          camFollowDist: 25,         // distance behind capsule
-          camFollowSmooth: 5,        // lerp speed for camera follow
-          capsuleVisible: true,      // show/hide capsule mesh
+          grassReceiveShadow: true, // grass receives shadows from other objects
+          grassCastShadow: false, // grass casts shadows (expensive)
+          shadowDebug: false, // show torusknot to test shadow receiving
+          specular: false, // enable waxy specular sheen
+          specRoughness: 0.55, // blade roughness when specular is on
+          specEnvIntensity: 0.15, // env map reflection when specular is on
+          groundPlane: true, // show ground plane under grass
+          groundColor: "#1a2e0a", // dark earthy green
+          fieldSize: 20, // size of ONE patch (world units)
+          gridSize: 7, // patches per side → total field = fieldSize * gridSize
+          grassCount: 300, // blades per patch (total = gridSize² × grassCount)
+          lodEnabled: false, // enable LOD system (camera-relative grid)
+          lodDistance: 60, // high→low geometry swap distance
+          lodMaxDistance: 150, // max render distance (blades fade out)
+          lodLowSegments: 3, // segment count for far LOD geometry
+          lodDebug: false, // tint high=green, low=red to visualize LOD zones
         };
 
         const uWindSpeed = uniform(params.windSpeed);
@@ -228,11 +220,13 @@
         const uCylindrical = uniform(params.cylindrical);
         const uViewThicken = uniform(params.viewThicken);
         const uBladeHeight = uniform(params.bladeHeight);
-        const uSunDir = uniform(new THREE.Vector3(params.sunX, params.sunY, params.sunZ).normalize());
-        const vCustomNormal = varying(vec3(0, 1, 0), 'vCN');
-        const vClumpShade = varying(float(1), 'vCS');
-        const vColorTint = varying(vec3(1, 1, 1), 'vCT');  // warm/cool tint target
-        const vDryBlend = varying(float(0), 'vDB');         // dry blade factor
+        const uSunDir = uniform(
+          new THREE.Vector3(params.sunX, params.sunY, params.sunZ).normalize(),
+        );
+        const vCustomNormal = varying(vec3(0, 1, 0), "vCN");
+        const vClumpShade = varying(float(1), "vCS");
+        const vColorTint = varying(vec3(1, 1, 1), "vCT"); // warm/cool tint target
+        const vDryBlend = varying(float(0), "vDB"); // dry blade factor
         const uBssCol = uniform(new THREE.Color(params.bssColor));
         const uBssIntensity = uniform(params.bssIntensity);
         const uBssPower = uniform(params.bssPower);
@@ -240,7 +234,7 @@
         const uLodDist = uniform(params.lodDistance);
         const uLodMaxDist = uniform(params.lodMaxDistance);
         const uLodDebug = uniform(0);
-        const vLodMorph = varying(float(0), 'vLM');
+        const vLodMorph = varying(float(0), "vLM");
 
         // High roughness + no env specular: thin DoubleSide blades otherwise pick up
         // sharp IBL streaks and floor Z-fight shimmer that read as “weird lines” up close.
@@ -278,17 +272,25 @@
           // World-space blade base — used for wave UV and per-blade hashes.
           // Using world position means patches share a seamless wave and
           // blades at the same local offset in different patches look different.
-          const bladeWorld = modelWorldMatrix.mul(vec4(off.x, float(0), off.z, float(1))).xyz;
+          const bladeWorld = modelWorldMatrix.mul(
+            vec4(off.x, float(0), off.z, float(1)),
+          ).xyz;
           const bladeXZ = vec2(bladeWorld.x, bladeWorld.z);
 
           // LOD: per-blade distance to camera for morph + fade
           const camXZ = vec2(cameraPosition.x, cameraPosition.z);
           const bladeCamDist = length(bladeXZ.sub(camXZ));
           // lodMorph: 0 = full detail, 1 = simplified (kills micro-detail)
-          const lodMorph = uLodEnabled.mul(smoothstep(uLodDist.mul(float(0.6)), uLodDist, bladeCamDist));
+          const lodMorph = uLodEnabled.mul(
+            smoothstep(uLodDist.mul(float(0.6)), uLodDist, bladeCamDist),
+          );
           vLodMorph.assign(lodMorph);
           // distFade: 1 = full size, 0 = collapsed (blade disappears at maxDist)
-          const distFade = mix(float(1), smoothstep(uLodMaxDist, uLodMaxDist.mul(float(0.8)), bladeCamDist), uLodEnabled);
+          const distFade = mix(
+            float(1),
+            smoothstep(uLodMaxDist, uLodMaxDist.mul(float(0.8)), bladeCamDist),
+            uLodEnabled,
+          );
 
           const h0 = fract(
             sin(dot(bladeXZ, vec2(127.1, 311.7))).mul(float(43758.5453)),
@@ -308,31 +310,59 @@
           const cellP = bladeXZ.div(uClumpScale);
           const cellID = cellP.floor();
           const cellFrac = fract(cellP);
-          const cA = fract(sin(dot(cellID, vec2(127.1, 311.7))).mul(float(43758.5453)));
-          const cB = fract(sin(dot(cellID, vec2(269.5, 183.3))).mul(float(43758.5453)));
-          const cC = fract(sin(dot(cellID, vec2(419.2, 371.9))).mul(float(43758.5453)));
-          const cD = fract(sin(dot(cellID, vec2(113.5, 271.9))).mul(float(43758.5453)));
+          const cA = fract(
+            sin(dot(cellID, vec2(127.1, 311.7))).mul(float(43758.5453)),
+          );
+          const cB = fract(
+            sin(dot(cellID, vec2(269.5, 183.3))).mul(float(43758.5453)),
+          );
+          const cC = fract(
+            sin(dot(cellID, vec2(419.2, 371.9))).mul(float(43758.5453)),
+          );
+          const cD = fract(
+            sin(dot(cellID, vec2(113.5, 271.9))).mul(float(43758.5453)),
+          );
           // How close this blade is to its clump center (1 = at center, 0 = at edge)
           const clumpDist = length(vec2(cA, cB).sub(cellFrac));
-          const clumpInfluence = smoothstep(float(0.75), float(0.05), clumpDist).mul(uClumpStrength);
+          const clumpInfluence = smoothstep(
+            float(0.75),
+            float(0.05),
+            clumpDist,
+          ).mul(uClumpStrength);
 
           // Blend individual random values toward clump values
-          const randomYaw = mix(h0.mul(PI.mul(2)), cC.mul(PI.mul(2)), clumpInfluence);
+          const randomYaw = mix(
+            h0.mul(PI.mul(2)),
+            cC.mul(PI.mul(2)),
+            clumpInfluence,
+          );
           const hScale = mix(float(0.75), float(1.5), h2);
           const clumpHeightScale = mix(float(0.6), float(1.4), cA);
-          const naturalLean = mix(h3.mul(uNaturalLean), cD.mul(uNaturalLean), clumpInfluence);
-          const bladeH = uBladeHeight.mul(mix(hScale, clumpHeightScale, clumpInfluence));
+          const naturalLean = mix(
+            h3.mul(uNaturalLean),
+            cD.mul(uNaturalLean),
+            clumpInfluence,
+          );
+          const bladeH = uBladeHeight.mul(
+            mix(hScale, clumpHeightScale, clumpInfluence),
+          );
           // Cross ribbon: +90° yaw, collapsed to zero height when uCrossed=0
           const crossedYaw = randomYaw.add(aIsCross.mul(PI.mul(0.5)));
           const crossedBladeH = bladeH.mul(mix(float(1.0), uCrossed, aIsCross));
           // LOD fade: collapse blade height to 0 at maxDistance
           const finalBladeH = crossedBladeH.mul(distFade);
           // Clump color tint — passed to colorNode via varying
-          vClumpShade.assign(mix(float(1.0), mix(float(0.82), float(1.18), cB), clumpInfluence));
+          vClumpShade.assign(
+            mix(float(1.0), mix(float(0.82), float(1.18), cB), clumpInfluence),
+          );
 
           // Color variation hashes — computed here (vertex) to avoid fragment precision issues
-          const h4 = fract(sin(dot(bladeXZ, vec2(537.3, 197.1))).mul(float(43758.5453)));
-          const h5 = fract(sin(dot(bladeXZ, vec2(419.7, 631.2))).mul(float(43758.5453)));
+          const h4 = fract(
+            sin(dot(bladeXZ, vec2(537.3, 197.1))).mul(float(43758.5453)),
+          );
+          const h5 = fract(
+            sin(dot(bladeXZ, vec2(419.7, 631.2))).mul(float(43758.5453)),
+          );
           // Warm/cool tint target per blade
           const warmCol = vec3(0.18, 0.28, 0.02);
           const coolCol = vec3(0.02, 0.18, 0.08);
@@ -353,13 +383,18 @@
           );
           const wave = mx_noise_float(waveUV);
           const windBase = wave.add(float(0.4));
-          const windMicro = mx_noise_float(tBlade.mul(float(4.0))).mul(float(0.15));
+          const windMicro = mx_noise_float(tBlade.mul(float(4.0))).mul(
+            float(0.15),
+          );
           // LOD: kill per-blade micro-turbulence at distance (saves visual noise)
           const windMicroLod = windMicro.mul(float(1).sub(lodMorph));
           // Available room shrinks as naturalLean grows toward maxAngle.
           // Heavily-leaned blades quiver (small amplitude), upright blades do big sweeps.
           const room = max(float(0), uMaxAngle.sub(naturalLean));
-          const windScaled = windBase.add(windMicroLod).mul(uWindStrength).mul(room.div(uMaxAngle));
+          const windScaled = windBase
+            .add(windMicroLod)
+            .mul(uWindStrength)
+            .mul(room.div(uMaxAngle));
           const totalForce = naturalLean.add(windScaled);
           const angle = totalForce.mul(curveWeight);
 
@@ -368,13 +403,25 @@
           const arcY = cos(angle).mul(L);
           // cross-direction sway also travels as a wave (perpendicular to wind dir)
           const zWaveUV = vec3(
-            bladeWorld.z.mul(uWindWaveScale).add(uWindDirZ.mul(tBase)).add(float(17.3)),
+            bladeWorld.z
+              .mul(uWindWaveScale)
+              .add(uWindDirZ.mul(tBase))
+              .add(float(17.3)),
             float(0),
-            bladeWorld.x.mul(uWindWaveScale).sub(uWindDirX.mul(tBase)).add(float(31.7)),
+            bladeWorld.x
+              .mul(uWindWaveScale)
+              .sub(uWindDirX.mul(tBase))
+              .add(float(31.7)),
           );
-          const zRollPhase = mx_noise_float(zWaveUV).mul(float(0.4)).sub(float(0.2));
+          const zRollPhase = mx_noise_float(zWaveUV)
+            .mul(float(0.4))
+            .sub(float(0.2));
           // LOD: kill cross-direction sway at distance
-          const arcZ = sin(zRollPhase).mul(L).mul(curveWeight).mul(0.2).mul(float(1).sub(lodMorph));
+          const arcZ = sin(zRollPhase)
+            .mul(L)
+            .mul(curveWeight)
+            .mul(0.2)
+            .mul(float(1).sub(lodMorph));
 
           const ty = vUv.y;
           const eps = float(0.02);
@@ -441,7 +488,11 @@
           // Sky blend: tilt normals toward up so blades catch overhead light
           // from all sides — this is what eliminates the dark-side problem.
           // LOD: push normals more toward up at distance for simpler lighting
-          const lodSkyBlend = mix(uSkyBlend, max(uSkyBlend, float(0.7)), lodMorph);
+          const lodSkyBlend = mix(
+            uSkyBlend,
+            max(uSkyBlend, float(0.7)),
+            lodMorph,
+          );
           const nFinal = normalize(mix(nOut, uGroundNormal, lodSkyBlend));
           normalLocal.assign(nFinal);
           vCustomNormal.assign(nFinal);
@@ -450,7 +501,9 @@
         })();
         material.colorNode = Fn(() => {
           const off = attribute("offset", "vec3");
-          const bladeWorldC = modelWorldMatrix.mul(vec4(off.x, float(0), off.z, float(1))).xyz;
+          const bladeWorldC = modelWorldMatrix.mul(
+            vec4(off.x, float(0), off.z, float(1)),
+          ).xyz;
           const bladeXZ = vec2(bladeWorldC.x, bladeWorldC.z);
           const h1 = fract(
             sin(dot(bladeXZ, vec2(269.5, 183.3))).mul(float(43758.5453)),
@@ -470,23 +523,38 @@
           const satCol = mix(vec3(lum, lum, lum), hueCol, satFactor);
 
           // Dry blades from vDryBlend varying — stronger at root, fades at tip
-          const dryBlend = vDryBlend.mul(float(1.0).sub(vUv.y).mul(float(0.5)).add(float(0.5)));
+          const dryBlend = vDryBlend.mul(
+            float(1.0).sub(vUv.y).mul(float(0.5)).add(float(0.5)),
+          );
           const dryCol = mix(satCol, uCvDryCol, dryBlend);
 
           // Final: apply variation only when enabled
           const variedCol = mix(baseCol, dryCol, uColorVar);
 
-          const finalCol = variedCol.mul(vec3(randomShade.mul(vClumpShade).mul(ao)));
+          const finalCol = variedCol.mul(
+            vec3(randomShade.mul(vClumpShade).mul(ao)),
+          );
           // LOD debug: green = high detail, red = low detail
-          const debugTint = mix(vec3(0.2, 1.0, 0.2), vec3(1.0, 0.2, 0.2), vLodMorph);
+          const debugTint = mix(
+            vec3(0.2, 1.0, 0.2),
+            vec3(1.0, 0.2, 0.2),
+            vLodMorph,
+          );
           return mix(finalCol, debugTint, uLodDebug);
         })();
 
         // SSS as emissiveNode — added AFTER PBR lighting, so the dark side
         // gets the glow regardless of ambient factor (unlike colorNode which is albedo).
         material.emissiveNode = Fn(() => {
-          const backScat = max(dot(negate(uSunDir), normalize(vCustomNormal)), float(0));
-          const sss = clamp(pow(backScat, uBssPower).mul(uBssIntensity), float(0), float(1));
+          const backScat = max(
+            dot(negate(uSunDir), normalize(vCustomNormal)),
+            float(0),
+          );
+          const sss = clamp(
+            pow(backScat, uBssPower).mul(uBssIntensity),
+            float(0),
+            float(1),
+          );
           return uBssCol.mul(sss);
         })();
 
@@ -574,8 +642,11 @@
             const x = -patchSize * 0.5 + col * cellW + Math.random() * cellW;
             const z = -patchSize * 0.5 + row * cellH + Math.random() * cellH;
             const phase = Math.random() * Math.PI * 2;
-            offsets[i * 3] = x;     offsets[i * 3 + 1] = 0;  offsets[i * 3 + 2] = z;
-            phases[i] = phase;      isCrossArr[i] = 0;
+            offsets[i * 3] = x;
+            offsets[i * 3 + 1] = 0;
+            offsets[i * 3 + 2] = z;
+            phases[i] = phase;
+            isCrossArr[i] = 0;
             offsets[(i + numGrass) * 3] = x;
             offsets[(i + numGrass) * 3 + 1] = 0;
             offsets[(i + numGrass) * 3 + 2] = z;
@@ -589,9 +660,18 @@
           if (baseBlade.attributes.normal) {
             ig.setAttribute("normal", baseBlade.attributes.normal.clone());
           }
-          ig.setAttribute("offset", new THREE.InstancedBufferAttribute(offsets, 3));
-          ig.setAttribute("aPhase", new THREE.InstancedBufferAttribute(phases, 1));
-          ig.setAttribute("aIsCross", new THREE.InstancedBufferAttribute(isCrossArr, 1));
+          ig.setAttribute(
+            "offset",
+            new THREE.InstancedBufferAttribute(offsets, 3),
+          );
+          ig.setAttribute(
+            "aPhase",
+            new THREE.InstancedBufferAttribute(phases, 1),
+          );
+          ig.setAttribute(
+            "aIsCross",
+            new THREE.InstancedBufferAttribute(isCrossArr, 1),
+          );
           ig.instanceCount = total;
           const half = patchSize * 0.5;
           const r = Math.sqrt(half * half * 2 + bladeHeight * bladeHeight) + 2;
@@ -602,138 +682,202 @@
           return ig;
         }
 
-        // ── Unified streaming grass system: camera-relative grid + pooling + frustum cull ──
+        function buildPatchGeometry() {
+          const base = createBladeGeometry(
+            params.bladeHeight,
+            params.bladeWidth,
+            Math.max(2, Math.round(params.bladeYSegments)),
+            params.tipTaperStart,
+          );
+          const field = createFieldInstancedGeometry(
+            base,
+            params.fieldSize,
+            Math.max(1, Math.round(params.grassCount)),
+            params.bladeHeight,
+          );
+          base.dispose();
+          return field;
+        }
+
+        // Grid of patch meshes — all share one geometry, each positioned at its cell center.
         const grassGroup = new THREE.Group();
         scene.add(grassGroup);
-        let geoHigh = null, geoLow = null;
-        const poolHigh = { meshes: [], idx: 0 };
-        const poolLow = { meshes: [], idx: 0 };
+        let sharedPatchGeo = null;
 
-        // Reusable objects — zero allocation per frame
-        const _cellPos = new THREE.Vector3();
-        const _camPosXZ = new THREE.Vector3();
-        const _aabb = new THREE.Box3();
-        const _aabbSize = new THREE.Vector3();
-        const _frustum = new THREE.Frustum();
-        const _projScreenMatrix = new THREE.Matrix4();
+        function buildGrassField() {
+          // Dispose old meshes + geometry
+          while (grassGroup.children.length)
+            grassGroup.remove(grassGroup.children[0]);
+          if (sharedPatchGeo) {
+            sharedPatchGeo.dispose();
+            sharedPatchGeo = null;
+          }
 
-        function buildStreamingGeometries() {
-          if (geoHigh) geoHigh.dispose();
-          if (geoLow) geoLow.dispose();
+          sharedPatchGeo = buildPatchGeometry();
+          const G = Math.max(1, Math.round(params.gridSize));
+          const half = (G - 1) * 0.5 * params.fieldSize;
+          for (let r = 0; r < G; r++) {
+            for (let c = 0; c < G; c++) {
+              const m = new THREE.Mesh(sharedPatchGeo, material);
+              m.frustumCulled = false;
+              m.receiveShadow = params.grassReceiveShadow;
+              m.castShadow = params.grassCastShadow;
+              m.position.set(
+                c * params.fieldSize - half,
+                0,
+                r * params.fieldSize - half,
+              );
+              grassGroup.add(m);
+            }
+          }
+        }
+        buildGrassField();
+
+        function grassRebuildKey() {
+          return [
+            params.bladeHeight,
+            params.bladeWidth,
+            params.tipTaperStart,
+            Math.round(params.bladeYSegments),
+            params.fieldSize,
+            Math.round(params.grassCount),
+            Math.round(params.gridSize),
+          ].join("|");
+        }
+        let lastGrassRebuildKey = grassRebuildKey();
+
+        // ── LOD System ──
+        const lodGroup = new THREE.Group();
+        scene.add(lodGroup);
+        let lodHighGeo = null,
+          lodLowGeo = null;
+        const lodHighPool = [],
+          lodLowPool = [];
+        let lodHighIdx = 0,
+          lodLowIdx = 0;
+
+        function buildLodGeometries() {
+          if (lodHighGeo) lodHighGeo.dispose();
+          if (lodLowGeo) lodLowGeo.dispose();
 
           const highSeg = Math.max(2, Math.round(params.bladeYSegments));
           const lowSeg = Math.max(2, Math.round(params.lodLowSegments));
 
           const highBase = createBladeGeometry(
-            params.bladeHeight, params.bladeWidth, highSeg, params.tipTaperStart);
-          geoHigh = createFieldInstancedGeometry(
-            highBase, params.fieldSize,
-            Math.max(1, Math.round(params.grassCount)), params.bladeHeight);
+            params.bladeHeight,
+            params.bladeWidth,
+            highSeg,
+            params.tipTaperStart,
+          );
+          lodHighGeo = createFieldInstancedGeometry(
+            highBase,
+            params.fieldSize,
+            Math.max(1, Math.round(params.grassCount)),
+            params.bladeHeight,
+          );
           highBase.dispose();
 
           const lowBase = createBladeGeometry(
-            params.bladeHeight, params.bladeWidth, lowSeg, params.tipTaperStart);
-          geoLow = createFieldInstancedGeometry(
-            lowBase, params.fieldSize,
-            Math.max(1, Math.round(params.lodLowGrassCount)), params.bladeHeight);
+            params.bladeHeight,
+            params.bladeWidth,
+            lowSeg,
+            params.tipTaperStart,
+          );
+          lodLowGeo = createFieldInstancedGeometry(
+            lowBase,
+            params.fieldSize,
+            Math.max(1, Math.round(params.grassCount)),
+            params.bladeHeight,
+          );
           lowBase.dispose();
 
-          // Update existing pool meshes to use new geometry
-          poolHigh.meshes.forEach(m => { m.geometry = geoHigh; });
-          poolLow.meshes.forEach(m => { m.geometry = geoLow; });
+          // Update existing pool mesh geometries
+          lodHighPool.forEach((m) => {
+            m.geometry = lodHighGeo;
+          });
+          lodLowPool.forEach((m) => {
+            m.geometry = lodLowGeo;
+          });
         }
 
-        function getMesh(pool, geo) {
-          if (pool.idx < pool.meshes.length) return pool.meshes[pool.idx++];
-          const m = new THREE.Mesh(geo, material);
-          m.frustumCulled = false;  // we do manual culling
-          m.castShadow = false;
-          m.receiveShadow = true;
-          grassGroup.add(m);
-          pool.meshes.push(m);
-          pool.idx++;
-          return m;
-        }
+        function updateLodGrid() {
+          // Hide all pool meshes
+          for (let i = 0; i < lodHighPool.length; i++)
+            lodHighPool[i].visible = false;
+          for (let i = 0; i < lodLowPool.length; i++)
+            lodLowPool[i].visible = false;
+          lodHighIdx = 0;
+          lodLowIdx = 0;
 
-        let lastPatchCount = 0;
-
-        function updateGrassGrid() {
-          // Hide all pooled meshes, reset indices
-          for (const child of grassGroup.children) child.visible = false;
-          poolHigh.idx = 0;
-          poolLow.idx = 0;
-
-          // Extract view frustum for culling
-          _projScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-          _frustum.setFromProjectionMatrix(_projScreenMatrix);
-
+          const cx = camera.position.x;
+          const cz = camera.position.z;
           const ps = params.fieldSize;
           const maxDist = params.lodMaxDistance;
           const lodDist = params.lodDistance;
-          const useLod = params.lodEnabled;
+          const halfPatch = ps * 0.5;
 
-          // Snap grid origin to camera (floor, not round — consistent tiling)
-          const snapX = Math.floor(camera.position.x / ps) * ps;
-          const snapZ = Math.floor(camera.position.z / ps) * ps;
+          // Snap camera to nearest grid cell
+          const snapX = Math.round(cx / ps) * ps;
+          const snapZ = Math.round(cz / ps) * ps;
           const cells = Math.ceil(maxDist / ps) + 1;
-
-          _camPosXZ.set(camera.position.x, 0, camera.position.z);
-          _aabbSize.set(ps, 1000, ps);
-
-          let patchCount = 0;
 
           for (let r = -cells; r <= cells; r++) {
             for (let c = -cells; c <= cells; c++) {
               const cellX = snapX + c * ps;
               const cellZ = snapZ + r * ps;
 
-              _cellPos.set(cellX, 0, cellZ);
-              _aabb.setFromCenterAndSize(_cellPos, _aabbSize);
+              // Distance from camera to nearest point on patch AABB
+              const dx = Math.max(0, Math.abs(cellX - cx) - halfPatch);
+              const dz = Math.max(0, Math.abs(cellZ - cz) - halfPatch);
+              const dist = Math.sqrt(dx * dx + dz * dz);
 
-              // Stage 1: cheap distance check
-              const dist = _aabb.distanceToPoint(_camPosXZ);
               if (dist > maxDist) continue;
 
-              // Stage 2: frustum cull
-              if (!_frustum.intersectsBox(_aabb)) continue;
+              const isLow = dist > lodDist;
+              const pool = isLow ? lodLowPool : lodHighPool;
+              let idx = isLow ? lodLowIdx : lodHighIdx;
+              const geo = isLow ? lodLowGeo : lodHighGeo;
 
-              // LOD selection
-              const isLow = useLod && dist > lodDist;
-              const pool = isLow ? poolLow : poolHigh;
-              const geo = isLow ? geoLow : geoHigh;
+              if (idx >= pool.length) {
+                const m = new THREE.Mesh(geo, material);
+                m.frustumCulled = false;
+                pool.push(m);
+                lodGroup.add(m);
+              }
+              const m = pool[idx];
+              if (isLow) lodLowIdx++;
+              else lodHighIdx++;
 
-              const mesh = getMesh(pool, geo);
-              mesh.geometry = geo;
-              mesh.visible = true;
-              mesh.position.set(cellX, 0, cellZ);
-              mesh.receiveShadow = params.grassReceiveShadow;
-              mesh.castShadow = params.grassCastShadow;
-              patchCount++;
+              m.visible = true;
+              m.position.set(cellX, 0, cellZ);
+              m.receiveShadow = params.grassReceiveShadow;
+              m.castShadow = params.grassCastShadow;
             }
           }
-
-          lastPatchCount = patchCount;
-          return patchCount;
         }
 
-        // Build initial geometries
-        let lastGeoKey = "";
-        function geoRebuildKey() {
+        let lastLodRebuildKey = "";
+        function lodRebuildKey() {
           return [
-            params.bladeHeight, params.bladeWidth, params.tipTaperStart,
-            Math.round(params.bladeYSegments), Math.round(params.lodLowSegments),
-            params.fieldSize, Math.round(params.grassCount),
-            Math.round(params.lodLowGrassCount),
+            params.bladeHeight,
+            params.bladeWidth,
+            params.tipTaperStart,
+            Math.round(params.bladeYSegments),
+            Math.round(params.lodLowSegments),
+            params.fieldSize,
+            Math.round(params.grassCount),
           ].join("|");
         }
 
         // Ground/Lights
-        function floorExtent() {
-          return params.lodMaxDistance * 2 + params.fieldSize;
+        function totalFieldSize() {
+          return Math.max(1, Math.round(params.gridSize)) * params.fieldSize;
         }
-        const floorMat = new THREE.MeshStandardMaterial({ color: params.groundColor });
+        const floorMat = new THREE.MeshStandardMaterial({
+          color: params.groundColor,
+        });
         const floor = new THREE.Mesh(
-          new THREE.PlaneGeometry(floorExtent(), floorExtent()),
+          new THREE.PlaneGeometry(totalFieldSize() + 8, totalFieldSize() + 8),
           floorMat,
         );
         floor.rotation.x = -Math.PI / 2;
@@ -750,7 +894,7 @@
         sun.shadow.mapSize.height = 2048;
         sun.shadow.camera.near = 0.5;
         sun.shadow.camera.far = 200;
-        const shadowExtent = floorExtent() * 0.6;
+        const shadowExtent = totalFieldSize() * 0.6;
         sun.shadow.camera.left = -shadowExtent;
         sun.shadow.camera.right = shadowExtent;
         sun.shadow.camera.top = shadowExtent;
@@ -802,141 +946,11 @@
         updateSkyParams();
         bakeSkyEnvironment();
 
-        // ── Player capsule + follow camera ──────────────────────────────────
-        const CAPSULE_R = 0.5, CAPSULE_H = 2.0;
-        const capsuleGeo = new THREE.CapsuleGeometry(CAPSULE_R, CAPSULE_H, 8, 16);
-        const capsuleMat = new THREE.MeshStandardMaterial({ color: 0x4488cc, roughness: 0.4 });
-        const capsule = new THREE.Mesh(capsuleGeo, capsuleMat);
-        capsule.position.set(0, CAPSULE_R + CAPSULE_H * 0.5, 0);
-        capsule.castShadow = true;
-        scene.add(capsule);
-
-        // Player state
-        const playerPos = new THREE.Vector3(0, 0, 0);  // XZ ground pos (Y=0)
-        let playerYaw = 0;  // radians, 0 = looking down +Z
-        const followCamPos = new THREE.Vector3();
-        followCamPos.copy(camera.position);
-
-        // Input tracking
-        const keys = {};
-        window.addEventListener("keydown", (e) => {
-          if (e.target.closest(".tp-dfwv, #tweakpane-scroll")) return;
-          keys[e.code] = true;
-        });
-        window.addEventListener("keyup", (e) => { keys[e.code] = false; });
-        // Prevent stuck keys on blur
-        window.addEventListener("blur", () => { for (const k in keys) keys[k] = false; });
-
-        // Mouse rotation for follow mode (pointer lock)
-        let mouseDX = 0, mouseDY = 0;
-        let followPitch = 0.3;  // radians above horizontal
-        renderer.domElement.addEventListener("click", () => {
-          if (params.cameraMode === "follow" && !document.pointerLockElement) {
-            renderer.domElement.requestPointerLock();
-          }
-        });
-        document.addEventListener("mousemove", (e) => {
-          if (document.pointerLockElement === renderer.domElement && params.cameraMode === "follow") {
-            mouseDX += e.movementX;
-            mouseDY += e.movementY;
-          }
-        });
-        document.addEventListener("pointerlockchange", () => {
-          if (!document.pointerLockElement) {
-            mouseDX = 0; mouseDY = 0;
-          }
-        });
-
-        const _timer = new THREE.Timer();
-
-        function updatePlayer(dt) {
-          if (params.cameraMode !== "follow") return;
-
-          // Mouse look
-          const sensitivity = 0.003;
-          playerYaw -= mouseDX * sensitivity;
-          followPitch = THREE.MathUtils.clamp(followPitch + mouseDY * sensitivity, -0.2, 1.2);
-          mouseDX = 0; mouseDY = 0;
-
-          // WASD movement relative to player yaw
-          let moveX = 0, moveZ = 0;
-          if (keys["KeyW"] || keys["ArrowUp"]) moveZ -= 1;
-          if (keys["KeyS"] || keys["ArrowDown"]) moveZ += 1;
-          if (keys["KeyA"] || keys["ArrowLeft"]) moveX -= 1;
-          if (keys["KeyD"] || keys["ArrowRight"]) moveX += 1;
-
-          if (moveX !== 0 || moveZ !== 0) {
-            const len = Math.sqrt(moveX * moveX + moveZ * moveZ);
-            moveX /= len; moveZ /= len;
-            const sprint = keys["ShiftLeft"] || keys["ShiftRight"] ? params.playerSprintMul : 1;
-            const speed = params.playerSpeed * sprint * dt;
-            const sinY = Math.sin(playerYaw), cosY = Math.cos(playerYaw);
-            playerPos.x += (moveX * cosY + moveZ * sinY) * speed;
-            playerPos.z += (-moveX * sinY + moveZ * cosY) * speed;
-          }
-
-          // Update capsule
-          capsule.position.set(playerPos.x, CAPSULE_R + CAPSULE_H * 0.5, playerPos.z);
-          capsule.rotation.y = playerYaw;
-
-          // Follow camera: behind + above player
-          const camDist = params.camFollowDist;
-          const camH = params.camFollowHeight;
-          const targetX = playerPos.x + Math.sin(playerYaw) * camDist * Math.cos(followPitch);
-          const targetZ = playerPos.z + Math.cos(playerYaw) * camDist * Math.cos(followPitch);
-          const targetY = camH + Math.sin(followPitch) * camDist;
-
-          const t = 1 - Math.exp(-params.camFollowSmooth * dt);
-          followCamPos.x += (targetX - followCamPos.x) * t;
-          followCamPos.y += (targetY - followCamPos.y) * t;
-          followCamPos.z += (targetZ - followCamPos.z) * t;
-
-          camera.position.copy(followCamPos);
-          camera.lookAt(playerPos.x, CAPSULE_H * 0.5, playerPos.z);
-        }
-
-        function switchCameraMode(mode) {
-          params.cameraMode = mode;
-          if (mode === "orbit") {
-            controls.enabled = true;
-            capsule.visible = params.capsuleVisible;
-            if (document.pointerLockElement) document.exitPointerLock();
-          } else {
-            controls.enabled = false;
-            capsule.visible = params.capsuleVisible;
-            // Seed follow camera from current camera
-            followCamPos.copy(camera.position);
-            // Derive yaw from camera-to-target direction
-            const dx = controls.target.x - camera.position.x;
-            const dz = controls.target.z - camera.position.z;
-            playerYaw = Math.atan2(dx, dz) + Math.PI;
-            playerPos.set(controls.target.x, 0, controls.target.z);
-          }
-        }
-
         // --- GUI ---
         const pane = new Pane({
           title: "Arc Shape Controller",
           container: document.getElementById("tweakpane-scroll"),
         });
-
-        const camFolder = pane.addFolder({ title: "Camera / Player" });
-        camFolder.addBlade({
-          view: "list",
-          label: "Mode",
-          options: [
-            { text: "Orbit (free)", value: "orbit" },
-            { text: "Follow (WASD)", value: "follow" },
-          ],
-          value: params.cameraMode,
-        }).on("change", (ev) => { switchCameraMode(ev.value); });
-        camFolder.addBinding(params, "playerSpeed", { min: 5, max: 80, label: "Move speed" });
-        camFolder.addBinding(params, "playerSprintMul", { min: 1, max: 5, label: "Sprint multiplier" });
-        camFolder.addBinding(params, "camFollowHeight", { min: 2, max: 40, label: "Cam height" });
-        camFolder.addBinding(params, "camFollowDist", { min: 5, max: 60, label: "Cam distance" });
-        camFolder.addBinding(params, "camFollowSmooth", { min: 1, max: 20, label: "Cam smoothness" });
-        camFolder.addBinding(params, "capsuleVisible", { label: "Show capsule" });
-
         pane.addBinding(params, "bendFocus", {
           min: 0.5,
           max: 5.0,
@@ -949,23 +963,76 @@
         });
         pane.addBinding(params, "windStrength", { min: 0, max: 5 });
         pane.addBinding(params, "windSpeed", { min: 0.1, max: 3 });
-        pane.addBinding(params, "maxAngle", { min: 0.5, max: 2.5, label: "Max bend angle" });
-        pane.addBinding(params, "naturalLean", { min: 0, max: 1.5, label: "Natural lean" });
-        pane.addBinding(params, "clumpScale", { min: 1, max: 20, label: "Clump size" });
-        pane.addBinding(params, "clumpStrength", { min: 0, max: 1, label: "Clump strength" });
-        pane.addBinding(params, "aoBase", { min: 0, max: 1, label: "AO base darkness" });
-        pane.addBinding(params, "aoPower", { min: 0.5, max: 6, label: "AO curve" });
-        pane.addBinding(params, "windAngle", { min: 0, max: 360, step: 1, label: "Wind angle (°)" });
-        pane.addBinding(params, "windWaveScale", { min: 0.01, max: 0.8, label: "Wave scale" });
+        pane.addBinding(params, "maxAngle", {
+          min: 0.5,
+          max: 2.5,
+          label: "Max bend angle",
+        });
+        pane.addBinding(params, "naturalLean", {
+          min: 0,
+          max: 1.5,
+          label: "Natural lean",
+        });
+        pane.addBinding(params, "clumpScale", {
+          min: 1,
+          max: 20,
+          label: "Clump size",
+        });
+        pane.addBinding(params, "clumpStrength", {
+          min: 0,
+          max: 1,
+          label: "Clump strength",
+        });
+        pane.addBinding(params, "aoBase", {
+          min: 0,
+          max: 1,
+          label: "AO base darkness",
+        });
+        pane.addBinding(params, "aoPower", {
+          min: 0.5,
+          max: 6,
+          label: "AO curve",
+        });
+        pane.addBinding(params, "windAngle", {
+          min: 0,
+          max: 360,
+          step: 1,
+          label: "Wind angle (°)",
+        });
+        pane.addBinding(params, "windWaveScale", {
+          min: 0.01,
+          max: 0.8,
+          label: "Wave scale",
+        });
         pane.addBinding(params, "colorVariation", { label: "Color variation" });
-        pane.addBinding(params, "cvHueSpread", { min: 0, max: 0.3, label: "Hue spread" });
-        pane.addBinding(params, "cvSatSpread", { min: 0, max: 1, label: "Saturation spread" });
-        pane.addBinding(params, "cvDryAmount", { min: 0, max: 0.5, label: "Dry blade amount" });
+        pane.addBinding(params, "cvHueSpread", {
+          min: 0,
+          max: 0.3,
+          label: "Hue spread",
+        });
+        pane.addBinding(params, "cvSatSpread", {
+          min: 0,
+          max: 1,
+          label: "Saturation spread",
+        });
+        pane.addBinding(params, "cvDryAmount", {
+          min: 0,
+          max: 0.5,
+          label: "Dry blade amount",
+        });
         pane.addBinding(params, "cvDryColor", { label: "Dry blade color" });
         pane.addBinding(params, "doubleSide", { label: "Double side" });
         pane.addBinding(params, "crossed", { label: "Crossed ribbons" });
-        pane.addBinding(params, "skyBlend", { min: 0, max: 1, label: "Sky normal blend" });
-        pane.addBinding(params, "cylindrical", { min: 0, max: 1, label: "Cylindrical normals" });
+        pane.addBinding(params, "skyBlend", {
+          min: 0,
+          max: 1,
+          label: "Sky normal blend",
+        });
+        pane.addBinding(params, "cylindrical", {
+          min: 0,
+          max: 1,
+          label: "Cylindrical normals",
+        });
         pane.addBinding(params, "viewThicken", {
           min: 0,
           max: 1,
@@ -1000,11 +1067,12 @@
         bladeFolder.addBinding(params, "bladeColor", { label: "Base color" });
         bladeFolder.addBinding(params, "tipColor", { label: "Tip color" });
 
-        const fieldFolder = pane.addFolder({ title: "Field (streaming)" });
-        const patchCountMonitor = { patches: 0 };
-        fieldFolder.addBinding(patchCountMonitor, "patches", {
-          label: "Visible patches",
-          readonly: true,
+        const fieldFolder = pane.addFolder({ title: "Field" });
+        fieldFolder.addBinding(params, "gridSize", {
+          min: 1,
+          max: 15,
+          step: 1,
+          label: "Grid size (NxN patches)",
         });
         fieldFolder.addBinding(params, "fieldSize", {
           min: 4,
@@ -1018,11 +1086,21 @@
           step: 32,
           label: "Blades per patch",
         });
-        fieldFolder.addBinding(params, "groundPlane", { label: "Ground plane" });
-        fieldFolder.addBinding(params, "groundColor", { label: "Ground color" });
-        fieldFolder.addBinding(params, "grassReceiveShadow", { label: "Receive shadow" });
-        fieldFolder.addBinding(params, "grassCastShadow", { label: "Cast shadow" });
-        fieldFolder.addBinding(params, "shadowDebug", { label: "Shadow debug mesh" });
+        fieldFolder.addBinding(params, "groundPlane", {
+          label: "Ground plane",
+        });
+        fieldFolder.addBinding(params, "groundColor", {
+          label: "Ground color",
+        });
+        fieldFolder.addBinding(params, "grassReceiveShadow", {
+          label: "Receive shadow",
+        });
+        fieldFolder.addBinding(params, "grassCastShadow", {
+          label: "Cast shadow",
+        });
+        fieldFolder.addBinding(params, "shadowDebug", {
+          label: "Shadow debug mesh",
+        });
 
         const lightFolder = pane.addFolder({ title: "Lighting" });
         lightFolder.addBinding(params, "sunIntensity", {
@@ -1044,22 +1122,50 @@
         });
 
         const bssFolder = pane.addFolder({ title: "Backscatter (SSS)" });
-        bssFolder.addBinding(params, "bssIntensity", { min: 0, max: 3, label: "Intensity" });
-        bssFolder.addBinding(params, "bssPower", { min: 0.5, max: 8, label: "Sharpness" });
+        bssFolder.addBinding(params, "bssIntensity", {
+          min: 0,
+          max: 3,
+          label: "Intensity",
+        });
+        bssFolder.addBinding(params, "bssPower", {
+          min: 0.5,
+          max: 8,
+          label: "Sharpness",
+        });
         bssFolder.addBinding(params, "bssColor", { label: "Glow color" });
 
         const lodFolder = pane.addFolder({ title: "LOD" });
         lodFolder.addBinding(params, "lodEnabled", { label: "Enable LOD" });
-        lodFolder.addBinding(params, "lodDistance", { min: 20, max: 200, label: "LOD distance" });
-        lodFolder.addBinding(params, "lodMaxDistance", { min: 50, max: 500, label: "Max distance" });
-        lodFolder.addBinding(params, "lodLowSegments", { min: 2, max: 6, step: 1, label: "Low LOD segments" });
-        lodFolder.addBinding(params, "lodLowGrassCount", { min: 32, max: 4000, step: 32, label: "Low LOD blades/patch" });
+        lodFolder.addBinding(params, "lodDistance", {
+          min: 20,
+          max: 200,
+          label: "LOD distance",
+        });
+        lodFolder.addBinding(params, "lodMaxDistance", {
+          min: 50,
+          max: 500,
+          label: "Max distance",
+        });
+        lodFolder.addBinding(params, "lodLowSegments", {
+          min: 2,
+          max: 6,
+          step: 1,
+          label: "Low LOD segments",
+        });
         lodFolder.addBinding(params, "lodDebug", { label: "Debug colors" });
 
         const specFolder = pane.addFolder({ title: "Specular" });
         specFolder.addBinding(params, "specular", { label: "Enable specular" });
-        specFolder.addBinding(params, "specRoughness", { min: 0.1, max: 0.92, label: "Roughness" });
-        specFolder.addBinding(params, "specEnvIntensity", { min: 0, max: 1, label: "Env reflection" });
+        specFolder.addBinding(params, "specRoughness", {
+          min: 0.1,
+          max: 0.92,
+          label: "Roughness",
+        });
+        specFolder.addBinding(params, "specEnvIntensity", {
+          min: 0,
+          max: 1,
+          label: "Env reflection",
+        });
 
         const skyFolder = pane.addFolder({ title: "Sky" });
         skyFolder.addBinding(params, "skyTurbidity", {
@@ -1089,38 +1195,36 @@
         });
 
         let lastFloorSize = 0;
-        // Build initial geometries
-        buildStreamingGeometries();
-        lastGeoKey = geoRebuildKey();
-
         renderer.setAnimationLoop(() => {
-          _timer.update();
-          const dt = _timer.getDelta();
-
-          // Player movement + follow camera
-          updatePlayer(dt);
-          capsule.visible = params.capsuleVisible && params.cameraMode === "follow";
-
-          // Rebuild geometries only when blade shape / patch params change
-          const gk = geoRebuildKey();
-          if (gk !== lastGeoKey) {
-            lastGeoKey = gk;
-            buildStreamingGeometries();
+          // LOD mode: camera-relative dynamic grid
+          if (params.lodEnabled) {
+            grassGroup.visible = false;
+            lodGroup.visible = true;
+            const lk = lodRebuildKey();
+            if (lk !== lastLodRebuildKey) {
+              lastLodRebuildKey = lk;
+              buildLodGeometries();
+            }
+            updateLodGrid();
+          } else {
+            grassGroup.visible = true;
+            lodGroup.visible = false;
+            const gk = grassRebuildKey();
+            if (gk !== lastGrassRebuildKey) {
+              lastGrassRebuildKey = gk;
+              buildGrassField();
+            }
           }
 
-          // Stream patches: camera-relative grid + frustum cull + pooling
-          updateGrassGrid();
-          patchCountMonitor.patches = lastPatchCount;
-
-          // Floor follows maxDistance
-          const neededFloor = floorExtent();
+          // Floor sizing: cover LOD maxDist when on, or fixed grid when off
+          const neededFloor = params.lodEnabled
+            ? params.lodMaxDistance * 2 + params.fieldSize
+            : totalFieldSize() + 8;
           if (neededFloor !== lastFloorSize) {
             lastFloorSize = neededFloor;
             floor.geometry.dispose();
             floor.geometry = new THREE.PlaneGeometry(neededFloor, neededFloor);
           }
-          // Floor follows camera XZ so ground is always under the streaming area
-          floor.position.set(camera.position.x, 0, camera.position.z);
 
           uBendFocus.value = params.bendFocus;
           uStiffness.value = params.stiffness;
@@ -1146,12 +1250,20 @@
           uCvSatSpread.value = params.cvSatSpread;
           uCvDryAmount.value = params.cvDryAmount;
           uCvDryCol.value.set(params.cvDryColor);
-          material.side = params.doubleSide ? THREE.DoubleSide : THREE.FrontSide;
+          material.side = params.doubleSide
+            ? THREE.DoubleSide
+            : THREE.FrontSide;
           material.needsUpdate = true;
           floor.visible = params.groundPlane;
           floorMat.color.set(params.groundColor);
           material.roughness = params.specular ? params.specRoughness : 0.92;
-          material.envMapIntensity = params.specular ? params.specEnvIntensity : 0;
+          material.envMapIntensity = params.specular
+            ? params.specEnvIntensity
+            : 0;
+          grassGroup.children.forEach((m) => {
+            m.receiveShadow = params.grassReceiveShadow;
+            m.castShadow = params.grassCastShadow;
+          });
           debugKnot.visible = params.shadowDebug;
           uViewThicken.value = params.viewThicken;
           uBladeCol.value.set(params.bladeColor);
@@ -1171,7 +1283,7 @@
           ambient.color.set(params.ambientColor);
           updateSkyParams();
           scene.environmentIntensity = params.environmentIntensity;
-          if (params.cameraMode === "orbit") controls.update();
+          controls.update();
           renderer.render(scene, camera);
           stats.update();
         });
