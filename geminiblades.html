@@ -201,7 +201,14 @@
           camFollowDist: 15,         // distance behind capsule
           camFollowSmooth: 5,        // lerp speed for camera follow
           capsuleVisible: true,      // show/hide capsule mesh
+          // Fog (linear) — off by default
+          fogEnabled: false,
+          fogColor: "#b8c5d0",
+          fogNear: 50,
+          fogFar: 220,
         };
+
+        const fog = new THREE.Fog(params.fogColor, params.fogNear, params.fogFar);
 
         const uWindSpeed = uniform(params.windSpeed);
         const uWindStrength = uniform(params.windStrength);
@@ -873,6 +880,7 @@
         // ── Sky (WebGPU SkyMesh + PMREM env), same pattern as grass-sandbox.html ──
         const sky = new SkyMesh();
         sky.scale.setScalar(450000);
+        sky.material.fog = false; // scene fog only affects world meshes, not the skydome
         scene.add(sky);
         const pmremGenerator = new THREE.PMREMGenerator(renderer);
 
@@ -1197,6 +1205,22 @@
           label: "Env intensity",
         });
 
+        const fogFolder = pane.addFolder({ title: "Fog" });
+        fogFolder.addBinding(params, "fogEnabled", { label: "Enable fog" });
+        fogFolder.addBinding(params, "fogColor", { label: "Color" });
+        fogFolder.addBinding(params, "fogNear", {
+          min: 0,
+          max: 500,
+          step: 1,
+          label: "Near",
+        });
+        fogFolder.addBinding(params, "fogFar", {
+          min: 10,
+          max: 2500,
+          step: 5,
+          label: "Far",
+        });
+
         let lastFloorSize = 0;
         // Build initial geometries
         buildStreamingGeometries();
@@ -1285,6 +1309,14 @@
           ambient.color.set(params.ambientColor);
           updateSkyParams();
           scene.environmentIntensity = params.environmentIntensity;
+          if (params.fogEnabled) {
+            fog.color.set(params.fogColor);
+            fog.near = params.fogNear;
+            fog.far = Math.max(params.fogFar, params.fogNear + 1);
+            scene.fog = fog;
+          } else {
+            scene.fog = null;
+          }
           if (params.cameraMode === "orbit") controls.update();
           renderer.render(scene, camera);
           stats.update();
