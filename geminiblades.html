@@ -204,6 +204,10 @@
           camFollowDist: 15,         // distance behind capsule
           camFollowSmooth: 5,        // lerp speed for camera follow
           capsuleVisible: true,      // show/hide capsule mesh
+          // Grass interaction
+          grassInteraction: true,    // blades bend away from player
+          interactionRadius: 1.5,    // push radius around player
+          interactionStrength: 0.7,  // how much blades bend (0-1)
           // Fog (linear) — off by default
           fogEnabled: false,
           fogColor: "#b8c5d0",
@@ -259,6 +263,10 @@
         const uLodFadeStart = uniform(params.lodFadeStart);
         const uLodDebug = uniform(0);
         const uGrassDensity = uniform(params.grassDensity);
+        const uPlayerPos = uniform(new THREE.Vector3(0, 0, 0));
+        const uInteractionRadius = uniform(params.interactionRadius);
+        const uInteractionStrength = uniform(params.interactionStrength);
+        const uInteractionEnabled = uniform(1);
         const vLodMorph = varying(float(0), 'vLM');
         const vDistFade = varying(float(1), 'vDF');
 
@@ -478,15 +486,57 @@
           const nYaw = normalize(rotY(crossedYaw, fanN));
           const pOut = rotY(deltaYaw, pYaw);
           const nOut = normalize(rotY(deltaYaw, nYaw));
+
+          // Player interaction: bend blades away from player (same pattern as grass.js)
+          const playerXZ = vec2(uPlayerPos.x, uPlayerPos.z);
+          const toBlade = bladeXZ.sub(playerXZ);
+          const pDist = length(toBlade);
+          // Falloff: strong when close, zero beyond radius (matches grass.js smoothstep pattern)
+          const distFalloff = mix(float(1), float(0), smoothstep(float(0.5), uInteractionRadius, pDist));
+          const pFall = distFalloff.mul(uInteractionEnabled);
+          // Push angle: bend away from player, strength scaled by falloff
+          const pAng = negate(mix(float(0), uInteractionStrength, pFall));
+          // Direction from blade toward player (for rotation axis)
+          const pTo = normalize(vec3(playerXZ.x.sub(bladeXZ.x), float(0), playerXZ.y.sub(bladeXZ.y)).add(vec3(0.001, 0, 0.001)));
+          // Perpendicular axis to rotate around (tangent to push direction)
+          const pAx = vec3(pTo.z, float(0), negate(pTo.x));
+          // Apply interaction rotation to position + normal, scaled by vertex height
+          const intAngle = pAng.mul(vUv.y);
+          const cI = cos(intAngle), sI = sin(intAngle);
+          // Rodrigues rotation around pAx
+          const pDotAx = dot(vec3(pOut.x, pOut.y, pOut.z), pAx);
+          const pCrossAx = vec3(
+            pAx.y.mul(pOut.z).sub(pAx.z.mul(pOut.y)),
+            pAx.z.mul(pOut.x).sub(pAx.x.mul(pOut.z)),
+            pAx.x.mul(pOut.y).sub(pAx.y.mul(pOut.x)),
+          );
+          const pRotated = vec3(
+            pOut.x.mul(cI).add(pCrossAx.x.mul(sI)).add(pAx.x.mul(pDotAx).mul(float(1).sub(cI))),
+            pOut.y.mul(cI).add(pCrossAx.y.mul(sI)).add(pAx.y.mul(pDotAx).mul(float(1).sub(cI))),
+            pOut.z.mul(cI).add(pCrossAx.z.mul(sI)).add(pAx.z.mul(pDotAx).mul(float(1).sub(cI))),
+          );
+          // Also rotate the normal for correct lighting on bent blades
+          const nDotAx = dot(nOut, pAx);
+          const nCrossAx = vec3(
+            pAx.y.mul(nOut.z).sub(pAx.z.mul(nOut.y)),
+            pAx.z.mul(nOut.x).sub(pAx.x.mul(nOut.z)),
+            pAx.x.mul(nOut.y).sub(pAx.y.mul(nOut.x)),
+          );
+          const nRotated = vec3(
+            nOut.x.mul(cI).add(nCrossAx.x.mul(sI)).add(pAx.x.mul(nDotAx).mul(float(1).sub(cI))),
+            nOut.y.mul(cI).add(nCrossAx.y.mul(sI)).add(pAx.y.mul(nDotAx).mul(float(1).sub(cI))),
+            nOut.z.mul(cI).add(nCrossAx.z.mul(sI)).add(pAx.z.mul(nDotAx).mul(float(1).sub(cI))),
+          );
+
           // Sky blend: tilt normals toward up so blades catch overhead light
           // from all sides — this is what eliminates the dark-side problem.
           // LOD: push normals more toward up at distance for simpler lighting
           const lodSkyBlend = mix(uSkyBlend, max(uSkyBlend, float(0.7)), lodMorph);
-          const nFinal = normalize(mix(nOut, uGroundNormal, lodSkyBlend));
+          const nFinal = normalize(mix(nRotated, uGroundNormal, lodSkyBlend));
           normalLocal.assign(nFinal);
           vCustomNormal.assign(nFinal);
 
-          return vec3(pOut.x.add(off.x), pOut.y, pOut.z.add(off.z));
+          return vec3(pRotated.x.add(off.x), pRotated.y, pRotated.z.add(off.z));
         })();
         material.colorNode = Fn(() => {
           const off = attribute("offset", "vec3");
@@ -1093,6 +1143,9 @@
         camFolder.addBinding(params, "camFollowDist", { min: 5, max: 60, label: "Cam distance" });
         camFolder.addBinding(params, "camFollowSmooth", { min: 1, max: 20, label: "Cam smoothness" });
         camFolder.addBinding(params, "capsuleVisible", { label: "Show capsule" });
+        camFolder.addBinding(params, "grassInteraction", { label: "Grass interaction" });
+        camFolder.addBinding(params, "interactionRadius", { min: 0.5, max: 5, step: 0.1, label: "Interaction radius" });
+        camFolder.addBinding(params, "interactionStrength", { min: 0.1, max: 2.0, step: 0.05, label: "Interaction strength" });
 
         pane.addBinding(params, "bendFocus", {
           min: 0.5,
@@ -1290,6 +1343,12 @@
           // Player movement + follow camera
           updatePlayer(dt);
           capsule.visible = params.capsuleVisible && params.cameraMode === "follow";
+
+          // Update interaction uniforms
+          uPlayerPos.value.set(playerPos.x, 0, playerPos.z);
+          uInteractionEnabled.value = params.grassInteraction ? 1.0 : 0.0;
+          uInteractionRadius.value = params.interactionRadius;
+          uInteractionStrength.value = params.interactionStrength;
 
           // Rebuild geometries only when blade shape / patch params change
           const gk = geoRebuildKey();
