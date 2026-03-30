@@ -208,6 +208,7 @@
           groundColor: "#1a2e0a",    // dark earthy green
           fieldSize: 10,    // size of ONE patch (world units)
           grassDensity: 1.0,  // GPU-side density (0 = no blades, 1 = all blades)
+          densityPattern: "full",  // test pattern: "full", "circular", "half"
           grassCount: 1516,  // blades per patch HIGH
           lodEnabled: false,       // enable LOD system (camera-relative grid)
           lodMidDistance: 40,      // HIGH→MID swap distance
@@ -330,33 +331,41 @@
 
         // ── Painted grass density texture ──
         // In the editor this comes from grassDensityCanvas (128×128, painted by brush).
-        // Here we create a test texture: left half = full grass, right half = no grass,
-        // so you can visually verify the sampling works. Replace with editor canvas later.
+        // Here we create test patterns to verify sampling. Replace with editor canvas later.
         const densityRes = 128;
-        const grassDensityTex = (() => {
-          const data = new Uint8Array(densityRes * densityRes * 4);
+        const grassDensityTex = new THREE.DataTexture(
+          new Uint8Array(densityRes * densityRes * 4), densityRes, densityRes,
+          THREE.RGBAFormat, THREE.UnsignedByteType
+        );
+        grassDensityTex.wrapS = THREE.ClampToEdgeWrapping;
+        grassDensityTex.wrapT = THREE.ClampToEdgeWrapping;
+        grassDensityTex.minFilter = THREE.LinearFilter;
+        grassDensityTex.magFilter = THREE.LinearFilter;
+
+        function fillDensityPattern(pattern) {
+          const data = grassDensityTex.image.data;
           for (let z = 0; z < densityRes; z++) {
             for (let x = 0; x < densityRes; x++) {
               const idx = (z * densityRes + x) * 4;
-              // Test pattern: circular gradient from center (full density) to edges (zero)
-              const u = x / (densityRes - 1), v = z / (densityRes - 1);
-              const dx = u - 0.5, dz = v - 0.5;
-              const dist = Math.sqrt(dx * dx + dz * dz) * 2; // 0 at center, 1 at corners
-              const density = Math.max(0, Math.min(255, (1 - dist) * 255));
-              data[idx] = density;      // R = density
-              data[idx + 1] = density;  // G (unused, but visible if debugging)
-              data[idx + 2] = density;  // B
-              data[idx + 3] = 255;      // A
+              let density = 255;
+              if (pattern === "circular") {
+                const u = x / (densityRes - 1), v = z / (densityRes - 1);
+                const dx = u - 0.5, dz = v - 0.5;
+                const dist = Math.sqrt(dx * dx + dz * dz) * 2;
+                density = Math.max(0, Math.min(255, (1 - dist) * 255));
+              } else if (pattern === "half") {
+                density = x < densityRes / 2 ? 255 : 0;
+              }
+              // "full" → 255 everywhere (default)
+              data[idx] = density;
+              data[idx + 1] = density;
+              data[idx + 2] = density;
+              data[idx + 3] = 255;
             }
           }
-          const tex = new THREE.DataTexture(data, densityRes, densityRes, THREE.RGBAFormat, THREE.UnsignedByteType);
-          tex.wrapS = THREE.ClampToEdgeWrapping;
-          tex.wrapT = THREE.ClampToEdgeWrapping;
-          tex.minFilter = THREE.LinearFilter;
-          tex.magFilter = THREE.LinearFilter;
-          tex.needsUpdate = true;
-          return tex;
-        })();
+          grassDensityTex.needsUpdate = true;
+        }
+        fillDensityPattern(params.densityPattern);
 
         const vLodMorph = varying(float(0), 'vLM');
         const vDistFade = varying(float(1), 'vDF');
@@ -1476,6 +1485,19 @@
         });
         fieldFolder.addBinding(params, "grassDensity", {
           min: 0.05, max: 1.0, step: 0.05, label: "Density (GPU cull)",
+        });
+        fieldFolder.addBlade({
+          view: "list",
+          label: "Density pattern",
+          options: [
+            { text: "Full (infinite)", value: "full" },
+            { text: "Circular gradient", value: "circular" },
+            { text: "Half field", value: "half" },
+          ],
+          value: params.densityPattern,
+        }).on("change", (ev) => {
+          params.densityPattern = ev.value;
+          fillDensityPattern(ev.value);
         });
         fieldFolder.addBinding(params, "grassCount", {
           min: 32,
