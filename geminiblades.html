@@ -184,11 +184,14 @@
           fieldSize: 10,    // size of ONE patch (world units)
           grassCount: 300,  // blades per patch HIGH
           lodEnabled: false,       // enable LOD system (camera-relative grid)
-          lodDistance: 60,         // high→low geometry swap distance
-          lodMaxDistance: 150,     // max render distance (blades fade out)
-          lodLowSegments: 3,      // segment count for far LOD geometry
-          lodLowGrassCount: 150,  // blades per patch LOW (fewer = faster)
-          lodDebug: false,         // tint high=green, low=red to visualize LOD zones
+          lodMidDistance: 40,      // HIGH→MID swap distance
+          lodFarDistance: 80,      // MID→FAR swap distance
+          lodMaxDistance: 200,     // absolute cutoff (no grass beyond)
+          lodMidSegments: 3,       // segment count for MID LOD
+          lodMidGrassCount: 150,   // blades per patch MID
+          lodFarSegments: 1,       // segment count for FAR LOD (single quad)
+          lodFarGrassCount: 80,    // blades per patch FAR (minimal)
+          lodDebug: false,         // tint HIGH=green, MID=yellow, FAR=blue
           // Camera / player
           cameraMode: "orbit",       // "orbit" or "follow"
           playerSpeed: 30,           // world units per second
@@ -237,7 +240,8 @@
         const uBssIntensity = uniform(params.bssIntensity);
         const uBssPower = uniform(params.bssPower);
         const uLodEnabled = uniform(0);
-        const uLodDist = uniform(params.lodDistance);
+        const uLodMidDist = uniform(params.lodMidDistance);
+        const uLodFarDist = uniform(params.lodFarDistance);
         const uLodMaxDist = uniform(params.lodMaxDistance);
         const uLodDebug = uniform(0);
         const vLodMorph = varying(float(0), 'vLM');
@@ -284,8 +288,10 @@
           // LOD: per-blade distance to camera for morph + fade
           const camXZ = vec2(cameraPosition.x, cameraPosition.z);
           const bladeCamDist = length(bladeXZ.sub(camXZ));
-          // lodMorph: 0 = full detail, 1 = simplified (kills micro-detail)
-          const lodMorph = uLodEnabled.mul(smoothstep(uLodDist.mul(float(0.6)), uLodDist, bladeCamDist));
+          // lodMorph: 0 = HIGH detail, 0.5 = MID, 1.0 = FAR (used for shader simplification + debug)
+          const morphToMid = smoothstep(uLodMidDist.mul(float(0.6)), uLodMidDist, bladeCamDist);
+          const morphToFar = smoothstep(uLodFarDist.mul(float(0.8)), uLodFarDist, bladeCamDist);
+          const lodMorph = uLodEnabled.mul(mix(morphToMid.mul(float(0.5)), float(0.5).add(morphToFar.mul(float(0.5))), morphToFar));
           vLodMorph.assign(lodMorph);
           // distFade: 1 = full size, 0 = collapsed (blade disappears at maxDist)
           const distFade = mix(float(1), smoothstep(uLodMaxDist, uLodMaxDist.mul(float(0.8)), bladeCamDist), uLodEnabled);
@@ -478,7 +484,13 @@
 
           const finalCol = variedCol.mul(vec3(randomShade.mul(vClumpShade).mul(ao)));
           // LOD debug: green = high detail, red = low detail
-          const debugTint = mix(vec3(0.2, 1.0, 0.2), vec3(1.0, 0.2, 0.2), vLodMorph);
+          // Debug: GREEN = HIGH, YELLOW = MID, BLUE = FAR
+          const dbHigh = vec3(0.2, 1.0, 0.2);
+          const dbMid = vec3(1.0, 1.0, 0.2);
+          const dbFar = vec3(0.2, 0.4, 1.0);
+          const midBlend = smoothstep(float(0.2), float(0.5), vLodMorph);
+          const farBlend = smoothstep(float(0.6), float(0.9), vLodMorph);
+          const debugTint = mix(mix(dbHigh, dbMid, midBlend), dbFar, farBlend);
           return mix(finalCol, debugTint, uLodDebug);
         })();
 
@@ -551,20 +563,20 @@
           return geo;
         }
 
-        // Instanced field: grid + jitter like grass-sandbox createGrassGeometry (no LOD).
+        // Instanced field: grid + jitter like grass-sandbox createGrassGeometry.
+        // `includeCross` — when false, skips crossed ribbon duplicates (half the instances).
         function createFieldInstancedGeometry(
           baseBlade,
           patchSize,
           numGrass,
           bladeHeight,
+          includeCross = true,
         ) {
           const numCellsX = Math.max(1, Math.ceil(Math.sqrt(numGrass)));
           const numCellsZ = Math.max(1, Math.ceil(numGrass / numCellsX));
           const cellW = patchSize / numCellsX;
           const cellH = patchSize / numCellsZ;
-          // Always generate 2× instances: first half = normal blades,
-          // second half = cross blades (+90° yaw in shader, hidden when uCrossed=0).
-          const total = numGrass * 2;
+          const total = includeCross ? numGrass * 2 : numGrass;
           const offsets = new Float32Array(total * 3);
           const phases = new Float32Array(total);
           const isCrossArr = new Float32Array(total);
@@ -576,11 +588,13 @@
             const phase = Math.random() * Math.PI * 2;
             offsets[i * 3] = x;     offsets[i * 3 + 1] = 0;  offsets[i * 3 + 2] = z;
             phases[i] = phase;      isCrossArr[i] = 0;
-            offsets[(i + numGrass) * 3] = x;
-            offsets[(i + numGrass) * 3 + 1] = 0;
-            offsets[(i + numGrass) * 3 + 2] = z;
-            phases[i + numGrass] = phase;
-            isCrossArr[i + numGrass] = 1;
+            if (includeCross) {
+              offsets[(i + numGrass) * 3] = x;
+              offsets[(i + numGrass) * 3 + 1] = 0;
+              offsets[(i + numGrass) * 3 + 2] = z;
+              phases[i + numGrass] = phase;
+              isCrossArr[i + numGrass] = 1;
+            }
           }
           const ig = new THREE.InstancedBufferGeometry();
           if (baseBlade.index) ig.index = baseBlade.index.clone();
@@ -602,12 +616,13 @@
           return ig;
         }
 
-        // ── Unified streaming grass system: camera-relative grid + pooling + frustum cull ──
+        // ── Unified streaming grass: 3-tier LOD + pooling + frustum cull ──
         const grassGroup = new THREE.Group();
         scene.add(grassGroup);
-        let geoHigh = null, geoLow = null;
+        let geoHigh = null, geoMid = null, geoFar = null;
         const poolHigh = { meshes: [], idx: 0 };
-        const poolLow = { meshes: [], idx: 0 };
+        const poolMid = { meshes: [], idx: 0 };
+        const poolFar = { meshes: [], idx: 0 };
 
         // Reusable objects — zero allocation per frame
         const _cellPos = new THREE.Vector3();
@@ -619,28 +634,41 @@
 
         function buildStreamingGeometries() {
           if (geoHigh) geoHigh.dispose();
-          if (geoLow) geoLow.dispose();
+          if (geoMid) geoMid.dispose();
+          if (geoFar) geoFar.dispose();
 
           const highSeg = Math.max(2, Math.round(params.bladeYSegments));
-          const lowSeg = Math.max(2, Math.round(params.lodLowSegments));
+          const midSeg = Math.max(2, Math.round(params.lodMidSegments));
+          const farSeg = Math.max(1, Math.round(params.lodFarSegments));
 
+          // HIGH — full segments, full density, crossed ribbons
           const highBase = createBladeGeometry(
             params.bladeHeight, params.bladeWidth, highSeg, params.tipTaperStart);
           geoHigh = createFieldInstancedGeometry(
             highBase, params.fieldSize,
-            Math.max(1, Math.round(params.grassCount)), params.bladeHeight);
+            Math.max(1, Math.round(params.grassCount)), params.bladeHeight, true);
           highBase.dispose();
 
-          const lowBase = createBladeGeometry(
-            params.bladeHeight, params.bladeWidth, lowSeg, params.tipTaperStart);
-          geoLow = createFieldInstancedGeometry(
-            lowBase, params.fieldSize,
-            Math.max(1, Math.round(params.lodLowGrassCount)), params.bladeHeight);
-          lowBase.dispose();
+          // MID — reduced segments, reduced density, crossed ribbons
+          const midBase = createBladeGeometry(
+            params.bladeHeight, params.bladeWidth, midSeg, params.tipTaperStart);
+          geoMid = createFieldInstancedGeometry(
+            midBase, params.fieldSize,
+            Math.max(1, Math.round(params.lodMidGrassCount)), params.bladeHeight, true);
+          midBase.dispose();
+
+          // FAR — minimal segments, minimal density, NO crossed ribbons
+          const farBase = createBladeGeometry(
+            params.bladeHeight, params.bladeWidth, farSeg, params.tipTaperStart);
+          geoFar = createFieldInstancedGeometry(
+            farBase, params.fieldSize,
+            Math.max(1, Math.round(params.lodFarGrassCount)), params.bladeHeight, false);
+          farBase.dispose();
 
           // Update existing pool meshes to use new geometry
           poolHigh.meshes.forEach(m => { m.geometry = geoHigh; });
-          poolLow.meshes.forEach(m => { m.geometry = geoLow; });
+          poolMid.meshes.forEach(m => { m.geometry = geoMid; });
+          poolFar.meshes.forEach(m => { m.geometry = geoFar; });
         }
 
         function getMesh(pool, geo) {
@@ -656,12 +684,14 @@
         }
 
         let lastPatchCount = 0;
+        let lastHighCount = 0, lastMidCount = 0, lastFarCount = 0;
 
         function updateGrassGrid() {
           // Hide all pooled meshes, reset indices
           for (const child of grassGroup.children) child.visible = false;
           poolHigh.idx = 0;
-          poolLow.idx = 0;
+          poolMid.idx = 0;
+          poolFar.idx = 0;
 
           // Extract view frustum for culling
           _projScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
@@ -669,7 +699,8 @@
 
           const ps = params.fieldSize;
           const maxDist = params.lodMaxDistance;
-          const lodDist = params.lodDistance;
+          const midDist = params.lodMidDistance;
+          const farDist = params.lodFarDistance;
           const useLod = params.lodEnabled;
 
           // Snap grid origin to camera (floor, not round — consistent tiling)
@@ -681,6 +712,7 @@
           _aabbSize.set(ps, 1000, ps);
 
           let patchCount = 0;
+          let highCount = 0, midCount = 0, farCount = 0;
 
           for (let r = -cells; r <= cells; r++) {
             for (let c = -cells; c <= cells; c++) {
@@ -697,10 +729,15 @@
               // Stage 2: frustum cull
               if (!_frustum.intersectsBox(_aabb)) continue;
 
-              // LOD selection
-              const isLow = useLod && dist > lodDist;
-              const pool = isLow ? poolLow : poolHigh;
-              const geo = isLow ? geoLow : geoHigh;
+              // 3-tier LOD selection
+              let pool, geo;
+              if (!useLod || dist <= midDist) {
+                pool = poolHigh; geo = geoHigh; highCount++;
+              } else if (dist <= farDist) {
+                pool = poolMid; geo = geoMid; midCount++;
+              } else {
+                pool = poolFar; geo = geoFar; farCount++;
+              }
 
               const mesh = getMesh(pool, geo);
               mesh.geometry = geo;
@@ -713,6 +750,9 @@
           }
 
           lastPatchCount = patchCount;
+          lastHighCount = highCount;
+          lastMidCount = midCount;
+          lastFarCount = farCount;
           return patchCount;
         }
 
@@ -721,9 +761,10 @@
         function geoRebuildKey() {
           return [
             params.bladeHeight, params.bladeWidth, params.tipTaperStart,
-            Math.round(params.bladeYSegments), Math.round(params.lodLowSegments),
+            Math.round(params.bladeYSegments),
+            Math.round(params.lodMidSegments), Math.round(params.lodFarSegments),
             params.fieldSize, Math.round(params.grassCount),
-            Math.round(params.lodLowGrassCount),
+            Math.round(params.lodMidGrassCount), Math.round(params.lodFarGrassCount),
           ].join("|");
         }
 
@@ -1048,13 +1089,22 @@
         bssFolder.addBinding(params, "bssPower", { min: 0.5, max: 8, label: "Sharpness" });
         bssFolder.addBinding(params, "bssColor", { label: "Glow color" });
 
-        const lodFolder = pane.addFolder({ title: "LOD" });
+        const lodFolder = pane.addFolder({ title: "LOD (3-tier)" });
         lodFolder.addBinding(params, "lodEnabled", { label: "Enable LOD" });
-        lodFolder.addBinding(params, "lodDistance", { min: 20, max: 200, label: "LOD distance" });
-        lodFolder.addBinding(params, "lodMaxDistance", { min: 50, max: 500, label: "Max distance" });
-        lodFolder.addBinding(params, "lodLowSegments", { min: 2, max: 6, step: 1, label: "Low LOD segments" });
-        lodFolder.addBinding(params, "lodLowGrassCount", { min: 32, max: 4000, step: 32, label: "Low LOD blades/patch" });
-        lodFolder.addBinding(params, "lodDebug", { label: "Debug colors" });
+        lodFolder.addBinding(params, "lodDebug", { label: "Debug colors (G/Y/B)" });
+        const lodCountMonitor = { high: 0, mid: 0, far: 0 };
+        lodFolder.addBinding(lodCountMonitor, "high", { label: "HIGH patches", readonly: true });
+        lodFolder.addBinding(lodCountMonitor, "mid", { label: "MID patches", readonly: true });
+        lodFolder.addBinding(lodCountMonitor, "far", { label: "FAR patches", readonly: true });
+        const lodMidFolder = lodFolder.addFolder({ title: "MID tier" });
+        lodMidFolder.addBinding(params, "lodMidDistance", { min: 10, max: 200, label: "HIGH→MID distance" });
+        lodMidFolder.addBinding(params, "lodMidSegments", { min: 2, max: 8, step: 1, label: "Segments" });
+        lodMidFolder.addBinding(params, "lodMidGrassCount", { min: 32, max: 4000, step: 32, label: "Blades/patch" });
+        const lodFarFolder = lodFolder.addFolder({ title: "FAR tier (no crossed ribbons)" });
+        lodFarFolder.addBinding(params, "lodFarDistance", { min: 20, max: 400, label: "MID→FAR distance" });
+        lodFarFolder.addBinding(params, "lodFarSegments", { min: 1, max: 4, step: 1, label: "Segments" });
+        lodFarFolder.addBinding(params, "lodFarGrassCount", { min: 16, max: 2000, step: 16, label: "Blades/patch" });
+        lodFolder.addBinding(params, "lodMaxDistance", { min: 50, max: 600, label: "Max distance (cutoff)" });
 
         const specFolder = pane.addFolder({ title: "Specular" });
         specFolder.addBinding(params, "specular", { label: "Enable specular" });
@@ -1164,9 +1214,13 @@
           uBssIntensity.value = params.bssIntensity;
           uBssPower.value = params.bssPower;
           uLodEnabled.value = params.lodEnabled ? 1.0 : 0.0;
-          uLodDist.value = params.lodDistance;
+          uLodMidDist.value = params.lodMidDistance;
+          uLodFarDist.value = params.lodFarDistance;
           uLodMaxDist.value = params.lodMaxDistance;
           uLodDebug.value = params.lodDebug ? 1.0 : 0.0;
+          lodCountMonitor.high = lastHighCount;
+          lodCountMonitor.mid = lastMidCount;
+          lodCountMonitor.far = lastFarCount;
           ambient.intensity = params.ambientIntensity;
           ambient.color.set(params.ambientColor);
           updateSkyParams();
