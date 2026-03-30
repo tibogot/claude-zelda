@@ -1,3 +1,6 @@
+// Gemini Blades v6 withouthashnoise
+
+
 <!doctype html>
 <html lang="en">
   <head>
@@ -386,22 +389,6 @@
 
         const vUv = uv();
 
-        // Robust hash functions (no sin — stable across all GPU precision levels)
-        // hash42: 2D input → 4 decorrelated outputs (replaces 4 sin-hashes)
-        const hash42 = (p) => {
-          const p4 = fract(vec4(p.x, p.y, p.x, p.y).mul(vec4(443.897, 441.423, 437.195, 429.123)));
-          const d = dot(p4, p4.wzxy.add(19.19));
-          const r = p4.add(d);
-          return fract(r.xxyz.add(r.yzzw).mul(r.zywx));
-        };
-        // hash22: 2D input → 2 decorrelated outputs
-        const hash22 = (p) => {
-          const p3 = fract(vec3(p.x, p.y, p.x).mul(vec3(443.897, 441.423, 437.195)));
-          const d = dot(p3, p3.yzx.add(19.19));
-          const r = p3.add(d);
-          return fract(r.xx.add(r.yz).mul(r.zy));
-        };
-
         const rotY = (ang, v) => {
           const c = cos(ang),
             s = sin(ang);
@@ -466,28 +453,32 @@
           const paintedDensity = texture(grassDensityTex, terrainUV).x;
           const hasDensity = smoothstep(float(0.0), float(0.005), paintedDensity); // soft kill below 0.005
 
-          // Per-blade randomization: 4 decorrelated values from one hash call
-          const hv = hash42(bladeXZ);
-          const h0 = hv.x;  // yaw rotation
-          const h1 = hv.y;  // shade variation
-          const h2 = hv.z;  // height scale
-          const h3 = hv.w;  // lean angle
-
-          // Stochastic density culling: uses separate hash to decorrelate from blade properties
-          const densityHv = hash22(bladeXZ.add(vec2(853.1, 137.9)));
-          const densityHash = densityHv.x;
+          // Stochastic density culling: collapse blade to 0 height if its hash > density
+          const densityHash = fract(sin(dot(bladeXZ, vec2(853.1, 137.9))).mul(float(43758.5453)));
           const densityCull = smoothstep(uGrassDensity.mul(paintedDensity), uGrassDensity.mul(paintedDensity).add(float(0.01)), densityHash).oneMinus().mul(hasDensity);
+
+          const h0 = fract(
+            sin(dot(bladeXZ, vec2(127.1, 311.7))).mul(float(43758.5453)),
+          );
+          const h1 = fract(
+            sin(dot(bladeXZ, vec2(269.5, 183.3))).mul(float(43758.5453)),
+          );
+          const h2 = fract(
+            sin(dot(bladeXZ, vec2(419.2, 371.9))).mul(float(43758.5453)),
+          );
+          const h3 = fract(
+            sin(dot(bladeXZ, vec2(371.2, 113.7))).mul(float(43758.5453)),
+          );
           // --- Clump cell (Voronoi-style) ---
           // Divide world into cells; each cell has a random center = the clump center.
           // Blades near that center inherit the clump's personality.
           const cellP = bladeXZ.div(uClumpScale);
           const cellID = cellP.floor();
           const cellFrac = fract(cellP);
-          const cv = hash42(cellID);
-          const cA = cv.x;
-          const cB = cv.y;
-          const cC = cv.z;
-          const cD = cv.w;
+          const cA = fract(sin(dot(cellID, vec2(127.1, 311.7))).mul(float(43758.5453)));
+          const cB = fract(sin(dot(cellID, vec2(269.5, 183.3))).mul(float(43758.5453)));
+          const cC = fract(sin(dot(cellID, vec2(419.2, 371.9))).mul(float(43758.5453)));
+          const cD = fract(sin(dot(cellID, vec2(113.5, 271.9))).mul(float(43758.5453)));
           // How close this blade is to its clump center (1 = at center, 0 = at edge)
           const clumpDist = length(vec2(cA, cB).sub(cellFrac));
           // LOD: fade out clump influence at FAR only — saves 4 mix ops + smoothstep
@@ -509,9 +500,8 @@
 
           // Color variation hashes — computed here (vertex) to avoid fragment precision issues
           // LOD: skip color variation hashing at distance (2 fewer sin/dot/fract + mix ops)
-          const hv2 = hash22(bladeXZ.add(vec2(537.3, 197.1)));
-          const h4 = hv2.x;
-          const h5 = hv2.y;
+          const h4 = fract(sin(dot(bladeXZ, vec2(537.3, 197.1))).mul(float(43758.5453)));
+          const h5 = fract(sin(dot(bladeXZ, vec2(419.7, 631.2))).mul(float(43758.5453)));
           // Warm/cool tint target per blade — fade to neutral at distance
           const warmCol = vec3(0.18, 0.28, 0.02);
           const coolCol = vec3(0.02, 0.18, 0.08);
@@ -686,8 +676,10 @@
           const off = attribute("offset", "vec3");
           const bladeWorldC = modelWorldMatrix.mul(vec4(off.x, float(0), off.z, float(1))).xyz;
           const bladeXZ = vec2(bladeWorldC.x, bladeWorldC.z);
-          const fragHv = hash22(bladeXZ);
-          const randomShade = mix(float(0.75), float(1.0), fragHv.x);
+          const h1 = fract(
+            sin(dot(bladeXZ, vec2(269.5, 183.3))).mul(float(43758.5453)),
+          );
+          const randomShade = mix(float(0.75), float(1.0), h1);
           // AO: base of blade is darkened by neighboring blades, tip is fully lit.
           // LOD modulation: weaken AO at distance (FAR blades are tiny, strong AO looks wrong)
           const aoLod = uAoBase.mul(mix(float(0.5), float(1.0), smoothstep(float(0.5), float(0.0), vLodMorph)));
@@ -700,7 +692,7 @@
 
           // Saturation variation
           const lum = dot(hueCol, vec3(0.299, 0.587, 0.114));
-          const satFactor = float(1.0).sub(fragHv.y.mul(uCvSatSpread));
+          const satFactor = float(1.0).sub(h1.mul(uCvSatSpread));
           const satCol = mix(vec3(lum, lum, lum), hueCol, satFactor);
 
           // Dry blades from vDryBlend varying — stronger at root, fades at tip
