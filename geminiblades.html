@@ -191,6 +191,7 @@
           lodMidGrassCount: 150,   // blades per patch MID
           lodFarSegments: 1,       // segment count for FAR LOD (single quad)
           lodFarGrassCount: 80,    // blades per patch FAR (minimal)
+          lodFadeStart: 0.75,      // fraction of maxDistance where fade begins (0.75 = last 25%)
           lodDebug: false,         // tint HIGH=green, MID=yellow, FAR=blue
           // Camera / player
           cameraMode: "orbit",       // "orbit" or "follow"
@@ -243,8 +244,10 @@
         const uLodMidDist = uniform(params.lodMidDistance);
         const uLodFarDist = uniform(params.lodFarDistance);
         const uLodMaxDist = uniform(params.lodMaxDistance);
+        const uLodFadeStart = uniform(params.lodFadeStart);
         const uLodDebug = uniform(0);
         const vLodMorph = varying(float(0), 'vLM');
+        const vDistFade = varying(float(1), 'vDF');
 
         // High roughness + no env specular: thin DoubleSide blades otherwise pick up
         // sharp IBL streaks and floor Z-fight shimmer that read as “weird lines” up close.
@@ -293,8 +296,13 @@
           const morphToFar = smoothstep(uLodFarDist.mul(float(0.8)), uLodFarDist, bladeCamDist);
           const lodMorph = uLodEnabled.mul(mix(morphToMid.mul(float(0.5)), float(0.5).add(morphToFar.mul(float(0.5))), morphToFar));
           vLodMorph.assign(lodMorph);
-          // distFade: 1 = full size, 0 = collapsed (blade disappears at maxDist)
-          const distFade = mix(float(1), smoothstep(uLodMaxDist, uLodMaxDist.mul(float(0.8)), bladeCamDist), uLodEnabled);
+          // distFade: 1 = full size, 0 = collapsed (blade shrinks to ground at maxDist)
+          // Always active — prevents hard cutoff at field edge even without LOD
+          const fadeBegin = uLodMaxDist.mul(uLodFadeStart);
+          const distFadeLinear = smoothstep(uLodMaxDist, fadeBegin, bladeCamDist);
+          // Squared falloff — sharper near the edge, more natural
+          const distFade = distFadeLinear.mul(distFadeLinear);
+          vDistFade.assign(distFade);
 
           const h0 = fract(
             sin(dot(bladeXZ, vec2(127.1, 311.7))).mul(float(43758.5453)),
@@ -482,8 +490,8 @@
           // Final: apply variation only when enabled
           const variedCol = mix(baseCol, dryCol, uColorVar);
 
-          const finalCol = variedCol.mul(vec3(randomShade.mul(vClumpShade).mul(ao)));
-          // LOD debug: green = high detail, red = low detail
+          // Distance fade dims color near maxDistance — blades dissolve into ground
+          const finalCol = variedCol.mul(vec3(randomShade.mul(vClumpShade).mul(ao).mul(vDistFade)));
           // Debug: GREEN = HIGH, YELLOW = MID, BLUE = FAR
           const dbHigh = vec3(0.2, 1.0, 0.2);
           const dbMid = vec3(1.0, 1.0, 0.2);
@@ -686,6 +694,47 @@
         let lastPatchCount = 0;
         let lastHighCount = 0, lastMidCount = 0, lastFarCount = 0;
 
+        // Hysteresis: remember last LOD tier per patch cell to prevent flickering
+        const patchLodCache = new Map();
+        const LOD_HYSTERESIS = 2;  // deadband in world units
+
+        function selectLodTier(dist, cellKey, midDist, farDist) {
+          const hyst = LOD_HYSTERESIS;
+          const last = patchLodCache.get(cellKey);
+
+          let tier;
+          if (last === "high") {
+            // Stay HIGH until clearly past midDist + hysteresis
+            if (dist > midDist + hyst) {
+              tier = dist > farDist + hyst ? "far" : "mid";
+            } else {
+              tier = "high";
+            }
+          } else if (last === "mid") {
+            // Drop back to HIGH if clearly inside, promote to FAR if clearly past
+            if (dist <= midDist - hyst) {
+              tier = "high";
+            } else if (dist > farDist + hyst) {
+              tier = "far";
+            } else {
+              tier = "mid";
+            }
+          } else if (last === "far") {
+            // Only come back to MID if clearly inside farDist
+            if (dist <= farDist - hyst) {
+              tier = dist <= midDist - hyst ? "high" : "mid";
+            } else {
+              tier = "far";
+            }
+          } else {
+            // First time seeing this cell — no hysteresis
+            tier = dist <= midDist ? "high" : dist <= farDist ? "mid" : "far";
+          }
+
+          patchLodCache.set(cellKey, tier);
+          return tier;
+        }
+
         function updateGrassGrid() {
           // Hide all pooled meshes, reset indices
           for (const child of grassGroup.children) child.visible = false;
@@ -729,14 +778,20 @@
               // Stage 2: frustum cull
               if (!_frustum.intersectsBox(_aabb)) continue;
 
-              // 3-tier LOD selection
+              // 3-tier LOD selection with hysteresis
               let pool, geo;
-              if (!useLod || dist <= midDist) {
+              if (!useLod) {
                 pool = poolHigh; geo = geoHigh; highCount++;
-              } else if (dist <= farDist) {
-                pool = poolMid; geo = geoMid; midCount++;
               } else {
-                pool = poolFar; geo = geoFar; farCount++;
+                const cellKey = `${cellX},${cellZ}`;
+                const tier = selectLodTier(dist, cellKey, midDist, farDist);
+                if (tier === "high") {
+                  pool = poolHigh; geo = geoHigh; highCount++;
+                } else if (tier === "mid") {
+                  pool = poolMid; geo = geoMid; midCount++;
+                } else {
+                  pool = poolFar; geo = geoFar; farCount++;
+                }
               }
 
               const mesh = getMesh(pool, geo);
@@ -748,6 +803,9 @@
               patchCount++;
             }
           }
+
+          // Prevent unbounded cache growth in open-world movement
+          if (patchLodCache.size > 1200) patchLodCache.clear();
 
           lastPatchCount = patchCount;
           lastHighCount = highCount;
@@ -1091,6 +1149,7 @@
 
         const lodFolder = pane.addFolder({ title: "LOD (3-tier)" });
         lodFolder.addBinding(params, "lodEnabled", { label: "Enable LOD" });
+        lodFolder.addBinding(params, "lodFadeStart", { label: "Fade start", min: 0.1, max: 1.0, step: 0.05 });
         lodFolder.addBinding(params, "lodDebug", { label: "Debug colors (G/Y/B)" });
         const lodCountMonitor = { high: 0, mid: 0, far: 0 };
         lodFolder.addBinding(lodCountMonitor, "high", { label: "HIGH patches", readonly: true });
@@ -1217,6 +1276,7 @@
           uLodMidDist.value = params.lodMidDistance;
           uLodFarDist.value = params.lodFarDistance;
           uLodMaxDist.value = params.lodMaxDistance;
+          uLodFadeStart.value = params.lodFadeStart;
           uLodDebug.value = params.lodDebug ? 1.0 : 0.0;
           lodCountMonitor.high = lastHighCount;
           lodCountMonitor.mid = lastMidCount;
