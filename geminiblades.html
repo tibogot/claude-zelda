@@ -94,6 +94,7 @@
         texture,
         add,
         div,
+        reflect,
       } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
@@ -184,6 +185,25 @@
           envLighting: 0.15,         // environment map fill (colored ambient from sky)
           specular: false,            // enable waxy specular sheen
           specRoughness: 0.55,       // blade roughness when specular is on
+          // Specular V1 — sharp directional highlights (tip-only, distance-faded)
+          specV1Enabled: false,
+          specV1Intensity: 1.5,
+          specV1Color: "#ffffff",
+          specV1DirX: -1.0,
+          specV1DirY: 1.0,
+          specV1DirZ: 0.5,
+          specV1Power: 25.6,
+          // Specular V2 — noisy/textured highlights (Perlin-perturbed normal)
+          specV2Enabled: false,
+          specV2Intensity: 1.0,
+          specV2Color: "#ffffff",
+          specV2DirX: -1.0,
+          specV2DirY: 0.45,
+          specV2DirZ: 1.0,
+          specV2NoiseScale: 3.0,
+          specV2NoiseStr: 0.6,
+          specV2Power: 12.0,
+          specV2TipBias: 0.5,
           groundPlane: true,          // show ground plane under grass
           groundColor: "#1a2e0a",    // dark earthy green
           fieldSize: 10,    // size of ONE patch (world units)
@@ -266,6 +286,21 @@
         const uBssPower = uniform(params.bssPower);
         const uFrontScatter = uniform(params.frontScatter);
         const uRimSSS = uniform(params.rimSSS);
+        // Specular V1 — sharp highlights
+        const uSpecV1Enabled = uniform(0);
+        const uSpecV1Intensity = uniform(params.specV1Intensity);
+        const uSpecV1Col = uniform(new THREE.Color(params.specV1Color));
+        const uSpecV1Dir = uniform(new THREE.Vector3(params.specV1DirX, params.specV1DirY, params.specV1DirZ).normalize());
+        const uSpecV1Power = uniform(params.specV1Power);
+        // Specular V2 — noisy textured highlights
+        const uSpecV2Enabled = uniform(0);
+        const uSpecV2Intensity = uniform(params.specV2Intensity);
+        const uSpecV2Col = uniform(new THREE.Color(params.specV2Color));
+        const uSpecV2Dir = uniform(new THREE.Vector3(params.specV2DirX, params.specV2DirY, params.specV2DirZ).normalize());
+        const uSpecV2NoiseScale = uniform(params.specV2NoiseScale);
+        const uSpecV2NoiseStr = uniform(params.specV2NoiseStr);
+        const uSpecV2Power = uniform(params.specV2Power);
+        const uSpecV2TipBias = uniform(params.specV2TipBias);
         const uLodEnabled = uniform(0);
         const uLodMidDist = uniform(params.lodMidDistance);
         const uLodFarDist = uniform(params.lodFarDistance);
@@ -677,9 +712,46 @@
             float(0), float(1),
           );
 
-          // farMorph: 0 at HIGH+MID, 1 at FAR — reduce SSS for FAR
+          // farMorph: 0 at HIGH+MID, 1 at FAR — reduce SSS + spec for FAR
           const farFade = smoothstep(float(0.5), float(1.0), vLodMorph);
-          return transmitCol.mul(float(0.35)).mul(totalSSS).mul(uBssIntensity).mul(float(1).sub(farFade));
+          const sssResult = transmitCol.mul(float(0.35)).mul(totalSSS).mul(uBssIntensity).mul(float(1).sub(farFade));
+
+          // ── Specular V1: sharp directional highlights ──
+          // Distance fade (2-10 units), tip-only (upper 50%), LOD fade
+          const specDistFade = smoothstep(float(10), float(2), length(sub(cameraPosition, positionLocal)));
+          const lodSpecFade = float(1).sub(smoothstep(float(0.2), float(0.5), vLodMorph));
+          const tipFade1 = smoothstep(float(0.5), float(1.0), heightPct);
+
+          const reflV1 = reflect(uSpecV1Dir, N);
+          const specDot1 = pow(max(dot(viewDir, reflV1), float(0)), uSpecV1Power);
+          const spec1 = uSpecV1Col.mul(specDot1).mul(uSpecV1Intensity)
+            .mul(specDistFade).mul(tipFade1).mul(lodSpecFade).mul(float(3.0))
+            .mul(uSpecV1Enabled);
+
+          // ── Specular V2: noisy textured highlights (3-octave Perlin perturbation) ──
+          const worldPos = positionLocal;
+          const noiseP1 = mx_noise_float(vec3(worldPos.x.mul(uSpecV2NoiseScale), worldPos.y.mul(uSpecV2NoiseScale), worldPos.z.mul(uSpecV2NoiseScale)));
+          const noiseP2 = mx_noise_float(vec3(
+            worldPos.x.mul(uSpecV2NoiseScale).add(float(17.3)),
+            worldPos.y.mul(uSpecV2NoiseScale).add(float(31.7)),
+            worldPos.z.mul(uSpecV2NoiseScale).add(float(47.1)),
+          ));
+          const noiseP3 = mx_noise_float(vec3(
+            worldPos.x.mul(uSpecV2NoiseScale).mul(float(2.7)).add(float(59.3)),
+            worldPos.y.mul(uSpecV2NoiseScale).mul(float(2.7)).add(float(73.1)),
+            worldPos.z.mul(uSpecV2NoiseScale).mul(float(2.7)).add(float(89.7)),
+          ));
+          const noiseCombined = noiseP1.add(noiseP2).add(noiseP3).mul(float(0.333));
+          const perturbedN = normalize(mix(N, vec3(noiseCombined, float(1), noiseCombined), uSpecV2NoiseStr));
+
+          const reflV2 = reflect(uSpecV2Dir, perturbedN);
+          const specDot2 = pow(max(dot(viewDir, reflV2), float(0)), uSpecV2Power);
+          const tipFade2 = smoothstep(float(1).sub(uSpecV2TipBias), float(1), heightPct);
+          const spec2 = uSpecV2Col.mul(specDot2).mul(uSpecV2Intensity)
+            .mul(specDistFade).mul(tipFade2).mul(lodSpecFade)
+            .mul(uSpecV2Enabled);
+
+          return sssResult.add(spec1).add(spec2);
         })();
 
         // --- GEOMETRY ---
@@ -951,7 +1023,7 @@
               if (!_frustum.intersectsBox(_aabb)) continue;
 
               // 3-tier LOD selection with hysteresis
-              let pool, geo;
+              let pool, geo, isFar = false;
               if (!useLod) {
                 pool = poolHigh; geo = geoHigh; highCount++;
               } else {
@@ -962,7 +1034,7 @@
                 } else if (tier === "mid") {
                   pool = poolMid; geo = geoMid; midCount++;
                 } else {
-                  pool = poolFar; geo = geoFar; farCount++;
+                  pool = poolFar; geo = geoFar; farCount++; isFar = true;
                 }
               }
 
@@ -970,7 +1042,7 @@
               mesh.geometry = geo;
               mesh.visible = true;
               mesh.position.set(cellX, 0, cellZ);
-              mesh.receiveShadow = params.grassReceiveShadow;
+              mesh.receiveShadow = isFar ? false : params.grassReceiveShadow;
               mesh.castShadow = params.grassCastShadow;
               patchCount++;
             }
@@ -1462,8 +1534,27 @@
         lodFolder.addBinding(params, "lodMaxDistance", { min: 50, max: 600, label: "Max distance (cutoff)" });
 
         const specFolder = pane.addFolder({ title: "Specular" });
-        specFolder.addBinding(params, "specular", { label: "Enable specular" });
+        specFolder.addBinding(params, "specular", { label: "Enable env specular" });
         specFolder.addBinding(params, "specRoughness", { min: 0.1, max: 0.92, label: "Roughness" });
+        const specV1Folder = specFolder.addFolder({ title: "V1 — Sharp highlights" });
+        specV1Folder.addBinding(params, "specV1Enabled", { label: "Enable" });
+        specV1Folder.addBinding(params, "specV1Intensity", { min: 0, max: 5, step: 0.1, label: "Intensity" });
+        specV1Folder.addBinding(params, "specV1Power", { min: 1, max: 64, step: 0.1, label: "Sharpness" });
+        specV1Folder.addBinding(params, "specV1Color", { label: "Color" });
+        specV1Folder.addBinding(params, "specV1DirX", { min: -1, max: 1, step: 0.05, label: "Dir X" });
+        specV1Folder.addBinding(params, "specV1DirY", { min: -1, max: 1, step: 0.05, label: "Dir Y" });
+        specV1Folder.addBinding(params, "specV1DirZ", { min: -1, max: 1, step: 0.05, label: "Dir Z" });
+        const specV2Folder = specFolder.addFolder({ title: "V2 — Noisy/textured" });
+        specV2Folder.addBinding(params, "specV2Enabled", { label: "Enable" });
+        specV2Folder.addBinding(params, "specV2Intensity", { min: 0, max: 5, step: 0.1, label: "Intensity" });
+        specV2Folder.addBinding(params, "specV2Power", { min: 1, max: 64, step: 0.1, label: "Sharpness" });
+        specV2Folder.addBinding(params, "specV2Color", { label: "Color" });
+        specV2Folder.addBinding(params, "specV2NoiseScale", { min: 0.5, max: 10, step: 0.1, label: "Noise scale" });
+        specV2Folder.addBinding(params, "specV2NoiseStr", { min: 0, max: 1, step: 0.05, label: "Noise strength" });
+        specV2Folder.addBinding(params, "specV2TipBias", { min: 0, max: 1, step: 0.05, label: "Tip bias" });
+        specV2Folder.addBinding(params, "specV2DirX", { min: -1, max: 1, step: 0.05, label: "Dir X" });
+        specV2Folder.addBinding(params, "specV2DirY", { min: -1, max: 1, step: 0.05, label: "Dir Y" });
+        specV2Folder.addBinding(params, "specV2DirZ", { min: -1, max: 1, step: 0.05, label: "Dir Z" });
 
         const skyFolder = pane.addFolder({ title: "Sky" });
         skyFolder.addBinding(params, "skyTurbidity", {
@@ -1588,6 +1679,21 @@
           uBssPower.value = params.bssPower;
           uFrontScatter.value = params.frontScatter;
           uRimSSS.value = params.rimSSS;
+          // Specular V1
+          uSpecV1Enabled.value = params.specV1Enabled ? 1.0 : 0.0;
+          uSpecV1Intensity.value = params.specV1Intensity;
+          uSpecV1Col.value.set(params.specV1Color);
+          uSpecV1Dir.value.set(params.specV1DirX, params.specV1DirY, params.specV1DirZ).normalize();
+          uSpecV1Power.value = params.specV1Power;
+          // Specular V2
+          uSpecV2Enabled.value = params.specV2Enabled ? 1.0 : 0.0;
+          uSpecV2Intensity.value = params.specV2Intensity;
+          uSpecV2Col.value.set(params.specV2Color);
+          uSpecV2Dir.value.set(params.specV2DirX, params.specV2DirY, params.specV2DirZ).normalize();
+          uSpecV2NoiseScale.value = params.specV2NoiseScale;
+          uSpecV2NoiseStr.value = params.specV2NoiseStr;
+          uSpecV2Power.value = params.specV2Power;
+          uSpecV2TipBias.value = params.specV2TipBias;
           uGrassDensity.value = params.grassDensity;
           uLodEnabled.value = params.lodEnabled ? 1.0 : 0.0;
           uLodMidDist.value = params.lodMidDistance;
