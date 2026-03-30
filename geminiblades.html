@@ -154,9 +154,11 @@
           bladeColor: "#0e300e",
           tipColor: "#004d05",
           doubleSide: false,
-          bssIntensity: 1.2,    // backscatter strength
-          bssPower: 2.0,        // falloff sharpness (lower = wider glow)
+          bssIntensity: 1.2,    // overall SSS strength
+          bssPower: 2.0,        // backscatter sharpness (lower = wider glow)
           bssColor: "#2d7a2d",  // transmitted light color
+          frontScatter: 0.3,    // forward scattering strength
+          rimSSS: 0.25,         // rim/silhouette glow strength
           skyBlend: 0.8,       // blend normal toward (0,1,0) — fixes dark side
           cylindrical: 0.3,     // fan normals across blade width (cylinder illusion)
           roundCrossSection: 0, // legacy, keep for compat
@@ -176,9 +178,9 @@
           grassReceiveShadow: true,   // grass receives shadows from other objects
           grassCastShadow: false,     // grass casts shadows (expensive)
           shadowDebug: false,         // show torusknot to test shadow receiving
+          envLighting: 0.15,         // environment map fill (colored ambient from sky)
           specular: false,            // enable waxy specular sheen
           specRoughness: 0.55,       // blade roughness when specular is on
-          specEnvIntensity: 0.15,    // env map reflection when specular is on
           groundPlane: true,          // show ground plane under grass
           groundColor: "#1a2e0a",    // dark earthy green
           fieldSize: 10,    // size of ONE patch (world units)
@@ -247,6 +249,8 @@
         const uBssCol = uniform(new THREE.Color(params.bssColor));
         const uBssIntensity = uniform(params.bssIntensity);
         const uBssPower = uniform(params.bssPower);
+        const uFrontScatter = uniform(params.frontScatter);
+        const uRimSSS = uniform(params.rimSSS);
         const uLodEnabled = uniform(0);
         const uLodMidDist = uniform(params.lodMidDistance);
         const uLodFarDist = uniform(params.lodFarDistance);
@@ -517,15 +521,43 @@
           return mix(finalCol, debugTint, uLodDebug);
         })();
 
-        // SSS as emissiveNode — added AFTER PBR lighting, so the dark side
-        // gets the glow regardless of ambient factor (unlike colorNode which is albedo).
+        // SSS emissive — 3-component model from grass-sandbox:
+        // backscatter + frontscatter + rim, modulated by blade thickness.
         material.emissiveNode = Fn(() => {
-          const backScat = max(dot(negate(uSunDir), normalize(vCustomNormal)), float(0));
-          // LOD: fade out SSS at distance — invisible on FAR blades
-          const sss = clamp(pow(backScat, uBssPower).mul(uBssIntensity), float(0), float(1));
-          // farMorph: 0 at HIGH+MID, 1 at FAR — only kill SSS for FAR
+          const N = normalize(vCustomNormal);
+          const viewDir = normalize(sub(cameraPosition, positionLocal));
+
+          // Thickness: base is thick (opaque), tip is thin (translucent)
+          const heightPct = vUv.y;
+          const thickness = float(1).sub(heightPct).mul(float(0.7)).add(float(0.3));
+
+          // Warm shift for transmitted light (sun through blade = warmer)
+          const transmitCol = mix(
+            uBssCol,
+            uBssCol.mul(vec3(1.3, 1.1, 0.7)),
+            float(1).sub(thickness),
+          );
+
+          // 1) Backscatter: light coming through from behind the blade
+          const backScat = max(dot(negate(uSunDir), N), float(0));
+
+          // 2) Forward scatter: light hitting the front and transmitting
+          const frontScat = max(dot(uSunDir, N), float(0));
+
+          // 3) Rim: silhouette glow (blades edge-on to camera catch light)
+          const rim = float(1).sub(max(dot(N, viewDir), float(0)));
+
+          // Combine all three, each weighted by thickness
+          const totalSSS = clamp(
+            pow(backScat, uBssPower).mul(thickness)
+              .add(pow(frontScat, float(1.5)).mul(thickness).mul(uFrontScatter))
+              .add(pow(rim, float(3.0)).mul(thickness).mul(uRimSSS)),
+            float(0), float(1),
+          );
+
+          // farMorph: 0 at HIGH+MID, 1 at FAR — reduce SSS for FAR
           const farFade = smoothstep(float(0.5), float(1.0), vLodMorph);
-          return uBssCol.mul(sss).mul(float(1).sub(farFade));
+          return transmitCol.mul(float(0.35)).mul(totalSSS).mul(uBssIntensity).mul(float(1).sub(farFade));
         })();
 
         // --- GEOMETRY ---
@@ -1160,10 +1192,15 @@
         lightFolder.addBinding(params, "ambientColor", {
           label: "Ambient color",
         });
+        lightFolder.addBinding(params, "envLighting", {
+          min: 0, max: 0.5, step: 0.01, label: "Env fill (sky color)",
+        });
 
-        const bssFolder = pane.addFolder({ title: "Backscatter (SSS)" });
-        bssFolder.addBinding(params, "bssIntensity", { min: 0, max: 3, label: "Intensity" });
-        bssFolder.addBinding(params, "bssPower", { min: 0.5, max: 8, label: "Sharpness" });
+        const bssFolder = pane.addFolder({ title: "Subsurface Scattering" });
+        bssFolder.addBinding(params, "bssIntensity", { min: 0, max: 3, label: "Overall intensity" });
+        bssFolder.addBinding(params, "bssPower", { min: 0.5, max: 8, label: "Back sharpness" });
+        bssFolder.addBinding(params, "frontScatter", { min: 0, max: 1, step: 0.05, label: "Front scatter" });
+        bssFolder.addBinding(params, "rimSSS", { min: 0, max: 1, step: 0.05, label: "Rim glow" });
         bssFolder.addBinding(params, "bssColor", { label: "Glow color" });
 
         const lodFolder = pane.addFolder({ title: "LOD (3-tier)" });
@@ -1187,7 +1224,6 @@
         const specFolder = pane.addFolder({ title: "Specular" });
         specFolder.addBinding(params, "specular", { label: "Enable specular" });
         specFolder.addBinding(params, "specRoughness", { min: 0.1, max: 0.92, label: "Roughness" });
-        specFolder.addBinding(params, "specEnvIntensity", { min: 0, max: 1, label: "Env reflection" });
 
         const skyFolder = pane.addFolder({ title: "Sky" });
         skyFolder.addBinding(params, "skyTurbidity", {
@@ -1298,7 +1334,7 @@
           floor.visible = params.groundPlane;
           floorMat.color.set(params.groundColor);
           material.roughness = params.specular ? params.specRoughness : 0.92;
-          material.envMapIntensity = params.specular ? params.specEnvIntensity : 0;
+          material.envMapIntensity = params.envLighting + (params.specular ? 0.1 : 0);
           debugKnot.visible = params.shadowDebug;
           uViewThicken.value = params.viewThicken;
           uBladeCol.value.set(params.bladeColor);
@@ -1310,6 +1346,8 @@
           uBssCol.value.set(params.bssColor);
           uBssIntensity.value = params.bssIntensity;
           uBssPower.value = params.bssPower;
+          uFrontScatter.value = params.frontScatter;
+          uRimSSS.value = params.rimSSS;
           uLodEnabled.value = params.lodEnabled ? 1.0 : 0.0;
           uLodMidDist.value = params.lodMidDistance;
           uLodFarDist.value = params.lodFarDistance;
