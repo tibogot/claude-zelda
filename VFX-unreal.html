@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VFX Unreal V2 - Blade Slash</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #0a0a0d;
+        color: #d7ffd0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+          "Courier New", monospace;
+      }
+
+      #viewport {
+        position: absolute;
+        inset: 0;
+      }
+
+      #ui {
+        position: absolute;
+        left: 0;
+        top: 0;
+        z-index: 10;
+        width: 330px;
+        max-width: 85vw;
+        height: 100%;
+        overflow: auto;
+        padding: 10px;
+        box-sizing: border-box;
+        background: rgba(0, 0, 0, 0.35);
+        border-right: 1px solid rgba(255, 255, 255, 0.1);
+        backdrop-filter: blur(6px);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="ui"></div>
+    <div id="viewport"></div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.3/dist/tweakpane.min.js"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
+      import {
+        Fn,
+        uv,
+        vec2,
+        vec3,
+        vec4,
+        float,
+        sin,
+        cos,
+        fract,
+        floor,
+        dot,
+        abs,
+        min,
+        max,
+        smoothstep,
+        uniform,
+        color
+      } from "three/tsl";
+      import { pass } from "three/tsl";
+      import { bloom } from "three/addons/tsl/display/BloomNode.js";
+
+      let renderer, scene, camera, controls, mesh, pane, renderPipeline, bloomPass;
+
+      const params = {
+        autoRotate: true,
+        autoRotateSpeed: 0.8,
+        yScale: 0.34,
+        baseColor: "#0a1320",
+        slashColor: "#66dfff",
+        edgeColor: "#ffffff",
+        slashIntensity: 4.8,
+        alphaStrength: 1.0,
+        ringSoftness: 0.22,
+        ringCenter: 0.65,
+        ringWidth: 0.26,
+        radialNoiseScale: 11.5,
+        radialNoiseWarp: 1.8,
+        radialNoiseSpeed: 1.25,
+        streakFreq: 17.0,
+        streakStrength: 0.33,
+        edgeThreshold: 0.52,
+        edgeSharpness: 0.08,
+        bloomStrength: 1.05,
+        bloomRadius: 0.15,
+        bloomThreshold: 0.92
+      };
+
+      const u = {
+        time: uniform(0),
+        baseColor: uniform(color(params.baseColor)),
+        slashColor: uniform(color(params.slashColor)),
+        edgeColor: uniform(color(params.edgeColor)),
+        slashIntensity: uniform(params.slashIntensity),
+        alphaStrength: uniform(params.alphaStrength),
+        ringSoftness: uniform(params.ringSoftness),
+        ringCenter: uniform(params.ringCenter),
+        ringWidth: uniform(params.ringWidth),
+        radialNoiseScale: uniform(params.radialNoiseScale),
+        radialNoiseWarp: uniform(params.radialNoiseWarp),
+        radialNoiseSpeed: uniform(params.radialNoiseSpeed),
+        streakFreq: uniform(params.streakFreq),
+        streakStrength: uniform(params.streakStrength),
+        edgeThreshold: uniform(params.edgeThreshold),
+        edgeSharpness: uniform(params.edgeSharpness)
+      };
+
+      const CONFIG = {
+        height: 0.66,
+        sides: 25,
+        r5: { x: 0.5, z: 0.5 },
+        r4: { x: 1.0, z: 1.0 },
+        r3: { x: 1.5, z: 1.5 },
+        r2: { x: 1.0, z: 1.0 },
+        r1: { x: 0.5, z: 0.5 },
+        y2: 0.2,
+        y3: 0.5,
+        y4: 0.8
+      };
+
+      function createHardcodedGeometry() {
+        const { sides, height, r1, r2, r3, r4, r5, y2, y3, y4 } = CONFIG;
+        const positions = [];
+        const uvs = [];
+        const indices = [];
+        const ringVerts = sides + 1;
+
+        const levels = [
+          { y: -height * 0.5, rx: r1.x, rz: r1.z, v: 0.0 },
+          { y: -height * 0.5 + height * y2, rx: r2.x, rz: r2.z, v: y2 },
+          { y: -height * 0.5 + height * y3, rx: r3.x, rz: r3.z, v: y3 },
+          { y: -height * 0.5 + height * y4, rx: r4.x, rz: r4.z, v: y4 },
+          { y: height * 0.5, rx: r5.x, rz: r5.z, v: 1.0 }
+        ];
+
+        for (let i = 0; i < levels.length; i++) {
+          const { y, rx, rz, v } = levels[i];
+          // Duplicate the seam vertex (s=sides) so u=0 and u=1 are different vertices.
+          // This avoids shader interpolation crossing the UV wrap on one side.
+          for (let s = 0; s <= sides; s++) {
+            const t = s / sides;
+            const angle = t * Math.PI * 2;
+            positions.push(Math.cos(angle) * rx, y, Math.sin(angle) * rz);
+            uvs.push(t, v);
+          }
+        }
+
+        for (let l = 0; l < 4; l++) {
+          const startCurrent = l * ringVerts;
+          const startNext = (l + 1) * ringVerts;
+          for (let s = 0; s < sides; s++) {
+            const a = startCurrent + s;
+            const b = startCurrent + s + 1;
+            const c = startNext + s;
+            const d = startNext + s + 1;
+            indices.push(a, b, c, b, d, c);
+          }
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+        geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+        geo.setIndex(indices);
+        geo.computeVertexNormals();
+        return geo;
+      }
+
+      const hash21 = Fn(([p]) => {
+        return fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453));
+      });
+
+      const valueNoise2D = Fn(([p]) => {
+        const i = floor(p);
+        const f = fract(p);
+        const u2 = f.mul(f).mul(float(3).sub(f.mul(2)));
+
+        const a = hash21(i);
+        const b = hash21(i.add(vec2(1, 0)));
+        const c = hash21(i.add(vec2(0, 1)));
+        const d = hash21(i.add(vec2(1, 1)));
+
+        const ab = a.add(b.sub(a).mul(u2.x));
+        const cd = c.add(d.sub(c).mul(u2.x));
+        return ab.add(cd.sub(ab).mul(u2.y));
+      });
+
+      async function init() {
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0b0b0f);
+
+        camera = new THREE.PerspectiveCamera(42, window.innerWidth / window.innerHeight, 0.01, 100);
+        camera.position.set(3, 2, 3);
+
+        renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.getElementById("viewport").appendChild(renderer.domElement);
+        await renderer.init();
+
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.target.set(0, 0, 0);
+
+        const slashMaterial = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          depthWrite: false,
+          side: THREE.DoubleSide
+        });
+
+        slashMaterial.outputNode = Fn(() => {
+          const uvNode = uv();
+          const centered = uvNode.sub(0.5).toVar();
+          const radial = centered.length();
+          const angle = centered.y.atan(centered.x);
+          const angle01 = angle.add(Math.PI).div(Math.PI * 2);
+
+          const t = u.time.mul(u.radialNoiseSpeed);
+          // IMPORTANT: build noise coords from angle+radius instead of uv.x
+          // so we don't get a visible seam where geometry wraps u≈1 back to u=0.
+          const dir = vec2(cos(angle), sin(angle));
+          const polar = dir.mul(radial);
+          const nUv = polar
+            .mul(vec2(u.radialNoiseScale, u.radialNoiseScale))
+            .add(vec2(t, t.negate()))
+            .toVar();
+
+          const warpX = valueNoise2D(nUv).sub(0.5).mul(u.radialNoiseWarp);
+          const warpY = valueNoise2D(nUv.add(vec2(17.3, 9.1))).sub(0.5).mul(u.radialNoiseWarp);
+          const warped = nUv.add(vec2(warpX, warpY));
+          const n = valueNoise2D(warped);
+
+          const noisyRadius = radial.add(n.sub(0.5).mul(0.12));
+          const ringDelta = abs(noisyRadius.sub(u.ringCenter));
+          const ringMask = smoothstep(u.ringWidth, u.ringWidth.sub(u.ringSoftness.mul(0.5)), ringDelta);
+
+          const streak = sin(angle01.mul(u.streakFreq).add(t.mul(2.4))).mul(0.5).add(0.5);
+          const streakMask = streak.mul(u.streakStrength).add(float(1).sub(u.streakStrength));
+
+          const core = ringMask.mul(streakMask).toVar();
+          const edge = smoothstep(u.edgeThreshold, u.edgeThreshold.add(u.edgeSharpness), core);
+
+          const base = u.baseColor.mul(0.12);
+          const slash = u.slashColor.mul(core.mul(u.slashIntensity));
+          const edgeGlow = u.edgeColor.mul(edge.mul(u.slashIntensity).mul(0.8));
+          const outColor = base.add(slash).add(edgeGlow);
+
+          const alpha = max(core, edge.mul(0.7)).mul(u.alphaStrength).clamp(0, 1);
+          return vec4(outColor, alpha);
+        })();
+
+        mesh = new THREE.Mesh(createHardcodedGeometry(), slashMaterial);
+        mesh.scale.y = params.yScale;
+        scene.add(mesh);
+
+        const key = new THREE.DirectionalLight(0xffffff, 0.8);
+        key.position.set(4, 7, 4);
+        const fill = new THREE.AmbientLight(0xffffff, 0.2);
+        scene.add(key, fill);
+
+        renderPipeline = new THREE.RenderPipeline(renderer);
+        const scenePass = pass(scene, camera);
+        const sceneColor = scenePass.getTextureNode ? scenePass.getTextureNode("output") : scenePass;
+        bloomPass = bloom(sceneColor, params.bloomStrength, params.bloomRadius, params.bloomThreshold);
+        renderPipeline.outputNode = sceneColor.add(bloomPass);
+        await renderer.compileAsync(scene, camera);
+
+        buildUI();
+        onParamsChanged();
+
+        const timer = new THREE.Timer();
+        function animate() {
+          requestAnimationFrame(animate);
+          timer.update();
+          const dt = timer.getDelta();
+          u.time.value += dt;
+          if (params.autoRotate && mesh) mesh.rotation.y += dt * params.autoRotateSpeed;
+          controls.update();
+          renderPipeline.render();
+        }
+        animate();
+
+        window.addEventListener("resize", onResize);
+      }
+
+      function onParamsChanged() {
+        u.baseColor.value.set(params.baseColor);
+        u.slashColor.value.set(params.slashColor);
+        u.edgeColor.value.set(params.edgeColor);
+        u.slashIntensity.value = params.slashIntensity;
+        u.alphaStrength.value = params.alphaStrength;
+        u.ringSoftness.value = params.ringSoftness;
+        u.ringCenter.value = params.ringCenter;
+        u.ringWidth.value = params.ringWidth;
+        u.radialNoiseScale.value = params.radialNoiseScale;
+        u.radialNoiseWarp.value = params.radialNoiseWarp;
+        u.radialNoiseSpeed.value = params.radialNoiseSpeed;
+        u.streakFreq.value = params.streakFreq;
+        u.streakStrength.value = params.streakStrength;
+        u.edgeThreshold.value = params.edgeThreshold;
+        u.edgeSharpness.value = params.edgeSharpness;
+
+        if (mesh) mesh.scale.y = params.yScale;
+        if (bloomPass) {
+          bloomPass.strength.value = params.bloomStrength;
+          bloomPass.radius.value = params.bloomRadius;
+          bloomPass.threshold.value = params.bloomThreshold;
+        }
+      }
+
+      function buildUI() {
+        pane = new Pane({ container: document.getElementById("ui"), title: "VFX Unreal V2 - Blade Slash" });
+
+        const fAnim = pane.addFolder({ title: "Animation" });
+        fAnim.addBinding(params, "autoRotate").on("change", onParamsChanged);
+        fAnim.addBinding(params, "autoRotateSpeed", { min: -4, max: 4, step: 0.01 }).on("change", onParamsChanged);
+
+        const fMesh = pane.addFolder({ title: "Mesh" });
+        fMesh.addBinding(params, "yScale", { min: 0.05, max: 1.2, step: 0.01 }).on("change", onParamsChanged);
+
+        const fColor = pane.addFolder({ title: "Color" });
+        fColor.addBinding(params, "baseColor").on("change", onParamsChanged);
+        fColor.addBinding(params, "slashColor").on("change", onParamsChanged);
+        fColor.addBinding(params, "edgeColor").on("change", onParamsChanged);
+        fColor.addBinding(params, "slashIntensity", { min: 0, max: 12, step: 0.01 }).on("change", onParamsChanged);
+        fColor.addBinding(params, "alphaStrength", { min: 0, max: 1.5, step: 0.01 }).on("change", onParamsChanged);
+
+        const fMask = pane.addFolder({ title: "Blade Mask" });
+        fMask.addBinding(params, "ringCenter", { min: 0.1, max: 1.1, step: 0.001 }).on("change", onParamsChanged);
+        fMask.addBinding(params, "ringWidth", { min: 0.02, max: 0.7, step: 0.001 }).on("change", onParamsChanged);
+        fMask.addBinding(params, "ringSoftness", { min: 0.01, max: 0.5, step: 0.001 }).on("change", onParamsChanged);
+        fMask.addBinding(params, "radialNoiseScale", { min: 1, max: 40, step: 0.1 }).on("change", onParamsChanged);
+        fMask.addBinding(params, "radialNoiseWarp", { min: 0, max: 5, step: 0.01 }).on("change", onParamsChanged);
+        fMask.addBinding(params, "radialNoiseSpeed", { min: -5, max: 5, step: 0.01 }).on("change", onParamsChanged);
+        fMask.addBinding(params, "streakFreq", { min: 1, max: 64, step: 0.1 }).on("change", onParamsChanged);
+        fMask.addBinding(params, "streakStrength", { min: 0, max: 1, step: 0.01 }).on("change", onParamsChanged);
+        fMask.addBinding(params, "edgeThreshold", { min: 0, max: 1, step: 0.001 }).on("change", onParamsChanged);
+        fMask.addBinding(params, "edgeSharpness", { min: 0.001, max: 0.35, step: 0.001 }).on("change", onParamsChanged);
+
+        const fPost = pane.addFolder({ title: "Bloom" });
+        fPost.addBinding(params, "bloomStrength", { min: 0, max: 8, step: 0.01 }).on("change", onParamsChanged);
+        fPost.addBinding(params, "bloomRadius", { min: 0, max: 1, step: 0.01 }).on("change", onParamsChanged);
+        fPost.addBinding(params, "bloomThreshold", { min: 0, max: 2, step: 0.01 }).on("change", onParamsChanged);
+      }
+
+      function onResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      }
+
+      init().catch((err) => {
+        console.error(err);
+      });
+    </script>
+  </body>
+</html>
