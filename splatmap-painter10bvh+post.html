@@ -384,6 +384,12 @@
       import { createFoliageSlot } from "./foliage-painter.js";
       import { createFleurSystem, FLEUR_PRESETS } from "./fleur-painter.js";
       import { createAmbientFXSystem } from "./ambientfx-painter.js";
+      import {
+        createBladeGeometry as geminiBladeGeo,
+        createFieldInstancedGeometry as geminiFieldGeo,
+        createGrassMaterial as geminiGrassMat,
+        setupGrassPatches as geminiSetupPatches,
+      } from "./grass-gemini.js";
       import { MeshBVH } from "three-mesh-bvh";
       import { Pane } from "tweakpane";
       import Stats from "stats-gl";
@@ -969,6 +975,10 @@
       let cliffHeightTex = null;
       let cliffGrassPatchSystem = null;
       let cliffGrassEraseMode = false;
+      let geminiGrassPatchSystem = null;
+      let geminiGrassUniforms = null;
+      let geminiGrassEraseMode = false;
+      let geminiGrassGroup = null;
 
       // ─── DECAL STATE ──────────────────────────
       let decalObjects = [];    // placed decal meshes
@@ -3579,6 +3589,209 @@
             maxDistance: grassParams.maxDistance,
           },
         );
+
+        // ── GEMINI GRASS PATCH SYSTEM ────────────────────────────────────
+        // New grass renderer from geminiblades.html — arc bending, Voronoi
+        // clumping, crossed ribbons, SSS, dual specular.
+        // Shares the same grassDensityTex + heightTex as the old grass.
+        {
+          const gp = {
+            bladeHeight: 0.7,
+            bladeWidth: 0.08,
+            tipTaperStart: 0.7,
+            bladeYSegments: 7,
+            grassCount: 1516,
+            fieldSize: 10,
+            grassDensity: 1.0,
+            windSpeed: 0.2,
+            windStrength: 1.4,
+            maxAngle: 1.4,
+            naturalLean: 0.9,
+            windAngle: 0,
+            windWaveScale: 0.12,
+            windGust: 0.3,
+            bendFocus: 0.5,
+            stiffness: 0.0,
+            clumpScale: 1.5,
+            clumpStrength: 0.7,
+            crossed: true,
+            bladeColor: "#0e300e",
+            tipColor: "#004d05",
+            skyBlend: 0.8,
+            cylindrical: 0.3,
+            viewThicken: 0.45,
+            aoBase: 0.25,
+            aoPower: 2.0,
+            colorVariation: false,
+            cvHueSpread: 0.08,
+            cvSatSpread: 0.3,
+            cvDryAmount: 0.15,
+            cvDryColor: "#8a7a3a",
+            bssIntensity: 1.2,
+            bssPower: 2.0,
+            bssColor: "#2d7a2d",
+            frontScatter: 0.3,
+            rimSSS: 0.25,
+            specV1Enabled: false,
+            specV1Intensity: 1.5,
+            specV1Color: "#ffffff",
+            specV1DirX: -1.0,
+            specV1DirY: 1.0,
+            specV1DirZ: 0.5,
+            specV1Power: 25.6,
+            specV2Enabled: false,
+            specV2Intensity: 1.0,
+            specV2Color: "#ffffff",
+            specV2DirX: -1.0,
+            specV2DirY: 0.45,
+            specV2DirZ: 1.0,
+            specV2NoiseScale: 3.0,
+            specV2NoiseStr: 0.6,
+            specV2Power: 12.0,
+            specV2TipBias: 0.5,
+            lodEnabled: true,
+            lodMidDistance: 28,
+            lodFarDistance: 55,
+            lodMaxDistance: 80,
+            lodFadeStart: 0.75,
+            lodMidSegments: 3,
+            lodMidGrassCount: 150,
+            lodFarSegments: 1,
+            lodFarGrassCount: 80,
+            lodDebug: false,
+            interactionRadius: 1.5,
+            interactionStrength: 0.7,
+            grassReceiveShadow: true,
+          };
+          // Store params on window-level variable for GUI access
+          window._geminiGrassParams = gp;
+
+          function srgbLin(hex) {
+            return new THREE.Color(hex).convertSRGBToLinear();
+          }
+          const sunDir = sunDirectionFromAngles(
+            PARAMS.light.sunAzimuth,
+            PARAMS.light.sunElevation,
+          );
+
+          const gu = {
+            uTerrainSize:          uniform(TERRAIN_SIZE),
+            uSunDir:               uniform(sunDir),
+            uPlayerPos:            uniform(new THREE.Vector3(0, 0, 0)),
+            uBladeHeight:          uniform(gp.bladeHeight),
+            uGrassDensity:         uniform(gp.grassDensity),
+            uWindSpeed:            uniform(gp.windSpeed),
+            uWindStrength:         uniform(gp.windStrength),
+            uMaxAngle:             uniform(gp.maxAngle),
+            uNaturalLean:          uniform(gp.naturalLean),
+            uWindDirX:             uniform(Math.cos(gp.windAngle)),
+            uWindDirZ:             uniform(Math.sin(gp.windAngle)),
+            uWindWaveScale:        uniform(gp.windWaveScale),
+            uWindGust:             uniform(gp.windGust),
+            uBendFocus:            uniform(gp.bendFocus),
+            uStiffness:            uniform(gp.stiffness),
+            uClumpScale:           uniform(gp.clumpScale),
+            uClumpStrength:        uniform(gp.clumpStrength),
+            uCrossed:              uniform(gp.crossed ? 1 : 0),
+            uBladeCol:             uniform(srgbLin(gp.bladeColor)),
+            uTipCol:               uniform(srgbLin(gp.tipColor)),
+            uSkyBlend:             uniform(gp.skyBlend),
+            uCylindrical:          uniform(gp.cylindrical),
+            uViewThicken:          uniform(gp.viewThicken),
+            uAoBase:               uniform(gp.aoBase),
+            uAoPower:              uniform(gp.aoPower),
+            uColorVar:             uniform(gp.colorVariation ? 1 : 0),
+            uCvHueSpread:          uniform(gp.cvHueSpread),
+            uCvSatSpread:          uniform(gp.cvSatSpread),
+            uCvDryAmount:          uniform(gp.cvDryAmount),
+            uCvDryCol:             uniform(srgbLin(gp.cvDryColor)),
+            uBssCol:               uniform(srgbLin(gp.bssColor)),
+            uBssIntensity:         uniform(gp.bssIntensity),
+            uBssPower:             uniform(gp.bssPower),
+            uFrontScatter:         uniform(gp.frontScatter),
+            uRimSSS:               uniform(gp.rimSSS),
+            uSpecV1Enabled:        uniform(gp.specV1Enabled ? 1 : 0),
+            uSpecV1Intensity:      uniform(gp.specV1Intensity),
+            uSpecV1Col:            uniform(srgbLin(gp.specV1Color)),
+            uSpecV1Dir:            uniform(new THREE.Vector3(gp.specV1DirX, gp.specV1DirY, gp.specV1DirZ).normalize()),
+            uSpecV1Power:          uniform(gp.specV1Power),
+            uSpecV2Enabled:        uniform(gp.specV2Enabled ? 1 : 0),
+            uSpecV2Intensity:      uniform(gp.specV2Intensity),
+            uSpecV2Col:            uniform(srgbLin(gp.specV2Color)),
+            uSpecV2Dir:            uniform(new THREE.Vector3(gp.specV2DirX, gp.specV2DirY, gp.specV2DirZ).normalize()),
+            uSpecV2NoiseScale:     uniform(gp.specV2NoiseScale),
+            uSpecV2NoiseStr:       uniform(gp.specV2NoiseStr),
+            uSpecV2Power:          uniform(gp.specV2Power),
+            uSpecV2TipBias:        uniform(gp.specV2TipBias),
+            uLodEnabled:           uniform(gp.lodEnabled ? 1 : 0),
+            uLodMidDist:           uniform(gp.lodMidDistance),
+            uLodFarDist:           uniform(gp.lodFarDistance),
+            uLodMaxDist:           uniform(gp.lodMaxDistance),
+            uLodFadeStart:         uniform(gp.lodFadeStart),
+            uLodDebug:             uniform(gp.lodDebug ? 1 : 0),
+            uInteractionEnabled:   uniform(1),
+            uInteractionRadius:    uniform(gp.interactionRadius),
+            uInteractionStrength:  uniform(gp.interactionStrength),
+          };
+          geminiGrassUniforms = gu;
+
+          const geminiCtx = {
+            ...gu,
+            heightTex,
+            grassDensityTex,
+            terrainRes: HTEX_RES,
+          };
+
+          const geminiMat = geminiGrassMat(geminiCtx);
+
+          // Build 3-tier geometries
+          function buildGeminiGeos() {
+            const highBase = geminiBladeGeo(gp.bladeHeight, gp.bladeWidth, Math.round(gp.bladeYSegments), gp.tipTaperStart);
+            const geoHigh = geminiFieldGeo(highBase, gp.fieldSize, Math.round(gp.grassCount), gp.bladeHeight, true);
+            highBase.dispose();
+
+            const midBase = geminiBladeGeo(gp.bladeHeight, gp.bladeWidth, Math.round(gp.lodMidSegments), gp.tipTaperStart);
+            const geoMid = geminiFieldGeo(midBase, gp.fieldSize, Math.round(gp.lodMidGrassCount), gp.bladeHeight, true);
+            midBase.dispose();
+
+            const farBase = geminiBladeGeo(gp.bladeHeight, gp.bladeWidth, Math.round(gp.lodFarSegments), gp.tipTaperStart);
+            const geoFar = geminiFieldGeo(farBase, gp.fieldSize, Math.round(gp.lodFarGrassCount), gp.bladeHeight, false);
+            farBase.dispose();
+
+            return { geoHigh, geoMid, geoFar };
+          }
+          let geminiGeos = buildGeminiGeos();
+
+          geminiGrassGroup = new THREE.Group();
+          geminiGrassGroup.visible = false; // hidden until mode selected or toggled
+          scene.add(geminiGrassGroup);
+
+          geminiGrassPatchSystem = geminiSetupPatches(
+            scene,
+            camera,
+            geminiGrassGroup,
+            { ...geminiGeos, material: geminiMat },
+            {
+              patchSize: gp.fieldSize,
+              lodMidDistance: gp.lodMidDistance,
+              lodFarDistance: gp.lodFarDistance,
+              maxDistance: gp.lodMaxDistance,
+              lodHysteresis: 2,
+              lodEnabled: gp.lodEnabled,
+              grassReceiveShadow: gp.grassReceiveShadow,
+            },
+          );
+
+          // Expose rebuild function for GUI
+          window._geminiRebuildGeos = () => {
+            const oldGeos = geminiGeos;
+            geminiGeos = buildGeminiGeos();
+            geminiGrassPatchSystem.updateGeometries(geminiGeos);
+            if (oldGeos.geoHigh) oldGeos.geoHigh.dispose();
+            if (oldGeos.geoMid) oldGeos.geoMid.dispose();
+            if (oldGeos.geoFar) oldGeos.geoFar.dispose();
+          };
+        }
 
         // ── COLOR HELPER — hex sRGB → linear THREE.Color (matches testtsushimaplayer2) ──
         function toLinear(hex) {
@@ -6264,6 +6477,7 @@
             "Flowers [B]": "flowers",
             "Fleurs [M]":  "fleurs",
             "Ambient FX [X]": "ambientfx",
+            "Gemini Grass": "geminigrass",
             "River [V]": "river",
             "Waterfall [H]": "waterfall",
             "Play [F]": "play",
