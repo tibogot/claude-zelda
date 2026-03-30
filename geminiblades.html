@@ -303,6 +303,8 @@
           const morphToFar = smoothstep(uLodFarDist.mul(float(0.8)), uLodFarDist, bladeCamDist);
           const lodMorph = uLodEnabled.mul(mix(morphToMid.mul(float(0.5)), float(0.5).add(morphToFar.mul(float(0.5))), morphToFar));
           vLodMorph.assign(lodMorph);
+          // farMorph: 0 for HIGH+MID, ramps to 1 only for FAR — used for aggressive shader simplification
+          const farMorph = smoothstep(float(0.5), float(1.0), lodMorph);
           // distFade: 1 = full size, 0 = collapsed (blade shrinks to ground at maxDist)
           // Always active — prevents hard cutoff at field edge even without LOD
           const fadeBegin = uLodMaxDist.mul(uLodFadeStart);
@@ -335,7 +337,8 @@
           const cD = fract(sin(dot(cellID, vec2(113.5, 271.9))).mul(float(43758.5453)));
           // How close this blade is to its clump center (1 = at center, 0 = at edge)
           const clumpDist = length(vec2(cA, cB).sub(cellFrac));
-          const clumpInfluence = smoothstep(float(0.75), float(0.05), clumpDist).mul(uClumpStrength);
+          // LOD: fade out clump influence at FAR only — saves 4 mix ops + smoothstep
+          const clumpInfluence = smoothstep(float(0.75), float(0.05), clumpDist).mul(uClumpStrength).mul(float(1).sub(farMorph));
 
           // Blend individual random values toward clump values
           const randomYaw = mix(h0.mul(PI.mul(2)), cC.mul(PI.mul(2)), clumpInfluence);
@@ -352,15 +355,17 @@
           vClumpShade.assign(mix(float(1.0), mix(float(0.82), float(1.18), cB), clumpInfluence));
 
           // Color variation hashes — computed here (vertex) to avoid fragment precision issues
+          // LOD: skip color variation hashing at distance (2 fewer sin/dot/fract + mix ops)
           const h4 = fract(sin(dot(bladeXZ, vec2(537.3, 197.1))).mul(float(43758.5453)));
           const h5 = fract(sin(dot(bladeXZ, vec2(419.7, 631.2))).mul(float(43758.5453)));
-          // Warm/cool tint target per blade
+          // Warm/cool tint target per blade — fade to neutral at distance
           const warmCol = vec3(0.18, 0.28, 0.02);
           const coolCol = vec3(0.02, 0.18, 0.08);
-          vColorTint.assign(mix(warmCol, coolCol, h4));
-          // Dry blade factor: blades with h5 < dryAmount become dry
+          const tintTarget = mix(warmCol, coolCol, h4);
+          vColorTint.assign(mix(tintTarget, vec3(1, 1, 1), farMorph));
+          // Dry blade factor: blades with h5 < dryAmount become dry — fade out at FAR
           const isDry = smoothstep(uCvDryAmount, float(0.0), h5);
-          vDryBlend.assign(isDry);
+          vDryBlend.assign(isDry.mul(float(1).sub(farMorph)));
 
           const baseStiffness = smoothstep(0.0, uStiffness, vUv.y);
           const curveWeight = vUv.y.pow(uBendFocus).mul(baseStiffness);
@@ -426,7 +431,8 @@
           const gvn = normalize(vec3(float(0), negate(T.z), T.y));
           // Cylindrical normals: fan left/right across blade width so it
           // catches light from multiple directions like a rounded surface.
-          const cylSpread = uCylindrical.mul(float(Math.PI * 0.5));
+          // LOD: collapse spread to 0 at FAR only — saves 2 rotY + normalize
+          const cylSpread = uCylindrical.mul(float(Math.PI * 0.5)).mul(float(1).sub(farMorph));
           const nL = normalize(rotY(cylSpread, gvn));
           const nR = normalize(rotY(negate(cylSpread), gvn));
           const fanN = normalize(mix(nL, nR, vUv.x));
@@ -445,10 +451,12 @@
             sub(1, faceZ),
           ).mul(smoothstep(float(0.08), float(0.35), lenXZ));
           const yawMax = float(0.55);
+          // LOD: fade out view-thickening at FAR only (saves matrix mul + atan + smoothsteps)
           const deltaYaw = uViewThicken
             .mul(edgeOn)
             .mul(yawMax)
-            .mul(atan(viewL.x, viewL.z));
+            .mul(atan(viewL.x, viewL.z))
+            .mul(float(1).sub(farMorph));
 
           const pArc = vec3(
             arcX.add(positionLocal.x),
@@ -513,8 +521,11 @@
         // gets the glow regardless of ambient factor (unlike colorNode which is albedo).
         material.emissiveNode = Fn(() => {
           const backScat = max(dot(negate(uSunDir), normalize(vCustomNormal)), float(0));
+          // LOD: fade out SSS at distance — invisible on FAR blades
           const sss = clamp(pow(backScat, uBssPower).mul(uBssIntensity), float(0), float(1));
-          return uBssCol.mul(sss);
+          // farMorph: 0 at HIGH+MID, 1 at FAR — only kill SSS for FAR
+          const farFade = smoothstep(float(0.5), float(1.0), vLodMorph);
+          return uBssCol.mul(sss).mul(float(1).sub(farFade));
         })();
 
         // --- GEOMETRY ---
