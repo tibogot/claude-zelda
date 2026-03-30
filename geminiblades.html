@@ -404,6 +404,17 @@
           const terrainUV = add(div(bladeXZ, uTerrainSize), vec2(0.5));
           const terrainH = texture(heightTex, terrainUV).x;
 
+          // Compute per-blade terrain normal via central differences
+          // Sample 4 neighbors offset by 1 texel in heightmap space
+          const texelSize = float(1).div(float(params.terrainRes));
+          const hL = texture(heightTex, terrainUV.add(vec2(negate(texelSize), float(0)))).x;
+          const hR = texture(heightTex, terrainUV.add(vec2(texelSize, float(0)))).x;
+          const hD = texture(heightTex, terrainUV.add(vec2(float(0), negate(texelSize)))).x;
+          const hU = texture(heightTex, terrainUV.add(vec2(float(0), texelSize))).x;
+          // World-space step between neighboring texels
+          const worldStep = uTerrainSize.div(float(params.terrainRes));
+          const terrainNormal = normalize(vec3(hL.sub(hR), worldStep.mul(float(2)), hD.sub(hU)));
+
           // LOD: per-blade distance to camera for morph + fade
           const camXZ = vec2(cameraPosition.x, cameraPosition.z);
           const bladeCamDist = length(bladeXZ.sub(camXZ));
@@ -632,7 +643,7 @@
           // from all sides — this is what eliminates the dark-side problem.
           // LOD: push normals more toward up at distance for simpler lighting
           const lodSkyBlend = mix(uSkyBlend, max(uSkyBlend, float(0.7)), lodMorph);
-          const nFinal = normalize(mix(nRotated, uGroundNormal, lodSkyBlend));
+          const nFinal = normalize(mix(nRotated, terrainNormal, lodSkyBlend));
           normalLocal.assign(nFinal);
           vCustomNormal.assign(nFinal);
 
