@@ -149,6 +149,7 @@
           aoPower: 2.0,       // curve — higher = AO more concentrated near base
           windAngle: 0,       // degrees — direction the wind travels (0 = +X)
           windWaveScale: 0.12, // spatial frequency: larger = tighter waves
+          windGust: 0.3,       // gust amplitude (0 = no gusts)
           bendFocus: 0.5, // The 'Curve' control
           stiffness: 0.0, // How much of the base is 'unbendable'
           bladeHeight: 1.5,
@@ -265,6 +266,7 @@
         const uWindDirX = uniform(1.0);
         const uWindDirZ = uniform(0.0);
         const uWindWaveScale = uniform(params.windWaveScale);
+        const uWindGust = uniform(params.windGust);
         const uBendFocus = uniform(params.bendFocus);
         const uStiffness = uniform(params.stiffness);
         const uBladeCol = uniform(new THREE.Color(params.bladeColor));
@@ -517,7 +519,16 @@
             bladeWorld.z.mul(uWindWaveScale).add(uWindDirZ.mul(tBase)),
           );
           const wave = mx_noise_float(waveUV);
-          const windBase = wave.add(float(0.4));
+          // Gust layer: coarse, low-frequency noise that triggers intermittent bursts
+          // Added into windBase BEFORE room scaling — so gusts can never exceed maxAngle
+          const gustUV = vec3(
+            bladeWorld.x.mul(uWindWaveScale).mul(float(0.25)).add(uWindDirX.mul(tBase).mul(float(0.3))),
+            float(0),
+            bladeWorld.z.mul(uWindWaveScale).mul(float(0.25)).add(uWindDirZ.mul(tBase).mul(float(0.3))),
+          );
+          const gustRaw = mx_noise_float(gustUV);
+          const gustStr = smoothstep(float(0.5), float(0.9), gustRaw).mul(uWindGust);
+          const windBase = wave.add(float(0.4)).add(gustStr);
           const windMicro = mx_noise_float(tBlade.mul(float(4.0))).mul(float(0.15));
           // LOD: kill per-blade micro-turbulence at distance (saves visual noise)
           const windMicroLod = windMicro.mul(float(1).sub(lodMorph));
@@ -667,7 +678,9 @@
           );
           const randomShade = mix(float(0.75), float(1.0), h1);
           // AO: base of blade is darkened by neighboring blades, tip is fully lit.
-          const ao = mix(uAoBase, float(1.0), pow(vUv.y, uAoPower));
+          // LOD modulation: weaken AO at distance (FAR blades are tiny, strong AO looks wrong)
+          const aoLod = uAoBase.mul(mix(float(0.5), float(1.0), smoothstep(float(0.5), float(0.0), vLodMorph)));
+          const ao = mix(aoLod, float(1.0), pow(vUv.y, uAoPower));
           const baseCol = mix(uBladeCol, uTipCol, vUv.y);
 
           // --- Color variation (hashes computed in vertex via varyings) ---
@@ -1428,6 +1441,7 @@
         pane.addBinding(params, "aoPower", { min: 0.5, max: 6, label: "AO curve" });
         pane.addBinding(params, "windAngle", { min: 0, max: 360, step: 1, label: "Wind angle (°)" });
         pane.addBinding(params, "windWaveScale", { min: 0.01, max: 0.8, label: "Wave scale" });
+        pane.addBinding(params, "windGust", { min: 0, max: 1, step: 0.05, label: "Wind gust" });
         pane.addBinding(params, "colorVariation", { label: "Color variation" });
         pane.addBinding(params, "cvHueSpread", { min: 0, max: 0.3, label: "Hue spread" });
         pane.addBinding(params, "cvSatSpread", { min: 0, max: 1, label: "Saturation spread" });
@@ -1681,6 +1695,7 @@
           uWindDirX.value = Math.cos(windRad);
           uWindDirZ.value = Math.sin(windRad);
           uWindWaveScale.value = params.windWaveScale;
+          uWindGust.value = params.windGust;
           uBladeHeight.value = params.bladeHeight;
           uRoundCross.value = params.roundCrossSection;
           uSkyBlend.value = params.skyBlend;
