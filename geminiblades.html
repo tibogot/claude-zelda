@@ -293,6 +293,36 @@
         heightTex.magFilter = THREE.LinearFilter;
         heightTex.needsUpdate = true;
 
+        // ── Painted grass density texture ──
+        // In the editor this comes from grassDensityCanvas (128×128, painted by brush).
+        // Here we create a test texture: left half = full grass, right half = no grass,
+        // so you can visually verify the sampling works. Replace with editor canvas later.
+        const densityRes = 128;
+        const grassDensityTex = (() => {
+          const data = new Uint8Array(densityRes * densityRes * 4);
+          for (let z = 0; z < densityRes; z++) {
+            for (let x = 0; x < densityRes; x++) {
+              const idx = (z * densityRes + x) * 4;
+              // Test pattern: circular gradient from center (full density) to edges (zero)
+              const u = x / (densityRes - 1), v = z / (densityRes - 1);
+              const dx = u - 0.5, dz = v - 0.5;
+              const dist = Math.sqrt(dx * dx + dz * dz) * 2; // 0 at center, 1 at corners
+              const density = Math.max(0, Math.min(255, (1 - dist) * 255));
+              data[idx] = density;      // R = density
+              data[idx + 1] = density;  // G (unused, but visible if debugging)
+              data[idx + 2] = density;  // B
+              data[idx + 3] = 255;      // A
+            }
+          }
+          const tex = new THREE.DataTexture(data, densityRes, densityRes, THREE.RGBAFormat, THREE.UnsignedByteType);
+          tex.wrapS = THREE.ClampToEdgeWrapping;
+          tex.wrapT = THREE.ClampToEdgeWrapping;
+          tex.minFilter = THREE.LinearFilter;
+          tex.magFilter = THREE.LinearFilter;
+          tex.needsUpdate = true;
+          return tex;
+        })();
+
         const vLodMorph = varying(float(0), 'vLM');
         const vDistFade = varying(float(1), 'vDF');
 
@@ -357,10 +387,15 @@
           const distFade = distFadeLinear.mul(distFadeLinear);
           vDistFade.assign(distFade);
 
+          // Painted density: sample the density texture at same UV as heightmap
+          // In the editor this is the grassDensityCanvas; here it's a test pattern.
+          // Interface matches grass-painter7.js exactly: paintedDensity × uGrassDensity
+          const paintedDensity = texture(grassDensityTex, terrainUV).x;
+          const hasDensity = smoothstep(float(0.0), float(0.005), paintedDensity); // soft kill below 0.005
+
           // Stochastic density culling: collapse blade to 0 height if its hash > density
-          // Uses a unique hash so culling pattern doesn't correlate with other blade properties
           const densityHash = fract(sin(dot(bladeXZ, vec2(853.1, 137.9))).mul(float(43758.5453)));
-          const densityCull = smoothstep(uGrassDensity, uGrassDensity.add(float(0.01)), densityHash).oneMinus();  // 1 = keep, 0 = cull
+          const densityCull = smoothstep(uGrassDensity.mul(paintedDensity), uGrassDensity.mul(paintedDensity).add(float(0.01)), densityHash).oneMinus().mul(hasDensity);
 
           const h0 = fract(
             sin(dot(bladeXZ, vec2(127.1, 311.7))).mul(float(43758.5453)),
