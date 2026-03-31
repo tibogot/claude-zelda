@@ -99,6 +99,10 @@
         background: rgba(50, 90, 35, 0.95);
         color: #d0f0a0;
       }
+      #mode-badge.geminicliffgrass {
+        background: rgba(40, 80, 50, 0.95);
+        color: #b0f0c0;
+      }
       #mode-badge.pinelod {
         background: rgba(140, 40, 180, 0.95);
         color: #f0d0ff;
@@ -631,6 +635,15 @@
       meadowCtx.fillStyle = "#000";
       meadowCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
 
+      // ─── GEMINI CLIFF GRASS DENSITY CANVAS ────
+      const geminiCliffDensityCanvas = document.createElement("canvas");
+      geminiCliffDensityCanvas.width = geminiCliffDensityCanvas.height = SPLAT_RES;
+      const geminiCliffDensityCtx = geminiCliffDensityCanvas.getContext("2d", {
+        willReadFrequently: true,
+      });
+      geminiCliffDensityCtx.fillStyle = "#000";
+      geminiCliffDensityCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+
       // ─── CLIFF GRASS DENSITY CANVAS ──────────
       const cliffDensityCanvas = document.createElement("canvas");
       cliffDensityCanvas.width = cliffDensityCanvas.height = SPLAT_RES;
@@ -989,6 +1002,10 @@
       let geminiGrassEraseMode = false;
       let geminiGrassGroup = null;
       let geminiDensityTex = null;
+      let geminiCliffGrassPatchSystem = null;
+      let geminiCliffGrassEraseMode = false;
+      let geminiCliffGrassGroup = null;
+      let geminiCliffDensityTex = null;
 
       // ─── DECAL STATE ──────────────────────────
       let decalObjects = [];    // placed decal meshes
@@ -1655,6 +1672,24 @@
           geminiDensityCtx.fill();
         }
         if (geminiDensityTex) geminiDensityTex.needsUpdate = true;
+      }
+
+      // ─── GEMINI CLIFF GRASS DENSITY PAINT ─────
+      function paintGeminiCliffGrassAt(wx, wz, erase) {
+        const { u, v } = worldToUV(wx, wz);
+        const cx = u * SPLAT_RES, cy = v * SPLAT_RES;
+        if (PARAMS.paintBrush === "smear") {
+          _smearCanvas(geminiCliffDensityCtx, cx, cy);
+        } else {
+          const alpha = brushStr / 100;
+          const [cr, cg, cb] = erase ? [0, 0, 0] : [255, 255, 255];
+          geminiCliffDensityCtx.globalCompositeOperation = "source-over";
+          geminiCliffDensityCtx.fillStyle = _radialGrad(geminiCliffDensityCtx, cx, cy, cr, cg, cb, alpha);
+          geminiCliffDensityCtx.beginPath();
+          geminiCliffDensityCtx.arc(cx, cy, brushSize, 0, PI * 2);
+          geminiCliffDensityCtx.fill();
+        }
+        if (geminiCliffDensityTex) geminiCliffDensityTex.needsUpdate = true;
       }
 
       // ─── FLOWER DENSITY PAINT ────────────────
@@ -3170,6 +3205,11 @@
         cliffDensityTex.wrapS = cliffDensityTex.wrapT =
           THREE.ClampToEdgeWrapping;
 
+        // ── GEMINI CLIFF DENSITY TEX ──────────────────────────────────────
+        geminiCliffDensityTex = new THREE.CanvasTexture(geminiCliffDensityCanvas);
+        geminiCliffDensityTex.wrapS = geminiCliffDensityTex.wrapT =
+          THREE.ClampToEdgeWrapping;
+
         // ── HEIGHT TEX (for grass blade positioning) ──────────────────────
         const heightTexData = new Float32Array(HTEX_RES * HTEX_RES * 4);
         heightTex = new THREE.DataTexture(
@@ -3820,10 +3860,44 @@
             const oldGeos = geminiGeos;
             geminiGeos = buildGeminiGeos();
             geminiGrassPatchSystem.updateGeometries(geminiGeos);
+            if (geminiCliffGrassPatchSystem) geminiCliffGrassPatchSystem.updateGeometries(geminiGeos);
             if (oldGeos.geoHigh) oldGeos.geoHigh.dispose();
             if (oldGeos.geoMid) oldGeos.geoMid.dispose();
             if (oldGeos.geoFar) oldGeos.geoFar.dispose();
           };
+
+          // ── GEMINI CLIFF GRASS PATCH SYSTEM ───────────────────────────────
+          // Same gemini material + geometry but samples cliffHeightTex + geminiCliffDensityTex
+          {
+            const geminiCliffCtx = {
+              ...gu,
+              heightTex: cliffHeightTex,
+              grassDensityTex: geminiCliffDensityTex,
+              terrainRes: HTEX_RES,
+            };
+
+            const geminiCliffMat = geminiGrassMat(geminiCliffCtx);
+
+            geminiCliffGrassGroup = new THREE.Group();
+            geminiCliffGrassGroup.visible = true;
+            scene.add(geminiCliffGrassGroup);
+
+            geminiCliffGrassPatchSystem = geminiSetupPatches(
+              scene,
+              camera,
+              geminiCliffGrassGroup,
+              { ...geminiGeos, material: geminiCliffMat },
+              {
+                patchSize: gp.fieldSize,
+                lodMidDistance: gp.lodMidDistance,
+                lodFarDistance: gp.lodFarDistance,
+                maxDistance: gp.lodMaxDistance,
+                lodHysteresis: 2,
+                lodEnabled: gp.lodEnabled,
+                grassReceiveShadow: gp.grassReceiveShadow,
+              },
+            );
+          }
         }
 
         // ── COLOR HELPER — hex sRGB → linear THREE.Color (matches testtsushimaplayer2) ──
@@ -6038,6 +6112,8 @@
           );
           zip.file("meadow.bin", _canvasToRawBin(meadowCanvas, meadowCtx));
           zip.file("cliff-grass-density.bin", _canvasToRawBin(cliffDensityCanvas, cliffDensityCtx));
+          zip.file("gemini-grass-density.bin", _canvasToRawBin(geminiDensityCanvas, geminiDensityCtx));
+          zip.file("gemini-cliff-grass-density.bin", _canvasToRawBin(geminiCliffDensityCanvas, geminiCliffDensityCtx));
           zip.file("flower-density.bin", _canvasToRawBin(flowerDensityCanvas, flowerDensityCtx));
           zip.file("img-splat.bin", imgSplatData.buffer);
 
@@ -6179,6 +6255,22 @@
                 cliffDensityCanvas,
                 cliffDensityCtx,
                 cliffDensityTex,
+              );
+            const geminiGrassDensityFile = zip.file("gemini-grass-density.bin");
+            if (geminiGrassDensityFile)
+              _rawBinToCanvas(
+                await geminiGrassDensityFile.async("arraybuffer"),
+                geminiDensityCanvas,
+                geminiDensityCtx,
+                geminiDensityTex,
+              );
+            const geminiCliffGrassDensityFile = zip.file("gemini-cliff-grass-density.bin");
+            if (geminiCliffGrassDensityFile)
+              _rawBinToCanvas(
+                await geminiCliffGrassDensityFile.async("arraybuffer"),
+                geminiCliffDensityCanvas,
+                geminiCliffDensityCtx,
+                geminiCliffDensityTex,
               );
             const flowerDensityFile = zip.file("flower-density.bin");
             if (flowerDensityFile)
@@ -6511,6 +6603,7 @@
             "Fleurs [M]":  "fleurs",
             "Ambient FX [X]": "ambientfx",
             "Gemini Grass": "geminigrass",
+            "Gemini Cliff Grass": "geminicliffgrass",
             "River [V]": "river",
             "Waterfall [H]": "waterfall",
             "Play [F]": "play",
@@ -8199,6 +8292,26 @@
         }
         geminiGrassFolder.hidden = true;
 
+        // ── Gemini Cliff Grass folder ──
+        const geminiCliffGrassErasePARAMS = { erase: false };
+        const geminiCliffGrassFolder = pane.addFolder({
+          title: "Gemini Cliff Grass",
+          expanded: true,
+        });
+        geminiCliffGrassFolder.addBinding(geminiCliffGrassErasePARAMS, "erase", { label: "Erase (or Shift)" })
+          .on("change", (e) => { geminiCliffGrassEraseMode = e.value; });
+        geminiCliffGrassFolder.addButton({ title: "Clear cliff grass" }).on("click", () => {
+          geminiCliffDensityCtx.fillStyle = "#000";
+          geminiCliffDensityCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+          if (geminiCliffDensityTex) geminiCliffDensityTex.needsUpdate = true;
+        });
+        geminiCliffGrassFolder.addButton({ title: "Fill all cliff grass" }).on("click", () => {
+          geminiCliffDensityCtx.fillStyle = "#fff";
+          geminiCliffDensityCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+          if (geminiCliffDensityTex) geminiCliffDensityTex.needsUpdate = true;
+        });
+        geminiCliffGrassFolder.hidden = true;
+
         // ── Trees folder ──
         const treesFolder = pane.addFolder({
           title: "Trees  [ T ]",
@@ -9699,6 +9812,7 @@
           if (ambientFXFolder) ambientFXFolder.hidden = mode !== "ambientfx";
           if (ambientFXSystem) ambientFXSystem.setRingsVisible(mode === "ambientfx");
           geminiGrassFolder.hidden = mode !== "geminigrass";
+          if (typeof geminiCliffGrassFolder !== "undefined") geminiCliffGrassFolder.hidden = mode !== "geminicliffgrass";
           brushFolder.hidden =
             mode === "view" ||
             mode === "place" ||
@@ -9810,7 +9924,9 @@
                                                 ? "AMBIENT FX  [ X ]"
                                                 : mode === "geminigrass"
                                                   ? "GEMINI GRASS MODE"
-                                                  : "PLACE MODE"; // play handled above
+                                                  : mode === "geminicliffgrass"
+                                                    ? "GEMINI CLIFF GRASS MODE"
+                                                    : "PLACE MODE"; // play handled above
           badge.className = mode;
           renderer.domElement.style.cursor =
             mode === "view" ? "default" : "crosshair";
@@ -9826,7 +9942,7 @@
             mode === "decal"
           )
             brushRing.visible = false;
-          else if (mode === "cliffgrass" || mode === "pinelod")
+          else if (mode === "cliffgrass" || mode === "geminicliffgrass" || mode === "pinelod")
             brushRing.visible = true;
         }
         setMode("view");
@@ -10086,6 +10202,8 @@
             paintCliffGrassAt(p.x, p.z, cliffGrassEraseMode || e.shiftKey);
           if (currentMode === "geminigrass")
             paintGeminiGrassAt(p.x, p.z, geminiGrassEraseMode || e.shiftKey);
+          if (currentMode === "geminicliffgrass")
+            paintGeminiCliffGrassAt(p.x, p.z, geminiCliffGrassEraseMode || e.shiftKey);
           if (currentMode === "trees")
             paintTreesAt(p.x, p.z, treeEraseMode || e.shiftKey);
           if (currentMode === "foliage")
@@ -10823,6 +10941,18 @@
               PARAMS.light.sunElevation,
             );
             geminiGrassUniforms.uSunDir.value.copy(sd);
+          }
+          // Gemini cliff grass — same update as gemini grass
+          if (geminiCliffGrassPatchSystem && geminiCliffGrassGroup) {
+            const gp = window._geminiGrassParams;
+            geminiCliffGrassPatchSystem.update({
+              patchSize: gp.fieldSize,
+              lodMidDistance: gp.lodMidDistance,
+              lodFarDistance: gp.lodFarDistance,
+              maxDistance: gp.lodMaxDistance,
+              lodEnabled: gp.lodEnabled,
+              grassReceiveShadow: gp.grassReceiveShadow,
+            });
           }
           // Day/night cycle animation
           if (PARAMS.dayNight.enabled) {
