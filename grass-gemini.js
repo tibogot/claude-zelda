@@ -504,11 +504,11 @@ export function createGrassMaterial(ctx) {
       .mul(atan(viewL.x, viewL.z))
       .mul(float(1).sub(farMorph));
 
-    // Compose position
+    // Compose position — zero out width when density is 0
     const pArc = vec3(
-      arcX.add(positionLocal.x),
+      arcX.add(positionLocal.x.mul(densityCull)),
       arcY,
-      arcZ.add(positionLocal.z),
+      arcZ.add(positionLocal.z.mul(densityCull)),
     );
     const pYaw = rotY(crossedYaw, pArc);
     const nYaw = normalize(rotY(crossedYaw, fanN));
