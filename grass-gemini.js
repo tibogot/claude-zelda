@@ -700,12 +700,13 @@ export function setupGrassPatches(scene, camera, grassGroup, geosAndMats, option
     lodEnabled = true,
     grassReceiveShadow = true,
     grassCastShadow = false,
+    patchSizeMid = patchSize,
+    patchSizeFar = patchSize,
   } = options;
 
   const poolHigh = { meshes: [], idx: 0 };
   const poolMid = { meshes: [], idx: 0 };
   const poolFar = { meshes: [], idx: 0 };
-  const patchLodCache = new Map();
 
   // Reusable objects — zero allocation per frame
   const _cellPos = new THREE.Vector3();
@@ -727,37 +728,6 @@ export function setupGrassPatches(scene, camera, grassGroup, geosAndMats, option
     return m;
   }
 
-  function selectLodTier(dist, cellKey, midDist, farDist) {
-    const hyst = lodHysteresis;
-    const last = patchLodCache.get(cellKey);
-    let tier;
-    if (last === "high") {
-      if (dist > midDist + hyst) {
-        tier = dist > farDist + hyst ? "far" : "mid";
-      } else {
-        tier = "high";
-      }
-    } else if (last === "mid") {
-      if (dist <= midDist - hyst) {
-        tier = "high";
-      } else if (dist > farDist + hyst) {
-        tier = "far";
-      } else {
-        tier = "mid";
-      }
-    } else if (last === "far") {
-      if (dist <= farDist - hyst) {
-        tier = dist <= midDist - hyst ? "high" : "mid";
-      } else {
-        tier = "far";
-      }
-    } else {
-      tier = dist <= midDist ? "high" : dist <= farDist ? "mid" : "far";
-    }
-    patchLodCache.set(cellKey, tier);
-    return tier;
-  }
-
   let lastPatchCount = 0;
   let lastHighCount = 0,
     lastMidCount = 0,
@@ -772,6 +742,8 @@ export function setupGrassPatches(scene, camera, grassGroup, geosAndMats, option
       lodEnabled: useLod = lodEnabled,
       grassReceiveShadow: recvShadow = grassReceiveShadow,
       grassCastShadow: castShadow = grassCastShadow,
+      patchSizeMid: psMid = patchSizeMid,
+      patchSizeFar: psFar = patchSizeFar,
     } = opts;
 
     // Hide all, reset pools
@@ -784,65 +756,105 @@ export function setupGrassPatches(scene, camera, grassGroup, geosAndMats, option
     _projScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     _frustum.setFromProjectionMatrix(_projScreenMatrix);
 
-    const snapX = Math.floor(camera.position.x / ps) * ps;
-    const snapZ = Math.floor(camera.position.z / ps) * ps;
-    const cells = Math.ceil(maxDist / ps) + 1;
-
     _camPosXZ.set(camera.position.x, 0, camera.position.z);
-    _aabbSize.set(ps, 1000, ps);
 
     let patchCount = 0;
     let highCount = 0,
       midCount = 0,
       farCount = 0;
 
-    for (let r = -cells; r <= cells; r++) {
-      for (let c = -cells; c <= cells; c++) {
-        const cellX = snapX + c * ps;
-        const cellZ = snapZ + r * ps;
+    // ── HIGH tier grid (spacing = ps) ──
+    {
+      const snapX = Math.floor(camera.position.x / ps) * ps;
+      const snapZ = Math.floor(camera.position.z / ps) * ps;
+      const cells = Math.ceil((useLod ? midDist + lodHysteresis + ps : maxDist) / ps) + 1;
+      _aabbSize.set(ps, 1000, ps);
 
-        _cellPos.set(cellX, 0, cellZ);
-        _aabb.setFromCenterAndSize(_cellPos, _aabbSize);
+      for (let r = -cells; r <= cells; r++) {
+        for (let c = -cells; c <= cells; c++) {
+          const cellX = snapX + c * ps;
+          const cellZ = snapZ + r * ps;
+          _cellPos.set(cellX, 0, cellZ);
+          _aabb.setFromCenterAndSize(_cellPos, _aabbSize);
+          const dist = _aabb.distanceToPoint(_camPosXZ);
+          if (useLod && dist > midDist + lodHysteresis) continue;
+          if (!useLod && dist > maxDist) continue;
+          if (!_frustum.intersectsBox(_aabb)) continue;
 
-        const dist = _aabb.distanceToPoint(_camPosXZ);
-        if (dist > maxDist) continue;
-        if (!_frustum.intersectsBox(_aabb)) continue;
-
-        let pool, geo, isFar = false;
-        if (!useLod) {
-          pool = poolHigh;
-          geo = geoHigh;
+          const mesh = getMesh(poolHigh, geoHigh);
+          mesh.geometry = geoHigh;
+          mesh.visible = true;
+          mesh.position.set(cellX, 0, cellZ);
+          mesh.scale.set(1, 1, 1);
+          mesh.receiveShadow = recvShadow;
+          mesh.castShadow = castShadow;
           highCount++;
-        } else {
-          const cellKey = `${cellX},${cellZ}`;
-          const tier = selectLodTier(dist, cellKey, midDist, farDist);
-          if (tier === "high") {
-            pool = poolHigh;
-            geo = geoHigh;
-            highCount++;
-          } else if (tier === "mid") {
-            pool = poolMid;
-            geo = geoMid;
-            midCount++;
-          } else {
-            pool = poolFar;
-            geo = geoFar;
-            farCount++;
-            isFar = true;
-          }
+          patchCount++;
         }
-
-        const mesh = getMesh(pool, geo);
-        mesh.geometry = geo;
-        mesh.visible = true;
-        mesh.position.set(cellX, 0, cellZ);
-        mesh.receiveShadow = isFar ? false : recvShadow;
-        mesh.castShadow = castShadow;
-        patchCount++;
       }
     }
 
-    if (patchLodCache.size > 1200) patchLodCache.clear();
+    // ── MID tier grid (spacing = psMid) ──
+    if (useLod) {
+      const snapX = Math.floor(camera.position.x / psMid) * psMid;
+      const snapZ = Math.floor(camera.position.z / psMid) * psMid;
+      const cells = Math.ceil((farDist + lodHysteresis + psMid) / psMid) + 1;
+      _aabbSize.set(psMid, 1000, psMid);
+
+      for (let r = -cells; r <= cells; r++) {
+        for (let c = -cells; c <= cells; c++) {
+          const cellX = snapX + c * psMid;
+          const cellZ = snapZ + r * psMid;
+          _cellPos.set(cellX, 0, cellZ);
+          _aabb.setFromCenterAndSize(_cellPos, _aabbSize);
+          const dist = _aabb.distanceToPoint(_camPosXZ);
+          if (dist <= midDist - lodHysteresis) continue; // HIGH covers this
+          if (dist > farDist + lodHysteresis) continue;
+          if (!_frustum.intersectsBox(_aabb)) continue;
+
+          const mesh = getMesh(poolMid, geoMid);
+          mesh.geometry = geoMid;
+          mesh.visible = true;
+          mesh.position.set(cellX, 0, cellZ);
+          mesh.scale.set(1, 1, 1);
+          mesh.receiveShadow = recvShadow;
+          mesh.castShadow = castShadow;
+          midCount++;
+          patchCount++;
+        }
+      }
+    }
+
+    // ── FAR tier grid (spacing = psFar) ──
+    if (useLod) {
+      const snapX = Math.floor(camera.position.x / psFar) * psFar;
+      const snapZ = Math.floor(camera.position.z / psFar) * psFar;
+      const cells = Math.ceil((maxDist + psFar) / psFar) + 1;
+      _aabbSize.set(psFar, 1000, psFar);
+
+      for (let r = -cells; r <= cells; r++) {
+        for (let c = -cells; c <= cells; c++) {
+          const cellX = snapX + c * psFar;
+          const cellZ = snapZ + r * psFar;
+          _cellPos.set(cellX, 0, cellZ);
+          _aabb.setFromCenterAndSize(_cellPos, _aabbSize);
+          const dist = _aabb.distanceToPoint(_camPosXZ);
+          if (dist <= farDist - lodHysteresis) continue; // MID covers this
+          if (dist > maxDist) continue;
+          if (!_frustum.intersectsBox(_aabb)) continue;
+
+          const mesh = getMesh(poolFar, geoFar);
+          mesh.geometry = geoFar;
+          mesh.visible = true;
+          mesh.position.set(cellX, 0, cellZ);
+          mesh.scale.set(1, 1, 1);
+          mesh.receiveShadow = false;
+          mesh.castShadow = castShadow;
+          farCount++;
+          patchCount++;
+        }
+      }
+    }
 
     lastPatchCount = patchCount;
     lastHighCount = highCount;
