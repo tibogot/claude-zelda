@@ -686,12 +686,11 @@ export function createGrassMaterial(ctx) {
 // Camera-relative grid, frustum culling, pooling, hysteresis.
 // Returns { update(charPos) } — call every frame.
 export function setupGrassPatches(scene, camera, grassGroup, geosAndMats, options) {
-  const {
-    geoHigh,
-    geoMid,
-    geoFar,
-    material,
-  } = geosAndMats;
+  // Read geos via geosAndMats so updateGeometries() can swap them live
+  let geoHigh = geosAndMats.geoHigh;
+  let geoMid = geosAndMats.geoMid;
+  let geoFar = geosAndMats.geoFar;
+  const material = geosAndMats.material;
   const {
     patchSize = 10,
     lodMidDistance = 40,
@@ -856,14 +855,17 @@ export function setupGrassPatches(scene, camera, grassGroup, geosAndMats, option
   // Allow updating geometries after rebuild
   function updateGeometries(newGeos) {
     if (newGeos.geoHigh) {
+      geoHigh = newGeos.geoHigh;
       poolHigh.meshes.forEach((m) => { m.geometry = newGeos.geoHigh; });
       geosAndMats.geoHigh = newGeos.geoHigh;
     }
     if (newGeos.geoMid) {
+      geoMid = newGeos.geoMid;
       poolMid.meshes.forEach((m) => { m.geometry = newGeos.geoMid; });
       geosAndMats.geoMid = newGeos.geoMid;
     }
     if (newGeos.geoFar) {
+      geoFar = newGeos.geoFar;
       poolFar.meshes.forEach((m) => { m.geometry = newGeos.geoFar; });
       geosAndMats.geoFar = newGeos.geoFar;
     }
