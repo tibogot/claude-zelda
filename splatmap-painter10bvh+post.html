@@ -6613,6 +6613,7 @@
             "River [V]": "river",
             "Waterfall [H]": "waterfall",
             "Play [F]": "play",
+            "Cliff Blend Test": "cliffblend",
           },
         });
         modeBinding.on("change", (ev) => setMode(ev.value));
@@ -8966,6 +8967,156 @@
 
         ciPaneBindings = { pane };
 
+        // ── CLIFF BLEND TEST MODE ──────────────────────────────────────────
+        const cliffBlendObjects = [];
+        let selectedCliffBlend = null;
+        const cbPARAMS = {
+          slopelow:    0.5,   // normalWorld.y below this → full rock
+          slopeHigh:   0.85,  // normalWorld.y above this → full ground
+          noiseScale:  0.06,  // noise frequency for organic edge
+          noiseStr:    0.15,  // how much noise offsets the blend threshold
+          modelIndex:  0,     // which cliff template to use
+        };
+
+        // TSL material: blend groundProc() on flat tops, triplanar rock on steep faces
+        const cliffBlendMat = new MeshStandardNodeMaterial({
+          roughness: 0.88,
+          metalness: 0,
+        });
+
+        const uCBSlopeLow  = uniform(cbPARAMS.slopelow  ?? 0.5);
+        const uCBSlopeHigh = uniform(cbPARAMS.slopeHigh ?? 0.85);
+        const uCBNoiseScale = uniform(cbPARAMS.noiseScale);
+        const uCBNoiseStr   = uniform(cbPARAMS.noiseStr);
+
+        cliffBlendMat.colorNode = Fn(() => {
+          // Ground layer — same procedural as terrain, sampled at world XZ
+          const ground = groundProc();
+
+          // Rock layer — triplanar Rock028 (same as terrain cliff faces)
+          const rockUV_XZ = positionWorld.xz.mul(uRockScale);
+          const rockUV_XY = positionWorld.xy.mul(uRockScale);
+          const rockUV_ZY = positionWorld.zy.mul(uRockScale);
+          const triWRaw = normalWorld.abs().pow(uTriplanarSharp);
+          const triW = triWRaw.div(triWRaw.x.add(triWRaw.y).add(triWRaw.z));
+          const rawRock = texture(rock028ColorTex, rockUV_XZ).rgb.mul(triW.y)
+            .add(texture(rock028ColorTex, rockUV_XY).rgb.mul(triW.z))
+            .add(texture(rock028ColorTex, rockUV_ZY).rgb.mul(triW.x));
+          const cRock = clamp(rawRock.sub(float(0.5)).mul(uRockContrast).add(float(0.5)), 0.0, 1.0);
+          const rock = cRock.mul(uRockBrightness).mul(uRockTint);
+
+          // Slope blend: normalWorld.y = 1 on flat tops, 0 on vertical faces
+          const noiseOffset = mx_noise_float(positionWorld.xz.mul(uCBNoiseScale)).mul(uCBNoiseStr);
+          const slopeVal = normalWorld.y.add(noiseOffset);
+          const blend = smoothstep(uCBSlopeLow, uCBSlopeHigh, slopeVal);
+
+          return mix(rock, ground, blend);
+        })();
+
+        // Normal node: triplanar rock028 normal on steep, flat terrain normal on top
+        cliffBlendMat.normalNode = (() => {
+          const _nuvXZ = positionWorld.xz.mul(uRockScale);
+          const _nuvXY = positionWorld.xy.mul(uRockScale);
+          const _nuvZY = positionWorld.zy.mul(uRockScale);
+          const _ntWRaw = normalWorld.abs().pow(uTriplanarSharp);
+          const _ntW = _ntWRaw.div(_ntWRaw.x.add(_ntWRaw.y).add(_ntWRaw.z));
+          const rNrmBA_XZ = texture(rock028DataTex, _nuvXZ).ba;
+          const rNrmBA_XY = texture(rock028DataTex, _nuvXY).ba;
+          const rNrmBA_ZY = texture(rock028DataTex, _nuvZY).ba;
+          const rNrmBA = rNrmBA_XZ.mul(_ntW.y).add(rNrmBA_XY.mul(_ntW.z)).add(rNrmBA_ZY.mul(_ntW.x));
+          const rNrmVec = vec3(rNrmBA.x, rNrmBA.y, float(1.0));
+          const noiseOffset2 = mx_noise_float(positionWorld.xz.mul(uCBNoiseScale)).mul(uCBNoiseStr);
+          const blend2 = smoothstep(uCBSlopeLow, uCBSlopeHigh, normalWorld.y.add(noiseOffset2));
+          const flatNm = vec3(0.5, 0.5, 1.0);
+          return normalMap(mix(rNrmVec, flatNm, blend2));
+        })();
+
+        // Roughness: rocky on steep, smoother on flat
+        cliffBlendMat.roughnessNode = Fn(() => {
+          const noiseOffset3 = mx_noise_float(positionWorld.xz.mul(uCBNoiseScale)).mul(uCBNoiseStr);
+          const blend3 = smoothstep(uCBSlopeLow, uCBSlopeHigh, normalWorld.y.add(noiseOffset3));
+          const rockRough = texture(rock028DataTex, positionWorld.xz.mul(uRockScale)).r;
+          return mix(rockRough, float(0.9), blend3);
+        })();
+
+        function placeCliffBlend(wx, wy, wz, modelIndex) {
+          const root = cliffTemplates[modelIndex].clone();
+          root.position.set(wx, wy, wz);
+          root.userData.isCliffBlend = true;
+          root.traverse((o) => {
+            if (o.isMesh) {
+              o.material = cliffBlendMat;
+              o.castShadow = true;
+              o.receiveShadow = true;
+            }
+          });
+          scene.add(root);
+          cliffBlendObjects.push(root);
+          selectCliffBlend(root);
+        }
+
+        function selectCliffBlend(obj) {
+          selectedCliffBlend = obj;
+          if (obj && transformControls) {
+            transformControls.attach(obj);
+            tcHelper.visible = true;
+          } else if (transformControls) {
+            transformControls.detach();
+            tcHelper.visible = false;
+          }
+        }
+
+        function getCliffBlendRoot(mesh) {
+          let p = mesh;
+          while (p) {
+            if (p.userData && p.userData.isCliffBlend) return p;
+            p = p.parent;
+          }
+          return null;
+        }
+
+        // Cliff Blend Test folder
+        const cliffBlendFolder = pane.addFolder({
+          title: "Cliff Blend Test",
+          expanded: true,
+        });
+        cliffBlendFolder.hidden = true;
+
+        cliffBlendFolder.addBinding(cbPARAMS, "modelIndex", {
+          label: "Cliff model",
+          min: 0, max: 2, step: 1,
+        });
+        cliffBlendFolder.addBinding(cbPARAMS, "slopelow", {
+          label: "Slope low",
+          min: 0, max: 1, step: 0.01,
+        }).on("change", (ev) => { uCBSlopeLow.value = ev.value; });
+        cliffBlendFolder.addBinding(cbPARAMS, "slopeHigh", {
+          label: "Slope high",
+          min: 0, max: 1, step: 0.01,
+        }).on("change", (ev) => { uCBSlopeHigh.value = ev.value; });
+        cliffBlendFolder.addBinding(cbPARAMS, "noiseScale", {
+          label: "Edge noise scale",
+          min: 0.001, max: 0.3, step: 0.001,
+        }).on("change", (ev) => { uCBNoiseScale.value = ev.value; });
+        cliffBlendFolder.addBinding(cbPARAMS, "noiseStr", {
+          label: "Edge noise strength",
+          min: 0, max: 0.5, step: 0.01,
+        }).on("change", (ev) => { uCBNoiseStr.value = ev.value; });
+        cliffBlendFolder.addBlade({ view: "separator" });
+        cliffBlendFolder.addButton({ title: "🗑 Delete selected  [Del]" }).on("click", () => {
+          if (selectedCliffBlend) {
+            scene.remove(selectedCliffBlend);
+            const idx = cliffBlendObjects.indexOf(selectedCliffBlend);
+            if (idx !== -1) cliffBlendObjects.splice(idx, 1);
+            selectCliffBlend(null);
+          }
+        });
+        cliffBlendFolder.addButton({ title: "Clear all test cliffs" }).on("click", () => {
+          cliffBlendObjects.forEach((o) => scene.remove(o));
+          cliffBlendObjects.length = 0;
+          selectCliffBlend(null);
+        });
+
         // ── PATH FOLDER ──
         const pathFolder = pane.addFolder({
           title: "Path  [ L ]",
@@ -9823,6 +9974,7 @@
           if (ambientFXSystem) ambientFXSystem.setRingsVisible(mode === "ambientfx");
           geminiGrassFolder.hidden = mode !== "geminigrass";
           if (typeof geminiCliffGrassFolder !== "undefined") geminiCliffGrassFolder.hidden = mode !== "geminicliffgrass";
+          cliffBlendFolder.hidden = mode !== "cliffblend";
           brushFolder.hidden =
             mode === "view" ||
             mode === "place" ||
@@ -9831,10 +9983,11 @@
             mode === "waterfall" ||
             mode === "cliffs" ||
             mode === "spline" ||
-            mode === "decal";
+            mode === "decal" ||
+            mode === "cliffblend";
 
           const usingTC =
-            mode === "place" || mode === "props" || mode === "water" || mode === "waterfall" || mode === "cliffs" || mode === "decal";
+            mode === "place" || mode === "props" || mode === "water" || mode === "waterfall" || mode === "cliffs" || mode === "decal" || mode === "cliffblend";
           if (!usingTC && transformControls) {
             if (tcHelper) tcHelper.visible = false;
             transformControls.enabled = false;
@@ -9844,6 +9997,7 @@
             selectWater(null);
             selectWaterfall(null);
             selectDecal(null);
+            selectCliffBlend(null);
           } else if (usingTC && transformControls) {
             transformControls.enabled = true;
             if (mode === "place") {
@@ -9883,9 +10037,24 @@
               selectWater(null);
               selectWaterfall(null);
               selectDecal(null);
+              selectCliffBlend(null);
               // Re-attach gizmo if an instance was already selected
               if (cliffInstancer.hasSelection()) {
                 transformControls.attach(cliffInstancer.proxyObject);
+                tcHelper.visible = true;
+              } else {
+                transformControls.detach();
+                tcHelper.visible = false;
+              }
+            }
+            if (mode === "cliffblend") {
+              selectedCliff = null;
+              selectedProp = null;
+              selectWater(null);
+              selectWaterfall(null);
+              selectDecal(null);
+              if (selectedCliffBlend) {
+                transformControls.attach(selectedCliffBlend);
                 tcHelper.visible = true;
               } else {
                 transformControls.detach();
@@ -9936,7 +10105,9 @@
                                                   ? "GEMINI GRASS MODE"
                                                   : mode === "geminicliffgrass"
                                                     ? "GEMINI CLIFF GRASS MODE"
-                                                    : "PLACE MODE"; // play handled above
+                                                    : mode === "cliffblend"
+                                                      ? "CLIFF BLEND TEST"
+                                                      : "PLACE MODE"; // play handled above
           badge.className = mode;
           renderer.domElement.style.cursor =
             mode === "view" ? "default" : "crosshair";
@@ -9949,7 +10120,8 @@
             mode === "cliffs" ||
             mode === "spline" ||
             mode === "river" ||
-            mode === "decal"
+            mode === "decal" ||
+            mode === "cliffblend"
           )
             brushRing.visible = false;
           else if (mode === "cliffgrass" || mode === "geminicliffgrass" || mode === "pinelod")
@@ -10149,6 +10321,17 @@
               selectWaterfall(null);
             }
           }
+          if (currentMode === "cliffblend") {
+            if (e.code === "KeyW") { e.preventDefault(); transformControls.setMode("translate"); }
+            if (e.code === "KeyE") { e.preventDefault(); transformControls.setMode("rotate"); }
+            if (e.code === "KeyR") { e.preventDefault(); transformControls.setMode("scale"); }
+            if (e.code === "Delete" && selectedCliffBlend) {
+              scene.remove(selectedCliffBlend);
+              const idx = cliffBlendObjects.indexOf(selectedCliffBlend);
+              if (idx !== -1) cliffBlendObjects.splice(idx, 1);
+              selectCliffBlend(null);
+            }
+          }
         });
 
         // ── MOUSE ──
@@ -10318,6 +10501,28 @@
               cliffInstancer.placeAt(pt.x, pt.y, pt.z);
               ciRefreshProxy();
             }
+            return;
+          }
+
+          if (currentMode === "cliffblend") {
+            if (transformControls.axis !== null) return;
+            const rect = renderer.domElement.getBoundingClientRect();
+            mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            // Try selecting existing cliff blend object
+            const cbMeshes = [];
+            cliffBlendObjects.forEach((root) =>
+              root.traverse((o) => { if (o.isMesh) cbMeshes.push(o); })
+            );
+            const cbHits = raycaster.intersectObjects(cbMeshes, false);
+            if (cbHits.length > 0) {
+              const root = getCliffBlendRoot(cbHits[0].object);
+              if (root) { selectCliffBlend(root); return; }
+            }
+            // Click terrain → place new blended cliff
+            const pt = getTerrainHit(e);
+            if (pt) placeCliffBlend(pt.x, pt.y, pt.z, cbPARAMS.modelIndex);
             return;
           }
 
