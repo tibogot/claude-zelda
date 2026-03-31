@@ -6541,6 +6541,7 @@
         const ciProxy = { px: 0, py: 0, pz: 0, rx: 0, ry: 0, rz: 0, sx: 1, sy: 1, sz: 1 };
         let ciActiveLabel = "none";
         let ciCount = 0;
+        let ciLastTypeCount = 0;
         let ciPaneBindings = null; // will hold refs to refresh
 
         function ciRefreshProxy() {
@@ -6554,13 +6555,22 @@
           const types = cliffInstancer.getTypes();
           const active = types[cliffInstancer.getActiveTypeIdx()];
           ciActiveLabel = active ? `${active.name}  (${active.count} placed)` : "— none loaded —";
+          ciTypeSelect.index = cliffInstancer.getActiveTypeIdx();
+          if (typeof ciRebuildTypeSelector === "function" && types.length !== ciLastTypeCount) {
+            ciLastTypeCount = types.length;
+            ciRebuildTypeSelector();
+          }
           if (ciPaneBindings) ciPaneBindings.pane.refresh();
         }
 
-        // Load default cliff at startup
-        gltfLoader.load("models/cliff1.glb", (gltf) => {
-          cliffInstancer.loadGLB(gltf, "cliff1");
-          ciRefreshProxy();
+        // Load all 3 default cliff models at startup
+        CLIFF_MODELS.forEach((url, i) => {
+          const name = "cliff" + (i + 1);
+          gltfLoader.load(url, (gltf) => {
+            cliffInstancer.loadGLB(gltf, name);
+            if (cliffBlendMat) cliffInstancer.setMaterial(cliffBlendMat);
+            ciRefreshProxy();
+          });
         });
 
         document.getElementById("cliff-inst-glb-input").addEventListener("change", (e) => {
@@ -6570,6 +6580,7 @@
           const name = file.name.replace(/\.glb$/i, "");
           gltfLoader.load(url, (gltf) => {
             cliffInstancer.loadGLB(gltf, name);
+            if (cliffBlendMat) cliffInstancer.setMaterial(cliffBlendMat);
             ciRefreshProxy();
             URL.revokeObjectURL(url);
           });
@@ -8950,6 +8961,23 @@
 
         const ciActiveDisplay = { label: ciActiveLabel };
         cliffsFolder.addBinding(ciActiveDisplay, "label", { label: "Active type", readonly: true });
+        const ciTypeSelect = { index: 0 };
+        let ciTypeBinding = null;
+        function ciRebuildTypeSelector() {
+          if (ciTypeBinding) ciTypeBinding.dispose();
+          const types = cliffInstancer.getTypes();
+          const opts = {};
+          types.forEach((t) => { opts[t.name] = t.idx; });
+          if (Object.keys(opts).length === 0) return;
+          ciTypeBinding = cliffsFolder.addBinding(ciTypeSelect, "index", {
+            label: "Model",
+            options: opts,
+          });
+          ciTypeBinding.on("change", (ev) => {
+            cliffInstancer.setActiveType(ev.value);
+            ciRefreshProxy();
+          });
+        }
         cliffsFolder.addButton({ title: "📂 Load Cliff GLB…" })
           .on("click", () => document.getElementById("cliff-inst-glb-input").click());
         cliffsFolder.addBlade({ view: "separator" });
@@ -9000,31 +9028,54 @@
 
         ciPaneBindings = { pane };
 
+        // ── CLIFF BLEND PARAMS & MATERIAL (shared by Cliffs mode + Cliff Blend Test) ──
+        const cbPARAMS = {
+          slopelow:    0.5,
+          slopeHigh:   0.85,
+          noiseScale:  0.06,
+          noiseStr:    0.15,
+          modelIndex:  0,
+          groundScale: 1.0,
+          rockScaleMul: 1.0,
+        };
+
+        const uCBSlopeLow    = uniform(cbPARAMS.slopelow);
+        const uCBSlopeHigh   = uniform(cbPARAMS.slopeHigh);
+        const uCBNoiseScale  = uniform(cbPARAMS.noiseScale);
+        const uCBNoiseStr    = uniform(cbPARAMS.noiseStr);
+        const uCBGroundScale = uniform(cbPARAMS.groundScale);
+        const uCBRockScaleMul = uniform(cbPARAMS.rockScaleMul);
+
+        // Blend material controls in Cliffs folder
+        cliffsFolder.addBlade({ view: "separator" });
+        cliffsFolder.addBinding(cbPARAMS, "slopelow", {
+          label: "Slope low", min: 0, max: 1, step: 0.01,
+        }).on("change", (ev) => { uCBSlopeLow.value = ev.value; });
+        cliffsFolder.addBinding(cbPARAMS, "slopeHigh", {
+          label: "Slope high", min: 0, max: 1, step: 0.01,
+        }).on("change", (ev) => { uCBSlopeHigh.value = ev.value; });
+        cliffsFolder.addBinding(cbPARAMS, "noiseScale", {
+          label: "Edge noise scale", min: 0.001, max: 0.3, step: 0.001,
+        }).on("change", (ev) => { uCBNoiseScale.value = ev.value; });
+        cliffsFolder.addBinding(cbPARAMS, "noiseStr", {
+          label: "Edge noise strength", min: 0, max: 0.5, step: 0.01,
+        }).on("change", (ev) => { uCBNoiseStr.value = ev.value; });
+        cliffsFolder.addBinding(cbPARAMS, "groundScale", {
+          label: "Ground tex scale", min: 0.1, max: 5.0, step: 0.05,
+        }).on("change", (ev) => { uCBGroundScale.value = ev.value; });
+        cliffsFolder.addBinding(cbPARAMS, "rockScaleMul", {
+          label: "Rock tex scale", min: 0.1, max: 5.0, step: 0.05,
+        }).on("change", (ev) => { uCBRockScaleMul.value = ev.value; });
+
         // ── CLIFF BLEND TEST MODE ──────────────────────────────────────────
         // cliffBlendObjects declared in top-level state section
         let selectedCliffBlend = null;
-        const cbPARAMS = {
-          slopelow:    0.5,   // normalWorld.y below this → full rock
-          slopeHigh:   0.85,  // normalWorld.y above this → full ground
-          noiseScale:  0.06,  // noise frequency for organic edge
-          noiseStr:    0.15,  // how much noise offsets the blend threshold
-          modelIndex:  0,     // which cliff template to use
-          groundScale: 1.0,   // UV scale multiplier for ground texture on cliff
-          rockScaleMul: 1.0,  // UV scale multiplier for rock texture on cliff
-        };
 
         // TSL material: blend groundProc() on flat tops, triplanar rock on steep faces
         const cliffBlendMat = new MeshStandardNodeMaterial({
           roughness: 0.88,
           metalness: 0,
         });
-
-        const uCBSlopeLow   = uniform(cbPARAMS.slopelow  ?? 0.5);
-        const uCBSlopeHigh  = uniform(cbPARAMS.slopeHigh ?? 0.85);
-        const uCBNoiseScale = uniform(cbPARAMS.noiseScale);
-        const uCBNoiseStr   = uniform(cbPARAMS.noiseStr);
-        const uCBGroundScale = uniform(cbPARAMS.groundScale);
-        const uCBRockScaleMul = uniform(cbPARAMS.rockScaleMul);
 
         // Helper: get cliff paint UV (same world-space mapping as terrain splatmap)
         const getCBPaintUV = () =>
@@ -9090,6 +9141,9 @@
           const rockRough = texture(rock028DataTex, positionWorld.xz.mul(cbRockScaleR)).r;
           return mix(rockRough, float(0.9), blend3);
         })();
+
+        // Apply blend material to the Cliffs (C) instancer too
+        if (cliffInstancer) cliffInstancer.setMaterial(cliffBlendMat);
 
         function placeCliffBlend(wx, wy, wz, modelIndex) {
           const root = cliffTemplates[modelIndex].clone();

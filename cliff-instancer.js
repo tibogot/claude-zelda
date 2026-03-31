@@ -305,6 +305,15 @@ export function createCliffInstancer(scene, options = {}) {
       marker.visible = false;
     },
 
+    // ── Override material on all InstancedMeshes of all types ──
+    setMaterial(mat) {
+      for (const type of types) {
+        for (const entry of type.entries) {
+          entry.im.material = mat;
+        }
+      }
+    },
+
     getTypes() {
       return types.map((t, i) => ({
         name: t.name,
