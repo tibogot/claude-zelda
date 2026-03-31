@@ -27,8 +27,8 @@
         left: 0;
         top: 0;
         z-index: 10;
-        width: 330px;
-        max-width: 85vw;
+        width: 360px;
+        max-width: 90vw;
         height: 100%;
         overflow: auto;
         padding: 10px;
@@ -61,6 +61,7 @@
       import { Pane } from "tweakpane";
       import {
         Fn,
+        mix,
         uv,
         vec2,
         vec3,
@@ -83,8 +84,9 @@
 
       let renderer, scene, camera, controls, mesh, pane, renderPipeline, bloomPass;
 
+      /** Base values (sliders). Animated uniforms are derived each frame in applyEnvelopeToScene(). */
       const params = {
-        autoRotate: true,
+        autoRotate: false,
         autoRotateSpeed: 0.8,
         yScale: 0.34,
         baseColor: "#0a1320",
@@ -98,13 +100,59 @@
         radialNoiseScale: 11.5,
         radialNoiseWarp: 1.8,
         radialNoiseSpeed: 1.25,
+        radialNoiseScaleFine: 22,
+        radialNoiseWarpFine: 0.55,
+        radialNoiseSpeedFine: 2.8,
         streakFreq: 17.0,
         streakStrength: 0.33,
         edgeThreshold: 0.52,
         edgeSharpness: 0.08,
         bloomStrength: 1.05,
         bloomRadius: 0.15,
-        bloomThreshold: 0.92
+        bloomThreshold: 0.92,
+        // Life cycle: attack → sustain → decay. envMult drives shader + bloom/mesh.
+        envEnabled: true,
+        /** manual = play button / Space only; loop = continuous; loopPause = loop + rest between cycles. */
+        envPlayback: "manual",
+        /** Seconds of black / idle between slashes when envPlayback is loopPause. */
+        envPauseBetween: 5,
+        envDuration: 0.72,
+        envAttackFrac: 0.14,
+        envDecayFrac: 0.48,
+        /** Blade arc: mesh Y rotation sweeps this many degrees over one slash (Play). */
+        sweepEnabled: true,
+        sweepAngleDeg: 78,
+        // Coupled motion: oscillations scaled by envelope so motion rests at start/end of cycle.
+        coupleEnabled: false,
+        coupleBreathAmp: 0.14,
+        coupleBreathFreq: 2,
+        ringCenterWiggleAmp: 0.045,
+        ringCenterWiggleFreq: 3,
+        // Second ring (afterglow), delayed in phase — reads as echo / shockwave.
+        echoEnabled: true,
+        echoRadiusOffset: -0.07,
+        echoWidthMul: 1.15,
+        echoSoftnessMul: 1.2,
+        echoIntensity: 0.42,
+        echoPhaseDelay: 0.14,
+        // Energy along blade length (UV.v): traveling pulse.
+        vTravelEnabled: true,
+        vTravelScale: 14,
+        vTravelSpeed: 5,
+        vTravelStrength: 0.35,
+        // One bright wedge rotating around the ring (directional hit read).
+        heroEnabled: true,
+        heroWidth: 0.09,
+        heroSpeed: 0,
+        heroPhase: 0,
+        heroIntensity: 1.25,
+        // Bloom reacts to envelope peak (screen flash feel).
+        bloomPulseEnabled: false,
+        bloomPulseStrength: 0.55,
+        bloomThresholdPulse: 0.12,
+        // Mesh squash on peak (impact).
+        meshPunchEnabled: true,
+        meshPunchAmp: 0.12
       };
 
       const u = {
@@ -120,11 +168,112 @@
         radialNoiseScale: uniform(params.radialNoiseScale),
         radialNoiseWarp: uniform(params.radialNoiseWarp),
         radialNoiseSpeed: uniform(params.radialNoiseSpeed),
+        radialNoiseScaleFine: uniform(params.radialNoiseScaleFine),
+        radialNoiseWarpFine: uniform(params.radialNoiseWarpFine),
+        radialNoiseSpeedFine: uniform(params.radialNoiseSpeedFine),
         streakFreq: uniform(params.streakFreq),
         streakStrength: uniform(params.streakStrength),
         edgeThreshold: uniform(params.edgeThreshold),
-        edgeSharpness: uniform(params.edgeSharpness)
+        edgeSharpness: uniform(params.edgeSharpness),
+        envMult: uniform(1),
+        echoEnabled: uniform(params.echoEnabled ? 1 : 0),
+        echoRadiusOffset: uniform(params.echoRadiusOffset),
+        echoWidthMul: uniform(params.echoWidthMul),
+        echoSoftnessMul: uniform(params.echoSoftnessMul),
+        echoIntensity: uniform(params.echoIntensity),
+        echoEnvMult: uniform(1),
+        vTravelEnabled: uniform(params.vTravelEnabled ? 1 : 0),
+        vTravelScale: uniform(params.vTravelScale),
+        vTravelSpeed: uniform(params.vTravelSpeed),
+        vTravelStrength: uniform(params.vTravelStrength),
+        heroEnabled: uniform(params.heroEnabled ? 1 : 0),
+        heroWidth: uniform(params.heroWidth),
+        heroSpeed: uniform(params.heroSpeed),
+        heroPhase: uniform(params.heroPhase),
+        heroIntensity: uniform(params.heroIntensity)
       };
+
+      /** null = manual mode idle (no slash) until Play. */
+      let envStartTime = null;
+
+      function phaseInCycle() {
+        const dur = params.envDuration;
+        if (dur <= 1e-6) return 0;
+        if (params.envPlayback === "manual" && envStartTime === null) return 1;
+        const elapsed = u.time.value - envStartTime;
+
+        if (params.envPlayback === "manual") {
+          if (elapsed <= 0) return 0;
+          if (elapsed >= dur) return 1;
+          return elapsed / dur;
+        }
+
+        if (params.envPlayback === "loopPause") {
+          const pause = Math.max(0, params.envPauseBetween);
+          const period = dur + pause;
+          if (period <= 1e-6) return 0;
+          const te = ((elapsed % period) + period) % period;
+          if (te >= dur) return 1;
+          return te / dur;
+        }
+
+        const m = ((elapsed % dur) + dur) % dur;
+        return m / dur;
+      }
+
+      function phaseEcho() {
+        const d = params.echoPhaseDelay;
+        const p = phaseInCycle();
+        return (p - d + 1) % 1;
+      }
+
+      function applySweepRotation() {
+        if (!mesh || !params.sweepEnabled || !params.envEnabled) return;
+        const dur = params.envDuration;
+        if (dur <= 1e-6) return;
+        if (params.envPlayback === "manual" && envStartTime === null) {
+          mesh.rotation.y = mesh.userData.sweepBaseY ?? 0;
+          return;
+        }
+        const elapsed = u.time.value - envStartTime;
+        const base = mesh.userData.sweepBaseY ?? 0;
+        const r = THREE.MathUtils.degToRad(params.sweepAngleDeg);
+
+        if (params.envPlayback === "manual") {
+          if (elapsed <= 0) {
+            mesh.rotation.y = base;
+            return;
+          }
+          if (elapsed >= dur) {
+            mesh.rotation.y = base;
+            return;
+          }
+          const ph = elapsed / dur;
+          const ease = smoothstepJs(0, 1, ph);
+          mesh.rotation.y = base + ease * r;
+          return;
+        }
+
+        if (params.envPlayback === "loopPause") {
+          const pause = Math.max(0, params.envPauseBetween);
+          const period = dur + pause;
+          if (period <= 1e-6) return;
+          const te = ((elapsed % period) + period) % period;
+          if (te >= dur) {
+            mesh.rotation.y = base;
+            return;
+          }
+          const ph = te / dur;
+          const ease = smoothstepJs(0, 1, ph);
+          mesh.rotation.y = base + ease * r;
+          return;
+        }
+
+        const m = ((elapsed % dur) + dur) % dur;
+        const ph = m / dur;
+        const ease = smoothstepJs(0, 1, ph);
+        mesh.rotation.y = base + ease * r;
+      }
 
       const CONFIG = {
         height: 0.66,
@@ -138,6 +287,19 @@
         y3: 0.5,
         y4: 0.8
       };
+
+      function smoothstepJs(edge0, edge1, x) {
+        const t = Math.max(0, Math.min(1, (x - edge0) / Math.max(1e-6, edge1 - edge0)));
+        return t * t * (3 - 2 * t);
+      }
+
+      /** 0→1 attack, hold, 1→0 decay. p in [0,1]. */
+      function evalEnvelope(p, attack, decay) {
+        const sustainEnd = 1 - decay;
+        if (p <= attack) return attack > 1e-6 ? smoothstepJs(0, attack, p) : 1;
+        if (p <= sustainEnd) return 1;
+        return decay > 1e-6 ? 1 - smoothstepJs(sustainEnd, 1, p) : 0;
+      }
 
       function createHardcodedGeometry() {
         const { sides, height, r1, r2, r3, r4, r5, y2, y3, y4 } = CONFIG;
@@ -156,8 +318,6 @@
 
         for (let i = 0; i < levels.length; i++) {
           const { y, rx, rz, v } = levels[i];
-          // Duplicate the seam vertex (s=sides) so u=0 and u=1 are different vertices.
-          // This avoids shader interpolation crossing the UV wrap on one side.
           for (let s = 0; s <= sides; s++) {
             const t = s / sides;
             const angle = t * Math.PI * 2;
@@ -230,14 +390,14 @@
 
         slashMaterial.outputNode = Fn(() => {
           const uvNode = uv();
+          const vAlongBlade = uvNode.y;
           const centered = uvNode.sub(0.5).toVar();
           const radial = centered.length();
           const angle = centered.y.atan(centered.x);
           const angle01 = angle.add(Math.PI).div(Math.PI * 2);
 
           const t = u.time.mul(u.radialNoiseSpeed);
-          // IMPORTANT: build noise coords from angle+radius instead of uv.x
-          // so we don't get a visible seam where geometry wraps u≈1 back to u=0.
+          const tFine = u.time.mul(u.radialNoiseSpeedFine);
           const dir = vec2(cos(angle), sin(angle));
           const polar = dir.mul(radial);
           const nUv = polar
@@ -247,30 +407,60 @@
 
           const warpX = valueNoise2D(nUv).sub(0.5).mul(u.radialNoiseWarp);
           const warpY = valueNoise2D(nUv.add(vec2(17.3, 9.1))).sub(0.5).mul(u.radialNoiseWarp);
-          const warped = nUv.add(vec2(warpX, warpY));
+          const nUvFine = polar
+            .mul(vec2(u.radialNoiseScaleFine, u.radialNoiseScaleFine))
+            .add(vec2(tFine.mul(1.1), tFine.negate().mul(0.85)));
+          const warpFX = valueNoise2D(nUvFine.add(vec2(3.7, 2.2))).sub(0.5).mul(u.radialNoiseWarpFine);
+          const warpFY = valueNoise2D(nUvFine.add(vec2(11.1, 6.4))).sub(0.5).mul(u.radialNoiseWarpFine);
+          const warped = nUv.add(vec2(warpX, warpY)).add(vec2(warpFX, warpFY));
           const n = valueNoise2D(warped);
 
           const noisyRadius = radial.add(n.sub(0.5).mul(0.12));
           const ringDelta = abs(noisyRadius.sub(u.ringCenter));
           const ringMask = smoothstep(u.ringWidth, u.ringWidth.sub(u.ringSoftness.mul(0.5)), ringDelta);
 
+          const echoCenter = u.ringCenter.add(u.echoRadiusOffset);
+          const echoW = u.ringWidth.mul(u.echoWidthMul);
+          const echoS = u.ringSoftness.mul(u.echoSoftnessMul);
+          const ringDeltaE = abs(noisyRadius.sub(echoCenter));
+          const ringMaskEcho = smoothstep(echoW, echoW.sub(echoS.mul(0.5)), ringDeltaE);
+
           const streak = sin(angle01.mul(u.streakFreq).add(t.mul(2.4))).mul(0.5).add(0.5);
           const streakMask = streak.mul(u.streakStrength).add(float(1).sub(u.streakStrength));
 
-          const core = ringMask.mul(streakMask).toVar();
+          const vWave = sin(
+            vAlongBlade.mul(u.vTravelScale).add(u.time.mul(u.vTravelSpeed)),
+          )
+            .mul(0.5)
+            .add(0.5);
+          const vMask = mix(float(1), vWave, u.vTravelStrength.mul(u.vTravelEnabled));
+
+          const corePrimary = ringMask.mul(streakMask).mul(vMask).toVar();
+          const echoPart = ringMaskEcho.mul(streakMask).mul(vMask).mul(u.echoEnvMult).mul(u.echoIntensity);
+          const coreEcho = echoPart.mul(u.echoEnabled);
+          const core = max(corePrimary, coreEcho).toVar();
+
+          const heroCenter = fract(u.time.mul(u.heroSpeed).add(u.heroPhase));
+          const da = fract(angle01.sub(heroCenter).add(0.5)).sub(0.5);
+          const angDist = abs(da);
+          const heroMask = smoothstep(u.heroWidth, float(0), angDist).mul(u.heroEnabled);
+          const coreBoost = mix(float(1), u.heroIntensity, heroMask);
+
           const edge = smoothstep(u.edgeThreshold, u.edgeThreshold.add(u.edgeSharpness), core);
 
           const base = u.baseColor.mul(0.12);
-          const slash = u.slashColor.mul(core.mul(u.slashIntensity));
-          const edgeGlow = u.edgeColor.mul(edge.mul(u.slashIntensity).mul(0.8));
+          const em = u.envMult;
+          const slash = u.slashColor.mul(core.mul(u.slashIntensity).mul(em).mul(coreBoost));
+          const edgeGlow = u.edgeColor.mul(edge.mul(u.slashIntensity).mul(0.8).mul(em).mul(coreBoost));
           const outColor = base.add(slash).add(edgeGlow);
 
-          const alpha = max(core, edge.mul(0.7)).mul(u.alphaStrength).clamp(0, 1);
+          const alpha = max(core, edge.mul(0.7)).mul(u.alphaStrength).mul(em).clamp(0, 1);
           return vec4(outColor, alpha);
         })();
 
         mesh = new THREE.Mesh(createHardcodedGeometry(), slashMaterial);
         mesh.scale.y = params.yScale;
+        mesh.userData.sweepBaseY = 0;
         scene.add(mesh);
 
         const key = new THREE.DirectionalLight(0xffffff, 0.8);
@@ -287,6 +477,9 @@
 
         buildUI();
         onParamsChanged();
+        if (params.envPlayback !== "manual") {
+          envStartTime = u.time.value;
+        }
 
         const timer = new THREE.Timer();
         function animate() {
@@ -294,13 +487,78 @@
           timer.update();
           const dt = timer.getDelta();
           u.time.value += dt;
-          if (params.autoRotate && mesh) mesh.rotation.y += dt * params.autoRotateSpeed;
+          applyEnvelopeToScene();
+          if (params.sweepEnabled && params.envEnabled) {
+            applySweepRotation();
+          } else if (params.autoRotate && mesh) {
+            mesh.rotation.y += dt * params.autoRotateSpeed;
+          }
           controls.update();
           renderPipeline.render();
         }
         animate();
 
         window.addEventListener("resize", onResize);
+        window.addEventListener("keydown", (e) => {
+          if (e.code !== "Space") return;
+          const t = e.target;
+          if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
+          e.preventDefault();
+          playSlash();
+        });
+      }
+
+      function applyEnvelopeToScene() {
+        const phase = phaseInCycle();
+        const echoPh = phaseEcho();
+        const env = params.envEnabled
+          ? evalEnvelope(phase, params.envAttackFrac, params.envDecayFrac)
+          : 1;
+        let echoEnv = params.envEnabled
+          ? evalEnvelope(echoPh, params.envAttackFrac, params.envDecayFrac)
+          : 1;
+        if (params.envPlayback === "manual" && envStartTime === null) {
+          echoEnv = 0;
+        }
+
+        u.envMult.value = env;
+
+        let w = params.ringWidth;
+        let s = params.ringSoftness;
+        let c = params.ringCenter;
+        if (params.envEnabled && params.coupleEnabled) {
+          const breath = Math.sin(phase * Math.PI * 2 * params.coupleBreathFreq) * params.coupleBreathAmp * env;
+          w *= 1 + breath;
+          s *= 1 + breath * 0.65;
+          c +=
+            Math.sin(phase * Math.PI * 2 * params.ringCenterWiggleFreq) *
+            params.ringCenterWiggleAmp *
+            env;
+        }
+        u.ringWidth.value = w;
+        u.ringSoftness.value = s;
+        u.ringCenter.value = c;
+
+        u.echoEnvMult.value = echoEnv;
+
+        if (mesh && params.meshPunchEnabled && params.envEnabled) {
+          const punch = 1 + params.meshPunchAmp * env;
+          mesh.scale.y = params.yScale * punch;
+        } else if (mesh) {
+          mesh.scale.y = params.yScale;
+        }
+
+        if (bloomPass) {
+          let str = params.bloomStrength;
+          let thr = params.bloomThreshold;
+          if (params.bloomPulseEnabled && params.envEnabled) {
+            str += params.bloomPulseStrength * env;
+            thr = Math.max(0, thr - params.bloomThresholdPulse * env);
+          }
+          bloomPass.strength.value = str;
+          bloomPass.radius.value = params.bloomRadius;
+          bloomPass.threshold.value = thr;
+        }
       }
 
       function onParamsChanged() {
@@ -315,10 +573,30 @@
         u.radialNoiseScale.value = params.radialNoiseScale;
         u.radialNoiseWarp.value = params.radialNoiseWarp;
         u.radialNoiseSpeed.value = params.radialNoiseSpeed;
+        u.radialNoiseScaleFine.value = params.radialNoiseScaleFine;
+        u.radialNoiseWarpFine.value = params.radialNoiseWarpFine;
+        u.radialNoiseSpeedFine.value = params.radialNoiseSpeedFine;
         u.streakFreq.value = params.streakFreq;
         u.streakStrength.value = params.streakStrength;
         u.edgeThreshold.value = params.edgeThreshold;
         u.edgeSharpness.value = params.edgeSharpness;
+
+        u.echoEnabled.value = params.echoEnabled ? 1 : 0;
+        u.echoRadiusOffset.value = params.echoRadiusOffset;
+        u.echoWidthMul.value = params.echoWidthMul;
+        u.echoSoftnessMul.value = params.echoSoftnessMul;
+        u.echoIntensity.value = params.echoIntensity;
+
+        u.vTravelEnabled.value = params.vTravelEnabled ? 1 : 0;
+        u.vTravelScale.value = params.vTravelScale;
+        u.vTravelSpeed.value = params.vTravelSpeed;
+        u.vTravelStrength.value = params.vTravelStrength;
+
+        u.heroEnabled.value = params.heroEnabled ? 1 : 0;
+        u.heroWidth.value = params.heroWidth;
+        u.heroSpeed.value = params.heroSpeed;
+        u.heroPhase.value = params.heroPhase;
+        u.heroIntensity.value = params.heroIntensity;
 
         if (mesh) mesh.scale.y = params.yScale;
         if (bloomPass) {
@@ -328,15 +606,83 @@
         }
       }
 
+      function playSlash() {
+        if (mesh) mesh.userData.sweepBaseY = mesh.rotation.y;
+        envStartTime = u.time.value;
+      }
+
       function buildUI() {
         pane = new Pane({ container: document.getElementById("ui"), title: "VFX Unreal V2 - Blade Slash" });
 
         const fAnim = pane.addFolder({ title: "Animation" });
-        fAnim.addBinding(params, "autoRotate").on("change", onParamsChanged);
+        fAnim.addBinding(params, "autoRotate", {
+          label: "Spin mesh (off if sweep)",
+        }).on("change", onParamsChanged);
         fAnim.addBinding(params, "autoRotateSpeed", { min: -4, max: 4, step: 0.01 }).on("change", onParamsChanged);
+
+        const fEnv = pane.addFolder({ title: "Slash playback & fade", expanded: true });
+        fEnv.addBinding(params, "envEnabled", { label: "Envelope (fade out)" }).on("change", onParamsChanged);
+        fEnv
+          .addBinding(params, "envPlayback", {
+            label: "Mode",
+            options: {
+              "Play (button / Space)": "manual",
+              "Loop (continuous)": "loop",
+              "Loop + pause between": "loopPause",
+            },
+          })
+          .on("change", () => {
+            envStartTime = params.envPlayback === "manual" ? null : u.time.value;
+            onParamsChanged();
+          });
+        fEnv.addBinding(params, "envPauseBetween", {
+          label: "Pause between (s)",
+          min: 0,
+          max: 30,
+          step: 0.25,
+        }).on("change", onParamsChanged);
+        fEnv.addBinding(params, "envDuration", { min: 0.2, max: 12, step: 0.05 }).on("change", onParamsChanged);
+        fEnv.addBinding(params, "envAttackFrac", { min: 0.02, max: 0.45, step: 0.01 }).on("change", onParamsChanged);
+        fEnv.addBinding(params, "envDecayFrac", { min: 0.02, max: 0.6, step: 0.01 }).on("change", onParamsChanged);
+        fEnv.addBinding(params, "sweepEnabled", { label: "Blade arc sweep" }).on("change", onParamsChanged);
+        fEnv.addBinding(params, "sweepAngleDeg", { label: "Sweep (°)", min: -180, max: 180, step: 1 }).on(
+          "change",
+          onParamsChanged,
+        );
+        fEnv.addButton({ title: "Play slash" }).on("click", playSlash);
+
+        const fCouple = pane.addFolder({ title: "Coupled ring motion", expanded: false });
+        fCouple.addBinding(params, "coupleEnabled", { label: "Use envelope coupling" }).on("change", onParamsChanged);
+        fCouple.addBinding(params, "coupleBreathAmp", { min: 0, max: 0.45, step: 0.01 }).on("change", onParamsChanged);
+        fCouple.addBinding(params, "coupleBreathFreq", { min: 0.5, max: 8, step: 0.1 }).on("change", onParamsChanged);
+        fCouple.addBinding(params, "ringCenterWiggleAmp", { min: 0, max: 0.15, step: 0.001 }).on("change", onParamsChanged);
+        fCouple.addBinding(params, "ringCenterWiggleFreq", { min: 0.5, max: 12, step: 0.1 }).on("change", onParamsChanged);
+
+        const fEcho = pane.addFolder({ title: "Echo ring (delayed)", expanded: false });
+        fEcho.addBinding(params, "echoEnabled").on("change", onParamsChanged);
+        fEcho.addBinding(params, "echoRadiusOffset", { min: -0.25, max: 0.25, step: 0.005 }).on("change", onParamsChanged);
+        fEcho.addBinding(params, "echoWidthMul", { min: 0.5, max: 2, step: 0.02 }).on("change", onParamsChanged);
+        fEcho.addBinding(params, "echoSoftnessMul", { min: 0.5, max: 2.5, step: 0.02 }).on("change", onParamsChanged);
+        fEcho.addBinding(params, "echoIntensity", { min: 0, max: 1.5, step: 0.02 }).on("change", onParamsChanged);
+        fEcho.addBinding(params, "echoPhaseDelay", { min: 0, max: 0.45, step: 0.01 }).on("change", onParamsChanged);
+
+        const fV = pane.addFolder({ title: "Blade length (V) pulse", expanded: false });
+        fV.addBinding(params, "vTravelEnabled").on("change", onParamsChanged);
+        fV.addBinding(params, "vTravelScale", { min: 2, max: 48, step: 0.5 }).on("change", onParamsChanged);
+        fV.addBinding(params, "vTravelSpeed", { min: 0, max: 16, step: 0.1 }).on("change", onParamsChanged);
+        fV.addBinding(params, "vTravelStrength", { min: 0, max: 1, step: 0.02 }).on("change", onParamsChanged);
+
+        const fHero = pane.addFolder({ title: "Hero wedge (rotating hot arc)", expanded: false });
+        fHero.addBinding(params, "heroEnabled").on("change", onParamsChanged);
+        fHero.addBinding(params, "heroWidth", { min: 0.02, max: 0.35, step: 0.005 }).on("change", onParamsChanged);
+        fHero.addBinding(params, "heroSpeed", { min: -2, max: 2, step: 0.02 }).on("change", onParamsChanged);
+        fHero.addBinding(params, "heroPhase", { min: 0, max: 1, step: 0.01 }).on("change", onParamsChanged);
+        fHero.addBinding(params, "heroIntensity", { min: 1, max: 2.5, step: 0.02 }).on("change", onParamsChanged);
 
         const fMesh = pane.addFolder({ title: "Mesh" });
         fMesh.addBinding(params, "yScale", { min: 0.05, max: 1.2, step: 0.01 }).on("change", onParamsChanged);
+        fMesh.addBinding(params, "meshPunchEnabled", { label: "Y punch on peak" }).on("change", onParamsChanged);
+        fMesh.addBinding(params, "meshPunchAmp", { min: 0, max: 0.4, step: 0.01 }).on("change", onParamsChanged);
 
         const fColor = pane.addFolder({ title: "Color" });
         fColor.addBinding(params, "baseColor").on("change", onParamsChanged);
@@ -345,13 +691,25 @@
         fColor.addBinding(params, "slashIntensity", { min: 0, max: 12, step: 0.01 }).on("change", onParamsChanged);
         fColor.addBinding(params, "alphaStrength", { min: 0, max: 1.5, step: 0.01 }).on("change", onParamsChanged);
 
-        const fMask = pane.addFolder({ title: "Blade Mask" });
+        const fMask = pane.addFolder({ title: "Blade Mask (base)" });
         fMask.addBinding(params, "ringCenter", { min: 0.1, max: 1.1, step: 0.001 }).on("change", onParamsChanged);
         fMask.addBinding(params, "ringWidth", { min: 0.02, max: 0.7, step: 0.001 }).on("change", onParamsChanged);
         fMask.addBinding(params, "ringSoftness", { min: 0.01, max: 0.5, step: 0.001 }).on("change", onParamsChanged);
         fMask.addBinding(params, "radialNoiseScale", { min: 1, max: 40, step: 0.1 }).on("change", onParamsChanged);
         fMask.addBinding(params, "radialNoiseWarp", { min: 0, max: 5, step: 0.01 }).on("change", onParamsChanged);
         fMask.addBinding(params, "radialNoiseSpeed", { min: -5, max: 5, step: 0.01 }).on("change", onParamsChanged);
+        fMask.addBinding(params, "radialNoiseScaleFine", { label: "Fine noise scale", min: 4, max: 64, step: 0.5 }).on(
+          "change",
+          onParamsChanged,
+        );
+        fMask.addBinding(params, "radialNoiseWarpFine", { label: "Fine warp", min: 0, max: 2.5, step: 0.01 }).on(
+          "change",
+          onParamsChanged,
+        );
+        fMask.addBinding(params, "radialNoiseSpeedFine", { label: "Fine speed", min: 0, max: 8, step: 0.05 }).on(
+          "change",
+          onParamsChanged,
+        );
         fMask.addBinding(params, "streakFreq", { min: 1, max: 64, step: 0.1 }).on("change", onParamsChanged);
         fMask.addBinding(params, "streakStrength", { min: 0, max: 1, step: 0.01 }).on("change", onParamsChanged);
         fMask.addBinding(params, "edgeThreshold", { min: 0, max: 1, step: 0.001 }).on("change", onParamsChanged);
@@ -361,6 +719,9 @@
         fPost.addBinding(params, "bloomStrength", { min: 0, max: 8, step: 0.01 }).on("change", onParamsChanged);
         fPost.addBinding(params, "bloomRadius", { min: 0, max: 1, step: 0.01 }).on("change", onParamsChanged);
         fPost.addBinding(params, "bloomThreshold", { min: 0, max: 2, step: 0.01 }).on("change", onParamsChanged);
+        fPost.addBinding(params, "bloomPulseEnabled", { label: "Pulse w/ envelope" }).on("change", onParamsChanged);
+        fPost.addBinding(params, "bloomPulseStrength", { min: 0, max: 4, step: 0.05 }).on("change", onParamsChanged);
+        fPost.addBinding(params, "bloomThresholdPulse", { min: 0, max: 0.5, step: 0.01 }).on("change", onParamsChanged);
       }
 
       function onResize() {

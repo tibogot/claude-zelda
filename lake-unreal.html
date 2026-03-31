@@ -754,6 +754,22 @@
           shoreFoamV2VoronoiRadius: 0.38,
           /** Pow on Voronoi channel before mixing. */
           shoreFoamV2VoronoiContrast: 1.25,
+          /** Extra transparency + noise in very shallow water at terrain contact. */
+          shoreContactEnabled: true,
+          /** World units: shallow band where contact alpha ramps from full effect to none. */
+          shoreContactBandWidth: 0.45,
+          /** Multiplies water alpha at contact (lower = more see-through). */
+          shoreContactAlphaMul: 0.38,
+          /** World XZ scale for contact-edge alpha wobble. */
+          shoreContactNoiseScale: 6.5,
+          /** How much animated noise modulates alpha in the contact band (0 = off). */
+          shoreContactNoiseAmp: 0.22,
+          /** Push primary shore foam slightly inland (0 at contact, full past delay band). */
+          shoreFoamDelayEnabled: true,
+          /** Where foam ramp starts (water depth above terrain, world units). */
+          shoreFoamDelayStart: 0.08,
+          /** Softness of the foam delay ramp (added to start). */
+          shoreFoamDelaySoft: 0.35,
           /** World XZ stretch for shore noise (≠1 = elongated cells / streaks). */
           shoreNoiseAnisoX: 1,
           shoreNoiseAnisoZ: 1,
@@ -1253,6 +1269,14 @@
           uShoreFoamV2VoronoiRadius.value = params.shoreFoamV2VoronoiRadius;
           uShoreFoamV2VoronoiContrast.value = params.shoreFoamV2VoronoiContrast;
           applyPaneColor(params.shoreFoamV2Color, uShoreFoamV2Color.value);
+          uShoreContactEnabled.value = params.shoreContactEnabled ? 1 : 0;
+          uShoreContactBandWidth.value = params.shoreContactBandWidth;
+          uShoreContactAlphaMul.value = params.shoreContactAlphaMul;
+          uShoreContactNoiseScale.value = params.shoreContactNoiseScale;
+          uShoreContactNoiseAmp.value = params.shoreContactNoiseAmp;
+          uShoreFoamDelayEnabled.value = params.shoreFoamDelayEnabled ? 1 : 0;
+          uShoreFoamDelayStart.value = params.shoreFoamDelayStart;
+          uShoreFoamDelaySoft.value = params.shoreFoamDelaySoft;
           uShoreNoiseAnisoX.value = params.shoreNoiseAnisoX;
           uShoreNoiseAnisoZ.value = params.shoreNoiseAnisoZ;
           uShorePulseNoiseAnisoX.value = params.shorePulseNoiseAnisoX;
@@ -1351,6 +1375,14 @@
           params.shoreFoamV2VoronoiContrast,
         );
         const uShoreFoamV2Color = uniform(new THREE.Color(params.shoreFoamV2Color));
+        const uShoreContactEnabled = uniform(params.shoreContactEnabled ? 1 : 0);
+        const uShoreContactBandWidth = uniform(params.shoreContactBandWidth);
+        const uShoreContactAlphaMul = uniform(params.shoreContactAlphaMul);
+        const uShoreContactNoiseScale = uniform(params.shoreContactNoiseScale);
+        const uShoreContactNoiseAmp = uniform(params.shoreContactNoiseAmp);
+        const uShoreFoamDelayEnabled = uniform(params.shoreFoamDelayEnabled ? 1 : 0);
+        const uShoreFoamDelayStart = uniform(params.shoreFoamDelayStart);
+        const uShoreFoamDelaySoft = uniform(params.shoreFoamDelaySoft);
         const uShoreNoiseAnisoX = uniform(params.shoreNoiseAnisoX);
         const uShoreNoiseAnisoZ = uniform(params.shoreNoiseAnisoZ);
         const uShorePulseNoiseAnisoX = uniform(params.shorePulseNoiseAnisoX);
@@ -1918,12 +1950,47 @@
           const bz = abs(worldXZ.y);
           const boxR = max(bx, bz).div(max(uLakeHalfExtent, float(0.001)));
           const fade = float(1).sub(pow(saturate(boxR), uFadeStrength));
+          const hmHalf = uTerrainWorldSize.mul(float(0.5));
+          const hmU = worldXZ.x.add(hmHalf).div(uTerrainWorldSize);
+          const hmV = worldXZ.y.add(hmHalf).div(uTerrainWorldSize);
+          const hmUVc = vec2(hmU, hmV);
+          const inHm = step(float(0.001), hmU)
+            .mul(step(hmU, float(0.999)))
+            .mul(step(float(0.001), hmV))
+            .mul(step(hmV, float(0.999)));
+          const terrainWorldY = heightTexNode.sample(hmUVc).r;
+          const distShore = uWaterY.sub(terrainWorldY);
+          const shallowDepth = max(float(0), distShore);
+          const shoreWet = step(float(0.0001), shallowDepth);
+          const contactBand = float(1).sub(
+            smoothstep(float(0), uShoreContactBandWidth, shallowDepth),
+          );
+          const contactBlend = contactBand.mul(shoreWet).mul(inHm);
+          const nContact = mx_noise_float(
+            worldXZ.mul(uShoreContactNoiseScale).add(
+              vec2(uTime.mul(0.31), uTime.mul(-0.27)),
+            ),
+          )
+            .mul(0.5)
+            .add(0.5);
+          const alphaContactMul = mix(
+            float(1),
+            uShoreContactAlphaMul,
+            contactBlend.mul(uShoreContactEnabled),
+          );
+          const alphaNoiseWobble = mix(
+            float(1),
+            nContact,
+            contactBlend.mul(uShoreContactNoiseAmp).mul(uShoreContactEnabled),
+          );
           const tForAlpha = t.mul(uWaterCellsEnabled);
           const alphaDepthThin = mix(uWaterShallowAlpha, float(1), depthBlend);
           const waterAlpha = mix(uDeepOpacity, 1, max(tForAlpha, ripple))
             .mul(uOpacity)
             .mul(fade)
-            .mul(alphaDepthThin);
+            .mul(alphaDepthThin)
+            .mul(alphaContactMul)
+            .mul(alphaNoiseWobble);
 
           // Waterline/foam: depth prepass vs water — band thickness scales with view distance (not fixed linear ε).
           const rawScene = rawSceneDepth;
@@ -1944,16 +2011,6 @@
           const foamCol = mix(uGlowColor, uLineColor, line);
           const geoMask = float(1).sub(step(float(0.9999), rawScene));
 
-          const hmHalf = uTerrainWorldSize.mul(float(0.5));
-          const hmU = worldXZ.x.add(hmHalf).div(uTerrainWorldSize);
-          const hmV = worldXZ.y.add(hmHalf).div(uTerrainWorldSize);
-          const hmUVc = vec2(hmU, hmV);
-          const inHm = step(float(0.001), hmU)
-            .mul(step(hmU, float(0.999)))
-            .mul(step(float(0.001), hmV))
-            .mul(step(hmV, float(0.999)));
-          const terrainWorldY = heightTexNode.sample(hmUVc).r;
-          const distShore = uWaterY.sub(terrainWorldY);
           const shoreLayers = shoreFoamLayerMasks(worldXZ, distShore, float(1));
           const useV2 = uShoreFoamV2Enabled;
           const shorePrimaryOld = shoreLayers.x;
@@ -1965,7 +2022,20 @@
           const foamLandMul = float(1).sub(uw.mul(0.9));
           // Legacy shoreline requires heightmapShoreFoam. V2 is independent so you can see it without that toggle.
           const shoreFoamGate = mix(uHeightmapFoamEnabled, float(1), useV2);
-          const pMask = shorePrimaryA.mul(inHm).mul(shoreFoamGate).mul(foamLandMul);
+          const foamDelayRamp = mix(
+            float(1),
+            smoothstep(
+              uShoreFoamDelayStart,
+              uShoreFoamDelayStart.add(uShoreFoamDelaySoft),
+              shallowDepth,
+            ),
+            uShoreFoamDelayEnabled,
+          );
+          const pMask = shorePrimaryA
+            .mul(inHm)
+            .mul(shoreFoamGate)
+            .mul(foamLandMul)
+            .mul(foamDelayRamp);
           const sMaskA = pulseAMask.mul(inHm).mul(uHeightmapFoamEnabled).mul(foamLandMul);
           const sMaskB = pulseBMask.mul(inHm).mul(uHeightmapFoamEnabled).mul(foamLandMul);
           const depthContrib = foamAlphaDepth
@@ -3605,6 +3675,53 @@
           min: 0.04,
           max: 0.35,
           step: 0.01,
+        });
+
+        const fShoreContact = pane.addFolder({
+          title: "Shore — contact & foam delay",
+          expanded: false,
+        });
+        fShoreContact.addBinding(params, "shoreContactEnabled", {
+          label: "Shallow contact transparency",
+        });
+        fShoreContact.addBinding(params, "shoreContactBandWidth", {
+          label: "Contact band (world)",
+          min: 0.08,
+          max: 2.5,
+          step: 0.02,
+        });
+        fShoreContact.addBinding(params, "shoreContactAlphaMul", {
+          label: "Alpha at contact",
+          min: 0.05,
+          max: 1,
+          step: 0.02,
+        });
+        fShoreContact.addBinding(params, "shoreContactNoiseScale", {
+          label: "Edge noise scale",
+          min: 0.5,
+          max: 24,
+          step: 0.25,
+        });
+        fShoreContact.addBinding(params, "shoreContactNoiseAmp", {
+          label: "Edge noise on alpha",
+          min: 0,
+          max: 0.85,
+          step: 0.02,
+        });
+        fShoreContact.addBinding(params, "shoreFoamDelayEnabled", {
+          label: "Foam delay inland",
+        });
+        fShoreContact.addBinding(params, "shoreFoamDelayStart", {
+          label: "Foam starts after (depth)",
+          min: 0,
+          max: 0.6,
+          step: 0.01,
+        });
+        fShoreContact.addBinding(params, "shoreFoamDelaySoft", {
+          label: "Foam delay softness",
+          min: 0.05,
+          max: 1.2,
+          step: 0.02,
         });
 
         const fRings = pane.addFolder({
