@@ -764,10 +764,12 @@ export function setupGrassPatches(scene, camera, grassGroup, geosAndMats, option
       farCount = 0;
 
     // ── HIGH tier grid (spacing = ps) ──
+    // Track HIGH coverage so MID/FAR can skip fully-covered cells
+    const highMaxEdge = useLod ? midDist + lodHysteresis : maxDist;
     {
       const snapX = Math.floor(camera.position.x / ps) * ps;
       const snapZ = Math.floor(camera.position.z / ps) * ps;
-      const cells = Math.ceil((useLod ? midDist + lodHysteresis + ps : maxDist) / ps) + 1;
+      const cells = Math.ceil(highMaxEdge / ps) + 1;
       _aabbSize.set(ps, 1000, ps);
 
       for (let r = -cells; r <= cells; r++) {
@@ -777,8 +779,7 @@ export function setupGrassPatches(scene, camera, grassGroup, geosAndMats, option
           _cellPos.set(cellX, 0, cellZ);
           _aabb.setFromCenterAndSize(_cellPos, _aabbSize);
           const dist = _aabb.distanceToPoint(_camPosXZ);
-          if (useLod && dist > midDist + lodHysteresis) continue;
-          if (!useLod && dist > maxDist) continue;
+          if (dist > highMaxEdge) continue;
           if (!_frustum.intersectsBox(_aabb)) continue;
 
           const mesh = getMesh(poolHigh, geoHigh);
@@ -795,11 +796,16 @@ export function setupGrassPatches(scene, camera, grassGroup, geosAndMats, option
     }
 
     // ── MID tier grid (spacing = psMid) ──
+    // Skip cells whose farthest corner is inside HIGH zone (fully covered).
+    // Cells that partially overlap HIGH are still rendered — overlap is OK,
+    // blade hashing + density culling prevent visual doubling.
+    const midMaxEdge = farDist + lodHysteresis;
     if (useLod) {
       const snapX = Math.floor(camera.position.x / psMid) * psMid;
       const snapZ = Math.floor(camera.position.z / psMid) * psMid;
-      const cells = Math.ceil((farDist + lodHysteresis + psMid) / psMid) + 1;
+      const cells = Math.ceil((midMaxEdge + psMid) / psMid) + 1;
       _aabbSize.set(psMid, 1000, psMid);
+      const halfMid = psMid * 0.5;
 
       for (let r = -cells; r <= cells; r++) {
         for (let c = -cells; c <= cells; c++) {
@@ -808,8 +814,13 @@ export function setupGrassPatches(scene, camera, grassGroup, geosAndMats, option
           _cellPos.set(cellX, 0, cellZ);
           _aabb.setFromCenterAndSize(_cellPos, _aabbSize);
           const dist = _aabb.distanceToPoint(_camPosXZ);
-          if (dist <= midDist - lodHysteresis) continue; // HIGH covers this
-          if (dist > farDist + lodHysteresis) continue;
+          if (dist > midMaxEdge) continue;
+          // Skip if the farthest corner of this cell is still inside HIGH zone
+          const farthestCornerDist = Math.sqrt(
+            Math.pow(Math.max(Math.abs(cellX - camera.position.x) + halfMid, 0), 2) +
+            Math.pow(Math.max(Math.abs(cellZ - camera.position.z) + halfMid, 0), 2)
+          );
+          if (farthestCornerDist < midDist - lodHysteresis) continue;
           if (!_frustum.intersectsBox(_aabb)) continue;
 
           const mesh = getMesh(poolMid, geoMid);
@@ -831,6 +842,7 @@ export function setupGrassPatches(scene, camera, grassGroup, geosAndMats, option
       const snapZ = Math.floor(camera.position.z / psFar) * psFar;
       const cells = Math.ceil((maxDist + psFar) / psFar) + 1;
       _aabbSize.set(psFar, 1000, psFar);
+      const halfFar = psFar * 0.5;
 
       for (let r = -cells; r <= cells; r++) {
         for (let c = -cells; c <= cells; c++) {
@@ -839,8 +851,13 @@ export function setupGrassPatches(scene, camera, grassGroup, geosAndMats, option
           _cellPos.set(cellX, 0, cellZ);
           _aabb.setFromCenterAndSize(_cellPos, _aabbSize);
           const dist = _aabb.distanceToPoint(_camPosXZ);
-          if (dist <= farDist - lodHysteresis) continue; // MID covers this
           if (dist > maxDist) continue;
+          // Skip if the farthest corner is still inside MID zone
+          const farthestCornerDist = Math.sqrt(
+            Math.pow(Math.max(Math.abs(cellX - camera.position.x) + halfFar, 0), 2) +
+            Math.pow(Math.max(Math.abs(cellZ - camera.position.z) + halfFar, 0), 2)
+          );
+          if (farthestCornerDist < farDist - lodHysteresis) continue;
           if (!_frustum.intersectsBox(_aabb)) continue;
 
           const mesh = getMesh(poolFar, geoFar);
