@@ -653,6 +653,16 @@
       cliffDensityCtx.fillStyle = "#000";
       cliffDensityCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
 
+      // ─── CLIFF PAINT CANVAS (separate from terrain splatmap) ──────
+      const cliffPaintCanvas = document.createElement("canvas");
+      cliffPaintCanvas.width = cliffPaintCanvas.height = SPLAT_RES;
+      const cliffPaintCtx = cliffPaintCanvas.getContext("2d", {
+        willReadFrequently: true,
+      });
+      cliffPaintCtx.fillStyle = "#000";
+      cliffPaintCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+      let cliffPaintTex = null; // created after renderer init
+
       // ─── IMAGE TEXTURE SPLATMAP ──────────────
       // Uint8Array avoids canvas premultiplied-alpha zeroing our channels (R*alpha=0 bug)
       // RGBA: R=slot0 weight, G=slot1, B=slot2, A=slot3
@@ -997,6 +1007,7 @@
       let cliffHeightTex = null;
       let cliffGrassPatchSystem = null;
       let cliffGrassEraseMode = false;
+      let cliffPaintEraseMode = false;
       let geminiGrassPatchSystem = null;
       let geminiGrassUniforms = null;
       let geminiGrassEraseMode = false;
@@ -1726,6 +1737,16 @@
           cliffDensityCtx.fill();
         }
         if (cliffDensityTex) cliffDensityTex.needsUpdate = true;
+      }
+
+      // ─── CLIFF BLEND PAINT ───────────────────
+      function paintCliffBlendAt(wx, wz, erase) {
+        const { u, v } = worldToUV(wx, wz);
+        const cx = u * SPLAT_RES, cy = v * SPLAT_RES;
+        const alpha = brushStr / 100;
+        const [cr, cg, cb] = erase ? [0, 0, 0] : [255, 255, 255];
+        _applyBrushToCanvas(cliffPaintCtx, cx, cy, cr, cg, cb, alpha);
+        if (cliffPaintTex) cliffPaintTex.needsUpdate = true;
       }
 
       // ─── TREE PAINT ──────────────────────────
@@ -3204,6 +3225,10 @@
         cliffDensityTex = new THREE.CanvasTexture(cliffDensityCanvas);
         cliffDensityTex.wrapS = cliffDensityTex.wrapT =
           THREE.ClampToEdgeWrapping;
+
+        // ── CLIFF PAINT TEX (separate splatmap for cliff blend surfaces) ──
+        cliffPaintTex = new THREE.CanvasTexture(cliffPaintCanvas);
+        cliffPaintTex.wrapS = cliffPaintTex.wrapT = THREE.ClampToEdgeWrapping;
 
         // ── GEMINI CLIFF DENSITY TEX ──────────────────────────────────────
         geminiCliffDensityTex = new THREE.CanvasTexture(geminiCliffDensityCanvas);
@@ -6614,6 +6639,7 @@
             "Waterfall [H]": "waterfall",
             "Play [F]": "play",
             "Cliff Blend Test": "cliffblend",
+            "Cliff Paint": "cliffpaint",
           },
         });
         modeBinding.on("change", (ev) => setMode(ev.value));
@@ -8976,6 +9002,8 @@
           noiseScale:  0.06,  // noise frequency for organic edge
           noiseStr:    0.15,  // how much noise offsets the blend threshold
           modelIndex:  0,     // which cliff template to use
+          groundScale: 1.0,   // UV scale multiplier for ground texture on cliff
+          rockScaleMul: 1.0,  // UV scale multiplier for rock texture on cliff
         };
 
         // TSL material: blend groundProc() on flat tops, triplanar rock on steep faces
@@ -8984,19 +9012,26 @@
           metalness: 0,
         });
 
-        const uCBSlopeLow  = uniform(cbPARAMS.slopelow  ?? 0.5);
-        const uCBSlopeHigh = uniform(cbPARAMS.slopeHigh ?? 0.85);
+        const uCBSlopeLow   = uniform(cbPARAMS.slopelow  ?? 0.5);
+        const uCBSlopeHigh  = uniform(cbPARAMS.slopeHigh ?? 0.85);
         const uCBNoiseScale = uniform(cbPARAMS.noiseScale);
         const uCBNoiseStr   = uniform(cbPARAMS.noiseStr);
+        const uCBGroundScale = uniform(cbPARAMS.groundScale);
+        const uCBRockScaleMul = uniform(cbPARAMS.rockScaleMul);
+
+        // Helper: get cliff paint UV (same world-space mapping as terrain splatmap)
+        const getCBPaintUV = () =>
+          positionWorld.xz.add(float(TERRAIN_SIZE * 0.5)).div(float(TERRAIN_SIZE));
 
         cliffBlendMat.colorNode = Fn(() => {
-          // Ground layer — same procedural as terrain, sampled at world XZ
+          // Ground layer — same procedural as terrain, with adjustable scale
           const ground = groundProc();
 
-          // Rock layer — triplanar Rock028 (same as terrain cliff faces)
-          const rockUV_XZ = positionWorld.xz.mul(uRockScale);
-          const rockUV_XY = positionWorld.xy.mul(uRockScale);
-          const rockUV_ZY = positionWorld.zy.mul(uRockScale);
+          // Rock layer — triplanar Rock028, with adjustable scale multiplier
+          const cbRockScale = uRockScale.mul(uCBRockScaleMul);
+          const rockUV_XZ = positionWorld.xz.mul(cbRockScale);
+          const rockUV_XY = positionWorld.xy.mul(cbRockScale);
+          const rockUV_ZY = positionWorld.zy.mul(cbRockScale);
           const triWRaw = normalWorld.abs().pow(uTriplanarSharp);
           const triW = triWRaw.div(triWRaw.x.add(triWRaw.y).add(triWRaw.z));
           const rawRock = texture(rock028ColorTex, rockUV_XZ).rgb.mul(triW.y)
@@ -9010,14 +9045,23 @@
           const slopeVal = normalWorld.y.add(noiseOffset);
           const blend = smoothstep(uCBSlopeLow, uCBSlopeHigh, slopeVal);
 
-          return mix(rock, ground, blend);
+          let col = mix(rock, ground, blend);
+
+          // Cliff paint layer on top (separate canvas, independent from terrain splatmap)
+          const cpaint = texture(cliffPaintTex, getCBPaintUV());
+          // R channel = paint strength, paint applies the terrain procedural color as override
+          const paintCol = groundProc();
+          col = mix(col, paintCol, cpaint.r);
+
+          return col;
         })();
 
         // Normal node: triplanar rock028 normal on steep, flat terrain normal on top
         cliffBlendMat.normalNode = (() => {
-          const _nuvXZ = positionWorld.xz.mul(uRockScale);
-          const _nuvXY = positionWorld.xy.mul(uRockScale);
-          const _nuvZY = positionWorld.zy.mul(uRockScale);
+          const cbRockScaleN = uRockScale.mul(uCBRockScaleMul);
+          const _nuvXZ = positionWorld.xz.mul(cbRockScaleN);
+          const _nuvXY = positionWorld.xy.mul(cbRockScaleN);
+          const _nuvZY = positionWorld.zy.mul(cbRockScaleN);
           const _ntWRaw = normalWorld.abs().pow(uTriplanarSharp);
           const _ntW = _ntWRaw.div(_ntWRaw.x.add(_ntWRaw.y).add(_ntWRaw.z));
           const rNrmBA_XZ = texture(rock028DataTex, _nuvXZ).ba;
@@ -9033,9 +9077,10 @@
 
         // Roughness: rocky on steep, smoother on flat
         cliffBlendMat.roughnessNode = Fn(() => {
+          const cbRockScaleR = uRockScale.mul(uCBRockScaleMul);
           const noiseOffset3 = mx_noise_float(positionWorld.xz.mul(uCBNoiseScale)).mul(uCBNoiseStr);
           const blend3 = smoothstep(uCBSlopeLow, uCBSlopeHigh, normalWorld.y.add(noiseOffset3));
-          const rockRough = texture(rock028DataTex, positionWorld.xz.mul(uRockScale)).r;
+          const rockRough = texture(rock028DataTex, positionWorld.xz.mul(cbRockScaleR)).r;
           return mix(rockRough, float(0.9), blend3);
         })();
 
@@ -9103,6 +9148,15 @@
           min: 0, max: 0.5, step: 0.01,
         }).on("change", (ev) => { uCBNoiseStr.value = ev.value; });
         cliffBlendFolder.addBlade({ view: "separator" });
+        cliffBlendFolder.addBinding(cbPARAMS, "groundScale", {
+          label: "Ground tex scale",
+          min: 0.1, max: 5.0, step: 0.05,
+        }).on("change", (ev) => { uCBGroundScale.value = ev.value; });
+        cliffBlendFolder.addBinding(cbPARAMS, "rockScaleMul", {
+          label: "Rock tex scale",
+          min: 0.1, max: 5.0, step: 0.05,
+        }).on("change", (ev) => { uCBRockScaleMul.value = ev.value; });
+        cliffBlendFolder.addBlade({ view: "separator" });
         cliffBlendFolder.addButton({ title: "🗑 Delete selected  [Del]" }).on("click", () => {
           if (selectedCliffBlend) {
             scene.remove(selectedCliffBlend);
@@ -9115,6 +9169,27 @@
           cliffBlendObjects.forEach((o) => scene.remove(o));
           cliffBlendObjects.length = 0;
           selectCliffBlend(null);
+        });
+
+        // ── CLIFF PAINT MODE FOLDER ──
+        const cliffPaintFolder = pane.addFolder({
+          title: "Cliff Paint",
+          expanded: true,
+        });
+        cliffPaintFolder.hidden = true;
+        const cbPaintPARAMS = { erase: false };
+        cliffPaintFolder.addBinding(cbPaintPARAMS, "erase", {
+          label: "Erase (or Shift)",
+        }).on("change", (ev) => { cliffPaintEraseMode = ev.value; });
+        cliffPaintFolder.addButton({ title: "Clear cliff paint" }).on("click", () => {
+          cliffPaintCtx.fillStyle = "#000";
+          cliffPaintCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+          if (cliffPaintTex) cliffPaintTex.needsUpdate = true;
+        });
+        cliffPaintFolder.addButton({ title: "Fill cliff paint" }).on("click", () => {
+          cliffPaintCtx.fillStyle = "#fff";
+          cliffPaintCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
+          if (cliffPaintTex) cliffPaintTex.needsUpdate = true;
         });
 
         // ── PATH FOLDER ──
@@ -9975,6 +10050,7 @@
           geminiGrassFolder.hidden = mode !== "geminigrass";
           if (typeof geminiCliffGrassFolder !== "undefined") geminiCliffGrassFolder.hidden = mode !== "geminicliffgrass";
           cliffBlendFolder.hidden = mode !== "cliffblend";
+          cliffPaintFolder.hidden = mode !== "cliffpaint";
           brushFolder.hidden =
             mode === "view" ||
             mode === "place" ||
@@ -10107,7 +10183,9 @@
                                                     ? "GEMINI CLIFF GRASS MODE"
                                                     : mode === "cliffblend"
                                                       ? "CLIFF BLEND TEST"
-                                                      : "PLACE MODE"; // play handled above
+                                                      : mode === "cliffpaint"
+                                                        ? "CLIFF PAINT"
+                                                        : "PLACE MODE"; // play handled above
           badge.className = mode;
           renderer.domElement.style.cursor =
             mode === "view" ? "default" : "crosshair";
@@ -10410,6 +10488,8 @@
             paintLODAt(p.x, p.z, e.shiftKey);
           if (currentMode === "ftrees")
             paintFTreeAt(p.x, p.z, e.shiftKey);
+          if (currentMode === "cliffpaint")
+            paintCliffBlendAt(p.x, p.z, cliffPaintEraseMode || e.shiftKey);
         });
 
         // ── BRUSH SCROLL SHORTCUTS ──────────────────────────────────────
@@ -10650,6 +10730,8 @@
             paintFleurAt(p.x, p.z, fleurEraseMode || e.shiftKey);
           if (currentMode === "ambientfx")
             paintAmbientFXAt(p.x, p.z, ambientFXErase || e.shiftKey);
+          if (currentMode === "cliffpaint")
+            paintCliffBlendAt(p.x, p.z, cliffPaintEraseMode || e.shiftKey);
         });
 
         renderer.domElement.addEventListener("mouseup", () => {
