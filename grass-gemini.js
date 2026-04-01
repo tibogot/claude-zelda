@@ -282,6 +282,8 @@ export function createGrassMaterial(ctx) {
   const vClumpShade = varying(float(1), "v_gm_cs");
   const vColorTint = varying(vec3(1, 1, 1), "v_gm_ct");
   const vDryBlend = varying(float(0), "v_gm_db");
+  const vRandomShade = varying(float(1), "v_gm_rs");
+  const vSatHash = varying(float(0), "v_gm_sh");
 
   const material = new THREE.MeshStandardNodeMaterial({
     side: THREE.FrontSide,
@@ -408,6 +410,10 @@ export function createGrassMaterial(ctx) {
     vColorTint.assign(mix(tintTarget, vec3(1, 1, 1), farMorph));
     const isDry = smoothstep(uCvDryAmount, float(0.0), h5);
     vDryBlend.assign(isDry.mul(float(1).sub(farMorph)));
+
+    // Per-blade shade + sat hash — computed here (vertex) to avoid fragment precision noise
+    vRandomShade.assign(mix(float(0.75), float(1.0), h1));
+    vSatHash.assign(hv2.y);
 
     // ── Arc bending ──
     const baseStiffness = smoothstep(0.0, uStiffness, vUv.y);
@@ -568,12 +574,6 @@ export function createGrassMaterial(ctx) {
   // COLOR NODE — fragment shader (base color)
   // ════════════════════════════════════════════════════════════
   material.colorNode = Fn(() => {
-    const off = attribute("offset", "vec3");
-    const bladeWorldC = modelWorldMatrix.mul(vec4(off.x, float(0), off.z, float(1))).xyz;
-    const bladeXZ = vec2(bladeWorldC.x, bladeWorldC.z);
-    const fragHv = hash22(bladeXZ);
-    const randomShade = mix(float(0.75), float(1.0), fragHv.x);
-
     // AO: LOD-modulated (weaker at distance)
     const aoLod = uAoBase.mul(
       mix(float(0.5), float(1.0), smoothstep(float(0.5), float(0.0), vLodMorph)),
@@ -584,7 +584,7 @@ export function createGrassMaterial(ctx) {
     // ── Color variation ──
     const hueCol = mix(baseCol, vColorTint, uCvHueSpread);
     const lum = dot(hueCol, vec3(0.299, 0.587, 0.114));
-    const satFactor = float(1.0).sub(fragHv.y.mul(uCvSatSpread));
+    const satFactor = float(1.0).sub(vSatHash.mul(uCvSatSpread));
     const satCol = mix(vec3(lum, lum, lum), hueCol, satFactor);
     const dryBlend = vDryBlend.mul(
       float(1.0).sub(vUv.y).mul(float(0.5)).add(float(0.5)),
@@ -594,7 +594,7 @@ export function createGrassMaterial(ctx) {
 
     // Distance fade + clump shade
     const finalCol = variedCol.mul(
-      vec3(randomShade.mul(vClumpShade).mul(ao).mul(vDistFade)),
+      vec3(vRandomShade.mul(vClumpShade).mul(ao).mul(vDistFade)),
     );
 
     // LOD debug tint
