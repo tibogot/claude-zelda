@@ -74,6 +74,7 @@
       import { Pane } from "tweakpane";
       import { createButterflyFX, buildButterflyUI } from "./fx-butterflies.js";
       import { createEmberFX, buildEmberUI } from "./fx-embers.js";
+      import { createFlowingLines } from "./flowing-lines.js";
 
       // ─── Globals ──────────────────────────────────────────────────────
       let camera, scene, renderer, controls, timer;
@@ -102,6 +103,16 @@
 
       // ─── Tweakpane refs (must be declared before init) ────────────────
       let pane, fxFolder;
+
+      // Simple terrain height used for both the ground mesh and flowing lines.
+      function terrainHeight(x, z) {
+        const base =
+          (Math.sin(x * 0.25) * Math.cos(z * 0.2) * 0.5 +
+            Math.sin(x * 0.15 + z * 0.1) * 0.3 +
+            Math.cos(z * 0.3 + x * 0.05) * 0.2);
+        // Slight overall scaling so bumps are clearly visible
+        return base * 3.0;
+      }
 
       // ─── Init ─────────────────────────────────────────────────────────
       init();
@@ -153,44 +164,36 @@
         scene.userData.dirLight = dirLight;
         scene.userData.ambLight = ambLight;
 
-        // ─── Ground plane ───────────────────────────────────────────
-        const groundGeo = new THREE.PlaneGeometry(80, 80);
+        // ─── Ground plane with gentle bumps ─────────────────────────
+        const groundSize = 80;
+        const groundRes  = 64;
+        const groundGeo = new THREE.PlaneGeometry(groundSize, groundSize, groundRes, groundRes);
         const groundMat = new THREE.MeshStandardMaterial({
-          color: 0x4a7a3a,
+          color: 0x3b6a3b,
           roughness: 0.9,
+          metalness: 0.0,
         });
         const ground = new THREE.Mesh(groundGeo, groundMat);
+        // Displace vertices along local Z, then rotate the plane so this becomes world Y.
+        const pos = groundGeo.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+          const x = pos.getX(i);
+          const y = pos.getY(i);
+          const h = terrainHeight(x, y);
+          pos.setZ(i, h);
+        }
+        pos.needsUpdate = true;
+        groundGeo.computeVertexNormals();
         ground.rotation.x = -Math.PI / 2;
         ground.position.y = 0;
         ground.receiveShadow = true;
         scene.add(ground);
         scene.userData.ground = ground;
 
-        // ─── Some reference props (small rocks/bumps for scale) ─────
-        const bumpGeo = new THREE.SphereGeometry(0.8, 6, 4);
-        const bumpMat = new THREE.MeshStandardMaterial({ color: 0x5a6a4a, roughness: 0.95 });
-        for (let i = 0; i < 8; i++) {
-          const bump = new THREE.Mesh(bumpGeo, bumpMat);
-          const angle = (i / 8) * Math.PI * 2;
-          const r = 6 + Math.random() * 12;
-          bump.position.set(
-            Math.cos(angle) * r,
-            -0.3 + Math.random() * 0.2,
-            Math.sin(angle) * r
-          );
-          bump.scale.set(
-            0.6 + Math.random() * 1.2,
-            0.3 + Math.random() * 0.5,
-            0.6 + Math.random() * 1.2
-          );
-          bump.castShadow = true;
-          bump.receiveShadow = true;
-          scene.add(bump);
-        }
-
-        // ─── Grid helper for spatial reference ──────────────────────
-        const grid = new THREE.GridHelper(80, 40, 0x333333, 0x222222);
-        grid.position.y = 0.01;
+        // ─── Optional grid helper (kept off to avoid flattening the look) ─────
+        const grid = new THREE.GridHelper(80, 40, 0x222222, 0x151515);
+        grid.position.y = 0.02;
+        grid.visible = false;
         scene.add(grid);
         scene.userData.grid = grid;
 
@@ -300,10 +303,10 @@
 
       function getFXColor(name) {
         const colors = {
-          Butterflies: "#f7b",
-          Embers:      "#fa3",
-          Fireflies:   "#bf5",
-          "Wind Lines":"#adf",
+          Butterflies:    "#f7b",
+          Embers:         "#fa3",
+          Fireflies:      "#bf5",
+          "Flowing Lines":"#adf",
         };
         return colors[name] || "#7df";
       }
@@ -316,11 +319,11 @@
         pane.addBinding(shared, "effect", {
           label: "Effect",
           options: {
-            "None":       "none",
-            "Butterflies":"Butterflies",
-            "Embers":     "Embers",
-            "Fireflies":  "Fireflies",
-            "Wind Lines": "Wind Lines",
+            "None":         "none",
+            "Butterflies":  "Butterflies",
+            "Embers":       "Embers",
+            "Fireflies":    "Fireflies",
+            "Flowing Lines":"Flowing Lines",
           },
         }).on("change", (ev) => switchEffect(ev.value));
 
@@ -378,6 +381,168 @@
         fxFolder = null;
       }
 
+      // Flowing Lines effect wired directly to flowing-lines.js and terrainHeight().
+      function createFlowingLinesFX(scene, shared) {
+        const params = {
+          lineCount: 12,
+          lineLength: 14,
+          lineWidth: 0.18,
+          segments: 24,
+          heightOffset: 0.4,
+          verticalWave: 0.1,
+          animationSpeed: 1.2,
+          pathRadius: 30,
+          pathFrequency: 0.9,
+          lineColor: "#a8d8ea",
+          lineOpacity: 0.75,
+          pathNoise: 0.0,
+          windStrength: 0.0,
+          depthFadeNear: 0.0,
+          depthFadeFar: 0.0,
+        };
+
+        let flowing = null;
+
+        function buildInstance() {
+          if (flowing && flowing.group) {
+            scene.remove(flowing.group);
+            for (const line of flowing.linesData) {
+              line.mesh.geometry.dispose();
+            }
+          }
+
+          flowing = createFlowingLines({
+            scene,
+            getTerrainHeight: (x, z) => terrainHeight(x, z) + shared.groundY,
+            lineCount: params.lineCount,
+            lineLength: params.lineLength,
+            lineWidth: params.lineWidth,
+            segments: params.segments,
+            heightOffset: params.heightOffset,
+            verticalWave: params.verticalWave,
+            animationSpeed: params.animationSpeed,
+            pathRadius: params.pathRadius,
+            pathFrequency: params.pathFrequency,
+            lineColor: params.lineColor,
+            lineOpacity: params.lineOpacity,
+            pathNoise: params.pathNoise,
+            windDirX: shared.windX,
+            windDirZ: shared.windZ,
+            windSpeed: params.windStrength * shared.windStrength * 0.05,
+            depthFadeNear: params.depthFadeNear,
+            depthFadeFar: params.depthFadeFar,
+          });
+        }
+
+        buildInstance();
+
+        function update(_dt, elapsed) {
+          if (!flowing) return;
+
+          flowing.params.heightOffset = params.heightOffset;
+          flowing.params.verticalWave = params.verticalWave;
+          flowing.params.animationSpeed = params.animationSpeed;
+          flowing.params.pathRadius = params.pathRadius;
+          flowing.params.pathFrequency = params.pathFrequency;
+          flowing.params.pathNoise = params.pathNoise;
+          flowing.params.windDirX = shared.windX;
+          flowing.params.windDirZ = shared.windZ;
+          flowing.params.windSpeed = params.windStrength * shared.windStrength * 0.05;
+
+          flowing.setParams({
+            lineColor: params.lineColor,
+            lineOpacity: params.lineOpacity,
+            depthFadeNear: params.depthFadeNear,
+            depthFadeFar: params.depthFadeFar,
+          });
+
+          flowing.update(elapsed);
+        }
+
+        function dispose(sc) {
+          if (!flowing) return;
+          sc.remove(flowing.group);
+          for (const line of flowing.linesData) {
+            line.mesh.geometry.dispose();
+          }
+          flowing = null;
+        }
+
+        function rebuild() {
+          buildInstance();
+        }
+
+        return { update, dispose, params, rebuild };
+      }
+
+      function buildFlowingLinesUI(folder, state) {
+        const p = state.params;
+
+        folder.addButton({ title: "Apply geometry" }).on("click", () => {
+          state.rebuild();
+        });
+
+        folder.addBinding(p, "lineCount", {
+          label: "Line Count",
+          min: 1, max: 24, step: 1,
+        });
+        folder.addBinding(p, "lineLength", {
+          label: "Line Length",
+          min: 4, max: 30, step: 1,
+        });
+        folder.addBinding(p, "lineWidth", {
+          label: "Line Width",
+          min: 0.05, max: 0.5, step: 0.01,
+        });
+        folder.addBinding(p, "segments", {
+          label: "Segments",
+          min: 8, max: 48, step: 2,
+        });
+        folder.addBinding(p, "heightOffset", {
+          label: "Height Offset",
+          min: 0, max: 3, step: 0.05,
+        });
+        folder.addBinding(p, "verticalWave", {
+          label: "Vertical Wave",
+          min: 0, max: 0.3, step: 0.01,
+        });
+        folder.addBinding(p, "animationSpeed", {
+          label: "Anim Speed",
+          min: 0.2, max: 3, step: 0.05,
+        });
+        folder.addBinding(p, "pathRadius", {
+          label: "Path Radius",
+          min: 10, max: 80, step: 2,
+        });
+        folder.addBinding(p, "pathFrequency", {
+          label: "Path Freq",
+          min: 0.2, max: 2, step: 0.05,
+        });
+        folder.addBinding(p, "lineColor", { label: "Line Color" });
+        folder.addBinding(p, "lineOpacity", {
+          label: "Opacity",
+          min: 0.2, max: 1, step: 0.05,
+        });
+
+        const adv = folder.addFolder({ title: "Advanced", expanded: false });
+        adv.addBinding(p, "pathNoise", {
+          label: "Path Noise",
+          min: 0, max: 4, step: 0.1,
+        });
+        adv.addBinding(p, "windStrength", {
+          label: "Wind Coupling",
+          min: 0, max: 3, step: 0.05,
+        });
+        adv.addBinding(p, "depthFadeNear", {
+          label: "Depth Fade Near",
+          min: 0, max: 80, step: 1,
+        });
+        adv.addBinding(p, "depthFadeFar", {
+          label: "Depth Fade Far",
+          min: 0, max: 200, step: 1,
+        });
+      }
+
       // ─── Effect registration ────────────────────────────────────────────
       effects["Butterflies"] = {
         create: (sc, sh) => createButterflyFX(sc, sh),
@@ -386,6 +551,10 @@
       effects["Embers"] = {
         create: (sc, sh) => createEmberFX(sc, sh),
         buildUI: (folder, state, sh) => buildEmberUI(folder, state),
+      };
+      effects["Flowing Lines"] = {
+        create: (sc, sh) => createFlowingLinesFX(sc, sh),
+        buildUI: (folder, state, sh) => buildFlowingLinesUI(folder, state),
       };
     </script>
   </body>
