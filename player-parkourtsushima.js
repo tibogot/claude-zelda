@@ -332,6 +332,46 @@ export function createPlayer(opts) {
             gltf.animations.find((a) => a.name === "Sword_Attack_RM_Armature") ||
             gltf.animations.find((a) => a.name === "Sword_Attack_RM") ||
             attackClip;
+          // Simple spell clips
+          const spellEnterClip =
+            gltf.animations.find((a) => a.name === "Spell_Simple_Enter_Armature") ||
+            gltf.animations.find((a) => a.name === "Spell_Simple_Enter") ||
+            null;
+          const spellIdleClip =
+            gltf.animations.find((a) => a.name === "Spell_Simple_Idle_Loop_Armature") ||
+            gltf.animations.find((a) => a.name === "Spell_Simple_Idle_Loop") ||
+            null;
+          const spellShootClip =
+            gltf.animations.find((a) => a.name === "Spell_Simple_Shoot_Armature") ||
+            gltf.animations.find((a) => a.name === "Spell_Simple_Shoot") ||
+            null;
+          const spellExitClip =
+            gltf.animations.find((a) => a.name === "Spell_Simple_Exit_Armature") ||
+            gltf.animations.find((a) => a.name === "Spell_Simple_Exit") ||
+            null;
+          const spellEnterAction = spellEnterClip
+            ? characterMixer.clipAction(spellEnterClip).setLoop(2200)
+            : null;
+          const spellIdleAction = spellIdleClip
+            ? characterMixer.clipAction(spellIdleClip).setLoop(2201)
+            : null;
+          const spellShootAction = spellShootClip
+            ? characterMixer.clipAction(spellShootClip).setLoop(2200)
+            : null;
+          const spellExitAction = spellExitClip
+            ? characterMixer.clipAction(spellExitClip).setLoop(2200)
+            : null;
+          // Light combo clips: Regular A/B/C/Combo
+          const lightAClip =
+            gltf.animations.find((a) => a.name === "Sword_Regular_A") ||
+            attackClip;
+          const lightBClip =
+            gltf.animations.find((a) => a.name === "Sword_Regular_B") ||
+            lightAClip;
+          const lightCClip =
+            gltf.animations.find((a) => a.name === "Sword_Regular_C") ||
+            gltf.animations.find((a) => a.name === "Sword_Regular_Combo") ||
+            lightBClip;
           const crouchClip =
             gltf.animations.find((a) => a.name === "Crouch_Idle_Loop_Armature") ||
             gltf.animations.find((a) => a.name === "Crouch_Idle_Loop") ||
@@ -397,6 +437,16 @@ export function createPlayer(opts) {
           const attackAction2 = attackClip2
             ? characterMixer.clipAction(attackClip2).setLoop(2200)
             : null;
+          // Light combo actions (A/B/C)
+          const lightAAction = lightAClip
+            ? characterMixer.clipAction(lightAClip).setLoop(2200)
+            : null;
+          const lightBAction = lightBClip
+            ? characterMixer.clipAction(lightBClip).setLoop(2200)
+            : null;
+          const lightCAction = lightCClip
+            ? characterMixer.clipAction(lightCClip).setLoop(2200)
+            : null;
           const crouchAction = characterMixer
             .clipAction(crouchClip)
             .setLoop(2201);
@@ -408,6 +458,18 @@ export function createPlayer(opts) {
             attackAction.clampWhenFinished = true;
           if (attackAction2?.clampWhenFinished !== undefined)
             attackAction2.clampWhenFinished = true;
+          if (lightAAction?.clampWhenFinished !== undefined)
+            lightAAction.clampWhenFinished = true;
+          if (lightBAction?.clampWhenFinished !== undefined)
+            lightBAction.clampWhenFinished = true;
+          if (lightCAction?.clampWhenFinished !== undefined)
+            lightCAction.clampWhenFinished = true;
+          if (spellEnterAction?.clampWhenFinished !== undefined)
+            spellEnterAction.clampWhenFinished = true;
+          if (spellShootAction?.clampWhenFinished !== undefined)
+            spellShootAction.clampWhenFinished = true;
+          if (spellExitAction?.clampWhenFinished !== undefined)
+            spellExitAction.clampWhenFinished = true;
           if (rollAction && rollAction.clampWhenFinished !== undefined)
             rollAction.clampWhenFinished = true;
           const slideStartAction = characterMixer
@@ -438,6 +500,21 @@ export function createPlayer(opts) {
           characterGroup.userData.crouchAction = crouchAction;
           characterGroup.userData.crouchWalkAction = crouchWalkAction;
           characterGroup.userData.rollAction = rollAction;
+          characterGroup.userData.lightActions = [
+            lightAAction,
+            lightBAction,
+            lightCAction,
+          ];
+          characterGroup.userData.comboIndex = 0;
+          characterGroup.userData.comboQueued = false;
+          characterGroup.userData.currentAttack = null;
+          characterGroup.userData.currentAttackType = null; // "light" | "heavy"
+          characterGroup.userData.isCastingSpell = false;
+          characterGroup.userData.spellPhase = "none"; // "none" | "enter" | "idle" | "shoot" | "exit"
+          characterGroup.userData.spellEnterAction = spellEnterAction;
+          characterGroup.userData.spellIdleAction = spellIdleAction;
+          characterGroup.userData.spellShootAction = spellShootAction;
+          characterGroup.userData.spellExitAction = spellExitAction;
           characterGroup.userData.attackAction = attackAction;
           characterGroup.userData.attackAction2 = attackAction2;
           characterGroup.userData.slideStartAction = slideStartAction;
@@ -680,6 +757,70 @@ export function createPlayer(opts) {
               ud.lastMoveState = "idle";
             });
           }
+          // Spell: Enter -> Idle stance
+          if (spellEnterAction) {
+            characterMixer.addEventListener("finished", (e) => {
+              if (e.action !== spellEnterAction) return;
+              const ud = characterGroup.userData;
+              if (!ud.isCastingSpell || ud.spellPhase !== "enter") return;
+              ud.spellPhase = "idle";
+              if (spellIdleAction) {
+                spellIdleAction.reset();
+                spellIdleAction.enabled = true;
+                spellIdleAction.crossFadeFrom(spellEnterAction, 0.12).play();
+              }
+            });
+          }
+          // Spell: Shoot -> back to Idle stance
+          if (spellShootAction) {
+            characterMixer.addEventListener("finished", (e) => {
+              if (e.action !== spellShootAction) return;
+              const ud = characterGroup.userData;
+              if (!ud.isCastingSpell || ud.spellPhase !== "shoot") return;
+              ud.spellPhase = "idle";
+              if (spellIdleAction) {
+                spellIdleAction.reset();
+                spellIdleAction.enabled = true;
+                spellIdleAction.crossFadeFrom(spellShootAction, 0.12).play();
+              }
+            });
+          }
+          // Spell: Exit -> back to locomotion
+          if (spellExitAction) {
+            characterMixer.addEventListener("finished", (e) => {
+              if (e.action !== spellExitAction) return;
+              const ud = characterGroup.userData;
+              if (!ud.isCastingSpell || ud.spellPhase !== "exit") return;
+              ud.isCastingSpell = false;
+              ud.spellPhase = "none";
+              const from = ud.preSpellState || "idle";
+              const aIdle = ud.idleAction;
+              const aWalk = ud.walkAction;
+              const aRun = ud.runAction;
+              const aCrouch = ud.crouchAction;
+              const aCrouchWalk = ud.crouchWalkAction;
+              if (from === "walk" && aWalk) {
+                aWalk.enabled = true;
+                aWalk.crossFadeFrom(spellExitAction, 0.2).play();
+              } else if (from === "run" && aRun) {
+                aRun.enabled = true;
+                aRun.crossFadeFrom(spellExitAction, 0.2).play();
+              } else if (from === "crouch" && aCrouch) {
+                aCrouch.enabled = true;
+                aCrouch.crossFadeFrom(spellExitAction, 0.2).play();
+              } else if (from === "crouch_walk" && aCrouchWalk) {
+                aCrouchWalk.enabled = true;
+                aCrouchWalk.crossFadeFrom(spellExitAction, 0.2).play();
+              } else if (aIdle) {
+                aIdle.enabled = true;
+                aIdle.crossFadeFrom(spellExitAction, 0.2).play();
+              }
+              ud.lastMoveState = from;
+              setTimeout(() => {
+                spellExitAction.enabled = false;
+              }, 200);
+            });
+          }
         }
       } catch (e) {
         console.warn("Character animations:", e);
@@ -707,6 +848,9 @@ export function createPlayer(opts) {
     f: false,
     x: false,
     r: false,
+    j: false,
+    k: false,
+    q: false,
     shift: false,
     ctrl: false,
     space: false,
@@ -719,6 +863,9 @@ export function createPlayer(opts) {
   const state = {
     camYaw: 0,
     camPitch: 0.3,
+    // Separate character facing from camera yaw so movement can
+    // turn the character toward the move direction (Genshin/Zelda-style)
+    charYaw: 0,
     characterVelY: 0,
     isGrounded: false,
     isGliding: false,
@@ -824,15 +971,40 @@ export function createPlayer(opts) {
   renderer.domElement.addEventListener("contextmenu", (e) =>
     e.preventDefault(),
   );
-  renderer.domElement.addEventListener("mousedown", (e) => {
-    if (e.button !== 2) return;
+  function startLightAttack() {
     const ud = characterGroup.userData;
-    if (!ud.attackAction || ud.isAttacking || ud.isRolling || ud.isSliding || ud.isClimbing) return;
+    const lights = ud.lightActions;
+    if (!lights || !lights.length) return;
+    if (ud.isRolling || ud.isSliding || ud.isClimbing) return;
+
+    // If a light combo is already playing, treat this as "queue next hit".
+    if (ud.isAttacking && ud.currentAttackType === "light") {
+      ud.comboQueued = true;
+      return;
+    }
+
+    // If some other attack is active (e.g. heavy), ignore new light input.
+    if (ud.isAttacking) return;
+
+    // Start new light combo chain.
     ud.isAttacking = true;
+    ud.currentAttackType = "light";
+    ud.comboIndex = 0;
+    ud.comboQueued = false;
     ud.preAttackState = ud.lastMoveState || "idle";
-    ud.attackAction.stop();
-    ud.attackAction.time = 0;
-    ud.attackAction.enabled = true;
+
+    // Face camera direction at attack start.
+    state.charYaw = state.camYaw;
+
+    const action = lights[0];
+    if (!action) {
+      ud.isAttacking = false;
+      ud.currentAttackType = null;
+      return;
+    }
+    action.stop();
+    action.time = 0;
+    action.enabled = true;
     const from =
       ud.preAttackState === "run"
         ? ud.runAction
@@ -845,14 +1017,133 @@ export function createPlayer(opts) {
               : ud.preAttackState === "crouch_walk"
                 ? ud.crouchWalkAction
                 : ud.idleAction;
-    ud.attackAction.crossFadeFrom(from, 0.1).play();
+    action.crossFadeFrom(from, 0.1).play();
+    ud.currentAttack = action;
+  }
+
+  function startSpellCastCycle() {
+    const ud = characterGroup.userData;
+    // If already in spell mode and not already exiting, Q toggles spell off (plays Exit).
+    if (ud.isCastingSpell) {
+      if (ud.spellExitAction && ud.spellPhase !== "exit") {
+        ud.spellPhase = "exit";
+        ud.spellExitAction.reset();
+        ud.spellExitAction.enabled = true;
+        const fromAction =
+          ud.spellShootAction?.enabled
+            ? ud.spellShootAction
+            : ud.spellIdleAction?.enabled
+              ? ud.spellIdleAction
+              : ud.spellEnterAction?.enabled
+                ? ud.spellEnterAction
+                : null;
+        if (fromAction) {
+          ud.spellExitAction.crossFadeFrom(fromAction, 0.12).play();
+        } else {
+          ud.spellExitAction.play();
+        }
+      }
+      return;
+    }
+    if (
+      ud.isRolling ||
+      ud.isSliding ||
+      ud.isClimbing ||
+      ud.isAttacking
+    )
+      return;
+    if (!ud.spellEnterAction || !ud.spellShootAction || !ud.spellExitAction)
+      return;
+    ud.isCastingSpell = true;
+    ud.spellPhase = "enter";
+    ud.preSpellState = ud.lastMoveState || "idle";
+    // Face toward camera when starting spell.
+    state.charYaw = state.camYaw;
+    const from =
+      ud.preSpellState === "run"
+        ? ud.runAction
+        : ud.preSpellState === "walk"
+          ? ud.walkAction
+          : ud.preSpellState === "jump"
+            ? ud.jumpAction
+            : ud.preSpellState === "crouch"
+              ? ud.crouchAction
+              : ud.preSpellState === "crouch_walk"
+                ? ud.crouchWalkAction
+                : ud.idleAction;
+    ud.spellEnterAction.reset();
+    ud.spellEnterAction.enabled = true;
+    ud.spellEnterAction.crossFadeFrom(from, 0.15).play();
+  }
+
+  function triggerSpellShoot() {
+    const ud = characterGroup.userData;
+    if (
+      !ud.isCastingSpell ||
+      ud.spellPhase !== "idle" ||
+      !ud.spellShootAction
+    )
+      return;
+    ud.spellPhase = "shoot";
+    ud.spellShootAction.reset();
+    ud.spellShootAction.enabled = true;
+    const fromAction =
+      ud.spellIdleAction?.enabled
+        ? ud.spellIdleAction
+        : ud.spellEnterAction?.enabled
+          ? ud.spellEnterAction
+          : ud.idleAction;
+    if (fromAction) {
+      ud.spellShootAction.crossFadeFrom(fromAction, 0.12).play();
+    } else {
+      ud.spellShootAction.play();
+    }
+  }
+
+  renderer.domElement.addEventListener("mousedown", (e) => {
+    // Left click: light combo, Right click: heavy (handled via E/K logic)
+    if (e.button === 0) {
+      const ud = characterGroup.userData;
+      if (ud.isCastingSpell) {
+        // In spell stance: left click triggers spell shoot instead of sword combo.
+        triggerSpellShoot();
+        return;
+      }
+      startLightAttack();
+      return;
+    }
+    if (e.button !== 2) return;
   });
   window.addEventListener("keydown", (e) => {
-    if (e.key.toLowerCase() !== "e" || e.repeat) return;
+    const key = e.key.toLowerCase();
+
+    // Spell cast: Q (single simple spell cycle)
+    if (key === "q" && !e.repeat) {
+      startSpellCastCycle();
+      return;
+    }
+
+    // Light attack from keyboard: J
+    if (key === "j" && !e.repeat) {
+      const ud = characterGroup.userData;
+      if (ud.isCastingSpell) {
+        // In spell stance: J triggers spell shoot.
+        triggerSpellShoot();
+      } else {
+        startLightAttack();
+      }
+      return;
+    }
+
+    // Heavy attack: E key or K key
+    if ((key !== "e" && key !== "k") || e.repeat) return;
     const ud = characterGroup.userData;
     if (!ud.attackAction2 || ud.isAttacking || ud.isRolling || ud.isSliding || ud.isClimbing) return;
     ud.isAttacking = true;
+    ud.currentAttackType = "heavy";
     ud.preAttackState = ud.lastMoveState || "idle";
+    // Face camera direction at heavy attack start.
+    state.charYaw = state.camYaw;
     ud.attackAction2.stop();
     ud.attackAction2.time = 0;
     ud.attackAction2.enabled = true;
@@ -869,6 +1160,7 @@ export function createPlayer(opts) {
                 ? ud.crouchWalkAction
                 : ud.idleAction;
     ud.attackAction2.crossFadeFrom(from, 0.1).play();
+    ud.currentAttack = ud.attackAction2;
   });
   document.addEventListener("mousemove", (e) => {
     if (!isPointerLocked && !(e.buttons & 1)) return;
@@ -991,10 +1283,13 @@ export function createPlayer(opts) {
       !ud.isRolling &&
       !ud.isSliding &&
       !ud.isClimbing &&
-      !ud.isAttacking &&
       onGroundForCrouch
     ) {
       keys.f = false;
+      // Roll cancels any current attack.
+      ud.isAttacking = false;
+      ud.currentAttack = null;
+      ud.currentAttackType = null;
       ud.isRolling = true;
       ud.preRollState = ud.lastMoveState || "idle";
       ud.rollStartTime = performance.now();
@@ -1154,8 +1449,14 @@ export function createPlayer(opts) {
       ud.slideStartAction.enabled = true;
       ud.slideStartAction.crossFadeFrom(from, 0.1).play();
     }
-    if (keys.w) state.moveDir.z -= 1;
-    if (keys.s) state.moveDir.z += 1;
+    // In spell stance, keep the character rooted (no WASD movement),
+    // but still allow air control / gravity to work as usual.
+    const inSpellStance = ud.isCastingSpell && (ud.spellPhase === "enter" || ud.spellPhase === "idle" || ud.spellPhase === "shoot");
+
+    if (!inSpellStance) {
+      if (keys.w) state.moveDir.z -= 1;
+      if (keys.s) state.moveDir.z += 1;
+    }
     if (state.moveDir.length() > 0) {
       state.moveDir.normalize();
       const sinY = Math.sin(state.camYaw);
@@ -1166,6 +1467,22 @@ export function createPlayer(opts) {
       const rightZ = -sinY;
       const mx = state.moveDir.x * rightX - state.moveDir.z * forwardX;
       const mz = state.moveDir.x * rightZ - state.moveDir.z * forwardZ;
+
+      // Character facing: when there is movement input and we are not in
+      // a special state, rotate the character toward the movement vector
+      // (so S makes him turn and run toward the camera instead of moonwalking).
+      const inSpecial =
+        ud?.isRolling || ud?.isSliding || ud?.isClimbing || ud?.isAttacking;
+      if (!inSpecial && (mx !== 0 || mz !== 0)) {
+        const targetYaw = Math.atan2(mx, mz);
+        const turnSpeed = (PARAMS.turnSpeed ?? 10) * dt;
+        let delta = targetYaw - state.charYaw;
+        // Wrap to [-PI, PI] to take shortest path
+        while (delta > Math.PI) delta -= Math.PI * 2;
+        while (delta < -Math.PI) delta += Math.PI * 2;
+        state.charYaw += THREE.MathUtils.clamp(delta, -turnSpeed, turnSpeed);
+      }
+
       const speedMult = _isCrouching
         ? (PARAMS.crouchSpeedMultiplier ?? 0.5)
         : keys.shift
@@ -1487,7 +1804,9 @@ export function createPlayer(opts) {
     }
     characterGroup.position.copy(charPos);
     capsule.position.copy(charPos);
-    characterGroup.rotation.y = state.camYaw;
+    // Use charYaw so movement determines facing, while camYaw remains
+    // purely for camera orbit / input.
+    characterGroup.rotation.y = state.charYaw;
     if (characterGroup.children.length > 0) {
       if (ud.initialCharHeight != null)
         characterGroup.scale.setScalar(
@@ -1839,16 +2158,45 @@ export function createPlayer(opts) {
       ud.walkAction &&
       ud.runAction
     ) {
-      const currentAttack = ud.attackAction?.enabled
-        ? ud.attackAction
-        : ud.attackAction2?.enabled
-          ? ud.attackAction2
-          : null;
+      const currentAttack = ud.currentAttack;
       if (currentAttack) {
         const clip = currentAttack.getClip();
         const dur = clip && clip.duration != null ? clip.duration : 1;
+        const t = dur > 0 ? currentAttack.time / dur : 0;
+
+        // Light combo progression
+        if (
+          ud.currentAttackType === "light" &&
+          ud.lightActions &&
+          ud.comboQueued &&
+          ud.comboIndex < ud.lightActions.length - 1 &&
+          t >= 0.3 // combo window starts after initial wind-up
+        ) {
+          ud.comboQueued = false;
+          ud.comboIndex++;
+          const nextAction = ud.lightActions[ud.comboIndex];
+          if (nextAction) {
+            nextAction.reset();
+            nextAction.enabled = true;
+            nextAction.crossFadeFrom(currentAttack, 0.12).play();
+            // Let previous attack finish blending out asynchronously.
+            setTimeout(() => {
+              if (ud.currentAttack !== currentAttack) {
+                currentAttack.enabled = false;
+              }
+            }, 150);
+            ud.currentAttack = nextAction;
+            return;
+          }
+        }
+
+        // Attack finished (no further combo)
         if (currentAttack.time >= dur - 0.02) {
           ud.isAttacking = false;
+          ud.currentAttackType = null;
+          ud.currentAttack = null;
+          ud.comboIndex = 0;
+          ud.comboQueued = false;
           const from = ud.preAttackState || "idle";
           if (from === "walk") {
             ud.walkAction.enabled = true;

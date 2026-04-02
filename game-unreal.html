@@ -53,7 +53,8 @@
           "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
           "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
           "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
-          "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js"
+          "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js",
+          "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.9/build/index.module.js"
         }
       }
     </script>
@@ -141,8 +142,12 @@
       import { PARAMS } from "./params.js";
       import { PI } from "./constants.js";
       import { createTileMaterial } from "./tileMaterial.js";
+      import { MeshBVH, acceleratedRaycast } from "three-mesh-bvh";
 
       const PARKOUR_SIZE = 800;
+
+      // Enable BVH-accelerated raycasting on THREE.Mesh
+      THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
       // Floor surface height — parkour ground sits on top of createPhysicsWorld's default ground
       const FLOOR_Y = 1;
@@ -310,6 +315,87 @@
 
       // Flat terrain: sampleHeight returns floor height for player ground checks
       const sampleHeight = () => FLOOR_Y;
+
+      // Load a simple deer target (for testing spells)
+      async function loadDeerTarget(scene) {
+        const loader = new GLTFLoader();
+        return new Promise((resolve, reject) => {
+          loader.load(
+            "models/deer.gltf",
+            (gltf) => {
+              const root = gltf.scene;
+              let deerMesh = null;
+              root.traverse((o) => {
+                if (o.isMesh) {
+                  o.castShadow = true;
+                  o.receiveShadow = true;
+                  // Use a single combined skinned mesh for BVH if possible
+                  if (!deerMesh) deerMesh = o;
+                }
+              });
+              // Scale and place the deer near origin
+              root.scale.setScalar(0.8);
+              root.position.set(6, FLOOR_Y, -4);
+              scene.add(root);
+
+              const mixer = new THREE.AnimationMixer(root);
+              const anims = gltf.animations || [];
+              const findClip = (names) =>
+                anims.find((a) => names.includes(a.name)) || null;
+              const idleClip = findClip([
+                "Idle",
+                "idle",
+                "Idle_Loop",
+                "Idle_Loop_Armature",
+              ]);
+              const walkClip = findClip(["Walk", "Walk_Loop", "Walk_Fwd"]);
+              const deathClip = findClip(["Die", "Death", "Death_Armature"]);
+
+              const idleAction = idleClip
+                ? mixer.clipAction(idleClip).setLoop(THREE.LoopRepeat)
+                : null;
+              const walkAction = walkClip
+                ? mixer.clipAction(walkClip).setLoop(THREE.LoopRepeat)
+                : null;
+              const deathAction = deathClip
+                ? mixer.clipAction(deathClip).setLoop(THREE.LoopOnce)
+                : null;
+              if (deathAction) deathAction.clampWhenFinished = true;
+
+              if (idleAction) idleAction.play();
+
+              // Build BVH for precise ray hits if we found a mesh
+              let deerBvh = null;
+              if (deerMesh && deerMesh.geometry) {
+                // Ensure geometry is non-indexed for best BVH behavior
+                if (deerMesh.geometry.index) {
+                  deerMesh.geometry = deerMesh.geometry.toNonIndexed();
+                }
+                deerMesh.geometry.computeBoundsTree?.();
+                if (!deerMesh.geometry.boundsTree) {
+                  deerMesh.geometry.boundsTree = new MeshBVH(
+                    deerMesh.geometry,
+                    { lazyGeneration: false },
+                  );
+                }
+                deerBvh = deerMesh;
+              }
+
+              resolve({
+                root,
+                mixer,
+                idleAction,
+                walkAction,
+                deathAction,
+                isDead: false,
+                bvhMesh: deerBvh,
+              });
+            },
+            undefined,
+            (err) => reject(err),
+          );
+        });
+      }
 
       async function init() {
         const renderer = new THREE.WebGPURenderer({ antialias: true });
@@ -631,6 +717,14 @@
           footstepSoundsPath: "sounds",
           TERRAIN_SIZE: PARKOUR_SIZE,
         });
+
+        // Load deer spell-test target
+        let deer = null;
+        try {
+          deer = await loadDeerTarget(scene);
+        } catch (e) {
+          console.warn("Deer target failed to load:", e);
+        }
 
         // ── TWEAKPANE CONTROLS ──
         const pane = new Tweakpane.Pane({ title: "Parkour", expanded: true });
@@ -1578,6 +1672,56 @@
         let lastCsmLightMargin = parkourParams.csm.lightMargin;
         let lastCsmMapSize = parkourParams.csm.mapSize;
 
+        // Helper: check simple spell hit from player toward camera-facing direction
+        // using BVH raycast against the deer mesh, and draw a temporary debug line.
+        const spellDebugMat = new THREE.LineBasicMaterial({
+          color: 0x00ffff,
+        });
+        let spellDebugLine = null;
+        function trySpellHit() {
+          if (!deer || deer.isDead) return;
+          const charPos = player.characterGroup.position;
+          const yaw = player.state.camYaw;
+          const dir = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
+          // Cast from roughly hand / chest height, slightly in front of the body
+          const origin = new THREE.Vector3(
+            charPos.x,
+            charPos.y + 0.9,
+            charPos.z,
+          ).addScaledVector(dir, 0.4);
+          const maxDist = 30;
+          const end = origin.clone().addScaledVector(dir, maxDist);
+
+          // Debug line: show the ray this frame
+          const geom = new THREE.BufferGeometry().setFromPoints([origin, end]);
+          if (spellDebugLine) {
+            spellDebugLine.geometry.dispose();
+            spellDebugLine.geometry = geom;
+          } else {
+            spellDebugLine = new THREE.Line(geom, spellDebugMat);
+            scene.add(spellDebugLine);
+          }
+
+          // Precise hit test using MeshBVH if available
+          if (deer.bvhMesh && deer.bvhMesh.geometry && deer.bvhMesh.geometry.boundsTree) {
+            const ray = new THREE.Ray(origin, dir.clone().normalize());
+            const raycaster = new THREE.Raycaster();
+            raycaster.ray.copy(ray);
+            raycaster.far = maxDist;
+            const hits = raycaster.intersectObject(deer.bvhMesh, true);
+            if (hits && hits.length > 0) {
+              // Hit: play death animation once
+              deer.isDead = true;
+              if (deer.deathAction) {
+                if (deer.idleAction) deer.idleAction.stop();
+                if (deer.walkAction) deer.walkAction.stop();
+                deer.deathAction.reset();
+                deer.deathAction.play();
+              }
+            }
+          }
+        }
+
         renderer.setAnimationLoop(() => {
           timer.update();
           const elapsed = timer.getElapsed();
@@ -1595,11 +1739,46 @@
 
           player.update(dt);
 
+          // When a spell shoot is happening, fire a hit test once per shoot phase
+          const udPlayer = player.characterGroup.userData;
+          if (!udPlayer._spellHitMarker) udPlayer._spellHitMarker = false;
+          if (udPlayer.isCastingSpell && udPlayer.spellPhase === "shoot") {
+            if (!udPlayer._spellHitMarker) {
+              udPlayer._spellHitMarker = true;
+              trySpellHit();
+            }
+          } else {
+            udPlayer._spellHitMarker = false;
+          }
+
           const swordGroup = player.characterGroup.userData.sword;
           if (swordGroup && parkourParams.katana) {
             const k = parkourParams.katana;
             swordGroup.position.set(k.posX, k.posY, k.posZ);
             swordGroup.rotation.set(k.rotX, k.rotY, k.rotZ);
+
+            // Simple sword → deer hit: check distance from sword tip to deer center
+            if (deer && !deer.isDead) {
+              const ud = player.characterGroup.userData;
+              if (ud.isAttacking) {
+                // Approximate blade tip a bit forward along local +Z
+                const localTip = new THREE.Vector3(0, 0, 0.9);
+                const worldTip = swordGroup.localToWorld(localTip.clone());
+                const deerPos = new THREE.Vector3();
+                deer.root.getWorldPosition(deerPos);
+                const distSq = worldTip.distanceToSquared(deerPos);
+                const hitRadius = 2.2;
+                if (distSq <= hitRadius * hitRadius) {
+                  deer.isDead = true;
+                  if (deer.deathAction) {
+                    if (deer.idleAction) deer.idleAction.stop();
+                    if (deer.walkAction) deer.walkAction.stop();
+                    deer.deathAction.reset();
+                    deer.deathAction.play();
+                  }
+                }
+              }
+            }
           }
 
           // Sync dynamic props visual → physics
@@ -1645,6 +1824,11 @@
             lineOpacity: parkourParams.flowingLines.lineOpacity,
           });
           flowing.update(elapsed);
+
+          // Update deer animation mixer
+          if (deer && deer.mixer) {
+            deer.mixer.update(dt);
+          }
 
           // Smooth character visual + camera to filter physics jitter (ground appears to shake otherwise)
           const inAir = !player.state.isGrounded;
