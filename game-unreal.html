@@ -116,6 +116,10 @@
         normalize,
         negate,
         mx_noise_float,
+        fract,
+        floor,
+        max,
+        min,
       } from "three/tsl";
       import { bloom } from "three/addons/tsl/display/BloomNode.js";
       import { fxaa } from "three/addons/tsl/display/FXAANode.js";
@@ -222,6 +226,34 @@
           rotY: 1.35,
           rotZ: -2.21,
         },
+        bladeVFX: {
+          enabled: true,
+          posX: 0,
+          posY: 0.45,
+          posZ: 0,
+          rotX: Math.PI * 0.5,
+          rotY: 0,
+          rotZ: 0,
+          scaleX: 0.35,
+          scaleY: 0.12,
+          scaleZ: 0.35,
+          slashColor: "#66dfff",
+          edgeColor: "#ffffff",
+          slashIntensity: 4.8,
+          alphaStrength: 1.0,
+          ringSoftness: 0.22,
+          ringCenter: 0.65,
+          ringWidth: 0.26,
+          noiseScale: 11.5,
+          noiseWarp: 1.8,
+          noiseSpeed: 1.25,
+          streakFreq: 17.0,
+          streakStrength: 0.33,
+          edgeThreshold: 0.52,
+          edgeSharpness: 0.08,
+          fadeInTime: 0.06,
+          fadeOutTime: 0.15,
+        },
         flowingLines: {
           enabled: false,
           lineCount: 8,
@@ -311,6 +343,188 @@
           Math.sin(el),
           cosEl * Math.sin(az),
         ).normalize();
+      }
+
+      /* ── Blade Slash VFX ─────────────────────────────────────── */
+      const bladeVfxUniforms = {
+        time:           uniform(0),
+        slashColor:     uniform(color(parkourParams.bladeVFX.slashColor)),
+        edgeColor:      uniform(color(parkourParams.bladeVFX.edgeColor)),
+        slashIntensity: uniform(parkourParams.bladeVFX.slashIntensity),
+        alphaStrength:  uniform(parkourParams.bladeVFX.alphaStrength),
+        ringSoftness:   uniform(parkourParams.bladeVFX.ringSoftness),
+        ringCenter:     uniform(parkourParams.bladeVFX.ringCenter),
+        ringWidth:      uniform(parkourParams.bladeVFX.ringWidth),
+        noiseScale:     uniform(parkourParams.bladeVFX.noiseScale),
+        noiseWarp:      uniform(parkourParams.bladeVFX.noiseWarp),
+        noiseSpeed:     uniform(parkourParams.bladeVFX.noiseSpeed),
+        streakFreq:     uniform(parkourParams.bladeVFX.streakFreq),
+        streakStrength: uniform(parkourParams.bladeVFX.streakStrength),
+        edgeThreshold:  uniform(parkourParams.bladeVFX.edgeThreshold),
+        edgeSharpness:  uniform(parkourParams.bladeVFX.edgeSharpness),
+        opacity:        uniform(0),
+      };
+
+      const _bladeHash21 = Fn(([p]) => {
+        return fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453));
+      });
+      const _bladeNoise2D = Fn(([p]) => {
+        const i = floor(p);
+        const f = fract(p);
+        const u2 = f.mul(f).mul(float(3).sub(f.mul(2)));
+        const a = _bladeHash21(i);
+        const b = _bladeHash21(i.add(vec2(1, 0)));
+        const c = _bladeHash21(i.add(vec2(0, 1)));
+        const d = _bladeHash21(i.add(vec2(1, 1)));
+        const ab = a.add(b.sub(a).mul(u2.x));
+        const cd = c.add(d.sub(c).mul(u2.x));
+        return ab.add(cd.sub(ab).mul(u2.y));
+      });
+
+      function createBladeSlashGeometry() {
+        const sides = 25;
+        const height = 0.66;
+        const rings = [
+          { y: 0.0, rx: 0.5, rz: 0.5 },
+          { y: 0.2, rx: 1.0, rz: 1.0 },
+          { y: 0.5, rx: 1.5, rz: 1.5 },
+          { y: 0.8, rx: 1.0, rz: 1.0 },
+          { y: 1.0, rx: 0.5, rz: 0.5 },
+        ];
+        const positions = [], uvs = [], indices = [];
+        const rv = sides + 1;
+        for (const { y, rx, rz } of rings) {
+          const py = -height * 0.5 + height * y;
+          for (let s = 0; s <= sides; s++) {
+            const t = s / sides;
+            const a = t * Math.PI * 2;
+            positions.push(Math.cos(a) * rx, py, Math.sin(a) * rz);
+            uvs.push(t, y);
+          }
+        }
+        for (let l = 0; l < 4; l++) {
+          const c0 = l * rv, c1 = (l + 1) * rv;
+          for (let s = 0; s < sides; s++) {
+            const a = c0 + s, b = a + 1, c = c1 + s, d = c + 1;
+            indices.push(a, b, c, b, d, c);
+          }
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+        geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+        geo.setIndex(indices);
+        geo.computeVertexNormals();
+        return geo;
+      }
+
+      function createBladeSlashMaterial() {
+        const mat = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
+        const u = bladeVfxUniforms;
+        mat.outputNode = Fn(() => {
+          const uvNode = uv();
+          const centered = uvNode.sub(0.5).toVar();
+          const radial = centered.length();
+          const angle = centered.y.atan(centered.x);
+          const angle01 = angle.add(Math.PI).div(Math.PI * 2);
+          const t = u.time.mul(u.noiseSpeed);
+          const dir = vec2(cos(angle), sin(angle));
+          const polar = dir.mul(radial);
+          const nUv = polar.mul(vec2(u.noiseScale, u.noiseScale))
+            .add(vec2(t, t.negate())).toVar();
+          const warpX = _bladeNoise2D(nUv).sub(0.5).mul(u.noiseWarp);
+          const warpY = _bladeNoise2D(nUv.add(vec2(17.3, 9.1))).sub(0.5).mul(u.noiseWarp);
+          const warped = nUv.add(vec2(warpX, warpY));
+          const n = _bladeNoise2D(warped);
+          const noisyRadius = radial.add(n.sub(0.5).mul(0.12));
+          const ringDelta = abs(noisyRadius.sub(u.ringCenter));
+          const ringMask = smoothstep(u.ringWidth, u.ringWidth.sub(u.ringSoftness.mul(0.5)), ringDelta);
+          const streak = sin(angle01.mul(u.streakFreq).add(t.mul(2.4))).mul(0.5).add(0.5);
+          const streakMask = streak.mul(u.streakStrength).add(float(1).sub(u.streakStrength));
+          const core = ringMask.mul(streakMask).toVar();
+          const edge = smoothstep(u.edgeThreshold, u.edgeThreshold.add(u.edgeSharpness), core);
+          const slash = u.slashColor.mul(core.mul(u.slashIntensity));
+          const edgeGlow = u.edgeColor.mul(edge.mul(u.slashIntensity).mul(0.8));
+          const outColor = slash.add(edgeGlow);
+          const alpha = max(core, edge.mul(0.7)).mul(u.alphaStrength).mul(u.opacity).clamp(0, 1);
+          return vec4(outColor, alpha);
+        })();
+        return mat;
+      }
+
+      let bladeSlashMesh = null;
+      let bladeVfxState = { active: false, timer: 0, phase: "off" };
+
+      function initBladeSlashVFX(swordGroup) {
+        const geo = createBladeSlashGeometry();
+        const mat = createBladeSlashMaterial();
+        bladeSlashMesh = new THREE.Mesh(geo, mat);
+        bladeSlashMesh.frustumCulled = false;
+        bladeSlashMesh.renderOrder = 999;
+        const p = parkourParams.bladeVFX;
+        bladeSlashMesh.position.set(p.posX, p.posY, p.posZ);
+        bladeSlashMesh.rotation.set(p.rotX, p.rotY, p.rotZ);
+        bladeSlashMesh.scale.set(p.scaleX, p.scaleY, p.scaleZ);
+        bladeSlashMesh.visible = false;
+        swordGroup.add(bladeSlashMesh);
+      }
+
+      function updateBladeVFX(dt, isAttacking) {
+        if (!bladeSlashMesh) return;
+        const p = parkourParams.bladeVFX;
+        if (!p.enabled) { bladeSlashMesh.visible = false; return; }
+
+        bladeSlashMesh.position.set(p.posX, p.posY, p.posZ);
+        bladeSlashMesh.rotation.set(p.rotX, p.rotY, p.rotZ);
+        bladeSlashMesh.scale.set(p.scaleX, p.scaleY, p.scaleZ);
+
+        const bu = bladeVfxUniforms;
+        bu.slashColor.value.set(p.slashColor);
+        bu.edgeColor.value.set(p.edgeColor);
+        bu.slashIntensity.value = p.slashIntensity;
+        bu.alphaStrength.value = p.alphaStrength;
+        bu.ringSoftness.value = p.ringSoftness;
+        bu.ringCenter.value = p.ringCenter;
+        bu.ringWidth.value = p.ringWidth;
+        bu.noiseScale.value = p.noiseScale;
+        bu.noiseWarp.value = p.noiseWarp;
+        bu.noiseSpeed.value = p.noiseSpeed;
+        bu.streakFreq.value = p.streakFreq;
+        bu.streakStrength.value = p.streakStrength;
+        bu.edgeThreshold.value = p.edgeThreshold;
+        bu.edgeSharpness.value = p.edgeSharpness;
+
+        if (isAttacking && bladeVfxState.phase !== "on" && bladeVfxState.phase !== "fadein") {
+          bladeVfxState.phase = "fadein";
+          bladeVfxState.timer = 0;
+          bladeSlashMesh.visible = true;
+          bu.time.value = 0;
+        } else if (!isAttacking && bladeVfxState.phase === "on") {
+          bladeVfxState.phase = "fadeout";
+          bladeVfxState.timer = 0;
+        }
+
+        bladeVfxState.timer += dt;
+        bu.time.value += dt;
+
+        if (bladeVfxState.phase === "fadein") {
+          const t = Math.min(bladeVfxState.timer / Math.max(p.fadeInTime, 0.01), 1);
+          bu.opacity.value = t;
+          if (t >= 1) bladeVfxState.phase = "on";
+        } else if (bladeVfxState.phase === "on") {
+          bu.opacity.value = 1;
+          if (!isAttacking) { bladeVfxState.phase = "fadeout"; bladeVfxState.timer = 0; }
+        } else if (bladeVfxState.phase === "fadeout") {
+          const t = 1 - Math.min(bladeVfxState.timer / Math.max(p.fadeOutTime, 0.01), 1);
+          bu.opacity.value = t;
+          if (t <= 0) { bladeVfxState.phase = "off"; bladeSlashMesh.visible = false; }
+        } else {
+          bu.opacity.value = 0;
+          bladeSlashMesh.visible = false;
+        }
       }
 
       // Flat terrain: sampleHeight returns floor height for player ground checks
@@ -750,6 +964,8 @@
             minSlopeSlideAngle: (65 * Math.PI) / 180,
           });
 
+        for (let i = 0; i < 250; i++) physicsWorld.step();
+
         const player = createPlayer({
           scene,
           renderer,
@@ -887,6 +1103,37 @@
           step: 0.05,
           label: "rot Z (rad)",
         });
+
+        const bladeVfxFolder = pane.addFolder({ title: "Blade Slash VFX", expanded: false });
+        bladeVfxFolder.addBinding(parkourParams.bladeVFX, "enabled", { label: "enabled" });
+        const bvPos = bladeVfxFolder.addFolder({ title: "Position / Scale", expanded: true });
+        bvPos.addBinding(parkourParams.bladeVFX, "posX",  { min: -2, max: 2, step: 0.01, label: "pos X" });
+        bvPos.addBinding(parkourParams.bladeVFX, "posY",  { min: -2, max: 2, step: 0.01, label: "pos Y" });
+        bvPos.addBinding(parkourParams.bladeVFX, "posZ",  { min: -2, max: 2, step: 0.01, label: "pos Z" });
+        bvPos.addBinding(parkourParams.bladeVFX, "rotX",  { min: -Math.PI * 2, max: Math.PI * 2, step: 0.05, label: "rot X" });
+        bvPos.addBinding(parkourParams.bladeVFX, "rotY",  { min: -Math.PI * 2, max: Math.PI * 2, step: 0.05, label: "rot Y" });
+        bvPos.addBinding(parkourParams.bladeVFX, "rotZ",  { min: -Math.PI * 2, max: Math.PI * 2, step: 0.05, label: "rot Z" });
+        bvPos.addBinding(parkourParams.bladeVFX, "scaleX", { min: 0.01, max: 2, step: 0.01, label: "scale X" });
+        bvPos.addBinding(parkourParams.bladeVFX, "scaleY", { min: 0.01, max: 2, step: 0.01, label: "scale Y" });
+        bvPos.addBinding(parkourParams.bladeVFX, "scaleZ", { min: 0.01, max: 2, step: 0.01, label: "scale Z" });
+        const bvLook = bladeVfxFolder.addFolder({ title: "Shader", expanded: false });
+        bvLook.addBinding(parkourParams.bladeVFX, "slashColor", { label: "slash color" });
+        bvLook.addBinding(parkourParams.bladeVFX, "edgeColor",  { label: "edge color" });
+        bvLook.addBinding(parkourParams.bladeVFX, "slashIntensity", { min: 0, max: 12, step: 0.1, label: "intensity" });
+        bvLook.addBinding(parkourParams.bladeVFX, "alphaStrength",  { min: 0, max: 1.5, step: 0.01, label: "alpha" });
+        bvLook.addBinding(parkourParams.bladeVFX, "ringCenter",   { min: 0.1, max: 1.1, step: 0.01, label: "ring center" });
+        bvLook.addBinding(parkourParams.bladeVFX, "ringWidth",    { min: 0.02, max: 0.7, step: 0.01, label: "ring width" });
+        bvLook.addBinding(parkourParams.bladeVFX, "ringSoftness", { min: 0.01, max: 0.5, step: 0.01, label: "ring softness" });
+        bvLook.addBinding(parkourParams.bladeVFX, "noiseScale",   { min: 1, max: 40, step: 0.1, label: "noise scale" });
+        bvLook.addBinding(parkourParams.bladeVFX, "noiseWarp",    { min: 0, max: 5, step: 0.01, label: "noise warp" });
+        bvLook.addBinding(parkourParams.bladeVFX, "noiseSpeed",   { min: -5, max: 5, step: 0.01, label: "noise speed" });
+        bvLook.addBinding(parkourParams.bladeVFX, "streakFreq",   { min: 1, max: 64, step: 0.1, label: "streak freq" });
+        bvLook.addBinding(parkourParams.bladeVFX, "streakStrength", { min: 0, max: 1, step: 0.01, label: "streak str" });
+        bvLook.addBinding(parkourParams.bladeVFX, "edgeThreshold",  { min: 0, max: 1, step: 0.01, label: "edge threshold" });
+        bvLook.addBinding(parkourParams.bladeVFX, "edgeSharpness",  { min: 0.001, max: 0.35, step: 0.001, label: "edge sharp" });
+        const bvTiming = bladeVfxFolder.addFolder({ title: "Timing", expanded: true });
+        bvTiming.addBinding(parkourParams.bladeVFX, "fadeInTime",  { min: 0, max: 0.5, step: 0.01, label: "fade in (s)" });
+        bvTiming.addBinding(parkourParams.bladeVFX, "fadeOutTime", { min: 0, max: 0.5, step: 0.01, label: "fade out (s)" });
 
         const playerCameraFolder = pane.addFolder({
           title: "Player & Camera",
@@ -1780,9 +2027,13 @@
             const hits = raycaster.intersectObject(deer.bvhMesh, true);
             if (hits && hits.length > 0) {
               deer.isDead = true;
+              deer.state = "dead";
               if (deer.deathAction) {
                 if (deer.idleAction) deer.idleAction.stop();
                 if (deer.walkAction) deer.walkAction.stop();
+                if (deer.runAction) deer.runAction.stop();
+                if (deer.grazeAction) deer.grazeAction.stop();
+                if (deer.lookAction) deer.lookAction.stop();
                 deer.deathAction.reset();
                 deer.deathAction.play();
               }
@@ -1825,6 +2076,10 @@
             swordGroup.position.set(k.posX, k.posY, k.posZ);
             swordGroup.rotation.set(k.rotX, k.rotY, k.rotZ);
 
+            if (!bladeSlashMesh) initBladeSlashVFX(swordGroup);
+            const udForVfx = player.characterGroup.userData;
+            updateBladeVFX(dt, !!udForVfx.isAttacking);
+
             // Simple sword → deer hit: check distance from sword tip to each deer center
             if (deerTargets.length) {
               const ud = player.characterGroup.userData;
@@ -1839,9 +2094,13 @@
                   const distSq = worldTip.distanceToSquared(deerPos);
                   if (distSq <= hitRadius * hitRadius) {
                     deer.isDead = true;
+                    deer.state = "dead";
                     if (deer.deathAction) {
                       if (deer.idleAction) deer.idleAction.stop();
                       if (deer.walkAction) deer.walkAction.stop();
+                      if (deer.runAction) deer.runAction.stop();
+                      if (deer.grazeAction) deer.grazeAction.stop();
+                      if (deer.lookAction) deer.lookAction.stop();
                       deer.deathAction.reset();
                       deer.deathAction.play();
                     }
