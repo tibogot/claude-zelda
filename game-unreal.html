@@ -316,7 +316,7 @@
       // Flat terrain: sampleHeight returns floor height for player ground checks
       const sampleHeight = () => FLOOR_Y;
 
-      // Load a simple deer target (for testing spells)
+      // Load a simple deer target (for testing spells + ambient life)
       async function loadDeerTarget(scene) {
         const loader = new GLTFLoader();
         return new Promise((resolve, reject) => {
@@ -340,22 +340,56 @@
 
               const mixer = new THREE.AnimationMixer(root);
               const anims = gltf.animations || [];
-              const findClip = (names) =>
-                anims.find((a) => names.includes(a.name)) || null;
-              const idleClip = findClip([
-                "Idle",
-                "idle",
-                "Idle_Loop",
-                "Idle_Loop_Armature",
+              const findClip = (candidates) =>
+                anims.find((a) => candidates.some((n) => a.name === n)) || null;
+              const idleClip =
+                findClip([
+                  "Idle",
+                  "idle",
+                  "Idle_Loop",
+                  "Idle_Loop_Armature",
+                  "Idle_01",
+                ]) || anims[0] || null;
+              const walkClip = findClip([
+                "Walk",
+                "Walk_Loop",
+                "Walk_Fwd",
+                "Walk_Fwd_Loop",
               ]);
-              const walkClip = findClip(["Walk", "Walk_Loop", "Walk_Fwd"]);
-              const deathClip = findClip(["Die", "Death", "Death_Armature"]);
+              const runClip = findClip([
+                "Run",
+                "Run_Loop",
+                "Run_Fwd",
+                "Gallop",
+              ]);
+              const grazeClip = findClip([
+                "Graze",
+                "Eat",
+                "Eat_Loop",
+                "Idle_Eat",
+              ]);
+              const lookClip = findClip(["Look", "Look_Around"]);
+              const deathClip = findClip([
+                "Die",
+                "Death",
+                "Death_Armature",
+                "Death01",
+              ]);
 
               const idleAction = idleClip
                 ? mixer.clipAction(idleClip).setLoop(THREE.LoopRepeat)
                 : null;
               const walkAction = walkClip
                 ? mixer.clipAction(walkClip).setLoop(THREE.LoopRepeat)
+                : null;
+              const runAction = runClip
+                ? mixer.clipAction(runClip).setLoop(THREE.LoopRepeat)
+                : null;
+              const grazeAction = grazeClip
+                ? mixer.clipAction(grazeClip).setLoop(THREE.LoopRepeat)
+                : null;
+              const lookAction = lookClip
+                ? mixer.clipAction(lookClip).setLoop(THREE.LoopRepeat)
                 : null;
               const deathAction = deathClip
                 ? mixer.clipAction(deathClip).setLoop(THREE.LoopOnce)
@@ -381,14 +415,26 @@
                 deerBvh = deerMesh;
               }
 
+              const homePos = root.position.clone();
+
               resolve({
                 root,
                 mixer,
                 idleAction,
                 walkAction,
+                runAction,
+                grazeAction,
+                lookAction,
                 deathAction,
                 isDead: false,
                 bvhMesh: deerBvh,
+                // Simple ambient state machine
+                state: "idle", // "idle" | "graze" | "walk" | "run" | "dead"
+                stateTime: 0,
+                homePos,
+                targetPos: homePos.clone(),
+                walkSpeed: 1.5,
+                runSpeed: 4.0,
               });
             },
             undefined,
@@ -718,12 +764,29 @@
           TERRAIN_SIZE: PARKOUR_SIZE,
         });
 
-        // Load deer spell-test target
-        let deer = null;
-        try {
-          deer = await loadDeerTarget(scene);
-        } catch (e) {
-          console.warn("Deer target failed to load:", e);
+        // Load multiple deer spell-test targets
+        /** @type {Array<any>} */
+        const deerTargets = [];
+        const deerSpawns = [
+          new THREE.Vector3(6, FLOOR_Y, -4),
+          new THREE.Vector3(-4, FLOOR_Y, -8),
+          new THREE.Vector3(10, FLOOR_Y, 6),
+          new THREE.Vector3(-10, FLOOR_Y, 10),
+          new THREE.Vector3(14, FLOOR_Y, -12),
+          new THREE.Vector3(-16, FLOOR_Y, -6),
+          new THREE.Vector3(4, FLOOR_Y, 14),
+          new THREE.Vector3(-12, FLOOR_Y, 4),
+          new THREE.Vector3(18, FLOOR_Y, 2),
+          new THREE.Vector3(-18, FLOOR_Y, -2),
+        ];
+        for (const spawn of deerSpawns) {
+          try {
+            const d = await loadDeerTarget(scene);
+            d.root.position.copy(spawn);
+            deerTargets.push(d);
+          } catch (e) {
+            console.warn("Deer target failed to load at spawn", spawn, e);
+          }
         }
 
         // ── TWEAKPANE CONTROLS ──
@@ -1679,7 +1742,7 @@
         });
         let spellDebugLine = null;
         function trySpellHit() {
-          if (!deer || deer.isDead) return;
+          if (!deerTargets.length) return;
           const charPos = player.characterGroup.position;
           const yaw = player.state.camYaw;
           const dir = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
@@ -1702,15 +1765,18 @@
             scene.add(spellDebugLine);
           }
 
-          // Precise hit test using MeshBVH if available
-          if (deer.bvhMesh && deer.bvhMesh.geometry && deer.bvhMesh.geometry.boundsTree) {
-            const ray = new THREE.Ray(origin, dir.clone().normalize());
-            const raycaster = new THREE.Raycaster();
-            raycaster.ray.copy(ray);
-            raycaster.far = maxDist;
+          // Precise hit test using MeshBVH if available, against all deer
+          const ray = new THREE.Ray(origin, dir.clone().normalize());
+          const raycaster = new THREE.Raycaster();
+          raycaster.ray.copy(ray);
+          raycaster.far = maxDist;
+
+          for (const deer of deerTargets) {
+            if (!deer || deer.isDead || !deer.bvhMesh) continue;
+            if (!deer.bvhMesh.geometry || !deer.bvhMesh.geometry.boundsTree)
+              continue;
             const hits = raycaster.intersectObject(deer.bvhMesh, true);
             if (hits && hits.length > 0) {
-              // Hit: play death animation once
               deer.isDead = true;
               if (deer.deathAction) {
                 if (deer.idleAction) deer.idleAction.stop();
@@ -1739,6 +1805,24 @@
 
           player.update(dt);
 
+          // Clamp player to sit exactly on top of the flat physics ground only
+          // during the very first moments after load. This avoids rare cases
+          // where the capsule starts slightly below FLOOR_Y, without fighting
+          // crouch/slide, which intentionally adjust the capsule height later.
+          const baseY = FLOOR_Y + capHalfH + capR;
+          if (elapsed < 0.25 && charPos.y < baseY) {
+            charPos.y = baseY;
+            playerBody.setTranslation(
+              { x: charPos.x, y: baseY, z: charPos.z },
+              true,
+            );
+            playerBody.setNextKinematicTranslation({
+              x: charPos.x,
+              y: baseY,
+              z: charPos.z,
+            });
+          }
+
           // When a spell shoot is happening, fire a hit test once per shoot phase
           const udPlayer = player.characterGroup.userData;
           if (!udPlayer._spellHitMarker) udPlayer._spellHitMarker = false;
@@ -1757,24 +1841,26 @@
             swordGroup.position.set(k.posX, k.posY, k.posZ);
             swordGroup.rotation.set(k.rotX, k.rotY, k.rotZ);
 
-            // Simple sword → deer hit: check distance from sword tip to deer center
-            if (deer && !deer.isDead) {
+            // Simple sword → deer hit: check distance from sword tip to each deer center
+            if (deerTargets.length) {
               const ud = player.characterGroup.userData;
               if (ud.isAttacking) {
-                // Approximate blade tip a bit forward along local +Z
                 const localTip = new THREE.Vector3(0, 0, 0.9);
                 const worldTip = swordGroup.localToWorld(localTip.clone());
-                const deerPos = new THREE.Vector3();
-                deer.root.getWorldPosition(deerPos);
-                const distSq = worldTip.distanceToSquared(deerPos);
                 const hitRadius = 2.2;
-                if (distSq <= hitRadius * hitRadius) {
-                  deer.isDead = true;
-                  if (deer.deathAction) {
-                    if (deer.idleAction) deer.idleAction.stop();
-                    if (deer.walkAction) deer.walkAction.stop();
-                    deer.deathAction.reset();
-                    deer.deathAction.play();
+                const deerPos = new THREE.Vector3();
+                for (const deer of deerTargets) {
+                  if (!deer || deer.isDead) continue;
+                  deer.root.getWorldPosition(deerPos);
+                  const distSq = worldTip.distanceToSquared(deerPos);
+                  if (distSq <= hitRadius * hitRadius) {
+                    deer.isDead = true;
+                    if (deer.deathAction) {
+                      if (deer.idleAction) deer.idleAction.stop();
+                      if (deer.walkAction) deer.walkAction.stop();
+                      deer.deathAction.reset();
+                      deer.deathAction.play();
+                    }
                   }
                 }
               }
@@ -1825,8 +1911,74 @@
           });
           flowing.update(elapsed);
 
-          // Update deer animation mixer
-          if (deer && deer.mixer) {
+        // Update deer animation mixers + simple ambient behavior
+          for (const deer of deerTargets) {
+            if (!deer || !deer.mixer) continue;
+
+            if (!deer.isDead) {
+              deer.stateTime += dt;
+
+              // Decide on next state when timer expires
+              if (deer.state === "idle" || deer.state === "graze") {
+                if (deer.stateTime > 4 + Math.random() * 3) {
+                  deer.stateTime = 0;
+                  const r = Math.random();
+                  if (r < 0.4 && deer.grazeAction) {
+                    // Stay in place and graze
+                    if (deer.idleAction) deer.idleAction.stop();
+                    if (deer.lookAction) deer.lookAction.stop();
+                    deer.grazeAction.reset();
+                    deer.grazeAction.play();
+                    deer.state = "graze";
+                  } else {
+                    // Pick a new wander target near home
+                    const radius = 10;
+                    const angle = Math.random() * Math.PI * 2;
+                    deer.targetPos.set(
+                      deer.homePos.x + Math.cos(angle) * radius,
+                      FLOOR_Y,
+                      deer.homePos.z + Math.sin(angle) * radius,
+                    );
+                    const useRun = r > 0.8 && deer.runAction;
+                    deer.state = useRun ? "run" : "walk";
+                    if (deer.idleAction) deer.idleAction.stop();
+                    if (deer.grazeAction) deer.grazeAction.stop();
+                    if (useRun) {
+                      deer.runAction.reset();
+                      deer.runAction.play();
+                    } else if (deer.walkAction) {
+                      deer.walkAction.reset();
+                      deer.walkAction.play();
+                    }
+                  }
+                }
+              } else if (deer.state === "walk" || deer.state === "run") {
+                // Move toward target
+                const pos = deer.root.position;
+                const dir = deer.targetPos.clone().sub(pos);
+                const dist = dir.length();
+                if (dist < 0.2) {
+                  // Arrived
+                  deer.state = "idle";
+                  deer.stateTime = 0;
+                  if (deer.walkAction) deer.walkAction.stop();
+                  if (deer.runAction) deer.runAction.stop();
+                  if (deer.idleAction) {
+                    deer.idleAction.reset();
+                    deer.idleAction.play();
+                  }
+                } else {
+                  dir.normalize();
+                  const speed =
+                    deer.state === "run" ? deer.runSpeed : deer.walkSpeed;
+                  pos.addScaledVector(dir, speed * dt);
+                  // Face movement direction
+                  const yaw = Math.atan2(dir.x, dir.z);
+                  deer.root.rotation.y = yaw;
+                }
+              }
+            }
+
             deer.mixer.update(dt);
           }
 

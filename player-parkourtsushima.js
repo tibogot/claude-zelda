@@ -510,7 +510,9 @@ export function createPlayer(opts) {
           characterGroup.userData.currentAttack = null;
           characterGroup.userData.currentAttackType = null; // "light" | "heavy"
           characterGroup.userData.isCastingSpell = false;
-          characterGroup.userData.spellPhase = "none"; // "none" | "enter" | "idle" | "shoot" | "exit"
+          characterGroup.userData.spellPhase = "none"; // kept for backward compat, mirrors spellState
+          characterGroup.userData.spellState = "none"; // "none" | "enter" | "idle" | "shoot" | "exit"
+          characterGroup.userData.spellExitRequested = false;
           characterGroup.userData.spellEnterAction = spellEnterAction;
           characterGroup.userData.spellIdleAction = spellIdleAction;
           characterGroup.userData.spellShootAction = spellShootAction;
@@ -757,31 +759,55 @@ export function createPlayer(opts) {
               ud.lastMoveState = "idle";
             });
           }
-          // Spell: Enter -> Idle stance
+          // Spell: Enter -> Idle stance (or Exit, if exit was requested during Enter)
           if (spellEnterAction) {
             characterMixer.addEventListener("finished", (e) => {
               if (e.action !== spellEnterAction) return;
               const ud = characterGroup.userData;
               if (!ud.isCastingSpell || ud.spellPhase !== "enter") return;
-              ud.spellPhase = "idle";
-              if (spellIdleAction) {
-                spellIdleAction.reset();
-                spellIdleAction.enabled = true;
-                spellIdleAction.crossFadeFrom(spellEnterAction, 0.12).play();
+
+              if (ud.spellExitRequested && ud.spellExitAction) {
+                // Player pressed Q again during Enter: go straight to Exit.
+                ud.spellState = "exit";
+                ud.spellPhase = "exit";
+                ud.spellExitAction.reset();
+                ud.spellExitAction.enabled = true;
+                ud.spellExitAction.crossFadeFrom(spellEnterAction, 0.12).play();
+              } else {
+                // Normal flow: enter → idle stance.
+                ud.spellState = "idle";
+                ud.spellPhase = "idle";
+                if (spellIdleAction) {
+                  spellIdleAction.reset();
+                  spellIdleAction.enabled = true;
+                  spellIdleAction.crossFadeFrom(spellEnterAction, 0.12).play();
+                }
               }
             });
           }
-          // Spell: Shoot -> back to Idle stance
+          // Spell: Shoot -> back to Idle stance (or Exit if requested)
           if (spellShootAction) {
             characterMixer.addEventListener("finished", (e) => {
               if (e.action !== spellShootAction) return;
               const ud = characterGroup.userData;
               if (!ud.isCastingSpell || ud.spellPhase !== "shoot") return;
-              ud.spellPhase = "idle";
-              if (spellIdleAction) {
-                spellIdleAction.reset();
-                spellIdleAction.enabled = true;
-                spellIdleAction.crossFadeFrom(spellShootAction, 0.12).play();
+
+              if (ud.spellExitRequested && ud.spellExitAction) {
+                // Player requested exit while shooting: go to Exit.
+                ud.spellState = "exit";
+                ud.spellPhase = "exit";
+                ud.spellExitAction.reset();
+                ud.spellExitAction.enabled = true;
+                ud.spellExitAction.crossFadeFrom(spellShootAction, 0.12).play();
+              } else {
+                // Normal flow: shoot → back to idle stance.
+                ud.spellState = "idle";
+                ud.spellPhase = "idle";
+                if (spellIdleAction) {
+                  spellIdleAction.reset();
+                  spellIdleAction.enabled = true;
+                  spellIdleAction.crossFadeFrom(spellShootAction, 0.12).play();
+                }
               }
             });
           }
@@ -793,6 +819,8 @@ export function createPlayer(opts) {
               if (!ud.isCastingSpell || ud.spellPhase !== "exit") return;
               ud.isCastingSpell = false;
               ud.spellPhase = "none";
+              ud.spellState = "none";
+              ud.spellExitRequested = false;
               const from = ud.preSpellState || "idle";
               const aIdle = ud.idleAction;
               const aWalk = ud.walkAction;
@@ -1023,20 +1051,23 @@ export function createPlayer(opts) {
 
   function startSpellCastCycle() {
     const ud = characterGroup.userData;
+    const stateSpell = ud.spellState || "none";
+
     // If already in spell mode and not already exiting, Q toggles spell off (plays Exit).
-    if (ud.isCastingSpell) {
-      if (ud.spellExitAction && ud.spellPhase !== "exit") {
+    if (stateSpell !== "none") {
+      // Request an exit; depending on current phase we either go immediately or after current clip.
+      ud.spellExitRequested = true;
+      if (ud.spellExitAction && stateSpell === "idle") {
+        ud.spellState = "exit";
         ud.spellPhase = "exit";
         ud.spellExitAction.reset();
         ud.spellExitAction.enabled = true;
         const fromAction =
-          ud.spellShootAction?.enabled
-            ? ud.spellShootAction
-            : ud.spellIdleAction?.enabled
-              ? ud.spellIdleAction
-              : ud.spellEnterAction?.enabled
-                ? ud.spellEnterAction
-                : null;
+          ud.spellIdleAction?.enabled
+            ? ud.spellIdleAction
+            : ud.spellEnterAction?.enabled
+              ? ud.spellEnterAction
+              : null;
         if (fromAction) {
           ud.spellExitAction.crossFadeFrom(fromAction, 0.12).play();
         } else {
@@ -1056,6 +1087,8 @@ export function createPlayer(opts) {
       return;
     ud.isCastingSpell = true;
     ud.spellPhase = "enter";
+    ud.spellState = "enter";
+    ud.spellExitRequested = false;
     ud.preSpellState = ud.lastMoveState || "idle";
     // Face toward camera when starting spell.
     state.charYaw = state.camYaw;
@@ -1080,11 +1113,13 @@ export function createPlayer(opts) {
     const ud = characterGroup.userData;
     if (
       !ud.isCastingSpell ||
-      ud.spellPhase !== "idle" ||
+      (ud.spellState !== "idle" && ud.spellPhase !== "idle") ||
+      ud.spellExitRequested ||
       !ud.spellShootAction
     )
       return;
     ud.spellPhase = "shoot";
+    ud.spellState = "shoot";
     ud.spellShootAction.reset();
     ud.spellShootAction.enabled = true;
     const fromAction =
@@ -1490,6 +1525,17 @@ export function createPlayer(opts) {
           : 1;
       desiredDx = mx * PARAMS.playerSpeed * speedMult * dt;
       desiredDz = mz * PARAMS.playerSpeed * speedMult * dt;
+    }
+
+    // While in spell stance, continuously rotate the character toward the camera
+    // so spell aim (camera) and body facing stay aligned.
+    if (ud.isCastingSpell && (ud.spellState === "enter" || ud.spellState === "idle" || ud.spellState === "shoot")) {
+      const targetYaw = state.camYaw;
+      let delta = targetYaw - state.charYaw;
+      while (delta > Math.PI) delta -= Math.PI * 2;
+      while (delta < -Math.PI) delta += Math.PI * 2;
+      const turnSpeedSpell = (PARAMS.turnSpeed ?? 10) * dt;
+      state.charYaw += THREE.MathUtils.clamp(delta, -turnSpeedSpell, turnSpeedSpell);
     }
     if (ud && ud.isRolling && ud.rollDuration > 0) {
       const elapsed = (performance.now() - ud.rollStartTime) / 1000;
