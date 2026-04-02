@@ -71,6 +71,10 @@
         background: rgba(20, 20, 180, 0.92);
         color: #aaccff;
       }
+      #mode-badge.barrier {
+        background: rgba(200, 30, 30, 0.92);
+        color: #ffcccc;
+      }
       #mode-badge.place {
         background: rgba(180, 60, 200, 0.9);
         color: #fff;
@@ -663,6 +667,17 @@
       cliffPaintCtx.fillRect(0, 0, SPLAT_RES, SPLAT_RES);
       let cliffPaintTex = null; // created after renderer init
 
+      // ─── BARRIER CANVAS (play-mode collision boundaries) ──────
+      const BARRIER_RES = SPLAT_RES;
+      const barrierCanvas = document.createElement("canvas");
+      barrierCanvas.width = barrierCanvas.height = BARRIER_RES;
+      const barrierCtx = barrierCanvas.getContext("2d", {
+        willReadFrequently: true,
+      });
+      barrierCtx.fillStyle = "#000";
+      barrierCtx.fillRect(0, 0, BARRIER_RES, BARRIER_RES);
+      let barrierTex = null;
+
       // ─── IMAGE TEXTURE SPLATMAP ──────────────
       // Uint8Array avoids canvas premultiplied-alpha zeroing our channels (R*alpha=0 bug)
       // RGBA: R=slot0 weight, G=slot1, B=slot2, A=slot3
@@ -1008,6 +1023,9 @@
       let cliffGrassPatchSystem = null;
       let cliffGrassEraseMode = false;
       let cliffPaintEraseMode = false;
+      let barrierEraseMode = false;
+      let barrierOverlayVisible = true;
+      let barrierOverlayMesh = null;
       let geminiGrassPatchSystem = null;
       let geminiGrassUniforms = null;
       let geminiGrassEraseMode = false;
@@ -1748,6 +1766,42 @@
         const [cr, cg, cb] = erase ? [0, 0, 0] : [255, 255, 255];
         _applyBrushToCanvas(cliffPaintCtx, cx, cy, cr, cg, cb, alpha);
         if (cliffPaintTex) cliffPaintTex.needsUpdate = true;
+      }
+
+      // ─── BARRIER PAINT ────────────────────────
+      function paintBarrierAt(wx, wz, erase) {
+        const { u, v } = worldToUV(wx, wz);
+        const cx = u * BARRIER_RES, cy = v * BARRIER_RES;
+        const alpha = brushStr / 100;
+        const [cr, cg, cb] = erase ? [0, 0, 0] : [255, 0, 0];
+        _applyBrushToCanvas(barrierCtx, cx, cy, cr, cg, cb, alpha);
+        if (barrierTex) barrierTex.needsUpdate = true;
+        invalidateBarrierCache();
+        syncBarrierOverlay();
+      }
+
+      let _barrierCache = null;
+      let _barrierCacheDirty = true;
+      function _getBarrierPixels() {
+        if (_barrierCacheDirty || !_barrierCache) {
+          _barrierCache = barrierCtx.getImageData(0, 0, BARRIER_RES, BARRIER_RES).data;
+          _barrierCacheDirty = false;
+        }
+        return _barrierCache;
+      }
+      function invalidateBarrierCache() { _barrierCacheDirty = true; }
+
+      function isBarrierBlocked(wx, wz) {
+        const pixels = _getBarrierPixels();
+        const { u, v } = worldToUV(wx, wz);
+        const px = Math.max(0, Math.min(BARRIER_RES - 1, Math.floor(u * BARRIER_RES)));
+        const py = Math.max(0, Math.min(BARRIER_RES - 1, Math.floor(v * BARRIER_RES)));
+        return pixels[(py * BARRIER_RES + px) * 4] > 64;
+      }
+
+      function syncBarrierOverlay() {
+        if (!barrierOverlayMesh) return;
+        barrierOverlayMesh.material.map.needsUpdate = true;
       }
 
       // ─── TREE PAINT ──────────────────────────
@@ -3230,6 +3284,27 @@
         // ── CLIFF PAINT TEX (separate splatmap for cliff blend surfaces) ──
         cliffPaintTex = new THREE.CanvasTexture(cliffPaintCanvas);
         cliffPaintTex.wrapS = cliffPaintTex.wrapT = THREE.ClampToEdgeWrapping;
+
+        // ── BARRIER TEX + OVERLAY MESH ──────────────────────────────────
+        barrierTex = new THREE.CanvasTexture(barrierCanvas);
+        barrierTex.flipY = false;
+        barrierTex.wrapS = barrierTex.wrapT = THREE.ClampToEdgeWrapping;
+        {
+          const overlayGeo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, 1, 1);
+          overlayGeo.rotateX(-Math.PI / 2);
+          const overlayMat = new THREE.MeshBasicMaterial({
+            map: barrierTex,
+            transparent: true,
+            opacity: 0.35,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+          });
+          barrierOverlayMesh = new THREE.Mesh(overlayGeo, overlayMat);
+          barrierOverlayMesh.position.y = 0.6;
+          barrierOverlayMesh.renderOrder = 10;
+          barrierOverlayMesh.visible = false;
+          scene.add(barrierOverlayMesh);
+        }
 
         // ── GEMINI CLIFF DENSITY TEX ──────────────────────────────────────
         geminiCliffDensityTex = new THREE.CanvasTexture(geminiCliffDensityCanvas);
@@ -6154,6 +6229,7 @@
           zip.file("gemini-cliff-grass-density.bin", _canvasToRawBin(geminiCliffDensityCanvas, geminiCliffDensityCtx));
           zip.file("flower-density.bin", _canvasToRawBin(flowerDensityCanvas, flowerDensityCtx));
           zip.file("img-splat.bin", imgSplatData.buffer);
+          zip.file("barrier.bin", _canvasToRawBin(barrierCanvas, barrierCtx));
 
           // JSON for object positions (already lossless)
           const meta = {
@@ -6324,6 +6400,16 @@
                 new Uint8Array(await imgSplatFile.async("arraybuffer")),
               );
               if (imgSplatTex) imgSplatTex.needsUpdate = true;
+            }
+            const barrierFile = zip.file("barrier.bin");
+            if (barrierFile) {
+              _rawBinToCanvas(
+                await barrierFile.async("arraybuffer"),
+                barrierCanvas,
+                barrierCtx,
+                barrierTex,
+              );
+              invalidateBarrierCache();
             }
 
             // Object positions
@@ -6499,6 +6585,7 @@
             .querySelectorAll(".preview-label")
             .forEach((el) => (el.style.display = "none"));
           brushRing.visible = false;
+          if (barrierOverlayMesh) barrierOverlayMesh.visible = false;
           renderer.domElement.requestPointerLock();
         }
 
@@ -6610,7 +6697,9 @@
                 ? 0x44aa44
                 : currentMode === "foliage"
                   ? 0xaaff44
-                  : 0xffffff,
+                  : currentMode === "barrier"
+                    ? 0xff2222
+                    : 0xffffff,
           );
           brushRing.position.set(p.x, p.y + 0.15, p.z);
           brushRing.scale.setScalar(brushWorldRadius());
@@ -6658,6 +6747,7 @@
             "Play [F]": "play",
             "Cliff Blend Test": "cliffblend",
             "Cliff Paint": "cliffpaint",
+            "Barrier": "barrier",
           },
         });
         modeBinding.on("change", (ev) => setMode(ev.value));
@@ -9253,6 +9343,37 @@
           if (cliffPaintTex) cliffPaintTex.needsUpdate = true;
         });
 
+        // ── BARRIER FOLDER ──
+        const barrierFolder = pane.addFolder({
+          title: "Barrier",
+          expanded: true,
+        });
+        barrierFolder.hidden = true;
+        const barrierPARAMS = { erase: false, showOverlay: true };
+        barrierFolder.addBinding(barrierPARAMS, "erase", {
+          label: "Erase (or Shift)",
+        }).on("change", (ev) => { barrierEraseMode = ev.value; });
+        barrierFolder.addBinding(barrierPARAMS, "showOverlay", {
+          label: "Show overlay",
+        }).on("change", (ev) => {
+          barrierOverlayVisible = ev.value;
+          if (barrierOverlayMesh) barrierOverlayMesh.visible = ev.value && currentMode === "barrier";
+        });
+        barrierFolder.addButton({ title: "Clear all barriers" }).on("click", () => {
+          barrierCtx.fillStyle = "#000";
+          barrierCtx.fillRect(0, 0, BARRIER_RES, BARRIER_RES);
+          if (barrierTex) barrierTex.needsUpdate = true;
+          invalidateBarrierCache();
+          syncBarrierOverlay();
+        });
+        barrierFolder.addButton({ title: "Fill all barriers" }).on("click", () => {
+          barrierCtx.fillStyle = "#f00";
+          barrierCtx.fillRect(0, 0, BARRIER_RES, BARRIER_RES);
+          if (barrierTex) barrierTex.needsUpdate = true;
+          invalidateBarrierCache();
+          syncBarrierOverlay();
+        });
+
         // ── PATH FOLDER ──
         const pathFolder = pane.addFolder({
           title: "Path  [ L ]",
@@ -10112,6 +10233,8 @@
           if (typeof geminiCliffGrassFolder !== "undefined") geminiCliffGrassFolder.hidden = mode !== "geminicliffgrass";
           cliffBlendFolder.hidden = mode !== "cliffblend";
           cliffPaintFolder.hidden = mode !== "cliffpaint";
+          barrierFolder.hidden = mode !== "barrier";
+          if (barrierOverlayMesh) barrierOverlayMesh.visible = mode === "barrier" && barrierOverlayVisible;
           brushFolder.hidden =
             mode === "view" ||
             mode === "place" ||
@@ -10246,7 +10369,9 @@
                                                       ? "CLIFF BLEND TEST"
                                                       : mode === "cliffpaint"
                                                         ? "CLIFF PAINT"
-                                                        : "PLACE MODE"; // play handled above
+                                                        : mode === "barrier"
+                                                          ? "BARRIER MODE"
+                                                          : "PLACE MODE"; // play handled above
           badge.className = mode;
           renderer.domElement.style.cursor =
             mode === "view" ? "default" : "crosshair";
@@ -10552,6 +10677,8 @@
             paintFTreeAt(p.x, p.z, e.shiftKey);
           if (currentMode === "cliffpaint")
             paintCliffBlendAt(p.x, p.z, cliffPaintEraseMode || e.shiftKey);
+          if (currentMode === "barrier")
+            paintBarrierAt(p.x, p.z, barrierEraseMode || e.shiftKey);
         });
 
         // ── BRUSH SCROLL SHORTCUTS ──────────────────────────────────────
@@ -10794,6 +10921,8 @@
             paintAmbientFXAt(p.x, p.z, ambientFXErase || e.shiftKey);
           if (currentMode === "cliffpaint")
             paintCliffBlendAt(p.x, p.z, cliffPaintEraseMode || e.shiftKey);
+          if (currentMode === "barrier")
+            paintBarrierAt(p.x, p.z, barrierEraseMode || e.shiftKey);
         });
 
         renderer.domElement.addEventListener("mouseup", () => {
@@ -11186,16 +11315,21 @@
             }
             const mlen = Math.sqrt(mx * mx + mz * mz);
             if (mlen > 0) {
-              playerPos.x += (mx / mlen) * playParams.speed * dt;
-              playerPos.z += (mz / mlen) * playParams.speed * dt;
-              playerPos.x = Math.max(
-                -TERRAIN_SIZE / 2,
-                Math.min(TERRAIN_SIZE / 2, playerPos.x),
-              );
-              playerPos.z = Math.max(
-                -TERRAIN_SIZE / 2,
-                Math.min(TERRAIN_SIZE / 2, playerPos.z),
-              );
+              const stepX = (mx / mlen) * playParams.speed * dt;
+              const stepZ = (mz / mlen) * playParams.speed * dt;
+              let newX = playerPos.x + stepX;
+              let newZ = playerPos.z + stepZ;
+              newX = Math.max(-TERRAIN_SIZE / 2, Math.min(TERRAIN_SIZE / 2, newX));
+              newZ = Math.max(-TERRAIN_SIZE / 2, Math.min(TERRAIN_SIZE / 2, newZ));
+              if (isBarrierBlocked(newX, newZ)) {
+                const slideX = !isBarrierBlocked(newX, playerPos.z);
+                const slideZ = !isBarrierBlocked(playerPos.x, newZ);
+                if (slideX) newZ = playerPos.z;
+                else if (slideZ) newX = playerPos.x;
+                else { newX = playerPos.x; newZ = playerPos.z; }
+              }
+              playerPos.x = newX;
+              playerPos.z = newZ;
             }
             // Snap Y to terrain (bvhHeight includes cliff surfaces)
             playerPos.y = bvhHeight(playerPos.x, playerPos.z);
