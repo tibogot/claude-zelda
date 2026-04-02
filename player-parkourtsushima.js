@@ -293,6 +293,8 @@ export function createPlayer(opts) {
       });
       characterGroup.userData.footBoneL = _fbl;
       characterGroup.userData.footBoneR = _fbr;
+      // Pelvis bone for debugging forward offset during combo finish
+      characterGroup.userData.pelvisBone = model.getObjectByName("pelvis") || null;
 
       try {
         if (gltf.animations && gltf.animations.length) {
@@ -933,6 +935,9 @@ export function createPlayer(opts) {
 
   // Foot bone Y tracking for footstep sync
   const _footPos = new THREE.Vector3();
+  const _tmpVecA = new THREE.Vector3();
+  const _tmpVecB = new THREE.Vector3();
+  const _tmpForward = new THREE.Vector3();
   let _footRelYL = null,
     _footRelYR = null;
   let _footVelL = 0,
@@ -2262,6 +2267,14 @@ export function createPlayer(opts) {
           ud.comboIndex++;
           const nextAction = ud.lightActions[ud.comboIndex];
           if (nextAction) {
+            // If entering the third hit, record pelvis/world start for debug offset
+            if (ud.comboIndex === 2 && ud.pelvisBone) {
+              ud.comboPelvisStart = ud.pelvisBone
+                .getWorldPosition(_tmpVecA.clone())
+                .clone();
+              ud.comboCharPosStart = charPos.clone();
+              ud.comboYawStart = state.charYaw;
+            }
             nextAction.reset();
             nextAction.enabled = true;
             nextAction.crossFadeFrom(currentAttack, 0.12).play();
@@ -2278,6 +2291,39 @@ export function createPlayer(opts) {
 
         // Attack finished (no further combo)
         if (currentAttack.time >= dur - 0.02) {
+          // If we just finished the third light combo hit, shift the character
+          // forward by the distance the pelvis moved during the animation, so
+          // the final idle happens "1m ahead" instead of sliding back.
+          if (
+            ud.currentAttackType === "light" &&
+            (ud.comboIndex ?? 0) === 2 &&
+            ud.pelvisBone &&
+            ud.comboPelvisStart
+          ) {
+            const pelvisNow = ud.pelvisBone
+              .getWorldPosition(_tmpVecA.set(0, 0, 0))
+              .clone();
+            const deltaPelvis = pelvisNow.sub(ud.comboPelvisStart);
+            _tmpForward.set(
+              Math.sin(state.charYaw),
+              0,
+              Math.cos(state.charYaw),
+            );
+            const d = deltaPelvis.dot(_tmpForward);
+            if (d > 0.05 && d < 2.5) {
+              charPos.addScaledVector(_tmpForward, d);
+              const newPos = {
+                x: charPos.x,
+                y: charPos.y,
+                z: charPos.z,
+              };
+              playerBody.setTranslation(newPos, true);
+              playerBody.setNextKinematicTranslation(newPos);
+            }
+            ud.comboPelvisStart = null;
+            ud.comboCharPosStart = null;
+          }
+
           ud.isAttacking = false;
           ud.currentAttackType = null;
           ud.currentAttack = null;
