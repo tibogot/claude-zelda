@@ -226,33 +226,18 @@
           rotY: 1.35,
           rotZ: -2.21,
         },
-        bladeVFX: {
+        swordTrail: {
           enabled: true,
-          posX: 0,
-          posY: 0.45,
-          posZ: 0,
-          rotX: Math.PI * 0.5,
-          rotY: 0,
-          rotZ: 0,
-          scaleX: 0.35,
-          scaleY: 0.12,
-          scaleZ: 0.35,
-          slashColor: "#66dfff",
+          trailColor: "#66dfff",
           edgeColor: "#ffffff",
-          slashIntensity: 4.8,
-          alphaStrength: 1.0,
-          ringSoftness: 0.22,
-          ringCenter: 0.65,
-          ringWidth: 0.26,
-          noiseScale: 11.5,
-          noiseWarp: 1.8,
-          noiseSpeed: 1.25,
-          streakFreq: 17.0,
-          streakStrength: 0.33,
-          edgeThreshold: 0.52,
-          edgeSharpness: 0.08,
-          fadeInTime: 0.06,
-          fadeOutTime: 0.15,
+          trailLength: 8,
+          tipOffset: 0.85,
+          baseOffset: 0.0,
+          widthScale: 1.0,
+          opacity: 0.8,
+          fadeOutTime: 0.12,
+          lightIntensity: 1.5,
+          lightRange: 3.0,
         },
         flowingLines: {
           enabled: false,
@@ -267,6 +252,47 @@
           pathFrequency: 0.8,
           lineColor: "#a8d8ea",
           lineOpacity: 0.7,
+        },
+        bloodFX: {
+          enabled: true,
+          burstCount: 10,
+          bloodColor: "#8b0000",
+          bloodColor2: "#cc1100",
+          burstSpeed: 3.5,
+          burstSpread: 2.0,
+          gravity: 6.0,
+          spriteSize: 0.12,
+          lifetime: 0.6,
+          poolColor: "#550000",
+          poolSize: 0.3,
+          poolLifetime: 3.0,
+          flashDuration: 0.12,
+          flashColor: "#ff2200",
+        },
+        spellVFX: {
+          enabled: true,
+          orbColor: "#33ccff",
+          orbCoreColor: "#ffffff",
+          orbSize: 0.12,
+          orbIntensity: 6.0,
+          orbPulseSpeed: 3.0,
+          orbPulseAmount: 0.25,
+          orbLightIntensity: 2.5,
+          orbLightRange: 4.0,
+          orbOffsetX: 0,
+          orbOffsetY: 0,
+          orbOffsetZ: 0,
+          projectileSpeed: 28,
+          projectileSize: 0.1,
+          projectileMaxDist: 35,
+          trailLength: 12,
+          trailSpacing: 0.06,
+          impactSize: 0.8,
+          impactDuration: 0.3,
+          sparkCount: 8,
+          sparkOrbitRadius: 0.2,
+          sparkOrbitSpeed: 5.0,
+          sparkSize: 0.02,
         },
         enemies: undefined,
       };
@@ -345,186 +371,687 @@
         ).normalize();
       }
 
-      /* ── Blade Slash VFX ─────────────────────────────────────── */
-      const bladeVfxUniforms = {
-        time:           uniform(0),
-        slashColor:     uniform(color(parkourParams.bladeVFX.slashColor)),
-        edgeColor:      uniform(color(parkourParams.bladeVFX.edgeColor)),
-        slashIntensity: uniform(parkourParams.bladeVFX.slashIntensity),
-        alphaStrength:  uniform(parkourParams.bladeVFX.alphaStrength),
-        ringSoftness:   uniform(parkourParams.bladeVFX.ringSoftness),
-        ringCenter:     uniform(parkourParams.bladeVFX.ringCenter),
-        ringWidth:      uniform(parkourParams.bladeVFX.ringWidth),
-        noiseScale:     uniform(parkourParams.bladeVFX.noiseScale),
-        noiseWarp:      uniform(parkourParams.bladeVFX.noiseWarp),
-        noiseSpeed:     uniform(parkourParams.bladeVFX.noiseSpeed),
-        streakFreq:     uniform(parkourParams.bladeVFX.streakFreq),
-        streakStrength: uniform(parkourParams.bladeVFX.streakStrength),
-        edgeThreshold:  uniform(parkourParams.bladeVFX.edgeThreshold),
-        edgeSharpness:  uniform(parkourParams.bladeVFX.edgeSharpness),
-        opacity:        uniform(0),
+      /* ── Sword Trail VFX (ribbon trail, zero shader compilation) ─ */
+      function makeTrailTexture(w, h) {
+        const c = document.createElement("canvas");
+        c.width = w; c.height = h;
+        const ctx = c.getContext("2d");
+        const g = ctx.createLinearGradient(0, 0, 0, h);
+        g.addColorStop(0, "rgba(255,255,255,0)");
+        g.addColorStop(0.15, "rgba(255,255,255,0.6)");
+        g.addColorStop(0.5, "rgba(255,255,255,1)");
+        g.addColorStop(0.85, "rgba(255,255,255,0.6)");
+        g.addColorStop(1, "rgba(255,255,255,0)");
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, w, h);
+        const tex = new THREE.CanvasTexture(c);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        return tex;
+      }
+
+      const swordTrail = {
+        mesh: null, geo: null, mat: null, edgeMat: null, edgeMesh: null,
+        light: null,
+        history: [],
+        maxSamples: 12,
+        wasAttacking: false, fadeTimer: 0, currentOpacity: 0,
+        initialized: false,
+        _tipLocal: new THREE.Vector3(),
+        _baseLocal: new THREE.Vector3(),
+        _tipWorld: new THREE.Vector3(),
+        _baseWorld: new THREE.Vector3(),
       };
 
-      const _bladeHash21 = Fn(([p]) => {
-        return fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453));
-      });
-      const _bladeNoise2D = Fn(([p]) => {
-        const i = floor(p);
-        const f = fract(p);
-        const u2 = f.mul(f).mul(float(3).sub(f.mul(2)));
-        const a = _bladeHash21(i);
-        const b = _bladeHash21(i.add(vec2(1, 0)));
-        const c = _bladeHash21(i.add(vec2(0, 1)));
-        const d = _bladeHash21(i.add(vec2(1, 1)));
-        const ab = a.add(b.sub(a).mul(u2.x));
-        const cd = c.add(d.sub(c).mul(u2.x));
-        return ab.add(cd.sub(ab).mul(u2.y));
-      });
+      function initSwordTrail(scene) {
+        if (swordTrail.initialized) return;
+        swordTrail.initialized = true;
+        const p = parkourParams.swordTrail;
+        swordTrail.maxSamples = p.trailLength + 2;
 
-      function createBladeSlashGeometry() {
-        const sides = 25;
-        const height = 0.66;
-        const rings = [
-          { y: 0.0, rx: 0.5, rz: 0.5 },
-          { y: 0.2, rx: 1.0, rz: 1.0 },
-          { y: 0.5, rx: 1.5, rz: 1.5 },
-          { y: 0.8, rx: 1.0, rz: 1.0 },
-          { y: 1.0, rx: 0.5, rz: 0.5 },
-        ];
-        const positions = [], uvs = [], indices = [];
-        const rv = sides + 1;
-        for (const { y, rx, rz } of rings) {
-          const py = -height * 0.5 + height * y;
-          for (let s = 0; s <= sides; s++) {
-            const t = s / sides;
-            const a = t * Math.PI * 2;
-            positions.push(Math.cos(a) * rx, py, Math.sin(a) * rz);
-            uvs.push(t, y);
-          }
-        }
-        for (let l = 0; l < 4; l++) {
-          const c0 = l * rv, c1 = (l + 1) * rv;
-          for (let s = 0; s < sides; s++) {
-            const a = c0 + s, b = a + 1, c = c1 + s, d = c + 1;
-            indices.push(a, b, c, b, d, c);
-          }
-        }
-        const geo = new THREE.BufferGeometry();
-        geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-        geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
-        geo.setIndex(indices);
-        geo.computeVertexNormals();
-        return geo;
-      }
+        const maxVerts = swordTrail.maxSamples * 2;
+        const maxTris = (swordTrail.maxSamples - 1) * 2;
+        const positions = new Float32Array(maxVerts * 3);
+        const uvs = new Float32Array(maxVerts * 2);
+        const colors = new Float32Array(maxVerts * 4);
+        const indices = new Uint16Array(maxTris * 3);
 
-      function createBladeSlashMaterial() {
-        const mat = new THREE.MeshBasicNodeMaterial({
-          transparent: true,
-          depthWrite: false,
-          side: THREE.DoubleSide,
+        swordTrail.geo = new THREE.BufferGeometry();
+        swordTrail.geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+        swordTrail.geo.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+        swordTrail.geo.setAttribute("color", new THREE.BufferAttribute(colors, 4));
+        swordTrail.geo.setIndex(new THREE.BufferAttribute(indices, 1));
+        swordTrail.geo.setDrawRange(0, 0);
+
+        const trailTex = makeTrailTexture(4, 64);
+
+        swordTrail.mat = new THREE.MeshBasicMaterial({
+          vertexColors: true, transparent: true, depthWrite: false,
+          side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+          map: trailTex, color: new THREE.Color(p.trailColor),
         });
-        const u = bladeVfxUniforms;
-        mat.outputNode = Fn(() => {
-          const uvNode = uv();
-          const centered = uvNode.sub(0.5).toVar();
-          const radial = centered.length();
-          const angle = centered.y.atan(centered.x);
-          const angle01 = angle.add(Math.PI).div(Math.PI * 2);
-          const t = u.time.mul(u.noiseSpeed);
-          const dir = vec2(cos(angle), sin(angle));
-          const polar = dir.mul(radial);
-          const nUv = polar.mul(vec2(u.noiseScale, u.noiseScale))
-            .add(vec2(t, t.negate())).toVar();
-          const warpX = _bladeNoise2D(nUv).sub(0.5).mul(u.noiseWarp);
-          const warpY = _bladeNoise2D(nUv.add(vec2(17.3, 9.1))).sub(0.5).mul(u.noiseWarp);
-          const warped = nUv.add(vec2(warpX, warpY));
-          const n = _bladeNoise2D(warped);
-          const noisyRadius = radial.add(n.sub(0.5).mul(0.12));
-          const ringDelta = abs(noisyRadius.sub(u.ringCenter));
-          const ringMask = smoothstep(u.ringWidth, u.ringWidth.sub(u.ringSoftness.mul(0.5)), ringDelta);
-          const streak = sin(angle01.mul(u.streakFreq).add(t.mul(2.4))).mul(0.5).add(0.5);
-          const streakMask = streak.mul(u.streakStrength).add(float(1).sub(u.streakStrength));
-          const core = ringMask.mul(streakMask).toVar();
-          const edge = smoothstep(u.edgeThreshold, u.edgeThreshold.add(u.edgeSharpness), core);
-          const slash = u.slashColor.mul(core.mul(u.slashIntensity));
-          const edgeGlow = u.edgeColor.mul(edge.mul(u.slashIntensity).mul(0.8));
-          const outColor = slash.add(edgeGlow);
-          const alpha = max(core, edge.mul(0.7)).mul(u.alphaStrength).mul(u.opacity).clamp(0, 1);
-          return vec4(outColor, alpha);
-        })();
-        return mat;
+
+        swordTrail.mesh = new THREE.Mesh(swordTrail.geo, swordTrail.mat);
+        swordTrail.mesh.frustumCulled = false;
+        swordTrail.mesh.renderOrder = 998;
+        scene.add(swordTrail.mesh);
+
+        swordTrail.edgeMat = new THREE.MeshBasicMaterial({
+          vertexColors: true, transparent: true, depthWrite: false,
+          side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+          color: new THREE.Color(p.edgeColor),
+        });
+
+        const edgeGeo = new THREE.BufferGeometry();
+        edgeGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(maxVerts * 3), 3));
+        edgeGeo.setAttribute("color", new THREE.BufferAttribute(new Float32Array(maxVerts * 4), 4));
+        edgeGeo.setIndex(new THREE.BufferAttribute(new Uint16Array(maxTris * 3), 1));
+        edgeGeo.setDrawRange(0, 0);
+        swordTrail.edgeMesh = new THREE.Mesh(edgeGeo, swordTrail.edgeMat);
+        swordTrail.edgeMesh.frustumCulled = false;
+        swordTrail.edgeMesh.renderOrder = 999;
+        scene.add(swordTrail.edgeMesh);
+
+        swordTrail.light = new THREE.PointLight(0x33ccff, 0, p.lightRange);
+        scene.add(swordTrail.light);
       }
 
-      let bladeSlashMesh = null;
-      let bladeVfxState = { active: false, timer: 0, phase: "off" };
-
-      function initBladeSlashVFX(swordGroup) {
-        const geo = createBladeSlashGeometry();
-        const mat = createBladeSlashMaterial();
-        bladeSlashMesh = new THREE.Mesh(geo, mat);
-        bladeSlashMesh.frustumCulled = false;
-        bladeSlashMesh.renderOrder = 999;
-        const p = parkourParams.bladeVFX;
-        bladeSlashMesh.position.set(p.posX, p.posY, p.posZ);
-        bladeSlashMesh.rotation.set(p.rotX, p.rotY, p.rotZ);
-        bladeSlashMesh.scale.set(p.scaleX, p.scaleY, p.scaleZ);
-        bladeSlashMesh.visible = false;
-        swordGroup.add(bladeSlashMesh);
-      }
-
-      function updateBladeVFX(dt, isAttacking) {
-        if (!bladeSlashMesh) return;
-        const p = parkourParams.bladeVFX;
-        if (!p.enabled) { bladeSlashMesh.visible = false; return; }
-
-        bladeSlashMesh.position.set(p.posX, p.posY, p.posZ);
-        bladeSlashMesh.rotation.set(p.rotX, p.rotY, p.rotZ);
-        bladeSlashMesh.scale.set(p.scaleX, p.scaleY, p.scaleZ);
-
-        const bu = bladeVfxUniforms;
-        bu.slashColor.value.set(p.slashColor);
-        bu.edgeColor.value.set(p.edgeColor);
-        bu.slashIntensity.value = p.slashIntensity;
-        bu.alphaStrength.value = p.alphaStrength;
-        bu.ringSoftness.value = p.ringSoftness;
-        bu.ringCenter.value = p.ringCenter;
-        bu.ringWidth.value = p.ringWidth;
-        bu.noiseScale.value = p.noiseScale;
-        bu.noiseWarp.value = p.noiseWarp;
-        bu.noiseSpeed.value = p.noiseSpeed;
-        bu.streakFreq.value = p.streakFreq;
-        bu.streakStrength.value = p.streakStrength;
-        bu.edgeThreshold.value = p.edgeThreshold;
-        bu.edgeSharpness.value = p.edgeSharpness;
-
-        if (isAttacking && bladeVfxState.phase !== "on" && bladeVfxState.phase !== "fadein") {
-          bladeVfxState.phase = "fadein";
-          bladeVfxState.timer = 0;
-          bladeSlashMesh.visible = true;
-          bu.time.value = 0;
-        } else if (!isAttacking && bladeVfxState.phase === "on") {
-          bladeVfxState.phase = "fadeout";
-          bladeVfxState.timer = 0;
+      function updateSwordTrail(dt, swordGroup, isAttacking) {
+        if (!swordTrail.initialized) return;
+        const p = parkourParams.swordTrail;
+        if (!p.enabled) {
+          swordTrail.geo.setDrawRange(0, 0);
+          swordTrail.edgeMesh.geometry.setDrawRange(0, 0);
+          swordTrail.light.intensity = 0;
+          swordTrail.history.length = 0;
+          return;
         }
 
-        bladeVfxState.timer += dt;
-        bu.time.value += dt;
+        swordTrail.mat.color.set(p.trailColor);
+        swordTrail.edgeMat.color.set(p.edgeColor);
+        swordTrail.maxSamples = p.trailLength + 2;
 
-        if (bladeVfxState.phase === "fadein") {
-          const t = Math.min(bladeVfxState.timer / Math.max(p.fadeInTime, 0.01), 1);
-          bu.opacity.value = t;
-          if (t >= 1) bladeVfxState.phase = "on";
-        } else if (bladeVfxState.phase === "on") {
-          bu.opacity.value = 1;
-          if (!isAttacking) { bladeVfxState.phase = "fadeout"; bladeVfxState.timer = 0; }
-        } else if (bladeVfxState.phase === "fadeout") {
-          const t = 1 - Math.min(bladeVfxState.timer / Math.max(p.fadeOutTime, 0.01), 1);
-          bu.opacity.value = t;
-          if (t <= 0) { bladeVfxState.phase = "off"; bladeSlashMesh.visible = false; }
+        if (isAttacking) {
+          swordTrail.currentOpacity = Math.min(swordTrail.currentOpacity + dt * 16, 1);
+          swordTrail._tipLocal.set(0, 0, p.tipOffset);
+          swordTrail._baseLocal.set(0, 0, p.baseOffset);
+          swordGroup.localToWorld(swordTrail._tipWorld.copy(swordTrail._tipLocal));
+          swordGroup.localToWorld(swordTrail._baseWorld.copy(swordTrail._baseLocal));
+          swordTrail.history.unshift({
+            tip: swordTrail._tipWorld.clone(),
+            base: swordTrail._baseWorld.clone(),
+          });
+          if (swordTrail.history.length > swordTrail.maxSamples) {
+            swordTrail.history.length = swordTrail.maxSamples;
+          }
+          swordTrail.wasAttacking = true;
+          swordTrail.fadeTimer = 0;
         } else {
-          bu.opacity.value = 0;
-          bladeSlashMesh.visible = false;
+          if (swordTrail.wasAttacking) {
+            swordTrail.fadeTimer += dt;
+            swordTrail.currentOpacity = Math.max(1 - swordTrail.fadeTimer / Math.max(p.fadeOutTime, 0.01), 0);
+            if (swordTrail.currentOpacity <= 0) {
+              swordTrail.wasAttacking = false;
+              swordTrail.history.length = 0;
+            }
+          }
         }
+
+        const n = swordTrail.history.length;
+        if (n < 2) {
+          swordTrail.geo.setDrawRange(0, 0);
+          swordTrail.edgeMesh.geometry.setDrawRange(0, 0);
+          swordTrail.light.intensity = 0;
+          return;
+        }
+
+        const posAttr = swordTrail.geo.attributes.position;
+        const uvAttr = swordTrail.geo.attributes.uv;
+        const colAttr = swordTrail.geo.attributes.color;
+        const idxAttr = swordTrail.geo.index;
+        const eposAttr = swordTrail.edgeMesh.geometry.attributes.position;
+        const ecolAttr = swordTrail.edgeMesh.geometry.attributes.color;
+        const eidxAttr = swordTrail.edgeMesh.geometry.index;
+        const trailCol = new THREE.Color(p.trailColor);
+
+        for (let i = 0; i < n; i++) {
+          const { tip, base } = swordTrail.history[i];
+          const frac = i / (n - 1);
+          const alpha = (1 - frac) * p.opacity * swordTrail.currentOpacity;
+          const edgeAlpha = (1 - frac * frac) * swordTrail.currentOpacity;
+          const ws = p.widthScale;
+
+          const vi = i * 2;
+          posAttr.array[vi * 3] = base.x;
+          posAttr.array[vi * 3 + 1] = base.y;
+          posAttr.array[vi * 3 + 2] = base.z;
+          posAttr.array[(vi + 1) * 3] = tip.x;
+          posAttr.array[(vi + 1) * 3 + 1] = tip.y;
+          posAttr.array[(vi + 1) * 3 + 2] = tip.z;
+
+          uvAttr.array[vi * 2] = frac;
+          uvAttr.array[vi * 2 + 1] = 0;
+          uvAttr.array[(vi + 1) * 2] = frac;
+          uvAttr.array[(vi + 1) * 2 + 1] = 1;
+
+          colAttr.array[vi * 4] = trailCol.r;
+          colAttr.array[vi * 4 + 1] = trailCol.g;
+          colAttr.array[vi * 4 + 2] = trailCol.b;
+          colAttr.array[vi * 4 + 3] = alpha;
+          colAttr.array[(vi + 1) * 4] = 1;
+          colAttr.array[(vi + 1) * 4 + 1] = 1;
+          colAttr.array[(vi + 1) * 4 + 2] = 1;
+          colAttr.array[(vi + 1) * 4 + 3] = alpha * 1.2;
+
+          eposAttr.array[vi * 3] = tip.x;
+          eposAttr.array[vi * 3 + 1] = tip.y;
+          eposAttr.array[vi * 3 + 2] = tip.z;
+          eposAttr.array[(vi + 1) * 3] = tip.x;
+          eposAttr.array[(vi + 1) * 3 + 1] = tip.y;
+          eposAttr.array[(vi + 1) * 3 + 2] = tip.z;
+
+          ecolAttr.array[vi * 4] = 1;
+          ecolAttr.array[vi * 4 + 1] = 1;
+          ecolAttr.array[vi * 4 + 2] = 1;
+          ecolAttr.array[vi * 4 + 3] = edgeAlpha * 0.8;
+          ecolAttr.array[(vi + 1) * 4] = trailCol.r;
+          ecolAttr.array[(vi + 1) * 4 + 1] = trailCol.g;
+          ecolAttr.array[(vi + 1) * 4 + 2] = trailCol.b;
+          ecolAttr.array[(vi + 1) * 4 + 3] = edgeAlpha * 0.3;
+        }
+
+        let triIdx = 0;
+        for (let i = 0; i < n - 1; i++) {
+          const a = i * 2, b = a + 1, c = (i + 1) * 2, d = c + 1;
+          idxAttr.array[triIdx++] = a;
+          idxAttr.array[triIdx++] = b;
+          idxAttr.array[triIdx++] = c;
+          idxAttr.array[triIdx++] = b;
+          idxAttr.array[triIdx++] = d;
+          idxAttr.array[triIdx++] = c;
+          eidxAttr.array[(i * 6)] = a;
+          eidxAttr.array[(i * 6) + 1] = b;
+          eidxAttr.array[(i * 6) + 2] = c;
+          eidxAttr.array[(i * 6) + 3] = b;
+          eidxAttr.array[(i * 6) + 4] = d;
+          eidxAttr.array[(i * 6) + 5] = c;
+        }
+
+        posAttr.needsUpdate = true;
+        uvAttr.needsUpdate = true;
+        colAttr.needsUpdate = true;
+        idxAttr.needsUpdate = true;
+        eposAttr.needsUpdate = true;
+        ecolAttr.needsUpdate = true;
+        eidxAttr.needsUpdate = true;
+
+        swordTrail.geo.setDrawRange(0, (n - 1) * 6);
+        swordTrail.edgeMesh.geometry.setDrawRange(0, (n - 1) * 6);
+
+        const midTip = swordTrail.history[0].tip;
+        swordTrail.light.position.copy(midTip);
+        swordTrail.light.intensity = p.lightIntensity * swordTrail.currentOpacity;
+        swordTrail.light.distance = p.lightRange;
+        swordTrail.light.color.set(p.trailColor);
+      }
+
+      /* ── Blood FX: pooled sprites, zero compilation ──────────── */
+      function makeBloodTexture(size) {
+        const c = document.createElement("canvas");
+        c.width = c.height = size;
+        const ctx = c.getContext("2d");
+        const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+        g.addColorStop(0, "rgba(255,255,255,1)");
+        g.addColorStop(0.3, "rgba(255,200,200,0.8)");
+        g.addColorStop(0.6, "rgba(200,50,50,0.4)");
+        g.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, size, size);
+        const tex = new THREE.CanvasTexture(c);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        return tex;
+      }
+
+      const MAX_BLOOD_PARTICLES = 60;
+      const MAX_BLOOD_POOLS = 12;
+
+      const bloodFx = {
+        particles: [], pools: [],
+        mat: null, poolMat: null,
+        initialized: false,
+      };
+
+      function initBloodFX(scene) {
+        if (bloodFx.initialized) return;
+        bloodFx.initialized = true;
+        const tex = makeBloodTexture(32);
+
+        bloodFx.mat = new THREE.SpriteMaterial({
+          map: tex, transparent: true, depthWrite: false,
+          blending: THREE.NormalBlending, color: 0x8b0000,
+        });
+        bloodFx.poolMat = new THREE.SpriteMaterial({
+          map: tex, transparent: true, depthWrite: false,
+          blending: THREE.NormalBlending, color: 0x550000,
+        });
+
+        for (let i = 0; i < MAX_BLOOD_PARTICLES; i++) {
+          const s = new THREE.Sprite(bloodFx.mat);
+          s.renderOrder = 990;
+          s.scale.set(0.001, 0.001, 1);
+          scene.add(s);
+          bloodFx.particles.push({
+            sprite: s, alive: false, timer: 0, lifetime: 0,
+            vx: 0, vy: 0, vz: 0, size: 0,
+          });
+        }
+
+        for (let i = 0; i < MAX_BLOOD_POOLS; i++) {
+          const s = new THREE.Sprite(bloodFx.poolMat);
+          s.renderOrder = 989;
+          s.scale.set(0.001, 0.001, 1);
+          s.material = bloodFx.poolMat;
+          scene.add(s);
+          bloodFx.pools.push({
+            sprite: s, alive: false, timer: 0, lifetime: 0, size: 0,
+          });
+        }
+      }
+
+      function spawnBloodBurst(position, floorY) {
+        const p = parkourParams.bloodFX;
+        if (!p.enabled) return;
+        const col1 = new THREE.Color(p.bloodColor);
+        const col2 = new THREE.Color(p.bloodColor2);
+
+        for (let i = 0; i < p.burstCount; i++) {
+          const part = bloodFx.particles.find((x) => !x.alive);
+          if (!part) break;
+          part.alive = true;
+          part.timer = 0;
+          part.lifetime = p.lifetime * (0.6 + Math.random() * 0.8);
+          part.size = p.spriteSize * (0.5 + Math.random());
+          const angle = Math.random() * Math.PI * 2;
+          const upward = 0.5 + Math.random() * 1.0;
+          const spread = p.burstSpread * (0.3 + Math.random() * 0.7);
+          part.vx = Math.cos(angle) * spread * p.burstSpeed;
+          part.vy = upward * p.burstSpeed;
+          part.vz = Math.sin(angle) * spread * p.burstSpeed;
+          part.sprite.position.copy(position);
+          part.floorY = floorY;
+          const t = Math.random();
+          part.sprite.material = bloodFx.mat;
+        }
+
+        const pool = bloodFx.pools.find((x) => !x.alive);
+        if (pool) {
+          pool.alive = true;
+          pool.timer = 0;
+          pool.lifetime = p.poolLifetime;
+          pool.size = p.poolSize * (0.7 + Math.random() * 0.6);
+          pool.sprite.position.set(
+            position.x + (Math.random() - 0.5) * 0.5,
+            floorY + 0.02,
+            position.z + (Math.random() - 0.5) * 0.5,
+          );
+          pool.sprite.scale.set(0.001, 0.001, 1);
+        }
+      }
+
+      const _bloodHideScale = new THREE.Vector3(0.001, 0.001, 1);
+
+      function updateBloodFX(dt) {
+        if (!bloodFx.initialized) return;
+        const p = parkourParams.bloodFX;
+        bloodFx.mat.color.set(p.bloodColor);
+        bloodFx.poolMat.color.set(p.poolColor);
+
+        for (const part of bloodFx.particles) {
+          if (!part.alive) continue;
+          part.timer += dt;
+          if (part.timer >= part.lifetime) {
+            part.alive = false;
+            part.sprite.scale.copy(_bloodHideScale);
+            continue;
+          }
+          part.vy -= p.gravity * dt;
+          part.sprite.position.x += part.vx * dt;
+          part.sprite.position.y += part.vy * dt;
+          part.sprite.position.z += part.vz * dt;
+          if (part.sprite.position.y < part.floorY + 0.05) {
+            part.sprite.position.y = part.floorY + 0.05;
+            part.vy = 0;
+            part.vx *= 0.5;
+            part.vz *= 0.5;
+          }
+          const t = part.timer / part.lifetime;
+          const fade = t < 0.1 ? t / 0.1 : 1 - (t - 0.1) / 0.9;
+          const sz = part.size * fade;
+          part.sprite.scale.set(sz, sz, 1);
+        }
+
+        for (const pool of bloodFx.pools) {
+          if (!pool.alive) continue;
+          pool.timer += dt;
+          if (pool.timer >= pool.lifetime) {
+            pool.alive = false;
+            pool.sprite.scale.copy(_bloodHideScale);
+            continue;
+          }
+          const t = pool.timer / pool.lifetime;
+          const growT = Math.min(pool.timer / 0.3, 1);
+          const fadeT = t > 0.6 ? 1 - (t - 0.6) / 0.4 : 1;
+          const sz = pool.size * growT * fadeT;
+          pool.sprite.scale.set(sz * 2, sz, 1);
+        }
+      }
+
+      function flashDeerRed(deer) {
+        const p = parkourParams.bloodFX;
+        if (!p.enabled || !deer.root) return;
+        deer._flashTimer = p.flashDuration;
+        deer._origColors = deer._origColors || new Map();
+        deer.root.traverse((child) => {
+          if (!child.isMesh || !child.material) return;
+          if (!deer._origColors.has(child)) {
+            deer._origColors.set(child, child.material.color ? child.material.color.clone() : new THREE.Color(1, 1, 1));
+          }
+          if (child.material.color) child.material.color.set(p.flashColor);
+        });
+      }
+
+      function updateDeerFlash(deer, dt) {
+        if (!deer._flashTimer || deer._flashTimer <= 0) return;
+        deer._flashTimer -= dt;
+        if (deer._flashTimer <= 0) {
+          deer._flashTimer = 0;
+          if (deer._origColors) {
+            deer._origColors.forEach((origCol, child) => {
+              if (child.material && child.material.color) child.material.color.copy(origCol);
+            });
+          }
+        }
+      }
+
+      /* ── Spell VFX System ────────────────────────────────────── */
+      /* ── Spell VFX: 2 shared Sprites, zero shader compilation ──── */
+      function makeGlowTexture(size) {
+        const c = document.createElement("canvas");
+        c.width = c.height = size;
+        const ctx = c.getContext("2d");
+        const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+        g.addColorStop(0, "rgba(255,255,255,1)");
+        g.addColorStop(0.15, "rgba(200,240,255,0.9)");
+        g.addColorStop(0.4, "rgba(80,200,255,0.4)");
+        g.addColorStop(0.7, "rgba(40,140,255,0.1)");
+        g.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, size, size);
+        const tex = new THREE.CanvasTexture(c);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        return tex;
+      }
+
+      const MAX_PROJECTILES = 4;
+      const MAX_TRAIL = 8;
+      const MAX_IMPACTS = 3;
+      let _spellTime = 0;
+
+      const spellVfx = {
+        orbSprite: null, orbInner: null, orbLight: null, sparks: [],
+        projPool: [], impactPool: [],
+        glowMat: null, brightMat: null,
+        scene: null, initialized: false, orbOpacity: 0,
+      };
+
+      function initSpellVFX(scene, camera) {
+        if (spellVfx.initialized) return;
+        spellVfx.scene = scene;
+        spellVfx.initialized = true;
+        const p = parkourParams.spellVFX;
+        const glowTex = makeGlowTexture(64);
+
+        spellVfx.glowMat = new THREE.SpriteMaterial({
+          map: glowTex, transparent: true, depthWrite: false,
+          blending: THREE.AdditiveBlending, color: 0x33ccff,
+        });
+        spellVfx.brightMat = new THREE.SpriteMaterial({
+          map: glowTex, transparent: true, depthWrite: false,
+          blending: THREE.AdditiveBlending, color: 0xffffff,
+        });
+
+        spellVfx.orbSprite = new THREE.Sprite(spellVfx.glowMat);
+        spellVfx.orbSprite.renderOrder = 1000;
+        spellVfx.orbSprite.scale.set(0.001, 0.001, 1);
+        scene.add(spellVfx.orbSprite);
+
+        spellVfx.orbInner = new THREE.Sprite(spellVfx.brightMat);
+        spellVfx.orbInner.renderOrder = 1001;
+        spellVfx.orbInner.scale.set(0.001, 0.001, 1);
+        scene.add(spellVfx.orbInner);
+
+        spellVfx.orbLight = new THREE.PointLight(0x33ccff, 0, p.orbLightRange);
+        scene.add(spellVfx.orbLight);
+
+        for (let i = 0; i < p.sparkCount; i++) {
+          const spark = new THREE.Sprite(spellVfx.brightMat);
+          spark.renderOrder = 1002;
+          spark.scale.set(0.001, 0.001, 1);
+          spark.userData.phase = Math.random() * Math.PI * 2;
+          spark.userData.yOffset = (Math.random() - 0.5) * 0.3;
+          spark.userData.radiusScale = 0.7 + Math.random() * 0.6;
+          scene.add(spark);
+          spellVfx.sparks.push(spark);
+        }
+
+        for (let i = 0; i < MAX_PROJECTILES; i++) {
+          const outer = new THREE.Sprite(spellVfx.glowMat);
+          outer.renderOrder = 1000;
+          outer.scale.set(0.001, 0.001, 1);
+          scene.add(outer);
+          const inner = new THREE.Sprite(spellVfx.brightMat);
+          inner.renderOrder = 1001;
+          inner.scale.set(0.001, 0.001, 1);
+          scene.add(inner);
+          const light = new THREE.PointLight(0x33ccff, 0, p.orbLightRange * 0.6);
+          scene.add(light);
+
+          const trail = [];
+          for (let j = 0; j < MAX_TRAIL; j++) {
+            const t = new THREE.Sprite(spellVfx.glowMat);
+            t.renderOrder = 999;
+            t.scale.set(0.001, 0.001, 1);
+            scene.add(t);
+            trail.push(t);
+          }
+
+          spellVfx.projPool.push({
+            outer, inner, light, trail,
+            pos: new THREE.Vector3(),
+            dir: new THREE.Vector3(), speed: 0, distance: 0, maxDist: 0,
+            alive: false, trailPositions: [], _trailTimer: 0,
+          });
+        }
+
+        for (let i = 0; i < MAX_IMPACTS; i++) {
+          const outer = new THREE.Sprite(spellVfx.glowMat);
+          outer.renderOrder = 1002;
+          outer.scale.set(0.001, 0.001, 1);
+          scene.add(outer);
+          const inner = new THREE.Sprite(spellVfx.brightMat);
+          inner.renderOrder = 1003;
+          inner.scale.set(0.001, 0.001, 1);
+          scene.add(inner);
+          const light = new THREE.PointLight(0x33ccff, 0, p.orbLightRange * 1.5);
+          scene.add(light);
+          spellVfx.impactPool.push({ outer, inner, light, timer: 0, duration: 0, alive: false });
+        }
+      }
+
+      const _hideScale = new THREE.Vector3(0.001, 0.001, 1);
+      const _handWorldPos = new THREE.Vector3();
+
+      function spawnProjectile(origin, direction) {
+        const p = parkourParams.spellVFX;
+        const proj = spellVfx.projPool.find((x) => !x.alive);
+        if (!proj) return;
+        proj.alive = true;
+        proj.distance = 0;
+        proj.speed = p.projectileSpeed;
+        proj.maxDist = p.projectileMaxDist;
+        proj.dir.copy(direction).normalize();
+        proj.pos.copy(origin);
+        const sz = p.projectileSize * 2;
+        proj.outer.position.copy(origin);
+        proj.outer.scale.set(sz * 2.5, sz * 2.5, 1);
+        proj.inner.position.copy(origin);
+        proj.inner.scale.set(sz, sz, 1);
+        proj.light.position.copy(origin);
+        proj.light.intensity = p.orbLightIntensity * 0.8;
+        proj.trailPositions.length = 0;
+        proj.trailPositions.push(origin.clone());
+        proj._trailTimer = 0;
+        for (const t of proj.trail) t.scale.copy(_hideScale);
+      }
+
+      function spawnImpact(position) {
+        const p = parkourParams.spellVFX;
+        const imp = spellVfx.impactPool.find((x) => !x.alive);
+        if (!imp) return;
+        imp.alive = true;
+        imp.timer = 0;
+        imp.duration = p.impactDuration;
+        imp.outer.position.copy(position);
+        imp.inner.position.copy(position);
+        imp.light.position.copy(position);
+        imp.light.intensity = p.orbLightIntensity * 3;
+      }
+
+      function updateSpellVFX(dt, camera, udPlayer) {
+        if (!spellVfx.initialized) return;
+        const p = parkourParams.spellVFX;
+        if (!p.enabled) {
+          spellVfx.orbSprite.scale.copy(_hideScale);
+          spellVfx.orbInner.scale.copy(_hideScale);
+          spellVfx.orbLight.intensity = 0;
+          for (const s of spellVfx.sparks) s.scale.copy(_hideScale);
+          return;
+        }
+
+        _spellTime += dt;
+        spellVfx.glowMat.color.set(p.orbColor);
+        spellVfx.brightMat.color.set(p.orbCoreColor);
+
+        const isCasting = udPlayer.isCastingSpell;
+        const phase = udPlayer.spellPhase || "none";
+        const handBone = udPlayer.leftHandBone;
+        const showOrb = isCasting && handBone && (phase === "enter" || phase === "idle" || phase === "shoot");
+
+        if (showOrb) {
+          const targetOp = phase === "enter" ? 0.6 : 1;
+          spellVfx.orbOpacity += (targetOp - spellVfx.orbOpacity) * Math.min(dt * 8, 1);
+        } else {
+          spellVfx.orbOpacity *= Math.max(1 - dt * 12, 0);
+          if (spellVfx.orbOpacity < 0.01) spellVfx.orbOpacity = 0;
+        }
+
+        if (spellVfx.orbOpacity > 0 && handBone) {
+          handBone.getWorldPosition(_handWorldPos);
+          _handWorldPos.x += p.orbOffsetX;
+          _handWorldPos.y += p.orbOffsetY;
+          _handWorldPos.z += p.orbOffsetZ;
+
+          const pulse = 1 + Math.sin(_spellTime * p.orbPulseSpeed) * p.orbPulseAmount;
+          const os = p.orbSize * 2 * pulse * spellVfx.orbOpacity;
+
+          spellVfx.orbSprite.position.copy(_handWorldPos);
+          spellVfx.orbSprite.scale.set(os * 2.5, os * 2.5, 1);
+          spellVfx.orbInner.position.copy(_handWorldPos);
+          spellVfx.orbInner.scale.set(os, os, 1);
+          spellVfx.orbLight.position.copy(_handWorldPos);
+          spellVfx.orbLight.intensity = p.orbLightIntensity * pulse * spellVfx.orbOpacity;
+          spellVfx.orbLight.distance = p.orbLightRange;
+
+          for (const spark of spellVfx.sparks) {
+            const angle = _spellTime * p.sparkOrbitSpeed + spark.userData.phase;
+            const r = p.sparkOrbitRadius * spark.userData.radiusScale * pulse;
+            spark.position.set(
+              _handWorldPos.x + Math.cos(angle) * r,
+              _handWorldPos.y + spark.userData.yOffset * pulse,
+              _handWorldPos.z + Math.sin(angle) * r,
+            );
+            const ss = p.sparkSize * 2 * spellVfx.orbOpacity;
+            spark.scale.set(ss, ss, 1);
+          }
+        } else {
+          spellVfx.orbSprite.scale.copy(_hideScale);
+          spellVfx.orbInner.scale.copy(_hideScale);
+          spellVfx.orbLight.intensity = 0;
+          for (const s of spellVfx.sparks) s.scale.copy(_hideScale);
+        }
+
+        for (const proj of spellVfx.projPool) {
+          if (!proj.alive) continue;
+          const moveStep = proj.speed * dt;
+          proj.pos.addScaledVector(proj.dir, moveStep);
+          proj.distance += moveStep;
+
+          proj.outer.position.copy(proj.pos);
+          proj.inner.position.copy(proj.pos);
+          proj.light.position.copy(proj.pos);
+
+          proj._trailTimer += dt;
+          if (proj._trailTimer >= p.trailSpacing) {
+            proj._trailTimer = 0;
+            proj.trailPositions.push(proj.pos.clone());
+            if (proj.trailPositions.length > MAX_TRAIL + 1) proj.trailPositions.shift();
+          }
+
+          const sz = p.projectileSize * 2;
+          for (let i = 0; i < proj.trail.length; i++) {
+            const tIdx = proj.trailPositions.length - 2 - i;
+            if (tIdx >= 0) {
+              const tm = proj.trail[i];
+              tm.position.copy(proj.trailPositions[tIdx]);
+              const frac = (i + 1) / MAX_TRAIL;
+              const ts = sz * (2.5 - frac * 2);
+              tm.scale.set(ts, ts, 1);
+            } else {
+              proj.trail[i].scale.copy(_hideScale);
+            }
+          }
+
+          if (proj.distance >= proj.maxDist) {
+            releaseProjectile(proj);
+            spawnImpact(proj.pos.clone());
+          }
+        }
+
+        for (const imp of spellVfx.impactPool) {
+          if (!imp.alive) continue;
+          imp.timer += dt;
+          const t = imp.timer / imp.duration;
+          if (t >= 1) {
+            imp.alive = false;
+            imp.outer.scale.copy(_hideScale);
+            imp.inner.scale.copy(_hideScale);
+            imp.light.intensity = 0;
+            continue;
+          }
+          const ease = 1 - t;
+          const scale = p.impactSize * (1 + t * 3) * ease;
+          imp.outer.scale.set(scale, scale, 1);
+          const innerScale = p.impactSize * (0.5 + t) * ease;
+          imp.inner.scale.set(innerScale, innerScale, 1);
+          imp.light.intensity = p.orbLightIntensity * 3 * ease;
+        }
+      }
+
+      function releaseProjectile(proj) {
+        proj.alive = false;
+        proj.outer.scale.copy(_hideScale);
+        proj.inner.scale.copy(_hideScale);
+        proj.light.intensity = 0;
+        for (const t of proj.trail) t.scale.copy(_hideScale);
       }
 
       // Flat terrain: sampleHeight returns floor height for player ground checks
@@ -1104,36 +1631,61 @@
           label: "rot Z (rad)",
         });
 
-        const bladeVfxFolder = pane.addFolder({ title: "Blade Slash VFX", expanded: false });
-        bladeVfxFolder.addBinding(parkourParams.bladeVFX, "enabled", { label: "enabled" });
-        const bvPos = bladeVfxFolder.addFolder({ title: "Position / Scale", expanded: true });
-        bvPos.addBinding(parkourParams.bladeVFX, "posX",  { min: -2, max: 2, step: 0.01, label: "pos X" });
-        bvPos.addBinding(parkourParams.bladeVFX, "posY",  { min: -2, max: 2, step: 0.01, label: "pos Y" });
-        bvPos.addBinding(parkourParams.bladeVFX, "posZ",  { min: -2, max: 2, step: 0.01, label: "pos Z" });
-        bvPos.addBinding(parkourParams.bladeVFX, "rotX",  { min: -Math.PI * 2, max: Math.PI * 2, step: 0.05, label: "rot X" });
-        bvPos.addBinding(parkourParams.bladeVFX, "rotY",  { min: -Math.PI * 2, max: Math.PI * 2, step: 0.05, label: "rot Y" });
-        bvPos.addBinding(parkourParams.bladeVFX, "rotZ",  { min: -Math.PI * 2, max: Math.PI * 2, step: 0.05, label: "rot Z" });
-        bvPos.addBinding(parkourParams.bladeVFX, "scaleX", { min: 0.01, max: 2, step: 0.01, label: "scale X" });
-        bvPos.addBinding(parkourParams.bladeVFX, "scaleY", { min: 0.01, max: 2, step: 0.01, label: "scale Y" });
-        bvPos.addBinding(parkourParams.bladeVFX, "scaleZ", { min: 0.01, max: 2, step: 0.01, label: "scale Z" });
-        const bvLook = bladeVfxFolder.addFolder({ title: "Shader", expanded: false });
-        bvLook.addBinding(parkourParams.bladeVFX, "slashColor", { label: "slash color" });
-        bvLook.addBinding(parkourParams.bladeVFX, "edgeColor",  { label: "edge color" });
-        bvLook.addBinding(parkourParams.bladeVFX, "slashIntensity", { min: 0, max: 12, step: 0.1, label: "intensity" });
-        bvLook.addBinding(parkourParams.bladeVFX, "alphaStrength",  { min: 0, max: 1.5, step: 0.01, label: "alpha" });
-        bvLook.addBinding(parkourParams.bladeVFX, "ringCenter",   { min: 0.1, max: 1.1, step: 0.01, label: "ring center" });
-        bvLook.addBinding(parkourParams.bladeVFX, "ringWidth",    { min: 0.02, max: 0.7, step: 0.01, label: "ring width" });
-        bvLook.addBinding(parkourParams.bladeVFX, "ringSoftness", { min: 0.01, max: 0.5, step: 0.01, label: "ring softness" });
-        bvLook.addBinding(parkourParams.bladeVFX, "noiseScale",   { min: 1, max: 40, step: 0.1, label: "noise scale" });
-        bvLook.addBinding(parkourParams.bladeVFX, "noiseWarp",    { min: 0, max: 5, step: 0.01, label: "noise warp" });
-        bvLook.addBinding(parkourParams.bladeVFX, "noiseSpeed",   { min: -5, max: 5, step: 0.01, label: "noise speed" });
-        bvLook.addBinding(parkourParams.bladeVFX, "streakFreq",   { min: 1, max: 64, step: 0.1, label: "streak freq" });
-        bvLook.addBinding(parkourParams.bladeVFX, "streakStrength", { min: 0, max: 1, step: 0.01, label: "streak str" });
-        bvLook.addBinding(parkourParams.bladeVFX, "edgeThreshold",  { min: 0, max: 1, step: 0.01, label: "edge threshold" });
-        bvLook.addBinding(parkourParams.bladeVFX, "edgeSharpness",  { min: 0.001, max: 0.35, step: 0.001, label: "edge sharp" });
-        const bvTiming = bladeVfxFolder.addFolder({ title: "Timing", expanded: true });
-        bvTiming.addBinding(parkourParams.bladeVFX, "fadeInTime",  { min: 0, max: 0.5, step: 0.01, label: "fade in (s)" });
-        bvTiming.addBinding(parkourParams.bladeVFX, "fadeOutTime", { min: 0, max: 0.5, step: 0.01, label: "fade out (s)" });
+        const swordTrailFolder = pane.addFolder({ title: "Sword Trail VFX", expanded: false });
+        swordTrailFolder.addBinding(parkourParams.swordTrail, "enabled", { label: "enabled" });
+        swordTrailFolder.addBinding(parkourParams.swordTrail, "trailColor", { label: "trail color" });
+        swordTrailFolder.addBinding(parkourParams.swordTrail, "edgeColor", { label: "edge color" });
+        swordTrailFolder.addBinding(parkourParams.swordTrail, "trailLength", { min: 3, max: 16, step: 1, label: "trail length" });
+        swordTrailFolder.addBinding(parkourParams.swordTrail, "tipOffset", { min: 0, max: 1.5, step: 0.01, label: "tip offset" });
+        swordTrailFolder.addBinding(parkourParams.swordTrail, "baseOffset", { min: -0.5, max: 0.5, step: 0.01, label: "base offset" });
+        swordTrailFolder.addBinding(parkourParams.swordTrail, "widthScale", { min: 0.1, max: 3, step: 0.1, label: "width scale" });
+        swordTrailFolder.addBinding(parkourParams.swordTrail, "opacity", { min: 0, max: 1, step: 0.01, label: "opacity" });
+        swordTrailFolder.addBinding(parkourParams.swordTrail, "fadeOutTime", { min: 0.01, max: 0.5, step: 0.01, label: "fade out (s)" });
+        swordTrailFolder.addBinding(parkourParams.swordTrail, "lightIntensity", { min: 0, max: 5, step: 0.1, label: "light intensity" });
+        swordTrailFolder.addBinding(parkourParams.swordTrail, "lightRange", { min: 0, max: 10, step: 0.5, label: "light range" });
+
+        const bloodFolder = pane.addFolder({ title: "Blood FX", expanded: false });
+        bloodFolder.addBinding(parkourParams.bloodFX, "enabled", { label: "enabled" });
+        bloodFolder.addBinding(parkourParams.bloodFX, "burstCount", { min: 3, max: 20, step: 1, label: "burst count" });
+        bloodFolder.addBinding(parkourParams.bloodFX, "bloodColor", { label: "blood color" });
+        bloodFolder.addBinding(parkourParams.bloodFX, "bloodColor2", { label: "blood color 2" });
+        bloodFolder.addBinding(parkourParams.bloodFX, "burstSpeed", { min: 0.5, max: 8, step: 0.1, label: "burst speed" });
+        bloodFolder.addBinding(parkourParams.bloodFX, "burstSpread", { min: 0.5, max: 5, step: 0.1, label: "spread" });
+        bloodFolder.addBinding(parkourParams.bloodFX, "gravity", { min: 1, max: 15, step: 0.5, label: "gravity" });
+        bloodFolder.addBinding(parkourParams.bloodFX, "spriteSize", { min: 0.02, max: 0.4, step: 0.01, label: "sprite size" });
+        bloodFolder.addBinding(parkourParams.bloodFX, "lifetime", { min: 0.2, max: 2, step: 0.05, label: "lifetime" });
+        bloodFolder.addBinding(parkourParams.bloodFX, "poolColor", { label: "pool color" });
+        bloodFolder.addBinding(parkourParams.bloodFX, "poolSize", { min: 0.1, max: 1, step: 0.05, label: "pool size" });
+        bloodFolder.addBinding(parkourParams.bloodFX, "poolLifetime", { min: 0.5, max: 8, step: 0.5, label: "pool lifetime" });
+        bloodFolder.addBinding(parkourParams.bloodFX, "flashDuration", { min: 0.02, max: 0.5, step: 0.01, label: "flash time" });
+        bloodFolder.addBinding(parkourParams.bloodFX, "flashColor", { label: "flash color" });
+
+        const spellVfxFolder = pane.addFolder({ title: "Spell VFX", expanded: false });
+        spellVfxFolder.addBinding(parkourParams.spellVFX, "enabled", { label: "enabled" });
+        const svOrb = spellVfxFolder.addFolder({ title: "Orb", expanded: true });
+        svOrb.addBinding(parkourParams.spellVFX, "orbColor", { label: "color" });
+        svOrb.addBinding(parkourParams.spellVFX, "orbCoreColor", { label: "core color" });
+        svOrb.addBinding(parkourParams.spellVFX, "orbSize", { min: 0.02, max: 0.5, step: 0.01, label: "size" });
+        svOrb.addBinding(parkourParams.spellVFX, "orbIntensity", { min: 0, max: 15, step: 0.1, label: "intensity" });
+        svOrb.addBinding(parkourParams.spellVFX, "orbPulseSpeed", { min: 0, max: 10, step: 0.1, label: "pulse speed" });
+        svOrb.addBinding(parkourParams.spellVFX, "orbPulseAmount", { min: 0, max: 1, step: 0.01, label: "pulse amount" });
+        svOrb.addBinding(parkourParams.spellVFX, "orbLightIntensity", { min: 0, max: 10, step: 0.1, label: "light intensity" });
+        svOrb.addBinding(parkourParams.spellVFX, "orbLightRange", { min: 0, max: 15, step: 0.5, label: "light range" });
+        svOrb.addBinding(parkourParams.spellVFX, "orbOffsetX", { min: -1, max: 1, step: 0.01, label: "offset X" });
+        svOrb.addBinding(parkourParams.spellVFX, "orbOffsetY", { min: -1, max: 1, step: 0.01, label: "offset Y" });
+        svOrb.addBinding(parkourParams.spellVFX, "orbOffsetZ", { min: -1, max: 1, step: 0.01, label: "offset Z" });
+        const svSparks = spellVfxFolder.addFolder({ title: "Sparks", expanded: false });
+        svSparks.addBinding(parkourParams.spellVFX, "sparkOrbitRadius", { min: 0.05, max: 1, step: 0.01, label: "orbit radius" });
+        svSparks.addBinding(parkourParams.spellVFX, "sparkOrbitSpeed", { min: 0, max: 15, step: 0.1, label: "orbit speed" });
+        svSparks.addBinding(parkourParams.spellVFX, "sparkSize", { min: 0.005, max: 0.1, step: 0.005, label: "size" });
+        const svProj = spellVfxFolder.addFolder({ title: "Projectile", expanded: false });
+        svProj.addBinding(parkourParams.spellVFX, "projectileSpeed", { min: 5, max: 60, step: 1, label: "speed" });
+        svProj.addBinding(parkourParams.spellVFX, "projectileSize", { min: 0.03, max: 0.5, step: 0.01, label: "size" });
+        svProj.addBinding(parkourParams.spellVFX, "projectileMaxDist", { min: 5, max: 80, step: 1, label: "max distance" });
+        svProj.addBinding(parkourParams.spellVFX, "trailLength", { min: 0, max: 30, step: 1, label: "trail length" });
+        svProj.addBinding(parkourParams.spellVFX, "trailSpacing", { min: 0.01, max: 0.2, step: 0.01, label: "trail spacing" });
+        svProj.addBinding(parkourParams.spellVFX, "impactSize", { min: 0.2, max: 3, step: 0.1, label: "impact size" });
+        svProj.addBinding(parkourParams.spellVFX, "impactDuration", { min: 0.1, max: 1, step: 0.05, label: "impact time" });
 
         const playerCameraFolder = pane.addFolder({
           title: "Player & Camera",
@@ -1984,58 +2536,57 @@
         let lastCsmLightMargin = parkourParams.csm.lightMargin;
         let lastCsmMapSize = parkourParams.csm.mapSize;
 
-        // Helper: check simple spell hit from player toward camera-facing direction
-        // using BVH raycast against the deer mesh, and draw a temporary debug line.
-        const spellDebugMat = new THREE.LineBasicMaterial({
-          color: 0x00ffff,
-        });
-        let spellDebugLine = null;
+        initSpellVFX(scene, camera);
+        initBloodFX(scene);
+
         function trySpellHit() {
-          if (!deerTargets.length) return;
+          const ud = player.characterGroup.userData;
+          const handBone = ud.leftHandBone;
           const charPos = player.characterGroup.position;
           const yaw = player.state.camYaw;
           const dir = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
-          // Cast from roughly hand / chest height, slightly in front of the body
-          const origin = new THREE.Vector3(
-            charPos.x,
-            charPos.y + 0.9,
-            charPos.z,
-          ).addScaledVector(dir, 0.4);
-          const maxDist = 30;
-          const end = origin.clone().addScaledVector(dir, maxDist);
-
-          // Debug line: show the ray this frame
-          const geom = new THREE.BufferGeometry().setFromPoints([origin, end]);
-          if (spellDebugLine) {
-            spellDebugLine.geometry.dispose();
-            spellDebugLine.geometry = geom;
+          let origin;
+          if (handBone) {
+            origin = new THREE.Vector3();
+            handBone.getWorldPosition(origin);
+            const sp = parkourParams.spellVFX;
+            origin.x += sp.orbOffsetX;
+            origin.y += sp.orbOffsetY;
+            origin.z += sp.orbOffsetZ;
           } else {
-            spellDebugLine = new THREE.Line(geom, spellDebugMat);
-            scene.add(spellDebugLine);
+            origin = new THREE.Vector3(charPos.x, charPos.y + 0.9, charPos.z).addScaledVector(dir, 0.4);
           }
+          spawnProjectile(origin, dir);
+        }
 
-          // Precise hit test using MeshBVH if available, against all deer
-          const ray = new THREE.Ray(origin, dir.clone().normalize());
-          const raycaster = new THREE.Raycaster();
-          raycaster.ray.copy(ray);
-          raycaster.far = maxDist;
-
-          for (const deer of deerTargets) {
-            if (!deer || deer.isDead || !deer.bvhMesh) continue;
-            if (!deer.bvhMesh.geometry || !deer.bvhMesh.geometry.boundsTree)
-              continue;
-            const hits = raycaster.intersectObject(deer.bvhMesh, true);
-            if (hits && hits.length > 0) {
-              deer.isDead = true;
-              deer.state = "dead";
-              if (deer.deathAction) {
-                if (deer.idleAction) deer.idleAction.stop();
-                if (deer.walkAction) deer.walkAction.stop();
-                if (deer.runAction) deer.runAction.stop();
-                if (deer.grazeAction) deer.grazeAction.stop();
-                if (deer.lookAction) deer.lookAction.stop();
-                deer.deathAction.reset();
-                deer.deathAction.play();
+        const _deerPosHit = new THREE.Vector3();
+        function checkProjectileHits() {
+          for (const proj of spellVfx.projPool) {
+            if (!proj.alive) continue;
+            const pos = proj.pos;
+            const hitRadius = 1.8;
+            for (const deer of deerTargets) {
+              if (!deer || deer.isDead) continue;
+              deer.root.getWorldPosition(_deerPosHit);
+              _deerPosHit.y += 0.8;
+              const distSq = pos.distanceToSquared(_deerPosHit);
+              if (distSq <= hitRadius * hitRadius) {
+                deer.isDead = true;
+                deer.state = "dead";
+                if (deer.deathAction) {
+                  if (deer.idleAction) deer.idleAction.stop();
+                  if (deer.walkAction) deer.walkAction.stop();
+                  if (deer.runAction) deer.runAction.stop();
+                  if (deer.grazeAction) deer.grazeAction.stop();
+                  if (deer.lookAction) deer.lookAction.stop();
+                  deer.deathAction.reset();
+                  deer.deathAction.play();
+                }
+                spawnBloodBurst(_deerPosHit, FLOOR_Y);
+                flashDeerRed(deer);
+                spawnImpact(pos.clone());
+                releaseProjectile(proj);
+                break;
               }
             }
           }
@@ -2070,15 +2621,18 @@
             udPlayer._spellHitMarker = false;
           }
 
+          updateSpellVFX(dt, camera, udPlayer);
+          checkProjectileHits();
+
           const swordGroup = player.characterGroup.userData.sword;
           if (swordGroup && parkourParams.katana) {
             const k = parkourParams.katana;
             swordGroup.position.set(k.posX, k.posY, k.posZ);
             swordGroup.rotation.set(k.rotX, k.rotY, k.rotZ);
 
-            if (!bladeSlashMesh) initBladeSlashVFX(swordGroup);
+            if (!swordTrail.initialized) initSwordTrail(scene);
             const udForVfx = player.characterGroup.userData;
-            updateBladeVFX(dt, !!udForVfx.isAttacking);
+            updateSwordTrail(dt, swordGroup, !!udForVfx.isAttacking);
 
             // Simple sword → deer hit: check distance from sword tip to each deer center
             if (deerTargets.length) {
@@ -2104,6 +2658,10 @@
                       deer.deathAction.reset();
                       deer.deathAction.play();
                     }
+                    const bloodPos = deerPos.clone();
+                    bloodPos.y += 0.8;
+                    spawnBloodBurst(bloodPos, FLOOR_Y);
+                    flashDeerRed(deer);
                   }
                 }
               }
@@ -2223,7 +2781,9 @@
             }
 
             deer.mixer.update(dt);
+            updateDeerFlash(deer, dt);
           }
+          updateBloodFX(dt);
 
           // Smooth character visual + camera to filter physics jitter (ground appears to shake otherwise)
           const inAir = !player.state.isGrounded;
