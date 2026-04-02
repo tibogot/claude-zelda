@@ -1318,6 +1318,7 @@ export function createPlayer(opts) {
       !ud.isRolling &&
       !ud.isSliding &&
       !ud.isClimbing &&
+      !ud.isCastingSpell &&
       onGroundForCrouch
     ) {
       keys.f = false;
@@ -1357,6 +1358,7 @@ export function createPlayer(opts) {
       !ud.isRolling &&
       !ud.isSliding &&
       !ud.isAttacking &&
+      !ud.isCastingSpell &&
       _jumpPhase === "none" &&
       onGroundForCrouch &&
       Array.isArray(climbables) &&
@@ -1435,6 +1437,7 @@ export function createPlayer(opts) {
       !ud.isSliding &&
       !ud.isRolling &&
       !ud.isAttacking &&
+      !ud.isCastingSpell &&
       _jumpPhase === "none" &&
       onGroundForCrouch &&
       (keys.w || keys.s || keys.a || keys.d)
@@ -1564,6 +1567,42 @@ export function createPlayer(opts) {
             ud.slideLoopAction.enabled = false;
           }, 120);
         }
+      }
+    }
+    // Light sword combo: small forward dash per hit so the character actually
+    // advances during the combo instead of only the pose moving forward.
+    if (
+      ud?.isAttacking &&
+      ud.currentAttackType === "light" &&
+      ud.currentAttack &&
+      !ud.isRolling &&
+      !ud.isSliding &&
+      !ud.isClimbing
+    ) {
+      const clip = ud.currentAttack.getClip();
+      const dur = clip && clip.duration != null ? clip.duration : 0.6;
+      if (dur > 0) {
+        const t = THREE.MathUtils.clamp(ud.currentAttack.time / dur, 0, 1);
+        // Dash distances for hits A/B/C (in meters)
+        const dashDists = [
+          PARAMS.lightAttackDashA ?? 0.4,
+          PARAMS.lightAttackDashB ?? 0.55,
+          PARAMS.lightAttackDashC ?? 0.8,
+        ];
+        const idx = Math.min(
+          ud.comboIndex ?? 0,
+          dashDists.length - 1,
+        );
+        const totalDist = dashDists[idx];
+        // Smooth in-and-out speed curve; mostly moves during middle of swing.
+        const ease = Math.sin(t * Math.PI);
+        const baseSpeed = totalDist / dur;
+        const dashSpeed = baseSpeed * ease;
+        const sinY = Math.sin(state.charYaw);
+        const cosY = Math.cos(state.charYaw);
+        // Override WASD for the duration of the swing so movement feels committed.
+        desiredDx = sinY * dashSpeed * dt;
+        desiredDz = cosY * dashSpeed * dt;
       }
     }
     if (ud?.isClimbing) {
@@ -2036,6 +2075,7 @@ export function createPlayer(opts) {
       !ud.isRolling &&
       !ud.isSliding &&
       !ud.isClimbing &&
+      !ud.isCastingSpell &&
       _jumpPhase === "none"
     ) {
       const skipT = 0.4;
