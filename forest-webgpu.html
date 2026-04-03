@@ -1,0 +1,587 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Forest — WebGPU octahedral impostor</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #87ceeb;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        z-index: 10;
+        font:
+          12px/1.5 "SF Mono",
+          "Fira Code",
+          monospace;
+        color: #b0d890;
+        background: rgba(0, 0, 0, 0.55);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: none;
+      }
+      #info span {
+        color: #e0f0c0;
+        font-weight: 600;
+      }
+      .tp-dfwv {
+        z-index: 40 !important;
+      }
+      #quality-bar {
+        position: fixed;
+        top: 12px;
+        right: 12px;
+        z-index: 20;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font:
+          11px "SF Mono",
+          "Fira Code",
+          monospace;
+        color: #b0d890;
+        background: rgba(0, 0, 0, 0.55);
+        padding: 6px 10px;
+        border-radius: 6px;
+      }
+      #quality-bar select {
+        background: rgba(255, 255, 255, 0.1);
+        color: #e0f0c0;
+        border: 1px solid #444;
+        padding: 4px 6px;
+        border-radius: 4px;
+        font: inherit;
+        cursor: pointer;
+      }
+      #quality-bar button {
+        background: #2a6;
+        color: #fff;
+        border: none;
+        padding: 4px 12px;
+        border-radius: 4px;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      #quality-bar button:hover {
+        background: #3b7;
+      }
+      #quality-bar input[type="text"] {
+        width: 140px;
+        background: rgba(255, 255, 255, 0.1);
+        color: #e0f0c0;
+        border: 1px solid #444;
+        padding: 4px 6px;
+        border-radius: 4px;
+        font: inherit;
+      }
+      #quality-bar input[type="file"] {
+        font:
+          10px "SF Mono",
+          monospace;
+        max-width: 100px;
+      }
+      #quality-bar .row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      #quality-bar .row + .row {
+        margin-top: 6px;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">
+      Forest (WebGPU bake + TSL impostor) — <span id="status">loading…</span>
+    </div>
+    <div id="quality-bar">
+      <div class="row">
+        <label for="model-select">Model</label>
+        <select id="model-select" title="Preset or use path below">
+          <option value="models/pine2.glb">pine2</option>
+          <option value="models/tree.glb">tree</option>
+          <option value="models/pine-transformed.glb">pine-transformed</option>
+          <option value="models/pine3.glb">pine3</option>
+          <option value="models/realistic_palm_tree_4_free.glb">palm</option>
+          <option value="models/low_poly_flower-transformed.glb">flower</option>
+          <option value="models/rock__game_asset.glb">rock</option>
+          <option value="__torusknot__">TorusKnot (debug)</option>
+        </select>
+        <input
+          type="text"
+          id="model-path-input"
+          placeholder="or path: models/foo.glb"
+          title="Overrides dropdown when non-empty"
+        />
+        <input
+          type="file"
+          id="model-file-input"
+          accept=".glb,.gltf"
+          title="Load GLB/GLTF from disk"
+        />
+      </div>
+      <div class="row">
+        <label for="quality-select">Quality</label>
+        <select id="quality-select" title="Texture size / sprites per side">
+          <option value="1024_6">1024 / 6</option>
+          <option value="1024_8">1024 / 8</option>
+          <option value="2048_12" selected>2048 / 12</option>
+          <option value="2048_16">2048 / 16</option>
+          <option value="4096_8">4096 / 8</option>
+          <option value="4096_12">4096 / 12</option>
+        </select>
+        <button id="rebake-btn">Rebake</button>
+      </div>
+    </div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { pass } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+      import GUI from "three/addons/libs/lil-gui.module.min.js";
+      import { createOctahedralImpostorForestWebgpu } from "./octahedralImpostorForestWebgpu.js";
+
+      const dracoLoader = new DRACOLoader();
+      dracoLoader.setDecoderPath(
+        "https://www.gstatic.com/draco/versioned/decoders/1.5.6/",
+      );
+      const gltfLoader = new GLTFLoader();
+      gltfLoader.setDRACOLoader(dracoLoader);
+
+      const renderer = new THREE.WebGPURenderer({
+        antialias: true,
+        requiredLimits: { maxStorageBuffersInVertexStage: 3 },
+      });
+      await renderer.init();
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1;
+      document.body.appendChild(renderer.domElement);
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x87ceeb);
+
+      const camera = new THREE.PerspectiveCamera(
+        60,
+        innerWidth / innerHeight,
+        0.5,
+        5000,
+      );
+      camera.position.set(0, 4, 18);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 2, 0);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.05;
+
+      const groundGeo = new THREE.PlaneGeometry(200, 200);
+      const groundMat = new THREE.MeshStandardMaterial({
+        color: 0x6b8e4e,
+        roughness: 0.9,
+        metalness: 0,
+      });
+      const ground = new THREE.Mesh(groundGeo, groundMat);
+      ground.rotation.x = -Math.PI / 2;
+      ground.receiveShadow = true;
+      scene.add(ground);
+
+      const dirLight = new THREE.DirectionalLight(0xffeedd, 1.2);
+      dirLight.position.set(10, 20, 10);
+      dirLight.castShadow = true;
+      dirLight.shadow.mapSize.width = 2048;
+      dirLight.shadow.mapSize.height = 2048;
+      dirLight.shadow.camera.near = 0.5;
+      dirLight.shadow.camera.far = 150;
+      dirLight.shadow.camera.left = dirLight.shadow.camera.bottom = -50;
+      dirLight.shadow.camera.right = dirLight.shadow.camera.top = 50;
+      dirLight.shadow.bias = -0.0001;
+      scene.add(dirLight);
+
+      const hemiLight = new THREE.HemisphereLight(0x4080a0, 0x203020, 0.5);
+      scene.add(hemiLight);
+
+      const ambLight = new THREE.AmbientLight(0x8090b0, 0.8);
+      scene.add(ambLight);
+
+      renderer.shadowMap.enabled = true;
+
+      const PARAMS = {
+        sunAzimuth: 225,
+        sunElevation: 56,
+        sunIntensity: 1.8,
+        ambIntensity: 0.8,
+        lightScale: 1.0,
+        normalStrength: 1.0,
+        rimStrength: 0.14,
+        rimPower: 3,
+        rimColor: { r: 0.4, g: 0.5, b: 0.65 },
+        diffuseWrap: 0,
+        lod0Visible: true,
+        lod1Visible: true,
+        lod2Visible: true,
+        edgeSmoothScale: 1.5,
+        alphaClamp: 0.1,
+        parallaxStrength: 0.12,
+        lodDistance: 45,
+        fadeRange: 8,
+        /** 0 = smooth complementary crossfade; 1 = legacy stochastic dither (old look). */
+        lodDither: 0,
+      };
+
+      function applySunToScene() {
+        const az = (PARAMS.sunAzimuth * Math.PI) / 180;
+        const el = (PARAMS.sunElevation * Math.PI) / 180;
+        dirLight.position.set(
+          Math.cos(el) * Math.sin(az),
+          Math.sin(el),
+          Math.cos(el) * Math.cos(az),
+        );
+        dirLight.intensity = PARAMS.sunIntensity;
+        ambLight.intensity = PARAMS.ambIntensity;
+      }
+
+      function applyLightingToForest() {
+        if (!forest) return;
+        const az = (PARAMS.sunAzimuth * Math.PI) / 180;
+        const el = (PARAMS.sunElevation * Math.PI) / 180;
+        const dir = new THREE.Vector3(
+          Math.cos(el) * Math.sin(az),
+          Math.sin(el),
+          Math.cos(el) * Math.cos(az),
+        ).normalize();
+        forest.updateSunDir(dir);
+        forest.updateSunColor(
+          new THREE.Vector3(
+            dirLight.color.r * PARAMS.sunIntensity,
+            dirLight.color.g * PARAMS.sunIntensity,
+            dirLight.color.b * PARAMS.sunIntensity,
+          ),
+        );
+        forest.updateAmbColor(
+          new THREE.Vector3(
+            ambLight.color.r * PARAMS.ambIntensity,
+            ambLight.color.g * PARAMS.ambIntensity,
+            ambLight.color.b * PARAMS.ambIntensity,
+          ),
+        );
+        const hemiIntensity = hemiLight.intensity * 0.5;
+        forest.updateHemiColors(
+          new THREE.Vector3(
+            hemiLight.color.r * hemiIntensity,
+            hemiLight.color.g * hemiIntensity,
+            hemiLight.color.b * hemiIntensity,
+          ),
+          new THREE.Vector3(
+            hemiLight.groundColor.r * hemiIntensity,
+            hemiLight.groundColor.g * hemiIntensity,
+            hemiLight.groundColor.b * hemiIntensity,
+          ),
+        );
+        forest.setLightScale(PARAMS.lightScale);
+        forest.setNormalStrength(PARAMS.normalStrength);
+        forest.setRimStrength(PARAMS.rimStrength);
+        forest.setRimPower(PARAMS.rimPower);
+        const rc = PARAMS.rimColor;
+        const r = typeof rc === "number" ? ((rc >> 16) & 0xff) / 255 : rc.r;
+        const g = typeof rc === "number" ? ((rc >> 8) & 0xff) / 255 : rc.g;
+        const b = typeof rc === "number" ? (rc & 0xff) / 255 : rc.b;
+        forest.setRimColor(r, g, b);
+        forest.setDiffuseWrap(PARAMS.diffuseWrap);
+        forest.setLodDither(PARAMS.lodDither);
+      }
+
+      applySunToScene();
+
+      let forest = null;
+      const projMat = new THREE.Matrix4();
+      const frustum = new THREE.Frustum();
+
+      function getQuality() {
+        const [ts, sps] = document
+          .getElementById("quality-select")
+          .value.split("_");
+        return { textureSize: +ts, spritesPerSide: +sps };
+      }
+
+      function getModelSource() {
+        const input = document.getElementById("model-path-input").value.trim();
+        if (input) return input;
+        return document.getElementById("model-select").value;
+      }
+
+      async function getModelConfig() {
+        const fileInput = document.getElementById("model-file-input");
+        if (fileInput.files && fileInput.files[0]) {
+          const url = URL.createObjectURL(fileInput.files[0]);
+          try {
+            const gltf = await new Promise((res, rej) =>
+              gltfLoader.load(url, res, undefined, rej),
+            );
+            gltf.scene.updateMatrixWorld(true);
+            return { modelScene: gltf.scene };
+          } finally {
+            URL.revokeObjectURL(url);
+          }
+        }
+        const source = getModelSource();
+        if (source === "__torusknot__") {
+          const geo = new THREE.TorusKnotGeometry(1, 0.35, 128, 20);
+          geo.computeBoundingBox();
+          const mat = new THREE.MeshStandardMaterial({
+            color: 0x22cc55,
+            roughness: 0.45,
+            metalness: 0.05,
+          });
+          const mesh = new THREE.Mesh(geo, mat);
+          mesh.position.y = -geo.boundingBox.min.y;
+          const group = new THREE.Group();
+          group.add(mesh);
+          group.updateMatrixWorld(true);
+          return { modelScene: group };
+        }
+        return { modelPath: source };
+      }
+
+      async function loadForest() {
+        document.getElementById("status").textContent = "Baking WebGPU atlas…";
+        if (forest) {
+          forest.dispose();
+          scene.remove(forest.group);
+          forest = null;
+        }
+        try {
+          const modelConfig = await getModelConfig();
+          const quality = getQuality();
+          forest = await createOctahedralImpostorForestWebgpu(
+            renderer,
+            dirLight,
+            {
+              ...modelConfig,
+              treeCount: 80,
+              treeScale: 1.5,
+              lodDistance: PARAMS.lodDistance,
+              radius: 80,
+              minRadius: 12,
+              centerPosition: [0, 0, 0],
+              getTerrainHeight: () => 0,
+              impostorSettings: {
+                ...quality,
+                alphaClamp: PARAMS.alphaClamp,
+                edgeSmoothScale: PARAMS.edgeSmoothScale,
+                alphaTest: 0.05,
+                fadeRange: PARAMS.fadeRange,
+                lodDither: PARAMS.lodDither,
+                lod2Distance: 120,
+                lightScale: PARAMS.lightScale,
+                normalStrength: PARAMS.normalStrength,
+                rimStrength: PARAMS.rimStrength,
+                rimPower: PARAMS.rimPower,
+                rimColor: [
+                  PARAMS.rimColor.r,
+                  PARAMS.rimColor.g,
+                  PARAMS.rimColor.b,
+                ],
+                diffuseWrap: PARAMS.diffuseWrap,
+                parallaxStrength: PARAMS.parallaxStrength,
+              },
+            },
+          );
+          scene.add(forest.group);
+          forest.setLodVisible(0, PARAMS.lod0Visible);
+          forest.setLodVisible(1, PARAMS.lod1Visible);
+          forest.setLodVisible(2, PARAMS.lod2Visible);
+          applyLightingToForest();
+          document.getElementById("status").textContent =
+            "WebGPU forest — orbit to explore";
+        } catch (e) {
+          console.error("Forest failed:", e);
+          document.getElementById("status").textContent =
+            "Error: " + (e.message || e);
+        }
+      }
+
+      await loadForest();
+
+      function syncForestLighting() {
+        applySunToScene();
+        applyLightingToForest();
+      }
+
+      const renderPipeline = new THREE.RenderPipeline(renderer);
+      renderPipeline.outputNode = pass(scene, camera);
+
+      await renderer.compileAsync(scene, camera);
+
+      renderer.setAnimationLoop(() => {
+        controls.update();
+        if (forest) {
+          projMat.multiplyMatrices(
+            camera.projectionMatrix,
+            camera.matrixWorldInverse,
+          );
+          frustum.setFromProjectionMatrix(projMat);
+          forest.update(camera, frustum);
+          syncForestLighting();
+        }
+        renderPipeline.render();
+      });
+
+      window.addEventListener("resize", () => {
+        camera.aspect = innerWidth / innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+      });
+
+      const gui = new GUI({ title: "Forest / WebGPU impostor", width: 260 });
+      gui.domElement.style.position = "fixed";
+      gui.domElement.style.top = "12px";
+      gui.domElement.style.left = "12px";
+
+      const fLight = gui.addFolder("Lighting");
+      fLight
+        .add(PARAMS, "sunAzimuth", 0, 360, 1)
+        .name("Sun azimuth°")
+        .onChange(syncForestLighting);
+      fLight
+        .add(PARAMS, "sunElevation", 0, 90, 0.5)
+        .name("Sun elevation°")
+        .onChange(syncForestLighting);
+      fLight
+        .add(PARAMS, "sunIntensity", 0, 5, 0.05)
+        .name("Sun intensity")
+        .onChange(syncForestLighting);
+      fLight
+        .add(PARAMS, "ambIntensity", 0, 3, 0.05)
+        .name("Ambient intensity")
+        .onChange(syncForestLighting);
+      fLight
+        .add(PARAMS, "lightScale", 0.1, 2.5, 0.05)
+        .name("Impostor light scale")
+        .onChange(syncForestLighting);
+      fLight.open();
+
+      const fShade = gui.addFolder("Impostor shading");
+      fShade
+        .add(PARAMS, "normalStrength", 0, 1, 0.02)
+        .name("Normal strength")
+        .onChange(syncForestLighting);
+      fShade
+        .add(PARAMS, "rimStrength", 0, 0.5, 0.01)
+        .name("Rim strength")
+        .onChange(syncForestLighting);
+      fShade
+        .add(PARAMS, "rimPower", 1, 8, 0.5)
+        .name("Rim power")
+        .onChange(syncForestLighting);
+      fShade
+        .addColor(PARAMS, "rimColor")
+        .name("Rim color")
+        .onChange(syncForestLighting);
+      fShade
+        .add(PARAMS, "diffuseWrap", 0, 0.8, 0.02)
+        .name("Diffuse wrap (foliage)")
+        .onChange(syncForestLighting);
+      fShade
+        .add(PARAMS, "parallaxStrength", 0, 0.4, 0.01)
+        .name("Depth parallax")
+        .onChange(() => {
+          if (forest) forest.setParallaxStrength(PARAMS.parallaxStrength);
+        });
+      fShade.open();
+
+      const fCross = gui.addFolder("LOD0 ↔ impostor crossfade");
+      fCross
+        .add(PARAMS, "lodDistance", 12, 120, 1)
+        .name("Switch distance")
+        .onChange((v) => {
+          if (forest) forest.setLodDistance(v);
+        });
+      fCross
+        .add(PARAMS, "fadeRange", 2, 36, 0.5)
+        .name("Blend width")
+        .onChange((v) => {
+          if (forest) forest.setFadeRange(v);
+        });
+      fCross
+        .add(PARAMS, "lodDither", 0, 1, 0.02)
+        .name("Stochastic dither mix")
+        .onChange((v) => {
+          if (forest) forest.setLodDither(v);
+        });
+      fCross.open();
+
+      const fLod = gui.addFolder("LOD visibility");
+      fLod
+        .add(PARAMS, "lod0Visible")
+        .name("LOD0 (real mesh)")
+        .onChange((v) => {
+          if (forest) forest.setLodVisible(0, v);
+        });
+      fLod
+        .add(PARAMS, "lod1Visible")
+        .name("LOD1 (impostor)")
+        .onChange((v) => {
+          if (forest) forest.setLodVisible(1, v);
+        });
+      fLod
+        .add(PARAMS, "lod2Visible")
+        .name("LOD2 (mega impostor)")
+        .onChange((v) => {
+          if (forest) forest.setLodVisible(2, v);
+        });
+      fLod.open();
+
+      const fEdge = gui.addFolder("Edge AA");
+      fEdge
+        .add(PARAMS, "edgeSmoothScale", 0, 4, 0.1)
+        .name("Smooth scale")
+        .onChange(() => {
+          if (forest) forest.setEdgeSmoothScale(PARAMS.edgeSmoothScale);
+        });
+      fEdge
+        .add(PARAMS, "alphaClamp", 0.01, 0.5, 0.01)
+        .name("Alpha cutoff")
+        .onChange(() => {
+          if (forest) forest.setAlphaClamp(PARAMS.alphaClamp);
+        });
+      fEdge.open();
+
+      document.getElementById("rebake-btn").addEventListener("click", () => {
+        loadForest().catch((e) => {
+          console.error(e);
+          document.getElementById("status").textContent =
+            "Error: " + (e.message || e);
+        });
+      });
+    </script>
+  </body>
+</html>
