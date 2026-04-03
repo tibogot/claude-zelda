@@ -340,13 +340,13 @@ function createImpostorMaterial(colorTex, normalTex, rmTex, depthTex, impostorSc
     const c2 = texture(colorTex, puv2);
     const c3 = texture(colorTex, puv3);
 
-    // Dominant sprite selection
+    // Dominant sprite selection (single cell — avoids ghosting on complex shapes)
     const isDom1 = vWeight.x.greaterThanEqual(vWeight.y).and(vWeight.x.greaterThanEqual(vWeight.z));
     const isDom2 = vWeight.y.greaterThanEqual(vWeight.z);
     const domAlpha = select(isDom1, c1.a, select(isDom2, c2.a, c3.a));
     const domRgb = select(isDom1, c1.rgb, select(isDom2, c2.rgb, c3.rgb));
 
-    // IGN dither
+    // IGN dither (optional alternative)
     const px = viewportCoordinate.xy;
     const ign = fract(mul(float(52.9829189), fract(add(mul(float(0.06711056), px.x), mul(float(0.00583715), px.y)))));
     const wSum = add(add(vWeight.x, vWeight.y), vWeight.z);
@@ -365,7 +365,7 @@ function createImpostorMaterial(colorTex, normalTex, rmTex, depthTex, impostorSc
     const alpha = smoothstep(sub(uAlphaCutoff, edgeW), add(uAlphaCutoff, edgeW), selAlpha);
     const albedo = saturate(mul(selRgb, div(1, max(selAlpha, float(0.001)))));
 
-    // Normals (follows same selection as color)
+    // Normals
     const n1 = texture(normalTex, puv1).xyz;
     const n2 = texture(normalTex, puv2).xyz;
     const n3 = texture(normalTex, puv3).xyz;
@@ -376,7 +376,7 @@ function createImpostorMaterial(colorTex, normalTex, rmTex, depthTex, impostorSc
     const wNormRaw = normalize(sub(mul(normEnc, 2.0), 1.0));
     const wNorm = normalize(mix(vec3(0, 1, 0), wNormRaw, uNormStr));
 
-    // Roughness / metalness from RM atlas (per-pixel)
+    // Roughness / metalness
     const rm1 = texture(rmTex, puv1);
     const rm2 = texture(rmTex, puv2);
     const rm3 = texture(rmTex, puv3);
