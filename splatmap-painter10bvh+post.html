@@ -998,6 +998,8 @@
       let _rebuildGlowOrbs = () => {};
       let splineGroup = null;      // Group containing all spline visuals
       let splineTrainT = 0;        // Current position along curve (0–1)
+      let _cachedTrainCurve = null;
+      let _cachedTrainLen = 0;
       // ── RIVER STATE ──
       let riverPoints = [];
       let riverSelectedIdx = -1;
@@ -10116,11 +10118,15 @@
             if (child.material) child.material.dispose();
           }
           splinePointMeshes = [];
+          _cachedTrainCurve = null;
+          _cachedTrainLen = 0;
           if (splinePoints.length === 0) return;
 
           // Draw curve line if 2+ points
           if (splinePoints.length >= 2) {
             const curve = new THREE.CatmullRomCurve3(splinePoints, PARAMS.spline.closed, "catmullrom", 0.5);
+            _cachedTrainCurve = curve;
+            _cachedTrainLen = curve.getLength();
             const pts = curve.getPoints(Math.max(60, splinePoints.length * 20));
             const geo = new THREE.BufferGeometry().setFromPoints(pts);
             const mat = new THREE.LineBasicMaterial({ color: 0x00ccff, depthTest: false });
@@ -11711,18 +11717,14 @@
           uRiverTime.value += dt;
 
           // ── SPLINE TRAIN UPDATE ──
-          if (PARAMS.spline.showTrain && splinePoints.length >= 2) {
-            const trainCurve = new THREE.CatmullRomCurve3(splinePoints, PARAMS.spline.closed, "catmullrom", 0.5);
-            const len = trainCurve.getLength();
-            if (len > 0) {
-              splineTrainT = (splineTrainT + dt * PARAMS.spline.trainSpeed / len) % 1;
-              const pos = trainCurve.getPoint(splineTrainT);
-              const tangent = trainCurve.getTangent(splineTrainT);
-              trainMesh.position.copy(pos);
-              trainMesh.scale.setScalar(PARAMS.spline.trainScale);
-              trainMesh.lookAt(pos.x + tangent.x, pos.y + tangent.y, pos.z + tangent.z);
-              trainMesh.visible = true;
-            }
+          if (PARAMS.spline.showTrain && _cachedTrainCurve && _cachedTrainLen > 0) {
+            splineTrainT = (splineTrainT + dt * PARAMS.spline.trainSpeed / _cachedTrainLen) % 1;
+            const pos = _cachedTrainCurve.getPoint(splineTrainT);
+            const tangent = _cachedTrainCurve.getTangent(splineTrainT);
+            trainMesh.position.copy(pos);
+            trainMesh.scale.setScalar(PARAMS.spline.trainScale);
+            trainMesh.lookAt(pos.x + tangent.x, pos.y + tangent.y, pos.z + tangent.z);
+            trainMesh.visible = true;
           } else {
             trainMesh.visible = false;
           }
