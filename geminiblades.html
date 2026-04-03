@@ -284,6 +284,8 @@
         const vClumpShade = varying(float(1), 'vCS');
         const vColorTint = varying(vec3(1, 1, 1), 'vCT');  // warm/cool tint target
         const vDryBlend = varying(float(0), 'vDB');         // dry blade factor
+        const vRandomShade = varying(float(1), 'vRS');
+        const vSatHash = varying(float(0), 'vSH');
         const uBssCol = uniform(new THREE.Color(params.bssColor));
         const uBssIntensity = uniform(params.bssIntensity);
         const uBssPower = uniform(params.bssPower);
@@ -521,6 +523,10 @@
           const isDry = smoothstep(uCvDryAmount, float(0.0), h5);
           vDryBlend.assign(isDry.mul(float(1).sub(farMorph)));
 
+          // Per-blade shade + sat hash — computed here (vertex) to avoid fragment precision noise
+          vRandomShade.assign(mix(float(0.75), float(1.0), h1));
+          vSatHash.assign(hv2.y);
+
           const baseStiffness = smoothstep(0.0, uStiffness, vUv.y);
           const curveWeight = vUv.y.pow(uBendFocus).mul(baseStiffness);
 
@@ -683,11 +689,6 @@
           return vec3(pRotated.x.add(off.x), pRotated.y.add(terrainH), pRotated.z.add(off.z));
         })();
         material.colorNode = Fn(() => {
-          const off = attribute("offset", "vec3");
-          const bladeWorldC = modelWorldMatrix.mul(vec4(off.x, float(0), off.z, float(1))).xyz;
-          const bladeXZ = vec2(bladeWorldC.x, bladeWorldC.z);
-          const fragHv = hash22(bladeXZ);
-          const randomShade = mix(float(0.75), float(1.0), fragHv.x);
           // AO: base of blade is darkened by neighboring blades, tip is fully lit.
           // LOD modulation: weaken AO at distance (FAR blades are tiny, strong AO looks wrong)
           const aoLod = uAoBase.mul(mix(float(0.5), float(1.0), smoothstep(float(0.5), float(0.0), vLodMorph)));
@@ -700,7 +701,7 @@
 
           // Saturation variation
           const lum = dot(hueCol, vec3(0.299, 0.587, 0.114));
-          const satFactor = float(1.0).sub(fragHv.y.mul(uCvSatSpread));
+          const satFactor = float(1.0).sub(vSatHash.mul(uCvSatSpread));
           const satCol = mix(vec3(lum, lum, lum), hueCol, satFactor);
 
           // Dry blades from vDryBlend varying — stronger at root, fades at tip
@@ -711,7 +712,7 @@
           const variedCol = mix(baseCol, dryCol, uColorVar);
 
           // Distance fade dims color near maxDistance — blades dissolve into ground
-          const finalCol = variedCol.mul(vec3(randomShade.mul(vClumpShade).mul(ao).mul(vDistFade)));
+          const finalCol = variedCol.mul(vec3(vRandomShade.mul(vClumpShade).mul(ao).mul(vDistFade)));
           // Debug: GREEN = HIGH, YELLOW = MID, BLUE = FAR
           const dbHigh = vec3(0.2, 1.0, 0.2);
           const dbMid = vec3(1.0, 1.0, 0.2);
