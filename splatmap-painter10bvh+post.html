@@ -3011,10 +3011,13 @@
         orbit.update();
 
         // ── LIGHTING ──
+        const _sunDirResult = new THREE.Vector3();
+        const _tmpSunVec = new THREE.Vector3();
+        const _tmpSunV4 = new THREE.Vector4();
         function sunDirectionFromAngles(azDeg, elDeg) {
           const az = (azDeg * PI) / 180,
             el = (elDeg * PI) / 180;
-          return new THREE.Vector3(
+          return _sunDirResult.set(
             Math.cos(el) * Math.cos(az),
             Math.sin(el),
             Math.cos(el) * Math.sin(az),
@@ -3028,7 +3031,7 @@
           PARAMS.light.dirColor,
           PARAMS.light.dirIntensity,
         );
-        dirLight.position.copy(_sunDir.clone().multiplyScalar(600));
+        dirLight.position.copy(_sunDir).multiplyScalar(600);
         dirLight.castShadow = true;
         dirLight.shadow.mapSize.set(PARAMS.csm.mapSize, PARAMS.csm.mapSize);
         dirLight.shadow.camera.near = 1;
@@ -11585,7 +11588,7 @@
             PARAMS.light.sunAzimuth,
             PARAMS.light.sunElevation,
           );
-          dirLight.position.copy(sunDir.clone().multiplyScalar(600));
+          dirLight.position.copy(sunDir).multiplyScalar(600);
           dirLight.color.set(PARAMS.light.dirColor);
           dirLight.intensity = PARAMS.light.dirIntensity;
           dirLight.shadow.bias = PARAMS.shadowBias;
@@ -11693,20 +11696,13 @@
             uOutlineDepthThresh.value = postParams.outline.depthThreshold;
             uOutlineRes.value.set(renderer.domElement.width, renderer.domElement.height);
 
-            const _sunWorld = camera.position
-              .clone()
-              .add(sunDir.clone().multiplyScalar(500000));
-            const _v4 = new THREE.Vector4(
-              _sunWorld.x,
-              _sunWorld.y,
-              _sunWorld.z,
-              1,
-            );
-            _v4.applyMatrix4(camera.matrixWorldInverse);
-            _v4.applyMatrix4(camera.projectionMatrix);
+            _tmpSunVec.copy(sunDir).multiplyScalar(500000).add(camera.position);
+            _tmpSunV4.set(_tmpSunVec.x, _tmpSunVec.y, _tmpSunVec.z, 1);
+            _tmpSunV4.applyMatrix4(camera.matrixWorldInverse);
+            _tmpSunV4.applyMatrix4(camera.projectionMatrix);
             uSunScreenPos.value.set(
-              (_v4.x / _v4.w) * 0.5 + 0.5,
-              (_v4.y / _v4.w) * 0.5 + 0.5,
+              (_tmpSunV4.x / _tmpSunV4.w) * 0.5 + 0.5,
+              (_tmpSunV4.y / _tmpSunV4.w) * 0.5 + 0.5,
             );
             uCameraFar.value = camera.far;
           }

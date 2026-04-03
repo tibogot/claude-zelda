@@ -376,12 +376,17 @@
         gltfLoader.setKTX2Loader(ktx2Loader);
 
         // ── LIGHTING ──
+        const _sunDirResult = new THREE.Vector3();
+        const _tmpSunVec = new THREE.Vector3();
+        const _tmpSunV4 = new THREE.Vector4();
+        const _tmpCamTarget = new THREE.Vector3();
+        const _tmpCamLook = new THREE.Vector3();
         function sunDirectionFromAngles(azDeg, elDeg) {
           const az = azDeg * PI / 180, el = elDeg * PI / 180;
-          return new THREE.Vector3(Math.cos(el) * Math.cos(az), Math.sin(el), Math.cos(el) * Math.sin(az)).normalize();
+          return _sunDirResult.set(Math.cos(el) * Math.cos(az), Math.sin(el), Math.cos(el) * Math.sin(az)).normalize();
         }
         const dirLight = new THREE.DirectionalLight(PARAMS.light.dirColor, PARAMS.light.dirIntensity);
-        dirLight.position.copy(sunDirectionFromAngles(PARAMS.light.sunAzimuth, PARAMS.light.sunElevation).multiplyScalar(600));
+        dirLight.position.copy(sunDirectionFromAngles(PARAMS.light.sunAzimuth, PARAMS.light.sunElevation)).multiplyScalar(600);
         dirLight.castShadow = true;
         dirLight.shadow.mapSize.set(PARAMS.csm.mapSize, PARAMS.csm.mapSize);
         dirLight.shadow.camera.near = 1; dirLight.shadow.camera.far = 300;
@@ -1828,8 +1833,10 @@
             const cy = smoothCharPos.y + Math.sin(player.state.camPitch) * camDist + SHARED_PARAMS.camHeight;
             const cz = smoothCharPos.z - Math.cos(player.state.camYaw) * Math.cos(player.state.camPitch) * camDist;
             const camTerrainY = bvhHeight(cx, cz) + 1.5;
-            const targetPos = new THREE.Vector3(cx, Math.max(cy, camTerrainY), cz);
-            const targetLook = new THREE.Vector3(smoothCharPos.x, smoothCharPos.y + 0.5, smoothCharPos.z);
+            _tmpCamTarget.set(cx, Math.max(cy, camTerrainY), cz);
+            _tmpCamLook.set(smoothCharPos.x, smoothCharPos.y + 0.5, smoothCharPos.z);
+            const targetPos = _tmpCamTarget;
+            const targetLook = _tmpCamLook;
             if (!camSmoothInit) { smoothCamPos.copy(targetPos); smoothLookAt.copy(targetLook); camSmoothInit = true; }
             const alpha = 1 - Math.exp(-CAM_SMOOTH * dt);
             smoothCamPos.lerp(targetPos, alpha);
@@ -1859,12 +1866,12 @@
             patchSize: gp.fieldSize, patchSizeMid: gp.lodMidPatchSize, patchSizeFar: gp.lodFarPatchSize,
             lodMidDistance: gp.lodMidDistance, lodFarDistance: gp.lodFarDistance, maxDistance: gp.lodMaxDistance,
             lodEnabled: gp.lodEnabled, grassReceiveShadow: gp.grassReceiveShadow });
-          geminiGrassUniforms.uSunDir.value.copy(sunDirectionFromAngles(PARAMS.light.sunAzimuth, PARAMS.light.sunElevation));
+          const sunDir = sunDirectionFromAngles(PARAMS.light.sunAzimuth, PARAMS.light.sunElevation);
+          geminiGrassUniforms.uSunDir.value.copy(sunDir);
 
           // Lighting
           shadowTarget.position.set(camera.position.x, 0, camera.position.z);
-          const sunDir = sunDirectionFromAngles(PARAMS.light.sunAzimuth, PARAMS.light.sunElevation);
-          dirLight.position.copy(sunDir.clone().multiplyScalar(600));
+          dirLight.position.copy(sunDir).multiplyScalar(600);
           dirLight.color.set(PARAMS.light.dirColor); dirLight.intensity = PARAMS.light.dirIntensity;
           dirLight.shadow.bias = PARAMS.shadowBias; dirLight.shadow.normalBias = PARAMS.shadowNormalBias;
           if (csm.mainFrustum && PARAMS.csm.enabled && PARAMS.csm.updateEveryFrame) csm.updateFrustums();
@@ -1901,10 +1908,10 @@
             gtaoPass.scale.value = postParams.gtao.scale; gtaoPass.distanceFallOff.value = postParams.gtao.distanceFallOff;
             gtaoPass.distanceExponent.value = postParams.gtao.distanceExponent; gtaoPass.thickness.value = postParams.gtao.thickness;
             flareThreshold.value = postParams.lensflare.threshold; flareGhostAttenuation.value = postParams.lensflare.ghostAttenuation; flareGhostSpacing.value = postParams.lensflare.ghostSpacing;
-            const _sunWorld = camera.position.clone().add(sunDir.clone().multiplyScalar(500000));
-            const _v4 = new THREE.Vector4(_sunWorld.x, _sunWorld.y, _sunWorld.z, 1);
-            _v4.applyMatrix4(camera.matrixWorldInverse); _v4.applyMatrix4(camera.projectionMatrix);
-            uSunScreenPos.value.set((_v4.x / _v4.w) * 0.5 + 0.5, (_v4.y / _v4.w) * 0.5 + 0.5);
+            _tmpSunVec.copy(sunDir).multiplyScalar(500000).add(camera.position);
+            _tmpSunV4.set(_tmpSunVec.x, _tmpSunVec.y, _tmpSunVec.z, 1);
+            _tmpSunV4.applyMatrix4(camera.matrixWorldInverse); _tmpSunV4.applyMatrix4(camera.projectionMatrix);
+            uSunScreenPos.value.set((_tmpSunV4.x / _tmpSunV4.w) * 0.5 + 0.5, (_tmpSunV4.y / _tmpSunV4.w) * 0.5 + 0.5);
             uCameraFar.value = camera.far;
           }
 
