@@ -46,6 +46,7 @@ export function createFoliageSlot(scene, sampleHeight) {
     meshParts = [];
 
     const parts = [];
+    gltf.scene.updateMatrixWorld(true);
     gltf.scene.traverse((o) => { if (o.isMesh) parts.push(o); });
     if (parts.length === 0) return;
 
@@ -57,7 +58,9 @@ export function createFoliageSlot(scene, sampleHeight) {
         mat.alphaTest = 0.5;
         mat.depthWrite = true;
       }
-      meshParts.push({ geometry: part.geometry, material: mat });
+      const geo = part.geometry.clone();
+      geo.applyMatrix4(part.matrixWorld);
+      meshParts.push({ geometry: geo, material: mat });
     });
 
     rebuild();
