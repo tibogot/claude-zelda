@@ -5766,6 +5766,7 @@
           });
         }
         _rebuildLODChunks = function(slot) {
+          _markLodDirty();
           if (!slot || !slot.ready) return;
           const byChunk = new Map();
           slot.positions.forEach(pos => {
@@ -5915,6 +5916,7 @@
 
         // Real _rebuildFTreeChunks — needs scene + _makeChunkIMs in scope
         _rebuildFTreeChunks = function(slot) {
+          _markFtreeDirty();
           if (!slot || !slot.ready || !slot.trunkDefs) return;
           const byChunk = new Map();
           slot.positions.forEach(pos => {
@@ -11155,8 +11157,21 @@
         let _lastCsmMargin = PARAMS.csm.lightMargin;
         let _lastCsmMapSize = PARAMS.csm.mapSize;
         // ── TREE LOD — per-frame chunk-culled multi-slot update ──────────────
+        let _lodDirty = true;
+        const _lodLastPos = new THREE.Vector3(Infinity, Infinity, Infinity);
+        const _lodLastQuat = new THREE.Quaternion();
+        const _LOD_POS_THR = 4, _LOD_ROT_THR = 0.9986; // ~3° rotation
+        function _markLodDirty() { _lodDirty = true; }
+
         function updateLODInstances() {
           if (!LOD_SLOTS.some(s => s.ready && s.chunks.size > 0)) return;
+          const posMoved = _lodLastPos.distanceToSquared(camera.position) > _LOD_POS_THR * _LOD_POS_THR;
+          const camQ = camera.quaternion;
+          const rotChanged = Math.abs(_lodLastQuat.dot(camQ)) < _LOD_ROT_THR;
+          if (!_lodDirty && !posMoved && !rotChanged) return;
+          _lodDirty = false;
+          _lodLastPos.copy(camera.position);
+          _lodLastQuat.copy(camQ);
           _lodCamPos.copy(camera.position);
           _lodProjMat.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
           _lodFrustum.setFromProjectionMatrix(_lodProjMat);
@@ -11208,9 +11223,20 @@
           if (lodFolder) pane.refresh();
         }
 
+        let _ftreeDirty = true;
+        const _ftreeLastPos = new THREE.Vector3(Infinity, Infinity, Infinity);
+        const _ftreeLastQuat = new THREE.Quaternion();
+        function _markFtreeDirty() { _ftreeDirty = true; }
+
         function updateFTreeInstances() {
           if (!FTREE_SLOTS.some(s => s.ready && s.chunks.size > 0)) return;
-          _ftreeCamPos.copy(camera.position);
+          const posMoved = _ftreeLastPos.distanceToSquared(camera.position) > _LOD_POS_THR * _LOD_POS_THR;
+          const camQ = camera.quaternion;
+          const rotChanged = Math.abs(_ftreeLastQuat.dot(camQ)) < _LOD_ROT_THR;
+          if (!_ftreeDirty && !posMoved && !rotChanged) return;
+          _ftreeDirty = false;
+          _ftreeLastPos.copy(camera.position);
+          _ftreeLastQuat.copy(camQ);
           _ftreeProjMat.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
           _ftreeFrustum.setFromProjectionMatrix(_ftreeProjMat);
           let totalVisible = 0, totalChunks = 0, totalTrunks = 0, totalLeaves = 0;

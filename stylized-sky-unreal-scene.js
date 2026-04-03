@@ -555,8 +555,12 @@ export async function createStylizedSkyUnrealScene({
   bindUniformColor(fCloudColor, "cloudShadow", skyU.cloudShadow);
   bindUniformFloat(fCloudColor, "cloudShadowStr", skyU.cloudShadowStr, { min: 0, max: 2, step: 0.01 });
   bindUniformColor(fCloudColor, "cloudSunset", skyU.cloudSunset);
+  bindUniformFloat(fCloudColor, "cloudRimStr", skyU.cloudRimStr, { min: 0, max: 2, step: 0.01 });
+  bindUniformFloat(fCloudColor, "cloudRimWidth", skyU.cloudRimWidth, { min: 0.01, max: 1, step: 0.005 });
   bindUniformFloat(fCloudColor, "cloudVertStr", skyU.cloudVertStr, { min: 0, max: 1, step: 0.01 });
   bindUniformColor(fCloudColor, "cloudGradientDark", skyU.cloudGradientDark);
+  bindUniformFloat(fCloudColor, "cloudGradientStr", skyU.cloudGradientStr, { min: 0, max: 1, step: 0.01 });
+  bindUniformFloat(fCloudColor, "cloudDetailScale", skyU.cloudDetailScale, { min: 0.1, max: 12, step: 0.1 });
 
   const fGodRays = pane.addFolder({ title: "God Rays", expanded: false });
   bindUniformFloat(fGodRays, "godRayStr", skyU.godRayStr, { min: 0, max: 2, step: 0.01 });

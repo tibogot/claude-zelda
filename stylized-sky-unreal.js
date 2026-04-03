@@ -1,26 +1,16 @@
 /**
- * stylized-sky-unreal.js — Procedural Ghibli / Zelda / Genshin Impact TSL sky dome
- *
- * Optimized: ~11 noise samples/pixel (down from 29-53 in previous version)
- *
- * Changes from previous version:
- *  - 2-octave fBm for cloud shape (was 4) → big smooth Ghibli blobs
- *  - Single noise sample for directional shadow (was full 4-octave fBm)
- *  - Removed silver lining / rim (expensive, photorealistic — wrong for stylized)
- *  - Removed conditional detail bumps
- *  - Strong vertical gradient shading by default (bright tops, blue undersides)
- *  - Ghibli-inspired color palette with pink-lavender sunset band
- *  - Anti-banding dither
- *  - 1-octave god ray march (was 2)
+ * stylized-sky-unreal.js — Procedural Ghibli/Zelda TSL sky dome
  *
  * Features:
- *  - Multi-stop gradient (zenith → mid → horizon) with warm Ghibli palette
- *  - Soft sun disc + wide corona (rays available but off by default)
- *  - Atmospheric horizon scatter + 360° luminosity band
- *  - Two cloud layers with domain warp for organic cauliflower shapes
- *  - Vertical gradient cloud shading — THE signature Ghibli look
+ *  - Multi-stop gradient (zenith → mid → horizon) driven by sun elevation
+ *  - Zelda-style sun: large disc + overexposed core + halo ring + radial rays
+ *  - Atmospheric horizon scatter (golden/orange ring around sun at sunset)
+ *  - Full 360° horizon luminosity band (warm glow all around the horizon)
+ *  - Two cloud layers: 2D perspective-projected fBm, directional self-shadow, sunset tint
  *  - Stars (hash grid) + moon disc at night
- *  - Optional god rays (zero-cost when disabled)
+ *  - Pink-lavender sunset band for Ghibli feel
+ *  - Vertical gradient cloud shading (bright tops, blue undersides)
+ *  - Anti-banding dither
  */
 
 import * as THREE from "three/webgpu";
@@ -107,23 +97,23 @@ export function createStylizedSky() {
     new THREE.Color().setHex(0xfff0d0).convertSRGBToLinear(),
   );
 
-  // ── Cloud layer 1 (low, large, slow — big Ghibli cumulus) ──
+  // ── Cloud layer 1 (low, large, slow) ──
   const uC1Coverage = uniform(0.50);
-  const uC1Softness = uniform(0.14);
-  const uC1Scale = uniform(0.65);
+  const uC1Softness = uniform(0.16);
+  const uC1Scale = uniform(0.85);
   const uC1WindDir = uniform(new THREE.Vector2(0.005, 0.002));
-  const uC1Height = uniform(1.2);
-  const uC1WarpStr = uniform(0.50);
-  const uC1WarpScale = uniform(0.28);
+  const uC1Height = uniform(1.0);
+  const uC1WarpStr = uniform(0.42);
+  const uC1WarpScale = uniform(0.35);
 
-  // ── Cloud layer 2 (high, smaller, faster) ──
-  const uC2Coverage = uniform(0.36);
-  const uC2Softness = uniform(0.18);
-  const uC2Scale = uniform(0.30);
+  // ── Cloud layer 2 (high, small, faster) ──
+  const uC2Coverage = uniform(0.34);
+  const uC2Softness = uniform(0.22);
+  const uC2Scale = uniform(0.38);
   const uC2WindDir = uniform(new THREE.Vector2(-0.003, 0.001));
-  const uC2Height = uniform(2.8);
-  const uC2WarpStr = uniform(0.30);
-  const uC2WarpScale = uniform(0.45);
+  const uC2Height = uniform(2.6);
+  const uC2WarpStr = uniform(0.25);
+  const uC2WarpScale = uniform(0.55);
 
   // ── Cloud colors ──
   const uCloudLit = uniform(
@@ -132,14 +122,18 @@ export function createStylizedSky() {
   const uCloudShadow = uniform(
     new THREE.Color().setHex(0x6878b0).convertSRGBToLinear(),
   );
-  const uCloudShadowStr = uniform(0.50);
+  const uCloudShadowStr = uniform(0.55);
   const uCloudSunset = uniform(
     new THREE.Color().setHex(0xffa068).convertSRGBToLinear(),
   );
 
-  // ── Cloud contrast + vertical shading ──
-  const uC1Contrast = uniform(1.1);
+  // ── Cloud contrast + silver lining + internal gradient ──
+  const uC1Contrast = uniform(1.0);
   const uC2Contrast = uniform(1.0);
+  const uCloudRimStr = uniform(0.3);
+  const uCloudRimWidth = uniform(0.15);
+  const uCloudGradientStr = uniform(0.0);
+  const uCloudDetailScale = uniform(3.5);
   const uCloudVertStr = uniform(0.55);
   const uCloudGradientDark = uniform(
     new THREE.Color().setHex(0x7088b0).convertSRGBToLinear(),
@@ -154,24 +148,23 @@ export function createStylizedSky() {
   const uStarsSize = uniform(0.08);
   const uStarsBrightness = uniform(1.0);
 
-  // ── 2-octave fBm — smooth Ghibli blobs (2 noise samples) ──
+  // ── 4-octave fBm ──
   const fbmCloud = Fn(([p]) => {
+    const n1 = mx_noise_float(vec3(p, float(0.0)));
+    const n2 = mx_noise_float(vec3(p.mul(2.07), float(1.3))).mul(0.5);
+    const n3 = mx_noise_float(vec3(p.mul(4.31), float(2.7))).mul(0.25);
+    const n4 = mx_noise_float(vec3(p.mul(8.73), float(4.1))).mul(0.125);
+    return clamp(n1.add(n2).add(n3).add(n4).mul(0.533).add(0.5), 0, 1);
+  });
+
+  // ── 2-octave fBm (cheaper, used for god ray march) ──
+  const fbmCloudFast = Fn(([p]) => {
     const n1 = mx_noise_float(vec3(p, float(0.0)));
     const n2 = mx_noise_float(vec3(p.mul(2.07), float(1.3))).mul(0.5);
     return clamp(n1.add(n2).mul(0.667).add(0.5), 0, 1);
   });
 
-  // ── 1-octave noise for god ray march (1 sample) ──
-  const fbmCloudFast = Fn(([p]) => {
-    return clamp(
-      mx_noise_float(vec3(p, float(0.0))).mul(0.5).add(0.5),
-      0,
-      1,
-    );
-  });
-
-  // ── Cloud layer: vec4(rgb, alpha) ──
-  // Cheap directional shadow (1 noise sample) + vertical gradient shading
+  // ── Cloud layer: returns vec4(rgb, alpha) ──
   const cloudLayer = Fn(
     ([
       uvBase,
@@ -185,23 +178,18 @@ export function createStylizedSky() {
     ]) => {
       const threshold = float(1.0).sub(coverage);
       const noise = fbmCloud(uvBase);
+      const shadowUV = uvBase.add(sunHoriz.mul(0.2));
+      const shadowNoise = fbmCloud(shadowUV);
       const rawDensity = smoothstep(threshold, threshold.add(softness), noise);
       const density = clamp(
         rawDensity.sub(float(0.5)).mul(contrast).add(float(0.5)),
         float(0),
         float(1),
       ).mul(horizMask);
-
-      // Directional shadow: single noise sample at sun-offset UV
-      const shadowSample = mx_noise_float(
-        vec3(uvBase.add(sunHoriz.mul(0.22)), float(0.0)),
-      )
-        .mul(0.5)
-        .add(0.5);
       const inShadow = smoothstep(
         threshold.sub(0.05),
         threshold.add(softness),
-        shadowSample,
+        shadowNoise,
       );
       const shadowBlend = clamp(
         inShadow.mul(uCloudShadowStr),
@@ -214,13 +202,46 @@ export function createStylizedSky() {
         shadowBlend,
       );
 
-      // Vertical gradient: bright tops, cool blue-purple undersides
+      // ── Vertical macro gradient: top of cloud = bright, base = shadow ──
       const vertGrad = smoothstep(float(0.05), float(0.4), upDotParam);
       const vertCol = mix(vec3(uCloudGradientDark), vec3(litColor), vertGrad);
 
-      const cloudCol = mix(directionalCol, vertCol, uCloudVertStr);
+      const cloudColVar = mix(directionalCol, vertCol, uCloudVertStr).toVar();
 
-      return vec4(cloudCol, density);
+      // ── Internal bump detail (skipped when strength = 0) ──
+      If(uCloudGradientStr.greaterThan(float(0.001)), () => {
+        const detailUV = uvBase
+          .mul(uCloudDetailScale)
+          .add(vec2(float(5.73), float(3.17)));
+        const bumpHeight = fbmCloud(detailUV);
+        const bumpLit = vertGrad.mul(
+          float(0.5).add(bumpHeight.mul(float(0.5))),
+        );
+        const bumpCol = mix(
+          vec3(uCloudGradientDark),
+          vec3(litColor),
+          clamp(bumpLit, float(0), float(1)),
+        );
+        cloudColVar.assign(mix(cloudColVar, bumpCol, uCloudGradientStr));
+      });
+      let cloudCol = cloudColVar;
+
+      // Silver lining: bright rim on sun-facing cloud edges
+      const rimUV = uvBase.sub(sunHoriz.mul(uCloudRimWidth));
+      const rimNoise = fbmCloud(rimUV);
+      const rimSolid = smoothstep(
+        threshold.sub(float(0.02)),
+        threshold.add(softness),
+        rimNoise,
+      );
+      const rimFactor = rimSolid
+        .mul(rawDensity.oneMinus())
+        .mul(uCloudRimStr)
+        .mul(horizMask);
+      const cloudColRim = cloudCol.add(
+        vec3(float(1.0), float(0.98), float(0.92)).mul(rimFactor),
+      );
+      return vec4(cloudColRim, density);
     },
   );
 
@@ -279,7 +300,7 @@ export function createStylizedSky() {
       vec3(horizFinalCol).mul(horizBand).mul(uHorizonRingStr).mul(sunSideBoost),
     );
 
-    // ── Sun: disc + corona + halo + optional rays ──
+    // ── Sun: core + disc + wide corona + halo ring + radial rays ──
     const sunDot = clamp(dot(dir, uSunDir), 0, 1);
 
     const sunGlow = pow(sunDot, uSunGlowPower).mul(uSunGlowStrength);
@@ -300,7 +321,6 @@ export function createStylizedSky() {
       uSunHaloStr,
     );
 
-    // Radial rays (off by default — stylized look)
     const dx = dot(dir, uSunRight);
     const dy = dot(dir, uSunUp);
     const rayAngle = atan(dy, dx);
@@ -461,7 +481,7 @@ export function createStylizedSky() {
   mesh.frustumCulled = false;
   mesh.visible = false;
 
-  // ── Wind direction helpers ──
+  // ── Wind direction helpers (angle in degrees + speed → vec2) ──
   const windState = {
     c1Angle: 20,
     c1Speed: 0.008,
@@ -543,10 +563,14 @@ export function createStylizedSky() {
       cloudShadow: uCloudShadow,
       cloudShadowStr: uCloudShadowStr,
       cloudSunset: uCloudSunset,
+      cloudRimStr: uCloudRimStr,
+      cloudRimWidth: uCloudRimWidth,
       cloudVertStr: uCloudVertStr,
       cloudGradientDark: uCloudGradientDark,
       godRayStr: uGodRayStr,
       godRayDecay: uGodRayDecay,
+      cloudGradientStr: uCloudGradientStr,
+      cloudDetailScale: uCloudDetailScale,
       moonColor: uMoonColor,
       moonGlowStr: uMoonGlowStr,
       moonGlowPower: uMoonGlowPower,
