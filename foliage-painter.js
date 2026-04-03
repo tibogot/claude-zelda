@@ -5,18 +5,82 @@
  * - Chunk-based InstancedMesh: world divided into CHUNK_SIZE×CHUNK_SIZE cells,
  *   each chunk gets its own InstancedMesh with frustumCulled=true so Three.js
  *   automatically skips draw calls for chunks outside the camera frustum.
+ * - Optional per-slot wind animation + player interaction via TSL positionNode.
  */
 
 import * as THREE from "three";
+import {
+  Fn, float, vec3, vec4, add, mul, sub, sin, cos, max, negate,
+  length, smoothstep, mix, abs, div,
+  positionLocal, modelWorldMatrix, modelWorldMatrixInverse,
+  instanceIndex, uniform,
+} from "three/tsl";
 
-const MAX_INSTANCES = 6000;
+const MAX_INSTANCES = 12000;
 const CHUNK_SIZE = 64; // world-units per chunk side
 
-export function createFoliageSlot(scene, sampleHeight) {
+/**
+ * @param {THREE.Scene} scene
+ * @param {(x:number,z:number)=>number} sampleHeight
+ * @param {object} [windConfig] - Optional wind/interaction config:
+ *   { windDir, windSpeed, windStr, interactionRange, interactionStrength, interactionHThresh }
+ */
+export function createFoliageSlot(scene, sampleHeight, windConfig) {
   let positions  = []; // { x, z, rot, scale }
   let meshParts  = []; // [{ geometry, material }] — shared across chunks
   let _castShadow = false;
   const dummy    = new THREE.Object3D();
+
+  // ── Wind uniforms & positionNode (only when windConfig is provided) ────
+  let _windUniforms = null;
+  let _windPosNode  = null;
+
+  if (windConfig) {
+    const wDir  = (windConfig.windDir ?? 0.7) * Math.PI;
+    const wSpd  = windConfig.windSpeed ?? 1.2;
+    const wStr  = (windConfig.windStr ?? 0.15) * 0.25;
+    const iRng  = windConfig.interactionRange    ?? 2.5;
+    const iStr  = windConfig.interactionStrength  ?? 1.5;
+    const iHTh  = windConfig.interactionHThresh   ?? 2.0;
+
+    _windUniforms = {
+      uTime:      uniform(0),
+      uPlayerPos: uniform(new THREE.Vector3(9999, 0, 9999)),
+      uWindDir:   uniform(wDir),
+      uWindSpeed: uniform(wSpd),
+      uWindStr:   uniform(wStr),
+      uIRange:    uniform(iRng),
+      uIStr:      uniform(iStr),
+      uIHTh:      uniform(iHTh),
+    };
+
+    const u = _windUniforms;
+    _windPosNode = Fn(() => {
+      const phase = add(mul(u.uTime, u.uWindSpeed), mul(instanceIndex.toFloat(), 1.2), u.uWindDir);
+      const heightPct = mul(max(float(0), positionLocal.y), max(float(0), positionLocal.y));
+      const bend  = mul(sin(phase), u.uWindStr, heightPct);
+      const micro = mul(sin(add(mul(phase, 2.3), instanceIndex.toFloat())), 0.06, u.uWindStr, heightPct);
+      const windAmount = add(bend, micro);
+      let pos = add(positionLocal, vec3(mul(cos(u.uWindDir), windAmount), float(0), mul(sin(u.uWindDir), windAmount)));
+
+      const baseWorld = modelWorldMatrix.mul(vec4(float(0), float(0), float(0), float(1))).xyz;
+      const playerXZ  = u.uPlayerPos.xz;
+      const pDist     = length(sub(baseWorld.xz, playerXZ));
+      const pHD       = abs(sub(baseWorld.y, u.uPlayerPos.y));
+      const distFall  = mix(float(1), float(0), smoothstep(float(0.5), u.uIRange, pDist));
+      const hFall     = smoothstep(u.uIHTh, float(0), pHD);
+      const pFall     = mul(distFall, hFall);
+      const diffXZ    = sub(vec3(baseWorld.x, float(0), baseWorld.z), vec3(playerXZ.x, float(0), playerXZ.y));
+      const len       = max(length(diffXZ), 0.001);
+      const pTo       = mul(diffXZ, div(float(1), len));
+      const pushAmt   = mul(negate(mul(u.uIStr, pFall)), heightPct);
+      const dispWorld = mul(pTo, pushAmt);
+      const dispLocal = modelWorldMatrixInverse.mul(vec4(dispWorld, float(0))).xyz;
+      pos = add(pos, dispLocal);
+
+      return pos;
+    })();
+  }
 
   // chunks: Map<"cx,cz", { ims: InstancedMesh[], capacity: number }>
   const chunks = new Map();
@@ -51,12 +115,38 @@ export function createFoliageSlot(scene, sampleHeight) {
     if (parts.length === 0) return;
 
     parts.forEach((part) => {
-      let mat = part.material;
-      if (mat.transparent || mat.alphaTest > 0) {
-        mat = mat.clone();
-        mat.transparent = false;
-        mat.alphaTest = 0.5;
-        mat.depthWrite = true;
+      const src = part.material;
+      let mat;
+      if (_windPosNode) {
+        mat = new THREE.MeshStandardNodeMaterial({
+          color:     src.color?.clone()  ?? new THREE.Color(0x4a6b3a),
+          map:       src.map            ?? null,
+          normalMap: src.normalMap       ?? null,
+          roughness: src.roughness       ?? 0.9,
+          metalness: src.metalness       ?? 0,
+          roughnessMap: src.roughnessMap ?? null,
+          metalnessMap: src.metalnessMap ?? null,
+          emissive:  src.emissive?.clone() ?? new THREE.Color(0),
+          emissiveMap: src.emissiveMap   ?? null,
+          emissiveIntensity: src.emissiveIntensity ?? 1,
+          side:      src.side           ?? THREE.FrontSide,
+          depthWrite: true,
+        });
+        if (src.transparent || (src.alphaTest != null && src.alphaTest > 0)) {
+          mat.alphaTest = 0.5;
+          mat.alphaMap  = src.alphaMap ?? null;
+          if (src.map && !src.alphaMap) mat.alphaTest = 0.5;
+        }
+        if (src.normalScale) mat.normalScale = src.normalScale.clone();
+        mat.positionNode = _windPosNode;
+      } else {
+        mat = src;
+        if (mat.transparent || mat.alphaTest > 0) {
+          mat = mat.clone();
+          mat.transparent = false;
+          mat.alphaTest = 0.5;
+          mat.depthWrite = true;
+        }
       }
       const geo = part.geometry.clone();
       geo.applyMatrix4(part.matrixWorld);
@@ -201,5 +291,11 @@ export function createFoliageSlot(scene, sampleHeight) {
     return { visible, total: chunks.size };
   }
 
-  return { setModel, addInBrush, removeInBrush, syncHeights, setCastShadow, dispose, getPositions, setPositions, getCount, clear, getChunkStats };
+  function update(elapsed, playerWorldPos) {
+    if (!_windUniforms) return;
+    _windUniforms.uTime.value = elapsed;
+    if (playerWorldPos) _windUniforms.uPlayerPos.value.copy(playerWorldPos);
+  }
+
+  return { setModel, addInBrush, removeInBrush, syncHeights, setCastShadow, dispose, getPositions, setPositions, getCount, clear, getChunkStats, update };
 }

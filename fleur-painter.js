@@ -12,7 +12,7 @@ import {
   and, float, mix, normalWorld, smoothstep, step, texture, uniform, uv, vec2,
 } from "three/tsl";
 
-const MAX_FLEURS = 15000;
+const MAX_FLEURS = 30000;
 const CHUNK_SIZE  = 64; // world-units per chunk side
 
 // ── Color presets (from genshin-flowers2.html) ─────────────────────────────
