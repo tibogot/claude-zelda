@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Rectangle plane — alpha-card shaping</title>
+    <title>Pine editor — instanced rings + card shaping</title>
     <style>
       * {
         margin: 0;
@@ -63,9 +63,9 @@
     </script>
   </head>
   <body>
-    <div id="title">Pine card + trunk — vertical to stem · pivot on short edge</div>
+    <div id="title">Pine — 9 cards / ring · 8 levels (default) · pivot on trunk</div>
     <div id="hint">
-      Card is vertical to the trunk (YZ-style plane, 90° to Y). Pivot = center of the chosen short edge; place posX ≈ trunk radius so it sits on the wood.
+      Pine: pivot default = trunk centerline (XZ); use “pivot → surface” to slide onto the hull. Single card: use position + rotation.
     </div>
     <script type="module">
       import * as THREE from "three";
@@ -73,6 +73,20 @@
       import { Pane } from "tweakpane";
 
       const DEG = Math.PI / 180;
+      const _v3 = new THREE.Vector3();
+      const _euler = new THREE.Euler();
+      const _qCard = new THREE.Quaternion();
+      const _qAz = new THREE.Quaternion();
+      const _qOut = new THREE.Quaternion();
+      const _dummy = new THREE.Object3D();
+      const _yAxis = new THREE.Vector3(0, 1, 0);
+
+      function trunkRadiusAtWorldY(y, trunk) {
+        const H = Math.max(0.15, trunk.height);
+        const y0 = trunk.yOffset;
+        const f = THREE.MathUtils.clamp((y - y0) / H, 0, 1);
+        return THREE.MathUtils.lerp(trunk.radiusBottom, trunk.radiusTop, f);
+      }
 
       /**
        * Build in centered XY (normal +Z), deform, move chosen edge midpoint to origin, then rotate +90° Y so:
@@ -101,8 +115,8 @@
           x += skewX * ny * hh;
           y += skewY * nx * hw;
           let z = pos.getZ(i);
-          z -= bendX * nx * nx;
-          z -= bendY * ny * ny;
+          z += bendX * nx * nx;
+          z += bendY * ny * ny;
           pos.setXYZ(i, x, y, z);
         }
 
@@ -186,12 +200,13 @@
             /** auto | left | right | bottom | top — short edge recommended for trunk hook */
             pivotEdge: "auto",
           },
+          /** Blender-style pine card: 12 verts = 6 along the bough × 2 across → 5 quads; curve = bendX (long axis). */
           grid: {
-            segX: 32,
-            segY: 24,
+            segX: 5,
+            segY: 1,
           },
           shape: {
-            bendX: 0,
+            bendX: 0.14,
             bendY: 0,
             skewX: 0,
             skewY: 0,
@@ -201,9 +216,28 @@
             posX: 0.01,
             posY: 1.35,
             posZ: 0,
-            rotXDeg: 0,
+            rotXDeg: -6,
             rotYDeg: 0,
             rotZDeg: 90,
+          },
+          foliage: {
+            layout: "pine",
+            levels: 8,
+            perRing: 9,
+            baseY: 0.28,
+            stepY: 0.42,
+            scaleBottom: 1,
+            scaleTop: 0.32,
+            scalePower: 1.15,
+            globalScale: 1,
+            radialInset: 0.02,
+            /** 0 = pivot on trunk axis (centered from top); 1 = pivot on surface at this azimuth (old behavior) */
+            pivotAlongRadius: 0,
+            azimuthOffsetDeg: 0,
+            staggerDeg: 0,
+            offsetX: 0,
+            offsetY: 0,
+            offsetZ: 0,
           },
           trunk: {
             height: 4,
@@ -274,8 +308,10 @@
         });
 
         let geo = null;
-        const mesh = new THREE.Mesh();
-        scene.add(mesh);
+        /** @type {THREE.Mesh | THREE.InstancedMesh | null} */
+        let foliageObject = null;
+        /** @type {THREE.Object3D | null} */
+        let pivotHelperRoot = null;
 
         const trunkMat = new THREE.MeshStandardMaterial({
           color: params.trunk.color,
@@ -287,8 +323,6 @@
         trunkMesh.castShadow = false;
         trunkMesh.receiveShadow = false;
         scene.add(trunkMesh);
-
-        let pivotHelper = null;
 
         const fileInput = document.createElement("input");
         fileInput.type = "file";
@@ -329,10 +363,107 @@
           mat.needsUpdate = true;
         }
 
-        function applyTransform() {
+        function applySingleTransform() {
+          if (!foliageObject || foliageObject.isInstancedMesh) return;
           const t = params.transform;
-          mesh.position.set(t.posX, t.posY, t.posZ);
-          mesh.rotation.set(t.rotXDeg * DEG, t.rotYDeg * DEG, t.rotZDeg * DEG, "XYZ");
+          const g = params.foliage.globalScale;
+          foliageObject.position.set(t.posX, t.posY, t.posZ);
+          foliageObject.rotation.set(t.rotXDeg * DEG, t.rotYDeg * DEG, t.rotZDeg * DEG, "XYZ");
+          foliageObject.scale.setScalar(Number.isFinite(g) && g > 0 ? g : 1);
+        }
+
+        function quaternionForAzimuth(thetaRad) {
+          const t = params.transform;
+          _euler.set(t.rotXDeg * DEG, t.rotYDeg * DEG, t.rotZDeg * DEG, "XYZ");
+          _qCard.setFromEuler(_euler);
+          _qAz.setFromAxisAngle(_yAxis, thetaRad);
+          return _qOut.copy(_qAz).multiply(_qCard);
+        }
+
+        function updateInstanceMatrices() {
+          if (!foliageObject?.isInstancedMesh) return;
+          const f = params.foliage;
+          const tr = params.trunk;
+          const levels = Math.max(1, Math.round(f.levels));
+          const perRing = Math.max(1, Math.round(f.perRing));
+          const count = levels * perRing;
+          if (foliageObject.count !== count) return;
+
+          const pow = Math.max(0.05, f.scalePower);
+          const gScale = Number.isFinite(f.globalScale) && f.globalScale > 0 ? f.globalScale : 1;
+
+          let idx = 0;
+          for (let level = 0; level < levels; level++) {
+            const tLin = levels <= 1 ? 0 : level / (levels - 1);
+            const u = Math.pow(tLin, pow);
+            const s =
+              (f.scaleBottom * (1 - u) + f.scaleTop * u) * gScale;
+            const y = f.baseY + level * f.stepY + f.offsetY;
+            const R = Math.max(0.001, trunkRadiusAtWorldY(y, tr) - f.radialInset);
+            const along = THREE.MathUtils.clamp(
+              Number.isFinite(f.pivotAlongRadius) ? f.pivotAlongRadius : 0,
+              0,
+              1
+            );
+
+            for (let k = 0; k < perRing; k++) {
+              const thetaDeg =
+                f.azimuthOffsetDeg + (k * 360) / perRing + f.staggerDeg * level;
+              const theta = thetaDeg * DEG;
+              const cx = Math.cos(theta);
+              const sz = Math.sin(theta);
+
+              const px = along * R * cx + f.offsetX;
+              const pz = along * R * sz + f.offsetZ;
+              _dummy.position.set(px, y, pz);
+              _dummy.quaternion.copy(quaternionForAzimuth(theta));
+              _dummy.scale.setScalar(s);
+              _dummy.updateMatrix();
+              foliageObject.setMatrixAt(idx++, _dummy.matrix);
+            }
+          }
+          foliageObject.instanceMatrix.needsUpdate = true;
+        }
+
+        function disposeFoliageObject() {
+          if (!foliageObject) return;
+          scene.remove(foliageObject);
+          if (foliageObject.isInstancedMesh) foliageObject.dispose();
+          foliageObject = null;
+        }
+
+        function ensureFoliageObject() {
+          const f = params.foliage;
+          const pine = f.layout === "pine";
+          const levels = Math.max(1, Math.round(f.levels));
+          const perRing = Math.max(1, Math.round(f.perRing));
+          const needCount = pine ? levels * perRing : 1;
+
+          const needNewType =
+            !foliageObject ||
+            (pine && !foliageObject.isInstancedMesh) ||
+            (!pine && foliageObject.isInstancedMesh) ||
+            (pine && foliageObject.isInstancedMesh && foliageObject.count !== needCount);
+
+          if (needNewType) {
+            disposeFoliageObject();
+            if (pine) {
+              foliageObject = new THREE.InstancedMesh(geo, mat, needCount);
+              foliageObject.frustumCulled = false;
+              scene.add(foliageObject);
+              updateInstanceMatrices();
+            } else {
+              foliageObject = new THREE.Mesh(geo, mat);
+              scene.add(foliageObject);
+              applySingleTransform();
+            }
+          } else {
+            foliageObject.geometry = geo;
+            foliageObject.material = mat;
+            if (pine) updateInstanceMatrices();
+            else applySingleTransform();
+          }
+          updatePivotHelper();
         }
 
         function rebuildTrunk() {
@@ -350,18 +481,32 @@
         }
 
         function updatePivotHelper() {
-          if (pivotHelper) {
-            mesh.remove(pivotHelper);
-            pivotHelper.traverse((o) => {
+          if (pivotHelperRoot) {
+            scene.remove(pivotHelperRoot);
+            pivotHelperRoot.traverse((o) => {
               o.geometry?.dispose?.();
               const m = o.material;
               if (m) (Array.isArray(m) ? m : [m]).forEach((x) => x.dispose?.());
             });
-            pivotHelper = null;
+            pivotHelperRoot = null;
           }
-          if (!params.debug.showPivot) return;
-          pivotHelper = new THREE.AxesHelper(0.22);
-          mesh.add(pivotHelper);
+          if (!params.debug.showPivot || !foliageObject) return;
+
+          const axes = new THREE.AxesHelper(0.2);
+          if (foliageObject.isInstancedMesh) {
+            const m = new THREE.Matrix4();
+            foliageObject.getMatrixAt(0, m);
+            m.decompose(_dummy.position, _dummy.quaternion, _v3);
+            const g = new THREE.Group();
+            g.position.copy(_dummy.position);
+            g.quaternion.copy(_dummy.quaternion);
+            g.add(axes);
+            scene.add(g);
+            pivotHelperRoot = g;
+          } else {
+            foliageObject.add(axes);
+            pivotHelperRoot = axes;
+          }
         }
 
         function rebuildGeometry() {
@@ -371,11 +516,11 @@
           const h = Math.max(0.05, r.height);
           const sx = Math.max(1, Math.round(g.segX));
           const sy = Math.max(1, Math.round(g.segY));
+          const newGeo = createRectangleGeometry(w, h, sx, sy, params.shape, params.rect.pivotEdge);
+          if (foliageObject) foliageObject.geometry = newGeo;
           if (geo) geo.dispose();
-          geo = createRectangleGeometry(w, h, sx, sy, params.shape, params.rect.pivotEdge);
-          mesh.geometry = geo;
-          mesh.material = mat;
-          updatePivotHelper();
+          geo = newGeo;
+          ensureFoliageObject();
         }
 
         function syncScene() {
@@ -386,7 +531,6 @@
 
         rebuildTrunk();
         rebuildGeometry();
-        applyTransform();
         syncMaterial();
         syncScene();
 
@@ -435,7 +579,48 @@
         fTrunk.addBinding(params.trunk, "yOffset", { min: -1, max: 2, step: 0.01, label: "base Y" });
         fTrunk.addBinding(params.trunk, "color");
         fTrunk.addBinding(params.trunk, "visible");
-        fTrunk.on("change", () => rebuildTrunk());
+        fTrunk.on("change", () => {
+          rebuildTrunk();
+          updateInstanceMatrices();
+          updatePivotHelper();
+        });
+
+        const fFoliage = pane.addFolder({ title: "Foliage layout", expanded: true });
+        fFoliage.addBinding(params.foliage, "layout", {
+          label: "mode",
+          options: { pine: "pine", single: "single" },
+        });
+        fFoliage.addBinding(params.foliage, "levels", { min: 1, max: 32, step: 1, label: "levels" });
+        fFoliage.addBinding(params.foliage, "perRing", { min: 1, max: 32, step: 1, label: "per ring" });
+        fFoliage.addBinding(params.foliage, "baseY", { min: -2, max: 24, step: 0.02, label: "base Y" });
+        fFoliage.addBinding(params.foliage, "stepY", { min: 0.05, max: 4, step: 0.02, label: "ΔY / level" });
+        fFoliage.addBinding(params.foliage, "scaleBottom", { min: 0.05, max: 3, step: 0.02, label: "scale bottom" });
+        fFoliage.addBinding(params.foliage, "scaleTop", { min: 0.05, max: 3, step: 0.02, label: "scale top" });
+        fFoliage.addBinding(params.foliage, "scalePower", { min: 0.2, max: 4, step: 0.02, label: "scale curve" });
+        fFoliage.addBinding(params.foliage, "globalScale", { min: 0.1, max: 3, step: 0.02, label: "global ×" });
+        fFoliage.addBinding(params.foliage, "radialInset", { min: -0.2, max: 0.5, step: 0.005, label: "trunk inset" });
+        fFoliage.addBinding(params.foliage, "pivotAlongRadius", {
+          min: 0,
+          max: 1,
+          step: 0.02,
+          label: "pivot → surface",
+        });
+        fFoliage.addBinding(params.foliage, "azimuthOffsetDeg", {
+          min: -180,
+          max: 180,
+          step: 0.5,
+          label: "ring rotate °",
+        });
+        fFoliage.addBinding(params.foliage, "staggerDeg", {
+          min: -45,
+          max: 45,
+          step: 0.5,
+          label: "stagger / level °",
+        });
+        fFoliage.addBinding(params.foliage, "offsetX", { min: -2, max: 2, step: 0.02, label: "offset X" });
+        fFoliage.addBinding(params.foliage, "offsetY", { min: -2, max: 2, step: 0.02, label: "offset Y" });
+        fFoliage.addBinding(params.foliage, "offsetZ", { min: -2, max: 2, step: 0.02, label: "offset Z" });
+        fFoliage.on("change", () => ensureFoliageObject());
 
         const fRect = pane.addFolder({ title: "Rectangle (pivot = short edge)", expanded: true });
         fRect.addBinding(params.rect, "width", { min: 0.1, max: 8, step: 0.05 });
@@ -460,13 +645,13 @@
           min: -2,
           max: 2,
           step: 0.02,
-          label: "cup along width (Z)",
+          label: "bend width (+ convex)",
         });
         fShape.addBinding(params.shape, "bendY", {
           min: -2,
           max: 2,
           step: 0.02,
-          label: "cup along height (Z)",
+          label: "bend height (+ convex)",
         });
         fShape.addBinding(params.shape, "skewX", {
           min: -1,
@@ -487,7 +672,7 @@
           label: "width taper vs Y",
         });
 
-        const fXf = pane.addFolder({ title: "Card transform (on trunk surface)", expanded: true });
+        const fXf = pane.addFolder({ title: "Card tilt (single: full transform)", expanded: true });
         fXf.addBinding(params.transform, "posX", { min: -4, max: 4, step: 0.02 });
         fXf.addBinding(params.transform, "posY", { min: -4, max: 4, step: 0.02 });
         fXf.addBinding(params.transform, "posZ", { min: -4, max: 4, step: 0.02 });
@@ -545,6 +730,24 @@
           "skewY",
           "taperX",
         ]);
+        const FOLIAGE_KEYS = new Set([
+          "layout",
+          "levels",
+          "perRing",
+          "baseY",
+          "stepY",
+          "scaleBottom",
+          "scaleTop",
+          "scalePower",
+          "globalScale",
+          "radialInset",
+          "pivotAlongRadius",
+          "azimuthOffsetDeg",
+          "staggerDeg",
+          "offsetX",
+          "offsetY",
+          "offsetZ",
+        ]);
         const XF_KEYS = new Set(["posX", "posY", "posZ", "rotXDeg", "rotYDeg", "rotZDeg"]);
         const MAT_KEYS = new Set(["color", "roughness", "metalness", "useChecker"]);
         const TEX_KEYS = new Set(["alphaTest", "depthWrite", "maskMode"]);
@@ -554,8 +757,12 @@
         pane.on("change", (ev) => {
           const k = ev.target.key;
           if (GEOM_KEYS.has(k)) rebuildGeometry();
-          else if (XF_KEYS.has(k)) applyTransform();
-          else if (MAT_KEYS.has(k)) syncMaterial();
+          else if (FOLIAGE_KEYS.has(k)) ensureFoliageObject();
+          else if (XF_KEYS.has(k)) {
+            if (params.foliage.layout === "pine") updateInstanceMatrices();
+            else applySingleTransform();
+            if (params.debug.showPivot) updatePivotHelper();
+          } else if (MAT_KEYS.has(k)) syncMaterial();
           else if (TEX_KEYS.has(k)) syncMaterial();
           else if (SCENE_KEYS.has(k)) syncScene();
           else if (DBG_KEYS.has(k)) {

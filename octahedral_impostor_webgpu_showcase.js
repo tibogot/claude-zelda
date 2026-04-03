@@ -31,17 +31,23 @@ async function bakeAtlases(renderer, sourceGeo, sourceMat) {
   const cs = Math.floor(ATLAS_SIZE / GRID);
   const dir = new THREE.Vector3();
 
+  const hasAlpha = !!(sourceMat.map || sourceMat.alphaMap);
+  const BAKE_ALPHA = 0.05;
+
   const colorMat = new THREE.MeshBasicMaterial({
     color: sourceMat.color ? sourceMat.color.clone() : new THREE.Color(0xffffff),
     map: sourceMat.map || null,
-    alphaTest: sourceMat.alphaTest || 0,
+    alphaTest: hasAlpha ? BAKE_ALPHA : 0,
+    alphaMap: sourceMat.alphaMap || null,
     side: THREE.DoubleSide,
   });
 
+  const alphaNode = sourceMat.map ? texture(sourceMat.map, uv()).a : float(1);
   const normalMat = new THREE.MeshBasicNodeMaterial({
     side: THREE.DoubleSide,
-    colorNode: vec4(mul(add(normalWorld, 1), 0.5), float(1)),
+    colorNode: vec4(mul(add(normalWorld, 1), 0.5), alphaNode),
   });
+  if (hasAlpha) normalMat.alphaTest = BAKE_ALPHA;
 
   const colorScene = new THREE.Scene();
   colorScene.add(new THREE.Mesh(sourceGeo, colorMat));
@@ -56,7 +62,9 @@ async function bakeAtlases(renderer, sourceGeo, sourceMat) {
   });
 
   const savedToneMapping = renderer.toneMapping;
+  const savedOutputCS = renderer.outputColorSpace;
   renderer.toneMapping = THREE.NoToneMapping;
+  renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
   renderer.setClearColor(0x000000, 0);
 
   // Pre-compile both materials so the first render doesn't fail silently
@@ -102,9 +110,11 @@ async function bakeAtlases(renderer, sourceGeo, sourceMat) {
   renderer.setRenderTarget(null);
   renderer.autoClear = true;
   renderer.toneMapping = savedToneMapping;
+  renderer.outputColorSpace = savedOutputCS;
 
-  const makeTex = (data) => {
+  const makeTex = (data, srgb = false) => {
     const t = new THREE.DataTexture(data, ATLAS_SIZE, ATLAS_SIZE, THREE.RGBAFormat);
+    if (srgb) t.colorSpace = THREE.SRGBColorSpace;
     t.minFilter = THREE.LinearMipmapLinearFilter;
     t.magFilter = THREE.LinearFilter;
     t.generateMipmaps = true;
