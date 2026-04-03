@@ -22,12 +22,96 @@ function hemiOctaGridToDir(gx, gy, out) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  Atlas Baking  —  3-pass: color + normal + roughness/metalness
+//  Per-cell alpha-weighted mipmap generation
+// ═══════════════════════════════════════════════════════════════════════════
+
+function generatePerCellMipmaps(pixels, atlasSize, grid) {
+  const levels = [pixels];
+  let prevSize = atlasSize;
+  while (prevSize > 1) {
+    const nextSize = prevSize >> 1;
+    if (nextSize < 1) break;
+    const prev = levels[levels.length - 1];
+    const next = new Uint8Array(nextSize * nextSize * 4);
+    const prevCellSize = prevSize / grid;
+    const nextCellSize = nextSize / grid;
+
+    for (let row = 0; row < grid; row++) {
+      for (let col = 0; col < grid; col++) {
+        const nx0 = Math.floor(col * nextCellSize);
+        const ny0 = Math.floor(row * nextCellSize);
+        const nw = Math.floor((col + 1) * nextCellSize) - nx0;
+        const nh = Math.floor((row + 1) * nextCellSize) - ny0;
+
+        for (let dy = 0; dy < nh; dy++) {
+          for (let dx = 0; dx < nw; dx++) {
+            const sx = Math.floor(col * prevCellSize) + dx * 2;
+            const sy = Math.floor(row * prevCellSize) + dy * 2;
+            const sxMax = Math.floor((col + 1) * prevCellSize) - 1;
+            const syMax = Math.floor((row + 1) * prevCellSize) - 1;
+
+            let r = 0, g = 0, b = 0, a = 0, cnt = 0;
+            for (let oy = 0; oy < 2; oy++) {
+              for (let ox = 0; ox < 2; ox++) {
+                const px = Math.min(sx + ox, sxMax);
+                const py = Math.min(sy + oy, syMax);
+                const idx = (py * prevSize + px) * 4;
+                const sa = prev[idx + 3];
+                if (sa > 0) {
+                  r += prev[idx] * sa;
+                  g += prev[idx + 1] * sa;
+                  b += prev[idx + 2] * sa;
+                  a += sa;
+                  cnt++;
+                }
+              }
+            }
+            const di = ((ny0 + dy) * nextSize + (nx0 + dx)) * 4;
+            if (a > 0) {
+              next[di] = Math.round(r / a);
+              next[di + 1] = Math.round(g / a);
+              next[di + 2] = Math.round(b / a);
+              next[di + 3] = Math.round(a / Math.max(cnt, 1));
+            }
+          }
+        }
+      }
+    }
+    levels.push(next);
+    prevSize = nextSize;
+  }
+  return levels;
+}
+
+function makeTexWithMips(mipLevels, atlasSize, maxAniso, srgb) {
+  const t = new THREE.DataTexture(mipLevels[0], atlasSize, atlasSize, THREE.RGBAFormat);
+  t.mipmaps = [];
+  let sz = atlasSize;
+  for (let i = 0; i < mipLevels.length; i++) {
+    t.mipmaps.push({ data: mipLevels[i], width: sz, height: sz });
+    sz >>= 1;
+  }
+  t.needsUpdate = true;
+  t.flipY = false;
+  t.generateMipmaps = false;
+  t.minFilter = THREE.LinearMipmapLinearFilter;
+  t.magFilter = THREE.LinearFilter;
+  t.wrapS = THREE.ClampToEdgeWrapping;
+  t.wrapT = THREE.ClampToEdgeWrapping;
+  if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = maxAniso;
+  return t;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Atlas Baking  —  4-pass: color + normal + roughness/metalness + depth
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function bakeAtlases(renderer, bakeMeshData, opts) {
-  const { grid, atlasSize, maxAniso } = opts;
+  const { grid, atlasSize, maxAniso, cellPad = 2 } = opts;
   const cs = Math.floor(atlasSize / grid);
+  const pad = cellPad;
+  const innerCS = cs - pad * 2;
 
   const box = new THREE.Box3();
   for (const { geometry } of bakeMeshData) {
@@ -95,7 +179,7 @@ async function bakeAtlases(renderer, bakeMeshData, opts) {
     depthScene.add(new THREE.Mesh(geometry.clone(), dMat));
   }
 
-  const cellRT = new THREE.RenderTarget(cs, cs, {
+  const cellRT = new THREE.RenderTarget(innerCS, innerCS, {
     format: THREE.RGBAFormat,
     type: THREE.UnsignedByteType,
     colorSpace: THREE.LinearSRGBColorSpace,
@@ -117,7 +201,7 @@ async function bakeAtlases(renderer, bakeMeshData, opts) {
   const rmPixels = new Uint8Array(atlasSize * atlasSize * 4);
   const depthPixels = new Uint8Array(atlasSize * atlasSize * 4);
 
-  const tightRow = cs * 4;
+  const tightRow = innerCS * 4;
   const paddedRow = Math.ceil(tightRow / 256) * 256;
 
   const scenes = [
@@ -139,14 +223,14 @@ async function bakeAtlases(renderer, bakeMeshData, opts) {
         renderer.autoClear = true;
         renderer.render(sc, ortho);
 
-        const buf = await renderer.readRenderTargetPixelsAsync(cellRT, 0, 0, cs, cs);
+        const buf = await renderer.readRenderTargetPixelsAsync(cellRT, 0, 0, innerCS, innerCS);
         const src = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
-        const srcStride = (src.length > cs * cs * 4) ? paddedRow : tightRow;
+        const srcStride = (src.length > innerCS * innerCS * 4) ? paddedRow : tightRow;
 
-        for (let row = 0; row < cs; row++) {
-          const srcOff = (cs - 1 - row) * srcStride;
-          const dy = gy * cs + row;
-          const dstOff = (dy * atlasSize + gx * cs) * 4;
+        for (let row = 0; row < innerCS; row++) {
+          const srcOff = (innerCS - 1 - row) * srcStride;
+          const dy = gy * cs + pad + row;
+          const dstOff = (dy * atlasSize + gx * cs + pad) * 4;
           dest.set(src.subarray(srcOff, srcOff + tightRow), dstOff);
         }
       }
@@ -159,22 +243,18 @@ async function bakeAtlases(renderer, bakeMeshData, opts) {
   renderer.toneMapping = savedTM;
   renderer.outputColorSpace = savedOCS;
 
-  const makeTex = (data, srgb = false) => {
-    const t = new THREE.DataTexture(data, atlasSize, atlasSize, THREE.RGBAFormat);
-    if (srgb) t.colorSpace = THREE.SRGBColorSpace;
-    t.minFilter = THREE.LinearMipmapLinearFilter;
-    t.magFilter = THREE.LinearFilter;
-    t.anisotropy = maxAniso;
-    t.generateMipmaps = true;
-    t.needsUpdate = true;
-    return t;
-  };
+  const colorMips = generatePerCellMipmaps(colorPixels, atlasSize, grid);
+  const normalMips = generatePerCellMipmaps(normalPixels, atlasSize, grid);
+  const rmMips = generatePerCellMipmaps(rmPixels, atlasSize, grid);
+  const depthMips = generatePerCellMipmaps(depthPixels, atlasSize, grid);
 
   return {
-    colorTex: makeTex(colorPixels), normalTex: makeTex(normalPixels),
-    rmTex: makeTex(rmPixels), depthTex: makeTex(depthPixels),
+    colorTex: makeTexWithMips(colorMips, atlasSize, maxAniso, false),
+    normalTex: makeTexWithMips(normalMips, atlasSize, maxAniso, false),
+    rmTex: makeTexWithMips(rmMips, atlasSize, maxAniso, false),
+    depthTex: makeTexWithMips(depthMips, atlasSize, maxAniso, false),
     colorPixels, normalPixels, rmPixels, depthPixels,
-    radius, center, grid, atlasSize,
+    radius, center, grid, atlasSize, cellPad: pad,
   };
 }
 
@@ -182,7 +262,7 @@ async function bakeAtlases(renderer, bakeMeshData, opts) {
 //  Impostor Material  —  TSL PBR + RM atlas + debug + freeze + dither
 // ═══════════════════════════════════════════════════════════════════════════
 
-function createImpostorMaterial(colorTex, normalTex, rmTex, depthTex, impostorScale, gridVal, atlasSize) {
+function createImpostorMaterial(colorTex, normalTex, rmTex, depthTex, impostorScale, gridVal, atlasSize, cellPad) {
   const uSPS = uniform(float(gridVal));
   const uScale = uniform(float(impostorScale));
   const uCenter = uniform(new THREE.Vector3());
@@ -205,18 +285,17 @@ function createImpostorMaterial(colorTex, normalTex, rmTex, depthTex, impostorSc
   const uFreeze = uniform(float(0));
   const uFreezeDir = uniform(new THREE.Vector3(0, 0, 1));
 
-  // Half-texel inset to prevent cross-cell bleeding
-  const cellPx = Math.floor(atlasSize / gridVal);
-  const htx = 0.5 / cellPx;
-  const uHTX = uniform(float(htx));
+  const uCellFrac = uniform(float(1 / gridVal));
+  const uPadFrac = uniform(float(cellPad / atlasSize));
+  const uInnerFrac = uniform(float(1 / gridVal - 2 * cellPad / atlasSize));
+
+  const uCamRight = uniform(new THREE.Vector3(1, 0, 0));
+  const uCamUp = uniform(new THREE.Vector3(0, 1, 0));
 
   const vWeight = varying(vec4(0, 0, 0, 0), "vW");
   const vS1 = varying(vec2(0, 0), "vS1");
   const vS2 = varying(vec2(0, 0), "vS2");
   const vS3 = varying(vec2(0, 0), "vS3");
-  const vUV1 = varying(vec2(0, 0), "vUV1");
-  const vUV2 = varying(vec2(0, 0), "vUV2");
-  const vUV3 = varying(vec2(0, 0), "vUV3");
 
   const encode = Fn(([d]) => {
     const s = vec3(sign(d.x), sign(d.y), sign(d.z));
@@ -248,29 +327,14 @@ function createImpostorMaterial(colorTex, normalTex, rmTex, depthTex, impostorSc
     return select(len.lessThan(float(0.001)), t, normalize(proj));
   });
 
-  const projectVert = Fn(([n]) => {
-    const t = planeTangent(n);
-    const up = planeUp(n, t);
-    return add(mul(positionLocal.x, t), mul(positionLocal.y, up));
-  });
-
-  const planeUV = Fn(([n, t, camL, vd]) => {
-    const denom = dot(vd, n);
-    const tt = mul(dot(negate(camL), n), div(1, denom));
-    const hit = add(camL, mul(vd, tt));
-    const upP = planeUp(n, t);
-    return add(vec2(dot(t, hit), dot(upP, hit)), 0.5);
-  });
-
   // ── vertex stage: billboard + octahedral lookup (with freeze support) ──
   const posNodeFn = Fn(() => {
     const nm1 = vec2(sub(uSPS, 1), sub(uSPS, 1));
     const camLocal = mul(sub(cameraPosition, uCenter), div(1, uScale));
     const actualCamDir = normalize(camLocal);
 
-    // Billboard always faces real camera
-    const bv = projectVert(actualCamDir);
-    const viewDir = normalize(sub(bv, camLocal));
+    // Spherical billboard using camera right/up from view matrix (v8 approach)
+    const bv = add(mul(positionLocal.x, uCamRight), mul(positionLocal.y, uCamUp));
 
     // Atlas lookup: frozen or actual direction
     const lookupDir = select(
@@ -294,25 +358,32 @@ function createImpostorMaterial(colorTex, normalTex, rmTex, depthTex, impostorSc
     const s3 = min(add(s1, vec2(1, 1)), nm1);
     vS1.assign(s1); vS2.assign(s2); vS3.assign(s3);
 
-    const pn1 = decode(s1, nm1); const pt1 = planeTangent(pn1);
-    const pn2 = decode(s2, nm1); const pt2 = planeTangent(pn2);
-    const pn3 = decode(s3, nm1); const pt3 = planeTangent(pn3);
-    vUV1.assign(planeUV(pn1, pt1, camLocal, viewDir));
-    vUV2.assign(planeUV(pn2, pt2, camLocal, viewDir));
-    vUV3.assign(planeUV(pn3, pt3, camLocal, viewDir));
-
     return bv;
   });
 
-  // ── atlas UV with half-texel inset ──
-  const getUV = Fn(([uvf, frame, fs]) => {
-    const clamped = clamp(vec2(uvf.x, uvf.y), uHTX, sub(float(1), uHTX));
-    return clamp(mul(fs, add(frame, clamped)), 0, 1);
+  // ── atlas UV with cell padding ──
+  const getUV = Fn(([uvf, frame]) => {
+    const clamped = clamp(vec2(uvf.x, uvf.y), float(0), float(1));
+    return add(mul(frame, uCellFrac), add(uPadFrac, mul(clamped, uInnerFrac)));
+  });
+
+  // ── per-pixel ray-plane UV (matches v8's parallaxUV in fragment shader) ──
+  const rayPlaneUV = Fn(([cellNorm, cellGrid]) => {
+    const tng = planeTangent(cellNorm);
+    const spUp = planeUp(cellNorm, tng);
+    const rd = normalize(sub(positionWorld, cameraPosition));
+    const denom = dot(rd, cellNorm);
+    const absDenom = max(abs(denom), float(0.0001));
+    const safeDenom = select(denom.greaterThanEqual(float(0)), absDenom, negate(absDenom));
+    const th = div(dot(sub(uCenter, cameraPosition), cellNorm), safeDenom);
+    const hit = add(cameraPosition, mul(rd, th));
+    const lh = sub(hit, uCenter);
+    return add(div(vec2(dot(lh, tng), dot(lh, spUp)), uScale), float(0.5));
   });
 
   // ── depth parallax UV offset ──
-  const depthParallax = Fn(([localUV, cellNorm, frame, fs]) => {
-    const baseAtlasUV = getUV(localUV, frame, fs);
+  const depthParallax = Fn(([localUV, cellNorm, frame]) => {
+    const baseAtlasUV = getUV(localUV, frame);
     const d = texture(depthTex, baseAtlasUV).r;
     const relD = sub(float(0.5), d);
     const V = normalize(sub(cameraPosition, positionWorld));
@@ -320,21 +391,25 @@ function createImpostorMaterial(colorTex, normalTex, rmTex, depthTex, impostorSc
     const B = planeUp(cellNorm, T);
     const VdotN = max(dot(V, cellNorm), float(0.3));
     const off = mul(vec2(dot(V, T), dot(V, B)), div(mul(relD, uParallaxStr), VdotN));
-    return getUV(add(localUV, off), frame, fs);
+    return getUV(add(localUV, off), frame);
   });
 
   // ── fragment stage ──
   const colorNodeFn = Fn(() => {
-    const fs = div(float(1), uSPS);
     const nm1_f = vec2(sub(uSPS, 1), sub(uSPS, 1));
 
     const cn1 = decode(vS1, nm1_f);
     const cn2 = decode(vS2, nm1_f);
     const cn3 = decode(vS3, nm1_f);
 
-    const puv1 = depthParallax(vUV1, cn1, vS1, fs);
-    const puv2 = depthParallax(vUV2, cn2, vS2, fs);
-    const puv3 = depthParallax(vUV3, cn3, vS3, fs);
+    // Per-pixel ray-plane UVs (v8 approach — no vertex interpolation error)
+    const localUV1 = rayPlaneUV(cn1, vS1);
+    const localUV2 = rayPlaneUV(cn2, vS2);
+    const localUV3 = rayPlaneUV(cn3, vS3);
+
+    const puv1 = depthParallax(localUV1, cn1, vS1);
+    const puv2 = depthParallax(localUV2, cn2, vS2);
+    const puv3 = depthParallax(localUV3, cn3, vS3);
 
     const c1 = texture(colorTex, puv1);
     const c2 = texture(colorTex, puv2);
@@ -451,6 +526,7 @@ function createImpostorMaterial(colorTex, normalTex, rmTex, depthTex, impostorSc
     uHemiSky, uHemiGround, uNormStr, uRimStr, uRimPow,
     uRimCol, uAlphaCutoff, uEdgeSmooth, uDiffuseWrap, uParallaxStr,
     uScale, uSPS, uDither, uDebugMode, uFreeze, uFreezeDir,
+    uCamRight, uCamUp,
   };
 }
 
@@ -516,7 +592,10 @@ export async function run() {
 
   const ground = new THREE.Mesh(
     new THREE.PlaneGeometry(60, 60),
-    new THREE.MeshStandardMaterial({ color: 0x3a4a3a, roughness: 0.9 }),
+    new THREE.MeshStandardMaterial({
+      color: 0x3a4a3a, roughness: 0.9,
+      polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
+    }),
   );
   ground.rotation.x = -Math.PI / 2;
   scene.add(ground);
@@ -533,6 +612,7 @@ export async function run() {
   let sourceGroup = null;
   let bakeMeshData = [];
   let sourceBSphere = null;
+  let sourceGroundY = 0;
   let impostor = null;
   let imp = null;
   let atlasResult = null;
@@ -576,15 +656,15 @@ export async function run() {
     return data;
   }
 
-  function computeBoundingSphere(meshData) {
+  function computeBounds(meshData) {
     const box = new THREE.Box3();
     for (const { geometry } of meshData) {
       geometry.computeBoundingBox();
       box.union(geometry.boundingBox);
     }
-    const s = new THREE.Sphere();
-    box.getBoundingSphere(s);
-    return s;
+    const sphere = new THREE.Sphere();
+    box.getBoundingSphere(sphere);
+    return { sphere, box };
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -616,11 +696,44 @@ export async function run() {
     sourceGroup = new THREE.Group();
     sourceGroup.add(mesh);
     bakeMeshData = extractBakeData(sourceGroup);
-    sourceBSphere = computeBoundingSphere(bakeMeshData);
-    sourceGroup.position.set(-3, sourceBSphere.radius - sourceBSphere.center.y, 0);
+    const bounds = computeBounds(bakeMeshData);
+    sourceBSphere = bounds.sphere;
+    sourceGroundY = -bounds.box.min.y;
+    sourceGroup.position.set(-3, sourceGroundY, 0);
     scene.add(sourceGroup);
     P.roughness = mat.roughness;
     P.metalness = mat.metalness;
+  }
+
+  async function setupGLBScene(gltf, name) {
+    clearScene();
+    currentModelName = name;
+    gltf.scene.updateMatrixWorld(true);
+    bakeMeshData = extractBakeData(gltf.scene);
+    if (bakeMeshData.length === 0) { info.textContent = "No meshes found."; return; }
+    const bounds = computeBounds(bakeMeshData);
+    sourceBSphere = bounds.sphere;
+    sourceGroundY = -bounds.box.min.y;
+    const firstMat = bakeMeshData[0].material;
+    const displayGroup = new THREE.Group();
+    gltf.scene.traverse(c => { if (c.isMesh) displayGroup.add(c.clone()); });
+    sourceGroup = displayGroup;
+    sourceGroup.position.set(-3, sourceGroundY, 0);
+    scene.add(sourceGroup);
+    P.roughness = firstMat.roughness !== undefined ? firstMat.roughness : 0.5;
+    P.metalness = firstMat.metalness !== undefined ? firstMat.metalness : 0.0;
+    await rebake();
+  }
+
+  async function loadGLBPath(path, name) {
+    info.textContent = `Loading ${name}…`;
+    try {
+      const gltf = await gltfLoader.loadAsync(path);
+      await setupGLBScene(gltf, name);
+    } catch (e) {
+      info.textContent = "Load error: " + e.message;
+      console.error(e);
+    }
   }
 
   async function loadGLB(file) {
@@ -629,34 +742,7 @@ export async function run() {
     try {
       const gltf = await gltfLoader.loadAsync(url);
       URL.revokeObjectURL(url);
-      clearScene();
-      currentModelName = file.name.replace(/\.[^.]+$/, "");
-
-      gltf.scene.updateMatrixWorld(true);
-      sourceGroup = gltf.scene;
-      bakeMeshData = extractBakeData(sourceGroup);
-
-      if (bakeMeshData.length === 0) {
-        info.textContent = "No meshes found in GLB.";
-        return;
-      }
-      sourceBSphere = computeBoundingSphere(bakeMeshData);
-      const firstMat = bakeMeshData[0].material;
-
-      const displayGroup = new THREE.Group();
-      gltf.scene.traverse(child => {
-        if (child.isMesh) {
-          const m = child.clone();
-          displayGroup.add(m);
-        }
-      });
-      sourceGroup = displayGroup;
-      sourceGroup.position.set(-3, -sourceBSphere.center.y + sourceBSphere.radius, 0);
-      scene.add(sourceGroup);
-
-      P.roughness = firstMat.roughness !== undefined ? firstMat.roughness : 0.5;
-      P.metalness = firstMat.metalness !== undefined ? firstMat.metalness : 0.0;
-      await rebake();
+      await setupGLBScene(gltf, file.name.replace(/\.[^.]+$/, ""));
     } catch (e) {
       URL.revokeObjectURL(url);
       info.textContent = "GLB load error: " + e.message;
@@ -687,19 +773,18 @@ export async function run() {
 
     try {
       atlasResult = await bakeAtlases(renderer, bakeMeshData, {
-        grid: P.grid, atlasSize: P.atlasSize, maxAniso,
+        grid: P.grid, atlasSize: P.atlasSize, maxAniso, cellPad: P.cellPad,
       });
 
       info.textContent = "Creating impostor…";
       imp = createImpostorMaterial(
         atlasResult.colorTex, atlasResult.normalTex, atlasResult.rmTex,
-        atlasResult.depthTex, atlasResult.radius, P.grid, P.atlasSize,
+        atlasResult.depthTex, atlasResult.radius, P.grid, P.atlasSize, P.cellPad,
       );
 
       const impostorGeo = new THREE.PlaneGeometry(1, 1);
       impostor = new THREE.Mesh(impostorGeo, imp.mat);
-      const impostorY = sourceBSphere.radius - sourceBSphere.center.y;
-      impostor.position.set(3, impostorY + sourceBSphere.center.y, 0);
+      impostor.position.set(3, sourceBSphere.center.y + sourceGroundY, 0);
       impostor.scale.setScalar(2 * atlasResult.radius);
       impostor.frustumCulled = false;
       imp.uCenter.value.copy(impostor.position);
@@ -770,7 +855,7 @@ export async function run() {
 
   const P = {
     model: "TorusKnot",
-    grid: 12, atlasSize: 2048,
+    grid: 12, atlasSize: 2048, cellPad: 2,
     showAtlas: true, showOriginal: true, showImpostor: true,
     sunAzimuth: 225, sunElevation: 56, sunIntensity: 2.0, exposure: 1.0,
     roughness: 0.35, metalness: 0.15, normalStr: 1.0,
@@ -855,10 +940,24 @@ export async function run() {
   const gui = new GUI({ title: "Impostor Editor", width: 240 });
   gui.domElement.style.cssText = "position:fixed;top:8px;right:8px;z-index:10;";
 
+  const GLB_MODELS = {
+    "Pine 2": "models/pine2.glb",
+    "Pine 3": "models/pine3.glb",
+    "Cherry Tree": "models/japanese_cherry_tree.glb",
+    "Cypress": "models/cypress_tree_compressed.glb",
+    "Palm Tree": "models/realistic_palm_tree_free.glb",
+    "Rock": "models/rock_boulder.glb",
+  };
+  const ALL_MODELS = ["TorusKnot", "Sphere", "Torus", "Cylinder", ...Object.keys(GLB_MODELS)];
+
   const fModel = gui.addFolder("Model");
-  fModel.add(P, "model", ["TorusKnot", "Sphere", "Torus", "Cylinder"]).name("Primitive").onChange(v => {
-    loadPrimitive(v);
-    rebake();
+  fModel.add(P, "model", ALL_MODELS).name("Model").onChange(v => {
+    if (GLB_MODELS[v]) {
+      loadGLBPath(GLB_MODELS[v], v);
+    } else {
+      loadPrimitive(v);
+      rebake();
+    }
   });
   fModel.add({ load: () => fileInput.click() }, "load").name("Load GLB…");
   fModel.add(P, "showOriginal").name("Show original").onChange(syncParams);
@@ -867,6 +966,7 @@ export async function run() {
   const fAtlas = gui.addFolder("Atlas");
   fAtlas.add(P, "grid", [4, 6, 8, 10, 12, 14, 16]).name("Grid").onChange(() => rebake());
   fAtlas.add(P, "atlasSize", [512, 1024, 2048, 4096]).name("Resolution").onChange(() => rebake());
+  fAtlas.add(P, "cellPad", 0, 8, 1).name("Cell padding").onChange(() => rebake());
   fAtlas.add(P, "showAtlas").name("Show preview").onChange(syncParams);
   fAtlas.add({ rebake: () => rebake() }, "rebake").name("Rebake now");
 
@@ -990,6 +1090,13 @@ export async function run() {
       frameCount = 0;
       lastFpsTime = now;
       updateInfo();
+    }
+
+    if (imp) {
+      camera.updateMatrixWorld();
+      const e = camera.matrixWorldInverse.elements;
+      imp.uCamRight.value.set(e[0], e[4], e[8]);
+      imp.uCamUp.value.set(e[1], e[5], e[9]);
     }
 
     renderer.render(scene, camera);

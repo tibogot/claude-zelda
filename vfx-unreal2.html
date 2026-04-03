@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>VFX Unreal V2 - Blade Slash</title>
+    <title>VFX Unreal V2 - FX Editor</title>
     <style>
       html,
       body {
@@ -61,39 +61,45 @@
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { Pane } from "tweakpane";
       import {
-        Fn,
-        uv,
-        vec2,
-        vec3,
-        vec4,
-        float,
-        sin,
-        cos,
-        fract,
-        floor,
-        dot,
-        abs,
-        min,
-        max,
-        smoothstep,
-        uniform,
-        color,
+        Fn, uv, vec2, vec3, vec4, float, sin, cos, fract, floor, dot,
+        abs, min, max, smoothstep, uniform, color, positionLocal, atan,
       } from "three/tsl";
       import { pass } from "three/tsl";
       import { bloom } from "three/addons/tsl/display/BloomNode.js";
 
-      let renderer,
-        scene,
-        camera,
-        controls,
-        mesh,
-        pane,
-        renderPipeline,
-        bloomPass;
+      let renderer, scene, camera, controls, pane, renderPipeline, bloomPass;
+      let slashMesh, energyMesh, energyDarkMesh;
+      let currentEffect = "bladeSlash";
 
+      /* ── Shared uniforms ────────────────────────────────────── */
+      const u = {
+        time: uniform(0),
+      };
+
+      /* ── Shared noise ───────────────────────────────────────── */
+      const hash21 = Fn(([p]) => fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453)));
+      const valueNoise2D = Fn(([p]) => {
+        const i = floor(p); const f = fract(p);
+        const u2 = f.mul(f).mul(float(3).sub(f.mul(2)));
+        const a = hash21(i), b = hash21(i.add(vec2(1, 0)));
+        const c = hash21(i.add(vec2(0, 1))), d = hash21(i.add(vec2(1, 1)));
+        return a.add(b.sub(a).mul(u2.x)).add(
+          c.add(d.sub(c).mul(u2.x)).sub(a.add(b.sub(a).mul(u2.x))).mul(u2.y)
+        );
+      });
+
+      /* ── Shared params ──────────────────────────────────────── */
       const params = {
+        effect: "bladeSlash",
         autoRotate: true,
         autoRotateSpeed: 0.8,
+        bloomStrength: 1.05,
+        bloomRadius: 0.15,
+        bloomThreshold: 0.92,
+      };
+
+      /* ── Blade Slash params + uniforms ──────────────────────── */
+      const slashParams = {
         yScale: 0.34,
         baseColor: "#0a1320",
         slashColor: "#66dfff",
@@ -110,122 +116,128 @@
         streakStrength: 0.33,
         edgeThreshold: 0.52,
         edgeSharpness: 0.08,
-        bloomStrength: 1.05,
-        bloomRadius: 0.15,
-        bloomThreshold: 0.92,
+      };
+      const su = {
+        baseColor: uniform(color(slashParams.baseColor)),
+        slashColor: uniform(color(slashParams.slashColor)),
+        edgeColor: uniform(color(slashParams.edgeColor)),
+        slashIntensity: uniform(slashParams.slashIntensity),
+        alphaStrength: uniform(slashParams.alphaStrength),
+        ringSoftness: uniform(slashParams.ringSoftness),
+        ringCenter: uniform(slashParams.ringCenter),
+        ringWidth: uniform(slashParams.ringWidth),
+        radialNoiseScale: uniform(slashParams.radialNoiseScale),
+        radialNoiseWarp: uniform(slashParams.radialNoiseWarp),
+        radialNoiseSpeed: uniform(slashParams.radialNoiseSpeed),
+        streakFreq: uniform(slashParams.streakFreq),
+        streakStrength: uniform(slashParams.streakStrength),
+        edgeThreshold: uniform(slashParams.edgeThreshold),
+        edgeSharpness: uniform(slashParams.edgeSharpness),
       };
 
-      const u = {
-        time: uniform(0),
-        baseColor: uniform(color(params.baseColor)),
-        slashColor: uniform(color(params.slashColor)),
-        edgeColor: uniform(color(params.edgeColor)),
-        slashIntensity: uniform(params.slashIntensity),
-        alphaStrength: uniform(params.alphaStrength),
-        ringSoftness: uniform(params.ringSoftness),
-        ringCenter: uniform(params.ringCenter),
-        ringWidth: uniform(params.ringWidth),
-        radialNoiseScale: uniform(params.radialNoiseScale),
-        radialNoiseWarp: uniform(params.radialNoiseWarp),
-        radialNoiseSpeed: uniform(params.radialNoiseSpeed),
-        streakFreq: uniform(params.streakFreq),
-        streakStrength: uniform(params.streakStrength),
-        edgeThreshold: uniform(params.edgeThreshold),
-        edgeSharpness: uniform(params.edgeSharpness),
+      /* ── Energy FX params + uniforms ────────────────────────── */
+      const energyParams = {
+        energyColor: "#33ccff",
+        coreColor: "#ffffff",
+        darkColor: "#041828",
+        intensity: 5.0,
+        height: 2.0,
+        radius: 0.3,
+        segments: 30,
+        timeScale: 0.8,
+        parabolStrength: 0.6,
+        parabolOffset: 0.5,
+        parabolAmplitude: 0.3,
+        turbulenceStr: 0.15,
+        turbulenceFreq: 6.0,
+        turbulenceAngle: 2.0,
+        noiseScaleX: 3.0,
+        noiseScaleY: 0.5,
+        noiseSpeed: 1.0,
+        noiseSkew: -1.0,
+        noise2ScaleX: 6.0,
+        noise2ScaleY: 1.2,
+        noise2Speed: 0.6,
+        alphaWidth: 0.35,
+        topFade: 0.4,
+        bottomFade: 0.1,
+        darkAlphaWidth: 0.3,
+        darkScale: 1.05,
+      };
+      const eu = {
+        energyColor: uniform(color(energyParams.energyColor)),
+        coreColor: uniform(color(energyParams.coreColor)),
+        darkColor: uniform(color(energyParams.darkColor)),
+        intensity: uniform(energyParams.intensity),
+        parabolStrength: uniform(energyParams.parabolStrength),
+        parabolOffset: uniform(energyParams.parabolOffset),
+        parabolAmplitude: uniform(energyParams.parabolAmplitude),
+        turbulenceStr: uniform(energyParams.turbulenceStr),
+        turbulenceFreq: uniform(energyParams.turbulenceFreq),
+        turbulenceAngle: uniform(energyParams.turbulenceAngle),
+        noiseScaleX: uniform(energyParams.noiseScaleX),
+        noiseScaleY: uniform(energyParams.noiseScaleY),
+        noiseSpeed: uniform(energyParams.noiseSpeed),
+        noiseSkew: uniform(energyParams.noiseSkew),
+        noise2ScaleX: uniform(energyParams.noise2ScaleX),
+        noise2ScaleY: uniform(energyParams.noise2ScaleY),
+        noise2Speed: uniform(energyParams.noise2Speed),
+        alphaWidth: uniform(energyParams.alphaWidth),
+        topFade: uniform(energyParams.topFade),
+        bottomFade: uniform(energyParams.bottomFade),
+        darkAlphaWidth: uniform(energyParams.darkAlphaWidth),
       };
 
-      const CONFIG = {
-        height: 0.66,
-        sides: 25,
-        r5: { x: 0.5, z: 0.5 },
-        r4: { x: 1.0, z: 1.0 },
-        r3: { x: 1.5, z: 1.5 },
-        r2: { x: 1.0, z: 1.0 },
-        r1: { x: 0.5, z: 0.5 },
-        y2: 0.2,
-        y3: 0.5,
-        y4: 0.8,
-      };
-
-      function createHardcodedGeometry() {
-        const { sides, height, r1, r2, r3, r4, r5, y2, y3, y4 } = CONFIG;
-        const positions = [];
-        const uvs = [];
-        const indices = [];
-        const ringVerts = sides + 1;
-
-        const levels = [
-          { y: -height * 0.5, rx: r1.x, rz: r1.z, v: 0.0 },
-          { y: -height * 0.5 + height * y2, rx: r2.x, rz: r2.z, v: y2 },
-          { y: -height * 0.5 + height * y3, rx: r3.x, rz: r3.z, v: y3 },
-          { y: -height * 0.5 + height * y4, rx: r4.x, rz: r4.z, v: y4 },
-          { y: height * 0.5, rx: r5.x, rz: r5.z, v: 1.0 },
+      /* ── Blade Slash geometry ───────────────────────────────── */
+      function createSlashGeometry() {
+        const sides = 25, height = 0.66;
+        const rings = [
+          { y: 0.0, rx: 0.5, rz: 0.5 }, { y: 0.2, rx: 1.0, rz: 1.0 },
+          { y: 0.5, rx: 1.5, rz: 1.5 }, { y: 0.8, rx: 1.0, rz: 1.0 },
+          { y: 1.0, rx: 0.5, rz: 0.5 },
         ];
-
-        for (let i = 0; i < levels.length; i++) {
-          const { y, rx, rz, v } = levels[i];
-          // Duplicate the seam vertex (s=sides) so u=0 and u=1 are different vertices.
-          // This avoids shader interpolation crossing the UV wrap on one side.
+        const positions = [], uvs = [], indices = [], rv = sides + 1;
+        for (const { y, rx, rz } of rings) {
+          const py = -height * 0.5 + height * y;
           for (let s = 0; s <= sides; s++) {
-            const t = s / sides;
-            const angle = t * Math.PI * 2;
-            positions.push(Math.cos(angle) * rx, y, Math.sin(angle) * rz);
-            uvs.push(t, v);
+            const t = s / sides, a = t * Math.PI * 2;
+            positions.push(Math.cos(a) * rx, py, Math.sin(a) * rz);
+            uvs.push(t, y);
           }
         }
-
         for (let l = 0; l < 4; l++) {
-          const startCurrent = l * ringVerts;
-          const startNext = (l + 1) * ringVerts;
+          const c0 = l * rv, c1 = (l + 1) * rv;
           for (let s = 0; s < sides; s++) {
-            const a = startCurrent + s;
-            const b = startCurrent + s + 1;
-            const c = startNext + s;
-            const d = startNext + s + 1;
-            indices.push(a, b, c, b, d, c);
+            const a = c0 + s, b = a + 1, cc = c1 + s, d = cc + 1;
+            indices.push(a, b, cc, b, d, cc);
           }
         }
-
         const geo = new THREE.BufferGeometry();
-        geo.setAttribute(
-          "position",
-          new THREE.Float32BufferAttribute(positions, 3),
-        );
+        geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
         geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
         geo.setIndex(indices);
         geo.computeVertexNormals();
         return geo;
       }
 
-      const hash21 = Fn(([p]) => {
-        return fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453));
+      /* ── Energy: displaced cylinder function ────────────────── */
+      const twistedCylinder = Fn(([pos, pStr, pOff, pAmp, timeNode, turbStr, turbFreq, turbAngle]) => {
+        const angle = atan(pos.z, pos.x).toVar();
+        const elevation = pos.y;
+        const radius = pStr.mul(pos.y.sub(pOff)).pow(2).add(pAmp).toVar();
+        radius.addAssign(sin(elevation.sub(timeNode).mul(turbFreq).add(angle.mul(turbAngle))).mul(turbStr));
+        return vec3(cos(angle).mul(radius), elevation, sin(angle).mul(radius));
       });
 
-      const valueNoise2D = Fn(([p]) => {
-        const i = floor(p);
-        const f = fract(p);
-        const u2 = f.mul(f).mul(float(3).sub(f.mul(2)));
-
-        const a = hash21(i);
-        const b = hash21(i.add(vec2(1, 0)));
-        const c = hash21(i.add(vec2(0, 1)));
-        const d = hash21(i.add(vec2(1, 1)));
-
-        const ab = a.add(b.sub(a).mul(u2.x));
-        const cd = c.add(d.sub(c).mul(u2.x));
-        return ab.add(cd.sub(ab).mul(u2.y));
+      /* ── Energy: skewed UV helper ───────────────────────────── */
+      const toSkewedUv = Fn(([uvNode, skew]) => {
+        return vec2(uvNode.x.add(uvNode.y.mul(skew.x)), uvNode.y.add(uvNode.x.mul(skew.y)));
       });
 
       async function init() {
         scene = new THREE.Scene();
         scene.background = new THREE.Color(0x0b0b0f);
-
-        camera = new THREE.PerspectiveCamera(
-          42,
-          window.innerWidth / window.innerHeight,
-          0.01,
-          100,
-        );
+        camera = new THREE.PerspectiveCamera(42, window.innerWidth / window.innerHeight, 0.01, 100);
         camera.position.set(3, 2, 3);
 
         renderer = new THREE.WebGPURenderer({ antialias: true });
@@ -238,129 +250,191 @@
         controls.enableDamping = true;
         controls.target.set(0, 0, 0);
 
-        const slashMaterial = new THREE.MeshBasicNodeMaterial({
-          transparent: true,
-          depthWrite: false,
-          side: THREE.DoubleSide,
-        });
+        const key = new THREE.DirectionalLight(0xffffff, 0.8);
+        key.position.set(4, 7, 4);
+        scene.add(key, new THREE.AmbientLight(0xffffff, 0.2));
 
-        slashMaterial.outputNode = Fn(() => {
-          const uvNode = uv();
-          const centered = uvNode.sub(0.5).toVar();
+        /* ── Effect 1: Blade Slash ────────────────────────────── */
+        const slashMat = new THREE.MeshBasicNodeMaterial({
+          transparent: true, depthWrite: false, side: THREE.DoubleSide,
+        });
+        slashMat.outputNode = Fn(() => {
+          const uvNode = uv(); const centered = uvNode.sub(0.5).toVar();
           const radial = centered.length();
           const angle = centered.y.atan(centered.x);
           const angle01 = angle.add(Math.PI).div(Math.PI * 2);
-
-          const t = u.time.mul(u.radialNoiseSpeed);
-          // IMPORTANT: build noise coords from angle+radius instead of uv.x
-          // so we don't get a visible seam where geometry wraps u≈1 back to u=0.
+          const t = u.time.mul(su.radialNoiseSpeed);
           const dir = vec2(cos(angle), sin(angle));
-          const polar = dir.mul(radial);
-          const nUv = polar
-            .mul(vec2(u.radialNoiseScale, u.radialNoiseScale))
-            .add(vec2(t, t.negate()))
-            .toVar();
-
-          const warpX = valueNoise2D(nUv).sub(0.5).mul(u.radialNoiseWarp);
-          const warpY = valueNoise2D(nUv.add(vec2(17.3, 9.1)))
-            .sub(0.5)
-            .mul(u.radialNoiseWarp);
-          const warped = nUv.add(vec2(warpX, warpY));
-          const n = valueNoise2D(warped);
-
-          const noisyRadius = radial.add(n.sub(0.5).mul(0.12));
-          const ringDelta = abs(noisyRadius.sub(u.ringCenter));
-          const ringMask = smoothstep(
-            u.ringWidth,
-            u.ringWidth.sub(u.ringSoftness.mul(0.5)),
-            ringDelta,
-          );
-
-          const streak = sin(angle01.mul(u.streakFreq).add(t.mul(2.4)))
-            .mul(0.5)
-            .add(0.5);
-          const streakMask = streak
-            .mul(u.streakStrength)
-            .add(float(1).sub(u.streakStrength));
-
+          const nUv = dir.mul(radial).mul(vec2(su.radialNoiseScale, su.radialNoiseScale))
+            .add(vec2(t, t.negate())).toVar();
+          const warpX = valueNoise2D(nUv).sub(0.5).mul(su.radialNoiseWarp);
+          const warpY = valueNoise2D(nUv.add(vec2(17.3, 9.1))).sub(0.5).mul(su.radialNoiseWarp);
+          const n = valueNoise2D(nUv.add(vec2(warpX, warpY)));
+          const noisyR = radial.add(n.sub(0.5).mul(0.12));
+          const ringMask = smoothstep(su.ringWidth, su.ringWidth.sub(su.ringSoftness.mul(0.5)), abs(noisyR.sub(su.ringCenter)));
+          const streak = sin(angle01.mul(su.streakFreq).add(t.mul(2.4))).mul(0.5).add(0.5);
+          const streakMask = streak.mul(su.streakStrength).add(float(1).sub(su.streakStrength));
           const core = ringMask.mul(streakMask).toVar();
-          const edge = smoothstep(
-            u.edgeThreshold,
-            u.edgeThreshold.add(u.edgeSharpness),
-            core,
-          );
+          const edge = smoothstep(su.edgeThreshold, su.edgeThreshold.add(float(0.08)), core);
+          const outColor = su.baseColor.mul(0.12).add(su.slashColor.mul(core.mul(su.slashIntensity)))
+            .add(su.edgeColor.mul(edge.mul(su.slashIntensity).mul(0.8)));
+          return vec4(outColor, max(core, edge.mul(0.7)).mul(su.alphaStrength).clamp(0, 1));
+        })();
+        slashMesh = new THREE.Mesh(createSlashGeometry(), slashMat);
+        slashMesh.scale.y = slashParams.yScale;
+        scene.add(slashMesh);
 
-          const base = u.baseColor.mul(0.12);
-          const slash = u.slashColor.mul(core.mul(u.slashIntensity));
-          const edgeGlow = u.edgeColor.mul(edge.mul(u.slashIntensity).mul(0.8));
-          const outColor = base.add(slash).add(edgeGlow);
+        /* ── Effect 2: Stylized Energy (displaced cylinder) ───── */
+        const cylGeo = new THREE.CylinderGeometry(1, 1, 1, energyParams.segments, energyParams.segments, true);
+        cylGeo.translate(0, 0.5, 0);
 
-          const alpha = max(core, edge.mul(0.7))
-            .mul(u.alphaStrength)
-            .clamp(0, 1);
-          return vec4(outColor, alpha);
+        const energyMat = new THREE.MeshBasicNodeMaterial({
+          transparent: true, depthWrite: false, side: THREE.DoubleSide,
+        });
+        const energyTimeU = uniform(energyParams.timeScale);
+        energyMat.positionNode = twistedCylinder(
+          positionLocal, eu.parabolStrength, eu.parabolOffset,
+          eu.parabolAmplitude, u.time.mul(energyTimeU),
+          eu.turbulenceStr, eu.turbulenceFreq, eu.turbulenceAngle,
+        );
+        energyMat.outputNode = Fn(() => {
+          const st = u.time.mul(energyTimeU);
+          const n1Uv = uv().add(vec2(st.mul(eu.noiseSpeed), st.negate().mul(eu.noiseSpeed))).toVar();
+          n1Uv.assign(toSkewedUv(n1Uv, vec2(eu.noiseSkew, float(0))));
+          n1Uv.mulAssign(vec2(eu.noiseScaleX, eu.noiseScaleY));
+          const n1 = valueNoise2D(n1Uv.mul(8.0));
+          const n2Uv = uv().add(vec2(st.mul(eu.noise2Speed), st.negate().mul(eu.noise2Speed))).toVar();
+          n2Uv.assign(toSkewedUv(n2Uv, vec2(eu.noiseSkew, float(0))));
+          n2Uv.mulAssign(vec2(eu.noise2ScaleX, eu.noise2ScaleY));
+          const n2 = valueNoise2D(n2Uv.mul(8.0));
+          const outerFade = min(uv().y.smoothstep(0, eu.bottomFade), uv().y.oneMinus().smoothstep(0, eu.topFade));
+          const effect = n1.mul(n2).mul(outerFade);
+          const col = eu.energyColor.mul(eu.intensity).add(eu.coreColor.mul(effect.mul(effect).mul(eu.intensity).mul(0.5)));
+          return vec4(col, effect.smoothstep(0, eu.alphaWidth));
         })();
 
-        mesh = new THREE.Mesh(createHardcodedGeometry(), slashMaterial);
-        mesh.scale.y = params.yScale;
-        scene.add(mesh);
+        energyMesh = new THREE.Mesh(cylGeo, energyMat);
+        energyMesh.scale.y = energyParams.height;
+        energyMesh.visible = false;
+        scene.add(energyMesh);
 
-        const key = new THREE.DirectionalLight(0xffffff, 0.8);
-        key.position.set(4, 7, 4);
-        const fill = new THREE.AmbientLight(0xffffff, 0.2);
-        scene.add(key, fill);
+        const darkMat = new THREE.MeshBasicNodeMaterial({
+          transparent: true, depthWrite: false, side: THREE.DoubleSide,
+        });
+        darkMat.positionNode = twistedCylinder(
+          positionLocal, eu.parabolStrength, eu.parabolOffset,
+          eu.parabolAmplitude, u.time.mul(energyTimeU),
+          eu.turbulenceStr, eu.turbulenceFreq, eu.turbulenceAngle,
+        );
+        darkMat.outputNode = Fn(() => {
+          const st = u.time.mul(energyTimeU).add(123.4);
+          const n1Uv = uv().add(vec2(st.mul(eu.noiseSpeed), st.negate().mul(eu.noiseSpeed))).toVar();
+          n1Uv.assign(toSkewedUv(n1Uv, vec2(eu.noiseSkew, float(0))));
+          n1Uv.mulAssign(vec2(eu.noiseScaleX.mul(1.5), eu.noiseScaleY.mul(0.8)));
+          const n1 = valueNoise2D(n1Uv.mul(8.0));
+          const n2Uv = uv().add(vec2(st.mul(eu.noise2Speed).mul(0.7), st.negate().mul(eu.noise2Speed))).toVar();
+          n2Uv.assign(toSkewedUv(n2Uv, vec2(eu.noiseSkew, float(0))));
+          n2Uv.mulAssign(vec2(eu.noise2ScaleX, eu.noise2ScaleY));
+          const n2 = valueNoise2D(n2Uv.mul(8.0));
+          const outerFade = min(uv().y.smoothstep(0, eu.bottomFade), uv().y.oneMinus().smoothstep(0, eu.topFade));
+          const effect = n1.mul(n2).mul(outerFade);
+          return vec4(eu.darkColor, effect.smoothstep(0, eu.darkAlphaWidth));
+        })();
 
+        const darkCylGeo = new THREE.CylinderGeometry(1, 1, 1, energyParams.segments, energyParams.segments, true);
+        darkCylGeo.translate(0, 0.5, 0);
+        energyDarkMesh = new THREE.Mesh(darkCylGeo, darkMat);
+        energyDarkMesh.scale.y = energyParams.height;
+        energyDarkMesh.scale.x = energyDarkMesh.scale.z = energyParams.darkScale;
+        energyDarkMesh.visible = false;
+        scene.add(energyDarkMesh);
+
+        // Store timeScale uniform ref for live update
+        energyMesh.userData.timeScaleU = energyTimeU;
+
+        /* ── Post-processing ──────────────────────────────────── */
         renderPipeline = new THREE.RenderPipeline(renderer);
         const scenePass = pass(scene, camera);
-        const sceneColor = scenePass.getTextureNode
-          ? scenePass.getTextureNode("output")
-          : scenePass;
-        bloomPass = bloom(
-          sceneColor,
-          params.bloomStrength,
-          params.bloomRadius,
-          params.bloomThreshold,
-        );
+        const sceneColor = scenePass.getTextureNode ? scenePass.getTextureNode("output") : scenePass;
+        bloomPass = bloom(sceneColor, params.bloomStrength, params.bloomRadius, params.bloomThreshold);
         renderPipeline.outputNode = sceneColor.add(bloomPass);
         await renderer.compileAsync(scene, camera);
 
         buildUI();
-        onParamsChanged();
+        syncAll();
+        switchEffect(params.effect);
 
         const timer = new THREE.Timer();
         function animate() {
           requestAnimationFrame(animate);
           timer.update();
-          const dt = timer.getDelta();
-          u.time.value += dt;
-          if (params.autoRotate && mesh)
-            mesh.rotation.y += dt * params.autoRotateSpeed;
+          u.time.value += timer.getDelta();
+          if (params.autoRotate) {
+            if (slashMesh.visible) slashMesh.rotation.y += timer.getDelta() * params.autoRotateSpeed;
+            if (energyMesh.visible) { energyMesh.rotation.y += timer.getDelta() * params.autoRotateSpeed * 0.5; energyDarkMesh.rotation.y = energyMesh.rotation.y; }
+          }
           controls.update();
           renderPipeline.render();
         }
         animate();
-
         window.addEventListener("resize", onResize);
       }
 
-      function onParamsChanged() {
-        u.baseColor.value.set(params.baseColor);
-        u.slashColor.value.set(params.slashColor);
-        u.edgeColor.value.set(params.edgeColor);
-        u.slashIntensity.value = params.slashIntensity;
-        u.alphaStrength.value = params.alphaStrength;
-        u.ringSoftness.value = params.ringSoftness;
-        u.ringCenter.value = params.ringCenter;
-        u.ringWidth.value = params.ringWidth;
-        u.radialNoiseScale.value = params.radialNoiseScale;
-        u.radialNoiseWarp.value = params.radialNoiseWarp;
-        u.radialNoiseSpeed.value = params.radialNoiseSpeed;
-        u.streakFreq.value = params.streakFreq;
-        u.streakStrength.value = params.streakStrength;
-        u.edgeThreshold.value = params.edgeThreshold;
-        u.edgeSharpness.value = params.edgeSharpness;
+      /* ── Effect switching ───────────────────────────────────── */
+      function switchEffect(name) {
+        currentEffect = name;
+        slashMesh.visible = name === "bladeSlash";
+        energyMesh.visible = name === "energyFX";
+        energyDarkMesh.visible = name === "energyFX";
+      }
 
-        if (mesh) mesh.scale.y = params.yScale;
+      /* ── Sync all uniforms from params ──────────────────────── */
+      function syncAll() {
+        su.baseColor.value.set(slashParams.baseColor);
+        su.slashColor.value.set(slashParams.slashColor);
+        su.edgeColor.value.set(slashParams.edgeColor);
+        su.slashIntensity.value = slashParams.slashIntensity;
+        su.alphaStrength.value = slashParams.alphaStrength;
+        su.ringSoftness.value = slashParams.ringSoftness;
+        su.ringCenter.value = slashParams.ringCenter;
+        su.ringWidth.value = slashParams.ringWidth;
+        su.radialNoiseScale.value = slashParams.radialNoiseScale;
+        su.radialNoiseWarp.value = slashParams.radialNoiseWarp;
+        su.radialNoiseSpeed.value = slashParams.radialNoiseSpeed;
+        su.streakFreq.value = slashParams.streakFreq;
+        su.streakStrength.value = slashParams.streakStrength;
+        su.edgeThreshold.value = slashParams.edgeThreshold;
+        su.edgeSharpness.value = slashParams.edgeSharpness;
+        if (slashMesh) slashMesh.scale.y = slashParams.yScale;
+
+        eu.energyColor.value.set(energyParams.energyColor);
+        eu.coreColor.value.set(energyParams.coreColor);
+        eu.darkColor.value.set(energyParams.darkColor);
+        eu.intensity.value = energyParams.intensity;
+        eu.parabolStrength.value = energyParams.parabolStrength;
+        eu.parabolOffset.value = energyParams.parabolOffset;
+        eu.parabolAmplitude.value = energyParams.parabolAmplitude;
+        eu.turbulenceStr.value = energyParams.turbulenceStr;
+        eu.turbulenceFreq.value = energyParams.turbulenceFreq;
+        eu.turbulenceAngle.value = energyParams.turbulenceAngle;
+        eu.noiseScaleX.value = energyParams.noiseScaleX;
+        eu.noiseScaleY.value = energyParams.noiseScaleY;
+        eu.noiseSpeed.value = energyParams.noiseSpeed;
+        eu.noiseSkew.value = energyParams.noiseSkew;
+        eu.noise2ScaleX.value = energyParams.noise2ScaleX;
+        eu.noise2ScaleY.value = energyParams.noise2ScaleY;
+        eu.noise2Speed.value = energyParams.noise2Speed;
+        eu.alphaWidth.value = energyParams.alphaWidth;
+        eu.topFade.value = energyParams.topFade;
+        eu.bottomFade.value = energyParams.bottomFade;
+        eu.darkAlphaWidth.value = energyParams.darkAlphaWidth;
+        if (energyMesh) {
+          energyMesh.scale.y = energyParams.height;
+          energyDarkMesh.scale.y = energyParams.height;
+          energyDarkMesh.scale.x = energyDarkMesh.scale.z = energyParams.darkScale;
+          energyMesh.userData.timeScaleU.value = energyParams.timeScale;
+        }
+
         if (bloomPass) {
           bloomPass.strength.value = params.bloomStrength;
           bloomPass.radius.value = params.bloomRadius;
@@ -369,95 +443,73 @@
       }
 
       function buildUI() {
-        pane = new Pane({
-          container: document.getElementById("ui"),
-          title: "VFX Unreal V2 - Blade Slash",
-        });
+        pane = new Pane({ container: document.getElementById("ui"), title: "VFX FX Editor" });
+        const sync = () => syncAll();
+
+        pane.addBinding(params, "effect", {
+          options: { "Blade Slash": "bladeSlash", "Energy FX": "energyFX" },
+          label: "Effect",
+        }).on("change", (ev) => { switchEffect(ev.value); });
 
         const fAnim = pane.addFolder({ title: "Animation" });
-        fAnim.addBinding(params, "autoRotate").on("change", onParamsChanged);
-        fAnim
-          .addBinding(params, "autoRotateSpeed", {
-            min: -4,
-            max: 4,
-            step: 0.01,
-          })
-          .on("change", onParamsChanged);
+        fAnim.addBinding(params, "autoRotate").on("change", sync);
+        fAnim.addBinding(params, "autoRotateSpeed", { min: -4, max: 4, step: 0.01 }).on("change", sync);
 
-        const fMesh = pane.addFolder({ title: "Mesh" });
-        fMesh
-          .addBinding(params, "yScale", { min: 0.05, max: 1.2, step: 0.01 })
-          .on("change", onParamsChanged);
+        /* ── Blade Slash controls ─────────────────────────────── */
+        const fSlash = pane.addFolder({ title: "Blade Slash", expanded: true });
+        fSlash.addBinding(slashParams, "yScale", { min: 0.05, max: 1.2, step: 0.01 }).on("change", sync);
+        fSlash.addBinding(slashParams, "baseColor").on("change", sync);
+        fSlash.addBinding(slashParams, "slashColor").on("change", sync);
+        fSlash.addBinding(slashParams, "edgeColor").on("change", sync);
+        fSlash.addBinding(slashParams, "slashIntensity", { min: 0, max: 12, step: 0.01 }).on("change", sync);
+        fSlash.addBinding(slashParams, "alphaStrength", { min: 0, max: 1.5, step: 0.01 }).on("change", sync);
+        fSlash.addBinding(slashParams, "ringCenter", { min: 0.1, max: 1.1, step: 0.001 }).on("change", sync);
+        fSlash.addBinding(slashParams, "ringWidth", { min: 0.02, max: 0.7, step: 0.001 }).on("change", sync);
+        fSlash.addBinding(slashParams, "ringSoftness", { min: 0.01, max: 0.5, step: 0.001 }).on("change", sync);
+        fSlash.addBinding(slashParams, "radialNoiseScale", { min: 1, max: 40, step: 0.1 }).on("change", sync);
+        fSlash.addBinding(slashParams, "radialNoiseWarp", { min: 0, max: 5, step: 0.01 }).on("change", sync);
+        fSlash.addBinding(slashParams, "radialNoiseSpeed", { min: -5, max: 5, step: 0.01 }).on("change", sync);
+        fSlash.addBinding(slashParams, "streakFreq", { min: 1, max: 64, step: 0.1 }).on("change", sync);
+        fSlash.addBinding(slashParams, "streakStrength", { min: 0, max: 1, step: 0.01 }).on("change", sync);
+        fSlash.addBinding(slashParams, "edgeThreshold", { min: 0, max: 1, step: 0.001 }).on("change", sync);
+        fSlash.addBinding(slashParams, "edgeSharpness", { min: 0.001, max: 0.35, step: 0.001 }).on("change", sync);
 
-        const fColor = pane.addFolder({ title: "Color" });
-        fColor.addBinding(params, "baseColor").on("change", onParamsChanged);
-        fColor.addBinding(params, "slashColor").on("change", onParamsChanged);
-        fColor.addBinding(params, "edgeColor").on("change", onParamsChanged);
-        fColor
-          .addBinding(params, "slashIntensity", { min: 0, max: 12, step: 0.01 })
-          .on("change", onParamsChanged);
-        fColor
-          .addBinding(params, "alphaStrength", { min: 0, max: 1.5, step: 0.01 })
-          .on("change", onParamsChanged);
+        /* ── Energy FX controls ───────────────────────────────── */
+        const fEnergy = pane.addFolder({ title: "Energy FX", expanded: true });
+        const fEColor = fEnergy.addFolder({ title: "Colors", expanded: true });
+        fEColor.addBinding(energyParams, "energyColor", { label: "energy" }).on("change", sync);
+        fEColor.addBinding(energyParams, "coreColor", { label: "core" }).on("change", sync);
+        fEColor.addBinding(energyParams, "darkColor", { label: "dark" }).on("change", sync);
+        fEColor.addBinding(energyParams, "intensity", { min: 0, max: 15, step: 0.1 }).on("change", sync);
+        const fEShape = fEnergy.addFolder({ title: "Shape", expanded: true });
+        fEShape.addBinding(energyParams, "height", { min: 0.5, max: 6, step: 0.1 }).on("change", sync);
+        fEShape.addBinding(energyParams, "timeScale", { min: -3, max: 3, step: 0.01 }).on("change", sync);
+        fEShape.addBinding(energyParams, "parabolStrength", { min: 0, max: 3, step: 0.01, label: "parabol str" }).on("change", sync);
+        fEShape.addBinding(energyParams, "parabolOffset", { min: -1, max: 2, step: 0.01, label: "parabol off" }).on("change", sync);
+        fEShape.addBinding(energyParams, "parabolAmplitude", { min: 0, max: 2, step: 0.01, label: "parabol amp" }).on("change", sync);
+        fEShape.addBinding(energyParams, "turbulenceStr", { min: 0, max: 1, step: 0.01, label: "turb str" }).on("change", sync);
+        fEShape.addBinding(energyParams, "turbulenceFreq", { min: 0, max: 20, step: 0.1, label: "turb freq" }).on("change", sync);
+        fEShape.addBinding(energyParams, "turbulenceAngle", { min: 0, max: 8, step: 0.1, label: "turb angle" }).on("change", sync);
+        fEShape.addBinding(energyParams, "darkScale", { min: 0.8, max: 1.5, step: 0.01, label: "dark scale" }).on("change", sync);
+        const fENoise = fEnergy.addFolder({ title: "Noise", expanded: false });
+        fENoise.addBinding(energyParams, "noiseScaleX", { min: 0.5, max: 12, step: 0.1 }).on("change", sync);
+        fENoise.addBinding(energyParams, "noiseScaleY", { min: 0.1, max: 4, step: 0.1 }).on("change", sync);
+        fENoise.addBinding(energyParams, "noiseSpeed", { min: -3, max: 3, step: 0.01 }).on("change", sync);
+        fENoise.addBinding(energyParams, "noiseSkew", { min: -3, max: 3, step: 0.01 }).on("change", sync);
+        fENoise.addBinding(energyParams, "noise2ScaleX", { min: 0.5, max: 12, step: 0.1 }).on("change", sync);
+        fENoise.addBinding(energyParams, "noise2ScaleY", { min: 0.1, max: 4, step: 0.1 }).on("change", sync);
+        fENoise.addBinding(energyParams, "noise2Speed", { min: -3, max: 3, step: 0.01 }).on("change", sync);
+        const fEAlpha = fEnergy.addFolder({ title: "Alpha / Fade", expanded: false });
+        fEAlpha.addBinding(energyParams, "alphaWidth", { min: 0.01, max: 1, step: 0.01 }).on("change", sync);
+        fEAlpha.addBinding(energyParams, "topFade", { min: 0.01, max: 1, step: 0.01 }).on("change", sync);
+        fEAlpha.addBinding(energyParams, "bottomFade", { min: 0.01, max: 1, step: 0.01 }).on("change", sync);
+        fEAlpha.addBinding(energyParams, "darkAlphaWidth", { min: 0.01, max: 1, step: 0.01 }).on("change", sync);
 
-        const fMask = pane.addFolder({ title: "Blade Mask" });
-        fMask
-          .addBinding(params, "ringCenter", { min: 0.1, max: 1.1, step: 0.001 })
-          .on("change", onParamsChanged);
-        fMask
-          .addBinding(params, "ringWidth", { min: 0.02, max: 0.7, step: 0.001 })
-          .on("change", onParamsChanged);
-        fMask
-          .addBinding(params, "ringSoftness", {
-            min: 0.01,
-            max: 0.5,
-            step: 0.001,
-          })
-          .on("change", onParamsChanged);
-        fMask
-          .addBinding(params, "radialNoiseScale", {
-            min: 1,
-            max: 40,
-            step: 0.1,
-          })
-          .on("change", onParamsChanged);
-        fMask
-          .addBinding(params, "radialNoiseWarp", { min: 0, max: 5, step: 0.01 })
-          .on("change", onParamsChanged);
-        fMask
-          .addBinding(params, "radialNoiseSpeed", {
-            min: -5,
-            max: 5,
-            step: 0.01,
-          })
-          .on("change", onParamsChanged);
-        fMask
-          .addBinding(params, "streakFreq", { min: 1, max: 64, step: 0.1 })
-          .on("change", onParamsChanged);
-        fMask
-          .addBinding(params, "streakStrength", { min: 0, max: 1, step: 0.01 })
-          .on("change", onParamsChanged);
-        fMask
-          .addBinding(params, "edgeThreshold", { min: 0, max: 1, step: 0.001 })
-          .on("change", onParamsChanged);
-        fMask
-          .addBinding(params, "edgeSharpness", {
-            min: 0.001,
-            max: 0.35,
-            step: 0.001,
-          })
-          .on("change", onParamsChanged);
-
+        /* ── Bloom ────────────────────────────────────────────── */
         const fPost = pane.addFolder({ title: "Bloom" });
-        fPost
-          .addBinding(params, "bloomStrength", { min: 0, max: 8, step: 0.01 })
-          .on("change", onParamsChanged);
-        fPost
-          .addBinding(params, "bloomRadius", { min: 0, max: 1, step: 0.01 })
-          .on("change", onParamsChanged);
-        fPost
-          .addBinding(params, "bloomThreshold", { min: 0, max: 2, step: 0.01 })
-          .on("change", onParamsChanged);
+        fPost.addBinding(params, "bloomStrength", { min: 0, max: 8, step: 0.01 }).on("change", sync);
+        fPost.addBinding(params, "bloomRadius", { min: 0, max: 1, step: 0.01 }).on("change", sync);
+        fPost.addBinding(params, "bloomThreshold", { min: 0, max: 2, step: 0.01 }).on("change", sync);
       }
 
       function onResize() {
@@ -466,9 +518,7 @@
         renderer.setSize(window.innerWidth, window.innerHeight);
       }
 
-      init().catch((err) => {
-        console.error(err);
-      });
+      init().catch(console.error);
     </script>
   </body>
 </html>
