@@ -384,10 +384,10 @@ export async function createStylizedSkyUnrealScene({
 
     const dnf = Math.max(0, Math.min(1, (-rawElev - 5) / 25));
     const lrpSky = (a, b) => _dnC0.set(a).lerp(_dnC1.set(b), dnf).convertSRGBToLinear();
-    skyU.sunsetLow.value.copy(lrpSky("#aa1500", "#020408"));
-    skyU.sunsetColor.value.copy(lrpSky("#ff6820", "#060a14"));
-    skyU.sunsetHigh.value.copy(lrpSky("#ffd580", "#0c1828"));
-    skyU.zenithColor.value.copy(lrpSky("#0c3fbf", "#010306"));
+    skyU.sunsetLow.value.copy(lrpSky("#b82000", "#020408"));
+    skyU.sunsetColor.value.copy(lrpSky("#ff7838", "#060a14"));
+    skyU.sunsetHigh.value.copy(lrpSky("#e8b0c8", "#0c1828"));
+    skyU.zenithColor.value.copy(lrpSky("#1535b0", "#010306"));
     skyU.horizonRingStr.value = 0.22 * (1 - dnf);
   };
   applyLighting();
@@ -555,12 +555,8 @@ export async function createStylizedSkyUnrealScene({
   bindUniformColor(fCloudColor, "cloudShadow", skyU.cloudShadow);
   bindUniformFloat(fCloudColor, "cloudShadowStr", skyU.cloudShadowStr, { min: 0, max: 2, step: 0.01 });
   bindUniformColor(fCloudColor, "cloudSunset", skyU.cloudSunset);
-  bindUniformFloat(fCloudColor, "cloudRimStr", skyU.cloudRimStr, { min: 0, max: 2, step: 0.01 });
-  bindUniformFloat(fCloudColor, "cloudRimWidth", skyU.cloudRimWidth, { min: 0.01, max: 1, step: 0.005 });
   bindUniformFloat(fCloudColor, "cloudVertStr", skyU.cloudVertStr, { min: 0, max: 1, step: 0.01 });
   bindUniformColor(fCloudColor, "cloudGradientDark", skyU.cloudGradientDark);
-  bindUniformFloat(fCloudColor, "cloudGradientStr", skyU.cloudGradientStr, { min: 0, max: 1, step: 0.01 });
-  bindUniformFloat(fCloudColor, "cloudDetailScale", skyU.cloudDetailScale, { min: 0.1, max: 12, step: 0.1 });
 
   const fGodRays = pane.addFolder({ title: "God Rays", expanded: false });
   bindUniformFloat(fGodRays, "godRayStr", skyU.godRayStr, { min: 0, max: 2, step: 0.01 });
