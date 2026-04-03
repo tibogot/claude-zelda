@@ -83,6 +83,10 @@
         background: rgba(210, 110, 20, 0.92);
         color: #fff5e0;
       }
+      #mode-badge.objects {
+        background: rgba(140, 90, 30, 0.92);
+        color: #ffe8c0;
+      }
       #mode-badge.water {
         background: rgba(20, 100, 200, 0.92);
         color: #c8e8ff;
@@ -1144,6 +1148,20 @@
       let activeFoliageSlot = 0;
       let foliageEraseMode = false;
 
+      // ─── INSTANCED OBJECTS SYSTEM ──────────────
+      const OBJECT_SLOTS = [
+        { name: "Rock",    modelPath: "models/rock__game_asset.glb", castShadow: true, perStroke: 3, minSpacing: 3,   scaleMin: 0.5, scaleMax: 1.5, system: null },
+        { name: "Stone",   modelPath: "models/stone_low-poly.glb",  castShadow: true, perStroke: 4, minSpacing: 2,   scaleMin: 0.4, scaleMax: 1.2, system: null },
+        { name: "Barrel",  modelPath: null, castShadow: true, perStroke: 2, minSpacing: 2,   scaleMin: 0.8, scaleMax: 1.2, system: null },
+        { name: "Crate",   modelPath: null, castShadow: true, perStroke: 2, minSpacing: 2,   scaleMin: 0.8, scaleMax: 1.2, system: null },
+        { name: "Fence",   modelPath: null, castShadow: true, perStroke: 2, minSpacing: 1.5, scaleMin: 0.9, scaleMax: 1.1, system: null },
+        { name: "Lantern", modelPath: null, castShadow: true, perStroke: 1, minSpacing: 4,   scaleMin: 0.8, scaleMax: 1.0, system: null },
+        { name: "Custom A", modelPath: null, castShadow: true, perStroke: 3, minSpacing: 3, scaleMin: 0.8, scaleMax: 1.4, system: null },
+        { name: "Custom B", modelPath: null, castShadow: true, perStroke: 3, minSpacing: 3, scaleMin: 0.8, scaleMax: 1.4, system: null },
+      ];
+      let activeObjectSlot = 0;
+      let objectEraseMode = false;
+
       // ─── IMAGE TEXTURE SLOTS ─────────────────
       // Use THREE.Texture(canvas) — NOT DataTexture — so image reassignment works in WebGPU
       const _makeSlotTex = (r, g, b) => {
@@ -1843,6 +1861,17 @@
             slot.scaleMin,
             slot.scaleMax,
           );
+        }
+      }
+
+      function paintObjectAt(wx, wz, erase) {
+        const slot = OBJECT_SLOTS[activeObjectSlot];
+        if (!slot.system) return;
+        const radius = brushWorldRadius();
+        if (erase) {
+          slot.system.removeInBrush(wx, wz, radius);
+        } else {
+          slot.system.addInBrush(wx, wz, radius, slot.perStroke, slot.minSpacing, slot.scaleMin, slot.scaleMax);
         }
       }
 
@@ -2682,6 +2711,9 @@
         FOLIAGE_SLOTS.forEach((s) => {
           if (s.system) s.system.syncHeights();
         });
+        OBJECT_SLOTS.forEach((s) => {
+          if (s.system) s.system.syncHeights();
+        });
         if (fleurSystem) fleurSystem.syncHeights();
         if (ambientFXSystem) ambientFXSystem.syncHeights();
         propObjects.forEach((root) => {
@@ -2848,6 +2880,9 @@
           syncLODHeights();
           syncFTreeHeights();
           FOLIAGE_SLOTS.forEach((s) => {
+            if (s.system) s.system.syncHeights();
+          });
+          OBJECT_SLOTS.forEach((s) => {
             if (s.system) s.system.syncHeights();
           });
           if (fleurSystem) fleurSystem.syncHeights();
@@ -5840,6 +5875,17 @@
           }
         });
 
+        // ── OBJECT SYSTEMS ──
+        OBJECT_SLOTS.forEach((slot) => {
+          slot.system = createFoliageSlot(scene, bvhHeight);
+          slot.system.setCastShadow(slot.castShadow);
+          if (slot.modelPath) {
+            gltfLoader.loadAsync(slot.modelPath).then((gltf) => {
+              slot.system.setModel(gltf);
+            }).catch(() => console.warn(`Objects: ${slot.modelPath} not found — slot active but no model`));
+          }
+        });
+
         // ── FTREE INIT ──
         // Auto-fetch preset files: tree-presets/slot1.json … slot6.json
         FTREE_SLOTS.forEach((slot, i) => {
@@ -6216,6 +6262,10 @@
               name: s.name,
               positions: s.system ? s.system.getPositions() : [],
             })),
+            objects: OBJECT_SLOTS.map((s) => ({
+              name: s.name,
+              positions: s.system ? s.system.getPositions() : [],
+            })),
             cliffs: cliffObjects.map((root) => ({
               modelIndex: root.userData.modelIndex ?? 0,
               x: root.position.x,
@@ -6301,6 +6351,9 @@
               syncLODHeights();
               syncFTreeHeights();
               FOLIAGE_SLOTS.forEach((s) => {
+                if (s.system) s.system.syncHeights();
+              });
+              OBJECT_SLOTS.forEach((s) => {
                 if (s.system) s.system.syncHeights();
               });
               if (fleurSystem) fleurSystem.syncHeights();
@@ -6417,6 +6470,12 @@
                     fd.positions
                   )
                     FOLIAGE_SLOTS[idx].system.setPositions(fd.positions);
+                });
+              }
+              if (meta.objects) {
+                meta.objects.forEach((od, idx) => {
+                  if (idx < OBJECT_SLOTS.length && OBJECT_SLOTS[idx].system && od.positions)
+                    OBJECT_SLOTS[idx].system.setPositions(od.positions);
                 });
               }
               if (meta.cliffs) applyCliffs(meta.cliffs);
@@ -6704,6 +6763,7 @@
             "Tree LOD [J]": "pinelod",
             "Foliage Trees [U]": "ftrees",
             "Foliage [N]": "foliage",
+            "Objects [E]": "objects",
             "Props [I]": "props",
             "Path [L]": "path",
             "Spline [K]": "spline",
@@ -6854,6 +6914,9 @@
             syncLODHeights();
             syncFTreeHeights();
             FOLIAGE_SLOTS.forEach((s) => {
+              if (s.system) s.system.syncHeights();
+            });
+            OBJECT_SLOTS.forEach((s) => {
               if (s.system) s.system.syncHeights();
             });
             if (fleurSystem) fleurSystem.syncHeights();
@@ -8783,6 +8846,46 @@
           });
         });
 
+        // ── OBJECTS FOLDER ──
+        const objectsFolder = pane.addFolder({ title: "Objects  [ E ]", expanded: true });
+        objectsFolder.hidden = true;
+
+        const objectActiveParams = { slotIndex: 0 };
+        const objectSlotOptions = {};
+        OBJECT_SLOTS.forEach((s, i) => { objectSlotOptions[s.name] = i; });
+        objectsFolder.addBinding(objectActiveParams, "slotIndex", { label: "Active slot", options: objectSlotOptions })
+          .on("change", (e) => { activeObjectSlot = e.value; });
+
+        const objectErasePARAMS = { erase: false };
+        objectsFolder.addBinding(objectErasePARAMS, "erase", { label: "Erase (or Shift)" })
+          .on("change", (e) => { objectEraseMode = e.value; });
+
+        OBJECT_SLOTS.forEach((slot, idx) => {
+          const sf = objectsFolder.addFolder({ title: slot.name, expanded: idx === 0 });
+          const ofi = document.createElement("input");
+          ofi.type = "file"; ofi.accept = ".glb"; ofi.style.display = "none";
+          document.body.appendChild(ofi);
+          sf.addButton({ title: "Load GLB…" }).on("click", () => ofi.click());
+          ofi.addEventListener("change", (e) => {
+            if (!e.target.files[0]) return;
+            const url = URL.createObjectURL(e.target.files[0]);
+            gltfLoader.loadAsync(url).then((gltf) => {
+              slot.system.setModel(gltf);
+              slot.system.setCastShadow(slot.castShadow);
+            }).catch((err) => console.error("Objects: failed to load GLB", err));
+            e.target.value = "";
+          });
+          sf.addBinding(slot, "perStroke",   { label: "Per stroke",  min: 1,    max: 20,  step: 1 });
+          sf.addBinding(slot, "minSpacing",  { label: "Min spacing", min: 0.5,  max: 40,  step: 0.5 });
+          sf.addBinding(slot, "scaleMin",    { label: "Scale min",   min: 0.05, max: 5,   step: 0.05 });
+          sf.addBinding(slot, "scaleMax",    { label: "Scale max",   min: 0.05, max: 5,   step: 0.05 });
+          sf.addBinding(slot, "castShadow",  { label: "Cast shadow" }).on("change", (e) => {
+            slot.castShadow = e.value;
+            if (slot.system) slot.system.setCastShadow(e.value);
+          });
+          sf.addButton({ title: "Clear slot" }).on("click", () => { if (slot.system) slot.system.clear(); });
+        });
+
         // ── PROPS FOLDER ──
         const propsFolder = pane.addFolder({
           title: "Props  [ I ]",
@@ -9508,10 +9611,13 @@
 
         splineFolder.addBlade({ view: "separator" });
 
-        // Object picker — built from treeSystem + FOLIAGE_SLOTS
+        // Object picker — built from treeSystem + FOLIAGE_SLOTS + OBJECT_SLOTS
         const splineObjOptions = { "Trees": "trees", "Glow Orbs": "glorborbs" };
         FOLIAGE_SLOTS.forEach((slot, i) => {
           splineObjOptions[`Foliage: ${slot.name}`] = `foliage${i}`;
+        });
+        OBJECT_SLOTS.forEach((slot, i) => {
+          splineObjOptions[`Object: ${slot.name}`] = `object${i}`;
         });
         splineFolder.addBinding(PARAMS.spline, "objectType", {
           label: "Place object",
@@ -10155,6 +10261,19 @@
               slot.system.setPositions(existing);
               if (slot.system.syncHeights) slot.system.syncHeights();
             }
+          } else if (type.startsWith("object")) {
+            const slotIdx = parseInt(type.replace("object", ""));
+            const slot = OBJECT_SLOTS[slotIdx];
+            if (slot && slot.system) {
+              const existing = slot.system.getPositions();
+              samples.forEach(({ pos, angleY }) => {
+                const scale = PARAMS.spline.scaleMin + Math.random() * scaleRange;
+                const rot = PARAMS.spline.alignToPath ? angleY : Math.random() * Math.PI * 2;
+                existing.push({ x: pos.x, z: pos.z, rot, scale });
+              });
+              slot.system.setPositions(existing);
+              if (slot.system.syncHeights) slot.system.syncHeights();
+            }
           }
 
           splineClearPreview();
@@ -10190,6 +10309,7 @@
           if (lodFolder)    lodFolder.hidden    = mode !== "pinelod";
           if (ftreeFolder)  ftreeFolder.hidden  = mode !== "ftrees";
           foliageFolder.hidden = mode !== "foliage";
+          if (objectsFolder) objectsFolder.hidden = mode !== "objects";
           propsFolder.hidden = mode !== "props";
           pathFolder.hidden = mode !== "path";
           splineFolder.hidden = mode !== "spline";
@@ -10308,8 +10428,10 @@
                     ? "GRASS MODE"
                     : mode === "trees"
                       ? "TREES MODE"
-                      : mode === "foliage"
+                        : mode === "foliage"
                         ? "FOLIAGE MODE  [ N ]"
+                        : mode === "objects"
+                        ? "OBJECTS MODE  [ E ]"
                         : mode === "props"
                           ? "PROPS MODE  [ I ]"
                           : mode === "water"
@@ -10401,6 +10523,8 @@
             setMode(currentMode === "trees" ? "view" : "trees");
           if (e.code === "KeyN")
             setMode(currentMode === "foliage" ? "view" : "foliage");
+          if (e.code === "KeyE" && !["water","waterfall","cliffs","decal","place","props","cliffblend"].includes(currentMode))
+            setMode(currentMode === "objects" ? "view" : "objects");
           if (e.code === "KeyJ")
             setMode(currentMode === "pinelod" ? "view" : "pinelod");
           if (currentMode === "pinelod" && e.code.match(/^Digit[1-6]$/)) {
@@ -10640,6 +10764,8 @@
             paintTreesAt(p.x, p.z, treeEraseMode || e.shiftKey);
           if (currentMode === "foliage")
             paintFoliageAt(p.x, p.z, foliageEraseMode || e.shiftKey);
+          if (currentMode === "objects")
+            paintObjectAt(p.x, p.z, objectEraseMode || e.shiftKey);
           if (currentMode === "fleurs")
             paintFleurAt(p.x, p.z, fleurEraseMode || e.shiftKey);
           if (currentMode === "ambientfx")
@@ -10888,6 +11014,8 @@
             paintFTreeAt(p.x, p.z, e.shiftKey);
           if (currentMode === "foliage")
             paintFoliageAt(p.x, p.z, foliageEraseMode || e.shiftKey);
+          if (currentMode === "objects")
+            paintObjectAt(p.x, p.z, objectEraseMode || e.shiftKey);
           if (currentMode === "fleurs")
             paintFleurAt(p.x, p.z, fleurEraseMode || e.shiftKey);
           if (currentMode === "ambientfx")
@@ -10916,6 +11044,9 @@
             syncLODHeights();
             syncFTreeHeights();
             FOLIAGE_SLOTS.forEach((s) => {
+              if (s.system) s.system.syncHeights();
+            });
+            OBJECT_SLOTS.forEach((s) => {
               if (s.system) s.system.syncHeights();
             });
             if (fleurSystem) fleurSystem.syncHeights();
@@ -11619,6 +11750,11 @@
               }
             });
             if (ft > 0) lines.push(`Foliage: ${fv}/${ft} chunks`);
+            let ov = 0, ot = 0;
+            OBJECT_SLOTS.forEach(s => {
+              if (s.system) { const cs = s.system.getChunkStats(camera); ov += cs.visible; ot += cs.total; }
+            });
+            if (ot > 0) lines.push(`Objects: ${ov}/${ot} chunks`);
             const _totalLodChunks = LOD_SLOTS.reduce((s, sl) => s + sl.chunks.size, 0);
             if (_totalLodChunks > 0) lines.push(`TreeLOD: ${lodParams.chunksVisible}/${_totalLodChunks} chunks`);
             chunkInfoDiv.textContent = lines.length ? lines.join('\n') : '';
