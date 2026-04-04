@@ -359,7 +359,7 @@ export function createGrassMaterial(ctx) {
     const cliffH = texture(cliffHTex, terrainUV).x;
     const cliffD = texture(cliffDTex, terrainUV).x;
     const cliffValid = smoothstep(float(-9990), float(-9000), cliffH);
-    const cliffPainted = smoothstep(float(0.0), float(0.005), cliffD);
+    const cliffPainted = smoothstep(float(0.01), float(0.03), cliffD);
     const useCliff = cliffValid.mul(cliffPainted);
 
     const finalH = mix(terrainH, cliffH, useCliff);
@@ -410,7 +410,7 @@ export function createGrassMaterial(ctx) {
 
     // ── Painted density (cliff density overrides terrain when cliff surface exists) ──
     const terrainDensity = texture(grassDensityTex, terrainUV).x;
-    const paintedDensity = mix(terrainDensity, cliffD, useCliff);
+    const paintedDensity = max(terrainDensity, cliffD.mul(useCliff));
     const hasDensity = smoothstep(float(0.0), float(0.005), paintedDensity);
 
     // ── Per-blade randomization (4 decorrelated outputs) ──
