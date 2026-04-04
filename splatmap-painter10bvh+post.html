@@ -393,6 +393,7 @@
       import { createUniforms } from "./uniforms-sandbox.js";
       import { setSeed, randRange } from "./rng.js";
       import { createTreeSystem } from "./tree-painter7.js";
+      import { createOctahedralImpostorForestWebgpu } from "./octahedralImpostorForestWebgpu.js";
       import { createFoliageSlot } from "./foliage-painter.js";
       import { createFleurSystem, FLEUR_PRESETS } from "./fleur-painter.js";
       import { createAmbientFXSystem } from "./ambientfx-painter.js";
@@ -929,7 +930,7 @@
 
       // ── TREE LOD — multi-slot instanced tree system ───────────────────────
       const LOD_SLOTS = [
-        { name: "Pine", modelPath: "models/pine2.glb", lod1Path: "models/pine2LODtest.glb", lodThreshold: 80, minSpacing: 3,  scaleMin: 0.8, scaleMax: 1.4, density: 0.25, treesPerStroke: 3, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
+        { name: "Pine", modelPath: "models/pine2.glb", lod1Path: "models/pine2LODtest.glb", lodThreshold: 80, lodImpostorDist: 115, lodMegaDist: 220, minSpacing: 3,  scaleMin: 0.8, scaleMax: 1.4, density: 0.25, treesPerStroke: 3, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false, pineImpostorApi: null, pineImpostorBusy: false },
         { name: "Oak",  modelPath: "models/treeez2_simon.glb", lod1Path: "models/treeez2_simon.glb", lodThreshold: 60, minSpacing: 4,  scaleMin: 0.9, scaleMax: 1.6, density: 0.2,  treesPerStroke: 3, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
         { name: "Dead", modelPath: "models/treeez2.glb",       lod1Path: "models/treeez2.glb",       lodThreshold: 50, minSpacing: 2,  scaleMin: 0.7, scaleMax: 1.2, density: 0.3,  treesPerStroke: 3, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
         { name: "Palm",  modelPath: "models/botatree_compressed (1).glb", lod1Path: "models/botatree_compressed (1).glb", lodThreshold: 60, minSpacing: 5,  scaleMin: 1.0, scaleMax: 2.0, density: 0.15, treesPerStroke: 3, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
@@ -940,7 +941,24 @@
       const LOD_CHUNK_SIZE    = 64;      // world-units per chunk side
       const LOD_MAX_PER_CHUNK = 512;     // max trees per chunk IM
       let _rebuildLODChunks   = (_slot) => {}; // assigned inside init() once scene is ready
-      const lodParams = { slotName: "Pine", threshold: 80, minSpacing: 3, scaleMin: 0.8, scaleMax: 1.4, density: 0.25, treesPerStroke: 3, count0: 0, count1: 0, totalTrees: 0, chunks: 0, chunksVisible: 0 };
+      const lodParams = {
+        slotName: "Pine",
+        threshold: 80,
+        lodImpostorDist: 115,
+        lodMegaDist: 220,
+        minSpacing: 3,
+        scaleMin: 0.8,
+        scaleMax: 1.4,
+        density: 0.25,
+        treesPerStroke: 3,
+        count0: 0,
+        count1: 0,
+        count2: 0,
+        count3: 0,
+        totalTrees: 0,
+        chunks: 0,
+        chunksVisible: 0,
+      };
       let lodFolder = null;
 
       // ─── FOLIAGE TREE SYSTEM (trunk GLB + TSL leaf planes) ───────────────────
@@ -2970,7 +2988,10 @@
       async function init() {
         const renderer = new THREE.WebGPURenderer({
           antialias: true,
-          requiredLimits: { maxSampledTexturesPerShaderStage: 32 },
+          requiredLimits: {
+            maxSampledTexturesPerShaderStage: 32,
+            maxStorageBuffersInVertexStage: 3,
+          },
         });
         await renderer.init();
         renderer.setSize(innerWidth, innerHeight);
@@ -5806,6 +5827,58 @@
             return { im, localMatrix };
           });
         }
+        let _lodDirty = true;
+        function _markLodDirty() {
+          _lodDirty = true;
+        }
+        function _schedulePineImpostorBuild(slot) {
+          if (
+            slot.name !== "Pine" ||
+            slot.pineImpostorBusy ||
+            slot.pineImpostorApi ||
+            slot.positions.length === 0
+          )
+            return;
+          slot.pineImpostorBusy = true;
+          createOctahedralImpostorForestWebgpu(renderer, dirLight, {
+            modelPath: slot.modelPath,
+            skipNearMeshes: true,
+            fixedPlacements: slot.positions.slice(),
+            impostorStandalone: true,
+            treeScale: 1,
+            lodDistance: 80,
+            centerPosition: [0, 0, 0],
+            placementCapacity: Math.max(1024, slot.positions.length + 512),
+            impostorSettings: {
+              lod2Distance: 9999,
+              fadeRange: 6,
+              textureSize: 1024,
+              spritesPerSide: 8,
+              /** false = bake trunk + foliage; true picks one mesh by volume (often leaves-only on pines) */
+              bakeOnlyLargestMesh: false,
+              fogEnabled: false,
+              /** CSM / compare samplers break WGSL in this editor; no real-time shadow on billboards */
+              skipShadow: true,
+            },
+          })
+            .then((api) => {
+              slot.pineImpostorBusy = false;
+              slot.pineImpostorApi = api;
+              scene.add(api.group);
+              if (!api.rebuildPlacements(slot.positions)) {
+                scene.remove(api.group);
+                api.dispose();
+                slot.pineImpostorApi = null;
+                _schedulePineImpostorBuild(slot);
+                return;
+              }
+              _markLodDirty();
+            })
+            .catch((err) => {
+              slot.pineImpostorBusy = false;
+              console.warn("[TREE LOD] Pine impostor bake failed:", err);
+            });
+        }
         _rebuildLODChunks = function(slot) {
           _markLodDirty();
           if (!slot || !slot.ready) return;
@@ -5843,6 +5916,21 @@
             let r = 0;
             positions.forEach(p => { const d = Math.sqrt((p.x-cx)**2+(p.y-cy)**2+(p.z-cz)**2); if (d > r) r = d; });
             chunk.sphere.set(new THREE.Vector3(cx, cy, cz), r + 20);
+          }
+          slot.positions.forEach((p, i) => { p._lodIdx = i; });
+          if (slot.name === "Pine") {
+            if (
+              slot.pineImpostorApi &&
+              slot.positions.length > slot.pineImpostorApi.capacity
+            ) {
+              scene.remove(slot.pineImpostorApi.group);
+              slot.pineImpostorApi.dispose();
+              slot.pineImpostorApi = null;
+            }
+            _schedulePineImpostorBuild(slot);
+            if (slot.pineImpostorApi) {
+              slot.pineImpostorApi.rebuildPlacements(slot.positions);
+            }
           }
         };
         function _tryBuildSlot(slot) {
@@ -6661,6 +6749,8 @@
         const mouse = new THREE.Vector2();
 
         // ── CLIFF INSTANCER ──
+        let cliffBlendMat = null;
+        const ciTypeSelect = { index: 0 };
         cliffInstancer = createCliffInstancer(scene, { maxInstances: 500 });
         // Proxy for per-instance sliders
         const ciProxy = { px: 0, py: 0, pz: 0, rx: 0, ry: 0, rz: 0, sx: 1, sy: 1, sz: 1 };
@@ -8580,6 +8670,8 @@
             activeLodSlot = i;
             lodParams.slotName   = slot.name;
             lodParams.threshold  = slot.lodThreshold;
+            lodParams.lodImpostorDist = slot.lodImpostorDist ?? 115;
+            lodParams.lodMegaDist = slot.lodMegaDist ?? 220;
             lodParams.minSpacing = slot.minSpacing;
             lodParams.scaleMin   = slot.scaleMin;
             lodParams.scaleMax   = slot.scaleMax;
@@ -8590,6 +8682,14 @@
         });
         lodFolder.addBinding(lodParams, "slotName",  { label: "Painting slot", readonly: true });
         lodFolder.addBinding(lodParams, "threshold",  { label: "LOD switch dist",  min: 5,    max: 300, step: 1    }).on("change", (ev) => { LOD_SLOTS[activeLodSlot].lodThreshold = ev.value; });
+        lodFolder.addBinding(lodParams, "lodImpostorDist", { label: "LOD2 impostor ≥", min: 20, max: 600, step: 1 }).on("change", (ev) => {
+          const s = LOD_SLOTS[activeLodSlot];
+          s.lodImpostorDist = ev.value;
+        });
+        lodFolder.addBinding(lodParams, "lodMegaDist", { label: "LOD3 mega ≥", min: 40, max: 900, step: 1 }).on("change", (ev) => {
+          const s = LOD_SLOTS[activeLodSlot];
+          s.lodMegaDist = ev.value;
+        });
         lodFolder.addBinding(lodParams, "minSpacing", { label: "Min spacing",       min: 0,    max: 20,  step: 0.5  }).on("change", (ev) => { LOD_SLOTS[activeLodSlot].minSpacing  = ev.value; });
         lodFolder.addBinding(lodParams, "scaleMin",   { label: "Scale min",         min: 0.1,  max: 5.0, step: 0.05 }).on("change", (ev) => { LOD_SLOTS[activeLodSlot].scaleMin    = ev.value; });
         lodFolder.addBinding(lodParams, "scaleMax",   { label: "Scale max",         min: 0.1,  max: 5.0, step: 0.05 }).on("change", (ev) => { LOD_SLOTS[activeLodSlot].scaleMax    = ev.value; });
@@ -8597,6 +8697,8 @@
         lodFolder.addBinding(lodParams, "treesPerStroke", { label: "Trees per stroke",  min: 1,    max: 20,  step: 1    }).on("change", (ev) => { LOD_SLOTS[activeLodSlot].treesPerStroke = ev.value; });
         lodFolder.addBinding(lodParams, "count0",      { label: "LOD0 visible", readonly: true });
         lodFolder.addBinding(lodParams, "count1",      { label: "LOD1 visible", readonly: true });
+        lodFolder.addBinding(lodParams, "count2",      { label: "LOD2 impostor vis.", readonly: true });
+        lodFolder.addBinding(lodParams, "count3",      { label: "LOD3 mega vis.", readonly: true });
         lodFolder.addBinding(lodParams, "totalTrees",  { label: "Total trees",  readonly: true });
         lodFolder.addBinding(lodParams, "chunksVisible", { label: "Chunks visible", readonly: true });
         lodFolder.addBinding(lodParams, "chunks",      { label: "Chunks total",  readonly: true });
@@ -9133,7 +9235,6 @@
 
         const ciActiveDisplay = { label: ciActiveLabel };
         cliffsFolder.addBinding(ciActiveDisplay, "label", { label: "Active type", readonly: true });
-        const ciTypeSelect = { index: 0 };
         let ciTypeBinding = null;
         function ciRebuildTypeSelector() {
           if (ciTypeBinding) ciTypeBinding.dispose();
@@ -9244,7 +9345,7 @@
         let selectedCliffBlend = null;
 
         // TSL material: blend groundProc() on flat tops, triplanar rock on steep faces
-        const cliffBlendMat = new MeshStandardNodeMaterial({
+        cliffBlendMat = new MeshStandardNodeMaterial({
           roughness: 0.88,
           metalness: 0,
         });
@@ -10543,6 +10644,8 @@
             const _s = LOD_SLOTS[idx];
             lodParams.slotName   = _s.name;
             lodParams.threshold  = _s.lodThreshold;
+            lodParams.lodImpostorDist = _s.lodImpostorDist ?? 115;
+            lodParams.lodMegaDist = _s.lodMegaDist ?? 220;
             lodParams.minSpacing = _s.minSpacing;
             lodParams.scaleMin   = _s.scaleMin;
             lodParams.scaleMax   = _s.scaleMax;
@@ -11298,14 +11401,22 @@
         let _lastCsmMargin = PARAMS.csm.lightMargin;
         let _lastCsmMapSize = PARAMS.csm.mapSize;
         // ── TREE LOD — per-frame chunk-culled multi-slot update ──────────────
-        let _lodDirty = true;
         const _lodLastPos = new THREE.Vector3(Infinity, Infinity, Infinity);
         const _lodLastQuat = new THREE.Quaternion();
         const _LOD_POS_THR = 4, _LOD_ROT_THR = 0.9986; // ~3° rotation
-        function _markLodDirty() { _lodDirty = true; }
 
         function updateLODInstances() {
-          if (!LOD_SLOTS.some(s => s.ready && s.chunks.size > 0)) return;
+          const _anyLodChunk = LOD_SLOTS.some(
+            (s) => s.ready && s.chunks.size > 0,
+          );
+          const _pineApiEarly = LOD_SLOTS[0]?.pineImpostorApi;
+          if (!_anyLodChunk) {
+            if (_pineApiEarly && LOD_SLOTS[0].name === "Pine") {
+              _pineApiEarly.paintFinishImpostorMega(0, 0);
+              _pineApiEarly.syncShadowMaps();
+            }
+            return;
+          }
           const posMoved = _lodLastPos.distanceToSquared(camera.position) > _LOD_POS_THR * _LOD_POS_THR;
           const camQ = camera.quaternion;
           const rotChanged = Math.abs(_lodLastQuat.dot(camQ)) < _LOD_ROT_THR;
@@ -11316,11 +11427,24 @@
           _lodCamPos.copy(camera.position);
           _lodProjMat.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
           _lodFrustum.setFromProjectionMatrix(_lodProjMat);
-          let totalVisible = 0, totalChunks = 0, count0 = 0, count1 = 0, totalTrees = 0;
+          let totalVisible = 0, totalChunks = 0, count0 = 0, count1 = 0, count2 = 0, count3 = 0, totalTrees = 0;
           for (const slot of LOD_SLOTS) {
             if (!slot.ready) continue;
             totalTrees += slot.positions.length;
             const thr = slot.lodThreshold;
+            const pineImpostor =
+              slot.name === "Pine" ? slot.pineImpostorApi : null;
+            const tImp =
+              typeof slot.lodImpostorDist === "number"
+                ? slot.lodImpostorDist
+                : 1e9;
+            const tMega =
+              typeof slot.lodMegaDist === "number"
+                ? slot.lodMegaDist
+                : 1e9;
+            let pineImpW = 0;
+            let pineMegaW = 0;
+            const capIm = pineImpostor ? pineImpostor.capacity : 0;
             for (const chunk of slot.chunks.values()) {
               totalChunks++;
               const inFrustum = _lodFrustum.intersectsSphere(chunk.sphere);
@@ -11328,9 +11452,22 @@
               if (chunk.lod1ims) chunk.lod1ims.forEach(g => { g.im.count = 0; });
               if (!inFrustum) continue;
               totalVisible++;
-              for (const { x, y, z, scale } of chunk.positions) {
+              for (const p of chunk.positions) {
+                const { x, y, z, scale } = p;
                 const dx = x - _lodCamPos.x, dy = y - _lodCamPos.y, dz = z - _lodCamPos.z;
-                const useLod1 = chunk.lod1ims && Math.sqrt(dx*dx + dy*dy + dz*dz) >= thr;
+                const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                const ti = p._lodIdx ?? 0;
+                if (pineImpostor) {
+                  if (dist >= tMega && pineMegaW < capIm) {
+                    pineImpostor.paintWriteMegaSlot(pineMegaW++, ti);
+                    continue;
+                  }
+                  if (dist >= tImp && pineImpW < capIm) {
+                    pineImpostor.paintWriteImpostorSlot(pineImpW++, ti);
+                    continue;
+                  }
+                }
+                const useLod1 = chunk.lod1ims && dist >= thr;
                 const groups = useLod1 ? chunk.lod1ims : chunk.lod0ims;
                 _lodDummy.position.set(x, y, z);
                 _lodDummy.scale.setScalar(scale);
@@ -11347,10 +11484,18 @@
               count0 += chunk.lod0ims[0]?.im.count ?? 0;
               if (chunk.lod1ims) count1 += chunk.lod1ims[0]?.im.count ?? 0;
             }
+            if (pineImpostor) {
+              pineImpostor.paintFinishImpostorMega(pineImpW, pineMegaW);
+              pineImpostor.syncShadowMaps();
+              count2 += pineImpW;
+              count3 += pineMegaW;
+            }
           }
           const active = LOD_SLOTS[activeLodSlot];
           lodParams.slotName   = active.name;
           lodParams.threshold  = active.lodThreshold;
+          lodParams.lodImpostorDist = active.lodImpostorDist ?? 115;
+          lodParams.lodMegaDist = active.lodMegaDist ?? 220;
           lodParams.minSpacing = active.minSpacing;
           lodParams.scaleMin   = active.scaleMin;
           lodParams.scaleMax   = active.scaleMax;
@@ -11358,6 +11503,8 @@
           lodParams.treesPerStroke = active.treesPerStroke;
           lodParams.count0    = count0;
           lodParams.count1    = count1;
+          lodParams.count2    = count2;
+          lodParams.count3    = count3;
           lodParams.totalTrees = totalTrees;
           lodParams.chunks    = totalChunks;
           lodParams.chunksVisible = totalVisible;
@@ -11627,6 +11774,40 @@
           hemiLight.color.set(PARAMS.light.hemiSkyColor);
           hemiLight.groundColor.set(PARAMS.light.hemiGroundColor);
           hemiLight.intensity = PARAMS.light.hemiIntensity;
+          {
+            const _pineSlot = LOD_SLOTS[0];
+            const _pineApi = _pineSlot?.pineImpostorApi;
+            if (_pineApi && _pineSlot.name === "Pine") {
+              const _sd = sunDirectionFromAngles(
+                PARAMS.light.sunAzimuth,
+                PARAMS.light.sunElevation,
+              );
+              _pineApi.updateSunDir(_sd);
+              const _dc = dirLight.color;
+              _pineApi.updateSunColor(
+                new THREE.Vector3(
+                  _dc.r * dirLight.intensity,
+                  _dc.g * dirLight.intensity,
+                  _dc.b * dirLight.intensity,
+                ),
+              );
+              _pineApi.updateAmbColor(new THREE.Vector3(0.22, 0.24, 0.28));
+              const _hi = hemiLight.intensity * 0.5;
+              _pineApi.updateHemiColors(
+                new THREE.Vector3(
+                  hemiLight.color.r * _hi,
+                  hemiLight.color.g * _hi,
+                  hemiLight.color.b * _hi,
+                ),
+                new THREE.Vector3(
+                  hemiLight.groundColor.r * _hi,
+                  hemiLight.groundColor.g * _hi,
+                  hemiLight.groundColor.b * _hi,
+                ),
+              );
+              _pineApi.syncShadowMaps();
+            }
+          }
           if (skyMode === "physical") {
             sky.turbidity.value = PARAMS.sky.turbidity;
             sky.rayleigh.value = PARAMS.sky.rayleigh;

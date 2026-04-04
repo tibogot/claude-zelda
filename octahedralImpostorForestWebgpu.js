@@ -184,6 +184,7 @@ function createForestImpostorMaterial(
   opts = {},
 ) {
   const mega = opts.mega === true;
+  const skipShadow = opts.skipShadow === true;
   const lodDistance = opts.lodDistance ?? 80;
   const fadeRange = opts.fadeRange ?? 8;
 
@@ -359,20 +360,26 @@ function createForestImpostorMaterial(
     return getUV(add(localUV, off), frame);
   });
 
-  const phDepth = new THREE.DepthTexture(4, 4);
-  phDepth.compareFunction = THREE.LessEqualCompare;
-  const uShadowMapDepth = texture(phDepth);
+  let uShadowMapDepth = null;
+  let sunShadow;
+  if (skipShadow) {
+    sunShadow = float(1);
+  } else {
+    const phDepth = new THREE.DepthTexture(4, 4);
+    phDepth.compareFunction = THREE.LessEqualCompare;
+    uShadowMapDepth = texture(phDepth);
 
-  let shadowFilterFn = PCFSoftShadowFilter;
-  const smt = renderer.shadowMap.type;
-  if (smt === THREE.BasicShadowMap) shadowFilterFn = BasicShadowFilter;
-  else if (smt === THREE.PCFShadowMap) shadowFilterFn = PCFShadowFilter;
+    let shadowFilterFn = PCFSoftShadowFilter;
+    const smt = renderer.shadowMap.type;
+    if (smt === THREE.BasicShadowMap) shadowFilterFn = BasicShadowFilter;
+    else if (smt === THREE.PCFShadowMap) shadowFilterFn = PCFShadowFilter;
 
-  const sunShadow = directionalShadowVisibility(
-    dirLight,
-    uShadowMapDepth,
-    shadowFilterFn,
-  );
+    sunShadow = directionalShadowVisibility(
+      dirLight,
+      uShadowMapDepth,
+      shadowFilterFn,
+    );
+  }
 
   const colorNodeFn = Fn(() => {
     const nm1_f = vec2(sub(uSPS, 1), sub(uSPS, 1));
@@ -532,8 +539,10 @@ function createForestImpostorMaterial(
   mat.transparent = false;
   mat.alphaTest = 0.005;
   mat.depthWrite = true;
-  mat.receiveShadow = true;
-  mat.receivedShadowPositionNode = Fn(() => positionWorld)();
+  mat.receiveShadow = !skipShadow;
+  if (!skipShadow) {
+    mat.receivedShadowPositionNode = Fn(() => positionWorld)();
+  }
 
   return {
     mat,
@@ -581,7 +590,22 @@ export async function createOctahedralImpostorForestWebgpu(
     lod0AlphaTest = 0.1,
     impostorSettings = {},
     cellPad = 2,
+    skipNearMeshes = false,
+    fixedPlacements = null,
+    impostorStandalone = false,
+    placementCapacity = null,
   } = opts;
+
+  const skipNear = skipNearMeshes === true;
+  const useFixed =
+    Array.isArray(fixedPlacements) && fixedPlacements.length > 0;
+  const capExtra =
+    typeof placementCapacity === "number" && placementCapacity > 0
+      ? Math.floor(placementCapacity)
+      : 0;
+  const capacity = useFixed
+    ? Math.max(fixedPlacements.length, capExtra || fixedPlacements.length)
+    : Math.max(1, treeCount | 0);
 
   const iOpts = {
     spritesPerSide: impostorSettings.spritesPerSide ?? 12,
@@ -604,6 +628,7 @@ export async function createOctahedralImpostorForestWebgpu(
     fogFar: impostorSettings.fogFar ?? 170,
     fogEnabled: impostorSettings.fogEnabled !== false,
     fogColor: impostorSettings.fogColor ?? 0x87ceeb,
+    skipShadow: impostorSettings.skipShadow === true,
   };
 
   const grid = iOpts.spritesPerSide;
@@ -679,132 +704,180 @@ export async function createOctahedralImpostorForestWebgpu(
   const trunkGeos = [];
   const trunkMats = [];
 
-  root.traverse((o) => {
-    if (!o.isMesh || !o.geometry) return;
-    const g = o.geometry.clone();
-    g.applyMatrix4(o.matrixWorld);
-    if (isFlatGeometry(g)) return;
-    const m = o.material;
-    const mat0 = Array.isArray(m) ? m[0] : m;
-    const name = (o.name + " " + (mat0?.name ?? "")).toLowerCase();
-    const isLeaf =
-      mat0?.transparent ||
-      /leaf|leave|foliage|canopy|frond|branch/i.test(name) ||
-      (mat0?.map &&
-        (mat0?.side === THREE.DoubleSide || mat0?.alphaTest > 0));
+  if (!skipNear) {
+    root.traverse((o) => {
+      if (!o.isMesh || !o.geometry) return;
+      const g = o.geometry.clone();
+      g.applyMatrix4(o.matrixWorld);
+      if (isFlatGeometry(g)) return;
+      const m = o.material;
+      const mat0 = Array.isArray(m) ? m[0] : m;
+      const name = (o.name + " " + (mat0?.name ?? "")).toLowerCase();
+      const isLeaf =
+        mat0?.transparent ||
+        /leaf|leave|foliage|canopy|frond|branch/i.test(name) ||
+        (mat0?.map &&
+          (mat0?.side === THREE.DoubleSide || mat0?.alphaTest > 0));
 
-    g.computeBoundingBox();
-    const geoMinY = g.boundingBox.min.y;
-    const geoMaxY = g.boundingBox.max.y;
-    const geoHeight = Math.max(0.1, geoMaxY - geoMinY);
+      g.computeBoundingBox();
+      const geoMinY = g.boundingBox.min.y;
+      const geoMaxY = g.boundingBox.max.y;
+      const geoHeight = Math.max(0.1, geoMaxY - geoMinY);
 
-    const nodeMat = new THREE.MeshStandardNodeMaterial({
-      color: mat0?.color?.getHex?.() ?? 0x448833,
-      roughness: mat0?.roughness ?? 0.8,
-      metalness: mat0?.metalness ?? 0,
-      map: mat0?.map ?? null,
-      transparent: isLeaf,
-      alphaTest: isLeaf ? lod0AlphaTest : 0.5,
-      side: isLeaf ? THREE.DoubleSide : (mat0?.side ?? THREE.FrontSide),
-      depthWrite: true,
-    });
-    nodeMat.fog = true;
+      const nodeMat = new THREE.MeshStandardNodeMaterial({
+        color: mat0?.color?.getHex?.() ?? 0x448833,
+        roughness: mat0?.roughness ?? 0.8,
+        metalness: mat0?.metalness ?? 0,
+        map: mat0?.map ?? null,
+        transparent: isLeaf,
+        alphaTest: isLeaf ? lod0AlphaTest : 0.5,
+        side: isLeaf ? THREE.DoubleSide : (mat0?.side ?? THREE.FrontSide),
+        depthWrite: true,
+      });
+      nodeMat.fog = true;
 
-    if (isLeaf) {
-      const uGeoMinY = uniform(float(geoMinY));
-      const uGeoHeight = uniform(float(geoHeight));
-      nodeMat.positionNode = Fn(() => {
-        const heightFactor = saturate(
-          div(sub(positionLocal.y, uGeoMinY), uGeoHeight),
+      if (isLeaf) {
+        const uGeoMinY = uniform(float(geoMinY));
+        const uGeoHeight = uniform(float(geoHeight));
+        nodeMat.positionNode = Fn(() => {
+          const heightFactor = saturate(
+            div(sub(positionLocal.y, uGeoMinY), uGeoHeight),
+          );
+          const seedOffset = add(positionWorld.x, positionWorld.z);
+          const windOffset = windDisplacement(
+            positionWorld,
+            heightFactor,
+            seedOffset,
+          );
+          return add(positionLocal, windOffset);
+        })();
+      }
+
+      const matMap = mat0?.map ?? null;
+      nodeMat.alphaNode = Fn(() => {
+        const dist = length(sub(positionWorld, cameraPosition));
+        const wImp = smoothstep(
+          sub(uNearLodDist, uNearFadeRange),
+          add(uNearLodDist, uNearFadeRange),
+          dist,
         );
-        const seedOffset = add(positionWorld.x, positionWorld.z);
-        const windOffset = windDisplacement(
-          positionWorld,
-          heightFactor,
-          seedOffset,
+        const wMesh = sub(float(1), wImp);
+        const baseAlpha = matMap ? texture(matMap, uv()).a : float(1.0);
+        const smoothA = mul(baseAlpha, wMesh);
+
+        const fadeT = saturate(
+          div(sub(add(uNearLodDist, uNearFadeRange), dist), uNearFadeRange),
         );
-        return add(positionLocal, windOffset);
+        const fadeTSoft = smoothstep(float(0.15), float(0.85), fadeT);
+        const dither = IGN(screenCoordinate.xy);
+        const ditheredAlpha = select(
+          dither.greaterThan(fadeTSoft),
+          float(0.0),
+          baseAlpha,
+        );
+        const ramp = sub(
+          float(1),
+          smoothstep(uNearLodDist, add(uNearLodDist, uNearFadeRange), dist),
+        );
+        const legacyA = mul(ditheredAlpha, ramp);
+
+        return mix(smoothA, legacyA, _uLodDither);
       })();
-    }
 
-    const matMap = mat0?.map ?? null;
-    nodeMat.alphaNode = Fn(() => {
-      const dist = length(sub(positionWorld, cameraPosition));
-      const wImp = smoothstep(
-        sub(uNearLodDist, uNearFadeRange),
-        add(uNearLodDist, uNearFadeRange),
-        dist,
-      );
-      const wMesh = sub(float(1), wImp);
-      const baseAlpha = matMap ? texture(matMap, uv()).a : float(1.0);
-      const smoothA = mul(baseAlpha, wMesh);
-
-      const fadeT = saturate(
-        div(sub(add(uNearLodDist, uNearFadeRange), dist), uNearFadeRange),
-      );
-      const fadeTSoft = smoothstep(float(0.15), float(0.85), fadeT);
-      const dither = IGN(screenCoordinate.xy);
-      const ditheredAlpha = select(
-        dither.greaterThan(fadeTSoft),
-        float(0.0),
-        baseAlpha,
-      );
-      const ramp = sub(
-        float(1),
-        smoothstep(uNearLodDist, add(uNearLodDist, uNearFadeRange), dist),
-      );
-      const legacyA = mul(ditheredAlpha, ramp);
-
-      return mix(smoothA, legacyA, _uLodDither);
-    })();
-
-    if (isLeaf) {
-      leafGeos.push(g);
-      leafMats.push(nodeMat);
-    } else {
-      trunkGeos.push(g);
-      trunkMats.push(nodeMat);
-    }
-  });
+      if (isLeaf) {
+        leafGeos.push(g);
+        leafMats.push(nodeMat);
+      } else {
+        trunkGeos.push(g);
+        trunkMats.push(nodeMat);
+      }
+    });
+  }
 
   const cx0 = centerPosition[0];
   const cz0 = centerPosition[2];
-  const posX = new Float32Array(treeCount);
-  const posY = new Float32Array(treeCount);
-  const posZ = new Float32Array(treeCount);
-  const allNearMats = new Float32Array(treeCount * 16);
-  const allImpostorMats = new Float32Array(treeCount * 16);
-  const allCenters = new Float32Array(treeCount * 3);
+  const posX = new Float32Array(capacity);
+  const posY = new Float32Array(capacity);
+  const posZ = new Float32Array(capacity);
+  const allNearMats = new Float32Array(capacity * 16);
+  const allImpostorMats = new Float32Array(capacity * 16);
+  const allCenters = new Float32Array(capacity * 3);
 
   const _m = new THREE.Matrix4();
   const _sc = new THREE.Vector3(treeScale, treeScale, treeScale);
+  const _scPer = new THREE.Vector3();
+  const _sphereScaled = new THREE.Vector3();
 
-  for (let i = 0; i < treeCount; i++) {
-    const angle = Math.random() * Math.PI * 2;
-    const dist = minRadius + Math.random() * (radius - minRadius);
-    const x = cx0 + Math.cos(angle) * dist;
-    const z = cz0 + Math.sin(angle) * dist;
-    const y = getTerrainHeight ? getTerrainHeight(x, z) : centerPosition[1];
+  let placementCount = capacity;
 
-    posX[i] = x;
-    posY[i] = y;
-    posZ[i] = z;
+  function applyPlacementsFromArray(arr) {
+    const n = arr.length;
+    if (n > capacity) {
+      console.warn(
+        "[ForestWebGPU] applyPlacementsFromArray: count exceeds capacity",
+      );
+      return false;
+    }
+    placementCount = n;
+    for (let i = 0; i < n; i++) {
+      const { x, y, z, scale: scRaw } = arr[i];
+      const sc =
+        typeof scRaw === "number" && Number.isFinite(scRaw) ? scRaw : 1;
+      const ry = Math.PI * 2 * ((x * 13.7 + z * 7.3) % 1);
+      posX[i] = x;
+      posY[i] = y;
+      posZ[i] = z;
+      _scPer.set(sc, sc, sc);
+      _sphereScaled.copy(atlasResult.center).multiplyScalar(sc);
+      const impS = bakeR * 2 * sc;
+      const gLift = bakeR * sc * (1 - 1 / BAKE_SPHERE_MARGIN);
 
-    _m.makeRotationY(Math.random() * Math.PI * 2)
-      .scale(_sc)
-      .setPosition(x, y, z);
-    _m.toArray(allNearMats, i * 16);
+      _m.makeRotationY(ry).scale(_scPer).setPosition(x, y, z);
+      _m.toArray(allNearMats, i * 16);
 
-    const wcx = x + sphereCenter.x;
-    const wcy = y + sphereCenter.y + groundLift;
-    const wcz = z + sphereCenter.z;
-    allCenters[i * 3] = wcx;
-    allCenters[i * 3 + 1] = wcy;
-    allCenters[i * 3 + 2] = wcz;
-    _m.identity()
-      .makeScale(impostorScale, impostorScale, impostorScale)
-      .setPosition(wcx, wcy, wcz);
-    _m.toArray(allImpostorMats, i * 16);
+      const wcx = x + _sphereScaled.x;
+      const wcy = y + _sphereScaled.y + gLift;
+      const wcz = z + _sphereScaled.z;
+      allCenters[i * 3] = wcx;
+      allCenters[i * 3 + 1] = wcy;
+      allCenters[i * 3 + 2] = wcz;
+      _m.identity().makeScale(impS, impS, impS).setPosition(wcx, wcy, wcz);
+      _m.toArray(allImpostorMats, i * 16);
+    }
+    return true;
+  }
+
+  if (useFixed) {
+    applyPlacementsFromArray(fixedPlacements);
+  } else {
+    placementCount = capacity;
+    for (let i = 0; i < capacity; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const dist = minRadius + Math.random() * (radius - minRadius);
+      const x = cx0 + Math.cos(angle) * dist;
+      const z = cz0 + Math.sin(angle) * dist;
+      const y = getTerrainHeight ? getTerrainHeight(x, z) : centerPosition[1];
+
+      posX[i] = x;
+      posY[i] = y;
+      posZ[i] = z;
+
+      _m.makeRotationY(Math.random() * Math.PI * 2)
+        .scale(_sc)
+        .setPosition(x, y, z);
+      _m.toArray(allNearMats, i * 16);
+
+      const wcx = x + sphereCenter.x;
+      const wcy = y + sphereCenter.y + groundLift;
+      const wcz = z + sphereCenter.z;
+      allCenters[i * 3] = wcx;
+      allCenters[i * 3 + 1] = wcy;
+      allCenters[i * 3 + 2] = wcz;
+      _m.identity()
+        .makeScale(impostorScale, impostorScale, impostorScale)
+        .setPosition(wcx, wcy, wcz);
+      _m.toArray(allImpostorMats, i * 16);
+    }
   }
 
   const group = new THREE.Group();
@@ -817,16 +890,16 @@ export async function createOctahedralImpostorForestWebgpu(
     const im = new THREE.InstancedMesh(
       geo,
       mats.length === 1 ? mats[0] : mats,
-      treeCount,
+      capacity,
     );
     im.castShadow = true;
     im.frustumCulled = false;
-    for (let i = 0; i < treeCount; i++) {
+    for (let i = 0; i < placementCount; i++) {
       _m.fromArray(allNearMats, i * 16);
       im.setMatrixAt(i, _m);
     }
     im.instanceMatrix.needsUpdate = true;
-    im.count = treeCount;
+    im.count = placementCount;
     group.add(im);
     nearMeshes.push(im);
     return im;
@@ -835,7 +908,7 @@ export async function createOctahedralImpostorForestWebgpu(
   makeNearMesh(leafGeos, leafMats);
 
   const planeGeo = new THREE.PlaneGeometry(1, 1);
-  const compactCenters = new Float32Array(treeCount * 4);
+  const compactCenters = new Float32Array(capacity * 4);
   const centersStorage = instancedArray(compactCenters, "vec4").setName(
     "impostorCentersW",
   );
@@ -892,6 +965,7 @@ export async function createOctahedralImpostorForestWebgpu(
     rimColor: iOpts.rimColor,
     diffuseWrap: iOpts.diffuseWrap,
     parallaxStrength: iOpts.parallaxStrength,
+    skipShadow: iOpts.skipShadow,
   };
 
   const impostorPack = createForestImpostorMaterial(
@@ -921,14 +995,14 @@ export async function createOctahedralImpostorForestWebgpu(
   const impostorMesh = new THREE.InstancedMesh(
     planeGeo,
     impostorMat,
-    treeCount,
+    capacity,
   );
   impostorMesh.castShadow = false;
   impostorMesh.frustumCulled = false;
   impostorMesh.count = 0;
   group.add(impostorMesh);
 
-  const compactCenters2 = new Float32Array(treeCount * 4);
+  const compactCenters2 = new Float32Array(capacity * 4);
   const centersStorage2 = instancedArray(compactCenters2, "vec4").setName(
     "megaCentersW",
   );
@@ -957,13 +1031,22 @@ export async function createOctahedralImpostorForestWebgpu(
   const megaMat = megaPack.mat;
   megaMat.fog = false;
 
-  const megaMesh = new THREE.InstancedMesh(planeGeo, megaMat, treeCount);
+  if (impostorStandalone) {
+    impostorPack.uLodDist.value = -1e9;
+    impostorPack.uFadeRange.value = 100;
+    impostorPack.uLodDither.value = 0;
+    megaPack.uLodDist.value = -1e9;
+    megaPack.uFadeRange.value = 100;
+    megaPack.uLodDither.value = 0;
+  }
+
+  const megaMesh = new THREE.InstancedMesh(planeGeo, megaMat, capacity);
   megaMesh.castShadow = false;
   megaMesh.frustumCulled = false;
   megaMesh.count = 0;
   group.add(megaMesh);
 
-  const _compactNear = new Float32Array(treeCount * 16);
+  const _compactNear = new Float32Array(capacity * 16);
   const _cullSphere = new THREE.Sphere(new THREE.Vector3(), impostorScale * 0.5);
 
   let innerDistSq, outerDistSq, inner2DistSq, outer2DistSq;
@@ -982,8 +1065,9 @@ export async function createOctahedralImpostorForestWebgpu(
   let _lastTime = performance.now();
 
   function syncShadowMaps() {
+    if (iOpts.skipShadow) return;
     const smDt = dirLight.shadow.map?.depthTexture;
-    if (smDt) {
+    if (smDt && impostorPack.uShadowMapDepth && megaPack.uShadowMapDepth) {
       impostorPack.uShadowMapDepth.value = smDt;
       megaPack.uShadowMapDepth.value = smDt;
     }
@@ -1008,7 +1092,7 @@ export async function createOctahedralImpostorForestWebgpu(
     let farCount = 0;
     let megaCount = 0;
 
-    for (let i = 0; i < treeCount; i++) {
+    for (let i = 0; i < placementCount; i++) {
       if (frustum) {
         _cullSphere.center.set(posX[i], posY[i], posZ[i]);
         if (!frustum.intersectsSphere(_cullSphere)) continue;
@@ -1173,5 +1257,54 @@ export async function createOctahedralImpostorForestWebgpu(
       lod1: _lastLod1Count,
       lod2: _lastLod2Count,
     }),
+    capacity,
+    getPlacementCount: () => placementCount,
+    rebuildPlacements(arr) {
+      if (!applyPlacementsFromArray(arr)) return false;
+      for (let i = 0; i < placementCount; i++) {
+        _m.fromArray(allImpostorMats, i * 16);
+        impostorMesh.setMatrixAt(i, _m);
+        megaMesh.setMatrixAt(i, _m);
+      }
+      for (const nm of nearMeshes) {
+        for (let j = 0; j < placementCount; j++) {
+          _m.fromArray(allNearMats, j * 16);
+          nm.setMatrixAt(j, _m);
+        }
+        nm.count = placementCount;
+        nm.instanceMatrix.needsUpdate = true;
+      }
+      impostorMesh.count = 0;
+      megaMesh.count = 0;
+      impostorMesh.instanceMatrix.needsUpdate = true;
+      megaMesh.instanceMatrix.needsUpdate = true;
+      centersStorage.value.needsUpdate = true;
+      centersStorage2.value.needsUpdate = true;
+      return true;
+    },
+    paintWriteImpostorSlot(dst, treeIdx) {
+      _m.fromArray(allImpostorMats, treeIdx * 16);
+      impostorMesh.setMatrixAt(dst, _m);
+      compactCenters[dst * 4] = allCenters[treeIdx * 3];
+      compactCenters[dst * 4 + 1] = allCenters[treeIdx * 3 + 1];
+      compactCenters[dst * 4 + 2] = allCenters[treeIdx * 3 + 2];
+      compactCenters[dst * 4 + 3] = 0;
+    },
+    paintWriteMegaSlot(dst, treeIdx) {
+      _m.fromArray(allImpostorMats, treeIdx * 16);
+      megaMesh.setMatrixAt(dst, _m);
+      compactCenters2[dst * 4] = allCenters[treeIdx * 3];
+      compactCenters2[dst * 4 + 1] = allCenters[treeIdx * 3 + 1];
+      compactCenters2[dst * 4 + 2] = allCenters[treeIdx * 3 + 2];
+      compactCenters2[dst * 4 + 3] = 0;
+    },
+    paintFinishImpostorMega(impostorWritten, megaWritten) {
+      impostorMesh.count = impostorWritten;
+      megaMesh.count = megaWritten;
+      impostorMesh.instanceMatrix.needsUpdate = true;
+      megaMesh.instanceMatrix.needsUpdate = true;
+      centersStorage.value.needsUpdate = true;
+      centersStorage2.value.needsUpdate = true;
+    },
   };
 }
