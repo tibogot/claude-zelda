@@ -11706,6 +11706,8 @@
         let _lastCsmMargin = PARAMS.csm.lightMargin;
         let _lastCsmMapSize = PARAMS.csm.mapSize;
         // ── TREE LOD — per-frame chunk-culled multi-slot update ──────────────
+        let _lastPaneRefresh = 0;
+        const _PANE_REFRESH_INTERVAL = 500; // ms — throttle Tweakpane DOM updates
         const _lodLastPos = new THREE.Vector3(Infinity, Infinity, Infinity);
         const _lodLastQuat = new THREE.Quaternion();
         const _LOD_POS_THR = 4, _LOD_ROT_THR = 0.9986; // ~3° rotation
@@ -11811,7 +11813,6 @@
           lodParams.totalTrees = totalTrees;
           lodParams.chunks    = totalChunks;
           lodParams.chunksVisible = totalVisible;
-          if (lodFolder) pane.refresh();
         }
 
         let _ftreeDirty = true;
@@ -11866,7 +11867,6 @@
           ftreeParams.totalLeaves    = totalLeaves;
           ftreeParams.chunks         = totalChunks;
           ftreeParams.chunksVisible  = totalVisible;
-          if (ftreeFolder) pane.refresh();
         }
 
         renderer.setAnimationLoop(() => {
@@ -12214,6 +12214,14 @@
           uFTreeTime.value = elapsed;
           updateLODInstances();
           updateFTreeInstances();
+          // Throttled Tweakpane refresh for LOD/FTree readonly stats
+          {
+            const _now = performance.now();
+            if ((lodFolder || ftreeFolder) && _now - _lastPaneRefresh > _PANE_REFRESH_INTERVAL) {
+              _lastPaneRefresh = _now;
+              pane.refresh();
+            }
+          }
           stats.update();
           (postParams.enabled ? renderPipeline : simplePipeline).render();
           {
