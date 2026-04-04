@@ -168,6 +168,46 @@ function makeTexWithMips(mipLevels, atlasSize, maxAniso, srgb) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  Atlas edge dilation — flood-fill transparent pixels with nearest opaque RGB
+// ═══════════════════════════════════════════════════════════════════════════
+
+function dilateAtlasEdges(pixels, size, iterations = 8) {
+  const tmp = new Uint8Array(pixels.length);
+  for (let iter = 0; iter < iterations; iter++) {
+    tmp.set(pixels);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const i = (y * size + x) * 4;
+        if (pixels[i + 3] > 0) continue;
+        let r = 0, g = 0, b = 0, cnt = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const ny = y + dy;
+          if (ny < 0 || ny >= size) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            const nx = x + dx;
+            if (nx < 0 || nx >= size) continue;
+            const ni = (ny * size + nx) * 4;
+            if (pixels[ni + 3] > 0) {
+              r += pixels[ni];
+              g += pixels[ni + 1];
+              b += pixels[ni + 2];
+              cnt++;
+            }
+          }
+        }
+        if (cnt > 0) {
+          tmp[i]     = Math.round(r / cnt);
+          tmp[i + 1] = Math.round(g / cnt);
+          tmp[i + 2] = Math.round(b / cnt);
+        }
+      }
+    }
+    pixels.set(tmp);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  Atlas Baking  —  4-pass: color + normal + roughness/metalness + depth
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -330,6 +370,11 @@ async function bakeAtlases(renderer, bakeMeshData, opts) {
   renderer.autoClear = true;
   renderer.toneMapping = savedTM;
   renderer.outputColorSpace = savedOCS;
+
+  dilateAtlasEdges(colorPixels, atlasSize, 8);
+  dilateAtlasEdges(normalPixels, atlasSize, 8);
+  dilateAtlasEdges(rmPixels, atlasSize, 8);
+  dilateAtlasEdges(depthPixels, atlasSize, 8);
 
   const colorMips = generatePerCellMipmaps(colorPixels, atlasSize, grid);
   const normalMips = generatePerCellMipmaps(normalPixels, atlasSize, grid);
