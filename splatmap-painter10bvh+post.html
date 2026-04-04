@@ -1031,6 +1031,9 @@
       let currentBiome = "forest";
       let sculptMode = "raise"; // "raise" | "lower" | "smooth"
       let flattenTargetY = 0; // sampled on mousedown when alt+drag
+      // Sculpt dirty region — tracks world-space AABB of all brush strokes in a drag
+      let _sculptDirtyMin = null; // {x, z} or null when no sculpt happened
+      let _sculptDirtyMax = null;
       let rampPointA = null;  // first click of ramp tool { x, y, z }
       let stampImageData = null; // grayscale PNG loaded for heightmap stamping
       // ── SPLINE STATE ──
@@ -1737,6 +1740,20 @@
               (targetY - cur) * falloff * PARAMS.path.flattenStrength * 0.08;
           }
         }
+        // Expand sculpt dirty region for path flatten
+        {
+          const bx0 = wx - radius, bx1 = wx + radius;
+          const bz0 = wz - radius, bz1 = wz + radius;
+          if (!_sculptDirtyMin) {
+            _sculptDirtyMin = { x: bx0, z: bz0 };
+            _sculptDirtyMax = { x: bx1, z: bz1 };
+          } else {
+            if (bx0 < _sculptDirtyMin.x) _sculptDirtyMin.x = bx0;
+            if (bz0 < _sculptDirtyMin.z) _sculptDirtyMin.z = bz0;
+            if (bx1 > _sculptDirtyMax.x) _sculptDirtyMax.x = bx1;
+            if (bz1 > _sculptDirtyMax.z) _sculptDirtyMax.z = bz1;
+          }
+        }
         syncGeometry();
       }
 
@@ -2429,6 +2446,20 @@
               }
               heightData[iz * VERTS + ix] += delta;
             }
+          }
+        }
+        // Expand sculpt dirty region
+        {
+          const bx0 = wx - radius, bx1 = wx + radius;
+          const bz0 = wz - radius, bz1 = wz + radius;
+          if (!_sculptDirtyMin) {
+            _sculptDirtyMin = { x: bx0, z: bz0 };
+            _sculptDirtyMax = { x: bx1, z: bz1 };
+          } else {
+            if (bx0 < _sculptDirtyMin.x) _sculptDirtyMin.x = bx0;
+            if (bz0 < _sculptDirtyMin.z) _sculptDirtyMin.z = bz0;
+            if (bx1 > _sculptDirtyMax.x) _sculptDirtyMax.x = bx1;
+            if (bz1 > _sculptDirtyMax.z) _sculptDirtyMax.z = bz1;
           }
         }
         syncGeometry();
@@ -3486,94 +3517,100 @@
           new THREE.Vector3(),
           new THREE.Vector3(0, -1, 0),
         );
-        bakeBVH = function () {
+        // region: optional {xMin,xMax,zMin,zMax} in world space — partial bake for sculpt
+        bakeBVH = function (region) {
           scene.updateMatrixWorld(true);
 
-          // Build BVH from cliff objects only (not terrain mesh)
-          const positions = [],
-            idxList = [];
-          let vOffset = 0;
-          function addMesh(mesh) {
-            const geo = mesh.geometry;
-            const posAttr = geo.attributes.position;
-            const mat = mesh.matrixWorld;
-            for (let i = 0; i < posAttr.count; i++) {
-              _bvhV.fromBufferAttribute(posAttr, i).applyMatrix4(mat);
-              positions.push(_bvhV.x, _bvhV.y, _bvhV.z);
+          // ── Cliff BVH — skip rebuild when only terrain changed (partial bake) ──
+          let cliffBvh = _camCliffBvh; // reuse previous cliff BVH by default
+          if (!region) {
+            // Full bake: rebuild cliff BVH from scratch
+            const positions = [],
+              idxList = [];
+            let vOffset = 0;
+            function addMesh(mesh) {
+              const geo = mesh.geometry;
+              const posAttr = geo.attributes.position;
+              const mat = mesh.matrixWorld;
+              for (let i = 0; i < posAttr.count; i++) {
+                _bvhV.fromBufferAttribute(posAttr, i).applyMatrix4(mat);
+                positions.push(_bvhV.x, _bvhV.y, _bvhV.z);
+              }
+              if (geo.index) {
+                const idx = geo.index.array;
+                for (let i = 0; i < idx.length; i++)
+                  idxList.push(idx[i] + vOffset);
+              } else {
+                for (let i = 0; i < posAttr.count; i++) idxList.push(i + vOffset);
+              }
+              vOffset += posAttr.count;
             }
-            if (geo.index) {
-              const idx = geo.index.array;
-              for (let i = 0; i < idx.length; i++)
-                idxList.push(idx[i] + vOffset);
-            } else {
-              for (let i = 0; i < posAttr.count; i++) idxList.push(i + vOffset);
+            function addGeoWithMatrix(geo, mat) {
+              const posAttr = geo.attributes.position;
+              for (let i = 0; i < posAttr.count; i++) {
+                _bvhV.fromBufferAttribute(posAttr, i).applyMatrix4(mat);
+                positions.push(_bvhV.x, _bvhV.y, _bvhV.z);
+              }
+              if (geo.index) {
+                const idx = geo.index.array;
+                for (let i = 0; i < idx.length; i++)
+                  idxList.push(idx[i] + vOffset);
+              } else {
+                for (let i = 0; i < posAttr.count; i++) idxList.push(i + vOffset);
+              }
+              vOffset += posAttr.count;
             }
-            vOffset += posAttr.count;
-          }
-          function addGeoWithMatrix(geo, mat) {
-            const posAttr = geo.attributes.position;
-            for (let i = 0; i < posAttr.count; i++) {
-              _bvhV.fromBufferAttribute(posAttr, i).applyMatrix4(mat);
-              positions.push(_bvhV.x, _bvhV.y, _bvhV.z);
-            }
-            if (geo.index) {
-              const idx = geo.index.array;
-              for (let i = 0; i < idx.length; i++)
-                idxList.push(idx[i] + vOffset);
-            } else {
-              for (let i = 0; i < posAttr.count; i++) idxList.push(i + vOffset);
-            }
-            vOffset += posAttr.count;
-          }
-          cliffObjects.forEach((root) =>
-            root.traverse((o) => {
-              if (o.isMesh) addMesh(o);
-            }),
-          );
-          // Also include cliff blend test objects
-          cliffBlendObjects.forEach((root) =>
-            root.traverse((o) => {
-              if (o.isMesh) addMesh(o);
-            }),
-          );
-          // Also include all instances from the Cliffs Mode instancer
-          if (cliffInstancer)
-            cliffInstancer.forEachMeshInstance((geo, mat) => addGeoWithMatrix(geo, mat));
-
-          // Build cliff BVH only if there are any cliff meshes
-          let cliffBvh = null;
-          if (positions.length > 0) {
-            const mergedGeo = new THREE.BufferGeometry();
-            mergedGeo.setAttribute(
-              "position",
-              new THREE.BufferAttribute(new Float32Array(positions), 3),
+            cliffObjects.forEach((root) =>
+              root.traverse((o) => {
+                if (o.isMesh) addMesh(o);
+              }),
             );
-            mergedGeo.setIndex(
-              new THREE.BufferAttribute(new Uint32Array(idxList), 1),
+            cliffBlendObjects.forEach((root) =>
+              root.traverse((o) => {
+                if (o.isMesh) addMesh(o);
+              }),
             );
-            cliffBvh = new MeshBVH(mergedGeo);
-            // mergedGeo can be GC'd after MeshBVH stores its internal data
+            if (cliffInstancer)
+              cliffInstancer.forEachMeshInstance((geo, mat) => addGeoWithMatrix(geo, mat));
+
+            cliffBvh = null;
+            if (positions.length > 0) {
+              const mergedGeo = new THREE.BufferGeometry();
+              mergedGeo.setAttribute(
+                "position",
+                new THREE.BufferAttribute(new Float32Array(positions), 3),
+              );
+              mergedGeo.setIndex(
+                new THREE.BufferAttribute(new Uint32Array(idxList), 1),
+              );
+              cliffBvh = new MeshBVH(mergedGeo);
+            }
           }
 
-          // Build a BVH from the actual terrain mesh geometry so heightTexData
-          // gets the exact same triangle-interpolated heights the GPU renders.
-          // This is the village5.html approach and is the only way to be exact.
+          // Terrain BVH always rebuilt (cheap — 129x129 display mesh)
           const terrainBvh = new MeshBVH(terrainGeo);
           const _terrainRay = new THREE.Ray(
             new THREE.Vector3(0, 99999, 0),
             new THREE.Vector3(0, -1, 0),
           );
 
-          for (let iz = 0; iz < HTEX_RES; iz++) {
-            for (let ix = 0; ix < HTEX_RES; ix++) {
-              // CPU grid positions for bvhGrid (bilinear lookup — no half-texel needed)
+          // Grid bounds — full or partial
+          const half = TERRAIN_SIZE / 2;
+          let iz0 = 0, iz1 = HTEX_RES, ix0 = 0, ix1 = HTEX_RES;
+          if (region) {
+            ix0 = Math.max(0, Math.floor((region.xMin / TERRAIN_SIZE + 0.5) * HTEX_RES) - 1);
+            ix1 = Math.min(HTEX_RES, Math.ceil((region.xMax / TERRAIN_SIZE + 0.5) * HTEX_RES) + 1);
+            iz0 = Math.max(0, Math.floor((region.zMin / TERRAIN_SIZE + 0.5) * HTEX_RES) - 1);
+            iz1 = Math.min(HTEX_RES, Math.ceil((region.zMax / TERRAIN_SIZE + 0.5) * HTEX_RES) + 1);
+          }
+
+          for (let iz = iz0; iz < iz1; iz++) {
+            for (let ix = ix0; ix < ix1; ix++) {
               const wx = (-0.5 + ix / HTEX_RES) * TERRAIN_SIZE;
               const wz = (-0.5 + iz / HTEX_RES) * TERRAIN_SIZE;
-              // GPU texel-center positions for heightTexData (LinearFilter reads centers)
               const wxG = (-0.5 + (ix + 0.5) / HTEX_RES) * TERRAIN_SIZE;
               const wzG = (-0.5 + (iz + 0.5) / HTEX_RES) * TERRAIN_SIZE;
 
-              // GPU: raycast at texel-center — matches LinearFilter reads in grass shader
               _terrainRay.origin.set(wxG, 99999, wzG);
               const terrainHitG = terrainBvh.raycastFirst(
                 _terrainRay,
@@ -3583,7 +3620,6 @@
                 ? terrainHitG.point.y
                 : sampleHeight(wxG, wzG);
 
-              // CPU: raycast at grid-corner — matches bvhHeight() bilinear lookup positions
               _terrainRay.origin.set(wx, 99999, wz);
               const terrainHitC = terrainBvh.raycastFirst(
                 _terrainRay,
@@ -3597,9 +3633,7 @@
                 _bvhRay.origin.set(wx, 99999, wz);
                 const hit = cliffBvh.raycastFirst(_bvhRay, THREE.DoubleSide);
                 if (hit && hit.point.y > hCpu) {
-                  hCpu = hit.point.y; // bvhGrid always gets cliff height (props/trees/player)
-                  // NOTE: terrain heightTex (hGpu) intentionally NOT updated with cliff height.
-                  // Layer 1 (terrain grass) ignores cliffs entirely — cliff mesh naturally occludes it.
+                  hCpu = hit.point.y;
                 }
               }
 
@@ -3611,9 +3645,6 @@
                   hGpu;
               heightTexData[i4 + 3] = 1;
 
-              // ── CLIFF HEIGHT TEX: only flat cliff surfaces (face.normal.y > 0.3) ──
-              // Blades positioned here root at the cliff top. All other positions = -9999
-              // so blades stay underground (invisible) without needing a density mask.
               {
                 const cliffI4 = (iz * HTEX_RES + ix) * 4;
                 let cliffH = -9999;
@@ -3633,9 +3664,8 @@
           }
           heightTex.needsUpdate = true;
           cliffHeightTex.needsUpdate = true;
-          // Expose for play-mode camera collision (directional raycast, not vertical)
           _camTerrainBvh = terrainBvh;
-          _camCliffBvh   = cliffBvh; // may be null if no cliffs placed
+          if (!region) _camCliffBvh = cliffBvh; // only update cliff BVH ref on full bake
         };
         bakeBVH();
 
@@ -11413,7 +11443,15 @@
             generateObjects(scene);
           }
           if (currentMode === "sculpt" || currentMode === "path") {
-            if (bakeBVH) bakeBVH();
+            if (bakeBVH) {
+              if (_sculptDirtyMin && _sculptDirtyMax) {
+                bakeBVH({ xMin: _sculptDirtyMin.x, xMax: _sculptDirtyMax.x, zMin: _sculptDirtyMin.z, zMax: _sculptDirtyMax.z });
+              } else {
+                bakeBVH();
+              }
+            }
+            _sculptDirtyMin = null;
+            _sculptDirtyMax = null;
             if (treeSystem) treeSystem.syncHeights();
             syncLODHeights();
             syncFTreeHeights();
