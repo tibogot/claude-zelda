@@ -208,7 +208,7 @@ function createForestImpostorMaterial(
   const uNormStr =
     opts.normStrUniform ?? uniform(float(opts.normalStrength ?? 1.0));
   const uRimStr =
-    opts.rimStrengthUniform ?? uniform(float(opts.rimStrength ?? 0.14));
+    opts.rimStrengthUniform ?? uniform(float(opts.rimStrength ?? 0.00));
   const uRimPow =
     opts.rimPowerUniform ?? uniform(float(opts.rimPower ?? 3.0));
   const rimColorVec =
@@ -232,6 +232,8 @@ function createForestImpostorMaterial(
     opts.parallaxStrUniform ?? uniform(float(opts.parallaxStrength ?? 0.12));
   const uLodDither =
     opts.lodDitherUniform ?? uniform(float(opts.lodDither ?? 0));
+  const uBlend3Cell =
+    opts.blend3CellUniform ?? uniform(float(opts.blend3Cell !== false ? 1 : 0));
 
   const uFogNear = opts.fogNearUniform ?? uniform(float(1e9));
   const uFogFar = opts.fogFarUniform ?? uniform(float(1e9));
@@ -297,19 +299,16 @@ function createForestImpostorMaterial(
       });
 
   const planeTangent = Fn(([n]) => {
-    const up = mix(
-      vec3(0, 1, 0),
-      vec3(-1, 0, 0),
-      max(float(0), sign(sub(n.y, float(0.999)))),
-    );
-    return normalize(cross(up, n));
+    const c1 = cross(vec3(0, 1, 0), n);
+    const c2 = cross(vec3(0, 0, 1), n);
+    return normalize(select(dot(c1, c1).greaterThan(float(0.001)), c1, c2));
   });
 
   const planeUp = Fn(([n, t]) => {
     const worldUp = vec3(0, 1, 0);
     const proj = sub(worldUp, mul(n, dot(n, worldUp)));
-    const len = length(proj);
-    return select(len.lessThan(float(0.001)), t, normalize(proj));
+    const lenSq = dot(proj, proj);
+    return normalize(select(lenSq.greaterThan(float(0.0001)), proj, cross(n, t)));
   });
 
   const projectVert = Fn(([n]) => {
@@ -422,21 +421,22 @@ function createForestImpostorMaterial(
     const c2 = texture(colorTex, puv2);
     const c3 = texture(colorTex, puv3);
 
+    const pm1 = mul(c1.rgb, c1.a);
+    const pm2 = mul(c2.rgb, c2.a);
+    const pm3 = mul(c3.rgb, c3.a);
+    const blendRgb = add(add(mul(pm1, vWeight.x), mul(pm2, vWeight.y)), mul(pm3, vWeight.z));
+    const blendA = add(add(mul(c1.a, vWeight.x), mul(c2.a, vWeight.y)), mul(c3.a, vWeight.z));
+
     const isDom1 = vWeight.x
       .greaterThanEqual(vWeight.y)
       .and(vWeight.x.greaterThanEqual(vWeight.z));
     const isDom2 = vWeight.y.greaterThanEqual(vWeight.z);
+    const domOnlyAlpha = select(isDom1, c1.a, select(isDom2, c2.a, c3.a));
+    const domOnlyRgb = select(isDom1, pm1, select(isDom2, pm2, pm3));
 
-    const domAlpha = select(
-      uMega.greaterThan(float(0.5)),
-      c1.a,
-      select(isDom1, c1.a, select(isDom2, c2.a, c3.a)),
-    );
-    const domRgb = select(
-      uMega.greaterThan(float(0.5)),
-      c1.rgb,
-      select(isDom1, c1.rgb, select(isDom2, c2.rgb, c3.rgb)),
-    );
+    const use3 = uBlend3Cell.greaterThan(float(0.5));
+    const domAlpha = select(use3, blendA, domOnlyAlpha);
+    const domRgb = select(use3, blendRgb, domOnlyRgb);
 
     const edgeW = mul(fwidth(domAlpha), uEdgeSmoothScale);
     const smoothedAlpha = smoothstep(
@@ -449,22 +449,24 @@ function createForestImpostorMaterial(
     const n1 = texture(normalTex, puv1).xyz;
     const n2 = texture(normalTex, puv2).xyz;
     const n3 = texture(normalTex, puv3).xyz;
-    const normEnc = select(
-      uMega.greaterThan(float(0.5)),
-      n1,
-      select(isDom1, n1, select(isDom2, n2, n3)),
+    const blendNorm = div(
+      add(add(mul(mul(n1, c1.a), vWeight.x), mul(mul(n2, c2.a), vWeight.y)), mul(mul(n3, c3.a), vWeight.z)),
+      max(blendA, float(0.001)),
     );
+    const domOnlyNorm = select(isDom1, n1, select(isDom2, n2, n3));
+    const normEnc = select(use3, blendNorm, domOnlyNorm);
     const wNormRaw = normalize(sub(mul(normEnc, 2.0), 1.0));
     const wNorm = normalize(mix(vec3(0, 1, 0), wNormRaw, uNormStr));
 
     const rm1 = texture(rmTex, puv1);
     const rm2 = texture(rmTex, puv2);
     const rm3 = texture(rmTex, puv3);
-    const rmSel = select(
-      uMega.greaterThan(float(0.5)),
-      rm1,
-      select(isDom1, rm1, select(isDom2, rm2, rm3)),
+    const blendRM = div(
+      add(add(mul(mul(rm1, c1.a), vWeight.x), mul(mul(rm2, c2.a), vWeight.y)), mul(mul(rm3, c3.a), vWeight.z)),
+      max(blendA, float(0.001)),
     );
+    const domOnlyRM = select(isDom1, rm1, select(isDom2, rm2, rm3));
+    const rmSel = select(use3, blendRM, domOnlyRM);
     const rough = clamp(rmSel.x, float(0.05), float(1));
     const metal = clamp(rmSel.y, float(0), float(1));
     const oneMinusMetal = sub(float(1), metal);
@@ -591,6 +593,7 @@ function createForestImpostorMaterial(
     uFadeRange,
     uMega,
     uLodDither,
+    uBlend3Cell,
     uFogNear,
     uFogFar,
     uFogColor,
@@ -643,7 +646,7 @@ export async function createOctahedralImpostorForestWebgpu(
     lightScale: impostorSettings.lightScale ?? 1.0,
     bakeOnlyLargestMesh: impostorSettings.bakeOnlyLargestMesh ?? false,
     normalStrength: impostorSettings.normalStrength ?? 1.0,
-    rimStrength: impostorSettings.rimStrength ?? 0.14,
+    rimStrength: impostorSettings.rimStrength ?? 0.00,
     rimPower: impostorSettings.rimPower ?? 3.0,
     rimColor: impostorSettings.rimColor ?? null,
     diffuseWrap: impostorSettings.diffuseWrap ?? 0.0,
@@ -962,6 +965,7 @@ export async function createOctahedralImpostorForestWebgpu(
   const _uEdgeSmoothScale = uniform(float(iOpts.edgeSmoothScale));
   const _uAlphaClamp = uniform(float(iOpts.alphaClamp));
   const _uParallaxStr = uniform(float(iOpts.parallaxStrength));
+  const _uBlend3Cell = uniform(float(1));
 
   const _initFogColor = new THREE.Color(iOpts.fogColor);
   const _uFogNear = uniform(float(iOpts.fogNear));
@@ -988,6 +992,7 @@ export async function createOctahedralImpostorForestWebgpu(
     edgeSmoothUniform: _uEdgeSmoothScale,
     alphaClampUniform: _uAlphaClamp,
     parallaxStrUniform: _uParallaxStr,
+    blend3CellUniform: _uBlend3Cell,
     fogNearUniform: _uFogNear,
     fogFarUniform: _uFogFar,
     fogColorUniform: _uFogColor,
@@ -1249,6 +1254,9 @@ export async function createOctahedralImpostorForestWebgpu(
     },
     setAlphaClamp: (v) => {
       _uAlphaClamp.value = v;
+    },
+    setBlend3Cell: (b) => {
+      _uBlend3Cell.value = b ? 1 : 0;
     },
     setEdgeSmoothScale: (v) => {
       _uEdgeSmoothScale.value = v;

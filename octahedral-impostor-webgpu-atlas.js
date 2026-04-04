@@ -17,7 +17,7 @@ import {
   saturate,
 } from "three/tsl";
 
-export const BAKE_SPHERE_MARGIN = 1.08;
+export const BAKE_SPHERE_MARGIN = 1.02;
 
 export function hemiOctaGridToDir(gx, gy, out) {
   out.set(gx - gy, 0, -1 + gx + gy);
@@ -129,6 +129,20 @@ export function makeTexWithMips(mipLevels, atlasSize, maxAniso, srgb) {
 }
 
 /**
+ * Convert linear RGB pixels to sRGB encoding in-place (alpha stays linear).
+ * Preserves precision in dark values when stored as 8-bit.
+ */
+export function linearToSrgbPixels(pixels) {
+  for (let i = 0; i < pixels.length; i += 4) {
+    for (let c = 0; c < 3; c++) {
+      let v = pixels[i + c] / 255;
+      v = v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
+      pixels[i + c] = Math.round(Math.min(255, Math.max(0, v * 255)));
+    }
+  }
+}
+
+/**
  * Flood-fill transparent pixels with nearest opaque pixel's RGB, keeping alpha=0.
  * Eliminates dark halos when the GPU bilinear-filters across silhouette edges.
  */
@@ -208,7 +222,7 @@ export async function bakeAtlases(renderer, bakeMeshData, opts) {
   const rmScene = new THREE.Scene();
   const depthScene = new THREE.Scene();
 
-  const BAKE_ALPHA = 0.05;
+  const BAKE_ALPHA = 0.1;
   const depthNear = radius;
   const depthSpan = 2 * radius;
 
@@ -337,13 +351,20 @@ export async function bakeAtlases(renderer, bakeMeshData, opts) {
   dilateAtlasEdges(rmPixels, atlasSize, 8);
   dilateAtlasEdges(depthPixels, atlasSize, 8);
 
+  linearToSrgbPixels(colorPixels);
+
   const colorMips = generatePerCellMipmaps(colorPixels, atlasSize, grid);
   const normalMips = generatePerCellMipmaps(normalPixels, atlasSize, grid);
   const rmMips = generatePerCellMipmaps(rmPixels, atlasSize, grid);
   const depthMips = generatePerCellMipmaps(depthPixels, atlasSize, grid);
 
+  for (let i = 1, sz = atlasSize >> 1; i < colorMips.length && sz >= 2; i++, sz >>= 1) {
+    dilateAtlasEdges(colorMips[i], sz, 8);
+    dilateAtlasEdges(normalMips[i], sz, 8);
+  }
+
   return {
-    colorTex: makeTexWithMips(colorMips, atlasSize, maxAniso, false),
+    colorTex: makeTexWithMips(colorMips, atlasSize, maxAniso, true),
     normalTex: makeTexWithMips(normalMips, atlasSize, maxAniso, false),
     rmTex: makeTexWithMips(rmMips, atlasSize, maxAniso, false),
     depthTex: makeTexWithMips(depthMips, atlasSize, maxAniso, false),
