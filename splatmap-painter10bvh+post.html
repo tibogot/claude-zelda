@@ -1523,12 +1523,16 @@
         ctx.fill();
       }
 
+      const _fbmSplatCanvas = document.createElement("canvas");
+      _fbmSplatCanvas.width = _fbmSplatCanvas.height = 162; // max brush rad*2
+      const _fbmSplatCtx = _fbmSplatCanvas.getContext("2d");
+
       function _paintFbmSplat(ctx, cx, cy, r, g, b, alpha) {
         const rad = Math.ceil(brushSize) + 1;
-        const oc = document.createElement("canvas");
-        oc.width = oc.height = rad * 2;
-        const octx = oc.getContext("2d");
-        const imgData = octx.createImageData(rad * 2, rad * 2);
+        const side = rad * 2;
+        if (_fbmSplatCanvas.width < side) _fbmSplatCanvas.width = side;
+        if (_fbmSplatCanvas.height < side) _fbmSplatCanvas.height = side;
+        const imgData = _fbmSplatCtx.createImageData(side, side);
         const data = imgData.data;
         const sc = 4.0 / brushSize;
         for (let py = 0; py < rad * 2; py++) {
@@ -1553,9 +1557,9 @@
             data[idx + 3] = Math.round(w * 255);
           }
         }
-        octx.putImageData(imgData, 0, 0);
+        _fbmSplatCtx.putImageData(imgData, 0, 0);
         ctx.globalCompositeOperation = "source-over";
-        ctx.drawImage(oc, cx - rad, cy - rad);
+        ctx.drawImage(_fbmSplatCanvas, 0, 0, side, side, cx - rad, cy - rad, side, side);
       }
 
       function _paintScatter(ctx, cx, cy, r, g, b, alpha) {
@@ -12179,7 +12183,10 @@
           }
           stats.update();
           (postParams.enabled ? renderPipeline : simplePipeline).render();
-          {
+          // Throttled chunk stats DOM update (reuses _lastPaneRefresh timer)
+          if (performance.now() - _lastPaneRefresh < _PANE_REFRESH_INTERVAL) {
+            // skip — pane refresh block already updated recently or will soon
+          } else {
             const lines = [];
             if (treeSystem) {
               const cs = treeSystem.getChunkStats(camera);
