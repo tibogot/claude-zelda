@@ -60,6 +60,22 @@ function hemiOctaGridToDir(gx, gy, out) {
   return out.normalize();
 }
 
+function fullOctaGridToDir(gx, gy, out) {
+  const ox = gx * 2 - 1;
+  const oz = gy * 2 - 1;
+  const oy = 1 - Math.abs(ox) - Math.abs(oz);
+  if (oy >= 0) {
+    out.set(ox, oy, oz);
+  } else {
+    out.set(
+      (1 - Math.abs(oz)) * (ox >= 0 ? 1 : -1),
+      oy,
+      (1 - Math.abs(ox)) * (oz >= 0 ? 1 : -1),
+    );
+  }
+  return out.normalize();
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Per-cell alpha-weighted mipmap generation
 // ═══════════════════════════════════════════════════════════════════════════
@@ -159,7 +175,8 @@ function makeTexWithMips(mipLevels, atlasSize, maxAniso, srgb) {
 const BAKE_SPHERE_MARGIN = 1.08;
 
 async function bakeAtlases(renderer, bakeMeshData, opts) {
-  const { grid, atlasSize, maxAniso, cellPad = 2 } = opts;
+  const { grid, atlasSize, maxAniso, cellPad = 2, fullOctahedral = false } = opts;
+  const gridToDir = fullOctahedral ? fullOctaGridToDir : hemiOctaGridToDir;
   const cs = Math.floor(atlasSize / grid);
   const pad = cellPad;
   const innerCS = cs - pad * 2;
@@ -277,7 +294,7 @@ async function bakeAtlases(renderer, bakeMeshData, opts) {
 
   for (let gy = 0; gy < grid; gy++) {
     for (let gx = 0; gx < grid; gx++) {
-      hemiOctaGridToDir(gx / (grid - 1), gy / (grid - 1), dir);
+      gridToDir(gx / (grid - 1), gy / (grid - 1), dir);
       ortho.position.copy(center).addScaledVector(dir, radius * 2);
       ortho.lookAt(center);
       ortho.updateMatrixWorld(true);
@@ -393,7 +410,9 @@ function createImpostorMaterial(
   /** Scene sun — shadow map depth is sampled each frame via uShadowMapDepth. */
   dirLight,
   renderer,
+  { fullOctahedral = false } = {},
 ) {
+  const fullOcta = fullOctahedral;
   const uSPS = uniform(float(gridVal));
   const uScale = uniform(float(impostorScale));
   const uCenter = uniform(new THREE.Vector3());
@@ -428,20 +447,45 @@ function createImpostorMaterial(
   const vUV2 = varying(vec2(0, 0), "vUV2");
   const vUV3 = varying(vec2(0, 0), "vUV3");
 
-  const encode = Fn(([d]) => {
-    const s = vec3(sign(d.x), sign(d.y), sign(d.z));
-    const l1 = dot(d, s);
-    const o = vec3(div(d.x, l1), div(d.y, l1), div(d.z, l1));
-    return mul(vec2(add(1, add(o.x, o.z)), add(1, sub(o.z, o.x))), 0.5);
-  });
+  const encode = fullOcta
+    ? Fn(([d]) => {
+        const l1 = add(add(abs(d.x), abs(d.y)), abs(d.z));
+        const ox = div(d.x, l1);
+        const oz = div(d.z, l1);
+        const wrapX = mul(sub(float(1), abs(oz)), sign(d.x));
+        const wrapZ = mul(sub(float(1), abs(ox)), sign(d.z));
+        const isLower = d.y.lessThan(float(0));
+        const uvX = select(isLower, wrapX, ox);
+        const uvZ = select(isLower, wrapZ, oz);
+        return mul(add(vec2(uvX, uvZ), float(1)), float(0.5));
+      })
+    : Fn(([d]) => {
+        const s = vec3(sign(d.x), sign(d.y), sign(d.z));
+        const l1 = dot(d, s);
+        const o = vec3(div(d.x, l1), div(d.y, l1), div(d.z, l1));
+        return mul(vec2(add(1, add(o.x, o.z)), add(1, sub(o.z, o.x))), 0.5);
+      });
 
-  const decode = Fn(([gi, nm1]) => {
-    const u = vec2(div(gi.x, nm1.x), div(gi.y, nm1.y));
-    const px = sub(u.x, u.y);
-    const pz = sub(add(u.x, u.y), 1);
-    const py = sub(sub(1, abs(px)), abs(pz));
-    return normalize(vec3(px, py, pz));
-  });
+  const decode = fullOcta
+    ? Fn(([gi, nm1]) => {
+        const u = vec2(div(gi.x, nm1.x), div(gi.y, nm1.y));
+        const ox = sub(mul(u.x, float(2)), float(1));
+        const oz = sub(mul(u.y, float(2)), float(1));
+        const oy = sub(sub(float(1), abs(ox)), abs(oz));
+        const isLower = oy.lessThan(float(0));
+        const unwrapX = mul(sub(float(1), abs(oz)), sign(ox));
+        const unwrapZ = mul(sub(float(1), abs(ox)), sign(oz));
+        const fx = select(isLower, unwrapX, ox);
+        const fz = select(isLower, unwrapZ, oz);
+        return normalize(vec3(fx, oy, fz));
+      })
+    : Fn(([gi, nm1]) => {
+        const u = vec2(div(gi.x, nm1.x), div(gi.y, nm1.y));
+        const px = sub(u.x, u.y);
+        const pz = sub(add(u.x, u.y), 1);
+        const py = sub(sub(1, abs(px)), abs(pz));
+        return normalize(vec3(px, py, pz));
+      });
 
   const planeTangent = Fn(([n]) => {
     const up = mix(
@@ -1092,6 +1136,7 @@ export async function run() {
         atlasSize: P.atlasSize,
         maxAniso,
         cellPad: P.cellPad,
+        fullOctahedral: P.fullOctahedral,
       });
 
       info.textContent = "Creating impostor…";
@@ -1106,6 +1151,7 @@ export async function run() {
         P.cellPad,
         dirLight,
         renderer,
+        { fullOctahedral: P.fullOctahedral },
       );
 
       const impostorGeo = new THREE.PlaneGeometry(1, 1);
@@ -1239,6 +1285,7 @@ export async function run() {
     debugMode: 0,
     freeze: false,
     autoOrbit: false,
+    fullOctahedral: false,
   };
 
   function syncParams() {
@@ -1366,6 +1413,7 @@ export async function run() {
     .add(P, "cellPad", 0, 8, 1)
     .name("Cell padding")
     .onChange(() => rebake());
+  fAtlas.add(P, "fullOctahedral").name("Full octahedral").onChange(() => rebake());
   fAtlas.add(P, "showAtlas").name("Show preview").onChange(syncParams);
   fAtlas.add({ rebake: () => rebake() }, "rebake").name("Rebake now");
 

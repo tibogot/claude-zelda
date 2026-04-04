@@ -25,6 +25,22 @@ export function hemiOctaGridToDir(gx, gy, out) {
   return out.normalize();
 }
 
+export function fullOctaGridToDir(gx, gy, out) {
+  const ox = gx * 2 - 1;
+  const oz = gy * 2 - 1;
+  const oy = 1 - Math.abs(ox) - Math.abs(oz);
+  if (oy >= 0) {
+    out.set(ox, oy, oz);
+  } else {
+    out.set(
+      (1 - Math.abs(oz)) * (ox >= 0 ? 1 : -1),
+      oy,
+      (1 - Math.abs(ox)) * (oz >= 0 ? 1 : -1),
+    );
+  }
+  return out.normalize();
+}
+
 export function generatePerCellMipmaps(pixels, atlasSize, grid) {
   const levels = [pixels];
   let prevSize = atlasSize;
@@ -118,7 +134,8 @@ export function makeTexWithMips(mipLevels, atlasSize, maxAniso, srgb) {
  * @param {{ grid: number, atlasSize: number, maxAniso: number, cellPad?: number }} opts
  */
 export async function bakeAtlases(renderer, bakeMeshData, opts) {
-  const { grid, atlasSize, maxAniso, cellPad = 2 } = opts;
+  const { grid, atlasSize, maxAniso, cellPad = 2, fullOctahedral = false } = opts;
+  const gridToDir = fullOctahedral ? fullOctaGridToDir : hemiOctaGridToDir;
   const cs = Math.floor(atlasSize / grid);
   const pad = cellPad;
   const innerCS = cs - pad * 2;
@@ -236,7 +253,7 @@ export async function bakeAtlases(renderer, bakeMeshData, opts) {
 
   for (let gy = 0; gy < grid; gy++) {
     for (let gx = 0; gx < grid; gx++) {
-      hemiOctaGridToDir(gx / (grid - 1), gy / (grid - 1), dir);
+      gridToDir(gx / (grid - 1), gy / (grid - 1), dir);
       ortho.position.copy(center).addScaledVector(dir, radius * 2);
       ortho.lookAt(center);
       ortho.updateMatrixWorld(true);

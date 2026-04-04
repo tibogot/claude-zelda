@@ -1,0 +1,655 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Waterfall Pool</title>
+    <style>
+      body {
+        margin: 0;
+        background: #1a2a35;
+        overflow: hidden;
+      }
+      canvas {
+        display: block;
+      }
+      .tp-dfwv {
+        max-height: calc(100vh - 32px) !important;
+        overflow-y: auto !important;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+      }
+      .tp-dfwv::-webkit-scrollbar {
+        width: 4px;
+      }
+      .tp-dfwv::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      .tp-dfwv::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.2);
+        border-radius: 2px;
+      }
+    </style>
+  </head>
+  <body>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.3/dist/tweakpane.min.js"
+        }
+      }
+    </script>
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import {
+        Fn,
+        uv,
+        vec2,
+        vec3,
+        vec4,
+        float,
+        mix,
+        smoothstep,
+        floor,
+        fract,
+        sin,
+        cos,
+        dot,
+        min,
+        max,
+        length,
+        uniform,
+        pow,
+        oneMinus,
+        normalize,
+        abs,
+        clamp,
+        atan2,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
+
+      // ══════════════════════════════════════════════════════════════════════
+      // Noise functions — identical to waterfall-unreal.html
+      // ══════════════════════════════════════════════════════════════════════
+
+      // ── Gradient noise ────────────────────────────────────────────────────
+      const gradientNoise = Fn(([p]) => {
+        const i = floor(p).toVar();
+        const f = fract(p).toVar();
+        const uu = f
+          .mul(f)
+          .mul(f)
+          .mul(f.mul(f.mul(6).sub(15)).add(10));
+        const rg = Fn(([ip]) => {
+          const a = fract(sin(dot(ip, vec2(127.1, 311.7))).mul(43758.5453)).mul(
+            Math.PI * 2,
+          );
+          return vec2(cos(a), sin(a));
+        });
+        const d00 = dot(rg(i), f);
+        const d10 = dot(rg(i.add(vec2(1, 0))), f.sub(vec2(1, 0)));
+        const d01 = dot(rg(i.add(vec2(0, 1))), f.sub(vec2(0, 1)));
+        const d11 = dot(rg(i.add(vec2(1, 1))), f.sub(vec2(1, 1)));
+        return mix(mix(d00, d10, uu.x), mix(d01, d11, uu.x), uu.y)
+          .mul(0.5)
+          .add(0.5);
+      });
+
+      // ── Voronoi F1 ────────────────────────────────────────────────────────
+      const NEIGHBORS = [
+        [-1, -1], [0, -1], [1, -1],
+        [-1, 0],  [0, 0],  [1, 0],
+        [-1, 1],  [0, 1],  [1, 1],
+      ];
+      const voronoiF1 = Fn(([p, jitter]) => {
+        const ip = floor(p).toVar();
+        const fp = fract(p).toVar();
+        const md = float(10.0).toVar();
+        for (const [nx, ny] of NEIGHBORS) {
+          const off = vec2(float(nx), float(ny));
+          const h = vec2(
+            fract(sin(dot(ip.add(off), vec2(127.1, 311.7))).mul(43758.5453)),
+            fract(sin(dot(ip.add(off), vec2(269.5, 183.3))).mul(43758.5453)),
+          );
+          md.assign(
+            min(md, length(off.add(mix(vec2(0.5), h, jitter)).sub(fp))),
+          );
+        }
+        return md;
+      });
+
+      // ── Voronoi FBM ───────────────────────────────────────────────────────
+      const voronoiFbm = Fn(([p_in, jitter, octaves, lac, gain]) => {
+        const p = p_in.toVar();
+        const val = float(0).toVar();
+        const amp = float(1.0).toVar();
+        const total = float(0).toVar();
+        val.addAssign(amp.mul(voronoiF1(p, jitter)));
+        total.addAssign(amp);
+        p.mulAssign(lac); amp.mulAssign(gain);
+        const d2 = smoothstep(float(1), float(2), octaves);
+        val.addAssign(amp.mul(voronoiF1(p, jitter)).mul(d2));
+        total.addAssign(amp.mul(d2));
+        p.mulAssign(lac); amp.mulAssign(gain);
+        const d3 = smoothstep(float(2), float(3), octaves);
+        val.addAssign(amp.mul(voronoiF1(p, jitter)).mul(d3));
+        total.addAssign(amp.mul(d3));
+        p.mulAssign(lac); amp.mulAssign(gain);
+        const d4 = smoothstep(float(3), float(4), octaves);
+        val.addAssign(amp.mul(voronoiF1(p, jitter)).mul(d4));
+        total.addAssign(amp.mul(d4));
+        p.mulAssign(lac); amp.mulAssign(gain);
+        const d5 = smoothstep(float(4), float(5), octaves);
+        val.addAssign(amp.mul(voronoiF1(p, jitter)).mul(d5));
+        total.addAssign(amp.mul(d5));
+        p.mulAssign(lac); amp.mulAssign(gain);
+        const d6 = smoothstep(float(5), float(6), octaves);
+        val.addAssign(amp.mul(voronoiF1(p, jitter)).mul(d6));
+        total.addAssign(amp.mul(d6));
+        return val.div(total);
+      });
+
+      // ── Voronoi Edge (F2-F1) ──────────────────────────────────────────────
+      const voronoiEdge = Fn(([p, jitter]) => {
+        const ip = floor(p).toVar();
+        const fp = fract(p).toVar();
+        const d1 = float(10.0).toVar();
+        const d2 = float(10.0).toVar();
+        for (const [nx, ny] of NEIGHBORS) {
+          const off = vec2(float(nx), float(ny));
+          const h = vec2(
+            fract(sin(dot(ip.add(off), vec2(127.1, 311.7))).mul(43758.5453)),
+            fract(sin(dot(ip.add(off), vec2(269.5, 183.3))).mul(43758.5453)),
+          );
+          const dist = length(off.add(mix(vec2(0.5), h, jitter)).sub(fp));
+          d2.assign(min(d2, max(d1, dist)));
+          d1.assign(min(d1, dist));
+        }
+        return d2.sub(d1);
+      });
+
+      // ── Shared voronoi layer (same as waterfall-unreal) ───────────────────
+      const voroLayer = Fn(
+        ([v, scaleX, scaleY, offX, offY, jitter, octaves, lac, gain, warpStr, warpScale, contrast]) => {
+          const p = vec2(
+            v.x.mul(scaleX).add(offX),
+            v.y.mul(scaleY).add(offY),
+          ).toVar();
+          const wx = gradientNoise(p.mul(warpScale)).sub(0.5);
+          const wy = gradientNoise(p.mul(warpScale).add(vec2(3.7, 8.3))).sub(0.5);
+          p.addAssign(vec2(wx, wy).mul(warpStr));
+          return pow(voronoiFbm(p, jitter, octaves, lac, gain), contrast);
+        },
+      );
+
+      // ══════════════════════════════════════════════════════════════════════
+      // Pool uniforms
+      // ══════════════════════════════════════════════════════════════════════
+      const u = {
+        time: uniform(0.0),
+        flowTime: uniform(0.0),
+        flowSpeed: uniform(0.4),
+        animEnable: uniform(1.0),
+
+        // ── Pool shape ────────────────────────────────────────────────────
+        // Impact center in UV space (0.5, 0.0) = top-center of the circle
+        impactX: uniform(0.5),
+        impactY: uniform(0.15),
+
+        // ── Base body (same palette as waterfall) ─────────────────────────
+        darkColor: uniform(new THREE.Color(0x041820)),
+        bodyColor: uniform(new THREE.Color(0x0d6a7a)),
+        depthStrength: uniform(0.65),
+        bodyBrightness: uniform(1.0),
+        bodyContrast: uniform(1.1),
+
+        // ── Radial flow ───────────────────────────────────────────────────
+        radialSpeed: uniform(0.3),
+        radialScale: uniform(4.0),
+
+        // ── Swirl / tangential turbulence ─────────────────────────────────
+        swirlStrength: uniform(0.25),
+        swirlFreq: uniform(3.0),
+        swirlSpeed: uniform(0.8),
+
+        // ── Impact foam (dense voronoi at impact zone) ────────────────────
+        impact_enabled: uniform(1.0),
+        impact_radius: uniform(0.45),
+        impact_falloff: uniform(0.3),
+        impact_scaleX: uniform(8.0),
+        impact_scaleY: uniform(8.0),
+        impact_jitter: uniform(0.6),
+        impact_octaves: uniform(3.0),
+        impact_lac: uniform(2.3),
+        impact_gain: uniform(0.42),
+        impact_warpStr: uniform(0.7),
+        impact_warpScale: uniform(1.8),
+        impact_contrast: uniform(1.3),
+        impact_threshold: uniform(0.15),
+        impact_sharpness: uniform(0.03),
+        impact_color: uniform(new THREE.Color("#d8f4f0")),
+        impact_strength: uniform(0.85),
+
+        // ── Spread foam (medium voronoi radiating outward) ────────────────
+        spread_enabled: uniform(1.0),
+        spread_innerRadius: uniform(0.2),
+        spread_outerRadius: uniform(0.7),
+        spread_scaleX: uniform(6.0),
+        spread_scaleY: uniform(6.0),
+        spread_jitter: uniform(0.55),
+        spread_octaves: uniform(3.0),
+        spread_lac: uniform(2.2),
+        spread_gain: uniform(0.4),
+        spread_warpStr: uniform(0.5),
+        spread_warpScale: uniform(2.0),
+        spread_contrast: uniform(1.5),
+        spread_threshold: uniform(0.18),
+        spread_sharpness: uniform(0.025),
+        spread_color: uniform(new THREE.Color("#88e0e8")),
+        spread_strength: uniform(0.5),
+
+        // ── Ripple rings (concentric expanding from impact) ───────────────
+        ripple_enabled: uniform(1.0),
+        ripple_count: uniform(6.0),
+        ripple_speed: uniform(0.5),
+        ripple_width: uniform(0.04),
+        ripple_decay: uniform(1.8),
+        ripple_color: uniform(new THREE.Color("#b0f0ff")),
+        ripple_strength: uniform(0.35),
+
+        // ── Cyan tint (radial glow near impact — matches waterfall cyan) ──
+        cyan_enabled: uniform(1.0),
+        cyan_radius: uniform(0.35),
+        cyan_falloff: uniform(0.25),
+        cyan_color: uniform(new THREE.Color("#00fff4")),
+        cyan_strength: uniform(0.15),
+
+        // ── Edge foam (at pool boundary) ──────────────────────────────────
+        edge_enabled: uniform(1.0),
+        edge_width: uniform(0.08),
+        edge_softness: uniform(0.06),
+        edge_scaleX: uniform(12.0),
+        edge_scaleY: uniform(12.0),
+        edge_jitter: uniform(0.8),
+        edge_warpStr: uniform(0.3),
+        edge_warpScale: uniform(3.0),
+        edge_color: uniform(new THREE.Color("#e8f8ff")),
+        edge_strength: uniform(0.6),
+
+        // ── Overall ───────────────────────────────────────────────────────
+        poolRadius: uniform(1.0),
+        opacity: uniform(0.85),
+        edgeFade: uniform(0.1),
+      };
+
+      // ══════════════════════════════════════════════════════════════════════
+      // Pool color shader
+      // ══════════════════════════════════════════════════════════════════════
+      const poolColorNode = Fn(() => {
+        const v = uv(); // 0..1 over the pool plane
+
+        // ── Remap UV to centered -1..1 space ─────────────────────────────
+        const centered = vec2(v.x.sub(0.5).mul(2.0), v.y.sub(0.5).mul(2.0));
+        const dist = length(centered); // 0 at center, 1 at edge
+
+        // ── Impact point in centered space ───────────────────────────────
+        const impactPt = vec2(
+          u.impactX.sub(0.5).mul(2.0),
+          u.impactY.sub(0.5).mul(2.0),
+        );
+        const toImpact = centered.sub(impactPt);
+        const impactDist = length(toImpact);
+
+        // ── Radial + swirl UV warp ───────────────────────────────────────
+        // Direction from impact, normalized
+        const dir = toImpact.div(impactDist.max(0.001));
+        // Tangent (perpendicular to radial direction)
+        const tangent = vec2(dir.y.negate(), dir.x);
+
+        // Radial outward push
+        const radialWarp = dir.mul(u.flowTime.mul(u.radialSpeed));
+
+        // Swirl: tangential displacement modulated by noise
+        const swirlNoise = gradientNoise(
+          vec2(impactDist.mul(u.swirlFreq), u.flowTime.mul(u.swirlSpeed)),
+        ).sub(0.5);
+        const swirlWarp = tangent.mul(swirlNoise.mul(u.swirlStrength));
+
+        // Intensity of flow warp decreases with distance from impact
+        const flowFade = smoothstep(float(1.0), float(0.0), impactDist);
+        const warpedUV = v.add(radialWarp.mul(flowFade)).add(swirlWarp.mul(flowFade));
+
+        // ── Layer 0: body — dark base with depth gradient ────────────────
+        // Darker near impact (deeper water), lighter at edges
+        const depthN = gradientNoise(
+          vec2(warpedUV.x.mul(3.0), warpedUV.y.mul(3.0).add(u.flowTime.mul(0.15))),
+        );
+        const depthGrad = smoothstep(float(0.0), float(0.8), impactDist);
+        const col = mix(
+          u.darkColor,
+          u.bodyColor,
+          depthGrad.mul(0.6).add(depthN.mul(u.depthStrength).mul(0.4)),
+        ).toVar();
+        col.assign(
+          col.sub(0.5).mul(u.bodyContrast).add(0.5).mul(u.bodyBrightness).clamp(0, 1),
+        );
+
+        // ── Layer 1: cyan glow near impact ───────────────────────────────
+        const cyanMask = smoothstep(
+          u.cyan_radius.add(u.cyan_falloff),
+          u.cyan_radius,
+          impactDist,
+        );
+        col.assign(mix(
+          col,
+          u.cyan_color,
+          cyanMask.mul(u.cyan_strength).mul(u.cyan_enabled).clamp(0, 1),
+        ));
+
+        // ── Layer 2: impact foam (dense voronoi at splash zone) ──────────
+        const impactMask = smoothstep(
+          u.impact_radius.add(u.impact_falloff),
+          u.impact_radius.sub(u.impact_falloff),
+          impactDist,
+        );
+        const impactF1 = voroLayer(
+          warpedUV,
+          u.impact_scaleX,
+          u.impact_scaleY,
+          u.flowTime.mul(0.2),  // offset X scrolls with flow
+          u.flowTime.mul(0.1),  // offset Y
+          u.impact_jitter,
+          u.impact_octaves,
+          u.impact_lac,
+          u.impact_gain,
+          u.impact_warpStr,
+          u.impact_warpScale,
+          u.impact_contrast,
+        );
+        const impactFoam = smoothstep(
+          u.impact_threshold.sub(u.impact_sharpness),
+          u.impact_threshold.add(u.impact_sharpness),
+          impactF1,
+        );
+        col.assign(mix(
+          col,
+          u.impact_color,
+          impactFoam.mul(impactMask).mul(u.impact_strength).mul(u.impact_enabled).clamp(0, 1),
+        ));
+
+        // ── Layer 3: spread foam (radiating outward from impact) ─────────
+        const spreadMask = smoothstep(u.spread_innerRadius, u.spread_innerRadius.add(0.1), impactDist)
+          .mul(smoothstep(u.spread_outerRadius.add(0.1), u.spread_outerRadius, impactDist));
+        const spreadF1 = voroLayer(
+          warpedUV,
+          u.spread_scaleX,
+          u.spread_scaleY,
+          u.flowTime.mul(0.15),
+          u.flowTime.mul(0.08),
+          u.spread_jitter,
+          u.spread_octaves,
+          u.spread_lac,
+          u.spread_gain,
+          u.spread_warpStr,
+          u.spread_warpScale,
+          u.spread_contrast,
+        );
+        const spreadFoam = smoothstep(
+          u.spread_threshold.sub(u.spread_sharpness),
+          u.spread_threshold.add(u.spread_sharpness),
+          spreadF1,
+        );
+        col.assign(mix(
+          col,
+          u.spread_color,
+          spreadFoam.mul(spreadMask).mul(u.spread_strength).mul(u.spread_enabled).clamp(0, 1),
+        ));
+
+        // ── Layer 4: concentric ripple rings from impact ─────────────────
+        // Multiple rings expanding outward continuously
+        const rippleVal = float(0.0).toVar();
+        // Use fract-based rings — cheap, many rings
+        const ringPhase = impactDist.mul(u.ripple_count).sub(u.flowTime.mul(u.ripple_speed));
+        const ringFract = fract(ringPhase);
+        // Thin ring at the edge of each fract cycle
+        const ring = smoothstep(u.ripple_width, float(0.0), ringFract)
+          .add(smoothstep(float(1.0).sub(u.ripple_width), float(1.0), ringFract))
+          .min(float(1.0));
+        // Decay with distance from impact
+        const ringDecay = smoothstep(float(1.0), float(0.1), impactDist);
+        rippleVal.assign(ring.mul(ringDecay));
+
+        col.assign(mix(
+          col,
+          u.ripple_color,
+          rippleVal.mul(u.ripple_strength).mul(u.ripple_enabled).clamp(0, 1),
+        ));
+
+        // ── Layer 5: edge foam (at pool boundary) ────────────────────────
+        const edgeMask = smoothstep(
+          u.poolRadius.sub(u.edge_width).sub(u.edge_softness),
+          u.poolRadius.sub(u.edge_width),
+          dist,
+        ).mul(smoothstep(u.poolRadius, u.poolRadius.sub(0.02), dist));
+        const edgeUV = vec2(
+          v.x.mul(u.edge_scaleX).add(u.flowTime.mul(0.05)),
+          v.y.mul(u.edge_scaleY).add(u.flowTime.mul(0.03)),
+        );
+        const edgeWarpN = gradientNoise(edgeUV.mul(u.edge_warpScale)).sub(0.5);
+        const edgeF1 = voronoiF1(edgeUV.add(edgeWarpN.mul(u.edge_warpStr)), u.edge_jitter);
+        const edgeFoam = smoothstep(float(0.3), float(0.2), edgeF1);
+        col.assign(mix(
+          col,
+          u.edge_color,
+          edgeFoam.mul(edgeMask).mul(u.edge_strength).mul(u.edge_enabled).clamp(0, 1),
+        ));
+
+        return col;
+      })();
+
+      // ── Pool alpha shader ─────────────────────────────────────────────────
+      const poolAlphaNode = Fn(() => {
+        const v = uv();
+        const centered = vec2(v.x.sub(0.5).mul(2.0), v.y.sub(0.5).mul(2.0));
+        const dist = length(centered);
+        // Circular alpha: fully opaque inside, fades at edge
+        const alpha = smoothstep(u.poolRadius, u.poolRadius.sub(u.edgeFade), dist);
+        return alpha.mul(u.opacity);
+      })();
+
+      // ══════════════════════════════════════════════════════════════════════
+      // Scene setup
+      // ══════════════════════════════════════════════════════════════════════
+      async function init() {
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+        await renderer.init();
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x1a2a35);
+        scene.fog = new THREE.FogExp2(0x1a2a35, 0.045);
+
+        const camera = new THREE.PerspectiveCamera(
+          45,
+          window.innerWidth / window.innerHeight,
+          0.1,
+          100,
+        );
+        camera.position.set(0, 8, 8);
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.target.set(0, 0, 0);
+
+        // ── Lighting (same as waterfall-unreal) ──────────────────────────
+        scene.add(new THREE.AmbientLight(0x7ab8cc, 1.8));
+        const keyLight = new THREE.DirectionalLight(0xffffff, 3.5);
+        keyLight.position.set(5, 10, 14);
+        scene.add(keyLight);
+        const fillLight = new THREE.DirectionalLight(0x88ccee, 1.2);
+        fillLight.position.set(-8, 4, 8);
+        scene.add(fillLight);
+        const topLight = new THREE.DirectionalLight(0xffffff, 1.5);
+        topLight.position.set(0, 20, -2);
+        scene.add(topLight);
+        const rimLight = new THREE.DirectionalLight(0xaaddff, 0.8);
+        rimLight.position.set(4, -2, 6);
+        scene.add(rimLight);
+
+        // ── Pool mesh — circular disc ────────────────────────────────────
+        const POOL_RADIUS = 3.0;
+        const poolGeo = new THREE.CircleGeometry(POOL_RADIUS, 128);
+        const poolMat = new THREE.MeshStandardNodeMaterial({
+          side: THREE.DoubleSide,
+          transparent: true,
+          depthWrite: false,
+          roughness: 0.6,
+          metalness: 0.0,
+          envMapIntensity: 0,
+        });
+        poolMat.colorNode = poolColorNode;
+        poolMat.opacityNode = poolAlphaNode;
+        const poolMesh = new THREE.Mesh(poolGeo, poolMat);
+        poolMesh.rotation.x = -Math.PI / 2; // lay flat
+        scene.add(poolMesh);
+
+        // ── Optional: faint ground plane to see the pool against ─────────
+        const groundGeo = new THREE.PlaneGeometry(20, 20);
+        const groundMat = new THREE.MeshStandardNodeMaterial({
+          color: new THREE.Color(0x0a1a22),
+          roughness: 1.0,
+        });
+        const ground = new THREE.Mesh(groundGeo, groundMat);
+        ground.rotation.x = -Math.PI / 2;
+        ground.position.y = -0.01;
+        scene.add(ground);
+
+        window.addEventListener("resize", () => {
+          camera.aspect = window.innerWidth / window.innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // ══════════════════════════════════════════════════════════════════
+        // Tweakpane
+        // ══════════════════════════════════════════════════════════════════
+        const pane = new Pane({ title: "Waterfall Pool" });
+
+        const mkColor = (folder, label, key, hex) => {
+          const obj = { color: hex };
+          folder
+            .addBinding(obj, "color", { label })
+            .on("change", ({ value }) => u[key].value.set(value));
+        };
+        const mkF = (folder, label, key, mn, mx, step) =>
+          folder.addBinding(u[key], "value", { label, min: mn, max: mx, step });
+
+        // ── Animation ────────────────────────────────────────────────────
+        const animF = pane.addFolder({ title: "Animation", expanded: true });
+        const animEnabled = { enabled: true };
+        animF.addBinding(animEnabled, "enabled", { label: "Enable" })
+          .on("change", ({ value }) => { u.animEnable.value = value ? 1.0 : 0.0; });
+        mkF(animF, "Flow Speed", "flowSpeed", 0, 2, 0.01);
+        animF.addButton({ title: "Reset flow" }).on("click", () => { u.flowTime.value = 0; });
+
+        // ── Impact Position ──────────────────────────────────────────────
+        const posF = pane.addFolder({ title: "Impact Position" });
+        mkF(posF, "X", "impactX", 0, 1, 0.01);
+        mkF(posF, "Y", "impactY", 0, 1, 0.01);
+
+        // ── Body ─────────────────────────────────────────────────────────
+        const bodyF = pane.addFolder({ title: "Body" });
+        mkColor(bodyF, "Dark", "darkColor", "#041820");
+        mkColor(bodyF, "Body", "bodyColor", "#0d6a7a");
+        mkF(bodyF, "Depth Str", "depthStrength", 0, 1, 0.01);
+        mkF(bodyF, "Brightness", "bodyBrightness", 0, 3, 0.01);
+        mkF(bodyF, "Contrast", "bodyContrast", 0, 4, 0.05);
+
+        // ── Flow ─────────────────────────────────────────────────────────
+        const flowF = pane.addFolder({ title: "Flow" });
+        mkF(flowF, "Radial Speed", "radialSpeed", 0, 1, 0.01);
+        mkF(flowF, "Radial Scale", "radialScale", 1, 10, 0.1);
+        mkF(flowF, "Swirl Str", "swirlStrength", 0, 1, 0.01);
+        mkF(flowF, "Swirl Freq", "swirlFreq", 0.5, 10, 0.1);
+        mkF(flowF, "Swirl Speed", "swirlSpeed", 0, 3, 0.05);
+
+        // ── Cyan Glow ────────────────────────────────────────────────────
+        const cyanGF = pane.addFolder({ title: "Cyan Glow" });
+        const cyanEO = { enabled: true };
+        cyanGF.addBinding(cyanEO, "enabled", { label: "Enable" })
+          .on("change", ({ value }) => { u.cyan_enabled.value = value ? 1.0 : 0.0; });
+        mkF(cyanGF, "Radius", "cyan_radius", 0, 1, 0.01);
+        mkF(cyanGF, "Falloff", "cyan_falloff", 0, 1, 0.01);
+        mkColor(cyanGF, "Color", "cyan_color", "#00fff4");
+        mkF(cyanGF, "Strength", "cyan_strength", 0, 1, 0.01);
+
+        // ── Impact Foam ──────────────────────────────────────────────────
+        const addFoamLayer = (title, prefix, hex, defaultEnabled = true) => {
+          const f = pane.addFolder({ title });
+          const eo = { enabled: defaultEnabled };
+          f.addBinding(eo, "enabled", { label: "Enable" })
+            .on("change", ({ value }) => { u[`${prefix}_enabled`].value = value ? 1.0 : 0.0; });
+          if (u[`${prefix}_radius`]) mkF(f, "Radius", `${prefix}_radius`, 0, 1.5, 0.01);
+          if (u[`${prefix}_falloff`]) mkF(f, "Falloff", `${prefix}_falloff`, 0, 1, 0.01);
+          if (u[`${prefix}_innerRadius`]) mkF(f, "Inner R", `${prefix}_innerRadius`, 0, 1, 0.01);
+          if (u[`${prefix}_outerRadius`]) mkF(f, "Outer R", `${prefix}_outerRadius`, 0, 1.5, 0.01);
+          if (u[`${prefix}_width`]) mkF(f, "Width", `${prefix}_width`, 0, 0.3, 0.005);
+          if (u[`${prefix}_softness`]) mkF(f, "Softness", `${prefix}_softness`, 0, 0.3, 0.005);
+          mkF(f, "Scale X", `${prefix}_scaleX`, 1, 30, 0.5);
+          mkF(f, "Scale Y", `${prefix}_scaleY`, 1, 30, 0.5);
+          mkF(f, "Jitter", `${prefix}_jitter`, 0, 1, 0.01);
+          if (u[`${prefix}_octaves`]) mkF(f, "Octaves", `${prefix}_octaves`, 1, 6, 0.1);
+          if (u[`${prefix}_lac`]) mkF(f, "Lacunarity", `${prefix}_lac`, 1.2, 4, 0.05);
+          if (u[`${prefix}_gain`]) mkF(f, "Gain", `${prefix}_gain`, 0.1, 0.9, 0.01);
+          mkF(f, "Warp Str", `${prefix}_warpStr`, 0, 2, 0.01);
+          mkF(f, "Warp Scale", `${prefix}_warpScale`, 0.5, 10, 0.1);
+          if (u[`${prefix}_contrast`]) mkF(f, "Contrast", `${prefix}_contrast`, 0.2, 6, 0.05);
+          if (u[`${prefix}_threshold`]) mkF(f, "Threshold", `${prefix}_threshold`, 0.05, 0.8, 0.01);
+          if (u[`${prefix}_sharpness`]) mkF(f, "Sharpness", `${prefix}_sharpness`, 0.005, 0.2, 0.005);
+          mkColor(f, "Color", `${prefix}_color`, hex);
+          mkF(f, "Strength", `${prefix}_strength`, 0, 1, 0.01);
+        };
+
+        addFoamLayer("Impact Foam", "impact", "#d8f4f0", true);
+        addFoamLayer("Spread Foam", "spread", "#88e0e8", true);
+
+        // ── Ripple Rings ─────────────────────────────────────────────────
+        const ripF = pane.addFolder({ title: "Ripple Rings" });
+        const ripEO = { enabled: true };
+        ripF.addBinding(ripEO, "enabled", { label: "Enable" })
+          .on("change", ({ value }) => { u.ripple_enabled.value = value ? 1.0 : 0.0; });
+        mkF(ripF, "Count", "ripple_count", 1, 20, 0.5);
+        mkF(ripF, "Speed", "ripple_speed", 0, 3, 0.05);
+        mkF(ripF, "Width", "ripple_width", 0.005, 0.15, 0.005);
+        mkF(ripF, "Decay", "ripple_decay", 0.5, 5, 0.1);
+        mkColor(ripF, "Color", "ripple_color", "#b0f0ff");
+        mkF(ripF, "Strength", "ripple_strength", 0, 1, 0.01);
+
+        // ── Edge Foam ────────────────────────────────────────────────────
+        addFoamLayer("Edge Foam", "edge", "#e8f8ff", true);
+
+        // ── Overall ──────────────────────────────────────────────────────
+        const ovrF = pane.addFolder({ title: "Overall" });
+        mkF(ovrF, "Pool Radius", "poolRadius", 0.5, 1.5, 0.01);
+        mkF(ovrF, "Opacity", "opacity", 0, 1, 0.01);
+        mkF(ovrF, "Edge Fade", "edgeFade", 0, 0.5, 0.01);
+
+        // ── Render loop ──────────────────────────────────────────────────
+        let t0 = performance.now() / 1000, lastT = 0;
+        renderer.setAnimationLoop(() => {
+          const t = performance.now() / 1000 - t0;
+          const dt = t - lastT; lastT = t;
+          u.time.value = t;
+          u.flowTime.value += dt * u.flowSpeed.value * u.animEnable.value;
+          renderer.render(scene, camera);
+        });
+      }
+
+      init();
+    </script>
+  </body>
+</html>

@@ -185,6 +185,7 @@ function createForestImpostorMaterial(
 ) {
   const mega = opts.mega === true;
   const skipShadow = opts.skipShadow === true;
+  const fullOcta = opts.fullOctahedral === true;
   const lodDistance = opts.lodDistance ?? 80;
   const fadeRange = opts.fadeRange ?? 8;
 
@@ -255,20 +256,45 @@ function createForestImpostorMaterial(
   const vUV2 = varying(vec2(0, 0), "vWUV2");
   const vUV3 = varying(vec2(0, 0), "vWUV3");
 
-  const encode = Fn(([d]) => {
-    const s = vec3(sign(d.x), sign(d.y), sign(d.z));
-    const l1 = dot(d, s);
-    const o = vec3(div(d.x, l1), div(d.y, l1), div(d.z, l1));
-    return mul(vec2(add(1, add(o.x, o.z)), add(1, sub(o.z, o.x))), 0.5);
-  });
+  const encode = fullOcta
+    ? Fn(([d]) => {
+        const l1 = add(add(abs(d.x), abs(d.y)), abs(d.z));
+        const ox = div(d.x, l1);
+        const oz = div(d.z, l1);
+        const wrapX = mul(sub(float(1), abs(oz)), sign(d.x));
+        const wrapZ = mul(sub(float(1), abs(ox)), sign(d.z));
+        const isLower = d.y.lessThan(float(0));
+        const uvX = select(isLower, wrapX, ox);
+        const uvZ = select(isLower, wrapZ, oz);
+        return mul(add(vec2(uvX, uvZ), float(1)), float(0.5));
+      })
+    : Fn(([d]) => {
+        const s = vec3(sign(d.x), sign(d.y), sign(d.z));
+        const l1 = dot(d, s);
+        const o = vec3(div(d.x, l1), div(d.y, l1), div(d.z, l1));
+        return mul(vec2(add(1, add(o.x, o.z)), add(1, sub(o.z, o.x))), 0.5);
+      });
 
-  const decode = Fn(([gi, nm1]) => {
-    const u = vec2(div(gi.x, nm1.x), div(gi.y, nm1.y));
-    const px = sub(u.x, u.y);
-    const pz = sub(add(u.x, u.y), 1);
-    const py = sub(sub(1, abs(px)), abs(pz));
-    return normalize(vec3(px, py, pz));
-  });
+  const decode = fullOcta
+    ? Fn(([gi, nm1]) => {
+        const u = vec2(div(gi.x, nm1.x), div(gi.y, nm1.y));
+        const ox = sub(mul(u.x, float(2)), float(1));
+        const oz = sub(mul(u.y, float(2)), float(1));
+        const oy = sub(sub(float(1), abs(ox)), abs(oz));
+        const isLower = oy.lessThan(float(0));
+        const unwrapX = mul(sub(float(1), abs(oz)), sign(ox));
+        const unwrapZ = mul(sub(float(1), abs(ox)), sign(oz));
+        const fx = select(isLower, unwrapX, ox);
+        const fz = select(isLower, unwrapZ, oz);
+        return normalize(vec3(fx, oy, fz));
+      })
+    : Fn(([gi, nm1]) => {
+        const u = vec2(div(gi.x, nm1.x), div(gi.y, nm1.y));
+        const px = sub(u.x, u.y);
+        const pz = sub(add(u.x, u.y), 1);
+        const py = sub(sub(1, abs(px)), abs(pz));
+        return normalize(vec3(px, py, pz));
+      });
 
   const planeTangent = Fn(([n]) => {
     const up = mix(
@@ -631,6 +657,7 @@ export async function createOctahedralImpostorForestWebgpu(
     skipShadow: impostorSettings.skipShadow === true,
     /** When true, material.fog is enabled so scene.fog / scene.fogNode (e.g. TSL height+distance) affects billboards. */
     useSceneFog: impostorSettings.useSceneFog === true,
+    fullOctahedral: impostorSettings.fullOctahedral === true,
   };
 
   const grid = iOpts.spritesPerSide;
@@ -690,6 +717,7 @@ export async function createOctahedralImpostorForestWebgpu(
     atlasSize,
     maxAniso,
     cellPad,
+    fullOctahedral: iOpts.fullOctahedral,
   });
 
   const bakeR = atlasResult.radius;
@@ -968,6 +996,7 @@ export async function createOctahedralImpostorForestWebgpu(
     diffuseWrap: iOpts.diffuseWrap,
     parallaxStrength: iOpts.parallaxStrength,
     skipShadow: iOpts.skipShadow,
+    fullOctahedral: iOpts.fullOctahedral,
   };
 
   const impostorPack = createForestImpostorMaterial(
