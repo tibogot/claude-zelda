@@ -234,6 +234,10 @@ function createForestImpostorMaterial(
     opts.lodDitherUniform ?? uniform(float(opts.lodDither ?? 0));
   const uBlend3Cell =
     opts.blend3CellUniform ?? uniform(float(opts.blend3Cell !== false ? 1 : 0));
+  const uTransStr =
+    opts.transStrUniform ?? uniform(float(opts.translucencyStrength ?? 0.0));
+  const uTransPow =
+    opts.transPowUniform ?? uniform(float(opts.translucencyPower ?? 2.0));
 
   const uFogNear = opts.fogNearUniform ?? uniform(float(1e9));
   const uFogFar = opts.fogFarUniform ?? uniform(float(1e9));
@@ -528,6 +532,8 @@ function createForestImpostorMaterial(
     const sunLit = add(diffuse, spec);
     const shadowedSun = mul(sunLit, sunShadow);
     let lit = add(add(add(shadowedSun, ambient), indirectSpec), rim);
+    const backLit = pow(saturate(dot(viewDir, negate(uSunDir))), uTransPow);
+    lit = add(lit, mul(mul(mul(backLit, uTransStr), albedo), uSunColor));
     lit = mul(lit, uLightScale);
 
     const dist = length(sub(centerNode, cameraPosition));
@@ -594,6 +600,8 @@ function createForestImpostorMaterial(
     uMega,
     uLodDither,
     uBlend3Cell,
+    uTransStr,
+    uTransPow,
     uFogNear,
     uFogFar,
     uFogColor,
@@ -966,6 +974,8 @@ export async function createOctahedralImpostorForestWebgpu(
   const _uAlphaClamp = uniform(float(iOpts.alphaClamp));
   const _uParallaxStr = uniform(float(iOpts.parallaxStrength));
   const _uBlend3Cell = uniform(float(1));
+  const _uTransStr = uniform(float(0));
+  const _uTransPow = uniform(float(2));
 
   const _initFogColor = new THREE.Color(iOpts.fogColor);
   const _uFogNear = uniform(float(iOpts.fogNear));
@@ -993,6 +1003,8 @@ export async function createOctahedralImpostorForestWebgpu(
     alphaClampUniform: _uAlphaClamp,
     parallaxStrUniform: _uParallaxStr,
     blend3CellUniform: _uBlend3Cell,
+    transStrUniform: _uTransStr,
+    transPowUniform: _uTransPow,
     fogNearUniform: _uFogNear,
     fogFarUniform: _uFogFar,
     fogColorUniform: _uFogColor,
@@ -1257,6 +1269,10 @@ export async function createOctahedralImpostorForestWebgpu(
     },
     setBlend3Cell: (b) => {
       _uBlend3Cell.value = b ? 1 : 0;
+    },
+    setTranslucency: (str, pow) => {
+      _uTransStr.value = str;
+      _uTransPow.value = pow;
     },
     setEdgeSmoothScale: (v) => {
       _uEdgeSmoothScale.value = v;
