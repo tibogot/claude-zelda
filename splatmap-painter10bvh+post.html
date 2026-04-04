@@ -1124,7 +1124,6 @@
       let cliffGrassEraseMode = false;
       let cliffPaintEraseMode = false;
       let barrierEraseMode = false;
-      let barrierOverlayVisible = true;
       let barrierOverlayMesh = null;
       let geminiGrassPatchSystem = null;
       let geminiGrassUniforms = null;
@@ -9817,15 +9816,24 @@
           expanded: true,
         });
         barrierFolder.hidden = true;
-        const barrierPARAMS = { erase: false, showOverlay: true };
+        // Overlay defaults off: full-terrain plane + opacity darkens ground even where barrier is empty.
+        const barrierPARAMS = { erase: false, showOverlay: false };
+        function syncBarrierOverlayFromParams() {
+          if (barrierOverlayMesh)
+            barrierOverlayMesh.visible = barrierPARAMS.showOverlay;
+        }
         barrierFolder.addBinding(barrierPARAMS, "erase", {
           label: "Erase (or Shift)",
         }).on("change", (ev) => { barrierEraseMode = ev.value; });
         barrierFolder.addBinding(barrierPARAMS, "showOverlay", {
           label: "Show overlay",
-        }).on("change", (ev) => {
-          barrierOverlayVisible = ev.value;
-          if (barrierOverlayMesh) barrierOverlayMesh.visible = ev.value && currentMode === "barrier";
+        }).on("change", () => {
+          syncBarrierOverlayFromParams();
+        });
+        sceneFolder.addBinding(barrierPARAMS, "showOverlay", {
+          label: "Barrier overlay",
+        }).on("change", () => {
+          syncBarrierOverlayFromParams();
         });
         barrierFolder.addButton({ title: "Clear all barriers" }).on("click", () => {
           barrierCtx.fillStyle = "#000";
@@ -10723,7 +10731,7 @@
           cliffBlendFolder.hidden = mode !== "cliffblend";
           cliffPaintFolder.hidden = mode !== "cliffpaint";
           barrierFolder.hidden = mode !== "barrier";
-          if (barrierOverlayMesh) barrierOverlayMesh.visible = mode === "barrier" && barrierOverlayVisible;
+          syncBarrierOverlayFromParams();
           brushFolder.hidden =
             mode === "view" ||
             mode === "place" ||
