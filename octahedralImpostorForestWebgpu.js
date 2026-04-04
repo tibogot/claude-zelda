@@ -26,6 +26,7 @@ import {
   texture,
   cameraPosition,
   positionWorld,
+  positionView,
   positionLocal,
   float,
   uniform,
@@ -229,6 +230,13 @@ function createForestImpostorMaterial(
     opts.parallaxStrUniform ?? uniform(float(opts.parallaxStrength ?? 0.12));
   const uLodDither =
     opts.lodDitherUniform ?? uniform(float(opts.lodDither ?? 0));
+
+  const uFogNear = opts.fogNearUniform ?? uniform(float(1e9));
+  const uFogFar = opts.fogFarUniform ?? uniform(float(1e9));
+  const uFogColor =
+    opts.fogColorUniform ??
+    uniform(new THREE.Vector3(0.5, 0.65, 0.85));
+  const uFogStrength = opts.fogStrengthUniform ?? uniform(float(0));
 
   const uCellFrac = uniform(float(1 / gridVal));
   const uPadFrac = uniform(float(cellPad / atlasSize));
@@ -510,7 +518,12 @@ function createForestImpostorMaterial(
 
     const alphaOut = mix(smoothAlphaOut, legacyAlphaOut, uLodDither);
 
-    return vec4(saturate(lit), alphaOut);
+    const fogDepth = negate(positionView.z);
+    const fogT = smoothstep(uFogNear, uFogFar, fogDepth);
+    const fogMix = mul(fogT, uFogStrength);
+    const litRgb = mix(saturate(lit), uFogColor, fogMix);
+
+    return vec4(litRgb, alphaOut);
   });
 
   const mat = new THREE.MeshBasicNodeMaterial({ side: THREE.FrontSide });
@@ -543,6 +556,10 @@ function createForestImpostorMaterial(
     uFadeRange,
     uMega,
     uLodDither,
+    uFogNear,
+    uFogFar,
+    uFogColor,
+    uFogStrength,
   };
 }
 
@@ -583,6 +600,10 @@ export async function createOctahedralImpostorForestWebgpu(
     edgeSmoothScale: impostorSettings.edgeSmoothScale ?? 1.5,
     parallaxStrength: impostorSettings.parallaxStrength ?? 0.12,
     lodDither: impostorSettings.lodDither ?? 0,
+    fogNear: impostorSettings.fogNear ?? 28,
+    fogFar: impostorSettings.fogFar ?? 170,
+    fogEnabled: impostorSettings.fogEnabled !== false,
+    fogColor: impostorSettings.fogColor ?? 0x87ceeb,
   };
 
   const grid = iOpts.spritesPerSide;
@@ -687,6 +708,7 @@ export async function createOctahedralImpostorForestWebgpu(
       side: isLeaf ? THREE.DoubleSide : (mat0?.side ?? THREE.FrontSide),
       depthWrite: true,
     });
+    nodeMat.fog = true;
 
     if (isLeaf) {
       const uGeoMinY = uniform(float(geoMinY));
@@ -838,6 +860,16 @@ export async function createOctahedralImpostorForestWebgpu(
   const _uAlphaClamp = uniform(float(iOpts.alphaClamp));
   const _uParallaxStr = uniform(float(iOpts.parallaxStrength));
 
+  const _initFogColor = new THREE.Color(iOpts.fogColor);
+  const _uFogNear = uniform(float(iOpts.fogNear));
+  const _uFogFar = uniform(
+    float(Math.max(iOpts.fogFar, iOpts.fogNear + 0.5)),
+  );
+  const _uFogColor = uniform(
+    new THREE.Vector3(_initFogColor.r, _initFogColor.g, _initFogColor.b),
+  );
+  const _uFogStrength = uniform(float(iOpts.fogEnabled ? 1 : 0));
+
   const sunOpts = {
     sunDir: _uSunDir,
     sunColor: _uSunColor,
@@ -853,6 +885,10 @@ export async function createOctahedralImpostorForestWebgpu(
     edgeSmoothUniform: _uEdgeSmoothScale,
     alphaClampUniform: _uAlphaClamp,
     parallaxStrUniform: _uParallaxStr,
+    fogNearUniform: _uFogNear,
+    fogFarUniform: _uFogFar,
+    fogColorUniform: _uFogColor,
+    fogStrengthUniform: _uFogStrength,
     rimColor: iOpts.rimColor,
     diffuseWrap: iOpts.diffuseWrap,
     parallaxStrength: iOpts.parallaxStrength,
@@ -880,6 +916,7 @@ export async function createOctahedralImpostorForestWebgpu(
     },
   );
   const impostorMat = impostorPack.mat;
+  impostorMat.fog = false;
 
   const impostorMesh = new THREE.InstancedMesh(
     planeGeo,
@@ -918,6 +955,7 @@ export async function createOctahedralImpostorForestWebgpu(
     },
   );
   const megaMat = megaPack.mat;
+  megaMat.fog = false;
 
   const megaMesh = new THREE.InstancedMesh(planeGeo, megaMat, treeCount);
   megaMesh.castShadow = false;
@@ -1102,6 +1140,19 @@ export async function createOctahedralImpostorForestWebgpu(
     },
     setParallaxStrength: (v) => {
       _uParallaxStr.value = v;
+    },
+    setFog: (o) => {
+      if (o == null) return;
+      if (o.near != null) {
+        _uFogNear.value = o.near;
+        if (_uFogFar.value <= _uFogNear.value)
+          _uFogFar.value = _uFogNear.value + 0.5;
+      }
+      if (o.far != null)
+        _uFogFar.value = Math.max(o.far, _uFogNear.value + 0.5);
+      if (o.strength != null) _uFogStrength.value = o.strength;
+      if (o.color != null && o.color.isColor)
+        _uFogColor.value.set(o.color.r, o.color.g, o.color.b);
     },
     setWindStrength: (v) => {
       uWindStrength.value = v;

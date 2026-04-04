@@ -189,6 +189,66 @@
 
       const scene = new THREE.Scene();
       scene.background = new THREE.Color(0x87ceeb);
+      let forest = null;
+
+      const PARAMS = {
+        sunAzimuth: 225,
+        sunElevation: 56,
+        sunIntensity: 1.8,
+        ambIntensity: 0.8,
+        lightScale: 1.0,
+        normalStrength: 1.0,
+        rimStrength: 0.14,
+        rimPower: 3,
+        rimColor: { r: 0.4, g: 0.5, b: 0.65 },
+        diffuseWrap: 0,
+        lod0Visible: true,
+        lod1Visible: true,
+        lod2Visible: true,
+        edgeSmoothScale: 1.5,
+        alphaClamp: 0.1,
+        parallaxStrength: 0.12,
+        lodDistance: 45,
+        fadeRange: 8,
+        /** 0 = smooth complementary crossfade; 1 = legacy stochastic dither (old look). */
+        lodDither: 0,
+        fogEnabled: true,
+        fogNear: 28,
+        fogFar: 170,
+        /** sRGB — also drives scene background when fog is on */
+        fogColor: { r: 0.529, g: 0.808, b: 0.922 },
+      };
+
+      const _fogColorThree = new THREE.Color();
+      const _fogGuiColor = new THREE.Color();
+      let sceneFog = null;
+
+      function applyAtmosphere() {
+        const fc = PARAMS.fogColor;
+        _fogGuiColor.setRGB(fc.r, fc.g, fc.b, THREE.SRGBColorSpace);
+        _fogColorThree.copy(_fogGuiColor);
+        if (PARAMS.fogEnabled) {
+          if (!sceneFog) sceneFog = new THREE.Fog(_fogColorThree, 1, 2);
+          scene.fog = sceneFog;
+          sceneFog.color.copy(_fogColorThree);
+          sceneFog.near = PARAMS.fogNear;
+          sceneFog.far = Math.max(PARAMS.fogFar, PARAMS.fogNear + 1);
+          scene.background.copy(_fogColorThree);
+        } else {
+          scene.fog = null;
+          scene.background.set(0x87ceeb);
+        }
+        if (forest) {
+          forest.setFog({
+            near: PARAMS.fogNear,
+            far: Math.max(PARAMS.fogFar, PARAMS.fogNear + 1),
+            strength: PARAMS.fogEnabled ? 1 : 0,
+            color: _fogColorThree,
+          });
+        }
+      }
+
+      applyAtmosphere();
 
       const camera = new THREE.PerspectiveCamera(
         60,
@@ -208,6 +268,7 @@
         color: 0x6b8e4e,
         roughness: 0.9,
         metalness: 0,
+        fog: true,
       });
       const ground = new THREE.Mesh(groundGeo, groundMat);
       ground.rotation.x = -Math.PI / 2;
@@ -233,29 +294,6 @@
       scene.add(ambLight);
 
       renderer.shadowMap.enabled = true;
-
-      const PARAMS = {
-        sunAzimuth: 225,
-        sunElevation: 56,
-        sunIntensity: 1.8,
-        ambIntensity: 0.8,
-        lightScale: 1.0,
-        normalStrength: 1.0,
-        rimStrength: 0.14,
-        rimPower: 3,
-        rimColor: { r: 0.4, g: 0.5, b: 0.65 },
-        diffuseWrap: 0,
-        lod0Visible: true,
-        lod1Visible: true,
-        lod2Visible: true,
-        edgeSmoothScale: 1.5,
-        alphaClamp: 0.1,
-        parallaxStrength: 0.12,
-        lodDistance: 45,
-        fadeRange: 8,
-        /** 0 = smooth complementary crossfade; 1 = legacy stochastic dither (old look). */
-        lodDither: 0,
-      };
 
       function applySunToScene() {
         const az = (PARAMS.sunAzimuth * Math.PI) / 180;
@@ -321,7 +359,6 @@
 
       applySunToScene();
 
-      let forest = null;
       const projMat = new THREE.Matrix4();
       const frustum = new THREE.Frustum();
 
@@ -412,6 +449,15 @@
                 ],
                 diffuseWrap: PARAMS.diffuseWrap,
                 parallaxStrength: PARAMS.parallaxStrength,
+                fogNear: PARAMS.fogNear,
+                fogFar: PARAMS.fogFar,
+                fogEnabled: PARAMS.fogEnabled,
+                fogColor: new THREE.Color().setRGB(
+                  PARAMS.fogColor.r,
+                  PARAMS.fogColor.g,
+                  PARAMS.fogColor.b,
+                  THREE.SRGBColorSpace,
+                ).getHex(),
               },
             },
           );
@@ -420,6 +466,7 @@
           forest.setLodVisible(1, PARAMS.lod1Visible);
           forest.setLodVisible(2, PARAMS.lod2Visible);
           applyLightingToForest();
+          applyAtmosphere();
           document.getElementById("status").textContent =
             "WebGPU forest — orbit to explore";
         } catch (e) {
@@ -559,6 +606,25 @@
           if (forest) forest.setLodVisible(2, v);
         });
       fLod.open();
+
+      const fAtmo = gui.addFolder("Atmosphere (distance fog)");
+      fAtmo
+        .add(PARAMS, "fogEnabled")
+        .name("Fog on")
+        .onChange(applyAtmosphere);
+      fAtmo
+        .add(PARAMS, "fogNear", 0, 120, 1)
+        .name("Fog near")
+        .onChange(applyAtmosphere);
+      fAtmo
+        .add(PARAMS, "fogFar", 20, 400, 2)
+        .name("Fog far")
+        .onChange(applyAtmosphere);
+      fAtmo
+        .addColor(PARAMS, "fogColor")
+        .name("Fog / sky color")
+        .onChange(applyAtmosphere);
+      fAtmo.open();
 
       const fEdge = gui.addFolder("Edge AA");
       fEdge
