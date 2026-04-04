@@ -979,6 +979,9 @@
         pineFogNear: 28,
         pineFogFar: 170,
         pineFogColor: "#87ceeb",
+        /** Pine octahedral atlas bake — changing either triggers a full rebake (GPU). */
+        pineAtlasTextureSize: 1024,
+        pineAtlasSpritesPerSide: 8,
       };
       let lodFolder = null;
       const _pineImpostorColorTmp = new THREE.Color();
@@ -5923,8 +5926,14 @@
             impostorSettings: {
               lod2Distance: 9999,
               fadeRange: lodParams.pineImpBlendWidth,
-              textureSize: 1024,
-              spritesPerSide: 8,
+              textureSize: Math.max(
+                256,
+                Math.min(8192, Math.round(lodParams.pineAtlasTextureSize)),
+              ),
+              spritesPerSide: Math.max(
+                2,
+                Math.min(32, Math.round(lodParams.pineAtlasSpritesPerSide)),
+              ),
               lightScale: lodParams.pineLightScale,
               normalStrength: lodParams.pineNormalStrength,
               rimStrength: lodParams.pineRimStrength,
@@ -5966,6 +5975,18 @@
               slot.pineImpostorBusy = false;
               console.warn("[TREE LOD] Pine impostor bake failed:", err);
             });
+        }
+        function _rebakePineImpostorAtlas() {
+          const slot = LOD_SLOTS[0];
+          if (!slot || slot.name !== "Pine") return;
+          if (slot.pineImpostorApi) {
+            scene.remove(slot.pineImpostorApi.group);
+            slot.pineImpostorApi.dispose();
+            slot.pineImpostorApi = null;
+          }
+          slot.pineImpostorBusy = false;
+          _markLodDirty();
+          if (slot.positions.length > 0) _schedulePineImpostorBuild(slot);
         }
         _rebuildLODChunks = function(slot) {
           _markLodDirty();
@@ -8791,6 +8812,26 @@
         lodFolder.addBinding(lodParams, "totalTrees",  { label: "Total trees",  readonly: true });
         lodFolder.addBinding(lodParams, "chunksVisible", { label: "Chunks visible", readonly: true });
         lodFolder.addBinding(lodParams, "chunks",      { label: "Chunks total",  readonly: true });
+        const fPineAtlas = lodFolder.addFolder({
+          title: "Pine · atlas bake (WebGPU)",
+          expanded: false,
+        });
+        fPineAtlas.addBinding(lodParams, "pineAtlasTextureSize", {
+          label: "Atlas size (px)",
+          options: {
+            "512": 512,
+            "1024": 1024,
+            "2048": 2048,
+            "4096": 4096,
+          },
+        }).on("change", () => _rebakePineImpostorAtlas());
+        fPineAtlas.addBinding(lodParams, "pineAtlasSpritesPerSide", {
+          label: "Views / side",
+          options: { "4": 4, "6": 6, "8": 8, "10": 10, "12": 12, "16": 16 },
+        }).on("change", () => _rebakePineImpostorAtlas());
+        fPineAtlas
+          .addButton({ title: "Rebake atlas now" })
+          .on("click", () => _rebakePineImpostorAtlas());
         const fPineLight = lodFolder.addFolder({
           title: "Pine · impostor light (WebGPU)",
           expanded: false,
