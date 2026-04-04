@@ -629,6 +629,8 @@ export async function createOctahedralImpostorForestWebgpu(
     fogEnabled: impostorSettings.fogEnabled !== false,
     fogColor: impostorSettings.fogColor ?? 0x87ceeb,
     skipShadow: impostorSettings.skipShadow === true,
+    /** When true, material.fog is enabled so scene.fog / scene.fogNode (e.g. TSL height+distance) affects billboards. */
+    useSceneFog: impostorSettings.useSceneFog === true,
   };
 
   const grid = iOpts.spritesPerSide;
@@ -990,7 +992,7 @@ export async function createOctahedralImpostorForestWebgpu(
     },
   );
   const impostorMat = impostorPack.mat;
-  impostorMat.fog = false;
+  impostorMat.fog = iOpts.useSceneFog;
 
   const impostorMesh = new THREE.InstancedMesh(
     planeGeo,
@@ -1029,7 +1031,7 @@ export async function createOctahedralImpostorForestWebgpu(
     },
   );
   const megaMat = megaPack.mat;
-  megaMat.fog = false;
+  megaMat.fog = iOpts.useSceneFog;
 
   if (impostorStandalone) {
     impostorPack.uLodDist.value = -1e9;

@@ -930,7 +930,7 @@
 
       // ── TREE LOD — multi-slot instanced tree system ───────────────────────
       const LOD_SLOTS = [
-        { name: "Pine", modelPath: "models/pine2.glb", lod1Path: "models/pine2LODtest.glb", lodThreshold: 80, lodImpostorDist: 115, lodMegaDist: 220, minSpacing: 3,  scaleMin: 0.8, scaleMax: 1.4, density: 0.25, treesPerStroke: 3, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false, pineImpostorApi: null, pineImpostorBusy: false },
+        { name: "Pine", modelPath: "models/pine2.glb", lod1Path: "models/pine2LOD1.glb", lodThreshold: 80, lodImpostorDist: 115, lodMegaDist: 220, minSpacing: 3,  scaleMin: 0.8, scaleMax: 1.4, density: 0.25, treesPerStroke: 3, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false, pineImpostorApi: null, pineImpostorBusy: false },
         { name: "Oak",  modelPath: "models/treeez2_simon.glb", lod1Path: "models/treeez2_simon.glb", lodThreshold: 60, minSpacing: 4,  scaleMin: 0.9, scaleMax: 1.6, density: 0.2,  treesPerStroke: 3, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
         { name: "Dead", modelPath: "models/treeez2.glb",       lod1Path: "models/treeez2.glb",       lodThreshold: 50, minSpacing: 2,  scaleMin: 0.7, scaleMax: 1.2, density: 0.3,  treesPerStroke: 3, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
         { name: "Palm",  modelPath: "models/botatree_compressed (1).glb", lod1Path: "models/botatree_compressed (1).glb", lodThreshold: 60, minSpacing: 5,  scaleMin: 1.0, scaleMax: 2.0, density: 0.15, treesPerStroke: 3, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
@@ -958,8 +958,79 @@
         totalTrees: 0,
         chunks: 0,
         chunksVisible: 0,
+        /** Pine WebGPU impostor — match forest-webgpu.html */
+        pineLightScale: 1.0,
+        pineNormalStrength: 1.0,
+        pineRimStrength: 0.14,
+        pineRimPower: 3,
+        pineRimColor: "#6699a6",
+        pineDiffuseWrap: 0,
+        pineParallaxStrength: 0.12,
+        pineImpCrossfadeDist: 80,
+        pineImpBlendWidth: 6,
+        pineLodDither: 0,
+        lodVisMesh0: true,
+        lodVisMesh1: true,
+        lodVisImpostor: true,
+        lodVisMega: true,
+        pineEdgeSmoothScale: 1.5,
+        pineAlphaClamp: 0.1,
+        pineFogEnabled: false,
+        pineFogNear: 28,
+        pineFogFar: 170,
+        pineFogColor: "#87ceeb",
       };
       let lodFolder = null;
+      const _pineImpostorColorTmp = new THREE.Color();
+      function applyPineImpostorMaterialFromLodParams() {
+        const api = LOD_SLOTS[0]?.pineImpostorApi;
+        if (!api || LOD_SLOTS[0].name !== "Pine") return;
+        api.setLightScale(lodParams.pineLightScale);
+        api.setNormalStrength(lodParams.pineNormalStrength);
+        api.setRimStrength(lodParams.pineRimStrength);
+        api.setRimPower(lodParams.pineRimPower);
+        _pineImpostorColorTmp.set(lodParams.pineRimColor);
+        api.setRimColor(
+          _pineImpostorColorTmp.r,
+          _pineImpostorColorTmp.g,
+          _pineImpostorColorTmp.b,
+        );
+        api.setDiffuseWrap(lodParams.pineDiffuseWrap);
+        api.setParallaxStrength(lodParams.pineParallaxStrength);
+        api.setLodDistance(lodParams.pineImpCrossfadeDist);
+        api.setFadeRange(lodParams.pineImpBlendWidth);
+        api.setLodDither(lodParams.pineLodDither);
+        api.setEdgeSmoothScale(lodParams.pineEdgeSmoothScale);
+        api.setAlphaClamp(lodParams.pineAlphaClamp);
+        _pineImpostorColorTmp.set(lodParams.pineFogColor);
+        api.setFog({
+          near: lodParams.pineFogNear,
+          far: Math.max(lodParams.pineFogFar, lodParams.pineFogNear + 1),
+          strength: lodParams.pineFogEnabled ? 1 : 0,
+          color: _pineImpostorColorTmp,
+        });
+      }
+      function applyLodTierVisibility() {
+        const v0 = lodParams.lodVisMesh0;
+        const v1 = lodParams.lodVisMesh1;
+        for (const slot of LOD_SLOTS) {
+          if (!slot.ready) continue;
+          for (const ch of slot.chunks.values()) {
+            ch.lod0ims.forEach(({ im }) => {
+              im.visible = v0;
+            });
+            if (ch.lod1ims)
+              ch.lod1ims.forEach(({ im }) => {
+                im.visible = v1;
+              });
+          }
+        }
+        const api = LOD_SLOTS[0]?.pineImpostorApi;
+        if (api && LOD_SLOTS[0].name === "Pine") {
+          api.setLodVisible(1, lodParams.lodVisImpostor);
+          api.setLodVisible(2, lodParams.lodVisMega);
+        }
+      }
 
       // ─── FOLIAGE TREE SYSTEM (trunk GLB + TSL leaf planes) ───────────────────
       // Trunk A — shared by slots 1-3. Trunk B — shared by slots 4-6 (assign when ready).
@@ -5846,25 +5917,42 @@
             fixedPlacements: slot.positions.slice(),
             impostorStandalone: true,
             treeScale: 1,
-            lodDistance: 80,
+            lodDistance: lodParams.pineImpCrossfadeDist,
             centerPosition: [0, 0, 0],
             placementCapacity: Math.max(1024, slot.positions.length + 512),
             impostorSettings: {
               lod2Distance: 9999,
-              fadeRange: 6,
+              fadeRange: lodParams.pineImpBlendWidth,
               textureSize: 1024,
               spritesPerSide: 8,
+              lightScale: lodParams.pineLightScale,
+              normalStrength: lodParams.pineNormalStrength,
+              rimStrength: lodParams.pineRimStrength,
+              rimPower: lodParams.pineRimPower,
+              diffuseWrap: lodParams.pineDiffuseWrap,
+              parallaxStrength: lodParams.pineParallaxStrength,
+              lodDither: lodParams.pineLodDither,
+              edgeSmoothScale: lodParams.pineEdgeSmoothScale,
+              alphaClamp: lodParams.pineAlphaClamp,
+              fogEnabled: lodParams.pineFogEnabled,
+              fogNear: lodParams.pineFogNear,
+              fogFar: lodParams.pineFogFar,
+              fogColor: new THREE.Color().set(lodParams.pineFogColor).getHex(),
+              rimColor: new THREE.Color().set(lodParams.pineRimColor),
               /** false = bake trunk + foliage; true picks one mesh by volume (often leaves-only on pines) */
               bakeOnlyLargestMesh: false,
-              fogEnabled: false,
               /** CSM / compare samplers break WGSL in this editor; no real-time shadow on billboards */
               skipShadow: true,
+              /** Let scene.fogNode (height + distance TSL fog) affect impostor billboards */
+              useSceneFog: true,
             },
           })
             .then((api) => {
               slot.pineImpostorBusy = false;
               slot.pineImpostorApi = api;
               scene.add(api.group);
+              applyPineImpostorMaterialFromLodParams();
+              applyLodTierVisibility();
               if (!api.rebuildPlacements(slot.positions)) {
                 scene.remove(api.group);
                 api.dispose();
@@ -5932,6 +6020,7 @@
               slot.pineImpostorApi.rebuildPlacements(slot.positions);
             }
           }
+          applyLodTierVisibility();
         };
         function _tryBuildSlot(slot) {
           if (!slot.lod0Defs) return;
@@ -8702,6 +8791,161 @@
         lodFolder.addBinding(lodParams, "totalTrees",  { label: "Total trees",  readonly: true });
         lodFolder.addBinding(lodParams, "chunksVisible", { label: "Chunks visible", readonly: true });
         lodFolder.addBinding(lodParams, "chunks",      { label: "Chunks total",  readonly: true });
+        const fPineLight = lodFolder.addFolder({
+          title: "Pine · impostor light (WebGPU)",
+          expanded: false,
+        });
+        fPineLight
+          .addBinding(lodParams, "pineLightScale", {
+            label: "Light scale",
+            min: 0.1,
+            max: 2.5,
+            step: 0.05,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        const fPineShade = lodFolder.addFolder({
+          title: "Pine · impostor shading",
+          expanded: false,
+        });
+        fPineShade
+          .addBinding(lodParams, "pineNormalStrength", {
+            label: "Normal strength",
+            min: 0,
+            max: 1,
+            step: 0.02,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        fPineShade
+          .addBinding(lodParams, "pineRimStrength", {
+            label: "Rim strength",
+            min: 0,
+            max: 0.5,
+            step: 0.01,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        fPineShade
+          .addBinding(lodParams, "pineRimPower", {
+            label: "Rim power",
+            min: 1,
+            max: 8,
+            step: 0.5,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        fPineShade
+          .addBinding(lodParams, "pineRimColor", {
+            label: "Rim color",
+            view: "color",
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        fPineShade
+          .addBinding(lodParams, "pineDiffuseWrap", {
+            label: "Diffuse wrap",
+            min: 0,
+            max: 0.8,
+            step: 0.02,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        fPineShade
+          .addBinding(lodParams, "pineParallaxStrength", {
+            label: "Depth parallax",
+            min: 0,
+            max: 0.4,
+            step: 0.01,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        const fPineBillboard = lodFolder.addFolder({
+          title: "Pine · billboard fade (shader)",
+          expanded: false,
+        });
+        fPineBillboard
+          .addBinding(lodParams, "pineImpCrossfadeDist", {
+            label: "Crossfade distance",
+            min: 12,
+            max: 120,
+            step: 1,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        fPineBillboard
+          .addBinding(lodParams, "pineImpBlendWidth", {
+            label: "Blend width",
+            min: 2,
+            max: 36,
+            step: 0.5,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        fPineBillboard
+          .addBinding(lodParams, "pineLodDither", {
+            label: "Stochastic dither mix",
+            min: 0,
+            max: 1,
+            step: 0.02,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        const fLodVis = lodFolder.addFolder({
+          title: "LOD debug visibility",
+          expanded: false,
+        });
+        fLodVis
+          .addBinding(lodParams, "lodVisMesh0", { label: "LOD0 mesh (near)" })
+          .on("change", () => applyLodTierVisibility());
+        fLodVis
+          .addBinding(lodParams, "lodVisMesh1", { label: "LOD1 mesh (mid)" })
+          .on("change", () => applyLodTierVisibility());
+        fLodVis
+          .addBinding(lodParams, "lodVisImpostor", { label: "LOD2 impostor" })
+          .on("change", () => applyLodTierVisibility());
+        fLodVis
+          .addBinding(lodParams, "lodVisMega", { label: "LOD3 mega" })
+          .on("change", () => applyLodTierVisibility());
+        const fPineEdge = lodFolder.addFolder({
+          title: "Pine · edge AA",
+          expanded: false,
+        });
+        fPineEdge
+          .addBinding(lodParams, "pineEdgeSmoothScale", {
+            label: "Smooth scale",
+            min: 0,
+            max: 4,
+            step: 0.1,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        fPineEdge
+          .addBinding(lodParams, "pineAlphaClamp", {
+            label: "Alpha cutoff",
+            min: 0.01,
+            max: 0.5,
+            step: 0.01,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        const fPineFog = lodFolder.addFolder({
+          title: "Pine · impostor distance fog",
+          expanded: false,
+        });
+        fPineFog
+          .addBinding(lodParams, "pineFogEnabled", { label: "Fog on billboards" })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        fPineFog
+          .addBinding(lodParams, "pineFogNear", {
+            label: "Fog near",
+            min: 0,
+            max: 120,
+            step: 1,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        fPineFog
+          .addBinding(lodParams, "pineFogFar", {
+            label: "Fog far",
+            min: 20,
+            max: 400,
+            step: 2,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        fPineFog
+          .addBinding(lodParams, "pineFogColor", {
+            label: "Fog color",
+            view: "color",
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
         lodFolder.addButton({ title: "Clear active slot" }).on("click", () => {
           const slot = LOD_SLOTS[activeLodSlot];
           slot.positions = [];
