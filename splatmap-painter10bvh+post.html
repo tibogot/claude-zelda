@@ -349,6 +349,7 @@
       import { ao as gtaoEffect } from "three/addons/tsl/display/GTAONode.js";
       import { denoise } from "three/addons/tsl/display/DenoiseNode.js";
       import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
+      import { createLakeShader, LAKE_DEFAULTS } from "./lake-shader.js";
       import {
         valueNoise2D,
         perlinNoise2D,
@@ -5102,45 +5103,7 @@
           return vec4(finalColor, waterAlpha);
         });
 
-        // ── LAKE FRAG (calm surface, depth colour, gentle shimmer) ──────────
-        const buildLakeFrag = Fn(() => {
-          const worldXZ = positionWorld.xz;
-
-          // Two cross-moving FBM layers for gentle ripple shimmer
-          const t1 = uWaterTime.mul(0.07);
-          const t2 = uWaterTime.mul(0.04);
-          const uv1 = worldXZ.mul(0.12).add(vec2(t1, t1.mul(0.6)));
-          const uv2 = worldXZ.mul(0.07).add(vec2(t2.negate(), t2.mul(1.2)));
-          const wave = _wFbm2(uv1).mul(0.6).add(_wFbm2(uv2).mul(0.4));
-
-          // Depth colour — deeper = uWBDeepColor, shallower = uWBHighlight
-          const terrainAbove = _shoreAboveFn();
-          const depth = clamp(terrainAbove.negate().mul(0.25), float(0), float(1));
-          const shallowFac = clamp(float(1).sub(depth.mul(2.5)), float(0), float(1));
-          const depthColor = mix(uWBDeepColor, uWBHighlight, shallowFac);
-
-          // Shimmer from waves
-          const shimmer = wave.sub(0.5).mul(0.25);
-          const surfaceColor = mix(depthColor, uWBMidColor, clamp(shimmer.add(0.5), float(0), float(1)));
-
-          // Fake Fresnel — graze angle adds highlight tint
-          const viewDir = normalize(cameraPosition.sub(positionWorld));
-          const vDotN   = clamp(dot(viewDir, vec3(0, 1, 0)), float(0), float(1));
-          const fresnel = pow(float(1).sub(vDotN), float(3.0)).mul(0.35);
-          const finalSurface = mix(surfaceColor, uWBHighlight, fresnel);
-
-          // Alpha — deeper = more opaque
-          const waterAlpha = mix(float(0.45), float(0.88), depth).mul(uWBOpacity);
-
-          // Shore foam (reuses ocean approach)
-          const onShore   = step(float(0), terrainAbove);
-          const line      = sub(float(1), smoothstep(float(0), uWBLineWidth, terrainAbove)).mul(onShore);
-          const glow      = exp(terrainAbove.div(max(uWBGlowWidth, float(0.001))).mul(float(-1))).mul(onShore);
-          const foamAlpha = saturate(max(line, glow.mul(float(0.5))).mul(uWBLineIntensity));
-          const foamCol   = mix(uWGlowColor, uWBLineColor, line);
-          const finalColor = saturate(finalSurface.add(foamCol.mul(foamAlpha)));
-          return vec4(finalColor, waterAlpha);
-        });
+        // Lake frag now provided by lake-shader.js module (see lakeShader above)
 
         // ── RIVER STYLIZED uniforms ───────────────────────────────────────
         const rsU = {
@@ -5404,8 +5367,8 @@
         const waterOceanTemplateMat = new MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide });
         { const f = buildWaterBodyFrag(); waterOceanTemplateMat.colorNode = f.rgb; waterOceanTemplateMat.opacityNode = f.a; }
 
-        const waterLakeTemplateMat = new MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide });
-        { const f = buildLakeFrag(); waterLakeTemplateMat.colorNode = f.rgb; waterLakeTemplateMat.opacityNode = f.a; }
+        const lakeShader = createLakeShader({ heightTex, terrainSize: TERRAIN_SIZE });
+        const waterLakeTemplateMat = lakeShader.material;
 
         function makeWaterMat(style) {
           return (style === "Lake" ? waterLakeTemplateMat : waterOceanTemplateMat).clone();
@@ -5632,6 +5595,7 @@
         }
 
         function syncWaterBodyMat() {
+          // Ocean-style uniforms
           uWBScale.value         = PARAMS.water.scale;
           uWBEdgeThresh.value    = PARAMS.water.edgeThreshold;
           uWBFlowZ.value         = PARAMS.water.flowZ;
@@ -5647,6 +5611,14 @@
           uWBGlowWidth.value     = PARAMS.water.glowWidth;
           uWBLineIntensity.value = PARAMS.water.waterlineIntensity;
           uWBLineColor.value.set(PARAMS.water.foamColor);
+          // Lake-style uniforms (via module)
+          lakeShader.syncParams({
+            deepColor:      PARAMS.water.deepColor,
+            midColor:       PARAMS.water.midColor,
+            highlightColor: PARAMS.water.highlightColor,
+            opacity:        PARAMS.water.opacity,
+            foamColor:      PARAMS.water.foamColor,
+          });
         }
 
         function syncRiverMat() {
@@ -5796,14 +5768,23 @@
           }
         }
 
+        const LAKE_PLANE_SEGMENTS = 64;
+
+        function makeWaterGeo(w, l, style) {
+          const segs = style === "Lake" ? LAKE_PLANE_SEGMENTS : 1;
+          const geo = new THREE.PlaneGeometry(w, l, segs, segs);
+          geo.rotateX(-Math.PI / 2);
+          return geo;
+        }
+
         function placeWater(wx, wy, wz) {
           const preset = WATER_PRESETS[PARAMS.water.preset] ?? WATER_PRESETS["Small lake"];
-          const geo = new THREE.PlaneGeometry(preset.w, preset.l);
-          geo.rotateX(-Math.PI / 2);
+          const geo = makeWaterGeo(preset.w, preset.l, PARAMS.water.style);
           const mesh = new THREE.Mesh(geo, makeWaterMat(PARAMS.water.style));
           mesh.userData.waterStyle = PARAMS.water.style;
           mesh.position.set(wx, wy + PARAMS.water.sinkOffset, wz);
           mesh.renderOrder = 2;
+          mesh.frustumCulled = false;
           scene.add(mesh);
           waterObjects.push(mesh);
           selectWater(mesh);
@@ -5815,8 +5796,7 @@
           selectWater(null);
           data.forEach((d) => {
             const style = d.waterStyle ?? "Ocean";
-            const geo = new THREE.PlaneGeometry(1, 1);
-            geo.rotateX(-Math.PI / 2);
+            const geo = makeWaterGeo(1, 1, style);
             const mesh = new THREE.Mesh(geo, makeWaterMat(style));
             mesh.userData.waterStyle = style;
             mesh.position.set(d.x, d.y, d.z);
@@ -12159,6 +12139,9 @@
             FOLIAGE_SLOTS.forEach(s => { if (s.system) s.system.update(elapsed, null); });
           }
           uWaterTime.value = elapsed;
+          // Update lake shader (time + bob for Lake-style water bodies)
+          const lakeBodies = waterObjects.filter(m => m.userData.waterStyle === "Lake");
+          lakeShader.update(dt, elapsed, lakeBodies);
           if (waterfallObjects.length > 0) wfU.wfFlowTime.value += dt * wfU.wfFlowSpeed.value;
           uWCamXZ.value.set(camera.position.x, camera.position.z);
           _syncRipples();
