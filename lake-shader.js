@@ -27,7 +27,7 @@ import {
   Fn, uniform, float, vec2, vec3, vec4, uv,
   mix, smoothstep, step, floor, fract, sin, cos,
   dot, length, min, max, exp, abs, pow, saturate, clamp,
-  normalize, texture, positionWorld, positionLocal,
+  normalize, texture, uniformTexture, positionWorld, positionLocal,
   positionView, cameraPosition, mx_noise_float, Loop,
   modelWorldMatrix, modelWorldMatrixInverse,
 } from "three/tsl";
@@ -59,7 +59,7 @@ export const LAKE_DEFAULTS = {
   shallowAlpha:    0.5,
 
   // Reflections (host must provide RT)
-  reflectEnabled:    false,
+  reflectEnabled:    true,
   reflectStrength:   0.52,
   reflectDistort:    0.034,
 
@@ -293,7 +293,12 @@ export function createLakeShader({ heightTex, terrainSize }) {
   u.reflectStrength  = uniform(LAKE_DEFAULTS.reflectStrength);
   u.reflectDistort   = uniform(LAKE_DEFAULTS.reflectDistort);
   u.reflectVP        = uniform(new THREE.Matrix4());
-  u.reflectTex       = uniform(null); // set by host if reflection RT exists
+  // 1×1 white placeholder — replaced by host with reflection RT texture
+  const _placeholderTex = new THREE.DataTexture(
+    new Uint8Array([128, 128, 128, 255]), 1, 1, THREE.RGBAFormat,
+  );
+  _placeholderTex.needsUpdate = true;
+  u.reflectTex       = uniformTexture(_placeholderTex);
 
   // Vertex displacement
   u.vertNoiseAmp     = uniform(LAKE_DEFAULTS.vertNoiseAmp);
@@ -531,10 +536,25 @@ export function createLakeShader({ heightTex, terrainSize }) {
     const fresnel = pow(float(1).sub(saturate(NdotV)), u.fresnelExp);
     const absorptionSky = absorptionBase.add(u.highlightColor.mul(fresnel).mul(u.fresnelSky));
 
-    // ── Reflections (optional — host must provide RT) ────────────────────────
-    // For now, reflections are a simple Fresnel-modulated highlight boost.
-    // When reflectTex is provided, we'll sample it with distorted UVs.
-    const surfaceColor = absorptionSky;
+    // ── Planar reflections (host provides RT + VP matrix) ──────────────────
+    const clipR  = u.reflectVP.mul(vec4(positionWorld, float(1)));
+    const wClip  = clipR.w;
+    const ndcR   = clipR.xy.div(max(abs(wClip), float(1e-4)));
+    const uvR0   = ndcR.mul(0.5).add(0.5);
+    // Distort with surface normal perturbation + flip Y
+    const uvR    = vec2(uvR0.x, float(1).sub(uvR0.y))
+      .add(vec2(dnx, dnz).mul(u.reflectDistort));
+    const uvRc   = vec2(
+      clamp(uvR.x, float(0.02), float(0.98)),
+      clamp(uvR.y, float(0.02), float(0.98)),
+    );
+    const reflSample = texture(u.reflectTex, uvRc).rgb;
+    const reflFront  = step(float(0), wClip); // only in front of reflect cam
+    const reflAmt    = fresnel
+      .mul(u.reflectStrength)
+      .mul(reflFront)
+      .mul(u.reflectEnabled);
+    const surfaceColor = mix(absorptionSky, reflSample, reflAmt);
 
     // ── Alpha ────────────────────────────────────────────────────────────────
     const alphaDepthThin = mix(u.shallowAlpha, float(1), depthBlend);

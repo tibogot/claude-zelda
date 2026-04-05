@@ -5370,6 +5370,71 @@
         const lakeShader = createLakeShader({ heightTex, terrainSize: TERRAIN_SIZE });
         const waterLakeTemplateMat = lakeShader.material;
 
+        // ── LAKE PLANAR REFLECTION ───────────────────────────────────────────
+        const LAKE_REFLECT_SCALE = 0.5; // half-res
+        let lakeReflectRT = new THREE.RenderTarget(4, 4, {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          depthBuffer: true,
+        });
+        lakeReflectRT.texture.name = "LakeReflect";
+        const lakeReflectCam = new THREE.PerspectiveCamera(45, 1, 0.05, 4000);
+        const _reflVPHelper = new THREE.Matrix4();
+        const _reflClearColor = new THREE.Color(0x1a3048);
+
+        function updateLakeReflectCamera(waterY) {
+          lakeReflectCam.fov = camera.fov;
+          lakeReflectCam.near = camera.near;
+          lakeReflectCam.far = camera.far;
+          const w = Math.max(4, Math.floor(window.innerWidth * LAKE_REFLECT_SCALE));
+          const h = Math.max(4, Math.floor(window.innerHeight * LAKE_REFLECT_SCALE));
+          lakeReflectCam.aspect = w / h;
+          lakeReflectCam.updateProjectionMatrix();
+          // Mirror camera across water plane Y
+          lakeReflectCam.position.copy(camera.position);
+          lakeReflectCam.position.y = 2 * waterY - camera.position.y;
+          const t = orbit.target.clone();
+          t.y = 2 * waterY - t.y;
+          lakeReflectCam.up.set(0, -1, 0);
+          lakeReflectCam.lookAt(t);
+          lakeReflectCam.updateMatrixWorld(true);
+          // Resize RT if needed
+          if (lakeReflectRT.width !== w || lakeReflectRT.height !== h) {
+            lakeReflectRT.setSize(w, h);
+          }
+        }
+
+        function renderLakeReflection(lakeBodies) {
+          if (lakeBodies.length === 0) return;
+          const waterY = lakeBodies[0].position.y;
+          updateLakeReflectCamera(waterY);
+          // VP matrix for shader
+          _reflVPHelper.multiplyMatrices(
+            lakeReflectCam.projectionMatrix,
+            lakeReflectCam.matrixWorldInverse,
+          );
+          lakeShader.uniforms.reflectVP.value.copy(_reflVPHelper);
+          // Hide water bodies + gizmo for reflection pass
+          const savedVis = [];
+          for (const m of waterObjects) { savedVis.push(m.visible); m.visible = false; }
+          const tcVis = tcHelper.visible;
+          tcHelper.visible = false;
+          // Render
+          const prevBg = scene.background;
+          scene.background = _reflClearColor;
+          const prevRT = renderer.getRenderTarget();
+          renderer.setRenderTarget(lakeReflectRT);
+          renderer.render(scene, lakeReflectCam);
+          renderer.setRenderTarget(prevRT);
+          scene.background = prevBg;
+          // Restore
+          for (let i = 0; i < waterObjects.length; i++) waterObjects[i].visible = savedVis[i];
+          tcHelper.visible = tcVis;
+          // Pass texture to shader
+          lakeShader.uniforms.reflectTex.value = lakeReflectRT.texture;
+          lakeShader.uniforms.reflectEnabled.value = 1;
+        }
+
         function makeWaterMat(style) {
           return (style === "Lake" ? waterLakeTemplateMat : waterOceanTemplateMat).clone();
         }
@@ -12368,6 +12433,8 @@
             }
           }
           stats.update();
+          // Lake planar reflection pre-pass (only when lake bodies exist)
+          if (lakeBodies.length > 0) renderLakeReflection(lakeBodies);
           (postParams.enabled ? renderPipeline : simplePipeline).render();
           // Throttled chunk stats DOM update (reuses _lastPaneRefresh timer)
           if (performance.now() - _lastPaneRefresh < _PANE_REFRESH_INTERVAL) {
