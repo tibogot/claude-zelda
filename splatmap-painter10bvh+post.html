@@ -1374,7 +1374,20 @@
         stemBase:       "#1f5c32",
         stemTop:        "#6bae6e",
         stemStaticCurve: 0.1,
+        interactRadius: 1.5,
+        interactStrength: 0.4,
+        interactGain: 0.85,
+        windAmp: 0.042,
+        windSpeed: 1.12,
       };
+      function _syncFleurInteractionToSystem() {
+        if (!fleurSystem) return;
+        fleurSystem.setInteractionRadius(fleurParams.interactRadius);
+        fleurSystem.setInteractionStrength(fleurParams.interactStrength);
+        fleurSystem.setRepulseGain(fleurParams.interactGain);
+        fleurSystem.setWindAmp(fleurParams.windAmp);
+        fleurSystem.setWindSpeed(fleurParams.windSpeed);
+      }
       const fleurColorA = { preset: "main",   inner: FLEUR_PRESETS.main.inner,   outer: FLEUR_PRESETS.main.outer,   glow: FLEUR_PRESETS.main.glow   };
       const fleurColorB = { preset: "sakura", inner: FLEUR_PRESETS.sakura.inner, outer: FLEUR_PRESETS.sakura.outer, glow: FLEUR_PRESETS.sakura.glow };
 
@@ -6535,8 +6548,8 @@
             );
             fleurSystem.setStemColors(fleurParams.stemBase, fleurParams.stemTop);
             fleurSystem.setStemStaticCurve(fleurParams.stemStaticCurve);
+            _syncFleurInteractionToSystem();
           },
-          geminiGrassUniforms,
         );
 
         // ── AMBIENT FX SYSTEM ──
@@ -7217,6 +7230,13 @@
               paintBrush:      PARAMS.paintBrush,
               brushFalloff:    PARAMS.brushFalloff,
               sculptBrush:     PARAMS.sculptBrush,
+              fleurInteraction: {
+                interactRadius:   fleurParams.interactRadius,
+                interactStrength: fleurParams.interactStrength,
+                interactGain:     fleurParams.interactGain,
+                windAmp:          fleurParams.windAmp,
+                windSpeed:        fleurParams.windSpeed,
+              },
             },
           };
           zip.file("scene.json", JSON.stringify(meta, null, 2));
@@ -7440,6 +7460,18 @@
                 if (s.paintBrush != null) PARAMS.paintBrush = s.paintBrush;
                 if (s.brushFalloff != null) PARAMS.brushFalloff = s.brushFalloff;
                 if (s.sculptBrush != null) PARAMS.sculptBrush = s.sculptBrush;
+                if (s.fleurInteraction) {
+                  const fi = s.fleurInteraction;
+                  if (fi.interactRadius != null)
+                    fleurParams.interactRadius = fi.interactRadius;
+                  if (fi.interactStrength != null)
+                    fleurParams.interactStrength = fi.interactStrength;
+                  if (fi.interactGain != null)
+                    fleurParams.interactGain = fi.interactGain;
+                  if (fi.windAmp != null) fleurParams.windAmp = fi.windAmp;
+                  if (fi.windSpeed != null) fleurParams.windSpeed = fi.windSpeed;
+                  _syncFleurInteractionToSystem();
+                }
                 pane.refresh();
               }
               if (bakeBVH) bakeBVH();
@@ -9275,6 +9307,61 @@
         fleurFolder.addBinding(fleurParams, "scaleMax",      { label: "Scale max",      min: 0.1, max: 3,   step: 0.05 });
         fleurFolder.addBinding(fleurParams, "hoverBase",     { label: "Hover height",   min: 0.0, max: 1.0, step: 0.01 });
         fleurFolder.addBinding(fleurParams, "hoverVariance", { label: "Hover variance", min: 0.0, max: 0.5, step: 0.01 });
+
+        const fleurInteractFolder = fleurFolder.addFolder({
+          title: "Interaction (play / orbit)",
+          expanded: false,
+        });
+        fleurInteractFolder
+          .addBinding(fleurParams, "interactRadius", {
+            label: "Radius",
+            min: 0.25,
+            max: 8,
+            step: 0.05,
+          })
+          .on("change", () => {
+            _syncFleurInteractionToSystem();
+          });
+        fleurInteractFolder
+          .addBinding(fleurParams, "interactStrength", {
+            label: "Lean (rad)",
+            min: 0,
+            max: 1.2,
+            step: 0.01,
+          })
+          .on("change", () => {
+            _syncFleurInteractionToSystem();
+          });
+        fleurInteractFolder
+          .addBinding(fleurParams, "interactGain", {
+            label: "Gain",
+            min: 0,
+            max: 2.5,
+            step: 0.05,
+          })
+          .on("change", () => {
+            _syncFleurInteractionToSystem();
+          });
+        fleurInteractFolder
+          .addBinding(fleurParams, "windAmp", {
+            label: "Wind sway (rad)",
+            min: 0,
+            max: 0.14,
+            step: 0.002,
+          })
+          .on("change", () => {
+            _syncFleurInteractionToSystem();
+          });
+        fleurInteractFolder
+          .addBinding(fleurParams, "windSpeed", {
+            label: "Wind speed",
+            min: 0.2,
+            max: 3.5,
+            step: 0.05,
+          })
+          .on("change", () => {
+            _syncFleurInteractionToSystem();
+          });
 
         fleurFolder.addButton({ title: "Clear all fleurs" }).on("click", () => {
           if (fleurSystem) fleurSystem.clear();
@@ -12875,6 +12962,8 @@
                 playerPos.y,
                 playerPos.z,
               );
+            // Feed player pos to fleur interaction
+            if (fleurSystem) fleurSystem.update(playerPos, elapsed);
             // Feed player pos to wind-enabled foliage
             FOLIAGE_SLOTS.forEach(s => {
               if (s.system) s.system.update(elapsed, playerPos);
@@ -12885,6 +12974,16 @@
           // Foliage wind time (always ticks — player interaction only in play mode above)
           if (currentMode !== "play") {
             FOLIAGE_SLOTS.forEach(s => { if (s.system) s.system.update(elapsed, null); });
+            // Gemini grass uses uPlayerPos for interaction; in editor drive it from camera.
+            if (geminiGrassUniforms) {
+              geminiGrassUniforms.uPlayerPos.value.set(
+                camera.position.x,
+                camera.position.y,
+                camera.position.z,
+              );
+            }
+            // Fleurs: drive from camera in editor mode too
+            if (fleurSystem) fleurSystem.update(camera.position, elapsed);
           }
           uWaterTime.value = elapsed;
           // Update lake shader (time + bob for Lake-style water bodies)

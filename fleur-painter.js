@@ -11,16 +11,21 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import {
   and,
   attribute,
+  cos,
+  dot,
   float,
   Fn,
   length,
   max,
+  min,
   mix,
-  modelWorldMatrix,
   modelWorldMatrixInverse,
+  negate,
   normalWorld,
+  normalize,
   positionLocal,
   pow,
+  sin,
   smoothstep,
   step,
   texture,
@@ -222,17 +227,39 @@ function createMergedFlowerGeometry() {
   return merged;
 }
 
-function createFleurMaterial(innerHex, outerHex, glow, alphaTex, matOpts) {
-  const shared = matOpts?.sharedGrassUniforms;
-  const uStemStaticCurve = matOpts?.uStemStaticCurve ?? uniform(0.1);
+/** Local Y of planted foot: min Y for ground blooms; stem-ground ring Y for stemmed (all verts same). */
+function addInteractPivotYAttribute(geo) {
+  const pos = geo.attributes.position;
+  const fp = geo.attributes.flowerPart;
+  let minY = Infinity;
+  let maxStemY = -Infinity;
+  for (let i = 0; i < pos.count; i++) {
+    const y = pos.getY(i);
+    minY = Math.min(minY, y);
+    if (fp.getX(i) > 0.5) maxStemY = Math.max(maxStemY, y);
+  }
+  const pivotY = Number.isFinite(maxStemY) ? maxStemY : minY;
+  const arr = new Float32Array(pos.count);
+  arr.fill(pivotY);
+  geo.setAttribute(
+    "interactPivotY",
+    new THREE.Float32BufferAttribute(arr, 1),
+  );
+}
 
-  const uPlayerPos = shared?.uPlayerPos ?? uniform(new THREE.Vector3(0, 0, 0));
-  const uInteractionEnabled =
-    shared?.uInteractionEnabled ?? uniform(1);
+function createFleurMaterial(innerHex, outerHex, glow, alphaTex, matOpts) {
+  const uStemStaticCurve = matOpts?.uStemStaticCurve ?? uniform(0.1);
+  const uRepulseGain =
+    matOpts?.uFleurRepulseGain ?? uniform(0.85);
+  const uFleurTime = matOpts?.uFleurTime ?? uniform(0);
+  const uWindAmp = matOpts?.uWindAmp ?? uniform(0.042);
+  const uWindSpeed = matOpts?.uWindSpeed ?? uniform(1.12);
+
+  const uPlayerPos = matOpts?.uPlayerPos ?? uniform(new THREE.Vector3(0, 9999, 0));
   const uInteractionRadius =
-    shared?.uInteractionRadius ?? uniform(1.5);
+    matOpts?.uInteractionRadius ?? uniform(1.5);
   const uInteractionStrength =
-    shared?.uInteractionStrength ?? uniform(0.7);
+    matOpts?.uInteractionStrength ?? uniform(0.7);
 
   const uInner = uniform(new THREE.Color(innerHex));
   const uOuter = uniform(new THREE.Color(outerHex));
@@ -248,6 +275,9 @@ function createFleurMaterial(innerHex, outerHex, glow, alphaTex, matOpts) {
 
   const aFlowerPart = attribute("flowerPart", "float");
   const aStemT = attribute("stemT", "float");
+  /** Per-instance world XZ (ground contact); InstancedMesh + positionNode lacks reliable instance world matrix. */
+  const aInstanceXZ = attribute("instanceFleurXZ", "vec2");
+  const aPivotY = attribute("interactPivotY", "float");
   const isStem = aFlowerPart.greaterThan(float(0.5));
 
   const uvCoord = uv();
@@ -292,35 +322,82 @@ function createFleurMaterial(innerHex, outerHex, glow, alphaTex, matOpts) {
   mat.depthWrite = true;
   mat.side = THREE.DoubleSide;
 
-  // Stem-only: static lean + player push. (Wind disabled — bloom verts stay static; stem-only wind looked odd.)
+  // Static stem lean (vertex-varying) + rigid whole-fleur tilt vs player (same angle on stem + bloom).
   mat.positionNode = Fn(() => {
-    // stemT: 0 = ground base, 1 = bloom junction — flex 0 at both ends so attach ring stays welded to bloom.
     const flex = aStemT
       .mul(pow(float(1).sub(aStemT), float(1.75)))
       .mul(float(8.35));
     const amp = flex.mul(aFlowerPart);
-
-    const rootW = modelWorldMatrix.mul(vec4(0, 0, 0, 1)).xyz;
-
     const staticLean = vec3(uStemStaticCurve.mul(amp), float(0), float(0));
 
-    const playerXZ = vec2(uPlayerPos.x, uPlayerPos.z);
-    const rootXZ = vec2(rootW.x, rootW.z);
-    const pDist = length(rootXZ.sub(playerXZ));
-    const pFall = float(1)
-      .sub(smoothstep(float(0.5), uInteractionRadius, pDist))
-      .mul(uInteractionEnabled);
-    const vx = rootW.x.sub(uPlayerPos.x);
-    const vz = rootW.z.sub(uPlayerPos.z);
-    const pd = length(vec2(vx, vz)).max(float(0.001));
-    const pushW = vec3(vx.div(pd), float(0), vz.div(pd))
-      .mul(uInteractionStrength)
-      .mul(float(0.18))
-      .mul(pFall)
-      .mul(amp);
-    const pushL = modelWorldMatrixInverse.mul(vec4(pushW, float(0))).xyz;
+    const pivot = vec3(float(0), aPivotY, float(0));
 
-    return positionLocal.add(staticLean).add(pushL);
+    const playerXZ = vec2(uPlayerPos.x, uPlayerPos.z);
+    const bladeXZ = aInstanceXZ;
+    const pDist = length(bladeXZ.sub(playerXZ));
+    const pFall = mix(
+      float(1),
+      float(0),
+      smoothstep(float(0.35), uInteractionRadius, pDist),
+    );
+    const pAng = negate(mix(float(0), uInteractionStrength, pFall)).mul(
+      uRepulseGain,
+    );
+    const pTo = normalize(
+      vec3(
+        playerXZ.x.sub(bladeXZ.x),
+        float(0),
+        playerXZ.y.sub(bladeXZ.y),
+      ).add(vec3(float(0.001), float(0), float(0.001))),
+    );
+    const pAxW = vec3(pTo.z, float(0), negate(pTo.x));
+    const pAx = normalize(
+      modelWorldMatrixInverse.mul(vec4(pAxW, float(0))).xyz,
+    );
+
+    // Idle wind: small rigid sway about the foot pivot (before player tilt).
+    const windAx = normalize(
+      modelWorldMatrixInverse.mul(vec4(float(1), float(0), float(0), float(0))).xyz,
+    );
+    const tW = uFleurTime.mul(uWindSpeed);
+    const windAng = sin(tW)
+      .mul(uWindAmp)
+      .add(sin(tW.mul(float(2.17))).mul(uWindAmp).mul(float(0.31)));
+    const pArmW = positionLocal.sub(pivot);
+    const cW = cos(windAng);
+    const sW = sin(windAng);
+    const pDotW = dot(pArmW, windAx);
+    const pCrossW = vec3(
+      windAx.y.mul(pArmW.z).sub(windAx.z.mul(pArmW.y)),
+      windAx.z.mul(pArmW.x).sub(windAx.x.mul(pArmW.z)),
+      windAx.x.mul(pArmW.y).sub(windAx.y.mul(pArmW.x)),
+    );
+    const pWindRel = vec3(
+      pArmW.x.mul(cW).add(pCrossW.x.mul(sW)).add(windAx.x.mul(pDotW).mul(float(1).sub(cW))),
+      pArmW.y.mul(cW).add(pCrossW.y.mul(sW)).add(windAx.y.mul(pDotW).mul(float(1).sub(cW))),
+      pArmW.z.mul(cW).add(pCrossW.z.mul(sW)).add(windAx.z.mul(pDotW).mul(float(1).sub(cW))),
+    );
+    const pAfterWind = pWindRel.add(pivot);
+
+    // Player tilt: same rigid rod, stacked on wind.
+    const intAngle = pAng;
+    const pArm = pAfterWind.sub(pivot);
+    const cI = cos(intAngle);
+    const sI = sin(intAngle);
+    const pDotAx = dot(pArm, pAx);
+    const pCrossAx = vec3(
+      pAx.y.mul(pArm.z).sub(pAx.z.mul(pArm.y)),
+      pAx.z.mul(pArm.x).sub(pAx.x.mul(pArm.z)),
+      pAx.x.mul(pArm.y).sub(pAx.y.mul(pArm.x)),
+    );
+    const pRotRel = vec3(
+      pArm.x.mul(cI).add(pCrossAx.x.mul(sI)).add(pAx.x.mul(pDotAx).mul(float(1).sub(cI))),
+      pArm.y.mul(cI).add(pCrossAx.y.mul(sI)).add(pAx.y.mul(pDotAx).mul(float(1).sub(cI))),
+      pArm.z.mul(cI).add(pCrossAx.z.mul(sI)).add(pAx.z.mul(pDotAx).mul(float(1).sub(cI))),
+    );
+    const pRigid = pRotRel.add(pivot);
+
+    return pRigid.add(staticLean);
   })();
 
   mat._uInner = uInner;
@@ -362,11 +439,21 @@ export function createFleurSystem(
   scene,
   sampleHeight,
   onReady,
-  sharedGrassUniforms,
 ) {
   let positions = [];
   const dummy = new THREE.Object3D();
   const uStemStaticCurve = uniform(0.1);
+  /** Fleur-only interaction scale (subtle repulse). */
+  const uFleurRepulseGain = uniform(0.85);
+
+  // ── Own interaction uniforms (independent of gemini grass) ──
+  const uPlayerPos = uniform(new THREE.Vector3(0, 9999, 0));
+  const uInteractionRadius = uniform(1.5);
+  const uInteractionStrength = uniform(0.4);
+  const uFleurTime = uniform(0);
+  /** Max wind sway (radians), rigid about pivot. */
+  const uWindAmp = uniform(0.042);
+  const uWindSpeed = uniform(1.12);
 
   let geoGround = null;
   let geoStemmed = null;
@@ -406,7 +493,12 @@ export function createFleurSystem(
   }
 
   function makeIM(geo, mat, cap) {
-    const im = new THREE.InstancedMesh(geo, mat, cap);
+    const g = geo.clone();
+    g.setAttribute(
+      "instanceFleurXZ",
+      new THREE.InstancedBufferAttribute(new Float32Array(cap * 2), 2),
+    );
+    const im = new THREE.InstancedMesh(g, mat, cap);
     im.castShadow = false;
     im.receiveShadow = false;
     im.frustumCulled = true;
@@ -467,6 +559,7 @@ export function createFleurSystem(
 
       cell.im.count = count;
       const im = cell.im;
+      const ixAttr = im.geometry.getAttribute("instanceFleurXZ");
       for (let i = 0; i < count; i++) {
         const { x, z, rot, scale, yOffset } = positions[indices[i]];
         let groundY = sampleHeight(x, z) + yOffset;
@@ -477,8 +570,10 @@ export function createFleurSystem(
         dummy.scale.setScalar(scale);
         dummy.updateMatrix();
         im.setMatrixAt(i, dummy.matrix);
+        ixAttr.setXY(i, x, z);
       }
       im.instanceMatrix.needsUpdate = true;
+      ixAttr.needsUpdate = true;
       im.computeBoundingSphere();
     }
   }
@@ -647,7 +742,9 @@ export function createFleurSystem(
   function bootstrapMaterials() {
     if (geoGround) return;
     geoGround = createBloomGeometry();
+    addInteractPivotYAttribute(geoGround);
     geoStemmed = createMergedFlowerGeometry();
+    addInteractPivotYAttribute(geoStemmed);
     const sp = geoStemmed.attributes.position;
     stemLocalVerts = [];
     for (let i = 0; i < sp.count; i++) {
@@ -656,8 +753,14 @@ export function createFleurSystem(
       );
     }
     const matOpts = {
-      sharedGrassUniforms,
+      uPlayerPos,
+      uInteractionRadius,
+      uInteractionStrength,
       uStemStaticCurve,
+      uFleurRepulseGain,
+      uFleurTime,
+      uWindAmp,
+      uWindSpeed,
     };
     for (let i = 0; i < FLEUR_MASK_COUNT; i++) {
       matsA.push(
@@ -718,6 +821,26 @@ export function createFleurSystem(
     setColorB,
     setStemColors,
     setStemStaticCurve,
+    setRepulseGain(g) {
+      uFleurRepulseGain.value = g;
+    },
+    /**
+     * @param {THREE.Vector3|null|undefined} playerWorldPos
+     * @param {number} [timeSec] — clock elapsed for wind; omit to leave time unchanged
+     */
+    update(playerWorldPos, timeSec) {
+      if (timeSec !== undefined && timeSec !== null)
+        uFleurTime.value = timeSec;
+      if (playerWorldPos) {
+        uPlayerPos.value.set(playerWorldPos.x, playerWorldPos.y, playerWorldPos.z);
+      } else {
+        uPlayerPos.value.set(0, 9999, 0);
+      }
+    },
+    setInteractionRadius(r) { uInteractionRadius.value = r; },
+    setInteractionStrength(s) { uInteractionStrength.value = s; },
+    setWindAmp(a) { uWindAmp.value = a; },
+    setWindSpeed(s) { uWindSpeed.value = s; },
     getPositions,
     setPositions,
     clear,
