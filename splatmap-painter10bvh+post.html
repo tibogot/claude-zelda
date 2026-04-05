@@ -721,6 +721,21 @@
         terraceSharpness: 0.7,
         paintBrush: "smooth",
         brushFalloff: "smooth", // "smooth" | "linear" | "sphere" | "hard"
+        paintFbm: {
+          noiseScale: 4,
+          octaves: 4,
+          edgeStart: 0.4,
+          edgeBase: 0.3,
+          edgeNoise: 1.6,
+          centerPower: 2,
+        },
+        paintScatter: {
+          densityMult: 1,
+          dotRelSize: 0.12,
+          radiusRel: 0.85,
+          alphaMin: 0.5,
+          alphaVar: 0.5,
+        },
         slopeStart: 0.05,
         slopeEnd: 0.7,
         debugColors: false,
@@ -1538,13 +1553,21 @@
       const _fbmSplatCtx = _fbmSplatCanvas.getContext("2d");
 
       function _paintFbmSplat(ctx, cx, cy, r, g, b, alpha) {
+        const pf = PARAMS.paintFbm;
+        const oct = Math.max(1, Math.min(8, Math.round(pf.octaves)));
+        const edgeStart = Math.max(0.05, Math.min(0.95, pf.edgeStart));
+        const edgeSpan = Math.max(1e-3, 1 - edgeStart);
+        const edgeBase = Math.max(0, Math.min(1, pf.edgeBase));
+        const edgeNoise = Math.max(0, pf.edgeNoise);
+        const centerPower = Math.max(0.25, Math.min(6, pf.centerPower));
+        const noiseScale = Math.max(0.05, pf.noiseScale);
         const rad = Math.ceil(brushSize) + 1;
         const side = rad * 2;
         if (_fbmSplatCanvas.width < side) _fbmSplatCanvas.width = side;
         if (_fbmSplatCanvas.height < side) _fbmSplatCanvas.height = side;
         const imgData = _fbmSplatCtx.createImageData(side, side);
         const data = imgData.data;
-        const sc = 4.0 / brushSize;
+        const sc = noiseScale / Math.max(brushSize, 1e-6);
         for (let py = 0; py < rad * 2; py++) {
           for (let px = 0; px < rad * 2; px++) {
             const dx = px - rad,
@@ -1554,11 +1577,11 @@
             const n = _fbm(
               dx * sc + brushNoiseSeed,
               dy * sc + brushNoiseSeed + 77,
-              4,
+              oct,
             );
-            const blend = Math.max(0, (t - 0.4) / 0.6);
-            const edgeMod = 1 - blend + blend * (0.3 + n * 1.6);
-            const base = Math.max(0, (1 - t) * (1 - t));
+            const blend = Math.max(0, (t - edgeStart) / edgeSpan);
+            const edgeMod = 1 - blend + blend * (edgeBase + n * edgeNoise);
+            const base = Math.max(0, Math.pow(Math.max(0, 1 - t), centerPower));
             const w = Math.min(1, Math.max(0, base * edgeMod)) * alpha;
             const idx = (py * rad * 2 + px) * 4;
             data[idx] = r;
@@ -1573,15 +1596,26 @@
       }
 
       function _paintScatter(ctx, cx, cy, r, g, b, alpha) {
-        const count = Math.round(brushSize * 0.25 + 4);
-        const dotR = Math.max(2, brushSize * 0.12);
+        const ps = PARAMS.paintScatter;
+        const densityMult = Math.max(0.05, ps.densityMult);
+        const dotRel = Math.max(0.02, Math.min(0.5, ps.dotRelSize));
+        const radiusRel = Math.max(0.1, Math.min(1, ps.radiusRel));
+        const alphaMin = Math.max(0, Math.min(1, ps.alphaMin));
+        const alphaVar = Math.max(0, Math.min(1, ps.alphaVar));
+        const count = Math.max(
+          1,
+          Math.round((brushSize * 0.25 + 4) * densityMult),
+        );
+        const dotR = Math.max(2, brushSize * dotRel);
         ctx.globalCompositeOperation = "source-over";
         for (let i = 0; i < count; i++) {
           const angle = Math.random() * PI * 2;
-          const dist = Math.random() * brushSize * 0.85;
+          const dist = Math.random() * brushSize * radiusRel;
           const dx = cx + Math.cos(angle) * dist;
           const dy = cy + Math.sin(angle) * dist;
-          const a = alpha * (0.5 + Math.random() * 0.5);
+          const a =
+            alpha *
+            Math.min(1, alphaMin + Math.random() * alphaVar);
           const grad = ctx.createRadialGradient(dx, dy, 0, dx, dy, dotR);
           grad.addColorStop(0, `rgba(${r},${g},${b},${a})`);
           grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
@@ -6528,6 +6562,13 @@
               postFx:          JSON.parse(JSON.stringify(postParams)),
               river:           JSON.parse(JSON.stringify(PARAMS.river)),
               spline:          JSON.parse(JSON.stringify(PARAMS.spline)),
+              paintFbm:        JSON.parse(JSON.stringify(PARAMS.paintFbm)),
+              paintScatter:    JSON.parse(JSON.stringify(PARAMS.paintScatter)),
+              brushSize:       PARAMS.brushSize,
+              brushStrength:   PARAMS.brushStrength,
+              paintBrush:      PARAMS.paintBrush,
+              brushFalloff:    PARAMS.brushFalloff,
+              sculptBrush:     PARAMS.sculptBrush,
             },
           };
           zip.file("scene.json", JSON.stringify(meta, null, 2));
@@ -6736,6 +6777,21 @@
                 if (s.skyMode) setSkyMode(s.skyMode);
                 if (s.river)  Object.assign(PARAMS.river,  s.river);
                 if (s.spline) Object.assign(PARAMS.spline, s.spline);
+                if (s.paintFbm)
+                  Object.assign(PARAMS.paintFbm, s.paintFbm);
+                if (s.paintScatter)
+                  Object.assign(PARAMS.paintScatter, s.paintScatter);
+                if (s.brushSize != null) {
+                  PARAMS.brushSize = s.brushSize;
+                  brushSize = s.brushSize;
+                }
+                if (s.brushStrength != null) {
+                  PARAMS.brushStrength = s.brushStrength;
+                  brushStr = s.brushStrength;
+                }
+                if (s.paintBrush != null) PARAMS.paintBrush = s.paintBrush;
+                if (s.brushFalloff != null) PARAMS.brushFalloff = s.brushFalloff;
+                if (s.sculptBrush != null) PARAMS.sculptBrush = s.sculptBrush;
                 pane.refresh();
               }
               if (bakeBVH) bakeBVH();
@@ -7045,6 +7101,76 @@
             Sphere: "sphere",
             Hard: "hard",
           },
+        });
+        const paintAdvFolder = brushFolder.addFolder({
+          title: "FBM splat / Scatter",
+          expanded: false,
+        });
+        paintAdvFolder.addBinding(PARAMS.paintFbm, "noiseScale", {
+          label: "FBM noise scale",
+          min: 0.25,
+          max: 16,
+          step: 0.05,
+        });
+        paintAdvFolder.addBinding(PARAMS.paintFbm, "octaves", {
+          label: "FBM octaves",
+          min: 1,
+          max: 8,
+          step: 1,
+        });
+        paintAdvFolder.addBinding(PARAMS.paintFbm, "edgeStart", {
+          label: "FBM edge start",
+          min: 0.05,
+          max: 0.95,
+          step: 0.01,
+        });
+        paintAdvFolder.addBinding(PARAMS.paintFbm, "edgeBase", {
+          label: "FBM edge base",
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+        paintAdvFolder.addBinding(PARAMS.paintFbm, "edgeNoise", {
+          label: "FBM edge noise",
+          min: 0,
+          max: 4,
+          step: 0.05,
+        });
+        paintAdvFolder.addBinding(PARAMS.paintFbm, "centerPower", {
+          label: "FBM center falloff",
+          min: 0.25,
+          max: 6,
+          step: 0.05,
+        });
+        paintAdvFolder.addBinding(PARAMS.paintScatter, "densityMult", {
+          label: "Scatter density ×",
+          min: 0.05,
+          max: 4,
+          step: 0.05,
+        });
+        paintAdvFolder.addBinding(PARAMS.paintScatter, "dotRelSize", {
+          label: "Scatter dot size",
+          min: 0.02,
+          max: 0.5,
+          step: 0.01,
+        });
+        paintAdvFolder.addBinding(PARAMS.paintScatter, "radiusRel", {
+          label: "Scatter radius",
+          min: 0.1,
+          max: 1,
+          step: 0.01,
+        });
+        paintAdvFolder.addBinding(PARAMS.paintScatter, "alphaMin", {
+          label: "Scatter α min",
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+        paintAdvFolder.addBinding(PARAMS.paintScatter, "alphaVar", {
+          label: "Scatter α range",
+          min: 0,
+          max: 1,
+          step: 0.01,
         });
 
         // History (always visible)
