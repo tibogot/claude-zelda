@@ -12,14 +12,23 @@ import {
   and,
   attribute,
   float,
+  Fn,
+  length,
+  max,
   mix,
+  modelWorldMatrix,
+  modelWorldMatrixInverse,
   normalWorld,
+  positionLocal,
+  pow,
   smoothstep,
   step,
   texture,
   uniform,
   uv,
   vec2,
+  vec3,
+  vec4,
 } from "three/tsl";
 
 const MAX_FLEURS = 30000;
@@ -213,7 +222,18 @@ function createMergedFlowerGeometry() {
   return merged;
 }
 
-function createFleurMaterial(innerHex, outerHex, glow, alphaTex) {
+function createFleurMaterial(innerHex, outerHex, glow, alphaTex, matOpts) {
+  const shared = matOpts?.sharedGrassUniforms;
+  const uStemStaticCurve = matOpts?.uStemStaticCurve ?? uniform(0.1);
+
+  const uPlayerPos = shared?.uPlayerPos ?? uniform(new THREE.Vector3(0, 0, 0));
+  const uInteractionEnabled =
+    shared?.uInteractionEnabled ?? uniform(1);
+  const uInteractionRadius =
+    shared?.uInteractionRadius ?? uniform(1.5);
+  const uInteractionStrength =
+    shared?.uInteractionStrength ?? uniform(0.7);
+
   const uInner = uniform(new THREE.Color(innerHex));
   const uOuter = uniform(new THREE.Color(outerHex));
   const uGlow = uniform(float(glow));
@@ -272,11 +292,43 @@ function createFleurMaterial(innerHex, outerHex, glow, alphaTex) {
   mat.depthWrite = true;
   mat.side = THREE.DoubleSide;
 
+  // Stem-only: static lean + player push. (Wind disabled — bloom verts stay static; stem-only wind looked odd.)
+  mat.positionNode = Fn(() => {
+    // stemT: 0 = ground base, 1 = bloom junction — flex 0 at both ends so attach ring stays welded to bloom.
+    const flex = aStemT
+      .mul(pow(float(1).sub(aStemT), float(1.75)))
+      .mul(float(8.35));
+    const amp = flex.mul(aFlowerPart);
+
+    const rootW = modelWorldMatrix.mul(vec4(0, 0, 0, 1)).xyz;
+
+    const staticLean = vec3(uStemStaticCurve.mul(amp), float(0), float(0));
+
+    const playerXZ = vec2(uPlayerPos.x, uPlayerPos.z);
+    const rootXZ = vec2(rootW.x, rootW.z);
+    const pDist = length(rootXZ.sub(playerXZ));
+    const pFall = float(1)
+      .sub(smoothstep(float(0.5), uInteractionRadius, pDist))
+      .mul(uInteractionEnabled);
+    const vx = rootW.x.sub(uPlayerPos.x);
+    const vz = rootW.z.sub(uPlayerPos.z);
+    const pd = length(vec2(vx, vz)).max(float(0.001));
+    const pushW = vec3(vx.div(pd), float(0), vz.div(pd))
+      .mul(uInteractionStrength)
+      .mul(float(0.18))
+      .mul(pFall)
+      .mul(amp);
+    const pushL = modelWorldMatrixInverse.mul(vec4(pushW, float(0))).xyz;
+
+    return positionLocal.add(staticLean).add(pushL);
+  })();
+
   mat._uInner = uInner;
   mat._uOuter = uOuter;
   mat._uGlow = uGlow;
   mat._uStemBase = uStemBase;
   mat._uStemTop = uStemTop;
+  mat._uStemStaticCurve = uStemStaticCurve;
 
   return mat;
 }
@@ -306,9 +358,15 @@ function parseCellKey(key) {
   };
 }
 
-export function createFleurSystem(scene, sampleHeight, onReady) {
+export function createFleurSystem(
+  scene,
+  sampleHeight,
+  onReady,
+  sharedGrassUniforms,
+) {
   let positions = [];
   const dummy = new THREE.Object3D();
+  const uStemStaticCurve = uniform(0.1);
 
   let geoGround = null;
   let geoStemmed = null;
@@ -517,6 +575,10 @@ export function createFleurSystem(scene, sampleHeight, onReady) {
     }
   }
 
+  function setStemStaticCurve(v) {
+    uStemStaticCurve.value = v;
+  }
+
   function getPositions() {
     return positions.map((p) => ({ ...p }));
   }
@@ -593,6 +655,10 @@ export function createFleurSystem(scene, sampleHeight, onReady) {
         new THREE.Vector3(sp.getX(i), sp.getY(i), sp.getZ(i)),
       );
     }
+    const matOpts = {
+      sharedGrassUniforms,
+      uStemStaticCurve,
+    };
     for (let i = 0; i < FLEUR_MASK_COUNT; i++) {
       matsA.push(
         createFleurMaterial(
@@ -600,6 +666,7 @@ export function createFleurSystem(scene, sampleHeight, onReady) {
           FLEUR_PRESETS.main.outer,
           FLEUR_PRESETS.main.glow,
           textures[i],
+          matOpts,
         ),
       );
       matsB.push(
@@ -608,6 +675,7 @@ export function createFleurSystem(scene, sampleHeight, onReady) {
           FLEUR_PRESETS.sakura.outer,
           FLEUR_PRESETS.sakura.glow,
           textures[i],
+          matOpts,
         ),
       );
     }
@@ -649,6 +717,7 @@ export function createFleurSystem(scene, sampleHeight, onReady) {
     setColorA,
     setColorB,
     setStemColors,
+    setStemStaticCurve,
     getPositions,
     setPositions,
     clear,
