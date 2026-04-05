@@ -146,6 +146,7 @@
       import { PARAMS } from "./params.js";
       import { PI } from "./constants.js";
       import { createTileMaterial } from "./tileMaterial.js";
+      import { createHorizonSky } from "./horizon-webgpu-tsl.js";
       import { MeshBVH, acceleratedRaycast } from "three-mesh-bvh";
 
       const PARKOUR_SIZE = 800;
@@ -196,6 +197,18 @@
           cloudCoverage: 0.4,
           cloudDensity: 0.4,
           cloudElevation: 0.5,
+        },
+        horizonGradient: {
+          enabled: false,
+          drawOnTop: true,
+          topColor: "#0077ff",
+          bottomColor: "#ffffff",
+          offset: 33,
+          exponent: 0.6,
+          radius: 4000,
+          ringStrength: 0,
+          ringWidth: 0.12,
+          ringColor: "#fff0d0",
         },
         debug: {
           rapierDebug: false,
@@ -1314,6 +1327,23 @@
             parkourParams.light.sunElevation,
           ),
         );
+        sky.renderOrder = -5;
+
+        const horizonSky = createHorizonSky({
+          topColor: parkourParams.horizonGradient.topColor,
+          bottomColor: parkourParams.horizonGradient.bottomColor,
+          offset: parkourParams.horizonGradient.offset,
+          exponent: parkourParams.horizonGradient.exponent,
+          radius: parkourParams.horizonGradient.radius,
+          ringStrength: parkourParams.horizonGradient.ringStrength,
+          ringWidth: parkourParams.horizonGradient.ringWidth,
+          ringColor: parkourParams.horizonGradient.ringColor,
+        });
+        horizonSky.mesh.visible = parkourParams.horizonGradient.enabled;
+        horizonSky.mesh.renderOrder = parkourParams.horizonGradient.drawOnTop
+          ? 5
+          : -10;
+        scene.add(horizonSky.mesh);
 
         const pmremGenerator = new THREE.PMREMGenerator(renderer);
         const skyEnvScene = new THREE.Scene();
@@ -1965,6 +1995,60 @@
           max: 1,
           step: 0.01,
           label: "cloud elevation",
+        });
+
+        skyFolder.addBlade({ view: "separator" });
+        const horizonFolder = skyFolder.addFolder({
+          title: "Gradient dome (TSL)",
+          expanded: false,
+        });
+        horizonFolder.addBinding(parkourParams.horizonGradient, "enabled", {
+          label: "enable",
+        });
+        horizonFolder.addBinding(parkourParams.horizonGradient, "drawOnTop", {
+          label: "draw on top",
+        });
+        horizonFolder.addBinding(parkourParams.horizonGradient, "topColor", {
+          view: "color",
+          label: "top (zenith)",
+        });
+        horizonFolder.addBinding(parkourParams.horizonGradient, "bottomColor", {
+          view: "color",
+          label: "bottom (horizon)",
+        });
+        horizonFolder.addBinding(parkourParams.horizonGradient, "offset", {
+          min: -200,
+          max: 200,
+          step: 1,
+          label: "bias / offset",
+        });
+        horizonFolder.addBinding(parkourParams.horizonGradient, "exponent", {
+          min: 0.1,
+          max: 4,
+          step: 0.05,
+          label: "exponent",
+        });
+        horizonFolder.addBinding(parkourParams.horizonGradient, "radius", {
+          min: 500,
+          max: 20000,
+          step: 100,
+          label: "sphere radius",
+        });
+        horizonFolder.addBinding(parkourParams.horizonGradient, "ringStrength", {
+          min: 0,
+          max: 1,
+          step: 0.01,
+          label: "horizon ring",
+        });
+        horizonFolder.addBinding(parkourParams.horizonGradient, "ringWidth", {
+          min: 0.02,
+          max: 0.5,
+          step: 0.01,
+          label: "ring width",
+        });
+        horizonFolder.addBinding(parkourParams.horizonGradient, "ringColor", {
+          view: "color",
+          label: "ring color",
         });
 
         const foliageFolder = pane.addFolder({
@@ -2898,6 +2982,30 @@
           sky.cloudDensity.value = parkourParams.sky.cloudDensity;
           sky.cloudElevation.value = parkourParams.sky.cloudElevation;
           sky.sunPosition.value.copy(sunDir);
+
+          horizonSky.mesh.visible = parkourParams.horizonGradient.enabled;
+          horizonSky.mesh.renderOrder = parkourParams.horizonGradient.drawOnTop
+            ? 5
+            : -10;
+          horizonSky.uniforms.topColor.value
+            .set(parkourParams.horizonGradient.topColor)
+            .convertSRGBToLinear();
+          horizonSky.uniforms.bottomColor.value
+            .set(parkourParams.horizonGradient.bottomColor)
+            .convertSRGBToLinear();
+          horizonSky.uniforms.offset.value = parkourParams.horizonGradient.offset;
+          horizonSky.uniforms.exponent.value =
+            parkourParams.horizonGradient.exponent;
+          horizonSky.uniforms.ringStrength.value =
+            parkourParams.horizonGradient.ringStrength;
+          horizonSky.uniforms.ringWidth.value =
+            parkourParams.horizonGradient.ringWidth;
+          horizonSky.uniforms.ringColor.value
+            .set(parkourParams.horizonGradient.ringColor)
+            .convertSRGBToLinear();
+          horizonSky.setRadius(parkourParams.horizonGradient.radius);
+          horizonSky.update(camera);
+
           scene.environmentIntensity = parkourParams.light.envIntensity;
           renderer.toneMappingExposure = parkourParams.light.exposure;
 
