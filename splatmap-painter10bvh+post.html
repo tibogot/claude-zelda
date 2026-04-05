@@ -1369,6 +1369,10 @@
         scaleMax:      0.7,
         hoverBase:     0.45,
         hoverVariance: 0.1,
+        subMode:       "ground",
+        bloomShape:    0,
+        stemBase:      "#1f5c32",
+        stemTop:       "#6bae6e",
       };
       const fleurColorA = { preset: "main",   inner: FLEUR_PRESETS.main.inner,   outer: FLEUR_PRESETS.main.outer,   glow: FLEUR_PRESETS.main.glow   };
       const fleurColorB = { preset: "sakura", inner: FLEUR_PRESETS.sakura.inner, outer: FLEUR_PRESETS.sakura.outer, glow: FLEUR_PRESETS.sakura.glow };
@@ -1999,6 +2003,8 @@
             fleurParams.hoverBase,
             fleurParams.hoverVariance,
             fleurActiveSlot,
+            fleurParams.subMode === "stem" ? "stem" : "ground",
+            fleurParams.bloomShape,
           );
         }
       }
@@ -6511,7 +6517,20 @@
         );
 
         // ── FLEUR SYSTEM ──
-        fleurSystem = createFleurSystem(scene, bvhHeight);
+        fleurSystem = createFleurSystem(scene, bvhHeight, () => {
+          if (!fleurSystem) return;
+          fleurSystem.setColorA(
+            fleurColorA.inner,
+            fleurColorA.outer,
+            fleurColorA.glow,
+          );
+          fleurSystem.setColorB(
+            fleurColorB.inner,
+            fleurColorB.outer,
+            fleurColorB.glow,
+          );
+          fleurSystem.setStemColors(fleurParams.stemBase, fleurParams.stemTop);
+        });
 
         // ── AMBIENT FX SYSTEM ──
         ambientFXSystem = createAmbientFXSystem(scene, bvhHeight);
@@ -9171,6 +9190,40 @@
           label: "Paint color",
           options: { "Color A": "A", "Color B": "B" },
         }).on("change", (e) => { fleurActiveSlot = e.value === "A" ? 0 : 1; });
+
+        let fleurStemFolder = null;
+
+        fleurFolder
+          .addBinding(fleurParams, "subMode", {
+            label: "Placement",
+            options: { "Ground bloom": "ground", Stemmed: "stem" },
+          })
+          .on("change", () => {
+            if (fleurStemFolder)
+              fleurStemFolder.hidden = fleurParams.subMode !== "stem";
+            fleurFolder.refresh();
+          });
+
+        fleurFolder.addBinding(fleurParams, "bloomShape", {
+          label: "Bloom shape",
+          options: { "A (mask 1)": 0, "B (mask 2)": 1, "C (mask 3)": 2 },
+        });
+
+        fleurStemFolder = fleurFolder.addFolder({
+          title: "Stem colors",
+          expanded: true,
+        });
+        fleurStemFolder.hidden = fleurParams.subMode !== "stem";
+        fleurStemFolder
+          .addBinding(fleurParams, "stemBase", { label: "Stem base", view: "color" })
+          .on("change", (e) => {
+            if (fleurSystem) fleurSystem.setStemColors(e.value, fleurParams.stemTop);
+          });
+        fleurStemFolder
+          .addBinding(fleurParams, "stemTop", { label: "Stem top", view: "color" })
+          .on("change", (e) => {
+            if (fleurSystem) fleurSystem.setStemColors(fleurParams.stemBase, e.value);
+          });
 
         // ── Color A ──
         const fleurAFolder = fleurFolder.addFolder({ title: "Color A", expanded: true });
