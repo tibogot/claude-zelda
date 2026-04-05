@@ -238,6 +238,8 @@ function createForestImpostorMaterial(
     opts.transStrUniform ?? uniform(float(opts.translucencyStrength ?? 0.0));
   const uTransPow =
     opts.transPowUniform ?? uniform(float(opts.translucencyPower ?? 2.0));
+  const uAoStr =
+    opts.aoStrUniform ?? uniform(float(opts.aoStrength ?? 0.0));
 
   const uFogNear = opts.fogNearUniform ?? uniform(float(1e9));
   const uFogFar = opts.fogFarUniform ?? uniform(float(1e9));
@@ -386,7 +388,8 @@ function createForestImpostorMaterial(
       vec2(dot(V, T), dot(V, B)),
       div(mul(relD, uParallaxStr), VdotN),
     );
-    return getUV(add(localUV, off), frame);
+    const resultUV = getUV(add(localUV, off), frame);
+    return vec3(resultUV.x, resultUV.y, d);
   });
 
   let uShadowMapDepth = null;
@@ -417,9 +420,12 @@ function createForestImpostorMaterial(
     const cn2 = decode(vS2, nm1_f);
     const cn3 = decode(vS3, nm1_f);
 
-    const puv1 = depthParallax(vUV1, cn1, vS1);
-    const puv2 = depthParallax(vUV2, cn2, vS2);
-    const puv3 = depthParallax(vUV3, cn3, vS3);
+    const puvd1 = depthParallax(vUV1, cn1, vS1);
+    const puvd2 = depthParallax(vUV2, cn2, vS2);
+    const puvd3 = depthParallax(vUV3, cn3, vS3);
+    const puv1 = puvd1.xy;
+    const puv2 = puvd2.xy;
+    const puv3 = puvd3.xy;
 
     const c1 = texture(colorTex, puv1);
     const c2 = texture(colorTex, puv2);
@@ -448,7 +454,9 @@ function createForestImpostorMaterial(
       add(uAlphaClamp, edgeW),
       domAlpha,
     );
-    const albedo = saturate(mul(domRgb, div(1, max(domAlpha, float(0.001)))));
+    const blendDepth = add(add(mul(puvd1.z, vWeight.x), mul(puvd2.z, vWeight.y)), mul(puvd3.z, vWeight.z));
+    const ao = sub(float(1), mul(uAoStr, blendDepth));
+    const albedo = mul(saturate(mul(domRgb, div(1, max(domAlpha, float(0.001))))), ao);
 
     const n1 = texture(normalTex, puv1).xyz;
     const n2 = texture(normalTex, puv2).xyz;
@@ -562,7 +570,7 @@ function createForestImpostorMaterial(
     const fogDepth = negate(positionView.z);
     const fogT = smoothstep(uFogNear, uFogFar, fogDepth);
     const fogMix = mul(fogT, uFogStrength);
-    const litRgb = mix(saturate(lit), uFogColor, fogMix);
+    const litRgb = mix(lit, uFogColor, fogMix);
 
     return vec4(litRgb, alphaOut);
   });
@@ -602,6 +610,7 @@ function createForestImpostorMaterial(
     uBlend3Cell,
     uTransStr,
     uTransPow,
+    uAoStr,
     uFogNear,
     uFogFar,
     uFogColor,
@@ -976,6 +985,7 @@ export async function createOctahedralImpostorForestWebgpu(
   const _uBlend3Cell = uniform(float(1));
   const _uTransStr = uniform(float(0));
   const _uTransPow = uniform(float(2));
+  const _uAoStr = uniform(float(0));
 
   const _initFogColor = new THREE.Color(iOpts.fogColor);
   const _uFogNear = uniform(float(iOpts.fogNear));
@@ -1005,6 +1015,7 @@ export async function createOctahedralImpostorForestWebgpu(
     blend3CellUniform: _uBlend3Cell,
     transStrUniform: _uTransStr,
     transPowUniform: _uTransPow,
+    aoStrUniform: _uAoStr,
     fogNearUniform: _uFogNear,
     fogFarUniform: _uFogFar,
     fogColorUniform: _uFogColor,
@@ -1273,6 +1284,9 @@ export async function createOctahedralImpostorForestWebgpu(
     setTranslucency: (str, pow) => {
       _uTransStr.value = str;
       _uTransPow.value = pow;
+    },
+    setAoStrength: (v) => {
+      _uAoStr.value = v;
     },
     setEdgeSmoothScale: (v) => {
       _uEdgeSmoothScale.value = v;
