@@ -48,6 +48,7 @@
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
       import { Pane } from "tweakpane";
       import Stats from "stats-gl";
+      import { createLakeShader } from "./lake-shader.js";
       import {
         Fn,
         uniform,
@@ -71,20 +72,15 @@
         abs,
         positionWorld,
         positionLocal,
-        positionView,
         modelWorldMatrix,
         modelWorldMatrixInverse,
         normalize,
         pow,
         saturate,
-        color,
         clamp,
         texture,
-        screenUV,
-        cameraPosition,
         mx_noise_float,
         Loop,
-        uniformTexture,
       } from "three/tsl";
 
       const WATER_Y = -0.1;
@@ -378,10 +374,7 @@
       }
       const WAVE_RES = 512;
       const TEXEL = 1 / WAVE_RES;
-      const MAX_RIPPLES = 8;
-
       // Placeholder textures so TSL texture() always receives a valid Texture (WebGPU)
-      const placeholderDepth = new THREE.DepthTexture(2, 2);
       const placeholderColor = new THREE.DataTexture(
         new Uint8Array([0, 0, 0, 0]),
         2,
@@ -389,22 +382,7 @@
       );
       placeholderColor.needsUpdate = true;
 
-      // ─── Ripple store (event bus for water surface) ───────────────────────────
-      const rippleBuffer = [];
-      const rippleConfig = {
-        speed: 1.5,
-        width: 0.12,
-        decay: 1.6,
-        strength: 5.5,
-        rings: 2,
-        spacing: 1.0,
-      };
-      function rippleAdd(x, z, t) {
-        if (rippleBuffer.length >= MAX_RIPPLES) rippleBuffer.shift();
-        rippleBuffer.push({ x, z, t });
-      }
-
-      // ─── TSL: hash and Voronoi (same style as waterfall_pool_v7) ────────────
+      // ─── TSL: hash and Voronoi (shore foam / V2) ────────────────────────────
       const hash22 = Fn(([p]) => {
         const px = dot(p, vec2(127.1, 311.7));
         const py = dot(p, vec2(269.5, 183.3));
@@ -423,64 +401,6 @@
         [1, 1],
       ];
 
-      const smin = Fn(([a, b, k]) => {
-        const h = max(k.sub(abs(a.sub(b))), float(0)).div(k);
-        return min(a, b).sub(h.mul(h).mul(h).mul(k).div(6));
-      });
-
-      const cellPt = Fn(([seed, uTime, cellSpeed]) => {
-        return float(0.5).add(
-          float(0.5).mul(
-            sin(uTime.mul(cellSpeed).add(float(6.2831).mul(seed))),
-          ),
-        );
-      });
-
-      const voronoiF1 = Fn(([p, uTime, cellSpeed]) => {
-        const ip = floor(p);
-        const fp = fract(p);
-        const md = float(10.0).toVar();
-        const neighbors = [
-          [-1, -1],
-          [0, -1],
-          [1, -1],
-          [-1, 0],
-          [0, 0],
-          [1, 0],
-          [-1, 1],
-          [0, 1],
-          [1, 1],
-        ];
-        for (const [nx, ny] of neighbors) {
-          const n = vec2(float(nx), float(ny));
-          const rnd = hash22(ip.add(n));
-          const pt = vec2(
-            cellPt(rnd.x, uTime, cellSpeed),
-            cellPt(rnd.y, uTime, cellSpeed),
-          );
-          const dist = length(n.add(pt).sub(fp));
-          md.assign(min(md, dist));
-        }
-        return md;
-      });
-
-      const voronoiSmoothF1 = Fn(([p, uTime, cellSpeed, smoothness]) => {
-        const ip = floor(p);
-        const fp = fract(p);
-        const res = float(10.0).toVar();
-        for (const [nx, ny] of neighbors) {
-          const n = vec2(float(nx), float(ny));
-          const rnd = hash22(ip.add(n));
-          const pt = vec2(
-            cellPt(rnd.x, uTime, cellSpeed),
-            cellPt(rnd.y, uTime, cellSpeed),
-          );
-          const dist = length(n.add(pt).sub(fp));
-          res.assign(smin(res, dist, smoothness));
-        }
-        return res;
-      });
-
       const nHash = Fn(([p]) => {
         const pp = fract(p.mul(vec2(127.1, 311.7)));
         const d = dot(pp, pp.add(45.32));
@@ -496,13 +416,6 @@
         const n01 = nHash(i.add(vec2(0, 1)));
         const n11 = nHash(i.add(vec2(1, 1)));
         return mix(mix(n00, n10, uu.x), mix(n01, n11, uu.x), uu.y);
-      });
-
-      const fbm2 = Fn(([p]) => {
-        const v = vnoise2(p).mul(0.5).toVar();
-        p = p.mul(2);
-        v.addAssign(vnoise2(p).mul(0.25));
-        return v;
       });
 
       /** Organic jitter Voronoi F1 (water-ocean-pro style); `jitter` 0 = grid, 1 = irregular. */
@@ -605,14 +518,6 @@
           skyCloudCoverage: 0.4,
           skyCloudDensity: 0.4,
           skyCloudElevation: 0.5,
-          noiseTimeScale: 0.6,
-          noiseScale: 1.52,
-          waterNoise: false,
-          waterCells: false,
-          flowZ: 0.08,
-          cellSpeed: 0.45,
-          distort: 0.35,
-          edgeThreshold: 0.067,
           deepColor: "#153a48",
           midColor: "#2a5f72",
           highlightColor: "#4a90a8",
@@ -672,14 +577,18 @@
           waterSurfRippleAmp: 0.014,
           waterSurfRippleFreq: 0.36,
           waterSurfRippleSpeed: 1.05,
-          rippleStrength: 5.5,
-          rippleWidth: 0.12,
-          lineThinness: 0.045,
           foamColor: "#e8f4ff",
+          glowColor: "#88ccff",
           waterlineIntensity: 0,
+          /** Shore seam debug: when true, that lake-shader layer is off. All true = minimal water. */
+          lakeDebugNoPrimaryFoam: true,
+          lakeDebugNoWaterline: true,
+          lakeDebugNoShoreContact: true,
+          lakeDebugNoReflection: true,
+          lakeDebugNoFresnelSky: true,
+          lakeDebugNoSurfNormals: true,
           lineWidth: 0.42,
           glowWidth: 1.35,
-          foamDistanceScale: 0.00105,
           ringOpacity: 1,
           gradScale: 1.5,
           terrainSeed: 90210,
@@ -694,7 +603,6 @@
           terrainVerticalBias: 2.25,
           terrainRoughness: 0.78,
           terrainMetalness: 0.02,
-          heightmapShoreFoam: false,
           shoreFoamWidth: 0.55,
           /** How much Perlin/Worley modulates the distance band (multiplicative). */
           shoreFoamNoise: 0.35,
@@ -764,13 +672,15 @@
           /** Extra transparency + noise in very shallow water at terrain contact. */
           shoreContactEnabled: true,
           /** World units: shallow band where contact alpha ramps from full effect to none. */
-          shoreContactBandWidth: 0.45,
+          shoreContactBandWidth: 1.18,
           /** Multiplies water alpha at contact (lower = more see-through). */
-          shoreContactAlphaMul: 0.38,
+          shoreContactAlphaMul: 0.44,
           /** World XZ scale for contact-edge alpha wobble. */
           shoreContactNoiseScale: 6.5,
           /** How much animated noise modulates alpha in the contact band (0 = off). */
-          shoreContactNoiseAmp: 0.22,
+          shoreContactNoiseAmp: 0.12,
+          /** Lower = softer contact falloff (less hard inner edge). Clamped in shader. */
+          shoreContactCurve: 0.58,
           /** Push primary shore foam slightly inland (0 at contact, full past delay band). */
           shoreFoamDelayEnabled: true,
           /** Where foam ramp starts (water depth above terrain, world units). */
@@ -828,7 +738,6 @@
           shorePulseNoiseAnimSpeed: 0.55,
           /** >1 = thinner brighter pulse band. */
           shorePulseRingSharpness: 1.15,
-          objectFoamFromDepth: false,
           dragonVisible: true,
           gizmoEnabled: true,
           /** World-space shore-style foam on dragon (noise + pulse); scales mix to foam color. */
@@ -848,6 +757,138 @@
         };
 
         renderer.toneMappingExposure = params.exposure;
+
+        function buildLakeShaderParams(p) {
+          return {
+            deepColor: p.deepColor,
+            midColor: p.midColor,
+            highlightColor: p.highlightColor,
+            opacity: p.waterOpacity,
+            depthAbsorb: p.waterDepthAbsorb,
+            shallowPale: p.waterShallowPale,
+            shallowAlpha: p.waterShallowAlpha,
+            surfNoiseScale1: p.waterSurfNoiseScale1,
+            surfNoiseScale2: p.waterSurfNoiseScale2,
+            surfNoiseSpeed1: p.waterSurfNoiseSpeed1,
+            surfNoiseSpeed2: p.waterSurfNoiseSpeed2,
+            procNoiseSpeed: p.waterProcNoiseSpeed,
+            surfNormalStrength: p.waterSurfNormalStrength,
+            fresnelExp: p.waterFresnelExp,
+            fresnelSky: p.waterFresnelSky,
+            reflectEnabled: p.reflectEnabled,
+            reflectStrength: p.reflectStrength,
+            reflectDistort: p.reflectDistort,
+            vertNoiseAmp: p.waterVertNoiseAmp,
+            vertNoiseScale: p.waterVertNoiseScale,
+            vertNoiseSpeedX: p.waterVertNoiseSpeedX,
+            vertNoiseSpeedZ: p.waterVertNoiseSpeedZ,
+            surfRippleEnabled: p.waterSurfRippleEnabled,
+            surfRippleAmp: p.waterSurfRippleAmp,
+            surfRippleFreq: p.waterSurfRippleFreq,
+            surfRippleSpeed: p.waterSurfRippleSpeed,
+            bobEnabled: p.waterBobEnabled,
+            bobAmplitude: p.waterBobAmplitude,
+            bobHz: p.waterBobHz,
+            bobSecondaryAmp: p.waterBobSecondaryAmp,
+            bobSecondaryHz: p.waterBobSecondaryHz,
+            foamColor: p.foamColor,
+            glowColor: p.glowColor,
+            lineWidth: p.lineWidth,
+            glowWidth: p.glowWidth,
+            waterlineIntensity: p.waterlineIntensity,
+            shoreFoamWidth: p.shoreFoamWidth,
+            shoreFoamNoise: p.shoreFoamNoise,
+            shoreFoamIntensity: p.shoreFoamIntensity,
+            shoreFoamSharpness: p.shoreFoamSharpness,
+            shoreNoiseWorldScale: p.shoreNoiseWorldScale,
+            shoreNoiseAnimSpeed: p.shoreNoiseAnimSpeed,
+            shoreNoiseScrollV: p.shoreNoiseScrollV,
+            shoreNoiseContrast: p.shoreNoiseContrast,
+            shoreNoiseFineScale: p.shoreNoiseFineScale,
+            shoreNoiseFineAmt: p.shoreNoiseFineAmt,
+            shoreNoiseFineSpeed: p.shoreNoiseFineSpeed,
+            shoreJaggedCutoff: p.shoreJaggedCutoff,
+            shoreFoamTransitionWidth: p.shoreFoamTransitionWidth,
+            shoreFoamNoiseStyle: p.shoreFoamNoiseStyle,
+            shoreNoiseAnisoX: p.shoreNoiseAnisoX,
+            shoreNoiseAnisoZ: p.shoreNoiseAnisoZ,
+            shoreWorleyJitter: p.shoreWorleyJitter,
+            shoreWorleyWarpScale: p.shoreWorleyWarpScale,
+            shoreWorleyWarpStrength: p.shoreWorleyWarpStrength,
+            shoreWorleyContrast: p.shoreWorleyContrast,
+            shoreWorleyThreshold: p.shoreWorleyThreshold,
+            shoreWorleySoftness: p.shoreWorleySoftness,
+            shoreWorleyBrightness: p.shoreWorleyBrightness,
+            shoreFoamVoroSmoothness: p.shoreFoamVoroSmoothness,
+            shoreFoamVoroCellSpeed: p.shoreFoamVoroCellSpeed,
+            shoreFoamVoroEdgeGain: p.shoreFoamVoroEdgeGain,
+            shoreFoamVoroFbmWeight: p.shoreFoamVoroFbmWeight,
+            shorePrimaryFoamColor: p.shorePrimaryFoamColor,
+            shoreFoamV2Enabled: p.shoreFoamV2Enabled,
+            shoreFoamV2Width: p.shoreFoamV2Width,
+            shoreFoamV2Intensity: p.shoreFoamV2Intensity,
+            shoreFoamV2Sharpness: p.shoreFoamV2Sharpness,
+            shoreFoamV2NoiseAmt: p.shoreFoamV2NoiseAmt,
+            shoreFoamV2WorldScale: p.shoreFoamV2WorldScale,
+            shoreFoamV2AnimSpeed: p.shoreFoamV2AnimSpeed,
+            shoreFoamV2ScrollV: p.shoreFoamV2ScrollV,
+            shoreFoamV2AnisoX: p.shoreFoamV2AnisoX,
+            shoreFoamV2AnisoZ: p.shoreFoamV2AnisoZ,
+            shoreFoamV2WarpScale: p.shoreFoamV2WarpScale,
+            shoreFoamV2WarpStrength: p.shoreFoamV2WarpStrength,
+            shoreFoamV2FineScale: p.shoreFoamV2FineScale,
+            shoreFoamV2FineAmt: p.shoreFoamV2FineAmt,
+            shoreFoamV2FineSpeed: p.shoreFoamV2FineSpeed,
+            shoreFoamV2Contrast: p.shoreFoamV2Contrast,
+            shoreFoamV2Cutoff: p.shoreFoamV2Cutoff,
+            shoreFoamV2TransitionWidth: p.shoreFoamV2TransitionWidth,
+            shoreFoamV2VoronoiMix: p.shoreFoamV2VoronoiMix,
+            shoreFoamV2VoronoiJitter: p.shoreFoamV2VoronoiJitter,
+            shoreFoamV2VoronoiScale: p.shoreFoamV2VoronoiScale,
+            shoreFoamV2VoronoiRadius: p.shoreFoamV2VoronoiRadius,
+            shoreFoamV2VoronoiContrast: p.shoreFoamV2VoronoiContrast,
+            shoreFoamV2Color: p.shoreFoamV2Color,
+            shoreContactEnabled: p.shoreContactEnabled,
+            shoreContactBandWidth: p.shoreContactBandWidth,
+            shoreContactAlphaMul: p.shoreContactAlphaMul,
+            shoreContactNoiseScale: p.shoreContactNoiseScale,
+            shoreContactNoiseAmp: p.shoreContactNoiseAmp,
+            shoreContactCurve: p.shoreContactCurve,
+            shoreFoamDelayEnabled: p.shoreFoamDelayEnabled,
+            shoreFoamDelayStart: p.shoreFoamDelayStart,
+            shoreFoamDelaySoft: p.shoreFoamDelaySoft,
+            lakeDebugNoPrimaryFoam: p.lakeDebugNoPrimaryFoam,
+            lakeDebugNoWaterline: p.lakeDebugNoWaterline,
+            lakeDebugNoShoreContact: p.lakeDebugNoShoreContact,
+            lakeDebugNoReflection: p.lakeDebugNoReflection,
+            lakeDebugNoFresnelSky: p.lakeDebugNoFresnelSky,
+            lakeDebugNoSurfNormals: p.lakeDebugNoSurfNormals,
+            shorePulseNoiseAnisoX: p.shorePulseNoiseAnisoX,
+            shorePulseNoiseAnisoZ: p.shorePulseNoiseAnisoZ,
+            shorePulseOpacity: p.shorePulseOpacity,
+            shorePulse2Opacity: p.shorePulse2Opacity,
+            shorePulseFoamColor: p.shorePulseFoamColor,
+            shorePulse2FoamColor: p.shorePulse2FoamColor,
+            shorePulseNoiseStyle: p.shorePulseNoiseStyle,
+            shorePulseEnabled: p.shorePulseEnabled,
+            shorePulseAnimSpeed: p.shorePulseAnimSpeed,
+            shorePulseMaxRange: p.shorePulseMaxRange,
+            shorePulseTravelPower: p.shorePulseTravelPower,
+            shorePulseMinDist: p.shorePulseMinDist,
+            shorePulseRingWidth: p.shorePulseRingWidth,
+            shorePulseRing2WidthMul: p.shorePulseRing2WidthMul,
+            shorePulseIntensity: p.shorePulseIntensity,
+            shorePulseFade: p.shorePulseFade,
+            shorePulseStagger: p.shorePulseStagger,
+            shorePulse2Intensity: p.shorePulse2Intensity,
+            shorePulse2Fade: p.shorePulse2Fade,
+            shorePulseNoiseAmt: p.shorePulseNoiseAmt,
+            shorePulseNoiseScale: p.shorePulseNoiseScale,
+            shorePulseNoiseAnimSpeed: p.shorePulseNoiseAnimSpeed,
+            shorePulseRingSharpness: p.shorePulseRingSharpness,
+            shorePulseRing2Sharpness: p.shorePulseRing2Sharpness,
+          };
+        }
 
         function heightmapOptsFromParams(p) {
           return {
@@ -921,49 +962,9 @@
         rimLight.position.set(0, 5, -12);
         scene.add(rimLight);
 
-        // ─── Water surface uniforms (for TSL) ───────────────────────────────────
+        // ─── Time (dragon shore-foam TSL only; lake uses lake-shader.js `u.time`) ─
         const uTime = uniform(0);
-        const uScale = uniform(0.3);
-        const uSmoothness = uniform(0.55);
-        const uEdgeThreshold = uniform(0.067);
-        const uEdgeSoftness = uniform(0.01);
-        const uFlowX = uniform(0);
-        const uFlowZ = uniform(0.08);
-        const uCellSpeed = uniform(0.45);
-        const uNoiseScale = uniform(1.52);
-        const uNoiseFlowSpeed = uniform(0.2);
-        const uNoiseTimeScale = uniform(0.6);
-        const uDistortAmount = uniform(0.35);
-        const uWaterNoiseEnabled = uniform(0);
-        const uWaterCellsEnabled = uniform(0);
-        const uDeepColor = uniform(new THREE.Color("#153a48"));
-        const uMidColor = uniform(new THREE.Color("#2a5f72"));
-        const uMidPos = uniform(0.12);
-        const uHighlight = uniform(new THREE.Color("#4a90a8"));
-        const uOpacity = uniform(1);
-        const uDeepOpacity = uniform(0.78);
-        /** Soft edge at the lake quad border (world XZ); not camera-based — zoom no longer erases water. */
-        const uLakeHalfExtent = uniform(LAKE_PLANE_BASE * 0.5);
-        const uFadeStrength = uniform(1.4);
-        const uRippleCenters = Array.from({ length: MAX_RIPPLES }, () =>
-          uniform(new THREE.Vector2(0, 0)),
-        );
-        const uRippleTimes = Array.from({ length: MAX_RIPPLES }, () =>
-          uniform(0),
-        );
-        const uRippleCount = uniform(0);
-        const uRippleSpeed = uniform(1.5);
-        const uRippleWidth = uniform(0.12);
-        const uRippleStrength = uniform(5.5);
-        const uRippleDecay = uniform(1.6);
-        const uRippleRings = uniform(2);
-        const uRippleSpacing = uniform(1.0);
 
-        // ─── Depth (for waterline/foam in water shader so visible from any angle) ─
-        const depthRT = new THREE.WebGLRenderTarget(512, 512);
-        depthRT.depthBuffer = true;
-        depthRT.depthTexture = new THREE.DepthTexture(512, 512);
-        depthRT.depthTexture.type = THREE.UnsignedShortType;
         const reflectRT = new THREE.WebGLRenderTarget(4, 4, {
           minFilter: THREE.LinearFilter,
           magFilter: THREE.LinearFilter,
@@ -987,12 +988,6 @@
           refCam.lookAt(t);
           refCam.updateMatrixWorld(true);
         }
-        const depthScene = new THREE.Scene();
-        const depthMat = new THREE.MeshBasicNodeMaterial({
-          color: 0x000000,
-          side: THREE.FrontSide,
-        });
-        const depthGroups = new Map();
 
         let lastTerrainGeoSig = "";
         let lastForestSig = "";
@@ -1011,8 +1006,6 @@
         let treeLeafMatForest = null;
         let treeTrunksIM = null;
         let treeLeavesIM = null;
-        let treeTrunksDIM = null;
-        let treeLeavesDIM = null;
         const heightOptsInit = heightmapOptsFromParams(params);
         let heightmapFloatData = buildHeightmapFloatData(heightOptsInit);
         const heightmapDataTex = new THREE.DataTexture(
@@ -1051,10 +1044,6 @@
         terrainMesh.renderOrder = 1;
         scene.add(terrainMesh);
 
-        const terrainDepthMesh = new THREE.Mesh(terrainGeometry, depthMat);
-        terrainDepthMesh.renderOrder = 1;
-        depthScene.add(terrainDepthMesh);
-
         function ensureForestInstancedMeshes() {
           if (treeTrunksIM) return;
           treeTrunkMatForest = new THREE.MeshStandardMaterial({
@@ -1079,27 +1068,11 @@
             treeLeafMatForest,
             MAX_FOREST_TREES,
           );
-          treeTrunksDIM = new THREE.InstancedMesh(
-            _treeTrunkGeo,
-            depthMat,
-            MAX_FOREST_TREES,
-          );
-          treeLeavesDIM = new THREE.InstancedMesh(
-            _treeLeafGeo,
-            depthMat,
-            MAX_FOREST_TREES,
-          );
-          for (const im of [
-            treeTrunksIM,
-            treeLeavesIM,
-            treeTrunksDIM,
-            treeLeavesDIM,
-          ]) {
+          for (const im of [treeTrunksIM, treeLeavesIM]) {
             im.frustumCulled = false;
             im.renderOrder = 1;
           }
           scene.add(treeTrunksIM, treeLeavesIM);
-          depthScene.add(treeTrunksDIM, treeLeavesDIM);
         }
 
         function rebuildForestInstanced() {
@@ -1113,13 +1086,9 @@
           const clearR = Math.max(6, params.lakeTreeClearRadius);
           treeTrunksIM.count = n;
           treeLeavesIM.count = n;
-          treeTrunksDIM.count = n;
-          treeLeavesDIM.count = n;
           const show = n > 0;
           treeTrunksIM.visible = show;
           treeLeavesIM.visible = show;
-          treeTrunksDIM.visible = show;
-          treeLeavesDIM.visible = show;
           if (n === 0) return;
           const rnd = mulberry32((params.terrainSeed ^ 0x5f356495) >>> 0);
           const half = TERRAIN_SIZE * 0.5;
@@ -1157,25 +1126,20 @@
             m4.compose(pos, quat, scale);
             treeTrunksIM.setMatrixAt(i, m4);
             treeLeavesIM.setMatrixAt(i, m4);
-            treeTrunksDIM.setMatrixAt(i, m4);
-            treeLeavesDIM.setMatrixAt(i, m4);
           }
           treeTrunksIM.instanceMatrix.needsUpdate = true;
           treeLeavesIM.instanceMatrix.needsUpdate = true;
-          treeTrunksDIM.instanceMatrix.needsUpdate = true;
-          treeLeavesDIM.instanceMatrix.needsUpdate = true;
         }
 
         rebuildForestInstanced();
         lastForestSig = `${lastTerrainGeoSig}|${params.treeCount}|${params.treesEnabled}|${params.lakeTreeClearRadius}`;
 
         let dragonModelRoot = null;
-        let dragonDepthRoot = null;
         let dragonTransformControls = null;
+        let lakeShader = null;
 
         function applyDragonVisibility() {
           if (dragonModelRoot) dragonModelRoot.visible = params.dragonVisible;
-          if (dragonDepthRoot) dragonDepthRoot.visible = params.dragonVisible;
         }
 
         function applyDragonGizmoState() {
@@ -1195,17 +1159,6 @@
             dragonModelRoot.scale.setScalar(4.5);
             dragonModelRoot.rotation.y = -1.1;
             scene.add(dragonModelRoot);
-
-            dragonDepthRoot = dragonModelRoot.clone(true);
-            dragonDepthRoot.traverse((obj) => {
-              if (obj.isMesh) {
-                const m = obj.material;
-                obj.material = Array.isArray(m)
-                  ? m.map(() => depthMat)
-                  : depthMat;
-              }
-            });
-            depthScene.add(dragonDepthRoot);
 
             applyDragonWaterlineMaterials(dragonModelRoot);
 
@@ -1245,7 +1198,6 @@
             );
             const oldGeo = terrainMesh.geometry;
             terrainMesh.geometry = newGeo;
-            terrainDepthMesh.geometry = newGeo;
             oldGeo.dispose();
           }
           terrainMaterial.roughness = params.terrainRoughness;
@@ -1300,6 +1252,7 @@
           uShoreContactAlphaMul.value = params.shoreContactAlphaMul;
           uShoreContactNoiseScale.value = params.shoreContactNoiseScale;
           uShoreContactNoiseAmp.value = params.shoreContactNoiseAmp;
+          uShoreContactCurve.value = params.shoreContactCurve;
           uShoreFoamDelayEnabled.value = params.shoreFoamDelayEnabled ? 1 : 0;
           uShoreFoamDelayStart.value = params.shoreFoamDelayStart;
           uShoreFoamDelaySoft.value = params.shoreFoamDelaySoft;
@@ -1345,11 +1298,10 @@
           uShorePulseNoiseAnimSpeed.value = params.shorePulseNoiseAnimSpeed;
           uShorePulseRingSharpness.value = params.shorePulseRingSharpness;
           uShorePulseRing2Sharpness.value = params.shorePulseRing2Sharpness;
-          uHeightmapFoamEnabled.value = params.heightmapShoreFoam ? 1 : 0;
-          uObjectFoamFromDepth.value = params.objectFoamFromDepth ? 1 : 0;
           uDragonMeshFoam.value = params.dragonWaterFoam;
           uDragonPulseRangeMul.value = params.dragonPulseRangeMul;
           uUnderwaterSurfaceTint.value = params.underwaterSurfaceTint;
+          lakeShader?.syncParams(buildLakeShaderParams(params));
           const forestSig = `${lastTerrainGeoSig}|${params.treeCount}|${params.treesEnabled}|${params.lakeTreeClearRadius}`;
           if (forestSig !== lastForestSig) {
             lastForestSig = forestSig;
@@ -1357,8 +1309,6 @@
           }
         }
 
-        const heightTexNode = texture(heightmapDataTex, vec2(0.5, 0.5));
-        const uTerrainWorldSize = uniform(TERRAIN_SIZE);
         const uShoreFoamWidth = uniform(params.shoreFoamWidth);
         const uShoreFoamNoiseAmt = uniform(params.shoreFoamNoise);
         const uShoreFoamIntensity = uniform(params.shoreFoamIntensity);
@@ -1431,6 +1381,7 @@
         const uShoreContactAlphaMul = uniform(params.shoreContactAlphaMul);
         const uShoreContactNoiseScale = uniform(params.shoreContactNoiseScale);
         const uShoreContactNoiseAmp = uniform(params.shoreContactNoiseAmp);
+        const uShoreContactCurve = uniform(params.shoreContactCurve);
         const uShoreFoamDelayEnabled = uniform(
           params.shoreFoamDelayEnabled ? 1 : 0,
         );
@@ -1485,66 +1436,10 @@
         const uShorePulseRing2Sharpness = uniform(
           params.shorePulseRing2Sharpness,
         );
-        const uHeightmapFoamEnabled = uniform(
-          params.heightmapShoreFoam ? 1 : 0,
-        );
-        const uObjectFoamFromDepth = uniform(
-          params.objectFoamFromDepth ? 1 : 0,
-        );
-
-        const depthTexNode = texture(placeholderDepth, screenUV);
-        const uReflectTex = uniformTexture(placeholderColor);
-        const uReflectVP = uniform(new THREE.Matrix4());
-        const uReflectStrength = uniform(params.reflectStrength);
-        const uReflectDistort = uniform(params.reflectDistort);
-        const uReflectEnabled = uniform(params.reflectEnabled ? 1 : 0);
-        const uDepthNear = uniform(0.1);
-        const uDepthFar = uniform(1000);
-        const uLineWidth = uniform(0.42);
-        const uGlowWidth = uniform(1.35);
-        /** Scales foam band with eye distance so contact line stays ~constant in world space (fixes zoom-out blowout). */
-        const uFoamDistanceScale = uniform(0.00105);
-        const uWaterlineIntensity = uniform(params.waterlineIntensity);
-        const uWaterDepthAbsorb = uniform(params.waterDepthAbsorb);
-        const uWaterShallowPale = uniform(params.waterShallowPale);
-        const uWaterSurfNoiseScale1 = uniform(params.waterSurfNoiseScale1);
-        const uWaterSurfNoiseScale2 = uniform(params.waterSurfNoiseScale2);
-        const uWaterSurfNoiseSpeed1 = uniform(params.waterSurfNoiseSpeed1);
-        const uWaterSurfNoiseSpeed2 = uniform(params.waterSurfNoiseSpeed2);
-        const uWaterSurfNormalStrength = uniform(
-          params.waterSurfNormalStrength,
-        );
-        const uWaterFresnelExp = uniform(params.waterFresnelExp);
-        const uWaterFresnelSky = uniform(params.waterFresnelSky);
-        const uWaterShallowAlpha = uniform(params.waterShallowAlpha);
-        const uWaterVertNoiseAmp = uniform(params.waterVertNoiseAmp);
-        const uWaterVertNoiseScale = uniform(params.waterVertNoiseScale);
-        const uWaterVertNoiseSpeedX = uniform(params.waterVertNoiseSpeedX);
-        const uWaterVertNoiseSpeedZ = uniform(params.waterVertNoiseSpeedZ);
-        const uWaterProcNoiseSpeed = uniform(params.waterProcNoiseSpeed);
-        const uLineColor = uniform(new THREE.Color("#ffffff"));
-        const uGlowColor = uniform(new THREE.Color("#88ccff"));
-        // Convert raw depth [0,1] to linear view-space distance (match original WaterDepthIntersection)
-        const linearDepth = Fn(([raw, near, far]) => {
-          const z = raw.mul(2).sub(1);
-          const denom = far.add(near).sub(z.mul(far.sub(near)));
-          return float(2).mul(near).mul(far).div(denom);
-        });
-        // Per-fragment water depth: view-space Z (camera looks down -Z, so linear depth = -positionView.z)
-        const waterLinearDepth = Fn(() => positionView.z.negate());
-
         // Contact foam on objects (baked into object shader like original DragonBalls/index.tsx)
         const uWaterY = uniform(WATER_Y);
         const uCameraUnderwater = uniform(0);
         const uUnderwaterSurfaceTint = uniform(params.underwaterSurfaceTint);
-        const uSurfRippleAmp = uniform(params.waterSurfRippleAmp);
-        const uSurfRippleFreq = uniform(params.waterSurfRippleFreq);
-        const uSurfRippleSpeed = uniform(params.waterSurfRippleSpeed);
-        const uSurfRippleEnabled = uniform(
-          params.waterSurfRippleEnabled ? 1 : 0,
-        );
-        const uWaterLineThinness = uniform(0.045);
-        const uWaterLineColor = uniform(new THREE.Color("#e8f4ff"));
         const uDragonMeshFoam = uniform(params.dragonWaterFoam);
         const uDragonPulseRangeMul = uniform(params.dragonPulseRangeMul);
 
@@ -1875,326 +1770,11 @@
           });
         }
 
-        // World XZ from position (water plane is XZ at Y = WATER_Y)
-        // Wrap in Fn() so .toVar() / .addAssign() have a valid TSL stack
-        const waterFrag = Fn(() => {
-          const worldXZ = positionWorld.xz;
-          const tNoise = uTime.mul(uNoiseTimeScale);
-          const noiseUV = worldXZ
-            .mul(uNoiseScale)
-            .add(vec2(tNoise.mul(uNoiseFlowSpeed), 0));
-          const noiseFac = fbm2(noiseUV);
-          const noiseFacBlend = mix(float(0.5), noiseFac, uWaterNoiseEnabled);
-          const distort = vec2(
-            noiseFacBlend.sub(0.5),
-            noiseFacBlend.sub(0.5),
-          ).mul(uDistortAmount);
-
-          const tNoiseActive = tNoise.mul(uWaterNoiseEnabled);
-          const uvVoro = worldXZ
-            .mul(uScale)
-            .add(vec2(uFlowX.mul(tNoiseActive), uFlowZ.mul(tNoiseActive)))
-            .add(distort);
-          const f1 = voronoiF1(uvVoro, tNoiseActive, uCellSpeed);
-          const sf1 = voronoiSmoothF1(
-            uvVoro,
-            tNoiseActive,
-            uCellSpeed,
-            uSmoothness,
-          );
-          const edge = f1.sub(sf1);
-          const t = smoothstep(
-            uEdgeThreshold.sub(uEdgeSoftness),
-            uEdgeThreshold.add(uEdgeSoftness),
-            edge,
-          );
-          const safeMP = max(uMidPos, 0.0001);
-          const seg0 = clamp(t.div(safeMP), 0, 1);
-          const seg1 = clamp(
-            t.sub(safeMP).div(float(1).sub(safeMP).add(0.0001)),
-            0,
-            1,
-          );
-          const inSeg1 = smoothstep(safeMP.sub(0.001), safeMP.add(0.001), t);
-          const baseColorCells = mix(
-            mix(uDeepColor, uMidColor, seg0),
-            mix(uMidColor, uHighlight, seg1),
-            inSeg1,
-          );
-          const baseColorFlat = mix(uDeepColor, uMidColor, uMidPos);
-          const baseColor = mix(
-            baseColorFlat,
-            baseColorCells,
-            uWaterCellsEnabled,
-          );
-
-          const rippleAcc = float(0).toVar();
-          for (let i = 0; i < MAX_RIPPLES; i++) {
-            const isOn = step(float(i).add(0.5), uRippleCount);
-            const elapsed = max(uTime.sub(uRippleTimes[i]), 0);
-            const d = length(worldXZ.sub(uRippleCenters[i]));
-            for (let r = 0; r < 4; r++) {
-              const rIsOn = smoothstep(
-                float(r).sub(0.5),
-                float(r).add(0.5),
-                uRippleRings,
-              );
-              const re = max(elapsed.sub(float(r).mul(uRippleSpacing)), 0);
-              const ringR = re.mul(uRippleSpeed);
-              const ringDist = abs(d.sub(ringR));
-              const ring = float(1).sub(
-                smoothstep(float(0), uRippleWidth, ringDist),
-              );
-              const fade = exp(re.mul(float(-1).mul(uRippleDecay)));
-              rippleAcc.addAssign(ring.mul(fade).mul(isOn).mul(rIsOn));
-            }
-          }
-          const ripple = saturate(rippleAcc.mul(uRippleStrength));
-          const waterColor = mix(baseColor, uHighlight, ripple);
-
-          const rawSceneDepth = depthTexNode.r;
-          const sceneLinD = linearDepth(rawSceneDepth, uDepthNear, uDepthFar);
-          const waterLinD = waterLinearDepth();
-          const thicknessW = max(float(0), sceneLinD.sub(waterLinD));
-          const thickness = min(thicknessW, float(28));
-          const depthBlend = float(1)
-            .sub(exp(thickness.mul(uWaterDepthAbsorb).negate()))
-            .saturate();
-          const paleLift = vec3(0.12, 0.19, 0.21);
-          const waterPale = waterColor
-            .add(paleLift.mul(uWaterShallowPale))
-            .saturate();
-          const absorptionBase = mix(waterPale, waterColor, depthBlend);
-
-          const nSpd = max(uWaterProcNoiseSpeed, float(0.001));
-          const scrollN1 = vec2(
-            uTime.mul(uWaterSurfNoiseSpeed1.mul(nSpd)),
-            uTime.mul(uWaterSurfNoiseSpeed1.mul(0.71).mul(nSpd)),
-          );
-          const scrollN2 = vec2(
-            uTime.mul(uWaterSurfNoiseSpeed2.mul(nSpd)),
-            uTime.mul(uWaterSurfNoiseSpeed2.mul(-0.63).mul(nSpd)),
-          );
-          const uvN1 = worldXZ.mul(uWaterSurfNoiseScale1).add(scrollN1);
-          const uvN2 = worldXZ.mul(uWaterSurfNoiseScale2).add(scrollN2);
-          const epsN = float(0.065);
-          const s10 = mx_noise_float(uvN1);
-          const s1px = mx_noise_float(uvN1.add(vec2(epsN, 0)));
-          const s1pz = mx_noise_float(uvN1.add(vec2(0, epsN)));
-          const s20 = mx_noise_float(uvN2);
-          const s2px = mx_noise_float(uvN2.add(vec2(epsN.mul(1.15), 0)));
-          const s2pz = mx_noise_float(uvN2.add(vec2(0, epsN.mul(1.15))));
-          const g1x = s1px.sub(s10);
-          const g1z = s1pz.sub(s10);
-          const g2x = s2px.sub(s20);
-          const g2z = s2pz.sub(s20);
-          const dnx = g1x.add(g2x.mul(0.62)).mul(uWaterSurfNormalStrength);
-          const dnz = g1z.add(g2z.mul(0.62)).mul(uWaterSurfNormalStrength);
-          const worldN = normalize(vec3(dnx.negate(), float(1), dnz.negate()));
-          const viewDir = normalize(cameraPosition.sub(positionWorld));
-          const NdotV = max(dot(worldN, viewDir), float(0.001));
-          const fresnel = pow(float(1).sub(saturate(NdotV)), uWaterFresnelExp);
-          const absorptionSky = absorptionBase.add(
-            uHighlight.mul(fresnel).mul(uWaterFresnelSky),
-          );
-          const clipR = uReflectVP.mul(vec4(positionWorld, float(1)));
-          const wClip = clipR.w;
-          const ndcR = clipR.xy.div(max(abs(wClip), float(1e-4)));
-          const uvR0 = ndcR.mul(0.5).add(0.5);
-          const uvR = vec2(uvR0.x, float(1).sub(uvR0.y)).add(
-            vec2(dnx, dnz).mul(uReflectDistort),
-          );
-          const uvRc = vec2(
-            clamp(uvR.x, float(0.02), float(0.98)),
-            clamp(uvR.y, float(0.02), float(0.98)),
-          );
-          const reflSample = texture(uReflectTex, uvRc).rgb;
-          const reflFront = step(float(0), wClip);
-          const reflDepthW = smoothstep(float(0.06), float(2.4), thickness);
-          const reflAmt = fresnel
-            .mul(uReflectStrength)
-            .mul(reflDepthW)
-            .mul(reflFront)
-            .mul(uReflectEnabled);
-          const absorptionCol = mix(absorptionSky, reflSample, reflAmt);
-
-          const bx = abs(worldXZ.x);
-          const bz = abs(worldXZ.y);
-          const boxR = max(bx, bz).div(max(uLakeHalfExtent, float(0.001)));
-          const fade = float(1).sub(pow(saturate(boxR), uFadeStrength));
-          const hmHalf = uTerrainWorldSize.mul(float(0.5));
-          const hmU = worldXZ.x.add(hmHalf).div(uTerrainWorldSize);
-          const hmV = worldXZ.y.add(hmHalf).div(uTerrainWorldSize);
-          const hmUVc = vec2(hmU, hmV);
-          const inHm = step(float(0.001), hmU)
-            .mul(step(hmU, float(0.999)))
-            .mul(step(float(0.001), hmV))
-            .mul(step(hmV, float(0.999)));
-          const terrainWorldY = heightTexNode.sample(hmUVc).r;
-          const distShore = uWaterY.sub(terrainWorldY);
-          const shallowDepth = max(float(0), distShore);
-          const shoreWet = step(float(0.0001), shallowDepth);
-          const contactBand = float(1).sub(
-            smoothstep(float(0), uShoreContactBandWidth, shallowDepth),
-          );
-          const contactBlend = contactBand.mul(shoreWet).mul(inHm);
-          const nContact = mx_noise_float(
-            worldXZ
-              .mul(uShoreContactNoiseScale)
-              .add(vec2(uTime.mul(0.31), uTime.mul(-0.27))),
-          )
-            .mul(0.5)
-            .add(0.5);
-          const alphaContactMul = mix(
-            float(1),
-            uShoreContactAlphaMul,
-            contactBlend.mul(uShoreContactEnabled),
-          );
-          const alphaNoiseWobble = mix(
-            float(1),
-            nContact,
-            contactBlend.mul(uShoreContactNoiseAmp).mul(uShoreContactEnabled),
-          );
-          const tForAlpha = t.mul(uWaterCellsEnabled);
-          const alphaDepthThin = mix(uWaterShallowAlpha, float(1), depthBlend);
-          const waterAlpha = mix(uDeepOpacity, 1, max(tForAlpha, ripple))
-            .mul(uOpacity)
-            .mul(fade)
-            .mul(alphaDepthThin)
-            .mul(alphaContactMul)
-            .mul(alphaNoiseWobble);
-
-          // Waterline/foam: depth prepass vs water — band thickness scales with view distance (not fixed linear ε).
-          const rawScene = rawSceneDepth;
-          const sceneD = sceneLinD;
-          const waterD = waterLinD;
-          const diff = abs(sceneD.sub(waterD));
-          const refD = max(max(waterD, sceneD), float(0.12));
-          const distScale = refD.mul(uFoamDistanceScale);
-          const lineW = max(uLineWidth.mul(distScale), float(0.0005));
-          const glowW = max(uGlowWidth.mul(distScale), float(0.0007));
-          const lineInner = lineW.mul(0.25);
-          const line = float(1).sub(smoothstep(lineInner, lineW, diff));
-          const glow = exp(diff.div(max(glowW, float(1e-4))).mul(float(-1)));
-          const foamAlphaDepth = max(line, glow.mul(0.45))
-            .saturate()
-            .mul(uWaterlineIntensity)
-            .saturate();
-          const foamCol = mix(uGlowColor, uLineColor, line);
-          const geoMask = float(1).sub(step(float(0.9999), rawScene));
-
-          const shoreLayers = shoreFoamLayerMasks(worldXZ, distShore, float(1));
-          const useV2 = uShoreFoamV2Enabled;
-          const shorePrimaryOld = shoreLayers.x;
-          const shorePrimaryV2 = shoreFoamV2PrimaryMask(worldXZ, distShore);
-          const shorePrimaryA = mix(shorePrimaryOld, shorePrimaryV2, useV2);
-          const pulseAMask = shoreLayers.y.mul(float(1).sub(useV2));
-          const pulseBMask = shoreLayers.z.mul(float(1).sub(useV2));
-          const uw = uCameraUnderwater;
-          const foamLandMul = float(1).sub(uw.mul(0.9));
-          // Legacy shoreline requires heightmapShoreFoam. V2 is independent so you can see it without that toggle.
-          const shoreFoamGate = mix(uHeightmapFoamEnabled, float(1), useV2);
-          const foamDelayRamp = mix(
-            float(1),
-            smoothstep(
-              uShoreFoamDelayStart,
-              uShoreFoamDelayStart.add(uShoreFoamDelaySoft),
-              shallowDepth,
-            ),
-            uShoreFoamDelayEnabled,
-          );
-          const pMask = shorePrimaryA
-            .mul(inHm)
-            .mul(shoreFoamGate)
-            .mul(foamLandMul)
-            .mul(foamDelayRamp);
-          const sMaskA = pulseAMask
-            .mul(inHm)
-            .mul(uHeightmapFoamEnabled)
-            .mul(foamLandMul);
-          const sMaskB = pulseBMask
-            .mul(inHm)
-            .mul(uHeightmapFoamEnabled)
-            .mul(foamLandMul);
-          const depthContrib = foamAlphaDepth
-            .mul(geoMask)
-            .mul(uObjectFoamFromDepth)
-            .mul(float(1).sub(uw.mul(0.65)));
-          const primaryFoamColor = mix(
-            uShorePrimaryFoamColor,
-            uShoreFoamV2Color,
-            useV2,
-          );
-          const shoreBaseCol = absorptionCol
-            .add(foamCol.mul(depthContrib))
-            .add(primaryFoamColor.mul(pMask));
-          const afterPulseA = mix(
-            shoreBaseCol,
-            uShorePulseFoamColor,
-            min(float(1), sMaskA.mul(uShorePulseOpacity)),
-          );
-          const finalColor = mix(
-            afterPulseA,
-            uShorePulse2FoamColor,
-            min(float(1), sMaskB.mul(uShorePulse2Opacity)),
-          ).saturate();
-          const underTint = vec3(0.52, 0.78, 0.9);
-          const finalTinted = mix(
-            finalColor,
-            finalColor.mul(underTint),
-            uw.mul(uUnderwaterSurfaceTint),
-          ).saturate();
-
-          return vec4(finalTinted, waterAlpha);
+        lakeShader = createLakeShader({
+          heightTex: heightmapDataTex,
+          terrainSize: TERRAIN_SIZE,
         });
-
-        const fragOut = waterFrag();
-        const waterVert = Fn(() => {
-          const wp = modelWorldMatrix.mul(vec4(positionLocal, 1)).xyz;
-          const wxz = wp.xz;
-          const t = uTime.mul(uSurfRippleSpeed);
-          const w1 = sin(wxz.x.mul(uSurfRippleFreq).add(t));
-          const w2 = cos(wxz.y.mul(uSurfRippleFreq.mul(1.17)).sub(t.mul(0.82)));
-          const hWave = w1
-            .add(w2.mul(0.55))
-            .mul(uSurfRippleAmp)
-            .mul(uSurfRippleEnabled);
-          const vnSpd = max(uWaterProcNoiseSpeed, float(0.001));
-          const vertNoiseScroll = vec2(
-            uTime.mul(uWaterVertNoiseSpeedX.mul(vnSpd)),
-            uTime.mul(uWaterVertNoiseSpeedZ.mul(vnSpd)),
-          );
-          const vertNoiseUV = wxz
-            .mul(uWaterVertNoiseScale)
-            .add(vertNoiseScroll);
-          const nA = mx_noise_float(vertNoiseUV);
-          const nB = mx_noise_float(
-            vertNoiseUV
-              .mul(float(1.73))
-              .add(
-                vec2(
-                  uTime.mul(float(0.11).mul(vnSpd)),
-                  uTime.mul(float(-0.15).mul(vnSpd)),
-                ),
-              ),
-          );
-          const hNoise = nA
-            .sub(float(0.5))
-            .mul(float(0.62))
-            .add(nB.sub(float(0.5)).mul(float(0.38)))
-            .mul(uWaterVertNoiseAmp);
-          const h = hWave.add(hNoise);
-          const wNew = wp.add(vec3(0, h, 0));
-          return modelWorldMatrixInverse.mul(vec4(wNew, 1)).xyz;
-        });
-        const waterMaterial = new THREE.MeshBasicNodeMaterial({
-          transparent: true,
-          depthWrite: false,
-          side: THREE.DoubleSide,
-          positionNode: waterVert(),
-          colorNode: fragOut.rgb,
-          opacityNode: fragOut.a,
-        });
+        lakeShader.syncParams(buildLakeShaderParams(params));
 
         const waterPlane = new THREE.Mesh(
           new THREE.PlaneGeometry(
@@ -2203,7 +1783,7 @@
             WATER_PLANE_SEGMENTS,
             WATER_PLANE_SEGMENTS,
           ),
-          waterMaterial,
+          lakeShader.material,
         );
         waterPlane.rotation.x = -Math.PI / 2;
         waterPlane.position.set(0, WATER_Y, 0);
@@ -2228,24 +1808,17 @@
           debugReflectMat,
         );
         debugReflectOrb.name = "DebugReflectOrb";
-        const debugReflectDepth = new THREE.Mesh(debugReflectGeo, depthMat);
-        debugReflectDepth.name = "DebugReflectOrbDepth";
-        depthScene.add(debugReflectDepth);
         scene.add(debugReflectOrb);
 
         function applyDebugReflectOrb() {
           debugReflectOrb.visible = params.debugReflectOrb;
-          debugReflectDepth.visible = params.debugReflectOrb;
           debugReflectOrb.position.set(
             params.debugReflectOrbX,
             params.debugReflectOrbY,
             params.debugReflectOrbZ,
           );
-          debugReflectDepth.position.copy(debugReflectOrb.position);
-          debugReflectDepth.quaternion.copy(debugReflectOrb.quaternion);
           const s = params.debugReflectOrbSize / dbgReflectBaseR;
           debugReflectOrb.scale.setScalar(s);
-          debugReflectDepth.scale.copy(debugReflectOrb.scale);
           debugReflectMat.roughness = params.debugReflectRoughness;
           debugReflectMat.envMapIntensity = params.debugReflectEnvBoost;
         }
@@ -2426,14 +1999,6 @@
           camera.aspect = w / h;
           camera.updateProjectionMatrix();
           renderer.setSize(w, h);
-          const dpr = renderer.getPixelRatio();
-          depthRT.setSize(Math.round(w * dpr), Math.round(h * dpr));
-          depthRT.depthTexture?.dispose();
-          depthRT.depthTexture = new THREE.DepthTexture(
-            Math.round(w * dpr),
-            Math.round(h * dpr),
-          );
-          depthRT.depthTexture.type = THREE.UnsignedShortType;
         }
         window.addEventListener("resize", onResize);
         onResize();
@@ -2450,6 +2015,7 @@
           const elapsed = clock.getElapsed();
           const delta = clock.getDelta();
           uTime.value = elapsed;
+          lakeShader?.update(delta, elapsed, [waterPlane]);
 
           const bob1 = params.waterBobEnabled
             ? Math.sin(elapsed * Math.PI * 2 * params.waterBobHz) *
@@ -2489,42 +2055,13 @@
             (ORBIT_MAX_UNDERWATER - ORBIT_MAX_SURFACE) * orbitBlend;
 
           // Keep texture nodes valid; update .value with real RT textures when available
-          depthTexNode.value = placeholderDepth;
           waveTexNode.value = placeholderColor;
           injTexNode.value = placeholderColor;
           dispTexNode.value = placeholderColor;
 
-          for (let i = 0; i < MAX_RIPPLES; i++) {
-            if (rippleBuffer[i]) {
-              uRippleCenters[i].value.set(rippleBuffer[i].x, rippleBuffer[i].z);
-              uRippleTimes[i].value = rippleBuffer[i].t;
-            } else {
-              uRippleCenters[i].value.set(1e6, 1e6);
-              uRippleTimes[i].value = 0;
-            }
-          }
-          uRippleCount.value = rippleBuffer.length;
-          uRippleSpeed.value = rippleConfig.speed;
-          uRippleWidth.value = rippleConfig.width;
-          uRippleStrength.value = rippleConfig.strength;
-          uRippleDecay.value = rippleConfig.decay;
-          uRippleRings.value = rippleConfig.rings;
-          uRippleSpacing.value = rippleConfig.spacing;
-
-          const objects = [];
           const dpr = renderer.getPixelRatio();
           const physW = Math.round(window.innerWidth * dpr);
           const physH = Math.round(window.innerHeight * dpr);
-          if (depthRT.width !== physW || depthRT.height !== physH) {
-            depthRT.setSize(physW, physH);
-            if (depthRT.depthTexture) {
-              depthRT.depthTexture.dispose();
-              depthRT.depthTexture = new THREE.DepthTexture(physW, physH);
-              depthRT.depthTexture.type = THREE.UnsignedShortType;
-            }
-            // Keep depth texture node in sync
-            depthTexNode.value = depthRT.depthTexture || placeholderDepth;
-          }
 
           if (params.reflectEnabled) {
             const rs = Math.max(0.22, Math.min(1, params.reflectResScale));
@@ -2544,7 +2081,7 @@
               reflectCamera.projectionMatrix,
               reflectCamera.matrixWorldInverse,
             );
-            uReflectVP.value.copy(uReflectVPHelper);
+            lakeShader?.uniforms.reflectVP.value.copy(uReflectVPHelper);
             const prevBgR = scene.background;
             const wVis = waterPlane.visible;
             const wdVis = waveDisplayPlane.visible;
@@ -2569,57 +2106,17 @@
             sky.visible = skyVis;
             if (gizmoHelper) gizmoHelper.visible = gizmoVis;
             if (reflectRT.texture instanceof THREE.Texture) {
-              uReflectTex.value = reflectRT.texture;
+              if (lakeShader) lakeShader.uniforms.reflectTex.value = reflectRT.texture;
             }
-            uReflectEnabled.value = 1;
+            if (lakeShader) lakeShader.uniforms.reflectEnabled.value = 1;
           } else {
-            uReflectEnabled.value = 0;
-            uReflectTex.value = placeholderColor;
-          }
-
-          for (const obj of objects) {
-            if (!depthGroups.has(obj.id)) {
-              const group = new THREE.Group();
-              for (const geo of obj.geometries) {
-                const mesh = new THREE.Mesh(geo, depthMat);
-                group.add(mesh);
-              }
-              depthScene.add(group);
-              depthGroups.set(obj.id, group);
-            }
-            const group = depthGroups.get(obj.id);
-            group.position.copy(obj.ref.current.position);
-            group.rotation.copy(obj.ref.current.rotation);
-            group.scale.copy(obj.ref.current.scale);
-          }
-          for (const [id, group] of depthGroups) {
-            if (!objects.find((o) => o.id === id)) {
-              depthScene.remove(group);
-              depthGroups.delete(id);
+            if (lakeShader) {
+              lakeShader.uniforms.reflectEnabled.value = 0;
+              lakeShader.uniforms.reflectTex.value = placeholderColor;
             }
           }
 
-          if (dragonModelRoot && dragonDepthRoot) {
-            dragonDepthRoot.position.copy(dragonModelRoot.position);
-            dragonDepthRoot.quaternion.copy(dragonModelRoot.quaternion);
-            dragonDepthRoot.scale.copy(dragonModelRoot.scale);
-          }
-
-          const prevRT = renderer.getRenderTarget();
-          const prevAC = renderer.autoClear;
-          renderer.autoClear = true;
-          renderer.setRenderTarget(depthRT);
-          renderer.render(depthScene, camera);
-          renderer.setRenderTarget(prevRT);
-          renderer.autoClear = prevAC;
-
-          // Only assign if valid THREE.Texture (WebGPU RT may expose different type)
-          if (depthRT.depthTexture instanceof THREE.Texture) {
-            depthTexNode.value = depthRT.depthTexture;
-          }
-          uDepthNear.value = camera.near;
-          uDepthFar.value = camera.far;
-
+          const objects = [];
           let cx = 0,
             cz = 0,
             maxScale = 5;
@@ -3089,32 +2586,6 @@
             rebuildSkyEnvironmentMap();
           });
 
-        const fNoise = pane.addFolder({ title: "Water — noise" });
-        fNoise.addBinding(params, "waterNoise", { label: "Motion & FBM" });
-        fNoise.addBinding(params, "waterCells", { label: "Cell pattern" });
-        fNoise.addBinding(params, "noiseTimeScale", {
-          min: 0.1,
-          max: 1.5,
-          step: 0.05,
-        });
-        fNoise.addBinding(params, "noiseScale", {
-          min: 0.3,
-          max: 4,
-          step: 0.02,
-        });
-        fNoise.addBinding(params, "flowZ", { min: 0, max: 0.3, step: 0.01 });
-        fNoise.addBinding(params, "cellSpeed", {
-          min: 0.05,
-          max: 1.2,
-          step: 0.05,
-        });
-        fNoise.addBinding(params, "distort", { min: 0, max: 1, step: 0.02 });
-        fNoise.addBinding(params, "edgeThreshold", {
-          min: 0.02,
-          max: 0.2,
-          step: 0.005,
-        });
-
         const fWaterCol = pane.addFolder({ title: "Water — colors" });
         fWaterCol.addBinding(params, "deepColor");
         fWaterCol.addBinding(params, "midColor");
@@ -3125,8 +2596,30 @@
           step: 0.02,
         });
         const fWaterTsl = pane.addFolder({
-          title: "Water — TSL surface (depth + noise)",
+          title: "Water — lake-shader.js (surface)",
           expanded: true,
+        });
+        const fLakeShoreDebug = fWaterTsl.addFolder({
+          title: "Shore seam debug (strip layers)",
+          expanded: true,
+        });
+        fLakeShoreDebug.addBinding(params, "lakeDebugNoPrimaryFoam", {
+          label: "Strip primary foam (V1/V2)",
+        });
+        fLakeShoreDebug.addBinding(params, "lakeDebugNoWaterline", {
+          label: "Strip waterline glow",
+        });
+        fLakeShoreDebug.addBinding(params, "lakeDebugNoShoreContact", {
+          label: "Strip shallow contact α + rim fade",
+        });
+        fLakeShoreDebug.addBinding(params, "lakeDebugNoReflection", {
+          label: "Strip planar reflection",
+        });
+        fLakeShoreDebug.addBinding(params, "lakeDebugNoFresnelSky", {
+          label: "Strip grazing highlight (Fresnel sky)",
+        });
+        fLakeShoreDebug.addBinding(params, "lakeDebugNoSurfNormals", {
+          label: "Strip surface normal perturbation",
         });
         fWaterTsl.addBinding(params, "waterProcNoiseSpeed", {
           label: "All noise scroll × (normals + waves)",
@@ -3271,22 +2764,7 @@
           step: 0.05,
         });
 
-        const fRipple = pane.addFolder({ title: "Ripples" });
-        fRipple.addBinding(params, "rippleStrength", {
-          min: 0,
-          max: 15,
-          step: 0.5,
-        });
-        fRipple.addBinding(params, "rippleWidth", {
-          min: 0.02,
-          max: 0.4,
-          step: 0.01,
-        });
-
         const fFoam = pane.addFolder({ title: "Waterline / foam" });
-        fFoam.addBinding(params, "heightmapShoreFoam", {
-          label: "Shore foam (heightmap vs water Y)",
-        });
         fFoam.addBinding(params, "shoreFoamWidth", {
           label: "Shore band width (world)",
           min: 0.08,
@@ -3582,15 +3060,8 @@
           max: 1.5,
           step: 0.02,
         });
-        fFoam.addBinding(params, "objectFoamFromDepth", {
-          label: "Foam on props (depth prepass)",
-        });
-        fFoam.addBinding(params, "lineThinness", {
-          min: 0.01,
-          max: 0.15,
-          step: 0.005,
-        });
         fFoam.addBinding(params, "foamColor", { view: "color" });
+        fFoam.addBinding(params, "glowColor", { view: "color" });
         fFoam.addBinding(params, "waterlineIntensity", {
           min: 0,
           max: 4,
@@ -3605,12 +3076,6 @@
           min: 0.2,
           max: 5,
           step: 0.1,
-        });
-        fFoam.addBinding(params, "foamDistanceScale", {
-          label: "Foam vs distance",
-          min: 0.0003,
-          max: 0.004,
-          step: 0.00005,
         });
 
         const fFoamV2 = pane.addFolder({
@@ -3792,6 +3257,12 @@
           max: 0.85,
           step: 0.02,
         });
+        fShoreContact.addBinding(params, "shoreContactCurve", {
+          label: "Blend softness (↓ softer)",
+          min: 0.32,
+          max: 1,
+          step: 0.02,
+        });
         fShoreContact.addBinding(params, "shoreFoamDelayEnabled", {
           label: "Foam delay inland",
         });
@@ -3827,7 +3298,6 @@
           const f = params.lakeSize / LAKE_PLANE_BASE;
           waterPlane.scale.set(f, 1, f);
           waveDisplayPlane.scale.set(f, 1, f);
-          uLakeHalfExtent.value = params.lakeSize * 0.5;
         }
 
         function syncPaneToScene() {
@@ -3841,25 +3311,7 @@
           applySkyFromParams();
           fillLight.intensity = params.fill;
           rimLight.intensity = params.rim;
-          uNoiseTimeScale.value = params.noiseTimeScale;
-          uNoiseScale.value = params.noiseScale;
-          uWaterNoiseEnabled.value = params.waterNoise ? 1 : 0;
-          uWaterCellsEnabled.value = params.waterCells ? 1 : 0;
-          uFlowZ.value = params.flowZ;
-          uCellSpeed.value = params.cellSpeed;
-          uDistortAmount.value = params.distort;
-          uEdgeThreshold.value = params.edgeThreshold;
-          applyPaneColor(params.deepColor, uDeepColor.value);
-          applyPaneColor(params.midColor, uMidColor.value);
-          applyPaneColor(params.highlightColor, uHighlight.value);
-          uDeepOpacity.value = params.waterOpacity;
-          uRippleStrength.value = params.rippleStrength;
-          rippleConfig.strength = params.rippleStrength;
-          uRippleWidth.value = params.rippleWidth;
-          rippleConfig.width = params.rippleWidth;
-          uWaterLineThinness.value = params.lineThinness;
           uDragonMeshFoam.value = params.dragonWaterFoam;
-          applyPaneColor(params.foamColor, uWaterLineColor.value);
           applyPaneColor(
             params.shorePrimaryFoamColor,
             uShorePrimaryFoamColor.value,
@@ -3872,33 +3324,8 @@
             params.shorePulse2FoamColor,
             uShorePulse2FoamColor.value,
           );
-          uWaterlineIntensity.value = params.waterlineIntensity;
-          uLineWidth.value = params.lineWidth;
-          uGlowWidth.value = params.glowWidth;
-          uFoamDistanceScale.value = params.foamDistanceScale;
           uDispOpacity.value = params.ringOpacity;
           uDispGradScale.value = params.gradScale;
-          uSurfRippleAmp.value = params.waterSurfRippleAmp;
-          uSurfRippleFreq.value = params.waterSurfRippleFreq;
-          uSurfRippleSpeed.value = params.waterSurfRippleSpeed;
-          uSurfRippleEnabled.value = params.waterSurfRippleEnabled ? 1 : 0;
-          uWaterDepthAbsorb.value = params.waterDepthAbsorb;
-          uWaterShallowPale.value = params.waterShallowPale;
-          uWaterSurfNoiseScale1.value = params.waterSurfNoiseScale1;
-          uWaterSurfNoiseScale2.value = params.waterSurfNoiseScale2;
-          uWaterSurfNoiseSpeed1.value = params.waterSurfNoiseSpeed1;
-          uWaterSurfNoiseSpeed2.value = params.waterSurfNoiseSpeed2;
-          uWaterSurfNormalStrength.value = params.waterSurfNormalStrength;
-          uWaterFresnelExp.value = params.waterFresnelExp;
-          uWaterFresnelSky.value = params.waterFresnelSky;
-          uWaterShallowAlpha.value = params.waterShallowAlpha;
-          uWaterVertNoiseAmp.value = params.waterVertNoiseAmp;
-          uWaterVertNoiseScale.value = params.waterVertNoiseScale;
-          uWaterVertNoiseSpeedX.value = params.waterVertNoiseSpeedX;
-          uWaterVertNoiseSpeedZ.value = params.waterVertNoiseSpeedZ;
-          uWaterProcNoiseSpeed.value = params.waterProcNoiseSpeed;
-          uReflectStrength.value = params.reflectStrength;
-          uReflectDistort.value = params.reflectDistort;
           applyDebugReflectOrb();
         }
 

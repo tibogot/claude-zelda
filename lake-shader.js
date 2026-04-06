@@ -8,6 +8,7 @@
  *   - Shore foam V1 (Voronoi FBM / Perlin, jagged cutoff)
  *   - Shore foam V2 (domain warp, Voronoi/value noise, independent system)
  *   - Shore contact transparency (shallow alpha wobble)
+ *   - Debug: lakeDebugNo* uniforms strip one layer at a time (isolate shore seam)
  *   - Foam delay ramp (pushes foam inland)
  *   - Vertex displacement (sine ripples + noise)
  *   - Whole-lake vertical bob (dual sine)
@@ -138,10 +139,18 @@ export const LAKE_DEFAULTS = {
 
   // Shore contact transparency
   shoreContactEnabled:    true,
-  shoreContactBandWidth:  0.45,
-  shoreContactAlphaMul:   0.38,
+  /** World units: shallow-depth range over which contact α eases to full (wider = gentler shore). */
+  shoreContactBandWidth:  1.18,
+  /** Minimum α multiplier in the contact zone (higher = less “empty” near shore). */
+  shoreContactAlphaMul:   0.44,
   shoreContactNoiseScale: 6.5,
-  shoreContactNoiseAmp:   0.22,
+  /** Edge α wobble; kept moderate — dual noise + edge gate reduce crawl. */
+  shoreContactNoiseAmp:   0.12,
+  /**
+   * Pow exponent on the raw contact mask (0.35–1). Lower = softer, longer transparent shoulder
+   * and no hard step at the inner edge of the band.
+   */
+  shoreContactCurve:      0.58,
 
   // Foam delay ramp
   shoreFoamDelayEnabled:  true,
@@ -154,6 +163,14 @@ export const LAKE_DEFAULTS = {
   lineWidth: 0.42,
   glowWidth: 1.35,
   waterlineIntensity: 0,
+
+  /** Shore debug: when 1, strips that layer so you can isolate the seam (re-enable one by one). */
+  lakeDebugNoPrimaryFoam:   false,
+  lakeDebugNoWaterline:     false,
+  lakeDebugNoShoreContact:  false,
+  lakeDebugNoReflection:    false,
+  lakeDebugNoFresnelSky:    false,
+  lakeDebugNoSurfNormals:   false,
 };
 
 // ─── TSL helper functions ────────────────────────────────────────────────────
@@ -375,6 +392,7 @@ export function createLakeShader({ heightTex, terrainSize }) {
   u.shoreContactAlphaMul   = uniform(LAKE_DEFAULTS.shoreContactAlphaMul);
   u.shoreContactNoiseScale = uniform(LAKE_DEFAULTS.shoreContactNoiseScale);
   u.shoreContactNoiseAmp   = uniform(LAKE_DEFAULTS.shoreContactNoiseAmp);
+  u.shoreContactCurve      = uniform(LAKE_DEFAULTS.shoreContactCurve);
 
   // Foam delay
   u.shoreFoamDelayEnabled  = uniform(LAKE_DEFAULTS.shoreFoamDelayEnabled ? 1 : 0);
@@ -387,6 +405,13 @@ export function createLakeShader({ heightTex, terrainSize }) {
   u.lineWidth       = uniform(LAKE_DEFAULTS.lineWidth);
   u.glowWidth       = uniform(LAKE_DEFAULTS.glowWidth);
   u.waterlineIntensity = uniform(LAKE_DEFAULTS.waterlineIntensity);
+
+  u.lakeDebugNoPrimaryFoam  = uniform(LAKE_DEFAULTS.lakeDebugNoPrimaryFoam ? 1 : 0);
+  u.lakeDebugNoWaterline    = uniform(LAKE_DEFAULTS.lakeDebugNoWaterline ? 1 : 0);
+  u.lakeDebugNoShoreContact = uniform(LAKE_DEFAULTS.lakeDebugNoShoreContact ? 1 : 0);
+  u.lakeDebugNoReflection   = uniform(LAKE_DEFAULTS.lakeDebugNoReflection ? 1 : 0);
+  u.lakeDebugNoFresnelSky   = uniform(LAKE_DEFAULTS.lakeDebugNoFresnelSky ? 1 : 0);
+  u.lakeDebugNoSurfNormals  = uniform(LAKE_DEFAULTS.lakeDebugNoSurfNormals ? 1 : 0);
 
   // Terrain size for heightmap UV
   const uTerrainSize = uniform(terrainSize);
@@ -528,13 +553,20 @@ export function createLakeShader({ heightTex, terrainSize }) {
     const g2z = s2pz.sub(s20);
     const dnx = g1x.add(g2x.mul(0.62)).mul(u.surfNormalStrength);
     const dnz = g1z.add(g2z.mul(0.62)).mul(u.surfNormalStrength);
-    const worldN = normalize(vec3(dnx.negate(), float(1), dnz.negate()));
+    const worldNPerturbed = normalize(vec3(dnx.negate(), float(1), dnz.negate()));
+    const flatUp = vec3(float(0), float(1), float(0));
+    const worldN = normalize(
+      mix(flatUp, worldNPerturbed, float(1).sub(u.lakeDebugNoSurfNormals)),
+    );
 
     // ── Fresnel (perturbed normal) ───────────────────────────────────────────
     const viewDir = normalize(cameraPosition.sub(positionWorld));
     const NdotV   = max(dot(worldN, viewDir), float(0.001));
     const fresnel = pow(float(1).sub(saturate(NdotV)), u.fresnelExp);
-    const absorptionSky = absorptionBase.add(u.highlightColor.mul(fresnel).mul(u.fresnelSky));
+    const fresnelSkyMul = float(1).sub(u.lakeDebugNoFresnelSky);
+    const absorptionSky = absorptionBase.add(
+      u.highlightColor.mul(fresnel).mul(u.fresnelSky).mul(fresnelSkyMul),
+    );
 
     // ── Planar reflections (host provides RT + VP matrix) ──────────────────
     const clipR  = u.reflectVP.mul(vec4(positionWorld, float(1)));
@@ -553,7 +585,8 @@ export function createLakeShader({ heightTex, terrainSize }) {
     const reflAmt    = fresnel
       .mul(u.reflectStrength)
       .mul(reflFront)
-      .mul(u.reflectEnabled);
+      .mul(u.reflectEnabled)
+      .mul(float(1).sub(u.lakeDebugNoReflection));
     const surfaceColor = mix(absorptionSky, reflSample, reflAmt);
 
     // ── Alpha ────────────────────────────────────────────────────────────────
@@ -561,14 +594,24 @@ export function createLakeShader({ heightTex, terrainSize }) {
     const waterAlpha = u.deepOpacity.mul(u.opacity).mul(alphaDepthThin);
 
     // ── Shore contact transparency ───────────────────────────────────────────
-    const shoreWet  = step(float(0.0001), shallowDepth);
-    const contactBand = float(1).sub(smoothstep(float(0), u.shoreContactBandWidth, shallowDepth));
-    const contactBlend = contactBand.mul(shoreWet);
-    const nContact = mx_noise_float(
-      worldXZ.mul(u.shoreContactNoiseScale).add(vec2(u.time.mul(0.31), u.time.mul(-0.27))),
-    ).mul(0.5).add(0.5);
-    const alphaContactMul = mix(float(1), u.shoreContactAlphaMul, contactBlend.mul(u.shoreContactEnabled));
-    const alphaNoiseWobble = mix(float(1), nContact, contactBlend.mul(u.shoreContactNoiseAmp).mul(u.shoreContactEnabled));
+    // Silhouette: ramp wet from slightly negative distShore (heightmap vs mesh mismatch).
+    // Depth: smoothstep band, then pow(contactRaw, curve) for a soft shoulder (no hard inner rim).
+    // Noise: two octaves + edge-gated weight so the boundary doesn’t sparkle/crawl.
+    const contactOn = u.shoreContactEnabled.mul(float(1).sub(u.lakeDebugNoShoreContact));
+    const shoreEdgeBias = max(u.shoreContactBandWidth.mul(0.28), float(0.05));
+    const shoreWet = smoothstep(shoreEdgeBias.negate(), float(0), distShore);
+    const contactBandLin = float(1).sub(smoothstep(float(0), u.shoreContactBandWidth, shallowDepth));
+    const contactRaw = contactBandLin.mul(shoreWet);
+    const curve = clamp(u.shoreContactCurve, float(0.32), float(1));
+    const contactBlend = pow(max(contactRaw, float(1e-5)), curve);
+    const nUv = worldXZ.mul(u.shoreContactNoiseScale).add(vec2(u.time.mul(0.31), u.time.mul(-0.27)));
+    const nContactLo = mx_noise_float(nUv).mul(0.5).add(0.5);
+    const nContactHi = mx_noise_float(nUv.mul(0.53).add(vec2(19.2, 8.7))).mul(0.5).add(0.5);
+    const nContact = nContactLo.mul(0.58).add(nContactHi.mul(0.42));
+    const noiseEdge = pow(max(contactRaw, float(0)), float(1.22));
+    const noiseW = noiseEdge.mul(u.shoreContactNoiseAmp).mul(contactOn);
+    const alphaContactMul = mix(float(1), u.shoreContactAlphaMul, contactBlend.mul(contactOn));
+    const alphaNoiseWobble = mix(float(1), nContact, noiseW);
     const finalAlpha = waterAlpha.mul(alphaContactMul).mul(alphaNoiseWobble);
 
     // ── Shore foam V1 (heightmap-based) ──────────────────────────────────────
@@ -586,20 +629,47 @@ export function createLakeShader({ heightTex, terrainSize }) {
       u.shoreFoamDelayEnabled,
     );
     const pMask = shorePrimary.mul(foamDelayRamp);
+    // Primary shore foam also peaks at abs(distShore)≈0 (same kernel as foamBase). With default
+    // white shorePrimaryFoamColor that stacks as a jagged bright line at the heightmap zero-crossing
+    // (triangle edges), independent of waterlineIntensity. Fade it in over a thin band when
+    // shore contact transparency is on so the edge reads as alpha contact, not additive foam.
+    const absDistShore = abs(distShore);
+    const primaryFoamRimW = max(u.shoreContactBandWidth.mul(0.18), float(0.022));
+    const primaryFoamRimFade = mix(
+      float(1),
+      smoothstep(float(0), primaryFoamRimW, absDistShore),
+      contactOn,
+    );
+    const pMaskFinal = pMask.mul(primaryFoamRimFade);
 
     // ── Simple waterline glow (heightmap-based) ──────────────────────────────
     const terrainAbove = distShore.negate(); // positive = terrain above water
     const onShore = step(float(0), terrainAbove);
     const line = float(1).sub(smoothstep(float(0), u.lineWidth, terrainAbove)).mul(onShore);
     const glow = exp(terrainAbove.div(max(u.glowWidth, float(0.001))).mul(-1)).mul(onShore);
-    const foamAlpha = saturate(max(line, glow.mul(0.5)).mul(u.waterlineIntensity));
+    const foamAlphaRaw = saturate(max(line, glow.mul(0.5)).mul(u.waterlineIntensity));
+    // Waterline `line` peaks at terrainAbove≈0; additive foamCol then reads as a bright rim on
+    // top of shore-contact alpha. When contact is on: ramp in from 0 (kills bilinear spikes)
+    // and fade where contactBlend is strong so transparency meets terrain without a white band.
+    const waterlineRampInW = max(u.shoreContactBandWidth.mul(0.4), u.lineWidth.mul(0.15));
+    const waterlineShoreFade = mix(
+      float(1),
+      smoothstep(float(0), waterlineRampInW, terrainAbove),
+      contactOn,
+    );
+    const waterlineContactFade = float(1).sub(contactBlend.mul(contactOn));
+    const foamAlpha = foamAlphaRaw
+      .mul(waterlineShoreFade)
+      .mul(waterlineContactFade)
+      .mul(float(1).sub(u.lakeDebugNoWaterline));
     const foamCol = mix(u.glowColor, u.foamColor, line);
 
     // ── Composite ────────────────────────────────────────────────────────────
     const primaryFoamColor = mix(u.shorePrimaryFoamColor, u.shoreFoamV2Color, useV2);
+    const primaryFoamMul = float(1).sub(u.lakeDebugNoPrimaryFoam);
     const afterFoam = surfaceColor
       .add(foamCol.mul(foamAlpha))
-      .add(primaryFoamColor.mul(pMask));
+      .add(primaryFoamColor.mul(pMaskFinal).mul(primaryFoamMul));
     const finalColor = afterFoam.saturate();
 
     return vec4(finalColor, finalAlpha);
@@ -759,6 +829,7 @@ export function createLakeShader({ heightTex, terrainSize }) {
     if (p.shoreContactAlphaMul != null)   u.shoreContactAlphaMul.value   = p.shoreContactAlphaMul;
     if (p.shoreContactNoiseScale != null) u.shoreContactNoiseScale.value = p.shoreContactNoiseScale;
     if (p.shoreContactNoiseAmp != null)   u.shoreContactNoiseAmp.value   = p.shoreContactNoiseAmp;
+    if (p.shoreContactCurve != null)      u.shoreContactCurve.value      = p.shoreContactCurve;
 
     // Foam delay
     if (p.shoreFoamDelayEnabled != null)  u.shoreFoamDelayEnabled.value  = p.shoreFoamDelayEnabled ? 1 : 0;
@@ -771,6 +842,13 @@ export function createLakeShader({ heightTex, terrainSize }) {
     if (p.lineWidth != null)         u.lineWidth.value         = p.lineWidth;
     if (p.glowWidth != null)         u.glowWidth.value         = p.glowWidth;
     if (p.waterlineIntensity != null) u.waterlineIntensity.value = p.waterlineIntensity;
+
+    if (p.lakeDebugNoPrimaryFoam != null)   u.lakeDebugNoPrimaryFoam.value   = p.lakeDebugNoPrimaryFoam ? 1 : 0;
+    if (p.lakeDebugNoWaterline != null)     u.lakeDebugNoWaterline.value     = p.lakeDebugNoWaterline ? 1 : 0;
+    if (p.lakeDebugNoShoreContact != null)  u.lakeDebugNoShoreContact.value  = p.lakeDebugNoShoreContact ? 1 : 0;
+    if (p.lakeDebugNoReflection != null)    u.lakeDebugNoReflection.value    = p.lakeDebugNoReflection ? 1 : 0;
+    if (p.lakeDebugNoFresnelSky != null)    u.lakeDebugNoFresnelSky.value    = p.lakeDebugNoFresnelSky ? 1 : 0;
+    if (p.lakeDebugNoSurfNormals != null)   u.lakeDebugNoSurfNormals.value   = p.lakeDebugNoSurfNormals ? 1 : 0;
   }
 
   /**
