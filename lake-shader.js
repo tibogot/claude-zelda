@@ -9,6 +9,7 @@
  *   - Shore foam V2 (domain warp, Voronoi/value noise, independent system)
  *   - Shore contact transparency (shallow alpha wobble)
  *   - Debug: lakeDebugNo* uniforms strip one layer at a time (isolate shore seam)
+ *   - Optional open-water anime Voronoi (“caustic foam” tint, separate from shore foam)
  *   - Foam delay ramp (pushes foam inland)
  *   - Vertex displacement (sine ripples + noise)
  *   - Whole-lake vertical bob (dual sine)
@@ -70,6 +71,23 @@ export const LAKE_DEFAULTS = {
   reflectEnabled:    true,
   reflectStrength:   0.52,
   reflectDistort:    0.034,
+
+  /** Anime-style Voronoi “caustic foam” on the open water (independent of shore foam). */
+  causticFoamEnabled:   false,
+  causticFoamBlend:     0.72,
+  causticFoamScale:     0.28,
+  causticFoamSmoothness: 0.55,
+  causticFoamEdgeThreshold: 0.067,
+  causticFoamEdgeSoftness:  0.012,
+  causticFoamFlowX:     0,
+  causticFoamFlowZ:     0.08,
+  causticFoamCellSpeed: 0.45,
+  causticFoamNoiseScale:   1.5,
+  causticFoamNoiseTime:    0.55,
+  causticFoamNoiseFlow:    0.18,
+  causticFoamDistort:      0.28,
+  causticFoamMidPos:       0.084,
+  causticFoamColor:        "#dff8ff",
 
   // Vertex displacement
   vertNoiseAmp:       0.018,
@@ -205,6 +223,39 @@ const _cellPt = Fn(([seed, time, cellSpeed]) => {
   );
 });
 
+/** Animated Voronoi F1 + smooth-min F1 (anime-water-scene2 style, jittered cell points). */
+const _animeVoronoiF1 = Fn(([p, tNoise, cellSpeed]) => {
+  const ip = floor(p);
+  const fp = fract(p);
+  const md = float(10.0).toVar();
+  for (const [nx, ny] of _neighbors) {
+    const n = vec2(float(nx), float(ny));
+    const rnd = _hash22(ip.add(n));
+    const pt = vec2(
+      _cellPt(rnd.x, tNoise, cellSpeed),
+      _cellPt(rnd.y, tNoise, cellSpeed),
+    );
+    md.assign(min(md, length(n.add(pt).sub(fp))));
+  }
+  return md;
+});
+
+const _animeVoronoiSmoothF1 = Fn(([p, tNoise, cellSpeed, smoothness]) => {
+  const ip = floor(p);
+  const fp = fract(p);
+  const res = float(10.0).toVar();
+  for (const [nx, ny] of _neighbors) {
+    const n = vec2(float(nx), float(ny));
+    const rnd = _hash22(ip.add(n));
+    const pt = vec2(
+      _cellPt(rnd.x, tNoise, cellSpeed),
+      _cellPt(rnd.y, tNoise, cellSpeed),
+    );
+    res.assign(_smin(res, length(n.add(pt).sub(fp)), smoothness));
+  }
+  return res;
+});
+
 const _nHash = Fn(([p]) => {
   const pp = fract(p.mul(vec2(127.1, 311.7)));
   const d = dot(pp, pp.add(45.32));
@@ -318,6 +369,23 @@ export function createLakeShader({ heightTex, terrainSize }) {
   u.reflectStrength  = uniform(LAKE_DEFAULTS.reflectStrength);
   u.reflectDistort   = uniform(LAKE_DEFAULTS.reflectDistort);
   u.reflectVP        = uniform(new THREE.Matrix4());
+
+  // Open-water anime Voronoi (caustic-style foam tint)
+  u.causticFoamEnabled       = uniform(LAKE_DEFAULTS.causticFoamEnabled ? 1 : 0);
+  u.causticFoamBlend         = uniform(LAKE_DEFAULTS.causticFoamBlend);
+  u.causticFoamScale         = uniform(LAKE_DEFAULTS.causticFoamScale);
+  u.causticFoamSmoothness    = uniform(LAKE_DEFAULTS.causticFoamSmoothness);
+  u.causticFoamEdgeThreshold = uniform(LAKE_DEFAULTS.causticFoamEdgeThreshold);
+  u.causticFoamEdgeSoftness  = uniform(LAKE_DEFAULTS.causticFoamEdgeSoftness);
+  u.causticFoamFlowX         = uniform(LAKE_DEFAULTS.causticFoamFlowX);
+  u.causticFoamFlowZ         = uniform(LAKE_DEFAULTS.causticFoamFlowZ);
+  u.causticFoamCellSpeed     = uniform(LAKE_DEFAULTS.causticFoamCellSpeed);
+  u.causticFoamNoiseScale    = uniform(LAKE_DEFAULTS.causticFoamNoiseScale);
+  u.causticFoamNoiseTime     = uniform(LAKE_DEFAULTS.causticFoamNoiseTime);
+  u.causticFoamNoiseFlow     = uniform(LAKE_DEFAULTS.causticFoamNoiseFlow);
+  u.causticFoamDistort       = uniform(LAKE_DEFAULTS.causticFoamDistort);
+  u.causticFoamMidPos        = uniform(LAKE_DEFAULTS.causticFoamMidPos);
+  u.causticFoamColor         = uniform(new THREE.Color(LAKE_DEFAULTS.causticFoamColor));
   // 1×1 white placeholder — replaced by host with reflection RT texture
   const _placeholderTex = new THREE.DataTexture(
     new Uint8Array([128, 128, 128, 255]), 1, 1, THREE.RGBAFormat,
@@ -541,6 +609,52 @@ export function createLakeShader({ heightTex, terrainSize }) {
     const waterPale = baseColor.add(paleLift.mul(u.shallowPale)).saturate();
     const absorptionBase = mix(waterPale, baseColor, depthBlendColor);
 
+    // ── Open-water anime Voronoi (optional “caustic foam” tint) ─────────────
+    const tNoiseCf = u.time.mul(u.causticFoamNoiseTime);
+    const noiseUVCf = worldXZ
+      .mul(u.causticFoamNoiseScale)
+      .add(vec2(tNoiseCf.mul(u.causticFoamNoiseFlow), float(0)));
+    const noiseFacCf = _fbm2(noiseUVCf);
+    const distortCf = vec2(noiseFacCf.sub(0.5), noiseFacCf.sub(0.5)).mul(
+      u.causticFoamDistort,
+    );
+    const uvVoroCf = worldXZ
+      .mul(u.causticFoamScale)
+      .add(vec2(u.causticFoamFlowX.mul(tNoiseCf), u.causticFoamFlowZ.mul(tNoiseCf)))
+      .add(distortCf);
+    const f1Cf = _animeVoronoiF1(uvVoroCf, tNoiseCf, u.causticFoamCellSpeed);
+    const sf1Cf = _animeVoronoiSmoothF1(
+      uvVoroCf,
+      tNoiseCf,
+      u.causticFoamCellSpeed,
+      u.causticFoamSmoothness,
+    );
+    const edgeCf = f1Cf.sub(sf1Cf);
+    const tCellCf = smoothstep(
+      u.causticFoamEdgeThreshold.sub(u.causticFoamEdgeSoftness),
+      u.causticFoamEdgeThreshold.add(u.causticFoamEdgeSoftness),
+      edgeCf,
+    );
+    const safeMpCf = max(u.causticFoamMidPos, float(0.0001));
+    const seg0Cf = clamp(tCellCf.div(safeMpCf), float(0), float(1));
+    const seg1Cf = clamp(
+      tCellCf.sub(safeMpCf).div(float(1).sub(safeMpCf).add(float(0.0001))),
+      float(0),
+      float(1),
+    );
+    const inSeg1Cf = smoothstep(safeMpCf.sub(0.001), safeMpCf.add(0.001), tCellCf);
+    const midLiftCf = mix(absorptionBase, u.midColor, float(0.35));
+    const causticFoamLayer = mix(
+      mix(absorptionBase, midLiftCf, seg0Cf),
+      mix(midLiftCf, u.causticFoamColor, seg1Cf),
+      inSeg1Cf,
+    );
+    const absorptionColor = mix(
+      absorptionBase,
+      causticFoamLayer,
+      u.causticFoamBlend.mul(u.causticFoamEnabled),
+    );
+
     // ── Procedural surface normals (dual-layer mx_noise_float gradients) ─────
     const nSpd = max(u.procNoiseSpeed, float(0.001));
     const scrollN1 = vec2(
@@ -577,7 +691,7 @@ export function createLakeShader({ heightTex, terrainSize }) {
     const NdotV   = max(dot(worldN, viewDir), float(0.001));
     const fresnel = pow(float(1).sub(saturate(NdotV)), u.fresnelExp);
     const fresnelSkyMul = float(1).sub(u.lakeDebugNoFresnelSky);
-    const absorptionSky = absorptionBase.add(
+    const absorptionSky = absorptionColor.add(
       u.highlightColor.mul(fresnel).mul(u.fresnelSky).mul(fresnelSkyMul),
     );
 
@@ -766,6 +880,22 @@ export function createLakeShader({ heightTex, terrainSize }) {
     if (p.reflectEnabled != null)  u.reflectEnabled.value  = p.reflectEnabled ? 1 : 0;
     if (p.reflectStrength != null) u.reflectStrength.value = p.reflectStrength;
     if (p.reflectDistort != null)  u.reflectDistort.value  = p.reflectDistort;
+
+    if (p.causticFoamEnabled != null)       u.causticFoamEnabled.value       = p.causticFoamEnabled ? 1 : 0;
+    if (p.causticFoamBlend != null)         u.causticFoamBlend.value         = p.causticFoamBlend;
+    if (p.causticFoamScale != null)         u.causticFoamScale.value         = p.causticFoamScale;
+    if (p.causticFoamSmoothness != null)    u.causticFoamSmoothness.value    = p.causticFoamSmoothness;
+    if (p.causticFoamEdgeThreshold != null) u.causticFoamEdgeThreshold.value = p.causticFoamEdgeThreshold;
+    if (p.causticFoamEdgeSoftness != null)  u.causticFoamEdgeSoftness.value  = p.causticFoamEdgeSoftness;
+    if (p.causticFoamFlowX != null)         u.causticFoamFlowX.value         = p.causticFoamFlowX;
+    if (p.causticFoamFlowZ != null)         u.causticFoamFlowZ.value         = p.causticFoamFlowZ;
+    if (p.causticFoamCellSpeed != null)     u.causticFoamCellSpeed.value     = p.causticFoamCellSpeed;
+    if (p.causticFoamNoiseScale != null)    u.causticFoamNoiseScale.value    = p.causticFoamNoiseScale;
+    if (p.causticFoamNoiseTime != null)     u.causticFoamNoiseTime.value     = p.causticFoamNoiseTime;
+    if (p.causticFoamNoiseFlow != null)     u.causticFoamNoiseFlow.value     = p.causticFoamNoiseFlow;
+    if (p.causticFoamDistort != null)       u.causticFoamDistort.value       = p.causticFoamDistort;
+    if (p.causticFoamMidPos != null)        u.causticFoamMidPos.value        = p.causticFoamMidPos;
+    if (p.causticFoamColor != null)         c(p.causticFoamColor, u.causticFoamColor.value);
 
     if (p.vertNoiseAmp != null)    u.vertNoiseAmp.value    = p.vertNoiseAmp;
     if (p.vertNoiseScale != null)  u.vertNoiseScale.value  = p.vertNoiseScale;
