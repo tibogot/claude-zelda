@@ -115,6 +115,7 @@
         dot,
         normalize,
         negate,
+        texture,
         mx_noise_float,
         fract,
         floor,
@@ -277,10 +278,25 @@
           spriteSize: 0.12,
           lifetime: 0.6,
           poolColor: "#550000",
-          poolSize: 0.3,
-          poolLifetime: 3.0,
+          poolSize: 3.0,
+          poolLifetime: 8.0,
+          poolPersist: true,
+          poolAnimDuration: 2.25,
+          poolFlipbookByFps: false,
+          poolMinWorldScale: 0.08,
+          poolYOffset: 0.03,
           flashDuration: 0.12,
           flashColor: "#ff2200",
+          poolAtlasBasePath: "./textures/BloodPool/",
+          poolColorAtlasFile: "ContactSheet.png",
+          poolAlphaAtlasFile: "ContactSheet-001.png",
+          poolAtlasCols: 14,
+          poolAtlasRows: 14,
+          poolAnimFps: 14,
+          poolAlphaCutoff: 0.02,
+          poolInvertAlphaMask: true,
+          poolFlipRowUV: false,
+          poolAtlasLinear: false,
         },
         spellVFX: {
           enabled: true,
@@ -607,7 +623,7 @@
         swordTrail.light.color.set(p.trailColor);
       }
 
-      /* ── Blood FX: pooled sprites, zero compilation ──────────── */
+      /* ── Blood FX: burst sprites (canvas) + floor pools (atlas or fallback) ─ */
       function makeBloodTexture(size) {
         const c = document.createElement("canvas");
         c.width = c.height = size;
@@ -624,28 +640,90 @@
         return tex;
       }
 
+      function applyBloodPoolTextureFilters(tex, linear) {
+        const f = linear ? THREE.LinearFilter : THREE.NearestFilter;
+        tex.magFilter = f;
+        tex.minFilter = f;
+        tex.needsUpdate = true;
+      }
+
+      function createBloodPoolAtlasMaterial(colorMap, alphaMap) {
+        const p0 = parkourParams.bloodFX;
+        const uCellScale = uniform(new THREE.Vector2(1 / p0.poolAtlasCols, 1 / p0.poolAtlasRows));
+        const uCellOffset = uniform(new THREE.Vector2(0, 0));
+        const uTint = uniform(new THREE.Color(p0.poolColor));
+        const uBrightness = uniform(1);
+        const uCut = uniform(p0.poolAlphaCutoff);
+        const uInvertMask = uniform(p0.poolInvertAlphaMask ? 1 : 0);
+        const atlasUv = uv().mul(uCellScale).add(uCellOffset);
+        const samp = texture(colorMap, atlasUv);
+        const maskSamp = texture(alphaMap, atlasUv);
+        const maskR = maskSamp.r;
+        const invR = float(1).sub(maskR);
+        const a = mix(maskR, invR, uInvertMask);
+        const rgb = samp.rgb.mul(uTint).mul(uBrightness);
+        const mat = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          depthWrite: false,
+          depthTest: true,
+          side: THREE.DoubleSide,
+        });
+        mat.colorNode = vec4(rgb, a);
+        mat.alphaTestNode = uCut;
+        return {
+          mat,
+          uCellScale,
+          uCellOffset,
+          uTint,
+          uBrightness,
+          uCut,
+          uInvertMask,
+        };
+      }
+
       const MAX_BLOOD_PARTICLES = 60;
       const MAX_BLOOD_POOLS = 12;
 
       const bloodFx = {
-        particles: [], pools: [],
-        mat: null, poolMat: null,
+        particles: [],
+        pools: [],
+        mat: null,
+        poolMat: null,
+        poolMeshMat: null,
+        poolPlaneGeo: null,
+        poolAtlasOk: false,
+        poolColorTex: null,
+        poolAlphaTex: null,
         initialized: false,
       };
 
-      function initBloodFX(scene) {
+      async function initBloodFX(scene) {
         if (bloodFx.initialized) return;
         bloodFx.initialized = true;
         const tex = makeBloodTexture(32);
 
         bloodFx.mat = new THREE.SpriteMaterial({
-          map: tex, transparent: true, depthWrite: false,
-          blending: THREE.NormalBlending, color: 0x8b0000,
+          map: tex,
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.NormalBlending,
+          color: 0x8b0000,
         });
         bloodFx.poolMat = new THREE.SpriteMaterial({
-          map: tex, transparent: true, depthWrite: false,
-          blending: THREE.NormalBlending, color: 0x550000,
+          map: tex,
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.NormalBlending,
+          color: 0x550000,
         });
+        bloodFx.poolMeshMat = new THREE.MeshBasicMaterial({
+          map: tex,
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.NormalBlending,
+          color: 0x550000,
+        });
+        bloodFx.poolPlaneGeo = new THREE.PlaneGeometry(1, 1);
 
         for (let i = 0; i < MAX_BLOOD_PARTICLES; i++) {
           const s = new THREE.Sprite(bloodFx.mat);
@@ -653,20 +731,80 @@
           s.scale.set(0.001, 0.001, 1);
           scene.add(s);
           bloodFx.particles.push({
-            sprite: s, alive: false, timer: 0, lifetime: 0,
-            vx: 0, vy: 0, vz: 0, size: 0,
+            sprite: s,
+            alive: false,
+            timer: 0,
+            lifetime: 0,
+            vx: 0,
+            vy: 0,
+            vz: 0,
+            size: 0,
           });
         }
 
-        for (let i = 0; i < MAX_BLOOD_POOLS; i++) {
-          const s = new THREE.Sprite(bloodFx.poolMat);
-          s.renderOrder = 989;
-          s.scale.set(0.001, 0.001, 1);
-          s.material = bloodFx.poolMat;
-          scene.add(s);
-          bloodFx.pools.push({
-            sprite: s, alive: false, timer: 0, lifetime: 0, size: 0,
-          });
+        const p = parkourParams.bloodFX;
+        const loader = new THREE.TextureLoader();
+        const base = p.poolAtlasBasePath.endsWith("/") ? p.poolAtlasBasePath : `${p.poolAtlasBasePath}/`;
+        const colorUrl = base + p.poolColorAtlasFile;
+        const alphaUrl = base + p.poolAlphaAtlasFile;
+
+        let colorTex = null;
+        let alphaTex = null;
+        try {
+          colorTex = await loader.loadAsync(colorUrl);
+          alphaTex = await loader.loadAsync(alphaUrl);
+        } catch (err) {
+          console.warn(
+            "[bloodFX] Pool atlas load failed (using soft blob fallback). Expected:",
+            colorUrl,
+            alphaUrl,
+            err,
+          );
+        }
+
+        if (colorTex && alphaTex) {
+          bloodFx.poolAtlasOk = true;
+          bloodFx.poolColorTex = colorTex;
+          bloodFx.poolAlphaTex = alphaTex;
+          colorTex.colorSpace = THREE.SRGBColorSpace;
+          colorTex.wrapS = colorTex.wrapT = THREE.ClampToEdgeWrapping;
+          alphaTex.colorSpace = THREE.NoColorSpace;
+          alphaTex.wrapS = alphaTex.wrapT = THREE.ClampToEdgeWrapping;
+          applyBloodPoolTextureFilters(colorTex, p.poolAtlasLinear);
+          applyBloodPoolTextureFilters(alphaTex, p.poolAtlasLinear);
+
+          for (let i = 0; i < MAX_BLOOD_POOLS; i++) {
+            const u = createBloodPoolAtlasMaterial(colorTex, alphaTex);
+            const s = new THREE.Mesh(bloodFx.poolPlaneGeo, u.mat);
+            s.rotation.x = -Math.PI / 2;
+            s.renderOrder = 989;
+            s.scale.set(0.001, 0.001, 0.001);
+            scene.add(s);
+            bloodFx.pools.push({
+              sprite: s,
+              alive: false,
+              animTimer: 0,
+              lifetime: 0,
+              size: 0,
+              uni: u,
+            });
+          }
+        } else {
+          for (let i = 0; i < MAX_BLOOD_POOLS; i++) {
+            const s = new THREE.Mesh(bloodFx.poolPlaneGeo, bloodFx.poolMeshMat);
+            s.rotation.x = -Math.PI / 2;
+            s.renderOrder = 989;
+            s.scale.set(0.001, 0.001, 0.001);
+            scene.add(s);
+            bloodFx.pools.push({
+              sprite: s,
+              alive: false,
+              animTimer: 0,
+              lifetime: 0,
+              size: 0,
+              uni: null,
+            });
+          }
         }
       }
 
@@ -698,25 +836,51 @@
         const pool = bloodFx.pools.find((x) => !x.alive);
         if (pool) {
           pool.alive = true;
-          pool.timer = 0;
+          pool.animTimer = 0;
           pool.lifetime = p.poolLifetime;
           pool.size = p.poolSize * (0.7 + Math.random() * 0.6);
           pool.sprite.position.set(
             position.x + (Math.random() - 0.5) * 0.5,
-            floorY + 0.02,
+            floorY + p.poolYOffset,
             position.z + (Math.random() - 0.5) * 0.5,
           );
-          pool.sprite.scale.set(0.001, 0.001, 1);
+          pool.sprite.scale.set(0.001, 0.001, 0.001);
+          if (bloodFx.poolAtlasOk && pool.uni) {
+            setBloodPoolAtlasFrame(pool, 0);
+            pool.uni.uTint.value.set(p.poolColor);
+            pool.uni.uBrightness.value = 1;
+            pool.uni.uCut.value = p.poolAlphaCutoff;
+            pool.uni.uInvertMask.value = p.poolInvertAlphaMask ? 1 : 0;
+          }
         }
       }
 
       const _bloodHideScale = new THREE.Vector3(0.001, 0.001, 1);
+      const _bloodPoolHideScale = new THREE.Vector3(0.001, 0.001, 0.001);
+
+      function setBloodPoolAtlasFrame(pool, frameIndex) {
+        if (!bloodFx.poolAtlasOk || !pool.uni) return;
+        const p = parkourParams.bloodFX;
+        const cols = Math.max(1, p.poolAtlasCols);
+        const rows = Math.max(1, p.poolAtlasRows);
+        const n = cols * rows;
+        const fi = Math.max(0, Math.min(n - 1, Math.floor(frameIndex)));
+        const cw = 1 / cols;
+        const ch = 1 / rows;
+        pool.uni.uCellScale.value.set(cw, ch);
+        const col = fi % cols;
+        const row = Math.floor(fi / cols);
+        const u = col * cw;
+        const v = p.poolFlipRowUV ? row * ch : 1 - (row + 1) * ch;
+        pool.uni.uCellOffset.value.set(u, v);
+      }
 
       function updateBloodFX(dt) {
         if (!bloodFx.initialized) return;
         const p = parkourParams.bloodFX;
         bloodFx.mat.color.set(p.bloodColor);
         bloodFx.poolMat.color.set(p.poolColor);
+        if (bloodFx.poolMeshMat) bloodFx.poolMeshMat.color.set(p.poolColor);
 
         for (const part of bloodFx.particles) {
           if (!part.alive) continue;
@@ -744,17 +908,43 @@
 
         for (const pool of bloodFx.pools) {
           if (!pool.alive) continue;
-          pool.timer += dt;
-          if (pool.timer >= pool.lifetime) {
+          pool.animTimer += dt;
+
+          if (!p.poolPersist && pool.animTimer >= pool.lifetime) {
             pool.alive = false;
-            pool.sprite.scale.copy(_bloodHideScale);
+            pool.sprite.scale.copy(_bloodPoolHideScale);
             continue;
           }
-          const t = pool.timer / pool.lifetime;
-          const growT = Math.min(pool.timer / 0.3, 1);
-          const fadeT = t > 0.6 ? 1 - (t - 0.6) / 0.4 : 1;
-          const sz = pool.size * growT * fadeT;
-          pool.sprite.scale.set(sz * 2, sz, 1);
+
+          const growT = Math.min(pool.animTimer / 0.28, 1);
+          let sz = pool.size * growT;
+          sz = Math.max(sz, p.poolMinWorldScale, 0.05);
+          pool.sprite.scale.set(sz, sz, 1);
+
+          let fadeT = 1;
+          if (!p.poolPersist && pool.lifetime > 0) {
+            const t = pool.animTimer / pool.lifetime;
+            fadeT = t > 0.6 ? 1 - (t - 0.6) / 0.4 : 1;
+          }
+
+          if (bloodFx.poolAtlasOk && pool.uni) {
+            const cols = Math.max(1, p.poolAtlasCols);
+            const rows = Math.max(1, p.poolAtlasRows);
+            const n = cols * rows;
+            let fi;
+            if (p.poolFlipbookByFps) {
+              fi = Math.min(n - 1, Math.floor(pool.animTimer * p.poolAnimFps));
+            } else {
+              const dur = Math.max(0.04, p.poolAnimDuration);
+              const ap = Math.min(1, pool.animTimer / dur);
+              fi = Math.min(n - 1, Math.round((n - 1) * ap));
+            }
+            setBloodPoolAtlasFrame(pool, fi);
+            pool.uni.uTint.value.set(p.poolColor);
+            pool.uni.uBrightness.value = p.poolPersist ? 1 : fadeT;
+            pool.uni.uCut.value = p.poolAlphaCutoff;
+            pool.uni.uInvertMask.value = p.poolInvertAlphaMask ? 1 : 0;
+          }
         }
       }
 
@@ -1685,10 +1875,53 @@
         bloodFolder.addBinding(parkourParams.bloodFX, "spriteSize", { min: 0.02, max: 0.4, step: 0.01, label: "sprite size" });
         bloodFolder.addBinding(parkourParams.bloodFX, "lifetime", { min: 0.2, max: 2, step: 0.05, label: "lifetime" });
         bloodFolder.addBinding(parkourParams.bloodFX, "poolColor", { label: "pool color" });
-        bloodFolder.addBinding(parkourParams.bloodFX, "poolSize", { min: 0.1, max: 1, step: 0.05, label: "pool size" });
-        bloodFolder.addBinding(parkourParams.bloodFX, "poolLifetime", { min: 0.5, max: 8, step: 0.5, label: "pool lifetime" });
+        bloodFolder.addBinding(parkourParams.bloodFX, "poolSize", { min: 0.1, max: 3, step: 0.05, label: "pool size" });
+        bloodFolder.addBinding(parkourParams.bloodFX, "poolMinWorldScale", {
+          min: 0.02,
+          max: 0.6,
+          step: 0.01,
+          label: "pool min size (world)",
+        });
+        bloodFolder.addBinding(parkourParams.bloodFX, "poolYOffset", {
+          min: 0,
+          max: 0.2,
+          step: 0.005,
+          label: "pool Y above floor",
+        });
+        bloodFolder.addBinding(parkourParams.bloodFX, "poolPersist", { label: "pool stays (no fade out)" });
+        bloodFolder.addBinding(parkourParams.bloodFX, "poolLifetime", {
+          min: 0.5,
+          max: 30,
+          step: 0.5,
+          label: "pool lifetime (if persist off)",
+        });
         bloodFolder.addBinding(parkourParams.bloodFX, "flashDuration", { min: 0.02, max: 0.5, step: 0.01, label: "flash time" });
         bloodFolder.addBinding(parkourParams.bloodFX, "flashColor", { label: "flash color" });
+
+        const bloodPoolAtlasFolder = bloodFolder.addFolder({ title: "Pool atlas (floor)", expanded: false });
+        bloodPoolAtlasFolder.addBinding(parkourParams.bloodFX, "poolAtlasBasePath", { label: "folder URL" });
+        bloodPoolAtlasFolder.addBinding(parkourParams.bloodFX, "poolColorAtlasFile", { label: "color file" });
+        bloodPoolAtlasFolder.addBinding(parkourParams.bloodFX, "poolAlphaAtlasFile", { label: "alpha file" });
+        bloodPoolAtlasFolder.addBinding(parkourParams.bloodFX, "poolAtlasCols", { min: 1, max: 32, step: 1, label: "cols" });
+        bloodPoolAtlasFolder.addBinding(parkourParams.bloodFX, "poolAtlasRows", { min: 1, max: 32, step: 1, label: "rows" });
+        bloodPoolAtlasFolder.addBinding(parkourParams.bloodFX, "poolAnimDuration", {
+          min: 0.2,
+          max: 12,
+          step: 0.05,
+          label: "flipbook duration (s)",
+        });
+        bloodPoolAtlasFolder.addBinding(parkourParams.bloodFX, "poolFlipbookByFps", { label: "use FPS mode (not duration)" });
+        bloodPoolAtlasFolder.addBinding(parkourParams.bloodFX, "poolAnimFps", { min: 1, max: 60, step: 1, label: "anim fps (FPS mode)" });
+        bloodPoolAtlasFolder.addBinding(parkourParams.bloodFX, "poolAlphaCutoff", { min: 0, max: 0.5, step: 0.01, label: "alpha cutoff" });
+        bloodPoolAtlasFolder.addBinding(parkourParams.bloodFX, "poolInvertAlphaMask", { label: "invert mask" });
+        bloodPoolAtlasFolder.addBinding(parkourParams.bloodFX, "poolFlipRowUV", { label: "flip row UV" });
+        bloodPoolAtlasFolder.addBinding(parkourParams.bloodFX, "poolAtlasLinear", { label: "linear filter" }).on("change", () => {
+          const bx = parkourParams.bloodFX;
+          if (bloodFx.poolAtlasOk && bloodFx.poolColorTex && bloodFx.poolAlphaTex) {
+            applyBloodPoolTextureFilters(bloodFx.poolColorTex, bx.poolAtlasLinear);
+            applyBloodPoolTextureFilters(bloodFx.poolAlphaTex, bx.poolAtlasLinear);
+          }
+        });
 
         const spellVfxFolder = pane.addFolder({ title: "Spell VFX", expanded: false });
         spellVfxFolder.addBinding(parkourParams.spellVFX, "enabled", { label: "enabled" });
@@ -2621,7 +2854,7 @@
         let lastCsmMapSize = parkourParams.csm.mapSize;
 
         initSpellVFX(scene, camera);
-        initBloodFX(scene);
+        await initBloodFX(scene);
 
         function trySpellHit() {
           const ud = player.characterGroup.userData;
