@@ -903,9 +903,9 @@
         { name: "Dead", modelPath: "models/tree_compressed.glb", lod1Path: "models/tree_compressed.glb",       lodThreshold: 50, minSpacing: 2,  scaleMin: 0.7, scaleMax: 1.2, density: 0.3,  treesPerStroke: 3, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
         { name: "Palm",  modelPath: "models/botatree_compressed (1).glb", lod1Path: "models/botatree_compressed (1).glb", lodThreshold: 60, minSpacing: 5,  scaleMin: 1.0, scaleMax: 2.0, density: 0.15, treesPerStroke: 3, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
         { name: "Bush",  modelPath: null, lod1Path: null, lodThreshold: 40, minSpacing: 1.5, scaleMin: 0.6, scaleMax: 1.2, density: 0.35, treesPerStroke: 4, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
-        { name: "Extra", modelPath: null, lod1Path: null, lodThreshold: 50, minSpacing: 2,   scaleMin: 0.8, scaleMax: 1.4, density: 0.25, treesPerStroke: 3, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
-        { name: "Extra 2", modelPath: null, lod1Path: null, lodThreshold: 50, minSpacing: 2, scaleMin: 0.8, scaleMax: 1.4, density: 0.25, treesPerStroke: 3, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
-        { name: "Extra 3", modelPath: null, lod1Path: null, lodThreshold: 50, minSpacing: 2, scaleMin: 0.8, scaleMax: 1.4, density: 0.25, treesPerStroke: 3, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
+        { name: "Pine (no impostor)", modelPath: "models/pine2.glb", lod1Path: "models/pine2LOD1.glb", lodThreshold: 80, minSpacing: 3, scaleMin: 0.8, scaleMax: 1.4, density: 0.25, treesPerStroke: 3, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
+        { name: "Platano", modelPath: "models/platano_tree_compressed.glb", lod1Path: null, lodThreshold: 60, minSpacing: 4, scaleMin: 0.85, scaleMax: 1.5, density: 0.2, treesPerStroke: 3, meshScale: 0.025, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
+        { name: "Maple", modelPath: "models/maple_compressed.glb", lod1Path: null, lodThreshold: 60, minSpacing: 4, scaleMin: 0.85, scaleMax: 1.5, density: 0.2, treesPerStroke: 3, meshScale: 2, positions: [], chunks: new Map(), lod0Defs: null, lod1Defs: null, ready: false },
       ];
       let activeLodSlot       = 0;
       const LOD_CHUNK_SIZE    = 64;      // world-units per chunk side
@@ -919,6 +919,7 @@
         minSpacing: 3,
         scaleMin: 0.8,
         scaleMax: 1.4,
+        meshScale: 1,
         density: 0.25,
         treesPerStroke: 3,
         count0: 0,
@@ -7161,7 +7162,7 @@
             trees: treeSystem ? treeSystem.getPositions() : [],
             fleurs: fleurSystem ? fleurSystem.getPositions() : [],
             ambientFX: ambientFXSystem ? ambientFXSystem.getEmitters() : [],
-            lodSlots:   LOD_SLOTS.map(s   => ({ name: s.name, positions: s.positions })),
+            lodSlots:   LOD_SLOTS.map(s   => ({ name: s.name, positions: s.positions, meshScale: s.meshScale ?? 1 })),
             ftreeSlots: FTREE_SLOTS.map(s  => ({ name: s.name, positions: s.positions })),
             foliage: FOLIAGE_SLOTS.map((s) => ({
               name: s.name,
@@ -7368,6 +7369,8 @@
                 meta.lodSlots.forEach((saved, i) => {
                   if (i < LOD_SLOTS.length) {
                     LOD_SLOTS[i].positions = saved.positions || [];
+                    if (typeof saved.meshScale === "number")
+                      LOD_SLOTS[i].meshScale = saved.meshScale;
                     _rebuildLODChunks(LOD_SLOTS[i]);
                   }
                 });
@@ -9732,6 +9735,7 @@
             lodParams.minSpacing = slot.minSpacing;
             lodParams.scaleMin   = slot.scaleMin;
             lodParams.scaleMax   = slot.scaleMax;
+            lodParams.meshScale  = slot.meshScale ?? 1;
             lodParams.density        = slot.density;
             lodParams.treesPerStroke = slot.treesPerStroke;
             if (lodFolder) pane.refresh();
@@ -9750,6 +9754,7 @@
         lodFolder.addBinding(lodParams, "minSpacing", { label: "Min spacing",       min: 0,    max: 20,  step: 0.5  }).on("change", (ev) => { LOD_SLOTS[activeLodSlot].minSpacing  = ev.value; });
         lodFolder.addBinding(lodParams, "scaleMin",   { label: "Scale min",         min: 0.1,  max: 5.0, step: 0.05 }).on("change", (ev) => { LOD_SLOTS[activeLodSlot].scaleMin    = ev.value; });
         lodFolder.addBinding(lodParams, "scaleMax",   { label: "Scale max",         min: 0.1,  max: 5.0, step: 0.05 }).on("change", (ev) => { LOD_SLOTS[activeLodSlot].scaleMax    = ev.value; });
+        lodFolder.addBinding(lodParams, "meshScale",  { label: "Model scale (asset)", min: 0.005, max: 2.0, step: 0.005 }).on("change", (ev) => { LOD_SLOTS[activeLodSlot].meshScale = ev.value; });
         lodFolder.addBinding(lodParams, "density",        { label: "Brush density",     min: 0.05, max: 2.0, step: 0.05 }).on("change", (ev) => { LOD_SLOTS[activeLodSlot].density        = ev.value; });
         lodFolder.addBinding(lodParams, "treesPerStroke", { label: "Trees per stroke",  min: 1,    max: 20,  step: 1    }).on("change", (ev) => { LOD_SLOTS[activeLodSlot].treesPerStroke = ev.value; });
         lodFolder.addBinding(lodParams, "count0",      { label: "LOD0 visible", readonly: true });
@@ -11923,6 +11928,7 @@
               lodParams.minSpacing = _s.minSpacing;
               lodParams.scaleMin   = _s.scaleMin;
               lodParams.scaleMax   = _s.scaleMax;
+              lodParams.meshScale  = _s.meshScale ?? 1;
               lodParams.density        = _s.density;
               lodParams.treesPerStroke = _s.treesPerStroke;
               if (lodFolder) pane.refresh();
@@ -12732,6 +12738,7 @@
             let pineImpW = 0;
             let pineMegaW = 0;
             const capIm = pineImpostor ? pineImpostor.capacity : 0;
+            const _lodMeshMul = slot.meshScale ?? 1;
             for (const chunk of slot.chunks.values()) {
               totalChunks++;
               const inFrustum = _lodFrustum.intersectsSphere(chunk.sphere);
@@ -12757,7 +12764,7 @@
                 const useLod1 = chunk.lod1ims && distSq >= thrSq;
                 const groups = useLod1 ? chunk.lod1ims : chunk.lod0ims;
                 _lodDummy.position.set(x, y, z);
-                _lodDummy.scale.setScalar(scale);
+                _lodDummy.scale.setScalar(scale * _lodMeshMul);
                 _lodDummy.rotation.set(0, Math.PI * 2 * ((x * 13.7 + z * 7.3) % 1), 0);
                 _lodDummy.updateMatrix();
                 groups.forEach(({ im, localMatrix }) => {
@@ -12785,6 +12792,7 @@
           lodParams.minSpacing = active.minSpacing;
           lodParams.scaleMin   = active.scaleMin;
           lodParams.scaleMax   = active.scaleMax;
+          lodParams.meshScale    = active.meshScale ?? 1;
           lodParams.density        = active.density;
           lodParams.treesPerStroke = active.treesPerStroke;
           lodParams.count0    = count0;
