@@ -39,8 +39,9 @@ export const LAKE_DEFAULTS = {
   deepColor:       "#153a48",
   midColor:        "#2a5f72",
   highlightColor:  "#4a90a8",
-  opacity:         0.72,
-  deepOpacity:     0.78,
+  opacity:         0.88,
+  /** Max surface α when depth → full (multiply with `opacity`; keep high for solid deep water). */
+  deepOpacity:     0.98,
 
   // Procedural surface normals
   surfNoiseScale1:     0.4,
@@ -55,9 +56,15 @@ export const LAKE_DEFAULTS = {
   fresnelSky:      0.48,
 
   // Depth absorption
+  /** Thickness → deep *color* (exp falloff). Lower = slower color shift. */
   depthAbsorb:     0.38,
+  /**
+   * Thickness → opaque *alpha* (separate from color). Higher = deep water becomes solid sooner
+   * (Genshin-style: very clear at shore, opaque in the bowl).
+   */
+  depthAlphaAbsorb: 0.92,
   shallowPale:     0.55,
-  shallowAlpha:    0.5,
+  shallowAlpha:    0.42,
 
   // Reflections (host must provide RT)
   reflectEnabled:    true,
@@ -301,9 +308,10 @@ export function createLakeShader({ heightTex, terrainSize }) {
   u.fresnelSky       = uniform(LAKE_DEFAULTS.fresnelSky);
 
   // Depth absorption
-  u.depthAbsorb      = uniform(LAKE_DEFAULTS.depthAbsorb);
-  u.shallowPale      = uniform(LAKE_DEFAULTS.shallowPale);
-  u.shallowAlpha     = uniform(LAKE_DEFAULTS.shallowAlpha);
+  u.depthAbsorb       = uniform(LAKE_DEFAULTS.depthAbsorb);
+  u.depthAlphaAbsorb  = uniform(LAKE_DEFAULTS.depthAlphaAbsorb);
+  u.shallowPale       = uniform(LAKE_DEFAULTS.shallowPale);
+  u.shallowAlpha      = uniform(LAKE_DEFAULTS.shallowAlpha);
 
   // Reflections
   u.reflectEnabled   = uniform(LAKE_DEFAULTS.reflectEnabled ? 1 : 0);
@@ -522,11 +530,16 @@ export function createLakeShader({ heightTex, terrainSize }) {
     // ── Depth-based colour (heightmap) ───────────────────────────────────────
     const distShore = shoreDepthFn(); // positive = water above terrain
     const shallowDepth = max(float(0), distShore);
-    const depthBlend = float(1).sub(exp(shallowDepth.mul(u.depthAbsorb).negate())).saturate();
+    const depthBlendColor = float(1)
+      .sub(exp(shallowDepth.mul(u.depthAbsorb).negate()))
+      .saturate();
+    const depthBlendAlpha = float(1)
+      .sub(exp(shallowDepth.mul(u.depthAlphaAbsorb).negate()))
+      .saturate();
     const paleLift = vec3(0.12, 0.19, 0.21);
     const baseColor = mix(u.deepColor, u.midColor, float(0.12));
     const waterPale = baseColor.add(paleLift.mul(u.shallowPale)).saturate();
-    const absorptionBase = mix(waterPale, baseColor, depthBlend);
+    const absorptionBase = mix(waterPale, baseColor, depthBlendColor);
 
     // ── Procedural surface normals (dual-layer mx_noise_float gradients) ─────
     const nSpd = max(u.procNoiseSpeed, float(0.001));
@@ -590,7 +603,9 @@ export function createLakeShader({ heightTex, terrainSize }) {
     const surfaceColor = mix(absorptionSky, reflSample, reflAmt);
 
     // ── Alpha ────────────────────────────────────────────────────────────────
-    const alphaDepthThin = mix(u.shallowAlpha, float(1), depthBlend);
+    // `depthAlphaAbsorb` can exceed color absorb so deep water goes solid while staying pale→teal.
+    const depthAlphaLift = pow(depthBlendAlpha, float(0.88)).saturate();
+    const alphaDepthThin = mix(u.shallowAlpha, float(1), depthAlphaLift);
     const waterAlpha = u.deepOpacity.mul(u.opacity).mul(alphaDepthThin);
 
     // ── Shore contact transparency ───────────────────────────────────────────
@@ -743,7 +758,8 @@ export function createLakeShader({ heightTex, terrainSize }) {
     if (p.fresnelExp != null)      u.fresnelExp.value      = p.fresnelExp;
     if (p.fresnelSky != null)      u.fresnelSky.value      = p.fresnelSky;
 
-    if (p.depthAbsorb != null)     u.depthAbsorb.value     = p.depthAbsorb;
+    if (p.depthAbsorb != null)      u.depthAbsorb.value      = p.depthAbsorb;
+    if (p.depthAlphaAbsorb != null) u.depthAlphaAbsorb.value = p.depthAlphaAbsorb;
     if (p.shallowPale != null)     u.shallowPale.value     = p.shallowPale;
     if (p.shallowAlpha != null)    u.shallowAlpha.value    = p.shallowAlpha;
 
