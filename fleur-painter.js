@@ -560,10 +560,11 @@ export function createFleurSystem(
       cell.im.count = count;
       const im = cell.im;
       const ixAttr = im.geometry.getAttribute("instanceFleurXZ");
+      const stemChunk = variant === "stem";
       for (let i = 0; i < count; i++) {
         const { x, z, rot, scale, yOffset } = positions[indices[i]];
-        let groundY = sampleHeight(x, z) + yOffset;
-        if (variant === "stem")
+        let groundY = sampleHeight(x, z) + (stemChunk ? 0 : yOffset);
+        if (stemChunk)
           groundY += -stemMinRelY(scale, rot) + FLEUR_STEM_GROUND_BIAS;
         dummy.position.set(x, groundY, z);
         dummy.rotation.set(Math.PI, rot, 0);
@@ -613,7 +614,10 @@ export function createFleurSystem(
       }
       if (tooClose) continue;
 
-      const yOffset = hoverBase + (Math.random() - 0.5) * 2 * hoverVariance;
+      const yOffset =
+        v === "stem"
+          ? 0
+          : hoverBase + (Math.random() - 0.5) * 2 * hoverVariance;
       positions.push({
         x,
         z,
@@ -679,19 +683,22 @@ export function createFleurSystem(
   }
 
   function setPositions(arr) {
-    positions = arr.map((p) => ({
-      x: p.x,
-      z: p.z,
-      rot: p.rot,
-      scale: p.scale,
-      yOffset: p.yOffset ?? 0.15,
-      colorSlot: p.colorSlot ?? 0,
-      variant: p.variant === "stem" ? "stem" : "ground",
-      maskIndex: Math.max(
-        0,
-        Math.min(FLEUR_MASK_COUNT - 1, p.maskIndex ?? 0),
-      ),
-    }));
+    positions = arr.map((p) => {
+      const stem = p.variant === "stem";
+      return {
+        x: p.x,
+        z: p.z,
+        rot: p.rot,
+        scale: p.scale,
+        yOffset: stem ? 0 : (p.yOffset ?? 0.15),
+        colorSlot: p.colorSlot ?? 0,
+        variant: stem ? "stem" : "ground",
+        maskIndex: Math.max(
+          0,
+          Math.min(FLEUR_MASK_COUNT - 1, p.maskIndex ?? 0),
+        ),
+      };
+    });
     rebuild();
   }
 
