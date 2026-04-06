@@ -1,0 +1,663 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Blood sprite atlas editor (WebGPU)</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        display: flex;
+        height: 100vh;
+        background: #0d0d0d;
+        color: #c8c8c8;
+        font: 13px/1.45 system-ui, sans-serif;
+        overflow: hidden;
+      }
+      #sidebar {
+        width: 320px;
+        flex-shrink: 0;
+        padding: 14px;
+        overflow-y: auto;
+        border-right: 1px solid #2a2a2a;
+        background: #141414;
+      }
+      #sidebar h1 {
+        margin: 0 0 4px;
+        font-size: 15px;
+        font-weight: 600;
+        color: #e85a5a;
+      }
+      #sidebar .sub {
+        margin: 0 0 14px;
+        font-size: 11px;
+        color: #777;
+      }
+      #atlas-wrap {
+        margin-bottom: 12px;
+      }
+      #atlas-wrap label {
+        display: block;
+        font-size: 11px;
+        color: #888;
+        margin-bottom: 6px;
+      }
+      #atlas-canvas {
+        display: block;
+        width: 100%;
+        height: 200px;
+        background: #0a0a0a;
+        border: 1px solid #2a2a2a;
+        border-radius: 4px;
+        image-rendering: pixelated;
+      }
+      #file-row {
+        margin-top: 8px;
+      }
+      #file-row input[type="file"] {
+        width: 100%;
+        font-size: 11px;
+      }
+      .file-label {
+        font-size: 11px;
+        color: #888;
+        margin-bottom: 4px;
+        display: block;
+      }
+      #viewport {
+        flex: 1;
+        min-width: 0;
+        position: relative;
+      }
+      #viewport canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+      #error {
+        display: none;
+        position: absolute;
+        inset: 0;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        text-align: center;
+        background: rgba(0, 0, 0, 0.85);
+        color: #f88;
+        font-size: 14px;
+        z-index: 10;
+      }
+      #hint {
+        position: absolute;
+        bottom: 12px;
+        left: 12px;
+        right: 12px;
+        font: 11px/1.4 ui-monospace, monospace;
+        color: #666;
+        pointer-events: none;
+        text-shadow: 0 1px 2px #000;
+      }
+      .tp-dfwv {
+        position: relative !important;
+        width: 100% !important;
+        max-width: 100% !important;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="sidebar">
+      <h1>Blood sprite lab</h1>
+      <p class="sub">
+        WebGPU + SpriteNodeMaterial + billboarding. Load a color atlas; optionally a
+        second atlas supplies alpha (same grid / frame layout).
+      </p>
+      <div id="atlas-wrap">
+        <label>Atlas overview (color sheet + grid)</label>
+        <canvas id="atlas-canvas" width="280" height="200"></canvas>
+        <div id="file-row">
+          <span class="file-label">Color atlas (RGB)</span>
+          <input type="file" id="atlas-file" accept="image/png,image/webp,image/jpeg" />
+        </div>
+        <div id="file-row">
+          <span class="file-label">Alpha mask atlas (optional, same layout)</span>
+          <input type="file" id="alpha-atlas-file" accept="image/png,image/webp,image/jpeg" />
+        </div>
+      </div>
+      <div id="pane-root"></div>
+      <p class="sub" style="margin-top: 12px">
+        Mask texture uses linear sampling (no sRGB). Grayscale masks: channel R. Use
+        Nearest on both atlases for pixel art.
+      </p>
+    </div>
+    <div id="viewport">
+      <div id="error"></div>
+      <canvas id="c3d"></canvas>
+      <div id="hint">Orbit: drag · Zoom: wheel</div>
+    </div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/+esm"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import {
+        texture,
+        uv,
+        uniform,
+        vec2,
+        vec4,
+        float,
+        billboarding,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
+
+      const atlasCanvas = document.getElementById("atlas-canvas");
+      const atlasCtx = atlasCanvas.getContext("2d");
+      const fileInput = document.getElementById("atlas-file");
+      const alphaFileInput = document.getElementById("alpha-atlas-file");
+      const errorEl = document.getElementById("error");
+      const canvas3d = document.getElementById("c3d");
+
+      let camera,
+        scene,
+        renderer,
+        controls,
+        sprite,
+        material,
+        mapTexture = null,
+        alphaMapTexture = null;
+      let uCellScale, uCellOffset, uTint, uBrightness, uCut;
+      const clock = new THREE.Clock();
+
+      const params = {
+        cols: 14,
+        rows: 14,
+        frame: 0,
+        fps: 14,
+        playing: false,
+        loop: true,
+        startFrame: 0,
+        endFrame: 195,
+        tint: "#ffffff",
+        brightness: 1,
+        filter: "nearest",
+        bg: "#1a0808",
+        flipRows: false,
+        spriteScale: 1.2,
+        depthTest: true,
+        alphaCutoff: 0.02,
+        alphaChannel: "r",
+        invertAlphaMask: false,
+        multiplyColorAndMaskAlpha: false,
+      };
+
+      let playAccum = 0;
+      let loadedBitmap = null;
+
+      function maxFrameIndex() {
+        return Math.max(0, params.cols * params.rows - 1);
+      }
+
+      function clampFrames() {
+        const max = maxFrameIndex();
+        params.endFrame = Math.min(max, Math.max(0, params.endFrame));
+        params.startFrame = Math.min(max, Math.max(0, params.startFrame));
+        if (params.startFrame > params.endFrame)
+          params.startFrame = params.endFrame;
+        params.frame = Math.min(max, Math.max(0, params.frame));
+      }
+
+      function frameToColRow(index) {
+        const col = index % params.cols;
+        const row = Math.floor(index / params.cols);
+        return { col, row };
+      }
+
+      function updateUniformsFromFrame(index) {
+        if (!uCellScale || !uCellOffset) return;
+        const { col, row } = frameToColRow(index);
+        const cw = 1 / params.cols;
+        const ch = 1 / params.rows;
+        uCellScale.value.set(cw, ch);
+        const u = col * cw;
+        let v;
+        if (params.flipRows) v = row * ch;
+        else v = 1 - (row + 1) * ch;
+        uCellOffset.value.set(u, v);
+      }
+
+      function drawAtlas2D() {
+        const w = atlasCanvas.width;
+        const h = atlasCanvas.height;
+        atlasCtx.fillStyle = "#111";
+        atlasCtx.fillRect(0, 0, w, h);
+        if (!loadedBitmap) {
+          atlasCtx.fillStyle = "#555";
+          atlasCtx.font = "12px system-ui";
+          atlasCtx.fillText("Load an atlas image", 12, h / 2);
+          return;
+        }
+        const iw = loadedBitmap.width;
+        const ih = loadedBitmap.height;
+        const scale = Math.min(w / iw, h / ih);
+        const dw = iw * scale;
+        const dh = ih * scale;
+        const ox = (w - dw) * 0.5;
+        const oy = (h - dh) * 0.5;
+        atlasCtx.drawImage(loadedBitmap, ox, oy, dw, dh);
+
+        const cols = params.cols;
+        const rows = params.rows;
+        atlasCtx.strokeStyle = "rgba(255,255,255,0.25)";
+        atlasCtx.lineWidth = 1;
+        for (let c = 0; c <= cols; c++) {
+          const x = ox + (c / cols) * dw;
+          atlasCtx.beginPath();
+          atlasCtx.moveTo(x, oy);
+          atlasCtx.lineTo(x, oy + dh);
+          atlasCtx.stroke();
+        }
+        for (let r = 0; r <= rows; r++) {
+          const y = oy + (r / rows) * dh;
+          atlasCtx.beginPath();
+          atlasCtx.moveTo(ox, y);
+          atlasCtx.lineTo(ox + dw, y);
+          atlasCtx.stroke();
+        }
+        const { col, row } = frameToColRow(params.frame);
+        atlasCtx.strokeStyle = "rgba(255,80,80,0.95)";
+        atlasCtx.lineWidth = 2;
+        const cx = ox + (col / cols) * dw;
+        const cy = oy + (row / rows) * dh;
+        const cw = dw / cols;
+        const ch = dh / rows;
+        atlasCtx.strokeRect(cx, cy, cw, ch);
+      }
+
+      function applyTextureFilters() {
+        const f =
+          params.filter === "nearest"
+            ? THREE.NearestFilter
+            : THREE.LinearFilter;
+        if (mapTexture) {
+          mapTexture.magFilter = f;
+          mapTexture.minFilter = f;
+          mapTexture.needsUpdate = true;
+        }
+        if (alphaMapTexture) {
+          alphaMapTexture.magFilter = f;
+          alphaMapTexture.minFilter = f;
+          alphaMapTexture.needsUpdate = true;
+        }
+      }
+
+      function maskChannelNode(maskSamp) {
+        const ch = params.alphaChannel;
+        if (ch === "g") return maskSamp.g;
+        if (ch === "b") return maskSamp.b;
+        if (ch === "a") return maskSamp.a;
+        return maskSamp.r;
+      }
+
+      function rebuildMaterial() {
+        if (!mapTexture) return;
+        applyTextureFilters();
+
+        uCellScale = uniform(new THREE.Vector2(1 / params.cols, 1 / params.rows));
+        uCellOffset = uniform(new THREE.Vector2(0, 0));
+        uTint = uniform(new THREE.Color(0xffffff));
+        uBrightness = uniform(1);
+        uCut = uniform(params.alphaCutoff);
+
+        const atlasUv = uv().mul(uCellScale).add(uCellOffset);
+        const samp = texture(mapTexture, atlasUv);
+        const rgb = samp.rgb.mul(uTint).mul(uBrightness);
+        let a;
+        if (alphaMapTexture) {
+          const maskSamp = texture(alphaMapTexture, atlasUv);
+          a = maskChannelNode(maskSamp);
+          if (params.invertAlphaMask) a = float(1).sub(a);
+          if (params.multiplyColorAndMaskAlpha) a = a.mul(samp.a);
+        } else {
+          a = samp.a;
+        }
+
+        material = new THREE.SpriteNodeMaterial({
+          transparent: true,
+          depthTest: params.depthTest,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
+        material.colorNode = vec4(rgb, a);
+        material.alphaTestNode = uCut;
+        material.vertexNode = billboarding();
+
+        if (sprite) {
+          scene.remove(sprite);
+          sprite.material.dispose();
+        }
+        sprite = new THREE.Sprite(material);
+        sprite.center.set(0.5, 0.5);
+        sprite.scale.setScalar(params.spriteScale);
+        scene.add(sprite);
+
+        updateUniformsFromFrame(params.frame);
+        syncTintUniforms();
+      }
+
+      function syncTintUniforms() {
+        if (!uTint || !uBrightness) return;
+        uTint.value.set(params.tint);
+        uBrightness.value = params.brightness;
+      }
+
+      function setMapFromTexture(tex, bitmap) {
+        mapTexture = tex;
+        loadedBitmap = bitmap;
+        mapTexture.colorSpace = THREE.SRGBColorSpace;
+        mapTexture.wrapS = THREE.ClampToEdgeWrapping;
+        mapTexture.wrapT = THREE.ClampToEdgeWrapping;
+        applyTextureFilters();
+        params.endFrame = maxFrameIndex();
+        clampFrames();
+        rebuildMaterial();
+        drawAtlas2D();
+        paneRefresh();
+      }
+
+      function setAlphaMapFromTexture(tex) {
+        if (alphaMapTexture) alphaMapTexture.dispose();
+        alphaMapTexture = tex;
+        alphaMapTexture.colorSpace = THREE.NoColorSpace;
+        alphaMapTexture.wrapS = THREE.ClampToEdgeWrapping;
+        alphaMapTexture.wrapT = THREE.ClampToEdgeWrapping;
+        applyTextureFilters();
+        if (mapTexture) rebuildMaterial();
+      }
+
+      function clearAlphaAtlas() {
+        if (alphaMapTexture) alphaMapTexture.dispose();
+        alphaMapTexture = null;
+        alphaFileInput.value = "";
+        if (mapTexture) rebuildMaterial();
+      }
+
+      function paneRefresh() {
+        if (pane && fMax) {
+          fMax.max = maxFrameIndex();
+          fStart.max = maxFrameIndex();
+          fEnd.max = maxFrameIndex();
+        }
+      }
+
+      let pane, fMax, fStart, fEnd;
+
+      function buildUI() {
+        pane = new Pane({ container: document.getElementById("pane-root"), title: "Atlas" });
+        pane.addBinding(params, "cols", { min: 1, max: 32, step: 1 }).on("change", () => {
+          clampFrames();
+          updateUniformsFromFrame(params.frame);
+          if (mapTexture) rebuildMaterial();
+          drawAtlas2D();
+          paneRefresh();
+        });
+        pane.addBinding(params, "rows", { min: 1, max: 32, step: 1 }).on("change", () => {
+          clampFrames();
+          updateUniformsFromFrame(params.frame);
+          if (mapTexture) rebuildMaterial();
+          drawAtlas2D();
+          paneRefresh();
+        });
+
+        const play = pane.addFolder({ title: "Playback" });
+        fMax = play.addBinding(params, "frame", { min: 0, max: maxFrameIndex(), step: 1 });
+        fMax.on("change", () => {
+          clampFrames();
+          updateUniformsFromFrame(params.frame);
+          playAccum = 0;
+          drawAtlas2D();
+        });
+        play.addBinding(params, "fps", { min: 1, max: 60, step: 1 });
+        play.addBinding(params, "playing");
+        play.addBinding(params, "loop");
+        fStart = play.addBinding(params, "startFrame", { min: 0, max: maxFrameIndex(), step: 1 });
+        fEnd = play.addBinding(params, "endFrame", { min: 0, max: maxFrameIndex(), step: 1 });
+        fStart.on("change", () => {
+          clampFrames();
+          drawAtlas2D();
+        });
+        fEnd.on("change", () => {
+          clampFrames();
+          drawAtlas2D();
+        });
+
+        const look = pane.addFolder({ title: "Preview" });
+        look.addBinding(params, "tint", { view: "color" }).on("change", () => syncTintUniforms());
+        look.addBinding(params, "brightness", { min: 0, max: 3, step: 0.02 }).on("change", () => syncTintUniforms());
+        look.addBinding(params, "filter", { options: { Nearest: "nearest", Linear: "linear" } }).on("change", () => {
+          applyTextureFilters();
+        });
+
+        const mask = pane.addFolder({ title: "Alpha mask atlas" });
+        mask.addBinding(params, "alphaChannel", {
+          label: "mask channel",
+          options: { R: "r", G: "g", B: "b", A: "a" },
+        }).on("change", () => {
+          if (mapTexture) rebuildMaterial();
+        });
+        mask.addBinding(params, "invertAlphaMask", { label: "invert mask" }).on("change", () => {
+          if (mapTexture) rebuildMaterial();
+        });
+        mask.addBinding(params, "multiplyColorAndMaskAlpha", {
+          label: "× color alpha",
+        }).on("change", () => {
+          if (mapTexture) rebuildMaterial();
+        });
+        mask.addButton({ title: "Clear mask atlas" }).on("click", () => clearAlphaAtlas());
+        look.addBinding(params, "bg", { view: "color" }).on("change", () => {
+          scene.background = new THREE.Color(params.bg);
+        });
+        look.addBinding(params, "flipRows", { label: "flip row UV" }).on("change", () => {
+          updateUniformsFromFrame(params.frame);
+        });
+        look.addBinding(params, "spriteScale", { min: 0.2, max: 6, step: 0.05 }).on("change", () => {
+          if (sprite) sprite.scale.setScalar(params.spriteScale);
+        });
+        look.addBinding(params, "depthTest").on("change", () => {
+          if (material) material.depthTest = params.depthTest;
+        });
+        look.addBinding(params, "alphaCutoff", { min: 0, max: 0.5, step: 0.01 }).on("change", () => {
+          if (uCut) uCut.value = params.alphaCutoff;
+        });
+
+        pane
+          .addButton({ title: "Export JSON" })
+          .on("click", () => {
+            const out = {
+              cols: params.cols,
+              rows: params.rows,
+              fps: params.fps,
+              loop: params.loop,
+              startFrame: params.startFrame,
+              endFrame: params.endFrame,
+              tint: params.tint,
+              brightness: params.brightness,
+              filter: params.filter,
+              flipRows: params.flipRows,
+              alphaCutoff: params.alphaCutoff,
+              separateAlphaAtlas: !!alphaMapTexture,
+              alphaChannel: params.alphaChannel,
+              invertAlphaMask: params.invertAlphaMask,
+              multiplyColorAndMaskAlpha: params.multiplyColorAndMaskAlpha,
+            };
+            const blob = new Blob([JSON.stringify(out, null, 2)], { type: "application/json" });
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            a.download = "blood-sprite-atlas.json";
+            a.click();
+            URL.revokeObjectURL(a.href);
+          });
+
+        pane
+          .addButton({ title: "Copy JSON" })
+          .on("click", async () => {
+            const out = {
+              cols: params.cols,
+              rows: params.rows,
+              fps: params.fps,
+              loop: params.loop,
+              startFrame: params.startFrame,
+              endFrame: params.endFrame,
+              tint: params.tint,
+              brightness: params.brightness,
+              filter: params.filter,
+              flipRows: params.flipRows,
+              alphaCutoff: params.alphaCutoff,
+              separateAlphaAtlas: !!alphaMapTexture,
+              alphaChannel: params.alphaChannel,
+              invertAlphaMask: params.invertAlphaMask,
+              multiplyColorAndMaskAlpha: params.multiplyColorAndMaskAlpha,
+            };
+            try {
+              await navigator.clipboard.writeText(JSON.stringify(out, null, 2));
+            } catch {
+              /* ignore */
+            }
+          });
+      }
+
+      fileInput.addEventListener("change", async () => {
+        const f = fileInput.files?.[0];
+        if (!f) return;
+        const url = URL.createObjectURL(f);
+        try {
+          const loader = new THREE.TextureLoader();
+          const tex = await loader.loadAsync(url);
+          let bmp = null;
+          try {
+            bmp = await createImageBitmap(f);
+          } catch {
+            bmp = tex.image;
+          }
+          setMapFromTexture(tex, bmp);
+        } catch (e) {
+          console.error(e);
+          errorEl.style.display = "flex";
+          errorEl.textContent = "Failed to load image.";
+        }
+        URL.revokeObjectURL(url);
+      });
+
+      alphaFileInput.addEventListener("change", async () => {
+        const f = alphaFileInput.files?.[0];
+        if (!f) return;
+        if (!mapTexture) {
+          errorEl.style.display = "flex";
+          errorEl.textContent = "Load the color atlas first, then the alpha mask atlas.";
+          alphaFileInput.value = "";
+          setTimeout(() => {
+            errorEl.style.display = "none";
+          }, 3200);
+          return;
+        }
+        const url = URL.createObjectURL(f);
+        try {
+          const loader = new THREE.TextureLoader();
+          const tex = await loader.loadAsync(url);
+          setAlphaMapFromTexture(tex);
+        } catch (e) {
+          console.error(e);
+          errorEl.style.display = "flex";
+          errorEl.textContent = "Failed to load alpha mask image.";
+        }
+        URL.revokeObjectURL(url);
+      });
+
+      async function init() {
+        buildUI();
+
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(params.bg);
+
+        camera = new THREE.PerspectiveCamera(45, 1, 0.05, 50);
+        camera.position.set(0, 0, 3.2);
+
+        renderer = new THREE.WebGPURenderer({
+          canvas: canvas3d,
+          antialias: true,
+        });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.target.set(0, 0, 0);
+
+        const amb = new THREE.AmbientLight(0xffffff, 0.4);
+        scene.add(amb);
+
+        function resize() {
+          const el = canvas3d.parentElement;
+          const w = el.clientWidth;
+          const h = el.clientHeight;
+          camera.aspect = w / h;
+          camera.updateProjectionMatrix();
+          renderer.setSize(w, h, false);
+        }
+        resize();
+        window.addEventListener("resize", resize);
+
+        try {
+          await renderer.init();
+        } catch (e) {
+          console.error(e);
+          errorEl.style.display = "flex";
+          errorEl.textContent =
+            "WebGPU failed to initialize. Use a Chromium-based browser with WebGPU enabled, or check GPU blocklist.";
+          return;
+        }
+
+        clock.getDelta();
+
+        renderer.setAnimationLoop(() => {
+          const dtReal = clock.getDelta();
+          controls.update();
+
+          if (mapTexture && params.playing) {
+            playAccum += dtReal * params.fps;
+            const span = Math.max(1, params.endFrame - params.startFrame + 1);
+            let next;
+            if (params.loop) {
+              const i = Math.floor(playAccum) % span;
+              next = params.startFrame + i;
+            } else {
+              const i = Math.min(Math.floor(playAccum), span - 1);
+              next = params.startFrame + i;
+            }
+            params.frame = next;
+            updateUniformsFromFrame(params.frame);
+            drawAtlas2D();
+          }
+
+          renderer.render(scene, camera);
+        });
+
+        drawAtlas2D();
+      }
+
+      init();
+    </script>
+  </body>
+</html>
