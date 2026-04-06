@@ -81,6 +81,7 @@
         texture,
         mx_noise_float,
         Loop,
+        normalLocal,
       } from "three/tsl";
 
       const WATER_Y = -0.1;
@@ -750,6 +751,23 @@
           waterfallPosX: 38,
           waterfallPosY: 10.2,
           waterfallPosZ: -28,
+          /** Hand-placed “impact foam”: squat spherical cap + heavy procedural vertex churn. */
+          impactFoamVisible: true,
+          impactFoamGizmoEnabled: true,
+          impactFoamPosX: 41,
+          impactFoamPosY: 0.14,
+          impactFoamPosZ: -25,
+          impactFoamScaleX: 1.15,
+          impactFoamScaleY: 1.15,
+          impactFoamScaleZ: 1.15,
+          impactFoamDispAmp: 0.62,
+          impactFoamNoiseFreq: 2.35,
+          impactFoamFlow: 1.35,
+          impactFoamOpacity: 0.88,
+          impactFoamRimCyan: 0.22,
+          /** Sphere cap: larger = wider, flatter pool (radians × π). */
+          impactFoamCapAngle: 0.42,
+          impactFoamBaseRadius: 3.35,
           /** World-space shore-style foam on dragon (noise + pulse); scales mix to foam color. */
           dragonWaterFoam: 0.85,
           /** Multiplies inward pulse travel on dragon (props are smaller than the lake). */
@@ -2457,6 +2475,166 @@
         applyWaterfallVisibility();
         applyWaterfallGizmoState();
 
+        // ─── Impact foam (hand-placed): squat sphere cap + procedural displacement ─
+        /** Spherical cap from north pole: wide, shallow “splash pool”; flip for bowl opening up. */
+        function buildImpactFoamGeometry(baseRadius, phiFrac) {
+          const R = Math.max(0.35, baseRadius);
+          const phi = Math.max(0.08, Math.min(0.48, phiFrac));
+          return new THREE.SphereGeometry(R, 72, 52, 0, Math.PI * 2, 0, Math.PI * phi);
+        }
+
+        const uIFTime = uniform(0);
+        const uIFDisp = uniform(params.impactFoamDispAmp);
+        const uIFNoiseFreq = uniform(params.impactFoamNoiseFreq);
+        const uIFFlow = uniform(params.impactFoamFlow);
+        const uIFOpacity = uniform(params.impactFoamOpacity);
+        const uIFRimCyan = uniform(params.impactFoamRimCyan);
+        const uIFRadius = uniform(params.impactFoamBaseRadius);
+        const uIFFoamWhite = uniform(new THREE.Color(0xf8fbff));
+        const uIFFoamCyan = uniform(new THREE.Color(0xa8e8f5));
+
+        const impactFoamPosNode = Fn(() => {
+          const t = uIFTime;
+          const xz = positionLocal.xz.mul(uIFNoiseFreq);
+          const scroll = vec2(t.mul(uIFFlow), t.mul(uIFFlow.mul(0.74)));
+          const n1 = mx_noise_float(xz.add(scroll));
+          const n2 = mx_noise_float(xz.mul(2.12).sub(vec2(scroll.y, scroll.x.mul(0.9))));
+          const n3 = mx_noise_float(
+            xz.mul(0.48).add(vec2(t.mul(-0.52), t.mul(0.61))),
+          );
+          const d = n1
+            .mul(0.38)
+            .add(n2.mul(0.34))
+            .add(n3.mul(0.28));
+          return positionLocal.add(normalLocal.mul(d.mul(uIFDisp)));
+        })();
+
+        const impactFoamColorNode = Fn(() => {
+          const t = uIFTime;
+          const xz = positionLocal.xz.mul(uIFNoiseFreq.mul(0.88));
+          const scroll = vec2(t.mul(uIFFlow.mul(0.92)), t.mul(uIFFlow.mul(0.58)));
+          const f1 = mx_noise_float(xz.add(scroll)).mul(0.5).add(0.5);
+          const f2 = mx_noise_float(xz.mul(2.95).sub(scroll)).mul(0.5).add(0.5);
+          const rn = length(positionLocal.xz).div(max(uIFRadius, float(0.001)));
+          const rim = smoothstep(float(0.22), float(0.98), rn);
+          const base = mix(uIFFoamWhite, uIFFoamCyan, rim.mul(uIFRimCyan));
+          return mix(
+            base,
+            uIFFoamWhite,
+            f1.mul(0.32).add(f2.mul(0.2)),
+          ).saturate();
+        })();
+
+        const impactFoamAlphaNode = Fn(() => {
+          const t = uIFTime;
+          const xz = positionLocal.xz.mul(uIFNoiseFreq.mul(1.05));
+          const scroll = vec2(t.mul(uIFFlow.mul(1.05)), t.mul(0.5));
+          const a1 = mx_noise_float(xz.add(scroll)).mul(0.5).add(0.5);
+          const a2 = mx_noise_float(xz.mul(3.2).sub(vec2(t.mul(1.2), 0))).mul(0.5).add(0.5);
+          const rn = length(positionLocal.xz).div(max(uIFRadius, float(0.001)));
+          const edgeFade = float(1).sub(smoothstep(float(0.78), float(1.05), rn));
+          return uIFOpacity
+            .mul(float(0.42).add(a1.mul(0.38)).add(a2.mul(0.2)))
+            .mul(edgeFade.add(0.12));
+        })();
+
+        const impactFoamMat = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
+        impactFoamMat.positionNode = impactFoamPosNode;
+        impactFoamMat.colorNode = impactFoamColorNode;
+        impactFoamMat.opacityNode = impactFoamAlphaNode;
+
+        const impactFoamMesh = new THREE.Mesh(
+          buildImpactFoamGeometry(
+            params.impactFoamBaseRadius,
+            params.impactFoamCapAngle,
+          ),
+          impactFoamMat,
+        );
+        impactFoamMesh.name = "EditorImpactFoam";
+        impactFoamMesh.rotation.x = Math.PI;
+        impactFoamMesh.position.set(
+          params.impactFoamPosX,
+          params.impactFoamPosY,
+          params.impactFoamPosZ,
+        );
+        impactFoamMesh.scale.set(
+          params.impactFoamScaleX,
+          params.impactFoamScaleY,
+          params.impactFoamScaleZ,
+        );
+        impactFoamMesh.renderOrder = 4;
+        scene.add(impactFoamMesh);
+
+        function rebuildImpactFoamGeometry() {
+          const old = impactFoamMesh.geometry;
+          impactFoamMesh.geometry = buildImpactFoamGeometry(
+            params.impactFoamBaseRadius,
+            params.impactFoamCapAngle,
+          );
+          old.dispose();
+          uIFRadius.value = params.impactFoamBaseRadius;
+        }
+
+        let impactFoamTransformControls = null;
+        impactFoamTransformControls = new TransformControls(
+          camera,
+          renderer.domElement,
+        );
+        impactFoamTransformControls.setSize(0.98);
+        impactFoamTransformControls.addEventListener("dragging-changed", (ev) => {
+          controls.enabled = !ev.value;
+          if (!ev.value) {
+            params.impactFoamPosX = impactFoamMesh.position.x;
+            params.impactFoamPosY = impactFoamMesh.position.y;
+            params.impactFoamPosZ = impactFoamMesh.position.z;
+            params.impactFoamScaleX = impactFoamMesh.scale.x;
+            params.impactFoamScaleY = impactFoamMesh.scale.y;
+            params.impactFoamScaleZ = impactFoamMesh.scale.z;
+          }
+        });
+        scene.add(impactFoamTransformControls.getHelper());
+        impactFoamTransformControls.attach(impactFoamMesh);
+
+        function applyImpactFoamVisibility() {
+          impactFoamMesh.visible = params.impactFoamVisible;
+        }
+        function applyImpactFoamGizmoState() {
+          if (!impactFoamTransformControls) return;
+          impactFoamTransformControls.enabled = params.impactFoamGizmoEnabled;
+          const h = impactFoamTransformControls.getHelper();
+          if (h) h.visible = params.impactFoamGizmoEnabled && params.impactFoamVisible;
+          if (!params.impactFoamGizmoEnabled) controls.enabled = true;
+        }
+        function syncImpactFoamPositionFromParams() {
+          impactFoamMesh.position.set(
+            params.impactFoamPosX,
+            params.impactFoamPosY,
+            params.impactFoamPosZ,
+          );
+        }
+        function syncImpactFoamScaleFromParams() {
+          impactFoamMesh.scale.set(
+            params.impactFoamScaleX,
+            params.impactFoamScaleY,
+            params.impactFoamScaleZ,
+          );
+        }
+        function syncImpactFoamUniforms() {
+          uIFDisp.value = params.impactFoamDispAmp;
+          uIFNoiseFreq.value = params.impactFoamNoiseFreq;
+          uIFFlow.value = params.impactFoamFlow;
+          uIFOpacity.value = params.impactFoamOpacity;
+          uIFRimCyan.value = params.impactFoamRimCyan;
+          uIFRadius.value = params.impactFoamBaseRadius;
+        }
+        applyImpactFoamVisibility();
+        applyImpactFoamGizmoState();
+        syncImpactFoamUniforms();
+
         // ─── Resize ───────────────────────────────────────────────────────────
         function onResize() {
           const w = window.innerWidth;
@@ -2555,11 +2733,14 @@
             const gizmoVis = gizmoHelper ? gizmoHelper.visible : true;
             const wfGizmoHelper = waterfallTransformControls?.getHelper();
             const wfGizmoVis = wfGizmoHelper ? wfGizmoHelper.visible : true;
+            const foamGizmoHelper = impactFoamTransformControls?.getHelper();
+            const foamGizmoVis = foamGizmoHelper ? foamGizmoHelper.visible : true;
             waterPlane.visible = false;
             waveDisplayPlane.visible = false;
             sky.visible = false;
             if (gizmoHelper) gizmoHelper.visible = false;
             if (wfGizmoHelper) wfGizmoHelper.visible = false;
+            if (foamGizmoHelper) foamGizmoHelper.visible = false;
             scene.background = reflectClearColor;
             const prevTR = renderer.getRenderTarget();
             const prevAutoR = renderer.autoClear;
@@ -2574,6 +2755,7 @@
             sky.visible = skyVis;
             if (gizmoHelper) gizmoHelper.visible = gizmoVis;
             if (wfGizmoHelper) wfGizmoHelper.visible = wfGizmoVis;
+            if (foamGizmoHelper) foamGizmoHelper.visible = foamGizmoVis;
             if (reflectRT.texture instanceof THREE.Texture) {
               if (lakeShader) lakeShader.uniforms.reflectTex.value = reflectRT.texture;
             }
@@ -2688,6 +2870,9 @@
           controls.update();
           dragonTransformControls?.update();
           waterfallTransformControls?.update();
+          impactFoamTransformControls?.update();
+          uIFTime.value = elapsed;
+          syncImpactFoamUniforms();
           if (params.waterfallVisible)
             wfU.wfFlowTime.value += delta * wfU.wfFlowSpeed.value;
           renderer.render(scene, camera);
@@ -2971,6 +3156,166 @@
           a.click();
         });
 
+        const fImpactFoam = pane.addFolder({
+          title: "Impact foam (hand-placed splash cap)",
+          expanded: false,
+        });
+        fImpactFoam
+          .addBinding(params, "impactFoamVisible", {
+            label: "Show foam",
+          })
+          .on("change", () => {
+            applyImpactFoamVisibility();
+            applyImpactFoamGizmoState();
+          });
+        fImpactFoam
+          .addBinding(params, "impactFoamGizmoEnabled", {
+            label: "Gizmo on",
+          })
+          .on("change", applyImpactFoamGizmoState);
+        fImpactFoam
+          .addBinding(params, "impactFoamPosX", {
+            label: "Position X",
+            min: -120,
+            max: 120,
+            step: 0.5,
+          })
+          .on("change", syncImpactFoamPositionFromParams);
+        fImpactFoam
+          .addBinding(params, "impactFoamPosY", {
+            label: "Position Y",
+            min: -2,
+            max: 25,
+            step: 0.05,
+          })
+          .on("change", syncImpactFoamPositionFromParams);
+        fImpactFoam
+          .addBinding(params, "impactFoamPosZ", {
+            label: "Position Z",
+            min: -120,
+            max: 120,
+            step: 0.5,
+          })
+          .on("change", syncImpactFoamPositionFromParams);
+        fImpactFoam
+          .addBinding(params, "impactFoamScaleX", {
+            label: "Scale X",
+            min: 0.15,
+            max: 4,
+            step: 0.02,
+          })
+          .on("change", syncImpactFoamScaleFromParams);
+        fImpactFoam
+          .addBinding(params, "impactFoamScaleY", {
+            label: "Scale Y",
+            min: 0.15,
+            max: 4,
+            step: 0.02,
+          })
+          .on("change", syncImpactFoamScaleFromParams);
+        fImpactFoam
+          .addBinding(params, "impactFoamScaleZ", {
+            label: "Scale Z",
+            min: 0.15,
+            max: 4,
+            step: 0.02,
+          })
+          .on("change", syncImpactFoamScaleFromParams);
+        fImpactFoam.addButton({ title: "Set scale X=Y=Z (uses Scale X)" }).on(
+          "click",
+          () => {
+            const u = params.impactFoamScaleX;
+            params.impactFoamScaleY = u;
+            params.impactFoamScaleZ = u;
+            syncImpactFoamScaleFromParams();
+            pane.refresh();
+          },
+        );
+        fImpactFoam.addBlade({ view: "separator" });
+        fImpactFoam.addBinding(params, "impactFoamBaseRadius", {
+          label: "Cap radius (world)",
+          min: 0.6,
+          max: 14,
+          step: 0.05,
+        });
+        fImpactFoam.addBinding(params, "impactFoamCapAngle", {
+          label: "Cap span (×π rad)",
+          min: 0.1,
+          max: 0.48,
+          step: 0.01,
+        });
+        fImpactFoam.addButton({ title: "Rebuild cap geometry" }).on("click", () => {
+          rebuildImpactFoamGeometry();
+        });
+        fImpactFoam.addBlade({ view: "separator" });
+        fImpactFoam.addBinding(params, "impactFoamDispAmp", {
+          label: "Vertex churn (displace)",
+          min: 0,
+          max: 2.2,
+          step: 0.02,
+        });
+        fImpactFoam.addBinding(params, "impactFoamNoiseFreq", {
+          label: "Noise frequency",
+          min: 0.2,
+          max: 6,
+          step: 0.05,
+        });
+        fImpactFoam.addBinding(params, "impactFoamFlow", {
+          label: "Scroll / flow speed",
+          min: 0,
+          max: 4,
+          step: 0.05,
+        });
+        fImpactFoam.addBinding(params, "impactFoamOpacity", {
+          label: "Opacity max",
+          min: 0.2,
+          max: 1,
+          step: 0.02,
+        });
+        fImpactFoam.addBinding(params, "impactFoamRimCyan", {
+          label: "Rim cyan mix",
+          min: 0,
+          max: 1,
+          step: 0.02,
+        });
+        fImpactFoam.addBlade({ view: "separator" });
+        fImpactFoam.addButton({ title: "Move (key 7)" }).on("click", () => {
+          impactFoamTransformControls?.setMode("translate");
+        });
+        fImpactFoam.addButton({ title: "Rotate (key 8)" }).on("click", () => {
+          impactFoamTransformControls?.setMode("rotate");
+        });
+        fImpactFoam.addButton({ title: "Scale (key 9)" }).on("click", () => {
+          impactFoamTransformControls?.setMode("scale");
+        });
+        fImpactFoam.addButton({ title: "Save transform JSON" }).on("click", () => {
+          const m = impactFoamMesh;
+          const blob = new Blob(
+            [
+              JSON.stringify(
+                {
+                  x: m.position.x,
+                  y: m.position.y,
+                  z: m.position.z,
+                  rx: m.rotation.x,
+                  ry: m.rotation.y,
+                  rz: m.rotation.z,
+                  sx: m.scale.x,
+                  sy: m.scale.y,
+                  sz: m.scale.z,
+                },
+                null,
+                2,
+              ),
+            ],
+            { type: "application/json" },
+          );
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = "lake-editor-impact-foam-transform.json";
+          a.click();
+        });
+
         window.addEventListener("keydown", (e) => {
           if (e.target.closest(".tp-dfwv")) return;
           if (e.repeat) return;
@@ -2984,6 +3329,18 @@
           }
           if (e.key === "6") {
             waterfallTransformControls?.setMode("scale");
+            return;
+          }
+          if (e.key === "7") {
+            impactFoamTransformControls?.setMode("translate");
+            return;
+          }
+          if (e.key === "8") {
+            impactFoamTransformControls?.setMode("rotate");
+            return;
+          }
+          if (e.key === "9") {
+            impactFoamTransformControls?.setMode("scale");
             return;
           }
           if (!dragonTransformControls) return;
