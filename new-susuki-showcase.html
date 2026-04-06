@@ -1,0 +1,1332 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Susuki — merged stem & plume editor</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background-color: #a8e6cf;
+        overflow: hidden;
+        font-family: sans-serif;
+      }
+      canvas {
+        display: block;
+      }
+      #label {
+        position: absolute;
+        top: 20px;
+        width: 100%;
+        text-align: center;
+        color: #2d5a27;
+        pointer-events: none;
+        text-shadow: 1px 1px 0px white;
+      }
+      .tp-dfwv {
+        max-height: calc(100vh - 24px);
+        overflow-y: auto;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/+esm"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="label">
+      <h1>Susuki editor</h1>
+      Stem mesh = same builder as genshin-flowers3 · plumes keep SSS
+    </div>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import {
+        Fn,
+        float,
+        vec2,
+        vec3,
+        vec4,
+        attribute,
+        varying,
+        texture,
+        uniform,
+        mix,
+        smoothstep,
+        clamp,
+        abs,
+        sin,
+        cos,
+        fract,
+        floor,
+        mod,
+        dot,
+        length,
+        negate,
+        normalize,
+        add,
+        sub,
+        mul,
+        div,
+        max,
+        pow,
+        modelWorldMatrix,
+        cameraPosition,
+        normalLocal,
+        normalWorld,
+        mat3,
+        instanceIndex,
+      } from "three/tsl";
+      import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
+
+      const PI = Math.PI;
+
+      // ─── Inlined tsl-utils (noise + rotation matrices) ─────────────────────
+      const hash12 = Fn(([p]) =>
+        fract(sin(dot(vec2(p), vec2(127.1, 311.7))).mul(43758.5453)),
+      );
+      const noise12 = Fn(([p_in]) => {
+        const p = vec2(p_in),
+          i = floor(p),
+          f = fract(p),
+          u = f.mul(f).mul(sub(3.0, f.mul(2.0)));
+        return mix(
+          mix(hash12(i), hash12(add(i, vec2(1, 0))), u.x),
+          mix(hash12(add(i, vec2(0, 1))), hash12(add(i, vec2(1, 1))), u.x),
+          u.y,
+        );
+      });
+      const hash42 = Fn(([p_in]) => {
+        const p = vec2(p_in),
+          p4 = fract(
+            vec4(p.x, p.y, p.x, p.y).mul(
+              vec4(443.897, 441.423, 437.195, 429.123),
+            ),
+          ),
+          d = dot(p4, p4.wzxy.add(19.19)),
+          r = p4.add(d);
+        return fract(r.xxyz.add(r.yzzw).mul(r.zywx));
+      });
+      const hash22 = Fn(([p_in]) => {
+        const p = vec2(p_in),
+          p3 = fract(
+            vec3(p.x, p.y, p.x).mul(vec3(443.897, 441.423, 437.195)),
+          ),
+          d = dot(p3, p3.yzx.add(19.19)),
+          r = p3.add(d);
+        return fract(r.xx.add(r.yz).mul(r.zy));
+      });
+      const remap = Fn(([v, a, b, c, d]) =>
+        mix(c, d, sub(v, a).div(sub(b, a))),
+      );
+      const easeIn = Fn(([x, t]) => pow(x, t));
+      const rotateX_mat = Fn(([th]) => {
+        const c = cos(th),
+          s = sin(th);
+        return mat3(1, 0, 0, 0, c, negate(s), 0, s, c);
+      });
+      const rotateY_mat = Fn(([th]) => {
+        const c = cos(th),
+          s = sin(th);
+        return mat3(c, 0, s, 0, 1, 0, negate(s), 0, c);
+      });
+      const rotateAxis_mat = Fn(([ax_in, ang]) => {
+        const ax = normalize(vec3(ax_in)),
+          s = sin(ang),
+          c = cos(ang),
+          oc = sub(1, c);
+        return mat3(
+          add(mul(oc, ax.x, ax.x), c),
+          add(mul(oc, ax.x, ax.y), mul(ax.z, s)),
+          sub(mul(oc, ax.z, ax.x), mul(ax.y, s)),
+          sub(mul(oc, ax.x, ax.y), mul(ax.z, s)),
+          add(mul(oc, ax.y, ax.y), c),
+          add(mul(oc, ax.y, ax.z), mul(ax.x, s)),
+          add(mul(oc, ax.z, ax.x), mul(ax.y, s)),
+          sub(mul(oc, ax.y, ax.z), mul(ax.x, s)),
+          add(mul(oc, ax.z, ax.z), c),
+        );
+      });
+
+      function makeRibbonIndices(segments) {
+        const indices = [];
+        const vertsPerRow = 2;
+        const rows = segments + 1;
+        for (let i = 0; i < segments; i++) {
+          const v = i * vertsPerRow;
+          indices.push(v, v + 1, v + 2, v + 2, v + 1, v + 3);
+        }
+        return { indices, numVerts: rows * vertsPerRow };
+      }
+
+      function ribbonBufferGeometry(segments, partType, bandIndex) {
+        const { indices, numVerts } = makeRibbonIndices(segments);
+        const pos = new Float32Array(numVerts * 3);
+        const nrm = new Float32Array(numVerts * 3);
+        const vertIndex = new Float32Array(numVerts);
+        const partArr = new Float32Array(numVerts);
+        const bandArr = new Float32Array(numVerts);
+        const stemTArr = new Float32Array(numVerts);
+        const uvs = new Float32Array(numVerts * 2);
+        for (let i = 0; i < numVerts; i++) {
+          nrm[i * 3 + 1] = 1;
+          vertIndex[i] = i;
+          partArr[i] = partType;
+          bandArr[i] = bandIndex;
+          stemTArr[i] = 0.5;
+          uvs[i * 2] = 0.5;
+          uvs[i * 2 + 1] = 0.5;
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+        geo.setAttribute("normal", new THREE.Float32BufferAttribute(nrm, 3));
+        geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+        geo.setAttribute("stemT", new THREE.Float32BufferAttribute(stemTArr, 1));
+        geo.setAttribute("vertIndex", new THREE.Float32BufferAttribute(vertIndex, 1));
+        geo.setAttribute("partType", new THREE.Float32BufferAttribute(partArr, 1));
+        geo.setAttribute("bandIndex", new THREE.Float32BufferAttribute(bandArr, 1));
+        geo.setIndex(indices);
+        return geo;
+      }
+
+      /** Same hub radii as genshin-flowers3.html (drives cupInset / coneClearance). */
+      const SHAPE = {
+        ringCount: 2,
+        centerY: 0.6,
+        r1: 0.42,
+        r2: 0.86,
+        r3: 1.32,
+        r4: 1.88,
+        y1: 0.18,
+        y2: 0.0,
+        y3: -0.02,
+        y4: -0.24,
+      };
+
+      /**
+       * Exact copy of genshin-flowers3.html createStemGeometry, then Y remapped so
+       * ground = y=0 and tip = y=stemLen (upright susuki). Normals = mesh only.
+       */
+      function createStemGeometryExactlyGenshin(shape, stemCfg, stemLen) {
+        const stem = { ...stemCfg, height: stemLen };
+        const nRings = Math.min(4, Math.max(2, shape.ringCount | 0) || 4);
+        const ringR = [0.0];
+        const ringY = [shape.centerY];
+        for (let i = 1; i <= nRings; i++) {
+          ringR.push(shape[`r${i}`]);
+          ringY.push(shape[`y${i}`]);
+        }
+        const yTip = ringY[0];
+        const y1 = ringY[1];
+        const r1 = ringR[1];
+
+        const inset = Math.max(0, Math.min(1, stem.cupInset));
+        let yAttach = yTip + (y1 - yTip) * inset + stem.rimNudge;
+        const yLo = Math.min(yTip, y1);
+        const yHi = Math.max(yTip, y1);
+        yAttach = Math.max(yLo, Math.min(yHi, yAttach));
+
+        const denom = y1 - yTip;
+        const tAlong =
+          Math.abs(denom) < 1e-8
+            ? 0
+            : Math.max(0, Math.min(1, (yAttach - yTip) / denom));
+        const rFrustum = r1 * tAlong;
+        const tipBlend = 1 - tAlong;
+        const maxR = Math.max(
+          0.0025,
+          rFrustum * stem.coneClearance +
+            r1 * stem.coneClearance * 0.06 * tipBlend,
+        );
+        const rTopEff = Math.min(stem.radiusTop, maxR);
+
+        const yFar = yAttach + stem.height;
+
+        const sides = Math.max(3, stem.sides | 0);
+        const segs = Math.max(1, stem.segments | 0);
+        const positions = [],
+          uvs = [],
+          indices = [],
+          stemT = [],
+          partType = [],
+          bandIndex = [],
+          vertIndex = [];
+
+        for (let j = 0; j <= segs; j++) {
+          const t = j / segs;
+          const y = yAttach + (yFar - yAttach) * t;
+          const r = rTopEff + (stem.radiusBottom - rTopEff) * t;
+          const bendOff = stem.bend * t * t;
+          for (let s = 0; s < sides; s++) {
+            const a = (s / sides) * Math.PI * 2 + Math.PI / sides;
+            positions.push(Math.cos(a) * r + bendOff, y, Math.sin(a) * r);
+            uvs.push(0.5, 0.5);
+            stemT.push(1 - t);
+            partType.push(0);
+            bandIndex.push(0);
+            vertIndex.push(0);
+          }
+        }
+        for (let i = 0; i < positions.length; i += 3) {
+          positions[i + 1] = yFar - positions[i + 1];
+        }
+
+        const row = (j) => j * sides;
+        for (let j = 0; j < segs; j++) {
+          for (let s = 0; s < sides; s++) {
+            const a = row(j) + s;
+            const b = row(j) + ((s + 1) % sides);
+            const c = row(j + 1) + s;
+            const d = row(j + 1) + ((s + 1) % sides);
+            indices.push(a, b, c, b, d, c);
+          }
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+        geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+        geo.setAttribute("stemT", new THREE.Float32BufferAttribute(stemT, 1));
+        geo.setAttribute("partType", new THREE.Float32BufferAttribute(partType, 1));
+        geo.setAttribute("bandIndex", new THREE.Float32BufferAttribute(bandIndex, 1));
+        geo.setAttribute("vertIndex", new THREE.Float32BufferAttribute(vertIndex, 1));
+        geo.setIndex(indices);
+        geo.computeVertexNormals();
+        return geo;
+      }
+
+      function buildMergedSusukiGeometry(stemCfg, shape, stemLength, plumeSeg, bandCount) {
+        const parts = [];
+        if (stemCfg.enabled) {
+          parts.push(createStemGeometryExactlyGenshin(shape, stemCfg, stemLength));
+        }
+        for (let b = 0; b < bandCount; b++) {
+          parts.push(ribbonBufferGeometry(plumeSeg, 1, b));
+        }
+        const merged = mergeGeometries(parts, false);
+        for (const g of parts) g.dispose();
+        merged.computeBoundingSphere();
+        return merged;
+      }
+
+      function hexToVec3(hex) {
+        const c = new THREE.Color(hex);
+        c.convertSRGBToLinear();
+        return new THREE.Vector3(c.r, c.g, c.b);
+      }
+
+      /** Genshin flower stem — same fields as genshin-flowers3.html */
+      const STEM = {
+        enabled: true,
+        /** Same meaning as genshin-flowers3 STEM.height (plant scale for stem + plume split). */
+        height: 2.6,
+        cupInset: 0,
+        rimNudge: -0.055,
+        coneClearance: 0.29,
+        radiusTop: 0.072,
+        radiusBottom: 0.034,
+        sides: 6,
+        segments: 3,
+        bend: 0.06,
+        baseColor: "#1f5c32",
+        topColor: "#6bae6e",
+      };
+
+      const PARAMS = {
+        plumeSegments: 12,
+        bandCount: 8,
+        bandWidth: 0.055,
+        plumeStart: 0.62,
+        /** Tilts each plume ribbon outward (rad) so the head reads open, not a closed tube. */
+        plumeFlare: 0.52,
+        plumeFlex: 0.22,
+        plumeSoftEdge: 0.12,
+        randomAngle: 0.0,
+        randomHeight: 1.0,
+        stemLean: 0.1,
+        bandLean: 0.05,
+        windDir: 0.75,
+        windWaveScale: 0.085,
+        windSpeed: 1.15,
+        /** Overall breeze; stem only uses a fraction (stemWindMul) so plumes flex more. */
+        windStr: 0.34,
+        windGust: 0.42,
+        windMicro: 0.08,
+        /** Multiplies wind lean + micro on stem + stemTipWorld only (ribbons use full wind × height). */
+        stemWindMul: 0.22,
+        /** Extra multiplier on ribbon wind lean (heightPct still ramps from base). */
+        plumeWindMul: 1.18,
+        plumeColor: "#f5f8f0",
+        /** Match genshin-flowers3.html scene lights; aligns ~ with dir (5,10,5). */
+        sunAzimuth: 45,
+        sunElevation: 54.74,
+        sunIntensity: 2.5,
+        /** Higher default: MeshStandard still multiplies colorNode by scene lights; ribbon normals are often in low N·L for the sun, especially from a far field camera. */
+        ambIntensity: 0.68,
+        /** Sky / ground fill so vertical plumes get light from both hemispheres (susuki-showcase used stronger ambient only). */
+        hemiIntensity: 0.42,
+        aoIntensity: 1.0,
+        bsIntensity: 0.38,
+        bsColor: "#8ae090",
+        bsPower: 2.0,
+        frontScatter: 0.28,
+        rimSSS: 0.42,
+        specV1Intensity: 1.4,
+        specV1Color: "#ffffff",
+        specV1DirX: -1.0,
+        specV1DirY: 1.0,
+        specV1DirZ: 0.45,
+        specV2Intensity: 0.95,
+        specV2Color: "#ffffff",
+        specV2DirX: -0.9,
+        specV2DirY: 0.5,
+        specV2DirZ: 0.9,
+        specV2NoiseScale: 3.0,
+        specV2NoiseStr: 0.55,
+        specV2Power: 12.0,
+        specV2TipBias: 0.48,
+        /** Field mode: InstancedMesh patch + optional ground/grid */
+        fieldEnabled: false,
+        fieldCount: 520,
+        fieldSize: 20,
+        fieldSeed: 42,
+        showFieldGround: true,
+        showFieldGrid: true,
+        /** Used for the canvas clear color in both single-plant and field modes */
+        sceneBackground: "#d4f1f4",
+        fieldGroundColor: "#3d5a3d",
+      };
+
+      const heightTex = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1);
+      heightTex.needsUpdate = true;
+      const uTerrainSize = float(1e6);
+
+      let plantMesh,
+        material,
+        scene,
+        camera,
+        renderer,
+        controls,
+        ground,
+        fieldGrid;
+      let dirLight, ambLight, hemiLight;
+      const uTime = uniform(0);
+      const uPlumeSegs = uniform(float(PARAMS.plumeSegments));
+      const uBands = uniform(float(PARAMS.bandCount));
+      const uStemHeight = uniform(STEM.height);
+      const uStemTopY = uniform(
+        STEM.height * PARAMS.plumeStart * PARAMS.randomHeight,
+      );
+      const uBandWidth = uniform(PARAMS.bandWidth);
+      const uPlumeStart = uniform(PARAMS.plumeStart);
+      const uPlumeFlare = uniform(PARAMS.plumeFlare);
+      const uSusukiPlumeFlex = uniform(PARAMS.plumeFlex);
+      const uSusukiPlumeSoftEdge = uniform(PARAMS.plumeSoftEdge);
+      const uRandomAngle = uniform(PARAMS.randomAngle);
+      const uRandomHeight = uniform(PARAMS.randomHeight);
+      const uStemLean = uniform(PARAMS.stemLean);
+      const uBandLean = uniform(PARAMS.bandLean);
+      /** 1 = use instanceIndex hashes for yaw/lean; stem height from instance Y scale. */
+      const uFieldBlend = uniform(float(0));
+      /** Genshin-flowers3 SHADING defaults for stem only (MeshBasic-style N·L). */
+      const uStemAmbientLift = uniform(0.4);
+      const uStemDiffuse = uniform(0.6);
+      const uStemBacklight = uniform(0.65);
+      const uStemBacklightTint = uniform(new THREE.Color("#fff4d0"));
+      const uWindDirX = uniform(Math.cos(PARAMS.windDir));
+      const uWindDirZ = uniform(Math.sin(PARAMS.windDir));
+      const uWindAxis = uniform(
+        new THREE.Vector3(
+          Math.sin(PARAMS.windDir),
+          0,
+          -Math.cos(PARAMS.windDir),
+        ),
+      );
+      const uCrossAxis = uniform(
+        new THREE.Vector3(
+          Math.cos(PARAMS.windDir),
+          0,
+          Math.sin(PARAMS.windDir),
+        ),
+      );
+      const uWindWaveScale = uniform(PARAMS.windWaveScale);
+      const uWindSpeed = uniform(PARAMS.windSpeed);
+      const uWindStr = uniform(PARAMS.windStr);
+      const uWindGust = uniform(PARAMS.windGust);
+      const uWindMicro = uniform(PARAMS.windMicro);
+      const uStemWindMul = uniform(PARAMS.stemWindMul);
+      const uPlumeWindMul = uniform(PARAMS.plumeWindMul);
+      const uStemBase = uniform(hexToVec3(STEM.baseColor));
+      const uStemTop = uniform(hexToVec3(STEM.topColor));
+      const uPlumeColor = uniform(hexToVec3(PARAMS.plumeColor));
+      const uSunDir = uniform(new THREE.Vector3(0.5, 0.7, 0.5).normalize());
+      const uAoIntensity = uniform(PARAMS.aoIntensity);
+      const uBsColor = uniform(hexToVec3(PARAMS.bsColor));
+      const uBsPower = uniform(PARAMS.bsPower);
+      const uFrontScatter = uniform(PARAMS.frontScatter);
+      const uRimSSS = uniform(PARAMS.rimSSS);
+      const uBsIntensity = uniform(PARAMS.bsIntensity);
+      const uSpecV1Intensity = uniform(PARAMS.specV1Intensity);
+      const uSpecV1Color = uniform(hexToVec3(PARAMS.specV1Color));
+      const uSpecV1Dir = uniform(new THREE.Vector3(0, 1, 0));
+      const uSpecV2Intensity = uniform(PARAMS.specV2Intensity);
+      const uSpecV2Color = uniform(hexToVec3(PARAMS.specV2Color));
+      const uSpecV2Dir = uniform(new THREE.Vector3(0, 1, 0));
+      const uSpecV2NoiseScale = uniform(PARAMS.specV2NoiseScale);
+      const uSpecV2NoiseStr = uniform(PARAMS.specV2NoiseStr);
+      const uSpecV2Power = uniform(PARAMS.specV2Power);
+      const uSpecV2TipBias = uniform(PARAMS.specV2TipBias);
+
+      const uTrailCenter = uniform(new THREE.Vector2(9999, 9999));
+      const uPlayerPos = uniform(new THREE.Vector3(9999, 0, 9999));
+      const uInteractionRange = uniform(9999);
+      const uInteractionStrength = uniform(0);
+      const uInteractionHThresh = uniform(2);
+      const uInteractionRepel = uniform(1);
+
+      const vColor = varying(vec3(0), "v_col");
+      const vPacked = varying(vec3(0), "v_pk");
+      const vWorldPos = varying(vec3(0), "v_wp");
+      const vEdgeFade = varying(float(1), "v_ef");
+      const vIsStem = varying(float(0), "v_st");
+
+      const aPart = attribute("partType", "float");
+      const aVertIndex = attribute("vertIndex", "float");
+      const aBandIndex = attribute("bandIndex", "float");
+      const aStemT = attribute("stemT", "float");
+      const aPos = attribute("position", "vec3");
+      const aNrm = attribute("normal", "vec3");
+      const isConeStem = aPart.lessThan(float(0.5));
+
+      const positionNode = Fn(() => {
+        const plantOffset = vec3(0, 0, 0);
+        const bladeWorld = modelWorldMatrix.mul(vec4(plantOffset, 1)).xyz;
+
+        const terrainUV = add(div(bladeWorld.xz, uTerrainSize), vec2(0.5));
+        const terrainH = texture(heightTex, terrainUV).r;
+
+        const hv = hash42(bladeWorld.xz);
+        const hv2 = hash22(bladeWorld.xz);
+        const idf = float(instanceIndex);
+        const hInstA = fract(mul(sin(mul(idf, float(127.1))), float(43758.5453)));
+        const hInstB = fract(
+          mul(sin(add(mul(idf, float(269.5)), hInstA)), float(43758.5453)),
+        );
+        const hInstC = fract(
+          mul(sin(add(mul(idf, float(419.2)), hInstB)), float(43758.5453)),
+        );
+        const instYaw = mul(hInstA, float(2 * PI));
+        const instStemLean = add(mul(hInstB, float(0.12)), float(0.05));
+        const instBandLean = add(mul(hInstC, float(0.06)), float(0.02));
+        const randomAngle = mix(uRandomAngle, instYaw, uFieldBlend);
+        const randomHeight = mix(uRandomHeight, float(1), uFieldBlend);
+        const bandRandomLean = mix(uBandLean, instBandLean, uFieldBlend);
+        const stemLeanEff = mix(uStemLean, instStemLean, uFieldBlend);
+
+        const SEGS = uPlumeSegs;
+        const NVERTS = mul(add(SEGS, 1), 2);
+        const vertID = mod(aVertIndex, NVERTS);
+        const zSide = float(1);
+        const xSide = mod(vertID, 2);
+        const heightPct = div(sub(vertID, xSide), mul(SEGS, 2));
+
+        const stemTotalHeight = mul(uStemHeight, randomHeight, uPlumeStart);
+        const bandLength = mul(uStemHeight, randomHeight, sub(1, uPlumeStart));
+
+        const bandW = uBandWidth;
+        const x = mul(sub(xSide, 0.5), bandW);
+
+        const yPlume = mul(heightPct, bandLength);
+
+        const tipFade = sub(
+          float(1),
+          mul(
+            uSusukiPlumeSoftEdge,
+            smoothstep(float(0.5), float(0.95), heightPct),
+          ),
+        );
+        vEdgeFade.assign(isConeStem.select(float(1), tipFade));
+
+        const windDirVec = vec2(uWindDirX, uWindDirZ);
+        const windScroll = mul(windDirVec, mul(uTime, uWindSpeed));
+        const waveUV1 = add(mul(bladeWorld.xz, uWindWaveScale), windScroll);
+        const wave1 = sub(mul(noise12(waveUV1), 2), 1);
+        const crossDir = vec2(negate(uWindDirZ), uWindDirX);
+        const waveUV2 = add(
+          mul(bladeWorld.xz, mul(uWindWaveScale, 2.3)),
+          mul(windScroll, 1.4),
+          mul(crossDir, mul(uTime, 0.3)),
+        );
+        const wave2 = mul(sub(mul(noise12(waveUV2), 2), 1), 0.35);
+        const gustUV = add(
+          mul(bladeWorld.xz, mul(uWindWaveScale, 0.25)),
+          mul(windScroll, 0.3),
+        );
+        const gustRaw = noise12(gustUV);
+        const gustStr = mul(smoothstep(0.5, 0.9, gustRaw), uWindGust);
+        const windLean = mul(add(wave1, wave2, gustStr), uWindStr);
+        const microPhase = add(mul(hv.x, 6.28), mul(uTime, 2.5));
+        const micro = mul(sin(microPhase), uWindMicro, 0.3);
+        const crossSway = mul(wave2, 0.3, uWindStr, heightPct);
+
+        const bladeY = add(terrainH, float(0));
+        const repulseCenterXZ = uTrailCenter;
+        const pDist = length(sub(bladeWorld.xz, repulseCenterXZ));
+        const pHD = abs(sub(bladeY, uPlayerPos.y));
+        const distFalloff = mix(
+          float(1),
+          float(0),
+          smoothstep(float(0.5), uInteractionRange, pDist),
+        );
+        const heightFalloff = smoothstep(uInteractionHThresh, 0, pHD);
+        const pFall = mul(distFalloff, heightFalloff);
+        const pAng = mul(
+          negate(mix(0, uInteractionStrength, pFall)),
+          uInteractionRepel,
+        );
+        const pTo = normalize(
+          sub(
+            vec3(repulseCenterXZ.x, 0, repulseCenterXZ.y),
+            vec3(bladeWorld.x, 0, bladeWorld.z),
+          ),
+        );
+        const pAx = vec3(pTo.z, 0, negate(pTo.x));
+        const totalFall = pFall;
+        const sumAxis = mul(pAx, pFall);
+        const sumAngle = mul(pAng, pFall);
+        const invTotal = div(1, max(totalFall, 0.001));
+        const hasInteraction = smoothstep(0.001, 0.002, totalFall);
+        const pAxis = normalize(mix(vec3(1, 0, 0), sumAxis, hasInteraction));
+        const pAngle = mul(mul(sumAngle, invTotal), hasInteraction);
+
+        const windFull = add(windLean, micro);
+        const windStemLean = mul(windFull, uStemWindMul);
+        const stemCrossSway = mul(wave2, 0.3, uWindStr, uStemWindMul);
+        const stemGrassMat = rotateAxis_mat(pAxis, pAngle)
+          .mul(rotateAxis_mat(uWindAxis, windStemLean))
+          .mul(rotateAxis_mat(uCrossAxis, stemCrossSway))
+          .mul(rotateY_mat(randomAngle));
+        const stemFrame = stemGrassMat.mul(
+          rotateX_mat(mul(negate(stemLeanEff), float(0.85))),
+        );
+        const stemTipLocal = vec3(float(0), uStemTopY, float(0));
+        const stemTipWorld = add(plantOffset, stemFrame.mul(stemTipLocal));
+
+        const coneRigid = stemFrame.mul(aPos);
+        const coneBent = add(plantOffset, coneRigid);
+
+        const totalWindLeanPlume = mul(mul(windFull, heightPct), uPlumeWindMul);
+        const effectiveWind = mul(totalWindLeanPlume, add(1, uSusukiPlumeFlex));
+        const bandAngle = mul(
+          div(add(aBandIndex, float(0.5)), max(uBands, float(1))),
+          float(2 * PI),
+        );
+        const grassMatPlume = rotateAxis_mat(pAxis, pAngle)
+          .mul(rotateAxis_mat(uWindAxis, effectiveWind))
+          .mul(rotateAxis_mat(uCrossAxis, crossSway))
+          .mul(rotateY_mat(add(randomAngle, bandAngle)))
+          .mul(rotateX_mat(uPlumeFlare));
+
+        const easedHPlume = easeIn(heightPct, 2);
+        const curveAmtPlume = mul(negate(bandRandomLean), easedHPlume);
+        const localPlume = vec3(
+          x,
+          mul(yPlume, cos(curveAmtPlume)),
+          mul(yPlume, sin(curveAmtPlume)),
+        );
+        const bandLocal = grassMatPlume.mul(localPlume);
+        const finalPlume = add(bandLocal, stemTipWorld);
+
+        const coneWorld = vec3(
+          coneBent.x,
+          add(coneBent.y, terrainH),
+          coneBent.z,
+        );
+        const plumeWorld = vec3(
+          finalPlume.x,
+          add(finalPlume.y, terrainH),
+          finalPlume.z,
+        );
+        const worldOut = isConeStem.select(coneWorld, plumeWorld);
+
+        const _hp01 = add(heightPct, 0.01);
+        const n1p = vec3(
+          0,
+          mul(_hp01, cos(curveAmtPlume)),
+          mul(_hp01, sin(curveAmtPlume)),
+        );
+        const _nc09 = mul(curveAmtPlume, 0.9);
+        const n2p = vec3(
+          0,
+          mul(mul(_hp01, 0.9), cos(_nc09)),
+          mul(mul(_hp01, 0.9), sin(_nc09)),
+        );
+        const ncurve = normalize(sub(n1p, n2p));
+        const gvn = vec3(0, negate(ncurve.z), ncurve.y);
+        const gvn1 = mul(
+          grassMatPlume,
+          rotateY_mat(mul(float(PI), 0.3, zSide)).mul(gvn),
+        ).mul(zSide);
+        const gvn2 = mul(
+          grassMatPlume,
+          rotateY_mat(mul(float(PI), float(-0.3), zSide)).mul(gvn),
+        ).mul(zSide);
+        const blendedPlumeN = normalize(mix(gvn1, gvn2, xSide));
+
+        const nStemRigid = normalize(stemFrame.mul(aNrm));
+        normalLocal.assign(isConeStem.select(nStemRigid, blendedPlumeN));
+
+        const aoBase = max(sub(1.0, mul(uAoIntensity, 0.65)), 0.2);
+        const aoConeStem = mix(aoBase, 1.0, smoothstep(0.0, 0.35, aStemT));
+        const randomShadePlume = remap(hv2.x, 0, 1, 0.95, 1.05);
+        const plantColPlume = mul(uPlumeColor, randomShadePlume);
+        const aoPlume = mix(aoBase, 1.0, smoothstep(0.0, 0.3, heightPct));
+        const colCone = mul(mix(uStemBase, uStemTop, aStemT), aoConeStem);
+        const colPlume = mul(plantColPlume, aoPlume);
+        vColor.assign(isConeStem.select(colCone, colPlume));
+        vPacked.assign(isConeStem.select(vec3(aStemT, 0, 1), vec3(heightPct, xSide, 1)));
+        vIsStem.assign(isConeStem.select(float(1), float(0)));
+
+        vWorldPos.assign(modelWorldMatrix.mul(vec4(worldOut, 1)).xyz);
+        return worldOut;
+      })();
+
+      const colorNode = Fn(() => {
+        const heightPct = vPacked.x;
+        const nwStem = normalize(normalWorld);
+        const sunStem = normalize(uSunDir);
+        const nDotStem = dot(nwStem, sunStem);
+        const frontStem = max(nDotStem, float(0));
+        const backStem = max(negate(nDotStem), float(0));
+        const litStemFactor = uStemAmbientLift
+          .add(mul(frontStem, uStemDiffuse))
+          .add(mul(backStem, uStemBacklight));
+        const frontLitStem = mul(vColor, litStemFactor);
+        const backTintStem = mix(vColor, uStemBacklightTint, mul(backStem, float(0.5)));
+        const stemGenshinLit = mix(frontLitStem, backTintStem, mul(backStem, float(0.6)));
+
+        let col = vColor;
+        const viewDir = normalize(sub(cameraPosition, vWorldPos));
+        const n = normalLocal;
+        const backScat = max(dot(negate(uSunDir), n), 0);
+        const frontScat = max(dot(uSunDir, n), 0);
+        const rim = sub(1, max(dot(n, viewDir), 0));
+        const thickness = add(mul(sub(1, heightPct), 0.7), 0.3);
+        const transmitCol = mix(
+          uBsColor,
+          mul(uBsColor, vec3(1.3, 1.1, 0.7)),
+          sub(1, thickness),
+        );
+        const totalSSS = clamp(
+          add(
+            mul(pow(backScat, uBsPower), thickness),
+            mul(pow(frontScat, 1.5), thickness, uFrontScatter),
+            mul(pow(pow(rim, 1.5), 2), thickness, uRimSSS),
+          ),
+          0,
+          1,
+        );
+        col = add(col, mul(transmitCol, 0.35, totalSSS, uBsIntensity));
+        const specNormal = normalize(n);
+        const specReflect = sub(
+          uSpecV1Dir,
+          mul(specNormal, mul(2.0, dot(uSpecV1Dir, specNormal))),
+        );
+        const specDot = pow(max(dot(viewDir, specReflect), 0.0), 25.6);
+        const sceneDepth = length(sub(cameraPosition, vWorldPos));
+        const specDistFade = smoothstep(2.0, 10.0, sceneDepth);
+        const specTipFade = smoothstep(0.5, 1.0, heightPct);
+        const specV1 = mul(
+          uSpecV1Color,
+          specDot,
+          uSpecV1Intensity,
+          specDistFade,
+          specTipFade,
+          3.0,
+        );
+        col = add(col, specV1);
+        const noiseUV = mul(vWorldPos.xz, uSpecV2NoiseScale);
+        const n1v2 = sub(mul(noise12(noiseUV), 2.0), 1.0);
+        const n2v2 = sub(
+          mul(noise12(add(noiseUV, vec2(73.7, 157.3))), 2.0),
+          1.0,
+        );
+        const n3v2 = sub(
+          mul(noise12(add(mul(noiseUV, 2.7), vec2(31.1, 97.5))), 2.0),
+          1.0,
+        );
+        const perturbedN = normalize(
+          add(n, mul(vec3(n1v2, mul(n3v2, 0.3), n2v2), uSpecV2NoiseStr)),
+        );
+        const v2Reflect = sub(
+          uSpecV2Dir,
+          mul(perturbedN, mul(2.0, dot(uSpecV2Dir, perturbedN))),
+        );
+        const v2Spec = pow(max(dot(viewDir, v2Reflect), 0.0), uSpecV2Power);
+        const v2DistFade = smoothstep(2.0, 10.0, sceneDepth);
+        const v2TipFade = smoothstep(sub(1.0, uSpecV2TipBias), 1.0, heightPct);
+        const specV2 = mul(
+          uSpecV2Color,
+          v2Spec,
+          uSpecV2Intensity,
+          v2DistFade,
+          v2TipFade,
+        );
+        col = add(col, specV2);
+        const rimFresnel = mul(pow(rim, 2), float(0.25));
+        col = add(col, vec3(rimFresnel, rimFresnel, rimFresnel));
+        return vIsStem.greaterThan(float(0.5)).select(stemGenshinLit, col);
+      })();
+
+      material = new THREE.MeshStandardNodeMaterial({
+        side: THREE.DoubleSide,
+        roughness: 0.88,
+        metalness: 0,
+        transparent: true,
+        alphaTest: 0.02,
+        depthWrite: true,
+      });
+      material.positionNode = positionNode;
+      material.colorNode = colorNode;
+      material.alphaNode = mix(vEdgeFade, float(1), vIsStem);
+      material.envMapIntensity = 0;
+
+      function applySun() {
+        const az = (PARAMS.sunAzimuth * Math.PI) / 180;
+        const el = (PARAMS.sunElevation * Math.PI) / 180;
+        const dir = new THREE.Vector3(
+          Math.cos(el) * Math.sin(az),
+          Math.sin(el),
+          Math.cos(el) * Math.cos(az),
+        ).normalize();
+        uSunDir.value.copy(dir);
+        if (dirLight) {
+          dirLight.position.copy(dir).multiplyScalar(20);
+          dirLight.target.position.set(0, 0, 0);
+          dirLight.updateMatrixWorld();
+        }
+        if (ambLight) {
+          ambLight.intensity = PARAMS.ambIntensity;
+          ambLight.color.setHex(0x8090b0);
+        }
+        if (hemiLight) hemiLight.intensity = PARAMS.hemiIntensity;
+        if (dirLight) dirLight.intensity = PARAMS.sunIntensity;
+      }
+
+      function applySpecDirs() {
+        uSpecV1Dir.value.set(
+          PARAMS.specV1DirX,
+          PARAMS.specV1DirY,
+          PARAMS.specV1DirZ,
+        ).normalize();
+        uSpecV2Dir.value.set(
+          PARAMS.specV2DirX,
+          PARAMS.specV2DirY,
+          PARAMS.specV2DirZ,
+        ).normalize();
+      }
+
+      function applyColors() {
+        uStemBase.value.copy(hexToVec3(STEM.baseColor));
+        uStemTop.value.copy(hexToVec3(STEM.topColor));
+        uPlumeColor.value.copy(hexToVec3(PARAMS.plumeColor));
+        uBsColor.value.copy(hexToVec3(PARAMS.bsColor));
+        uSpecV1Color.value.copy(hexToVec3(PARAMS.specV1Color));
+        uSpecV2Color.value.copy(hexToVec3(PARAMS.specV2Color));
+      }
+
+      function applyWindDir() {
+        uWindDirX.value = Math.cos(PARAMS.windDir);
+        uWindDirZ.value = Math.sin(PARAMS.windDir);
+        uWindAxis.value.set(
+          Math.sin(PARAMS.windDir),
+          0,
+          -Math.cos(PARAMS.windDir),
+        );
+        uCrossAxis.value.set(
+          Math.cos(PARAMS.windDir),
+          0,
+          Math.sin(PARAMS.windDir),
+        );
+      }
+
+      function mulberry32(a) {
+        return function () {
+          let t = (a += 0x6d2b79f5);
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+
+      function syncFieldUniforms() {
+        uFieldBlend.value = PARAMS.fieldEnabled ? 1 : 0;
+      }
+
+      function syncStemUniforms() {
+        uStemHeight.value = STEM.height;
+        const rh = PARAMS.fieldEnabled ? 1 : PARAMS.randomHeight;
+        uRandomHeight.value = rh;
+        uStemTopY.value = STEM.height * PARAMS.plumeStart * rh;
+      }
+
+      function computeFieldGridDims(count) {
+        let numCellsX = Math.floor(Math.sqrt(count));
+        while (count % numCellsX !== 0) numCellsX--;
+        if (numCellsX < 1) numCellsX = 1;
+        const numCellsZ = Math.max(1, Math.floor(count / numCellsX));
+        return { numCellsX, numCellsZ };
+      }
+
+      function refillFieldMatrices(im) {
+        if (!im?.isInstancedMesh) return;
+        const count = im.count;
+        const rng = mulberry32(PARAMS.fieldSeed | 0);
+        const { numCellsX, numCellsZ } = computeFieldGridDims(count);
+        const patch = Math.max(4, PARAMS.fieldSize);
+        const cellW = patch / numCellsX;
+        const cellH = patch / numCellsZ;
+        const dummy = new THREE.Object3D();
+        for (let i = 0; i < count; i++) {
+          const col = i % numCellsX;
+          const row = Math.floor(i / numCellsX);
+          const jx = rng() * cellW;
+          const jz = rng() * cellH;
+          const x = -patch * 0.5 + col * cellW + jx;
+          const z = -patch * 0.5 + row * cellH + jz;
+          dummy.position.set(x, 0, z);
+          dummy.rotation.set(0, 0, 0);
+          const sy = 0.75 + rng() * 0.5;
+          dummy.scale.set(1, sy, 1);
+          dummy.updateMatrix();
+          im.setMatrixAt(i, dummy.matrix);
+        }
+        im.instanceMatrix.needsUpdate = true;
+      }
+
+      function applyFieldEnvironment() {
+        const on = PARAMS.fieldEnabled;
+        if (ground) {
+          ground.visible = on && PARAMS.showFieldGround;
+          ground.material.color.setStyle(PARAMS.fieldGroundColor);
+        }
+        if (fieldGrid) {
+          fieldGrid.visible = on && PARAMS.showFieldGrid;
+        }
+        scene.fog = null;
+        scene.background.setStyle(PARAMS.sceneBackground);
+        camera.far = on ? 280 : 100;
+        camera.updateProjectionMatrix();
+      }
+
+      function applyFieldCamera() {
+        if (PARAMS.fieldEnabled) {
+          camera.fov = 50;
+          camera.position.set(0, 4, 18);
+          controls.target.set(0, 1.2, 0);
+        } else {
+          camera.fov = 45;
+          camera.position.set(0, 5, 8);
+          controls.target.set(0, 1, 0);
+        }
+        camera.updateProjectionMatrix();
+        controls.update();
+      }
+
+      function rebuildGeometry() {
+        if (plantMesh) {
+          scene.remove(plantMesh);
+          plantMesh.geometry.dispose();
+          plantMesh = null;
+        }
+        syncFieldUniforms();
+        syncStemUniforms();
+        uPlumeSegs.value = PARAMS.plumeSegments;
+        uBands.value = Math.max(1, PARAMS.bandCount | 0);
+        const rh = PARAMS.fieldEnabled ? 1 : PARAMS.randomHeight;
+        const stemLen = Math.max(1e-4, STEM.height * PARAMS.plumeStart * rh);
+        const geo = buildMergedSusukiGeometry(
+          STEM,
+          SHAPE,
+          stemLen,
+          Math.max(2, PARAMS.plumeSegments | 0),
+          Math.max(1, Math.min(16, PARAMS.bandCount | 0)),
+        );
+        if (PARAMS.fieldEnabled) {
+          const n = Math.max(1, Math.min(4096, PARAMS.fieldCount | 0));
+          plantMesh = new THREE.InstancedMesh(geo, material, n);
+          plantMesh.frustumCulled = false;
+          refillFieldMatrices(plantMesh);
+          scene.add(plantMesh);
+        } else {
+          plantMesh = new THREE.Mesh(geo, material);
+          plantMesh.frustumCulled = false;
+          scene.add(plantMesh);
+        }
+      }
+
+      async function init() {
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color().setStyle(PARAMS.sceneBackground);
+
+        camera = new THREE.PerspectiveCamera(
+          45,
+          window.innerWidth / window.innerHeight,
+          0.1,
+          100,
+        );
+        camera.position.set(0, 5, 8);
+
+        renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setPixelRatio(devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+        await renderer.init();
+
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+
+        dirLight = new THREE.DirectionalLight(0xffffff, PARAMS.sunIntensity);
+        dirLight.target.position.set(0, 0, 0);
+        scene.add(dirLight);
+        scene.add(dirLight.target);
+        ambLight = new THREE.AmbientLight(0x8090b0, PARAMS.ambIntensity);
+        scene.add(ambLight);
+        hemiLight = new THREE.HemisphereLight(0xc8e4f0, 0x4d6b44, PARAMS.hemiIntensity);
+        scene.add(hemiLight);
+
+        const groundGeo = new THREE.PlaneGeometry(96, 96, 1, 1);
+        const groundMat = new THREE.MeshStandardMaterial({
+          color: PARAMS.fieldGroundColor,
+          roughness: 0.95,
+          metalness: 0,
+        });
+        ground = new THREE.Mesh(groundGeo, groundMat);
+        ground.rotation.x = -Math.PI / 2;
+        ground.visible = false;
+        scene.add(ground);
+
+        fieldGrid = new THREE.GridHelper(80, 20, 0x4a5a6a, 0x3a4a5a);
+        fieldGrid.position.y = 0.01;
+        fieldGrid.visible = false;
+        scene.add(fieldGrid);
+
+        applySun();
+        applySpecDirs();
+        applyColors();
+        applyWindDir();
+        rebuildGeometry();
+        applyFieldEnvironment();
+        applyFieldCamera();
+
+        const pane = new Pane({ title: "Susuki editor" });
+
+        const fField = pane.addFolder({ title: "Field" });
+        fField
+          .addBinding(PARAMS, "fieldEnabled", { label: "Instanced field" })
+          .on("change", () => {
+            rebuildGeometry();
+            applyFieldEnvironment();
+            applyFieldCamera();
+            pane.refresh();
+          });
+        fField
+          .addBinding(PARAMS, "fieldCount", {
+            min: 40,
+            max: 2000,
+            step: 20,
+            label: "Plant count",
+          })
+          .on("change", rebuildGeometry);
+        fField
+          .addBinding(PARAMS, "fieldSize", {
+            min: 8,
+            max: 48,
+            step: 1,
+            label: "Patch size",
+          })
+          .on("change", rebuildGeometry);
+        fField
+          .addBinding(PARAMS, "fieldSeed", { min: 0, max: 99999, step: 1 })
+          .on("change", () => {
+            if (plantMesh?.isInstancedMesh) refillFieldMatrices(plantMesh);
+          });
+        fField
+          .addBinding(PARAMS, "showFieldGround", { label: "Ground" })
+          .on("change", applyFieldEnvironment);
+        fField
+          .addBinding(PARAMS, "showFieldGrid", { label: "Grid" })
+          .on("change", applyFieldEnvironment);
+        fField
+          .addBinding(PARAMS, "sceneBackground", { label: "Background" })
+          .on("change", applyFieldEnvironment);
+        fField.addBinding(PARAMS, "fieldGroundColor", { label: "Ground" }).on("change", applyFieldEnvironment);
+
+        const fGeo = pane.addFolder({ title: "Mesh" });
+        fGeo
+          .addBinding(PARAMS, "plumeSegments", { min: 4, max: 28, step: 1 })
+          .on("change", rebuildGeometry);
+        fGeo
+          .addBinding(PARAMS, "bandCount", { min: 4, max: 14, step: 1 })
+          .on("change", rebuildGeometry);
+
+        const fPlant = pane.addFolder({ title: "Plant" });
+        fPlant
+          .addBinding(STEM, "height", { min: 0.5, max: 5, step: 0.05, label: "Stem ref height" })
+          .on("change", () => {
+            syncStemUniforms();
+            rebuildGeometry();
+          });
+        fPlant
+          .addBinding(PARAMS, "plumeStart", { min: 0.35, max: 0.92, step: 0.01 })
+          .on("change", (e) => {
+            uPlumeStart.value = e.value;
+            syncStemUniforms();
+            rebuildGeometry();
+          });
+        fPlant
+          .addBinding(PARAMS, "bandWidth", { min: 0.015, max: 0.14, step: 0.002 })
+          .on("change", (e) => (uBandWidth.value = e.value));
+        fPlant
+          .addBinding(PARAMS, "plumeFlare", {
+            min: -0.2,
+            max: 1.1,
+            step: 0.02,
+            label: "Plume flare (rad)",
+          })
+          .on("change", (e) => (uPlumeFlare.value = e.value));
+        fPlant
+          .addBinding(PARAMS, "plumeFlex", { min: 0, max: 0.8, step: 0.02 })
+          .on("change", (e) => (uSusukiPlumeFlex.value = e.value));
+        fPlant
+          .addBinding(PARAMS, "plumeSoftEdge", { min: 0, max: 0.5, step: 0.02 })
+          .on("change", (e) => (uSusukiPlumeSoftEdge.value = e.value));
+
+        const fStem = pane.addFolder({ title: "Stem (Genshin-style)" });
+        fStem
+          .addBinding(STEM, "enabled", { label: "Enabled" })
+          .on("change", rebuildGeometry);
+        fStem
+          .addBinding(STEM, "cupInset", {
+            min: 0,
+            max: 1,
+            step: 0.01,
+            label: "0 = centerY tip → 1 = ring 1",
+          })
+          .on("change", rebuildGeometry);
+        fStem
+          .addBinding(STEM, "rimNudge", {
+            min: -0.12,
+            max: 0.12,
+            step: 0.001,
+            label: "Axis nudge (Y)",
+          })
+          .on("change", rebuildGeometry);
+        fStem
+          .addBinding(STEM, "coneClearance", {
+            min: 0.08,
+            max: 0.5,
+            step: 0.01,
+            label: "Max width vs cup",
+          })
+          .on("change", rebuildGeometry);
+        fStem
+          .addBinding(STEM, "radiusTop", { min: 0.02, max: 0.35, label: "Radius top" })
+          .on("change", rebuildGeometry);
+        fStem
+          .addBinding(STEM, "radiusBottom", {
+            min: 0.02,
+            max: 0.35,
+            label: "Radius bottom",
+          })
+          .on("change", rebuildGeometry);
+        fStem
+          .addBinding(STEM, "sides", { min: 3, max: 16, step: 1, label: "Sides" })
+          .on("change", rebuildGeometry);
+        fStem
+          .addBinding(STEM, "segments", {
+            min: 1,
+            max: 8,
+            step: 1,
+            label: "Height segments",
+          })
+          .on("change", rebuildGeometry);
+        fStem
+          .addBinding(STEM, "bend", { min: -0.35, max: 0.35, label: "Bend (+X)" })
+          .on("change", rebuildGeometry);
+        fStem.addBinding(STEM, "baseColor", { label: "Base color" }).on("change", applyColors);
+        fStem.addBinding(STEM, "topColor", { label: "Top color" }).on("change", applyColors);
+
+        const fVar = pane.addFolder({ title: "Variation" });
+        fVar
+          .addBinding(PARAMS, "randomAngle", {
+            min: 0,
+            max: Math.PI * 2,
+            step: 0.02,
+            label: "Yaw (rad)",
+          })
+          .on("change", (e) => (uRandomAngle.value = e.value));
+        fVar
+          .addBinding(PARAMS, "randomHeight", { min: 0.75, max: 1.25, step: 0.01 })
+          .on("change", () => {
+            if (!PARAMS.fieldEnabled) {
+              syncStemUniforms();
+              rebuildGeometry();
+            }
+          });
+        fVar
+          .addBinding(PARAMS, "stemLean", { min: 0, max: 0.35, step: 0.01 })
+          .on("change", (e) => (uStemLean.value = e.value));
+        fVar
+          .addBinding(PARAMS, "bandLean", { min: 0, max: 0.2, step: 0.005 })
+          .on("change", (e) => (uBandLean.value = e.value));
+        fVar.addButton({ title: "Randomize plant" }).on("click", () => {
+          if (PARAMS.fieldEnabled) {
+            PARAMS.fieldSeed = (Math.random() * 99999) | 0;
+            if (plantMesh?.isInstancedMesh) refillFieldMatrices(plantMesh);
+            pane.refresh();
+            return;
+          }
+          PARAMS.randomAngle = Math.random() * Math.PI * 2;
+          PARAMS.randomHeight = 0.85 + Math.random() * 0.3;
+          PARAMS.stemLean = 0.05 + Math.random() * 0.12;
+          PARAMS.bandLean = 0.02 + Math.random() * 0.06;
+          uRandomAngle.value = PARAMS.randomAngle;
+          uStemLean.value = PARAMS.stemLean;
+          uBandLean.value = PARAMS.bandLean;
+          syncStemUniforms();
+          rebuildGeometry();
+          pane.refresh();
+        });
+
+        const fWind = pane.addFolder({ title: "Wind" });
+        fWind
+          .addBinding(PARAMS, "windDir", {
+            min: 0,
+            max: Math.PI * 2,
+            step: 0.02,
+            label: "Direction (rad)",
+          })
+          .on("change", applyWindDir);
+        fWind
+          .addBinding(PARAMS, "windWaveScale", { min: 0.02, max: 0.25, step: 0.005 })
+          .on("change", (e) => (uWindWaveScale.value = e.value));
+        fWind
+          .addBinding(PARAMS, "windSpeed", { min: 0, max: 3, step: 0.05 })
+          .on("change", (e) => (uWindSpeed.value = e.value));
+        fWind
+          .addBinding(PARAMS, "windStr", { min: 0, max: 1.2, step: 0.02 })
+          .on("change", (e) => (uWindStr.value = e.value));
+        fWind
+          .addBinding(PARAMS, "windGust", { min: 0, max: 1.5, step: 0.02 })
+          .on("change", (e) => (uWindGust.value = e.value));
+        fWind
+          .addBinding(PARAMS, "windMicro", { min: 0, max: 0.35, step: 0.01 })
+          .on("change", (e) => (uWindMicro.value = e.value));
+        fWind
+          .addBinding(PARAMS, "stemWindMul", {
+            min: 0.05,
+            max: 0.85,
+            step: 0.02,
+            label: "Stem wind (rigid ← → soft)",
+          })
+          .on("change", (e) => (uStemWindMul.value = e.value));
+        fWind
+          .addBinding(PARAMS, "plumeWindMul", {
+            min: 0.5,
+            max: 2.2,
+            step: 0.02,
+            label: "Plume wind (ribbon sway)",
+          })
+          .on("change", (e) => (uPlumeWindMul.value = e.value));
+
+        const fCol = pane.addFolder({ title: "Colors" });
+        fCol.addBinding(PARAMS, "plumeColor").on("change", applyColors);
+
+        const fLight = pane.addFolder({ title: "Lighting" });
+        fLight
+          .addBinding(PARAMS, "sunAzimuth", { min: 0, max: 360, step: 5 })
+          .on("change", applySun);
+        fLight
+          .addBinding(PARAMS, "sunElevation", { min: 5, max: 90, step: 2 })
+          .on("change", applySun);
+        fLight
+          .addBinding(PARAMS, "sunIntensity", { min: 0.5, max: 4, step: 0.1 })
+          .on("change", (e) => {
+            if (dirLight) dirLight.intensity = e.value;
+          });
+        fLight
+          .addBinding(PARAMS, "ambIntensity", { min: 0.2, max: 1.5, step: 0.05 })
+          .on("change", (e) => {
+            if (ambLight) ambLight.intensity = e.value;
+          });
+        fLight
+          .addBinding(PARAMS, "hemiIntensity", {
+            min: 0,
+            max: 1.2,
+            step: 0.02,
+            label: "Hemisphere fill",
+          })
+          .on("change", (e) => {
+            if (hemiLight) hemiLight.intensity = e.value;
+          });
+
+        const fSss = pane.addFolder({ title: "SSS & spec" });
+        fSss
+          .addBinding(PARAMS, "aoIntensity", { min: 0, max: 2, step: 0.05 })
+          .on("change", (e) => (uAoIntensity.value = e.value));
+        fSss
+          .addBinding(PARAMS, "bsIntensity", { min: 0, max: 1, step: 0.05 })
+          .on("change", (e) => (uBsIntensity.value = e.value));
+        fSss.addBinding(PARAMS, "bsColor").on("change", applyColors);
+        fSss
+          .addBinding(PARAMS, "bsPower", { min: 1, max: 5, step: 0.1 })
+          .on("change", (e) => (uBsPower.value = e.value));
+        fSss
+          .addBinding(PARAMS, "frontScatter", { min: 0, max: 1, step: 0.05 })
+          .on("change", (e) => (uFrontScatter.value = e.value));
+        fSss
+          .addBinding(PARAMS, "rimSSS", { min: 0, max: 1, step: 0.05 })
+          .on("change", (e) => (uRimSSS.value = e.value));
+        fSss
+          .addBinding(PARAMS, "specV1Intensity", { min: 0, max: 4, step: 0.1 })
+          .on("change", (e) => (uSpecV1Intensity.value = e.value));
+        fSss
+          .addBinding(PARAMS, "specV2Intensity", { min: 0, max: 3, step: 0.1 })
+          .on("change", (e) => (uSpecV2Intensity.value = e.value));
+        fSss
+          .addBinding(PARAMS, "specV2Power", { min: 2, max: 32, step: 1 })
+          .on("change", (e) => (uSpecV2Power.value = e.value));
+
+        const timer = new THREE.Timer();
+        renderer.setAnimationLoop(() => {
+          timer.update();
+          uTime.value = timer.getElapsed();
+          controls.update();
+          renderer.render(scene, camera);
+        });
+
+        window.addEventListener("resize", () => {
+          camera.aspect = window.innerWidth / window.innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+      }
+
+      init();
+    </script>
+  </body>
+</html>
