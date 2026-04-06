@@ -801,6 +801,73 @@
           underwaterSurfaceTint: 0.28,
           /** Higher = faster transition (still no fog on/off hitch). */
           underwaterTransitionSpeed: 10,
+
+          /** Stylized river strip (same TSL as splatmap-painter “Stylized” river). */
+          riverVisible: false,
+          riverGizmoEnabled: true,
+          /** Next left-click on terrain adds a control point (max 6). */
+          riverPickAddNextClick: false,
+          /** Active control points along the path (XZ; Y comes from terrain + offset). */
+          riverPointCount: 4,
+          riverPointsXZ: [
+            { x: -40, z: 22 },
+            { x: -18, z: 10 },
+            { x: 5, z: -4 },
+            { x: 26, z: -18 },
+            { x: 0, z: 0 },
+            { x: 0, z: 0 },
+          ],
+          riverWidth: 8,
+          riverSegments: 200,
+          riverHeightOffset: 0.18,
+          /** Shader tuning (matches splatmap `rsU` defaults). */
+          riverStyl: {
+            flowSpeed: 0.05,
+            darkColor: "#041820",
+            bodyColor: "#30989f",
+            depthScaleU: 1.5,
+            depthScaleV: 0.8,
+            depthStrength: 0.55,
+            bodyBright: 1,
+            bodyContrast: 1,
+            streakEnabled: true,
+            streakScaleV: 12,
+            streakScaleU: 8,
+            streakWarpStr: 0.25,
+            streakWarpSc: 1.5,
+            streakContrast: 4,
+            streakThresh: 0.12,
+            streakSharp: 0.03,
+            streakColor: "#ffffff",
+            streakStr: 0.9,
+            foamAEnabled: true,
+            foamBEnabled: true,
+            foamWidth: 0.18,
+            foamScaleV: 10,
+            foamScaleU: 6,
+            foamJitter: 0.9,
+            foamOctaves: 3,
+            foamLac: 2.35,
+            foamGain: 0.41,
+            foamWarpStr: 1.2,
+            foamWarpSc: 1.6,
+            foamContrast: 2.5,
+            foamThresh: 0.12,
+            foamSharp: 0.02,
+            foamAColor: "#ffffff",
+            foamAStr: 0.5,
+            foamBColor: "#ffffff",
+            foamBStr: 0.8,
+            shimEnabled: true,
+            shimNScV: 12,
+            shimNScU: 12,
+            shimNoiseAmt: 0.3,
+            shimSharp: 0.02,
+            shimColor: "#00fff4",
+            shimStr: 0.08,
+            shimFlowSpd: 1.5,
+            opacity: 0.92,
+          },
         };
 
         renderer.toneMappingExposure = params.exposure;
@@ -1072,6 +1139,8 @@
         let treeLeavesIM = null;
         const heightOptsInit = heightmapOptsFromParams(params);
         let heightmapFloatData = buildHeightmapFloatData(heightOptsInit);
+        /** Assigned once the stylized river strip exists; terrain rebuild calls this. */
+        let regenerateEditorRiverMesh = () => {};
         const heightmapDataTex = new THREE.DataTexture(
           heightmapFloatData,
           HEIGHTMAP_RES,
@@ -1263,6 +1332,7 @@
             const oldGeo = terrainMesh.geometry;
             terrainMesh.geometry = newGeo;
             oldGeo.dispose();
+            regenerateEditorRiverMesh();
           }
           terrainMaterial.roughness = params.terrainRoughness;
           terrainMaterial.metalness = params.terrainMetalness;
@@ -2589,7 +2659,7 @@
           impactFoamMat,
         );
         impactFoamMesh.name = "EditorImpactFoam";
-        impactFoamMesh.rotation.x = Math.PI;
+        impactFoamMesh.rotation.x = 0;
         impactFoamMesh.position.set(
           params.impactFoamPosX,
           params.impactFoamPosY,
@@ -2668,6 +2738,505 @@
         applyImpactFoamVisibility();
         applyImpactFoamGizmoState();
         syncImpactFoamUniforms();
+
+        // ─── Stylized river strip (splatmap-painter “Stylized” TSL, UV flow) ─────
+        const uRiverTime = uniform(0);
+        const rsU = {
+          flowSpeed: uniform(0.05),
+          darkColor: uniform(new THREE.Color(0x041820)),
+          bodyColor: uniform(new THREE.Color(0x30989f)),
+          depthScaleU: uniform(1.5),
+          depthScaleV: uniform(0.8),
+          depthStrength: uniform(0.55),
+          bodyBright: uniform(1.0),
+          bodyContrast: uniform(1.0),
+          streakEnabled: uniform(1.0),
+          streakScaleV: uniform(12.0),
+          streakScaleU: uniform(8.0),
+          streakWarpStr: uniform(0.25),
+          streakWarpSc: uniform(1.5),
+          streakContrast: uniform(4.0),
+          streakThresh: uniform(0.12),
+          streakSharp: uniform(0.03),
+          streakColor: uniform(new THREE.Color(0xffffff)),
+          streakStr: uniform(0.9),
+          foamAEnabled: uniform(1.0),
+          foamBEnabled: uniform(1.0),
+          foamWidth: uniform(0.18),
+          foamScaleV: uniform(10.0),
+          foamScaleU: uniform(6.0),
+          foamJitter: uniform(0.9),
+          foamOctaves: uniform(3.0),
+          foamLac: uniform(2.35),
+          foamGain: uniform(0.41),
+          foamWarpStr: uniform(1.2),
+          foamWarpSc: uniform(1.6),
+          foamContrast: uniform(2.5),
+          foamThresh: uniform(0.12),
+          foamSharp: uniform(0.02),
+          foamAColor: uniform(new THREE.Color("#ffffff")),
+          foamAStr: uniform(0.5),
+          foamBColor: uniform(new THREE.Color("#ffffff")),
+          foamBStr: uniform(0.8),
+          shimEnabled: uniform(1.0),
+          shimNScV: uniform(12.0),
+          shimNScU: uniform(12.0),
+          shimNoiseAmt: uniform(0.3),
+          shimSharp: uniform(0.02),
+          shimColor: uniform(new THREE.Color("#00fff4")),
+          shimStr: uniform(0.08),
+          shimFlowSpd: uniform(1.5),
+          opacity: uniform(0.92),
+        };
+
+        const buildRiverStylizedFrag = Fn(() => {
+          const uvCoord = uv();
+          const fUV = vec2(
+            uvCoord.y,
+            uvCoord.x.sub(uRiverTime.mul(rsU.flowSpeed)),
+          );
+          const depthN = _wfGradientNoise(
+            vec2(
+              fUV.x.mul(rsU.depthScaleV),
+              fUV.y.mul(rsU.depthScaleU),
+            ),
+          );
+          const col = mix(
+            rsU.darkColor,
+            rsU.bodyColor,
+            depthN.mul(rsU.depthStrength),
+          ).toVar();
+          col.assign(
+            col
+              .sub(0.5)
+              .mul(rsU.bodyContrast)
+              .add(0.5)
+              .mul(rsU.bodyBright)
+              .clamp(0, 1),
+          );
+          const shimN = _wfGradientNoise(
+            vec2(
+              fUV.x.mul(rsU.shimNScV),
+              fUV.y.mul(rsU.shimNScU).add(uRiverTime.mul(rsU.shimFlowSpd)),
+            ),
+          );
+          const shimBand = _wfBandMask(
+            uvCoord.y,
+            float(0.2),
+            float(0.8),
+            shimN,
+            rsU.shimNoiseAmt,
+            rsU.shimSharp,
+          );
+          col.assign(
+            mix(
+              col,
+              rsU.shimColor,
+              shimBand.mul(rsU.shimStr).mul(rsU.shimEnabled).clamp(0, 1),
+            ),
+          );
+          const foamAMask = smoothstep(rsU.foamWidth, float(0), uvCoord.y).clamp(
+            0,
+            1,
+          );
+          const foamADynThresh = mix(float(1.2), rsU.foamThresh, foamAMask);
+          const foamAF1 = _wfVoroLayer(
+            fUV,
+            rsU.foamScaleV,
+            rsU.foamScaleU,
+            float(0),
+            float(0),
+            rsU.foamJitter,
+            rsU.foamOctaves,
+            rsU.foamLac,
+            rsU.foamGain,
+            rsU.foamWarpStr,
+            rsU.foamWarpSc,
+            rsU.foamContrast,
+          );
+          const foamA = smoothstep(
+            foamADynThresh.sub(rsU.foamSharp),
+            foamADynThresh.add(rsU.foamSharp),
+            foamAF1,
+          );
+          col.assign(
+            mix(
+              col,
+              rsU.foamAColor,
+              foamA.mul(rsU.foamAStr).mul(rsU.foamAEnabled).clamp(0, 1),
+            ),
+          );
+          const foamBMask = smoothstep(
+            float(1).sub(rsU.foamWidth),
+            float(1),
+            uvCoord.y,
+          ).clamp(0, 1);
+          const foamBDynThresh = mix(float(1.2), rsU.foamThresh, foamBMask);
+          const foamBF1 = _wfVoroLayer(
+            fUV,
+            rsU.foamScaleV,
+            rsU.foamScaleU,
+            float(5.3),
+            float(2.7),
+            rsU.foamJitter,
+            rsU.foamOctaves,
+            rsU.foamLac,
+            rsU.foamGain,
+            rsU.foamWarpStr,
+            rsU.foamWarpSc,
+            rsU.foamContrast,
+          );
+          const foamB = smoothstep(
+            foamBDynThresh.sub(rsU.foamSharp),
+            foamBDynThresh.add(rsU.foamSharp),
+            foamBF1,
+          );
+          col.assign(
+            mix(
+              col,
+              rsU.foamBColor,
+              foamB.mul(rsU.foamBStr).mul(rsU.foamBEnabled).clamp(0, 1),
+            ),
+          );
+          const sUV = vec2(
+            fUV.x.mul(rsU.streakScaleV),
+            fUV.y.mul(rsU.streakScaleU),
+          ).toVar();
+          const sWarpT = uRiverTime.mul(rsU.flowSpeed).mul(float(0.4));
+          const sWx = _wfGradientNoise(
+            vec2(
+              sUV.x.mul(rsU.streakWarpSc),
+              sUV.y.mul(rsU.streakWarpSc).add(sWarpT),
+            ),
+          ).sub(0.5);
+          const sWy = _wfGradientNoise(
+            vec2(
+              sUV.x.mul(rsU.streakWarpSc).add(float(3.7)),
+              sUV.y.mul(rsU.streakWarpSc).add(float(8.3)).add(sWarpT),
+            ),
+          ).sub(0.5);
+          sUV.addAssign(vec2(sWx, sWy).mul(rsU.streakWarpStr));
+          const streakRaw = pow(
+            _wfVoroFbm(sUV, float(1), float(2), float(2), float(0.4)),
+            rsU.streakContrast,
+          );
+          const streak = smoothstep(
+            rsU.streakThresh.sub(rsU.streakSharp),
+            rsU.streakThresh.add(rsU.streakSharp),
+            streakRaw,
+          );
+          col.assign(
+            mix(
+              col,
+              rsU.streakColor,
+              streak.mul(rsU.streakStr).mul(rsU.streakEnabled).clamp(0, 1),
+            ),
+          );
+          return vec4(col, rsU.opacity);
+        });
+
+        const riverStylMat = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+          polygonOffset: true,
+          polygonOffsetFactor: -2,
+          polygonOffsetUnits: -2,
+        });
+        const riverStylFragOut = buildRiverStylizedFrag();
+        riverStylMat.colorNode = riverStylFragOut.rgb;
+        riverStylMat.opacityNode = riverStylFragOut.a;
+
+        const editorRiverGroup = new THREE.Group();
+        editorRiverGroup.name = "EditorStylizedRiver";
+        const editorRiverHandlesGroup = new THREE.Group();
+        editorRiverGroup.add(editorRiverHandlesGroup);
+        scene.add(editorRiverGroup);
+
+        let riverStripMesh = null;
+        const editorRiverPointMeshes = [];
+        const raycaster = new THREE.Raycaster();
+        const ndcRiver = new THREE.Vector2();
+        const _riverHit = new THREE.Vector3();
+        let editorRiverDragIdx = -1;
+        const _riverPlane = new THREE.Plane();
+        const _riverPlaneHit = new THREE.Vector3();
+
+        function sampleTerrainHeightWorld(rx, rz) {
+          const half = TERRAIN_SIZE * 0.5;
+          const tu = (rx + half) / TERRAIN_SIZE;
+          const tv = (rz + half) / TERRAIN_SIZE;
+          return sampleHeightBilinear(
+            heightmapFloatData,
+            HEIGHTMAP_RES,
+            tu,
+            tv,
+          );
+        }
+
+        function syncRiverStylUniformsFromParams() {
+          const s = params.riverStyl;
+          rsU.flowSpeed.value = s.flowSpeed;
+          rsU.darkColor.value.set(s.darkColor);
+          rsU.bodyColor.value.set(s.bodyColor);
+          rsU.depthScaleU.value = s.depthScaleU;
+          rsU.depthScaleV.value = s.depthScaleV;
+          rsU.depthStrength.value = s.depthStrength;
+          rsU.bodyBright.value = s.bodyBright;
+          rsU.bodyContrast.value = s.bodyContrast;
+          rsU.streakEnabled.value = s.streakEnabled ? 1 : 0;
+          rsU.streakScaleV.value = s.streakScaleV;
+          rsU.streakScaleU.value = s.streakScaleU;
+          rsU.streakWarpStr.value = s.streakWarpStr;
+          rsU.streakWarpSc.value = s.streakWarpSc;
+          rsU.streakContrast.value = s.streakContrast;
+          rsU.streakThresh.value = s.streakThresh;
+          rsU.streakSharp.value = s.streakSharp;
+          rsU.streakColor.value.set(s.streakColor);
+          rsU.streakStr.value = s.streakStr;
+          rsU.foamAEnabled.value = s.foamAEnabled ? 1 : 0;
+          rsU.foamBEnabled.value = s.foamBEnabled ? 1 : 0;
+          rsU.foamWidth.value = s.foamWidth;
+          rsU.foamScaleV.value = s.foamScaleV;
+          rsU.foamScaleU.value = s.foamScaleU;
+          rsU.foamJitter.value = s.foamJitter;
+          rsU.foamOctaves.value = s.foamOctaves;
+          rsU.foamLac.value = s.foamLac;
+          rsU.foamGain.value = s.foamGain;
+          rsU.foamWarpStr.value = s.foamWarpStr;
+          rsU.foamWarpSc.value = s.foamWarpSc;
+          rsU.foamContrast.value = s.foamContrast;
+          rsU.foamThresh.value = s.foamThresh;
+          rsU.foamSharp.value = s.foamSharp;
+          rsU.foamAColor.value.set(s.foamAColor);
+          rsU.foamAStr.value = s.foamAStr;
+          rsU.foamBColor.value.set(s.foamBColor);
+          rsU.foamBStr.value = s.foamBStr;
+          rsU.shimEnabled.value = s.shimEnabled ? 1 : 0;
+          rsU.shimNScV.value = s.shimNScV;
+          rsU.shimNScU.value = s.shimNScU;
+          rsU.shimNoiseAmt.value = s.shimNoiseAmt;
+          rsU.shimSharp.value = s.shimSharp;
+          rsU.shimColor.value.set(s.shimColor);
+          rsU.shimStr.value = s.shimStr;
+          rsU.shimFlowSpd.value = s.shimFlowSpd;
+          rsU.opacity.value = s.opacity;
+        }
+
+        function editorRiverCurvePoints3D() {
+          const n = Math.max(
+            2,
+            Math.min(6, Math.round(params.riverPointCount)),
+          );
+          const off = params.riverHeightOffset;
+          const out = [];
+          for (let i = 0; i < n; i++) {
+            const p = params.riverPointsXZ[i];
+            const y = sampleTerrainHeightWorld(p.x, p.z) + off;
+            out.push(new THREE.Vector3(p.x, y, p.z));
+          }
+          return out;
+        }
+
+        function generateEditorRiverStripGeometry(curve, width, segments, hOff) {
+          const pts = curve.getSpacedPoints(segments);
+          const arcLen = [0];
+          for (let i = 1; i <= segments; i++) {
+            arcLen.push(arcLen[i - 1] + pts[i].distanceTo(pts[i - 1]));
+          }
+          const totalLen = arcLen[segments] || 1;
+          const positions = [];
+          const uvs = [];
+          const indices = [];
+          for (let i = 0; i <= segments; i++) {
+            const u = arcLen[i] / totalLen;
+            const pos = pts[i];
+            const prev = pts[Math.max(0, i - 1)];
+            const next = pts[Math.min(segments, i + 1)];
+            const tan = next.clone().sub(prev).normalize();
+            const perp = new THREE.Vector3(-tan.z, 0, tan.x).normalize();
+            const half = width / 2;
+            const lx = pos.x - perp.x * half;
+            const lz = pos.z - perp.z * half;
+            const rx = pos.x + perp.x * half;
+            const rz = pos.z + perp.z * half;
+            positions.push(
+              lx,
+              sampleTerrainHeightWorld(lx, lz) + hOff,
+              lz,
+            );
+            positions.push(
+              rx,
+              sampleTerrainHeightWorld(rx, rz) + hOff,
+              rz,
+            );
+            uvs.push(u, 0, u, 1);
+            if (i < segments) {
+              const b = i * 2;
+              indices.push(b, b + 2, b + 1, b + 1, b + 2, b + 3);
+            }
+          }
+          const geo = new THREE.BufferGeometry();
+          geo.setAttribute(
+            "position",
+            new THREE.Float32BufferAttribute(positions, 3),
+          );
+          geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+          geo.setIndex(indices);
+          geo.computeVertexNormals();
+          return geo;
+        }
+
+        function editorRebuildRiverHandles() {
+          for (const m of editorRiverPointMeshes) {
+            editorRiverHandlesGroup.remove(m);
+            m.geometry.dispose();
+            m.material.dispose();
+          }
+          editorRiverPointMeshes.length = 0;
+          const n = Math.max(
+            2,
+            Math.min(6, Math.round(params.riverPointCount)),
+          );
+          for (let i = 0; i < n; i++) {
+            const p = params.riverPointsXZ[i];
+            const y = sampleTerrainHeightWorld(p.x, p.z) + params.riverHeightOffset;
+            const sph = new THREE.Mesh(
+              new THREE.SphereGeometry(0.55, 14, 12),
+              new THREE.MeshBasicMaterial({
+                color: 0x0088ff,
+                depthTest: true,
+              }),
+            );
+            sph.position.set(p.x, y, p.z);
+            sph.userData.riverPointIndex = i;
+            editorRiverHandlesGroup.add(sph);
+            editorRiverPointMeshes.push(sph);
+          }
+        }
+
+        function editorRegenerateRiverStrip() {
+          const n = Math.max(
+            2,
+            Math.min(6, Math.round(params.riverPointCount)),
+          );
+          if (n < 2) return;
+          const cpts = editorRiverCurvePoints3D();
+          const curve = new THREE.CatmullRomCurve3(cpts, false, "catmullrom", 0.5);
+          const geo = generateEditorRiverStripGeometry(
+            curve,
+            params.riverWidth,
+            params.riverSegments,
+            params.riverHeightOffset,
+          );
+          if (!riverStripMesh) {
+            riverStripMesh = new THREE.Mesh(geo, riverStylMat);
+            riverStripMesh.renderOrder = 5;
+            riverStripMesh.name = "EditorStylizedRiverStrip";
+            editorRiverGroup.add(riverStripMesh);
+          } else {
+            riverStripMesh.geometry.dispose();
+            riverStripMesh.geometry = geo;
+          }
+          editorRebuildRiverHandles();
+          applyEditorRiverVisibility();
+        }
+
+        regenerateEditorRiverMesh = editorRegenerateRiverStrip;
+
+        function applyEditorRiverVisibility() {
+          editorRiverGroup.visible = params.riverVisible;
+          if (riverStripMesh) riverStripMesh.visible = params.riverVisible;
+          for (const m of editorRiverPointMeshes) {
+            m.visible = params.riverVisible && params.riverGizmoEnabled;
+          }
+        }
+
+        syncRiverStylUniformsFromParams();
+        editorRegenerateRiverStrip();
+
+        function editorRiverPickHandle(clientX, clientY) {
+          const rect = renderer.domElement.getBoundingClientRect();
+          ndcRiver.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+          ndcRiver.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+          raycaster.setFromCamera(ndcRiver, camera);
+          const hits = raycaster.intersectObjects(
+            editorRiverPointMeshes,
+            false,
+          );
+          if (hits.length === 0) return -1;
+          return hits[0].object.userData.riverPointIndex ?? -1;
+        }
+
+        renderer.domElement.addEventListener("pointerdown", (e) => {
+          if (e.button !== 0) return;
+          if (!params.riverVisible) return;
+          const rect = renderer.domElement.getBoundingClientRect();
+          ndcRiver.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+          ndcRiver.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+          raycaster.setFromCamera(ndcRiver, camera);
+          if (params.riverPickAddNextClick) {
+            const th = raycaster.intersectObject(terrainMesh, false);
+            if (th.length > 0) {
+              const n = Math.max(
+                2,
+                Math.min(6, Math.round(params.riverPointCount)),
+              );
+              if (n < 6) {
+                const hx = th[0].point.x;
+                const hz = th[0].point.z;
+                params.riverPointsXZ[n] = { x: hx, z: hz };
+                params.riverPointCount = n + 1;
+                params.riverPickAddNextClick = false;
+                editorRegenerateRiverStrip();
+                if (typeof pane !== "undefined") pane.refresh();
+              } else {
+                params.riverPickAddNextClick = false;
+                if (typeof pane !== "undefined") pane.refresh();
+              }
+            }
+            return;
+          }
+          const hi = editorRiverPickHandle(e.clientX, e.clientY);
+          if (hi >= 0 && params.riverGizmoEnabled) {
+            editorRiverDragIdx = hi;
+            controls.enabled = false;
+            e.preventDefault();
+          }
+        });
+
+        renderer.domElement.addEventListener("pointermove", (e) => {
+          if (editorRiverDragIdx < 0) return;
+          const rect = renderer.domElement.getBoundingClientRect();
+          ndcRiver.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+          ndcRiver.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+          raycaster.setFromCamera(ndcRiver, camera);
+          const p = params.riverPointsXZ[editorRiverDragIdx];
+          const y = sampleTerrainHeightWorld(p.x, p.z) + params.riverHeightOffset;
+          _riverPlane.setFromNormalAndCoplanarPoint(
+            new THREE.Vector3(0, 1, 0),
+            new THREE.Vector3(p.x, y, p.z),
+          );
+          if (raycaster.ray.intersectPlane(_riverPlane, _riverPlaneHit)) {
+            p.x = _riverPlaneHit.x;
+            p.z = _riverPlaneHit.z;
+            editorRegenerateRiverStrip();
+          }
+        });
+
+        renderer.domElement.addEventListener("pointerup", () => {
+          if (editorRiverDragIdx >= 0) {
+            editorRiverDragIdx = -1;
+            controls.enabled = true;
+          }
+        });
+
+        renderer.domElement.addEventListener("pointerleave", () => {
+          if (editorRiverDragIdx >= 0) {
+            editorRiverDragIdx = -1;
+            controls.enabled = true;
+          }
+        });
 
         // ─── Resize ───────────────────────────────────────────────────────────
         function onResize() {
@@ -2769,6 +3338,8 @@
             const wfGizmoVis = wfGizmoHelper ? wfGizmoHelper.visible : true;
             const foamGizmoHelper = impactFoamTransformControls?.getHelper();
             const foamGizmoVis = foamGizmoHelper ? foamGizmoHelper.visible : true;
+            const riverVisReflect = editorRiverGroup.visible;
+            editorRiverGroup.visible = false;
             waterPlane.visible = false;
             waveDisplayPlane.visible = false;
             sky.visible = false;
@@ -2790,6 +3361,7 @@
             if (gizmoHelper) gizmoHelper.visible = gizmoVis;
             if (wfGizmoHelper) wfGizmoHelper.visible = wfGizmoVis;
             if (foamGizmoHelper) foamGizmoHelper.visible = foamGizmoVis;
+            editorRiverGroup.visible = riverVisReflect;
             if (reflectRT.texture instanceof THREE.Texture) {
               if (lakeShader) lakeShader.uniforms.reflectTex.value = reflectRT.texture;
             }
@@ -2907,6 +3479,8 @@
           impactFoamTransformControls?.update();
           uIFTime.value = elapsed;
           syncImpactFoamUniforms();
+          uRiverTime.value += delta;
+          syncRiverStylUniformsFromParams();
           if (params.waterfallVisible)
             wfU.wfFlowTime.value += delta * wfU.wfFlowSpeed.value;
           renderer.render(scene, camera);
@@ -3349,6 +3923,181 @@
           a.download = "lake-editor-impact-foam-transform.json";
           a.click();
         });
+
+        const fRiver = pane.addFolder({
+          title: "Stylized river (splatmap painter TSL)",
+          expanded: false,
+        });
+        const fRiverShape = fRiver.addFolder({
+          title: "Strip & visibility",
+          expanded: true,
+        });
+        function onRiverPathOrShapeChange() {
+          applyEditorRiverVisibility();
+          editorRegenerateRiverStrip();
+        }
+        fRiverShape
+          .addBinding(params, "riverVisible", { label: "Show river" })
+          .on("change", onRiverPathOrShapeChange);
+        fRiverShape
+          .addBinding(params, "riverGizmoEnabled", {
+            label: "Show path handles (drag on XZ)",
+          })
+          .on("change", onRiverPathOrShapeChange);
+        fRiverShape
+          .addBinding(params, "riverPickAddNextClick", {
+            label: "Next click on terrain adds point (max 6)",
+          })
+          .on("change", onRiverPathOrShapeChange);
+        fRiverShape
+          .addBinding(params, "riverPointCount", {
+            label: "Point count",
+            min: 2,
+            max: 6,
+            step: 1,
+          })
+          .on("change", onRiverPathOrShapeChange);
+        fRiverShape
+          .addBinding(params, "riverWidth", {
+            label: "Strip width (world)",
+            min: 1,
+            max: 40,
+            step: 0.5,
+          })
+          .on("change", onRiverPathOrShapeChange);
+        fRiverShape
+          .addBinding(params, "riverSegments", {
+            label: "Strip subdiv (length)",
+            min: 24,
+            max: 400,
+            step: 4,
+          })
+          .on("change", onRiverPathOrShapeChange);
+        fRiverShape
+          .addBinding(params, "riverHeightOffset", {
+            label: "Height above terrain",
+            min: -2,
+            max: 4,
+            step: 0.02,
+          })
+          .on("change", onRiverPathOrShapeChange);
+        const fRiverPts = fRiver.addFolder({
+          title: "Path points (XZ; Y = terrain + offset)",
+          expanded: false,
+        });
+        for (let i = 0; i < 6; i++) {
+          fRiverPts
+            .addBinding(params.riverPointsXZ[i], "x", {
+              label: `P${i} X`,
+              min: -TERRAIN_SIZE,
+              max: TERRAIN_SIZE,
+              step: 0.5,
+            })
+            .on("change", onRiverPathOrShapeChange);
+          fRiverPts
+            .addBinding(params.riverPointsXZ[i], "z", {
+              label: `P${i} Z`,
+              min: -TERRAIN_SIZE,
+              max: TERRAIN_SIZE,
+              step: 0.5,
+            })
+            .on("change", onRiverPathOrShapeChange);
+        }
+        fRiverPts.addButton({ title: "Remove last point" }).on("click", () => {
+          if (params.riverPointCount > 2) {
+            params.riverPointCount -= 1;
+            editorRegenerateRiverStrip();
+            pane.refresh();
+          }
+        });
+        const rs = params.riverStyl;
+        const fRiverStyl = fRiver.addFolder({
+          title: "Stylized shader (foam / streaks / shimmer)",
+          expanded: false,
+        });
+        fRiverStyl.addBinding(rs, "flowSpeed", {
+          label: "Flow speed (UV scroll)",
+          min: 0,
+          max: 0.35,
+          step: 0.005,
+        });
+        fRiverStyl.addBinding(rs, "opacity", {
+          label: "Opacity",
+          min: 0.2,
+          max: 1,
+          step: 0.02,
+        });
+        fRiverStyl.addBinding(rs, "darkColor", { view: "color" });
+        fRiverStyl.addBinding(rs, "bodyColor", { view: "color" });
+        fRiverStyl.addBinding(rs, "depthScaleU", {
+          label: "Depth noise scale U",
+          min: 0.2,
+          max: 4,
+          step: 0.05,
+        });
+        fRiverStyl.addBinding(rs, "depthScaleV", {
+          label: "Depth noise scale V",
+          min: 0.2,
+          max: 4,
+          step: 0.05,
+        });
+        fRiverStyl.addBinding(rs, "depthStrength", {
+          label: "Depth mix strength",
+          min: 0,
+          max: 1.2,
+          step: 0.02,
+        });
+        fRiverStyl.addBinding(rs, "bodyBright", {
+          label: "Body brightness",
+          min: 0.4,
+          max: 2,
+          step: 0.02,
+        });
+        fRiverStyl.addBinding(rs, "bodyContrast", {
+          label: "Body contrast",
+          min: 0.3,
+          max: 2.5,
+          step: 0.02,
+        });
+        fRiverStyl.addBlade({ view: "separator" });
+        fRiverStyl.addBinding(rs, "shimEnabled", { label: "Center shimmer" });
+        fRiverStyl.addBinding(rs, "shimNScV", { label: "Shimmer noise V", min: 2, max: 40, step: 0.5 });
+        fRiverStyl.addBinding(rs, "shimNScU", { label: "Shimmer noise U", min: 2, max: 40, step: 0.5 });
+        fRiverStyl.addBinding(rs, "shimNoiseAmt", { label: "Shimmer band noise", min: 0, max: 0.8, step: 0.02 });
+        fRiverStyl.addBinding(rs, "shimSharp", { label: "Shimmer band sharp", min: 0.002, max: 0.08, step: 0.002 });
+        fRiverStyl.addBinding(rs, "shimColor", { view: "color" });
+        fRiverStyl.addBinding(rs, "shimStr", { label: "Shimmer strength", min: 0, max: 0.5, step: 0.01 });
+        fRiverStyl.addBinding(rs, "shimFlowSpd", { label: "Shimmer flow", min: 0, max: 6, step: 0.05 });
+        fRiverStyl.addBlade({ view: "separator" });
+        fRiverStyl.addBinding(rs, "foamAEnabled", { label: "Foam bank A (V≈0)" });
+        fRiverStyl.addBinding(rs, "foamBEnabled", { label: "Foam bank B (V≈1)" });
+        fRiverStyl.addBinding(rs, "foamWidth", { label: "Foam width (UV)", min: 0.02, max: 0.45, step: 0.01 });
+        fRiverStyl.addBinding(rs, "foamScaleV", { min: 2, max: 40, step: 0.5 });
+        fRiverStyl.addBinding(rs, "foamScaleU", { min: 2, max: 40, step: 0.5 });
+        fRiverStyl.addBinding(rs, "foamJitter", { min: 0.2, max: 1.2, step: 0.02 });
+        fRiverStyl.addBinding(rs, "foamOctaves", { min: 1, max: 4, step: 0.05 });
+        fRiverStyl.addBinding(rs, "foamLac", { min: 1.5, max: 3.5, step: 0.05 });
+        fRiverStyl.addBinding(rs, "foamGain", { min: 0.2, max: 0.7, step: 0.02 });
+        fRiverStyl.addBinding(rs, "foamWarpStr", { min: 0, max: 3, step: 0.05 });
+        fRiverStyl.addBinding(rs, "foamWarpSc", { min: 0.5, max: 4, step: 0.05 });
+        fRiverStyl.addBinding(rs, "foamContrast", { min: 1, max: 5, step: 0.05 });
+        fRiverStyl.addBinding(rs, "foamThresh", { min: 0.02, max: 0.35, step: 0.01 });
+        fRiverStyl.addBinding(rs, "foamSharp", { min: 0.005, max: 0.08, step: 0.001 });
+        fRiverStyl.addBinding(rs, "foamAColor", { view: "color" });
+        fRiverStyl.addBinding(rs, "foamAStr", { min: 0, max: 1.2, step: 0.02 });
+        fRiverStyl.addBinding(rs, "foamBColor", { view: "color" });
+        fRiverStyl.addBinding(rs, "foamBStr", { min: 0, max: 1.2, step: 0.02 });
+        fRiverStyl.addBlade({ view: "separator" });
+        fRiverStyl.addBinding(rs, "streakEnabled", { label: "Flow streaks" });
+        fRiverStyl.addBinding(rs, "streakScaleV", { min: 2, max: 40, step: 0.5 });
+        fRiverStyl.addBinding(rs, "streakScaleU", { min: 2, max: 40, step: 0.5 });
+        fRiverStyl.addBinding(rs, "streakWarpStr", { min: 0, max: 0.8, step: 0.02 });
+        fRiverStyl.addBinding(rs, "streakWarpSc", { min: 0.5, max: 4, step: 0.05 });
+        fRiverStyl.addBinding(rs, "streakContrast", { min: 1, max: 8, step: 0.1 });
+        fRiverStyl.addBinding(rs, "streakThresh", { min: 0.02, max: 0.4, step: 0.01 });
+        fRiverStyl.addBinding(rs, "streakSharp", { min: 0.005, max: 0.1, step: 0.005 });
+        fRiverStyl.addBinding(rs, "streakColor", { view: "color" });
+        fRiverStyl.addBinding(rs, "streakStr", { min: 0, max: 1.5, step: 0.02 });
 
         window.addEventListener("keydown", (e) => {
           if (e.target.closest(".tp-dfwv")) return;
