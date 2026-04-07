@@ -325,6 +325,7 @@ function _pickFile(accept, cb) {
 
 fImport.addButton({ title: 'Load Leaf SDF (PNG)' }).on('click', () => {
     _pickFile('image/png', file => {
+        params.leafTexFile = file.name;
         const reader = new FileReader();
         reader.onload = ev => {
             const img = new Image();
@@ -348,6 +349,123 @@ fImport.addButton({ title: 'Load Custom Trunk (GLB)' }).on('click', () => {
             buildTree();
         });
     });
+});
+
+/** 8. PRESETS **/
+const fPreset = pane.addFolder({ title: 'Presets', expanded: true });
+params.presetName = 'my_tree';
+params.leafTexFile = '';
+params.bushMode = false;
+
+fPreset.addBinding(params, 'presetName', { label: 'Preset name' });
+
+function buildPresetData() {
+    return {
+        presetName: params.presetName,
+        trunk: {
+            seed: params.seed, levels: params.levels,
+            trunkHeight: params.trunkHeight, trunkRadius: params.trunkRadius,
+            trunkTaper: params.trunkTaper, branchMult: params.branchMult,
+            children: params.children, gnarliness: params.gnarliness,
+            sunForce: params.sunForce, gravity: params.gravity,
+        },
+        canopy: {
+            canopyWidth: params.canopyWidth, canopyHeight: params.canopyHeight,
+            shapeMode: params.shapeMode, leafSize: params.leafSize,
+            leafDensity: params.leafDensity, clumpRadius: params.clumpRadius,
+        },
+        material: {
+            topColor: params.topColor, bottomColor: params.bottomColor,
+            sssColor: params.sssColor, rimColor: params.rimColor,
+            alphaCutoff: params.alphaCutoff, normalBias: params.normalBias,
+            leafWarp: params.leafWarp, aoStrength: params.aoStrength,
+            sssStrength: params.sssStrength, rimStrength: params.rimStrength,
+            rimPower: params.rimPower,
+        },
+        wind: { windStrength: params.windStrength, windSpeed: params.windSpeed },
+        leafTexFile: params.leafTexFile,
+        bushMode: params.bushMode,
+    };
+}
+
+function applyPresetData(data) {
+    if (data.presetName) params.presetName = data.presetName;
+    if (data.trunk) {
+        const t = data.trunk;
+        Object.keys(t).forEach(k => { if (t[k] != null && params[k] != null) params[k] = t[k]; });
+    }
+    if (data.canopy) {
+        const c = data.canopy;
+        Object.keys(c).forEach(k => { if (c[k] != null && params[k] != null) params[k] = c[k]; });
+    }
+    if (data.material) {
+        const m = data.material;
+        Object.keys(m).forEach(k => { if (m[k] != null && params[k] != null) params[k] = m[k]; });
+        uAlphaCutoff.value = params.alphaCutoff;
+        uNormalBias.value = params.normalBias;
+        uLeafWarp.value = params.leafWarp;
+        uAO.value = params.aoStrength;
+        uSSS.value = params.sssStrength;
+        uRimS.value = params.rimStrength;
+        uRimP.value = params.rimPower;
+    }
+    if (data.wind) {
+        if (data.wind.windStrength != null) { params.windStrength = data.wind.windStrength; uWindS.value = data.wind.windStrength; }
+        if (data.wind.windSpeed != null) { params.windSpeed = data.wind.windSpeed; uWindSpeed.value = data.wind.windSpeed; }
+    }
+    if (data.leafTexFile) params.leafTexFile = data.leafTexFile;
+    if (data.bushMode != null) params.bushMode = data.bushMode;
+    pane.refresh();
+    buildTree();
+}
+
+fPreset.addButton({ title: 'Save Preset JSON' }).on('click', async () => {
+    const json = JSON.stringify(buildPresetData(), null, 2);
+    const name = (params.presetName || 'preset').replace(/[^a-z0-9_\-]/gi, '_');
+    if (window.showSaveFilePicker) {
+        try {
+            const handle = await showSaveFilePicker({
+                suggestedName: name + '.json',
+                types: [{ description: 'JSON preset', accept: { 'application/json': ['.json'] } }],
+            });
+            const writable = await handle.createWritable();
+            await writable.write(json);
+            await writable.close();
+            alert('Preset saved!');
+        } catch (e) { if (e.name !== 'AbortError') console.error(e); }
+    } else {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+        a.download = name + '.json';
+        a.click();
+    }
+});
+
+fPreset.addButton({ title: 'Load Preset JSON' }).on('click', () => {
+    _pickFile('.json', file => {
+        const reader = new FileReader();
+        reader.onload = ev => {
+            try {
+                applyPresetData(JSON.parse(ev.target.result));
+                alert('Preset loaded!');
+            } catch (e) { alert('Invalid preset: ' + e.message); }
+        };
+        reader.readAsText(file);
+    });
+});
+
+fPreset.addButton({ title: 'Copy to Clipboard' }).on('click', () => {
+    const json = JSON.stringify(buildPresetData(), null, 2);
+    navigator.clipboard.writeText(json)
+        .then(() => alert('Preset copied to clipboard!'))
+        .catch(() => {
+            const ta = document.createElement('textarea');
+            ta.value = json;
+            document.body.appendChild(ta); ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+            alert('Preset copied!');
+        });
 });
 
 function animate() {
