@@ -123,6 +123,10 @@
         background: rgba(0, 160, 180, 0.92);
         color: #c0fffa;
       }
+      #mode-badge.hole {
+        background: rgba(60, 0, 0, 0.95);
+        color: #ff6666;
+      }
 
       #chunk-info {
         position: fixed;
@@ -637,6 +641,16 @@
       barrierCtx.fillRect(0, 0, BARRIER_RES, BARRIER_RES);
       let barrierTex = null;
 
+      // ─── HOLE MASK CANVAS (terrain hole punch) ──────
+      const HOLE_RES = SPLAT_RES;
+      const holeCanvas = document.createElement("canvas");
+      holeCanvas.width = holeCanvas.height = HOLE_RES;
+      const holeCtx = holeCanvas.getContext("2d", {
+        willReadFrequently: true,
+      });
+      holeCtx.fillStyle = "#000";
+      holeCtx.fillRect(0, 0, HOLE_RES, HOLE_RES);
+
       // ─── IMAGE TEXTURE SPLATMAP ──────────────
       // Uint8Array avoids canvas premultiplied-alpha zeroing our channels (R*alpha=0 bug)
       // RGBA: R=slot0 weight, G=slot1, B=slot2, A=slot3
@@ -1111,6 +1125,9 @@
       let cliffPaintEraseMode = false;
       let barrierEraseMode = false;
       let barrierOverlayMesh = null;
+      let holeTex = null;
+      let holeEraseMode = false;
+      let holeOverlayMesh = null;
       let geminiGrassPatchSystem = null;
       let geminiGrassUniforms = null;
       let geminiGrassEraseMode = false;
@@ -1934,6 +1951,21 @@
         if (barrierTex) barrierTex.needsUpdate = true;
         invalidateBarrierCache();
         syncBarrierOverlay();
+      }
+
+      function paintHoleAt(wx, wz, erase) {
+        const { u, v } = worldToUV(wx, wz);
+        const cx = u * HOLE_RES, cy = v * HOLE_RES;
+        const alpha = brushStr / 100;
+        const [cr, cg, cb] = erase ? [0, 0, 0] : [255, 0, 0];
+        _applyBrushToCanvas(holeCtx, cx, cy, cr, cg, cb, alpha);
+        if (holeTex) holeTex.needsUpdate = true;
+        syncHoleOverlay();
+      }
+
+      function syncHoleOverlay() {
+        if (!holeOverlayMesh) return;
+        holeOverlayMesh.material.map.needsUpdate = true;
       }
 
       let _barrierCache = null;
@@ -3508,6 +3540,27 @@
           barrierOverlayMesh.renderOrder = 10;
           barrierOverlayMesh.visible = false;
           scene.add(barrierOverlayMesh);
+        }
+
+        // ── HOLE MASK TEX + OVERLAY ──────────────────────────────────────
+        holeTex = new THREE.CanvasTexture(holeCanvas);
+        holeTex.flipY = false;
+        holeTex.wrapS = holeTex.wrapT = THREE.ClampToEdgeWrapping;
+        {
+          const holeOverlayGeo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, 1, 1);
+          holeOverlayGeo.rotateX(-Math.PI / 2);
+          const holeOverlayMat = new THREE.MeshBasicMaterial({
+            map: holeTex,
+            transparent: true,
+            opacity: 0.45,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+          });
+          holeOverlayMesh = new THREE.Mesh(holeOverlayGeo, holeOverlayMat);
+          holeOverlayMesh.position.y = 0.7;
+          holeOverlayMesh.renderOrder = 10;
+          holeOverlayMesh.visible = false;
+          scene.add(holeOverlayMesh);
         }
 
         // ── GEMINI CLIFF DENSITY TEX ──────────────────────────────────────
@@ -5310,6 +5363,21 @@
           // Snow is very matte — override roughness where snow appears
           return mix(afterRock, uSnowRoughness, getSnowMask());
         })();
+
+        // ── HOLE MASK — discard terrain fragments where holes are painted ──
+        {
+          const holeUVraw = positionWorld.xz.add(uTerrainHalf).div(uTerrainSize);
+          const holeUV = vec2(holeUVraw.x, float(1.0).sub(holeUVraw.y));
+          const holeMask = texture(holeTex, holeUV).r;
+          // opacity = 1 where no hole, 0 where hole is painted (red channel > 0)
+          const holeOpacity = float(1.0).sub(step(float(0.25), holeMask));
+          splatMat.opacityNode = holeOpacity;
+          splatMat.alphaTest = 0.5;
+          splatMat.transparent = false;
+          tileMat.opacityNode = holeOpacity;
+          tileMat.alphaTest = 0.5;
+          tileMat.transparent = false;
+        }
 
         // splatMat ready — tile grid is the default view. Toggle with ~ key.
         const toggleTerrainMat = () => {
@@ -7413,6 +7481,7 @@
           zip.file("flower-density.bin", _canvasToRawBin(flowerDensityCanvas, flowerDensityCtx));
           zip.file("img-splat.bin", imgSplatData.buffer);
           zip.file("barrier.bin", _canvasToRawBin(barrierCanvas, barrierCtx));
+          zip.file("hole.bin", _canvasToRawBin(holeCanvas, holeCtx));
 
           // JSON for object positions (already lossless)
           const meta = {
@@ -7626,6 +7695,15 @@
               );
               invalidateBarrierCache();
             }
+            const holeFile = zip.file("hole.bin");
+            if (holeFile) {
+              _rawBinToCanvas(
+                await holeFile.async("arraybuffer"),
+                holeCanvas,
+                holeCtx,
+                holeTex,
+              );
+            }
 
             // Object positions
             const metaFile = zip.file("scene.json");
@@ -7837,6 +7915,7 @@
             .forEach((el) => (el.style.display = "none"));
           brushRing.visible = false;
           if (barrierOverlayMesh) barrierOverlayMesh.visible = false;
+          if (holeOverlayMesh) holeOverlayMesh.visible = false;
           renderer.domElement.requestPointerLock();
         }
 
@@ -8002,6 +8081,7 @@
             "Cliff Blend Test": "cliffblend",
             "Cliff Paint": "cliffpaint",
             "Barrier": "barrier",
+            "Hole": "hole",
           },
         });
         modeBinding.on("change", (ev) => setMode(ev.value));
@@ -11114,6 +11194,32 @@
           syncBarrierOverlay();
         });
 
+        // ── HOLE FOLDER ──
+        const holeFolder = pane.addFolder({
+          title: "Hole",
+          expanded: true,
+        });
+        holeFolder.hidden = true;
+        const holePARAMS = { erase: false, showOverlay: true };
+        function syncHoleOverlayFromParams() {
+          if (holeOverlayMesh)
+            holeOverlayMesh.visible = holePARAMS.showOverlay && currentMode === "hole";
+        }
+        holeFolder.addBinding(holePARAMS, "erase", {
+          label: "Erase (or Shift)",
+        }).on("change", (ev) => { holeEraseMode = ev.value; });
+        holeFolder.addBinding(holePARAMS, "showOverlay", {
+          label: "Show overlay",
+        }).on("change", () => {
+          syncHoleOverlayFromParams();
+        });
+        holeFolder.addButton({ title: "Clear all holes" }).on("click", () => {
+          holeCtx.fillStyle = "#000";
+          holeCtx.fillRect(0, 0, HOLE_RES, HOLE_RES);
+          if (holeTex) holeTex.needsUpdate = true;
+          syncHoleOverlay();
+        });
+
         // ── PATH FOLDER ──
         const pathFolder = pane.addFolder({
           title: "Path  [ L ]",
@@ -12140,7 +12246,9 @@
           cliffBlendFolder.hidden = mode !== "cliffblend";
           cliffPaintFolder.hidden = mode !== "cliffpaint";
           barrierFolder.hidden = mode !== "barrier";
+          holeFolder.hidden = mode !== "hole";
           syncBarrierOverlayFromParams();
+          syncHoleOverlayFromParams();
           brushFolder.hidden =
             mode === "view" ||
             mode === "place" ||
@@ -12288,7 +12396,9 @@
                                                         ? "CLIFF PAINT"
                                                         : mode === "barrier"
                                                           ? "BARRIER MODE"
-                                                          : "PLACE MODE"; // play handled above
+                                                          : mode === "hole"
+                                                            ? "HOLE MODE"
+                                                            : "PLACE MODE"; // play handled above
           badge.className = mode;
           renderer.domElement.style.cursor =
             mode === "view" ? "default" : "crosshair";
@@ -12627,6 +12737,8 @@
             paintCliffBlendAt(p.x, p.z, cliffPaintEraseMode || e.shiftKey);
           if (currentMode === "barrier")
             paintBarrierAt(p.x, p.z, barrierEraseMode || e.shiftKey);
+          if (currentMode === "hole")
+            paintHoleAt(p.x, p.z, holeEraseMode || e.shiftKey);
         });
 
         // ── BRUSH SCROLL SHORTCUTS ──────────────────────────────────────
@@ -12887,6 +12999,8 @@
             paintCliffBlendAt(p.x, p.z, cliffPaintEraseMode || e.shiftKey);
           if (currentMode === "barrier")
             paintBarrierAt(p.x, p.z, barrierEraseMode || e.shiftKey);
+          if (currentMode === "hole")
+            paintHoleAt(p.x, p.z, holeEraseMode || e.shiftKey);
         });
 
         renderer.domElement.addEventListener("mouseup", () => {
