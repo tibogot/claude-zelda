@@ -172,7 +172,7 @@ export const LAKE_DEFAULTS = {
   shorePulseFoamColor: "#c9ebff",
   shorePulse2FoamColor: "#a8d8ff",
   shorePulseNoiseStyle: "voronoiFbm",
-  shorePulseEnabled: false,
+  shorePulseEnabled: true,
   shorePulseAnimSpeed: 0.38,
   shorePulseMaxRange: 3.2,
   shorePulseTravelPower: 1,
