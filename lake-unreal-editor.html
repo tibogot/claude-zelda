@@ -519,12 +519,18 @@
           skyCloudCoverage: 0.4,
           skyCloudDensity: 0.4,
           skyCloudElevation: 0.5,
-          deepColor: "#153a48",
-          midColor: "#2a5f72",
-          highlightColor: "#4a90a8",
-          waterOpacity: 0.88,
+          /** Depth ramp: pale shore → mid cyan → deep (see `depthRamp*` knees). */
+          shoreColor: "#ffffff",
+          midColor: "#38d0d0",
+          deepColor: "#39b7b7",
+          highlightColor: "#6aa0b2",
+          /** 0–1 in depth-blend space: shore→mid completes by min(knee1,knee2). */
+          depthRampShoreMid: 0.36,
+          /** Mid→deep starts from max(knee1,knee2); plateau is the band between. */
+          depthRampMidDeep: 0.72,
+          waterOpacity: 0.96,
           /** Max α in deep water (multiplies `waterOpacity`). Was hidden before; keep ~1 for solid lakes. */
-          waterDeepOpacity: 0.98,
+          waterDeepOpacity: 1,
           /** View-thickness → deep color (TSL `exp(-k·thickness)`). Higher = faster shift to deep teal. */
           waterDepthAbsorb: 0.38,
           /** Thickness → opaque α (can be > color absorb for Genshin-like clear shore / solid center). */
@@ -532,8 +538,8 @@
           /** Shallow band: add this much pale lift (RGB) near shore / thin water. */
           waterShallowPale: 0.55,
           /** Dual-layer procedural surface noise (world XZ scale). */
-          waterSurfNoiseScale1: 0.4,
-          waterSurfNoiseScale2: 1.18,
+          waterSurfNoiseScale1: 0.2,
+          waterSurfNoiseScale2: 0.2,
           waterSurfNoiseSpeed1: 0.1,
           waterSurfNoiseSpeed2: -0.078,
           /** Multiplies all procedural water noise scroll (fragment normals + vertex). Crank up to see motion. */
@@ -545,6 +551,14 @@
           waterFresnelSky: 0.48,
           /** Shallow water multiplies final alpha (more see-through near shore). */
           waterShallowAlpha: 0.42,
+          /** Heightmap |∇terrain|: gentle slopes keep shallow α / pale; cliffs dampen (pools by rocks). */
+          waterShoreSlopeShallowEnabled: true,
+          waterShoreSlopeSampleEps: 0.65,
+          waterShoreSlopeBeach: 0.2,
+          waterShoreSlopeCliff: 0.95,
+          waterShallowAlphaSlopeDampen: 1,
+          waterShoreContactSlopeDampen: 1,
+          waterShallowPaleSlopeDampen: 0.78,
           /** Extra Y displacement from `mx_noise_float` on the subdivided plane. */
           waterVertNoiseAmp: 0.018,
           /** World XZ scale for vertex noise sampling. */
@@ -874,15 +888,25 @@
 
         function buildLakeShaderParams(p) {
           return {
-            deepColor: p.deepColor,
+            shoreColor: p.shoreColor,
             midColor: p.midColor,
+            deepColor: p.deepColor,
             highlightColor: p.highlightColor,
+            depthRampShoreMid: p.depthRampShoreMid,
+            depthRampMidDeep: p.depthRampMidDeep,
             opacity: p.waterOpacity,
             deepOpacity: p.waterDeepOpacity,
             depthAbsorb: p.waterDepthAbsorb,
             depthAlphaAbsorb: p.waterDepthAlphaAbsorb,
             shallowPale: p.waterShallowPale,
             shallowAlpha: p.waterShallowAlpha,
+            shoreSlopeShallowEnabled: p.waterShoreSlopeShallowEnabled,
+            shoreSlopeSampleEps: p.waterShoreSlopeSampleEps,
+            shoreSlopeBeach: p.waterShoreSlopeBeach,
+            shoreSlopeCliff: p.waterShoreSlopeCliff,
+            shallowAlphaSlopeDampen: p.waterShallowAlphaSlopeDampen,
+            shoreContactSlopeDampen: p.waterShoreContactSlopeDampen,
+            shallowPaleSlopeDampen: p.waterShallowPaleSlopeDampen,
             surfNoiseScale1: p.waterSurfNoiseScale1,
             surfNoiseScale2: p.waterSurfNoiseScale2,
             surfNoiseSpeed1: p.waterSurfNoiseSpeed1,
@@ -2249,11 +2273,11 @@
         );
 
         const wfU = {
-          darkColor: uniform(new THREE.Color(0x041820)),
-          bodyColor: uniform(new THREE.Color(0x30989f)),
-          depthScaleX: uniform(2.5),
-          depthScaleY: uniform(0.8),
-          depthStrength: uniform(0.55),
+          darkColor: uniform(new THREE.Color("#00544c")),
+          bodyColor: uniform(new THREE.Color("#38d0d0")),
+          depthScaleX: uniform(2.0),
+          depthScaleY: uniform(1.65),
+          depthStrength: uniform(0.5),
           bodyBrightness: uniform(1.0),
           bodyContrast: uniform(1.0),
           cyan_enabled: uniform(1.0),
@@ -4346,9 +4370,18 @@
           });
 
         const fWaterCol = pane.addFolder({ title: "Water — colors" });
-        fWaterCol.addBinding(params, "deepColor");
-        fWaterCol.addBinding(params, "midColor");
-        fWaterCol.addBinding(params, "highlightColor");
+        fWaterCol.addBinding(params, "shoreColor", {
+          label: "Shore (thin water, pale)",
+        });
+        fWaterCol.addBinding(params, "midColor", {
+          label: "Mid depth (cyan band)",
+        });
+        fWaterCol.addBinding(params, "deepColor", {
+          label: "Deep water",
+        });
+        fWaterCol.addBinding(params, "highlightColor", {
+          label: "Fresnel / grazing highlight",
+        });
         fWaterCol.addBinding(params, "waterOpacity", {
           min: 0.2,
           max: 1,
@@ -4479,9 +4512,21 @@
           step: 0.25,
         });
         fWaterTsl.addBinding(params, "waterDepthAbsorb", {
-          label: "Depth → deep color",
+          label: "Depth → color ramp (thickness scale)",
           min: 0.05,
           max: 1.2,
+          step: 0.02,
+        });
+        fWaterTsl.addBinding(params, "depthRampShoreMid", {
+          label: "Ramp knee A (shore↔mid)",
+          min: 0.05,
+          max: 0.95,
+          step: 0.02,
+        });
+        fWaterTsl.addBinding(params, "depthRampMidDeep", {
+          label: "Ramp knee B (mid↔deep)",
+          min: 0.05,
+          max: 0.95,
           step: 0.02,
         });
         fWaterTsl.addBinding(params, "waterDepthAlphaAbsorb", {
@@ -4491,7 +4536,7 @@
           step: 0.02,
         });
         fWaterTsl.addBinding(params, "waterShallowPale", {
-          label: "Shallow pale lift",
+          label: "Extra shore brightening (× RGB lift)",
           min: 0,
           max: 1.2,
           step: 0.02,
@@ -4499,6 +4544,49 @@
         fWaterTsl.addBinding(params, "waterShallowAlpha", {
           label: "Shallow alpha (see-through)",
           min: 0.15,
+          max: 1,
+          step: 0.02,
+        });
+        const fShoreSlope = fWaterTsl.addFolder({
+          title: "Shore slope — beach vs cliff (shallow α)",
+          expanded: false,
+        });
+        fShoreSlope.addBinding(params, "waterShoreSlopeShallowEnabled", {
+          label: "Enable slope mask",
+        });
+        fShoreSlope.addBinding(params, "waterShoreSlopeSampleEps", {
+          label: "Gradient sample (world m)",
+          min: 0.15,
+          max: 2.5,
+          step: 0.05,
+        });
+        fShoreSlope.addBinding(params, "waterShoreSlopeBeach", {
+          label: "Beach max |∇h| (gentle)",
+          min: 0.02,
+          max: 0.8,
+          step: 0.02,
+        });
+        fShoreSlope.addBinding(params, "waterShoreSlopeCliff", {
+          label: "Cliff min |∇h| (steep)",
+          min: 0.15,
+          max: 3,
+          step: 0.05,
+        });
+        fShoreSlope.addBinding(params, "waterShallowAlphaSlopeDampen", {
+          label: "Cliff → opaque α strength",
+          min: 0,
+          max: 1,
+          step: 0.02,
+        });
+        fShoreSlope.addBinding(params, "waterShoreContactSlopeDampen", {
+          label: "Cliff dampens contact α",
+          min: 0,
+          max: 1,
+          step: 0.02,
+        });
+        fShoreSlope.addBinding(params, "waterShallowPaleSlopeDampen", {
+          label: "Cliff dampens pale tint",
+          min: 0,
           max: 1,
           step: 0.02,
         });

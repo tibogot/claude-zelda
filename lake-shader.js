@@ -3,11 +3,13 @@
  *
  * Extracted from lake-unreal.html. Features:
  *   - Procedural dual-layer surface normals (mx_noise_float gradients)
+ *   - Three-stop depth ramp: shore (pale) → mid → deep + Fresnel highlight
  *   - Proper perturbed-normal Fresnel
  *   - Planar reflections (optional, host provides RT)
  *   - Shore foam V1 (Voronoi FBM / Perlin, jagged cutoff)
  *   - Shore foam V2 (domain warp, Voronoi/value noise, independent system)
  *   - Shore contact transparency (shallow alpha wobble)
+ *   - Terrain-slope mask: gentle beaches keep shallow α / pale tint; steep cliffs damp them (no “fake shallow” on walls)
  *   - Debug: lakeDebugNo* uniforms strip one layer at a time (isolate shore seam)
  *   - Optional open-water anime Voronoi (“caustic foam” tint, separate from shore foam)
  *   - Foam delay ramp (pushes foam inland)
@@ -36,17 +38,28 @@ import {
 
 // ─── Default parameters (mirrors lake-unreal.html) ──────────────────────────
 export const LAKE_DEFAULTS = {
-  // Surface colours
-  deepColor:       "#153a48",
-  midColor:        "#2a5f72",
-  highlightColor:  "#4a90a8",
-  opacity:         0.88,
+  // Surface colours (three-stop depth ramp + Fresnel highlight)
+  /** Thin water / pale shore — ramp starts here, blends toward `midColor`. */
+  shoreColor:      "#ffffff",
+  /** Mid-thickness cyan band between shore and deep. */
+  midColor:        "#38d0d0",
+  /** Deepest water body color. */
+  deepColor:       "#39b7b7",
+  /** Grazing-angle tint (not depth). */
+  highlightColor:  "#6aa0b2",
+  /**
+   * Depth ramp knees in `depthBlendColor` space (0 = thinnest, 1 = thickest).
+   * Shore→mid completes by `min(kneeShoreMid, kneeMidDeep)`; mid→deep starts from `max(...)`.
+   */
+  depthRampShoreMid: 0.36,
+  depthRampMidDeep:  0.72,
+  opacity:         0.96,
   /** Max surface α when depth → full (multiply with `opacity`; keep high for solid deep water). */
-  deepOpacity:     0.98,
+  deepOpacity:     1,
 
   // Procedural surface normals
-  surfNoiseScale1:     0.4,
-  surfNoiseScale2:     1.18,
+  surfNoiseScale1:     0.2,
+  surfNoiseScale2:     0.2,
   surfNoiseSpeed1:     0.1,
   surfNoiseSpeed2:    -0.078,
   procNoiseSpeed:      8,
@@ -66,6 +79,20 @@ export const LAKE_DEFAULTS = {
   depthAlphaAbsorb: 0.92,
   shallowPale:     0.55,
   shallowAlpha:    0.42,
+  /**
+   * |∇terrain| (rise/run in world units) from heightmap — dampens shallow transparency on cliffs.
+   * Below `shoreSlopeBeach` → full beach shallow treatment; above `shoreSlopeCliff` → full dampen.
+   */
+  shoreSlopeShallowEnabled: true,
+  shoreSlopeSampleEps:   0.65,
+  shoreSlopeBeach:       0.2,
+  shoreSlopeCliff:       0.95,
+  /** 0–1: how strongly cliffs force α toward opaque (vs depth-only shallowAlpha). */
+  shallowAlphaSlopeDampen: 1,
+  /** 0–1: reduce shore-contact α cut on steep ground. */
+  shoreContactSlopeDampen: 1,
+  /** 0–1: reduce shallow “pale lift” on cliffs (deep pool beside rock stays darker). */
+  shallowPaleSlopeDampen: 0.78,
 
   // Reflections (host must provide RT)
   reflectEnabled:    true,
@@ -340,9 +367,12 @@ export function createLakeShader({ heightTex, terrainSize }) {
   u.time             = uniform(0);
 
   // Surface colours
-  u.deepColor        = uniform(new THREE.Color(LAKE_DEFAULTS.deepColor));
+  u.shoreColor       = uniform(new THREE.Color(LAKE_DEFAULTS.shoreColor));
   u.midColor         = uniform(new THREE.Color(LAKE_DEFAULTS.midColor));
+  u.deepColor        = uniform(new THREE.Color(LAKE_DEFAULTS.deepColor));
   u.highlightColor   = uniform(new THREE.Color(LAKE_DEFAULTS.highlightColor));
+  u.depthRampShoreMid = uniform(LAKE_DEFAULTS.depthRampShoreMid);
+  u.depthRampMidDeep  = uniform(LAKE_DEFAULTS.depthRampMidDeep);
   u.opacity          = uniform(LAKE_DEFAULTS.opacity);
   u.deepOpacity      = uniform(LAKE_DEFAULTS.deepOpacity);
 
@@ -363,6 +393,13 @@ export function createLakeShader({ heightTex, terrainSize }) {
   u.depthAlphaAbsorb  = uniform(LAKE_DEFAULTS.depthAlphaAbsorb);
   u.shallowPale       = uniform(LAKE_DEFAULTS.shallowPale);
   u.shallowAlpha      = uniform(LAKE_DEFAULTS.shallowAlpha);
+  u.shoreSlopeShallowEnabled = uniform(LAKE_DEFAULTS.shoreSlopeShallowEnabled ? 1 : 0);
+  u.shoreSlopeSampleEps      = uniform(LAKE_DEFAULTS.shoreSlopeSampleEps);
+  u.shoreSlopeBeach          = uniform(LAKE_DEFAULTS.shoreSlopeBeach);
+  u.shoreSlopeCliff          = uniform(LAKE_DEFAULTS.shoreSlopeCliff);
+  u.shallowAlphaSlopeDampen    = uniform(LAKE_DEFAULTS.shallowAlphaSlopeDampen);
+  u.shoreContactSlopeDampen    = uniform(LAKE_DEFAULTS.shoreContactSlopeDampen);
+  u.shallowPaleSlopeDampen     = uniform(LAKE_DEFAULTS.shallowPaleSlopeDampen);
 
   // Reflections
   u.reflectEnabled   = uniform(LAKE_DEFAULTS.reflectEnabled ? 1 : 0);
@@ -503,6 +540,33 @@ export function createLakeShader({ heightTex, terrainSize }) {
     return u.waterY.sub(terrainWorldY); // positive = water above terrain
   });
 
+  /** Bilinear-safe height sample at world XZ (for slope). */
+  const _terrainHAtXZ = Fn(([wx, wz]) => {
+    const hUV = vec2(
+      wx.div(uTerrainSize).add(0.5),
+      wz.div(uTerrainSize).add(0.5),
+    );
+    const uvc = vec2(
+      clamp(hUV.x, float(0.008), float(0.992)),
+      clamp(hUV.y, float(0.008), float(0.992)),
+    );
+    return texture(heightTex, uvc).r;
+  });
+
+  /** |∇h| in world units (≈0 flat beach, large on cliffs). */
+  const terrainSlopeMagFn = Fn(() => {
+    const eps = max(u.shoreSlopeSampleEps, float(0.04));
+    const x = positionWorld.x;
+    const z = positionWorld.z;
+    const hxp = _terrainHAtXZ(x.add(eps), z);
+    const hxm = _terrainHAtXZ(x.sub(eps), z);
+    const hzp = _terrainHAtXZ(x, z.add(eps));
+    const hzm = _terrainHAtXZ(x, z.sub(eps));
+    const dhdx = hxp.sub(hxm).div(eps.mul(2));
+    const dhdz = hzp.sub(hzm).div(eps.mul(2));
+    return length(vec2(dhdx, dhdz));
+  });
+
   // ── Shore foam V1 layer masks ──────────────────────────────────────────────
   const shoreFoamLayerMasks = Fn(([wXZ, distS]) => {
     const absD = abs(distS);
@@ -604,10 +668,23 @@ export function createLakeShader({ heightTex, terrainSize }) {
     const depthBlendAlpha = float(1)
       .sub(exp(shallowDepth.mul(u.depthAlphaAbsorb).negate()))
       .saturate();
+    const slopeLo = min(u.shoreSlopeBeach, u.shoreSlopeCliff);
+    const slopeHi = max(u.shoreSlopeBeach, u.shoreSlopeCliff);
+    const cliffBlend = smoothstep(slopeLo, slopeHi, terrainSlopeMagFn()).mul(
+      u.shoreSlopeShallowEnabled,
+    );
+    const beachKeepPale = float(1).sub(cliffBlend.mul(u.shallowPaleSlopeDampen));
     const paleLift = vec3(0.12, 0.19, 0.21);
-    const baseColor = mix(u.deepColor, u.midColor, float(0.12));
-    const waterPale = baseColor.add(paleLift.mul(u.shallowPale)).saturate();
-    const absorptionBase = mix(waterPale, baseColor, depthBlendColor);
+    const shoreTint = u.shoreColor
+      .add(paleLift.mul(u.shallowPale).mul(beachKeepPale))
+      .saturate();
+    const kneeLo = min(u.depthRampShoreMid, u.depthRampMidDeep);
+    const kneeHi = max(u.depthRampShoreMid, u.depthRampMidDeep);
+    const tDepth = depthBlendColor;
+    const wShoreMid = smoothstep(float(0), max(kneeLo, float(0.02)), tDepth);
+    const wMidDeep = smoothstep(min(kneeHi, float(0.98)), float(1), tDepth);
+    const cMidBand = mix(shoreTint, u.midColor, wShoreMid);
+    const absorptionBase = mix(cMidBand, u.deepColor, wMidDeep).saturate();
 
     // ── Open-water anime Voronoi (optional “caustic foam” tint) ─────────────
     const tNoiseCf = u.time.mul(u.causticFoamNoiseTime);
@@ -718,8 +795,14 @@ export function createLakeShader({ heightTex, terrainSize }) {
 
     // ── Alpha ────────────────────────────────────────────────────────────────
     // `depthAlphaAbsorb` can exceed color absorb so deep water goes solid while staying pale→teal.
+    // Steep terrain (cliffs) damps shallow α so deep pools beside rocks don’t read as “glass beach”.
     const depthAlphaLift = pow(depthBlendAlpha, float(0.88)).saturate();
-    const alphaDepthThin = mix(u.shallowAlpha, float(1), depthAlphaLift);
+    const baseAlphaThin = mix(u.shallowAlpha, float(1), depthAlphaLift);
+    const alphaDepthThin = mix(
+      baseAlphaThin,
+      float(1),
+      cliffBlend.mul(u.shallowAlphaSlopeDampen),
+    );
     const waterAlpha = u.deepOpacity.mul(u.opacity).mul(alphaDepthThin);
 
     // ── Shore contact transparency ───────────────────────────────────────────
@@ -739,7 +822,14 @@ export function createLakeShader({ heightTex, terrainSize }) {
     const nContact = nContactLo.mul(0.58).add(nContactHi.mul(0.42));
     const noiseEdge = pow(max(contactRaw, float(0)), float(1.22));
     const noiseW = noiseEdge.mul(u.shoreContactNoiseAmp).mul(contactOn);
-    const alphaContactMul = mix(float(1), u.shoreContactAlphaMul, contactBlend.mul(contactOn));
+    const contactBlendSlope = contactBlend.mul(
+      float(1).sub(cliffBlend.mul(u.shoreContactSlopeDampen)),
+    );
+    const alphaContactMul = mix(
+      float(1),
+      u.shoreContactAlphaMul,
+      contactBlendSlope.mul(contactOn),
+    );
     const alphaNoiseWobble = mix(float(1), nContact, noiseW);
     const finalAlpha = waterAlpha.mul(alphaContactMul).mul(alphaNoiseWobble);
 
@@ -856,9 +946,12 @@ export function createLakeShader({ heightTex, terrainSize }) {
   function syncParams(p) {
     const c = (hex, target) => target.set(hex);
 
-    if (p.deepColor != null)       c(p.deepColor,      u.deepColor.value);
+    if (p.shoreColor != null)      c(p.shoreColor,      u.shoreColor.value);
     if (p.midColor != null)        c(p.midColor,        u.midColor.value);
+    if (p.deepColor != null)       c(p.deepColor,       u.deepColor.value);
     if (p.highlightColor != null)  c(p.highlightColor,  u.highlightColor.value);
+    if (p.depthRampShoreMid != null) u.depthRampShoreMid.value = p.depthRampShoreMid;
+    if (p.depthRampMidDeep != null)  u.depthRampMidDeep.value  = p.depthRampMidDeep;
     if (p.opacity != null)         u.opacity.value         = p.opacity;
     if (p.deepOpacity != null)     u.deepOpacity.value     = p.deepOpacity;
 
@@ -876,6 +969,13 @@ export function createLakeShader({ heightTex, terrainSize }) {
     if (p.depthAlphaAbsorb != null) u.depthAlphaAbsorb.value = p.depthAlphaAbsorb;
     if (p.shallowPale != null)     u.shallowPale.value     = p.shallowPale;
     if (p.shallowAlpha != null)    u.shallowAlpha.value    = p.shallowAlpha;
+    if (p.shoreSlopeShallowEnabled != null) u.shoreSlopeShallowEnabled.value = p.shoreSlopeShallowEnabled ? 1 : 0;
+    if (p.shoreSlopeSampleEps != null)      u.shoreSlopeSampleEps.value      = p.shoreSlopeSampleEps;
+    if (p.shoreSlopeBeach != null)          u.shoreSlopeBeach.value          = p.shoreSlopeBeach;
+    if (p.shoreSlopeCliff != null)          u.shoreSlopeCliff.value          = p.shoreSlopeCliff;
+    if (p.shallowAlphaSlopeDampen != null)  u.shallowAlphaSlopeDampen.value  = p.shallowAlphaSlopeDampen;
+    if (p.shoreContactSlopeDampen != null)  u.shoreContactSlopeDampen.value  = p.shoreContactSlopeDampen;
+    if (p.shallowPaleSlopeDampen != null)   u.shallowPaleSlopeDampen.value   = p.shallowPaleSlopeDampen;
 
     if (p.reflectEnabled != null)  u.reflectEnabled.value  = p.reflectEnabled ? 1 : 0;
     if (p.reflectStrength != null) u.reflectStrength.value = p.reflectStrength;
