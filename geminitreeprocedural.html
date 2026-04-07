@@ -61,6 +61,7 @@ const params = {
     levels: 3,
     trunkHeight: 9.0,
     trunkRadius: 0.8,
+    trunkSegments: 10,
     trunkTaper: 0.6,
     branchMult: 0.7,
     children: 3,
@@ -97,6 +98,12 @@ const params = {
     bushDensity: 20,
     bushLeafSize: 3.0,
     bushClumps: 3,
+    trunkColor: '#3d2b1f',
+    // Stats (readonly)
+    trunkVerts: 0,
+    trunkTris: 0,
+    leafInstances: 0,
+    totalTris: 0,
 };
 
 // Uniforms
@@ -194,6 +201,10 @@ function buildTree() {
         }
         leavesMesh.instanceMatrix.needsUpdate = true;
         scene.add(leavesMesh);
+        params.trunkVerts = 0; params.trunkTris = 0;
+        params.leafInstances = totalLeaves;
+        params.totalTris = totalLeaves * 2;
+        try { pane.refresh(); } catch(e) {}
         return;
     }
 
@@ -206,8 +217,8 @@ function buildTree() {
                 return;
             }
             const end = pos.clone().add(dir.clone().multiplyScalar(len));
-            const geo = new THREE.CylinderGeometry(rad * params.trunkTaper, rad, len, 10);
-            const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: 0x3d2b1f }));
+            const geo = new THREE.CylinderGeometry(rad * params.trunkTaper, rad, len, params.trunkSegments);
+            const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: params.trunkColor }));
             mesh.position.copy(pos.clone().add(end).multiplyScalar(0.5));
             mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
             trunkGroup.add(mesh);
@@ -253,6 +264,19 @@ function buildTree() {
     });
     leavesMesh.instanceMatrix.needsUpdate = true;
     scene.add(leavesMesh);
+
+    // Update stats
+    let tv = 0, tt = 0;
+    trunkGroup.traverse(c => {
+        if (!c.isMesh || !c.geometry) return;
+        tv += c.geometry.attributes.position.count;
+        tt += c.geometry.index ? c.geometry.index.count / 3 : c.geometry.attributes.position.count / 3;
+    });
+    params.trunkVerts = tv;
+    params.trunkTris = Math.round(tt);
+    params.leafInstances = counter;
+    params.totalTris = Math.round(tt) + counter * 2;
+    try { pane.refresh(); } catch(e) {}
 }
 buildTree();
 
@@ -283,10 +307,13 @@ fStruc.addBinding(params, 'seed', {min:0, max:9999, step:1}).on('change', buildT
 fStruc.addBinding(params, 'levels', {min:1, max:5, step:1}).on('change', buildTree);
 fStruc.addBinding(params, 'trunkHeight', {min:2, max:20}).on('change', buildTree);
 fStruc.addBinding(params, 'trunkRadius', {min:0.1, max:3}).on('change', buildTree);
+fStruc.addBinding(params, 'trunkSegments', {min:3, max:16, step:1, label:'Radial segments'}).on('change', buildTree);
 fStruc.addBinding(params, 'trunkTaper', {min:0.1, max:1}).on('change', buildTree);
 fStruc.addBinding(params, 'gnarliness', {min:0, max:2}).on('change', buildTree);
 fStruc.addBinding(params, 'sunForce', {min:0, max:1}).on('change', buildTree);
 fStruc.addBinding(params, 'gravity', {min:0, max:1}).on('change', buildTree);
+fStruc.addBlade({ view: 'separator' });
+fStruc.addBinding(params, 'trunkColor', { label: 'Trunk color' }).on('change', buildTree);
 
 const fCanopy = pane.addFolder({ title: 'Canopy & Clumping' });
 fCanopy.addBinding(params, 'clumpRadius', {min:1, max:15}).on('change', buildTree);
@@ -335,7 +362,7 @@ fExport.addButton({ title: 'Merge Trunk Geometry' }).on('click', () => {
     // Remove old separate meshes
     const oldChildren = [...trunkGroup.children];
     oldChildren.forEach(c => trunkGroup.remove(c));
-    mergedTrunkMesh = new THREE.Mesh(merged, new THREE.MeshStandardMaterial({ color: 0x3d2b1f }));
+    mergedTrunkMesh = new THREE.Mesh(merged, new THREE.MeshStandardMaterial({ color: params.trunkColor }));
     trunkGroup.add(mergedTrunkMesh);
     geos.forEach(g => g.dispose());
     alert('Trunk merged into 1 mesh (' + merged.attributes.position.count + ' vertices)');
@@ -360,7 +387,7 @@ fExport.addButton({ title: 'Save Trunk as GLB' }).on('click', () => {
         const geos = exportGroup.children.map(c => c.geometry);
         const merged = BufferGeometryUtils.mergeGeometries(geos, false);
         exportGroup.clear();
-        exportGroup.add(new THREE.Mesh(merged, new THREE.MeshStandardMaterial({ color: 0x3d2b1f })));
+        exportGroup.add(new THREE.Mesh(merged, new THREE.MeshStandardMaterial({ color: params.trunkColor })));
     }
     const exporter = new GLTFExporter();
     exporter.parse(exportGroup, (glb) => {
@@ -413,7 +440,14 @@ fImport.addButton({ title: 'Load Custom Trunk (GLB)' }).on('click', () => {
     });
 });
 
-/** 8. PRESETS **/
+/** 8. STATS **/
+const fStats = pane.addFolder({ title: 'Stats', expanded: true });
+fStats.addBinding(params, 'trunkVerts',    { label: 'Trunk vertices',  readonly: true });
+fStats.addBinding(params, 'trunkTris',     { label: 'Trunk triangles', readonly: true });
+fStats.addBinding(params, 'leafInstances', { label: 'Leaf instances',  readonly: true });
+fStats.addBinding(params, 'totalTris',     { label: 'Total triangles', readonly: true });
+
+/** 9. PRESETS **/
 const fPreset = pane.addFolder({ title: 'Presets', expanded: true });
 params.presetName = 'my_tree';
 params.leafTexFile = '';
@@ -427,7 +461,8 @@ function buildPresetData() {
         trunk: {
             seed: params.seed, levels: params.levels,
             trunkHeight: params.trunkHeight, trunkRadius: params.trunkRadius,
-            trunkTaper: params.trunkTaper, branchMult: params.branchMult,
+            trunkTaper: params.trunkTaper, trunkSegments: params.trunkSegments,
+            branchMult: params.branchMult,
             children: params.children, gnarliness: params.gnarliness,
             sunForce: params.sunForce, gravity: params.gravity,
         },

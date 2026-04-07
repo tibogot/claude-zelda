@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Blood particles VFX editor (WebGPU + TSL)</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #0a0a0c;
+        font-family: system-ui, sans-serif;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+      #err {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: #120808;
+        color: #f0d0d0;
+        text-align: center;
+        z-index: 20;
+      }
+      #err.visible {
+        display: flex;
+      }
+      #files {
+        position: fixed;
+        bottom: 12px;
+        right: 12px;
+        z-index: 10;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        font-size: 11px;
+        color: #aaa;
+      }
+      #files label {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        cursor: pointer;
+      }
+      #files input[type="file"] {
+        max-width: 180px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="err">
+      <div>
+        <p><strong>WebGPU required.</strong></p>
+        <p>Use a recent Chrome / Edge, enable WebGPU, and serve this file over http(s).</p>
+      </div>
+    </div>
+    <div id="files">
+      <label
+        >Mask (RGB)<input id="fileMask" type="file" accept="image/*"
+      /></label>
+      <label
+        >Noise (R)<input id="fileNoise" type="file" accept="image/*"
+      /></label>
+    </div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/+esm"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import {
+        uv,
+        texture,
+        uniform,
+        float,
+        vec2,
+        vec3,
+        color,
+        mix,
+        clamp,
+        sin,
+        cos,
+        attribute,
+        time,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
+
+      const PARTICLE_COUNT = 384;
+
+      /** @type {THREE.WebGPURenderer} */
+      let renderer;
+      /** @type {THREE.Scene} */
+      let scene;
+      /** @type {THREE.PerspectiveCamera} */
+      let camera;
+      /** @type {OrbitControls} */
+      let controls;
+      /** @type {THREE.InstancedMesh} */
+      let particles;
+
+      const clock = new THREE.Clock();
+
+      const posArr = new Float32Array(PARTICLE_COUNT * 3);
+      const velArr = new Float32Array(PARTICLE_COUNT * 3);
+      const lifeArr = new Float32Array(PARTICLE_COUNT);
+      const maxLifeArr = new Float32Array(PARTICLE_COUNT);
+      const sizeArr = new Float32Array(PARTICLE_COUNT);
+
+      const _q = new THREE.Quaternion();
+      const _s = new THREE.Vector3();
+      const _m = new THREE.Matrix4();
+      const _p = new THREE.Vector3();
+
+      function hash(i) {
+        const x = Math.sin(i * 127.1 + 311.7) * 43758.5453;
+        return x - Math.floor(x);
+      }
+
+      function resetParticle(i) {
+        const i3 = i * 3;
+        const theta = hash(i + 0.1) * Math.PI * 2;
+        const phi = hash(i + 0.2) * Math.PI * 0.5;
+        const speed = 1.2 + hash(i + 0.3) * 3.5;
+        velArr[i3] = Math.sin(phi) * Math.cos(theta) * speed;
+        velArr[i3 + 1] = Math.cos(phi) * speed * 0.85 + 0.4;
+        velArr[i3 + 2] = Math.sin(phi) * Math.sin(theta) * speed;
+        posArr[i3] = (hash(i + 0.4) - 0.5) * 0.15;
+        posArr[i3 + 1] = (hash(i + 0.5) - 0.5) * 0.08;
+        posArr[i3 + 2] = (hash(i + 0.6) - 0.5) * 0.15;
+        maxLifeArr[i] = params.minLife + hash(i + 0.7) * (params.maxLife - params.minLife);
+        lifeArr[i] = maxLifeArr[i] * (0.2 + hash(i + 0.8) * 0.8);
+        sizeArr[i] = 0.45 + hash(i + 0.9) * 0.9;
+      }
+
+      function createDefaultMaskTexture() {
+        const c = document.createElement("canvas");
+        c.width = c.height = 256;
+        const g = c.getContext("2d");
+        g.fillStyle = "#000";
+        g.fillRect(0, 0, 256, 256);
+        const cx = 128,
+          cy = 128;
+        for (let k = 0; k < 48; k++) {
+          const ang = (k / 48) * Math.PI * 2 + k * 0.2;
+          g.strokeStyle = `rgba(255,0,0,${0.15 + (k % 5) * 0.08})`;
+          g.lineWidth = 1 + (k % 3);
+          g.beginPath();
+          g.moveTo(cx, cy);
+          g.lineTo(cx + Math.cos(ang) * 120, cy + Math.sin(ang) * 120);
+          g.stroke();
+        }
+        const rg = g.createRadialGradient(cx, cy, 4, cx, cy, 72);
+        rg.addColorStop(0, "rgba(0,255,0,0.95)");
+        rg.addColorStop(0.4, "rgba(0,255,0,0.35)");
+        rg.addColorStop(1, "rgba(0,255,0,0)");
+        g.fillStyle = rg;
+        g.beginPath();
+        g.arc(cx, cy, 70 + Math.random() * 8, 0, Math.PI * 2);
+        g.fill();
+        for (let n = 0; n < 220; n++) {
+          const x = cx + (Math.random() - 0.5) * 200;
+          const y = cy + (Math.random() - 0.5) * 200;
+          g.fillStyle = `rgba(0,0,255,${0.15 + Math.random() * 0.5})`;
+          g.beginPath();
+          g.arc(x, y, Math.random() * 2.2, 0, Math.PI * 2);
+          g.fill();
+        }
+        const tex = new THREE.CanvasTexture(c);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+        return tex;
+      }
+
+      function createDefaultNoiseTexture() {
+        const c = document.createElement("canvas");
+        c.width = c.height = 256;
+        const g = c.getContext("2d");
+        const img = g.createImageData(256, 256);
+        for (let y = 0; y < 256; y++) {
+          for (let x = 0; x < 256; x++) {
+            const n =
+              Math.sin(x * 0.08) * Math.cos(y * 0.07) +
+              Math.sin(x * 0.15 + y * 0.12) * 0.5;
+            const v = Math.floor(((n + 1.5) / 3) * 255);
+            const i = (y * 256 + x) * 4;
+            img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+            img.data[i + 3] = 255;
+          }
+        }
+        g.putImageData(img, 0, 0);
+        const tex = new THREE.CanvasTexture(c);
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.colorSpace = THREE.NoColorSpace;
+        return tex;
+      }
+
+      const params = {
+        minLife: 0.45,
+        maxLife: 1.6,
+        gravity: 5.2,
+        drag: 0.04,
+        particleScale: 0.55,
+        weightR: 0.85,
+        weightG: 1.15,
+        weightB: 0.65,
+        noiseScale: 2.2,
+        noiseStrength: 0.07,
+        scrollSpeed: 0.12,
+        wetBoost: 0.35,
+        opacity: 1.0,
+        blendAdditive: false,
+        darkBlood: "#1a0305",
+        brightBlood: "#8a1520",
+      };
+
+      const uWeightR = uniform(float(params.weightR));
+      const uWeightG = uniform(float(params.weightG));
+      const uWeightB = uniform(float(params.weightB));
+      const uNoiseScale = uniform(float(params.noiseScale));
+      const uNoiseStrength = uniform(float(params.noiseStrength));
+      const uScrollSpeed = uniform(float(params.scrollSpeed));
+      const uWetBoost = uniform(float(params.wetBoost));
+      const uOpacity = uniform(float(params.opacity));
+      const uDark = uniform(color(params.darkBlood));
+      const uBright = uniform(color(params.brightBlood));
+
+      const maskMap = createDefaultMaskTexture();
+      const noiseMap = createDefaultNoiseTexture();
+
+      const maskTexNode = texture(maskMap);
+      const noiseTexNode = texture(noiseMap);
+
+      const aSeed = new Float32Array(PARTICLE_COUNT);
+      for (let i = 0; i < PARTICLE_COUNT; i++) {
+        aSeed[i] = hash(i + 99);
+      }
+
+      const geo = new THREE.PlaneGeometry(1, 1);
+      geo.setAttribute("aSeed", new THREE.InstancedBufferAttribute(aSeed, 1));
+
+      const uv0 = uv();
+      const aSeedN = attribute("aSeed", "float");
+      const centered = uv0.sub(0.5);
+      const ang = aSeedN.mul(6.2831853);
+      const uvRot = vec2(
+        centered.x.mul(ang.cos()).sub(centered.y.mul(ang.sin())),
+        centered.x.mul(ang.sin()).add(centered.y.mul(ang.cos())),
+      ).add(0.5);
+
+      const tScroll = time.mul(uScrollSpeed);
+      const noiseUV = uvRot.mul(uNoiseScale).add(vec2(tScroll, tScroll.mul(0.73)));
+      const nSample = noiseTexNode.sample(noiseUV);
+      const nR = nSample.r;
+      const warp = vec2(
+        nR,
+        noiseTexNode.sample(uvRot.mul(uNoiseScale.mul(1.7))).r,
+      )
+        .sub(0.5)
+        .mul(uNoiseStrength);
+      const uvW = uvRot.add(warp);
+
+      const maskSample = maskTexNode.sample(uvW);
+      const mR = maskSample.r.mul(uWeightR);
+      const mG = maskSample.g.mul(uWeightG);
+      const mB = maskSample.b.mul(uWeightB);
+      const maskSum = clamp(mR.add(mG).add(mB), 0.0, 1.0);
+      const wet = nR.mul(uWetBoost).add(0.15);
+      const col = mix(uDark, uBright, clamp(wet, 0.0, 1.0));
+
+      const tLife = clamp(
+        attribute("aLifetime", "float").div(attribute("aMaxLifetime", "float")),
+        0.0,
+        1.0,
+      );
+      const lifeAlpha = sin(tLife.mul(Math.PI));
+
+      const shapeAlpha = maskSum.mul(lifeAlpha).mul(uOpacity);
+
+      const mat = new THREE.MeshBasicNodeMaterial({
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      });
+
+      mat.colorNode = col;
+      mat.opacityNode = shapeAlpha;
+
+      function applyBlendMode() {
+        mat.blending = params.blendAdditive
+          ? THREE.AdditiveBlending
+          : THREE.NormalBlending;
+        mat.needsUpdate = true;
+      }
+
+      applyBlendMode();
+
+      async function init() {
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0a0a0c);
+
+        camera = new THREE.PerspectiveCamera(
+          50,
+          window.innerWidth / window.innerHeight,
+          0.05,
+          80,
+        );
+        camera.position.set(2.2, 1.4, 2.8);
+
+        renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        document.body.appendChild(renderer.domElement);
+
+        try {
+          await renderer.init();
+        } catch (e) {
+          document.getElementById("err").classList.add("visible");
+          console.error(e);
+          return;
+        }
+
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.target.set(0, 0.35, 0);
+
+        const lifeAttr = new THREE.InstancedBufferAttribute(lifeArr, 1);
+        const maxLifeAttr = new THREE.InstancedBufferAttribute(maxLifeArr, 1);
+        geo.setAttribute("aLifetime", lifeAttr);
+        geo.setAttribute("aMaxLifetime", maxLifeAttr);
+
+        for (let i = 0; i < PARTICLE_COUNT; i++) resetParticle(i);
+
+        particles = new THREE.InstancedMesh(geo, mat, PARTICLE_COUNT);
+        particles.frustumCulled = false;
+        particles.renderOrder = 5;
+        scene.add(particles);
+
+        const amb = new THREE.AmbientLight(0xffffff, 0.04);
+        scene.add(amb);
+
+        const pane = new Pane({ title: "Blood VFX (TSL)" });
+        const fSim = pane.addFolder({ title: "Simulation" });
+        fSim.addBinding(params, "minLife", { min: 0.1, max: 2, step: 0.01 });
+        fSim.addBinding(params, "maxLife", { min: 0.2, max: 4, step: 0.01 });
+        fSim.addBinding(params, "gravity", { min: 0, max: 20, step: 0.1 });
+        fSim.addBinding(params, "drag", { min: 0, max: 0.2, step: 0.005 });
+        fSim.addBinding(params, "particleScale", { min: 0.1, max: 2, step: 0.01 });
+
+        const fMask = pane.addFolder({ title: "Channel mask" });
+        fMask.addBinding(uWeightR, "value", { label: "R streaks", min: 0, max: 2, step: 0.01 });
+        fMask.addBinding(uWeightG, "value", { label: "G splat", min: 0, max: 2, step: 0.01 });
+        fMask.addBinding(uWeightB, "value", { label: "B droplets", min: 0, max: 2, step: 0.01 });
+
+        const fNoise = pane.addFolder({ title: "Noise warp" });
+        fNoise.addBinding(uNoiseScale, "value", { label: "scale", min: 0.2, max: 8, step: 0.05 });
+        fNoise.addBinding(uNoiseStrength, "value", { label: "distort", min: 0, max: 0.35, step: 0.005 });
+        fNoise.addBinding(uScrollSpeed, "value", { label: "scroll", min: 0, max: 1, step: 0.01 });
+        fNoise.addBinding(uWetBoost, "value", { label: "wet / rim", min: 0, max: 1.5, step: 0.01 });
+
+        const fCol = pane.addFolder({ title: "Look" });
+        fCol.addBinding(uDark, "value", { label: "dark" });
+        fCol.addBinding(uBright, "value", { label: "bright" });
+        fCol.addBinding(uOpacity, "value", { label: "opacity", min: 0, max: 2, step: 0.01 });
+        fCol.addBinding(params, "blendAdditive", { label: "additive" }).on("change", () => {
+          applyBlendMode();
+        });
+
+        document.getElementById("fileMask").addEventListener("change", (ev) => {
+          const f = ev.target.files[0];
+          if (!f) return;
+          const url = URL.createObjectURL(f);
+          new THREE.TextureLoader().load(url, (tex) => {
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+            maskTexNode.value.dispose();
+            maskTexNode.value = tex;
+            URL.revokeObjectURL(url);
+          });
+        });
+
+        document.getElementById("fileNoise").addEventListener("change", (ev) => {
+          const f = ev.target.files[0];
+          if (!f) return;
+          const url = URL.createObjectURL(f);
+          new THREE.TextureLoader().load(url, (tex) => {
+            tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+            tex.colorSpace = THREE.NoColorSpace;
+            noiseTexNode.value.dispose();
+            noiseTexNode.value = tex;
+            URL.revokeObjectURL(url);
+          });
+        });
+
+        window.addEventListener("resize", onResize);
+        renderer.setAnimationLoop(animate);
+      }
+
+      function onResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      }
+
+      function animate() {
+        const dt = Math.min(clock.getDelta(), 0.1);
+        camera.getWorldQuaternion(_q);
+
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+          const i3 = i * 3;
+          lifeArr[i] -= dt;
+          if (lifeArr[i] <= 0) resetParticle(i);
+
+          velArr[i3 + 1] -= params.gravity * dt;
+          velArr[i3] *= 1 - params.drag;
+          velArr[i3 + 1] *= 1 - params.drag;
+          velArr[i3 + 2] *= 1 - params.drag;
+
+          posArr[i3] += velArr[i3] * dt;
+          posArr[i3 + 1] += velArr[i3 + 1] * dt;
+          posArr[i3 + 2] += velArr[i3 + 2] * dt;
+
+          const s = sizeArr[i] * params.particleScale;
+          _p.set(posArr[i3], posArr[i3 + 1], posArr[i3 + 2]);
+          _s.set(s, s, s);
+          _m.compose(_p, _q, _s);
+          particles.setMatrixAt(i, _m);
+        }
+        particles.instanceMatrix.needsUpdate = true;
+
+        geo.attributes.aLifetime.needsUpdate = true;
+        geo.attributes.aMaxLifetime.needsUpdate = true;
+
+        controls.update();
+        renderer.render(scene, camera);
+      }
+
+      init();
+    </script>
+  </body>
+</html>

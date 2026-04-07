@@ -1,0 +1,1972 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Particles VFX editor (WebGPU + TSL)</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #0c0c10;
+        font-family: system-ui, sans-serif;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+      .visually-hidden {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+      #err {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: #120808;
+        color: #f0d0d0;
+        text-align: center;
+        z-index: 40;
+      }
+      #err.visible {
+        display: flex;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="err">
+      <div>
+        <p><strong>WebGPU required.</strong></p>
+        <p>Use a recent Chrome / Edge, enable WebGPU, and serve this file over http(s).</p>
+      </div>
+    </div>
+
+    <input
+      type="file"
+      id="fileMask"
+      class="visually-hidden"
+      accept="image/*"
+      tabindex="-1"
+      aria-hidden="true"
+    />
+    <input
+      type="file"
+      id="fileNoise"
+      class="visually-hidden"
+      accept="image/*"
+      tabindex="-1"
+      aria-hidden="true"
+    />
+    <input
+      type="file"
+      id="fileFoam"
+      class="visually-hidden"
+      accept="image/*"
+      tabindex="-1"
+      aria-hidden="true"
+    />
+    <input
+      type="file"
+      id="fileSprite"
+      class="visually-hidden"
+      accept="image/*"
+      tabindex="-1"
+      aria-hidden="true"
+    />
+    <input
+      type="file"
+      id="fileFlipbook"
+      class="visually-hidden"
+      accept="image/*"
+      tabindex="-1"
+      aria-hidden="true"
+    />
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/+esm"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import {
+        uv,
+        texture,
+        uniform,
+        float,
+        vec2,
+        vec3,
+        color,
+        mix,
+        clamp,
+        sin,
+        cos,
+        abs,
+        exp,
+        max,
+        attribute,
+        time,
+        pow,
+        range,
+        rotateUV,
+        positionLocal,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
+
+      const DEFAULT_COUNT = 384;
+
+      function hash(i) {
+        const x = Math.sin(i * 127.1 + 311.7) * 43758.5453;
+        return x - Math.floor(x);
+      }
+
+      /** @type {THREE.WebGPURenderer} */
+      let renderer;
+      /** @type {THREE.Scene} */
+      let scene;
+      /** @type {THREE.PerspectiveCamera} */
+      let camera;
+      /** @type {OrbitControls} */
+      let controls;
+      /** @type {import('tweakpane').Pane} */
+      let pane;
+      /** @type {{ dispose: () => void, tick: (dt: number) => void, setupPane: (p: import('tweakpane').Pane) => void } | null} */
+      let active = null;
+      let lastActivatedPreset = "";
+      /** Saved when entering fire_smoke so we restore the editor camera for other presets. */
+      let savedEditorView = null;
+
+      const timer = new THREE.Timer();
+
+      function captureEditorView() {
+        return {
+          fov: camera.fov,
+          near: camera.near,
+          far: camera.far,
+          cameraPos: camera.position.toArray(),
+          target: controls.target.toArray(),
+          background: scene.background.clone(),
+          maxDistance: controls.maxDistance,
+        };
+      }
+
+      function applyEditorView(v) {
+        camera.fov = v.fov;
+        camera.near = v.near;
+        camera.far = v.far;
+        camera.position.fromArray(v.cameraPos);
+        camera.updateProjectionMatrix();
+        controls.target.fromArray(v.target);
+        controls.maxDistance = v.maxDistance;
+        controls.update();
+        scene.background.copy(v.background);
+      }
+
+      /** Same framing as three.js `webgpu_particles` (camera, clip, orbit limits, background). */
+      function applyFireSmokeExampleView() {
+        camera.fov = 60;
+        camera.near = 1;
+        camera.far = 5000;
+        camera.position.set(1300, 500, 0);
+        camera.updateProjectionMatrix();
+        controls.target.set(0, 500, 0);
+        controls.maxDistance = 2700;
+        controls.update();
+        scene.background.setHex(0x333333);
+      }
+      const PRESET_ORDER = [
+        "starter",
+        "impact_hit",
+        "blood",
+        "waterfall_foam",
+        "fire_smoke",
+        "rain",
+        "magic_burst",
+        "flipbook_burst",
+        "sparks",
+        "soft_dust",
+      ];
+      const editorState = { preset: "starter" };
+      const fileMaskEl = document.getElementById("fileMask");
+      const fileNoiseEl = document.getElementById("fileNoise");
+      const fileFoamEl = document.getElementById("fileFoam");
+      const fileSpriteEl = document.getElementById("fileSprite");
+      const fileFlipbookEl = document.getElementById("fileFlipbook");
+
+      const _q = new THREE.Quaternion();
+      const _s = new THREE.Vector3();
+      const _m = new THREE.Matrix4();
+      const _p = new THREE.Vector3();
+
+      function createDefaultBloodMaskTexture() {
+        const c = document.createElement("canvas");
+        c.width = c.height = 256;
+        const g = c.getContext("2d");
+        g.fillStyle = "#000";
+        g.fillRect(0, 0, 256, 256);
+        const cx = 128,
+          cy = 128;
+        for (let k = 0; k < 48; k++) {
+          const ang = (k / 48) * Math.PI * 2 + k * 0.2;
+          g.strokeStyle = `rgba(255,0,0,${0.15 + (k % 5) * 0.08})`;
+          g.lineWidth = 1 + (k % 3);
+          g.beginPath();
+          g.moveTo(cx, cy);
+          g.lineTo(cx + Math.cos(ang) * 120, cy + Math.sin(ang) * 120);
+          g.stroke();
+        }
+        const rg = g.createRadialGradient(cx, cy, 4, cx, cy, 72);
+        rg.addColorStop(0, "rgba(0,255,0,0.95)");
+        rg.addColorStop(0.4, "rgba(0,255,0,0.35)");
+        rg.addColorStop(1, "rgba(0,255,0,0)");
+        g.fillStyle = rg;
+        g.beginPath();
+        g.arc(cx, cy, 70 + Math.random() * 8, 0, Math.PI * 2);
+        g.fill();
+        for (let n = 0; n < 220; n++) {
+          const x = cx + (Math.random() - 0.5) * 200;
+          const y = cy + (Math.random() - 0.5) * 200;
+          g.fillStyle = `rgba(0,0,255,${0.15 + Math.random() * 0.5})`;
+          g.beginPath();
+          g.arc(x, y, Math.random() * 2.2, 0, Math.PI * 2);
+          g.fill();
+        }
+        const tex = new THREE.CanvasTexture(c);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+        return tex;
+      }
+
+      function createDefaultNoiseTexture() {
+        const c = document.createElement("canvas");
+        c.width = c.height = 256;
+        const g = c.getContext("2d");
+        const img = g.createImageData(256, 256);
+        for (let y = 0; y < 256; y++) {
+          for (let x = 0; x < 256; x++) {
+            const n =
+              Math.sin(x * 0.08) * Math.cos(y * 0.07) +
+              Math.sin(x * 0.15 + y * 0.12) * 0.5;
+            const v = Math.floor(((n + 1.5) / 3) * 255);
+            const i = (y * 256 + x) * 4;
+            img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+            img.data[i + 3] = 255;
+          }
+        }
+        g.putImageData(img, 0, 0);
+        const tex = new THREE.CanvasTexture(c);
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.colorSpace = THREE.NoColorSpace;
+        return tex;
+      }
+
+      function createDefaultFoamTexture() {
+        const c = document.createElement("canvas");
+        c.width = c.height = 128;
+        const g = c.getContext("2d");
+        g.clearRect(0, 0, 128, 128);
+        const rg = g.createRadialGradient(64, 64, 4, 64, 64, 56);
+        rg.addColorStop(0, "rgba(255,255,255,1)");
+        rg.addColorStop(0.25, "rgba(255,255,255,0.65)");
+        rg.addColorStop(0.55, "rgba(250,252,255,0.28)");
+        rg.addColorStop(1, "rgba(255,255,255,0)");
+        g.fillStyle = rg;
+        g.fillRect(0, 0, 128, 128);
+        g.globalCompositeOperation = "lighter";
+        for (let i = 0; i < 12; i++) {
+          const px = 64 + (Math.random() - 0.5) * 40;
+          const py = 64 + (Math.random() - 0.5) * 40;
+          const rr = g.createRadialGradient(px, py, 0, px, py, 8 + Math.random() * 14);
+          rr.addColorStop(0, `rgba(255,255,255,${0.08 + Math.random() * 0.12})`);
+          rr.addColorStop(1, "rgba(255,255,255,0)");
+          g.fillStyle = rr;
+          g.beginPath();
+          g.arc(px, py, 16, 0, Math.PI * 2);
+          g.fill();
+        }
+        const tex = new THREE.CanvasTexture(c);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+        tex.premultiplyAlpha = false;
+        return tex;
+      }
+
+      function createDefaultStarterTexture() {
+        const c = document.createElement("canvas");
+        c.width = c.height = 256;
+        const g = c.getContext("2d");
+        g.clearRect(0, 0, 256, 256);
+        const rg = g.createRadialGradient(128, 128, 6, 128, 128, 120);
+        rg.addColorStop(0, "rgba(255,255,255,1)");
+        rg.addColorStop(0.35, "rgba(255,255,255,0.55)");
+        rg.addColorStop(0.7, "rgba(255,255,255,0.15)");
+        rg.addColorStop(1, "rgba(255,255,255,0)");
+        g.fillStyle = rg;
+        g.fillRect(0, 0, 256, 256);
+        g.globalCompositeOperation = "lighter";
+        for (let i = 0; i < 8; i++) {
+          const px = 128 + (Math.random() - 0.5) * 70;
+          const py = 128 + (Math.random() - 0.5) * 70;
+          const r = g.createRadialGradient(px, py, 0, px, py, 10 + Math.random() * 18);
+          r.addColorStop(0, `rgba(255,255,255,${0.06 + Math.random() * 0.1})`);
+          r.addColorStop(1, "rgba(255,255,255,0)");
+          g.fillStyle = r;
+          g.beginPath();
+          g.arc(px, py, 22, 0, Math.PI * 2);
+          g.fill();
+        }
+        const tex = new THREE.CanvasTexture(c);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+        return tex;
+      }
+
+      /** Horizontal strip atlas (e.g. 8×1) for flipbook preset; white rings that grow per frame. */
+      function createFlipbookExplosionTexture(cols = 8, cell = 64) {
+        const w = cols * cell;
+        const h = cell;
+        const c = document.createElement("canvas");
+        c.width = w;
+        c.height = h;
+        const g = c.getContext("2d");
+        g.fillStyle = "#000000";
+        g.fillRect(0, 0, w, h);
+        for (let i = 0; i < cols; i++) {
+          const cx = i * cell + cell * 0.5;
+          const cy = cell * 0.5;
+          const t = cols > 1 ? i / (cols - 1) : 0;
+          const r = (cell * 0.12 + t * cell * 0.38) | 0;
+          const rg = g.createRadialGradient(cx, cy, 0, cx, cy, r);
+          rg.addColorStop(0, "rgba(255,255,255,1)");
+          rg.addColorStop(0.35, "rgba(255,250,240,0.55)");
+          rg.addColorStop(0.65, "rgba(255,220,180,0.2)");
+          rg.addColorStop(1, "rgba(255,200,160,0)");
+          g.fillStyle = rg;
+          g.beginPath();
+          g.arc(cx, cy, r, 0, Math.PI * 2);
+          g.fill();
+        }
+        const tex = new THREE.CanvasTexture(c);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.generateMipmaps = false;
+        return { tex, cols, rows: 1, numFrames: cols };
+      }
+
+      function makeSharedGeometry(count) {
+        const aSeed = new Float32Array(count);
+        for (let i = 0; i < count; i++) aSeed[i] = hash(i + 99);
+        const geo = new THREE.PlaneGeometry(1, 1);
+        geo.setAttribute("aSeed", new THREE.InstancedBufferAttribute(aSeed, 1));
+        return geo;
+      }
+
+      /**
+       * @param {object} opts
+       * @param {THREE.BufferGeometry} opts.geo
+       * @param {Float32Array} opts.posArr
+       * @param {Float32Array} opts.lifeArr
+       * @param {Float32Array} opts.maxLifeArr
+       * @param {Float32Array} opts.sizeArr
+       * @param {number} opts.particleScale
+       * @param {THREE.InstancedMesh} opts.mesh
+       */
+      function billboardTick(opts, dt) {
+        const { geo, posArr, lifeArr, maxLifeArr, sizeArr, particleScale, mesh } = opts;
+        camera.getWorldQuaternion(_q);
+        const n = lifeArr.length;
+        for (let i = 0; i < n; i++) {
+          const i3 = i * 3;
+          const s = sizeArr[i] * particleScale;
+          _p.set(posArr[i3], posArr[i3 + 1], posArr[i3 + 2]);
+          _s.set(s, s, s);
+          _m.compose(_p, _q, _s);
+          mesh.setMatrixAt(i, _m);
+        }
+        mesh.instanceMatrix.needsUpdate = true;
+        geo.attributes.aLifetime.needsUpdate = true;
+        geo.attributes.aMaxLifetime.needsUpdate = true;
+      }
+
+      /** @type {Record<string, { id: string, label: string, hint: string, filePanel: null | 'blood' | 'foam' | 'starter' | 'impact' | 'flipbook', activate: () => { dispose: () => void, tick: (dt: number) => void, setupPane: (p: import('tweakpane').Pane) => void } }>} */
+      const PRESETS = {};
+
+      PRESETS.starter = {
+        id: "starter",
+        label: "Starter (generic sprite)",
+        hint: "Default entry point: one RGBA texture, tint, UV scroll & spin, lifetime + simple physics. Branch into Blood, Foam, or custom presets when you need more.",
+        filePanel: "starter",
+        activate() {
+          const count = DEFAULT_COUNT;
+          const posArr = new Float32Array(count * 3);
+          const velArr = new Float32Array(count * 3);
+          const lifeArr = new Float32Array(count);
+          const maxLifeArr = new Float32Array(count);
+          const sizeArr = new Float32Array(count);
+
+          const params = {
+            minLife: 0.55,
+            maxLife: 1.8,
+            gravity: 3.2,
+            drag: 0.035,
+            particleScale: 0.62,
+            burstSpeed: 2.4,
+            spread: 0.22,
+            blendAdditive: false,
+            tint: "#e8f0ff",
+            opacity: 1.0,
+            alphaBoost: 1.0,
+            scrollU: 0.0,
+            scrollV: 0.08,
+            uvSpin: 0.35,
+          };
+
+          const uTint = uniform(color(params.tint));
+          const uOpacity = uniform(float(params.opacity));
+          const uAlphaBoost = uniform(float(params.alphaBoost));
+          const uScrollU = uniform(float(params.scrollU));
+          const uScrollV = uniform(float(params.scrollV));
+          const uUvSpin = uniform(float(params.uvSpin));
+
+          const spriteMap = createDefaultStarterTexture();
+          const spriteTexNode = texture(spriteMap);
+
+          const geo = makeSharedGeometry(count);
+          const uv0 = uv();
+          const aSeedN = attribute("aSeed", "float");
+          const centered = uv0.sub(0.5);
+          const ang = aSeedN.mul(6.2831853).add(time.mul(uUvSpin));
+          const uvRot = vec2(
+            centered.x.mul(ang.cos()).sub(centered.y.mul(ang.sin())),
+            centered.x.mul(ang.sin()).add(centered.y.mul(ang.cos())),
+          ).add(0.5);
+          const uvScroll = vec2(time.mul(uScrollU), time.mul(uScrollV));
+          const uvS = uvRot.add(uvScroll);
+          const samp = spriteTexNode.sample(uvS);
+
+          const tLife = clamp(
+            attribute("aLifetime", "float").div(attribute("aMaxLifetime", "float")),
+            0.0,
+            1.0,
+          );
+          const lifeAlpha = sin(tLife.mul(Math.PI));
+          const shapeAlpha = samp.a.mul(uAlphaBoost).mul(lifeAlpha).mul(uOpacity);
+          const col = samp.rgb.mul(uTint);
+
+          const mat = new THREE.MeshBasicNodeMaterial({
+            transparent: true,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+          });
+          mat.colorNode = col;
+          mat.opacityNode = shapeAlpha;
+
+          function applyBlendMode() {
+            mat.blending = params.blendAdditive
+              ? THREE.AdditiveBlending
+              : THREE.NormalBlending;
+            mat.needsUpdate = true;
+          }
+          applyBlendMode();
+
+          const lifeAttr = new THREE.InstancedBufferAttribute(lifeArr, 1);
+          const maxLifeAttr = new THREE.InstancedBufferAttribute(maxLifeArr, 1);
+          geo.setAttribute("aLifetime", lifeAttr);
+          geo.setAttribute("aMaxLifetime", maxLifeAttr);
+
+          function resetParticle(i) {
+            const i3 = i * 3;
+            const theta = hash(i + 11.1) * Math.PI * 2;
+            const phi = hash(i + 11.2) * Math.PI * 0.55;
+            const sp = params.burstSpeed * (0.35 + hash(i + 11.3) * 0.65);
+            velArr[i3] = Math.sin(phi) * Math.cos(theta) * sp;
+            velArr[i3 + 1] = Math.cos(phi) * sp * 0.9 + 0.35;
+            velArr[i3 + 2] = Math.sin(phi) * Math.sin(theta) * sp;
+            const spR = params.spread;
+            posArr[i3] = (hash(i + 11.4) - 0.5) * spR;
+            posArr[i3 + 1] = (hash(i + 11.5) - 0.5) * spR * 0.5;
+            posArr[i3 + 2] = (hash(i + 11.6) - 0.5) * spR;
+            maxLifeArr[i] = params.minLife + hash(i + 11.7) * (params.maxLife - params.minLife);
+            lifeArr[i] = maxLifeArr[i] * (0.15 + hash(i + 11.8) * 0.85);
+            sizeArr[i] = 0.4 + hash(i + 11.9) * 0.95;
+          }
+
+          for (let i = 0; i < count; i++) resetParticle(i);
+
+          const mesh = new THREE.InstancedMesh(geo, mat, count);
+          mesh.frustumCulled = false;
+          mesh.renderOrder = 5;
+          scene.add(mesh);
+
+          const onSprite = (ev) => {
+            const f = ev.target.files[0];
+            if (!f) return;
+            const url = URL.createObjectURL(f);
+            new THREE.TextureLoader().load(url, (tex) => {
+              tex.colorSpace = THREE.SRGBColorSpace;
+              tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+              spriteTexNode.value.dispose();
+              spriteTexNode.value = tex;
+              URL.revokeObjectURL(url);
+            });
+          };
+          fileSpriteEl.addEventListener("change", onSprite);
+
+          return {
+            dispose() {
+              fileSpriteEl.removeEventListener("change", onSprite);
+              scene.remove(mesh);
+              geo.dispose();
+              mat.dispose();
+              spriteTexNode.value.dispose();
+            },
+            tick(dt) {
+              for (let i = 0; i < count; i++) {
+                const i3 = i * 3;
+                lifeArr[i] -= dt;
+                if (lifeArr[i] <= 0) resetParticle(i);
+                velArr[i3 + 1] -= params.gravity * dt;
+                velArr[i3] *= 1 - params.drag;
+                velArr[i3 + 1] *= 1 - params.drag;
+                velArr[i3 + 2] *= 1 - params.drag;
+                posArr[i3] += velArr[i3] * dt;
+                posArr[i3 + 1] += velArr[i3 + 1] * dt;
+                posArr[i3 + 2] += velArr[i3 + 2] * dt;
+              }
+              billboardTick(
+                { geo, posArr, lifeArr, maxLifeArr, sizeArr, particleScale: params.particleScale, mesh },
+                dt,
+              );
+            },
+            setupPane(p) {
+              const fSim = p.addFolder({ title: "Simulation" });
+              fSim.addBinding(params, "minLife", { min: 0.1, max: 4, step: 0.05 });
+              fSim.addBinding(params, "maxLife", { min: 0.2, max: 6, step: 0.05 });
+              fSim.addBinding(params, "gravity", { min: 0, max: 25, step: 0.1 });
+              fSim.addBinding(params, "drag", { min: 0, max: 0.25, step: 0.005 });
+              fSim.addBinding(params, "burstSpeed", { label: "burst speed", min: 0, max: 12, step: 0.1 });
+              fSim.addBinding(params, "spread", { label: "spawn spread", min: 0, max: 1.2, step: 0.02 });
+              fSim.addBinding(params, "particleScale", { min: 0.1, max: 2.5, step: 0.02 });
+
+              const fUv = p.addFolder({ title: "UV motion" });
+              fUv.addBinding(uScrollU, "value", { label: "scroll U", min: -1, max: 1, step: 0.01 });
+              fUv.addBinding(uScrollV, "value", { label: "scroll V", min: -1, max: 1, step: 0.01 });
+              fUv.addBinding(uUvSpin, "value", { label: "spin speed", min: -3, max: 3, step: 0.05 });
+
+              const fLook = p.addFolder({ title: "Look" });
+              fLook.addBinding(uTint, "value", { label: "tint" });
+              fLook.addBinding(uOpacity, "value", { label: "opacity", min: 0, max: 2, step: 0.02 });
+              fLook.addBinding(uAlphaBoost, "value", { label: "alpha boost", min: 0.2, max: 3, step: 0.05 });
+              fLook.addBinding(params, "blendAdditive", { label: "additive" }).on("change", () => {
+                applyBlendMode();
+              });
+            },
+          };
+        },
+      };
+
+      PRESETS.impact_hit = {
+        id: "impact_hit",
+        label: "Impact hit (mask / sprite)",
+        hint: "Melee or spell strike flash. Default: opacity from luminance so white-on-black PNGs work without repacking alpha. Switch to Alpha (A) for proper RGBA sprites.",
+        filePanel: "impact",
+        activate() {
+          const count = DEFAULT_COUNT;
+          const posArr = new Float32Array(count * 3);
+          const velArr = new Float32Array(count * 3);
+          const lifeArr = new Float32Array(count);
+          const maxLifeArr = new Float32Array(count);
+          const sizeArr = new Float32Array(count);
+
+          const params = {
+            minLife: 0.09,
+            maxLife: 0.42,
+            gravity: 0.9,
+            drag: 0.11,
+            particleScale: 0.95,
+            burstSpeed: 7.2,
+            spread: 0.07,
+            blendAdditive: true,
+            tint: "#ffddaa",
+            opacity: 1.15,
+            alphaBoost: 1.0,
+            scrollU: 0.0,
+            scrollV: 0.03,
+            uvSpin: 1.4,
+            opacitySource: 1,
+          };
+
+          const uTint = uniform(color(params.tint));
+          const uOpacity = uniform(float(params.opacity));
+          const uAlphaBoost = uniform(float(params.alphaBoost));
+          const uScrollU = uniform(float(params.scrollU));
+          const uScrollV = uniform(float(params.scrollV));
+          const uUvSpin = uniform(float(params.uvSpin));
+          const uMaskMode = uniform(float(params.opacitySource));
+
+          const spriteMap = createDefaultStarterTexture();
+          const spriteTexNode = texture(spriteMap);
+
+          const geo = makeSharedGeometry(count);
+          const uv0 = uv();
+          const aSeedN = attribute("aSeed", "float");
+          const centered = uv0.sub(0.5);
+          const ang = aSeedN.mul(6.2831853).add(time.mul(uUvSpin));
+          const uvRot = vec2(
+            centered.x.mul(ang.cos()).sub(centered.y.mul(ang.sin())),
+            centered.x.mul(ang.sin()).add(centered.y.mul(ang.cos())),
+          ).add(0.5);
+          const uvScroll = vec2(time.mul(uScrollU), time.mul(uScrollV));
+          const uvS = uvRot.add(uvScroll);
+          const samp = spriteTexNode.sample(uvS);
+          const luma = samp.rgb.dot(vec3(0.299, 0.587, 0.114));
+          const shapeMask = mix(samp.a, luma, uMaskMode);
+
+          const tLife = clamp(
+            attribute("aLifetime", "float").div(attribute("aMaxLifetime", "float")),
+            0.0,
+            1.0,
+          );
+          const lifeAlpha = sin(tLife.mul(Math.PI));
+          const shapeAlpha = shapeMask.mul(uAlphaBoost).mul(lifeAlpha).mul(uOpacity);
+          const col = samp.rgb.mul(uTint);
+
+          const mat = new THREE.MeshBasicNodeMaterial({
+            transparent: true,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+          });
+          mat.colorNode = col;
+          mat.opacityNode = shapeAlpha;
+
+          function applyBlendMode() {
+            mat.blending = params.blendAdditive
+              ? THREE.AdditiveBlending
+              : THREE.NormalBlending;
+            mat.needsUpdate = true;
+          }
+          applyBlendMode();
+
+          const lifeAttr = new THREE.InstancedBufferAttribute(lifeArr, 1);
+          const maxLifeAttr = new THREE.InstancedBufferAttribute(maxLifeArr, 1);
+          geo.setAttribute("aLifetime", lifeAttr);
+          geo.setAttribute("aMaxLifetime", maxLifeAttr);
+
+          function resetParticle(i) {
+            const i3 = i * 3;
+            const theta = hash(i + 31.1) * Math.PI * 2;
+            const phi = hash(i + 31.2) * Math.PI * 0.52;
+            const sp = params.burstSpeed * (0.45 + hash(i + 31.3) * 0.55);
+            velArr[i3] = Math.sin(phi) * Math.cos(theta) * sp;
+            velArr[i3 + 1] = Math.cos(phi) * sp * 0.88 + 0.25;
+            velArr[i3 + 2] = Math.sin(phi) * Math.sin(theta) * sp;
+            const spR = params.spread;
+            posArr[i3] = (hash(i + 31.4) - 0.5) * spR;
+            posArr[i3 + 1] = (hash(i + 31.5) - 0.5) * spR * 0.45;
+            posArr[i3 + 2] = (hash(i + 31.6) - 0.5) * spR;
+            maxLifeArr[i] = params.minLife + hash(i + 31.7) * (params.maxLife - params.minLife);
+            lifeArr[i] = maxLifeArr[i] * (0.12 + hash(i + 31.8) * 0.88);
+            sizeArr[i] = 0.42 + hash(i + 31.9) * 0.75;
+          }
+
+          for (let i = 0; i < count; i++) resetParticle(i);
+
+          const mesh = new THREE.InstancedMesh(geo, mat, count);
+          mesh.frustumCulled = false;
+          mesh.renderOrder = 6;
+          scene.add(mesh);
+
+          const onImpactSprite = (ev) => {
+            const f = ev.target.files[0];
+            if (!f) return;
+            const url = URL.createObjectURL(f);
+            new THREE.TextureLoader().load(url, (tex) => {
+              tex.colorSpace = THREE.SRGBColorSpace;
+              tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+              spriteTexNode.value.dispose();
+              spriteTexNode.value = tex;
+              URL.revokeObjectURL(url);
+            });
+          };
+          fileSpriteEl.addEventListener("change", onImpactSprite);
+
+          return {
+            dispose() {
+              fileSpriteEl.removeEventListener("change", onImpactSprite);
+              scene.remove(mesh);
+              geo.dispose();
+              mat.dispose();
+              spriteTexNode.value.dispose();
+            },
+            tick(dt) {
+              for (let i = 0; i < count; i++) {
+                const i3 = i * 3;
+                lifeArr[i] -= dt;
+                if (lifeArr[i] <= 0) resetParticle(i);
+                velArr[i3 + 1] -= params.gravity * dt;
+                velArr[i3] *= 1 - params.drag;
+                velArr[i3 + 1] *= 1 - params.drag;
+                velArr[i3 + 2] *= 1 - params.drag;
+                posArr[i3] += velArr[i3] * dt;
+                posArr[i3 + 1] += velArr[i3 + 1] * dt;
+                posArr[i3 + 2] += velArr[i3 + 2] * dt;
+              }
+              billboardTick(
+                { geo, posArr, lifeArr, maxLifeArr, sizeArr, particleScale: params.particleScale, mesh },
+                dt,
+              );
+            },
+            setupPane(p) {
+              const fMask = p.addFolder({ title: "Mask / texture" });
+              fMask
+                .addBinding(params, "opacitySource", {
+                  label: "Shape opacity from",
+                  options: { "Alpha (A)": 0, "Luminance (B&W)": 1 },
+                })
+                .on("change", () => {
+                  uMaskMode.value = params.opacitySource;
+                });
+
+              const fSim = p.addFolder({ title: "Simulation" });
+              fSim.addBinding(params, "minLife", { min: 0.02, max: 1.2, step: 0.01 });
+              fSim.addBinding(params, "maxLife", { min: 0.05, max: 2, step: 0.02 });
+              fSim.addBinding(params, "gravity", { min: 0, max: 20, step: 0.1 });
+              fSim.addBinding(params, "drag", { min: 0, max: 0.35, step: 0.005 });
+              fSim.addBinding(params, "burstSpeed", { label: "burst speed", min: 0, max: 16, step: 0.2 });
+              fSim.addBinding(params, "spread", { label: "spawn spread", min: 0, max: 0.8, step: 0.01 });
+              fSim.addBinding(params, "particleScale", { min: 0.15, max: 3, step: 0.02 });
+
+              const fUv = p.addFolder({ title: "UV motion" });
+              fUv.addBinding(uScrollU, "value", { label: "scroll U", min: -0.5, max: 0.5, step: 0.01 });
+              fUv.addBinding(uScrollV, "value", { label: "scroll V", min: -0.5, max: 0.5, step: 0.01 });
+              fUv.addBinding(uUvSpin, "value", { label: "spin speed", min: -4, max: 4, step: 0.05 });
+
+              const fLook = p.addFolder({ title: "Look" });
+              fLook.addBinding(uTint, "value", { label: "tint" });
+              fLook.addBinding(uOpacity, "value", { label: "opacity", min: 0, max: 2.5, step: 0.02 });
+              fLook.addBinding(uAlphaBoost, "value", { label: "mask boost", min: 0.2, max: 3, step: 0.05 });
+              fLook.addBinding(params, "blendAdditive", { label: "additive" }).on("change", () => {
+                applyBlendMode();
+              });
+            },
+          };
+        },
+      };
+
+      PRESETS.blood = {
+        id: "blood",
+        label: "Blood splat (RGB mask + noise)",
+        hint: "Unity-style channel-packed mask and tiling noise. Load textures from the Textures folder above.",
+        filePanel: "blood",
+        activate() {
+          const count = DEFAULT_COUNT;
+          const posArr = new Float32Array(count * 3);
+          const velArr = new Float32Array(count * 3);
+          const lifeArr = new Float32Array(count);
+          const maxLifeArr = new Float32Array(count);
+          const sizeArr = new Float32Array(count);
+
+          const params = {
+            minLife: 0.45,
+            maxLife: 1.6,
+            gravity: 5.2,
+            drag: 0.04,
+            particleScale: 0.55,
+            weightR: 0.85,
+            weightG: 1.15,
+            weightB: 0.65,
+            noiseScale: 2.2,
+            noiseStrength: 0.07,
+            scrollSpeed: 0.12,
+            wetBoost: 0.35,
+            opacity: 1.0,
+            blendAdditive: false,
+            darkBlood: "#1a0305",
+            brightBlood: "#8a1520",
+          };
+
+          const uWeightR = uniform(float(params.weightR));
+          const uWeightG = uniform(float(params.weightG));
+          const uWeightB = uniform(float(params.weightB));
+          const uNoiseScale = uniform(float(params.noiseScale));
+          const uNoiseStrength = uniform(float(params.noiseStrength));
+          const uScrollSpeed = uniform(float(params.scrollSpeed));
+          const uWetBoost = uniform(float(params.wetBoost));
+          const uOpacity = uniform(float(params.opacity));
+          const uDark = uniform(color(params.darkBlood));
+          const uBright = uniform(color(params.brightBlood));
+
+          const maskMap = createDefaultBloodMaskTexture();
+          const noiseMap = createDefaultNoiseTexture();
+          const maskTexNode = texture(maskMap);
+          const noiseTexNode = texture(noiseMap);
+
+          const geo = makeSharedGeometry(count);
+          const uv0 = uv();
+          const aSeedN = attribute("aSeed", "float");
+          const centered = uv0.sub(0.5);
+          const ang = aSeedN.mul(6.2831853);
+          const uvRot = vec2(
+            centered.x.mul(ang.cos()).sub(centered.y.mul(ang.sin())),
+            centered.x.mul(ang.sin()).add(centered.y.mul(ang.cos())),
+          ).add(0.5);
+
+          const tScroll = time.mul(uScrollSpeed);
+          const noiseUV = uvRot.mul(uNoiseScale).add(vec2(tScroll, tScroll.mul(0.73)));
+          const nSample = noiseTexNode.sample(noiseUV);
+          const nR = nSample.r;
+          const warp = vec2(
+            nR,
+            noiseTexNode.sample(uvRot.mul(uNoiseScale.mul(1.7))).r,
+          )
+            .sub(0.5)
+            .mul(uNoiseStrength);
+          const uvW = uvRot.add(warp);
+
+          const maskSample = maskTexNode.sample(uvW);
+          const mR = maskSample.r.mul(uWeightR);
+          const mG = maskSample.g.mul(uWeightG);
+          const mB = maskSample.b.mul(uWeightB);
+          const maskSum = clamp(mR.add(mG).add(mB), 0.0, 1.0);
+          const wet = nR.mul(uWetBoost).add(0.15);
+          const col = mix(uDark, uBright, clamp(wet, 0.0, 1.0));
+
+          const tLife = clamp(
+            attribute("aLifetime", "float").div(attribute("aMaxLifetime", "float")),
+            0.0,
+            1.0,
+          );
+          const lifeAlpha = sin(tLife.mul(Math.PI));
+          const shapeAlpha = maskSum.mul(lifeAlpha).mul(uOpacity);
+
+          const mat = new THREE.MeshBasicNodeMaterial({
+            transparent: true,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+          });
+          mat.colorNode = col;
+          mat.opacityNode = shapeAlpha;
+
+          function applyBlendMode() {
+            mat.blending = params.blendAdditive
+              ? THREE.AdditiveBlending
+              : THREE.NormalBlending;
+            mat.needsUpdate = true;
+          }
+          applyBlendMode();
+
+          const lifeAttr = new THREE.InstancedBufferAttribute(lifeArr, 1);
+          const maxLifeAttr = new THREE.InstancedBufferAttribute(maxLifeArr, 1);
+          geo.setAttribute("aLifetime", lifeAttr);
+          geo.setAttribute("aMaxLifetime", maxLifeAttr);
+
+          function resetParticle(i) {
+            const i3 = i * 3;
+            const theta = hash(i + 0.1) * Math.PI * 2;
+            const phi = hash(i + 0.2) * Math.PI * 0.5;
+            const speed = 1.2 + hash(i + 0.3) * 3.5;
+            velArr[i3] = Math.sin(phi) * Math.cos(theta) * speed;
+            velArr[i3 + 1] = Math.cos(phi) * speed * 0.85 + 0.4;
+            velArr[i3 + 2] = Math.sin(phi) * Math.sin(theta) * speed;
+            posArr[i3] = (hash(i + 0.4) - 0.5) * 0.15;
+            posArr[i3 + 1] = (hash(i + 0.5) - 0.5) * 0.08;
+            posArr[i3 + 2] = (hash(i + 0.6) - 0.5) * 0.15;
+            maxLifeArr[i] = params.minLife + hash(i + 0.7) * (params.maxLife - params.minLife);
+            lifeArr[i] = maxLifeArr[i] * (0.2 + hash(i + 0.8) * 0.8);
+            sizeArr[i] = 0.45 + hash(i + 0.9) * 0.9;
+          }
+
+          for (let i = 0; i < count; i++) resetParticle(i);
+
+          const mesh = new THREE.InstancedMesh(geo, mat, count);
+          mesh.frustumCulled = false;
+          mesh.renderOrder = 5;
+          scene.add(mesh);
+
+          const onMask = (ev) => {
+            const f = ev.target.files[0];
+            if (!f) return;
+            const url = URL.createObjectURL(f);
+            new THREE.TextureLoader().load(url, (tex) => {
+              tex.colorSpace = THREE.SRGBColorSpace;
+              tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+              maskTexNode.value.dispose();
+              maskTexNode.value = tex;
+              URL.revokeObjectURL(url);
+            });
+          };
+          const onNoise = (ev) => {
+            const f = ev.target.files[0];
+            if (!f) return;
+            const url = URL.createObjectURL(f);
+            new THREE.TextureLoader().load(url, (tex) => {
+              tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+              tex.colorSpace = THREE.NoColorSpace;
+              noiseTexNode.value.dispose();
+              noiseTexNode.value = tex;
+              URL.revokeObjectURL(url);
+            });
+          };
+          document.getElementById("fileMask").addEventListener("change", onMask);
+          document.getElementById("fileNoise").addEventListener("change", onNoise);
+
+          return {
+            dispose() {
+              document.getElementById("fileMask").removeEventListener("change", onMask);
+              document.getElementById("fileNoise").removeEventListener("change", onNoise);
+              scene.remove(mesh);
+              geo.dispose();
+              mat.dispose();
+              maskTexNode.value.dispose();
+              noiseTexNode.value.dispose();
+            },
+            tick(dt) {
+              for (let i = 0; i < count; i++) {
+                const i3 = i * 3;
+                lifeArr[i] -= dt;
+                if (lifeArr[i] <= 0) resetParticle(i);
+                velArr[i3 + 1] -= params.gravity * dt;
+                velArr[i3] *= 1 - params.drag;
+                velArr[i3 + 1] *= 1 - params.drag;
+                velArr[i3 + 2] *= 1 - params.drag;
+                posArr[i3] += velArr[i3] * dt;
+                posArr[i3 + 1] += velArr[i3 + 1] * dt;
+                posArr[i3 + 2] += velArr[i3 + 2] * dt;
+              }
+              billboardTick(
+                { geo, posArr, lifeArr, maxLifeArr, sizeArr, particleScale: params.particleScale, mesh },
+                dt,
+              );
+            },
+            setupPane(p) {
+              const fSim = p.addFolder({ title: "Simulation" });
+              fSim.addBinding(params, "minLife", { min: 0.1, max: 2, step: 0.01 });
+              fSim.addBinding(params, "maxLife", { min: 0.2, max: 4, step: 0.01 });
+              fSim.addBinding(params, "gravity", { min: 0, max: 20, step: 0.1 });
+              fSim.addBinding(params, "drag", { min: 0, max: 0.2, step: 0.005 });
+              fSim.addBinding(params, "particleScale", { min: 0.1, max: 2, step: 0.01 });
+
+              const fMask = p.addFolder({ title: "Channel mask" });
+              fMask.addBinding(uWeightR, "value", { label: "R streaks", min: 0, max: 2, step: 0.01 });
+              fMask.addBinding(uWeightG, "value", { label: "G splat", min: 0, max: 2, step: 0.01 });
+              fMask.addBinding(uWeightB, "value", { label: "B droplets", min: 0, max: 2, step: 0.01 });
+
+              const fNoise = p.addFolder({ title: "Noise warp" });
+              fNoise.addBinding(uNoiseScale, "value", { label: "scale", min: 0.2, max: 8, step: 0.05 });
+              fNoise.addBinding(uNoiseStrength, "value", { label: "distort", min: 0, max: 0.35, step: 0.005 });
+              fNoise.addBinding(uScrollSpeed, "value", { label: "scroll", min: 0, max: 1, step: 0.01 });
+              fNoise.addBinding(uWetBoost, "value", { label: "wet / rim", min: 0, max: 1.5, step: 0.01 });
+
+              const fCol = p.addFolder({ title: "Look" });
+              fCol.addBinding(uDark, "value", { label: "dark" });
+              fCol.addBinding(uBright, "value", { label: "bright" });
+              fCol.addBinding(uOpacity, "value", { label: "opacity", min: 0, max: 2, step: 0.01 });
+              fCol.addBinding(params, "blendAdditive", { label: "additive" }).on("change", () => {
+                applyBlendMode();
+              });
+            },
+          };
+        },
+      };
+
+      PRESETS.sparks = {
+        id: "sparks",
+        label: "Sparks (procedural, additive)",
+        hint: "No textures — TSL procedural star on each quad. Good template for hit sparks or magic glitter.",
+        filePanel: null,
+        activate() {
+          const count = DEFAULT_COUNT;
+          const posArr = new Float32Array(count * 3);
+          const velArr = new Float32Array(count * 3);
+          const lifeArr = new Float32Array(count);
+          const maxLifeArr = new Float32Array(count);
+          const sizeArr = new Float32Array(count);
+
+          const params = {
+            minLife: 0.2,
+            maxLife: 0.85,
+            gravity: 2.8,
+            drag: 0.02,
+            particleScale: 0.35,
+            blendAdditive: true,
+            sparkColor: "#ffcc77",
+            intensity: 2.2,
+            armSharpness: 9,
+            armFalloff: 2.2,
+            glowRadius: 4.5,
+          };
+
+          const uColor = uniform(color(params.sparkColor));
+          const uIntensity = uniform(float(params.intensity));
+          const uArmSharpness = uniform(float(params.armSharpness));
+          const uArmFalloff = uniform(float(params.armFalloff));
+          const uGlowRadius = uniform(float(params.glowRadius));
+
+          const geo = makeSharedGeometry(count);
+          const uv0 = uv();
+          const aSeedN = attribute("aSeed", "float");
+          const centered = uv0.sub(0.5);
+          const ang = aSeedN.mul(6.2831853);
+          const uvRot = vec2(
+            centered.x.mul(ang.cos()).sub(centered.y.mul(ang.sin())),
+            centered.x.mul(ang.sin()).add(centered.y.mul(ang.cos())),
+          ).add(0.5);
+          const sparkleUV = uvRot.mul(2).sub(1);
+          const hArm = exp(abs(sparkleUV.y).mul(float(-1)).mul(uArmSharpness)).mul(
+            exp(abs(sparkleUV.x).mul(float(-1)).mul(uArmFalloff)),
+          );
+          const vArm = exp(abs(sparkleUV.x).mul(float(-1)).mul(uArmSharpness)).mul(
+            exp(abs(sparkleUV.y).mul(float(-1)).mul(uArmFalloff)),
+          );
+          const glowShape = exp(sparkleUV.length().mul(float(-1)).mul(uGlowRadius));
+          const starShape = max(max(hArm, vArm), glowShape);
+
+          const tLife = clamp(
+            attribute("aLifetime", "float").div(attribute("aMaxLifetime", "float")),
+            0.0,
+            1.0,
+          );
+          const lifeAlpha = sin(tLife.mul(Math.PI));
+          const shapeAlpha = starShape.mul(lifeAlpha);
+
+          const mat = new THREE.MeshBasicNodeMaterial({
+            transparent: true,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+            blending: THREE.AdditiveBlending,
+          });
+          mat.colorNode = uColor.mul(uIntensity);
+          mat.opacityNode = shapeAlpha;
+
+          const lifeAttr = new THREE.InstancedBufferAttribute(lifeArr, 1);
+          const maxLifeAttr = new THREE.InstancedBufferAttribute(maxLifeArr, 1);
+          geo.setAttribute("aLifetime", lifeAttr);
+          geo.setAttribute("aMaxLifetime", maxLifeAttr);
+
+          function resetParticle(i) {
+            const i3 = i * 3;
+            const theta = hash(i + 1.1) * Math.PI * 2;
+            const phi = hash(i + 1.2) * Math.PI * 0.55;
+            const speed = 2.5 + hash(i + 1.3) * 6;
+            velArr[i3] = Math.sin(phi) * Math.cos(theta) * speed;
+            velArr[i3 + 1] = Math.cos(phi) * speed * 0.9 + 1.2;
+            velArr[i3 + 2] = Math.sin(phi) * Math.sin(theta) * speed;
+            posArr[i3] = (hash(i + 1.4) - 0.5) * 0.08;
+            posArr[i3 + 1] = (hash(i + 1.5) - 0.5) * 0.06;
+            posArr[i3 + 2] = (hash(i + 1.6) - 0.5) * 0.08;
+            maxLifeArr[i] = params.minLife + hash(i + 1.7) * (params.maxLife - params.minLife);
+            lifeArr[i] = maxLifeArr[i] * (0.15 + hash(i + 1.8) * 0.85);
+            sizeArr[i] = 0.35 + hash(i + 1.9) * 0.95;
+          }
+
+          for (let i = 0; i < count; i++) resetParticle(i);
+
+          const mesh = new THREE.InstancedMesh(geo, mat, count);
+          mesh.frustumCulled = false;
+          mesh.renderOrder = 5;
+          scene.add(mesh);
+
+          return {
+            dispose() {
+              scene.remove(mesh);
+              geo.dispose();
+              mat.dispose();
+            },
+            tick(dt) {
+              for (let i = 0; i < count; i++) {
+                const i3 = i * 3;
+                lifeArr[i] -= dt;
+                if (lifeArr[i] <= 0) resetParticle(i);
+                velArr[i3 + 1] -= params.gravity * dt;
+                velArr[i3] *= 1 - params.drag;
+                velArr[i3 + 1] *= 1 - params.drag;
+                velArr[i3 + 2] *= 1 - params.drag;
+                posArr[i3] += velArr[i3] * dt;
+                posArr[i3 + 1] += velArr[i3 + 1] * dt;
+                posArr[i3 + 2] += velArr[i3 + 2] * dt;
+              }
+              billboardTick(
+                { geo, posArr, lifeArr, maxLifeArr, sizeArr, particleScale: params.particleScale, mesh },
+                dt,
+              );
+            },
+            setupPane(p) {
+              const fSim = p.addFolder({ title: "Simulation" });
+              fSim.addBinding(params, "minLife", { min: 0.05, max: 2, step: 0.01 });
+              fSim.addBinding(params, "maxLife", { min: 0.1, max: 3, step: 0.01 });
+              fSim.addBinding(params, "gravity", { min: 0, max: 15, step: 0.1 });
+              fSim.addBinding(params, "drag", { min: 0, max: 0.15, step: 0.005 });
+              fSim.addBinding(params, "particleScale", { min: 0.05, max: 1.5, step: 0.01 });
+
+              const fShape = p.addFolder({ title: "Spark shape (TSL)" });
+              fShape.addBinding(uArmSharpness, "value", { label: "arm sharp", min: 1, max: 24, step: 0.5 });
+              fShape.addBinding(uArmFalloff, "value", { label: "arm falloff", min: 0.5, max: 8, step: 0.1 });
+              fShape.addBinding(uGlowRadius, "value", { label: "glow radius", min: 1, max: 12, step: 0.25 });
+
+              const fLook = p.addFolder({ title: "Look" });
+              fLook.addBinding(uColor, "value", { label: "color" });
+              fLook.addBinding(uIntensity, "value", { label: "intensity", min: 0, max: 6, step: 0.05 });
+              fLook.addBinding(params, "blendAdditive", { label: "additive" }).on("change", () => {
+                mat.blending = params.blendAdditive
+                  ? THREE.AdditiveBlending
+                  : THREE.NormalBlending;
+                mat.needsUpdate = true;
+              });
+            },
+          };
+        },
+      };
+
+      PRESETS.soft_dust = {
+        id: "soft_dust",
+        label: "Soft dust / motes",
+        hint: "Simple radial falloff in TSL, slow drift — starting point for ambient particles.",
+        filePanel: null,
+        activate() {
+          const count = Math.min(512, DEFAULT_COUNT + 128);
+          const posArr = new Float32Array(count * 3);
+          const velArr = new Float32Array(count * 3);
+          const lifeArr = new Float32Array(count);
+          const maxLifeArr = new Float32Array(count);
+          const sizeArr = new Float32Array(count);
+
+          const params = {
+            minLife: 1.2,
+            maxLife: 3.5,
+            gravity: 0.15,
+            drag: 0.008,
+            particleScale: 0.42,
+            drift: 0.35,
+            opacity: 0.55,
+            dustColor: "#c8c4d8",
+            edgeSoft: 1.85,
+            blendAdditive: false,
+          };
+
+          const uColor = uniform(color(params.dustColor));
+          const uOpacity = uniform(float(params.opacity));
+          const uEdgeSoft = uniform(float(params.edgeSoft));
+
+          const geo = makeSharedGeometry(count);
+          const uv0 = uv();
+          const aSeedN = attribute("aSeed", "float");
+          const centered = uv0.sub(0.5);
+          const ang = aSeedN.mul(6.2831853);
+          const uvRot = vec2(
+            centered.x.mul(ang.cos()).sub(centered.y.mul(ang.sin())),
+            centered.x.mul(ang.sin()).add(centered.y.mul(ang.cos())),
+          ).add(0.5);
+          const d = uvRot.sub(0.5).length().mul(2);
+          const blob = clamp(float(1).sub(pow(d, uEdgeSoft)), 0.0, 1.0);
+
+          const tLife = clamp(
+            attribute("aLifetime", "float").div(attribute("aMaxLifetime", "float")),
+            0.0,
+            1.0,
+          );
+          const lifeAlpha = sin(tLife.mul(Math.PI)).mul(0.85).add(0.15);
+          const shapeAlpha = blob.mul(lifeAlpha).mul(uOpacity);
+
+          const mat = new THREE.MeshBasicNodeMaterial({
+            transparent: true,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+          });
+          mat.colorNode = uColor;
+          mat.opacityNode = shapeAlpha;
+
+          function applyBlendMode() {
+            mat.blending = params.blendAdditive
+              ? THREE.AdditiveBlending
+              : THREE.NormalBlending;
+            mat.needsUpdate = true;
+          }
+          applyBlendMode();
+
+          const lifeAttr = new THREE.InstancedBufferAttribute(lifeArr, 1);
+          const maxLifeAttr = new THREE.InstancedBufferAttribute(maxLifeArr, 1);
+          geo.setAttribute("aLifetime", lifeAttr);
+          geo.setAttribute("aMaxLifetime", maxLifeAttr);
+
+          function resetParticle(i) {
+            const i3 = i * 3;
+            velArr[i3] = (hash(i + 3.1) - 0.5) * params.drift;
+            velArr[i3 + 1] = (hash(i + 3.2) - 0.5) * params.drift * 0.4 + 0.08;
+            velArr[i3 + 2] = (hash(i + 3.3) - 0.5) * params.drift;
+            posArr[i3] = (hash(i + 3.4) - 0.5) * 2.2;
+            posArr[i3 + 1] = (hash(i + 3.5) - 0.5) * 1.2;
+            posArr[i3 + 2] = (hash(i + 3.6) - 0.5) * 2.2;
+            maxLifeArr[i] = params.minLife + hash(i + 3.7) * (params.maxLife - params.minLife);
+            lifeArr[i] = maxLifeArr[i] * (0.2 + hash(i + 3.8) * 0.8);
+            sizeArr[i] = 0.5 + hash(i + 3.9) * 1.1;
+          }
+
+          for (let i = 0; i < count; i++) resetParticle(i);
+
+          const mesh = new THREE.InstancedMesh(geo, mat, count);
+          mesh.frustumCulled = false;
+          mesh.renderOrder = 4;
+          scene.add(mesh);
+
+          return {
+            dispose() {
+              scene.remove(mesh);
+              geo.dispose();
+              mat.dispose();
+            },
+            tick(dt) {
+              for (let i = 0; i < count; i++) {
+                const i3 = i * 3;
+                lifeArr[i] -= dt;
+                if (lifeArr[i] <= 0) resetParticle(i);
+                velArr[i3 + 1] -= params.gravity * dt;
+                velArr[i3] *= 1 - params.drag;
+                velArr[i3 + 1] *= 1 - params.drag;
+                velArr[i3 + 2] *= 1 - params.drag;
+                posArr[i3] += velArr[i3] * dt;
+                posArr[i3 + 1] += velArr[i3 + 1] * dt;
+                posArr[i3 + 2] += velArr[i3 + 2] * dt;
+              }
+              billboardTick(
+                { geo, posArr, lifeArr, maxLifeArr, sizeArr, particleScale: params.particleScale, mesh },
+                dt,
+              );
+            },
+            setupPane(p) {
+              const fSim = p.addFolder({ title: "Simulation" });
+              fSim.addBinding(params, "minLife", { min: 0.2, max: 5, step: 0.05 });
+              fSim.addBinding(params, "maxLife", { min: 0.5, max: 8, step: 0.05 });
+              fSim.addBinding(params, "gravity", { min: 0, max: 2, step: 0.02 });
+              fSim.addBinding(params, "drag", { min: 0, max: 0.05, step: 0.001 });
+              fSim.addBinding(params, "drift", { min: 0, max: 1.5, step: 0.02 }).on("change", () => {
+                for (let i = 0; i < count; i++) resetParticle(i);
+              });
+              fSim.addBinding(params, "particleScale", { min: 0.1, max: 1.5, step: 0.01 });
+
+              const fLook = p.addFolder({ title: "Look" });
+              fLook.addBinding(uColor, "value", { label: "color" });
+              fLook.addBinding(uOpacity, "value", { label: "opacity", min: 0, max: 1.5, step: 0.02 });
+              fLook.addBinding(uEdgeSoft, "value", { label: "edge softness", min: 0.5, max: 4, step: 0.05 });
+              fLook.addBinding(params, "blendAdditive", { label: "additive" }).on("change", () => {
+                applyBlendMode();
+              });
+            },
+          };
+        },
+      };
+
+      PRESETS.waterfall_foam = {
+        id: "waterfall_foam",
+        label: "Waterfall cap foam (GPU sprites)",
+        hint: "Same idea as three.js webgpu particles: SpriteNodeMaterial + range() + time — looped foam puffs. Tune here, then port values into lake-unreal-editor.",
+        filePanel: "foam",
+        activate() {
+          const count = 2000;
+          const foamMap = createDefaultFoamTexture();
+          const foamTexNode = texture(foamMap);
+
+          const lifeRange = range(0.12, 1.0);
+          const offsetRange = range(
+            new THREE.Vector3(-0.55, 0, -0.55),
+            new THREE.Vector3(0.55, 0.5, 0.55),
+          );
+          const scaleRange = range(0.18, 1.05);
+          const rotateRange = range(0.2, 3.2);
+
+          const params = {
+            blendAdditive: false,
+          };
+
+          const uSpeed = uniform(0.42);
+          const uSpread = uniform(1.0);
+          const uScaleGlobal = uniform(0.72);
+          const uScaleFloor = uniform(0.22);
+          const uRotSpeed = uniform(1.0);
+          const uOpacity = uniform(0.78);
+          const uFadePow = uniform(1.15);
+          const uCoreCol = uniform(color(0xf5fbff));
+          const uDeepCol = uniform(color(0x5a8aa8));
+          const uFakeLightStr = uniform(0.85);
+
+          const scaledTime = time.add(2.1).mul(uSpeed);
+          const lifeTime = scaledTime.mul(lifeRange).mod(1);
+          const life = lifeTime.div(lifeRange).min(1.0);
+
+          const rotAngle = scaledTime.mul(rotateRange).mul(uRotSpeed);
+          const texSample = foamTexNode.sample(rotateUV(uv(), rotAngle));
+          const opacityNode = texSample.a
+            .mul(pow(life.oneMinus(), uFadePow))
+            .mul(uOpacity);
+
+          const fakeLight = positionLocal.y.oneMinus().max(0.22).mul(uFakeLightStr).add(0.18);
+          const colorNode = mix(uDeepCol, uCoreCol, lifeTime.mul(2.2).min(1)).mul(fakeLight);
+
+          const mat = new THREE.SpriteNodeMaterial({
+            transparent: true,
+            depthWrite: false,
+          });
+          mat.colorNode = colorNode;
+          mat.opacityNode = opacityNode;
+          mat.positionNode = offsetRange.mul(lifeTime).mul(uSpread);
+          mat.scaleNode = scaleRange.mul(lifeTime.max(uScaleFloor)).mul(uScaleGlobal);
+
+          function applyBlendMode() {
+            mat.blending = params.blendAdditive
+              ? THREE.AdditiveBlending
+              : THREE.NormalBlending;
+            mat.needsUpdate = true;
+          }
+          applyBlendMode();
+
+          const geo = new THREE.PlaneGeometry(1, 1);
+          const mesh = new THREE.Mesh(geo, mat);
+          mesh.scale.setScalar(1.35);
+          mesh.count = count;
+          mesh.frustumCulled = false;
+          mesh.renderOrder = 6;
+          scene.add(mesh);
+
+          const onFoamFile = (ev) => {
+            const f = ev.target.files[0];
+            if (!f) return;
+            const url = URL.createObjectURL(f);
+            new THREE.TextureLoader().load(url, (tex) => {
+              tex.colorSpace = THREE.SRGBColorSpace;
+              tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+              foamTexNode.value.dispose();
+              foamTexNode.value = tex;
+              URL.revokeObjectURL(url);
+            });
+          };
+          document.getElementById("fileFoam").addEventListener("change", onFoamFile);
+
+          return {
+            dispose() {
+              document.getElementById("fileFoam").removeEventListener("change", onFoamFile);
+              scene.remove(mesh);
+              geo.dispose();
+              mat.dispose();
+              foamTexNode.value.dispose();
+            },
+            tick() {},
+            setupPane(p) {
+              const fLife = p.addFolder({ title: "GPU life (three.js style)" });
+              fLife.addBinding(uSpeed, "value", { label: "cycle speed", min: 0.05, max: 1.2, step: 0.01 });
+              fLife.addBinding(uSpread, "value", { label: "drift spread", min: 0.2, max: 2.5, step: 0.02 });
+              fLife.addBinding(uFadePow, "value", { label: "fade curve", min: 0.4, max: 3, step: 0.05 });
+
+              const fShape = p.addFolder({ title: "Sprite shape" });
+              fShape.addBinding(uScaleGlobal, "value", { label: "size", min: 0.15, max: 2, step: 0.02 });
+              fShape.addBinding(uScaleFloor, "value", { label: "min scale (life)", min: 0.05, max: 0.8, step: 0.02 });
+              fShape.addBinding(uRotSpeed, "value", { label: "UV spin", min: 0, max: 2.5, step: 0.05 });
+
+              const fLook = p.addFolder({ title: "Look" });
+              fLook.addBinding(uCoreCol, "value", { label: "foam bright" });
+              fLook.addBinding(uDeepCol, "value", { label: "foam shadow" });
+              fLook.addBinding(uOpacity, "value", { label: "opacity", min: 0, max: 1.5, step: 0.02 });
+              fLook.addBinding(uFakeLightStr, "value", { label: "quad shading", min: 0, max: 2, step: 0.05 });
+              fLook.addBinding(params, "blendAdditive", { label: "additive" }).on("change", () => {
+                applyBlendMode();
+              });
+            },
+          };
+        },
+      };
+
+      PRESETS.fire_smoke = {
+        id: "fire_smoke",
+        label: "Fire + smoke (three.js example)",
+        hint: "Same TSL graph as three.js webgpu particles: TextureLoader only (no extra wrap/colorspace), positionNode = offsetRange×lifeTime, shared smokeMat.scaleNode on fire, fire opacityNode×0.5, meshes scale 400, fire Y = −100. Selecting this preset switches camera/background to match the official example (restored when you leave).",
+        filePanel: null,
+        activate() {
+          const loader = new THREE.TextureLoader();
+          const map = loader.load("textures/smoke1.png");
+
+          const lifeRange = range(0.1, 1);
+          const offsetRange = range(new THREE.Vector3(-2, 3, -2), new THREE.Vector3(2, 5, 2));
+
+          const speed = uniform(0.2);
+          const scaledTime = time.add(5).mul(speed);
+          const lifeTime = scaledTime.mul(lifeRange).mod(1);
+          const scaleRange = range(0.3, 2);
+          const rotateRange = range(0.1, 4);
+          const life = lifeTime.div(lifeRange);
+
+          const fakeLightEffect = positionLocal.y.oneMinus().max(0.2);
+          const textureNode = texture(map, rotateUV(uv(), scaledTime.mul(rotateRange)));
+          const opacityNode = textureNode.a.mul(life.oneMinus());
+          const smokeColor = mix(color(0x2c1501), color(0x222222), positionLocal.y.mul(3).clamp());
+
+          const smokeGeo = new THREE.PlaneGeometry(1, 1);
+          const fireGeo = new THREE.PlaneGeometry(1, 1);
+
+          const smokeNodeMaterial = new THREE.SpriteNodeMaterial();
+          smokeNodeMaterial.colorNode = mix(color(0xf27d0c), smokeColor, life.mul(2.5).min(1)).mul(
+            fakeLightEffect,
+          );
+          smokeNodeMaterial.opacityNode = opacityNode;
+          smokeNodeMaterial.positionNode = offsetRange.mul(lifeTime);
+          smokeNodeMaterial.scaleNode = scaleRange.mul(lifeTime.max(0.3));
+          smokeNodeMaterial.depthWrite = false;
+
+          const fireCount = 1000;
+          const fireNodeMaterial = new THREE.SpriteNodeMaterial();
+          fireNodeMaterial.colorNode = mix(color(0xb72f17), color(0xb72f17), life);
+          fireNodeMaterial.positionNode = range(
+            new THREE.Vector3(-1, 1, -1),
+            new THREE.Vector3(1, 2, 1),
+          ).mul(lifeTime);
+          fireNodeMaterial.scaleNode = smokeNodeMaterial.scaleNode;
+          fireNodeMaterial.opacityNode = opacityNode.mul(0.5);
+          fireNodeMaterial.blending = THREE.AdditiveBlending;
+          fireNodeMaterial.transparent = true;
+          fireNodeMaterial.depthWrite = false;
+
+          const params = { meshScale: 400, fireY: -100, smokeAdditive: false };
+
+          function applySmokeBlend() {
+            smokeNodeMaterial.transparent = true;
+            smokeNodeMaterial.blending = params.smokeAdditive
+              ? THREE.AdditiveBlending
+              : THREE.NormalBlending;
+            smokeNodeMaterial.needsUpdate = true;
+          }
+          applySmokeBlend();
+
+          const smokeInstancedSprite = new THREE.Mesh(smokeGeo, smokeNodeMaterial);
+          smokeInstancedSprite.scale.setScalar(params.meshScale);
+          smokeInstancedSprite.count = 2000;
+          smokeInstancedSprite.frustumCulled = false;
+          smokeInstancedSprite.renderOrder = 0;
+          scene.add(smokeInstancedSprite);
+
+          const fireInstancedSprite = new THREE.Mesh(fireGeo, fireNodeMaterial);
+          fireInstancedSprite.scale.setScalar(params.meshScale);
+          fireInstancedSprite.count = fireCount;
+          fireInstancedSprite.position.y = params.fireY;
+          fireInstancedSprite.frustumCulled = false;
+          fireInstancedSprite.renderOrder = 1;
+          scene.add(fireInstancedSprite);
+
+          const gridHelper = new THREE.GridHelper(3000, 40, 0x444444, 0x444444);
+          gridHelper.position.y = -75;
+          scene.add(gridHelper);
+
+          function syncMeshScale() {
+            const s = params.meshScale;
+            smokeInstancedSprite.scale.setScalar(s);
+            fireInstancedSprite.scale.setScalar(s);
+          }
+
+          return {
+            dispose() {
+              scene.remove(smokeInstancedSprite);
+              scene.remove(fireInstancedSprite);
+              scene.remove(gridHelper);
+              gridHelper.dispose();
+              smokeGeo.dispose();
+              fireGeo.dispose();
+              smokeNodeMaterial.dispose();
+              fireNodeMaterial.dispose();
+              map.dispose();
+            },
+            tick() {},
+            setupPane(p) {
+              const fLife = p.addFolder({ title: "Settings (same as example GUI)" });
+              fLife.addBinding(speed, "value", { label: "speed", min: 0, max: 1, step: 0.01 });
+
+              const fScene = p.addFolder({ title: "Scene overrides" });
+              fScene
+                .addBinding(params, "meshScale", { label: "mesh scale", min: 50, max: 800, step: 5 })
+                .on("change", () => syncMeshScale());
+              fScene.addBinding(params, "fireY", { label: "fire mesh Y", min: -250, max: 50, step: 5 }).on(
+                "change",
+                () => {
+                  fireInstancedSprite.position.y = params.fireY;
+                },
+              );
+              fScene.addBinding(params, "smokeAdditive", { label: "smoke additive" }).on("change", () => {
+                applySmokeBlend();
+              });
+            },
+          };
+        },
+      };
+
+      PRESETS.rain = {
+        id: "rain",
+        label: "Rain (weather streaks)",
+        hint: "GPU looped sprites: tall narrow quads, procedural streak alpha, downward drift with optional wind. Same life/time pattern as waterfall foam.",
+        filePanel: null,
+        activate() {
+          const count = 4200;
+          const lifeRange = range(0.08, 0.55);
+          const offsetRange = range(
+            new THREE.Vector3(-2.6, 3.8, -2.6),
+            new THREE.Vector3(2.6, -0.9, 2.6),
+          );
+          const scaleRange = range(0.55, 1.15);
+
+          const params = { blendAdditive: false };
+
+          const uSpeed = uniform(0.55);
+          const uSpread = uniform(1.0);
+          const uWindX = uniform(0.35);
+          const uWindZ = uniform(0.12);
+          const uOpacity = uniform(0.42);
+          const uMeshScale = uniform(1.15);
+          const uTipFade = uniform(0.48);
+          const uStreakSharp = uniform(11);
+          const uDeep = uniform(color(0x6a7a90));
+          const uBright = uniform(color(0xb8d0e8));
+
+          const scaledTime = time.add(1.8).mul(uSpeed);
+          const lifeTime = scaledTime.mul(lifeRange).mod(1);
+          const life = lifeTime.div(lifeRange).min(1);
+
+          const wind = vec3(uWindX, float(0), uWindZ).mul(lifeTime);
+          const positionNode = offsetRange.mul(lifeTime).mul(uSpread).add(wind);
+
+          const ux = abs(uv().x.sub(0.5)).mul(2);
+          const streak = pow(float(1).sub(clamp(ux, 0, 1)), uStreakSharp);
+          const vy = uv().y;
+          const tip = float(1).sub(vy.sub(float(1).sub(uTipFade)).max(0).div(uTipFade));
+          const shapeAlpha = streak.mul(clamp(tip, 0, 1));
+
+          const opacityNode = shapeAlpha.mul(uOpacity).mul(pow(life.oneMinus(), float(0.75)));
+
+          const colorNode = mix(uDeep, uBright, life.oneMinus().mul(1.15).min(1));
+
+          const mat = new THREE.SpriteNodeMaterial({
+            transparent: true,
+            depthWrite: false,
+          });
+          mat.colorNode = colorNode;
+          mat.opacityNode = opacityNode;
+          mat.positionNode = positionNode;
+          mat.scaleNode = scaleRange.mul(lifeTime.max(0.12));
+
+          function applyBlendMode() {
+            mat.blending = params.blendAdditive ? THREE.AdditiveBlending : THREE.NormalBlending;
+            mat.needsUpdate = true;
+          }
+          applyBlendMode();
+
+          const geo = new THREE.PlaneGeometry(0.032, 1.05);
+          const mesh = new THREE.Mesh(geo, mat);
+          mesh.scale.setScalar(uMeshScale.value);
+          mesh.count = count;
+          mesh.frustumCulled = false;
+          mesh.renderOrder = 5;
+          scene.add(mesh);
+
+          return {
+            dispose() {
+              scene.remove(mesh);
+              geo.dispose();
+              mat.dispose();
+            },
+            tick() {},
+            setupPane(p) {
+              const fLife = p.addFolder({ title: "Rain motion" });
+              fLife.addBinding(uSpeed, "value", { label: "cycle speed", min: 0.1, max: 1.4, step: 0.02 });
+              fLife.addBinding(uSpread, "value", { label: "column spread", min: 0.35, max: 2.2, step: 0.02 });
+              fLife.addBinding(uWindX, "value", { label: "wind X", min: -1.2, max: 1.2, step: 0.02 });
+              fLife.addBinding(uWindZ, "value", { label: "wind Z", min: -1.2, max: 1.2, step: 0.02 });
+
+              const fShape = p.addFolder({ title: "Streak shape" });
+              fShape.addBinding(uMeshScale, "value", { label: "mesh scale", min: 0.4, max: 2.5, step: 0.02 }).on(
+                "change",
+                () => {
+                  mesh.scale.setScalar(uMeshScale.value);
+                },
+              );
+              fShape.addBinding(uStreakSharp, "value", { label: "streak sharpness", min: 2, max: 28, step: 0.5 });
+              fShape.addBinding(uTipFade, "value", { label: "tip fade start", min: 0.15, max: 0.85, step: 0.02 });
+
+              const fLook = p.addFolder({ title: "Look" });
+              fLook.addBinding(uDeep, "value", { label: "far color" });
+              fLook.addBinding(uBright, "value", { label: "near color" });
+              fLook.addBinding(uOpacity, "value", { label: "opacity", min: 0, max: 1.2, step: 0.02 });
+              fLook.addBinding(params, "blendAdditive", { label: "additive" }).on("change", () => {
+                applyBlendMode();
+              });
+            },
+          };
+        },
+      };
+
+      PRESETS.magic_burst = {
+        id: "magic_burst",
+        label: "Magic burst (ability)",
+        hint: "Short GPU life, radial position push, scale peaking mid-life (sin), additive glow — level-up / cast ring energy.",
+        filePanel: null,
+        activate() {
+          const count = 2800;
+          const lifeRange = range(0.05, 0.32);
+          const burstDir = range(new THREE.Vector3(-1, 0.15, -1), new THREE.Vector3(1, 1.1, 1));
+
+          const params = { blendAdditive: true };
+
+          const uSpeed = uniform(0.85);
+          const uRadial = uniform(2.15);
+          const uScaleMul = uniform(0.95);
+          const uOpacity = uniform(1.25);
+          const uCore = uniform(color(0x66f5ff));
+          const uMid = uniform(color(0xc86cff));
+          const uRim = uniform(color(0xffe8ff));
+
+          const scaledTime = time.add(0.4).mul(uSpeed);
+          const lifeTime = scaledTime.mul(lifeRange).mod(1);
+          const life = lifeTime.div(lifeRange).min(1);
+
+          const positionNode = burstDir.mul(lifeTime.pow(float(0.9))).mul(uRadial);
+
+          const pulse = sin(life.mul(float(Math.PI))).max(0.08);
+          const scaleRange = range(0.28, 1.05);
+          const scaleNode = scaleRange.mul(pulse).mul(uScaleMul);
+
+          const d = uv().sub(0.5).length().mul(2);
+          const glow = pow(float(1).sub(clamp(d, 0, 1)), float(2.8));
+          const opacityNode = glow.mul(uOpacity).mul(pulse);
+
+          const tCol = life.mul(2.2).min(1);
+          const colA = mix(uCore, uMid, tCol);
+          const colB = mix(colA, uRim, life.pow(float(1.4)));
+          const colorNode = colB.mul(glow.mul(1.15).add(0.25));
+
+          const mat = new THREE.SpriteNodeMaterial({
+            transparent: true,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+          });
+          mat.colorNode = colorNode;
+          mat.opacityNode = opacityNode;
+          mat.positionNode = positionNode;
+          mat.scaleNode = scaleNode;
+
+          function applyBlendMode() {
+            mat.blending = params.blendAdditive ? THREE.AdditiveBlending : THREE.NormalBlending;
+            mat.needsUpdate = true;
+          }
+          applyBlendMode();
+
+          const geo = new THREE.PlaneGeometry(1, 1);
+          const mesh = new THREE.Mesh(geo, mat);
+          mesh.scale.setScalar(0.85);
+          mesh.count = count;
+          mesh.frustumCulled = false;
+          mesh.renderOrder = 7;
+          scene.add(mesh);
+
+          return {
+            dispose() {
+              scene.remove(mesh);
+              geo.dispose();
+              mat.dispose();
+            },
+            tick() {},
+            setupPane(p) {
+              const fLife = p.addFolder({ title: "Burst timing" });
+              fLife.addBinding(uSpeed, "value", { label: "cycle speed", min: 0.2, max: 2.2, step: 0.02 });
+              fLife.addBinding(uRadial, "value", { label: "outward push", min: 0.5, max: 4, step: 0.05 });
+
+              const fShape = p.addFolder({ title: "Shape" });
+              fShape.addBinding(uScaleMul, "value", { label: "scale mul", min: 0.2, max: 2, step: 0.02 });
+
+              const fLook = p.addFolder({ title: "Look" });
+              fLook.addBinding(uCore, "value", { label: "core" });
+              fLook.addBinding(uMid, "value", { label: "mid" });
+              fLook.addBinding(uRim, "value", { label: "rim" });
+              fLook.addBinding(uOpacity, "value", { label: "opacity", min: 0, max: 3, step: 0.05 });
+              fLook.addBinding(params, "blendAdditive", { label: "additive" }).on("change", () => {
+                applyBlendMode();
+              });
+            },
+          };
+        },
+      };
+
+      PRESETS.flipbook_burst = {
+        id: "flipbook_burst",
+        label: "Flipbook burst (sheet)",
+        hint: "Atlas UVs: frame = floor(lifeTime × numFrames). Default 8×1 strip from code; load your own horizontal sheet and set columns / frames in the panel.",
+        filePanel: "flipbook",
+        activate() {
+          const { tex: fbTex, cols: defCols, rows: defRows, numFrames: defNum } = createFlipbookExplosionTexture();
+          const texNode = texture(fbTex);
+
+          const count = 1800;
+          const lifeRange = range(0.12, 0.72);
+          const offsetRange = range(
+            new THREE.Vector3(-0.45, 0.05, -0.45),
+            new THREE.Vector3(0.45, 0.65, 0.45),
+          );
+          const scaleRange = range(0.35, 1.05);
+
+          const params = {
+            blendAdditive: true,
+            cols: defCols,
+            rows: defRows,
+            numFrames: defNum,
+          };
+
+          const uSpeed = uniform(0.5);
+          const uSpread = uniform(1.0);
+          const uOpacity = uniform(1.05);
+          const uTint = uniform(color(0xffffff));
+          const colsU = uniform(float(params.cols));
+          const rowsU = uniform(float(params.rows));
+          const numFramesU = uniform(float(params.numFrames));
+
+          const scaledTime = time.add(0.9).mul(uSpeed);
+          const lifeTime = scaledTime.mul(lifeRange).mod(1);
+          const life = lifeTime.div(lifeRange).min(1);
+
+          const fi = lifeTime.mul(numFramesU).floor().min(numFramesU.sub(1).max(0));
+          const col = fi.mod(colsU);
+          const row = fi.div(colsU).floor();
+          const uA = uv().x.add(col).div(colsU);
+          const vA = uv().y.add(row).div(rowsU);
+          const uvAtlas = vec2(uA, vA);
+          const samp = texNode.sample(uvAtlas);
+
+          const opacityNode = samp.a.mul(uOpacity).mul(pow(life.oneMinus(), float(0.55)));
+
+          const mat = new THREE.SpriteNodeMaterial({
+            transparent: true,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+          });
+          mat.colorNode = samp.rgb.mul(uTint);
+          mat.opacityNode = opacityNode;
+          mat.positionNode = offsetRange.mul(lifeTime).mul(uSpread);
+          mat.scaleNode = scaleRange.mul(lifeTime.max(0.15));
+
+          function applyBlendMode() {
+            mat.blending = params.blendAdditive ? THREE.AdditiveBlending : THREE.NormalBlending;
+            mat.needsUpdate = true;
+          }
+          applyBlendMode();
+
+          const geo = new THREE.PlaneGeometry(1, 1);
+          const mesh = new THREE.Mesh(geo, mat);
+          mesh.scale.setScalar(0.95);
+          mesh.count = count;
+          mesh.frustumCulled = false;
+          mesh.renderOrder = 6;
+          scene.add(mesh);
+
+          function syncAtlasUniforms() {
+            colsU.value = params.cols;
+            rowsU.value = params.rows;
+            numFramesU.value = params.numFrames;
+          }
+
+          const onFlipbookFile = (ev) => {
+            const f = ev.target.files[0];
+            if (!f) return;
+            const url = URL.createObjectURL(f);
+            new THREE.TextureLoader().load(url, (tex) => {
+              tex.colorSpace = THREE.SRGBColorSpace;
+              tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+              tex.minFilter = THREE.LinearFilter;
+              tex.magFilter = THREE.LinearFilter;
+              tex.generateMipmaps = false;
+              texNode.value.dispose();
+              texNode.value = tex;
+              URL.revokeObjectURL(url);
+            });
+          };
+          fileFlipbookEl.addEventListener("change", onFlipbookFile);
+
+          return {
+            dispose() {
+              fileFlipbookEl.removeEventListener("change", onFlipbookFile);
+              scene.remove(mesh);
+              geo.dispose();
+              mat.dispose();
+              texNode.value.dispose();
+            },
+            tick() {},
+            setupPane(p) {
+              const fTex = p.addFolder({ title: "Atlas layout" });
+              fTex.addBinding(params, "cols", { label: "columns", min: 1, max: 16, step: 1 }).on("change", () => {
+                syncAtlasUniforms();
+              });
+              fTex.addBinding(params, "rows", { label: "rows", min: 1, max: 16, step: 1 }).on("change", () => {
+                syncAtlasUniforms();
+              });
+              fTex.addBinding(params, "numFrames", { label: "frame count", min: 1, max: 64, step: 1 }).on(
+                "change",
+                () => {
+                  syncAtlasUniforms();
+                },
+              );
+
+              const fLife = p.addFolder({ title: "Playback" });
+              fLife.addBinding(uSpeed, "value", { label: "cycle speed", min: 0.15, max: 1.6, step: 0.02 });
+              fLife.addBinding(uSpread, "value", { label: "drift", min: 0.2, max: 2.2, step: 0.02 });
+
+              const fLook = p.addFolder({ title: "Look" });
+              fLook.addBinding(uTint, "value", { label: "tint" });
+              fLook.addBinding(uOpacity, "value", { label: "opacity", min: 0, max: 2.5, step: 0.02 });
+              fLook.addBinding(params, "blendAdditive", { label: "additive" }).on("change", () => {
+                applyBlendMode();
+              });
+            },
+          };
+        },
+      };
+
+      const PRESET_OPTIONS = Object.fromEntries(
+        PRESET_ORDER.map((key) => [PRESETS[key].label, key]),
+      );
+
+      function disposeActive() {
+        if (active) {
+          active.dispose();
+          active = null;
+        }
+        if (pane) {
+          pane.dispose();
+          pane = null;
+        }
+      }
+
+      function activatePreset(presetId) {
+        const def = PRESETS[presetId];
+        if (!def) return;
+        if (presetId === lastActivatedPreset && active) return;
+
+        const fromPreset = lastActivatedPreset;
+        if (fromPreset === "fire_smoke" && presetId !== "fire_smoke" && savedEditorView) {
+          applyEditorView(savedEditorView);
+          savedEditorView = null;
+        }
+
+        lastActivatedPreset = presetId;
+        disposeActive();
+        active = def.activate();
+
+        if (presetId === "fire_smoke") {
+          if (!savedEditorView) savedEditorView = captureEditorView();
+          applyFireSmokeExampleView();
+        }
+        editorState.preset = def.id;
+        pane = new Pane({ title: "Particles VFX editor", expanded: true });
+        pane
+          .addBinding(editorState, "preset", {
+            label: "Preset",
+            options: PRESET_OPTIONS,
+          })
+          .on("change", (e) => {
+            // Defer so Tweakpane finishes the change before we dispose this pane.
+            queueMicrotask(() => activatePreset(e.value));
+          });
+        const about = { text: def.hint };
+        pane.addBinding(about, "text", {
+          readonly: true,
+          label: "About this preset",
+        });
+        if (def.filePanel === "blood") {
+          const tf = pane.addFolder({ title: "Textures" });
+          tf.addButton({ title: "Load RGB mask…" }).on("click", () => fileMaskEl.click());
+          tf.addButton({ title: "Load noise map…" }).on("click", () => fileNoiseEl.click());
+        } else if (def.filePanel === "foam") {
+          const tf = pane.addFolder({ title: "Textures" });
+          tf.addButton({ title: "Load foam sprite (RGBA)…" }).on("click", () => fileFoamEl.click());
+        } else if (def.filePanel === "starter") {
+          const tf = pane.addFolder({ title: "Textures" });
+          tf.addButton({ title: "Load sprite (RGBA)…" }).on("click", () => fileSpriteEl.click());
+        } else if (def.filePanel === "impact") {
+          const tf = pane.addFolder({ title: "Textures" });
+          tf.addButton({ title: "Load impact mask / sprite…" }).on("click", () => fileSpriteEl.click());
+        } else if (def.filePanel === "flipbook") {
+          const tf = pane.addFolder({ title: "Textures" });
+          tf.addButton({ title: "Load flipbook sheet…" }).on("click", () => fileFlipbookEl.click());
+        }
+        active.setupPane(pane);
+      }
+
+      function onResize() {
+        if (!camera || !renderer) return;
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      }
+
+      function animate() {
+        timer.update();
+        const dt = Math.min(timer.getDelta(), 0.1);
+        if (active) active.tick(dt);
+        controls.update();
+        renderer.render(scene, camera);
+      }
+
+      async function init() {
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0c0c10);
+
+        camera = new THREE.PerspectiveCamera(
+          50,
+          window.innerWidth / window.innerHeight,
+          0.05,
+          80,
+        );
+        camera.position.set(2.2, 1.4, 2.8);
+
+        renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        document.body.appendChild(renderer.domElement);
+
+        try {
+          await renderer.init();
+        } catch (e) {
+          document.getElementById("err").classList.add("visible");
+          console.error(e);
+          return;
+        }
+
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.target.set(0, 0.35, 0);
+
+        scene.add(new THREE.AmbientLight(0xffffff, 0.06));
+
+        window.addEventListener("resize", onResize);
+        activatePreset("starter");
+        renderer.setAnimationLoop(animate);
+      }
+
+      init();
+    </script>
+  </body>
+</html>
