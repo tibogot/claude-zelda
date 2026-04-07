@@ -339,6 +339,7 @@
         color,
         attribute,
         positionLocal,
+        normalLocal,
         negate,
       } from "three/tsl";
       import { bloom } from "three/addons/tsl/display/BloomNode.js";
@@ -6175,11 +6176,149 @@
         // State
         let waterfallObjects = [];
         let selectedWaterfall = null;
+        let splashCapObjects = [];
+        let selectedSplashCap = null;
+
+        /** In [ H ] mode: place waterfall sheet vs impact splash cap (matches lake-unreal-editor). */
+        const wfPlaceTool = { tool: "waterfall" };
+
+        /** Splash cap shader / shape (transform = gizmo only, like waterfall sheets). */
+        const impactFoamParams = {
+          impactFoamVisible: true,
+          impactFoamDispAmp: 0.62,
+          impactFoamNoiseFreq: 2.35,
+          impactFoamFlow: 1.35,
+          impactFoamOpacity: 0.88,
+          impactFoamRimCyan: 0.22,
+          impactFoamCapAngle: 0.42,
+          impactFoamBaseRadius: 3.35,
+        };
+
+        function buildImpactFoamGeometry(baseRadius, phiFrac) {
+          const R = Math.max(0.35, baseRadius);
+          const phi = Math.max(0.08, Math.min(0.48, phiFrac));
+          return new THREE.SphereGeometry(R, 72, 52, 0, Math.PI * 2, 0, Math.PI * phi);
+        }
+
+        const uIFTime = uniform(0);
+        const uIFDisp = uniform(impactFoamParams.impactFoamDispAmp);
+        const uIFNoiseFreq = uniform(impactFoamParams.impactFoamNoiseFreq);
+        const uIFFlow = uniform(impactFoamParams.impactFoamFlow);
+        const uIFOpacity = uniform(impactFoamParams.impactFoamOpacity);
+        const uIFRimCyan = uniform(impactFoamParams.impactFoamRimCyan);
+        const uIFRadius = uniform(impactFoamParams.impactFoamBaseRadius);
+        const uIFFoamWhite = uniform(new THREE.Color(0xf8fbff));
+        const uIFFoamCyan = uniform(new THREE.Color(0xa8e8f5));
+
+        const impactFoamPosNode = Fn(() => {
+          const t = uIFTime;
+          const xz = positionLocal.xz.mul(uIFNoiseFreq);
+          const scroll = vec2(t.mul(uIFFlow), t.mul(uIFFlow.mul(0.74)));
+          const n1 = mx_noise_float(xz.add(scroll));
+          const n2 = mx_noise_float(xz.mul(2.12).sub(vec2(scroll.y, scroll.x.mul(0.9))));
+          const n3 = mx_noise_float(xz.mul(0.48).add(vec2(t.mul(-0.52), t.mul(0.61))));
+          const d = n1.mul(0.38).add(n2.mul(0.34)).add(n3.mul(0.28));
+          return positionLocal.add(normalLocal.mul(d.mul(uIFDisp)));
+        })();
+
+        const impactFoamColorNode = Fn(() => {
+          const t = uIFTime;
+          const xz = positionLocal.xz.mul(uIFNoiseFreq.mul(0.88));
+          const scroll = vec2(t.mul(uIFFlow.mul(0.92)), t.mul(uIFFlow.mul(0.58)));
+          const f1 = mx_noise_float(xz.add(scroll)).mul(0.5).add(0.5);
+          const f2 = mx_noise_float(xz.mul(2.95).sub(scroll)).mul(0.5).add(0.5);
+          const rn = length(positionLocal.xz).div(max(uIFRadius, float(0.001)));
+          const rim = smoothstep(float(0.22), float(0.98), rn);
+          const base = mix(uIFFoamWhite, uIFFoamCyan, rim.mul(uIFRimCyan));
+          return mix(base, uIFFoamWhite, f1.mul(0.32).add(f2.mul(0.2))).saturate();
+        })();
+
+        const impactFoamAlphaNode = Fn(() => {
+          const t = uIFTime;
+          const xz = positionLocal.xz.mul(uIFNoiseFreq.mul(1.05));
+          const scroll = vec2(t.mul(uIFFlow.mul(1.05)), t.mul(0.5));
+          const a1 = mx_noise_float(xz.add(scroll)).mul(0.5).add(0.5);
+          const a2 = mx_noise_float(xz.mul(3.2).sub(vec2(t.mul(1.2), float(0)))).mul(0.5).add(0.5);
+          const rn = length(positionLocal.xz).div(max(uIFRadius, float(0.001)));
+          const edgeFade = float(1).sub(smoothstep(float(0.78), float(1.05), rn));
+          return uIFOpacity
+            .mul(float(0.42).add(a1.mul(0.38)).add(a2.mul(0.2)))
+            .mul(edgeFade.add(0.12));
+        })();
+
+        const impactFoamMat = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
+        impactFoamMat.positionNode = impactFoamPosNode;
+        impactFoamMat.colorNode = impactFoamColorNode;
+        impactFoamMat.opacityNode = impactFoamAlphaNode;
+
+        function syncImpactFoamUniforms() {
+          uIFDisp.value = impactFoamParams.impactFoamDispAmp;
+          uIFNoiseFreq.value = impactFoamParams.impactFoamNoiseFreq;
+          uIFFlow.value = impactFoamParams.impactFoamFlow;
+          uIFOpacity.value = impactFoamParams.impactFoamOpacity;
+          uIFRimCyan.value = impactFoamParams.impactFoamRimCyan;
+          uIFRadius.value = impactFoamParams.impactFoamBaseRadius;
+        }
+
+        function applyImpactFoamVisibility() {
+          splashCapObjects.forEach((m) => {
+            m.visible = impactFoamParams.impactFoamVisible;
+          });
+          if (selectedSplashCap && !impactFoamParams.impactFoamVisible) {
+            transformControls.detach();
+            tcHelper.visible = false;
+            if (currentMode !== "play" && orbit) orbit.enabled = true;
+          } else if (
+            selectedSplashCap &&
+            impactFoamParams.impactFoamVisible &&
+            currentMode === "waterfall"
+          ) {
+            transformControls.enabled = true;
+            tcHelper.visible = true;
+            transformControls.attach(selectedSplashCap);
+          }
+        }
+
+        function rebuildAllImpactFoamGeometry() {
+          splashCapObjects.forEach((m) => {
+            const old = m.geometry;
+            m.geometry = buildImpactFoamGeometry(
+              impactFoamParams.impactFoamBaseRadius,
+              impactFoamParams.impactFoamCapAngle,
+            );
+            old.dispose();
+          });
+          uIFRadius.value = impactFoamParams.impactFoamBaseRadius;
+        }
 
         function selectWaterfall(mesh) {
+          selectedSplashCap = null;
           selectedWaterfall = mesh;
-          if (mesh) { tcHelper.visible = true; transformControls.attach(mesh); }
-          else { tcHelper.visible = false; transformControls.detach(); }
+          if (mesh) {
+            transformControls.enabled = true;
+            tcHelper.visible = true;
+            transformControls.attach(mesh);
+          } else {
+            tcHelper.visible = false;
+            transformControls.detach();
+          }
+        }
+
+        function selectSplashCap(mesh) {
+          selectedWaterfall = null;
+          selectedSplashCap = mesh;
+          if (mesh) {
+            transformControls.enabled = true;
+            tcHelper.visible = true;
+            transformControls.attach(mesh);
+          } else {
+            tcHelper.visible = false;
+            transformControls.detach();
+          }
         }
 
         function placeWaterfall(wx, wy, wz) {
@@ -6212,6 +6351,75 @@
           const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
           const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "waterfalls.json"; a.click();
         }
+
+        function placeSplashCap(wx, wy, wz) {
+          const mesh = new THREE.Mesh(
+            buildImpactFoamGeometry(
+              impactFoamParams.impactFoamBaseRadius,
+              impactFoamParams.impactFoamCapAngle,
+            ),
+            impactFoamMat,
+          );
+          mesh.name = "SplashCap";
+          mesh.userData.isSplashCap = true;
+          mesh.rotation.x = 0;
+          mesh.position.set(wx, wy, wz);
+          mesh.scale.set(1, 1, 1);
+          mesh.visible = impactFoamParams.impactFoamVisible;
+          mesh.renderOrder = 4;
+          scene.add(mesh);
+          splashCapObjects.push(mesh);
+          selectSplashCap(mesh);
+        }
+
+        function applySplashCaps(data) {
+          splashCapObjects.forEach((m) => {
+            scene.remove(m);
+            m.geometry.dispose();
+          });
+          splashCapObjects = [];
+          selectSplashCap(null);
+          data.forEach((d) => {
+            const mesh = new THREE.Mesh(
+              buildImpactFoamGeometry(
+                impactFoamParams.impactFoamBaseRadius,
+                impactFoamParams.impactFoamCapAngle,
+              ),
+              impactFoamMat,
+            );
+            mesh.name = "SplashCap";
+            mesh.userData.isSplashCap = true;
+            mesh.position.set(d.x, d.y, d.z);
+            mesh.rotation.set(d.rx, d.ry, d.rz);
+            mesh.scale.set(d.sx, d.sy, d.sz);
+            mesh.visible = impactFoamParams.impactFoamVisible;
+            mesh.renderOrder = 4;
+            scene.add(mesh);
+            splashCapObjects.push(mesh);
+          });
+        }
+
+        function saveSplashCaps() {
+          const data = splashCapObjects.map((m) => ({
+            x: m.position.x,
+            y: m.position.y,
+            z: m.position.z,
+            rx: m.rotation.x,
+            ry: m.rotation.y,
+            rz: m.rotation.z,
+            sx: m.scale.x,
+            sy: m.scale.y,
+            sz: m.scale.z,
+          }));
+          const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = "splash-caps.json";
+          a.click();
+        }
+
+        syncImpactFoamUniforms();
+        applyImpactFoamVisibility();
 
         // River material — uses UV-based directional flow shader
         const riverMat = new MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
@@ -7207,6 +7415,17 @@
             })),
             cliffInstances: cliffInstancer.exportData(),
             waterfalls: waterfallObjects.map(m => ({ x:m.position.x, y:m.position.y, z:m.position.z, rx:m.rotation.x, ry:m.rotation.y, rz:m.rotation.z, sx:m.scale.x, sy:m.scale.y, sz:m.scale.z })),
+            splashCaps: splashCapObjects.map((m) => ({
+              x: m.position.x,
+              y: m.position.y,
+              z: m.position.z,
+              rx: m.rotation.x,
+              ry: m.rotation.y,
+              rz: m.rotation.z,
+              sx: m.scale.x,
+              sy: m.scale.y,
+              sz: m.scale.z,
+            })),
             glowOrbs: glowOrbPositions,
             riverPoints: riverPoints.map(p => ({ x:p.x, y:p.y, z:p.z })),
             splinePoints: splinePoints.map(p => ({ x:p.x, y:p.y, z:p.z })),
@@ -7414,6 +7633,7 @@
               if (meta.props) applyProps(meta.props);
               if (meta.waterBodies) applyWaterBodies(meta.waterBodies);
               if (meta.waterfalls) applyWaterfalls(meta.waterfalls);
+              if (meta.splashCaps) applySplashCaps(meta.splashCaps);
               if (meta.glowOrbs) {
                 glowOrbPositions = meta.glowOrbs;
                 _rebuildGlowOrbs();
@@ -11069,6 +11289,27 @@
         const waterfallFolder = pane.addFolder({ title: "Waterfall  [ H ]", expanded: true });
         waterfallFolder.hidden = true;
         {
+          const wfPlaceOptions = {
+            "Waterfall sheet": "waterfall",
+            "Impact splash cap": "splashCap",
+          };
+          waterfallFolder
+            .addBinding(wfPlaceTool, "tool", { label: "Place", options: wfPlaceOptions })
+            .on("change", () => {
+              selectWaterfall(null);
+              selectSplashCap(null);
+              if (currentMode === "waterfall") {
+                const b = document.getElementById("mode-badge");
+                b.textContent =
+                  wfPlaceTool.tool === "splashCap"
+                    ? "SPLASH CAP MODE  [ H ]"
+                    : "WATERFALL MODE  [ H ]";
+                b.className = "waterfall";
+              }
+              pane.refresh();
+            });
+          waterfallFolder.addBlade({ view: "separator" });
+
           const wfMkColor = (folder, label, key) => {
             const hex = "#" + wfU[key].value.getHexString();
             const obj = { color: hex };
@@ -11118,18 +11359,142 @@
           wfMkColor(dripF, "Color", "drip_color");
           wfMkF(dripF, "Strength", "drip_strength", 0, 1, 0.01);
 
+          const fImpactFoam = waterfallFolder.addFolder({
+            title: "Impact foam (hand-placed splash cap)",
+            expanded: false,
+          });
+          fImpactFoam
+            .addBinding(impactFoamParams, "impactFoamVisible", { label: "Show foam" })
+            .on("change", () => {
+              applyImpactFoamVisibility();
+            });
+          fImpactFoam.addBlade({ view: "separator" });
+          fImpactFoam
+            .addBinding(impactFoamParams, "impactFoamBaseRadius", {
+              label: "Cap radius (world)",
+              min: 0.6,
+              max: 14,
+              step: 0.05,
+            })
+            .on("change", syncImpactFoamUniforms);
+          fImpactFoam.addBinding(impactFoamParams, "impactFoamCapAngle", {
+            label: "Cap span (×π rad)",
+            min: 0.1,
+            max: 0.48,
+            step: 0.01,
+          });
+          fImpactFoam.addButton({ title: "Rebuild cap geometry" }).on("click", () => {
+            rebuildAllImpactFoamGeometry();
+          });
+          fImpactFoam.addBlade({ view: "separator" });
+          fImpactFoam
+            .addBinding(impactFoamParams, "impactFoamDispAmp", {
+              label: "Vertex churn (displace)",
+              min: 0,
+              max: 2.2,
+              step: 0.02,
+            })
+            .on("change", syncImpactFoamUniforms);
+          fImpactFoam
+            .addBinding(impactFoamParams, "impactFoamNoiseFreq", {
+              label: "Noise frequency",
+              min: 0.2,
+              max: 6,
+              step: 0.05,
+            })
+            .on("change", syncImpactFoamUniforms);
+          fImpactFoam
+            .addBinding(impactFoamParams, "impactFoamFlow", {
+              label: "Scroll / flow speed",
+              min: 0,
+              max: 4,
+              step: 0.05,
+            })
+            .on("change", syncImpactFoamUniforms);
+          fImpactFoam
+            .addBinding(impactFoamParams, "impactFoamOpacity", {
+              label: "Opacity max",
+              min: 0.2,
+              max: 1,
+              step: 0.02,
+            })
+            .on("change", syncImpactFoamUniforms);
+          fImpactFoam
+            .addBinding(impactFoamParams, "impactFoamRimCyan", {
+              label: "Rim cyan mix",
+              min: 0,
+              max: 1,
+              step: 0.02,
+            })
+            .on("change", syncImpactFoamUniforms);
+          fImpactFoam.addBlade({ view: "separator" });
+          fImpactFoam.addButton({ title: "Move (key 7)" }).on("click", () => {
+            transformControls.setMode("translate");
+          });
+          fImpactFoam.addButton({ title: "Rotate (key 8)" }).on("click", () => {
+            transformControls.setMode("rotate");
+          });
+          fImpactFoam.addButton({ title: "Scale (key 9)" }).on("click", () => {
+            transformControls.setMode("scale");
+          });
+          fImpactFoam.addButton({ title: "Save transform JSON" }).on("click", () => {
+            if (!selectedSplashCap) return;
+            const m = selectedSplashCap;
+            const blob = new Blob(
+              [
+                JSON.stringify(
+                  {
+                    x: m.position.x,
+                    y: m.position.y,
+                    z: m.position.z,
+                    rx: m.rotation.x,
+                    ry: m.rotation.y,
+                    rz: m.rotation.z,
+                    sx: m.scale.x,
+                    sy: m.scale.y,
+                    sz: m.scale.z,
+                  },
+                  null,
+                  2,
+                ),
+              ],
+              { type: "application/json" },
+            );
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            a.download = "lake-editor-impact-foam-transform.json";
+            a.click();
+          });
+
           waterfallFolder.addBlade({ view: "separator" });
           waterfallFolder.addButton({ title: "Save waterfalls JSON" }).on("click", saveWaterfalls);
+          waterfallFolder.addButton({ title: "Save splash caps JSON" }).on("click", saveSplashCaps);
           waterfallFolder.addButton({ title: "Delete selected  [ Del ]" }).on("click", () => {
-            if (!selectedWaterfall) return;
-            scene.remove(selectedWaterfall);
-            waterfallObjects = waterfallObjects.filter(m => m !== selectedWaterfall);
-            selectWaterfall(null);
+            if (selectedWaterfall) {
+              scene.remove(selectedWaterfall);
+              waterfallObjects = waterfallObjects.filter((m) => m !== selectedWaterfall);
+              selectWaterfall(null);
+            } else if (selectedSplashCap) {
+              scene.remove(selectedSplashCap);
+              selectedSplashCap.geometry.dispose();
+              splashCapObjects = splashCapObjects.filter((m) => m !== selectedSplashCap);
+              selectSplashCap(null);
+            }
+            pane.refresh();
           });
           waterfallFolder.addButton({ title: "Clear all waterfalls" }).on("click", () => {
             waterfallObjects.forEach(m => scene.remove(m));
             waterfallObjects = [];
             selectWaterfall(null);
+          });
+          waterfallFolder.addButton({ title: "Clear all splash caps" }).on("click", () => {
+            splashCapObjects.forEach((m) => {
+              scene.remove(m);
+              m.geometry.dispose();
+            });
+            splashCapObjects = [];
+            selectSplashCap(null);
+            pane.refresh();
           });
         }
 
@@ -11755,6 +12120,7 @@
             selectedProp = null;
             selectWater(null);
             selectWaterfall(null);
+            selectSplashCap(null);
             selectDecal(null);
             selectCliffBlend(null);
           } else if (usingTC && transformControls) {
@@ -11763,18 +12129,21 @@
               selectedProp = null;
               selectWater(null);
               selectWaterfall(null);
+              selectSplashCap(null);
               selectDecal(null);
             }
             if (mode === "props") {
               selectedCliff = null;
               selectWater(null);
               selectWaterfall(null);
+              selectSplashCap(null);
               selectDecal(null);
             }
             if (mode === "water") {
               selectedCliff = null;
               selectedProp = null;
               selectWaterfall(null);
+              selectSplashCap(null);
               selectDecal(null);
             }
             if (mode === "waterfall") {
@@ -11788,6 +12157,7 @@
               selectedProp = null;
               selectWater(null);
               selectWaterfall(null);
+              selectSplashCap(null);
               selectDecal(selectedDecal); // re-attach if already selected
             }
             if (mode === "cliffs") {
@@ -11795,6 +12165,7 @@
               selectedProp = null;
               selectWater(null);
               selectWaterfall(null);
+              selectSplashCap(null);
               selectDecal(null);
               selectCliffBlend(null);
               // Re-attach gizmo if an instance was already selected
@@ -11811,6 +12182,7 @@
               selectedProp = null;
               selectWater(null);
               selectWaterfall(null);
+              selectSplashCap(null);
               selectDecal(null);
               if (selectedCliffBlend) {
                 transformControls.attach(selectedCliffBlend);
@@ -11855,7 +12227,9 @@
                                       : mode === "river"
                                         ? "RIVER MODE  [ V ]"
                                         : mode === "waterfall"
-                                          ? "WATERFALL MODE  [ H ]"
+                                          ? wfPlaceTool.tool === "splashCap"
+                                            ? "SPLASH CAP MODE  [ H ]"
+                                            : "WATERFALL MODE  [ H ]"
                                           : mode === "pinelod"
                                             ? "TREE LOD  [ J ]"
                                             : mode === "ftrees"
@@ -12006,6 +12380,21 @@
             if (e.code === "KeyW") { e.preventDefault(); transformControls.setMode("translate"); }
             if (e.code === "KeyE") { e.preventDefault(); transformControls.setMode("rotate"); }
             if (e.code === "KeyR") { e.preventDefault(); transformControls.setMode("scale"); }
+            if (e.code === "Digit7") { e.preventDefault(); transformControls.setMode("translate"); }
+            if (e.code === "Digit8") { e.preventDefault(); transformControls.setMode("rotate"); }
+            if (e.code === "Digit9") { e.preventDefault(); transformControls.setMode("scale"); }
+            if (e.code === "Delete" && selectedWaterfall) {
+              scene.remove(selectedWaterfall);
+              waterfallObjects = waterfallObjects.filter((m) => m !== selectedWaterfall);
+              selectWaterfall(null);
+            }
+            if (e.code === "Delete" && selectedSplashCap) {
+              scene.remove(selectedSplashCap);
+              selectedSplashCap.geometry.dispose();
+              splashCapObjects = splashCapObjects.filter((m) => m !== selectedSplashCap);
+              selectSplashCap(null);
+              pane.refresh();
+            }
           }
           if (currentMode === "decal") {
             if (e.code === "KeyW") { e.preventDefault(); transformControls.setMode("translate"); }
@@ -12092,6 +12481,13 @@
               scene.remove(selectedWaterfall);
               waterfallObjects = waterfallObjects.filter(m => m !== selectedWaterfall);
               selectWaterfall(null);
+            }
+            if (e.code === "Delete" && selectedSplashCap) {
+              scene.remove(selectedSplashCap);
+              selectedSplashCap.geometry.dispose();
+              splashCapObjects = splashCapObjects.filter((m) => m !== selectedSplashCap);
+              selectSplashCap(null);
+              pane.refresh();
             }
           }
           if (currentMode === "cliffblend") {
@@ -12331,6 +12727,20 @@
             mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
             mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
             raycaster.setFromCamera(mouse, camera);
+            if (wfPlaceTool.tool === "splashCap") {
+              const capHits = raycaster.intersectObjects(splashCapObjects, false);
+              if (capHits.length > 0) {
+                selectSplashCap(capHits[0].object);
+                pane.refresh();
+                return;
+              }
+              const pt = getTerrainHit(e);
+              if (pt) {
+                placeSplashCap(pt.x, pt.y, pt.z);
+                pane.refresh();
+              }
+              return;
+            }
             const wfHits = raycaster.intersectObjects(waterfallObjects, false);
             if (wfHits.length > 0) { selectWaterfall(wfHits[0].object); return; }
             const pt = getTerrainHit(e);
@@ -13019,6 +13429,10 @@
           const lakeBodies = waterObjects.filter(m => m.userData.waterStyle === "Lake");
           lakeShader.update(dt, elapsed, lakeBodies);
           if (waterfallObjects.length > 0) wfU.wfFlowTime.value += dt * wfU.wfFlowSpeed.value;
+          if (splashCapObjects.length > 0) {
+            uIFTime.value = elapsed;
+            syncImpactFoamUniforms();
+          }
           uWCamXZ.value.set(camera.position.x, camera.position.z);
           _syncRipples();
           if (grassPatchSystem || cliffGrassPatchSystem || flowerPatchSystem) {
