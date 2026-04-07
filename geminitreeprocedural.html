@@ -67,23 +67,6 @@ const params = {
     gnarliness: 0.45,
     sunForce: 0.25,
     gravity: 0.12,
-    radialSegments: 6,
-    // Trunk Curve
-    trunkLean: 0.15,
-    trunkLeanDir: 0,
-    // Branch Angles
-    branchAngleMin: 20,
-    branchAngleMax: 50,
-    // Root Flare
-    rootCount: 4,
-    rootSpread: 2.0,
-    rootHeight: 1.5,
-    rootFlare: 1.8,
-    // Vertex Noise
-    vertexNoise: 0.15,
-    // Bark Colors
-    barkColorBase: '#2a1a0e',
-    barkColorTop: '#4a3520',
     // Canopy Shape
     canopyWidth: 7.0,
     canopyHeight: 12.0,
@@ -172,143 +155,30 @@ function buildTree() {
     };
 
     const tips = [];
-    const colBase = new THREE.Color(params.barkColorBase);
-    const colTop  = new THREE.Color(params.barkColorTop);
-    // Track max Y for gradient normalization
-    let maxY = params.trunkHeight;
-
-    // Helper: apply radial vertex noise + vertex color gradient to a cylinder geo
-    function enhanceGeo(geo, baseY, height) {
-        const pos = geo.attributes.position;
-        const norm = geo.attributes.normal;
-        const colors = new Float32Array(pos.count * 3);
-        const tmpC = new THREE.Color();
-        for (let i = 0; i < pos.count; i++) {
-            // Vertex noise — displace radially
-            if (params.vertexNoise > 0) {
-                const nx = norm.getX(i), nz = norm.getZ(i);
-                const radialLen = Math.sqrt(nx * nx + nz * nz);
-                if (radialLen > 0.01) {
-                    const noise = (random() - 0.5) * 2 * params.vertexNoise * 0.3;
-                    pos.setX(i, pos.getX(i) + (nx / radialLen) * noise);
-                    pos.setZ(i, pos.getZ(i) + (nz / radialLen) * noise);
-                }
-            }
-            // Bark color gradient based on world Y
-            const localY = pos.getY(i);
-            const worldY = baseY + localY + height * 0.5;
-            const t = Math.min(Math.max(worldY / maxY, 0), 1);
-            tmpC.lerpColors(colBase, colTop, t);
-            colors[i * 3]     = tmpC.r;
-            colors[i * 3 + 1] = tmpC.g;
-            colors[i * 3 + 2] = tmpC.b;
-        }
-        geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-        pos.needsUpdate = true;
-    }
-
-    const barkMat = new THREE.MeshStandardMaterial({ vertexColors: true });
-    const segs = params.radialSegments;
 
     if (!params.useCustomTrunk) {
-        // Lean direction vector (XZ plane)
-        const leanRad = params.trunkLeanDir * Math.PI / 180;
-        const leanDirX = Math.sin(leanRad);
-        const leanDirZ = Math.cos(leanRad);
-
         function grow(pos, dir, rad, len, lvl) {
             if (lvl > params.levels) {
                 tips.push({ pos: pos.clone(), dir: dir.clone() });
                 return;
             }
-            // Apply trunk lean curve (strongest on main trunk, fades on branches)
-            const leanFactor = params.trunkLean * (1 / (1 + lvl * 0.8));
-            const curvedDir = dir.clone();
-            curvedDir.x += leanDirX * leanFactor * 0.3;
-            curvedDir.z += leanDirZ * leanFactor * 0.3;
-            curvedDir.normalize();
-
-            const end = pos.clone().add(curvedDir.clone().multiplyScalar(len));
-            const topRad = rad * params.trunkTaper;
-            const geo = new THREE.CylinderGeometry(topRad, rad, len, segs);
-            const baseY = Math.min(pos.y, end.y);
-            enhanceGeo(geo, baseY, len);
-            const mesh = new THREE.Mesh(geo, barkMat);
+            const end = pos.clone().add(dir.clone().multiplyScalar(len));
+            const geo = new THREE.CylinderGeometry(rad * params.trunkTaper, rad, len, 10);
+            const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: 0x3d2b1f }));
             mesh.position.copy(pos.clone().add(end).multiplyScalar(0.5));
-            mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), curvedDir);
+            mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
             trunkGroup.add(mesh);
 
-            // Branch children with angle control
-            const angleMinRad = params.branchAngleMin * Math.PI / 180;
-            const angleMaxRad = params.branchAngleMax * Math.PI / 180;
             for (let i = 0; i < params.children; i++) {
-                const nextDir = curvedDir.clone();
-                // Controlled spread angle
-                const spreadAngle = angleMinRad + random() * (angleMaxRad - angleMinRad);
-                const azimuth = random() * Math.PI * 2;
-                // Build a perpendicular vector for rotation
-                const perp = new THREE.Vector3(-curvedDir.z, 0, curvedDir.x).normalize();
-                if (perp.length() < 0.01) perp.set(1, 0, 0);
-                const perp2 = new THREE.Vector3().crossVectors(curvedDir, perp).normalize();
-                const offX = Math.cos(azimuth) * Math.sin(spreadAngle);
-                const offZ = Math.sin(azimuth) * Math.sin(spreadAngle);
-                const offY = Math.cos(spreadAngle);
-                nextDir.set(
-                    curvedDir.x * offY + perp.x * offX + perp2.x * offZ,
-                    curvedDir.y * offY + perp.y * offX + perp2.y * offZ,
-                    curvedDir.z * offY + perp.z * offX + perp2.z * offZ
-                );
-                // Add gnarliness jitter on top
-                nextDir.x += (random() - 0.5) * params.gnarliness * 0.5;
-                nextDir.z += (random() - 0.5) * params.gnarliness * 0.5;
+                const nextDir = dir.clone();
+                nextDir.x += (random() - 0.5) * params.gnarliness;
+                nextDir.z += (random() - 0.5) * params.gnarliness;
                 nextDir.y += params.sunForce - (params.gravity * lvl);
                 nextDir.normalize();
-                grow(end, nextDir, topRad, len * params.branchMult, lvl + 1);
+                grow(end, nextDir, rad * params.trunkTaper, len * params.branchMult, lvl + 1);
             }
         }
-
-        // Estimate maxY for color gradient
-        maxY = params.trunkHeight * (1 + params.levels * params.branchMult) * 0.8;
-
         grow(new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 1, 0), params.trunkRadius, params.trunkHeight, 0);
-
-        // ── Root Flare ──
-        if (params.rootCount > 0) {
-            const baseRad = params.trunkRadius * params.rootFlare;
-            for (let i = 0; i < params.rootCount; i++) {
-                const angle = (i / params.rootCount) * Math.PI * 2 + random() * 0.4;
-                const spread = params.rootSpread;
-                const rHeight = params.rootHeight * (0.7 + random() * 0.3);
-                // Root: tapered cylinder angled outward and downward
-                const rootLen = Math.sqrt(spread * spread + rHeight * rHeight);
-                const rootDir = new THREE.Vector3(
-                    Math.cos(angle) * spread,
-                    rHeight,
-                    Math.sin(angle) * spread
-                ).normalize();
-                const rootRadBot = baseRad * (0.3 + random() * 0.2);
-                const rootRadTop = rootRadBot * 0.3;
-                const geo = new THREE.CylinderGeometry(rootRadTop, rootRadBot, rootLen, segs);
-                enhanceGeo(geo, -0.2, rootLen);
-                const mesh = new THREE.Mesh(geo, barkMat);
-                // Position: midpoint of root
-                const rootEnd = new THREE.Vector3(
-                    Math.cos(angle) * spread,
-                    rHeight,
-                    Math.sin(angle) * spread
-                );
-                mesh.position.copy(rootEnd.clone().multiplyScalar(0.5));
-                mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), rootDir);
-                trunkGroup.add(mesh);
-            }
-            // Flared base cylinder (wider at bottom)
-            const flareGeo = new THREE.CylinderGeometry(params.trunkRadius, baseRad, params.rootHeight * 0.6, segs);
-            enhanceGeo(flareGeo, 0, params.rootHeight * 0.6);
-            const flareMesh = new THREE.Mesh(flareGeo, barkMat);
-            flareMesh.position.y = params.rootHeight * 0.3;
-            trunkGroup.add(flareMesh);
-        }
-
     } else if (customTrunk) {
         trunkGroup.add(customTrunk);
         const box = new THREE.Box3().setFromObject(customTrunk);
@@ -352,26 +222,9 @@ fStruc.addBinding(params, 'levels', {min:1, max:5, step:1}).on('change', buildTr
 fStruc.addBinding(params, 'trunkHeight', {min:2, max:20}).on('change', buildTree);
 fStruc.addBinding(params, 'trunkRadius', {min:0.1, max:3}).on('change', buildTree);
 fStruc.addBinding(params, 'trunkTaper', {min:0.1, max:1}).on('change', buildTree);
-fStruc.addBinding(params, 'radialSegments', {min:4, max:12, step:1, label:'Sides'}).on('change', buildTree);
 fStruc.addBinding(params, 'gnarliness', {min:0, max:2}).on('change', buildTree);
 fStruc.addBinding(params, 'sunForce', {min:0, max:1}).on('change', buildTree);
 fStruc.addBinding(params, 'gravity', {min:0, max:1}).on('change', buildTree);
-fStruc.addBinding(params, 'vertexNoise', {min:0, max:1, label:'Vertex noise'}).on('change', buildTree);
-
-const fCurve = pane.addFolder({ title: 'Trunk Curve' });
-fCurve.addBinding(params, 'trunkLean', {min:0, max:2, label:'Lean'}).on('change', buildTree);
-fCurve.addBinding(params, 'trunkLeanDir', {min:0, max:360, step:1, label:'Lean direction'}).on('change', buildTree);
-
-const fBranch = pane.addFolder({ title: 'Branch Angles' });
-fBranch.addBinding(params, 'branchAngleMin', {min:0, max:90, step:1, label:'Min angle'}).on('change', buildTree);
-fBranch.addBinding(params, 'branchAngleMax', {min:0, max:90, step:1, label:'Max angle'}).on('change', buildTree);
-fBranch.addBinding(params, 'children', {min:1, max:6, step:1}).on('change', buildTree);
-
-const fRoots = pane.addFolder({ title: 'Root Flare' });
-fRoots.addBinding(params, 'rootCount', {min:0, max:8, step:1, label:'Roots'}).on('change', buildTree);
-fRoots.addBinding(params, 'rootSpread', {min:0, max:5, label:'Spread'}).on('change', buildTree);
-fRoots.addBinding(params, 'rootHeight', {min:0, max:4, label:'Height'}).on('change', buildTree);
-fRoots.addBinding(params, 'rootFlare', {min:1, max:4, label:'Flare'}).on('change', buildTree);
 
 const fCanopy = pane.addFolder({ title: 'Canopy & Clumping' });
 fCanopy.addBinding(params, 'clumpRadius', {min:1, max:15}).on('change', buildTree);
@@ -398,9 +251,6 @@ fColors.addBinding(params, 'topColor');
 fColors.addBinding(params, 'bottomColor');
 fColors.addBinding(params, 'sssColor');
 fColors.addBinding(params, 'rimColor');
-fColors.addBlade({ view: 'separator' });
-fColors.addBinding(params, 'barkColorBase', {label:'Bark base'}).on('change', buildTree);
-fColors.addBinding(params, 'barkColorTop', {label:'Bark top'}).on('change', buildTree);
 
 /** 6. MERGE & EXPORT **/
 const fExport = pane.addFolder({ title: 'Export Trunk' });
