@@ -8,6 +8,7 @@
  *   - Planar reflections (optional, host provides RT)
  *   - Shore foam V1 (Voronoi FBM / Perlin, jagged cutoff)
  *   - Shore foam V2 (domain warp, Voronoi/value noise, independent system)
+ *   - Shore inward pulse rings (A+B): time-traveling bands from shore toward deeper water
  *   - Shore contact transparency (shallow alpha wobble)
  *   - Terrain-slope mask: gentle beaches keep shallow α / pale tint; steep cliffs damp them (no “fake shallow” on walls)
  *   - Debug: lakeDebugNo* uniforms strip one layer at a time (isolate shore seam)
@@ -162,6 +163,32 @@ export const LAKE_DEFAULTS = {
   shoreFoamVoroEdgeGain:   3.2,
   shoreFoamVoroFbmWeight:  0.72,
   shorePrimaryFoamColor: "#ffffff",
+
+  /** Inward-traveling pulse rings on the lake (same idea as lake-unreal.html waterFrag). */
+  shorePulseNoiseAnisoX: 1,
+  shorePulseNoiseAnisoZ: 1,
+  shorePulseOpacity: 1,
+  shorePulse2Opacity: 1,
+  shorePulseFoamColor: "#c9ebff",
+  shorePulse2FoamColor: "#a8d8ff",
+  shorePulseNoiseStyle: "voronoiFbm",
+  shorePulseEnabled: false,
+  shorePulseAnimSpeed: 0.38,
+  shorePulseMaxRange: 3.2,
+  shorePulseTravelPower: 1,
+  shorePulseMinDist: 0.02,
+  shorePulseRingWidth: 0.11,
+  shorePulseRing2WidthMul: 1,
+  shorePulseIntensity: 0.72,
+  shorePulseFade: 1.65,
+  shorePulseStagger: 0.5,
+  shorePulse2Intensity: 0.45,
+  shorePulseRing2Sharpness: 1.15,
+  shorePulse2Fade: 1.65,
+  shorePulseNoiseAmt: 0.35,
+  shorePulseNoiseScale: 9,
+  shorePulseNoiseAnimSpeed: 0.55,
+  shorePulseRingSharpness: 1.15,
 
   // Shore foam V2
   shoreFoamV2Enabled:    false,
@@ -473,6 +500,31 @@ export function createLakeShader({ heightTex, terrainSize }) {
   u.shoreFoamVoroFbmWeight  = uniform(LAKE_DEFAULTS.shoreFoamVoroFbmWeight);
   u.shorePrimaryFoamColor   = uniform(new THREE.Color(LAKE_DEFAULTS.shorePrimaryFoamColor));
 
+  u.shorePulseNoiseMode = uniform(LAKE_DEFAULTS.shorePulseNoiseStyle === "voronoiFbm" ? 1 : 0);
+  u.shorePulseNoiseAnisoX = uniform(LAKE_DEFAULTS.shorePulseNoiseAnisoX);
+  u.shorePulseNoiseAnisoZ = uniform(LAKE_DEFAULTS.shorePulseNoiseAnisoZ);
+  u.shorePulseOpacity = uniform(LAKE_DEFAULTS.shorePulseOpacity);
+  u.shorePulse2Opacity = uniform(LAKE_DEFAULTS.shorePulse2Opacity);
+  u.shorePulseFoamColor = uniform(new THREE.Color(LAKE_DEFAULTS.shorePulseFoamColor));
+  u.shorePulse2FoamColor = uniform(new THREE.Color(LAKE_DEFAULTS.shorePulse2FoamColor));
+  u.shorePulseEnabled = uniform(LAKE_DEFAULTS.shorePulseEnabled ? 1 : 0);
+  u.shorePulseAnimSpeed = uniform(LAKE_DEFAULTS.shorePulseAnimSpeed);
+  u.shorePulseMaxRange = uniform(LAKE_DEFAULTS.shorePulseMaxRange);
+  u.shorePulseTravelPower = uniform(LAKE_DEFAULTS.shorePulseTravelPower);
+  u.shorePulseMinDist = uniform(LAKE_DEFAULTS.shorePulseMinDist);
+  u.shorePulseRingWidth = uniform(LAKE_DEFAULTS.shorePulseRingWidth);
+  u.shorePulseRing2WidthMul = uniform(LAKE_DEFAULTS.shorePulseRing2WidthMul);
+  u.shorePulseIntensity = uniform(LAKE_DEFAULTS.shorePulseIntensity);
+  u.shorePulseFade = uniform(LAKE_DEFAULTS.shorePulseFade);
+  u.shorePulseStagger = uniform(LAKE_DEFAULTS.shorePulseStagger);
+  u.shorePulse2Intensity = uniform(LAKE_DEFAULTS.shorePulse2Intensity);
+  u.shorePulse2Fade = uniform(LAKE_DEFAULTS.shorePulse2Fade);
+  u.shorePulseNoiseAmt = uniform(LAKE_DEFAULTS.shorePulseNoiseAmt);
+  u.shorePulseNoiseScale = uniform(LAKE_DEFAULTS.shorePulseNoiseScale);
+  u.shorePulseNoiseAnimSpeed = uniform(LAKE_DEFAULTS.shorePulseNoiseAnimSpeed);
+  u.shorePulseRingSharpness = uniform(LAKE_DEFAULTS.shorePulseRingSharpness);
+  u.shorePulseRing2Sharpness = uniform(LAKE_DEFAULTS.shorePulseRing2Sharpness);
+
   // Shore foam V2
   u.shoreFoamV2Enabled     = uniform(LAKE_DEFAULTS.shoreFoamV2Enabled ? 1 : 0);
   u.shoreFoamV2Width       = uniform(LAKE_DEFAULTS.shoreFoamV2Width);
@@ -567,7 +619,7 @@ export function createLakeShader({ heightTex, terrainSize }) {
     return length(vec2(dhdx, dhdz));
   });
 
-  // ── Shore foam V1 layer masks ──────────────────────────────────────────────
+  // ── Shore foam V1 layer masks (+ inward pulse rings y/z) ───────────────────
   const shoreFoamLayerMasks = Fn(([wXZ, distS]) => {
     const absD = abs(distS);
     const foamBase = float(1).sub(smoothstep(float(0), u.shoreFoamWidth, absD));
@@ -609,7 +661,102 @@ export function createLakeShader({ heightTex, terrainSize }) {
     const bandHi = min(u.shoreJaggedCutoff.add(tw), float(1));
     const shorePrimaryA = smoothstep(bandLo, bandHi, unifiedFoam).mul(u.shoreFoamIntensity).saturate();
 
-    return shorePrimaryA;
+    const distInLake = max(float(0), distS);
+    const pulseRange = u.shorePulseMaxRange;
+    const pulseNoiseXY = vec2(
+      u.time.mul(u.shorePulseNoiseAnimSpeed),
+      u.time.mul(u.shorePulseNoiseAnimSpeed.mul(float(0.72))),
+    );
+    const wPAniso = vec2(
+      wXZ.x.mul(u.shorePulseNoiseAnisoX),
+      wXZ.y.mul(u.shorePulseNoiseAnisoZ),
+    );
+    const pulseUVMain = wPAniso.mul(u.shorePulseNoiseScale).add(pulseNoiseXY);
+    const pulseNPerlin = mx_noise_float(pulseUVMain);
+    const uvWorA = pulseUVMain.toVar();
+    const wWarpA = uvWorA.mul(u.shoreWorleyWarpScale);
+    const sa1 = _valueFbm5(wWarpA);
+    const sa2 = _valueFbm5(wWarpA.add(vec2(4, 4)));
+    uvWorA.addAssign(vec2(sa1.sub(0.5), sa2.sub(0.5)).mul(u.shoreWorleyWarpStrength));
+    const nWorA = _worleyFbm5(uvWorA, u.shoreWorleyJitter).toVar();
+    nWorA.assign(pow(nWorA, u.shoreWorleyContrast));
+    nWorA.assign(
+      smoothstep(
+        u.shoreWorleyThreshold,
+        u.shoreWorleyThreshold.add(u.shoreWorleySoftness),
+        nWorA,
+      ),
+    );
+    nWorA.mulAssign(u.shoreWorleyBrightness);
+    const pulseNWorley = nWorA;
+    const pulseModN = mix(
+      pulseNPerlin.mul(0.5).add(0.5),
+      pulseNWorley,
+      u.shorePulseNoiseMode,
+    );
+    const pulseMod = mix(float(1), pulseModN, u.shorePulseNoiseAmt);
+
+    const pulseT0 = fract(u.time.mul(u.shorePulseAnimSpeed));
+    const pulseT = pow(pulseT0, max(u.shorePulseTravelPower, float(0.001)));
+    const pulseFront = pulseT.mul(pulseRange);
+    const pulseRingRaw = float(1).sub(
+      smoothstep(float(0), u.shorePulseRingWidth, abs(distInLake.sub(pulseFront))),
+    );
+    const pulseRing = pow(
+      max(pulseRingRaw.mul(pulseMod), float(0.0001)),
+      u.shorePulseRingSharpness,
+    );
+    const pulseFade = pow(float(1).sub(pulseT0), u.shorePulseFade);
+    const pulseA = pulseRing
+      .mul(pulseFade)
+      .mul(u.shorePulseIntensity)
+      .mul(step(u.shorePulseMinDist, distInLake));
+
+    const pulseT02 = fract(u.time.mul(u.shorePulseAnimSpeed).add(u.shorePulseStagger));
+    const pulseT2 = pow(pulseT02, max(u.shorePulseTravelPower, float(0.001)));
+    const pulseFront2 = pulseT2.mul(pulseRange);
+    const ringW2 = u.shorePulseRingWidth.mul(u.shorePulseRing2WidthMul);
+    const pulseRing2Raw = float(1).sub(
+      smoothstep(float(0), ringW2, abs(distInLake.sub(pulseFront2))),
+    );
+    const pulseUVMain2 = wPAniso
+      .mul(u.shorePulseNoiseScale.mul(float(1.07)))
+      .add(pulseNoiseXY.mul(float(1.03)));
+    const pulseN2Perlin = mx_noise_float(pulseUVMain2);
+    const uvWorB = pulseUVMain2.toVar();
+    const wWarpB = uvWorB.mul(u.shoreWorleyWarpScale);
+    const sb1 = _valueFbm5(wWarpB);
+    const sb2 = _valueFbm5(wWarpB.add(vec2(4, 4)));
+    uvWorB.addAssign(vec2(sb1.sub(0.5), sb2.sub(0.5)).mul(u.shoreWorleyWarpStrength));
+    const nWorB = _worleyFbm5(uvWorB, u.shoreWorleyJitter).toVar();
+    nWorB.assign(pow(nWorB, u.shoreWorleyContrast));
+    nWorB.assign(
+      smoothstep(
+        u.shoreWorleyThreshold,
+        u.shoreWorleyThreshold.add(u.shoreWorleySoftness),
+        nWorB,
+      ),
+    );
+    nWorB.mulAssign(u.shoreWorleyBrightness);
+    const pulseN2Worley = nWorB;
+    const pulseMod2N = mix(
+      pulseN2Perlin.mul(0.5).add(0.5),
+      pulseN2Worley,
+      u.shorePulseNoiseMode,
+    );
+    const pulseMod2 = mix(float(1), pulseMod2N, u.shorePulseNoiseAmt);
+    const pulseRing2 = pow(
+      max(pulseRing2Raw.mul(pulseMod2), float(0.0001)),
+      u.shorePulseRing2Sharpness,
+    );
+    const pulseFade2 = pow(float(1).sub(pulseT02), u.shorePulse2Fade);
+    const pulseB = pulseRing2
+      .mul(pulseFade2)
+      .mul(u.shorePulse2Intensity)
+      .mul(step(u.shorePulseMinDist, distInLake));
+
+    const en = u.shorePulseEnabled;
+    return vec3(shorePrimaryA, pulseA.mul(en), pulseB.mul(en));
   });
 
   // ── Shore foam V2 ──────────────────────────────────────────────────────────
@@ -833,13 +980,16 @@ export function createLakeShader({ heightTex, terrainSize }) {
     const alphaNoiseWobble = mix(float(1), nContact, noiseW);
     const finalAlpha = waterAlpha.mul(alphaContactMul).mul(alphaNoiseWobble);
 
-    // ── Shore foam V1 (heightmap-based) ──────────────────────────────────────
-    const shorePrimaryOld = shoreFoamLayerMasks(worldXZ, distShore);
+    // ── Shore foam V1 (heightmap-based) + pulse masks .y / .z ─────────────────
+    const shoreLayers = shoreFoamLayerMasks(worldXZ, distShore);
+    const shorePrimaryOld = shoreLayers.x;
 
     // ── Shore foam V2 (independent) ──────────────────────────────────────────
     const shorePrimaryV2 = shoreFoamV2Mask(worldXZ, distShore);
     const useV2 = u.shoreFoamV2Enabled;
     const shorePrimary = mix(shorePrimaryOld, shorePrimaryV2, useV2);
+    const pulseAMask = shoreLayers.y.mul(float(1).sub(useV2));
+    const pulseBMask = shoreLayers.z.mul(float(1).sub(useV2));
 
     // ── Foam delay ramp ──────────────────────────────────────────────────────
     const foamDelayRamp = mix(
@@ -889,7 +1039,16 @@ export function createLakeShader({ heightTex, terrainSize }) {
     const afterFoam = surfaceColor
       .add(foamCol.mul(foamAlpha))
       .add(primaryFoamColor.mul(pMaskFinal).mul(primaryFoamMul));
-    const finalColor = afterFoam.saturate();
+    const afterPulseA = mix(
+      afterFoam,
+      u.shorePulseFoamColor,
+      min(float(1), pulseAMask.mul(u.shorePulseOpacity)),
+    );
+    const finalColor = mix(
+      afterPulseA,
+      u.shorePulse2FoamColor,
+      min(float(1), pulseBMask.mul(u.shorePulse2Opacity)),
+    ).saturate();
 
     return vec4(finalColor, finalAlpha);
   });
@@ -1042,6 +1201,33 @@ export function createLakeShader({ heightTex, terrainSize }) {
     if (p.shoreFoamVoroEdgeGain != null)   u.shoreFoamVoroEdgeGain.value   = p.shoreFoamVoroEdgeGain;
     if (p.shoreFoamVoroFbmWeight != null)  u.shoreFoamVoroFbmWeight.value  = p.shoreFoamVoroFbmWeight;
     if (p.shorePrimaryFoamColor != null) c(p.shorePrimaryFoamColor, u.shorePrimaryFoamColor.value);
+
+    if (p.shorePulseNoiseStyle != null) {
+      u.shorePulseNoiseMode.value = p.shorePulseNoiseStyle === "voronoiFbm" ? 1 : 0;
+    }
+    if (p.shorePulseNoiseAnisoX != null) u.shorePulseNoiseAnisoX.value = p.shorePulseNoiseAnisoX;
+    if (p.shorePulseNoiseAnisoZ != null) u.shorePulseNoiseAnisoZ.value = p.shorePulseNoiseAnisoZ;
+    if (p.shorePulseOpacity != null) u.shorePulseOpacity.value = p.shorePulseOpacity;
+    if (p.shorePulse2Opacity != null) u.shorePulse2Opacity.value = p.shorePulse2Opacity;
+    if (p.shorePulseFoamColor != null) c(p.shorePulseFoamColor, u.shorePulseFoamColor.value);
+    if (p.shorePulse2FoamColor != null) c(p.shorePulse2FoamColor, u.shorePulse2FoamColor.value);
+    if (p.shorePulseEnabled != null) u.shorePulseEnabled.value = p.shorePulseEnabled ? 1 : 0;
+    if (p.shorePulseAnimSpeed != null) u.shorePulseAnimSpeed.value = p.shorePulseAnimSpeed;
+    if (p.shorePulseMaxRange != null) u.shorePulseMaxRange.value = p.shorePulseMaxRange;
+    if (p.shorePulseTravelPower != null) u.shorePulseTravelPower.value = p.shorePulseTravelPower;
+    if (p.shorePulseMinDist != null) u.shorePulseMinDist.value = p.shorePulseMinDist;
+    if (p.shorePulseRingWidth != null) u.shorePulseRingWidth.value = p.shorePulseRingWidth;
+    if (p.shorePulseRing2WidthMul != null) u.shorePulseRing2WidthMul.value = p.shorePulseRing2WidthMul;
+    if (p.shorePulseIntensity != null) u.shorePulseIntensity.value = p.shorePulseIntensity;
+    if (p.shorePulseFade != null) u.shorePulseFade.value = p.shorePulseFade;
+    if (p.shorePulseStagger != null) u.shorePulseStagger.value = p.shorePulseStagger;
+    if (p.shorePulse2Intensity != null) u.shorePulse2Intensity.value = p.shorePulse2Intensity;
+    if (p.shorePulse2Fade != null) u.shorePulse2Fade.value = p.shorePulse2Fade;
+    if (p.shorePulseNoiseAmt != null) u.shorePulseNoiseAmt.value = p.shorePulseNoiseAmt;
+    if (p.shorePulseNoiseScale != null) u.shorePulseNoiseScale.value = p.shorePulseNoiseScale;
+    if (p.shorePulseNoiseAnimSpeed != null) u.shorePulseNoiseAnimSpeed.value = p.shorePulseNoiseAnimSpeed;
+    if (p.shorePulseRingSharpness != null) u.shorePulseRingSharpness.value = p.shorePulseRingSharpness;
+    if (p.shorePulseRing2Sharpness != null) u.shorePulseRing2Sharpness.value = p.shorePulseRing2Sharpness;
 
     // Shore V2
     if (p.shoreFoamV2Enabled != null)     u.shoreFoamV2Enabled.value     = p.shoreFoamV2Enabled ? 1 : 0;
