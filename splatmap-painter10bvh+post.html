@@ -1150,6 +1150,10 @@
       let propLibrary = []; // [{ name, scene }] loaded GLBs
       let activePropIndex = -1; // index into propLibrary
       let waterObjects = []; // placed water body meshes
+      let _cachedLakeBodies = [];
+      function _invalidateLakeCache() {
+        _cachedLakeBodies = waterObjects.filter(m => m.userData.waterStyle === "Lake");
+      }
       let selectedWater = null; // currently selected water body
       let syncHeightTex = null; // kept but replaced by bakeBVH
       let bakeBVH = null; // assigned inside init
@@ -6778,6 +6782,7 @@
           mesh.frustumCulled = false;
           scene.add(mesh);
           waterObjects.push(mesh);
+          _invalidateLakeCache();
           selectWater(mesh);
         }
 
@@ -6797,6 +6802,7 @@
             scene.add(mesh);
             waterObjects.push(mesh);
           });
+          _invalidateLakeCache();
         }
 
         function saveWaterBodies() {
@@ -10831,6 +10837,7 @@
             if (!selectedWater) return;
             scene.remove(selectedWater);
             waterObjects = waterObjects.filter((m) => m !== selectedWater);
+            _invalidateLakeCache();
             selectWater(null);
           });
         waterFolder
@@ -10838,6 +10845,7 @@
           .on("click", () => {
             waterObjects.forEach((m) => scene.remove(m));
             waterObjects = [];
+            _invalidateLakeCache();
             selectWater(null);
           });
 
@@ -12627,6 +12635,7 @@
             if (e.code === "Delete" && selectedWater) {
               scene.remove(selectedWater);
               waterObjects = waterObjects.filter((m) => m !== selectedWater);
+              _invalidateLakeCache();
               selectWater(null);
             }
             if (e.code === "Delete" && selectedWaterfall) {
@@ -13582,7 +13591,7 @@
           }
           uWaterTime.value = elapsed;
           // Update lake shader (time + bob for Lake-style water bodies)
-          const lakeBodies = waterObjects.filter(m => m.userData.waterStyle === "Lake");
+          const lakeBodies = _cachedLakeBodies;
           lakeShader.update(dt, elapsed, lakeBodies);
           if (waterfallObjects.length > 0) wfU.wfFlowTime.value += dt * wfU.wfFlowSpeed.value;
           if (splashCapObjects.length > 0) {

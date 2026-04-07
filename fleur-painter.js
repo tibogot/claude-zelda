@@ -442,6 +442,58 @@ export function createFleurSystem(
 ) {
   let positions = [];
   const dummy = new THREE.Object3D();
+
+  // ── Spatial hash for fast min-spacing checks ──
+  const _GRID_CELL = 2; // cell size ≥ max minSpacing you'd ever use
+  const _spatialGrid = new Map(); // "gx|gz" → [index, ...]
+  function _gridKey(gx, gz) { return gx + "|" + gz; }
+  function _toGrid(v) { return Math.floor(v / _GRID_CELL); }
+  function _spatialRebuild() {
+    _spatialGrid.clear();
+    for (let i = 0; i < positions.length; i++) {
+      const gx = _toGrid(positions[i].x), gz = _toGrid(positions[i].z);
+      const k = _gridKey(gx, gz);
+      let arr = _spatialGrid.get(k);
+      if (!arr) { arr = []; _spatialGrid.set(k, arr); }
+      arr.push(i);
+    }
+  }
+  function _spatialAdd(idx) {
+    const p = positions[idx];
+    const gx = _toGrid(p.x), gz = _toGrid(p.z);
+    const k = _gridKey(gx, gz);
+    let arr = _spatialGrid.get(k);
+    if (!arr) { arr = []; _spatialGrid.set(k, arr); }
+    arr.push(idx);
+  }
+  function _spatialHasTooClose(x, z, minSq) {
+    const gx = _toGrid(x), gz = _toGrid(z);
+    const r = Math.ceil(Math.sqrt(minSq) / _GRID_CELL);
+    for (let dx = -r; dx <= r; dx++) {
+      for (let dz = -r; dz <= r; dz++) {
+        const arr = _spatialGrid.get(_gridKey(gx + dx, gz + dz));
+        if (!arr) continue;
+        for (let i = 0; i < arr.length; i++) {
+          const p = positions[arr[i]];
+          const ex = p.x - x, ez = p.z - z;
+          if (ex * ex + ez * ez < minSq) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  // ── Debounced rebuild — at most once per frame ──
+  let _rebuildScheduled = false;
+  function _scheduleRebuild() {
+    if (_rebuildScheduled) return;
+    _rebuildScheduled = true;
+    requestAnimationFrame(() => {
+      _rebuildScheduled = false;
+      rebuild();
+    });
+  }
+
   const uStemStaticCurve = uniform(0.1);
   /** Fleur-only interaction scale (subtle repulse). */
   const uFleurRepulseGain = uniform(0.85);
@@ -603,21 +655,13 @@ export function createFleurSystem(
       const x = cx + Math.cos(angle) * r;
       const z = cz + Math.sin(angle) * r;
 
-      let tooClose = false;
-      for (let i = 0; i < positions.length; i++) {
-        const dx = positions[i].x - x,
-          dz = positions[i].z - z;
-        if (dx * dx + dz * dz < minSq) {
-          tooClose = true;
-          break;
-        }
-      }
-      if (tooClose) continue;
+      if (_spatialHasTooClose(x, z, minSq)) continue;
 
       const yOffset =
         v === "stem"
           ? 0
           : hoverBase + (Math.random() - 0.5) * 2 * hoverVariance;
+      const idx = positions.length;
       positions.push({
         x,
         z,
@@ -628,10 +672,11 @@ export function createFleurSystem(
         variant: v,
         maskIndex: m,
       });
+      _spatialAdd(idx);
       added++;
       if (positions.length >= MAX_FLEURS) break;
     }
-    if (added > 0) rebuild();
+    if (added > 0) _scheduleRebuild();
     return added;
   }
 
@@ -643,7 +688,10 @@ export function createFleurSystem(
         dz = z - cz;
       return dx * dx + dz * dz > rSq;
     });
-    if (positions.length !== before) rebuild();
+    if (positions.length !== before) {
+      _spatialRebuild();
+      _scheduleRebuild();
+    }
   }
 
   function syncHeights() {
@@ -699,11 +747,13 @@ export function createFleurSystem(
         ),
       };
     });
+    _spatialRebuild();
     rebuild();
   }
 
   function clear() {
     positions = [];
+    _spatialGrid.clear();
     rebuild();
   }
 
@@ -789,7 +839,10 @@ export function createFleurSystem(
         ),
       );
     }
-    if (positions.length > 0) rebuild();
+    if (positions.length > 0) {
+      _spatialRebuild();
+      rebuild();
+    }
     if (typeof onReady === "function") onReady();
   }
 
