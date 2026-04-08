@@ -2083,6 +2083,8 @@
         const [cr, cg, cb] = erase ? [0, 0, 0] : [255, 0, 0];
         _applyBrushToCanvas(holeCtx, cx, cy, cr, cg, cb, alpha);
         if (holeTex) holeTex.needsUpdate = true;
+        // Also write to imgSplatData alpha channel (slot 3) for terrain shader
+        paintImgAt(wx, wz, 3, erase);
         syncHoleOverlay();
       }
 
@@ -5528,11 +5530,10 @@
         })();
 
         // ── HOLE MASK — discard terrain fragments where holes are painted ──
+        // Read from imgSplatTex alpha channel (already sampled) to avoid extra sampler
         {
-          const holeUVraw = positionWorld.xz.add(uTerrainHalf).div(uTerrainSize);
-          const holeUV = vec2(holeUVraw.x, float(1.0).sub(holeUVraw.y));
-          const holeMask = texture(holeTex, holeUV).r;
-          // opacity = 1 where no hole, 0 where hole is painted (red channel > 0)
+          const holeMask = texture(imgSplatTex, getSplatUV()).a;
+          // opacity = 1 where no hole, 0 where hole is painted (alpha > 0)
           const holeOpacity = float(1.0).sub(step(float(0.25), holeMask));
           splatMat.opacityNode = holeOpacity;
           splatMat.alphaTest = 0.5;
@@ -7479,11 +7480,7 @@
           mat.positionNode = posNode;
           mat.colorNode    = colNode;
           mat.opacityNode  = opNode;
-          mat.castShadowNode = Fn(() => {
-            const a = smoothstep(u.alphaCutoff.sub(0.05), u.alphaCutoff.add(0.05), mapNode.r);
-            a.lessThan(float(0.5)).discard();
-            return vec4(0, 0, 0, 1);
-          })();
+          mat.alphaTest    = 0.45;
           slot.leafMat = mat;
         }
 
@@ -8027,6 +8024,18 @@
                 holeCtx,
                 holeTex,
               );
+              // Sync hole canvas red channel → imgSplatData alpha channel
+              const holePixels = holeCtx.getImageData(0, 0, SPLAT_RES, SPLAT_RES).data;
+              for (let y = 0; y < SPLAT_RES; y++) {
+                // DataTexture Y is flipped vs canvas Y
+                const dy = SPLAT_RES - 1 - y;
+                for (let x = 0; x < SPLAT_RES; x++) {
+                  const canvasIdx = (y * SPLAT_RES + x) * 4;
+                  const dataIdx   = (dy * SPLAT_RES + x) * 4 + 3;
+                  imgSplatData[dataIdx] = holePixels[canvasIdx]; // red channel → alpha
+                }
+              }
+              if (imgSplatTex) imgSplatTex.needsUpdate = true;
             }
 
             // Object positions
@@ -11665,6 +11674,9 @@
           holeCtx.fillStyle = "#000";
           holeCtx.fillRect(0, 0, HOLE_RES, HOLE_RES);
           if (holeTex) holeTex.needsUpdate = true;
+          // Also clear imgSplatData alpha channel
+          for (let i = 3; i < imgSplatData.length; i += 4) imgSplatData[i] = 0;
+          if (imgSplatTex) imgSplatTex.needsUpdate = true;
           syncHoleOverlay();
         });
 
