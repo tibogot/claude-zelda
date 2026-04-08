@@ -1104,6 +1104,7 @@
         slotName: "Proc A", minSpacing: 2, scaleMin: 0.9, scaleMax: 1.1,
         treesPerStroke: 2, totalTrunks: 0, totalLeaves: 0,
         chunksVisible: 0, chunks: 0,
+        leafMipBias: -0.65,
       };
       function _markPtreeDirty() { _ptreeDirty = true; }
 
@@ -7443,6 +7444,7 @@
             sunDir:      uniform(new THREE.Vector3(5, 12, 4).normalize()),
             windSpeed:   uniform(w.windSpeed ?? 1.8),
             windStr:     uniform(w.windStrength ?? 0.25),
+            leafMipBias: uniform(ptreeParams.leafMipBias),
           };
           slot.uniforms = u;
           const aRand = attribute("aRand", "vec2");
@@ -7471,7 +7473,11 @@
             return clamp(col, float(0), float(2));
           })();
           const opNode = Fn(() =>
-            smoothstep(u.alphaCutoff.sub(0.05), u.alphaCutoff.add(0.05), mapNode.r)
+            smoothstep(
+              u.alphaCutoff.sub(0.05),
+              u.alphaCutoff.add(0.05),
+              mapNode.bias(u.leafMipBias).r
+            )
           )();
           const mat = new MeshStandardNodeMaterial({
             side: THREE.DoubleSide, transparent: false, alphaTest: 0.01,
@@ -7481,7 +7487,11 @@
           mat.colorNode    = colNode;
           mat.opacityNode  = opNode;
           mat.castShadowNode = Fn(() => {
-            const a = smoothstep(u.alphaCutoff.sub(0.05), u.alphaCutoff.add(0.05), mapNode.r);
+            const a = smoothstep(
+              u.alphaCutoff.sub(0.05),
+              u.alphaCutoff.add(0.05),
+              mapNode.bias(u.leafMipBias).r
+            );
             a.lessThan(float(0.5)).discard();
             return vec4(0, 0, 0, 1);
           })();
@@ -10856,6 +10866,9 @@
         ptreeFolder.addBinding(ptreeParams, "scaleMin",       { label: "Scale min",        min: 0.1, max: 5.0, step: 0.05 }).on("change", ev => { PTREE_SLOTS[activePTreeSlot].scaleMin       = ev.value; });
         ptreeFolder.addBinding(ptreeParams, "scaleMax",       { label: "Scale max",        min: 0.1, max: 5.0, step: 0.05 }).on("change", ev => { PTREE_SLOTS[activePTreeSlot].scaleMax       = ev.value; });
         ptreeFolder.addBinding(ptreeParams, "treesPerStroke", { label: "Trees per stroke", min: 1,   max: 20,  step: 1    }).on("change", ev => { PTREE_SLOTS[activePTreeSlot].treesPerStroke = ev.value; });
+        ptreeFolder.addBinding(ptreeParams, "leafMipBias",    { label: "Leaf mip bias",    min: -2,  max: 1,   step: 0.05 }).on("change", ev => {
+          PTREE_SLOTS.forEach(s => { if (s.uniforms?.leafMipBias) s.uniforms.leafMipBias.value = ev.value; });
+        });
         ptreeFolder.addBinding(ptreeParams, "totalTrunks",    { label: "Total trunks",     readonly: true });
         ptreeFolder.addBinding(ptreeParams, "totalLeaves",    { label: "Total leaves",     readonly: true });
         ptreeFolder.addBinding(ptreeParams, "chunksVisible",  { label: "Chunks visible",   readonly: true });
