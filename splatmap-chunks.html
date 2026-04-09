@@ -81,6 +81,7 @@
     <input type="file" id="load-terrain-input" accept="application/json,.json" style="display: none" />
 
     <div id="hint">
+      <kbd>F</kbd> play · <kbd>Esc</kbd>/<kbd>F</kbd> exit ·
       Terrain gen: pane → Terrain generator ·
       <kbd>Shift</kbd>+LMB/RMB sculpt · <kbd>P</kbd> paint · <kbd>G</kbd> Gemini grass · <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> R/G/B ·
       <kbd>~</kbd> tile view · <kbd>D</kbd> chunk debug · <kbd>E</kbd> export <kbd>L</kbd> load · Shift+scroll brush size · Alt+scroll strength
@@ -180,6 +181,7 @@
       const HTEX_RES = 512;
 
       const hudEl = document.getElementById("hud");
+      const hintEl = document.getElementById("hint");
 
       const scene = new THREE.Scene();
 
@@ -654,6 +656,29 @@
         hasBrushHit: false,
         brushWorldPoint: new THREE.Vector3()
       };
+
+      const PLAYER_CAP_R = 0.4;
+      const PLAYER_CAP_H = 1.2;
+      const playParams = {
+        speed: 12,
+        camDist: 8,
+        camSensX: 0.002,
+        camSensY: 0.002
+      };
+      let playMode = false;
+      const keysHeld = {};
+      const playerPos = new THREE.Vector3();
+      let camYaw = 0;
+      let camPitch = 0.35;
+      let savedCamPos = null;
+      let savedTarget = null;
+
+      const capsuleGeo = new THREE.CapsuleGeometry(PLAYER_CAP_R, PLAYER_CAP_H, 4, 8);
+      const capsuleMat = new THREE.MeshStandardMaterial({ color: 0xff6633, roughness: 0.7 });
+      const capsuleMesh = new THREE.Mesh(capsuleGeo, capsuleMat);
+      capsuleMesh.castShadow = true;
+      capsuleMesh.visible = false;
+      scene.add(capsuleMesh);
 
       function syncGeminiFolderVisibility() {
         if (geminiGrassFolderRef)
@@ -1276,9 +1301,9 @@
       }
 
       function updateChunkSet() {
-        const cam = camera.position;
-        const camChunkX = Math.floor((cam.x + worldHalf) / CONFIG.chunkSize);
-        const camChunkZ = Math.floor((cam.z + worldHalf) / CONFIG.chunkSize);
+        const anchor = playMode ? playerPos : camera.position;
+        const camChunkX = Math.floor((anchor.x + worldHalf) / CONFIG.chunkSize);
+        const camChunkZ = Math.floor((anchor.z + worldHalf) / CONFIG.chunkSize);
 
         const needed = new Set();
         const maxChunk = Math.floor(CONFIG.worldSize / CONFIG.chunkSize);
@@ -1288,7 +1313,7 @@
           needed.add(key);
 
           const center = chunkCenterWorld(cx, cz);
-          const dist = center.distanceTo(cam);
+          const dist = center.distanceTo(anchor);
           const lod = PARAMS.terrainLodEnabled
             ? pickLodByDistance(dist)
             : CONFIG.lodLevels[0];
@@ -1366,6 +1391,44 @@
             activeChunks.delete(key);
           }
         }
+      }
+
+      function enterPlayMode() {
+        if (playMode) return;
+        playMode = true;
+        savedCamPos = camera.position.clone();
+        savedTarget = controls.target.clone();
+        playerPos.set(controls.target.x, 0, controls.target.z);
+        playerPos.y = getWorldHeight(playerPos.x, playerPos.z);
+        camYaw = 0;
+        camPitch = 0.35;
+        capsuleMesh.visible = true;
+        controls.enabled = false;
+        brushMarker.visible = false;
+        const tpEl = document.querySelector(".tp-dfwv");
+        if (tpEl) tpEl.style.display = "none";
+        hintEl.style.display = "none";
+        updateChunkSet();
+        renderer.domElement.style.cursor = "none";
+        renderer.domElement.requestPointerLock();
+      }
+
+      function exitPlayMode() {
+        if (!playMode) return;
+        playMode = false;
+        for (const k of Object.keys(keysHeld)) delete keysHeld[k];
+        capsuleMesh.visible = false;
+        if (savedCamPos) camera.position.copy(savedCamPos);
+        if (savedTarget) {
+          controls.target.copy(savedTarget);
+          camera.lookAt(savedTarget);
+        }
+        controls.enabled = true;
+        const tpEl = document.querySelector(".tp-dfwv");
+        if (tpEl) tpEl.style.display = "";
+        hintEl.style.display = "";
+        if (document.pointerLockElement) document.exitPointerLock();
+        renderer.domElement.style.cursor = "";
       }
 
       function rebuildDirtyActiveChunks(limit = 8) {
@@ -1524,10 +1587,39 @@
         return el.closest?.(".tp-dfwv") != null;
       }
 
+      document.addEventListener("mousemove", (event) => {
+        if (!playMode || !document.pointerLockElement) return;
+        camYaw -= event.movementX * playParams.camSensX;
+        camPitch += event.movementY * playParams.camSensY;
+        camPitch = Math.max(0.05, Math.min(PI * 0.45, camPitch));
+      });
+
+      document.addEventListener("pointerlockchange", () => {
+        if (!document.pointerLockElement && playMode) exitPlayMode();
+      });
+
       window.addEventListener("keydown", (event) => {
         if (event.key === "Shift") editState.isShiftDown = true;
+
+        if (playMode) {
+          keysHeld[event.code] = true;
+          if (event.code.startsWith("Arrow")) event.preventDefault();
+          if (!event.repeat && (event.code === "Escape" || event.code === "KeyF")) {
+            event.preventDefault();
+            exitPlayMode();
+          }
+          return;
+        }
+
         if (event.repeat) return;
         if (uiTypingTarget(event.target)) return;
+
+        if (event.code === "KeyF") {
+          event.preventDefault();
+          enterPlayMode();
+          return;
+        }
+
         if (event.key === "d" || event.key === "D") {
           debugChunkView = !debugChunkView;
           if (!debugChunkView) disposeDebugChunkMaterials();
@@ -1565,10 +1657,12 @@
       });
 
       window.addEventListener("keyup", (event) => {
+        if (playMode) keysHeld[event.code] = false;
         if (event.key === "Shift") editState.isShiftDown = false;
       });
 
       renderer.domElement.addEventListener("pointermove", (event) => {
+        if (playMode) return;
         updatePointerNdc(event);
         const hit = raycastTerrainPoint();
         editState.hasBrushHit = !!hit;
@@ -1594,6 +1688,7 @@
       });
 
       renderer.domElement.addEventListener("pointerdown", (event) => {
+        if (playMode) return;
         updatePointerNdc(event);
         const hit = raycastTerrainPoint();
 
@@ -1634,7 +1729,7 @@
         if (editState.isPointerDown) {
           editState.isPointerDown = false;
           editState.pointerAction = null;
-          controls.enabled = true;
+          if (!playMode) controls.enabled = true;
         }
       });
 
@@ -1678,7 +1773,7 @@ fps: ${frameState.fps.toFixed(1)}   frame: ${dtMs.toFixed(2)} ms
 draw calls: ${renderer.info.render.calls}
 terrain tris: ${Math.round(tris).toLocaleString()}
 active chunks: ${activeChunks.size}  (dist LOD: ${PARAMS.terrainLodEnabled ? "ON" : "OFF"})  (chunk cull: ${PARAMS.terrainChunkCulling ? "ON" : "OFF — full world"})  L0=${lodL0} L1=${lodL1} L2=${lodL2}
-mode: ${editState.mode}  paint ch=${chName}  tile view: ${tileShadingMode ? "ON" : "OFF"}
+mode: ${playMode ? "PLAY (WASD · Esc/F exit)" : editState.mode}  paint ch=${chName}  tile view: ${tileShadingMode ? "ON" : "OFF"}
 chunk debug: ${debugChunkView ? "ON" : "OFF"}
 chunks saved: ${chunkDataMap.size} height / ${chunkSplatMap.size} splat
 dirty chunks: ${dirtyChunks.size}
@@ -1972,6 +2067,12 @@ brush: sculpt r=${CONFIG.sculpt.radius} | paint r=${CONFIG.paint.radius} (${edit
         pane
           .addBinding(PARAMS, "terrainChunkCulling", { label: "Terrain chunk culling (near cam)" })
           .on("change", () => updateChunkSet());
+
+        const playFolder = pane.addFolder({ title: "Play [F]", expanded: false });
+        playFolder.addBinding(playParams, "speed", { min: 2, max: 40, step: 0.5, label: "Move speed" });
+        playFolder.addBinding(playParams, "camDist", { min: 3, max: 30, step: 0.5, label: "Cam distance" });
+        playFolder.addBinding(playParams, "camSensX", { min: 0.0005, max: 0.01, step: 0.0005, label: "Look X" });
+        playFolder.addBinding(playParams, "camSensY", { min: 0.0005, max: 0.01, step: 0.0005, label: "Look Y" });
 
         pane.addBlade({ view: "separator" });
 
@@ -2383,6 +2484,7 @@ brush: sculpt r=${CONFIG.sculpt.radius} | paint r=${CONFIG.paint.radius} (${edit
       renderer.domElement.addEventListener(
         "wheel",
         (e) => {
+          if (playMode) return;
           if (!e.shiftKey && !e.altKey) return;
           e.preventDefault();
           e.stopPropagation();
@@ -2414,7 +2516,55 @@ brush: sculpt r=${CONFIG.sculpt.radius} | paint r=${CONFIG.paint.radius} (${edit
 
         syncLightAndSkyFromParams();
 
-        controls.update();
+        const dtSec = Math.min(0.05, dt * 0.001);
+
+        if (playMode) {
+          let mx = 0;
+          let mz = 0;
+          if (keysHeld.KeyW || keysHeld.ArrowUp) {
+            mx -= Math.sin(camYaw);
+            mz -= Math.cos(camYaw);
+          }
+          if (keysHeld.KeyS || keysHeld.ArrowDown) {
+            mx += Math.sin(camYaw);
+            mz += Math.cos(camYaw);
+          }
+          if (keysHeld.KeyA || keysHeld.ArrowLeft) {
+            mx -= Math.cos(camYaw);
+            mz += Math.sin(camYaw);
+          }
+          if (keysHeld.KeyD || keysHeld.ArrowRight) {
+            mx += Math.cos(camYaw);
+            mz -= Math.sin(camYaw);
+          }
+          const mlen = Math.hypot(mx, mz);
+          if (mlen > 0) {
+            const stepX = (mx / mlen) * playParams.speed * dtSec;
+            const stepZ = (mz / mlen) * playParams.speed * dtSec;
+            let newX = playerPos.x + stepX;
+            let newZ = playerPos.z + stepZ;
+            newX = THREE.MathUtils.clamp(newX, worldBounds.min.x, worldBounds.max.x);
+            newZ = THREE.MathUtils.clamp(newZ, worldBounds.min.z, worldBounds.max.z);
+            playerPos.x = newX;
+            playerPos.z = newZ;
+          }
+          playerPos.y = getWorldHeight(playerPos.x, playerPos.z);
+          const capsuleCY = playerPos.y + PLAYER_CAP_R + PLAYER_CAP_H * 0.5;
+          capsuleMesh.position.set(playerPos.x, capsuleCY, playerPos.z);
+          if (mlen > 0) capsuleMesh.rotation.y = Math.atan2(mx, mz) + PI;
+
+          const lookAtY = capsuleCY + 0.6;
+          const hDist = playParams.camDist * Math.cos(camPitch);
+          const vDist = playParams.camDist * Math.sin(camPitch);
+          camera.position.set(
+            playerPos.x + Math.sin(camYaw) * hDist,
+            lookAtY + vDist,
+            playerPos.z + Math.cos(camYaw) * hDist
+          );
+          camera.lookAt(playerPos.x, lookAtY, playerPos.z);
+        } else {
+          controls.update();
+        }
 
         if (now - frameState.lastChunkUpdateMs > 120) {
           updateChunkSet();
@@ -2441,7 +2591,7 @@ brush: sculpt r=${CONFIG.sculpt.radius} | paint r=${CONFIG.paint.radius} (${edit
           _geminiUpdateOpts.grassReceiveShadow = gp.grassReceiveShadow;
           const stats = geminiGrassPatchSystem.update(_geminiUpdateOpts);
           lastGeminiPatchCount = stats.patchCount;
-          geminiGrassUniforms.uPlayerPos.value.copy(camera.position);
+          geminiGrassUniforms.uPlayerPos.value.copy(playMode ? playerPos : camera.position);
           geminiGrassUniforms.uSunDir.value.copy(sunDir);
         }
 
