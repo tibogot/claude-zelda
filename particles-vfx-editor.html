@@ -133,6 +133,8 @@
         range,
         rotateUV,
         positionLocal,
+        smoothstep,
+        length,
       } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { Pane } from "tweakpane";
@@ -202,6 +204,7 @@
         "starter",
         "impact_hit",
         "blood",
+        "blood_splash",
         "waterfall_foam",
         "fire_smoke",
         "rain",
@@ -980,6 +983,282 @@
               const fNoise = p.addFolder({ title: "Noise warp" });
               fNoise.addBinding(uNoiseScale, "value", { label: "scale", min: 0.2, max: 8, step: 0.05 });
               fNoise.addBinding(uNoiseStrength, "value", { label: "distort", min: 0, max: 0.35, step: 0.005 });
+              fNoise.addBinding(uScrollSpeed, "value", { label: "scroll", min: 0, max: 1, step: 0.01 });
+              fNoise.addBinding(uWetBoost, "value", { label: "wet / rim", min: 0, max: 1.5, step: 0.01 });
+
+              const fCol = p.addFolder({ title: "Look" });
+              fCol.addBinding(uDark, "value", { label: "dark" });
+              fCol.addBinding(uBright, "value", { label: "bright" });
+              fCol.addBinding(uOpacity, "value", { label: "opacity", min: 0, max: 2, step: 0.01 });
+              fCol.addBinding(params, "blendAdditive", { label: "additive" }).on("change", () => {
+                applyBlendMode();
+              });
+            },
+          };
+        },
+      };
+
+      PRESETS.blood_splash = {
+        id: "blood_splash",
+        label: "Blood splat (gradient splash mask)",
+        hint: "Radial open from UV center (like Unity gradient on a quad): reveal finishes in the first part of life (reveal hold), then the splat holds. Optional rim wobble uses noise only at the edge — not a full noise-dissolve. Scale pop on spawn sells impact.",
+        filePanel: "blood",
+        activate() {
+          const count = 6;
+          const posArr = new Float32Array(count * 3);
+          const lifeArr = new Float32Array(count);
+          const maxLifeArr = new Float32Array(count);
+          const sizeArr = new Float32Array(count);
+
+          const params = {
+            minLife: 0.6,
+            maxLife: 1.4,
+            particleScale: 1.8,
+            sizeVariation: 0.5,
+            spawnSpread: 0.25,
+            emitInterval: 0.18,
+            popFrom: 0.2,
+            weightR: 0.85,
+            weightG: 1.15,
+            weightB: 0.65,
+            noiseScale: 2.2,
+            scrollSpeed: 0.04,
+            wetBoost: 0.35,
+            opacity: 1.0,
+            blendAdditive: false,
+            darkBlood: "#1a0305",
+            brightBlood: "#8a1520",
+          };
+
+          const uWeightR = uniform(float(params.weightR));
+          const uWeightG = uniform(float(params.weightG));
+          const uWeightB = uniform(float(params.weightB));
+          const uNoiseScale = uniform(float(params.noiseScale));
+          const uScrollSpeed = uniform(float(params.scrollSpeed));
+          const uWetBoost = uniform(float(params.wetBoost));
+          const uOpacity = uniform(float(params.opacity));
+          const uDark = uniform(color(params.darkBlood));
+          const uBright = uniform(color(params.brightBlood));
+          const uGradOpaqueUntil = uniform(float(0.85));
+          const uGradFadeEnd = uniform(float(1.0));
+          const uSplashGrowMin = uniform(float(0.04));
+          const uSplashGrowMax = uniform(float(1.22));
+          const uSplashSoft = uniform(float(0.05));
+          const uRevealPower = uniform(float(0.55));
+          const uRevealHold = uniform(float(0.09));
+          const uRimNoise = uniform(float(0.06));
+          const uMaskGamma = uniform(float(1.75));
+          const uLifeTail = uniform(float(0.16));
+
+          const maskMap = createDefaultBloodMaskTexture();
+          const noiseMap = createDefaultNoiseTexture();
+          const maskTexNode = texture(maskMap);
+          const noiseTexNode = texture(noiseMap);
+
+          const geo = makeSharedGeometry(count);
+          const uv0 = uv();
+          const aSeedN = attribute("aSeed", "float");
+          const centered = uv0.sub(0.5);
+          const ang = aSeedN.mul(6.2831853);
+          const uvRot = vec2(
+            centered.x.mul(ang.cos()).sub(centered.y.mul(ang.sin())),
+            centered.x.mul(ang.sin()).add(centered.y.mul(ang.cos())),
+          ).add(0.5);
+
+          /* ── Sample blood mask texture (shape) ── */
+          const maskSample = maskTexNode.sample(uvRot);
+          const mR = maskSample.r.mul(uWeightR);
+          const mG = maskSample.g.mul(uWeightG);
+          const mB = maskSample.b.mul(uWeightB);
+          const maskSum = clamp(mR.add(mG).add(mB), 0.0, 1.0);
+          const maskSharpened = pow(maskSum, uMaskGamma);
+
+          /* ── Noise: wet tint + slight rim wobble only (not the main reveal) ── */
+          const noiseUV = uvRot.mul(uNoiseScale).add(vec2(time.mul(uScrollSpeed), time.mul(uScrollSpeed.mul(0.71))));
+          const nR = noiseTexNode.sample(noiseUV).r;
+          const wet = nR.mul(uWetBoost).add(0.15);
+          const col = mix(uDark, uBright, clamp(wet, 0.0, 1.0));
+
+          /* ── Lifetime: tRem = remaining / max (1 = newborn) ── */
+          const tRem = clamp(
+            attribute("aLifetime", "float").div(attribute("aMaxLifetime", "float")),
+            0.0,
+            1.0,
+          );
+          const lifeAlpha = smoothstep(float(0), uLifeTail, tRem);
+
+          /* ── Radial splash: open from center; most motion in first uRevealHold of life ── */
+          const elapsed = clamp(float(1).sub(tRem), 0.0, 1.0);
+          const revealPhase = clamp(elapsed.div(max(uRevealHold, float(0.001))), 0.0, 1.0);
+          const revealT = pow(revealPhase, uRevealPower);
+          const growEdge = mix(uSplashGrowMin, uSplashGrowMax, revealT);
+          const dRadial = clamp(length(centered.mul(2)), 0.0, 1.0);
+          const dWobble = clamp(dRadial.add(nR.sub(0.5).mul(uRimNoise)), 0.0, 1.0);
+          const splashMask = float(1).sub(
+            smoothstep(growEdge.sub(uSplashSoft), growEdge.add(uSplashSoft), dWobble),
+          );
+          const gradMask = float(1).sub(smoothstep(uGradOpaqueUntil, uGradFadeEnd, dRadial));
+          const shapeAlpha = maskSharpened.mul(splashMask).mul(gradMask).mul(lifeAlpha).mul(uOpacity);
+
+          const mat = new THREE.MeshBasicNodeMaterial({
+            transparent: true,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+          });
+          mat.colorNode = col;
+          mat.opacityNode = shapeAlpha;
+
+          function applyBlendMode() {
+            mat.blending = params.blendAdditive
+              ? THREE.AdditiveBlending
+              : THREE.NormalBlending;
+            mat.needsUpdate = true;
+          }
+          applyBlendMode();
+
+          const lifeAttr = new THREE.InstancedBufferAttribute(lifeArr, 1);
+          const maxLifeAttr = new THREE.InstancedBufferAttribute(maxLifeArr, 1);
+          geo.setAttribute("aLifetime", lifeAttr);
+          geo.setAttribute("aMaxLifetime", maxLifeAttr);
+
+          let seedCounter = 0;
+          let nextEmit = 0;
+          let nextSlot = 0;
+
+          function resetParticle(i) {
+            const i3 = i * 3;
+            seedCounter++;
+            const s = seedCounter;
+            posArr[i3] = (hash(s + 0.4) - 0.5) * params.spawnSpread;
+            posArr[i3 + 1] = (hash(s + 0.5) - 0.5) * params.spawnSpread * 0.5;
+            posArr[i3 + 2] = (hash(s + 0.6) - 0.5) * params.spawnSpread;
+            maxLifeArr[i] = params.minLife + hash(s + 0.7) * (params.maxLife - params.minLife);
+            lifeArr[i] = maxLifeArr[i];
+            sizeArr[i] = 1.0 + (hash(s + 0.9) - 0.5) * params.sizeVariation;
+            geo.attributes.aSeed.array[i] = hash(s + 99);
+            geo.attributes.aSeed.needsUpdate = true;
+          }
+
+          for (let i = 0; i < count; i++) {
+            lifeArr[i] = 0;
+            maxLifeArr[i] = 1;
+            sizeArr[i] = 0;
+          }
+
+          const mesh = new THREE.InstancedMesh(geo, mat, count);
+          mesh.frustumCulled = false;
+          mesh.renderOrder = 5;
+          scene.add(mesh);
+
+          const onMask = (ev) => {
+            const f = ev.target.files[0];
+            if (!f) return;
+            const url = URL.createObjectURL(f);
+            new THREE.TextureLoader().load(url, (tex) => {
+              tex.colorSpace = THREE.SRGBColorSpace;
+              tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+              maskTexNode.value.dispose();
+              maskTexNode.value = tex;
+              URL.revokeObjectURL(url);
+            });
+          };
+          const onNoise = (ev) => {
+            const f = ev.target.files[0];
+            if (!f) return;
+            const url = URL.createObjectURL(f);
+            new THREE.TextureLoader().load(url, (tex) => {
+              tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+              tex.colorSpace = THREE.NoColorSpace;
+              noiseTexNode.value.dispose();
+              noiseTexNode.value = tex;
+              URL.revokeObjectURL(url);
+            });
+          };
+          document.getElementById("fileMask").addEventListener("change", onMask);
+          document.getElementById("fileNoise").addEventListener("change", onNoise);
+
+          return {
+            dispose() {
+              document.getElementById("fileMask").removeEventListener("change", onMask);
+              document.getElementById("fileNoise").removeEventListener("change", onNoise);
+              scene.remove(mesh);
+              geo.dispose();
+              mat.dispose();
+              maskTexNode.value.dispose();
+              noiseTexNode.value.dispose();
+            },
+            tick(dt) {
+              nextEmit -= dt;
+              if (nextEmit <= 0) {
+                resetParticle(nextSlot);
+                nextSlot = (nextSlot + 1) % count;
+                nextEmit = params.emitInterval;
+              }
+              camera.getWorldQuaternion(_q);
+              const hold = Math.max(1e-4, uRevealHold.value);
+              for (let i = 0; i < count; i++) {
+                lifeArr[i] -= dt;
+                if (lifeArr[i] < 0) lifeArr[i] = 0;
+                const i3 = i * 3;
+                const maxL = maxLifeArr[i];
+                const rem = maxL > 1e-6 ? lifeArr[i] / maxL : 0;
+                const elapsed = 1 - rem;
+                const popT = Math.min(1, elapsed / hold);
+                const pop = THREE.MathUtils.lerp(params.popFrom, 1, THREE.MathUtils.smoothstep(popT, 0, 1));
+                const s = sizeArr[i] * params.particleScale * pop;
+                _p.set(posArr[i3], posArr[i3 + 1], posArr[i3 + 2]);
+                _s.set(s, s, s);
+                _m.compose(_p, _q, _s);
+                mesh.setMatrixAt(i, _m);
+              }
+              mesh.instanceMatrix.needsUpdate = true;
+              geo.attributes.aLifetime.needsUpdate = true;
+              geo.attributes.aMaxLifetime.needsUpdate = true;
+            },
+            setupPane(p) {
+              const fSim = p.addFolder({ title: "Simulation" });
+              fSim.addBinding(params, "minLife", { min: 0.2, max: 3, step: 0.01 });
+              fSim.addBinding(params, "maxLife", { min: 0.4, max: 5, step: 0.01 });
+              fSim.addBinding(params, "emitInterval", { label: "emit interval", min: 0.02, max: 1, step: 0.01 });
+              fSim.addBinding(params, "particleScale", { min: 0.5, max: 5, step: 0.05 });
+              fSim.addBinding(params, "sizeVariation", { label: "size variation", min: 0, max: 1.5, step: 0.05 });
+              fSim.addBinding(params, "spawnSpread", { label: "spawn spread", min: 0, max: 1, step: 0.01 });
+              fSim.addBinding(uRevealHold, "value", {
+                label: "reveal hold",
+                min: 0.02,
+                max: 0.45,
+                step: 0.01,
+              });
+              fSim.addBinding(params, "popFrom", { label: "scale pop from", min: 0.05, max: 0.9, step: 0.02 });
+
+              const fSplash = p.addFolder({ title: "Gradient splash mask" });
+              fSplash.addBinding(uGradOpaqueUntil, "value", {
+                label: "opaque until",
+                min: 0.5,
+                max: 0.98,
+                step: 0.01,
+              });
+              fSplash.addBinding(uGradFadeEnd, "value", {
+                label: "fade end",
+                min: 0.85,
+                max: 1.0,
+                step: 0.005,
+              });
+              fSplash.addBinding(uSplashGrowMin, "value", { label: "reveal start", min: 0.02, max: 0.35, step: 0.01 });
+              fSplash.addBinding(uSplashGrowMax, "value", { label: "reveal end", min: 0.5, max: 1.6, step: 0.02 });
+              fSplash.addBinding(uSplashSoft, "value", { label: "reveal soft", min: 0.02, max: 0.45, step: 0.01 });
+              fSplash.addBinding(uRevealPower, "value", { label: "reveal curve", min: 0.15, max: 2.5, step: 0.02 });
+              fSplash.addBinding(uRimNoise, "value", { label: "rim wobble", min: 0, max: 0.25, step: 0.005 });
+              fSplash.addBinding(uMaskGamma, "value", { label: "mask gamma", min: 1, max: 3.5, step: 0.05 });
+              fSplash.addBinding(uLifeTail, "value", { label: "fade tail", min: 0.02, max: 0.45, step: 0.01 });
+
+              const fMask = p.addFolder({ title: "Channel mask" });
+              fMask.addBinding(uWeightR, "value", { label: "R streaks", min: 0, max: 2, step: 0.01 });
+              fMask.addBinding(uWeightG, "value", { label: "G splat", min: 0, max: 2, step: 0.01 });
+              fMask.addBinding(uWeightB, "value", { label: "B droplets", min: 0, max: 2, step: 0.01 });
+
+              const fNoise = p.addFolder({ title: "Noise (wet + rim)" });
+              fNoise.addBinding(uNoiseScale, "value", { label: "scale", min: 0.2, max: 8, step: 0.05 });
               fNoise.addBinding(uScrollSpeed, "value", { label: "scroll", min: 0, max: 1, step: 0.01 });
               fNoise.addBinding(uWetBoost, "value", { label: "wet / rim", min: 0, max: 1.5, step: 0.01 });
 
