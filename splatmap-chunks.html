@@ -84,7 +84,7 @@
       <kbd>F</kbd> play · <kbd>Esc</kbd>/<kbd>F</kbd> exit ·
       Terrain gen: pane → Terrain generator ·
       <kbd>Shift</kbd>+LMB/RMB sculpt · <kbd>P</kbd> paint · <kbd>G</kbd> Gemini grass · <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> R/G/B ·
-      <kbd>~</kbd> tile view · <kbd>D</kbd> chunk debug · <kbd>E</kbd> export <kbd>L</kbd> load · Shift+scroll brush size · Alt+scroll strength
+      <kbd>~</kbd> surface: tile → TSL ground → splat → green · <kbd>D</kbd> chunk debug · <kbd>E</kbd> export <kbd>L</kbd> load · Shift+scroll brush size · Alt+scroll strength
     </div>
 
     <script type="module">
@@ -94,6 +94,7 @@
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
       import { Pane } from "tweakpane";
       import { createTileMaterial } from "./tileMaterial.js";
+      import { createChunkPainterGroundMaterial } from "./chunkPainterGroundMaterial.js";
       import {
         createBladeGeometry as geminiBladeGeo,
         createFieldInstancedGeometry as geminiFieldGeo,
@@ -110,6 +111,8 @@
         terrainLodEnabled: true,
         /** When false, load all chunks in the world (ignore camera radius) and turn off mesh frustum cull for placement / overview. */
         terrainChunkCulling: true,
+        /** tile | tslGround (painter-style proc. ground + splat) | splat | greenGround */
+        terrainSurface: "tile",
         brushSize: 20,
         brushStrength: 60,
         paintBrush: "smooth",
@@ -150,6 +153,13 @@
           tiltX: 0,
           tiltZ: 0
         }
+      };
+
+      const TERRAIN_SURFACE_LABEL = {
+        tile: "tile grid",
+        tslGround: "painter TSL ground",
+        splat: "splat paint",
+        greenGround: "green seam-test"
       };
 
       let brushSize = PARAMS.brushSize;
@@ -309,6 +319,8 @@
       let geminiGrassPatchSystem = null;
       let geminiGrassGroup = null;
       let geminiGrassUniforms = null;
+      /** False until user paints / fills / loads density — avoids ~100+ grass patch draws when density is empty. */
+      let geminiGrassHasPaintedDensity = false;
       let lastGeminiPatchCount = 0;
       let editorPane = null;
       let geminiGrassFolderRef = null;
@@ -430,6 +442,7 @@
           geminiDensityCtx.fill();
         }
         if (geminiDensityTex) geminiDensityTex.needsUpdate = true;
+        geminiGrassHasPaintedDensity = true;
       }
 
       // Same default tile material as splatmap-painter10bvh+post.html (~ key toggles there)
@@ -439,6 +452,17 @@
         tileColor: 0xe6e3e3,
         gridColor: 0x444444,
         gridLineColor: 0x111111
+      });
+
+      /**
+       * Seam-test: MeshBasicMaterial so color is truly flat (no lights / env / specular).
+       * MeshStandardMaterial + scene.environment made every triangle reflect the sky
+       * slightly differently, which reads as a chunky “tile grid” on dense terrain even
+       * though there is no grid texture.
+       */
+      const seamTestTerrainMaterial = new THREE.MeshBasicMaterial({
+        color: 0x3a8c4a,
+        toneMapped: false
       });
 
       function createChunkSplatMaterial(splatTex) {
@@ -466,7 +490,6 @@
       }
 
       let debugChunkView = false;
-      let tileShadingMode = true;
       const debugChunkMaterialCache = new Map();
 
       function chunkDebugHue(cx, cz) {
@@ -500,7 +523,9 @@
 
       function resolveTerrainMaterial(cx, cz, lodLevel) {
         if (debugChunkView) return getOrCreateDebugChunkMaterial(cx, cz, lodLevel);
-        if (tileShadingMode) return terrainMaterial;
+        if (PARAMS.terrainSurface === "greenGround") return seamTestTerrainMaterial;
+        if (PARAMS.terrainSurface === "tile") return terrainMaterial;
+        if (PARAMS.terrainSurface === "tslGround") return ensureChunkSplat(cx, cz).tslGroundMaterial;
         return ensureChunkSplat(cx, cz).material;
       }
 
@@ -532,7 +557,8 @@
         tex.colorSpace = THREE.SRGBColorSpace;
         tex.needsUpdate = true;
         const material = createChunkSplatMaterial(tex);
-        b = { canvas, ctx, tex, material };
+        const tslGroundMaterial = createChunkPainterGroundMaterial(tex, CONFIG.chunkSize);
+        b = { canvas, ctx, tex, material, tslGroundMaterial };
         chunkSplatMap.set(k, b);
         return b;
       }
@@ -637,6 +663,8 @@
 
       const raycaster = new THREE.Raycaster();
       const pointerNdc = new THREE.Vector2();
+      /** Reused every raycast — avoids allocating a new array per pointermove / hit test. */
+      const _terrainRaycastMeshes = [];
 
       const brushMarker = new THREE.Mesh(
         new THREE.RingGeometry(CONFIG.sculpt.radius * 0.96, CONFIG.sculpt.radius, 48),
@@ -657,6 +685,7 @@
         pointerAction: null,
         isShiftDown: false,
         sculptSign: 1,
+        sculptSkipFirstMoveDup: false,
         paintErase: false,
         paintChannel: 0,
         hasBrushHit: false,
@@ -981,13 +1010,18 @@
        * Force shared edge heights to match after sculpt.
        * If both chunks were touched by the brush, average removes FP drift.
        * If only one was touched, that side wins so strokes stay authoritative.
+       * @param {Set<string>} brushedChunkKeys
+       * @param {{ wx: number, wz: number, radius: number } | null} seamLimit — when set (sculpt),
+       *   only merge seam samples near the brush so averaging does not warp the whole boundary.
        */
-      function syncSeamsAfterSculpt(brushedChunkKeys) {
+      function syncSeamsAfterSculpt(brushedChunkKeys, seamLimit = null) {
         if (brushedChunkKeys.size === 0) return;
 
         const brushed = brushedChunkKeys;
         const maxC = getMaxChunkIndex();
         const res = CONFIG.dataResolution;
+        const step = CONFIG.chunkSize / res;
+        const useSeamLimit = seamLimit != null && seamLimit.radius > 0;
 
         const markDirty = (cx, cz) => {
           dirtyChunks.add(chunkKey(cx, cz));
@@ -1013,15 +1047,31 @@
               if (hL && hR) {
                 const dL = brushed.has(kL);
                 const dR = brushed.has(kR);
+                const limitThisSeam = useSeamLimit && dL && dR;
+                let seamChanged = false;
                 for (let iz = 0; iz <= res; iz++) {
+                  if (limitThisSeam) {
+                    const seamX = chunkMinWorldX(cx + 1);
+                    const wz = chunkMinWorldZ(cz) + iz * step;
+                    const margin = seamLimit.radius + step;
+                    if (Math.hypot(seamX - seamLimit.wx, wz - seamLimit.wz) > margin) continue;
+                  }
                   const iL = getChunkDataIndex(res, iz);
                   const iR = getChunkDataIndex(0, iz);
                   const v = mergeEdge(dL, dR, hL[iL], hR[iR]);
-                  hL[iL] = v;
-                  hR[iR] = v;
+                  if (
+                    Math.abs(hL[iL] - v) > 1e-9 ||
+                    Math.abs(hR[iR] - v) > 1e-9
+                  ) {
+                    hL[iL] = v;
+                    hR[iR] = v;
+                    seamChanged = true;
+                  }
                 }
-                markDirty(cx, cz);
-                markDirty(cx + 1, cz);
+                if (!limitThisSeam || seamChanged) {
+                  markDirty(cx, cz);
+                  markDirty(cx + 1, cz);
+                }
               }
             }
 
@@ -1033,15 +1083,31 @@
               if (hLo && hHi) {
                 const dLo = brushed.has(kLo);
                 const dHi = brushed.has(kHi);
+                const limitThisSeam = useSeamLimit && dLo && dHi;
+                let seamChanged = false;
                 for (let ix = 0; ix <= res; ix++) {
+                  if (limitThisSeam) {
+                    const seamZ = chunkMinWorldZ(cz + 1);
+                    const wx = chunkMinWorldX(cx) + ix * step;
+                    const margin = seamLimit.radius + step;
+                    if (Math.hypot(wx - seamLimit.wx, seamZ - seamLimit.wz) > margin) continue;
+                  }
                   const iLo = getChunkDataIndex(ix, res);
                   const iHi = getChunkDataIndex(ix, 0);
                   const v = mergeEdge(dLo, dHi, hLo[iLo], hHi[iHi]);
-                  hLo[iLo] = v;
-                  hHi[iHi] = v;
+                  if (
+                    Math.abs(hLo[iLo] - v) > 1e-9 ||
+                    Math.abs(hHi[iHi] - v) > 1e-9
+                  ) {
+                    hLo[iLo] = v;
+                    hHi[iHi] = v;
+                    seamChanged = true;
+                  }
                 }
-                markDirty(cx, cz);
-                markDirty(cx, cz + 1);
+                if (!limitThisSeam || seamChanged) {
+                  markDirty(cx, cz);
+                  markDirty(cx, cz + 1);
+                }
               }
             }
           }
@@ -1253,9 +1319,15 @@
        */
       function appendChunkTerrainSkirt(geom, segments, skirtDepth) {
         const expected = (segments + 1) * (segments + 1);
-        if (geom.attributes.position.count !== expected) return;
+        if (geom.attributes.position.count !== expected) {
+          delete geom.userData.terrainTriCount;
+          return;
+        }
         const idx = geom.index;
-        if (!idx) return;
+        if (!idx) {
+          delete geom.userData.terrainTriCount;
+          return;
+        }
 
         const ring = getChunkPerimeterRingIndices(segments);
         const baseCount = expected;
@@ -1287,6 +1359,8 @@
         }
 
         const oldIdx = idx.array;
+        // Raycasts must ignore skirt triangles (first hit can be a vertical skirt face → wrong xz).
+        geom.userData.terrainTriCount = oldIdx.length / 3;
         const newIdxLen = oldIdx.length + ring.length * 6;
         const maxVertIndex = newCount - 1;
         const newIdx =
@@ -1317,7 +1391,9 @@
             ? new THREE.Uint32BufferAttribute(newIdx, 1)
             : new THREE.Uint16BufferAttribute(newIdx, 1);
         geom.setIndex(indexBuf);
-        geom.computeVertexNormals();
+        // Do NOT computeVertexNormals() here. Skirt wall triangles share the top-ring
+        // vertices with the terrain surface; averaging would blend outward wall normals
+        // into the rim and MeshStandard lighting draws a dark grid on every chunk edge.
         geom.computeBoundingSphere();
       }
 
@@ -1387,13 +1463,52 @@
           lodLabel: lodLevel.label,
           segments: lodLevel.segments,
           mesh,
-          triCount: geom.index ? geom.index.count / 3 : geom.attributes.position.count / 3
+          triCount: geom.index ? geom.index.count / 3 : geom.attributes.position.count / 3,
+          stitchSig: undefined
         };
       }
 
       function removeChunk(chunk) {
         scene.remove(chunk.mesh);
         chunk.mesh.geometry.dispose();
+      }
+
+      /** Clear so LOD seam pass will rebuild after height / neighbor changes. */
+      function invalidateLodStitchSignaturesForKeys(chunkKeys) {
+        const expanded = expandChunkKeysWithNeighbors(chunkKeys);
+        for (const k of expanded) {
+          const ch = activeChunks.get(k);
+          if (ch) ch.stitchSig = undefined;
+        }
+      }
+
+      /**
+       * Signature of LOD neighborhood — when unchanged, skip expensive dispose+rebuild seam pass.
+       * (Previously we rebuilt every ~120ms on every abutsCoarser chunk → huge idle CPU/GPU cost.)
+       */
+      function computeLodStitchSignature(key, chunk) {
+        const { cx, cz } = parseChunkKey(key);
+        const maxIdx = getMaxChunkIndex();
+        const nbSeg = [];
+        let abutsCoarser = false;
+        for (const [dx, dz] of [
+          [1, 0],
+          [-1, 0],
+          [0, 1],
+          [0, -1]
+        ]) {
+          const ncx = cx + dx;
+          const ncz = cz + dz;
+          if (ncx < 0 || ncz < 0 || ncx > maxIdx || ncz > maxIdx) {
+            nbSeg.push("x");
+            continue;
+          }
+          const nb = activeChunks.get(chunkKey(ncx, ncz));
+          const s = nb ? nb.segments : -1;
+          nbSeg.push(String(s));
+          if (nb && nb.segments < chunk.segments) abutsCoarser = true;
+        }
+        return `${chunk.segments}|${abutsCoarser ? 1 : 0}|${nbSeg.join(",")}`;
       }
 
       function updateChunkSet() {
@@ -1476,12 +1591,20 @@
               break;
             }
           }
-          if (abutsCoarser) {
+
+          const sig = computeLodStitchSignature(key, chunk);
+          if (chunk.stitchSig === sig) continue;
+
+          const needGeomRebuild = abutsCoarser || chunk.stitchSig !== undefined;
+          if (needGeomRebuild) {
             const oldG = chunk.mesh.geometry;
             oldG.dispose();
             chunk.mesh.geometry = getGeometry(chunk.segments).clone();
             applyChunkHeightsToGeometry(chunk.mesh.geometry, cx, cz, chunk.segments);
+            const g = chunk.mesh.geometry;
+            chunk.triCount = g.index ? g.index.count / 3 : g.attributes.position.count / 3;
           }
+          chunk.stitchSig = sig;
         }
 
         for (const [key, chunk] of activeChunks) {
@@ -1565,6 +1688,7 @@
         const maxCz = THREE.MathUtils.clamp(max.cz, 0, maxChunk);
 
         const brushedChunkKeys = new Set();
+        const r2 = radius * radius;
 
         for (let cz = minCz; cz <= maxCz; cz++) {
           for (let cx = minCx; cx <= maxCx; cx++) {
@@ -1583,8 +1707,9 @@
                 const dx = wx - worldPoint.x;
                 if (Math.abs(dx) > radius) continue;
 
-                const dist = Math.sqrt(dx * dx + dz * dz);
-                if (dist > radius) continue;
+                const distSq = dx * dx + dz * dz;
+                if (distSq > r2) continue;
+                const dist = Math.sqrt(distSq);
 
                 const falloff = 1.0 - dist / radius;
                 const delta = sign * CONFIG.sculpt.strength * falloff;
@@ -1602,7 +1727,12 @@
           }
         }
 
-        syncSeamsAfterSculpt(brushedChunkKeys);
+        syncSeamsAfterSculpt(brushedChunkKeys, {
+          wx: worldPoint.x,
+          wz: worldPoint.z,
+          radius
+        });
+        invalidateLodStitchSignaturesForKeys(brushedChunkKeys);
         heightTexDirty = true;
       }
 
@@ -1658,14 +1788,23 @@
       }
 
       function raycastTerrainPoint() {
-        const meshes = [];
+        const meshes = _terrainRaycastMeshes;
+        meshes.length = 0;
         for (const chunk of activeChunks.values()) meshes.push(chunk.mesh);
         if (meshes.length === 0) return null;
 
         raycaster.setFromCamera(pointerNdc, camera);
         const hits = raycaster.intersectObjects(meshes, false);
-        if (hits.length === 0) return null;
-        return hits[0].point;
+        for (let i = 0; i < hits.length; i++) {
+          const h = hits[i];
+          const geom = h.object.geometry;
+          const nTerrain = geom.userData.terrainTriCount;
+          if (typeof nTerrain === "number" && h.faceIndex != null && h.faceIndex >= nTerrain) {
+            continue;
+          }
+          return h.point;
+        }
+        return null;
       }
 
       const frameState = {
@@ -1725,8 +1864,11 @@
           refreshActiveChunkMaterials();
         }
         if (event.code === "Backquote") {
-          tileShadingMode = !tileShadingMode;
+          const surfOrder = ["tile", "tslGround", "splat", "greenGround"];
+          const si = surfOrder.indexOf(PARAMS.terrainSurface);
+          PARAMS.terrainSurface = surfOrder[(si + 1) % surfOrder.length];
           refreshActiveChunkMaterials();
+          if (editorPane) editorPane.refresh();
         }
         if (event.key === "p" || event.key === "P") {
           editState.mode = editState.mode === "paint" ? "sculpt" : "paint";
@@ -1775,8 +1917,17 @@
         if (editState.mode === "geminigrass") syncBrushVisual();
 
         if (editState.isPointerDown && editState.pointerAction === "sculpt" && hit) {
-          applyBrushAt(hit, editState.sculptSign);
-          rebuildDirtyActiveChunks(12);
+          if (
+            editState.sculptSkipFirstMoveDup &&
+            event.movementX === 0 &&
+            event.movementY === 0
+          ) {
+            editState.sculptSkipFirstMoveDup = false;
+          } else {
+            editState.sculptSkipFirstMoveDup = false;
+            applyBrushAt(hit, editState.sculptSign);
+            rebuildDirtyActiveChunks(12);
+          }
         }
         if (editState.isPointerDown && editState.pointerAction === "paint" && hit) {
           applyPaintAtWorld(hit, editState.paintErase);
@@ -1808,6 +1959,7 @@
           editState.sculptSign = event.button === 2 ? -1 : 1;
           controls.enabled = false;
           if (hit) {
+            editState.sculptSkipFirstMoveDup = true;
             applyBrushAt(hit, editState.sculptSign);
             rebuildDirtyActiveChunks(12);
           }
@@ -1828,6 +1980,7 @@
         if (editState.isPointerDown) {
           editState.isPointerDown = false;
           editState.pointerAction = null;
+          editState.sculptSkipFirstMoveDup = false;
           if (!playMode) controls.enabled = true;
         }
       });
@@ -1872,14 +2025,14 @@ fps: ${frameState.fps.toFixed(1)}   frame: ${dtMs.toFixed(2)} ms
 draw calls: ${renderer.info.render.calls}
 terrain tris: ${Math.round(tris).toLocaleString()}
 active chunks: ${activeChunks.size}  (dist LOD: ${PARAMS.terrainLodEnabled ? "ON" : "OFF"})  (chunk cull: ${PARAMS.terrainChunkCulling ? "ON" : "OFF — full world"})  L0=${lodL0} L1=${lodL1} L2=${lodL2}
-mode: ${playMode ? "PLAY (WASD · Esc/F exit)" : editState.mode}  paint ch=${chName}  tile view: ${tileShadingMode ? "ON" : "OFF"}
+mode: ${playMode ? "PLAY (WASD · Esc/F exit)" : editState.mode}  paint ch=${chName}  terrain: ${TERRAIN_SURFACE_LABEL[PARAMS.terrainSurface] ?? PARAMS.terrainSurface}
 chunk debug: ${debugChunkView ? "ON" : "OFF"}
 chunks saved: ${chunkDataMap.size} height / ${chunkSplatMap.size} splat
 dirty chunks: ${dirtyChunks.size}
 camera: ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}
 world size: ${CONFIG.worldSize} | chunk size: ${CONFIG.chunkSize}
 bounds: ${worldBounds.min.x}..${worldBounds.max.x}
-gemini grass patches: ${lastGeminiPatchCount}
+gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}  (no GPU grass until density)
 brush: sculpt r=${CONFIG.sculpt.radius} | paint r=${CONFIG.paint.radius} (${editState.hasBrushHit ? "hit" : "no-hit"})`;
       }
 
@@ -2167,6 +2320,18 @@ brush: sculpt r=${CONFIG.sculpt.radius} | paint r=${CONFIG.paint.radius} (${edit
           .addBinding(PARAMS, "terrainChunkCulling", { label: "Terrain chunk culling (near cam)" })
           .on("change", () => updateChunkSet());
 
+        pane
+          .addBinding(PARAMS, "terrainSurface", {
+            label: "Terrain surface",
+            options: {
+              "Tile grid": "tile",
+              "Painter TSL ground": "tslGround",
+              "Splat paint": "splat",
+              "Green seam-test": "greenGround"
+            }
+          })
+          .on("change", () => refreshActiveChunkMaterials());
+
         const playFolder = pane.addFolder({ title: "Play [F]", expanded: false });
         playFolder.addBinding(playParams, "speed", { min: 2, max: 40, step: 0.5, label: "Move speed" });
         playFolder.addBinding(playParams, "camDist", { min: 3, max: 30, step: 0.5, label: "Cam distance" });
@@ -2332,11 +2497,13 @@ brush: sculpt r=${CONFIG.sculpt.radius} | paint r=${CONFIG.paint.radius} (${edit
           geminiDensityCtx.fillStyle = "#000";
           geminiDensityCtx.fillRect(0, 0, HTEX_RES, HTEX_RES);
           if (geminiDensityTex) geminiDensityTex.needsUpdate = true;
+          geminiGrassHasPaintedDensity = false;
         });
         geminiGrassFolder.addButton({ title: "Fill all grass" }).on("click", () => {
           geminiDensityCtx.fillStyle = "#fff";
           geminiDensityCtx.fillRect(0, 0, HTEX_RES, HTEX_RES);
           if (geminiDensityTex) geminiDensityTex.needsUpdate = true;
+          geminiGrassHasPaintedDensity = true;
         });
         const geminiDensityFileInput = document.createElement("input");
         geminiDensityFileInput.type = "file";
@@ -2362,6 +2529,7 @@ brush: sculpt r=${CONFIG.sculpt.radius} | paint r=${CONFIG.paint.radius} (${edit
             imgData.data.set(loaded.subarray(0, imgData.data.length));
             geminiDensityCtx.putImageData(imgData, 0, 0);
             if (geminiDensityTex) geminiDensityTex.needsUpdate = true;
+            geminiGrassHasPaintedDensity = true;
           };
           reader.readAsArrayBuffer(e.target.files[0]);
           e.target.value = "";
@@ -2678,20 +2846,25 @@ brush: sculpt r=${CONFIG.sculpt.radius} | paint r=${CONFIG.paint.radius} (${edit
           lastHeightTexSyncMs = now;
         }
 
-        if (geminiGrassPatchSystem && geminiGrassUniforms) {
-          const gp = window._geminiGrassParams;
-          _geminiUpdateOpts.patchSize = gp.fieldSize;
-          _geminiUpdateOpts.patchSizeMid = gp.lodMidPatchSize;
-          _geminiUpdateOpts.patchSizeFar = gp.lodFarPatchSize;
-          _geminiUpdateOpts.lodMidDistance = gp.lodMidDistance;
-          _geminiUpdateOpts.lodFarDistance = gp.lodFarDistance;
-          _geminiUpdateOpts.maxDistance = gp.lodMaxDistance;
-          _geminiUpdateOpts.lodEnabled = gp.lodEnabled;
-          _geminiUpdateOpts.grassReceiveShadow = gp.grassReceiveShadow;
-          const stats = geminiGrassPatchSystem.update(_geminiUpdateOpts);
-          lastGeminiPatchCount = stats.patchCount;
-          geminiGrassUniforms.uPlayerPos.value.copy(playMode ? playerPos : camera.position);
-          geminiGrassUniforms.uSunDir.value.copy(sunDir);
+        if (geminiGrassPatchSystem && geminiGrassUniforms && geminiGrassGroup) {
+          if (geminiGrassHasPaintedDensity) {
+            geminiGrassGroup.visible = true;
+            const gp = window._geminiGrassParams;
+            _geminiUpdateOpts.patchSize = gp.fieldSize;
+            _geminiUpdateOpts.patchSizeMid = gp.lodMidPatchSize;
+            _geminiUpdateOpts.patchSizeFar = gp.lodFarPatchSize;
+            _geminiUpdateOpts.lodMidDistance = gp.lodMidDistance;
+            _geminiUpdateOpts.lodFarDistance = gp.lodFarDistance;
+            _geminiUpdateOpts.maxDistance = gp.lodMaxDistance;
+            _geminiUpdateOpts.lodEnabled = gp.lodEnabled;
+            _geminiUpdateOpts.grassReceiveShadow = gp.grassReceiveShadow;
+            const stats = geminiGrassPatchSystem.update(_geminiUpdateOpts);
+            lastGeminiPatchCount = stats.patchCount;
+            geminiGrassUniforms.uPlayerPos.value.copy(playMode ? playerPos : camera.position);
+            geminiGrassUniforms.uSunDir.value.copy(sunDir);
+          } else {
+            geminiGrassGroup.visible = false;
+          }
         }
 
         renderer.render(scene, camera);
