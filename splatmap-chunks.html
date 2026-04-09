@@ -51,6 +51,18 @@
         padding: 8px 10px;
         font-size: 12px;
       }
+
+      /* Tweakpane — anchor top-right (left is HUD) */
+      .tp-dfwv {
+        position: fixed !important;
+        top: 16px !important;
+        right: 16px !important;
+        width: 280px !important;
+        z-index: 20;
+        max-height: calc(100vh - 32px) !important;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+      }
     </style>
     <script type="importmap">
       {
@@ -58,7 +70,8 @@
           "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
           "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
           "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
-          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://esm.sh/tweakpane@4.0.4"
         }
       }
     </script>
@@ -68,28 +81,44 @@
     <input type="file" id="load-terrain-input" accept="application/json,.json" style="display: none" />
 
     <div id="hint">
-      <kbd>Shift</kbd>+LMB/RMB sculpt · <kbd>P</kbd> paint · <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> R/G/B · <kbd>~</kbd> tile view ·
-      <kbd>D</kbd> chunk debug · <kbd>E</kbd> export <kbd>L</kbd> load
+      <kbd>Shift</kbd>+LMB/RMB sculpt · <kbd>P</kbd> paint · <kbd>G</kbd> Gemini grass · <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> R/G/B ·
+      <kbd>~</kbd> tile view · <kbd>D</kbd> chunk debug · <kbd>E</kbd> export <kbd>L</kbd> load · Shift+scroll brush size · Alt+scroll strength
     </div>
 
     <script type="module">
       import * as THREE from "three";
-      import { Fn, texture, vec3, vec2, mix, positionLocal, float } from "three/tsl";
+      import { Fn, texture, vec3, vec2, mix, positionLocal, float, uniform } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+      import { Pane } from "tweakpane";
       import { createTileMaterial } from "./tileMaterial.js";
+      import {
+        createBladeGeometry as geminiBladeGeo,
+        createFieldInstancedGeometry as geminiFieldGeo,
+        createGrassMaterial as geminiGrassMat,
+        setupGrassPatches as geminiSetupPatches
+      } from "./grass-gemini.js";
 
-      /** Default physical sky + light match splatmap-painter10bvh+post.html (skyMode physical). */
-      const PHYSICAL_SKY = {
-        sunAzimuth: 135,
-        sunElevation: 43,
-        dirColor: 0xfff5e0,
-        dirIntensity: 2.2,
-        hemiSkyColor: 0xc8e0ff,
-        hemiGroundColor: 0x88aa55,
-        hemiIntensity: 0.4,
-        envIntensity: 0.2,
-        exposure: 0.5,
+      const PI = Math.PI;
+
+      /** Tweakpane + lighting — same defaults as splatmap-painter10bvh+post.html (physical sky). */
+      const PARAMS = {
+        mode: "sculpt",
+        brushSize: 20,
+        brushStrength: 60,
+        paintBrush: "smooth",
+        brushFalloff: "smooth",
+        light: {
+          sunAzimuth: 135,
+          sunElevation: 43,
+          dirColor: "#fff5e0",
+          dirIntensity: 2.2,
+          hemiSkyColor: "#c8e0ff",
+          hemiGroundColor: "#88aa55",
+          hemiIntensity: 0.4,
+          envIntensity: 0.2,
+          exposure: 0.5
+        },
         sky: {
           turbidity: 2,
           rayleigh: 1.5,
@@ -100,6 +129,10 @@
           cloudElevation: 0.5
         }
       };
+
+      let brushSize = PARAMS.brushSize;
+      let brushStr = PARAMS.brushStrength;
+      let geminiGrassEraseMode = false;
 
       const CONFIG = {
         worldSize: 1600,
@@ -122,6 +155,8 @@
           strength: 0.35
         }
       };
+
+      const HTEX_RES = 512;
 
       const hudEl = document.getElementById("hud");
 
@@ -151,7 +186,7 @@
       }
 
       const sunDir = new THREE.Vector3();
-      sunDirectionFromAngles(PHYSICAL_SKY.sunAzimuth, PHYSICAL_SKY.sunElevation, sunDir);
+      sunDirectionFromAngles(PARAMS.light.sunAzimuth, PARAMS.light.sunElevation, sunDir);
 
       const controls = new OrbitControls(camera, renderer.domElement);
       controls.target.set(0, 0, 0);
@@ -161,15 +196,27 @@
       controls.maxDistance = 1500;
 
       const hemi = new THREE.HemisphereLight(
-        PHYSICAL_SKY.hemiSkyColor,
-        PHYSICAL_SKY.hemiGroundColor,
-        PHYSICAL_SKY.hemiIntensity
+        PARAMS.light.hemiSkyColor,
+        PARAMS.light.hemiGroundColor,
+        PARAMS.light.hemiIntensity
       );
       scene.add(hemi);
 
-      const sun = new THREE.DirectionalLight(PHYSICAL_SKY.dirColor, PHYSICAL_SKY.dirIntensity);
+      const sun = new THREE.DirectionalLight(PARAMS.light.dirColor, PARAMS.light.dirIntensity);
       sun.position.copy(sunDir).multiplyScalar(600);
       scene.add(sun);
+      if (renderer.shadowMap) {
+        renderer.shadowMap.enabled = true;
+        sun.castShadow = true;
+        sun.shadow.mapSize.set(2048, 2048);
+        sun.shadow.camera.near = 1;
+        sun.shadow.camera.far = 2600;
+        const sh = 1100;
+        sun.shadow.camera.left = -sh;
+        sun.shadow.camera.right = sh;
+        sun.shadow.camera.top = sh;
+        sun.shadow.camera.bottom = -sh;
+      }
 
       scene.background = null;
 
@@ -177,13 +224,13 @@
       sky.scale.setScalar(10000);
       sky.material.fog = false;
       scene.add(sky);
-      sky.turbidity.value = PHYSICAL_SKY.sky.turbidity;
-      sky.rayleigh.value = PHYSICAL_SKY.sky.rayleigh;
-      sky.mieCoefficient.value = PHYSICAL_SKY.sky.mie;
-      sky.mieDirectionalG.value = PHYSICAL_SKY.sky.mieG;
-      sky.cloudCoverage.value = PHYSICAL_SKY.sky.cloudCoverage;
-      sky.cloudDensity.value = PHYSICAL_SKY.sky.cloudDensity;
-      sky.cloudElevation.value = PHYSICAL_SKY.sky.cloudElevation;
+      sky.turbidity.value = PARAMS.sky.turbidity;
+      sky.rayleigh.value = PARAMS.sky.rayleigh;
+      sky.mieCoefficient.value = PARAMS.sky.mie;
+      sky.mieDirectionalG.value = PARAMS.sky.mieG;
+      sky.cloudCoverage.value = PARAMS.sky.cloudCoverage;
+      sky.cloudDensity.value = PARAMS.sky.cloudDensity;
+      sky.cloudElevation.value = PARAMS.sky.cloudElevation;
       sky.sunPosition.value.copy(sunDir);
 
       const pmremGenerator = new THREE.PMREMGenerator(renderer);
@@ -193,14 +240,168 @@
         scene.environment = pmremGenerator.fromScene(envScene, 0.04).texture;
       };
       rebuildSkyEnv();
-      scene.environmentIntensity = PHYSICAL_SKY.envIntensity;
-      renderer.toneMappingExposure = PHYSICAL_SKY.exposure;
+      scene.environmentIntensity = PARAMS.light.envIntensity;
+      renderer.toneMappingExposure = PARAMS.light.exposure;
+
+      /** Match painter: live sky = SkyMesh uniforms each frame; PMREM env only from initial rebuildSkyEnv() (not per slider). */
+      function syncLightAndSkyFromParams() {
+        sunDirectionFromAngles(PARAMS.light.sunAzimuth, PARAMS.light.sunElevation, sunDir);
+        sun.position.copy(sunDir).multiplyScalar(600);
+        sun.color.set(PARAMS.light.dirColor);
+        sun.intensity = PARAMS.light.dirIntensity;
+        hemi.color.set(PARAMS.light.hemiSkyColor);
+        hemi.groundColor.set(PARAMS.light.hemiGroundColor);
+        hemi.intensity = PARAMS.light.hemiIntensity;
+        sky.turbidity.value = PARAMS.sky.turbidity;
+        sky.rayleigh.value = PARAMS.sky.rayleigh;
+        sky.mieCoefficient.value = PARAMS.sky.mie;
+        sky.mieDirectionalG.value = PARAMS.sky.mieG;
+        sky.cloudCoverage.value = PARAMS.sky.cloudCoverage;
+        sky.cloudDensity.value = PARAMS.sky.cloudDensity;
+        sky.cloudElevation.value = PARAMS.sky.cloudElevation;
+        sky.sunPosition.value.copy(sunDir);
+        scene.environmentIntensity = PARAMS.light.envIntensity;
+        renderer.toneMappingExposure = PARAMS.light.exposure;
+      }
 
       const worldHalf = CONFIG.worldSize * 0.5;
       const worldBounds = new THREE.Box3(
         new THREE.Vector3(-worldHalf, -1000, -worldHalf),
         new THREE.Vector3(worldHalf, 1000, worldHalf)
       );
+
+      let heightTexDirty = true;
+      let lastHeightTexSyncMs = 0;
+      let globalHeightTexData = null;
+      let globalHeightTex = null;
+      let geminiDensityCanvas = null;
+      let geminiDensityCtx = null;
+      let geminiDensityTex = null;
+      let geminiGrassPatchSystem = null;
+      let geminiGrassGroup = null;
+      let geminiGrassUniforms = null;
+      let lastGeminiPatchCount = 0;
+      let editorPane = null;
+      let geminiGrassFolderRef = null;
+      const _geminiUpdateOpts = {
+        patchSize: 10,
+        patchSizeMid: 18,
+        patchSizeFar: 28,
+        lodMidDistance: 40,
+        lodFarDistance: 80,
+        maxDistance: 220,
+        lodEnabled: true,
+        grassReceiveShadow: true
+      };
+
+      function worldToUV(wx, wz) {
+        const W = CONFIG.worldSize;
+        return {
+          u: (wx + W / 2) / W,
+          v: 1.0 - (wz + W / 2) / W
+        };
+      }
+
+      function geminiBrushWorldRadius() {
+        return (brushSize / HTEX_RES) * CONFIG.worldSize;
+      }
+
+      function brushFalloff(t) {
+        if (t >= 1) return 0;
+        if (t <= 0) return 1;
+        switch (PARAMS.brushFalloff) {
+          case "linear":
+            return 1 - t;
+          case "sphere":
+            return Math.sqrt(1 - t * t);
+          case "hard":
+            return 1;
+          default:
+            return (1 + Math.cos(t * PI)) * 0.5;
+        }
+      }
+
+      function _radialGrad(ctx, cx, cy, r, g, b, alpha) {
+        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, brushSize);
+        [0, 0.25, 0.5, 0.75, 0.95].forEach((t) => {
+          grad.addColorStop(t, `rgba(${r},${g},${b},${alpha * brushFalloff(t)})`);
+        });
+        grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+        return grad;
+      }
+
+      function _smearCanvas(ctx, cx, cy) {
+        const rad = Math.ceil(brushSize);
+        const cw = ctx.canvas.width;
+        const ch = ctx.canvas.height;
+        const x0 = Math.max(0, Math.floor(cx - rad));
+        const y0 = Math.max(0, Math.floor(cy - rad));
+        const x1 = Math.min(cw, Math.ceil(cx + rad));
+        const y1 = Math.min(ch, Math.ceil(cy + rad));
+        const w = x1 - x0;
+        const h = y1 - y0;
+        if (w <= 0 || h <= 0) return;
+        const imgData = ctx.getImageData(x0, y0, w, h);
+        const src = new Uint8ClampedArray(imgData.data);
+        const dst = imgData.data;
+        const alpha = brushStr / 100;
+        const kr = Math.max(1, Math.round(brushSize * 0.18));
+        for (let py = 0; py < h; py++) {
+          for (let px = 0; px < w; px++) {
+            const dx = x0 + px - cx;
+            const dy = y0 + py - cy;
+            const t = Math.sqrt(dx * dx + dy * dy) / brushSize;
+            if (t >= 1) continue;
+            const str = brushFalloff(t) * alpha;
+            let r = 0;
+            let g = 0;
+            let b = 0;
+            let a = 0;
+            let tw = 0;
+            for (let oy = -kr; oy <= kr; oy++) {
+              for (let ox = -kr; ox <= kr; ox++) {
+                const sx = px + ox;
+                const sy = py + oy;
+                if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue;
+                const wi = 1;
+                const j = (sy * w + sx) * 4;
+                r += src[j] * wi;
+                g += src[j + 1] * wi;
+                b += src[j + 2] * wi;
+                a += src[j + 3] * wi;
+                tw += wi;
+              }
+            }
+            if (tw <= 0) continue;
+            const di = (py * w + px) * 4;
+            const mixf = str;
+            dst[di] = Math.round(dst[di] * (1 - mixf) + (r / tw) * mixf);
+            dst[di + 1] = Math.round(dst[di + 1] * (1 - mixf) + (g / tw) * mixf);
+            dst[di + 2] = Math.round(dst[di + 2] * (1 - mixf) + (b / tw) * mixf);
+            dst[di + 3] = Math.round(dst[di + 3] * (1 - mixf) + (a / tw) * mixf);
+          }
+        }
+        ctx.putImageData(imgData, x0, y0);
+      }
+
+      function paintGeminiGrassAt(wx, wz, erase) {
+        if (!geminiDensityCtx) return;
+        const { u, v } = worldToUV(wx, wz);
+        const cx = u * HTEX_RES;
+        const cy = v * HTEX_RES;
+        if (PARAMS.paintBrush === "smear") {
+          _smearCanvas(geminiDensityCtx, cx, cy);
+        } else {
+          const alpha = brushStr / 100;
+          const [gr, gg, gb] = erase ? [0, 0, 0] : [255, 255, 255];
+          geminiDensityCtx.globalCompositeOperation = "source-over";
+          geminiDensityCtx.fillStyle = _radialGrad(geminiDensityCtx, cx, cy, gr, gg, gb, alpha);
+          geminiDensityCtx.beginPath();
+          geminiDensityCtx.arc(cx, cy, brushSize, 0, PI * 2);
+          geminiDensityCtx.fill();
+        }
+        if (geminiDensityTex) geminiDensityTex.needsUpdate = true;
+      }
 
       // Same default tile material as splatmap-painter10bvh+post.html (~ key toggles there)
       const terrainMaterial = createTileMaterial({
@@ -390,6 +591,7 @@
           activeChunks.set(key, createChunk(ch.cx, ch.cz, lod));
         }
         refreshActiveChunkMaterials();
+        heightTexDirty = true;
       }
 
       function refreshActiveChunkMaterials() {
@@ -428,10 +630,22 @@
         brushWorldPoint: new THREE.Vector3()
       };
 
+      function syncGeminiFolderVisibility() {
+        if (geminiGrassFolderRef)
+          geminiGrassFolderRef.hidden = editState.mode !== "geminigrass";
+      }
+
       function syncBrushVisual() {
-        const paint = editState.mode === "paint";
-        brushMarker.material.color.setHex(paint ? 0x44ff88 : 0xffaa55);
-        brushMarker.scale.setScalar(paint ? CONFIG.paint.radius / CONFIG.sculpt.radius : 1);
+        if (editState.mode === "paint") {
+          brushMarker.material.color.setHex(0x44ff88);
+          brushMarker.scale.setScalar(CONFIG.paint.radius / CONFIG.sculpt.radius);
+        } else if (editState.mode === "geminigrass") {
+          brushMarker.material.color.setHex(0x66dd99);
+          brushMarker.scale.setScalar(geminiBrushWorldRadius() / CONFIG.sculpt.radius);
+        } else {
+          brushMarker.material.color.setHex(0xffaa55);
+          brushMarker.scale.setScalar(1);
+        }
       }
 
       syncBrushVisual();
@@ -669,6 +883,36 @@
         return sampleChunkDataBilinear(heights, u, v);
       }
 
+      function sampleHeightfieldForGlobalGrassTex(wx, wz) {
+        const maxC = getMaxChunkIndex();
+        const cs = CONFIG.chunkSize;
+        const cx = THREE.MathUtils.clamp(Math.floor((wx + worldHalf) / cs), 0, maxC);
+        const cz = THREE.MathUtils.clamp(Math.floor((wz + worldHalf) / cs), 0, maxC);
+        const arr = chunkDataMap.get(chunkKey(cx, cz));
+        if (!arr) return sampleHeight(wx, wz);
+        const u = ((wx - chunkMinWorldX(cx)) / cs) * CONFIG.dataResolution;
+        const v = ((wz - chunkMinWorldZ(cz)) / cs) * CONFIG.dataResolution;
+        return sampleChunkDataBilinear(arr, u, v);
+      }
+
+      function rebuildGlobalHeightTexture() {
+        if (!globalHeightTexData || !globalHeightTex) return;
+        const ws = CONFIG.worldSize;
+        for (let iz = 0; iz < HTEX_RES; iz++) {
+          for (let ix = 0; ix < HTEX_RES; ix++) {
+            const wx = ws * ((ix + 0.5) / HTEX_RES - 0.5);
+            const wz = ws * ((iz + 0.5) / HTEX_RES - 0.5);
+            const h = sampleHeightfieldForGlobalGrassTex(wx, wz);
+            const i = (iz * HTEX_RES + ix) * 4;
+            globalHeightTexData[i] = h;
+            globalHeightTexData[i + 1] = 0;
+            globalHeightTexData[i + 2] = 0;
+            globalHeightTexData[i + 3] = 1;
+          }
+        }
+        globalHeightTex.needsUpdate = true;
+      }
+
       function sampleChunkDataBilinear(heights, gridX, gridZ) {
         const res = CONFIG.dataResolution;
         const gx = THREE.MathUtils.clamp(gridX, 0, res);
@@ -858,6 +1102,7 @@
         const mesh = new THREE.Mesh(geom, resolveTerrainMaterial(cx, cz, lodLevel));
         mesh.position.copy(center);
         mesh.frustumCulled = true;
+        mesh.receiveShadow = true;
         mesh.userData.chunkKey = chunkKey(cx, cz);
         scene.add(mesh);
 
@@ -1025,6 +1270,7 @@
         }
 
         syncSeamsAfterSculpt(brushedChunkKeys);
+        heightTexDirty = true;
       }
 
       function applyPaintAtWorld(center, erase) {
@@ -1100,9 +1346,17 @@
         event.preventDefault();
       });
 
+      function uiTypingTarget(el) {
+        if (!el || el === document.body) return false;
+        const tag = el.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+        return el.closest?.(".tp-dfwv") != null;
+      }
+
       window.addEventListener("keydown", (event) => {
         if (event.key === "Shift") editState.isShiftDown = true;
         if (event.repeat) return;
+        if (uiTypingTarget(event.target)) return;
         if (event.key === "d" || event.key === "D") {
           debugChunkView = !debugChunkView;
           if (!debugChunkView) disposeDebugChunkMaterials();
@@ -1114,7 +1368,18 @@
         }
         if (event.key === "p" || event.key === "P") {
           editState.mode = editState.mode === "paint" ? "sculpt" : "paint";
+          PARAMS.mode = editState.mode;
+          if (editorPane) editorPane.refresh();
           syncBrushVisual();
+          syncGeminiFolderVisibility();
+        }
+        if (event.code === "KeyG") {
+          event.preventDefault();
+          editState.mode = editState.mode === "geminigrass" ? "sculpt" : "geminigrass";
+          PARAMS.mode = editState.mode;
+          if (editorPane) editorPane.refresh();
+          syncBrushVisual();
+          syncGeminiFolderVisibility();
         }
         if (event.key === "1") editState.paintChannel = 0;
         if (event.key === "2") editState.paintChannel = 1;
@@ -1143,6 +1408,7 @@
         } else {
           brushMarker.visible = false;
         }
+        if (editState.mode === "geminigrass") syncBrushVisual();
 
         if (editState.isPointerDown && editState.pointerAction === "sculpt" && hit) {
           applyBrushAt(hit, editState.sculptSign);
@@ -1151,11 +1417,24 @@
         if (editState.isPointerDown && editState.pointerAction === "paint" && hit) {
           applyPaintAtWorld(hit, editState.paintErase);
         }
+        if (editState.isPointerDown && editState.pointerAction === "geminigrass" && hit) {
+          paintGeminiGrassAt(hit.x, hit.z, editState.paintErase);
+        }
       });
 
       renderer.domElement.addEventListener("pointerdown", (event) => {
         updatePointerNdc(event);
         const hit = raycastTerrainPoint();
+
+        if (editState.mode === "geminigrass" && event.button === 0) {
+          event.preventDefault();
+          editState.isPointerDown = true;
+          editState.pointerAction = "geminigrass";
+          editState.paintErase = geminiGrassEraseMode || event.shiftKey;
+          controls.enabled = false;
+          if (hit) paintGeminiGrassAt(hit.x, hit.z, editState.paintErase);
+          return;
+        }
 
         if (event.shiftKey && (event.button === 0 || event.button === 2)) {
           event.preventDefault();
@@ -1235,6 +1514,7 @@ dirty chunks: ${dirtyChunks.size}
 camera: ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}
 world size: ${CONFIG.worldSize} | chunk size: ${CONFIG.chunkSize}
 bounds: ${worldBounds.min.x}..${worldBounds.max.x}
+gemini grass patches: ${lastGeminiPatchCount}
 brush: sculpt r=${CONFIG.sculpt.radius} | paint r=${CONFIG.paint.radius} (${editState.hasBrushHit ? "hit" : "no-hit"})`;
       }
 
@@ -1244,6 +1524,681 @@ brush: sculpt r=${CONFIG.sculpt.radius} | paint r=${CONFIG.paint.radius} (${edit
         renderer.setSize(window.innerWidth, window.innerHeight);
       });
 
+      globalHeightTexData = new Float32Array(HTEX_RES * HTEX_RES * 4);
+      globalHeightTex = new THREE.DataTexture(
+        globalHeightTexData,
+        HTEX_RES,
+        HTEX_RES,
+        THREE.RGBAFormat,
+        THREE.FloatType
+      );
+      globalHeightTex.wrapS = globalHeightTex.wrapT = THREE.ClampToEdgeWrapping;
+      globalHeightTex.minFilter = THREE.LinearFilter;
+      globalHeightTex.magFilter = THREE.LinearFilter;
+      globalHeightTex.needsUpdate = true;
+
+      geminiDensityCanvas = document.createElement("canvas");
+      geminiDensityCanvas.width = geminiDensityCanvas.height = HTEX_RES;
+      geminiDensityCtx = geminiDensityCanvas.getContext("2d", { willReadFrequently: true });
+      geminiDensityCtx.fillStyle = "#000000";
+      geminiDensityCtx.fillRect(0, 0, HTEX_RES, HTEX_RES);
+      geminiDensityTex = new THREE.CanvasTexture(geminiDensityCanvas);
+      geminiDensityTex.wrapS = geminiDensityTex.wrapT = THREE.ClampToEdgeWrapping;
+      geminiDensityTex.needsUpdate = true;
+
+      function _gemCol(hex) {
+        return new THREE.Color(hex);
+      }
+
+      const _gp = {
+        bladeHeight: 1.0,
+        bladeWidth: 0.15,
+        tipTaperStart: 0.5,
+        bladeYSegments: 7,
+        grassCount: 1516,
+        fieldSize: 10,
+        grassDensity: 1.0,
+        windSpeed: 0.2,
+        windStrength: 1.4,
+        maxAngle: 1.4,
+        naturalLean: 0.9,
+        windAngle: 0,
+        windWaveScale: 0.12,
+        windGust: 0.3,
+        bendFocus: 0.5,
+        stiffness: 0.0,
+        clumpScale: 1.5,
+        clumpStrength: 0.7,
+        crossed: true,
+        bladeColor: "#0e300e",
+        tipColor: "#004d05",
+        skyBlend: 0.8,
+        cylindrical: 0.3,
+        viewThicken: 0.45,
+        aoBase: 0.25,
+        aoPower: 2.0,
+        colorVariation: false,
+        cvHueSpread: 0.08,
+        cvSatSpread: 0.3,
+        cvDryAmount: 0.15,
+        cvDryColor: "#8a7a3a",
+        bssIntensity: 1.2,
+        bssPower: 2.0,
+        bssColor: "#2d7a2d",
+        frontScatter: 0.3,
+        rimSSS: 0.25,
+        specV1Enabled: false,
+        specV1Intensity: 1.5,
+        specV1Color: "#ffffff",
+        specV1DirX: -1.0,
+        specV1DirY: 1.0,
+        specV1DirZ: 0.5,
+        specV1Power: 25.6,
+        specV2Enabled: false,
+        specV2Intensity: 1.0,
+        specV2Color: "#ffffff",
+        specV2DirX: -1.0,
+        specV2DirY: 0.45,
+        specV2DirZ: 1.0,
+        specV2NoiseScale: 3.0,
+        specV2NoiseStr: 0.6,
+        specV2Power: 12.0,
+        specV2TipBias: 0.5,
+        lodEnabled: true,
+        lodMidDistance: 40,
+        lodFarDistance: 80,
+        lodMaxDistance: 200,
+        lodFadeStart: 0.75,
+        lodMidPatchSize: 18,
+        lodMidSegments: 3,
+        lodMidGrassCount: 1500,
+        lodFarPatchSize: 28,
+        lodFarSegments: 1,
+        lodFarGrassCount: 1300,
+        lodDebug: false,
+        interactionRadius: 1.5,
+        interactionStrength: 0.7,
+        grassReceiveShadow: true
+      };
+      window._geminiGrassParams = _gp;
+
+      geminiGrassUniforms = {
+        uTerrainSize: uniform(CONFIG.worldSize),
+        uSunDir: uniform(sunDir.clone()),
+        uPlayerPos: uniform(new THREE.Vector3(0, 0, 0)),
+        uBladeHeight: uniform(_gp.bladeHeight),
+        uGrassDensity: uniform(_gp.grassDensity),
+        uWindSpeed: uniform(_gp.windSpeed),
+        uWindStrength: uniform(_gp.windStrength),
+        uMaxAngle: uniform(_gp.maxAngle),
+        uNaturalLean: uniform(_gp.naturalLean),
+        uWindDirX: uniform(Math.cos(_gp.windAngle)),
+        uWindDirZ: uniform(Math.sin(_gp.windAngle)),
+        uWindWaveScale: uniform(_gp.windWaveScale),
+        uWindGust: uniform(_gp.windGust),
+        uBendFocus: uniform(_gp.bendFocus),
+        uStiffness: uniform(_gp.stiffness),
+        uClumpScale: uniform(_gp.clumpScale),
+        uClumpStrength: uniform(_gp.clumpStrength),
+        uCrossed: uniform(_gp.crossed ? 1 : 0),
+        uBladeCol: uniform(_gemCol(_gp.bladeColor)),
+        uTipCol: uniform(_gemCol(_gp.tipColor)),
+        uSkyBlend: uniform(_gp.skyBlend),
+        uCylindrical: uniform(_gp.cylindrical),
+        uViewThicken: uniform(_gp.viewThicken),
+        uAoBase: uniform(_gp.aoBase),
+        uAoPower: uniform(_gp.aoPower),
+        uColorVar: uniform(_gp.colorVariation ? 1 : 0),
+        uCvHueSpread: uniform(_gp.cvHueSpread),
+        uCvSatSpread: uniform(_gp.cvSatSpread),
+        uCvDryAmount: uniform(_gp.cvDryAmount),
+        uCvDryCol: uniform(_gemCol(_gp.cvDryColor)),
+        uBssCol: uniform(_gemCol(_gp.bssColor)),
+        uBssIntensity: uniform(_gp.bssIntensity),
+        uBssPower: uniform(_gp.bssPower),
+        uFrontScatter: uniform(_gp.frontScatter),
+        uRimSSS: uniform(_gp.rimSSS),
+        uSpecV1Enabled: uniform(_gp.specV1Enabled ? 1 : 0),
+        uSpecV1Intensity: uniform(_gp.specV1Intensity),
+        uSpecV1Col: uniform(_gemCol(_gp.specV1Color)),
+        uSpecV1Dir: uniform(
+          new THREE.Vector3(_gp.specV1DirX, _gp.specV1DirY, _gp.specV1DirZ).normalize()
+        ),
+        uSpecV1Power: uniform(_gp.specV1Power),
+        uSpecV2Enabled: uniform(_gp.specV2Enabled ? 1 : 0),
+        uSpecV2Intensity: uniform(_gp.specV2Intensity),
+        uSpecV2Col: uniform(_gemCol(_gp.specV2Color)),
+        uSpecV2Dir: uniform(
+          new THREE.Vector3(_gp.specV2DirX, _gp.specV2DirY, _gp.specV2DirZ).normalize()
+        ),
+        uSpecV2NoiseScale: uniform(_gp.specV2NoiseScale),
+        uSpecV2NoiseStr: uniform(_gp.specV2NoiseStr),
+        uSpecV2Power: uniform(_gp.specV2Power),
+        uSpecV2TipBias: uniform(_gp.specV2TipBias),
+        uLodEnabled: uniform(_gp.lodEnabled ? 1 : 0),
+        uLodMidDist: uniform(_gp.lodMidDistance),
+        uLodFarDist: uniform(_gp.lodFarDistance),
+        uLodMaxDist: uniform(_gp.lodMaxDistance),
+        uLodFadeStart: uniform(_gp.lodFadeStart),
+        uLodDebug: uniform(_gp.lodDebug ? 1 : 0),
+        uInteractionEnabled: uniform(1),
+        uInteractionRadius: uniform(_gp.interactionRadius),
+        uInteractionStrength: uniform(_gp.interactionStrength)
+      };
+
+      const _geminiCtx = {
+        ...geminiGrassUniforms,
+        heightTex: globalHeightTex,
+        grassDensityTex: geminiDensityTex,
+        terrainRes: HTEX_RES
+      };
+
+      const _geminiMat = geminiGrassMat(_geminiCtx);
+
+      function _buildGeminiGeos() {
+        const highBase = geminiBladeGeo(
+          _gp.bladeHeight,
+          _gp.bladeWidth,
+          Math.round(_gp.bladeYSegments),
+          _gp.tipTaperStart
+        );
+        const geoHigh = geminiFieldGeo(
+          highBase,
+          _gp.fieldSize,
+          Math.round(_gp.grassCount),
+          _gp.bladeHeight,
+          true
+        );
+        highBase.dispose();
+
+        const midBase = geminiBladeGeo(
+          _gp.bladeHeight,
+          _gp.bladeWidth,
+          Math.round(_gp.lodMidSegments),
+          _gp.tipTaperStart
+        );
+        const geoMid = geminiFieldGeo(
+          midBase,
+          _gp.lodMidPatchSize,
+          Math.round(_gp.lodMidGrassCount),
+          _gp.bladeHeight,
+          true
+        );
+        midBase.dispose();
+
+        const farBase = geminiBladeGeo(
+          _gp.bladeHeight,
+          _gp.bladeWidth,
+          Math.round(_gp.lodFarSegments),
+          _gp.tipTaperStart
+        );
+        const geoFar = geminiFieldGeo(
+          farBase,
+          _gp.lodFarPatchSize,
+          Math.round(_gp.lodFarGrassCount),
+          _gp.bladeHeight,
+          false
+        );
+        farBase.dispose();
+
+        return { geoHigh, geoMid, geoFar };
+      }
+
+      let _geminiGeos = _buildGeminiGeos();
+      geminiGrassGroup = new THREE.Group();
+      geminiGrassGroup.name = "GeminiGrass";
+      scene.add(geminiGrassGroup);
+
+      geminiGrassPatchSystem = geminiSetupPatches(
+        scene,
+        camera,
+        geminiGrassGroup,
+        { ..._geminiGeos, material: _geminiMat },
+        {
+          patchSize: _gp.fieldSize,
+          patchSizeMid: _gp.lodMidPatchSize,
+          patchSizeFar: _gp.lodFarPatchSize,
+          lodMidDistance: _gp.lodMidDistance,
+          lodFarDistance: _gp.lodFarDistance,
+          maxDistance: _gp.lodMaxDistance,
+          lodHysteresis: 2,
+          lodEnabled: _gp.lodEnabled,
+          grassReceiveShadow: _gp.grassReceiveShadow
+        }
+      );
+
+      window._geminiRebuildGeos = () => {
+        const oldGeos = _geminiGeos;
+        _geminiGeos = _buildGeminiGeos();
+        geminiGrassPatchSystem.updateGeometries(_geminiGeos);
+        if (oldGeos.geoHigh) oldGeos.geoHigh.dispose();
+        if (oldGeos.geoMid) oldGeos.geoMid.dispose();
+        if (oldGeos.geoFar) oldGeos.geoFar.dispose();
+      };
+
+      {
+        const pane = new Pane({ title: "Chunk terrain" });
+        editorPane = pane;
+
+        pane
+          .addBinding(PARAMS, "mode", {
+            label: "Mode",
+            options: {
+              Sculpt: "sculpt",
+              "Paint [P]": "paint",
+              "Gemini Grass [G]": "geminigrass"
+            }
+          })
+          .on("change", (ev) => {
+            editState.mode = ev.value;
+            syncBrushVisual();
+            syncGeminiFolderVisibility();
+          });
+
+        pane.addBlade({ view: "separator" });
+
+        const brushFolder = pane.addFolder({ title: "Brush", expanded: true });
+        brushFolder
+          .addBinding(PARAMS, "brushSize", {
+            label: "Size",
+            min: 2,
+            max: 80,
+            step: 1
+          })
+          .on("change", (ev) => {
+            brushSize = ev.value;
+            syncBrushVisual();
+          });
+        brushFolder
+          .addBinding(PARAMS, "brushStrength", {
+            label: "Strength",
+            min: 5,
+            max: 100,
+            step: 1
+          })
+          .on("change", (ev) => {
+            brushStr = ev.value;
+          });
+        brushFolder.addBinding(PARAMS, "paintBrush", {
+          label: "Gemini brush",
+          options: { Smooth: "smooth", Smear: "smear" }
+        });
+        brushFolder.addBinding(PARAMS, "brushFalloff", {
+          label: "Falloff",
+          options: {
+            Smooth: "smooth",
+            Linear: "linear",
+            Sphere: "sphere",
+            Hard: "hard"
+          }
+        });
+
+        const lightFolder = pane.addFolder({ title: "Lighting", expanded: false });
+        lightFolder.addBinding(PARAMS.light, "sunAzimuth", {
+          label: "Sun azimuth",
+          min: 0,
+          max: 360,
+          step: 1
+        });
+        lightFolder.addBinding(PARAMS.light, "sunElevation", {
+          label: "Sun elevation",
+          min: -10,
+          max: 90,
+          step: 1
+        });
+        lightFolder.addBinding(PARAMS.light, "dirColor", {
+          label: "Sun color",
+          view: "color"
+        });
+        lightFolder.addBinding(PARAMS.light, "dirIntensity", {
+          label: "Sun intensity",
+          min: 0,
+          max: 5,
+          step: 0.1
+        });
+        lightFolder.addBlade({ view: "separator" });
+        lightFolder.addBinding(PARAMS.light, "hemiSkyColor", {
+          label: "Ambient sky",
+          view: "color"
+        });
+        lightFolder.addBinding(PARAMS.light, "hemiGroundColor", {
+          label: "Ambient ground",
+          view: "color"
+        });
+        lightFolder.addBinding(PARAMS.light, "hemiIntensity", {
+          label: "Ambient intensity",
+          min: 0,
+          max: 3,
+          step: 0.1
+        });
+        lightFolder.addBlade({ view: "separator" });
+        lightFolder.addBinding(PARAMS.light, "envIntensity", {
+          label: "Env map",
+          min: 0,
+          max: 2,
+          step: 0.01
+        });
+        lightFolder.addBinding(PARAMS.light, "exposure", {
+          label: "Exposure",
+          min: 0.1,
+          max: 2,
+          step: 0.05
+        });
+
+        const skyFolder = pane.addFolder({ title: "Sky (physical)", expanded: false });
+        skyFolder.addBinding(PARAMS.sky, "turbidity", { min: 0, max: 10, step: 0.1 });
+        skyFolder.addBinding(PARAMS.sky, "rayleigh", { min: 0, max: 4, step: 0.1 });
+        skyFolder.addBinding(PARAMS.sky, "mie", { min: 0, max: 0.1, step: 0.001 });
+        skyFolder.addBinding(PARAMS.sky, "mieG", {
+          label: "mie g",
+          min: 0,
+          max: 1,
+          step: 0.01
+        });
+        skyFolder.addBinding(PARAMS.sky, "cloudCoverage", {
+          label: "cloud coverage",
+          min: 0,
+          max: 1,
+          step: 0.01
+        });
+        skyFolder.addBinding(PARAMS.sky, "cloudDensity", {
+          label: "cloud density",
+          min: 0,
+          max: 1,
+          step: 0.01
+        });
+        skyFolder.addBinding(PARAMS.sky, "cloudElevation", {
+          label: "cloud elevation",
+          min: 0,
+          max: 1,
+          step: 0.01
+        });
+
+        const geminiGrassErasePARAMS = { erase: false };
+        const geminiGrassFolder = pane.addFolder({
+          title: "Gemini Grass  [ G ]",
+          expanded: true
+        });
+        geminiGrassFolderRef = geminiGrassFolder;
+        geminiGrassFolder.addBinding(geminiGrassErasePARAMS, "erase", { label: "Erase (or Shift)" }).on("change", (e) => {
+          geminiGrassEraseMode = e.value;
+        });
+        geminiGrassFolder.addButton({ title: "Clear grass" }).on("click", () => {
+          geminiDensityCtx.fillStyle = "#000";
+          geminiDensityCtx.fillRect(0, 0, HTEX_RES, HTEX_RES);
+          if (geminiDensityTex) geminiDensityTex.needsUpdate = true;
+        });
+        geminiGrassFolder.addButton({ title: "Fill all grass" }).on("click", () => {
+          geminiDensityCtx.fillStyle = "#fff";
+          geminiDensityCtx.fillRect(0, 0, HTEX_RES, HTEX_RES);
+          if (geminiDensityTex) geminiDensityTex.needsUpdate = true;
+        });
+        const geminiDensityFileInput = document.createElement("input");
+        geminiDensityFileInput.type = "file";
+        geminiDensityFileInput.accept = ".bin,image/png";
+        geminiDensityFileInput.style.display = "none";
+        document.body.appendChild(geminiDensityFileInput);
+        geminiGrassFolder.addButton({ title: "Save density map" }).on("click", () => {
+          const pixels = geminiDensityCtx.getImageData(0, 0, HTEX_RES, HTEX_RES).data;
+          const blob = new Blob([pixels.buffer], { type: "application/octet-stream" });
+          const a = document.createElement("a");
+          a.download = "gemini-grass-density.bin";
+          a.href = URL.createObjectURL(blob);
+          a.click();
+          URL.revokeObjectURL(a.href);
+        });
+        geminiGrassFolder.addButton({ title: "Load density map" }).on("click", () => geminiDensityFileInput.click());
+        geminiDensityFileInput.addEventListener("change", (e) => {
+          if (!e.target.files[0]) return;
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            const loaded = new Uint8ClampedArray(ev.target.result);
+            const imgData = geminiDensityCtx.createImageData(HTEX_RES, HTEX_RES);
+            imgData.data.set(loaded.subarray(0, imgData.data.length));
+            geminiDensityCtx.putImageData(imgData, 0, 0);
+            if (geminiDensityTex) geminiDensityTex.needsUpdate = true;
+          };
+          reader.readAsArrayBuffer(e.target.files[0]);
+          e.target.value = "";
+        });
+
+        {
+          const gp = window._geminiGrassParams;
+          const gu = geminiGrassUniforms;
+          function col(hex) {
+            return new THREE.Color(hex);
+          }
+
+          const gBlade = geminiGrassFolder.addFolder({ title: "Blade", expanded: false });
+          const _gemRebuildBlade = () => {
+            gu.uBladeHeight.value = gp.bladeHeight;
+            window._geminiRebuildGeos();
+          };
+          gBlade
+            .addBinding(gp, "bladeHeight", { min: 0.3, max: 5, step: 0.05, label: "Height" })
+            .on("change", _gemRebuildBlade);
+          gBlade
+            .addBinding(gp, "bladeWidth", { min: 0.02, max: 0.5, step: 0.01, label: "Width" })
+            .on("change", () => {
+              window._geminiRebuildGeos();
+            });
+          gBlade
+            .addBinding(gp, "tipTaperStart", { min: 0.2, max: 0.98, step: 0.01, label: "Taper start" })
+            .on("change", () => {
+              window._geminiRebuildGeos();
+            });
+          gBlade
+            .addBinding(gp, "bladeYSegments", { min: 2, max: 16, step: 1, label: "Segments" })
+            .on("change", () => {
+              window._geminiRebuildGeos();
+            });
+          gBlade.addBinding(gp, "bladeColor", { label: "Base color" }).on("change", (e) => {
+            gu.uBladeCol.value.copy(col(e.value));
+          });
+          gBlade.addBinding(gp, "tipColor", { label: "Tip color" }).on("change", (e) => {
+            gu.uTipCol.value.copy(col(e.value));
+          });
+
+          const gWind = geminiGrassFolder.addFolder({ title: "Wind", expanded: false });
+          gWind.addBinding(gp, "windSpeed", { min: 0.05, max: 2, label: "Speed" }).on("change", (e) => {
+            gu.uWindSpeed.value = e.value;
+          });
+          gWind.addBinding(gp, "windStrength", { min: 0, max: 3, label: "Strength" }).on("change", (e) => {
+            gu.uWindStrength.value = e.value;
+          });
+          gWind.addBinding(gp, "maxAngle", { min: 0.5, max: 2.5, label: "Max bend" }).on("change", (e) => {
+            gu.uMaxAngle.value = e.value;
+          });
+          gWind.addBinding(gp, "naturalLean", { min: 0, max: 1.5, label: "Natural lean" }).on("change", (e) => {
+            gu.uNaturalLean.value = e.value;
+          });
+          gWind
+            .addBinding(gp, "windAngle", { min: 0, max: 360, step: 1, label: "Direction (°)" })
+            .on("change", (e) => {
+              const r = (e.value * PI) / 180;
+              gu.uWindDirX.value = Math.cos(r);
+              gu.uWindDirZ.value = Math.sin(r);
+            });
+          gWind.addBinding(gp, "windWaveScale", { min: 0.01, max: 0.5, label: "Wave scale" }).on("change", (e) => {
+            gu.uWindWaveScale.value = e.value;
+          });
+          gWind.addBinding(gp, "windGust", { min: 0, max: 1, step: 0.05, label: "Gust" }).on("change", (e) => {
+            gu.uWindGust.value = e.value;
+          });
+          gWind.addBinding(gp, "bendFocus", { min: 0.5, max: 5, label: "Bend focus" }).on("change", (e) => {
+            gu.uBendFocus.value = e.value;
+          });
+          gWind.addBinding(gp, "stiffness", { min: 0, max: 0.8, label: "Root stiffness" }).on("change", (e) => {
+            gu.uStiffness.value = e.value;
+          });
+
+          const gField = geminiGrassFolder.addFolder({ title: "Field", expanded: false });
+          gField
+            .addBinding(gp, "grassDensity", { min: 0.05, max: 1, step: 0.05, label: "Density" })
+            .on("change", (e) => {
+              gu.uGrassDensity.value = e.value;
+            });
+          gField
+            .addBinding(gp, "grassCount", { min: 32, max: 4000, step: 32, label: "Blades/patch" })
+            .on("change", () => {
+              window._geminiRebuildGeos();
+            });
+          gField
+            .addBinding(gp, "fieldSize", { min: 4, max: 30, step: 0.5, label: "Patch size" })
+            .on("change", () => {
+              window._geminiRebuildGeos();
+            });
+          gField.addBinding(gp, "clumpScale", { min: 1, max: 20, label: "Clump size" }).on("change", (e) => {
+            gu.uClumpScale.value = e.value;
+          });
+          gField
+            .addBinding(gp, "clumpStrength", { min: 0, max: 1, label: "Clump strength" })
+            .on("change", (e) => {
+              gu.uClumpStrength.value = e.value;
+            });
+          gField.addBinding(gp, "crossed", { label: "Crossed ribbons" }).on("change", (e) => {
+            gu.uCrossed.value = e.value ? 1 : 0;
+          });
+          gField
+            .addBinding(gp, "interactionRadius", { min: 0.5, max: 5, step: 0.1, label: "Interact radius" })
+            .on("change", (e) => {
+              gu.uInteractionRadius.value = e.value;
+            });
+          gField
+            .addBinding(gp, "interactionStrength", { min: 0.1, max: 2, step: 0.05, label: "Interact strength" })
+            .on("change", (e) => {
+              gu.uInteractionStrength.value = e.value;
+            });
+
+          const gColor = geminiGrassFolder.addFolder({ title: "Color variation", expanded: false });
+          gColor.addBinding(gp, "colorVariation", { label: "Enable" }).on("change", (e) => {
+            gu.uColorVar.value = e.value ? 1 : 0;
+          });
+          gColor.addBinding(gp, "cvHueSpread", { min: 0, max: 0.3, label: "Hue spread" }).on("change", (e) => {
+            gu.uCvHueSpread.value = e.value;
+          });
+          gColor.addBinding(gp, "cvSatSpread", { min: 0, max: 1, label: "Sat spread" }).on("change", (e) => {
+            gu.uCvSatSpread.value = e.value;
+          });
+          gColor.addBinding(gp, "cvDryAmount", { min: 0, max: 0.5, label: "Dry amount" }).on("change", (e) => {
+            gu.uCvDryAmount.value = e.value;
+          });
+          gColor.addBinding(gp, "cvDryColor", { label: "Dry color" }).on("change", (e) => {
+            gu.uCvDryCol.value.copy(col(e.value));
+          });
+          gColor.addBinding(gp, "aoBase", { min: 0, max: 1, label: "AO base" }).on("change", (e) => {
+            gu.uAoBase.value = e.value;
+          });
+          gColor.addBinding(gp, "aoPower", { min: 0.5, max: 6, label: "AO curve" }).on("change", (e) => {
+            gu.uAoPower.value = e.value;
+          });
+          gColor.addBinding(gp, "skyBlend", { min: 0, max: 1, label: "Sky normal blend" }).on("change", (e) => {
+            gu.uSkyBlend.value = e.value;
+          });
+          gColor
+            .addBinding(gp, "cylindrical", { min: 0, max: 1, label: "Cylindrical normals" })
+            .on("change", (e) => {
+              gu.uCylindrical.value = e.value;
+            });
+          gColor.addBinding(gp, "viewThicken", { min: 0, max: 1, label: "View thicken" }).on("change", (e) => {
+            gu.uViewThicken.value = e.value;
+          });
+
+          const gSSS = geminiGrassFolder.addFolder({ title: "SSS", expanded: false });
+          gSSS.addBinding(gp, "bssIntensity", { min: 0, max: 3, label: "Intensity" }).on("change", (e) => {
+            gu.uBssIntensity.value = e.value;
+          });
+          gSSS.addBinding(gp, "bssPower", { min: 0.5, max: 8, label: "Back sharpness" }).on("change", (e) => {
+            gu.uBssPower.value = e.value;
+          });
+          gSSS.addBinding(gp, "frontScatter", { min: 0, max: 1, step: 0.05, label: "Front scatter" }).on("change", (e) => {
+            gu.uFrontScatter.value = e.value;
+          });
+          gSSS.addBinding(gp, "rimSSS", { min: 0, max: 1, step: 0.05, label: "Rim glow" }).on("change", (e) => {
+            gu.uRimSSS.value = e.value;
+          });
+          gSSS.addBinding(gp, "bssColor", { label: "Glow color" }).on("change", (e) => {
+            gu.uBssCol.value.copy(col(e.value));
+          });
+
+          const gLod = geminiGrassFolder.addFolder({ title: "LOD", expanded: false });
+          gLod.addBinding(gp, "lodEnabled", { label: "Enable LOD" }).on("change", (e) => {
+            gu.uLodEnabled.value = e.value ? 1 : 0;
+          });
+          gLod.addBinding(gp, "lodMidDistance", { min: 10, max: 120, label: "HIGH→MID dist" }).on("change", (e) => {
+            gu.uLodMidDist.value = e.value;
+          });
+          gLod.addBinding(gp, "lodFarDistance", { min: 20, max: 200, label: "MID→FAR dist" }).on("change", (e) => {
+            gu.uLodFarDist.value = e.value;
+          });
+          gLod.addBinding(gp, "lodMaxDistance", { min: 30, max: 300, label: "Max distance" }).on("change", (e) => {
+            gu.uLodMaxDist.value = e.value;
+          });
+          gLod.addBinding(gp, "lodFadeStart", { min: 0.1, max: 1, step: 0.05, label: "Fade start" }).on("change", (e) => {
+            gu.uLodFadeStart.value = e.value;
+          });
+          gLod.addBinding(gp, "lodDebug", { label: "Debug colors" }).on("change", (e) => {
+            gu.uLodDebug.value = e.value ? 1 : 0;
+          });
+          gLod.addBinding(gp, "grassReceiveShadow", { label: "Receive shadow" });
+
+          const _gemRebuild = () => {
+            window._geminiRebuildGeos();
+          };
+
+          const gLodMid = gLod.addFolder({ title: "MID tier", expanded: false });
+          gLodMid
+            .addBinding(gp, "lodMidPatchSize", { min: 10, max: 40, step: 1, label: "Patch size" })
+            .on("change", _gemRebuild);
+          gLodMid
+            .addBinding(gp, "lodMidSegments", { min: 2, max: 8, step: 1, label: "Segments" })
+            .on("change", _gemRebuild);
+          gLodMid
+            .addBinding(gp, "lodMidGrassCount", { min: 32, max: 4000, step: 32, label: "Blades/patch" })
+            .on("change", _gemRebuild);
+
+          const gLodFar = gLod.addFolder({ title: "FAR tier", expanded: false });
+          gLodFar
+            .addBinding(gp, "lodFarPatchSize", { min: 10, max: 60, step: 1, label: "Patch size" })
+            .on("change", _gemRebuild);
+          gLodFar
+            .addBinding(gp, "lodFarSegments", { min: 1, max: 4, step: 1, label: "Segments" })
+            .on("change", _gemRebuild);
+          gLodFar
+            .addBinding(gp, "lodFarGrassCount", { min: 16, max: 2000, step: 16, label: "Blades/patch" })
+            .on("change", _gemRebuild);
+
+          gLod.addButton({ title: "Rebuild LOD geometries" }).on("click", _gemRebuild);
+        }
+
+        geminiGrassFolder.hidden = true;
+        syncGeminiFolderVisibility();
+      }
+
+      renderer.domElement.addEventListener(
+        "wheel",
+        (e) => {
+          if (!e.shiftKey && !e.altKey) return;
+          e.preventDefault();
+          e.stopPropagation();
+          const dir = e.deltaY < 0 ? 1 : -1;
+          if (e.shiftKey) {
+            PARAMS.brushSize = Math.min(80, Math.max(2, PARAMS.brushSize + dir * 2));
+            brushSize = PARAMS.brushSize;
+          } else {
+            PARAMS.brushStrength = Math.min(100, Math.max(5, PARAMS.brushStrength + dir * 5));
+            brushStr = PARAMS.brushStrength;
+          }
+          if (editorPane) editorPane.refresh();
+          syncBrushVisual();
+        },
+        { passive: false, capture: true }
+      );
+
+      rebuildGlobalHeightTexture();
+      heightTexDirty = false;
+      lastHeightTexSyncMs = performance.now();
+
       updateChunkSet();
 
       let lastTime = performance.now();
@@ -1251,6 +2206,8 @@ brush: sculpt r=${CONFIG.sculpt.radius} | paint r=${CONFIG.paint.radius} (${edit
         const now = performance.now();
         const dt = now - lastTime;
         lastTime = now;
+
+        syncLightAndSkyFromParams();
 
         controls.update();
 
@@ -1260,6 +2217,28 @@ brush: sculpt r=${CONFIG.sculpt.radius} | paint r=${CONFIG.paint.radius} (${edit
         }
 
         if (dirtyChunks.size > 0) rebuildDirtyActiveChunks(4);
+
+        if (heightTexDirty && now - lastHeightTexSyncMs > 100) {
+          rebuildGlobalHeightTexture();
+          heightTexDirty = false;
+          lastHeightTexSyncMs = now;
+        }
+
+        if (geminiGrassPatchSystem && geminiGrassUniforms) {
+          const gp = window._geminiGrassParams;
+          _geminiUpdateOpts.patchSize = gp.fieldSize;
+          _geminiUpdateOpts.patchSizeMid = gp.lodMidPatchSize;
+          _geminiUpdateOpts.patchSizeFar = gp.lodFarPatchSize;
+          _geminiUpdateOpts.lodMidDistance = gp.lodMidDistance;
+          _geminiUpdateOpts.lodFarDistance = gp.lodFarDistance;
+          _geminiUpdateOpts.maxDistance = gp.lodMaxDistance;
+          _geminiUpdateOpts.lodEnabled = gp.lodEnabled;
+          _geminiUpdateOpts.grassReceiveShadow = gp.grassReceiveShadow;
+          const stats = geminiGrassPatchSystem.update(_geminiUpdateOpts);
+          lastGeminiPatchCount = stats.patchCount;
+          geminiGrassUniforms.uPlayerPos.value.copy(camera.position);
+          geminiGrassUniforms.uSunDir.value.copy(sunDir);
+        }
 
         renderer.render(scene, camera);
         updateHud(dt);
