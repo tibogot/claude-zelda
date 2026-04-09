@@ -84,7 +84,7 @@
       <kbd>F</kbd> play · <kbd>Esc</kbd>/<kbd>F</kbd> exit ·
       Terrain gen: pane → Terrain generator ·
       <kbd>Shift</kbd>+LMB/RMB sculpt · <kbd>P</kbd> paint · <kbd>G</kbd> Gemini grass · <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> R/G/B ·
-      <kbd>~</kbd> surface: tile → TSL ground → splat → green · <kbd>D</kbd> chunk debug · <kbd>E</kbd> export <kbd>L</kbd> load · Shift+scroll brush size · Alt+scroll strength
+      <kbd>~</kbd> surface: tile → TSL ground → splat → green · <kbd>D</kbd> chunk debug · <kbd>E</kbd> export <kbd>L</kbd> load · Shift+scroll size (sculpt + Gemini) · Alt+scroll strength
     </div>
 
     <script type="module">
@@ -95,6 +95,11 @@
       import { Pane } from "tweakpane";
       import { createTileMaterial } from "./tileMaterial.js";
       import { createChunkPainterGroundMaterial } from "./chunkPainterGroundMaterial.js";
+      import {
+        loadRock028Textures,
+        createAutoCliffUniforms,
+        createChunkSplatCliffMaterial
+      } from "./chunkTerrainAutoCliff.js";
       import {
         createBladeGeometry as geminiBladeGeo,
         createFieldInstancedGeometry as geminiFieldGeo,
@@ -113,8 +118,28 @@
         terrainChunkCulling: true,
         /** tile | tslGround (painter-style proc. ground + splat) | splat | greenGround */
         terrainSurface: "tile",
+        /** Painter-style Rock028 + heightTex slope mask on splat + TSL ground surfaces. */
+        autoCliffEnabled: true,
+        autoCliff: {
+          slopeStart: 0.05,
+          slopeEnd: 0.7,
+          rockScale: 0.05,
+          rockBrightness: 0.85,
+          rockContrast: 1.1,
+          rockTint: "#ffffff",
+          rockNormalStr: 1.0,
+          rockBlendSharp: 1.0,
+          rockRoughMul: 1.0,
+          triplanarSharp: 4.0
+        },
         brushSize: 20,
         brushStrength: 60,
+        /**
+         * Hard clamp on sculpted heightfield (world Y). Old fixed max 180 made peaks plateau —
+         * raise max for tall mountains; lower max (~100–200) for intentional mesa / table-top.
+         */
+        sculptClampMin: -200,
+        sculptClampMax: 2000,
         paintBrush: "smooth",
         brushFalloff: "smooth",
         light: {
@@ -172,9 +197,9 @@
         activeRadiusInChunks: 6,
         dataResolution: 64,
         maxTerrainHeight: 26,
+        /** Brush ring mesh is built at this world radius; live sculpt size/strength = Tweakpane Brush sliders. */
         sculpt: {
-          radius: 26,
-          strength: 1.4
+          ringGeomBase: 26
         },
         lodLevels: [
           { maxDistance: 200, segments: 64, label: "L0" },
@@ -193,6 +218,16 @@
          */
         terrainSkirtDepth: 100
       };
+
+      const SCULPT_RING_GEOM_BASE = CONFIG.sculpt.ringGeomBase;
+
+      function sculptBrushWorldRadius() {
+        return THREE.MathUtils.mapLinear(PARAMS.brushSize, 2, 80, 5, 90);
+      }
+
+      function sculptBrushStrength() {
+        return THREE.MathUtils.mapLinear(PARAMS.brushStrength, 5, 100, 0.15, 2.5);
+      }
 
       const HTEX_RES = 512;
 
@@ -313,6 +348,60 @@
       let lastHeightTexSyncMs = 0;
       let globalHeightTexData = null;
       let globalHeightTex = null;
+
+      const cliffU = createAutoCliffUniforms();
+      const rock028Textures = { colorTex: null, dataTex: null };
+      let rock028Ready = false;
+
+      function syncCliffUniformsFromParams() {
+        const ac = PARAMS.autoCliff;
+        cliffU.uSlopeStart.value = ac.slopeStart;
+        cliffU.uSlopeEnd.value = ac.slopeEnd;
+        cliffU.uRockScale.value = ac.rockScale;
+        cliffU.uRockBrightness.value = ac.rockBrightness;
+        cliffU.uRockContrast.value = ac.rockContrast;
+        cliffU.uRockTint.value.set(ac.rockTint).convertSRGBToLinear();
+        cliffU.uRockNormalStr.value = ac.rockNormalStr;
+        cliffU.uRockBlendSharp.value = ac.rockBlendSharp;
+        cliffU.uRockRoughMul.value = ac.rockRoughMul;
+        cliffU.uTriplanarSharp.value = ac.triplanarSharp;
+      }
+
+      function buildCliffDeps() {
+        if (!PARAMS.autoCliffEnabled || !rock028Ready || !globalHeightTex || !rock028Textures.colorTex) {
+          return null;
+        }
+        return {
+          heightTex: globalHeightTex,
+          rockColorTex: rock028Textures.colorTex,
+          rockDataTex: rock028Textures.dataTex,
+          cliffU,
+          worldSize: CONFIG.worldSize,
+          worldHalf: CONFIG.worldSize * 0.5,
+          htexRes: HTEX_RES
+        };
+      }
+
+      function createSplatMaterialsForTex(tex) {
+        syncCliffUniformsFromParams();
+        const deps = buildCliffDeps();
+        const material = deps
+          ? createChunkSplatCliffMaterial(
+              tex,
+              CONFIG.chunkSize,
+              deps.heightTex,
+              deps.rockColorTex,
+              deps.rockDataTex,
+              cliffU,
+              deps.worldSize,
+              deps.worldHalf,
+              deps.htexRes
+            )
+          : createChunkSplatMaterial(tex);
+        const tslGroundMaterial = createChunkPainterGroundMaterial(tex, CONFIG.chunkSize, {}, deps);
+        return { material, tslGroundMaterial };
+      }
+
       let geminiDensityCanvas = null;
       let geminiDensityCtx = null;
       let geminiDensityTex = null;
@@ -556,8 +645,7 @@
         tex.flipY = false;
         tex.colorSpace = THREE.SRGBColorSpace;
         tex.needsUpdate = true;
-        const material = createChunkSplatMaterial(tex);
-        const tslGroundMaterial = createChunkPainterGroundMaterial(tex, CONFIG.chunkSize);
+        const { material, tslGroundMaterial } = createSplatMaterialsForTex(tex);
         b = { canvas, ctx, tex, material, tslGroundMaterial };
         chunkSplatMap.set(k, b);
         return b;
@@ -661,13 +749,24 @@
         }
       }
 
+      function rebuildAllChunkSplatMaterials() {
+        for (const splat of chunkSplatMap.values()) {
+          splat.material.dispose();
+          splat.tslGroundMaterial.dispose();
+          const { material, tslGroundMaterial } = createSplatMaterialsForTex(splat.tex);
+          splat.material = material;
+          splat.tslGroundMaterial = tslGroundMaterial;
+        }
+        refreshActiveChunkMaterials();
+      }
+
       const raycaster = new THREE.Raycaster();
       const pointerNdc = new THREE.Vector2();
       /** Reused every raycast — avoids allocating a new array per pointermove / hit test. */
       const _terrainRaycastMeshes = [];
 
       const brushMarker = new THREE.Mesh(
-        new THREE.RingGeometry(CONFIG.sculpt.radius * 0.96, CONFIG.sculpt.radius, 48),
+        new THREE.RingGeometry(SCULPT_RING_GEOM_BASE * 0.96, SCULPT_RING_GEOM_BASE, 48),
         new THREE.MeshBasicMaterial({
           color: 0xffaa55,
           transparent: true,
@@ -723,13 +822,13 @@
       function syncBrushVisual() {
         if (editState.mode === "paint") {
           brushMarker.material.color.setHex(0x44ff88);
-          brushMarker.scale.setScalar(CONFIG.paint.radius / CONFIG.sculpt.radius);
+          brushMarker.scale.setScalar(CONFIG.paint.radius / SCULPT_RING_GEOM_BASE);
         } else if (editState.mode === "geminigrass") {
           brushMarker.material.color.setHex(0x66dd99);
-          brushMarker.scale.setScalar(geminiBrushWorldRadius() / CONFIG.sculpt.radius);
+          brushMarker.scale.setScalar(geminiBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
         } else {
           brushMarker.material.color.setHex(0xffaa55);
-          brushMarker.scale.setScalar(1);
+          brushMarker.scale.setScalar(sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
         }
       }
 
@@ -1676,7 +1775,7 @@
       }
 
       function applyBrushAt(worldPoint, sign) {
-        const radius = CONFIG.sculpt.radius;
+        const radius = sculptBrushWorldRadius();
         const step = CONFIG.chunkSize / CONFIG.dataResolution;
         const min = worldToChunkIndex(worldPoint.x - radius, worldPoint.z - radius);
         const max = worldToChunkIndex(worldPoint.x + radius, worldPoint.z + radius);
@@ -1712,9 +1811,13 @@
                 const dist = Math.sqrt(distSq);
 
                 const falloff = 1.0 - dist / radius;
-                const delta = sign * CONFIG.sculpt.strength * falloff;
+                const delta = sign * sculptBrushStrength() * falloff;
                 const idx = getChunkDataIndex(ix, iz);
-                heights[idx] = THREE.MathUtils.clamp(heights[idx] + delta, -120, 180);
+                heights[idx] = THREE.MathUtils.clamp(
+                  heights[idx] + delta,
+                  PARAMS.sculptClampMin,
+                  PARAMS.sculptClampMax
+                );
                 changed = true;
               }
             }
@@ -2033,7 +2136,7 @@ camera: ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}
 world size: ${CONFIG.worldSize} | chunk size: ${CONFIG.chunkSize}
 bounds: ${worldBounds.min.x}..${worldBounds.max.x}
 gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}  (no GPU grass until density)
-brush: sculpt r=${CONFIG.sculpt.radius} | paint r=${CONFIG.paint.radius} (${editState.hasBrushHit ? "hit" : "no-hit"})`;
+brush: sculpt r=${sculptBrushWorldRadius().toFixed(1)} str=${sculptBrushStrength().toFixed(2)} | paint r=${CONFIG.paint.radius} (${editState.hasBrushHit ? "hit" : "no-hit"})`;
       }
 
       window.addEventListener("resize", () => {
@@ -2054,6 +2157,17 @@ brush: sculpt r=${CONFIG.sculpt.radius} | paint r=${CONFIG.paint.radius} (${edit
       globalHeightTex.minFilter = THREE.LinearFilter;
       globalHeightTex.magFilter = THREE.LinearFilter;
       globalHeightTex.needsUpdate = true;
+
+      syncCliffUniformsFromParams();
+      loadRock028Textures()
+        .then(({ colorTex, dataTex }) => {
+          rock028Textures.colorTex = colorTex;
+          rock028Textures.dataTex = dataTex;
+          rock028Ready = true;
+          rebuildAllChunkSplatMaterials();
+          heightTexDirty = true;
+        })
+        .catch((err) => console.warn("Rock028 textures failed (auto cliff off):", err));
 
       geminiDensityCanvas = document.createElement("canvas");
       geminiDensityCanvas.width = geminiDensityCanvas.height = HTEX_RES;
@@ -2332,6 +2446,48 @@ brush: sculpt r=${CONFIG.sculpt.radius} | paint r=${CONFIG.paint.radius} (${edit
           })
           .on("change", () => refreshActiveChunkMaterials());
 
+        const cliffFolder = pane.addFolder({ title: "Auto cliff (painter Rock028)", expanded: false });
+        const onCliffGuiChange = () => {
+          syncCliffUniformsFromParams();
+          refreshActiveChunkMaterials();
+        };
+        cliffFolder
+          .addBinding(PARAMS, "autoCliffEnabled", { label: "Enabled (splat + TSL ground)" })
+          .on("change", () => rebuildAllChunkSplatMaterials());
+        cliffFolder
+          .addBinding(PARAMS.autoCliff, "slopeStart", {
+            label: "Slope start (flat→cliff)",
+            min: 0,
+            max: 1,
+            step: 0.01
+          })
+          .on("change", onCliffGuiChange);
+        cliffFolder
+          .addBinding(PARAMS.autoCliff, "slopeEnd", { label: "Slope end", min: 0, max: 1, step: 0.01 })
+          .on("change", onCliffGuiChange);
+        cliffFolder
+          .addBinding(PARAMS.autoCliff, "rockScale", { label: "Rock UV scale", min: 0.01, max: 0.3, step: 0.005 })
+          .on("change", onCliffGuiChange);
+        cliffFolder
+          .addBinding(PARAMS.autoCliff, "rockBrightness", { label: "Rock brightness", min: 0.2, max: 2, step: 0.05 })
+          .on("change", onCliffGuiChange);
+        cliffFolder
+          .addBinding(PARAMS.autoCliff, "rockContrast", { label: "Rock contrast", min: 0.5, max: 2, step: 0.05 })
+          .on("change", onCliffGuiChange);
+        cliffFolder.addBinding(PARAMS.autoCliff, "rockTint", { label: "Rock tint", view: "color" }).on("change", onCliffGuiChange);
+        cliffFolder
+          .addBinding(PARAMS.autoCliff, "rockNormalStr", { label: "Rock normal str", min: 0, max: 2, step: 0.05 })
+          .on("change", onCliffGuiChange);
+        cliffFolder
+          .addBinding(PARAMS.autoCliff, "rockBlendSharp", { label: "Blend sharpness", min: 0.2, max: 4, step: 0.05 })
+          .on("change", onCliffGuiChange);
+        cliffFolder
+          .addBinding(PARAMS.autoCliff, "rockRoughMul", { label: "Rock rough ×", min: 0.2, max: 2, step: 0.05 })
+          .on("change", onCliffGuiChange);
+        cliffFolder
+          .addBinding(PARAMS.autoCliff, "triplanarSharp", { label: "Triplanar sharp", min: 1, max: 8, step: 0.5 })
+          .on("change", onCliffGuiChange);
+
         const playFolder = pane.addFolder({ title: "Play [F]", expanded: false });
         playFolder.addBinding(playParams, "speed", { min: 2, max: 40, step: 0.5, label: "Move speed" });
         playFolder.addBinding(playParams, "camDist", { min: 3, max: 30, step: 0.5, label: "Cam distance" });
@@ -2343,7 +2499,7 @@ brush: sculpt r=${CONFIG.sculpt.radius} | paint r=${CONFIG.paint.radius} (${edit
         const brushFolder = pane.addFolder({ title: "Brush", expanded: true });
         brushFolder
           .addBinding(PARAMS, "brushSize", {
-            label: "Size",
+            label: "Size (sculpt + Gemini)",
             min: 2,
             max: 80,
             step: 1
@@ -2354,13 +2510,14 @@ brush: sculpt r=${CONFIG.sculpt.radius} | paint r=${CONFIG.paint.radius} (${edit
           });
         brushFolder
           .addBinding(PARAMS, "brushStrength", {
-            label: "Strength",
+            label: "Strength (sculpt + Gemini)",
             min: 5,
             max: 100,
             step: 1
           })
           .on("change", (ev) => {
             brushStr = ev.value;
+            syncBrushVisual();
           });
         brushFolder.addBinding(PARAMS, "paintBrush", {
           label: "Gemini brush",
@@ -2375,6 +2532,33 @@ brush: sculpt r=${CONFIG.sculpt.radius} | paint r=${CONFIG.paint.radius} (${edit
             Hard: "hard"
           }
         });
+        brushFolder.addBlade({ view: "separator" });
+        brushFolder
+          .addBinding(PARAMS, "sculptClampMax", {
+            label: "Sculpt max Y (plateau if low)",
+            min: 40,
+            max: 4000,
+            step: 10
+          })
+          .on("change", () => {
+            if (PARAMS.sculptClampMax < PARAMS.sculptClampMin + 10) {
+              PARAMS.sculptClampMax = PARAMS.sculptClampMin + 10;
+              if (editorPane) editorPane.refresh();
+            }
+          });
+        brushFolder
+          .addBinding(PARAMS, "sculptClampMin", {
+            label: "Sculpt min Y",
+            min: -800,
+            max: 80,
+            step: 5
+          })
+          .on("change", () => {
+            if (PARAMS.sculptClampMin > PARAMS.sculptClampMax - 10) {
+              PARAMS.sculptClampMin = PARAMS.sculptClampMax - 10;
+              if (editorPane) editorPane.refresh();
+            }
+          });
 
         const genFolder = pane.addFolder({ title: "Terrain generator", expanded: false });
         genFolder.addBinding(PARAMS.gen, "mode", {

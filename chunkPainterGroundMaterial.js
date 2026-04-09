@@ -24,6 +24,7 @@ import {
   uniform,
 } from "three/tsl";
 import { perlinNoise2D, fbmPerlin2D } from "./tsl-noise.js";
+import { createCliffShadingContext } from "./chunkTerrainAutoCliff.js";
 
 function toLinearColor(hex) {
   return new THREE.Color(hex).convertSRGBToLinear();
@@ -44,8 +45,9 @@ const proceduralLayerMask = Fn(
  * @param {THREE.Texture} splatTex — same per-chunk splat as createChunkSplatMaterial
  * @param {number} chunkSize
  * @param {object} [opts] — defaults match splatmap-painter10bvh+post.html gPARAMS (default preset)
+ * @param {null | { heightTex, rockColorTex, rockDataTex, cliffU, worldSize, worldHalf, htexRes }} [cliffDeps] — painter-style auto cliff
  */
-export function createChunkPainterGroundMaterial(splatTex, chunkSize, opts = {}) {
+export function createChunkPainterGroundMaterial(splatTex, chunkSize, opts = {}, cliffDeps = null) {
   const baseColor = opts.baseColor ?? "#74CA5E";
   const brightness = opts.brightness ?? 1.3;
   const contrast = opts.contrast ?? 0.95;
@@ -97,6 +99,18 @@ export function createChunkPainterGroundMaterial(splatTex, chunkSize, opts = {})
     metalness,
   });
   mat.envMapIntensity = envMapIntensity;
+
+  const cliff =
+    cliffDeps &&
+    createCliffShadingContext(
+      cliffDeps.heightTex,
+      cliffDeps.rockColorTex,
+      cliffDeps.rockDataTex,
+      cliffDeps.cliffU,
+      cliffDeps.worldSize,
+      cliffDeps.worldHalf,
+      cliffDeps.htexRes,
+    );
 
   mat.colorNode = Fn(() => {
     const wxz = positionWorld.xz;
@@ -150,8 +164,13 @@ export function createChunkPainterGroundMaterial(splatTex, chunkSize, opts = {})
     col = mix(col, layR, s.r);
     col = mix(col, layG, s.g);
     col = mix(col, layB, s.b);
-    return col;
+    return cliff ? cliff.augmentColor(col) : col;
   })();
+
+  if (cliff) {
+    mat.normalNode = cliff.buildNormalNode();
+    mat.roughnessNode = cliff.buildRoughnessNode();
+  }
 
   return mat;
 }
