@@ -1,0 +1,1269 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Splatmap Chunks - Phase 1</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        overflow: hidden;
+        background: #0b0f13;
+        color: #cfe2f3;
+        font-family: "SF Mono", Consolas, monospace;
+      }
+
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+
+      #hud {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        pointer-events: none;
+        background: rgba(0, 0, 0, 0.55);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        border-radius: 8px;
+        padding: 10px 12px;
+        white-space: pre;
+        line-height: 1.4;
+        font-size: 12px;
+      }
+
+      #hint {
+        position: fixed;
+        bottom: 12px;
+        left: 12px;
+        z-index: 10;
+        pointer-events: none;
+        background: rgba(0, 0, 0, 0.45);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 12px;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="hud">booting...</div>
+    <input type="file" id="load-terrain-input" accept="application/json,.json" style="display: none" />
+
+    <div id="hint">
+      <kbd>Shift</kbd>+LMB/RMB sculpt · <kbd>P</kbd> paint · <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> R/G/B · <kbd>~</kbd> tile view ·
+      <kbd>D</kbd> chunk debug · <kbd>E</kbd> export <kbd>L</kbd> load
+    </div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { Fn, texture, vec3, vec2, mix, positionLocal, float } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+      import { createTileMaterial } from "./tileMaterial.js";
+
+      /** Default physical sky + light match splatmap-painter10bvh+post.html (skyMode physical). */
+      const PHYSICAL_SKY = {
+        sunAzimuth: 135,
+        sunElevation: 43,
+        dirColor: 0xfff5e0,
+        dirIntensity: 2.2,
+        hemiSkyColor: 0xc8e0ff,
+        hemiGroundColor: 0x88aa55,
+        hemiIntensity: 0.4,
+        envIntensity: 0.2,
+        exposure: 0.5,
+        sky: {
+          turbidity: 2,
+          rayleigh: 1.5,
+          mie: 0.005,
+          mieG: 0.8,
+          cloudCoverage: 0.4,
+          cloudDensity: 0.4,
+          cloudElevation: 0.5
+        }
+      };
+
+      const CONFIG = {
+        worldSize: 1600,
+        chunkSize: 100,
+        activeRadiusInChunks: 6,
+        dataResolution: 64,
+        maxTerrainHeight: 26,
+        sculpt: {
+          radius: 26,
+          strength: 1.4
+        },
+        lodLevels: [
+          { maxDistance: 200, segments: 64, label: "L0" },
+          { maxDistance: 420, segments: 32, label: "L1" },
+          { maxDistance: Infinity, segments: 16, label: "L2" }
+        ],
+        splatRes: 256,
+        paint: {
+          radius: 22,
+          strength: 0.35
+        }
+      };
+
+      const hudEl = document.getElementById("hud");
+
+      const scene = new THREE.Scene();
+
+      const camera = new THREE.PerspectiveCamera(
+        65,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        5000
+      );
+      camera.position.set(170, 145, 170);
+
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      document.body.appendChild(renderer.domElement);
+      await renderer.init();
+
+      function sunDirectionFromAngles(azDeg, elDeg, target = new THREE.Vector3()) {
+        const az = (azDeg * Math.PI) / 180;
+        const el = (elDeg * Math.PI) / 180;
+        return target
+          .set(Math.cos(el) * Math.cos(az), Math.sin(el), Math.cos(el) * Math.sin(az))
+          .normalize();
+      }
+
+      const sunDir = new THREE.Vector3();
+      sunDirectionFromAngles(PHYSICAL_SKY.sunAzimuth, PHYSICAL_SKY.sunElevation, sunDir);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 0, 0);
+      controls.enableDamping = true;
+      controls.maxPolarAngle = Math.PI * 0.49;
+      controls.minDistance = 15;
+      controls.maxDistance = 1500;
+
+      const hemi = new THREE.HemisphereLight(
+        PHYSICAL_SKY.hemiSkyColor,
+        PHYSICAL_SKY.hemiGroundColor,
+        PHYSICAL_SKY.hemiIntensity
+      );
+      scene.add(hemi);
+
+      const sun = new THREE.DirectionalLight(PHYSICAL_SKY.dirColor, PHYSICAL_SKY.dirIntensity);
+      sun.position.copy(sunDir).multiplyScalar(600);
+      scene.add(sun);
+
+      scene.background = null;
+
+      const sky = new SkyMesh();
+      sky.scale.setScalar(10000);
+      sky.material.fog = false;
+      scene.add(sky);
+      sky.turbidity.value = PHYSICAL_SKY.sky.turbidity;
+      sky.rayleigh.value = PHYSICAL_SKY.sky.rayleigh;
+      sky.mieCoefficient.value = PHYSICAL_SKY.sky.mie;
+      sky.mieDirectionalG.value = PHYSICAL_SKY.sky.mieG;
+      sky.cloudCoverage.value = PHYSICAL_SKY.sky.cloudCoverage;
+      sky.cloudDensity.value = PHYSICAL_SKY.sky.cloudDensity;
+      sky.cloudElevation.value = PHYSICAL_SKY.sky.cloudElevation;
+      sky.sunPosition.value.copy(sunDir);
+
+      const pmremGenerator = new THREE.PMREMGenerator(renderer);
+      const rebuildSkyEnv = () => {
+        const envScene = new THREE.Scene();
+        envScene.add(sky.clone());
+        scene.environment = pmremGenerator.fromScene(envScene, 0.04).texture;
+      };
+      rebuildSkyEnv();
+      scene.environmentIntensity = PHYSICAL_SKY.envIntensity;
+      renderer.toneMappingExposure = PHYSICAL_SKY.exposure;
+
+      const worldHalf = CONFIG.worldSize * 0.5;
+      const worldBounds = new THREE.Box3(
+        new THREE.Vector3(-worldHalf, -1000, -worldHalf),
+        new THREE.Vector3(worldHalf, 1000, worldHalf)
+      );
+
+      // Same default tile material as splatmap-painter10bvh+post.html (~ key toggles there)
+      const terrainMaterial = createTileMaterial({
+        roughness: 0.95,
+        textureScale: 400,
+        tileColor: 0xe6e3e3,
+        gridColor: 0x444444,
+        gridLineColor: 0x111111
+      });
+
+      function createChunkSplatMaterial(splatTex) {
+        splatTex.anisotropy = 8;
+        splatTex.flipY = false;
+        const cs = float(CONFIG.chunkSize);
+        const mat = new THREE.MeshStandardNodeMaterial({
+          roughness: 0.88,
+          metalness: 0.02
+        });
+        mat.colorNode = Fn(() => {
+          const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));
+          const s = texture(splatTex, splatUV);
+          const base = vec3(0.22, 0.38, 0.13);
+          const layR = vec3(0.34, 0.27, 0.16);
+          const layG = vec3(0.36, 0.52, 0.22);
+          const layB = vec3(0.46, 0.4, 0.28);
+          let col = base;
+          col = mix(col, layR, s.r);
+          col = mix(col, layG, s.g);
+          col = mix(col, layB, s.b);
+          return col;
+        })();
+        return mat;
+      }
+
+      let debugChunkView = false;
+      let tileShadingMode = false;
+      const debugChunkMaterialCache = new Map();
+
+      function chunkDebugHue(cx, cz) {
+        let n = (cx * 73856093) ^ (cz * 19349663);
+        n = (n ^ (n >>> 15)) >>> 0;
+        return (n % 360) / 360;
+      }
+
+      function lodBrightnessForSegments(segments) {
+        if (segments >= 64) return 1;
+        if (segments >= 32) return 0.78;
+        return 0.52;
+      }
+
+      function getOrCreateDebugChunkMaterial(cx, cz, lodLevel) {
+        const key = `${cx},${cz},s${lodLevel.segments}`;
+        let mat = debugChunkMaterialCache.get(key);
+        if (mat) return mat;
+
+        const c = new THREE.Color().setHSL(chunkDebugHue(cx, cz), 0.58, 0.5);
+        c.multiplyScalar(lodBrightnessForSegments(lodLevel.segments));
+        mat = new THREE.MeshStandardMaterial({
+          color: c,
+          roughness: 0.82,
+          metalness: 0.06,
+          flatShading: true
+        });
+        debugChunkMaterialCache.set(key, mat);
+        return mat;
+      }
+
+      function resolveTerrainMaterial(cx, cz, lodLevel) {
+        if (debugChunkView) return getOrCreateDebugChunkMaterial(cx, cz, lodLevel);
+        if (tileShadingMode) return terrainMaterial;
+        return ensureChunkSplat(cx, cz).material;
+      }
+
+      function disposeDebugChunkMaterials() {
+        for (const m of debugChunkMaterialCache.values()) m.dispose();
+        debugChunkMaterialCache.clear();
+      }
+
+      const geometryCache = new Map();
+      const activeChunks = new Map();
+      const chunkDataMap = new Map();
+      const chunkSplatMap = new Map();
+      const dirtyChunks = new Set();
+
+      function ensureChunkSplat(cx, cz) {
+        const k = chunkKey(cx, cz);
+        let b = chunkSplatMap.get(k);
+        if (b) return b;
+        const res = CONFIG.splatRes;
+        const canvas = document.createElement("canvas");
+        canvas.width = res;
+        canvas.height = res;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        ctx.fillStyle = "#000000";
+        ctx.fillRect(0, 0, res, res);
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+        tex.flipY = false;
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.needsUpdate = true;
+        const material = createChunkSplatMaterial(tex);
+        b = { canvas, ctx, tex, material };
+        chunkSplatMap.set(k, b);
+        return b;
+      }
+
+      function bufferToBase64(buf) {
+        const bytes = new Uint8Array(buf);
+        let binary = "";
+        const chunk = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunk) {
+          binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunk, bytes.length)));
+        }
+        return btoa(binary);
+      }
+
+      function base64ToBuffer(b64) {
+        const binary = atob(b64);
+        const out = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+        return out.buffer;
+      }
+
+      function exportTerrainJson() {
+        const chunkKeys = new Set([...chunkDataMap.keys(), ...chunkSplatMap.keys()]);
+        const chunks = {};
+        const splatBytes = CONFIG.splatRes * CONFIG.splatRes * 4;
+        for (const k of chunkKeys) {
+          const { cx, cz } = parseChunkKey(k);
+          const h = chunkDataMap.get(k) ?? ensureChunkData(cx, cz);
+          const splat = ensureChunkSplat(cx, cz);
+          const img = splat.ctx.getImageData(0, 0, CONFIG.splatRes, CONFIG.splatRes);
+          const d = img.data;
+          chunks[k] = {
+            h: bufferToBase64(h.buffer.slice(h.byteOffset, h.byteOffset + h.byteLength)),
+            s: bufferToBase64(d.buffer.slice(d.byteOffset, d.byteOffset + splatBytes))
+          };
+        }
+        const payload = {
+          v: 1,
+          worldSize: CONFIG.worldSize,
+          chunkSize: CONFIG.chunkSize,
+          dataResolution: CONFIG.dataResolution,
+          splatRes: CONFIG.splatRes,
+          chunks
+        };
+        const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "splatmap-chunks-terrain.json";
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }
+
+      function importTerrainJson(text) {
+        const data = JSON.parse(text);
+        if (data.v !== 1) throw new Error("Unsupported file version");
+        if (
+          data.worldSize !== CONFIG.worldSize ||
+          data.chunkSize !== CONFIG.chunkSize ||
+          data.dataResolution !== CONFIG.dataResolution ||
+          data.splatRes !== CONFIG.splatRes
+        ) {
+          throw new Error("World config mismatch — use same worldSize/chunkSize/res as export");
+        }
+        const hCount = (CONFIG.dataResolution + 1) * (CONFIG.dataResolution + 1);
+        const hBytes = hCount * 4;
+        const splatBytes = CONFIG.splatRes * CONFIG.splatRes * 4;
+        for (const [k, entry] of Object.entries(data.chunks)) {
+          const { cx, cz } = parseChunkKey(k);
+          const hb = base64ToBuffer(entry.h);
+          if (hb.byteLength !== hBytes) throw new Error(`Bad height size for ${k}`);
+          const heights = new Float32Array(hb);
+          chunkDataMap.set(k, heights);
+          const sb = base64ToBuffer(entry.s);
+          if (sb.byteLength !== splatBytes) throw new Error(`Bad splat size for ${k}`);
+          const splat = ensureChunkSplat(cx, cz);
+          const u8 = new Uint8ClampedArray(sb);
+          splat.ctx.putImageData(new ImageData(u8, CONFIG.splatRes, CONFIG.splatRes), 0, 0);
+          splat.tex.needsUpdate = true;
+          dirtyChunks.add(k);
+        }
+        for (const [key, ch] of [...activeChunks.entries()]) {
+          const lod =
+            CONFIG.lodLevels.find((l) => l.segments === ch.segments) ?? CONFIG.lodLevels[0];
+          removeChunk(ch);
+          activeChunks.set(key, createChunk(ch.cx, ch.cz, lod));
+        }
+        refreshActiveChunkMaterials();
+      }
+
+      function refreshActiveChunkMaterials() {
+        for (const chunk of activeChunks.values()) {
+          const lod =
+            CONFIG.lodLevels.find((l) => l.segments === chunk.segments) ?? CONFIG.lodLevels[0];
+          chunk.mesh.material = resolveTerrainMaterial(chunk.cx, chunk.cz, lod);
+        }
+      }
+
+      const raycaster = new THREE.Raycaster();
+      const pointerNdc = new THREE.Vector2();
+
+      const brushMarker = new THREE.Mesh(
+        new THREE.RingGeometry(CONFIG.sculpt.radius * 0.96, CONFIG.sculpt.radius, 48),
+        new THREE.MeshBasicMaterial({
+          color: 0xffaa55,
+          transparent: true,
+          opacity: 0.8,
+          side: THREE.DoubleSide
+        })
+      );
+      brushMarker.rotation.x = -Math.PI / 2;
+      brushMarker.visible = false;
+      scene.add(brushMarker);
+
+      const editState = {
+        mode: "sculpt",
+        isPointerDown: false,
+        pointerAction: null,
+        isShiftDown: false,
+        sculptSign: 1,
+        paintErase: false,
+        paintChannel: 0,
+        hasBrushHit: false,
+        brushWorldPoint: new THREE.Vector3()
+      };
+
+      function syncBrushVisual() {
+        const paint = editState.mode === "paint";
+        brushMarker.material.color.setHex(paint ? 0x44ff88 : 0xffaa55);
+        brushMarker.scale.setScalar(paint ? CONFIG.paint.radius / CONFIG.sculpt.radius : 1);
+      }
+
+      syncBrushVisual();
+
+      function sampleHeight(worldX, worldZ) {
+        const n1 = Math.sin(worldX * 0.012) * Math.cos(worldZ * 0.01);
+        const n2 = Math.sin(worldX * 0.041 + worldZ * 0.037) * 0.25;
+        return (n1 + n2) * CONFIG.maxTerrainHeight;
+      }
+
+      function getGeometry(segments) {
+        const key = String(segments);
+        if (geometryCache.has(key)) return geometryCache.get(key);
+
+        const geom = new THREE.PlaneGeometry(
+          CONFIG.chunkSize,
+          CONFIG.chunkSize,
+          segments,
+          segments
+        );
+        geom.rotateX(-Math.PI / 2);
+
+        geometryCache.set(key, geom);
+        return geom;
+      }
+
+      function chunkKey(cx, cz) {
+        return `${cx},${cz}`;
+      }
+
+      function chunkCenterWorld(cx, cz) {
+        return new THREE.Vector3(
+          -worldHalf + cx * CONFIG.chunkSize + CONFIG.chunkSize * 0.5,
+          0,
+          -worldHalf + cz * CONFIG.chunkSize + CONFIG.chunkSize * 0.5
+        );
+      }
+
+      function getChunkDataIndex(ix, iz) {
+        return iz * (CONFIG.dataResolution + 1) + ix;
+      }
+
+      function chunkMinWorldX(cx) {
+        return -worldHalf + cx * CONFIG.chunkSize;
+      }
+
+      function chunkMinWorldZ(cz) {
+        return -worldHalf + cz * CONFIG.chunkSize;
+      }
+
+      function ensureChunkData(cx, cz) {
+        const key = chunkKey(cx, cz);
+        const existing = chunkDataMap.get(key);
+        if (existing) return existing;
+
+        const countPerAxis = CONFIG.dataResolution + 1;
+        const heights = new Float32Array(countPerAxis * countPerAxis);
+        const step = CONFIG.chunkSize / CONFIG.dataResolution;
+        const minX = chunkMinWorldX(cx);
+        const minZ = chunkMinWorldZ(cz);
+
+        for (let iz = 0; iz < countPerAxis; iz++) {
+          const wz = minZ + iz * step;
+          for (let ix = 0; ix < countPerAxis; ix++) {
+            const wx = minX + ix * step;
+            heights[getChunkDataIndex(ix, iz)] = sampleHeight(wx, wz);
+          }
+        }
+
+        stitchNewChunkFromNeighbors(cx, cz, heights);
+
+        chunkDataMap.set(key, heights);
+        return heights;
+      }
+
+      /** Max chunk index (chunks span 0..maxChunkIndex inclusive). */
+      function getMaxChunkIndex() {
+        return Math.floor(CONFIG.worldSize / CONFIG.chunkSize) - 1;
+      }
+
+      /**
+       * When a chunk is first allocated, pull edge heights from already-loaded neighbors
+       * so streaming matches edited terrain at boundaries.
+       */
+      function stitchNewChunkFromNeighbors(cx, cz, heights) {
+        const res = CONFIG.dataResolution;
+        const maxC = getMaxChunkIndex();
+
+        for (let pass = 0; pass < 2; pass++) {
+          if (cx > 0) {
+            const nb = chunkDataMap.get(chunkKey(cx - 1, cz));
+            if (nb) {
+              for (let iz = 0; iz <= res; iz++) {
+                heights[getChunkDataIndex(0, iz)] = nb[getChunkDataIndex(res, iz)];
+              }
+            }
+          }
+          if (cx < maxC) {
+            const nb = chunkDataMap.get(chunkKey(cx + 1, cz));
+            if (nb) {
+              for (let iz = 0; iz <= res; iz++) {
+                heights[getChunkDataIndex(res, iz)] = nb[getChunkDataIndex(0, iz)];
+              }
+            }
+          }
+          if (cz > 0) {
+            const nb = chunkDataMap.get(chunkKey(cx, cz - 1));
+            if (nb) {
+              for (let ix = 0; ix <= res; ix++) {
+                heights[getChunkDataIndex(ix, 0)] = nb[getChunkDataIndex(ix, res)];
+              }
+            }
+          }
+          if (cz < maxC) {
+            const nb = chunkDataMap.get(chunkKey(cx, cz + 1));
+            if (nb) {
+              for (let ix = 0; ix <= res; ix++) {
+                heights[getChunkDataIndex(ix, res)] = nb[getChunkDataIndex(ix, 0)];
+              }
+            }
+          }
+        }
+      }
+
+      function parseChunkKey(key) {
+        const [cx, cz] = key.split(",").map(Number);
+        return { cx, cz };
+      }
+
+      function expandChunkKeysWithNeighbors(keys) {
+        const out = new Set(keys);
+        const maxC = getMaxChunkIndex();
+        for (const key of keys) {
+          const { cx, cz } = parseChunkKey(key);
+          for (let dz = -1; dz <= 1; dz++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              const nx = cx + dx;
+              const nz = cz + dz;
+              if (nx < 0 || nz < 0 || nx > maxC || nz > maxC) continue;
+              out.add(chunkKey(nx, nz));
+            }
+          }
+        }
+        return out;
+      }
+
+      /**
+       * Force shared edge heights to match after sculpt.
+       * If both chunks were touched by the brush, average removes FP drift.
+       * If only one was touched, that side wins so strokes stay authoritative.
+       */
+      function syncSeamsAfterSculpt(brushedChunkKeys) {
+        if (brushedChunkKeys.size === 0) return;
+
+        const brushed = brushedChunkKeys;
+        const maxC = getMaxChunkIndex();
+        const res = CONFIG.dataResolution;
+
+        const markDirty = (cx, cz) => {
+          dirtyChunks.add(chunkKey(cx, cz));
+        };
+
+        const mergeEdge = (dA, dB, a, b) => {
+          if (dA && dB) return (a + b) * 0.5;
+          if (dA) return a;
+          if (dB) return b;
+          if (Math.abs(a - b) < 1e-5) return a;
+          return (a + b) * 0.5;
+        };
+
+        const runPass = () => {
+          for (const key of expandChunkKeysWithNeighbors(brushed)) {
+            const { cx, cz } = parseChunkKey(key);
+
+            if (cx < maxC) {
+              const kL = chunkKey(cx, cz);
+              const kR = chunkKey(cx + 1, cz);
+              const hL = chunkDataMap.get(kL);
+              const hR = chunkDataMap.get(kR);
+              if (hL && hR) {
+                const dL = brushed.has(kL);
+                const dR = brushed.has(kR);
+                for (let iz = 0; iz <= res; iz++) {
+                  const iL = getChunkDataIndex(res, iz);
+                  const iR = getChunkDataIndex(0, iz);
+                  const v = mergeEdge(dL, dR, hL[iL], hR[iR]);
+                  hL[iL] = v;
+                  hR[iR] = v;
+                }
+                markDirty(cx, cz);
+                markDirty(cx + 1, cz);
+              }
+            }
+
+            if (cz < maxC) {
+              const kLo = chunkKey(cx, cz);
+              const kHi = chunkKey(cx, cz + 1);
+              const hLo = chunkDataMap.get(kLo);
+              const hHi = chunkDataMap.get(kHi);
+              if (hLo && hHi) {
+                const dLo = brushed.has(kLo);
+                const dHi = brushed.has(kHi);
+                for (let ix = 0; ix <= res; ix++) {
+                  const iLo = getChunkDataIndex(ix, res);
+                  const iHi = getChunkDataIndex(ix, 0);
+                  const v = mergeEdge(dLo, dHi, hLo[iLo], hHi[iHi]);
+                  hLo[iLo] = v;
+                  hHi[iHi] = v;
+                }
+                markDirty(cx, cz);
+                markDirty(cx, cz + 1);
+              }
+            }
+          }
+        };
+
+        runPass();
+        runPass();
+      }
+
+      /**
+       * Resolve a world (x,z) to the owning chunk and bilinear-sample its height field.
+       * Used for cross-chunk normal computation so seams share identical normals.
+       */
+      function getWorldHeight(worldX, worldZ) {
+        const cs = CONFIG.chunkSize;
+        const maxC = getMaxChunkIndex();
+        let cx = Math.floor((worldX + worldHalf) / cs);
+        let cz = Math.floor((worldZ + worldHalf) / cs);
+        cx = THREE.MathUtils.clamp(cx, 0, maxC);
+        cz = THREE.MathUtils.clamp(cz, 0, maxC);
+        const heights = ensureChunkData(cx, cz);
+        const u = ((worldX - chunkMinWorldX(cx)) / cs) * CONFIG.dataResolution;
+        const v = ((worldZ - chunkMinWorldZ(cz)) / cs) * CONFIG.dataResolution;
+        return sampleChunkDataBilinear(heights, u, v);
+      }
+
+      function sampleChunkDataBilinear(heights, gridX, gridZ) {
+        const res = CONFIG.dataResolution;
+        const gx = THREE.MathUtils.clamp(gridX, 0, res);
+        const gz = THREE.MathUtils.clamp(gridZ, 0, res);
+
+        const x0 = Math.floor(gx);
+        const z0 = Math.floor(gz);
+        const x1 = Math.min(x0 + 1, res);
+        const z1 = Math.min(z0 + 1, res);
+        const tx = gx - x0;
+        const tz = gz - z0;
+
+        const h00 = heights[getChunkDataIndex(x0, z0)];
+        const h10 = heights[getChunkDataIndex(x1, z0)];
+        const h01 = heights[getChunkDataIndex(x0, z1)];
+        const h11 = heights[getChunkDataIndex(x1, z1)];
+
+        const hx0 = h00 + (h10 - h00) * tx;
+        const hx1 = h01 + (h11 - h01) * tx;
+        return hx0 + (hx1 - hx0) * tz;
+      }
+
+      /** Heightfield FD normal at world (x,z), written into `out`. */
+      function heightfieldNormalAt(worldX, worldZ, out) {
+        const eps = CONFIG.chunkSize / CONFIG.dataResolution;
+        const inv2eps = 1 / (2 * eps);
+        const hL = getWorldHeight(worldX - eps, worldZ);
+        const hR = getWorldHeight(worldX + eps, worldZ);
+        const hD = getWorldHeight(worldX, worldZ - eps);
+        const hU = getWorldHeight(worldX, worldZ + eps);
+        out.set((hL - hR) * inv2eps, 1, (hD - hU) * inv2eps).normalize();
+        return out;
+      }
+
+      /**
+       * Removes T-junction cracks when this chunk is higher-res than an active neighbor:
+       * each boundary vertex is snapped to the neighbor's coarse edge polyline (same as
+       * that mesh's triangle strip along the seam). Also overwrites the vertex normal
+       * with the LERPED normal between the two coarse endpoints, so lighting is
+       * continuous across the LOD seam (otherwise you get a visible "ring" at LOD
+       * transitions even though geometry has no crack).
+       */
+      function stitchMeshEdgesToCoarserNeighbors(geom, cx, cz, mySeg) {
+        const maxC = getMaxChunkIndex();
+        const half = CONFIG.chunkSize * 0.5;
+        const eps = CONFIG.chunkSize * 2e-5;
+        const pos = geom.attributes.position;
+        const normal = geom.attributes.normal;
+        const minXw = chunkMinWorldX(cx);
+        const minZw = chunkMinWorldZ(cz);
+        const cwx = chunkCenterWorld(cx, cz).x;
+        const cwz = chunkCenterWorld(cx, cz).z;
+
+        const _n0 = new THREE.Vector3();
+        const _n1 = new THREE.Vector3();
+
+        const neighborSeg = (ncx, ncz) => activeChunks.get(chunkKey(ncx, ncz))?.segments;
+
+        // Snap the vertex onto the chord between two coarse-neighbor edge vertices,
+        // and set its normal to the lerped FD normal of those two endpoints.
+        // (`alongAxis` = "z" for vertical seams, "x" for horizontal seams.)
+        function snapToCoarseSeam(i, alongAxis, S_n, seamWX, seamWZ, worldAlong) {
+          const minAlong = alongAxis === "z" ? minZw : minXw;
+          const t = THREE.MathUtils.clamp((worldAlong - minAlong) / CONFIG.chunkSize, 0, 1);
+          const f = t * S_n;
+          const k = Math.min(Math.floor(f + 1e-8), S_n - 1);
+          const alpha = THREE.MathUtils.clamp(f - k, 0, 1);
+
+          // World coords of coarse endpoints k and k+1 along the seam.
+          let wx0, wz0, wx1, wz1;
+          if (alongAxis === "z") {
+            wx0 = wx1 = seamWX;
+            wz0 = minZw + (k / S_n) * CONFIG.chunkSize;
+            wz1 = minZw + ((k + 1) / S_n) * CONFIG.chunkSize;
+          } else {
+            wz0 = wz1 = seamWZ;
+            wx0 = minXw + (k / S_n) * CONFIG.chunkSize;
+            wx1 = minXw + ((k + 1) / S_n) * CONFIG.chunkSize;
+          }
+
+          // Position: lerp Y on the coarse polyline (heightfield is stitched at edges,
+          // so getWorldHeight at the seam returns the same value both sides see).
+          const y0 = getWorldHeight(wx0, wz0);
+          const y1 = getWorldHeight(wx1, wz1);
+          pos.setY(i, y0 + alpha * (y1 - y0));
+
+          // Normal: lerp the FD normals of the two coarse endpoints. This matches the
+          // normal field along the coarse neighbor's edge triangle, so the seam
+          // becomes lighting-continuous.
+          heightfieldNormalAt(wx0, wz0, _n0);
+          heightfieldNormalAt(wx1, wz1, _n1);
+          const nx = _n0.x + alpha * (_n1.x - _n0.x);
+          const ny = _n0.y + alpha * (_n1.y - _n0.y);
+          const nz = _n0.z + alpha * (_n1.z - _n0.z);
+          const len = Math.hypot(nx, ny, nz) || 1;
+          normal.setXYZ(i, nx / len, ny / len, nz / len);
+        }
+
+        for (let i = 0; i < pos.count; i++) {
+          const lx = pos.getX(i);
+          const lz = pos.getZ(i);
+          const worldX = cwx + lx;
+          const worldZ = cwz + lz;
+
+          if (cx < maxC) {
+            const Sn = neighborSeg(cx + 1, cz);
+            if (Sn != null && Sn < mySeg && Math.abs(lx - half) < eps) {
+              snapToCoarseSeam(i, "z", Sn, cwx + half, 0, worldZ);
+              continue;
+            }
+          }
+          if (cx > 0) {
+            const Sn = neighborSeg(cx - 1, cz);
+            if (Sn != null && Sn < mySeg && Math.abs(lx + half) < eps) {
+              snapToCoarseSeam(i, "z", Sn, cwx - half, 0, worldZ);
+              continue;
+            }
+          }
+          if (cz > 0) {
+            const Sn = neighborSeg(cx, cz - 1);
+            if (Sn != null && Sn < mySeg && Math.abs(lz + half) < eps) {
+              snapToCoarseSeam(i, "x", Sn, 0, cwz - half, worldX);
+              continue;
+            }
+          }
+          if (cz < maxC) {
+            const Sn = neighborSeg(cx, cz + 1);
+            if (Sn != null && Sn < mySeg && Math.abs(lz - half) < eps) {
+              snapToCoarseSeam(i, "x", Sn, 0, cwz + half, worldX);
+              continue;
+            }
+          }
+        }
+      }
+
+      function applyChunkHeightsToGeometry(geom, cx, cz, mySegments) {
+        const heights = ensureChunkData(cx, cz);
+        const pos = geom.attributes.position;
+
+        // 1) Set positions from this chunk's height field.
+        for (let i = 0; i < pos.count; i++) {
+          const localX = pos.getX(i);
+          const localZ = pos.getZ(i);
+          const u = (localX / CONFIG.chunkSize + 0.5) * CONFIG.dataResolution;
+          const v = (localZ / CONFIG.chunkSize + 0.5) * CONFIG.dataResolution;
+          pos.setY(i, sampleChunkDataBilinear(heights, u, v));
+        }
+
+        // 2) Compute normals analytically from the world heightfield via central
+        //    differences. Both sides of any seam evaluate the same finite difference
+        //    at the same world (x,z), so edge normals match exactly across chunks
+        //    and same-LOD lighting seams disappear.
+        const center = chunkCenterWorld(cx, cz);
+        const cwx = center.x;
+        const cwz = center.z;
+        let normalAttr = geom.attributes.normal;
+        if (!normalAttr || normalAttr.count !== pos.count) {
+          normalAttr = new THREE.BufferAttribute(new Float32Array(pos.count * 3), 3);
+          geom.setAttribute("normal", normalAttr);
+        }
+        const _n = new THREE.Vector3();
+        for (let i = 0; i < pos.count; i++) {
+          heightfieldNormalAt(cwx + pos.getX(i), cwz + pos.getZ(i), _n);
+          normalAttr.setXYZ(i, _n.x, _n.y, _n.z);
+        }
+
+        // 3) Snap LOD-boundary edges (position AND normal) to the coarse neighbor's
+        //    polyline so LOD seams are both crack-free and lighting-continuous.
+        stitchMeshEdgesToCoarserNeighbors(geom, cx, cz, mySegments);
+
+        pos.needsUpdate = true;
+        normalAttr.needsUpdate = true;
+      }
+
+      function pickLodByDistance(distance) {
+        for (const level of CONFIG.lodLevels) {
+          if (distance <= level.maxDistance) return level;
+        }
+        return CONFIG.lodLevels[CONFIG.lodLevels.length - 1];
+      }
+
+      function createChunk(cx, cz, lodLevel) {
+        const center = chunkCenterWorld(cx, cz);
+        const geom = getGeometry(lodLevel.segments).clone();
+        applyChunkHeightsToGeometry(geom, cx, cz, lodLevel.segments);
+
+        const mesh = new THREE.Mesh(geom, resolveTerrainMaterial(cx, cz, lodLevel));
+        mesh.position.copy(center);
+        mesh.frustumCulled = true;
+        mesh.userData.chunkKey = chunkKey(cx, cz);
+        scene.add(mesh);
+
+        return {
+          cx,
+          cz,
+          lodLabel: lodLevel.label,
+          segments: lodLevel.segments,
+          mesh,
+          triCount: geom.index ? geom.index.count / 3 : geom.attributes.position.count / 3
+        };
+      }
+
+      function removeChunk(chunk) {
+        scene.remove(chunk.mesh);
+        chunk.mesh.geometry.dispose();
+      }
+
+      function updateChunkSet() {
+        const cam = camera.position;
+        const camChunkX = Math.floor((cam.x + worldHalf) / CONFIG.chunkSize);
+        const camChunkZ = Math.floor((cam.z + worldHalf) / CONFIG.chunkSize);
+
+        const needed = new Set();
+        const maxChunk = Math.floor(CONFIG.worldSize / CONFIG.chunkSize);
+
+        for (let dz = -CONFIG.activeRadiusInChunks; dz <= CONFIG.activeRadiusInChunks; dz++) {
+          for (let dx = -CONFIG.activeRadiusInChunks; dx <= CONFIG.activeRadiusInChunks; dx++) {
+            const cx = camChunkX + dx;
+            const cz = camChunkZ + dz;
+            if (cx < 0 || cz < 0 || cx >= maxChunk || cz >= maxChunk) continue;
+
+            const key = chunkKey(cx, cz);
+            needed.add(key);
+
+            const center = chunkCenterWorld(cx, cz);
+            const dist = center.distanceTo(cam);
+            const lod = pickLodByDistance(dist);
+
+            const existing = activeChunks.get(key);
+            if (!existing) {
+              activeChunks.set(key, createChunk(cx, cz, lod));
+              dirtyChunks.delete(key);
+              continue;
+            }
+
+            if (existing.segments !== lod.segments) {
+              removeChunk(existing);
+              activeChunks.set(key, createChunk(cx, cz, lod));
+              dirtyChunks.delete(key);
+              continue;
+            }
+
+            if (dirtyChunks.has(key)) {
+              removeChunk(existing);
+              activeChunks.set(key, createChunk(cx, cz, lod));
+              dirtyChunks.delete(key);
+            }
+          }
+        }
+
+        const maxIdx = getMaxChunkIndex();
+        for (const [key, chunk] of activeChunks) {
+          if (!needed.has(key)) continue;
+          const { cx, cz } = parseChunkKey(key);
+          let abutsCoarser = false;
+          for (const [dx, dz] of [
+            [1, 0],
+            [-1, 0],
+            [0, 1],
+            [0, -1]
+          ]) {
+            const ncx = cx + dx;
+            const ncz = cz + dz;
+            if (ncx < 0 || ncz < 0 || ncx > maxIdx || ncz > maxIdx) continue;
+            const nb = activeChunks.get(chunkKey(ncx, ncz));
+            if (nb && nb.segments < chunk.segments) {
+              abutsCoarser = true;
+              break;
+            }
+          }
+          if (abutsCoarser) {
+            applyChunkHeightsToGeometry(chunk.mesh.geometry, cx, cz, chunk.segments);
+          }
+        }
+
+        for (const [key, chunk] of activeChunks) {
+          if (!needed.has(key)) {
+            removeChunk(chunk);
+            activeChunks.delete(key);
+          }
+        }
+      }
+
+      function rebuildDirtyActiveChunks(limit = 8) {
+        let done = 0;
+        for (const key of dirtyChunks) {
+          const active = activeChunks.get(key);
+          if (active) {
+            const lod = CONFIG.lodLevels.find((l) => l.segments === active.segments) ?? CONFIG.lodLevels[0];
+            removeChunk(active);
+            activeChunks.set(key, createChunk(active.cx, active.cz, lod));
+          }
+          dirtyChunks.delete(key);
+          done++;
+          if (done >= limit) break;
+        }
+      }
+
+      function worldToChunkIndex(worldX, worldZ) {
+        return {
+          cx: Math.floor((worldX + worldHalf) / CONFIG.chunkSize),
+          cz: Math.floor((worldZ + worldHalf) / CONFIG.chunkSize)
+        };
+      }
+
+      function applyBrushAt(worldPoint, sign) {
+        const radius = CONFIG.sculpt.radius;
+        const step = CONFIG.chunkSize / CONFIG.dataResolution;
+        const min = worldToChunkIndex(worldPoint.x - radius, worldPoint.z - radius);
+        const max = worldToChunkIndex(worldPoint.x + radius, worldPoint.z + radius);
+        const maxChunk = getMaxChunkIndex();
+
+        const minCx = THREE.MathUtils.clamp(min.cx, 0, maxChunk);
+        const minCz = THREE.MathUtils.clamp(min.cz, 0, maxChunk);
+        const maxCx = THREE.MathUtils.clamp(max.cx, 0, maxChunk);
+        const maxCz = THREE.MathUtils.clamp(max.cz, 0, maxChunk);
+
+        const brushedChunkKeys = new Set();
+
+        for (let cz = minCz; cz <= maxCz; cz++) {
+          for (let cx = minCx; cx <= maxCx; cx++) {
+            const heights = ensureChunkData(cx, cz);
+            const minX = chunkMinWorldX(cx);
+            const minZ = chunkMinWorldZ(cz);
+            let changed = false;
+
+            for (let iz = 0; iz <= CONFIG.dataResolution; iz++) {
+              const wz = minZ + iz * step;
+              const dz = wz - worldPoint.z;
+              if (Math.abs(dz) > radius) continue;
+
+              for (let ix = 0; ix <= CONFIG.dataResolution; ix++) {
+                const wx = minX + ix * step;
+                const dx = wx - worldPoint.x;
+                if (Math.abs(dx) > radius) continue;
+
+                const dist = Math.sqrt(dx * dx + dz * dz);
+                if (dist > radius) continue;
+
+                const falloff = 1.0 - dist / radius;
+                const delta = sign * CONFIG.sculpt.strength * falloff;
+                const idx = getChunkDataIndex(ix, iz);
+                heights[idx] = THREE.MathUtils.clamp(heights[idx] + delta, -120, 180);
+                changed = true;
+              }
+            }
+
+            if (changed) {
+              const k = chunkKey(cx, cz);
+              dirtyChunks.add(k);
+              brushedChunkKeys.add(k);
+            }
+          }
+        }
+
+        syncSeamsAfterSculpt(brushedChunkKeys);
+      }
+
+      function applyPaintAtWorld(center, erase) {
+        const R = CONFIG.paint.radius;
+        const res = CONFIG.splatRes;
+        const maxChunk = getMaxChunkIndex();
+        const minC = worldToChunkIndex(center.x - R, center.z - R);
+        const maxC = worldToChunkIndex(center.x + R, center.z + R);
+        const minCx = THREE.MathUtils.clamp(minC.cx, 0, maxChunk);
+        const minCz = THREE.MathUtils.clamp(minC.cz, 0, maxChunk);
+        const maxCx = THREE.MathUtils.clamp(maxC.cx, 0, maxChunk);
+        const maxCz = THREE.MathUtils.clamp(maxC.cz, 0, maxChunk);
+        const ch = editState.paintChannel;
+        const flow = CONFIG.paint.strength * 255;
+
+        for (let cz = minCz; cz <= maxCz; cz++) {
+          for (let cx = minCx; cx <= maxCx; cx++) {
+            const splat = ensureChunkSplat(cx, cz);
+            const img = splat.ctx.getImageData(0, 0, res, res);
+            const data = img.data;
+            const c = chunkCenterWorld(cx, cz);
+            const cs = CONFIG.chunkSize;
+            let touched = false;
+            for (let py = 0; py < res; py++) {
+              for (let px = 0; px < res; px++) {
+                const uTex = (px + 0.5) / res;
+                const vTex = (py + 0.5) / res;
+                const wx = c.x + (uTex - 0.5) * cs;
+                const wz = c.z + (vTex - 0.5) * cs;
+                const dx = wx - center.x;
+                const dz = wz - center.z;
+                const dist = Math.hypot(dx, dz);
+                if (dist > R) continue;
+                const falloff = 1 - dist / R;
+                const delta = (erase ? -1 : 1) * flow * falloff;
+                const i = (py * res + px) * 4;
+                data[i + ch] = THREE.MathUtils.clamp(data[i + ch] + delta, 0, 255);
+                touched = true;
+              }
+            }
+            if (touched) {
+              splat.ctx.putImageData(img, 0, 0);
+              splat.tex.needsUpdate = true;
+            }
+          }
+        }
+      }
+
+      function updatePointerNdc(event) {
+        pointerNdc.x = (event.clientX / window.innerWidth) * 2 - 1;
+        pointerNdc.y = -(event.clientY / window.innerHeight) * 2 + 1;
+      }
+
+      function raycastTerrainPoint() {
+        const meshes = [];
+        for (const chunk of activeChunks.values()) meshes.push(chunk.mesh);
+        if (meshes.length === 0) return null;
+
+        raycaster.setFromCamera(pointerNdc, camera);
+        const hits = raycaster.intersectObjects(meshes, false);
+        if (hits.length === 0) return null;
+        return hits[0].point;
+      }
+
+      const frameState = {
+        lastChunkUpdateMs: 0,
+        frames: 0,
+        fps: 0,
+        fpsWindowStartMs: performance.now()
+      };
+
+      window.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+      });
+
+      window.addEventListener("keydown", (event) => {
+        if (event.key === "Shift") editState.isShiftDown = true;
+        if (event.repeat) return;
+        if (event.key === "d" || event.key === "D") {
+          debugChunkView = !debugChunkView;
+          if (!debugChunkView) disposeDebugChunkMaterials();
+          refreshActiveChunkMaterials();
+        }
+        if (event.code === "Backquote") {
+          tileShadingMode = !tileShadingMode;
+          refreshActiveChunkMaterials();
+        }
+        if (event.key === "p" || event.key === "P") {
+          editState.mode = editState.mode === "paint" ? "sculpt" : "paint";
+          syncBrushVisual();
+        }
+        if (event.key === "1") editState.paintChannel = 0;
+        if (event.key === "2") editState.paintChannel = 1;
+        if (event.key === "3") editState.paintChannel = 2;
+        if (event.key === "e" || event.key === "E") {
+          event.preventDefault();
+          exportTerrainJson();
+        }
+        if (event.key === "l" || event.key === "L") {
+          document.getElementById("load-terrain-input").click();
+        }
+      });
+
+      window.addEventListener("keyup", (event) => {
+        if (event.key === "Shift") editState.isShiftDown = false;
+      });
+
+      renderer.domElement.addEventListener("pointermove", (event) => {
+        updatePointerNdc(event);
+        const hit = raycastTerrainPoint();
+        editState.hasBrushHit = !!hit;
+        if (hit) {
+          editState.brushWorldPoint.copy(hit);
+          brushMarker.visible = true;
+          brushMarker.position.set(hit.x, hit.y + 0.04, hit.z);
+        } else {
+          brushMarker.visible = false;
+        }
+
+        if (editState.isPointerDown && editState.pointerAction === "sculpt" && hit) {
+          applyBrushAt(hit, editState.sculptSign);
+          rebuildDirtyActiveChunks(12);
+        }
+        if (editState.isPointerDown && editState.pointerAction === "paint" && hit) {
+          applyPaintAtWorld(hit, editState.paintErase);
+        }
+      });
+
+      renderer.domElement.addEventListener("pointerdown", (event) => {
+        updatePointerNdc(event);
+        const hit = raycastTerrainPoint();
+
+        if (event.shiftKey && (event.button === 0 || event.button === 2)) {
+          event.preventDefault();
+          editState.isPointerDown = true;
+          editState.pointerAction = "sculpt";
+          editState.sculptSign = event.button === 2 ? -1 : 1;
+          controls.enabled = false;
+          if (hit) {
+            applyBrushAt(hit, editState.sculptSign);
+            rebuildDirtyActiveChunks(12);
+          }
+          return;
+        }
+
+        if (editState.mode === "paint" && !event.shiftKey && (event.button === 0 || event.button === 2)) {
+          event.preventDefault();
+          editState.isPointerDown = true;
+          editState.pointerAction = "paint";
+          editState.paintErase = event.button === 2;
+          controls.enabled = false;
+          if (hit) applyPaintAtWorld(hit, editState.paintErase);
+        }
+      });
+
+      window.addEventListener("pointerup", () => {
+        if (editState.isPointerDown) {
+          editState.isPointerDown = false;
+          editState.pointerAction = null;
+          controls.enabled = true;
+        }
+      });
+
+      document.getElementById("load-terrain-input").addEventListener("change", async (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        try {
+          importTerrainJson(await file.text());
+        } catch (err) {
+          alert(err?.message || String(err));
+        }
+        e.target.value = "";
+      });
+
+      function updateHud(dtMs) {
+        frameState.frames++;
+        const now = performance.now();
+        const elapsed = now - frameState.fpsWindowStartMs;
+        if (elapsed >= 500) {
+          frameState.fps = (frameState.frames * 1000) / elapsed;
+          frameState.frames = 0;
+          frameState.fpsWindowStartMs = now;
+        }
+
+        let tris = 0;
+        let lodL0 = 0;
+        let lodL1 = 0;
+        let lodL2 = 0;
+        for (const chunk of activeChunks.values()) {
+          tris += chunk.triCount;
+          if (chunk.segments >= 64) lodL0++;
+          else if (chunk.segments >= 32) lodL1++;
+          else lodL2++;
+        }
+
+        const p = camera.position;
+        const chName = ["R", "G", "B"][editState.paintChannel];
+        hudEl.textContent =
+`splatmap-chunks.html (splat + sculpt)
+fps: ${frameState.fps.toFixed(1)}   frame: ${dtMs.toFixed(2)} ms
+draw calls: ${renderer.info.render.calls}
+terrain tris: ${Math.round(tris).toLocaleString()}
+active chunks: ${activeChunks.size}  (LOD: L0=${lodL0} L1=${lodL1} L2=${lodL2})
+mode: ${editState.mode}  paint ch=${chName}  tile view: ${tileShadingMode ? "ON" : "OFF"}
+chunk debug: ${debugChunkView ? "ON" : "OFF"}
+chunks saved: ${chunkDataMap.size} height / ${chunkSplatMap.size} splat
+dirty chunks: ${dirtyChunks.size}
+camera: ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}
+world size: ${CONFIG.worldSize} | chunk size: ${CONFIG.chunkSize}
+bounds: ${worldBounds.min.x}..${worldBounds.max.x}
+brush: sculpt r=${CONFIG.sculpt.radius} | paint r=${CONFIG.paint.radius} (${editState.hasBrushHit ? "hit" : "no-hit"})`;
+      }
+
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+
+      updateChunkSet();
+
+      let lastTime = performance.now();
+      renderer.setAnimationLoop(() => {
+        const now = performance.now();
+        const dt = now - lastTime;
+        lastTime = now;
+
+        controls.update();
+
+        if (now - frameState.lastChunkUpdateMs > 120) {
+          updateChunkSet();
+          frameState.lastChunkUpdateMs = now;
+        }
+
+        if (dirtyChunks.size > 0) rebuildDirtyActiveChunks(4);
+
+        renderer.render(scene, camera);
+        updateHud(dt);
+      });
+    </script>
+  </body>
+</html>
