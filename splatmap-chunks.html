@@ -39,19 +39,6 @@
         font-size: 12px;
       }
 
-      #hint {
-        position: fixed;
-        bottom: 12px;
-        left: 12px;
-        z-index: 10;
-        pointer-events: none;
-        background: rgba(0, 0, 0, 0.45);
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        border-radius: 8px;
-        padding: 8px 10px;
-        font-size: 12px;
-      }
-
       /* Tweakpane — anchor top-right (left is HUD) */
       .tp-dfwv {
         position: fixed !important;
@@ -62,6 +49,42 @@
         max-height: calc(100vh - 32px) !important;
         overflow-y: auto !important;
         overflow-x: hidden !important;
+      }
+
+      /* Same idea as splatmap-painter — centered so it does not overlap the pane */
+      #mode-badge {
+        position: fixed;
+        top: 16px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 25;
+        font: bold 13px "SF Mono", Consolas, monospace;
+        padding: 6px 14px;
+        border-radius: 6px;
+        pointer-events: none;
+        transition:
+          background 0.2s,
+          color 0.2s;
+      }
+      #mode-badge.view {
+        background: rgba(40, 40, 40, 0.85);
+        color: #aaa;
+      }
+      #mode-badge.sculpt {
+        background: rgba(200, 120, 40, 0.92);
+        color: #fff;
+      }
+      #mode-badge.paint {
+        background: rgba(40, 160, 80, 0.92);
+        color: #fff;
+      }
+      #mode-badge.geminigrass {
+        background: rgba(60, 160, 60, 0.9);
+        color: #fff;
+      }
+      #mode-badge.play {
+        background: rgba(20, 20, 180, 0.92);
+        color: #aaccff;
       }
     </style>
     <script type="importmap">
@@ -78,14 +101,8 @@
   </head>
   <body>
     <div id="hud">booting...</div>
+    <div id="mode-badge" class="view">VIEW MODE</div>
     <input type="file" id="load-terrain-input" accept="application/json,.json" style="display: none" />
-
-    <div id="hint">
-      <kbd>F</kbd> play · <kbd>Esc</kbd>/<kbd>F</kbd> exit ·
-      Terrain gen: pane → Terrain generator ·
-      <kbd>Shift</kbd>+LMB/RMB sculpt · <kbd>P</kbd> paint · <kbd>G</kbd> Gemini grass · <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> R/G/B ·
-      <kbd>~</kbd> surface: tile → TSL ground → splat → green · <kbd>D</kbd> chunk debug · <kbd>E</kbd> export <kbd>L</kbd> load · Shift+scroll size (sculpt + Gemini) · Alt+scroll strength
-    </div>
 
     <script type="module">
       import * as THREE from "three";
@@ -111,7 +128,7 @@
 
       /** Tweakpane + lighting — same defaults as splatmap-painter10bvh+post.html (physical sky). */
       const PARAMS = {
-        mode: "sculpt",
+        mode: "view",
         /** When false, every loaded chunk uses L0 (max segments) so you can tell LOD vs pure chunk seams. */
         terrainLodEnabled: true,
         /** When false, load all chunks in the world (ignore camera radius) and turn off mesh frustum cull for placement / overview. */
@@ -140,6 +157,10 @@
          */
         sculptClampMin: -200,
         sculptClampMax: 2000,
+        /** brush: LMB raise · Shift+LMB lower · Ctrl+LMB smooth · Alt flatten (like painter) · ramp: two LMB */
+        sculptTool: "brush",
+        /** Raise/lower only — same shapes as splatmap-painter Brush → Sculpt shape */
+        sculptBrush: "smooth",
         paintBrush: "smooth",
         brushFalloff: "smooth",
         light: {
@@ -232,7 +253,6 @@
       const HTEX_RES = 512;
 
       const hudEl = document.getElementById("hud");
-      const hintEl = document.getElementById("hint");
 
       const scene = new THREE.Scene();
 
@@ -268,6 +288,11 @@
       controls.maxPolarAngle = Math.PI * 0.49;
       controls.minDistance = 15;
       controls.maxDistance = 1500;
+      // Same as splatmap-painter: LMB free for sculpt/paint · MMB orbit · RMB pan
+      controls.mouseButtons = {
+        MIDDLE: THREE.MOUSE.ROTATE,
+        RIGHT: THREE.MOUSE.PAN
+      };
 
       const hemi = new THREE.HemisphereLight(
         PARAMS.light.hemiSkyColor,
@@ -413,6 +438,8 @@
       let lastGeminiPatchCount = 0;
       let editorPane = null;
       let geminiGrassFolderRef = null;
+      let brushFolderRef = null;
+      let playFolderRef = null;
       const _geminiUpdateOpts = {
         patchSize: 10,
         patchSizeMid: 18,
@@ -778,13 +805,40 @@
       brushMarker.visible = false;
       scene.add(brushMarker);
 
+      const rampMarkerA = brushMarker.clone();
+      rampMarkerA.material = brushMarker.material.clone();
+      rampMarkerA.material.color.setHex(0xcc66ff);
+      rampMarkerA.visible = false;
+      scene.add(rampMarkerA);
+
+      function syncRampMarkerVisual() {
+        if (
+          editState.mode !== "sculpt" ||
+          !editState.rampPointA ||
+          PARAMS.sculptTool !== "ramp"
+        ) {
+          rampMarkerA.visible = false;
+          return;
+        }
+        rampMarkerA.visible = true;
+        rampMarkerA.position.set(
+          editState.rampPointA.x,
+          editState.rampPointA.y + 0.04,
+          editState.rampPointA.z
+        );
+        rampMarkerA.scale.setScalar(sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
+      }
+
       const editState = {
-        mode: "sculpt",
+        mode: "view",
         isPointerDown: false,
         pointerAction: null,
         isShiftDown: false,
         sculptSign: 1,
         sculptSkipFirstMoveDup: false,
+        /** Height sample at sculpt pointerdown when Alt held (flatten-to plateau). */
+        sculptFlattenTargetY: 0,
+        rampPointA: null,
         paintErase: false,
         paintChannel: 0,
         hasBrushHit: false,
@@ -819,7 +873,47 @@
           geminiGrassFolderRef.hidden = editState.mode !== "geminigrass";
       }
 
+      function syncModeBadge() {
+        const el = document.getElementById("mode-badge");
+        if (!el) return;
+        if (playMode) {
+          el.textContent = "PLAY MODE  [ F / Esc to exit ]";
+          el.className = "play";
+          return;
+        }
+        const m = editState.mode;
+        el.className = m;
+        if (m === "view") el.textContent = "VIEW MODE  [ Esc ]";
+        else if (m === "sculpt") el.textContent = "SCULPT MODE  [ S · Esc → view ]";
+        else if (m === "paint") el.textContent = "PAINT MODE  [ P · Esc → view ]";
+        else if (m === "geminigrass") el.textContent = "GEMINI GRASS  [ G · Esc → view ]";
+        else el.textContent = String(m).toUpperCase();
+      }
+
+      function setEditMode(mode) {
+        if (mode !== "sculpt") editState.rampPointA = null;
+        if (mode === "view" && editState.isPointerDown) {
+          editState.isPointerDown = false;
+          editState.pointerAction = null;
+          editState.sculptSkipFirstMoveDup = false;
+          if (!playMode) controls.enabled = true;
+        }
+        editState.mode = mode;
+        PARAMS.mode = mode;
+        if (brushFolderRef) brushFolderRef.hidden = mode === "view";
+        if (playFolderRef) playFolderRef.hidden = mode !== "view";
+        syncModeBadge();
+        syncBrushVisual();
+        syncGeminiFolderVisibility();
+        if (editorPane) editorPane.refresh();
+      }
+
       function syncBrushVisual() {
+        if (editState.mode === "view") {
+          brushMarker.visible = false;
+          rampMarkerA.visible = false;
+          return;
+        }
         if (editState.mode === "paint") {
           brushMarker.material.color.setHex(0x44ff88);
           brushMarker.scale.setScalar(CONFIG.paint.radius / SCULPT_RING_GEOM_BASE);
@@ -830,6 +924,7 @@
           brushMarker.material.color.setHex(0xffaa55);
           brushMarker.scale.setScalar(sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
         }
+        syncRampMarkerVisual();
       }
 
       syncBrushVisual();
@@ -1726,9 +1821,10 @@
         capsuleMesh.visible = true;
         controls.enabled = false;
         brushMarker.visible = false;
+        rampMarkerA.visible = false;
+        syncModeBadge();
         const tpEl = document.querySelector(".tp-dfwv");
         if (tpEl) tpEl.style.display = "none";
-        hintEl.style.display = "none";
         updateChunkSet();
         renderer.domElement.style.cursor = "none";
         renderer.domElement.requestPointerLock();
@@ -1747,9 +1843,9 @@
         controls.enabled = true;
         const tpEl = document.querySelector(".tp-dfwv");
         if (tpEl) tpEl.style.display = "";
-        hintEl.style.display = "";
         if (document.pointerLockElement) document.exitPointerLock();
         renderer.domElement.style.cursor = "";
+        syncModeBadge();
       }
 
       function rebuildDirtyActiveChunks(limit = 8) {
@@ -1774,8 +1870,58 @@
         };
       }
 
-      function applyBrushAt(worldPoint, sign) {
+      /** Matches splatmap-painter sculptAt: (brushStrength/100)*0.4 per frame factor. */
+      function sculptPainterStrengthFactor() {
+        return (PARAMS.brushStrength / 100) * 0.4;
+      }
+
+      function finalizeSculpt(brushedChunkKeys, seamLimit) {
+        syncSeamsAfterSculpt(brushedChunkKeys, seamLimit);
+        invalidateLodStitchSignaturesForKeys(brushedChunkKeys);
+        heightTexDirty = true;
+      }
+
+      // CPU FBM for sculpt shapes (same math as splatmap-painter _fbm / _fbmRidge)
+      function _sculptH2(x, y) {
+        const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+        return n - Math.floor(n);
+      }
+      function _sculptSn2(x, y) {
+        const ix = Math.floor(x);
+        const iy = Math.floor(y);
+        const fx = x - ix;
+        const fy = y - iy;
+        const u = fx * fx * (3 - 2 * fx);
+        const v = fy * fy * (3 - 2 * fy);
+        return (
+          _sculptH2(ix, iy) * (1 - u) * (1 - v) +
+          _sculptH2(ix + 1, iy) * u * (1 - v) +
+          _sculptH2(ix, iy + 1) * (1 - u) * v +
+          _sculptH2(ix + 1, iy + 1) * u * v
+        );
+      }
+      function _sculptFbmRidge(x, y, oct = 6) {
+        let s = 0;
+        let a = 0.5;
+        let f = 1;
+        let m = 0;
+        for (let i = 0; i < oct; i++) {
+          const n = _sculptSn2(x * f, y * f);
+          s += (1.0 - Math.abs(n * 2.0 - 1.0)) * a;
+          m += a;
+          a *= 0.5;
+          f *= 2.1;
+        }
+        return s / m;
+      }
+
+      /** New seed each sculpt mousedown — FBM peak variation (painter: brushNoiseSeed). */
+      let sculptBrushNoiseSeed = 0;
+
+      function applyRaiseLowerAt(worldPoint, sign) {
         const radius = sculptBrushWorldRadius();
+        const strength = sculptPainterStrengthFactor();
+        const brush = PARAMS.sculptBrush;
         const step = CONFIG.chunkSize / CONFIG.dataResolution;
         const min = worldToChunkIndex(worldPoint.x - radius, worldPoint.z - radius);
         const max = worldToChunkIndex(worldPoint.x + radius, worldPoint.z + radius);
@@ -1809,9 +1955,33 @@
                 const distSq = dx * dx + dz * dz;
                 if (distSq > r2) continue;
                 const dist = Math.sqrt(distSq);
+                const t = dist / radius;
 
-                const falloff = 1.0 - dist / radius;
-                const delta = sign * sculptBrushStrength() * falloff;
+                let delta = 0;
+                if (brush === "fbm_peak") {
+                  const ridgeSc = 3.5 / radius;
+                  const ridge = _sculptFbmRidge(
+                    dx * ridgeSc + sculptBrushNoiseSeed,
+                    dz * ridgeSc + sculptBrushNoiseSeed,
+                    6
+                  );
+                  const spike = Math.pow(Math.max(0, 1 - t), 2.5);
+                  const shape = spike * (0.35 + ridge * 1.8);
+                  delta = sign * Math.max(0, shape) * strength * 2.0;
+                } else if (brush === "crater") {
+                  const rim = Math.exp(-Math.pow(t - 0.55, 2) / 0.04) * 1.2;
+                  const pit = Math.max(0, 1 - t * 4) * 0.6;
+                  delta = sign * (rim - pit) * strength * 0.8;
+                } else if (brush === "plateau") {
+                  const flat = Math.max(
+                    0,
+                    1 - Math.pow(Math.max(0, t - 0.6) / 0.4, 2)
+                  );
+                  delta = sign * flat * strength * 0.7;
+                } else {
+                  delta = sign * brushFalloff(t) * strength;
+                }
+
                 const idx = getChunkDataIndex(ix, iz);
                 heights[idx] = THREE.MathUtils.clamp(
                   heights[idx] + delta,
@@ -1830,13 +2000,235 @@
           }
         }
 
-        syncSeamsAfterSculpt(brushedChunkKeys, {
+        finalizeSculpt(brushedChunkKeys, {
           wx: worldPoint.x,
           wz: worldPoint.z,
           radius
         });
-        invalidateLodStitchSignaturesForKeys(brushedChunkKeys);
-        heightTexDirty = true;
+      }
+
+      function applyFlattenAt(worldPoint, flattenTargetY) {
+        const radius = sculptBrushWorldRadius();
+        const strength = sculptPainterStrengthFactor();
+        const step = CONFIG.chunkSize / CONFIG.dataResolution;
+        const min = worldToChunkIndex(worldPoint.x - radius, worldPoint.z - radius);
+        const max = worldToChunkIndex(worldPoint.x + radius, worldPoint.z + radius);
+        const maxChunk = getMaxChunkIndex();
+        const minCx = THREE.MathUtils.clamp(min.cx, 0, maxChunk);
+        const minCz = THREE.MathUtils.clamp(min.cz, 0, maxChunk);
+        const maxCx = THREE.MathUtils.clamp(max.cx, 0, maxChunk);
+        const maxCz = THREE.MathUtils.clamp(max.cz, 0, maxChunk);
+        const brushedChunkKeys = new Set();
+        const r2 = radius * radius;
+
+        for (let cz = minCz; cz <= maxCz; cz++) {
+          for (let cx = minCx; cx <= maxCx; cx++) {
+            const heights = ensureChunkData(cx, cz);
+            const minX = chunkMinWorldX(cx);
+            const minZ = chunkMinWorldZ(cz);
+            let changed = false;
+
+            for (let iz = 0; iz <= CONFIG.dataResolution; iz++) {
+              const wz = minZ + iz * step;
+              const dz = wz - worldPoint.z;
+              if (Math.abs(dz) > radius) continue;
+
+              for (let ix = 0; ix <= CONFIG.dataResolution; ix++) {
+                const wx = minX + ix * step;
+                const dx = wx - worldPoint.x;
+                if (Math.abs(dx) > radius) continue;
+
+                const distSq = dx * dx + dz * dz;
+                if (distSq > r2) continue;
+                const dist = Math.sqrt(distSq);
+                const falloff = 1.0 - dist / radius;
+                const smooth = falloff * falloff;
+                const idx = getChunkDataIndex(ix, iz);
+                const current = heights[idx];
+                const delta = (flattenTargetY - current) * smooth * strength * 2;
+                heights[idx] = THREE.MathUtils.clamp(
+                  current + delta,
+                  PARAMS.sculptClampMin,
+                  PARAMS.sculptClampMax
+                );
+                changed = true;
+              }
+            }
+
+            if (changed) {
+              const k = chunkKey(cx, cz);
+              dirtyChunks.add(k);
+              brushedChunkKeys.add(k);
+            }
+          }
+        }
+
+        finalizeSculpt(brushedChunkKeys, {
+          wx: worldPoint.x,
+          wz: worldPoint.z,
+          radius
+        });
+      }
+
+      function applySmoothAt(worldPoint) {
+        const radius = sculptBrushWorldRadius();
+        const strength = sculptPainterStrengthFactor();
+        const step = CONFIG.chunkSize / CONFIG.dataResolution;
+        const min = worldToChunkIndex(worldPoint.x - radius - step, worldPoint.z - radius - step);
+        const max = worldToChunkIndex(worldPoint.x + radius + step, worldPoint.z + radius + step);
+        const maxChunk = getMaxChunkIndex();
+        const minCx = THREE.MathUtils.clamp(min.cx, 0, maxChunk);
+        const minCz = THREE.MathUtils.clamp(min.cz, 0, maxChunk);
+        const maxCx = THREE.MathUtils.clamp(max.cx, 0, maxChunk);
+        const maxCz = THREE.MathUtils.clamp(max.cz, 0, maxChunk);
+        const r2 = radius * radius;
+
+        const samples = [];
+        for (let cz = minCz; cz <= maxCz; cz++) {
+          for (let cx = minCx; cx <= maxCx; cx++) {
+            const heights = ensureChunkData(cx, cz);
+            const minX = chunkMinWorldX(cx);
+            const minZ = chunkMinWorldZ(cz);
+
+            for (let iz = 0; iz <= CONFIG.dataResolution; iz++) {
+              const wz = minZ + iz * step;
+              const dz = wz - worldPoint.z;
+              if (Math.abs(dz) > radius) continue;
+
+              for (let ix = 0; ix <= CONFIG.dataResolution; ix++) {
+                const wx = minX + ix * step;
+                const dx = wx - worldPoint.x;
+                if (Math.abs(dx) > radius) continue;
+
+                const distSq = dx * dx + dz * dz;
+                if (distSq > r2) continue;
+                const dist = Math.sqrt(distSq);
+                const falloff = 1.0 - dist / radius;
+                const idx = getChunkDataIndex(ix, iz);
+                samples.push({
+                  cx,
+                  cz,
+                  idx,
+                  wx,
+                  wz,
+                  curH: heights[idx],
+                  falloff
+                });
+              }
+            }
+          }
+        }
+
+        const brushedChunkKeys = new Set();
+        const n = samples.length;
+        for (let i = 0; i < n; i++) {
+          const s = samples[i];
+          let sum = 0;
+          for (let oz = -1; oz <= 1; oz++) {
+            for (let ox = -1; ox <= 1; ox++) {
+              sum += getWorldHeight(s.wx + ox * step, s.wz + oz * step);
+            }
+          }
+          const avg = sum / 9;
+          const heights = ensureChunkData(s.cx, s.cz);
+          const nh = s.curH + (avg - s.curH) * s.falloff * strength * 2;
+          heights[s.idx] = THREE.MathUtils.clamp(
+            nh,
+            PARAMS.sculptClampMin,
+            PARAMS.sculptClampMax
+          );
+          dirtyChunks.add(chunkKey(s.cx, s.cz));
+          brushedChunkKeys.add(chunkKey(s.cx, s.cz));
+        }
+
+        finalizeSculpt(brushedChunkKeys, {
+          wx: worldPoint.x,
+          wz: worldPoint.z,
+          radius
+        });
+      }
+
+      function applyRampAt(ptA, ptB) {
+        const dx = ptB.x - ptA.x;
+        const dz = ptB.z - ptA.z;
+        const lenSq = dx * dx + dz * dz;
+        if (lenSq < 0.001) return;
+
+        const radius = sculptBrushWorldRadius();
+        const radiusSq = radius * radius;
+        const strength = PARAMS.brushStrength / 100;
+        const step = CONFIG.chunkSize / CONFIG.dataResolution;
+
+        const minX = Math.min(ptA.x, ptB.x) - radius;
+        const maxX = Math.max(ptA.x, ptB.x) + radius;
+        const minZ = Math.min(ptA.z, ptB.z) - radius;
+        const maxZ = Math.max(ptA.z, ptB.z) + radius;
+
+        const maxChunk = getMaxChunkIndex();
+        const minC = worldToChunkIndex(minX, minZ);
+        const maxC = worldToChunkIndex(maxX, maxZ);
+        const minCx = THREE.MathUtils.clamp(minC.cx, 0, maxChunk);
+        const minCz = THREE.MathUtils.clamp(minC.cz, 0, maxChunk);
+        const maxCx = THREE.MathUtils.clamp(maxC.cx, 0, maxChunk);
+        const maxCz = THREE.MathUtils.clamp(maxC.cz, 0, maxChunk);
+
+        const brushedChunkKeys = new Set();
+
+        for (let cz = minCz; cz <= maxCz; cz++) {
+          for (let cx = minCx; cx <= maxCx; cx++) {
+            const heights = ensureChunkData(cx, cz);
+            const cminX = chunkMinWorldX(cx);
+            const cminZ = chunkMinWorldZ(cz);
+            let changed = false;
+
+            for (let iz = 0; iz <= CONFIG.dataResolution; iz++) {
+              const wz = cminZ + iz * step;
+              for (let ix = 0; ix <= CONFIG.dataResolution; ix++) {
+                const wx = cminX + ix * step;
+                const t = THREE.MathUtils.clamp(
+                  ((wx - ptA.x) * dx + (wz - ptA.z) * dz) / lenSq,
+                  0,
+                  1
+                );
+                const perpX = ptA.x + t * dx - wx;
+                const perpZ = ptA.z + t * dz - wz;
+                const perpSq = perpX * perpX + perpZ * perpZ;
+                if (perpSq > radiusSq) continue;
+                const falloff = Math.pow(1 - Math.sqrt(perpSq) / radius, 2);
+                const targetY = ptA.y + t * (ptB.y - ptA.y);
+                const idx = getChunkDataIndex(ix, iz);
+                const current = heights[idx];
+                heights[idx] = THREE.MathUtils.clamp(
+                  current + (targetY - current) * falloff * strength,
+                  PARAMS.sculptClampMin,
+                  PARAMS.sculptClampMax
+                );
+                changed = true;
+              }
+            }
+
+            if (changed) {
+              const k = chunkKey(cx, cz);
+              dirtyChunks.add(k);
+              brushedChunkKeys.add(k);
+            }
+          }
+        }
+
+        const midx = (ptA.x + ptB.x) * 0.5;
+        const midz = (ptA.z + ptB.z) * 0.5;
+        const seamR = radius + Math.hypot(dx, dz) * 0.5 + step * 2;
+        finalizeSculpt(brushedChunkKeys, { wx: midx, wz: midz, radius: seamR });
+      }
+
+      function applySculptAt(worldPoint, event) {
+        if (event.altKey) {
+          applyFlattenAt(worldPoint, editState.sculptFlattenTargetY);
+        } else if (event.ctrlKey) {
+          applySmoothAt(worldPoint);
+        } else {
+          applyRaiseLowerAt(worldPoint, editState.sculptSign);
+        }
       }
 
       function applyPaintAtWorld(center, erase) {
@@ -1936,7 +2328,10 @@
       });
 
       document.addEventListener("pointerlockchange", () => {
-        if (!document.pointerLockElement && playMode) exitPlayMode();
+        if (!document.pointerLockElement && playMode) {
+          exitPlayMode();
+          setEditMode("view");
+        }
       });
 
       window.addEventListener("keydown", (event) => {
@@ -1948,7 +2343,15 @@
           if (!event.repeat && (event.code === "Escape" || event.code === "KeyF")) {
             event.preventDefault();
             exitPlayMode();
+            setEditMode("view");
           }
+          return;
+        }
+
+        // Esc: always back to view from any edit mode (same rule as we add modes later).
+        if (event.code === "Escape" && !event.repeat) {
+          event.preventDefault();
+          setEditMode("view");
           return;
         }
 
@@ -1973,20 +2376,20 @@
           refreshActiveChunkMaterials();
           if (editorPane) editorPane.refresh();
         }
-        if (event.key === "p" || event.key === "P") {
-          editState.mode = editState.mode === "paint" ? "sculpt" : "paint";
-          PARAMS.mode = editState.mode;
-          if (editorPane) editorPane.refresh();
-          syncBrushVisual();
-          syncGeminiFolderVisibility();
+        if (event.code === "KeyS") {
+          event.preventDefault();
+          setEditMode(editState.mode === "sculpt" ? "view" : "sculpt");
+          return;
+        }
+        if (event.code === "KeyP") {
+          event.preventDefault();
+          setEditMode(editState.mode === "paint" ? "view" : "paint");
+          return;
         }
         if (event.code === "KeyG") {
           event.preventDefault();
-          editState.mode = editState.mode === "geminigrass" ? "sculpt" : "geminigrass";
-          PARAMS.mode = editState.mode;
-          if (editorPane) editorPane.refresh();
-          syncBrushVisual();
-          syncGeminiFolderVisibility();
+          setEditMode(editState.mode === "geminigrass" ? "view" : "geminigrass");
+          return;
         }
         if (event.key === "1") editState.paintChannel = 0;
         if (event.key === "2") editState.paintChannel = 1;
@@ -2010,7 +2413,12 @@
         updatePointerNdc(event);
         const hit = raycastTerrainPoint();
         editState.hasBrushHit = !!hit;
-        if (hit) {
+        const showBrushRing =
+          editState.mode === "paint" ||
+          editState.mode === "geminigrass" ||
+          (editState.mode === "sculpt" &&
+            (PARAMS.sculptTool === "brush" || PARAMS.sculptTool === "ramp"));
+        if (showBrushRing && hit) {
           editState.brushWorldPoint.copy(hit);
           brushMarker.visible = true;
           brushMarker.position.set(hit.x, hit.y + 0.04, hit.z);
@@ -2019,7 +2427,13 @@
         }
         if (editState.mode === "geminigrass") syncBrushVisual();
 
-        if (editState.isPointerDown && editState.pointerAction === "sculpt" && hit) {
+        if (
+          editState.mode === "sculpt" &&
+          editState.isPointerDown &&
+          editState.pointerAction === "sculpt" &&
+          hit &&
+          PARAMS.sculptTool === "brush"
+        ) {
           if (
             editState.sculptSkipFirstMoveDup &&
             event.movementX === 0 &&
@@ -2028,10 +2442,11 @@
             editState.sculptSkipFirstMoveDup = false;
           } else {
             editState.sculptSkipFirstMoveDup = false;
-            applyBrushAt(hit, editState.sculptSign);
+            applySculptAt(hit, event);
             rebuildDirtyActiveChunks(12);
           }
         }
+        if (PARAMS.sculptTool === "ramp" && editState.rampPointA) syncRampMarkerVisual();
         if (editState.isPointerDown && editState.pointerAction === "paint" && hit) {
           applyPaintAtWorld(hit, editState.paintErase);
         }
@@ -2055,17 +2470,45 @@
           return;
         }
 
-        if (event.shiftKey && (event.button === 0 || event.button === 2)) {
+        if (
+          editState.mode === "sculpt" &&
+          PARAMS.sculptTool === "ramp" &&
+          event.button === 0
+        ) {
           event.preventDefault();
+          if (!hit) return;
+          if (!editState.rampPointA) {
+            editState.rampPointA = {
+              x: hit.x,
+              y: getWorldHeight(hit.x, hit.z),
+              z: hit.z
+            };
+          } else {
+            applyRampAt(editState.rampPointA, {
+              x: hit.x,
+              y: getWorldHeight(hit.x, hit.z),
+              z: hit.z
+            });
+            editState.rampPointA = null;
+            rebuildDirtyActiveChunks(16);
+          }
+          syncBrushVisual();
+          return;
+        }
+
+        if (editState.mode === "sculpt" && PARAMS.sculptTool === "brush" && event.button === 0) {
+          event.preventDefault();
+          if (!hit) return;
+          sculptBrushNoiseSeed = Math.random() * 1000;
           editState.isPointerDown = true;
           editState.pointerAction = "sculpt";
-          editState.sculptSign = event.button === 2 ? -1 : 1;
-          controls.enabled = false;
-          if (hit) {
-            editState.sculptSkipFirstMoveDup = true;
-            applyBrushAt(hit, editState.sculptSign);
-            rebuildDirtyActiveChunks(12);
+          editState.sculptSign = event.shiftKey ? -1 : 1;
+          if (event.altKey) {
+            editState.sculptFlattenTargetY = getWorldHeight(hit.x, hit.z);
           }
+          editState.sculptSkipFirstMoveDup = true;
+          applySculptAt(hit, event);
+          rebuildDirtyActiveChunks(12);
           return;
         }
 
@@ -2136,7 +2579,7 @@ camera: ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}
 world size: ${CONFIG.worldSize} | chunk size: ${CONFIG.chunkSize}
 bounds: ${worldBounds.min.x}..${worldBounds.max.x}
 gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}  (no GPU grass until density)
-brush: sculpt r=${sculptBrushWorldRadius().toFixed(1)} str=${sculptBrushStrength().toFixed(2)} | paint r=${CONFIG.paint.radius} (${editState.hasBrushHit ? "hit" : "no-hit"})`;
+brush: sculpt ${PARAMS.sculptTool === "ramp" ? "ramp" : "brush"} r=${sculptBrushWorldRadius().toFixed(1)} str=${sculptBrushStrength().toFixed(2)}${editState.rampPointA ? " · ramp A set" : ""} | paint r=${CONFIG.paint.radius} (${editState.hasBrushHit ? "hit" : "no-hit"})`;
       }
 
       window.addEventListener("resize", () => {
@@ -2416,15 +2859,14 @@ brush: sculpt r=${sculptBrushWorldRadius().toFixed(1)} str=${sculptBrushStrength
           .addBinding(PARAMS, "mode", {
             label: "Mode",
             options: {
-              Sculpt: "sculpt",
+              "View [Esc]": "view",
+              "Sculpt [S]": "sculpt",
               "Paint [P]": "paint",
               "Gemini Grass [G]": "geminigrass"
             }
           })
           .on("change", (ev) => {
-            editState.mode = ev.value;
-            syncBrushVisual();
-            syncGeminiFolderVisibility();
+            setEditMode(ev.value);
           });
 
         pane
@@ -2519,6 +2961,24 @@ brush: sculpt r=${sculptBrushWorldRadius().toFixed(1)} str=${sculptBrushStrength
             brushStr = ev.value;
             syncBrushVisual();
           });
+        brushFolder
+          .addBinding(PARAMS, "sculptTool", {
+            label: "Sculpt tool",
+            options: { Brush: "brush", Ramp: "ramp" }
+          })
+          .on("change", () => {
+            editState.rampPointA = null;
+            syncBrushVisual();
+          });
+        brushFolder.addBinding(PARAMS, "sculptBrush", {
+          label: "Sculpt shape",
+          options: {
+            Smooth: "smooth",
+            "FBM peak": "fbm_peak",
+            Crater: "crater",
+            Plateau: "plateau"
+          }
+        });
         brushFolder.addBinding(PARAMS, "paintBrush", {
           label: "Gemini brush",
           options: { Smooth: "smooth", Smear: "smear" }
@@ -2928,8 +3388,9 @@ brush: sculpt r=${sculptBrushWorldRadius().toFixed(1)} str=${sculptBrushStrength
           gLod.addButton({ title: "Rebuild LOD geometries" }).on("click", _gemRebuild);
         }
 
-        geminiGrassFolder.hidden = true;
-        syncGeminiFolderVisibility();
+        playFolderRef = playFolder;
+        brushFolderRef = brushFolder;
+        setEditMode(PARAMS.mode);
       }
 
       renderer.domElement.addEventListener(
