@@ -118,6 +118,10 @@
         background: rgba(200, 30, 30, 0.92);
         color: #ffcccc;
       }
+      #mode-badge.waterfall {
+        background: rgba(50, 130, 200, 0.92);
+        color: #e8f8ff;
+      }
     </style>
     <script type="importmap">
       {
@@ -142,7 +146,7 @@
 
     <script type="module">
       import * as THREE from "three";
-      import { MeshStandardNodeMaterial } from "three";
+      import { MeshStandardNodeMaterial, MeshBasicNodeMaterial } from "three";
       import {
         Fn,
         texture,
@@ -167,8 +171,19 @@
         smoothstep,
         pow,
         max,
+        min,
         sin,
-        cos
+        cos,
+        length,
+        floor,
+        fract,
+        uv,
+        mx_noise_float,
+        normalLocal,
+        saturate,
+        sub,
+        add,
+        div
       } from "three/tsl";
       import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
@@ -537,6 +552,571 @@
       let _lastCsmMaxFar = PARAMS.csm.maxFar;
       let _lastCsmMargin = PARAMS.csm.lightMargin;
       let _lastCsmMapSize = PARAMS.csm.mapSize;
+
+      // ── WATERFALL [ H ] — same as splatmap-painter10bvh+post.html ─────────────
+      const _wfGradientNoise = Fn(([p]) => {
+        const i = floor(p).toVar();
+        const f = fract(p).toVar();
+        const uu = f.mul(f).mul(f).mul(f.mul(f.mul(6).sub(15)).add(10));
+        const rg = Fn(([ip]) => {
+          const a = fract(sin(dot(ip, vec2(127.1, 311.7))).mul(43758.5453)).mul(Math.PI * 2);
+          return vec2(cos(a), sin(a));
+        });
+        return mix(
+          mix(dot(rg(i), f), dot(rg(i.add(vec2(1, 0))), f.sub(vec2(1, 0))), uu.x),
+          mix(
+            dot(rg(i.add(vec2(0, 1))), f.sub(vec2(0, 1))),
+            dot(rg(i.add(vec2(1, 1))), f.sub(vec2(1, 1))),
+            uu.x
+          ),
+          uu.y
+        )
+          .mul(0.5)
+          .add(0.5);
+      });
+      const _wfVoroF1 = Fn(([p, jitter]) => {
+        const ip = floor(p).toVar();
+        const fp = fract(p).toVar();
+        const md = float(10).toVar();
+        for (const [nx, ny] of [
+          [-1, -1],
+          [0, -1],
+          [1, -1],
+          [-1, 0],
+          [0, 0],
+          [1, 0],
+          [-1, 1],
+          [0, 1],
+          [1, 1]
+        ]) {
+          const off = vec2(float(nx), float(ny));
+          const h = vec2(
+            fract(sin(dot(ip.add(off), vec2(127.1, 311.7))).mul(43758.5453)),
+            fract(sin(dot(ip.add(off), vec2(269.5, 183.3))).mul(43758.5453))
+          );
+          md.assign(min(md, length(off.add(mix(vec2(0.5), h, jitter)).sub(fp))));
+        }
+        return md;
+      });
+      const _wfVoroFbm = Fn(([p_in, jitter, octaves, lac, gain]) => {
+        const p = p_in.toVar();
+        const val = float(0).toVar();
+        const amp = float(1).toVar();
+        const total = float(0).toVar();
+        val.addAssign(amp.mul(_wfVoroF1(p, jitter)));
+        total.addAssign(amp);
+        p.mulAssign(lac);
+        amp.mulAssign(gain);
+        const d2 = smoothstep(float(1), float(2), octaves);
+        val.addAssign(amp.mul(_wfVoroF1(p, jitter)).mul(d2));
+        total.addAssign(amp.mul(d2));
+        p.mulAssign(lac);
+        amp.mulAssign(gain);
+        const d3 = smoothstep(float(2), float(3), octaves);
+        val.addAssign(amp.mul(_wfVoroF1(p, jitter)).mul(d3));
+        total.addAssign(amp.mul(d3));
+        p.mulAssign(lac);
+        amp.mulAssign(gain);
+        const d4 = smoothstep(float(3), float(4), octaves);
+        val.addAssign(amp.mul(_wfVoroF1(p, jitter)).mul(d4));
+        total.addAssign(amp.mul(d4));
+        return val.div(total);
+      });
+      const _wfBandMask = Fn(([y, low, high, n, noiseAmt, sharpness]) => {
+        const nLow = low.add(n.sub(0.5).mul(noiseAmt.mul(2)));
+        const nHigh = high.add(n.sub(0.5).mul(noiseAmt.mul(2)));
+        return smoothstep(nLow.sub(sharpness), nLow.add(sharpness), y).mul(
+          smoothstep(nHigh.add(sharpness), nHigh.sub(sharpness), y)
+        );
+      });
+      const _wfVoroLayer = Fn(
+        ([v, scaleX, scaleY, offX, offY, jitter, octaves, lac, gain, warpStr, warpScale, contrast]) => {
+          const p = vec2(v.x.mul(scaleX).add(offX), v.y.mul(scaleY).add(offY)).toVar();
+          const wx = _wfGradientNoise(p.mul(warpScale)).sub(0.5);
+          const wy = _wfGradientNoise(p.mul(warpScale).add(vec2(3.7, 8.3))).sub(0.5);
+          p.addAssign(vec2(wx, wy).mul(warpStr));
+          return pow(_wfVoroFbm(p, jitter, octaves, lac, gain), contrast);
+        }
+      );
+
+      const wfU = {
+        darkColor: uniform(new THREE.Color("#00544c")),
+        bodyColor: uniform(new THREE.Color("#38d0d0")),
+        depthScaleX: uniform(2.0),
+        depthScaleY: uniform(1.65),
+        depthStrength: uniform(0.5),
+        bodyBrightness: uniform(1.0),
+        bodyContrast: uniform(1.0),
+        cyan_enabled: uniform(1.0),
+        cyan_bandLow: uniform(0.3),
+        cyan_bandHigh: uniform(0.8),
+        cyan_nScaleX: uniform(12.0),
+        cyan_nScaleY: uniform(12.0),
+        cyan_noiseAmt: uniform(0.3),
+        cyan_bandSharp: uniform(0.02),
+        cyan_color: uniform(new THREE.Color("#00fff4")),
+        cyan_strength: uniform(0.1),
+        cyan_flowSpeed: uniform(3.0),
+        red_enabled: uniform(1.0),
+        red_bandLow: uniform(0.35),
+        red_bandHigh: uniform(0.93),
+        red_nScaleX: uniform(6.0),
+        red_nScaleY: uniform(3.0),
+        red_noiseAmt: uniform(0.22),
+        red_bandSharp: uniform(0.03),
+        red_scaleX: uniform(7.0),
+        red_scaleY: uniform(4.0),
+        red_offsetX: uniform(0.0),
+        red_offsetY: uniform(0.0),
+        red_jitter: uniform(0.55),
+        red_octaves: uniform(3.0),
+        red_lac: uniform(2.35),
+        red_gain: uniform(0.41),
+        red_warpStr: uniform(0.83),
+        red_warpScale: uniform(1.6),
+        red_contrast: uniform(1.2),
+        red_threshold: uniform(0.12),
+        red_sharpness: uniform(0.02),
+        red_color: uniform(new THREE.Color("#c8f0ee")),
+        red_strength: uniform(0.3),
+        green_enabled: uniform(1.0),
+        green_bandLow: uniform(0.45),
+        green_bandHigh: uniform(0.82),
+        green_scaleX: uniform(7.0),
+        green_scaleY: uniform(4.0),
+        green_offsetX: uniform(0.0),
+        green_offsetY: uniform(0.0),
+        green_jitter: uniform(0.55),
+        green_octaves: uniform(3.0),
+        green_lac: uniform(2.35),
+        green_gain: uniform(0.41),
+        green_warpStr: uniform(0.83),
+        green_warpScale: uniform(1.6),
+        green_contrast: uniform(1.2),
+        green_threshold: uniform(0.12),
+        green_sharpness: uniform(0.02),
+        green_color: uniform(new THREE.Color("#ffffff")),
+        green_strength: uniform(1.0),
+        drip_enabled: uniform(1.0),
+        drip_bandLow: uniform(0.0),
+        drip_bandHigh: uniform(1.0),
+        drip_nScaleX: uniform(6.0),
+        drip_nScaleY: uniform(2.0),
+        drip_noiseAmt: uniform(0.08),
+        drip_bandSharp: uniform(0.04),
+        drip_scaleX: uniform(14.0),
+        drip_scaleY: uniform(1.8),
+        drip_offsetX: uniform(0.0),
+        drip_offsetY: uniform(0.0),
+        drip_jitter: uniform(1.0),
+        drip_octaves: uniform(2.0),
+        drip_lac: uniform(2.0),
+        drip_gain: uniform(0.4),
+        drip_warpStr: uniform(0.25),
+        drip_warpScale: uniform(1.5),
+        drip_contrast: uniform(4.0),
+        drip_threshold: uniform(0.12),
+        drip_sharpness: uniform(0.03),
+        drip_color: uniform(new THREE.Color(0xffffff)),
+        drip_strength: uniform(0.9),
+        wfFlowTime: uniform(0.0),
+        wfFlowSpeed: uniform(0.5)
+      };
+
+      const _buildWaterfallColorNode = () =>
+        Fn(() => {
+          const v = uv();
+          const depthN = _wfGradientNoise(
+            vec2(v.x.mul(wfU.depthScaleX), v.y.mul(wfU.depthScaleY).add(wfU.wfFlowTime.mul(float(0.5))))
+          );
+          const col = mix(wfU.darkColor, wfU.bodyColor, depthN.mul(wfU.depthStrength)).toVar();
+          col.assign(col.sub(0.5).mul(wfU.bodyContrast).add(0.5).mul(wfU.bodyBrightness).clamp(0, 1));
+          const cyanN = _wfGradientNoise(
+            vec2(
+              v.x.mul(wfU.cyan_nScaleX),
+              v.y.mul(wfU.cyan_nScaleY).add(wfU.wfFlowTime.mul(wfU.cyan_flowSpeed))
+            )
+          );
+          const cyanBand = _wfBandMask(
+            v.y,
+            wfU.cyan_bandLow,
+            wfU.cyan_bandHigh,
+            cyanN,
+            wfU.cyan_noiseAmt,
+            wfU.cyan_bandSharp
+          );
+          col.assign(mix(col, wfU.cyan_color, cyanBand.mul(wfU.cyan_strength).mul(wfU.cyan_enabled).clamp(0, 1)));
+          const redCorner = smoothstep(wfU.red_bandLow, wfU.red_bandHigh, v.y)
+            .mul(smoothstep(wfU.red_bandHigh, wfU.red_bandLow, v.y))
+            .mul(4.0)
+            .clamp(0, 1);
+          const redDynThresh = mix(float(1.2), wfU.red_threshold, redCorner);
+          const redF1 = _wfVoroLayer(
+            v,
+            wfU.red_scaleX,
+            wfU.red_scaleY,
+            wfU.red_offsetX,
+            wfU.red_offsetY.add(wfU.wfFlowTime),
+            wfU.red_jitter,
+            wfU.red_octaves,
+            wfU.red_lac,
+            wfU.red_gain,
+            wfU.red_warpStr,
+            wfU.red_warpScale,
+            wfU.red_contrast
+          );
+          const redFoam = smoothstep(
+            redDynThresh.sub(wfU.red_sharpness),
+            redDynThresh.add(wfU.red_sharpness),
+            redF1
+          );
+          col.assign(mix(col, wfU.red_color, redFoam.mul(wfU.red_strength).mul(wfU.red_enabled).clamp(0, 1)));
+          const greenCorner = smoothstep(wfU.green_bandLow, wfU.green_bandHigh, v.y)
+            .mul(smoothstep(wfU.green_bandHigh, wfU.green_bandLow, v.y))
+            .mul(4.0)
+            .clamp(0, 1);
+          const greenDynThresh = mix(float(1.2), wfU.green_threshold, greenCorner);
+          const greenF1 = _wfVoroLayer(
+            v,
+            wfU.green_scaleX,
+            wfU.green_scaleY,
+            wfU.green_offsetX,
+            wfU.green_offsetY.add(wfU.wfFlowTime),
+            wfU.green_jitter,
+            wfU.green_octaves,
+            wfU.green_lac,
+            wfU.green_gain,
+            wfU.green_warpStr,
+            wfU.green_warpScale,
+            wfU.green_contrast
+          );
+          const greenFoam = smoothstep(
+            greenDynThresh.sub(wfU.green_sharpness),
+            greenDynThresh.add(wfU.green_sharpness),
+            greenF1
+          );
+          col.assign(mix(col, wfU.green_color, greenFoam.mul(wfU.green_strength).mul(wfU.green_enabled).clamp(0, 1)));
+          const dripN = _wfGradientNoise(vec2(v.x.mul(wfU.drip_nScaleX), v.y.mul(wfU.drip_nScaleY)));
+          const dripBand = _wfBandMask(
+            v.y,
+            wfU.drip_bandLow,
+            wfU.drip_bandHigh,
+            dripN,
+            wfU.drip_noiseAmt,
+            wfU.drip_bandSharp
+          );
+          const dripF1 = _wfVoroLayer(
+            v,
+            wfU.drip_scaleX,
+            wfU.drip_scaleY,
+            wfU.drip_offsetX,
+            wfU.drip_offsetY.add(wfU.wfFlowTime),
+            wfU.drip_jitter,
+            wfU.drip_octaves,
+            wfU.drip_lac,
+            wfU.drip_gain,
+            wfU.drip_warpStr,
+            wfU.drip_warpScale,
+            wfU.drip_contrast
+          );
+          const dripFoam = smoothstep(
+            wfU.drip_threshold.sub(wfU.drip_sharpness),
+            wfU.drip_threshold.add(wfU.drip_sharpness),
+            dripF1
+          );
+          col.assign(
+            mix(col, wfU.drip_color, dripFoam.mul(dripBand).mul(wfU.drip_strength).mul(wfU.drip_enabled).clamp(0, 1))
+          );
+          return col;
+        })();
+
+      const WF_MESH = { width: 4, totalHeight: 8, topLength: 2.5, radius: 1.2, segments: 128 };
+      function buildWaterfallGeo() {
+        const { width, totalHeight, topLength, radius, segments } = WF_MESH;
+        const geo = new THREE.PlaneGeometry(width, totalHeight, 1, segments);
+        const pos = geo.attributes.position;
+        const vv = new THREE.Vector3();
+        const curveStart = totalHeight - topLength;
+        const curveEnd = curveStart - radius;
+        for (let i = 0; i < pos.count; i++) {
+          vv.fromBufferAttribute(pos, i);
+          let cy = vv.y + totalHeight / 2;
+          if (cy >= curveStart) {
+            vv.y = cy;
+            vv.z = 0;
+          } else if (cy > curveEnd) {
+            const a = ((curveStart - cy) / radius) * (Math.PI / 2);
+            vv.y = curveStart - Math.sin(a) * radius;
+            vv.z = -(radius - Math.cos(a) * radius);
+          } else {
+            vv.y = curveStart - radius;
+            vv.z = -radius - (curveEnd - cy);
+          }
+          pos.setXYZ(i, vv.x, vv.y, vv.z);
+        }
+        geo.computeVertexNormals();
+        return geo;
+      }
+
+      const waterfallTemplateMat = new MeshStandardNodeMaterial({
+        side: THREE.DoubleSide,
+        roughness: 1.0,
+        metalness: 0.0
+      });
+      waterfallTemplateMat.colorNode = _buildWaterfallColorNode();
+
+      let waterfallObjects = [];
+      let selectedWaterfall = null;
+      let splashCapObjects = [];
+      let selectedSplashCap = null;
+      const wfPlaceTool = { tool: "waterfall" };
+
+      const impactFoamParams = {
+        impactFoamVisible: true,
+        impactFoamDispAmp: 0.62,
+        impactFoamNoiseFreq: 2.35,
+        impactFoamFlow: 1.35,
+        impactFoamOpacity: 0.88,
+        impactFoamRimCyan: 0.22,
+        impactFoamCapAngle: 0.42,
+        impactFoamBaseRadius: 3.35
+      };
+
+      function buildImpactFoamGeometry(baseRadius, phiFrac) {
+        const R = Math.max(0.35, baseRadius);
+        const phi = Math.max(0.08, Math.min(0.48, phiFrac));
+        return new THREE.SphereGeometry(R, 72, 52, 0, Math.PI * 2, 0, Math.PI * phi);
+      }
+
+      const uIFTime = uniform(0);
+      const uIFDisp = uniform(impactFoamParams.impactFoamDispAmp);
+      const uIFNoiseFreq = uniform(impactFoamParams.impactFoamNoiseFreq);
+      const uIFFlow = uniform(impactFoamParams.impactFoamFlow);
+      const uIFOpacity = uniform(impactFoamParams.impactFoamOpacity);
+      const uIFRimCyan = uniform(impactFoamParams.impactFoamRimCyan);
+      const uIFRadius = uniform(impactFoamParams.impactFoamBaseRadius);
+      const uIFFoamWhite = uniform(new THREE.Color(0xf8fbff));
+      const uIFFoamCyan = uniform(new THREE.Color(0xa8e8f5));
+
+      const impactFoamPosNode = Fn(() => {
+        const t = uIFTime;
+        const xz = positionLocal.xz.mul(uIFNoiseFreq);
+        const scroll = vec2(t.mul(uIFFlow), t.mul(uIFFlow.mul(0.74)));
+        const n1 = mx_noise_float(xz.add(scroll));
+        const n2 = mx_noise_float(xz.mul(2.12).sub(vec2(scroll.y, scroll.x.mul(0.9))));
+        const n3 = mx_noise_float(xz.mul(0.48).add(vec2(t.mul(-0.52), t.mul(0.61))));
+        const d = n1.mul(0.38).add(n2.mul(0.34)).add(n3.mul(0.28));
+        return positionLocal.add(normalLocal.mul(d.mul(uIFDisp)));
+      })();
+
+      const impactFoamColorNode = Fn(() => {
+        const t = uIFTime;
+        const xz = positionLocal.xz.mul(uIFNoiseFreq.mul(0.88));
+        const scroll = vec2(t.mul(uIFFlow.mul(0.92)), t.mul(uIFFlow.mul(0.58)));
+        const f1 = mx_noise_float(xz.add(scroll)).mul(0.5).add(0.5);
+        const f2 = mx_noise_float(xz.mul(2.95).sub(scroll)).mul(0.5).add(0.5);
+        const rn = length(positionLocal.xz).div(max(uIFRadius, float(0.001)));
+        const rim = smoothstep(float(0.22), float(0.98), rn);
+        const base = mix(uIFFoamWhite, uIFFoamCyan, rim.mul(uIFRimCyan));
+        return mix(base, uIFFoamWhite, f1.mul(0.32).add(f2.mul(0.2))).saturate();
+      })();
+
+      const impactFoamAlphaNode = Fn(() => {
+        const t = uIFTime;
+        const xz = positionLocal.xz.mul(uIFNoiseFreq.mul(1.05));
+        const scroll = vec2(t.mul(uIFFlow.mul(1.05)), t.mul(0.5));
+        const a1 = mx_noise_float(xz.add(scroll)).mul(0.5).add(0.5);
+        const a2 = mx_noise_float(xz.mul(3.2).sub(vec2(t.mul(1.2), float(0)))).mul(0.5).add(0.5);
+        const rn = length(positionLocal.xz).div(max(uIFRadius, float(0.001)));
+        const edgeFade = float(1).sub(smoothstep(float(0.78), float(1.05), rn));
+        return uIFOpacity
+          .mul(float(0.42).add(a1.mul(0.38)).add(a2.mul(0.2)))
+          .mul(edgeFade.add(0.12));
+      })();
+
+      const impactFoamMat = new MeshBasicNodeMaterial({
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide
+      });
+      impactFoamMat.positionNode = impactFoamPosNode;
+      impactFoamMat.colorNode = impactFoamColorNode;
+      impactFoamMat.opacityNode = impactFoamAlphaNode;
+
+      function syncImpactFoamUniforms() {
+        uIFDisp.value = impactFoamParams.impactFoamDispAmp;
+        uIFNoiseFreq.value = impactFoamParams.impactFoamNoiseFreq;
+        uIFFlow.value = impactFoamParams.impactFoamFlow;
+        uIFOpacity.value = impactFoamParams.impactFoamOpacity;
+        uIFRimCyan.value = impactFoamParams.impactFoamRimCyan;
+        uIFRadius.value = impactFoamParams.impactFoamBaseRadius;
+      }
+
+      function applyImpactFoamVisibility() {
+        splashCapObjects.forEach((m) => {
+          m.visible = impactFoamParams.impactFoamVisible;
+        });
+        if (selectedSplashCap && !impactFoamParams.impactFoamVisible) {
+          transformControls.detach();
+          tcHelper.visible = false;
+          if (!playMode) controls.enabled = true;
+        } else if (
+          selectedSplashCap &&
+          impactFoamParams.impactFoamVisible &&
+          editState.mode === "waterfall"
+        ) {
+          transformControls.enabled = true;
+          tcHelper.visible = true;
+          transformControls.attach(selectedSplashCap);
+        }
+      }
+
+      function rebuildAllImpactFoamGeometry() {
+        splashCapObjects.forEach((m) => {
+          const old = m.geometry;
+          m.geometry = buildImpactFoamGeometry(
+            impactFoamParams.impactFoamBaseRadius,
+            impactFoamParams.impactFoamCapAngle
+          );
+          old.dispose();
+        });
+        uIFRadius.value = impactFoamParams.impactFoamBaseRadius;
+      }
+
+      function selectWaterfall(mesh) {
+        selectedSplashCap = null;
+        selectedWaterfall = mesh;
+        if (mesh) {
+          transformControls.enabled = true;
+          tcHelper.visible = true;
+          transformControls.attach(mesh);
+        } else {
+          tcHelper.visible = false;
+          transformControls.detach();
+        }
+      }
+
+      function selectSplashCap(mesh) {
+        selectedWaterfall = null;
+        selectedSplashCap = mesh;
+        if (mesh) {
+          transformControls.enabled = true;
+          tcHelper.visible = true;
+          transformControls.attach(mesh);
+        } else {
+          tcHelper.visible = false;
+          transformControls.detach();
+        }
+      }
+
+      function placeWaterfall(wx, wy, wz) {
+        const mesh = new THREE.Mesh(buildWaterfallGeo(), waterfallTemplateMat.clone());
+        mesh.rotation.x = -Math.PI / 2;
+        mesh.position.set(wx, wy, wz);
+        mesh.renderOrder = 2;
+        scene.add(mesh);
+        waterfallObjects.push(mesh);
+        selectWaterfall(mesh);
+      }
+
+      function applyWaterfalls(data) {
+        waterfallObjects.forEach((m) => scene.remove(m));
+        waterfallObjects = [];
+        selectWaterfall(null);
+        data.forEach((d) => {
+          const mesh = new THREE.Mesh(buildWaterfallGeo(), waterfallTemplateMat.clone());
+          mesh.position.set(d.x, d.y, d.z);
+          mesh.rotation.set(d.rx, d.ry, d.rz);
+          mesh.scale.set(d.sx, d.sy, d.sz);
+          mesh.renderOrder = 2;
+          scene.add(mesh);
+          waterfallObjects.push(mesh);
+        });
+      }
+
+      function saveWaterfalls() {
+        const data = waterfallObjects.map((m) => ({
+          x: m.position.x,
+          y: m.position.y,
+          z: m.position.z,
+          rx: m.rotation.x,
+          ry: m.rotation.y,
+          rz: m.rotation.z,
+          sx: m.scale.x,
+          sy: m.scale.y,
+          sz: m.scale.z
+        }));
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "waterfalls.json";
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }
+
+      function placeSplashCap(wx, wy, wz) {
+        const mesh = new THREE.Mesh(
+          buildImpactFoamGeometry(impactFoamParams.impactFoamBaseRadius, impactFoamParams.impactFoamCapAngle),
+          impactFoamMat
+        );
+        mesh.name = "SplashCap";
+        mesh.userData.isSplashCap = true;
+        mesh.rotation.x = 0;
+        mesh.position.set(wx, wy, wz);
+        mesh.scale.set(1, 1, 1);
+        mesh.visible = impactFoamParams.impactFoamVisible;
+        mesh.renderOrder = 4;
+        scene.add(mesh);
+        splashCapObjects.push(mesh);
+        selectSplashCap(mesh);
+      }
+
+      function applySplashCaps(data) {
+        splashCapObjects.forEach((m) => {
+          scene.remove(m);
+          m.geometry.dispose();
+        });
+        splashCapObjects = [];
+        selectSplashCap(null);
+        data.forEach((d) => {
+          const mesh = new THREE.Mesh(
+            buildImpactFoamGeometry(impactFoamParams.impactFoamBaseRadius, impactFoamParams.impactFoamCapAngle),
+            impactFoamMat
+          );
+          mesh.name = "SplashCap";
+          mesh.userData.isSplashCap = true;
+          mesh.position.set(d.x, d.y, d.z);
+          mesh.rotation.set(d.rx, d.ry, d.rz);
+          mesh.scale.set(d.sx, d.sy, d.sz);
+          mesh.visible = impactFoamParams.impactFoamVisible;
+          mesh.renderOrder = 4;
+          scene.add(mesh);
+          splashCapObjects.push(mesh);
+        });
+      }
+
+      function saveSplashCaps() {
+        const data = splashCapObjects.map((m) => ({
+          x: m.position.x,
+          y: m.position.y,
+          z: m.position.z,
+          rx: m.rotation.x,
+          ry: m.rotation.y,
+          rz: m.rotation.z,
+          sx: m.scale.x,
+          sy: m.scale.y,
+          sz: m.scale.z
+        }));
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "splash-caps.json";
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }
+
+      syncImpactFoamUniforms();
+      applyImpactFoamVisibility();
 
       scene.background = null;
 
@@ -920,6 +1500,7 @@
       let brushFolderRef = null;
       let lodFolderRef = null;
       let ptreeFolderRef = null;
+      let waterfallFolderRef = null;
       let placeFolderRef = null;
       let cliffsFolderRef = null;
       let playFolderRef = null;
@@ -1817,6 +2398,28 @@
             return o;
           }),
           ptreeSlots: PTREE_SLOTS.map((s) => ({ name: s.name, positions: s.positions })),
+          waterfalls: waterfallObjects.map((m) => ({
+            x: m.position.x,
+            y: m.position.y,
+            z: m.position.z,
+            rx: m.rotation.x,
+            ry: m.rotation.y,
+            rz: m.rotation.z,
+            sx: m.scale.x,
+            sy: m.scale.y,
+            sz: m.scale.z
+          })),
+          splashCaps: splashCapObjects.map((m) => ({
+            x: m.position.x,
+            y: m.position.y,
+            z: m.position.z,
+            rx: m.rotation.x,
+            ry: m.rotation.y,
+            rz: m.rotation.z,
+            sx: m.scale.x,
+            sy: m.scale.y,
+            sz: m.scale.z
+          })),
           cliffs: cliffObjects.map((root) => ({
             modelIndex: root.userData.modelIndex ?? 0,
             x: root.position.x,
@@ -1917,6 +2520,8 @@
         }
         syncTreeLodHeights();
         syncPTreeHeights();
+        if (data.waterfalls && Array.isArray(data.waterfalls)) applyWaterfalls(data.waterfalls);
+        if (data.splashCaps && Array.isArray(data.splashCaps)) applySplashCaps(data.splashCaps);
         if (data.cliffs && Array.isArray(data.cliffs)) applyCliffs(data.cliffs);
         if (data.cliffInstances && Array.isArray(data.cliffInstances)) {
           cliffInstancer.importData(data.cliffInstances);
@@ -2124,6 +2729,10 @@
         if (cliffsFolderRef) cliffsFolderRef.hidden = editState.mode !== "cliffs";
       }
 
+      function syncWaterfallFolderVisibility() {
+        if (waterfallFolderRef) waterfallFolderRef.hidden = editState.mode !== "waterfall";
+      }
+
       function syncModeBadge() {
         const el = document.getElementById("mode-badge");
         if (!el) return;
@@ -2151,6 +2760,11 @@
           el.textContent =
             "CLIFFS MODE  [ C · LMB place · RMB select · W/E/R gizmo · Del · Rebake BVH for trees/grass · Esc → view ]";
         else if (m === "barrier") el.textContent = "BARRIER MODE";
+        else if (m === "waterfall")
+          el.textContent =
+            wfPlaceTool.tool === "splashCap"
+              ? "SPLASH CAP MODE  [ H · W/E/R gizmo · Esc → view ]"
+              : "WATERFALL MODE  [ H · W/E/R gizmo · Esc → view ]";
         else el.textContent = String(m).toUpperCase();
       }
 
@@ -2164,13 +2778,15 @@
         }
         editState.mode = mode;
         PARAMS.mode = mode;
-        const tcMode = mode === "place" || mode === "cliffs";
+        const tcMode = mode === "place" || mode === "cliffs" || mode === "waterfall";
         if (brushFolderRef) brushFolderRef.hidden = mode === "view" || tcMode;
         if (playFolderRef) playFolderRef.hidden = mode !== "view";
         if (tcMode) {
           transformControls.enabled = true;
           if (mode === "place") {
             cliffInstancer.clearSelection();
+            selectWaterfall(null);
+            selectSplashCap(null);
             if (selectedCliff) {
               transformControls.attach(selectedCliff);
               tcHelper.visible = true;
@@ -2178,14 +2794,28 @@
               transformControls.detach();
               tcHelper.visible = false;
             }
-          } else {
+          } else if (mode === "cliffs") {
             selectedCliff = null;
+            selectWaterfall(null);
+            selectSplashCap(null);
             if (cliffInstancer.hasSelection()) {
               transformControls.attach(cliffInstancer.proxyObject);
               tcHelper.visible = true;
             } else {
               transformControls.detach();
               tcHelper.visible = false;
+            }
+          } else if (mode === "waterfall") {
+            cliffInstancer.clearSelection();
+            selectedCliff = null;
+            transformControls.detach();
+            tcHelper.visible = false;
+            if (selectedWaterfall) {
+              transformControls.attach(selectedWaterfall);
+              tcHelper.visible = true;
+            } else if (selectedSplashCap) {
+              transformControls.attach(selectedSplashCap);
+              tcHelper.visible = true;
             }
           }
         } else {
@@ -2194,6 +2824,8 @@
           if (tcHelper) tcHelper.visible = false;
           selectedCliff = null;
           cliffInstancer.clearSelection();
+          selectWaterfall(null);
+          selectSplashCap(null);
         }
         syncModeBadge();
         syncBrushVisual();
@@ -2209,6 +2841,7 @@
         syncPtreeFolderVisibility();
         syncPlaceFolderVisibility();
         syncCliffsFolderVisibility();
+        syncWaterfallFolderVisibility();
         if (barrierFolderRef) barrierFolderRef.hidden = editState.mode !== "barrier";
         syncBarrierOverlayFromParams();
         if (!playMode) {
@@ -2219,7 +2852,12 @@
       }
 
       function syncBrushVisual() {
-        if (editState.mode === "view" || editState.mode === "place" || editState.mode === "cliffs") {
+        if (
+          editState.mode === "view" ||
+          editState.mode === "place" ||
+          editState.mode === "cliffs" ||
+          editState.mode === "waterfall"
+        ) {
           brushMarker.visible = false;
           rampMarkerA.visible = false;
           return;
@@ -3865,6 +4503,7 @@
         if (tcHelper) tcHelper.visible = false;
         selectedCliff = null;
         cliffInstancer.clearSelection();
+        selectWaterfall(null);
         syncModeBadge();
         if (editorPane) editorPane.refresh();
         const tpEl = document.querySelector(".tp-dfwv");
@@ -4942,6 +5581,11 @@
           setEditMode(editState.mode === "ambientfx" ? "view" : "ambientfx");
           return;
         }
+        if (event.code === "KeyH") {
+          event.preventDefault();
+          setEditMode(editState.mode === "waterfall" ? "view" : "waterfall");
+          return;
+        }
         if (editState.mode === "place" || editState.mode === "cliffs") {
           if (event.code === "KeyW") {
             event.preventDefault();
@@ -4978,6 +5622,55 @@
             return;
           }
         }
+        if (editState.mode === "waterfall") {
+          if (event.code === "KeyW") {
+            event.preventDefault();
+            transformControls.setMode("translate");
+            return;
+          }
+          if (event.code === "KeyE") {
+            event.preventDefault();
+            transformControls.setMode("rotate");
+            return;
+          }
+          if (event.code === "KeyR") {
+            event.preventDefault();
+            transformControls.setMode("scale");
+            return;
+          }
+          if (event.code === "Digit7") {
+            event.preventDefault();
+            transformControls.setMode("translate");
+            return;
+          }
+          if (event.code === "Digit8") {
+            event.preventDefault();
+            transformControls.setMode("rotate");
+            return;
+          }
+          if (event.code === "Digit9") {
+            event.preventDefault();
+            transformControls.setMode("scale");
+            return;
+          }
+          if (event.code === "Delete" && selectedWaterfall) {
+            event.preventDefault();
+            scene.remove(selectedWaterfall);
+            waterfallObjects = waterfallObjects.filter((m) => m !== selectedWaterfall);
+            selectWaterfall(null);
+            if (editorPane) editorPane.refresh();
+            return;
+          }
+          if (event.code === "Delete" && selectedSplashCap) {
+            event.preventDefault();
+            scene.remove(selectedSplashCap);
+            selectedSplashCap.geometry.dispose();
+            splashCapObjects = splashCapObjects.filter((m) => m !== selectedSplashCap);
+            selectSplashCap(null);
+            if (editorPane) editorPane.refresh();
+            return;
+          }
+        }
         if (editState.mode === "pinelod") {
           const dk = parseInt(event.key, 10);
           if (dk >= 1 && dk <= 8) {
@@ -4990,7 +5683,7 @@
           if (event.key === "3") editState.paintChannel = 2;
         }
         if (event.key === "e" || event.key === "E") {
-          if (editState.mode === "cliffs") return;
+          if (editState.mode === "cliffs" || editState.mode === "waterfall") return;
           event.preventDefault();
           exportTerrainJson();
         }
@@ -5130,6 +5823,34 @@
             }
           }
           if (hit) placeCliff(hit.x, hit.y, hit.z, activeCliffModel);
+          return;
+        }
+
+        if (editState.mode === "waterfall" && event.button === 0) {
+          event.preventDefault();
+          if (transformControls.axis !== null) return;
+          raycaster.setFromCamera(pointerNdc, camera);
+          if (wfPlaceTool.tool === "splashCap") {
+            const capHits = raycaster.intersectObjects(splashCapObjects, false);
+            if (capHits.length > 0) {
+              selectSplashCap(capHits[0].object);
+              if (editorPane) editorPane.refresh();
+              return;
+            }
+            const pt = raycastTerrainPoint();
+            if (pt) {
+              placeSplashCap(pt.x, pt.y, pt.z);
+              if (editorPane) editorPane.refresh();
+            }
+            return;
+          }
+          const wfHits = raycaster.intersectObjects(waterfallObjects, false);
+          if (wfHits.length > 0) {
+            selectWaterfall(wfHits[0].object);
+            return;
+          }
+          const pt = raycastTerrainPoint();
+          if (pt) placeWaterfall(pt.x, pt.y, pt.z);
           return;
         }
 
@@ -5758,6 +6479,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
               Barrier: "barrier",
               "Tree LOD [J]": "pinelod",
               "Proc Trees": "proctrees",
+              "Waterfall [H]": "waterfall",
               "Place [O]": "place",
               "Cliffs [C]": "cliffs",
               "Play [F]": "play"
@@ -6216,6 +6938,223 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
             _ptreeRebuildLeaves(slot);
           });
         });
+
+        const waterfallFolder = pane.addFolder({ title: "Waterfall  [ H ]", expanded: true });
+        waterfallFolderRef = waterfallFolder;
+        waterfallFolder.hidden = true;
+        {
+          const wfPlaceOptions = {
+            "Waterfall sheet": "waterfall",
+            "Impact splash cap": "splashCap"
+          };
+          waterfallFolder
+            .addBinding(wfPlaceTool, "tool", { label: "Place", options: wfPlaceOptions })
+            .on("change", () => {
+              selectWaterfall(null);
+              selectSplashCap(null);
+              if (editState.mode === "waterfall") syncModeBadge();
+              editorPane.refresh();
+            });
+          waterfallFolder.addBlade({ view: "separator" });
+
+          const wfMkColor = (folder, label, key) => {
+            const hex = "#" + wfU[key].value.getHexString();
+            const obj = { color: hex };
+            folder.addBinding(obj, "color", { label }).on("change", ({ value }) => wfU[key].value.set(value));
+          };
+          const wfMkF = (folder, label, key, mn, mx, step) =>
+            folder.addBinding(wfU[key], "value", { label, min: mn, max: mx, step });
+
+          const bodyF = waterfallFolder.addFolder({ title: "Body" });
+          wfMkColor(bodyF, "Dark", "darkColor");
+          wfMkColor(bodyF, "Teal", "bodyColor");
+          wfMkF(bodyF, "Depth Strength", "depthStrength", 0, 1, 0.01);
+          wfMkF(bodyF, "Brightness", "bodyBrightness", 0, 3, 0.01);
+          wfMkF(bodyF, "Contrast", "bodyContrast", 0, 4, 0.05);
+
+          const animF = waterfallFolder.addFolder({ title: "Animation" });
+          wfMkF(animF, "Flow Speed", "wfFlowSpeed", 0, 2, 0.01);
+
+          const cyanF = waterfallFolder.addFolder({ title: "Cyan Lip" });
+          const cyanEO = { enabled: true };
+          cyanF
+            .addBinding(cyanEO, "enabled", { label: "Enable" })
+            .on("change", ({ value }) => {
+              wfU.cyan_enabled.value = value ? 1 : 0;
+            });
+          wfMkColor(cyanF, "Color", "cyan_color");
+          wfMkF(cyanF, "Strength", "cyan_strength", 0, 1, 0.01);
+          wfMkF(cyanF, "Flow Speed", "cyan_flowSpeed", 0, 5, 0.05);
+
+          const foamAF = waterfallFolder.addFolder({ title: "Corner Foam A" });
+          const foamAEO = { enabled: true };
+          foamAF
+            .addBinding(foamAEO, "enabled", { label: "Enable" })
+            .on("change", ({ value }) => {
+              wfU.red_enabled.value = value ? 1 : 0;
+            });
+          wfMkColor(foamAF, "Color", "red_color");
+          wfMkF(foamAF, "Strength", "red_strength", 0, 1, 0.01);
+
+          const foamBF = waterfallFolder.addFolder({ title: "Corner Foam B" });
+          const foamBEO = { enabled: true };
+          foamBF
+            .addBinding(foamBEO, "enabled", { label: "Enable" })
+            .on("change", ({ value }) => {
+              wfU.green_enabled.value = value ? 1 : 0;
+            });
+          wfMkColor(foamBF, "Color", "green_color");
+          wfMkF(foamBF, "Strength", "green_strength", 0, 1, 0.01);
+
+          const dripF = waterfallFolder.addFolder({ title: "Drip Streaks" });
+          const dripEO = { enabled: true };
+          dripF
+            .addBinding(dripEO, "enabled", { label: "Enable" })
+            .on("change", ({ value }) => {
+              wfU.drip_enabled.value = value ? 1 : 0;
+            });
+          wfMkColor(dripF, "Color", "drip_color");
+          wfMkF(dripF, "Strength", "drip_strength", 0, 1, 0.01);
+
+          const fImpactFoam = waterfallFolder.addFolder({
+            title: "Impact foam (hand-placed splash cap)",
+            expanded: false
+          });
+          fImpactFoam
+            .addBinding(impactFoamParams, "impactFoamVisible", { label: "Show foam" })
+            .on("change", () => {
+              applyImpactFoamVisibility();
+            });
+          fImpactFoam.addBlade({ view: "separator" });
+          fImpactFoam
+            .addBinding(impactFoamParams, "impactFoamBaseRadius", {
+              label: "Cap radius (world)",
+              min: 0.6,
+              max: 14,
+              step: 0.05
+            })
+            .on("change", syncImpactFoamUniforms);
+          fImpactFoam.addBinding(impactFoamParams, "impactFoamCapAngle", {
+            label: "Cap span (×π rad)",
+            min: 0.1,
+            max: 0.48,
+            step: 0.01
+          });
+          fImpactFoam.addButton({ title: "Rebuild cap geometry" }).on("click", () => {
+            rebuildAllImpactFoamGeometry();
+          });
+          fImpactFoam.addBlade({ view: "separator" });
+          fImpactFoam
+            .addBinding(impactFoamParams, "impactFoamDispAmp", {
+              label: "Vertex churn (displace)",
+              min: 0,
+              max: 2.2,
+              step: 0.02
+            })
+            .on("change", syncImpactFoamUniforms);
+          fImpactFoam
+            .addBinding(impactFoamParams, "impactFoamNoiseFreq", {
+              label: "Noise frequency",
+              min: 0.2,
+              max: 6,
+              step: 0.05
+            })
+            .on("change", syncImpactFoamUniforms);
+          fImpactFoam
+            .addBinding(impactFoamParams, "impactFoamFlow", {
+              label: "Scroll / flow speed",
+              min: 0,
+              max: 4,
+              step: 0.05
+            })
+            .on("change", syncImpactFoamUniforms);
+          fImpactFoam
+            .addBinding(impactFoamParams, "impactFoamOpacity", {
+              label: "Opacity max",
+              min: 0.2,
+              max: 1,
+              step: 0.02
+            })
+            .on("change", syncImpactFoamUniforms);
+          fImpactFoam
+            .addBinding(impactFoamParams, "impactFoamRimCyan", {
+              label: "Rim cyan mix",
+              min: 0,
+              max: 1,
+              step: 0.02
+            })
+            .on("change", syncImpactFoamUniforms);
+          fImpactFoam.addBlade({ view: "separator" });
+          fImpactFoam.addButton({ title: "Move (key 7)" }).on("click", () => {
+            transformControls.setMode("translate");
+          });
+          fImpactFoam.addButton({ title: "Rotate (key 8)" }).on("click", () => {
+            transformControls.setMode("rotate");
+          });
+          fImpactFoam.addButton({ title: "Scale (key 9)" }).on("click", () => {
+            transformControls.setMode("scale");
+          });
+          fImpactFoam.addButton({ title: "Save transform JSON" }).on("click", () => {
+            if (!selectedSplashCap) return;
+            const m = selectedSplashCap;
+            const blob = new Blob(
+              [
+                JSON.stringify(
+                  {
+                    x: m.position.x,
+                    y: m.position.y,
+                    z: m.position.z,
+                    rx: m.rotation.x,
+                    ry: m.rotation.y,
+                    rz: m.rotation.z,
+                    sx: m.scale.x,
+                    sy: m.scale.y,
+                    sz: m.scale.z
+                  },
+                  null,
+                  2
+                )
+              ],
+              { type: "application/json" }
+            );
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            a.download = "lake-editor-impact-foam-transform.json";
+            a.click();
+          });
+
+          waterfallFolder.addBlade({ view: "separator" });
+          waterfallFolder.addButton({ title: "Save waterfalls JSON" }).on("click", saveWaterfalls);
+          waterfallFolder.addButton({ title: "Save splash caps JSON" }).on("click", saveSplashCaps);
+          waterfallFolder.addButton({ title: "Delete selected  [ Del ]" }).on("click", () => {
+            if (selectedWaterfall) {
+              scene.remove(selectedWaterfall);
+              waterfallObjects = waterfallObjects.filter((m) => m !== selectedWaterfall);
+              selectWaterfall(null);
+            } else if (selectedSplashCap) {
+              scene.remove(selectedSplashCap);
+              selectedSplashCap.geometry.dispose();
+              splashCapObjects = splashCapObjects.filter((m) => m !== selectedSplashCap);
+              selectSplashCap(null);
+            }
+            editorPane.refresh();
+          });
+          waterfallFolder.addButton({ title: "Clear all waterfalls" }).on("click", () => {
+            waterfallObjects.forEach((m) => scene.remove(m));
+            waterfallObjects = [];
+            selectWaterfall(null);
+            editorPane.refresh();
+          });
+          waterfallFolder.addButton({ title: "Clear all splash caps" }).on("click", () => {
+            splashCapObjects.forEach((m) => {
+              scene.remove(m);
+              m.geometry.dispose();
+            });
+            splashCapObjects = [];
+            selectSplashCap(null);
+            editorPane.refresh();
+          });
+        }
 
         const placeFolder = pane.addFolder({
           title: "Place  [ W move · E rotate · R scale · Del remove ]",
@@ -7454,6 +8393,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
         setEditMode(PARAMS.mode);
         syncLodFolderVisibility();
         syncPtreeFolderVisibility();
+        syncWaterfallFolderVisibility();
         syncPlaceFolderVisibility();
         syncAmbientFXFolderVisibility();
       }
@@ -7521,6 +8461,11 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
         const dtSec = Math.min(0.05, dt * 0.001);
         appTimeSec += dtSec;
         uFTreeTime.value = appTimeSec;
+        if (waterfallObjects.length > 0) wfU.wfFlowTime.value += dtSec * wfU.wfFlowSpeed.value;
+        if (splashCapObjects.length > 0) {
+          uIFTime.value = appTimeSec;
+          syncImpactFoamUniforms();
+        }
 
         if (playMode) {
           let mx = 0;
