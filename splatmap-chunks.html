@@ -130,6 +130,10 @@
         background: rgba(40, 140, 160, 0.92);
         color: #e0ffff;
       }
+      #mode-badge.props {
+        background: rgba(140, 90, 160, 0.92);
+        color: #fce8ff;
+      }
     </style>
     <script type="importmap">
       {
@@ -151,6 +155,8 @@
     <input type="file" id="load-cliffs-input" accept="application/json,.json" style="display: none" />
     <input type="file" id="cliff-inst-glb-input" accept=".glb,.gltf" style="display: none" />
     <input type="file" id="hdr-file-input" accept=".hdr,.exr,image/*" style="display: none" />
+    <input type="file" id="prop-glb-input" accept=".glb,.gltf" style="display: none" />
+    <input type="file" id="props-json-input" accept=".json,application/json" style="display: none" multiple />
 
     <script type="module">
       import * as THREE from "three";
@@ -352,6 +358,9 @@
           trainSpeed: 8,
           trainScale: 1
         },
+        /** Props mode [ I ] — splatmap-painter */
+        propSinkOffset: 0,
+        activePropName: "None",
         /** Place mode [ O ] — hand-placed cliff meshes (splatmap-painter) */
         cliffModel: 0,
         sinkOffset: 2
@@ -516,6 +525,10 @@
         if (!e.value && editState.mode === "cliffs") {
           invalidateBvhHeight();
           ciRefreshProxy();
+          if (editorPane) editorPane.refresh();
+        }
+        if (!e.value && editState.mode === "props") {
+          invalidateBvhHeight();
           if (editorPane) editorPane.refresh();
         }
       });
@@ -1441,6 +1454,116 @@
         URL.revokeObjectURL(a.href);
       }
 
+      let propLibrary = [];
+      let propObjects = [];
+      let selectedProp = null;
+      let activePropIndex = -1;
+
+      function getPropRoot(object) {
+        let obj = object;
+        while (obj) {
+          if (propObjects.includes(obj)) return obj;
+          obj = obj.parent;
+        }
+        return null;
+      }
+
+      function selectProp(root) {
+        selectedProp = root;
+        if (root) {
+          transformControls.enabled = true;
+          tcHelper.visible = true;
+          transformControls.attach(root);
+        } else {
+          tcHelper.visible = false;
+          transformControls.detach();
+        }
+      }
+
+      function placeProp(wx, wy, wz) {
+        if (activePropIndex < 0 || activePropIndex >= propLibrary.length) return;
+        const root = propLibrary[activePropIndex].scene.clone();
+        root.position.set(wx, wy + PARAMS.propSinkOffset, wz);
+        root.userData.propName = propLibrary[activePropIndex].name;
+        root.traverse((o) => {
+          if (o.isMesh) {
+            o.castShadow = true;
+            o.receiveShadow = true;
+          }
+        });
+        scene.add(root);
+        propObjects.push(root);
+        selectProp(root);
+        invalidateBvhHeight();
+      }
+
+      function saveProps() {
+        const data = propObjects.map((root) => ({
+          propName: root.userData.propName ?? "unknown",
+          x: root.position.x,
+          y: root.position.y,
+          z: root.position.z,
+          rx: root.rotation.x,
+          ry: root.rotation.y,
+          rz: root.rotation.z,
+          sx: root.scale.x,
+          sy: root.scale.y,
+          sz: root.scale.z
+        }));
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+        const a = document.createElement("a");
+        a.download = "props.json";
+        a.href = URL.createObjectURL(blob);
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }
+
+      function applyProps(data) {
+        propObjects.forEach((r) => scene.remove(r));
+        propObjects = [];
+        selectProp(null);
+        data.forEach((d) => {
+          const entry = propLibrary.find((e) => e.name === d.propName);
+          if (!entry) {
+            console.warn(`Props: model "${d.propName}" not in library — import it first`);
+            return;
+          }
+          const root = entry.scene.clone();
+          root.position.set(d.x, d.y, d.z);
+          root.rotation.set(d.rx, d.ry, d.rz);
+          root.scale.set(d.sx, d.sy, d.sz);
+          root.userData.propName = d.propName;
+          root.traverse((o) => {
+            if (o.isMesh) {
+              o.castShadow = true;
+              o.receiveShadow = true;
+            }
+          });
+          scene.add(root);
+          propObjects.push(root);
+        });
+        invalidateBvhHeight();
+      }
+
+      function loadPropsJson(file) {
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          try {
+            applyProps(JSON.parse(ev.target.result));
+          } catch (err) {
+            console.error("Failed to load props.json", err);
+          }
+        };
+        reader.readAsText(file);
+      }
+
+      function syncPropObjectsHeights() {
+        propObjects.forEach((root) => {
+          root.position.y =
+            getChunkHeightfieldHeight(root.position.x, root.position.z) + PARAMS.propSinkOffset;
+        });
+      }
+
       let heightTexDirty = true;
       let lastHeightTexSyncMs = 0;
       let globalHeightTexData = null;
@@ -1525,6 +1648,7 @@
       let waterfallFolderRef = null;
       let objectsFolderRef = null;
       let splineFolderRef = null;
+      let propsFolderRef = null;
 
       let splinePoints = [];
       let splineSelectedIdx = -1;
@@ -2421,6 +2545,7 @@
         syncTreeLodHeights();
         syncPTreeHeights();
         syncObjectSlotsHeights();
+        syncPropObjectsHeights();
         invalidateBvhHeight();
       }
 
@@ -2575,6 +2700,18 @@
             sz: root.scale.z
           })),
           cliffInstances: cliffInstancer.exportData(),
+          props: propObjects.map((root) => ({
+            propName: root.userData.propName ?? "unknown",
+            x: root.position.x,
+            y: root.position.y,
+            z: root.position.z,
+            rx: root.rotation.x,
+            ry: root.rotation.y,
+            rz: root.rotation.z,
+            sx: root.scale.x,
+            sy: root.scale.y,
+            sz: root.scale.z
+          })),
           objects: OBJECT_SLOTS.map((s) => ({
             name: s.name,
             positions: s.system ? s.system.getPositions() : []
@@ -2675,6 +2812,7 @@
         if (data.cliffInstances && Array.isArray(data.cliffInstances)) {
           cliffInstancer.importData(data.cliffInstances);
         }
+        if (data.props && Array.isArray(data.props)) applyProps(data.props);
         bakeBVH();
         syncTreeLodHeights();
         syncPTreeHeights();
@@ -2924,6 +3062,10 @@
         if (splineFolderRef) splineFolderRef.hidden = editState.mode !== "spline";
       }
 
+      function syncPropsFolderVisibility() {
+        if (propsFolderRef) propsFolderRef.hidden = editState.mode !== "props";
+      }
+
       function syncModeBadge() {
         const el = document.getElementById("mode-badge");
         if (!el) return;
@@ -2961,6 +3103,9 @@
         else if (m === "spline")
           el.textContent =
             "SPLINE MODE  [ K · LMB add / drag points · Del · Esc clears pick / view ]";
+        else if (m === "props")
+          el.textContent =
+            "PROPS MODE  [ I · LMB place / pick · W/E/R gizmo · Del · Esc → view ]";
         else el.textContent = String(m).toUpperCase();
       }
 
@@ -2975,13 +3120,15 @@
         editState.mode = mode;
         PARAMS.mode = mode;
         if (mode !== "spline") splineClearPreview();
-        const tcMode = mode === "place" || mode === "cliffs" || mode === "waterfall";
+        const tcMode =
+          mode === "place" || mode === "cliffs" || mode === "waterfall" || mode === "props";
         if (brushFolderRef)
           brushFolderRef.hidden = mode === "view" || tcMode || mode === "spline";
         if (playFolderRef) playFolderRef.hidden = mode !== "view";
         if (tcMode) {
           transformControls.enabled = true;
           if (mode === "place") {
+            selectProp(null);
             cliffInstancer.clearSelection();
             selectWaterfall(null);
             selectSplashCap(null);
@@ -2993,6 +3140,7 @@
               tcHelper.visible = false;
             }
           } else if (mode === "cliffs") {
+            selectProp(null);
             selectedCliff = null;
             selectWaterfall(null);
             selectSplashCap(null);
@@ -3004,6 +3152,7 @@
               tcHelper.visible = false;
             }
           } else if (mode === "waterfall") {
+            selectProp(null);
             cliffInstancer.clearSelection();
             selectedCliff = null;
             transformControls.detach();
@@ -3015,6 +3164,18 @@
               transformControls.attach(selectedSplashCap);
               tcHelper.visible = true;
             }
+          } else if (mode === "props") {
+            cliffInstancer.clearSelection();
+            selectedCliff = null;
+            selectWaterfall(null);
+            selectSplashCap(null);
+            if (selectedProp) {
+              transformControls.attach(selectedProp);
+              tcHelper.visible = true;
+            } else {
+              transformControls.detach();
+              tcHelper.visible = false;
+            }
           }
         } else {
           transformControls.enabled = false;
@@ -3024,6 +3185,7 @@
           cliffInstancer.clearSelection();
           selectWaterfall(null);
           selectSplashCap(null);
+          selectProp(null);
         }
         syncModeBadge();
         syncBrushVisual();
@@ -3041,6 +3203,7 @@
         syncCliffsFolderVisibility();
         syncWaterfallFolderVisibility();
         syncObjectsFolderVisibility();
+        syncPropsFolderVisibility();
         syncSplineFolderVisibility();
         if (barrierFolderRef) barrierFolderRef.hidden = editState.mode !== "barrier";
         syncBarrierOverlayFromParams();
@@ -3057,6 +3220,7 @@
           editState.mode === "place" ||
           editState.mode === "cliffs" ||
           editState.mode === "waterfall" ||
+          editState.mode === "props" ||
           editState.mode === "spline"
         ) {
           brushMarker.visible = false;
@@ -3356,6 +3520,7 @@
         syncTreeLodHeights();
         syncPTreeHeights();
         syncObjectSlotsHeights();
+        syncPropObjectsHeights();
         invalidateBvhHeight();
       }
 
@@ -3594,6 +3759,11 @@
           }),
         );
         cliffInstancer.forEachMeshInstance((geo, mat) => addGeoWithMatrix(geo, mat));
+        propObjects.forEach((root) =>
+          root.traverse((o) => {
+            if (o.isMesh) addMesh(o);
+          }),
+        );
 
         let cliffBvh = null;
         if (positions.length > 0) {
@@ -4738,6 +4908,7 @@
         selectedCliff = null;
         cliffInstancer.clearSelection();
         selectWaterfall(null);
+        selectProp(null);
         syncModeBadge();
         if (editorPane) editorPane.refresh();
         const tpEl = document.querySelector(".tp-dfwv");
@@ -5051,6 +5222,7 @@
         syncTreeLodHeights();
         syncPTreeHeights();
         syncObjectSlotsHeights();
+        syncPropObjectsHeights();
         rebuildAllActiveChunkMeshes();
         if (editorPane) editorPane.refresh();
       }
@@ -5554,6 +5726,7 @@
         syncTreeLodHeights();
         syncPTreeHeights();
         syncObjectSlotsHeights();
+        syncPropObjectsHeights();
       }
 
       function applySculptAt(worldPoint, event) {
@@ -5849,6 +6022,7 @@
         syncTreeLodHeights();
         syncPTreeHeights();
         syncObjectSlotsHeights();
+        syncPropObjectsHeights();
         if (fleurSystem) fleurSystem.syncHeights();
       }
 
@@ -6046,6 +6220,11 @@
           setEditMode(editState.mode === "spline" ? "view" : "spline");
           return;
         }
+        if (event.code === "KeyI") {
+          event.preventDefault();
+          setEditMode(editState.mode === "props" ? "view" : "props");
+          return;
+        }
         if (editState.mode === "spline" && event.code === "Delete") {
           event.preventDefault();
           splineDeleteSelected();
@@ -6056,13 +6235,14 @@
           event.code === "KeyE" &&
           editState.mode !== "place" &&
           editState.mode !== "cliffs" &&
-          editState.mode !== "waterfall"
+          editState.mode !== "waterfall" &&
+          editState.mode !== "props"
         ) {
           event.preventDefault();
           setEditMode(editState.mode === "objects" ? "view" : "objects");
           return;
         }
-        if (editState.mode === "place" || editState.mode === "cliffs") {
+        if (editState.mode === "place" || editState.mode === "cliffs" || editState.mode === "props") {
           if (event.code === "KeyW") {
             event.preventDefault();
             transformControls.setMode("translate");
@@ -6094,6 +6274,14 @@
               cliffObjects = cliffObjects.filter((c) => c !== selectedCliff);
               selectCliff(null);
               invalidateBvhHeight();
+              return;
+            }
+            if (editState.mode === "props" && selectedProp) {
+              scene.remove(selectedProp);
+              propObjects = propObjects.filter((p) => p !== selectedProp);
+              selectProp(null);
+              invalidateBvhHeight();
+              if (editorPane) editorPane.refresh();
             }
             return;
           }
@@ -6162,7 +6350,8 @@
           (event.key === "e" || event.key === "E") &&
           (event.ctrlKey || event.metaKey)
         ) {
-          if (editState.mode === "cliffs" || editState.mode === "waterfall") return;
+          if (editState.mode === "cliffs" || editState.mode === "waterfall" || editState.mode === "props")
+            return;
           event.preventDefault();
           exportTerrainJson();
         }
@@ -6327,6 +6516,29 @@
             }
           }
           if (hit) placeCliff(hit.x, hit.y, hit.z, activeCliffModel);
+          return;
+        }
+
+        if (editState.mode === "props" && event.button === 0) {
+          event.preventDefault();
+          if (transformControls.axis !== null) return;
+          raycaster.setFromCamera(pointerNdc, camera);
+          const propMeshes = [];
+          propObjects.forEach((root) =>
+            root.traverse((o) => {
+              if (o.isMesh) propMeshes.push(o);
+            })
+          );
+          const propHits = raycaster.intersectObjects(propMeshes, false);
+          if (propHits.length > 0) {
+            const root = getPropRoot(propHits[0].object);
+            if (root) {
+              selectProp(root);
+              if (editorPane) editorPane.refresh();
+              return;
+            }
+          }
+          if (hit) placeProp(hit.x, hit.y, hit.z);
           return;
         }
 
@@ -6536,6 +6748,7 @@
           syncTreeLodHeights();
           syncPTreeHeights();
           syncObjectSlotsHeights();
+          syncPropObjectsHeights();
         }
       });
 
@@ -6997,6 +7210,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
               "Tree LOD [J]": "pinelod",
               "Proc Trees": "proctrees",
               "Objects [E]": "objects",
+              "Props [I]": "props",
               "Spline [K]": "spline",
               "Waterfall [H]": "waterfall",
               "Place [O]": "place",
@@ -7729,6 +7943,145 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
           });
         }
 
+        const propsFolder = pane.addFolder({
+          title: "Props  [ I ]",
+          expanded: true
+        });
+        propsFolderRef = propsFolder;
+        propsFolder.hidden = true;
+
+        const propActivePARAMS = { name: PARAMS.activePropName };
+        propsFolder.addBinding(propActivePARAMS, "name", {
+          label: "Active model",
+          readonly: true
+        });
+
+        const PROJECT_MODELS = [
+          "low_poly_fern.glb",
+          "rock__game_asset.glb",
+          "ruined_elden_ring_church.glb",
+          "japanese_cherry_tree.glb"
+        ];
+        const projectPickPARAMS = { model: "— pick a model —" };
+        function loadProjectPropModel(filename) {
+          const url = resolveModelUrl(`models/${filename}`);
+          const name = filename.replace(/\.glb$/i, "");
+          gltfLoader
+            .loadAsync(url)
+            .then((gltf) => {
+              gltf.scene.traverse((o) => {
+                if (o.isMesh) {
+                  o.castShadow = true;
+                  o.receiveShadow = true;
+                  if (o.material && (o.material.transparent || o.material.alphaTest > 0)) {
+                    const m = o.material.clone();
+                    m.transparent = false;
+                    m.alphaTest = 0.5;
+                    m.depthWrite = true;
+                    o.material = m;
+                  }
+                }
+              });
+              const existing = propLibrary.findIndex((en) => en.name === name);
+              if (existing >= 0) {
+                propLibrary[existing] = { name, scene: gltf.scene };
+                activePropIndex = existing;
+              } else {
+                propLibrary.push({ name, scene: gltf.scene });
+                activePropIndex = propLibrary.length - 1;
+              }
+              propActivePARAMS.name = name;
+              PARAMS.activePropName = name;
+              pane.refresh();
+            })
+            .catch((err) => console.error(`Props: failed to load ${url}`, err));
+        }
+        propsFolder
+          .addBinding(projectPickPARAMS, "model", {
+            label: "Project model",
+            options: Object.fromEntries(["— pick a model —", ...PROJECT_MODELS].map((m) => [m, m]))
+          })
+          .on("change", (ev) => {
+            if (ev.value !== "— pick a model —") loadProjectPropModel(ev.value);
+          });
+
+        propsFolder
+          .addButton({ title: "Import GLB…" })
+          .on("click", () => document.getElementById("prop-glb-input").click());
+
+        propsFolder.addBinding(PARAMS, "propSinkOffset", {
+          label: "Sink offset",
+          min: -2,
+          max: 2,
+          step: 0.01
+        });
+
+        propsFolder.addButton({ title: "Save props JSON" }).on("click", saveProps);
+
+        propsFolder
+          .addButton({ title: "Load props JSON…" })
+          .on("click", () => document.getElementById("props-json-input").click());
+
+        propsFolder.addButton({ title: "Delete selected (Del)" }).on("click", () => {
+          if (!selectedProp) return;
+          scene.remove(selectedProp);
+          propObjects = propObjects.filter((p) => p !== selectedProp);
+          selectProp(null);
+          invalidateBvhHeight();
+          pane.refresh();
+        });
+
+        propsFolder.addButton({ title: "Clear all props" }).on("click", () => {
+          propObjects.forEach((r) => scene.remove(r));
+          propObjects = [];
+          selectProp(null);
+          invalidateBvhHeight();
+          pane.refresh();
+        });
+
+        document.getElementById("prop-glb-input").addEventListener("change", (e) => {
+          const file = e.target.files[0];
+          if (!file) return;
+          const url = URL.createObjectURL(file);
+          const name = file.name.replace(/\.glb$/i, "").replace(/\.gltf$/i, "");
+          gltfLoader
+            .loadAsync(url)
+            .then((gltf) => {
+              gltf.scene.traverse((o) => {
+                if (o.isMesh) {
+                  o.castShadow = true;
+                  o.receiveShadow = true;
+                  if (o.material && (o.material.transparent || o.material.alphaTest > 0)) {
+                    const m = o.material.clone();
+                    m.transparent = false;
+                    m.alphaTest = 0.5;
+                    m.depthWrite = true;
+                    o.material = m;
+                  }
+                }
+              });
+              const existing = propLibrary.findIndex((en) => en.name === name);
+              if (existing >= 0) {
+                propLibrary[existing] = { name, scene: gltf.scene };
+                activePropIndex = existing;
+              } else {
+                propLibrary.push({ name, scene: gltf.scene });
+                activePropIndex = propLibrary.length - 1;
+              }
+              PARAMS.activePropName = name;
+              propActivePARAMS.name = name;
+              pane.refresh();
+              e.target.value = "";
+            })
+            .catch((err) => console.error("Props: failed to load GLB", err));
+        });
+
+        document.getElementById("props-json-input").addEventListener("change", (e) => {
+          const files = Array.from(e.target.files);
+          files.forEach((f) => loadPropsJson(f));
+          e.target.value = "";
+        });
+
         const splineFolder = pane.addFolder({ title: "Spline  [ K ]", expanded: true });
         splineFolderRef = splineFolder;
         splineFolder.hidden = true;
@@ -7921,6 +8274,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
             syncTreeLodHeights();
             syncPTreeHeights();
             syncObjectSlotsHeights();
+            syncPropObjectsHeights();
             ciRefreshProxy();
             pane.refresh();
           });
@@ -9052,6 +9406,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
         syncPtreeFolderVisibility();
         syncWaterfallFolderVisibility();
         syncObjectsFolderVisibility();
+        syncPropsFolderVisibility();
         syncSplineFolderVisibility();
         syncPlaceFolderVisibility();
         syncAmbientFXFolderVisibility();
