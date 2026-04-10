@@ -130,7 +130,20 @@
 
     <script type="module">
       import * as THREE from "three";
-      import { Fn, texture, vec3, vec2, mix, positionLocal, float, uniform } from "three/tsl";
+      import {
+        Fn,
+        texture,
+        vec3,
+        vec2,
+        mix,
+        positionLocal,
+        float,
+        uniform,
+        clamp,
+        exponentialHeightFogFactor,
+        densityFogFactor,
+        fog
+      } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { TransformControls } from "three/addons/controls/TransformControls.js";
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
@@ -222,6 +235,20 @@
           cloudCoverage: 0.4,
           cloudDensity: 0.4,
           cloudElevation: 0.5
+        },
+        /** WebGPU TSL fog — same as splatmap-painter10bvh+post.html */
+        fog: {
+          height: {
+            enabled: false,
+            color: "#a8c4e0",
+            density: 0.05,
+            height: 2.0
+          },
+          distance: {
+            enabled: false,
+            color: "#d0e4f0",
+            density: 0.006
+          }
         },
         gen: {
           mode: "ridge",
@@ -458,6 +485,33 @@
 
       const stylizedSky = createStylizedSky();
       scene.add(stylizedSky.mesh);
+
+      const uHFogEnabled = uniform(PARAMS.fog.height.enabled ? 1 : 0);
+      const uHFogColor = uniform(new THREE.Color(PARAMS.fog.height.color).convertSRGBToLinear());
+      const uHFogDensity = uniform(PARAMS.fog.height.density);
+      const uHFogHeight = uniform(PARAMS.fog.height.height);
+      const uDFogEnabled = uniform(PARAMS.fog.distance.enabled ? 1 : 0);
+      const uDFogColor = uniform(new THREE.Color(PARAMS.fog.distance.color).convertSRGBToLinear());
+      const uDFogDensity = uniform(PARAMS.fog.distance.density);
+      const _hFactor = exponentialHeightFogFactor(uHFogDensity, uHFogHeight).mul(uHFogEnabled);
+      const _dFactor = densityFogFactor(uDFogDensity).mul(uDFogEnabled);
+      const _combinedFactor = clamp(_hFactor.add(_dFactor), 0, 1);
+      const _totalW = _hFactor.add(_dFactor).add(0.0001);
+      const _blendedFogColor = mix(uHFogColor, uDFogColor, _dFactor.div(_totalW));
+      const _combinedFogNode = fog(_blendedFogColor, _combinedFactor);
+
+      function syncFog() {
+        uHFogEnabled.value = PARAMS.fog.height.enabled ? 1 : 0;
+        uHFogColor.value.set(PARAMS.fog.height.color).convertSRGBToLinear();
+        uHFogDensity.value = PARAMS.fog.height.density;
+        uHFogHeight.value = PARAMS.fog.height.height;
+        uDFogEnabled.value = PARAMS.fog.distance.enabled ? 1 : 0;
+        uDFogColor.value.set(PARAMS.fog.distance.color).convertSRGBToLinear();
+        uDFogDensity.value = PARAMS.fog.distance.density;
+        const anyEnabled = PARAMS.fog.height.enabled || PARAMS.fog.distance.enabled;
+        scene.fogNode = anyEnabled ? _combinedFogNode : null;
+      }
+      syncFog();
 
       let hdrTexture = null;
       const setSkyMode = (mode) => {
@@ -1376,7 +1430,8 @@
             interactGain: fleurParams.interactGain,
             windAmp: fleurParams.windAmp,
             windSpeed: fleurParams.windSpeed
-          }
+          },
+          fog: JSON.parse(JSON.stringify(PARAMS.fog))
         };
         if (geminiDensityCtx) {
           const gpix = geminiDensityCtx.getImageData(0, 0, HTEX_RES, HTEX_RES).data;
@@ -1462,6 +1517,11 @@
           }
         }
         syncGeminiGrassHasPaintedFromCanvas();
+        if (data.fog && typeof data.fog === "object") {
+          Object.assign(PARAMS.fog.height, data.fog.height ?? {});
+          Object.assign(PARAMS.fog.distance, data.fog.distance ?? {});
+          syncFog();
+        }
         if (data.fleurInteraction && typeof data.fleurInteraction === "object") {
           const fi = data.fleurInteraction;
           if (fi.interactRadius != null) fleurParams.interactRadius = fi.interactRadius;
@@ -5689,6 +5749,39 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
           max: 1,
           step: 0.01
         });
+
+        const fogFolder = skyFolder.addFolder({ title: "Fog", expanded: false });
+        const hFogFolder = fogFolder.addFolder({ title: "Height Fog", expanded: true });
+        hFogFolder.addBinding(PARAMS.fog.height, "enabled", { label: "Enabled" }).on("change", syncFog);
+        hFogFolder.addBinding(PARAMS.fog.height, "color", { label: "Color" }).on("change", syncFog);
+        hFogFolder
+          .addBinding(PARAMS.fog.height, "density", {
+            label: "Density",
+            min: 0.001,
+            max: 0.3,
+            step: 0.001
+          })
+          .on("change", syncFog);
+        hFogFolder
+          .addBinding(PARAMS.fog.height, "height", {
+            label: "Base height",
+            min: -10,
+            max: 40,
+            step: 0.5
+          })
+          .on("change", syncFog);
+
+        const dFogFolder = fogFolder.addFolder({ title: "Distance Fog", expanded: true });
+        dFogFolder.addBinding(PARAMS.fog.distance, "enabled", { label: "Enabled" }).on("change", syncFog);
+        dFogFolder.addBinding(PARAMS.fog.distance, "color", { label: "Color" }).on("change", syncFog);
+        dFogFolder
+          .addBinding(PARAMS.fog.distance, "density", {
+            label: "Density",
+            min: 0.0001,
+            max: 0.05,
+            step: 0.0001
+          })
+          .on("change", syncFog);
 
         const geminiGrassErasePARAMS = { erase: false };
         const geminiGrassFolder = pane.addFolder({
