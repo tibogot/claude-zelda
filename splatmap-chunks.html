@@ -130,6 +130,10 @@
         background: rgba(45, 110, 65, 0.92);
         color: #e8ffe8;
       }
+      #mode-badge.river {
+        background: rgba(30, 100, 150, 0.92);
+        color: #e0f4ff;
+      }
       #mode-badge.spline {
         background: rgba(40, 140, 160, 0.92);
         color: #e0ffff;
@@ -201,7 +205,8 @@
         saturate,
         sub,
         add,
-        div
+        div,
+        abs
       } from "three/tsl";
       import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
@@ -361,6 +366,21 @@
           showTrain: false,
           trainSpeed: 8,
           trainScale: 1
+        },
+        /** River path [ V ] — splatmap-painter10bvh+post.html */
+        river: {
+          width: 8,
+          segments: 200,
+          flowSpeed: 0.15,
+          deepColor: "#1a4a6a",
+          shallowColor: "#5dbfaa",
+          highlightColor: "#c8ecff",
+          foamColor: "#ffffff",
+          foamWidth: 0.18,
+          opacity: 0.88,
+          heightOffset: 0.18,
+          selectedPointY: 0,
+          shaderStyle: "Basic"
         },
         /** Props mode [ I ] — splatmap-painter */
         propSinkOffset: 0,
@@ -678,6 +698,27 @@
         }
       );
 
+      const _wNHash = Fn(([p]) => {
+        const pp = fract(p.mul(vec2(127.1, 311.7)));
+        const d = dot(pp, pp.add(45.32));
+        return fract(pp.x.add(d).mul(pp.y.add(d)));
+      });
+      const _wVNoise = Fn(([p]) => {
+        const i = floor(p);
+        const f = fract(p);
+        const uu = f.mul(f).mul(float(3).sub(f.mul(2)));
+        return mix(
+          mix(_wNHash(i), _wNHash(i.add(vec2(1, 0))), uu.x),
+          mix(_wNHash(i.add(vec2(0, 1))), _wNHash(i.add(vec2(1, 1))), uu.x),
+          uu.y
+        );
+      });
+      const _wFbm2 = Fn(([p]) => {
+        const v = _wVNoise(p).mul(0.5).toVar();
+        v.addAssign(_wVNoise(p.mul(2)).mul(0.25));
+        return v;
+      });
+
       const wfU = {
         darkColor: uniform(new THREE.Color("#00544c")),
         bodyColor: uniform(new THREE.Color("#38d0d0")),
@@ -981,6 +1022,219 @@
       impactFoamMat.positionNode = impactFoamPosNode;
       impactFoamMat.colorNode = impactFoamColorNode;
       impactFoamMat.opacityNode = impactFoamAlphaNode;
+
+      const uRiverTime = uniform(0.0);
+      const uRiverFlowSpeed = uniform(PARAMS.river.flowSpeed);
+      const uRiverDeepColor = uniform(new THREE.Color(PARAMS.river.deepColor));
+      const uRiverShallowColor = uniform(new THREE.Color(PARAMS.river.shallowColor));
+      const uRiverHighlight = uniform(new THREE.Color(PARAMS.river.highlightColor));
+      const uRiverFoamColor = uniform(new THREE.Color(PARAMS.river.foamColor));
+      const uRiverFoamWidth = uniform(PARAMS.river.foamWidth);
+      const uRiverOpacity = uniform(PARAMS.river.opacity);
+
+      const rsU = {
+        flowSpeed: uniform(0.05),
+        darkColor: uniform(new THREE.Color(0x041820)),
+        bodyColor: uniform(new THREE.Color(0x30989f)),
+        depthScaleU: uniform(1.5),
+        depthScaleV: uniform(0.8),
+        depthStrength: uniform(0.55),
+        bodyBright: uniform(1.0),
+        bodyContrast: uniform(1.0),
+        streakEnabled: uniform(1.0),
+        streakScaleV: uniform(12.0),
+        streakScaleU: uniform(8.0),
+        streakWarpStr: uniform(0.25),
+        streakWarpSc: uniform(1.5),
+        streakContrast: uniform(4.0),
+        streakThresh: uniform(0.12),
+        streakSharp: uniform(0.03),
+        streakColor: uniform(new THREE.Color(0xffffff)),
+        streakStr: uniform(0.9),
+        foamAEnabled: uniform(1.0),
+        foamBEnabled: uniform(1.0),
+        foamWidth: uniform(0.18),
+        foamScaleV: uniform(10.0),
+        foamScaleU: uniform(6.0),
+        foamJitter: uniform(0.9),
+        foamOctaves: uniform(3.0),
+        foamLac: uniform(2.35),
+        foamGain: uniform(0.41),
+        foamWarpStr: uniform(1.2),
+        foamWarpSc: uniform(1.6),
+        foamContrast: uniform(2.5),
+        foamThresh: uniform(0.12),
+        foamSharp: uniform(0.02),
+        foamAColor: uniform(new THREE.Color("#ffffff")),
+        foamAStr: uniform(0.5),
+        foamBColor: uniform(new THREE.Color("#ffffff")),
+        foamBStr: uniform(0.8),
+        shimEnabled: uniform(1.0),
+        shimNScV: uniform(12.0),
+        shimNScU: uniform(12.0),
+        shimNoiseAmt: uniform(0.3),
+        shimSharp: uniform(0.02),
+        shimColor: uniform(new THREE.Color("#00fff4")),
+        shimStr: uniform(0.08),
+        shimFlowSpd: uniform(1.5),
+        opacity: uniform(0.92)
+      };
+
+      const buildRiverFrag = Fn(() => {
+        const uvCoord = uv();
+        const flowU = uvCoord.x.sub(uRiverTime.mul(uRiverFlowSpeed));
+        const animUV = vec2(flowU, uvCoord.y);
+        const wave1 = _wFbm2(animUV.mul(6.0));
+        const wave2 = _wFbm2(animUV.mul(3.0).add(vec2(1.7, 3.1)));
+        const wave = wave1.mul(0.6).add(wave2.mul(0.4));
+        const centerDist = abs(uvCoord.y.sub(0.5)).mul(2.0);
+        const depthColor = mix(uRiverDeepColor, uRiverShallowColor, pow(centerDist, float(0.6)));
+        const shimmer = wave.sub(0.5).mul(0.18);
+        const surfaceColor = mix(
+          depthColor,
+          uRiverHighlight,
+          clamp(shimmer.add(0.5), float(0), float(1))
+        );
+        const leftFoam = smoothstep(uRiverFoamWidth, float(0), uvCoord.y);
+        const rightFoam = smoothstep(float(1).sub(uRiverFoamWidth), float(1), uvCoord.y);
+        const bankFoam = max(leftFoam, rightFoam);
+        const finalColor = mix(surfaceColor, uRiverFoamColor, bankFoam.mul(0.85));
+        return vec4(finalColor, uRiverOpacity);
+      });
+
+      const buildRiverStylizedFrag = Fn(() => {
+        const uvCoord = uv();
+        const fUV = vec2(uvCoord.y, uvCoord.x.sub(uRiverTime.mul(rsU.flowSpeed)));
+        const depthN = _wfGradientNoise(
+          vec2(fUV.x.mul(rsU.depthScaleV), fUV.y.mul(rsU.depthScaleU))
+        );
+        const col = mix(rsU.darkColor, rsU.bodyColor, depthN.mul(rsU.depthStrength)).toVar();
+        col.assign(
+          col
+            .sub(0.5)
+            .mul(rsU.bodyContrast)
+            .add(0.5)
+            .mul(rsU.bodyBright)
+            .clamp(0, 1)
+        );
+        const shimN = _wfGradientNoise(
+          vec2(
+            fUV.x.mul(rsU.shimNScV),
+            fUV.y.mul(rsU.shimNScU).add(uRiverTime.mul(rsU.shimFlowSpd))
+          )
+        );
+        const shimBand = _wfBandMask(
+          uvCoord.y,
+          float(0.2),
+          float(0.8),
+          shimN,
+          rsU.shimNoiseAmt,
+          rsU.shimSharp
+        );
+        col.assign(
+          mix(col, rsU.shimColor, shimBand.mul(rsU.shimStr).mul(rsU.shimEnabled).clamp(0, 1))
+        );
+        const foamAMask = smoothstep(rsU.foamWidth, float(0), uvCoord.y).clamp(0, 1);
+        const foamADynThresh = mix(float(1.2), rsU.foamThresh, foamAMask);
+        const foamAF1 = _wfVoroLayer(
+          fUV,
+          rsU.foamScaleV,
+          rsU.foamScaleU,
+          float(0),
+          float(0),
+          rsU.foamJitter,
+          rsU.foamOctaves,
+          rsU.foamLac,
+          rsU.foamGain,
+          rsU.foamWarpStr,
+          rsU.foamWarpSc,
+          rsU.foamContrast
+        );
+        const foamA = smoothstep(
+          foamADynThresh.sub(rsU.foamSharp),
+          foamADynThresh.add(rsU.foamSharp),
+          foamAF1
+        );
+        col.assign(mix(col, rsU.foamAColor, foamA.mul(rsU.foamAStr).mul(rsU.foamAEnabled).clamp(0, 1)));
+        const foamBMask = smoothstep(float(1).sub(rsU.foamWidth), float(1), uvCoord.y).clamp(0, 1);
+        const foamBDynThresh = mix(float(1.2), rsU.foamThresh, foamBMask);
+        const foamBF1 = _wfVoroLayer(
+          fUV,
+          rsU.foamScaleV,
+          rsU.foamScaleU,
+          float(5.3),
+          float(2.7),
+          rsU.foamJitter,
+          rsU.foamOctaves,
+          rsU.foamLac,
+          rsU.foamGain,
+          rsU.foamWarpStr,
+          rsU.foamWarpSc,
+          rsU.foamContrast
+        );
+        const foamB = smoothstep(
+          foamBDynThresh.sub(rsU.foamSharp),
+          foamBDynThresh.add(rsU.foamSharp),
+          foamBF1
+        );
+        col.assign(mix(col, rsU.foamBColor, foamB.mul(rsU.foamBStr).mul(rsU.foamBEnabled).clamp(0, 1)));
+        const sUV = vec2(fUV.x.mul(rsU.streakScaleV), fUV.y.mul(rsU.streakScaleU)).toVar();
+        const sWarpT = uRiverTime.mul(rsU.flowSpeed).mul(float(0.4));
+        const sWx = _wfGradientNoise(vec2(sUV.x.mul(rsU.streakWarpSc), sUV.y.mul(rsU.streakWarpSc).add(sWarpT))).sub(
+          0.5
+        );
+        const sWy = _wfGradientNoise(
+          vec2(
+            sUV.x.mul(rsU.streakWarpSc).add(float(3.7)),
+            sUV.y.mul(rsU.streakWarpSc).add(float(8.3)).add(sWarpT)
+          )
+        ).sub(0.5);
+        sUV.addAssign(vec2(sWx, sWy).mul(rsU.streakWarpStr));
+        const streakRaw = pow(
+          _wfVoroFbm(sUV, float(1), float(2), float(2), float(0.4)),
+          rsU.streakContrast
+        );
+        const streak = smoothstep(
+          rsU.streakThresh.sub(rsU.streakSharp),
+          rsU.streakThresh.add(rsU.streakSharp),
+          streakRaw
+        );
+        col.assign(
+          mix(col, rsU.streakColor, streak.mul(rsU.streakStr).mul(rsU.streakEnabled).clamp(0, 1))
+        );
+        return vec4(col, rsU.opacity);
+      });
+
+      const riverMat = new MeshBasicNodeMaterial({
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+        polygonOffsetUnits: -2
+      });
+      {
+        const f = buildRiverFrag();
+        riverMat.colorNode = f.rgb;
+        riverMat.opacityNode = f.a;
+      }
+
+      function syncRiverMat() {
+        uRiverFlowSpeed.value = PARAMS.river.flowSpeed;
+        uRiverDeepColor.value.set(PARAMS.river.deepColor);
+        uRiverShallowColor.value.set(PARAMS.river.shallowColor);
+        uRiverHighlight.value.set(PARAMS.river.highlightColor);
+        uRiverFoamColor.value.set(PARAMS.river.foamColor);
+        uRiverFoamWidth.value = PARAMS.river.foamWidth;
+        uRiverOpacity.value = PARAMS.river.opacity;
+      }
+
+      function applyRiverStyle(style) {
+        const f = style === "Stylized" ? buildRiverStylizedFrag() : buildRiverFrag();
+        riverMat.colorNode = f.rgb;
+        riverMat.opacityNode = f.a;
+        riverMat.needsUpdate = true;
+      }
 
       function syncImpactFoamUniforms() {
         uIFDisp.value = impactFoamParams.impactFoamDispAmp;
@@ -1653,7 +1907,15 @@
       let objectsFolderRef = null;
       let foliageFolderRef = null;
       let splineFolderRef = null;
+      let riverFolderRef = null;
       let propsFolderRef = null;
+
+      let riverPoints = [];
+      let riverSelectedIdx = -1;
+      let riverDragging = false;
+      let riverPointMeshes = [];
+      let riverGroup = null;
+      let riverMesh = null;
 
       let splinePoints = [];
       let splineSelectedIdx = -1;
@@ -2856,6 +3118,8 @@
             windAmp: fleurParams.windAmp,
             windSpeed: fleurParams.windSpeed
           },
+          riverPoints: riverPoints.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+          river: JSON.parse(JSON.stringify(PARAMS.river)),
           fog: JSON.parse(JSON.stringify(PARAMS.fog)),
           csm: JSON.parse(JSON.stringify(PARAMS.csm)),
           shadowBias: PARAMS.shadowBias,
@@ -3004,6 +3268,20 @@
         if (data.spline && typeof data.spline === "object") {
           Object.assign(PARAMS.spline, data.spline);
         }
+        if (data.riverPoints && Array.isArray(data.riverPoints)) {
+          riverPoints = data.riverPoints.map((p) => new THREE.Vector3(p.x, p.y, p.z));
+          riverSelectedIdx = -1;
+          riverDragging = false;
+        }
+        if (data.river && typeof data.river === "object") {
+          Object.assign(PARAMS.river, data.river);
+          applyRiverStyle(PARAMS.river.shaderStyle);
+          syncRiverMat();
+        }
+        if (data.riverPoints && Array.isArray(data.riverPoints)) {
+          riverRebuildVisual();
+          riverUpdateSelectedYParam();
+        }
         if (data.foliage && Array.isArray(data.foliage)) {
           data.foliage.forEach((fd, idx) => {
             if (idx < FOLIAGE_SLOTS.length && FOLIAGE_SLOTS[idx].system && fd.positions) {
@@ -3149,6 +3427,8 @@
 
       splineGroup = new THREE.Group();
       scene.add(splineGroup);
+      riverGroup = new THREE.Group();
+      scene.add(riverGroup);
       splinePreviewGroup = new THREE.Group();
       scene.add(splinePreviewGroup);
       splineTrainMesh = new THREE.Mesh(
@@ -3199,6 +3479,10 @@
         if (splineFolderRef) splineFolderRef.hidden = editState.mode !== "spline";
       }
 
+      function syncRiverFolderVisibility() {
+        if (riverFolderRef) riverFolderRef.hidden = editState.mode !== "river";
+      }
+
       function syncPropsFolderVisibility() {
         if (propsFolderRef) propsFolderRef.hidden = editState.mode !== "props";
       }
@@ -3246,6 +3530,9 @@
         else if (m === "spline")
           el.textContent =
             "SPLINE MODE  [ K · LMB add / drag points · Del · Esc clears pick / view ]";
+        else if (m === "river")
+          el.textContent =
+            "RIVER MODE  [ V · LMB add / pick · drag · Del · Esc clears pick · Esc → view ]";
         else if (m === "props")
           el.textContent =
             "PROPS MODE  [ I · LMB place / pick · W/E/R gizmo · Del · Esc → view ]";
@@ -3253,6 +3540,10 @@
       }
 
       function setEditMode(mode) {
+        if (editState.mode === "river" && mode !== "river") {
+          riverDragging = false;
+          if (!playMode) controls.enabled = true;
+        }
         if (mode !== "sculpt") editState.rampPointA = null;
         if (mode === "view" && editState.isPointerDown) {
           editState.isPointerDown = false;
@@ -3266,7 +3557,7 @@
         const tcMode =
           mode === "place" || mode === "cliffs" || mode === "waterfall" || mode === "props";
         if (brushFolderRef)
-          brushFolderRef.hidden = mode === "view" || tcMode || mode === "spline";
+          brushFolderRef.hidden = mode === "view" || tcMode || mode === "spline" || mode === "river";
         if (playFolderRef) playFolderRef.hidden = mode !== "view";
         if (tcMode) {
           transformControls.enabled = true;
@@ -3349,6 +3640,7 @@
         syncFoliageFolderVisibility();
         syncPropsFolderVisibility();
         syncSplineFolderVisibility();
+        syncRiverFolderVisibility();
         if (barrierFolderRef) barrierFolderRef.hidden = editState.mode !== "barrier";
         syncBarrierOverlayFromParams();
         if (!playMode) {
@@ -3365,7 +3657,8 @@
           editState.mode === "cliffs" ||
           editState.mode === "waterfall" ||
           editState.mode === "props" ||
-          editState.mode === "spline"
+          editState.mode === "spline" ||
+          editState.mode === "river"
         ) {
           brushMarker.visible = false;
           rampMarkerA.visible = false;
@@ -5990,6 +6283,134 @@
         return null;
       }
 
+      function generateRiverMesh(curve, width, segments, heightOffset) {
+        const pts = curve.getSpacedPoints(segments);
+        const arcLen = [0];
+        for (let i = 1; i <= segments; i++) {
+          arcLen.push(arcLen[i - 1] + pts[i].distanceTo(pts[i - 1]));
+        }
+        const totalLen = arcLen[segments] || 1;
+        const positions = [];
+        const uvs = [];
+        const indices = [];
+        for (let i = 0; i <= segments; i++) {
+          const u = arcLen[i] / totalLen;
+          const pos = pts[i];
+          const prev = pts[Math.max(0, i - 1)];
+          const next = pts[Math.min(segments, i + 1)];
+          const tan = next.clone().sub(prev).normalize();
+          const perp = new THREE.Vector3(-tan.z, 0, tan.x).normalize();
+          const half = width / 2;
+          const lx = pos.x - perp.x * half;
+          const lz = pos.z - perp.z * half;
+          const rx = pos.x + perp.x * half;
+          const rz = pos.z + perp.z * half;
+          positions.push(lx, getWorldHeight(lx, lz) + heightOffset, lz);
+          positions.push(rx, getWorldHeight(rx, rz) + heightOffset, rz);
+          uvs.push(u, 0, u, 1);
+          if (i < segments) {
+            const b = i * 2;
+            indices.push(b, b + 2, b + 1, b + 1, b + 2, b + 3);
+          }
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+        geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+        geo.setIndex(indices);
+        geo.computeVertexNormals();
+        return geo;
+      }
+
+      function riverClearMesh() {
+        if (riverMesh) {
+          scene.remove(riverMesh);
+          riverMesh.geometry.dispose();
+          riverMesh = null;
+        }
+      }
+
+      function riverGenerate() {
+        if (riverPoints.length < 2) return;
+        riverClearMesh();
+        const curve = new THREE.CatmullRomCurve3(riverPoints, false, "catmullrom", 0.5);
+        const geo = generateRiverMesh(
+          curve,
+          PARAMS.river.width,
+          PARAMS.river.segments,
+          PARAMS.river.heightOffset
+        );
+        riverMesh = new THREE.Mesh(geo, riverMat);
+        riverMesh.renderOrder = 2;
+        scene.add(riverMesh);
+      }
+
+      function riverRebuildVisual() {
+        while (riverGroup.children.length) {
+          const child = riverGroup.children[0];
+          riverGroup.remove(child);
+          if (child.geometry) child.geometry.dispose();
+          if (child.material) child.material.dispose();
+        }
+        riverPointMeshes = [];
+        riverPoints.forEach((pt, i) => {
+          const sphere = new THREE.Mesh(
+            new THREE.SphereGeometry(0.5, 8, 8),
+            new THREE.MeshBasicMaterial({ color: i === riverSelectedIdx ? 0xffff00 : 0x0088ff })
+          );
+          sphere.position.copy(pt);
+          riverGroup.add(sphere);
+          riverPointMeshes.push(sphere);
+        });
+        if (riverPoints.length >= 2) {
+          const curve = new THREE.CatmullRomCurve3(riverPoints, false, "catmullrom", 0.5);
+          const lineGeo = new THREE.BufferGeometry().setFromPoints(curve.getPoints(60));
+          const line = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0x00aaff }));
+          riverGroup.add(line);
+          riverPointMeshes.push(line);
+          riverGenerate();
+        } else {
+          riverClearMesh();
+        }
+      }
+
+      function riverAddPoint(p) {
+        riverPoints.push(p.clone());
+        riverSelectedIdx = riverPoints.length - 1;
+        riverRebuildVisual();
+        riverUpdateSelectedYParam();
+      }
+
+      function riverDeleteSelected() {
+        if (riverSelectedIdx < 0 || riverPoints.length === 0) return;
+        riverPoints.splice(riverSelectedIdx, 1);
+        riverSelectedIdx = Math.min(riverSelectedIdx, riverPoints.length - 1);
+        riverRebuildVisual();
+        riverUpdateSelectedYParam();
+      }
+
+      function riverMoveSelected(pos) {
+        if (riverSelectedIdx < 0) return;
+        const currentY = riverPoints[riverSelectedIdx].y;
+        riverPoints[riverSelectedIdx].copy(pos);
+        riverPoints[riverSelectedIdx].y = currentY;
+        riverRebuildVisual();
+      }
+
+      function riverUpdateSelectedYParam() {
+        if (riverSelectedIdx >= 0 && riverSelectedIdx < riverPoints.length) {
+          PARAMS.river.selectedPointY = riverPoints[riverSelectedIdx].y;
+        }
+        if (editorPane) editorPane.refresh();
+      }
+
+      function riverPickPoint(event) {
+        updatePointerNdc(event);
+        raycaster.setFromCamera(pointerNdc, camera);
+        const hits = raycaster.intersectObjects(riverPointMeshes.filter((m) => m.isMesh), false);
+        if (hits.length === 0) return -1;
+        return riverPointMeshes.indexOf(hits[0].object);
+      }
+
       function splineRebuildVisual() {
         while (splineGroup.children.length) {
           const child = splineGroup.children[0];
@@ -6299,6 +6720,21 @@
           return;
         }
 
+        if (
+          event.code === "Escape" &&
+          !event.repeat &&
+          editState.mode === "river" &&
+          riverSelectedIdx >= 0
+        ) {
+          event.preventDefault();
+          riverSelectedIdx = -1;
+          riverDragging = false;
+          if (!playMode) controls.enabled = true;
+          riverRebuildVisual();
+          if (editorPane) editorPane.refresh();
+          return;
+        }
+
         // Esc: always back to view from any edit mode (same rule as we add modes later).
         if (event.code === "Escape" && !event.repeat) {
           event.preventDefault();
@@ -6407,6 +6843,11 @@
           setEditMode(editState.mode === "spline" ? "view" : "spline");
           return;
         }
+        if (event.code === "KeyV") {
+          event.preventDefault();
+          setEditMode(editState.mode === "river" ? "view" : "river");
+          return;
+        }
         if (event.code === "KeyI") {
           event.preventDefault();
           setEditMode(editState.mode === "props" ? "view" : "props");
@@ -6415,6 +6856,12 @@
         if (editState.mode === "spline" && event.code === "Delete") {
           event.preventDefault();
           splineDeleteSelected();
+          if (editorPane) editorPane.refresh();
+          return;
+        }
+        if (editState.mode === "river" && event.code === "Delete") {
+          event.preventDefault();
+          riverDeleteSelected();
           if (editorPane) editorPane.refresh();
           return;
         }
@@ -6555,6 +7002,11 @@
       renderer.domElement.addEventListener("pointermove", (event) => {
         if (playMode) return;
         updatePointerNdc(event);
+        if (editState.mode === "river" && riverDragging && riverSelectedIdx >= 0) {
+          const p = raycastTerrainPoint();
+          if (p) riverMoveSelected(p);
+          return;
+        }
         if (editState.mode === "spline" && splineDragging && splineSelectedIdx >= 0) {
           const p = raycastTerrainPoint();
           if (p) splineMoveSelected(p);
@@ -6661,6 +7113,21 @@
         if (playMode) return;
         updatePointerNdc(event);
         const hit = raycastTerrainPoint();
+
+        if (editState.mode === "river" && event.button === 0) {
+          event.preventDefault();
+          const picked = riverPickPoint(event);
+          if (picked >= 0) {
+            riverSelectedIdx = picked;
+            riverDragging = true;
+            controls.enabled = false;
+            riverRebuildVisual();
+            riverUpdateSelectedYParam();
+          } else if (hit) {
+            riverAddPoint(hit);
+          }
+          return;
+        }
 
         if (editState.mode === "spline" && event.button === 0) {
           event.preventDefault();
@@ -6933,6 +7400,10 @@
       });
 
       window.addEventListener("pointerup", () => {
+        if (riverDragging) {
+          riverDragging = false;
+          if (!playMode) controls.enabled = true;
+        }
         if (splineDragging) {
           splineDragging = false;
           if (!playMode) controls.enabled = true;
@@ -7444,6 +7915,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
               "Objects [E]": "objects",
               "Props [I]": "props",
               "Spline [K]": "spline",
+              "River [V]": "river",
               "Waterfall [H]": "waterfall",
               "Place [O]": "place",
               "Cliffs [C]": "cliffs",
@@ -8367,6 +8839,157 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
           files.forEach((f) => loadPropsJson(f));
           e.target.value = "";
         });
+
+        const riverFolder = pane.addFolder({ title: "River  [ V ]", expanded: true });
+        riverFolderRef = riverFolder;
+        riverFolder.hidden = true;
+
+        riverFolder.addButton({ title: "Delete selected point  [ Del ]" }).on("click", () => {
+          riverDeleteSelected();
+          editorPane.refresh();
+        });
+        riverFolder.addButton({ title: "Clear all points" }).on("click", () => {
+          riverPoints = [];
+          riverSelectedIdx = -1;
+          riverRebuildVisual();
+          editorPane.refresh();
+        });
+        riverFolder.addBlade({ view: "separator" });
+        riverFolder
+          .addBinding(PARAMS.river, "selectedPointY", {
+            label: "Selected Y height",
+            min: -50,
+            max: 200,
+            step: 0.5
+          })
+          .on("change", ({ value }) => {
+            if (riverSelectedIdx >= 0 && riverSelectedIdx < riverPoints.length) {
+              riverPoints[riverSelectedIdx].y = value;
+              riverRebuildVisual();
+            }
+          });
+        riverFolder.addButton({ title: "Snap selected Y to terrain" }).on("click", () => {
+          if (riverSelectedIdx < 0 || riverSelectedIdx >= riverPoints.length) return;
+          const pt = riverPoints[riverSelectedIdx];
+          pt.y = getWorldHeight(pt.x, pt.z);
+          PARAMS.river.selectedPointY = pt.y;
+          editorPane.refresh();
+          riverRebuildVisual();
+        });
+        riverFolder.addBlade({ view: "separator" });
+        riverFolder
+          .addBinding(PARAMS.river, "width", { label: "River width", min: 1, max: 60, step: 0.5 })
+          .on("change", () => {
+            if (riverPoints.length >= 2) riverGenerate();
+          });
+        riverFolder
+          .addBinding(PARAMS.river, "segments", { label: "Mesh segments", min: 40, max: 600, step: 10 })
+          .on("change", () => {
+            if (riverPoints.length >= 2) riverGenerate();
+          });
+        riverFolder
+          .addBinding(PARAMS.river, "heightOffset", { label: "Height offset", min: 0.01, max: 5, step: 0.01 })
+          .on("change", () => {
+            if (riverPoints.length >= 2) riverGenerate();
+          });
+
+        const basicRiverFolder = riverFolder.addFolder({ title: "Basic Settings", expanded: true });
+        basicRiverFolder
+          .addBinding(PARAMS.river, "flowSpeed", { label: "Flow speed", min: 0, max: 1, step: 0.01 })
+          .on("change", syncRiverMat);
+        basicRiverFolder
+          .addBinding(PARAMS.river, "deepColor", { label: "Deep colour", view: "color" })
+          .on("change", syncRiverMat);
+        basicRiverFolder
+          .addBinding(PARAMS.river, "shallowColor", { label: "Shallow colour", view: "color" })
+          .on("change", syncRiverMat);
+        basicRiverFolder
+          .addBinding(PARAMS.river, "highlightColor", { label: "Highlight", view: "color" })
+          .on("change", syncRiverMat);
+        basicRiverFolder
+          .addBinding(PARAMS.river, "foamColor", { label: "Foam colour", view: "color" })
+          .on("change", syncRiverMat);
+        basicRiverFolder
+          .addBinding(PARAMS.river, "foamWidth", { label: "Bank foam width", min: 0, max: 0.45, step: 0.01 })
+          .on("change", syncRiverMat);
+        basicRiverFolder
+          .addBinding(PARAMS.river, "opacity", { label: "Opacity", min: 0, max: 1, step: 0.01 })
+          .on("change", syncRiverMat);
+
+        const stylizedRiverFolder = riverFolder.addFolder({ title: "Stylized Settings", expanded: true });
+        stylizedRiverFolder.hidden = true;
+        {
+          const rsMkF = (folder, label, key, mn, mx, step) =>
+            folder.addBinding(rsU[key], "value", { label, min: mn, max: mx, step });
+          const rsMkColor = (folder, label, key) => {
+            const obj = { color: "#" + rsU[key].value.getHexString() };
+            folder.addBinding(obj, "color", { label }).on("change", ({ value }) => rsU[key].value.set(value));
+          };
+
+          const rsBodyF = stylizedRiverFolder.addFolder({ title: "Body" });
+          rsMkColor(rsBodyF, "Dark", "darkColor");
+          rsMkColor(rsBodyF, "Teal", "bodyColor");
+          rsMkF(rsBodyF, "Depth Strength", "depthStrength", 0, 1, 0.01);
+          rsMkF(rsBodyF, "Brightness", "bodyBright", 0, 3, 0.01);
+          rsMkF(rsBodyF, "Flow Speed", "flowSpeed", 0, 2, 0.01);
+          rsMkF(rsBodyF, "Opacity", "opacity", 0, 1, 0.01);
+
+          const rsStreakF = stylizedRiverFolder.addFolder({ title: "Flow Streaks" });
+          const streakEO = { enabled: true };
+          rsStreakF.addBinding(streakEO, "enabled", { label: "Enable" }).on("change", ({ value }) => {
+            rsU.streakEnabled.value = value ? 1 : 0;
+          });
+          rsMkColor(rsStreakF, "Color", "streakColor");
+          rsMkF(rsStreakF, "Strength", "streakStr", 0, 1, 0.01);
+          rsMkF(rsStreakF, "Count (across)", "streakScaleV", 1, 30, 0.5);
+          rsMkF(rsStreakF, "Length (flow)", "streakScaleU", 1, 30, 0.5);
+
+          const rsFoamF = stylizedRiverFolder.addFolder({ title: "Shore Foam" });
+          const foamAEO = { enabled: true };
+          const foamBEO = { enabled: true };
+          rsFoamF.addBinding(foamAEO, "enabled", { label: "Bank A" }).on("change", ({ value }) => {
+            rsU.foamAEnabled.value = value ? 1 : 0;
+          });
+          rsFoamF.addBinding(foamBEO, "enabled", { label: "Bank B" }).on("change", ({ value }) => {
+            rsU.foamBEnabled.value = value ? 1 : 0;
+          });
+          rsMkF(rsFoamF, "Width", "foamWidth", 0, 0.5, 0.01);
+          rsMkColor(rsFoamF, "Color A", "foamAColor");
+          rsMkF(rsFoamF, "Strength A", "foamAStr", 0, 1, 0.01);
+          rsMkF(rsFoamF, "Jitter", "foamJitter", 0, 1, 0.01);
+          rsMkF(rsFoamF, "Contrast", "foamContrast", 0.2, 6, 0.05);
+          rsMkColor(rsFoamF, "Color B", "foamBColor");
+          rsMkF(rsFoamF, "Strength B", "foamBStr", 0, 1, 0.01);
+
+          const rsShimF = stylizedRiverFolder.addFolder({ title: "Center Shimmer" });
+          const shimEO = { enabled: true };
+          rsShimF.addBinding(shimEO, "enabled", { label: "Enable" }).on("change", ({ value }) => {
+            rsU.shimEnabled.value = value ? 1 : 0;
+          });
+          rsMkColor(rsShimF, "Color", "shimColor");
+          rsMkF(rsShimF, "Strength", "shimStr", 0, 0.5, 0.01);
+          rsMkF(rsShimF, "Flow Speed", "shimFlowSpd", 0, 10, 0.1);
+        }
+
+        riverFolder
+          .addBinding(PARAMS.river, "shaderStyle", {
+            label: "Shader",
+            options: { Basic: "Basic", Stylized: "Stylized" }
+          })
+          .on("change", ({ value }) => {
+            applyRiverStyle(value);
+            basicRiverFolder.hidden = value !== "Basic";
+            stylizedRiverFolder.hidden = value !== "Stylized";
+          });
+
+        riverFolder.addBlade({ view: "separator" });
+        riverFolder.addButton({ title: "▶ Generate river" }).on("click", riverGenerate);
+        riverFolder.addButton({ title: "Clear river mesh" }).on("click", riverClearMesh);
+
+        applyRiverStyle(PARAMS.river.shaderStyle);
+        basicRiverFolder.hidden = PARAMS.river.shaderStyle !== "Basic";
+        stylizedRiverFolder.hidden = PARAMS.river.shaderStyle !== "Stylized";
+        syncRiverMat();
 
         const splineFolder = pane.addFolder({ title: "Spline  [ K ]", expanded: true });
         splineFolderRef = splineFolder;
@@ -9698,6 +10321,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
         syncFoliageFolderVisibility();
         syncPropsFolderVisibility();
         syncSplineFolderVisibility();
+        syncRiverFolderVisibility();
         syncPlaceFolderVisibility();
         syncAmbientFXFolderVisibility();
       }
@@ -9765,6 +10389,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
         const dtSec = Math.min(0.05, dt * 0.001);
         appTimeSec += dtSec;
         uFTreeTime.value = appTimeSec;
+        uRiverTime.value = appTimeSec;
         if (waterfallObjects.length > 0) wfU.wfFlowTime.value += dtSec * wfU.wfFlowSpeed.value;
         if (splashCapObjects.length > 0) {
           uIFTime.value = appTimeSec;
