@@ -170,6 +170,7 @@
         sin,
         cos
       } from "three/tsl";
+      import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { TransformControls } from "three/addons/controls/TransformControls.js";
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
@@ -254,6 +255,16 @@
           envIntensity: 0.2,
           exposure: 0.5
         },
+        csm: {
+          enabled: true,
+          cascades: 2,
+          maxFar: 300,
+          lightMargin: 100,
+          mapSize: 2048,
+          updateEveryFrame: false
+        },
+        shadowBias: -0.0005,
+        shadowNormalBias: 0.02,
         sky: {
           mode: "physical",
           turbidity: 2,
@@ -491,18 +502,41 @@
       const sun = new THREE.DirectionalLight(PARAMS.light.dirColor, PARAMS.light.dirIntensity);
       sun.position.copy(sunDir).multiplyScalar(600);
       scene.add(sun);
+
+      const shadowTarget = new THREE.Object3D();
+      scene.add(shadowTarget);
+      sun.target = shadowTarget;
+
+      /** Same CSM setup as splatmap-painter10bvh+post.html */
+      let csm = null;
+      function setCsmEnabled(on) {
+        if (!csm || !sun.shadow) return;
+        sun.shadow.shadowNode = on ? csm : null;
+      }
       if (renderer.shadowMap) {
         renderer.shadowMap.enabled = true;
         sun.castShadow = true;
-        sun.shadow.mapSize.set(2048, 2048);
+        sun.shadow.mapSize.set(PARAMS.csm.mapSize, PARAMS.csm.mapSize);
         sun.shadow.camera.near = 1;
-        sun.shadow.camera.far = 2600;
-        const sh = 1100;
-        sun.shadow.camera.left = -sh;
-        sun.shadow.camera.right = sh;
-        sun.shadow.camera.top = sh;
-        sun.shadow.camera.bottom = -sh;
+        sun.shadow.camera.far = 300;
+        sun.shadow.camera.left = sun.shadow.camera.bottom = -300;
+        sun.shadow.camera.right = sun.shadow.camera.top = 300;
+        sun.shadow.bias = PARAMS.shadowBias;
+        sun.shadow.normalBias = PARAMS.shadowNormalBias;
+        csm = new CSMShadowNode(sun, {
+          cascades: PARAMS.csm.cascades,
+          maxFar: PARAMS.csm.maxFar,
+          mode: "practical",
+          lightMargin: PARAMS.csm.lightMargin
+        });
+        if (csm.lights.length > 2) csm.lights[2].shadow.mapSize.set(1024, 1024);
+        if (PARAMS.csm.enabled) sun.shadow.shadowNode = csm;
       }
+
+      let _lastCsmCascades = PARAMS.csm.cascades;
+      let _lastCsmMaxFar = PARAMS.csm.maxFar;
+      let _lastCsmMargin = PARAMS.csm.lightMargin;
+      let _lastCsmMapSize = PARAMS.csm.mapSize;
 
       scene.background = null;
 
@@ -628,6 +662,10 @@
         sun.position.copy(sunDir).multiplyScalar(600);
         sun.color.set(PARAMS.light.dirColor);
         sun.intensity = PARAMS.light.dirIntensity;
+        if (sun.shadow) {
+          sun.shadow.bias = PARAMS.shadowBias;
+          sun.shadow.normalBias = PARAMS.shadowNormalBias;
+        }
         hemi.color.set(PARAMS.light.hemiSkyColor);
         hemi.groundColor.set(PARAMS.light.hemiGroundColor);
         hemi.intensity = PARAMS.light.hemiIntensity;
@@ -1801,6 +1839,9 @@
             windSpeed: fleurParams.windSpeed
           },
           fog: JSON.parse(JSON.stringify(PARAMS.fog)),
+          csm: JSON.parse(JSON.stringify(PARAMS.csm)),
+          shadowBias: PARAMS.shadowBias,
+          shadowNormalBias: PARAMS.shadowNormalBias,
           ambientFX: ambientFXSystem ? ambientFXSystem.getEmitters() : [],
           barrierMap: (() => {
             const bd = barrierCtx.getImageData(0, 0, BARRIER_RES, BARRIER_RES).data;
@@ -1907,6 +1948,17 @@
           Object.assign(PARAMS.fog.distance, data.fog.distance ?? {});
           syncFog();
         }
+        if (data.csm && typeof data.csm === "object") {
+          Object.assign(PARAMS.csm, data.csm);
+        }
+        if (typeof data.shadowBias === "number") PARAMS.shadowBias = data.shadowBias;
+        if (typeof data.shadowNormalBias === "number") PARAMS.shadowNormalBias = data.shadowNormalBias;
+        if (sun.shadow) {
+          sun.shadow.bias = PARAMS.shadowBias;
+          sun.shadow.normalBias = PARAMS.shadowNormalBias;
+        }
+        setCsmEnabled(PARAMS.csm.enabled);
+        _lastCsmCascades = -1;
         if (data.fleurInteraction && typeof data.fleurInteraction === "object") {
           const fi = data.fleurInteraction;
           if (fi.interactRadius != null) fleurParams.interactRadius = fi.interactRadius;
@@ -6457,6 +6509,53 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
           max: 2,
           step: 0.05
         });
+        lightFolder.addBlade({ view: "separator" });
+        const csmFolder = lightFolder.addFolder({
+          title: "Shadows (CSM)",
+          expanded: false
+        });
+        csmFolder
+          .addBinding(PARAMS.csm, "enabled", { label: "CSM enabled" })
+          .on("change", ({ value }) => setCsmEnabled(value));
+        csmFolder.addBinding(PARAMS.csm, "updateEveryFrame", {
+          label: "Update every frame"
+        });
+        csmFolder.addBinding(PARAMS, "shadowBias", {
+          label: "Bias",
+          min: -0.01,
+          max: 0.001,
+          step: 0.0001
+        });
+        csmFolder.addBinding(PARAMS, "shadowNormalBias", {
+          label: "Normal bias",
+          min: 0,
+          max: 0.2,
+          step: 0.001
+        });
+        csmFolder.addBinding(PARAMS.csm, "cascades", {
+          label: "Cascades",
+          min: 1,
+          max: 4,
+          step: 1
+        });
+        csmFolder.addBinding(PARAMS.csm, "maxFar", {
+          label: "Max far",
+          min: 30,
+          max: 600,
+          step: 10
+        });
+        csmFolder.addBinding(PARAMS.csm, "lightMargin", {
+          label: "Light margin",
+          min: 0,
+          max: 400,
+          step: 10
+        });
+        csmFolder.addBinding(PARAMS.csm, "mapSize", {
+          label: "Map size",
+          min: 512,
+          max: 4096,
+          step: 512
+        });
 
         const skyFolder = pane.addFolder({ title: "Sky", expanded: false });
         skyFolder
@@ -7393,8 +7492,31 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
         const dt = now - lastTime;
         lastTime = now;
 
+        shadowTarget.position.set(camera.position.x, 0, camera.position.z);
         syncLightAndSkyFromParams();
         stylizedSky.update(sunDir, camera.position);
+
+        const _csmChanged =
+          csm &&
+          PARAMS.csm.enabled &&
+          (PARAMS.csm.cascades !== _lastCsmCascades ||
+            PARAMS.csm.maxFar !== _lastCsmMaxFar ||
+            PARAMS.csm.lightMargin !== _lastCsmMargin ||
+            PARAMS.csm.mapSize !== _lastCsmMapSize);
+        if (csm?.mainFrustum && _csmChanged) {
+          _lastCsmCascades = PARAMS.csm.cascades;
+          _lastCsmMaxFar = PARAMS.csm.maxFar;
+          _lastCsmMargin = PARAMS.csm.lightMargin;
+          _lastCsmMapSize = PARAMS.csm.mapSize;
+          csm.cascades = PARAMS.csm.cascades;
+          csm.maxFar = PARAMS.csm.maxFar;
+          csm.lightMargin = PARAMS.csm.lightMargin;
+          sun.shadow.mapSize.set(PARAMS.csm.mapSize, PARAMS.csm.mapSize);
+          csm.updateFrustums();
+        }
+        if (csm?.mainFrustum && PARAMS.csm.enabled && PARAMS.csm.updateEveryFrame) {
+          csm.updateFrustums();
+        }
 
         const dtSec = Math.min(0.05, dt * 0.001);
         appTimeSec += dtSec;
