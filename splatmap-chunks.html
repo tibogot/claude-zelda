@@ -82,12 +82,20 @@
         background: rgba(60, 160, 60, 0.9);
         color: #fff;
       }
+      #mode-badge.geminicliffgrass {
+        background: rgba(40, 80, 50, 0.95);
+        color: #b0f0c0;
+      }
       #mode-badge.pinelod {
         background: rgba(100, 140, 60, 0.92);
         color: #fff;
       }
       #mode-badge.place {
         background: rgba(120, 90, 140, 0.92);
+        color: #fff;
+      }
+      #mode-badge.cliffs {
+        background: rgba(140, 100, 60, 0.92);
         color: #fff;
       }
       #mode-badge.play {
@@ -102,6 +110,7 @@
           "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
           "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
           "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.9/build/index.module.js",
           "tweakpane": "https://esm.sh/tweakpane@4.0.4"
         }
       }
@@ -112,6 +121,7 @@
     <div id="mode-badge" class="view">VIEW MODE</div>
     <input type="file" id="load-terrain-input" accept="application/json,.json" style="display: none" />
     <input type="file" id="load-cliffs-input" accept="application/json,.json" style="display: none" />
+    <input type="file" id="cliff-inst-glb-input" accept=".glb,.gltf" style="display: none" />
     <input type="file" id="hdr-file-input" accept=".hdr,.exr,image/*" style="display: none" />
 
     <script type="module">
@@ -125,6 +135,9 @@
       import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
       import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
       import { createStylizedSky } from "./stylized-sky.js";
+      import { MeshBVH } from "three-mesh-bvh";
+      import { createCliffInstancer } from "./cliff-instancer.js";
+      import { createCliffInstancerBlendMaterial } from "./cliffInstancerBlendMaterial.js";
       import { Pane } from "tweakpane";
       import { createTileMaterial } from "./tileMaterial.js";
       import { createChunkPainterGroundMaterial } from "./chunkPainterGroundMaterial.js";
@@ -246,7 +259,26 @@
       let brushSize = PARAMS.brushSize;
       let brushStr = PARAMS.brushStrength;
       let geminiGrassEraseMode = false;
+      let geminiCliffGrassEraseMode = false;
       let playMode = false;
+
+      const editState = {
+        mode: "view",
+        isPointerDown: false,
+        pointerAction: null,
+        isShiftDown: false,
+        sculptSign: 1,
+        sculptSkipFirstMoveDup: false,
+        /** Height sample at sculpt pointerdown when Alt held (flatten-to plateau). */
+        sculptFlattenTargetY: 0,
+        rampPointA: null,
+        paintErase: false,
+        paintChannel: 0,
+        hasBrushHit: false,
+        brushWorldPoint: new THREE.Vector3()
+      };
+
+      let editorPane = null;
 
       const CONFIG = {
         worldSize: 1600,
@@ -287,6 +319,15 @@
       }
 
       const HTEX_RES = 512;
+      const bvhGrid = new Float32Array(HTEX_RES * HTEX_RES);
+      let bvhBaked = false;
+      let _camCliffBvh = null;
+      const _bvhRay = new THREE.Ray(new THREE.Vector3(), new THREE.Vector3(0, -1, 0));
+      const _bvhTmpV = new THREE.Vector3();
+
+      function invalidateBvhHeight() {
+        bvhBaked = false;
+      }
 
       const hudEl = document.getElementById("hud");
 
@@ -338,9 +379,25 @@
         RIGHT: THREE.MOUSE.PAN
       };
 
+      const cliffInstancer = createCliffInstancer(scene, { maxInstances: 500 });
+      let ciRefreshProxy = () => {};
+      let cliffBlendPack = null;
+      let cliffsBlendBindingsFn = null;
+      let cliffsBlendSlidersAdded = false;
+
       const transformControls = new TransformControls(camera, renderer.domElement);
       transformControls.addEventListener("dragging-changed", (e) => {
         controls.enabled = e.value ? false : !playMode;
+        if (!e.value && editState.mode === "cliffs") {
+          invalidateBvhHeight();
+          ciRefreshProxy();
+          if (editorPane) editorPane.refresh();
+        }
+      });
+      transformControls.addEventListener("change", () => {
+        if (editState.mode === "cliffs" && cliffInstancer.hasSelection()) {
+          cliffInstancer.syncFromProxy();
+        }
       });
       transformControls.enabled = false;
       const tcHelper = transformControls.getHelper();
@@ -522,6 +579,15 @@
       }
       await loadPlaceCliffTemplates();
 
+      CLIFF_MODELS.forEach((url, i) => {
+        const name = `cliff${i + 1}`;
+        gltfLoader.load(resolveModelUrl(url), (gltf) => {
+          cliffInstancer.loadGLB(gltf, name);
+          if (cliffBlendPack) cliffInstancer.setMaterial(cliffBlendPack.material);
+          ciRefreshProxy();
+        });
+      });
+
       function getCliffRoot(object) {
         let obj = object;
         while (obj) {
@@ -557,6 +623,7 @@
         scene.add(root);
         cliffObjects.push(root);
         selectCliff(root);
+        invalidateBvhHeight();
       }
 
       function applyCliffs(data) {
@@ -580,6 +647,7 @@
           scene.add(root);
           cliffObjects.push(root);
         });
+        invalidateBvhHeight();
       }
 
       function saveCliffs() {
@@ -607,6 +675,12 @@
       let lastHeightTexSyncMs = 0;
       let globalHeightTexData = null;
       let globalHeightTex = null;
+      /** Terrain heightfield only (no BVH cliff merge) — Gemini grass roots follow this. */
+      let geminiTerrainOnlyHeightTexData = null;
+      let geminiTerrainOnlyHeightTex = null;
+      /** Cliff top Y for upward-facing surfaces; -9999 where no valid cliff grass surface. */
+      let cliffHeightTexData = null;
+      let cliffHeightTex = null;
 
       const cliffU = createAutoCliffUniforms();
       const rock028Textures = { colorTex: null, dataTex: null };
@@ -664,17 +738,21 @@
       let geminiDensityCanvas = null;
       let geminiDensityCtx = null;
       let geminiDensityTex = null;
+      let geminiCliffDensityCanvas = null;
+      let geminiCliffDensityCtx = null;
+      let geminiCliffDensityTex = null;
       let geminiGrassPatchSystem = null;
       let geminiGrassGroup = null;
       let geminiGrassUniforms = null;
       /** False until user paints / fills / loads density — avoids ~100+ grass patch draws when density is empty. */
       let geminiGrassHasPaintedDensity = false;
       let lastGeminiPatchCount = 0;
-      let editorPane = null;
       let geminiGrassFolderRef = null;
+      let geminiCliffGrassFolderRef = null;
       let brushFolderRef = null;
       let lodFolderRef = null;
       let placeFolderRef = null;
+      let cliffsFolderRef = null;
       let playFolderRef = null;
       const _geminiUpdateOpts = {
         patchSize: 10,
@@ -794,6 +872,26 @@
           geminiDensityCtx.fill();
         }
         if (geminiDensityTex) geminiDensityTex.needsUpdate = true;
+        geminiGrassHasPaintedDensity = true;
+      }
+
+      function paintGeminiCliffGrassAt(wx, wz, erase) {
+        if (!geminiCliffDensityCtx) return;
+        const { u, v } = worldToUV(wx, wz);
+        const cx = u * HTEX_RES;
+        const cy = v * HTEX_RES;
+        if (PARAMS.paintBrush === "smear") {
+          _smearCanvas(geminiCliffDensityCtx, cx, cy);
+        } else {
+          const alpha = brushStr / 100;
+          const [cr, cg, cb] = erase ? [0, 0, 0] : [255, 255, 255];
+          geminiCliffDensityCtx.globalCompositeOperation = "source-over";
+          geminiCliffDensityCtx.fillStyle = _radialGrad(geminiCliffDensityCtx, cx, cy, cr, cg, cb, alpha);
+          geminiCliffDensityCtx.beginPath();
+          geminiCliffDensityCtx.arc(cx, cy, brushSize, 0, PI * 2);
+          geminiCliffDensityCtx.fill();
+        }
+        if (geminiCliffDensityTex) geminiCliffDensityTex.needsUpdate = true;
         geminiGrassHasPaintedDensity = true;
       }
 
@@ -1027,7 +1125,12 @@
           const g = geminiDensityCtx.getImageData(0, 0, HTEX_RES, HTEX_RES);
           geminiDensity = new Uint8ClampedArray(g.data);
         }
-        return { heights, splats, geminiDensity };
+        let geminiCliffDensity = null;
+        if (geminiCliffDensityCtx) {
+          const gc = geminiCliffDensityCtx.getImageData(0, 0, HTEX_RES, HTEX_RES);
+          geminiCliffDensity = new Uint8ClampedArray(gc.data);
+        }
+        return { heights, splats, geminiDensity, geminiCliffDensity };
       }
 
       function restoreTerrainUndoSnapshot(snap) {
@@ -1053,6 +1156,11 @@
           geminiDensityCtx.putImageData(id, 0, 0);
           if (geminiDensityTex) geminiDensityTex.needsUpdate = true;
         }
+        if (snap.geminiCliffDensity && geminiCliffDensityCtx) {
+          const idc = new ImageData(new Uint8ClampedArray(snap.geminiCliffDensity), HTEX_RES, HTEX_RES);
+          geminiCliffDensityCtx.putImageData(idc, 0, 0);
+          if (geminiCliffDensityTex) geminiCliffDensityTex.needsUpdate = true;
+        }
         rebuildAllActiveChunkMeshes();
         refreshActiveChunkMaterials();
         heightTexDirty = true;
@@ -1060,18 +1168,29 @@
         invalidateLodStitchSignaturesForKeys(new Set(activeChunks.keys()));
         syncGeminiGrassHasPaintedFromCanvas();
         syncTreeLodHeights();
+        invalidateBvhHeight();
       }
 
       function syncGeminiGrassHasPaintedFromCanvas() {
-        if (!geminiDensityCtx) return;
-        const d = geminiDensityCtx.getImageData(0, 0, HTEX_RES, HTEX_RES).data;
-        for (let i = 0; i < d.length; i += 4) {
-          if (d[i] + d[i + 1] + d[i + 2] > 8) {
-            geminiGrassHasPaintedDensity = true;
-            return;
+        geminiGrassHasPaintedDensity = false;
+        if (geminiDensityCtx) {
+          const d = geminiDensityCtx.getImageData(0, 0, HTEX_RES, HTEX_RES).data;
+          for (let i = 0; i < d.length; i += 4) {
+            if (d[i] + d[i + 1] + d[i + 2] > 8) {
+              geminiGrassHasPaintedDensity = true;
+              return;
+            }
           }
         }
-        geminiGrassHasPaintedDensity = false;
+        if (geminiCliffDensityCtx) {
+          const dc = geminiCliffDensityCtx.getImageData(0, 0, HTEX_RES, HTEX_RES).data;
+          for (let i = 0; i < dc.length; i += 4) {
+            if (dc[i] + dc[i + 1] + dc[i + 2] > 8) {
+              geminiGrassHasPaintedDensity = true;
+              return;
+            }
+          }
+        }
       }
 
       function pushTerrainUndo() {
@@ -1178,8 +1297,19 @@
             sx: root.scale.x,
             sy: root.scale.y,
             sz: root.scale.z
-          }))
+          })),
+          cliffInstances: cliffInstancer.exportData()
         };
+        if (geminiDensityCtx) {
+          const gpix = geminiDensityCtx.getImageData(0, 0, HTEX_RES, HTEX_RES).data;
+          payload.geminiGrassDensity = bufferToBase64(gpix.buffer.slice(gpix.byteOffset, gpix.byteOffset + gpix.byteLength));
+        }
+        if (geminiCliffDensityCtx) {
+          const cpix = geminiCliffDensityCtx.getImageData(0, 0, HTEX_RES, HTEX_RES).data;
+          payload.geminiCliffGrassDensity = bufferToBase64(
+            cpix.buffer.slice(cpix.byteOffset, cpix.byteOffset + cpix.byteLength)
+          );
+        }
         const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
         const a = document.createElement("a");
         a.href = URL.createObjectURL(blob);
@@ -1230,6 +1360,30 @@
         }
         syncTreeLodHeights();
         if (data.cliffs && Array.isArray(data.cliffs)) applyCliffs(data.cliffs);
+        if (data.cliffInstances && Array.isArray(data.cliffInstances)) {
+          cliffInstancer.importData(data.cliffInstances);
+        }
+        bakeBVH();
+        syncTreeLodHeights();
+        ciRefreshProxy();
+        const gBytes = HTEX_RES * HTEX_RES * 4;
+        if (data.geminiGrassDensity && geminiDensityCtx) {
+          const gb = base64ToBuffer(data.geminiGrassDensity);
+          if (gb.byteLength === gBytes) {
+            const idg = new ImageData(new Uint8ClampedArray(gb), HTEX_RES, HTEX_RES);
+            geminiDensityCtx.putImageData(idg, 0, 0);
+            if (geminiDensityTex) geminiDensityTex.needsUpdate = true;
+          }
+        }
+        if (data.geminiCliffGrassDensity && geminiCliffDensityCtx) {
+          const cb = base64ToBuffer(data.geminiCliffGrassDensity);
+          if (cb.byteLength === gBytes) {
+            const idc = new ImageData(new Uint8ClampedArray(cb), HTEX_RES, HTEX_RES);
+            geminiCliffDensityCtx.putImageData(idc, 0, 0);
+            if (geminiCliffDensityTex) geminiCliffDensityTex.needsUpdate = true;
+          }
+        }
+        syncGeminiGrassHasPaintedFromCanvas();
       }
 
       function rebuildAllActiveChunkMeshes() {
@@ -1311,22 +1465,6 @@
         if (editorPane) editorPane.refresh();
       }
 
-      const editState = {
-        mode: "view",
-        isPointerDown: false,
-        pointerAction: null,
-        isShiftDown: false,
-        sculptSign: 1,
-        sculptSkipFirstMoveDup: false,
-        /** Height sample at sculpt pointerdown when Alt held (flatten-to plateau). */
-        sculptFlattenTargetY: 0,
-        rampPointA: null,
-        paintErase: false,
-        paintChannel: 0,
-        hasBrushHit: false,
-        brushWorldPoint: new THREE.Vector3()
-      };
-
       const PLAYER_CAP_R = 0.4;
       const PLAYER_CAP_H = 1.2;
       const playParams = {
@@ -1350,8 +1488,8 @@
       scene.add(capsuleMesh);
 
       function syncGeminiFolderVisibility() {
-        if (geminiGrassFolderRef)
-          geminiGrassFolderRef.hidden = editState.mode !== "geminigrass";
+        if (geminiGrassFolderRef) geminiGrassFolderRef.hidden = editState.mode !== "geminigrass";
+        if (geminiCliffGrassFolderRef) geminiCliffGrassFolderRef.hidden = editState.mode !== "geminicliffgrass";
       }
 
       function syncLodFolderVisibility() {
@@ -1360,6 +1498,10 @@
 
       function syncPlaceFolderVisibility() {
         if (placeFolderRef) placeFolderRef.hidden = editState.mode !== "place";
+      }
+
+      function syncCliffsFolderVisibility() {
+        if (cliffsFolderRef) cliffsFolderRef.hidden = editState.mode !== "cliffs";
       }
 
       function syncModeBadge() {
@@ -1376,9 +1518,14 @@
         else if (m === "sculpt") el.textContent = "SCULPT MODE  [ S · Esc → view ]";
         else if (m === "paint") el.textContent = "PAINT MODE  [ P · Esc → view ]";
         else if (m === "geminigrass") el.textContent = "GEMINI GRASS  [ G · Esc → view ]";
+        else if (m === "geminicliffgrass")
+          el.textContent = "GEMINI CLIFF GRASS  [ Mode menu · Esc → view ]";
         else if (m === "pinelod") el.textContent = "TREE LOD  [ J · 1–8 slot · Shift erase · Esc → view ]";
         else if (m === "place")
           el.textContent = "PLACE MODE  [ O · W move · E rotate · R scale · Del remove · Esc → view ]";
+        else if (m === "cliffs")
+          el.textContent =
+            "CLIFFS MODE  [ C · LMB place · RMB select · W/E/R gizmo · Del · Rebake BVH for trees/grass · Esc → view ]";
         else el.textContent = String(m).toUpperCase();
       }
 
@@ -1392,21 +1539,43 @@
         }
         editState.mode = mode;
         PARAMS.mode = mode;
-        if (brushFolderRef) brushFolderRef.hidden = mode === "view" || mode === "place";
+        const tcMode = mode === "place" || mode === "cliffs";
+        if (brushFolderRef) brushFolderRef.hidden = mode === "view" || tcMode;
         if (playFolderRef) playFolderRef.hidden = mode !== "view";
-        if (mode === "place") {
+        if (tcMode) {
           transformControls.enabled = true;
+          if (mode === "place") {
+            cliffInstancer.clearSelection();
+            if (selectedCliff) {
+              transformControls.attach(selectedCliff);
+              tcHelper.visible = true;
+            } else {
+              transformControls.detach();
+              tcHelper.visible = false;
+            }
+          } else {
+            selectedCliff = null;
+            if (cliffInstancer.hasSelection()) {
+              transformControls.attach(cliffInstancer.proxyObject);
+              tcHelper.visible = true;
+            } else {
+              transformControls.detach();
+              tcHelper.visible = false;
+            }
+          }
         } else {
           transformControls.enabled = false;
           transformControls.detach();
           if (tcHelper) tcHelper.visible = false;
           selectedCliff = null;
+          cliffInstancer.clearSelection();
         }
         syncModeBadge();
         syncBrushVisual();
         syncGeminiFolderVisibility();
         syncLodFolderVisibility();
         syncPlaceFolderVisibility();
+        syncCliffsFolderVisibility();
         if (!playMode) {
           renderer.domElement.style.cursor =
             editState.mode === "view" ? "default" : "crosshair";
@@ -1415,7 +1584,7 @@
       }
 
       function syncBrushVisual() {
-        if (editState.mode === "view" || editState.mode === "place") {
+        if (editState.mode === "view" || editState.mode === "place" || editState.mode === "cliffs") {
           brushMarker.visible = false;
           rampMarkerA.visible = false;
           return;
@@ -1425,6 +1594,9 @@
           brushMarker.scale.setScalar(CONFIG.paint.radius / SCULPT_RING_GEOM_BASE);
         } else if (editState.mode === "geminigrass") {
           brushMarker.material.color.setHex(0x66dd99);
+          brushMarker.scale.setScalar(geminiBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
+        } else if (editState.mode === "geminicliffgrass") {
+          brushMarker.material.color.setHex(0x55cc88);
           brushMarker.scale.setScalar(geminiBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
         } else if (editState.mode === "pinelod") {
           brushMarker.material.color.setHex(0x88bb44);
@@ -1692,6 +1864,7 @@
         syncSeamsAfterSculpt(touched);
         rebuildAllActiveChunkMeshes();
         syncTreeLodHeights();
+        invalidateBvhHeight();
       }
 
       function expandChunkKeysWithNeighbors(keys) {
@@ -1823,10 +1996,9 @@
       }
 
       /**
-       * Resolve a world (x,z) to the owning chunk and bilinear-sample its height field.
-       * Used for cross-chunk normal computation so seams share identical normals.
+       * Raw heightfield from chunk data only (no baked cliff BVH). Use for BVH bake baseline.
        */
-      function getWorldHeight(worldX, worldZ) {
+      function getChunkHeightfieldHeight(worldX, worldZ) {
         const cs = CONFIG.chunkSize;
         const maxC = getMaxChunkIndex();
         let cx = Math.floor((worldX + worldHalf) / cs);
@@ -1837,6 +2009,125 @@
         const u = ((worldX - chunkMinWorldX(cx)) / cs) * CONFIG.dataResolution;
         const v = ((worldZ - chunkMinWorldZ(cz)) / cs) * CONFIG.dataResolution;
         return sampleChunkDataBilinear(heights, u, v);
+      }
+
+      function bvhHeightSample(wx, wz) {
+        const ws = CONFIG.worldSize;
+        const fx = (wx / ws + 0.5) * HTEX_RES;
+        const fz = (wz / ws + 0.5) * HTEX_RES;
+        const ix0 = Math.max(0, Math.min(HTEX_RES - 1, Math.floor(fx)));
+        const iz0 = Math.max(0, Math.min(HTEX_RES - 1, Math.floor(fz)));
+        const ix1 = Math.min(HTEX_RES - 1, ix0 + 1);
+        const iz1 = Math.min(HTEX_RES - 1, iz0 + 1);
+        const tx = fx - ix0;
+        const tz = fz - iz0;
+        const h00 = bvhGrid[iz0 * HTEX_RES + ix0];
+        const h10 = bvhGrid[iz0 * HTEX_RES + ix1];
+        const h01 = bvhGrid[iz1 * HTEX_RES + ix0];
+        const h11 = bvhGrid[iz1 * HTEX_RES + ix1];
+        return h00 + (h10 - h00) * tx + (h01 - h00) * tz + (h00 - h10 - h01 + h11) * tx * tz;
+      }
+
+      /**
+       * Effective ground height: after Rebake BVH, includes instanced / place-mode cliff meshes.
+       */
+      function getWorldHeight(worldX, worldZ) {
+        if (bvhBaked) return bvhHeightSample(worldX, worldZ);
+        return getChunkHeightfieldHeight(worldX, worldZ);
+      }
+
+      function bakeBVH() {
+        scene.updateMatrixWorld(true);
+        const positions = [];
+        const idxList = [];
+        let vOffset = 0;
+        function addMesh(mesh) {
+          const geo = mesh.geometry;
+          const posAttr = geo.attributes.position;
+          const mat = mesh.matrixWorld;
+          for (let i = 0; i < posAttr.count; i++) {
+            _bvhTmpV.fromBufferAttribute(posAttr, i).applyMatrix4(mat);
+            positions.push(_bvhTmpV.x, _bvhTmpV.y, _bvhTmpV.z);
+          }
+          if (geo.index) {
+            const idx = geo.index.array;
+            for (let i = 0; i < idx.length; i++) idxList.push(idx[i] + vOffset);
+          } else {
+            for (let i = 0; i < posAttr.count; i++) idxList.push(i + vOffset);
+          }
+          vOffset += posAttr.count;
+        }
+        function addGeoWithMatrix(geo, mat) {
+          const posAttr = geo.attributes.position;
+          for (let i = 0; i < posAttr.count; i++) {
+            _bvhTmpV.fromBufferAttribute(posAttr, i).applyMatrix4(mat);
+            positions.push(_bvhTmpV.x, _bvhTmpV.y, _bvhTmpV.z);
+          }
+          if (geo.index) {
+            const idx = geo.index.array;
+            for (let i = 0; i < idx.length; i++) idxList.push(idx[i] + vOffset);
+          } else {
+            for (let i = 0; i < posAttr.count; i++) idxList.push(i + vOffset);
+          }
+          vOffset += posAttr.count;
+        }
+        cliffObjects.forEach((root) =>
+          root.traverse((o) => {
+            if (o.isMesh) addMesh(o);
+          }),
+        );
+        cliffInstancer.forEachMeshInstance((geo, mat) => addGeoWithMatrix(geo, mat));
+
+        let cliffBvh = null;
+        if (positions.length > 0) {
+          const mergedGeo = new THREE.BufferGeometry();
+          mergedGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
+          mergedGeo.setIndex(new THREE.BufferAttribute(new Uint32Array(idxList), 1));
+          cliffBvh = new MeshBVH(mergedGeo);
+        }
+        _camCliffBvh = cliffBvh;
+
+        const ws = CONFIG.worldSize;
+        for (let iz = 0; iz < HTEX_RES; iz++) {
+          for (let ix = 0; ix < HTEX_RES; ix++) {
+            const wx = (-0.5 + ix / HTEX_RES) * ws;
+            const wz = (-0.5 + iz / HTEX_RES) * ws;
+            const wxG = (-0.5 + (ix + 0.5) / HTEX_RES) * ws;
+            const wzG = (-0.5 + (iz + 0.5) / HTEX_RES) * ws;
+            let hCpu = getChunkHeightfieldHeight(wx, wz);
+            if (cliffBvh) {
+              _bvhRay.origin.set(wx, 99999, wz);
+              const hit = cliffBvh.raycastFirst(_bvhRay, THREE.DoubleSide);
+              if (hit && hit.point.y > hCpu) hCpu = hit.point.y;
+            }
+            bvhGrid[iz * HTEX_RES + ix] = hCpu;
+
+            if (cliffHeightTexData) {
+              const cliffI4 = (iz * HTEX_RES + ix) * 4;
+              let cliffH = -9999;
+              if (cliffBvh) {
+                const hTerrainG = getChunkHeightfieldHeight(wxG, wzG);
+                _bvhRay.origin.set(wxG, 99999, wzG);
+                const cliffHit = cliffBvh.raycastFirst(_bvhRay, THREE.DoubleSide);
+                if (
+                  cliffHit &&
+                  cliffHit.face &&
+                  cliffHit.face.normal &&
+                  cliffHit.face.normal.y > 0.3 &&
+                  cliffHit.point.y > hTerrainG + 0.08
+                ) {
+                  cliffH = cliffHit.point.y;
+                }
+              }
+              cliffHeightTexData[cliffI4] = cliffHeightTexData[cliffI4 + 1] = cliffHeightTexData[cliffI4 + 2] = cliffH;
+              cliffHeightTexData[cliffI4 + 3] = 1;
+            }
+          }
+        }
+        bvhBaked = true;
+        heightTexDirty = true;
+        if (cliffHeightTex) cliffHeightTex.needsUpdate = true;
+        rebuildGlobalHeightTexture();
       }
 
       function sampleHeightfieldForGlobalGrassTex(wx, wz) {
@@ -1858,7 +2149,7 @@
           for (let ix = 0; ix < HTEX_RES; ix++) {
             const wx = ws * ((ix + 0.5) / HTEX_RES - 0.5);
             const wz = ws * ((iz + 0.5) / HTEX_RES - 0.5);
-            const h = sampleHeightfieldForGlobalGrassTex(wx, wz);
+            const h = bvhBaked ? bvhHeightSample(wx, wz) : sampleHeightfieldForGlobalGrassTex(wx, wz);
             const i = (iz * HTEX_RES + ix) * 4;
             globalHeightTexData[i] = h;
             globalHeightTexData[i + 1] = 0;
@@ -1867,6 +2158,25 @@
           }
         }
         globalHeightTex.needsUpdate = true;
+        rebuildGeminiTerrainOnlyHeightTexture();
+      }
+
+      function rebuildGeminiTerrainOnlyHeightTexture() {
+        if (!geminiTerrainOnlyHeightTexData || !geminiTerrainOnlyHeightTex) return;
+        const ws = CONFIG.worldSize;
+        for (let iz = 0; iz < HTEX_RES; iz++) {
+          for (let ix = 0; ix < HTEX_RES; ix++) {
+            const wx = ws * ((ix + 0.5) / HTEX_RES - 0.5);
+            const wz = ws * ((iz + 0.5) / HTEX_RES - 0.5);
+            const h = sampleHeightfieldForGlobalGrassTex(wx, wz);
+            const i = (iz * HTEX_RES + ix) * 4;
+            geminiTerrainOnlyHeightTexData[i] = h;
+            geminiTerrainOnlyHeightTexData[i + 1] = 0;
+            geminiTerrainOnlyHeightTexData[i + 2] = 0;
+            geminiTerrainOnlyHeightTexData[i + 3] = 1;
+          }
+        }
+        geminiTerrainOnlyHeightTex.needsUpdate = true;
       }
 
       function sampleChunkDataBilinear(heights, gridX, gridZ) {
@@ -1895,10 +2205,10 @@
       function heightfieldNormalAt(worldX, worldZ, out) {
         const eps = CONFIG.chunkSize / CONFIG.dataResolution;
         const inv2eps = 1 / (2 * eps);
-        const hL = getWorldHeight(worldX - eps, worldZ);
-        const hR = getWorldHeight(worldX + eps, worldZ);
-        const hD = getWorldHeight(worldX, worldZ - eps);
-        const hU = getWorldHeight(worldX, worldZ + eps);
+        const hL = getChunkHeightfieldHeight(worldX - eps, worldZ);
+        const hR = getChunkHeightfieldHeight(worldX + eps, worldZ);
+        const hD = getChunkHeightfieldHeight(worldX, worldZ - eps);
+        const hU = getChunkHeightfieldHeight(worldX, worldZ + eps);
         out.set((hL - hR) * inv2eps, 1, (hD - hU) * inv2eps).normalize();
         return out;
       }
@@ -2269,10 +2579,9 @@
             wx1 = minXw + ((k + 1) / S_n) * CONFIG.chunkSize;
           }
 
-          // Position: lerp Y on the coarse polyline (heightfield is stitched at edges,
-          // so getWorldHeight at the seam returns the same value both sides see).
-          const y0 = getWorldHeight(wx0, wz0);
-          const y1 = getWorldHeight(wx1, wz1);
+          // Position: lerp Y on the coarse polyline (chunk heightfield only — not baked BVH).
+          const y0 = getChunkHeightfieldHeight(wx0, wz0);
+          const y1 = getChunkHeightfieldHeight(wx1, wz1);
           pos.setY(i, y0 + alpha * (y1 - y0));
 
           // Normal: lerp the FD normals of the two coarse endpoints. This matches the
@@ -2658,6 +2967,7 @@
         transformControls.detach();
         if (tcHelper) tcHelper.visible = false;
         selectedCliff = null;
+        cliffInstancer.clearSelection();
         syncModeBadge();
         if (editorPane) editorPane.refresh();
         const tpEl = document.querySelector(".tp-dfwv");
@@ -2716,6 +3026,7 @@
         syncSeamsAfterSculpt(brushedChunkKeys, seamLimit);
         invalidateLodStitchSignaturesForKeys(brushedChunkKeys);
         heightTexDirty = true;
+        invalidateBvhHeight();
       }
 
       /** Global height grid vertex count along one axis (Nc * RES inclusive indices 0..maxG). */
@@ -2738,7 +3049,7 @@
         const STEP = CONFIG.chunkSize / CONFIG.dataResolution;
         const wx = -worldHalf + igx * STEP;
         const wz = -worldHalf + igz * STEP;
-        return getWorldHeight(wx, wz);
+        return getChunkHeightfieldHeight(wx, wz);
       }
 
       function addHeightDeltaGlobalVertex(igx, igz, delta, brushedChunkKeys) {
@@ -3374,7 +3685,7 @@
           let sum = 0;
           for (let oz = -1; oz <= 1; oz++) {
             for (let ox = -1; ox <= 1; ox++) {
-              sum += getWorldHeight(s.wx + ox * step, s.wz + oz * step);
+              sum += getChunkHeightfieldHeight(s.wx + ox * step, s.wz + oz * step);
             }
           }
           const avg = sum / 9;
@@ -3701,7 +4012,7 @@
           setEditMode(editState.mode === "paint" ? "view" : "paint");
           return;
         }
-        if (event.code === "KeyG") {
+        if (event.code === "KeyG" && !event.shiftKey) {
           event.preventDefault();
           setEditMode(editState.mode === "geminigrass" ? "view" : "geminigrass");
           return;
@@ -3716,7 +4027,12 @@
           setEditMode(editState.mode === "place" ? "view" : "place");
           return;
         }
-        if (editState.mode === "place") {
+        if (event.code === "KeyC") {
+          event.preventDefault();
+          setEditMode(editState.mode === "cliffs" ? "view" : "cliffs");
+          return;
+        }
+        if (editState.mode === "place" || editState.mode === "cliffs") {
           if (event.code === "KeyW") {
             event.preventDefault();
             transformControls.setMode("translate");
@@ -3732,11 +4048,23 @@
             transformControls.setMode("scale");
             return;
           }
-          if (event.code === "Delete" && selectedCliff) {
+          if (event.code === "Delete") {
             event.preventDefault();
-            scene.remove(selectedCliff);
-            cliffObjects = cliffObjects.filter((c) => c !== selectedCliff);
-            selectCliff(null);
+            if (editState.mode === "cliffs" && cliffInstancer.hasSelection()) {
+              cliffInstancer.deleteSelected();
+              invalidateBvhHeight();
+              ciRefreshProxy();
+              if (editorPane) editorPane.refresh();
+              transformControls.detach();
+              tcHelper.visible = false;
+              return;
+            }
+            if (editState.mode === "place" && selectedCliff) {
+              scene.remove(selectedCliff);
+              cliffObjects = cliffObjects.filter((c) => c !== selectedCliff);
+              selectCliff(null);
+              invalidateBvhHeight();
+            }
             return;
           }
         }
@@ -3752,6 +4080,7 @@
           if (event.key === "3") editState.paintChannel = 2;
         }
         if (event.key === "e" || event.key === "E") {
+          if (editState.mode === "cliffs") return;
           event.preventDefault();
           exportTerrainJson();
         }
@@ -3773,6 +4102,7 @@
         const showBrushRing =
           editState.mode === "paint" ||
           editState.mode === "geminigrass" ||
+          editState.mode === "geminicliffgrass" ||
           editState.mode === "pinelod" ||
           (editState.mode === "sculpt" &&
             (PARAMS.sculptTool === "brush" ||
@@ -3787,7 +4117,12 @@
         } else {
           brushMarker.visible = false;
         }
-        if (editState.mode === "geminigrass" || editState.mode === "pinelod") syncBrushVisual();
+        if (
+          editState.mode === "geminigrass" ||
+          editState.mode === "geminicliffgrass" ||
+          editState.mode === "pinelod"
+        )
+          syncBrushVisual();
 
         if (
           editState.mode === "sculpt" &&
@@ -3818,6 +4153,9 @@
         if (editState.isPointerDown && editState.pointerAction === "geminigrass" && hit) {
           paintGeminiGrassAt(hit.x, hit.z, editState.paintErase);
         }
+        if (editState.isPointerDown && editState.pointerAction === "geminicliffgrass" && hit) {
+          paintGeminiCliffGrassAt(hit.x, hit.z, editState.paintErase);
+        }
         if (editState.isPointerDown && editState.pointerAction === "pinelod" && hit) {
           editState.paintErase = event.shiftKey;
           paintLODAt(hit.x, hit.z, editState.paintErase);
@@ -3828,6 +4166,18 @@
         if (playMode) return;
         updatePointerNdc(event);
         const hit = raycastTerrainPoint();
+
+        if (editState.mode === "cliffs" && event.button === 0) {
+          event.preventDefault();
+          if (transformControls.axis !== null) return;
+          if (hit) {
+            cliffInstancer.placeAt(hit.x, hit.y, hit.z);
+            invalidateBvhHeight();
+            ciRefreshProxy();
+            if (editorPane) editorPane.refresh();
+          }
+          return;
+        }
 
         if (editState.mode === "place" && event.button === 0) {
           event.preventDefault();
@@ -3859,6 +4209,17 @@
           editState.paintErase = geminiGrassEraseMode || event.shiftKey;
           controls.enabled = false;
           if (hit) paintGeminiGrassAt(hit.x, hit.z, editState.paintErase);
+          return;
+        }
+
+        if (editState.mode === "geminicliffgrass" && event.button === 0) {
+          event.preventDefault();
+          pushTerrainUndo();
+          editState.isPointerDown = true;
+          editState.pointerAction = "geminicliffgrass";
+          editState.paintErase = geminiCliffGrassEraseMode || event.shiftKey;
+          controls.enabled = false;
+          if (hit) paintGeminiCliffGrassAt(hit.x, hit.z, editState.paintErase);
           return;
         }
 
@@ -3931,6 +4292,27 @@
           editState.paintErase = event.shiftKey;
           controls.enabled = false;
           if (hit) paintLODAt(hit.x, hit.z, editState.paintErase);
+        }
+      });
+
+      renderer.domElement.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        if (playMode || editState.mode !== "cliffs") return;
+        updatePointerNdc(e);
+        raycaster.setFromCamera(pointerNdc, camera);
+        const ciHit = cliffInstancer.raycastInstances(raycaster);
+        if (ciHit) {
+          cliffInstancer.selectInstance(ciHit.typeIdx, ciHit.instIdx);
+          transformControls.attach(cliffInstancer.proxyObject);
+          tcHelper.visible = true;
+          ciRefreshProxy();
+          if (editorPane) editorPane.refresh();
+        } else {
+          cliffInstancer.clearSelection();
+          transformControls.detach();
+          tcHelper.visible = false;
+          ciRefreshProxy();
+          if (editorPane) editorPane.refresh();
         }
       });
 
@@ -4036,6 +4418,38 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
       globalHeightTex.magFilter = THREE.LinearFilter;
       globalHeightTex.needsUpdate = true;
 
+      geminiTerrainOnlyHeightTexData = new Float32Array(HTEX_RES * HTEX_RES * 4);
+      geminiTerrainOnlyHeightTex = new THREE.DataTexture(
+        geminiTerrainOnlyHeightTexData,
+        HTEX_RES,
+        HTEX_RES,
+        THREE.RGBAFormat,
+        THREE.FloatType
+      );
+      geminiTerrainOnlyHeightTex.wrapS = geminiTerrainOnlyHeightTex.wrapT = THREE.ClampToEdgeWrapping;
+      geminiTerrainOnlyHeightTex.minFilter = THREE.LinearFilter;
+      geminiTerrainOnlyHeightTex.magFilter = THREE.LinearFilter;
+      geminiTerrainOnlyHeightTex.needsUpdate = true;
+
+      cliffHeightTexData = new Float32Array(HTEX_RES * HTEX_RES * 4);
+      for (let i = 0; i < HTEX_RES * HTEX_RES; i++) {
+        cliffHeightTexData[i * 4] = cliffHeightTexData[i * 4 + 1] = cliffHeightTexData[i * 4 + 2] = -9999;
+        cliffHeightTexData[i * 4 + 3] = 1;
+      }
+      cliffHeightTex = new THREE.DataTexture(
+        cliffHeightTexData,
+        HTEX_RES,
+        HTEX_RES,
+        THREE.RGBAFormat,
+        THREE.FloatType
+      );
+      cliffHeightTex.wrapS = cliffHeightTex.wrapT = THREE.ClampToEdgeWrapping;
+      cliffHeightTex.minFilter = THREE.NearestFilter;
+      cliffHeightTex.magFilter = THREE.NearestFilter;
+      cliffHeightTex.needsUpdate = true;
+
+      rebuildGeminiTerrainOnlyHeightTexture();
+
       syncCliffUniformsFromParams();
       loadRock028Textures()
         .then(({ colorTex, dataTex }) => {
@@ -4044,6 +4458,27 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
           rock028Ready = true;
           rebuildAllChunkSplatMaterials();
           heightTexDirty = true;
+
+          const cliffPaintCanvas = document.createElement("canvas");
+          cliffPaintCanvas.width = cliffPaintCanvas.height = HTEX_RES;
+          const cpctx = cliffPaintCanvas.getContext("2d");
+          cpctx.fillStyle = "#000000";
+          cpctx.fillRect(0, 0, HTEX_RES, HTEX_RES);
+          const cliffPaintTex = new THREE.CanvasTexture(cliffPaintCanvas);
+          cliffPaintTex.wrapS = cliffPaintTex.wrapT = THREE.ClampToEdgeWrapping;
+          cliffPaintTex.needsUpdate = true;
+
+          cliffBlendPack = createCliffInstancerBlendMaterial(
+            CONFIG.worldSize,
+            worldHalf,
+            colorTex,
+            dataTex,
+            cliffU,
+            cliffPaintTex,
+          );
+          cliffInstancer.setMaterial(cliffBlendPack.material);
+          ciRefreshProxy();
+          if (cliffsBlendBindingsFn) cliffsBlendBindingsFn();
         })
         .catch((err) => console.warn("Rock028 textures failed (auto cliff off):", err));
 
@@ -4055,6 +4490,15 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
       geminiDensityTex = new THREE.CanvasTexture(geminiDensityCanvas);
       geminiDensityTex.wrapS = geminiDensityTex.wrapT = THREE.ClampToEdgeWrapping;
       geminiDensityTex.needsUpdate = true;
+
+      geminiCliffDensityCanvas = document.createElement("canvas");
+      geminiCliffDensityCanvas.width = geminiCliffDensityCanvas.height = HTEX_RES;
+      geminiCliffDensityCtx = geminiCliffDensityCanvas.getContext("2d", { willReadFrequently: true });
+      geminiCliffDensityCtx.fillStyle = "#000000";
+      geminiCliffDensityCtx.fillRect(0, 0, HTEX_RES, HTEX_RES);
+      geminiCliffDensityTex = new THREE.CanvasTexture(geminiCliffDensityCanvas);
+      geminiCliffDensityTex.wrapS = geminiCliffDensityTex.wrapT = THREE.ClampToEdgeWrapping;
+      geminiCliffDensityTex.needsUpdate = true;
 
       function _gemCol(hex) {
         return new THREE.Color(hex);
@@ -4198,8 +4642,10 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
 
       const _geminiCtx = {
         ...geminiGrassUniforms,
-        heightTex: globalHeightTex,
+        heightTex: geminiTerrainOnlyHeightTex,
         grassDensityTex: geminiDensityTex,
+        cliffHeightTex,
+        cliffDensityTex: geminiCliffDensityTex,
         terrainRes: HTEX_RES
       };
 
@@ -4307,8 +4753,10 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
               "Sculpt [S]": "sculpt",
               "Paint [P]": "paint",
               "Gemini Grass [G]": "geminigrass",
+              "Gemini Cliff Grass": "geminicliffgrass",
               "Tree LOD [J]": "pinelod",
               "Place [O]": "place",
+              "Cliffs [C]": "cliffs",
               "Play [F]": "play"
             }
           })
@@ -4649,6 +5097,189 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
           document.getElementById("load-cliffs-input").click();
         });
 
+        const cliffsFolder = pane.addFolder({ title: "Cliffs  [ C ]", expanded: true });
+        cliffsFolderRef = cliffsFolder;
+        cliffsFolder.hidden = true;
+
+        const ciTypeSelect = { index: 0 };
+        const ciProxy = { px: 0, py: 0, pz: 0, rx: 0, ry: 0, rz: 0, sx: 1, sy: 1, sz: 1 };
+        let ciActiveLabel = "—";
+        let ciLastTypeCount = -1;
+        const ciActiveDisplay = { label: ciActiveLabel };
+        cliffsFolder.addBinding(ciActiveDisplay, "label", { label: "Active type", readonly: true });
+        let ciTypeBinding = null;
+        function ciRebuildTypeSelector() {
+          if (ciTypeBinding) ciTypeBinding.dispose();
+          const types = cliffInstancer.getTypes();
+          const opts = {};
+          types.forEach((t) => {
+            opts[t.name] = t.idx;
+          });
+          if (Object.keys(opts).length === 0) return;
+          ciTypeBinding = cliffsFolder.addBinding(ciTypeSelect, "index", {
+            label: "Model",
+            options: opts
+          });
+          ciTypeBinding.on("change", (ev) => {
+            cliffInstancer.setActiveType(ev.value);
+            ciRefreshProxy();
+          });
+        }
+
+        cliffsFolder.addButton({ title: "📂 Load Cliff GLB…" }).on("click", () => {
+          document.getElementById("cliff-inst-glb-input").click();
+        });
+        cliffsFolder.addBlade({ view: "separator" });
+
+        const ciSelLabel = { label: "— RMB select —" };
+        cliffsFolder.addBinding(ciSelLabel, "label", { label: "Selected", readonly: true });
+        cliffsFolder.addBlade({ view: "separator" });
+
+        const ciPosFolder = cliffsFolder.addFolder({ title: "Position", expanded: true });
+        ciPosFolder
+          .addBinding(ciProxy, "px", { label: "X", min: -6000, max: 6000, step: 0.1 })
+          .on("change", (ev) => cliffInstancer.updateSelected({ px: ev.value }));
+        ciPosFolder
+          .addBinding(ciProxy, "py", { label: "Y", min: -500, max: 4000, step: 0.1 })
+          .on("change", (ev) => cliffInstancer.updateSelected({ py: ev.value }));
+        ciPosFolder
+          .addBinding(ciProxy, "pz", { label: "Z", min: -6000, max: 6000, step: 0.1 })
+          .on("change", (ev) => cliffInstancer.updateSelected({ pz: ev.value }));
+
+        const ciRotFolder = cliffsFolder.addFolder({ title: "Rotation (deg)", expanded: true });
+        ciRotFolder
+          .addBinding(ciProxy, "rx", { label: "X", min: -180, max: 180, step: 1 })
+          .on("change", (ev) => cliffInstancer.updateSelected({ rx: ev.value }));
+        ciRotFolder
+          .addBinding(ciProxy, "ry", { label: "Y", min: -180, max: 180, step: 1 })
+          .on("change", (ev) => cliffInstancer.updateSelected({ ry: ev.value }));
+        ciRotFolder
+          .addBinding(ciProxy, "rz", { label: "Z", min: -180, max: 180, step: 1 })
+          .on("change", (ev) => cliffInstancer.updateSelected({ rz: ev.value }));
+
+        const ciScaleFolder = cliffsFolder.addFolder({ title: "Scale", expanded: true });
+        ciScaleFolder
+          .addBinding(ciProxy, "sx", { label: "X", min: 0.05, max: 15, step: 0.05 })
+          .on("change", (ev) => cliffInstancer.updateSelected({ sx: ev.value }));
+        ciScaleFolder
+          .addBinding(ciProxy, "sy", { label: "Y", min: 0.05, max: 15, step: 0.05 })
+          .on("change", (ev) => cliffInstancer.updateSelected({ sy: ev.value }));
+        ciScaleFolder
+          .addBinding(ciProxy, "sz", { label: "Z", min: 0.05, max: 15, step: 0.05 })
+          .on("change", (ev) => cliffInstancer.updateSelected({ sz: ev.value }));
+
+        cliffsFolder.addBlade({ view: "separator" });
+        cliffsFolder
+          .addButton({ title: "▶ Rebake BVH  (terrain + cliffs → height / trees / grass)" })
+          .on("click", () => {
+            bakeBVH();
+            syncTreeLodHeights();
+            ciRefreshProxy();
+            pane.refresh();
+          });
+        cliffsFolder.addBlade({ view: "separator" });
+        cliffsFolder.addButton({ title: "🗑 Delete selected  [Del]" }).on("click", () => {
+          cliffInstancer.deleteSelected();
+          invalidateBvhHeight();
+          ciRefreshProxy();
+          pane.refresh();
+        });
+        cliffsFolder.addButton({ title: "Clear all instanced cliffs" }).on("click", () => {
+          const types = cliffInstancer.getTypes();
+          types.forEach((t) => {
+            for (let i = t.count - 1; i >= 0; i--) {
+              cliffInstancer.selectInstance(t.idx, i);
+              cliffInstancer.deleteSelected();
+            }
+          });
+          invalidateBvhHeight();
+          ciRefreshProxy();
+          pane.refresh();
+        });
+
+        cliffsBlendBindingsFn = () => {
+          if (!cliffBlendPack || cliffsBlendSlidersAdded) return;
+          cliffsBlendSlidersAdded = true;
+          const cb = cliffBlendPack.cbPARAMS;
+          const u = cliffBlendPack;
+          cliffsFolder.addBlade({ view: "separator" });
+          cliffsFolder
+            .addBinding(cb, "slopelow", { label: "Slope low", min: 0, max: 1, step: 0.01 })
+            .on("change", (ev) => {
+              u.uCBSlopeLow.value = ev.value;
+            });
+          cliffsFolder
+            .addBinding(cb, "slopeHigh", { label: "Slope high", min: 0, max: 1, step: 0.01 })
+            .on("change", (ev) => {
+              u.uCBSlopeHigh.value = ev.value;
+            });
+          cliffsFolder
+            .addBinding(cb, "noiseScale", { label: "Edge noise scale", min: 0, max: 0.5, step: 0.01 })
+            .on("change", (ev) => {
+              u.uCBNoiseScale.value = ev.value;
+            });
+          cliffsFolder
+            .addBinding(cb, "noiseStr", { label: "Edge noise strength", min: 0, max: 0.5, step: 0.01 })
+            .on("change", (ev) => {
+              u.uCBNoiseStr.value = ev.value;
+            });
+          cliffsFolder
+            .addBinding(cb, "groundScale", { label: "Ground tex scale", min: 0.1, max: 5, step: 0.05 })
+            .on("change", (ev) => {
+              u.uCBGroundScale.value = ev.value;
+            });
+          cliffsFolder
+            .addBinding(cb, "rockScaleMul", { label: "Rock tex scale ×", min: 0.1, max: 5, step: 0.05 })
+            .on("change", (ev) => {
+              u.uCBRockScaleMul.value = ev.value;
+            });
+          pane.refresh();
+        };
+        if (cliffBlendPack) cliffsBlendBindingsFn();
+
+        ciRefreshProxy = () => {
+          const sel = cliffInstancer.getSelected();
+          if (sel) {
+            ciProxy.px = +sel.px.toFixed(2);
+            ciProxy.py = +sel.py.toFixed(2);
+            ciProxy.pz = +sel.pz.toFixed(2);
+            ciProxy.rx = +sel.rx.toFixed(1);
+            ciProxy.ry = +sel.ry.toFixed(1);
+            ciProxy.rz = +sel.rz.toFixed(1);
+            ciProxy.sx = +sel.sx.toFixed(3);
+            ciProxy.sy = +sel.sy.toFixed(3);
+            ciProxy.sz = +sel.sz.toFixed(3);
+            ciSelLabel.label = `${sel.typeIdx}:${sel.instIdx}`;
+          } else {
+            ciSelLabel.label = "— RMB select —";
+          }
+          const types = cliffInstancer.getTypes();
+          const active = types[cliffInstancer.getActiveTypeIdx()];
+          ciActiveLabel = active ? `${active.name}  (${active.count} placed)` : "— none loaded —";
+          ciActiveDisplay.label = ciActiveLabel;
+          ciTypeSelect.index = cliffInstancer.getActiveTypeIdx();
+          if (types.length !== ciLastTypeCount) {
+            ciLastTypeCount = types.length;
+            ciRebuildTypeSelector();
+          }
+          pane.refresh();
+        };
+        ciRefreshProxy();
+
+        document.getElementById("cliff-inst-glb-input").addEventListener("change", (e) => {
+          const file = e.target.files?.[0];
+          if (!file) return;
+          const url = URL.createObjectURL(file);
+          const name = file.name.replace(/\.(glb|gltf)$/i, "");
+          gltfLoader.load(url, (gltf) => {
+            cliffInstancer.loadGLB(gltf, name);
+            if (cliffBlendPack) cliffInstancer.setMaterial(cliffBlendPack.material);
+            ciRefreshProxy();
+            URL.revokeObjectURL(url);
+          });
+          e.target.value = "";
+        });
+
         const genFolder = pane.addFolder({ title: "Terrain generator", expanded: false });
         genFolder.addBinding(PARAMS.gen, "mode", {
           label: "Mode",
@@ -4942,14 +5573,14 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
           geminiDensityCtx.fillStyle = "#000";
           geminiDensityCtx.fillRect(0, 0, HTEX_RES, HTEX_RES);
           if (geminiDensityTex) geminiDensityTex.needsUpdate = true;
-          geminiGrassHasPaintedDensity = false;
+          syncGeminiGrassHasPaintedFromCanvas();
         });
         geminiGrassFolder.addButton({ title: "Fill all grass" }).on("click", () => {
           pushTerrainUndo();
           geminiDensityCtx.fillStyle = "#fff";
           geminiDensityCtx.fillRect(0, 0, HTEX_RES, HTEX_RES);
           if (geminiDensityTex) geminiDensityTex.needsUpdate = true;
-          geminiGrassHasPaintedDensity = true;
+          syncGeminiGrassHasPaintedFromCanvas();
         });
         const geminiDensityFileInput = document.createElement("input");
         geminiDensityFileInput.type = "file";
@@ -4976,7 +5607,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
             imgData.data.set(loaded.subarray(0, imgData.data.length));
             geminiDensityCtx.putImageData(imgData, 0, 0);
             if (geminiDensityTex) geminiDensityTex.needsUpdate = true;
-            geminiGrassHasPaintedDensity = true;
+            syncGeminiGrassHasPaintedFromCanvas();
           };
           reader.readAsArrayBuffer(e.target.files[0]);
           e.target.value = "";
@@ -5190,6 +5821,64 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
 
           gLod.addButton({ title: "Rebuild LOD geometries" }).on("click", _gemRebuild);
         }
+
+        const geminiCliffGrassErasePARAMS = { erase: false };
+        const geminiCliffGrassFolder = pane.addFolder({
+          title: "Gemini Cliff Grass",
+          expanded: true
+        });
+        geminiCliffGrassFolderRef = geminiCliffGrassFolder;
+        geminiCliffGrassFolder
+          .addBinding(geminiCliffGrassErasePARAMS, "erase", { label: "Erase (or Shift)" })
+          .on("change", (e) => {
+            geminiCliffGrassEraseMode = e.value;
+          });
+        geminiCliffGrassFolder.addButton({ title: "Clear cliff grass" }).on("click", () => {
+          pushTerrainUndo();
+          geminiCliffDensityCtx.fillStyle = "#000";
+          geminiCliffDensityCtx.fillRect(0, 0, HTEX_RES, HTEX_RES);
+          if (geminiCliffDensityTex) geminiCliffDensityTex.needsUpdate = true;
+          syncGeminiGrassHasPaintedFromCanvas();
+        });
+        geminiCliffGrassFolder.addButton({ title: "Fill all cliff grass" }).on("click", () => {
+          pushTerrainUndo();
+          geminiCliffDensityCtx.fillStyle = "#fff";
+          geminiCliffDensityCtx.fillRect(0, 0, HTEX_RES, HTEX_RES);
+          if (geminiCliffDensityTex) geminiCliffDensityTex.needsUpdate = true;
+          syncGeminiGrassHasPaintedFromCanvas();
+        });
+        const geminiCliffDensityFileInput = document.createElement("input");
+        geminiCliffDensityFileInput.type = "file";
+        geminiCliffDensityFileInput.accept = ".bin,image/png";
+        geminiCliffDensityFileInput.style.display = "none";
+        document.body.appendChild(geminiCliffDensityFileInput);
+        geminiCliffGrassFolder.addButton({ title: "Save cliff density map" }).on("click", () => {
+          const pixels = geminiCliffDensityCtx.getImageData(0, 0, HTEX_RES, HTEX_RES).data;
+          const blob = new Blob([pixels.buffer], { type: "application/octet-stream" });
+          const a = document.createElement("a");
+          a.download = "gemini-cliff-grass-density.bin";
+          a.href = URL.createObjectURL(blob);
+          a.click();
+          URL.revokeObjectURL(a.href);
+        });
+        geminiCliffGrassFolder
+          .addButton({ title: "Load cliff density map" })
+          .on("click", () => geminiCliffDensityFileInput.click());
+        geminiCliffDensityFileInput.addEventListener("change", (e) => {
+          if (!e.target.files[0]) return;
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            pushTerrainUndo();
+            const loaded = new Uint8ClampedArray(ev.target.result);
+            const imgData = geminiCliffDensityCtx.createImageData(HTEX_RES, HTEX_RES);
+            imgData.data.set(loaded.subarray(0, imgData.data.length));
+            geminiCliffDensityCtx.putImageData(imgData, 0, 0);
+            if (geminiCliffDensityTex) geminiCliffDensityTex.needsUpdate = true;
+            syncGeminiGrassHasPaintedFromCanvas();
+          };
+          reader.readAsArrayBuffer(e.target.files[0]);
+          e.target.value = "";
+        });
 
         playFolderRef = playFolder;
         brushFolderRef = brushFolder;
