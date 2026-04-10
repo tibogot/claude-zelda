@@ -110,6 +110,10 @@
         background: rgba(20, 20, 180, 0.92);
         color: #aaccff;
       }
+      #mode-badge.barrier {
+        background: rgba(200, 30, 30, 0.92);
+        color: #ffcccc;
+      }
     </style>
     <script type="importmap">
       {
@@ -346,9 +350,26 @@
       };
 
       const SCULPT_RING_GEOM_BASE = CONFIG.sculpt.ringGeomBase;
+      const BARRIER_RES = CONFIG.splatRes;
+
+      const barrierCanvas = document.createElement("canvas");
+      barrierCanvas.width = barrierCanvas.height = BARRIER_RES;
+      const barrierCtx = barrierCanvas.getContext("2d", { willReadFrequently: true });
+      barrierCtx.clearRect(0, 0, BARRIER_RES, BARRIER_RES);
+      let barrierTex = null;
+      let barrierOverlayMesh = null;
+      let barrierEraseMode = false;
+      /** `showOverlay`: see painted barriers in any mode (sculpt, place, …). Barrier mode always shows the overlay for live paint preview (same idea as splatmap-painter). */
+      const barrierPARAMS = { erase: false, showOverlay: true };
+      let barrierFolderRef = null;
 
       function sculptBrushWorldRadius() {
         return THREE.MathUtils.mapLinear(PARAMS.brushSize, 2, 80, 5, 90);
+      }
+
+      /** Same as splatmap-painter `brushWorldRadius` for barrier paint preview. */
+      function barrierBrushWorldRadius() {
+        return (brushSize / CONFIG.splatRes) * CONFIG.worldSize;
       }
 
       function sculptBrushStrength() {
@@ -517,6 +538,32 @@
         scene.fogNode = anyEnabled ? _combinedFogNode : null;
       }
       syncFog();
+
+      barrierTex = new THREE.CanvasTexture(barrierCanvas);
+      barrierTex.flipY = false;
+      barrierTex.wrapS = barrierTex.wrapT = THREE.ClampToEdgeWrapping;
+      barrierTex.colorSpace = THREE.SRGBColorSpace;
+      barrierTex.premultiplyAlpha = false;
+      {
+        const W = CONFIG.worldSize;
+        const overlayGeo = new THREE.PlaneGeometry(W, W, 1, 1);
+        overlayGeo.rotateX(-Math.PI / 2);
+        const overlayMat = new THREE.MeshBasicMaterial({
+          map: barrierTex,
+          transparent: true,
+          opacity: 0.35,
+          depthWrite: false,
+          depthTest: false,
+          toneMapped: false,
+          side: THREE.DoubleSide
+        });
+        barrierOverlayMesh = new THREE.Mesh(overlayGeo, overlayMat);
+        barrierOverlayMesh.position.y = 0.6;
+        barrierOverlayMesh.renderOrder = 10;
+        barrierOverlayMesh.visible = false;
+        scene.add(barrierOverlayMesh);
+      }
+      syncBarrierOverlayFromParams();
 
       let hdrTexture = null;
       const setSkyMode = (mode) => {
@@ -826,6 +873,7 @@
       let ambientFXSystem = null;
       let ambientFXErase = false;
       let ambientFXFolderRef = null;
+
       const ambientFXParams = {
         effectType: "butterflies",
         emitterRadius: 12,
@@ -923,6 +971,16 @@
         return grad;
       }
 
+      /** White radial alpha for `destination-out` erase (barrier mask — no RGB darkening). */
+      function _radialGradAlphaPunch(ctx, cx, cy, alpha) {
+        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, brushSize);
+        [0, 0.25, 0.5, 0.75, 0.95].forEach((t) => {
+          grad.addColorStop(t, `rgba(255,255,255,${alpha * brushFalloff(t)})`);
+        });
+        grad.addColorStop(1, "rgba(255,255,255,0)");
+        return grad;
+      }
+
       function _smearCanvas(ctx, cx, cy) {
         const rad = Math.ceil(brushSize);
         const cw = ctx.canvas.width;
@@ -975,6 +1033,78 @@
           }
         }
         ctx.putImageData(imgData, x0, y0);
+      }
+
+      function _paintSmooth(ctx, cx, cy, r, g, b, alpha) {
+        ctx.globalCompositeOperation = "source-over";
+        ctx.fillStyle = _radialGrad(ctx, cx, cy, r, g, b, alpha);
+        ctx.beginPath();
+        ctx.arc(cx, cy, brushSize, 0, PI * 2);
+        ctx.fill();
+      }
+
+      /** Matches splatmap-painter `_applyBrushToCanvas` (smooth + smear; chunks pane has no fbm/scatter). */
+      function _applyBrushToCanvas(ctx, cx, cy, r, g, b, alpha) {
+        if (PARAMS.paintBrush === "smear") _smearCanvas(ctx, cx, cy);
+        else _paintSmooth(ctx, cx, cy, r, g, b, alpha);
+      }
+
+      let _barrierCache = null;
+      let _barrierCacheDirty = true;
+      function _getBarrierPixels() {
+        if (_barrierCacheDirty || !_barrierCache) {
+          _barrierCache = barrierCtx.getImageData(0, 0, BARRIER_RES, BARRIER_RES).data;
+          _barrierCacheDirty = false;
+        }
+        return _barrierCache;
+      }
+      function invalidateBarrierCache() {
+        _barrierCacheDirty = true;
+      }
+
+      function isBarrierBlocked(wx, wz) {
+        const pixels = _getBarrierPixels();
+        const { u, v } = worldToUV(wx, wz);
+        const px = Math.max(0, Math.min(BARRIER_RES - 1, Math.floor(u * BARRIER_RES)));
+        const py = Math.max(0, Math.min(BARRIER_RES - 1, Math.floor(v * BARRIER_RES)));
+        return pixels[(py * BARRIER_RES + px) * 4] > 64;
+      }
+
+      function syncBarrierOverlay() {
+        if (!barrierOverlayMesh) return;
+        barrierOverlayMesh.material.map.needsUpdate = true;
+      }
+
+      function syncBarrierOverlayFromParams() {
+        if (!barrierOverlayMesh) return;
+        if (playMode) {
+          barrierOverlayMesh.visible = false;
+          return;
+        }
+        barrierOverlayMesh.visible =
+          barrierPARAMS.showOverlay || editState.mode === "barrier";
+      }
+
+      function paintBarrierAt(wx, wz, erase) {
+        const { u, v } = worldToUV(wx, wz);
+        const cx = u * BARRIER_RES;
+        const cy = v * BARRIER_RES;
+        const alpha = brushStr / 100;
+        if (erase) {
+          barrierCtx.save();
+          barrierCtx.globalCompositeOperation = "destination-out";
+          barrierCtx.fillStyle = _radialGradAlphaPunch(barrierCtx, cx, cy, alpha);
+          barrierCtx.beginPath();
+          barrierCtx.arc(cx, cy, brushSize, 0, PI * 2);
+          barrierCtx.fill();
+          barrierCtx.restore();
+        } else {
+          _applyBrushToCanvas(barrierCtx, cx, cy, 255, 0, 0, alpha);
+        }
+        barrierCtx.globalCompositeOperation = "source-over";
+        if (barrierTex) barrierTex.needsUpdate = true;
+        invalidateBarrierCache();
+        syncBarrierOverlay();
       }
 
       function paintGeminiGrassAt(wx, wz, erase) {
@@ -1468,7 +1598,11 @@
             windSpeed: fleurParams.windSpeed
           },
           fog: JSON.parse(JSON.stringify(PARAMS.fog)),
-          ambientFX: ambientFXSystem ? ambientFXSystem.getEmitters() : []
+          ambientFX: ambientFXSystem ? ambientFXSystem.getEmitters() : [],
+          barrierMap: (() => {
+            const bd = barrierCtx.getImageData(0, 0, BARRIER_RES, BARRIER_RES).data;
+            return bufferToBase64(bd.buffer.slice(bd.byteOffset, bd.byteOffset + bd.byteLength));
+          })()
         };
         if (geminiDensityCtx) {
           const gpix = geminiDensityCtx.getImageData(0, 0, HTEX_RES, HTEX_RES).data;
@@ -1574,6 +1708,20 @@
         if (data.ambientFX && Array.isArray(data.ambientFX) && ambientFXSystem) {
           ambientFXSystem.setEmitters(data.ambientFX);
         }
+        const barrierBytes = BARRIER_RES * BARRIER_RES * 4;
+        if (data.barrierMap && typeof data.barrierMap === "string") {
+          const bb = base64ToBuffer(data.barrierMap);
+          if (bb.byteLength === barrierBytes) {
+            barrierCtx.putImageData(
+              new ImageData(new Uint8ClampedArray(bb), BARRIER_RES, BARRIER_RES),
+              0,
+              0
+            );
+            if (barrierTex) barrierTex.needsUpdate = true;
+            invalidateBarrierCache();
+            syncBarrierOverlay();
+          }
+        }
         if (fleurSystem) fleurSystem.syncHeights();
         if (ambientFXSystem) ambientFXSystem.syncHeights();
       }
@@ -1618,11 +1766,13 @@
         new THREE.MeshBasicMaterial({
           color: 0xffaa55,
           transparent: true,
-          opacity: 0.8,
-          side: THREE.DoubleSide
+          opacity: 0.9,
+          side: THREE.DoubleSide,
+          depthWrite: false
         })
       );
       brushMarker.rotation.x = -Math.PI / 2;
+      brushMarker.renderOrder = 0;
       brushMarker.visible = false;
       scene.add(brushMarker);
 
@@ -1729,6 +1879,7 @@
         else if (m === "cliffs")
           el.textContent =
             "CLIFFS MODE  [ C · LMB place · RMB select · W/E/R gizmo · Del · Rebake BVH for trees/grass · Esc → view ]";
+        else if (m === "barrier") el.textContent = "BARRIER MODE";
         else el.textContent = String(m).toUpperCase();
       }
 
@@ -1786,6 +1937,8 @@
         syncLodFolderVisibility();
         syncPlaceFolderVisibility();
         syncCliffsFolderVisibility();
+        if (barrierFolderRef) barrierFolderRef.hidden = editState.mode !== "barrier";
+        syncBarrierOverlayFromParams();
         if (!playMode) {
           renderer.domElement.style.cursor =
             editState.mode === "view" ? "default" : "crosshair";
@@ -1814,6 +1967,9 @@
         } else if (editState.mode === "ambientfx") {
           brushMarker.material.color.setHex(0x00d4c4);
           brushMarker.scale.setScalar(ambientFXParams.emitterRadius / SCULPT_RING_GEOM_BASE);
+        } else if (editState.mode === "barrier") {
+          brushMarker.material.color.setHex(0xff2222);
+          brushMarker.scale.setScalar(barrierBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
         } else if (editState.mode === "pinelod") {
           brushMarker.material.color.setHex(0x88bb44);
           brushMarker.scale.setScalar(sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
@@ -1821,6 +1977,7 @@
           brushMarker.material.color.setHex(0xffaa55);
           brushMarker.scale.setScalar(sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
         }
+        brushMarker.renderOrder = editState.mode === "barrier" ? 11 : 0;
         syncRampMarkerVisual();
       }
 
@@ -3181,6 +3338,7 @@
         controls.enabled = false;
         brushMarker.visible = false;
         rampMarkerA.visible = false;
+        if (barrierOverlayMesh) barrierOverlayMesh.visible = false;
         transformControls.enabled = false;
         transformControls.detach();
         if (tcHelper) tcHelper.visible = false;
@@ -3211,6 +3369,7 @@
         if (document.pointerLockElement) document.exitPointerLock();
         renderer.domElement.style.cursor = "";
         syncModeBadge();
+        syncBarrierOverlayFromParams();
       }
 
       function rebuildDirtyActiveChunks(limit = 8) {
@@ -4333,6 +4492,7 @@
           editState.mode === "geminicliffgrass" ||
           editState.mode === "fleurs" ||
           editState.mode === "ambientfx" ||
+          editState.mode === "barrier" ||
           editState.mode === "pinelod" ||
           (editState.mode === "sculpt" &&
             (PARAMS.sculptTool === "brush" ||
@@ -4343,7 +4503,8 @@
         if (showBrushRing && hit) {
           editState.brushWorldPoint.copy(hit);
           brushMarker.visible = true;
-          brushMarker.position.set(hit.x, hit.y + 0.04, hit.z);
+          const lift = editState.mode === "barrier" ? 0.15 : 0.04;
+          brushMarker.position.set(hit.x, hit.y + lift, hit.z);
         } else {
           brushMarker.visible = false;
         }
@@ -4352,6 +4513,7 @@
           editState.mode === "geminicliffgrass" ||
           editState.mode === "fleurs" ||
           editState.mode === "ambientfx" ||
+          editState.mode === "barrier" ||
           editState.mode === "pinelod"
         )
           syncBrushVisual();
@@ -4393,6 +4555,9 @@
         }
         if (editState.isPointerDown && editState.pointerAction === "ambientfx" && hit) {
           paintAmbientFXAt(hit.x, hit.z, ambientFXErase || event.shiftKey);
+        }
+        if (editState.isPointerDown && editState.pointerAction === "barrier" && hit) {
+          paintBarrierAt(hit.x, hit.z, barrierEraseMode || event.shiftKey);
         }
         if (editState.isPointerDown && editState.pointerAction === "pinelod" && hit) {
           editState.paintErase = event.shiftKey;
@@ -4478,6 +4643,16 @@
           editState.paintErase = ambientFXErase || event.shiftKey;
           controls.enabled = false;
           if (hit) paintAmbientFXAt(hit.x, hit.z, ambientFXErase || event.shiftKey);
+          return;
+        }
+
+        if (editState.mode === "barrier" && event.button === 0) {
+          event.preventDefault();
+          editState.isPointerDown = true;
+          editState.pointerAction = "barrier";
+          editState.paintErase = barrierEraseMode || event.shiftKey;
+          controls.enabled = false;
+          if (hit) paintBarrierAt(hit.x, hit.z, barrierEraseMode || event.shiftKey);
           return;
         }
 
@@ -5029,6 +5204,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
               "Gemini Cliff Grass": "geminicliffgrass",
               "Fleurs [M]": "fleurs",
               "Ambient FX [X]": "ambientfx",
+              Barrier: "barrier",
               "Tree LOD [J]": "pinelod",
               "Place [O]": "place",
               "Cliffs [C]": "cliffs",
@@ -5062,6 +5238,10 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
             }
           })
           .on("change", () => refreshActiveChunkMaterials());
+
+        pane.addBinding(barrierPARAMS, "showOverlay", { label: "Barrier overlay" }).on("change", () => {
+          syncBarrierOverlayFromParams();
+        });
 
         const cliffFolder = pane.addFolder({ title: "Auto cliff (painter Rock028)", expanded: false });
         const onCliffGuiChange = () => {
@@ -6501,6 +6681,31 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
           if (ambientFXSystem) ambientFXSystem.clear();
         });
 
+        const barrierFolder = pane.addFolder({ title: "Barrier", expanded: true });
+        barrierFolderRef = barrierFolder;
+        barrierFolder.hidden = true;
+        barrierFolder.addBinding(barrierPARAMS, "erase", { label: "Erase (or Shift)" }).on("change", (ev) => {
+          barrierEraseMode = ev.value;
+        });
+        barrierFolder.addBinding(barrierPARAMS, "showOverlay", { label: "Show overlay" }).on("change", () => {
+          syncBarrierOverlayFromParams();
+        });
+        barrierFolder.addButton({ title: "Clear all barriers" }).on("click", () => {
+          barrierCtx.globalCompositeOperation = "source-over";
+          barrierCtx.clearRect(0, 0, BARRIER_RES, BARRIER_RES);
+          if (barrierTex) barrierTex.needsUpdate = true;
+          invalidateBarrierCache();
+          syncBarrierOverlay();
+        });
+        barrierFolder.addButton({ title: "Fill all barriers" }).on("click", () => {
+          barrierCtx.globalCompositeOperation = "source-over";
+          barrierCtx.fillStyle = "#f00";
+          barrierCtx.fillRect(0, 0, BARRIER_RES, BARRIER_RES);
+          if (barrierTex) barrierTex.needsUpdate = true;
+          invalidateBarrierCache();
+          syncBarrierOverlay();
+        });
+
         playFolderRef = playFolder;
         brushFolderRef = brushFolder;
         setEditMode(PARAMS.mode);
@@ -6576,6 +6781,16 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
             let newZ = playerPos.z + stepZ;
             newX = THREE.MathUtils.clamp(newX, worldBounds.min.x, worldBounds.max.x);
             newZ = THREE.MathUtils.clamp(newZ, worldBounds.min.z, worldBounds.max.z);
+            if (isBarrierBlocked(newX, newZ)) {
+              const slideX = !isBarrierBlocked(newX, playerPos.z);
+              const slideZ = !isBarrierBlocked(playerPos.x, newZ);
+              if (slideX) newZ = playerPos.z;
+              else if (slideZ) newX = playerPos.x;
+              else {
+                newX = playerPos.x;
+                newZ = playerPos.z;
+              }
+            }
             playerPos.x = newX;
             playerPos.z = newZ;
           }
