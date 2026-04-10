@@ -126,6 +126,10 @@
         background: rgba(110, 95, 70, 0.92);
         color: #fff5e0;
       }
+      #mode-badge.foliage {
+        background: rgba(45, 110, 65, 0.92);
+        color: #e8ffe8;
+      }
       #mode-badge.spline {
         background: rgba(40, 140, 160, 0.92);
         color: #e0ffff;
@@ -1647,6 +1651,7 @@
       let ptreeFolderRef = null;
       let waterfallFolderRef = null;
       let objectsFolderRef = null;
+      let foliageFolderRef = null;
       let splineFolderRef = null;
       let propsFolderRef = null;
 
@@ -1983,6 +1988,25 @@
         }
       }
 
+      function paintFoliageAt(wx, wz, erase) {
+        const slot = FOLIAGE_SLOTS[activeFoliageSlot];
+        if (!slot?.system) return;
+        const radius = sculptBrushWorldRadius();
+        if (erase) {
+          slot.system.removeInBrush(wx, wz, radius);
+        } else {
+          slot.system.addInBrush(
+            wx,
+            wz,
+            radius,
+            slot.perStroke,
+            slot.minSpacing,
+            slot.scaleMin,
+            slot.scaleMax
+          );
+        }
+      }
+
       function paintObjectAt(wx, wz, erase) {
         const slot = OBJECT_SLOTS[activeObjectSlot];
         if (!slot?.system) return;
@@ -2192,6 +2216,108 @@
           ready: false
         }
       ];
+
+      /** Instanced foliage — same slots as splatmap-painter Foliage [ N ] (wind on Fern/Reed). */
+      const FOLIAGE_SLOTS = [
+        {
+          name: "Cherry Tree",
+          modelPath: "models/japanese_cherry_tree.glb",
+          castShadow: true,
+          perStroke: 2,
+          minSpacing: 6,
+          scaleMin: 0.8,
+          scaleMax: 1.3,
+          system: null
+        },
+        {
+          name: "Fern",
+          modelPath: "models/low_poly_fern.glb",
+          castShadow: false,
+          perStroke: 5,
+          minSpacing: 2,
+          scaleMin: 0.6,
+          scaleMax: 1.2,
+          system: null,
+          wind: {
+            windDir: 0.7,
+            windSpeed: 0.8,
+            windStr: 0.08,
+            interactionRange: 1.5,
+            interactionStrength: 0.8,
+            interactionHThresh: 1.5
+          }
+        },
+        {
+          name: "Reed",
+          modelPath: "models/reedplant_compressed.glb",
+          castShadow: false,
+          perStroke: 12,
+          minSpacing: 0.8,
+          scaleMin: 4.0,
+          scaleMax: 6.0,
+          system: null,
+          wind: {
+            windDir: 0.7,
+            windSpeed: 1.2,
+            windStr: 0.15,
+            interactionRange: 2.5,
+            interactionStrength: 1.5,
+            interactionHThresh: 2.0
+          }
+        },
+        {
+          name: "Rock",
+          modelPath: "models/rock__game_asset.glb",
+          castShadow: true,
+          perStroke: 3,
+          minSpacing: 3,
+          scaleMin: 0.5,
+          scaleMax: 1.5,
+          system: null
+        },
+        {
+          name: "Stone",
+          modelPath: "models/stone_low-poly.glb",
+          castShadow: true,
+          perStroke: 4,
+          minSpacing: 2,
+          scaleMin: 0.4,
+          scaleMax: 1.2,
+          system: null
+        },
+        {
+          name: "Pine 3",
+          modelPath: "models/pine3.glb",
+          castShadow: true,
+          perStroke: 2,
+          minSpacing: 5,
+          scaleMin: 0.7,
+          scaleMax: 1.5,
+          system: null
+        },
+        {
+          name: "Palm Tree",
+          modelPath: "models/realistic_palm_tree_4_free.glb",
+          castShadow: true,
+          perStroke: 2,
+          minSpacing: 6,
+          scaleMin: 0.8,
+          scaleMax: 1.4,
+          system: null
+        },
+        {
+          name: "Cylinder",
+          modelPath: "models/cylinder.glb",
+          castShadow: true,
+          perStroke: 3,
+          minSpacing: 3,
+          scaleMin: 0.5,
+          scaleMax: 1.5,
+          system: null
+        }
+      ];
+      let activeFoliageSlot = 0;
+      let foliageEraseMode = false;
 
       /** Instanced props on terrain — same slots as splatmap-painter Objects [ E ]. */
       const OBJECT_SLOTS = [
@@ -2712,6 +2838,10 @@
             sy: root.scale.y,
             sz: root.scale.z
           })),
+          foliage: FOLIAGE_SLOTS.map((s) => ({
+            name: s.name,
+            positions: s.system ? s.system.getPositions() : []
+          })),
           objects: OBJECT_SLOTS.map((s) => ({
             name: s.name,
             positions: s.system ? s.system.getPositions() : []
@@ -2873,6 +3003,13 @@
         }
         if (data.spline && typeof data.spline === "object") {
           Object.assign(PARAMS.spline, data.spline);
+        }
+        if (data.foliage && Array.isArray(data.foliage)) {
+          data.foliage.forEach((fd, idx) => {
+            if (idx < FOLIAGE_SLOTS.length && FOLIAGE_SLOTS[idx].system && fd.positions) {
+              FOLIAGE_SLOTS[idx].system.setPositions(fd.positions);
+            }
+          });
         }
         if (data.objects && Array.isArray(data.objects)) {
           data.objects.forEach((od, idx) => {
@@ -3066,6 +3203,10 @@
         if (propsFolderRef) propsFolderRef.hidden = editState.mode !== "props";
       }
 
+      function syncFoliageFolderVisibility() {
+        if (foliageFolderRef) foliageFolderRef.hidden = editState.mode !== "foliage";
+      }
+
       function syncModeBadge() {
         const el = document.getElementById("mode-badge");
         if (!el) return;
@@ -3100,6 +3241,8 @@
               : "WATERFALL MODE  [ H · W/E/R gizmo · Esc → view ]";
         else if (m === "objects")
           el.textContent = "OBJECTS MODE  [ E · brush paint · Shift erase · Esc → view ]";
+        else if (m === "foliage")
+          el.textContent = "FOLIAGE MODE  [ N · brush paint · Shift erase · Esc → view ]";
         else if (m === "spline")
           el.textContent =
             "SPLINE MODE  [ K · LMB add / drag points · Del · Esc clears pick / view ]";
@@ -3203,6 +3346,7 @@
         syncCliffsFolderVisibility();
         syncWaterfallFolderVisibility();
         syncObjectsFolderVisibility();
+        syncFoliageFolderVisibility();
         syncPropsFolderVisibility();
         syncSplineFolderVisibility();
         if (barrierFolderRef) barrierFolderRef.hidden = editState.mode !== "barrier";
@@ -3250,6 +3394,9 @@
           brushMarker.scale.setScalar(sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
         } else if (editState.mode === "objects") {
           brushMarker.material.color.setHex(0xc9a06c);
+          brushMarker.scale.setScalar(sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
+        } else if (editState.mode === "foliage") {
+          brushMarker.material.color.setHex(0x56b366);
           brushMarker.scale.setScalar(sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
         } else if (editState.mode === "proctrees") {
           brushMarker.material.color.setHex(0x77aa55);
@@ -3694,8 +3841,29 @@
       }
 
       function syncObjectSlotsHeights() {
+        FOLIAGE_SLOTS.forEach((s) => {
+          if (s.system) s.system.syncHeights();
+        });
         OBJECT_SLOTS.forEach((s) => {
           if (s.system) s.system.syncHeights();
+        });
+      }
+
+      function initFoliageSlots() {
+        FOLIAGE_SLOTS.forEach((slot) => {
+          slot.system = createFoliageSlot(scene, (x, z) => getWorldHeight(x, z), slot.wind || null);
+          slot.system.setCastShadow(slot.castShadow);
+          if (slot.modelPath) {
+            gltfLoader
+              .loadAsync(resolveModelUrl(slot.modelPath))
+              .then((gltf) => {
+                slot.system.setModel(gltf);
+                slot.system.setCastShadow(slot.castShadow);
+              })
+              .catch(() =>
+                console.warn(`Foliage: ${slot.modelPath} not found — slot active but no model`)
+              );
+          }
         });
       }
 
@@ -3716,6 +3884,7 @@
           }
         });
       }
+      initFoliageSlots();
       initObjectPaintSlots();
 
       function bakeBVH() {
@@ -5998,6 +6167,19 @@
           });
           fleurSystem.setPositions(existing);
           if (fleurSystem.syncHeights) fleurSystem.syncHeights();
+        } else if (type.startsWith("foliage")) {
+          const slotIdx = parseInt(type.replace("foliage", ""), 10);
+          const slot = FOLIAGE_SLOTS[slotIdx];
+          if (slot?.system) {
+            const existing = slot.system.getPositions();
+            samples.forEach(({ pos, angleY }) => {
+              const scale = PARAMS.spline.scaleMin + Math.random() * scaleRange;
+              const rot = PARAMS.spline.alignToPath ? angleY : Math.random() * Math.PI * 2;
+              existing.push({ x: pos.x, z: pos.z, rot, scale });
+            });
+            slot.system.setPositions(existing);
+            if (slot.system.syncHeights) slot.system.syncHeights();
+          }
         } else if (type.startsWith("object")) {
           const slotIdx = parseInt(type.replace("object", ""), 10);
           const slot = OBJECT_SLOTS[slotIdx];
@@ -6205,6 +6387,11 @@
           setEditMode(editState.mode === "fleurs" ? "view" : "fleurs");
           return;
         }
+        if (event.code === "KeyN") {
+          event.preventDefault();
+          setEditMode(editState.mode === "foliage" ? "view" : "foliage");
+          return;
+        }
         if (event.code === "KeyX") {
           event.preventDefault();
           setEditMode(editState.mode === "ambientfx" ? "view" : "ambientfx");
@@ -6385,6 +6572,7 @@
           editState.mode === "pinelod" ||
           editState.mode === "proctrees" ||
           editState.mode === "objects" ||
+          editState.mode === "foliage" ||
           (editState.mode === "sculpt" &&
             (PARAMS.sculptTool === "brush" ||
               PARAMS.sculptTool === "ramp" ||
@@ -6407,7 +6595,8 @@
           editState.mode === "barrier" ||
           editState.mode === "pinelod" ||
           editState.mode === "proctrees" ||
-          editState.mode === "objects"
+          editState.mode === "objects" ||
+          editState.mode === "foliage"
         )
           syncBrushVisual();
 
@@ -6462,6 +6651,9 @@
         }
         if (editState.isPointerDown && editState.pointerAction === "objects" && hit) {
           paintObjectAt(hit.x, hit.z, objectEraseMode || event.shiftKey);
+        }
+        if (editState.isPointerDown && editState.pointerAction === "foliage" && hit) {
+          paintFoliageAt(hit.x, hit.z, foliageEraseMode || event.shiftKey);
         }
       });
 
@@ -6709,6 +6901,14 @@
           controls.enabled = false;
           if (hit) paintObjectAt(hit.x, hit.z, objectEraseMode || event.shiftKey);
         }
+
+        if (editState.mode === "foliage" && event.button === 0) {
+          event.preventDefault();
+          editState.isPointerDown = true;
+          editState.pointerAction = "foliage";
+          controls.enabled = false;
+          if (hit) paintFoliageAt(hit.x, hit.z, foliageEraseMode || event.shiftKey);
+        }
       });
 
       renderer.domElement.addEventListener("contextmenu", (e) => {
@@ -6814,6 +7014,35 @@
           editState.mode === "proctrees"
             ? `proc trees: slot ${activePTreeSlot + 1} ${PTREE_SLOTS[activePTreeSlot]?.name ?? ""}  trunks=${ptreeParams.totalTrunks}  leaves=${ptreeParams.totalLeaves}  brush r=${sculptBrushWorldRadius().toFixed(1)}${procFrustum}`
             : `proc trees: ${ptreeParams.totalTrunks} trunks (Mode → Proc Trees)${procFrustum}`;
+        let foliageVis = 0;
+        let foliageTotal = 0;
+        FOLIAGE_SLOTS.forEach((s) => {
+          if (s.system) {
+            const cs = s.system.getChunkStats(camera);
+            foliageVis += cs.visible;
+            foliageTotal += cs.total;
+          }
+        });
+        const foliageFrustum =
+          foliageTotal > 0 ? `  Foliage frustum: ${foliageVis}/${foliageTotal} chunks` : "";
+        const foliageHud =
+          editState.mode === "foliage"
+            ? `foliage: slot ${activeFoliageSlot + 1} ${FOLIAGE_SLOTS[activeFoliageSlot]?.name ?? ""}  brush r=${sculptBrushWorldRadius().toFixed(1)}${foliageFrustum}`
+            : `foliage: paint with N${foliageFrustum}`;
+        let objVis = 0;
+        let objTotal = 0;
+        OBJECT_SLOTS.forEach((s) => {
+          if (s.system) {
+            const cs = s.system.getChunkStats(camera);
+            objVis += cs.visible;
+            objTotal += cs.total;
+          }
+        });
+        const objectsFrustum = objTotal > 0 ? `  Objects frustum: ${objVis}/${objTotal} chunks` : "";
+        const objectsHud =
+          editState.mode === "objects"
+            ? `objects: slot ${activeObjectSlot + 1} ${OBJECT_SLOTS[activeObjectSlot]?.name ?? ""}  brush r=${sculptBrushWorldRadius().toFixed(1)}${objectsFrustum}`
+            : `objects: paint with E${objectsFrustum}`;
         hudEl.textContent =
 `splatmap-chunks.html (splat + sculpt)
 fps: ${frameState.fps.toFixed(1)}   frame: ${dtMs.toFixed(2)} ms
@@ -6823,6 +7052,8 @@ active chunks: ${activeChunks.size}  (dist LOD: ${PARAMS.terrainLodEnabled ? "ON
 mode: ${playMode ? "PLAY (WASD · Esc/F exit)" : editState.mode}  paint ch=${chName}  terrain: ${TERRAIN_SURFACE_LABEL[PARAMS.terrainSurface] ?? PARAMS.terrainSurface}
 ${treeLodHud}
 ${procTreeHud}
+${foliageHud}
+${objectsHud}
 chunk debug: ${debugChunkView ? "ON" : "OFF"}
 chunks saved: ${chunkDataMap.size} height / ${chunkSplatMap.size} splat
 dirty chunks: ${dirtyChunks.size}
@@ -7209,6 +7440,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
               Barrier: "barrier",
               "Tree LOD [J]": "pinelod",
               "Proc Trees": "proctrees",
+              "Foliage [N]": "foliage",
               "Objects [E]": "objects",
               "Props [I]": "props",
               "Spline [K]": "spline",
@@ -7889,6 +8121,60 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
           });
         }
 
+        const foliageFolder = pane.addFolder({ title: "Foliage  [ N ]", expanded: true });
+        foliageFolderRef = foliageFolder;
+        foliageFolder.hidden = true;
+        {
+          const foliageActiveParams = { slotIndex: 0 };
+          const foliageSlotOptions = {};
+          FOLIAGE_SLOTS.forEach((s, i) => {
+            foliageSlotOptions[s.name] = i;
+          });
+          foliageFolder
+            .addBinding(foliageActiveParams, "slotIndex", { label: "Active slot", options: foliageSlotOptions })
+            .on("change", (e) => {
+              activeFoliageSlot = e.value;
+            });
+          const foliageErasePARAMS = { erase: false };
+          foliageFolder
+            .addBinding(foliageErasePARAMS, "erase", { label: "Erase (or Shift)" })
+            .on("change", (e) => {
+              foliageEraseMode = e.value;
+            });
+          FOLIAGE_SLOTS.forEach((slot, idx) => {
+            const sf = foliageFolder.addFolder({ title: slot.name, expanded: idx === 0 });
+            const ffi = document.createElement("input");
+            ffi.type = "file";
+            ffi.accept = ".glb";
+            ffi.style.display = "none";
+            document.body.appendChild(ffi);
+            sf.addButton({ title: "Load GLB…" }).on("click", () => ffi.click());
+            ffi.addEventListener("change", (e) => {
+              if (!e.target.files[0]) return;
+              const url = URL.createObjectURL(e.target.files[0]);
+              gltfLoader
+                .loadAsync(url)
+                .then((gltf) => {
+                  slot.system.setModel(gltf);
+                  slot.system.setCastShadow(slot.castShadow);
+                })
+                .catch((err) => console.error("Foliage: failed to load GLB", err));
+              e.target.value = "";
+            });
+            sf.addBinding(slot, "perStroke", { label: "Per stroke", min: 1, max: 20, step: 1 });
+            sf.addBinding(slot, "minSpacing", { label: "Min spacing", min: 0.5, max: 40, step: 0.5 });
+            sf.addBinding(slot, "scaleMin", { label: "Scale min", min: 0.05, max: 5, step: 0.05 });
+            sf.addBinding(slot, "scaleMax", { label: "Scale max", min: 0.05, max: 5, step: 0.05 });
+            sf.addBinding(slot, "castShadow", { label: "Cast shadow" }).on("change", (e) => {
+              slot.castShadow = e.value;
+              if (slot.system) slot.system.setCastShadow(e.value);
+            });
+            sf.addButton({ title: "Clear slot" }).on("click", () => {
+              if (slot.system) slot.system.clear();
+            });
+          });
+        }
+
         const objectsFolder = pane.addFolder({ title: "Objects  [ E ]", expanded: true });
         objectsFolderRef = objectsFolder;
         objectsFolder.hidden = true;
@@ -8117,6 +8403,9 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
           "Tree LOD (active J slot)": "trees",
           Fleurs: "fleurs"
         };
+        FOLIAGE_SLOTS.forEach((slot, i) => {
+          splineObjOptions[`Foliage: ${slot.name}`] = `foliage${i}`;
+        });
         OBJECT_SLOTS.forEach((slot, i) => {
           splineObjOptions[`Object: ${slot.name}`] = `object${i}`;
         });
@@ -8268,7 +8557,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
 
         cliffsFolder.addBlade({ view: "separator" });
         cliffsFolder
-          .addButton({ title: "▶ Rebake BVH  (terrain + cliffs → height / trees / grass)" })
+          .addButton({ title: "▶ Rebake BVH  (terrain + cliffs → height / trees / grass / foliage)" })
           .on("click", () => {
             bakeBVH();
             syncTreeLodHeights();
@@ -9406,6 +9695,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
         syncPtreeFolderVisibility();
         syncWaterfallFolderVisibility();
         syncObjectsFolderVisibility();
+        syncFoliageFolderVisibility();
         syncPropsFolderVisibility();
         syncSplineFolderVisibility();
         syncPlaceFolderVisibility();
@@ -9555,6 +9845,16 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
         if (fleurSystem) {
           if (playMode) fleurSystem.update(playerPos, appTimeSec);
           else fleurSystem.update(camera.position, appTimeSec);
+        }
+
+        if (playMode) {
+          FOLIAGE_SLOTS.forEach((s) => {
+            if (s.system) s.system.update(appTimeSec, playerPos);
+          });
+        } else {
+          FOLIAGE_SLOTS.forEach((s) => {
+            if (s.system) s.system.update(appTimeSec, null);
+          });
         }
 
         if (ambientFXSystem) {
