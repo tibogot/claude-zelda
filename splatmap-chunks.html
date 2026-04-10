@@ -122,6 +122,10 @@
         background: rgba(50, 130, 200, 0.92);
         color: #e8f8ff;
       }
+      #mode-badge.objects {
+        background: rgba(110, 95, 70, 0.92);
+        color: #fff5e0;
+      }
     </style>
     <script type="importmap">
       {
@@ -213,6 +217,7 @@
       } from "./grass-gemini.js";
       import { createFleurSystem, FLEUR_PRESETS } from "./fleur-painter.js";
       import { createAmbientFXSystem } from "./ambientfx-painter.js";
+      import { createFoliageSlot } from "./foliage-painter.js";
 
       const PI = Math.PI;
       const uFTreeTime = uniform(0.0);
@@ -1501,6 +1506,7 @@
       let lodFolderRef = null;
       let ptreeFolderRef = null;
       let waterfallFolderRef = null;
+      let objectsFolderRef = null;
       let placeFolderRef = null;
       let cliffsFolderRef = null;
       let playFolderRef = null;
@@ -1824,6 +1830,25 @@
         }
       }
 
+      function paintObjectAt(wx, wz, erase) {
+        const slot = OBJECT_SLOTS[activeObjectSlot];
+        if (!slot?.system) return;
+        const radius = sculptBrushWorldRadius();
+        if (erase) {
+          slot.system.removeInBrush(wx, wz, radius);
+        } else {
+          slot.system.addInBrush(
+            wx,
+            wz,
+            radius,
+            slot.perStroke,
+            slot.minSpacing,
+            slot.scaleMin,
+            slot.scaleMax
+          );
+        }
+      }
+
       // Same default tile material as splatmap-painter10bvh+post.html (~ key toggles there)
       const terrainMaterial = createTileMaterial({
         roughness: 0.95,
@@ -2014,6 +2039,93 @@
           ready: false
         }
       ];
+
+      /** Instanced props on terrain — same slots as splatmap-painter Objects [ E ]. */
+      const OBJECT_SLOTS = [
+        {
+          name: "Rock",
+          modelPath: "models/rock__game_asset.glb",
+          castShadow: true,
+          perStroke: 3,
+          minSpacing: 3,
+          scaleMin: 0.5,
+          scaleMax: 1.5,
+          system: null
+        },
+        {
+          name: "Stone",
+          modelPath: "models/stone_low-poly.glb",
+          castShadow: true,
+          perStroke: 4,
+          minSpacing: 2,
+          scaleMin: 0.4,
+          scaleMax: 1.2,
+          system: null
+        },
+        {
+          name: "Barrel",
+          modelPath: null,
+          castShadow: true,
+          perStroke: 2,
+          minSpacing: 2,
+          scaleMin: 0.8,
+          scaleMax: 1.2,
+          system: null
+        },
+        {
+          name: "Crate",
+          modelPath: null,
+          castShadow: true,
+          perStroke: 2,
+          minSpacing: 2,
+          scaleMin: 0.8,
+          scaleMax: 1.2,
+          system: null
+        },
+        {
+          name: "Fence",
+          modelPath: null,
+          castShadow: true,
+          perStroke: 2,
+          minSpacing: 1.5,
+          scaleMin: 0.9,
+          scaleMax: 1.1,
+          system: null
+        },
+        {
+          name: "Lantern",
+          modelPath: null,
+          castShadow: true,
+          perStroke: 1,
+          minSpacing: 4,
+          scaleMin: 0.8,
+          scaleMax: 1.0,
+          system: null
+        },
+        {
+          name: "Custom A",
+          modelPath: null,
+          castShadow: true,
+          perStroke: 3,
+          minSpacing: 3,
+          scaleMin: 0.8,
+          scaleMax: 1.4,
+          system: null
+        },
+        {
+          name: "Custom B",
+          modelPath: null,
+          castShadow: true,
+          perStroke: 3,
+          minSpacing: 3,
+          scaleMin: 0.8,
+          scaleMax: 1.4,
+          system: null
+        }
+      ];
+      let activeObjectSlot = 0;
+      let objectEraseMode = false;
+
       let activeLodSlot = 0;
       let _rebuildLODChunks = () => {};
       const lodParams = {
@@ -2279,6 +2391,7 @@
         syncGeminiGrassHasPaintedFromCanvas();
         syncTreeLodHeights();
         syncPTreeHeights();
+        syncObjectSlotsHeights();
         invalidateBvhHeight();
       }
 
@@ -2433,6 +2546,10 @@
             sz: root.scale.z
           })),
           cliffInstances: cliffInstancer.exportData(),
+          objects: OBJECT_SLOTS.map((s) => ({
+            name: s.name,
+            positions: s.system ? s.system.getPositions() : []
+          })),
           fleurs: fleurSystem ? fleurSystem.getPositions() : [],
           fleurInteraction: {
             interactRadius: fleurParams.interactRadius,
@@ -2520,6 +2637,7 @@
         }
         syncTreeLodHeights();
         syncPTreeHeights();
+        syncObjectSlotsHeights();
         if (data.waterfalls && Array.isArray(data.waterfalls)) applyWaterfalls(data.waterfalls);
         if (data.splashCaps && Array.isArray(data.splashCaps)) applySplashCaps(data.splashCaps);
         if (data.cliffs && Array.isArray(data.cliffs)) applyCliffs(data.cliffs);
@@ -2529,6 +2647,7 @@
         bakeBVH();
         syncTreeLodHeights();
         syncPTreeHeights();
+        syncObjectSlotsHeights();
         ciRefreshProxy();
         const gBytes = HTEX_RES * HTEX_RES * 4;
         if (data.geminiGrassDensity && geminiDensityCtx) {
@@ -2576,6 +2695,17 @@
         if (data.fleurs && Array.isArray(data.fleurs) && fleurSystem) {
           fleurSystem.setPositions(data.fleurs);
         }
+        if (data.objects && Array.isArray(data.objects)) {
+          data.objects.forEach((od, idx) => {
+            if (
+              idx < OBJECT_SLOTS.length &&
+              OBJECT_SLOTS[idx].system &&
+              od.positions
+            ) {
+              OBJECT_SLOTS[idx].system.setPositions(od.positions);
+            }
+          });
+        }
         if (data.ambientFX && Array.isArray(data.ambientFX) && ambientFXSystem) {
           ambientFXSystem.setEmitters(data.ambientFX);
         }
@@ -2595,6 +2725,7 @@
         }
         if (fleurSystem) fleurSystem.syncHeights();
         if (ambientFXSystem) ambientFXSystem.syncHeights();
+        syncObjectSlotsHeights();
       }
 
       function rebuildAllActiveChunkMeshes() {
@@ -2733,6 +2864,10 @@
         if (waterfallFolderRef) waterfallFolderRef.hidden = editState.mode !== "waterfall";
       }
 
+      function syncObjectsFolderVisibility() {
+        if (objectsFolderRef) objectsFolderRef.hidden = editState.mode !== "objects";
+      }
+
       function syncModeBadge() {
         const el = document.getElementById("mode-badge");
         if (!el) return;
@@ -2765,6 +2900,8 @@
             wfPlaceTool.tool === "splashCap"
               ? "SPLASH CAP MODE  [ H · W/E/R gizmo · Esc → view ]"
               : "WATERFALL MODE  [ H · W/E/R gizmo · Esc → view ]";
+        else if (m === "objects")
+          el.textContent = "OBJECTS MODE  [ E · brush paint · Shift erase · Esc → view ]";
         else el.textContent = String(m).toUpperCase();
       }
 
@@ -2842,6 +2979,7 @@
         syncPlaceFolderVisibility();
         syncCliffsFolderVisibility();
         syncWaterfallFolderVisibility();
+        syncObjectsFolderVisibility();
         if (barrierFolderRef) barrierFolderRef.hidden = editState.mode !== "barrier";
         syncBarrierOverlayFromParams();
         if (!playMode) {
@@ -2882,6 +3020,9 @@
           brushMarker.scale.setScalar(barrierBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
         } else if (editState.mode === "pinelod") {
           brushMarker.material.color.setHex(0x88bb44);
+          brushMarker.scale.setScalar(sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
+        } else if (editState.mode === "objects") {
+          brushMarker.material.color.setHex(0xc9a06c);
           brushMarker.scale.setScalar(sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
         } else if (editState.mode === "proctrees") {
           brushMarker.material.color.setHex(0x77aa55);
@@ -3151,6 +3292,7 @@
         rebuildAllActiveChunkMeshes();
         syncTreeLodHeights();
         syncPTreeHeights();
+        syncObjectSlotsHeights();
         invalidateBvhHeight();
       }
 
@@ -3323,6 +3465,31 @@
         return getChunkHeightfieldHeight(worldX, worldZ);
       }
 
+      function syncObjectSlotsHeights() {
+        OBJECT_SLOTS.forEach((s) => {
+          if (s.system) s.system.syncHeights();
+        });
+      }
+
+      function initObjectPaintSlots() {
+        OBJECT_SLOTS.forEach((slot) => {
+          slot.system = createFoliageSlot(scene, (x, z) => getWorldHeight(x, z));
+          slot.system.setCastShadow(slot.castShadow);
+          if (slot.modelPath) {
+            gltfLoader
+              .loadAsync(resolveModelUrl(slot.modelPath))
+              .then((gltf) => {
+                slot.system.setModel(gltf);
+                slot.system.setCastShadow(slot.castShadow);
+              })
+              .catch(() =>
+                console.warn(`Objects: ${slot.modelPath} not found — slot active but no model`)
+              );
+          }
+        });
+      }
+      initObjectPaintSlots();
+
       function bakeBVH() {
         scene.updateMatrixWorld(true);
         const positions = [];
@@ -3448,6 +3615,7 @@
         rebuildGeminiTerrainOnlyHeightTexture();
         if (fleurSystem) fleurSystem.syncHeights();
         if (ambientFXSystem) ambientFXSystem.syncHeights();
+        syncObjectSlotsHeights();
       }
 
       function rebuildGeminiTerrainOnlyHeightTexture() {
@@ -4816,6 +4984,7 @@
         finalizeSculpt(brushedChunkKeys, null);
         syncTreeLodHeights();
         syncPTreeHeights();
+        syncObjectSlotsHeights();
         rebuildAllActiveChunkMeshes();
         if (editorPane) editorPane.refresh();
       }
@@ -5318,6 +5487,7 @@
         finalizeSculpt(brushedChunkKeys, { wx: midx, wz: midz, radius: seamR });
         syncTreeLodHeights();
         syncPTreeHeights();
+        syncObjectSlotsHeights();
       }
 
       function applySculptAt(worldPoint, event) {
@@ -5586,6 +5756,16 @@
           setEditMode(editState.mode === "waterfall" ? "view" : "waterfall");
           return;
         }
+        if (
+          event.code === "KeyE" &&
+          editState.mode !== "place" &&
+          editState.mode !== "cliffs" &&
+          editState.mode !== "waterfall"
+        ) {
+          event.preventDefault();
+          setEditMode(editState.mode === "objects" ? "view" : "objects");
+          return;
+        }
         if (editState.mode === "place" || editState.mode === "cliffs") {
           if (event.code === "KeyW") {
             event.preventDefault();
@@ -5682,7 +5862,10 @@
           if (event.key === "2") editState.paintChannel = 1;
           if (event.key === "3") editState.paintChannel = 2;
         }
-        if (event.key === "e" || event.key === "E") {
+        if (
+          (event.key === "e" || event.key === "E") &&
+          (event.ctrlKey || event.metaKey)
+        ) {
           if (editState.mode === "cliffs" || editState.mode === "waterfall") return;
           event.preventDefault();
           exportTerrainJson();
@@ -5711,6 +5894,7 @@
           editState.mode === "barrier" ||
           editState.mode === "pinelod" ||
           editState.mode === "proctrees" ||
+          editState.mode === "objects" ||
           (editState.mode === "sculpt" &&
             (PARAMS.sculptTool === "brush" ||
               PARAMS.sculptTool === "ramp" ||
@@ -5732,7 +5916,8 @@
           editState.mode === "ambientfx" ||
           editState.mode === "barrier" ||
           editState.mode === "pinelod" ||
-          editState.mode === "proctrees"
+          editState.mode === "proctrees" ||
+          editState.mode === "objects"
         )
           syncBrushVisual();
 
@@ -5784,6 +5969,9 @@
         if (editState.isPointerDown && editState.pointerAction === "proctrees" && hit) {
           editState.paintErase = event.shiftKey;
           paintPTreeAt(hit.x, hit.z, editState.paintErase);
+        }
+        if (editState.isPointerDown && editState.pointerAction === "objects" && hit) {
+          paintObjectAt(hit.x, hit.z, objectEraseMode || event.shiftKey);
         }
       });
 
@@ -5985,6 +6173,14 @@
           controls.enabled = false;
           if (hit) paintPTreeAt(hit.x, hit.z, editState.paintErase);
         }
+
+        if (editState.mode === "objects" && event.button === 0) {
+          event.preventDefault();
+          editState.isPointerDown = true;
+          editState.pointerAction = "objects";
+          controls.enabled = false;
+          if (hit) paintObjectAt(hit.x, hit.z, objectEraseMode || event.shiftKey);
+        }
       });
 
       renderer.domElement.addEventListener("contextmenu", (e) => {
@@ -6019,6 +6215,7 @@
         if (!playMode && pa === "sculpt") {
           syncTreeLodHeights();
           syncPTreeHeights();
+          syncObjectSlotsHeights();
         }
       });
 
@@ -6101,7 +6298,7 @@ world size: ${CONFIG.worldSize} | chunk size: ${CONFIG.chunkSize}
 bounds: ${worldBounds.min.x}..${worldBounds.max.x}
 gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}  (no GPU grass until density)
 brush: sculpt ${PARAMS.sculptTool} r=${sculptBrushWorldRadius().toFixed(1)} str=${sculptBrushStrength().toFixed(2)}${editState.rampPointA ? " · ramp A set (R or button to clear)" : ""} | paint r=${CONFIG.paint.radius} (${editState.hasBrushHit ? "hit" : "no-hit"})
-undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ctrl+Y · Ctrl+Shift+Z)`;
+undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ctrl+Y · Ctrl+Shift+Z)  export: Ctrl+E`;
       }
 
       window.addEventListener("resize", () => {
@@ -6479,6 +6676,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
               Barrier: "barrier",
               "Tree LOD [J]": "pinelod",
               "Proc Trees": "proctrees",
+              "Objects [E]": "objects",
               "Waterfall [H]": "waterfall",
               "Place [O]": "place",
               "Cliffs [C]": "cliffs",
@@ -7156,6 +7354,60 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
           });
         }
 
+        const objectsFolder = pane.addFolder({ title: "Objects  [ E ]", expanded: true });
+        objectsFolderRef = objectsFolder;
+        objectsFolder.hidden = true;
+        {
+          const objectActiveParams = { slotIndex: 0 };
+          const objectSlotOptions = {};
+          OBJECT_SLOTS.forEach((s, i) => {
+            objectSlotOptions[s.name] = i;
+          });
+          objectsFolder
+            .addBinding(objectActiveParams, "slotIndex", { label: "Active slot", options: objectSlotOptions })
+            .on("change", (e) => {
+              activeObjectSlot = e.value;
+            });
+          const objectErasePARAMS = { erase: false };
+          objectsFolder
+            .addBinding(objectErasePARAMS, "erase", { label: "Erase (or Shift)" })
+            .on("change", (e) => {
+              objectEraseMode = e.value;
+            });
+          OBJECT_SLOTS.forEach((slot, idx) => {
+            const sf = objectsFolder.addFolder({ title: slot.name, expanded: idx === 0 });
+            const ofi = document.createElement("input");
+            ofi.type = "file";
+            ofi.accept = ".glb";
+            ofi.style.display = "none";
+            document.body.appendChild(ofi);
+            sf.addButton({ title: "Load GLB…" }).on("click", () => ofi.click());
+            ofi.addEventListener("change", (e) => {
+              if (!e.target.files[0]) return;
+              const url = URL.createObjectURL(e.target.files[0]);
+              gltfLoader
+                .loadAsync(url)
+                .then((gltf) => {
+                  slot.system.setModel(gltf);
+                  slot.system.setCastShadow(slot.castShadow);
+                })
+                .catch((err) => console.error("Objects: failed to load GLB", err));
+              e.target.value = "";
+            });
+            sf.addBinding(slot, "perStroke", { label: "Per stroke", min: 1, max: 20, step: 1 });
+            sf.addBinding(slot, "minSpacing", { label: "Min spacing", min: 0.5, max: 40, step: 0.5 });
+            sf.addBinding(slot, "scaleMin", { label: "Scale min", min: 0.05, max: 5, step: 0.05 });
+            sf.addBinding(slot, "scaleMax", { label: "Scale max", min: 0.05, max: 5, step: 0.05 });
+            sf.addBinding(slot, "castShadow", { label: "Cast shadow" }).on("change", (e) => {
+              slot.castShadow = e.value;
+              if (slot.system) slot.system.setCastShadow(e.value);
+            });
+            sf.addButton({ title: "Clear slot" }).on("click", () => {
+              if (slot.system) slot.system.clear();
+            });
+          });
+        }
+
         const placeFolder = pane.addFolder({
           title: "Place  [ W move · E rotate · R scale · Del remove ]",
           expanded: false
@@ -7264,6 +7516,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
             bakeBVH();
             syncTreeLodHeights();
             syncPTreeHeights();
+            syncObjectSlotsHeights();
             ciRefreshProxy();
             pane.refresh();
           });
@@ -8394,6 +8647,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
         syncLodFolderVisibility();
         syncPtreeFolderVisibility();
         syncWaterfallFolderVisibility();
+        syncObjectsFolderVisibility();
         syncPlaceFolderVisibility();
         syncAmbientFXFolderVisibility();
       }
