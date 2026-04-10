@@ -98,6 +98,10 @@
         background: rgba(100, 140, 60, 0.92);
         color: #fff;
       }
+      #mode-badge.proctrees {
+        background: rgba(70, 120, 55, 0.92);
+        color: #e8ffd8;
+      }
       #mode-badge.place {
         background: rgba(120, 90, 140, 0.92);
         color: #fff;
@@ -138,11 +142,13 @@
 
     <script type="module">
       import * as THREE from "three";
+      import { MeshStandardNodeMaterial } from "three";
       import {
         Fn,
         texture,
         vec3,
         vec2,
+        vec4,
         mix,
         positionLocal,
         float,
@@ -150,7 +156,19 @@
         clamp,
         exponentialHeightFogFactor,
         densityFogFactor,
-        fog
+        fog,
+        attribute,
+        positionWorld,
+        normalWorld,
+        cameraPosition,
+        normalize,
+        negate,
+        dot,
+        smoothstep,
+        pow,
+        max,
+        sin,
+        cos
       } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { TransformControls } from "three/addons/controls/TransformControls.js";
@@ -181,6 +199,7 @@
       import { createAmbientFXSystem } from "./ambientfx-painter.js";
 
       const PI = Math.PI;
+      const uFTreeTime = uniform(0.0);
 
       /** Tweakpane + lighting — same defaults as splatmap-painter10bvh+post.html (physical sky). */
       const PARAMS = {
@@ -862,6 +881,7 @@
       let geminiCliffGrassFolderRef = null;
       let brushFolderRef = null;
       let lodFolderRef = null;
+      let ptreeFolderRef = null;
       let placeFolderRef = null;
       let cliffsFolderRef = null;
       let playFolderRef = null;
@@ -1395,6 +1415,187 @@
         lodVisMesh1: true
       };
 
+      // ─── PROC TREES — same data + algorithms as splatmap-painter10bvh+post.html ───
+      const PTREE_MAX_PER_CHUNK = 256;
+      const PTREE_CHUNK_SIZE = 64;
+      const _ptreeSlot = (name) => ({
+        name,
+        preset: null,
+        trunkDefs: null,
+        trunkPath: null,
+        leafTexPath: null,
+        leafMat: null,
+        leafMapNode: null,
+        leafMesh: null,
+        uniforms: null,
+        positions: [],
+        chunks: new Map(),
+        minSpacing: 2,
+        scaleMin: 0.9,
+        scaleMax: 1.1,
+        treesPerStroke: 2,
+        ready: false
+      });
+      const PTREE_SLOTS = [
+        _ptreeSlot("Proc A"),
+        _ptreeSlot("Proc B"),
+        _ptreeSlot("Proc C"),
+        _ptreeSlot("Proc D")
+      ];
+      let activePTreeSlot = 0;
+      let _rebuildPTreeChunks = () => {};
+      let _ptreeRebuildLeaves = () => {};
+      let _ptreeDirty = true;
+      const _ptreeDummy = new THREE.Object3D();
+      const _ptreeFinalMat = new THREE.Matrix4();
+      const _ptreeLastPos = new THREE.Vector3(Infinity, Infinity, Infinity);
+      const _ptreeLastQuat = new THREE.Quaternion();
+      const _ptreeFrustum = new THREE.Frustum();
+      const _ptreeProjMat = new THREE.Matrix4();
+      const ptreeParams = {
+        slotName: "Proc A",
+        minSpacing: 2,
+        scaleMin: 0.9,
+        scaleMax: 1.1,
+        treesPerStroke: 2,
+        totalTrunks: 0,
+        totalLeaves: 0,
+        chunksVisible: 0,
+        chunks: 0,
+        leafMipBias: -0.65
+      };
+      function _markPtreeDirty() {
+        _ptreeDirty = true;
+      }
+
+      function _ptreeGrowTipsWithSeed(preset) {
+        const p = preset.trunk;
+        if (!p) return { random: () => 0, tips: [] };
+        let currentSeed = p.seed;
+        const random = () => {
+          const x = Math.sin(currentSeed++) * 10000;
+          return x - Math.floor(x);
+        };
+        const tips = [];
+        function grow(pos, dir, rad, len, lvl) {
+          if (lvl > p.levels) {
+            tips.push(pos.clone());
+            return;
+          }
+          const end = pos.clone().add(dir.clone().multiplyScalar(len));
+          for (let i = 0; i < p.children; i++) {
+            const nextDir = dir.clone();
+            nextDir.x += (random() - 0.5) * p.gnarliness;
+            nextDir.z += (random() - 0.5) * p.gnarliness;
+            nextDir.y += p.sunForce - p.gravity * lvl;
+            nextDir.normalize();
+            grow(end, nextDir, rad * p.trunkTaper, len * p.branchMult, lvl + 1);
+          }
+        }
+        grow(new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 1, 0), p.trunkRadius, p.trunkHeight, 0);
+        return { random, tips };
+      }
+
+      function _ptreeSampleLeaves(preset) {
+        const p = preset.trunk;
+        const c = preset.canopy;
+        if (!p || !c) return [];
+
+        const bushMode = preset.bushMode === true;
+
+        if (bushMode) {
+          let currentSeed = p.seed;
+          const random = () => {
+            const x = Math.sin(currentSeed++) * 10000;
+            return x - Math.floor(x);
+          };
+          const bush = preset.bush || {};
+          const bw = bush.bushWidth || 5;
+          const bh = bush.bushHeight || 3;
+          const bd = bush.bushDensity || 20;
+          const bs = bush.bushLeafSize || 3;
+          const bc = bush.bushClumps || 3;
+          const leaves = [];
+          for (let ci = 0; ci < bc; ci++) {
+            const clumpAngle = (ci / bc) * Math.PI * 2 + random() * 0.5;
+            const clumpDist = random() * bw * 0.3;
+            const cx = Math.cos(clumpAngle) * clumpDist;
+            const cz = Math.sin(clumpAngle) * clumpDist;
+            for (let i = 0; i < bd; i++) {
+              const angle = random() * Math.PI * 2;
+              const r = random() * bw * 0.5;
+              const yRaw = random() * bh;
+              const hSpread = r * (1.0 - yRaw / bh);
+              leaves.push({
+                lx: cx + Math.cos(angle) * hSpread,
+                ly: yRaw,
+                lz: cz + Math.sin(angle) * hSpread,
+                leafSize: bs
+              });
+            }
+          }
+          return leaves;
+        }
+
+        const { random, tips } = _ptreeGrowTipsWithSeed(preset);
+        const leaves = [];
+        tips.forEach((tip) => {
+          for (let i = 0; i < c.leafDensity; i++) {
+            const angle = random() * Math.PI * 2;
+            const rBase = random() * c.clumpRadius;
+            const vSpread = (random() - 0.5) * c.canopyHeight;
+            const hSpread = rBase * (1.0 - (Math.abs(vSpread) / (c.canopyHeight / 2)) * c.shapeMode);
+            leaves.push({
+              lx: tip.x + Math.cos(angle) * hSpread,
+              ly: tip.y + vSpread,
+              lz: tip.z + Math.sin(angle) * hSpread,
+              leafSize: c.leafSize
+            });
+          }
+        });
+        return leaves;
+      }
+
+      function paintPTreeAt(wx, wz, erase) {
+        const slot = PTREE_SLOTS[activePTreeSlot];
+        if (!slot.preset && !slot.trunkDefs) return;
+        const radius = sculptBrushWorldRadius();
+        if (erase) {
+          const r2 = radius * radius;
+          slot.positions = slot.positions.filter((p) => (p.x - wx) ** 2 + (p.z - wz) ** 2 > r2);
+        } else {
+          const target = slot.treesPerStroke;
+          const ms2 = slot.minSpacing * slot.minSpacing;
+          let added = 0;
+          for (let attempt = 0; attempt < target * 4 && added < target; attempt++) {
+            const angle = Math.random() * Math.PI * 2;
+            const dist = Math.sqrt(Math.random()) * radius;
+            let x = wx + Math.cos(angle) * dist;
+            let z = wz + Math.sin(angle) * dist;
+            x = THREE.MathUtils.clamp(x, worldBounds.min.x, worldBounds.max.x);
+            z = THREE.MathUtils.clamp(z, worldBounds.min.z, worldBounds.max.z);
+            if (ms2 > 0 && slot.positions.some((p) => (p.x - x) ** 2 + (p.z - z) ** 2 < ms2)) continue;
+            const y = getWorldHeight(x, z);
+            const scale = slot.scaleMin + Math.random() * (slot.scaleMax - slot.scaleMin);
+            slot.positions.push({ x, y, z, scale });
+            added++;
+          }
+        }
+        if (slot.ready) _rebuildPTreeChunks(slot);
+        _ptreeRebuildLeaves(slot);
+      }
+
+      function syncPTreeHeights() {
+        PTREE_SLOTS.forEach((slot) => {
+          if (slot.positions.length === 0) return;
+          slot.positions.forEach((p) => {
+            p.y = getWorldHeight(p.x, p.z);
+          });
+          _rebuildPTreeChunks(slot);
+          _ptreeRebuildLeaves(slot);
+        });
+      }
+
       const MAX_TERRAIN_UNDO = 25;
       const terrainUndoStack = [];
       const terrainRedoStack = [];
@@ -1458,6 +1659,7 @@
         invalidateLodStitchSignaturesForKeys(new Set(activeChunks.keys()));
         syncGeminiGrassHasPaintedFromCanvas();
         syncTreeLodHeights();
+        syncPTreeHeights();
         invalidateBvhHeight();
       }
 
@@ -1576,6 +1778,7 @@
             if (s.meshScale != null && s.meshScale !== 1) o.meshScale = s.meshScale;
             return o;
           }),
+          ptreeSlots: PTREE_SLOTS.map((s) => ({ name: s.name, positions: s.positions })),
           cliffs: cliffObjects.map((root) => ({
             modelIndex: root.userData.modelIndex ?? 0,
             x: root.position.x,
@@ -1662,13 +1865,24 @@
             _rebuildLODChunks(slot);
           });
         }
+        if (data.ptreeSlots && Array.isArray(data.ptreeSlots)) {
+          data.ptreeSlots.forEach((entry, i) => {
+            if (i >= PTREE_SLOTS.length) return;
+            const slot = PTREE_SLOTS[i];
+            slot.positions = entry.positions || [];
+            _rebuildPTreeChunks(slot);
+            _ptreeRebuildLeaves(slot);
+          });
+        }
         syncTreeLodHeights();
+        syncPTreeHeights();
         if (data.cliffs && Array.isArray(data.cliffs)) applyCliffs(data.cliffs);
         if (data.cliffInstances && Array.isArray(data.cliffInstances)) {
           cliffInstancer.importData(data.cliffInstances);
         }
         bakeBVH();
         syncTreeLodHeights();
+        syncPTreeHeights();
         ciRefreshProxy();
         const gBytes = HTEX_RES * HTEX_RES * 4;
         if (data.geminiGrassDensity && geminiDensityCtx) {
@@ -1846,6 +2060,10 @@
         if (lodFolderRef) lodFolderRef.hidden = editState.mode !== "pinelod";
       }
 
+      function syncPtreeFolderVisibility() {
+        if (ptreeFolderRef) ptreeFolderRef.hidden = editState.mode !== "proctrees";
+      }
+
       function syncPlaceFolderVisibility() {
         if (placeFolderRef) placeFolderRef.hidden = editState.mode !== "place";
       }
@@ -1874,6 +2092,7 @@
         else if (m === "ambientfx")
           el.textContent = "AMBIENT FX  [ X · Esc → view ]";
         else if (m === "pinelod") el.textContent = "TREE LOD  [ J · 1–8 slot · Shift erase · Esc → view ]";
+        else if (m === "proctrees") el.textContent = "PROC TREES";
         else if (m === "place")
           el.textContent = "PLACE MODE  [ O · W move · E rotate · R scale · Del remove · Esc → view ]";
         else if (m === "cliffs")
@@ -1935,6 +2154,7 @@
           );
         }
         syncLodFolderVisibility();
+        syncPtreeFolderVisibility();
         syncPlaceFolderVisibility();
         syncCliffsFolderVisibility();
         if (barrierFolderRef) barrierFolderRef.hidden = editState.mode !== "barrier";
@@ -1972,6 +2192,9 @@
           brushMarker.scale.setScalar(barrierBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
         } else if (editState.mode === "pinelod") {
           brushMarker.material.color.setHex(0x88bb44);
+          brushMarker.scale.setScalar(sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
+        } else if (editState.mode === "proctrees") {
+          brushMarker.material.color.setHex(0x77aa55);
           brushMarker.scale.setScalar(sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
         } else {
           brushMarker.material.color.setHex(0xffaa55);
@@ -2237,6 +2460,7 @@
         syncSeamsAfterSculpt(touched);
         rebuildAllActiveChunkMeshes();
         syncTreeLodHeights();
+        syncPTreeHeights();
         invalidateBvhHeight();
       }
 
@@ -2847,6 +3071,55 @@
         lodParams.chunksVisible = totalVisible;
       }
 
+      function updatePTreeInstances() {
+        if (!PTREE_SLOTS.some((s) => s.ready && s.chunks.size > 0)) return;
+        const posMoved =
+          _ptreeLastPos.distanceToSquared(camera.position) > _LOD_POS_THR * _LOD_POS_THR;
+        const camQ = camera.quaternion;
+        const rotChanged = Math.abs(_ptreeLastQuat.dot(camQ)) < _LOD_ROT_THR;
+        if (!_ptreeDirty && !posMoved && !rotChanged) return;
+        _ptreeDirty = false;
+        _ptreeLastPos.copy(camera.position);
+        _ptreeLastQuat.copy(camQ);
+        _ptreeProjMat.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+        _ptreeFrustum.setFromProjectionMatrix(_ptreeProjMat);
+        let totalVisible = 0;
+        let totalChunks = 0;
+        let totalTrunks = 0;
+        let totalLeaves = 0;
+        for (const slot of PTREE_SLOTS) {
+          if (!slot.ready || !slot.trunkDefs) continue;
+          totalTrunks += slot.positions.length;
+          for (const chunk of slot.chunks.values()) {
+            totalChunks++;
+            chunk.ims.forEach((g) => {
+              g.im.count = 0;
+            });
+            if (!_ptreeFrustum.intersectsSphere(chunk.sphere)) continue;
+            totalVisible++;
+            for (const { x, y, z, scale } of chunk.positions) {
+              _ptreeDummy.position.set(x, y, z);
+              _ptreeDummy.scale.setScalar(scale);
+              _ptreeDummy.rotation.set(0, Math.PI * 2 * ((x * 13.7 + z * 7.3) % 1), 0);
+              _ptreeDummy.updateMatrix();
+              chunk.ims.forEach(({ im, localMatrix }) => {
+                if (im.count >= PTREE_MAX_PER_CHUNK) return;
+                _ptreeFinalMat.multiplyMatrices(_ptreeDummy.matrix, localMatrix);
+                im.setMatrixAt(im.count++, _ptreeFinalMat);
+              });
+            }
+            chunk.ims.forEach((g) => {
+              if (g.im.count > 0) g.im.instanceMatrix.needsUpdate = true;
+            });
+          }
+          if (slot.leafMesh) totalLeaves += slot.leafMesh.count;
+        }
+        ptreeParams.totalTrunks = totalTrunks;
+        ptreeParams.totalLeaves = totalLeaves;
+        ptreeParams.chunks = totalChunks;
+        ptreeParams.chunksVisible = totalVisible;
+      }
+
       function loadTreeLodSlot(slot) {
         if (!slot.modelPath) return;
         const candidates = [slot.modelPath, slot.fallbackModelPath].filter(Boolean);
@@ -2907,6 +3180,202 @@
       }
 
       LOD_SLOTS.forEach((slot) => loadTreeLodSlot(slot));
+
+      // ── PROC TREES INIT (same as painter — user loads JSON + trunk GLB per slot) ──
+      function _ptreeBuildLeafMat(slot) {
+        const m = slot.preset.material || {};
+        const w = slot.preset.wind || {};
+        const mapNode = texture(new THREE.Texture());
+        slot.leafMapNode = mapNode;
+        const u = {
+          yMin: uniform(0.0),
+          yMax: uniform(10.0),
+          bottomColor: uniform(new THREE.Color(m.bottomColor || "#1d4d22")),
+          topColor: uniform(new THREE.Color(m.topColor || "#a8e360")),
+          alphaCutoff: uniform(m.alphaCutoff ?? 0.5),
+          sssColor: uniform(new THREE.Color(m.sssColor || "#ffea00")),
+          sssStr: uniform(m.sssStrength ?? 0.9),
+          sssPow: uniform(2.0),
+          rimColor: uniform(new THREE.Color(m.rimColor || "#ffffff")),
+          rimStr: uniform(m.rimStrength ?? 2.0),
+          rimPow: uniform(m.rimPower ?? 4.0),
+          aoStr: uniform(m.aoStrength ?? 0.65),
+          sunDir: uniform(new THREE.Vector3(5, 12, 4).normalize()),
+          windSpeed: uniform(w.windSpeed ?? 1.8),
+          windStr: uniform(w.windStrength ?? 0.25),
+          leafMipBias: uniform(ptreeParams.leafMipBias)
+        };
+        slot.uniforms = u;
+        const aRand = attribute("aRand", "vec2");
+        const posNode = Fn(() => {
+          const phase = aRand.x.mul(6.2832);
+          const tipFactor = positionLocal.y.add(0.5);
+          const sway = sin(uFTreeTime.mul(u.windSpeed).add(phase))
+            .mul(u.windStr)
+            .mul(tipFactor);
+          const swayZ = cos(uFTreeTime.mul(u.windSpeed.mul(0.8)).add(phase.mul(1.3)))
+            .mul(u.windStr.mul(0.5))
+            .mul(tipFactor);
+          return positionLocal.add(vec3(sway, float(0), swayZ));
+        })();
+        const colNode = Fn(() => {
+          const h1 = aRand.x;
+          const heightFactor = clamp(
+            positionWorld.y.sub(u.yMin).div(max(u.yMax.sub(u.yMin), float(0.001))),
+            float(0),
+            float(1)
+          );
+          let col = mix(u.bottomColor, u.topColor, heightFactor);
+          col = col.mul(h1.mul(float(0.24)).add(float(0.88)));
+          col = col.mul(mix(float(1.0).sub(u.aoStr), float(1.0), heightFactor.mul(0.8).add(0.2)));
+          const viewDir = normalize(cameraPosition.sub(positionWorld));
+          const n = normalWorld;
+          const sss = pow(max(dot(negate(u.sunDir), n), float(0)), u.sssPow).mul(u.sssStr);
+          col = col.add(u.sssColor.mul(sss));
+          const rim = pow(float(1.0).sub(max(dot(n, viewDir), float(0))), u.rimPow).mul(u.rimStr);
+          col = col.add(u.rimColor.mul(rim));
+          return clamp(col, float(0), float(2));
+        })();
+        const opNode = Fn(() =>
+          smoothstep(
+            u.alphaCutoff.sub(0.05),
+            u.alphaCutoff.add(0.05),
+            mapNode.bias(u.leafMipBias).r
+          )
+        )();
+        const mat = new MeshStandardNodeMaterial({
+          side: THREE.DoubleSide,
+          transparent: false,
+          alphaTest: 0.01,
+          roughness: 0.88,
+          metalness: 0.0,
+          depthWrite: true,
+          alphaToCoverage: true
+        });
+        mat.positionNode = posNode;
+        mat.colorNode = colNode;
+        mat.opacityNode = opNode;
+        mat.castShadowNode = Fn(() => {
+          const a = smoothstep(
+            u.alphaCutoff.sub(0.05),
+            u.alphaCutoff.add(0.05),
+            mapNode.bias(u.leafMipBias).r
+          );
+          a.lessThan(float(0.5)).discard();
+          return vec4(0, 0, 0, 1);
+        })();
+        slot.leafMat = mat;
+      }
+
+      function _ptreeLoadLeafTex(slot) {
+        if (!slot.leafTexPath || !slot.leafMapNode) return;
+        new THREE.TextureLoader().load(slot.leafTexPath, (tex) => {
+          tex.colorSpace = THREE.SRGBColorSpace;
+          tex.generateMipmaps = true;
+          tex.minFilter = THREE.LinearMipmapLinearFilter;
+          tex.magFilter = THREE.LinearFilter;
+          tex.anisotropy = renderer.capabilities?.maxAnisotropy ?? 8;
+          tex.needsUpdate = true;
+          slot.leafMapNode.value = tex;
+        });
+      }
+
+      _ptreeRebuildLeaves = function (slot) {
+        if (slot.leafMesh) {
+          scene.remove(slot.leafMesh);
+          slot.leafMesh.geometry.dispose();
+          slot.leafMesh = null;
+        }
+        if (!slot.leafMat || !slot.preset || slot.positions.length === 0) return;
+        const localLeaves = _ptreeSampleLeaves(slot.preset);
+        if (localLeaves.length === 0) return;
+        const n = slot.positions.length * localLeaves.length;
+        let yMin = Infinity;
+        let yMax = -Infinity;
+        slot.positions.forEach((p) => {
+          localLeaves.forEach((l) => {
+            const wy = p.y + l.ly * p.scale;
+            if (wy < yMin) yMin = wy;
+            if (wy > yMax) yMax = wy;
+          });
+        });
+        if (slot.uniforms) {
+          slot.uniforms.yMin.value = yMin - 0.3;
+          slot.uniforms.yMax.value = yMax + 0.5;
+        }
+        const geo = new THREE.PlaneGeometry(1, 1);
+        const randData = new Float32Array(n * 2);
+        for (let i = 0; i < n; i++) {
+          randData[i * 2] = Math.random();
+          randData[i * 2 + 1] = Math.random();
+        }
+        geo.setAttribute("aRand", new THREE.InstancedBufferAttribute(randData, 2));
+        const mesh = new THREE.InstancedMesh(geo, slot.leafMat, n);
+        mesh.frustumCulled = false;
+        mesh.castShadow = true;
+        mesh.receiveShadow = false;
+        const dummy = new THREE.Object3D();
+        let idx = 0;
+        slot.positions.forEach((p) => {
+          localLeaves.forEach((l) => {
+            dummy.position.set(p.x + l.lx * p.scale, p.y + l.ly * p.scale, p.z + l.lz * p.scale);
+            dummy.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+            const s = Math.max(0.05, l.leafSize * p.scale);
+            dummy.scale.setScalar(s);
+            dummy.updateMatrix();
+            mesh.setMatrixAt(idx++, dummy.matrix);
+          });
+        });
+        mesh.instanceMatrix.needsUpdate = true;
+        scene.add(mesh);
+        slot.leafMesh = mesh;
+      };
+
+      _rebuildPTreeChunks = function (slot) {
+        _markPtreeDirty();
+        if (!slot || !slot.ready || !slot.trunkDefs) return;
+        const byChunk = new Map();
+        slot.positions.forEach((pos) => {
+          const key = `${Math.floor(pos.x / PTREE_CHUNK_SIZE)},${Math.floor(pos.z / PTREE_CHUNK_SIZE)}`;
+          if (!byChunk.has(key)) byChunk.set(key, []);
+          byChunk.get(key).push(pos);
+        });
+        for (const key of [...slot.chunks.keys()]) {
+          if (!byChunk.has(key)) {
+            slot.chunks.get(key).ims.forEach((g) => scene.remove(g.im));
+            slot.chunks.delete(key);
+          }
+        }
+        for (const [key, positions] of byChunk) {
+          let chunk = slot.chunks.get(key);
+          if (!chunk) {
+            chunk = { positions: [], sphere: new THREE.Sphere(), ims: _makeChunkIMs(slot.trunkDefs) };
+            slot.chunks.set(key, chunk);
+          }
+          chunk.positions = positions;
+          let cx = 0;
+          let cy = 0;
+          let cz = 0;
+          positions.forEach((p) => {
+            cx += p.x;
+            cy += p.y;
+            cz += p.z;
+          });
+          cx /= positions.length;
+          cy /= positions.length;
+          cz /= positions.length;
+          let r = 0;
+          positions.forEach((p) => {
+            const d = Math.sqrt((p.x - cx) ** 2 + (p.y - cy) ** 2 + (p.z - cz) ** 2);
+            if (d > r) r = d;
+          });
+          chunk.sphere.set(new THREE.Vector3(cx, cy, cz), r + 20);
+        }
+      };
+
+      PTREE_SLOTS.forEach((slot) => {
+        slot.ready = true;
+      });
 
       /**
        * Removes T-junction cracks when this chunk is higher-res than an active neighbor:
@@ -3655,6 +4124,7 @@
 
         finalizeSculpt(brushedChunkKeys, null);
         syncTreeLodHeights();
+        syncPTreeHeights();
         rebuildAllActiveChunkMeshes();
         if (editorPane) editorPane.refresh();
       }
@@ -4156,6 +4626,7 @@
         const seamR = radius + Math.hypot(dx, dz) * 0.5 + step * 2;
         finalizeSculpt(brushedChunkKeys, { wx: midx, wz: midz, radius: seamR });
         syncTreeLodHeights();
+        syncPTreeHeights();
       }
 
       function applySculptAt(worldPoint, event) {
@@ -4461,7 +4932,7 @@
             event.preventDefault();
             assignLodSlot(dk - 1);
           }
-        } else {
+        } else if (editState.mode !== "proctrees") {
           if (event.key === "1") editState.paintChannel = 0;
           if (event.key === "2") editState.paintChannel = 1;
           if (event.key === "3") editState.paintChannel = 2;
@@ -4494,6 +4965,7 @@
           editState.mode === "ambientfx" ||
           editState.mode === "barrier" ||
           editState.mode === "pinelod" ||
+          editState.mode === "proctrees" ||
           (editState.mode === "sculpt" &&
             (PARAMS.sculptTool === "brush" ||
               PARAMS.sculptTool === "ramp" ||
@@ -4514,7 +4986,8 @@
           editState.mode === "fleurs" ||
           editState.mode === "ambientfx" ||
           editState.mode === "barrier" ||
-          editState.mode === "pinelod"
+          editState.mode === "pinelod" ||
+          editState.mode === "proctrees"
         )
           syncBrushVisual();
 
@@ -4562,6 +5035,10 @@
         if (editState.isPointerDown && editState.pointerAction === "pinelod" && hit) {
           editState.paintErase = event.shiftKey;
           paintLODAt(hit.x, hit.z, editState.paintErase);
+        }
+        if (editState.isPointerDown && editState.pointerAction === "proctrees" && hit) {
+          editState.paintErase = event.shiftKey;
+          paintPTreeAt(hit.x, hit.z, editState.paintErase);
         }
       });
 
@@ -4726,6 +5203,15 @@
           controls.enabled = false;
           if (hit) paintLODAt(hit.x, hit.z, editState.paintErase);
         }
+
+        if (editState.mode === "proctrees" && event.button === 0) {
+          event.preventDefault();
+          editState.isPointerDown = true;
+          editState.pointerAction = "proctrees";
+          editState.paintErase = event.shiftKey;
+          controls.enabled = false;
+          if (hit) paintPTreeAt(hit.x, hit.z, editState.paintErase);
+        }
       });
 
       renderer.domElement.addEventListener("contextmenu", (e) => {
@@ -4757,7 +5243,10 @@
           editState.sculptSkipFirstMoveDup = false;
           if (!playMode) controls.enabled = true;
         }
-        if (!playMode && pa === "sculpt") syncTreeLodHeights();
+        if (!playMode && pa === "sculpt") {
+          syncTreeLodHeights();
+          syncPTreeHeights();
+        }
       });
 
       document.getElementById("load-terrain-input").addEventListener("change", async (e) => {
@@ -4813,6 +5302,15 @@
           editState.mode === "pinelod"
             ? `tree LOD: slot ${activeLodSlot + 1} ${LOD_SLOTS[activeLodSlot]?.name ?? ""}  total=${lodParams.totalTrees}  brush r=${sculptBrushWorldRadius().toFixed(1)}${treeLodFrustum}`
             : `tree LOD: ${lodParams.totalTrees} trees (J to paint)${treeLodFrustum}`;
+        const totalPtreeChunks = PTREE_SLOTS.reduce((s, sl) => s + sl.chunks.size, 0);
+        const procFrustum =
+          totalPtreeChunks > 0
+            ? `  Proc frustum: ${ptreeParams.chunksVisible}/${totalPtreeChunks} chunks`
+            : "";
+        const procTreeHud =
+          editState.mode === "proctrees"
+            ? `proc trees: slot ${activePTreeSlot + 1} ${PTREE_SLOTS[activePTreeSlot]?.name ?? ""}  trunks=${ptreeParams.totalTrunks}  leaves=${ptreeParams.totalLeaves}  brush r=${sculptBrushWorldRadius().toFixed(1)}${procFrustum}`
+            : `proc trees: ${ptreeParams.totalTrunks} trunks (Mode → Proc Trees)${procFrustum}`;
         hudEl.textContent =
 `splatmap-chunks.html (splat + sculpt)
 fps: ${frameState.fps.toFixed(1)}   frame: ${dtMs.toFixed(2)} ms
@@ -4821,6 +5319,7 @@ terrain tris: ${Math.round(tris).toLocaleString()}
 active chunks: ${activeChunks.size}  (dist LOD: ${PARAMS.terrainLodEnabled ? "ON" : "OFF"})  (chunk cull: ${PARAMS.terrainChunkCulling ? "ON" : "OFF — full world"})  L0=${lodL0} L1=${lodL1} L2=${lodL2}
 mode: ${playMode ? "PLAY (WASD · Esc/F exit)" : editState.mode}  paint ch=${chName}  terrain: ${TERRAIN_SURFACE_LABEL[PARAMS.terrainSurface] ?? PARAMS.terrainSurface}
 ${treeLodHud}
+${procTreeHud}
 chunk debug: ${debugChunkView ? "ON" : "OFF"}
 chunks saved: ${chunkDataMap.size} height / ${chunkSplatMap.size} splat
 dirty chunks: ${dirtyChunks.size}
@@ -5206,6 +5705,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
               "Ambient FX [X]": "ambientfx",
               Barrier: "barrier",
               "Tree LOD [J]": "pinelod",
+              "Proc Trees": "proctrees",
               "Place [O]": "place",
               "Cliffs [C]": "cliffs",
               "Play [F]": "play"
@@ -5522,6 +6022,149 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
         });
         assignLodSlot(0);
 
+        const ptreeFolder = pane.addFolder({ title: "Proc Trees", expanded: true });
+        ptreeFolderRef = ptreeFolder;
+        ptreeFolder.hidden = true;
+
+        const _ptreeSlotFolder = ptreeFolder.addFolder({ title: "Active slot  [ 1–4 ]", expanded: true });
+        PTREE_SLOTS.forEach((slot, i) => {
+          _ptreeSlotFolder.addButton({ title: `${i + 1}: ${slot.name}` }).on("click", () => {
+            activePTreeSlot = i;
+            ptreeParams.slotName = slot.name;
+            ptreeParams.minSpacing = slot.minSpacing;
+            ptreeParams.scaleMin = slot.scaleMin;
+            ptreeParams.scaleMax = slot.scaleMax;
+            ptreeParams.treesPerStroke = slot.treesPerStroke;
+            pane.refresh();
+          });
+        });
+        ptreeFolder.addBinding(ptreeParams, "slotName", { label: "Painting slot", readonly: true });
+        ptreeFolder
+          .addBinding(ptreeParams, "minSpacing", { label: "Min spacing", min: 0, max: 20, step: 0.5 })
+          .on("change", (ev) => {
+            PTREE_SLOTS[activePTreeSlot].minSpacing = ev.value;
+          });
+        ptreeFolder
+          .addBinding(ptreeParams, "scaleMin", { label: "Scale min", min: 0.1, max: 5.0, step: 0.05 })
+          .on("change", (ev) => {
+            PTREE_SLOTS[activePTreeSlot].scaleMin = ev.value;
+          });
+        ptreeFolder
+          .addBinding(ptreeParams, "scaleMax", { label: "Scale max", min: 0.1, max: 5.0, step: 0.05 })
+          .on("change", (ev) => {
+            PTREE_SLOTS[activePTreeSlot].scaleMax = ev.value;
+          });
+        ptreeFolder
+          .addBinding(ptreeParams, "treesPerStroke", { label: "Trees per stroke", min: 1, max: 20, step: 1 })
+          .on("change", (ev) => {
+            PTREE_SLOTS[activePTreeSlot].treesPerStroke = ev.value;
+          });
+        ptreeFolder.addBinding(ptreeParams, "leafMipBias", { label: "Leaf mip bias", min: -2, max: 1, step: 0.05 }).on(
+          "change",
+          (ev) => {
+            PTREE_SLOTS.forEach((s) => {
+              if (s.uniforms?.leafMipBias) s.uniforms.leafMipBias.value = ev.value;
+            });
+          }
+        );
+        ptreeFolder.addBinding(ptreeParams, "totalTrunks", { label: "Total trunks", readonly: true });
+        ptreeFolder.addBinding(ptreeParams, "totalLeaves", { label: "Total leaves", readonly: true });
+        ptreeFolder.addBinding(ptreeParams, "chunksVisible", { label: "Chunks visible", readonly: true });
+        ptreeFolder.addBinding(ptreeParams, "chunks", { label: "Chunks total", readonly: true });
+
+        ptreeFolder.addButton({ title: "Load Preset JSON (active slot)" }).on("click", () => {
+          const inp = document.createElement("input");
+          inp.type = "file";
+          inp.accept = ".json";
+          inp.onchange = () => {
+            if (!inp.files[0]) return;
+            const slot = PTREE_SLOTS[activePTreeSlot];
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+              try {
+                slot.preset = JSON.parse(ev.target.result);
+                slot.leafTexPath = slot.preset.leafTexFile
+                  ? `textures/leaves/${slot.preset.leafTexFile}`
+                  : "textures/leaves/foliage_alpha3.png";
+                _ptreeBuildLeafMat(slot);
+                _ptreeLoadLeafTex(slot);
+                if (slot.positions.length > 0) _ptreeRebuildLeaves(slot);
+                alert("Proc preset applied to slot: " + slot.name);
+              } catch (e) {
+                alert("Invalid preset JSON: " + e.message);
+              }
+            };
+            reader.readAsText(inp.files[0]);
+          };
+          inp.click();
+        });
+
+        ptreeFolder.addButton({ title: "Load Trunk GLB (active slot)" }).on("click", () => {
+          const inp = document.createElement("input");
+          inp.type = "file";
+          inp.accept = ".glb,.gltf";
+          inp.onchange = () => {
+            if (!inp.files[0]) return;
+            const slot = PTREE_SLOTS[activePTreeSlot];
+            const url = URL.createObjectURL(inp.files[0]);
+            gltfLoader.load(
+              url,
+              (g) => {
+                slot.trunkDefs = _extractLODDefs(g);
+                slot.trunkPath = inp.files[0].name;
+                slot.ready = true;
+                URL.revokeObjectURL(url);
+                _rebuildPTreeChunks(slot);
+                _ptreeRebuildLeaves(slot);
+              },
+              undefined,
+              (err) => {
+                URL.revokeObjectURL(url);
+                console.error("Proc trunk load error:", err);
+              }
+            );
+          };
+          inp.click();
+        });
+
+        ptreeFolder.addButton({ title: "Load Leaf Texture (active slot)" }).on("click", () => {
+          const inp = document.createElement("input");
+          inp.type = "file";
+          inp.accept = "image/*";
+          inp.onchange = () => {
+            if (!inp.files[0]) return;
+            const slot = PTREE_SLOTS[activePTreeSlot];
+            if (!slot.leafMapNode) return;
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+              const img = new Image();
+              img.onload = () => {
+                const tex = new THREE.Texture(img);
+                tex.colorSpace = THREE.SRGBColorSpace;
+                tex.needsUpdate = true;
+                slot.leafMapNode.value = tex;
+              };
+              img.src = ev.target.result;
+            };
+            reader.readAsDataURL(inp.files[0]);
+          };
+          inp.click();
+        });
+
+        ptreeFolder.addButton({ title: "Clear active slot" }).on("click", () => {
+          const slot = PTREE_SLOTS[activePTreeSlot];
+          slot.positions = [];
+          _rebuildPTreeChunks(slot);
+          _ptreeRebuildLeaves(slot);
+        });
+        ptreeFolder.addButton({ title: "Clear ALL slots" }).on("click", () => {
+          PTREE_SLOTS.forEach((slot) => {
+            slot.positions = [];
+            _rebuildPTreeChunks(slot);
+            _ptreeRebuildLeaves(slot);
+          });
+        });
+
         const placeFolder = pane.addFolder({
           title: "Place  [ W move · E rotate · R scale · Del remove ]",
           expanded: false
@@ -5629,6 +6272,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
           .on("click", () => {
             bakeBVH();
             syncTreeLodHeights();
+            syncPTreeHeights();
             ciRefreshProxy();
             pane.refresh();
           });
@@ -6710,6 +7354,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
         brushFolderRef = brushFolder;
         setEditMode(PARAMS.mode);
         syncLodFolderVisibility();
+        syncPtreeFolderVisibility();
         syncPlaceFolderVisibility();
         syncAmbientFXFolderVisibility();
       }
@@ -6753,6 +7398,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
 
         const dtSec = Math.min(0.05, dt * 0.001);
         appTimeSec += dtSec;
+        uFTreeTime.value = appTimeSec;
 
         if (playMode) {
           let mx = 0;
@@ -6862,14 +7508,16 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
         }
 
         updateLODInstances();
+        updatePTreeInstances();
         {
           const now = performance.now();
           const totalLodChunks = LOD_SLOTS.reduce((s, sl) => s + sl.chunks.size, 0);
+          const totalPtreeChunks = PTREE_SLOTS.reduce((s, sl) => s + sl.chunks.size, 0);
           if (
-            lodFolderRef &&
-            totalLodChunks > 0 &&
             editorPane &&
-            now - _treeLodStatsPaneRefreshMs > TREE_LOD_STATS_PANE_MS
+            now - _treeLodStatsPaneRefreshMs > TREE_LOD_STATS_PANE_MS &&
+            (totalLodChunks > 0 || totalPtreeChunks > 0) &&
+            (lodFolderRef || ptreeFolderRef)
           ) {
             _treeLodStatsPaneRefreshMs = now;
             editorPane.refresh();
