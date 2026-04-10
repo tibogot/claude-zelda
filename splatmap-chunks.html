@@ -90,6 +90,10 @@
         background: rgba(160, 80, 140, 0.92);
         color: #ffe8f5;
       }
+      #mode-badge.ambientfx {
+        background: rgba(0, 160, 180, 0.92);
+        color: #c0fffa;
+      }
       #mode-badge.pinelod {
         background: rgba(100, 140, 60, 0.92);
         color: #fff;
@@ -170,6 +174,7 @@
         setupGrassPatches as geminiSetupPatches
       } from "./grass-gemini.js";
       import { createFleurSystem, FLEUR_PRESETS } from "./fleur-painter.js";
+      import { createAmbientFXSystem } from "./ambientfx-painter.js";
 
       const PI = Math.PI;
 
@@ -817,6 +822,22 @@
       let fleurFolderRef = null;
       let fleurEraseMode = false;
       let fleurActiveSlot = 0;
+
+      let ambientFXSystem = null;
+      let ambientFXErase = false;
+      let ambientFXFolderRef = null;
+      const ambientFXParams = {
+        effectType: "butterflies",
+        emitterRadius: 12,
+        density: 3,
+        flapSpeed: 8.0,
+        flapAngle: 0.8,
+        glideRatio: 0.45,
+        showRings: true,
+        windX: 1.0,
+        windZ: 0.3,
+        windStrength: 1.0
+      };
       const fleurParams = {
         perStroke: 20,
         minSpacing: 0.4,
@@ -994,6 +1015,21 @@
         }
         if (geminiCliffDensityTex) geminiCliffDensityTex.needsUpdate = true;
         geminiGrassHasPaintedDensity = true;
+      }
+
+      function paintAmbientFXAt(wx, wz, erase) {
+        if (!ambientFXSystem) return;
+        if (erase) {
+          ambientFXSystem.removeInBrush(wx, wz, ambientFXParams.emitterRadius);
+        } else {
+          ambientFXSystem.addInBrush(
+            wx,
+            wz,
+            ambientFXParams.emitterRadius,
+            ambientFXParams.effectType,
+            ambientFXParams.density
+          );
+        }
       }
 
       function paintFleurAt(wx, wz, erase) {
@@ -1431,7 +1467,8 @@
             windAmp: fleurParams.windAmp,
             windSpeed: fleurParams.windSpeed
           },
-          fog: JSON.parse(JSON.stringify(PARAMS.fog))
+          fog: JSON.parse(JSON.stringify(PARAMS.fog)),
+          ambientFX: ambientFXSystem ? ambientFXSystem.getEmitters() : []
         };
         if (geminiDensityCtx) {
           const gpix = geminiDensityCtx.getImageData(0, 0, HTEX_RES, HTEX_RES).data;
@@ -1534,7 +1571,11 @@
         if (data.fleurs && Array.isArray(data.fleurs) && fleurSystem) {
           fleurSystem.setPositions(data.fleurs);
         }
+        if (data.ambientFX && Array.isArray(data.ambientFX) && ambientFXSystem) {
+          ambientFXSystem.setEmitters(data.ambientFX);
+        }
         if (fleurSystem) fleurSystem.syncHeights();
+        if (ambientFXSystem) ambientFXSystem.syncHeights();
       }
 
       function rebuildAllActiveChunkMeshes() {
@@ -1647,6 +1688,10 @@
         if (fleurFolderRef) fleurFolderRef.hidden = editState.mode !== "fleurs";
       }
 
+      function syncAmbientFXFolderVisibility() {
+        if (ambientFXFolderRef) ambientFXFolderRef.hidden = editState.mode !== "ambientfx";
+      }
+
       function syncLodFolderVisibility() {
         if (lodFolderRef) lodFolderRef.hidden = editState.mode !== "pinelod";
       }
@@ -1676,6 +1721,8 @@
         else if (m === "geminicliffgrass")
           el.textContent = "GEMINI CLIFF GRASS  [ Mode menu · Esc → view ]";
         else if (m === "fleurs") el.textContent = "FLEURS MODE  [ M · Esc → view ]";
+        else if (m === "ambientfx")
+          el.textContent = "AMBIENT FX  [ X · Esc → view ]";
         else if (m === "pinelod") el.textContent = "TREE LOD  [ J · 1–8 slot · Shift erase · Esc → view ]";
         else if (m === "place")
           el.textContent = "PLACE MODE  [ O · W move · E rotate · R scale · Del remove · Esc → view ]";
@@ -1730,6 +1777,12 @@
         syncBrushVisual();
         syncGeminiFolderVisibility();
         syncFleurFolderVisibility();
+        syncAmbientFXFolderVisibility();
+        if (ambientFXSystem) {
+          ambientFXSystem.setRingsVisible(
+            editState.mode === "ambientfx" && ambientFXParams.showRings
+          );
+        }
         syncLodFolderVisibility();
         syncPlaceFolderVisibility();
         syncCliffsFolderVisibility();
@@ -1758,6 +1811,9 @@
         } else if (editState.mode === "fleurs") {
           brushMarker.material.color.setHex(0xff66aa);
           brushMarker.scale.setScalar(geminiBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
+        } else if (editState.mode === "ambientfx") {
+          brushMarker.material.color.setHex(0x00d4c4);
+          brushMarker.scale.setScalar(ambientFXParams.emitterRadius / SCULPT_RING_GEOM_BASE);
         } else if (editState.mode === "pinelod") {
           brushMarker.material.color.setHex(0x88bb44);
           brushMarker.scale.setScalar(sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
@@ -2320,6 +2376,7 @@
         globalHeightTex.needsUpdate = true;
         rebuildGeminiTerrainOnlyHeightTexture();
         if (fleurSystem) fleurSystem.syncHeights();
+        if (ambientFXSystem) ambientFXSystem.syncHeights();
       }
 
       function rebuildGeminiTerrainOnlyHeightTexture() {
@@ -4198,6 +4255,11 @@
           setEditMode(editState.mode === "fleurs" ? "view" : "fleurs");
           return;
         }
+        if (event.code === "KeyX") {
+          event.preventDefault();
+          setEditMode(editState.mode === "ambientfx" ? "view" : "ambientfx");
+          return;
+        }
         if (editState.mode === "place" || editState.mode === "cliffs") {
           if (event.code === "KeyW") {
             event.preventDefault();
@@ -4270,6 +4332,7 @@
           editState.mode === "geminigrass" ||
           editState.mode === "geminicliffgrass" ||
           editState.mode === "fleurs" ||
+          editState.mode === "ambientfx" ||
           editState.mode === "pinelod" ||
           (editState.mode === "sculpt" &&
             (PARAMS.sculptTool === "brush" ||
@@ -4288,6 +4351,7 @@
           editState.mode === "geminigrass" ||
           editState.mode === "geminicliffgrass" ||
           editState.mode === "fleurs" ||
+          editState.mode === "ambientfx" ||
           editState.mode === "pinelod"
         )
           syncBrushVisual();
@@ -4326,6 +4390,9 @@
         }
         if (editState.isPointerDown && editState.pointerAction === "fleurs" && hit) {
           paintFleurAt(hit.x, hit.z, editState.paintErase);
+        }
+        if (editState.isPointerDown && editState.pointerAction === "ambientfx" && hit) {
+          paintAmbientFXAt(hit.x, hit.z, ambientFXErase || event.shiftKey);
         }
         if (editState.isPointerDown && editState.pointerAction === "pinelod" && hit) {
           editState.paintErase = event.shiftKey;
@@ -4401,6 +4468,16 @@
           editState.paintErase = fleurEraseMode || event.shiftKey;
           controls.enabled = false;
           if (hit) paintFleurAt(hit.x, hit.z, editState.paintErase);
+          return;
+        }
+
+        if (editState.mode === "ambientfx" && event.button === 0) {
+          event.preventDefault();
+          editState.isPointerDown = true;
+          editState.pointerAction = "ambientfx";
+          editState.paintErase = ambientFXErase || event.shiftKey;
+          controls.enabled = false;
+          if (hit) paintAmbientFXAt(hit.x, hit.z, ambientFXErase || event.shiftKey);
           return;
         }
 
@@ -4922,6 +4999,12 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
         _syncFleurInteractionToSystem();
       });
 
+      ambientFXSystem = createAmbientFXSystem(scene, getWorldHeight);
+      ambientFXSystem.setFlapSpeed(ambientFXParams.flapSpeed);
+      ambientFXSystem.setFlapAngle(ambientFXParams.flapAngle);
+      ambientFXSystem.setGlideRatio(ambientFXParams.glideRatio);
+      ambientFXSystem.setRingsVisible(false);
+
       {
         const pane = new Pane({ title: "Chunk terrain" });
         editorPane = pane;
@@ -4945,6 +5028,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
               "Gemini Grass [G]": "geminigrass",
               "Gemini Cliff Grass": "geminicliffgrass",
               "Fleurs [M]": "fleurs",
+              "Ambient FX [X]": "ambientfx",
               "Tree LOD [J]": "pinelod",
               "Place [O]": "place",
               "Cliffs [C]": "cliffs",
@@ -6314,11 +6398,115 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
           e.target.value = "";
         });
 
+        const ambientFXFolder = pane.addFolder({ title: "Ambient FX  [ X ]", expanded: true });
+        ambientFXFolderRef = ambientFXFolder;
+        ambientFXFolder.hidden = true;
+
+        const ambientFXErasePARAMS = { erase: false };
+        ambientFXFolder.addBinding(ambientFXErasePARAMS, "erase", { label: "Erase (or Shift)" }).on("change", (e) => {
+          ambientFXErase = e.value;
+        });
+
+        ambientFXFolder.addBinding(ambientFXParams, "effectType", {
+          label: "Effect",
+          options: {
+            Butterflies: "butterflies"
+          }
+        });
+
+        ambientFXFolder.addBlade({ view: "separator" });
+
+        ambientFXFolder
+          .addBinding(ambientFXParams, "emitterRadius", {
+            label: "Emitter radius",
+            min: 4,
+            max: 40,
+            step: 1
+          })
+          .on("change", () => syncBrushVisual());
+        ambientFXFolder.addBinding(ambientFXParams, "density", {
+          label: "Density",
+          min: 1,
+          max: 12,
+          step: 1
+        });
+
+        ambientFXFolder.addBlade({ view: "separator" });
+
+        const ambientFXButterflyFolder = ambientFXFolder.addFolder({
+          title: "Butterfly params",
+          expanded: false
+        });
+        ambientFXButterflyFolder
+          .addBinding(ambientFXParams, "flapSpeed", {
+            label: "Flap Speed",
+            min: 2,
+            max: 20,
+            step: 0.5
+          })
+          .on("change", (e) => {
+            if (ambientFXSystem) ambientFXSystem.setFlapSpeed(e.value);
+          });
+        ambientFXButterflyFolder
+          .addBinding(ambientFXParams, "flapAngle", {
+            label: "Flap Angle",
+            min: 0.1,
+            max: 1.5,
+            step: 0.05
+          })
+          .on("change", (e) => {
+            if (ambientFXSystem) ambientFXSystem.setFlapAngle(e.value);
+          });
+        ambientFXButterflyFolder
+          .addBinding(ambientFXParams, "glideRatio", {
+            label: "Glide Ratio",
+            min: 0,
+            max: 0.8,
+            step: 0.05
+          })
+          .on("change", (e) => {
+            if (ambientFXSystem) ambientFXSystem.setGlideRatio(e.value);
+          });
+
+        ambientFXFolder.addBlade({ view: "separator" });
+
+        ambientFXFolder.addBinding(ambientFXParams, "windStrength", {
+          label: "Wind Strength",
+          min: 0,
+          max: 3,
+          step: 0.1
+        });
+        ambientFXFolder.addBinding(ambientFXParams, "windX", {
+          label: "Wind X",
+          min: -3,
+          max: 3,
+          step: 0.1
+        });
+        ambientFXFolder.addBinding(ambientFXParams, "windZ", {
+          label: "Wind Z",
+          min: -3,
+          max: 3,
+          step: 0.1
+        });
+
+        ambientFXFolder.addBlade({ view: "separator" });
+
+        ambientFXFolder
+          .addBinding(ambientFXParams, "showRings", { label: "Show emitter rings" })
+          .on("change", (e) => {
+            if (ambientFXSystem && editState.mode === "ambientfx") ambientFXSystem.setRingsVisible(e.value);
+          });
+
+        ambientFXFolder.addButton({ title: "Clear all emitters" }).on("click", () => {
+          if (ambientFXSystem) ambientFXSystem.clear();
+        });
+
         playFolderRef = playFolder;
         brushFolderRef = brushFolder;
         setEditMode(PARAMS.mode);
         syncLodFolderVisibility();
         syncPlaceFolderVisibility();
+        syncAmbientFXFolderVisibility();
       }
 
       renderer.domElement.addEventListener(
@@ -6412,6 +6600,16 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
         if (fleurSystem) {
           if (playMode) fleurSystem.update(playerPos, appTimeSec);
           else fleurSystem.update(camera.position, appTimeSec);
+        }
+
+        if (ambientFXSystem) {
+          ambientFXSystem.update(
+            dtSec,
+            appTimeSec,
+            ambientFXParams.windX,
+            ambientFXParams.windZ,
+            ambientFXParams.windStrength
+          );
         }
 
         if (now - frameState.lastChunkUpdateMs > 120) {
