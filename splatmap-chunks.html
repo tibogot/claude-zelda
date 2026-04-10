@@ -103,12 +103,15 @@
     <div id="hud">booting...</div>
     <div id="mode-badge" class="view">VIEW MODE</div>
     <input type="file" id="load-terrain-input" accept="application/json,.json" style="display: none" />
+    <input type="file" id="hdr-file-input" accept=".hdr,.exr,image/*" style="display: none" />
 
     <script type="module">
       import * as THREE from "three";
       import { Fn, texture, vec3, vec2, mix, positionLocal, float, uniform } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+      import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
+      import { createStylizedSky } from "./stylized-sky.js";
       import { Pane } from "tweakpane";
       import { createTileMaterial } from "./tileMaterial.js";
       import { createChunkPainterGroundMaterial } from "./chunkPainterGroundMaterial.js";
@@ -157,10 +160,15 @@
          */
         sculptClampMin: -200,
         sculptClampMax: 2000,
-        /** brush: LMB raise · Shift+LMB lower · Ctrl+LMB smooth · Alt flatten (like painter) · ramp: two LMB */
+        /** brush: LMB raise · Shift+LMB lower · Ctrl+LMB smooth · Alt flatten (like painter) · ramp: two LMB · R clears ramp A */
         sculptTool: "brush",
         /** Raise/lower only — same shapes as splatmap-painter Brush → Sculpt shape */
         sculptBrush: "smooth",
+        /** Noise brush (sculpt tool = noise) — splatmap-painter sculptAt */
+        noiseScale: 2.5,
+        noiseOctaves: 2,
+        terraceStep: 8,
+        terraceSharpness: 0.7,
         paintBrush: "smooth",
         brushFalloff: "smooth",
         light: {
@@ -175,6 +183,7 @@
           exposure: 0.5
         },
         sky: {
+          mode: "physical",
           turbidity: 2,
           rayleigh: 1.5,
           mie: 0.005,
@@ -198,6 +207,16 @@
           additive: false,
           tiltX: 0,
           tiltZ: 0
+        },
+        /** Hydraulic erosion — same fields as splatmap-painter10bvh+post.html */
+        erosion: {
+          iterations: 30000,
+          erosionRate: 0.3,
+          depositionRate: 0.3,
+          evaporation: 0.015,
+          inertia: 0.1,
+          capacity: 6,
+          radius: 3
         }
       };
 
@@ -211,6 +230,7 @@
       let brushSize = PARAMS.brushSize;
       let brushStr = PARAMS.brushStrength;
       let geminiGrassEraseMode = false;
+      let playMode = false;
 
       const CONFIG = {
         worldSize: 1600,
@@ -269,7 +289,15 @@
       renderer.setSize(window.innerWidth, window.innerHeight);
       renderer.outputColorSpace = THREE.SRGBColorSpace;
       document.body.appendChild(renderer.domElement);
+      renderer.domElement.tabIndex = 0;
+      renderer.domElement.style.outline = "none";
+      renderer.domElement.addEventListener("pointerdown", () => {
+        if (!playMode) renderer.domElement.focus({ preventScroll: true });
+      });
       await renderer.init();
+      // Same as splatmap-painter10bvh+post.html init — SkyMesh is HDR; without ACES it looks flat/wrong.
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = PARAMS.light.exposure;
 
       function sunDirectionFromAngles(azDeg, elDeg, target = new THREE.Vector3()) {
         const az = (azDeg * Math.PI) / 180;
@@ -340,9 +368,49 @@
       };
       rebuildSkyEnv();
       scene.environmentIntensity = PARAMS.light.envIntensity;
-      renderer.toneMappingExposure = PARAMS.light.exposure;
 
-      /** Match painter: live sky = SkyMesh uniforms each frame; PMREM env only from initial rebuildSkyEnv() (not per slider). */
+      const stylizedSky = createStylizedSky();
+      scene.add(stylizedSky.mesh);
+
+      let hdrTexture = null;
+      const setSkyMode = (mode) => {
+        PARAMS.sky.mode = mode;
+        sky.visible = false;
+        stylizedSky.mesh.visible = false;
+        scene.background = null;
+        if (mode === "physical") {
+          sky.visible = true;
+          rebuildSkyEnv();
+        } else if (mode === "stylized") {
+          stylizedSky.mesh.visible = true;
+        } else if (mode === "hdr") {
+          if (hdrTexture) {
+            scene.background = hdrTexture;
+            scene.environment = hdrTexture;
+          }
+        }
+        if (editorPane) editorPane.refresh();
+      };
+
+      const rgbeLoader = new HDRLoader();
+      document.getElementById("hdr-file-input").addEventListener("change", (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        const url = URL.createObjectURL(file);
+        rgbeLoader.load(url, (tex) => {
+          tex.mapping = THREE.EquirectangularReflectionMapping;
+          if (hdrTexture) hdrTexture.dispose();
+          hdrTexture = tex;
+          if (PARAMS.sky.mode === "hdr") {
+            scene.background = hdrTexture;
+            scene.environment = hdrTexture;
+          }
+          URL.revokeObjectURL(url);
+        });
+        e.target.value = "";
+      });
+
+      /** Match painter: physical = SkyMesh uniforms each frame; PMREM from rebuildSkyEnv when physical. */
       function syncLightAndSkyFromParams() {
         sunDirectionFromAngles(PARAMS.light.sunAzimuth, PARAMS.light.sunElevation, sunDir);
         sun.position.copy(sunDir).multiplyScalar(600);
@@ -351,14 +419,16 @@
         hemi.color.set(PARAMS.light.hemiSkyColor);
         hemi.groundColor.set(PARAMS.light.hemiGroundColor);
         hemi.intensity = PARAMS.light.hemiIntensity;
-        sky.turbidity.value = PARAMS.sky.turbidity;
-        sky.rayleigh.value = PARAMS.sky.rayleigh;
-        sky.mieCoefficient.value = PARAMS.sky.mie;
-        sky.mieDirectionalG.value = PARAMS.sky.mieG;
-        sky.cloudCoverage.value = PARAMS.sky.cloudCoverage;
-        sky.cloudDensity.value = PARAMS.sky.cloudDensity;
-        sky.cloudElevation.value = PARAMS.sky.cloudElevation;
-        sky.sunPosition.value.copy(sunDir);
+        if (PARAMS.sky.mode === "physical") {
+          sky.turbidity.value = PARAMS.sky.turbidity;
+          sky.rayleigh.value = PARAMS.sky.rayleigh;
+          sky.mieCoefficient.value = PARAMS.sky.mie;
+          sky.mieDirectionalG.value = PARAMS.sky.mieG;
+          sky.cloudCoverage.value = PARAMS.sky.cloudCoverage;
+          sky.cloudDensity.value = PARAMS.sky.cloudDensity;
+          sky.cloudElevation.value = PARAMS.sky.cloudElevation;
+          sky.sunPosition.value.copy(sunDir);
+        }
         scene.environmentIntensity = PARAMS.light.envIntensity;
         renderer.toneMappingExposure = PARAMS.light.exposure;
       }
@@ -656,6 +726,90 @@
       const chunkSplatMap = new Map();
       const dirtyChunks = new Set();
 
+      const MAX_TERRAIN_UNDO = 25;
+      const terrainUndoStack = [];
+      const terrainRedoStack = [];
+
+      function captureTerrainUndoSnapshot() {
+        const heights = new Map();
+        for (const [k, arr] of chunkDataMap) {
+          heights.set(k, new Float32Array(arr));
+        }
+        const splats = new Map();
+        const sRes = CONFIG.splatRes;
+        for (const [k, splat] of chunkSplatMap) {
+          const img = splat.ctx.getImageData(0, 0, sRes, sRes);
+          splats.set(k, new Uint8ClampedArray(img.data));
+        }
+        let geminiDensity = null;
+        if (geminiDensityCtx) {
+          const g = geminiDensityCtx.getImageData(0, 0, HTEX_RES, HTEX_RES);
+          geminiDensity = new Uint8ClampedArray(g.data);
+        }
+        return { heights, splats, geminiDensity };
+      }
+
+      function restoreTerrainUndoSnapshot(snap) {
+        for (const k of [...chunkSplatMap.keys()]) {
+          if (!snap.splats.has(k)) disposeChunkSplatEntry(k);
+        }
+        for (const k of [...chunkDataMap.keys()]) {
+          if (!snap.heights.has(k)) chunkDataMap.delete(k);
+        }
+        for (const [k, arr] of snap.heights) {
+          chunkDataMap.set(k, new Float32Array(arr));
+        }
+        const sRes = CONFIG.splatRes;
+        for (const [k, u8] of snap.splats) {
+          const { cx, cz } = parseChunkKey(k);
+          const splat = ensureChunkSplat(cx, cz);
+          const id = new ImageData(new Uint8ClampedArray(u8), sRes, sRes);
+          splat.ctx.putImageData(id, 0, 0);
+          splat.tex.needsUpdate = true;
+        }
+        if (snap.geminiDensity && geminiDensityCtx) {
+          const id = new ImageData(new Uint8ClampedArray(snap.geminiDensity), HTEX_RES, HTEX_RES);
+          geminiDensityCtx.putImageData(id, 0, 0);
+          if (geminiDensityTex) geminiDensityTex.needsUpdate = true;
+        }
+        rebuildAllActiveChunkMeshes();
+        refreshActiveChunkMaterials();
+        heightTexDirty = true;
+        dirtyChunks.clear();
+        invalidateLodStitchSignaturesForKeys(new Set(activeChunks.keys()));
+        syncGeminiGrassHasPaintedFromCanvas();
+      }
+
+      function syncGeminiGrassHasPaintedFromCanvas() {
+        if (!geminiDensityCtx) return;
+        const d = geminiDensityCtx.getImageData(0, 0, HTEX_RES, HTEX_RES).data;
+        for (let i = 0; i < d.length; i += 4) {
+          if (d[i] + d[i + 1] + d[i + 2] > 8) {
+            geminiGrassHasPaintedDensity = true;
+            return;
+          }
+        }
+        geminiGrassHasPaintedDensity = false;
+      }
+
+      function pushTerrainUndo() {
+        if (terrainUndoStack.length >= MAX_TERRAIN_UNDO) terrainUndoStack.shift();
+        terrainUndoStack.push(captureTerrainUndoSnapshot());
+        terrainRedoStack.length = 0;
+      }
+
+      function undoTerrainEdit() {
+        if (terrainUndoStack.length === 0) return;
+        terrainRedoStack.push(captureTerrainUndoSnapshot());
+        restoreTerrainUndoSnapshot(terrainUndoStack.pop());
+      }
+
+      function redoTerrainEdit() {
+        if (terrainRedoStack.length === 0) return;
+        terrainUndoStack.push(captureTerrainUndoSnapshot());
+        restoreTerrainUndoSnapshot(terrainRedoStack.pop());
+      }
+
       function ensureChunkSplat(cx, cz) {
         const k = chunkKey(cx, cz);
         let b = chunkSplatMap.get(k);
@@ -676,6 +830,15 @@
         b = { canvas, ctx, tex, material, tslGroundMaterial };
         chunkSplatMap.set(k, b);
         return b;
+      }
+
+      function disposeChunkSplatEntry(key) {
+        const s = chunkSplatMap.get(key);
+        if (!s) return;
+        s.material.dispose();
+        s.tslGroundMaterial.dispose();
+        s.tex.dispose();
+        chunkSplatMap.delete(key);
       }
 
       function bufferToBase64(buf) {
@@ -755,6 +918,8 @@
           dirtyChunks.add(k);
         }
         rebuildAllActiveChunkMeshes();
+        terrainUndoStack.length = 0;
+        terrainRedoStack.length = 0;
       }
 
       function rebuildAllActiveChunkMeshes() {
@@ -829,6 +994,13 @@
         rampMarkerA.scale.setScalar(sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
       }
 
+      function clearRampStart() {
+        if (!editState.rampPointA) return;
+        editState.rampPointA = null;
+        syncBrushVisual();
+        if (editorPane) editorPane.refresh();
+      }
+
       const editState = {
         mode: "view",
         isPointerDown: false,
@@ -853,7 +1025,6 @@
         camSensX: 0.002,
         camSensY: 0.002
       };
-      let playMode = false;
       const keysHeld = {};
       const playerPos = new THREE.Vector3();
       let camYaw = 0;
@@ -1147,6 +1318,7 @@
       }
 
       function applyProceduralTerrainToAllChunks() {
+        pushTerrainUndo();
         const g = PARAMS.gen;
         const maxC = getMaxChunkIndex();
         const res = CONFIG.dataResolution;
@@ -1812,6 +1984,7 @@
       function enterPlayMode() {
         if (playMode) return;
         playMode = true;
+        PARAMS.mode = "play";
         savedCamPos = camera.position.clone();
         savedTarget = controls.target.clone();
         playerPos.set(controls.target.x, 0, controls.target.z);
@@ -1823,6 +1996,7 @@
         brushMarker.visible = false;
         rampMarkerA.visible = false;
         syncModeBadge();
+        if (editorPane) editorPane.refresh();
         const tpEl = document.querySelector(".tp-dfwv");
         if (tpEl) tpEl.style.display = "none";
         updateChunkSet();
@@ -1881,6 +2055,258 @@
         heightTexDirty = true;
       }
 
+      /** Global height grid vertex count along one axis (Nc * RES inclusive indices 0..maxG). */
+      function erosionGlobalGridMax() {
+        return (getMaxChunkIndex() + 1) * CONFIG.dataResolution;
+      }
+
+      function globalGridVertToChunk(ig) {
+        const RES = CONFIG.dataResolution;
+        const maxC = getMaxChunkIndex();
+        const maxG = erosionGlobalGridMax();
+        if (ig < 0 || ig > maxG) return null;
+        if (ig === maxG) return { c: maxC, i: RES };
+        const c = Math.floor(ig / RES);
+        const i = ig - c * RES;
+        return { c, i };
+      }
+
+      function heightAtGlobalGrid(igx, igz) {
+        const STEP = CONFIG.chunkSize / CONFIG.dataResolution;
+        const wx = -worldHalf + igx * STEP;
+        const wz = -worldHalf + igz * STEP;
+        return getWorldHeight(wx, wz);
+      }
+
+      function addHeightDeltaGlobalVertex(igx, igz, delta, brushedChunkKeys) {
+        if (Math.abs(delta) < 1e-14) return;
+        const locX = globalGridVertToChunk(igx);
+        const locZ = globalGridVertToChunk(igz);
+        if (!locX || !locZ) return;
+        const heights = ensureChunkData(locX.c, locZ.c);
+        const idx = getChunkDataIndex(locX.i, locZ.i);
+        heights[idx] = THREE.MathUtils.clamp(
+          heights[idx] + delta,
+          PARAMS.sculptClampMin,
+          PARAMS.sculptClampMax
+        );
+        const k = chunkKey(locX.c, locZ.c);
+        dirtyChunks.add(k);
+        brushedChunkKeys.add(k);
+      }
+
+      function erosionSampleHG(px, pz) {
+        const maxG = erosionGlobalGridMax();
+        const x0 = Math.floor(px);
+        const z0 = Math.floor(pz);
+        const x1 = Math.min(maxG, x0 + 1);
+        const z1 = Math.min(maxG, z0 + 1);
+        const tx = px - x0;
+        const tz = pz - z0;
+        const h00 = heightAtGlobalGrid(x0, z0);
+        const h10 = heightAtGlobalGrid(x1, z0);
+        const h01 = heightAtGlobalGrid(x0, z1);
+        const h11 = heightAtGlobalGrid(x1, z1);
+        return {
+          h:
+            h00 * (1 - tx) * (1 - tz) +
+            h10 * tx * (1 - tz) +
+            h01 * (1 - tx) * tz +
+            h11 * tx * tz,
+          gx: (h10 - h00) * (1 - tz) + (h11 - h01) * tz,
+          gz: (h01 - h00) * (1 - tx) + (h11 - h10) * tx
+        };
+      }
+
+      function erosionDepositGrid(px, pz, amt, brushedChunkKeys) {
+        if (Math.abs(amt) < 1e-14) return;
+        const maxG = erosionGlobalGridMax();
+        const x0 = Math.floor(px);
+        const z0 = Math.floor(pz);
+        const x1 = Math.min(maxG, x0 + 1);
+        const z1 = Math.min(maxG, z0 + 1);
+        const tx = px - x0;
+        const tz = pz - z0;
+        addHeightDeltaGlobalVertex(x0, z0, amt * (1 - tx) * (1 - tz), brushedChunkKeys);
+        addHeightDeltaGlobalVertex(x1, z0, amt * tx * (1 - tz), brushedChunkKeys);
+        addHeightDeltaGlobalVertex(x0, z1, amt * (1 - tx) * tz, brushedChunkKeys);
+        addHeightDeltaGlobalVertex(x1, z1, amt * tx * tz, brushedChunkKeys);
+      }
+
+      function erosionErodeKernel(px, pz, amt, bOffX, bOffZ, bW, brushedChunkKeys) {
+        const maxG = erosionGlobalGridMax();
+        const cx = Math.floor(px);
+        const cz = Math.floor(pz);
+        for (let i = 0; i < bW.length; i++) {
+          const nx = cx + bOffX[i];
+          const nz = cz + bOffZ[i];
+          if (nx < 0 || nx > maxG || nz < 0 || nz > maxG) continue;
+          addHeightDeltaGlobalVertex(nx, nz, -amt * bW[i], brushedChunkKeys);
+        }
+      }
+
+      function buildErosionKernel(erRad) {
+        const r = Math.ceil(erRad);
+        const bOffX = [];
+        const bOffZ = [];
+        const bW = [];
+        let totalW = 0;
+        for (let dz = -r; dz <= r; dz++) {
+          for (let dx = -r; dx <= r; dx++) {
+            const dist = Math.sqrt(dx * dx + dz * dz);
+            if (dist >= erRad) continue;
+            const w = erRad - dist;
+            bOffX.push(dx);
+            bOffZ.push(dz);
+            bW.push(w);
+            totalW += w;
+          }
+        }
+        for (let i = 0; i < bW.length; i++) bW[i] /= totalW;
+        return { bOffX, bOffZ, bW };
+      }
+
+      /** One brush stroke — splatmap-painter sculptAt erosion block (chunked heightfield). */
+      function applyErosionBrushAt(worldPoint) {
+        const Ke = PARAMS.erosion.erosionRate;
+        const Kd = PARAMS.erosion.depositionRate;
+        const Kev = PARAMS.erosion.evaporation;
+        const Kin = PARAMS.erosion.inertia;
+        const Kc = PARAMS.erosion.capacity;
+        const erRad = PARAMS.erosion.radius;
+        const G = 4;
+        const maxSteps = 60;
+        const minSlope = 0.001;
+
+        const radius = sculptBrushWorldRadius();
+        const STEP = CONFIG.chunkSize / CONFIG.dataResolution;
+        const maxG = erosionGlobalGridMax();
+        const gcx = (worldPoint.x + worldHalf) / STEP;
+        const gcz = (worldPoint.z + worldHalf) / STEP;
+        const gridR = radius / STEP;
+        const N = Math.max(1, Math.round(PARAMS.brushStrength * 1.5));
+
+        const { bOffX, bOffZ, bW } = buildErosionKernel(erRad);
+        const brushedChunkKeys = new Set();
+
+        for (let iter = 0; iter < N; iter++) {
+          const angle = Math.random() * 2 * Math.PI;
+          const rr = Math.sqrt(Math.random()) * gridR;
+          let px = gcx + Math.cos(angle) * rr;
+          let pz = gcz + Math.sin(angle) * rr;
+          if (px < 1 || px >= maxG - 1 || pz < 1 || pz >= maxG - 1) continue;
+
+          let ddx = 0;
+          let ddz = 0;
+          let speed = 1;
+          let water = 1;
+          let sediment = 0;
+
+          for (let step = 0; step < maxSteps; step++) {
+            const { h, gx, gz } = erosionSampleHG(px, pz);
+            ddx = ddx * Kin - gx * (1 - Kin);
+            ddz = ddz * Kin - gz * (1 - Kin);
+            const len = Math.sqrt(ddx * ddx + ddz * ddz) || 1;
+            ddx /= len;
+            ddz /= len;
+            const nx2 = px + ddx;
+            const nz2 = pz + ddz;
+            if (nx2 < 0 || nx2 >= maxG || nz2 < 0 || nz2 >= maxG) break;
+
+            const dh = erosionSampleHG(nx2, nz2).h - h;
+            const cap = Math.max(minSlope, -dh) * speed * water * Kc;
+            if (sediment > cap || dh > 0) {
+              const amt = dh > 0 ? Math.min(sediment, dh) : (sediment - cap) * Kd;
+              sediment -= amt;
+              erosionDepositGrid(px, pz, amt, brushedChunkKeys);
+            } else {
+              const amt = Math.min((cap - sediment) * Ke, -dh + 0.001);
+              sediment += amt;
+              erosionErodeKernel(px, pz, amt, bOffX, bOffZ, bW, brushedChunkKeys);
+            }
+            speed = Math.min(8, Math.sqrt(Math.max(0, speed * speed - dh * G)));
+            water *= 1 - Kev;
+            if (water < 0.005) break;
+            px = nx2;
+            pz = nz2;
+          }
+          erosionDepositGrid(px, pz, sediment * Kd, brushedChunkKeys);
+        }
+
+        finalizeSculpt(brushedChunkKeys, {
+          wx: worldPoint.x,
+          wz: worldPoint.z,
+          radius
+        });
+      }
+
+      /** Full-world pass — splatmap-painter runErosion (chunked). */
+      function runGlobalErosion() {
+        pushTerrainUndo();
+        const Ke = PARAMS.erosion.erosionRate;
+        const Kd = PARAMS.erosion.depositionRate;
+        const Kev = PARAMS.erosion.evaporation;
+        const Kin = PARAMS.erosion.inertia;
+        const Kc = PARAMS.erosion.capacity;
+        const erRad = PARAMS.erosion.radius;
+        const G = 4;
+        const maxSteps = 80;
+        const minSlope = 0.001;
+        const N = PARAMS.erosion.iterations;
+
+        const { bOffX, bOffZ, bW } = buildErosionKernel(erRad);
+        const maxG = erosionGlobalGridMax();
+        const brushedChunkKeys = new Set();
+
+        for (let iter = 0; iter < N; iter++) {
+          let px = 1 + Math.random() * (maxG - 2);
+          let pz = 1 + Math.random() * (maxG - 2);
+          let dx = 0;
+          let dz = 0;
+          let speed = 1;
+          let water = 1;
+          let sediment = 0;
+
+          for (let step = 0; step < maxSteps; step++) {
+            const { h, gx, gz } = erosionSampleHG(px, pz);
+            dx = dx * Kin - gx * (1 - Kin);
+            dz = dz * Kin - gz * (1 - Kin);
+            const len = Math.sqrt(dx * dx + dz * dz) || 1;
+            dx /= len;
+            dz /= len;
+            const nx = px + dx;
+            const nz = pz + dz;
+            if (nx < 0 || nx >= maxG || nz < 0 || nz >= maxG) break;
+
+            const newH = erosionSampleHG(nx, nz).h;
+            const dh = newH - h;
+            const slope = Math.max(minSlope, -dh);
+            const cap = slope * speed * water * Kc;
+
+            if (sediment > cap || dh > 0) {
+              const amt = dh > 0 ? Math.min(sediment, dh) : (sediment - cap) * Kd;
+              sediment -= amt;
+              erosionDepositGrid(px, pz, amt, brushedChunkKeys);
+            } else {
+              const amt = Math.min((cap - sediment) * Ke, -dh + 0.001);
+              sediment += amt;
+              erosionErodeKernel(px, pz, amt, bOffX, bOffZ, bW, brushedChunkKeys);
+            }
+            speed = Math.sqrt(Math.max(0, speed * speed - dh * G));
+            speed = Math.min(speed, 8);
+            water *= 1 - Kev;
+            if (water < 0.005) break;
+            px = nx;
+            pz = nz;
+          }
+          erosionDepositGrid(px, pz, sediment * Kd, brushedChunkKeys);
+        }
+
+        finalizeSculpt(brushedChunkKeys, null);
+        rebuildAllActiveChunkMeshes();
+        if (editorPane) editorPane.refresh();
+      }
+
       // CPU FBM for sculpt shapes (same math as splatmap-painter _fbm / _fbmRidge)
       function _sculptH2(x, y) {
         const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
@@ -1899,6 +2325,20 @@
           _sculptH2(ix, iy + 1) * (1 - u) * v +
           _sculptH2(ix + 1, iy + 1) * u * v
         );
+      }
+      function _sculptFbm(x, y, oct = 5) {
+        const o = Math.max(1, Math.min(8, Math.round(oct)));
+        let s = 0;
+        let a = 0.5;
+        let f = 1;
+        let m = 0;
+        for (let i = 0; i < o; i++) {
+          s += _sculptSn2(x * f, y * f) * a;
+          m += a;
+          a *= 0.5;
+          f *= 2;
+        }
+        return m > 0 ? s / m : 0;
       }
       function _sculptFbmRidge(x, y, oct = 6) {
         let s = 0;
@@ -1985,6 +2425,150 @@
                 const idx = getChunkDataIndex(ix, iz);
                 heights[idx] = THREE.MathUtils.clamp(
                   heights[idx] + delta,
+                  PARAMS.sculptClampMin,
+                  PARAMS.sculptClampMax
+                );
+                changed = true;
+              }
+            }
+
+            if (changed) {
+              const k = chunkKey(cx, cz);
+              dirtyChunks.add(k);
+              brushedChunkKeys.add(k);
+            }
+          }
+        }
+
+        finalizeSculpt(brushedChunkKeys, {
+          wx: worldPoint.x,
+          wz: worldPoint.z,
+          radius
+        });
+      }
+
+      function applyNoiseAt(worldPoint) {
+        const radius = sculptBrushWorldRadius();
+        const strength = sculptPainterStrengthFactor();
+        const freq = PARAMS.noiseScale / Math.max(radius, 1e-6);
+        const oct = Math.max(1, Math.min(8, Math.round(PARAMS.noiseOctaves)));
+        const step = CONFIG.chunkSize / CONFIG.dataResolution;
+        const min = worldToChunkIndex(worldPoint.x - radius, worldPoint.z - radius);
+        const max = worldToChunkIndex(worldPoint.x + radius, worldPoint.z + radius);
+        const maxChunk = getMaxChunkIndex();
+        const minCx = THREE.MathUtils.clamp(min.cx, 0, maxChunk);
+        const minCz = THREE.MathUtils.clamp(min.cz, 0, maxChunk);
+        const maxCx = THREE.MathUtils.clamp(max.cx, 0, maxChunk);
+        const maxCz = THREE.MathUtils.clamp(max.cz, 0, maxChunk);
+        const brushedChunkKeys = new Set();
+        const r2 = radius * radius;
+
+        for (let cz = minCz; cz <= maxCz; cz++) {
+          for (let cx = minCx; cx <= maxCx; cx++) {
+            const heights = ensureChunkData(cx, cz);
+            const minX = chunkMinWorldX(cx);
+            const minZ = chunkMinWorldZ(cz);
+            let changed = false;
+
+            for (let iz = 0; iz <= CONFIG.dataResolution; iz++) {
+              const wz = minZ + iz * step;
+              const dz = wz - worldPoint.z;
+              if (Math.abs(dz) > radius) continue;
+
+              for (let ix = 0; ix <= CONFIG.dataResolution; ix++) {
+                const wx = minX + ix * step;
+                const dx = wx - worldPoint.x;
+                if (Math.abs(dx) > radius) continue;
+
+                const distSq = dx * dx + dz * dz;
+                if (distSq > r2) continue;
+                const dist = Math.sqrt(distSq);
+                const t = dist / radius;
+                const falloff = (1 - t) * (1 - t);
+                const n =
+                  _sculptFbm(
+                    wx * freq + sculptBrushNoiseSeed,
+                    wz * freq + sculptBrushNoiseSeed * 1.3,
+                    oct
+                  ) - 0.5;
+                const delta = n * falloff * strength * 4;
+                const idx = getChunkDataIndex(ix, iz);
+                heights[idx] = THREE.MathUtils.clamp(
+                  heights[idx] + delta,
+                  PARAMS.sculptClampMin,
+                  PARAMS.sculptClampMax
+                );
+                changed = true;
+              }
+            }
+
+            if (changed) {
+              const k = chunkKey(cx, cz);
+              dirtyChunks.add(k);
+              brushedChunkKeys.add(k);
+            }
+          }
+        }
+
+        finalizeSculpt(brushedChunkKeys, {
+          wx: worldPoint.x,
+          wz: worldPoint.z,
+          radius
+        });
+      }
+
+      function applyTerraceAt(worldPoint) {
+        const radius = sculptBrushWorldRadius();
+        const strength = sculptPainterStrengthFactor();
+        const stepH = Math.max(0.25, PARAMS.terraceStep);
+        const sharpRaw = PARAMS.terraceSharpness;
+        const sharpness = THREE.MathUtils.clamp(sharpRaw, 0.05, 0.95);
+        const step = CONFIG.chunkSize / CONFIG.dataResolution;
+        const min = worldToChunkIndex(worldPoint.x - radius, worldPoint.z - radius);
+        const max = worldToChunkIndex(worldPoint.x + radius, worldPoint.z + radius);
+        const maxChunk = getMaxChunkIndex();
+        const minCx = THREE.MathUtils.clamp(min.cx, 0, maxChunk);
+        const minCz = THREE.MathUtils.clamp(min.cz, 0, maxChunk);
+        const maxCx = THREE.MathUtils.clamp(max.cx, 0, maxChunk);
+        const maxCz = THREE.MathUtils.clamp(max.cz, 0, maxChunk);
+        const brushedChunkKeys = new Set();
+        const r2 = radius * radius;
+
+        for (let cz = minCz; cz <= maxCz; cz++) {
+          for (let cx = minCx; cx <= maxCx; cx++) {
+            const heights = ensureChunkData(cx, cz);
+            const minX = chunkMinWorldX(cx);
+            const minZ = chunkMinWorldZ(cz);
+            let changed = false;
+
+            for (let iz = 0; iz <= CONFIG.dataResolution; iz++) {
+              const wz = minZ + iz * step;
+              const dz = wz - worldPoint.z;
+              if (Math.abs(dz) > radius) continue;
+
+              for (let ix = 0; ix <= CONFIG.dataResolution; ix++) {
+                const wx = minX + ix * step;
+                const dx = wx - worldPoint.x;
+                if (Math.abs(dx) > radius) continue;
+
+                const distSq = dx * dx + dz * dz;
+                if (distSq > r2) continue;
+                const dist = Math.sqrt(distSq);
+                const t = dist / radius;
+                const falloff = (1 - t * t) * (1 - t * t);
+                const idx = getChunkDataIndex(ix, iz);
+                const h = heights[idx];
+                const floored = Math.floor(h / stepH) * stepH;
+                const frac = (h - floored) / stepH;
+                const curved =
+                  frac < sharpness
+                    ? (frac * (1 - sharpness)) / sharpness
+                    : ((frac - sharpness) / (1 - sharpness)) * sharpness +
+                      (1 - sharpness);
+                const snapped = floored + curved * stepH;
+                const delta = (snapped - h) * falloff * strength * 3;
+                heights[idx] = THREE.MathUtils.clamp(
+                  h + delta,
                   PARAMS.sculptClampMin,
                   PARAMS.sculptClampMax
                 );
@@ -2226,6 +2810,17 @@
           applyFlattenAt(worldPoint, editState.sculptFlattenTargetY);
         } else if (event.ctrlKey) {
           applySmoothAt(worldPoint);
+        } else if (
+          (PARAMS.sculptTool === "noise" || PARAMS.sculptTool === "terrace") &&
+          event.shiftKey
+        ) {
+          applyRaiseLowerAt(worldPoint, -1);
+        } else if (PARAMS.sculptTool === "noise") {
+          applyNoiseAt(worldPoint);
+        } else if (PARAMS.sculptTool === "terrace") {
+          applyTerraceAt(worldPoint);
+        } else if (PARAMS.sculptTool === "erosion") {
+          applyErosionBrushAt(worldPoint);
         } else {
           applyRaiseLowerAt(worldPoint, editState.sculptSign);
         }
@@ -2320,6 +2915,32 @@
         return el.closest?.(".tp-dfwv") != null;
       }
 
+      /** True only for fields where Ctrl+Z should edit text, not terrain. */
+      function isEditableTextTarget(el) {
+        if (!el) return false;
+        const tag = el.tagName;
+        if (tag === "TEXTAREA" || tag === "SELECT") return true;
+        if (tag === "INPUT") {
+          const type = (el.type || "text").toLowerCase();
+          if (
+            type === "button" ||
+            type === "checkbox" ||
+            type === "color" ||
+            type === "file" ||
+            type === "hidden" ||
+            type === "radio" ||
+            type === "range" ||
+            type === "reset" ||
+            type === "submit"
+          ) {
+            return false;
+          }
+          return true;
+        }
+        if (el.isContentEditable) return true;
+        return false;
+      }
+
       document.addEventListener("mousemove", (event) => {
         if (!playMode || !document.pointerLockElement) return;
         camYaw -= event.movementX * playParams.camSensX;
@@ -2356,7 +2977,32 @@
         }
 
         if (event.repeat) return;
+
+        const modUndo = event.ctrlKey || event.metaKey;
+        if (
+          modUndo &&
+          (event.code === "KeyZ" || event.code === "KeyY") &&
+          !isEditableTextTarget(event.target)
+        ) {
+          event.preventDefault();
+          if (event.code === "KeyY") redoTerrainEdit();
+          else if (event.shiftKey) redoTerrainEdit();
+          else undoTerrainEdit();
+          return;
+        }
+
         if (uiTypingTarget(event.target)) return;
+
+        if (
+          event.code === "KeyR" &&
+          editState.mode === "sculpt" &&
+          PARAMS.sculptTool === "ramp" &&
+          editState.rampPointA
+        ) {
+          event.preventDefault();
+          clearRampStart();
+          return;
+        }
 
         if (event.code === "KeyF") {
           event.preventDefault();
@@ -2417,7 +3063,11 @@
           editState.mode === "paint" ||
           editState.mode === "geminigrass" ||
           (editState.mode === "sculpt" &&
-            (PARAMS.sculptTool === "brush" || PARAMS.sculptTool === "ramp"));
+            (PARAMS.sculptTool === "brush" ||
+              PARAMS.sculptTool === "ramp" ||
+              PARAMS.sculptTool === "noise" ||
+              PARAMS.sculptTool === "terrace" ||
+              PARAMS.sculptTool === "erosion"));
         if (showBrushRing && hit) {
           editState.brushWorldPoint.copy(hit);
           brushMarker.visible = true;
@@ -2432,7 +3082,10 @@
           editState.isPointerDown &&
           editState.pointerAction === "sculpt" &&
           hit &&
-          PARAMS.sculptTool === "brush"
+          (PARAMS.sculptTool === "brush" ||
+            PARAMS.sculptTool === "noise" ||
+            PARAMS.sculptTool === "terrace" ||
+            PARAMS.sculptTool === "erosion")
         ) {
           if (
             editState.sculptSkipFirstMoveDup &&
@@ -2462,6 +3115,7 @@
 
         if (editState.mode === "geminigrass" && event.button === 0) {
           event.preventDefault();
+          pushTerrainUndo();
           editState.isPointerDown = true;
           editState.pointerAction = "geminigrass";
           editState.paintErase = geminiGrassEraseMode || event.shiftKey;
@@ -2484,6 +3138,7 @@
               z: hit.z
             };
           } else {
+            pushTerrainUndo();
             applyRampAt(editState.rampPointA, {
               x: hit.x,
               y: getWorldHeight(hit.x, hit.z),
@@ -2496,9 +3151,17 @@
           return;
         }
 
-        if (editState.mode === "sculpt" && PARAMS.sculptTool === "brush" && event.button === 0) {
+        if (
+          editState.mode === "sculpt" &&
+          (PARAMS.sculptTool === "brush" ||
+            PARAMS.sculptTool === "noise" ||
+            PARAMS.sculptTool === "terrace" ||
+            PARAMS.sculptTool === "erosion") &&
+          event.button === 0
+        ) {
           event.preventDefault();
           if (!hit) return;
+          pushTerrainUndo();
           sculptBrushNoiseSeed = Math.random() * 1000;
           editState.isPointerDown = true;
           editState.pointerAction = "sculpt";
@@ -2514,6 +3177,7 @@
 
         if (editState.mode === "paint" && !event.shiftKey && (event.button === 0 || event.button === 2)) {
           event.preventDefault();
+          pushTerrainUndo();
           editState.isPointerDown = true;
           editState.pointerAction = "paint";
           editState.paintErase = event.button === 2;
@@ -2579,7 +3243,8 @@ camera: ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}
 world size: ${CONFIG.worldSize} | chunk size: ${CONFIG.chunkSize}
 bounds: ${worldBounds.min.x}..${worldBounds.max.x}
 gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}  (no GPU grass until density)
-brush: sculpt ${PARAMS.sculptTool === "ramp" ? "ramp" : "brush"} r=${sculptBrushWorldRadius().toFixed(1)} str=${sculptBrushStrength().toFixed(2)}${editState.rampPointA ? " · ramp A set" : ""} | paint r=${CONFIG.paint.radius} (${editState.hasBrushHit ? "hit" : "no-hit"})`;
+brush: sculpt ${PARAMS.sculptTool} r=${sculptBrushWorldRadius().toFixed(1)} str=${sculptBrushStrength().toFixed(2)}${editState.rampPointA ? " · ramp A set (R or button to clear)" : ""} | paint r=${CONFIG.paint.radius} (${editState.hasBrushHit ? "hit" : "no-hit"})
+undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ctrl+Y · Ctrl+Shift+Z)`;
       }
 
       window.addEventListener("resize", () => {
@@ -2855,6 +3520,15 @@ brush: sculpt ${PARAMS.sculptTool === "ramp" ? "ramp" : "brush"} r=${sculptBrush
         const pane = new Pane({ title: "Chunk terrain" });
         editorPane = pane;
 
+        pane.addButton({ title: "Undo terrain (Ctrl+Z)" }).on("click", () => {
+          undoTerrainEdit();
+          if (editorPane) editorPane.refresh();
+        });
+        pane.addButton({ title: "Redo terrain (Ctrl+Y)" }).on("click", () => {
+          redoTerrainEdit();
+          if (editorPane) editorPane.refresh();
+        });
+
         pane
           .addBinding(PARAMS, "mode", {
             label: "Mode",
@@ -2862,10 +3536,16 @@ brush: sculpt ${PARAMS.sculptTool === "ramp" ? "ramp" : "brush"} r=${sculptBrush
               "View [Esc]": "view",
               "Sculpt [S]": "sculpt",
               "Paint [P]": "paint",
-              "Gemini Grass [G]": "geminigrass"
+              "Gemini Grass [G]": "geminigrass",
+              "Play [F]": "play"
             }
           })
           .on("change", (ev) => {
+            if (ev.value === "play") {
+              enterPlayMode();
+              return;
+            }
+            if (playMode) exitPlayMode();
             setEditMode(ev.value);
           });
 
@@ -2964,12 +3644,45 @@ brush: sculpt ${PARAMS.sculptTool === "ramp" ? "ramp" : "brush"} r=${sculptBrush
         brushFolder
           .addBinding(PARAMS, "sculptTool", {
             label: "Sculpt tool",
-            options: { Brush: "brush", Ramp: "ramp" }
+            options: {
+              Brush: "brush",
+              Noise: "noise",
+              Terrace: "terrace",
+              Erosion: "erosion",
+              Ramp: "ramp"
+            }
           })
           .on("change", () => {
             editState.rampPointA = null;
             syncBrushVisual();
           });
+        brushFolder.addButton({ title: "Clear ramp start (R)" }).on("click", () => {
+          clearRampStart();
+        });
+        brushFolder.addBinding(PARAMS, "noiseScale", {
+          label: "Noise scale",
+          min: 0.3,
+          max: 10,
+          step: 0.1
+        });
+        brushFolder.addBinding(PARAMS, "noiseOctaves", {
+          label: "Noise octaves",
+          min: 1,
+          max: 8,
+          step: 1
+        });
+        brushFolder.addBinding(PARAMS, "terraceStep", {
+          label: "Terrace step (world Y)",
+          min: 0.5,
+          max: 40,
+          step: 0.5
+        });
+        brushFolder.addBinding(PARAMS, "terraceSharpness", {
+          label: "Terrace sharpness",
+          min: 0.05,
+          max: 0.95,
+          step: 0.01
+        });
         brushFolder.addBinding(PARAMS, "sculptBrush", {
           label: "Sculpt shape",
           options: {
@@ -3019,6 +3732,53 @@ brush: sculpt ${PARAMS.sculptTool === "ramp" ? "ramp" : "brush"} r=${sculptBrush
               if (editorPane) editorPane.refresh();
             }
           });
+
+        const erosionFolder = pane.addFolder({ title: "Erosion", expanded: false });
+        erosionFolder.addBinding(PARAMS.erosion, "iterations", {
+          label: "Droplets (global pass)",
+          min: 5000,
+          max: 100000,
+          step: 5000
+        });
+        erosionFolder.addBinding(PARAMS.erosion, "erosionRate", {
+          label: "Erosion",
+          min: 0.05,
+          max: 0.9,
+          step: 0.01
+        });
+        erosionFolder.addBinding(PARAMS.erosion, "depositionRate", {
+          label: "Deposition",
+          min: 0.05,
+          max: 0.9,
+          step: 0.01
+        });
+        erosionFolder.addBinding(PARAMS.erosion, "evaporation", {
+          label: "Evaporation",
+          min: 0.005,
+          max: 0.05,
+          step: 0.001
+        });
+        erosionFolder.addBinding(PARAMS.erosion, "inertia", {
+          label: "Inertia",
+          min: 0.01,
+          max: 0.5,
+          step: 0.01
+        });
+        erosionFolder.addBinding(PARAMS.erosion, "capacity", {
+          label: "Capacity",
+          min: 1,
+          max: 20,
+          step: 0.5
+        });
+        erosionFolder.addBinding(PARAMS.erosion, "radius", {
+          label: "Brush radius (kernel)",
+          min: 1,
+          max: 6,
+          step: 0.5
+        });
+        erosionFolder.addButton({ title: "▶ Run erosion (all saved chunks)" }).on("click", () => {
+          runGlobalErosion();
+        });
 
         const genFolder = pane.addFolder({ title: "Terrain generator", expanded: false });
         genFolder.addBinding(PARAMS.gen, "mode", {
@@ -3099,29 +3859,200 @@ brush: sculpt ${PARAMS.sculptTool === "ramp" ? "ramp" : "brush"} r=${sculptBrush
           step: 0.05
         });
 
-        const skyFolder = pane.addFolder({ title: "Sky (physical)", expanded: false });
-        skyFolder.addBinding(PARAMS.sky, "turbidity", { min: 0, max: 10, step: 0.1 });
-        skyFolder.addBinding(PARAMS.sky, "rayleigh", { min: 0, max: 4, step: 0.1 });
-        skyFolder.addBinding(PARAMS.sky, "mie", { min: 0, max: 0.1, step: 0.001 });
-        skyFolder.addBinding(PARAMS.sky, "mieG", {
+        const skyFolder = pane.addFolder({ title: "Sky", expanded: false });
+        skyFolder
+          .addBinding(PARAMS.sky, "mode", {
+            label: "Sky type",
+            options: { Physical: "physical", Stylized: "stylized", HDR: "hdr" }
+          })
+          .on("change", (ev) => setSkyMode(ev.value));
+        skyFolder.addButton({ title: "Load HDR…" }).on("click", () => {
+          document.getElementById("hdr-file-input").click();
+        });
+        skyFolder.addBlade({ view: "separator" });
+
+        const sSky = stylizedSky.uniforms;
+        function bindSkyColor(folder, label, uni) {
+          const proxy = { col: "#" + uni.value.clone().convertLinearToSRGB().getHexString() };
+          folder
+            .addBinding(proxy, "col", { label, view: "color" })
+            .on("change", (ev) => uni.value.set(ev.value).convertSRGBToLinear());
+        }
+        const stylizedFolder = skyFolder.addFolder({ title: "Stylized sky", expanded: false });
+        const sGrad = stylizedFolder.addFolder({ title: "Gradient", expanded: true });
+        bindSkyColor(sGrad, "Zenith", sSky.zenithColor);
+        bindSkyColor(sGrad, "Sky", sSky.skyColor);
+        bindSkyColor(sGrad, "Horizon", sSky.horizonColor);
+        bindSkyColor(sGrad, "Sunset low (crimson)", sSky.sunsetLow);
+        bindSkyColor(sGrad, "Sunset mid (orange)", sSky.sunsetColor);
+        bindSkyColor(sGrad, "Sunset high (amber)", sSky.sunsetHigh);
+        bindSkyColor(sGrad, "Ground", sSky.groundColor);
+        const sSun = stylizedFolder.addFolder({ title: "Sun", expanded: true });
+        bindSkyColor(sSun, "Sun color", sSky.sunColor);
+        sSun
+          .addBinding({ v: sSky.sunSize.value }, "v", { label: "Disc size", min: 0.001, max: 0.06, step: 0.001 })
+          .on("change", (ev) => (sSky.sunSize.value = ev.value));
+        sSun
+          .addBinding({ v: sSky.sunGlowPower.value }, "v", { label: "Glow sharpness", min: 1, max: 64, step: 0.5 })
+          .on("change", (ev) => (sSky.sunGlowPower.value = ev.value));
+        sSun
+          .addBinding({ v: sSky.sunGlowStrength.value }, "v", { label: "Glow strength", min: 0, max: 4, step: 0.05 })
+          .on("change", (ev) => (sSky.sunGlowStrength.value = ev.value));
+        sSun
+          .addBinding({ v: sSky.sunHaloStr.value }, "v", { label: "Halo strength", min: 0, max: 1, step: 0.01 })
+          .on("change", (ev) => (sSky.sunHaloStr.value = ev.value));
+        sSun
+          .addBinding({ v: sSky.sunHaloRadius.value }, "v", { label: "Halo radius", min: 1.2, max: 5, step: 0.1 })
+          .on("change", (ev) => (sSky.sunHaloRadius.value = ev.value));
+        sSun
+          .addBinding({ v: sSky.sunRayCount.value }, "v", { label: "Ray count", min: 2, max: 16, step: 1 })
+          .on("change", (ev) => (sSky.sunRayCount.value = ev.value));
+        sSun
+          .addBinding({ v: sSky.sunRayStr.value }, "v", { label: "Ray strength", min: 0, max: 1.5, step: 0.01 })
+          .on("change", (ev) => (sSky.sunRayStr.value = ev.value));
+        sSun
+          .addBinding({ v: sSky.sunRaySharp.value }, "v", { label: "Ray sharpness", min: 1, max: 20, step: 0.5 })
+          .on("change", (ev) => (sSky.sunRaySharp.value = ev.value));
+        sSun
+          .addBinding({ v: sSky.sunRayLen.value }, "v", { label: "Ray length", min: 0.02, max: 0.6, step: 0.01 })
+          .on("change", (ev) => (sSky.sunRayLen.value = ev.value));
+        const sHoriz = stylizedFolder.addFolder({ title: "Horizon ring", expanded: true });
+        bindSkyColor(sHoriz, "Color", sSky.horizonRingColor);
+        sHoriz
+          .addBinding({ v: sSky.horizonRingStr.value }, "v", { label: "Strength", min: 0, max: 1, step: 0.01 })
+          .on("change", (ev) => (sSky.horizonRingStr.value = ev.value));
+        sHoriz
+          .addBinding({ v: sSky.horizonRingWidth.value }, "v", { label: "Width", min: 0.01, max: 0.4, step: 0.01 })
+          .on("change", (ev) => (sSky.horizonRingWidth.value = ev.value));
+        const sC1 = stylizedFolder.addFolder({ title: "Clouds (low)", expanded: false });
+        sC1
+          .addBinding({ v: sSky.c1Coverage.value }, "v", { label: "Coverage", min: 0, max: 1, step: 0.01 })
+          .on("change", (ev) => (sSky.c1Coverage.value = ev.value));
+        sC1
+          .addBinding({ v: sSky.c1Softness.value }, "v", { label: "Softness", min: 0, max: 0.5, step: 0.01 })
+          .on("change", (ev) => (sSky.c1Softness.value = ev.value));
+        sC1
+          .addBinding({ v: sSky.c1Scale.value }, "v", { label: "Scale", min: 0.1, max: 4, step: 0.05 })
+          .on("change", (ev) => (sSky.c1Scale.value = ev.value));
+        sC1
+          .addBinding({ v: sSky.c1Height.value }, "v", { label: "Height", min: 0.2, max: 5, step: 0.1 })
+          .on("change", (ev) => (sSky.c1Height.value = ev.value));
+        sC1
+          .addBinding(stylizedSky.windState, "c1Angle", { label: "Wind angle", min: 0, max: 360, step: 1 })
+          .on("change", () => stylizedSky.updateWind());
+        sC1
+          .addBinding(stylizedSky.windState, "c1Speed", { label: "Wind speed", min: 0, max: 0.03, step: 0.001 })
+          .on("change", () => stylizedSky.updateWind());
+        sC1
+          .addBinding({ v: sSky.c1WarpStr.value }, "v", { label: "Warp amount", min: 0, max: 1.5, step: 0.05 })
+          .on("change", (ev) => (sSky.c1WarpStr.value = ev.value));
+        sC1
+          .addBinding({ v: sSky.c1WarpScale.value }, "v", { label: "Warp scale", min: 0.1, max: 2, step: 0.05 })
+          .on("change", (ev) => (sSky.c1WarpScale.value = ev.value));
+        sC1
+          .addBinding({ v: sSky.c1Contrast.value }, "v", { label: "Contrast", min: 0.5, max: 4, step: 0.05 })
+          .on("change", (ev) => (sSky.c1Contrast.value = ev.value));
+        const sC2 = stylizedFolder.addFolder({ title: "Clouds (high)", expanded: false });
+        sC2
+          .addBinding({ v: sSky.c2Coverage.value }, "v", { label: "Coverage", min: 0, max: 1, step: 0.01 })
+          .on("change", (ev) => (sSky.c2Coverage.value = ev.value));
+        sC2
+          .addBinding({ v: sSky.c2Softness.value }, "v", { label: "Softness", min: 0, max: 0.5, step: 0.01 })
+          .on("change", (ev) => (sSky.c2Softness.value = ev.value));
+        sC2
+          .addBinding({ v: sSky.c2Scale.value }, "v", { label: "Scale", min: 0.1, max: 4, step: 0.05 })
+          .on("change", (ev) => (sSky.c2Scale.value = ev.value));
+        sC2
+          .addBinding({ v: sSky.c2Height.value }, "v", { label: "Height", min: 0.2, max: 8, step: 0.1 })
+          .on("change", (ev) => (sSky.c2Height.value = ev.value));
+        sC2
+          .addBinding(stylizedSky.windState, "c2Angle", { label: "Wind angle", min: 0, max: 360, step: 1 })
+          .on("change", () => stylizedSky.updateWind());
+        sC2
+          .addBinding(stylizedSky.windState, "c2Speed", { label: "Wind speed", min: 0, max: 0.03, step: 0.001 })
+          .on("change", () => stylizedSky.updateWind());
+        sC2
+          .addBinding({ v: sSky.c2WarpStr.value }, "v", { label: "Warp amount", min: 0, max: 1.5, step: 0.05 })
+          .on("change", (ev) => (sSky.c2WarpStr.value = ev.value));
+        sC2
+          .addBinding({ v: sSky.c2WarpScale.value }, "v", { label: "Warp scale", min: 0.1, max: 2, step: 0.05 })
+          .on("change", (ev) => (sSky.c2WarpScale.value = ev.value));
+        sC2
+          .addBinding({ v: sSky.c2Contrast.value }, "v", { label: "Contrast", min: 0.5, max: 4, step: 0.05 })
+          .on("change", (ev) => (sSky.c2Contrast.value = ev.value));
+        const sCCol = stylizedFolder.addFolder({ title: "Cloud colors", expanded: false });
+        bindSkyColor(sCCol, "Lit", sSky.cloudLit);
+        bindSkyColor(sCCol, "Shadow", sSky.cloudShadow);
+        bindSkyColor(sCCol, "Sunset tint", sSky.cloudSunset);
+        sCCol
+          .addBinding({ v: sSky.cloudShadowStr.value }, "v", { label: "Shadow strength", min: 0, max: 1, step: 0.01 })
+          .on("change", (ev) => (sSky.cloudShadowStr.value = ev.value));
+        sCCol
+          .addBinding({ v: sSky.cloudRimStr.value }, "v", { label: "Silver lining", min: 0, max: 1.5, step: 0.01 })
+          .on("change", (ev) => (sSky.cloudRimStr.value = ev.value));
+        sCCol
+          .addBinding({ v: sSky.cloudRimWidth.value }, "v", { label: "Rim width", min: 0, max: 0.5, step: 0.01 })
+          .on("change", (ev) => (sSky.cloudRimWidth.value = ev.value));
+        sCCol
+          .addBinding({ v: sSky.cloudVertStr.value }, "v", { label: "Vert gradient", min: 0, max: 1, step: 0.01 })
+          .on("change", (ev) => (sSky.cloudVertStr.value = ev.value));
+        bindSkyColor(sCCol, "Gradient dark", sSky.cloudGradientDark);
+        sCCol
+          .addBinding({ v: sSky.cloudGradientStr.value }, "v", { label: "Bump detail", min: 0, max: 1, step: 0.01 })
+          .on("change", (ev) => (sSky.cloudGradientStr.value = ev.value));
+        sCCol
+          .addBinding({ v: sSky.cloudDetailScale.value }, "v", { label: "Bump scale", min: 1, max: 8, step: 0.1 })
+          .on("change", (ev) => (sSky.cloudDetailScale.value = ev.value));
+        const sGodRay = stylizedFolder.addFolder({ title: "God rays", expanded: false });
+        sGodRay
+          .addBinding({ v: sSky.godRayStr.value }, "v", { label: "Strength", min: 0, max: 1, step: 0.01 })
+          .on("change", (ev) => (sSky.godRayStr.value = ev.value));
+        sGodRay
+          .addBinding({ v: sSky.godRayDecay.value }, "v", { label: "Decay", min: 0.7, max: 0.99, step: 0.01 })
+          .on("change", (ev) => (sSky.godRayDecay.value = ev.value));
+        const sMoon = stylizedFolder.addFolder({ title: "Moon", expanded: false });
+        bindSkyColor(sMoon, "Color", sSky.moonColor);
+        sMoon
+          .addBinding({ v: sSky.moonGlowStr.value }, "v", { label: "Glow strength", min: 0, max: 1, step: 0.01 })
+          .on("change", (ev) => (sSky.moonGlowStr.value = ev.value));
+        sMoon
+          .addBinding({ v: sSky.moonGlowPower.value }, "v", { label: "Glow sharpness", min: 4, max: 64, step: 1 })
+          .on("change", (ev) => (sSky.moonGlowPower.value = ev.value));
+        const sStars = stylizedFolder.addFolder({ title: "Stars", expanded: false });
+        sStars
+          .addBinding({ v: sSky.starsDensity.value }, "v", { label: "Density", min: 10, max: 200, step: 1 })
+          .on("change", (ev) => (sSky.starsDensity.value = ev.value));
+        sStars
+          .addBinding({ v: sSky.starsSize.value }, "v", { label: "Size", min: 0.01, max: 0.3, step: 0.01 })
+          .on("change", (ev) => (sSky.starsSize.value = ev.value));
+        sStars
+          .addBinding({ v: sSky.starsBrightness.value }, "v", { label: "Brightness", min: 0, max: 2, step: 0.05 })
+          .on("change", (ev) => (sSky.starsBrightness.value = ev.value));
+
+        skyFolder.addBlade({ view: "separator" });
+        const physicalSkyFolder = skyFolder.addFolder({ title: "Physical sky", expanded: true });
+        physicalSkyFolder.addBinding(PARAMS.sky, "turbidity", { min: 0, max: 10, step: 0.1 });
+        physicalSkyFolder.addBinding(PARAMS.sky, "rayleigh", { min: 0, max: 4, step: 0.1 });
+        physicalSkyFolder.addBinding(PARAMS.sky, "mie", { min: 0, max: 0.1, step: 0.001 });
+        physicalSkyFolder.addBinding(PARAMS.sky, "mieG", {
           label: "mie g",
           min: 0,
           max: 1,
           step: 0.01
         });
-        skyFolder.addBinding(PARAMS.sky, "cloudCoverage", {
+        physicalSkyFolder.addBinding(PARAMS.sky, "cloudCoverage", {
           label: "cloud coverage",
           min: 0,
           max: 1,
           step: 0.01
         });
-        skyFolder.addBinding(PARAMS.sky, "cloudDensity", {
+        physicalSkyFolder.addBinding(PARAMS.sky, "cloudDensity", {
           label: "cloud density",
           min: 0,
           max: 1,
           step: 0.01
         });
-        skyFolder.addBinding(PARAMS.sky, "cloudElevation", {
+        physicalSkyFolder.addBinding(PARAMS.sky, "cloudElevation", {
           label: "cloud elevation",
           min: 0,
           max: 1,
@@ -3138,12 +4069,14 @@ brush: sculpt ${PARAMS.sculptTool === "ramp" ? "ramp" : "brush"} r=${sculptBrush
           geminiGrassEraseMode = e.value;
         });
         geminiGrassFolder.addButton({ title: "Clear grass" }).on("click", () => {
+          pushTerrainUndo();
           geminiDensityCtx.fillStyle = "#000";
           geminiDensityCtx.fillRect(0, 0, HTEX_RES, HTEX_RES);
           if (geminiDensityTex) geminiDensityTex.needsUpdate = true;
           geminiGrassHasPaintedDensity = false;
         });
         geminiGrassFolder.addButton({ title: "Fill all grass" }).on("click", () => {
+          pushTerrainUndo();
           geminiDensityCtx.fillStyle = "#fff";
           geminiDensityCtx.fillRect(0, 0, HTEX_RES, HTEX_RES);
           if (geminiDensityTex) geminiDensityTex.needsUpdate = true;
@@ -3168,6 +4101,7 @@ brush: sculpt ${PARAMS.sculptTool === "ramp" ? "ramp" : "brush"} r=${sculptBrush
           if (!e.target.files[0]) return;
           const reader = new FileReader();
           reader.onload = (ev) => {
+            pushTerrainUndo();
             const loaded = new Uint8ClampedArray(ev.target.result);
             const imgData = geminiDensityCtx.createImageData(HTEX_RES, HTEX_RES);
             imgData.data.set(loaded.subarray(0, imgData.data.length));
@@ -3427,6 +4361,7 @@ brush: sculpt ${PARAMS.sculptTool === "ramp" ? "ramp" : "brush"} r=${sculptBrush
         lastTime = now;
 
         syncLightAndSkyFromParams();
+        stylizedSky.update(sunDir, camera.position);
 
         const dtSec = Math.min(0.05, dt * 0.001);
 
