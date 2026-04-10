@@ -19,6 +19,7 @@ import {
   sqrt,
   max,
   uniform,
+  step,
 } from "three/tsl";
 import { normalMap } from "three/tsl";
 
@@ -291,6 +292,14 @@ export function createChunkSplatCliffMaterial(
 
   mat.normalNode = cliff.buildNormalNode();
   mat.roughnessNode = cliff.buildRoughnessNode();
+
+  mat.opacityNode = Fn(() => {
+    const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));
+    const s = texture(splatTex, splatUV);
+    return float(1.0).sub(step(float(0.25), s.a));
+  })();
+  mat.alphaTest = 0.5;
+  mat.transparent = false;
 
   return mat;
 }

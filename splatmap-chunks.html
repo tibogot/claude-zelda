@@ -118,6 +118,10 @@
         background: rgba(200, 30, 30, 0.92);
         color: #ffcccc;
       }
+      #mode-badge.hole {
+        background: rgba(60, 0, 0, 0.95);
+        color: #ff6666;
+      }
       #mode-badge.waterfall {
         background: rgba(50, 130, 200, 0.92);
         color: #e8f8ff;
@@ -215,7 +219,8 @@
         sub,
         add,
         div,
-        abs
+        abs,
+        step
       } from "three/tsl";
       import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
@@ -480,6 +485,18 @@
       /** `showOverlay`: see painted barriers in any mode (sculpt, place, …). Barrier mode always shows the overlay for live paint preview (same idea as splatmap-painter). */
       const barrierPARAMS = { erase: false, showOverlay: true };
       let barrierFolderRef = null;
+
+      const HOLE_RES = BARRIER_RES;
+      const holeCanvas = document.createElement("canvas");
+      holeCanvas.width = holeCanvas.height = HOLE_RES;
+      const holeCtx = holeCanvas.getContext("2d", { willReadFrequently: true });
+      holeCtx.fillStyle = "#000";
+      holeCtx.fillRect(0, 0, HOLE_RES, HOLE_RES);
+      let holeTex = null;
+      let holeOverlayMesh = null;
+      let holeEraseMode = false;
+      const holePARAMS = { erase: false, showOverlay: true };
+      let holeFolderRef = null;
 
       function sculptBrushWorldRadius() {
         return THREE.MathUtils.mapLinear(PARAMS.brushSize, 2, 80, 5, 90);
@@ -1509,6 +1526,32 @@
       }
       syncBarrierOverlayFromParams();
 
+      holeTex = new THREE.CanvasTexture(holeCanvas);
+      holeTex.flipY = false;
+      holeTex.wrapS = holeTex.wrapT = THREE.ClampToEdgeWrapping;
+      holeTex.colorSpace = THREE.SRGBColorSpace;
+      holeTex.premultiplyAlpha = false;
+      {
+        const W = CONFIG.worldSize;
+        const holeOverlayGeo = new THREE.PlaneGeometry(W, W, 1, 1);
+        holeOverlayGeo.rotateX(-Math.PI / 2);
+        const holeOverlayMat = new THREE.MeshBasicMaterial({
+          map: holeTex,
+          transparent: true,
+          opacity: 0.45,
+          depthWrite: false,
+          depthTest: false,
+          toneMapped: false,
+          side: THREE.DoubleSide
+        });
+        holeOverlayMesh = new THREE.Mesh(holeOverlayGeo, holeOverlayMat);
+        holeOverlayMesh.position.y = 0.7;
+        holeOverlayMesh.renderOrder = 10;
+        holeOverlayMesh.visible = false;
+        scene.add(holeOverlayMesh);
+      }
+      syncHoleOverlayFromParams();
+
       let hdrTexture = null;
       const setSkyMode = (mode) => {
         PARAMS.sky.mode = mode;
@@ -2062,6 +2105,28 @@
         };
       }
 
+      /** Per-chunk tile view with hole punch from splat α — matches painter `tileMat.opacityNode`. */
+      function createChunkTileMaterialWithHoles(splatTex) {
+        splatTex.anisotropy = Math.max(splatTex.anisotropy || 0, 8);
+        splatTex.flipY = false;
+        const mat = createTileMaterial({
+          roughness: 0.95,
+          textureScale: 400,
+          tileColor: 0xe6e3e3,
+          gridColor: 0x444444,
+          gridLineColor: 0x111111
+        });
+        const cs = float(CONFIG.chunkSize);
+        mat.opacityNode = Fn(() => {
+          const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));
+          const s = texture(splatTex, splatUV);
+          return float(1.0).sub(step(float(0.25), s.a));
+        })();
+        mat.alphaTest = 0.5;
+        mat.transparent = false;
+        return mat;
+      }
+
       function createSplatMaterialsForTex(tex) {
         syncCliffUniformsFromParams();
         const deps = buildCliffDeps();
@@ -2079,7 +2144,8 @@
             )
           : createChunkSplatMaterial(tex);
         const tslGroundMaterial = createChunkPainterGroundMaterial(tex, CONFIG.chunkSize, {}, deps);
-        return { material, tslGroundMaterial };
+        const tileMaterial = createChunkTileMaterialWithHoles(tex);
+        return { material, tslGroundMaterial, tileMaterial };
       }
 
       let geminiDensityCanvas = null;
@@ -2370,6 +2436,146 @@
         syncBarrierOverlay();
       }
 
+      function syncHoleOverlay() {
+        if (!holeOverlayMesh) return;
+        holeOverlayMesh.material.map.needsUpdate = true;
+      }
+
+      function syncHoleOverlayFromParams() {
+        if (!holeOverlayMesh) return;
+        if (playMode) {
+          holeOverlayMesh.visible = false;
+          return;
+        }
+        holeOverlayMesh.visible =
+          holePARAMS.showOverlay && editState.mode === "hole";
+      }
+
+      /** Rebuild world hole preview canvas from per-chunk splat alpha (after undo / import). */
+      function rebuildHoleCanvasFromSplats() {
+        const res = HOLE_RES;
+        const img = holeCtx.createImageData(res, res);
+        const hd = img.data;
+        for (let i = 0; i < hd.length; i += 4) {
+          hd[i] = 0;
+          hd[i + 1] = 0;
+          hd[i + 2] = 0;
+          hd[i + 3] = 255;
+        }
+        const sR = CONFIG.splatRes;
+        const maxChunk = getMaxChunkIndex();
+        for (let cz = 0; cz <= maxChunk; cz++) {
+          for (let cx = 0; cx <= maxChunk; cx++) {
+            const k = chunkKey(cx, cz);
+            if (!chunkSplatMap.has(k)) continue;
+            const splat = chunkSplatMap.get(k);
+            const simg = splat.ctx.getImageData(0, 0, sR, sR);
+            const sd = simg.data;
+            const c = chunkCenterWorld(cx, cz);
+            const cs = CONFIG.chunkSize;
+            for (let py = 0; py < sR; py++) {
+              for (let px = 0; px < sR; px++) {
+                const uTex = (px + 0.5) / sR;
+                const vTex = (py + 0.5) / sR;
+                const wx = c.x + (uTex - 0.5) * cs;
+                const wz = c.z + (vTex - 0.5) * cs;
+                const { u, v } = worldToUV(wx, wz);
+                const hx = Math.min(res - 1, Math.max(0, Math.floor(u * res)));
+                const hy = Math.min(res - 1, Math.max(0, Math.floor(v * res)));
+                const a = sd[(py * sR + px) * 4 + 3];
+                const hi = (hy * res + hx) * 4;
+                if (a > hd[hi]) hd[hi] = a;
+              }
+            }
+          }
+        }
+        holeCtx.putImageData(img, 0, 0);
+        if (holeTex) holeTex.needsUpdate = true;
+        syncHoleOverlay();
+      }
+
+      function clearAllHoles() {
+        holeCtx.fillStyle = "#000";
+        holeCtx.fillRect(0, 0, HOLE_RES, HOLE_RES);
+        if (holeTex) holeTex.needsUpdate = true;
+        syncHoleOverlay();
+        const sR = CONFIG.splatRes;
+        for (const splat of chunkSplatMap.values()) {
+          const simg = splat.ctx.getImageData(0, 0, sR, sR);
+          const d = simg.data;
+          for (let i = 0; i < d.length; i += 4) d[i + 3] = 0;
+          splat.ctx.putImageData(simg, 0, 0);
+          splat.tex.needsUpdate = true;
+        }
+        refreshActiveChunkMaterials();
+      }
+
+      /** Terrain punch: world hole canvas + splat texture alpha (same mask as splatmap-painter `paintHoleAt`). */
+      function paintHoleAtWorld(center, erase) {
+        const { u, v } = worldToUV(center.x, center.z);
+        const cx = u * HOLE_RES;
+        const cy = v * HOLE_RES;
+        const alpha = brushStr / 100;
+        if (erase) {
+          holeCtx.save();
+          holeCtx.globalCompositeOperation = "destination-out";
+          holeCtx.fillStyle = _radialGradAlphaPunch(holeCtx, cx, cy, alpha);
+          holeCtx.beginPath();
+          holeCtx.arc(cx, cy, brushSize, 0, PI * 2);
+          holeCtx.fill();
+          holeCtx.restore();
+        } else {
+          _applyBrushToCanvas(holeCtx, cx, cy, 255, 0, 0, alpha);
+        }
+        holeCtx.globalCompositeOperation = "source-over";
+        if (holeTex) holeTex.needsUpdate = true;
+        syncHoleOverlay();
+
+        const R = CONFIG.paint.radius;
+        const res = CONFIG.splatRes;
+        const maxChunk = getMaxChunkIndex();
+        const minC = worldToChunkIndex(center.x - R, center.z - R);
+        const maxC = worldToChunkIndex(center.x + R, center.z + R);
+        const minCx = THREE.MathUtils.clamp(minC.cx, 0, maxChunk);
+        const minCz = THREE.MathUtils.clamp(minC.cz, 0, maxChunk);
+        const maxCx = THREE.MathUtils.clamp(maxC.cx, 0, maxChunk);
+        const maxCz = THREE.MathUtils.clamp(maxC.cz, 0, maxChunk);
+        const ch = 3;
+        const flowBase = (brushStr / 100) * 255;
+
+        for (let cz = minCz; cz <= maxCz; cz++) {
+          for (let cx = minCx; cx <= maxCx; cx++) {
+            const splat = ensureChunkSplat(cx, cz);
+            const img = splat.ctx.getImageData(0, 0, res, res);
+            const data = img.data;
+            const c = chunkCenterWorld(cx, cz);
+            const cs = CONFIG.chunkSize;
+            let touched = false;
+            for (let py = 0; py < res; py++) {
+              for (let px = 0; px < res; px++) {
+                const uTex = (px + 0.5) / res;
+                const vTex = (py + 0.5) / res;
+                const wx = c.x + (uTex - 0.5) * cs;
+                const wz = c.z + (vTex - 0.5) * cs;
+                const dx = wx - center.x;
+                const dz = wz - center.z;
+                const dist = Math.hypot(dx, dz);
+                if (dist > R) continue;
+                const falloff = 1 - dist / R;
+                const delta = (erase ? -1 : 1) * flowBase * falloff;
+                const i = (py * res + px) * 4;
+                data[i + ch] = THREE.MathUtils.clamp(data[i + ch] + delta, 0, 255);
+                touched = true;
+              }
+            }
+            if (touched) {
+              splat.ctx.putImageData(img, 0, 0);
+              splat.tex.needsUpdate = true;
+            }
+          }
+        }
+      }
+
       function paintGeminiGrassAt(wx, wz, erase) {
         if (!geminiDensityCtx) return;
         const { u, v } = worldToUV(wx, wz);
@@ -2486,15 +2692,6 @@
         }
       }
 
-      // Same default tile material as splatmap-painter10bvh+post.html (~ key toggles there)
-      const terrainMaterial = createTileMaterial({
-        roughness: 0.95,
-        textureScale: 400,
-        tileColor: 0xe6e3e3,
-        gridColor: 0x444444,
-        gridLineColor: 0x111111
-      });
-
       /**
        * Seam-test: MeshBasicMaterial so color is truly flat (no lights / env / specular).
        * MeshStandardMaterial + scene.environment made every triangle reflect the sky
@@ -2527,6 +2724,13 @@
           col = mix(col, layB, s.b);
           return col;
         })();
+        mat.opacityNode = Fn(() => {
+          const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));
+          const s = texture(splatTex, splatUV);
+          return float(1.0).sub(step(float(0.25), s.a));
+        })();
+        mat.alphaTest = 0.5;
+        mat.transparent = false;
         return mat;
       }
 
@@ -2565,7 +2769,8 @@
       function resolveTerrainMaterial(cx, cz, lodLevel) {
         if (debugChunkView) return getOrCreateDebugChunkMaterial(cx, cz, lodLevel);
         if (PARAMS.terrainSurface === "greenGround") return seamTestTerrainMaterial;
-        if (PARAMS.terrainSurface === "tile") return terrainMaterial;
+        if (PARAMS.terrainSurface === "tile")
+          return ensureChunkSplat(cx, cz).tileMaterial;
         if (PARAMS.terrainSurface === "tslGround") return ensureChunkSplat(cx, cz).tslGroundMaterial;
         return ensureChunkSplat(cx, cz).material;
       }
@@ -3133,6 +3338,7 @@
         syncObjectSlotsHeights();
         syncPropObjectsHeights();
         invalidateBvhHeight();
+        rebuildHoleCanvasFromSplats();
       }
 
       function syncGeminiGrassHasPaintedFromCanvas() {
@@ -3184,15 +3390,14 @@
         canvas.width = res;
         canvas.height = res;
         const ctx = canvas.getContext("2d", { willReadFrequently: true });
-        ctx.fillStyle = "#000000";
-        ctx.fillRect(0, 0, res, res);
+        ctx.clearRect(0, 0, res, res);
         const tex = new THREE.CanvasTexture(canvas);
         tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
         tex.flipY = false;
-        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.colorSpace = THREE.NoColorSpace;
         tex.needsUpdate = true;
-        const { material, tslGroundMaterial } = createSplatMaterialsForTex(tex);
-        b = { canvas, ctx, tex, material, tslGroundMaterial };
+        const { material, tslGroundMaterial, tileMaterial } = createSplatMaterialsForTex(tex);
+        b = { canvas, ctx, tex, material, tslGroundMaterial, tileMaterial };
         chunkSplatMap.set(k, b);
         return b;
       }
@@ -3202,6 +3407,7 @@
         if (!s) return;
         s.material.dispose();
         s.tslGroundMaterial.dispose();
+        s.tileMaterial.dispose();
         s.tex.dispose();
         chunkSplatMap.delete(key);
       }
@@ -3239,7 +3445,7 @@
           };
         }
         const payload = {
-          v: 1,
+          v: 2,
           worldSize: CONFIG.worldSize,
           chunkSize: CONFIG.chunkSize,
           dataResolution: CONFIG.dataResolution,
@@ -3363,7 +3569,7 @@
 
       function importTerrainJson(text) {
         const data = JSON.parse(text);
-        if (data.v !== 1) throw new Error("Unsupported file version");
+        if (data.v !== 1 && data.v !== 2) throw new Error("Unsupported file version");
         if (
           data.worldSize !== CONFIG.worldSize ||
           data.chunkSize !== CONFIG.chunkSize ||
@@ -3385,6 +3591,9 @@
           if (sb.byteLength !== splatBytes) throw new Error(`Bad splat size for ${k}`);
           const splat = ensureChunkSplat(cx, cz);
           const u8 = new Uint8ClampedArray(sb);
+          if (data.v === 1) {
+            for (let i = 0; i < u8.length; i += 4) u8[i + 3] = 0;
+          }
           splat.ctx.putImageData(new ImageData(u8, CONFIG.splatRes, CONFIG.splatRes), 0, 0);
           splat.tex.needsUpdate = true;
           dirtyChunks.add(k);
@@ -3540,6 +3749,7 @@
             syncBarrierOverlay();
           }
         }
+        rebuildHoleCanvasFromSplats();
         if (fleurSystem) fleurSystem.syncHeights();
         if (ambientFXSystem) ambientFXSystem.syncHeights();
         syncObjectSlotsHeights();
@@ -3568,9 +3778,11 @@
         for (const splat of chunkSplatMap.values()) {
           splat.material.dispose();
           splat.tslGroundMaterial.dispose();
-          const { material, tslGroundMaterial } = createSplatMaterialsForTex(splat.tex);
+          splat.tileMaterial.dispose();
+          const { material, tslGroundMaterial, tileMaterial } = createSplatMaterialsForTex(splat.tex);
           splat.material = material;
           splat.tslGroundMaterial = tslGroundMaterial;
+          splat.tileMaterial = tileMaterial;
         }
         refreshActiveChunkMaterials();
       }
@@ -3714,6 +3926,10 @@
         if (decalFolderRef) decalFolderRef.hidden = editState.mode !== "decal";
       }
 
+      function syncHoleFolderVisibility() {
+        if (holeFolderRef) holeFolderRef.hidden = editState.mode !== "hole";
+      }
+
       function syncPropsFolderVisibility() {
         if (propsFolderRef) propsFolderRef.hidden = editState.mode !== "props";
       }
@@ -3770,6 +3986,9 @@
         else if (m === "decal")
           el.textContent =
             "DECAL MODE  [ D · LMB place / pick · W/E/R gizmo · Del · Refit in pane · Esc → view ]";
+        else if (m === "hole")
+          el.textContent =
+            "HOLE MODE  [ paint terrain punch · splat α + overlay · Shift erase · Brush pane · Esc → view ]";
         else if (m === "props")
           el.textContent =
             "PROPS MODE  [ I · LMB place / pick · W/E/R gizmo · Del · Esc → view ]";
@@ -3799,7 +4018,11 @@
           mode === "decal";
         if (brushFolderRef)
           brushFolderRef.hidden =
-            mode === "view" || tcMode || mode === "spline" || mode === "river";
+            mode === "view" ||
+            tcMode ||
+            mode === "spline" ||
+            mode === "river" ||
+            mode === "hole";
         if (playFolderRef) playFolderRef.hidden = mode !== "view";
         if (tcMode) {
           transformControls.enabled = true;
@@ -3903,8 +4126,10 @@
         syncRiverFolderVisibility();
         syncPathFolderVisibility();
         syncDecalFolderVisibility();
+        syncHoleFolderVisibility();
         if (barrierFolderRef) barrierFolderRef.hidden = editState.mode !== "barrier";
         syncBarrierOverlayFromParams();
+        syncHoleOverlayFromParams();
         if (!playMode) {
           renderer.domElement.style.cursor =
             editState.mode === "view" ? "default" : "crosshair";
@@ -3920,6 +4145,7 @@
           editState.mode === "waterfall" ||
           editState.mode === "props" ||
           editState.mode === "decal" ||
+          editState.mode === "hole" ||
           editState.mode === "spline" ||
           editState.mode === "river"
         ) {
@@ -3948,6 +4174,9 @@
         } else if (editState.mode === "barrier") {
           brushMarker.material.color.setHex(0xff2222);
           brushMarker.scale.setScalar(barrierBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
+        } else if (editState.mode === "hole") {
+          brushMarker.material.color.setHex(0xaa3333);
+          brushMarker.scale.setScalar(barrierBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
         } else if (editState.mode === "pinelod") {
           brushMarker.material.color.setHex(0x88bb44);
           brushMarker.scale.setScalar(sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
@@ -3964,7 +4193,8 @@
           brushMarker.material.color.setHex(0xffaa55);
           brushMarker.scale.setScalar(sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
         }
-        brushMarker.renderOrder = editState.mode === "barrier" ? 11 : 0;
+        brushMarker.renderOrder =
+          editState.mode === "barrier" || editState.mode === "hole" ? 11 : 0;
         syncRampMarkerVisual();
       }
 
@@ -5630,6 +5860,7 @@
         brushMarker.visible = false;
         rampMarkerA.visible = false;
         if (barrierOverlayMesh) barrierOverlayMesh.visible = false;
+        if (holeOverlayMesh) holeOverlayMesh.visible = false;
         transformControls.enabled = false;
         transformControls.detach();
         if (tcHelper) tcHelper.visible = false;
@@ -5664,6 +5895,7 @@
         renderer.domElement.style.cursor = "";
         syncModeBadge();
         syncBarrierOverlayFromParams();
+        syncHoleOverlayFromParams();
       }
 
       function rebuildDirtyActiveChunks(limit = 8) {
@@ -7421,6 +7653,7 @@
           editState.mode === "fleurs" ||
           editState.mode === "ambientfx" ||
           editState.mode === "barrier" ||
+          editState.mode === "hole" ||
           editState.mode === "pinelod" ||
           editState.mode === "proctrees" ||
           editState.mode === "objects" ||
@@ -7434,7 +7667,8 @@
         if (showBrushRing && hit) {
           editState.brushWorldPoint.copy(hit);
           brushMarker.visible = true;
-          const lift = editState.mode === "barrier" ? 0.15 : 0.04;
+          const lift =
+            editState.mode === "barrier" || editState.mode === "hole" ? 0.15 : 0.04;
           brushMarker.position.set(hit.x, hit.y + lift, hit.z);
         } else {
           brushMarker.visible = false;
@@ -7446,6 +7680,7 @@
           editState.mode === "fleurs" ||
           editState.mode === "ambientfx" ||
           editState.mode === "barrier" ||
+          editState.mode === "hole" ||
           editState.mode === "pinelod" ||
           editState.mode === "proctrees" ||
           editState.mode === "objects" ||
@@ -7496,6 +7731,9 @@
         }
         if (editState.isPointerDown && editState.pointerAction === "barrier" && hit) {
           paintBarrierAt(hit.x, hit.z, barrierEraseMode || event.shiftKey);
+        }
+        if (editState.isPointerDown && editState.pointerAction === "hole" && hit) {
+          paintHoleAtWorld(hit, holeEraseMode || event.shiftKey);
         }
         if (editState.isPointerDown && editState.pointerAction === "pinelod" && hit) {
           editState.paintErase = event.shiftKey;
@@ -7696,6 +7934,17 @@
           editState.paintErase = barrierEraseMode || event.shiftKey;
           controls.enabled = false;
           if (hit) paintBarrierAt(hit.x, hit.z, barrierEraseMode || event.shiftKey);
+          return;
+        }
+
+        if (editState.mode === "hole" && event.button === 0) {
+          event.preventDefault();
+          pushTerrainUndo();
+          editState.isPointerDown = true;
+          editState.pointerAction = "hole";
+          editState.paintErase = holeEraseMode || event.shiftKey;
+          controls.enabled = false;
+          if (hit) paintHoleAtWorld(hit, holeEraseMode || event.shiftKey);
           return;
         }
 
@@ -8337,6 +8586,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
               "Fleurs [M]": "fleurs",
               "Ambient FX [X]": "ambientfx",
               Barrier: "barrier",
+              Hole: "hole",
               "Tree LOD [J]": "pinelod",
               "Proc Trees": "proctrees",
               "Foliage [N]": "foliage",
@@ -10804,6 +11054,20 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
           syncBarrierOverlay();
         });
 
+        const holeFolder = pane.addFolder({ title: "Hole", expanded: true });
+        holeFolderRef = holeFolder;
+        holeFolder.hidden = true;
+        holeFolder.addBinding(holePARAMS, "erase", { label: "Erase (or Shift)" }).on("change", (ev) => {
+          holeEraseMode = ev.value;
+        });
+        holeFolder.addBinding(holePARAMS, "showOverlay", { label: "Show overlay" }).on("change", () => {
+          syncHoleOverlayFromParams();
+        });
+        holeFolder.addButton({ title: "Clear all holes" }).on("click", () => {
+          clearAllHoles();
+          if (editorPane) editorPane.refresh();
+        });
+
         playFolderRef = playFolder;
         brushFolderRef = brushFolder;
         setEditMode(PARAMS.mode);
@@ -10817,6 +11081,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
         syncRiverFolderVisibility();
         syncPathFolderVisibility();
         syncDecalFolderVisibility();
+        syncHoleFolderVisibility();
         syncPlaceFolderVisibility();
         syncAmbientFXFolderVisibility();
       }

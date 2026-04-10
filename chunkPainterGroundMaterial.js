@@ -22,6 +22,7 @@ import {
   sub,
   max,
   uniform,
+  step,
 } from "three/tsl";
 import { perlinNoise2D, fbmPerlin2D } from "./tsl-noise.js";
 import { createCliffShadingContext } from "./chunkTerrainAutoCliff.js";
@@ -171,6 +172,14 @@ export function createChunkPainterGroundMaterial(splatTex, chunkSize, opts = {},
     mat.normalNode = cliff.buildNormalNode();
     mat.roughnessNode = cliff.buildRoughnessNode();
   }
+
+  mat.opacityNode = Fn(() => {
+    const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));
+    const s = texture(splatTex, splatUV);
+    return float(1.0).sub(step(float(0.25), s.a));
+  })();
+  mat.alphaTest = 0.5;
+  mat.transparent = false;
 
   return mat;
 }
