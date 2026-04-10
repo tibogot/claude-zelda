@@ -303,6 +303,18 @@
         towerGun: {
           enabled: true,
           scale: 0.28,
+          aimEnabled: true,
+          aimMaxRange: 140,
+          aimTurnSpeed: 2.8,
+          aimRetargetInterval: 0.18,
+          aimRequireLos: false,
+          aimDeerYOffset: 0.85,
+          aimPivotYOffset: 0.45,
+          aimYawOffset: 0,
+          shootEnabled: false,
+          shootCooldown: 0.85,
+          shootMuzzleAlongAim: 0.08,
+          shootYawTolerance: 0.2,
         },
         spellVFX: {
           enabled: true,
@@ -1434,6 +1446,59 @@
         processParent(root);
       }
 
+      /**
+       * Barrel muzzle in `towerGun_turret` local space: furthest horizontal rim of the
+       * turret mesh AABB (avoids firing from the pivot at the bottom).
+       */
+      function recomputeTowerGunBarrelMuzzleLocal(rotateGroup) {
+        if (!rotateGroup) return;
+        const corner = new THREE.Vector3();
+        const box = new THREE.Box3().makeEmpty();
+        rotateGroup.updateMatrixWorld(true);
+        rotateGroup.traverse((o) => {
+          if (!o.isMesh || !o.geometry) return;
+          const g = o.geometry;
+          if (!g.boundingBox) g.computeBoundingBox();
+          const { min: mn, max: mx } = g.boundingBox;
+          const xs = [mn.x, mx.x];
+          const ys = [mn.y, mx.y];
+          const zs = [mn.z, mx.z];
+          for (const x of xs) {
+            for (const y of ys) {
+              for (const z of zs) {
+                corner.set(x, y, z);
+                o.localToWorld(corner);
+                rotateGroup.worldToLocal(corner);
+                box.expandByPoint(corner);
+              }
+            }
+          }
+        });
+        if (box.isEmpty()) {
+          rotateGroup.userData.barrelMuzzleLocal = new THREE.Vector3(0, 0.35, 0.55);
+          return;
+        }
+        const cx = (box.min.x + box.max.x) * 0.5;
+        const cy = (box.min.y + box.max.y) * 0.5;
+        const cz = (box.min.z + box.max.z) * 0.5;
+        const candidates = [
+          [cx, cy, box.max.z],
+          [cx, cy, box.min.z],
+          [box.max.x, cy, cz],
+          [box.min.x, cy, cz],
+        ];
+        let bestD2 = -1;
+        const tip = new THREE.Vector3();
+        for (const [x, y, z] of candidates) {
+          const d2 = x * x + z * z;
+          if (d2 > bestD2) {
+            bestD2 = d2;
+            tip.set(x, y, z);
+          }
+        }
+        rotateGroup.userData.barrelMuzzleLocal = tip;
+      }
+
       /** Uniform scale + keep world AABB bottom on `FLOOR_Y` and center XZ on spawn. */
       function syncTowerGunScaleAndGround(root) {
         if (!root) return;
@@ -1447,6 +1512,9 @@
           FLOOR_Y - box.min.y,
           TOWER_GUN_SPAWN_Z - midZ,
         );
+        root.updateMatrixWorld(true);
+        const rg = root.getObjectByName("towerGun_turret");
+        if (rg) recomputeTowerGunBarrelMuzzleLocal(rg);
       }
 
       /** Place `models/newtowergun.glb` on the parkour floor (bottom of bounds on FLOOR_Y). */
@@ -1858,14 +1926,11 @@
         let towerGunRoot = null;
         /** @type {THREE.Group | null} */
         let towerGunRotateGroup = null;
-        let towerGunSpinRate = 0;
-        let towerGunSpinRetargetT = 0;
         try {
           const tg = await loadTowerGunModel(scene);
           towerGunRoot = tg.root;
           towerGunRotateGroup = tg.rotateGroup;
           towerGunRoot.visible = parkourParams.towerGun.enabled;
-          towerGunSpinRetargetT = 0;
         } catch (e) {
           console.warn("Tower gun model failed to load", e);
         }
@@ -1944,6 +2009,57 @@
             label: "scale",
           })
           .on("change", () => syncTowerGunScaleAndGround(towerGunRoot));
+        towerGunFolder.addBinding(parkourParams.towerGun, "aimEnabled", {
+          label: "aim deer",
+        });
+        towerGunFolder.addBinding(parkourParams.towerGun, "aimMaxRange", {
+          min: 10,
+          max: 400,
+          step: 5,
+          label: "aim range",
+        });
+        towerGunFolder.addBinding(parkourParams.towerGun, "aimTurnSpeed", {
+          min: 0.2,
+          max: 12,
+          step: 0.1,
+          label: "turn speed (rad/s)",
+        });
+        towerGunFolder.addBinding(parkourParams.towerGun, "aimRetargetInterval", {
+          min: 0.05,
+          max: 0.6,
+          step: 0.01,
+          label: "LOS refresh (s)",
+        });
+        towerGunFolder.addBinding(parkourParams.towerGun, "aimRequireLos", {
+          label: "require LOS (BVH)",
+        });
+        towerGunFolder.addBinding(parkourParams.towerGun, "aimYawOffset", {
+          min: -Math.PI,
+          max: Math.PI,
+          step: 0.02,
+          label: "yaw offset (fix mesh fwd)",
+        });
+        towerGunFolder.addBinding(parkourParams.towerGun, "shootEnabled", {
+          label: "shoot (spell proj)",
+        });
+        towerGunFolder.addBinding(parkourParams.towerGun, "shootCooldown", {
+          min: 0.15,
+          max: 4,
+          step: 0.05,
+          label: "shoot cooldown (s)",
+        });
+        towerGunFolder.addBinding(parkourParams.towerGun, "shootMuzzleAlongAim", {
+          min: 0,
+          max: 1.5,
+          step: 0.02,
+          label: "muzzle along aim (clear)",
+        });
+        towerGunFolder.addBinding(parkourParams.towerGun, "shootYawTolerance", {
+          min: 0.02,
+          max: 0.6,
+          step: 0.01,
+          label: "shoot aim tolerance (rad)",
+        });
 
         const katanaFolder = pane.addFolder({
           title: "Katana (in hand)",
@@ -2991,6 +3107,189 @@
         initSpellVFX(scene, camera);
         await initBloodFX(scene);
 
+        const _towerAimOrigin = new THREE.Vector3();
+        const _towerAimDeer = new THREE.Vector3();
+        const _towerAimRayDir = new THREE.Vector3();
+        const _towerShootDir = new THREE.Vector3();
+        const _towerMuzzlePos = new THREE.Vector3();
+        const towerLosRaycaster = new THREE.Raycaster();
+        towerLosRaycaster.firstHitOnly = true;
+
+        const _towerLosMeshesScratch = [];
+
+        /** Ray vs deer BVH meshes; first hit must be `targetDeer` (uses shared mesh list). */
+        function towerGunLosToDeer(origin, aimPoint, targetDeer, deerBvhMeshes) {
+          if (!targetDeer.bvhMesh) return true;
+          _towerAimRayDir.subVectors(aimPoint, origin);
+          const dist = _towerAimRayDir.length();
+          if (dist < 0.02) return true;
+          _towerAimRayDir.multiplyScalar(1 / dist);
+          towerLosRaycaster.set(origin, _towerAimRayDir);
+          towerLosRaycaster.near = 0.05;
+          towerLosRaycaster.far = dist + 0.35;
+          if (deerBvhMeshes.length === 0) return true;
+          const hits = towerLosRaycaster.intersectObjects(deerBvhMeshes, false);
+          if (hits.length === 0) return false;
+          return hits[0].object === targetDeer.bvhMesh;
+        }
+
+        function collectTowerGunDeerBvhMeshes() {
+          _towerLosMeshesScratch.length = 0;
+          for (const d of deerTargets) {
+            if (!d || d.isDead || !d.bvhMesh) continue;
+            _towerLosMeshesScratch.push(d.bvhMesh);
+          }
+          return _towerLosMeshesScratch;
+        }
+
+        /** Nearest in range; with LOS, try sorted candidates so we raycast at most a few times per call (not every frame × every deer). */
+        function pickTowerGunTargetDeer(origin, rSq) {
+          const p = parkourParams.towerGun;
+          const candidates = [];
+          for (const deer of deerTargets) {
+            if (!deer || deer.isDead) continue;
+            deer.root.getWorldPosition(_towerAimDeer);
+            _towerAimDeer.y += p.aimDeerYOffset;
+            const distSq = origin.distanceToSquared(_towerAimDeer);
+            if (distSq > rSq) continue;
+            candidates.push({ deer, distSq });
+          }
+          candidates.sort((a, b) => a.distSq - b.distSq);
+          if (candidates.length === 0) return null;
+          if (!p.aimRequireLos) return candidates[0].deer;
+
+          const losMeshes = collectTowerGunDeerBvhMeshes();
+          for (const c of candidates) {
+            c.deer.root.getWorldPosition(_towerAimDeer);
+            _towerAimDeer.y += p.aimDeerYOffset;
+            if (towerGunLosToDeer(origin, _towerAimDeer, c.deer, losMeshes))
+              return c.deer;
+          }
+          return null;
+        }
+
+        let towerGunLockedDeer = null;
+        let towerGunAimRetargetAcc = 0;
+        let towerGunShootAcc = 0;
+        let towerGunIdlePause = false;
+        let towerGunIdlePhaseT = 0;
+        let towerGunIdleSpinRate = 0;
+
+        /** Slow scan + random pauses when no deer is locked (searching). */
+        function updateTowerGunIdleSearch(dt) {
+          if (!towerGunRotateGroup) return;
+          towerGunIdlePhaseT -= dt;
+          if (towerGunIdlePhaseT <= 0) {
+            if (towerGunIdlePause) {
+              towerGunIdlePause = false;
+              towerGunIdleSpinRate = (Math.random() - 0.5) * 1.15;
+              towerGunIdlePhaseT = 0.65 + Math.random() * 2.0;
+            } else {
+              if (Math.random() < 0.42) {
+                towerGunIdlePause = true;
+                towerGunIdleSpinRate = 0;
+                towerGunIdlePhaseT = 0.4 + Math.random() * 1.6;
+              } else {
+                towerGunIdleSpinRate = (Math.random() - 0.5) * 1.15;
+                towerGunIdlePhaseT = 0.55 + Math.random() * 1.9;
+              }
+            }
+          }
+          if (!towerGunIdlePause) {
+            towerGunRotateGroup.rotation.y += towerGunIdleSpinRate * dt;
+          }
+        }
+
+        function updateTowerGunTargeting(dt) {
+          if (
+            !towerGunRotateGroup ||
+            !parkourParams.towerGun.enabled ||
+            !towerGunRoot?.visible
+          )
+            return;
+          const p = parkourParams.towerGun;
+          if (!p.aimEnabled) {
+            towerGunLockedDeer = null;
+            towerGunShootAcc = 0;
+            updateTowerGunIdleSearch(dt);
+            return;
+          }
+
+          towerGunRotateGroup.getWorldPosition(_towerAimOrigin);
+          _towerAimOrigin.y += p.aimPivotYOffset;
+
+          const rSq = p.aimMaxRange * p.aimMaxRange;
+
+          if (towerGunLockedDeer) {
+            if (towerGunLockedDeer.isDead) towerGunLockedDeer = null;
+            else {
+              towerGunLockedDeer.root.getWorldPosition(_towerAimDeer);
+              _towerAimDeer.y += p.aimDeerYOffset;
+              if (_towerAimOrigin.distanceToSquared(_towerAimDeer) > rSq)
+                towerGunLockedDeer = null;
+            }
+          }
+
+          towerGunAimRetargetAcc += dt;
+          const interval = Math.max(0.04, p.aimRetargetInterval);
+          if (!towerGunLockedDeer || towerGunAimRetargetAcc >= interval) {
+            towerGunAimRetargetAcc = 0;
+            towerGunLockedDeer = pickTowerGunTargetDeer(_towerAimOrigin, rSq);
+          }
+
+          if (!towerGunLockedDeer) {
+            updateTowerGunIdleSearch(dt);
+            return;
+          }
+
+          towerGunLockedDeer.root.getWorldPosition(_towerAimDeer);
+          _towerAimDeer.y += p.aimDeerYOffset;
+
+          const dx = _towerAimDeer.x - _towerAimOrigin.x;
+          const dz = _towerAimDeer.z - _towerAimOrigin.z;
+          const targetYaw = Math.atan2(dx, dz) + p.aimYawOffset;
+
+          let cur = towerGunRotateGroup.rotation.y;
+          let delta = targetYaw - cur;
+          delta = Math.atan2(Math.sin(delta), Math.cos(delta));
+          const maxStep = p.aimTurnSpeed * dt;
+          towerGunRotateGroup.rotation.y +=
+            Math.sign(delta) * Math.min(Math.abs(delta), maxStep);
+
+          // Same projectile pool + hit logic as player spell (checkProjectileHits).
+          if (
+            p.shootEnabled &&
+            parkourParams.spellVFX.enabled &&
+            spellVfx.initialized
+          ) {
+            towerGunShootAcc += dt;
+            const lenSqH = dx * dx + dz * dz;
+            if (lenSqH >= 0.04 && towerGunShootAcc >= p.shootCooldown) {
+              _towerShootDir.set(dx, 0, dz).multiplyScalar(1 / Math.sqrt(lenSqH));
+              const curYaw = towerGunRotateGroup.rotation.y;
+              let aimErr = targetYaw - curYaw;
+              aimErr = Math.atan2(Math.sin(aimErr), Math.cos(aimErr));
+              if (Math.abs(aimErr) <= p.shootYawTolerance) {
+                towerGunShootAcc = 0;
+                const bm = towerGunRotateGroup.userData.barrelMuzzleLocal;
+                if (bm) {
+                  _towerMuzzlePos.copy(bm);
+                  towerGunRotateGroup.localToWorld(_towerMuzzlePos);
+                } else {
+                  _towerMuzzlePos
+                    .copy(_towerAimOrigin)
+                    .addScaledVector(_towerShootDir, 0.35);
+                }
+                _towerMuzzlePos.addScaledVector(
+                  _towerShootDir,
+                  p.shootMuzzleAlongAim,
+                );
+                spawnProjectile(_towerMuzzlePos, _towerShootDir);
+              }
+            }
+          }
+        }
+
         function trySpellHit() {
           const ud = player.characterGroup.userData;
           const handBone = ud.leftHandBone;
@@ -3072,6 +3371,10 @@
           } else {
             udPlayer._spellHitMarker = false;
           }
+
+          if (towerGunRoot)
+            towerGunRoot.visible = parkourParams.towerGun.enabled;
+          updateTowerGunTargeting(dt);
 
           updateSpellVFX(dt, camera, udPlayer);
           checkProjectileHits();
@@ -3158,20 +3461,6 @@
           flowing.params.pathFrequency =
             parkourParams.flowingLines.pathFrequency;
           flowing.group.visible = parkourParams.flowingLines.enabled;
-          if (towerGunRoot)
-            towerGunRoot.visible = parkourParams.towerGun.enabled;
-          if (
-            towerGunRotateGroup &&
-            parkourParams.towerGun.enabled &&
-            towerGunRoot?.visible
-          ) {
-            towerGunSpinRetargetT -= dt;
-            if (towerGunSpinRetargetT <= 0) {
-              towerGunSpinRetargetT = 0.8 + Math.random() * 2.2;
-              towerGunSpinRate = (Math.random() - 0.5) * 2.5;
-            }
-            towerGunRotateGroup.rotation.y += towerGunSpinRate * dt;
-          }
           flowing.setParams({
             lineColor: parkourParams.flowingLines.lineColor,
             lineOpacity: parkourParams.flowingLines.lineOpacity,
