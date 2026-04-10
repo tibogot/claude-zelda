@@ -86,6 +86,10 @@
         background: rgba(40, 80, 50, 0.95);
         color: #b0f0c0;
       }
+      #mode-badge.fleurs {
+        background: rgba(160, 80, 140, 0.92);
+        color: #ffe8f5;
+      }
       #mode-badge.pinelod {
         background: rgba(100, 140, 60, 0.92);
         color: #fff;
@@ -152,6 +156,7 @@
         createGrassMaterial as geminiGrassMat,
         setupGrassPatches as geminiSetupPatches
       } from "./grass-gemini.js";
+      import { createFleurSystem, FLEUR_PRESETS } from "./fleur-painter.js";
 
       const PI = Math.PI;
 
@@ -754,6 +759,48 @@
       let placeFolderRef = null;
       let cliffsFolderRef = null;
       let playFolderRef = null;
+      let fleurSystem = null;
+      let fleurFolderRef = null;
+      let fleurEraseMode = false;
+      let fleurActiveSlot = 0;
+      const fleurParams = {
+        perStroke: 20,
+        minSpacing: 0.4,
+        scaleMin: 0.4,
+        scaleMax: 0.7,
+        hoverBase: 0.45,
+        hoverVariance: 0.1,
+        subMode: "ground",
+        bloomShape: 0,
+        stemBase: "#1f5c32",
+        stemTop: "#6bae6e",
+        stemStaticCurve: 0.1,
+        interactRadius: 1.5,
+        interactStrength: 0.4,
+        interactGain: 0.85,
+        windAmp: 0.042,
+        windSpeed: 1.12
+      };
+      function _syncFleurInteractionToSystem() {
+        if (!fleurSystem) return;
+        fleurSystem.setInteractionRadius(fleurParams.interactRadius);
+        fleurSystem.setInteractionStrength(fleurParams.interactStrength);
+        fleurSystem.setRepulseGain(fleurParams.interactGain);
+        fleurSystem.setWindAmp(fleurParams.windAmp);
+        fleurSystem.setWindSpeed(fleurParams.windSpeed);
+      }
+      const fleurColorA = {
+        preset: "main",
+        inner: FLEUR_PRESETS.main.inner,
+        outer: FLEUR_PRESETS.main.outer,
+        glow: FLEUR_PRESETS.main.glow
+      };
+      const fleurColorB = {
+        preset: "sakura",
+        inner: FLEUR_PRESETS.sakura.inner,
+        outer: FLEUR_PRESETS.sakura.outer,
+        glow: FLEUR_PRESETS.sakura.glow
+      };
       const _geminiUpdateOpts = {
         patchSize: 10,
         patchSizeMid: 18,
@@ -893,6 +940,29 @@
         }
         if (geminiCliffDensityTex) geminiCliffDensityTex.needsUpdate = true;
         geminiGrassHasPaintedDensity = true;
+      }
+
+      function paintFleurAt(wx, wz, erase) {
+        if (!fleurSystem) return;
+        const radius = geminiBrushWorldRadius();
+        if (erase) {
+          fleurSystem.removeInBrush(wx, wz, radius);
+        } else {
+          fleurSystem.addInBrush(
+            wx,
+            wz,
+            radius,
+            fleurParams.perStroke,
+            fleurParams.minSpacing,
+            fleurParams.scaleMin,
+            fleurParams.scaleMax,
+            fleurParams.hoverBase,
+            fleurParams.hoverVariance,
+            fleurActiveSlot,
+            fleurParams.subMode === "stem" ? "stem" : "ground",
+            fleurParams.bloomShape
+          );
+        }
       }
 
       // Same default tile material as splatmap-painter10bvh+post.html (~ key toggles there)
@@ -1298,7 +1368,15 @@
             sy: root.scale.y,
             sz: root.scale.z
           })),
-          cliffInstances: cliffInstancer.exportData()
+          cliffInstances: cliffInstancer.exportData(),
+          fleurs: fleurSystem ? fleurSystem.getPositions() : [],
+          fleurInteraction: {
+            interactRadius: fleurParams.interactRadius,
+            interactStrength: fleurParams.interactStrength,
+            interactGain: fleurParams.interactGain,
+            windAmp: fleurParams.windAmp,
+            windSpeed: fleurParams.windSpeed
+          }
         };
         if (geminiDensityCtx) {
           const gpix = geminiDensityCtx.getImageData(0, 0, HTEX_RES, HTEX_RES).data;
@@ -1384,6 +1462,19 @@
           }
         }
         syncGeminiGrassHasPaintedFromCanvas();
+        if (data.fleurInteraction && typeof data.fleurInteraction === "object") {
+          const fi = data.fleurInteraction;
+          if (fi.interactRadius != null) fleurParams.interactRadius = fi.interactRadius;
+          if (fi.interactStrength != null) fleurParams.interactStrength = fi.interactStrength;
+          if (fi.interactGain != null) fleurParams.interactGain = fi.interactGain;
+          if (fi.windAmp != null) fleurParams.windAmp = fi.windAmp;
+          if (fi.windSpeed != null) fleurParams.windSpeed = fi.windSpeed;
+          _syncFleurInteractionToSystem();
+        }
+        if (data.fleurs && Array.isArray(data.fleurs) && fleurSystem) {
+          fleurSystem.setPositions(data.fleurs);
+        }
+        if (fleurSystem) fleurSystem.syncHeights();
       }
 
       function rebuildAllActiveChunkMeshes() {
@@ -1492,6 +1583,10 @@
         if (geminiCliffGrassFolderRef) geminiCliffGrassFolderRef.hidden = editState.mode !== "geminicliffgrass";
       }
 
+      function syncFleurFolderVisibility() {
+        if (fleurFolderRef) fleurFolderRef.hidden = editState.mode !== "fleurs";
+      }
+
       function syncLodFolderVisibility() {
         if (lodFolderRef) lodFolderRef.hidden = editState.mode !== "pinelod";
       }
@@ -1520,6 +1615,7 @@
         else if (m === "geminigrass") el.textContent = "GEMINI GRASS  [ G · Esc → view ]";
         else if (m === "geminicliffgrass")
           el.textContent = "GEMINI CLIFF GRASS  [ Mode menu · Esc → view ]";
+        else if (m === "fleurs") el.textContent = "FLEURS MODE  [ M · Esc → view ]";
         else if (m === "pinelod") el.textContent = "TREE LOD  [ J · 1–8 slot · Shift erase · Esc → view ]";
         else if (m === "place")
           el.textContent = "PLACE MODE  [ O · W move · E rotate · R scale · Del remove · Esc → view ]";
@@ -1573,6 +1669,7 @@
         syncModeBadge();
         syncBrushVisual();
         syncGeminiFolderVisibility();
+        syncFleurFolderVisibility();
         syncLodFolderVisibility();
         syncPlaceFolderVisibility();
         syncCliffsFolderVisibility();
@@ -1597,6 +1694,9 @@
           brushMarker.scale.setScalar(geminiBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
         } else if (editState.mode === "geminicliffgrass") {
           brushMarker.material.color.setHex(0x55cc88);
+          brushMarker.scale.setScalar(geminiBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
+        } else if (editState.mode === "fleurs") {
+          brushMarker.material.color.setHex(0xff66aa);
           brushMarker.scale.setScalar(geminiBrushWorldRadius() / SCULPT_RING_GEOM_BASE);
         } else if (editState.mode === "pinelod") {
           brushMarker.material.color.setHex(0x88bb44);
@@ -2159,6 +2259,7 @@
         }
         globalHeightTex.needsUpdate = true;
         rebuildGeminiTerrainOnlyHeightTexture();
+        if (fleurSystem) fleurSystem.syncHeights();
       }
 
       function rebuildGeminiTerrainOnlyHeightTexture() {
@@ -4032,6 +4133,11 @@
           setEditMode(editState.mode === "cliffs" ? "view" : "cliffs");
           return;
         }
+        if (event.code === "KeyM") {
+          event.preventDefault();
+          setEditMode(editState.mode === "fleurs" ? "view" : "fleurs");
+          return;
+        }
         if (editState.mode === "place" || editState.mode === "cliffs") {
           if (event.code === "KeyW") {
             event.preventDefault();
@@ -4103,6 +4209,7 @@
           editState.mode === "paint" ||
           editState.mode === "geminigrass" ||
           editState.mode === "geminicliffgrass" ||
+          editState.mode === "fleurs" ||
           editState.mode === "pinelod" ||
           (editState.mode === "sculpt" &&
             (PARAMS.sculptTool === "brush" ||
@@ -4120,6 +4227,7 @@
         if (
           editState.mode === "geminigrass" ||
           editState.mode === "geminicliffgrass" ||
+          editState.mode === "fleurs" ||
           editState.mode === "pinelod"
         )
           syncBrushVisual();
@@ -4155,6 +4263,9 @@
         }
         if (editState.isPointerDown && editState.pointerAction === "geminicliffgrass" && hit) {
           paintGeminiCliffGrassAt(hit.x, hit.z, editState.paintErase);
+        }
+        if (editState.isPointerDown && editState.pointerAction === "fleurs" && hit) {
+          paintFleurAt(hit.x, hit.z, editState.paintErase);
         }
         if (editState.isPointerDown && editState.pointerAction === "pinelod" && hit) {
           editState.paintErase = event.shiftKey;
@@ -4220,6 +4331,16 @@
           editState.paintErase = geminiCliffGrassEraseMode || event.shiftKey;
           controls.enabled = false;
           if (hit) paintGeminiCliffGrassAt(hit.x, hit.z, editState.paintErase);
+          return;
+        }
+
+        if (editState.mode === "fleurs" && event.button === 0) {
+          event.preventDefault();
+          editState.isPointerDown = true;
+          editState.pointerAction = "fleurs";
+          editState.paintErase = fleurEraseMode || event.shiftKey;
+          controls.enabled = false;
+          if (hit) paintFleurAt(hit.x, hit.z, editState.paintErase);
           return;
         }
 
@@ -4732,6 +4853,15 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
         if (oldGeos.geoFar) oldGeos.geoFar.dispose();
       };
 
+      fleurSystem = createFleurSystem(scene, getWorldHeight, () => {
+        if (!fleurSystem) return;
+        fleurSystem.setColorA(fleurColorA.inner, fleurColorA.outer, fleurColorA.glow);
+        fleurSystem.setColorB(fleurColorB.inner, fleurColorB.outer, fleurColorB.glow);
+        fleurSystem.setStemColors(fleurParams.stemBase, fleurParams.stemTop);
+        fleurSystem.setStemStaticCurve(fleurParams.stemStaticCurve);
+        _syncFleurInteractionToSystem();
+      });
+
       {
         const pane = new Pane({ title: "Chunk terrain" });
         editorPane = pane;
@@ -4754,6 +4884,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
               "Paint [P]": "paint",
               "Gemini Grass [G]": "geminigrass",
               "Gemini Cliff Grass": "geminicliffgrass",
+              "Fleurs [M]": "fleurs",
               "Tree LOD [J]": "pinelod",
               "Place [O]": "place",
               "Cliffs [C]": "cliffs",
@@ -4841,7 +4972,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
         const brushFolder = pane.addFolder({ title: "Brush", expanded: true });
         brushFolder
           .addBinding(PARAMS, "brushSize", {
-            label: "Size (sculpt + Gemini)",
+            label: "Size (sculpt + Gemini + Fleurs)",
             min: 2,
             max: 80,
             step: 1
@@ -5880,6 +6011,216 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
           e.target.value = "";
         });
 
+        const fleurFolder = pane.addFolder({ title: "Fleurs  [ M ]", expanded: true });
+        fleurFolderRef = fleurFolder;
+        fleurFolder.hidden = true;
+
+        function _applyFleurPreset(slot, key) {
+          const p = FLEUR_PRESETS[key];
+          if (!p) return;
+          if (slot === "A") {
+            fleurColorA.inner = p.inner;
+            fleurColorA.outer = p.outer;
+            fleurColorA.glow = p.glow;
+            if (fleurSystem) fleurSystem.setColorA(p.inner, p.outer, p.glow);
+          } else {
+            fleurColorB.inner = p.inner;
+            fleurColorB.outer = p.outer;
+            fleurColorB.glow = p.glow;
+            if (fleurSystem) fleurSystem.setColorB(p.inner, p.outer, p.glow);
+          }
+        }
+
+        const fleurErasePARAMS = { erase: false };
+        fleurFolder
+          .addBinding(fleurErasePARAMS, "erase", { label: "Erase (or Shift)" })
+          .on("change", (e) => {
+            fleurEraseMode = e.value;
+          });
+
+        const fleurSlotPARAMS = { slot: "A" };
+        fleurFolder
+          .addBinding(fleurSlotPARAMS, "slot", {
+            label: "Paint color",
+            options: { "Color A": "A", "Color B": "B" }
+          })
+          .on("change", (e) => {
+            fleurActiveSlot = e.value === "A" ? 0 : 1;
+          });
+
+        let fleurStemFolder = null;
+        let fleurHoverFolder = null;
+
+        fleurFolder
+          .addBinding(fleurParams, "subMode", {
+            label: "Placement",
+            options: { "Ground bloom": "ground", Stemmed: "stem" }
+          })
+          .on("change", () => {
+            if (fleurStemFolder) fleurStemFolder.hidden = fleurParams.subMode !== "stem";
+            if (fleurHoverFolder) fleurHoverFolder.hidden = fleurParams.subMode === "stem";
+            fleurFolder.refresh();
+          });
+
+        fleurFolder.addBinding(fleurParams, "bloomShape", {
+          label: "Bloom shape",
+          options: { "A (mask 1)": 0, "B (mask 2)": 1, "C (mask 3)": 2 }
+        });
+
+        fleurStemFolder = fleurFolder.addFolder({ title: "Stem colors", expanded: true });
+        fleurStemFolder.hidden = fleurParams.subMode !== "stem";
+        fleurStemFolder
+          .addBinding(fleurParams, "stemBase", { label: "Stem base", view: "color" })
+          .on("change", (e) => {
+            if (fleurSystem) fleurSystem.setStemColors(e.value, fleurParams.stemTop);
+          });
+        fleurStemFolder
+          .addBinding(fleurParams, "stemTop", { label: "Stem top", view: "color" })
+          .on("change", (e) => {
+            if (fleurSystem) fleurSystem.setStemColors(fleurParams.stemBase, e.value);
+          });
+        fleurStemFolder
+          .addBinding(fleurParams, "stemStaticCurve", {
+            label: "Stem lean (static)",
+            min: 0,
+            max: 0.25,
+            step: 0.005
+          })
+          .on("change", (e) => {
+            if (fleurSystem) fleurSystem.setStemStaticCurve(e.value);
+          });
+
+        const fleurAFolder = fleurFolder.addFolder({ title: "Color A", expanded: true });
+        fleurAFolder
+          .addBinding(fleurColorA, "preset", {
+            label: "Preset",
+            options: { Main: "main", Sakura: "sakura", "Zelda Blue": "zeldaBlue", Sunflower: "sunflower" }
+          })
+          .on("change", (e) => {
+            fleurColorA.preset = e.value;
+            _applyFleurPreset("A", e.value);
+            fleurFolder.refresh();
+          });
+        fleurAFolder
+          .addBinding(fleurColorA, "inner", { label: "Center color" })
+          .on("change", (e) => {
+            if (fleurSystem) fleurSystem.setColorA(e.value, fleurColorA.outer, fleurColorA.glow);
+          });
+        fleurAFolder
+          .addBinding(fleurColorA, "outer", { label: "Edge color" })
+          .on("change", (e) => {
+            if (fleurSystem) fleurSystem.setColorA(fleurColorA.inner, e.value, fleurColorA.glow);
+          });
+        fleurAFolder
+          .addBinding(fleurColorA, "glow", { label: "Center glow", min: 0, max: 1, step: 0.01 })
+          .on("change", (e) => {
+            if (fleurSystem) fleurSystem.setColorA(fleurColorA.inner, fleurColorA.outer, e.value);
+          });
+
+        const fleurBFolder = fleurFolder.addFolder({ title: "Color B", expanded: true });
+        fleurBFolder
+          .addBinding(fleurColorB, "preset", {
+            label: "Preset",
+            options: { Main: "main", Sakura: "sakura", "Zelda Blue": "zeldaBlue", Sunflower: "sunflower" }
+          })
+          .on("change", (e) => {
+            fleurColorB.preset = e.value;
+            _applyFleurPreset("B", e.value);
+            fleurFolder.refresh();
+          });
+        fleurBFolder
+          .addBinding(fleurColorB, "inner", { label: "Center color" })
+          .on("change", (e) => {
+            if (fleurSystem) fleurSystem.setColorB(e.value, fleurColorB.outer, fleurColorB.glow);
+          });
+        fleurBFolder
+          .addBinding(fleurColorB, "outer", { label: "Edge color" })
+          .on("change", (e) => {
+            if (fleurSystem) fleurSystem.setColorB(fleurColorB.inner, e.value, fleurColorB.glow);
+          });
+        fleurBFolder
+          .addBinding(fleurColorB, "glow", { label: "Center glow", min: 0, max: 1, step: 0.01 })
+          .on("change", (e) => {
+            if (fleurSystem) fleurSystem.setColorB(fleurColorB.inner, fleurColorB.outer, e.value);
+          });
+
+        fleurFolder.addBinding(fleurParams, "perStroke", { label: "Per stroke", min: 1, max: 60, step: 1 });
+        fleurFolder.addBinding(fleurParams, "minSpacing", { label: "Min spacing", min: 0.1, max: 8, step: 0.05 });
+        fleurFolder.addBinding(fleurParams, "scaleMin", { label: "Scale min", min: 0.1, max: 3, step: 0.05 });
+        fleurFolder.addBinding(fleurParams, "scaleMax", { label: "Scale max", min: 0.1, max: 3, step: 0.05 });
+
+        fleurHoverFolder = fleurFolder.addFolder({ title: "Hover (ground bloom only)", expanded: true });
+        fleurHoverFolder.hidden = fleurParams.subMode === "stem";
+        fleurHoverFolder.addBinding(fleurParams, "hoverBase", { label: "Hover height", min: 0, max: 1, step: 0.01 });
+        fleurHoverFolder.addBinding(fleurParams, "hoverVariance", {
+          label: "Hover variance",
+          min: 0,
+          max: 0.5,
+          step: 0.01
+        });
+
+        const fleurInteractFolder = fleurFolder.addFolder({ title: "Interaction (play / orbit)", expanded: false });
+        fleurInteractFolder
+          .addBinding(fleurParams, "interactRadius", { label: "Radius", min: 0.25, max: 8, step: 0.05 })
+          .on("change", () => {
+            _syncFleurInteractionToSystem();
+          });
+        fleurInteractFolder
+          .addBinding(fleurParams, "interactStrength", { label: "Lean (rad)", min: 0, max: 1.2, step: 0.01 })
+          .on("change", () => {
+            _syncFleurInteractionToSystem();
+          });
+        fleurInteractFolder
+          .addBinding(fleurParams, "interactGain", { label: "Gain", min: 0, max: 2.5, step: 0.05 })
+          .on("change", () => {
+            _syncFleurInteractionToSystem();
+          });
+        fleurInteractFolder
+          .addBinding(fleurParams, "windAmp", { label: "Wind sway (rad)", min: 0, max: 0.14, step: 0.002 })
+          .on("change", () => {
+            _syncFleurInteractionToSystem();
+          });
+        fleurInteractFolder
+          .addBinding(fleurParams, "windSpeed", { label: "Wind speed", min: 0.2, max: 3.5, step: 0.05 })
+          .on("change", () => {
+            _syncFleurInteractionToSystem();
+          });
+
+        fleurFolder.addButton({ title: "Clear all fleurs" }).on("click", () => {
+          if (fleurSystem) fleurSystem.clear();
+        });
+        fleurFolder.addButton({ title: "Save fleurs JSON" }).on("click", () => {
+          if (!fleurSystem) return;
+          const blob = new Blob([JSON.stringify(fleurSystem.getPositions(), null, 2)], {
+            type: "application/json"
+          });
+          const a = document.createElement("a");
+          a.download = "fleurs.json";
+          a.href = URL.createObjectURL(blob);
+          a.click();
+          URL.revokeObjectURL(a.href);
+        });
+        const fleurFileInput = document.createElement("input");
+        fleurFileInput.type = "file";
+        fleurFileInput.accept = ".json";
+        fleurFileInput.style.display = "none";
+        document.body.appendChild(fleurFileInput);
+        fleurFolder.addButton({ title: "Load fleurs JSON" }).on("click", () => fleurFileInput.click());
+        fleurFileInput.addEventListener("change", (e) => {
+          if (!e.target.files[0] || !fleurSystem) return;
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            try {
+              fleurSystem.setPositions(JSON.parse(ev.target.result));
+              if (fleurSystem) fleurSystem.syncHeights();
+            } catch (err) {
+              console.error("Failed to load fleurs.json", err);
+            }
+          };
+          reader.readAsText(e.target.files[0]);
+          e.target.value = "";
+        });
+
         playFolderRef = playFolder;
         brushFolderRef = brushFolder;
         setEditMode(PARAMS.mode);
@@ -5915,6 +6256,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
       updateChunkSet();
 
       let lastTime = performance.now();
+      let appTimeSec = 0;
       renderer.setAnimationLoop(() => {
         const now = performance.now();
         const dt = now - lastTime;
@@ -5924,6 +6266,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
         stylizedSky.update(sunDir, camera.position);
 
         const dtSec = Math.min(0.05, dt * 0.001);
+        appTimeSec += dtSec;
 
         if (playMode) {
           let mx = 0;
@@ -5971,6 +6314,11 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
           camera.lookAt(playerPos.x, lookAtY, playerPos.z);
         } else {
           controls.update();
+        }
+
+        if (fleurSystem) {
+          if (playMode) fleurSystem.update(playerPos, appTimeSec);
+          else fleurSystem.update(camera.position, appTimeSec);
         }
 
         if (now - frameState.lastChunkUpdateMs > 120) {
