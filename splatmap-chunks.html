@@ -138,6 +138,10 @@
         background: rgba(40, 140, 160, 0.92);
         color: #e0ffff;
       }
+      #mode-badge.path {
+        background: rgba(140, 110, 50, 0.92);
+        color: #fff8e8;
+      }
       #mode-badge.props {
         background: rgba(140, 90, 160, 0.92);
         color: #fce8ff;
@@ -366,6 +370,10 @@
           showTrain: false,
           trainSpeed: 8,
           trainScale: 1
+        },
+        /** Path paint [ L ] — splatmap-painter10bvh+post.html (splat blue + optional flatten) */
+        path: {
+          flattenStrength: 0.5
         },
         /** River path [ V ] — splatmap-painter10bvh+post.html */
         river: {
@@ -1908,6 +1916,7 @@
       let foliageFolderRef = null;
       let splineFolderRef = null;
       let riverFolderRef = null;
+      let pathFolderRef = null;
       let propsFolderRef = null;
 
       let riverPoints = [];
@@ -3120,6 +3129,7 @@
           },
           riverPoints: riverPoints.map((p) => ({ x: p.x, y: p.y, z: p.z })),
           river: JSON.parse(JSON.stringify(PARAMS.river)),
+          path: JSON.parse(JSON.stringify(PARAMS.path)),
           fog: JSON.parse(JSON.stringify(PARAMS.fog)),
           csm: JSON.parse(JSON.stringify(PARAMS.csm)),
           shadowBias: PARAMS.shadowBias,
@@ -3277,6 +3287,9 @@
           Object.assign(PARAMS.river, data.river);
           applyRiverStyle(PARAMS.river.shaderStyle);
           syncRiverMat();
+        }
+        if (data.path && typeof data.path === "object") {
+          Object.assign(PARAMS.path, data.path);
         }
         if (data.riverPoints && Array.isArray(data.riverPoints)) {
           riverRebuildVisual();
@@ -3483,6 +3496,10 @@
         if (riverFolderRef) riverFolderRef.hidden = editState.mode !== "river";
       }
 
+      function syncPathFolderVisibility() {
+        if (pathFolderRef) pathFolderRef.hidden = editState.mode !== "path";
+      }
+
       function syncPropsFolderVisibility() {
         if (propsFolderRef) propsFolderRef.hidden = editState.mode !== "props";
       }
@@ -3533,6 +3550,9 @@
         else if (m === "river")
           el.textContent =
             "RIVER MODE  [ V · LMB add / pick · drag · Del · Esc clears pick · Esc → view ]";
+        else if (m === "path")
+          el.textContent =
+            "PATH MODE  [ L · paint splat blue · flatten under brush · Brush pane · Esc → view ]";
         else if (m === "props")
           el.textContent =
             "PROPS MODE  [ I · LMB place / pick · W/E/R gizmo · Del · Esc → view ]";
@@ -3641,6 +3661,7 @@
         syncPropsFolderVisibility();
         syncSplineFolderVisibility();
         syncRiverFolderVisibility();
+        syncPathFolderVisibility();
         if (barrierFolderRef) barrierFolderRef.hidden = editState.mode !== "barrier";
         syncBarrierOverlayFromParams();
         if (!playMode) {
@@ -3666,6 +3687,9 @@
         }
         if (editState.mode === "paint") {
           brushMarker.material.color.setHex(0x44ff88);
+          brushMarker.scale.setScalar(CONFIG.paint.radius / SCULPT_RING_GEOM_BASE);
+        } else if (editState.mode === "path") {
+          brushMarker.material.color.setHex(0xd4a574);
           brushMarker.scale.setScalar(CONFIG.paint.radius / SCULPT_RING_GEOM_BASE);
         } else if (editState.mode === "geminigrass") {
           brushMarker.material.color.setHex(0x66dd99);
@@ -6258,6 +6282,116 @@
         }
       }
 
+      /** Path [ L ]: splatmap blue (path / “village” layer) + gentle flatten like splatmap-painter `pathPaintAt`. */
+      function pathPaintAt(center) {
+        const R = CONFIG.paint.radius;
+        const res = CONFIG.splatRes;
+        const maxChunk = getMaxChunkIndex();
+        const minC = worldToChunkIndex(center.x - R, center.z - R);
+        const maxC = worldToChunkIndex(center.x + R, center.z + R);
+        const minCx = THREE.MathUtils.clamp(minC.cx, 0, maxChunk);
+        const minCz = THREE.MathUtils.clamp(minC.cz, 0, maxChunk);
+        const maxCx = THREE.MathUtils.clamp(maxC.cx, 0, maxChunk);
+        const maxCz = THREE.MathUtils.clamp(maxC.cz, 0, maxChunk);
+        const flowBase = (brushStr / 100) * 255;
+
+        for (let cz = minCz; cz <= maxCz; cz++) {
+          for (let cx = minCx; cx <= maxCx; cx++) {
+            const splat = ensureChunkSplat(cx, cz);
+            const img = splat.ctx.getImageData(0, 0, res, res);
+            const data = img.data;
+            const c = chunkCenterWorld(cx, cz);
+            const cs = CONFIG.chunkSize;
+            let touched = false;
+            for (let py = 0; py < res; py++) {
+              for (let px = 0; px < res; px++) {
+                const uTex = (px + 0.5) / res;
+                const vTex = (py + 0.5) / res;
+                const wx = c.x + (uTex - 0.5) * cs;
+                const wz = c.z + (vTex - 0.5) * cs;
+                const dx = wx - center.x;
+                const dz = wz - center.z;
+                const dist = Math.hypot(dx, dz);
+                if (dist > R) continue;
+                const falloff = 1 - dist / R;
+                const delta = flowBase * falloff;
+                const i = (py * res + px) * 4;
+                data[i + 2] = THREE.MathUtils.clamp(data[i + 2] + delta, 0, 255);
+                touched = true;
+              }
+            }
+            if (touched) {
+              splat.ctx.putImageData(img, 0, 0);
+              splat.tex.needsUpdate = true;
+            }
+          }
+        }
+
+        if (PARAMS.path.flattenStrength <= 0) return;
+
+        const targetY = getWorldHeight(center.x, center.z);
+        const radiusSq = R * R;
+        const step = CONFIG.chunkSize / CONFIG.dataResolution;
+        const brushedChunkKeys = new Set();
+
+        for (let cz = minCz; cz <= maxCz; cz++) {
+          for (let cx = minCx; cx <= maxCx; cx++) {
+            const heights = ensureChunkData(cx, cz);
+            const minX = chunkMinWorldX(cx);
+            const minZ = chunkMinWorldZ(cz);
+            let changed = false;
+
+            for (let iz = 0; iz <= CONFIG.dataResolution; iz++) {
+              const wz = minZ + iz * step;
+              const dz = wz - center.z;
+              if (Math.abs(dz) > R) continue;
+
+              for (let ix = 0; ix <= CONFIG.dataResolution; ix++) {
+                const wx = minX + ix * step;
+                const dx = wx - center.x;
+                if (Math.abs(dx) > R) continue;
+
+                const distSq = dx * dx + dz * dz;
+                if (distSq > radiusSq) continue;
+                const t = Math.sqrt(distSq) / R;
+                const falloff = (1 - t) * (1 - t);
+                const idx = getChunkDataIndex(ix, iz);
+                const cur = heights[idx];
+                heights[idx] = THREE.MathUtils.clamp(
+                  cur + (targetY - cur) * falloff * PARAMS.path.flattenStrength * 0.08,
+                  PARAMS.sculptClampMin,
+                  PARAMS.sculptClampMax
+                );
+                changed = true;
+              }
+            }
+
+            if (changed) {
+              const k = chunkKey(cx, cz);
+              dirtyChunks.add(k);
+              brushedChunkKeys.add(k);
+            }
+          }
+        }
+
+        if (brushedChunkKeys.size > 0) {
+          finalizeSculpt(brushedChunkKeys, { wx: center.x, wz: center.z, radius: R });
+          rebuildDirtyActiveChunks(12);
+        }
+      }
+
+      function clearPathSplatBlueAllChunks() {
+        const res = CONFIG.splatRes;
+        for (const splat of chunkSplatMap.values()) {
+          const img = splat.ctx.getImageData(0, 0, res, res);
+          const d = img.data;
+          for (let i = 0; i < d.length; i += 4) d[i + 2] = 0;
+          splat.ctx.putImageData(img, 0, 0);
+          splat.tex.needsUpdate = true;
+        }
+        refreshActiveChunkMaterials();
+      }
+
       function updatePointerNdc(event) {
         pointerNdc.x = (event.clientX / window.innerWidth) * 2 - 1;
         pointerNdc.y = -(event.clientY / window.innerHeight) * 2 + 1;
@@ -6848,6 +6982,11 @@
           setEditMode(editState.mode === "river" ? "view" : "river");
           return;
         }
+        if (event.code === "KeyL") {
+          event.preventDefault();
+          setEditMode(editState.mode === "path" ? "view" : "path");
+          return;
+        }
         if (event.code === "KeyI") {
           event.preventDefault();
           setEditMode(editState.mode === "props" ? "view" : "props");
@@ -7016,6 +7155,7 @@
         editState.hasBrushHit = !!hit;
         const showBrushRing =
           editState.mode === "paint" ||
+          editState.mode === "path" ||
           editState.mode === "geminigrass" ||
           editState.mode === "geminicliffgrass" ||
           editState.mode === "fleurs" ||
@@ -7040,6 +7180,7 @@
           brushMarker.visible = false;
         }
         if (
+          editState.mode === "path" ||
           editState.mode === "geminigrass" ||
           editState.mode === "geminicliffgrass" ||
           editState.mode === "fleurs" ||
@@ -7077,6 +7218,9 @@
         if (PARAMS.sculptTool === "ramp" && editState.rampPointA) syncRampMarkerVisual();
         if (editState.isPointerDown && editState.pointerAction === "paint" && hit) {
           applyPaintAtWorld(hit, editState.paintErase);
+        }
+        if (editState.isPointerDown && editState.pointerAction === "path" && hit) {
+          pathPaintAt(hit);
         }
         if (editState.isPointerDown && editState.pointerAction === "geminigrass" && hit) {
           paintGeminiGrassAt(hit.x, hit.z, editState.paintErase);
@@ -7343,6 +7487,16 @@
           return;
         }
 
+        if (editState.mode === "path" && event.button === 0) {
+          event.preventDefault();
+          pushTerrainUndo();
+          editState.isPointerDown = true;
+          editState.pointerAction = "path";
+          controls.enabled = false;
+          if (hit) pathPaintAt(hit);
+          return;
+        }
+
         if (editState.mode === "pinelod" && event.button === 0) {
           event.preventDefault();
           editState.isPointerDown = true;
@@ -7415,7 +7569,7 @@
           editState.sculptSkipFirstMoveDup = false;
           if (!playMode) controls.enabled = true;
         }
-        if (!playMode && pa === "sculpt") {
+        if (!playMode && (pa === "sculpt" || pa === "path")) {
           syncTreeLodHeights();
           syncPTreeHeights();
           syncObjectSlotsHeights();
@@ -7916,6 +8070,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
               "Props [I]": "props",
               "Spline [K]": "spline",
               "River [V]": "river",
+              "Path [L]": "path",
               "Waterfall [H]": "waterfall",
               "Place [O]": "place",
               "Cliffs [C]": "cliffs",
@@ -8990,6 +9145,21 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
         basicRiverFolder.hidden = PARAMS.river.shaderStyle !== "Basic";
         stylizedRiverFolder.hidden = PARAMS.river.shaderStyle !== "Stylized";
         syncRiverMat();
+
+        const pathFolder = pane.addFolder({ title: "Path  [ L ]", expanded: true });
+        pathFolderRef = pathFolder;
+        pathFolder.hidden = true;
+        pathFolder.addBinding(PARAMS.path, "flattenStrength", {
+          label: "Flatten strength",
+          min: 0,
+          max: 1,
+          step: 0.01
+        });
+        pathFolder.addBlade({ view: "separator" });
+        pathFolder.addButton({ title: "Clear path (blue) all chunks" }).on("click", () => {
+          clearPathSplatBlueAllChunks();
+          if (editorPane) editorPane.refresh();
+        });
 
         const splineFolder = pane.addFolder({ title: "Spline  [ K ]", expanded: true });
         splineFolderRef = splineFolder;
@@ -10322,6 +10492,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
         syncPropsFolderVisibility();
         syncSplineFolderVisibility();
         syncRiverFolderVisibility();
+        syncPathFolderVisibility();
         syncPlaceFolderVisibility();
         syncAmbientFXFolderVisibility();
       }
