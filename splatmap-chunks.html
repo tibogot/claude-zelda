@@ -86,6 +86,10 @@
         background: rgba(100, 140, 60, 0.92);
         color: #fff;
       }
+      #mode-badge.place {
+        background: rgba(120, 90, 140, 0.92);
+        color: #fff;
+      }
       #mode-badge.play {
         background: rgba(20, 20, 180, 0.92);
         color: #aaccff;
@@ -107,12 +111,14 @@
     <div id="hud">booting...</div>
     <div id="mode-badge" class="view">VIEW MODE</div>
     <input type="file" id="load-terrain-input" accept="application/json,.json" style="display: none" />
+    <input type="file" id="load-cliffs-input" accept="application/json,.json" style="display: none" />
     <input type="file" id="hdr-file-input" accept=".hdr,.exr,image/*" style="display: none" />
 
     <script type="module">
       import * as THREE from "three";
       import { Fn, texture, vec3, vec2, mix, positionLocal, float, uniform } from "three/tsl";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { TransformControls } from "three/addons/controls/TransformControls.js";
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
       import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
       import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
@@ -224,7 +230,10 @@
           inertia: 0.1,
           capacity: 6,
           radius: 3
-        }
+        },
+        /** Place mode [ O ] — hand-placed cliff meshes (splatmap-painter) */
+        cliffModel: 0,
+        sinkOffset: 2
       };
 
       const TERRAIN_SURFACE_LABEL = {
@@ -328,6 +337,15 @@
         MIDDLE: THREE.MOUSE.ROTATE,
         RIGHT: THREE.MOUSE.PAN
       };
+
+      const transformControls = new TransformControls(camera, renderer.domElement);
+      transformControls.addEventListener("dragging-changed", (e) => {
+        controls.enabled = e.value ? false : !playMode;
+      });
+      transformControls.enabled = false;
+      const tcHelper = transformControls.getHelper();
+      tcHelper.visible = false;
+      scene.add(tcHelper);
 
       const hemi = new THREE.HemisphereLight(
         PARAMS.light.hemiSkyColor,
@@ -456,6 +474,135 @@
       gltfLoader.setDRACOLoader(dracoLoader);
       gltfLoader.setKTX2Loader(ktx2Loader);
 
+      const ASSET_BASE = new URL(".", import.meta.url);
+      function resolveModelUrl(relPath) {
+        const parts = relPath.split("/").filter((p) => p.length > 0);
+        const encodedPath = parts.map(encodeURIComponent).join("/");
+        return new URL(encodedPath, ASSET_BASE).href;
+      }
+
+      const CLIFF_MODELS = ["models/cliff1.glb", "models/cliff2.glb", "models/cliff3.glb"];
+      let cliffTemplates = [];
+      let cliffObjects = [];
+      let selectedCliff = null;
+      let activeCliffModel = 0;
+      let cliffSinkOffset = 2;
+      let placeCliffsReady = false;
+
+      async function loadPlaceCliffTemplates() {
+        const CLIFF_FALLBACK_COLORS = [0x8a7a6a, 0x6a5a4a, 0x7a6858];
+        cliffTemplates = await Promise.all(
+          CLIFF_MODELS.map(async (url, i) => {
+            try {
+              const gltf = await gltfLoader.loadAsync(resolveModelUrl(url));
+              gltf.scene.traverse((o) => {
+                if (o.isMesh) {
+                  o.castShadow = true;
+                  o.receiveShadow = true;
+                }
+              });
+              return gltf.scene;
+            } catch {
+              const mesh = new THREE.Mesh(
+                new THREE.BoxGeometry(10, 15, 8),
+                new THREE.MeshStandardMaterial({
+                  color: CLIFF_FALLBACK_COLORS[i],
+                  roughness: 0.9
+                })
+              );
+              mesh.castShadow = true;
+              mesh.receiveShadow = true;
+              const g = new THREE.Group();
+              g.add(mesh);
+              return g;
+            }
+          })
+        );
+        placeCliffsReady = true;
+      }
+      await loadPlaceCliffTemplates();
+
+      function getCliffRoot(object) {
+        let obj = object;
+        while (obj) {
+          if (cliffObjects.includes(obj)) return obj;
+          obj = obj.parent;
+        }
+        return null;
+      }
+
+      function selectCliff(root) {
+        selectedCliff = root;
+        if (root) {
+          tcHelper.visible = true;
+          transformControls.attach(root);
+        } else {
+          tcHelper.visible = false;
+          transformControls.detach();
+        }
+      }
+
+      function placeCliff(wx, wy, wz, modelIndex) {
+        if (!placeCliffsReady || !cliffTemplates.length) return;
+        const mi = Math.max(0, Math.min(cliffTemplates.length - 1, modelIndex | 0));
+        const root = cliffTemplates[mi].clone();
+        root.position.set(wx, wy - cliffSinkOffset, wz);
+        root.userData.modelIndex = mi;
+        root.traverse((o) => {
+          if (o.isMesh) {
+            o.castShadow = true;
+            o.receiveShadow = true;
+          }
+        });
+        scene.add(root);
+        cliffObjects.push(root);
+        selectCliff(root);
+      }
+
+      function applyCliffs(data) {
+        if (!placeCliffsReady || !cliffTemplates.length) return;
+        cliffObjects.forEach((r) => scene.remove(r));
+        cliffObjects = [];
+        selectCliff(null);
+        data.forEach((d) => {
+          const idx = Math.max(0, Math.min(cliffTemplates.length - 1, d.modelIndex ?? 0));
+          const root = cliffTemplates[idx].clone();
+          root.position.set(d.x, d.y, d.z);
+          root.rotation.set(d.rx, d.ry, d.rz);
+          root.scale.set(d.sx, d.sy, d.sz);
+          root.userData.modelIndex = idx;
+          root.traverse((o) => {
+            if (o.isMesh) {
+              o.castShadow = true;
+              o.receiveShadow = true;
+            }
+          });
+          scene.add(root);
+          cliffObjects.push(root);
+        });
+      }
+
+      function saveCliffs() {
+        const data = cliffObjects.map((root) => ({
+          modelIndex: root.userData.modelIndex ?? 0,
+          x: root.position.x,
+          y: root.position.y,
+          z: root.position.z,
+          rx: root.rotation.x,
+          ry: root.rotation.y,
+          rz: root.rotation.z,
+          sx: root.scale.x,
+          sy: root.scale.y,
+          sz: root.scale.z
+        }));
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+        const a = document.createElement("a");
+        a.download = "cliffs.json";
+        a.href = URL.createObjectURL(blob);
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }
+
       let heightTexDirty = true;
       let lastHeightTexSyncMs = 0;
       let globalHeightTexData = null;
@@ -527,6 +674,7 @@
       let geminiGrassFolderRef = null;
       let brushFolderRef = null;
       let lodFolderRef = null;
+      let placeFolderRef = null;
       let playFolderRef = null;
       const _geminiUpdateOpts = {
         patchSize: 10,
@@ -1018,7 +1166,19 @@
             const o = { name: s.name, positions: s.positions };
             if (s.meshScale != null && s.meshScale !== 1) o.meshScale = s.meshScale;
             return o;
-          })
+          }),
+          cliffs: cliffObjects.map((root) => ({
+            modelIndex: root.userData.modelIndex ?? 0,
+            x: root.position.x,
+            y: root.position.y,
+            z: root.position.z,
+            rx: root.rotation.x,
+            ry: root.rotation.y,
+            rz: root.rotation.z,
+            sx: root.scale.x,
+            sy: root.scale.y,
+            sz: root.scale.z
+          }))
         };
         const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
         const a = document.createElement("a");
@@ -1069,6 +1229,7 @@
           });
         }
         syncTreeLodHeights();
+        if (data.cliffs && Array.isArray(data.cliffs)) applyCliffs(data.cliffs);
       }
 
       function rebuildAllActiveChunkMeshes() {
@@ -1197,6 +1358,10 @@
         if (lodFolderRef) lodFolderRef.hidden = editState.mode !== "pinelod";
       }
 
+      function syncPlaceFolderVisibility() {
+        if (placeFolderRef) placeFolderRef.hidden = editState.mode !== "place";
+      }
+
       function syncModeBadge() {
         const el = document.getElementById("mode-badge");
         if (!el) return;
@@ -1212,6 +1377,8 @@
         else if (m === "paint") el.textContent = "PAINT MODE  [ P · Esc → view ]";
         else if (m === "geminigrass") el.textContent = "GEMINI GRASS  [ G · Esc → view ]";
         else if (m === "pinelod") el.textContent = "TREE LOD  [ J · 1–8 slot · Shift erase · Esc → view ]";
+        else if (m === "place")
+          el.textContent = "PLACE MODE  [ O · W move · E rotate · R scale · Del remove · Esc → view ]";
         else el.textContent = String(m).toUpperCase();
       }
 
@@ -1225,17 +1392,30 @@
         }
         editState.mode = mode;
         PARAMS.mode = mode;
-        if (brushFolderRef) brushFolderRef.hidden = mode === "view";
+        if (brushFolderRef) brushFolderRef.hidden = mode === "view" || mode === "place";
         if (playFolderRef) playFolderRef.hidden = mode !== "view";
+        if (mode === "place") {
+          transformControls.enabled = true;
+        } else {
+          transformControls.enabled = false;
+          transformControls.detach();
+          if (tcHelper) tcHelper.visible = false;
+          selectedCliff = null;
+        }
         syncModeBadge();
         syncBrushVisual();
         syncGeminiFolderVisibility();
         syncLodFolderVisibility();
+        syncPlaceFolderVisibility();
+        if (!playMode) {
+          renderer.domElement.style.cursor =
+            editState.mode === "view" ? "default" : "crosshair";
+        }
         if (editorPane) editorPane.refresh();
       }
 
       function syncBrushVisual() {
-        if (editState.mode === "view") {
+        if (editState.mode === "view" || editState.mode === "place") {
           brushMarker.visible = false;
           rampMarkerA.visible = false;
           return;
@@ -1982,18 +2162,6 @@
         lodParams.chunksVisible = totalVisible;
       }
 
-      /**
-       * Resolve `models/…` next to this HTML file (same as splatmap-painter), not vs raw
-       * `location.href` (hash/query/iframe/dev preview can break that). `import.meta.url` is
-       * the document URL for this inline module.
-       */
-      const TREE_LOD_ASSET_BASE = new URL(".", import.meta.url);
-      function resolveModelUrl(relPath) {
-        const parts = relPath.split("/").filter((p) => p.length > 0);
-        const encodedPath = parts.map(encodeURIComponent).join("/");
-        return new URL(encodedPath, TREE_LOD_ASSET_BASE).href;
-      }
-
       function loadTreeLodSlot(slot) {
         if (!slot.modelPath) return;
         const candidates = [slot.modelPath, slot.fallbackModelPath].filter(Boolean);
@@ -2486,6 +2654,10 @@
         controls.enabled = false;
         brushMarker.visible = false;
         rampMarkerA.visible = false;
+        transformControls.enabled = false;
+        transformControls.detach();
+        if (tcHelper) tcHelper.visible = false;
+        selectedCliff = null;
         syncModeBadge();
         if (editorPane) editorPane.refresh();
         const tpEl = document.querySelector(".tp-dfwv");
@@ -3539,6 +3711,35 @@
           setEditMode(editState.mode === "pinelod" ? "view" : "pinelod");
           return;
         }
+        if (event.code === "KeyO") {
+          event.preventDefault();
+          setEditMode(editState.mode === "place" ? "view" : "place");
+          return;
+        }
+        if (editState.mode === "place") {
+          if (event.code === "KeyW") {
+            event.preventDefault();
+            transformControls.setMode("translate");
+            return;
+          }
+          if (event.code === "KeyE") {
+            event.preventDefault();
+            transformControls.setMode("rotate");
+            return;
+          }
+          if (event.code === "KeyR") {
+            event.preventDefault();
+            transformControls.setMode("scale");
+            return;
+          }
+          if (event.code === "Delete" && selectedCliff) {
+            event.preventDefault();
+            scene.remove(selectedCliff);
+            cliffObjects = cliffObjects.filter((c) => c !== selectedCliff);
+            selectCliff(null);
+            return;
+          }
+        }
         if (editState.mode === "pinelod") {
           const dk = parseInt(event.key, 10);
           if (dk >= 1 && dk <= 8) {
@@ -3627,6 +3828,28 @@
         if (playMode) return;
         updatePointerNdc(event);
         const hit = raycastTerrainPoint();
+
+        if (editState.mode === "place" && event.button === 0) {
+          event.preventDefault();
+          if (transformControls.axis !== null) return;
+          raycaster.setFromCamera(pointerNdc, camera);
+          const cliffMeshes = [];
+          cliffObjects.forEach((root) =>
+            root.traverse((o) => {
+              if (o.isMesh) cliffMeshes.push(o);
+            })
+          );
+          const cliffHits = raycaster.intersectObjects(cliffMeshes, false);
+          if (cliffHits.length > 0) {
+            const root = getCliffRoot(cliffHits[0].object);
+            if (root) {
+              selectCliff(root);
+              return;
+            }
+          }
+          if (hit) placeCliff(hit.x, hit.y, hit.z, activeCliffModel);
+          return;
+        }
 
         if (editState.mode === "geminigrass" && event.button === 0) {
           event.preventDefault();
@@ -3727,6 +3950,18 @@
         if (!file) return;
         try {
           importTerrainJson(await file.text());
+        } catch (err) {
+          alert(err?.message || String(err));
+        }
+        e.target.value = "";
+      });
+
+      document.getElementById("load-cliffs-input").addEventListener("change", async (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        try {
+          applyCliffs(JSON.parse(await file.text()));
+          if (editorPane) editorPane.refresh();
         } catch (err) {
           alert(err?.message || String(err));
         }
@@ -4073,6 +4308,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
               "Paint [P]": "paint",
               "Gemini Grass [G]": "geminigrass",
               "Tree LOD [J]": "pinelod",
+              "Place [O]": "place",
               "Play [F]": "play"
             }
           })
@@ -4382,6 +4618,36 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
           });
         });
         assignLodSlot(0);
+
+        const placeFolder = pane.addFolder({
+          title: "Place  [ W move · E rotate · R scale · Del remove ]",
+          expanded: false
+        });
+        placeFolderRef = placeFolder;
+        activeCliffModel = PARAMS.cliffModel;
+        cliffSinkOffset = PARAMS.sinkOffset;
+        placeFolder
+          .addBinding(PARAMS, "cliffModel", {
+            label: "Model",
+            options: { "Cliff 1": 0, "Cliff 2": 1, "Cliff 3": 2 }
+          })
+          .on("change", (ev) => {
+            activeCliffModel = ev.value;
+          });
+        placeFolder
+          .addBinding(PARAMS, "sinkOffset", {
+            label: "Sink",
+            min: 0,
+            max: 20,
+            step: 0.5
+          })
+          .on("change", (ev) => {
+            cliffSinkOffset = ev.value;
+          });
+        placeFolder.addButton({ title: "Save Cliffs JSON" }).on("click", () => saveCliffs());
+        placeFolder.addButton({ title: "Load Cliffs JSON" }).on("click", () => {
+          document.getElementById("load-cliffs-input").click();
+        });
 
         const genFolder = pane.addFolder({ title: "Terrain generator", expanded: false });
         genFolder.addBinding(PARAMS.gen, "mode", {
@@ -4929,6 +5195,7 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
         brushFolderRef = brushFolder;
         setEditMode(PARAMS.mode);
         syncLodFolderVisibility();
+        syncPlaceFolderVisibility();
       }
 
       renderer.domElement.addEventListener(
