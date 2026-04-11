@@ -159,6 +159,10 @@
       const FLOOR_Y = 1;
       const TOWER_GUN_SPAWN_X = 20;
       const TOWER_GUN_SPAWN_Z = 12;
+      const TANK_SPAWN_X = -14;
+      const TANK_SPAWN_Z = 8;
+
+      const _tankFootCorner = new THREE.Vector3();
 
       const parkourParams = {
         tile: {
@@ -302,6 +306,31 @@
           poolInvertAlphaMask: true,
           poolFlipRowUV: false,
           poolAtlasLinear: false,
+        },
+        tank: {
+          enabled: true,
+          scale: 1,
+          spawnX: TANK_SPAWN_X,
+          spawnZ: TANK_SPAWN_Z,
+          spawnYaw: 0,
+          yawOffset: 0,
+          patrol: true,
+          patrolRadius: 22,
+          patrolCenterX: 0,
+          patrolCenterZ: 0,
+          boundarySoft: 0.82,
+          boundarySteerWeight: 0.92,
+          maxSpeed: 4.2,
+          accel: 5.5,
+          turnSpeed: 0.95,
+          steerSmooth: 3.2,
+          steerAggression: 0.85,
+          reverseChance: 0.14,
+          pauseChance: 0.1,
+          pauseDurationMin: 0.9,
+          pauseDurationMax: 2.4,
+          maneuverTimeMin: 2.0,
+          maneuverTimeMax: 5.2,
         },
         towerGun: {
           enabled: true,
@@ -1603,6 +1632,231 @@
         if (rg) recomputeTowerGunBarrelMuzzleLocal(rg);
       }
 
+      /**
+       * Lowest world Y of visible mesh hulls (geometry AABB corners × matrixWorld).
+       * Avoids Box3.setFromObject(), which can jitter each frame on some GLTFs (skins/helpers).
+       */
+      function computeTankHullMinWorldY(root) {
+        if (!root) return null;
+        const box = new THREE.Box3().makeEmpty();
+        let any = false;
+        root.traverse((o) => {
+          if (!o.isMesh || !o.geometry || o.visible === false) return;
+          const g = o.geometry;
+          if (!g.boundingBox) g.computeBoundingBox();
+          const b = g.boundingBox;
+          if (!b) return;
+          any = true;
+          const { min, max } = b;
+          for (let i = 0; i < 8; i++) {
+            _tankFootCorner.set(
+              i & 1 ? max.x : min.x,
+              i & 2 ? max.y : min.y,
+              i & 4 ? max.z : min.z,
+            );
+            _tankFootCorner.applyMatrix4(o.matrixWorld);
+            box.expandByPoint(_tankFootCorner);
+          }
+        });
+        return any ? box.min.y : null;
+      }
+
+      function applyTankGroundY(root) {
+        if (!root) return;
+        root.updateMatrixWorld(true);
+        let minY = computeTankHullMinWorldY(root);
+        if (minY == null || !Number.isFinite(minY)) {
+          const box = new THREE.Box3().setFromObject(root);
+          if (box.isEmpty()) return;
+          minY = box.min.y;
+        }
+        // Additive snap: once the hull bottom is on FLOOR_Y, minY ≈ FLOOR_Y and delta → 0.
+        // Using `y = FLOOR_Y - minY` every frame wrongly drives y → 0 after the first good frame.
+        const d = FLOOR_Y - minY;
+        if (Math.abs(d) > 1e-6) root.position.y += d;
+        root.updateMatrixWorld(true);
+      }
+
+      /** Static placement: spawn XZ + optional yaw, feet on `FLOOR_Y`. */
+      function placeTankStaticAtSpawn(root) {
+        if (!root) return;
+        const p = parkourParams.tank;
+        root.scale.setScalar(p.scale);
+        root.rotation.y = p.spawnYaw + p.yawOffset;
+        root.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(root);
+        const midX = (box.min.x + box.max.x) * 0.5;
+        const midZ = (box.min.z + box.max.z) * 0.5;
+        root.position.set(p.spawnX - midX, 0, p.spawnZ - midZ);
+        applyTankGroundY(root);
+      }
+
+      function createTankPatrolState() {
+        const p = parkourParams.tank;
+        return {
+          x: p.spawnX,
+          z: p.spawnZ,
+          yaw: Math.random() * PI * 2,
+          speed: 0,
+          speedTarget: 0,
+          steerSmoothed: 0,
+          steerTarget: 0,
+          phase: "drive",
+          phaseT: 0.35 + Math.random() * 0.5,
+        };
+      }
+
+      function pickTankManeuver(state, p) {
+        state.phase = "drive";
+        state.steerTarget = (Math.random() * 2 - 1) * p.steerAggression;
+        state.speedTarget =
+          Math.random() < p.reverseChance
+            ? -p.maxSpeed * (0.32 + Math.random() * 0.58)
+            : p.maxSpeed * (0.38 + Math.random() * 0.62);
+        state.phaseT =
+          p.maneuverTimeMin +
+          Math.random() * (p.maneuverTimeMax - p.maneuverTimeMin);
+      }
+
+      /** Patrol pose: world XZ + yaw from `state`, scale from params, Y from AABB. */
+      function applyTankPatrolTransform(root, state) {
+        if (!root || !state) return;
+        const p = parkourParams.tank;
+        root.scale.setScalar(p.scale);
+        root.position.x = state.x;
+        root.position.z = state.z;
+        root.rotation.y = state.yaw + p.yawOffset;
+        applyTankGroundY(root);
+      }
+
+      function updateTankPatrol(dt, root, state) {
+        const p = parkourParams.tank;
+        if (!root || !state || !p.patrol || !p.enabled) return;
+
+        const cx = p.patrolCenterX;
+        const cz = p.patrolCenterZ;
+        const R = p.patrolRadius;
+        const soft = R * p.boundarySoft;
+
+        let dx = state.x - cx;
+        let dz = state.z - cz;
+        let dist = Math.hypot(dx, dz);
+
+        state.phaseT -= dt;
+        if (state.phaseT <= 0) {
+          if (state.phase === "pause") {
+            pickTankManeuver(state, p);
+          } else if (Math.random() < p.pauseChance) {
+            state.phase = "pause";
+            state.speedTarget = 0;
+            state.steerTarget *= 0.35;
+            state.phaseT =
+              p.pauseDurationMin +
+              Math.random() * (p.pauseDurationMax - p.pauseDurationMin);
+          } else {
+            pickTankManeuver(state, p);
+          }
+        }
+
+        let steerDesired = state.steerTarget;
+        if (dist > soft) {
+          const w = Math.min(1, (dist - soft) / (R - soft + 0.001));
+          const toCenter = Math.atan2(-dx, -dz);
+          let angDiff = toCenter - state.yaw;
+          while (angDiff > PI) angDiff -= 2 * PI;
+          while (angDiff < -PI) angDiff += 2 * PI;
+          const towardCenter = THREE.MathUtils.clamp(angDiff * 2.2, -1, 1);
+          steerDesired = THREE.MathUtils.lerp(
+            state.steerTarget,
+            towardCenter,
+            w * p.boundarySteerWeight,
+          );
+        }
+
+        state.steerSmoothed += (steerDesired - state.steerSmoothed) *
+          Math.min(1, p.steerSmooth * dt);
+
+        const spdAbs = Math.abs(state.speed);
+        const turnScale = THREE.MathUtils.clamp(
+          1.12 - 0.62 * (spdAbs / (p.maxSpeed + 0.001)),
+          0.36,
+          1.08,
+        );
+        state.yaw += state.steerSmoothed * p.turnSpeed * turnScale * dt;
+
+        const dv = p.accel * dt;
+        if (state.speed < state.speedTarget) {
+          state.speed = Math.min(state.speedTarget, state.speed + dv);
+        } else if (state.speed > state.speedTarget) {
+          state.speed = Math.max(state.speedTarget, state.speed - dv);
+        }
+
+        const sn = Math.sin(state.yaw);
+        const cs = Math.cos(state.yaw);
+        state.x += sn * state.speed * dt;
+        state.z += cs * state.speed * dt;
+
+        dx = state.x - cx;
+        dz = state.z - cz;
+        dist = Math.hypot(dx, dz);
+        if (dist > R) {
+          const t = (R * 0.991) / dist;
+          state.x = cx + dx * t;
+          state.z = cz + dz * t;
+          state.speed *= 0.32;
+          state.speedTarget *= 0.45;
+        }
+
+        applyTankPatrolTransform(root, state);
+      }
+
+      /** Tweakpane: static spawn, or reset patrol position to spawn. */
+      function syncTankGround(root, state) {
+        if (!root) return;
+        const p = parkourParams.tank;
+        if (p.patrol && state) {
+          state.x = p.spawnX;
+          state.z = p.spawnZ;
+          state.speed = 0;
+          state.speedTarget = 0;
+          applyTankPatrolTransform(root, state);
+        } else {
+          placeTankStaticAtSpawn(root);
+        }
+      }
+
+      /** Place `models/tank.glb` on the parkour floor. */
+      async function loadTankModel(scene) {
+        const loader = new GLTFLoader();
+        const dracoLoader = new DRACOLoader();
+        dracoLoader.setDecoderPath(
+          "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/libs/draco/",
+        );
+        loader.setDRACOLoader(dracoLoader);
+
+        return new Promise((resolve, reject) => {
+          loader.load(
+            "models/tank.glb",
+            (gltf) => {
+              const root = gltf.scene;
+              root.traverse((o) => {
+                if (o.isMesh) {
+                  o.castShadow = true;
+                  o.receiveShadow = true;
+                  if (o.geometry && !o.geometry.boundingBox) {
+                    o.geometry.computeBoundingBox();
+                  }
+                }
+              });
+              scene.add(root);
+              resolve({ root });
+            },
+            undefined,
+            (err) => reject(err),
+          );
+        });
+      }
+
       /** Place `models/newtowergun.glb` on the parkour floor (bottom of bounds on FLOOR_Y). */
       async function loadTowerGunModel(scene) {
         const loader = new GLTFLoader();
@@ -2001,6 +2255,24 @@
           console.warn("Tower gun model failed to load", e);
         }
 
+        let tankRoot = null;
+        /** @type {ReturnType<typeof createTankPatrolState> | null} */
+        let tankState = null;
+        try {
+          const tk = await loadTankModel(scene);
+          tankRoot = tk.root;
+          tankState = createTankPatrolState();
+          if (parkourParams.tank.patrol) {
+            pickTankManeuver(tankState, parkourParams.tank);
+            applyTankPatrolTransform(tankRoot, tankState);
+          } else {
+            placeTankStaticAtSpawn(tankRoot);
+          }
+          tankRoot.visible = parkourParams.tank.enabled;
+        } catch (e) {
+          console.warn("Tank model failed to load", e);
+        }
+
         // ── TWEAKPANE CONTROLS ──
         const pane = new Tweakpane.Pane({ title: "Parkour", expanded: true });
 
@@ -2067,6 +2339,124 @@
           })
           .on("change", () => {
             void syncDeerPopulation(scene, deerTargets);
+          });
+
+        const tankFolder = pane.addFolder({ title: "Tank", expanded: false });
+        tankFolder
+          .addBinding(parkourParams.tank, "enabled", { label: "visible" })
+          .on("change", () => {
+            if (tankRoot) tankRoot.visible = parkourParams.tank.enabled;
+          });
+        tankFolder
+          .addBinding(parkourParams.tank, "patrol", { label: "patrol AI" })
+          .on("change", () => {
+            if (!tankRoot) return;
+            if (parkourParams.tank.patrol) {
+              if (!tankState) tankState = createTankPatrolState();
+              else syncTankGround(tankRoot, tankState);
+              pickTankManeuver(tankState, parkourParams.tank);
+              applyTankPatrolTransform(tankRoot, tankState);
+            } else {
+              placeTankStaticAtSpawn(tankRoot);
+            }
+          });
+        tankFolder
+          .addBinding(parkourParams.tank, "patrolRadius", {
+            min: 6,
+            max: 120,
+            step: 1,
+            label: "radius",
+          });
+        tankFolder.addBinding(parkourParams.tank, "patrolCenterX", {
+          min: -80,
+          max: 80,
+          step: 0.5,
+          label: "center X",
+        });
+        tankFolder.addBinding(parkourParams.tank, "patrolCenterZ", {
+          min: -80,
+          max: 80,
+          step: 0.5,
+          label: "center Z",
+        });
+        tankFolder.addBinding(parkourParams.tank, "maxSpeed", {
+          min: 0.5,
+          max: 14,
+          step: 0.1,
+          label: "max speed",
+        });
+        tankFolder.addBinding(parkourParams.tank, "accel", {
+          min: 1,
+          max: 20,
+          step: 0.25,
+        });
+        tankFolder.addBinding(parkourParams.tank, "turnSpeed", {
+          min: 0.2,
+          max: 2.5,
+          step: 0.05,
+          label: "turn speed",
+        });
+        tankFolder
+          .addBinding(parkourParams.tank, "scale", {
+            min: 0.05,
+            max: 5,
+            step: 0.01,
+            label: "scale",
+          })
+          .on("change", () => {
+            if (!tankRoot) return;
+            if (parkourParams.tank.patrol && tankState) {
+              applyTankPatrolTransform(tankRoot, tankState);
+            } else {
+              placeTankStaticAtSpawn(tankRoot);
+            }
+          });
+        tankFolder
+          .addBinding(parkourParams.tank, "spawnX", {
+            min: -200,
+            max: 200,
+            step: 1,
+            label: "spawn X",
+          })
+          .on("change", () => {
+            if (!tankRoot) return;
+            if (parkourParams.tank.patrol && tankState) {
+              tankState.x = parkourParams.tank.spawnX;
+              applyTankPatrolTransform(tankRoot, tankState);
+            } else {
+              placeTankStaticAtSpawn(tankRoot);
+            }
+          });
+        tankFolder
+          .addBinding(parkourParams.tank, "spawnZ", {
+            min: -200,
+            max: 200,
+            step: 1,
+            label: "spawn Z",
+          })
+          .on("change", () => {
+            if (!tankRoot) return;
+            if (parkourParams.tank.patrol && tankState) {
+              tankState.z = parkourParams.tank.spawnZ;
+              applyTankPatrolTransform(tankRoot, tankState);
+            } else {
+              placeTankStaticAtSpawn(tankRoot);
+            }
+          });
+        tankFolder
+          .addBinding(parkourParams.tank, "yawOffset", {
+            min: -PI,
+            max: PI,
+            step: 0.02,
+            label: "model yaw fix",
+          })
+          .on("change", () => {
+            if (!tankRoot) return;
+            if (parkourParams.tank.patrol && tankState) {
+              applyTankPatrolTransform(tankRoot, tankState);
+            } else {
+              placeTankStaticAtSpawn(tankRoot);
+            }
           });
 
         const towerGunFolder = pane.addFolder({
@@ -3452,6 +3842,8 @@
 
           if (towerGunRoot)
             towerGunRoot.visible = parkourParams.towerGun.enabled;
+          if (tankRoot) tankRoot.visible = parkourParams.tank.enabled;
+          updateTankPatrol(dt, tankRoot, tankState);
           updateTowerGunTargeting(dt);
 
           updateSpellVFX(dt, camera, udPlayer);

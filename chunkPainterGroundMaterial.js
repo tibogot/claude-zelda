@@ -25,6 +25,7 @@ import {
   clamp,
   sub,
   max,
+  sqrt,
   uniform,
   step,
 } from "three/tsl";
@@ -268,5 +269,77 @@ export function setupTslGroundMeshSwap(mesh, sharedNodes) {
     if (ud._tslSplat) sharedNodes.splatTexNode.value = ud._tslSplat;
     if (ud._tslImg && sharedNodes.imgWeightTexNode) sharedNodes.imgWeightTexNode.value = ud._tslImg;
     if (ud._tslMeadow && sharedNodes.meadowTexNode) sharedNodes.meadowTexNode.value = ud._tslMeadow;
+  };
+}
+
+/**
+ * Shared material that tiles one image slot texture (albedo + ORM) across the whole terrain.
+ * Swap which slot is shown by updating albedoTexNode.value / ormTexNode.value.
+ * Per-chunk splat texture swapped via onBeforeRender for hole punching.
+ *
+ * @param {number} chunkSize
+ * @param {number} worldSize
+ * @param {object} slot — initial slot from chunkImageSlotSystem (has albedoTex, ormTex, uUVScale, etc.)
+ * @returns {{ material, splatTexNode, albedoTexNode, ormTexNode, uUVScale }}
+ */
+export function createSharedImgTexMaterial(chunkSize, worldSize) {
+  const cs = float(chunkSize);
+  const ws = float(1.0).div(float(worldSize));
+  const uUVScale = uniform(3.0);
+
+  const mat = new THREE.MeshStandardNodeMaterial({
+    roughness: 0.88,
+    metalness: 0.02,
+  });
+  mat.envMapIntensity = 0;
+
+  // Shared texture nodes — swappable per slot + per chunk
+  const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));
+  const splatTexNode = texture(makePlaceholderTex(), splatUV);
+
+  const tileUV = positionWorld.xz.mul(ws).mul(uUVScale);
+  const albedoTexNode = texture(makePlaceholderTex(), tileUV);
+  const ormTexNode = texture(makePlaceholderTex(), tileUV);
+
+  // Color: albedo × AO
+  mat.colorNode = Fn(() => {
+    const col = albedoTexNode.rgb;
+    const ao = ormTexNode.r;
+    return col.mul(mix(float(1), ao, float(0.8)));
+  })();
+
+  // Roughness from ORM green channel
+  mat.roughnessNode = Fn(() => {
+    return clamp(ormTexNode.g, float(0.04), float(1));
+  })();
+
+  // Normal from ORM blue+alpha channels (same decode as image slots)
+  mat.normalNode = Fn(() => {
+    const nmX = ormTexNode.b.mul(2.0).sub(1.0);
+    const nmY = ormTexNode.a.mul(2.0).sub(1.0);
+    const nmZ = sqrt(max(float(0.0), float(1.0).sub(nmX.mul(nmX)).sub(nmY.mul(nmY))));
+    const raw = vec3(nmX.mul(0.5).add(0.5), nmY.mul(0.5).add(0.5), nmZ.mul(0.5).add(0.5));
+    return normalMap(raw, vec2(0.5, 0.5));
+  })();
+
+  // Hole punch from splat alpha
+  mat.opacityNode = Fn(() => {
+    return float(1.0).sub(step(float(0.25), splatTexNode.a));
+  })();
+  mat.alphaTest = 0.5;
+  mat.transparent = false;
+
+  return { material: mat, splatTexNode, albedoTexNode, ormTexNode, uUVScale };
+}
+
+/**
+ * Hook mesh.onBeforeRender to swap per-chunk splat texture on the shared imgTex material.
+ */
+export function setupImgTexMeshSwap(mesh, sharedImgTex) {
+  const prev = mesh.onBeforeRender;
+  mesh.onBeforeRender = () => {
+    if (prev) prev();
+    const ud = mesh.userData;
+    if (ud._tslSplat) sharedImgTex.splatTexNode.value = ud._tslSplat;
   };
 }
