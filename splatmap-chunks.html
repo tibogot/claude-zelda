@@ -138,6 +138,10 @@
         background: rgba(30, 100, 150, 0.92);
         color: #e0f4ff;
       }
+      #mode-badge.water {
+        background: rgba(40, 110, 170, 0.92);
+        color: #e8f8ff;
+      }
       #mode-badge.spline {
         background: rgba(40, 140, 160, 0.92);
         color: #e0ffff;
@@ -178,6 +182,7 @@
     <input type="file" id="prop-glb-input" accept=".glb,.gltf" style="display: none" />
     <input type="file" id="props-json-input" accept=".json,application/json" style="display: none" multiple />
     <input type="file" id="decal-json-input" accept=".json,application/json" style="display: none" />
+    <input type="file" id="water-json-input" accept=".json,application/json" style="display: none" />
 
     <script type="module">
       import * as THREE from "three";
@@ -220,8 +225,11 @@
         add,
         div,
         abs,
-        step
+        step,
+        reflector,
+        exp
       } from "three/tsl";
+      import { createLakeShader } from "./lake-shader.js";
       import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { TransformControls } from "three/addons/controls/TransformControls.js";
@@ -423,6 +431,59 @@
           heightOffset: 0.18,
           selectedPointY: 0,
           shaderStyle: "Basic"
+        },
+        water: {
+          scale: 0.3,
+          cellSpeed: 0.45,
+          noiseScale: 1.52,
+          noiseTimeScale: 0.6,
+          distort: 0.35,
+          flowZ: 0.08,
+          edgeThreshold: 0.067,
+          shoreColor: "#b8ecfa",
+          midColor: "#7ed4f8",
+          deepColor: "#3a6a8c",
+          highlightColor: "#e8f8ff",
+          depthRampShoreMid: 0.36,
+          depthRampMidDeep: 0.72,
+          opacity: 0.78,
+          foamColor: "#e8f4ff",
+          lineWidth: 0.5,
+          glowWidth: 2.0,
+          waterlineIntensity: 2.5,
+          rippleStrength: 5.5,
+          rippleWidth: 0.12,
+          sinkOffset: -0.05,
+          preset: "Small lake",
+          style: "Ocean",
+          stylized: false,
+          reflections: false,
+          reflectionScale: 0.35,
+          reflectionStrength: 0.35
+        },
+        ocean: {
+          scale: 0.3,
+          cellSpeed: 0.45,
+          noiseScale: 1.52,
+          noiseTimeScale: 0.6,
+          distort: 0.35,
+          flowZ: 0.08,
+          edgeThreshold: 0.067,
+          deepColor: "#3a6a8c",
+          midColor: "#7ed4f8",
+          highlightColor: "#e8f8ff",
+          opacity: 0.78,
+          foamColor: "#e8f4ff",
+          lineWidth: 0.5,
+          glowWidth: 2.0,
+          waterlineIntensity: 2.5,
+          rippleStrength: 5.5,
+          rippleWidth: 0.12,
+          oceanY: -0.5,
+          stylized: false,
+          reflections: false,
+          reflectionScale: 0.35,
+          reflectionStrength: 0.35
         },
         /** Props mode [ I ] — splatmap-painter */
         propSinkOffset: 0,
@@ -782,6 +843,64 @@
         return v;
       });
 
+      const _wHash22 = Fn(([p]) => {
+        const px = dot(p, vec2(127.1, 311.7));
+        const py = dot(p, vec2(269.5, 183.3));
+        return fract(sin(vec2(px, py)).mul(43758.5453));
+      });
+      const _wSmin = Fn(([a, b, k]) => {
+        const h = max(k.sub(abs(a.sub(b))), float(0)).div(k);
+        return min(a, b).sub(h.mul(h).mul(h).mul(k).div(6));
+      });
+      const _wCellPt = Fn(([seed, t, spd]) =>
+        float(0.5).add(float(0.5).mul(sin(t.mul(spd).add(float(6.2831).mul(seed)))))
+      );
+      const _wVoroF1 = Fn(([p, t, spd]) => {
+        const ip = floor(p);
+        const fp = fract(p);
+        const md = float(10).toVar();
+        for (const [nx, ny] of [
+          [-1, -1],
+          [0, -1],
+          [1, -1],
+          [-1, 0],
+          [0, 0],
+          [1, 0],
+          [-1, 1],
+          [0, 1],
+          [1, 1]
+        ]) {
+          const n = vec2(float(nx), float(ny));
+          const rnd = _wHash22(ip.add(n));
+          const pt = vec2(_wCellPt(rnd.x, t, spd), _wCellPt(rnd.y, t, spd));
+          md.assign(min(md, length(n.add(pt).sub(fp))));
+        }
+        return md;
+      });
+      const _wVoroSmooth = Fn(([p, t, spd, sm]) => {
+        const ip = floor(p);
+        const fp = fract(p);
+        const res = float(10).toVar();
+        for (const [nx, ny] of [
+          [-1, -1],
+          [0, -1],
+          [1, -1],
+          [-1, 0],
+          [0, 0],
+          [1, 0],
+          [-1, 1],
+          [0, 1],
+          [1, 1]
+        ]) {
+          const n = vec2(float(nx), float(ny));
+          const rnd = _wHash22(ip.add(n));
+          const pt = vec2(_wCellPt(rnd.x, t, spd), _wCellPt(rnd.y, t, spd));
+          const d = length(n.add(pt).sub(fp));
+          res.assign(_wSmin(res, d, sm));
+        }
+        return res;
+      });
+
       const wfU = {
         darkColor: uniform(new THREE.Color("#00544c")),
         bodyColor: uniform(new THREE.Color("#38d0d0")),
@@ -1013,6 +1132,14 @@
       let splashCapObjects = [];
       let selectedSplashCap = null;
       const wfPlaceTool = { tool: "waterfall" };
+
+      let waterObjects = [];
+      let _cachedLakeBodies = [];
+      function _invalidateLakeCache() {
+        _cachedLakeBodies = waterObjects.filter((m) => m.userData.waterStyle === "Lake");
+      }
+      let selectedWater = null;
+      let waterFolderRef = null;
 
       const impactFoamParams = {
         impactFoamVisible: true,
@@ -3594,6 +3721,18 @@
             sy: m.scale.y,
             sz: m.scale.z
           })),
+          waterBodies: waterObjects.map((m) => ({
+            x: m.position.x,
+            y: m.position.y,
+            z: m.position.z,
+            rx: m.rotation.x,
+            ry: m.rotation.y,
+            rz: m.rotation.z,
+            sx: m.scale.x,
+            sy: m.scale.y,
+            sz: m.scale.z,
+            waterStyle: m.userData.waterStyle ?? "Ocean"
+          })),
           cliffs: cliffObjects.map((root) => ({
             modelIndex: root.userData.modelIndex ?? 0,
             x: root.position.x,
@@ -3772,6 +3911,7 @@
         syncObjectSlotsHeights();
         if (data.waterfalls && Array.isArray(data.waterfalls)) applyWaterfalls(data.waterfalls);
         if (data.splashCaps && Array.isArray(data.splashCaps)) applySplashCaps(data.splashCaps);
+        if (data.waterBodies && Array.isArray(data.waterBodies)) applyWaterBodies(data.waterBodies);
         if (data.cliffs && Array.isArray(data.cliffs)) applyCliffs(data.cliffs);
         if (data.cliffInstances && Array.isArray(data.cliffInstances)) {
           cliffInstancer.importData(data.cliffInstances);
@@ -4077,6 +4217,10 @@
         if (riverFolderRef) riverFolderRef.hidden = editState.mode !== "river";
       }
 
+      function syncWaterFolderVisibility() {
+        if (waterFolderRef) waterFolderRef.hidden = editState.mode !== "water";
+      }
+
       function syncPathFolderVisibility() {
         if (pathFolderRef) pathFolderRef.hidden = editState.mode !== "path";
       }
@@ -4141,6 +4285,9 @@
         else if (m === "river")
           el.textContent =
             "RIVER MODE  [ V · LMB add / pick · drag · Del · Esc clears pick · Esc → view ]";
+        else if (m === "water")
+          el.textContent =
+            "WATER BODIES  [ W · LMB place / pick · E move · R rotate · T scale · Del · Esc → view ]";
         else if (m === "path")
           el.textContent =
             "PATH MODE  [ L · paint splat blue · flatten under brush · Brush pane · Esc → view ]";
@@ -4175,6 +4322,7 @@
           mode === "place" ||
           mode === "cliffs" ||
           mode === "waterfall" ||
+          mode === "water" ||
           mode === "props" ||
           mode === "decal";
         if (brushFolderRef)
@@ -4192,6 +4340,7 @@
             selectProp(null);
             cliffInstancer.clearSelection();
             selectWaterfall(null);
+            selectWater(null);
             selectSplashCap(null);
             if (selectedCliff) {
               transformControls.attach(selectedCliff);
@@ -4205,6 +4354,7 @@
             selectProp(null);
             selectedCliff = null;
             selectWaterfall(null);
+            selectWater(null);
             selectSplashCap(null);
             if (cliffInstancer.hasSelection()) {
               transformControls.attach(cliffInstancer.proxyObject);
@@ -4218,6 +4368,7 @@
             selectProp(null);
             cliffInstancer.clearSelection();
             selectedCliff = null;
+            selectWater(null);
             transformControls.detach();
             tcHelper.visible = false;
             if (selectedWaterfall) {
@@ -4232,6 +4383,7 @@
             cliffInstancer.clearSelection();
             selectedCliff = null;
             selectWaterfall(null);
+            selectWater(null);
             selectSplashCap(null);
             if (selectedProp) {
               transformControls.attach(selectedProp);
@@ -4245,9 +4397,24 @@
             cliffInstancer.clearSelection();
             selectedCliff = null;
             selectWaterfall(null);
+            selectWater(null);
             selectSplashCap(null);
             if (selectedDecal) {
               transformControls.attach(selectedDecal);
+              tcHelper.visible = true;
+            } else {
+              transformControls.detach();
+              tcHelper.visible = false;
+            }
+          } else if (mode === "water") {
+            selectDecal(null);
+            selectProp(null);
+            cliffInstancer.clearSelection();
+            selectedCliff = null;
+            selectWaterfall(null);
+            selectSplashCap(null);
+            if (selectedWater) {
+              transformControls.attach(selectedWater);
               tcHelper.visible = true;
             } else {
               transformControls.detach();
@@ -4262,6 +4429,7 @@
           cliffInstancer.clearSelection();
           selectWaterfall(null);
           selectSplashCap(null);
+          selectWater(null);
           selectProp(null);
           selectDecal(null);
         }
@@ -4285,6 +4453,7 @@
         syncPropsFolderVisibility();
         syncSplineFolderVisibility();
         syncRiverFolderVisibility();
+        syncWaterFolderVisibility();
         syncPathFolderVisibility();
         syncDecalFolderVisibility();
         syncHoleFolderVisibility();
@@ -4306,6 +4475,7 @@
           editState.mode === "waterfall" ||
           editState.mode === "props" ||
           editState.mode === "decal" ||
+          editState.mode === "water" ||
           editState.mode === "hole" ||
           editState.mode === "spline" ||
           editState.mode === "river"
@@ -4361,10 +4531,9 @@
 
       syncBrushVisual();
 
-      function sampleHeight(worldX, worldZ) {
-        const n1 = Math.sin(worldX * 0.012) * Math.cos(worldZ * 0.01);
-        const n2 = Math.sin(worldX * 0.041 + worldZ * 0.037) * 0.25;
-        return (n1 + n2) * CONFIG.maxTerrainHeight;
+      /** Default height for newly streamed chunks (flat). Use Terrain → procedural generate for FBM/ridge. */
+      function sampleHeight(_worldX, _worldZ) {
+        return 0;
       }
 
       function getGeometry(segments) {
@@ -6028,6 +6197,7 @@
         selectedCliff = null;
         cliffInstancer.clearSelection();
         selectWaterfall(null);
+        selectWater(null);
         selectProp(null);
         selectDecal(null);
         syncModeBadge();
@@ -7632,6 +7802,24 @@
           setEditMode(editState.mode === "river" ? "view" : "river");
           return;
         }
+        if (
+          event.code === "KeyW" &&
+          editState.mode !== "place" &&
+          editState.mode !== "props" &&
+          editState.mode !== "cliffs" &&
+          editState.mode !== "decal" &&
+          editState.mode !== "water" &&
+          editState.mode !== "waterfall"
+        ) {
+          event.preventDefault();
+          setEditMode("water");
+          return;
+        }
+        if (event.code === "KeyW" && editState.mode === "water") {
+          event.preventDefault();
+          setEditMode("view");
+          return;
+        }
         if (event.code === "KeyL") {
           event.preventDefault();
           setEditMode(editState.mode === "path" ? "view" : "path");
@@ -7664,6 +7852,7 @@
           editState.mode !== "place" &&
           editState.mode !== "cliffs" &&
           editState.mode !== "waterfall" &&
+          editState.mode !== "water" &&
           editState.mode !== "props" &&
           editState.mode !== "decal"
         ) {
@@ -7770,6 +7959,49 @@
             return;
           }
         }
+        if (editState.mode === "water") {
+          if (event.code === "KeyE") {
+            event.preventDefault();
+            transformControls.setMode("translate");
+            return;
+          }
+          if (event.code === "KeyR") {
+            event.preventDefault();
+            transformControls.setMode("rotate");
+            return;
+          }
+          if (event.code === "KeyT") {
+            event.preventDefault();
+            transformControls.setMode("scale");
+            return;
+          }
+          if (event.code === "Delete" && selectedWater) {
+            event.preventDefault();
+            scene.remove(selectedWater);
+            waterObjects = waterObjects.filter((m) => m !== selectedWater);
+            _invalidateLakeCache();
+            selectWater(null);
+            if (editorPane) editorPane.refresh();
+            return;
+          }
+          if (event.code === "Delete" && selectedWaterfall) {
+            event.preventDefault();
+            scene.remove(selectedWaterfall);
+            waterfallObjects = waterfallObjects.filter((m) => m !== selectedWaterfall);
+            selectWaterfall(null);
+            if (editorPane) editorPane.refresh();
+            return;
+          }
+          if (event.code === "Delete" && selectedSplashCap) {
+            event.preventDefault();
+            scene.remove(selectedSplashCap);
+            selectedSplashCap.geometry.dispose();
+            splashCapObjects = splashCapObjects.filter((m) => m !== selectedSplashCap);
+            selectSplashCap(null);
+            if (editorPane) editorPane.refresh();
+            return;
+          }
+        }
         if (editState.mode === "pinelod") {
           const dk = parseInt(event.key, 10);
           if (dk >= 1 && dk <= 8) {
@@ -7796,6 +8028,7 @@
           if (
             editState.mode === "cliffs" ||
             editState.mode === "waterfall" ||
+            editState.mode === "water" ||
             editState.mode === "props" ||
             editState.mode === "decal"
           )
@@ -7815,6 +8048,7 @@
 
       renderer.domElement.addEventListener("pointermove", (event) => {
         if (playMode) return;
+        if (editState.mode === "water") return;
         updatePointerNdc(event);
         if (editState.mode === "river" && riverDragging && riverSelectedIdx >= 0) {
           const p = raycastTerrainPoint();
@@ -7937,7 +8171,29 @@
       renderer.domElement.addEventListener("pointerdown", (event) => {
         if (playMode) return;
         updatePointerNdc(event);
+        if (event.button === 0) {
+          raycaster.setFromCamera(pointerNdc, camera);
+          const wHit = raycaster.intersectObject(oceanWater, false);
+          if (wHit.length > 0) rippleAdd(wHit[0].point.x, wHit[0].point.z);
+        }
         const hit = raycastTerrainPoint();
+
+        if (editState.mode === "water" && event.button === 0) {
+          event.preventDefault();
+          if (transformControls.axis !== null) return;
+          raycaster.setFromCamera(pointerNdc, camera);
+          const waterHits = raycaster.intersectObjects(waterObjects, false);
+          if (waterHits.length > 0) {
+            selectWater(getWaterRoot(waterHits[0].object) ?? waterHits[0].object);
+            if (editorPane) editorPane.refresh();
+            return;
+          }
+          if (hit) {
+            placeWater(hit.x, hit.y, hit.z);
+            if (editorPane) editorPane.refresh();
+          }
+          return;
+        }
 
         if (editState.mode === "river" && event.button === 0) {
           event.preventDefault();
@@ -8410,6 +8666,470 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
       globalHeightTex.magFilter = THREE.LinearFilter;
       globalHeightTex.needsUpdate = true;
 
+      // ── Ocean + water bodies (splatmap-painter10bvh+post.html) ─────────────
+      const heightTex = globalHeightTex;
+      const _waterTerrainSize = float(CONFIG.worldSize);
+      const seabedGeo = new THREE.PlaneGeometry(CONFIG.worldSize * 4, CONFIG.worldSize * 4);
+      seabedGeo.rotateX(-PI / 2);
+      const seabedMesh = new THREE.Mesh(seabedGeo, new MeshBasicNodeMaterial({ color: 0x1a3a52 }));
+      seabedMesh.position.y = PARAMS.ocean.oceanY - 3.5;
+      seabedMesh.renderOrder = 0;
+      seabedMesh.frustumCulled = false;
+      scene.add(seabedMesh);
+
+      const simpleWaterMat = new THREE.MeshBasicMaterial({
+        color: 0x2a6080,
+        transparent: true,
+        opacity: 0.88
+      });
+      const waterGeo = new THREE.PlaneGeometry(CONFIG.worldSize * 4, CONFIG.worldSize * 4);
+      waterGeo.rotateX(-PI / 2);
+      const waterMat = new MeshBasicNodeMaterial({
+        transparent: true,
+        depthWrite: false
+      });
+      const oceanWater = new THREE.Mesh(waterGeo, waterMat);
+      oceanWater.position.y = PARAMS.ocean.oceanY;
+      oceanWater.renderOrder = 1;
+      oceanWater.frustumCulled = false;
+      scene.add(oceanWater);
+
+      const waterReflector = reflector({
+        resolutionScale: PARAMS.ocean.reflectionScale
+      });
+      oceanWater.add(waterReflector.target);
+
+      const uWaterTime = uniform(0.0);
+      const uWScale = uniform(PARAMS.ocean.scale);
+      const uWSmoothness = uniform(0.55);
+      const uWEdgeThresh = uniform(PARAMS.ocean.edgeThreshold);
+      const uWEdgeSoft = uniform(0.01);
+      const uWFlowZ = uniform(PARAMS.ocean.flowZ);
+      const uWCellSpeed = uniform(PARAMS.ocean.cellSpeed);
+      const uWNoiseScale = uniform(PARAMS.ocean.noiseScale);
+      const uWNoiseFlow = uniform(0.2);
+      const uWNoiseTime = uniform(PARAMS.ocean.noiseTimeScale);
+      const uWDistort = uniform(PARAMS.ocean.distort);
+      const uWDeepColor = uniform(new THREE.Color(PARAMS.ocean.deepColor));
+      const uWMidColor = uniform(new THREE.Color(PARAMS.ocean.midColor));
+      const uWMidPos = uniform(0.084);
+      const uWHighlight = uniform(new THREE.Color(PARAMS.ocean.highlightColor));
+      const uWOpacity = uniform(PARAMS.ocean.opacity);
+      const uWFadeDistance = uniform(400.0);
+      const uWFadeStrength = uniform(1.4);
+      const uWCamXZ = uniform(new THREE.Vector2(0, 0));
+      const uWLineWidth = uniform(PARAMS.ocean.lineWidth);
+      const uWGlowWidth = uniform(PARAMS.ocean.glowWidth);
+      const uWLineIntensity = uniform(PARAMS.ocean.waterlineIntensity);
+      const uWLineColor = uniform(new THREE.Color(PARAMS.ocean.foamColor));
+      const uWGlowColor = uniform(new THREE.Color("#88ccff"));
+      const MAX_RIPPLES_W = 8;
+      const uRippleCenters = Array.from({ length: MAX_RIPPLES_W }, () => uniform(new THREE.Vector2(0, 0)));
+      const uRippleTimes = Array.from({ length: MAX_RIPPLES_W }, () => uniform(0.0));
+      const uRippleCount = uniform(0.0);
+      const uRippleSpeed = uniform(1.5);
+      const uRippleWidth = uniform(PARAMS.ocean.rippleWidth);
+      const uRippleStr = uniform(PARAMS.ocean.rippleStrength);
+      const uRippleDecay = uniform(1.6);
+
+      const uWBScale = uniform(PARAMS.water.scale);
+      const uWBEdgeThresh = uniform(PARAMS.water.edgeThreshold);
+      const uWBFlowZ = uniform(PARAMS.water.flowZ);
+      const uWBCellSpeed = uniform(PARAMS.water.cellSpeed);
+      const uWBNoiseScale = uniform(PARAMS.water.noiseScale);
+      const uWBNoiseTime = uniform(PARAMS.water.noiseTimeScale);
+      const uWBDistort = uniform(PARAMS.water.distort);
+      const uWBDeepColor = uniform(new THREE.Color(PARAMS.water.deepColor));
+      const uWBMidColor = uniform(new THREE.Color(PARAMS.water.midColor));
+      const uWBHighlight = uniform(new THREE.Color(PARAMS.water.highlightColor));
+      const uWBOpacity = uniform(PARAMS.water.opacity);
+      const uWBLineWidth = uniform(PARAMS.water.lineWidth);
+      const uWBGlowWidth = uniform(PARAMS.water.glowWidth);
+      const uWBLineIntensity = uniform(PARAMS.water.waterlineIntensity);
+      const uWBLineColor = uniform(new THREE.Color(PARAMS.water.foamColor));
+
+      const _shoreAboveFn = Fn(() => {
+        const hUV = vec2(
+          add(div(positionWorld.x, _waterTerrainSize), float(0.5)),
+          add(div(positionWorld.z, _waterTerrainSize), float(0.5))
+        );
+        return sub(texture(heightTex, hUV).r, positionWorld.y);
+      });
+
+      const _rippleBuffer = [];
+      function rippleAdd(x, z) {
+        if (_rippleBuffer.length >= MAX_RIPPLES_W) _rippleBuffer.shift();
+        _rippleBuffer.push({ x, z, t: uWaterTime.value });
+      }
+      function _syncRipples() {
+        uRippleCount.value = _rippleBuffer.length;
+        for (let i = 0; i < MAX_RIPPLES_W; i++) {
+          if (i < _rippleBuffer.length) {
+            uRippleCenters[i].value.set(_rippleBuffer[i].x, _rippleBuffer[i].z);
+            uRippleTimes[i].value = _rippleBuffer[i].t;
+          }
+        }
+      }
+
+      const buildWaterFrag = Fn(() => {
+        const worldXZ = positionWorld.xz;
+        const tNoise = uWaterTime.mul(uWNoiseTime);
+        const noiseUV = worldXZ.mul(uWNoiseScale).add(vec2(tNoise.mul(uWNoiseFlow), float(0)));
+        const noiseFac = _wFbm2(noiseUV);
+        const distort = vec2(noiseFac.sub(0.5), noiseFac.sub(0.5)).mul(uWDistort);
+        const uvVoro = worldXZ
+          .mul(uWScale)
+          .add(vec2(float(0), uWFlowZ.mul(tNoise)))
+          .add(distort);
+        const f1 = _wVoroF1(uvVoro, tNoise, uWCellSpeed);
+        const sf1 = _wVoroSmooth(uvVoro, tNoise, uWCellSpeed, uWSmoothness);
+        const edge = f1.sub(sf1);
+        const t = smoothstep(
+          uWEdgeThresh.sub(uWEdgeSoft),
+          uWEdgeThresh.add(uWEdgeSoft),
+          edge
+        );
+        const safeMP = max(uWMidPos, float(0.0001));
+        const seg0 = clamp(t.div(safeMP), float(0), float(1));
+        const seg1 = clamp(
+          t.sub(safeMP).div(float(1).sub(safeMP).add(float(0.0001))),
+          float(0),
+          float(1)
+        );
+        const inSeg1 = smoothstep(safeMP.sub(0.001), safeMP.add(0.001), t);
+        const baseColor = mix(
+          mix(uWDeepColor, uWMidColor, seg0),
+          mix(uWMidColor, uWHighlight, seg1),
+          inSeg1
+        );
+        const rippleAcc = float(0).toVar();
+        for (let i = 0; i < MAX_RIPPLES_W; i++) {
+          const isOn = step(float(i + 0.5), uRippleCount);
+          const elap = max(uWaterTime.sub(uRippleTimes[i]), float(0));
+          const d = length(worldXZ.sub(uRippleCenters[i]));
+          const ringR = elap.mul(uRippleSpeed);
+          const rdist = abs(d.sub(ringR));
+          const ring = float(1).sub(smoothstep(float(0), uRippleWidth, rdist));
+          const fade = exp(elap.mul(float(-1).mul(uRippleDecay)));
+          rippleAcc.addAssign(ring.mul(fade).mul(isOn));
+        }
+        const ripple = saturate(rippleAcc.mul(uRippleStr));
+        const waterColor = mix(baseColor, uWHighlight, ripple);
+        const distCam = length(worldXZ.sub(uWCamXZ));
+        const distFade = float(1).sub(
+          pow(saturate(distCam.div(uWFadeDistance)), uWFadeStrength)
+        );
+        const waterAlpha = mix(float(0.6), float(1), max(t, ripple))
+          .mul(uWOpacity)
+          .mul(distFade);
+        const terrainAbove = _shoreAboveFn();
+        const onShore = step(float(0), terrainAbove);
+        const line = sub(float(1), smoothstep(float(0), uWLineWidth, terrainAbove)).mul(onShore);
+        const glow = exp(terrainAbove.div(max(uWGlowWidth, float(0.001))).mul(float(-1))).mul(onShore);
+        const foamAlpha = saturate(max(line, glow.mul(float(0.5))).mul(uWLineIntensity));
+        const foamCol = mix(uWGlowColor, uWLineColor, line);
+        const finalColor = saturate(waterColor.add(foamCol.mul(foamAlpha)));
+        return vec4(finalColor, waterAlpha);
+      });
+
+      const buildWaterBodyFrag = Fn(() => {
+        const worldXZ = positionWorld.xz;
+        const tNoise = uWaterTime.mul(uWBNoiseTime);
+        const noiseUV = worldXZ.mul(uWBNoiseScale).add(vec2(tNoise.mul(uWNoiseFlow), float(0)));
+        const noiseFac = _wFbm2(noiseUV);
+        const distort = vec2(noiseFac.sub(0.5), noiseFac.sub(0.5)).mul(uWBDistort);
+        const uvVoro = worldXZ.mul(uWBScale).add(vec2(float(0), uWBFlowZ.mul(tNoise))).add(distort);
+        const f1 = _wVoroF1(uvVoro, tNoise, uWBCellSpeed);
+        const sf1 = _wVoroSmooth(uvVoro, tNoise, uWBCellSpeed, uWSmoothness);
+        const edge = f1.sub(sf1);
+        const t = smoothstep(
+          uWBEdgeThresh.sub(uWEdgeSoft),
+          uWBEdgeThresh.add(uWEdgeSoft),
+          edge
+        );
+        const safeMP = max(uWMidPos, float(0.0001));
+        const seg0 = clamp(t.div(safeMP), float(0), float(1));
+        const seg1 = clamp(
+          t.sub(safeMP).div(float(1).sub(safeMP).add(float(0.0001))),
+          float(0),
+          float(1)
+        );
+        const inSeg1 = smoothstep(safeMP.sub(0.001), safeMP.add(0.001), t);
+        const baseColor = mix(
+          mix(uWBDeepColor, uWBMidColor, seg0),
+          mix(uWBMidColor, uWBHighlight, seg1),
+          inSeg1
+        );
+        const waterAlpha = mix(float(0.6), float(1), t).mul(uWBOpacity);
+        const terrainAbove = _shoreAboveFn();
+        const onShore = step(float(0), terrainAbove);
+        const line = sub(float(1), smoothstep(float(0), uWBLineWidth, terrainAbove)).mul(onShore);
+        const glow = exp(terrainAbove.div(max(uWBGlowWidth, float(0.001))).mul(float(-1))).mul(onShore);
+        const foamAlpha = saturate(max(line, glow.mul(float(0.5))).mul(uWBLineIntensity));
+        const foamCol = mix(uWGlowColor, uWBLineColor, line);
+        const finalColor = saturate(baseColor.add(foamCol.mul(foamAlpha)));
+        return vec4(finalColor, waterAlpha);
+      });
+
+      const uReflStrength = uniform(PARAMS.ocean.reflectionStrength);
+      const buildWaterFragWithReflection = Fn(() => {
+        const base = buildWaterFrag();
+        const viewDir = normalize(sub(cameraPosition, positionWorld));
+        const fresnel = pow(
+          clamp(sub(float(1), dot(viewDir, vec3(0, 1, 0))), float(0), float(1)),
+          float(3)
+        ).mul(uReflStrength);
+        const reflected = mix(base.rgb, waterReflector.rgb, fresnel);
+        return vec4(reflected, base.a);
+      });
+
+      function setWaterReflections(enabled) {
+        if (!PARAMS.ocean.stylized) return;
+        const frag = enabled ? buildWaterFragWithReflection() : buildWaterFrag();
+        waterMat.colorNode = frag.rgb;
+        waterMat.opacityNode = frag.a;
+        waterMat.needsUpdate = true;
+        waterReflector.target.visible = enabled;
+      }
+
+      function setWaterStyle(stylized) {
+        if (stylized) {
+          const frag = PARAMS.ocean.reflections ? buildWaterFragWithReflection() : buildWaterFrag();
+          waterMat.colorNode = frag.rgb;
+          waterMat.opacityNode = frag.a;
+          oceanWater.material = waterMat;
+          waterReflector.target.visible = PARAMS.ocean.reflections;
+          seabedMesh.visible = true;
+        } else {
+          oceanWater.material = simpleWaterMat;
+          waterReflector.target.visible = false;
+          seabedMesh.visible = false;
+        }
+      }
+
+      {
+        const frag = PARAMS.ocean.reflections ? buildWaterFragWithReflection() : buildWaterFrag();
+        waterMat.colorNode = frag.rgb;
+        waterMat.opacityNode = frag.a;
+      }
+      setWaterStyle(PARAMS.ocean.stylized);
+
+      function syncOceanMat() {
+        uWScale.value = PARAMS.ocean.scale;
+        uWEdgeThresh.value = PARAMS.ocean.edgeThreshold;
+        uWFlowZ.value = PARAMS.ocean.flowZ;
+        uWCellSpeed.value = PARAMS.ocean.cellSpeed;
+        uWNoiseScale.value = PARAMS.ocean.noiseScale;
+        uWNoiseTime.value = PARAMS.ocean.noiseTimeScale;
+        uWDistort.value = PARAMS.ocean.distort;
+        uWDeepColor.value.set(PARAMS.ocean.deepColor);
+        uWMidColor.value.set(PARAMS.ocean.midColor);
+        uWHighlight.value.set(PARAMS.ocean.highlightColor);
+        uWOpacity.value = PARAMS.ocean.opacity;
+        uWLineWidth.value = PARAMS.ocean.lineWidth;
+        uWGlowWidth.value = PARAMS.ocean.glowWidth;
+        uWLineIntensity.value = PARAMS.ocean.waterlineIntensity;
+        uWLineColor.value.set(PARAMS.ocean.foamColor);
+        uRippleWidth.value = PARAMS.ocean.rippleWidth;
+        uRippleStr.value = PARAMS.ocean.rippleStrength;
+      }
+
+      const lakeShader = createLakeShader({ heightTex, terrainSize: CONFIG.worldSize });
+      const WATER_PRESETS = {
+        Puddle: { w: 3, l: 3 },
+        "Small lake": { w: 20, l: 20 },
+        "Large lake": { w: 60, l: 60 },
+        "River strip": { w: 8, l: 50 }
+      };
+      const LAKE_PLANE_SEGMENTS = 64;
+      const waterOceanTemplateMat = new MeshBasicNodeMaterial({
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide
+      });
+      {
+        const f = buildWaterBodyFrag();
+        waterOceanTemplateMat.colorNode = f.rgb;
+        waterOceanTemplateMat.opacityNode = f.a;
+      }
+
+      const LAKE_REFLECT_SCALE = 0.5;
+      let lakeReflectRT = new THREE.RenderTarget(4, 4, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        depthBuffer: true
+      });
+      lakeReflectRT.texture.name = "LakeReflect";
+      const lakeReflectCam = new THREE.PerspectiveCamera(45, 1, 0.05, 4000);
+      const _reflVPHelper = new THREE.Matrix4();
+      const _reflClearColor = new THREE.Color(0x1a3048);
+      const _reflLookDir = new THREE.Vector3();
+      const _reflLookAt = new THREE.Vector3();
+
+      function updateLakeReflectCamera(waterY) {
+        lakeReflectCam.fov = camera.fov;
+        lakeReflectCam.near = camera.near;
+        lakeReflectCam.far = camera.far;
+        const w = Math.max(4, Math.floor(window.innerWidth * LAKE_REFLECT_SCALE));
+        const h = Math.max(4, Math.floor(window.innerHeight * LAKE_REFLECT_SCALE));
+        lakeReflectCam.aspect = w / h;
+        lakeReflectCam.updateProjectionMatrix();
+        lakeReflectCam.position.copy(camera.position);
+        lakeReflectCam.position.y = 2 * waterY - camera.position.y;
+        camera.getWorldDirection(_reflLookDir);
+        _reflLookAt.copy(camera.position).addScaledVector(_reflLookDir, 10);
+        _reflLookAt.y = 2 * waterY - _reflLookAt.y;
+        lakeReflectCam.up.set(0, -1, 0);
+        lakeReflectCam.lookAt(_reflLookAt);
+        lakeReflectCam.updateMatrixWorld(true);
+        if (lakeReflectRT.width !== w || lakeReflectRT.height !== h) lakeReflectRT.setSize(w, h);
+      }
+
+      function renderLakeReflection(lakeBodies) {
+        if (lakeBodies.length === 0) return;
+        const waterY = lakeBodies[0].position.y;
+        updateLakeReflectCamera(waterY);
+        _reflVPHelper.multiplyMatrices(
+          lakeReflectCam.projectionMatrix,
+          lakeReflectCam.matrixWorldInverse
+        );
+        lakeShader.uniforms.reflectVP.value.copy(_reflVPHelper);
+        const savedVis = [];
+        for (const m of waterObjects) {
+          savedVis.push(m.visible);
+          m.visible = false;
+        }
+        const tcVis = tcHelper.visible;
+        tcHelper.visible = false;
+        const prevBg = scene.background;
+        const prevAutoClear = renderer.autoClear;
+        scene.background = _reflClearColor;
+        renderer.autoClear = true;
+        const prevRT = renderer.getRenderTarget();
+        renderer.setRenderTarget(lakeReflectRT);
+        renderer.render(scene, lakeReflectCam);
+        renderer.setRenderTarget(prevRT);
+        renderer.autoClear = prevAutoClear;
+        scene.background = prevBg;
+        for (let i = 0; i < waterObjects.length; i++) waterObjects[i].visible = savedVis[i];
+        tcHelper.visible = tcVis;
+        lakeShader.uniforms.reflectTex.value = lakeReflectRT.texture;
+        lakeShader.uniforms.reflectEnabled.value = 1;
+      }
+
+      function makeWaterMat(style) {
+        return (style === "Lake" ? lakeShader.material : waterOceanTemplateMat).clone();
+      }
+
+      function syncWaterBodyMat() {
+        uWBScale.value = PARAMS.water.scale;
+        uWBEdgeThresh.value = PARAMS.water.edgeThreshold;
+        uWBFlowZ.value = PARAMS.water.flowZ;
+        uWBCellSpeed.value = PARAMS.water.cellSpeed;
+        uWBNoiseScale.value = PARAMS.water.noiseScale;
+        uWBNoiseTime.value = PARAMS.water.noiseTimeScale;
+        uWBDistort.value = PARAMS.water.distort;
+        uWBDeepColor.value.set(PARAMS.water.deepColor);
+        uWBMidColor.value.set(PARAMS.water.midColor);
+        uWBHighlight.value.set(PARAMS.water.highlightColor);
+        uWBOpacity.value = PARAMS.water.opacity;
+        uWBLineWidth.value = PARAMS.water.lineWidth;
+        uWBGlowWidth.value = PARAMS.water.glowWidth;
+        uWBLineIntensity.value = PARAMS.water.waterlineIntensity;
+        uWBLineColor.value.set(PARAMS.water.foamColor);
+        lakeShader.syncParams({
+          shoreColor: PARAMS.water.shoreColor,
+          midColor: PARAMS.water.midColor,
+          deepColor: PARAMS.water.deepColor,
+          highlightColor: PARAMS.water.highlightColor,
+          depthRampShoreMid: PARAMS.water.depthRampShoreMid,
+          depthRampMidDeep: PARAMS.water.depthRampMidDeep,
+          opacity: PARAMS.water.opacity,
+          foamColor: PARAMS.water.foamColor
+        });
+      }
+
+      function getWaterRoot(object) {
+        let obj = object;
+        while (obj) {
+          if (waterObjects.includes(obj)) return obj;
+          obj = obj.parent;
+        }
+        return null;
+      }
+
+      function selectWater(mesh) {
+        selectedWater = mesh;
+        if (mesh) {
+          transformControls.enabled = true;
+          tcHelper.visible = true;
+          transformControls.attach(mesh);
+        } else {
+          tcHelper.visible = false;
+          transformControls.detach();
+        }
+      }
+
+      function makeWaterGeo(w, l, style) {
+        const segs = style === "Lake" ? LAKE_PLANE_SEGMENTS : 1;
+        const geo = new THREE.PlaneGeometry(w, l, segs, segs);
+        geo.rotateX(-PI / 2);
+        return geo;
+      }
+
+      function placeWater(wx, wy, wz) {
+        const preset = WATER_PRESETS[PARAMS.water.preset] ?? WATER_PRESETS["Small lake"];
+        const geo = makeWaterGeo(preset.w, preset.l, PARAMS.water.style);
+        const mesh = new THREE.Mesh(geo, makeWaterMat(PARAMS.water.style));
+        mesh.userData.waterStyle = PARAMS.water.style;
+        mesh.position.set(wx, wy + PARAMS.water.sinkOffset, wz);
+        mesh.renderOrder = 2;
+        mesh.frustumCulled = false;
+        scene.add(mesh);
+        waterObjects.push(mesh);
+        _invalidateLakeCache();
+        selectWater(mesh);
+      }
+
+      function applyWaterBodies(data) {
+        waterObjects.forEach((m) => scene.remove(m));
+        waterObjects = [];
+        selectWater(null);
+        data.forEach((d) => {
+          const style = d.waterStyle ?? "Ocean";
+          const geo = makeWaterGeo(1, 1, style);
+          const mesh = new THREE.Mesh(geo, makeWaterMat(style));
+          mesh.userData.waterStyle = style;
+          mesh.position.set(d.x, d.y, d.z);
+          mesh.rotation.set(d.rx, d.ry, d.rz);
+          mesh.scale.set(d.sx, d.sy, d.sz);
+          mesh.renderOrder = 2;
+          scene.add(mesh);
+          waterObjects.push(mesh);
+        });
+        _invalidateLakeCache();
+      }
+
+      function saveWaterBodies() {
+        const data = waterObjects.map((m) => ({
+          x: m.position.x,
+          y: m.position.y,
+          z: m.position.z,
+          rx: m.rotation.x,
+          ry: m.rotation.y,
+          rz: m.rotation.z,
+          sx: m.scale.x,
+          sy: m.scale.y,
+          sz: m.scale.z,
+          waterStyle: m.userData.waterStyle ?? "Ocean"
+        }));
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+        const a = document.createElement("a");
+        a.download = "water-bodies.json";
+        a.href = URL.createObjectURL(blob);
+        a.click();
+      }
+
       geminiTerrainOnlyHeightTexData = new Float32Array(HTEX_RES * HTEX_RES * 4);
       geminiTerrainOnlyHeightTex = new THREE.DataTexture(
         geminiTerrainOnlyHeightTexData,
@@ -8772,6 +9492,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
               "Props [I]": "props",
               "Spline [K]": "spline",
               "River [V]": "river",
+              "Water [W]": "water",
               "Path [L]": "path",
               "Decal [D]": "decal",
               "Waterfall [H]": "waterfall",
@@ -9953,6 +10674,75 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         stylizedRiverFolder.hidden = PARAMS.river.shaderStyle !== "Stylized";
         syncRiverMat();
 
+        const waterFolder = pane.addFolder({
+          title: "Water Bodies  [ W ]",
+          expanded: true
+        });
+        waterFolderRef = waterFolder;
+        waterFolder.hidden = true;
+        waterFolder.addBinding(PARAMS.water, "style", {
+          label: "Next body style",
+          options: { Ocean: "Ocean", Lake: "Lake" }
+        });
+        waterFolder.addBlade({ view: "separator" });
+        waterFolder.addBinding(PARAMS.water, "deepColor", { label: "Deep color", view: "color" }).on("change", syncWaterBodyMat);
+        waterFolder.addBinding(PARAMS.water, "midColor", { label: "Mid color", view: "color" }).on("change", syncWaterBodyMat);
+        waterFolder.addBinding(PARAMS.water, "highlightColor", { label: "Highlight", view: "color" }).on("change", syncWaterBodyMat);
+        waterFolder.addBinding(PARAMS.water, "opacity", { label: "Opacity", min: 0, max: 1, step: 0.01 }).on("change", syncWaterBodyMat);
+        waterFolder.addBinding(PARAMS.water, "foamColor", { label: "Foam color", view: "color" }).on("change", syncWaterBodyMat);
+        waterFolder.addBlade({ view: "separator" });
+        waterFolder.addBinding(PARAMS.water, "sinkOffset", {
+          label: "Sink offset",
+          min: -2,
+          max: 2,
+          step: 0.01
+        });
+        waterFolder.addBinding(PARAMS.water, "preset", {
+          label: "Size preset",
+          options: {
+            Puddle: "Puddle",
+            "Small lake": "Small lake",
+            "Large lake": "Large lake",
+            "River strip": "River strip"
+          }
+        });
+        waterFolder.addBlade({ view: "separator" });
+        waterFolder.addButton({ title: "Save water JSON" }).on("click", saveWaterBodies);
+        waterFolder
+          .addButton({ title: "Load water JSON…" })
+          .on("click", () => document.getElementById("water-json-input").click());
+        waterFolder.addButton({ title: "Delete selected (Del)" }).on("click", () => {
+          if (!selectedWater) return;
+          scene.remove(selectedWater);
+          waterObjects = waterObjects.filter((m) => m !== selectedWater);
+          _invalidateLakeCache();
+          selectWater(null);
+          if (editorPane) editorPane.refresh();
+        });
+        waterFolder.addButton({ title: "Clear all water bodies" }).on("click", () => {
+          waterObjects.forEach((m) => scene.remove(m));
+          waterObjects = [];
+          _invalidateLakeCache();
+          selectWater(null);
+          if (editorPane) editorPane.refresh();
+        });
+
+        document.getElementById("water-json-input").addEventListener("change", (e) => {
+          if (!e.target.files[0]) return;
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            try {
+              applyWaterBodies(JSON.parse(ev.target.result));
+              if (editorPane) editorPane.refresh();
+            } catch (err) {
+              console.error("Failed to load water-bodies.json", err);
+            }
+          };
+          reader.readAsText(e.target.files[0]);
+          e.target.value = "";
+        });
+        syncWaterBodyMat();
+
         const pathFolder = pane.addFolder({ title: "Path  [ L ]", expanded: true });
         pathFolderRef = pathFolder;
         pathFolder.hidden = true;
@@ -10661,6 +11451,51 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           })
           .on("change", syncFog);
 
+        const oceanFolder = skyFolder.addFolder({ title: "Ocean", expanded: false });
+        oceanFolder.addBinding(PARAMS.ocean, "stylized", { label: "Stylized (perf heavy)" }).on("change", ({ value }) => setWaterStyle(value));
+        oceanFolder
+          .addBinding(PARAMS.ocean, "oceanY", { label: "Ocean level Y", min: -20, max: 5, step: 0.1 })
+          .on("change", ({ value }) => {
+            oceanWater.position.y = value;
+            seabedMesh.position.y = value - 3.5;
+          });
+        oceanFolder.addBlade({ view: "separator" });
+        oceanFolder.addBinding(PARAMS.ocean, "deepColor", { label: "Deep colour" }).on("change", syncOceanMat);
+        oceanFolder.addBinding(PARAMS.ocean, "midColor", { label: "Mid colour" }).on("change", syncOceanMat);
+        oceanFolder.addBinding(PARAMS.ocean, "highlightColor", { label: "Highlight colour" }).on("change", syncOceanMat);
+        oceanFolder
+          .addBinding(PARAMS.ocean, "opacity", { label: "Opacity", min: 0.1, max: 1, step: 0.01 })
+          .on("change", syncOceanMat);
+        oceanFolder.addBlade({ view: "separator" });
+        oceanFolder.addBinding(PARAMS.ocean, "scale", { label: "Cell scale", min: 0.05, max: 2, step: 0.01 }).on("change", syncOceanMat);
+        oceanFolder.addBinding(PARAMS.ocean, "cellSpeed", { label: "Cell speed", min: 0.05, max: 1.5, step: 0.05 }).on("change", syncOceanMat);
+        oceanFolder.addBinding(PARAMS.ocean, "noiseScale", { label: "Noise scale", min: 0.3, max: 4, step: 0.02 }).on("change", syncOceanMat);
+        oceanFolder.addBinding(PARAMS.ocean, "noiseTimeScale", { label: "Noise time", min: 0.1, max: 1.5, step: 0.05 }).on("change", syncOceanMat);
+        oceanFolder.addBinding(PARAMS.ocean, "distort", { label: "Distort", min: 0, max: 1, step: 0.02 }).on("change", syncOceanMat);
+        oceanFolder.addBinding(PARAMS.ocean, "flowZ", { label: "Flow Z", min: 0, max: 0.3, step: 0.01 }).on("change", syncOceanMat);
+        oceanFolder
+          .addBinding(PARAMS.ocean, "edgeThreshold", { label: "Edge threshold", min: 0.02, max: 0.2, step: 0.005 })
+          .on("change", syncOceanMat);
+        oceanFolder.addBlade({ view: "separator" });
+        oceanFolder.addBinding(PARAMS.ocean, "foamColor", { label: "Foam colour" }).on("change", syncOceanMat);
+        oceanFolder.addBinding(PARAMS.ocean, "lineWidth", { label: "Foam width", min: 0.05, max: 5, step: 0.05 }).on("change", syncOceanMat);
+        oceanFolder.addBinding(PARAMS.ocean, "glowWidth", { label: "Foam glow", min: 0.2, max: 10, step: 0.1 }).on("change", syncOceanMat);
+        oceanFolder
+          .addBinding(PARAMS.ocean, "waterlineIntensity", { label: "Foam intensity", min: 0, max: 5, step: 0.1 })
+          .on("change", syncOceanMat);
+        oceanFolder.addBlade({ view: "separator" });
+        oceanFolder.addBinding(PARAMS.ocean, "rippleStrength", { label: "Ripple strength", min: 0, max: 15, step: 0.5 }).on("change", syncOceanMat);
+        oceanFolder.addBinding(PARAMS.ocean, "rippleWidth", { label: "Ripple width", min: 0.02, max: 0.4, step: 0.01 }).on("change", syncOceanMat);
+        oceanFolder.addBlade({ view: "separator" });
+        oceanFolder
+          .addBinding(PARAMS.ocean, "reflections", { label: "Reflections" })
+          .on("change", ({ value }) => setWaterReflections(value));
+        oceanFolder
+          .addBinding(PARAMS.ocean, "reflectionStrength", { label: "Refl. strength", min: 0, max: 1, step: 0.01 })
+          .on("change", ({ value }) => {
+            uReflStrength.value = value;
+          });
+
         const geminiGrassErasePARAMS = { erase: false };
         const geminiGrassFolder = pane.addFolder({
           title: "Gemini Grass  [ G ]",
@@ -11345,6 +12180,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         syncPropsFolderVisibility();
         syncSplineFolderVisibility();
         syncRiverFolderVisibility();
+        syncWaterFolderVisibility();
         syncPathFolderVisibility();
         syncDecalFolderVisibility();
         syncHoleFolderVisibility();
@@ -11416,6 +12252,10 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         appTimeSec += dtSec;
         uFTreeTime.value = appTimeSec;
         uRiverTime.value = appTimeSec;
+        uWaterTime.value = appTimeSec;
+        _syncRipples();
+        uWCamXZ.value.set(camera.position.x, camera.position.z);
+        lakeShader.update(dtSec, appTimeSec, _cachedLakeBodies);
         if (waterfallObjects.length > 0) wfU.wfFlowTime.value += dtSec * wfU.wfFlowSpeed.value;
         if (splashCapObjects.length > 0) {
           uIFTime.value = appTimeSec;
@@ -11568,6 +12408,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             editorPane.refresh();
           }
         }
+        if (_cachedLakeBodies.length > 0) renderLakeReflection(_cachedLakeBodies);
         renderer.render(scene, camera);
         updateHud(dt);
       });
