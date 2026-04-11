@@ -28,12 +28,14 @@ import {
   uniform,
   step,
 } from "three/tsl";
+import { normalMap } from "three/tsl";
 import { perlinNoise2D, fbmPerlin2D } from "./tsl-noise.js";
 import { createCliffShadingContext } from "./chunkTerrainAutoCliff.js";
 import {
   applyImageSlotAlbedoAndAO,
   applyImageSlotRoughness,
   createImageSlotNormalNode,
+  evaluateImageSlotNormalRaw,
 } from "./chunkTerrainImageSlotsTsl.js";
 
 function toLinearColor(hex) {
@@ -213,20 +215,28 @@ export function createChunkPainterGroundMaterial(
   })();
 
   if (cliff) {
-    mat.normalNode = cliff.buildNormalNode();
-    mat.roughnessNode =
-      imgWeightTexNode && imageSlots
-        ? Fn(() =>
-            applyImageSlotRoughness(
-              cliff.evaluateRoughnessInFn(),
-              cs,
-              worldSizeF,
-              null,
-              imageSlots,
-              imgWeightTexNode,
-            ),
-          )()
-        : cliff.buildRoughnessNode();
+    if (imgWeightTexNode && imageSlots) {
+      // Blend cliff normals with image slot normals where image paint is present
+      mat.normalNode = Fn(() => {
+        const cliffRawNm = cliff.evaluateNormalInFn();
+        const { raw: imgRawNm, weight: imgW } = evaluateImageSlotNormalRaw(worldSizeF, imageSlots, imgWeightTexNode);
+        const combined = mix(cliffRawNm, imgRawNm, imgW);
+        return normalMap(combined, vec2(0.25, 0.25));
+      })();
+      mat.roughnessNode = Fn(() =>
+        applyImageSlotRoughness(
+          cliff.evaluateRoughnessInFn(),
+          cs,
+          worldSizeF,
+          null,
+          imageSlots,
+          imgWeightTexNode,
+        ),
+      )();
+    } else {
+      mat.normalNode = cliff.buildNormalNode();
+      mat.roughnessNode = cliff.buildRoughnessNode();
+    }
   } else if (imgWeightTexNode && imageSlots) {
     mat.roughnessNode = Fn(() =>
       applyImageSlotRoughness(float(roughness), cs, worldSizeF, null, imageSlots, imgWeightTexNode),

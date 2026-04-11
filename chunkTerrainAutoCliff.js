@@ -25,6 +25,7 @@ import { normalMap } from "three/tsl";
 import {
   applyImageSlotAlbedoAndAO,
   applyImageSlotRoughness,
+  evaluateImageSlotNormalRaw,
 } from "./chunkTerrainImageSlotsTsl.js";
 
 function packChannelIntoDataTexture(dt, imgEl, channelIdx) {
@@ -194,39 +195,41 @@ export function createCliffShadingContext(
     return out;
   };
 
+  /** Call only inside Fn(() => { ... }) — returns cliff raw normal in 0-1 space (before normalMap). */
+  const evaluateNormalInFn = () => {
+    const w = triWeights();
+    const rockUV_XZ = positionWorld.xz.mul(cliffU.uRockScale);
+    const rockUV_XY = positionWorld.xy.mul(cliffU.uRockScale);
+    const rockUV_ZY = positionWorld.zy.mul(cliffU.uRockScale);
+    const _dXZ = texture(rockDataTex, rockUV_XZ);
+    const _dXY = texture(rockDataTex, rockUV_XY);
+    const _dZY = texture(rockDataTex, rockUV_ZY);
+    const _nxXZ = _dXZ.b.mul(2.0).sub(1.0);
+    const _nyXZ = _dXZ.a.mul(2.0).sub(1.0);
+    const _nzXZ = sqrt(max(float(0.0), float(1.0).sub(_nxXZ.mul(_nxXZ)).sub(_nyXZ.mul(_nyXZ))));
+    const _nxXY = _dXY.b.mul(2.0).sub(1.0);
+    const _nyXY = _dXY.a.mul(2.0).sub(1.0);
+    const _nzXY = sqrt(max(float(0.0), float(1.0).sub(_nxXY.mul(_nxXY)).sub(_nyXY.mul(_nyXY))));
+    const _nxZY = _dZY.b.mul(2.0).sub(1.0);
+    const _nyZY = _dZY.a.mul(2.0).sub(1.0);
+    const _nzZY = sqrt(max(float(0.0), float(1.0).sub(_nxZY.mul(_nxZY)).sub(_nyZY.mul(_nyZY))));
+    const _nWXZ = vec3(_nxXZ, _nzXZ, _nyXZ);
+    const _nWXY = vec3(_nxXY, _nyXY, _nzXY);
+    const _nWZY = vec3(_nzZY, _nyZY, _nxZY);
+    const _nBlend = _nWXZ
+      .mul(w.y)
+      .add(_nWXY.mul(w.z))
+      .add(_nWZY.mul(w.x))
+      .normalize();
+    const rock028NmRGB = _nBlend.mul(0.5).add(0.5);
+    const flatNm = vec3(0.5, 0.5, 1.0);
+    const rock028NmStrength = mix(flatNm, rock028NmRGB, cliffU.uRockNormalStr);
+    const flatTerrainNm = vec3(0.5, 0.5, 1.0);
+    return mix(rock028NmStrength, flatTerrainNm, getSlopeMask().pow(cliffU.uRockBlendSharp));
+  };
+
   const buildNormalNode = () =>
-    Fn(() => {
-      const w = triWeights();
-      const rockUV_XZ = positionWorld.xz.mul(cliffU.uRockScale);
-      const rockUV_XY = positionWorld.xy.mul(cliffU.uRockScale);
-      const rockUV_ZY = positionWorld.zy.mul(cliffU.uRockScale);
-      const _dXZ = texture(rockDataTex, rockUV_XZ);
-      const _dXY = texture(rockDataTex, rockUV_XY);
-      const _dZY = texture(rockDataTex, rockUV_ZY);
-      const _nxXZ = _dXZ.b.mul(2.0).sub(1.0);
-      const _nyXZ = _dXZ.a.mul(2.0).sub(1.0);
-      const _nzXZ = sqrt(max(float(0.0), float(1.0).sub(_nxXZ.mul(_nxXZ)).sub(_nyXZ.mul(_nyXZ))));
-      const _nxXY = _dXY.b.mul(2.0).sub(1.0);
-      const _nyXY = _dXY.a.mul(2.0).sub(1.0);
-      const _nzXY = sqrt(max(float(0.0), float(1.0).sub(_nxXY.mul(_nxXY)).sub(_nyXY.mul(_nyXY))));
-      const _nxZY = _dZY.b.mul(2.0).sub(1.0);
-      const _nyZY = _dZY.a.mul(2.0).sub(1.0);
-      const _nzZY = sqrt(max(float(0.0), float(1.0).sub(_nxZY.mul(_nxZY)).sub(_nyZY.mul(_nyZY))));
-      const _nWXZ = vec3(_nxXZ, _nzXZ, _nyXZ);
-      const _nWXY = vec3(_nxXY, _nyXY, _nzXY);
-      const _nWZY = vec3(_nzZY, _nyZY, _nxZY);
-      const _nBlend = _nWXZ
-        .mul(w.y)
-        .add(_nWXY.mul(w.z))
-        .add(_nWZY.mul(w.x))
-        .normalize();
-      const rock028NmRGB = _nBlend.mul(0.5).add(0.5);
-      const flatNm = vec3(0.5, 0.5, 1.0);
-      const rock028NmStrength = mix(flatNm, rock028NmRGB, cliffU.uRockNormalStr);
-      const flatTerrainNm = vec3(0.5, 0.5, 1.0);
-      const autoNm = mix(rock028NmStrength, flatTerrainNm, getSlopeMask().pow(cliffU.uRockBlendSharp));
-      return normalMap(autoNm, vec2(0.25, 0.25));
-    })();
+    Fn(() => normalMap(evaluateNormalInFn(), vec2(0.25, 0.25)))();
 
   /** Call only inside `Fn(() => { ... })` — cliff-only roughness before image-slot mix. */
   const evaluateRoughnessInFn = () => {
@@ -245,7 +248,7 @@ export function createCliffShadingContext(
 
   const buildRoughnessNode = () => Fn(() => evaluateRoughnessInFn())();
 
-  return { augmentColor, buildNormalNode, buildRoughnessNode, evaluateRoughnessInFn };
+  return { augmentColor, buildNormalNode, buildRoughnessNode, evaluateRoughnessInFn, evaluateNormalInFn };
 }
 
 /**
@@ -301,19 +304,28 @@ export function createChunkSplatCliffMaterial(
     return cliff.augmentColor(col);
   })();
 
-  mat.normalNode = cliff.buildNormalNode();
-  mat.roughnessNode =
-    imgWeightTex && imageSlots
-      ? Fn(() =>
-          applyImageSlotRoughness(
-            cliff.evaluateRoughnessInFn(),
-            cs,
-            float(worldSize),
-            imgWeightTex,
-            imageSlots,
-          ),
-        )()
-      : cliff.buildRoughnessNode();
+  if (imgWeightTex && imageSlots) {
+    mat.normalNode = Fn(() => {
+      const cliffRawNm = cliff.evaluateNormalInFn();
+      const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));
+      const imgW = texture(imgWeightTex, splatUV);
+      const { raw: imgRawNm, weight: imgSlotW } = evaluateImageSlotNormalRaw(float(worldSize), imageSlots, imgW);
+      const combined = mix(cliffRawNm, imgRawNm, imgSlotW);
+      return normalMap(combined, vec2(0.25, 0.25));
+    })();
+    mat.roughnessNode = Fn(() =>
+      applyImageSlotRoughness(
+        cliff.evaluateRoughnessInFn(),
+        cs,
+        float(worldSize),
+        imgWeightTex,
+        imageSlots,
+      ),
+    )();
+  } else {
+    mat.normalNode = cliff.buildNormalNode();
+    mat.roughnessNode = cliff.buildRoughnessNode();
+  }
 
   mat.opacityNode = Fn(() => {
     const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));

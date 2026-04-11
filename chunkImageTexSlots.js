@@ -85,9 +85,12 @@ export function createChunkImageSlotSystem() {
     uHasNormal: uniform(0),
     uHasRough: uniform(0),
     uHasAO: uniform(0),
-    /** UI + shader: scales this slot’s contribution to blended tangent normals. */
     normalStrength: 1.0,
     uNormalStr: uniform(1.0),
+    aoStrength: 1.0,
+    uAOStr: uniform(1.0),
+    roughStrength: 1.0,
+    uRoughStr: uniform(1.0),
   };
 
   const slotGrass = {
@@ -102,6 +105,10 @@ export function createChunkImageSlotSystem() {
     uHasAO: uniform(0),
     normalStrength: 1.0,
     uNormalStr: uniform(1.0),
+    aoStrength: 1.0,
+    uAOStr: uniform(1.0),
+    roughStrength: 1.0,
+    uRoughStr: uniform(1.0),
   };
 
   const slotGround = {
@@ -116,6 +123,10 @@ export function createChunkImageSlotSystem() {
     uHasAO: uniform(0),
     normalStrength: 1.0,
     uNormalStr: uniform(1.0),
+    aoStrength: 1.0,
+    uAOStr: uniform(1.0),
+    roughStrength: 1.0,
+    uRoughStr: uniform(1.0),
   };
 
   const slots = [slotRock, slotGrass, slotGround];
