@@ -288,7 +288,7 @@
       import { createCliffInstancerBlendMaterial } from "./cliffInstancerBlendMaterial.js";
       import { Pane } from "tweakpane";
       import { createTileMaterial } from "./tileMaterial.js";
-      import { createChunkPainterGroundMaterial } from "./chunkPainterGroundMaterial.js";
+      import { createChunkPainterGroundMaterial, setupTslGroundMeshSwap } from "./chunkPainterGroundMaterial.js";
       import {
         loadRock028Textures,
         createAutoCliffUniforms,
@@ -1668,13 +1668,18 @@
         riverMat.needsUpdate = true;
       }
 
+      let _ifSnap = "";
       function syncImpactFoamUniforms() {
-        uIFDisp.value = impactFoamParams.impactFoamDispAmp;
-        uIFNoiseFreq.value = impactFoamParams.impactFoamNoiseFreq;
-        uIFFlow.value = impactFoamParams.impactFoamFlow;
-        uIFOpacity.value = impactFoamParams.impactFoamOpacity;
-        uIFRimCyan.value = impactFoamParams.impactFoamRimCyan;
-        uIFRadius.value = impactFoamParams.impactFoamBaseRadius;
+        const p = impactFoamParams;
+        const snap = `${p.impactFoamDispAmp},${p.impactFoamNoiseFreq},${p.impactFoamFlow},${p.impactFoamOpacity},${p.impactFoamRimCyan},${p.impactFoamBaseRadius}`;
+        if (snap === _ifSnap) return;
+        _ifSnap = snap;
+        uIFDisp.value = p.impactFoamDispAmp;
+        uIFNoiseFreq.value = p.impactFoamNoiseFreq;
+        uIFFlow.value = p.impactFoamFlow;
+        uIFOpacity.value = p.impactFoamOpacity;
+        uIFRimCyan.value = p.impactFoamRimCyan;
+        uIFRadius.value = p.impactFoamBaseRadius;
       }
 
       function applyImpactFoamVisibility() {
@@ -2590,6 +2595,23 @@
         return mat;
       }
 
+      // ── Shared TSL ground material (one compiled shader for all chunks) ──
+      let sharedTslGround = null; // { material, splatTexNode, imgWeightTexNode, meadowTexNode }
+
+      function buildSharedTslGroundMaterial() {
+        if (sharedTslGround) sharedTslGround.material.dispose();
+        syncCliffUniformsFromParams();
+        const deps = buildCliffDeps();
+        sharedTslGround = createChunkPainterGroundMaterial(
+          CONFIG.chunkSize,
+          { worldSize: CONFIG.worldSize },
+          deps,
+          chunkImageSlots,
+          chunkMeadowBundle,
+        );
+      }
+      buildSharedTslGroundMaterial();
+
       function createSplatMaterialsForTex(tex, imgWeightTex, meadowTex) {
         syncCliffUniformsFromParams();
         const deps = buildCliffDeps();
@@ -2609,18 +2631,8 @@
               slots,
             )
           : createChunkSplatMaterial(tex, imgWeightTex, slots);
-        const tslGroundMaterial = createChunkPainterGroundMaterial(
-          tex,
-          CONFIG.chunkSize,
-          { worldSize: CONFIG.worldSize },
-          deps,
-          imgWeightTex,
-          slots,
-          meadowTex,
-          chunkMeadowBundle,
-        );
         const tileMaterial = createChunkTileMaterialWithHoles(tex);
-        return { material, tslGroundMaterial, tileMaterial };
+        return { material, tileMaterial };
       }
 
       let geminiDensityCanvas = null;
@@ -3321,7 +3333,7 @@
         if (PARAMS.terrainSurface === "tile")
           return ensureChunkSplat(cx, cz).tileMaterial;
         if (PARAMS.terrainSurface === "tslGround")
-          return ensureChunkSplat(cx, cz).tslGroundMaterial;
+          return sharedTslGround.material;
         return ensureChunkSplat(cx, cz).material;
       }
 
@@ -4065,6 +4077,7 @@
         const tex = new THREE.CanvasTexture(canvas);
         tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
         tex.flipY = false;
+        tex.anisotropy = 8;
         tex.colorSpace = THREE.NoColorSpace;
         tex.needsUpdate = true;
         const imgCanvas = document.createElement("canvas");
@@ -4089,7 +4102,7 @@
         meadowTex.flipY = false;
         meadowTex.colorSpace = THREE.NoColorSpace;
         meadowTex.needsUpdate = true;
-        const { material, tslGroundMaterial, tileMaterial } =
+        const { material, tileMaterial } =
           createSplatMaterialsForTex(tex, imgTex, meadowTex);
         b = {
           canvas,
@@ -4102,7 +4115,6 @@
           meadowCtx,
           meadowTex,
           material,
-          tslGroundMaterial,
           tileMaterial,
         };
         chunkSplatMap.set(k, b);
@@ -4113,7 +4125,6 @@
         const s = chunkSplatMap.get(key);
         if (!s) return;
         s.material.dispose();
-        s.tslGroundMaterial.dispose();
         s.tileMaterial.dispose();
         s.tex.dispose();
         s.imgTex.dispose();
@@ -4640,28 +4651,54 @@
         heightTexDirty = true;
       }
 
+      let _matSwapQueue = [];
+      let _matSwapActive = false;
       function refreshActiveChunkMaterials() {
-        for (const chunk of activeChunks.values()) {
-          const lod =
-            CONFIG.lodLevels.find((l) => l.segments === chunk.segments) ??
-            CONFIG.lodLevels[0];
-          chunk.mesh.material = resolveTerrainMaterial(chunk.cx, chunk.cz, lod);
+        // Progressive material swap — update a few chunks per frame to avoid
+        // GPU shader compilation stalls (TSL materials compile on first render).
+        // Sort: nearest chunks first so close terrain updates before far terrain.
+        const anchor = playMode ? playerPos : camera.position;
+        _matSwapQueue = [...activeChunks.values()].sort((a, b) => {
+          const ac = chunkCenterWorld(a.cx, a.cz);
+          const da = ac.distanceToSquared(anchor);
+          const bc = chunkCenterWorld(b.cx, b.cz);
+          const db = bc.distanceToSquared(anchor);
+          return da - db;
+        });
+        if (!_matSwapActive) {
+          _matSwapActive = true;
+          const SWAP_PER_FRAME = 4;
+          const step = () => {
+            for (let i = 0; i < SWAP_PER_FRAME && _matSwapQueue.length > 0; i++) {
+              const chunk = _matSwapQueue.shift();
+              if (!activeChunks.has(chunkKey(chunk.cx, chunk.cz))) continue;
+              const lod =
+                CONFIG.lodLevels.find((l) => l.segments === chunk.segments) ??
+                CONFIG.lodLevels[0];
+              chunk.mesh.material = resolveTerrainMaterial(chunk.cx, chunk.cz, lod);
+            }
+            if (_matSwapQueue.length > 0) {
+              requestAnimationFrame(step);
+            } else {
+              _matSwapActive = false;
+            }
+          };
+          requestAnimationFrame(step);
         }
       }
 
       function rebuildAllChunkSplatMaterials() {
+        buildSharedTslGroundMaterial();
         for (const splat of chunkSplatMap.values()) {
           splat.material.dispose();
-          splat.tslGroundMaterial.dispose();
           splat.tileMaterial.dispose();
-          const { material, tslGroundMaterial, tileMaterial } =
+          const { material, tileMaterial } =
             createSplatMaterialsForTex(
               splat.tex,
               splat.imgTex,
               splat.meadowTex,
             );
           splat.material = material;
-          splat.tslGroundMaterial = tslGroundMaterial;
           splat.tileMaterial = tileMaterial;
         }
         refreshActiveChunkMaterials();
@@ -6830,6 +6867,12 @@
         mesh.frustumCulled = PARAMS.terrainChunkCulling;
         mesh.receiveShadow = true;
         mesh.userData.chunkKey = chunkKey(cx, cz);
+        // Store per-chunk textures for shared TSL ground material's onBeforeRender
+        const splat = ensureChunkSplat(cx, cz);
+        mesh.userData._tslSplat = splat.tex;
+        mesh.userData._tslImg = splat.imgTex;
+        mesh.userData._tslMeadow = splat.meadowTex;
+        setupTslGroundMeshSwap(mesh, sharedTslGround);
         scene.add(mesh);
 
         return {
@@ -6887,59 +6930,59 @@
       }
 
       const _neededChunks = new Set();
+      let _lastFrustumCullParam = PARAMS.terrainChunkCulling;
+      let _ucAnchor = new THREE.Vector3();
+      let _ucChunksCreated = 0;
+      const _UC_MAX_CREATES = 2;
+
+      function _visitChunk(cx, cz, camChunkX, camChunkZ, maxChunk) {
+        const key = chunkKey(cx, cz);
+        _neededChunks.add(key);
+
+        const center = chunkCenterWorld(cx, cz);
+        const dist = center.distanceTo(_ucAnchor);
+        const lod = PARAMS.terrainLodEnabled
+          ? pickLodByDistance(dist)
+          : CONFIG.lodLevels[0];
+
+        const existing = activeChunks.get(key);
+        if (!existing) {
+          if (_ucChunksCreated < _UC_MAX_CREATES) {
+            activeChunks.set(key, createChunk(cx, cz, lod));
+            dirtyChunks.delete(key);
+            _ucChunksCreated++;
+          }
+          return;
+        }
+
+        if (existing.segments !== lod.segments) {
+          if (_ucChunksCreated < _UC_MAX_CREATES) {
+            removeChunk(existing);
+            activeChunks.set(key, createChunk(cx, cz, lod));
+            dirtyChunks.delete(key);
+            _ucChunksCreated++;
+          }
+          return;
+        }
+
+        if (dirtyChunks.has(key)) {
+          if (_ucChunksCreated < _UC_MAX_CREATES) {
+            removeChunk(existing);
+            activeChunks.set(key, createChunk(cx, cz, lod));
+            dirtyChunks.delete(key);
+            _ucChunksCreated++;
+          }
+        }
+      }
+
       function updateChunkSet() {
-        const anchor = playMode ? playerPos : camera.position;
-        const camChunkX = Math.floor((anchor.x + worldHalf) / CONFIG.chunkSize);
-        const camChunkZ = Math.floor((anchor.z + worldHalf) / CONFIG.chunkSize);
+        _ucAnchor.copy(playMode ? playerPos : camera.position);
+        const camChunkX = Math.floor((_ucAnchor.x + worldHalf) / CONFIG.chunkSize);
+        const camChunkZ = Math.floor((_ucAnchor.z + worldHalf) / CONFIG.chunkSize);
 
-        const needed = _neededChunks;
-        needed.clear();
+        _neededChunks.clear();
+        _ucChunksCreated = 0;
         const maxChunk = Math.floor(CONFIG.worldSize / CONFIG.chunkSize);
-
-        // Limit chunk creates per update to spread heavy work across frames
-        const MAX_CHUNK_CREATES_PER_UPDATE = 2;
-        let chunksCreatedThisUpdate = 0;
-        const _deferredChunkCreates = [];
-
-        const visitChunk = (cx, cz) => {
-          const key = chunkKey(cx, cz);
-          needed.add(key);
-
-          const center = chunkCenterWorld(cx, cz);
-          const dist = center.distanceTo(anchor);
-          const lod = PARAMS.terrainLodEnabled
-            ? pickLodByDistance(dist)
-            : CONFIG.lodLevels[0];
-
-          const existing = activeChunks.get(key);
-          if (!existing) {
-            if (chunksCreatedThisUpdate < MAX_CHUNK_CREATES_PER_UPDATE) {
-              activeChunks.set(key, createChunk(cx, cz, lod));
-              dirtyChunks.delete(key);
-              chunksCreatedThisUpdate++;
-            }
-            return;
-          }
-
-          if (existing.segments !== lod.segments) {
-            if (chunksCreatedThisUpdate < MAX_CHUNK_CREATES_PER_UPDATE) {
-              removeChunk(existing);
-              activeChunks.set(key, createChunk(cx, cz, lod));
-              dirtyChunks.delete(key);
-              chunksCreatedThisUpdate++;
-            }
-            return;
-          }
-
-          if (dirtyChunks.has(key)) {
-            if (chunksCreatedThisUpdate < MAX_CHUNK_CREATES_PER_UPDATE) {
-              removeChunk(existing);
-              activeChunks.set(key, createChunk(cx, cz, lod));
-              dirtyChunks.delete(key);
-              chunksCreatedThisUpdate++;
-            }
-          }
-        };
 
         if (PARAMS.terrainChunkCulling) {
           for (
@@ -6956,27 +6999,33 @@
               const cz = camChunkZ + dz;
               if (cx < 0 || cz < 0 || cx >= maxChunk || cz >= maxChunk)
                 continue;
-              visitChunk(cx, cz);
+              _visitChunk(cx, cz, camChunkX, camChunkZ, maxChunk);
             }
           }
         } else {
           for (let cz = 0; cz < maxChunk; cz++) {
             for (let cx = 0; cx < maxChunk; cx++) {
-              visitChunk(cx, cz);
+              _visitChunk(cx, cz, camChunkX, camChunkZ, maxChunk);
             }
           }
         }
 
-        for (const ch of activeChunks.values()) {
-          ch.mesh.frustumCulled = PARAMS.terrainChunkCulling;
+        // Only update frustumCulled when the param actually changes
+        if (_lastFrustumCullParam !== PARAMS.terrainChunkCulling) {
+          _lastFrustumCullParam = PARAMS.terrainChunkCulling;
+          for (const ch of activeChunks.values()) {
+            ch.mesh.frustumCulled = PARAMS.terrainChunkCulling;
+          }
         }
 
         const maxIdx = getMaxChunkIndex();
         const MAX_STITCH_REBUILDS = 2;
         let stitchRebuilds = 0;
-        for (const [key, chunk] of activeChunks) {
-          if (!needed.has(key)) continue;
-          const { cx, cz } = parseChunkKey(key);
+        for (const [, chunk] of activeChunks) {
+          const key = chunk.mesh.userData.chunkKey;
+          if (!_neededChunks.has(key)) continue;
+          const cx = chunk.cx;
+          const cz = chunk.cz;
           let abutsCoarser = false;
           for (let d = 0; d < 4; d++) {
             const ncx = cx + _stitchDirs[d][0];
@@ -7014,7 +7063,7 @@
         }
 
         for (const [key, chunk] of activeChunks) {
-          if (!needed.has(key)) {
+          if (!_neededChunks.has(key)) {
             removeChunk(chunk);
             activeChunks.delete(key);
           }
@@ -15053,8 +15102,14 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         lastTime = now;
 
         shadowTarget.position.set(camera.position.x, 0, camera.position.z);
+        const _lightChanged = _lightSkySnap;
         syncLightAndSkyFromParams();
-        stylizedSky.update(sunDir, camera.position);
+        // Only recompute sun axes when light params changed; always sync camera pos
+        if (_lightChanged !== _lightSkySnap) {
+          stylizedSky.update(sunDir, camera.position);
+        } else {
+          stylizedSky.mesh.position.copy(camera.position);
+        }
 
         const _csmChanged =
           csm &&
@@ -15087,9 +15142,11 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         uFTreeTime.value = appTimeSec;
         uRiverTime.value = appTimeSec;
         uWaterTime.value = appTimeSec;
-        _syncRipples();
-        uWCamXZ.value.set(camera.position.x, camera.position.z);
-        lakeShader.update(dtSec, appTimeSec, _cachedLakeBodies);
+        if (_rippleBuffer.length > 0) _syncRipples();
+        if (_cachedLakeBodies.length > 0 || waterObjects.length > 0) {
+          uWCamXZ.value.set(camera.position.x, camera.position.z);
+          lakeShader.update(dtSec, appTimeSec, _cachedLakeBodies);
+        }
         if (waterfallObjects.length > 0)
           wfU.wfFlowTime.value += dtSec * wfU.wfFlowSpeed.value;
         if (splashCapObjects.length > 0) {
@@ -15218,7 +15275,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
 
         if (dirtyChunks.size > 0) rebuildDirtyActiveChunks(2);
 
-        if (heightTexDirty && now - lastHeightTexSyncMs > 100) {
+        if (heightTexDirty && now - lastHeightTexSyncMs > 500) {
           rebuildGlobalHeightTexture();
           heightTexDirty = false;
           lastHeightTexSyncMs = now;

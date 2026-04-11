@@ -2,9 +2,13 @@
  * Chunk terrain: same procedural ground stack as splatmap-painter10bvh+post.html `groundProc`
  * (gPARAMS + groundLayerMask: Perlin / FBM via tsl-noise.js), plus splat RGB blend.
  *
- * Uses MeshStandardNodeMaterial so sun + hemi actually shade the surface (Basic looked “flat”).
+ * Uses MeshStandardNodeMaterial so sun + hemi actually shade the surface (Basic looked "flat").
  * envMapIntensity = 0 avoids environment reflections exaggerating per-triangle / LOD differences
- * (the old “chunk grid” read that pushed the seam-test toward Basic).
+ * (the old "chunk grid" read that pushed the seam-test toward Basic).
+ *
+ * SHARED MATERIAL: one material instance is compiled once and reused for every chunk.
+ * Per-chunk textures (splat, imgWeight, meadow) are swapped via onBeforeRender
+ * by updating TextureNode.value — same shader, different texture bindings.
  */
 import * as THREE from "three";
 import {
@@ -36,6 +40,16 @@ function toLinearColor(hex) {
   return new THREE.Color(hex).convertSRGBToLinear();
 }
 
+/** 1×1 black RGBA placeholder so TextureNodes have a valid initial binding. */
+function makePlaceholderTex() {
+  const d = new Uint8Array([0, 0, 0, 255]);
+  const t = new THREE.DataTexture(d, 1, 1, THREE.RGBAFormat);
+  t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+  t.flipY = false;
+  t.needsUpdate = true;
+  return t;
+}
+
 /** Matches painter `groundLayerMask` for noiseType perlin + optional FBM. */
 const proceduralLayerMask = Fn(
   ([p, useFbm, octaves, lacunarity, gain, maskLow, maskHigh, maskSharpness, strength]) => {
@@ -48,23 +62,21 @@ const proceduralLayerMask = Fn(
 );
 
 /**
- * @param {THREE.Texture} splatTex — same per-chunk splat as createChunkSplatMaterial
+ * Creates ONE shared TSL ground material. Per-chunk textures (splat, imgWeight, meadow)
+ * are bound via returned TextureNode references — swap `.value` in onBeforeRender.
+ *
  * @param {number} chunkSize
- * @param {object} [opts] — defaults match splatmap-painter10bvh+post.html gPARAMS (default preset)
- * @param {null | { heightTex, rockColorTex, rockDataTex, cliffU, worldSize, worldHalf, htexRes }} [cliffDeps] — painter-style auto cliff
- * @param {THREE.Texture | null} [imgWeightTex] — per-chunk RGB weights for image slots (R,G,B → slot 0–2)
+ * @param {object} [opts]
+ * @param {null | { heightTex, rockColorTex, rockDataTex, cliffU, worldSize, worldHalf, htexRes }} [cliffDeps]
  * @param {object[] | null} [imageSlots] — from createChunkImageSlotSystem().slots
- * @param {THREE.Texture | null} [meadowDensityTex] — per-chunk R = meadow blend weight (painter meadowCtx)
  * @param {null | { meadowProc: object }} [meadowBundle] — from createMeadowTslBundle()
+ * @returns {{ material, splatTexNode, imgWeightTexNode, meadowTexNode }}
  */
 export function createChunkPainterGroundMaterial(
-  splatTex,
   chunkSize,
   opts = {},
   cliffDeps = null,
-  imgWeightTex = null,
   imageSlots = null,
-  meadowDensityTex = null,
   meadowBundle = null,
 ) {
   const baseColor = opts.baseColor ?? "#74CA5E";
@@ -105,9 +117,6 @@ export function createChunkPainterGroundMaterial(
     maskSharpness: opts.layer2?.maskSharpness ?? 1.0,
   };
 
-  splatTex.anisotropy = 8;
-  splatTex.flipY = false;
-
   const uBase = uniform(toLinearColor(baseColor));
   const uL1c = uniform(toLinearColor(L1.color));
   const uL2c = uniform(toLinearColor(L2.color));
@@ -132,6 +141,13 @@ export function createChunkPainterGroundMaterial(
       cliffDeps.worldHalf,
       cliffDeps.htexRes,
     );
+
+  // ── Shared texture nodes: one per varying-per-chunk texture ──
+  // All chunks share the same compiled shader; onBeforeRender swaps .value.
+  const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));
+  const splatTexNode = texture(makePlaceholderTex(), splatUV);
+  const imgWeightTexNode = imageSlots ? texture(makePlaceholderTex(), splatUV) : null;
+  const meadowTexNode = meadowBundle ? texture(makePlaceholderTex(), splatUV) : null;
 
   mat.colorNode = Fn(() => {
     const wxz = positionWorld.xz;
@@ -176,8 +192,8 @@ export function createChunkPainterGroundMaterial(
       float(1),
     );
 
-    const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));
-    const s = texture(splatTex, splatUV);
+    // Splat blend — uses shared splatTexNode
+    const s = splatTexNode;
     const layR = vec3(0.34, 0.27, 0.16);
     const layG = vec3(0.36, 0.52, 0.22);
     const layB = vec3(0.46, 0.4, 0.28);
@@ -185,12 +201,13 @@ export function createChunkPainterGroundMaterial(
     col = mix(col, layR, s.r);
     col = mix(col, layG, s.g);
     col = mix(col, layB, s.b);
-    if (meadowBundle && meadowDensityTex) {
-      const mW = texture(meadowDensityTex, splatUV).r;
+
+    if (meadowBundle && meadowTexNode) {
+      const mW = meadowTexNode.r;
       col = mix(col, meadowBundle.meadowProc(), mW);
     }
-    if (imgWeightTex && imageSlots) {
-      col = applyImageSlotAlbedoAndAO(col, cs, worldSizeF, imgWeightTex, imageSlots);
+    if (imgWeightTexNode && imageSlots) {
+      col = applyImageSlotAlbedoAndAO(col, cs, worldSizeF, null, imageSlots, imgWeightTexNode);
     }
     return cliff ? cliff.augmentColor(col) : col;
   })();
@@ -198,31 +215,48 @@ export function createChunkPainterGroundMaterial(
   if (cliff) {
     mat.normalNode = cliff.buildNormalNode();
     mat.roughnessNode =
-      imgWeightTex && imageSlots
+      imgWeightTexNode && imageSlots
         ? Fn(() =>
             applyImageSlotRoughness(
               cliff.evaluateRoughnessInFn(),
               cs,
               worldSizeF,
-              imgWeightTex,
+              null,
               imageSlots,
+              imgWeightTexNode,
             ),
           )()
         : cliff.buildRoughnessNode();
-  } else if (imgWeightTex && imageSlots) {
+  } else if (imgWeightTexNode && imageSlots) {
     mat.roughnessNode = Fn(() =>
-      applyImageSlotRoughness(float(roughness), cs, worldSizeF, imgWeightTex, imageSlots),
+      applyImageSlotRoughness(float(roughness), cs, worldSizeF, null, imageSlots, imgWeightTexNode),
     )();
-    mat.normalNode = createImageSlotNormalNode(cs, worldSizeF, imgWeightTex, imageSlots);
+    mat.normalNode = createImageSlotNormalNode(cs, worldSizeF, null, imageSlots, imgWeightTexNode);
   }
 
   mat.opacityNode = Fn(() => {
-    const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));
-    const s = texture(splatTex, splatUV);
-    return float(1.0).sub(step(float(0.25), s.a));
+    return float(1.0).sub(step(float(0.25), splatTexNode.a));
   })();
   mat.alphaTest = 0.5;
   mat.transparent = false;
 
-  return mat;
+  return { material: mat, splatTexNode, imgWeightTexNode, meadowTexNode };
+}
+
+/**
+ * Hook mesh.onBeforeRender to swap per-chunk textures on the shared material.
+ * Call once per mesh after creation. The mesh must have userData._tslSplat, _tslImg, _tslMeadow.
+ *
+ * @param {THREE.Mesh} mesh
+ * @param {{ splatTexNode, imgWeightTexNode, meadowTexNode }} sharedNodes
+ */
+export function setupTslGroundMeshSwap(mesh, sharedNodes) {
+  const prev = mesh.onBeforeRender;
+  mesh.onBeforeRender = () => {
+    if (prev) prev();
+    const ud = mesh.userData;
+    if (ud._tslSplat) sharedNodes.splatTexNode.value = ud._tslSplat;
+    if (ud._tslImg && sharedNodes.imgWeightTexNode) sharedNodes.imgWeightTexNode.value = ud._tslImg;
+    if (ud._tslMeadow && sharedNodes.meadowTexNode) sharedNodes.meadowTexNode.value = ud._tslMeadow;
+  };
 }

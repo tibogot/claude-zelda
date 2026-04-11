@@ -20,10 +20,9 @@ import {
 } from "three/tsl";
 import { normalMap } from "three/tsl";
 
-export function applyImageSlotAlbedoAndAO(col, cs, worldSize, imgWeightTex, slots) {
+export function applyImageSlotAlbedoAndAO(col, cs, worldSize, imgWeightTex, slots, imgWSample) {
   const ws = float(1.0).div(float(worldSize));
-  const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));
-  const imgW = texture(imgWeightTex, splatUV);
+  const imgW = imgWSample ?? texture(imgWeightTex, positionLocal.xz.div(cs).add(vec2(0.5, 0.5)));
   const s0 = slots[0],
     s1 = slots[1],
     s2 = slots[2];
@@ -41,10 +40,9 @@ export function applyImageSlotAlbedoAndAO(col, cs, worldSize, imgWeightTex, slot
 }
 
 /** `baseRough` is a float node (e.g. cliff roughness output). */
-export function applyImageSlotRoughness(baseRough, cs, worldSize, imgWeightTex, slots) {
+export function applyImageSlotRoughness(baseRough, cs, worldSize, imgWeightTex, slots, imgWSample) {
   const ws = float(1.0).div(float(worldSize));
-  const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));
-  const imgW = texture(imgWeightTex, splatUV);
+  const imgW = imgWSample ?? texture(imgWeightTex, positionLocal.xz.div(cs).add(vec2(0.5, 0.5)));
   const s0 = slots[0],
     s1 = slots[1],
     s2 = slots[2];
@@ -59,11 +57,10 @@ export function applyImageSlotRoughness(baseRough, cs, worldSize, imgWeightTex, 
 }
 
 /** Normal detail from painted slots (world XZ UV); blends decoded tangent normals by weight. */
-export function createImageSlotNormalNode(cs, worldSize, imgWeightTex, slots) {
+export function createImageSlotNormalNode(cs, worldSize, imgWeightTex, slots, imgWSample) {
   return Fn(() => {
     const ws = float(1.0).div(float(worldSize));
-    const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));
-    const imgW = texture(imgWeightTex, splatUV);
+    const imgW = imgWSample ?? texture(imgWeightTex, positionLocal.xz.div(cs).add(vec2(0.5, 0.5)));
     const decode = (ormS) => {
       const nmX = ormS.b.mul(2.0).sub(1.0);
       const nmY = ormS.a.mul(2.0).sub(1.0);
