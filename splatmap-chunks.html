@@ -582,7 +582,7 @@
       const CONFIG = {
         worldSize: 1600,
         chunkSize: 100,
-        activeRadiusInChunks: 6,
+        activeRadiusInChunks: 16,
         dataResolution: 64,
         maxTerrainHeight: 26,
         /** Brush ring mesh is built at this world radius; live sculpt size/strength = Tweakpane Brush sliders. */
@@ -592,7 +592,9 @@
         lodLevels: [
           { maxDistance: 200, segments: 64, label: "L0" },
           { maxDistance: 420, segments: 32, label: "L1" },
-          { maxDistance: Infinity, segments: 16, label: "L2" },
+          { maxDistance: 800, segments: 16, label: "L2" },
+          { maxDistance: 1400, segments: 8, label: "L3" },
+          { maxDistance: Infinity, segments: 4, label: "L4" },
         ],
         splatRes: 256,
         paint: {
@@ -3361,7 +3363,9 @@
       function lodBrightnessForSegments(segments) {
         if (segments >= 64) return 1;
         if (segments >= 32) return 0.78;
-        return 0.52;
+        if (segments >= 16) return 0.58;
+        if (segments >= 8) return 0.42;
+        return 0.30;
       }
 
       function getOrCreateDebugChunkMaterial(cx, cz, lodLevel) {
@@ -7007,7 +7011,20 @@
       let _lastFrustumCullParam = PARAMS.terrainChunkCulling;
       let _ucAnchor = new THREE.Vector3();
       let _ucChunksCreated = 0;
+      let _ucCheapCreated = 0;
       const _UC_MAX_CREATES = 2;
+      /** Distant chunks (≤8 segments) are nearly free — allow many per frame so mountains don't pop in. */
+      const _UC_MAX_CHEAP = 32;
+      const _UC_CHEAP_THRESHOLD = 8;
+
+      function _canCreate(lod) {
+        if (lod.segments <= _UC_CHEAP_THRESHOLD) return _ucCheapCreated < _UC_MAX_CHEAP;
+        return _ucChunksCreated < _UC_MAX_CREATES;
+      }
+      function _countCreate(lod) {
+        if (lod.segments <= _UC_CHEAP_THRESHOLD) _ucCheapCreated++;
+        else _ucChunksCreated++;
+      }
 
       function _visitChunk(cx, cz, camChunkX, camChunkZ, maxChunk) {
         const key = chunkKey(cx, cz);
@@ -7021,30 +7038,30 @@
 
         const existing = activeChunks.get(key);
         if (!existing) {
-          if (_ucChunksCreated < _UC_MAX_CREATES) {
+          if (_canCreate(lod)) {
             activeChunks.set(key, createChunk(cx, cz, lod));
             dirtyChunks.delete(key);
-            _ucChunksCreated++;
+            _countCreate(lod);
           }
           return;
         }
 
         if (existing.segments !== lod.segments) {
-          if (_ucChunksCreated < _UC_MAX_CREATES) {
+          if (_canCreate(lod)) {
             removeChunk(existing);
             activeChunks.set(key, createChunk(cx, cz, lod));
             dirtyChunks.delete(key);
-            _ucChunksCreated++;
+            _countCreate(lod);
           }
           return;
         }
 
         if (dirtyChunks.has(key)) {
-          if (_ucChunksCreated < _UC_MAX_CREATES) {
+          if (_canCreate(lod)) {
             removeChunk(existing);
             activeChunks.set(key, createChunk(cx, cz, lod));
             dirtyChunks.delete(key);
-            _ucChunksCreated++;
+            _countCreate(lod);
           }
         }
       }
@@ -7056,6 +7073,7 @@
 
         _neededChunks.clear();
         _ucChunksCreated = 0;
+        _ucCheapCreated = 0;
         const maxChunk = Math.floor(CONFIG.worldSize / CONFIG.chunkSize);
 
         if (PARAMS.terrainChunkCulling) {
@@ -9826,11 +9844,15 @@
         let lodL0 = 0;
         let lodL1 = 0;
         let lodL2 = 0;
+        let lodL3 = 0;
+        let lodL4 = 0;
         for (const chunk of activeChunks.values()) {
           tris += chunk.triCount;
           if (chunk.segments >= 64) lodL0++;
           else if (chunk.segments >= 32) lodL1++;
-          else lodL2++;
+          else if (chunk.segments >= 16) lodL2++;
+          else if (chunk.segments >= 8) lodL3++;
+          else lodL4++;
         }
 
         const p = camera.position;
@@ -9900,7 +9922,7 @@
         hudEl.textContent = `fps: ${frameState.fps.toFixed(1)}   frame: ${dtMs.toFixed(2)} ms
 draw calls (frame): ${drawCallsHud}
 terrain tris: ${Math.round(tris).toLocaleString()}
-active chunks: ${activeChunks.size}  (dist LOD: ${PARAMS.terrainLodEnabled ? "ON" : "OFF"})  (chunk cull: ${PARAMS.terrainChunkCulling ? "ON" : "OFF — full world"})  L0=${lodL0} L1=${lodL1} L2=${lodL2}
+active chunks: ${activeChunks.size}  (dist LOD: ${PARAMS.terrainLodEnabled ? "ON" : "OFF"})  (chunk cull: ${PARAMS.terrainChunkCulling ? "ON" : "OFF — full world"})  L0=${lodL0} L1=${lodL1} L2=${lodL2} L3=${lodL3} L4=${lodL4}
 ${treeLodHud}
 ${procTreeHud}
 ${foliageHud}
