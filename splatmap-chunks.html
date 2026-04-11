@@ -3414,8 +3414,6 @@
       const dirtyChunks = new Set();
 
       /** Tree LOD (J) — instanced meshes only; no WebGPU impostor path. */
-      const LOD_CHUNK_SIZE = 64;
-      const LOD_MAX_PER_CHUNK = 512;
       const LOD_SLOTS = [
         {
           name: "Pine",
@@ -3753,11 +3751,16 @@
         meshScale: 1,
         density: 0.25,
         treesPerStroke: 3,
+        maxDrawDistance: 520,
+        lodChunkSize: 128,
+        lodMaxPerChunk: 1024,
         count0: 0,
         count1: 0,
         totalTrees: 0,
         chunks: 0,
         chunksVisible: 0,
+        chunksCulledDistance: 0,
+        treesCulledDistance: 0,
         lodVisMesh0: true,
         lodVisMesh1: true,
       };
@@ -4270,6 +4273,10 @@
           dataResolution: CONFIG.dataResolution,
           splatRes: CONFIG.splatRes,
           chunks,
+          treeLodSettings: {
+            lodChunkSize: lodParams.lodChunkSize,
+            lodMaxPerChunk: lodParams.lodMaxPerChunk,
+          },
           treeLod: LOD_SLOTS.map((s) => {
             const o = { name: s.name, positions: s.positions };
             if (s.meshScale != null && s.meshScale !== 1)
@@ -4513,6 +4520,13 @@
         rebuildAllActiveChunkMeshes();
         terrainUndoStack.length = 0;
         terrainRedoStack.length = 0;
+        if (data.treeLodSettings && typeof data.treeLodSettings === "object") {
+          const tls = data.treeLodSettings;
+          if (typeof tls.lodChunkSize === "number")
+            lodParams.lodChunkSize = tls.lodChunkSize;
+          if (typeof tls.lodMaxPerChunk === "number")
+            lodParams.lodMaxPerChunk = tls.lodMaxPerChunk;
+        }
         if (data.treeLod && Array.isArray(data.treeLod)) {
           data.treeLod.forEach((entry, i) => {
             if (i >= LOD_SLOTS.length) return;
@@ -4520,6 +4534,7 @@
             slot.positions = entry.positions || [];
             if (typeof entry.meshScale === "number")
               slot.meshScale = entry.meshScale;
+            _disposeSlotLodChunks(slot);
             _rebuildLODChunks(slot);
           });
         }
@@ -6019,8 +6034,12 @@
       }
 
       // ── Tree LOD — instanced GLB chunks (LOD0 / LOD1), no impostor ─────────
-      const _lodDummy = new THREE.Object3D();
       const _lodFinalMat = new THREE.Matrix4();
+      const _lodTreeMat = new THREE.Matrix4();
+      const _lodTreePos = new THREE.Vector3();
+      const _lodTreeScale = new THREE.Vector3();
+      const _lodTreeQuat = new THREE.Quaternion();
+      const _lodUpY = new THREE.Vector3(0, 1, 0);
       const _lodCamPos = new THREE.Vector3();
       const _lodFrustum = new THREE.Frustum();
       const _lodProjMat = new THREE.Matrix4();
@@ -6074,13 +6093,30 @@
         return defs;
       }
 
-      function _makeChunkIMs(defs) {
+      function _disposeSlotLodChunks(slot) {
+        if (!slot.chunks || slot.chunks.size === 0) return;
+        for (const c of slot.chunks.values()) {
+          c.lod0ims.forEach(({ im }) => scene.remove(im));
+          if (c.lod1ims) c.lod1ims.forEach(({ im }) => scene.remove(im));
+        }
+        slot.chunks.clear();
+      }
+
+      function _rebuildAllTreeLodChunksFromParams() {
+        LOD_SLOTS.forEach((slot) => {
+          if (!slot.ready) return;
+          _disposeSlotLodChunks(slot);
+          _rebuildLODChunks(slot);
+        });
+      }
+
+      function _makeChunkIMs(defs, instanceCap) {
+        const cap = Math.max(
+          32,
+          Math.min(8192, Math.floor(instanceCap) || 1024),
+        );
         return defs.map(({ geometry, material, localMatrix }) => {
-          const im = new THREE.InstancedMesh(
-            geometry,
-            material,
-            LOD_MAX_PER_CHUNK,
-          );
+          const im = new THREE.InstancedMesh(geometry, material, cap);
           im.count = 0;
           im.castShadow = true;
           im.receiveShadow = true;
@@ -6093,9 +6129,14 @@
       _rebuildLODChunks = function (slot) {
         _markLodDirty();
         if (!slot || !slot.ready) return;
+        const cs = Math.max(
+          16,
+          Math.min(1024, Math.floor(lodParams.lodChunkSize) || 128),
+        );
+        const instanceCap = lodParams.lodMaxPerChunk;
         const byChunk = new Map();
         slot.positions.forEach((pos) => {
-          const key = `${Math.floor(pos.x / LOD_CHUNK_SIZE)},${Math.floor(pos.z / LOD_CHUNK_SIZE)}`;
+          const key = `${Math.floor(pos.x / cs)},${Math.floor(pos.z / cs)}`;
           if (!byChunk.has(key)) byChunk.set(key, []);
           byChunk.get(key).push(pos);
         });
@@ -6113,8 +6154,10 @@
             chunk = {
               positions: [],
               sphere: new THREE.Sphere(),
-              lod0ims: _makeChunkIMs(slot.lod0Defs),
-              lod1ims: slot.lod1Defs ? _makeChunkIMs(slot.lod1Defs) : null,
+              lod0ims: _makeChunkIMs(slot.lod0Defs, instanceCap),
+              lod1ims: slot.lod1Defs
+                ? _makeChunkIMs(slot.lod1Defs, instanceCap)
+                : null,
             };
             slot.chunks.set(key, chunk);
           }
@@ -6139,6 +6182,14 @@
           });
           chunk.sphere.set(new THREE.Vector3(cx, cy, cz), r + 20);
         }
+        slot.positions.forEach((p) => {
+          if (typeof p.rot !== "number" || !Number.isFinite(p.rot)) {
+            p.rot =
+              Math.PI *
+              2 *
+              ((((p.x * 13.7 + p.z * 7.3) % 1) + 1) % 1);
+          }
+        });
         slot.positions.forEach((p, i) => {
           p._lodIdx = i;
         });
@@ -6201,7 +6252,13 @@
             const y = getWorldHeight(x, z);
             const scale =
               slot.scaleMin + Math.random() * (slot.scaleMax - slot.scaleMin);
-            slot.positions.push({ x, y, z, scale });
+            slot.positions.push({
+              x,
+              y,
+              z,
+              scale,
+              rot: Math.random() * Math.PI * 2,
+            });
             added++;
           }
         }
@@ -6241,6 +6298,11 @@
         let count0 = 0;
         let count1 = 0;
         let totalTrees = 0;
+        let treesCulledDistance = 0;
+        let chunksCulledDistance = 0;
+        const maxDraw = lodParams.maxDrawDistance;
+        const maxSq =
+          maxDraw > 0 ? maxDraw * maxDraw : Number.POSITIVE_INFINITY;
         for (const slot of LOD_SLOTS) {
           if (!slot.ready) continue;
           totalTrees += slot.positions.length;
@@ -6259,26 +6321,49 @@
               });
             }
             if (!inFrustum) continue;
+            if (maxDraw > 0) {
+              const c = chunk.sphere.center;
+              const dxc = c.x - _lodCamPos.x;
+              const dyc = c.y - _lodCamPos.y;
+              const dzc = c.z - _lodCamPos.z;
+              const distCenter = Math.sqrt(dxc * dxc + dyc * dyc + dzc * dzc);
+              if (distCenter - chunk.sphere.radius > maxDraw) {
+                chunksCulledDistance++;
+                continue;
+              }
+            }
             totalVisible++;
+            const instanceCap = Math.max(
+              32,
+              Math.min(
+                8192,
+                Math.floor(lodParams.lodMaxPerChunk) || 1024,
+              ),
+            );
             for (const p of chunk.positions) {
               const { x, y, z, scale } = p;
               const dx = x - _lodCamPos.x;
               const dy = y - _lodCamPos.y;
               const dz = z - _lodCamPos.z;
               const distSq = dx * dx + dy * dy + dz * dz;
+              if (distSq > maxSq) {
+                treesCulledDistance++;
+                continue;
+              }
               const useLod1 = chunk.lod1ims && distSq >= thrSq;
               const groups = useLod1 ? chunk.lod1ims : chunk.lod0ims;
-              _lodDummy.position.set(x, y, z);
-              _lodDummy.scale.setScalar(scale * lodMeshMul);
               const rotY =
-                typeof p.rot === "number"
+                typeof p.rot === "number" && Number.isFinite(p.rot)
                   ? p.rot
                   : Math.PI * 2 * ((((x * 13.7 + z * 7.3) % 1) + 1) % 1);
-              _lodDummy.rotation.set(0, rotY, 0);
-              _lodDummy.updateMatrix();
+              const s = scale * lodMeshMul;
+              _lodTreePos.set(x, y, z);
+              _lodTreeScale.set(s, s, s);
+              _lodTreeQuat.setFromAxisAngle(_lodUpY, rotY);
+              _lodTreeMat.compose(_lodTreePos, _lodTreeQuat, _lodTreeScale);
               groups.forEach(({ im, localMatrix }) => {
-                if (im.count >= LOD_MAX_PER_CHUNK) return;
-                _lodFinalMat.multiplyMatrices(_lodDummy.matrix, localMatrix);
+                if (im.count >= instanceCap) return;
+                _lodFinalMat.multiplyMatrices(_lodTreeMat, localMatrix);
                 im.setMatrixAt(im.count++, _lodFinalMat);
               });
             }
@@ -6308,6 +6393,8 @@
         lodParams.totalTrees = totalTrees;
         lodParams.chunks = totalChunks;
         lodParams.chunksVisible = totalVisible;
+        lodParams.chunksCulledDistance = chunksCulledDistance;
+        lodParams.treesCulledDistance = treesCulledDistance;
       }
 
       function updatePTreeInstances() {
@@ -11488,6 +11575,38 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             _markLodDirty();
           });
         lodFolder
+          .addBinding(lodParams, "maxDrawDistance", {
+            label: "Max draw dist (0=∞)",
+            min: 0,
+            max: 2000,
+            step: 10,
+          })
+          .on("change", () => {
+            _markLodDirty();
+          });
+        lodFolder
+          .addBinding(lodParams, "lodChunkSize", {
+            label: "Tree chunk size (world)",
+            min: 32,
+            max: 512,
+            step: 32,
+          })
+          .on("change", () => {
+            _rebuildAllTreeLodChunksFromParams();
+            if (lodFolderRef) lodFolderRef.refresh();
+          });
+        lodFolder
+          .addBinding(lodParams, "lodMaxPerChunk", {
+            label: "Max instances / chunk",
+            min: 64,
+            max: 8192,
+            step: 64,
+          })
+          .on("change", () => {
+            _rebuildAllTreeLodChunksFromParams();
+            if (lodFolderRef) lodFolderRef.refresh();
+          });
+        lodFolder
           .addBinding(lodParams, "minSpacing", {
             label: "Min spacing",
             min: 0,
@@ -11562,6 +11681,14 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         });
         lodFolder.addBinding(lodParams, "chunksVisible", {
           label: "Chunks visible (frustum)",
+          readonly: true,
+        });
+        lodFolder.addBinding(lodParams, "chunksCulledDistance", {
+          label: "Chunks culled (distance)",
+          readonly: true,
+        });
+        lodFolder.addBinding(lodParams, "treesCulledDistance", {
+          label: "Trees culled (distance)",
           readonly: true,
         });
         lodFolder.addBinding(lodParams, "count0", {
