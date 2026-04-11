@@ -274,18 +274,20 @@ export function setupTslGroundMeshSwap(mesh, sharedNodes) {
 
 /**
  * Shared material that tiles one image slot texture (albedo + ORM) across the whole terrain.
- * Swap which slot is shown by updating albedoTexNode.value / ormTexNode.value.
+ * Swap which slot is shown by updating albedoTexNode.value / ormTexNode.value + syncing uniforms.
  * Per-chunk splat texture swapped via onBeforeRender for hole punching.
  *
  * @param {number} chunkSize
  * @param {number} worldSize
- * @param {object} slot — initial slot from chunkImageSlotSystem (has albedoTex, ormTex, uUVScale, etc.)
- * @returns {{ material, splatTexNode, albedoTexNode, ormTexNode, uUVScale }}
+ * @returns {{ material, splatTexNode, albedoTexNode, ormTexNode, uUVScale, uNormalStr, uAOStr, uRoughStr }}
  */
 export function createSharedImgTexMaterial(chunkSize, worldSize) {
   const cs = float(chunkSize);
   const ws = float(1.0).div(float(worldSize));
   const uUVScale = uniform(3.0);
+  const uNormalStr = uniform(1.0);
+  const uAOStr = uniform(1.0);
+  const uRoughStr = uniform(1.0);
 
   const mat = new THREE.MeshStandardNodeMaterial({
     roughness: 0.88,
@@ -301,24 +303,27 @@ export function createSharedImgTexMaterial(chunkSize, worldSize) {
   const albedoTexNode = texture(makePlaceholderTex(), tileUV);
   const ormTexNode = texture(makePlaceholderTex(), tileUV);
 
-  // Color: albedo × AO
+  // Color: albedo × AO (strength-controlled)
   mat.colorNode = Fn(() => {
     const col = albedoTexNode.rgb;
     const ao = ormTexNode.r;
-    return col.mul(mix(float(1), ao, float(0.8)));
+    return col.mul(mix(float(1), ao, uAOStr));
   })();
 
-  // Roughness from ORM green channel
+  // Roughness: blend from base toward ORM green channel by roughStr
   mat.roughnessNode = Fn(() => {
-    return clamp(ormTexNode.g, float(0.04), float(1));
+    const ormRough = ormTexNode.g;
+    return clamp(mix(float(0.88), ormRough, uRoughStr), float(0.04), float(1));
   })();
 
-  // Normal from ORM blue+alpha channels (same decode as image slots)
+  // Normal from ORM blue+alpha channels, strength-controlled
   mat.normalNode = Fn(() => {
     const nmX = ormTexNode.b.mul(2.0).sub(1.0);
     const nmY = ormTexNode.a.mul(2.0).sub(1.0);
     const nmZ = sqrt(max(float(0.0), float(1.0).sub(nmX.mul(nmX)).sub(nmY.mul(nmY))));
-    const raw = vec3(nmX.mul(0.5).add(0.5), nmY.mul(0.5).add(0.5), nmZ.mul(0.5).add(0.5));
+    const decoded = vec3(nmX.mul(0.5).add(0.5), nmY.mul(0.5).add(0.5), nmZ.mul(0.5).add(0.5));
+    const flatNm = vec3(0.5, 0.5, 1.0);
+    const raw = mix(flatNm, decoded, clamp(uNormalStr, float(0), float(1)));
     return normalMap(raw, vec2(0.5, 0.5));
   })();
 
@@ -329,7 +334,7 @@ export function createSharedImgTexMaterial(chunkSize, worldSize) {
   mat.alphaTest = 0.5;
   mat.transparent = false;
 
-  return { material: mat, splatTexNode, albedoTexNode, ormTexNode, uUVScale };
+  return { material: mat, splatTexNode, albedoTexNode, ormTexNode, uUVScale, uNormalStr, uAOStr, uRoughStr };
 }
 
 /**
