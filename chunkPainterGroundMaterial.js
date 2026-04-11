@@ -54,6 +54,8 @@ const proceduralLayerMask = Fn(
  * @param {null | { heightTex, rockColorTex, rockDataTex, cliffU, worldSize, worldHalf, htexRes }} [cliffDeps] — painter-style auto cliff
  * @param {THREE.Texture | null} [imgWeightTex] — per-chunk RGB weights for image slots (R,G,B → slot 0–2)
  * @param {object[] | null} [imageSlots] — from createChunkImageSlotSystem().slots
+ * @param {THREE.Texture | null} [meadowDensityTex] — per-chunk R = meadow blend weight (painter meadowCtx)
+ * @param {null | { meadowProc: object }} [meadowBundle] — from createMeadowTslBundle()
  */
 export function createChunkPainterGroundMaterial(
   splatTex,
@@ -62,6 +64,8 @@ export function createChunkPainterGroundMaterial(
   cliffDeps = null,
   imgWeightTex = null,
   imageSlots = null,
+  meadowDensityTex = null,
+  meadowBundle = null,
 ) {
   const baseColor = opts.baseColor ?? "#74CA5E";
   const brightness = opts.brightness ?? 1.3;
@@ -181,6 +185,10 @@ export function createChunkPainterGroundMaterial(
     col = mix(col, layR, s.r);
     col = mix(col, layG, s.g);
     col = mix(col, layB, s.b);
+    if (meadowBundle && meadowDensityTex) {
+      const mW = texture(meadowDensityTex, splatUV).r;
+      col = mix(col, meadowBundle.meadowProc(), mW);
+    }
     if (imgWeightTex && imageSlots) {
       col = applyImageSlotAlbedoAndAO(col, cs, worldSizeF, imgWeightTex, imageSlots);
     }

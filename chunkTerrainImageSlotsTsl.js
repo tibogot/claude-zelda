@@ -79,12 +79,16 @@ export function createImageSlotNormalNode(cs, worldSize, imgWeightTex, slots) {
     const n0 = decode(texture(s0.ormTex, iuv0));
     const n1 = decode(texture(s1.ormTex, iuv1));
     const n2 = decode(texture(s2.ormTex, iuv2));
-    const w0 = imgW.r.mul(s0.uHasNormal).mul(s0.uNormalStr);
-    const w1 = imgW.g.mul(s1.uHasNormal).mul(s1.uNormalStr);
-    const w2 = imgW.b.mul(s2.uHasNormal).mul(s2.uNormalStr);
-    const wSum = max(w0.add(w1).add(w2), float(0.001));
-    const blended = div(n0.mul(w0).add(n1.mul(w1)).add(n2.mul(w2)), wSum);
     const flatNm = vec3(0.5, 0.5, 1.0);
+    // Strength: mix toward flat per slot; do not fold into w0–w2 or it cancels when one slot dominates.
+    const n0e = mix(flatNm, n0, clamp(s0.uNormalStr, float(0), float(1)));
+    const n1e = mix(flatNm, n1, clamp(s1.uNormalStr, float(0), float(1)));
+    const n2e = mix(flatNm, n2, clamp(s2.uNormalStr, float(0), float(1)));
+    const w0 = imgW.r.mul(s0.uHasNormal);
+    const w1 = imgW.g.mul(s1.uHasNormal);
+    const w2 = imgW.b.mul(s2.uHasNormal);
+    const wSum = max(w0.add(w1).add(w2), float(0.001));
+    const blended = div(n0e.mul(w0).add(n1e.mul(w1)).add(n2e.mul(w2)), wSum);
     const mixed = mix(flatNm, blended, min(wSum, float(1)));
     return normalMap(mixed, vec2(0.35, 0.35));
   })();
