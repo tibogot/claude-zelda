@@ -316,15 +316,13 @@ export function createSharedImgTexMaterial(chunkSize, worldSize) {
     return clamp(mix(float(0.88), ormRough, uRoughStr), float(0.04), float(1));
   })();
 
-  // Normal from ORM blue+alpha channels, strength-controlled
+  // Normal from ORM blue+alpha channels — uNormalStr drives normalMap scale directly
   mat.normalNode = Fn(() => {
     const nmX = ormTexNode.b.mul(2.0).sub(1.0);
     const nmY = ormTexNode.a.mul(2.0).sub(1.0);
     const nmZ = sqrt(max(float(0.0), float(1.0).sub(nmX.mul(nmX)).sub(nmY.mul(nmY))));
     const decoded = vec3(nmX.mul(0.5).add(0.5), nmY.mul(0.5).add(0.5), nmZ.mul(0.5).add(0.5));
-    const flatNm = vec3(0.5, 0.5, 1.0);
-    const raw = mix(flatNm, decoded, clamp(uNormalStr, float(0), float(1)));
-    return normalMap(raw, vec2(0.5, 0.5));
+    return normalMap(decoded, vec2(uNormalStr, uNormalStr));
   })();
 
   // Hole punch from splat alpha

@@ -95,6 +95,6 @@ export function createImageSlotNormalNode(cs, worldSize, imgWeightTex, slots, im
   return Fn(() => {
     const imgW = imgWSample ?? texture(imgWeightTex, positionLocal.xz.div(cs).add(vec2(0.5, 0.5)));
     const { raw } = evaluateImageSlotNormalRaw(cs, worldSize, slots, imgW);
-    return normalMap(raw, vec2(0.35, 0.35));
+    return normalMap(raw, vec2(1.0, 1.0));
   })();
 }
