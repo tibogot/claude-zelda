@@ -735,6 +735,10 @@
       let cliffBlendPack = null;
       let cliffsBlendBindingsFn = null;
       let cliffsBlendSlidersAdded = false;
+      let cliffPaintCanvas = null;
+      let cliffPaintCtx = null;
+      let cliffPaintTex = null;
+      let cliffPaintEraseMode = false;
 
       const transformControls = new TransformControls(
         camera,
@@ -2704,6 +2708,7 @@
       let _cachedTrainLen = 0;
       let placeFolderRef = null;
       let cliffsFolderRef = null;
+      let cliffPaintFolderRef = null;
       let playFolderRef = null;
       let fleurSystem = null;
       let fleurFolderRef = null;
@@ -3170,6 +3175,33 @@
         }
         if (geminiCliffDensityTex) geminiCliffDensityTex.needsUpdate = true;
         geminiGrassHasPaintedDensity = true;
+      }
+
+      function paintCliffAt(wx, wz, erase) {
+        if (!cliffPaintCtx) return;
+        const { u, v } = worldToUV(wx, wz);
+        const cx = u * HTEX_RES;
+        const cy = v * HTEX_RES;
+        if (PARAMS.paintBrush === "smear") {
+          _smearCanvas(cliffPaintCtx, cx, cy);
+        } else {
+          const alpha = brushStr / 100;
+          const [cr, cg, cb] = erase ? [0, 0, 0] : [255, 255, 255];
+          cliffPaintCtx.globalCompositeOperation = "source-over";
+          cliffPaintCtx.fillStyle = _radialGrad(
+            cliffPaintCtx,
+            cx,
+            cy,
+            cr,
+            cg,
+            cb,
+            alpha,
+          );
+          cliffPaintCtx.beginPath();
+          cliffPaintCtx.arc(cx, cy, brushSize, 0, PI * 2);
+          cliffPaintCtx.fill();
+        }
+        if (cliffPaintTex) cliffPaintTex.needsUpdate = true;
       }
 
       function paintAmbientFXAt(wx, wz, erase) {
@@ -4873,6 +4905,11 @@
           cliffsFolderRef.hidden = editState.mode !== "cliffs";
       }
 
+      function syncCliffPaintFolderVisibility() {
+        if (cliffPaintFolderRef)
+          cliffPaintFolderRef.hidden = editState.mode !== "cliffpaint";
+      }
+
       function syncWaterfallFolderVisibility() {
         if (waterfallFolderRef)
           waterfallFolderRef.hidden = editState.mode !== "waterfall";
@@ -4977,6 +5014,9 @@
         else if (m === "decal")
           el.textContent =
             "DECAL MODE  [ D · LMB place / pick · W/E/R gizmo · Del · Refit in pane · Esc → view ]";
+        else if (m === "cliffpaint")
+          el.textContent =
+            "CLIFF PAINT  [ B · LMB paint · Shift erase · Esc → view ]";
         else if (m === "hole")
           el.textContent =
             "HOLE MODE  [ paint terrain punch · splat α + overlay · Shift erase · Brush pane · Esc → view ]";
@@ -5130,6 +5170,7 @@
         syncPtreeFolderVisibility();
         syncPlaceFolderVisibility();
         syncCliffsFolderVisibility();
+        syncCliffPaintFolderVisibility();
         syncWaterfallFolderVisibility();
         syncObjectsFolderVisibility();
         syncFoliageFolderVisibility();
@@ -5220,6 +5261,11 @@
           );
         } else if (editState.mode === "foliage") {
           brushMarker.material.color.setHex(0x56b366);
+          brushMarker.scale.setScalar(
+            sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE,
+          );
+        } else if (editState.mode === "cliffpaint") {
+          brushMarker.material.color.setHex(0xaa8866);
           brushMarker.scale.setScalar(
             sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE,
           );
@@ -8862,6 +8908,11 @@
           setEditMode(editState.mode === "cliffs" ? "view" : "cliffs");
           return;
         }
+        if (event.code === "KeyB") {
+          event.preventDefault();
+          setEditMode(editState.mode === "cliffpaint" ? "view" : "cliffpaint");
+          return;
+        }
         if (event.code === "KeyM") {
           event.preventDefault();
           setEditMode(editState.mode === "fleurs" ? "view" : "fleurs");
@@ -9177,6 +9228,7 @@
           editState.mode === "path" ||
           editState.mode === "geminigrass" ||
           editState.mode === "geminicliffgrass" ||
+          editState.mode === "cliffpaint" ||
           editState.mode === "fleurs" ||
           editState.mode === "ambientfx" ||
           editState.mode === "barrier" ||
@@ -9268,6 +9320,13 @@
           hit
         ) {
           paintGeminiCliffGrassAt(hit.x, hit.z, editState.paintErase);
+        }
+        if (
+          editState.isPointerDown &&
+          editState.pointerAction === "cliffpaint" &&
+          hit
+        ) {
+          paintCliffAt(hit.x, hit.z, editState.paintErase);
         }
         if (
           editState.isPointerDown &&
@@ -9506,6 +9565,17 @@
           editState.paintErase = geminiCliffGrassEraseMode || event.shiftKey;
           controls.enabled = false;
           if (hit) paintGeminiCliffGrassAt(hit.x, hit.z, editState.paintErase);
+          return;
+        }
+
+        if (editState.mode === "cliffpaint" && event.button === 0) {
+          event.preventDefault();
+          pushTerrainUndo();
+          editState.isPointerDown = true;
+          editState.pointerAction = "cliffpaint";
+          editState.paintErase = cliffPaintEraseMode || event.shiftKey;
+          controls.enabled = false;
+          if (hit) paintCliffAt(hit.x, hit.z, editState.paintErase);
           return;
         }
 
@@ -10461,12 +10531,12 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           rebuildAllChunkSplatMaterials();
           heightTexDirty = true;
 
-          const cliffPaintCanvas = document.createElement("canvas");
+          cliffPaintCanvas = document.createElement("canvas");
           cliffPaintCanvas.width = cliffPaintCanvas.height = HTEX_RES;
-          const cpctx = cliffPaintCanvas.getContext("2d");
-          cpctx.fillStyle = "#000000";
-          cpctx.fillRect(0, 0, HTEX_RES, HTEX_RES);
-          const cliffPaintTex = new THREE.CanvasTexture(cliffPaintCanvas);
+          cliffPaintCtx = cliffPaintCanvas.getContext("2d", { willReadFrequently: true });
+          cliffPaintCtx.fillStyle = "#000000";
+          cliffPaintCtx.fillRect(0, 0, HTEX_RES, HTEX_RES);
+          cliffPaintTex = new THREE.CanvasTexture(cliffPaintCanvas);
           cliffPaintTex.wrapS = cliffPaintTex.wrapT = THREE.ClampToEdgeWrapping;
           cliffPaintTex.needsUpdate = true;
 
@@ -10813,6 +10883,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
               "Waterfall [H]": "waterfall",
               "Place [O]": "place",
               "Cliffs [C]": "cliffs",
+              "Cliff Paint [B]": "cliffpaint",
               "Play [F]": "play",
             },
           })
@@ -10962,6 +11033,41 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             step: 0.5,
           })
           .on("change", onCliffGuiChange);
+
+        const cliffPaintFolder = pane.addFolder({
+          title: "Cliff Paint [B]",
+          expanded: false,
+        });
+        cliffPaintFolderRef = cliffPaintFolder;
+        cliffPaintFolder.hidden = editState.mode !== "cliffpaint";
+        const cliffPaintErasePARAMS = { erase: false };
+        cliffPaintFolder
+          .addBinding(cliffPaintErasePARAMS, "erase", {
+            label: "Erase (or Shift)",
+          })
+          .on("change", (e) => {
+            cliffPaintEraseMode = e.value;
+          });
+        cliffPaintFolder
+          .addButton({ title: "Clear cliff paint" })
+          .on("click", () => {
+            pushTerrainUndo();
+            if (cliffPaintCtx) {
+              cliffPaintCtx.fillStyle = "#000";
+              cliffPaintCtx.fillRect(0, 0, HTEX_RES, HTEX_RES);
+              if (cliffPaintTex) cliffPaintTex.needsUpdate = true;
+            }
+          });
+        cliffPaintFolder
+          .addButton({ title: "Fill cliff paint" })
+          .on("click", () => {
+            pushTerrainUndo();
+            if (cliffPaintCtx) {
+              cliffPaintCtx.fillStyle = "#fff";
+              cliffPaintCtx.fillRect(0, 0, HTEX_RES, HTEX_RES);
+              if (cliffPaintTex) cliffPaintTex.needsUpdate = true;
+            }
+          });
 
         const playFolder = pane.addFolder({
           title: "Play [F]",
