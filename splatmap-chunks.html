@@ -2018,34 +2018,36 @@
         });
 
       /** Match painter: physical = SkyMesh uniforms each frame; PMREM from rebuildSkyEnv when physical. */
+      let _lightSkySnap = "";
       function syncLightAndSkyFromParams() {
-        sunDirectionFromAngles(
-          PARAMS.light.sunAzimuth,
-          PARAMS.light.sunElevation,
-          sunDir,
-        );
+        const L = PARAMS.light;
+        const S = PARAMS.sky;
+        const snap = `${L.sunAzimuth},${L.sunElevation},${L.dirColor},${L.dirIntensity},${PARAMS.shadowBias},${PARAMS.shadowNormalBias},${L.hemiSkyColor},${L.hemiGroundColor},${L.hemiIntensity},${L.envIntensity},${L.exposure},${S.mode},${S.turbidity},${S.rayleigh},${S.mie},${S.mieG},${S.cloudCoverage},${S.cloudDensity},${S.cloudElevation}`;
+        if (snap === _lightSkySnap) return;
+        _lightSkySnap = snap;
+        sunDirectionFromAngles(L.sunAzimuth, L.sunElevation, sunDir);
         sun.position.copy(sunDir).multiplyScalar(600);
-        sun.color.set(PARAMS.light.dirColor);
-        sun.intensity = PARAMS.light.dirIntensity;
+        sun.color.set(L.dirColor);
+        sun.intensity = L.dirIntensity;
         if (sun.shadow) {
           sun.shadow.bias = PARAMS.shadowBias;
           sun.shadow.normalBias = PARAMS.shadowNormalBias;
         }
-        hemi.color.set(PARAMS.light.hemiSkyColor);
-        hemi.groundColor.set(PARAMS.light.hemiGroundColor);
-        hemi.intensity = PARAMS.light.hemiIntensity;
-        if (PARAMS.sky.mode === "physical") {
-          sky.turbidity.value = PARAMS.sky.turbidity;
-          sky.rayleigh.value = PARAMS.sky.rayleigh;
-          sky.mieCoefficient.value = PARAMS.sky.mie;
-          sky.mieDirectionalG.value = PARAMS.sky.mieG;
-          sky.cloudCoverage.value = PARAMS.sky.cloudCoverage;
-          sky.cloudDensity.value = PARAMS.sky.cloudDensity;
-          sky.cloudElevation.value = PARAMS.sky.cloudElevation;
+        hemi.color.set(L.hemiSkyColor);
+        hemi.groundColor.set(L.hemiGroundColor);
+        hemi.intensity = L.hemiIntensity;
+        if (S.mode === "physical") {
+          sky.turbidity.value = S.turbidity;
+          sky.rayleigh.value = S.rayleigh;
+          sky.mieCoefficient.value = S.mie;
+          sky.mieDirectionalG.value = S.mieG;
+          sky.cloudCoverage.value = S.cloudCoverage;
+          sky.cloudDensity.value = S.cloudDensity;
+          sky.cloudElevation.value = S.cloudElevation;
           sky.sunPosition.value.copy(sunDir);
         }
-        scene.environmentIntensity = PARAMS.light.envIntensity;
-        renderer.toneMappingExposure = PARAMS.light.exposure;
+        scene.environmentIntensity = L.envIntensity;
+        renderer.toneMappingExposure = L.exposure;
       }
 
       const worldHalf = CONFIG.worldSize * 0.5;
@@ -5200,8 +5202,9 @@
         return `${cx},${cz}`;
       }
 
+      const _tmpCenter = new THREE.Vector3();
       function chunkCenterWorld(cx, cz) {
-        return new THREE.Vector3(
+        return _tmpCenter.set(
           -worldHalf + cx * CONFIG.chunkSize + CONFIG.chunkSize * 0.5,
           0,
           -worldHalf + cz * CONFIG.chunkSize + CONFIG.chunkSize * 0.5,
@@ -6556,6 +6559,8 @@
        * continuous across the LOD seam (otherwise you get a visible "ring" at LOD
        * transitions even though geometry has no crack).
        */
+      const _stitchN0 = new THREE.Vector3();
+      const _stitchN1 = new THREE.Vector3();
       function stitchMeshEdgesToCoarserNeighbors(geom, cx, cz, mySeg) {
         const maxC = getMaxChunkIndex();
         const half = CONFIG.chunkSize * 0.5;
@@ -6564,11 +6569,12 @@
         const normal = geom.attributes.normal;
         const minXw = chunkMinWorldX(cx);
         const minZw = chunkMinWorldZ(cz);
-        const cwx = chunkCenterWorld(cx, cz).x;
-        const cwz = chunkCenterWorld(cx, cz).z;
+        const _cc = chunkCenterWorld(cx, cz);
+        const cwx = _cc.x;
+        const cwz = _cc.z;
 
-        const _n0 = new THREE.Vector3();
-        const _n1 = new THREE.Vector3();
+
+
 
         const neighborSeg = (ncx, ncz) =>
           activeChunks.get(chunkKey(ncx, ncz))?.segments;
@@ -6614,11 +6620,11 @@
           // Normal: lerp the FD normals of the two coarse endpoints. This matches the
           // normal field along the coarse neighbor's edge triangle, so the seam
           // becomes lighting-continuous.
-          heightfieldNormalAt(wx0, wz0, _n0);
-          heightfieldNormalAt(wx1, wz1, _n1);
-          const nx = _n0.x + alpha * (_n1.x - _n0.x);
-          const ny = _n0.y + alpha * (_n1.y - _n0.y);
-          const nz = _n0.z + alpha * (_n1.z - _n0.z);
+          heightfieldNormalAt(wx0, wz0, _stitchN0);
+          heightfieldNormalAt(wx1, wz1, _stitchN1);
+          const nx = _stitchN0.x + alpha * (_stitchN1.x - _stitchN0.x);
+          const ny = _stitchN0.y + alpha * (_stitchN1.y - _stitchN0.y);
+          const nz = _stitchN0.z + alpha * (_stitchN1.z - _stitchN0.z);
           const len = Math.hypot(nx, ny, nz) || 1;
           normal.setXYZ(i, nx / len, ny / len, nz / len);
         }
@@ -6857,38 +6863,43 @@
        * Signature of LOD neighborhood — when unchanged, skip expensive dispose+rebuild seam pass.
        * (Previously we rebuilt every ~120ms on every abutsCoarser chunk → huge idle CPU/GPU cost.)
        */
+      const _stitchDirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
       function computeLodStitchSignature(key, chunk) {
         const { cx, cz } = parseChunkKey(key);
         const maxIdx = getMaxChunkIndex();
-        const nbSeg = [];
+        // Pack into a single integer: seg(8) | abuts(1) | 4x neighbor seg slots (8 each)
+        // Segment values: 16,32,64 or -1(none) or 0(OOB) — all fit in 8 bits (signed +128 offset)
+        let sig = (chunk.segments & 0xff) << 25;
         let abutsCoarser = false;
-        for (const [dx, dz] of [
-          [1, 0],
-          [-1, 0],
-          [0, 1],
-          [0, -1],
-        ]) {
-          const ncx = cx + dx;
-          const ncz = cz + dz;
-          if (ncx < 0 || ncz < 0 || ncx > maxIdx || ncz > maxIdx) {
-            nbSeg.push("x");
-            continue;
+        for (let d = 0; d < 4; d++) {
+          const ncx = cx + _stitchDirs[d][0];
+          const ncz = cz + _stitchDirs[d][1];
+          let s = 0; // OOB sentinel
+          if (ncx >= 0 && ncz >= 0 && ncx <= maxIdx && ncz <= maxIdx) {
+            const nb = activeChunks.get(chunkKey(ncx, ncz));
+            s = nb ? nb.segments : -1;
+            if (nb && nb.segments < chunk.segments) abutsCoarser = true;
           }
-          const nb = activeChunks.get(chunkKey(ncx, ncz));
-          const s = nb ? nb.segments : -1;
-          nbSeg.push(String(s));
-          if (nb && nb.segments < chunk.segments) abutsCoarser = true;
+          sig |= ((s + 128) & 0xff) << (d * 6);
         }
-        return `${chunk.segments}|${abutsCoarser ? 1 : 0}|${nbSeg.join(",")}`;
+        if (abutsCoarser) sig |= 1 << 24;
+        return sig;
       }
 
+      const _neededChunks = new Set();
       function updateChunkSet() {
         const anchor = playMode ? playerPos : camera.position;
         const camChunkX = Math.floor((anchor.x + worldHalf) / CONFIG.chunkSize);
         const camChunkZ = Math.floor((anchor.z + worldHalf) / CONFIG.chunkSize);
 
-        const needed = new Set();
+        const needed = _neededChunks;
+        needed.clear();
         const maxChunk = Math.floor(CONFIG.worldSize / CONFIG.chunkSize);
+
+        // Limit chunk creates per update to spread heavy work across frames
+        const MAX_CHUNK_CREATES_PER_UPDATE = 2;
+        let chunksCreatedThisUpdate = 0;
+        const _deferredChunkCreates = [];
 
         const visitChunk = (cx, cz) => {
           const key = chunkKey(cx, cz);
@@ -6902,22 +6913,31 @@
 
           const existing = activeChunks.get(key);
           if (!existing) {
-            activeChunks.set(key, createChunk(cx, cz, lod));
-            dirtyChunks.delete(key);
+            if (chunksCreatedThisUpdate < MAX_CHUNK_CREATES_PER_UPDATE) {
+              activeChunks.set(key, createChunk(cx, cz, lod));
+              dirtyChunks.delete(key);
+              chunksCreatedThisUpdate++;
+            }
             return;
           }
 
           if (existing.segments !== lod.segments) {
-            removeChunk(existing);
-            activeChunks.set(key, createChunk(cx, cz, lod));
-            dirtyChunks.delete(key);
+            if (chunksCreatedThisUpdate < MAX_CHUNK_CREATES_PER_UPDATE) {
+              removeChunk(existing);
+              activeChunks.set(key, createChunk(cx, cz, lod));
+              dirtyChunks.delete(key);
+              chunksCreatedThisUpdate++;
+            }
             return;
           }
 
           if (dirtyChunks.has(key)) {
-            removeChunk(existing);
-            activeChunks.set(key, createChunk(cx, cz, lod));
-            dirtyChunks.delete(key);
+            if (chunksCreatedThisUpdate < MAX_CHUNK_CREATES_PER_UPDATE) {
+              removeChunk(existing);
+              activeChunks.set(key, createChunk(cx, cz, lod));
+              dirtyChunks.delete(key);
+              chunksCreatedThisUpdate++;
+            }
           }
         };
 
@@ -6952,18 +6972,15 @@
         }
 
         const maxIdx = getMaxChunkIndex();
+        const MAX_STITCH_REBUILDS = 2;
+        let stitchRebuilds = 0;
         for (const [key, chunk] of activeChunks) {
           if (!needed.has(key)) continue;
           const { cx, cz } = parseChunkKey(key);
           let abutsCoarser = false;
-          for (const [dx, dz] of [
-            [1, 0],
-            [-1, 0],
-            [0, 1],
-            [0, -1],
-          ]) {
-            const ncx = cx + dx;
-            const ncz = cz + dz;
+          for (let d = 0; d < 4; d++) {
+            const ncx = cx + _stitchDirs[d][0];
+            const ncz = cz + _stitchDirs[d][1];
             if (ncx < 0 || ncz < 0 || ncx > maxIdx || ncz > maxIdx) continue;
             const nb = activeChunks.get(chunkKey(ncx, ncz));
             if (nb && nb.segments < chunk.segments) {
@@ -6977,6 +6994,7 @@
 
           const needGeomRebuild = abutsCoarser || chunk.stitchSig !== undefined;
           if (needGeomRebuild) {
+            if (stitchRebuilds >= MAX_STITCH_REBUILDS) continue;
             const oldG = chunk.mesh.geometry;
             oldG.dispose();
             chunk.mesh.geometry = getGeometry(chunk.segments).clone();
@@ -6990,6 +7008,7 @@
             chunk.triCount = g.index
               ? g.index.count / 3
               : g.attributes.position.count / 3;
+            stitchRebuilds++;
           }
           chunk.stitchSig = sig;
         }
@@ -9641,6 +9660,7 @@
           e.target.value = "";
         });
 
+      let _lastHudUpdateMs = 0;
       function updateHud(dtMs) {
         frameState.frames++;
         const now = performance.now();
@@ -9650,6 +9670,10 @@
           frameState.frames = 0;
           frameState.fpsWindowStartMs = now;
         }
+
+        // Throttle the expensive DOM + string work to ~4 Hz
+        if (now - _lastHudUpdateMs < 250) return;
+        _lastHudUpdateMs = now;
 
         let tris = 0;
         let lodL0 = 0;
@@ -10133,8 +10157,37 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           lakeReflectRT.setSize(w, h);
       }
 
+      const _reflFrustum = new THREE.Frustum();
+      const _reflProjMat = new THREE.Matrix4();
+      const _reflSphere = new THREE.Sphere();
+      let _reflFrameCounter = 0;
+      const _REFL_EVERY_N_FRAMES = 2;
+
       function renderLakeReflection(lakeBodies) {
         if (lakeBodies.length === 0) return;
+
+        // Frustum cull — skip if no lake mesh is visible to the camera
+        _reflProjMat.multiplyMatrices(
+          camera.projectionMatrix,
+          camera.matrixWorldInverse,
+        );
+        _reflFrustum.setFromProjectionMatrix(_reflProjMat);
+        let anyVisible = false;
+        for (const m of lakeBodies) {
+          if (!m.visible) continue;
+          if (!m.geometry.boundingSphere) m.geometry.computeBoundingSphere();
+          _reflSphere.copy(m.geometry.boundingSphere).applyMatrix4(m.matrixWorld);
+          if (_reflFrustum.intersectsSphere(_reflSphere)) {
+            anyVisible = true;
+            break;
+          }
+        }
+        if (!anyVisible) return;
+
+        // Throttle — render reflection every N frames instead of every frame
+        _reflFrameCounter++;
+        if (_reflFrameCounter % _REFL_EVERY_N_FRAMES !== 0) return;
+
         const waterY = lakeBodies[0].position.y;
         updateLakeReflectCamera(waterY);
         _reflVPHelper.multiplyMatrices(
@@ -14983,6 +15036,15 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
 
       updateChunkSet();
 
+      // Periodic Tweakpane refresh for live tree LOD stats — outside the render loop
+      setInterval(() => {
+        if (!editorPane) return;
+        if (!(lodFolderRef || ptreeFolderRef)) return;
+        const hasChunks = LOD_SLOTS.some((s) => s.chunks.size > 0) ||
+          PTREE_SLOTS.some((s) => s.chunks.size > 0);
+        if (hasChunks) editorPane.refresh();
+      }, TREE_LOD_STATS_PANE_MS);
+
       let lastTime = performance.now();
       let appTimeSec = 0;
       renderer.setAnimationLoop(() => {
@@ -15149,12 +15211,12 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           );
         }
 
-        if (now - frameState.lastChunkUpdateMs > 120) {
+        if (now - frameState.lastChunkUpdateMs > 60) {
           updateChunkSet();
           frameState.lastChunkUpdateMs = now;
         }
 
-        if (dirtyChunks.size > 0) rebuildDirtyActiveChunks(4);
+        if (dirtyChunks.size > 0) rebuildDirtyActiveChunks(2);
 
         if (heightTexDirty && now - lastHeightTexSyncMs > 100) {
           rebuildGlobalHeightTexture();
@@ -15187,26 +15249,6 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
 
         updateLODInstances();
         updatePTreeInstances();
-        {
-          const now = performance.now();
-          const totalLodChunks = LOD_SLOTS.reduce(
-            (s, sl) => s + sl.chunks.size,
-            0,
-          );
-          const totalPtreeChunks = PTREE_SLOTS.reduce(
-            (s, sl) => s + sl.chunks.size,
-            0,
-          );
-          if (
-            editorPane &&
-            now - _treeLodStatsPaneRefreshMs > TREE_LOD_STATS_PANE_MS &&
-            (totalLodChunks > 0 || totalPtreeChunks > 0) &&
-            (lodFolderRef || ptreeFolderRef)
-          ) {
-            _treeLodStatsPaneRefreshMs = now;
-            editorPane.refresh();
-          }
-        }
         if (_cachedLakeBodies.length > 0)
           renderLakeReflection(_cachedLakeBodies);
         renderer.render(scene, camera);
