@@ -2614,6 +2614,25 @@
       }
       buildSharedTslGroundMaterial();
 
+      // ── Shared image-texture ground material (tiles one slot's textures over entire terrain) ──
+      let sharedImgTex = null; // { material, splatTexNode, albedoTexNode, ormTexNode, uUVScale }
+
+      function buildSharedImgTexMaterial() {
+        if (sharedImgTex) sharedImgTex.material.dispose();
+        sharedImgTex = createSharedImgTexMaterial(CONFIG.chunkSize, CONFIG.worldSize);
+        syncImgTexSlot();
+      }
+
+      function syncImgTexSlot() {
+        if (!sharedImgTex) return;
+        const slot = chunkImageSlots[PARAMS.imgTexSlotIndex] || chunkImageSlots[0];
+        sharedImgTex.albedoTexNode.value = slot.albedoTex;
+        sharedImgTex.ormTexNode.value = slot.ormTex;
+        sharedImgTex.uUVScale.value = slot.uvScale;
+      }
+
+      buildSharedImgTexMaterial();
+
       function createSplatMaterialsForTex(tex, imgWeightTex, meadowTex) {
         syncCliffUniformsFromParams();
         const deps = buildCliffDeps();
@@ -3336,6 +3355,8 @@
           return ensureChunkSplat(cx, cz).tileMaterial;
         if (PARAMS.terrainSurface === "tslGround")
           return sharedTslGround.material;
+        if (PARAMS.terrainSurface === "imgTex")
+          return sharedImgTex.material;
         return ensureChunkSplat(cx, cz).material;
       }
 
@@ -4691,6 +4712,7 @@
 
       function rebuildAllChunkSplatMaterials() {
         buildSharedTslGroundMaterial();
+        buildSharedImgTexMaterial();
         for (const splat of chunkSplatMap.values()) {
           splat.material.dispose();
           splat.tileMaterial.dispose();
@@ -6875,6 +6897,7 @@
         mesh.userData._tslImg = splat.imgTex;
         mesh.userData._tslMeadow = splat.meadowTex;
         setupTslGroundMeshSwap(mesh, sharedTslGround);
+        setupImgTexMeshSwap(mesh, sharedImgTex);
         scene.add(mesh);
 
         return {
@@ -8798,7 +8821,7 @@
           refreshActiveChunkMaterials();
         }
         if (event.code === "Backquote") {
-          const surfOrder = ["tile", "tslGround", "splat", "greenGround"];
+          const surfOrder = ["tile", "tslGround", "splat", "imgTex", "greenGround"];
           const si = surfOrder.indexOf(PARAMS.terrainSurface);
           PARAMS.terrainSurface = surfOrder[(si + 1) % surfOrder.length];
           refreshActiveChunkMaterials();
@@ -10817,10 +10840,25 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
               "Tile grid": "tile",
               "Painter TSL ground": "tslGround",
               "Splat paint": "splat",
+              "Image texture": "imgTex",
               "Green seam-test": "greenGround",
             },
           })
           .on("change", () => refreshActiveChunkMaterials());
+
+        const imgTexSlotOptions = {};
+        chunkImageSlots.forEach((slot, idx) => {
+          imgTexSlotOptions[`${idx + 1}. ${slot.name}`] = idx;
+        });
+        pane
+          .addBinding(PARAMS, "imgTexSlotIndex", {
+            label: "Image tex slot",
+            options: imgTexSlotOptions,
+          })
+          .on("change", () => {
+            syncImgTexSlot();
+            if (PARAMS.terrainSurface === "imgTex") refreshActiveChunkMaterials();
+          });
 
         pane
           .addBinding(barrierPARAMS, "showOverlay", {
