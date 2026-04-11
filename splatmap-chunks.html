@@ -8328,13 +8328,6 @@
         }
 
         const p = camera.position;
-        const chName = ["R", "G", "B"][editState.paintChannel];
-        const paintLayerLabel =
-          editState.paintLayer === "img"
-            ? "img"
-            : editState.paintLayer === "meadow"
-              ? "meadow"
-              : "splat";
         const totalLodChunks = LOD_SLOTS.reduce((s, sl) => s + sl.chunks.size, 0);
         const treeLodFrustum =
           totalLodChunks > 0 ? `  TreeLOD frustum: ${lodParams.chunksVisible}/${totalLodChunks} chunks` : "";
@@ -8365,7 +8358,9 @@
         const foliageHud =
           editState.mode === "foliage"
             ? `foliage: slot ${activeFoliageSlot + 1} ${FOLIAGE_SLOTS[activeFoliageSlot]?.name ?? ""}  brush r=${sculptBrushWorldRadius().toFixed(1)}${foliageFrustum}`
-            : `foliage: paint with N${foliageFrustum}`;
+            : foliageTotal > 0
+              ? `foliage${foliageFrustum}`
+              : "";
         let objVis = 0;
         let objTotal = 0;
         OBJECT_SLOTS.forEach((s) => {
@@ -8379,27 +8374,21 @@
         const objectsHud =
           editState.mode === "objects"
             ? `objects: slot ${activeObjectSlot + 1} ${OBJECT_SLOTS[activeObjectSlot]?.name ?? ""}  brush r=${sculptBrushWorldRadius().toFixed(1)}${objectsFrustum}`
-            : `objects: paint with E${objectsFrustum}`;
+            : objTotal > 0
+              ? `objects${objectsFrustum}`
+              : "";
         hudEl.textContent =
-`splatmap-chunks.html (splat + sculpt)
-fps: ${frameState.fps.toFixed(1)}   frame: ${dtMs.toFixed(2)} ms
+`fps: ${frameState.fps.toFixed(1)}   frame: ${dtMs.toFixed(2)} ms
 draw calls: ${renderer.info.render.calls}
 terrain tris: ${Math.round(tris).toLocaleString()}
 active chunks: ${activeChunks.size}  (dist LOD: ${PARAMS.terrainLodEnabled ? "ON" : "OFF"})  (chunk cull: ${PARAMS.terrainChunkCulling ? "ON" : "OFF — full world"})  L0=${lodL0} L1=${lodL1} L2=${lodL2}
-mode: ${playMode ? "PLAY (WASD · Esc/F exit)" : editState.mode}  paint ${paintLayerLabel} ch=${chName}  terrain: ${TERRAIN_SURFACE_LABEL[PARAMS.terrainSurface] ?? PARAMS.terrainSurface}
 ${treeLodHud}
 ${procTreeHud}
 ${foliageHud}
 ${objectsHud}
-chunk debug: ${debugChunkView ? "ON" : "OFF"}
-chunks saved: ${chunkDataMap.size} height / ${chunkSplatMap.size} splat
 dirty chunks: ${dirtyChunks.size}
 camera: ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}
-world size: ${CONFIG.worldSize} | chunk size: ${CONFIG.chunkSize}
-bounds: ${worldBounds.min.x}..${worldBounds.max.x}
-gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}  (no GPU grass until density)
-brush: sculpt ${PARAMS.sculptTool} r=${sculptBrushWorldRadius().toFixed(1)} str=${sculptBrushStrength().toFixed(2)}${editState.rampPointA ? " · ramp A set (R or button to clear)" : ""} | paint r=${CONFIG.paint.radius} (${editState.hasBrushHit ? "hit" : "no-hit"})
-undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ctrl+Y · Ctrl+Shift+Z)  export: Ctrl+E`;
+gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}`;
       }
 
       window.addEventListener("resize", () => {
