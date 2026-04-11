@@ -6,6 +6,7 @@
  *   createBladeGeometry(height, baseWidth, ySegments, taperStart)
  *   createFieldInstancedGeometry(baseBlade, patchSize, numGrass, bladeHeight, includeCross)
  *   createGrassMaterial(ctx)
+ *   createGrassMaterialMega(ctx) — distant ring: cheap sway, no clump/spec/SSS
  *   setupGrassPatches(scene, camera, grassGroup, geosAndMats, options)
  */
 import * as THREE from "three";
@@ -876,8 +877,189 @@ export function createGrassMaterial(ctx) {
   return material;
 }
 
-// ─── 3-Tier LOD Streaming ───
+/**
+ * Lightweight grass material for the MEGA LOD ring — reuses the same ctx uniforms
+ * as createGrassMaterial so editor updates apply to both.
+ */
+export function createGrassMaterialMega(ctx) {
+  const {
+    heightTex,
+    grassDensityTex,
+    cliffHeightTex: _cliffHTex,
+    cliffDensityTex: _cliffDTex,
+    terrainRes,
+    uTerrainSize,
+    uSunDir,
+    uBladeHeight,
+    uGrassDensity,
+    uWindSpeed,
+    uWindStrength,
+    uBendFocus,
+    uCrossed,
+    uBladeCol,
+    uTipCol,
+    uSkyBlend,
+    uAoBase,
+    uAoPower,
+    uLodMaxDist,
+    uLodFadeStart,
+    uLodDebug,
+  } = ctx;
+
+  const cliffHTex = _cliffHTex ?? _getDummyCliffHTex();
+  const cliffDTex = _cliffDTex ?? _getDummyCliffDTex();
+
+  const vDistFade = varying(float(1), "v_gm_mg_df");
+  const vCustomNormal = varying(vec3(0, 1, 0), "v_gm_mg_cn");
+  const vRandomShade = varying(float(1), "v_gm_mg_rs");
+
+  const material = new THREE.MeshStandardNodeMaterial({
+    side: THREE.FrontSide,
+    roughness: 0.92,
+    metalness: 0,
+  });
+  material.envMapIntensity = 0;
+  material.polygonOffset = true;
+  material.polygonOffsetFactor = 1;
+  material.polygonOffsetUnits = 1;
+
+  const vUv = uv();
+
+  const rotY = (ang, v) => {
+    const c = cos(ang),
+      s = sin(ang);
+    return vec3(
+      v.x.mul(c).add(v.z.mul(s)),
+      v.y,
+      negate(v.x).mul(s).add(v.z.mul(c)),
+    );
+  };
+
+  material.positionNode = Fn(() => {
+    const off = attribute("offset", "vec3");
+    const aPhase = attribute("aPhase", "float");
+    const aIsCross = attribute("aIsCross", "float");
+    const tBase = time.mul(uWindSpeed);
+    const tBlade = tBase.add(aPhase);
+
+    const bladeWorld = modelWorldMatrix.mul(
+      vec4(off.x, float(0), off.z, float(1)),
+    ).xyz;
+    const bladeXZ = vec2(bladeWorld.x, bladeWorld.z);
+
+    const terrainUV = add(div(bladeXZ, uTerrainSize), vec2(0.5));
+    const terrainH = texture(heightTex, terrainUV).x;
+
+    const cliffH = texture(cliffHTex, terrainUV).x;
+    const cliffD = texture(cliffDTex, terrainUV).x;
+    const cliffValid = smoothstep(float(-9990), float(-9000), cliffH);
+    const cliffPainted = smoothstep(float(0.01), float(0.03), cliffD);
+    const useCliff = cliffValid.mul(cliffPainted);
+    const finalH = mix(terrainH, cliffH, useCliff);
+
+    const texelSize = float(1).div(float(terrainRes));
+    const uvL = terrainUV.add(vec2(negate(texelSize), float(0)));
+    const uvR = terrainUV.add(vec2(texelSize, float(0)));
+    const uvD = terrainUV.add(vec2(float(0), negate(texelSize)));
+    const uvU = terrainUV.add(vec2(float(0), texelSize));
+    const hL = texture(heightTex, uvL).x;
+    const hR = texture(heightTex, uvR).x;
+    const hD = texture(heightTex, uvD).x;
+    const hU = texture(heightTex, uvU).x;
+    const worldStep = uTerrainSize.div(float(terrainRes));
+    const tNorm = normalize(
+      vec3(hL.sub(hR), worldStep.mul(float(2)), hD.sub(hU)),
+    );
+    const chL = texture(cliffHTex, uvL).x;
+    const chR = texture(cliffHTex, uvR).x;
+    const chD = texture(cliffHTex, uvD).x;
+    const chU = texture(cliffHTex, uvU).x;
+    const chLs = mix(cliffH, chL, smoothstep(float(-9990), float(-9000), chL));
+    const chRs = mix(cliffH, chR, smoothstep(float(-9990), float(-9000), chR));
+    const chDs = mix(cliffH, chD, smoothstep(float(-9990), float(-9000), chD));
+    const chUs = mix(cliffH, chU, smoothstep(float(-9990), float(-9000), chU));
+    const cNorm = normalize(
+      vec3(chLs.sub(chRs), worldStep.mul(float(2)), chDs.sub(chUs)),
+    );
+    const terrainNormal = normalize(mix(tNorm, cNorm, useCliff));
+
+    const camXZ = vec2(cameraPosition.x, cameraPosition.z);
+    const bladeCamDist = length(bladeXZ.sub(camXZ));
+    const fadeBegin = uLodMaxDist.mul(uLodFadeStart);
+    const distFadeLinear = smoothstep(uLodMaxDist, fadeBegin, bladeCamDist);
+    const distFade = distFadeLinear.mul(distFadeLinear);
+    vDistFade.assign(distFade);
+
+    const terrainDensity = texture(grassDensityTex, terrainUV).x;
+    const paintedDensity = max(terrainDensity, cliffD.mul(useCliff));
+    const hasDensity = smoothstep(float(0.0), float(0.005), paintedDensity);
+    const densityHv = hash22(bladeXZ.add(vec2(853.1, 137.9)));
+    const densityHash = densityHv.x;
+    const densityCull = smoothstep(
+      uGrassDensity.mul(paintedDensity),
+      uGrassDensity.mul(paintedDensity).add(float(0.01)),
+      densityHash,
+    )
+      .oneMinus()
+      .mul(hasDensity);
+
+    const hv = hash42(bladeXZ);
+    const h0 = hv.x;
+    const h1 = hv.y;
+    const h2 = hv.z;
+    const randomYaw = h0.mul(PI.mul(2));
+    const bladeH = uBladeHeight.mul(mix(float(0.82), float(1.08), h2));
+    const crossedYaw = randomYaw.add(aIsCross.mul(PI.mul(0.5)));
+    const crossedBladeH = bladeH.mul(mix(float(1.0), uCrossed, aIsCross));
+    const finalBladeH = crossedBladeH.mul(distFade).mul(densityCull);
+
+    vRandomShade.assign(mix(float(0.78), float(1.0), h1));
+
+    const sway = sin(
+      tBlade.add(bladeWorld.x.mul(0.06)).add(bladeWorld.z.mul(0.05)),
+    )
+      .mul(float(0.2))
+      .mul(clamp(uWindStrength, float(0), float(2)));
+    const curveWeight = vUv.y.pow(uBendFocus);
+    const angle = sway.mul(curveWeight);
+    const L = vUv.y.mul(finalBladeH);
+    const arcX = sin(angle).mul(L);
+    const arcY = cos(angle).mul(L);
+
+    const pLocal = vec3(
+      positionLocal.x.mul(densityCull).add(arcX),
+      arcY,
+      positionLocal.z.mul(densityCull),
+    );
+    const pYaw = rotY(crossedYaw, pLocal);
+
+    const nUp = vec3(float(0), float(1), float(0));
+    const nBlend = normalize(mix(nUp, terrainNormal, uSkyBlend));
+    normalLocal.assign(nBlend);
+    vCustomNormal.assign(nBlend);
+
+    return vec3(pYaw.x.add(off.x), pYaw.y.add(finalH), pYaw.z.add(off.z));
+  })();
+
+  material.colorNode = Fn(() => {
+    const aoFar = uAoBase.mul(float(0.55));
+    const ao = mix(aoFar, float(1.0), pow(vUv.y, uAoPower));
+    const baseCol = mix(uBladeCol, uTipCol, vUv.y);
+    const finalCol = baseCol.mul(
+      vec3(vRandomShade.mul(ao).mul(vDistFade)),
+    );
+    const dbMega = vec3(0.85, 0.35, 1.0);
+    return mix(finalCol, dbMega, uLodDebug);
+  })();
+
+  material.emissiveNode = Fn(() => vec3(float(0), float(0), float(0)))();
+
+  return material;
+}
+
+// ─── 4-Tier LOD Streaming (HIGH / MID / FAR / MEGA) ───
 // Camera-relative grid, frustum culling, pooling, hysteresis.
+// MEGA ring: maxDistance < megaMaxDistance, optional geoMega on geosAndMats.
 // Returns { update(charPos) } — call every frame.
 export function setupGrassPatches(
   scene,
@@ -890,23 +1072,28 @@ export function setupGrassPatches(
   let geoHigh = geosAndMats.geoHigh;
   let geoMid = geosAndMats.geoMid;
   let geoFar = geosAndMats.geoFar;
+  let geoMega = geosAndMats.geoMega;
   const material = geosAndMats.material;
+  const materialMega = geosAndMats.materialMega ?? material;
   const {
     patchSize = 10,
     lodMidDistance = 40,
     lodFarDistance = 80,
     maxDistance = 200,
+    megaMaxDistance = maxDistance,
     lodHysteresis = 2,
     lodEnabled = true,
     grassReceiveShadow = true,
     grassCastShadow = false,
     patchSizeMid = patchSize,
     patchSizeFar = patchSize,
+    patchSizeMega = 60,
   } = options;
 
   const poolHigh = { meshes: [], idx: 0 };
   const poolMid = { meshes: [], idx: 0 };
   const poolFar = { meshes: [], idx: 0 };
+  const poolMega = { meshes: [], idx: 0 };
 
   // Reusable objects — zero allocation per frame
   const _cellPos = new THREE.Vector3();
@@ -916,9 +1103,14 @@ export function setupGrassPatches(
   const _frustum = new THREE.Frustum();
   const _projScreenMatrix = new THREE.Matrix4();
 
-  function getMesh(pool, geo) {
-    if (pool.idx < pool.meshes.length) return pool.meshes[pool.idx++];
-    const m = new THREE.Mesh(geo, material);
+  function getMesh(pool, geo, matOverride) {
+    const mat = matOverride ?? material;
+    if (pool.idx < pool.meshes.length) {
+      const m = pool.meshes[pool.idx++];
+      m.material = mat;
+      return m;
+    }
+    const m = new THREE.Mesh(geo, mat);
     m.frustumCulled = false;
     m.castShadow = false;
     m.receiveShadow = true;
@@ -931,7 +1123,8 @@ export function setupGrassPatches(
   let lastPatchCount = 0;
   let lastHighCount = 0,
     lastMidCount = 0,
-    lastFarCount = 0;
+    lastFarCount = 0,
+    lastMegaCount = 0;
 
   function update(opts = {}) {
     const {
@@ -939,11 +1132,13 @@ export function setupGrassPatches(
       lodMidDistance: midDist = lodMidDistance,
       lodFarDistance: farDist = lodFarDistance,
       maxDistance: maxDist = maxDistance,
+      megaMaxDistance: megaMax = megaMaxDistance,
       lodEnabled: useLod = lodEnabled,
       grassReceiveShadow: recvShadow = grassReceiveShadow,
       grassCastShadow: castShadow = grassCastShadow,
       patchSizeMid: psMid = patchSizeMid,
       patchSizeFar: psFar = patchSizeFar,
+      patchSizeMega: psMega = patchSizeMega,
     } = opts;
 
     // Hide all, reset pools
@@ -951,6 +1146,7 @@ export function setupGrassPatches(
     poolHigh.idx = 0;
     poolMid.idx = 0;
     poolFar.idx = 0;
+    poolMega.idx = 0;
 
     // Frustum
     _projScreenMatrix.multiplyMatrices(
@@ -964,7 +1160,8 @@ export function setupGrassPatches(
     let patchCount = 0;
     let highCount = 0,
       midCount = 0,
-      farCount = 0;
+      farCount = 0,
+      megaCount = 0;
 
     // ── HIGH tier grid (spacing = ps) ──
     // Track HIGH coverage so MID/FAR can skip fully-covered cells
@@ -1088,12 +1285,56 @@ export function setupGrassPatches(
       }
     }
 
+    // ── MEGA tier grid (spacing = psMega), beyond FAR until megaMax ──
+    if (useLod && geoMega && megaMax > maxDist) {
+      const snapX = Math.floor(camera.position.x / psMega) * psMega;
+      const snapZ = Math.floor(camera.position.z / psMega) * psMega;
+      const cells = Math.ceil((megaMax + psMega) / psMega) + 1;
+      _aabbSize.set(psMega, 1000, psMega);
+      const halfMega = psMega * 0.5;
+
+      for (let r = -cells; r <= cells; r++) {
+        for (let c = -cells; c <= cells; c++) {
+          const cellX = snapX + c * psMega;
+          const cellZ = snapZ + r * psMega;
+          _cellPos.set(cellX, 0, cellZ);
+          _aabb.setFromCenterAndSize(_cellPos, _aabbSize);
+          const dist = _aabb.distanceToPoint(_camPosXZ);
+          if (dist > megaMax) continue;
+          const farthestCornerDist = Math.sqrt(
+            Math.pow(
+              Math.max(Math.abs(cellX - camera.position.x) + halfMega, 0),
+              2,
+            ) +
+              Math.pow(
+                Math.max(Math.abs(cellZ - camera.position.z) + halfMega, 0),
+                2,
+              ),
+          );
+          if (farthestCornerDist < maxDist - lodHysteresis) continue;
+          if (!_frustum.intersectsBox(_aabb)) continue;
+
+          const mesh = getMesh(poolMega, geoMega, materialMega);
+          mesh.geometry = geoMega;
+          mesh.material = materialMega;
+          mesh.visible = true;
+          mesh.position.set(cellX, 0, cellZ);
+          mesh.scale.set(1, 1, 1);
+          mesh.receiveShadow = false;
+          mesh.castShadow = castShadow;
+          megaCount++;
+          patchCount++;
+        }
+      }
+    }
+
     lastPatchCount = patchCount;
     lastHighCount = highCount;
     lastMidCount = midCount;
     lastFarCount = farCount;
+    lastMegaCount = megaCount;
 
-    return { patchCount, highCount, midCount, farCount };
+    return { patchCount, highCount, midCount, farCount, megaCount };
   }
 
   // Allow updating geometries after rebuild
@@ -1118,6 +1359,13 @@ export function setupGrassPatches(
         m.geometry = newGeos.geoFar;
       });
       geosAndMats.geoFar = newGeos.geoFar;
+    }
+    if (newGeos.geoMega) {
+      geoMega = newGeos.geoMega;
+      poolMega.meshes.forEach((m) => {
+        m.geometry = newGeos.geoMega;
+      });
+      geosAndMats.geoMega = newGeos.geoMega;
     }
   }
 

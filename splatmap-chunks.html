@@ -310,6 +310,7 @@
         createBladeGeometry as geminiBladeGeo,
         createFieldInstancedGeometry as geminiFieldGeo,
         createGrassMaterial as geminiGrassMat,
+        createGrassMaterialMega as geminiGrassMatMega,
         setupGrassPatches as geminiSetupPatches,
       } from "./grass-gemini3.js";
       import { createFleurSystem, FLEUR_PRESETS } from "./fleur-painter.js";
@@ -2775,9 +2776,11 @@
         patchSize: 10,
         patchSizeMid: 18,
         patchSizeFar: 28,
+        patchSizeMega: 60,
         lodMidDistance: 40,
         lodFarDistance: 80,
         maxDistance: 220,
+        megaMaxDistance: 400,
         lodEnabled: true,
         grassReceiveShadow: true,
       };
@@ -10672,6 +10675,10 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         lodFarPatchSize: 28,
         lodFarSegments: 1,
         lodFarGrassCount: 1300,
+        lodMegaMaxDistance: 400,
+        lodMegaPatchSize: 60,
+        lodMegaSegments: 1,
+        lodMegaGrassCount: 400,
         lodDebug: false,
         interactionRadius: 1.5,
         interactionStrength: 0.7,
@@ -10743,7 +10750,9 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         uLodEnabled: uniform(_gp.lodEnabled ? 1 : 0),
         uLodMidDist: uniform(_gp.lodMidDistance),
         uLodFarDist: uniform(_gp.lodFarDistance),
-        uLodMaxDist: uniform(_gp.lodMaxDistance),
+        uLodMaxDist: uniform(
+          Math.max(_gp.lodMaxDistance, _gp.lodMegaMaxDistance),
+        ),
         uLodFadeStart: uniform(_gp.lodFadeStart),
         uLodDebug: uniform(_gp.lodDebug ? 1 : 0),
         uInteractionEnabled: uniform(1),
@@ -10761,6 +10770,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
       };
 
       const _geminiMat = geminiGrassMat(_geminiCtx);
+      const _geminiMatMega = geminiGrassMatMega(_geminiCtx);
 
       function _buildGeminiGeos() {
         const highBase = geminiBladeGeo(
@@ -10808,7 +10818,22 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         );
         farBase.dispose();
 
-        return { geoHigh, geoMid, geoFar };
+        const megaBase = geminiBladeGeo(
+          _gp.bladeHeight,
+          _gp.bladeWidth,
+          Math.round(_gp.lodMegaSegments),
+          _gp.tipTaperStart,
+        );
+        const geoMega = geminiFieldGeo(
+          megaBase,
+          _gp.lodMegaPatchSize,
+          Math.round(_gp.lodMegaGrassCount),
+          _gp.bladeHeight,
+          false,
+        );
+        megaBase.dispose();
+
+        return { geoHigh, geoMid, geoFar, geoMega };
       }
 
       let _geminiGeos = _buildGeminiGeos();
@@ -10820,14 +10845,16 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         scene,
         camera,
         geminiGrassGroup,
-        { ..._geminiGeos, material: _geminiMat },
+        { ..._geminiGeos, material: _geminiMat, materialMega: _geminiMatMega },
         {
           patchSize: _gp.fieldSize,
           patchSizeMid: _gp.lodMidPatchSize,
           patchSizeFar: _gp.lodFarPatchSize,
+          patchSizeMega: _gp.lodMegaPatchSize,
           lodMidDistance: _gp.lodMidDistance,
           lodFarDistance: _gp.lodFarDistance,
           maxDistance: _gp.lodMaxDistance,
+          megaMaxDistance: _gp.lodMegaMaxDistance,
           lodHysteresis: 2,
           lodEnabled: _gp.lodEnabled,
           grassReceiveShadow: _gp.grassReceiveShadow,
@@ -10841,6 +10868,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         if (oldGeos.geoHigh) oldGeos.geoHigh.dispose();
         if (oldGeos.geoMid) oldGeos.geoMid.dispose();
         if (oldGeos.geoFar) oldGeos.geoFar.dispose();
+        if (oldGeos.geoMega) oldGeos.geoMega.dispose();
       };
 
       fleurSystem = createFleurSystem(scene, getWorldHeight, () => {
@@ -14530,6 +14558,13 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
               gu.uBssCol.value.copy(col(e.value));
             });
 
+          const syncGeminiLodFadeUniform = () => {
+            gu.uLodMaxDist.value = Math.max(
+              gp.lodMaxDistance,
+              gp.lodMegaMaxDistance,
+            );
+          };
+
           const gLod = geminiGrassFolder.addFolder({
             title: "LOD",
             expanded: false,
@@ -14560,11 +14595,21 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           gLod
             .addBinding(gp, "lodMaxDistance", {
               min: 30,
-              max: 300,
-              label: "Max distance",
+              max: 500,
+              label: "FAR max (inner ring end)",
             })
-            .on("change", (e) => {
-              gu.uLodMaxDist.value = e.value;
+            .on("change", () => {
+              syncGeminiLodFadeUniform();
+            });
+          gLod
+            .addBinding(gp, "lodMegaMaxDistance", {
+              min: 50,
+              max: 800,
+              step: 5,
+              label: "MEGA max (outer)",
+            })
+            .on("change", () => {
+              syncGeminiLodFadeUniform();
             });
           gLod
             .addBinding(gp, "lodFadeStart", {
@@ -14640,6 +14685,35 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             .on("change", _gemRebuild);
           gLodFar
             .addBinding(gp, "lodFarGrassCount", {
+              min: 16,
+              max: 2000,
+              step: 16,
+              label: "Blades/patch",
+            })
+            .on("change", _gemRebuild);
+
+          const gLodMega = gLod.addFolder({
+            title: "MEGA tier",
+            expanded: false,
+          });
+          gLodMega
+            .addBinding(gp, "lodMegaPatchSize", {
+              min: 24,
+              max: 120,
+              step: 1,
+              label: "Patch size",
+            })
+            .on("change", _gemRebuild);
+          gLodMega
+            .addBinding(gp, "lodMegaSegments", {
+              min: 1,
+              max: 4,
+              step: 1,
+              label: "Segments",
+            })
+            .on("change", _gemRebuild);
+          gLodMega
+            .addBinding(gp, "lodMegaGrassCount", {
               min: 16,
               max: 2000,
               step: 16,
@@ -15495,9 +15569,11 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             _geminiUpdateOpts.patchSize = gp.fieldSize;
             _geminiUpdateOpts.patchSizeMid = gp.lodMidPatchSize;
             _geminiUpdateOpts.patchSizeFar = gp.lodFarPatchSize;
+            _geminiUpdateOpts.patchSizeMega = gp.lodMegaPatchSize;
             _geminiUpdateOpts.lodMidDistance = gp.lodMidDistance;
             _geminiUpdateOpts.lodFarDistance = gp.lodFarDistance;
             _geminiUpdateOpts.maxDistance = gp.lodMaxDistance;
+            _geminiUpdateOpts.megaMaxDistance = gp.lodMegaMaxDistance;
             _geminiUpdateOpts.lodEnabled = gp.lodEnabled;
             _geminiUpdateOpts.grassReceiveShadow = gp.grassReceiveShadow;
             const stats = geminiGrassPatchSystem.update(_geminiUpdateOpts);
