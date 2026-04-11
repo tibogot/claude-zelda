@@ -3811,6 +3811,7 @@
         leafMat: null,
         leafMapNode: null,
         leafMesh: null,
+        leafCullSphere: null,
         uniforms: null,
         positions: [],
         chunks: new Map(),
@@ -6664,6 +6665,12 @@
             chunk.ims.forEach((g) => {
               g.im.count = 0;
             });
+            if (chunk.leafMesh) {
+              chunk.leafMesh.visible = _ptreeFrustum.intersectsSphere(
+                chunk.leafSphere,
+              );
+              totalLeaves += chunk.leafMesh.count;
+            }
             if (!_ptreeFrustum.intersectsSphere(chunk.sphere)) continue;
             totalVisible++;
             for (const { x, y, z, scale } of chunk.positions) {
@@ -6688,7 +6695,16 @@
               if (g.im.count > 0) g.im.instanceMatrix.needsUpdate = true;
             });
           }
-          if (slot.leafMesh) totalLeaves += slot.leafMesh.count;
+          if (slot.leafMesh) {
+            if (slot.leafCullSphere) {
+              slot.leafMesh.visible = _ptreeFrustum.intersectsSphere(
+                slot.leafCullSphere,
+              );
+            } else {
+              slot.leafMesh.visible = true;
+            }
+            totalLeaves += slot.leafMesh.count;
+          }
         }
         ptreeParams.totalTrunks = totalTrunks;
         ptreeParams.totalLeaves = totalLeaves;
@@ -6885,11 +6901,19 @@
           slot.leafMesh.geometry.dispose();
           slot.leafMesh = null;
         }
+        slot.leafCullSphere = null;
+        for (const chunk of slot.chunks.values()) {
+          if (chunk.leafMesh) {
+            scene.remove(chunk.leafMesh);
+            chunk.leafMesh.geometry.dispose();
+            chunk.leafMesh = null;
+          }
+        }
+        _markPtreeDirty();
         if (!slot.leafMat || !slot.preset || slot.positions.length === 0)
           return;
         const localLeaves = _ptreeSampleLeaves(slot.preset);
         if (localLeaves.length === 0) return;
-        const n = slot.positions.length * localLeaves.length;
         let yMin = Infinity;
         let yMax = -Infinity;
         slot.positions.forEach((p) => {
@@ -6903,43 +6927,88 @@
           slot.uniforms.yMin.value = yMin - 0.3;
           slot.uniforms.yMax.value = yMax + 0.5;
         }
-        const geo = new THREE.PlaneGeometry(1, 1);
-        const randData = new Float32Array(n * 2);
-        for (let i = 0; i < n; i++) {
-          randData[i * 2] = Math.random();
-          randData[i * 2 + 1] = Math.random();
-        }
-        geo.setAttribute(
-          "aRand",
-          new THREE.InstancedBufferAttribute(randData, 2),
-        );
-        const mesh = new THREE.InstancedMesh(geo, slot.leafMat, n);
-        mesh.frustumCulled = false;
-        mesh.castShadow = true;
-        mesh.receiveShadow = false;
-        const dummy = new THREE.Object3D();
-        let idx = 0;
-        slot.positions.forEach((p) => {
-          localLeaves.forEach((l) => {
-            dummy.position.set(
-              p.x + l.lx * p.scale,
-              p.y + l.ly * p.scale,
-              p.z + l.lz * p.scale,
-            );
-            dummy.rotation.set(
-              Math.random() * Math.PI,
-              Math.random() * Math.PI,
-              Math.random() * Math.PI,
-            );
-            const s = Math.max(0.05, l.leafSize * p.scale);
-            dummy.scale.setScalar(s);
-            dummy.updateMatrix();
-            mesh.setMatrixAt(idx++, dummy.matrix);
+        function buildLeafInstancedMesh(positions, boundsSphere) {
+          const n = positions.length * localLeaves.length;
+          if (n === 0) return null;
+          const geo = new THREE.PlaneGeometry(1, 1);
+          const randData = new Float32Array(n * 2);
+          for (let i = 0; i < n; i++) {
+            randData[i * 2] = Math.random();
+            randData[i * 2 + 1] = Math.random();
+          }
+          geo.setAttribute(
+            "aRand",
+            new THREE.InstancedBufferAttribute(randData, 2),
+          );
+          const mesh = new THREE.InstancedMesh(geo, slot.leafMat, n);
+          mesh.frustumCulled = false;
+          mesh.castShadow = true;
+          mesh.receiveShadow = false;
+          const dummy = new THREE.Object3D();
+          let idx = 0;
+          let lcx = 0;
+          let lcy = 0;
+          let lcz = 0;
+          positions.forEach((p) => {
+            localLeaves.forEach((l) => {
+              const wx = p.x + l.lx * p.scale;
+              const wy = p.y + l.ly * p.scale;
+              const wz = p.z + l.lz * p.scale;
+              lcx += wx;
+              lcy += wy;
+              lcz += wz;
+              dummy.position.set(wx, wy, wz);
+              dummy.rotation.set(
+                Math.random() * Math.PI,
+                Math.random() * Math.PI,
+                Math.random() * Math.PI,
+              );
+              const s = Math.max(0.05, l.leafSize * p.scale);
+              dummy.scale.setScalar(s);
+              dummy.updateMatrix();
+              mesh.setMatrixAt(idx++, dummy.matrix);
+            });
           });
-        });
-        mesh.instanceMatrix.needsUpdate = true;
-        scene.add(mesh);
-        slot.leafMesh = mesh;
+          const invN = 1 / n;
+          lcx *= invN;
+          lcy *= invN;
+          lcz *= invN;
+          let lr = 0;
+          positions.forEach((p) => {
+            localLeaves.forEach((l) => {
+              const wx = p.x + l.lx * p.scale;
+              const wy = p.y + l.ly * p.scale;
+              const wz = p.z + l.lz * p.scale;
+              const half = Math.max(0.05, l.leafSize * p.scale) * 0.71;
+              const d = Math.sqrt(
+                (wx - lcx) ** 2 + (wy - lcy) ** 2 + (wz - lcz) ** 2,
+              );
+              const ext = d + half + 0.35;
+              if (ext > lr) lr = ext;
+            });
+          });
+          boundsSphere.set(new THREE.Vector3(lcx, lcy, lcz), lr);
+          mesh.instanceMatrix.needsUpdate = true;
+          scene.add(mesh);
+          return mesh;
+        }
+        const useChunks =
+          slot.ready && slot.trunkDefs && slot.chunks.size > 0;
+        if (useChunks) {
+          for (const chunk of slot.chunks.values()) {
+            if (!chunk.leafSphere) chunk.leafSphere = new THREE.Sphere();
+            chunk.leafMesh = buildLeafInstancedMesh(
+              chunk.positions,
+              chunk.leafSphere,
+            );
+          }
+          return;
+        }
+        slot.leafCullSphere = new THREE.Sphere();
+        slot.leafMesh = buildLeafInstancedMesh(
+          slot.positions,
+          slot.leafCullSphere,
+        );
       };
 
       _rebuildPTreeChunks = function (slot) {
@@ -6953,7 +7022,13 @@
         });
         for (const key of [...slot.chunks.keys()]) {
           if (!byChunk.has(key)) {
-            slot.chunks.get(key).ims.forEach((g) => scene.remove(g.im));
+            const rm = slot.chunks.get(key);
+            rm.ims.forEach((g) => scene.remove(g.im));
+            if (rm.leafMesh) {
+              scene.remove(rm.leafMesh);
+              rm.leafMesh.geometry.dispose();
+              rm.leafMesh = null;
+            }
             slot.chunks.delete(key);
           }
         }
@@ -6964,9 +7039,12 @@
               positions: [],
               sphere: new THREE.Sphere(),
               ims: _makeChunkIMs(slot.trunkDefs),
+              leafMesh: null,
+              leafSphere: new THREE.Sphere(),
             };
             slot.chunks.set(key, chunk);
           }
+          if (!chunk.leafSphere) chunk.leafSphere = new THREE.Sphere();
           chunk.positions = positions;
           let cx = 0;
           let cy = 0;
