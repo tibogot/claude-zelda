@@ -242,6 +242,12 @@
         createAutoCliffUniforms,
         createChunkSplatCliffMaterial
       } from "./chunkTerrainAutoCliff.js";
+      import { createChunkImageSlotSystem } from "./chunkImageTexSlots.js";
+      import {
+        applyImageSlotAlbedoAndAO,
+        applyImageSlotRoughness,
+        createImageSlotNormalNode
+      } from "./chunkTerrainImageSlotsTsl.js";
       import {
         createBladeGeometry as geminiBladeGeo,
         createFieldInstancedGeometry as geminiFieldGeo,
@@ -264,6 +270,8 @@
         terrainChunkCulling: true,
         /** tile | tslGround (painter-style proc. ground + splat) | splat | greenGround */
         terrainSurface: "tile",
+        /** Paint [P]: splat RGB vs image-slot weights (1–3 = R,G,B). Toggle with U. */
+        paintLayerTarget: "splat",
         /** Painter-style Rock028 + heightTex slope mask on splat + TSL ground surfaces. */
         autoCliffEnabled: true,
         autoCliff: {
@@ -438,9 +446,14 @@
         rampPointA: null,
         paintErase: false,
         paintChannel: 0,
+        /** "splat" = RGB+A holes on main splat; "img" = image slot weights (R,G,B → slots 0–2). */
+        paintLayer: "splat", // kept in sync with PARAMS.paintLayerTarget
         hasBrushHit: false,
         brushWorldPoint: new THREE.Vector3()
       };
+
+      const chunkImageSlotSystem = createChunkImageSlotSystem();
+      const chunkImageSlots = chunkImageSlotSystem.slots;
 
       let editorPane = null;
 
@@ -2127,9 +2140,10 @@
         return mat;
       }
 
-      function createSplatMaterialsForTex(tex) {
+      function createSplatMaterialsForTex(tex, imgWeightTex) {
         syncCliffUniformsFromParams();
         const deps = buildCliffDeps();
+        const slots = chunkImageSlots;
         const material = deps
           ? createChunkSplatCliffMaterial(
               tex,
@@ -2140,10 +2154,19 @@
               cliffU,
               deps.worldSize,
               deps.worldHalf,
-              deps.htexRes
+              deps.htexRes,
+              imgWeightTex,
+              slots
             )
-          : createChunkSplatMaterial(tex);
-        const tslGroundMaterial = createChunkPainterGroundMaterial(tex, CONFIG.chunkSize, {}, deps);
+          : createChunkSplatMaterial(tex, imgWeightTex, slots);
+        const tslGroundMaterial = createChunkPainterGroundMaterial(
+          tex,
+          CONFIG.chunkSize,
+          { worldSize: CONFIG.worldSize },
+          deps,
+          imgWeightTex,
+          slots
+        );
         const tileMaterial = createChunkTileMaterialWithHoles(tex);
         return { material, tslGroundMaterial, tileMaterial };
       }
@@ -2703,10 +2726,11 @@
         toneMapped: false
       });
 
-      function createChunkSplatMaterial(splatTex) {
+      function createChunkSplatMaterial(splatTex, imgWeightTex, imageSlots) {
         splatTex.anisotropy = 8;
         splatTex.flipY = false;
         const cs = float(CONFIG.chunkSize);
+        const wS = float(CONFIG.worldSize);
         const mat = new THREE.MeshStandardNodeMaterial({
           roughness: 0.88,
           metalness: 0.02
@@ -2722,8 +2746,17 @@
           col = mix(col, layR, s.r);
           col = mix(col, layG, s.g);
           col = mix(col, layB, s.b);
+          if (imgWeightTex && imageSlots) {
+            col = applyImageSlotAlbedoAndAO(col, cs, wS, imgWeightTex, imageSlots);
+          }
           return col;
         })();
+        if (imgWeightTex && imageSlots) {
+          mat.roughnessNode = Fn(() =>
+            applyImageSlotRoughness(float(0.88), cs, wS, imgWeightTex, imageSlots)
+          )();
+          mat.normalNode = createImageSlotNormalNode(cs, wS, imgWeightTex, imageSlots);
+        }
         mat.opacityNode = Fn(() => {
           const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));
           const s = texture(splatTex, splatUV);
@@ -3283,8 +3316,12 @@
         const splats = new Map();
         const sRes = CONFIG.splatRes;
         for (const [k, splat] of chunkSplatMap) {
-          const img = splat.ctx.getImageData(0, 0, sRes, sRes);
-          splats.set(k, new Uint8ClampedArray(img.data));
+          const simg = splat.ctx.getImageData(0, 0, sRes, sRes);
+          const iimg = splat.imgCtx.getImageData(0, 0, sRes, sRes);
+          splats.set(k, {
+            s: new Uint8ClampedArray(simg.data),
+            i: new Uint8ClampedArray(iimg.data)
+          });
         }
         let geminiDensity = null;
         if (geminiDensityCtx) {
@@ -3310,12 +3347,19 @@
           chunkDataMap.set(k, new Float32Array(arr));
         }
         const sRes = CONFIG.splatRes;
-        for (const [k, u8] of snap.splats) {
+        for (const [k, entry] of snap.splats) {
           const { cx, cz } = parseChunkKey(k);
           const splat = ensureChunkSplat(cx, cz);
-          const id = new ImageData(new Uint8ClampedArray(u8), sRes, sRes);
-          splat.ctx.putImageData(id, 0, 0);
+          if (entry && entry.s && entry.i) {
+            splat.ctx.putImageData(new ImageData(new Uint8ClampedArray(entry.s), sRes, sRes), 0, 0);
+            splat.imgCtx.putImageData(new ImageData(new Uint8ClampedArray(entry.i), sRes, sRes), 0, 0);
+          } else {
+            const flat = new Uint8ClampedArray(entry);
+            splat.ctx.putImageData(new ImageData(flat, sRes, sRes), 0, 0);
+            splat.imgCtx.clearRect(0, 0, sRes, sRes);
+          }
           splat.tex.needsUpdate = true;
+          splat.imgTex.needsUpdate = true;
         }
         if (snap.geminiDensity && geminiDensityCtx) {
           const id = new ImageData(new Uint8ClampedArray(snap.geminiDensity), HTEX_RES, HTEX_RES);
@@ -3396,8 +3440,27 @@
         tex.flipY = false;
         tex.colorSpace = THREE.NoColorSpace;
         tex.needsUpdate = true;
-        const { material, tslGroundMaterial, tileMaterial } = createSplatMaterialsForTex(tex);
-        b = { canvas, ctx, tex, material, tslGroundMaterial, tileMaterial };
+        const imgCanvas = document.createElement("canvas");
+        imgCanvas.width = imgCanvas.height = res;
+        const imgCtx = imgCanvas.getContext("2d", { willReadFrequently: true });
+        imgCtx.clearRect(0, 0, res, res);
+        const imgTex = new THREE.CanvasTexture(imgCanvas);
+        imgTex.wrapS = imgTex.wrapT = THREE.ClampToEdgeWrapping;
+        imgTex.flipY = false;
+        imgTex.colorSpace = THREE.NoColorSpace;
+        imgTex.needsUpdate = true;
+        const { material, tslGroundMaterial, tileMaterial } = createSplatMaterialsForTex(tex, imgTex);
+        b = {
+          canvas,
+          ctx,
+          tex,
+          imgCanvas,
+          imgCtx,
+          imgTex,
+          material,
+          tslGroundMaterial,
+          tileMaterial
+        };
         chunkSplatMap.set(k, b);
         return b;
       }
@@ -3409,6 +3472,7 @@
         s.tslGroundMaterial.dispose();
         s.tileMaterial.dispose();
         s.tex.dispose();
+        s.imgTex.dispose();
         chunkSplatMap.delete(key);
       }
 
@@ -3439,13 +3503,16 @@
           const splat = ensureChunkSplat(cx, cz);
           const img = splat.ctx.getImageData(0, 0, CONFIG.splatRes, CONFIG.splatRes);
           const d = img.data;
+          const idw = splat.imgCtx.getImageData(0, 0, CONFIG.splatRes, CONFIG.splatRes);
+          const dw = idw.data;
           chunks[k] = {
             h: bufferToBase64(h.buffer.slice(h.byteOffset, h.byteOffset + h.byteLength)),
-            s: bufferToBase64(d.buffer.slice(d.byteOffset, d.byteOffset + splatBytes))
+            s: bufferToBase64(d.buffer.slice(d.byteOffset, d.byteOffset + splatBytes)),
+            i: bufferToBase64(dw.buffer.slice(dw.byteOffset, dw.byteOffset + splatBytes))
           };
         }
         const payload = {
-          v: 2,
+          v: 3,
           worldSize: CONFIG.worldSize,
           chunkSize: CONFIG.chunkSize,
           dataResolution: CONFIG.dataResolution,
@@ -3569,7 +3636,7 @@
 
       function importTerrainJson(text) {
         const data = JSON.parse(text);
-        if (data.v !== 1 && data.v !== 2) throw new Error("Unsupported file version");
+        if (data.v !== 1 && data.v !== 2 && data.v !== 3) throw new Error("Unsupported file version");
         if (
           data.worldSize !== CONFIG.worldSize ||
           data.chunkSize !== CONFIG.chunkSize ||
@@ -3596,6 +3663,21 @@
           }
           splat.ctx.putImageData(new ImageData(u8, CONFIG.splatRes, CONFIG.splatRes), 0, 0);
           splat.tex.needsUpdate = true;
+          if (data.v >= 3 && entry.i) {
+            const ib = base64ToBuffer(entry.i);
+            if (ib.byteLength === splatBytes) {
+              splat.imgCtx.putImageData(
+                new ImageData(new Uint8ClampedArray(ib), CONFIG.splatRes, CONFIG.splatRes),
+                0,
+                0
+              );
+            } else {
+              splat.imgCtx.clearRect(0, 0, CONFIG.splatRes, CONFIG.splatRes);
+            }
+          } else {
+            splat.imgCtx.clearRect(0, 0, CONFIG.splatRes, CONFIG.splatRes);
+          }
+          splat.imgTex.needsUpdate = true;
           dirtyChunks.add(k);
         }
         rebuildAllActiveChunkMeshes();
@@ -3779,13 +3861,23 @@
           splat.material.dispose();
           splat.tslGroundMaterial.dispose();
           splat.tileMaterial.dispose();
-          const { material, tslGroundMaterial, tileMaterial } = createSplatMaterialsForTex(splat.tex);
+          const { material, tslGroundMaterial, tileMaterial } = createSplatMaterialsForTex(
+            splat.tex,
+            splat.imgTex
+          );
           splat.material = material;
           splat.tslGroundMaterial = tslGroundMaterial;
           splat.tileMaterial = tileMaterial;
         }
         refreshActiveChunkMaterials();
       }
+
+      chunkImageSlotSystem
+        .loadDefaults()
+        .then(() => {
+          rebuildAllChunkSplatMaterials();
+        })
+        .catch((e) => console.warn("Chunk image slot defaults:", e));
 
       const raycaster = new THREE.Raycaster();
       const pointerNdc = new THREE.Vector2();
@@ -3950,7 +4042,9 @@
         el.className = m;
         if (m === "view") el.textContent = "VIEW MODE  [ Esc ]";
         else if (m === "sculpt") el.textContent = "SCULPT MODE  [ S · Esc → view ]";
-        else if (m === "paint") el.textContent = "PAINT MODE  [ P · Esc → view ]";
+        else if (m === "paint")
+          el.textContent =
+            "PAINT MODE  [ P · 1–3 channel · U splat/img · Esc → view ]";
         else if (m === "geminigrass") el.textContent = "GEMINI GRASS  [ G · Esc → view ]";
         else if (m === "geminicliffgrass")
           el.textContent = "GEMINI CLIFF GRASS  [ Mode menu · Esc → view ]";
@@ -6722,12 +6816,15 @@
         const maxCx = THREE.MathUtils.clamp(maxC.cx, 0, maxChunk);
         const maxCz = THREE.MathUtils.clamp(maxC.cz, 0, maxChunk);
         const ch = editState.paintChannel;
-        const flow = CONFIG.paint.strength * 255;
+        const flowBase = (brushStr / 100) * 255;
+        const useImg = editState.paintLayer === "img";
 
         for (let cz = minCz; cz <= maxCz; cz++) {
           for (let cx = minCx; cx <= maxCx; cx++) {
             const splat = ensureChunkSplat(cx, cz);
-            const img = splat.ctx.getImageData(0, 0, res, res);
+            const ctx = useImg ? splat.imgCtx : splat.ctx;
+            const glTex = useImg ? splat.imgTex : splat.tex;
+            const img = ctx.getImageData(0, 0, res, res);
             const data = img.data;
             const c = chunkCenterWorld(cx, cz);
             const cs = CONFIG.chunkSize;
@@ -6743,15 +6840,15 @@
                 const dist = Math.hypot(dx, dz);
                 if (dist > R) continue;
                 const falloff = 1 - dist / R;
-                const delta = (erase ? -1 : 1) * flow * falloff;
+                const delta = (erase ? -1 : 1) * flowBase * falloff;
                 const i = (py * res + px) * 4;
                 data[i + ch] = THREE.MathUtils.clamp(data[i + ch] + delta, 0, 255);
                 touched = true;
               }
             }
             if (touched) {
-              splat.ctx.putImageData(img, 0, 0);
-              splat.tex.needsUpdate = true;
+              ctx.putImageData(img, 0, 0);
+              glTex.needsUpdate = true;
             }
           }
         }
@@ -7606,6 +7703,12 @@
           if (event.key === "2") editState.paintChannel = 1;
           if (event.key === "3") editState.paintChannel = 2;
         }
+        if (editState.mode === "paint" && (event.key === "u" || event.key === "U")) {
+          event.preventDefault();
+          PARAMS.paintLayerTarget = PARAMS.paintLayerTarget === "img" ? "splat" : "img";
+          editState.paintLayer = PARAMS.paintLayerTarget;
+          if (editorPane) editorPane.refresh();
+        }
         if (
           (event.key === "e" || event.key === "E") &&
           (event.ctrlKey || event.metaKey)
@@ -8146,6 +8249,7 @@
 
         const p = camera.position;
         const chName = ["R", "G", "B"][editState.paintChannel];
+        const paintLayerLabel = editState.paintLayer === "img" ? "img" : "splat";
         const totalLodChunks = LOD_SLOTS.reduce((s, sl) => s + sl.chunks.size, 0);
         const treeLodFrustum =
           totalLodChunks > 0 ? `  TreeLOD frustum: ${lodParams.chunksVisible}/${totalLodChunks} chunks` : "";
@@ -8197,7 +8301,7 @@ fps: ${frameState.fps.toFixed(1)}   frame: ${dtMs.toFixed(2)} ms
 draw calls: ${renderer.info.render.calls}
 terrain tris: ${Math.round(tris).toLocaleString()}
 active chunks: ${activeChunks.size}  (dist LOD: ${PARAMS.terrainLodEnabled ? "ON" : "OFF"})  (chunk cull: ${PARAMS.terrainChunkCulling ? "ON" : "OFF — full world"})  L0=${lodL0} L1=${lodL1} L2=${lodL2}
-mode: ${playMode ? "PLAY (WASD · Esc/F exit)" : editState.mode}  paint ch=${chName}  terrain: ${TERRAIN_SURFACE_LABEL[PARAMS.terrainSurface] ?? PARAMS.terrainSurface}
+mode: ${playMode ? "PLAY (WASD · Esc/F exit)" : editState.mode}  paint ${paintLayerLabel} ch=${chName}  terrain: ${TERRAIN_SURFACE_LABEL[PARAMS.terrainSurface] ?? PARAMS.terrainSurface}
 ${treeLodHud}
 ${procTreeHud}
 ${foliageHud}
@@ -8761,6 +8865,31 @@ undo: ${terrainUndoStack.length}  redo: ${terrainRedoStack.length}  (Ctrl+Z / Ct
         brushFolder.addBinding(PARAMS, "paintBrush", {
           label: "Gemini brush",
           options: { Smooth: "smooth", Smear: "smear" }
+        });
+        editState.paintLayer = PARAMS.paintLayerTarget;
+        brushFolder
+          .addBinding(PARAMS, "paintLayerTarget", {
+            label: "Paint target",
+            options: { "Splat RGB": "splat", "Image slots": "img" }
+          })
+          .on("change", (e) => {
+            editState.paintLayer = e.value;
+          });
+        const imgSlotUvFolder = brushFolder.addFolder({
+          title: "Image slot UV (Rock / Grass / Ground)",
+          expanded: false
+        });
+        chunkImageSlots.forEach((slot, idx) => {
+          imgSlotUvFolder
+            .addBinding(slot, "uvScale", {
+              label: `${idx + 1}. ${slot.name}`,
+              min: 0.1,
+              max: 40,
+              step: 0.1
+            })
+            .on("change", (ev) => {
+              slot.uUVScale.value = ev.value;
+            });
         });
         brushFolder.addBinding(PARAMS, "brushFalloff", {
           label: "Falloff",

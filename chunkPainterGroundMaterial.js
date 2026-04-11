@@ -26,6 +26,11 @@ import {
 } from "three/tsl";
 import { perlinNoise2D, fbmPerlin2D } from "./tsl-noise.js";
 import { createCliffShadingContext } from "./chunkTerrainAutoCliff.js";
+import {
+  applyImageSlotAlbedoAndAO,
+  applyImageSlotRoughness,
+  createImageSlotNormalNode,
+} from "./chunkTerrainImageSlotsTsl.js";
 
 function toLinearColor(hex) {
   return new THREE.Color(hex).convertSRGBToLinear();
@@ -47,8 +52,17 @@ const proceduralLayerMask = Fn(
  * @param {number} chunkSize
  * @param {object} [opts] — defaults match splatmap-painter10bvh+post.html gPARAMS (default preset)
  * @param {null | { heightTex, rockColorTex, rockDataTex, cliffU, worldSize, worldHalf, htexRes }} [cliffDeps] — painter-style auto cliff
+ * @param {THREE.Texture | null} [imgWeightTex] — per-chunk RGB weights for image slots (R,G,B → slot 0–2)
+ * @param {object[] | null} [imageSlots] — from createChunkImageSlotSystem().slots
  */
-export function createChunkPainterGroundMaterial(splatTex, chunkSize, opts = {}, cliffDeps = null) {
+export function createChunkPainterGroundMaterial(
+  splatTex,
+  chunkSize,
+  opts = {},
+  cliffDeps = null,
+  imgWeightTex = null,
+  imageSlots = null,
+) {
   const baseColor = opts.baseColor ?? "#74CA5E";
   const brightness = opts.brightness ?? 1.3;
   const contrast = opts.contrast ?? 0.95;
@@ -100,6 +114,8 @@ export function createChunkPainterGroundMaterial(splatTex, chunkSize, opts = {},
     metalness,
   });
   mat.envMapIntensity = envMapIntensity;
+
+  const worldSizeF = float(opts.worldSize ?? (cliffDeps ? cliffDeps.worldSize : 1600));
 
   const cliff =
     cliffDeps &&
@@ -165,12 +181,31 @@ export function createChunkPainterGroundMaterial(splatTex, chunkSize, opts = {},
     col = mix(col, layR, s.r);
     col = mix(col, layG, s.g);
     col = mix(col, layB, s.b);
+    if (imgWeightTex && imageSlots) {
+      col = applyImageSlotAlbedoAndAO(col, cs, worldSizeF, imgWeightTex, imageSlots);
+    }
     return cliff ? cliff.augmentColor(col) : col;
   })();
 
   if (cliff) {
     mat.normalNode = cliff.buildNormalNode();
-    mat.roughnessNode = cliff.buildRoughnessNode();
+    mat.roughnessNode =
+      imgWeightTex && imageSlots
+        ? Fn(() =>
+            applyImageSlotRoughness(
+              cliff.evaluateRoughnessInFn(),
+              cs,
+              worldSizeF,
+              imgWeightTex,
+              imageSlots,
+            ),
+          )()
+        : cliff.buildRoughnessNode();
+  } else if (imgWeightTex && imageSlots) {
+    mat.roughnessNode = Fn(() =>
+      applyImageSlotRoughness(float(roughness), cs, worldSizeF, imgWeightTex, imageSlots),
+    )();
+    mat.normalNode = createImageSlotNormalNode(cs, worldSizeF, imgWeightTex, imageSlots);
   }
 
   mat.opacityNode = Fn(() => {

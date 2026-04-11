@@ -22,6 +22,10 @@ import {
   step,
 } from "three/tsl";
 import { normalMap } from "three/tsl";
+import {
+  applyImageSlotAlbedoAndAO,
+  applyImageSlotRoughness,
+} from "./chunkTerrainImageSlotsTsl.js";
 
 function packChannelIntoDataTexture(dt, imgEl, channelIdx) {
   const size = dt.image.width;
@@ -224,22 +228,24 @@ export function createCliffShadingContext(
       return normalMap(autoNm, vec2(0.25, 0.25));
     })();
 
-  const buildRoughnessNode = () =>
-    Fn(() => {
-      const w = triWeights();
-      const _rrXZ = positionWorld.xz.mul(cliffU.uRockScale);
-      const _rrXY = positionWorld.xy.mul(cliffU.uRockScale);
-      const _rrZY = positionWorld.zy.mul(cliffU.uRockScale);
-      const rock028Rough = texture(rockDataTex, _rrXZ)
-        .r.mul(w.y)
-        .add(texture(rockDataTex, _rrXY).r.mul(w.z))
-        .add(texture(rockDataTex, _rrZY).r.mul(w.x))
-        .mul(cliffU.uRockRoughMul);
-      const baseRough = float(0.85);
-      return mix(clamp(rock028Rough, float(0), float(1)), baseRough, getSlopeMask().pow(cliffU.uRockBlendSharp));
-    })();
+  /** Call only inside `Fn(() => { ... })` — cliff-only roughness before image-slot mix. */
+  const evaluateRoughnessInFn = () => {
+    const w = triWeights();
+    const _rrXZ = positionWorld.xz.mul(cliffU.uRockScale);
+    const _rrXY = positionWorld.xy.mul(cliffU.uRockScale);
+    const _rrZY = positionWorld.zy.mul(cliffU.uRockScale);
+    const rock028Rough = texture(rockDataTex, _rrXZ)
+      .r.mul(w.y)
+      .add(texture(rockDataTex, _rrXY).r.mul(w.z))
+      .add(texture(rockDataTex, _rrZY).r.mul(w.x))
+      .mul(cliffU.uRockRoughMul);
+    const baseRough = float(0.85);
+    return mix(clamp(rock028Rough, float(0), float(1)), baseRough, getSlopeMask().pow(cliffU.uRockBlendSharp));
+  };
 
-  return { augmentColor, buildNormalNode, buildRoughnessNode };
+  const buildRoughnessNode = () => Fn(() => evaluateRoughnessInFn())();
+
+  return { augmentColor, buildNormalNode, buildRoughnessNode, evaluateRoughnessInFn };
 }
 
 /**
@@ -255,6 +261,8 @@ export function createChunkSplatCliffMaterial(
   worldSize,
   worldHalf,
   htexRes,
+  imgWeightTex = null,
+  imageSlots = null,
 ) {
   splatTex.anisotropy = 8;
   splatTex.flipY = false;
@@ -287,11 +295,25 @@ export function createChunkSplatCliffMaterial(
     col = mix(col, layR, s.r);
     col = mix(col, layG, s.g);
     col = mix(col, layB, s.b);
+    if (imgWeightTex && imageSlots) {
+      col = applyImageSlotAlbedoAndAO(col, cs, float(worldSize), imgWeightTex, imageSlots);
+    }
     return cliff.augmentColor(col);
   })();
 
   mat.normalNode = cliff.buildNormalNode();
-  mat.roughnessNode = cliff.buildRoughnessNode();
+  mat.roughnessNode =
+    imgWeightTex && imageSlots
+      ? Fn(() =>
+          applyImageSlotRoughness(
+            cliff.evaluateRoughnessInFn(),
+            cs,
+            float(worldSize),
+            imgWeightTex,
+            imageSlots,
+          ),
+        )()
+      : cliff.buildRoughnessNode();
 
   mat.opacityNode = Fn(() => {
     const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));
