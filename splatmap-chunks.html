@@ -316,6 +316,7 @@
       import { createFleurSystem, FLEUR_PRESETS } from "./fleur-painter.js";
       import { createAmbientFXSystem } from "./ambientfx-painter.js";
       import { createFoliageSlot } from "./foliage-painter.js";
+      import { createOctahedralImpostorForestWebgpu } from "./octahedralImpostorForestWebgpu.js";
 
       const PI = Math.PI;
       const uFTreeTime = uniform(0.0);
@@ -3413,13 +3414,15 @@
       const chunkSplatMap = new Map();
       const dirtyChunks = new Set();
 
-      /** Tree LOD (J) — instanced meshes only; no WebGPU impostor path. */
+      /** Tree LOD (J) — instanced GLB + WebGPU octahedral impostor (Pine slot). */
       const LOD_SLOTS = [
         {
           name: "Pine",
           modelPath: "models/pine2.glb",
           lod1Path: "models/pine2LOD1.glb",
           lodThreshold: 80,
+          lodImpostorDist: 115,
+          lodMegaDist: 220,
           minSpacing: 3,
           scaleMin: 0.8,
           scaleMax: 1.4,
@@ -3430,6 +3433,8 @@
           lod0Defs: null,
           lod1Defs: null,
           ready: false,
+          pineImpostorApi: null,
+          pineImpostorBusy: false,
         },
         {
           name: "Oak",
@@ -3754,8 +3759,12 @@
         maxDrawDistance: 520,
         lodChunkSize: 128,
         lodMaxPerChunk: 1024,
+        lodImpostorDist: 115,
+        lodMegaDist: 220,
         count0: 0,
         count1: 0,
+        count2: 0,
+        count3: 0,
         totalTrees: 0,
         chunks: 0,
         chunksVisible: 0,
@@ -3763,6 +3772,31 @@
         treesCulledDistance: 0,
         lodVisMesh0: true,
         lodVisMesh1: true,
+        lodVisImpostor: true,
+        lodVisMega: true,
+        pineLightScale: 1.0,
+        pineNormalStrength: 1.0,
+        pineRimStrength: 0.0,
+        pineRimPower: 3,
+        pineRimColor: "#6699a6",
+        pineDiffuseWrap: 0,
+        pineParallaxStrength: 0,
+        pineImpCrossfadeDist: 80,
+        pineImpBlendWidth: 6,
+        pineLodDither: 0,
+        pineEdgeSmoothScale: 1.5,
+        pineAlphaClamp: 0.1,
+        pineBlend3Cell: true,
+        pineTranslucency: 0.0,
+        pineTranslucencyPow: 2.0,
+        pineAoStrength: 0.0,
+        pineFogEnabled: false,
+        pineFogNear: 28,
+        pineFogFar: 170,
+        pineFogColor: "#87ceeb",
+        pineAtlasTextureSize: 2048,
+        pineAtlasSpritesPerSide: 8,
+        pineFullOctahedral: true,
       };
 
       // ─── PROC TREES — same data + algorithms as splatmap-painter10bvh+post.html ───
@@ -4281,6 +4315,10 @@
             const o = { name: s.name, positions: s.positions };
             if (s.meshScale != null && s.meshScale !== 1)
               o.meshScale = s.meshScale;
+            if (s.name === "Pine") {
+              o.lodImpostorDist = s.lodImpostorDist ?? 115;
+              o.lodMegaDist = s.lodMegaDist ?? 220;
+            }
             return o;
           }),
           ptreeSlots: PTREE_SLOTS.map((s) => ({
@@ -4534,7 +4572,14 @@
             slot.positions = entry.positions || [];
             if (typeof entry.meshScale === "number")
               slot.meshScale = entry.meshScale;
+            if (slot.name === "Pine") {
+              if (typeof entry.lodImpostorDist === "number")
+                slot.lodImpostorDist = entry.lodImpostorDist;
+              if (typeof entry.lodMegaDist === "number")
+                slot.lodMegaDist = entry.lodMegaDist;
+            }
             _disposeSlotLodChunks(slot);
+            if (slot.name === "Pine") _disposePineImpostor(slot);
             _rebuildLODChunks(slot);
           });
         }
@@ -6040,6 +6085,11 @@
       const _lodTreeScale = new THREE.Vector3();
       const _lodTreeQuat = new THREE.Quaternion();
       const _lodUpY = new THREE.Vector3(0, 1, 0);
+      const _tmpPineSunCol = new THREE.Vector3();
+      const _tmpPineAmbCol = new THREE.Vector3();
+      const _tmpPineHemiSky = new THREE.Vector3();
+      const _tmpPineHemiGnd = new THREE.Vector3();
+      const _pineImpostorColorTmp = new THREE.Color();
       const _lodCamPos = new THREE.Vector3();
       const _lodFrustum = new THREE.Frustum();
       const _lodProjMat = new THREE.Matrix4();
@@ -6051,6 +6101,41 @@
 
       function _markLodDirty() {
         _lodDirty = true;
+      }
+
+      function applyPineImpostorMaterialFromLodParams() {
+        const api = LOD_SLOTS[0]?.pineImpostorApi;
+        if (!api || LOD_SLOTS[0].name !== "Pine") return;
+        api.setLightScale(lodParams.pineLightScale);
+        api.setNormalStrength(lodParams.pineNormalStrength);
+        api.setRimStrength(lodParams.pineRimStrength);
+        api.setRimPower(lodParams.pineRimPower);
+        _pineImpostorColorTmp.set(lodParams.pineRimColor);
+        api.setRimColor(
+          _pineImpostorColorTmp.r,
+          _pineImpostorColorTmp.g,
+          _pineImpostorColorTmp.b,
+        );
+        api.setDiffuseWrap(lodParams.pineDiffuseWrap);
+        api.setParallaxStrength(lodParams.pineParallaxStrength);
+        api.setLodDistance(lodParams.pineImpCrossfadeDist);
+        api.setFadeRange(lodParams.pineImpBlendWidth);
+        api.setLodDither(lodParams.pineLodDither);
+        api.setEdgeSmoothScale(lodParams.pineEdgeSmoothScale);
+        api.setAlphaClamp(lodParams.pineAlphaClamp);
+        api.setBlend3Cell(lodParams.pineBlend3Cell);
+        api.setTranslucency(
+          lodParams.pineTranslucency,
+          lodParams.pineTranslucencyPow,
+        );
+        api.setAoStrength(lodParams.pineAoStrength);
+        _pineImpostorColorTmp.set(lodParams.pineFogColor);
+        api.setFog({
+          near: lodParams.pineFogNear,
+          far: Math.max(lodParams.pineFogFar, lodParams.pineFogNear + 1),
+          strength: lodParams.pineFogEnabled ? 1 : 0,
+          color: _pineImpostorColorTmp,
+        });
       }
 
       function applyLodTierVisibility() {
@@ -6069,6 +6154,99 @@
             }
           }
         }
+        const api = LOD_SLOTS[0]?.pineImpostorApi;
+        if (api && LOD_SLOTS[0].name === "Pine") {
+          api.setLodVisible(1, lodParams.lodVisImpostor);
+          api.setLodVisible(2, lodParams.lodVisMega);
+        }
+      }
+
+      function _disposePineImpostor(slot) {
+        if (!slot || slot.name !== "Pine") return;
+        if (slot.pineImpostorApi) {
+          scene.remove(slot.pineImpostorApi.group);
+          slot.pineImpostorApi.dispose();
+          slot.pineImpostorApi = null;
+        }
+        slot.pineImpostorBusy = false;
+      }
+
+      function _schedulePineImpostorBuild(slot) {
+        if (
+          slot.name !== "Pine" ||
+          slot.pineImpostorBusy ||
+          slot.pineImpostorApi ||
+          slot.positions.length === 0
+        )
+          return;
+        slot.pineImpostorBusy = true;
+        createOctahedralImpostorForestWebgpu(renderer, sun, {
+          modelPath: slot.modelPath,
+          skipNearMeshes: true,
+          fixedPlacements: slot.positions.slice(),
+          impostorStandalone: true,
+          treeScale: 1,
+          lodDistance: lodParams.pineImpCrossfadeDist,
+          centerPosition: [0, 0, 0],
+          placementCapacity: Math.max(1024, slot.positions.length + 512),
+          impostorSettings: {
+            lod2Distance: 9999,
+            fadeRange: lodParams.pineImpBlendWidth,
+            textureSize: Math.max(
+              256,
+              Math.min(8192, Math.round(lodParams.pineAtlasTextureSize)),
+            ),
+            spritesPerSide: Math.max(
+              2,
+              Math.min(32, Math.round(lodParams.pineAtlasSpritesPerSide)),
+            ),
+            lightScale: lodParams.pineLightScale,
+            normalStrength: lodParams.pineNormalStrength,
+            rimStrength: lodParams.pineRimStrength,
+            rimPower: lodParams.pineRimPower,
+            diffuseWrap: lodParams.pineDiffuseWrap,
+            parallaxStrength: lodParams.pineParallaxStrength,
+            lodDither: lodParams.pineLodDither,
+            edgeSmoothScale: lodParams.pineEdgeSmoothScale,
+            alphaClamp: lodParams.pineAlphaClamp,
+            fogEnabled: lodParams.pineFogEnabled,
+            fogNear: lodParams.pineFogNear,
+            fogFar: lodParams.pineFogFar,
+            fogColor: new THREE.Color().set(lodParams.pineFogColor).getHex(),
+            rimColor: new THREE.Color().set(lodParams.pineRimColor),
+            bakeOnlyLargestMesh: false,
+            fullOctahedral: lodParams.pineFullOctahedral,
+            skipShadow: true,
+            useSceneFog: true,
+          },
+        })
+          .then((api) => {
+            slot.pineImpostorBusy = false;
+            slot.pineImpostorApi = api;
+            scene.add(api.group);
+            applyPineImpostorMaterialFromLodParams();
+            applyLodTierVisibility();
+            if (!api.rebuildPlacements(slot.positions)) {
+              scene.remove(api.group);
+              api.dispose();
+              slot.pineImpostorApi = null;
+              _schedulePineImpostorBuild(slot);
+              return;
+            }
+            _markLodDirty();
+          })
+          .catch((err) => {
+            slot.pineImpostorBusy = false;
+            console.warn("[Tree LOD] Pine impostor bake failed:", err);
+          });
+      }
+
+      function _rebakePineImpostorAtlas() {
+        const slot = LOD_SLOTS[0];
+        if (!slot || slot.name !== "Pine") return;
+        _disposePineImpostor(slot);
+        _markLodDirty();
+        if (slot.positions.length > 0) _schedulePineImpostorBuild(slot);
       }
 
       function _extractLODDefs(gltf) {
@@ -6193,6 +6371,22 @@
         slot.positions.forEach((p, i) => {
           p._lodIdx = i;
         });
+        if (slot.name === "Pine") {
+          if (slot.positions.length === 0) {
+            _disposePineImpostor(slot);
+          } else {
+            if (
+              slot.pineImpostorApi &&
+              slot.positions.length > slot.pineImpostorApi.capacity
+            ) {
+              _disposePineImpostor(slot);
+            }
+            _schedulePineImpostorBuild(slot);
+            if (slot.pineImpostorApi) {
+              slot.pineImpostorApi.rebuildPlacements(slot.positions);
+            }
+          }
+        }
         applyLodTierVisibility();
       };
 
@@ -6217,6 +6411,8 @@
         lodParams.meshScale = slot.meshScale ?? 1;
         lodParams.density = slot.density;
         lodParams.treesPerStroke = slot.treesPerStroke;
+        lodParams.lodImpostorDist = slot.lodImpostorDist ?? 115;
+        lodParams.lodMegaDist = slot.lodMegaDist ?? 220;
         if (lodFolderRef) lodFolderRef.refresh();
       }
 
@@ -6277,7 +6473,15 @@
 
       function updateLODInstances() {
         const anyLodChunk = LOD_SLOTS.some((s) => s.ready && s.chunks.size > 0);
-        if (!anyLodChunk) return;
+        const pineSlotEarly = LOD_SLOTS[0];
+        const pineApiEarly =
+          pineSlotEarly?.name === "Pine"
+            ? pineSlotEarly.pineImpostorApi
+            : null;
+        if (!anyLodChunk) {
+          if (pineApiEarly) pineApiEarly.paintFinishImpostorMega(0, 0);
+          return;
+        }
         const camQ = camera.quaternion;
         const posMoved =
           _lodLastPos.distanceToSquared(camera.position) >
@@ -6297,6 +6501,8 @@
         let totalChunks = 0;
         let count0 = 0;
         let count1 = 0;
+        let count2 = 0;
+        let count3 = 0;
         let totalTrees = 0;
         let treesCulledDistance = 0;
         let chunksCulledDistance = 0;
@@ -6309,6 +6515,19 @@
           const thr = slot.lodThreshold;
           const thrSq = thr * thr;
           const lodMeshMul = slot.meshScale ?? 1;
+          const pineImpostor =
+            slot.name === "Pine" ? slot.pineImpostorApi : null;
+          const tImp =
+            typeof slot.lodImpostorDist === "number"
+              ? slot.lodImpostorDist
+              : 1e9;
+          const tImpSq = tImp * tImp;
+          const tMega =
+            typeof slot.lodMegaDist === "number" ? slot.lodMegaDist : 1e9;
+          const tMegaSq = tMega * tMega;
+          let pineImpW = 0;
+          let pineMegaW = 0;
+          const capIm = pineImpostor ? pineImpostor.capacity : 0;
           for (const chunk of slot.chunks.values()) {
             totalChunks++;
             const inFrustum = _lodFrustum.intersectsSphere(chunk.sphere);
@@ -6350,6 +6569,17 @@
                 treesCulledDistance++;
                 continue;
               }
+              const ti = p._lodIdx ?? 0;
+              if (pineImpostor) {
+                if (distSq >= tMegaSq && pineMegaW < capIm) {
+                  pineImpostor.paintWriteMegaSlot(pineMegaW++, ti);
+                  continue;
+                }
+                if (distSq >= tImpSq && pineImpW < capIm) {
+                  pineImpostor.paintWriteImpostorSlot(pineImpW++, ti);
+                  continue;
+                }
+              }
               const useLod1 = chunk.lod1ims && distSq >= thrSq;
               const groups = useLod1 ? chunk.lod1ims : chunk.lod0ims;
               const rotY =
@@ -6378,6 +6608,11 @@
             count0 += chunk.lod0ims[0]?.im.count ?? 0;
             if (chunk.lod1ims) count1 += chunk.lod1ims[0]?.im.count ?? 0;
           }
+          if (pineImpostor) {
+            pineImpostor.paintFinishImpostorMega(pineImpW, pineMegaW);
+            count2 += pineImpW;
+            count3 += pineMegaW;
+          }
         }
         const active = LOD_SLOTS[activeLodSlot];
         lodParams.slotName = active.name;
@@ -6388,8 +6623,12 @@
         lodParams.meshScale = active.meshScale ?? 1;
         lodParams.density = active.density;
         lodParams.treesPerStroke = active.treesPerStroke;
+        lodParams.lodImpostorDist = active.lodImpostorDist ?? 115;
+        lodParams.lodMegaDist = active.lodMegaDist ?? 220;
         lodParams.count0 = count0;
         lodParams.count1 = count1;
+        lodParams.count2 = count2;
+        lodParams.count3 = count3;
         lodParams.totalTrees = totalTrees;
         lodParams.chunks = totalChunks;
         lodParams.chunksVisible = totalVisible;
@@ -11585,6 +11824,30 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             _markLodDirty();
           });
         lodFolder
+          .addBinding(lodParams, "lodImpostorDist", {
+            label: "Pine impostor ≥ (world)",
+            min: 20,
+            max: 600,
+            step: 1,
+          })
+          .on("change", (ev) => {
+            const s = LOD_SLOTS[0];
+            if (s.name === "Pine") s.lodImpostorDist = ev.value;
+            _markLodDirty();
+          });
+        lodFolder
+          .addBinding(lodParams, "lodMegaDist", {
+            label: "Pine mega ≥ (world)",
+            min: 40,
+            max: 900,
+            step: 1,
+          })
+          .on("change", (ev) => {
+            const s = LOD_SLOTS[0];
+            if (s.name === "Pine") s.lodMegaDist = ev.value;
+            _markLodDirty();
+          });
+        lodFolder
           .addBinding(lodParams, "lodChunkSize", {
             label: "Tree chunk size (world)",
             min: 32,
@@ -11699,20 +11962,169 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           label: "LOD1 visible (instances)",
           readonly: true,
         });
+        lodFolder.addBinding(lodParams, "count2", {
+          label: "Pine impostor instances",
+          readonly: true,
+        });
+        lodFolder.addBinding(lodParams, "count3", {
+          label: "Pine mega instances",
+          readonly: true,
+        });
         lodFolder
           .addBinding(lodParams, "lodVisMesh0", { label: "Show LOD0 mesh" })
           .on("change", () => applyLodTierVisibility());
         lodFolder
           .addBinding(lodParams, "lodVisMesh1", { label: "Show LOD1 mesh" })
           .on("change", () => applyLodTierVisibility());
+        lodFolder
+          .addBinding(lodParams, "lodVisImpostor", {
+            label: "Show Pine impostor",
+          })
+          .on("change", () => applyLodTierVisibility());
+        lodFolder
+          .addBinding(lodParams, "lodVisMega", { label: "Show Pine mega" })
+          .on("change", () => applyLodTierVisibility());
+
+        const pineImpAtlasFolder = lodFolder.addFolder({
+          title: "Pine impostor atlas",
+          expanded: false,
+        });
+        pineImpAtlasFolder
+          .addBinding(lodParams, "pineAtlasTextureSize", {
+            label: "Texture size",
+            min: 512,
+            max: 4096,
+            step: 256,
+          })
+          .on("change", () => _rebakePineImpostorAtlas());
+        pineImpAtlasFolder
+          .addBinding(lodParams, "pineAtlasSpritesPerSide", {
+            label: "Sprites / side",
+            min: 4,
+            max: 16,
+            step: 1,
+          })
+          .on("change", () => _rebakePineImpostorAtlas());
+        pineImpAtlasFolder
+          .addBinding(lodParams, "pineFullOctahedral", {
+            label: "Full octahedral",
+          })
+          .on("change", () => _rebakePineImpostorAtlas());
+        pineImpAtlasFolder
+          .addButton({ title: "Rebake atlas (GPU)" })
+          .on("click", () => _rebakePineImpostorAtlas());
+
+        const pineImpLookFolder = lodFolder.addFolder({
+          title: "Pine impostor look",
+          expanded: false,
+        });
+        pineImpLookFolder
+          .addBinding(lodParams, "pineLightScale", {
+            min: 0.2,
+            max: 2.5,
+            step: 0.05,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        pineImpLookFolder
+          .addBinding(lodParams, "pineNormalStrength", {
+            label: "Normal str",
+            min: 0,
+            max: 2,
+            step: 0.05,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        pineImpLookFolder
+          .addBinding(lodParams, "pineParallaxStrength", {
+            label: "Parallax",
+            min: 0,
+            max: 0.25,
+            step: 0.01,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        pineImpLookFolder
+          .addBinding(lodParams, "pineImpCrossfadeDist", {
+            label: "Mat LOD fade dist",
+            min: 10,
+            max: 200,
+            step: 1,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        pineImpLookFolder
+          .addBinding(lodParams, "pineImpBlendWidth", {
+            label: "Mat fade width",
+            min: 1,
+            max: 40,
+            step: 1,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        pineImpLookFolder
+          .addBinding(lodParams, "pineBlend3Cell", {
+            label: "3-cell blend",
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        pineImpLookFolder
+          .addBinding(lodParams, "pineAlphaClamp", {
+            min: 0.02,
+            max: 0.5,
+            step: 0.01,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        pineImpLookFolder
+          .addBinding(lodParams, "pineEdgeSmoothScale", {
+            label: "Edge AA scale",
+            min: 0.5,
+            max: 4,
+            step: 0.1,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        pineImpLookFolder
+          .addBinding(lodParams, "pineLodDither", {
+            label: "LOD dither",
+            min: 0,
+            max: 1,
+            step: 0.05,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        pineImpLookFolder
+          .addBinding(lodParams, "pineRimStrength", {
+            label: "Rim str",
+            min: 0,
+            max: 1,
+            step: 0.02,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        pineImpLookFolder
+          .addBinding(lodParams, "pineRimPower", {
+            min: 1,
+            max: 8,
+            step: 0.25,
+          })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        pineImpLookFolder
+          .addBinding(lodParams, "pineRimColor", { label: "Rim color" })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        pineImpLookFolder
+          .addBinding(lodParams, "pineFogEnabled", { label: "Impostor fog" })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        pineImpLookFolder
+          .addBinding(lodParams, "pineFogNear", { min: 5, max: 120, step: 1 })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        pineImpLookFolder
+          .addBinding(lodParams, "pineFogFar", { min: 20, max: 400, step: 5 })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
+        pineImpLookFolder
+          .addBinding(lodParams, "pineFogColor", { label: "Fog color" })
+          .on("change", () => applyPineImpostorMaterialFromLodParams());
         lodFolder.addButton({ title: "Clear active slot" }).on("click", () => {
           const slot = LOD_SLOTS[activeLodSlot];
           slot.positions = [];
+          if (slot.name === "Pine") _disposePineImpostor(slot);
           _rebuildLODChunks(slot);
         });
         lodFolder.addButton({ title: "Clear ALL slots" }).on("click", () => {
           LOD_SLOTS.forEach((slot) => {
             slot.positions = [];
+            if (slot.name === "Pine") _disposePineImpostor(slot);
             _rebuildLODChunks(slot);
           });
         });
@@ -15711,6 +16123,38 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             geminiGrassUniforms.uSunDir.value.copy(sunDir);
           } else {
             geminiGrassGroup.visible = false;
+          }
+        }
+
+        {
+          const _pineSlot = LOD_SLOTS[0];
+          const _pineApi = _pineSlot?.pineImpostorApi;
+          if (_pineApi && _pineSlot.name === "Pine") {
+            const _sd = sunDirectionFromAngles(
+              PARAMS.light.sunAzimuth,
+              PARAMS.light.sunElevation,
+            );
+            _pineApi.updateSunDir(_sd);
+            _tmpPineSunCol.set(
+              sun.color.r * sun.intensity,
+              sun.color.g * sun.intensity,
+              sun.color.b * sun.intensity,
+            );
+            _pineApi.updateSunColor(_tmpPineSunCol);
+            _tmpPineAmbCol.set(0.22, 0.24, 0.28);
+            _pineApi.updateAmbColor(_tmpPineAmbCol);
+            const _hi = hemi.intensity * 0.5;
+            _tmpPineHemiSky.set(
+              hemi.color.r * _hi,
+              hemi.color.g * _hi,
+              hemi.color.b * _hi,
+            );
+            _tmpPineHemiGnd.set(
+              hemi.groundColor.r * _hi,
+              hemi.groundColor.g * _hi,
+              hemi.groundColor.b * _hi,
+            );
+            _pineApi.updateHemiColors(_tmpPineHemiSky, _tmpPineHemiGnd);
           }
         }
 
