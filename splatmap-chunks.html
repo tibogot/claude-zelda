@@ -5094,7 +5094,15 @@
         camDist: 8,
         camSensX: 0.002,
         camSensY: 0.002,
+        flyVerticalSpeed: 10,
       };
+      /** "capsule" | "fly" — toggled with G while in play mode (pointer lock). */
+      let playMovementMode = "capsule";
+      /** Fly mode only: height above terrain at (playerPos.x, playerPos.z); playerPos.y stays at ground. */
+      let playFlyHeight = 0;
+      let playPlaneRoot = null;
+      let playPlaneLoaded = false;
+      const PLAY_PLANE_MODEL = "models/wenning_carsten_gameart_plane_compressed.glb";
       const keysHeld = {};
       const playerPos = new THREE.Vector3();
       let camYaw = 0;
@@ -5116,6 +5124,43 @@
       capsuleMesh.castShadow = true;
       capsuleMesh.visible = false;
       scene.add(capsuleMesh);
+
+      gltfLoader.load(resolveModelUrl(PLAY_PLANE_MODEL), (gltf) => {
+        const inner = gltf.scene;
+        inner.traverse((o) => {
+          if (o.isMesh) {
+            o.castShadow = true;
+            o.receiveShadow = true;
+          }
+        });
+        inner.rotation.y = Math.PI;
+        inner.updateMatrixWorld(true);
+        const box0 = new THREE.Box3().setFromObject(inner);
+        if (!box0.isEmpty()) {
+          const size0 = box0.getSize(new THREE.Vector3());
+          const max0 = Math.max(size0.x, size0.y, size0.z);
+          const playPlaneTargetSpan =
+            2.8 * (PLAYER_CAP_H + 2 * PLAYER_CAP_R);
+          inner.scale.setScalar(playPlaneTargetSpan / max0);
+          inner.updateMatrixWorld(true);
+          const box = new THREE.Box3().setFromObject(inner);
+          inner.position.set(
+            -((box.min.x + box.max.x) * 0.5),
+            -box.min.y,
+            -((box.min.z + box.max.z) * 0.5),
+          );
+        }
+        playPlaneRoot = new THREE.Group();
+        playPlaneRoot.add(inner);
+        playPlaneRoot.visible = false;
+        scene.add(playPlaneRoot);
+        playPlaneLoaded = true;
+        if (playMode && playMovementMode === "fly") {
+          playPlaneRoot.visible = true;
+          capsuleMesh.visible = false;
+          syncModeBadge();
+        }
+      });
 
       splineGroup = new THREE.Group();
       scene.add(splineGroup);
@@ -5218,7 +5263,10 @@
         const el = document.getElementById("mode-badge");
         if (!el) return;
         if (playMode) {
-          el.textContent = "PLAY MODE  [ F / Esc to exit ]";
+          el.textContent =
+            playMovementMode === "fly"
+              ? "PLAY FLY  [ G walk · Shift up · Alt down · F / Esc exit ]"
+              : "PLAY WALK  [ G fly · F / Esc exit ]";
           el.className = "play";
           return;
         }
@@ -8172,6 +8220,8 @@
       function enterPlayMode() {
         if (playMode) return;
         playMode = true;
+        playMovementMode = "capsule";
+        playFlyHeight = 0;
         PARAMS.mode = "play";
         savedCamPos = camera.position.clone();
         savedTarget = controls.target.clone();
@@ -8180,6 +8230,7 @@
         camYaw = 0;
         camPitch = 0.35;
         capsuleMesh.visible = true;
+        if (playPlaneRoot) playPlaneRoot.visible = false;
         controls.enabled = false;
         brushMarker.visible = false;
         rampMarkerA.visible = false;
@@ -8206,8 +8257,11 @@
       function exitPlayMode() {
         if (!playMode) return;
         playMode = false;
+        playMovementMode = "capsule";
+        playFlyHeight = 0;
         for (const k of Object.keys(keysHeld)) delete keysHeld[k];
         capsuleMesh.visible = false;
+        if (playPlaneRoot) playPlaneRoot.visible = false;
         if (savedCamPos) camera.position.copy(savedCamPos);
         if (savedTarget) {
           controls.target.copy(savedTarget);
@@ -9805,6 +9859,29 @@
         if (event.key === "Shift") editState.isShiftDown = true;
 
         if (playMode) {
+          if (!event.repeat && event.code === "KeyG") {
+            event.preventDefault();
+            playMovementMode = playMovementMode === "capsule" ? "fly" : "capsule";
+            if (playMovementMode === "capsule") playFlyHeight = 0;
+            capsuleMesh.visible =
+              playMovementMode === "capsule" ||
+              (playMovementMode === "fly" && !playPlaneLoaded);
+            if (playPlaneRoot)
+              playPlaneRoot.visible =
+                playMovementMode === "fly" && playPlaneLoaded;
+            syncModeBadge();
+            return;
+          }
+          if (
+            playMovementMode === "fly" &&
+            playPlaneLoaded &&
+            (event.code === "AltLeft" ||
+              event.code === "AltRight" ||
+              event.code === "ShiftLeft" ||
+              event.code === "ShiftRight")
+          ) {
+            event.preventDefault();
+          }
           keysHeld[event.code] = true;
           if (event.code.startsWith("Arrow")) event.preventDefault();
           if (
@@ -16830,11 +16907,38 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             playerPos.z = newZ;
           }
           playerPos.y = getWorldHeight(playerPos.x, playerPos.z);
-          const capsuleCY = playerPos.y + PLAYER_CAP_R + PLAYER_CAP_H * 0.5;
+          const groundY = playerPos.y;
+          const flying = playMovementMode === "fly" && playPlaneLoaded;
+          if (flying) {
+            let dv = 0;
+            if (keysHeld.ShiftLeft || keysHeld.ShiftRight)
+              dv += playParams.flyVerticalSpeed * dtSec;
+            if (keysHeld.AltLeft || keysHeld.AltRight)
+              dv -= playParams.flyVerticalSpeed * dtSec;
+            playFlyHeight = Math.max(0, playFlyHeight + dv);
+          } else {
+            playFlyHeight = 0;
+          }
+          const planeY = groundY + playFlyHeight;
+          const capsuleCY = groundY + PLAYER_CAP_R + PLAYER_CAP_H * 0.5;
+          capsuleMesh.visible =
+            playMovementMode === "capsule" ||
+            (playMovementMode === "fly" && !playPlaneLoaded);
           capsuleMesh.position.set(playerPos.x, capsuleCY, playerPos.z);
           if (mlen > 0) capsuleMesh.rotation.y = Math.atan2(mx, mz) + PI;
 
-          const lookAtY = capsuleCY + 0.6;
+          if (playPlaneRoot) {
+            playPlaneRoot.visible = flying;
+            if (flying) {
+              playPlaneRoot.position.set(playerPos.x, planeY, playerPos.z);
+              if (mlen > 0)
+                playPlaneRoot.rotation.y = Math.atan2(mx, mz) + PI;
+              else playPlaneRoot.rotation.y = capsuleMesh.rotation.y;
+            }
+          }
+
+          const lookAtY =
+            flying ? planeY + 0.45 : capsuleCY + 0.6;
           const hDist = playParams.camDist * Math.cos(camPitch);
           const vDist = playParams.camDist * Math.sin(camPitch);
           camera.position.set(
