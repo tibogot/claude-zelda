@@ -8204,11 +8204,39 @@
         appendChunkTerrainSkirt(geom, mySegments, CONFIG.terrainSkirtDepth);
       }
 
+      /** Hysteresis factor — downgrade requires 20% more distance than upgrade. */
+      const LOD_HYSTERESIS = 0.20;
+
       function pickLodByDistance(distance) {
         for (const level of CONFIG.lodLevels) {
           if (distance <= level.maxDistance) return level;
         }
         return CONFIG.lodLevels[CONFIG.lodLevels.length - 1];
+      }
+
+      /** Pick LOD with hysteresis: upgrading uses normal thresholds,
+       *  downgrading requires crossing threshold + hysteresis band. */
+      function pickLodWithHysteresis(distance, currentSegments) {
+        const levels = CONFIG.lodLevels;
+        // Find the current LOD level index
+        let curIdx = levels.findIndex(l => l.segments === currentSegments);
+        if (curIdx < 0) curIdx = 0;
+
+        // What LOD would a fresh pick give?
+        const freshLod = pickLodByDistance(distance);
+        const freshIdx = levels.indexOf(freshLod);
+
+        // Upgrading (closer = lower index = more detail) — use normal threshold
+        if (freshIdx <= curIdx) return freshLod;
+
+        // Downgrading (farther = higher index = less detail) — require extra distance
+        // Stay at current LOD unless distance exceeds current level's maxDistance + hysteresis
+        const curMax = levels[curIdx].maxDistance;
+        if (curMax === Infinity) return levels[curIdx];
+        if (distance <= curMax * (1 + LOD_HYSTERESIS)) return levels[curIdx];
+
+        // Passed the hysteresis band — allow downgrade
+        return freshLod;
       }
 
       function createChunk(cx, cz, lodLevel) {
@@ -8312,12 +8340,12 @@
 
         const center = chunkCenterWorld(cx, cz);
         const dist = center.distanceTo(_ucAnchor);
-        const lod = PARAMS.terrainLodEnabled
-          ? pickLodByDistance(dist)
-          : CONFIG.lodLevels[0];
 
         const existing = activeChunks.get(key);
         if (!existing) {
+          const lod = PARAMS.terrainLodEnabled
+            ? pickLodByDistance(dist)
+            : CONFIG.lodLevels[0];
           if (_canCreate(lod)) {
             activeChunks.set(key, createChunk(cx, cz, lod));
             dirtyChunks.delete(key);
@@ -8325,6 +8353,11 @@
           }
           return;
         }
+
+        // Use hysteresis for existing chunks to prevent LOD flipping during orbit
+        const lod = PARAMS.terrainLodEnabled
+          ? pickLodWithHysteresis(dist, existing.segments)
+          : CONFIG.lodLevels[0];
 
         if (existing.segments !== lod.segments) {
           if (_canCreate(lod)) {
