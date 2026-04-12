@@ -5845,6 +5845,47 @@
         return geom;
       }
 
+      // ── Geometry pool: reuse disposed geometries instead of clone+GC ──
+      /** Pool of ready-to-reuse geometries with skirts, keyed by segment count. */
+      const _geomPool = new Map(); // segments → BufferGeometry[]
+      const _GEOM_POOL_MAX = 16;  // max pooled per segment count
+
+      /** Template geometries with skirt already sized — clone these for new pool entries. */
+      const _skirtTemplateCache = new Map();
+      function _getSkirtTemplate(segments) {
+        if (_skirtTemplateCache.has(segments)) return _skirtTemplateCache.get(segments);
+        const base = getGeometry(segments).clone();
+        // Build a flat skirt template so buffers are the right size
+        appendChunkTerrainSkirt(base, segments, CONFIG.terrainSkirtDepth);
+        // Store the base vertex count for later use
+        base.userData._baseVertCount = (segments + 1) * (segments + 1);
+        _skirtTemplateCache.set(segments, base);
+        return base;
+      }
+
+      function acquireChunkGeometry(segments) {
+        const pool = _geomPool.get(segments);
+        if (pool && pool.length > 0) {
+          return pool.pop();
+        }
+        // Clone from skirt template — buffers are pre-sized
+        const tmpl = _getSkirtTemplate(segments);
+        const geom = tmpl.clone();
+        geom.userData._baseVertCount = tmpl.userData._baseVertCount;
+        geom.userData.terrainTriCount = tmpl.userData.terrainTriCount;
+        return geom;
+      }
+
+      function releaseChunkGeometry(geom, segments) {
+        let pool = _geomPool.get(segments);
+        if (!pool) { pool = []; _geomPool.set(segments, pool); }
+        if (pool.length < _GEOM_POOL_MAX) {
+          pool.push(geom);
+        } else {
+          geom.dispose();
+        }
+      }
+
       function chunkKey(cx, cz) {
         return `${cx},${cz}`;
       }
@@ -8068,13 +8109,17 @@
        * CCW perimeter walk on Three.js PlaneGeometry (widthSegments = heightSegments = segments).
        * Used to build Unity-style skirts that hide micro-gaps between chunk meshes.
        */
+      const _perimeterRingCache = new Map();
       function getChunkPerimeterRingIndices(segments) {
+        let ring = _perimeterRingCache.get(segments);
+        if (ring) return ring;
         const w = segments + 1;
-        const ring = [];
+        ring = [];
         for (let ix = 0; ix <= segments; ix++) ring.push(ix);
         for (let iy = 1; iy <= segments; iy++) ring.push(iy * w + segments);
         for (let ix = segments - 1; ix >= 0; ix--) ring.push(segments * w + ix);
         for (let iy = segments - 1; iy >= 1; iy--) ring.push(iy * w);
+        _perimeterRingCache.set(segments, ring);
         return ring;
       }
 
@@ -8167,9 +8212,10 @@
       function applyChunkHeightsToGeometry(geom, cx, cz, mySegments) {
         const heights = ensureChunkData(cx, cz);
         const pos = geom.attributes.position;
+        const baseCount = geom.userData._baseVertCount || pos.count;
 
-        // 1) Set positions from this chunk's height field.
-        for (let i = 0; i < pos.count; i++) {
+        // 1) Set positions from this chunk's height field (base vertices only).
+        for (let i = 0; i < baseCount; i++) {
           const localX = pos.getX(i);
           const localZ = pos.getZ(i);
           const u = (localX / CONFIG.chunkSize + 0.5) * CONFIG.dataResolution;
@@ -8193,7 +8239,7 @@
           geom.setAttribute("normal", normalAttr);
         }
         const _n = new THREE.Vector3();
-        for (let i = 0; i < pos.count; i++) {
+        for (let i = 0; i < baseCount; i++) {
           heightfieldNormalAt(cwx + pos.getX(i), cwz + pos.getZ(i), _n);
           normalAttr.setXYZ(i, _n.x, _n.y, _n.z);
         }
@@ -8202,10 +8248,25 @@
         //    polyline so LOD seams are both crack-free and lighting-continuous.
         stitchMeshEdgesToCoarserNeighbors(geom, cx, cz, mySegments);
 
+        // 4) Update skirt vertices in-place (if geometry already has skirt buffers).
+        //    Skirt verts mirror the perimeter ring, dropped by skirtDepth.
+        if (pos.count > baseCount) {
+          const ring = getChunkPerimeterRingIndices(mySegments);
+          const skirtDepth = CONFIG.terrainSkirtDepth;
+          for (let r = 0; r < ring.length; r++) {
+            const ti = ring[r];
+            const bi = baseCount + r;
+            pos.setXYZ(bi, pos.getX(ti), pos.getY(ti) - skirtDepth, pos.getZ(ti));
+            normalAttr.setXYZ(bi, normalAttr.getX(ti), normalAttr.getY(ti), normalAttr.getZ(ti));
+          }
+        } else {
+          // Fallback for geometries without pre-built skirts (e.g. from old clone path)
+          appendChunkTerrainSkirt(geom, mySegments, CONFIG.terrainSkirtDepth);
+        }
+
         pos.needsUpdate = true;
         normalAttr.needsUpdate = true;
-
-        appendChunkTerrainSkirt(geom, mySegments, CONFIG.terrainSkirtDepth);
+        geom.computeBoundingSphere();
       }
 
       /** Hysteresis factor — downgrade requires 20% more distance than upgrade. */
@@ -8245,7 +8306,7 @@
 
       function createChunk(cx, cz, lodLevel) {
         const center = chunkCenterWorld(cx, cz);
-        const geom = getGeometry(lodLevel.segments).clone();
+        const geom = acquireChunkGeometry(lodLevel.segments);
         applyChunkHeightsToGeometry(geom, cx, cz, lodLevel.segments);
 
         const mesh = new THREE.Mesh(
@@ -8280,7 +8341,7 @@
 
       function removeChunk(chunk) {
         scene.remove(chunk.mesh);
-        chunk.mesh.geometry.dispose();
+        releaseChunkGeometry(chunk.mesh.geometry, chunk.segments);
       }
 
       /** Clear so LOD seam pass will rebuild after height / neighbor changes. */
@@ -8454,8 +8515,8 @@
           if (needGeomRebuild) {
             if (stitchRebuilds >= MAX_STITCH_REBUILDS) continue;
             const oldG = chunk.mesh.geometry;
-            oldG.dispose();
-            chunk.mesh.geometry = getGeometry(chunk.segments).clone();
+            releaseChunkGeometry(oldG, chunk.segments);
+            chunk.mesh.geometry = acquireChunkGeometry(chunk.segments);
             applyChunkHeightsToGeometry(
               chunk.mesh.geometry,
               cx,
