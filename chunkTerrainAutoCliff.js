@@ -1,6 +1,6 @@
 /**
  * Auto cliff shading matching splatmap-painter10bvh+post.html:
- * heightTex finite-difference flatness → slope mask, Rock028 triplanar albedo/normal/roughness + AO.
+ * heightTex finite-difference flatness → slope mask, cliff rock triplanar albedo/normal/roughness + AO.
  */
 import * as THREE from "three";
 import {
@@ -56,7 +56,7 @@ function packNormalIntoDataTextureBA(dt, imgEl) {
 }
 
 const ROCK028_RES = 1024;
-const TEX_BASE = "textures/ground_tiles_01_2k";
+const TEX_BASE = "textures/cliff_rocks_07_2k";
 
 /**
  * @returns {Promise<{ colorTex: THREE.Texture, dataTex: THREE.DataTexture }>}
@@ -65,7 +65,7 @@ export function loadRock028Textures() {
   const loader = new THREE.TextureLoader();
   return new Promise((resolve, reject) => {
     const colorTex = loader.load(
-      `${TEX_BASE}/ground_tiles_01_color_2k.png`,
+      `${TEX_BASE}/cliff_rocks_07_basecolor_2k.png`,
       () => {},
       undefined,
       reject,
@@ -88,15 +88,15 @@ export function loadRock028Textures() {
       if (pending === 0) resolve({ colorTex, dataTex });
     };
 
-    loader.load(`${TEX_BASE}/ground_tiles_01_roughness_2k.png`, (t) => {
+    loader.load(`${TEX_BASE}/cliff_rocks_07_roughness_2k.png`, (t) => {
       packChannelIntoDataTexture(dataTex, t.image, 0);
       doneOne();
     });
-    loader.load(`${TEX_BASE}/ground_tiles_01_ambient_occlusion_2k.png`, (t) => {
+    loader.load(`${TEX_BASE}/cliff_rocks_07_ambientocclusion_2k.png`, (t) => {
       packChannelIntoDataTexture(dataTex, t.image, 1);
       doneOne();
     });
-    loader.load(`${TEX_BASE}/ground_tiles_01_normal_gl_2k.png`, (t) => {
+    loader.load(`${TEX_BASE}/cliff_rocks_07_normal_gl_2k.png`, (t) => {
       packNormalIntoDataTextureBA(dataTex, t.image);
       doneOne();
     });
@@ -120,7 +120,7 @@ export function createAutoCliffUniforms() {
 }
 
 /**
- * Shared slope + Rock028 triplanar (painter splatMat). Use inside one Fn(() => { ... }) per material.
+ * Shared slope + cliff-rock triplanar (painter splatMat). Use inside one Fn(() => { ... }) per material.
  */
 export function createCliffShadingContext(
   heightTex,

@@ -1,7 +1,7 @@
 /**
  * Cliff instancer blend material — same idea as splatmap-painter10bvh+post.html cliffBlendMat:
  * procedural ground (painter default gPARAMS / chunkPainterGround stack) on flat tops,
- * Rock028 triplanar on steep faces, slope noise, optional cliff paint layer (R = strength).
+ * Cliff-rock triplanar on steep faces, slope noise, optional cliff paint layer (R = strength).
  */
 import * as THREE from "three";
 import {
