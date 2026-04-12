@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <title>Ultimate Ghibli Tree Architect — Complete Control</title>
 <style>
-    body { margin:0; overflow:hidden; background:#a4d3ff; font-family: sans-serif; }
+    body { margin:0; overflow:hidden; background:#87ceeb; font-family: sans-serif; }
     #panel { position:fixed; top:20px; left:20px; z-index:10; max-height: 90vh; overflow-y: auto; }
 
 </style>
@@ -27,7 +27,13 @@
 
 <script type="module">
 import * as THREE from 'three/webgpu';
-import { vec3, uv, positionLocal, normalLocal, uniform, sin, normalize, mix, texture, modelWorldMatrix, time, smoothstep, color, dot, cameraPosition, clamp, pow, oneMinus, normalWorld } from 'three/tsl';
+import {
+    Fn, float, vec2, vec3, vec4,
+    uv, positionLocal, positionWorld, normalLocal, normalWorld,
+    uniform, attribute, texture, modelWorldMatrix, time,
+    sin, cos, normalize, mix, smoothstep, color, dot, cameraPosition,
+    clamp, pow, oneMinus, add, sub, mul, div, max, min, negate, length,
+} from 'three/tsl';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
@@ -36,23 +42,48 @@ import { Pane } from 'tweakpane';
 
 /** 1. ENGINE SETUP **/
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+scene.background = new THREE.Color(0x87ceeb);
+scene.fog = new THREE.FogExp2(0xacd8f0, 0.018);
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 500);
 camera.position.set(30, 25, 45);
 
 const renderer = new THREE.WebGPURenderer({ antialias: true });
-renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setAnimationLoop(animate);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.transmitted = true;
 document.body.appendChild(renderer.domElement);
+await renderer.init();
+renderer.setAnimationLoop(animate);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 12, 0);
 controls.enableDamping = true;
 
-const sun = new THREE.DirectionalLight(0xffffff, 2.8);
-sun.position.set(15, 30, 15);
+const hemi = new THREE.HemisphereLight(0xb8dfff, 0x3d6b20, 0.85);
+scene.add(hemi);
+
+const sun = new THREE.DirectionalLight(0xfff8e8, 2.35);
+sun.position.set(5, 12, 4);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.near = 0.5;
+sun.shadow.camera.far = 80;
+sun.shadow.camera.left = -22;
+sun.shadow.camera.right = 22;
+sun.shadow.camera.top = 22;
+sun.shadow.camera.bottom = -22;
+sun.shadow.bias = -0.001;
 scene.add(sun);
-scene.add(new THREE.HemisphereLight(0xdef1ff, 0x556633, 1.2));
+
+const groundGeo = new THREE.CircleGeometry(40, 72);
+const groundMat = new THREE.MeshStandardMaterial({ color: 0x4a7c2a, roughness: 0.92, metalness: 0 });
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
 
 /** 2. ALL PARAMETERS RESTORED & EXPANDED **/
 const params = {
@@ -76,16 +107,18 @@ const params = {
     leafDensity: 12,
     clumpRadius: 4.0,
     // Shading
-    alphaCutoff: 0.5,
-    normalBias: 0.8,
-    leafWarp: 0.3,
-    aoStrength: 0.65,
-    sssStrength: 0.9,
-    rimStrength: 2.0,
-    rimPower: 4.0,
+    alphaCutoff: 0.45,
+    normalBias: 0.75,
+    leafWarp: 0.28,
+    colorVar: 0.12,
+    aoStrength: 0.45,
+    sssStrength: 0.65,
+    rimStrength: 0.55,
+    rimPower: 2.8,
     // Wind
-    windStrength: 0.25,
-    windSpeed: 1.8,
+    windStrength: 0.18,
+    windSpeed: 1.0,
+    windMicro: 0.05,
     // Colors
     topColor: '#a8e360',
     bottomColor: '#1d4d22',
@@ -93,11 +126,15 @@ const params = {
     rimColor: '#ffffff',
     useCustomTrunk: false,
     bushMode: false,
-    bushWidth: 5.0,
-    bushHeight: 3.0,
-    bushDensity: 20,
-    bushLeafSize: 3.0,
-    bushClumps: 3,
+    bushWidth: 4.8,
+    bushHeight: 3.2,
+    bushDensity: 500,
+    bushLeafSize: 1.0,
+    bushClumps: 1,
+    bushShell: 0.5,
+    bushShellThick: 0.45,
+    bushScaleVar: 0.35,
+    bushTiltMax: 35,
     trunkColor: '#3d2b1f',
     // Stats (readonly)
     trunkVerts: 0,
@@ -116,40 +153,86 @@ const uRimS = uniform(params.rimStrength);
 const uRimP = uniform(params.rimPower);
 const uWindS = uniform(params.windStrength);
 const uWindSpeed = uniform(params.windSpeed);
+const uWindMicro = uniform(params.windMicro);
+const uColorVar = uniform(params.colorVar);
+const uYMin = uniform(0);
+const uYMax = uniform(12);
+const uCanopyCenter = uniform(new THREE.Vector3(0, 10, 0));
+const uAoRadius = uniform(12);
+const uSunDir = uniform(new THREE.Vector3(5, 12, 4).normalize());
 const uTopC = uniform(color(params.topColor));
 const uBotC = uniform(color(params.bottomColor));
 const uSSSC = uniform(color(params.sssColor));
 const uRimC = uniform(color(params.rimColor));
 const leafMap = texture(new THREE.Texture());
 
-/** 3. THE "SUPER-SHADER" (TSL) **/
-const t = time.mul(uWindSpeed);
+/** 3. LEAF MATERIAL (bounds-aware, per-instance wind + tint) **/
+const aRand = attribute('aRand', 'vec2');
+
 const wPos = modelWorldMatrix.mul(positionLocal);
-
-// Multi-octave wind for fluttering
-const mainWave = sin(t.add(wPos.x.mul(0.12)));
-const flutter = sin(t.mul(4.5).add(wPos.y.mul(0.6))).mul(0.25);
-const windNode = positionLocal.add(vec3(mainWave.add(flutter).mul(uWindS), 0, 0).mul(uv().y));
-
-// Normal logic: Blending leaf plane normal with "Global Sphere" normal
-const canopyCenter = vec3(0, 15, 0); 
-const sphereDir = normalize(wPos.xyz.sub(canopyCenter));
+const sphereDir = normalize(wPos.xyz.sub(uCanopyCenter));
 const warpedNormal = normalize(normalLocal.add(sin(uv().x.mul(10)).mul(uLeafWarp)));
 const finalNormal = normalize(mix(warpedNormal, sphereDir, uNormalBias));
 
-const leafMat = new THREE.MeshStandardNodeMaterial({ side: THREE.DoubleSide, alphaTest: 0.5, transparent: true });
-leafMat.positionNode = windNode;
+const leafPositionNode = Fn(() => {
+    const phase = aRand.x.mul(6.2832);
+    const tipFactor = positionLocal.y.add(0.5);
+    const t = time.mul(uWindSpeed);
+    const sway = sin(t.add(phase)).mul(uWindS).mul(tipFactor);
+    const micro = sin(t.mul(3.1).add(phase.mul(2.6))).mul(uWindMicro).mul(tipFactor);
+    const swayZ = cos(t.mul(uWindSpeed.mul(0.8)).add(phase.mul(1.3))).mul(uWindS.mul(0.5)).mul(tipFactor);
+    return positionLocal.add(vec3(sway.add(micro), float(0), swayZ));
+})();
+
+const leafColorNode = Fn(() => {
+    const h1 = aRand.x;
+    const h2 = aRand.y;
+    const heightFactor = clamp(
+        positionWorld.y.sub(uYMin).div(max(uYMax.sub(uYMin), float(0.001))),
+        float(0), float(1)
+    );
+    let col = mix(uBotC, uTopC, heightFactor);
+    const varMul = h1.mul(uColorVar.mul(2.0)).add(float(1.0).sub(uColorVar));
+    col = col.mul(varMul);
+    const hueShift = h2.sub(0.5).mul(uColorVar.mul(0.4));
+    col = vec3(
+        col.x.add(hueShift.mul(0.3)),
+        col.y,
+        col.z.sub(hueShift.mul(0.2))
+    );
+    const aoHeight = mix(float(1.0).sub(uAO), float(1.0), heightFactor.mul(0.8).add(0.2));
+    col = col.mul(aoHeight);
+    const distC = clamp(length(sub(positionWorld, uCanopyCenter)).div(max(uAoRadius, float(0.001))), float(0), float(1));
+    const aoSphere = mix(float(1.0).sub(uAO), float(1.0), distC);
+    col = col.mul(aoSphere);
+    const backDot = max(dot(negate(uSunDir), normalWorld), float(0));
+    const sss = pow(backDot, float(2.0)).mul(uSSS);
+    col = col.add(uSSSC.mul(sss));
+    const viewDir = normalize(cameraPosition.sub(positionWorld));
+    const rimDot = float(1.0).sub(max(dot(normalWorld, viewDir), float(0)));
+    const rim = pow(rimDot, uRimP).mul(uRimS).mul(uRimC);
+    col = col.add(rim);
+    return clamp(col, float(0), float(2));
+})();
+
+const leafMat = new THREE.MeshStandardNodeMaterial({
+    side: THREE.DoubleSide,
+    transparent: false,
+    alphaTest: 0.5,
+    roughness: 0.88,
+    metalness: 0,
+    depthWrite: true,
+});
+leafMat.envMapIntensity = 0;
+leafMat.positionNode = leafPositionNode;
 leafMat.normalNode = finalNormal;
-
-// AO, SSS, and Rim
-const distCenter = clamp(wPos.xyz.distance(canopyCenter).div(20), 0, 1);
-const ao = mix(uAO.oneMinus(), 1.0, distCenter);
-const sss = pow(clamp(dot(normalWorld, normalize(sun.position)).negate(), 0, 1), 2.0).mul(uSSS);
-const viewDir = normalize(cameraPosition.sub(wPos.xyz));
-const rim = pow(oneMinus(clamp(dot(viewDir, finalNormal), 0, 1)), uRimP).mul(uRimS).mul(uRimC);
-
-leafMat.colorNode = mix(uBotC, uTopC, uv().y).mul(ao).add(uSSSC.mul(sss)).add(rim);
+leafMat.colorNode = leafColorNode;
 leafMat.opacityNode = smoothstep(uAlphaCutoff.sub(0.05), uAlphaCutoff.add(0.05), leafMap.r);
+leafMat.castShadowNode = Fn(() => {
+    const a = smoothstep(uAlphaCutoff.sub(0.05), uAlphaCutoff.add(0.05), leafMap.r);
+    a.lessThan(float(0.5)).discard();
+    return vec4(0, 0, 0, 1);
+})();
 
 /** 4. RECURSIVE ARCHITECT **/
 let trunkGroup = new THREE.Group();
@@ -157,9 +240,64 @@ let leavesMesh;
 let customTrunk;
 scene.add(trunkGroup);
 
+function sampleClusterEllipsoid(c, seedOffset) {
+    let lcg = (seedOffset * 1664525 + 1013904223) >>> 0;
+    const rng = () => { lcg = (lcg * 1664525 + 1013904223) >>> 0; return lcg / 0xffffffff; };
+    const positions = [];
+    const maxTry = c.count * 14;
+    let tries = 0;
+    while (positions.length < c.count && tries++ < maxTry) {
+        const rx = rng() * 2 - 1;
+        const ry = rng() * 2 - 1;
+        const rz = rng() * 2 - 1;
+        const d = Math.sqrt(rx * rx + ry * ry + rz * rz);
+        if (d > 1.0) continue;
+        const innerR = 1.0 - c.shellThick;
+        if (d < innerR && rng() < c.shell) continue;
+        positions.push({
+            x: c.x + rx * c.rx,
+            y: c.y + ry * c.ry,
+            z: c.z + rz * c.rx,
+            leafSize: c.leafSize,
+            scaleVar: c.scaleVar,
+            tiltMax: c.tiltMax,
+        });
+    }
+    return positions;
+}
+
+function updateFoliageBounds(worldPoints) {
+    if (!worldPoints.length) return;
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (const p of worldPoints) {
+        minX = Math.min(minX, p.x); minY = Math.min(minY, p.y); minZ = Math.min(minZ, p.z);
+        maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y); maxZ = Math.max(maxZ, p.z);
+    }
+    uYMin.value = minY - 0.35;
+    uYMax.value = maxY + 0.55;
+    uCanopyCenter.value.set(
+        (minX + maxX) * 0.5,
+        (minY + maxY) * 0.5,
+        (minZ + maxZ) * 0.5
+    );
+    const ext = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 1.0);
+    uAoRadius.value = ext * 0.62;
+}
+
+function setLeafRandomAttribute(geo, count) {
+    const randData = new Float32Array(count * 2);
+    for (let i = 0; i < count * 2; i++) randData[i] = Math.random();
+    geo.setAttribute('aRand', new THREE.InstancedBufferAttribute(randData, 2));
+}
+
 function buildTree() {
     trunkGroup.clear();
-    if (leavesMesh) scene.remove(leavesMesh);
+    if (leavesMesh) {
+        scene.remove(leavesMesh);
+        leavesMesh.geometry.dispose();
+        leavesMesh = null;
+    }
 
     let currentSeed = params.seed;
     const random = () => {
@@ -168,43 +306,68 @@ function buildTree() {
     };
 
     if (params.bushMode) {
-        // Bush mode: no trunk, leaf clumps at ground level
-        const totalLeaves = params.bushClumps * params.bushDensity;
-        const leafGeo = new THREE.PlaneGeometry(params.bushLeafSize, params.bushLeafSize);
-        leavesMesh = new THREE.InstancedMesh(leafGeo, leafMat, totalLeaves);
-        const dummy = new THREE.Object3D();
-        let counter = 0;
-
-        for (let c = 0; c < params.bushClumps; c++) {
-            const clumpAngle = (c / params.bushClumps) * Math.PI * 2 + random() * 0.5;
-            const clumpDist = random() * params.bushWidth * 0.3;
+        const allPos = [];
+        const nClumps = Math.max(1, params.bushClumps);
+        for (let cl = 0; cl < nClumps; cl++) {
+            const clumpAngle = (cl / nClumps) * Math.PI * 2 + random() * 0.45;
+            const clumpDist = random() * params.bushWidth * 0.28;
             const cx = Math.cos(clumpAngle) * clumpDist;
             const cz = Math.sin(clumpAngle) * clumpDist;
+            const c = {
+                x: cx,
+                y: params.bushHeight * 0.5,
+                z: cz,
+                rx: params.bushWidth * 0.48,
+                ry: params.bushHeight * 0.5,
+                count: params.bushDensity,
+                leafSize: params.bushLeafSize,
+                scaleVar: params.bushScaleVar,
+                shell: params.bushShell,
+                shellThick: params.bushShellThick,
+                tiltMax: params.bushTiltMax,
+            };
+            allPos.push(...sampleClusterEllipsoid(c, params.seed + cl * 7919));
+        }
+        if (allPos.length === 0) {
+            try { pane.refresh(); } catch (e) {}
+            return;
+        }
 
-            for (let i = 0; i < params.bushDensity; i++) {
-                const angle = random() * Math.PI * 2;
-                const r = random() * params.bushWidth * 0.5;
-                const yRaw = random() * params.bushHeight;
-                // Hemisphere falloff: leaves denser at bottom, taper toward top
-                const yFactor = 1.0 - (yRaw / params.bushHeight);
-                const hSpread = r * yFactor;
+        let minY = Infinity;
+        allPos.forEach(p => { if (p.y < minY) minY = p.y; });
+        allPos.forEach(p => { p.y -= minY; });
 
-                dummy.position.set(
-                    cx + Math.cos(angle) * hSpread,
-                    yRaw,
-                    cz + Math.sin(angle) * hSpread
-                );
-                dummy.rotation.set(random()*Math.PI, random()*Math.PI, random()*Math.PI);
-                dummy.updateMatrix();
-                leavesMesh.setMatrixAt(counter++, dummy.matrix);
-            }
+        const n = allPos.length;
+        const leafGeo = new THREE.PlaneGeometry(1, 1);
+        setLeafRandomAttribute(leafGeo, n);
+        leavesMesh = new THREE.InstancedMesh(leafGeo, leafMat, n);
+        leavesMesh.castShadow = true;
+        leavesMesh.frustumCulled = false;
+
+        const dummy = new THREE.Object3D();
+        const DEG2RAD = Math.PI / 180;
+        const worldCenters = [];
+        for (let i = 0; i < n; i++) {
+            const p = allPos[i];
+            dummy.position.set(p.x, p.y, p.z);
+            dummy.rotation.order = 'YXZ';
+            dummy.rotation.y = Math.random() * Math.PI * 2;
+            dummy.rotation.x = (Math.random() - 0.5) * p.tiltMax * DEG2RAD * 2;
+            dummy.rotation.z = (Math.random() - 0.5) * p.tiltMax * DEG2RAD * 2;
+            const s = Math.max(0.05, p.leafSize * (1 + (Math.random() - 0.5) * 2 * p.scaleVar));
+            dummy.scale.setScalar(s);
+            dummy.updateMatrix();
+            leavesMesh.setMatrixAt(i, dummy.matrix);
+            worldCenters.push(new THREE.Vector3(p.x, p.y, p.z));
         }
         leavesMesh.instanceMatrix.needsUpdate = true;
         scene.add(leavesMesh);
+        updateFoliageBounds(worldCenters);
+
         params.trunkVerts = 0; params.trunkTris = 0;
-        params.leafInstances = totalLeaves;
-        params.totalTris = totalLeaves * 2;
-        try { pane.refresh(); } catch(e) {}
+        params.leafInstances = n;
+        params.totalTris = n * 2;
+        try { pane.refresh(); } catch (e) {}
         return;
     }
 
@@ -221,6 +384,8 @@ function buildTree() {
             const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: params.trunkColor }));
             mesh.position.copy(pos.clone().add(end).multiplyScalar(0.5));
             mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
             trunkGroup.add(mesh);
 
             for (let i = 0; i < params.children; i++) {
@@ -240,30 +405,38 @@ function buildTree() {
     }
 
     // Leaf Spawning
-    const leafGeo = new THREE.PlaneGeometry(params.leafSize, params.leafSize);
-    leavesMesh = new THREE.InstancedMesh(leafGeo, leafMat, Math.max(1, tips.length) * params.leafDensity);
+    const totalLeaves = Math.max(1, tips.length) * params.leafDensity;
+    const leafGeo = new THREE.PlaneGeometry(1, 1);
+    setLeafRandomAttribute(leafGeo, totalLeaves);
+    leavesMesh = new THREE.InstancedMesh(leafGeo, leafMat, totalLeaves);
+    leavesMesh.castShadow = true;
+    leavesMesh.frustumCulled = false;
     const dummy = new THREE.Object3D();
     let counter = 0;
+    const worldCenters = [];
 
     tips.forEach(tip => {
-        for(let i=0; i < params.leafDensity; i++) {
+        for (let i = 0; i < params.leafDensity; i++) {
             const angle = random() * Math.PI * 2;
             const rBase = random() * params.clumpRadius;
             const verticalSpread = (random() - 0.5) * params.canopyHeight;
-            const horizontalSpread = rBase * (1.0 - (Math.abs(verticalSpread) / (params.canopyHeight/2)) * params.shapeMode);
+            const horizontalSpread = rBase * (1.0 - (Math.abs(verticalSpread) / (params.canopyHeight / 2)) * params.shapeMode);
 
             dummy.position.set(
                 tip.pos.x + Math.cos(angle) * horizontalSpread,
                 tip.pos.y + verticalSpread,
                 tip.pos.z + Math.sin(angle) * horizontalSpread
             );
-            dummy.rotation.set(random()*Math.PI, random()*Math.PI, random()*Math.PI);
+            dummy.rotation.set(random() * Math.PI, random() * Math.PI, random() * Math.PI);
+            dummy.scale.setScalar(params.leafSize);
             dummy.updateMatrix();
             leavesMesh.setMatrixAt(counter++, dummy.matrix);
+            worldCenters.push(dummy.position.clone());
         }
     });
     leavesMesh.instanceMatrix.needsUpdate = true;
     scene.add(leavesMesh);
+    updateFoliageBounds(worldCenters);
 
     // Update stats
     let tv = 0, tt = 0;
@@ -283,12 +456,24 @@ buildTree();
 /** 5. TWEAKPANE (ALL CONTROLS) **/
 const pane = new Pane({ container: document.getElementById("panel") });
 
+function syncCameraForBush() {
+    if (params.bushMode) {
+        controls.target.set(0, 1.2, 0);
+        camera.position.set(7, 4, 10);
+    } else {
+        controls.target.set(0, 12, 0);
+        camera.position.set(30, 25, 45);
+    }
+    controls.update();
+}
+
 // Mode toggle
 pane.addBinding(params, 'bushMode', { label: 'Bush Mode' }).on('change', () => {
     fStruc.hidden = params.bushMode;
     fCanopy.hidden = params.bushMode;
     fBush.hidden = !params.bushMode;
     fExport.hidden = params.bushMode;
+    syncCameraForBush();
     buildTree();
 });
 
@@ -298,9 +483,14 @@ fBush.hidden = true;
 fBush.addBinding(params, 'seed', {min:0, max:9999, step:1, label: 'Seed'}).on('change', buildTree);
 fBush.addBinding(params, 'bushWidth', {min:1, max:15, step:0.1, label: 'Width'}).on('change', buildTree);
 fBush.addBinding(params, 'bushHeight', {min:0.5, max:8, step:0.1, label: 'Height'}).on('change', buildTree);
-fBush.addBinding(params, 'bushLeafSize', {min:0.5, max:8, step:0.1, label: 'Leaf size'}).on('change', buildTree);
-fBush.addBinding(params, 'bushDensity', {min:5, max:80, step:1, label: 'Leaves/clump'}).on('change', buildTree);
+fBush.addBinding(params, 'bushLeafSize', {min:0.05, max:4, step:0.05, label: 'Leaf size'}).on('change', buildTree);
+fBush.addBinding(params, 'bushDensity', {min:20, max:2000, step:10, label: 'Leaves / clump'}).on('change', buildTree);
 fBush.addBinding(params, 'bushClumps', {min:1, max:10, step:1, label: 'Clumps'}).on('change', buildTree);
+fBush.addBlade({ view: 'separator' });
+fBush.addBinding(params, 'bushShell', {min:0, max:1, step:0.01, label: 'Shell bias'}).on('change', buildTree);
+fBush.addBinding(params, 'bushShellThick', {min:0.05, max:0.98, step:0.01, label: 'Shell thickness'}).on('change', buildTree);
+fBush.addBinding(params, 'bushScaleVar', {min:0, max:0.9, step:0.01, label: 'Scale variation'}).on('change', buildTree);
+fBush.addBinding(params, 'bushTiltMax', {min:0, max:90, step:1, label: 'Max tilt (°)'}).on('change', buildTree);
 
 const fStruc = pane.addFolder({ title: 'Tree Skeleton' });
 fStruc.addBinding(params, 'seed', {min:0, max:9999, step:1}).on('change', buildTree);
@@ -326,14 +516,16 @@ const fShading = pane.addFolder({ title: 'Atmospheric Shading' });
 fShading.addBinding(params, 'alphaCutoff', {min:0, max:1}).on('change', v => uAlphaCutoff.value = v.value);
 fShading.addBinding(params, 'normalBias', {min:0, max:1}).on('change', v => uNormalBias.value = v.value);
 fShading.addBinding(params, 'leafWarp', {min:0, max:1}).on('change', v => uLeafWarp.value = v.value);
+fShading.addBinding(params, 'colorVar', {min:0, max:0.6, step:0.01, label: 'Leaf tint variation'}).on('change', v => uColorVar.value = v.value);
 fShading.addBinding(params, 'aoStrength', {min:0, max:1}).on('change', v => uAO.value = v.value);
 fShading.addBinding(params, 'sssStrength', {min:0, max:2}).on('change', v => uSSS.value = v.value);
 fShading.addBinding(params, 'rimStrength', {min:0, max:5}).on('change', v => uRimS.value = v.value);
 fShading.addBinding(params, 'rimPower', {min:1, max:10}).on('change', v => uRimP.value = v.value);
 
 const fWind = pane.addFolder({ title: 'Wind System' });
-fWind.addBinding(params, 'windStrength', {min:0, max:1}).on('change', v => uWindS.value = v.value);
+fWind.addBinding(params, 'windStrength', {min:0, max:0.8, step:0.005, label: 'Strength'}).on('change', v => uWindS.value = v.value);
 fWind.addBinding(params, 'windSpeed', {min:0, max:5}).on('change', v => uWindSpeed.value = v.value);
+fWind.addBinding(params, 'windMicro', {min:0, max:0.3, step:0.005, label: 'Micro sway'}).on('change', v => uWindMicro.value = v.value);
 
 const fColors = pane.addFolder({ title: 'Colors' });
 fColors.addBinding(params, 'topColor');
@@ -363,6 +555,8 @@ fExport.addButton({ title: 'Merge Trunk Geometry' }).on('click', () => {
     const oldChildren = [...trunkGroup.children];
     oldChildren.forEach(c => trunkGroup.remove(c));
     mergedTrunkMesh = new THREE.Mesh(merged, new THREE.MeshStandardMaterial({ color: params.trunkColor }));
+    mergedTrunkMesh.castShadow = true;
+    mergedTrunkMesh.receiveShadow = true;
     trunkGroup.add(mergedTrunkMesh);
     geos.forEach(g => g.dispose());
     alert('Trunk merged into 1 mesh (' + merged.attributes.position.count + ' vertices)');
@@ -412,8 +606,8 @@ function _pickFile(accept, cb) {
     inp.click();
 }
 
-fImport.addButton({ title: 'Load Leaf SDF (PNG)' }).on('click', () => {
-    _pickFile('image/png', file => {
+fImport.addButton({ title: 'Load Leaf texture (PNG / JPG)' }).on('click', () => {
+    _pickFile('image/*', file => {
         params.leafTexFile = file.name;
         const reader = new FileReader();
         reader.onload = ev => {
@@ -435,6 +629,9 @@ fImport.addButton({ title: 'Load Custom Trunk (GLB)' }).on('click', () => {
         loader.load(URL.createObjectURL(file), (gltf) => {
             customTrunk = gltf.scene;
             params.useCustomTrunk = true;
+            customTrunk.traverse(o => {
+                if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; }
+            });
             buildTree();
         });
     });
@@ -475,15 +672,18 @@ function buildPresetData() {
             topColor: params.topColor, bottomColor: params.bottomColor,
             sssColor: params.sssColor, rimColor: params.rimColor,
             alphaCutoff: params.alphaCutoff, normalBias: params.normalBias,
-            leafWarp: params.leafWarp, aoStrength: params.aoStrength,
+            leafWarp: params.leafWarp, colorVar: params.colorVar,
+            aoStrength: params.aoStrength,
             sssStrength: params.sssStrength, rimStrength: params.rimStrength,
             rimPower: params.rimPower,
         },
-        wind: { windStrength: params.windStrength, windSpeed: params.windSpeed },
+        wind: { windStrength: params.windStrength, windSpeed: params.windSpeed, windMicro: params.windMicro },
         bush: {
             bushWidth: params.bushWidth, bushHeight: params.bushHeight,
             bushDensity: params.bushDensity, bushLeafSize: params.bushLeafSize,
             bushClumps: params.bushClumps,
+            bushShell: params.bushShell, bushShellThick: params.bushShellThick,
+            bushScaleVar: params.bushScaleVar, bushTiltMax: params.bushTiltMax,
         },
         leafTexFile: params.leafTexFile,
         bushMode: params.bushMode,
@@ -510,10 +710,12 @@ function applyPresetData(data) {
         uSSS.value = params.sssStrength;
         uRimS.value = params.rimStrength;
         uRimP.value = params.rimPower;
+        uColorVar.value = params.colorVar;
     }
     if (data.wind) {
         if (data.wind.windStrength != null) { params.windStrength = data.wind.windStrength; uWindS.value = data.wind.windStrength; }
         if (data.wind.windSpeed != null) { params.windSpeed = data.wind.windSpeed; uWindSpeed.value = data.wind.windSpeed; }
+        if (data.wind.windMicro != null) { params.windMicro = data.wind.windMicro; uWindMicro.value = data.wind.windMicro; }
     }
     if (data.bush) {
         const b = data.bush;
@@ -526,6 +728,7 @@ function applyPresetData(data) {
         fCanopy.hidden = params.bushMode;
         fBush.hidden = !params.bushMode;
         fExport.hidden = params.bushMode;
+        syncCameraForBush();
     }
     pane.refresh();
     buildTree();
@@ -582,12 +785,19 @@ fPreset.addButton({ title: 'Copy to Clipboard' }).on('click', () => {
 
 function animate() {
     controls.update();
+    uSunDir.value.copy(sun.position).normalize();
     uTopC.value.set(params.topColor);
     uBotC.value.set(params.bottomColor);
     uSSSC.value.set(params.sssColor);
     uRimC.value.set(params.rimColor);
     renderer.render(scene, camera);
 }
+
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
 </script>
 </body>
 </html>
