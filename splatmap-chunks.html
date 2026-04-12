@@ -9839,6 +9839,66 @@
         return null;
       }
 
+      /**
+       * Cheap screen-ray → terrain pick by marching against `getWorldHeight`
+       * (an O(1) grid lookup). Unlike `raycastTerrainPoint` this skips the
+       * per-triangle intersect of active chunk meshes — chunks here don't
+       * have three-mesh-bvh attached, so intersectObjects is brute force and
+       * chokes at pointer-move rates. ~200 height samples ≪ 1 triangle test.
+       * Used by iso-mode click-to-move / hover ring.
+       */
+      const _cheapPickHit = new THREE.Vector3();
+      function pickTerrainFast() {
+        raycaster.setFromCamera(pointerNdc, camera);
+        const origin = raycaster.ray.origin;
+        const dir = raycaster.ray.direction;
+        // Must be pointing downward for a downward-growing ground march to
+        // make sense. Horizontal/upward rays can't hit the terrain from
+        // above so we bail — avoids divide-by-zero and runaway loops.
+        if (dir.y > -1e-4) return null;
+
+        let t = 0.4;
+        let step = 0.4;
+        const MAX_T = 1200;
+        const MAX_STEP = 18;
+        let prevAbove =
+          origin.y - getWorldHeight(origin.x, origin.z) > 0;
+        let prevT = 0;
+        for (let i = 0; i < 240; i++) {
+          const px = origin.x + dir.x * t;
+          const py = origin.y + dir.y * t;
+          const pz = origin.z + dir.z * t;
+          const above = py - getWorldHeight(px, pz) > 0;
+          if (!above && prevAbove) {
+            // Found a crossing between prevT and t — bisect for precision.
+            let lo = prevT;
+            let hi = t;
+            for (let j = 0; j < 12; j++) {
+              const mid = (lo + hi) * 0.5;
+              const mx = origin.x + dir.x * mid;
+              const my = origin.y + dir.y * mid;
+              const mz = origin.z + dir.z * mid;
+              if (my - getWorldHeight(mx, mz) > 0) lo = mid;
+              else hi = mid;
+            }
+            const ft = (lo + hi) * 0.5;
+            _cheapPickHit.set(
+              origin.x + dir.x * ft,
+              origin.y + dir.y * ft,
+              origin.z + dir.z * ft,
+            );
+            return _cheapPickHit;
+          }
+          prevAbove = above;
+          prevT = t;
+          t += step;
+          if (t > MAX_T) break;
+          // Gentle geometric growth — fine near camera, coarse far away.
+          if (step < MAX_STEP) step *= 1.025;
+        }
+        return null;
+      }
+
       function generateRiverMesh(curve, width, segments, heightOffset) {
         const pts = curve.getSpacedPoints(segments);
         const arcLen = [0];
@@ -11026,7 +11086,7 @@
           // sub-modes (follow, iso-fly) ignore pointer move.
           if (playCamView === "iso" && playMovementMode === "capsule") {
             updatePointerNdc(event);
-            const hit = raycastTerrainPoint();
+            const hit = pickTerrainFast();
             if (hit) {
               moveRing.visible = true;
               moveRing.position.set(hit.x, hit.y + 0.08, hit.z);
@@ -11233,7 +11293,7 @@
             event.button === 0
           ) {
             updatePointerNdc(event);
-            const hit = raycastTerrainPoint();
+            const hit = pickTerrainFast();
             if (hit) {
               if (!moveTarget) moveTarget = new THREE.Vector3();
               moveTarget.copy(hit);
