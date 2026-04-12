@@ -268,6 +268,7 @@
         sub,
         add,
         div,
+        mul,
         abs,
         step,
         reflector,
@@ -5143,6 +5144,85 @@
       capsuleMesh.visible = false;
       scene.add(capsuleMesh);
 
+      function createPlayWingLineGradientTexture() {
+        const canvas = document.createElement("canvas");
+        canvas.width = 64;
+        canvas.height = 8;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          const fb = document.createElement("canvas");
+          fb.width = 64;
+          fb.height = 8;
+          return new THREE.CanvasTexture(fb);
+        }
+        const g = ctx.createLinearGradient(0, 0, 64, 0);
+        g.addColorStop(0.0, "rgba(255,255,255,0.35)");
+        g.addColorStop(0.28, "rgba(255,255,255,1)");
+        g.addColorStop(0.72, "rgba(255,255,255,1)");
+        g.addColorStop(1.0, "rgba(255,255,255,0.35)");
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, 64, 8);
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.needsUpdate = true;
+        return tex;
+      }
+      const playWingLineGradientTex = createPlayWingLineGradientTexture();
+      const uWingTipLineTime = uniform(0.0);
+      const uWingTipLineColor = uniform(
+        new THREE.Color(0xffffff).convertSRGBToLinear(),
+      );
+      const uWingTipLineOpacity = uniform(1.0);
+      const playWingTipLineMaskNode = Fn(() => {
+        const v = uv().y;
+        const scroll = v.mul(float(12)).sub(uWingTipLineTime.mul(float(16)));
+        const band = fract(scroll);
+        const pulse = smoothstep(float(0.12), float(0.3), band).mul(
+          float(1).sub(smoothstep(float(0.7), float(0.88), band)),
+        );
+        return max(pulse, float(0.5));
+      })();
+      const playWingTipLineGradNode = texture(playWingLineGradientTex, uv());
+      const playWingTipLineMat = new MeshBasicNodeMaterial({
+        side: THREE.DoubleSide,
+        transparent: true,
+        depthWrite: false,
+        depthTest: false,
+        blending: THREE.AdditiveBlending,
+      });
+      playWingTipLineMat.colorNode = mul(
+        mul(playWingTipLineGradNode.rgb, uWingTipLineColor),
+        playWingTipLineMaskNode.mul(float(1.35)),
+      );
+      playWingTipLineMat.opacityNode = saturate(
+        mul(
+          mul(playWingTipLineGradNode.a, playWingTipLineMaskNode),
+          uWingTipLineOpacity,
+        ).mul(float(1.15)),
+      );
+      const playWingTipLineMeshes = [];
+      function addPlayWingTipRibbon(inner, worldPos, segments, lineLen, lineWid) {
+        const geo = new THREE.PlaneGeometry(lineWid, lineLen, 1, segments);
+        const posA = geo.attributes.position;
+        const base = new Float32Array(posA.count * 3);
+        for (let i = 0; i < posA.count; i++) {
+          base[i * 3] = posA.getX(i);
+          base[i * 3 + 1] = posA.getY(i);
+          base[i * 3 + 2] = posA.getZ(i);
+        }
+        const mesh = new THREE.Mesh(geo, playWingTipLineMat);
+        mesh.frustumCulled = false;
+        mesh.renderOrder = 20;
+        mesh.rotation.x = -PI * 0.5;
+        mesh.userData.wingTipBase = base;
+        mesh.userData.wingTipSegments = segments;
+        mesh.userData.wingPhase = Math.random() * PI * 2;
+        const p = worldPos.clone();
+        inner.worldToLocal(p);
+        mesh.position.copy(p);
+        inner.add(mesh);
+        playWingTipLineMeshes.push(mesh);
+      }
+
       gltfLoader.load(resolveModelUrl(PLAY_PLANE_MODEL), (gltf) => {
         const inner = gltf.scene;
         inner.traverse((o) => {
@@ -5168,6 +5248,50 @@
             -((box.min.z + box.max.z) * 0.5),
           );
         }
+        inner.updateMatrixWorld(true);
+        const wingBox = new THREE.Box3().setFromObject(inner);
+        const wbSz = new THREE.Vector3();
+        wingBox.getSize(wbSz);
+        {
+          const outX = wbSz.x * 0.048;
+          const tipXL = wingBox.min.x - outX;
+          const tipXR = wingBox.max.x + outX;
+          const zAft = wingBox.max.z - wbSz.z * 0.06;
+          const yUpper = wingBox.max.y - wbSz.y * 0.055;
+          const yLower = wingBox.min.y + wbSz.y * 0.2;
+          const segN = 16;
+          const lineLen = Math.max(0.85, wbSz.z * 0.52);
+          const lineWid = Math.max(0.14, wbSz.x * 0.11);
+          addPlayWingTipRibbon(
+            inner,
+            new THREE.Vector3(tipXL, yUpper, zAft),
+            segN,
+            lineLen,
+            lineWid,
+          );
+          addPlayWingTipRibbon(
+            inner,
+            new THREE.Vector3(tipXL, yLower, zAft),
+            segN,
+            lineLen,
+            lineWid,
+          );
+          addPlayWingTipRibbon(
+            inner,
+            new THREE.Vector3(tipXR, yUpper, zAft),
+            segN,
+            lineLen,
+            lineWid,
+          );
+          addPlayWingTipRibbon(
+            inner,
+            new THREE.Vector3(tipXR, yLower, zAft),
+            segN,
+            lineLen,
+            lineWid,
+          );
+        }
+
         playPlaneRoot = new THREE.Group();
         playPlaneRoot.rotation.order = "YXZ";
         playPlaneRoot.add(inner);
@@ -16876,6 +17000,30 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         uFTreeTime.value = appTimeSec;
         uRiverTime.value = appTimeSec;
         uWaterTime.value = appTimeSec;
+        if (playPlaneRoot?.visible && playWingTipLineMeshes.length > 0) {
+          uWingTipLineTime.value = appTimeSec;
+          for (const mesh of playWingTipLineMeshes) {
+            const base = mesh.userData.wingTipBase;
+            if (!base) continue;
+            const posA = mesh.geometry.attributes.position;
+            const segs = mesh.userData.wingTipSegments;
+            const pointsPerRow = segs + 1;
+            const ph = mesh.userData.wingPhase ?? 0;
+            for (let i = 0; i < posA.count; i++) {
+              const seg = i % pointsPerRow;
+              const w =
+                Math.sin(appTimeSec * 3.4 + seg * 0.42 + ph) * 0.016;
+              posA.setXYZ(
+                i,
+                base[i * 3],
+                base[i * 3 + 1] + w,
+                base[i * 3 + 2],
+              );
+            }
+            posA.needsUpdate = true;
+            mesh.geometry.computeBoundingSphere();
+          }
+        }
         if (_rippleBuffer.length > 0) _syncRipples();
         if (_cachedLakeBodies.length > 0 || waterObjects.length > 0) {
           uWCamXZ.value.set(camera.position.x, camera.position.z);
