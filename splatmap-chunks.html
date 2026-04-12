@@ -4448,6 +4448,26 @@
         return out.buffer;
       }
 
+      /** Shallow-merge nested plain objects (for JSON import overlays). */
+      function mergePlainDeep(target, src) {
+        if (!src || typeof src !== "object" || Array.isArray(src)) return;
+        for (const key of Object.keys(src)) {
+          const sv = src[key];
+          if (
+            sv !== null &&
+            typeof sv === "object" &&
+            !Array.isArray(sv) &&
+            target[key] &&
+            typeof target[key] === "object" &&
+            !Array.isArray(target[key])
+          ) {
+            mergePlainDeep(target[key], sv);
+          } else {
+            target[key] = sv;
+          }
+        }
+      }
+
       function exportTerrainJson() {
         const chunkKeys = new Set([
           ...chunkDataMap.keys(),
@@ -4495,11 +4515,15 @@
           };
         }
         const payload = {
-          v: 4,
+          v: 5,
           worldSize: CONFIG.worldSize,
           chunkSize: CONFIG.chunkSize,
           dataResolution: CONFIG.dataResolution,
           splatRes: CONFIG.splatRes,
+          meadow: JSON.parse(JSON.stringify(PARAMS.meadow)),
+          geminiGrassParams: window._geminiGrassParams
+            ? JSON.parse(JSON.stringify(window._geminiGrassParams))
+            : undefined,
           chunks,
           treeLodSettings: {
             lodChunkSize: lodParams.lodChunkSize,
@@ -4670,7 +4694,13 @@
 
       function importTerrainJson(text) {
         const data = JSON.parse(text);
-        if (data.v !== 1 && data.v !== 2 && data.v !== 3 && data.v !== 4)
+        if (
+          data.v !== 1 &&
+          data.v !== 2 &&
+          data.v !== 3 &&
+          data.v !== 4 &&
+          data.v !== 5
+        )
           throw new Error("Unsupported file version");
         if (
           data.worldSize !== CONFIG.worldSize ||
@@ -4956,6 +4986,7 @@
         if (fleurSystem) fleurSystem.syncHeights();
         if (ambientFXSystem) ambientFXSystem.syncHeights();
         syncObjectSlotsHeights();
+        applyImportedGrassTuning(data);
       }
 
       function rebuildAllActiveChunkMeshes() {
@@ -12010,6 +12041,70 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         uInteractionStrength: uniform(_gp.interactionStrength),
       };
 
+      function syncGeminiGrassUniformsFromGp(gp, gu) {
+        gu.uBladeHeight.value = gp.bladeHeight;
+        gu.uGrassDensity.value = gp.grassDensity;
+        gu.uWindSpeed.value = gp.windSpeed;
+        gu.uWindStrength.value = gp.windStrength;
+        gu.uMaxAngle.value = gp.maxAngle;
+        gu.uNaturalLean.value = gp.naturalLean;
+        const wr = (gp.windAngle * PI) / 180;
+        gu.uWindDirX.value = Math.cos(wr);
+        gu.uWindDirZ.value = Math.sin(wr);
+        gu.uWindWaveScale.value = gp.windWaveScale;
+        gu.uWindGust.value = gp.windGust;
+        gu.uBendFocus.value = gp.bendFocus;
+        gu.uStiffness.value = gp.stiffness;
+        gu.uClumpScale.value = gp.clumpScale;
+        gu.uClumpStrength.value = gp.clumpStrength;
+        gu.uCrossed.value = gp.crossed ? 1 : 0;
+        gu.uBladeCol.value.set(gp.bladeColor);
+        gu.uTipCol.value.set(gp.tipColor);
+        gu.uSkyBlend.value = gp.skyBlend;
+        gu.uCylindrical.value = gp.cylindrical;
+        gu.uViewThicken.value = gp.viewThicken;
+        gu.uAoBase.value = gp.aoBase;
+        gu.uAoPower.value = gp.aoPower;
+        gu.uColorVar.value = gp.colorVariation ? 1 : 0;
+        gu.uCvHueSpread.value = gp.cvHueSpread;
+        gu.uCvSatSpread.value = gp.cvSatSpread;
+        gu.uCvDryAmount.value = gp.cvDryAmount;
+        gu.uCvDryCol.value.set(gp.cvDryColor);
+        gu.uBssCol.value.set(gp.bssColor);
+        gu.uBssIntensity.value = gp.bssIntensity;
+        gu.uBssPower.value = gp.bssPower;
+        gu.uFrontScatter.value = gp.frontScatter;
+        gu.uRimSSS.value = gp.rimSSS;
+        gu.uSpecV1Enabled.value = gp.specV1Enabled ? 1 : 0;
+        gu.uSpecV1Intensity.value = gp.specV1Intensity;
+        gu.uSpecV1Col.value.set(gp.specV1Color);
+        gu.uSpecV1Dir.value
+          .set(gp.specV1DirX, gp.specV1DirY, gp.specV1DirZ)
+          .normalize();
+        gu.uSpecV1Power.value = gp.specV1Power;
+        gu.uSpecV2Enabled.value = gp.specV2Enabled ? 1 : 0;
+        gu.uSpecV2Intensity.value = gp.specV2Intensity;
+        gu.uSpecV2Col.value.set(gp.specV2Color);
+        gu.uSpecV2Dir.value
+          .set(gp.specV2DirX, gp.specV2DirY, gp.specV2DirZ)
+          .normalize();
+        gu.uSpecV2NoiseScale.value = gp.specV2NoiseScale;
+        gu.uSpecV2NoiseStr.value = gp.specV2NoiseStr;
+        gu.uSpecV2Power.value = gp.specV2Power;
+        gu.uSpecV2TipBias.value = gp.specV2TipBias;
+        gu.uLodEnabled.value = gp.lodEnabled ? 1 : 0;
+        gu.uLodMidDist.value = gp.lodMidDistance;
+        gu.uLodFarDist.value = gp.lodFarDistance;
+        gu.uLodMaxDist.value = Math.max(
+          gp.lodMaxDistance,
+          gp.lodMegaMaxDistance,
+        );
+        gu.uLodFadeStart.value = gp.lodFadeStart;
+        gu.uLodDebug.value = gp.lodDebug ? 1 : 0;
+        gu.uInteractionRadius.value = gp.interactionRadius;
+        gu.uInteractionStrength.value = gp.interactionStrength;
+      }
+
       const _geminiCtx = {
         ...geminiGrassUniforms,
         heightTex: geminiTerrainOnlyHeightTex,
@@ -12120,6 +12215,30 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         if (oldGeos.geoFar) oldGeos.geoFar.dispose();
         if (oldGeos.geoMega) oldGeos.geoMega.dispose();
       };
+
+      function applyImportedGrassTuning(data) {
+        if (data.meadow && typeof data.meadow === "object") {
+          mergePlainDeep(PARAMS.meadow, data.meadow);
+          chunkMeadowBundle.syncFromParams(PARAMS.meadow);
+          refreshActiveChunkMaterials();
+        }
+        const gp = window._geminiGrassParams;
+        const gu = geminiGrassUniforms;
+        if (
+          data.geminiGrassParams &&
+          typeof data.geminiGrassParams === "object" &&
+          gp &&
+          gu
+        ) {
+          mergePlainDeep(
+            gp,
+            JSON.parse(JSON.stringify(data.geminiGrassParams)),
+          );
+          syncGeminiGrassUniformsFromGp(gp, gu);
+          if (window._geminiRebuildGeos) window._geminiRebuildGeos();
+        }
+        if (editorPane) editorPane.refresh();
+      }
 
       fleurSystem = createFleurSystem(scene, getWorldHeight, () => {
         if (!fleurSystem) return;
