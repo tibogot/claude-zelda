@@ -5206,6 +5206,20 @@
       let camPitch = 0.35;
       let savedCamPos = null;
       let savedTarget = null;
+      /** "follow" | "iso" — toggled with V in play mode. Works for capsule and fly. */
+      let playCamView = "follow";
+      /** Iso view tunables (Diablo/C&C-style tilted top-down). */
+      const ISO_PITCH = 1.0;             // ~57° tilt, not true top-down
+      const ISO_DIST_DEFAULT = 26;
+      const ISO_DIST_MIN = 10;
+      const ISO_DIST_MAX = 70;
+      const ISO_YAW_ROT_SPEED = 1.6;     // rad/s when holding [ or ] (capsule)
+      const ISO_ZOOM_STEP = 0.9;         // multiplicative per wheel tick
+      const ISO_FLY_YAW_RATE = 1.9;      // rad/s plane yaw from A/D in iso fly
+      const ISO_FLY_CLIMB_RATE = 22;     // m/s altitude change from Space/Shift
+      const ISO_FLY_CHASE_SMOOTH = 5.5;  // camera yaw chase stiffness (1/s)
+      let isoYaw = Math.PI / 4;          // 45° classic iso angle
+      let isoDist = ISO_DIST_DEFAULT;
 
       const capsuleGeo = new THREE.CapsuleGeometry(
         PLAYER_CAP_R,
@@ -5492,10 +5506,17 @@
         const el = document.getElementById("mode-badge");
         if (!el) return;
         if (playMode) {
-          el.textContent =
-            playMovementMode === "fly"
-              ? "PLAY FLY  [ mouse · W/S · Q barrel · G walk · F/Esc ]"
-              : "PLAY WALK  [ G fly · F / Esc exit ]";
+          if (playCamView === "iso") {
+            el.textContent =
+              playMovementMode === "fly"
+                ? "PLAY FLY · ISO  [ A/D yaw · W/S thrust · Space/Shift climb · Q barrel · wheel zoom · V follow · G walk · F/Esc ]"
+                : "PLAY WALK · ISO  [ WASD · [ ] rotate · wheel zoom · V follow · G fly · F/Esc ]";
+          } else {
+            el.textContent =
+              playMovementMode === "fly"
+                ? "PLAY FLY  [ mouse · W/S · Q barrel · V iso · G walk · F/Esc ]"
+                : "PLAY WALK  [ V iso · G fly · F / Esc exit ]";
+          }
           el.className = "play";
           return;
         }
@@ -8544,6 +8565,9 @@
         if (playMode) return;
         playMode = true;
         playMovementMode = "capsule";
+        playCamView = "follow";
+        isoYaw = Math.PI / 4;
+        isoDist = ISO_DIST_DEFAULT;
         playFlyHeight = 0;
         PARAMS.mode = "play";
         savedCamPos = camera.position.clone();
@@ -8581,6 +8605,7 @@
         if (!playMode) return;
         playMode = false;
         playMovementMode = "capsule";
+        playCamView = "follow";
         playFlyHeight = 0;
         flyBarrelActive = false;
         flyBarrelPhase = 0;
@@ -10191,7 +10216,14 @@
       });
 
       document.addEventListener("pointerlockchange", () => {
-        if (!document.pointerLockElement && playMode) {
+        // Iso view intentionally releases pointer lock — don't treat that as
+        // an exit signal. Only exit play mode when the user drops out of the
+        // lock while still in follow view (e.g. Esc in follow mode).
+        if (
+          !document.pointerLockElement &&
+          playMode &&
+          playCamView !== "iso"
+        ) {
           exitPlayMode();
           setEditMode("view");
         }
@@ -10229,6 +10261,29 @@
             syncModeBadge();
             return;
           }
+          if (!event.repeat && event.code === "KeyV") {
+            event.preventDefault();
+            playCamView = playCamView === "follow" ? "iso" : "follow";
+            if (playCamView === "iso") {
+              // Release pointer lock so the cursor returns — camera yaw is
+              // fixed in iso, so raw mouse-look has nothing useful to do.
+              // Bracket keys rotate, wheel zooms.
+              if (document.pointerLockElement) document.exitPointerLock();
+              renderer.domElement.style.cursor = "";
+              // Seed iso yaw from the current follow yaw (or plane heading)
+              // so the switch doesn't snap-rotate the world under you.
+              isoYaw =
+                playMovementMode === "fly" && playPlaneLoaded
+                  ? flyHeading
+                  : camYaw;
+            } else {
+              // Back to follow — re-hide cursor and re-acquire pointer lock.
+              renderer.domElement.style.cursor = "none";
+              renderer.domElement.requestPointerLock();
+            }
+            syncModeBadge();
+            return;
+          }
           if (
             !event.repeat &&
             event.code === "KeyQ" &&
@@ -10243,6 +10298,9 @@
           }
           keysHeld[event.code] = true;
           if (event.code.startsWith("Arrow")) event.preventDefault();
+          // Iso mode releases pointer lock, so Space would otherwise
+          // scroll the page. Prevent it throughout play mode.
+          if (event.code === "Space") event.preventDefault();
           if (
             !event.repeat &&
             (event.code === "Escape" || event.code === "KeyF")
@@ -17191,7 +17249,20 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
       renderer.domElement.addEventListener(
         "wheel",
         (e) => {
-          if (playMode) return;
+          if (playMode) {
+            // Iso view: wheel zooms camera distance in/out.
+            if (playCamView === "iso") {
+              e.preventDefault();
+              e.stopPropagation();
+              const factor = e.deltaY < 0 ? ISO_ZOOM_STEP : 1 / ISO_ZOOM_STEP;
+              isoDist = THREE.MathUtils.clamp(
+                isoDist * factor,
+                ISO_DIST_MIN,
+                ISO_DIST_MAX,
+              );
+            }
+            return;
+          }
           if (!e.shiftKey && !e.altKey) return;
           e.preventDefault();
           e.stopPropagation();
@@ -17325,10 +17396,30 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
 
         if (playMode) {
           const flying = playMovementMode === "fly" && playPlaneLoaded;
+          const iso = playCamView === "iso";
           let flyBarrelAdd = 0;
+          // Iso capsule: [ / ] rotate the fixed camera yaw manually.
+          // Iso fly: camera chases flyHeading instead (see below), brackets
+          // would fight the chase so we ignore them there.
+          if (iso && !flying) {
+            if (keysHeld.BracketLeft)
+              isoYaw += ISO_YAW_ROT_SPEED * dtSec;
+            if (keysHeld.BracketRight)
+              isoYaw -= ISO_YAW_ROT_SPEED * dtSec;
+          }
+          // Iso fly: A/D yaw the plane before we build the thrust vector,
+          // so W/S push along the new heading in the same frame.
+          if (flying && iso) {
+            if (keysHeld.KeyA || keysHeld.ArrowLeft)
+              flyHeading += ISO_FLY_YAW_RATE * dtSec;
+            if (keysHeld.KeyD || keysHeld.ArrowRight)
+              flyHeading -= ISO_FLY_YAW_RATE * dtSec;
+          }
           let mx = 0;
           let mz = 0;
           if (flying) {
+            // Both follow-fly and iso-fly thrust along flyHeading. The only
+            // difference is where flyHeading comes from (mouse vs A/D above).
             if (keysHeld.KeyW || keysHeld.ArrowUp) {
               mx -= Math.sin(flyHeading);
               mz -= Math.cos(flyHeading);
@@ -17338,21 +17429,24 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
               mz += Math.cos(flyHeading);
             }
           } else {
+            // Capsule — follow uses camYaw, iso uses the manually-rotated
+            // isoYaw. Both are screen-relative 8-direction movement.
+            const moveYaw = iso ? isoYaw : camYaw;
             if (keysHeld.KeyW || keysHeld.ArrowUp) {
-              mx -= Math.sin(camYaw);
-              mz -= Math.cos(camYaw);
+              mx -= Math.sin(moveYaw);
+              mz -= Math.cos(moveYaw);
             }
             if (keysHeld.KeyS || keysHeld.ArrowDown) {
-              mx += Math.sin(camYaw);
-              mz += Math.cos(camYaw);
+              mx += Math.sin(moveYaw);
+              mz += Math.cos(moveYaw);
             }
             if (keysHeld.KeyA || keysHeld.ArrowLeft) {
-              mx -= Math.cos(camYaw);
-              mz += Math.sin(camYaw);
+              mx -= Math.cos(moveYaw);
+              mz += Math.sin(moveYaw);
             }
             if (keysHeld.KeyD || keysHeld.ArrowRight) {
-              mx += Math.cos(camYaw);
-              mz -= Math.sin(camYaw);
+              mx += Math.cos(moveYaw);
+              mz -= Math.sin(moveYaw);
             }
           }
           const mlen = Math.hypot(mx, mz);
@@ -17387,11 +17481,21 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           playerPos.y = getWorldHeight(playerPos.x, playerPos.z);
           const groundY = playerPos.y;
           if (flying) {
-            playFlyHeight = Math.max(
-              0,
-              playFlyHeight +
-                flyPitch * playParams.flyPitchClimbScale * dtSec,
-            );
+            if (iso) {
+              // Iso fly: Space climbs, Shift descends. No mouse pitch.
+              let climbDelta = 0;
+              if (keysHeld.Space)
+                climbDelta += ISO_FLY_CLIMB_RATE * dtSec;
+              if (keysHeld.ShiftLeft || keysHeld.ShiftRight)
+                climbDelta -= ISO_FLY_CLIMB_RATE * dtSec;
+              playFlyHeight = Math.max(0, playFlyHeight + climbDelta);
+            } else {
+              playFlyHeight = Math.max(
+                0,
+                playFlyHeight +
+                  flyPitch * playParams.flyPitchClimbScale * dtSec,
+              );
+            }
             if (flyBarrelActive) {
               flyBarrelPhase += dtSec / playParams.flyBarrelRollDuration;
               const t = Math.min(1, flyBarrelPhase);
@@ -17428,25 +17532,54 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             playPlaneRoot.visible = flying;
             if (flying) {
               playPlaneRoot.position.set(playerPos.x, planeY, playerPos.z);
-              playPlaneRoot.rotation.set(
-                flyPitch,
-                flyHeading,
-                flyRoll + flyBarrelAdd,
-              );
+              if (iso) {
+                // Top-down arcade plane: flyHeading is already driven by
+                // A/D above. Flatten pitch/roll so it reads from above,
+                // keep barrel roll fx.
+                playPlaneRoot.rotation.set(0, flyHeading, flyBarrelAdd);
+              } else {
+                playPlaneRoot.rotation.set(
+                  flyPitch,
+                  flyHeading,
+                  flyRoll + flyBarrelAdd,
+                );
+              }
             }
           }
 
           const lookAtY =
             flying ? planeY + 0.45 : capsuleCY + 0.6;
-          const camOrbitYaw = flying ? flyHeading : camYaw;
-          const hDist = playParams.camDist * Math.cos(camPitch);
-          const vDist = playParams.camDist * Math.sin(camPitch);
-          camera.position.set(
-            playerPos.x + Math.sin(camOrbitYaw) * hDist,
-            lookAtY + vDist,
-            playerPos.z + Math.cos(camOrbitYaw) * hDist,
-          );
-          camera.lookAt(playerPos.x, lookAtY, playerPos.z);
+          if (iso) {
+            // Fixed-angle tilted top-down camera. For capsule: yaw is
+            // manually rotated via [ / ]. For fly: yaw smoothly chases
+            // flyHeading so the plane always points "up" on screen.
+            if (flying) {
+              let yawDelta = flyHeading - isoYaw;
+              while (yawDelta > Math.PI) yawDelta -= 2 * Math.PI;
+              while (yawDelta < -Math.PI) yawDelta += 2 * Math.PI;
+              const chaseK =
+                1 - Math.exp(-ISO_FLY_CHASE_SMOOTH * Math.min(dtSec, 0.1));
+              isoYaw += yawDelta * chaseK;
+            }
+            const hDistIso = isoDist * Math.cos(ISO_PITCH);
+            const vDistIso = isoDist * Math.sin(ISO_PITCH);
+            camera.position.set(
+              playerPos.x + Math.sin(isoYaw) * hDistIso,
+              lookAtY + vDistIso,
+              playerPos.z + Math.cos(isoYaw) * hDistIso,
+            );
+            camera.lookAt(playerPos.x, lookAtY, playerPos.z);
+          } else {
+            const camOrbitYaw = flying ? flyHeading : camYaw;
+            const hDist = playParams.camDist * Math.cos(camPitch);
+            const vDist = playParams.camDist * Math.sin(camPitch);
+            camera.position.set(
+              playerPos.x + Math.sin(camOrbitYaw) * hDist,
+              lookAtY + vDist,
+              playerPos.z + Math.cos(camOrbitYaw) * hDist,
+            );
+            camera.lookAt(playerPos.x, lookAtY, playerPos.z);
+          }
         } else {
           controls.update();
         }
