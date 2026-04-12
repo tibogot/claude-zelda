@@ -2088,6 +2088,18 @@
         renderer.toneMappingExposure = L.exposure;
       }
 
+      function applyImportedLightSky(data) {
+        const hasLight = data.light && typeof data.light === "object";
+        const hasSky = data.sky && typeof data.sky === "object";
+        if (!hasLight && !hasSky) return;
+        if (hasLight) mergePlainDeep(PARAMS.light, data.light);
+        if (hasSky) mergePlainDeep(PARAMS.sky, data.sky);
+        _lightSkySnap = "";
+        setSkyMode(PARAMS.sky.mode);
+        syncLightAndSkyFromParams();
+        if (PARAMS.sky.mode === "physical") rebuildSkyEnv();
+      }
+
       const worldHalf = CONFIG.worldSize * 0.5;
       const worldBounds = new THREE.Box3(
         new THREE.Vector3(-worldHalf, -1000, -worldHalf),
@@ -4515,11 +4527,13 @@
           };
         }
         const payload = {
-          v: 5,
+          v: 6,
           worldSize: CONFIG.worldSize,
           chunkSize: CONFIG.chunkSize,
           dataResolution: CONFIG.dataResolution,
           splatRes: CONFIG.splatRes,
+          light: JSON.parse(JSON.stringify(PARAMS.light)),
+          sky: JSON.parse(JSON.stringify(PARAMS.sky)),
           meadow: JSON.parse(JSON.stringify(PARAMS.meadow)),
           geminiGrassParams: window._geminiGrassParams
             ? JSON.parse(JSON.stringify(window._geminiGrassParams))
@@ -4699,7 +4713,8 @@
           data.v !== 2 &&
           data.v !== 3 &&
           data.v !== 4 &&
-          data.v !== 5
+          data.v !== 5 &&
+          data.v !== 6
         )
           throw new Error("Unsupported file version");
         if (
@@ -4986,6 +5001,7 @@
         if (fleurSystem) fleurSystem.syncHeights();
         if (ambientFXSystem) ambientFXSystem.syncHeights();
         syncObjectSlotsHeights();
+        applyImportedLightSky(data);
         applyImportedGrassTuning(data);
       }
 
@@ -5177,7 +5193,7 @@
 
       /* ── Wingtip Contrail Trail System ── */
       const TRAIL_SEG = 90;
-      const TRAIL_HALF_W = 0.032;
+      const TRAIL_HALF_W = 0.038;
       const TRAIL_MAX_DIST = 0.6;
       const trailMat = new MeshBasicNodeMaterial({
         side: THREE.DoubleSide,
@@ -5185,9 +5201,19 @@
         depthWrite: false,
         blending: THREE.AdditiveBlending,
       });
-      const _trailAlphaNode = attribute("trailAlpha");
-      trailMat.colorNode = vec3(0.82, 0.94, 1.0);
-      trailMat.opacityNode = mul(_trailAlphaNode, 0.65);
+      /* TSL: all visual logic on GPU */
+      const _trUV = attribute("trailUV");
+      const _trLenT = _trUV.x;                                     // 0 = tip, 1 = tail
+      const _trLenFade = pow(sub(float(1.0), _trLenT), float(1.6));// fade along length
+      const _trEdge = abs(sub(_trUV.y, float(0.5))).mul(float(2)); // 0 center, 1 edge
+      const _trEdgeFade = sub(float(1.0), smoothstep(float(0.15), float(0.95), _trEdge));
+      const _trAlpha = mul(_trLenFade, _trEdgeFade, float(0.72));
+      /* Color: bright white core near tip → cool blue at tail */
+      const _trCoreColor = mix(vec3(1.0, 1.0, 1.0), vec3(0.65, 0.85, 1.0), _trLenT);
+      /* Brighten the center strip for a "hot core" look */
+      const _trCoreBright = sub(float(1.0), smoothstep(float(0.0), float(0.55), _trEdge));
+      trailMat.colorNode = add(_trCoreColor, mul(vec3(0.3, 0.25, 0.2), _trCoreBright));
+      trailMat.opacityNode = _trAlpha;
 
       const wingTrails = [];
       const _trDir = new THREE.Vector3();
@@ -5198,20 +5224,22 @@
       function createWingTrail(localOffset) {
         const vertCount = (TRAIL_SEG + 1) * 2;
         const positions = new Float32Array(vertCount * 3);
-        const alphas = new Float32Array(vertCount);
+        const trailUVs = new Float32Array(vertCount * 2);
         const indices = [];
         for (let i = 0; i < TRAIL_SEG; i++) {
           const v = i * 2;
           indices.push(v, v + 1, v + 2, v + 1, v + 3, v + 2);
         }
         for (let i = 0; i <= TRAIL_SEG; i++) {
-          const a = Math.pow(1 - i / TRAIL_SEG, 1.8);
-          alphas[i * 2] = a;
-          alphas[i * 2 + 1] = a;
+          const u = i / TRAIL_SEG; // 0 = tip, 1 = tail
+          trailUVs[(i * 2) * 2] = u;       // left vert .x
+          trailUVs[(i * 2) * 2 + 1] = 0;   // left vert .y = 0 (edge)
+          trailUVs[(i * 2 + 1) * 2] = u;   // right vert .x
+          trailUVs[(i * 2 + 1) * 2 + 1] = 1; // right vert .y = 1 (edge)
         }
         const geo = new THREE.BufferGeometry();
         geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-        geo.setAttribute("trailAlpha", new THREE.BufferAttribute(alphas, 1));
+        geo.setAttribute("trailUV", new THREE.BufferAttribute(trailUVs, 2));
         geo.setIndex(indices);
         const mesh = new THREE.Mesh(geo, trailMat);
         mesh.frustumCulled = false;
