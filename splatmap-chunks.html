@@ -3972,10 +3972,37 @@
         return { random, tips };
       }
 
+      /** Same ellipsoid + hollow-shell sampler as geminitreeprocedural.html (deterministic LCG). */
+      function _ptreeSampleClusterEllipsoid(c, seedOffset) {
+        let lcg = (seedOffset * 1664525 + 1013904223) >>> 0;
+        const rng = () => {
+          lcg = (lcg * 1664525 + 1013904223) >>> 0;
+          return lcg / 0xffffffff;
+        };
+        const positions = [];
+        const maxTry = c.count * 14;
+        let tries = 0;
+        while (positions.length < c.count && tries++ < maxTry) {
+          const rx = rng() * 2 - 1;
+          const ry = rng() * 2 - 1;
+          const rz = rng() * 2 - 1;
+          const d = Math.sqrt(rx * rx + ry * ry + rz * rz);
+          if (d > 1.0) continue;
+          const innerR = 1.0 - c.shellThick;
+          if (d < innerR && rng() < c.shell) continue;
+          positions.push({
+            x: c.x + rx * c.rx,
+            y: c.y + ry * c.ry,
+            z: c.z + rz * c.rx,
+          });
+        }
+        return positions;
+      }
+
       function _ptreeSampleLeaves(preset) {
         const p = preset.trunk;
         const c = preset.canopy;
-        if (!p || !c) return [];
+        if (!p) return [];
 
         const bushMode = preset.bushMode === true;
 
@@ -3986,32 +4013,90 @@
             return x - Math.floor(x);
           };
           const bush = preset.bush || {};
-          const bw = bush.bushWidth || 5;
-          const bh = bush.bushHeight || 3;
-          const bd = bush.bushDensity || 20;
-          const bs = bush.bushLeafSize || 3;
-          const bc = bush.bushClumps || 3;
-          const leaves = [];
-          for (let ci = 0; ci < bc; ci++) {
-            const clumpAngle = (ci / bc) * Math.PI * 2 + random() * 0.5;
-            const clumpDist = random() * bw * 0.3;
+          const bw = bush.bushWidth ?? 5;
+          const bh = bush.bushHeight ?? 3;
+          const bd = bush.bushDensity ?? 500;
+          const bs = bush.bushLeafSize ?? 1;
+          const bc = Math.max(1, bush.bushClumps ?? 1);
+          const shell = bush.bushShell ?? 0.5;
+          const shellThick = bush.bushShellThick ?? 0.45;
+          const scaleVar = bush.bushScaleVar ?? 0.35;
+          const tiltMaxDeg = bush.bushTiltMax ?? 35;
+          const tiltRad = tiltMaxDeg * (Math.PI / 180);
+          const allPos = [];
+          for (let cl = 0; cl < bc; cl++) {
+            const clumpAngle = (cl / bc) * Math.PI * 2 + random() * 0.45;
+            const clumpDist = random() * bw * 0.28;
             const cx = Math.cos(clumpAngle) * clumpDist;
             const cz = Math.sin(clumpAngle) * clumpDist;
-            for (let i = 0; i < bd; i++) {
-              const angle = random() * Math.PI * 2;
-              const r = random() * bw * 0.5;
-              const yRaw = random() * bh;
-              const hSpread = r * (1.0 - yRaw / bh);
-              leaves.push({
-                lx: cx + Math.cos(angle) * hSpread,
-                ly: yRaw,
-                lz: cz + Math.sin(angle) * hSpread,
-                leafSize: bs,
-              });
-            }
+            const ell = {
+              x: cx,
+              y: bh * 0.5,
+              z: cz,
+              rx: bw * 0.48,
+              ry: bh * 0.5,
+              count: bd,
+              shell,
+              shellThick,
+            };
+            allPos.push(..._ptreeSampleClusterEllipsoid(ell, p.seed + cl * 7919));
           }
-          return leaves;
+          if (allPos.length === 0) return [];
+          let minY = Infinity;
+          allPos.forEach((pos) => {
+            if (pos.y < minY) minY = pos.y;
+          });
+          return allPos.map((pos) => {
+            const t = Math.sin(
+              (p.seed * 0.001 +
+                pos.x * 12.9898 +
+                (pos.y - minY) * 78.233 +
+                pos.z * 37.719) *
+                43758.5453,
+            );
+            const jitter = t - Math.floor(t) - 0.5;
+            const leafSize = Math.max(
+              0.05,
+              bs * (1 + jitter * 2 * scaleVar),
+            );
+            const h0 = Math.sin(
+              (p.seed * 0.02 +
+                pos.x * 19.19 +
+                pos.y * 47.17 +
+                pos.z * 13.23) *
+                104729.0,
+            );
+            const h1 = Math.sin(
+              (p.seed * 0.03 +
+                pos.x * 23.11 +
+                pos.y * 55.03 +
+                pos.z * 29.41) *
+                93001.0,
+            );
+            const h2 = Math.sin(
+              (p.seed * 0.04 +
+                pos.x * 31.07 +
+                pos.y * 67.91 +
+                pos.z * 41.13) *
+                81799.0,
+            );
+            const u0 = h0 - Math.floor(h0);
+            const u1 = h1 - Math.floor(h1);
+            const u2 = h2 - Math.floor(h2);
+            return {
+              lx: pos.x,
+              ly: pos.y - minY,
+              lz: pos.z,
+              leafSize,
+              bushLeaf: true,
+              rotX: (u1 - 0.5) * 2 * tiltRad,
+              rotY: u0 * Math.PI * 2,
+              rotZ: (u2 - 0.5) * 2 * tiltRad,
+            };
+          });
         }
+
+        if (!c) return [];
 
         const { random, tips } = _ptreeGrowTipsWithSeed(preset);
         const leaves = [];
@@ -7185,11 +7270,17 @@
               lcy += wy;
               lcz += wz;
               dummy.position.set(wx, wy, wz);
-              dummy.rotation.set(
-                Math.random() * Math.PI,
-                Math.random() * Math.PI,
-                Math.random() * Math.PI,
-              );
+              if (l.bushLeaf === true) {
+                dummy.rotation.order = "YXZ";
+                dummy.rotation.set(l.rotX, l.rotY, l.rotZ);
+              } else {
+                dummy.rotation.order = "XYZ";
+                dummy.rotation.set(
+                  Math.random() * Math.PI,
+                  Math.random() * Math.PI,
+                  Math.random() * Math.PI,
+                );
+              }
               const s = Math.max(
                 0.05,
                 l.leafSize * p.scale * quadScaleMul,
