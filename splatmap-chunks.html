@@ -341,6 +341,12 @@
         imgTexSlotIndex: 1,
         /** Paint [P]: meadow density (TSL) | splat RGB | image slots. U cycles targets. */
         paintLayerTarget: "meadow",
+        /** Organic brush mask: 0 = solid radial disk, 1 = fully carved by fbm noise. */
+        paintNoiseAmount: 0,
+        /** Spatial frequency of the mask noise in world units — larger = chunkier splats. */
+        paintNoiseScale: 0.08,
+        /** fbm octaves for the mask noise. */
+        paintNoiseOctaves: 3,
         /** Painter-style meadow proc (chunkMeadowTsl.js) — synced to shared TSL uniforms. */
         meadow: (() => {
           const m = JSON.parse(JSON.stringify(MEADOW_DEFAULT_PARAMS));
@@ -597,6 +603,8 @@
         rampPointA: null,
         paintErase: false,
         paintChannel: 0,
+        /** Per-stroke random offset so repeated clicks get different noise patterns. */
+        paintNoiseSeed: 0,
         /** "meadow" | "splat" | "img" — synced with PARAMS.paintLayerTarget after init. */
         paintLayer: "meadow",
         hasBrushHit: false,
@@ -9532,6 +9540,40 @@
         }
       }
 
+      /** Cheap deterministic 2D hash → [0, 1). Used by the paint mask fbm. */
+      function _paintHash2(xi, yi) {
+        let h = (xi * 374761393 + yi * 668265263) | 0;
+        h = ((h ^ (h >>> 13)) * 1274126177) | 0;
+        return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+      }
+      function _paintValueNoise2D(x, y) {
+        const xi = Math.floor(x);
+        const yi = Math.floor(y);
+        const xf = x - xi;
+        const yf = y - yi;
+        const u = xf * xf * (3 - 2 * xf);
+        const v = yf * yf * (3 - 2 * yf);
+        const a = _paintHash2(xi, yi);
+        const b = _paintHash2(xi + 1, yi);
+        const c = _paintHash2(xi, yi + 1);
+        const d = _paintHash2(xi + 1, yi + 1);
+        return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
+      }
+      /** 2D fbm in [0,1], octaves ∈ {1..8}. */
+      function _paintFbm2D(x, y, octaves) {
+        let n = 0;
+        let amp = 0.5;
+        let freq = 1;
+        let norm = 0;
+        for (let i = 0; i < octaves; i++) {
+          n += _paintValueNoise2D(x * freq, y * freq) * amp;
+          norm += amp;
+          amp *= 0.5;
+          freq *= 2;
+        }
+        return n / norm;
+      }
+
       function applyPaintAtWorld(center, erase) {
         const R = CONFIG.paint.radius;
         const res = CONFIG.splatRes;
@@ -9547,6 +9589,10 @@
         const layer = editState.paintLayer;
         const useImg = layer === "img";
         const useMeadow = layer === "meadow";
+        const noiseAmt = THREE.MathUtils.clamp(PARAMS.paintNoiseAmount, 0, 1);
+        const noiseScale = PARAMS.paintNoiseScale;
+        const noiseOct = Math.max(1, PARAMS.paintNoiseOctaves | 0);
+        const noiseSeed = editState.paintNoiseSeed;
 
         for (let cz = minCz; cz <= maxCz; cz++) {
           for (let cx = minCx; cx <= maxCx; cx++) {
@@ -9577,7 +9623,16 @@
                 const dist = Math.hypot(dx, dz);
                 if (dist > R) continue;
                 const falloff = 1 - dist / R;
-                const delta = (erase ? -1 : 1) * flowBase * falloff;
+                let mask = falloff;
+                if (noiseAmt > 0) {
+                  const n = _paintFbm2D(
+                    (wx + noiseSeed) * noiseScale,
+                    (wz + noiseSeed) * noiseScale,
+                    noiseOct,
+                  );
+                  mask = falloff * (1 - noiseAmt + noiseAmt * n);
+                }
+                const delta = (erase ? -1 : 1) * flowBase * mask;
                 const i = (py * res + px) * 4;
                 if (useMeadow) {
                   data[i] = THREE.MathUtils.clamp(data[i] + delta, 0, 255);
@@ -11194,6 +11249,7 @@
           editState.isPointerDown = true;
           editState.pointerAction = "paint";
           editState.paintErase = event.shiftKey;
+          editState.paintNoiseSeed = Math.random() * 10000;
           controls.enabled = false;
           if (hit) applyPaintAtWorld(hit, editState.paintErase);
           return;
@@ -12890,6 +12946,24 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         brushFolder.addBinding(PARAMS, "paintBrush", {
           label: "Gemini brush",
           options: { Smooth: "smooth", Smear: "smear" },
+        });
+        brushFolder.addBinding(PARAMS, "paintNoiseAmount", {
+          label: "Organic mask",
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+        brushFolder.addBinding(PARAMS, "paintNoiseScale", {
+          label: "Mask scale",
+          min: 0.005,
+          max: 0.5,
+          step: 0.005,
+        });
+        brushFolder.addBinding(PARAMS, "paintNoiseOctaves", {
+          label: "Mask octaves",
+          min: 1,
+          max: 8,
+          step: 1,
         });
         editState.paintLayer = PARAMS.paintLayerTarget;
         brushFolder
