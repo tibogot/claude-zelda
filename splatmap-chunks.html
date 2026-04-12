@@ -1124,6 +1124,31 @@
         return mesh;
       });
 
+      /* Upgrade halation + ghosts with the hand-authored three.js PNGs.
+       * We replace the whole material (clean TSL recompile) and copy the
+       * existing uniform values across so tweakpane controls stay live. */
+      function _swapFlareTexture(mesh, newTex, colorHex) {
+        newTex.colorSpace = THREE.SRGBColorSpace;
+        newTex.needsUpdate = true;
+        const oldMat = mesh.material;
+        const newMat = _makeFlareMat(newTex, colorHex);
+        newMat.userData.uCol.value.copy(oldMat.userData.uCol.value);
+        newMat.userData.uInt.value = oldMat.userData.uInt.value;
+        mesh.material = newMat;
+        oldMat.dispose();
+      }
+      {
+        const loader = new THREE.TextureLoader();
+        loader.load("textures/lensflare0.png", (tex) => {
+          _swapFlareTexture(_lfHalation, tex, PARAMS.lensFlare.halationColor);
+        });
+        loader.load("textures/lensflare3.png", (tex) => {
+          for (const g of _lfGhosts) {
+            _swapFlareTexture(g, tex, g.userData.def.color);
+          }
+        });
+      }
+
       /* Lens dirt — full-screen additive, brightness driven by sun proximity */
       const _lfDirtMat = _makeFlareMat(_lfDirtTex, "#ffffff");
       const _lfDirt = new THREE.Mesh(
@@ -1200,8 +1225,8 @@
         _lfHalation.position.set(sunWX, sunWY, Z);
         const halScale = p.halationSize * halfH * 1.4;
         _lfHalation.scale.set(halScale, halScale, 1);
-        _lfHalationMat.userData.uInt.value = master * screenVis * 1.4;
-        _lfHalationMat.userData.uCol.value
+        _lfHalation.material.userData.uInt.value = master * screenVis * 1.4;
+        _lfHalation.material.userData.uCol.value
           .set(p.halationColor)
           .convertSRGBToLinear();
 
@@ -1212,9 +1237,9 @@
           halfH * 0.12,
           1,
         );
-        _lfStreakMat.userData.uInt.value =
+        _lfStreak.material.userData.uInt.value =
           master * screenVis * p.streakOpacity;
-        _lfStreakMat.userData.uCol.value
+        _lfStreak.material.userData.uCol.value
           .set(p.streakColor)
           .convertSRGBToLinear();
 
@@ -1235,7 +1260,7 @@
         /* Lens dirt — full-screen, brightens with sun proximity */
         _lfDirt.position.set(0, 0, Z);
         _lfDirt.scale.set(halfW * 2, halfH * 2, 1);
-        _lfDirtMat.userData.uInt.value =
+        _lfDirt.material.userData.uInt.value =
           master * screenVis * p.dirtOpacity * 0.9;
       }
 
