@@ -63,6 +63,8 @@ export function createCliffInstancer(scene, options = {}) {
       _tmp.multiplyMatrices(M, type.boxCenterMatrix);
       type.hitboxIM.setMatrixAt(instIdx, _tmp);
       type.hitboxIM.instanceMatrix.needsUpdate = true;
+      type.hitboxIM.boundingSphere = null;
+      type.hitboxIM.boundingBox = null;
     }
   }
 
@@ -85,6 +87,8 @@ export function createCliffInstancer(scene, options = {}) {
         type.hitboxIM.setMatrixAt(i, _tmp);
       }
       type.hitboxIM.instanceMatrix.needsUpdate = true;
+      type.hitboxIM.boundingSphere = null;
+      type.hitboxIM.boundingBox = null;
     }
   }
 
@@ -206,6 +210,8 @@ export function createCliffInstancer(scene, options = {}) {
         _tmp.multiplyMatrices(M, type.boxCenterMatrix);
         type.hitboxIM.setMatrixAt(idx, _tmp);
         type.hitboxIM.instanceMatrix.needsUpdate = true;
+        type.hitboxIM.boundingSphere = null;
+        type.hitboxIM.boundingBox = null;
       }
       return true;
     },
