@@ -4554,13 +4554,15 @@
           };
         }
         const payload = {
-          v: 6,
+          v: 7,
           worldSize: CONFIG.worldSize,
           chunkSize: CONFIG.chunkSize,
           dataResolution: CONFIG.dataResolution,
           splatRes: CONFIG.splatRes,
           light: JSON.parse(JSON.stringify(PARAMS.light)),
           sky: JSON.parse(JSON.stringify(PARAMS.sky)),
+          ocean: JSON.parse(JSON.stringify(PARAMS.ocean)),
+          water: JSON.parse(JSON.stringify(PARAMS.water)),
           meadow: JSON.parse(JSON.stringify(PARAMS.meadow)),
           geminiGrassParams: window._geminiGrassParams
             ? JSON.parse(JSON.stringify(window._geminiGrassParams))
@@ -4741,7 +4743,8 @@
           data.v !== 3 &&
           data.v !== 4 &&
           data.v !== 5 &&
-          data.v !== 6
+          data.v !== 6 &&
+          data.v !== 7
         )
           throw new Error("Unsupported file version");
         if (
@@ -5029,6 +5032,7 @@
         if (ambientFXSystem) ambientFXSystem.syncHeights();
         syncObjectSlotsHeights();
         applyImportedLightSky(data);
+        applyImportedWaterOcean(data);
         applyImportedGrassTuning(data);
       }
 
@@ -11780,6 +11784,22 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           opacity: PARAMS.water.opacity,
           foamColor: PARAMS.water.foamColor,
         });
+      }
+
+      function applyImportedWaterOcean(data) {
+        const hasO = data.ocean && typeof data.ocean === "object";
+        const hasW = data.water && typeof data.water === "object";
+        if (!hasO && !hasW) return;
+        if (hasO) mergePlainDeep(PARAMS.ocean, data.ocean);
+        if (hasW) mergePlainDeep(PARAMS.water, data.water);
+        oceanWater.position.y = PARAMS.ocean.oceanY;
+        seabedMesh.position.y = PARAMS.ocean.oceanY - 3.5;
+        uReflStrength.value = PARAMS.ocean.reflectionStrength;
+        setWaterStyle(PARAMS.ocean.stylized);
+        setWaterReflections(PARAMS.ocean.reflections);
+        syncOceanMat();
+        syncWaterBodyMat();
+        if (editorPane) editorPane.refresh();
       }
 
       function getWaterRoot(object) {
