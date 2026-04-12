@@ -18,19 +18,15 @@ import {
   vec3,
   mix,
   texture,
-  positionWorld,
   positionLocal,
-  smoothstep,
-  pow,
+  positionWorld,
   clamp,
-  sub,
   max,
   sqrt,
   uniform,
   step,
 } from "three/tsl";
 import { normalMap } from "three/tsl";
-import { perlinNoise2D, fbmPerlin2D } from "./tsl-noise.js";
 import { createCliffShadingContext } from "./chunkTerrainAutoCliff.js";
 import {
   applyImageSlotAlbedoAndAO,
@@ -38,10 +34,6 @@ import {
   createImageSlotNormalNode,
   evaluateImageSlotNormalRaw,
 } from "./chunkTerrainImageSlotsTsl.js";
-
-function toLinearColor(hex) {
-  return new THREE.Color(hex).convertSRGBToLinear();
-}
 
 /** 1×1 black RGBA placeholder so TextureNodes have a valid initial binding. */
 function makePlaceholderTex() {
@@ -53,17 +45,6 @@ function makePlaceholderTex() {
   return t;
 }
 
-/** Matches painter `groundLayerMask` for noiseType perlin + optional FBM. */
-const proceduralLayerMask = Fn(
-  ([p, useFbm, octaves, lacunarity, gain, maskLow, maskHigh, maskSharpness, strength]) => {
-    const nSingle = perlinNoise2D(p);
-    const nFbm = fbmPerlin2D(p, octaves, lacunarity, gain);
-    const n = mix(nSingle, nFbm, useFbm);
-    const raw = smoothstep(maskLow, maskHigh, n);
-    return pow(max(raw, float(0.0001)), maskSharpness).mul(strength);
-  },
-);
-
 /**
  * Creates ONE shared TSL ground material. Per-chunk textures (splat, imgWeight, meadow)
  * are bound via returned TextureNode references — swap `.value` in onBeforeRender.
@@ -73,6 +54,7 @@ const proceduralLayerMask = Fn(
  * @param {null | { heightTex, rockColorTex, rockDataTex, cliffU, worldSize, worldHalf, htexRes }} [cliffDeps]
  * @param {object[] | null} [imageSlots] — from createChunkImageSlotSystem().slots
  * @param {null | { meadowProc: object }} [meadowBundle] — from createMeadowTslBundle()
+ * @param {null | { groundProc: Function }} [groundBundle] — from createGroundTslBundle(); when present, replaces baked base+layer1+layer2 with live uniforms
  * @returns {{ material, splatTexNode, imgWeightTexNode, meadowTexNode }}
  */
 export function createChunkPainterGroundMaterial(
@@ -81,48 +63,12 @@ export function createChunkPainterGroundMaterial(
   cliffDeps = null,
   imageSlots = null,
   meadowBundle = null,
+  groundBundle = null,
 ) {
-  const baseColor = opts.baseColor ?? "#74CA5E";
-  const brightness = opts.brightness ?? 1.3;
-  const contrast = opts.contrast ?? 0.95;
   const roughness = opts.roughness ?? 0.9;
   const metalness = opts.metalness ?? 0;
   const envMapIntensity = opts.envMapIntensity ?? 0;
 
-  const L1 = {
-    enable: opts.layer1?.enable ?? true,
-    color: opts.layer1?.color ?? opts.layer1Color ?? "#2a4518",
-    strength: opts.layer1?.strength ?? opts.layer1Strength ?? 0.4,
-    useFbm: opts.layer1?.useFbm ?? true,
-    octaves: opts.layer1?.octaves ?? 3,
-    lacunarity: opts.layer1?.lacunarity ?? 2.0,
-    gain: opts.layer1?.gain ?? 0.5,
-    scale: opts.layer1?.scale ?? opts.layer1Scale ?? 0.012,
-    offsetX: opts.layer1?.offsetX ?? opts.layer1OffX ?? 0,
-    offsetY: opts.layer1?.offsetY ?? opts.layer1OffZ ?? 0,
-    maskLow: opts.layer1?.maskLow ?? opts.maskLow ?? 0.35,
-    maskHigh: opts.layer1?.maskHigh ?? opts.maskHigh ?? 0.8,
-    maskSharpness: opts.layer1?.maskSharpness ?? opts.maskSharpness ?? 1.0,
-  };
-  const L2 = {
-    enable: opts.layer2?.enable ?? false,
-    color: opts.layer2?.color ?? "#5aaa30",
-    strength: opts.layer2?.strength ?? 0.4,
-    useFbm: opts.layer2?.useFbm ?? true,
-    octaves: opts.layer2?.octaves ?? 2.5,
-    lacunarity: opts.layer2?.lacunarity ?? 2.2,
-    gain: opts.layer2?.gain ?? 0.5,
-    scale: opts.layer2?.scale ?? 0.04,
-    offsetX: opts.layer2?.offsetX ?? 13.7,
-    offsetY: opts.layer2?.offsetY ?? 31.1,
-    maskLow: opts.layer2?.maskLow ?? 0.4,
-    maskHigh: opts.layer2?.maskHigh ?? 0.75,
-    maskSharpness: opts.layer2?.maskSharpness ?? 1.0,
-  };
-
-  const uBase = uniform(toLinearColor(baseColor));
-  const uL1c = uniform(toLinearColor(L1.color));
-  const uL2c = uniform(toLinearColor(L2.color));
   const cs = float(chunkSize);
 
   const mat = new THREE.MeshStandardNodeMaterial({
@@ -153,47 +99,7 @@ export function createChunkPainterGroundMaterial(
   const meadowTexNode = meadowBundle ? texture(makePlaceholderTex(), splatUV) : null;
 
   mat.colorNode = Fn(() => {
-    const wxz = positionWorld.xz;
-    const p1 = vec2(
-      wxz.x.mul(float(L1.scale)).add(float(L1.offsetX)),
-      wxz.y.mul(float(L1.scale)).add(float(L1.offsetY)),
-    );
-    const m1 = proceduralLayerMask(
-      p1,
-      float(L1.useFbm ? 1 : 0),
-      float(L1.octaves),
-      float(L1.lacunarity),
-      float(L1.gain),
-      float(L1.maskLow),
-      float(L1.maskHigh),
-      float(L1.maskSharpness),
-      float(L1.strength * (L1.enable ? 1 : 0)),
-    );
-
-    const p2 = vec2(
-      wxz.x.mul(float(L2.scale)).add(float(L2.offsetX)),
-      wxz.y.mul(float(L2.scale)).add(float(L2.offsetY)),
-    );
-    const m2 = proceduralLayerMask(
-      p2,
-      float(L2.useFbm ? 1 : 0),
-      float(L2.octaves),
-      float(L2.lacunarity),
-      float(L2.gain),
-      float(L2.maskLow),
-      float(L2.maskHigh),
-      float(L2.maskSharpness),
-      float(L2.strength * (L2.enable ? 1 : 0)),
-    );
-
-    let terrainCol = uBase;
-    terrainCol = mix(terrainCol, uL1c, m1);
-    terrainCol = mix(terrainCol, uL2c, m2);
-    terrainCol = clamp(
-      sub(terrainCol, float(0.5)).mul(float(contrast)).add(float(0.5)).mul(float(brightness)),
-      float(0),
-      float(1),
-    );
+    let terrainCol = groundBundle.groundProc();
 
     // Splat blend — uses shared splatTexNode
     const s = splatTexNode;
