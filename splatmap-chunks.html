@@ -539,6 +539,19 @@
         /** Place mode [ O ] — hand-placed cliff meshes (splatmap-painter) */
         cliffModel: 0,
         sinkOffset: 2,
+        /**
+         * Optional `models/tank_compressed.glb` demo. When disabled: not parented to the scene and
+         * `updateDemoTank` returns immediately (no height samples, no matrix work). GLB loads only
+         * the first time you enable it.
+         */
+        demoTank: {
+          enabled: false,
+          speed: 4.2,
+          steerResponse: 2.4,
+          scaleMul: 1,
+          yOffset: 0.06,
+          alignSpeed: 10,
+        },
       };
 
       const TERRAIN_SURFACE_LABEL = {
@@ -5981,6 +5994,176 @@
       function getWorldHeight(worldX, worldZ) {
         if (bvhBaked) return bvhHeightSample(worldX, worldZ);
         return getChunkHeightfieldHeight(worldX, worldZ);
+      }
+
+      const _tankUp = new THREE.Vector3();
+      const _tankRight = new THREE.Vector3();
+      const _tankFlatFwd = new THREE.Vector3();
+      const _tankFwd = new THREE.Vector3();
+      const _tankMat = new THREE.Matrix4();
+      const _tankQuatTarget = new THREE.Quaternion();
+      const _tankBoxCenter = new THREE.Vector3();
+      const _tankBoxSize = new THREE.Vector3();
+      const demoTankState = {
+        root: null,
+        visual: null,
+        loadPromise: null,
+        baseScale: 1,
+        x: 0,
+        z: 0,
+        yaw: 0,
+        targetX: 0,
+        targetZ: 0,
+        nextRetargetSec: 0,
+      };
+
+      function pickDemoTankTarget() {
+        const m = worldHalf * 0.55;
+        demoTankState.targetX = (Math.random() * 2 - 1) * m;
+        demoTankState.targetZ = (Math.random() * 2 - 1) * m;
+      }
+
+      function ensureDemoTankLoaded() {
+        if (demoTankState.root) return Promise.resolve(demoTankState.root);
+        if (!demoTankState.loadPromise) {
+          demoTankState.loadPromise = gltfLoader
+            .loadAsync(resolveModelUrl("models/tank_compressed.glb"))
+            .then((gltf) => {
+              const wrap = new THREE.Group();
+              const vis = gltf.scene;
+              vis.traverse((o) => {
+                if (o.isMesh) {
+                  o.castShadow = true;
+                  o.receiveShadow = true;
+                }
+              });
+              wrap.add(vis);
+              const box = new THREE.Box3().setFromObject(vis);
+              box.getCenter(_tankBoxCenter);
+              vis.position.sub(_tankBoxCenter);
+              box.getSize(_tankBoxSize);
+              const maxDim = Math.max(
+                _tankBoxSize.x,
+                _tankBoxSize.y,
+                _tankBoxSize.z,
+                1e-4,
+              );
+              const wantLen = 2.0;
+              demoTankState.baseScale = wantLen / maxDim;
+              vis.scale.setScalar(
+                demoTankState.baseScale * PARAMS.demoTank.scaleMul,
+              );
+              demoTankState.root = wrap;
+              demoTankState.visual = vis;
+              return wrap;
+            })
+            .catch((err) => {
+              console.warn("Demo tank: models/tank_compressed.glb failed to load", err);
+              demoTankState.loadPromise = null;
+              throw err;
+            });
+        }
+        return demoTankState.loadPromise;
+      }
+
+      function syncDemoTankEnabled() {
+        if (!PARAMS.demoTank.enabled) {
+          if (demoTankState.root && demoTankState.root.parent) {
+            scene.remove(demoTankState.root);
+          }
+          return;
+        }
+        ensureDemoTankLoaded()
+          .then((root) => {
+            if (!PARAMS.demoTank.enabled) return;
+            if (!root.parent) {
+              demoTankState.x = 0;
+              demoTankState.z = worldHalf * 0.12;
+              demoTankState.yaw = Math.PI * 0.25;
+              pickDemoTankTarget();
+              demoTankState.nextRetargetSec = appTimeSec + 3;
+              root.position.set(
+                demoTankState.x,
+                getWorldHeight(demoTankState.x, demoTankState.z) +
+                  PARAMS.demoTank.yOffset,
+                demoTankState.z,
+              );
+              scene.add(root);
+            }
+          })
+          .catch(() => {});
+      }
+
+      function updateDemoTank(dt) {
+        const root = demoTankState.root;
+        if (!root || !root.parent) return;
+
+        const wx = demoTankState.x;
+        const wz = demoTankState.z;
+        const dx = demoTankState.targetX - wx;
+        const dz = demoTankState.targetZ - wz;
+        const dist = Math.hypot(dx, dz);
+        if (dist < 10 || appTimeSec > demoTankState.nextRetargetSec) {
+          pickDemoTankTarget();
+          demoTankState.nextRetargetSec = appTimeSec + 4 + Math.random() * 8;
+        }
+
+        const targetYaw = Math.atan2(dx, dz);
+        let dy = targetYaw - demoTankState.yaw;
+        while (dy > Math.PI) dy -= Math.PI * 2;
+        while (dy < -Math.PI) dy += Math.PI * 2;
+        const sr = PARAMS.demoTank.steerResponse;
+        demoTankState.yaw += THREE.MathUtils.clamp(dy, -sr * dt, sr * dt);
+
+        const sp = PARAMS.demoTank.speed;
+        const sinY = Math.sin(demoTankState.yaw);
+        const cosY = Math.cos(demoTankState.yaw);
+        demoTankState.x += sinY * sp * dt;
+        demoTankState.z += cosY * sp * dt;
+        const pad = 6;
+        demoTankState.x = THREE.MathUtils.clamp(
+          demoTankState.x,
+          worldBounds.min.x + pad,
+          worldBounds.max.x - pad,
+        );
+        demoTankState.z = THREE.MathUtils.clamp(
+          demoTankState.z,
+          worldBounds.min.z + pad,
+          worldBounds.max.z - pad,
+        );
+
+        const hx = demoTankState.x;
+        const hz = demoTankState.z;
+        const eps = 0.85;
+        const hC = getWorldHeight(hx, hz);
+        const hxp = getWorldHeight(hx + eps, hz);
+        const hxm = getWorldHeight(hx - eps, hz);
+        const hzp = getWorldHeight(hx, hz + eps);
+        const hzm = getWorldHeight(hx, hz - eps);
+        _tankUp.set(-(hxp - hxm), 2 * eps, -(hzp - hzm)).normalize();
+        if (!Number.isFinite(_tankUp.y) || _tankUp.y < 0.15) {
+          _tankUp.set(0, 1, 0);
+        }
+
+        _tankFlatFwd.set(sinY, 0, cosY);
+        _tankRight.crossVectors(_tankFlatFwd, _tankUp);
+        if (_tankRight.lengthSq() < 1e-10) {
+          _tankRight.set(1, 0, 0);
+        } else {
+          _tankRight.normalize();
+        }
+        _tankFwd.crossVectors(_tankUp, _tankRight).normalize();
+        _tankMat.makeBasis(_tankRight, _tankUp, _tankFwd);
+        _tankQuatTarget.setFromRotationMatrix(_tankMat);
+        const alignT = 1 - Math.exp(-PARAMS.demoTank.alignSpeed * dt);
+        root.quaternion.slerp(_tankQuatTarget, alignT);
+        root.position.set(hx, hC + PARAMS.demoTank.yOffset, hz);
+
+        const vis = demoTankState.visual;
+        if (vis) {
+          const s = demoTankState.baseScale * PARAMS.demoTank.scaleMul;
+          vis.scale.setScalar(s);
+        }
       }
 
       function syncObjectSlotsHeights() {
@@ -11753,6 +11936,53 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             syncBarrierOverlayFromParams();
           });
 
+        const demoTankFolder = pane.addFolder({
+          title: "Demo tank (tank_compressed.glb)",
+          expanded: false,
+        });
+        demoTankFolder
+          .addBinding(PARAMS.demoTank, "enabled", {
+            label: "Enable",
+          })
+          .on("change", () => {
+            syncDemoTankEnabled();
+          });
+        demoTankFolder
+          .addBinding(PARAMS.demoTank, "speed", {
+            label: "Drive speed",
+            min: 0.5,
+            max: 18,
+            step: 0.1,
+          });
+        demoTankFolder
+          .addBinding(PARAMS.demoTank, "steerResponse", {
+            label: "Steer response",
+            min: 0.5,
+            max: 6,
+            step: 0.1,
+          });
+        demoTankFolder
+          .addBinding(PARAMS.demoTank, "scaleMul", {
+            label: "Scale ×",
+            min: 0.2,
+            max: 3,
+            step: 0.05,
+          });
+        demoTankFolder
+          .addBinding(PARAMS.demoTank, "yOffset", {
+            label: "Ground offset",
+            min: -0.5,
+            max: 1.5,
+            step: 0.01,
+          });
+        demoTankFolder
+          .addBinding(PARAMS.demoTank, "alignSpeed", {
+            label: "Tilt smoothing",
+            min: 1,
+            max: 24,
+            step: 0.5,
+          });
+
         const cliffFolder = pane.addFolder({
           title: "Auto cliff (painter Rock028)",
           expanded: false,
@@ -16448,6 +16678,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
 
         const dtSec = Math.min(0.05, dt * 0.001);
         appTimeSec += dtSec;
+        if (PARAMS.demoTank.enabled) updateDemoTank(dtSec);
         uFTreeTime.value = appTimeSec;
         uRiverTime.value = appTimeSec;
         uWaterTime.value = appTimeSec;
