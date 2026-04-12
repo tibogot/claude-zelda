@@ -289,7 +289,12 @@
       import { createCliffInstancerBlendMaterial } from "./cliffInstancerBlendMaterial.js";
       import { Pane } from "tweakpane";
       import { createTileMaterial } from "./tileMaterial.js";
-      import { createChunkPainterGroundMaterial, setupTslGroundMeshSwap, createSharedImgTexMaterial, setupImgTexMeshSwap } from "./chunkPainterGroundMaterial.js";
+      import {
+        createChunkPainterGroundMaterial,
+        setupTslGroundMeshSwap,
+        createSharedImgTexMaterial,
+        setupImgTexMeshSwap,
+      } from "./chunkPainterGroundMaterial.js";
       import {
         loadRock028Textures,
         createAutoCliffUniforms,
@@ -2710,13 +2715,18 @@
         if (sharedImgTex) sharedImgTex.material.dispose();
         syncCliffUniformsFromParams();
         const deps = buildCliffDeps();
-        sharedImgTex = createSharedImgTexMaterial(CONFIG.chunkSize, CONFIG.worldSize, deps);
+        sharedImgTex = createSharedImgTexMaterial(
+          CONFIG.chunkSize,
+          CONFIG.worldSize,
+          deps,
+        );
         syncImgTexSlot();
       }
 
       function syncImgTexSlot() {
         if (!sharedImgTex) return;
-        const slot = chunkImageSlots[PARAMS.imgTexSlotIndex] || chunkImageSlots[0];
+        const slot =
+          chunkImageSlots[PARAMS.imgTexSlotIndex] || chunkImageSlots[0];
         sharedImgTex.albedoTexNode.value = slot.albedoTex;
         sharedImgTex.ormTexNode.value = slot.ormTex;
         sharedImgTex.uUVScale.value = slot.uvScale;
@@ -3452,7 +3462,7 @@
         if (segments >= 32) return 0.78;
         if (segments >= 16) return 0.58;
         if (segments >= 8) return 0.42;
-        return 0.30;
+        return 0.3;
       }
 
       function getOrCreateDebugChunkMaterial(cx, cz, lodLevel) {
@@ -3481,8 +3491,7 @@
           return ensureChunkSplat(cx, cz).tileMaterial;
         if (PARAMS.terrainSurface === "tslGround")
           return sharedTslGround.material;
-        if (PARAMS.terrainSurface === "imgTex")
-          return sharedImgTex.material;
+        if (PARAMS.terrainSurface === "imgTex") return sharedImgTex.material;
         return ensureChunkSplat(cx, cz).material;
       }
 
@@ -3993,10 +4002,7 @@
       function _ptreeBakeChunkTrunkMatrices(slot, chunk) {
         if (!chunk?.ims || !chunk.positions) return;
         const maxN = Math.min(chunk.positions.length, PTREE_MAX_PER_CHUNK);
-        if (
-          !chunk.ptreeBaked ||
-          chunk.ptreeBaked.length !== chunk.ims.length
-        ) {
+        if (!chunk.ptreeBaked || chunk.ptreeBaked.length !== chunk.ims.length) {
           chunk.ptreeBaked = chunk.ims.map(
             () => new Float32Array(PTREE_MAX_PER_CHUNK * 16),
           );
@@ -4122,7 +4128,9 @@
               shell,
               shellThick,
             };
-            allPos.push(..._ptreeSampleClusterEllipsoid(ell, p.seed + cl * 7919));
+            allPos.push(
+              ..._ptreeSampleClusterEllipsoid(ell, p.seed + cl * 7919),
+            );
           }
           if (allPos.length === 0) return [];
           let minY = Infinity;
@@ -4138,29 +4146,17 @@
                 43758.5453,
             );
             const jitter = t - Math.floor(t) - 0.5;
-            const leafSize = Math.max(
-              0.05,
-              bs * (1 + jitter * 2 * scaleVar),
-            );
+            const leafSize = Math.max(0.05, bs * (1 + jitter * 2 * scaleVar));
             const h0 = Math.sin(
-              (p.seed * 0.02 +
-                pos.x * 19.19 +
-                pos.y * 47.17 +
-                pos.z * 13.23) *
+              (p.seed * 0.02 + pos.x * 19.19 + pos.y * 47.17 + pos.z * 13.23) *
                 104729.0,
             );
             const h1 = Math.sin(
-              (p.seed * 0.03 +
-                pos.x * 23.11 +
-                pos.y * 55.03 +
-                pos.z * 29.41) *
+              (p.seed * 0.03 + pos.x * 23.11 + pos.y * 55.03 + pos.z * 29.41) *
                 93001.0,
             );
             const h2 = Math.sin(
-              (p.seed * 0.04 +
-                pos.x * 31.07 +
-                pos.y * 67.91 +
-                pos.z * 41.13) *
+              (p.seed * 0.04 + pos.x * 31.07 + pos.y * 67.91 + pos.z * 41.13) *
                 81799.0,
             );
             const u0 = h0 - Math.floor(h0);
@@ -4458,8 +4454,11 @@
         meadowTex.flipY = false;
         meadowTex.colorSpace = THREE.NoColorSpace;
         meadowTex.needsUpdate = true;
-        const { material, tileMaterial } =
-          createSplatMaterialsForTex(tex, imgTex, meadowTex);
+        const { material, tileMaterial } = createSplatMaterialsForTex(
+          tex,
+          imgTex,
+          meadowTex,
+        );
         b = {
           canvas,
           ctx,
@@ -5087,13 +5086,21 @@
           _matSwapActive = true;
           const SWAP_PER_FRAME = 4;
           const step = () => {
-            for (let i = 0; i < SWAP_PER_FRAME && _matSwapQueue.length > 0; i++) {
+            for (
+              let i = 0;
+              i < SWAP_PER_FRAME && _matSwapQueue.length > 0;
+              i++
+            ) {
               const chunk = _matSwapQueue.shift();
               if (!activeChunks.has(chunkKey(chunk.cx, chunk.cz))) continue;
               const lod =
                 CONFIG.lodLevels.find((l) => l.segments === chunk.segments) ??
                 CONFIG.lodLevels[0];
-              chunk.mesh.material = resolveTerrainMaterial(chunk.cx, chunk.cz, lod);
+              chunk.mesh.material = resolveTerrainMaterial(
+                chunk.cx,
+                chunk.cz,
+                lod,
+              );
             }
             if (_matSwapQueue.length > 0) {
               requestAnimationFrame(step);
@@ -5111,12 +5118,11 @@
         for (const splat of chunkSplatMap.values()) {
           splat.material.dispose();
           splat.tileMaterial.dispose();
-          const { material, tileMaterial } =
-            createSplatMaterialsForTex(
-              splat.tex,
-              splat.imgTex,
-              splat.meadowTex,
-            );
+          const { material, tileMaterial } = createSplatMaterialsForTex(
+            splat.tex,
+            splat.imgTex,
+            splat.meadowTex,
+          );
           splat.material = material;
           splat.tileMaterial = tileMaterial;
         }
@@ -5220,7 +5226,8 @@
       let playFlyHeight = 0;
       let playPlaneRoot = null;
       let playPlaneLoaded = false;
-      const PLAY_PLANE_MODEL = "models/wenning_carsten_gameart_plane_compressed.glb";
+      const PLAY_PLANE_MODEL =
+        "models/wenning_carsten_gameart_plane_compressed.glb";
       const keysHeld = {};
       const playerPos = new THREE.Vector3();
       let camYaw = 0;
@@ -5230,16 +5237,16 @@
       /** "follow" | "iso" — toggled with V in play mode. Works for capsule and fly. */
       let playCamView = "follow";
       /** Iso view tunables (Diablo/C&C-style tilted top-down). */
-      const ISO_PITCH = 1.0;             // ~57° tilt, not true top-down
+      const ISO_PITCH = 1.0; // ~57° tilt, not true top-down
       const ISO_DIST_DEFAULT = 26;
       const ISO_DIST_MIN = 10;
       const ISO_DIST_MAX = 70;
-      const ISO_YAW_ROT_SPEED = 1.6;     // rad/s when holding [ or ] (capsule)
-      const ISO_ZOOM_STEP = 0.9;         // multiplicative per wheel tick
-      const ISO_FLY_YAW_RATE = 1.9;      // rad/s plane yaw from A/D in iso fly
-      const ISO_FLY_CLIMB_RATE = 22;     // m/s altitude change from Space/Shift
-      const ISO_FLY_CHASE_SMOOTH = 5.5;  // camera yaw chase stiffness (1/s)
-      let isoYaw = Math.PI / 4;          // 45° classic iso angle
+      const ISO_YAW_ROT_SPEED = 1.6; // rad/s when holding [ or ] (capsule)
+      const ISO_ZOOM_STEP = 0.9; // multiplicative per wheel tick
+      const ISO_FLY_YAW_RATE = 1.9; // rad/s plane yaw from A/D in iso fly
+      const ISO_FLY_CLIMB_RATE = 22; // m/s altitude change from Space/Shift
+      const ISO_FLY_CHASE_SMOOTH = 5.5; // camera yaw chase stiffness (1/s)
+      let isoYaw = Math.PI / 4; // 45° classic iso angle
       let isoDist = ISO_DIST_DEFAULT;
 
       const capsuleGeo = new THREE.CapsuleGeometry(
@@ -5269,16 +5276,29 @@
       });
       /* TSL: all visual logic on GPU */
       const _trUV = attribute("trailUV");
-      const _trLenT = _trUV.x;                                     // 0 = tip, 1 = tail
-      const _trLenFade = pow(sub(float(1.0), _trLenT), float(1.6));// fade along length
+      const _trLenT = _trUV.x; // 0 = tip, 1 = tail
+      const _trLenFade = pow(sub(float(1.0), _trLenT), float(1.6)); // fade along length
       const _trEdge = abs(sub(_trUV.y, float(0.5))).mul(float(2)); // 0 center, 1 edge
-      const _trEdgeFade = sub(float(1.0), smoothstep(float(0.15), float(0.95), _trEdge));
+      const _trEdgeFade = sub(
+        float(1.0),
+        smoothstep(float(0.15), float(0.95), _trEdge),
+      );
       const _trAlpha = mul(_trLenFade, _trEdgeFade, float(0.72));
       /* Color: bright white core near tip → cool blue at tail */
-      const _trCoreColor = mix(vec3(1.0, 1.0, 1.0), vec3(0.65, 0.85, 1.0), _trLenT);
+      const _trCoreColor = mix(
+        vec3(1.0, 1.0, 1.0),
+        vec3(0.65, 0.85, 1.0),
+        _trLenT,
+      );
       /* Brighten the center strip for a "hot core" look */
-      const _trCoreBright = sub(float(1.0), smoothstep(float(0.0), float(0.55), _trEdge));
-      trailMat.colorNode = add(_trCoreColor, mul(vec3(0.3, 0.25, 0.2), _trCoreBright));
+      const _trCoreBright = sub(
+        float(1.0),
+        smoothstep(float(0.0), float(0.55), _trEdge),
+      );
+      trailMat.colorNode = add(
+        _trCoreColor,
+        mul(vec3(0.3, 0.25, 0.2), _trCoreBright),
+      );
       trailMat.opacityNode = _trAlpha;
 
       const wingTrails = [];
@@ -5298,9 +5318,9 @@
         }
         for (let i = 0; i <= TRAIL_SEG; i++) {
           const u = i / TRAIL_SEG; // 0 = tip, 1 = tail
-          trailUVs[(i * 2) * 2] = u;       // left vert .x
-          trailUVs[(i * 2) * 2 + 1] = 0;   // left vert .y = 0 (edge)
-          trailUVs[(i * 2 + 1) * 2] = u;   // right vert .x
+          trailUVs[i * 2 * 2] = u; // left vert .x
+          trailUVs[i * 2 * 2 + 1] = 0; // left vert .y = 0 (edge)
+          trailUVs[(i * 2 + 1) * 2] = u; // right vert .x
           trailUVs[(i * 2 + 1) * 2 + 1] = 1; // right vert .y = 1 (edge)
         }
         const geo = new THREE.BufferGeometry();
@@ -5342,7 +5362,8 @@
           for (let i = 0; i < n; i++) {
             const p = hist[i];
             if (i < n - 1) _trDir.subVectors(hist[i], hist[i + 1]).normalize();
-            else if (n > 1) _trDir.subVectors(hist[n - 2], hist[n - 1]).normalize();
+            else if (n > 1)
+              _trDir.subVectors(hist[n - 2], hist[n - 1]).normalize();
             else _trDir.set(0, 0, 1);
             _trSide.crossVectors(_trDir, _trUp);
             if (_trSide.lengthSq() < 1e-6) _trSide.set(1, 0, 0);
@@ -5350,8 +5371,18 @@
             const t = i / TRAIL_SEG;
             const w = TRAIL_HALF_W * (1 - t * 0.4);
             const vi = i * 2;
-            pos.setXYZ(vi, p.x - _trSide.x * w, p.y - _trSide.y * w, p.z - _trSide.z * w);
-            pos.setXYZ(vi + 1, p.x + _trSide.x * w, p.y + _trSide.y * w, p.z + _trSide.z * w);
+            pos.setXYZ(
+              vi,
+              p.x - _trSide.x * w,
+              p.y - _trSide.y * w,
+              p.z - _trSide.z * w,
+            );
+            pos.setXYZ(
+              vi + 1,
+              p.x + _trSide.x * w,
+              p.y + _trSide.y * w,
+              p.z + _trSide.z * w,
+            );
           }
           for (let i = n; i <= TRAIL_SEG; i++) {
             const vi = i * 2;
@@ -5384,8 +5415,7 @@
         if (!box0.isEmpty()) {
           const size0 = box0.getSize(new THREE.Vector3());
           const max0 = Math.max(size0.x, size0.y, size0.z);
-          const playPlaneTargetSpan =
-            2.8 * (PLAYER_CAP_H + 2 * PLAYER_CAP_R);
+          const playPlaneTargetSpan = 2.8 * (PLAYER_CAP_H + 2 * PLAYER_CAP_R);
           inner.scale.setScalar(playPlaneTargetSpan / max0);
           inner.updateMatrixWorld(true);
           const box = new THREE.Box3().setFromObject(inner);
@@ -5891,12 +5921,13 @@
       // ── Geometry pool: reuse disposed geometries instead of clone+GC ──
       /** Pool of ready-to-reuse geometries with skirts, keyed by segment count. */
       const _geomPool = new Map(); // segments → BufferGeometry[]
-      const _GEOM_POOL_MAX = 16;  // max pooled per segment count
+      const _GEOM_POOL_MAX = 16; // max pooled per segment count
 
       /** Template geometries with skirt already sized — clone these for new pool entries. */
       const _skirtTemplateCache = new Map();
       function _getSkirtTemplate(segments) {
-        if (_skirtTemplateCache.has(segments)) return _skirtTemplateCache.get(segments);
+        if (_skirtTemplateCache.has(segments))
+          return _skirtTemplateCache.get(segments);
         const base = getGeometry(segments).clone();
         // Build a flat skirt template so buffers are the right size
         appendChunkTerrainSkirt(base, segments, CONFIG.terrainSkirtDepth);
@@ -5921,7 +5952,10 @@
 
       function releaseChunkGeometry(geom, segments) {
         let pool = _geomPool.get(segments);
-        if (!pool) { pool = []; _geomPool.set(segments, pool); }
+        if (!pool) {
+          pool = [];
+          _geomPool.set(segments, pool);
+        }
         if (pool.length < _GEOM_POOL_MAX) {
           pool.push(geom);
         } else {
@@ -6425,7 +6459,10 @@
               return wrap;
             })
             .catch((err) => {
-              console.warn("Demo tank: models/tank_compressed.glb failed to load", err);
+              console.warn(
+                "Demo tank: models/tank_compressed.glb failed to load",
+                err,
+              );
               demoTankState.loadPromise = null;
               throw err;
             });
@@ -6470,9 +6507,7 @@
         const hx = demoTankState.x;
         const hz = demoTankState.z;
         root.rotation.set(0, demoTankState.yaw, 0);
-        vis.scale.setScalar(
-          demoTankState.baseScale * PARAMS.demoTank.scaleMul,
-        );
+        vis.scale.setScalar(demoTankState.baseScale * PARAMS.demoTank.scaleMul);
         root.position.set(hx, 0, hz);
         root.updateMatrixWorld(true);
         _tankWorldBB.setFromObject(vis);
@@ -6488,8 +6523,7 @@
         const root = demoTankState.root;
         if (!root || !root.parent) return;
 
-        const follow =
-          playMode && PARAMS.demoTank.followPlayerInPlay;
+        const follow = playMode && PARAMS.demoTank.followPlayerInPlay;
         const tx = follow ? playerPos.x : demoTankState.targetX;
         const tz = follow ? playerPos.z : demoTankState.targetZ;
         let dx = tx - demoTankState.x;
@@ -6497,10 +6531,7 @@
         let dist = Math.hypot(dx, dz);
 
         if (!follow) {
-          if (
-            dist < 14 ||
-            appTimeSec > demoTankState.nextRetargetSec
-          ) {
+          if (dist < 14 || appTimeSec > demoTankState.nextRetargetSec) {
             pickDemoTankTarget();
             const r0 = PARAMS.demoTank.roamRetargetMin;
             const r1 = PARAMS.demoTank.roamRetargetMax;
@@ -7137,10 +7168,7 @@
         }
         slot.positions.forEach((p) => {
           if (typeof p.rot !== "number" || !Number.isFinite(p.rot)) {
-            p.rot =
-              Math.PI *
-              2 *
-              ((((p.x * 13.7 + p.z * 7.3) % 1) + 1) % 1);
+            p.rot = Math.PI * 2 * ((((p.x * 13.7 + p.z * 7.3) % 1) + 1) % 1);
           }
         });
         slot.positions.forEach((p, i) => {
@@ -7151,9 +7179,7 @@
           const rotY =
             typeof p.rot === "number" && Number.isFinite(p.rot)
               ? p.rot
-              : Math.PI *
-                2 *
-                ((((p.x * 13.7 + p.z * 7.3) % 1) + 1) % 1);
+              : Math.PI * 2 * ((((p.x * 13.7 + p.z * 7.3) % 1) + 1) % 1);
           const s = p.scale;
           _lodTreePos.set(p.x, p.y, p.z);
           _lodTreeQuat.setFromAxisAngle(_lodUpY, rotY);
@@ -7264,9 +7290,7 @@
         const anyLodChunk = LOD_SLOTS.some((s) => s.ready && s.chunks.size > 0);
         const pineSlotEarly = LOD_SLOTS[0];
         const pineApiEarly =
-          pineSlotEarly?.name === "Pine"
-            ? pineSlotEarly.pineImpostorApi
-            : null;
+          pineSlotEarly?.name === "Pine" ? pineSlotEarly.pineImpostorApi : null;
         if (!anyLodChunk) {
           if (pineApiEarly) pineApiEarly.paintFinishImpostorMega(0, 0);
           return;
@@ -7343,10 +7367,7 @@
             totalVisible++;
             const instanceCap = Math.max(
               32,
-              Math.min(
-                8192,
-                Math.floor(lodParams.lodMaxPerChunk) || 1024,
-              ),
+              Math.min(8192, Math.floor(lodParams.lodMaxPerChunk) || 1024),
             );
             for (const p of chunk.positions) {
               const { x, y, z, scale } = p;
@@ -7389,9 +7410,7 @@
                 const rotY =
                   typeof p.rot === "number" && Number.isFinite(p.rot)
                     ? p.rot
-                    : Math.PI *
-                      2 *
-                      ((((x * 13.7 + z * 7.3) % 1) + 1) % 1);
+                    : Math.PI * 2 * ((((x * 13.7 + z * 7.3) % 1) + 1) % 1);
                 const s = scale * lodMeshMul;
                 _lodTreePos.set(x, y, z);
                 _lodTreeScale.set(s, s, s);
@@ -7499,18 +7518,13 @@
               if (ptreeParams.leafDistLod && chunk.leafMeshes.length > 1) {
                 const n1 = ptreeParams.leafLod1Dist;
                 const n2 = ptreeParams.leafLod2Dist;
-                if (
-                  n2 > 0 &&
-                  chunk.leafMeshes.length > 2 &&
-                  dLod >= n2
-                ) {
+                if (n2 > 0 && chunk.leafMeshes.length > 2 && dLod >= n2) {
                   lodIdx = 2;
                 } else if (chunk.leafMeshes.length > 1 && dLod >= n1) {
                   lodIdx = 1;
                 }
               }
-              const sphFr =
-                chunk.leafSpheres?.[lodIdx] ?? chunk.leafSphere;
+              const sphFr = chunk.leafSpheres?.[lodIdx] ?? chunk.leafSphere;
               const leafFr = _ptreeFrustum.intersectsSphere(sphFr);
               for (let L = 0; L < chunk.leafMeshes.length; L++) {
                 const m = chunk.leafMeshes[L];
@@ -7523,7 +7537,8 @@
             const n = Math.min(chunk.positions.length, PTREE_MAX_PER_CHUNK);
             if (
               n > 0 &&
-              (!chunk.ptreeBaked || chunk.ptreeBaked.length !== chunk.ims.length)
+              (!chunk.ptreeBaked ||
+                chunk.ptreeBaked.length !== chunk.ims.length)
             ) {
               _ptreeBakeChunkTrunkMatrices(slot, chunk);
             }
@@ -7562,11 +7577,7 @@
             if (ptreeParams.leafDistLod && slot.leafMeshes.length > 1) {
               const n1 = ptreeParams.leafLod1Dist;
               const n2 = ptreeParams.leafLod2Dist;
-              if (
-                n2 > 0 &&
-                slot.leafMeshes.length > 2 &&
-                dLod >= n2
-              ) {
+              if (n2 > 0 && slot.leafMeshes.length > 2 && dLod >= n2) {
                 lodIdx = 2;
               } else if (slot.leafMeshes.length > 1 && dLod >= n1) {
                 lodIdx = 1;
@@ -7809,9 +7820,7 @@
           slot.uniforms.yMax.value = yMax + 0.5;
         }
         const leafLodTiers = (() => {
-          const tiers = [
-            { subset: localLeaves, mul: 1, shadow: true },
-          ];
+          const tiers = [{ subset: localLeaves, mul: 1, shadow: true }];
           if (!ptreeParams.leafDistLod) return tiers;
           const half = localLeaves.filter((_, i) => (i & 1) === 0);
           if (half.length > 0 && half.length < localLeaves.length) {
@@ -7824,10 +7833,7 @@
           ) {
             const quarter = localLeaves.filter((_, i) => (i & 3) === 0);
             const halfSubset = tiers[1].subset;
-            if (
-              quarter.length > 0 &&
-              quarter.length < halfSubset.length
-            ) {
+            if (quarter.length > 0 && quarter.length < halfSubset.length) {
               tiers.push({
                 subset: quarter,
                 mul: 2,
@@ -7885,10 +7891,7 @@
                   Math.random() * Math.PI,
                 );
               }
-              const s = Math.max(
-                0.05,
-                l.leafSize * p.scale * quadScaleMul,
-              );
+              const s = Math.max(0.05, l.leafSize * p.scale * quadScaleMul);
               dummy.scale.setScalar(s);
               dummy.updateMatrix();
               mesh.setMatrixAt(idx++, dummy.matrix);
@@ -7940,8 +7943,7 @@
           _ptreeUnionLeafSpheres(spheres, envelopeSphere);
           return { meshes, spheres, envelopeSphere };
         }
-        const useChunks =
-          slot.ready && slot.trunkDefs && slot.chunks.size > 0;
+        const useChunks = slot.ready && slot.trunkDefs && slot.chunks.size > 0;
         if (useChunks) {
           for (const chunk of slot.chunks.values()) {
             if (!chunk.leafSphere) chunk.leafSphere = new THREE.Sphere();
@@ -8054,9 +8056,6 @@
         const _cc = chunkCenterWorld(cx, cz);
         const cwx = _cc.x;
         const cwz = _cc.z;
-
-
-
 
         const neighborSeg = (ncx, ncz) =>
           activeChunks.get(chunkKey(ncx, ncz))?.segments;
@@ -8299,8 +8298,18 @@
           for (let r = 0; r < ring.length; r++) {
             const ti = ring[r];
             const bi = baseCount + r;
-            pos.setXYZ(bi, pos.getX(ti), pos.getY(ti) - skirtDepth, pos.getZ(ti));
-            normalAttr.setXYZ(bi, normalAttr.getX(ti), normalAttr.getY(ti), normalAttr.getZ(ti));
+            pos.setXYZ(
+              bi,
+              pos.getX(ti),
+              pos.getY(ti) - skirtDepth,
+              pos.getZ(ti),
+            );
+            normalAttr.setXYZ(
+              bi,
+              normalAttr.getX(ti),
+              normalAttr.getY(ti),
+              normalAttr.getZ(ti),
+            );
           }
         } else {
           // Fallback for geometries without pre-built skirts (e.g. from old clone path)
@@ -8313,7 +8322,7 @@
       }
 
       /** Hysteresis factor — downgrade requires 20% more distance than upgrade. */
-      const LOD_HYSTERESIS = 0.20;
+      const LOD_HYSTERESIS = 0.2;
 
       function pickLodByDistance(distance) {
         for (const level of CONFIG.lodLevels) {
@@ -8327,7 +8336,7 @@
       function pickLodWithHysteresis(distance, currentSegments) {
         const levels = CONFIG.lodLevels;
         // Find the current LOD level index
-        let curIdx = levels.findIndex(l => l.segments === currentSegments);
+        let curIdx = levels.findIndex((l) => l.segments === currentSegments);
         if (curIdx < 0) curIdx = 0;
 
         // What LOD would a fresh pick give?
@@ -8400,7 +8409,12 @@
        * Signature of LOD neighborhood — when unchanged, skip expensive dispose+rebuild seam pass.
        * (Previously we rebuilt every ~120ms on every abutsCoarser chunk → huge idle CPU/GPU cost.)
        */
-      const _stitchDirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+      const _stitchDirs = [
+        [1, 0],
+        [-1, 0],
+        [0, 1],
+        [0, -1],
+      ];
       function computeLodStitchSignature(key, chunk) {
         const { cx, cz } = parseChunkKey(key);
         const maxIdx = getMaxChunkIndex();
@@ -8434,7 +8448,8 @@
       const _UC_CHEAP_THRESHOLD = 8;
 
       function _canCreate(lod) {
-        if (lod.segments <= _UC_CHEAP_THRESHOLD) return _ucCheapCreated < _UC_MAX_CHEAP;
+        if (lod.segments <= _UC_CHEAP_THRESHOLD)
+          return _ucCheapCreated < _UC_MAX_CHEAP;
         return _ucChunksCreated < _UC_MAX_CREATES;
       }
       function _countCreate(lod) {
@@ -8489,8 +8504,12 @@
 
       function updateChunkSet() {
         _ucAnchor.copy(playMode ? playerPos : camera.position);
-        const camChunkX = Math.floor((_ucAnchor.x + worldHalf) / CONFIG.chunkSize);
-        const camChunkZ = Math.floor((_ucAnchor.z + worldHalf) / CONFIG.chunkSize);
+        const camChunkX = Math.floor(
+          (_ucAnchor.x + worldHalf) / CONFIG.chunkSize,
+        );
+        const camChunkZ = Math.floor(
+          (_ucAnchor.z + worldHalf) / CONFIG.chunkSize,
+        );
 
         _neededChunks.clear();
         _ucChunksCreated = 0;
@@ -10288,11 +10307,7 @@
         // Iso view intentionally releases pointer lock — don't treat that as
         // an exit signal. Only exit play mode when the user drops out of the
         // lock while still in follow view (e.g. Esc in follow mode).
-        if (
-          !document.pointerLockElement &&
-          playMode &&
-          playCamView !== "iso"
-        ) {
+        if (!document.pointerLockElement && playMode && playCamView !== "iso") {
           exitPlayMode();
           setEditMode("view");
         }
@@ -10304,7 +10319,8 @@
         if (playMode) {
           if (!event.repeat && event.code === "KeyG") {
             event.preventDefault();
-            playMovementMode = playMovementMode === "capsule" ? "fly" : "capsule";
+            playMovementMode =
+              playMovementMode === "capsule" ? "fly" : "capsule";
             if (playMovementMode === "capsule") {
               playFlyHeight = 0;
               flyPitch = 0;
@@ -10458,7 +10474,13 @@
           refreshActiveChunkMaterials();
         }
         if (event.code === "Backquote") {
-          const surfOrder = ["tile", "tslGround", "splat", "imgTex", "greenGround"];
+          const surfOrder = [
+            "tile",
+            "tslGround",
+            "splat",
+            "imgTex",
+            "greenGround",
+          ];
           const si = surfOrder.indexOf(PARAMS.terrainSurface);
           PARAMS.terrainSurface = surfOrder[(si + 1) % surfOrder.length];
           refreshActiveChunkMaterials();
@@ -11894,7 +11916,9 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         for (const m of lakeBodies) {
           if (!m.visible) continue;
           if (!m.geometry.boundingSphere) m.geometry.computeBoundingSphere();
-          _reflSphere.copy(m.geometry.boundingSphere).applyMatrix4(m.matrixWorld);
+          _reflSphere
+            .copy(m.geometry.boundingSphere)
+            .applyMatrix4(m.matrixWorld);
           if (_reflFrustum.intersectsSphere(_reflSphere)) {
             anyVisible = true;
             break;
@@ -12120,7 +12144,9 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
 
           cliffPaintCanvas = document.createElement("canvas");
           cliffPaintCanvas.width = cliffPaintCanvas.height = HTEX_RES;
-          cliffPaintCtx = cliffPaintCanvas.getContext("2d", { willReadFrequently: true });
+          cliffPaintCtx = cliffPaintCanvas.getContext("2d", {
+            willReadFrequently: true,
+          });
           cliffPaintCtx.fillStyle = "#000000";
           cliffPaintCtx.fillRect(0, 0, HTEX_RES, HTEX_RES);
           cliffPaintTex = new THREE.CanvasTexture(cliffPaintCanvas);
@@ -12550,57 +12576,57 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
       ambientFXSystem.setRingsVisible(false);
 
       {
-        const pane = new Pane({ title: "Terrain studio" });
+        const pane = new Pane({ title: "Chunk terrain" });
         editorPane = pane;
 
-        const projectFolder = pane.addFolder({ title: "Project", expanded: true });
-        projectFolder.addButton({ title: "💾  Save All" }).on("click", () => {
+        const sceneFolder = pane.addFolder({ title: "Scene", expanded: true });
+        sceneFolder.addButton({ title: "💾  Save All" }).on("click", () => {
           exportTerrainJson();
         });
-        projectFolder
+        sceneFolder
           .addButton({ title: "📂  Load All…" })
           .on("click", () =>
             document.getElementById("load-terrain-input").click(),
           );
-        projectFolder.addBlade({ view: "separator" });
-        projectFolder.addButton({ title: "Undo terrain (Ctrl+Z)" }).on("click", () => {
+        pane.addBlade({ view: "separator" });
+
+        pane.addButton({ title: "Undo terrain (Ctrl+Z)" }).on("click", () => {
           undoTerrainEdit();
           if (editorPane) editorPane.refresh();
         });
-        projectFolder.addButton({ title: "Redo terrain (Ctrl+Y)" }).on("click", () => {
+        pane.addButton({ title: "Redo terrain (Ctrl+Y)" }).on("click", () => {
           redoTerrainEdit();
           if (editorPane) editorPane.refresh();
         });
 
-        const workflowFolder = pane.addFolder({ title: "Workflow", expanded: true });
-        workflowFolder
+        pane
           .addBinding(PARAMS, "mode", {
-            label: "Tool",
+            label: "Mode",
             options: {
-              "Navigate · Esc": "view",
-              "Sculpt height · S": "sculpt",
-              "Paint textures · P": "paint",
-              "Grass (Gemini) · G": "geminigrass",
-              "Grass on cliffs": "geminicliffgrass",
-              "Flowers · M": "fleurs",
-              "Ambient FX · X": "ambientfx",
-              "Barriers (walkable)": "barrier",
-              "Holes (cut terrain)": "hole",
-              "Trees (LOD) · J": "pinelod",
-              "Trees (procedural)": "proctrees",
-              "Foliage meshes · N": "foliage",
-              "Objects · E": "objects",
-              "Props · I": "props",
-              "Spline · K": "spline",
-              "River · V": "river",
-              "Water · W": "water",
-              "Path · L": "path",
-              "Decals · D": "decal",
-              "Waterfall · H": "waterfall",
-              "Place / move · O": "place",
-              "Cliff pieces · C": "cliffs",
-              "Cliff paint mask · B": "cliffpaint",
-              "Play / test · F": "play",
+              "View [Esc]": "view",
+              "Sculpt [S]": "sculpt",
+              "Paint [P]": "paint",
+              "Gemini Grass [G]": "geminigrass",
+              "Gemini Cliff Grass": "geminicliffgrass",
+              "Fleurs [M]": "fleurs",
+              "Ambient FX [X]": "ambientfx",
+              Barrier: "barrier",
+              Hole: "hole",
+              "Tree LOD [J]": "pinelod",
+              "Proc Trees": "proctrees",
+              "Foliage [N]": "foliage",
+              "Objects [E]": "objects",
+              "Props [I]": "props",
+              "Spline [K]": "spline",
+              "River [V]": "river",
+              "Water [W]": "water",
+              "Path [L]": "path",
+              "Decal [D]": "decal",
+              "Waterfall [H]": "waterfall",
+              "Place [O]": "place",
+              "Cliffs [C]": "cliffs",
+              "Cliff Paint [B]": "cliffpaint",
+              "Play [F]": "play",
             },
           })
           .on("change", (ev) => {
@@ -12612,30 +12638,26 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             setEditMode(ev.value);
           });
 
-        const terrainFolder = pane.addFolder({
-          title: "Terrain display & performance",
-          expanded: true,
-        });
-        terrainFolder
+        pane
           .addBinding(PARAMS, "terrainLodEnabled", {
-            label: "Distance LOD (terrain)",
+            label: "Terrain distance LOD",
           })
           .on("change", () => updateChunkSet());
-        terrainFolder
+        pane
           .addBinding(PARAMS, "terrainChunkCulling", {
-            label: "Hide chunks behind camera (near)",
+            label: "Terrain chunk culling (near cam)",
           })
           .on("change", () => updateChunkSet());
 
-        terrainFolder
+        pane
           .addBinding(PARAMS, "terrainSurface", {
-            label: "Surface shading",
+            label: "Terrain surface",
             options: {
-              "Debug grid": "tile",
-              "Procedural ground (TSL)": "tslGround",
-              "Blend maps (splat)": "splat",
-              "Your images (slots)": "imgTex",
-              "Debug green (seams)": "greenGround",
+              "Tile grid": "tile",
+              "Painter TSL ground": "tslGround",
+              "Splat paint": "splat",
+              "Image texture": "imgTex",
+              "Green seam-test": "greenGround",
             },
           })
           .on("change", () => refreshActiveChunkMaterials());
@@ -12644,27 +12666,27 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         chunkImageSlots.forEach((slot, idx) => {
           imgTexSlotOptions[`${idx + 1}. ${slot.name}`] = idx;
         });
-        terrainFolder
+        pane
           .addBinding(PARAMS, "imgTexSlotIndex", {
-            label: "Active image slot (when using images)",
+            label: "Image tex slot",
             options: imgTexSlotOptions,
           })
           .on("change", () => {
             syncImgTexSlot();
-            if (PARAMS.terrainSurface === "imgTex") refreshActiveChunkMaterials();
+            if (PARAMS.terrainSurface === "imgTex")
+              refreshActiveChunkMaterials();
           });
 
-        terrainFolder
+        pane
           .addBinding(barrierPARAMS, "showOverlay", {
-            label: "Show barrier mask overlay",
+            label: "Barrier overlay",
           })
           .on("change", () => {
             syncBarrierOverlayFromParams();
           });
 
-        const previewFolder = pane.addFolder({ title: "Preview", expanded: false });
-        const demoTankFolder = previewFolder.addFolder({
-          title: "Sample vehicle (demo GLB)",
+        const demoTankFolder = pane.addFolder({
+          title: "Demo tank (tank_compressed.glb)",
           expanded: false,
         });
         demoTankFolder
@@ -12674,52 +12696,42 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           .on("change", () => {
             syncDemoTankEnabled();
           });
-        demoTankFolder
-          .addBinding(PARAMS.demoTank, "speed", {
-            label: "Max speed",
-            min: 0.5,
-            max: 22,
-            step: 0.1,
-          });
-        demoTankFolder
-          .addBinding(PARAMS.demoTank, "accel", {
-            label: "Acceleration",
-            min: 2,
-            max: 28,
-            step: 0.5,
-          });
-        demoTankFolder
-          .addBinding(PARAMS.demoTank, "yawSmooth", {
-            label: "Turn smoothing (rad/s)",
-            min: 1,
-            max: 12,
-            step: 0.25,
-          });
-        demoTankFolder
-          .addBinding(PARAMS.demoTank, "followPlayerInPlay", {
-            label: "Follow player in Play [F]",
-          });
-        demoTankFolder
-          .addBinding(PARAMS.demoTank, "scaleMul", {
-            label: "Scale ×",
-            min: 0.2,
-            max: 8,
-            step: 0.05,
-          });
-        demoTankFolder
-          .addBinding(PARAMS.demoTank, "yOffset", {
-            label: "Ground offset",
-            min: -0.5,
-            max: 1.5,
-            step: 0.01,
-          });
-
-        const materialsFolder = pane.addFolder({
-          title: "Materials & masks",
-          expanded: false,
+        demoTankFolder.addBinding(PARAMS.demoTank, "speed", {
+          label: "Max speed",
+          min: 0.5,
+          max: 22,
+          step: 0.1,
         });
-        const cliffFolder = materialsFolder.addFolder({
-          title: "Auto cliff on steep slopes",
+        demoTankFolder.addBinding(PARAMS.demoTank, "accel", {
+          label: "Acceleration",
+          min: 2,
+          max: 28,
+          step: 0.5,
+        });
+        demoTankFolder.addBinding(PARAMS.demoTank, "yawSmooth", {
+          label: "Turn smoothing (rad/s)",
+          min: 1,
+          max: 12,
+          step: 0.25,
+        });
+        demoTankFolder.addBinding(PARAMS.demoTank, "followPlayerInPlay", {
+          label: "Follow player in Play [F]",
+        });
+        demoTankFolder.addBinding(PARAMS.demoTank, "scaleMul", {
+          label: "Scale ×",
+          min: 0.2,
+          max: 8,
+          step: 0.05,
+        });
+        demoTankFolder.addBinding(PARAMS.demoTank, "yOffset", {
+          label: "Ground offset",
+          min: -0.5,
+          max: 1.5,
+          step: 0.01,
+        });
+
+        const cliffFolder = pane.addFolder({
+          title: "Auto cliff (painter Rock028)",
           expanded: false,
         });
         const onCliffGuiChange = () => {
@@ -12728,7 +12740,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         };
         cliffFolder
           .addBinding(PARAMS, "autoCliffEnabled", {
-            label: "Enable on splat + procedural ground",
+            label: "Enabled (splat + TSL ground)",
           })
           .on("change", () => rebuildAllChunkSplatMaterials());
         cliffFolder
@@ -12810,8 +12822,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           })
           .on("change", onCliffGuiChange);
 
-        const cliffPaintFolder = materialsFolder.addFolder({
-          title: "Cliff mask paint · B",
+        const cliffPaintFolder = pane.addFolder({
+          title: "Cliff Paint [B]",
           expanded: false,
         });
         cliffPaintFolderRef = cliffPaintFolder;
@@ -12845,8 +12857,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             }
           });
 
-        const playFolder = previewFolder.addFolder({
-          title: "Play mode · F",
+        const playFolder = pane.addFolder({
+          title: "Play [F]",
           expanded: false,
         });
         playFolder.addBinding(playParams, "speed", {
@@ -12874,17 +12886,12 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           label: "Look Y",
         });
 
-        const toolsFolder = pane.addFolder({
-          title: "Sculpt, paint & brush",
-          expanded: true,
-        });
-        const brushCoreFolder = toolsFolder.addFolder({
-          title: "Brush size & falloff",
-          expanded: true,
-        });
-        brushCoreFolder
+        pane.addBlade({ view: "separator" });
+
+        const brushFolder = pane.addFolder({ title: "Brush", expanded: true });
+        brushFolder
           .addBinding(PARAMS, "brushSize", {
-            label: "Radius (sculpt, grass, flowers)",
+            label: "Size (sculpt + Gemini + Fleurs)",
             min: 2,
             max: 80,
             step: 1,
@@ -12893,9 +12900,9 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             brushSize = ev.value;
             syncBrushVisual();
           });
-        brushCoreFolder
+        brushFolder
           .addBinding(PARAMS, "brushStrength", {
-            label: "Strength (sculpt & grass)",
+            label: "Strength (sculpt + Gemini)",
             min: 5,
             max: 100,
             step: 1,
@@ -12904,23 +12911,9 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             brushStr = ev.value;
             syncBrushVisual();
           });
-        brushCoreFolder.addBinding(PARAMS, "brushFalloff", {
-          label: "Falloff shape",
-          options: {
-            Smooth: "smooth",
-            Linear: "linear",
-            Sphere: "sphere",
-            Hard: "hard",
-          },
-        });
-
-        const sculptBrushFolder = toolsFolder.addFolder({
-          title: "Sculpt height",
-          expanded: true,
-        });
-        sculptBrushFolder
+        brushFolder
           .addBinding(PARAMS, "sculptTool", {
-            label: "Tool",
+            label: "Sculpt tool",
             options: {
               Brush: "brush",
               Noise: "noise",
@@ -12933,37 +12926,37 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             editState.rampPointA = null;
             syncBrushVisual();
           });
-        sculptBrushFolder
-          .addButton({ title: "Clear ramp start · R" })
+        brushFolder
+          .addButton({ title: "Clear ramp start (R)" })
           .on("click", () => {
             clearRampStart();
           });
-        sculptBrushFolder.addBinding(PARAMS, "noiseScale", {
+        brushFolder.addBinding(PARAMS, "noiseScale", {
           label: "Noise scale",
           min: 0.3,
           max: 10,
           step: 0.1,
         });
-        sculptBrushFolder.addBinding(PARAMS, "noiseOctaves", {
+        brushFolder.addBinding(PARAMS, "noiseOctaves", {
           label: "Noise octaves",
           min: 1,
           max: 8,
           step: 1,
         });
-        sculptBrushFolder.addBinding(PARAMS, "terraceStep", {
-          label: "Terrace step (height)",
+        brushFolder.addBinding(PARAMS, "terraceStep", {
+          label: "Terrace step (world Y)",
           min: 0.5,
           max: 40,
           step: 0.5,
         });
-        sculptBrushFolder.addBinding(PARAMS, "terraceSharpness", {
+        brushFolder.addBinding(PARAMS, "terraceSharpness", {
           label: "Terrace sharpness",
           min: 0.05,
           max: 0.95,
           step: 0.01,
         });
-        sculptBrushFolder.addBinding(PARAMS, "sculptBrush", {
-          label: "Brush stamp shape",
+        brushFolder.addBinding(PARAMS, "sculptBrush", {
+          label: "Sculpt shape",
           options: {
             Smooth: "smooth",
             "FBM peak": "fbm_peak",
@@ -12971,67 +12964,35 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             Plateau: "plateau",
           },
         });
-        sculptBrushFolder.addBlade({ view: "separator" });
-        sculptBrushFolder
-          .addBinding(PARAMS, "sculptClampMax", {
-            label: "Max height (plateau cap)",
-            min: 40,
-            max: 4000,
-            step: 10,
-          })
-          .on("change", () => {
-            if (PARAMS.sculptClampMax < PARAMS.sculptClampMin + 10) {
-              PARAMS.sculptClampMax = PARAMS.sculptClampMin + 10;
-              if (editorPane) editorPane.refresh();
-            }
-          });
-        sculptBrushFolder
-          .addBinding(PARAMS, "sculptClampMin", {
-            label: "Min height (floor)",
-            min: -800,
-            max: 80,
-            step: 5,
-          })
-          .on("change", () => {
-            if (PARAMS.sculptClampMin > PARAMS.sculptClampMax - 10) {
-              PARAMS.sculptClampMin = PARAMS.sculptClampMax - 10;
-              if (editorPane) editorPane.refresh();
-            }
-          });
-
-        const paintBrushFolder = toolsFolder.addFolder({
-          title: "Paint & blend target",
-          expanded: false,
-        });
-        paintBrushFolder.addBinding(PARAMS, "paintBrush", {
-          label: "Grass / smear brush",
+        brushFolder.addBinding(PARAMS, "paintBrush", {
+          label: "Gemini brush",
           options: { Smooth: "smooth", Smear: "smear" },
         });
-        paintBrushFolder.addBinding(PARAMS, "paintNoiseAmount", {
-          label: "Organic variation",
+        brushFolder.addBinding(PARAMS, "paintNoiseAmount", {
+          label: "Organic mask",
           min: 0,
           max: 1,
           step: 0.01,
         });
-        paintBrushFolder.addBinding(PARAMS, "paintNoiseScale", {
-          label: "Variation scale",
+        brushFolder.addBinding(PARAMS, "paintNoiseScale", {
+          label: "Mask scale",
           min: 0.005,
           max: 0.5,
           step: 0.005,
         });
-        paintBrushFolder.addBinding(PARAMS, "paintNoiseOctaves", {
-          label: "Variation octaves",
+        brushFolder.addBinding(PARAMS, "paintNoiseOctaves", {
+          label: "Mask octaves",
           min: 1,
           max: 8,
           step: 1,
         });
         editState.paintLayer = PARAMS.paintLayerTarget;
-        paintBrushFolder
+        brushFolder
           .addBinding(PARAMS, "paintLayerTarget", {
-            label: "What you paint",
+            label: "Paint target",
             options: {
-              "Meadow layer (TSL)": "meadow",
-              "RGB blend map": "splat",
+              "Meadow (TSL)": "meadow",
+              "Splat RGB": "splat",
               "Image slots": "img",
             },
           })
@@ -13070,19 +13031,35 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             .addBinding(layerParams, "octaves", { min: 1, max: 6, step: 0.5 })
             .on("change", onSync);
           folder
-            .addBinding(layerParams, "lacunarity", { min: 1.2, max: 4, step: 0.1 })
+            .addBinding(layerParams, "lacunarity", {
+              min: 1.2,
+              max: 4,
+              step: 0.1,
+            })
             .on("change", onSync);
           folder
             .addBinding(layerParams, "gain", { min: 0.1, max: 0.9, step: 0.05 })
             .on("change", onSync);
           folder
-            .addBinding(layerParams, "scale", { min: 0.001, max: 0.1, step: 0.001 })
+            .addBinding(layerParams, "scale", {
+              min: 0.001,
+              max: 0.1,
+              step: 0.001,
+            })
             .on("change", onSync);
           folder
-            .addBinding(layerParams, "offsetX", { min: -100, max: 100, step: 1 })
+            .addBinding(layerParams, "offsetX", {
+              min: -100,
+              max: 100,
+              step: 1,
+            })
             .on("change", onSync);
           folder
-            .addBinding(layerParams, "offsetY", { min: -100, max: 100, step: 1 })
+            .addBinding(layerParams, "offsetY", {
+              min: -100,
+              max: 100,
+              step: 1,
+            })
             .on("change", onSync);
           folder
             .addBinding(layerParams, "invert", { label: "Invert" })
@@ -13125,8 +13102,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         const groundSyncProxy = () =>
           chunkGroundBundle.syncFromParams(PARAMS.ground);
         const groundPresetProxy = { preset: "default" };
-        const groundGuiFolder = materialsFolder.addFolder({
-          title: "Ground material (TSL)",
+        const groundGuiFolder = pane.addFolder({
+          title: "Ground TSL",
           expanded: false,
         });
         groundGuiFolder
@@ -13152,10 +13129,18 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           .addBinding(PARAMS.ground, "baseColor", { label: "Base color" })
           .on("change", groundSyncProxy);
         groundGuiFolder
-          .addBinding(PARAMS.ground, "contrast", { min: 0.2, max: 3, step: 0.05 })
+          .addBinding(PARAMS.ground, "contrast", {
+            min: 0.2,
+            max: 3,
+            step: 0.05,
+          })
           .on("change", groundSyncProxy);
         groundGuiFolder
-          .addBinding(PARAMS.ground, "brightness", { min: 0.2, max: 2, step: 0.05 })
+          .addBinding(PARAMS.ground, "brightness", {
+            min: 0.2,
+            max: 2,
+            step: 0.05,
+          })
           .on("change", groundSyncProxy);
         bindGroundLayerControls(
           groundGuiFolder.addFolder({ title: "Layer 1", expanded: true }),
@@ -13172,8 +13157,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         const meadowSyncProxy = () =>
           chunkMeadowBundle.syncFromParams(PARAMS.meadow);
         const meadowPresetProxy = { preset: "default" };
-        const meadowGuiFolder = materialsFolder.addFolder({
-          title: "Meadow material (TSL)",
+        const meadowGuiFolder = pane.addFolder({
+          title: "Meadow TSL",
           expanded: false,
         });
         meadowGuiFolder
@@ -13198,10 +13183,18 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           .addBinding(PARAMS.meadow, "baseColor", { label: "Base color" })
           .on("change", meadowSyncProxy);
         meadowGuiFolder
-          .addBinding(PARAMS.meadow, "contrast", { min: 0.2, max: 3, step: 0.05 })
+          .addBinding(PARAMS.meadow, "contrast", {
+            min: 0.2,
+            max: 3,
+            step: 0.05,
+          })
           .on("change", meadowSyncProxy);
         meadowGuiFolder
-          .addBinding(PARAMS.meadow, "brightness", { min: 0.2, max: 2, step: 0.05 })
+          .addBinding(PARAMS.meadow, "brightness", {
+            min: 0.2,
+            max: 2,
+            step: 0.05,
+          })
           .on("change", meadowSyncProxy);
         bindGroundLayerControls(
           meadowGuiFolder.addFolder({ title: "Layer 1", expanded: true }),
@@ -13213,12 +13206,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           PARAMS.meadow.layer2,
           meadowSyncProxy,
         );
-        const imgSlotsFolder = toolsFolder.addFolder({
-          title: "Image slot tuning (PBR)",
-          expanded: false,
-        });
-        const imgSlotUvFolder = imgSlotsFolder.addFolder({
-          title: "UV scale / tiling",
+        const imgSlotUvFolder = brushFolder.addFolder({
+          title: "Image slots — UV scale (texture tiling)",
           expanded: false,
         });
         chunkImageSlots.forEach((slot, idx) => {
@@ -13234,8 +13223,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
               if (idx === PARAMS.imgTexSlotIndex) syncImgTexSlot();
             });
         });
-        const imgSlotNormalFolder = imgSlotsFolder.addFolder({
-          title: "Normal strength",
+        const imgSlotNormalFolder = brushFolder.addFolder({
+          title: "Image slots — normal (0=flat … 1=full, per slot)",
           expanded: false,
         });
         chunkImageSlots.forEach((slot, idx) => {
@@ -13251,8 +13240,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
               if (idx === PARAMS.imgTexSlotIndex) syncImgTexSlot();
             });
         });
-        const imgSlotAOFolder = imgSlotsFolder.addFolder({
-          title: "Ambient occlusion",
+        const imgSlotAOFolder = brushFolder.addFolder({
+          title: "Image slots — AO strength (per slot)",
           expanded: false,
         });
         chunkImageSlots.forEach((slot, idx) => {
@@ -13268,8 +13257,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
               if (idx === PARAMS.imgTexSlotIndex) syncImgTexSlot();
             });
         });
-        const imgSlotRoughFolder = imgSlotsFolder.addFolder({
-          title: "Roughness",
+        const imgSlotRoughFolder = brushFolder.addFolder({
+          title: "Image slots — roughness strength (per slot)",
           expanded: false,
         });
         chunkImageSlots.forEach((slot, idx) => {
@@ -13285,8 +13274,45 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
               if (idx === PARAMS.imgTexSlotIndex) syncImgTexSlot();
             });
         });
-        const erosionFolder = toolsFolder.addFolder({
-          title: "Global erosion (all chunks)",
+        brushFolder.addBinding(PARAMS, "brushFalloff", {
+          label: "Falloff",
+          options: {
+            Smooth: "smooth",
+            Linear: "linear",
+            Sphere: "sphere",
+            Hard: "hard",
+          },
+        });
+        brushFolder.addBlade({ view: "separator" });
+        brushFolder
+          .addBinding(PARAMS, "sculptClampMax", {
+            label: "Sculpt max Y (plateau if low)",
+            min: 40,
+            max: 4000,
+            step: 10,
+          })
+          .on("change", () => {
+            if (PARAMS.sculptClampMax < PARAMS.sculptClampMin + 10) {
+              PARAMS.sculptClampMax = PARAMS.sculptClampMin + 10;
+              if (editorPane) editorPane.refresh();
+            }
+          });
+        brushFolder
+          .addBinding(PARAMS, "sculptClampMin", {
+            label: "Sculpt min Y",
+            min: -800,
+            max: 80,
+            step: 5,
+          })
+          .on("change", () => {
+            if (PARAMS.sculptClampMin > PARAMS.sculptClampMax - 10) {
+              PARAMS.sculptClampMin = PARAMS.sculptClampMax - 10;
+              if (editorPane) editorPane.refresh();
+            }
+          });
+
+        const erosionFolder = pane.addFolder({
+          title: "Erosion",
           expanded: false,
         });
         erosionFolder.addBinding(PARAMS.erosion, "iterations", {
@@ -13337,12 +13363,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             runGlobalErosion();
           });
 
-        const natureFolder = pane.addFolder({
-          title: "Vegetation & scatter",
-          expanded: false,
-        });
-        const lodFolder = natureFolder.addFolder({
-          title: "Tree LOD · J",
+        const lodFolder = pane.addFolder({
+          title: "Tree LOD  [ J ]",
           expanded: false,
         });
         lodFolderRef = lodFolder;
@@ -13679,8 +13701,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         });
         assignLodSlot(0);
 
-        const ptreeFolder = natureFolder.addFolder({
-          title: "Procedural trees",
+        const ptreeFolder = pane.addFolder({
+          title: "Proc Trees",
           expanded: true,
         });
         ptreeFolderRef = ptreeFolder;
@@ -13932,12 +13954,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           });
         });
 
-        const worldFolder = pane.addFolder({
-          title: "World objects & water",
-          expanded: false,
-        });
-        const waterfallFolder = worldFolder.addFolder({
-          title: "Waterfall · H",
+        const waterfallFolder = pane.addFolder({
+          title: "Waterfall  [ H ]",
           expanded: true,
         });
         waterfallFolderRef = waterfallFolder;
@@ -14186,8 +14204,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             });
         }
 
-        const foliageFolder = natureFolder.addFolder({
-          title: "Foliage meshes · N",
+        const foliageFolder = pane.addFolder({
+          title: "Foliage  [ N ]",
           expanded: true,
         });
         foliageFolderRef = foliageFolder;
@@ -14276,8 +14294,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           });
         }
 
-        const objectsFolder = worldFolder.addFolder({
-          title: "Objects · E",
+        const objectsFolder = pane.addFolder({
+          title: "Objects  [ E ]",
           expanded: true,
         });
         objectsFolderRef = objectsFolder;
@@ -14366,8 +14384,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           });
         }
 
-        const propsFolder = worldFolder.addFolder({
-          title: "Props · I",
+        const propsFolder = pane.addFolder({
+          title: "Props  [ I ]",
           expanded: true,
         });
         propsFolderRef = propsFolder;
@@ -14546,8 +14564,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             if (editorPane) editorPane.refresh();
           });
 
-        const riverFolder = worldFolder.addFolder({
-          title: "River · V",
+        const riverFolder = pane.addFolder({
+          title: "River  [ V ]",
           expanded: true,
         });
         riverFolderRef = riverFolder;
@@ -14781,8 +14799,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         stylizedRiverFolder.hidden = PARAMS.river.shaderStyle !== "Stylized";
         syncRiverMat();
 
-        const waterFolder = worldFolder.addFolder({
-          title: "Water bodies · W",
+        const waterFolder = pane.addFolder({
+          title: "Water Bodies  [ W ]",
           expanded: true,
         });
         waterFolderRef = waterFolder;
@@ -14887,8 +14905,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           });
         syncWaterBodyMat();
 
-        const pathFolder = worldFolder.addFolder({
-          title: "Paths · L",
+        const pathFolder = pane.addFolder({
+          title: "Path  [ L ]",
           expanded: true,
         });
         pathFolderRef = pathFolder;
@@ -14907,8 +14925,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             if (editorPane) editorPane.refresh();
           });
 
-        const decalFolder = worldFolder.addFolder({
-          title: "Decals · D",
+        const decalFolder = pane.addFolder({
+          title: "Decal  [ D ]",
           expanded: true,
         });
         decalFolderRef = decalFolder;
@@ -14957,8 +14975,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             document.getElementById("decal-json-input").click(),
           );
 
-        const splineFolder = worldFolder.addFolder({
-          title: "Spline · K",
+        const splineFolder = pane.addFolder({
+          title: "Spline  [ K ]",
           expanded: true,
         });
         splineFolderRef = splineFolder;
@@ -15061,8 +15079,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           step: 0.1,
         });
 
-        const placeFolder = worldFolder.addFolder({
-          title: "Place cliffs · W E R · Del",
+        const placeFolder = pane.addFolder({
+          title: "Place  [ W move · E rotate · R scale · Del remove ]",
           expanded: false,
         });
         placeFolderRef = placeFolder;
@@ -15093,8 +15111,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           document.getElementById("load-cliffs-input").click();
         });
 
-        const cliffsFolder = worldFolder.addFolder({
-          title: "Cliff library · C",
+        const cliffsFolder = pane.addFolder({
+          title: "Cliffs  [ C ]",
           expanded: true,
         });
         cliffsFolderRef = cliffsFolder;
@@ -15414,8 +15432,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             e.target.value = "";
           });
 
-        const genFolder = terrainFolder.addFolder({
-          title: "Procedural height (all chunks)",
+        const genFolder = pane.addFolder({
+          title: "Terrain generator",
           expanded: false,
         });
         genFolder.addBinding(PARAMS.gen, "mode", {
@@ -15508,12 +15526,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           .addButton({ title: "▶ Generate terrain (all chunks)" })
           .on("click", () => applyProceduralTerrainToAllChunks());
 
-        const environmentFolder = pane.addFolder({
-          title: "Lighting & atmosphere",
-          expanded: false,
-        });
-        const lightFolder = environmentFolder.addFolder({
-          title: "Sun & exposure",
+        const lightFolder = pane.addFolder({
+          title: "Lighting",
           expanded: false,
         });
         lightFolder.addBinding(PARAMS.light, "sunAzimuth", {
@@ -15614,10 +15628,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           step: 512,
         });
 
-        const skyFolder = environmentFolder.addFolder({
-          title: "Sky & fog",
-          expanded: false,
-        });
+        const skyFolder = pane.addFolder({ title: "Sky", expanded: false });
         skyFolder
           .addBinding(PARAMS.sky, "mode", {
             label: "Sky type",
@@ -16281,8 +16292,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           });
 
         const geminiGrassErasePARAMS = { erase: false };
-        const geminiGrassFolder = natureFolder.addFolder({
-          title: "Grass (Gemini) · G",
+        const geminiGrassFolder = pane.addFolder({
+          title: "Gemini Grass  [ G ]",
           expanded: true,
         });
         geminiGrassFolderRef = geminiGrassFolder;
@@ -16880,8 +16891,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         }
 
         const geminiCliffGrassErasePARAMS = { erase: false };
-        const geminiCliffGrassFolder = natureFolder.addFolder({
-          title: "Grass on cliffs (Gemini)",
+        const geminiCliffGrassFolder = pane.addFolder({
+          title: "Gemini Cliff Grass",
           expanded: true,
         });
         geminiCliffGrassFolderRef = geminiCliffGrassFolder;
@@ -16955,8 +16966,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           e.target.value = "";
         });
 
-        const fleurFolder = natureFolder.addFolder({
-          title: "Flowers · M",
+        const fleurFolder = pane.addFolder({
+          title: "Fleurs  [ M ]",
           expanded: true,
         });
         fleurFolderRef = fleurFolder;
@@ -17298,8 +17309,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           e.target.value = "";
         });
 
-        const ambientFXFolder = natureFolder.addFolder({
-          title: "Ambient FX · X",
+        const ambientFXFolder = pane.addFolder({
+          title: "Ambient FX  [ X ]",
           expanded: true,
         });
         ambientFXFolderRef = ambientFXFolder;
@@ -17413,8 +17424,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             if (ambientFXSystem) ambientFXSystem.clear();
           });
 
-        const barrierFolder = worldFolder.addFolder({
-          title: "Walkable barriers",
+        const barrierFolder = pane.addFolder({
+          title: "Barrier",
           expanded: true,
         });
         barrierFolderRef = barrierFolder;
@@ -17449,10 +17460,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             syncBarrierOverlay();
           });
 
-        const holeFolder = worldFolder.addFolder({
-          title: "Terrain holes",
-          expanded: true,
-        });
+        const holeFolder = pane.addFolder({ title: "Hole", expanded: true });
         holeFolderRef = holeFolder;
         holeFolder.hidden = true;
         holeFolder
@@ -17471,7 +17479,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         });
 
         playFolderRef = playFolder;
-        brushFolderRef = toolsFolder;
+        brushFolderRef = brushFolder;
         setEditMode(PARAMS.mode);
         syncLodFolderVisibility();
         syncPtreeFolderVisibility();
@@ -17539,7 +17547,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
       setInterval(() => {
         if (!editorPane) return;
         if (!(lodFolderRef || ptreeFolderRef)) return;
-        const hasChunks = LOD_SLOTS.some((s) => s.chunks.size > 0) ||
+        const hasChunks =
+          LOD_SLOTS.some((s) => s.chunks.size > 0) ||
           PTREE_SLOTS.some((s) => s.chunks.size > 0);
         if (hasChunks) editorPane.refresh();
       }, TREE_LOD_STATS_PANE_MS);
@@ -17645,10 +17654,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           // Iso fly: camera chases flyHeading instead (see below), brackets
           // would fight the chase so we ignore them there.
           if (iso && !flying) {
-            if (keysHeld.BracketLeft)
-              isoYaw += ISO_YAW_ROT_SPEED * dtSec;
-            if (keysHeld.BracketRight)
-              isoYaw -= ISO_YAW_ROT_SPEED * dtSec;
+            if (keysHeld.BracketLeft) isoYaw += ISO_YAW_ROT_SPEED * dtSec;
+            if (keysHeld.BracketRight) isoYaw -= ISO_YAW_ROT_SPEED * dtSec;
           }
           // Iso fly: A/D yaw the plane before we build the thrust vector,
           // so W/S push along the new heading in the same frame.
@@ -17727,8 +17734,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             if (iso) {
               // Iso fly: Space climbs, Shift descends. No mouse pitch.
               let climbDelta = 0;
-              if (keysHeld.Space)
-                climbDelta += ISO_FLY_CLIMB_RATE * dtSec;
+              if (keysHeld.Space) climbDelta += ISO_FLY_CLIMB_RATE * dtSec;
               if (keysHeld.ShiftLeft || keysHeld.ShiftRight)
                 climbDelta -= ISO_FLY_CLIMB_RATE * dtSec;
               playFlyHeight = Math.max(0, playFlyHeight + climbDelta);
@@ -17790,8 +17796,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             }
           }
 
-          const lookAtY =
-            flying ? planeY + 0.45 : capsuleCY + 0.6;
+          const lookAtY = flying ? planeY + 0.45 : capsuleCY + 0.6;
           if (iso) {
             // Fixed-angle tilted top-down camera. For capsule: yaw is
             // manually rotated via [ / ]. For fly: yaw smoothly chases
