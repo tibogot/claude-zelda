@@ -161,6 +161,57 @@
         background: rgba(140, 90, 160, 0.92);
         color: #fce8ff;
       }
+
+      /* Flight sim HUD — shown only in fly mode */
+      #fly-hud {
+        position: fixed;
+        bottom: 24px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 22;
+        display: none;
+        gap: 18px;
+        pointer-events: none;
+        font:
+          bold 12px "SF Mono",
+          Consolas,
+          monospace;
+      }
+      #fly-hud.visible {
+        display: flex;
+      }
+      .fly-gauge {
+        min-width: 96px;
+        padding: 8px 14px;
+        border: 1px solid rgba(140, 220, 255, 0.35);
+        background: rgba(6, 14, 24, 0.72);
+        color: #b6e8ff;
+        border-radius: 4px;
+        text-align: center;
+        box-shadow:
+          0 0 0 1px rgba(0, 0, 0, 0.6),
+          inset 0 0 12px rgba(80, 200, 255, 0.08);
+        backdrop-filter: blur(2px);
+      }
+      .fly-gauge .label {
+        display: block;
+        font-size: 10px;
+        letter-spacing: 2px;
+        color: rgba(180, 230, 255, 0.55);
+        margin-bottom: 2px;
+      }
+      .fly-gauge .value {
+        display: block;
+        font-size: 20px;
+        line-height: 1;
+        color: #d8f4ff;
+        text-shadow: 0 0 8px rgba(80, 200, 255, 0.45);
+      }
+      .fly-gauge .unit {
+        font-size: 10px;
+        color: rgba(180, 230, 255, 0.55);
+        margin-left: 3px;
+      }
     </style>
     <script type="importmap">
       {
@@ -178,6 +229,16 @@
   <body>
     <div id="hud">booting...</div>
     <div id="mode-badge" class="view">VIEW MODE</div>
+    <div id="fly-hud">
+      <div class="fly-gauge">
+        <span class="label">SPEED</span>
+        <span class="value"><span id="fly-spd">0</span><span class="unit">m/s</span></span>
+      </div>
+      <div class="fly-gauge">
+        <span class="label">ALTITUDE</span>
+        <span class="value"><span id="fly-alt">0</span><span class="unit">m</span></span>
+      </div>
+    </div>
     <input
       type="file"
       id="load-terrain-input"
@@ -719,6 +780,12 @@
       }
 
       const hudEl = document.getElementById("hud");
+      const flyHudEl = document.getElementById("fly-hud");
+      const flySpdEl = document.getElementById("fly-spd");
+      const flyAltEl = document.getElementById("fly-alt");
+      let _flyHudVisible = false;
+      let _flyHudSpdShown = -1;
+      let _flyHudAltShown = -1;
 
       const scene = new THREE.Scene();
 
@@ -5283,7 +5350,6 @@
       /* ── Wingtip Contrail Trail System ── */
       const TRAIL_SEG = 90;
       const TRAIL_HALF_W = 0.038;
-      const TRAIL_MAX_DIST = 0.6;
       const trailMat = new MeshBasicNodeMaterial({
         side: THREE.DoubleSide,
         transparent: true,
@@ -5340,20 +5406,20 @@
         return trail;
       }
 
-      function sampleWingTrails(planeInner) {
+      function sampleWingTrails(planeInner, accelerating) {
         for (const trail of wingTrails) {
           _trTipWorld.copy(trail.localOffset);
           planeInner.localToWorld(_trTipWorld);
           const hist = trail.history;
-          if (hist.length > 0) {
-            const d = _trTipWorld.distanceTo(hist[0]);
-            if (d < 0.002) continue;
-            if (d > TRAIL_MAX_DIST && hist.length > 1) {
-              hist.length = 0;
-            }
+          if (accelerating) {
+            if (hist.length > 0 && _trTipWorld.distanceTo(hist[0]) < 0.002) continue;
+            hist.unshift(_trTipWorld.clone());
+            if (hist.length > TRAIL_SEG + 1) hist.length = TRAIL_SEG + 1;
+          } else {
+            /* Not accelerating → dissipate: drop oldest samples each frame */
+            if (hist.length > 0) hist.pop();
+            if (hist.length > 1) hist.pop();
           }
-          hist.unshift(_trTipWorld.clone());
-          if (hist.length > TRAIL_SEG + 1) hist.length = TRAIL_SEG + 1;
         }
       }
 
@@ -8660,6 +8726,8 @@
         capsuleMesh.visible = false;
         if (playPlaneRoot) playPlaneRoot.visible = false;
         clearWingTrails();
+        flyHudEl.classList.remove("visible");
+        _flyHudVisible = false;
         if (savedCamPos) camera.position.copy(savedCamPos);
         if (savedTarget) {
           controls.target.copy(savedTarget);
@@ -17962,9 +18030,10 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         if (playPlaneRoot?.visible && wingTrails.length > 0) {
           const planeInner = playPlaneRoot.children[0];
           planeInner.updateMatrixWorld(true);
-          sampleWingTrails(planeInner);
+          const accel = !!(keysHeld.KeyW || keysHeld.ArrowUp);
+          sampleWingTrails(planeInner, accel);
           rebuildWingTrails();
-          for (const t of wingTrails) t.mesh.visible = true;
+          for (const t of wingTrails) t.mesh.visible = t.history.length > 1;
         } else if (wingTrails.length > 0) {
           clearWingTrails();
         }
@@ -18170,6 +18239,27 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
                 );
               }
             }
+          }
+
+          /* Flight HUD — speed & altitude. Pure DOM, ~free. */
+          if (flying) {
+            if (!_flyHudVisible) {
+              flyHudEl.classList.add("visible");
+              _flyHudVisible = true;
+            }
+            const spdNow = mlen > 0 ? Math.round(playParams.speed) : 0;
+            const altNow = Math.round(playFlyHeight);
+            if (spdNow !== _flyHudSpdShown) {
+              flySpdEl.textContent = spdNow;
+              _flyHudSpdShown = spdNow;
+            }
+            if (altNow !== _flyHudAltShown) {
+              flyAltEl.textContent = altNow;
+              _flyHudAltShown = altNow;
+            }
+          } else if (_flyHudVisible) {
+            flyHudEl.classList.remove("visible");
+            _flyHudVisible = false;
           }
 
           const lookAtY =
