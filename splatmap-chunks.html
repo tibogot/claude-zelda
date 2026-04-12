@@ -470,6 +470,11 @@
           showTrain: false,
           trainSpeed: 8,
           trainScale: 1,
+          /** Terrain plateau (apply current Catmull–Rom path to heightfield). */
+          plateauHeight: 24,
+          plateauFalloff: 4,
+          /** Half-width of flat top along an open path (m); ignored when path is closed. */
+          plateauHalfWidth: 10,
         },
         /** Path paint [ L ] — splatmap-painter10bvh+post.html (splat blue + optional flatten) */
         path: {
@@ -10232,6 +10237,226 @@
         if (fleurSystem) fleurSystem.syncHeights();
       }
 
+      /**
+       * Raise / flatten terrain to `plateauHeight` using the spline footprint in XZ.
+       * Closed loop: fills interior with optional soft edge (plateauFalloff).
+       * Open path: flat strip of half-width plateauHalfWidth with optional outer blend.
+       */
+      function splineApplyPlateau() {
+        const closed = PARAMS.spline.closed;
+        if (closed && splinePoints.length < 3) {
+          console.warn("Spline plateau: need at least 3 points for a closed path.");
+          return;
+        }
+        if (!closed && splinePoints.length < 2) {
+          console.warn("Spline plateau: need at least 2 points for an open path.");
+          return;
+        }
+
+        const curve = new THREE.CatmullRomCurve3(
+          splinePoints,
+          closed,
+          "catmullrom",
+          0.5,
+        );
+        const numPts = Math.max(96, splinePoints.length * 32);
+        const samples3 = curve.getPoints(numPts);
+        const polyX = [];
+        const polyZ = [];
+        for (let i = 0; i < samples3.length; i++) {
+          polyX.push(samples3[i].x);
+          polyZ.push(samples3[i].z);
+        }
+        if (closed && polyX.length >= 2) {
+          const last = polyX.length - 1;
+          const dx = polyX[last] - polyX[0];
+          const dz = polyZ[last] - polyZ[0];
+          if (dx * dx + dz * dz < 1e-6) {
+            polyX.pop();
+            polyZ.pop();
+          }
+        }
+        const nPoly = polyX.length;
+        if (closed && nPoly < 3) {
+          console.warn("Spline plateau: not enough vertices after sampling the closed path.");
+          return;
+        }
+        if (!closed && nPoly < 2) {
+          console.warn("Spline plateau: not enough vertices after sampling the path.");
+          return;
+        }
+
+        let bx0 = polyX[0],
+          bx1 = polyX[0],
+          bz0 = polyZ[0],
+          bz1 = polyZ[0];
+        for (let i = 1; i < nPoly; i++) {
+          bx0 = Math.min(bx0, polyX[i]);
+          bx1 = Math.max(bx1, polyX[i]);
+          bz0 = Math.min(bz0, polyZ[i]);
+          bz1 = Math.max(bz1, polyZ[i]);
+        }
+
+        const halfW = Math.max(0.25, PARAMS.spline.plateauHalfWidth);
+        const falloff = Math.max(0, PARAMS.spline.plateauFalloff);
+        const targetY = PARAMS.spline.plateauHeight;
+        const step = CONFIG.chunkSize / CONFIG.dataResolution;
+        const pad =
+          (closed ? falloff : halfW + falloff) + step * 2;
+        let minX = bx0 - pad;
+        let maxX = bx1 + pad;
+        let minZ = bz0 - pad;
+        let maxZ = bz1 + pad;
+        minX = THREE.MathUtils.clamp(minX, worldBounds.min.x, worldBounds.max.x);
+        maxX = THREE.MathUtils.clamp(maxX, worldBounds.min.x, worldBounds.max.x);
+        minZ = THREE.MathUtils.clamp(minZ, worldBounds.min.z, worldBounds.max.z);
+        maxZ = THREE.MathUtils.clamp(maxZ, worldBounds.min.z, worldBounds.max.z);
+
+        function pointInPolygon(x, z) {
+          let inside = false;
+          for (let i = 0, j = nPoly - 1; i < nPoly; j = i++) {
+            const xi = polyX[i],
+              zi = polyZ[i];
+            const xj = polyX[j],
+              zj = polyZ[j];
+            const cross =
+              zi > z !== zj > z &&
+              x < ((xj - xi) * (z - zi)) / (zj - zi + 1e-12) + xi;
+            if (cross) inside = !inside;
+          }
+          return inside;
+        }
+
+        function distPointSegment2D(px, pz, ax, az, bx, bz) {
+          const abx = bx - ax,
+            abz = bz - az;
+          const apx = px - ax,
+            apz = pz - az;
+          const ab2 = abx * abx + abz * abz;
+          let t = ab2 > 1e-20 ? (apx * abx + apz * abz) / ab2 : 0;
+          t = Math.max(0, Math.min(1, t));
+          const qx = ax + t * abx,
+            qz = az + t * abz;
+          return Math.hypot(px - qx, pz - qz);
+        }
+
+        function distToClosedRing(px, pz) {
+          let d = Infinity;
+          for (let i = 0; i < nPoly; i++) {
+            const j = (i + 1) % nPoly;
+            d = Math.min(
+              d,
+              distPointSegment2D(
+                px,
+                pz,
+                polyX[i],
+                polyZ[i],
+                polyX[j],
+                polyZ[j],
+              ),
+            );
+          }
+          return d;
+        }
+
+        function distToOpenPolyline(px, pz) {
+          let d = Infinity;
+          for (let i = 0; i < nPoly - 1; i++) {
+            d = Math.min(
+              d,
+              distPointSegment2D(
+                px,
+                pz,
+                polyX[i],
+                polyZ[i],
+                polyX[i + 1],
+                polyZ[i + 1],
+              ),
+            );
+          }
+          return d;
+        }
+
+        function weightAt(px, pz) {
+          if (closed) {
+            if (!pointInPolygon(px, pz)) return 0;
+            if (falloff <= 1e-6) return 1;
+            const dEdge = distToClosedRing(px, pz);
+            return THREE.MathUtils.smoothstep(dEdge, 0, falloff);
+          }
+          const d = distToOpenPolyline(px, pz);
+          const outer = halfW + falloff;
+          if (d > outer) return 0;
+          if (falloff <= 1e-6) return d <= halfW ? 1 : 0;
+          if (d <= halfW) return 1;
+          return 1 - THREE.MathUtils.smoothstep(halfW, outer, d);
+        }
+
+        const minCi = worldToChunkIndex(minX, minZ);
+        const maxCi = worldToChunkIndex(maxX, maxZ);
+        const maxChunk = getMaxChunkIndex();
+        const minCx = THREE.MathUtils.clamp(minCi.cx, 0, maxChunk);
+        const minCz = THREE.MathUtils.clamp(minCi.cz, 0, maxChunk);
+        const maxCx = THREE.MathUtils.clamp(maxCi.cx, 0, maxChunk);
+        const maxCz = THREE.MathUtils.clamp(maxCi.cz, 0, maxChunk);
+
+        pushTerrainUndo();
+        const brushedChunkKeys = new Set();
+
+        for (let cz = minCz; cz <= maxCz; cz++) {
+          for (let cx = minCx; cx <= maxCx; cx++) {
+            const heights = ensureChunkData(cx, cz);
+            const cminXw = chunkMinWorldX(cx);
+            const cminZw = chunkMinWorldZ(cz);
+            let changed = false;
+            for (let iz = 0; iz <= CONFIG.dataResolution; iz++) {
+              const wz = cminZw + iz * step;
+              if (wz < minZ || wz > maxZ) continue;
+              for (let ix = 0; ix <= CONFIG.dataResolution; ix++) {
+                const wx = cminXw + ix * step;
+                if (wx < minX || wx > maxX) continue;
+                const w = weightAt(wx, wz);
+                if (w < 1e-7) continue;
+                const idx = getChunkDataIndex(ix, iz);
+                const oldH = heights[idx];
+                const newH = THREE.MathUtils.lerp(oldH, targetY, w);
+                const clamped = THREE.MathUtils.clamp(
+                  newH,
+                  PARAMS.sculptClampMin,
+                  PARAMS.sculptClampMax,
+                );
+                if (Math.abs(clamped - oldH) < 1e-9) continue;
+                heights[idx] = clamped;
+                changed = true;
+              }
+            }
+            if (changed) {
+              const k = chunkKey(cx, cz);
+              dirtyChunks.add(k);
+              brushedChunkKeys.add(k);
+            }
+          }
+        }
+
+        if (brushedChunkKeys.size === 0) {
+          if (terrainUndoStack.length > 0) terrainUndoStack.pop();
+          console.warn(
+            "Spline plateau: no height samples changed (try larger falloff / half-width or check path is over terrain).",
+          );
+          return;
+        }
+
+        finalizeSculpt(brushedChunkKeys, null);
+        rebuildAllActiveChunkMeshes();
+        syncTreeLodHeights();
+        syncPTreeHeights();
+        syncObjectSlotsHeights();
+        syncPropObjectsHeights();
+        if (fleurSystem) fleurSystem.syncHeights();
+        if (ambientFXSystem) ambientFXSystem.syncHeights();
+        bakeBVH();
+      }
+
       const frameState = {
         lastChunkUpdateMs: 0,
         frames: 0,
@@ -15053,6 +15278,31 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             label: "Close path (loop)",
           })
           .on("change", () => splineRebuildVisual());
+        splineFolder.addBlade({ view: "separator" });
+        splineFolder.addBinding(PARAMS.spline, "plateauHeight", {
+          label: "Plateau height (Y)",
+          min: PARAMS.sculptClampMin,
+          max: PARAMS.sculptClampMax,
+          step: 0.5,
+        });
+        splineFolder.addBinding(PARAMS.spline, "plateauFalloff", {
+          label: "Plateau edge falloff (m)",
+          min: 0,
+          max: 80,
+          step: 0.25,
+        });
+        splineFolder.addBinding(PARAMS.spline, "plateauHalfWidth", {
+          label: "Open path half-width (m)",
+          min: 0.25,
+          max: 120,
+          step: 0.25,
+        });
+        splineFolder
+          .addButton({ title: "▶ Apply plateau to terrain" })
+          .on("click", () => {
+            splineApplyPlateau();
+            editorPane.refresh();
+          });
         splineFolder.addBlade({ view: "separator" });
         const splineObjOptions = {
           "Tree LOD (active J slot)": "trees",
