@@ -3837,6 +3837,7 @@
       const _ptreeLastQuat = new THREE.Quaternion();
       const _ptreeFrustum = new THREE.Frustum();
       const _ptreeProjMat = new THREE.Matrix4();
+      const _ptreeCamPos = new THREE.Vector3();
       const ptreeParams = {
         slotName: "Proc A",
         minSpacing: 2,
@@ -3848,9 +3849,42 @@
         chunksVisible: 0,
         chunks: 0,
         leafMipBias: -0.65,
+        /** 0 = no limit. Default matches Tree LOD max draw distance. */
+        maxDrawDistance: 520,
       };
       function _markPtreeDirty() {
         _ptreeDirty = true;
+      }
+
+      function _ptreeBakeChunkTrunkMatrices(slot, chunk) {
+        if (!chunk?.ims || !chunk.positions) return;
+        const maxN = Math.min(chunk.positions.length, PTREE_MAX_PER_CHUNK);
+        if (
+          !chunk.ptreeBaked ||
+          chunk.ptreeBaked.length !== chunk.ims.length
+        ) {
+          chunk.ptreeBaked = chunk.ims.map(
+            () => new Float32Array(PTREE_MAX_PER_CHUNK * 16),
+          );
+        }
+        const dummy = _ptreeDummy;
+        for (let i = 0; i < maxN; i++) {
+          const p = chunk.positions[i];
+          dummy.position.set(p.x, p.y, p.z);
+          dummy.scale.setScalar(p.scale);
+          dummy.rotation.set(
+            0,
+            Math.PI * 2 * ((p.x * 13.7 + p.z * 7.3) % 1),
+            0,
+          );
+          dummy.updateMatrix();
+          chunk.ims.forEach(({ localMatrix }, mi) => {
+            _ptreeFinalMat.multiplyMatrices(dummy.matrix, localMatrix);
+            _ptreeFinalMat.toArray(chunk.ptreeBaked[mi], i * 16);
+          });
+        }
+        chunk._ptreeBakeCount = maxN;
+        chunk._ptreeBakeRev = (chunk._ptreeBakeRev | 0) + 1;
       }
 
       function _ptreeGrowTipsWithSeed(preset) {
@@ -6372,6 +6406,20 @@
         slot.positions.forEach((p, i) => {
           p._lodIdx = i;
         });
+        slot.positions.forEach((p) => {
+          if (!p._lodBaseMat) p._lodBaseMat = new THREE.Matrix4();
+          const rotY =
+            typeof p.rot === "number" && Number.isFinite(p.rot)
+              ? p.rot
+              : Math.PI *
+                2 *
+                ((((p.x * 13.7 + p.z * 7.3) % 1) + 1) % 1);
+          const s = p.scale;
+          _lodTreePos.set(p.x, p.y, p.z);
+          _lodTreeQuat.setFromAxisAngle(_lodUpY, rotY);
+          _lodTreeScale.set(s, s, s);
+          p._lodBaseMat.compose(_lodTreePos, _lodTreeQuat, _lodTreeScale);
+        });
         if (slot.name === "Pine") {
           if (slot.positions.length === 0) {
             _disposePineImpostor(slot);
@@ -6583,15 +6631,33 @@
               }
               const useLod1 = chunk.lod1ims && distSq >= thrSq;
               const groups = useLod1 ? chunk.lod1ims : chunk.lod0ims;
-              const rotY =
-                typeof p.rot === "number" && Number.isFinite(p.rot)
-                  ? p.rot
-                  : Math.PI * 2 * ((((x * 13.7 + z * 7.3) % 1) + 1) % 1);
-              const s = scale * lodMeshMul;
-              _lodTreePos.set(x, y, z);
-              _lodTreeScale.set(s, s, s);
-              _lodTreeQuat.setFromAxisAngle(_lodUpY, rotY);
-              _lodTreeMat.compose(_lodTreePos, _lodTreeQuat, _lodTreeScale);
+              if (p._lodBaseMat) {
+                _lodTreeMat.copy(p._lodBaseMat);
+                if (lodMeshMul !== 1) {
+                  const me = _lodTreeMat.elements;
+                  me[0] *= lodMeshMul;
+                  me[1] *= lodMeshMul;
+                  me[2] *= lodMeshMul;
+                  me[4] *= lodMeshMul;
+                  me[5] *= lodMeshMul;
+                  me[6] *= lodMeshMul;
+                  me[8] *= lodMeshMul;
+                  me[9] *= lodMeshMul;
+                  me[10] *= lodMeshMul;
+                }
+              } else {
+                const rotY =
+                  typeof p.rot === "number" && Number.isFinite(p.rot)
+                    ? p.rot
+                    : Math.PI *
+                      2 *
+                      ((((x * 13.7 + z * 7.3) % 1) + 1) % 1);
+                const s = scale * lodMeshMul;
+                _lodTreePos.set(x, y, z);
+                _lodTreeScale.set(s, s, s);
+                _lodTreeQuat.setFromAxisAngle(_lodUpY, rotY);
+                _lodTreeMat.compose(_lodTreePos, _lodTreeQuat, _lodTreeScale);
+              }
               groups.forEach(({ im, localMatrix }) => {
                 if (im.count >= instanceCap) return;
                 _lodFinalMat.multiplyMatrices(_lodTreeMat, localMatrix);
@@ -6653,6 +6719,8 @@
           camera.matrixWorldInverse,
         );
         _ptreeFrustum.setFromProjectionMatrix(_ptreeProjMat);
+        _ptreeCamPos.copy(camera.position);
+        const pMaxDraw = ptreeParams.maxDrawDistance;
         let totalVisible = 0;
         let totalChunks = 0;
         let totalTrunks = 0;
@@ -6665,44 +6733,75 @@
             chunk.ims.forEach((g) => {
               g.im.count = 0;
             });
+            const inFrustum = _ptreeFrustum.intersectsSphere(chunk.sphere);
+            let inDrawRange = true;
+            if (pMaxDraw > 0) {
+              const c = chunk.sphere.center;
+              const dx = c.x - _ptreeCamPos.x;
+              const dy = c.y - _ptreeCamPos.y;
+              const dz = c.z - _ptreeCamPos.z;
+              const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+              if (dist - chunk.sphere.radius > pMaxDraw) inDrawRange = false;
+            }
+            const chunkDrawn = inFrustum && inDrawRange;
             if (chunk.leafMesh) {
-              chunk.leafMesh.visible = _ptreeFrustum.intersectsSphere(
-                chunk.leafSphere,
-              );
+              let leafInDraw = true;
+              if (pMaxDraw > 0) {
+                const lc = chunk.leafSphere.center;
+                const ldx = lc.x - _ptreeCamPos.x;
+                const ldy = lc.y - _ptreeCamPos.y;
+                const ldz = lc.z - _ptreeCamPos.z;
+                const ld = Math.sqrt(ldx * ldx + ldy * ldy + ldz * ldz);
+                if (ld - chunk.leafSphere.radius > pMaxDraw) leafInDraw = false;
+              }
+              chunk.leafMesh.visible =
+                leafInDraw &&
+                _ptreeFrustum.intersectsSphere(chunk.leafSphere);
               totalLeaves += chunk.leafMesh.count;
             }
-            if (!_ptreeFrustum.intersectsSphere(chunk.sphere)) continue;
+            if (!chunkDrawn) continue;
             totalVisible++;
-            for (const { x, y, z, scale } of chunk.positions) {
-              _ptreeDummy.position.set(x, y, z);
-              _ptreeDummy.scale.setScalar(scale);
-              _ptreeDummy.rotation.set(
-                0,
-                Math.PI * 2 * ((x * 13.7 + z * 7.3) % 1),
-                0,
-              );
-              _ptreeDummy.updateMatrix();
-              chunk.ims.forEach(({ im, localMatrix }) => {
-                if (im.count >= PTREE_MAX_PER_CHUNK) return;
-                _ptreeFinalMat.multiplyMatrices(
-                  _ptreeDummy.matrix,
-                  localMatrix,
-                );
-                im.setMatrixAt(im.count++, _ptreeFinalMat);
-              });
+            const n = Math.min(chunk.positions.length, PTREE_MAX_PER_CHUNK);
+            if (
+              n > 0 &&
+              (!chunk.ptreeBaked || chunk.ptreeBaked.length !== chunk.ims.length)
+            ) {
+              _ptreeBakeChunkTrunkMatrices(slot, chunk);
             }
-            chunk.ims.forEach((g) => {
-              if (g.im.count > 0) g.im.instanceMatrix.needsUpdate = true;
+            const bakeRev = chunk._ptreeBakeRev | 0;
+            const skipGpuUpload =
+              n > 0 &&
+              chunk._ptreeTrunkUploadedRev === bakeRev &&
+              chunk._ptreeTrunkUploadedN === n;
+            chunk.ims.forEach((g, mi) => {
+              const im = g.im;
+              im.count = n;
+              if (n === 0 || !chunk.ptreeBaked?.[mi]) return;
+              if (skipGpuUpload) return;
+              im.instanceMatrix.array.set(
+                chunk.ptreeBaked[mi].subarray(0, n * 16),
+              );
+              im.instanceMatrix.needsUpdate = true;
             });
+            if (n > 0) {
+              chunk._ptreeTrunkUploadedRev = bakeRev;
+              chunk._ptreeTrunkUploadedN = n;
+            }
           }
           if (slot.leafMesh) {
+            let leafVis = true;
             if (slot.leafCullSphere) {
-              slot.leafMesh.visible = _ptreeFrustum.intersectsSphere(
-                slot.leafCullSphere,
-              );
-            } else {
-              slot.leafMesh.visible = true;
+              leafVis = _ptreeFrustum.intersectsSphere(slot.leafCullSphere);
+              if (leafVis && pMaxDraw > 0) {
+                const lc = slot.leafCullSphere.center;
+                const dx = lc.x - _ptreeCamPos.x;
+                const dy = lc.y - _ptreeCamPos.y;
+                const dz = lc.z - _ptreeCamPos.z;
+                const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                if (d - slot.leafCullSphere.radius > pMaxDraw) leafVis = false;
+              }
             }
+            slot.leafMesh.visible = leafVis;
             totalLeaves += slot.leafMesh.count;
           }
         }
@@ -7065,6 +7164,7 @@
             if (d > r) r = d;
           });
           chunk.sphere.set(new THREE.Vector3(cx, cy, cz), r + 20);
+          _ptreeBakeChunkTrunkMatrices(slot, chunk);
         }
       };
 
@@ -12288,6 +12388,16 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
               if (s.uniforms?.leafMipBias)
                 s.uniforms.leafMipBias.value = ev.value;
             });
+          });
+        ptreeFolder
+          .addBinding(ptreeParams, "maxDrawDistance", {
+            label: "Max draw dist",
+            min: 0,
+            max: 2000,
+            step: 10,
+          })
+          .on("change", () => {
+            _markPtreeDirty();
           });
         ptreeFolder.addBinding(ptreeParams, "totalTrunks", {
           label: "Total trunks",
