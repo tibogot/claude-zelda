@@ -3810,7 +3810,8 @@
         leafTexPath: null,
         leafMat: null,
         leafMapNode: null,
-        leafMesh: null,
+        leafMeshes: null,
+        leafSpheres: null,
         leafCullSphere: null,
         uniforms: null,
         positions: [],
@@ -3851,9 +3852,59 @@
         leafMipBias: -0.65,
         /** 0 = no limit. Default matches Tree LOD max draw distance. */
         maxDrawDistance: 520,
+        /**
+         * Distance-based leaf LOD: fewer, larger cards when far (alpha foliage
+         * reads better than sub-pixel quads). Similar idea to open-world games
+         * that swap dense cards for coarser billboards / impostors.
+         */
+        leafDistLod: true,
+        /** Camera distance to chunk center: switch to half-density, ~√2 larger quads. */
+        leafLod1Dist: 55,
+        /** Beyond this use quarter-density, 2× quads (set 0 to disable L2). */
+        leafLod2Dist: 140,
+        /** L2 is usually far enough that leaf shadows are not worth the cost. */
+        leafLod2Shadow: false,
       };
       function _markPtreeDirty() {
         _ptreeDirty = true;
+      }
+
+      function _ptreeMergeTwoSpheres(s0, s1, out) {
+        const c0 = s0.center;
+        const r0 = s0.radius;
+        const c1 = s1.center;
+        const r1 = s1.radius;
+        const dx = c1.x - c0.x;
+        const dy = c1.y - c0.y;
+        const dz = c1.z - c0.z;
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (d < 1e-8) {
+          out.center.copy(c0);
+          out.radius = Math.max(r0, r1);
+          return;
+        }
+        if (d + r1 <= r0) {
+          out.center.copy(c0);
+          out.radius = r0;
+          return;
+        }
+        if (d + r0 <= r1) {
+          out.center.copy(c1);
+          out.radius = r1;
+          return;
+        }
+        const R = (d + r0 + r1) * 0.5;
+        const t = (R - r0) / d;
+        out.center.set(c0.x + dx * t, c0.y + dy * t, c0.z + dz * t);
+        out.radius = R;
+      }
+
+      function _ptreeUnionLeafSpheres(spheres, out) {
+        if (!spheres?.length) return;
+        out.copy(spheres[0]);
+        for (let i = 1; i < spheres.length; i++) {
+          _ptreeMergeTwoSpheres(out, spheres[i], out);
+        }
       }
 
       function _ptreeBakeChunkTrunkMatrices(slot, chunk) {
@@ -6744,7 +6795,7 @@
               if (dist - chunk.sphere.radius > pMaxDraw) inDrawRange = false;
             }
             const chunkDrawn = inFrustum && inDrawRange;
-            if (chunk.leafMesh) {
+            if (chunk.leafMeshes?.length) {
               let leafInDraw = true;
               if (pMaxDraw > 0) {
                 const lc = chunk.leafSphere.center;
@@ -6754,10 +6805,29 @@
                 const ld = Math.sqrt(ldx * ldx + ldy * ldy + ldz * ldz);
                 if (ld - chunk.leafSphere.radius > pMaxDraw) leafInDraw = false;
               }
-              chunk.leafMesh.visible =
-                leafInDraw &&
-                _ptreeFrustum.intersectsSphere(chunk.leafSphere);
-              totalLeaves += chunk.leafMesh.count;
+              const dLod = _ptreeCamPos.distanceTo(chunk.sphere.center);
+              let lodIdx = 0;
+              if (ptreeParams.leafDistLod && chunk.leafMeshes.length > 1) {
+                const n1 = ptreeParams.leafLod1Dist;
+                const n2 = ptreeParams.leafLod2Dist;
+                if (
+                  n2 > 0 &&
+                  chunk.leafMeshes.length > 2 &&
+                  dLod >= n2
+                ) {
+                  lodIdx = 2;
+                } else if (chunk.leafMeshes.length > 1 && dLod >= n1) {
+                  lodIdx = 1;
+                }
+              }
+              const sphFr =
+                chunk.leafSpheres?.[lodIdx] ?? chunk.leafSphere;
+              const leafFr = _ptreeFrustum.intersectsSphere(sphFr);
+              for (let L = 0; L < chunk.leafMeshes.length; L++) {
+                const m = chunk.leafMeshes[L];
+                m.visible = leafInDraw && leafFr && L === lodIdx;
+                if (m.visible) totalLeaves += m.count;
+              }
             }
             if (!chunkDrawn) continue;
             totalVisible++;
@@ -6788,21 +6858,38 @@
               chunk._ptreeTrunkUploadedN = n;
             }
           }
-          if (slot.leafMesh) {
-            let leafVis = true;
-            if (slot.leafCullSphere) {
-              leafVis = _ptreeFrustum.intersectsSphere(slot.leafCullSphere);
-              if (leafVis && pMaxDraw > 0) {
-                const lc = slot.leafCullSphere.center;
-                const dx = lc.x - _ptreeCamPos.x;
-                const dy = lc.y - _ptreeCamPos.y;
-                const dz = lc.z - _ptreeCamPos.z;
-                const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-                if (d - slot.leafCullSphere.radius > pMaxDraw) leafVis = false;
+          if (slot.leafMeshes?.length && slot.leafCullSphere) {
+            let leafInDraw = true;
+            if (pMaxDraw > 0) {
+              const lc = slot.leafCullSphere.center;
+              const dx = lc.x - _ptreeCamPos.x;
+              const dy = lc.y - _ptreeCamPos.y;
+              const dz = lc.z - _ptreeCamPos.z;
+              const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+              if (d - slot.leafCullSphere.radius > pMaxDraw) leafInDraw = false;
+            }
+            const dLod = _ptreeCamPos.distanceTo(slot.leafCullSphere.center);
+            let lodIdx = 0;
+            if (ptreeParams.leafDistLod && slot.leafMeshes.length > 1) {
+              const n1 = ptreeParams.leafLod1Dist;
+              const n2 = ptreeParams.leafLod2Dist;
+              if (
+                n2 > 0 &&
+                slot.leafMeshes.length > 2 &&
+                dLod >= n2
+              ) {
+                lodIdx = 2;
+              } else if (slot.leafMeshes.length > 1 && dLod >= n1) {
+                lodIdx = 1;
               }
             }
-            slot.leafMesh.visible = leafVis;
-            totalLeaves += slot.leafMesh.count;
+            const sphFr = slot.leafSpheres?.[lodIdx] ?? slot.leafCullSphere;
+            const leafFr = _ptreeFrustum.intersectsSphere(sphFr);
+            for (let L = 0; L < slot.leafMeshes.length; L++) {
+              const m = slot.leafMeshes[L];
+              m.visible = leafInDraw && leafFr && L === lodIdx;
+              if (m.visible) totalLeaves += m.count;
+            }
           }
         }
         ptreeParams.totalTrunks = totalTrunks;
@@ -6995,18 +7082,24 @@
       }
 
       _ptreeRebuildLeaves = function (slot) {
-        if (slot.leafMesh) {
-          scene.remove(slot.leafMesh);
-          slot.leafMesh.geometry.dispose();
-          slot.leafMesh = null;
+        if (slot.leafMeshes) {
+          slot.leafMeshes.forEach((m) => {
+            scene.remove(m);
+            m.geometry.dispose();
+          });
+          slot.leafMeshes = null;
         }
+        slot.leafSpheres = null;
         slot.leafCullSphere = null;
         for (const chunk of slot.chunks.values()) {
-          if (chunk.leafMesh) {
-            scene.remove(chunk.leafMesh);
-            chunk.leafMesh.geometry.dispose();
-            chunk.leafMesh = null;
+          if (chunk.leafMeshes) {
+            chunk.leafMeshes.forEach((m) => {
+              scene.remove(m);
+              m.geometry.dispose();
+            });
+            chunk.leafMeshes = null;
           }
+          chunk.leafSpheres = null;
         }
         _markPtreeDirty();
         if (!slot.leafMat || !slot.preset || slot.positions.length === 0)
@@ -7026,8 +7119,43 @@
           slot.uniforms.yMin.value = yMin - 0.3;
           slot.uniforms.yMax.value = yMax + 0.5;
         }
-        function buildLeafInstancedMesh(positions, boundsSphere) {
-          const n = positions.length * localLeaves.length;
+        const leafLodTiers = (() => {
+          const tiers = [
+            { subset: localLeaves, mul: 1, shadow: true },
+          ];
+          if (!ptreeParams.leafDistLod) return tiers;
+          const half = localLeaves.filter((_, i) => (i & 1) === 0);
+          if (half.length > 0 && half.length < localLeaves.length) {
+            tiers.push({ subset: half, mul: Math.SQRT2, shadow: true });
+          }
+          if (
+            ptreeParams.leafLod2Dist > 0 &&
+            localLeaves.length > 3 &&
+            tiers.length >= 2
+          ) {
+            const quarter = localLeaves.filter((_, i) => (i & 3) === 0);
+            const halfSubset = tiers[1].subset;
+            if (
+              quarter.length > 0 &&
+              quarter.length < halfSubset.length
+            ) {
+              tiers.push({
+                subset: quarter,
+                mul: 2,
+                shadow: ptreeParams.leafLod2Shadow,
+              });
+            }
+          }
+          return tiers;
+        })();
+        function buildLeafLodMesh(
+          positions,
+          leafSubset,
+          quadScaleMul,
+          castSh,
+          boundsSphere,
+        ) {
+          const n = positions.length * leafSubset.length;
           if (n === 0) return null;
           const geo = new THREE.PlaneGeometry(1, 1);
           const randData = new Float32Array(n * 2);
@@ -7041,7 +7169,7 @@
           );
           const mesh = new THREE.InstancedMesh(geo, slot.leafMat, n);
           mesh.frustumCulled = false;
-          mesh.castShadow = true;
+          mesh.castShadow = castSh;
           mesh.receiveShadow = false;
           const dummy = new THREE.Object3D();
           let idx = 0;
@@ -7049,7 +7177,7 @@
           let lcy = 0;
           let lcz = 0;
           positions.forEach((p) => {
-            localLeaves.forEach((l) => {
+            leafSubset.forEach((l) => {
               const wx = p.x + l.lx * p.scale;
               const wy = p.y + l.ly * p.scale;
               const wz = p.z + l.lz * p.scale;
@@ -7062,7 +7190,10 @@
                 Math.random() * Math.PI,
                 Math.random() * Math.PI,
               );
-              const s = Math.max(0.05, l.leafSize * p.scale);
+              const s = Math.max(
+                0.05,
+                l.leafSize * p.scale * quadScaleMul,
+              );
               dummy.scale.setScalar(s);
               dummy.updateMatrix();
               mesh.setMatrixAt(idx++, dummy.matrix);
@@ -7074,11 +7205,12 @@
           lcz *= invN;
           let lr = 0;
           positions.forEach((p) => {
-            localLeaves.forEach((l) => {
+            leafSubset.forEach((l) => {
               const wx = p.x + l.lx * p.scale;
               const wy = p.y + l.ly * p.scale;
               const wz = p.z + l.lz * p.scale;
-              const half = Math.max(0.05, l.leafSize * p.scale) * 0.71;
+              const half =
+                Math.max(0.05, l.leafSize * p.scale * quadScaleMul) * 0.71;
               const d = Math.sqrt(
                 (wx - lcx) ** 2 + (wy - lcy) ** 2 + (wz - lcz) ** 2,
               );
@@ -7091,23 +7223,53 @@
           scene.add(mesh);
           return mesh;
         }
+        function buildLeafLodsForPositions(positions, envelopeSphere) {
+          const meshes = [];
+          const spheres = [];
+          for (const tier of leafLodTiers) {
+            const sph = new THREE.Sphere();
+            const m = buildLeafLodMesh(
+              positions,
+              tier.subset,
+              tier.mul,
+              tier.shadow,
+              sph,
+            );
+            if (m) {
+              meshes.push(m);
+              spheres.push(sph);
+            }
+          }
+          if (meshes.length === 0) return;
+          if (!envelopeSphere) envelopeSphere = new THREE.Sphere();
+          _ptreeUnionLeafSpheres(spheres, envelopeSphere);
+          return { meshes, spheres, envelopeSphere };
+        }
         const useChunks =
           slot.ready && slot.trunkDefs && slot.chunks.size > 0;
         if (useChunks) {
           for (const chunk of slot.chunks.values()) {
             if (!chunk.leafSphere) chunk.leafSphere = new THREE.Sphere();
-            chunk.leafMesh = buildLeafInstancedMesh(
+            const built = buildLeafLodsForPositions(
               chunk.positions,
               chunk.leafSphere,
             );
+            if (built) {
+              chunk.leafMeshes = built.meshes;
+              chunk.leafSpheres = built.spheres;
+            }
           }
           return;
         }
         slot.leafCullSphere = new THREE.Sphere();
-        slot.leafMesh = buildLeafInstancedMesh(
+        const built = buildLeafLodsForPositions(
           slot.positions,
           slot.leafCullSphere,
         );
+        if (built) {
+          slot.leafMeshes = built.meshes;
+          slot.leafSpheres = built.spheres;
+        }
       };
 
       _rebuildPTreeChunks = function (slot) {
@@ -7123,11 +7285,14 @@
           if (!byChunk.has(key)) {
             const rm = slot.chunks.get(key);
             rm.ims.forEach((g) => scene.remove(g.im));
-            if (rm.leafMesh) {
-              scene.remove(rm.leafMesh);
-              rm.leafMesh.geometry.dispose();
-              rm.leafMesh = null;
+            if (rm.leafMeshes) {
+              rm.leafMeshes.forEach((m) => {
+                scene.remove(m);
+                m.geometry.dispose();
+              });
+              rm.leafMeshes = null;
             }
+            rm.leafSpheres = null;
             slot.chunks.delete(key);
           }
         }
@@ -7138,7 +7303,8 @@
               positions: [],
               sphere: new THREE.Sphere(),
               ims: _makeChunkIMs(slot.trunkDefs),
-              leafMesh: null,
+              leafMeshes: null,
+              leafSpheres: null,
               leafSphere: new THREE.Sphere(),
             };
             slot.chunks.set(key, chunk);
@@ -12398,6 +12564,50 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           })
           .on("change", () => {
             _markPtreeDirty();
+          });
+        const _ptreeRebuildAllLeavesIfAny = () => {
+          PTREE_SLOTS.forEach((s) => {
+            if (s.preset && s.leafMat && s.positions.length > 0)
+              _ptreeRebuildLeaves(s);
+          });
+        };
+        const ptreeLeafLodFolder = ptreeFolder.addFolder({
+          title: "Leaf LOD (distance)",
+          expanded: false,
+        });
+        ptreeLeafLodFolder
+          .addBinding(ptreeParams, "leafDistLod", {
+            label: "Enable",
+          })
+          .on("change", () => {
+            _ptreeRebuildAllLeavesIfAny();
+          });
+        ptreeLeafLodFolder
+          .addBinding(ptreeParams, "leafLod1Dist", {
+            label: "L1 from (m)",
+            min: 5,
+            max: 400,
+            step: 5,
+          })
+          .on("change", () => {
+            _markPtreeDirty();
+          });
+        ptreeLeafLodFolder
+          .addBinding(ptreeParams, "leafLod2Dist", {
+            label: "L2 from (m)",
+            min: 0,
+            max: 800,
+            step: 5,
+          })
+          .on("change", () => {
+            _ptreeRebuildAllLeavesIfAny();
+          });
+        ptreeLeafLodFolder
+          .addBinding(ptreeParams, "leafLod2Shadow", {
+            label: "L2 casts shadow",
+          })
+          .on("change", () => {
+            _ptreeRebuildAllLeavesIfAny();
           });
         ptreeFolder.addBinding(ptreeParams, "totalTrunks", {
           label: "Total trunks",
