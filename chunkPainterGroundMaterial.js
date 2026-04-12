@@ -281,7 +281,7 @@ export function setupTslGroundMeshSwap(mesh, sharedNodes) {
  * @param {number} worldSize
  * @returns {{ material, splatTexNode, albedoTexNode, ormTexNode, uUVScale, uNormalStr, uAOStr, uRoughStr }}
  */
-export function createSharedImgTexMaterial(chunkSize, worldSize) {
+export function createSharedImgTexMaterial(chunkSize, worldSize, cliffDeps = null) {
   const cs = float(chunkSize);
   const ws = float(1.0).div(float(worldSize));
   const uUVScale = uniform(3.0);
@@ -303,26 +303,46 @@ export function createSharedImgTexMaterial(chunkSize, worldSize) {
   const albedoTexNode = texture(makePlaceholderTex(), tileUV);
   const ormTexNode = texture(makePlaceholderTex(), tileUV);
 
-  // Color: albedo × AO (strength-controlled)
+  const cliff =
+    cliffDeps &&
+    createCliffShadingContext(
+      cliffDeps.heightTex,
+      cliffDeps.rockColorTex,
+      cliffDeps.rockDataTex,
+      cliffDeps.cliffU,
+      cliffDeps.worldSize,
+      cliffDeps.worldHalf,
+      cliffDeps.htexRes,
+    );
+
+  // Color: albedo × AO (strength-controlled), with cliff rock replacement on slopes.
   mat.colorNode = Fn(() => {
     const col = albedoTexNode.rgb;
     const ao = ormTexNode.r;
-    return col.mul(mix(float(1), ao, uAOStr));
+    const shaded = col.mul(mix(float(1), ao, uAOStr));
+    return cliff ? cliff.augmentColor(shaded) : shaded;
   })();
 
-  // Roughness: blend from base toward ORM green channel by roughStr
+  // Roughness: blend from base toward ORM green channel by roughStr, with cliff override on slopes.
   mat.roughnessNode = Fn(() => {
     const ormRough = ormTexNode.g;
-    return clamp(mix(float(0.88), ormRough, uRoughStr), float(0.04), float(1));
+    const imgRough = clamp(mix(float(0.88), ormRough, uRoughStr), float(0.04), float(1));
+    if (!cliff) return imgRough;
+    const slope = cliff.getSlopeMask().pow(cliffDeps.cliffU.uRockBlendSharp);
+    return mix(cliff.evaluateRockRoughnessRawInFn(), imgRough, slope);
   })();
 
-  // Normal from ORM blue+alpha channels — uNormalStr drives normalMap scale directly
+  // Normal from ORM blue+alpha channels — with cliff normal mixed in on slopes.
   mat.normalNode = Fn(() => {
     const nmX = ormTexNode.b.mul(2.0).sub(1.0);
     const nmY = ormTexNode.a.mul(2.0).sub(1.0);
     const nmZ = sqrt(max(float(0.0), float(1.0).sub(nmX.mul(nmX)).sub(nmY.mul(nmY))));
-    const decoded = vec3(nmX.mul(0.5).add(0.5), nmY.mul(0.5).add(0.5), nmZ.mul(0.5).add(0.5));
-    return normalMap(decoded, vec2(uNormalStr, uNormalStr));
+    const imgRaw = vec3(nmX.mul(0.5).add(0.5), nmY.mul(0.5).add(0.5), nmZ.mul(0.5).add(0.5));
+    if (!cliff) return normalMap(imgRaw, vec2(uNormalStr, uNormalStr));
+    const rockRaw = cliff.evaluateRockNormalRawInFn();
+    const slope = cliff.getSlopeMask().pow(cliffDeps.cliffU.uRockBlendSharp);
+    const combined = mix(rockRaw, imgRaw, slope);
+    return normalMap(combined, vec2(uNormalStr, uNormalStr));
   })();
 
   // Hole punch from splat alpha
