@@ -2016,6 +2016,36 @@
       syncHoleOverlayFromParams();
 
       let hdrTexture = null;
+      const DEFAULT_HDR_URL = new URL(
+        "textures/animestyled_hdr.hdr",
+        import.meta.url,
+      ).href;
+
+      function assignHdrTexture(tex) {
+        tex.mapping = THREE.EquirectangularReflectionMapping;
+        if (hdrTexture) hdrTexture.dispose();
+        hdrTexture = tex;
+        if (PARAMS.sky.mode === "hdr") {
+          scene.background = hdrTexture;
+          scene.environment = hdrTexture;
+        }
+      }
+
+      const rgbeLoader = new HDRLoader();
+
+      function loadDefaultHdrTexture() {
+        rgbeLoader.load(
+          DEFAULT_HDR_URL,
+          (tex) => assignHdrTexture(tex),
+          undefined,
+          (err) =>
+            console.warn(
+              "Default HDR textures/animestyled_hdr.hdr failed to load:",
+              err,
+            ),
+        );
+      }
+
       const setSkyMode = (mode) => {
         PARAMS.sky.mode = mode;
         sky.visible = false;
@@ -2030,12 +2060,15 @@
           if (hdrTexture) {
             scene.background = hdrTexture;
             scene.environment = hdrTexture;
+          } else {
+            loadDefaultHdrTexture();
           }
         }
         if (editorPane) editorPane.refresh();
       };
 
-      const rgbeLoader = new HDRLoader();
+      loadDefaultHdrTexture();
+
       document
         .getElementById("hdr-file-input")
         .addEventListener("change", (e) => {
@@ -2043,13 +2076,7 @@
           if (!file) return;
           const url = URL.createObjectURL(file);
           rgbeLoader.load(url, (tex) => {
-            tex.mapping = THREE.EquirectangularReflectionMapping;
-            if (hdrTexture) hdrTexture.dispose();
-            hdrTexture = tex;
-            if (PARAMS.sky.mode === "hdr") {
-              scene.background = hdrTexture;
-              scene.environment = hdrTexture;
-            }
+            assignHdrTexture(tex);
             URL.revokeObjectURL(url);
           });
           e.target.value = "";
