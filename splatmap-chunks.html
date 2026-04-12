@@ -543,14 +543,23 @@
          * Optional `models/tank_compressed.glb` demo. When disabled: not parented to the scene and
          * `updateDemoTank` returns immediately (no height samples, no matrix work). GLB loads only
          * the first time you enable it.
+         * Grounding matches play-mode capsule: same `getWorldHeight(x,z)` each frame, hull upright (yaw only).
          */
         demoTank: {
           enabled: false,
-          speed: 4.2,
-          steerResponse: 2.4,
-          scaleMul: 1,
-          yOffset: 0.06,
-          alignSpeed: 10,
+          /** Max drive speed (m/s), same order as play capsule `playParams.speed`. */
+          speed: 9,
+          /** How quickly velocity catches up to desired direction × speed. */
+          accel: 16,
+          /** Max yaw rate (rad/s) toward travel direction — avoids twitchy turns. */
+          yawSmooth: 4.5,
+          scaleMul: 3,
+          /** Same idea as capsule foot height — extra world Y after bottom alignment. */
+          yOffset: 0.02,
+          /** In Play [F] mode, drive toward the player capsule (otherwise random roam). */
+          followPlayerInPlay: true,
+          roamRetargetMin: 18,
+          roamRetargetMax: 40,
         },
       };
 
@@ -5996,14 +6005,9 @@
         return getChunkHeightfieldHeight(worldX, worldZ);
       }
 
-      const _tankUp = new THREE.Vector3();
-      const _tankRight = new THREE.Vector3();
-      const _tankFlatFwd = new THREE.Vector3();
-      const _tankFwd = new THREE.Vector3();
-      const _tankMat = new THREE.Matrix4();
-      const _tankQuatTarget = new THREE.Quaternion();
       const _tankBoxCenter = new THREE.Vector3();
       const _tankBoxSize = new THREE.Vector3();
+      const _tankWorldBB = new THREE.Box3();
       const demoTankState = {
         root: null,
         visual: null,
@@ -6011,6 +6015,8 @@
         baseScale: 1,
         x: 0,
         z: 0,
+        vx: 0,
+        vz: 0,
         yaw: 0,
         targetX: 0,
         targetZ: 0,
@@ -6081,89 +6087,143 @@
               demoTankState.z = worldHalf * 0.12;
               demoTankState.yaw = Math.PI * 0.25;
               pickDemoTankTarget();
+              demoTankState.vx = 0;
+              demoTankState.vz = 0;
               demoTankState.nextRetargetSec = appTimeSec + 3;
-              root.position.set(
-                demoTankState.x,
-                getWorldHeight(demoTankState.x, demoTankState.z) +
-                  PARAMS.demoTank.yOffset,
-                demoTankState.z,
-              );
               scene.add(root);
+              applyDemoTankGroundLikeCapsule();
             }
           })
           .catch(() => {});
+      }
+
+      /**
+       * Same vertical contract as play-mode capsule: `getWorldHeight(x,z)` at the tank XZ,
+       * hull stays upright (yaw only). World AABB bottom is snapped to that height (+ yOffset).
+       */
+      function applyDemoTankGroundLikeCapsule() {
+        const root = demoTankState.root;
+        const vis = demoTankState.visual;
+        if (!root || !vis || !root.parent) return;
+
+        const hx = demoTankState.x;
+        const hz = demoTankState.z;
+        root.rotation.set(0, demoTankState.yaw, 0);
+        vis.scale.setScalar(
+          demoTankState.baseScale * PARAMS.demoTank.scaleMul,
+        );
+        root.position.set(hx, 0, hz);
+        root.updateMatrixWorld(true);
+        _tankWorldBB.setFromObject(vis);
+        const bottomY = _tankWorldBB.min.y;
+        const g = getWorldHeight(hx, hz);
+        const lift = Number.isFinite(bottomY)
+          ? g + PARAMS.demoTank.yOffset - bottomY
+          : g + PARAMS.demoTank.yOffset;
+        root.position.set(hx, lift, hz);
       }
 
       function updateDemoTank(dt) {
         const root = demoTankState.root;
         if (!root || !root.parent) return;
 
-        const wx = demoTankState.x;
-        const wz = demoTankState.z;
-        const dx = demoTankState.targetX - wx;
-        const dz = demoTankState.targetZ - wz;
-        const dist = Math.hypot(dx, dz);
-        if (dist < 10 || appTimeSec > demoTankState.nextRetargetSec) {
-          pickDemoTankTarget();
-          demoTankState.nextRetargetSec = appTimeSec + 4 + Math.random() * 8;
+        const follow =
+          playMode && PARAMS.demoTank.followPlayerInPlay;
+        const tx = follow ? playerPos.x : demoTankState.targetX;
+        const tz = follow ? playerPos.z : demoTankState.targetZ;
+        let dx = tx - demoTankState.x;
+        let dz = tz - demoTankState.z;
+        let dist = Math.hypot(dx, dz);
+
+        if (!follow) {
+          if (
+            dist < 14 ||
+            appTimeSec > demoTankState.nextRetargetSec
+          ) {
+            pickDemoTankTarget();
+            const r0 = PARAMS.demoTank.roamRetargetMin;
+            const r1 = PARAMS.demoTank.roamRetargetMax;
+            demoTankState.nextRetargetSec =
+              appTimeSec + r0 + Math.random() * Math.max(0.1, r1 - r0);
+          }
+          dx = demoTankState.targetX - demoTankState.x;
+          dz = demoTankState.targetZ - demoTankState.z;
+          dist = Math.hypot(dx, dz);
         }
 
-        const targetYaw = Math.atan2(dx, dz);
-        let dy = targetYaw - demoTankState.yaw;
-        while (dy > Math.PI) dy -= Math.PI * 2;
-        while (dy < -Math.PI) dy += Math.PI * 2;
-        const sr = PARAMS.demoTank.steerResponse;
-        demoTankState.yaw += THREE.MathUtils.clamp(dy, -sr * dt, sr * dt);
-
-        const sp = PARAMS.demoTank.speed;
-        const sinY = Math.sin(demoTankState.yaw);
-        const cosY = Math.cos(demoTankState.yaw);
-        demoTankState.x += sinY * sp * dt;
-        demoTankState.z += cosY * sp * dt;
-        const pad = 6;
-        demoTankState.x = THREE.MathUtils.clamp(
-          demoTankState.x,
-          worldBounds.min.x + pad,
-          worldBounds.max.x - pad,
-        );
-        demoTankState.z = THREE.MathUtils.clamp(
-          demoTankState.z,
-          worldBounds.min.z + pad,
-          worldBounds.max.z - pad,
-        );
-
-        const hx = demoTankState.x;
-        const hz = demoTankState.z;
-        const eps = 0.85;
-        const hC = getWorldHeight(hx, hz);
-        const hxp = getWorldHeight(hx + eps, hz);
-        const hxm = getWorldHeight(hx - eps, hz);
-        const hzp = getWorldHeight(hx, hz + eps);
-        const hzm = getWorldHeight(hx, hz - eps);
-        _tankUp.set(-(hxp - hxm), 2 * eps, -(hzp - hzm)).normalize();
-        if (!Number.isFinite(_tankUp.y) || _tankUp.y < 0.15) {
-          _tankUp.set(0, 1, 0);
-        }
-
-        _tankFlatFwd.set(sinY, 0, cosY);
-        _tankRight.crossVectors(_tankFlatFwd, _tankUp);
-        if (_tankRight.lengthSq() < 1e-10) {
-          _tankRight.set(1, 0, 0);
+        let dirX;
+        let dirZ;
+        let maxS = PARAMS.demoTank.speed;
+        if (follow && dist < 7) {
+          const inv = dist > 0.05 ? 1 / dist : 0;
+          dirX = -dz * inv;
+          dirZ = dx * inv;
+          maxS *= THREE.MathUtils.clamp(dist / 9, 0.2, 1);
+        } else if (dist > 0.35) {
+          dirX = dx / dist;
+          dirZ = dz / dist;
         } else {
-          _tankRight.normalize();
+          const sy = Math.sin(demoTankState.yaw);
+          const cy = Math.cos(demoTankState.yaw);
+          dirX = sy;
+          dirZ = cy;
+          maxS *= 0.35;
         }
-        _tankFwd.crossVectors(_tankUp, _tankRight).normalize();
-        _tankMat.makeBasis(_tankRight, _tankUp, _tankFwd);
-        _tankQuatTarget.setFromRotationMatrix(_tankMat);
-        const alignT = 1 - Math.exp(-PARAMS.demoTank.alignSpeed * dt);
-        root.quaternion.slerp(_tankQuatTarget, alignT);
-        root.position.set(hx, hC + PARAMS.demoTank.yOffset, hz);
 
-        const vis = demoTankState.visual;
-        if (vis) {
-          const s = demoTankState.baseScale * PARAMS.demoTank.scaleMul;
-          vis.scale.setScalar(s);
+        const wantVx = dirX * maxS;
+        const wantVz = dirZ * maxS;
+        const ak = 1 - Math.exp(-PARAMS.demoTank.accel * dt);
+        demoTankState.vx += (wantVx - demoTankState.vx) * ak;
+        demoTankState.vz += (wantVz - demoTankState.vz) * ak;
+
+        let newX = demoTankState.x + demoTankState.vx * dt;
+        let newZ = demoTankState.z + demoTankState.vz * dt;
+        newX = THREE.MathUtils.clamp(
+          newX,
+          worldBounds.min.x,
+          worldBounds.max.x,
+        );
+        newZ = THREE.MathUtils.clamp(
+          newZ,
+          worldBounds.min.z,
+          worldBounds.max.z,
+        );
+        if (isBarrierBlocked(newX, newZ)) {
+          const slideX = !isBarrierBlocked(newX, demoTankState.z);
+          const slideZ = !isBarrierBlocked(demoTankState.x, newZ);
+          if (slideX) {
+            newZ = demoTankState.z;
+            demoTankState.vz *= 0.25;
+          } else if (slideZ) {
+            newX = demoTankState.x;
+            demoTankState.vx *= 0.25;
+          } else {
+            newX = demoTankState.x;
+            newZ = demoTankState.z;
+            demoTankState.vx *= 0.2;
+            demoTankState.vz *= 0.2;
+          }
         }
+        demoTankState.x = newX;
+        demoTankState.z = newZ;
+
+        const sp = Math.hypot(demoTankState.vx, demoTankState.vz);
+        let targetYaw;
+        if (sp > 0.1) {
+          targetYaw = Math.atan2(demoTankState.vx, demoTankState.vz);
+        } else {
+          targetYaw = Math.atan2(
+            follow ? playerPos.x - demoTankState.x : dx,
+            follow ? playerPos.z - demoTankState.z : dz,
+          );
+        }
+        let dy = targetYaw - demoTankState.yaw;
+        while (dy > PI) dy -= PI * 2;
+        while (dy < -PI) dy += PI * 2;
+        const yCap = PARAMS.demoTank.yawSmooth * dt;
+        demoTankState.yaw += THREE.MathUtils.clamp(dy, -yCap, yCap);
+
+        applyDemoTankGroundLikeCapsule();
       }
 
       function syncObjectSlotsHeights() {
@@ -11949,23 +12009,34 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           });
         demoTankFolder
           .addBinding(PARAMS.demoTank, "speed", {
-            label: "Drive speed",
+            label: "Max speed",
             min: 0.5,
-            max: 18,
+            max: 22,
             step: 0.1,
           });
         demoTankFolder
-          .addBinding(PARAMS.demoTank, "steerResponse", {
-            label: "Steer response",
-            min: 0.5,
-            max: 6,
-            step: 0.1,
+          .addBinding(PARAMS.demoTank, "accel", {
+            label: "Acceleration",
+            min: 2,
+            max: 28,
+            step: 0.5,
+          });
+        demoTankFolder
+          .addBinding(PARAMS.demoTank, "yawSmooth", {
+            label: "Turn smoothing (rad/s)",
+            min: 1,
+            max: 12,
+            step: 0.25,
+          });
+        demoTankFolder
+          .addBinding(PARAMS.demoTank, "followPlayerInPlay", {
+            label: "Follow player in Play [F]",
           });
         demoTankFolder
           .addBinding(PARAMS.demoTank, "scaleMul", {
             label: "Scale ×",
             min: 0.2,
-            max: 3,
+            max: 8,
             step: 0.05,
           });
         demoTankFolder
@@ -11974,13 +12045,6 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             min: -0.5,
             max: 1.5,
             step: 0.01,
-          });
-        demoTankFolder
-          .addBinding(PARAMS.demoTank, "alignSpeed", {
-            label: "Tilt smoothing",
-            min: 1,
-            max: 24,
-            step: 0.5,
           });
 
         const cliffFolder = pane.addFolder({
