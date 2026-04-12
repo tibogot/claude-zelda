@@ -5094,10 +5094,28 @@
         camDist: 8,
         camSensX: 0.002,
         camSensY: 0.002,
-        flyVerticalSpeed: 10,
+        flyMouseSensX: 0.0022,
+        flyMouseSensY: 0.0018,
+        flyPitchMin: -0.62,
+        flyPitchMax: 0.68,
+        /** Fly: altitude change (m/s) per rad of pitch — mouse up/down + nose attitude. */
+        flyPitchClimbScale: 14,
+        flyRollMax: 0.78,
+        flyRollVelScale: 0.0042,
+        flyRollSmooth: 10,
+        flyRollTargetDecay: 5,
+        /** Fly: full 360° barrel roll duration (s), smoothstep eased. */
+        flyBarrelRollDuration: 0.88,
       };
       /** "capsule" | "fly" — toggled with G while in play mode (pointer lock). */
       let playMovementMode = "capsule";
+      /** Fly only: heading (rad), matches prior mesh rotation.y; mouse steers, W/S along heading. */
+      let flyHeading = 0;
+      let flyPitch = 0;
+      let flyRoll = 0;
+      let flyRollTarget = 0;
+      let flyBarrelActive = false;
+      let flyBarrelPhase = 0;
       /** Fly mode only: height above terrain at (playerPos.x, playerPos.z); playerPos.y stays at ground. */
       let playFlyHeight = 0;
       let playPlaneRoot = null;
@@ -5151,6 +5169,7 @@
           );
         }
         playPlaneRoot = new THREE.Group();
+        playPlaneRoot.rotation.order = "YXZ";
         playPlaneRoot.add(inner);
         playPlaneRoot.visible = false;
         scene.add(playPlaneRoot);
@@ -5265,7 +5284,7 @@
         if (playMode) {
           el.textContent =
             playMovementMode === "fly"
-              ? "PLAY FLY  [ G walk · Shift up · Alt down · F / Esc exit ]"
+              ? "PLAY FLY  [ mouse · W/S · Q barrel · G walk · F/Esc ]"
               : "PLAY WALK  [ G fly · F / Esc exit ]";
           el.className = "play";
           return;
@@ -8259,6 +8278,8 @@
         playMode = false;
         playMovementMode = "capsule";
         playFlyHeight = 0;
+        flyBarrelActive = false;
+        flyBarrelPhase = 0;
         for (const k of Object.keys(keysHeld)) delete keysHeld[k];
         capsuleMesh.visible = false;
         if (playPlaneRoot) playPlaneRoot.visible = false;
@@ -9843,6 +9864,22 @@
 
       document.addEventListener("mousemove", (event) => {
         if (!playMode || !document.pointerLockElement) return;
+        if (playMovementMode === "fly" && playPlaneLoaded) {
+          const mx = event.movementX;
+          const my = event.movementY;
+          flyHeading -= mx * playParams.flyMouseSensX;
+          flyPitch = THREE.MathUtils.clamp(
+            flyPitch + my * playParams.flyMouseSensY,
+            playParams.flyPitchMin,
+            playParams.flyPitchMax,
+          );
+          flyRollTarget = THREE.MathUtils.clamp(
+            flyRollTarget - mx * playParams.flyRollVelScale,
+            -playParams.flyRollMax,
+            playParams.flyRollMax,
+          );
+          return;
+        }
         camYaw -= event.movementX * playParams.camSensX;
         camPitch += event.movementY * playParams.camSensY;
         camPitch = Math.max(0.05, Math.min(PI * 0.45, camPitch));
@@ -9862,7 +9899,21 @@
           if (!event.repeat && event.code === "KeyG") {
             event.preventDefault();
             playMovementMode = playMovementMode === "capsule" ? "fly" : "capsule";
-            if (playMovementMode === "capsule") playFlyHeight = 0;
+            if (playMovementMode === "capsule") {
+              playFlyHeight = 0;
+              flyPitch = 0;
+              flyRoll = 0;
+              flyRollTarget = 0;
+              flyBarrelActive = false;
+              flyBarrelPhase = 0;
+            } else {
+              flyHeading = capsuleMesh.rotation.y;
+              flyPitch = 0;
+              flyRoll = 0;
+              flyRollTarget = 0;
+              flyBarrelActive = false;
+              flyBarrelPhase = 0;
+            }
             capsuleMesh.visible =
               playMovementMode === "capsule" ||
               (playMovementMode === "fly" && !playPlaneLoaded);
@@ -9873,14 +9924,16 @@
             return;
           }
           if (
+            !event.repeat &&
+            event.code === "KeyQ" &&
             playMovementMode === "fly" &&
             playPlaneLoaded &&
-            (event.code === "AltLeft" ||
-              event.code === "AltRight" ||
-              event.code === "ShiftLeft" ||
-              event.code === "ShiftRight")
+            !flyBarrelActive
           ) {
             event.preventDefault();
+            flyBarrelActive = true;
+            flyBarrelPhase = 0;
+            return;
           }
           keysHeld[event.code] = true;
           if (event.code.startsWith("Arrow")) event.preventDefault();
@@ -16859,23 +16912,36 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         }
 
         if (playMode) {
+          const flying = playMovementMode === "fly" && playPlaneLoaded;
+          let flyBarrelAdd = 0;
           let mx = 0;
           let mz = 0;
-          if (keysHeld.KeyW || keysHeld.ArrowUp) {
-            mx -= Math.sin(camYaw);
-            mz -= Math.cos(camYaw);
-          }
-          if (keysHeld.KeyS || keysHeld.ArrowDown) {
-            mx += Math.sin(camYaw);
-            mz += Math.cos(camYaw);
-          }
-          if (keysHeld.KeyA || keysHeld.ArrowLeft) {
-            mx -= Math.cos(camYaw);
-            mz += Math.sin(camYaw);
-          }
-          if (keysHeld.KeyD || keysHeld.ArrowRight) {
-            mx += Math.cos(camYaw);
-            mz -= Math.sin(camYaw);
+          if (flying) {
+            if (keysHeld.KeyW || keysHeld.ArrowUp) {
+              mx -= Math.sin(flyHeading);
+              mz -= Math.cos(flyHeading);
+            }
+            if (keysHeld.KeyS || keysHeld.ArrowDown) {
+              mx += Math.sin(flyHeading);
+              mz += Math.cos(flyHeading);
+            }
+          } else {
+            if (keysHeld.KeyW || keysHeld.ArrowUp) {
+              mx -= Math.sin(camYaw);
+              mz -= Math.cos(camYaw);
+            }
+            if (keysHeld.KeyS || keysHeld.ArrowDown) {
+              mx += Math.sin(camYaw);
+              mz += Math.cos(camYaw);
+            }
+            if (keysHeld.KeyA || keysHeld.ArrowLeft) {
+              mx -= Math.cos(camYaw);
+              mz += Math.sin(camYaw);
+            }
+            if (keysHeld.KeyD || keysHeld.ArrowRight) {
+              mx += Math.cos(camYaw);
+              mz -= Math.sin(camYaw);
+            }
           }
           const mlen = Math.hypot(mx, mz);
           if (mlen > 0) {
@@ -16908,14 +16974,33 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           }
           playerPos.y = getWorldHeight(playerPos.x, playerPos.z);
           const groundY = playerPos.y;
-          const flying = playMovementMode === "fly" && playPlaneLoaded;
           if (flying) {
-            let dv = 0;
-            if (keysHeld.ShiftLeft || keysHeld.ShiftRight)
-              dv += playParams.flyVerticalSpeed * dtSec;
-            if (keysHeld.AltLeft || keysHeld.AltRight)
-              dv -= playParams.flyVerticalSpeed * dtSec;
-            playFlyHeight = Math.max(0, playFlyHeight + dv);
+            playFlyHeight = Math.max(
+              0,
+              playFlyHeight +
+                flyPitch * playParams.flyPitchClimbScale * dtSec,
+            );
+            if (flyBarrelActive) {
+              flyBarrelPhase += dtSec / playParams.flyBarrelRollDuration;
+              const t = Math.min(1, flyBarrelPhase);
+              const sm = t * t * (3 - 2 * t);
+              flyBarrelAdd = sm * PI * 2;
+              if (flyBarrelPhase >= 1) {
+                flyBarrelActive = false;
+                flyBarrelPhase = 0;
+              }
+            }
+            const dtRoll = Math.min(dtSec, 0.08);
+            flyRollTarget = THREE.MathUtils.lerp(
+              flyRollTarget,
+              0,
+              1 - Math.exp(-playParams.flyRollTargetDecay * dtRoll),
+            );
+            flyRoll = THREE.MathUtils.lerp(
+              flyRoll,
+              flyRollTarget,
+              1 - Math.exp(-playParams.flyRollSmooth * dtRoll),
+            );
           } else {
             playFlyHeight = 0;
           }
@@ -16931,20 +17016,23 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             playPlaneRoot.visible = flying;
             if (flying) {
               playPlaneRoot.position.set(playerPos.x, planeY, playerPos.z);
-              if (mlen > 0)
-                playPlaneRoot.rotation.y = Math.atan2(mx, mz) + PI;
-              else playPlaneRoot.rotation.y = capsuleMesh.rotation.y;
+              playPlaneRoot.rotation.set(
+                flyPitch,
+                flyHeading,
+                flyRoll + flyBarrelAdd,
+              );
             }
           }
 
           const lookAtY =
             flying ? planeY + 0.45 : capsuleCY + 0.6;
+          const camOrbitYaw = flying ? flyHeading : camYaw;
           const hDist = playParams.camDist * Math.cos(camPitch);
           const vDist = playParams.camDist * Math.sin(camPitch);
           camera.position.set(
-            playerPos.x + Math.sin(camYaw) * hDist,
+            playerPos.x + Math.sin(camOrbitYaw) * hDist,
             lookAtY + vDist,
-            playerPos.z + Math.cos(camYaw) * hDist,
+            playerPos.z + Math.cos(camOrbitYaw) * hDist,
           );
           camera.lookAt(playerPos.x, lookAtY, playerPos.z);
         } else {
