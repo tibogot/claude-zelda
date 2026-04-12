@@ -5154,6 +5154,24 @@
       brushMarker.visible = false;
       scene.add(brushMarker);
 
+      /* ── Iso click-to-move ring + target (capsule iso only) ── */
+      const moveRing = new THREE.Mesh(
+        new THREE.RingGeometry(1.05, 1.35, 48),
+        new THREE.MeshBasicMaterial({
+          color: 0x66ddff,
+          transparent: true,
+          opacity: 0.85,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        }),
+      );
+      moveRing.rotation.x = -Math.PI / 2;
+      moveRing.renderOrder = 1;
+      moveRing.visible = false;
+      scene.add(moveRing);
+      /** Click target for iso-capsule move-to-point. Null when idle. */
+      let moveTarget = null;
+
       const rampMarkerA = brushMarker.clone();
       rampMarkerA.material = brushMarker.material.clone();
       rampMarkerA.material.color.setHex(0xcc66ff);
@@ -5531,7 +5549,7 @@
             el.textContent =
               playMovementMode === "fly"
                 ? "PLAY FLY · ISO  [ A/D yaw · W/S thrust · Space/Shift climb · Q barrel · wheel zoom · V follow · G walk · F/Esc ]"
-                : "PLAY WALK · ISO  [ WASD · [ ] rotate · wheel zoom · V follow · G fly · F/Esc ]";
+                : "PLAY WALK · ISO  [ click-to-move · WASD · [ ] rotate · wheel zoom · V follow · G fly · F/Esc ]";
           } else {
             el.textContent =
               playMovementMode === "fly"
@@ -8629,6 +8647,8 @@
         playMovementMode = "capsule";
         playCamView = "follow";
         playFlyHeight = 0;
+        moveTarget = null;
+        moveRing.visible = false;
         flyBarrelActive = false;
         flyBarrelPhase = 0;
         for (const k of Object.keys(keysHeld)) delete keysHeld[k];
@@ -10320,6 +10340,9 @@
               flyRollTarget = 0;
               flyBarrelActive = false;
               flyBarrelPhase = 0;
+              // Leaving capsule — drop any click-to-move target/ring.
+              moveTarget = null;
+              moveRing.visible = false;
             }
             capsuleMesh.visible =
               playMovementMode === "capsule" ||
@@ -10347,6 +10370,9 @@
                   : camYaw;
             } else {
               // Back to follow — re-hide cursor and re-acquire pointer lock.
+              // Drop any pending click-to-move target.
+              moveTarget = null;
+              moveRing.visible = false;
               renderer.domElement.style.cursor = "none";
               renderer.domElement.requestPointerLock();
             }
@@ -10770,7 +10796,21 @@
       });
 
       renderer.domElement.addEventListener("pointermove", (event) => {
-        if (playMode) return;
+        if (playMode) {
+          // Iso-capsule: move the hover ring under the cursor. Other play
+          // sub-modes (follow, iso-fly) ignore pointer move.
+          if (playCamView === "iso" && playMovementMode === "capsule") {
+            updatePointerNdc(event);
+            const hit = raycastTerrainPoint();
+            if (hit) {
+              moveRing.visible = true;
+              moveRing.position.set(hit.x, hit.y + 0.08, hit.z);
+            } else {
+              moveRing.visible = false;
+            }
+          }
+          return;
+        }
         if (editState.mode === "water") return;
         updatePointerNdc(event);
         if (
@@ -10959,7 +10999,23 @@
       });
 
       renderer.domElement.addEventListener("pointerdown", (event) => {
-        if (playMode) return;
+        if (playMode) {
+          // Iso-capsule LMB: click-to-move. Store target; the render loop
+          // walks toward it until arrival or until the user presses WASD.
+          if (
+            playCamView === "iso" &&
+            playMovementMode === "capsule" &&
+            event.button === 0
+          ) {
+            updatePointerNdc(event);
+            const hit = raycastTerrainPoint();
+            if (hit) {
+              if (!moveTarget) moveTarget = new THREE.Vector3();
+              moveTarget.copy(hit);
+            }
+          }
+          return;
+        }
         updatePointerNdc(event);
         if (event.button === 0) {
           raycaster.setFromCamera(pointerNdc, camera);
@@ -17690,6 +17746,22 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             if (keysHeld.KeyD || keysHeld.ArrowRight) {
               mx += Math.cos(moveYaw);
               mz -= Math.sin(moveYaw);
+            }
+          }
+          // Iso-capsule click-to-move: if a click target is set, walk toward
+          // it when no WASD input is active. Any WASD press cancels it.
+          if (iso && !flying && moveTarget) {
+            if (mx !== 0 || mz !== 0) {
+              moveTarget = null;
+            } else {
+              const dx = moveTarget.x - playerPos.x;
+              const dz = moveTarget.z - playerPos.z;
+              if (Math.hypot(dx, dz) < 0.35) {
+                moveTarget = null;
+              } else {
+                mx = dx;
+                mz = dz;
+              }
             }
           }
           const mlen = Math.hypot(mx, mz);
