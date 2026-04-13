@@ -5857,11 +5857,24 @@
       let flyRollTarget = 0;
       let flyBarrelActive = false;
       let flyBarrelPhase = 0;
+      const PLAY_PLANE_MODEL = "models/wenning_carsten_gameart_plane_compressed.glb";
+      /** Plane airspeed tunables (m/s, m/s²). Separate from capsule `playParams.speed`. */
+      const PLAY_PLANE_MAX_FWD = 56;
+      const PLAY_PLANE_MAX_REV = 18;
+      const PLAY_PLANE_ACCEL = 10.5;
+      const PLAY_PLANE_BRAKE = 26;
+      const PLAY_PLANE_REV_ACCEL = 8;
+      const PLAY_PLANE_COAST = 3.8;
+      const PLAY_PLANE_DRAG = 0.014;
+      /** Below this height AGL (m), extra rolling resistance / deck braking when coasting. */
+      const PLAY_PLANE_DECK_ALT = 1.15;
+      const PLAY_PLANE_DECK_COAST_MULT = 2.1;
       /** Fly mode only: height above terrain at (playerPos.x, playerPos.z); playerPos.y stays at ground. */
       let playFlyHeight = 0;
+      /** Signed forward airspeed along `flyHeading` (m/s). Throttle ramps; never uses capsule speed. */
+      let playPlaneForwardSpeed = 0;
       let playPlaneRoot = null;
       let playPlaneLoaded = false;
-      const PLAY_PLANE_MODEL = "models/wenning_carsten_gameart_plane_compressed.glb";
 
       /* ── Animated character (3rd movement mode: "char") ── */
       /* Matches game-unreal.html: UA1+UA2 character w/ katana.glb, hat,
@@ -10713,6 +10726,7 @@
         isoYaw = Math.PI / 4;
         isoDist = ISO_DIST_DEFAULT;
         playFlyHeight = 0;
+        playPlaneForwardSpeed = 0;
         PARAMS.mode = "play";
         savedCamPos = camera.position.clone();
         savedTarget = controls.target.clone();
@@ -10754,6 +10768,7 @@
         playMovementMode = "capsule";
         playCamView = "follow";
         playFlyHeight = 0;
+        playPlaneForwardSpeed = 0;
         moveTarget = null;
         moveRing.visible = false;
         flyBarrelActive = false;
@@ -12927,6 +12942,7 @@
               flyRollTarget = 0;
               flyBarrelActive = false;
               flyBarrelPhase = 0;
+              playPlaneForwardSpeed = 0;
               moveTarget = null;
               moveRing.visible = false;
             } else if (playMovementMode === "char") {
@@ -12943,6 +12959,7 @@
             } else if (playMovementMode === "car") {
               /* Entering car mode from fly: inherit heading so the cycle
                * doesn't snap-rotate the world. Reset velocity/suspension. */
+              if (prevMode === "fly") playPlaneForwardSpeed = 0;
               playCarHeading =
                 prevMode === "fly" ? flyHeading
                 : prevMode === "char" ? playCharYaw
@@ -20864,15 +20881,55 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
              * direction accumulation so the mlen-based playerPos step
              * stays at zero. */
           } else if (flying) {
-            // Both follow-fly and iso-fly thrust along flyHeading. The only
-            // difference is where flyHeading comes from (mouse vs A/D above).
-            if (keysHeld.KeyW || keysHeld.ArrowUp) {
-              mx -= Math.sin(flyHeading);
-              mz -= Math.cos(flyHeading);
+            // Throttle-style airspeed: ramp up/down; HUD shows live speed.
+            const thr =
+              keysHeld.KeyW || keysHeld.ArrowUp
+                ? 1
+                : keysHeld.KeyS || keysHeld.ArrowDown
+                  ? -1
+                  : 0;
+            const drag =
+              PLAY_PLANE_DRAG *
+              playPlaneForwardSpeed *
+              Math.abs(playPlaneForwardSpeed);
+            let coast = PLAY_PLANE_COAST;
+            if (playFlyHeight < PLAY_PLANE_DECK_ALT)
+              coast *= PLAY_PLANE_DECK_COAST_MULT;
+            if (thr === 1) {
+              playPlaneForwardSpeed += PLAY_PLANE_ACCEL * dtSec;
+            } else if (thr === -1) {
+              if (playPlaneForwardSpeed > 0.55) {
+                playPlaneForwardSpeed -= PLAY_PLANE_BRAKE * dtSec;
+              } else {
+                playPlaneForwardSpeed -= PLAY_PLANE_REV_ACCEL * dtSec;
+              }
+            } else {
+              if (playPlaneForwardSpeed > 0) {
+                playPlaneForwardSpeed = Math.max(
+                  0,
+                  playPlaneForwardSpeed -
+                    (coast * dtSec + drag * dtSec),
+                );
+              } else if (playPlaneForwardSpeed < 0) {
+                playPlaneForwardSpeed = Math.min(
+                  0,
+                  playPlaneForwardSpeed +
+                    (coast * dtSec + drag * dtSec),
+                );
+              }
             }
-            if (keysHeld.KeyS || keysHeld.ArrowDown) {
-              mx += Math.sin(flyHeading);
-              mz += Math.cos(flyHeading);
+            playPlaneForwardSpeed = THREE.MathUtils.clamp(
+              playPlaneForwardSpeed,
+              -PLAY_PLANE_MAX_REV,
+              PLAY_PLANE_MAX_FWD,
+            );
+            if (Math.abs(playPlaneForwardSpeed) < 0.04 && thr === 0)
+              playPlaneForwardSpeed = 0;
+            const spdAbs = Math.abs(playPlaneForwardSpeed);
+            if (spdAbs > 1e-4) {
+              const sg = Math.sign(playPlaneForwardSpeed);
+              mx = -Math.sin(flyHeading) * sg;
+              mz = -Math.cos(flyHeading) * sg;
             }
           } else {
             // Capsule — follow uses camYaw, iso uses the manually-rotated
@@ -21004,7 +21061,9 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
                   : charRunning
                     ? PLAY_CHAR_RUN_SPEED
                     : PLAY_CHAR_WALK_SPEED
-            : playParams.speed;
+            : flying
+              ? Math.abs(playPlaneForwardSpeed)
+              : playParams.speed;
           if (mlen > 0) {
             const stepX = (mx / mlen) * _moveSpeed * dtSec;
             const stepZ = (mz / mlen) * _moveSpeed * dtSec;
@@ -21525,7 +21584,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
               flyHudEl.classList.add("visible");
               _flyHudVisible = true;
             }
-            const spdNow = mlen > 0 ? Math.round(playParams.speed) : 0;
+            const spdNow = Math.round(Math.abs(playPlaneForwardSpeed));
             const altNow = Math.round(playFlyHeight);
             if (spdNow !== _flyHudSpdShown) {
               flySpdEl.textContent = spdNow;
