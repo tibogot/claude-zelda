@@ -5862,6 +5862,52 @@
       let playPlaneRoot = null;
       let playPlaneLoaded = false;
       const PLAY_PLANE_MODEL = "models/wenning_carsten_gameart_plane_compressed.glb";
+
+      /* ── Animated character (3rd movement mode: "char") ── */
+      /* Matches game-unreal.html: UA1+UA2 character w/ katana.glb, hat,
+       * slide, spell, sword attacks, crouch, roll. */
+      const PLAY_CHAR_MODEL = "models/UA1+UA2_compressed.glb";
+      const PLAY_CHAR_KATANA_MODEL = "models/katana.glb";
+      const PLAY_CHAR_HAT_MODEL = "models/asian_conical_hat_compressed.glb";
+      const PLAY_CHAR_HEIGHT = 2.5;
+      const PLAY_CHAR_WALK_SPEED = 4.0;
+      const PLAY_CHAR_RUN_SPEED = 8.0;
+      /* Jump — v²/2g peak ≈ 3.2m. Tuned higher than a realistic ninja so
+       * hills/small obstacles are easy to clear. */
+      const PLAY_CHAR_JUMP_VEL = 11.0;
+      const PLAY_CHAR_GRAVITY = 20.0;
+      /* Roll peak speed: should exceed run so hitting C mid-sprint feels
+       * like a dash, not a brake. Speed = PEAK * cos(πt/2). */
+      const PLAY_CHAR_ROLL_PEAK = 13.0;
+      let playCharRoot = null;
+      let playCharInner = null;
+      let playCharMixer = null;
+      let playCharLoaded = false;
+      let playCharActions = null;
+      let playCharCurrentAction = null;
+      let playCharYaw = 0;
+      let playCharVelY = 0;
+      let playCharInAir = false;
+      let playCharCrouching = false;
+      let playCharAttacking = false;
+      let playCharRolling = false;
+      let playCharRollYaw = 0;
+      let playCharRollStart = 0;
+      /* Slide state: "none" | "start" | "loop" | "exit" */
+      let playCharSlidePhase = "none";
+      let playCharSlideYaw = 0;
+      let playCharSlideStart = 0;
+      /* Spell state: "none" | "enter" | "idle" | "shoot" | "exit" */
+      let playCharSpellPhase = "none";
+      let playCharSpellExitRequested = false;
+      /* Filled from rollAction.getClip().duration at load so the dash
+       * and the 75% early-exit both track the real animation length. */
+      let playCharRollDuration = 0.8;
+      /* Jump phase state machine — "none" | "start" | "loop" | "land".
+       * Mirrors game-unreal's Jump_Start → Jump_Loop → Jump_Land chain. */
+      let playCharJumpPhase = "none";
+      const PLAY_CHAR_SLIDE_SPEED = 10.0;
+      const PLAY_CHAR_SLIDE_MAX_TIME = 1.2;
       const keysHeld = {};
       const playerPos = new THREE.Vector3();
       let camYaw = 0;
@@ -6883,6 +6929,358 @@
         }
       });
 
+      /* ── Animated character loader (3rd mode, game-unreal parity) ── */
+      gltfLoader.load(resolveModelUrl(PLAY_CHAR_MODEL), (gltf) => {
+        const model = gltf.scene;
+        model.traverse((o) => {
+          if (o.isMesh || o.isSkinnedMesh) {
+            o.castShadow = true;
+            o.receiveShadow = true;
+            o.frustumCulled = false;
+          }
+        });
+        /* Scale to PLAY_CHAR_HEIGHT and recentre so feet sit at y=0. */
+        const box = new THREE.Box3().setFromObject(model);
+        const size = new THREE.Vector3();
+        box.getSize(size);
+        const scale = PLAY_CHAR_HEIGHT / (size.y || 1);
+        model.scale.setScalar(scale);
+        box.setFromObject(model);
+        model.position.y -= box.min.y;
+
+        playCharInner = model;
+        playCharRoot = new THREE.Group();
+        playCharRoot.add(model);
+        playCharRoot.visible = false;
+        scene.add(playCharRoot);
+
+        /* Bones — UA1+UA2 uses DEF-handR/DEF-head, but try fallbacks
+         * in case compression mangled names. */
+        const findBone = (names) => {
+          for (const n of names) {
+            const b = model.getObjectByName(n);
+            if (b) return b;
+          }
+          /* Last resort: scan by regex. */
+          let hit = null;
+          model.traverse((o) => {
+            if (hit) return;
+            const nm = (o.name || "").toLowerCase();
+            if (
+              /hand[_.-]?r|righthand|handright/.test(nm) &&
+              names[0].toLowerCase().includes("hand")
+            )
+              hit = o;
+            if (/head/.test(nm) && names[0].toLowerCase().includes("head"))
+              hit = o;
+          });
+          return hit;
+        };
+        const rightHandBone = findBone([
+          "DEF-handR",
+          "hand.R",
+          "mixamorigRightHand",
+          "RightHand",
+        ]);
+        const headBone = findBone([
+          "DEF-head",
+          "head",
+          "Head",
+          "mixamorigHead",
+        ]);
+        if (!rightHandBone)
+          console.warn(
+            "[char] right hand bone not found — katana won't attach",
+          );
+
+        /* Katana on right hand — loaded from separate GLB (matches game-unreal). */
+        if (rightHandBone) {
+          const swordGroup = new THREE.Group();
+          swordGroup.position.set(-0.07, 0.115, -0.2);
+          swordGroup.rotation.set(-1.37, 1.8, -2.21);
+          rightHandBone.add(swordGroup);
+          gltfLoader.load(
+            resolveModelUrl(PLAY_CHAR_KATANA_MODEL),
+            (katanaGltf) => {
+              const katanaScene = katanaGltf.scene;
+              katanaScene.traverse((o) => {
+                if (o.isMesh) {
+                  o.castShadow = true;
+                  o.receiveShadow = true;
+                }
+              });
+              const kbox = new THREE.Box3().setFromObject(katanaScene);
+              const ksize = new THREE.Vector3();
+              kbox.getSize(ksize);
+              const length = Math.max(ksize.x, ksize.y, ksize.z);
+              const kscale = 1.0 / (length || 1);
+              katanaScene.scale.setScalar(kscale);
+              kbox.setFromObject(katanaScene);
+              katanaScene.position.set(-kbox.min.x, -kbox.min.y, -kbox.min.z);
+              swordGroup.add(katanaScene);
+            },
+            undefined,
+            (err) => {
+              console.warn(
+                "Katana GLB load failed, using procedural sword:",
+                err,
+              );
+              const handleGeo = new THREE.CylinderGeometry(0.02, 0.025, 0.18, 8);
+              const bladeGeo = new THREE.BoxGeometry(0.015, 0.06, 0.95);
+              const handleMat = new THREE.MeshStandardMaterial({
+                color: 0x4a3728,
+                roughness: 0.8,
+                metalness: 0.1,
+              });
+              const bladeMat = new THREE.MeshStandardMaterial({
+                color: 0xc0c8d0,
+                roughness: 0.3,
+                metalness: 0.8,
+              });
+              const handle = new THREE.Mesh(handleGeo, handleMat);
+              const blade = new THREE.Mesh(bladeGeo, bladeMat);
+              blade.position.set(0, 0, 0.565);
+              swordGroup.add(handle);
+              swordGroup.add(blade);
+            },
+          );
+        }
+
+        /* Hat on head bone. */
+        if (headBone) {
+          gltfLoader.load(
+            resolveModelUrl(PLAY_CHAR_HAT_MODEL),
+            (hatGltf) => {
+              const hatScene = hatGltf.scene;
+              hatScene.traverse((o) => {
+                if (o.isMesh) {
+                  o.castShadow = true;
+                  o.receiveShadow = true;
+                }
+              });
+              const hatScale = PLAY_CHAR_HEIGHT / 1.8;
+              hatScene.scale.setScalar(0.65 * hatScale);
+              hatScene.position.set(0, 0.2, 0);
+              headBone.add(hatScene);
+            },
+            undefined,
+            (err) => console.warn("Hat GLB load failed:", err),
+          );
+        }
+
+        if (gltf.animations && gltf.animations.length) {
+          playCharMixer = new THREE.AnimationMixer(model);
+          /* UA1+UA2 uses `*_Armature` suffixes; fall back to plain names. */
+          const pick = (baseNames) => {
+            for (const base of baseNames) {
+              const hit = gltf.animations.find(
+                (a) => a.name === base + "_Armature" || a.name === base,
+              );
+              if (hit) return hit;
+            }
+            return null;
+          };
+          const idleClip = pick(["Idle_Loop"]) || gltf.animations[0];
+          const walkClip = pick(["Walk_Loop"]) || idleClip;
+          const runClip = pick(["Sprint_Loop", "Jog_Fwd_Loop"]) || walkClip;
+          const jumpStartClip = pick(["Jump_Start"]);
+          const jumpLoopClip =
+            pick(["Jump_Loop", "NinjaJump_Idle_Loop"]) ||
+            jumpStartClip ||
+            idleClip;
+          const jumpLandClip = pick(["Jump_Land"]) || idleClip;
+          const attackClip = pick(["Sword_Attack", "Sword_Attack_RM"]);
+          const crouchClip = pick(["Crouch_Idle_Loop"]) || idleClip;
+          const crouchWalkClip = pick(["Crouch_Fwd_Loop"]) || crouchClip;
+          const rollClip = pick(["Roll", "Roll_RM"]) || idleClip;
+          const slideStartClip = pick(["Slide_Start"]);
+          const slideLoopClip = pick(["Slide_Loop"]) || slideStartClip;
+          const slideExitClip = pick(["Slide_Exit"]) || slideLoopClip;
+          const spellEnterClip = pick(["Spell_Simple_Enter"]);
+          const spellIdleClip = pick(["Spell_Simple_Idle_Loop"]);
+          const spellShootClip = pick(["Spell_Simple_Shoot"]);
+          const spellExitClip = pick(["Spell_Simple_Exit"]);
+
+          const mk = (clip, loopOnce) => {
+            if (!clip) return null;
+            const a = playCharMixer
+              .clipAction(clip)
+              .setLoop(loopOnce ? THREE.LoopOnce : THREE.LoopRepeat);
+            if (loopOnce) a.clampWhenFinished = true;
+            return a;
+          };
+
+          const idleAction = mk(idleClip, false);
+          const walkAction = mk(walkClip, false);
+          const runAction = mk(runClip, false);
+          const jumpStartAction = mk(jumpStartClip, true);
+          const jumpLoopAction = mk(jumpLoopClip, false);
+          const jumpLandAction = mk(jumpLandClip, true);
+          /* Speed-up the short cinematic clips slightly so they feel
+           * responsive — matches game-unreal's 1.4x/1.8x on start/land. */
+          if (jumpStartAction) jumpStartAction.timeScale = 1.4;
+          if (jumpLandAction) jumpLandAction.timeScale = 1.8;
+          const crouchAction = mk(crouchClip, false);
+          const crouchWalkAction = mk(crouchWalkClip, false);
+          const attackAction = mk(attackClip, true);
+          const rollAction = mk(rollClip, true);
+          if (rollAction) {
+            const d = rollAction.getClip()?.duration;
+            if (d && d > 0) playCharRollDuration = d;
+          }
+          const slideStartAction = mk(slideStartClip, true);
+          const slideLoopAction = mk(slideLoopClip, false);
+          const slideExitAction = mk(slideExitClip, true);
+          const spellEnterAction = mk(spellEnterClip, true);
+          const spellIdleAction = mk(spellIdleClip, false);
+          const spellShootAction = mk(spellShootClip, true);
+          const spellExitAction = mk(spellExitClip, true);
+
+          idleAction.play();
+          playCharActions = {
+            idle: idleAction,
+            walk: walkAction,
+            run: runAction,
+            jumpStart: jumpStartAction,
+            jumpLoop: jumpLoopAction,
+            jumpLand: jumpLandAction,
+            crouch: crouchAction,
+            crouchWalk: crouchWalkAction,
+            attack: attackAction,
+            roll: rollAction,
+            slideStart: slideStartAction,
+            slideLoop: slideLoopAction,
+            slideExit: slideExitAction,
+            spellEnter: spellEnterAction,
+            spellIdle: spellIdleAction,
+            spellShoot: spellShootAction,
+            spellExit: spellExitAction,
+          };
+          playCharCurrentAction = idleAction;
+
+          playCharMixer.addEventListener("finished", (e) => {
+            /* Attack → back to locomotion (flag only; render loop picks next). */
+            if (attackAction && e.action === attackAction) {
+              playCharAttacking = false;
+              return;
+            }
+            if (rollAction && e.action === rollAction) {
+              playCharRolling = false;
+              return;
+            }
+            /* Jump Start → transition to Loop while airborne. */
+            if (jumpStartAction && e.action === jumpStartAction) {
+              if (playCharInAir && jumpLoopAction) {
+                playCharJumpPhase = "loop";
+                jumpLoopAction.reset();
+                jumpLoopAction.enabled = true;
+                jumpLoopAction
+                  .crossFadeFrom(jumpStartAction, 0.08, false)
+                  .play();
+                playCharCurrentAction = jumpLoopAction;
+              }
+              return;
+            }
+            /* Jump Land → back to locomotion. */
+            if (jumpLandAction && e.action === jumpLandAction) {
+              playCharJumpPhase = "none";
+              return;
+            }
+            /* Slide start → enter loop phase; loop is time-capped in render loop. */
+            if (slideStartAction && e.action === slideStartAction) {
+              if (playCharSlidePhase === "start") {
+                playCharSlidePhase = "loop";
+                if (slideLoopAction) {
+                  slideLoopAction.reset();
+                  slideLoopAction.enabled = true;
+                  slideLoopAction
+                    .crossFadeFrom(slideStartAction, 0.1, false)
+                    .play();
+                  playCharCurrentAction = slideLoopAction;
+                }
+              }
+              return;
+            }
+            if (slideExitAction && e.action === slideExitAction) {
+              playCharSlidePhase = "none";
+              return;
+            }
+            /* Spell Enter → Idle stance (or Exit if exit-requested mid-enter). */
+            if (spellEnterAction && e.action === spellEnterAction) {
+              if (playCharSpellPhase !== "enter") return;
+              if (playCharSpellExitRequested && spellExitAction) {
+                playCharSpellPhase = "exit";
+                spellExitAction.reset();
+                spellExitAction.enabled = true;
+                spellExitAction
+                  .crossFadeFrom(spellEnterAction, 0.12, false)
+                  .play();
+                playCharCurrentAction = spellExitAction;
+              } else if (spellIdleAction) {
+                playCharSpellPhase = "idle";
+                spellIdleAction.reset();
+                spellIdleAction.enabled = true;
+                spellIdleAction
+                  .crossFadeFrom(spellEnterAction, 0.12, false)
+                  .play();
+                playCharCurrentAction = spellIdleAction;
+              }
+              return;
+            }
+            /* Spell Shoot → back to idle stance (or exit if requested). */
+            if (spellShootAction && e.action === spellShootAction) {
+              if (playCharSpellPhase !== "shoot") return;
+              if (playCharSpellExitRequested && spellExitAction) {
+                playCharSpellPhase = "exit";
+                spellExitAction.reset();
+                spellExitAction.enabled = true;
+                spellExitAction
+                  .crossFadeFrom(spellShootAction, 0.12, false)
+                  .play();
+                playCharCurrentAction = spellExitAction;
+              } else if (spellIdleAction) {
+                playCharSpellPhase = "idle";
+                spellIdleAction.reset();
+                spellIdleAction.enabled = true;
+                spellIdleAction
+                  .crossFadeFrom(spellShootAction, 0.12, false)
+                  .play();
+                playCharCurrentAction = spellIdleAction;
+              }
+              return;
+            }
+            /* Spell Exit → back to locomotion idle. */
+            if (spellExitAction && e.action === spellExitAction) {
+              playCharSpellPhase = "none";
+              playCharSpellExitRequested = false;
+              if (idleAction) {
+                idleAction.reset();
+                idleAction.enabled = true;
+                idleAction
+                  .crossFadeFrom(spellExitAction, 0.2, false)
+                  .play();
+                playCharCurrentAction = idleAction;
+              }
+              return;
+            }
+          });
+        }
+        playCharLoaded = true;
+        if (playMode && playMovementMode === "char") {
+          playCharRoot.visible = true;
+          capsuleMesh.visible = false;
+          syncModeBadge();
+        }
+      });
+
+      function _playCharSetAction(next, fade = 0.18) {
+        if (!playCharActions || !next || next === playCharCurrentAction) return;
+        next.enabled = true;
+        next.reset();
+        next.crossFadeFrom(playCharCurrentAction, fade, false).play();
+        playCharCurrentAction = next;
+      }
+
       splineGroup = new THREE.Group();
       scene.add(splineGroup);
       riverGroup = new THREE.Group();
@@ -6998,16 +7396,21 @@
         const el = document.getElementById("mode-badge");
         if (!el) return;
         if (playMode) {
+          const mm = playMovementMode;
           if (playCamView === "iso") {
             el.textContent =
-              playMovementMode === "fly"
-                ? "PLAY FLY · ISO  [ A/D yaw · W/S thrust · Space/Shift climb · Q barrel · wheel zoom · V follow · G walk · F/Esc ]"
-                : "PLAY WALK · ISO  [ click-to-move · WASD · [ ] rotate · wheel zoom · V follow · G fly · F/Esc ]";
+              mm === "fly"
+                ? "PLAY FLY · ISO  [ A/D yaw · W/S thrust · Space/Shift climb · Q barrel · wheel zoom · V follow · G cycle · F/Esc ]"
+                : mm === "char"
+                  ? "PLAY CHAR · ISO  [ WASD · Shift run · Space jump · [ ] rotate · wheel zoom · V follow · G cycle · F/Esc ]"
+                  : "PLAY WALK · ISO  [ click-to-move · WASD · [ ] rotate · wheel zoom · V follow · G cycle · F/Esc ]";
           } else {
             el.textContent =
-              playMovementMode === "fly"
-                ? "PLAY FLY  [ mouse · W/S · Q barrel · V iso · G walk · F/Esc ]"
-                : "PLAY WALK  [ V iso · G fly · F / Esc exit ]";
+              mm === "fly"
+                ? "PLAY FLY  [ mouse · W/S · Q barrel · V iso · G cycle · F/Esc ]"
+                : mm === "char"
+                  ? "PLAY CHAR  [ WASD · Shift run · Space jump · V iso · G cycle · F/Esc ]"
+                  : "PLAY WALK  [ V iso · G cycle · F / Esc exit ]";
           }
           el.className = "play";
           return;
@@ -10082,6 +10485,7 @@
         camPitch = 0.35;
         capsuleMesh.visible = true;
         if (playPlaneRoot) playPlaneRoot.visible = false;
+        if (playCharRoot) playCharRoot.visible = false;
         syncRoadHandlesVisibility();
         controls.enabled = false;
         brushMarker.visible = false;
@@ -10119,6 +10523,7 @@
         for (const k of Object.keys(keysHeld)) delete keysHeld[k];
         capsuleMesh.visible = false;
         if (playPlaneRoot) playPlaneRoot.visible = false;
+        if (playCharRoot) playCharRoot.visible = false;
         clearWingTrails();
         flyHudEl.classList.remove("visible");
         _flyHudVisible = false;
@@ -12260,7 +12665,12 @@
         if (playMode) {
           if (!event.repeat && event.code === "KeyG") {
             event.preventDefault();
-            playMovementMode = playMovementMode === "capsule" ? "fly" : "capsule";
+            /* Cycle: capsule → char → fly → capsule. */
+            const prevMode = playMovementMode;
+            if (prevMode === "capsule") playMovementMode = "char";
+            else if (prevMode === "char") playMovementMode = "fly";
+            else playMovementMode = "capsule";
+
             if (playMovementMode === "capsule") {
               playFlyHeight = 0;
               flyPitch = 0;
@@ -12269,23 +12679,34 @@
               flyBarrelActive = false;
               flyBarrelPhase = 0;
               clearWingTrails();
-            } else {
-              flyHeading = capsuleMesh.rotation.y;
+            } else if (playMovementMode === "fly") {
+              flyHeading =
+                prevMode === "char" ? playCharYaw : capsuleMesh.rotation.y;
               flyPitch = 0;
               flyRoll = 0;
               flyRollTarget = 0;
               flyBarrelActive = false;
               flyBarrelPhase = 0;
-              // Leaving capsule — drop any click-to-move target/ring.
+              moveTarget = null;
+              moveRing.visible = false;
+            } else if (playMovementMode === "char") {
+              /* Entering char mode from capsule: seed yaw + grounded state. */
+              playCharYaw = capsuleMesh.rotation.y;
+              playCharVelY = 0;
+              playCharInAir = false;
               moveTarget = null;
               moveRing.visible = false;
             }
             capsuleMesh.visible =
               playMovementMode === "capsule" ||
-              (playMovementMode === "fly" && !playPlaneLoaded);
+              (playMovementMode === "fly" && !playPlaneLoaded) ||
+              (playMovementMode === "char" && !playCharLoaded);
             if (playPlaneRoot)
               playPlaneRoot.visible =
                 playMovementMode === "fly" && playPlaneLoaded;
+            if (playCharRoot)
+              playCharRoot.visible =
+                playMovementMode === "char" && playCharLoaded;
             syncModeBadge();
             return;
           }
@@ -12326,6 +12747,127 @@
             flyBarrelActive = true;
             flyBarrelPhase = 0;
             return;
+          }
+          /* Char mode (game-unreal parity):
+           *   R = sword attack, C = roll,
+           *   X = slide (requires WASD + grounded),
+           *   Q = spell toggle, J = spell shoot. */
+          if (
+            !event.repeat &&
+            playMovementMode === "char" &&
+            playCharLoaded &&
+            playCharActions
+          ) {
+            const a = playCharActions;
+            const busy =
+              playCharAttacking ||
+              playCharRolling ||
+              playCharSlidePhase !== "none";
+            const inSpell = playCharSpellPhase !== "none";
+
+            if (
+              event.code === "KeyR" &&
+              a.attack &&
+              !busy &&
+              !inSpell &&
+              !playCharInAir
+            ) {
+              event.preventDefault();
+              playCharAttacking = true;
+              a.attack.enabled = true;
+              a.attack.reset();
+              a.attack
+                .crossFadeFrom(playCharCurrentAction, 0.12, false)
+                .play();
+              playCharCurrentAction = a.attack;
+              return;
+            }
+            if (event.code === "KeyC" && a.roll && !busy && !inSpell) {
+              event.preventDefault();
+              playCharRolling = true;
+              playCharRollYaw = playCharYaw;
+              playCharRollStart = performance.now();
+              a.roll.enabled = true;
+              a.roll.reset();
+              a.roll.crossFadeFrom(playCharCurrentAction, 0.1, false).play();
+              playCharCurrentAction = a.roll;
+              return;
+            }
+            if (
+              event.code === "KeyX" &&
+              a.slideStart &&
+              !busy &&
+              !inSpell &&
+              !playCharInAir &&
+              (keysHeld.KeyW ||
+                keysHeld.KeyA ||
+                keysHeld.KeyS ||
+                keysHeld.KeyD ||
+                keysHeld.ArrowUp ||
+                keysHeld.ArrowDown ||
+                keysHeld.ArrowLeft ||
+                keysHeld.ArrowRight)
+            ) {
+              event.preventDefault();
+              playCharSlidePhase = "start";
+              playCharSlideYaw = playCharYaw;
+              playCharSlideStart = performance.now();
+              a.slideStart.enabled = true;
+              a.slideStart.reset();
+              a.slideStart
+                .crossFadeFrom(playCharCurrentAction, 0.1, false)
+                .play();
+              playCharCurrentAction = a.slideStart;
+              return;
+            }
+            if (event.code === "KeyQ") {
+              event.preventDefault();
+              /* Toggle spell stance. */
+              if (playCharSpellPhase === "none" && !busy && a.spellEnter) {
+                playCharSpellPhase = "enter";
+                playCharSpellExitRequested = false;
+                a.spellEnter.enabled = true;
+                a.spellEnter.reset();
+                a.spellEnter
+                  .crossFadeFrom(playCharCurrentAction, 0.15, false)
+                  .play();
+                playCharCurrentAction = a.spellEnter;
+              } else if (
+                (playCharSpellPhase === "idle" ||
+                  playCharSpellPhase === "enter" ||
+                  playCharSpellPhase === "shoot") &&
+                a.spellExit
+              ) {
+                /* Request exit; if already idle, transition now. */
+                playCharSpellExitRequested = true;
+                if (playCharSpellPhase === "idle") {
+                  playCharSpellPhase = "exit";
+                  a.spellExit.enabled = true;
+                  a.spellExit.reset();
+                  a.spellExit
+                    .crossFadeFrom(playCharCurrentAction, 0.12, false)
+                    .play();
+                  playCharCurrentAction = a.spellExit;
+                }
+              }
+              return;
+            }
+            if (
+              event.code === "KeyJ" &&
+              playCharSpellPhase === "idle" &&
+              !playCharSpellExitRequested &&
+              a.spellShoot
+            ) {
+              event.preventDefault();
+              playCharSpellPhase = "shoot";
+              a.spellShoot.enabled = true;
+              a.spellShoot.reset();
+              a.spellShoot
+                .crossFadeFrom(playCharCurrentAction, 0.12, false)
+                .play();
+              playCharCurrentAction = a.spellShoot;
+              return;
+            }
           }
           keysHeld[event.code] = true;
           if (event.code.startsWith("Arrow")) event.preventDefault();
@@ -20028,6 +20570,9 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
 
         if (playMode) {
           const flying = playMovementMode === "fly" && playPlaneLoaded;
+          const charMode = playMovementMode === "char" && playCharLoaded;
+          const charRunning =
+            charMode && (keysHeld.ShiftLeft || keysHeld.ShiftRight);
           const iso = playCamView === "iso";
           let flyBarrelAdd = 0;
           // Iso capsule: [ / ] rotate the fixed camera yaw manually.
@@ -20097,10 +20642,103 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
               }
             }
           }
+          /* Early roll exit (game-unreal parity): once past 75% of the
+           * roll dash, if a direction key is still held, abort the roll
+           * and crossfade straight into walk/run so movement is seamless. */
+          const _inputHeld =
+            keysHeld.KeyW ||
+            keysHeld.KeyA ||
+            keysHeld.KeyS ||
+            keysHeld.KeyD ||
+            keysHeld.ArrowUp ||
+            keysHeld.ArrowDown ||
+            keysHeld.ArrowLeft ||
+            keysHeld.ArrowRight;
+          if (
+            charMode &&
+            playCharRolling &&
+            _inputHeld &&
+            !playCharInAir &&
+            playCharActions
+          ) {
+            const rollT =
+              (performance.now() - playCharRollStart) /
+              1000 /
+              playCharRollDuration;
+            if (rollT >= 0.75) {
+              playCharRolling = false;
+              const running =
+                keysHeld.ShiftLeft || keysHeld.ShiftRight;
+              const tgt = playCharCrouching
+                ? playCharActions.crouchWalk
+                : running
+                  ? playCharActions.run
+                  : playCharActions.walk;
+              if (tgt && playCharActions.roll) {
+                tgt.enabled = true;
+                tgt.reset();
+                tgt.crossFadeFrom(playCharActions.roll, 0.15, false).play();
+                playCharCurrentAction = tgt;
+              }
+            }
+          }
+          /* Char roll: ease-out dash along locked yaw (direction only —
+           * speed goes into _moveSpeed so the (mx/mlen)*speed step math
+           * still works). */
+          let _charRollSpeed = 0;
+          if (charMode && playCharRolling) {
+            const elapsed = (performance.now() - playCharRollStart) / 1000;
+            const t = Math.min(1, elapsed / playCharRollDuration);
+            /* cos(0)=1, cos(π/2)=0 — starts at PEAK, eases out to 0. */
+            _charRollSpeed = PLAY_CHAR_ROLL_PEAK * Math.cos(t * Math.PI * 0.5);
+            mx = Math.sin(playCharRollYaw);
+            mz = Math.cos(playCharRollYaw);
+          }
+          /* Char slide: dash along locked yaw during start, loop AND exit
+           * (velocity keeps going through the exit clip so the character
+           * doesn't snap to a stop — matches game-unreal). */
+          if (charMode && playCharSlidePhase !== "none") {
+            mx = Math.sin(playCharSlideYaw);
+            mz = Math.cos(playCharSlideYaw);
+            if (playCharSlidePhase === "loop") {
+              const elapsed =
+                (performance.now() - playCharSlideStart) / 1000;
+              if (
+                (elapsed >= PLAY_CHAR_SLIDE_MAX_TIME || !keysHeld.KeyX) &&
+                playCharActions?.slideExit
+              ) {
+                playCharSlidePhase = "exit";
+                const se = playCharActions.slideExit;
+                se.reset();
+                se.enabled = true;
+                se.crossFadeFrom(playCharCurrentAction, 0.12, false).play();
+                playCharCurrentAction = se;
+              }
+            }
+          }
+          /* Attack and spell stance still freeze input. */
+          if (
+            charMode &&
+            (playCharAttacking || playCharSpellPhase !== "none")
+          ) {
+            mx = 0;
+            mz = 0;
+          }
           const mlen = Math.hypot(mx, mz);
+          const _moveSpeed = charMode
+            ? playCharRolling
+              ? _charRollSpeed
+              : playCharSlidePhase !== "none"
+                ? PLAY_CHAR_SLIDE_SPEED
+                : playCharCrouching
+                  ? PLAY_CHAR_WALK_SPEED * 0.5
+                  : charRunning
+                    ? PLAY_CHAR_RUN_SPEED
+                    : PLAY_CHAR_WALK_SPEED
+            : playParams.speed;
           if (mlen > 0) {
-            const stepX = (mx / mlen) * playParams.speed * dtSec;
-            const stepZ = (mz / mlen) * playParams.speed * dtSec;
+            const stepX = (mx / mlen) * _moveSpeed * dtSec;
+            const stepZ = (mz / mlen) * _moveSpeed * dtSec;
             let newX = playerPos.x + stepX;
             let newZ = playerPos.z + stepZ;
             newX = THREE.MathUtils.clamp(
@@ -20170,9 +20808,123 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           }
           const planeY = groundY + playFlyHeight;
           const capsuleCY = groundY + PLAYER_CAP_R + PLAYER_CAP_H * 0.5;
+
+          /* ── Character mode: jump integration + ground clamp ── */
+          let charY = groundY;
+          if (charMode) {
+            const inSpell = playCharSpellPhase !== "none";
+            const inSlide = playCharSlidePhase !== "none";
+            playCharCrouching =
+              !playCharInAir &&
+              !playCharRolling &&
+              !inSlide &&
+              !inSpell &&
+              !playCharAttacking &&
+              (keysHeld.ControlLeft || keysHeld.ControlRight);
+            /* Can't jump while crouched / busy / in stance / already mid-air
+             * or mid-land. */
+            if (
+              !playCharInAir &&
+              !playCharCrouching &&
+              !playCharRolling &&
+              !playCharAttacking &&
+              !inSlide &&
+              !inSpell &&
+              playCharJumpPhase !== "land" &&
+              keysHeld.Space
+            ) {
+              playCharVelY = PLAY_CHAR_JUMP_VEL;
+              playCharInAir = true;
+              /* Kick off the Start clip; finished listener switches to Loop. */
+              if (playCharActions?.jumpStart) {
+                playCharJumpPhase = "start";
+                const js = playCharActions.jumpStart;
+                js.reset();
+                js.enabled = true;
+                js.crossFadeFrom(playCharCurrentAction, 0.08, false).play();
+                playCharCurrentAction = js;
+              } else if (playCharActions?.jumpLoop) {
+                playCharJumpPhase = "loop";
+                const jl = playCharActions.jumpLoop;
+                jl.reset();
+                jl.enabled = true;
+                jl.crossFadeFrom(playCharCurrentAction, 0.08, false).play();
+                playCharCurrentAction = jl;
+              }
+            }
+            if (playCharInAir) {
+              playCharVelY -= PLAY_CHAR_GRAVITY * dtSec;
+              charY =
+                (playCharRoot?.position.y ?? groundY) + playCharVelY * dtSec;
+              if (charY <= groundY) {
+                charY = groundY;
+                playCharVelY = 0;
+                playCharInAir = false;
+                /* Touchdown. If a direction is held, skip Land — crossfade
+                 * straight to walk/run so WASD movement doesn't "slide"
+                 * over a stationary Land clip. Otherwise play Land. */
+                const _landInputHeld =
+                  keysHeld.KeyW ||
+                  keysHeld.KeyA ||
+                  keysHeld.KeyS ||
+                  keysHeld.KeyD ||
+                  keysHeld.ArrowUp ||
+                  keysHeld.ArrowDown ||
+                  keysHeld.ArrowLeft ||
+                  keysHeld.ArrowRight;
+                if (_landInputHeld && playCharActions) {
+                  playCharJumpPhase = "none";
+                  const running =
+                    keysHeld.ShiftLeft || keysHeld.ShiftRight;
+                  const tgt = running
+                    ? playCharActions.run
+                    : playCharActions.walk;
+                  if (tgt) {
+                    tgt.enabled = true;
+                    tgt.reset();
+                    tgt
+                      .crossFadeFrom(playCharCurrentAction, 0.12, false)
+                      .play();
+                    playCharCurrentAction = tgt;
+                  }
+                } else if (playCharActions?.jumpLand) {
+                  playCharJumpPhase = "land";
+                  const jlnd = playCharActions.jumpLand;
+                  jlnd.reset();
+                  jlnd.enabled = true;
+                  jlnd
+                    .crossFadeFrom(playCharCurrentAction, 0.1, false)
+                    .play();
+                  playCharCurrentAction = jlnd;
+                } else {
+                  playCharJumpPhase = "none";
+                }
+              }
+            } else {
+              charY = groundY;
+            }
+            /* Yaw: face movement direction. Spell / roll / slide / attack
+             * all freeze yaw (no auto-rotate toward camera). GLB forward
+             * is +Z (Godot convention). */
+            if (
+              mlen > 0 &&
+              !playCharRolling &&
+              !playCharAttacking &&
+              !inSlide &&
+              !inSpell
+            ) {
+              const targetYaw = Math.atan2(mx, mz);
+              let dYaw = targetYaw - playCharYaw;
+              while (dYaw > PI) dYaw -= 2 * PI;
+              while (dYaw < -PI) dYaw += 2 * PI;
+              playCharYaw += dYaw * (1 - Math.exp(-14 * dtSec));
+            }
+          }
+
           capsuleMesh.visible =
             playMovementMode === "capsule" ||
-            (playMovementMode === "fly" && !playPlaneLoaded);
+            (playMovementMode === "fly" && !playPlaneLoaded) ||
+            (playMovementMode === "char" && !playCharLoaded);
           capsuleMesh.position.set(playerPos.x, capsuleCY, playerPos.z);
           if (mlen > 0) capsuleMesh.rotation.y = Math.atan2(mx, mz) + PI;
 
@@ -20181,9 +20933,6 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             if (flying) {
               playPlaneRoot.position.set(playerPos.x, planeY, playerPos.z);
               if (iso) {
-                // Top-down arcade plane: flyHeading is already driven by
-                // A/D above. Flatten pitch/roll so it reads from above,
-                // keep barrel roll fx.
                 playPlaneRoot.rotation.set(0, flyHeading, flyBarrelAdd);
               } else {
                 playPlaneRoot.rotation.set(
@@ -20192,6 +20941,40 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
                   flyRoll + flyBarrelAdd,
                 );
               }
+            }
+          }
+
+          if (playCharRoot) {
+            playCharRoot.visible = charMode;
+            if (charMode) {
+              playCharRoot.position.set(playerPos.x, charY, playerPos.z);
+              playCharRoot.rotation.y = playCharYaw;
+              /* Locomotion picker — only runs when no special state owns
+               * the mixer (slide/spell/attack/roll/jump phases manage
+               * their own clips via keydown handlers + the finished
+               * listener). */
+              if (
+                playCharActions &&
+                !playCharAttacking &&
+                !playCharRolling &&
+                playCharSlidePhase === "none" &&
+                playCharSpellPhase === "none" &&
+                playCharJumpPhase === "none"
+              ) {
+                let target = null;
+                if (playCharCrouching)
+                  target =
+                    mlen > 0
+                      ? playCharActions.crouchWalk
+                      : playCharActions.crouch;
+                else if (mlen > 0)
+                  target = charRunning
+                    ? playCharActions.run
+                    : playCharActions.walk;
+                else target = playCharActions.idle;
+                if (target) _playCharSetAction(target);
+              }
+              if (playCharMixer) playCharMixer.update(dtSec);
             }
           }
 
@@ -20216,8 +20999,11 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             _flyHudVisible = false;
           }
 
-          const lookAtY =
-            flying ? planeY + 0.45 : capsuleCY + 0.6;
+          const lookAtY = flying
+            ? planeY + 0.45
+            : charMode
+              ? charY + PLAY_CHAR_HEIGHT * 0.6
+              : capsuleCY + 0.6;
           if (iso) {
             // Fixed-angle tilted top-down camera. For capsule: yaw is
             // manually rotated via [ / ]. For fly: yaw smoothly chases
