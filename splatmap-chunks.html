@@ -346,6 +346,7 @@
       import { SkyMesh } from "three/addons/objects/SkyMesh.js";
       import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
       import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import * as SkeletonUtils from "three/addons/utils/SkeletonUtils.js";
       import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
       import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
       import { createStylizedSky } from "./stylized-sky.js";
@@ -475,6 +476,38 @@
           ghostOpacity: 0.55,
           ghostSpacing: 0.42,
           dirtOpacity: 0.6,
+        },
+        /** Blood FX: deer hit burst + ground pool + red flash. */
+        bloodFX: {
+          enabled: true,
+          burstCount: 10,
+          bloodColor: "#8b0000",
+          bloodColor2: "#cc1100",
+          burstSpeed: 3.5,
+          burstSpread: 2.0,
+          gravity: 6.0,
+          spriteSize: 0.12,
+          lifetime: 0.6,
+          poolColor: "#550000",
+          poolSize: 3.0,
+          poolLifetime: 8.0,
+          poolPersist: true,
+          poolAnimDuration: 2.25,
+          poolFlipbookByFps: false,
+          poolMinWorldScale: 0.08,
+          poolYOffset: 0.03,
+          flashDuration: 0.12,
+          flashColor: "#ff2200",
+          poolAtlasBasePath: "./textures/BloodPool/",
+          poolColorAtlasFile: "ContactSheet.png",
+          poolAlphaAtlasFile: "ContactSheet-001.png",
+          poolAtlasCols: 14,
+          poolAtlasRows: 14,
+          poolAnimFps: 14,
+          poolAlphaCutoff: 0.02,
+          poolInvertAlphaMask: true,
+          poolFlipRowUV: false,
+          poolAtlasLinear: false,
         },
         /** Plane forward gun (E to fire in fly mode). */
         planeGun: {
@@ -6088,6 +6121,697 @@
               releasePlaneBullet(b);
               break;
             }
+          }
+        }
+      }
+
+      /* ══════════════════════════════════════════════════════════════════
+         BLOOD FX — ported from game-unreal.html. Pool of sprites (burst)
+         + flipbook atlas ground pools. Shared across all agents.
+         ══════════════════════════════════════════════════════════════════ */
+      const MAX_BLOOD_PARTICLES = 60;
+      const MAX_BLOOD_POOLS = 12;
+      const bloodFx = {
+        mat: null,
+        poolMat: null,
+        poolMeshMat: null,
+        poolPlaneGeo: null,
+        particles: [],
+        pools: [],
+        poolAtlasOk: false,
+        poolColorTex: null,
+        poolAlphaTex: null,
+        initialized: false,
+      };
+      const _bloodHideScale = new THREE.Vector3(0.001, 0.001, 1);
+      const _bloodPoolHideScale = new THREE.Vector3(0.001, 0.001, 0.001);
+
+      function makeBloodTexture(size) {
+        const c = document.createElement("canvas");
+        c.width = c.height = size;
+        const ctx = c.getContext("2d");
+        const g = ctx.createRadialGradient(
+          size / 2,
+          size / 2,
+          0,
+          size / 2,
+          size / 2,
+          size / 2,
+        );
+        g.addColorStop(0, "rgba(255,255,255,1)");
+        g.addColorStop(0.3, "rgba(255,200,200,0.8)");
+        g.addColorStop(0.6, "rgba(200,50,50,0.4)");
+        g.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, size, size);
+        const tex = new THREE.CanvasTexture(c);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        return tex;
+      }
+
+      function applyBloodPoolTextureFilters(tex, linear) {
+        const f = linear ? THREE.LinearFilter : THREE.NearestFilter;
+        tex.magFilter = f;
+        tex.minFilter = f;
+        tex.needsUpdate = true;
+      }
+
+      function createBloodPoolAtlasMaterial(colorMap, alphaMap) {
+        const p0 = PARAMS.bloodFX;
+        const uCellScale = uniform(
+          new THREE.Vector2(1 / p0.poolAtlasCols, 1 / p0.poolAtlasRows),
+        );
+        const uCellOffset = uniform(new THREE.Vector2(0, 0));
+        const uTint = uniform(new THREE.Color(p0.poolColor));
+        const uBrightness = uniform(1);
+        const uCut = uniform(p0.poolAlphaCutoff);
+        const uInvertMask = uniform(p0.poolInvertAlphaMask ? 1 : 0);
+        const atlasUv = uv().mul(uCellScale).add(uCellOffset);
+        const samp = texture(colorMap, atlasUv);
+        const maskSamp = texture(alphaMap, atlasUv);
+        const maskR = maskSamp.r;
+        const invR = float(1).sub(maskR);
+        const a = mix(maskR, invR, uInvertMask);
+        const rgb = samp.rgb.mul(uTint).mul(uBrightness);
+        const mat = new MeshBasicNodeMaterial({
+          transparent: true,
+          depthWrite: false,
+          depthTest: true,
+          side: THREE.DoubleSide,
+        });
+        mat.colorNode = vec4(rgb, a);
+        mat.alphaTestNode = uCut;
+        return { mat, uCellScale, uCellOffset, uTint, uBrightness, uCut, uInvertMask };
+      }
+
+      async function initBloodFX() {
+        if (bloodFx.initialized) return;
+        bloodFx.initialized = true;
+        const tex = makeBloodTexture(32);
+
+        bloodFx.mat = new THREE.SpriteMaterial({
+          map: tex,
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.NormalBlending,
+          color: 0x8b0000,
+        });
+        bloodFx.poolMat = new THREE.SpriteMaterial({
+          map: tex,
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.NormalBlending,
+          color: 0x550000,
+        });
+        bloodFx.poolMeshMat = new THREE.MeshBasicMaterial({
+          map: tex,
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.NormalBlending,
+          color: 0x550000,
+        });
+        bloodFx.poolPlaneGeo = new THREE.PlaneGeometry(1, 1);
+
+        for (let i = 0; i < MAX_BLOOD_PARTICLES; i++) {
+          const s = new THREE.Sprite(bloodFx.mat);
+          s.renderOrder = 990;
+          s.scale.set(0.001, 0.001, 1);
+          scene.add(s);
+          bloodFx.particles.push({
+            sprite: s,
+            alive: false,
+            timer: 0,
+            lifetime: 0,
+            vx: 0,
+            vy: 0,
+            vz: 0,
+            size: 0,
+            floorY: 0,
+          });
+        }
+
+        const p = PARAMS.bloodFX;
+        const loader = new THREE.TextureLoader();
+        const base = p.poolAtlasBasePath.endsWith("/")
+          ? p.poolAtlasBasePath
+          : `${p.poolAtlasBasePath}/`;
+        let colorTex = null;
+        let alphaTex = null;
+        try {
+          colorTex = await loader.loadAsync(base + p.poolColorAtlasFile);
+          alphaTex = await loader.loadAsync(base + p.poolAlphaAtlasFile);
+        } catch (err) {
+          console.warn("[bloodFX] Pool atlas load failed (using fallback):", err);
+        }
+
+        if (colorTex && alphaTex) {
+          bloodFx.poolAtlasOk = true;
+          bloodFx.poolColorTex = colorTex;
+          bloodFx.poolAlphaTex = alphaTex;
+          colorTex.colorSpace = THREE.SRGBColorSpace;
+          colorTex.wrapS = colorTex.wrapT = THREE.ClampToEdgeWrapping;
+          alphaTex.colorSpace = THREE.NoColorSpace;
+          alphaTex.wrapS = alphaTex.wrapT = THREE.ClampToEdgeWrapping;
+          applyBloodPoolTextureFilters(colorTex, p.poolAtlasLinear);
+          applyBloodPoolTextureFilters(alphaTex, p.poolAtlasLinear);
+
+          for (let i = 0; i < MAX_BLOOD_POOLS; i++) {
+            const u = createBloodPoolAtlasMaterial(colorTex, alphaTex);
+            const s = new THREE.Mesh(bloodFx.poolPlaneGeo, u.mat);
+            s.rotation.x = -Math.PI / 2;
+            s.renderOrder = 989;
+            s.scale.set(0.001, 0.001, 0.001);
+            scene.add(s);
+            bloodFx.pools.push({
+              sprite: s,
+              alive: false,
+              animTimer: 0,
+              lifetime: 0,
+              size: 0,
+              uni: u,
+            });
+          }
+        } else {
+          for (let i = 0; i < MAX_BLOOD_POOLS; i++) {
+            const s = new THREE.Mesh(bloodFx.poolPlaneGeo, bloodFx.poolMeshMat);
+            s.rotation.x = -Math.PI / 2;
+            s.renderOrder = 989;
+            s.scale.set(0.001, 0.001, 0.001);
+            scene.add(s);
+            bloodFx.pools.push({
+              sprite: s,
+              alive: false,
+              animTimer: 0,
+              lifetime: 0,
+              size: 0,
+              uni: null,
+            });
+          }
+        }
+      }
+
+      function setBloodPoolAtlasFrame(pool, frameIndex) {
+        if (!bloodFx.poolAtlasOk || !pool.uni) return;
+        const p = PARAMS.bloodFX;
+        const cols = Math.max(1, p.poolAtlasCols);
+        const rows = Math.max(1, p.poolAtlasRows);
+        const n = cols * rows;
+        const fi = Math.max(0, Math.min(n - 1, Math.floor(frameIndex)));
+        const cw = 1 / cols;
+        const ch = 1 / rows;
+        pool.uni.uCellScale.value.set(cw, ch);
+        const col = fi % cols;
+        const row = Math.floor(fi / cols);
+        const u = col * cw;
+        const v = p.poolFlipRowUV ? row * ch : 1 - (row + 1) * ch;
+        pool.uni.uCellOffset.value.set(u, v);
+      }
+
+      function spawnBloodBurst(position, floorY) {
+        if (!bloodFx.initialized) return;
+        const p = PARAMS.bloodFX;
+        if (!p.enabled) return;
+        for (let i = 0; i < p.burstCount; i++) {
+          const part = bloodFx.particles.find((x) => !x.alive);
+          if (!part) break;
+          part.alive = true;
+          part.timer = 0;
+          part.lifetime = p.lifetime * (0.6 + Math.random() * 0.8);
+          part.size = p.spriteSize * (0.5 + Math.random());
+          const angle = Math.random() * Math.PI * 2;
+          const upward = 0.5 + Math.random() * 1.0;
+          const spread = p.burstSpread * (0.3 + Math.random() * 0.7);
+          part.vx = Math.cos(angle) * spread * p.burstSpeed;
+          part.vy = upward * p.burstSpeed;
+          part.vz = Math.sin(angle) * spread * p.burstSpeed;
+          part.sprite.position.copy(position);
+          part.floorY = floorY;
+          part.sprite.material = bloodFx.mat;
+        }
+        const pool = bloodFx.pools.find((x) => !x.alive);
+        if (pool) {
+          pool.alive = true;
+          pool.animTimer = 0;
+          pool.lifetime = p.poolLifetime;
+          pool.size = p.poolSize * (0.7 + Math.random() * 0.6);
+          pool.sprite.position.set(
+            position.x + (Math.random() - 0.5) * 0.5,
+            floorY + p.poolYOffset,
+            position.z + (Math.random() - 0.5) * 0.5,
+          );
+          pool.sprite.scale.set(0.001, 0.001, 0.001);
+          if (bloodFx.poolAtlasOk && pool.uni) {
+            setBloodPoolAtlasFrame(pool, 0);
+            pool.uni.uTint.value.set(p.poolColor);
+            pool.uni.uBrightness.value = 1;
+            pool.uni.uCut.value = p.poolAlphaCutoff;
+            pool.uni.uInvertMask.value = p.poolInvertAlphaMask ? 1 : 0;
+          }
+        }
+      }
+
+      function updateBloodFX(dt) {
+        if (!bloodFx.initialized) return;
+        const p = PARAMS.bloodFX;
+        bloodFx.mat.color.set(p.bloodColor);
+        bloodFx.poolMat.color.set(p.poolColor);
+        if (bloodFx.poolMeshMat) bloodFx.poolMeshMat.color.set(p.poolColor);
+
+        for (const part of bloodFx.particles) {
+          if (!part.alive) continue;
+          part.timer += dt;
+          if (part.timer >= part.lifetime) {
+            part.alive = false;
+            part.sprite.scale.copy(_bloodHideScale);
+            continue;
+          }
+          part.vy -= p.gravity * dt;
+          part.sprite.position.x += part.vx * dt;
+          part.sprite.position.y += part.vy * dt;
+          part.sprite.position.z += part.vz * dt;
+          if (part.sprite.position.y < part.floorY + 0.05) {
+            part.sprite.position.y = part.floorY + 0.05;
+            part.vy = 0;
+            part.vx *= 0.5;
+            part.vz *= 0.5;
+          }
+          const t = part.timer / part.lifetime;
+          const fade = t < 0.1 ? t / 0.1 : 1 - (t - 0.1) / 0.9;
+          const sz = part.size * fade;
+          part.sprite.scale.set(sz, sz, 1);
+        }
+
+        for (const pool of bloodFx.pools) {
+          if (!pool.alive) continue;
+          pool.animTimer += dt;
+
+          if (!p.poolPersist && pool.animTimer >= pool.lifetime) {
+            pool.alive = false;
+            pool.sprite.scale.copy(_bloodPoolHideScale);
+            continue;
+          }
+
+          const growT = Math.min(pool.animTimer / 0.28, 1);
+          let sz = pool.size * growT;
+          sz = Math.max(sz, p.poolMinWorldScale, 0.05);
+          pool.sprite.scale.set(sz, sz, 1);
+
+          let fadeT = 1;
+          if (!p.poolPersist && pool.lifetime > 0) {
+            const t = pool.animTimer / pool.lifetime;
+            fadeT = t > 0.6 ? 1 - (t - 0.6) / 0.4 : 1;
+          }
+
+          if (bloodFx.poolAtlasOk && pool.uni) {
+            const cols = Math.max(1, p.poolAtlasCols);
+            const rows = Math.max(1, p.poolAtlasRows);
+            const n = cols * rows;
+            let fi;
+            if (p.poolFlipbookByFps) {
+              fi = Math.min(n - 1, Math.floor(pool.animTimer * p.poolAnimFps));
+            } else {
+              const dur = Math.max(0.04, p.poolAnimDuration);
+              const ap = Math.min(1, pool.animTimer / dur);
+              fi = Math.min(n - 1, Math.round((n - 1) * ap));
+            }
+            setBloodPoolAtlasFrame(pool, fi);
+            pool.uni.uTint.value.set(p.poolColor);
+            pool.uni.uBrightness.value = p.poolPersist ? 1 : fadeT;
+            pool.uni.uCut.value = p.poolAlphaCutoff;
+            pool.uni.uInvertMask.value = p.poolInvertAlphaMask ? 1 : 0;
+          }
+        }
+      }
+
+      function flashAgentRed(agent) {
+        const p = PARAMS.bloodFX;
+        if (!p.enabled || !agent.root) return;
+        agent._flashTimer = p.flashDuration;
+        agent._origColors = agent._origColors || new Map();
+        agent.root.traverse((child) => {
+          if (!child.isMesh && !child.isSkinnedMesh) return;
+          if (!child.material) return;
+          if (!agent._origColors.has(child)) {
+            agent._origColors.set(
+              child,
+              child.material.color
+                ? child.material.color.clone()
+                : new THREE.Color(1, 1, 1),
+            );
+          }
+          if (child.material.color) child.material.color.set(p.flashColor);
+        });
+      }
+
+      function updateAgentFlash(agent, dt) {
+        if (!agent._flashTimer || agent._flashTimer <= 0) return;
+        agent._flashTimer -= dt;
+        if (agent._flashTimer <= 0) {
+          agent._flashTimer = 0;
+          if (agent._origColors) {
+            agent._origColors.forEach((origCol, child) => {
+              if (child.material && child.material.color)
+                child.material.color.copy(origCol);
+            });
+          }
+        }
+      }
+
+      initBloodFX();
+
+      /* ══════════════════════════════════════════════════════════════════
+         AGENT SYSTEM — generic creature/NPC pool with tiered LOD updates.
+         Add new creatures by registering an agentType. The tier updater,
+         pooling, chunk hook, and lifecycle are all shared.
+
+         Tiers:
+           0 = near  (full AI tick, full anim, shadows)
+           1 = mid   (AI tick at 5Hz, anim, no shadows)
+           2 = far   (no AI, frozen pose or billboard)
+           3 = dormant (not in scene, just position+state)
+         ══════════════════════════════════════════════════════════════════ */
+      const agentTypes = new Map(); // typeId → { loadTemplate, createInstance, updateAI, onHit, ... }
+      const agents = [];             // all active agent instances
+      const AGENT_TIER_NEAR = 60;    // Tier 0 if within this distance
+      const AGENT_TIER_MID = 140;    // Tier 1 up to this
+      const AGENT_TIER_FAR = 260;    // Tier 2 up to this; beyond = Tier 3
+      let _agentTierRecheckMs = 0;
+      const _agentRefPos = new THREE.Vector3();
+      const _agentTmpVec = new THREE.Vector3();
+
+      function registerAgentType(typeId, config) {
+        agentTypes.set(typeId, { loaded: false, template: null, ...config });
+      }
+
+      async function ensureAgentTypeLoaded(typeId) {
+        const t = agentTypes.get(typeId);
+        if (!t) throw new Error(`Unknown agent type: ${typeId}`);
+        if (t.loaded) return t;
+        if (t._loadingPromise) return t._loadingPromise;
+        t._loadingPromise = t.loadTemplate().then((tmpl) => {
+          t.template = tmpl;
+          t.loaded = true;
+          return t;
+        });
+        return t._loadingPromise;
+      }
+
+      async function spawnAgent(typeId, worldPos) {
+        const t = await ensureAgentTypeLoaded(typeId);
+        const agent = t.createInstance(t.template, worldPos);
+        agent.typeId = typeId;
+        agent.tier = 3;
+        agent.aiAccum = 0;
+        agent.isDead = false;
+        agents.push(agent);
+        if (t.flightTarget) flightTargets.push(t.flightTarget(agent));
+        return agent;
+      }
+
+      function despawnAgent(agent) {
+        const idx = agents.indexOf(agent);
+        if (idx === -1) return;
+        agents.splice(idx, 1);
+        const t = agentTypes.get(agent.typeId);
+        if (t?.dispose) t.dispose(agent);
+        if (agent._flightTargetRef) {
+          const fi = flightTargets.indexOf(agent._flightTargetRef);
+          if (fi !== -1) flightTargets.splice(fi, 1);
+        }
+      }
+
+      function _agentTierForDist(d) {
+        if (d < AGENT_TIER_NEAR) return 0;
+        if (d < AGENT_TIER_MID) return 1;
+        if (d < AGENT_TIER_FAR) return 2;
+        return 3;
+      }
+
+      function updateAgents(dtSec, nowMs) {
+        if (agents.length === 0) return;
+        _agentRefPos.copy(playMode ? playerPos : camera.position);
+        const recheck = nowMs - _agentTierRecheckMs > 500;
+        if (recheck) _agentTierRecheckMs = nowMs;
+        for (let i = 0; i < agents.length; i++) {
+          const a = agents[i];
+          const t = agentTypes.get(a.typeId);
+          if (!t) continue;
+          if (recheck) {
+            _agentTmpVec.copy(a.position).sub(_agentRefPos);
+            const d = _agentTmpVec.length();
+            const newTier = _agentTierForDist(d);
+            if (newTier !== a.tier) {
+              a.tier = newTier;
+              if (t.onTierChange) t.onTierChange(a, newTier);
+            }
+          }
+          if (a.tier === 3) continue; // dormant
+          /* Tier 1: tick AI at 5 Hz instead of every frame */
+          if (a.tier === 1) {
+            a.aiAccum += dtSec;
+            if (a.aiAccum >= 0.2) {
+              if (t.updateAI) t.updateAI(a, a.aiAccum);
+              a.aiAccum = 0;
+            }
+          } else if (a.tier === 0) {
+            if (t.updateAI) t.updateAI(a, dtSec);
+          }
+          /* Anim + visuals: every frame for Tier 0/1, skip Tier 2 */
+          if (a.tier <= 1 && t.updateVisuals) t.updateVisuals(a, dtSec);
+        }
+      }
+
+      /* ── Deer agent type ── */
+      const DEER_MODEL_PATH = "models/Deer.gltf";
+      const DEER_SCALE = 0.8;
+      const _deerTmpDir = new THREE.Vector3();
+
+      function _findClip(anims, names) {
+        return anims.find((a) => names.some((n) => a.name === n)) || null;
+      }
+
+      function _loadDeerTemplate() {
+        return new Promise((resolve, reject) => {
+          gltfLoader.load(
+            resolveModelUrl(DEER_MODEL_PATH),
+            (gltf) => {
+              gltf.scene.traverse((o) => {
+                if (o.isMesh || o.isSkinnedMesh) {
+                  o.castShadow = true;
+                  o.receiveShadow = true;
+                  o.frustumCulled = false;
+                }
+              });
+              const anims = gltf.animations || [];
+              resolve({
+                scene: gltf.scene,
+                anims,
+                clips: {
+                  idle:
+                    _findClip(anims, ["Idle", "idle", "Idle_Loop", "Idle_01"]) ||
+                    anims[0] ||
+                    null,
+                  walk: _findClip(anims, [
+                    "Walk",
+                    "Walk_Loop",
+                    "Walk_Fwd",
+                    "Walk_Fwd_Loop",
+                  ]),
+                  run: _findClip(anims, ["Run", "Run_Loop", "Run_Fwd", "Gallop"]),
+                  graze: _findClip(anims, ["Graze", "Eat", "Eat_Loop", "Idle_Eat"]),
+                  death: _findClip(anims, [
+                    "Die",
+                    "Death",
+                    "Death_Armature",
+                    "Death01",
+                  ]),
+                },
+              });
+            },
+            undefined,
+            (err) => reject(err),
+          );
+        });
+      }
+
+      function _createDeerInstance(template, worldPos) {
+        const root = SkeletonUtils.clone(template.scene);
+        root.scale.setScalar(DEER_SCALE);
+        const gy = getWorldHeight(worldPos.x, worldPos.z);
+        root.position.set(worldPos.x, gy, worldPos.z);
+        scene.add(root);
+        const mixer = new THREE.AnimationMixer(root);
+        const mk = (clip, loopOnce = false) => {
+          if (!clip) return null;
+          const act = mixer
+            .clipAction(clip)
+            .setLoop(loopOnce ? THREE.LoopOnce : THREE.LoopRepeat);
+          if (loopOnce) act.clampWhenFinished = true;
+          return act;
+        };
+        const idleAction = mk(template.clips.idle);
+        const walkAction = mk(template.clips.walk);
+        const runAction = mk(template.clips.run);
+        const grazeAction = mk(template.clips.graze);
+        const deathAction = mk(template.clips.death, true);
+        if (idleAction) idleAction.play();
+        const agent = {
+          root,
+          mixer,
+          idleAction,
+          walkAction,
+          runAction,
+          grazeAction,
+          deathAction,
+          state: "idle",
+          stateTime: 0,
+          homePos: root.position.clone(),
+          targetPos: root.position.clone(),
+          walkSpeed: 1.5,
+          runSpeed: 4.0,
+          position: root.position, // alias for agent system
+          health: 1,
+          _flightTargetRef: null,
+          _flashTimer: 0,
+          _origColors: null,
+        };
+        return agent;
+      }
+
+      function _deerUpdateAI(a, dt) {
+        if (a.isDead) return;
+        a.stateTime += dt;
+        if (a.state === "idle" || a.state === "graze") {
+          if (a.stateTime > 4 + Math.random() * 3) {
+            a.stateTime = 0;
+            const r = Math.random();
+            if (r < 0.4 && a.grazeAction) {
+              if (a.idleAction) a.idleAction.stop();
+              a.grazeAction.reset().play();
+              a.state = "graze";
+            } else {
+              const radius = 10;
+              const angle = Math.random() * Math.PI * 2;
+              const tx = a.homePos.x + Math.cos(angle) * radius;
+              const tz = a.homePos.z + Math.sin(angle) * radius;
+              a.targetPos.set(tx, getWorldHeight(tx, tz), tz);
+              const useRun = r > 0.8 && a.runAction;
+              a.state = useRun ? "run" : "walk";
+              if (a.idleAction) a.idleAction.stop();
+              if (a.grazeAction) a.grazeAction.stop();
+              if (useRun) a.runAction.reset().play();
+              else if (a.walkAction) a.walkAction.reset().play();
+            }
+          }
+        } else if (a.state === "walk" || a.state === "run") {
+          _deerTmpDir.subVectors(a.targetPos, a.root.position);
+          _deerTmpDir.y = 0;
+          const dist = _deerTmpDir.length();
+          if (dist < 0.25) {
+            a.state = "idle";
+            a.stateTime = 0;
+            if (a.walkAction) a.walkAction.stop();
+            if (a.runAction) a.runAction.stop();
+            if (a.idleAction) a.idleAction.reset().play();
+          } else {
+            _deerTmpDir.normalize();
+            const speed = a.state === "run" ? a.runSpeed : a.walkSpeed;
+            a.root.position.addScaledVector(_deerTmpDir, speed * dt);
+            a.root.position.y = getWorldHeight(
+              a.root.position.x,
+              a.root.position.z,
+            );
+            a.root.rotation.y = Math.atan2(_deerTmpDir.x, _deerTmpDir.z);
+          }
+        }
+      }
+
+      function _deerUpdateVisuals(a, dt) {
+        if (a.mixer) a.mixer.update(dt);
+        updateAgentFlash(a, dt);
+      }
+
+      function _deerOnTierChange(a, tier) {
+        a.root.traverse((o) => {
+          if (o.isMesh || o.isSkinnedMesh) {
+            o.castShadow = tier === 0;
+          }
+        });
+        a.root.visible = tier < 3;
+      }
+
+      const _deerBloodPos = new THREE.Vector3();
+
+      function _deerKill(a, hitPos) {
+        if (a.isDead) return;
+        a.isDead = true;
+        a.state = "dead";
+        if (a.idleAction) a.idleAction.stop();
+        if (a.walkAction) a.walkAction.stop();
+        if (a.runAction) a.runAction.stop();
+        if (a.grazeAction) a.grazeAction.stop();
+        if (a.deathAction) a.deathAction.reset().play();
+      }
+
+      function _deerOnHit(a, dmg, hitPos, hitDir) {
+        if (a.isDead) return;
+        /* Blood burst + red flash on every hit (mirrors game-unreal). */
+        _deerBloodPos.copy(a.root.position);
+        _deerBloodPos.y += 0.8;
+        spawnBloodBurst(_deerBloodPos, a.root.position.y);
+        flashAgentRed(a);
+        a.health -= dmg;
+        if (a.health <= 0) _deerKill(a, hitPos);
+      }
+
+      function _deerFlightTarget(a) {
+        const ft = {
+          position: a.root.position, // live reference; updates each frame
+          get isDead() {
+            return a.isDead;
+          },
+          onHit: (dmg, hp, hd) => _deerOnHit(a, dmg, hp, hd),
+        };
+        a._flightTargetRef = ft;
+        return ft;
+      }
+
+      function _deerDispose(a) {
+        if (a.mixer) a.mixer.stopAllAction();
+        scene.remove(a.root);
+        a.root.traverse((o) => {
+          if (o.isSkinnedMesh || o.isMesh) {
+            if (o.geometry && !o._sharedGeometry) o.geometry.dispose?.();
+          }
+        });
+      }
+
+      registerAgentType("deer", {
+        loadTemplate: _loadDeerTemplate,
+        createInstance: _createDeerInstance,
+        updateAI: _deerUpdateAI,
+        updateVisuals: _deerUpdateVisuals,
+        onTierChange: _deerOnTierChange,
+        flightTarget: _deerFlightTarget,
+        dispose: _deerDispose,
+      });
+
+      async function spawnTestDeer(count = 6) {
+        const cx = (worldBounds.min.x + worldBounds.max.x) * 0.5;
+        const cz = (worldBounds.min.z + worldBounds.max.z) * 0.5;
+        for (let i = 0; i < count; i++) {
+          const angle = (i / count) * Math.PI * 2;
+          const radius = 18 + Math.random() * 12;
+          const pos = new THREE.Vector3(
+            cx + Math.cos(angle) * radius,
+            0,
+            cz + Math.sin(angle) * radius,
+          );
+          try {
+            await spawnAgent("deer", pos);
+          } catch (e) {
+            console.warn("spawn deer failed", e);
+            break;
           }
         }
       }
@@ -14236,6 +14960,21 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           label: "Damage",
         });
 
+        const agentsFolder = playFolder.addFolder({
+          title: "Agents (deer & NPCs)",
+          expanded: false,
+        });
+        agentsFolder
+          .addButton({ title: "Spawn test deer (6)" })
+          .on("click", () => {
+            spawnTestDeer(6);
+          });
+        agentsFolder
+          .addButton({ title: "Despawn all agents" })
+          .on("click", () => {
+            while (agents.length > 0) despawnAgent(agents[agents.length - 1]);
+          });
+
         const toolsFolder = pane.addFolder({
           title: "Sculpt, paint & brush",
           expanded: true,
@@ -19249,7 +19988,9 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           _planeGunCooldown = 1 / PARAMS.planeGun.fireRate;
         }
         updatePlaneBullets(dtSec);
+        updateAgents(dtSec, now);
         checkPlaneBulletHits();
+        updateBloodFX(dtSec);
         if (_rippleBuffer.length > 0) _syncRipples();
         if (_cachedLakeBodies.length > 0 || waterObjects.length > 0) {
           uWCamXZ.value.set(camera.position.x, camera.position.z);
