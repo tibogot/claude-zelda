@@ -141,6 +141,10 @@
         background: rgba(30, 100, 150, 0.92);
         color: #e0f4ff;
       }
+      #mode-badge.road {
+        background: rgba(75, 65, 55, 0.92);
+        color: #f2ebe0;
+      }
       #mode-badge.water {
         background: rgba(40, 110, 170, 0.92);
         color: #e8f8ff;
@@ -573,6 +577,22 @@
           heightOffset: 0.18,
           selectedPointY: 0,
           shaderStyle: "Basic",
+        },
+        /** Road path [ U ] — ribbon on terrain, TSL asphalt + edge lines */
+        road: {
+          width: 5,
+          segments: 200,
+          heightOffset: 0.08,
+          selectedPointY: 0,
+          /** Spheres + centre polyline; road mesh stays visible when false. */
+          showHandles: true,
+          asphaltDark: "#252528",
+          asphaltLight: "#4a4a52",
+          grainScale: 14,
+          grainStrength: 0.38,
+          lineColor: "#f2f2f2",
+          lineWidth: 0.07,
+          lineSoftness: 0.035,
         },
         water: {
           scale: 0.3,
@@ -2154,6 +2174,64 @@
         riverMat.needsUpdate = true;
       }
 
+      const uRoadAsphaltDark = uniform(
+        new THREE.Color(PARAMS.road.asphaltDark),
+      );
+      const uRoadAsphaltLight = uniform(
+        new THREE.Color(PARAMS.road.asphaltLight),
+      );
+      const uRoadLineColor = uniform(new THREE.Color(PARAMS.road.lineColor));
+      const uRoadGrainScale = uniform(PARAMS.road.grainScale);
+      const uRoadGrainStrength = uniform(PARAMS.road.grainStrength);
+      const uRoadLineWidth = uniform(PARAMS.road.lineWidth);
+      const uRoadLineSoftness = uniform(PARAMS.road.lineSoftness);
+
+      const buildRoadColorNode = Fn(() => {
+        const uvCoord = uv();
+        const grainUV = uvCoord.mul(uRoadGrainScale);
+        const g1 = _wFbm2(grainUV);
+        const g2 = _wFbm2(grainUV.mul(2.35).add(vec2(0.61, 1.93)));
+        const grain = g1.mul(0.62).add(g2.mul(0.38));
+        const tone = grain
+          .mul(uRoadGrainStrength)
+          .add(0.5)
+          .clamp(float(0), float(1));
+        const base = mix(uRoadAsphaltDark, uRoadAsphaltLight, tone);
+        const w = max(uRoadLineWidth, float(0.0001));
+        const s = uRoadLineSoftness;
+        const yL = uvCoord.y;
+        const yR = float(1).sub(uvCoord.y);
+        const hardL = float(1).sub(step(w, yL));
+        const hardR = float(1).sub(step(w, yR));
+        const softEps = max(s, float(1e-6));
+        const softL = float(1).sub(smoothstep(w, w.add(softEps), yL));
+        const softR = float(1).sub(smoothstep(w, w.add(softEps), yR));
+        const useSoft = step(float(1e-6), s);
+        const leftLine = mix(hardL, softL, useSoft);
+        const rightLine = mix(hardR, softR, useSoft);
+        const edgeBlend = max(leftLine, rightLine).clamp(float(0), float(1));
+        return mix(base, uRoadLineColor, edgeBlend).saturate();
+      });
+
+      const roadMat = new MeshBasicNodeMaterial({
+        side: THREE.DoubleSide,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1,
+      });
+      roadMat.colorNode = buildRoadColorNode();
+
+      function syncRoadMat() {
+        uRoadAsphaltDark.value.set(PARAMS.road.asphaltDark);
+        uRoadAsphaltLight.value.set(PARAMS.road.asphaltLight);
+        uRoadLineColor.value.set(PARAMS.road.lineColor);
+        uRoadGrainScale.value = PARAMS.road.grainScale;
+        uRoadGrainStrength.value = PARAMS.road.grainStrength;
+        uRoadLineWidth.value = PARAMS.road.lineWidth;
+        uRoadLineSoftness.value = PARAMS.road.lineSoftness;
+        roadMat.needsUpdate = true;
+      }
+
       let _ifSnap = "";
       function syncImpactFoamUniforms() {
         const p = impactFoamParams;
@@ -3207,6 +3285,7 @@
       let foliageFolderRef = null;
       let splineFolderRef = null;
       let riverFolderRef = null;
+      let roadFolderRef = null;
       let pathFolderRef = null;
       let decalFolderRef = null;
       let propsFolderRef = null;
@@ -3217,6 +3296,12 @@
       let riverPointMeshes = [];
       let riverGroup = null;
       let riverMesh = null;
+      let roadPoints = [];
+      let roadSelectedIdx = -1;
+      let roadDragging = false;
+      let roadPointMeshes = [];
+      let roadGroup = null;
+      let roadMesh = null;
 
       let splinePoints = [];
       let splineSelectedIdx = -1;
@@ -5121,6 +5206,8 @@
           },
           riverPoints: riverPoints.map((p) => ({ x: p.x, y: p.y, z: p.z })),
           river: JSON.parse(JSON.stringify(PARAMS.river)),
+          roadPoints: roadPoints.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+          road: JSON.parse(JSON.stringify(PARAMS.road)),
           path: JSON.parse(JSON.stringify(PARAMS.path)),
           decal: JSON.parse(JSON.stringify(PARAMS.decal)),
           decals: decalObjects.map((obj) => ({
@@ -5435,6 +5522,21 @@
         if (data.riverPoints && Array.isArray(data.riverPoints)) {
           riverRebuildVisual();
           riverUpdateSelectedYParam();
+        }
+        if (data.roadPoints && Array.isArray(data.roadPoints)) {
+          roadPoints = data.roadPoints.map(
+            (p) => new THREE.Vector3(p.x, p.y, p.z),
+          );
+          roadSelectedIdx = -1;
+          roadDragging = false;
+        }
+        if (data.road && typeof data.road === "object") {
+          Object.assign(PARAMS.road, data.road);
+          syncRoadMat();
+        }
+        if (data.roadPoints && Array.isArray(data.roadPoints)) {
+          roadRebuildVisual();
+          roadUpdateSelectedYParam();
         }
         if (data.foliage && Array.isArray(data.foliage)) {
           data.foliage.forEach((fd, idx) => {
@@ -5882,6 +5984,8 @@
       scene.add(splineGroup);
       riverGroup = new THREE.Group();
       scene.add(riverGroup);
+      roadGroup = new THREE.Group();
+      scene.add(roadGroup);
       splinePreviewGroup = new THREE.Group();
       scene.add(splinePreviewGroup);
       splineTrainMesh = new THREE.Mesh(
@@ -5948,6 +6052,18 @@
 
       function syncRiverFolderVisibility() {
         if (riverFolderRef) riverFolderRef.hidden = editState.mode !== "river";
+      }
+
+      function syncRoadFolderVisibility() {
+        if (roadFolderRef) roadFolderRef.hidden = editState.mode !== "road";
+      }
+
+      function syncRoadHandlesVisibility() {
+        if (!roadGroup) return;
+        roadGroup.visible =
+          !playMode &&
+          editState.mode === "road" &&
+          PARAMS.road.showHandles;
       }
 
       function syncWaterFolderVisibility() {
@@ -6037,6 +6153,9 @@
         else if (m === "river")
           el.textContent =
             "RIVER MODE  [ V · LMB add / pick · drag · Del · Esc clears pick · Esc → view ]";
+        else if (m === "road")
+          el.textContent =
+            "ROAD MODE  [ U · New road in pane · LMB add / pick · drag · Del · Esc → view ]";
         else if (m === "water")
           el.textContent =
             "WATER BODIES  [ W · LMB place / pick · E move · R rotate · T scale · Del · Esc → view ]";
@@ -6063,6 +6182,10 @@
           riverDragging = false;
           if (!playMode) controls.enabled = true;
         }
+        if (editState.mode === "road" && mode !== "road") {
+          roadDragging = false;
+          if (!playMode) controls.enabled = true;
+        }
         if (mode !== "sculpt") editState.rampPointA = null;
         if (mode === "view" && editState.isPointerDown) {
           editState.isPointerDown = false;
@@ -6086,6 +6209,7 @@
             tcMode ||
             mode === "spline" ||
             mode === "river" ||
+            mode === "road" ||
             mode === "hole";
         if (playFolderRef) playFolderRef.hidden = mode !== "view";
         if (tcMode) {
@@ -6209,6 +6333,8 @@
         syncPropsFolderVisibility();
         syncSplineFolderVisibility();
         syncRiverFolderVisibility();
+        syncRoadFolderVisibility();
+        syncRoadHandlesVisibility();
         syncWaterFolderVisibility();
         syncPathFolderVisibility();
         syncDecalFolderVisibility();
@@ -6235,7 +6361,8 @@
           editState.mode === "water" ||
           editState.mode === "hole" ||
           editState.mode === "spline" ||
-          editState.mode === "river"
+          editState.mode === "river" ||
+          editState.mode === "road"
         ) {
           brushMarker.visible = false;
           rampMarkerA.visible = false;
@@ -9052,6 +9179,7 @@
         camPitch = 0.35;
         capsuleMesh.visible = true;
         if (playPlaneRoot) playPlaneRoot.visible = false;
+        syncRoadHandlesVisibility();
         controls.enabled = false;
         brushMarker.visible = false;
         rampMarkerA.visible = false;
@@ -9102,6 +9230,7 @@
         if (document.pointerLockElement) document.exitPointerLock();
         renderer.domElement.style.cursor = "";
         syncModeBadge();
+        syncRoadHandlesVisibility();
         syncBarrierOverlayFromParams();
         syncHoleOverlayFromParams();
       }
@@ -10481,6 +10610,127 @@
         return riverPointMeshes.indexOf(hits[0].object);
       }
 
+      function roadClearMesh() {
+        if (roadMesh) {
+          scene.remove(roadMesh);
+          roadMesh.geometry.dispose();
+          roadMesh = null;
+        }
+      }
+
+      function roadGenerate() {
+        if (roadPoints.length < 2) return;
+        roadClearMesh();
+        const curve = new THREE.CatmullRomCurve3(
+          roadPoints,
+          false,
+          "catmullrom",
+          0.5,
+        );
+        const geo = generateRiverMesh(
+          curve,
+          PARAMS.road.width,
+          PARAMS.road.segments,
+          PARAMS.road.heightOffset,
+        );
+        roadMesh = new THREE.Mesh(geo, roadMat);
+        roadMesh.renderOrder = 3;
+        scene.add(roadMesh);
+      }
+
+      function roadRebuildVisual() {
+        while (roadGroup.children.length) {
+          const child = roadGroup.children[0];
+          roadGroup.remove(child);
+          if (child.geometry) child.geometry.dispose();
+          if (child.material) child.material.dispose();
+        }
+        roadPointMeshes = [];
+        roadPoints.forEach((pt, i) => {
+          const sphere = new THREE.Mesh(
+            new THREE.SphereGeometry(0.5, 8, 8),
+            new THREE.MeshBasicMaterial({
+              color: i === roadSelectedIdx ? 0xffff00 : 0x886644,
+            }),
+          );
+          sphere.position.copy(pt);
+          roadGroup.add(sphere);
+          roadPointMeshes.push(sphere);
+        });
+        if (roadPoints.length >= 2) {
+          const curve = new THREE.CatmullRomCurve3(
+            roadPoints,
+            false,
+            "catmullrom",
+            0.5,
+          );
+          const lineGeo = new THREE.BufferGeometry().setFromPoints(
+            curve.getPoints(60),
+          );
+          const line = new THREE.Line(
+            lineGeo,
+            new THREE.LineBasicMaterial({ color: 0xaa7744 }),
+          );
+          roadGroup.add(line);
+          roadPointMeshes.push(line);
+          roadGenerate();
+        } else {
+          roadClearMesh();
+        }
+        syncRoadHandlesVisibility();
+      }
+
+      /** One road at a time: clear control points and strip to start a fresh path. */
+      function roadStartNew() {
+        roadPoints = [];
+        roadSelectedIdx = -1;
+        roadDragging = false;
+        if (!playMode) controls.enabled = true;
+        roadRebuildVisual();
+        if (editorPane) editorPane.refresh();
+      }
+
+      function roadAddPoint(p) {
+        roadPoints.push(p.clone());
+        roadSelectedIdx = roadPoints.length - 1;
+        roadRebuildVisual();
+        roadUpdateSelectedYParam();
+      }
+
+      function roadDeleteSelected() {
+        if (roadSelectedIdx < 0 || roadPoints.length === 0) return;
+        roadPoints.splice(roadSelectedIdx, 1);
+        roadSelectedIdx = Math.min(roadSelectedIdx, roadPoints.length - 1);
+        roadRebuildVisual();
+        roadUpdateSelectedYParam();
+      }
+
+      function roadMoveSelected(pos) {
+        if (roadSelectedIdx < 0) return;
+        const currentY = roadPoints[roadSelectedIdx].y;
+        roadPoints[roadSelectedIdx].copy(pos);
+        roadPoints[roadSelectedIdx].y = currentY;
+        roadRebuildVisual();
+      }
+
+      function roadUpdateSelectedYParam() {
+        if (roadSelectedIdx >= 0 && roadSelectedIdx < roadPoints.length) {
+          PARAMS.road.selectedPointY = roadPoints[roadSelectedIdx].y;
+        }
+        if (editorPane) editorPane.refresh();
+      }
+
+      function roadPickPoint(event) {
+        updatePointerNdc(event);
+        raycaster.setFromCamera(pointerNdc, camera);
+        const hits = raycaster.intersectObjects(
+          roadPointMeshes.filter((m) => m.isMesh),
+          false,
+        );
+        if (hits.length === 0) return -1;
+        return roadPointMeshes.indexOf(hits[0].object);
+      }
+
       function splineRebuildVisual() {
         while (splineGroup.children.length) {
           const child = splineGroup.children[0];
@@ -11153,6 +11403,21 @@
           return;
         }
 
+        if (
+          event.code === "Escape" &&
+          !event.repeat &&
+          editState.mode === "road" &&
+          roadSelectedIdx >= 0
+        ) {
+          event.preventDefault();
+          roadSelectedIdx = -1;
+          roadDragging = false;
+          if (!playMode) controls.enabled = true;
+          roadRebuildVisual();
+          if (editorPane) editorPane.refresh();
+          return;
+        }
+
         // Esc: always back to view from any edit mode (same rule as we add modes later).
         if (event.code === "Escape" && !event.repeat) {
           event.preventDefault();
@@ -11273,6 +11538,11 @@
           setEditMode(editState.mode === "river" ? "view" : "river");
           return;
         }
+        if (event.code === "KeyU" && editState.mode !== "paint") {
+          event.preventDefault();
+          setEditMode(editState.mode === "road" ? "view" : "road");
+          return;
+        }
         if (
           event.code === "KeyW" &&
           editState.mode !== "place" &&
@@ -11315,6 +11585,12 @@
         if (editState.mode === "river" && event.code === "Delete") {
           event.preventDefault();
           riverDeleteSelected();
+          if (editorPane) editorPane.refresh();
+          return;
+        }
+        if (editState.mode === "road" && event.code === "Delete") {
+          event.preventDefault();
+          roadDeleteSelected();
           if (editorPane) editorPane.refresh();
           return;
         }
@@ -11536,6 +11812,15 @@
         ) {
           const p = raycastTerrainPoint();
           if (p) riverMoveSelected(p);
+          return;
+        }
+        if (
+          editState.mode === "road" &&
+          roadDragging &&
+          roadSelectedIdx >= 0
+        ) {
+          const p = raycastTerrainPoint();
+          if (p) roadMoveSelected(p);
           return;
         }
         if (
@@ -11770,6 +12055,21 @@
             riverUpdateSelectedYParam();
           } else if (hit) {
             riverAddPoint(hit);
+          }
+          return;
+        }
+
+        if (editState.mode === "road" && event.button === 0) {
+          event.preventDefault();
+          const picked = roadPickPoint(event);
+          if (picked >= 0) {
+            roadSelectedIdx = picked;
+            roadDragging = true;
+            controls.enabled = false;
+            roadRebuildVisual();
+            roadUpdateSelectedYParam();
+          } else if (hit) {
+            roadAddPoint(hit);
           }
           return;
         }
@@ -12098,6 +12398,10 @@
       window.addEventListener("pointerup", () => {
         if (riverDragging) {
           riverDragging = false;
+          if (!playMode) controls.enabled = true;
+        }
+        if (roadDragging) {
+          roadDragging = false;
           if (!playMode) controls.enabled = true;
         }
         if (splineDragging) {
@@ -13365,6 +13669,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
               "Props · I": "props",
               "Spline · K": "spline",
               "River · V": "river",
+              "Road · U": "road",
               "Water · W": "water",
               "Path · L": "path",
               "Decals · D": "decal",
@@ -15552,6 +15857,151 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         basicRiverFolder.hidden = PARAMS.river.shaderStyle !== "Basic";
         stylizedRiverFolder.hidden = PARAMS.river.shaderStyle !== "Stylized";
         syncRiverMat();
+
+        const roadFolder = worldFolder.addFolder({
+          title: "Road · U",
+          expanded: true,
+        });
+        roadFolderRef = roadFolder;
+        roadFolder.hidden = true;
+
+        roadFolder
+          .addBinding(PARAMS.road, "showHandles", {
+            label: "Show path points",
+          })
+          .on("change", () => syncRoadHandlesVisibility());
+
+        roadFolder
+          .addButton({
+            title: "New road — clears path & strip (start fresh)",
+          })
+          .on("click", () => roadStartNew());
+
+        roadFolder
+          .addButton({ title: "Delete selected point  [ Del ]" })
+          .on("click", () => {
+            roadDeleteSelected();
+            editorPane.refresh();
+          });
+        roadFolder.addBlade({ view: "separator" });
+        roadFolder
+          .addBinding(PARAMS.road, "selectedPointY", {
+            label: "Selected Y height",
+            min: -50,
+            max: 200,
+            step: 0.5,
+          })
+          .on("change", ({ value }) => {
+            if (
+              roadSelectedIdx >= 0 &&
+              roadSelectedIdx < roadPoints.length
+            ) {
+              roadPoints[roadSelectedIdx].y = value;
+              roadRebuildVisual();
+            }
+          });
+        roadFolder
+          .addButton({ title: "Snap selected Y to terrain" })
+          .on("click", () => {
+            if (roadSelectedIdx < 0 || roadSelectedIdx >= roadPoints.length)
+              return;
+            const pt = roadPoints[roadSelectedIdx];
+            pt.y = getWorldHeight(pt.x, pt.z);
+            PARAMS.road.selectedPointY = pt.y;
+            editorPane.refresh();
+            roadRebuildVisual();
+          });
+        roadFolder.addBlade({ view: "separator" });
+        roadFolder
+          .addBinding(PARAMS.road, "width", {
+            label: "Road width",
+            min: 1,
+            max: 60,
+            step: 0.5,
+          })
+          .on("change", () => {
+            if (roadPoints.length >= 2) roadGenerate();
+          });
+        roadFolder
+          .addBinding(PARAMS.road, "segments", {
+            label: "Mesh segments",
+            min: 40,
+            max: 600,
+            step: 10,
+          })
+          .on("change", () => {
+            if (roadPoints.length >= 2) roadGenerate();
+          });
+        roadFolder
+          .addBinding(PARAMS.road, "heightOffset", {
+            label: "Height offset",
+            min: 0.01,
+            max: 5,
+            step: 0.01,
+          })
+          .on("change", () => {
+            if (roadPoints.length >= 2) roadGenerate();
+          });
+        roadFolder.addBlade({ view: "separator" });
+        roadFolder
+          .addBinding(PARAMS.road, "asphaltDark", {
+            label: "Asphalt dark",
+            view: "color",
+          })
+          .on("change", () => syncRoadMat());
+        roadFolder
+          .addBinding(PARAMS.road, "asphaltLight", {
+            label: "Asphalt light",
+            view: "color",
+          })
+          .on("change", () => syncRoadMat());
+        roadFolder
+          .addBinding(PARAMS.road, "lineColor", {
+            label: "Line color",
+            view: "color",
+          })
+          .on("change", () => syncRoadMat());
+        roadFolder
+          .addBinding(PARAMS.road, "grainScale", {
+            label: "Grain scale",
+            min: 2,
+            max: 48,
+            step: 0.5,
+          })
+          .on("change", () => syncRoadMat());
+        roadFolder
+          .addBinding(PARAMS.road, "grainStrength", {
+            label: "Grain strength",
+            min: 0,
+            max: 1,
+            step: 0.01,
+          })
+          .on("change", () => syncRoadMat());
+        roadFolder
+          .addBinding(PARAMS.road, "lineWidth", {
+            label: "Line width (UV)",
+            min: 0.02,
+            max: 0.35,
+            step: 0.005,
+          })
+          .on("change", () => syncRoadMat());
+        roadFolder
+          .addBinding(PARAMS.road, "lineSoftness", {
+            label: "Line softness",
+            min: 0,
+            max: 0.2,
+            step: 0.005,
+          })
+          .on("change", () => syncRoadMat());
+        roadFolder.addBlade({ view: "separator" });
+        roadFolder
+          .addButton({ title: "▶ Rebuild road mesh" })
+          .on("click", roadGenerate);
+        roadFolder
+          .addButton({ title: "Clear road mesh" })
+          .on("click", roadClearMesh);
+
+        syncRoadMat();
 
         const waterFolder = worldFolder.addFolder({
           title: "Water bodies · W",
@@ -18336,6 +18786,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         syncPropsFolderVisibility();
         syncSplineFolderVisibility();
         syncRiverFolderVisibility();
+        syncRoadFolderVisibility();
+        syncRoadHandlesVisibility();
         syncWaterFolderVisibility();
         syncPathFolderVisibility();
         syncDecalFolderVisibility();
