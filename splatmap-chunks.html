@@ -539,7 +539,7 @@
           cloudDensity: 0.4,
           cloudElevation: 0.5,
           billboardClouds: {
-            enabled: true,
+            enabled: false,
             cloudCount: 60,
             segmentsPerCloud: 6,
             spread: 1400,
@@ -7257,14 +7257,17 @@
           inner.worldToLocal(tmpW);
           createWingTrail(tmpW.clone());
 
-          /* Forward gun muzzles: front of wings (min.z after Y-flip). */
+          /* Forward gun muzzles: same Z as before, but X toward fuselage so
+           * tracers aim nearer the nose cross (wingtips were too wide to target). */
           const zFront = wingBox.min.z + wbSz.z * 0.05;
-          const muzInsetX = wbSz.x * 0.06;
+          const wingHalfX = wbSz.x * 0.5;
+          const muzzleHalfSpan = wingHalfX * 0.42;
+          const cxW = (wingBox.min.x + wingBox.max.x) * 0.5;
           playPlaneMuzzles.length = 0;
-          tmpW.set(tipXL + muzInsetX, yMid, zFront);
+          tmpW.set(cxW - muzzleHalfSpan, yMid, zFront);
           inner.worldToLocal(tmpW);
           playPlaneMuzzles.push(tmpW.clone());
-          tmpW.set(tipXR - muzInsetX, yMid, zFront);
+          tmpW.set(cxW + muzzleHalfSpan, yMid, zFront);
           inner.worldToLocal(tmpW);
           playPlaneMuzzles.push(tmpW.clone());
         }
@@ -19578,7 +19581,9 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           expanded: false,
         });
         const BC = PARAMS.sky.billboardClouds;
-        bcFolder.addBinding(BC, "enabled");
+        bcFolder.addBinding(BC, "enabled").on("change", () => {
+          billboardClouds.update(0, camera, sunDir, 0);
+        });
         const bcShape = bcFolder.addFolder({
           title: "Shape",
           expanded: true,
