@@ -476,6 +476,16 @@
           ghostSpacing: 0.42,
           dirtOpacity: 0.6,
         },
+        /** Plane forward gun (E to fire in fly mode). */
+        planeGun: {
+          enabled: true,
+          fireRate: 12,
+          bulletSpeed: 240,
+          bulletMaxDist: 600,
+          bulletSize: 0.7,
+          tracerColor: "#fff0a0",
+          damage: 1,
+        },
         csm: {
           enabled: true,
           cascades: 2,
@@ -5967,6 +5977,121 @@
         }
       }
 
+      /* ── Plane Forward Gun ── */
+      const PLANE_BULLET_POOL = 64;
+      const planeBullets = [];
+      const planeBulletGroup = new THREE.Group();
+      planeBulletGroup.frustumCulled = false;
+      scene.add(planeBulletGroup);
+      const planeBulletGeo = new THREE.PlaneGeometry(0.18, 1.4);
+      const planeBulletMat = new THREE.MeshBasicMaterial({
+        color: new THREE.Color(PARAMS.planeGun.tracerColor),
+        transparent: true,
+        opacity: 1,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        toneMapped: false,
+      });
+      for (let i = 0; i < PLANE_BULLET_POOL; i++) {
+        const m = new THREE.Mesh(planeBulletGeo, planeBulletMat);
+        m.frustumCulled = false;
+        m.matrixAutoUpdate = false;
+        m.visible = false;
+        m.renderOrder = 11;
+        planeBulletGroup.add(m);
+        planeBullets.push({
+          mesh: m,
+          pos: new THREE.Vector3(),
+          dir: new THREE.Vector3(),
+          dist: 0,
+          alive: false,
+        });
+      }
+      const playPlaneMuzzles = []; // inner-local Vector3 offsets
+      let _planeMuzzleIdx = 0;
+      let _planeGunCooldown = 0;
+      const flightTargets = []; // populated when deers are added
+      const _bulletForwardWS = new THREE.Vector3();
+      const _bulletMuzzleWS = new THREE.Vector3();
+      const _bulletToCam = new THREE.Vector3();
+      const _bulletRight = new THREE.Vector3();
+      const _bulletPerp = new THREE.Vector3();
+      const _bulletMat4 = new THREE.Matrix4();
+      const _bulletStep = new THREE.Vector3();
+      const _bulletDirScaled = new THREE.Vector3();
+      const _bulletHitTmp = new THREE.Vector3();
+
+      function firePlaneBullet(origin, dir) {
+        let slot = null;
+        for (let i = 0; i < planeBullets.length; i++) {
+          if (!planeBullets[i].alive) {
+            slot = planeBullets[i];
+            break;
+          }
+        }
+        if (!slot) return;
+        slot.alive = true;
+        slot.pos.copy(origin);
+        slot.dir.copy(dir).normalize();
+        slot.dist = 0;
+        slot.mesh.visible = true;
+      }
+
+      function releasePlaneBullet(b) {
+        b.alive = false;
+        b.mesh.visible = false;
+      }
+
+      function updatePlaneBullets(dtSec) {
+        const speed = PARAMS.planeGun.bulletSpeed;
+        const maxDist = PARAMS.planeGun.bulletMaxDist;
+        const sz = PARAMS.planeGun.bulletSize;
+        for (let i = 0; i < planeBullets.length; i++) {
+          const b = planeBullets[i];
+          if (!b.alive) continue;
+          _bulletStep.copy(b.dir).multiplyScalar(speed * dtSec);
+          b.pos.add(_bulletStep);
+          b.dist += speed * dtSec;
+          if (b.dist > maxDist) {
+            releasePlaneBullet(b);
+            continue;
+          }
+          /* Build basis: local Y aligned with bullet dir, X = right (perp to view) */
+          _bulletToCam.subVectors(camera.position, b.pos);
+          _bulletRight.crossVectors(b.dir, _bulletToCam);
+          if (_bulletRight.lengthSq() < 1e-6) _bulletRight.set(1, 0, 0);
+          else _bulletRight.normalize();
+          _bulletPerp.crossVectors(_bulletRight, b.dir).normalize();
+          _bulletDirScaled.copy(b.dir).multiplyScalar(sz);
+          _bulletRight.multiplyScalar(sz);
+          _bulletPerp.multiplyScalar(sz);
+          _bulletMat4.makeBasis(_bulletRight, _bulletDirScaled, _bulletPerp);
+          _bulletMat4.setPosition(b.pos);
+          b.mesh.matrix.copy(_bulletMat4);
+        }
+      }
+
+      function checkPlaneBulletHits() {
+        if (flightTargets.length === 0) return;
+        const r = 2.0;
+        const r2 = r * r;
+        for (let i = 0; i < planeBullets.length; i++) {
+          const b = planeBullets[i];
+          if (!b.alive) continue;
+          for (let j = 0; j < flightTargets.length; j++) {
+            const t = flightTargets[j];
+            if (!t || t.isDead) continue;
+            _bulletHitTmp.subVectors(t.position, b.pos);
+            if (_bulletHitTmp.lengthSq() < r2) {
+              if (t.onHit) t.onHit(PARAMS.planeGun.damage, b.pos, b.dir);
+              releasePlaneBullet(b);
+              break;
+            }
+          }
+        }
+      }
+
       gltfLoader.load(resolveModelUrl(PLAY_PLANE_MODEL), (gltf) => {
         const inner = gltf.scene;
         inner.traverse((o) => {
@@ -6014,6 +6139,17 @@
           tmpW.set(tipXR, yMid, zBack);
           inner.worldToLocal(tmpW);
           createWingTrail(tmpW.clone());
+
+          /* Forward gun muzzles: front of wings (min.z after Y-flip). */
+          const zFront = wingBox.min.z + wbSz.z * 0.05;
+          const muzInsetX = wbSz.x * 0.06;
+          playPlaneMuzzles.length = 0;
+          tmpW.set(tipXL + muzInsetX, yMid, zFront);
+          inner.worldToLocal(tmpW);
+          playPlaneMuzzles.push(tmpW.clone());
+          tmpW.set(tipXR - muzInsetX, yMid, zFront);
+          inner.worldToLocal(tmpW);
+          playPlaneMuzzles.push(tmpW.clone());
         }
         playPlaneLoaded = true;
         if (playMode && playMovementMode === "fly") {
@@ -14061,6 +14197,45 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           label: "Look Y",
         });
 
+        const planeGunFolder = playFolder.addFolder({
+          title: "Plane gun · E",
+          expanded: false,
+        });
+        planeGunFolder.addBinding(PARAMS.planeGun, "enabled", { label: "Enabled" });
+        planeGunFolder.addBinding(PARAMS.planeGun, "fireRate", {
+          min: 1,
+          max: 30,
+          step: 0.5,
+          label: "Fire rate (Hz)",
+        });
+        planeGunFolder.addBinding(PARAMS.planeGun, "bulletSpeed", {
+          min: 60,
+          max: 600,
+          step: 5,
+          label: "Bullet speed",
+        });
+        planeGunFolder.addBinding(PARAMS.planeGun, "bulletMaxDist", {
+          min: 100,
+          max: 2000,
+          step: 10,
+          label: "Max range",
+        });
+        planeGunFolder.addBinding(PARAMS.planeGun, "bulletSize", {
+          min: 0.2,
+          max: 2,
+          step: 0.05,
+          label: "Tracer size",
+        });
+        planeGunFolder
+          .addBinding(PARAMS.planeGun, "tracerColor", { label: "Tracer color" })
+          .on("change", (ev) => planeBulletMat.color.set(ev.value));
+        planeGunFolder.addBinding(PARAMS.planeGun, "damage", {
+          min: 1,
+          max: 20,
+          step: 1,
+          label: "Damage",
+        });
+
         const toolsFolder = pane.addFolder({
           title: "Sculpt, paint & brush",
           expanded: true,
@@ -19050,6 +19225,31 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         } else if (wingTrails.length > 0) {
           clearWingTrails();
         }
+
+        /* ── Plane gun: fire on E, update bullets, check hits ── */
+        if (_planeGunCooldown > 0) _planeGunCooldown -= dtSec;
+        if (
+          PARAMS.planeGun.enabled &&
+          playPlaneRoot?.visible &&
+          playPlaneLoaded &&
+          playPlaneMuzzles.length > 0 &&
+          keysHeld.KeyE &&
+          _planeGunCooldown <= 0
+        ) {
+          const planeInner = playPlaneRoot.children[0];
+          planeInner.updateMatrixWorld(true);
+          _bulletForwardWS
+            .set(0, 0, -1)
+            .applyQuaternion(playPlaneRoot.quaternion);
+          const muz = playPlaneMuzzles[_planeMuzzleIdx];
+          _planeMuzzleIdx = (_planeMuzzleIdx + 1) % playPlaneMuzzles.length;
+          _bulletMuzzleWS.copy(muz);
+          planeInner.localToWorld(_bulletMuzzleWS);
+          firePlaneBullet(_bulletMuzzleWS, _bulletForwardWS);
+          _planeGunCooldown = 1 / PARAMS.planeGun.fireRate;
+        }
+        updatePlaneBullets(dtSec);
+        checkPlaneBulletHits();
         if (_rippleBuffer.length > 0) _syncRipples();
         if (_cachedLakeBodies.length > 0 || waterObjects.length > 0) {
           uWCamXZ.value.set(camera.position.x, camera.position.z);
