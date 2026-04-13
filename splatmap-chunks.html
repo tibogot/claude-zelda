@@ -10476,7 +10476,9 @@
           resolveTerrainMaterial(cx, cz, lodLevel),
         );
         mesh.position.copy(center);
-        mesh.frustumCulled = PARAMS.terrainChunkCulling;
+        // Per-mesh frustum culling forced off: WebGPU bind-group cold-start on
+        // chunks entering the frustum during orbit causes visible frame hitches.
+        mesh.frustumCulled = false;
         mesh.receiveShadow = true;
         mesh.userData.chunkKey = chunkKey(cx, cz);
         // Store per-chunk textures for shared TSL ground material's onBeforeRender
@@ -10642,11 +10644,12 @@
           }
         }
 
-        // Only update frustumCulled when the param actually changes
+        // terrainChunkCulling now only controls ring streaming; per-mesh
+        // frustumCulled stays false to avoid WebGPU bind-group cold-start hitches.
         if (_lastFrustumCullParam !== PARAMS.terrainChunkCulling) {
           _lastFrustumCullParam = PARAMS.terrainChunkCulling;
           for (const ch of activeChunks.values()) {
-            ch.mesh.frustumCulled = PARAMS.terrainChunkCulling;
+            ch.mesh.frustumCulled = false;
           }
         }
 
