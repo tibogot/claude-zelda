@@ -5880,12 +5880,26 @@
       /** Below this height AGL (m), extra rolling resistance / deck braking when coasting. */
       const PLAY_PLANE_DECK_ALT = 1.15;
       const PLAY_PLANE_DECK_COAST_MULT = 2.1;
+      /** On deck + below this speed: no mouse/iso flight steering (taxi); follow cam orbit offset only. */
+      const PLAY_PLANE_SURFACE_LOCK_MAX_AGL = 1.35;
+      const PLAY_PLANE_SURFACE_LOCK_MAX_SPEED = 16;
       /** Fly mode only: height above terrain at (playerPos.x, playerPos.z); playerPos.y stays at ground. */
       let playFlyHeight = 0;
       /** Signed forward airspeed along `flyHeading` (m/s). Throttle ramps; never uses capsule speed. */
       let playPlaneForwardSpeed = 0;
       let playPlaneRoot = null;
       let playPlaneLoaded = false;
+      /** Follow-fly only: look around while surface-locked (yaw orbit), decays in air. */
+      let flyGroundCamYawOff = 0;
+
+      function planeFlightSurfaceLocked() {
+        return (
+          playMovementMode === "fly" &&
+          playPlaneLoaded &&
+          playFlyHeight < PLAY_PLANE_SURFACE_LOCK_MAX_AGL &&
+          Math.abs(playPlaneForwardSpeed) < PLAY_PLANE_SURFACE_LOCK_MAX_SPEED
+        );
+      }
 
       /* ── Animated character (3rd movement mode: "char") ── */
       /* Matches game-unreal.html: UA1+UA2 character w/ katana.glb, hat,
@@ -10790,6 +10804,7 @@
         flyBarrelActive = false;
         flyBarrelPhase = 0;
         flyBarrelSign = 1;
+        flyGroundCamYawOff = 0;
         for (const k of Object.keys(keysHeld)) delete keysHeld[k];
         capsuleMesh.visible = false;
         if (playPlaneRoot) playPlaneRoot.visible = false;
@@ -12898,17 +12913,27 @@
         if (playMovementMode === "fly" && playPlaneLoaded) {
           const mx = event.movementX;
           const my = event.movementY;
-          flyHeading -= mx * playParams.flyMouseSensX;
-          flyPitch = THREE.MathUtils.clamp(
-            flyPitch + my * playParams.flyMouseSensY,
-            playParams.flyPitchMin,
-            playParams.flyPitchMax,
-          );
-          flyRollTarget = THREE.MathUtils.clamp(
-            flyRollTarget - mx * playParams.flyRollVelScale,
-            -playParams.flyRollMax,
-            playParams.flyRollMax,
-          );
+          if (planeFlightSurfaceLocked()) {
+            /* Taxi: mouse orbits camera only — no in-place yaw/roll/pitch on the runway. */
+            flyGroundCamYawOff -= mx * playParams.flyMouseSensX;
+            flyGroundCamYawOff = THREE.MathUtils.clamp(
+              flyGroundCamYawOff,
+              -1.65,
+              1.65,
+            );
+          } else {
+            flyHeading -= mx * playParams.flyMouseSensX;
+            flyPitch = THREE.MathUtils.clamp(
+              flyPitch + my * playParams.flyMouseSensY,
+              playParams.flyPitchMin,
+              playParams.flyPitchMax,
+            );
+            flyRollTarget = THREE.MathUtils.clamp(
+              flyRollTarget - mx * playParams.flyRollVelScale,
+              -playParams.flyRollMax,
+              playParams.flyRollMax,
+            );
+          }
           return;
         }
         camYaw -= event.movementX * playParams.camSensX;
@@ -12951,6 +12976,7 @@
               flyBarrelActive = false;
               flyBarrelPhase = 0;
               flyBarrelSign = 1;
+              flyGroundCamYawOff = 0;
               clearWingTrails();
             } else if (playMovementMode === "fly") {
               flyHeading =
@@ -12961,6 +12987,7 @@
               flyBarrelActive = false;
               flyBarrelPhase = 0;
               flyBarrelSign = 1;
+              flyGroundCamYawOff = 0;
               playPlaneForwardSpeed = 0;
               moveTarget = null;
               moveRing.visible = false;
@@ -13041,7 +13068,8 @@
             event.code === "KeyQ" &&
             playMovementMode === "fly" &&
             playPlaneLoaded &&
-            !flyBarrelActive
+            !flyBarrelActive &&
+            !planeFlightSurfaceLocked()
           ) {
             event.preventDefault();
             let rollHint = 0;
@@ -20897,7 +20925,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           }
           // Iso fly: A/D yaw the plane before we build the thrust vector,
           // so W/S push along the new heading in the same frame.
-          if (flying && iso) {
+          if (flying && iso && !planeFlightSurfaceLocked()) {
             if (keysHeld.KeyA || keysHeld.ArrowLeft)
               flyHeading += ISO_FLY_YAW_RATE * dtSec;
             if (keysHeld.KeyD || keysHeld.ArrowRight)
@@ -21188,6 +21216,19 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
               flyRollTarget,
               1 - Math.exp(-playParams.flyRollSmooth * dtRoll),
             );
+            if (planeFlightSurfaceLocked()) {
+              const sk = 1 - Math.exp(-14 * Math.min(dtSec, 0.1));
+              /* Follow: level nose on deck. Iso: keep pitch for Space/Shift takeoff. */
+              if (!iso) flyPitch += (0 - flyPitch) * sk;
+              flyRollTarget += (0 - flyRollTarget) * sk;
+              /* Without this, flare height stays in playFlyHeight — plane hovers
+               * above the runway after landing while pitch is zeroed. */
+              const ag = 1 - Math.exp(-17 * Math.min(dtSec, 0.1));
+              playFlyHeight += (0 - playFlyHeight) * ag;
+              playFlyHeight = Math.max(0, playFlyHeight);
+            } else {
+              flyGroundCamYawOff *= Math.exp(-10 * Math.min(dtSec, 0.12));
+            }
           } else {
             playFlyHeight = 0;
           }
@@ -21698,7 +21739,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
               while (d < -Math.PI) d += 2 * Math.PI;
               camYaw += d * (1 - Math.exp(-4.0 * Math.min(dtSec, 0.1)));
             }
-            const camOrbitYaw = flying ? flyHeading : camYaw;
+            const camOrbitYaw = flying ? flyHeading + flyGroundCamYawOff : camYaw;
             const camDistUse = carMode
               ? Math.max(playParams.camDist, 9.0)
               : playParams.camDist;
