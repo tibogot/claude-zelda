@@ -586,6 +586,8 @@
           selectedPointY: 0,
           /** Spheres + centre polyline; road mesh stays visible when false. */
           showHandles: true,
+          /** Which road spline is being edited (handles + new points). */
+          activeRoadIndex: 0,
           asphaltDark: "#252528",
           asphaltLight: "#4a4a52",
           grainScale: 14,
@@ -3296,12 +3298,12 @@
       let riverPointMeshes = [];
       let riverGroup = null;
       let riverMesh = null;
-      let roadPoints = [];
+      /** Each entry: { points: Vector3[], mesh: Mesh|null } — shared roadMat on every mesh. */
+      let roadSegs = [];
       let roadSelectedIdx = -1;
       let roadDragging = false;
       let roadPointMeshes = [];
       let roadGroup = null;
-      let roadMesh = null;
 
       let splinePoints = [];
       let splineSelectedIdx = -1;
@@ -5206,7 +5208,19 @@
           },
           riverPoints: riverPoints.map((p) => ({ x: p.x, y: p.y, z: p.z })),
           river: JSON.parse(JSON.stringify(PARAMS.river)),
-          roadPoints: roadPoints.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+          roads: roadSegs.map((seg) => ({
+            points: seg.points.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+          })),
+          activeRoadIndex:
+            roadSegs.length === 0
+              ? 0
+              : Math.max(
+                  0,
+                  Math.min(
+                    PARAMS.road.activeRoadIndex | 0,
+                    roadSegs.length - 1,
+                  ),
+                ),
           road: JSON.parse(JSON.stringify(PARAMS.road)),
           path: JSON.parse(JSON.stringify(PARAMS.path)),
           decal: JSON.parse(JSON.stringify(PARAMS.decal)),
@@ -5523,10 +5537,29 @@
           riverRebuildVisual();
           riverUpdateSelectedYParam();
         }
-        if (data.roadPoints && Array.isArray(data.roadPoints)) {
-          roadPoints = data.roadPoints.map(
-            (p) => new THREE.Vector3(p.x, p.y, p.z),
-          );
+        if (data.roads && Array.isArray(data.roads)) {
+          roadSegs.forEach((seg) => roadDisposeSegMesh(seg));
+          roadSegs = data.roads.map((r) => ({
+            points: Array.isArray(r.points)
+              ? r.points.map(
+                  (p) => new THREE.Vector3(p.x, p.y, p.z),
+                )
+              : [],
+            mesh: null,
+          }));
+          roadSelectedIdx = -1;
+          roadDragging = false;
+        } else if (data.roadPoints && Array.isArray(data.roadPoints)) {
+          roadSegs.forEach((seg) => roadDisposeSegMesh(seg));
+          roadSegs = [
+            {
+              points: data.roadPoints.map(
+                (p) => new THREE.Vector3(p.x, p.y, p.z),
+              ),
+              mesh: null,
+            },
+          ];
+          PARAMS.road.activeRoadIndex = 0;
           roadSelectedIdx = -1;
           roadDragging = false;
         }
@@ -5534,7 +5567,17 @@
           Object.assign(PARAMS.road, data.road);
           syncRoadMat();
         }
-        if (data.roadPoints && Array.isArray(data.roadPoints)) {
+        if (
+          typeof data.activeRoadIndex === "number" &&
+          (data.roads || data.roadPoints)
+        ) {
+          PARAMS.road.activeRoadIndex = data.activeRoadIndex;
+        }
+        if (
+          (data.roads && Array.isArray(data.roads)) ||
+          (data.roadPoints && Array.isArray(data.roadPoints))
+        ) {
+          roadClampParamActive();
           roadRebuildVisual();
           roadUpdateSelectedYParam();
         }
@@ -6155,7 +6198,7 @@
             "RIVER MODE  [ V · LMB add / pick · drag · Del · Esc clears pick · Esc → view ]";
         else if (m === "road")
           el.textContent =
-            "ROAD MODE  [ U · New road in pane · LMB add / pick · drag · Del · Esc → view ]";
+            "ROAD MODE  [ U · Active road # in pane · New road · LMB add / pick · drag · Del · Esc → view ]";
         else if (m === "water")
           el.textContent =
             "WATER BODIES  [ W · LMB place / pick · E move · R rotate · T scale · Del · Esc → view ]";
@@ -10610,35 +10653,56 @@
         return riverPointMeshes.indexOf(hits[0].object);
       }
 
-      function roadClearMesh() {
-        if (roadMesh) {
-          scene.remove(roadMesh);
-          roadMesh.geometry.dispose();
-          roadMesh = null;
+      function roadDisposeSegMesh(seg) {
+        if (!seg || !seg.mesh) return;
+        scene.remove(seg.mesh);
+        seg.mesh.geometry.dispose();
+        seg.mesh = null;
+      }
+
+      function roadClampParamActive() {
+        if (roadSegs.length === 0) {
+          PARAMS.road.activeRoadIndex = 0;
+          return;
+        }
+        PARAMS.road.activeRoadIndex = Math.max(
+          0,
+          Math.min(PARAMS.road.activeRoadIndex | 0, roadSegs.length - 1),
+        );
+      }
+
+      function roadActiveIdx() {
+        if (roadSegs.length === 0) return -1;
+        return Math.max(
+          0,
+          Math.min(PARAMS.road.activeRoadIndex | 0, roadSegs.length - 1),
+        );
+      }
+
+      function roadRebuildAllMeshes() {
+        for (let i = 0; i < roadSegs.length; i++) {
+          const seg = roadSegs[i];
+          roadDisposeSegMesh(seg);
+          if (seg.points.length < 2) continue;
+          const curve = new THREE.CatmullRomCurve3(
+            seg.points,
+            false,
+            "catmullrom",
+            0.5,
+          );
+          const geo = generateRiverMesh(
+            curve,
+            PARAMS.road.width,
+            PARAMS.road.segments,
+            PARAMS.road.heightOffset,
+          );
+          seg.mesh = new THREE.Mesh(geo, roadMat);
+          seg.mesh.renderOrder = 3;
+          scene.add(seg.mesh);
         }
       }
 
-      function roadGenerate() {
-        if (roadPoints.length < 2) return;
-        roadClearMesh();
-        const curve = new THREE.CatmullRomCurve3(
-          roadPoints,
-          false,
-          "catmullrom",
-          0.5,
-        );
-        const geo = generateRiverMesh(
-          curve,
-          PARAMS.road.width,
-          PARAMS.road.segments,
-          PARAMS.road.heightOffset,
-        );
-        roadMesh = new THREE.Mesh(geo, roadMat);
-        roadMesh.renderOrder = 3;
-        scene.add(roadMesh);
-      }
-
-      function roadRebuildVisual() {
+      function roadRebuildHandles() {
         while (roadGroup.children.length) {
           const child = roadGroup.children[0];
           roadGroup.remove(child);
@@ -10646,7 +10710,13 @@
           if (child.material) child.material.dispose();
         }
         roadPointMeshes = [];
-        roadPoints.forEach((pt, i) => {
+        const ai = roadActiveIdx();
+        if (ai < 0) {
+          syncRoadHandlesVisibility();
+          return;
+        }
+        const pts = roadSegs[ai].points;
+        pts.forEach((pt, i) => {
           const sphere = new THREE.Mesh(
             new THREE.SphereGeometry(0.5, 8, 8),
             new THREE.MeshBasicMaterial({
@@ -10657,9 +10727,9 @@
           roadGroup.add(sphere);
           roadPointMeshes.push(sphere);
         });
-        if (roadPoints.length >= 2) {
+        if (pts.length >= 2) {
           const curve = new THREE.CatmullRomCurve3(
-            roadPoints,
+            pts,
             false,
             "catmullrom",
             0.5,
@@ -10673,49 +10743,70 @@
           );
           roadGroup.add(line);
           roadPointMeshes.push(line);
-          roadGenerate();
-        } else {
-          roadClearMesh();
         }
         syncRoadHandlesVisibility();
       }
 
-      /** One road at a time: clear control points and strip to start a fresh path. */
+      function roadRebuildVisual() {
+        roadRebuildAllMeshes();
+        roadRebuildHandles();
+      }
+
+      /** Append an empty spline slot; LMB adds points to this road (others stay visible). */
       function roadStartNew() {
-        roadPoints = [];
-        roadSelectedIdx = -1;
         roadDragging = false;
         if (!playMode) controls.enabled = true;
+        roadSegs.push({ points: [], mesh: null });
+        PARAMS.road.activeRoadIndex = roadSegs.length - 1;
+        roadSelectedIdx = -1;
         roadRebuildVisual();
         if (editorPane) editorPane.refresh();
       }
 
       function roadAddPoint(p) {
-        roadPoints.push(p.clone());
-        roadSelectedIdx = roadPoints.length - 1;
+        if (roadSegs.length === 0) {
+          roadSegs.push({ points: [], mesh: null });
+          PARAMS.road.activeRoadIndex = 0;
+        }
+        roadClampParamActive();
+        const ai = roadActiveIdx();
+        const pts = roadSegs[ai].points;
+        pts.push(p.clone());
+        roadSelectedIdx = pts.length - 1;
         roadRebuildVisual();
         roadUpdateSelectedYParam();
       }
 
       function roadDeleteSelected() {
-        if (roadSelectedIdx < 0 || roadPoints.length === 0) return;
-        roadPoints.splice(roadSelectedIdx, 1);
-        roadSelectedIdx = Math.min(roadSelectedIdx, roadPoints.length - 1);
+        const ai = roadActiveIdx();
+        if (ai < 0 || roadSelectedIdx < 0) return;
+        const pts = roadSegs[ai].points;
+        if (roadSelectedIdx >= pts.length) return;
+        pts.splice(roadSelectedIdx, 1);
+        roadSelectedIdx = Math.min(roadSelectedIdx, pts.length - 1);
         roadRebuildVisual();
         roadUpdateSelectedYParam();
       }
 
       function roadMoveSelected(pos) {
-        if (roadSelectedIdx < 0) return;
-        const currentY = roadPoints[roadSelectedIdx].y;
-        roadPoints[roadSelectedIdx].copy(pos);
-        roadPoints[roadSelectedIdx].y = currentY;
+        const ai = roadActiveIdx();
+        if (ai < 0 || roadSelectedIdx < 0) return;
+        const pts = roadSegs[ai].points;
+        if (roadSelectedIdx >= pts.length) return;
+        const currentY = pts[roadSelectedIdx].y;
+        pts[roadSelectedIdx].copy(pos);
+        pts[roadSelectedIdx].y = currentY;
         roadRebuildVisual();
       }
 
       function roadUpdateSelectedYParam() {
-        if (roadSelectedIdx >= 0 && roadSelectedIdx < roadPoints.length) {
-          PARAMS.road.selectedPointY = roadPoints[roadSelectedIdx].y;
+        const ai = roadActiveIdx();
+        if (
+          ai >= 0 &&
+          roadSelectedIdx >= 0 &&
+          roadSelectedIdx < roadSegs[ai].points.length
+        ) {
+          PARAMS.road.selectedPointY = roadSegs[ai].points[roadSelectedIdx].y;
         }
         if (editorPane) editorPane.refresh();
       }
@@ -10729,6 +10820,25 @@
         );
         if (hits.length === 0) return -1;
         return roadPointMeshes.indexOf(hits[0].object);
+      }
+
+      /** Remove active spline and its strip; other roads unchanged. */
+      function roadDeleteActiveRoad() {
+        const ai = roadActiveIdx();
+        if (ai < 0) return;
+        roadDisposeSegMesh(roadSegs[ai]);
+        roadSegs.splice(ai, 1);
+        roadSelectedIdx = -1;
+        roadDragging = false;
+        if (!playMode) controls.enabled = true;
+        roadClampParamActive();
+        roadRebuildVisual();
+        if (editorPane) editorPane.refresh();
+      }
+
+      function roadClearAllMeshesOnly() {
+        for (const seg of roadSegs) roadDisposeSegMesh(seg);
+        if (editorPane) editorPane.refresh();
       }
 
       function splineRebuildVisual() {
@@ -15872,10 +15982,31 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           .on("change", () => syncRoadHandlesVisibility());
 
         roadFolder
+          .addBinding(PARAMS.road, "activeRoadIndex", {
+            label: "Active road #",
+            min: 0,
+            max: 63,
+            step: 1,
+          })
+          .on("change", () => {
+            roadClampParamActive();
+            roadSelectedIdx = -1;
+            roadDragging = false;
+            if (!playMode) controls.enabled = true;
+            roadRebuildHandles();
+            roadUpdateSelectedYParam();
+            if (editorPane) editorPane.refresh();
+          });
+
+        roadFolder
           .addButton({
-            title: "New road — clears path & strip (start fresh)",
+            title: "New road (empty spline slot)",
           })
           .on("click", () => roadStartNew());
+
+        roadFolder
+          .addButton({ title: "Delete active road (path + strip)" })
+          .on("click", () => roadDeleteActiveRoad());
 
         roadFolder
           .addButton({ title: "Delete selected point  [ Del ]" })
@@ -15892,20 +16023,27 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             step: 0.5,
           })
           .on("change", ({ value }) => {
+            const ai = roadActiveIdx();
             if (
+              ai >= 0 &&
               roadSelectedIdx >= 0 &&
-              roadSelectedIdx < roadPoints.length
+              roadSelectedIdx < roadSegs[ai].points.length
             ) {
-              roadPoints[roadSelectedIdx].y = value;
+              roadSegs[ai].points[roadSelectedIdx].y = value;
               roadRebuildVisual();
             }
           });
         roadFolder
           .addButton({ title: "Snap selected Y to terrain" })
           .on("click", () => {
-            if (roadSelectedIdx < 0 || roadSelectedIdx >= roadPoints.length)
+            const ai = roadActiveIdx();
+            if (
+              ai < 0 ||
+              roadSelectedIdx < 0 ||
+              roadSelectedIdx >= roadSegs[ai].points.length
+            )
               return;
-            const pt = roadPoints[roadSelectedIdx];
+            const pt = roadSegs[ai].points[roadSelectedIdx];
             pt.y = getWorldHeight(pt.x, pt.z);
             PARAMS.road.selectedPointY = pt.y;
             editorPane.refresh();
@@ -15920,7 +16058,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             step: 0.5,
           })
           .on("change", () => {
-            if (roadPoints.length >= 2) roadGenerate();
+            roadRebuildAllMeshes();
           });
         roadFolder
           .addBinding(PARAMS.road, "segments", {
@@ -15930,7 +16068,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             step: 10,
           })
           .on("change", () => {
-            if (roadPoints.length >= 2) roadGenerate();
+            roadRebuildAllMeshes();
           });
         roadFolder
           .addBinding(PARAMS.road, "heightOffset", {
@@ -15940,7 +16078,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             step: 0.01,
           })
           .on("change", () => {
-            if (roadPoints.length >= 2) roadGenerate();
+            roadRebuildAllMeshes();
           });
         roadFolder.addBlade({ view: "separator" });
         roadFolder
@@ -15995,11 +16133,13 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           .on("change", () => syncRoadMat());
         roadFolder.addBlade({ view: "separator" });
         roadFolder
-          .addButton({ title: "▶ Rebuild road mesh" })
-          .on("click", roadGenerate);
+          .addButton({ title: "▶ Rebuild all road meshes" })
+          .on("click", roadRebuildVisual);
         roadFolder
-          .addButton({ title: "Clear road mesh" })
-          .on("click", roadClearMesh);
+          .addButton({
+            title: "Clear all paved strips (keep paths)",
+          })
+          .on("click", roadClearAllMeshesOnly);
 
         syncRoadMat();
 
