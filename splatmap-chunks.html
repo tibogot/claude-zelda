@@ -5862,9 +5862,15 @@
       let flyRollTarget = 0;
       let flyBarrelActive = false;
       let flyBarrelPhase = 0;
+      /** +1 or −1: barrel follows current roll sense; set on Q (see FLY_BARREL_ROLL_DEAD). */
+      let flyBarrelSign = 1;
+      const FLY_BARREL_ROLL_DEAD = 0.028;
       const PLAY_PLANE_MODEL = "models/wenning_carsten_gameart_plane_compressed.glb";
       /** Plane airspeed tunables (m/s, m/s²). Separate from capsule `playParams.speed`. */
       const PLAY_PLANE_MAX_FWD = 56;
+      /** With Shift (afterburner), higher cap + stronger W-throttle accel. */
+      const PLAY_PLANE_MAX_FWD_BOOST = 78;
+      const PLAY_PLANE_SHIFT_ACCEL_MULT = 1.5;
       const PLAY_PLANE_MAX_REV = 18;
       const PLAY_PLANE_ACCEL = 10.5;
       const PLAY_PLANE_BRAKE = 26;
@@ -7653,7 +7659,7 @@
           if (playCamView === "iso") {
             el.textContent =
               mm === "fly"
-                ? "PLAY FLY · ISO  [ A/D yaw · W/S thrust · Space/Shift climb · Q barrel · wheel zoom · V follow · G cycle · F/Esc ]"
+                ? "PLAY FLY · ISO  [ A/D yaw · W/S thrust · W+Shift afterburn · Space climb · Shift dive · Q barrel · wheel zoom · V follow · G cycle · F/Esc ]"
                 : mm === "char"
                   ? "PLAY CHAR · ISO  [ WASD · Shift run · Space jump/glide · [ ] rotate · wheel zoom · V follow · G cycle · F/Esc ]"
                   : mm === "car"
@@ -7662,7 +7668,7 @@
           } else {
             el.textContent =
               mm === "fly"
-                ? "PLAY FLY  [ mouse · W/S · Q barrel · V iso · G cycle · F/Esc ]"
+                ? "PLAY FLY  [ mouse · W/S · Shift afterburn · Q barrel · V iso · G cycle · F/Esc ]"
                 : mm === "char"
                   ? "PLAY CHAR  [ WASD · Shift run · Space jump/glide · V iso · G cycle · F/Esc ]"
                   : mm === "car"
@@ -10783,6 +10789,7 @@
         moveRing.visible = false;
         flyBarrelActive = false;
         flyBarrelPhase = 0;
+        flyBarrelSign = 1;
         for (const k of Object.keys(keysHeld)) delete keysHeld[k];
         capsuleMesh.visible = false;
         if (playPlaneRoot) playPlaneRoot.visible = false;
@@ -12943,6 +12950,7 @@
               flyRollTarget = 0;
               flyBarrelActive = false;
               flyBarrelPhase = 0;
+              flyBarrelSign = 1;
               clearWingTrails();
             } else if (playMovementMode === "fly") {
               flyHeading =
@@ -12952,6 +12960,7 @@
               flyRollTarget = 0;
               flyBarrelActive = false;
               flyBarrelPhase = 0;
+              flyBarrelSign = 1;
               playPlaneForwardSpeed = 0;
               moveTarget = null;
               moveRing.visible = false;
@@ -13035,6 +13044,16 @@
             !flyBarrelActive
           ) {
             event.preventDefault();
+            let rollHint = 0;
+            if (Math.abs(flyRoll) > FLY_BARREL_ROLL_DEAD) rollHint = flyRoll;
+            else if (Math.abs(flyRollTarget) > FLY_BARREL_ROLL_DEAD)
+              rollHint = flyRollTarget;
+            flyBarrelSign =
+              rollHint !== 0
+                ? Math.sign(rollHint)
+                : Math.random() < 0.5
+                  ? 1
+                  : -1;
             flyBarrelActive = true;
             flyBarrelPhase = 0;
             return;
@@ -20906,7 +20925,10 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             if (playFlyHeight < PLAY_PLANE_DECK_ALT)
               coast *= PLAY_PLANE_DECK_COAST_MULT;
             if (thr === 1) {
-              playPlaneForwardSpeed += PLAY_PLANE_ACCEL * dtSec;
+              let a = PLAY_PLANE_ACCEL;
+              if (keysHeld.ShiftLeft || keysHeld.ShiftRight)
+                a *= PLAY_PLANE_SHIFT_ACCEL_MULT;
+              playPlaneForwardSpeed += a * dtSec;
             } else if (thr === -1) {
               if (playPlaneForwardSpeed > 0.55) {
                 playPlaneForwardSpeed -= PLAY_PLANE_BRAKE * dtSec;
@@ -20928,10 +20950,14 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
                 );
               }
             }
+            const maxFwdPlane =
+              keysHeld.ShiftLeft || keysHeld.ShiftRight
+                ? PLAY_PLANE_MAX_FWD_BOOST
+                : PLAY_PLANE_MAX_FWD;
             playPlaneForwardSpeed = THREE.MathUtils.clamp(
               playPlaneForwardSpeed,
               -PLAY_PLANE_MAX_REV,
-              PLAY_PLANE_MAX_FWD,
+              maxFwdPlane,
             );
             if (Math.abs(playPlaneForwardSpeed) < 0.04 && thr === 0)
               playPlaneForwardSpeed = 0;
@@ -21135,8 +21161,18 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
               flyBarrelPhase += dtSec / playParams.flyBarrelRollDuration;
               const t = Math.min(1, flyBarrelPhase);
               const sm = t * t * (3 - 2 * t);
-              flyBarrelAdd = sm * PI * 2;
+              flyBarrelAdd = sm * PI * 2 * flyBarrelSign;
               if (flyBarrelPhase >= 1) {
+                const wrap = (a) => {
+                  const T = PI * 2;
+                  while (a > PI) a -= T;
+                  while (a < -PI) a += T;
+                  return a;
+                };
+                flyRoll += PI * 2 * flyBarrelSign;
+                flyRollTarget += PI * 2 * flyBarrelSign;
+                flyRoll = wrap(flyRoll);
+                flyRollTarget = wrap(flyRollTarget);
                 flyBarrelActive = false;
                 flyBarrelPhase = 0;
               }
