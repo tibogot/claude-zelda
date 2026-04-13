@@ -5906,8 +5906,51 @@
       /* Jump phase state machine — "none" | "start" | "loop" | "land".
        * Mirrors game-unreal's Jump_Start → Jump_Loop → Jump_Land chain. */
       let playCharJumpPhase = "none";
+      /* Zelda-style glider: Space mid-air opens/closes a kite that caps
+       * fall speed. Mirrors player-parkourtsushima.js. */
+      let playCharGliding = false;
+      let playCharGliderPoseActive = false;
+      let playCharSpacePrev = false;
+      let playCharKite = null;
+      const PLAY_CHAR_GLIDE_FALL_SPEED = 3.0;
       const PLAY_CHAR_SLIDE_SPEED = 10.0;
       const PLAY_CHAR_SLIDE_MAX_TIME = 1.2;
+
+      /* ── Arcade car (4th movement mode: "car") ──
+       * Heightmap-raycast 4-wheeler, no Rapier. Uses bruno.glb from
+       * folio-2025-main — chassis + 4 cloned wheelContainers. */
+      const PLAY_CAR_MODEL = "models/bruno.glb";
+      const PLAY_CAR_ACCEL = 18.0;       // throttle acceleration (m/s²)
+      const PLAY_CAR_BRAKE = 34.0;       // brake deceleration
+      const PLAY_CAR_REVERSE = 12.0;     // reverse acceleration
+      const PLAY_CAR_MAX_SPEED = 22.0;   // fwd cap
+      const PLAY_CAR_MAX_REVERSE = 10.0; // reverse cap
+      const PLAY_CAR_ROLL_FRICTION = 2.2;// coast decel when no throttle
+      const PLAY_CAR_DRAG = 0.018;       // v² drag coefficient
+      const PLAY_CAR_STEER_MAX = 0.65;   // radians of steering input
+      const PLAY_CAR_STEER_RATE = 4.0;   // how fast steering follows input
+      const PLAY_CAR_TURN_RATE = 2.1;    // yaw change per (speed × steer)
+      const PLAY_CAR_HANDBRAKE = 55.0;   // handbrake decel
+      const PLAY_CAR_GRAVITY = 22.0;
+      const PLAY_CAR_WHEEL_BASE = 1.9;   // front-back distance
+      const PLAY_CAR_TRACK = 1.1;        // left-right distance
+      const PLAY_CAR_RIDE_HEIGHT = 0.35; // wheel hub below chassis center
+      const PLAY_CAR_WHEEL_RADIUS = 0.42;// so wheel bottoms rest ON ground
+      /* bruno.glb's chassis points +X in model space; our physics assumes
+       * +Z forward. Bake this 90° Y rotation into the visual mesh so the
+       * wheel/physics math stays in the clean +Z frame. */
+      const PLAY_CAR_MODEL_YAW = Math.PI / 2;
+      let playCarRoot = null;            // Group holding chassis + wheels
+      let playCarChassis = null;         // chassis mesh (parent of wheels)
+      let playCarWheels = [];            // [{container, suspension, cylinder, offset:Vec3}, …]
+      let playCarLoaded = false;
+      let playCarHeading = 0;            // yaw (rad)
+      let playCarSpeed = 0;              // m/s along heading (signed)
+      let playCarSteer = 0;              // current smoothed steering
+      let playCarY = 0;                  // chassis center y
+      let playCarPitch = 0;              // from front/rear wheel height diff
+      let playCarRoll = 0;               // from left/right wheel height diff
+      let playCarWheelSpin = 0;          // cumulative wheel rotation (radians)
       const keysHeld = {};
       const playerPos = new THREE.Vector3();
       let camYaw = 0;
@@ -6954,6 +6997,50 @@
         playCharRoot.visible = false;
         scene.add(playCharRoot);
 
+        /* Zelda-style glider kite — triangle canopy + control bar,
+         * parented to the character root so it rotates with yaw. */
+        {
+          const kiteGroup = new THREE.Group();
+          const kiteShape = new THREE.Shape();
+          kiteShape.moveTo(0, -0.7);
+          kiteShape.lineTo(-1.6, 0.6);
+          kiteShape.lineTo(1.6, 0.6);
+          kiteShape.closePath();
+          const canopyGeo = new THREE.ShapeGeometry(kiteShape);
+          const canopyMat = new THREE.MeshStandardMaterial({
+            color: 0x2563eb,
+            roughness: 0.5,
+            metalness: 0.1,
+            side: THREE.DoubleSide,
+          });
+          const canopy = new THREE.Mesh(canopyGeo, canopyMat);
+          canopy.castShadow = true;
+          canopy.receiveShadow = true;
+          canopy.rotation.x = -0.5;
+          canopy.position.set(0, 0.15, 0);
+          kiteGroup.add(canopy);
+          const barGeo = new THREE.BoxGeometry(0.7, 0.04, 0.04);
+          const barMat = new THREE.MeshStandardMaterial({
+            color: 0x1f2937,
+            roughness: 0.4,
+            metalness: 0.3,
+          });
+          const bar = new THREE.Mesh(barGeo, barMat);
+          bar.castShadow = true;
+          bar.position.set(0, -0.6, 0.35);
+          bar.rotation.x = 0.25;
+          kiteGroup.add(bar);
+          /* Position above the character's shoulders. Character GLB
+           * forward is +Z so the kite's -Z offset puts it in front of
+           * the back — matches the Zelda paraglider silhouette. */
+          kiteGroup.position.set(0, PLAY_CHAR_HEIGHT * 0.95, -0.35);
+          kiteGroup.rotation.x = 0.12;
+          kiteGroup.rotation.y = Math.PI / 2;
+          kiteGroup.visible = false;
+          playCharRoot.add(kiteGroup);
+          playCharKite = kiteGroup;
+        }
+
         /* Bones — UA1+UA2 uses DEF-handR/DEF-head, but try fallbacks
          * in case compression mangled names. */
         const findBone = (names) => {
@@ -7089,6 +7176,9 @@
             jumpStartClip ||
             idleClip;
           const jumpLandClip = pick(["Jump_Land"]) || idleClip;
+          /* Glider pose: different clip so the character holds the
+           * kite bar instead of the default freefall loop. */
+          const glideClip = pick(["NinjaJump_Idle_Loop"]) || jumpLoopClip;
           const attackClip = pick(["Sword_Attack", "Sword_Attack_RM"]);
           const crouchClip = pick(["Crouch_Idle_Loop"]) || idleClip;
           const crouchWalkClip = pick(["Crouch_Fwd_Loop"]) || crouchClip;
@@ -7116,6 +7206,7 @@
           const jumpStartAction = mk(jumpStartClip, true);
           const jumpLoopAction = mk(jumpLoopClip, false);
           const jumpLandAction = mk(jumpLandClip, true);
+          const glideAction = mk(glideClip, false);
           /* Speed-up the short cinematic clips slightly so they feel
            * responsive — matches game-unreal's 1.4x/1.8x on start/land. */
           if (jumpStartAction) jumpStartAction.timeScale = 1.4;
@@ -7144,6 +7235,7 @@
             jumpStart: jumpStartAction,
             jumpLoop: jumpLoopAction,
             jumpLand: jumpLandAction,
+            glide: glideAction,
             crouch: crouchAction,
             crouchWalk: crouchWalkAction,
             attack: attackAction,
@@ -7281,6 +7373,144 @@
         playCharCurrentAction = next;
       }
 
+      /* ── Car loader (bruno.glb) ──
+       * The folio source builds its car from named parts: `chassis` holds the
+       * body shell, `wheelContainer` is a template cloned 4× with child parts
+       * `wheelSuspension` + `wheelCylinder` (+ `wheelPainted`). We reproduce
+       * that structure: chassis is parented to playCarRoot, then 4 cloned
+       * wheelContainers are parented to chassis with per-wheel offsets. */
+      /* Cache-buster: the old bruno.glb we shipped was a different file
+       * with no chassis/wheelContainer nodes, so stale browser caches
+       * return the broken copy. Query string forces a re-fetch. */
+      gltfLoader.load(resolveModelUrl(PLAY_CAR_MODEL) + "?v=3", (gltf) => {
+        const src = gltf.scene;
+        /* Folio names parts with a numeric suffix from Blender (e.g.
+         * "chassis.001", "wheelContainer.001"). Match by prefix so any
+         * re-export still resolves cleanly. */
+        let chassisSrc = null;
+        let wheelSrc = null;
+        const _allNames = [];
+        src.traverse((o) => {
+          _allNames.push(o.name || "<unnamed>");
+          if (!chassisSrc && /^chassis(\.|\d|$)/.test(o.name)) chassisSrc = o;
+          if (!wheelSrc && /^wheelContainer(\.|\d|$)/.test(o.name)) wheelSrc = o;
+        });
+        console.log("[car] loaded node names:", _allNames);
+        if (!chassisSrc || !wheelSrc) {
+          console.warn(
+            "[car] bruno.glb missing chassis/wheelContainer — falling back to raw scene",
+          );
+          /* Last-resort fallback: reparent the whole scene as both the
+           * chassis and the wheel template so at least *something*
+           * appears. This will look wrong but prevents null-clone crashes. */
+          if (!chassisSrc) chassisSrc = src;
+          if (!wheelSrc) wheelSrc = src.clone(true);
+        }
+        /* Structure:
+         *   playCarRoot     ← position + heading yaw
+         *   └ playCarChassis ← pitch + roll (from wheel sampling)
+         *     ├ chassisVisual ← model yaw offset baked in
+         *     └ wheelContainer × 4 ← at +Z-forward corner offsets
+         * Keeping wheels outside chassisVisual means the MODEL_YAW
+         * rotation only affects the visible body; wheel offsets stay in
+         * the clean +Z frame our physics assumes. */
+        playCarRoot = new THREE.Group();
+        playCarChassis = new THREE.Group();
+        playCarRoot.add(playCarChassis);
+        const chassisVisual = chassisSrc.clone(true);
+        chassisVisual.position.set(0, 0, 0);
+        chassisVisual.rotation.set(0, PLAY_CAR_MODEL_YAW, 0);
+        chassisVisual.scale.setScalar(1);
+        /* Remove any embedded wheelContainer from the visual clone so we
+         * don't have a duplicate sitting at origin (matches folio's
+         * "wheelContainer.XXX" naming; loader strips dots to "001"). */
+        const strays = [];
+        chassisVisual.traverse((o) => {
+          if (/^wheelContainer(\.|\d|$)/.test(o.name)) strays.push(o);
+        });
+        strays.forEach((s) => s.parent?.remove(s));
+        /* Flag every mesh in the body as a shadow caster so the car
+         * drops a proper shadow on the terrain (CSM sun is configured
+         * with castShadow=true at line ~1340). */
+        chassisVisual.traverse((o) => {
+          if (o.isMesh) {
+            o.castShadow = true;
+            o.receiveShadow = true;
+          }
+        });
+        playCarChassis.add(chassisVisual);
+        /* Scale the whole car so the ride feels right on a Zelda-scale
+         * terrain. bruno.glb ships around 1 unit ≈ 1 meter, which is a
+         * touch small next to the 2.5m-tall character. Bump ×1.6 so it
+         * reads clearly in follow view. */
+        const CAR_SCALE = 1.6;
+        playCarRoot.scale.setScalar(CAR_SCALE);
+        /* Wheel offsets in chassis-local space. Physics forward is -Z,
+         * so the front wheels sit at z = -wheelbase/2 (ahead) and the
+         * rear at +wheelbase/2 (behind). X is left/right. */
+        const hw = PLAY_CAR_WHEEL_BASE * 0.5;
+        const ht = PLAY_CAR_TRACK * 0.5;
+        const wheelOffsets = [
+          { x: -ht, z: -hw, steer: true,  name: "FL" },
+          { x:  ht, z: -hw, steer: true,  name: "FR" },
+          { x: -ht, z:  hw, steer: false, name: "RL" },
+          { x:  ht, z:  hw, steer: false, name: "RR" },
+        ];
+        playCarWheels = wheelOffsets.map((o) => {
+          const container = wheelSrc.clone(true);
+          /* Wheel hub sits RIDE_HEIGHT below the chassis center. Wheel
+           * radius is added later (in the Y target calc) so the tyre
+           * bottoms actually rest on the ground instead of sinking. */
+          container.position.set(o.x, -PLAY_CAR_RIDE_HEIGHT, o.z);
+          /* bruno.glb's wheelContainer has its cylinder axle along the
+           * model's +Z (car's left/right in model frame, since the body
+           * points +X). We need the axle along physics X, so bake the
+           * same MODEL_YAW we applied to the chassis visual. Folio also
+           * mirrors left-side wheels by an extra π around Y — keep that
+           * so the cylinder spin direction stays consistent per side. */
+          const isLeft = o.x < 0;
+          container.rotation.set(
+            0,
+            PLAY_CAR_MODEL_YAW + (isLeft ? Math.PI : 0),
+            0,
+          );
+          /* Find sub-parts so we can rotate the container (steer) and
+           * cylinder (spin) independently, matching folio's VisualVehicle.
+           * Prefix match handles .001/.002 Blender suffixes. Also flag
+           * every mesh as a shadow caster in the same traversal. */
+          let suspension = null;
+          let cylinder = null;
+          container.traverse((c) => {
+            if (!suspension && /^wheelSuspension(\.|\d|$)/.test(c.name)) suspension = c;
+            if (!cylinder && /^wheelCylinder(\.|\d|$)/.test(c.name)) cylinder = c;
+            if (c.isMesh) {
+              c.castShadow = true;
+              c.receiveShadow = true;
+            }
+          });
+          /* Parent wheels to playCarChassis (NOT chassisVisual) so they
+           * don't inherit the MODEL_YAW rotation baked into the visual. */
+          playCarChassis.add(container);
+          return {
+            container,
+            suspension: suspension || container,
+            cylinder: cylinder || container,
+            offset: new THREE.Vector3(o.x, 0, o.z),
+            steer: o.steer,
+            isLeft,
+            name: o.name,
+          };
+        });
+        playCarRoot.visible = false;
+        scene.add(playCarRoot);
+        playCarLoaded = true;
+        if (playMode && playMovementMode === "car") {
+          playCarRoot.visible = true;
+          capsuleMesh.visible = false;
+          syncModeBadge();
+        }
+      });
+
       splineGroup = new THREE.Group();
       scene.add(splineGroup);
       riverGroup = new THREE.Group();
@@ -7402,15 +7632,19 @@
               mm === "fly"
                 ? "PLAY FLY · ISO  [ A/D yaw · W/S thrust · Space/Shift climb · Q barrel · wheel zoom · V follow · G cycle · F/Esc ]"
                 : mm === "char"
-                  ? "PLAY CHAR · ISO  [ WASD · Shift run · Space jump · [ ] rotate · wheel zoom · V follow · G cycle · F/Esc ]"
-                  : "PLAY WALK · ISO  [ click-to-move · WASD · [ ] rotate · wheel zoom · V follow · G cycle · F/Esc ]";
+                  ? "PLAY CHAR · ISO  [ WASD · Shift run · Space jump/glide · [ ] rotate · wheel zoom · V follow · G cycle · F/Esc ]"
+                  : mm === "car"
+                    ? "PLAY CAR · ISO  [ W/S drive · A/D steer · Space handbrake · wheel zoom · V follow · G cycle · F/Esc ]"
+                    : "PLAY WALK · ISO  [ click-to-move · WASD · [ ] rotate · wheel zoom · V follow · G cycle · F/Esc ]";
           } else {
             el.textContent =
               mm === "fly"
                 ? "PLAY FLY  [ mouse · W/S · Q barrel · V iso · G cycle · F/Esc ]"
                 : mm === "char"
-                  ? "PLAY CHAR  [ WASD · Shift run · Space jump · V iso · G cycle · F/Esc ]"
-                  : "PLAY WALK  [ V iso · G cycle · F / Esc exit ]";
+                  ? "PLAY CHAR  [ WASD · Shift run · Space jump/glide · V iso · G cycle · F/Esc ]"
+                  : mm === "car"
+                    ? "PLAY CAR  [ W/S drive · A/D steer · Space handbrake · V iso · G cycle · F/Esc ]"
+                    : "PLAY WALK  [ V iso · G cycle · F / Esc exit ]";
           }
           el.className = "play";
           return;
@@ -10486,6 +10720,7 @@
         capsuleMesh.visible = true;
         if (playPlaneRoot) playPlaneRoot.visible = false;
         if (playCharRoot) playCharRoot.visible = false;
+        if (playCarRoot) playCarRoot.visible = false;
         syncRoadHandlesVisibility();
         controls.enabled = false;
         brushMarker.visible = false;
@@ -10524,6 +10759,7 @@
         capsuleMesh.visible = false;
         if (playPlaneRoot) playPlaneRoot.visible = false;
         if (playCharRoot) playCharRoot.visible = false;
+        if (playCarRoot) playCarRoot.visible = false;
         clearWingTrails();
         flyHudEl.classList.remove("visible");
         _flyHudVisible = false;
@@ -12665,10 +12901,11 @@
         if (playMode) {
           if (!event.repeat && event.code === "KeyG") {
             event.preventDefault();
-            /* Cycle: capsule → char → fly → capsule. */
+            /* Cycle: capsule → char → fly → car → capsule. */
             const prevMode = playMovementMode;
             if (prevMode === "capsule") playMovementMode = "char";
             else if (prevMode === "char") playMovementMode = "fly";
+            else if (prevMode === "fly") playMovementMode = "car";
             else playMovementMode = "capsule";
 
             if (playMovementMode === "capsule") {
@@ -12694,19 +12931,43 @@
               playCharYaw = capsuleMesh.rotation.y;
               playCharVelY = 0;
               playCharInAir = false;
+              playCharGliding = false;
+              playCharGliderPoseActive = false;
+              playCharSpacePrev = false;
+              if (playCharKite) playCharKite.visible = false;
+              moveTarget = null;
+              moveRing.visible = false;
+            } else if (playMovementMode === "car") {
+              /* Entering car mode from fly: inherit heading so the cycle
+               * doesn't snap-rotate the world. Reset velocity/suspension. */
+              playCarHeading =
+                prevMode === "fly" ? flyHeading
+                : prevMode === "char" ? playCharYaw
+                : capsuleMesh.rotation.y;
+              playCarSpeed = 0;
+              playCarSteer = 0;
+              playCarPitch = 0;
+              playCarRoll = 0;
+              playCarY =
+                getWorldHeight(playerPos.x, playerPos.z) +
+                (PLAY_CAR_RIDE_HEIGHT + PLAY_CAR_WHEEL_RADIUS) * 1.6;
               moveTarget = null;
               moveRing.visible = false;
             }
             capsuleMesh.visible =
               playMovementMode === "capsule" ||
               (playMovementMode === "fly" && !playPlaneLoaded) ||
-              (playMovementMode === "char" && !playCharLoaded);
+              (playMovementMode === "char" && !playCharLoaded) ||
+              (playMovementMode === "car" && !playCarLoaded);
             if (playPlaneRoot)
               playPlaneRoot.visible =
                 playMovementMode === "fly" && playPlaneLoaded;
             if (playCharRoot)
               playCharRoot.visible =
                 playMovementMode === "char" && playCharLoaded;
+            if (playCarRoot)
+              playCarRoot.visible =
+                playMovementMode === "car" && playCarLoaded;
             syncModeBadge();
             return;
           }
@@ -20571,6 +20832,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         if (playMode) {
           const flying = playMovementMode === "fly" && playPlaneLoaded;
           const charMode = playMovementMode === "char" && playCharLoaded;
+          const carMode = playMovementMode === "car" && playCarLoaded;
           const charRunning =
             charMode && (keysHeld.ShiftLeft || keysHeld.ShiftRight);
           const iso = playCamView === "iso";
@@ -20594,7 +20856,11 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           }
           let mx = 0;
           let mz = 0;
-          if (flying) {
+          if (carMode) {
+            /* Car handles its own input below — skip the generic WASD
+             * direction accumulation so the mlen-based playerPos step
+             * stays at zero. */
+          } else if (flying) {
             // Both follow-fly and iso-fly thrust along flyHeading. The only
             // difference is where flyHeading comes from (mouse vs A/D above).
             if (keysHeld.KeyW || keysHeld.ArrowUp) {
@@ -20821,6 +21087,14 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
               !inSpell &&
               !playCharAttacking &&
               (keysHeld.ControlLeft || keysHeld.ControlRight);
+            /* Glider: Space pressed mid-air toggles the kite. Rising-
+             * edge only so holding Space from the jump press doesn't
+             * immediately open it. Mirrors player-parkourtsushima. */
+            const _charSpaceEdge =
+              keysHeld.Space && !playCharSpacePrev;
+            if (_charSpaceEdge && playCharInAir) {
+              playCharGliding = !playCharGliding;
+            }
             /* Can't jump while crouched / busy / in stance / already mid-air
              * or mid-land. */
             if (
@@ -20854,12 +21128,21 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             }
             if (playCharInAir) {
               playCharVelY -= PLAY_CHAR_GRAVITY * dtSec;
+              /* Glider caps downward velocity — player drifts instead
+               * of falling. Upward motion is unaffected. */
+              if (playCharGliding) {
+                playCharVelY = Math.max(
+                  playCharVelY,
+                  -PLAY_CHAR_GLIDE_FALL_SPEED,
+                );
+              }
               charY =
                 (playCharRoot?.position.y ?? groundY) + playCharVelY * dtSec;
               if (charY <= groundY) {
                 charY = groundY;
                 playCharVelY = 0;
                 playCharInAir = false;
+                playCharGliding = false;
                 /* Touchdown. If a direction is held, skip Land — crossfade
                  * straight to walk/run so WASD movement doesn't "slide"
                  * over a stationary Land clip. Otherwise play Land. */
@@ -20919,12 +21202,198 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
               while (dYaw < -PI) dYaw += 2 * PI;
               playCharYaw += dYaw * (1 - Math.exp(-14 * dtSec));
             }
+            playCharSpacePrev = !!keysHeld.Space;
+          }
+
+          /* ── Car mode physics ──
+           * Arcade 4-wheeler. W/S throttle+brake, A/D steering, Space
+           * handbrake. Heading integrates from steer × speed. Position
+           * integrates from heading × speed along the XZ plane. Each
+           * wheel raycasts against the heightmap for suspension height;
+           * the chassis Y/pitch/roll come from the 4 wheel contact points. */
+          if (carMode) {
+            const forward = keysHeld.KeyW || keysHeld.ArrowUp;
+            const backward = keysHeld.KeyS || keysHeld.ArrowDown;
+            const leftKey = keysHeld.KeyA || keysHeld.ArrowLeft;
+            const rightKey = keysHeld.KeyD || keysHeld.ArrowRight;
+            const handbrake = keysHeld.Space;
+            /* Target steer: A = +, D = −. Smooth toward target. */
+            let steerTarget = 0;
+            if (leftKey) steerTarget += PLAY_CAR_STEER_MAX;
+            if (rightKey) steerTarget -= PLAY_CAR_STEER_MAX;
+            const steerBlend = 1 - Math.exp(-PLAY_CAR_STEER_RATE * dtSec);
+            playCarSteer += (steerTarget - playCarSteer) * steerBlend;
+            /* Throttle / brake — brake is "press S while moving forward",
+             * reverse kicks in only once we've come to a near-stop. */
+            if (forward) {
+              playCarSpeed += PLAY_CAR_ACCEL * dtSec;
+            } else if (backward) {
+              if (playCarSpeed > 0.5) {
+                playCarSpeed -= PLAY_CAR_BRAKE * dtSec;
+              } else {
+                playCarSpeed -= PLAY_CAR_REVERSE * dtSec;
+              }
+            } else {
+              /* Coast: rolling friction pulls speed toward 0. */
+              if (playCarSpeed > 0) {
+                playCarSpeed = Math.max(
+                  0,
+                  playCarSpeed - PLAY_CAR_ROLL_FRICTION * dtSec,
+                );
+              } else if (playCarSpeed < 0) {
+                playCarSpeed = Math.min(
+                  0,
+                  playCarSpeed + PLAY_CAR_ROLL_FRICTION * dtSec,
+                );
+              }
+            }
+            if (handbrake) {
+              if (playCarSpeed > 0) {
+                playCarSpeed = Math.max(
+                  0,
+                  playCarSpeed - PLAY_CAR_HANDBRAKE * dtSec,
+                );
+              } else if (playCarSpeed < 0) {
+                playCarSpeed = Math.min(
+                  0,
+                  playCarSpeed + PLAY_CAR_HANDBRAKE * dtSec,
+                );
+              }
+            }
+            /* Aero drag — v² term gives a natural top speed. */
+            const dragA = PLAY_CAR_DRAG * playCarSpeed * Math.abs(playCarSpeed);
+            playCarSpeed -= dragA * dtSec;
+            playCarSpeed = THREE.MathUtils.clamp(
+              playCarSpeed,
+              -PLAY_CAR_MAX_REVERSE,
+              PLAY_CAR_MAX_SPEED,
+            );
+            /* Turn rate depends on speed (no free pivot at 0) and is
+             * capped so handling stays predictable at top speed. */
+            const speedNorm = Math.min(
+              1,
+              Math.abs(playCarSpeed) / (PLAY_CAR_MAX_SPEED * 0.5),
+            );
+            const yawRate =
+              PLAY_CAR_TURN_RATE *
+              playCarSteer *
+              speedNorm *
+              Math.sign(playCarSpeed || 1);
+            playCarHeading += yawRate * dtSec;
+            /* Integrate position. Our physics "forward" is -Z (matches
+             * the capsule/char modes and the camera which sits at +Z
+             * behind the player at heading=0). The chassis visual is
+             * rotated MODEL_YAW=π/2 which turns bruno.glb's model-frame
+             * +X front into -Z, so physics/visual line up. */
+            const fwdX = -Math.sin(playCarHeading);
+            const fwdZ = -Math.cos(playCarHeading);
+            let nX = playerPos.x + fwdX * playCarSpeed * dtSec;
+            let nZ = playerPos.z + fwdZ * playCarSpeed * dtSec;
+            nX = THREE.MathUtils.clamp(
+              nX,
+              worldBounds.min.x,
+              worldBounds.max.x,
+            );
+            nZ = THREE.MathUtils.clamp(
+              nZ,
+              worldBounds.min.z,
+              worldBounds.max.z,
+            );
+            if (isBarrierBlocked(nX, nZ)) {
+              /* Barrier hit — kill forward speed, keep the car in place. */
+              playCarSpeed *= 0.2;
+              nX = playerPos.x;
+              nZ = playerPos.z;
+            }
+            /* Slope barrier: if the ground ahead rises faster than the
+             * car can climb, treat it as a wall. Measured as a height
+             * delta per metre of horizontal travel — tan(55°) ≈ 1.43,
+             * so we block anything steeper than that. */
+            const stepDist = Math.hypot(nX - playerPos.x, nZ - playerPos.z);
+            if (stepDist > 1e-4) {
+              const hereY = getWorldHeight(playerPos.x, playerPos.z);
+              const thereY = getWorldHeight(nX, nZ);
+              const slopeTan = (thereY - hereY) / stepDist;
+              if (slopeTan > 1.0) {
+                playCarSpeed *= 0.1;
+                nX = playerPos.x;
+                nZ = playerPos.z;
+              }
+            }
+            playerPos.x = nX;
+            playerPos.z = nZ;
+            playerPos.y = getWorldHeight(nX, nZ);
+            /* Sample ground under each wheel, in world space. Wheels sit
+             * at (offset.x, offset.z) in chassis-local space; rotate by
+             * heading to get world offset, then sample the heightmap. */
+            const scaleFactor = playCarRoot?.scale.x || 1;
+            let maxY = -Infinity;
+            let frontY = 0;
+            let rearY = 0;
+            let leftY = 0;
+            let rightY = 0;
+            for (const w of playCarWheels) {
+              const lx = w.offset.x * scaleFactor;
+              const lz = w.offset.z * scaleFactor;
+              /* Rotate local offset by heading. The chassis local frame
+               * has +Z = rear (physics forward is -Z), so the rotation
+               * below is a standard 2D rotation around Y; "front" is
+               * detected below by lz < 0. */
+              const wx = nX + lx * Math.cos(playCarHeading) + lz * Math.sin(playCarHeading);
+              const wz = nZ - lx * Math.sin(playCarHeading) + lz * Math.cos(playCarHeading);
+              const h = getWorldHeight(wx, wz);
+              w._groundY = h;
+              if (h > maxY) maxY = h;
+              if (lz < 0) frontY += h;
+              else rearY += h;
+              if (lx < 0) leftY += h;
+              else rightY += h;
+            }
+            /* Chassis center = max(wheel ground) + (ride-height +
+             * wheel-radius) × scale. Max (not average) guarantees the
+             * body is never below any wheel, so steep slopes never let
+             * the chassis clip into the hillside. Downhill wheels can
+             * look slightly floaty in exchange, which is fine. */
+            playCarY =
+              maxY +
+              (PLAY_CAR_RIDE_HEIGHT + PLAY_CAR_WHEEL_RADIUS) * scaleFactor;
+            /* Pitch/roll from wheel height deltas. frontY/rearY are sums
+             * of two wheels each → divide by 2 for averages. */
+            const pitchDelta = (rearY - frontY) * 0.5;
+            const rollDelta = (leftY - rightY) * 0.5;
+            const pitchRaw = Math.atan2(
+              pitchDelta,
+              PLAY_CAR_WHEEL_BASE * scaleFactor,
+            );
+            const rollRaw = Math.atan2(
+              rollDelta,
+              PLAY_CAR_TRACK * scaleFactor,
+            );
+            /* Cap tilt to ±25° — arcade cars don't physically match a
+             * 45° slope, and unclamped pitch looks absurd on cliffs. */
+            const TILT_CAP = 0.436; // ~25°
+            const pitchClamped = THREE.MathUtils.clamp(
+              pitchRaw,
+              -TILT_CAP,
+              TILT_CAP,
+            );
+            const rollClamped = THREE.MathUtils.clamp(
+              rollRaw,
+              -TILT_CAP,
+              TILT_CAP,
+            );
+            const ktilt = 1 - Math.exp(-12 * dtSec);
+            playCarPitch += (pitchClamped - playCarPitch) * ktilt;
+            playCarRoll += (rollClamped - playCarRoll) * ktilt;
+            /* Spin wheels based on forward speed. Wheel radius ≈ 0.35m. */
+            playCarWheelSpin -= (playCarSpeed / 0.35) * dtSec;
           }
 
           capsuleMesh.visible =
             playMovementMode === "capsule" ||
             (playMovementMode === "fly" && !playPlaneLoaded) ||
-            (playMovementMode === "char" && !playCharLoaded);
+            (playMovementMode === "char" && !playCharLoaded) ||
+            (playMovementMode === "car" && !playCarLoaded);
           capsuleMesh.position.set(playerPos.x, capsuleCY, playerPos.z);
           if (mlen > 0) capsuleMesh.rotation.y = Math.atan2(mx, mz) + PI;
 
@@ -20944,11 +21413,79 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             }
           }
 
+          if (playCarRoot) {
+            playCarRoot.visible = carMode;
+            if (carMode) {
+              playCarRoot.position.set(playerPos.x, playCarY, playerPos.z);
+              /* Chassis orientation: yaw (heading) + pitch/roll from
+               * wheel suspension sampling. Y-first rotation so pitch
+               * and roll stay in the car's local frame. */
+              playCarRoot.rotation.set(0, playCarHeading, 0);
+              if (playCarChassis) {
+                playCarChassis.rotation.set(
+                  playCarPitch,
+                  0,
+                  playCarRoll,
+                );
+              }
+              /* Per-wheel: steer the front wheel containers (left side
+               * also needs the PI mirror baked in), spin the cylinders on
+               * local Z (matches folio's VisualVehicle.update()). The
+               * MODEL_YAW offset must be included so we don't clobber
+               * the chassis-to-physics-frame bake at load time. */
+              for (const w of playCarWheels) {
+                const baseYaw =
+                  PLAY_CAR_MODEL_YAW + (w.isLeft ? Math.PI : 0);
+                if (w.steer) {
+                  w.container.rotation.y = baseYaw + playCarSteer;
+                }
+                if (w.cylinder) {
+                  /* Left wheels already flipped 180° around Y, so they
+                   * must spin the opposite direction to visually roll
+                   * forward at the same rate as right wheels. */
+                  w.cylinder.rotation.z =
+                    (w.isLeft ? -1 : 1) * playCarWheelSpin;
+                }
+              }
+            }
+          }
+
           if (playCharRoot) {
             playCharRoot.visible = charMode;
             if (charMode) {
               playCharRoot.position.set(playerPos.x, charY, playerPos.z);
               playCharRoot.rotation.y = playCharYaw;
+              /* Kite is only visible while actively gliding. */
+              if (playCharKite) playCharKite.visible = playCharGliding;
+              /* Glider pose: while gliding, crossfade into the
+               * NinjaJump_Idle loop (character holds the kite bar);
+               * when gliding ends, fall back to the normal jump loop
+               * so the existing jump state machine continues. */
+              if (playCharActions) {
+                const wantGlide =
+                  playCharGliding && playCharActions.glide;
+                if (wantGlide && !playCharGliderPoseActive) {
+                  playCharGliderPoseActive = true;
+                  const ga = playCharActions.glide;
+                  ga.reset();
+                  ga.enabled = true;
+                  ga.crossFadeFrom(playCharCurrentAction, 0.15, false).play();
+                  playCharCurrentAction = ga;
+                } else if (!wantGlide && playCharGliderPoseActive) {
+                  playCharGliderPoseActive = false;
+                  /* Pick a sensible exit clip: if still airborne,
+                   * return to jumpLoop; otherwise let the locomotion
+                   * picker below re-enter idle/walk/run. */
+                  if (playCharInAir && playCharActions.jumpLoop) {
+                    const jl = playCharActions.jumpLoop;
+                    jl.reset();
+                    jl.enabled = true;
+                    jl.crossFadeFrom(playCharCurrentAction, 0.15, false).play();
+                    playCharCurrentAction = jl;
+                    playCharJumpPhase = "loop";
+                  }
+                }
+              }
               /* Locomotion picker — only runs when no special state owns
                * the mixer (slide/spell/attack/roll/jump phases manage
                * their own clips via keydown handlers + the finished
@@ -20957,6 +21494,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
                 playCharActions &&
                 !playCharAttacking &&
                 !playCharRolling &&
+                !playCharGliderPoseActive &&
                 playCharSlidePhase === "none" &&
                 playCharSpellPhase === "none" &&
                 playCharJumpPhase === "none"
@@ -21003,13 +21541,23 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             ? planeY + 0.45
             : charMode
               ? charY + PLAY_CHAR_HEIGHT * 0.6
-              : capsuleCY + 0.6;
+              : carMode
+                ? playCarY + 1.1
+                : capsuleCY + 0.6;
           if (iso) {
             // Fixed-angle tilted top-down camera. For capsule: yaw is
             // manually rotated via [ / ]. For fly: yaw smoothly chases
             // flyHeading so the plane always points "up" on screen.
+            // Car iso follows playCarHeading the same way fly follows flyHeading.
             if (flying) {
               let yawDelta = flyHeading - isoYaw;
+              while (yawDelta > Math.PI) yawDelta -= 2 * Math.PI;
+              while (yawDelta < -Math.PI) yawDelta += 2 * Math.PI;
+              const chaseK =
+                1 - Math.exp(-ISO_FLY_CHASE_SMOOTH * Math.min(dtSec, 0.1));
+              isoYaw += yawDelta * chaseK;
+            } else if (carMode) {
+              let yawDelta = playCarHeading - isoYaw;
               while (yawDelta > Math.PI) yawDelta -= 2 * Math.PI;
               while (yawDelta < -Math.PI) yawDelta += 2 * Math.PI;
               const chaseK =
@@ -21025,9 +21573,22 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             );
             camera.lookAt(playerPos.x, lookAtY, playerPos.z);
           } else {
+            /* Follow cam: car chases its heading (like fly) so the view
+             * stays behind the car during turns. camYaw drifts toward
+             * playCarHeading + π so "behind" stays behind. */
+            if (carMode) {
+              const targetCamYaw = playCarHeading;
+              let d = targetCamYaw - camYaw;
+              while (d > Math.PI) d -= 2 * Math.PI;
+              while (d < -Math.PI) d += 2 * Math.PI;
+              camYaw += d * (1 - Math.exp(-4.0 * Math.min(dtSec, 0.1)));
+            }
             const camOrbitYaw = flying ? flyHeading : camYaw;
-            const hDist = playParams.camDist * Math.cos(camPitch);
-            const vDist = playParams.camDist * Math.sin(camPitch);
+            const camDistUse = carMode
+              ? Math.max(playParams.camDist, 9.0)
+              : playParams.camDist;
+            const hDist = camDistUse * Math.cos(camPitch);
+            const vDist = camDistUse * Math.sin(camPitch);
             camera.position.set(
               playerPos.x + Math.sin(camOrbitYaw) * hDist,
               lookAtY + vDist,
