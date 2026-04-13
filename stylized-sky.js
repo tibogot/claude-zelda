@@ -20,7 +20,17 @@ import {
   mx_noise_float, Loop, Var, If,
 } from "three/tsl";
 
-export function createStylizedSky() {
+/**
+ * @param {object} [options]
+ * @param {number} [options.sphereRadius=4800] — world radius of the sky dome.
+ *   Must stay **below the camera far plane** (with margin) or the mesh clips
+ *   to a black faceted silhouette at the horizon.
+ */
+export function createStylizedSky(options = {}) {
+  const sphereRadius =
+    typeof options.sphereRadius === "number" && options.sphereRadius > 0
+      ? options.sphereRadius
+      : 4800;
 
   // ── Sky gradient ──
   const uZenithColor  = uniform(new THREE.Color().setHex(0x0c3fbf).convertSRGBToLinear());
@@ -332,7 +342,7 @@ export function createStylizedSky() {
   });
 
   const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 16), mat);
-  mesh.scale.setScalar(6000);
+  mesh.scale.setScalar(sphereRadius);
   mesh.frustumCulled = false;
   mesh.visible = false;
 

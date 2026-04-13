@@ -2497,7 +2497,11 @@
       rebuildSkyEnv();
       scene.environmentIntensity = PARAMS.light.envIntensity;
 
-      const stylizedSky = createStylizedSky();
+      /* Skydome radius must be < camera.far or the sphere is frustum-clipped
+       * (black faceted ring), worse when flying high / large worlds. */
+      const stylizedSky = createStylizedSky({
+        sphereRadius: camera.far * 0.92,
+      });
       scene.add(stylizedSky.mesh);
 
       const uHFogEnabled = uniform(PARAMS.fog.height.enabled ? 1 : 0);
@@ -5836,11 +5840,12 @@
         camSensX: 0.002,
         camSensY: 0.002,
         flyMouseSensX: 0.0022,
-        flyMouseSensY: 0.0018,
-        flyPitchMin: -0.62,
-        flyPitchMax: 0.68,
-        /** Fly: altitude change (m/s) per rad of pitch — mouse up/down + nose attitude. */
-        flyPitchClimbScale: 14,
+        flyMouseSensY: 0.00235,
+        /** Nose limits (rad). Wide down angle so dives read clearly on the mesh. */
+        flyPitchMin: -1.22,
+        flyPitchMax: 0.9,
+        /** Fly follow: altitude change (m/s) per rad of pitch; dives scale up separately. */
+        flyPitchClimbScale: 26,
         flyRollMax: 0.78,
         flyRollVelScale: 0.0042,
         flyRollSmooth: 10,
@@ -5980,7 +5985,12 @@
       const ISO_YAW_ROT_SPEED = 1.6;     // rad/s when holding [ or ] (capsule)
       const ISO_ZOOM_STEP = 0.9;         // multiplicative per wheel tick
       const ISO_FLY_YAW_RATE = 1.9;      // rad/s plane yaw from A/D in iso fly
-      const ISO_FLY_CLIMB_RATE = 22;     // m/s altitude change from Space/Shift
+      const ISO_FLY_CLIMB_RATE = 28;     // m/s up from Space
+      const ISO_FLY_DESCEND_RATE = 48; // m/s down from Shift — faster than climb
+      /** Follow-fly: extra vertical rate when nose-down (multiplies flyPitchClimbScale). */
+      const PLAY_FLY_VERT_DIVE_MULT = 1.82;
+      /** Iso fly: nose slews toward climb/dive target (1/s exponential). */
+      const ISO_FLY_PITCH_SLEW = 9;
       const ISO_FLY_CHASE_SMOOTH = 5.5;  // camera yaw chase stiffness (1/s)
       let isoYaw = Math.PI / 4;          // 45° classic iso angle
       let isoDist = ISO_DIST_DEFAULT;
@@ -21096,18 +21106,29 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           const groundY = playerPos.y;
           if (flying) {
             if (iso) {
-              // Iso fly: Space climbs, Shift descends. No mouse pitch.
+              // Iso fly: Space climbs, Shift descends. Nose slews with intent
+              // so the mesh dives/climbs visually (follow used to be the only
+              // mode with pitch on the GLB).
               let climbDelta = 0;
               if (keysHeld.Space)
                 climbDelta += ISO_FLY_CLIMB_RATE * dtSec;
               if (keysHeld.ShiftLeft || keysHeld.ShiftRight)
-                climbDelta -= ISO_FLY_CLIMB_RATE * dtSec;
+                climbDelta -= ISO_FLY_DESCEND_RATE * dtSec;
               playFlyHeight = Math.max(0, playFlyHeight + climbDelta);
+              let isoPitchTarget = 0;
+              if (keysHeld.Space)
+                isoPitchTarget = playParams.flyPitchMax * 0.92;
+              else if (keysHeld.ShiftLeft || keysHeld.ShiftRight)
+                isoPitchTarget = playParams.flyPitchMin * 0.96;
+              const pk =
+                1 - Math.exp(-ISO_FLY_PITCH_SLEW * Math.min(dtSec, 0.1));
+              flyPitch += (isoPitchTarget - flyPitch) * pk;
             } else {
+              let vScale = playParams.flyPitchClimbScale;
+              if (flyPitch < 0) vScale *= PLAY_FLY_VERT_DIVE_MULT;
               playFlyHeight = Math.max(
                 0,
-                playFlyHeight +
-                  flyPitch * playParams.flyPitchClimbScale * dtSec,
+                playFlyHeight + flyPitch * vScale * dtSec,
               );
             }
             if (flyBarrelActive) {
@@ -21463,15 +21484,11 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             playPlaneRoot.visible = flying;
             if (flying) {
               playPlaneRoot.position.set(playerPos.x, planeY, playerPos.z);
-              if (iso) {
-                playPlaneRoot.rotation.set(0, flyHeading, flyBarrelAdd);
-              } else {
-                playPlaneRoot.rotation.set(
-                  flyPitch,
-                  flyHeading,
-                  flyRoll + flyBarrelAdd,
-                );
-              }
+              playPlaneRoot.rotation.set(
+                flyPitch,
+                flyHeading,
+                flyRoll + flyBarrelAdd,
+              );
             }
           }
 
