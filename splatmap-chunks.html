@@ -340,6 +340,7 @@
         exp,
       } from "three/tsl";
       import { createLakeShader } from "./lake-shader.js";
+      import { createOceanShader, OCEAN_DEFAULTS } from "./ocean-shader.js";
       import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
       import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { TransformControls } from "three/addons/controls/TransformControls.js";
@@ -521,7 +522,7 @@
         },
         /** Sky boost rings (Play fly) — one auto-placed gate; slab+hole boost test. */
         flightRings: {
-          enabled: true,
+          enabled: false,
           /** Ring center height above terrain at its (x,z). */
           ringSkyAGL: 125,
           /** Half-thickness (m) along fly-through axis — generous so fast passes register. */
@@ -711,6 +712,15 @@
           reflectionStrength: 0.35,
         },
         ocean: {
+          // Toggle between new stylized ocean shader and flat-blue fallback
+          stylized: true,
+          oceanY: -7.0,
+          // Legacy fields — kept only so the old dead-code init path
+          // (reflector setup, old uniform initializers) doesn't read undefined.
+          // Not exposed in Tweakpane.
+          reflectionScale: 0.35,
+          reflectionStrength: 0.35,
+          reflections: false,
           scale: 0.3,
           cellSpeed: 0.45,
           noiseScale: 1.52,
@@ -718,21 +728,46 @@
           distort: 0.35,
           flowZ: 0.08,
           edgeThreshold: 0.067,
-          deepColor: "#3a6a8c",
-          midColor: "#7ed4f8",
-          highlightColor: "#e8f8ff",
-          opacity: 0.78,
-          foamColor: "#e8f4ff",
           lineWidth: 0.5,
           glowWidth: 2.0,
-          waterlineIntensity: 2.5,
-          rippleStrength: 5.5,
+          waterlineIntensity: 0,
+          rippleStrength: 0,
           rippleWidth: 0.12,
-          oceanY: -7.0,
-          stylized: false,
-          reflections: false,
-          reflectionScale: 0.35,
-          reflectionStrength: 0.35,
+          // All remaining fields mirror OCEAN_DEFAULTS keys — see ocean-shader.js
+          shoreColor:        OCEAN_DEFAULTS.shoreColor,
+          midColor:          OCEAN_DEFAULTS.midColor,
+          deepColor:         OCEAN_DEFAULTS.deepColor,
+          highlightColor:    OCEAN_DEFAULTS.highlightColor,
+          depthAbsorb:       OCEAN_DEFAULTS.depthAbsorb,
+          depthRampShoreMid: OCEAN_DEFAULTS.depthRampShoreMid,
+          depthRampMidDeep:  OCEAN_DEFAULTS.depthRampMidDeep,
+          openOceanDepth:    OCEAN_DEFAULTS.openOceanDepth,
+          surfNoiseScale1:    OCEAN_DEFAULTS.surfNoiseScale1,
+          surfNoiseScale2:    OCEAN_DEFAULTS.surfNoiseScale2,
+          surfNoiseSpeed1:    OCEAN_DEFAULTS.surfNoiseSpeed1,
+          surfNoiseSpeed2:    OCEAN_DEFAULTS.surfNoiseSpeed2,
+          procNoiseSpeed:     OCEAN_DEFAULTS.procNoiseSpeed,
+          surfNormalStrength: OCEAN_DEFAULTS.surfNormalStrength,
+          fresnelExp: OCEAN_DEFAULTS.fresnelExp,
+          fresnelSky: OCEAN_DEFAULTS.fresnelSky,
+          fresnelMax: OCEAN_DEFAULTS.fresnelMax,
+          opacity:    OCEAN_DEFAULTS.opacity,
+          foamEnabled:         OCEAN_DEFAULTS.foamEnabled,
+          foamColor:           OCEAN_DEFAULTS.foamColor,
+          foamBandWidth:       OCEAN_DEFAULTS.foamBandWidth,
+          foamIntensity:       OCEAN_DEFAULTS.foamIntensity,
+          foamSharpness:       OCEAN_DEFAULTS.foamSharpness,
+          foamNoiseAmt:        OCEAN_DEFAULTS.foamNoiseAmt,
+          foamNoiseScale:      OCEAN_DEFAULTS.foamNoiseScale,
+          foamNoiseSpeed:      OCEAN_DEFAULTS.foamNoiseSpeed,
+          foamFineScale:       OCEAN_DEFAULTS.foamFineScale,
+          foamFineAmt:         OCEAN_DEFAULTS.foamFineAmt,
+          foamFineSpeed:       OCEAN_DEFAULTS.foamFineSpeed,
+          foamContrast:        OCEAN_DEFAULTS.foamContrast,
+          foamCutoff:          OCEAN_DEFAULTS.foamCutoff,
+          foamTransitionWidth: OCEAN_DEFAULTS.foamTransitionWidth,
+          foamBreatheAmp:      OCEAN_DEFAULTS.foamBreatheAmp,
+          foamBreatheHz:       OCEAN_DEFAULTS.foamBreatheHz,
         },
         /** Props mode [ I ] — splatmap-painter */
         propSinkOffset: 0,
@@ -4437,7 +4472,7 @@
         },
         {
           name: "Pine (no impostor)",
-          modelPath: "models/pine2.glb",
+          modelPath: "models/pine2_compressed.glb",
           lod1Path: "models/pine2LOD1.glb",
           lodThreshold: 80,
           minSpacing: 3,
@@ -14985,10 +15020,11 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         transparent: true,
         opacity: 0.88,
       });
-      const waterGeo = new THREE.PlaneGeometry(
-        CONFIG.worldSize * 4,
-        CONFIG.worldSize * 4,
-      );
+      // Ocean plane: camera-locked (updated each frame), sized to reach the horizon
+      // from any camera position. Large enough for `camera.far`, small enough that
+      // frustum culling actually prunes it when the view points skyward.
+      const OCEAN_PLANE_SIZE = 3000;
+      const waterGeo = new THREE.PlaneGeometry(OCEAN_PLANE_SIZE, OCEAN_PLANE_SIZE);
       waterGeo.rotateX(-PI / 2);
       const waterMat = new MeshBasicNodeMaterial({
         transparent: true,
@@ -14997,7 +15033,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
       const oceanWater = new THREE.Mesh(waterGeo, waterMat);
       oceanWater.position.y = PARAMS.ocean.oceanY;
       oceanWater.renderOrder = 1;
-      oceanWater.frustumCulled = false;
+      oceanWater.frustumCulled = true;
       scene.add(oceanWater);
 
       const waterReflector = reflector({
@@ -15231,15 +15267,17 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         waterReflector.target.visible = enabled;
       }
 
+      // New stylized ocean shader — turquoise depth ramp + dual-noise normals +
+      // bounded Fresnel + animated coastal foam. See ocean-shader.js.
+      const oceanShader = createOceanShader({
+        heightTex,
+        terrainSize: CONFIG.worldSize,
+      });
+
       function setWaterStyle(stylized) {
         if (stylized) {
-          const frag = PARAMS.ocean.reflections
-            ? buildWaterFragWithReflection()
-            : buildWaterFrag();
-          waterMat.colorNode = frag.rgb;
-          waterMat.opacityNode = frag.a;
-          oceanWater.material = waterMat;
-          waterReflector.target.visible = PARAMS.ocean.reflections;
+          oceanWater.material = oceanShader.material;
+          waterReflector.target.visible = false;
           seabedMesh.visible = true;
         } else {
           oceanWater.material = simpleWaterMat;
@@ -15247,35 +15285,12 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           seabedMesh.visible = false;
         }
       }
-
-      {
-        const frag = PARAMS.ocean.reflections
-          ? buildWaterFragWithReflection()
-          : buildWaterFrag();
-        waterMat.colorNode = frag.rgb;
-        waterMat.opacityNode = frag.a;
-      }
       setWaterStyle(PARAMS.ocean.stylized);
 
       function syncOceanMat() {
-        uWScale.value = PARAMS.ocean.scale;
-        uWEdgeThresh.value = PARAMS.ocean.edgeThreshold;
-        uWFlowZ.value = PARAMS.ocean.flowZ;
-        uWCellSpeed.value = PARAMS.ocean.cellSpeed;
-        uWNoiseScale.value = PARAMS.ocean.noiseScale;
-        uWNoiseTime.value = PARAMS.ocean.noiseTimeScale;
-        uWDistort.value = PARAMS.ocean.distort;
-        uWDeepColor.value.set(PARAMS.ocean.deepColor);
-        uWMidColor.value.set(PARAMS.ocean.midColor);
-        uWHighlight.value.set(PARAMS.ocean.highlightColor);
-        uWOpacity.value = PARAMS.ocean.opacity;
-        uWLineWidth.value = PARAMS.ocean.lineWidth;
-        uWGlowWidth.value = PARAMS.ocean.glowWidth;
-        uWLineIntensity.value = PARAMS.ocean.waterlineIntensity;
-        uWLineColor.value.set(PARAMS.ocean.foamColor);
-        uRippleWidth.value = PARAMS.ocean.rippleWidth;
-        uRippleStr.value = PARAMS.ocean.rippleStrength;
+        oceanShader.syncParams(PARAMS.ocean);
       }
+      syncOceanMat();
 
       const lakeShader = createLakeShader({
         heightTex,
@@ -15442,9 +15457,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         if (hasW) mergePlainDeep(PARAMS.water, data.water);
         oceanWater.position.y = PARAMS.ocean.oceanY;
         seabedMesh.position.y = PARAMS.ocean.oceanY - 3.5;
-        uReflStrength.value = PARAMS.ocean.reflectionStrength;
         setWaterStyle(PARAMS.ocean.stylized);
-        setWaterReflections(PARAMS.ocean.reflections);
         syncOceanMat();
         syncWaterBodyMat();
         if (editorPane) editorPane.refresh();
@@ -20071,7 +20084,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         });
         oceanFolder
           .addBinding(PARAMS.ocean, "stylized", {
-            label: "Stylized (perf heavy)",
+            label: "Stylized ocean",
           })
           .on("change", ({ value }) => setWaterStyle(value));
         oceanFolder
@@ -20085,18 +20098,6 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             oceanWater.position.y = value;
             seabedMesh.position.y = value - 3.5;
           });
-        oceanFolder.addBlade({ view: "separator" });
-        oceanFolder
-          .addBinding(PARAMS.ocean, "deepColor", { label: "Deep colour" })
-          .on("change", syncOceanMat);
-        oceanFolder
-          .addBinding(PARAMS.ocean, "midColor", { label: "Mid colour" })
-          .on("change", syncOceanMat);
-        oceanFolder
-          .addBinding(PARAMS.ocean, "highlightColor", {
-            label: "Highlight colour",
-          })
-          .on("change", syncOceanMat);
         oceanFolder
           .addBinding(PARAMS.ocean, "opacity", {
             label: "Opacity",
@@ -20105,122 +20106,266 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             step: 0.01,
           })
           .on("change", syncOceanMat);
-        oceanFolder.addBlade({ view: "separator" });
-        oceanFolder
-          .addBinding(PARAMS.ocean, "scale", {
-            label: "Cell scale",
-            min: 0.05,
-            max: 2,
-            step: 0.01,
+
+        // ── Depth ramp (turquoise) ─────────────────────────────────────────
+        const oceanColorFolder = oceanFolder.addFolder({
+          title: "Depth ramp",
+          expanded: true,
+        });
+        oceanColorFolder
+          .addBinding(PARAMS.ocean, "shoreColor", { label: "Shore colour" })
+          .on("change", syncOceanMat);
+        oceanColorFolder
+          .addBinding(PARAMS.ocean, "midColor", { label: "Mid colour" })
+          .on("change", syncOceanMat);
+        oceanColorFolder
+          .addBinding(PARAMS.ocean, "deepColor", { label: "Deep colour" })
+          .on("change", syncOceanMat);
+        oceanColorFolder
+          .addBinding(PARAMS.ocean, "highlightColor", {
+            label: "Highlight colour",
           })
           .on("change", syncOceanMat);
-        oceanFolder
-          .addBinding(PARAMS.ocean, "cellSpeed", {
-            label: "Cell speed",
-            min: 0.05,
-            max: 1.5,
-            step: 0.05,
-          })
-          .on("change", syncOceanMat);
-        oceanFolder
-          .addBinding(PARAMS.ocean, "noiseScale", {
-            label: "Noise scale",
-            min: 0.3,
-            max: 4,
-            step: 0.02,
-          })
-          .on("change", syncOceanMat);
-        oceanFolder
-          .addBinding(PARAMS.ocean, "noiseTimeScale", {
-            label: "Noise time",
-            min: 0.1,
-            max: 1.5,
-            step: 0.05,
-          })
-          .on("change", syncOceanMat);
-        oceanFolder
-          .addBinding(PARAMS.ocean, "distort", {
-            label: "Distort",
-            min: 0,
-            max: 1,
-            step: 0.02,
-          })
-          .on("change", syncOceanMat);
-        oceanFolder
-          .addBinding(PARAMS.ocean, "flowZ", {
-            label: "Flow Z",
-            min: 0,
-            max: 0.3,
-            step: 0.01,
-          })
-          .on("change", syncOceanMat);
-        oceanFolder
-          .addBinding(PARAMS.ocean, "edgeThreshold", {
-            label: "Edge threshold",
-            min: 0.02,
-            max: 0.2,
+        oceanColorFolder
+          .addBinding(PARAMS.ocean, "depthAbsorb", {
+            label: "Depth absorb",
+            min: 0.01,
+            max: 0.6,
             step: 0.005,
           })
           .on("change", syncOceanMat);
-        oceanFolder.addBlade({ view: "separator" });
-        oceanFolder
-          .addBinding(PARAMS.ocean, "foamColor", { label: "Foam colour" })
-          .on("change", syncOceanMat);
-        oceanFolder
-          .addBinding(PARAMS.ocean, "lineWidth", {
-            label: "Foam width",
+        oceanColorFolder
+          .addBinding(PARAMS.ocean, "depthRampShoreMid", {
+            label: "Shore→Mid knee",
             min: 0.05,
-            max: 5,
+            max: 0.95,
+            step: 0.01,
+          })
+          .on("change", syncOceanMat);
+        oceanColorFolder
+          .addBinding(PARAMS.ocean, "depthRampMidDeep", {
+            label: "Mid→Deep knee",
+            min: 0.05,
+            max: 0.99,
+            step: 0.01,
+          })
+          .on("change", syncOceanMat);
+        oceanColorFolder
+          .addBinding(PARAMS.ocean, "openOceanDepth", {
+            label: "Open depth",
+            min: 5,
+            max: 200,
+            step: 1,
+          })
+          .on("change", syncOceanMat);
+
+        // ── Surface normals ────────────────────────────────────────────────
+        const oceanNormalsFolder = oceanFolder.addFolder({
+          title: "Surface normals",
+          expanded: false,
+        });
+        oceanNormalsFolder
+          .addBinding(PARAMS.ocean, "surfNormalStrength", {
+            label: "Strength",
+            min: 0,
+            max: 1,
+            step: 0.01,
+          })
+          .on("change", syncOceanMat);
+        oceanNormalsFolder
+          .addBinding(PARAMS.ocean, "surfNoiseScale1", {
+            label: "Scale 1",
+            min: 0.005,
+            max: 0.5,
+            step: 0.005,
+          })
+          .on("change", syncOceanMat);
+        oceanNormalsFolder
+          .addBinding(PARAMS.ocean, "surfNoiseScale2", {
+            label: "Scale 2",
+            min: 0.005,
+            max: 0.5,
+            step: 0.005,
+          })
+          .on("change", syncOceanMat);
+        oceanNormalsFolder
+          .addBinding(PARAMS.ocean, "surfNoiseSpeed1", {
+            label: "Speed 1",
+            min: -1,
+            max: 1,
+            step: 0.01,
+          })
+          .on("change", syncOceanMat);
+        oceanNormalsFolder
+          .addBinding(PARAMS.ocean, "surfNoiseSpeed2", {
+            label: "Speed 2",
+            min: -1,
+            max: 1,
+            step: 0.01,
+          })
+          .on("change", syncOceanMat);
+        oceanNormalsFolder
+          .addBinding(PARAMS.ocean, "procNoiseSpeed", {
+            label: "Time mul",
+            min: 0.1,
+            max: 4,
             step: 0.05,
           })
           .on("change", syncOceanMat);
-        oceanFolder
-          .addBinding(PARAMS.ocean, "glowWidth", {
-            label: "Foam glow",
-            min: 0.2,
+
+        // ── Fresnel ────────────────────────────────────────────────────────
+        const oceanFresnelFolder = oceanFolder.addFolder({
+          title: "Fresnel",
+          expanded: false,
+        });
+        oceanFresnelFolder
+          .addBinding(PARAMS.ocean, "fresnelExp", {
+            label: "Exponent",
+            min: 1,
+            max: 8,
+            step: 0.1,
+          })
+          .on("change", syncOceanMat);
+        oceanFresnelFolder
+          .addBinding(PARAMS.ocean, "fresnelSky", {
+            label: "Sky amt",
+            min: 0,
+            max: 1,
+            step: 0.01,
+          })
+          .on("change", syncOceanMat);
+        oceanFresnelFolder
+          .addBinding(PARAMS.ocean, "fresnelMax", {
+            label: "Max (anti-grey)",
+            min: 0,
+            max: 1,
+            step: 0.01,
+          })
+          .on("change", syncOceanMat);
+
+        // ── Coastal foam ───────────────────────────────────────────────────
+        const oceanFoamFolder = oceanFolder.addFolder({
+          title: "Coastal foam",
+          expanded: false,
+        });
+        oceanFoamFolder
+          .addBinding(PARAMS.ocean, "foamEnabled", { label: "Enabled" })
+          .on("change", syncOceanMat);
+        oceanFoamFolder
+          .addBinding(PARAMS.ocean, "foamColor", { label: "Colour" })
+          .on("change", syncOceanMat);
+        oceanFoamFolder
+          .addBinding(PARAMS.ocean, "foamBandWidth", {
+            label: "Band width",
+            min: 0.1,
             max: 10,
             step: 0.1,
           })
           .on("change", syncOceanMat);
-        oceanFolder
-          .addBinding(PARAMS.ocean, "waterlineIntensity", {
-            label: "Foam intensity",
+        oceanFoamFolder
+          .addBinding(PARAMS.ocean, "foamIntensity", {
+            label: "Intensity",
             min: 0,
-            max: 5,
-            step: 0.1,
+            max: 3,
+            step: 0.05,
           })
           .on("change", syncOceanMat);
-        oceanFolder.addBlade({ view: "separator" });
-        oceanFolder
-          .addBinding(PARAMS.ocean, "rippleStrength", {
-            label: "Ripple strength",
-            min: 0,
-            max: 15,
-            step: 0.5,
+        oceanFoamFolder
+          .addBinding(PARAMS.ocean, "foamSharpness", {
+            label: "Sharpness",
+            min: 0.2,
+            max: 4,
+            step: 0.05,
           })
           .on("change", syncOceanMat);
-        oceanFolder
-          .addBinding(PARAMS.ocean, "rippleWidth", {
-            label: "Ripple width",
-            min: 0.02,
-            max: 0.4,
-            step: 0.01,
-          })
-          .on("change", syncOceanMat);
-        oceanFolder.addBlade({ view: "separator" });
-        oceanFolder
-          .addBinding(PARAMS.ocean, "reflections", { label: "Reflections" })
-          .on("change", ({ value }) => setWaterReflections(value));
-        oceanFolder
-          .addBinding(PARAMS.ocean, "reflectionStrength", {
-            label: "Refl. strength",
+        oceanFoamFolder
+          .addBinding(PARAMS.ocean, "foamNoiseAmt", {
+            label: "Noise amt",
             min: 0,
             max: 1,
             step: 0.01,
           })
-          .on("change", ({ value }) => {
-            uReflStrength.value = value;
-          });
+          .on("change", syncOceanMat);
+        oceanFoamFolder
+          .addBinding(PARAMS.ocean, "foamNoiseScale", {
+            label: "Noise scale",
+            min: 0.02,
+            max: 2,
+            step: 0.01,
+          })
+          .on("change", syncOceanMat);
+        oceanFoamFolder
+          .addBinding(PARAMS.ocean, "foamNoiseSpeed", {
+            label: "Noise speed",
+            min: 0,
+            max: 1.5,
+            step: 0.01,
+          })
+          .on("change", syncOceanMat);
+        oceanFoamFolder
+          .addBinding(PARAMS.ocean, "foamFineScale", {
+            label: "Fine scale",
+            min: 0.05,
+            max: 4,
+            step: 0.01,
+          })
+          .on("change", syncOceanMat);
+        oceanFoamFolder
+          .addBinding(PARAMS.ocean, "foamFineAmt", {
+            label: "Fine amt",
+            min: 0,
+            max: 1,
+            step: 0.01,
+          })
+          .on("change", syncOceanMat);
+        oceanFoamFolder
+          .addBinding(PARAMS.ocean, "foamFineSpeed", {
+            label: "Fine speed",
+            min: 0,
+            max: 1.5,
+            step: 0.01,
+          })
+          .on("change", syncOceanMat);
+        oceanFoamFolder
+          .addBinding(PARAMS.ocean, "foamContrast", {
+            label: "Contrast",
+            min: 0.2,
+            max: 4,
+            step: 0.05,
+          })
+          .on("change", syncOceanMat);
+        oceanFoamFolder
+          .addBinding(PARAMS.ocean, "foamCutoff", {
+            label: "Cutoff",
+            min: 0,
+            max: 1,
+            step: 0.01,
+          })
+          .on("change", syncOceanMat);
+        oceanFoamFolder
+          .addBinding(PARAMS.ocean, "foamTransitionWidth", {
+            label: "Transition",
+            min: 0.01,
+            max: 0.5,
+            step: 0.01,
+          })
+          .on("change", syncOceanMat);
+        oceanFoamFolder
+          .addBinding(PARAMS.ocean, "foamBreatheAmp", {
+            label: "Breathe amp",
+            min: 0,
+            max: 3,
+            step: 0.05,
+          })
+          .on("change", syncOceanMat);
+        oceanFoamFolder
+          .addBinding(PARAMS.ocean, "foamBreatheHz", {
+            label: "Breathe Hz",
+            min: 0,
+            max: 2,
+            step: 0.01,
+          })
+          .on("change", syncOceanMat);
 
         const geminiGrassErasePARAMS = { erase: false };
         const geminiGrassFolder = natureFolder.addFolder({
@@ -21581,6 +21726,12 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           uWCamXZ.value.set(camera.position.x, camera.position.z);
           lakeShader.update(dtSec, appTimeSec, _cachedLakeBodies);
         }
+        // Camera-follow the main ocean plane so it stays centered on the viewer,
+        // and drive the ocean shader's time/waterY uniforms. World-space sampling
+        // inside the shader means the surface doesn't slide with the mesh.
+        oceanWater.position.x = camera.position.x;
+        oceanWater.position.z = camera.position.z;
+        oceanShader.update(dtSec, appTimeSec, [oceanWater]);
         if (waterfallObjects.length > 0)
           wfU.wfFlowTime.value += dtSec * wfU.wfFlowSpeed.value;
         if (splashCapObjects.length > 0) {
