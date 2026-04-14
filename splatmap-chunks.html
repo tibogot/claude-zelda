@@ -6609,14 +6609,16 @@
       const flightRingMat = new MeshBasicNodeMaterial({
         transparent: true,
         depthWrite: false,
+        depthTest: true,
         blending: THREE.NormalBlending,
         side: THREE.DoubleSide,
+        fog: false,
       });
       flightRingMat.toneMapped = true;
       {
         const ringSamp = texture(flightRingTex, uv());
         flightRingMat.colorNode = mul(ringSamp.rgb, vec3(uFlightRingTint));
-        flightRingMat.opacityNode = float(0.94);
+        flightRingMat.opacityNode = float(1);
       }
       const flightRingMesh = new THREE.InstancedMesh(
         _flightRingGeo,
@@ -6625,7 +6627,7 @@
       );
       flightRingMesh.count = 0;
       flightRingMesh.frustumCulled = false;
-      flightRingMesh.renderOrder = 9;
+      flightRingMesh.renderOrder = 20;
       flightRingMesh.visible = true;
       scene.add(flightRingMesh);
 
@@ -6663,8 +6665,8 @@
         const g = getWorldHeight(cx, cz);
         const sky = Math.max(40, P.ringSkyAGL ?? 125);
         const cy = g + sky + P.spawnHeightOffset * 0.35;
-        spawnFlightRingAt(cx, cy, cz, yaw0, P.ringRadius);
-        flightRingsFixedLayoutDone = true;
+        if (spawnFlightRingAt(cx, cy, cz, yaw0, P.ringRadius))
+          flightRingsFixedLayoutDone = true;
       }
 
       function spawnFlightRingAt(cx, cy, cz, yaw, majorR) {
@@ -7537,6 +7539,9 @@
           playPlaneRoot.visible = true;
           capsuleMesh.visible = false;
           syncModeBadge();
+          flightRingsFixedLayoutDone = false;
+          ensureFixedFlightRingsPlaced();
+          updateFlightRings(0, camera);
         }
       });
 
@@ -13518,6 +13523,11 @@
               playPlaneForwardSpeed = 0;
               moveTarget = null;
               moveRing.visible = false;
+              if (playPlaneLoaded && PARAMS.flightRings.enabled) {
+                flightRingsFixedLayoutDone = false;
+                ensureFixedFlightRingsPlaced();
+                updateFlightRings(0, camera);
+              }
             } else if (playMovementMode === "char") {
               /* Entering char mode from capsule: seed yaw + grounded state. */
               playCharYaw = capsuleMesh.rotation.y;
