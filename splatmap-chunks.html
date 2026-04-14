@@ -391,6 +391,10 @@
       import { createAmbientFXSystem } from "./ambientfx-painter.js";
       import { createFoliageSlot } from "./foliage-painter.js";
       import { createOctahedralImpostorForestWebgpu } from "./octahedralImpostorForestWebgpu.js";
+      import {
+        TreeLodChunkGpuCull,
+        treeLodGpuCanUseForDefs,
+      } from "./treeLodGpuCull.js";
 
       const PI = Math.PI;
       const uFTreeTime = uniform(0.0);
@@ -4764,6 +4768,10 @@
         pineAtlasTextureSize: 2048,
         pineAtlasSpritesPerSide: 8,
         pineFullOctahedral: true,
+        /** WebGPU compute: frustum + max distance + per-tree mesh LOD (dense instance matrices). */
+        treeLodGpuCull: false,
+        /** While painting Tree LOD (brush held), skip GPU encode and use CPU matrix fill for responsiveness. */
+        treeLodRelaxGpuWhilePainting: true,
       };
 
       // ─── PROC TREES — same data + algorithms as splatmap-painter10bvh+post.html ───
@@ -5476,6 +5484,8 @@
           treeLodSettings: {
             lodChunkSize: lodParams.lodChunkSize,
             lodMaxPerChunk: lodParams.lodMaxPerChunk,
+            treeLodGpuCull: lodParams.treeLodGpuCull,
+            treeLodRelaxGpuWhilePainting: lodParams.treeLodRelaxGpuWhilePainting,
           },
           treeLod: LOD_SLOTS.map((s) => {
             const o = { name: s.name, positions: s.positions };
@@ -5752,6 +5762,11 @@
             lodParams.lodChunkSize = tls.lodChunkSize;
           if (typeof tls.lodMaxPerChunk === "number")
             lodParams.lodMaxPerChunk = tls.lodMaxPerChunk;
+          if (typeof tls.treeLodGpuCull === "boolean")
+            lodParams.treeLodGpuCull = tls.treeLodGpuCull;
+          if (typeof tls.treeLodRelaxGpuWhilePainting === "boolean")
+            lodParams.treeLodRelaxGpuWhilePainting =
+              tls.treeLodRelaxGpuWhilePainting;
         }
         if (data.treeLod && Array.isArray(data.treeLod)) {
           data.treeLod.forEach((entry, i) => {
@@ -9595,6 +9610,20 @@
       const _lodCamPos = new THREE.Vector3();
       const _lodFrustum = new THREE.Frustum();
       const _lodProjMat = new THREE.Matrix4();
+      const _lodClipInv = new THREE.Matrix4();
+      const _lodUnprojV = new THREE.Vector4();
+      const _lodChunkWin = { ix0: 0, ix1: 0, iz0: 0, iz1: 0 };
+      /** NDC box corners for frustum ↔ world XZ bounds (conservative for Tree LOD window). */
+      const _LOD_NDC_BOX = [
+        [-1, -1, -1],
+        [1, -1, -1],
+        [-1, 1, -1],
+        [1, 1, -1],
+        [-1, -1, 1],
+        [1, -1, 1],
+        [-1, 1, 1],
+        [1, 1, 1],
+      ];
       let _lodDirty = true;
       const _lodLastPos = new THREE.Vector3(Infinity, Infinity, Infinity);
       const _lodLastQuat = new THREE.Quaternion();
@@ -9603,6 +9632,146 @@
 
       function _markLodDirty() {
         _lodDirty = true;
+      }
+
+      /** Quantized camera key for Tree LOD per-chunk write cache (align with `_LOD_POS_THR`). */
+      function _lodQuantCamKey(pos, step) {
+        const inv = 1 / step;
+        return `${Math.round(pos.x * inv)},${Math.round(pos.y * inv)},${Math.round(pos.z * inv)}`;
+      }
+
+      /** Expands `b` (minX/maxX/minZ/maxZ) with frustum corner rays in world XZ (inverse clip matrix). */
+      function _lodMergeFrustumXZIntoBounds(projViewMat, b) {
+        _lodClipInv.copy(projViewMat).invert();
+        for (let i = 0; i < 8; i++) {
+          const c = _LOD_NDC_BOX[i];
+          _lodUnprojV.set(c[0], c[1], c[2], 1).applyMatrix4(_lodClipInv);
+          const iw = 1.0 / _lodUnprojV.w;
+          if (!Number.isFinite(iw) || Math.abs(_lodUnprojV.w) < 1e-8) continue;
+          const wx = _lodUnprojV.x * iw;
+          const wz = _lodUnprojV.z * iw;
+          if (wx < b.minX) b.minX = wx;
+          if (wx > b.maxX) b.maxX = wx;
+          if (wz < b.minZ) b.minZ = wz;
+          if (wz > b.maxZ) b.maxZ = wz;
+        }
+      }
+
+      /**
+       * Integer tree-chunk index range that may intersect view or LOD radii (avoids scanning all chunks).
+       */
+      function _lodComputeTreeChunkWindow(
+        cs,
+        cam,
+        maxDraw,
+        slot,
+        projViewMat,
+        cameraFar,
+        out,
+      ) {
+        const pad = cs * 2 + 150;
+        const farCap = Math.min(
+          Math.max(cameraFar || 2000, 1) * 0.96,
+          6500,
+        );
+        const dSphere =
+          maxDraw > 0 ? maxDraw + pad : farCap + pad;
+        const impD = (slot.lodImpostorDist ?? 115) + pad;
+        const megaD = (slot.lodMegaDist ?? 220) + pad;
+        const thrD = (slot.lodThreshold ?? 80) + pad;
+        const ext = Math.max(dSphere, impD, megaD, thrD);
+        const b = {
+          minX: cam.x - ext,
+          maxX: cam.x + ext,
+          minZ: cam.z - ext,
+          maxZ: cam.z + ext,
+        };
+        _lodMergeFrustumXZIntoBounds(projViewMat, b);
+        b.minX = THREE.MathUtils.clamp(
+          b.minX,
+          worldBounds.min.x,
+          worldBounds.max.x,
+        );
+        b.maxX = THREE.MathUtils.clamp(
+          b.maxX,
+          worldBounds.min.x,
+          worldBounds.max.x,
+        );
+        b.minZ = THREE.MathUtils.clamp(
+          b.minZ,
+          worldBounds.min.z,
+          worldBounds.max.z,
+        );
+        b.maxZ = THREE.MathUtils.clamp(
+          b.maxZ,
+          worldBounds.min.z,
+          worldBounds.max.z,
+        );
+        out.ix0 = Math.floor(b.minX / cs);
+        out.ix1 = Math.floor(b.maxX / cs);
+        out.iz0 = Math.floor(b.minZ / cs);
+        out.iz1 = Math.floor(b.maxZ / cs);
+      }
+
+      /**
+       * Pre-multiply tree base matrix × each sub-mesh local matrix (per LOD tier).
+       * Runtime then only copies into InstancedMesh (no multiplyMatrices per tree).
+       */
+      function _lodBakeTreeInstanceMats(slot) {
+        if (!slot?.lod0Defs?.length) return;
+        const mul = slot.meshScale ?? 1;
+        const defs0 = slot.lod0Defs;
+        const defs1 = slot.lod1Defs;
+        for (let pi = 0; pi < slot.positions.length; pi++) {
+          const p = slot.positions[pi];
+          if (!p._lodBaseMat) continue;
+          if (!p._lodBaked0 || p._lodBaked0.length !== defs0.length) {
+            p._lodBaked0 = defs0.map(() => new THREE.Matrix4());
+          }
+          for (let mi = 0; mi < defs0.length; mi++) {
+            _lodTreeMat.copy(p._lodBaseMat);
+            if (mul !== 1) {
+              const me = _lodTreeMat.elements;
+              me[0] *= mul;
+              me[1] *= mul;
+              me[2] *= mul;
+              me[4] *= mul;
+              me[5] *= mul;
+              me[6] *= mul;
+              me[8] *= mul;
+              me[9] *= mul;
+              me[10] *= mul;
+            }
+            _lodFinalMat.multiplyMatrices(_lodTreeMat, defs0[mi].localMatrix);
+            p._lodBaked0[mi].copy(_lodFinalMat);
+          }
+          if (!defs1) {
+            p._lodBaked1 = null;
+          } else if (defs1 === defs0) {
+            p._lodBaked1 = p._lodBaked0;
+          } else {
+            if (!p._lodBaked1 || p._lodBaked1.length !== defs1.length) {
+              p._lodBaked1 = defs1.map(() => new THREE.Matrix4());
+            }
+            for (let mi = 0; mi < defs1.length; mi++) {
+              _lodTreeMat.copy(p._lodBaseMat);
+              if (mul !== 1) {
+                const me = _lodTreeMat.elements;
+                me[0] *= mul;
+                me[1] *= mul;
+                me[2] *= mul;
+                me[4] *= mul;
+                me[5] *= mul;
+                me[6] *= mul;
+                me[8] *= mul;
+                me[9] *= mul;
+                me[10] *= mul;
+              }
+              _lodFinalMat.multiplyMatrices(_lodTreeMat, defs1[mi].localMatrix);
+              p._lodBaked1[mi].copy(_lodFinalMat);
+            }
+          }
+        }
       }
 
       function applyPineImpostorMaterialFromLodParams() {
@@ -9736,6 +9905,10 @@
               return;
             }
             _markLodDirty();
+            if (lodParams.treeLodGpuCull && slot.chunks?.size) {
+              for (const ch of slot.chunks.values()) _disposeLodChunkGpu(ch);
+              _ensureTreeLodChunkGpu(slot);
+            }
           })
           .catch((err) => {
             slot.pineImpostorBusy = false;
@@ -9773,9 +9946,51 @@
         return defs;
       }
 
+      function _disposeLodChunkGpu(chunk) {
+        if (!chunk?._lodGpu) return;
+        try {
+          chunk._lodGpu.dispose();
+        } catch (_) {
+          /* ignore */
+        }
+        chunk._lodGpu = null;
+      }
+
+      function _ensureTreeLodChunkGpu(slot) {
+        if (!slot?.ready || !slot.chunks?.size) return;
+        const instanceCap = Math.max(
+          32,
+          Math.min(8192, Math.floor(lodParams.lodMaxPerChunk) || 1024),
+        );
+        const device = renderer?.backend?.device;
+        const wantGpu =
+          !!lodParams.treeLodGpuCull &&
+          !!device &&
+          treeLodGpuCanUseForDefs(slot.lod0Defs, slot.lod1Defs) &&
+          !(slot.name === "Pine" && slot.pineImpostorApi);
+        for (const ch of slot.chunks.values()) {
+          _disposeLodChunkGpu(ch);
+          if (!wantGpu) continue;
+          try {
+            ch._lodGpu = new TreeLodChunkGpuCull(
+              renderer,
+              instanceCap,
+              slot.lod0Defs,
+              slot.lod1Defs,
+              ch.lod0ims,
+              ch.lod1ims,
+            );
+          } catch (e) {
+            console.warn("[TreeLodGpu]", slot.name, e);
+            ch._lodGpu = null;
+          }
+        }
+      }
+
       function _disposeSlotLodChunks(slot) {
         if (!slot.chunks || slot.chunks.size === 0) return;
         for (const c of slot.chunks.values()) {
+          _disposeLodChunkGpu(c);
           c.lod0ims.forEach(({ im }) => scene.remove(im));
           if (c.lod1ims) c.lod1ims.forEach(({ im }) => scene.remove(im));
         }
@@ -9823,6 +10038,7 @@
         for (const key of [...slot.chunks.keys()]) {
           if (!byChunk.has(key)) {
             const c = slot.chunks.get(key);
+            _disposeLodChunkGpu(c);
             c.lod0ims.forEach((g) => scene.remove(g.im));
             if (c.lod1ims) c.lod1ims.forEach((g) => scene.remove(g.im));
             slot.chunks.delete(key);
@@ -9842,6 +10058,12 @@
             slot.chunks.set(key, chunk);
           }
           chunk.positions = positions;
+          chunk._lodGridKey = key;
+          {
+            const comma = key.indexOf(",");
+            chunk._lodIx = parseInt(key.slice(0, comma), 10);
+            chunk._lodIz = parseInt(key.slice(comma + 1), 10);
+          }
           let cx = 0;
           let cy = 0;
           let cz = 0;
@@ -9887,6 +10109,9 @@
           _lodTreeScale.set(s, s, s);
           p._lodBaseMat.compose(_lodTreePos, _lodTreeQuat, _lodTreeScale);
         });
+        _lodBakeTreeInstanceMats(slot);
+        slot._lodDataRev = (slot._lodDataRev | 0) + 1;
+        _ensureTreeLodChunkGpu(slot);
         if (slot.name === "Pine") {
           if (slot.positions.length === 0) {
             _disposePineImpostor(slot);
@@ -9987,6 +10212,62 @@
         });
       }
 
+      function _lodZeroChunkMeshes(chunk) {
+        chunk.lod0ims.forEach((g) => {
+          g.im.count = 0;
+        });
+        if (chunk.lod1ims) {
+          chunk.lod1ims.forEach((g) => {
+            g.im.count = 0;
+          });
+        }
+      }
+
+      /** Emit one tree into `groups` using baked matrices when available. */
+      function _lodEmitTreeToGroups(groups, p, useLod1, lodMeshMul, instanceCap) {
+        const mats = useLod1 ? p._lodBaked1 : p._lodBaked0;
+        if (mats && mats.length === groups.length) {
+          for (let mi = 0; mi < groups.length; mi++) {
+            const im = groups[mi].im;
+            if (im.count >= instanceCap) continue;
+            im.setMatrixAt(im.count++, mats[mi]);
+          }
+          return;
+        }
+        const { x, y, z, scale } = p;
+        if (p._lodBaseMat) {
+          _lodTreeMat.copy(p._lodBaseMat);
+          if (lodMeshMul !== 1) {
+            const me = _lodTreeMat.elements;
+            me[0] *= lodMeshMul;
+            me[1] *= lodMeshMul;
+            me[2] *= lodMeshMul;
+            me[4] *= lodMeshMul;
+            me[5] *= lodMeshMul;
+            me[6] *= lodMeshMul;
+            me[8] *= lodMeshMul;
+            me[9] *= lodMeshMul;
+            me[10] *= lodMeshMul;
+          }
+        } else {
+          const rotY =
+            typeof p.rot === "number" && Number.isFinite(p.rot)
+              ? p.rot
+              : Math.PI * 2 * ((((x * 13.7 + z * 7.3) % 1) + 1) % 1);
+          const s = scale * lodMeshMul;
+          _lodTreePos.set(x, y, z);
+          _lodTreeScale.set(s, s, s);
+          _lodTreeQuat.setFromAxisAngle(_lodUpY, rotY);
+          _lodTreeMat.compose(_lodTreePos, _lodTreeQuat, _lodTreeScale);
+        }
+        for (let mi = 0; mi < groups.length; mi++) {
+          const { im, localMatrix } = groups[mi];
+          if (im.count >= instanceCap) continue;
+          _lodFinalMat.multiplyMatrices(_lodTreeMat, localMatrix);
+          im.setMatrixAt(im.count++, _lodFinalMat);
+        }
+      }
+
       function updateLODInstances() {
         const anyLodChunk = LOD_SLOTS.some((s) => s.ready && s.chunks.size > 0);
         const pineSlotEarly = LOD_SLOTS[0];
@@ -9998,6 +10279,11 @@
           if (pineApiEarly) pineApiEarly.paintFinishImpostorMega(0, 0);
           return;
         }
+        const relaxGpuWhileTreePaint =
+          !!lodParams.treeLodRelaxGpuWhilePainting &&
+          !!lodParams.treeLodGpuCull &&
+          editState.isPointerDown &&
+          editState.pointerAction === "pinelod";
         const camQ = camera.quaternion;
         const posMoved =
           _lodLastPos.distanceToSquared(camera.position) >
@@ -10025,6 +10311,7 @@
         const maxDraw = lodParams.maxDrawDistance;
         const maxSq =
           maxDraw > 0 ? maxDraw * maxDraw : Number.POSITIVE_INFINITY;
+        const quantCamKey = _lodQuantCamKey(_lodCamPos, _LOD_POS_THR);
         for (const slot of LOD_SLOTS) {
           if (!slot.ready) continue;
           totalTrees += slot.positions.length;
@@ -10044,103 +10331,242 @@
           let pineImpW = 0;
           let pineMegaW = 0;
           const capIm = pineImpostor ? pineImpostor.capacity : 0;
+          const canCacheChunkWritesBase = !pineImpostor;
+          const instanceCap = Math.max(
+            32,
+            Math.min(
+              8192,
+              Math.floor(lodParams.lodMaxPerChunk) || 1024,
+            ),
+          );
+          const csLod = Math.max(
+            16,
+            Math.min(1024, Math.floor(lodParams.lodChunkSize) || 128),
+          );
+          _lodComputeTreeChunkWindow(
+            csLod,
+            _lodCamPos,
+            maxDraw,
+            slot,
+            _lodProjMat,
+            camera.far,
+            _lodChunkWin,
+          );
+          const { ix0, ix1, iz0, iz1 } = _lodChunkWin;
+          totalChunks += slot.chunks.size;
           for (const chunk of slot.chunks.values()) {
-            totalChunks++;
-            const inFrustum = _lodFrustum.intersectsSphere(chunk.sphere);
-            chunk.lod0ims.forEach((g) => {
-              g.im.count = 0;
-            });
-            if (chunk.lod1ims) {
-              chunk.lod1ims.forEach((g) => {
-                g.im.count = 0;
-              });
+            let ixC = chunk._lodIx;
+            let izC = chunk._lodIz;
+            if (
+              (ixC == null || izC == null || Number.isNaN(ixC) || Number.isNaN(izC)) &&
+              chunk._lodGridKey
+            ) {
+              const comma = chunk._lodGridKey.indexOf(",");
+              if (comma >= 0) {
+                ixC = parseInt(chunk._lodGridKey.slice(0, comma), 10);
+                izC = parseInt(chunk._lodGridKey.slice(comma + 1), 10);
+                chunk._lodIx = ixC;
+                chunk._lodIz = izC;
+              }
             }
-            if (!inFrustum) continue;
-            if (maxDraw > 0) {
+            if (
+              (chunk._lodIx == null || chunk._lodIz == null) &&
+              chunk.positions?.length
+            ) {
+              const p0 = chunk.positions[0];
+              chunk._lodIx = Math.floor(p0.x / csLod);
+              chunk._lodIz = Math.floor(p0.z / csLod);
+              chunk._lodGridKey = `${chunk._lodIx},${chunk._lodIz}`;
+            }
+            ixC = chunk._lodIx ?? 0;
+            izC = chunk._lodIz ?? 0;
+            if (ixC < ix0 || ixC > ix1 || izC < iz0 || izC > iz1) {
+              _lodZeroChunkMeshes(chunk);
+              chunk._lodWriteCacheKey = null;
+            }
+          }
+          for (let ixW = ix0; ixW <= ix1; ixW++) {
+            for (let izW = iz0; izW <= iz1; izW++) {
+              const chunk = slot.chunks.get(`${ixW},${izW}`);
+              if (!chunk) continue;
+              const inFrustum = _lodFrustum.intersectsSphere(chunk.sphere);
+              if (!inFrustum) {
+                _lodZeroChunkMeshes(chunk);
+                chunk._lodWriteCacheKey = null;
+                continue;
+              }
+              let drawOk = true;
               const c = chunk.sphere.center;
               const dxc = c.x - _lodCamPos.x;
               const dyc = c.y - _lodCamPos.y;
               const dzc = c.z - _lodCamPos.z;
-              const distCenter = Math.sqrt(dxc * dxc + dyc * dyc + dzc * dzc);
-              if (distCenter - chunk.sphere.radius > maxDraw) {
-                chunksCulledDistance++;
-                continue;
-              }
-            }
-            totalVisible++;
-            const instanceCap = Math.max(
-              32,
-              Math.min(
-                8192,
-                Math.floor(lodParams.lodMaxPerChunk) || 1024,
-              ),
-            );
-            for (const p of chunk.positions) {
-              const { x, y, z, scale } = p;
-              const dx = x - _lodCamPos.x;
-              const dy = y - _lodCamPos.y;
-              const dz = z - _lodCamPos.z;
-              const distSq = dx * dx + dy * dy + dz * dz;
-              if (distSq > maxSq) {
-                treesCulledDistance++;
-                continue;
-              }
-              const ti = p._lodIdx ?? 0;
-              if (pineImpostor) {
-                if (distSq >= tMegaSq && pineMegaW < capIm) {
-                  pineImpostor.paintWriteMegaSlot(pineMegaW++, ti);
-                  continue;
-                }
-                if (distSq >= tImpSq && pineImpW < capIm) {
-                  pineImpostor.paintWriteImpostorSlot(pineImpW++, ti);
-                  continue;
+              const distCenter = Math.sqrt(
+                dxc * dxc + dyc * dyc + dzc * dzc,
+              );
+              const r = chunk.sphere.radius;
+              if (maxDraw > 0) {
+                if (distCenter - r > maxDraw) {
+                  drawOk = false;
+                  chunksCulledDistance++;
                 }
               }
-              const useLod1 = chunk.lod1ims && distSq >= thrSq;
-              const groups = useLod1 ? chunk.lod1ims : chunk.lod0ims;
-              if (p._lodBaseMat) {
-                _lodTreeMat.copy(p._lodBaseMat);
-                if (lodMeshMul !== 1) {
-                  const me = _lodTreeMat.elements;
-                  me[0] *= lodMeshMul;
-                  me[1] *= lodMeshMul;
-                  me[2] *= lodMeshMul;
-                  me[4] *= lodMeshMul;
-                  me[5] *= lodMeshMul;
-                  me[6] *= lodMeshMul;
-                  me[8] *= lodMeshMul;
-                  me[9] *= lodMeshMul;
-                  me[10] *= lodMeshMul;
+              if (!drawOk) {
+                _lodZeroChunkMeshes(chunk);
+                chunk._lodWriteCacheKey = null;
+                continue;
+              }
+              const minDist = Math.max(0, distCenter - r);
+              const maxDist = distCenter + r;
+              const minDistSq = minDist * minDist;
+              const maxDistSq = maxDist * maxDist;
+              let meshMode = 2;
+              if (chunk.lod1ims) {
+                if (maxDistSq < thrSq) meshMode = 0;
+                else if (minDistSq >= thrSq) meshMode = 1;
+              } else {
+                meshMode = 0;
+              }
+              const nearMaxSq =
+                maxDraw <= 0 ? true : maxDistSq <= maxSq;
+              const chunkAllBeyondMaxDraw =
+                maxDraw > 0 &&
+                distCenter > r &&
+                minDistSq > maxSq;
+              if (chunkAllBeyondMaxDraw) {
+                _lodZeroChunkMeshes(chunk);
+                treesCulledDistance += chunk.positions.length;
+                chunk._lodWriteCacheKey = null;
+                continue;
+              }
+              totalVisible++;
+              const chunkCanCache =
+                canCacheChunkWritesBase &&
+                (!chunk._lodGpu || relaxGpuWhileTreePaint);
+              const cacheKey = chunkCanCache
+                ? `${quantCamKey}|${thrSq}|${maxSq}|${instanceCap}|${meshMode}|${nearMaxSq ? 1 : 0}|${lodMeshMul}|${slot._lodDataRev | 0}`
+                : "";
+              if (
+                chunkCanCache &&
+                cacheKey === chunk._lodWriteCacheKey &&
+                chunk._lodCachedCount0 != null
+              ) {
+                count0 += chunk._lodCachedCount0;
+                if (chunk.lod1ims) count1 += chunk._lodCachedCount1 ?? 0;
+                continue;
+              }
+              if (chunk._lodGpu && !relaxGpuWhileTreePaint) {
+                const nTrees = chunk.positions.length | 0;
+                const maxSqGpu =
+                  maxDraw > 0 ? maxSq : 1e30;
+                chunk._lodGpu.encode(
+                  _lodProjMat,
+                  _lodCamPos,
+                  thrSq,
+                  maxSqGpu,
+                  lodMeshMul,
+                  nTrees,
+                  chunk.positions,
+                  meshMode,
+                );
+                const dn =
+                  chunk.lod0ims[0]?.im.count ?? nTrees;
+                count0 += dn;
+                if (chunk.lod1ims) count1 += chunk.lod1ims[0]?.im.count ?? dn;
+                chunk._lodWriteCacheKey = null;
+                continue;
+              }
+              _lodZeroChunkMeshes(chunk);
+              const fillMeshForChunk = (positions, useLod1Mesh) => {
+                const groups = useLod1Mesh ? chunk.lod1ims : chunk.lod0ims;
+                for (let pi = 0; pi < positions.length; pi++) {
+                  const p = positions[pi];
+                  _lodEmitTreeToGroups(
+                    groups,
+                    p,
+                    useLod1Mesh,
+                    lodMeshMul,
+                    instanceCap,
+                  );
+                }
+              };
+              if (!pineImpostor) {
+                if (meshMode === 0 && nearMaxSq) {
+                  fillMeshForChunk(chunk.positions, false);
+                } else if (meshMode === 1 && nearMaxSq && chunk.lod1ims) {
+                  fillMeshForChunk(chunk.positions, true);
+                } else {
+                  for (const p of chunk.positions) {
+                    const { x, y, z } = p;
+                    const dx = x - _lodCamPos.x;
+                    const dy = y - _lodCamPos.y;
+                    const dz = z - _lodCamPos.z;
+                    const distSq = dx * dx + dy * dy + dz * dz;
+                    if (distSq > maxSq) {
+                      treesCulledDistance++;
+                      continue;
+                    }
+                    const useLod1 = !!(chunk.lod1ims && distSq >= thrSq);
+                    const groups = useLod1 ? chunk.lod1ims : chunk.lod0ims;
+                    _lodEmitTreeToGroups(
+                      groups,
+                      p,
+                      useLod1,
+                      lodMeshMul,
+                      instanceCap,
+                    );
+                  }
                 }
               } else {
-                const rotY =
-                  typeof p.rot === "number" && Number.isFinite(p.rot)
-                    ? p.rot
-                    : Math.PI *
-                      2 *
-                      ((((x * 13.7 + z * 7.3) % 1) + 1) % 1);
-                const s = scale * lodMeshMul;
-                _lodTreePos.set(x, y, z);
-                _lodTreeScale.set(s, s, s);
-                _lodTreeQuat.setFromAxisAngle(_lodUpY, rotY);
-                _lodTreeMat.compose(_lodTreePos, _lodTreeQuat, _lodTreeScale);
+                for (const p of chunk.positions) {
+                  const { x, y, z } = p;
+                  const dx = x - _lodCamPos.x;
+                  const dy = y - _lodCamPos.y;
+                  const dz = z - _lodCamPos.z;
+                  const distSq = dx * dx + dy * dy + dz * dz;
+                  if (distSq > maxSq) {
+                    treesCulledDistance++;
+                    continue;
+                  }
+                  const ti = p._lodIdx ?? 0;
+                  if (distSq >= tMegaSq && pineMegaW < capIm) {
+                    pineImpostor.paintWriteMegaSlot(pineMegaW++, ti);
+                    continue;
+                  }
+                  if (distSq >= tImpSq && pineImpW < capIm) {
+                    pineImpostor.paintWriteImpostorSlot(pineImpW++, ti);
+                    continue;
+                  }
+                  const useLod1 = !!(chunk.lod1ims && distSq >= thrSq);
+                  const groups = useLod1 ? chunk.lod1ims : chunk.lod0ims;
+                  _lodEmitTreeToGroups(
+                    groups,
+                    p,
+                    useLod1,
+                    lodMeshMul,
+                    instanceCap,
+                  );
+                }
               }
-              groups.forEach(({ im, localMatrix }) => {
-                if (im.count >= instanceCap) return;
-                _lodFinalMat.multiplyMatrices(_lodTreeMat, localMatrix);
-                im.setMatrixAt(im.count++, _lodFinalMat);
-              });
-            }
-            chunk.lod0ims.forEach((g) => {
-              if (g.im.count > 0) g.im.instanceMatrix.needsUpdate = true;
-            });
-            if (chunk.lod1ims) {
-              chunk.lod1ims.forEach((g) => {
+              chunk.lod0ims.forEach((g) => {
                 if (g.im.count > 0) g.im.instanceMatrix.needsUpdate = true;
               });
+              if (chunk.lod1ims) {
+                chunk.lod1ims.forEach((g) => {
+                  if (g.im.count > 0) g.im.instanceMatrix.needsUpdate = true;
+                });
+              }
+              count0 += chunk.lod0ims[0]?.im.count ?? 0;
+              if (chunk.lod1ims) count1 += chunk.lod1ims[0]?.im.count ?? 0;
+              if (chunkCanCache) {
+                chunk._lodWriteCacheKey = cacheKey;
+                chunk._lodCachedCount0 = chunk.lod0ims[0]?.im.count ?? 0;
+                chunk._lodCachedCount1 = chunk.lod1ims
+                  ? chunk.lod1ims[0]?.im.count ?? 0
+                  : 0;
+              } else {
+                chunk._lodWriteCacheKey = null;
+              }
             }
-            count0 += chunk.lod0ims[0]?.im.count ?? 0;
-            if (chunk.lod1ims) count1 += chunk.lod1ims[0]?.im.count ?? 0;
           }
           if (pineImpostor) {
             pineImpostor.paintFinishImpostorMega(pineImpW, pineMegaW);
@@ -14915,6 +15341,20 @@
           editState.mode === "pinelod"
             ? `tree LOD: slot ${activeLodSlot + 1} ${LOD_SLOTS[activeLodSlot]?.name ?? ""}  total=${lodParams.totalTrees}  brush r=${sculptBrushWorldRadius().toFixed(1)}${treeLodFrustum}`
             : `tree LOD: ${lodParams.totalTrees} trees (J to paint)${treeLodFrustum}`;
+        const treeChunkCullHud =
+          totalLodChunks > 0
+            ? `tree culling: chunk gates keep ${lodParams.chunksVisible}/${totalLodChunks} chunks active, skip ${lodParams.chunksCulledDistance} chunks by distance`
+            : "tree culling: no tree chunks yet (paint in Tree LOD mode)";
+        const relaxPaintHud =
+          lodParams.treeLodGpuCull &&
+          lodParams.treeLodRelaxGpuWhilePainting &&
+          editState.isPointerDown &&
+          editState.pointerAction === "pinelod"
+            ? "  [painting: CPU fill]"
+            : "";
+        const treeGpuCullHud = lodParams.treeLodGpuCull
+          ? `gpu tree cull: ON (GPU per-tree distance + LOD in active chunks; CPU chunk gates)${relaxPaintHud}`
+          : "gpu tree cull: OFF (CPU writes per-tree instance matrices; turn ON mainly for stable runtime/view mode)";
         const totalPtreeChunks = PTREE_SLOTS.reduce(
           (s, sl) => s + sl.chunks.size,
           0,
@@ -14971,6 +15411,8 @@ draw calls (frame): ${drawCallsHud}
 terrain tris: ${Math.round(tris).toLocaleString()}
 active chunks: ${activeChunks.size}  (dist LOD: ${PARAMS.terrainLodEnabled ? "ON" : "OFF"})  (chunk cull: ${PARAMS.terrainChunkCulling ? "ON" : "OFF — full world"})  L0=${lodL0} L1=${lodL1} L2=${lodL2} L3=${lodL3} L4=${lodL4}
 ${treeLodHud}
+${treeChunkCullHud}
+${treeGpuCullHud}
 ${procTreeHud}
 ${foliageHud}
 ${objectsHud}
@@ -16992,6 +17434,22 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             _markLodDirty();
           });
         lodFolder
+          .addBinding(lodParams, "treeLodGpuCull", {
+            label: "GPU tree cull (WebGPU)",
+          })
+          .on("change", () => {
+            _rebuildAllTreeLodChunksFromParams();
+            _markLodDirty();
+            if (lodFolderRef) lodFolderRef.refresh();
+          });
+        lodFolder
+          .addBinding(lodParams, "treeLodRelaxGpuWhilePainting", {
+            label: "Relax GPU while painting",
+          })
+          .on("change", () => {
+            _markLodDirty();
+          });
+        lodFolder
           .addBinding(lodParams, "lodImpostorDist", {
             label: "Pine impostor ≥ (world)",
             min: 20,
@@ -17076,7 +17534,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           })
           .on("change", (ev) => {
             LOD_SLOTS[activeLodSlot].meshScale = ev.value;
-            _markLodDirty();
+            _rebuildLODChunks(LOD_SLOTS[activeLodSlot]);
           });
         lodFolder
           .addBinding(lodParams, "density", {
