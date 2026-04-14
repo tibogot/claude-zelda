@@ -519,6 +519,25 @@
           tracerColor: "#fff0a0",
           damage: 1,
         },
+        /** Sky boost rings (Play fly) — one auto-placed gate; slab+hole boost test. */
+        flightRings: {
+          enabled: true,
+          /** Ring center height above terrain at its (x,z). */
+          ringSkyAGL: 125,
+          /** Half-thickness (m) along fly-through axis — generous so fast passes register. */
+          boostHoleSlabHalf: 22,
+          /** Hole radius ≈ ringRadius × this (inside opening, not rim). */
+          boostHoleRadiusMul: 0.9,
+          spawnAhead: 115,
+          spawnHeightOffset: 22,
+          ringRadius: 42,
+          boostDuration: 1.35,
+          boostMaxAdd: 78,
+          boostImpulse: 34,
+          /** One-shot × current speed + impulse on every ring hit. */
+          boostSurgeMult: 1.26,
+          color: "#66f0ff",
+        },
         csm: {
           enabled: true,
           cascades: 2,
@@ -6148,6 +6167,8 @@
       let playFlyHeight = 0;
       /** Signed forward airspeed along `flyHeading` (m/s). Throttle ramps; never uses capsule speed. */
       let playPlaneForwardSpeed = 0;
+      /** >0: ring boost raises forward speed cap (seconds). */
+      let playPlaneRingBoostT = 0;
       let playPlaneRoot = null;
       let playPlaneLoaded = false;
       /** Follow-fly only: look around while surface-locked (yaw orbit), decays in air. */
@@ -6515,6 +6536,246 @@
               break;
             }
           }
+        }
+      }
+
+      /* ── Flight boost rings (instanced torus, canvas texture, no frustum cull) ── */
+      const FLIGHT_RING_BASE_MAJOR = 1;
+      const FLIGHT_RING_BASE_TUBE = 0.075;
+      /** Instance pool (single gate uses slot 0). */
+      const FLIGHT_RING_POOL = 8;
+      /** After layout, skip until fly exit / rings disabled / explicit re-place. */
+      let flightRingsFixedLayoutDone = false;
+      const _flightRingDummy = new THREE.Object3D();
+      const _flightRingLookAt = new THREE.Vector3();
+      const flightRingSlots = [];
+      const FR = PARAMS.flightRings;
+      for (let i = 0; i < FLIGHT_RING_POOL; i++) {
+        flightRingSlots.push({
+          active: false,
+          cx: 0,
+          cy: 0,
+          cz: 0,
+          yaw: 0,
+          /** Unit: torus hole axis in world (vertical ring, fly through along −axis). */
+          ax: 0,
+          ay: 0,
+          az: 0,
+          majorR: FR.ringRadius,
+          /** True while plane sample is inside boost volume (slab + hole). */
+          wasInsideHole: false,
+        });
+      }
+      const _flightRingGeo = new THREE.TorusGeometry(
+        FLIGHT_RING_BASE_MAJOR,
+        FLIGHT_RING_BASE_TUBE * 1.15,
+        14,
+        40,
+      );
+      /* Default torus lies in XY; hole along ±Z — we orient with lookAt so
+       * the hole aligns with flight direction (flight-sim gate, not a ground hoop). */
+      const _flightRingCnv = document.createElement("canvas");
+      _flightRingCnv.width = 512;
+      _flightRingCnv.height = 128;
+      (() => {
+        const ctx = _flightRingCnv.getContext("2d");
+        const g = ctx.createLinearGradient(0, 0, 512, 0);
+        g.addColorStop(0, "rgba(0,30,50,0.2)");
+        g.addColorStop(0.38, "rgba(0,200,255,0.95)");
+        g.addColorStop(0.48, "rgba(255,255,255,1)");
+        g.addColorStop(0.52, "rgba(255,255,255,1)");
+        g.addColorStop(0.62, "rgba(0,200,255,0.95)");
+        g.addColorStop(1, "rgba(0,30,50,0.2)");
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, 512, 128);
+        const gv = ctx.createLinearGradient(0, 0, 0, 128);
+        gv.addColorStop(0, "rgba(0,0,0,0.35)");
+        gv.addColorStop(0.45, "rgba(0,0,0,0)");
+        gv.addColorStop(0.55, "rgba(0,0,0,0)");
+        gv.addColorStop(1, "rgba(0,0,0,0.35)");
+        ctx.fillStyle = gv;
+        ctx.globalCompositeOperation = "multiply";
+        ctx.fillRect(0, 0, 512, 128);
+      })();
+      const flightRingTex = new THREE.CanvasTexture(_flightRingCnv);
+      flightRingTex.colorSpace = THREE.SRGBColorSpace;
+      flightRingTex.wrapS = THREE.RepeatWrapping;
+      flightRingTex.wrapT = THREE.RepeatWrapping;
+      flightRingTex.repeat.set(3, 1);
+      flightRingTex.needsUpdate = true;
+      const uFlightRingTint = uniform(
+        new THREE.Color(FR.color).convertSRGBToLinear(),
+      );
+      const flightRingMat = new MeshBasicNodeMaterial({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.NormalBlending,
+        side: THREE.DoubleSide,
+      });
+      flightRingMat.toneMapped = true;
+      {
+        const ringSamp = texture(flightRingTex, uv());
+        flightRingMat.colorNode = mul(ringSamp.rgb, vec3(uFlightRingTint));
+        flightRingMat.opacityNode = float(0.94);
+      }
+      const flightRingMesh = new THREE.InstancedMesh(
+        _flightRingGeo,
+        flightRingMat,
+        FLIGHT_RING_POOL,
+      );
+      flightRingMesh.count = 0;
+      flightRingMesh.frustumCulled = false;
+      flightRingMesh.renderOrder = 9;
+      flightRingMesh.visible = true;
+      scene.add(flightRingMesh);
+
+      function flightRingAllocSlot() {
+        for (let i = 0; i < flightRingSlots.length; i++) {
+          if (!flightRingSlots[i].active) return i;
+        }
+        return -1;
+      }
+
+      /** One shot: exactly one gate ahead (symmetric ± fly-through axis). */
+      function ensureFixedFlightRingsPlaced() {
+        const P = PARAMS.flightRings;
+        if (!playMode || !P.enabled) {
+          flightRingsFixedLayoutDone = false;
+          return;
+        }
+        if (playMovementMode !== "fly" || !playPlaneLoaded) {
+          flightRingsFixedLayoutDone = false;
+          return;
+        }
+        if (flightRingsFixedLayoutDone) return;
+        for (let i = 0; i < flightRingSlots.length; i++) {
+          flightRingSlots[i].active = false;
+          flightRingSlots[i].wasInsideHole = false;
+        }
+        const yaw0 = flyHeading;
+        const fx = -Math.sin(yaw0);
+        const fz = -Math.cos(yaw0);
+        const bx = playerPos.x;
+        const bz = playerPos.z;
+        const along = P.spawnAhead;
+        const cx = bx + fx * along;
+        const cz = bz + fz * along;
+        const g = getWorldHeight(cx, cz);
+        const sky = Math.max(40, P.ringSkyAGL ?? 125);
+        const cy = g + sky + P.spawnHeightOffset * 0.35;
+        spawnFlightRingAt(cx, cy, cz, yaw0, P.ringRadius);
+        flightRingsFixedLayoutDone = true;
+      }
+
+      function spawnFlightRingAt(cx, cy, cz, yaw, majorR) {
+        const P = PARAMS.flightRings;
+        if (!P.enabled) return false;
+        const idx = flightRingAllocSlot();
+        if (idx < 0) return false;
+        const s = flightRingSlots[idx];
+        s.active = true;
+        s.cx = cx;
+        s.cy = cy;
+        s.cz = cz;
+        s.yaw = yaw;
+        s.majorR = majorR;
+        /* Vertical gate: default torus hole is +local Z; world hole axis is horizontal ⊥ flight dir. */
+        s.ax = Math.cos(yaw);
+        s.ay = 0;
+        s.az = -Math.sin(yaw);
+        s.wasInsideHole = false;
+        return true;
+      }
+
+      function clearFlightRings() {
+        for (let i = 0; i < flightRingSlots.length; i++) {
+          flightRingSlots[i].active = false;
+          flightRingSlots[i].wasInsideHole = false;
+        }
+        flightRingMesh.count = 0;
+        flightRingsFixedLayoutDone = false;
+      }
+
+      function updateFlightRings(dtSec, _cameraRef) {
+        const P = PARAMS.flightRings;
+        if (!P.enabled) {
+          flightRingMesh.count = 0;
+          flightRingMesh.visible = false;
+          return;
+        }
+        flightRingMesh.visible = true;
+        uFlightRingTint.value.set(P.color).convertSRGBToLinear();
+        let v = 0;
+        for (let i = 0; i < flightRingSlots.length; i++) {
+          const s = flightRingSlots[i];
+          if (!s.active) continue;
+          /* lookAt puts −Z toward target; we want +Z (torus hole) along (ax,ay,az). → target = C − a. */
+          _flightRingLookAt.set(
+            s.cx - s.ax,
+            s.cy - s.ay,
+            s.cz - s.az,
+          );
+          _flightRingDummy.position.set(s.cx, s.cy, s.cz);
+          _flightRingDummy.quaternion.identity();
+          _flightRingDummy.up.set(0, 1, 0);
+          _flightRingDummy.lookAt(_flightRingLookAt);
+          _flightRingDummy.scale.setScalar(s.majorR);
+          _flightRingDummy.updateMatrix();
+          flightRingMesh.setMatrixAt(v, _flightRingDummy.matrix);
+          v++;
+        }
+        flightRingMesh.count = v;
+        if (v > 0) flightRingMesh.instanceMatrix.needsUpdate = true;
+      }
+
+      function tryFlightRingPlaneBoost(px, py, pz) {
+        const P = PARAMS.flightRings;
+        if (
+          !P.enabled ||
+          !playPlaneLoaded ||
+          !playMode ||
+          playMovementMode !== "fly"
+        )
+          return;
+        for (let i = 0; i < flightRingSlots.length; i++) {
+          const s = flightRingSlots[i];
+          if (!s.active) continue;
+          /* Symmetric slab on gate plane ⊥ f: |f·(P−C)| < half → either approach side.
+           * Inside hole: radial distance in that plane < holeR. Edge: enter volume. */
+          const fx = -Math.sin(s.yaw);
+          const fy = 0;
+          const fz = -Math.cos(s.yaw);
+          const wx = px - s.cx;
+          const wy = py - s.cy;
+          const wz = pz - s.cz;
+          const sPlane = wx * fx + wy * fy + wz * fz;
+          const wLenSq = wx * wx + wy * wy + wz * wz;
+          const rhoSq = Math.max(0, wLenSq - sPlane * sPlane);
+          const slab = Math.max(8, P.boostHoleSlabHalf ?? 18);
+          const mul = Math.max(0.55, Math.min(0.98, P.boostHoleRadiusMul ?? 0.9));
+          const holeR = s.majorR * mul;
+          const holeRSq = holeR * holeR;
+          const inVol =
+            Math.abs(sPlane) < slab && rhoSq <= holeRSq * 1.002;
+          if (inVol) {
+            if (!s.wasInsideHole) {
+              s.wasInsideHole = true;
+              playPlaneRingBoostT = Math.max(
+                playPlaneRingBoostT,
+                P.boostDuration,
+              );
+              const cap =
+                (keysHeld.ShiftLeft || keysHeld.ShiftRight
+                  ? PLAY_PLANE_MAX_FWD_BOOST
+                  : PLAY_PLANE_MAX_FWD) + P.boostMaxAdd;
+              const mult = Math.max(1, P.boostSurgeMult ?? 1);
+              const surged = playPlaneForwardSpeed * mult + P.boostImpulse;
+              playPlaneForwardSpeed = Math.min(surged, cap);
+            }
+          } else {
+            s.wasInsideHole = false;
+          }
+          break;
         }
       }
 
@@ -11063,6 +11324,8 @@
         playCamView = "follow";
         playFlyHeight = 0;
         playPlaneForwardSpeed = 0;
+        playPlaneRingBoostT = 0;
+        clearFlightRings();
         moveTarget = null;
         moveRing.visible = false;
         flyBarrelActive = false;
@@ -16117,6 +16380,94 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           .addButton({ title: "Despawn all agents" })
           .on("click", () => {
             while (agents.length > 0) despawnAgent(agents[agents.length - 1]);
+          });
+
+        const flightRingsFolder = playFolder.addFolder({
+          title: "Boost rings (fly)",
+          expanded: false,
+        });
+        const FRp = PARAMS.flightRings;
+        flightRingsFolder.addBinding(FRp, "enabled", { label: "Enabled" }).on(
+          "change",
+          () => {
+            if (!FRp.enabled) {
+              clearFlightRings();
+              playPlaneRingBoostT = 0;
+            }
+            updateFlightRings(0, camera);
+          },
+        );
+        flightRingsFolder
+          .addButton({ title: "Clear ring (re-spawns in fly)" })
+          .on("click", () => {
+            clearFlightRings();
+            playPlaneRingBoostT = 0;
+            updateFlightRings(0, camera);
+          });
+        flightRingsFolder.addBinding(FRp, "ringSkyAGL", {
+          min: 35,
+          max: 320,
+          step: 5,
+          label: "Sky AGL (m)",
+        });
+        flightRingsFolder.addBinding(FRp, "boostHoleSlabHalf", {
+          min: 6,
+          max: 48,
+          step: 1,
+          label: "Boost slab ± (m)",
+        });
+        flightRingsFolder.addBinding(FRp, "boostHoleRadiusMul", {
+          min: 0.6,
+          max: 0.98,
+          step: 0.01,
+          label: "Hole radius ×",
+        });
+        flightRingsFolder.addBinding(FRp, "spawnAhead", {
+          min: 40,
+          max: 400,
+          step: 5,
+          label: "Ahead (m)",
+        });
+        flightRingsFolder.addBinding(FRp, "spawnHeightOffset", {
+          min: 5,
+          max: 120,
+          step: 1,
+          label: "Height offset",
+        });
+        flightRingsFolder.addBinding(FRp, "ringRadius", {
+          min: 12,
+          max: 120,
+          step: 1,
+          label: "Ring radius",
+        });
+        flightRingsFolder.addBinding(FRp, "boostDuration", {
+          min: 0.2,
+          max: 12,
+          step: 0.05,
+          label: "Boost time (s)",
+        });
+        flightRingsFolder.addBinding(FRp, "boostMaxAdd", {
+          min: 0,
+          max: 120,
+          step: 1,
+          label: "Max speed +",
+        });
+        flightRingsFolder.addBinding(FRp, "boostSurgeMult", {
+          min: 1,
+          max: 1.55,
+          step: 0.02,
+          label: "Surge × speed",
+        });
+        flightRingsFolder.addBinding(FRp, "boostImpulse", {
+          min: 0,
+          max: 90,
+          step: 0.5,
+          label: "Speed kick (+)",
+        });
+        flightRingsFolder
+          .addBinding(FRp, "color", { label: "Ring tint" })
+          .on("change", () => {
+            uFlightRingTint.value.set(FRp.color).convertSRGBToLinear();
           });
 
         const toolsFolder = pane.addFolder({
@@ -21211,6 +21562,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
         }
         updatePlaneBullets(dtSec);
         updateAgents(dtSec, now);
+        ensureFixedFlightRingsPlaced();
+        updateFlightRings(dtSec, camera);
         checkPlaneBulletHits();
         updateBloodFX(dtSec);
         if (_rippleBuffer.length > 0) _syncRipples();
@@ -21252,6 +21605,7 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           const flying = playMovementMode === "fly" && playPlaneLoaded;
           const charMode = playMovementMode === "char" && playCharLoaded;
           const carMode = playMovementMode === "car" && playCarLoaded;
+          if (!flying && playPlaneRingBoostT > 0) playPlaneRingBoostT = 0;
           const charRunning =
             charMode && (keysHeld.ShiftLeft || keysHeld.ShiftRight);
           const iso = playCamView === "iso";
@@ -21280,6 +21634,11 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
              * direction accumulation so the mlen-based playerPos step
              * stays at zero. */
           } else if (flying) {
+            if (!PARAMS.flightRings.enabled) {
+              playPlaneRingBoostT = 0;
+            } else if (playPlaneRingBoostT > 0) {
+              playPlaneRingBoostT = Math.max(0, playPlaneRingBoostT - dtSec);
+            }
             // Throttle-style airspeed: ramp up/down; HUD shows live speed.
             const thr =
               keysHeld.KeyW || keysHeld.ArrowUp
@@ -21320,10 +21679,14 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
                 );
               }
             }
+            const _ringCapExtra =
+              PARAMS.flightRings.enabled && playPlaneRingBoostT > 0
+                ? PARAMS.flightRings.boostMaxAdd
+                : 0;
             const maxFwdPlane =
-              keysHeld.ShiftLeft || keysHeld.ShiftRight
+              (keysHeld.ShiftLeft || keysHeld.ShiftRight
                 ? PLAY_PLANE_MAX_FWD_BOOST
-                : PLAY_PLANE_MAX_FWD;
+                : PLAY_PLANE_MAX_FWD) + _ringCapExtra;
             playPlaneForwardSpeed = THREE.MathUtils.clamp(
               playPlaneForwardSpeed,
               -PLAY_PLANE_MAX_REV,
@@ -21575,6 +21938,8 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
             playFlyHeight = 0;
           }
           const planeY = groundY + playFlyHeight;
+          if (flying)
+            tryFlightRingPlaneBoost(playerPos.x, planeY, playerPos.z);
           const capsuleCY = groundY + PLAYER_CAP_R + PLAYER_CAP_H * 0.5;
 
           /* ── Character mode: jump integration + ground clamp ── */
