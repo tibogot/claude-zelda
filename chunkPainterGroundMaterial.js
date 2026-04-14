@@ -77,7 +77,9 @@ export function createChunkPainterGroundMaterial(
   });
   mat.envMapIntensity = envMapIntensity;
 
-  const worldSizeF = float(opts.worldSize ?? (cliffDeps ? cliffDeps.worldSize : 1600));
+  const worldSizeF = float(
+    opts.worldSize ?? (cliffDeps ? cliffDeps.worldSize : 1600),
+  );
 
   const cliff =
     cliffDeps &&
@@ -95,8 +97,12 @@ export function createChunkPainterGroundMaterial(
   // All chunks share the same compiled shader; onBeforeRender swaps .value.
   const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));
   const splatTexNode = texture(makePlaceholderTex(), splatUV);
-  const imgWeightTexNode = imageSlots ? texture(makePlaceholderTex(), splatUV) : null;
-  const meadowTexNode = meadowBundle ? texture(makePlaceholderTex(), splatUV) : null;
+  const imgWeightTexNode = imageSlots
+    ? texture(makePlaceholderTex(), splatUV)
+    : null;
+  const meadowTexNode = meadowBundle
+    ? texture(makePlaceholderTex(), splatUV)
+    : null;
 
   mat.colorNode = Fn(() => {
     let terrainCol = groundBundle.groundProc();
@@ -116,7 +122,14 @@ export function createChunkPainterGroundMaterial(
       col = mix(col, meadowBundle.meadowProc(), mW);
     }
     if (imgWeightTexNode && imageSlots) {
-      col = applyImageSlotAlbedoAndAO(col, cs, worldSizeF, null, imageSlots, imgWeightTexNode);
+      col = applyImageSlotAlbedoAndAO(
+        col,
+        cs,
+        worldSizeF,
+        null,
+        imageSlots,
+        imgWeightTexNode,
+      );
     }
     return cliff ? cliff.augmentColor(col) : col;
   })();
@@ -126,7 +139,11 @@ export function createChunkPainterGroundMaterial(
       // Blend cliff normals with image slot normals where image paint is present
       mat.normalNode = Fn(() => {
         const cliffRawNm = cliff.evaluateNormalInFn();
-        const { raw: imgRawNm, weight: imgW } = evaluateImageSlotNormalRaw(worldSizeF, imageSlots, imgWeightTexNode);
+        const { raw: imgRawNm, weight: imgW } = evaluateImageSlotNormalRaw(
+          worldSizeF,
+          imageSlots,
+          imgWeightTexNode,
+        );
         const combined = mix(cliffRawNm, imgRawNm, imgW);
         return normalMap(combined, vec2(0.25, 0.25));
       })();
@@ -146,9 +163,22 @@ export function createChunkPainterGroundMaterial(
     }
   } else if (imgWeightTexNode && imageSlots) {
     mat.roughnessNode = Fn(() =>
-      applyImageSlotRoughness(float(roughness), cs, worldSizeF, null, imageSlots, imgWeightTexNode),
+      applyImageSlotRoughness(
+        float(roughness),
+        cs,
+        worldSizeF,
+        null,
+        imageSlots,
+        imgWeightTexNode,
+      ),
     )();
-    mat.normalNode = createImageSlotNormalNode(cs, worldSizeF, null, imageSlots, imgWeightTexNode);
+    mat.normalNode = createImageSlotNormalNode(
+      cs,
+      worldSizeF,
+      null,
+      imageSlots,
+      imgWeightTexNode,
+    );
   }
 
   mat.opacityNode = Fn(() => {
@@ -173,8 +203,10 @@ export function setupTslGroundMeshSwap(mesh, sharedNodes) {
     if (prev) prev();
     const ud = mesh.userData;
     if (ud._tslSplat) sharedNodes.splatTexNode.value = ud._tslSplat;
-    if (ud._tslImg && sharedNodes.imgWeightTexNode) sharedNodes.imgWeightTexNode.value = ud._tslImg;
-    if (ud._tslMeadow && sharedNodes.meadowTexNode) sharedNodes.meadowTexNode.value = ud._tslMeadow;
+    if (ud._tslImg && sharedNodes.imgWeightTexNode)
+      sharedNodes.imgWeightTexNode.value = ud._tslImg;
+    if (ud._tslMeadow && sharedNodes.meadowTexNode)
+      sharedNodes.meadowTexNode.value = ud._tslMeadow;
   };
 }
 
@@ -187,7 +219,11 @@ export function setupTslGroundMeshSwap(mesh, sharedNodes) {
  * @param {number} worldSize
  * @returns {{ material, splatTexNode, albedoTexNode, ormTexNode, uUVScale, uNormalStr, uAOStr, uRoughStr }}
  */
-export function createSharedImgTexMaterial(chunkSize, worldSize, cliffDeps = null) {
+export function createSharedImgTexMaterial(
+  chunkSize,
+  worldSize,
+  cliffDeps = null,
+) {
   const cs = float(chunkSize);
   const ws = float(1.0).div(float(worldSize));
   const uUVScale = uniform(3.0);
@@ -232,7 +268,11 @@ export function createSharedImgTexMaterial(chunkSize, worldSize, cliffDeps = nul
   // Roughness: blend from base toward ORM green channel by roughStr, with cliff override on slopes.
   mat.roughnessNode = Fn(() => {
     const ormRough = ormTexNode.g;
-    const imgRough = clamp(mix(float(0.88), ormRough, uRoughStr), float(0.04), float(1));
+    const imgRough = clamp(
+      mix(float(0.88), ormRough, uRoughStr),
+      float(0.04),
+      float(1),
+    );
     if (!cliff) return imgRough;
     const slope = cliff.getSlopeMask().pow(cliffDeps.cliffU.uRockBlendSharp);
     return mix(cliff.evaluateRockRoughnessRawInFn(), imgRough, slope);
@@ -242,8 +282,14 @@ export function createSharedImgTexMaterial(chunkSize, worldSize, cliffDeps = nul
   mat.normalNode = Fn(() => {
     const nmX = ormTexNode.b.mul(2.0).sub(1.0);
     const nmY = ormTexNode.a.mul(2.0).sub(1.0);
-    const nmZ = sqrt(max(float(0.0), float(1.0).sub(nmX.mul(nmX)).sub(nmY.mul(nmY))));
-    const imgRaw = vec3(nmX.mul(0.5).add(0.5), nmY.mul(0.5).add(0.5), nmZ.mul(0.5).add(0.5));
+    const nmZ = sqrt(
+      max(float(0.0), float(1.0).sub(nmX.mul(nmX)).sub(nmY.mul(nmY))),
+    );
+    const imgRaw = vec3(
+      nmX.mul(0.5).add(0.5),
+      nmY.mul(0.5).add(0.5),
+      nmZ.mul(0.5).add(0.5),
+    );
     if (!cliff) return normalMap(imgRaw, vec2(uNormalStr, uNormalStr));
     const rockRaw = cliff.evaluateRockNormalRawInFn();
     const slope = cliff.getSlopeMask().pow(cliffDeps.cliffU.uRockBlendSharp);
@@ -258,7 +304,16 @@ export function createSharedImgTexMaterial(chunkSize, worldSize, cliffDeps = nul
   mat.alphaTest = 0.5;
   mat.transparent = false;
 
-  return { material: mat, splatTexNode, albedoTexNode, ormTexNode, uUVScale, uNormalStr, uAOStr, uRoughStr };
+  return {
+    material: mat,
+    splatTexNode,
+    albedoTexNode,
+    ormTexNode,
+    uUVScale,
+    uNormalStr,
+    uAOStr,
+    uRoughStr,
+  };
 }
 
 /**

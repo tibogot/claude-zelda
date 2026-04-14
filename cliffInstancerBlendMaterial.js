@@ -25,7 +25,17 @@ import { normalMap } from "three/tsl";
 import { perlinNoise2D, fbmPerlin2D } from "./tsl-noise.js";
 
 const proceduralLayerMask = Fn(
-  ([p, useFbm, octaves, lacunarity, gain, maskLow, maskHigh, maskSharpness, strength]) => {
+  ([
+    p,
+    useFbm,
+    octaves,
+    lacunarity,
+    gain,
+    maskLow,
+    maskHigh,
+    maskSharpness,
+    strength,
+  ]) => {
     const nSingle = perlinNoise2D(p);
     const nFbm = fbmPerlin2D(p, octaves, lacunarity, gain);
     const n = mix(nSingle, nFbm, useFbm);
@@ -132,7 +142,8 @@ export function createCliffInstancerBlendMaterial(
   // Same idea as chunkPainterGroundMaterial — env reflections read as broken transparency on steep TBN.
   mat.envMapIntensity = 0;
 
-  const getCBPaintUV = () => positionWorld.xz.add(vec2(uWh, uWh)).div(vec2(uWs, uWs));
+  const getCBPaintUV = () =>
+    positionWorld.xz.add(vec2(uWh, uWh)).div(vec2(uWs, uWs));
 
   mat.colorNode = Fn(() => {
     const wxz = positionWorld.xz.mul(uCBGroundScale);
@@ -181,13 +192,20 @@ export function createCliffInstancerBlendMaterial(
     const rockUV_ZY = positionWorld.zy.mul(cbRockScale);
     const triWRaw = normalWorld.abs().pow(cliffU.uTriplanarSharp);
     const triW = triWRaw.div(triWRaw.x.add(triWRaw.y).add(triWRaw.z));
-    const rawRock = texture(rockColorTex, rockUV_XZ).rgb.mul(triW.y)
+    const rawRock = texture(rockColorTex, rockUV_XZ)
+      .rgb.mul(triW.y)
       .add(texture(rockColorTex, rockUV_XY).rgb.mul(triW.z))
       .add(texture(rockColorTex, rockUV_ZY).rgb.mul(triW.x));
-    const cRock = clamp(rawRock.sub(float(0.5)).mul(cliffU.uRockContrast).add(float(0.5)), 0.0, 1.0);
+    const cRock = clamp(
+      rawRock.sub(float(0.5)).mul(cliffU.uRockContrast).add(float(0.5)),
+      0.0,
+      1.0,
+    );
     const rock = cRock.mul(cliffU.uRockBrightness).mul(cliffU.uRockTint);
 
-    const noiseOffset = mx_noise_float(positionWorld.xz.mul(uCBNoiseScale)).mul(uCBNoiseStr);
+    const noiseOffset = mx_noise_float(positionWorld.xz.mul(uCBNoiseScale)).mul(
+      uCBNoiseStr,
+    );
     const slopeVal = normalWorld.y.add(noiseOffset);
     const blend = smoothstep(uCBSlopeLow, uCBSlopeHigh, slopeVal);
 
@@ -210,19 +228,37 @@ export function createCliffInstancerBlendMaterial(
     const rNrmBA_XZ = texture(rockDataTex, _nuvXZ).ba;
     const rNrmBA_XY = texture(rockDataTex, _nuvXY).ba;
     const rNrmBA_ZY = texture(rockDataTex, _nuvZY).ba;
-    const rNrmBA = rNrmBA_XZ.mul(_ntW.y).add(rNrmBA_XY.mul(_ntW.z)).add(rNrmBA_ZY.mul(_ntW.x));
+    const rNrmBA = rNrmBA_XZ
+      .mul(_ntW.y)
+      .add(rNrmBA_XY.mul(_ntW.z))
+      .add(rNrmBA_ZY.mul(_ntW.x));
     const rNrmVec = vec3(rNrmBA.x, rNrmBA.y, float(1.0));
-    const noiseOffset2 = mx_noise_float(positionWorld.xz.mul(uCBNoiseScale)).mul(uCBNoiseStr);
-    const blend2 = smoothstep(uCBSlopeLow, uCBSlopeHigh, normalWorld.y.add(noiseOffset2));
+    const noiseOffset2 = mx_noise_float(
+      positionWorld.xz.mul(uCBNoiseScale),
+    ).mul(uCBNoiseStr);
+    const blend2 = smoothstep(
+      uCBSlopeLow,
+      uCBSlopeHigh,
+      normalWorld.y.add(noiseOffset2),
+    );
     const flatNm = vec3(0.5, 0.5, 1.0);
     return normalMap(mix(rNrmVec, flatNm, blend2));
   })();
 
   mat.roughnessNode = Fn(() => {
     const cbRockScaleR = cliffU.uRockScale.mul(uCBRockScaleMul);
-    const noiseOffset3 = mx_noise_float(positionWorld.xz.mul(uCBNoiseScale)).mul(uCBNoiseStr);
-    const blend3 = smoothstep(uCBSlopeLow, uCBSlopeHigh, normalWorld.y.add(noiseOffset3));
-    const rockRough = texture(rockDataTex, positionWorld.xz.mul(cbRockScaleR)).r;
+    const noiseOffset3 = mx_noise_float(
+      positionWorld.xz.mul(uCBNoiseScale),
+    ).mul(uCBNoiseStr);
+    const blend3 = smoothstep(
+      uCBSlopeLow,
+      uCBSlopeHigh,
+      normalWorld.y.add(noiseOffset3),
+    );
+    const rockRough = texture(
+      rockDataTex,
+      positionWorld.xz.mul(cbRockScaleR),
+    ).r;
     return mix(rockRough, float(0.9), blend3);
   })();
 

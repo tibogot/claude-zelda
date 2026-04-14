@@ -65,10 +65,10 @@ function groundLayerUniforms(L) {
   };
 }
 
-function groundLayerMask(U) {
+function groundLayerMask(U, worldXZ) {
   const p = vec2(
-    positionWorld.x.mul(U.scale).add(U.offsetX),
-    positionWorld.z.mul(U.scale).add(U.offsetY),
+    worldXZ.x.mul(U.scale).add(U.offsetX),
+    worldXZ.y.mul(U.scale).add(U.offsetY),
   );
   const nVal = valueNoise2D(p);
   const nPerlS = perlinNoise2D(p);
@@ -407,17 +407,20 @@ export function createGroundTslBundle(initial) {
   const gL1 = groundLayerUniforms(initial.layer1);
   const gL2 = groundLayerUniforms(initial.layer2);
 
-  const groundProc = Fn(() => {
+  /** TSL vec3: same stack as terrain `tslGround` base (no splat / meadow / cliff). */
+  function groundColorAtWorldXZ(worldXZ) {
     let col = gBase;
-    col = mix(col, gL1.color, groundLayerMask(gL1));
-    col = mix(col, gL2.color, groundLayerMask(gL2));
+    col = mix(col, gL1.color, groundLayerMask(gL1, worldXZ));
+    col = mix(col, gL2.color, groundLayerMask(gL2, worldXZ));
     col = clamp(
       sub(col, float(0.5)).mul(gContrast).add(float(0.5)).mul(gBrightness),
       float(0),
       float(1),
     );
     return col;
-  });
+  }
+
+  const groundProc = Fn(() => groundColorAtWorldXZ(positionWorld.xz));
 
   function syncFromParams(p) {
     gBase.value.set(p.baseColor).convertSRGBToLinear();
@@ -429,6 +432,7 @@ export function createGroundTslBundle(initial) {
 
   return {
     groundProc,
+    groundColorAtWorldXZ,
     groundUniforms: { gBase, gContrast, gBrightness, gL1, gL2 },
     syncFromParams,
   };

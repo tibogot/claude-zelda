@@ -18,6 +18,7 @@ import {
   vec4,
   attribute,
   varying,
+  uniform,
   texture,
   mix,
   smoothstep,
@@ -37,6 +38,7 @@ import {
   max,
   min,
   pow,
+  step,
   modelWorldMatrix,
   modelWorldMatrixInverse,
   cameraPosition,
@@ -222,6 +224,13 @@ export function createFieldInstancedGeometry(
 //   uInteractionEnabled             — uniform(float) 0/1
 //   uInteractionRadius              — uniform(float)
 //   uInteractionStrength            — uniform(float)
+// Optional terrain color tint (splatmap-chunks):
+//   groundColorAtWorldXZ            — (xz: vec2) => vec3 TSL, from createGroundTslBundle
+//   uTerrainTintMode                — uniform(float) 0 off, 1 procedural tslGround, 2 imgTex albedo
+//   uTerrainTintStrength            — uniform(float)
+//   uTerrainTintRootBias            — uniform(float) 0 = full blade, 1 = tint strongest at blade root
+//   gemGrassTintPlaceholderTex      — THREE.Texture (1×1 ok); swapped via material.userData._gemTintTexNode.value
+//   uGemImgTexUVScale               — uniform(float) same as shared imgTex slot uv scale
 //
 // 1×1 dummy textures for optional cliff layer (reused across calls)
 let _dummyCliffHTex = null;
@@ -255,6 +264,22 @@ function _getDummyCliffDTex() {
     _dummyCliffDTex.needsUpdate = true;
   }
   return _dummyCliffDTex;
+}
+
+let _grassTintPlaceholderTex = null;
+function _getGrassTintPlaceholderTex() {
+  if (!_grassTintPlaceholderTex) {
+    const d = new Uint8Array([255, 255, 255, 255]);
+    _grassTintPlaceholderTex = new THREE.DataTexture(
+      d,
+      1,
+      1,
+      THREE.RGBAFormat,
+    );
+    _grassTintPlaceholderTex.colorSpace = THREE.SRGBColorSpace;
+    _grassTintPlaceholderTex.needsUpdate = true;
+  }
+  return _grassTintPlaceholderTex;
 }
 
 export function createGrassMaterial(ctx) {
@@ -321,20 +346,43 @@ export function createGrassMaterial(ctx) {
     uInteractionEnabled,
     uInteractionRadius,
     uInteractionStrength,
+    groundColorAtWorldXZ: _groundColorAtWorldXZ,
+    uTerrainTintMode: _uTerrainTintMode,
+    uTerrainTintStrength: _uTerrainTintStrength,
+    uTerrainTintRootBias: _uTerrainTintRootBias,
+    gemGrassTintPlaceholderTex: _gemGrassTintPh,
+    uGemImgTexUVScale: _uGemImgTexUVScale,
   } = ctx;
+
+  const groundColorAtWorldXZ =
+    _groundColorAtWorldXZ ?? ((_xz) => vec3(1, 1, 1));
+  const uTerrainTintMode = _uTerrainTintMode ?? uniform(0);
+  const uTerrainTintStrength = _uTerrainTintStrength ?? uniform(0);
+  const uTerrainTintRootBias = _uTerrainTintRootBias ?? uniform(0);
+  const uGemImgTexUVScale = _uGemImgTexUVScale ?? uniform(1);
+  const gemGrassTintPh =
+    _gemGrassTintPh ?? _getGrassTintPlaceholderTex();
 
   const cliffHTex = _cliffHTex ?? _getDummyCliffHTex();
   const cliffDTex = _cliffDTex ?? _getDummyCliffDTex();
 
-  // Varyings shared between vertex → fragment
-  const vLodMorph = varying(float(0), "v_gm_lm");
-  const vDistFade = varying(float(1), "v_gm_df");
+  // Packed varyings: WebGPU allows 16 user interpolants; MeshStandardNodeMaterial
+  // uses many internally, so keep custom outputs minimal (was 8 → now 3 nodes).
+  // vPackGrass0: x=lodMorph, y=distFade, z=clumpShade, w=randomShade
+  // vPackGrass1: xyz=color tint, w=h5 (same as old vSatHash; drives sat + dry)
+  const vPackGrass0 = varying(vec4(0, 0, 0, 1), "v_gm_p0");
+  const vPackGrass1 = varying(vec4(1, 1, 1, 0), "v_gm_p1");
   const vCustomNormal = varying(vec3(0, 1, 0), "v_gm_cn");
-  const vClumpShade = varying(float(1), "v_gm_cs");
-  const vColorTint = varying(vec3(1, 1, 1), "v_gm_ct");
-  const vDryBlend = varying(float(0), "v_gm_db");
-  const vRandomShade = varying(float(1), "v_gm_rs");
-  const vSatHash = varying(float(0), "v_gm_sh");
+
+  // Blade root world XZ (same as vertex height sampling). `positionWorld` in the fragment
+  // graph is unreliable with a custom `positionNode` on instanced grass, so we rebuild from
+  // the instanced `offset` attribute + `modelWorldMatrix`.
+  const offRoot = attribute("offset", "vec3");
+  const grassWorldXZ = modelWorldMatrix
+    .mul(vec4(offRoot.x, float(0), offRoot.z, float(1)))
+    .xz;
+  const gemImgTintUv = grassWorldXZ.div(uTerrainSize).mul(uGemImgTexUVScale);
+  const gemTintTexNode = texture(gemGrassTintPh, gemImgTintUv);
 
   const material = new THREE.MeshStandardNodeMaterial({
     side: THREE.FrontSide,
@@ -345,6 +393,7 @@ export function createGrassMaterial(ctx) {
   material.polygonOffset = true;
   material.polygonOffsetFactor = 1;
   material.polygonOffsetUnits = 1;
+  material.userData._gemTintTexNode = gemTintTexNode;
 
   const vUv = uv();
 
@@ -439,14 +488,12 @@ export function createGrassMaterial(ctx) {
         morphToFar,
       ),
     );
-    vLodMorph.assign(lodMorph);
     const farMorph = smoothstep(float(0.5), float(1.0), lodMorph);
 
     // Distance fade — squared falloff, prevents hard cutoff at field edge
     const fadeBegin = uLodMaxDist.mul(uLodFadeStart);
     const distFadeLinear = smoothstep(uLodMaxDist, fadeBegin, bladeCamDist);
     const distFade = distFadeLinear.mul(distFadeLinear);
-    vDistFade.assign(distFade);
 
     // ── Painted density (cliff density overrides terrain when cliff surface exists) ──
     const terrainDensity = texture(grassDensityTex, terrainUV).x;
@@ -463,13 +510,23 @@ export function createGrassMaterial(ctx) {
     // Stochastic density culling (decorrelated hash)
     const densityHv = hash22(bladeXZ.add(vec2(853.1, 137.9)));
     const densityHash = densityHv.x;
-    const densityCull = smoothstep(
+    let densityCull = smoothstep(
       uGrassDensity.mul(paintedDensity),
       uGrassDensity.mul(paintedDensity).add(float(0.01)),
       densityHash,
     )
       .oneMinus()
       .mul(hasDensity);
+
+    // Fade blades near / past the playable terrain square (same centered extent as
+    // terrain UV: xz in [-uTerrainSize/2, +uTerrainSize/2]). Stops grass on ocean.
+    const mapHalf = uTerrainSize.mul(0.5);
+    const mapEdgeW = max(float(1.5), uTerrainSize.mul(0.004));
+    const outMax = max(abs(bladeXZ.x), abs(bladeXZ.y));
+    const mapStay = float(1).sub(
+      smoothstep(mapHalf.sub(mapEdgeW), mapHalf.add(float(0.35)), outMax),
+    );
+    densityCull = densityCull.mul(mapStay);
 
     // ── Voronoi clumping ──
     const cellP = bladeXZ.div(uClumpScale);
@@ -502,9 +559,10 @@ export function createGrassMaterial(ctx) {
     const crossedBladeH = bladeH.mul(mix(float(1.0), uCrossed, aIsCross));
     const finalBladeH = crossedBladeH.mul(distFade).mul(densityCull);
 
-    // Clump shade varying
-    vClumpShade.assign(
-      mix(float(1.0), mix(float(0.82), float(1.18), cB), clumpInfluence),
+    const clumpShadeV = mix(
+      float(1.0),
+      mix(float(0.82), float(1.18), cB),
+      clumpInfluence,
     );
 
     // ── Color variation hashes (vertex-side for precision) ──
@@ -514,13 +572,12 @@ export function createGrassMaterial(ctx) {
     const warmCol = vec3(0.18, 0.28, 0.02);
     const coolCol = vec3(0.02, 0.18, 0.08);
     const tintTarget = mix(warmCol, coolCol, h4);
-    vColorTint.assign(mix(tintTarget, vec3(1, 1, 1), farMorph));
-    const isDry = smoothstep(uCvDryAmount, float(0.0), h5);
-    vDryBlend.assign(isDry.mul(float(1).sub(farMorph)));
-
-    // Per-blade shade + sat hash — computed here (vertex) to avoid fragment precision noise
-    vRandomShade.assign(mix(float(0.75), float(1.0), h1));
-    vSatHash.assign(hv2.y);
+    const tintRgbV = mix(tintTarget, vec3(1, 1, 1), farMorph);
+    const randomShadeV = mix(float(0.75), float(1.0), h1);
+    vPackGrass0.assign(
+      vec4(lodMorph, distFade, clumpShadeV, randomShadeV),
+    );
+    vPackGrass1.assign(vec4(tintRgbV.x, tintRgbV.y, tintRgbV.z, h5));
 
     // ── Arc bending ──
     const baseStiffness = smoothstep(0.0, uStiffness, vUv.y);
@@ -733,39 +790,75 @@ export function createGrassMaterial(ctx) {
   // COLOR NODE — fragment shader (base color)
   // ════════════════════════════════════════════════════════════
   material.colorNode = Fn(() => {
+    const lodMorph = vPackGrass0.x;
+    const distFade = vPackGrass0.y;
+    const clumpShade = vPackGrass0.z;
+    const randomShade = vPackGrass0.w;
+    const colorTint = vPackGrass1.xyz;
+    const cvH5 = vPackGrass1.w;
+    const farMorphFrag = smoothstep(float(0.5), float(1.0), lodMorph);
+    const dryBlendBase = smoothstep(uCvDryAmount, float(0), cvH5).mul(
+      float(1).sub(farMorphFrag),
+    );
+
     // AO: LOD-modulated (weaker at distance)
     const aoLod = uAoBase.mul(
       mix(
         float(0.5),
         float(1.0),
-        smoothstep(float(0.5), float(0.0), vLodMorph),
+        smoothstep(float(0.5), float(0.0), lodMorph),
       ),
     );
     const ao = mix(aoLod, float(1.0), pow(vUv.y, uAoPower));
     const baseCol = mix(uBladeCol, uTipCol, vUv.y);
 
     // ── Color variation ──
-    const hueCol = mix(baseCol, vColorTint, uCvHueSpread);
+    const hueCol = mix(baseCol, colorTint, uCvHueSpread);
     const lum = dot(hueCol, vec3(0.299, 0.587, 0.114));
-    const satFactor = float(1.0).sub(vSatHash.mul(uCvSatSpread));
+    const satFactor = float(1.0).sub(cvH5.mul(uCvSatSpread));
     const satCol = mix(vec3(lum, lum, lum), hueCol, satFactor);
-    const dryBlend = vDryBlend.mul(
+    const dryBlend = dryBlendBase.mul(
       float(1.0).sub(vUv.y).mul(float(0.5)).add(float(0.5)),
     );
     const dryCol = mix(satCol, uCvDryCol, dryBlend);
     const variedCol = mix(baseCol, dryCol, uColorVar);
 
+    const procTint = groundColorAtWorldXZ(grassWorldXZ);
+    const imgTint = gemTintTexNode.rgb;
+    const isImgMode = step(float(1.49), uTerrainTintMode);
+    const isProcMode = step(float(0.49), uTerrainTintMode).mul(
+      float(1).sub(isImgMode),
+    );
+    const tintRgb = procTint.mul(isProcMode).add(imgTint.mul(isImgMode));
+    const hasMode = isProcMode.add(isImgMode);
+    const rootW = mix(float(1), float(1).sub(vUv.y), uTerrainTintRootBias);
+    const tintAmt = clamp(
+      uTerrainTintStrength.mul(rootW).mul(hasMode),
+      float(0),
+      float(1),
+    );
+    // Match terrain hue without multiplicative crush (dark×dark → black).
+    const lumB = max(dot(variedCol, vec3(0.299, 0.587, 0.114)), float(0.02));
+    const lumT = max(dot(tintRgb, vec3(0.299, 0.587, 0.114)), float(0.1));
+    const tintMatched = clamp(
+      tintRgb.mul(lumB.div(lumT)),
+      float(0),
+      float(2.5),
+    );
+    const tintMixed = mix(tintMatched, tintRgb, float(0.45));
+    const tintedVaried = mix(variedCol, tintMixed, tintAmt);
+
     // Distance fade + clump shade
-    const finalCol = variedCol.mul(
-      vec3(vRandomShade.mul(vClumpShade).mul(ao).mul(vDistFade)),
+    const finalCol = tintedVaried.mul(
+      vec3(randomShade.mul(clumpShade).mul(ao).mul(distFade)),
     );
 
     // LOD debug tint
     const dbHigh = vec3(0.2, 1.0, 0.2);
     const dbMid = vec3(1.0, 1.0, 0.2);
     const dbFar = vec3(0.2, 0.4, 1.0);
-    const midBlend = smoothstep(float(0.2), float(0.5), vLodMorph);
-    const farBlend = smoothstep(float(0.6), float(0.9), vLodMorph);
+    const midBlend = smoothstep(float(0.2), float(0.5), lodMorph);
+    const farBlend = smoothstep(float(0.6), float(0.9), lodMorph);
     const debugTint = mix(mix(dbHigh, dbMid, midBlend), dbFar, farBlend);
     return mix(finalCol, debugTint, uLodDebug);
   })();
@@ -774,6 +867,7 @@ export function createGrassMaterial(ctx) {
   // EMISSIVE NODE — SSS + dual specular
   // ════════════════════════════════════════════════════════════
   material.emissiveNode = Fn(() => {
+    const lodMorph = vPackGrass0.x;
     const N = normalize(vCustomNormal);
     const viewDir = normalize(sub(cameraPosition, positionLocal));
     const heightPct = vUv.y;
@@ -799,7 +893,7 @@ export function createGrassMaterial(ctx) {
       float(1),
     );
 
-    const farFade = smoothstep(float(0.5), float(1.0), vLodMorph);
+    const farFade = smoothstep(float(0.5), float(1.0), lodMorph);
     const sssResult = transmitCol
       .mul(float(0.35))
       .mul(totalSSS)
@@ -813,7 +907,7 @@ export function createGrassMaterial(ctx) {
       length(sub(cameraPosition, positionLocal)),
     );
     const lodSpecFade = float(1).sub(
-      smoothstep(float(0.2), float(0.5), vLodMorph),
+      smoothstep(float(0.2), float(0.5), lodMorph),
     );
     const tipFade1 = smoothstep(float(0.5), float(1.0), heightPct);
 
@@ -904,7 +998,22 @@ export function createGrassMaterialMega(ctx) {
     uLodMaxDist,
     uLodFadeStart,
     uLodDebug,
+    groundColorAtWorldXZ: _groundColorAtWorldXZMega,
+    uTerrainTintMode: _uTerrainTintModeMega,
+    uTerrainTintStrength: _uTerrainTintStrengthMega,
+    uTerrainTintRootBias: _uTerrainTintRootBiasMega,
+    gemGrassTintPlaceholderTex: _gemGrassTintPhMega,
+    uGemImgTexUVScale: _uGemImgTexUVScaleMega,
   } = ctx;
+
+  const groundColorAtWorldXZ =
+    _groundColorAtWorldXZMega ?? ((_xz) => vec3(1, 1, 1));
+  const uTerrainTintMode = _uTerrainTintModeMega ?? uniform(0);
+  const uTerrainTintStrength = _uTerrainTintStrengthMega ?? uniform(0);
+  const uTerrainTintRootBias = _uTerrainTintRootBiasMega ?? uniform(0);
+  const uGemImgTexUVScale = _uGemImgTexUVScaleMega ?? uniform(1);
+  const gemGrassTintPh =
+    _gemGrassTintPhMega ?? _getGrassTintPlaceholderTex();
 
   const cliffHTex = _cliffHTex ?? _getDummyCliffHTex();
   const cliffDTex = _cliffDTex ?? _getDummyCliffDTex();
@@ -912,6 +1021,15 @@ export function createGrassMaterialMega(ctx) {
   const vDistFade = varying(float(1), "v_gm_mg_df");
   const vCustomNormal = varying(vec3(0, 1, 0), "v_gm_mg_cn");
   const vRandomShade = varying(float(1), "v_gm_mg_rs");
+
+  const offRootMega = attribute("offset", "vec3");
+  const grassWorldXZMega = modelWorldMatrix
+    .mul(vec4(offRootMega.x, float(0), offRootMega.z, float(1)))
+    .xz;
+  const gemImgTintUvMega = grassWorldXZMega
+    .div(uTerrainSize)
+    .mul(uGemImgTexUVScale);
+  const gemTintTexNodeMega = texture(gemGrassTintPh, gemImgTintUvMega);
 
   const material = new THREE.MeshStandardNodeMaterial({
     side: THREE.FrontSide,
@@ -922,6 +1040,7 @@ export function createGrassMaterialMega(ctx) {
   material.polygonOffset = true;
   material.polygonOffsetFactor = 1;
   material.polygonOffsetUnits = 1;
+  material.userData._gemTintTexNode = gemTintTexNodeMega;
 
   const vUv = uv();
 
@@ -995,13 +1114,21 @@ export function createGrassMaterialMega(ctx) {
     const hasDensity = smoothstep(float(0.0), float(0.005), paintedDensity);
     const densityHv = hash22(bladeXZ.add(vec2(853.1, 137.9)));
     const densityHash = densityHv.x;
-    const densityCull = smoothstep(
+    let densityCull = smoothstep(
       uGrassDensity.mul(paintedDensity),
       uGrassDensity.mul(paintedDensity).add(float(0.01)),
       densityHash,
     )
       .oneMinus()
       .mul(hasDensity);
+
+    const mapHalfM = uTerrainSize.mul(0.5);
+    const mapEdgeWM = max(float(1.5), uTerrainSize.mul(0.004));
+    const outMaxM = max(abs(bladeXZ.x), abs(bladeXZ.y));
+    const mapStayM = float(1).sub(
+      smoothstep(mapHalfM.sub(mapEdgeWM), mapHalfM.add(float(0.35)), outMaxM),
+    );
+    densityCull = densityCull.mul(mapStayM);
 
     const hv = hash42(bladeXZ);
     const h0 = hv.x;
@@ -1045,7 +1172,30 @@ export function createGrassMaterialMega(ctx) {
     const aoFar = uAoBase.mul(float(0.55));
     const ao = mix(aoFar, float(1.0), pow(vUv.y, uAoPower));
     const baseCol = mix(uBladeCol, uTipCol, vUv.y);
-    const finalCol = baseCol.mul(
+    const procTint = groundColorAtWorldXZ(grassWorldXZMega);
+    const imgTint = gemTintTexNodeMega.rgb;
+    const isImgModeM = step(float(1.49), uTerrainTintMode);
+    const isProcModeM = step(float(0.49), uTerrainTintMode).mul(
+      float(1).sub(isImgModeM),
+    );
+    const tintRgb = procTint.mul(isProcModeM).add(imgTint.mul(isImgModeM));
+    const hasMode = isProcModeM.add(isImgModeM);
+    const rootW = mix(float(1), float(1).sub(vUv.y), uTerrainTintRootBias);
+    const tintAmt = clamp(
+      uTerrainTintStrength.mul(rootW).mul(hasMode),
+      float(0),
+      float(1),
+    );
+    const lumBm = max(dot(baseCol, vec3(0.299, 0.587, 0.114)), float(0.02));
+    const lumTm = max(dot(tintRgb, vec3(0.299, 0.587, 0.114)), float(0.1));
+    const tintMatchedM = clamp(
+      tintRgb.mul(lumBm.div(lumTm)),
+      float(0),
+      float(2.5),
+    );
+    const tintMixedM = mix(tintMatchedM, tintRgb, float(0.45));
+    const tintedBase = mix(baseCol, tintMixedM, tintAmt);
+    const finalCol = tintedBase.mul(
       vec3(vRandomShade.mul(ao).mul(vDistFade)),
     );
     const dbMega = vec3(0.85, 0.35, 1.0);
@@ -1061,6 +1211,10 @@ export function createGrassMaterialMega(ctx) {
 // Camera-relative grid, frustum culling, pooling, hysteresis.
 // MEGA ring: maxDistance < megaMaxDistance, optional geoMega on geosAndMats.
 // Returns { update(charPos) } — call every frame.
+//
+// options.mapWorldHalf — if set (e.g. worldSize * 0.5 for a centered 1600 map),
+// skip grass patch meshes whose footprint does not intersect the playable xz square
+// [-half, +half]². Per-blade fade at edges is handled in the shader via uTerrainSize.
 export function setupGrassPatches(
   scene,
   camera,
@@ -1088,6 +1242,7 @@ export function setupGrassPatches(
     patchSizeMid = patchSize,
     patchSizeFar = patchSize,
     patchSizeMega = 60,
+    mapWorldHalf: initialMapWorldHalf = null,
   } = options;
 
   const poolHigh = { meshes: [], idx: 0 };
@@ -1126,6 +1281,21 @@ export function setupGrassPatches(
     lastFarCount = 0,
     lastMegaCount = 0;
 
+  function patchOverlapsPlayableMap(cellX, cellZ, patchW, mapHalf) {
+    if (mapHalf == null || !Number.isFinite(mapHalf)) return true;
+    const h = patchW * 0.5;
+    const minX = cellX - h;
+    const maxX = cellX + h;
+    const minZ = cellZ - h;
+    const maxZ = cellZ + h;
+    return !(
+      maxX < -mapHalf ||
+      minX > mapHalf ||
+      maxZ < -mapHalf ||
+      minZ > mapHalf
+    );
+  }
+
   function update(opts = {}) {
     const {
       patchSize: ps = patchSize,
@@ -1140,6 +1310,9 @@ export function setupGrassPatches(
       patchSizeFar: psFar = patchSizeFar,
       patchSizeMega: psMega = patchSizeMega,
     } = opts;
+
+    const mapHalf =
+      opts.mapWorldHalf !== undefined ? opts.mapWorldHalf : initialMapWorldHalf;
 
     // Hide all, reset pools
     for (const child of grassGroup.children) child.visible = false;
@@ -1181,6 +1354,7 @@ export function setupGrassPatches(
           const dist = _aabb.distanceToPoint(_camPosXZ);
           if (dist > highMaxEdge) continue;
           if (!_frustum.intersectsBox(_aabb)) continue;
+          if (!patchOverlapsPlayableMap(cellX, cellZ, ps, mapHalf)) continue;
 
           const mesh = getMesh(poolHigh, geoHigh);
           mesh.geometry = geoHigh;
@@ -1228,6 +1402,7 @@ export function setupGrassPatches(
           );
           if (farthestCornerDist < midDist - lodHysteresis) continue;
           if (!_frustum.intersectsBox(_aabb)) continue;
+          if (!patchOverlapsPlayableMap(cellX, cellZ, psMid, mapHalf)) continue;
 
           const mesh = getMesh(poolMid, geoMid);
           mesh.geometry = geoMid;
@@ -1271,6 +1446,7 @@ export function setupGrassPatches(
           );
           if (farthestCornerDist < farDist - lodHysteresis) continue;
           if (!_frustum.intersectsBox(_aabb)) continue;
+          if (!patchOverlapsPlayableMap(cellX, cellZ, psFar, mapHalf)) continue;
 
           const mesh = getMesh(poolFar, geoFar);
           mesh.geometry = geoFar;
@@ -1313,6 +1489,7 @@ export function setupGrassPatches(
           );
           if (farthestCornerDist < maxDist - lodHysteresis) continue;
           if (!_frustum.intersectsBox(_aabb)) continue;
+          if (!patchOverlapsPlayableMap(cellX, cellZ, psMega, mapHalf)) continue;
 
           const mesh = getMesh(poolMega, geoMega, materialMega);
           mesh.geometry = geoMega;

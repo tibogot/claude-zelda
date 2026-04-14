@@ -36,7 +36,8 @@ function packChannelIntoDataTexture(dt, imgEl, channelIdx) {
   tmpCtx.drawImage(imgEl, 0, 0, size, size);
   const src = tmpCtx.getImageData(0, 0, size, size).data;
   const dst = dt.image.data;
-  for (let i = 0, n = dst.length >> 2; i < n; i++) dst[i * 4 + channelIdx] = src[i * 4];
+  for (let i = 0, n = dst.length >> 2; i < n; i++)
+    dst[i * 4 + channelIdx] = src[i * 4];
   dt.needsUpdate = true;
 }
 
@@ -136,14 +137,21 @@ export function createCliffShadingContext(
   const uHeightTexStep = float(4.0 / htexRes);
   const uHeightToWorld = float((4.0 * worldSize) / htexRes);
 
-  const getWorldHeightUV = () => positionWorld.xz.add(uTerrainHalf).div(uTerrainSize);
+  const getWorldHeightUV = () =>
+    positionWorld.xz.add(uTerrainHalf).div(uTerrainSize);
 
   const getHeightTexFlatness = () => {
     const uv = getWorldHeightUV();
     const hR = texture(heightTex, uv.add(vec2(uHeightTexStep, float(0)))).r;
-    const hL = texture(heightTex, uv.add(vec2(uHeightTexStep.negate(), float(0)))).r;
+    const hL = texture(
+      heightTex,
+      uv.add(vec2(uHeightTexStep.negate(), float(0))),
+    ).r;
     const hU = texture(heightTex, uv.add(vec2(float(0), uHeightTexStep))).r;
-    const hD = texture(heightTex, uv.add(vec2(float(0), uHeightTexStep.negate()))).r;
+    const hD = texture(
+      heightTex,
+      uv.add(vec2(float(0), uHeightTexStep.negate())),
+    ).r;
     const dhdx = hR.sub(hL).div(uHeightToWorld.mul(float(2)));
     const dhdz = hU.sub(hD).div(uHeightToWorld.mul(float(2)));
     const steepness = sqrt(dhdx.mul(dhdx).add(dhdz.mul(dhdz)));
@@ -206,13 +214,19 @@ export function createCliffShadingContext(
     const _dZY = texture(rockDataTex, rockUV_ZY);
     const _nxXZ = _dXZ.b.mul(2.0).sub(1.0);
     const _nyXZ = _dXZ.a.mul(2.0).sub(1.0);
-    const _nzXZ = sqrt(max(float(0.0), float(1.0).sub(_nxXZ.mul(_nxXZ)).sub(_nyXZ.mul(_nyXZ))));
+    const _nzXZ = sqrt(
+      max(float(0.0), float(1.0).sub(_nxXZ.mul(_nxXZ)).sub(_nyXZ.mul(_nyXZ))),
+    );
     const _nxXY = _dXY.b.mul(2.0).sub(1.0);
     const _nyXY = _dXY.a.mul(2.0).sub(1.0);
-    const _nzXY = sqrt(max(float(0.0), float(1.0).sub(_nxXY.mul(_nxXY)).sub(_nyXY.mul(_nyXY))));
+    const _nzXY = sqrt(
+      max(float(0.0), float(1.0).sub(_nxXY.mul(_nxXY)).sub(_nyXY.mul(_nyXY))),
+    );
     const _nxZY = _dZY.b.mul(2.0).sub(1.0);
     const _nyZY = _dZY.a.mul(2.0).sub(1.0);
-    const _nzZY = sqrt(max(float(0.0), float(1.0).sub(_nxZY.mul(_nxZY)).sub(_nyZY.mul(_nyZY))));
+    const _nzZY = sqrt(
+      max(float(0.0), float(1.0).sub(_nxZY.mul(_nxZY)).sub(_nyZY.mul(_nyZY))),
+    );
     const _nWXZ = vec3(_nxXZ, _nzXZ, _nyXZ);
     const _nWXY = vec3(_nxXY, _nyXY, _nzXY);
     const _nWZY = vec3(_nzZY, _nyZY, _nxZY);
@@ -225,7 +239,11 @@ export function createCliffShadingContext(
     const flatNm = vec3(0.5, 0.5, 1.0);
     const rock028NmStrength = mix(flatNm, rock028NmRGB, cliffU.uRockNormalStr);
     const flatTerrainNm = vec3(0.5, 0.5, 1.0);
-    return mix(rock028NmStrength, flatTerrainNm, getSlopeMask().pow(cliffU.uRockBlendSharp));
+    return mix(
+      rock028NmStrength,
+      flatTerrainNm,
+      getSlopeMask().pow(cliffU.uRockBlendSharp),
+    );
   };
 
   const buildNormalNode = () =>
@@ -242,13 +260,19 @@ export function createCliffShadingContext(
     const _dZY = texture(rockDataTex, rockUV_ZY);
     const _nxXZ = _dXZ.b.mul(2.0).sub(1.0);
     const _nyXZ = _dXZ.a.mul(2.0).sub(1.0);
-    const _nzXZ = sqrt(max(float(0.0), float(1.0).sub(_nxXZ.mul(_nxXZ)).sub(_nyXZ.mul(_nyXZ))));
+    const _nzXZ = sqrt(
+      max(float(0.0), float(1.0).sub(_nxXZ.mul(_nxXZ)).sub(_nyXZ.mul(_nyXZ))),
+    );
     const _nxXY = _dXY.b.mul(2.0).sub(1.0);
     const _nyXY = _dXY.a.mul(2.0).sub(1.0);
-    const _nzXY = sqrt(max(float(0.0), float(1.0).sub(_nxXY.mul(_nxXY)).sub(_nyXY.mul(_nyXY))));
+    const _nzXY = sqrt(
+      max(float(0.0), float(1.0).sub(_nxXY.mul(_nxXY)).sub(_nyXY.mul(_nyXY))),
+    );
     const _nxZY = _dZY.b.mul(2.0).sub(1.0);
     const _nyZY = _dZY.a.mul(2.0).sub(1.0);
-    const _nzZY = sqrt(max(float(0.0), float(1.0).sub(_nxZY.mul(_nxZY)).sub(_nyZY.mul(_nyZY))));
+    const _nzZY = sqrt(
+      max(float(0.0), float(1.0).sub(_nxZY.mul(_nxZY)).sub(_nyZY.mul(_nyZY))),
+    );
     const _nWXZ = vec3(_nxXZ, _nzXZ, _nyXZ);
     const _nWXY = vec3(_nxXY, _nyXY, _nzXY);
     const _nWZY = vec3(_nzZY, _nyZY, _nxZY);
@@ -282,7 +306,11 @@ export function createCliffShadingContext(
   /** Call only inside `Fn(() => { ... })` — cliff-only roughness before image-slot mix. */
   const evaluateRoughnessInFn = () => {
     const baseRough = float(0.85);
-    return mix(evaluateRockRoughnessRawInFn(), baseRough, getSlopeMask().pow(cliffU.uRockBlendSharp));
+    return mix(
+      evaluateRockRoughnessRawInFn(),
+      baseRough,
+      getSlopeMask().pow(cliffU.uRockBlendSharp),
+    );
   };
 
   const buildRoughnessNode = () => Fn(() => evaluateRoughnessInFn())();
@@ -347,7 +375,13 @@ export function createChunkSplatCliffMaterial(
     col = mix(col, layG, s.g);
     col = mix(col, layB, s.b);
     if (imgWeightTex && imageSlots) {
-      col = applyImageSlotAlbedoAndAO(col, cs, float(worldSize), imgWeightTex, imageSlots);
+      col = applyImageSlotAlbedoAndAO(
+        col,
+        cs,
+        float(worldSize),
+        imgWeightTex,
+        imageSlots,
+      );
     }
     return cliff.augmentColor(col);
   })();
@@ -357,7 +391,11 @@ export function createChunkSplatCliffMaterial(
       const cliffRawNm = cliff.evaluateNormalInFn();
       const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));
       const imgW = texture(imgWeightTex, splatUV);
-      const { raw: imgRawNm, weight: imgSlotW } = evaluateImageSlotNormalRaw(float(worldSize), imageSlots, imgW);
+      const { raw: imgRawNm, weight: imgSlotW } = evaluateImageSlotNormalRaw(
+        float(worldSize),
+        imageSlots,
+        imgW,
+      );
       const combined = mix(cliffRawNm, imgRawNm, imgSlotW);
       return normalMap(combined, vec2(0.25, 0.25));
     })();
