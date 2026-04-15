@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { SkyMesh } from "three/addons/objects/SkyMesh.js";
 import { V2_CONFIG } from "./config.js";
@@ -10,6 +11,7 @@ import { ChunkStreamManager } from "../core/streaming/chunkStreamManager.js";
 import { SculptSystem } from "../tools/sculpt/sculptSystem.js";
 import { createTweakpaneUi } from "../ui/tweakpaneUi.js";
 import { createHud } from "../ui/hud.js";
+import { createLensFlareSystem } from "../effects/lensFlare.js";
 
 export async function startV2App() {
   const config = structuredClone(V2_CONFIG);
@@ -17,7 +19,8 @@ export async function startV2App() {
   const perf = createPerfState();
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(config.render.clearColor);
+  // splatmap-chunks.html: physical sky + PMREM — background stays null so SkyMesh fills the view.
+  scene.background = null;
 
   const camera = new THREE.PerspectiveCamera(
     65,
@@ -36,6 +39,16 @@ export async function startV2App() {
   document.body.appendChild(renderer.domElement);
   await renderer.init();
 
+  /** Same convention as `splatmap-chunks.html` `sunDirectionFromAngles`. */
+  const sunDir = new THREE.Vector3();
+  function sunDirectionFromAngles(azDeg, elDeg, target = new THREE.Vector3()) {
+    const az = THREE.MathUtils.degToRad(azDeg);
+    const el = THREE.MathUtils.degToRad(elDeg);
+    return target
+      .set(Math.cos(el) * Math.cos(az), Math.sin(el), Math.cos(el) * Math.sin(az))
+      .normalize();
+  }
+
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.target.set(0, 10, 0);
   controls.enableDamping = true;
@@ -48,24 +61,90 @@ export async function startV2App() {
     RIGHT: THREE.MOUSE.PAN,
   };
 
-  const hemi = new THREE.HemisphereLight(0xd7ebff, 0x5d6460, toolState.sky.hemiIntensity);
+  const L = toolState.light;
+  const hemi = new THREE.HemisphereLight(L.hemiSkyColor, L.hemiGroundColor, L.hemiIntensity);
   scene.add(hemi);
 
-  const sun = new THREE.DirectionalLight(0xfff8ea, toolState.sky.sunIntensity);
+  const sun = new THREE.DirectionalLight(L.dirColor, L.dirIntensity);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
-  sun.shadow.camera.near = 0.1;
-  sun.shadow.camera.far = 2500;
-  sun.shadow.camera.left = -500;
-  sun.shadow.camera.right = 500;
-  sun.shadow.camera.top = 500;
-  sun.shadow.camera.bottom = -500;
+  const shadowTarget = new THREE.Object3D();
+  scene.add(shadowTarget);
+  sun.target = shadowTarget;
+  sun.shadow.mapSize.set(toolState.csm.mapSize, toolState.csm.mapSize);
+  sun.shadow.camera.near = 1;
+  sun.shadow.camera.far = 300;
+  sun.shadow.camera.left = sun.shadow.camera.bottom = -300;
+  sun.shadow.camera.right = sun.shadow.camera.top = 300;
+  sun.shadow.bias = L.shadowBias;
+  sun.shadow.normalBias = L.shadowNormalBias;
   scene.add(sun);
-  scene.add(sun.target);
+
+  /** splatmap-chunks.html: `CSMShadowNode` (WebGPU); falls back to plain shadow if init fails. */
+  let csm = null;
+  let _lastCsmCascades = toolState.csm.cascades;
+  let _lastCsmMaxFar = toolState.csm.maxFar;
+  let _lastCsmMargin = toolState.csm.lightMargin;
+  let _lastCsmMapSize = toolState.csm.mapSize;
+
+  function setCsmEnabled(on) {
+    if (!sun.shadow) return;
+    sun.shadow.shadowNode = on && csm ? csm : null;
+  }
+
+  try {
+    if (renderer.shadowMap) {
+      csm = new CSMShadowNode(sun, {
+        cascades: toolState.csm.cascades,
+        maxFar: toolState.csm.maxFar,
+        mode: "practical",
+        lightMargin: toolState.csm.lightMargin,
+      });
+      if (csm.lights.length > 2) {
+        csm.lights[2].shadow.mapSize.set(1024, 1024);
+      }
+      if (toolState.csm.enabled) {
+        sun.shadow.shadowNode = csm;
+      }
+    }
+  } catch (err) {
+    console.warn("[V2] CSMShadowNode init failed; using non-CSM directional shadow.", err);
+    csm = null;
+  }
 
   const sky = new SkyMesh();
-  sky.scale.setScalar(4500);
+  sky.scale.setScalar(toolState.physicalSky.meshScale);
+  if (sky.material) sky.material.fog = false;
   scene.add(sky);
+
+  let pmremGenerator = null;
+  let disposeSkyEnv = null;
+  function applyPhysicalSkyMeshUniforms() {
+    const S = toolState.physicalSky;
+    sky.turbidity.value = S.turbidity;
+    sky.rayleigh.value = S.rayleigh;
+    sky.mieCoefficient.value = S.mie;
+    sky.mieDirectionalG.value = S.mieG;
+    sky.cloudCoverage.value = S.cloudCoverage;
+    sky.cloudDensity.value = S.cloudDensity;
+    sky.cloudElevation.value = S.cloudElevation;
+  }
+
+  function rebuildSkyEnv() {
+    try {
+      if (disposeSkyEnv) {
+        disposeSkyEnv();
+        disposeSkyEnv = null;
+      }
+      pmremGenerator = pmremGenerator ?? new THREE.PMREMGenerator(renderer);
+      const envScene = new THREE.Scene();
+      envScene.add(sky.clone());
+      const pmremRT = pmremGenerator.fromScene(envScene, 0.04);
+      scene.environment = pmremRT.texture;
+      disposeSkyEnv = () => pmremRT.dispose();
+    } catch (err) {
+      console.warn("[V2] PMREM from SkyMesh failed; IBL disabled.", err);
+    }
+  }
 
   const terrainStore = new TerrainStore(config);
   terrainStore.preloadChunksInRadius(0, 0, 4);
@@ -95,6 +174,8 @@ export async function startV2App() {
     onConfigChanged: () => {
       chunkStream.update(camera.position);
     },
+    onRebuildSkyEnv: rebuildSkyEnv,
+    onCsmEnabledChange: setCsmEnabled,
   });
 
   const ring = new THREE.Mesh(
@@ -111,25 +192,36 @@ export async function startV2App() {
   let hudLastMs = 0;
 
   function updateSunSky() {
-    const elev = THREE.MathUtils.degToRad(toolState.sky.elevationDeg);
-    const az = THREE.MathUtils.degToRad(toolState.sky.azimuthDeg);
-    const dir = new THREE.Vector3(
-      Math.cos(elev) * Math.sin(az),
-      Math.sin(elev),
-      Math.cos(elev) * Math.cos(az),
-    ).normalize();
-    sun.position.copy(dir).multiplyScalar(700);
-    sun.target.position.set(0, 0, 0);
-    hemi.intensity = toolState.sky.hemiIntensity;
-    sun.intensity = toolState.sky.sunIntensity;
+    const Li = toolState.light;
+    sunDirectionFromAngles(Li.sunAzimuth, Li.sunElevation, sunDir);
+    sun.position.copy(sunDir).multiplyScalar(Li.sunDistance);
+    sun.color.set(Li.dirColor);
+    sun.intensity = Li.dirIntensity;
+    hemi.color.set(Li.hemiSkyColor);
+    hemi.groundColor.set(Li.hemiGroundColor);
+    hemi.intensity = Li.hemiIntensity;
+    sun.shadow.bias = Li.shadowBias;
+    sun.shadow.normalBias = Li.shadowNormalBias;
+    renderer.toneMappingExposure = Li.exposure;
+    scene.environmentIntensity = Li.envIntensity;
+    applyPhysicalSkyMeshUniforms();
+    sky.scale.setScalar(toolState.physicalSky.meshScale);
     if (sky.sunPosition?.value?.copy) {
-      sky.sunPosition.value.copy(dir);
+      sky.sunPosition.value.copy(sunDir);
     } else if (sky.sunPosition?.copy) {
-      // Fallback for potential SkyMesh API variation.
-      sky.sunPosition.copy(dir);
+      sky.sunPosition.copy(sunDir);
     }
-    sky.position.copy(camera.position);
   }
+
+  updateSunSky();
+  rebuildSkyEnv();
+
+  const lensFlare = createLensFlareSystem({
+    scene,
+    camera,
+    getSunDir: () => sunDir,
+    getParams: () => toolState.lensFlare,
+  });
 
   function updatePointer(event) {
     const rect = renderer.domElement.getBoundingClientRect();
@@ -236,6 +328,35 @@ export async function startV2App() {
 
     controls.update();
     updateSunSky();
+    lensFlare.update();
+
+    shadowTarget.position.set(camera.position.x, 0, camera.position.z);
+    const csmCfg = toolState.csm;
+    const csmChanged =
+      csm &&
+      csmCfg.enabled &&
+      (csmCfg.cascades !== _lastCsmCascades ||
+        csmCfg.maxFar !== _lastCsmMaxFar ||
+        csmCfg.lightMargin !== _lastCsmMargin ||
+        csmCfg.mapSize !== _lastCsmMapSize);
+    if (csm?.mainFrustum && csmChanged) {
+      _lastCsmCascades = csmCfg.cascades;
+      _lastCsmMaxFar = csmCfg.maxFar;
+      _lastCsmMargin = csmCfg.lightMargin;
+      _lastCsmMapSize = csmCfg.mapSize;
+      csm.cascades = csmCfg.cascades;
+      csm.maxFar = csmCfg.maxFar;
+      csm.lightMargin = csmCfg.lightMargin;
+      sun.shadow.mapSize.set(csmCfg.mapSize, csmCfg.mapSize);
+      if (csm.lights.length > 2) {
+        csm.lights[2].shadow.mapSize.set(1024, 1024);
+      }
+      csm.updateFrustums();
+    }
+    if (csm?.mainFrustum && csmCfg.enabled && csmCfg.updateEveryFrame) {
+      csm.updateFrustums();
+    }
+
     chunkStream.update(camera.position);
 
     let tris = 0;
@@ -258,6 +379,16 @@ export async function startV2App() {
     renderer,
     dispose() {
       renderer.domElement.removeEventListener("wheel", onCanvasWheelBrush, { capture: true });
+      if (csm) {
+        sun.shadow.shadowNode = null;
+        csm.dispose();
+        csm = null;
+      }
+      scene.environment = null;
+      if (disposeSkyEnv) disposeSkyEnv();
+      if (pmremGenerator) pmremGenerator.dispose();
+      sky.dispose?.();
+      lensFlare.dispose();
       ui.dispose();
       chunkStream.dispose();
       terrainMaterial.dispose();

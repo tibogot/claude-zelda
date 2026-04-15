@@ -15,12 +15,10 @@ export function createToolState() {
       lodEnabled: true,
       activeRadiusInChunks: V2_CONFIG.lod.activeRadiusInChunks,
     },
-    sky: {
-      elevationDeg: 48,
-      azimuthDeg: 34,
-      sunIntensity: 1.7,
-      hemiIntensity: 0.35,
-    },
+    light: { ...V2_CONFIG.light },
+    physicalSky: { ...V2_CONFIG.physicalSky },
+    lensFlare: { ...V2_CONFIG.lensFlare },
+    csm: { ...V2_CONFIG.csm },
   };
 }
 

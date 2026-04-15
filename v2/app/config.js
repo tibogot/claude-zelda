@@ -5,6 +5,9 @@ export const V2_CONFIG = {
     dataResolution: 64,
     minHeight: -60,
     maxHeight: 180,
+    /** When true, new chunks are filled with `initialHeight` instead of `sampleInitialHeight` noise. */
+    flatInitialTerrain: true,
+    initialHeight: 0,
   },
   lod: {
     enabled: true,
@@ -56,6 +59,54 @@ export const V2_CONFIG = {
     terrainSkirtDepth: 80,
     maxPixelRatio: 2,
     clearColor: 0xa3c7df,
+  },
+  /** Defaults from `splatmap-chunks.html` PARAMS.light (sun + fill + tone exposure). */
+  light: {
+    sunAzimuth: 135,
+    sunElevation: 43,
+    dirColor: "#fff5e0",
+    dirIntensity: 2.2,
+    hemiSkyColor: "#c8e0ff",
+    hemiGroundColor: "#88aa55",
+    hemiIntensity: 0.4,
+    envIntensity: 0.2,
+    exposure: 0.5,
+    sunDistance: 600,
+    shadowBias: -0.0005,
+    shadowNormalBias: 0.02,
+  },
+  /** `splatmap-chunks.html` PARAMS.lensFlare — sun-anchored screen-space flare. */
+  lensFlare: {
+    enabled: true,
+    intensity: 3.0,
+    halationSize: 3.0,
+    halationColor: "#ffdca8",
+    streakLength: 0.0,
+    streakOpacity: 0.7,
+    streakColor: "#8cc8ff",
+    ghostOpacity: 2.0,
+    ghostSpacing: 1.0,
+    dirtOpacity: 0.0,
+  },
+  /** `splatmap-chunks.html` PARAMS.sky when mode === "physical" (SkyMesh uniforms). */
+  physicalSky: {
+    turbidity: 2,
+    rayleigh: 1.5,
+    mie: 0.005,
+    mieG: 0.8,
+    cloudCoverage: 0.4,
+    cloudDensity: 0.4,
+    cloudElevation: 0.5,
+    meshScale: 10000,
+  },
+  /** `splatmap-chunks.html` PARAMS.csm — WebGPU `CSMShadowNode` on the sun. */
+  csm: {
+    enabled: true,
+    cascades: 2,
+    maxFar: 300,
+    lightMargin: 100,
+    mapSize: 2048,
+    updateEveryFrame: false,
   },
 };
 

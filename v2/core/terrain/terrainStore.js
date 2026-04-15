@@ -28,11 +28,15 @@ export class TerrainStore {
     const minZ = chunkMinWorldZ(cz, this.config);
     const step = this.config.world.chunkSize / res;
 
+    const flat = !!this.config.world.flatInitialTerrain;
+    const flatY = this.config.world.initialHeight ?? 0;
     for (let iz = 0; iz <= res; iz++) {
       const wz = minZ + iz * step;
       for (let ix = 0; ix <= res; ix++) {
         const wx = minX + ix * step;
-        heights[getChunkDataIndex(ix, iz, this.config)] = this.sampleInitialHeight(wx, wz);
+        heights[getChunkDataIndex(ix, iz, this.config)] = flat
+          ? flatY
+          : this.sampleInitialHeight(wx, wz);
       }
     }
 
