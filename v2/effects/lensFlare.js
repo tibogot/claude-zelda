@@ -150,6 +150,7 @@ function makeFlareMat(tex, colorHex) {
   const sampled = texture(tex, uv());
   m.colorNode = mul(sampled.rgb, uCol);
   m.opacityNode = mul(sampled.a, uInt);
+  m.fog = false;
   m.userData = { uCol, uInt };
   return m;
 }

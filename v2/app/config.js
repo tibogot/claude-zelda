@@ -108,6 +108,20 @@ export const V2_CONFIG = {
     mapSize: 2048,
     updateEveryFrame: false,
   },
+  /** WebGPU TSL fog — same defaults as `splatmap-chunks.html` PARAMS.fog. */
+  fog: {
+    height: {
+      enabled: false,
+      color: "#a8c4e0",
+      density: 0.05,
+      height: 2.0,
+    },
+    distance: {
+      enabled: false,
+      color: "#d0e4f0",
+      density: 0.006,
+    },
+  },
 };
 
 export function getChunkCountPerAxis(config = V2_CONFIG) {

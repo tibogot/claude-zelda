@@ -19,6 +19,10 @@ export function createToolState() {
     physicalSky: { ...V2_CONFIG.physicalSky },
     lensFlare: { ...V2_CONFIG.lensFlare },
     csm: { ...V2_CONFIG.csm },
+    fog: {
+      height: { ...V2_CONFIG.fog.height },
+      distance: { ...V2_CONFIG.fog.distance },
+    },
   };
 }
 

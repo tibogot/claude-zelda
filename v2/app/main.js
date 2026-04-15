@@ -1,4 +1,12 @@
 import * as THREE from "three";
+import {
+  uniform,
+  mix,
+  clamp,
+  fog,
+  exponentialHeightFogFactor,
+  densityFogFactor,
+} from "three/tsl";
 import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { SkyMesh } from "three/addons/objects/SkyMesh.js";
@@ -116,6 +124,35 @@ export async function startV2App() {
   if (sky.material) sky.material.fog = false;
   scene.add(sky);
 
+  const F = toolState.fog;
+  const uHFogEnabled = uniform(F.height.enabled ? 1 : 0);
+  const uHFogColor = uniform(new THREE.Color(F.height.color).convertSRGBToLinear());
+  const uHFogDensity = uniform(F.height.density);
+  const uHFogHeight = uniform(F.height.height);
+  const uDFogEnabled = uniform(F.distance.enabled ? 1 : 0);
+  const uDFogColor = uniform(new THREE.Color(F.distance.color).convertSRGBToLinear());
+  const uDFogDensity = uniform(F.distance.density);
+  const _hFactor = exponentialHeightFogFactor(uHFogDensity, uHFogHeight).mul(uHFogEnabled);
+  const _dFactor = densityFogFactor(uDFogDensity).mul(uDFogEnabled);
+  const _combinedFactor = clamp(_hFactor.add(_dFactor), 0, 1);
+  const _totalW = _hFactor.add(_dFactor).add(0.0001);
+  const _blendedFogColor = mix(uHFogColor, uDFogColor, _dFactor.div(_totalW));
+  const _combinedFogNode = fog(_blendedFogColor, _combinedFactor);
+
+  // Same as splatmap-chunks.html: assign fogNode ONCE — toggling scene.fogNode at runtime
+  // forces every material to recompile (WebGPU watchdog / device lost). Uniforms zero the effect when off.
+  scene.fogNode = _combinedFogNode;
+  function syncFog() {
+    uHFogEnabled.value = F.height.enabled ? 1 : 0;
+    uHFogColor.value.set(F.height.color).convertSRGBToLinear();
+    uHFogDensity.value = F.height.density;
+    uHFogHeight.value = F.height.height;
+    uDFogEnabled.value = F.distance.enabled ? 1 : 0;
+    uDFogColor.value.set(F.distance.color).convertSRGBToLinear();
+    uDFogDensity.value = F.distance.density;
+  }
+  syncFog();
+
   let pmremGenerator = null;
   let disposeSkyEnv = null;
   function applyPhysicalSkyMeshUniforms() {
@@ -176,6 +213,7 @@ export async function startV2App() {
     },
     onRebuildSkyEnv: rebuildSkyEnv,
     onCsmEnabledChange: setCsmEnabled,
+    onFogChange: syncFog,
   });
 
   const ring = new THREE.Mesh(
@@ -184,6 +222,7 @@ export async function startV2App() {
   );
   ring.rotation.x = Math.PI * 0.5;
   ring.visible = false;
+  ring.material.fog = false;
   scene.add(ring);
 
   const raycaster = new THREE.Raycaster();

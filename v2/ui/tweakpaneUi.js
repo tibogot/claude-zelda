@@ -9,6 +9,7 @@ export function createTweakpaneUi({
   perf,
   onRebuildSkyEnv,
   onCsmEnabledChange,
+  onFogChange,
 }) {
   const pane = new Pane({ title: "V2 Terrain Core" });
 
@@ -43,82 +44,123 @@ export function createTweakpaneUi({
     label: "Shape",
   });
 
-  const lightFolder = pane.addFolder({ title: "Light (v1 defaults)", expanded: false });
-  lightFolder.addBinding(toolState.light, "sunAzimuth", {
-    label: "Sun azimuth°",
+  /** Same hierarchy as `splatmap-chunks.html` → `environmentFolder` ("Lighting & atmosphere"). */
+  const environmentFolder = pane.addFolder({
+    title: "Lighting & atmosphere",
+    expanded: false,
+  });
+
+  const sunExposureFolder = environmentFolder.addFolder({
+    title: "Sun & exposure",
+    expanded: false,
+  });
+  sunExposureFolder.addBinding(toolState.light, "sunAzimuth", {
+    label: "Sun azimuth",
     min: 0,
     max: 360,
     step: 1,
   });
-  lightFolder.addBinding(toolState.light, "sunElevation", {
-    label: "Sun elevation°",
-    min: -5,
-    max: 89,
+  sunExposureFolder.addBinding(toolState.light, "sunElevation", {
+    label: "Sun elevation",
+    min: -10,
+    max: 90,
     step: 1,
   });
-  lightFolder.addBinding(toolState.light, "dirColor", { label: "Sun color" });
-  lightFolder.addBinding(toolState.light, "dirIntensity", {
+  sunExposureFolder.addBinding(toolState.light, "dirColor", {
+    label: "Sun color",
+    view: "color",
+  });
+  sunExposureFolder.addBinding(toolState.light, "dirIntensity", {
     label: "Sun intensity",
     min: 0,
     max: 5,
-    step: 0.05,
+    step: 0.1,
   });
-  lightFolder.addBinding(toolState.light, "hemiSkyColor", { label: "Hemi sky" });
-  lightFolder.addBinding(toolState.light, "hemiGroundColor", { label: "Hemi ground" });
-  lightFolder.addBinding(toolState.light, "hemiIntensity", {
-    label: "Hemi intensity",
-    min: 0,
-    max: 2,
-    step: 0.02,
-  });
-  lightFolder.addBinding(toolState.light, "envIntensity", {
-    label: "Env intensity",
-    min: 0,
-    max: 2,
-    step: 0.02,
-  });
-  lightFolder.addBinding(toolState.light, "exposure", {
-    label: "Tone exposure",
-    min: 0.1,
-    max: 2,
-    step: 0.02,
-  });
-  lightFolder.addBinding(toolState.light, "sunDistance", {
+  sunExposureFolder.addBinding(toolState.light, "sunDistance", {
     label: "Sun distance",
     min: 200,
     max: 2000,
     step: 10,
   });
-  lightFolder.addBinding(toolState.light, "shadowBias", {
-    label: "Shadow bias",
-    min: -0.002,
-    max: 0.002,
+  sunExposureFolder.addBlade({ view: "separator" });
+  sunExposureFolder.addBinding(toolState.light, "hemiSkyColor", {
+    label: "Ambient sky",
+    view: "color",
+  });
+  sunExposureFolder.addBinding(toolState.light, "hemiGroundColor", {
+    label: "Ambient ground",
+    view: "color",
+  });
+  sunExposureFolder.addBinding(toolState.light, "hemiIntensity", {
+    label: "Ambient intensity",
+    min: 0,
+    max: 3,
+    step: 0.1,
+  });
+  sunExposureFolder.addBlade({ view: "separator" });
+  sunExposureFolder.addBinding(toolState.light, "envIntensity", {
+    label: "Env map",
+    min: 0,
+    max: 2,
+    step: 0.01,
+  });
+  sunExposureFolder.addBinding(toolState.light, "exposure", {
+    label: "Exposure",
+    min: 0.1,
+    max: 2,
+    step: 0.05,
+  });
+  sunExposureFolder.addBlade({ view: "separator" });
+
+  const csmFolder = sunExposureFolder.addFolder({
+    title: "Shadows (CSM)",
+    expanded: false,
+  });
+  csmFolder
+    .addBinding(toolState.csm, "enabled", { label: "CSM enabled" })
+    .on("change", () => onCsmEnabledChange?.(toolState.csm.enabled));
+  csmFolder.addBinding(toolState.csm, "updateEveryFrame", { label: "Update every frame" });
+  csmFolder.addBinding(toolState.light, "shadowBias", {
+    label: "Bias",
+    min: -0.01,
+    max: 0.001,
     step: 0.0001,
   });
-  lightFolder.addBinding(toolState.light, "shadowNormalBias", {
-    label: "Shadow n.bias",
+  csmFolder.addBinding(toolState.light, "shadowNormalBias", {
+    label: "Normal bias",
     min: 0,
-    max: 0.1,
+    max: 0.2,
     step: 0.001,
   });
+  csmFolder.addBinding(toolState.csm, "cascades", {
+    label: "Cascades",
+    min: 1,
+    max: 4,
+    step: 1,
+  });
+  csmFolder.addBinding(toolState.csm, "maxFar", {
+    label: "Max far",
+    min: 30,
+    max: 600,
+    step: 10,
+  });
+  csmFolder.addBinding(toolState.csm, "lightMargin", {
+    label: "Light margin",
+    min: 0,
+    max: 400,
+    step: 10,
+  });
+  csmFolder.addBinding(toolState.csm, "mapSize", {
+    label: "Map size",
+    min: 512,
+    max: 4096,
+    step: 512,
+  });
 
-  const skyFolder = pane.addFolder({ title: "Physical sky", expanded: false });
-  const skyChange = () => onRebuildSkyEnv?.();
-  skyFolder.addBinding(toolState.physicalSky, "meshScale", {
-    label: "Dome scale",
-    min: 2000,
-    max: 20000,
-    step: 100,
-  }).on("change", skyChange);
-  skyFolder.addBinding(toolState.physicalSky, "turbidity", { min: 0, max: 20, step: 0.1 }).on("change", skyChange);
-  skyFolder.addBinding(toolState.physicalSky, "rayleigh", { min: 0, max: 4, step: 0.05 }).on("change", skyChange);
-  skyFolder.addBinding(toolState.physicalSky, "mie", { min: 0, max: 0.1, step: 0.001 }).on("change", skyChange);
-  skyFolder.addBinding(toolState.physicalSky, "mieG", { min: 0, max: 1, step: 0.01 }).on("change", skyChange);
-  skyFolder.addBinding(toolState.physicalSky, "cloudCoverage", { min: 0, max: 1, step: 0.02 }).on("change", skyChange);
-  skyFolder.addBinding(toolState.physicalSky, "cloudDensity", { min: 0, max: 1, step: 0.02 }).on("change", skyChange);
-  skyFolder.addBinding(toolState.physicalSky, "cloudElevation", { min: 0, max: 1, step: 0.02 }).on("change", skyChange);
-
-  const lensFlareFolder = pane.addFolder({ title: "Lens flare", expanded: false });
+  const lensFlareFolder = environmentFolder.addFolder({
+    title: "Lens flare",
+    expanded: false,
+  });
   lensFlareFolder.addBinding(toolState.lensFlare, "enabled", { label: "Enabled" });
   lensFlareFolder.addBinding(toolState.lensFlare, "intensity", {
     label: "Master intensity",
@@ -171,35 +213,74 @@ export function createTweakpaneUi({
     step: 0.05,
   });
 
-  const csmFolder = pane.addFolder({ title: "CSM shadows", expanded: false });
-  csmFolder
-    .addBinding(toolState.csm, "enabled", { label: "Enabled" })
-    .on("change", () => onCsmEnabledChange?.(toolState.csm.enabled));
-  csmFolder.addBinding(toolState.csm, "updateEveryFrame", { label: "Update every frame" });
-  csmFolder.addBinding(toolState.csm, "cascades", {
-    label: "Cascades",
-    min: 1,
-    max: 4,
-    step: 1,
+  const skyFolder = environmentFolder.addFolder({
+    title: "Sky & fog",
+    expanded: false,
   });
-  csmFolder.addBinding(toolState.csm, "maxFar", {
-    label: "Max far",
-    min: 50,
-    max: 2000,
-    step: 10,
+  const skyChange = () => onRebuildSkyEnv?.();
+  skyFolder.addBinding(toolState.physicalSky, "meshScale", {
+    label: "Dome scale",
+    min: 2000,
+    max: 20000,
+    step: 100,
+  }).on("change", skyChange);
+  skyFolder.addBinding(toolState.physicalSky, "turbidity", { min: 0, max: 20, step: 0.1 }).on("change", skyChange);
+  skyFolder.addBinding(toolState.physicalSky, "rayleigh", { min: 0, max: 4, step: 0.05 }).on("change", skyChange);
+  skyFolder.addBinding(toolState.physicalSky, "mie", { min: 0, max: 0.1, step: 0.001 }).on("change", skyChange);
+  skyFolder.addBinding(toolState.physicalSky, "mieG", { min: 0, max: 1, step: 0.01 }).on("change", skyChange);
+  skyFolder.addBinding(toolState.physicalSky, "cloudCoverage", { min: 0, max: 1, step: 0.02 }).on("change", skyChange);
+  skyFolder.addBinding(toolState.physicalSky, "cloudDensity", { min: 0, max: 1, step: 0.02 }).on("change", skyChange);
+  skyFolder.addBinding(toolState.physicalSky, "cloudElevation", { min: 0, max: 1, step: 0.02 }).on("change", skyChange);
+
+  const fogFolder = skyFolder.addFolder({
+    title: "Fog",
+    expanded: false,
   });
-  csmFolder.addBinding(toolState.csm, "lightMargin", {
-    label: "Light margin",
-    min: 0,
-    max: 400,
-    step: 5,
+  const hFogFolder = fogFolder.addFolder({
+    title: "Height Fog",
+    expanded: true,
   });
-  csmFolder.addBinding(toolState.csm, "mapSize", {
-    label: "Map size",
-    min: 512,
-    max: 4096,
-    step: 256,
+  hFogFolder
+    .addBinding(toolState.fog.height, "enabled", { label: "Enabled" })
+    .on("change", onFogChange);
+  hFogFolder
+    .addBinding(toolState.fog.height, "color", { label: "Color", view: "color" })
+    .on("change", onFogChange);
+  hFogFolder
+    .addBinding(toolState.fog.height, "density", {
+      label: "Density",
+      min: 0.001,
+      max: 0.3,
+      step: 0.001,
+    })
+    .on("change", onFogChange);
+  hFogFolder
+    .addBinding(toolState.fog.height, "height", {
+      label: "Base height",
+      min: -10,
+      max: 40,
+      step: 0.5,
+    })
+    .on("change", onFogChange);
+
+  const dFogFolder = fogFolder.addFolder({
+    title: "Distance Fog",
+    expanded: true,
   });
+  dFogFolder
+    .addBinding(toolState.fog.distance, "enabled", { label: "Enabled" })
+    .on("change", onFogChange);
+  dFogFolder
+    .addBinding(toolState.fog.distance, "color", { label: "Color", view: "color" })
+    .on("change", onFogChange);
+  dFogFolder
+    .addBinding(toolState.fog.distance, "density", {
+      label: "Density",
+      min: 0.0001,
+      max: 0.05,
+      step: 0.0001,
+    })
+    .on("change", onFogChange);
 
   const sculptFolder = pane.addFolder({ title: "Sculpt" });
   sculptFolder.addBinding(toolState, "sculptMode", {
@@ -218,8 +299,8 @@ export function createTweakpaneUi({
     label: "Stroke spacing",
   });
 
-  const fbmPeakFolder = pane.addFolder({
-    title: "FBM peak (tool)",
+  const fbmPeakFolder = sculptFolder.addFolder({
+    title: "FBM peak stamp",
     expanded: false,
   });
   fbmPeakFolder.addBinding(toolState.fbmPeak, "freqMul", {
