@@ -107,7 +107,7 @@ export function loadRock028Textures() {
 /** Same defaults as splatmap-painter slope + rock folders (TSL uniform nodes). */
 export function createAutoCliffUniforms() {
   return {
-    uSlopeStart: uniform(0.05),
+    uSlopeStart: uniform(0.6),
     uSlopeEnd: uniform(0.7),
     uRockScale: uniform(0.05),
     uRockBrightness: uniform(0.85),

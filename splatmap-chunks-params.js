@@ -31,7 +31,7 @@ export const PARAMS = {
   /** Painter-style Rock028 + heightTex slope mask on splat + TSL ground surfaces. */
   autoCliffEnabled: true,
   autoCliff: {
-    slopeStart: 0.05,
+    slopeStart: 0.6,
     slopeEnd: 0.7,
     rockScale: 0.05,
     rockBrightness: 0.85,
