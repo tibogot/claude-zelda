@@ -3091,7 +3091,15 @@ function exportTerrainJson() {
         lodParams.treeLodRelaxGpuWhilePainting,
     },
     treeLod: LOD_SLOTS.map((s) => {
-      const o = { name: s.name, positions: s.positions };
+      const o = {
+        name: s.name,
+        positions: (s.positions || []).map((p) => {
+          const row = { x: p.x, y: p.y, z: p.z, scale: p.scale };
+          if (typeof p.rot === "number" && Number.isFinite(p.rot))
+            row.rot = p.rot;
+          return row;
+        }),
+      };
       if (s.meshScale != null && s.meshScale !== 1)
         o.meshScale = s.meshScale;
       if (s.name === "Pine") {
@@ -3376,6 +3384,7 @@ function importTerrainJson(text) {
       if (i >= LOD_SLOTS.length) return;
       const slot = LOD_SLOTS[i];
       slot.positions = entry.positions || [];
+      _sanitizeTreeLodPositionsFromJson(slot.positions);
       if (typeof entry.meshScale === "number")
         slot.meshScale = entry.meshScale;
       if (slot.name === "Pine") {
@@ -7267,8 +7276,12 @@ function _lodBakeTreeInstanceMats(slot) {
   const defs1 = slot.lod1Defs;
   for (let pi = 0; pi < slot.positions.length; pi++) {
     const p = slot.positions[pi];
-    if (!p._lodBaseMat) continue;
-    if (!p._lodBaked0 || p._lodBaked0.length !== defs0.length) {
+    if (!(p._lodBaseMat instanceof THREE.Matrix4)) continue;
+    const baked0Ok =
+      Array.isArray(p._lodBaked0) &&
+      p._lodBaked0.length === defs0.length &&
+      p._lodBaked0.every((m) => m instanceof THREE.Matrix4);
+    if (!baked0Ok) {
       p._lodBaked0 = defs0.map(() => new THREE.Matrix4());
     }
     for (let mi = 0; mi < defs0.length; mi++) {
@@ -7293,7 +7306,11 @@ function _lodBakeTreeInstanceMats(slot) {
     } else if (defs1 === defs0) {
       p._lodBaked1 = p._lodBaked0;
     } else {
-      if (!p._lodBaked1 || p._lodBaked1.length !== defs1.length) {
+      const baked1Ok =
+        Array.isArray(p._lodBaked1) &&
+        p._lodBaked1.length === defs1.length &&
+        p._lodBaked1.every((m) => m instanceof THREE.Matrix4);
+      if (!baked1Ok) {
         p._lodBaked1 = defs1.map(() => new THREE.Matrix4());
       }
       for (let mi = 0; mi < defs1.length; mi++) {
@@ -7530,6 +7547,22 @@ function _ensureTreeLodChunkGpu(slot) {
   }
 }
 
+/**
+ * JSON round-trip turns THREE.Matrix4 into plain objects; remove cached mats so
+ * rebuild creates real Matrix4 instances (fixes compose / setMatrixAt errors).
+ */
+function _sanitizeTreeLodPositionsFromJson(positions) {
+  if (!Array.isArray(positions)) return;
+  for (let i = 0; i < positions.length; i++) {
+    const p = positions[i];
+    if (!p || typeof p !== "object") continue;
+    delete p._lodBaseMat;
+    delete p._lodBaked0;
+    delete p._lodBaked1;
+    delete p._lodIdx;
+  }
+}
+
 function _disposeSlotLodChunks(slot) {
   if (!slot.chunks || slot.chunks.size === 0) return;
   for (const c of slot.chunks.values()) {
@@ -7636,7 +7669,8 @@ _rebuildLODChunks = function (slot) {
     p._lodIdx = i;
   });
   slot.positions.forEach((p) => {
-    if (!p._lodBaseMat) p._lodBaseMat = new THREE.Matrix4();
+    if (!(p._lodBaseMat instanceof THREE.Matrix4))
+      p._lodBaseMat = new THREE.Matrix4();
     const rotY =
       typeof p.rot === "number" && Number.isFinite(p.rot)
         ? p.rot
@@ -7779,7 +7813,7 @@ function _lodEmitTreeToGroups(
     return;
   }
   const { x, y, z, scale } = p;
-  if (p._lodBaseMat) {
+  if (p._lodBaseMat instanceof THREE.Matrix4) {
     _lodTreeMat.copy(p._lodBaseMat);
     if (lodMeshMul !== 1) {
       const me = _lodTreeMat.elements;

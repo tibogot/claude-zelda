@@ -4593,7 +4593,15 @@
             lodMaxPerChunk: lodParams.lodMaxPerChunk,
           },
           treeLod: LOD_SLOTS.map((s) => {
-            const o = { name: s.name, positions: s.positions };
+            const o = {
+              name: s.name,
+              positions: (s.positions || []).map((p) => {
+                const row = { x: p.x, y: p.y, z: p.z, scale: p.scale };
+                if (typeof p.rot === "number" && Number.isFinite(p.rot))
+                  row.rot = p.rot;
+                return row;
+              }),
+            };
             if (s.meshScale != null && s.meshScale !== 1)
               o.meshScale = s.meshScale;
             if (s.name === "Pine") {
@@ -4859,6 +4867,7 @@
             if (i >= LOD_SLOTS.length) return;
             const slot = LOD_SLOTS[i];
             slot.positions = entry.positions || [];
+            _sanitizeTreeLodPositionsFromJson(slot.positions);
             if (typeof entry.meshScale === "number")
               slot.meshScale = entry.meshScale;
             if (slot.name === "Pine") {
@@ -7077,6 +7086,18 @@
         return defs;
       }
 
+      function _sanitizeTreeLodPositionsFromJson(positions) {
+        if (!Array.isArray(positions)) return;
+        for (let i = 0; i < positions.length; i++) {
+          const p = positions[i];
+          if (!p || typeof p !== "object") continue;
+          delete p._lodBaseMat;
+          delete p._lodBaked0;
+          delete p._lodBaked1;
+          delete p._lodIdx;
+        }
+      }
+
       function _disposeSlotLodChunks(slot) {
         if (!slot.chunks || slot.chunks.size === 0) return;
         for (const c of slot.chunks.values()) {
@@ -7175,7 +7196,8 @@
           p._lodIdx = i;
         });
         slot.positions.forEach((p) => {
-          if (!p._lodBaseMat) p._lodBaseMat = new THREE.Matrix4();
+          if (!(p._lodBaseMat instanceof THREE.Matrix4))
+            p._lodBaseMat = new THREE.Matrix4();
           const rotY =
             typeof p.rot === "number" && Number.isFinite(p.rot)
               ? p.rot
