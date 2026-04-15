@@ -10,6 +10,7 @@ export function createTweakpaneUi({
   onRebuildSkyEnv,
   onCsmEnabledChange,
   onFogChange,
+  onGenerateProceduralTerrain,
 }) {
   const pane = new Pane({ title: "V2 Terrain Core" });
 
@@ -42,6 +43,13 @@ export function createTweakpaneUi({
     max: 4,
     step: 0.05,
     label: "Shape",
+  });
+  brushFolder.addBinding(toolState.brush, "previewShape", {
+    label: "Preview shape",
+    options: {
+      Dome: "dome",
+      Circle: "circle",
+    },
   });
 
   /** Same hierarchy as `splatmap-chunks.html` → `environmentFolder` ("Lighting & atmosphere"). */
@@ -339,6 +347,100 @@ export function createTweakpaneUi({
     max: 6,
     step: 0.05,
   });
+
+  const genFolder = sculptFolder.addFolder({
+    title: "Procedural height (all chunks)",
+    expanded: false,
+  });
+  genFolder.addBinding(toolState.gen, "mode", {
+    label: "Mode",
+    options: {
+      "Ridge (sharp peaks)": "ridge",
+      "FBM (rolling hills)": "fbm",
+    },
+  });
+  genFolder.addBinding(toolState.gen, "scale", {
+    label: "Scale",
+    min: 0.5,
+    max: 12,
+    step: 0.1,
+  });
+  genFolder.addBinding(toolState.gen, "octaves", {
+    label: "Octaves",
+    min: 1,
+    max: 8,
+    step: 1,
+  });
+  genFolder.addBinding(toolState.gen, "height", {
+    label: "Height",
+    min: 10,
+    max: 300,
+    step: 1,
+  });
+  genFolder.addBinding(toolState.gen, "seed", {
+    label: "Seed",
+    min: 0,
+    max: 999,
+    step: 1,
+  });
+  genFolder.addBinding(toolState.gen, "domainWarp", {
+    label: "Domain warp",
+    min: 0,
+    max: 2,
+    step: 0.05,
+  });
+  genFolder.addBlade({ view: "separator" });
+  genFolder.addBinding(toolState.gen, "dropoffShape", {
+    label: "Edge shape",
+    options: {
+      Circle: "circle",
+      "Box (fills terrain)": "box",
+      "Organic (noise edge)": "noise",
+    },
+  });
+  genFolder.addBinding(toolState.gen, "dropoff", {
+    label: "Edge dropoff",
+    min: 0.3,
+    max: 4,
+    step: 0.05,
+  });
+  genFolder.addBinding(toolState.gen, "offsetX", {
+    label: "Offset X",
+    min: -0.45,
+    max: 0.45,
+    step: 0.01,
+  });
+  genFolder.addBinding(toolState.gen, "offsetZ", {
+    label: "Offset Z",
+    min: -0.45,
+    max: 0.45,
+    step: 0.01,
+  });
+  genFolder.addBlade({ view: "separator" });
+  genFolder.addBinding(toolState.gen, "plains", {
+    label: "Plains",
+    min: 0,
+    max: 0.8,
+    step: 0.01,
+  });
+  genFolder.addBinding(toolState.gen, "tiltX", {
+    label: "Tilt X",
+    min: -1,
+    max: 1,
+    step: 0.05,
+  });
+  genFolder.addBinding(toolState.gen, "tiltZ", {
+    label: "Tilt Z",
+    min: -1,
+    max: 1,
+    step: 0.05,
+  });
+  genFolder.addBinding(toolState.gen, "additive", {
+    label: "Additive (layer on existing)",
+  });
+  genFolder
+    .addButton({ title: "Generate terrain (all chunks)" })
+    .on("click", () => onGenerateProceduralTerrain?.());
 
   const lodFolder = pane.addFolder({ title: "Terrain/LOD" });
   lodFolder

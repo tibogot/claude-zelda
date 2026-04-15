@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { createBrushStrokeFromHit, shouldApplyStroke, worldBrushBounds } from "./brushModel.js";
-import { parseChunkKey } from "../../core/terrain/chunkMath.js";
+import { chunkKey, getChunkCountPerAxis, parseChunkKey } from "../../core/terrain/chunkMath.js";
 
 export class SculptSystem {
   constructor({ toolState, terrainStore, chunkStream }) {
@@ -80,6 +80,31 @@ export class SculptSystem {
     const dirtyRects = new Map();
     this.terrainStore.applySculptStroke(stroke, dirtyRects);
     this.chunkStream.markDirtyRects(dirtyRects);
+  }
+
+  /**
+   * v1 `applyProceduralTerrainToAllChunks` — CPU FBM/ridge over entire heightfield, with undo.
+   */
+  applyProceduralTerrainAllChunks() {
+    const maxC = getChunkCountPerAxis(this.terrainStore.config) - 1;
+    const before = new Map();
+    for (let cz = 0; cz <= maxC; cz++) {
+      for (let cx = 0; cx <= maxC; cx++) {
+        const key = chunkKey(cx, cz);
+        const h = this.terrainStore.ensureChunkData(cx, cz);
+        before.set(key, new Float32Array(h));
+      }
+    }
+    const touched = this.terrainStore.applyProceduralTerrainToAllChunks(this.toolState.gen);
+    const after = new Map();
+    for (const key of touched) {
+      const arr = this.terrainStore.getChunkHeightsByKey(key);
+      if (arr) after.set(key, new Float32Array(arr));
+    }
+    this.undoStack.push({ before, after });
+    this.redoStack.length = 0;
+    if (this.undoStack.length > 64) this.undoStack.shift();
+    this.chunkStream.markDirtyFull(touched);
   }
 
   endStroke() {

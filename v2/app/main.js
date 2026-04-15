@@ -214,16 +214,57 @@ export async function startV2App() {
     onRebuildSkyEnv: rebuildSkyEnv,
     onCsmEnabledChange: setCsmEnabled,
     onFogChange: syncFog,
+    onGenerateProceduralTerrain: () => sculptSystem.applyProceduralTerrainAllChunks(),
   });
 
-  const ring = new THREE.Mesh(
+  /** Engine-style brush preview: translucent hemisphere + edge lines, aligned to surface normal. */
+  const brushDomeGeom = new THREE.SphereGeometry(
+    1,
+    48,
+    24,
+    0,
+    Math.PI * 2,
+    0,
+    Math.PI * 0.5,
+  );
+  const brushDomeFillMat = new THREE.MeshBasicMaterial({
+    color: 0xf5cc52,
+    transparent: true,
+    opacity: 0.16,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  brushDomeFillMat.fog = false;
+  const brushDomeFill = new THREE.Mesh(brushDomeGeom, brushDomeFillMat);
+  const brushDomeEdgesGeom = new THREE.EdgesGeometry(brushDomeGeom, 22);
+  const brushDomeLineMat = new THREE.LineBasicMaterial({
+    color: 0xffeebb,
+    transparent: true,
+    opacity: 0.72,
+    depthWrite: false,
+  });
+  brushDomeLineMat.fog = false;
+  const brushDomeLines = new THREE.LineSegments(brushDomeEdgesGeom, brushDomeLineMat);
+  const brushPreview = new THREE.Group();
+  brushPreview.add(brushDomeFill);
+  brushPreview.add(brushDomeLines);
+  brushPreview.visible = false;
+  brushPreview.renderOrder = 5;
+  scene.add(brushPreview);
+
+  const brushRing = new THREE.Mesh(
     new THREE.TorusGeometry(1, 0.045, 8, 64),
     new THREE.MeshBasicMaterial({ color: 0xf5cc52 }),
   );
-  ring.rotation.x = Math.PI * 0.5;
-  ring.visible = false;
-  ring.material.fog = false;
-  scene.add(ring);
+  brushRing.visible = false;
+  brushRing.material.fog = false;
+  brushRing.renderOrder = 5;
+  scene.add(brushRing);
+
+  /** Hemisphere: pole +Y; torus (`TorusGeometry`): ring in XY, symmetry axis +Z. */
+  const _brushY = new THREE.Vector3(0, 1, 0);
+  const _brushZ = new THREE.Vector3(0, 0, 1);
+  const brushPick = { point: new THREE.Vector3(), normal: new THREE.Vector3() };
 
   const raycaster = new THREE.Raycaster();
   const pointerNdc = new THREE.Vector2();
@@ -275,18 +316,43 @@ export async function startV2App() {
     raycaster.setFromCamera(pointerNdc, camera);
     const hits = raycaster.intersectObjects(targets, false);
     if (hits.length === 0) return null;
-    return hits[0].point;
+    const h = hits[0];
+    brushPick.point.copy(h.point);
+    if (h.face) {
+      brushPick.normal.copy(h.face.normal).transformDirection(h.object.matrixWorld).normalize();
+      if (brushPick.normal.lengthSq() < 1e-6) brushPick.normal.set(0, 1, 0);
+    } else {
+      brushPick.normal.set(0, 1, 0);
+    }
+    return brushPick;
   }
 
-  function updateBrushRing(event) {
-    const hit = pickTerrain(event);
-    if (!hit) {
-      ring.visible = false;
+  function updateBrushPreviewFromPick(hit) {
+    if (!hit || toolState.mode !== "sculpt") {
+      brushPreview.visible = false;
+      brushRing.visible = false;
       return;
     }
-    ring.visible = true;
-    ring.scale.setScalar(toolState.brush.radius);
-    ring.position.set(hit.x, hit.y + 0.08, hit.z);
+    const r = toolState.brush.radius;
+    const nudge = 0.012 + Math.min(0.08, r * 0.0004);
+    const useCircle = toolState.brush.previewShape === "circle";
+    if (useCircle) {
+      brushPreview.visible = false;
+      brushRing.visible = true;
+      brushRing.scale.setScalar(r);
+      brushRing.position.copy(hit.point).addScaledVector(hit.normal, nudge);
+      brushRing.quaternion.setFromUnitVectors(_brushZ, hit.normal);
+      return;
+    }
+    brushRing.visible = false;
+    brushPreview.visible = true;
+    brushPreview.scale.setScalar(r);
+    brushPreview.position.copy(hit.point).addScaledVector(hit.normal, nudge);
+    brushPreview.quaternion.setFromUnitVectors(_brushY, hit.normal);
+  }
+
+  function updateBrushPreview(event) {
+    updateBrushPreviewFromPick(pickTerrain(event));
   }
 
   renderer.domElement.addEventListener("pointerdown", (event) => {
@@ -296,15 +362,15 @@ export async function startV2App() {
     event.preventDefault();
     pointerDown = true;
     controls.enabled = false;
-    sculptSystem.beginStroke(hit, event);
+    sculptSystem.beginStroke(hit.point, event);
   });
 
   renderer.domElement.addEventListener("pointermove", (event) => {
-    updateBrushRing(event);
-    if (!pointerDown || toolState.mode !== "sculpt") return;
     const hit = pickTerrain(event);
+    updateBrushPreviewFromPick(hit);
+    if (!pointerDown || toolState.mode !== "sculpt") return;
     if (!hit) return;
-    sculptSystem.applyAt(hit, event);
+    sculptSystem.applyAt(hit.point, event);
   });
 
   // splatmap-chunks-main.js: Shift+wheel → brush size, Alt+wheel → strength (Shift wins if both).
@@ -431,8 +497,12 @@ export async function startV2App() {
       ui.dispose();
       chunkStream.dispose();
       terrainMaterial.dispose();
-      ring.geometry.dispose();
-      ring.material.dispose();
+      brushDomeGeom.dispose();
+      brushDomeFillMat.dispose();
+      brushDomeEdgesGeom.dispose();
+      brushDomeLineMat.dispose();
+      brushRing.geometry.dispose();
+      brushRing.material.dispose();
       controls.dispose();
       renderer.dispose();
     },

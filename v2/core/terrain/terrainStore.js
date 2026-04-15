@@ -9,6 +9,7 @@ import {
   worldHalf,
   worldToChunkIndex,
 } from "./chunkMath.js";
+import { terrainGenHeightAtWorld } from "./proceduralTerrainGen.js";
 
 export class TerrainStore {
   constructor(config) {
@@ -389,6 +390,47 @@ export class TerrainStore {
         this.ensureChunkData(x, z);
       }
     }
+  }
+
+  /**
+   * Full-world procedural height — same as `splatmap-chunks.html` `applyProceduralTerrainToAllChunks`.
+   * Overwrites every chunk heightfield; `additive` layers on previous heights per vertex.
+   * @param {object} gen — same fields as v1 `PARAMS.gen`
+   * @returns {Set<string>} all chunk keys written
+   */
+  applyProceduralTerrainToAllChunks(gen) {
+    const worldSize = this.config.world.size;
+    const maxC = getChunkCountPerAxis(this.config) - 1;
+    const res = this.config.world.dataResolution;
+    const count = (res + 1) * (res + 1);
+    const step = this.config.world.chunkSize / res;
+    const touched = new Set();
+
+    for (let cz = 0; cz <= maxC; cz++) {
+      for (let cx = 0; cx <= maxC; cx++) {
+        const key = chunkKey(cx, cz);
+        const prev = this.chunkDataMap.get(key) ?? null;
+        const heights = new Float32Array(count);
+        const minX = chunkMinWorldX(cx, this.config);
+        const minZ = chunkMinWorldZ(cz, this.config);
+
+        for (let iz = 0; iz <= res; iz++) {
+          const wz = minZ + iz * step;
+          for (let ix = 0; ix <= res; ix++) {
+            const wx = minX + ix * step;
+            const idx = getChunkDataIndex(ix, iz, this.config);
+            const genH = terrainGenHeightAtWorld(wx, wz, gen, worldSize);
+            heights[idx] = gen.additive && prev ? Math.max(0, prev[idx] + genH) : genH;
+          }
+        }
+
+        this.chunkDataMap.set(key, heights);
+        touched.add(key);
+      }
+    }
+
+    this.syncChunkEdgesAround(touched);
+    return touched;
   }
 }
 

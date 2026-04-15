@@ -9,8 +9,10 @@ export function createToolState() {
       strength: V2_CONFIG.sculpt.defaultStrength,
       falloff: V2_CONFIG.sculpt.defaultFalloff,
       spacingFactor: V2_CONFIG.sculpt.spacingFactor,
+      previewShape: V2_CONFIG.sculpt.previewShape,
     },
     fbmPeak: { ...V2_CONFIG.sculpt.fbmPeak },
+    gen: { ...V2_CONFIG.sculpt.gen },
     terrain: {
       lodEnabled: true,
       activeRadiusInChunks: V2_CONFIG.lod.activeRadiusInChunks,

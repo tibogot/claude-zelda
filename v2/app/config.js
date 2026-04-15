@@ -39,6 +39,8 @@ export const V2_CONFIG = {
     defaultStrength: 0.55,
     defaultFalloff: 1.8,
     spacingFactor: 0.22,
+    /** Viewport brush cursor: `"dome"` (hemisphere + edges) or `"circle"` (flat ring). */
+    previewShape: "dome",
     /** Same idea as `splatmap-chunks.html` PARAMS.sculptClamp* — not the initial noise range. */
     sculptClampMin: -200,
     sculptClampMax: 2000,
@@ -53,6 +55,23 @@ export const V2_CONFIG = {
       base: 0.35,
       ridgeWeight: 1.8,
       gain: 2.0,
+    },
+    /** `splatmap-chunks.html` PARAMS.gen — procedural height (all chunks). */
+    gen: {
+      mode: "ridge",
+      scale: 4.0,
+      octaves: 6,
+      height: 120,
+      seed: 0,
+      domainWarp: 0.5,
+      dropoff: 1.2,
+      dropoffShape: "circle",
+      offsetX: 0,
+      offsetZ: 0,
+      plains: 0,
+      additive: false,
+      tiltX: 0,
+      tiltZ: 0,
     },
   },
   render: {
