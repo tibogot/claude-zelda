@@ -117,6 +117,12 @@ import {
 import { createLensFlare } from "./splatmap-chunks-lensflare.js";
 import { createBillboardClouds } from "./splatmap-chunks-billboard-clouds.js";
 import { terrainGenHeightAtWorld } from "./splatmap-chunks-terrain-gen-math.js";
+import {
+  bufferToBase64,
+  base64ToBuffer,
+  mergePlainDeep,
+} from "./splatmap-chunks-data-utils.js";
+import { chunkKey, parseChunkKey } from "./splatmap-chunks-chunk-key.js";
 
 import { _wFbm2, _wVoroF1, _wVoroSmooth } from "./splatmap-chunks-w-tsl-noise.js";
 import {
@@ -3014,46 +3020,6 @@ function disposeChunkSplatEntry(key) {
   s.imgTex.dispose();
   s.meadowTex.dispose();
   chunkSplatMap.delete(key);
-}
-
-function bufferToBase64(buf) {
-  const bytes = new Uint8Array(buf);
-  let binary = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode.apply(
-      null,
-      bytes.subarray(i, Math.min(i + chunk, bytes.length)),
-    );
-  }
-  return btoa(binary);
-}
-
-function base64ToBuffer(b64) {
-  const binary = atob(b64);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
-  return out.buffer;
-}
-
-/** Shallow-merge nested plain objects (for JSON import overlays). */
-function mergePlainDeep(target, src) {
-  if (!src || typeof src !== "object" || Array.isArray(src)) return;
-  for (const key of Object.keys(src)) {
-    const sv = src[key];
-    if (
-      sv !== null &&
-      typeof sv === "object" &&
-      !Array.isArray(sv) &&
-      target[key] &&
-      typeof target[key] === "object" &&
-      !Array.isArray(target[key])
-    ) {
-      mergePlainDeep(target[key], sv);
-    } else {
-      target[key] = sv;
-    }
-  }
 }
 
 function exportTerrainJson() {
@@ -6367,10 +6333,6 @@ function releaseChunkGeometry(geom, segments) {
   }
 }
 
-function chunkKey(cx, cz) {
-  return `${cx},${cz}`;
-}
-
 const _tmpCenter = new THREE.Vector3();
 function chunkCenterWorld(cx, cz) {
   return _tmpCenter.set(
@@ -6468,11 +6430,6 @@ function stitchNewChunkFromNeighbors(cx, cz, heights) {
       }
     }
   }
-}
-
-function parseChunkKey(key) {
-  const [cx, cz] = key.split(",").map(Number);
-  return { cx, cz };
 }
 
 // ─── Terrain generator (CPU FBM) — heightfield math in splatmap-chunks-terrain-gen-math.js

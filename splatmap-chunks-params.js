@@ -2,7 +2,7 @@ import { OCEAN_DEFAULTS } from "./ocean-shader.js";
 import { MEADOW_DEFAULT_PARAMS } from "./chunkMeadowTsl.js";
 import { GROUND_DEFAULT_PARAMS } from "./chunkGroundTsl.js";
 
-/** Tweakpane + lighting — sky defaults to HDR env (textures/animestyled_hdr.hdr). */
+/** Tweakpane + lighting — sky defaults to Physical (SkyMesh + PMREM); HDR available in UI. */
 export const PARAMS = {
   mode: "view",
   /** When false, every loaded chunk uses L0 (max segments) so you can tell LOD vs pure chunk seams. */
@@ -157,7 +157,7 @@ export const PARAMS = {
   shadowBias: -0.0005,
   shadowNormalBias: 0.02,
   sky: {
-    mode: "hdr",
+    mode: "physical",
     turbidity: 2,
     rayleigh: 1.5,
     mie: 0.005,
