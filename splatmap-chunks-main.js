@@ -1,0 +1,15481 @@
+// App entry (split from the monolithic HTML workflow). Sync stylesheet from splatmap-chunks.html: npm run extract:splatmap
+
+import * as THREE from "three";
+import { UIctx } from "./splatmap-chunks-ui-context.js";
+import { mountTerrainStudioPane } from "./splatmap-chunks-editor-pane.js";
+import { MeshStandardNodeMaterial, MeshBasicNodeMaterial } from "three";
+import {
+  Fn,
+  texture,
+  vec3,
+  vec2,
+  vec4,
+  mix,
+  positionLocal,
+  float,
+  uniform,
+  clamp,
+  exponentialHeightFogFactor,
+  densityFogFactor,
+  fog,
+  attribute,
+  positionWorld,
+  normalWorld,
+  cameraPosition,
+  normalize,
+  negate,
+  dot,
+  smoothstep,
+  pow,
+  max,
+  min,
+  sin,
+  cos,
+  length,
+  floor,
+  fract,
+  uv,
+  mx_noise_float,
+  normalLocal,
+  saturate,
+  sub,
+  add,
+  div,
+  mul,
+  abs,
+  step,
+  reflector,
+  exp,
+} from "three/tsl";
+import { createLakeShader } from "./lake-shader.js";
+import { createOceanShader } from "./ocean-shader.js";
+import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { TransformControls } from "three/addons/controls/TransformControls.js";
+import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import * as SkeletonUtils from "three/addons/utils/SkeletonUtils.js";
+import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
+import { createStylizedSky } from "./stylized-sky.js";
+import { MeshBVH } from "three-mesh-bvh";
+import { createCliffInstancer } from "./cliff-instancer.js";
+import { createCliffInstancerBlendMaterial } from "./cliffInstancerBlendMaterial.js";
+import { Pane } from "tweakpane";
+import { createTileMaterial } from "./tileMaterial.js";
+import {
+  createChunkPainterGroundMaterial,
+  setupTslGroundMeshSwap,
+  createSharedImgTexMaterial,
+  setupImgTexMeshSwap,
+} from "./chunkPainterGroundMaterial.js";
+import {
+  loadRock028Textures,
+  createAutoCliffUniforms,
+  createChunkSplatCliffMaterial,
+} from "./chunkTerrainAutoCliff.js";
+import { createChunkImageSlotSystem } from "./chunkImageTexSlots.js";
+import {
+  applyImageSlotAlbedoAndAO,
+  applyImageSlotRoughness,
+  createImageSlotNormalNode,
+} from "./chunkTerrainImageSlotsTsl.js";
+import {
+  createMeadowTslBundle,
+  MEADOW_PRESETS,
+  applyMeadowPresetToParams,
+} from "./chunkMeadowTsl.js";
+import {
+  createGroundTslBundle,
+  GROUND_PRESETS,
+  applyGroundPresetToParams,
+} from "./chunkGroundTsl.js";
+import {
+  createBladeGeometry as geminiBladeGeo,
+  createFieldInstancedGeometry as geminiFieldGeo,
+  createGrassMaterial as geminiGrassMat,
+  createGrassMaterialMega as geminiGrassMatMega,
+  setupGrassPatches as geminiSetupPatches,
+} from "./grass-gemini3.js";
+import { createFleurSystem, FLEUR_PRESETS } from "./fleur-painter.js";
+import { createAmbientFXSystem } from "./ambientfx-painter.js";
+import { createFoliageSlot } from "./foliage-painter.js";
+import { createOctahedralImpostorForestWebgpu } from "./octahedralImpostorForestWebgpu.js";
+import {
+  TreeLodChunkGpuCull,
+  treeLodGpuCanUseForDefs,
+} from "./treeLodGpuCull.js";
+import { PARAMS } from "./splatmap-chunks-params.js";
+import {
+  TERRAIN_SURFACE_LABEL,
+  CONFIG,
+  SCULPT_RING_GEOM_BASE,
+  BARRIER_RES,
+  HOLE_RES,
+} from "./splatmap-chunks-config.js";
+import { createLensFlare } from "./splatmap-chunks-lensflare.js";
+import { createBillboardClouds } from "./splatmap-chunks-billboard-clouds.js";
+import { terrainGenHeightAtWorld } from "./splatmap-chunks-terrain-gen-math.js";
+
+import { _wFbm2, _wVoroF1, _wVoroSmooth } from "./splatmap-chunks-w-tsl-noise.js";
+import {
+  rwiRefs,
+  bindRiverWaterfallImpactRuntime,
+  wfU,
+  uRiverTime,
+  uIFTime,
+  riverMat,
+  waterfallTemplateMat,
+  impactFoamMat,
+  impactFoamParams,
+  rsU,
+  syncRiverMat,
+  applyRiverStyle,
+  syncImpactFoamUniforms,
+  applyImpactFoamVisibility,
+  rebuildAllImpactFoamGeometry,
+  selectWaterfall,
+  selectSplashCap,
+  placeWaterfall,
+  applyWaterfalls,
+  saveWaterfalls,
+  placeSplashCap,
+  applySplashCaps,
+  saveSplashCaps,
+  _invalidateLakeCache,
+  buildWaterfallGeo,
+  buildImpactFoamGeometry,
+  wfPlaceTool,
+} from "./splatmap-chunks-river-waterfall-impact.js";
+
+const PI = Math.PI;
+const uFTreeTime = uniform(0.0);
+
+let brushSize = PARAMS.brushSize;
+let brushStr = PARAMS.brushStrength;
+let geminiGrassEraseMode = false;
+let geminiCliffGrassEraseMode = false;
+let playMode = false;
+
+const editState = {
+  mode: "view",
+  isPointerDown: false,
+  pointerAction: null,
+  isShiftDown: false,
+  sculptSign: 1,
+  sculptSkipFirstMoveDup: false,
+  /** Height sample at sculpt pointerdown when Alt held (flatten-to plateau). */
+  sculptFlattenTargetY: 0,
+  rampPointA: null,
+  paintErase: false,
+  paintChannel: 0,
+  /** Per-stroke random offset so repeated clicks get different noise patterns. */
+  paintNoiseSeed: 0,
+  /** "meadow" | "splat" | "img" — synced with PARAMS.paintLayerTarget after init. */
+  paintLayer: "meadow",
+  hasBrushHit: false,
+  brushWorldPoint: new THREE.Vector3(),
+};
+
+const chunkImageSlotSystem = createChunkImageSlotSystem();
+const chunkImageSlots = chunkImageSlotSystem.slots;
+
+const chunkMeadowBundle = createMeadowTslBundle(PARAMS.meadow);
+chunkMeadowBundle.syncFromParams(PARAMS.meadow);
+const chunkGroundBundle = createGroundTslBundle(PARAMS.ground);
+chunkGroundBundle.syncFromParams(PARAMS.ground);
+editState.paintLayer = PARAMS.paintLayerTarget;
+
+let editorPane = null;
+
+const barrierCanvas = document.createElement("canvas");
+barrierCanvas.width = barrierCanvas.height = BARRIER_RES;
+const barrierCtx = barrierCanvas.getContext("2d", {
+  willReadFrequently: true,
+});
+barrierCtx.clearRect(0, 0, BARRIER_RES, BARRIER_RES);
+let barrierTex = null;
+let barrierOverlayMesh = null;
+let barrierEraseMode = false;
+/** `showOverlay`: see painted barriers in any mode (sculpt, place, …). Barrier mode always shows the overlay for live paint preview (same idea as splatmap-painter). */
+const barrierPARAMS = { erase: false, showOverlay: true };
+let barrierFolderRef = null;
+
+const holeCanvas = document.createElement("canvas");
+holeCanvas.width = holeCanvas.height = HOLE_RES;
+const holeCtx = holeCanvas.getContext("2d", { willReadFrequently: true });
+holeCtx.fillStyle = "#000";
+holeCtx.fillRect(0, 0, HOLE_RES, HOLE_RES);
+let holeTex = null;
+let holeOverlayMesh = null;
+let holeEraseMode = false;
+const holePARAMS = { erase: false, showOverlay: true };
+let holeFolderRef = null;
+
+function sculptBrushWorldRadius() {
+  return THREE.MathUtils.mapLinear(PARAMS.brushSize, 2, 80, 5, 90);
+}
+
+/** Same as splatmap-painter `brushWorldRadius` for barrier paint preview. */
+function barrierBrushWorldRadius() {
+  return (brushSize / CONFIG.splatRes) * CONFIG.worldSize;
+}
+
+function sculptBrushStrength() {
+  return THREE.MathUtils.mapLinear(
+    PARAMS.brushStrength,
+    5,
+    100,
+    0.15,
+    2.5,
+  );
+}
+
+const HTEX_RES = 512;
+const bvhGrid = new Float32Array(HTEX_RES * HTEX_RES);
+let bvhBaked = false;
+let _camCliffBvh = null;
+const _bvhRay = new THREE.Ray(
+  new THREE.Vector3(),
+  new THREE.Vector3(0, -1, 0),
+);
+const _bvhTmpV = new THREE.Vector3();
+
+function invalidateBvhHeight() {
+  bvhBaked = false;
+}
+
+const hudEl = document.getElementById("hud");
+const flyHudEl = document.getElementById("fly-hud");
+const flySpdEl = document.getElementById("fly-spd");
+const flyAltEl = document.getElementById("fly-alt");
+let _flyHudVisible = false;
+let _flyHudSpdShown = -1;
+let _flyHudAltShown = -1;
+
+const scene = new THREE.Scene();
+
+const camera = new THREE.PerspectiveCamera(
+  65,
+  window.innerWidth / window.innerHeight,
+  0.1,
+  5000,
+);
+camera.position.set(170, 145, 170);
+
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+renderer.domElement.tabIndex = 0;
+renderer.domElement.style.outline = "none";
+renderer.domElement.addEventListener("pointerdown", () => {
+  if (!playMode) renderer.domElement.focus({ preventScroll: true });
+});
+await renderer.init();
+// Same as splatmap-painter10bvh+post.html init — SkyMesh is HDR; without ACES it looks flat/wrong.
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = PARAMS.light.exposure;
+
+const worldHalf = CONFIG.worldSize * 0.5;
+const worldBounds = new THREE.Box3(
+  new THREE.Vector3(-worldHalf, -1000, -worldHalf),
+  new THREE.Vector3(worldHalf, 1000, worldHalf),
+);
+
+/** Same as splatmap-painter10bvh+post.html — tree GLBs use Draco / often KTX2. */
+const dracoLoader = new DRACOLoader();
+dracoLoader.setDecoderPath(
+  "https://www.gstatic.com/draco/versioned/decoders/1.5.6/",
+);
+const ktx2Loader = new KTX2Loader();
+ktx2Loader.setTranscoderPath(
+  "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/libs/basis/",
+);
+ktx2Loader.detectSupport(renderer);
+const gltfLoader = new GLTFLoader();
+gltfLoader.setDRACOLoader(dracoLoader);
+gltfLoader.setKTX2Loader(ktx2Loader);
+
+const ASSET_BASE = new URL(".", import.meta.url);
+function resolveModelUrl(relPath) {
+  const parts = relPath.split("/").filter((p) => p.length > 0);
+  const encodedPath = parts.map(encodeURIComponent).join("/");
+  return new URL(encodedPath, ASSET_BASE).href;
+}
+
+const CLIFF_MODELS = [
+  "models/cliff1.glb",
+  "models/cliff2.glb",
+  "models/cliff3.glb",
+];
+let cliffTemplates = [];
+let cliffObjects = [];
+let selectedCliff = null;
+let activeCliffModel = 0;
+let cliffSinkOffset = 2;
+let placeCliffsReady = false;
+
+async function loadPlaceCliffTemplates() {
+  const CLIFF_FALLBACK_COLORS = [0x8a7a6a, 0x6a5a4a, 0x7a6858];
+  cliffTemplates = await Promise.all(
+    CLIFF_MODELS.map(async (url, i) => {
+      try {
+        const gltf = await gltfLoader.loadAsync(resolveModelUrl(url));
+        gltf.scene.traverse((o) => {
+          if (o.isMesh) {
+            o.castShadow = true;
+            o.receiveShadow = true;
+          }
+        });
+        return gltf.scene;
+      } catch {
+        const mesh = new THREE.Mesh(
+          new THREE.BoxGeometry(10, 15, 8),
+          new THREE.MeshStandardMaterial({
+            color: CLIFF_FALLBACK_COLORS[i],
+            roughness: 0.9,
+          }),
+        );
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        const g = new THREE.Group();
+        g.add(mesh);
+        return g;
+      }
+    }),
+  );
+  placeCliffsReady = true;
+}
+await loadPlaceCliffTemplates();
+
+function sunDirectionFromAngles(
+  azDeg,
+  elDeg,
+  target = new THREE.Vector3(),
+) {
+  const az = (azDeg * Math.PI) / 180;
+  const el = (elDeg * Math.PI) / 180;
+  return target
+    .set(
+      Math.cos(el) * Math.cos(az),
+      Math.sin(el),
+      Math.cos(el) * Math.sin(az),
+    )
+    .normalize();
+}
+
+const sunDir = new THREE.Vector3();
+sunDirectionFromAngles(
+  PARAMS.light.sunAzimuth,
+  PARAMS.light.sunElevation,
+  sunDir,
+);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 0);
+controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI * 0.49;
+controls.minDistance = 15;
+controls.maxDistance = 1500;
+// Same as splatmap-painter: LMB free for sculpt/paint · MMB orbit · RMB pan
+controls.mouseButtons = {
+  MIDDLE: THREE.MOUSE.ROTATE,
+  RIGHT: THREE.MOUSE.PAN,
+};
+
+const cliffInstancer = createCliffInstancer(scene, { maxInstances: 500 });
+CLIFF_MODELS.forEach((url, i) => {
+  const name = `cliff${i + 1}`;
+  gltfLoader.load(resolveModelUrl(url), (gltf) => {
+    cliffInstancer.loadGLB(gltf, name);
+    if (cliffBlendPack)
+      cliffInstancer.setMaterial(cliffBlendPack.material);
+    ciRefreshProxy();
+  });
+});
+let ciRefreshProxy = () => {};
+let cliffBlendPack = null;
+let cliffsBlendBindingsFn = null;
+let cliffsBlendSlidersAdded = false;
+let cliffPaintCanvas = null;
+let cliffPaintCtx = null;
+let cliffPaintTex = null;
+let cliffPaintEraseMode = false;
+
+const transformControls = new TransformControls(
+  camera,
+  renderer.domElement,
+);
+transformControls.addEventListener("dragging-changed", (e) => {
+  controls.enabled = e.value ? false : !playMode;
+  if (!e.value && editState.mode === "cliffs") {
+    invalidateBvhHeight();
+    ciRefreshProxy();
+    if (editorPane) editorPane.refresh();
+  }
+  if (!e.value && editState.mode === "props") {
+    invalidateBvhHeight();
+    if (editorPane) editorPane.refresh();
+  }
+});
+transformControls.addEventListener("change", () => {
+  if (editState.mode === "cliffs" && cliffInstancer.hasSelection()) {
+    cliffInstancer.syncFromProxy();
+  }
+});
+transformControls.enabled = false;
+const tcHelper = transformControls.getHelper();
+tcHelper.visible = false;
+scene.add(tcHelper);
+
+let propLibrary = [];
+let propObjects = [];
+let selectedProp = null;
+let activePropIndex = -1;
+
+function getPropRoot(object) {
+  let obj = object;
+  while (obj) {
+    if (propObjects.includes(obj)) return obj;
+    obj = obj.parent;
+  }
+  return null;
+}
+
+function selectProp(root) {
+  selectedProp = root;
+  if (root) {
+    transformControls.enabled = true;
+    tcHelper.visible = true;
+    transformControls.attach(root);
+  } else {
+    tcHelper.visible = false;
+    transformControls.detach();
+  }
+}
+
+function placeProp(wx, wy, wz) {
+  if (activePropIndex < 0 || activePropIndex >= propLibrary.length) return;
+  const root = propLibrary[activePropIndex].scene.clone();
+  root.position.set(wx, wy + PARAMS.propSinkOffset, wz);
+  root.userData.propName = propLibrary[activePropIndex].name;
+  root.traverse((o) => {
+    if (o.isMesh) {
+      o.castShadow = true;
+      o.receiveShadow = true;
+    }
+  });
+  scene.add(root);
+  propObjects.push(root);
+  selectProp(root);
+  invalidateBvhHeight();
+}
+
+function saveProps() {
+  const data = propObjects.map((root) => ({
+    propName: root.userData.propName ?? "unknown",
+    x: root.position.x,
+    y: root.position.y,
+    z: root.position.z,
+    rx: root.rotation.x,
+    ry: root.rotation.y,
+    rz: root.rotation.z,
+    sx: root.scale.x,
+    sy: root.scale.y,
+    sz: root.scale.z,
+  }));
+  const blob = new Blob([JSON.stringify(data, null, 2)], {
+    type: "application/json",
+  });
+  const a = document.createElement("a");
+  a.download = "props.json";
+  a.href = URL.createObjectURL(blob);
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function applyProps(data) {
+  propObjects.forEach((r) => scene.remove(r));
+  propObjects = [];
+  selectProp(null);
+  data.forEach((d) => {
+    const entry = propLibrary.find((e) => e.name === d.propName);
+    if (!entry) {
+      console.warn(
+        `Props: model "${d.propName}" not in library — import it first`,
+      );
+      return;
+    }
+    const root = entry.scene.clone();
+    root.position.set(d.x, d.y, d.z);
+    root.rotation.set(d.rx, d.ry, d.rz);
+    root.scale.set(d.sx, d.sy, d.sz);
+    root.userData.propName = d.propName;
+    root.traverse((o) => {
+      if (o.isMesh) {
+        o.castShadow = true;
+        o.receiveShadow = true;
+      }
+    });
+    scene.add(root);
+    propObjects.push(root);
+  });
+  invalidateBvhHeight();
+}
+
+function loadPropsJson(file) {
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    try {
+      applyProps(JSON.parse(ev.target.result));
+    } catch (err) {
+      console.error("Failed to load props.json", err);
+    }
+  };
+  reader.readAsText(file);
+}
+
+function syncPropObjectsHeights() {
+  propObjects.forEach((root) => {
+    root.position.y =
+      getChunkHeightfieldHeight(root.position.x, root.position.z) +
+      PARAMS.propSinkOffset;
+  });
+}
+
+function getCliffRoot(object) {
+  let obj = object;
+  while (obj) {
+    if (cliffObjects.includes(obj)) return obj;
+    obj = obj.parent;
+  }
+  return null;
+}
+
+function selectCliff(root) {
+  selectedCliff = root;
+  if (root) {
+    tcHelper.visible = true;
+    transformControls.attach(root);
+  } else {
+    tcHelper.visible = false;
+    transformControls.detach();
+  }
+}
+
+function placeCliff(wx, wy, wz, modelIndex) {
+  if (!placeCliffsReady || !cliffTemplates.length) return;
+  const mi = Math.max(
+    0,
+    Math.min(cliffTemplates.length - 1, modelIndex | 0),
+  );
+  const root = cliffTemplates[mi].clone();
+  root.position.set(wx, wy - cliffSinkOffset, wz);
+  root.userData.modelIndex = mi;
+  root.traverse((o) => {
+    if (o.isMesh) {
+      o.castShadow = true;
+      o.receiveShadow = true;
+    }
+  });
+  scene.add(root);
+  cliffObjects.push(root);
+  selectCliff(root);
+  invalidateBvhHeight();
+}
+
+function applyCliffs(data) {
+  if (!placeCliffsReady || !cliffTemplates.length) return;
+  cliffObjects.forEach((r) => scene.remove(r));
+  cliffObjects = [];
+  selectCliff(null);
+  data.forEach((d) => {
+    const idx = Math.max(
+      0,
+      Math.min(cliffTemplates.length - 1, d.modelIndex ?? 0),
+    );
+    const root = cliffTemplates[idx].clone();
+    root.position.set(d.x, d.y, d.z);
+    root.rotation.set(d.rx, d.ry, d.rz);
+    root.scale.set(d.sx, d.sy, d.sz);
+    root.userData.modelIndex = idx;
+    root.traverse((o) => {
+      if (o.isMesh) {
+        o.castShadow = true;
+        o.receiveShadow = true;
+      }
+    });
+    scene.add(root);
+    cliffObjects.push(root);
+  });
+  invalidateBvhHeight();
+}
+
+function saveCliffs() {
+  const data = cliffObjects.map((root) => ({
+    modelIndex: root.userData.modelIndex ?? 0,
+    x: root.position.x,
+    y: root.position.y,
+    z: root.position.z,
+    rx: root.rotation.x,
+    ry: root.rotation.y,
+    rz: root.rotation.z,
+    sx: root.scale.x,
+    sy: root.scale.y,
+    sz: root.scale.z,
+  }));
+  const blob = new Blob([JSON.stringify(data, null, 2)], {
+    type: "application/json",
+  });
+  const a = document.createElement("a");
+  a.download = "cliffs.json";
+  a.href = URL.createObjectURL(blob);
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+let decalObjects = [];
+let selectedDecal = null;
+let decalTexture = null;
+let decalTextureUrl = null;
+
+function selectDecal(mesh) {
+  selectedDecal = mesh;
+  if (mesh) {
+    transformControls.enabled = true;
+    tcHelper.visible = true;
+    transformControls.attach(mesh);
+  } else {
+    tcHelper.visible = false;
+    transformControls.detach();
+  }
+}
+
+function placeDecal(x, y, z) {
+  if (!decalTexture) {
+    console.warn("Decal: load a PNG/image first (Decal folder).");
+    return;
+  }
+  const geo = new THREE.PlaneGeometry(1, 1);
+  geo.rotateX(-Math.PI / 2);
+  const mat = new THREE.MeshBasicMaterial({
+    map: decalTexture,
+    transparent: true,
+    alphaTest: 0.01,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -4,
+    polygonOffsetUnits: -4,
+    side: THREE.DoubleSide,
+    opacity: PARAMS.decal.opacity,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(x, y + PARAMS.decal.heightOffset, z);
+  mesh.scale.set(4, 1, 4);
+  mesh.renderOrder = 3;
+  mesh.userData.decalTextureUrl = decalTextureUrl;
+  mesh.userData.isDecal = true;
+  scene.add(mesh);
+  decalObjects.push(mesh);
+  selectDecal(mesh);
+  if (editorPane) editorPane.refresh();
+}
+
+function deleteSelectedDecal() {
+  if (!selectedDecal) return;
+  const m = selectedDecal;
+  const map = m.material.map;
+  scene.remove(m);
+  m.geometry.dispose();
+  m.material.map = null;
+  m.material.dispose();
+  decalObjects = decalObjects.filter((d) => d !== m);
+  const stillUsed = decalObjects.some((o) => o.material.map === map);
+  if (!stillUsed && map && map !== decalTexture) map.dispose();
+  selectDecal(null);
+  if (editorPane) editorPane.refresh();
+}
+
+function loadDecalPng() {
+  const inp = document.createElement("input");
+  inp.type = "file";
+  inp.accept = "image/*";
+  inp.onchange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      decalTextureUrl = ev.target.result;
+      new THREE.TextureLoader().load(decalTextureUrl, (tex) => {
+        tex.colorSpace = THREE.SRGBColorSpace;
+        if (decalTexture) decalTexture.dispose();
+        decalTexture = tex;
+        if (editorPane) editorPane.refresh();
+      });
+    };
+    reader.readAsDataURL(file);
+  };
+  inp.click();
+}
+
+function saveDecalsJsonFile() {
+  const data = decalObjects.map((obj) => ({
+    x: obj.position.x,
+    y: obj.position.y,
+    z: obj.position.z,
+    rx: obj.rotation.x,
+    ry: obj.rotation.y,
+    rz: obj.rotation.z,
+    sx: obj.scale.x,
+    sy: obj.scale.y,
+    sz: obj.scale.z,
+    opacity: obj.material.opacity,
+    textureUrl: obj.userData.decalTextureUrl,
+  }));
+  const blob = new Blob([JSON.stringify(data, null, 2)], {
+    type: "application/json",
+  });
+  const a = document.createElement("a");
+  a.download = "decals.json";
+  a.href = URL.createObjectURL(blob);
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function applyDecalsFromData(data) {
+  data.forEach((item) => {
+    new THREE.TextureLoader().load(
+      item.textureUrl,
+      (tex) => {
+        tex.colorSpace = THREE.SRGBColorSpace;
+        const geo = new THREE.PlaneGeometry(1, 1);
+        geo.rotateX(-Math.PI / 2);
+        const mat = new THREE.MeshBasicMaterial({
+          map: tex,
+          transparent: true,
+          alphaTest: 0.01,
+          depthWrite: false,
+          polygonOffset: true,
+          polygonOffsetFactor: -4,
+          polygonOffsetUnits: -4,
+          side: THREE.DoubleSide,
+          opacity: item.opacity ?? 1.0,
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(item.x, item.y, item.z);
+        mesh.rotation.set(item.rx, item.ry, item.rz);
+        mesh.scale.set(item.sx, item.sy, item.sz);
+        mesh.renderOrder = 3;
+        mesh.userData.decalTextureUrl = item.textureUrl;
+        mesh.userData.isDecal = true;
+        scene.add(mesh);
+        decalObjects.push(mesh);
+      },
+      undefined,
+      (err) => console.warn("Decal: failed to load textureUrl", err),
+    );
+  });
+}
+
+function clearDecals() {
+  const maps = new Set();
+  decalObjects.forEach((obj) => {
+    if (obj.material.map) maps.add(obj.material.map);
+    scene.remove(obj);
+    obj.geometry.dispose();
+    obj.material.map = null;
+    obj.material.dispose();
+  });
+  decalObjects = [];
+  selectDecal(null);
+  maps.forEach((map) => {
+    if (map && map !== decalTexture) map.dispose();
+  });
+}
+
+function refitDecalToTerrain() {
+  if (!selectedDecal) return;
+  const mesh = selectedDecal;
+  mesh.updateMatrixWorld(true);
+  const newGeo = new THREE.PlaneGeometry(1, 1, 32, 32);
+  newGeo.rotateX(-Math.PI / 2);
+  const pos = newGeo.attributes.position;
+  const v = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    v.set(pos.getX(i), pos.getY(i), pos.getZ(i));
+    mesh.localToWorld(v);
+    v.y = getWorldHeight(v.x, v.z) + PARAMS.decal.heightOffset;
+    mesh.worldToLocal(v);
+    pos.setXYZ(i, v.x, v.y, v.z);
+  }
+  pos.needsUpdate = true;
+  newGeo.computeVertexNormals();
+  mesh.geometry.dispose();
+  mesh.geometry = newGeo;
+}
+
+bindRiverWaterfallImpactRuntime({
+  scene,
+  transformControls,
+  tcHelper,
+  controls,
+  getPlayMode: () => playMode,
+  getEditState: () => editState,
+});
+syncImpactFoamUniforms();
+applyImpactFoamVisibility();
+
+const hemi = new THREE.HemisphereLight(
+  PARAMS.light.hemiSkyColor,
+  PARAMS.light.hemiGroundColor,
+  PARAMS.light.hemiIntensity,
+);
+scene.add(hemi);
+
+const sun = new THREE.DirectionalLight(
+  PARAMS.light.dirColor,
+  PARAMS.light.dirIntensity,
+);
+sun.position.copy(sunDir).multiplyScalar(600);
+scene.add(sun);
+
+const shadowTarget = new THREE.Object3D();
+scene.add(shadowTarget);
+sun.target = shadowTarget;
+
+const { updateLensFlare } = createLensFlare(scene, camera, sunDir);
+
+/** Same CSM setup as splatmap-painter10bvh+post.html */
+let csm = null;
+function setCsmEnabled(on) {
+  if (!csm || !sun.shadow) return;
+  sun.shadow.shadowNode = on ? csm : null;
+}
+if (renderer.shadowMap) {
+  renderer.shadowMap.enabled = true;
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(PARAMS.csm.mapSize, PARAMS.csm.mapSize);
+  sun.shadow.camera.near = 1;
+  sun.shadow.camera.far = 300;
+  sun.shadow.camera.left = sun.shadow.camera.bottom = -300;
+  sun.shadow.camera.right = sun.shadow.camera.top = 300;
+  sun.shadow.bias = PARAMS.shadowBias;
+  sun.shadow.normalBias = PARAMS.shadowNormalBias;
+  csm = new CSMShadowNode(sun, {
+    cascades: PARAMS.csm.cascades,
+    maxFar: PARAMS.csm.maxFar,
+    mode: "practical",
+    lightMargin: PARAMS.csm.lightMargin,
+  });
+  if (csm.lights.length > 2) csm.lights[2].shadow.mapSize.set(1024, 1024);
+  if (PARAMS.csm.enabled) sun.shadow.shadowNode = csm;
+}
+
+scene.background = null;
+
+const sky = new SkyMesh();
+sky.scale.setScalar(10000);
+sky.material.fog = false;
+scene.add(sky);
+sky.turbidity.value = PARAMS.sky.turbidity;
+sky.rayleigh.value = PARAMS.sky.rayleigh;
+sky.mieCoefficient.value = PARAMS.sky.mie;
+sky.mieDirectionalG.value = PARAMS.sky.mieG;
+sky.cloudCoverage.value = PARAMS.sky.cloudCoverage;
+sky.cloudDensity.value = PARAMS.sky.cloudDensity;
+sky.cloudElevation.value = PARAMS.sky.cloudElevation;
+sky.sunPosition.value.copy(sunDir);
+
+const pmremGenerator = new THREE.PMREMGenerator(renderer);
+function rebuildSkyEnv() {
+  const envScene = new THREE.Scene();
+  envScene.add(sky.clone());
+  scene.environment = pmremGenerator.fromScene(envScene, 0.04).texture;
+}
+if (PARAMS.sky.mode === "physical") {
+  rebuildSkyEnv();
+} else {
+  scene.environment = null;
+}
+sky.visible = PARAMS.sky.mode === "physical";
+scene.environmentIntensity = PARAMS.light.envIntensity;
+
+const stylizedSky = createStylizedSky({
+  sphereRadius: camera.far * 0.92,
+});
+scene.add(stylizedSky.mesh);
+
+const billboardClouds = createBillboardClouds(scene);
+
+const uHFogEnabled = uniform(PARAMS.fog.height.enabled ? 1 : 0);
+const uHFogColor = uniform(
+  new THREE.Color(PARAMS.fog.height.color).convertSRGBToLinear(),
+);
+const uHFogDensity = uniform(PARAMS.fog.height.density);
+const uHFogHeight = uniform(PARAMS.fog.height.height);
+const uDFogEnabled = uniform(PARAMS.fog.distance.enabled ? 1 : 0);
+const uDFogColor = uniform(
+  new THREE.Color(PARAMS.fog.distance.color).convertSRGBToLinear(),
+);
+const uDFogDensity = uniform(PARAMS.fog.distance.density);
+const _hFactor = exponentialHeightFogFactor(
+  uHFogDensity,
+  uHFogHeight,
+).mul(uHFogEnabled);
+const _dFactor = densityFogFactor(uDFogDensity).mul(uDFogEnabled);
+const _combinedFactor = clamp(_hFactor.add(_dFactor), 0, 1);
+const _totalW = _hFactor.add(_dFactor).add(0.0001);
+const _blendedFogColor = mix(
+  uHFogColor,
+  uDFogColor,
+  _dFactor.div(_totalW),
+);
+const _combinedFogNode = fog(_blendedFogColor, _combinedFactor);
+
+function syncFog() {
+  uHFogEnabled.value = PARAMS.fog.height.enabled ? 1 : 0;
+  uHFogColor.value.set(PARAMS.fog.height.color).convertSRGBToLinear();
+  uHFogDensity.value = PARAMS.fog.height.density;
+  uHFogHeight.value = PARAMS.fog.height.height;
+  uDFogEnabled.value = PARAMS.fog.distance.enabled ? 1 : 0;
+  uDFogColor.value.set(PARAMS.fog.distance.color).convertSRGBToLinear();
+  uDFogDensity.value = PARAMS.fog.distance.density;
+  const anyEnabled =
+    PARAMS.fog.height.enabled || PARAMS.fog.distance.enabled;
+  scene.fogNode = anyEnabled ? _combinedFogNode : null;
+}
+syncFog();
+
+let hdrTexture = null;
+const DEFAULT_HDR_URL = new URL(
+  "textures/animestyled_hdr.hdr",
+  import.meta.url,
+).href;
+
+function assignHdrTexture(tex) {
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  if (hdrTexture) hdrTexture.dispose();
+  hdrTexture = tex;
+  if (PARAMS.sky.mode === "hdr") {
+    scene.background = hdrTexture;
+    scene.environment = hdrTexture;
+  }
+}
+
+const rgbeLoader = new HDRLoader();
+
+function loadDefaultHdrTexture() {
+  rgbeLoader.load(
+    DEFAULT_HDR_URL,
+    (tex) => assignHdrTexture(tex),
+    undefined,
+    (err) =>
+      console.warn(
+        "Default HDR textures/animestyled_hdr.hdr failed to load:",
+        err,
+      ),
+  );
+}
+
+function setSkyMode(mode) {
+  PARAMS.sky.mode = mode;
+  sky.visible = false;
+  stylizedSky.mesh.visible = false;
+  scene.background = null;
+  if (mode === "physical") {
+    sky.visible = true;
+    rebuildSkyEnv();
+  } else if (mode === "stylized") {
+    stylizedSky.mesh.visible = true;
+  } else if (mode === "hdr") {
+    if (hdrTexture) {
+      scene.background = hdrTexture;
+      scene.environment = hdrTexture;
+    } else {
+      loadDefaultHdrTexture();
+    }
+  }
+  if (editorPane) editorPane.refresh();
+}
+
+setSkyMode(PARAMS.sky.mode);
+
+const _hdrFileInput = document.getElementById("hdr-file-input");
+if (_hdrFileInput) {
+  _hdrFileInput.addEventListener("change", (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    rgbeLoader.load(url, (tex) => {
+      assignHdrTexture(tex);
+      URL.revokeObjectURL(url);
+    });
+    e.target.value = "";
+  });
+}
+
+/** Match painter: physical = SkyMesh uniforms each frame; PMREM from rebuildSkyEnv when physical. */
+let _lightSkySnap = "";
+function syncLightAndSkyFromParams() {
+  const L = PARAMS.light;
+  const S = PARAMS.sky;
+  const snap = `${L.sunAzimuth},${L.sunElevation},${L.dirColor},${L.dirIntensity},${PARAMS.shadowBias},${PARAMS.shadowNormalBias},${L.hemiSkyColor},${L.hemiGroundColor},${L.hemiIntensity},${L.envIntensity},${L.exposure},${S.mode},${S.turbidity},${S.rayleigh},${S.mie},${S.mieG},${S.cloudCoverage},${S.cloudDensity},${S.cloudElevation}`;
+  if (snap === _lightSkySnap) return;
+  _lightSkySnap = snap;
+  sunDirectionFromAngles(L.sunAzimuth, L.sunElevation, sunDir);
+  sun.position.copy(sunDir).multiplyScalar(600);
+  sun.color.set(L.dirColor);
+  sun.intensity = L.dirIntensity;
+  if (sun.shadow) {
+    sun.shadow.bias = PARAMS.shadowBias;
+    sun.shadow.normalBias = PARAMS.shadowNormalBias;
+  }
+  hemi.color.set(L.hemiSkyColor);
+  hemi.groundColor.set(L.hemiGroundColor);
+  hemi.intensity = L.hemiIntensity;
+  if (S.mode === "physical") {
+    sky.turbidity.value = S.turbidity;
+    sky.rayleigh.value = S.rayleigh;
+    sky.mieCoefficient.value = S.mie;
+    sky.mieDirectionalG.value = S.mieG;
+    sky.cloudCoverage.value = S.cloudCoverage;
+    sky.cloudDensity.value = S.cloudDensity;
+    sky.cloudElevation.value = S.cloudElevation;
+    sky.sunPosition.value.copy(sunDir);
+  }
+  scene.environmentIntensity = L.envIntensity;
+  renderer.toneMappingExposure = L.exposure;
+}
+
+function applyImportedLightSky(data) {
+  const hasLight = data.light && typeof data.light === "object";
+  const hasSky = data.sky && typeof data.sky === "object";
+  if (!hasLight && !hasSky) return;
+  if (hasLight) mergePlainDeep(PARAMS.light, data.light);
+  if (hasSky) mergePlainDeep(PARAMS.sky, data.sky);
+  _lightSkySnap = "";
+  setSkyMode(PARAMS.sky.mode);
+  syncLightAndSkyFromParams();
+  if (PARAMS.sky.mode === "physical") rebuildSkyEnv();
+}
+
+let _lastCsmCascades = PARAMS.csm.cascades;
+let _lastCsmMaxFar = PARAMS.csm.maxFar;
+let _lastCsmMargin = PARAMS.csm.lightMargin;
+let _lastCsmMapSize = PARAMS.csm.mapSize;
+
+const uRoadAsphaltDark = uniform(
+  new THREE.Color(PARAMS.road.asphaltDark),
+);
+const uRoadAsphaltLight = uniform(
+  new THREE.Color(PARAMS.road.asphaltLight),
+);
+const uRoadLineColor = uniform(new THREE.Color(PARAMS.road.lineColor));
+const uRoadGrainScale = uniform(PARAMS.road.grainScale);
+const uRoadGrainStrength = uniform(PARAMS.road.grainStrength);
+const uRoadLineWidth = uniform(PARAMS.road.lineWidth);
+const uRoadLineSoftness = uniform(PARAMS.road.lineSoftness);
+
+const buildRoadColorNode = Fn(() => {
+  const uvCoord = uv();
+  const grainUV = uvCoord.mul(uRoadGrainScale);
+  const g1 = _wFbm2(grainUV);
+  const g2 = _wFbm2(grainUV.mul(2.35).add(vec2(0.61, 1.93)));
+  const grain = g1.mul(0.62).add(g2.mul(0.38));
+  const tone = grain
+    .mul(uRoadGrainStrength)
+    .add(0.5)
+    .clamp(float(0), float(1));
+  const base = mix(uRoadAsphaltDark, uRoadAsphaltLight, tone);
+  const w = max(uRoadLineWidth, float(0.0001));
+  const s = uRoadLineSoftness;
+  const yL = uvCoord.y;
+  const yR = float(1).sub(uvCoord.y);
+  const hardL = float(1).sub(step(w, yL));
+  const hardR = float(1).sub(step(w, yR));
+  const softEps = max(s, float(1e-6));
+  const softL = float(1).sub(smoothstep(w, w.add(softEps), yL));
+  const softR = float(1).sub(smoothstep(w, w.add(softEps), yR));
+  const useSoft = step(float(1e-6), s);
+  const leftLine = mix(hardL, softL, useSoft);
+  const rightLine = mix(hardR, softR, useSoft);
+  const edgeBlend = max(leftLine, rightLine).clamp(float(0), float(1));
+  return mix(base, uRoadLineColor, edgeBlend).saturate();
+});
+
+const roadMat = new MeshBasicNodeMaterial({
+  side: THREE.DoubleSide,
+  polygonOffset: true,
+  polygonOffsetFactor: -1,
+  polygonOffsetUnits: -1,
+});
+roadMat.colorNode = buildRoadColorNode();
+
+function syncRoadMat() {
+  uRoadAsphaltDark.value.set(PARAMS.road.asphaltDark);
+  uRoadAsphaltLight.value.set(PARAMS.road.asphaltLight);
+  uRoadLineColor.value.set(PARAMS.road.lineColor);
+  uRoadGrainScale.value = PARAMS.road.grainScale;
+  uRoadGrainStrength.value = PARAMS.road.grainStrength;
+  uRoadLineWidth.value = PARAMS.road.lineWidth;
+  uRoadLineSoftness.value = PARAMS.road.lineSoftness;
+  roadMat.needsUpdate = true;
+}
+
+let heightTexDirty = true;
+let lastHeightTexSyncMs = 0;
+let globalHeightTexData = null;
+let globalHeightTex = null;
+/** Terrain heightfield only (no BVH cliff merge) — Gemini grass roots follow this. */
+let geminiTerrainOnlyHeightTexData = null;
+let geminiTerrainOnlyHeightTex = null;
+/** Cliff top Y for upward-facing surfaces; -9999 where no valid cliff grass surface. */
+let cliffHeightTexData = null;
+let cliffHeightTex = null;
+
+const cliffU = createAutoCliffUniforms();
+const rock028Textures = { colorTex: null, dataTex: null };
+let rock028Ready = false;
+
+function syncCliffUniformsFromParams() {
+  const ac = PARAMS.autoCliff;
+  cliffU.uSlopeStart.value = ac.slopeStart;
+  cliffU.uSlopeEnd.value = ac.slopeEnd;
+  cliffU.uRockScale.value = ac.rockScale;
+  cliffU.uRockBrightness.value = ac.rockBrightness;
+  cliffU.uRockContrast.value = ac.rockContrast;
+  cliffU.uRockTint.value.set(ac.rockTint).convertSRGBToLinear();
+  cliffU.uRockNormalStr.value = ac.rockNormalStr;
+  cliffU.uRockBlendSharp.value = ac.rockBlendSharp;
+  cliffU.uRockRoughMul.value = ac.rockRoughMul;
+  cliffU.uTriplanarSharp.value = ac.triplanarSharp;
+}
+
+function buildCliffDeps() {
+  if (
+    !PARAMS.autoCliffEnabled ||
+    !rock028Ready ||
+    !globalHeightTex ||
+    !rock028Textures.colorTex
+  ) {
+    return null;
+  }
+  return {
+    heightTex: globalHeightTex,
+    rockColorTex: rock028Textures.colorTex,
+    rockDataTex: rock028Textures.dataTex,
+    cliffU,
+    worldSize: CONFIG.worldSize,
+    worldHalf: CONFIG.worldSize * 0.5,
+    htexRes: HTEX_RES,
+  };
+}
+
+/** Per-chunk tile view with hole punch from splat α — matches painter `tileMat.opacityNode`. */
+function createChunkTileMaterialWithHoles(splatTex) {
+  splatTex.anisotropy = Math.max(splatTex.anisotropy || 0, 8);
+  splatTex.flipY = false;
+  const mat = createTileMaterial({
+    roughness: 0.95,
+    textureScale: 400,
+    tileColor: 0xe6e3e3,
+    gridColor: 0x444444,
+    gridLineColor: 0x111111,
+  });
+  const cs = float(CONFIG.chunkSize);
+  mat.opacityNode = Fn(() => {
+    const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));
+    const s = texture(splatTex, splatUV);
+    return float(1.0).sub(step(float(0.25), s.a));
+  })();
+  mat.alphaTest = 0.5;
+  mat.transparent = false;
+  return mat;
+}
+
+// ── Shared TSL ground material (one compiled shader for all chunks) ──
+let sharedTslGround = null; // { material, splatTexNode, imgWeightTexNode, meadowTexNode }
+
+function buildSharedTslGroundMaterial() {
+  if (sharedTslGround) sharedTslGround.material.dispose();
+  syncCliffUniformsFromParams();
+  const deps = buildCliffDeps();
+  sharedTslGround = createChunkPainterGroundMaterial(
+    CONFIG.chunkSize,
+    { worldSize: CONFIG.worldSize },
+    deps,
+    chunkImageSlots,
+    chunkMeadowBundle,
+    chunkGroundBundle,
+  );
+}
+buildSharedTslGroundMaterial();
+
+// ── Shared image-texture ground material (tiles one slot's textures over entire terrain) ──
+let sharedImgTex = null; // { material, splatTexNode, albedoTexNode, ormTexNode, uUVScale }
+/** Declared before `syncImgTexSlot` / `buildSharedImgTexMaterial` so early calls are not TDZ. */
+let geminiGrassUniforms = null;
+let gemGrassTintTexNodeMain = null;
+let gemGrassTintTexNodeMega = null;
+
+let geminiDensityCanvas = null;
+let geminiDensityCtx = null;
+let geminiDensityTex = null;
+let geminiCliffDensityCanvas = null;
+let geminiCliffDensityCtx = null;
+let geminiCliffDensityTex = null;
+let geminiGrassPatchSystem = null;
+let geminiGrassGroup = null;
+/** False until user paints / fills / loads density — avoids ~100+ grass patch draws when density is empty. */
+let geminiGrassHasPaintedDensity = false;
+let lastGeminiPatchCount = 0;
+
+let geminiGrassFolderRef = null;
+let geminiCliffGrassFolderRef = null;
+let brushFolderRef = null;
+let lodFolderRef = null;
+let ptreeFolderRef = null;
+let waterfallFolderRef = null;
+let objectsFolderRef = null;
+let foliageFolderRef = null;
+let splineFolderRef = null;
+let riverFolderRef = null;
+let waterFolderRef = null;
+let roadFolderRef = null;
+let pathFolderRef = null;
+let decalFolderRef = null;
+let propsFolderRef = null;
+
+let riverPoints = [];
+let riverSelectedIdx = -1;
+let riverDragging = false;
+let riverPointMeshes = [];
+let riverGroup = null;
+let riverMesh = null;
+/** Each entry: { points: Vector3[], mesh: Mesh|null } — shared roadMat on every mesh. */
+let roadSegs = [];
+let roadSelectedIdx = -1;
+let roadDragging = false;
+let roadPointMeshes = [];
+let roadGroup = null;
+
+let splinePoints = [];
+let splineSelectedIdx = -1;
+let splineDragging = false;
+let splinePointMeshes = [];
+let splineGroup = null;
+let splinePreviewGroup = null;
+let splineTrainMesh = null;
+let splineTrainT = 0;
+let _cachedTrainCurve = null;
+let _cachedTrainLen = 0;
+let placeFolderRef = null;
+let cliffsFolderRef = null;
+let cliffPaintFolderRef = null;
+let playFolderRef = null;
+let fleurSystem = null;
+let fleurFolderRef = null;
+let fleurEraseMode = false;
+let fleurActiveSlot = 0;
+
+let ambientFXSystem = null;
+let ambientFXErase = false;
+let ambientFXFolderRef = null;
+
+const ambientFXParams = {
+  effectType: "butterflies",
+  emitterRadius: 12,
+  density: 3,
+  flapSpeed: 8.0,
+  flapAngle: 0.8,
+  glideRatio: 0.45,
+  showRings: true,
+  windX: 1.0,
+  windZ: 0.3,
+  windStrength: 1.0,
+};
+const fleurParams = {
+  perStroke: 20,
+  minSpacing: 0.4,
+  scaleMin: 0.4,
+  scaleMax: 0.7,
+  hoverBase: 0.45,
+  hoverVariance: 0.1,
+  subMode: "ground",
+  bloomShape: 0,
+  stemBase: "#1f5c32",
+  stemTop: "#6bae6e",
+  stemStaticCurve: 0.1,
+  interactRadius: 1.5,
+  interactStrength: 0.4,
+  interactGain: 0.85,
+  windAmp: 0.042,
+  windSpeed: 1.12,
+};
+function _syncFleurInteractionToSystem() {
+  if (!fleurSystem) return;
+  fleurSystem.setInteractionRadius(fleurParams.interactRadius);
+  fleurSystem.setInteractionStrength(fleurParams.interactStrength);
+  fleurSystem.setRepulseGain(fleurParams.interactGain);
+  fleurSystem.setWindAmp(fleurParams.windAmp);
+  fleurSystem.setWindSpeed(fleurParams.windSpeed);
+}
+const fleurColorA = {
+  preset: "main",
+  inner: FLEUR_PRESETS.main.inner,
+  outer: FLEUR_PRESETS.main.outer,
+  glow: FLEUR_PRESETS.main.glow,
+};
+const fleurColorB = {
+  preset: "sakura",
+  inner: FLEUR_PRESETS.sakura.inner,
+  outer: FLEUR_PRESETS.sakura.outer,
+  glow: FLEUR_PRESETS.sakura.glow,
+};
+const _geminiUpdateOpts = {
+  patchSize: 10,
+  patchSizeMid: 18,
+  patchSizeFar: 28,
+  patchSizeMega: 60,
+  lodMidDistance: 40,
+  lodFarDistance: 80,
+  maxDistance: 220,
+  megaMaxDistance: 400,
+  lodEnabled: true,
+  grassReceiveShadow: true,
+  mapWorldHalf: CONFIG.worldSize * 0.5,
+};
+
+function buildSharedImgTexMaterial() {
+  if (sharedImgTex) sharedImgTex.material.dispose();
+  syncCliffUniformsFromParams();
+  const deps = buildCliffDeps();
+  sharedImgTex = createSharedImgTexMaterial(
+    CONFIG.chunkSize,
+    CONFIG.worldSize,
+    deps,
+  );
+  syncImgTexSlot();
+}
+
+function syncImgTexSlot() {
+  if (!sharedImgTex) return;
+  const slot =
+    chunkImageSlots[PARAMS.imgTexSlotIndex] || chunkImageSlots[0];
+  sharedImgTex.albedoTexNode.value = slot.albedoTex;
+  sharedImgTex.ormTexNode.value = slot.ormTex;
+  sharedImgTex.uUVScale.value = slot.uvScale;
+  sharedImgTex.uNormalStr.value = slot.normalStrength;
+  sharedImgTex.uAOStr.value = slot.aoStrength;
+  sharedImgTex.uRoughStr.value = slot.roughStrength;
+  if (slot?.albedoTex) {
+    if (gemGrassTintTexNodeMain)
+      gemGrassTintTexNodeMain.value = slot.albedoTex;
+    if (gemGrassTintTexNodeMega)
+      gemGrassTintTexNodeMega.value = slot.albedoTex;
+  }
+}
+
+buildSharedImgTexMaterial();
+
+function worldToUV(wx, wz) {
+  const W = CONFIG.worldSize;
+  return {
+    u: (wx + W / 2) / W,
+    v: 1.0 - (wz + W / 2) / W,
+  };
+}
+
+function geminiBrushWorldRadius() {
+  return (brushSize / HTEX_RES) * CONFIG.worldSize;
+}
+
+function brushFalloff(t) {
+  if (t >= 1) return 0;
+  if (t <= 0) return 1;
+  switch (PARAMS.brushFalloff) {
+    case "linear":
+      return 1 - t;
+    case "sphere":
+      return Math.sqrt(1 - t * t);
+    case "hard":
+      return 1;
+    default:
+      return (1 + Math.cos(t * PI)) * 0.5;
+  }
+}
+
+function _radialGrad(ctx, cx, cy, r, g, b, alpha) {
+  const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, brushSize);
+  [0, 0.25, 0.5, 0.75, 0.95].forEach((t) => {
+    grad.addColorStop(
+      t,
+      `rgba(${r},${g},${b},${alpha * brushFalloff(t)})`,
+    );
+  });
+  grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+  return grad;
+}
+
+/** White radial alpha for `destination-out` erase (barrier mask — no RGB darkening). */
+function _radialGradAlphaPunch(ctx, cx, cy, alpha) {
+  const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, brushSize);
+  [0, 0.25, 0.5, 0.75, 0.95].forEach((t) => {
+    grad.addColorStop(t, `rgba(255,255,255,${alpha * brushFalloff(t)})`);
+  });
+  grad.addColorStop(1, "rgba(255,255,255,0)");
+  return grad;
+}
+
+function _smearCanvas(ctx, cx, cy) {
+  const rad = Math.ceil(brushSize);
+  const cw = ctx.canvas.width;
+  const ch = ctx.canvas.height;
+  const x0 = Math.max(0, Math.floor(cx - rad));
+  const y0 = Math.max(0, Math.floor(cy - rad));
+  const x1 = Math.min(cw, Math.ceil(cx + rad));
+  const y1 = Math.min(ch, Math.ceil(cy + rad));
+  const w = x1 - x0;
+  const h = y1 - y0;
+  if (w <= 0 || h <= 0) return;
+  const imgData = ctx.getImageData(x0, y0, w, h);
+  const src = new Uint8ClampedArray(imgData.data);
+  const dst = imgData.data;
+  const alpha = brushStr / 100;
+  const kr = Math.max(1, Math.round(brushSize * 0.18));
+  for (let py = 0; py < h; py++) {
+    for (let px = 0; px < w; px++) {
+      const dx = x0 + px - cx;
+      const dy = y0 + py - cy;
+      const t = Math.sqrt(dx * dx + dy * dy) / brushSize;
+      if (t >= 1) continue;
+      const str = brushFalloff(t) * alpha;
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let a = 0;
+      let tw = 0;
+      for (let oy = -kr; oy <= kr; oy++) {
+        for (let ox = -kr; ox <= kr; ox++) {
+          const sx = px + ox;
+          const sy = py + oy;
+          if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue;
+          const wi = 1;
+          const j = (sy * w + sx) * 4;
+          r += src[j] * wi;
+          g += src[j + 1] * wi;
+          b += src[j + 2] * wi;
+          a += src[j + 3] * wi;
+          tw += wi;
+        }
+      }
+      if (tw <= 0) continue;
+      const di = (py * w + px) * 4;
+      const mixf = str;
+      dst[di] = Math.round(dst[di] * (1 - mixf) + (r / tw) * mixf);
+      dst[di + 1] = Math.round(
+        dst[di + 1] * (1 - mixf) + (g / tw) * mixf,
+      );
+      dst[di + 2] = Math.round(
+        dst[di + 2] * (1 - mixf) + (b / tw) * mixf,
+      );
+      dst[di + 3] = Math.round(
+        dst[di + 3] * (1 - mixf) + (a / tw) * mixf,
+      );
+    }
+  }
+  ctx.putImageData(imgData, x0, y0);
+}
+
+function _paintSmooth(ctx, cx, cy, r, g, b, alpha) {
+  ctx.globalCompositeOperation = "source-over";
+  ctx.fillStyle = _radialGrad(ctx, cx, cy, r, g, b, alpha);
+  ctx.beginPath();
+  ctx.arc(cx, cy, brushSize, 0, PI * 2);
+  ctx.fill();
+}
+
+/** Matches splatmap-painter `_applyBrushToCanvas` (smooth + smear; chunks pane has no fbm/scatter). */
+function _applyBrushToCanvas(ctx, cx, cy, r, g, b, alpha) {
+  if (PARAMS.paintBrush === "smear") _smearCanvas(ctx, cx, cy);
+  else _paintSmooth(ctx, cx, cy, r, g, b, alpha);
+}
+
+let _barrierCache = null;
+let _barrierCacheDirty = true;
+function _getBarrierPixels() {
+  if (_barrierCacheDirty || !_barrierCache) {
+    _barrierCache = barrierCtx.getImageData(
+      0,
+      0,
+      BARRIER_RES,
+      BARRIER_RES,
+    ).data;
+    _barrierCacheDirty = false;
+  }
+  return _barrierCache;
+}
+function invalidateBarrierCache() {
+  _barrierCacheDirty = true;
+}
+
+function isBarrierBlocked(wx, wz) {
+  const pixels = _getBarrierPixels();
+  const { u, v } = worldToUV(wx, wz);
+  const px = Math.max(
+    0,
+    Math.min(BARRIER_RES - 1, Math.floor(u * BARRIER_RES)),
+  );
+  const py = Math.max(
+    0,
+    Math.min(BARRIER_RES - 1, Math.floor(v * BARRIER_RES)),
+  );
+  return pixels[(py * BARRIER_RES + px) * 4] > 64;
+}
+
+function syncBarrierOverlay() {
+  if (!barrierOverlayMesh) return;
+  barrierOverlayMesh.material.map.needsUpdate = true;
+}
+
+function syncBarrierOverlayFromParams() {
+  if (!barrierOverlayMesh) return;
+  if (playMode) {
+    barrierOverlayMesh.visible = false;
+    return;
+  }
+  barrierOverlayMesh.visible =
+    barrierPARAMS.showOverlay || editState.mode === "barrier";
+}
+
+function paintBarrierAt(wx, wz, erase) {
+  const { u, v } = worldToUV(wx, wz);
+  const cx = u * BARRIER_RES;
+  const cy = v * BARRIER_RES;
+  const alpha = brushStr / 100;
+  if (erase) {
+    barrierCtx.save();
+    barrierCtx.globalCompositeOperation = "destination-out";
+    barrierCtx.fillStyle = _radialGradAlphaPunch(
+      barrierCtx,
+      cx,
+      cy,
+      alpha,
+    );
+    barrierCtx.beginPath();
+    barrierCtx.arc(cx, cy, brushSize, 0, PI * 2);
+    barrierCtx.fill();
+    barrierCtx.restore();
+  } else {
+    _applyBrushToCanvas(barrierCtx, cx, cy, 255, 0, 0, alpha);
+  }
+  barrierCtx.globalCompositeOperation = "source-over";
+  if (barrierTex) barrierTex.needsUpdate = true;
+  invalidateBarrierCache();
+  syncBarrierOverlay();
+}
+
+function syncHoleOverlay() {
+  if (!holeOverlayMesh) return;
+  holeOverlayMesh.material.map.needsUpdate = true;
+}
+
+function syncHoleOverlayFromParams() {
+  if (!holeOverlayMesh) return;
+  if (playMode) {
+    holeOverlayMesh.visible = false;
+    return;
+  }
+  holeOverlayMesh.visible =
+    holePARAMS.showOverlay && editState.mode === "hole";
+}
+
+/** Rebuild world hole preview canvas from per-chunk splat alpha (after undo / import). */
+function rebuildHoleCanvasFromSplats() {
+  const res = HOLE_RES;
+  const img = holeCtx.createImageData(res, res);
+  const hd = img.data;
+  for (let i = 0; i < hd.length; i += 4) {
+    hd[i] = 0;
+    hd[i + 1] = 0;
+    hd[i + 2] = 0;
+    hd[i + 3] = 255;
+  }
+  const sR = CONFIG.splatRes;
+  const maxChunk = getMaxChunkIndex();
+  for (let cz = 0; cz <= maxChunk; cz++) {
+    for (let cx = 0; cx <= maxChunk; cx++) {
+      const k = chunkKey(cx, cz);
+      if (!chunkSplatMap.has(k)) continue;
+      const splat = chunkSplatMap.get(k);
+      const simg = splat.ctx.getImageData(0, 0, sR, sR);
+      const sd = simg.data;
+      const c = chunkCenterWorld(cx, cz);
+      const cs = CONFIG.chunkSize;
+      for (let py = 0; py < sR; py++) {
+        for (let px = 0; px < sR; px++) {
+          const uTex = (px + 0.5) / sR;
+          const vTex = (py + 0.5) / sR;
+          const wx = c.x + (uTex - 0.5) * cs;
+          const wz = c.z + (vTex - 0.5) * cs;
+          const { u, v } = worldToUV(wx, wz);
+          const hx = Math.min(res - 1, Math.max(0, Math.floor(u * res)));
+          const hy = Math.min(res - 1, Math.max(0, Math.floor(v * res)));
+          const a = sd[(py * sR + px) * 4 + 3];
+          const hi = (hy * res + hx) * 4;
+          if (a > hd[hi]) hd[hi] = a;
+        }
+      }
+    }
+  }
+  holeCtx.putImageData(img, 0, 0);
+  if (holeTex) holeTex.needsUpdate = true;
+  syncHoleOverlay();
+}
+
+function clearAllHoles() {
+  holeCtx.fillStyle = "#000";
+  holeCtx.fillRect(0, 0, HOLE_RES, HOLE_RES);
+  if (holeTex) holeTex.needsUpdate = true;
+  syncHoleOverlay();
+  const sR = CONFIG.splatRes;
+  for (const splat of chunkSplatMap.values()) {
+    const simg = splat.ctx.getImageData(0, 0, sR, sR);
+    const d = simg.data;
+    for (let i = 0; i < d.length; i += 4) d[i + 3] = 0;
+    splat.ctx.putImageData(simg, 0, 0);
+    splat.tex.needsUpdate = true;
+  }
+  refreshActiveChunkMaterials();
+}
+
+/** Terrain punch: world hole canvas + splat texture alpha (same mask as splatmap-painter `paintHoleAt`). */
+function paintHoleAtWorld(center, erase) {
+  const { u, v } = worldToUV(center.x, center.z);
+  const cx = u * HOLE_RES;
+  const cy = v * HOLE_RES;
+  const alpha = brushStr / 100;
+  if (erase) {
+    holeCtx.save();
+    holeCtx.globalCompositeOperation = "destination-out";
+    holeCtx.fillStyle = _radialGradAlphaPunch(holeCtx, cx, cy, alpha);
+    holeCtx.beginPath();
+    holeCtx.arc(cx, cy, brushSize, 0, PI * 2);
+    holeCtx.fill();
+    holeCtx.restore();
+  } else {
+    _applyBrushToCanvas(holeCtx, cx, cy, 255, 0, 0, alpha);
+  }
+  holeCtx.globalCompositeOperation = "source-over";
+  if (holeTex) holeTex.needsUpdate = true;
+  syncHoleOverlay();
+
+  const R = CONFIG.paint.radius;
+  const res = CONFIG.splatRes;
+  const maxChunk = getMaxChunkIndex();
+  const minC = worldToChunkIndex(center.x - R, center.z - R);
+  const maxC = worldToChunkIndex(center.x + R, center.z + R);
+  const minCx = THREE.MathUtils.clamp(minC.cx, 0, maxChunk);
+  const minCz = THREE.MathUtils.clamp(minC.cz, 0, maxChunk);
+  const maxCx = THREE.MathUtils.clamp(maxC.cx, 0, maxChunk);
+  const maxCz = THREE.MathUtils.clamp(maxC.cz, 0, maxChunk);
+  const ch = 3;
+  const flowBase = (brushStr / 100) * 255;
+
+  for (let cz = minCz; cz <= maxCz; cz++) {
+    for (let cx = minCx; cx <= maxCx; cx++) {
+      const splat = ensureChunkSplat(cx, cz);
+      const img = splat.ctx.getImageData(0, 0, res, res);
+      const data = img.data;
+      const c = chunkCenterWorld(cx, cz);
+      const cs = CONFIG.chunkSize;
+      let touched = false;
+      for (let py = 0; py < res; py++) {
+        for (let px = 0; px < res; px++) {
+          const uTex = (px + 0.5) / res;
+          const vTex = (py + 0.5) / res;
+          const wx = c.x + (uTex - 0.5) * cs;
+          const wz = c.z + (vTex - 0.5) * cs;
+          const dx = wx - center.x;
+          const dz = wz - center.z;
+          const dist = Math.hypot(dx, dz);
+          if (dist > R) continue;
+          const falloff = 1 - dist / R;
+          const delta = (erase ? -1 : 1) * flowBase * falloff;
+          const i = (py * res + px) * 4;
+          data[i + ch] = THREE.MathUtils.clamp(
+            data[i + ch] + delta,
+            0,
+            255,
+          );
+          touched = true;
+        }
+      }
+      if (touched) {
+        splat.ctx.putImageData(img, 0, 0);
+        splat.tex.needsUpdate = true;
+      }
+    }
+  }
+}
+
+function paintGeminiGrassAt(wx, wz, erase) {
+  if (!geminiDensityCtx) return;
+  const { u, v } = worldToUV(wx, wz);
+  const cx = u * HTEX_RES;
+  const cy = v * HTEX_RES;
+  if (PARAMS.paintBrush === "smear") {
+    _smearCanvas(geminiDensityCtx, cx, cy);
+  } else {
+    const alpha = brushStr / 100;
+    const [gr, gg, gb] = erase ? [0, 0, 0] : [255, 255, 255];
+    geminiDensityCtx.globalCompositeOperation = "source-over";
+    geminiDensityCtx.fillStyle = _radialGrad(
+      geminiDensityCtx,
+      cx,
+      cy,
+      gr,
+      gg,
+      gb,
+      alpha,
+    );
+    geminiDensityCtx.beginPath();
+    geminiDensityCtx.arc(cx, cy, brushSize, 0, PI * 2);
+    geminiDensityCtx.fill();
+  }
+  if (geminiDensityTex) geminiDensityTex.needsUpdate = true;
+  geminiGrassHasPaintedDensity = true;
+}
+
+function paintGeminiCliffGrassAt(wx, wz, erase) {
+  if (!geminiCliffDensityCtx) return;
+  const { u, v } = worldToUV(wx, wz);
+  const cx = u * HTEX_RES;
+  const cy = v * HTEX_RES;
+  if (PARAMS.paintBrush === "smear") {
+    _smearCanvas(geminiCliffDensityCtx, cx, cy);
+  } else {
+    const alpha = brushStr / 100;
+    const [cr, cg, cb] = erase ? [0, 0, 0] : [255, 255, 255];
+    geminiCliffDensityCtx.globalCompositeOperation = "source-over";
+    geminiCliffDensityCtx.fillStyle = _radialGrad(
+      geminiCliffDensityCtx,
+      cx,
+      cy,
+      cr,
+      cg,
+      cb,
+      alpha,
+    );
+    geminiCliffDensityCtx.beginPath();
+    geminiCliffDensityCtx.arc(cx, cy, brushSize, 0, PI * 2);
+    geminiCliffDensityCtx.fill();
+  }
+  if (geminiCliffDensityTex) geminiCliffDensityTex.needsUpdate = true;
+  geminiGrassHasPaintedDensity = true;
+}
+
+function paintCliffAt(wx, wz, erase) {
+  if (!cliffPaintCtx) return;
+  const { u, v } = worldToUV(wx, wz);
+  const cx = u * HTEX_RES;
+  const cy = v * HTEX_RES;
+  if (PARAMS.paintBrush === "smear") {
+    _smearCanvas(cliffPaintCtx, cx, cy);
+  } else {
+    const alpha = brushStr / 100;
+    const [cr, cg, cb] = erase ? [0, 0, 0] : [255, 255, 255];
+    cliffPaintCtx.globalCompositeOperation = "source-over";
+    cliffPaintCtx.fillStyle = _radialGrad(
+      cliffPaintCtx,
+      cx,
+      cy,
+      cr,
+      cg,
+      cb,
+      alpha,
+    );
+    cliffPaintCtx.beginPath();
+    cliffPaintCtx.arc(cx, cy, brushSize, 0, PI * 2);
+    cliffPaintCtx.fill();
+  }
+  if (cliffPaintTex) cliffPaintTex.needsUpdate = true;
+}
+
+function paintAmbientFXAt(wx, wz, erase) {
+  if (!ambientFXSystem) return;
+  if (erase) {
+    ambientFXSystem.removeInBrush(wx, wz, ambientFXParams.emitterRadius);
+  } else {
+    ambientFXSystem.addInBrush(
+      wx,
+      wz,
+      ambientFXParams.emitterRadius,
+      ambientFXParams.effectType,
+      ambientFXParams.density,
+    );
+  }
+}
+
+function paintFleurAt(wx, wz, erase) {
+  if (!fleurSystem) return;
+  const radius = geminiBrushWorldRadius();
+  if (erase) {
+    fleurSystem.removeInBrush(wx, wz, radius);
+  } else {
+    fleurSystem.addInBrush(
+      wx,
+      wz,
+      radius,
+      fleurParams.perStroke,
+      fleurParams.minSpacing,
+      fleurParams.scaleMin,
+      fleurParams.scaleMax,
+      fleurParams.hoverBase,
+      fleurParams.hoverVariance,
+      fleurActiveSlot,
+      fleurParams.subMode === "stem" ? "stem" : "ground",
+      fleurParams.bloomShape,
+    );
+  }
+}
+
+function paintFoliageAt(wx, wz, erase) {
+  const slot = FOLIAGE_SLOTS[activeFoliageSlot];
+  if (!slot?.system) return;
+  const radius = sculptBrushWorldRadius();
+  if (erase) {
+    slot.system.removeInBrush(wx, wz, radius);
+  } else {
+    slot.system.addInBrush(
+      wx,
+      wz,
+      radius,
+      slot.perStroke,
+      slot.minSpacing,
+      slot.scaleMin,
+      slot.scaleMax,
+    );
+  }
+}
+
+function paintObjectAt(wx, wz, erase) {
+  const slot = OBJECT_SLOTS[activeObjectSlot];
+  if (!slot?.system) return;
+  const radius = sculptBrushWorldRadius();
+  if (erase) {
+    slot.system.removeInBrush(wx, wz, radius);
+  } else {
+    slot.system.addInBrush(
+      wx,
+      wz,
+      radius,
+      slot.perStroke,
+      slot.minSpacing,
+      slot.scaleMin,
+      slot.scaleMax,
+    );
+  }
+}
+
+/**
+ * Seam-test: MeshBasicMaterial so color is truly flat (no lights / env / specular).
+ * MeshStandardMaterial + scene.environment made every triangle reflect the sky
+ * slightly differently, which reads as a chunky “tile grid” on dense terrain even
+ * though there is no grid texture.
+ */
+const seamTestTerrainMaterial = new THREE.MeshBasicMaterial({
+  color: 0x3a8c4a,
+  toneMapped: false,
+});
+
+function createChunkSplatMaterial(splatTex, imgWeightTex, imageSlots) {
+  splatTex.anisotropy = 8;
+  splatTex.flipY = false;
+  const cs = float(CONFIG.chunkSize);
+  const wS = float(CONFIG.worldSize);
+  const mat = new THREE.MeshStandardNodeMaterial({
+    roughness: 0.88,
+    metalness: 0.02,
+  });
+  mat.colorNode = Fn(() => {
+    const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));
+    const s = texture(splatTex, splatUV);
+    const base = vec3(0.22, 0.38, 0.13);
+    const layR = vec3(0.34, 0.27, 0.16);
+    const layG = vec3(0.36, 0.52, 0.22);
+    const layB = vec3(0.46, 0.4, 0.28);
+    let col = base;
+    col = mix(col, layR, s.r);
+    col = mix(col, layG, s.g);
+    col = mix(col, layB, s.b);
+    if (imgWeightTex && imageSlots) {
+      col = applyImageSlotAlbedoAndAO(
+        col,
+        cs,
+        wS,
+        imgWeightTex,
+        imageSlots,
+      );
+    }
+    return col;
+  })();
+  if (imgWeightTex && imageSlots) {
+    mat.roughnessNode = Fn(() =>
+      applyImageSlotRoughness(
+        float(0.88),
+        cs,
+        wS,
+        imgWeightTex,
+        imageSlots,
+      ),
+    )();
+    mat.normalNode = createImageSlotNormalNode(
+      cs,
+      wS,
+      imgWeightTex,
+      imageSlots,
+    );
+  }
+  mat.opacityNode = Fn(() => {
+    const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));
+    const s = texture(splatTex, splatUV);
+    return float(1.0).sub(step(float(0.25), s.a));
+  })();
+  mat.alphaTest = 0.5;
+  mat.transparent = false;
+  return mat;
+}
+
+function createSplatMaterialsForTex(tex, imgWeightTex, meadowTex) {
+  syncCliffUniformsFromParams();
+  const deps = buildCliffDeps();
+  const slots = chunkImageSlots;
+  const material = deps
+    ? createChunkSplatCliffMaterial(
+        tex,
+        CONFIG.chunkSize,
+        deps.heightTex,
+        deps.rockColorTex,
+        deps.rockDataTex,
+        cliffU,
+        deps.worldSize,
+        deps.worldHalf,
+        deps.htexRes,
+        imgWeightTex,
+        slots,
+      )
+    : createChunkSplatMaterial(tex, imgWeightTex, slots);
+  const tileMaterial = createChunkTileMaterialWithHoles(tex);
+  return { material, tileMaterial };
+}
+
+let debugChunkView = false;
+const debugChunkMaterialCache = new Map();
+
+function chunkDebugHue(cx, cz) {
+  let n = (cx * 73856093) ^ (cz * 19349663);
+  n = (n ^ (n >>> 15)) >>> 0;
+  return (n % 360) / 360;
+}
+
+function lodBrightnessForSegments(segments) {
+  if (segments >= 64) return 1;
+  if (segments >= 32) return 0.78;
+  if (segments >= 16) return 0.58;
+  if (segments >= 8) return 0.42;
+  return 0.3;
+}
+
+function getOrCreateDebugChunkMaterial(cx, cz, lodLevel) {
+  const key = `${cx},${cz},s${lodLevel.segments}`;
+  let mat = debugChunkMaterialCache.get(key);
+  if (mat) return mat;
+
+  const c = new THREE.Color().setHSL(chunkDebugHue(cx, cz), 0.58, 0.5);
+  c.multiplyScalar(lodBrightnessForSegments(lodLevel.segments));
+  mat = new THREE.MeshStandardMaterial({
+    color: c,
+    roughness: 0.82,
+    metalness: 0.06,
+    flatShading: true,
+  });
+  debugChunkMaterialCache.set(key, mat);
+  return mat;
+}
+
+function resolveTerrainMaterial(cx, cz, lodLevel) {
+  if (debugChunkView)
+    return getOrCreateDebugChunkMaterial(cx, cz, lodLevel);
+  if (PARAMS.terrainSurface === "greenGround")
+    return seamTestTerrainMaterial;
+  if (PARAMS.terrainSurface === "tile")
+    return ensureChunkSplat(cx, cz).tileMaterial;
+  if (PARAMS.terrainSurface === "tslGround")
+    return sharedTslGround.material;
+  if (PARAMS.terrainSurface === "imgTex") return sharedImgTex.material;
+  return ensureChunkSplat(cx, cz).material;
+}
+
+function disposeDebugChunkMaterials() {
+  for (const m of debugChunkMaterialCache.values()) m.dispose();
+  debugChunkMaterialCache.clear();
+}
+
+const geometryCache = new Map();
+const activeChunks = new Map();
+const chunkDataMap = new Map();
+const chunkSplatMap = new Map();
+const dirtyChunks = new Set();
+
+/** Tree LOD (J) — instanced GLB + WebGPU octahedral impostor (Pine slot). */
+const LOD_SLOTS = [
+  {
+    name: "Pine",
+    modelPath: "models/pine2.glb",
+    lod1Path: "models/pine2LOD1.glb",
+    lodThreshold: 80,
+    lodImpostorDist: 115,
+    lodMegaDist: 220,
+    minSpacing: 3,
+    scaleMin: 0.8,
+    scaleMax: 1.4,
+    density: 0.25,
+    treesPerStroke: 3,
+    positions: [],
+    chunks: new Map(),
+    lod0Defs: null,
+    lod1Defs: null,
+    ready: false,
+    pineImpostorApi: null,
+    pineImpostorBusy: false,
+  },
+  {
+    name: "Oak",
+    modelPath: "models/treeez2_simon.glb",
+    fallbackModelPath: "models/treeez2_compressed.glb",
+    lod1Path: "models/treeez2_simon.glb",
+    lodThreshold: 60,
+    minSpacing: 4,
+    scaleMin: 0.9,
+    scaleMax: 1.6,
+    density: 0.2,
+    treesPerStroke: 3,
+    positions: [],
+    chunks: new Map(),
+    lod0Defs: null,
+    lod1Defs: null,
+    ready: false,
+  },
+  {
+    name: "Dead",
+    modelPath: "models/tree_compressed.glb",
+    fallbackModelPath: "models/treeez2.glb",
+    lod1Path: "models/tree_compressed.glb",
+    lodThreshold: 50,
+    minSpacing: 2,
+    scaleMin: 0.7,
+    scaleMax: 1.2,
+    density: 0.3,
+    treesPerStroke: 3,
+    positions: [],
+    chunks: new Map(),
+    lod0Defs: null,
+    lod1Defs: null,
+    ready: false,
+  },
+  {
+    name: "Palm",
+    modelPath: "models/botatree_compressed.glb",
+    fallbackModelPath: "models/botatree_compressed (1).glb",
+    lod1Path: "models/botatree_compressed.glb",
+    lodThreshold: 60,
+    minSpacing: 5,
+    scaleMin: 1.0,
+    scaleMax: 2.0,
+    density: 0.15,
+    treesPerStroke: 3,
+    positions: [],
+    chunks: new Map(),
+    lod0Defs: null,
+    lod1Defs: null,
+    ready: false,
+  },
+  {
+    name: "Bush",
+    modelPath: null,
+    lod1Path: null,
+    lodThreshold: 40,
+    minSpacing: 1.5,
+    scaleMin: 0.6,
+    scaleMax: 1.2,
+    density: 0.35,
+    treesPerStroke: 4,
+    positions: [],
+    chunks: new Map(),
+    lod0Defs: null,
+    lod1Defs: null,
+    ready: false,
+  },
+  {
+    name: "Pine (no impostor)",
+    modelPath: "models/pine2_compressed.glb",
+    lod1Path: "models/pine2LOD1.glb",
+    lodThreshold: 80,
+    minSpacing: 3,
+    scaleMin: 0.8,
+    scaleMax: 1.4,
+    density: 0.25,
+    treesPerStroke: 3,
+    positions: [],
+    chunks: new Map(),
+    lod0Defs: null,
+    lod1Defs: null,
+    ready: false,
+  },
+  {
+    name: "Platano",
+    modelPath: "models/platano_tree_compressed.glb",
+    fallbackModelPath: "models/treeez2_compressed.glb",
+    lod1Path: null,
+    lodThreshold: 60,
+    minSpacing: 4,
+    scaleMin: 0.85,
+    scaleMax: 1.5,
+    density: 0.2,
+    treesPerStroke: 3,
+    meshScale: 0.025,
+    positions: [],
+    chunks: new Map(),
+    lod0Defs: null,
+    lod1Defs: null,
+    ready: false,
+  },
+  {
+    name: "Maple",
+    modelPath: "models/maple_compressed.glb",
+    fallbackModelPath: "models/simple_pine_tree.glb",
+    lod1Path: null,
+    lodThreshold: 60,
+    minSpacing: 4,
+    scaleMin: 0.85,
+    scaleMax: 1.5,
+    density: 0.2,
+    treesPerStroke: 3,
+    meshScale: 2,
+    positions: [],
+    chunks: new Map(),
+    lod0Defs: null,
+    lod1Defs: null,
+    ready: false,
+  },
+];
+
+/** Instanced foliage — same slots as splatmap-painter Foliage [ N ] (wind on Fern/Reed). */
+const FOLIAGE_SLOTS = [
+  {
+    name: "Cherry Tree",
+    modelPath: "models/japanese_cherry_tree.glb",
+    castShadow: true,
+    perStroke: 2,
+    minSpacing: 6,
+    scaleMin: 0.8,
+    scaleMax: 1.3,
+    system: null,
+  },
+  {
+    name: "Fern",
+    modelPath: "models/low_poly_fern.glb",
+    castShadow: false,
+    perStroke: 5,
+    minSpacing: 2,
+    scaleMin: 0.6,
+    scaleMax: 1.2,
+    system: null,
+    wind: {
+      windDir: 0.7,
+      windSpeed: 0.8,
+      windStr: 0.08,
+      interactionRange: 1.5,
+      interactionStrength: 0.8,
+      interactionHThresh: 1.5,
+    },
+  },
+  {
+    name: "Reed",
+    modelPath: "models/reedplant_compressed.glb",
+    castShadow: false,
+    perStroke: 12,
+    minSpacing: 0.8,
+    scaleMin: 4.0,
+    scaleMax: 6.0,
+    system: null,
+    wind: {
+      windDir: 0.7,
+      windSpeed: 1.2,
+      windStr: 0.15,
+      interactionRange: 2.5,
+      interactionStrength: 1.5,
+      interactionHThresh: 2.0,
+    },
+  },
+  {
+    name: "Rock",
+    modelPath: "models/rock__game_asset.glb",
+    castShadow: true,
+    perStroke: 3,
+    minSpacing: 3,
+    scaleMin: 0.5,
+    scaleMax: 1.5,
+    system: null,
+  },
+  {
+    name: "Stone",
+    modelPath: "models/stone_low-poly.glb",
+    castShadow: true,
+    perStroke: 4,
+    minSpacing: 2,
+    scaleMin: 0.4,
+    scaleMax: 1.2,
+    system: null,
+  },
+  {
+    name: "Pine 3",
+    modelPath: "models/pine3.glb",
+    castShadow: true,
+    perStroke: 2,
+    minSpacing: 5,
+    scaleMin: 0.7,
+    scaleMax: 1.5,
+    system: null,
+  },
+  {
+    name: "Palm Tree",
+    modelPath: "models/realistic_palm_tree_4_free.glb",
+    castShadow: true,
+    perStroke: 2,
+    minSpacing: 6,
+    scaleMin: 0.8,
+    scaleMax: 1.4,
+    system: null,
+  },
+  {
+    name: "Cylinder",
+    modelPath: "models/cylinder.glb",
+    castShadow: true,
+    perStroke: 3,
+    minSpacing: 3,
+    scaleMin: 0.5,
+    scaleMax: 1.5,
+    system: null,
+  },
+];
+let activeFoliageSlot = 0;
+let foliageEraseMode = false;
+
+/** Instanced props on terrain — same slots as splatmap-painter Objects [ E ]. */
+const OBJECT_SLOTS = [
+  {
+    name: "Rock",
+    modelPath: "models/rock__game_asset.glb",
+    castShadow: true,
+    perStroke: 3,
+    minSpacing: 3,
+    scaleMin: 0.5,
+    scaleMax: 1.5,
+    system: null,
+  },
+  {
+    name: "Stone",
+    modelPath: "models/stone_low-poly.glb",
+    castShadow: true,
+    perStroke: 4,
+    minSpacing: 2,
+    scaleMin: 0.4,
+    scaleMax: 1.2,
+    system: null,
+  },
+  {
+    name: "Barrel",
+    modelPath: null,
+    castShadow: true,
+    perStroke: 2,
+    minSpacing: 2,
+    scaleMin: 0.8,
+    scaleMax: 1.2,
+    system: null,
+  },
+  {
+    name: "Crate",
+    modelPath: null,
+    castShadow: true,
+    perStroke: 2,
+    minSpacing: 2,
+    scaleMin: 0.8,
+    scaleMax: 1.2,
+    system: null,
+  },
+  {
+    name: "Fence",
+    modelPath: null,
+    castShadow: true,
+    perStroke: 2,
+    minSpacing: 1.5,
+    scaleMin: 0.9,
+    scaleMax: 1.1,
+    system: null,
+  },
+  {
+    name: "Lantern",
+    modelPath: null,
+    castShadow: true,
+    perStroke: 1,
+    minSpacing: 4,
+    scaleMin: 0.8,
+    scaleMax: 1.0,
+    system: null,
+  },
+  {
+    name: "Custom A",
+    modelPath: null,
+    castShadow: true,
+    perStroke: 3,
+    minSpacing: 3,
+    scaleMin: 0.8,
+    scaleMax: 1.4,
+    system: null,
+  },
+  {
+    name: "Custom B",
+    modelPath: null,
+    castShadow: true,
+    perStroke: 3,
+    minSpacing: 3,
+    scaleMin: 0.8,
+    scaleMax: 1.4,
+    system: null,
+  },
+];
+let activeObjectSlot = 0;
+let objectEraseMode = false;
+
+let activeLodSlot = 0;
+let _rebuildLODChunks = () => {};
+const lodParams = {
+  slotName: "Pine",
+  threshold: 80,
+  minSpacing: 3,
+  scaleMin: 0.8,
+  scaleMax: 1.4,
+  meshScale: 1,
+  density: 0.25,
+  treesPerStroke: 3,
+  maxDrawDistance: 520,
+  lodChunkSize: 128,
+  lodMaxPerChunk: 1024,
+  lodImpostorDist: 115,
+  lodMegaDist: 220,
+  count0: 0,
+  count1: 0,
+  count2: 0,
+  count3: 0,
+  totalTrees: 0,
+  chunks: 0,
+  chunksVisible: 0,
+  chunksCulledDistance: 0,
+  treesCulledDistance: 0,
+  lodVisMesh0: true,
+  lodVisMesh1: true,
+  lodVisImpostor: true,
+  lodVisMega: true,
+  pineLightScale: 1.0,
+  pineNormalStrength: 1.0,
+  pineRimStrength: 0.0,
+  pineRimPower: 3,
+  pineRimColor: "#6699a6",
+  pineDiffuseWrap: 0,
+  pineParallaxStrength: 0,
+  pineImpCrossfadeDist: 80,
+  pineImpBlendWidth: 6,
+  pineLodDither: 0,
+  pineEdgeSmoothScale: 1.5,
+  pineAlphaClamp: 0.1,
+  pineBlend3Cell: true,
+  pineTranslucency: 0.0,
+  pineTranslucencyPow: 2.0,
+  pineAoStrength: 0.0,
+  pineFogEnabled: false,
+  pineFogNear: 28,
+  pineFogFar: 170,
+  pineFogColor: "#87ceeb",
+  pineAtlasTextureSize: 2048,
+  pineAtlasSpritesPerSide: 8,
+  pineFullOctahedral: true,
+  /** WebGPU compute: frustum + max distance + per-tree mesh LOD (dense instance matrices). */
+  treeLodGpuCull: false,
+  /** While painting Tree LOD (brush held), skip GPU encode and use CPU matrix fill for responsiveness. */
+  treeLodRelaxGpuWhilePainting: true,
+};
+
+// ─── PROC TREES — same data + algorithms as splatmap-painter10bvh+post.html ───
+const PTREE_MAX_PER_CHUNK = 256;
+const PTREE_CHUNK_SIZE = 64;
+const _ptreeSlot = (name) => ({
+  name,
+  preset: null,
+  trunkDefs: null,
+  trunkPath: null,
+  leafTexPath: null,
+  leafMat: null,
+  leafMapNode: null,
+  leafMeshes: null,
+  leafSpheres: null,
+  leafCullSphere: null,
+  uniforms: null,
+  positions: [],
+  chunks: new Map(),
+  minSpacing: 2,
+  scaleMin: 0.9,
+  scaleMax: 1.1,
+  treesPerStroke: 2,
+  ready: false,
+});
+const PTREE_SLOTS = [
+  _ptreeSlot("Proc A"),
+  _ptreeSlot("Proc B"),
+  _ptreeSlot("Proc C"),
+  _ptreeSlot("Proc D"),
+];
+let activePTreeSlot = 0;
+let _rebuildPTreeChunks = () => {};
+let _ptreeRebuildLeaves = () => {};
+let _ptreeDirty = true;
+const _ptreeDummy = new THREE.Object3D();
+const _ptreeFinalMat = new THREE.Matrix4();
+const _ptreeLastPos = new THREE.Vector3(Infinity, Infinity, Infinity);
+const _ptreeLastQuat = new THREE.Quaternion();
+const _ptreeFrustum = new THREE.Frustum();
+const _ptreeProjMat = new THREE.Matrix4();
+const _ptreeCamPos = new THREE.Vector3();
+const ptreeParams = {
+  slotName: "Proc A",
+  minSpacing: 2,
+  scaleMin: 0.9,
+  scaleMax: 1.1,
+  treesPerStroke: 2,
+  totalTrunks: 0,
+  totalLeaves: 0,
+  chunksVisible: 0,
+  chunks: 0,
+  leafMipBias: -0.65,
+  /** 0 = no limit. Default matches Tree LOD max draw distance. */
+  maxDrawDistance: 520,
+  /**
+   * Distance-based leaf LOD: fewer, larger cards when far (alpha foliage
+   * reads better than sub-pixel quads). Similar idea to open-world games
+   * that swap dense cards for coarser billboards / impostors.
+   */
+  leafDistLod: true,
+  /** Camera distance to chunk center: switch to half-density, ~√2 larger quads. */
+  leafLod1Dist: 55,
+  /** Beyond this use quarter-density, 2× quads (set 0 to disable L2). */
+  leafLod2Dist: 140,
+  /** L2 is usually far enough that leaf shadows are not worth the cost. */
+  leafLod2Shadow: false,
+};
+function _markPtreeDirty() {
+  _ptreeDirty = true;
+}
+
+function _ptreeMergeTwoSpheres(s0, s1, out) {
+  const c0 = s0.center;
+  const r0 = s0.radius;
+  const c1 = s1.center;
+  const r1 = s1.radius;
+  const dx = c1.x - c0.x;
+  const dy = c1.y - c0.y;
+  const dz = c1.z - c0.z;
+  const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  if (d < 1e-8) {
+    out.center.copy(c0);
+    out.radius = Math.max(r0, r1);
+    return;
+  }
+  if (d + r1 <= r0) {
+    out.center.copy(c0);
+    out.radius = r0;
+    return;
+  }
+  if (d + r0 <= r1) {
+    out.center.copy(c1);
+    out.radius = r1;
+    return;
+  }
+  const R = (d + r0 + r1) * 0.5;
+  const t = (R - r0) / d;
+  out.center.set(c0.x + dx * t, c0.y + dy * t, c0.z + dz * t);
+  out.radius = R;
+}
+
+function _ptreeUnionLeafSpheres(spheres, out) {
+  if (!spheres?.length) return;
+  out.copy(spheres[0]);
+  for (let i = 1; i < spheres.length; i++) {
+    _ptreeMergeTwoSpheres(out, spheres[i], out);
+  }
+}
+
+function _ptreeBakeChunkTrunkMatrices(slot, chunk) {
+  if (!chunk?.ims || !chunk.positions) return;
+  const maxN = Math.min(chunk.positions.length, PTREE_MAX_PER_CHUNK);
+  if (!chunk.ptreeBaked || chunk.ptreeBaked.length !== chunk.ims.length) {
+    chunk.ptreeBaked = chunk.ims.map(
+      () => new Float32Array(PTREE_MAX_PER_CHUNK * 16),
+    );
+  }
+  const dummy = _ptreeDummy;
+  for (let i = 0; i < maxN; i++) {
+    const p = chunk.positions[i];
+    dummy.position.set(p.x, p.y, p.z);
+    dummy.scale.setScalar(p.scale);
+    dummy.rotation.set(
+      0,
+      Math.PI * 2 * ((p.x * 13.7 + p.z * 7.3) % 1),
+      0,
+    );
+    dummy.updateMatrix();
+    chunk.ims.forEach(({ localMatrix }, mi) => {
+      _ptreeFinalMat.multiplyMatrices(dummy.matrix, localMatrix);
+      _ptreeFinalMat.toArray(chunk.ptreeBaked[mi], i * 16);
+    });
+  }
+  chunk._ptreeBakeCount = maxN;
+  chunk._ptreeBakeRev = (chunk._ptreeBakeRev | 0) + 1;
+}
+
+function _ptreeGrowTipsWithSeed(preset) {
+  const p = preset.trunk;
+  if (!p) return { random: () => 0, tips: [] };
+  let currentSeed = p.seed;
+  const random = () => {
+    const x = Math.sin(currentSeed++) * 10000;
+    return x - Math.floor(x);
+  };
+  const tips = [];
+  function grow(pos, dir, rad, len, lvl) {
+    if (lvl > p.levels) {
+      tips.push(pos.clone());
+      return;
+    }
+    const end = pos.clone().add(dir.clone().multiplyScalar(len));
+    for (let i = 0; i < p.children; i++) {
+      const nextDir = dir.clone();
+      nextDir.x += (random() - 0.5) * p.gnarliness;
+      nextDir.z += (random() - 0.5) * p.gnarliness;
+      nextDir.y += p.sunForce - p.gravity * lvl;
+      nextDir.normalize();
+      grow(end, nextDir, rad * p.trunkTaper, len * p.branchMult, lvl + 1);
+    }
+  }
+  grow(
+    new THREE.Vector3(0, 0, 0),
+    new THREE.Vector3(0, 1, 0),
+    p.trunkRadius,
+    p.trunkHeight,
+    0,
+  );
+  return { random, tips };
+}
+
+/** Same ellipsoid + hollow-shell sampler as geminitreeprocedural.html (deterministic LCG). */
+function _ptreeSampleClusterEllipsoid(c, seedOffset) {
+  let lcg = (seedOffset * 1664525 + 1013904223) >>> 0;
+  const rng = () => {
+    lcg = (lcg * 1664525 + 1013904223) >>> 0;
+    return lcg / 0xffffffff;
+  };
+  const positions = [];
+  const maxTry = c.count * 14;
+  let tries = 0;
+  while (positions.length < c.count && tries++ < maxTry) {
+    const rx = rng() * 2 - 1;
+    const ry = rng() * 2 - 1;
+    const rz = rng() * 2 - 1;
+    const d = Math.sqrt(rx * rx + ry * ry + rz * rz);
+    if (d > 1.0) continue;
+    const innerR = 1.0 - c.shellThick;
+    if (d < innerR && rng() < c.shell) continue;
+    positions.push({
+      x: c.x + rx * c.rx,
+      y: c.y + ry * c.ry,
+      z: c.z + rz * c.rx,
+    });
+  }
+  return positions;
+}
+
+function _ptreeSampleLeaves(preset) {
+  const p = preset.trunk;
+  const c = preset.canopy;
+  if (!p) return [];
+
+  const bushMode = preset.bushMode === true;
+
+  if (bushMode) {
+    let currentSeed = p.seed;
+    const random = () => {
+      const x = Math.sin(currentSeed++) * 10000;
+      return x - Math.floor(x);
+    };
+    const bush = preset.bush || {};
+    const bw = bush.bushWidth ?? 5;
+    const bh = bush.bushHeight ?? 3;
+    const bd = bush.bushDensity ?? 500;
+    const bs = bush.bushLeafSize ?? 1;
+    const bc = Math.max(1, bush.bushClumps ?? 1);
+    const shell = bush.bushShell ?? 0.5;
+    const shellThick = bush.bushShellThick ?? 0.45;
+    const scaleVar = bush.bushScaleVar ?? 0.35;
+    const tiltMaxDeg = bush.bushTiltMax ?? 35;
+    const tiltRad = tiltMaxDeg * (Math.PI / 180);
+    const allPos = [];
+    for (let cl = 0; cl < bc; cl++) {
+      const clumpAngle = (cl / bc) * Math.PI * 2 + random() * 0.45;
+      const clumpDist = random() * bw * 0.28;
+      const cx = Math.cos(clumpAngle) * clumpDist;
+      const cz = Math.sin(clumpAngle) * clumpDist;
+      const ell = {
+        x: cx,
+        y: bh * 0.5,
+        z: cz,
+        rx: bw * 0.48,
+        ry: bh * 0.5,
+        count: bd,
+        shell,
+        shellThick,
+      };
+      allPos.push(
+        ..._ptreeSampleClusterEllipsoid(ell, p.seed + cl * 7919),
+      );
+    }
+    if (allPos.length === 0) return [];
+    let minY = Infinity;
+    allPos.forEach((pos) => {
+      if (pos.y < minY) minY = pos.y;
+    });
+    return allPos.map((pos) => {
+      const t = Math.sin(
+        (p.seed * 0.001 +
+          pos.x * 12.9898 +
+          (pos.y - minY) * 78.233 +
+          pos.z * 37.719) *
+          43758.5453,
+      );
+      const jitter = t - Math.floor(t) - 0.5;
+      const leafSize = Math.max(0.05, bs * (1 + jitter * 2 * scaleVar));
+      const h0 = Math.sin(
+        (p.seed * 0.02 + pos.x * 19.19 + pos.y * 47.17 + pos.z * 13.23) *
+          104729.0,
+      );
+      const h1 = Math.sin(
+        (p.seed * 0.03 + pos.x * 23.11 + pos.y * 55.03 + pos.z * 29.41) *
+          93001.0,
+      );
+      const h2 = Math.sin(
+        (p.seed * 0.04 + pos.x * 31.07 + pos.y * 67.91 + pos.z * 41.13) *
+          81799.0,
+      );
+      const u0 = h0 - Math.floor(h0);
+      const u1 = h1 - Math.floor(h1);
+      const u2 = h2 - Math.floor(h2);
+      return {
+        lx: pos.x,
+        ly: pos.y - minY,
+        lz: pos.z,
+        leafSize,
+        bushLeaf: true,
+        rotX: (u1 - 0.5) * 2 * tiltRad,
+        rotY: u0 * Math.PI * 2,
+        rotZ: (u2 - 0.5) * 2 * tiltRad,
+      };
+    });
+  }
+
+  if (!c) return [];
+
+  const { random, tips } = _ptreeGrowTipsWithSeed(preset);
+  const leaves = [];
+  tips.forEach((tip) => {
+    for (let i = 0; i < c.leafDensity; i++) {
+      const angle = random() * Math.PI * 2;
+      const rBase = random() * c.clumpRadius;
+      const vSpread = (random() - 0.5) * c.canopyHeight;
+      const hSpread =
+        rBase *
+        (1.0 - (Math.abs(vSpread) / (c.canopyHeight / 2)) * c.shapeMode);
+      leaves.push({
+        lx: tip.x + Math.cos(angle) * hSpread,
+        ly: tip.y + vSpread,
+        lz: tip.z + Math.sin(angle) * hSpread,
+        leafSize: c.leafSize,
+      });
+    }
+  });
+  return leaves;
+}
+
+function paintPTreeAt(wx, wz, erase) {
+  const slot = PTREE_SLOTS[activePTreeSlot];
+  if (!slot.preset && !slot.trunkDefs) return;
+  const radius = sculptBrushWorldRadius();
+  if (erase) {
+    const r2 = radius * radius;
+    slot.positions = slot.positions.filter(
+      (p) => (p.x - wx) ** 2 + (p.z - wz) ** 2 > r2,
+    );
+  } else {
+    const target = slot.treesPerStroke;
+    const ms2 = slot.minSpacing * slot.minSpacing;
+    let added = 0;
+    for (
+      let attempt = 0;
+      attempt < target * 4 && added < target;
+      attempt++
+    ) {
+      const angle = Math.random() * Math.PI * 2;
+      const dist = Math.sqrt(Math.random()) * radius;
+      let x = wx + Math.cos(angle) * dist;
+      let z = wz + Math.sin(angle) * dist;
+      x = THREE.MathUtils.clamp(x, worldBounds.min.x, worldBounds.max.x);
+      z = THREE.MathUtils.clamp(z, worldBounds.min.z, worldBounds.max.z);
+      if (
+        ms2 > 0 &&
+        slot.positions.some((p) => (p.x - x) ** 2 + (p.z - z) ** 2 < ms2)
+      )
+        continue;
+      const y = getWorldHeight(x, z);
+      const scale =
+        slot.scaleMin + Math.random() * (slot.scaleMax - slot.scaleMin);
+      slot.positions.push({ x, y, z, scale });
+      added++;
+    }
+  }
+  if (slot.ready) _rebuildPTreeChunks(slot);
+  _ptreeRebuildLeaves(slot);
+}
+
+function syncPTreeHeights() {
+  PTREE_SLOTS.forEach((slot) => {
+    if (slot.positions.length === 0) return;
+    slot.positions.forEach((p) => {
+      p.y = getWorldHeight(p.x, p.z);
+    });
+    _rebuildPTreeChunks(slot);
+    _ptreeRebuildLeaves(slot);
+  });
+}
+
+const MAX_TERRAIN_UNDO = 25;
+const terrainUndoStack = [];
+const terrainRedoStack = [];
+
+function captureTerrainUndoSnapshot() {
+  const heights = new Map();
+  for (const [k, arr] of chunkDataMap) {
+    heights.set(k, new Float32Array(arr));
+  }
+  const splats = new Map();
+  const sRes = CONFIG.splatRes;
+  for (const [k, splat] of chunkSplatMap) {
+    const simg = splat.ctx.getImageData(0, 0, sRes, sRes);
+    const iimg = splat.imgCtx.getImageData(0, 0, sRes, sRes);
+    const mimg = splat.meadowCtx.getImageData(0, 0, sRes, sRes);
+    splats.set(k, {
+      s: new Uint8ClampedArray(simg.data),
+      i: new Uint8ClampedArray(iimg.data),
+      m: new Uint8ClampedArray(mimg.data),
+    });
+  }
+  let geminiDensity = null;
+  if (geminiDensityCtx) {
+    const g = geminiDensityCtx.getImageData(0, 0, HTEX_RES, HTEX_RES);
+    geminiDensity = new Uint8ClampedArray(g.data);
+  }
+  let geminiCliffDensity = null;
+  if (geminiCliffDensityCtx) {
+    const gc = geminiCliffDensityCtx.getImageData(
+      0,
+      0,
+      HTEX_RES,
+      HTEX_RES,
+    );
+    geminiCliffDensity = new Uint8ClampedArray(gc.data);
+  }
+  return { heights, splats, geminiDensity, geminiCliffDensity };
+}
+
+function restoreTerrainUndoSnapshot(snap) {
+  for (const k of [...chunkSplatMap.keys()]) {
+    if (!snap.splats.has(k)) disposeChunkSplatEntry(k);
+  }
+  for (const k of [...chunkDataMap.keys()]) {
+    if (!snap.heights.has(k)) chunkDataMap.delete(k);
+  }
+  for (const [k, arr] of snap.heights) {
+    chunkDataMap.set(k, new Float32Array(arr));
+  }
+  const sRes = CONFIG.splatRes;
+  for (const [k, entry] of snap.splats) {
+    const { cx, cz } = parseChunkKey(k);
+    const splat = ensureChunkSplat(cx, cz);
+    if (entry && entry.s && entry.i) {
+      splat.ctx.putImageData(
+        new ImageData(new Uint8ClampedArray(entry.s), sRes, sRes),
+        0,
+        0,
+      );
+      splat.imgCtx.putImageData(
+        new ImageData(new Uint8ClampedArray(entry.i), sRes, sRes),
+        0,
+        0,
+      );
+      if (entry.m) {
+        splat.meadowCtx.putImageData(
+          new ImageData(new Uint8ClampedArray(entry.m), sRes, sRes),
+          0,
+          0,
+        );
+      } else {
+        splat.meadowCtx.clearRect(0, 0, sRes, sRes);
+      }
+    } else {
+      const flat = new Uint8ClampedArray(entry);
+      splat.ctx.putImageData(new ImageData(flat, sRes, sRes), 0, 0);
+      splat.imgCtx.fillStyle = "rgba(0,0,0,1)";
+      splat.imgCtx.fillRect(0, 0, sRes, sRes);
+      splat.meadowCtx.clearRect(0, 0, sRes, sRes);
+    }
+    splat.tex.needsUpdate = true;
+    splat.imgTex.needsUpdate = true;
+    splat.meadowTex.needsUpdate = true;
+  }
+  if (snap.geminiDensity && geminiDensityCtx) {
+    const id = new ImageData(
+      new Uint8ClampedArray(snap.geminiDensity),
+      HTEX_RES,
+      HTEX_RES,
+    );
+    geminiDensityCtx.putImageData(id, 0, 0);
+    if (geminiDensityTex) geminiDensityTex.needsUpdate = true;
+  }
+  if (snap.geminiCliffDensity && geminiCliffDensityCtx) {
+    const idc = new ImageData(
+      new Uint8ClampedArray(snap.geminiCliffDensity),
+      HTEX_RES,
+      HTEX_RES,
+    );
+    geminiCliffDensityCtx.putImageData(idc, 0, 0);
+    if (geminiCliffDensityTex) geminiCliffDensityTex.needsUpdate = true;
+  }
+  rebuildAllActiveChunkMeshes();
+  refreshActiveChunkMaterials();
+  heightTexDirty = true;
+  dirtyChunks.clear();
+  invalidateLodStitchSignaturesForKeys(new Set(activeChunks.keys()));
+  syncGeminiGrassHasPaintedFromCanvas();
+  syncTreeLodHeights();
+  syncPTreeHeights();
+  syncObjectSlotsHeights();
+  syncPropObjectsHeights();
+  invalidateBvhHeight();
+  rebuildHoleCanvasFromSplats();
+}
+
+function syncGeminiGrassHasPaintedFromCanvas() {
+  geminiGrassHasPaintedDensity = false;
+  if (geminiDensityCtx) {
+    const d = geminiDensityCtx.getImageData(
+      0,
+      0,
+      HTEX_RES,
+      HTEX_RES,
+    ).data;
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i] + d[i + 1] + d[i + 2] > 8) {
+        geminiGrassHasPaintedDensity = true;
+        return;
+      }
+    }
+  }
+  if (geminiCliffDensityCtx) {
+    const dc = geminiCliffDensityCtx.getImageData(
+      0,
+      0,
+      HTEX_RES,
+      HTEX_RES,
+    ).data;
+    for (let i = 0; i < dc.length; i += 4) {
+      if (dc[i] + dc[i + 1] + dc[i + 2] > 8) {
+        geminiGrassHasPaintedDensity = true;
+        return;
+      }
+    }
+  }
+}
+
+function pushTerrainUndo() {
+  if (terrainUndoStack.length >= MAX_TERRAIN_UNDO)
+    terrainUndoStack.shift();
+  terrainUndoStack.push(captureTerrainUndoSnapshot());
+  terrainRedoStack.length = 0;
+}
+
+function undoTerrainEdit() {
+  if (terrainUndoStack.length === 0) return;
+  terrainRedoStack.push(captureTerrainUndoSnapshot());
+  restoreTerrainUndoSnapshot(terrainUndoStack.pop());
+}
+
+function redoTerrainEdit() {
+  if (terrainRedoStack.length === 0) return;
+  terrainUndoStack.push(captureTerrainUndoSnapshot());
+  restoreTerrainUndoSnapshot(terrainRedoStack.pop());
+}
+
+function ensureChunkSplat(cx, cz) {
+  const k = chunkKey(cx, cz);
+  let b = chunkSplatMap.get(k);
+  if (b) return b;
+  const res = CONFIG.splatRes;
+  const canvas = document.createElement("canvas");
+  canvas.width = res;
+  canvas.height = res;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.clearRect(0, 0, res, res);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.flipY = false;
+  tex.anisotropy = 8;
+  tex.colorSpace = THREE.NoColorSpace;
+  tex.needsUpdate = true;
+  const imgCanvas = document.createElement("canvas");
+  imgCanvas.width = imgCanvas.height = res;
+  const imgCtx = imgCanvas.getContext("2d", { willReadFrequently: true });
+  imgCtx.fillStyle = "rgba(0,0,0,1)";
+  imgCtx.fillRect(0, 0, res, res);
+  const imgTex = new THREE.CanvasTexture(imgCanvas);
+  imgTex.wrapS = imgTex.wrapT = THREE.ClampToEdgeWrapping;
+  imgTex.flipY = false;
+  imgTex.colorSpace = THREE.NoColorSpace;
+  imgTex.premultiplyAlpha = false;
+  imgTex.needsUpdate = true;
+  const meadowCanvas = document.createElement("canvas");
+  meadowCanvas.width = meadowCanvas.height = res;
+  const meadowCtx = meadowCanvas.getContext("2d", {
+    willReadFrequently: true,
+  });
+  meadowCtx.clearRect(0, 0, res, res);
+  const meadowTex = new THREE.CanvasTexture(meadowCanvas);
+  meadowTex.wrapS = meadowTex.wrapT = THREE.ClampToEdgeWrapping;
+  meadowTex.flipY = false;
+  meadowTex.colorSpace = THREE.NoColorSpace;
+  meadowTex.needsUpdate = true;
+  const { material, tileMaterial } = createSplatMaterialsForTex(
+    tex,
+    imgTex,
+    meadowTex,
+  );
+  b = {
+    canvas,
+    ctx,
+    tex,
+    imgCanvas,
+    imgCtx,
+    imgTex,
+    meadowCanvas,
+    meadowCtx,
+    meadowTex,
+    material,
+    tileMaterial,
+  };
+  chunkSplatMap.set(k, b);
+  return b;
+}
+
+function disposeChunkSplatEntry(key) {
+  const s = chunkSplatMap.get(key);
+  if (!s) return;
+  s.material.dispose();
+  s.tileMaterial.dispose();
+  s.tex.dispose();
+  s.imgTex.dispose();
+  s.meadowTex.dispose();
+  chunkSplatMap.delete(key);
+}
+
+function bufferToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(
+      null,
+      bytes.subarray(i, Math.min(i + chunk, bytes.length)),
+    );
+  }
+  return btoa(binary);
+}
+
+function base64ToBuffer(b64) {
+  const binary = atob(b64);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out.buffer;
+}
+
+/** Shallow-merge nested plain objects (for JSON import overlays). */
+function mergePlainDeep(target, src) {
+  if (!src || typeof src !== "object" || Array.isArray(src)) return;
+  for (const key of Object.keys(src)) {
+    const sv = src[key];
+    if (
+      sv !== null &&
+      typeof sv === "object" &&
+      !Array.isArray(sv) &&
+      target[key] &&
+      typeof target[key] === "object" &&
+      !Array.isArray(target[key])
+    ) {
+      mergePlainDeep(target[key], sv);
+    } else {
+      target[key] = sv;
+    }
+  }
+}
+
+function exportTerrainJson() {
+  const chunkKeys = new Set([
+    ...chunkDataMap.keys(),
+    ...chunkSplatMap.keys(),
+  ]);
+  const chunks = {};
+  const splatBytes = CONFIG.splatRes * CONFIG.splatRes * 4;
+  for (const k of chunkKeys) {
+    const { cx, cz } = parseChunkKey(k);
+    const h = chunkDataMap.get(k) ?? ensureChunkData(cx, cz);
+    const splat = ensureChunkSplat(cx, cz);
+    const img = splat.ctx.getImageData(
+      0,
+      0,
+      CONFIG.splatRes,
+      CONFIG.splatRes,
+    );
+    const d = img.data;
+    const idw = splat.imgCtx.getImageData(
+      0,
+      0,
+      CONFIG.splatRes,
+      CONFIG.splatRes,
+    );
+    const dw = idw.data;
+    const mdw = splat.meadowCtx.getImageData(
+      0,
+      0,
+      CONFIG.splatRes,
+      CONFIG.splatRes,
+    ).data;
+    chunks[k] = {
+      h: bufferToBase64(
+        h.buffer.slice(h.byteOffset, h.byteOffset + h.byteLength),
+      ),
+      s: bufferToBase64(
+        d.buffer.slice(d.byteOffset, d.byteOffset + splatBytes),
+      ),
+      i: bufferToBase64(
+        dw.buffer.slice(dw.byteOffset, dw.byteOffset + splatBytes),
+      ),
+      m: bufferToBase64(
+        mdw.buffer.slice(mdw.byteOffset, mdw.byteOffset + splatBytes),
+      ),
+    };
+  }
+  const payload = {
+    v: 7,
+    worldSize: CONFIG.worldSize,
+    chunkSize: CONFIG.chunkSize,
+    dataResolution: CONFIG.dataResolution,
+    splatRes: CONFIG.splatRes,
+    light: JSON.parse(JSON.stringify(PARAMS.light)),
+    sky: JSON.parse(JSON.stringify(PARAMS.sky)),
+    ocean: JSON.parse(JSON.stringify(PARAMS.ocean)),
+    water: JSON.parse(JSON.stringify(PARAMS.water)),
+    meadow: JSON.parse(JSON.stringify(PARAMS.meadow)),
+    geminiGrassParams: window._geminiGrassParams
+      ? JSON.parse(JSON.stringify(window._geminiGrassParams))
+      : undefined,
+    chunks,
+    treeLodSettings: {
+      lodChunkSize: lodParams.lodChunkSize,
+      lodMaxPerChunk: lodParams.lodMaxPerChunk,
+      treeLodGpuCull: lodParams.treeLodGpuCull,
+      treeLodRelaxGpuWhilePainting:
+        lodParams.treeLodRelaxGpuWhilePainting,
+    },
+    treeLod: LOD_SLOTS.map((s) => {
+      const o = { name: s.name, positions: s.positions };
+      if (s.meshScale != null && s.meshScale !== 1)
+        o.meshScale = s.meshScale;
+      if (s.name === "Pine") {
+        o.lodImpostorDist = s.lodImpostorDist ?? 115;
+        o.lodMegaDist = s.lodMegaDist ?? 220;
+      }
+      return o;
+    }),
+    ptreeSlots: PTREE_SLOTS.map((s) => ({
+      name: s.name,
+      positions: s.positions,
+    })),
+    waterfalls: rwiRefs.waterfallObjects.map((m) => ({
+      x: m.position.x,
+      y: m.position.y,
+      z: m.position.z,
+      rx: m.rotation.x,
+      ry: m.rotation.y,
+      rz: m.rotation.z,
+      sx: m.scale.x,
+      sy: m.scale.y,
+      sz: m.scale.z,
+    })),
+    splashCaps: rwiRefs.splashCapObjects.map((m) => ({
+      x: m.position.x,
+      y: m.position.y,
+      z: m.position.z,
+      rx: m.rotation.x,
+      ry: m.rotation.y,
+      rz: m.rotation.z,
+      sx: m.scale.x,
+      sy: m.scale.y,
+      sz: m.scale.z,
+    })),
+    waterBodies: rwiRefs.waterObjects.map((m) => ({
+      x: m.position.x,
+      y: m.position.y,
+      z: m.position.z,
+      rx: m.rotation.x,
+      ry: m.rotation.y,
+      rz: m.rotation.z,
+      sx: m.scale.x,
+      sy: m.scale.y,
+      sz: m.scale.z,
+      waterStyle: m.userData.waterStyle ?? "Ocean",
+    })),
+    cliffs: cliffObjects.map((root) => ({
+      modelIndex: root.userData.modelIndex ?? 0,
+      x: root.position.x,
+      y: root.position.y,
+      z: root.position.z,
+      rx: root.rotation.x,
+      ry: root.rotation.y,
+      rz: root.rotation.z,
+      sx: root.scale.x,
+      sy: root.scale.y,
+      sz: root.scale.z,
+    })),
+    cliffInstances: cliffInstancer.exportData(),
+    props: propObjects.map((root) => ({
+      propName: root.userData.propName ?? "unknown",
+      x: root.position.x,
+      y: root.position.y,
+      z: root.position.z,
+      rx: root.rotation.x,
+      ry: root.rotation.y,
+      rz: root.rotation.z,
+      sx: root.scale.x,
+      sy: root.scale.y,
+      sz: root.scale.z,
+    })),
+    foliage: FOLIAGE_SLOTS.map((s) => ({
+      name: s.name,
+      positions: s.system ? s.system.getPositions() : [],
+    })),
+    objects: OBJECT_SLOTS.map((s) => ({
+      name: s.name,
+      positions: s.system ? s.system.getPositions() : [],
+    })),
+    fleurs: fleurSystem ? fleurSystem.getPositions() : [],
+    splinePoints: splinePoints.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+    spline: JSON.parse(JSON.stringify(PARAMS.spline)),
+    fleurInteraction: {
+      interactRadius: fleurParams.interactRadius,
+      interactStrength: fleurParams.interactStrength,
+      interactGain: fleurParams.interactGain,
+      windAmp: fleurParams.windAmp,
+      windSpeed: fleurParams.windSpeed,
+    },
+    riverPoints: riverPoints.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+    river: JSON.parse(JSON.stringify(PARAMS.river)),
+    roads: roadSegs.map((seg) => ({
+      points: seg.points.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+    })),
+    activeRoadIndex:
+      roadSegs.length === 0
+        ? 0
+        : Math.max(
+            0,
+            Math.min(
+              PARAMS.road.activeRoadIndex | 0,
+              roadSegs.length - 1,
+            ),
+          ),
+    road: JSON.parse(JSON.stringify(PARAMS.road)),
+    path: JSON.parse(JSON.stringify(PARAMS.path)),
+    decal: JSON.parse(JSON.stringify(PARAMS.decal)),
+    decals: decalObjects.map((obj) => ({
+      x: obj.position.x,
+      y: obj.position.y,
+      z: obj.position.z,
+      rx: obj.rotation.x,
+      ry: obj.rotation.y,
+      rz: obj.rotation.z,
+      sx: obj.scale.x,
+      sy: obj.scale.y,
+      sz: obj.scale.z,
+      opacity: obj.material.opacity,
+      textureUrl: obj.userData.decalTextureUrl,
+    })),
+    fog: JSON.parse(JSON.stringify(PARAMS.fog)),
+    csm: JSON.parse(JSON.stringify(PARAMS.csm)),
+    shadowBias: PARAMS.shadowBias,
+    shadowNormalBias: PARAMS.shadowNormalBias,
+    ambientFX: ambientFXSystem ? ambientFXSystem.getEmitters() : [],
+    barrierMap: (() => {
+      const bd = barrierCtx.getImageData(
+        0,
+        0,
+        BARRIER_RES,
+        BARRIER_RES,
+      ).data;
+      return bufferToBase64(
+        bd.buffer.slice(bd.byteOffset, bd.byteOffset + bd.byteLength),
+      );
+    })(),
+  };
+  if (geminiDensityCtx) {
+    const gpix = geminiDensityCtx.getImageData(
+      0,
+      0,
+      HTEX_RES,
+      HTEX_RES,
+    ).data;
+    payload.geminiGrassDensity = bufferToBase64(
+      gpix.buffer.slice(
+        gpix.byteOffset,
+        gpix.byteOffset + gpix.byteLength,
+      ),
+    );
+  }
+  if (geminiCliffDensityCtx) {
+    const cpix = geminiCliffDensityCtx.getImageData(
+      0,
+      0,
+      HTEX_RES,
+      HTEX_RES,
+    ).data;
+    payload.geminiCliffGrassDensity = bufferToBase64(
+      cpix.buffer.slice(
+        cpix.byteOffset,
+        cpix.byteOffset + cpix.byteLength,
+      ),
+    );
+  }
+  const blob = new Blob([JSON.stringify(payload)], {
+    type: "application/json",
+  });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "splatmap-chunks-terrain.json";
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function importTerrainJson(text) {
+  const data = JSON.parse(text);
+  if (
+    data.v !== 1 &&
+    data.v !== 2 &&
+    data.v !== 3 &&
+    data.v !== 4 &&
+    data.v !== 5 &&
+    data.v !== 6 &&
+    data.v !== 7
+  )
+    throw new Error("Unsupported file version");
+  if (
+    data.worldSize !== CONFIG.worldSize ||
+    data.chunkSize !== CONFIG.chunkSize ||
+    data.dataResolution !== CONFIG.dataResolution ||
+    data.splatRes !== CONFIG.splatRes
+  ) {
+    throw new Error(
+      "World config mismatch — use same worldSize/chunkSize/res as export",
+    );
+  }
+  const hCount =
+    (CONFIG.dataResolution + 1) * (CONFIG.dataResolution + 1);
+  const hBytes = hCount * 4;
+  const splatBytes = CONFIG.splatRes * CONFIG.splatRes * 4;
+  for (const [k, entry] of Object.entries(data.chunks)) {
+    const { cx, cz } = parseChunkKey(k);
+    const hb = base64ToBuffer(entry.h);
+    if (hb.byteLength !== hBytes)
+      throw new Error(`Bad height size for ${k}`);
+    const heights = new Float32Array(hb);
+    chunkDataMap.set(k, heights);
+    const sb = base64ToBuffer(entry.s);
+    if (sb.byteLength !== splatBytes)
+      throw new Error(`Bad splat size for ${k}`);
+    const splat = ensureChunkSplat(cx, cz);
+    const u8 = new Uint8ClampedArray(sb);
+    if (data.v === 1) {
+      for (let i = 0; i < u8.length; i += 4) u8[i + 3] = 0;
+    }
+    splat.ctx.putImageData(
+      new ImageData(u8, CONFIG.splatRes, CONFIG.splatRes),
+      0,
+      0,
+    );
+    splat.tex.needsUpdate = true;
+    if (data.v >= 3 && entry.i) {
+      const ib = base64ToBuffer(entry.i);
+      if (ib.byteLength === splatBytes) {
+        splat.imgCtx.putImageData(
+          new ImageData(
+            new Uint8ClampedArray(ib),
+            CONFIG.splatRes,
+            CONFIG.splatRes,
+          ),
+          0,
+          0,
+        );
+      } else {
+        splat.imgCtx.fillStyle = "rgba(0,0,0,1)";
+        splat.imgCtx.fillRect(0, 0, CONFIG.splatRes, CONFIG.splatRes);
+      }
+    } else {
+      splat.imgCtx.fillStyle = "rgba(0,0,0,1)";
+      splat.imgCtx.fillRect(0, 0, CONFIG.splatRes, CONFIG.splatRes);
+    }
+    splat.imgTex.needsUpdate = true;
+    if (data.v >= 4 && entry.m) {
+      const mb = base64ToBuffer(entry.m);
+      if (mb.byteLength === splatBytes) {
+        splat.meadowCtx.putImageData(
+          new ImageData(
+            new Uint8ClampedArray(mb),
+            CONFIG.splatRes,
+            CONFIG.splatRes,
+          ),
+          0,
+          0,
+        );
+      } else {
+        splat.meadowCtx.clearRect(0, 0, CONFIG.splatRes, CONFIG.splatRes);
+      }
+    } else {
+      splat.meadowCtx.clearRect(0, 0, CONFIG.splatRes, CONFIG.splatRes);
+    }
+    splat.meadowTex.needsUpdate = true;
+    dirtyChunks.add(k);
+  }
+  rebuildAllActiveChunkMeshes();
+  terrainUndoStack.length = 0;
+  terrainRedoStack.length = 0;
+  if (data.treeLodSettings && typeof data.treeLodSettings === "object") {
+    const tls = data.treeLodSettings;
+    if (typeof tls.lodChunkSize === "number")
+      lodParams.lodChunkSize = tls.lodChunkSize;
+    if (typeof tls.lodMaxPerChunk === "number")
+      lodParams.lodMaxPerChunk = tls.lodMaxPerChunk;
+    if (typeof tls.treeLodGpuCull === "boolean")
+      lodParams.treeLodGpuCull = tls.treeLodGpuCull;
+    if (typeof tls.treeLodRelaxGpuWhilePainting === "boolean")
+      lodParams.treeLodRelaxGpuWhilePainting =
+        tls.treeLodRelaxGpuWhilePainting;
+  }
+  if (data.treeLod && Array.isArray(data.treeLod)) {
+    data.treeLod.forEach((entry, i) => {
+      if (i >= LOD_SLOTS.length) return;
+      const slot = LOD_SLOTS[i];
+      slot.positions = entry.positions || [];
+      if (typeof entry.meshScale === "number")
+        slot.meshScale = entry.meshScale;
+      if (slot.name === "Pine") {
+        if (typeof entry.lodImpostorDist === "number")
+          slot.lodImpostorDist = entry.lodImpostorDist;
+        if (typeof entry.lodMegaDist === "number")
+          slot.lodMegaDist = entry.lodMegaDist;
+      }
+      _disposeSlotLodChunks(slot);
+      if (slot.name === "Pine") _disposePineImpostor(slot);
+      _rebuildLODChunks(slot);
+    });
+  }
+  if (data.ptreeSlots && Array.isArray(data.ptreeSlots)) {
+    data.ptreeSlots.forEach((entry, i) => {
+      if (i >= PTREE_SLOTS.length) return;
+      const slot = PTREE_SLOTS[i];
+      slot.positions = entry.positions || [];
+      _rebuildPTreeChunks(slot);
+      _ptreeRebuildLeaves(slot);
+    });
+  }
+  syncTreeLodHeights();
+  syncPTreeHeights();
+  syncObjectSlotsHeights();
+  if (data.waterfalls && Array.isArray(data.waterfalls))
+    applyWaterfalls(data.waterfalls);
+  if (data.splashCaps && Array.isArray(data.splashCaps))
+    applySplashCaps(data.splashCaps);
+  if (data.waterBodies && Array.isArray(data.waterBodies))
+    applyWaterBodies(data.waterBodies);
+  if (data.cliffs && Array.isArray(data.cliffs)) applyCliffs(data.cliffs);
+  if (data.cliffInstances && Array.isArray(data.cliffInstances)) {
+    cliffInstancer.importData(data.cliffInstances);
+  }
+  if (data.props && Array.isArray(data.props)) applyProps(data.props);
+  bakeBVH();
+  syncTreeLodHeights();
+  syncPTreeHeights();
+  syncObjectSlotsHeights();
+  ciRefreshProxy();
+  const gBytes = HTEX_RES * HTEX_RES * 4;
+  if (data.geminiGrassDensity && geminiDensityCtx) {
+    const gb = base64ToBuffer(data.geminiGrassDensity);
+    if (gb.byteLength === gBytes) {
+      const idg = new ImageData(
+        new Uint8ClampedArray(gb),
+        HTEX_RES,
+        HTEX_RES,
+      );
+      geminiDensityCtx.putImageData(idg, 0, 0);
+      if (geminiDensityTex) geminiDensityTex.needsUpdate = true;
+    }
+  }
+  if (data.geminiCliffGrassDensity && geminiCliffDensityCtx) {
+    const cb = base64ToBuffer(data.geminiCliffGrassDensity);
+    if (cb.byteLength === gBytes) {
+      const idc = new ImageData(
+        new Uint8ClampedArray(cb),
+        HTEX_RES,
+        HTEX_RES,
+      );
+      geminiCliffDensityCtx.putImageData(idc, 0, 0);
+      if (geminiCliffDensityTex) geminiCliffDensityTex.needsUpdate = true;
+    }
+  }
+  syncGeminiGrassHasPaintedFromCanvas();
+  if (data.fog && typeof data.fog === "object") {
+    Object.assign(PARAMS.fog.height, data.fog.height ?? {});
+    Object.assign(PARAMS.fog.distance, data.fog.distance ?? {});
+    syncFog();
+  }
+  if (data.csm && typeof data.csm === "object") {
+    Object.assign(PARAMS.csm, data.csm);
+  }
+  if (typeof data.shadowBias === "number")
+    PARAMS.shadowBias = data.shadowBias;
+  if (typeof data.shadowNormalBias === "number")
+    PARAMS.shadowNormalBias = data.shadowNormalBias;
+  if (sun.shadow) {
+    sun.shadow.bias = PARAMS.shadowBias;
+    sun.shadow.normalBias = PARAMS.shadowNormalBias;
+  }
+  setCsmEnabled(PARAMS.csm.enabled);
+  _lastCsmCascades = -1;
+  if (
+    data.fleurInteraction &&
+    typeof data.fleurInteraction === "object"
+  ) {
+    const fi = data.fleurInteraction;
+    if (fi.interactRadius != null)
+      fleurParams.interactRadius = fi.interactRadius;
+    if (fi.interactStrength != null)
+      fleurParams.interactStrength = fi.interactStrength;
+    if (fi.interactGain != null)
+      fleurParams.interactGain = fi.interactGain;
+    if (fi.windAmp != null) fleurParams.windAmp = fi.windAmp;
+    if (fi.windSpeed != null) fleurParams.windSpeed = fi.windSpeed;
+    _syncFleurInteractionToSystem();
+  }
+  if (data.fleurs && Array.isArray(data.fleurs) && fleurSystem) {
+    fleurSystem.setPositions(data.fleurs);
+  }
+  if (data.splinePoints && Array.isArray(data.splinePoints)) {
+    splinePoints = data.splinePoints.map(
+      (p) => new THREE.Vector3(p.x, p.y, p.z),
+    );
+    splineSelectedIdx = -1;
+    splineDragging = false;
+    splineRebuildVisual();
+    splineUpdateSelectedYParam();
+  }
+  if (data.spline && typeof data.spline === "object") {
+    Object.assign(PARAMS.spline, data.spline);
+  }
+  if (data.riverPoints && Array.isArray(data.riverPoints)) {
+    riverPoints = data.riverPoints.map(
+      (p) => new THREE.Vector3(p.x, p.y, p.z),
+    );
+    riverSelectedIdx = -1;
+    riverDragging = false;
+  }
+  if (data.river && typeof data.river === "object") {
+    Object.assign(PARAMS.river, data.river);
+    applyRiverStyle(PARAMS.river.shaderStyle);
+    syncRiverMat();
+  }
+  if (data.path && typeof data.path === "object") {
+    Object.assign(PARAMS.path, data.path);
+  }
+  if (data.decal && typeof data.decal === "object") {
+    Object.assign(PARAMS.decal, data.decal);
+  }
+  if (data.decals && Array.isArray(data.decals)) {
+    clearDecals();
+    applyDecalsFromData(data.decals);
+  }
+  if (data.riverPoints && Array.isArray(data.riverPoints)) {
+    riverRebuildVisual();
+    riverUpdateSelectedYParam();
+  }
+  if (data.roads && Array.isArray(data.roads)) {
+    roadSegs.forEach((seg) => roadDisposeSegMesh(seg));
+    roadSegs = data.roads.map((r) => ({
+      points: Array.isArray(r.points)
+        ? r.points.map((p) => new THREE.Vector3(p.x, p.y, p.z))
+        : [],
+      mesh: null,
+    }));
+    roadSelectedIdx = -1;
+    roadDragging = false;
+  } else if (data.roadPoints && Array.isArray(data.roadPoints)) {
+    roadSegs.forEach((seg) => roadDisposeSegMesh(seg));
+    roadSegs = [
+      {
+        points: data.roadPoints.map(
+          (p) => new THREE.Vector3(p.x, p.y, p.z),
+        ),
+        mesh: null,
+      },
+    ];
+    PARAMS.road.activeRoadIndex = 0;
+    roadSelectedIdx = -1;
+    roadDragging = false;
+  }
+  if (data.road && typeof data.road === "object") {
+    Object.assign(PARAMS.road, data.road);
+    syncRoadMat();
+  }
+  if (
+    typeof data.activeRoadIndex === "number" &&
+    (data.roads || data.roadPoints)
+  ) {
+    PARAMS.road.activeRoadIndex = data.activeRoadIndex;
+  }
+  if (
+    (data.roads && Array.isArray(data.roads)) ||
+    (data.roadPoints && Array.isArray(data.roadPoints))
+  ) {
+    roadClampParamActive();
+    roadRebuildVisual();
+    roadUpdateSelectedYParam();
+  }
+  if (data.foliage && Array.isArray(data.foliage)) {
+    data.foliage.forEach((fd, idx) => {
+      if (
+        idx < FOLIAGE_SLOTS.length &&
+        FOLIAGE_SLOTS[idx].system &&
+        fd.positions
+      ) {
+        FOLIAGE_SLOTS[idx].system.setPositions(fd.positions);
+      }
+    });
+  }
+  if (data.objects && Array.isArray(data.objects)) {
+    data.objects.forEach((od, idx) => {
+      if (
+        idx < OBJECT_SLOTS.length &&
+        OBJECT_SLOTS[idx].system &&
+        od.positions
+      ) {
+        OBJECT_SLOTS[idx].system.setPositions(od.positions);
+      }
+    });
+  }
+  if (
+    data.ambientFX &&
+    Array.isArray(data.ambientFX) &&
+    ambientFXSystem
+  ) {
+    ambientFXSystem.setEmitters(data.ambientFX);
+  }
+  const barrierBytes = BARRIER_RES * BARRIER_RES * 4;
+  if (data.barrierMap && typeof data.barrierMap === "string") {
+    const bb = base64ToBuffer(data.barrierMap);
+    if (bb.byteLength === barrierBytes) {
+      barrierCtx.putImageData(
+        new ImageData(
+          new Uint8ClampedArray(bb),
+          BARRIER_RES,
+          BARRIER_RES,
+        ),
+        0,
+        0,
+      );
+      if (barrierTex) barrierTex.needsUpdate = true;
+      invalidateBarrierCache();
+      syncBarrierOverlay();
+    }
+  }
+  rebuildHoleCanvasFromSplats();
+  if (fleurSystem) fleurSystem.syncHeights();
+  if (ambientFXSystem) ambientFXSystem.syncHeights();
+  syncObjectSlotsHeights();
+  applyImportedLightSky(data);
+  applyImportedWaterOcean(data);
+  applyImportedGrassTuning(data);
+}
+
+function rebuildAllActiveChunkMeshes() {
+  for (const [key, ch] of [...activeChunks.entries()]) {
+    const lod =
+      CONFIG.lodLevels.find((l) => l.segments === ch.segments) ??
+      CONFIG.lodLevels[0];
+    removeChunk(ch);
+    activeChunks.set(key, createChunk(ch.cx, ch.cz, lod));
+  }
+  refreshActiveChunkMaterials();
+  heightTexDirty = true;
+}
+
+let _matSwapQueue = [];
+let _matSwapActive = false;
+function refreshActiveChunkMaterials() {
+  // Progressive material swap — update a few chunks per frame to avoid
+  // GPU shader compilation stalls (TSL materials compile on first render).
+  // Sort: nearest chunks first so close terrain updates before far terrain.
+  const anchor = playMode ? playerPos : camera.position;
+  _matSwapQueue = [...activeChunks.values()].sort((a, b) => {
+    const ac = chunkCenterWorld(a.cx, a.cz);
+    const da = ac.distanceToSquared(anchor);
+    const bc = chunkCenterWorld(b.cx, b.cz);
+    const db = bc.distanceToSquared(anchor);
+    return da - db;
+  });
+  if (!_matSwapActive) {
+    _matSwapActive = true;
+    const SWAP_PER_FRAME = 4;
+    const step = () => {
+      for (
+        let i = 0;
+        i < SWAP_PER_FRAME && _matSwapQueue.length > 0;
+        i++
+      ) {
+        const chunk = _matSwapQueue.shift();
+        if (!activeChunks.has(chunkKey(chunk.cx, chunk.cz))) continue;
+        const lod =
+          CONFIG.lodLevels.find((l) => l.segments === chunk.segments) ??
+          CONFIG.lodLevels[0];
+        chunk.mesh.material = resolveTerrainMaterial(
+          chunk.cx,
+          chunk.cz,
+          lod,
+        );
+      }
+      if (_matSwapQueue.length > 0) {
+        requestAnimationFrame(step);
+      } else {
+        _matSwapActive = false;
+      }
+    };
+    requestAnimationFrame(step);
+  }
+}
+
+function rebuildAllChunkSplatMaterials() {
+  buildSharedTslGroundMaterial();
+  buildSharedImgTexMaterial();
+  for (const splat of chunkSplatMap.values()) {
+    splat.material.dispose();
+    splat.tileMaterial.dispose();
+    const { material, tileMaterial } = createSplatMaterialsForTex(
+      splat.tex,
+      splat.imgTex,
+      splat.meadowTex,
+    );
+    splat.material = material;
+    splat.tileMaterial = tileMaterial;
+  }
+  refreshActiveChunkMaterials();
+}
+
+chunkImageSlotSystem
+  .loadDefaults()
+  .then(() => {
+    rebuildAllChunkSplatMaterials();
+  })
+  .catch((e) => console.warn("Chunk image slot defaults:", e));
+
+const raycaster = new THREE.Raycaster();
+const pointerNdc = new THREE.Vector2();
+/** Reused every raycast — avoids allocating a new array per pointermove / hit test. */
+const _terrainRaycastMeshes = [];
+
+const brushMarker = new THREE.Mesh(
+  new THREE.RingGeometry(
+    SCULPT_RING_GEOM_BASE * 0.96,
+    SCULPT_RING_GEOM_BASE,
+    48,
+  ),
+  new THREE.MeshBasicMaterial({
+    color: 0xffaa55,
+    transparent: true,
+    opacity: 0.9,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  }),
+);
+brushMarker.rotation.x = -Math.PI / 2;
+brushMarker.renderOrder = 0;
+brushMarker.visible = false;
+scene.add(brushMarker);
+
+/* ── Iso click-to-move ring + target (capsule iso only) ── */
+const moveRing = new THREE.Mesh(
+  new THREE.RingGeometry(1.05, 1.35, 48),
+  new THREE.MeshBasicMaterial({
+    color: 0x66ddff,
+    transparent: true,
+    opacity: 0.85,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  }),
+);
+moveRing.rotation.x = -Math.PI / 2;
+moveRing.renderOrder = 1;
+moveRing.visible = false;
+scene.add(moveRing);
+/** Click target for iso-capsule move-to-point. Null when idle. */
+let moveTarget = null;
+
+const rampMarkerA = brushMarker.clone();
+rampMarkerA.material = brushMarker.material.clone();
+rampMarkerA.material.color.setHex(0xcc66ff);
+rampMarkerA.visible = false;
+scene.add(rampMarkerA);
+
+function syncRampMarkerVisual() {
+  if (
+    editState.mode !== "sculpt" ||
+    !editState.rampPointA ||
+    PARAMS.sculptTool !== "ramp"
+  ) {
+    rampMarkerA.visible = false;
+    return;
+  }
+  rampMarkerA.visible = true;
+  rampMarkerA.position.set(
+    editState.rampPointA.x,
+    editState.rampPointA.y + 0.04,
+    editState.rampPointA.z,
+  );
+  rampMarkerA.scale.setScalar(
+    sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE,
+  );
+}
+
+function clearRampStart() {
+  if (!editState.rampPointA) return;
+  editState.rampPointA = null;
+  syncBrushVisual();
+  if (editorPane) editorPane.refresh();
+}
+
+const PLAYER_CAP_R = 0.4;
+const PLAYER_CAP_H = 1.2;
+const playParams = {
+  speed: 12,
+  camDist: 6,
+  camSensX: 0.002,
+  camSensY: 0.002,
+  flyMouseSensX: 0.0022,
+  flyMouseSensY: 0.00235,
+  /** Nose limits (rad). Wide down angle so dives read clearly on the mesh. */
+  flyPitchMin: -1.22,
+  flyPitchMax: 0.9,
+  /** Fly follow: altitude change (m/s) per rad of pitch; dives scale up separately. */
+  flyPitchClimbScale: 26,
+  flyRollMax: 0.78,
+  flyRollVelScale: 0.0042,
+  flyRollSmooth: 10,
+  flyRollTargetDecay: 5,
+  /** Fly: full 360° barrel roll duration (s), smoothstep eased. */
+  flyBarrelRollDuration: 0.88,
+};
+/** "capsule" | "fly" — toggled with G while in play mode (pointer lock). */
+let playMovementMode = "capsule";
+/** Fly only: heading (rad), matches prior mesh rotation.y; mouse steers, W/S along heading. */
+let flyHeading = 0;
+let flyPitch = 0;
+let flyRoll = 0;
+let flyRollTarget = 0;
+let flyBarrelActive = false;
+let flyBarrelPhase = 0;
+/** +1 or −1: barrel follows current roll sense; set on Q (see FLY_BARREL_ROLL_DEAD). */
+let flyBarrelSign = 1;
+const FLY_BARREL_ROLL_DEAD = 0.028;
+const PLAY_PLANE_MODEL =
+  "models/wenning_carsten_gameart_plane_compressed.glb";
+/** Plane airspeed tunables (m/s, m/s²). Separate from capsule `playParams.speed`. */
+const PLAY_PLANE_MAX_FWD = 56;
+/** With Shift (afterburner), higher cap + stronger W-throttle accel. */
+const PLAY_PLANE_MAX_FWD_BOOST = 78;
+const PLAY_PLANE_SHIFT_ACCEL_MULT = 1.5;
+const PLAY_PLANE_MAX_REV = 18;
+const PLAY_PLANE_ACCEL = 10.5;
+const PLAY_PLANE_BRAKE = 26;
+const PLAY_PLANE_REV_ACCEL = 8;
+const PLAY_PLANE_COAST = 3.8;
+const PLAY_PLANE_DRAG = 0.014;
+/** Below this height AGL (m), extra rolling resistance / deck braking when coasting. */
+const PLAY_PLANE_DECK_ALT = 1.15;
+const PLAY_PLANE_DECK_COAST_MULT = 2.1;
+/** On deck + below this speed: no mouse/iso flight steering (taxi); follow cam orbit offset only. */
+const PLAY_PLANE_SURFACE_LOCK_MAX_AGL = 1.35;
+const PLAY_PLANE_SURFACE_LOCK_MAX_SPEED = 16;
+/** Fly mode only: height above terrain at (playerPos.x, playerPos.z); playerPos.y stays at ground. */
+let playFlyHeight = 0;
+/** Signed forward airspeed along `flyHeading` (m/s). Throttle ramps; never uses capsule speed. */
+let playPlaneForwardSpeed = 0;
+/** >0: ring boost raises forward speed cap (seconds). */
+let playPlaneRingBoostT = 0;
+let playPlaneRoot = null;
+let playPlaneLoaded = false;
+/** Follow-fly only: look around while surface-locked (yaw orbit), decays in air. */
+let flyGroundCamYawOff = 0;
+
+function planeFlightSurfaceLocked() {
+  return (
+    playMovementMode === "fly" &&
+    playPlaneLoaded &&
+    playFlyHeight < PLAY_PLANE_SURFACE_LOCK_MAX_AGL &&
+    Math.abs(playPlaneForwardSpeed) < PLAY_PLANE_SURFACE_LOCK_MAX_SPEED
+  );
+}
+
+/* ── Animated character (3rd movement mode: "char") ── */
+/* Matches game-unreal.html: UA1+UA2 character w/ katana.glb, hat,
+ * slide, spell, sword attacks, crouch, roll. */
+const PLAY_CHAR_MODEL = "models/UA1+UA2_compressed.glb";
+const PLAY_CHAR_KATANA_MODEL = "models/katana.glb";
+const PLAY_CHAR_HAT_MODEL = "models/asian_conical_hat_compressed.glb";
+const PLAY_CHAR_HEIGHT = 2.5;
+const PLAY_CHAR_WALK_SPEED = 4.0;
+const PLAY_CHAR_RUN_SPEED = 8.0;
+/* Jump — v²/2g peak ≈ 3.2m. Tuned higher than a realistic ninja so
+ * hills/small obstacles are easy to clear. */
+const PLAY_CHAR_JUMP_VEL = 11.0;
+const PLAY_CHAR_GRAVITY = 20.0;
+/* Roll peak speed: should exceed run so hitting C mid-sprint feels
+ * like a dash, not a brake. Speed = PEAK * cos(πt/2). */
+const PLAY_CHAR_ROLL_PEAK = 13.0;
+let playCharRoot = null;
+let playCharInner = null;
+let playCharMixer = null;
+let playCharLoaded = false;
+let playCharActions = null;
+let playCharCurrentAction = null;
+let playCharYaw = 0;
+let playCharVelY = 0;
+let playCharInAir = false;
+let playCharCrouching = false;
+let playCharAttacking = false;
+let playCharRolling = false;
+let playCharRollYaw = 0;
+let playCharRollStart = 0;
+/* Slide state: "none" | "start" | "loop" | "exit" */
+let playCharSlidePhase = "none";
+let playCharSlideYaw = 0;
+let playCharSlideStart = 0;
+/* Spell state: "none" | "enter" | "idle" | "shoot" | "exit" */
+let playCharSpellPhase = "none";
+let playCharSpellExitRequested = false;
+/* Filled from rollAction.getClip().duration at load so the dash
+ * and the 75% early-exit both track the real animation length. */
+let playCharRollDuration = 0.8;
+/* Jump phase state machine — "none" | "start" | "loop" | "land".
+ * Mirrors game-unreal's Jump_Start → Jump_Loop → Jump_Land chain. */
+let playCharJumpPhase = "none";
+/* Zelda-style glider: Space mid-air opens/closes a kite that caps
+ * fall speed. Mirrors player-parkourtsushima.js. */
+let playCharGliding = false;
+let playCharGliderPoseActive = false;
+let playCharSpacePrev = false;
+let playCharKite = null;
+const PLAY_CHAR_GLIDE_FALL_SPEED = 3.0;
+const PLAY_CHAR_SLIDE_SPEED = 10.0;
+const PLAY_CHAR_SLIDE_MAX_TIME = 1.2;
+
+/* ── Arcade car (4th movement mode: "car") ──
+ * Heightmap-raycast 4-wheeler, no Rapier. Uses bruno.glb from
+ * folio-2025-main — chassis + 4 cloned wheelContainers. */
+const PLAY_CAR_MODEL = "models/bruno.glb";
+const PLAY_CAR_ACCEL = 18.0; // throttle acceleration (m/s²)
+const PLAY_CAR_BRAKE = 34.0; // brake deceleration
+const PLAY_CAR_REVERSE = 12.0; // reverse acceleration
+const PLAY_CAR_MAX_SPEED = 22.0; // fwd cap
+const PLAY_CAR_MAX_REVERSE = 10.0; // reverse cap
+const PLAY_CAR_ROLL_FRICTION = 2.2; // coast decel when no throttle
+const PLAY_CAR_DRAG = 0.018; // v² drag coefficient
+const PLAY_CAR_STEER_MAX = 0.65; // radians of steering input
+const PLAY_CAR_STEER_RATE = 4.0; // how fast steering follows input
+const PLAY_CAR_TURN_RATE = 2.1; // yaw change per (speed × steer)
+const PLAY_CAR_HANDBRAKE = 55.0; // handbrake decel
+const PLAY_CAR_GRAVITY = 22.0;
+const PLAY_CAR_WHEEL_BASE = 1.9; // front-back distance
+const PLAY_CAR_TRACK = 1.1; // left-right distance
+const PLAY_CAR_RIDE_HEIGHT = 0.35; // wheel hub below chassis center
+const PLAY_CAR_WHEEL_RADIUS = 0.42; // so wheel bottoms rest ON ground
+/* bruno.glb's chassis points +X in model space; our physics assumes
+ * +Z forward. Bake this 90° Y rotation into the visual mesh so the
+ * wheel/physics math stays in the clean +Z frame. */
+const PLAY_CAR_MODEL_YAW = Math.PI / 2;
+let playCarRoot = null; // Group holding chassis + wheels
+let playCarChassis = null; // chassis mesh (parent of wheels)
+let playCarWheels = []; // [{container, suspension, cylinder, offset:Vec3}, …]
+let playCarLoaded = false;
+let playCarHeading = 0; // yaw (rad)
+let playCarSpeed = 0; // m/s along heading (signed)
+let playCarSteer = 0; // current smoothed steering
+let playCarY = 0; // chassis center y
+let playCarPitch = 0; // from front/rear wheel height diff
+let playCarRoll = 0; // from left/right wheel height diff
+let playCarWheelSpin = 0; // cumulative wheel rotation (radians)
+const keysHeld = {};
+const playerPos = new THREE.Vector3();
+let camYaw = 0;
+let camPitch = 0.35;
+let savedCamPos = null;
+let savedTarget = null;
+/** "follow" | "iso" — toggled with V in play mode. Works for capsule and fly. */
+let playCamView = "follow";
+/** Iso view tunables (Diablo/C&C-style tilted top-down). */
+const ISO_PITCH = 1.0; // ~57° tilt, not true top-down
+const ISO_DIST_DEFAULT = 26;
+const ISO_DIST_MIN = 10;
+const ISO_DIST_MAX = 70;
+const ISO_YAW_ROT_SPEED = 1.6; // rad/s when holding [ or ] (capsule)
+const ISO_ZOOM_STEP = 0.9; // multiplicative per wheel tick
+const ISO_FLY_YAW_RATE = 1.9; // rad/s plane yaw from A/D in iso fly
+const ISO_FLY_CLIMB_RATE = 28; // m/s up from Space
+const ISO_FLY_DESCEND_RATE = 48; // m/s down from Shift — faster than climb
+/** Follow-fly: extra vertical rate when nose-down (multiplies flyPitchClimbScale). */
+const PLAY_FLY_VERT_DIVE_MULT = 1.82;
+/** Iso fly: nose slews toward climb/dive target (1/s exponential). */
+const ISO_FLY_PITCH_SLEW = 9;
+const ISO_FLY_CHASE_SMOOTH = 5.5; // camera yaw chase stiffness (1/s)
+let isoYaw = Math.PI / 4; // 45° classic iso angle
+let isoDist = ISO_DIST_DEFAULT;
+
+const capsuleGeo = new THREE.CapsuleGeometry(
+  PLAYER_CAP_R,
+  PLAYER_CAP_H,
+  4,
+  8,
+);
+const capsuleMat = new THREE.MeshStandardMaterial({
+  color: 0xff6633,
+  roughness: 0.7,
+});
+const capsuleMesh = new THREE.Mesh(capsuleGeo, capsuleMat);
+capsuleMesh.castShadow = true;
+capsuleMesh.visible = false;
+scene.add(capsuleMesh);
+
+/* ── Wingtip Contrail Trail System ── */
+const TRAIL_SEG = 90;
+const TRAIL_HALF_W = 0.038;
+const trailMat = new MeshBasicNodeMaterial({
+  side: THREE.DoubleSide,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+});
+/* TSL: all visual logic on GPU */
+const _trUV = attribute("trailUV");
+const _trLenT = _trUV.x; // 0 = tip, 1 = tail
+const _trLenFade = pow(sub(float(1.0), _trLenT), float(1.6)); // fade along length
+const _trEdge = abs(sub(_trUV.y, float(0.5))).mul(float(2)); // 0 center, 1 edge
+const _trEdgeFade = sub(
+  float(1.0),
+  smoothstep(float(0.15), float(0.95), _trEdge),
+);
+const _trAlpha = mul(_trLenFade, _trEdgeFade, float(0.72));
+/* Color: bright white core near tip → cool blue at tail */
+const _trCoreColor = mix(
+  vec3(1.0, 1.0, 1.0),
+  vec3(0.65, 0.85, 1.0),
+  _trLenT,
+);
+/* Brighten the center strip for a "hot core" look */
+const _trCoreBright = sub(
+  float(1.0),
+  smoothstep(float(0.0), float(0.55), _trEdge),
+);
+trailMat.colorNode = add(
+  _trCoreColor,
+  mul(vec3(0.3, 0.25, 0.2), _trCoreBright),
+);
+trailMat.opacityNode = _trAlpha;
+
+const wingTrails = [];
+const _trDir = new THREE.Vector3();
+const _trSide = new THREE.Vector3();
+const _trUp = new THREE.Vector3(0, 1, 0);
+const _trTipWorld = new THREE.Vector3();
+
+function createWingTrail(localOffset) {
+  const vertCount = (TRAIL_SEG + 1) * 2;
+  const positions = new Float32Array(vertCount * 3);
+  const trailUVs = new Float32Array(vertCount * 2);
+  const indices = [];
+  for (let i = 0; i < TRAIL_SEG; i++) {
+    const v = i * 2;
+    indices.push(v, v + 1, v + 2, v + 1, v + 3, v + 2);
+  }
+  for (let i = 0; i <= TRAIL_SEG; i++) {
+    const u = i / TRAIL_SEG; // 0 = tip, 1 = tail
+    trailUVs[i * 2 * 2] = u; // left vert .x
+    trailUVs[i * 2 * 2 + 1] = 0; // left vert .y = 0 (edge)
+    trailUVs[(i * 2 + 1) * 2] = u; // right vert .x
+    trailUVs[(i * 2 + 1) * 2 + 1] = 1; // right vert .y = 1 (edge)
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute("trailUV", new THREE.BufferAttribute(trailUVs, 2));
+  geo.setIndex(indices);
+  const mesh = new THREE.Mesh(geo, trailMat);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = 12;
+  mesh.visible = false;
+  scene.add(mesh);
+  const trail = { mesh, history: [], localOffset: localOffset.clone() };
+  wingTrails.push(trail);
+  return trail;
+}
+
+function sampleWingTrails(planeInner, accelerating) {
+  for (const trail of wingTrails) {
+    _trTipWorld.copy(trail.localOffset);
+    planeInner.localToWorld(_trTipWorld);
+    const hist = trail.history;
+    if (accelerating) {
+      if (hist.length > 0 && _trTipWorld.distanceTo(hist[0]) < 0.002)
+        continue;
+      hist.unshift(_trTipWorld.clone());
+      if (hist.length > TRAIL_SEG + 1) hist.length = TRAIL_SEG + 1;
+    } else {
+      /* Not accelerating → dissipate: drop oldest samples each frame */
+      if (hist.length > 0) hist.pop();
+      if (hist.length > 1) hist.pop();
+    }
+  }
+}
+
+function rebuildWingTrails() {
+  for (const trail of wingTrails) {
+    const pos = trail.mesh.geometry.attributes.position;
+    const hist = trail.history;
+    const n = Math.min(hist.length, TRAIL_SEG + 1);
+    for (let i = 0; i < n; i++) {
+      const p = hist[i];
+      if (i < n - 1) _trDir.subVectors(hist[i], hist[i + 1]).normalize();
+      else if (n > 1)
+        _trDir.subVectors(hist[n - 2], hist[n - 1]).normalize();
+      else _trDir.set(0, 0, 1);
+      _trSide.crossVectors(_trDir, _trUp);
+      if (_trSide.lengthSq() < 1e-6) _trSide.set(1, 0, 0);
+      else _trSide.normalize();
+      const t = i / TRAIL_SEG;
+      const w = TRAIL_HALF_W * (1 - t * 0.4);
+      const vi = i * 2;
+      pos.setXYZ(
+        vi,
+        p.x - _trSide.x * w,
+        p.y - _trSide.y * w,
+        p.z - _trSide.z * w,
+      );
+      pos.setXYZ(
+        vi + 1,
+        p.x + _trSide.x * w,
+        p.y + _trSide.y * w,
+        p.z + _trSide.z * w,
+      );
+    }
+    for (let i = n; i <= TRAIL_SEG; i++) {
+      const vi = i * 2;
+      const lp = n > 0 ? hist[n - 1] : { x: 0, y: 0, z: 0 };
+      pos.setXYZ(vi, lp.x, lp.y, lp.z);
+      pos.setXYZ(vi + 1, lp.x, lp.y, lp.z);
+    }
+    pos.needsUpdate = true;
+  }
+}
+
+function clearWingTrails() {
+  for (const trail of wingTrails) {
+    trail.history.length = 0;
+    trail.mesh.visible = false;
+  }
+}
+
+/* ── Plane Forward Gun ── */
+const PLANE_BULLET_POOL = 64;
+const planeBullets = [];
+const planeBulletGroup = new THREE.Group();
+planeBulletGroup.frustumCulled = false;
+scene.add(planeBulletGroup);
+const planeBulletGeo = new THREE.PlaneGeometry(0.18, 1.4);
+const planeBulletMat = new THREE.MeshBasicMaterial({
+  color: new THREE.Color(PARAMS.planeGun.tracerColor),
+  transparent: true,
+  opacity: 1,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  side: THREE.DoubleSide,
+  toneMapped: false,
+});
+for (let i = 0; i < PLANE_BULLET_POOL; i++) {
+  const m = new THREE.Mesh(planeBulletGeo, planeBulletMat);
+  m.frustumCulled = false;
+  m.matrixAutoUpdate = false;
+  m.visible = false;
+  m.renderOrder = 11;
+  planeBulletGroup.add(m);
+  planeBullets.push({
+    mesh: m,
+    pos: new THREE.Vector3(),
+    dir: new THREE.Vector3(),
+    dist: 0,
+    alive: false,
+  });
+}
+const playPlaneMuzzles = []; // inner-local Vector3 offsets
+let _planeMuzzleIdx = 0;
+let _planeGunCooldown = 0;
+const flightTargets = []; // populated when deers are added
+const _bulletForwardWS = new THREE.Vector3();
+const _bulletMuzzleWS = new THREE.Vector3();
+const _bulletToCam = new THREE.Vector3();
+const _bulletRight = new THREE.Vector3();
+const _bulletPerp = new THREE.Vector3();
+const _bulletMat4 = new THREE.Matrix4();
+const _bulletStep = new THREE.Vector3();
+const _bulletDirScaled = new THREE.Vector3();
+const _bulletHitTmp = new THREE.Vector3();
+
+function firePlaneBullet(origin, dir) {
+  let slot = null;
+  for (let i = 0; i < planeBullets.length; i++) {
+    if (!planeBullets[i].alive) {
+      slot = planeBullets[i];
+      break;
+    }
+  }
+  if (!slot) return;
+  slot.alive = true;
+  slot.pos.copy(origin);
+  slot.dir.copy(dir).normalize();
+  slot.dist = 0;
+  slot.mesh.visible = true;
+}
+
+function releasePlaneBullet(b) {
+  b.alive = false;
+  b.mesh.visible = false;
+}
+
+function updatePlaneBullets(dtSec) {
+  const speed = PARAMS.planeGun.bulletSpeed;
+  const maxDist = PARAMS.planeGun.bulletMaxDist;
+  const sz = PARAMS.planeGun.bulletSize;
+  for (let i = 0; i < planeBullets.length; i++) {
+    const b = planeBullets[i];
+    if (!b.alive) continue;
+    _bulletStep.copy(b.dir).multiplyScalar(speed * dtSec);
+    b.pos.add(_bulletStep);
+    b.dist += speed * dtSec;
+    if (b.dist > maxDist) {
+      releasePlaneBullet(b);
+      continue;
+    }
+    /* Build basis: local Y aligned with bullet dir, X = right (perp to view) */
+    _bulletToCam.subVectors(camera.position, b.pos);
+    _bulletRight.crossVectors(b.dir, _bulletToCam);
+    if (_bulletRight.lengthSq() < 1e-6) _bulletRight.set(1, 0, 0);
+    else _bulletRight.normalize();
+    _bulletPerp.crossVectors(_bulletRight, b.dir).normalize();
+    _bulletDirScaled.copy(b.dir).multiplyScalar(sz);
+    _bulletRight.multiplyScalar(sz);
+    _bulletPerp.multiplyScalar(sz);
+    _bulletMat4.makeBasis(_bulletRight, _bulletDirScaled, _bulletPerp);
+    _bulletMat4.setPosition(b.pos);
+    b.mesh.matrix.copy(_bulletMat4);
+  }
+}
+
+function checkPlaneBulletHits() {
+  if (flightTargets.length === 0) return;
+  const r = 2.0;
+  const r2 = r * r;
+  for (let i = 0; i < planeBullets.length; i++) {
+    const b = planeBullets[i];
+    if (!b.alive) continue;
+    for (let j = 0; j < flightTargets.length; j++) {
+      const t = flightTargets[j];
+      if (!t || t.isDead) continue;
+      _bulletHitTmp.subVectors(t.position, b.pos);
+      if (_bulletHitTmp.lengthSq() < r2) {
+        if (t.onHit) t.onHit(PARAMS.planeGun.damage, b.pos, b.dir);
+        releasePlaneBullet(b);
+        break;
+      }
+    }
+  }
+}
+
+/* ── Flight boost rings (instanced torus, canvas texture, no frustum cull) ── */
+const FLIGHT_RING_BASE_MAJOR = 1;
+const FLIGHT_RING_BASE_TUBE = 0.075;
+/** Instance pool (single gate uses slot 0). */
+const FLIGHT_RING_POOL = 8;
+/** After layout, skip until fly exit / rings disabled / explicit re-place. */
+let flightRingsFixedLayoutDone = false;
+const _flightRingDummy = new THREE.Object3D();
+const _flightRingLookAt = new THREE.Vector3();
+const flightRingSlots = [];
+const FR = PARAMS.flightRings;
+for (let i = 0; i < FLIGHT_RING_POOL; i++) {
+  flightRingSlots.push({
+    active: false,
+    cx: 0,
+    cy: 0,
+    cz: 0,
+    yaw: 0,
+    /** Unit: torus hole axis in world (vertical ring, fly through along −axis). */
+    ax: 0,
+    ay: 0,
+    az: 0,
+    majorR: FR.ringRadius,
+    /** True while plane sample is inside boost volume (slab + hole). */
+    wasInsideHole: false,
+  });
+}
+const _flightRingGeo = new THREE.TorusGeometry(
+  FLIGHT_RING_BASE_MAJOR,
+  FLIGHT_RING_BASE_TUBE * 1.15,
+  14,
+  40,
+);
+/* Default torus lies in XY; hole along ±Z — we orient with lookAt so
+ * the hole aligns with flight direction (flight-sim gate, not a ground hoop). */
+const _flightRingCnv = document.createElement("canvas");
+_flightRingCnv.width = 512;
+_flightRingCnv.height = 128;
+(() => {
+  const ctx = _flightRingCnv.getContext("2d");
+  const g = ctx.createLinearGradient(0, 0, 512, 0);
+  g.addColorStop(0, "rgba(0,30,50,0.2)");
+  g.addColorStop(0.38, "rgba(0,200,255,0.95)");
+  g.addColorStop(0.48, "rgba(255,255,255,1)");
+  g.addColorStop(0.52, "rgba(255,255,255,1)");
+  g.addColorStop(0.62, "rgba(0,200,255,0.95)");
+  g.addColorStop(1, "rgba(0,30,50,0.2)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 512, 128);
+  const gv = ctx.createLinearGradient(0, 0, 0, 128);
+  gv.addColorStop(0, "rgba(0,0,0,0.35)");
+  gv.addColorStop(0.45, "rgba(0,0,0,0)");
+  gv.addColorStop(0.55, "rgba(0,0,0,0)");
+  gv.addColorStop(1, "rgba(0,0,0,0.35)");
+  ctx.fillStyle = gv;
+  ctx.globalCompositeOperation = "multiply";
+  ctx.fillRect(0, 0, 512, 128);
+})();
+const flightRingTex = new THREE.CanvasTexture(_flightRingCnv);
+flightRingTex.colorSpace = THREE.SRGBColorSpace;
+flightRingTex.wrapS = THREE.RepeatWrapping;
+flightRingTex.wrapT = THREE.RepeatWrapping;
+flightRingTex.repeat.set(3, 1);
+flightRingTex.needsUpdate = true;
+const uFlightRingTint = uniform(
+  new THREE.Color(FR.color).convertSRGBToLinear(),
+);
+const flightRingMat = new MeshBasicNodeMaterial({
+  transparent: true,
+  depthWrite: false,
+  depthTest: true,
+  blending: THREE.NormalBlending,
+  side: THREE.DoubleSide,
+  fog: false,
+});
+flightRingMat.toneMapped = true;
+{
+  const ringSamp = texture(flightRingTex, uv());
+  flightRingMat.colorNode = mul(ringSamp.rgb, vec3(uFlightRingTint));
+  flightRingMat.opacityNode = float(1);
+}
+const flightRingMesh = new THREE.InstancedMesh(
+  _flightRingGeo,
+  flightRingMat,
+  FLIGHT_RING_POOL,
+);
+flightRingMesh.count = 0;
+flightRingMesh.frustumCulled = false;
+flightRingMesh.renderOrder = 20;
+flightRingMesh.visible = true;
+scene.add(flightRingMesh);
+
+function flightRingAllocSlot() {
+  for (let i = 0; i < flightRingSlots.length; i++) {
+    if (!flightRingSlots[i].active) return i;
+  }
+  return -1;
+}
+
+/** One shot: exactly one gate ahead (symmetric ± fly-through axis). */
+function ensureFixedFlightRingsPlaced() {
+  const P = PARAMS.flightRings;
+  if (!playMode || !P.enabled) {
+    flightRingsFixedLayoutDone = false;
+    return;
+  }
+  if (playMovementMode !== "fly" || !playPlaneLoaded) {
+    flightRingsFixedLayoutDone = false;
+    return;
+  }
+  if (flightRingsFixedLayoutDone) return;
+  for (let i = 0; i < flightRingSlots.length; i++) {
+    flightRingSlots[i].active = false;
+    flightRingSlots[i].wasInsideHole = false;
+  }
+  const yaw0 = flyHeading;
+  const fx = -Math.sin(yaw0);
+  const fz = -Math.cos(yaw0);
+  const bx = playerPos.x;
+  const bz = playerPos.z;
+  const along = P.spawnAhead;
+  const cx = bx + fx * along;
+  const cz = bz + fz * along;
+  const g = getWorldHeight(cx, cz);
+  const sky = Math.max(40, P.ringSkyAGL ?? 125);
+  const cy = g + sky + P.spawnHeightOffset * 0.35;
+  if (spawnFlightRingAt(cx, cy, cz, yaw0, P.ringRadius))
+    flightRingsFixedLayoutDone = true;
+}
+
+function spawnFlightRingAt(cx, cy, cz, yaw, majorR) {
+  const P = PARAMS.flightRings;
+  if (!P.enabled) return false;
+  const idx = flightRingAllocSlot();
+  if (idx < 0) return false;
+  const s = flightRingSlots[idx];
+  s.active = true;
+  s.cx = cx;
+  s.cy = cy;
+  s.cz = cz;
+  s.yaw = yaw;
+  s.majorR = majorR;
+  /* Vertical gate: default torus hole is +local Z; world hole axis is horizontal ⊥ flight dir. */
+  s.ax = Math.cos(yaw);
+  s.ay = 0;
+  s.az = -Math.sin(yaw);
+  s.wasInsideHole = false;
+  return true;
+}
+
+function clearFlightRings() {
+  for (let i = 0; i < flightRingSlots.length; i++) {
+    flightRingSlots[i].active = false;
+    flightRingSlots[i].wasInsideHole = false;
+  }
+  flightRingMesh.count = 0;
+  flightRingsFixedLayoutDone = false;
+}
+
+function updateFlightRings(dtSec, _cameraRef) {
+  const P = PARAMS.flightRings;
+  if (!P.enabled) {
+    flightRingMesh.count = 0;
+    flightRingMesh.visible = false;
+    return;
+  }
+  flightRingMesh.visible = true;
+  uFlightRingTint.value.set(P.color).convertSRGBToLinear();
+  let v = 0;
+  for (let i = 0; i < flightRingSlots.length; i++) {
+    const s = flightRingSlots[i];
+    if (!s.active) continue;
+    /* lookAt puts −Z toward target; we want +Z (torus hole) along (ax,ay,az). → target = C − a. */
+    _flightRingLookAt.set(s.cx - s.ax, s.cy - s.ay, s.cz - s.az);
+    _flightRingDummy.position.set(s.cx, s.cy, s.cz);
+    _flightRingDummy.quaternion.identity();
+    _flightRingDummy.up.set(0, 1, 0);
+    _flightRingDummy.lookAt(_flightRingLookAt);
+    _flightRingDummy.scale.setScalar(s.majorR);
+    _flightRingDummy.updateMatrix();
+    flightRingMesh.setMatrixAt(v, _flightRingDummy.matrix);
+    v++;
+  }
+  flightRingMesh.count = v;
+  if (v > 0) flightRingMesh.instanceMatrix.needsUpdate = true;
+}
+
+function tryFlightRingPlaneBoost(px, py, pz) {
+  const P = PARAMS.flightRings;
+  if (
+    !P.enabled ||
+    !playPlaneLoaded ||
+    !playMode ||
+    playMovementMode !== "fly"
+  )
+    return;
+  for (let i = 0; i < flightRingSlots.length; i++) {
+    const s = flightRingSlots[i];
+    if (!s.active) continue;
+    /* Symmetric slab on gate plane ⊥ f: |f·(P−C)| < half → either approach side.
+     * Inside hole: radial distance in that plane < holeR. Edge: enter volume. */
+    const fx = -Math.sin(s.yaw);
+    const fy = 0;
+    const fz = -Math.cos(s.yaw);
+    const wx = px - s.cx;
+    const wy = py - s.cy;
+    const wz = pz - s.cz;
+    const sPlane = wx * fx + wy * fy + wz * fz;
+    const wLenSq = wx * wx + wy * wy + wz * wz;
+    const rhoSq = Math.max(0, wLenSq - sPlane * sPlane);
+    const slab = Math.max(8, P.boostHoleSlabHalf ?? 18);
+    const mul = Math.max(
+      0.55,
+      Math.min(0.98, P.boostHoleRadiusMul ?? 0.9),
+    );
+    const holeR = s.majorR * mul;
+    const holeRSq = holeR * holeR;
+    const inVol = Math.abs(sPlane) < slab && rhoSq <= holeRSq * 1.002;
+    if (inVol) {
+      if (!s.wasInsideHole) {
+        s.wasInsideHole = true;
+        playPlaneRingBoostT = Math.max(
+          playPlaneRingBoostT,
+          P.boostDuration,
+        );
+        const cap =
+          (keysHeld.ShiftLeft || keysHeld.ShiftRight
+            ? PLAY_PLANE_MAX_FWD_BOOST
+            : PLAY_PLANE_MAX_FWD) + P.boostMaxAdd;
+        const mult = Math.max(1, P.boostSurgeMult ?? 1);
+        const surged = playPlaneForwardSpeed * mult + P.boostImpulse;
+        playPlaneForwardSpeed = Math.min(surged, cap);
+      }
+    } else {
+      s.wasInsideHole = false;
+    }
+    break;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   BLOOD FX — ported from game-unreal.html. Pool of sprites (burst)
+   + flipbook atlas ground pools. Shared across all agents.
+   ══════════════════════════════════════════════════════════════════ */
+const MAX_BLOOD_PARTICLES = 60;
+const MAX_BLOOD_POOLS = 12;
+const bloodFx = {
+  mat: null,
+  poolMat: null,
+  poolMeshMat: null,
+  poolPlaneGeo: null,
+  particles: [],
+  pools: [],
+  poolAtlasOk: false,
+  poolColorTex: null,
+  poolAlphaTex: null,
+  initialized: false,
+};
+const _bloodHideScale = new THREE.Vector3(0.001, 0.001, 1);
+const _bloodPoolHideScale = new THREE.Vector3(0.001, 0.001, 0.001);
+
+function makeBloodTexture(size) {
+  const c = document.createElement("canvas");
+  c.width = c.height = size;
+  const ctx = c.getContext("2d");
+  const g = ctx.createRadialGradient(
+    size / 2,
+    size / 2,
+    0,
+    size / 2,
+    size / 2,
+    size / 2,
+  );
+  g.addColorStop(0, "rgba(255,255,255,1)");
+  g.addColorStop(0.3, "rgba(255,200,200,0.8)");
+  g.addColorStop(0.6, "rgba(200,50,50,0.4)");
+  g.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+function applyBloodPoolTextureFilters(tex, linear) {
+  const f = linear ? THREE.LinearFilter : THREE.NearestFilter;
+  tex.magFilter = f;
+  tex.minFilter = f;
+  tex.needsUpdate = true;
+}
+
+function createBloodPoolAtlasMaterial(colorMap, alphaMap) {
+  const p0 = PARAMS.bloodFX;
+  const uCellScale = uniform(
+    new THREE.Vector2(1 / p0.poolAtlasCols, 1 / p0.poolAtlasRows),
+  );
+  const uCellOffset = uniform(new THREE.Vector2(0, 0));
+  const uTint = uniform(new THREE.Color(p0.poolColor));
+  const uBrightness = uniform(1);
+  const uCut = uniform(p0.poolAlphaCutoff);
+  const uInvertMask = uniform(p0.poolInvertAlphaMask ? 1 : 0);
+  const atlasUv = uv().mul(uCellScale).add(uCellOffset);
+  const samp = texture(colorMap, atlasUv);
+  const maskSamp = texture(alphaMap, atlasUv);
+  const maskR = maskSamp.r;
+  const invR = float(1).sub(maskR);
+  const a = mix(maskR, invR, uInvertMask);
+  const rgb = samp.rgb.mul(uTint).mul(uBrightness);
+  const mat = new MeshBasicNodeMaterial({
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+    side: THREE.DoubleSide,
+  });
+  mat.colorNode = vec4(rgb, a);
+  mat.alphaTestNode = uCut;
+  return {
+    mat,
+    uCellScale,
+    uCellOffset,
+    uTint,
+    uBrightness,
+    uCut,
+    uInvertMask,
+  };
+}
+
+async function initBloodFX() {
+  if (bloodFx.initialized) return;
+  bloodFx.initialized = true;
+  const tex = makeBloodTexture(32);
+
+  bloodFx.mat = new THREE.SpriteMaterial({
+    map: tex,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.NormalBlending,
+    color: 0x8b0000,
+  });
+  bloodFx.poolMat = new THREE.SpriteMaterial({
+    map: tex,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.NormalBlending,
+    color: 0x550000,
+  });
+  bloodFx.poolMeshMat = new THREE.MeshBasicMaterial({
+    map: tex,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.NormalBlending,
+    color: 0x550000,
+  });
+  bloodFx.poolPlaneGeo = new THREE.PlaneGeometry(1, 1);
+
+  for (let i = 0; i < MAX_BLOOD_PARTICLES; i++) {
+    const s = new THREE.Sprite(bloodFx.mat);
+    s.renderOrder = 990;
+    s.scale.set(0.001, 0.001, 1);
+    scene.add(s);
+    bloodFx.particles.push({
+      sprite: s,
+      alive: false,
+      timer: 0,
+      lifetime: 0,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      size: 0,
+      floorY: 0,
+    });
+  }
+
+  const p = PARAMS.bloodFX;
+  const loader = new THREE.TextureLoader();
+  const base = p.poolAtlasBasePath.endsWith("/")
+    ? p.poolAtlasBasePath
+    : `${p.poolAtlasBasePath}/`;
+  let colorTex = null;
+  let alphaTex = null;
+  try {
+    colorTex = await loader.loadAsync(base + p.poolColorAtlasFile);
+    alphaTex = await loader.loadAsync(base + p.poolAlphaAtlasFile);
+  } catch (err) {
+    console.warn(
+      "[bloodFX] Pool atlas load failed (using fallback):",
+      err,
+    );
+  }
+
+  if (colorTex && alphaTex) {
+    bloodFx.poolAtlasOk = true;
+    bloodFx.poolColorTex = colorTex;
+    bloodFx.poolAlphaTex = alphaTex;
+    colorTex.colorSpace = THREE.SRGBColorSpace;
+    colorTex.wrapS = colorTex.wrapT = THREE.ClampToEdgeWrapping;
+    alphaTex.colorSpace = THREE.NoColorSpace;
+    alphaTex.wrapS = alphaTex.wrapT = THREE.ClampToEdgeWrapping;
+    applyBloodPoolTextureFilters(colorTex, p.poolAtlasLinear);
+    applyBloodPoolTextureFilters(alphaTex, p.poolAtlasLinear);
+
+    for (let i = 0; i < MAX_BLOOD_POOLS; i++) {
+      const u = createBloodPoolAtlasMaterial(colorTex, alphaTex);
+      const s = new THREE.Mesh(bloodFx.poolPlaneGeo, u.mat);
+      s.rotation.x = -Math.PI / 2;
+      s.renderOrder = 989;
+      s.scale.set(0.001, 0.001, 0.001);
+      scene.add(s);
+      bloodFx.pools.push({
+        sprite: s,
+        alive: false,
+        animTimer: 0,
+        lifetime: 0,
+        size: 0,
+        uni: u,
+      });
+    }
+  } else {
+    for (let i = 0; i < MAX_BLOOD_POOLS; i++) {
+      const s = new THREE.Mesh(bloodFx.poolPlaneGeo, bloodFx.poolMeshMat);
+      s.rotation.x = -Math.PI / 2;
+      s.renderOrder = 989;
+      s.scale.set(0.001, 0.001, 0.001);
+      scene.add(s);
+      bloodFx.pools.push({
+        sprite: s,
+        alive: false,
+        animTimer: 0,
+        lifetime: 0,
+        size: 0,
+        uni: null,
+      });
+    }
+  }
+}
+
+function setBloodPoolAtlasFrame(pool, frameIndex) {
+  if (!bloodFx.poolAtlasOk || !pool.uni) return;
+  const p = PARAMS.bloodFX;
+  const cols = Math.max(1, p.poolAtlasCols);
+  const rows = Math.max(1, p.poolAtlasRows);
+  const n = cols * rows;
+  const fi = Math.max(0, Math.min(n - 1, Math.floor(frameIndex)));
+  const cw = 1 / cols;
+  const ch = 1 / rows;
+  pool.uni.uCellScale.value.set(cw, ch);
+  const col = fi % cols;
+  const row = Math.floor(fi / cols);
+  const u = col * cw;
+  const v = p.poolFlipRowUV ? row * ch : 1 - (row + 1) * ch;
+  pool.uni.uCellOffset.value.set(u, v);
+}
+
+function spawnBloodBurst(position, floorY) {
+  if (!bloodFx.initialized) return;
+  const p = PARAMS.bloodFX;
+  if (!p.enabled) return;
+  for (let i = 0; i < p.burstCount; i++) {
+    const part = bloodFx.particles.find((x) => !x.alive);
+    if (!part) break;
+    part.alive = true;
+    part.timer = 0;
+    part.lifetime = p.lifetime * (0.6 + Math.random() * 0.8);
+    part.size = p.spriteSize * (0.5 + Math.random());
+    const angle = Math.random() * Math.PI * 2;
+    const upward = 0.5 + Math.random() * 1.0;
+    const spread = p.burstSpread * (0.3 + Math.random() * 0.7);
+    part.vx = Math.cos(angle) * spread * p.burstSpeed;
+    part.vy = upward * p.burstSpeed;
+    part.vz = Math.sin(angle) * spread * p.burstSpeed;
+    part.sprite.position.copy(position);
+    part.floorY = floorY;
+    part.sprite.material = bloodFx.mat;
+  }
+  const pool = bloodFx.pools.find((x) => !x.alive);
+  if (pool) {
+    pool.alive = true;
+    pool.animTimer = 0;
+    pool.lifetime = p.poolLifetime;
+    pool.size = p.poolSize * (0.7 + Math.random() * 0.6);
+    pool.sprite.position.set(
+      position.x + (Math.random() - 0.5) * 0.5,
+      floorY + p.poolYOffset,
+      position.z + (Math.random() - 0.5) * 0.5,
+    );
+    pool.sprite.scale.set(0.001, 0.001, 0.001);
+    if (bloodFx.poolAtlasOk && pool.uni) {
+      setBloodPoolAtlasFrame(pool, 0);
+      pool.uni.uTint.value.set(p.poolColor);
+      pool.uni.uBrightness.value = 1;
+      pool.uni.uCut.value = p.poolAlphaCutoff;
+      pool.uni.uInvertMask.value = p.poolInvertAlphaMask ? 1 : 0;
+    }
+  }
+}
+
+function updateBloodFX(dt) {
+  if (!bloodFx.initialized) return;
+  const p = PARAMS.bloodFX;
+  bloodFx.mat.color.set(p.bloodColor);
+  bloodFx.poolMat.color.set(p.poolColor);
+  if (bloodFx.poolMeshMat) bloodFx.poolMeshMat.color.set(p.poolColor);
+
+  for (const part of bloodFx.particles) {
+    if (!part.alive) continue;
+    part.timer += dt;
+    if (part.timer >= part.lifetime) {
+      part.alive = false;
+      part.sprite.scale.copy(_bloodHideScale);
+      continue;
+    }
+    part.vy -= p.gravity * dt;
+    part.sprite.position.x += part.vx * dt;
+    part.sprite.position.y += part.vy * dt;
+    part.sprite.position.z += part.vz * dt;
+    if (part.sprite.position.y < part.floorY + 0.05) {
+      part.sprite.position.y = part.floorY + 0.05;
+      part.vy = 0;
+      part.vx *= 0.5;
+      part.vz *= 0.5;
+    }
+    const t = part.timer / part.lifetime;
+    const fade = t < 0.1 ? t / 0.1 : 1 - (t - 0.1) / 0.9;
+    const sz = part.size * fade;
+    part.sprite.scale.set(sz, sz, 1);
+  }
+
+  for (const pool of bloodFx.pools) {
+    if (!pool.alive) continue;
+    pool.animTimer += dt;
+
+    if (!p.poolPersist && pool.animTimer >= pool.lifetime) {
+      pool.alive = false;
+      pool.sprite.scale.copy(_bloodPoolHideScale);
+      continue;
+    }
+
+    const growT = Math.min(pool.animTimer / 0.28, 1);
+    let sz = pool.size * growT;
+    sz = Math.max(sz, p.poolMinWorldScale, 0.05);
+    pool.sprite.scale.set(sz, sz, 1);
+
+    let fadeT = 1;
+    if (!p.poolPersist && pool.lifetime > 0) {
+      const t = pool.animTimer / pool.lifetime;
+      fadeT = t > 0.6 ? 1 - (t - 0.6) / 0.4 : 1;
+    }
+
+    if (bloodFx.poolAtlasOk && pool.uni) {
+      const cols = Math.max(1, p.poolAtlasCols);
+      const rows = Math.max(1, p.poolAtlasRows);
+      const n = cols * rows;
+      let fi;
+      if (p.poolFlipbookByFps) {
+        fi = Math.min(n - 1, Math.floor(pool.animTimer * p.poolAnimFps));
+      } else {
+        const dur = Math.max(0.04, p.poolAnimDuration);
+        const ap = Math.min(1, pool.animTimer / dur);
+        fi = Math.min(n - 1, Math.round((n - 1) * ap));
+      }
+      setBloodPoolAtlasFrame(pool, fi);
+      pool.uni.uTint.value.set(p.poolColor);
+      pool.uni.uBrightness.value = p.poolPersist ? 1 : fadeT;
+      pool.uni.uCut.value = p.poolAlphaCutoff;
+      pool.uni.uInvertMask.value = p.poolInvertAlphaMask ? 1 : 0;
+    }
+  }
+}
+
+function flashAgentRed(agent) {
+  const p = PARAMS.bloodFX;
+  if (!p.enabled || !agent.root) return;
+  agent._flashTimer = p.flashDuration;
+  agent._origColors = agent._origColors || new Map();
+  agent.root.traverse((child) => {
+    if (!child.isMesh && !child.isSkinnedMesh) return;
+    if (!child.material) return;
+    if (!agent._origColors.has(child)) {
+      agent._origColors.set(
+        child,
+        child.material.color
+          ? child.material.color.clone()
+          : new THREE.Color(1, 1, 1),
+      );
+    }
+    if (child.material.color) child.material.color.set(p.flashColor);
+  });
+}
+
+function updateAgentFlash(agent, dt) {
+  if (!agent._flashTimer || agent._flashTimer <= 0) return;
+  agent._flashTimer -= dt;
+  if (agent._flashTimer <= 0) {
+    agent._flashTimer = 0;
+    if (agent._origColors) {
+      agent._origColors.forEach((origCol, child) => {
+        if (child.material && child.material.color)
+          child.material.color.copy(origCol);
+      });
+    }
+  }
+}
+
+initBloodFX();
+
+/* ══════════════════════════════════════════════════════════════════
+   AGENT SYSTEM — generic creature/NPC pool with tiered LOD updates.
+   Add new creatures by registering an agentType. The tier updater,
+   pooling, chunk hook, and lifecycle are all shared.
+
+   Tiers:
+     0 = near  (full AI tick, full anim, shadows)
+     1 = mid   (AI tick at 5Hz, anim, no shadows)
+     2 = far   (no AI, frozen pose or billboard)
+     3 = dormant (not in scene, just position+state)
+   ══════════════════════════════════════════════════════════════════ */
+const agentTypes = new Map(); // typeId → { loadTemplate, createInstance, updateAI, onHit, ... }
+const agents = []; // all active agent instances
+const AGENT_TIER_NEAR = 60; // Tier 0 if within this distance
+const AGENT_TIER_MID = 140; // Tier 1 up to this
+const AGENT_TIER_FAR = 260; // Tier 2 up to this; beyond = Tier 3
+let _agentTierRecheckMs = 0;
+const _agentRefPos = new THREE.Vector3();
+const _agentTmpVec = new THREE.Vector3();
+
+function registerAgentType(typeId, config) {
+  agentTypes.set(typeId, { loaded: false, template: null, ...config });
+}
+
+async function ensureAgentTypeLoaded(typeId) {
+  const t = agentTypes.get(typeId);
+  if (!t) throw new Error(`Unknown agent type: ${typeId}`);
+  if (t.loaded) return t;
+  if (t._loadingPromise) return t._loadingPromise;
+  t._loadingPromise = t.loadTemplate().then((tmpl) => {
+    t.template = tmpl;
+    t.loaded = true;
+    return t;
+  });
+  return t._loadingPromise;
+}
+
+async function spawnAgent(typeId, worldPos) {
+  const t = await ensureAgentTypeLoaded(typeId);
+  const agent = t.createInstance(t.template, worldPos);
+  agent.typeId = typeId;
+  agent.tier = 3;
+  agent.aiAccum = 0;
+  agent.isDead = false;
+  agents.push(agent);
+  if (t.flightTarget) flightTargets.push(t.flightTarget(agent));
+  return agent;
+}
+
+function despawnAgent(agent) {
+  const idx = agents.indexOf(agent);
+  if (idx === -1) return;
+  agents.splice(idx, 1);
+  const t = agentTypes.get(agent.typeId);
+  if (t?.dispose) t.dispose(agent);
+  if (agent._flightTargetRef) {
+    const fi = flightTargets.indexOf(agent._flightTargetRef);
+    if (fi !== -1) flightTargets.splice(fi, 1);
+  }
+}
+
+function _agentTierForDist(d) {
+  if (d < AGENT_TIER_NEAR) return 0;
+  if (d < AGENT_TIER_MID) return 1;
+  if (d < AGENT_TIER_FAR) return 2;
+  return 3;
+}
+
+function updateAgents(dtSec, nowMs) {
+  if (agents.length === 0) return;
+  _agentRefPos.copy(playMode ? playerPos : camera.position);
+  const recheck = nowMs - _agentTierRecheckMs > 500;
+  if (recheck) _agentTierRecheckMs = nowMs;
+  for (let i = 0; i < agents.length; i++) {
+    const a = agents[i];
+    const t = agentTypes.get(a.typeId);
+    if (!t) continue;
+    if (recheck) {
+      _agentTmpVec.copy(a.position).sub(_agentRefPos);
+      const d = _agentTmpVec.length();
+      const newTier = _agentTierForDist(d);
+      if (newTier !== a.tier) {
+        a.tier = newTier;
+        if (t.onTierChange) t.onTierChange(a, newTier);
+      }
+    }
+    if (a.tier === 3) continue; // dormant
+    /* Tier 1: tick AI at 5 Hz instead of every frame */
+    if (a.tier === 1) {
+      a.aiAccum += dtSec;
+      if (a.aiAccum >= 0.2) {
+        if (t.updateAI) t.updateAI(a, a.aiAccum);
+        a.aiAccum = 0;
+      }
+    } else if (a.tier === 0) {
+      if (t.updateAI) t.updateAI(a, dtSec);
+    }
+    /* Anim + visuals: every frame for Tier 0/1, skip Tier 2 */
+    if (a.tier <= 1 && t.updateVisuals) t.updateVisuals(a, dtSec);
+  }
+}
+
+/* ── Deer agent type ── */
+const DEER_MODEL_PATH = "models/Deer.gltf";
+const DEER_SCALE = 0.8;
+const _deerTmpDir = new THREE.Vector3();
+
+function _findClip(anims, names) {
+  return anims.find((a) => names.some((n) => a.name === n)) || null;
+}
+
+function _loadDeerTemplate() {
+  return new Promise((resolve, reject) => {
+    gltfLoader.load(
+      resolveModelUrl(DEER_MODEL_PATH),
+      (gltf) => {
+        gltf.scene.traverse((o) => {
+          if (o.isMesh || o.isSkinnedMesh) {
+            o.castShadow = true;
+            o.receiveShadow = true;
+            o.frustumCulled = false;
+          }
+        });
+        const anims = gltf.animations || [];
+        resolve({
+          scene: gltf.scene,
+          anims,
+          clips: {
+            idle:
+              _findClip(anims, [
+                "Idle",
+                "idle",
+                "Idle_Loop",
+                "Idle_01",
+              ]) ||
+              anims[0] ||
+              null,
+            walk: _findClip(anims, [
+              "Walk",
+              "Walk_Loop",
+              "Walk_Fwd",
+              "Walk_Fwd_Loop",
+            ]),
+            run: _findClip(anims, [
+              "Run",
+              "Run_Loop",
+              "Run_Fwd",
+              "Gallop",
+            ]),
+            graze: _findClip(anims, [
+              "Graze",
+              "Eat",
+              "Eat_Loop",
+              "Idle_Eat",
+            ]),
+            death: _findClip(anims, [
+              "Die",
+              "Death",
+              "Death_Armature",
+              "Death01",
+            ]),
+          },
+        });
+      },
+      undefined,
+      (err) => reject(err),
+    );
+  });
+}
+
+function _createDeerInstance(template, worldPos) {
+  const root = SkeletonUtils.clone(template.scene);
+  root.scale.setScalar(DEER_SCALE);
+  const gy = getWorldHeight(worldPos.x, worldPos.z);
+  root.position.set(worldPos.x, gy, worldPos.z);
+  scene.add(root);
+  const mixer = new THREE.AnimationMixer(root);
+  const mk = (clip, loopOnce = false) => {
+    if (!clip) return null;
+    const act = mixer
+      .clipAction(clip)
+      .setLoop(loopOnce ? THREE.LoopOnce : THREE.LoopRepeat);
+    if (loopOnce) act.clampWhenFinished = true;
+    return act;
+  };
+  const idleAction = mk(template.clips.idle);
+  const walkAction = mk(template.clips.walk);
+  const runAction = mk(template.clips.run);
+  const grazeAction = mk(template.clips.graze);
+  const deathAction = mk(template.clips.death, true);
+  if (idleAction) idleAction.play();
+  const agent = {
+    root,
+    mixer,
+    idleAction,
+    walkAction,
+    runAction,
+    grazeAction,
+    deathAction,
+    state: "idle",
+    stateTime: 0,
+    homePos: root.position.clone(),
+    targetPos: root.position.clone(),
+    walkSpeed: 1.5,
+    runSpeed: 4.0,
+    position: root.position, // alias for agent system
+    health: 1,
+    _flightTargetRef: null,
+    _flashTimer: 0,
+    _origColors: null,
+  };
+  return agent;
+}
+
+function _deerUpdateAI(a, dt) {
+  if (a.isDead) return;
+  a.stateTime += dt;
+  if (a.state === "idle" || a.state === "graze") {
+    if (a.stateTime > 4 + Math.random() * 3) {
+      a.stateTime = 0;
+      const r = Math.random();
+      if (r < 0.4 && a.grazeAction) {
+        if (a.idleAction) a.idleAction.stop();
+        a.grazeAction.reset().play();
+        a.state = "graze";
+      } else {
+        const radius = 10;
+        const angle = Math.random() * Math.PI * 2;
+        const tx = a.homePos.x + Math.cos(angle) * radius;
+        const tz = a.homePos.z + Math.sin(angle) * radius;
+        a.targetPos.set(tx, getWorldHeight(tx, tz), tz);
+        const useRun = r > 0.8 && a.runAction;
+        a.state = useRun ? "run" : "walk";
+        if (a.idleAction) a.idleAction.stop();
+        if (a.grazeAction) a.grazeAction.stop();
+        if (useRun) a.runAction.reset().play();
+        else if (a.walkAction) a.walkAction.reset().play();
+      }
+    }
+  } else if (a.state === "walk" || a.state === "run") {
+    _deerTmpDir.subVectors(a.targetPos, a.root.position);
+    _deerTmpDir.y = 0;
+    const dist = _deerTmpDir.length();
+    if (dist < 0.25) {
+      a.state = "idle";
+      a.stateTime = 0;
+      if (a.walkAction) a.walkAction.stop();
+      if (a.runAction) a.runAction.stop();
+      if (a.idleAction) a.idleAction.reset().play();
+    } else {
+      _deerTmpDir.normalize();
+      const speed = a.state === "run" ? a.runSpeed : a.walkSpeed;
+      a.root.position.addScaledVector(_deerTmpDir, speed * dt);
+      a.root.position.y = getWorldHeight(
+        a.root.position.x,
+        a.root.position.z,
+      );
+      a.root.rotation.y = Math.atan2(_deerTmpDir.x, _deerTmpDir.z);
+    }
+  }
+}
+
+function _deerUpdateVisuals(a, dt) {
+  if (a.mixer) a.mixer.update(dt);
+  updateAgentFlash(a, dt);
+}
+
+function _deerOnTierChange(a, tier) {
+  a.root.traverse((o) => {
+    if (o.isMesh || o.isSkinnedMesh) {
+      o.castShadow = tier === 0;
+    }
+  });
+  a.root.visible = tier < 3;
+}
+
+const _deerBloodPos = new THREE.Vector3();
+
+function _deerKill(a, hitPos) {
+  if (a.isDead) return;
+  a.isDead = true;
+  a.state = "dead";
+  if (a.idleAction) a.idleAction.stop();
+  if (a.walkAction) a.walkAction.stop();
+  if (a.runAction) a.runAction.stop();
+  if (a.grazeAction) a.grazeAction.stop();
+  if (a.deathAction) a.deathAction.reset().play();
+}
+
+function _deerOnHit(a, dmg, hitPos, hitDir) {
+  if (a.isDead) return;
+  /* Blood burst + red flash on every hit (mirrors game-unreal). */
+  _deerBloodPos.copy(a.root.position);
+  _deerBloodPos.y += 0.8;
+  spawnBloodBurst(_deerBloodPos, a.root.position.y);
+  flashAgentRed(a);
+  a.health -= dmg;
+  if (a.health <= 0) _deerKill(a, hitPos);
+}
+
+function _deerFlightTarget(a) {
+  const ft = {
+    position: a.root.position, // live reference; updates each frame
+    get isDead() {
+      return a.isDead;
+    },
+    onHit: (dmg, hp, hd) => _deerOnHit(a, dmg, hp, hd),
+  };
+  a._flightTargetRef = ft;
+  return ft;
+}
+
+function _deerDispose(a) {
+  if (a.mixer) a.mixer.stopAllAction();
+  scene.remove(a.root);
+  a.root.traverse((o) => {
+    if (o.isSkinnedMesh || o.isMesh) {
+      if (o.geometry && !o._sharedGeometry) o.geometry.dispose?.();
+    }
+  });
+}
+
+registerAgentType("deer", {
+  loadTemplate: _loadDeerTemplate,
+  createInstance: _createDeerInstance,
+  updateAI: _deerUpdateAI,
+  updateVisuals: _deerUpdateVisuals,
+  onTierChange: _deerOnTierChange,
+  flightTarget: _deerFlightTarget,
+  dispose: _deerDispose,
+});
+
+async function spawnTestDeer(count = 6) {
+  const cx = (worldBounds.min.x + worldBounds.max.x) * 0.5;
+  const cz = (worldBounds.min.z + worldBounds.max.z) * 0.5;
+  for (let i = 0; i < count; i++) {
+    const angle = (i / count) * Math.PI * 2;
+    const radius = 18 + Math.random() * 12;
+    const pos = new THREE.Vector3(
+      cx + Math.cos(angle) * radius,
+      0,
+      cz + Math.sin(angle) * radius,
+    );
+    try {
+      await spawnAgent("deer", pos);
+    } catch (e) {
+      console.warn("spawn deer failed", e);
+      break;
+    }
+  }
+}
+
+gltfLoader.load(resolveModelUrl(PLAY_PLANE_MODEL), (gltf) => {
+  const inner = gltf.scene;
+  inner.traverse((o) => {
+    if (o.isMesh) {
+      o.castShadow = true;
+      o.receiveShadow = true;
+    }
+  });
+  inner.rotation.y = Math.PI;
+  inner.updateMatrixWorld(true);
+  const box0 = new THREE.Box3().setFromObject(inner);
+  if (!box0.isEmpty()) {
+    const size0 = box0.getSize(new THREE.Vector3());
+    const max0 = Math.max(size0.x, size0.y, size0.z);
+    const playPlaneTargetSpan = 2.8 * (PLAYER_CAP_H + 2 * PLAYER_CAP_R);
+    inner.scale.setScalar(playPlaneTargetSpan / max0);
+    inner.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(inner);
+    inner.position.set(
+      -((box.min.x + box.max.x) * 0.5),
+      -box.min.y,
+      -((box.min.z + box.max.z) * 0.5),
+    );
+  }
+  playPlaneRoot = new THREE.Group();
+  playPlaneRoot.rotation.order = "YXZ";
+  playPlaneRoot.add(inner);
+  playPlaneRoot.visible = false;
+  scene.add(playPlaneRoot);
+  inner.updateMatrixWorld(true);
+  const wingBox = new THREE.Box3().setFromObject(inner);
+  const wbSz = new THREE.Vector3();
+  wingBox.getSize(wbSz);
+  {
+    const tipXL = wingBox.min.x;
+    const tipXR = wingBox.max.x;
+    const zBack = wingBox.max.z - wbSz.z * 0.08;
+    const yMid = (wingBox.min.y + wingBox.max.y) * 0.5;
+    /* Convert wingtip world positions to inner-local offsets */
+    const tmpW = new THREE.Vector3();
+    tmpW.set(tipXL, yMid, zBack);
+    inner.worldToLocal(tmpW);
+    createWingTrail(tmpW.clone());
+    tmpW.set(tipXR, yMid, zBack);
+    inner.worldToLocal(tmpW);
+    createWingTrail(tmpW.clone());
+
+    /* Forward gun muzzles: same Z as before, but X toward fuselage so
+     * tracers aim nearer the nose cross (wingtips were too wide to target). */
+    const zFront = wingBox.min.z + wbSz.z * 0.05;
+    const wingHalfX = wbSz.x * 0.5;
+    const muzzleHalfSpan = wingHalfX * 0.42;
+    const cxW = (wingBox.min.x + wingBox.max.x) * 0.5;
+    playPlaneMuzzles.length = 0;
+    tmpW.set(cxW - muzzleHalfSpan, yMid, zFront);
+    inner.worldToLocal(tmpW);
+    playPlaneMuzzles.push(tmpW.clone());
+    tmpW.set(cxW + muzzleHalfSpan, yMid, zFront);
+    inner.worldToLocal(tmpW);
+    playPlaneMuzzles.push(tmpW.clone());
+  }
+  playPlaneLoaded = true;
+  if (playMode && playMovementMode === "fly") {
+    playPlaneRoot.visible = true;
+    capsuleMesh.visible = false;
+    syncModeBadge();
+    flightRingsFixedLayoutDone = false;
+    ensureFixedFlightRingsPlaced();
+    updateFlightRings(0, camera);
+  }
+});
+
+/* ── Animated character loader (3rd mode, game-unreal parity) ── */
+gltfLoader.load(resolveModelUrl(PLAY_CHAR_MODEL), (gltf) => {
+  const model = gltf.scene;
+  model.traverse((o) => {
+    if (o.isMesh || o.isSkinnedMesh) {
+      o.castShadow = true;
+      o.receiveShadow = true;
+      o.frustumCulled = false;
+    }
+  });
+  /* Scale to PLAY_CHAR_HEIGHT and recentre so feet sit at y=0. */
+  const box = new THREE.Box3().setFromObject(model);
+  const size = new THREE.Vector3();
+  box.getSize(size);
+  const scale = PLAY_CHAR_HEIGHT / (size.y || 1);
+  model.scale.setScalar(scale);
+  box.setFromObject(model);
+  model.position.y -= box.min.y;
+
+  playCharInner = model;
+  playCharRoot = new THREE.Group();
+  playCharRoot.add(model);
+  playCharRoot.visible = false;
+  scene.add(playCharRoot);
+
+  /* Zelda-style glider kite — triangle canopy + control bar,
+   * parented to the character root so it rotates with yaw. */
+  {
+    const kiteGroup = new THREE.Group();
+    const kiteShape = new THREE.Shape();
+    kiteShape.moveTo(0, -0.7);
+    kiteShape.lineTo(-1.6, 0.6);
+    kiteShape.lineTo(1.6, 0.6);
+    kiteShape.closePath();
+    const canopyGeo = new THREE.ShapeGeometry(kiteShape);
+    const canopyMat = new THREE.MeshStandardMaterial({
+      color: 0x2563eb,
+      roughness: 0.5,
+      metalness: 0.1,
+      side: THREE.DoubleSide,
+    });
+    const canopy = new THREE.Mesh(canopyGeo, canopyMat);
+    canopy.castShadow = true;
+    canopy.receiveShadow = true;
+    canopy.rotation.x = -0.5;
+    canopy.position.set(0, 0.15, 0);
+    kiteGroup.add(canopy);
+    const barGeo = new THREE.BoxGeometry(0.7, 0.04, 0.04);
+    const barMat = new THREE.MeshStandardMaterial({
+      color: 0x1f2937,
+      roughness: 0.4,
+      metalness: 0.3,
+    });
+    const bar = new THREE.Mesh(barGeo, barMat);
+    bar.castShadow = true;
+    bar.position.set(0, -0.6, 0.35);
+    bar.rotation.x = 0.25;
+    kiteGroup.add(bar);
+    /* Position above the character's shoulders. Character GLB
+     * forward is +Z so the kite's -Z offset puts it in front of
+     * the back — matches the Zelda paraglider silhouette. */
+    kiteGroup.position.set(0, PLAY_CHAR_HEIGHT * 0.95, -0.35);
+    kiteGroup.rotation.x = 0.12;
+    kiteGroup.rotation.y = Math.PI / 2;
+    kiteGroup.visible = false;
+    playCharRoot.add(kiteGroup);
+    playCharKite = kiteGroup;
+  }
+
+  /* Bones — UA1+UA2 uses DEF-handR/DEF-head, but try fallbacks
+   * in case compression mangled names. */
+  const findBone = (names) => {
+    for (const n of names) {
+      const b = model.getObjectByName(n);
+      if (b) return b;
+    }
+    /* Last resort: scan by regex. */
+    let hit = null;
+    model.traverse((o) => {
+      if (hit) return;
+      const nm = (o.name || "").toLowerCase();
+      if (
+        /hand[_.-]?r|righthand|handright/.test(nm) &&
+        names[0].toLowerCase().includes("hand")
+      )
+        hit = o;
+      if (/head/.test(nm) && names[0].toLowerCase().includes("head"))
+        hit = o;
+    });
+    return hit;
+  };
+  const rightHandBone = findBone([
+    "DEF-handR",
+    "hand.R",
+    "mixamorigRightHand",
+    "RightHand",
+  ]);
+  const headBone = findBone([
+    "DEF-head",
+    "head",
+    "Head",
+    "mixamorigHead",
+  ]);
+  if (!rightHandBone)
+    console.warn(
+      "[char] right hand bone not found — katana won't attach",
+    );
+
+  /* Katana on right hand — loaded from separate GLB (matches game-unreal). */
+  if (rightHandBone) {
+    const swordGroup = new THREE.Group();
+    swordGroup.position.set(-0.07, 0.115, -0.2);
+    swordGroup.rotation.set(-1.37, 1.8, -2.21);
+    rightHandBone.add(swordGroup);
+    gltfLoader.load(
+      resolveModelUrl(PLAY_CHAR_KATANA_MODEL),
+      (katanaGltf) => {
+        const katanaScene = katanaGltf.scene;
+        katanaScene.traverse((o) => {
+          if (o.isMesh) {
+            o.castShadow = true;
+            o.receiveShadow = true;
+          }
+        });
+        const kbox = new THREE.Box3().setFromObject(katanaScene);
+        const ksize = new THREE.Vector3();
+        kbox.getSize(ksize);
+        const length = Math.max(ksize.x, ksize.y, ksize.z);
+        const kscale = 1.0 / (length || 1);
+        katanaScene.scale.setScalar(kscale);
+        kbox.setFromObject(katanaScene);
+        katanaScene.position.set(-kbox.min.x, -kbox.min.y, -kbox.min.z);
+        swordGroup.add(katanaScene);
+      },
+      undefined,
+      (err) => {
+        console.warn(
+          "Katana GLB load failed, using procedural sword:",
+          err,
+        );
+        const handleGeo = new THREE.CylinderGeometry(
+          0.02,
+          0.025,
+          0.18,
+          8,
+        );
+        const bladeGeo = new THREE.BoxGeometry(0.015, 0.06, 0.95);
+        const handleMat = new THREE.MeshStandardMaterial({
+          color: 0x4a3728,
+          roughness: 0.8,
+          metalness: 0.1,
+        });
+        const bladeMat = new THREE.MeshStandardMaterial({
+          color: 0xc0c8d0,
+          roughness: 0.3,
+          metalness: 0.8,
+        });
+        const handle = new THREE.Mesh(handleGeo, handleMat);
+        const blade = new THREE.Mesh(bladeGeo, bladeMat);
+        blade.position.set(0, 0, 0.565);
+        swordGroup.add(handle);
+        swordGroup.add(blade);
+      },
+    );
+  }
+
+  /* Hat on head bone. */
+  if (headBone) {
+    gltfLoader.load(
+      resolveModelUrl(PLAY_CHAR_HAT_MODEL),
+      (hatGltf) => {
+        const hatScene = hatGltf.scene;
+        hatScene.traverse((o) => {
+          if (o.isMesh) {
+            o.castShadow = true;
+            o.receiveShadow = true;
+          }
+        });
+        const hatScale = PLAY_CHAR_HEIGHT / 1.8;
+        hatScene.scale.setScalar(0.65 * hatScale);
+        hatScene.position.set(0, 0.2, 0);
+        headBone.add(hatScene);
+      },
+      undefined,
+      (err) => console.warn("Hat GLB load failed:", err),
+    );
+  }
+
+  if (gltf.animations && gltf.animations.length) {
+    playCharMixer = new THREE.AnimationMixer(model);
+    /* UA1+UA2 uses `*_Armature` suffixes; fall back to plain names. */
+    const pick = (baseNames) => {
+      for (const base of baseNames) {
+        const hit = gltf.animations.find(
+          (a) => a.name === base + "_Armature" || a.name === base,
+        );
+        if (hit) return hit;
+      }
+      return null;
+    };
+    const idleClip = pick(["Idle_Loop"]) || gltf.animations[0];
+    const walkClip = pick(["Walk_Loop"]) || idleClip;
+    const runClip = pick(["Sprint_Loop", "Jog_Fwd_Loop"]) || walkClip;
+    const jumpStartClip = pick(["Jump_Start"]);
+    const jumpLoopClip =
+      pick(["Jump_Loop", "NinjaJump_Idle_Loop"]) ||
+      jumpStartClip ||
+      idleClip;
+    const jumpLandClip = pick(["Jump_Land"]) || idleClip;
+    /* Glider pose: different clip so the character holds the
+     * kite bar instead of the default freefall loop. */
+    const glideClip = pick(["NinjaJump_Idle_Loop"]) || jumpLoopClip;
+    const attackClip = pick(["Sword_Attack", "Sword_Attack_RM"]);
+    const crouchClip = pick(["Crouch_Idle_Loop"]) || idleClip;
+    const crouchWalkClip = pick(["Crouch_Fwd_Loop"]) || crouchClip;
+    const rollClip = pick(["Roll", "Roll_RM"]) || idleClip;
+    const slideStartClip = pick(["Slide_Start"]);
+    const slideLoopClip = pick(["Slide_Loop"]) || slideStartClip;
+    const slideExitClip = pick(["Slide_Exit"]) || slideLoopClip;
+    const spellEnterClip = pick(["Spell_Simple_Enter"]);
+    const spellIdleClip = pick(["Spell_Simple_Idle_Loop"]);
+    const spellShootClip = pick(["Spell_Simple_Shoot"]);
+    const spellExitClip = pick(["Spell_Simple_Exit"]);
+
+    const mk = (clip, loopOnce) => {
+      if (!clip) return null;
+      const a = playCharMixer
+        .clipAction(clip)
+        .setLoop(loopOnce ? THREE.LoopOnce : THREE.LoopRepeat);
+      if (loopOnce) a.clampWhenFinished = true;
+      return a;
+    };
+
+    const idleAction = mk(idleClip, false);
+    const walkAction = mk(walkClip, false);
+    const runAction = mk(runClip, false);
+    const jumpStartAction = mk(jumpStartClip, true);
+    const jumpLoopAction = mk(jumpLoopClip, false);
+    const jumpLandAction = mk(jumpLandClip, true);
+    const glideAction = mk(glideClip, false);
+    /* Speed-up the short cinematic clips slightly so they feel
+     * responsive — matches game-unreal's 1.4x/1.8x on start/land. */
+    if (jumpStartAction) jumpStartAction.timeScale = 1.4;
+    if (jumpLandAction) jumpLandAction.timeScale = 1.8;
+    const crouchAction = mk(crouchClip, false);
+    const crouchWalkAction = mk(crouchWalkClip, false);
+    const attackAction = mk(attackClip, true);
+    const rollAction = mk(rollClip, true);
+    if (rollAction) {
+      const d = rollAction.getClip()?.duration;
+      if (d && d > 0) playCharRollDuration = d;
+    }
+    const slideStartAction = mk(slideStartClip, true);
+    const slideLoopAction = mk(slideLoopClip, false);
+    const slideExitAction = mk(slideExitClip, true);
+    const spellEnterAction = mk(spellEnterClip, true);
+    const spellIdleAction = mk(spellIdleClip, false);
+    const spellShootAction = mk(spellShootClip, true);
+    const spellExitAction = mk(spellExitClip, true);
+
+    idleAction.play();
+    playCharActions = {
+      idle: idleAction,
+      walk: walkAction,
+      run: runAction,
+      jumpStart: jumpStartAction,
+      jumpLoop: jumpLoopAction,
+      jumpLand: jumpLandAction,
+      glide: glideAction,
+      crouch: crouchAction,
+      crouchWalk: crouchWalkAction,
+      attack: attackAction,
+      roll: rollAction,
+      slideStart: slideStartAction,
+      slideLoop: slideLoopAction,
+      slideExit: slideExitAction,
+      spellEnter: spellEnterAction,
+      spellIdle: spellIdleAction,
+      spellShoot: spellShootAction,
+      spellExit: spellExitAction,
+    };
+    playCharCurrentAction = idleAction;
+
+    playCharMixer.addEventListener("finished", (e) => {
+      /* Attack → back to locomotion (flag only; render loop picks next). */
+      if (attackAction && e.action === attackAction) {
+        playCharAttacking = false;
+        return;
+      }
+      if (rollAction && e.action === rollAction) {
+        playCharRolling = false;
+        return;
+      }
+      /* Jump Start → transition to Loop while airborne. */
+      if (jumpStartAction && e.action === jumpStartAction) {
+        if (playCharInAir && jumpLoopAction) {
+          playCharJumpPhase = "loop";
+          jumpLoopAction.reset();
+          jumpLoopAction.enabled = true;
+          jumpLoopAction
+            .crossFadeFrom(jumpStartAction, 0.08, false)
+            .play();
+          playCharCurrentAction = jumpLoopAction;
+        }
+        return;
+      }
+      /* Jump Land → back to locomotion. */
+      if (jumpLandAction && e.action === jumpLandAction) {
+        playCharJumpPhase = "none";
+        return;
+      }
+      /* Slide start → enter loop phase; loop is time-capped in render loop. */
+      if (slideStartAction && e.action === slideStartAction) {
+        if (playCharSlidePhase === "start") {
+          playCharSlidePhase = "loop";
+          if (slideLoopAction) {
+            slideLoopAction.reset();
+            slideLoopAction.enabled = true;
+            slideLoopAction
+              .crossFadeFrom(slideStartAction, 0.1, false)
+              .play();
+            playCharCurrentAction = slideLoopAction;
+          }
+        }
+        return;
+      }
+      if (slideExitAction && e.action === slideExitAction) {
+        playCharSlidePhase = "none";
+        return;
+      }
+      /* Spell Enter → Idle stance (or Exit if exit-requested mid-enter). */
+      if (spellEnterAction && e.action === spellEnterAction) {
+        if (playCharSpellPhase !== "enter") return;
+        if (playCharSpellExitRequested && spellExitAction) {
+          playCharSpellPhase = "exit";
+          spellExitAction.reset();
+          spellExitAction.enabled = true;
+          spellExitAction
+            .crossFadeFrom(spellEnterAction, 0.12, false)
+            .play();
+          playCharCurrentAction = spellExitAction;
+        } else if (spellIdleAction) {
+          playCharSpellPhase = "idle";
+          spellIdleAction.reset();
+          spellIdleAction.enabled = true;
+          spellIdleAction
+            .crossFadeFrom(spellEnterAction, 0.12, false)
+            .play();
+          playCharCurrentAction = spellIdleAction;
+        }
+        return;
+      }
+      /* Spell Shoot → back to idle stance (or exit if requested). */
+      if (spellShootAction && e.action === spellShootAction) {
+        if (playCharSpellPhase !== "shoot") return;
+        if (playCharSpellExitRequested && spellExitAction) {
+          playCharSpellPhase = "exit";
+          spellExitAction.reset();
+          spellExitAction.enabled = true;
+          spellExitAction
+            .crossFadeFrom(spellShootAction, 0.12, false)
+            .play();
+          playCharCurrentAction = spellExitAction;
+        } else if (spellIdleAction) {
+          playCharSpellPhase = "idle";
+          spellIdleAction.reset();
+          spellIdleAction.enabled = true;
+          spellIdleAction
+            .crossFadeFrom(spellShootAction, 0.12, false)
+            .play();
+          playCharCurrentAction = spellIdleAction;
+        }
+        return;
+      }
+      /* Spell Exit → back to locomotion idle. */
+      if (spellExitAction && e.action === spellExitAction) {
+        playCharSpellPhase = "none";
+        playCharSpellExitRequested = false;
+        if (idleAction) {
+          idleAction.reset();
+          idleAction.enabled = true;
+          idleAction.crossFadeFrom(spellExitAction, 0.2, false).play();
+          playCharCurrentAction = idleAction;
+        }
+        return;
+      }
+    });
+  }
+  playCharLoaded = true;
+  if (playMode && playMovementMode === "char") {
+    playCharRoot.visible = true;
+    capsuleMesh.visible = false;
+    syncModeBadge();
+  }
+});
+
+function _playCharSetAction(next, fade = 0.18) {
+  if (!playCharActions || !next || next === playCharCurrentAction) return;
+  next.enabled = true;
+  next.reset();
+  next.crossFadeFrom(playCharCurrentAction, fade, false).play();
+  playCharCurrentAction = next;
+}
+
+/* ── Car loader (bruno.glb) ──
+ * The folio source builds its car from named parts: `chassis` holds the
+ * body shell, `wheelContainer` is a template cloned 4× with child parts
+ * `wheelSuspension` + `wheelCylinder` (+ `wheelPainted`). We reproduce
+ * that structure: chassis is parented to playCarRoot, then 4 cloned
+ * wheelContainers are parented to chassis with per-wheel offsets. */
+/* Cache-buster: the old bruno.glb we shipped was a different file
+ * with no chassis/wheelContainer nodes, so stale browser caches
+ * return the broken copy. Query string forces a re-fetch. */
+gltfLoader.load(resolveModelUrl(PLAY_CAR_MODEL) + "?v=3", (gltf) => {
+  const src = gltf.scene;
+  /* Folio names parts with a numeric suffix from Blender (e.g.
+   * "chassis.001", "wheelContainer.001"). Match by prefix so any
+   * re-export still resolves cleanly. */
+  let chassisSrc = null;
+  let wheelSrc = null;
+  src.traverse((o) => {
+    if (!chassisSrc && /^chassis(\.|\d|$)/.test(o.name)) chassisSrc = o;
+    if (!wheelSrc && /^wheelContainer(\.|\d|$)/.test(o.name))
+      wheelSrc = o;
+  });
+  if (!chassisSrc || !wheelSrc) {
+    console.warn(
+      "[car] bruno.glb missing chassis/wheelContainer — falling back to raw scene",
+    );
+    /* Last-resort fallback: reparent the whole scene as both the
+     * chassis and the wheel template so at least *something*
+     * appears. This will look wrong but prevents null-clone crashes. */
+    if (!chassisSrc) chassisSrc = src;
+    if (!wheelSrc) wheelSrc = src.clone(true);
+  }
+  /* Structure:
+   *   playCarRoot     ← position + heading yaw
+   *   └ playCarChassis ← pitch + roll (from wheel sampling)
+   *     ├ chassisVisual ← model yaw offset baked in
+   *     └ wheelContainer × 4 ← at +Z-forward corner offsets
+   * Keeping wheels outside chassisVisual means the MODEL_YAW
+   * rotation only affects the visible body; wheel offsets stay in
+   * the clean +Z frame our physics assumes. */
+  playCarRoot = new THREE.Group();
+  playCarChassis = new THREE.Group();
+  playCarRoot.add(playCarChassis);
+  const chassisVisual = chassisSrc.clone(true);
+  chassisVisual.position.set(0, 0, 0);
+  chassisVisual.rotation.set(0, PLAY_CAR_MODEL_YAW, 0);
+  chassisVisual.scale.setScalar(1);
+  /* Remove any embedded wheelContainer from the visual clone so we
+   * don't have a duplicate sitting at origin (matches folio's
+   * "wheelContainer.XXX" naming; loader strips dots to "001"). */
+  const strays = [];
+  chassisVisual.traverse((o) => {
+    if (/^wheelContainer(\.|\d|$)/.test(o.name)) strays.push(o);
+  });
+  strays.forEach((s) => s.parent?.remove(s));
+  /* Flag every mesh in the body as a shadow caster so the car
+   * drops a proper shadow on the terrain (CSM sun is configured
+   * with castShadow=true at line ~1340). */
+  chassisVisual.traverse((o) => {
+    if (o.isMesh) {
+      o.castShadow = true;
+      o.receiveShadow = true;
+    }
+  });
+  playCarChassis.add(chassisVisual);
+  /* Scale the whole car so the ride feels right on a Zelda-scale
+   * terrain. bruno.glb ships around 1 unit ≈ 1 meter, which is a
+   * touch small next to the 2.5m-tall character. Bump ×1.6 so it
+   * reads clearly in follow view. */
+  const CAR_SCALE = 1.6;
+  playCarRoot.scale.setScalar(CAR_SCALE);
+  /* Wheel offsets in chassis-local space. Physics forward is -Z,
+   * so the front wheels sit at z = -wheelbase/2 (ahead) and the
+   * rear at +wheelbase/2 (behind). X is left/right. */
+  const hw = PLAY_CAR_WHEEL_BASE * 0.5;
+  const ht = PLAY_CAR_TRACK * 0.5;
+  const wheelOffsets = [
+    { x: -ht, z: -hw, steer: true, name: "FL" },
+    { x: ht, z: -hw, steer: true, name: "FR" },
+    { x: -ht, z: hw, steer: false, name: "RL" },
+    { x: ht, z: hw, steer: false, name: "RR" },
+  ];
+  playCarWheels = wheelOffsets.map((o) => {
+    const container = wheelSrc.clone(true);
+    /* Wheel hub sits RIDE_HEIGHT below the chassis center. Wheel
+     * radius is added later (in the Y target calc) so the tyre
+     * bottoms actually rest on the ground instead of sinking. */
+    container.position.set(o.x, -PLAY_CAR_RIDE_HEIGHT, o.z);
+    /* bruno.glb's wheelContainer has its cylinder axle along the
+     * model's +Z (car's left/right in model frame, since the body
+     * points +X). We need the axle along physics X, so bake the
+     * same MODEL_YAW we applied to the chassis visual. Folio also
+     * mirrors left-side wheels by an extra π around Y — keep that
+     * so the cylinder spin direction stays consistent per side. */
+    const isLeft = o.x < 0;
+    container.rotation.set(
+      0,
+      PLAY_CAR_MODEL_YAW + (isLeft ? Math.PI : 0),
+      0,
+    );
+    /* Find sub-parts so we can rotate the container (steer) and
+     * cylinder (spin) independently, matching folio's VisualVehicle.
+     * Prefix match handles .001/.002 Blender suffixes. Also flag
+     * every mesh as a shadow caster in the same traversal. */
+    let suspension = null;
+    let cylinder = null;
+    container.traverse((c) => {
+      if (!suspension && /^wheelSuspension(\.|\d|$)/.test(c.name))
+        suspension = c;
+      if (!cylinder && /^wheelCylinder(\.|\d|$)/.test(c.name))
+        cylinder = c;
+      if (c.isMesh) {
+        c.castShadow = true;
+        c.receiveShadow = true;
+      }
+    });
+    /* Parent wheels to playCarChassis (NOT chassisVisual) so they
+     * don't inherit the MODEL_YAW rotation baked into the visual. */
+    playCarChassis.add(container);
+    return {
+      container,
+      suspension: suspension || container,
+      cylinder: cylinder || container,
+      offset: new THREE.Vector3(o.x, 0, o.z),
+      steer: o.steer,
+      isLeft,
+      name: o.name,
+    };
+  });
+  playCarRoot.visible = false;
+  scene.add(playCarRoot);
+  playCarLoaded = true;
+  if (playMode && playMovementMode === "car") {
+    playCarRoot.visible = true;
+    capsuleMesh.visible = false;
+    syncModeBadge();
+  }
+});
+
+splineGroup = new THREE.Group();
+scene.add(splineGroup);
+riverGroup = new THREE.Group();
+scene.add(riverGroup);
+roadGroup = new THREE.Group();
+scene.add(roadGroup);
+splinePreviewGroup = new THREE.Group();
+scene.add(splinePreviewGroup);
+splineTrainMesh = new THREE.Mesh(
+  new THREE.BoxGeometry(1.2, 0.8, 2.4),
+  new THREE.MeshBasicMaterial({ color: 0xff2200, depthTest: true }),
+);
+splineTrainMesh.visible = false;
+scene.add(splineTrainMesh);
+
+function syncGeminiFolderVisibility() {
+  if (geminiGrassFolderRef)
+    geminiGrassFolderRef.hidden = editState.mode !== "geminigrass";
+  if (geminiCliffGrassFolderRef)
+    geminiCliffGrassFolderRef.hidden =
+      editState.mode !== "geminicliffgrass";
+}
+
+function syncFleurFolderVisibility() {
+  if (fleurFolderRef) fleurFolderRef.hidden = editState.mode !== "fleurs";
+}
+
+function syncAmbientFXFolderVisibility() {
+  if (ambientFXFolderRef)
+    ambientFXFolderRef.hidden = editState.mode !== "ambientfx";
+}
+
+function syncLodFolderVisibility() {
+  if (lodFolderRef) lodFolderRef.hidden = editState.mode !== "pinelod";
+}
+
+function syncPtreeFolderVisibility() {
+  if (ptreeFolderRef)
+    ptreeFolderRef.hidden = editState.mode !== "proctrees";
+}
+
+function syncPlaceFolderVisibility() {
+  if (placeFolderRef) placeFolderRef.hidden = editState.mode !== "place";
+}
+
+function syncCliffsFolderVisibility() {
+  if (cliffsFolderRef)
+    cliffsFolderRef.hidden = editState.mode !== "cliffs";
+}
+
+function syncCliffPaintFolderVisibility() {
+  if (cliffPaintFolderRef)
+    cliffPaintFolderRef.hidden = editState.mode !== "cliffpaint";
+}
+
+function syncWaterfallFolderVisibility() {
+  if (waterfallFolderRef)
+    waterfallFolderRef.hidden = editState.mode !== "waterfall";
+}
+
+function syncObjectsFolderVisibility() {
+  if (objectsFolderRef)
+    objectsFolderRef.hidden = editState.mode !== "objects";
+}
+
+function syncSplineFolderVisibility() {
+  if (splineFolderRef)
+    splineFolderRef.hidden = editState.mode !== "spline";
+}
+
+function syncRiverFolderVisibility() {
+  if (riverFolderRef) riverFolderRef.hidden = editState.mode !== "river";
+}
+
+function syncRoadFolderVisibility() {
+  if (roadFolderRef) roadFolderRef.hidden = editState.mode !== "road";
+}
+
+function syncRoadHandlesVisibility() {
+  if (!roadGroup) return;
+  roadGroup.visible =
+    !playMode && editState.mode === "road" && PARAMS.road.showHandles;
+}
+
+function syncWaterFolderVisibility() {
+  if (waterFolderRef) waterFolderRef.hidden = editState.mode !== "water";
+}
+
+function syncPathFolderVisibility() {
+  if (pathFolderRef) pathFolderRef.hidden = editState.mode !== "path";
+}
+
+function syncDecalFolderVisibility() {
+  if (decalFolderRef) decalFolderRef.hidden = editState.mode !== "decal";
+}
+
+function syncHoleFolderVisibility() {
+  if (holeFolderRef) holeFolderRef.hidden = editState.mode !== "hole";
+}
+
+function syncPropsFolderVisibility() {
+  if (propsFolderRef) propsFolderRef.hidden = editState.mode !== "props";
+}
+
+function syncFoliageFolderVisibility() {
+  if (foliageFolderRef)
+    foliageFolderRef.hidden = editState.mode !== "foliage";
+}
+
+function syncModeBadge() {
+  const el = document.getElementById("mode-badge");
+  if (!el) return;
+  if (playMode) {
+    const mm = playMovementMode;
+    if (playCamView === "iso") {
+      el.textContent =
+        mm === "fly"
+          ? "PLAY FLY · ISO  [ A/D yaw · W/S thrust · W+Shift afterburn · Space climb · Shift dive · Q barrel · wheel zoom · V follow · G cycle · F/Esc ]"
+          : mm === "char"
+            ? "PLAY CHAR · ISO  [ WASD · Shift run · Space jump/glide · [ ] rotate · wheel zoom · V follow · G cycle · F/Esc ]"
+            : mm === "car"
+              ? "PLAY CAR · ISO  [ W/S drive · A/D steer · Space handbrake · wheel zoom · V follow · G cycle · F/Esc ]"
+              : "PLAY WALK · ISO  [ click-to-move · WASD · [ ] rotate · wheel zoom · V follow · G cycle · F/Esc ]";
+    } else {
+      el.textContent =
+        mm === "fly"
+          ? "PLAY FLY  [ mouse · W/S · Shift afterburn · Q barrel · V iso · G cycle · F/Esc ]"
+          : mm === "char"
+            ? "PLAY CHAR  [ WASD · Shift run · Space jump/glide · V iso · G cycle · F/Esc ]"
+            : mm === "car"
+              ? "PLAY CAR  [ W/S drive · A/D steer · Space handbrake · V iso · G cycle · F/Esc ]"
+              : "PLAY WALK  [ V iso · G cycle · F / Esc exit ]";
+    }
+    el.className = "play";
+    return;
+  }
+  const m = editState.mode;
+  el.className = m;
+  if (m === "view") el.textContent = "VIEW MODE  [ Esc ]";
+  else if (m === "sculpt")
+    el.textContent = "SCULPT MODE  [ S · Esc → view ]";
+  else if (m === "paint")
+    el.textContent =
+      "PAINT MODE  [ P · LMB paint · Shift erase · 1–3 ch · U target · Esc → view ]";
+  else if (m === "geminigrass")
+    el.textContent = "GEMINI GRASS  [ G · Esc → view ]";
+  else if (m === "geminicliffgrass")
+    el.textContent = "GEMINI CLIFF GRASS  [ Mode menu · Esc → view ]";
+  else if (m === "fleurs")
+    el.textContent = "FLEURS MODE  [ M · Esc → view ]";
+  else if (m === "ambientfx")
+    el.textContent = "AMBIENT FX  [ X · Esc → view ]";
+  else if (m === "pinelod")
+    el.textContent =
+      "TREE LOD  [ J · 1–8 slot · Shift erase · Esc → view ]";
+  else if (m === "proctrees") el.textContent = "PROC TREES";
+  else if (m === "place")
+    el.textContent =
+      "PLACE MODE  [ O · W move · E rotate · R scale · Del remove · Esc → view ]";
+  else if (m === "cliffs")
+    el.textContent =
+      "CLIFFS MODE  [ C · LMB place · RMB select · W/E/R gizmo · Del · Rebake BVH for trees/grass · Esc → view ]";
+  else if (m === "barrier") el.textContent = "BARRIER MODE";
+  else if (m === "waterfall")
+    el.textContent =
+      wfPlaceTool.tool === "splashCap"
+        ? "SPLASH CAP MODE  [ H · W/E/R gizmo · Esc → view ]"
+        : "WATERFALL MODE  [ H · W/E/R gizmo · Esc → view ]";
+  else if (m === "objects")
+    el.textContent =
+      "OBJECTS MODE  [ E · brush paint · Shift erase · Esc → view ]";
+  else if (m === "foliage")
+    el.textContent =
+      "FOLIAGE MODE  [ N · brush paint · Shift erase · Esc → view ]";
+  else if (m === "spline")
+    el.textContent =
+      "SPLINE MODE  [ K · LMB add / drag points · Del · Esc clears pick / view ]";
+  else if (m === "river")
+    el.textContent =
+      "RIVER MODE  [ V · LMB add / pick · drag · Del · Esc clears pick · Esc → view ]";
+  else if (m === "road")
+    el.textContent =
+      "ROAD MODE  [ U · Active road # in pane · New road · LMB add / pick · drag · Del · Esc → view ]";
+  else if (m === "water")
+    el.textContent =
+      "WATER BODIES  [ W · LMB place / pick · E move · R rotate · T scale · Del · Esc → view ]";
+  else if (m === "path")
+    el.textContent =
+      "PATH MODE  [ L · paint splat blue · flatten under brush · Brush pane · Esc → view ]";
+  else if (m === "decal")
+    el.textContent =
+      "DECAL MODE  [ D · LMB place / pick · W/E/R gizmo · Del · Refit in pane · Esc → view ]";
+  else if (m === "cliffpaint")
+    el.textContent =
+      "CLIFF PAINT  [ B · LMB paint · Shift erase · Esc → view ]";
+  else if (m === "hole")
+    el.textContent =
+      "HOLE MODE  [ paint terrain punch · splat α + overlay · Shift erase · Brush pane · Esc → view ]";
+  else if (m === "props")
+    el.textContent =
+      "PROPS MODE  [ I · LMB place / pick · W/E/R gizmo · Del · Esc → view ]";
+  else el.textContent = String(m).toUpperCase();
+}
+
+function setEditMode(mode) {
+  if (editState.mode === "river" && mode !== "river") {
+    riverDragging = false;
+    if (!playMode) controls.enabled = true;
+  }
+  if (editState.mode === "road" && mode !== "road") {
+    roadDragging = false;
+    if (!playMode) controls.enabled = true;
+  }
+  if (mode !== "sculpt") editState.rampPointA = null;
+  if (mode === "view" && editState.isPointerDown) {
+    editState.isPointerDown = false;
+    editState.pointerAction = null;
+    editState.sculptSkipFirstMoveDup = false;
+    if (!playMode) controls.enabled = true;
+  }
+  editState.mode = mode;
+  PARAMS.mode = mode;
+  if (mode !== "spline") splineClearPreview();
+  const tcMode =
+    mode === "place" ||
+    mode === "cliffs" ||
+    mode === "waterfall" ||
+    mode === "water" ||
+    mode === "props" ||
+    mode === "decal";
+  if (brushFolderRef)
+    brushFolderRef.hidden =
+      mode === "view" ||
+      tcMode ||
+      mode === "spline" ||
+      mode === "river" ||
+      mode === "road" ||
+      mode === "hole";
+  if (playFolderRef) playFolderRef.hidden = mode !== "view";
+  if (tcMode) {
+    transformControls.enabled = true;
+    if (mode === "place") {
+      selectDecal(null);
+      selectProp(null);
+      cliffInstancer.clearSelection();
+      selectWaterfall(null);
+      selectWater(null);
+      selectSplashCap(null);
+      if (selectedCliff) {
+        transformControls.attach(selectedCliff);
+        tcHelper.visible = true;
+      } else {
+        transformControls.detach();
+        tcHelper.visible = false;
+      }
+    } else if (mode === "cliffs") {
+      selectDecal(null);
+      selectProp(null);
+      selectedCliff = null;
+      selectWaterfall(null);
+      selectWater(null);
+      selectSplashCap(null);
+      if (cliffInstancer.hasSelection()) {
+        transformControls.attach(cliffInstancer.proxyObject);
+        tcHelper.visible = true;
+      } else {
+        transformControls.detach();
+        tcHelper.visible = false;
+      }
+    } else if (mode === "waterfall") {
+      selectDecal(null);
+      selectProp(null);
+      cliffInstancer.clearSelection();
+      selectedCliff = null;
+      selectWater(null);
+      transformControls.detach();
+      tcHelper.visible = false;
+      if (rwiRefs.selectedWaterfall) {
+        transformControls.attach(rwiRefs.selectedWaterfall);
+        tcHelper.visible = true;
+      } else if (rwiRefs.selectedSplashCap) {
+        transformControls.attach(rwiRefs.selectedSplashCap);
+        tcHelper.visible = true;
+      }
+    } else if (mode === "props") {
+      selectDecal(null);
+      cliffInstancer.clearSelection();
+      selectedCliff = null;
+      selectWaterfall(null);
+      selectWater(null);
+      selectSplashCap(null);
+      if (selectedProp) {
+        transformControls.attach(selectedProp);
+        tcHelper.visible = true;
+      } else {
+        transformControls.detach();
+        tcHelper.visible = false;
+      }
+    } else if (mode === "decal") {
+      selectProp(null);
+      cliffInstancer.clearSelection();
+      selectedCliff = null;
+      selectWaterfall(null);
+      selectWater(null);
+      selectSplashCap(null);
+      if (selectedDecal) {
+        transformControls.attach(selectedDecal);
+        tcHelper.visible = true;
+      } else {
+        transformControls.detach();
+        tcHelper.visible = false;
+      }
+    } else if (mode === "water") {
+      selectDecal(null);
+      selectProp(null);
+      cliffInstancer.clearSelection();
+      selectedCliff = null;
+      selectWaterfall(null);
+      selectSplashCap(null);
+      if (rwiRefs.selectedWater) {
+        transformControls.attach(rwiRefs.selectedWater);
+        tcHelper.visible = true;
+      } else {
+        transformControls.detach();
+        tcHelper.visible = false;
+      }
+    }
+  } else {
+    transformControls.enabled = false;
+    transformControls.detach();
+    if (tcHelper) tcHelper.visible = false;
+    selectedCliff = null;
+    cliffInstancer.clearSelection();
+    selectWaterfall(null);
+    selectSplashCap(null);
+    selectWater(null);
+    selectProp(null);
+    selectDecal(null);
+  }
+  syncModeBadge();
+  syncBrushVisual();
+  syncGeminiFolderVisibility();
+  syncFleurFolderVisibility();
+  syncAmbientFXFolderVisibility();
+  if (ambientFXSystem) {
+    ambientFXSystem.setRingsVisible(
+      editState.mode === "ambientfx" && ambientFXParams.showRings,
+    );
+  }
+  syncLodFolderVisibility();
+  syncPtreeFolderVisibility();
+  syncPlaceFolderVisibility();
+  syncCliffsFolderVisibility();
+  syncCliffPaintFolderVisibility();
+  syncWaterfallFolderVisibility();
+  syncObjectsFolderVisibility();
+  syncFoliageFolderVisibility();
+  syncPropsFolderVisibility();
+  syncSplineFolderVisibility();
+  syncRiverFolderVisibility();
+  syncRoadFolderVisibility();
+  syncRoadHandlesVisibility();
+  syncWaterFolderVisibility();
+  syncPathFolderVisibility();
+  syncDecalFolderVisibility();
+  syncHoleFolderVisibility();
+  if (barrierFolderRef)
+    barrierFolderRef.hidden = editState.mode !== "barrier";
+  syncBarrierOverlayFromParams();
+  syncHoleOverlayFromParams();
+  if (!playMode) {
+    renderer.domElement.style.cursor =
+      editState.mode === "view" ? "default" : "crosshair";
+  }
+  if (editorPane) editorPane.refresh();
+}
+
+function syncBrushVisual() {
+  if (
+    editState.mode === "view" ||
+    editState.mode === "place" ||
+    editState.mode === "cliffs" ||
+    editState.mode === "waterfall" ||
+    editState.mode === "props" ||
+    editState.mode === "decal" ||
+    editState.mode === "water" ||
+    editState.mode === "hole" ||
+    editState.mode === "spline" ||
+    editState.mode === "river" ||
+    editState.mode === "road"
+  ) {
+    brushMarker.visible = false;
+    rampMarkerA.visible = false;
+    return;
+  }
+  if (editState.mode === "paint") {
+    brushMarker.material.color.setHex(0x44ff88);
+    brushMarker.scale.setScalar(
+      CONFIG.paint.radius / SCULPT_RING_GEOM_BASE,
+    );
+  } else if (editState.mode === "path") {
+    brushMarker.material.color.setHex(0xd4a574);
+    brushMarker.scale.setScalar(
+      CONFIG.paint.radius / SCULPT_RING_GEOM_BASE,
+    );
+  } else if (editState.mode === "geminigrass") {
+    brushMarker.material.color.setHex(0x66dd99);
+    brushMarker.scale.setScalar(
+      geminiBrushWorldRadius() / SCULPT_RING_GEOM_BASE,
+    );
+  } else if (editState.mode === "geminicliffgrass") {
+    brushMarker.material.color.setHex(0x55cc88);
+    brushMarker.scale.setScalar(
+      geminiBrushWorldRadius() / SCULPT_RING_GEOM_BASE,
+    );
+  } else if (editState.mode === "fleurs") {
+    brushMarker.material.color.setHex(0xff66aa);
+    brushMarker.scale.setScalar(
+      geminiBrushWorldRadius() / SCULPT_RING_GEOM_BASE,
+    );
+  } else if (editState.mode === "ambientfx") {
+    brushMarker.material.color.setHex(0x00d4c4);
+    brushMarker.scale.setScalar(
+      ambientFXParams.emitterRadius / SCULPT_RING_GEOM_BASE,
+    );
+  } else if (editState.mode === "barrier") {
+    brushMarker.material.color.setHex(0xff2222);
+    brushMarker.scale.setScalar(
+      barrierBrushWorldRadius() / SCULPT_RING_GEOM_BASE,
+    );
+  } else if (editState.mode === "hole") {
+    brushMarker.material.color.setHex(0xaa3333);
+    brushMarker.scale.setScalar(
+      barrierBrushWorldRadius() / SCULPT_RING_GEOM_BASE,
+    );
+  } else if (editState.mode === "pinelod") {
+    brushMarker.material.color.setHex(0x88bb44);
+    brushMarker.scale.setScalar(
+      sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE,
+    );
+  } else if (editState.mode === "objects") {
+    brushMarker.material.color.setHex(0xc9a06c);
+    brushMarker.scale.setScalar(
+      sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE,
+    );
+  } else if (editState.mode === "foliage") {
+    brushMarker.material.color.setHex(0x56b366);
+    brushMarker.scale.setScalar(
+      sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE,
+    );
+  } else if (editState.mode === "cliffpaint") {
+    brushMarker.material.color.setHex(0xaa8866);
+    brushMarker.scale.setScalar(
+      sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE,
+    );
+  } else if (editState.mode === "proctrees") {
+    brushMarker.material.color.setHex(0x77aa55);
+    brushMarker.scale.setScalar(
+      sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE,
+    );
+  } else {
+    brushMarker.material.color.setHex(0xffaa55);
+    brushMarker.scale.setScalar(
+      sculptBrushWorldRadius() / SCULPT_RING_GEOM_BASE,
+    );
+  }
+  brushMarker.renderOrder =
+    editState.mode === "barrier" || editState.mode === "hole" ? 11 : 0;
+  syncRampMarkerVisual();
+}
+
+syncBrushVisual();
+
+/** Default height for newly streamed chunks (flat). Use Terrain → procedural generate for FBM/ridge. */
+function sampleHeight(_worldX, _worldZ) {
+  return 0;
+}
+
+function getGeometry(segments) {
+  const key = String(segments);
+  if (geometryCache.has(key)) return geometryCache.get(key);
+
+  const geom = new THREE.PlaneGeometry(
+    CONFIG.chunkSize,
+    CONFIG.chunkSize,
+    segments,
+    segments,
+  );
+  geom.rotateX(-Math.PI / 2);
+
+  geometryCache.set(key, geom);
+  return geom;
+}
+
+// ── Geometry pool: reuse disposed geometries instead of clone+GC ──
+/** Pool of ready-to-reuse geometries with skirts, keyed by segment count. */
+const _geomPool = new Map(); // segments → BufferGeometry[]
+const _GEOM_POOL_MAX = 16; // max pooled per segment count
+
+/** Template geometries with skirt already sized — clone these for new pool entries. */
+const _skirtTemplateCache = new Map();
+function _getSkirtTemplate(segments) {
+  if (_skirtTemplateCache.has(segments))
+    return _skirtTemplateCache.get(segments);
+  const base = getGeometry(segments).clone();
+  // Build a flat skirt template so buffers are the right size
+  appendChunkTerrainSkirt(base, segments, CONFIG.terrainSkirtDepth);
+  // Store the base vertex count for later use
+  base.userData._baseVertCount = (segments + 1) * (segments + 1);
+  _skirtTemplateCache.set(segments, base);
+  return base;
+}
+
+function acquireChunkGeometry(segments) {
+  const pool = _geomPool.get(segments);
+  if (pool && pool.length > 0) {
+    return pool.pop();
+  }
+  // Clone from skirt template — buffers are pre-sized
+  const tmpl = _getSkirtTemplate(segments);
+  const geom = tmpl.clone();
+  geom.userData._baseVertCount = tmpl.userData._baseVertCount;
+  geom.userData.terrainTriCount = tmpl.userData.terrainTriCount;
+  return geom;
+}
+
+function releaseChunkGeometry(geom, segments) {
+  let pool = _geomPool.get(segments);
+  if (!pool) {
+    pool = [];
+    _geomPool.set(segments, pool);
+  }
+  if (pool.length < _GEOM_POOL_MAX) {
+    pool.push(geom);
+  } else {
+    geom.dispose();
+  }
+}
+
+function chunkKey(cx, cz) {
+  return `${cx},${cz}`;
+}
+
+const _tmpCenter = new THREE.Vector3();
+function chunkCenterWorld(cx, cz) {
+  return _tmpCenter.set(
+    -worldHalf + cx * CONFIG.chunkSize + CONFIG.chunkSize * 0.5,
+    0,
+    -worldHalf + cz * CONFIG.chunkSize + CONFIG.chunkSize * 0.5,
+  );
+}
+
+function getChunkDataIndex(ix, iz) {
+  return iz * (CONFIG.dataResolution + 1) + ix;
+}
+
+function chunkMinWorldX(cx) {
+  return -worldHalf + cx * CONFIG.chunkSize;
+}
+
+function chunkMinWorldZ(cz) {
+  return -worldHalf + cz * CONFIG.chunkSize;
+}
+
+function ensureChunkData(cx, cz) {
+  const key = chunkKey(cx, cz);
+  const existing = chunkDataMap.get(key);
+  if (existing) return existing;
+
+  const countPerAxis = CONFIG.dataResolution + 1;
+  const heights = new Float32Array(countPerAxis * countPerAxis);
+  const step = CONFIG.chunkSize / CONFIG.dataResolution;
+  const minX = chunkMinWorldX(cx);
+  const minZ = chunkMinWorldZ(cz);
+
+  for (let iz = 0; iz < countPerAxis; iz++) {
+    const wz = minZ + iz * step;
+    for (let ix = 0; ix < countPerAxis; ix++) {
+      const wx = minX + ix * step;
+      heights[getChunkDataIndex(ix, iz)] = sampleHeight(wx, wz);
+    }
+  }
+
+  stitchNewChunkFromNeighbors(cx, cz, heights);
+
+  chunkDataMap.set(key, heights);
+  return heights;
+}
+
+/** Max chunk index (chunks span 0..maxChunkIndex inclusive). */
+function getMaxChunkIndex() {
+  return Math.floor(CONFIG.worldSize / CONFIG.chunkSize) - 1;
+}
+
+/**
+ * When a chunk is first allocated, pull edge heights from already-loaded neighbors
+ * so streaming matches edited terrain at boundaries.
+ */
+function stitchNewChunkFromNeighbors(cx, cz, heights) {
+  const res = CONFIG.dataResolution;
+  const maxC = getMaxChunkIndex();
+
+  for (let pass = 0; pass < 2; pass++) {
+    if (cx > 0) {
+      const nb = chunkDataMap.get(chunkKey(cx - 1, cz));
+      if (nb) {
+        for (let iz = 0; iz <= res; iz++) {
+          heights[getChunkDataIndex(0, iz)] =
+            nb[getChunkDataIndex(res, iz)];
+        }
+      }
+    }
+    if (cx < maxC) {
+      const nb = chunkDataMap.get(chunkKey(cx + 1, cz));
+      if (nb) {
+        for (let iz = 0; iz <= res; iz++) {
+          heights[getChunkDataIndex(res, iz)] =
+            nb[getChunkDataIndex(0, iz)];
+        }
+      }
+    }
+    if (cz > 0) {
+      const nb = chunkDataMap.get(chunkKey(cx, cz - 1));
+      if (nb) {
+        for (let ix = 0; ix <= res; ix++) {
+          heights[getChunkDataIndex(ix, 0)] =
+            nb[getChunkDataIndex(ix, res)];
+        }
+      }
+    }
+    if (cz < maxC) {
+      const nb = chunkDataMap.get(chunkKey(cx, cz + 1));
+      if (nb) {
+        for (let ix = 0; ix <= res; ix++) {
+          heights[getChunkDataIndex(ix, res)] =
+            nb[getChunkDataIndex(ix, 0)];
+        }
+      }
+    }
+  }
+}
+
+function parseChunkKey(key) {
+  const [cx, cz] = key.split(",").map(Number);
+  return { cx, cz };
+}
+
+// ─── Terrain generator (CPU FBM) — heightfield math in splatmap-chunks-terrain-gen-math.js
+function applyProceduralTerrainToAllChunks() {
+  pushTerrainUndo();
+  const g = PARAMS.gen;
+  const maxC = getMaxChunkIndex();
+  const res = CONFIG.dataResolution;
+  const count = (res + 1) * (res + 1);
+  const step = CONFIG.chunkSize / res;
+  const touched = new Set();
+
+  for (let cz = 0; cz <= maxC; cz++) {
+    for (let cx = 0; cx <= maxC; cx++) {
+      const key = chunkKey(cx, cz);
+      const prev = chunkDataMap.get(key);
+      const heights = new Float32Array(count);
+      const minX = chunkMinWorldX(cx);
+      const minZ = chunkMinWorldZ(cz);
+
+      for (let iz = 0; iz <= res; iz++) {
+        const wz = minZ + iz * step;
+        for (let ix = 0; ix <= res; ix++) {
+          const wx = minX + ix * step;
+          const idx = getChunkDataIndex(ix, iz);
+          const gen = terrainGenHeightAtWorld(wx, wz, g);
+          heights[idx] =
+            g.additive && prev ? Math.max(0, prev[idx] + gen) : gen;
+        }
+      }
+
+      chunkDataMap.set(key, heights);
+      touched.add(key);
+      dirtyChunks.add(key);
+    }
+  }
+
+  syncSeamsAfterSculpt(touched);
+  rebuildAllActiveChunkMeshes();
+  syncTreeLodHeights();
+  syncPTreeHeights();
+  syncObjectSlotsHeights();
+  syncPropObjectsHeights();
+  invalidateBvhHeight();
+}
+
+function expandChunkKeysWithNeighbors(keys) {
+  const out = new Set(keys);
+  const maxC = getMaxChunkIndex();
+  for (const key of keys) {
+    const { cx, cz } = parseChunkKey(key);
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const nx = cx + dx;
+        const nz = cz + dz;
+        if (nx < 0 || nz < 0 || nx > maxC || nz > maxC) continue;
+        out.add(chunkKey(nx, nz));
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Force shared edge heights to match after sculpt.
+ * If both chunks were touched by the brush, average removes FP drift.
+ * If only one was touched, that side wins so strokes stay authoritative.
+ * @param {Set<string>} brushedChunkKeys
+ * @param {{ wx: number, wz: number, radius: number } | null} seamLimit — when set (sculpt),
+ *   only merge seam samples near the brush so averaging does not warp the whole boundary.
+ */
+function syncSeamsAfterSculpt(brushedChunkKeys, seamLimit = null) {
+  if (brushedChunkKeys.size === 0) return;
+
+  const brushed = brushedChunkKeys;
+  const maxC = getMaxChunkIndex();
+  const res = CONFIG.dataResolution;
+  const step = CONFIG.chunkSize / res;
+  const useSeamLimit = seamLimit != null && seamLimit.radius > 0;
+
+  const markDirty = (cx, cz) => {
+    dirtyChunks.add(chunkKey(cx, cz));
+  };
+
+  const mergeEdge = (dA, dB, a, b) => {
+    if (dA && dB) return (a + b) * 0.5;
+    if (dA) return a;
+    if (dB) return b;
+    if (Math.abs(a - b) < 1e-5) return a;
+    return (a + b) * 0.5;
+  };
+
+  const runPass = () => {
+    for (const key of expandChunkKeysWithNeighbors(brushed)) {
+      const { cx, cz } = parseChunkKey(key);
+
+      if (cx < maxC) {
+        const kL = chunkKey(cx, cz);
+        const kR = chunkKey(cx + 1, cz);
+        const hL = chunkDataMap.get(kL);
+        const hR = chunkDataMap.get(kR);
+        if (hL && hR) {
+          const dL = brushed.has(kL);
+          const dR = brushed.has(kR);
+          const limitThisSeam = useSeamLimit && dL && dR;
+          let seamChanged = false;
+          for (let iz = 0; iz <= res; iz++) {
+            if (limitThisSeam) {
+              const seamX = chunkMinWorldX(cx + 1);
+              const wz = chunkMinWorldZ(cz) + iz * step;
+              const margin = seamLimit.radius + step;
+              if (
+                Math.hypot(seamX - seamLimit.wx, wz - seamLimit.wz) >
+                margin
+              )
+                continue;
+            }
+            const iL = getChunkDataIndex(res, iz);
+            const iR = getChunkDataIndex(0, iz);
+            const v = mergeEdge(dL, dR, hL[iL], hR[iR]);
+            if (
+              Math.abs(hL[iL] - v) > 1e-9 ||
+              Math.abs(hR[iR] - v) > 1e-9
+            ) {
+              hL[iL] = v;
+              hR[iR] = v;
+              seamChanged = true;
+            }
+          }
+          if (!limitThisSeam || seamChanged) {
+            markDirty(cx, cz);
+            markDirty(cx + 1, cz);
+          }
+        }
+      }
+
+      if (cz < maxC) {
+        const kLo = chunkKey(cx, cz);
+        const kHi = chunkKey(cx, cz + 1);
+        const hLo = chunkDataMap.get(kLo);
+        const hHi = chunkDataMap.get(kHi);
+        if (hLo && hHi) {
+          const dLo = brushed.has(kLo);
+          const dHi = brushed.has(kHi);
+          const limitThisSeam = useSeamLimit && dLo && dHi;
+          let seamChanged = false;
+          for (let ix = 0; ix <= res; ix++) {
+            if (limitThisSeam) {
+              const seamZ = chunkMinWorldZ(cz + 1);
+              const wx = chunkMinWorldX(cx) + ix * step;
+              const margin = seamLimit.radius + step;
+              if (
+                Math.hypot(wx - seamLimit.wx, seamZ - seamLimit.wz) >
+                margin
+              )
+                continue;
+            }
+            const iLo = getChunkDataIndex(ix, res);
+            const iHi = getChunkDataIndex(ix, 0);
+            const v = mergeEdge(dLo, dHi, hLo[iLo], hHi[iHi]);
+            if (
+              Math.abs(hLo[iLo] - v) > 1e-9 ||
+              Math.abs(hHi[iHi] - v) > 1e-9
+            ) {
+              hLo[iLo] = v;
+              hHi[iHi] = v;
+              seamChanged = true;
+            }
+          }
+          if (!limitThisSeam || seamChanged) {
+            markDirty(cx, cz);
+            markDirty(cx, cz + 1);
+          }
+        }
+      }
+    }
+  };
+
+  runPass();
+  runPass();
+}
+
+/**
+ * Raw heightfield from chunk data only (no baked cliff BVH). Use for BVH bake baseline.
+ */
+function getChunkHeightfieldHeight(worldX, worldZ) {
+  const cs = CONFIG.chunkSize;
+  const maxC = getMaxChunkIndex();
+  let cx = Math.floor((worldX + worldHalf) / cs);
+  let cz = Math.floor((worldZ + worldHalf) / cs);
+  cx = THREE.MathUtils.clamp(cx, 0, maxC);
+  cz = THREE.MathUtils.clamp(cz, 0, maxC);
+  const heights = ensureChunkData(cx, cz);
+  const u = ((worldX - chunkMinWorldX(cx)) / cs) * CONFIG.dataResolution;
+  const v = ((worldZ - chunkMinWorldZ(cz)) / cs) * CONFIG.dataResolution;
+  return sampleChunkDataBilinear(heights, u, v);
+}
+
+function bvhHeightSample(wx, wz) {
+  const ws = CONFIG.worldSize;
+  const fx = (wx / ws + 0.5) * HTEX_RES;
+  const fz = (wz / ws + 0.5) * HTEX_RES;
+  const ix0 = Math.max(0, Math.min(HTEX_RES - 1, Math.floor(fx)));
+  const iz0 = Math.max(0, Math.min(HTEX_RES - 1, Math.floor(fz)));
+  const ix1 = Math.min(HTEX_RES - 1, ix0 + 1);
+  const iz1 = Math.min(HTEX_RES - 1, iz0 + 1);
+  const tx = fx - ix0;
+  const tz = fz - iz0;
+  const h00 = bvhGrid[iz0 * HTEX_RES + ix0];
+  const h10 = bvhGrid[iz0 * HTEX_RES + ix1];
+  const h01 = bvhGrid[iz1 * HTEX_RES + ix0];
+  const h11 = bvhGrid[iz1 * HTEX_RES + ix1];
+  return (
+    h00 +
+    (h10 - h00) * tx +
+    (h01 - h00) * tz +
+    (h00 - h10 - h01 + h11) * tx * tz
+  );
+}
+
+/**
+ * Effective ground height: after Rebake BVH, includes instanced / place-mode cliff meshes.
+ */
+function getWorldHeight(worldX, worldZ) {
+  if (bvhBaked) return bvhHeightSample(worldX, worldZ);
+  return getChunkHeightfieldHeight(worldX, worldZ);
+}
+
+const _tankBoxCenter = new THREE.Vector3();
+const _tankBoxSize = new THREE.Vector3();
+const _tankWorldBB = new THREE.Box3();
+const demoTankState = {
+  root: null,
+  visual: null,
+  loadPromise: null,
+  baseScale: 1,
+  x: 0,
+  z: 0,
+  vx: 0,
+  vz: 0,
+  yaw: 0,
+  targetX: 0,
+  targetZ: 0,
+  nextRetargetSec: 0,
+};
+
+function pickDemoTankTarget() {
+  const m = worldHalf * 0.55;
+  demoTankState.targetX = (Math.random() * 2 - 1) * m;
+  demoTankState.targetZ = (Math.random() * 2 - 1) * m;
+}
+
+function ensureDemoTankLoaded() {
+  if (demoTankState.root) return Promise.resolve(demoTankState.root);
+  if (!demoTankState.loadPromise) {
+    demoTankState.loadPromise = gltfLoader
+      .loadAsync(resolveModelUrl("models/tank_compressed.glb"))
+      .then((gltf) => {
+        const wrap = new THREE.Group();
+        const vis = gltf.scene;
+        vis.traverse((o) => {
+          if (o.isMesh) {
+            o.castShadow = true;
+            o.receiveShadow = true;
+          }
+        });
+        wrap.add(vis);
+        const box = new THREE.Box3().setFromObject(vis);
+        box.getCenter(_tankBoxCenter);
+        vis.position.sub(_tankBoxCenter);
+        box.getSize(_tankBoxSize);
+        const maxDim = Math.max(
+          _tankBoxSize.x,
+          _tankBoxSize.y,
+          _tankBoxSize.z,
+          1e-4,
+        );
+        const wantLen = 2.0;
+        demoTankState.baseScale = wantLen / maxDim;
+        vis.scale.setScalar(
+          demoTankState.baseScale * PARAMS.demoTank.scaleMul,
+        );
+        demoTankState.root = wrap;
+        demoTankState.visual = vis;
+        return wrap;
+      })
+      .catch((err) => {
+        console.warn(
+          "Demo tank: models/tank_compressed.glb failed to load",
+          err,
+        );
+        demoTankState.loadPromise = null;
+        throw err;
+      });
+  }
+  return demoTankState.loadPromise;
+}
+
+function syncDemoTankEnabled() {
+  if (!PARAMS.demoTank.enabled) {
+    if (demoTankState.root && demoTankState.root.parent) {
+      scene.remove(demoTankState.root);
+    }
+    return;
+  }
+  ensureDemoTankLoaded()
+    .then((root) => {
+      if (!PARAMS.demoTank.enabled) return;
+      if (!root.parent) {
+        demoTankState.x = 0;
+        demoTankState.z = worldHalf * 0.12;
+        demoTankState.yaw = Math.PI * 0.25;
+        pickDemoTankTarget();
+        demoTankState.vx = 0;
+        demoTankState.vz = 0;
+        demoTankState.nextRetargetSec = appTimeSec + 3;
+        scene.add(root);
+        applyDemoTankGroundLikeCapsule();
+      }
+    })
+    .catch(() => {});
+}
+
+/**
+ * Same vertical contract as play-mode capsule: `getWorldHeight(x,z)` at the tank XZ,
+ * hull stays upright (yaw only). World AABB bottom is snapped to that height (+ yOffset).
+ */
+function applyDemoTankGroundLikeCapsule() {
+  const root = demoTankState.root;
+  const vis = demoTankState.visual;
+  if (!root || !vis || !root.parent) return;
+
+  const hx = demoTankState.x;
+  const hz = demoTankState.z;
+  root.rotation.set(0, demoTankState.yaw, 0);
+  vis.scale.setScalar(demoTankState.baseScale * PARAMS.demoTank.scaleMul);
+  root.position.set(hx, 0, hz);
+  root.updateMatrixWorld(true);
+  _tankWorldBB.setFromObject(vis);
+  const bottomY = _tankWorldBB.min.y;
+  const g = getWorldHeight(hx, hz);
+  const lift = Number.isFinite(bottomY)
+    ? g + PARAMS.demoTank.yOffset - bottomY
+    : g + PARAMS.demoTank.yOffset;
+  root.position.set(hx, lift, hz);
+}
+
+function updateDemoTank(dt) {
+  const root = demoTankState.root;
+  if (!root || !root.parent) return;
+
+  const follow = playMode && PARAMS.demoTank.followPlayerInPlay;
+  const tx = follow ? playerPos.x : demoTankState.targetX;
+  const tz = follow ? playerPos.z : demoTankState.targetZ;
+  let dx = tx - demoTankState.x;
+  let dz = tz - demoTankState.z;
+  let dist = Math.hypot(dx, dz);
+
+  if (!follow) {
+    if (dist < 14 || appTimeSec > demoTankState.nextRetargetSec) {
+      pickDemoTankTarget();
+      const r0 = PARAMS.demoTank.roamRetargetMin;
+      const r1 = PARAMS.demoTank.roamRetargetMax;
+      demoTankState.nextRetargetSec =
+        appTimeSec + r0 + Math.random() * Math.max(0.1, r1 - r0);
+    }
+    dx = demoTankState.targetX - demoTankState.x;
+    dz = demoTankState.targetZ - demoTankState.z;
+    dist = Math.hypot(dx, dz);
+  }
+
+  let dirX;
+  let dirZ;
+  let maxS = PARAMS.demoTank.speed;
+  if (follow && dist < 7) {
+    const inv = dist > 0.05 ? 1 / dist : 0;
+    dirX = -dz * inv;
+    dirZ = dx * inv;
+    maxS *= THREE.MathUtils.clamp(dist / 9, 0.2, 1);
+  } else if (dist > 0.35) {
+    dirX = dx / dist;
+    dirZ = dz / dist;
+  } else {
+    const sy = Math.sin(demoTankState.yaw);
+    const cy = Math.cos(demoTankState.yaw);
+    dirX = sy;
+    dirZ = cy;
+    maxS *= 0.35;
+  }
+
+  const wantVx = dirX * maxS;
+  const wantVz = dirZ * maxS;
+  const ak = 1 - Math.exp(-PARAMS.demoTank.accel * dt);
+  demoTankState.vx += (wantVx - demoTankState.vx) * ak;
+  demoTankState.vz += (wantVz - demoTankState.vz) * ak;
+
+  let newX = demoTankState.x + demoTankState.vx * dt;
+  let newZ = demoTankState.z + demoTankState.vz * dt;
+  newX = THREE.MathUtils.clamp(
+    newX,
+    worldBounds.min.x,
+    worldBounds.max.x,
+  );
+  newZ = THREE.MathUtils.clamp(
+    newZ,
+    worldBounds.min.z,
+    worldBounds.max.z,
+  );
+  if (isBarrierBlocked(newX, newZ)) {
+    const slideX = !isBarrierBlocked(newX, demoTankState.z);
+    const slideZ = !isBarrierBlocked(demoTankState.x, newZ);
+    if (slideX) {
+      newZ = demoTankState.z;
+      demoTankState.vz *= 0.25;
+    } else if (slideZ) {
+      newX = demoTankState.x;
+      demoTankState.vx *= 0.25;
+    } else {
+      newX = demoTankState.x;
+      newZ = demoTankState.z;
+      demoTankState.vx *= 0.2;
+      demoTankState.vz *= 0.2;
+    }
+  }
+  demoTankState.x = newX;
+  demoTankState.z = newZ;
+
+  const sp = Math.hypot(demoTankState.vx, demoTankState.vz);
+  let targetYaw;
+  if (sp > 0.1) {
+    targetYaw = Math.atan2(demoTankState.vx, demoTankState.vz);
+  } else {
+    targetYaw = Math.atan2(
+      follow ? playerPos.x - demoTankState.x : dx,
+      follow ? playerPos.z - demoTankState.z : dz,
+    );
+  }
+  let dy = targetYaw - demoTankState.yaw;
+  while (dy > PI) dy -= PI * 2;
+  while (dy < -PI) dy += PI * 2;
+  const yCap = PARAMS.demoTank.yawSmooth * dt;
+  demoTankState.yaw += THREE.MathUtils.clamp(dy, -yCap, yCap);
+
+  applyDemoTankGroundLikeCapsule();
+}
+
+function syncObjectSlotsHeights() {
+  FOLIAGE_SLOTS.forEach((s) => {
+    if (s.system) s.system.syncHeights();
+  });
+  OBJECT_SLOTS.forEach((s) => {
+    if (s.system) s.system.syncHeights();
+  });
+}
+
+function initFoliageSlots() {
+  FOLIAGE_SLOTS.forEach((slot) => {
+    slot.system = createFoliageSlot(
+      scene,
+      (x, z) => getWorldHeight(x, z),
+      slot.wind || null,
+    );
+    slot.system.setCastShadow(slot.castShadow);
+    if (slot.modelPath) {
+      gltfLoader
+        .loadAsync(resolveModelUrl(slot.modelPath))
+        .then((gltf) => {
+          slot.system.setModel(gltf);
+          slot.system.setCastShadow(slot.castShadow);
+        })
+        .catch(() =>
+          console.warn(
+            `Foliage: ${slot.modelPath} not found — slot active but no model`,
+          ),
+        );
+    }
+  });
+}
+
+function initObjectPaintSlots() {
+  OBJECT_SLOTS.forEach((slot) => {
+    slot.system = createFoliageSlot(scene, (x, z) =>
+      getWorldHeight(x, z),
+    );
+    slot.system.setCastShadow(slot.castShadow);
+    if (slot.modelPath) {
+      gltfLoader
+        .loadAsync(resolveModelUrl(slot.modelPath))
+        .then((gltf) => {
+          slot.system.setModel(gltf);
+          slot.system.setCastShadow(slot.castShadow);
+        })
+        .catch(() =>
+          console.warn(
+            `Objects: ${slot.modelPath} not found — slot active but no model`,
+          ),
+        );
+    }
+  });
+}
+initFoliageSlots();
+initObjectPaintSlots();
+
+function bakeBVH() {
+  scene.updateMatrixWorld(true);
+  const positions = [];
+  const idxList = [];
+  let vOffset = 0;
+  function addMesh(mesh) {
+    const geo = mesh.geometry;
+    const posAttr = geo.attributes.position;
+    const mat = mesh.matrixWorld;
+    for (let i = 0; i < posAttr.count; i++) {
+      _bvhTmpV.fromBufferAttribute(posAttr, i).applyMatrix4(mat);
+      positions.push(_bvhTmpV.x, _bvhTmpV.y, _bvhTmpV.z);
+    }
+    if (geo.index) {
+      const idx = geo.index.array;
+      for (let i = 0; i < idx.length; i++) idxList.push(idx[i] + vOffset);
+    } else {
+      for (let i = 0; i < posAttr.count; i++) idxList.push(i + vOffset);
+    }
+    vOffset += posAttr.count;
+  }
+  function addGeoWithMatrix(geo, mat) {
+    const posAttr = geo.attributes.position;
+    for (let i = 0; i < posAttr.count; i++) {
+      _bvhTmpV.fromBufferAttribute(posAttr, i).applyMatrix4(mat);
+      positions.push(_bvhTmpV.x, _bvhTmpV.y, _bvhTmpV.z);
+    }
+    if (geo.index) {
+      const idx = geo.index.array;
+      for (let i = 0; i < idx.length; i++) idxList.push(idx[i] + vOffset);
+    } else {
+      for (let i = 0; i < posAttr.count; i++) idxList.push(i + vOffset);
+    }
+    vOffset += posAttr.count;
+  }
+  cliffObjects.forEach((root) =>
+    root.traverse((o) => {
+      if (o.isMesh) addMesh(o);
+    }),
+  );
+  cliffInstancer.forEachMeshInstance((geo, mat) =>
+    addGeoWithMatrix(geo, mat),
+  );
+  propObjects.forEach((root) =>
+    root.traverse((o) => {
+      if (o.isMesh) addMesh(o);
+    }),
+  );
+
+  let cliffBvh = null;
+  if (positions.length > 0) {
+    const mergedGeo = new THREE.BufferGeometry();
+    mergedGeo.setAttribute(
+      "position",
+      new THREE.BufferAttribute(new Float32Array(positions), 3),
+    );
+    mergedGeo.setIndex(
+      new THREE.BufferAttribute(new Uint32Array(idxList), 1),
+    );
+    cliffBvh = new MeshBVH(mergedGeo);
+  }
+  _camCliffBvh = cliffBvh;
+
+  const ws = CONFIG.worldSize;
+  for (let iz = 0; iz < HTEX_RES; iz++) {
+    for (let ix = 0; ix < HTEX_RES; ix++) {
+      const wx = (-0.5 + ix / HTEX_RES) * ws;
+      const wz = (-0.5 + iz / HTEX_RES) * ws;
+      const wxG = (-0.5 + (ix + 0.5) / HTEX_RES) * ws;
+      const wzG = (-0.5 + (iz + 0.5) / HTEX_RES) * ws;
+      let hCpu = getChunkHeightfieldHeight(wx, wz);
+      if (cliffBvh) {
+        _bvhRay.origin.set(wx, 99999, wz);
+        const hit = cliffBvh.raycastFirst(_bvhRay, THREE.DoubleSide);
+        if (hit && hit.point.y > hCpu) hCpu = hit.point.y;
+      }
+      bvhGrid[iz * HTEX_RES + ix] = hCpu;
+
+      if (cliffHeightTexData) {
+        const cliffI4 = (iz * HTEX_RES + ix) * 4;
+        let cliffH = -9999;
+        if (cliffBvh) {
+          const hTerrainG = getChunkHeightfieldHeight(wxG, wzG);
+          _bvhRay.origin.set(wxG, 99999, wzG);
+          const cliffHit = cliffBvh.raycastFirst(
+            _bvhRay,
+            THREE.DoubleSide,
+          );
+          if (
+            cliffHit &&
+            cliffHit.face &&
+            cliffHit.face.normal &&
+            cliffHit.face.normal.y > 0.3 &&
+            cliffHit.point.y > hTerrainG + 0.08
+          ) {
+            cliffH = cliffHit.point.y;
+          }
+        }
+        cliffHeightTexData[cliffI4] =
+          cliffHeightTexData[cliffI4 + 1] =
+          cliffHeightTexData[cliffI4 + 2] =
+            cliffH;
+        cliffHeightTexData[cliffI4 + 3] = 1;
+      }
+    }
+  }
+  bvhBaked = true;
+  heightTexDirty = true;
+  if (cliffHeightTex) cliffHeightTex.needsUpdate = true;
+  rebuildGlobalHeightTexture();
+}
+
+function sampleHeightfieldForGlobalGrassTex(wx, wz) {
+  const maxC = getMaxChunkIndex();
+  const cs = CONFIG.chunkSize;
+  const cx = THREE.MathUtils.clamp(
+    Math.floor((wx + worldHalf) / cs),
+    0,
+    maxC,
+  );
+  const cz = THREE.MathUtils.clamp(
+    Math.floor((wz + worldHalf) / cs),
+    0,
+    maxC,
+  );
+  const arr = chunkDataMap.get(chunkKey(cx, cz));
+  if (!arr) return sampleHeight(wx, wz);
+  const u = ((wx - chunkMinWorldX(cx)) / cs) * CONFIG.dataResolution;
+  const v = ((wz - chunkMinWorldZ(cz)) / cs) * CONFIG.dataResolution;
+  return sampleChunkDataBilinear(arr, u, v);
+}
+
+function rebuildGlobalHeightTexture() {
+  if (!globalHeightTexData || !globalHeightTex) return;
+  const ws = CONFIG.worldSize;
+  for (let iz = 0; iz < HTEX_RES; iz++) {
+    for (let ix = 0; ix < HTEX_RES; ix++) {
+      const wx = ws * ((ix + 0.5) / HTEX_RES - 0.5);
+      const wz = ws * ((iz + 0.5) / HTEX_RES - 0.5);
+      const h = bvhBaked
+        ? bvhHeightSample(wx, wz)
+        : sampleHeightfieldForGlobalGrassTex(wx, wz);
+      const i = (iz * HTEX_RES + ix) * 4;
+      globalHeightTexData[i] = h;
+      globalHeightTexData[i + 1] = 0;
+      globalHeightTexData[i + 2] = 0;
+      globalHeightTexData[i + 3] = 1;
+    }
+  }
+  globalHeightTex.needsUpdate = true;
+  rebuildGeminiTerrainOnlyHeightTexture();
+  if (fleurSystem) fleurSystem.syncHeights();
+  if (ambientFXSystem) ambientFXSystem.syncHeights();
+  syncObjectSlotsHeights();
+}
+
+function rebuildGeminiTerrainOnlyHeightTexture() {
+  if (!geminiTerrainOnlyHeightTexData || !geminiTerrainOnlyHeightTex)
+    return;
+  const ws = CONFIG.worldSize;
+  for (let iz = 0; iz < HTEX_RES; iz++) {
+    for (let ix = 0; ix < HTEX_RES; ix++) {
+      const wx = ws * ((ix + 0.5) / HTEX_RES - 0.5);
+      const wz = ws * ((iz + 0.5) / HTEX_RES - 0.5);
+      const h = sampleHeightfieldForGlobalGrassTex(wx, wz);
+      const i = (iz * HTEX_RES + ix) * 4;
+      geminiTerrainOnlyHeightTexData[i] = h;
+      geminiTerrainOnlyHeightTexData[i + 1] = 0;
+      geminiTerrainOnlyHeightTexData[i + 2] = 0;
+      geminiTerrainOnlyHeightTexData[i + 3] = 1;
+    }
+  }
+  geminiTerrainOnlyHeightTex.needsUpdate = true;
+}
+
+function sampleChunkDataBilinear(heights, gridX, gridZ) {
+  const res = CONFIG.dataResolution;
+  const gx = THREE.MathUtils.clamp(gridX, 0, res);
+  const gz = THREE.MathUtils.clamp(gridZ, 0, res);
+
+  const x0 = Math.floor(gx);
+  const z0 = Math.floor(gz);
+  const x1 = Math.min(x0 + 1, res);
+  const z1 = Math.min(z0 + 1, res);
+  const tx = gx - x0;
+  const tz = gz - z0;
+
+  const h00 = heights[getChunkDataIndex(x0, z0)];
+  const h10 = heights[getChunkDataIndex(x1, z0)];
+  const h01 = heights[getChunkDataIndex(x0, z1)];
+  const h11 = heights[getChunkDataIndex(x1, z1)];
+
+  const hx0 = h00 + (h10 - h00) * tx;
+  const hx1 = h01 + (h11 - h01) * tx;
+  return hx0 + (hx1 - hx0) * tz;
+}
+
+/** Heightfield FD normal at world (x,z), written into `out`. */
+function heightfieldNormalAt(worldX, worldZ, out) {
+  const eps = CONFIG.chunkSize / CONFIG.dataResolution;
+  const inv2eps = 1 / (2 * eps);
+  const hL = getChunkHeightfieldHeight(worldX - eps, worldZ);
+  const hR = getChunkHeightfieldHeight(worldX + eps, worldZ);
+  const hD = getChunkHeightfieldHeight(worldX, worldZ - eps);
+  const hU = getChunkHeightfieldHeight(worldX, worldZ + eps);
+  out.set((hL - hR) * inv2eps, 1, (hD - hU) * inv2eps).normalize();
+  return out;
+}
+
+// ── Tree LOD — instanced GLB chunks (LOD0 / LOD1), no impostor ─────────
+const _lodFinalMat = new THREE.Matrix4();
+const _lodTreeMat = new THREE.Matrix4();
+const _lodTreePos = new THREE.Vector3();
+const _lodTreeScale = new THREE.Vector3();
+const _lodTreeQuat = new THREE.Quaternion();
+const _lodUpY = new THREE.Vector3(0, 1, 0);
+const _tmpPineSunCol = new THREE.Vector3();
+const _tmpPineAmbCol = new THREE.Vector3();
+const _tmpPineHemiSky = new THREE.Vector3();
+const _tmpPineHemiGnd = new THREE.Vector3();
+const _pineImpostorColorTmp = new THREE.Color();
+const _lodCamPos = new THREE.Vector3();
+const _lodFrustum = new THREE.Frustum();
+const _lodProjMat = new THREE.Matrix4();
+const _lodClipInv = new THREE.Matrix4();
+const _lodUnprojV = new THREE.Vector4();
+const _lodChunkWin = { ix0: 0, ix1: 0, iz0: 0, iz1: 0 };
+/** NDC box corners for frustum ↔ world XZ bounds (conservative for Tree LOD window). */
+const _LOD_NDC_BOX = [
+  [-1, -1, -1],
+  [1, -1, -1],
+  [-1, 1, -1],
+  [1, 1, -1],
+  [-1, -1, 1],
+  [1, -1, 1],
+  [-1, 1, 1],
+  [1, 1, 1],
+];
+let _lodDirty = true;
+const _lodLastPos = new THREE.Vector3(Infinity, Infinity, Infinity);
+const _lodLastQuat = new THREE.Quaternion();
+const _LOD_POS_THR = 4;
+const _LOD_ROT_THR = 0.9986;
+
+function _markLodDirty() {
+  _lodDirty = true;
+}
+
+/** Quantized camera key for Tree LOD per-chunk write cache (align with `_LOD_POS_THR`). */
+function _lodQuantCamKey(pos, step) {
+  const inv = 1 / step;
+  return `${Math.round(pos.x * inv)},${Math.round(pos.y * inv)},${Math.round(pos.z * inv)}`;
+}
+
+/** Expands `b` (minX/maxX/minZ/maxZ) with frustum corner rays in world XZ (inverse clip matrix). */
+function _lodMergeFrustumXZIntoBounds(projViewMat, b) {
+  _lodClipInv.copy(projViewMat).invert();
+  for (let i = 0; i < 8; i++) {
+    const c = _LOD_NDC_BOX[i];
+    _lodUnprojV.set(c[0], c[1], c[2], 1).applyMatrix4(_lodClipInv);
+    const iw = 1.0 / _lodUnprojV.w;
+    if (!Number.isFinite(iw) || Math.abs(_lodUnprojV.w) < 1e-8) continue;
+    const wx = _lodUnprojV.x * iw;
+    const wz = _lodUnprojV.z * iw;
+    if (wx < b.minX) b.minX = wx;
+    if (wx > b.maxX) b.maxX = wx;
+    if (wz < b.minZ) b.minZ = wz;
+    if (wz > b.maxZ) b.maxZ = wz;
+  }
+}
+
+/**
+ * Integer tree-chunk index range that may intersect view or LOD radii (avoids scanning all chunks).
+ */
+function _lodComputeTreeChunkWindow(
+  cs,
+  cam,
+  maxDraw,
+  slot,
+  projViewMat,
+  cameraFar,
+  out,
+) {
+  const pad = cs * 2 + 150;
+  const farCap = Math.min(Math.max(cameraFar || 2000, 1) * 0.96, 6500);
+  const dSphere = maxDraw > 0 ? maxDraw + pad : farCap + pad;
+  const impD = (slot.lodImpostorDist ?? 115) + pad;
+  const megaD = (slot.lodMegaDist ?? 220) + pad;
+  const thrD = (slot.lodThreshold ?? 80) + pad;
+  const ext = Math.max(dSphere, impD, megaD, thrD);
+  const b = {
+    minX: cam.x - ext,
+    maxX: cam.x + ext,
+    minZ: cam.z - ext,
+    maxZ: cam.z + ext,
+  };
+  _lodMergeFrustumXZIntoBounds(projViewMat, b);
+  b.minX = THREE.MathUtils.clamp(
+    b.minX,
+    worldBounds.min.x,
+    worldBounds.max.x,
+  );
+  b.maxX = THREE.MathUtils.clamp(
+    b.maxX,
+    worldBounds.min.x,
+    worldBounds.max.x,
+  );
+  b.minZ = THREE.MathUtils.clamp(
+    b.minZ,
+    worldBounds.min.z,
+    worldBounds.max.z,
+  );
+  b.maxZ = THREE.MathUtils.clamp(
+    b.maxZ,
+    worldBounds.min.z,
+    worldBounds.max.z,
+  );
+  out.ix0 = Math.floor(b.minX / cs);
+  out.ix1 = Math.floor(b.maxX / cs);
+  out.iz0 = Math.floor(b.minZ / cs);
+  out.iz1 = Math.floor(b.maxZ / cs);
+}
+
+/**
+ * Pre-multiply tree base matrix × each sub-mesh local matrix (per LOD tier).
+ * Runtime then only copies into InstancedMesh (no multiplyMatrices per tree).
+ */
+function _lodBakeTreeInstanceMats(slot) {
+  if (!slot?.lod0Defs?.length) return;
+  const mul = slot.meshScale ?? 1;
+  const defs0 = slot.lod0Defs;
+  const defs1 = slot.lod1Defs;
+  for (let pi = 0; pi < slot.positions.length; pi++) {
+    const p = slot.positions[pi];
+    if (!p._lodBaseMat) continue;
+    if (!p._lodBaked0 || p._lodBaked0.length !== defs0.length) {
+      p._lodBaked0 = defs0.map(() => new THREE.Matrix4());
+    }
+    for (let mi = 0; mi < defs0.length; mi++) {
+      _lodTreeMat.copy(p._lodBaseMat);
+      if (mul !== 1) {
+        const me = _lodTreeMat.elements;
+        me[0] *= mul;
+        me[1] *= mul;
+        me[2] *= mul;
+        me[4] *= mul;
+        me[5] *= mul;
+        me[6] *= mul;
+        me[8] *= mul;
+        me[9] *= mul;
+        me[10] *= mul;
+      }
+      _lodFinalMat.multiplyMatrices(_lodTreeMat, defs0[mi].localMatrix);
+      p._lodBaked0[mi].copy(_lodFinalMat);
+    }
+    if (!defs1) {
+      p._lodBaked1 = null;
+    } else if (defs1 === defs0) {
+      p._lodBaked1 = p._lodBaked0;
+    } else {
+      if (!p._lodBaked1 || p._lodBaked1.length !== defs1.length) {
+        p._lodBaked1 = defs1.map(() => new THREE.Matrix4());
+      }
+      for (let mi = 0; mi < defs1.length; mi++) {
+        _lodTreeMat.copy(p._lodBaseMat);
+        if (mul !== 1) {
+          const me = _lodTreeMat.elements;
+          me[0] *= mul;
+          me[1] *= mul;
+          me[2] *= mul;
+          me[4] *= mul;
+          me[5] *= mul;
+          me[6] *= mul;
+          me[8] *= mul;
+          me[9] *= mul;
+          me[10] *= mul;
+        }
+        _lodFinalMat.multiplyMatrices(_lodTreeMat, defs1[mi].localMatrix);
+        p._lodBaked1[mi].copy(_lodFinalMat);
+      }
+    }
+  }
+}
+
+function applyPineImpostorMaterialFromLodParams() {
+  const api = LOD_SLOTS[0]?.pineImpostorApi;
+  if (!api || LOD_SLOTS[0].name !== "Pine") return;
+  api.setLightScale(lodParams.pineLightScale);
+  api.setNormalStrength(lodParams.pineNormalStrength);
+  api.setRimStrength(lodParams.pineRimStrength);
+  api.setRimPower(lodParams.pineRimPower);
+  _pineImpostorColorTmp.set(lodParams.pineRimColor);
+  api.setRimColor(
+    _pineImpostorColorTmp.r,
+    _pineImpostorColorTmp.g,
+    _pineImpostorColorTmp.b,
+  );
+  api.setDiffuseWrap(lodParams.pineDiffuseWrap);
+  api.setParallaxStrength(lodParams.pineParallaxStrength);
+  api.setLodDistance(lodParams.pineImpCrossfadeDist);
+  api.setFadeRange(lodParams.pineImpBlendWidth);
+  api.setLodDither(lodParams.pineLodDither);
+  api.setEdgeSmoothScale(lodParams.pineEdgeSmoothScale);
+  api.setAlphaClamp(lodParams.pineAlphaClamp);
+  api.setBlend3Cell(lodParams.pineBlend3Cell);
+  api.setTranslucency(
+    lodParams.pineTranslucency,
+    lodParams.pineTranslucencyPow,
+  );
+  api.setAoStrength(lodParams.pineAoStrength);
+  _pineImpostorColorTmp.set(lodParams.pineFogColor);
+  api.setFog({
+    near: lodParams.pineFogNear,
+    far: Math.max(lodParams.pineFogFar, lodParams.pineFogNear + 1),
+    strength: lodParams.pineFogEnabled ? 1 : 0,
+    color: _pineImpostorColorTmp,
+  });
+}
+
+function applyLodTierVisibility() {
+  const v0 = lodParams.lodVisMesh0;
+  const v1 = lodParams.lodVisMesh1;
+  for (const slot of LOD_SLOTS) {
+    if (!slot.ready) continue;
+    for (const ch of slot.chunks.values()) {
+      ch.lod0ims.forEach(({ im }) => {
+        im.visible = v0;
+      });
+      if (ch.lod1ims) {
+        ch.lod1ims.forEach(({ im }) => {
+          im.visible = v1;
+        });
+      }
+    }
+  }
+  const api = LOD_SLOTS[0]?.pineImpostorApi;
+  if (api && LOD_SLOTS[0].name === "Pine") {
+    api.setLodVisible(1, lodParams.lodVisImpostor);
+    api.setLodVisible(2, lodParams.lodVisMega);
+  }
+}
+
+function _disposePineImpostor(slot) {
+  if (!slot || slot.name !== "Pine") return;
+  if (slot.pineImpostorApi) {
+    scene.remove(slot.pineImpostorApi.group);
+    slot.pineImpostorApi.dispose();
+    slot.pineImpostorApi = null;
+  }
+  slot.pineImpostorBusy = false;
+}
+
+function _schedulePineImpostorBuild(slot) {
+  if (
+    slot.name !== "Pine" ||
+    slot.pineImpostorBusy ||
+    slot.pineImpostorApi ||
+    slot.positions.length === 0
+  )
+    return;
+  slot.pineImpostorBusy = true;
+  createOctahedralImpostorForestWebgpu(renderer, sun, {
+    modelPath: slot.modelPath,
+    skipNearMeshes: true,
+    fixedPlacements: slot.positions.slice(),
+    impostorStandalone: true,
+    treeScale: 1,
+    lodDistance: lodParams.pineImpCrossfadeDist,
+    centerPosition: [0, 0, 0],
+    placementCapacity: Math.max(1024, slot.positions.length + 512),
+    impostorSettings: {
+      lod2Distance: 9999,
+      fadeRange: lodParams.pineImpBlendWidth,
+      textureSize: Math.max(
+        256,
+        Math.min(8192, Math.round(lodParams.pineAtlasTextureSize)),
+      ),
+      spritesPerSide: Math.max(
+        2,
+        Math.min(32, Math.round(lodParams.pineAtlasSpritesPerSide)),
+      ),
+      lightScale: lodParams.pineLightScale,
+      normalStrength: lodParams.pineNormalStrength,
+      rimStrength: lodParams.pineRimStrength,
+      rimPower: lodParams.pineRimPower,
+      diffuseWrap: lodParams.pineDiffuseWrap,
+      parallaxStrength: lodParams.pineParallaxStrength,
+      lodDither: lodParams.pineLodDither,
+      edgeSmoothScale: lodParams.pineEdgeSmoothScale,
+      alphaClamp: lodParams.pineAlphaClamp,
+      fogEnabled: lodParams.pineFogEnabled,
+      fogNear: lodParams.pineFogNear,
+      fogFar: lodParams.pineFogFar,
+      fogColor: new THREE.Color().set(lodParams.pineFogColor).getHex(),
+      rimColor: new THREE.Color().set(lodParams.pineRimColor),
+      bakeOnlyLargestMesh: false,
+      fullOctahedral: lodParams.pineFullOctahedral,
+      skipShadow: true,
+      useSceneFog: true,
+    },
+  })
+    .then((api) => {
+      slot.pineImpostorBusy = false;
+      slot.pineImpostorApi = api;
+      scene.add(api.group);
+      applyPineImpostorMaterialFromLodParams();
+      applyLodTierVisibility();
+      if (!api.rebuildPlacements(slot.positions)) {
+        scene.remove(api.group);
+        api.dispose();
+        slot.pineImpostorApi = null;
+        _schedulePineImpostorBuild(slot);
+        return;
+      }
+      _markLodDirty();
+      if (lodParams.treeLodGpuCull && slot.chunks?.size) {
+        for (const ch of slot.chunks.values()) _disposeLodChunkGpu(ch);
+        _ensureTreeLodChunkGpu(slot);
+      }
+    })
+    .catch((err) => {
+      slot.pineImpostorBusy = false;
+      console.warn("[Tree LOD] Pine impostor bake failed:", err);
+    });
+}
+
+function _rebakePineImpostorAtlas() {
+  const slot = LOD_SLOTS[0];
+  if (!slot || slot.name !== "Pine") return;
+  _disposePineImpostor(slot);
+  _markLodDirty();
+  if (slot.positions.length > 0) _schedulePineImpostorBuild(slot);
+}
+
+function _extractLODDefs(gltf) {
+  const defs = [];
+  gltf.scene.updateMatrixWorld(true);
+  gltf.scene.traverse((child) => {
+    if (child.isMesh) {
+      let mat = child.material;
+      if (mat && (mat.transparent || mat.alphaTest > 0)) {
+        mat = mat.clone();
+        mat.transparent = false;
+        mat.alphaTest = 0.5;
+        mat.depthWrite = true;
+      }
+      defs.push({
+        geometry: child.geometry,
+        material: mat,
+        localMatrix: child.matrixWorld.clone(),
+      });
+    }
+  });
+  return defs;
+}
+
+function _disposeLodChunkGpu(chunk) {
+  if (!chunk?._lodGpu) return;
+  try {
+    chunk._lodGpu.dispose();
+  } catch (_) {
+    /* ignore */
+  }
+  chunk._lodGpu = null;
+}
+
+function _ensureTreeLodChunkGpu(slot) {
+  if (!slot?.ready || !slot.chunks?.size) return;
+  const instanceCap = Math.max(
+    32,
+    Math.min(8192, Math.floor(lodParams.lodMaxPerChunk) || 1024),
+  );
+  const device = renderer?.backend?.device;
+  const wantGpu =
+    !!lodParams.treeLodGpuCull &&
+    !!device &&
+    treeLodGpuCanUseForDefs(slot.lod0Defs, slot.lod1Defs) &&
+    !(slot.name === "Pine" && slot.pineImpostorApi);
+  for (const ch of slot.chunks.values()) {
+    _disposeLodChunkGpu(ch);
+    if (!wantGpu) continue;
+    try {
+      ch._lodGpu = new TreeLodChunkGpuCull(
+        renderer,
+        instanceCap,
+        slot.lod0Defs,
+        slot.lod1Defs,
+        ch.lod0ims,
+        ch.lod1ims,
+      );
+    } catch (e) {
+      console.warn("[TreeLodGpu]", slot.name, e);
+      ch._lodGpu = null;
+    }
+  }
+}
+
+function _disposeSlotLodChunks(slot) {
+  if (!slot.chunks || slot.chunks.size === 0) return;
+  for (const c of slot.chunks.values()) {
+    _disposeLodChunkGpu(c);
+    c.lod0ims.forEach(({ im }) => scene.remove(im));
+    if (c.lod1ims) c.lod1ims.forEach(({ im }) => scene.remove(im));
+  }
+  slot.chunks.clear();
+}
+
+function _rebuildAllTreeLodChunksFromParams() {
+  LOD_SLOTS.forEach((slot) => {
+    if (!slot.ready) return;
+    _disposeSlotLodChunks(slot);
+    _rebuildLODChunks(slot);
+  });
+}
+
+function _makeChunkIMs(defs, instanceCap) {
+  const cap = Math.max(
+    32,
+    Math.min(8192, Math.floor(instanceCap) || 1024),
+  );
+  return defs.map(({ geometry, material, localMatrix }) => {
+    const im = new THREE.InstancedMesh(geometry, material, cap);
+    im.count = 0;
+    im.castShadow = true;
+    im.receiveShadow = true;
+    im.frustumCulled = false;
+    scene.add(im);
+    return { im, localMatrix };
+  });
+}
+
+_rebuildLODChunks = function (slot) {
+  _markLodDirty();
+  if (!slot || !slot.ready) return;
+  const cs = Math.max(
+    16,
+    Math.min(1024, Math.floor(lodParams.lodChunkSize) || 128),
+  );
+  const instanceCap = lodParams.lodMaxPerChunk;
+  const byChunk = new Map();
+  slot.positions.forEach((pos) => {
+    const key = `${Math.floor(pos.x / cs)},${Math.floor(pos.z / cs)}`;
+    if (!byChunk.has(key)) byChunk.set(key, []);
+    byChunk.get(key).push(pos);
+  });
+  for (const key of [...slot.chunks.keys()]) {
+    if (!byChunk.has(key)) {
+      const c = slot.chunks.get(key);
+      _disposeLodChunkGpu(c);
+      c.lod0ims.forEach((g) => scene.remove(g.im));
+      if (c.lod1ims) c.lod1ims.forEach((g) => scene.remove(g.im));
+      slot.chunks.delete(key);
+    }
+  }
+  for (const [key, positions] of byChunk) {
+    let chunk = slot.chunks.get(key);
+    if (!chunk) {
+      chunk = {
+        positions: [],
+        sphere: new THREE.Sphere(),
+        lod0ims: _makeChunkIMs(slot.lod0Defs, instanceCap),
+        lod1ims: slot.lod1Defs
+          ? _makeChunkIMs(slot.lod1Defs, instanceCap)
+          : null,
+      };
+      slot.chunks.set(key, chunk);
+    }
+    chunk.positions = positions;
+    chunk._lodGridKey = key;
+    {
+      const comma = key.indexOf(",");
+      chunk._lodIx = parseInt(key.slice(0, comma), 10);
+      chunk._lodIz = parseInt(key.slice(comma + 1), 10);
+    }
+    let cx = 0;
+    let cy = 0;
+    let cz = 0;
+    positions.forEach((p) => {
+      cx += p.x;
+      cy += p.y;
+      cz += p.z;
+    });
+    cx /= positions.length;
+    cy /= positions.length;
+    cz /= positions.length;
+    let r = 0;
+    positions.forEach((p) => {
+      const d = Math.sqrt(
+        (p.x - cx) ** 2 + (p.y - cy) ** 2 + (p.z - cz) ** 2,
+      );
+      if (d > r) r = d;
+    });
+    chunk.sphere.set(new THREE.Vector3(cx, cy, cz), r + 20);
+  }
+  slot.positions.forEach((p) => {
+    if (typeof p.rot !== "number" || !Number.isFinite(p.rot)) {
+      p.rot = Math.PI * 2 * ((((p.x * 13.7 + p.z * 7.3) % 1) + 1) % 1);
+    }
+  });
+  slot.positions.forEach((p, i) => {
+    p._lodIdx = i;
+  });
+  slot.positions.forEach((p) => {
+    if (!p._lodBaseMat) p._lodBaseMat = new THREE.Matrix4();
+    const rotY =
+      typeof p.rot === "number" && Number.isFinite(p.rot)
+        ? p.rot
+        : Math.PI * 2 * ((((p.x * 13.7 + p.z * 7.3) % 1) + 1) % 1);
+    const s = p.scale;
+    _lodTreePos.set(p.x, p.y, p.z);
+    _lodTreeQuat.setFromAxisAngle(_lodUpY, rotY);
+    _lodTreeScale.set(s, s, s);
+    p._lodBaseMat.compose(_lodTreePos, _lodTreeQuat, _lodTreeScale);
+  });
+  _lodBakeTreeInstanceMats(slot);
+  slot._lodDataRev = (slot._lodDataRev | 0) + 1;
+  _ensureTreeLodChunkGpu(slot);
+  if (slot.name === "Pine") {
+    if (slot.positions.length === 0) {
+      _disposePineImpostor(slot);
+    } else {
+      if (
+        slot.pineImpostorApi &&
+        slot.positions.length > slot.pineImpostorApi.capacity
+      ) {
+        _disposePineImpostor(slot);
+      }
+      _schedulePineImpostorBuild(slot);
+      if (slot.pineImpostorApi) {
+        slot.pineImpostorApi.rebuildPlacements(slot.positions);
+      }
+    }
+  }
+  applyLodTierVisibility();
+};
+
+function _tryBuildSlot(slot) {
+  if (!slot.lod0Defs) return;
+  slot.ready = true;
+  _rebuildLODChunks(slot);
+}
+
+function assignLodSlot(slotIndex) {
+  activeLodSlot = THREE.MathUtils.clamp(
+    slotIndex | 0,
+    0,
+    LOD_SLOTS.length - 1,
+  );
+  const slot = LOD_SLOTS[activeLodSlot];
+  lodParams.slotName = slot.name;
+  lodParams.threshold = slot.lodThreshold;
+  lodParams.minSpacing = slot.minSpacing;
+  lodParams.scaleMin = slot.scaleMin;
+  lodParams.scaleMax = slot.scaleMax;
+  lodParams.meshScale = slot.meshScale ?? 1;
+  lodParams.density = slot.density;
+  lodParams.treesPerStroke = slot.treesPerStroke;
+  lodParams.lodImpostorDist = slot.lodImpostorDist ?? 115;
+  lodParams.lodMegaDist = slot.lodMegaDist ?? 220;
+  if (lodFolderRef) lodFolderRef.refresh();
+}
+
+function paintLODAt(wx, wz, erase) {
+  const slot = LOD_SLOTS[activeLodSlot];
+  if (!slot.ready) return;
+  const radius = sculptBrushWorldRadius();
+  if (erase) {
+    const r2 = radius * radius;
+    slot.positions = slot.positions.filter(
+      (p) => (p.x - wx) ** 2 + (p.z - wz) ** 2 > r2,
+    );
+  } else {
+    const target = slot.treesPerStroke;
+    const ms2 = slot.minSpacing * slot.minSpacing;
+    let added = 0;
+    for (
+      let attempt = 0;
+      attempt < target * 4 && added < target;
+      attempt++
+    ) {
+      const angle = Math.random() * Math.PI * 2;
+      const dist = Math.sqrt(Math.random()) * radius;
+      let x = wx + Math.cos(angle) * dist;
+      let z = wz + Math.sin(angle) * dist;
+      x = THREE.MathUtils.clamp(x, worldBounds.min.x, worldBounds.max.x);
+      z = THREE.MathUtils.clamp(z, worldBounds.min.z, worldBounds.max.z);
+      if (
+        ms2 > 0 &&
+        slot.positions.some((p) => (p.x - x) ** 2 + (p.z - z) ** 2 < ms2)
+      )
+        continue;
+      const y = getWorldHeight(x, z);
+      const scale =
+        slot.scaleMin + Math.random() * (slot.scaleMax - slot.scaleMin);
+      slot.positions.push({
+        x,
+        y,
+        z,
+        scale,
+        rot: Math.random() * Math.PI * 2,
+      });
+      added++;
+    }
+  }
+  _rebuildLODChunks(slot);
+}
+
+function syncTreeLodHeights() {
+  LOD_SLOTS.forEach((slot) => {
+    if (!slot.ready || slot.positions.length === 0) return;
+    slot.positions.forEach((p) => {
+      p.y = getWorldHeight(p.x, p.z);
+    });
+    _rebuildLODChunks(slot);
+  });
+}
+
+function _lodZeroChunkMeshes(chunk) {
+  chunk.lod0ims.forEach((g) => {
+    g.im.count = 0;
+  });
+  if (chunk.lod1ims) {
+    chunk.lod1ims.forEach((g) => {
+      g.im.count = 0;
+    });
+  }
+}
+
+/** Emit one tree into `groups` using baked matrices when available. */
+function _lodEmitTreeToGroups(
+  groups,
+  p,
+  useLod1,
+  lodMeshMul,
+  instanceCap,
+) {
+  const mats = useLod1 ? p._lodBaked1 : p._lodBaked0;
+  if (mats && mats.length === groups.length) {
+    for (let mi = 0; mi < groups.length; mi++) {
+      const im = groups[mi].im;
+      if (im.count >= instanceCap) continue;
+      im.setMatrixAt(im.count++, mats[mi]);
+    }
+    return;
+  }
+  const { x, y, z, scale } = p;
+  if (p._lodBaseMat) {
+    _lodTreeMat.copy(p._lodBaseMat);
+    if (lodMeshMul !== 1) {
+      const me = _lodTreeMat.elements;
+      me[0] *= lodMeshMul;
+      me[1] *= lodMeshMul;
+      me[2] *= lodMeshMul;
+      me[4] *= lodMeshMul;
+      me[5] *= lodMeshMul;
+      me[6] *= lodMeshMul;
+      me[8] *= lodMeshMul;
+      me[9] *= lodMeshMul;
+      me[10] *= lodMeshMul;
+    }
+  } else {
+    const rotY =
+      typeof p.rot === "number" && Number.isFinite(p.rot)
+        ? p.rot
+        : Math.PI * 2 * ((((x * 13.7 + z * 7.3) % 1) + 1) % 1);
+    const s = scale * lodMeshMul;
+    _lodTreePos.set(x, y, z);
+    _lodTreeScale.set(s, s, s);
+    _lodTreeQuat.setFromAxisAngle(_lodUpY, rotY);
+    _lodTreeMat.compose(_lodTreePos, _lodTreeQuat, _lodTreeScale);
+  }
+  for (let mi = 0; mi < groups.length; mi++) {
+    const { im, localMatrix } = groups[mi];
+    if (im.count >= instanceCap) continue;
+    _lodFinalMat.multiplyMatrices(_lodTreeMat, localMatrix);
+    im.setMatrixAt(im.count++, _lodFinalMat);
+  }
+}
+
+function updateLODInstances() {
+  const anyLodChunk = LOD_SLOTS.some((s) => s.ready && s.chunks.size > 0);
+  const pineSlotEarly = LOD_SLOTS[0];
+  const pineApiEarly =
+    pineSlotEarly?.name === "Pine" ? pineSlotEarly.pineImpostorApi : null;
+  if (!anyLodChunk) {
+    if (pineApiEarly) pineApiEarly.paintFinishImpostorMega(0, 0);
+    return;
+  }
+  const relaxGpuWhileTreePaint =
+    !!lodParams.treeLodRelaxGpuWhilePainting &&
+    !!lodParams.treeLodGpuCull &&
+    editState.isPointerDown &&
+    editState.pointerAction === "pinelod";
+  const camQ = camera.quaternion;
+  const posMoved =
+    _lodLastPos.distanceToSquared(camera.position) >
+    _LOD_POS_THR * _LOD_POS_THR;
+  const rotChanged = Math.abs(_lodLastQuat.dot(camQ)) < _LOD_ROT_THR;
+  if (!_lodDirty && !posMoved && !rotChanged) return;
+  _lodDirty = false;
+  _lodLastPos.copy(camera.position);
+  _lodLastQuat.copy(camQ);
+  _lodCamPos.copy(camera.position);
+  _lodProjMat.multiplyMatrices(
+    camera.projectionMatrix,
+    camera.matrixWorldInverse,
+  );
+  _lodFrustum.setFromProjectionMatrix(_lodProjMat);
+  let totalVisible = 0;
+  let totalChunks = 0;
+  let count0 = 0;
+  let count1 = 0;
+  let count2 = 0;
+  let count3 = 0;
+  let totalTrees = 0;
+  let treesCulledDistance = 0;
+  let chunksCulledDistance = 0;
+  const maxDraw = lodParams.maxDrawDistance;
+  const maxSq =
+    maxDraw > 0 ? maxDraw * maxDraw : Number.POSITIVE_INFINITY;
+  const quantCamKey = _lodQuantCamKey(_lodCamPos, _LOD_POS_THR);
+  for (const slot of LOD_SLOTS) {
+    if (!slot.ready) continue;
+    totalTrees += slot.positions.length;
+    const thr = slot.lodThreshold;
+    const thrSq = thr * thr;
+    const lodMeshMul = slot.meshScale ?? 1;
+    const pineImpostor =
+      slot.name === "Pine" ? slot.pineImpostorApi : null;
+    const tImp =
+      typeof slot.lodImpostorDist === "number"
+        ? slot.lodImpostorDist
+        : 1e9;
+    const tImpSq = tImp * tImp;
+    const tMega =
+      typeof slot.lodMegaDist === "number" ? slot.lodMegaDist : 1e9;
+    const tMegaSq = tMega * tMega;
+    let pineImpW = 0;
+    let pineMegaW = 0;
+    const capIm = pineImpostor ? pineImpostor.capacity : 0;
+    const canCacheChunkWritesBase = !pineImpostor;
+    const instanceCap = Math.max(
+      32,
+      Math.min(8192, Math.floor(lodParams.lodMaxPerChunk) || 1024),
+    );
+    const csLod = Math.max(
+      16,
+      Math.min(1024, Math.floor(lodParams.lodChunkSize) || 128),
+    );
+    _lodComputeTreeChunkWindow(
+      csLod,
+      _lodCamPos,
+      maxDraw,
+      slot,
+      _lodProjMat,
+      camera.far,
+      _lodChunkWin,
+    );
+    const { ix0, ix1, iz0, iz1 } = _lodChunkWin;
+    totalChunks += slot.chunks.size;
+    for (const chunk of slot.chunks.values()) {
+      let ixC = chunk._lodIx;
+      let izC = chunk._lodIz;
+      if (
+        (ixC == null ||
+          izC == null ||
+          Number.isNaN(ixC) ||
+          Number.isNaN(izC)) &&
+        chunk._lodGridKey
+      ) {
+        const comma = chunk._lodGridKey.indexOf(",");
+        if (comma >= 0) {
+          ixC = parseInt(chunk._lodGridKey.slice(0, comma), 10);
+          izC = parseInt(chunk._lodGridKey.slice(comma + 1), 10);
+          chunk._lodIx = ixC;
+          chunk._lodIz = izC;
+        }
+      }
+      if (
+        (chunk._lodIx == null || chunk._lodIz == null) &&
+        chunk.positions?.length
+      ) {
+        const p0 = chunk.positions[0];
+        chunk._lodIx = Math.floor(p0.x / csLod);
+        chunk._lodIz = Math.floor(p0.z / csLod);
+        chunk._lodGridKey = `${chunk._lodIx},${chunk._lodIz}`;
+      }
+      ixC = chunk._lodIx ?? 0;
+      izC = chunk._lodIz ?? 0;
+      if (ixC < ix0 || ixC > ix1 || izC < iz0 || izC > iz1) {
+        _lodZeroChunkMeshes(chunk);
+        chunk._lodWriteCacheKey = null;
+      }
+    }
+    for (let ixW = ix0; ixW <= ix1; ixW++) {
+      for (let izW = iz0; izW <= iz1; izW++) {
+        const chunk = slot.chunks.get(`${ixW},${izW}`);
+        if (!chunk) continue;
+        const inFrustum = _lodFrustum.intersectsSphere(chunk.sphere);
+        if (!inFrustum) {
+          _lodZeroChunkMeshes(chunk);
+          chunk._lodWriteCacheKey = null;
+          continue;
+        }
+        let drawOk = true;
+        const c = chunk.sphere.center;
+        const dxc = c.x - _lodCamPos.x;
+        const dyc = c.y - _lodCamPos.y;
+        const dzc = c.z - _lodCamPos.z;
+        const distCenter = Math.sqrt(dxc * dxc + dyc * dyc + dzc * dzc);
+        const r = chunk.sphere.radius;
+        if (maxDraw > 0) {
+          if (distCenter - r > maxDraw) {
+            drawOk = false;
+            chunksCulledDistance++;
+          }
+        }
+        if (!drawOk) {
+          _lodZeroChunkMeshes(chunk);
+          chunk._lodWriteCacheKey = null;
+          continue;
+        }
+        const minDist = Math.max(0, distCenter - r);
+        const maxDist = distCenter + r;
+        const minDistSq = minDist * minDist;
+        const maxDistSq = maxDist * maxDist;
+        let meshMode = 2;
+        if (chunk.lod1ims) {
+          if (maxDistSq < thrSq) meshMode = 0;
+          else if (minDistSq >= thrSq) meshMode = 1;
+        } else {
+          meshMode = 0;
+        }
+        const nearMaxSq = maxDraw <= 0 ? true : maxDistSq <= maxSq;
+        const chunkAllBeyondMaxDraw =
+          maxDraw > 0 && distCenter > r && minDistSq > maxSq;
+        if (chunkAllBeyondMaxDraw) {
+          _lodZeroChunkMeshes(chunk);
+          treesCulledDistance += chunk.positions.length;
+          chunk._lodWriteCacheKey = null;
+          continue;
+        }
+        totalVisible++;
+        const chunkCanCache =
+          canCacheChunkWritesBase &&
+          (!chunk._lodGpu || relaxGpuWhileTreePaint);
+        const cacheKey = chunkCanCache
+          ? `${quantCamKey}|${thrSq}|${maxSq}|${instanceCap}|${meshMode}|${nearMaxSq ? 1 : 0}|${lodMeshMul}|${slot._lodDataRev | 0}`
+          : "";
+        if (
+          chunkCanCache &&
+          cacheKey === chunk._lodWriteCacheKey &&
+          chunk._lodCachedCount0 != null
+        ) {
+          count0 += chunk._lodCachedCount0;
+          if (chunk.lod1ims) count1 += chunk._lodCachedCount1 ?? 0;
+          continue;
+        }
+        if (chunk._lodGpu && !relaxGpuWhileTreePaint) {
+          const nTrees = chunk.positions.length | 0;
+          const maxSqGpu = maxDraw > 0 ? maxSq : 1e30;
+          chunk._lodGpu.encode(
+            _lodProjMat,
+            _lodCamPos,
+            thrSq,
+            maxSqGpu,
+            lodMeshMul,
+            nTrees,
+            chunk.positions,
+            meshMode,
+          );
+          const dn = chunk.lod0ims[0]?.im.count ?? nTrees;
+          count0 += dn;
+          if (chunk.lod1ims) count1 += chunk.lod1ims[0]?.im.count ?? dn;
+          chunk._lodWriteCacheKey = null;
+          continue;
+        }
+        _lodZeroChunkMeshes(chunk);
+        const fillMeshForChunk = (positions, useLod1Mesh) => {
+          const groups = useLod1Mesh ? chunk.lod1ims : chunk.lod0ims;
+          for (let pi = 0; pi < positions.length; pi++) {
+            const p = positions[pi];
+            _lodEmitTreeToGroups(
+              groups,
+              p,
+              useLod1Mesh,
+              lodMeshMul,
+              instanceCap,
+            );
+          }
+        };
+        if (!pineImpostor) {
+          if (meshMode === 0 && nearMaxSq) {
+            fillMeshForChunk(chunk.positions, false);
+          } else if (meshMode === 1 && nearMaxSq && chunk.lod1ims) {
+            fillMeshForChunk(chunk.positions, true);
+          } else {
+            for (const p of chunk.positions) {
+              const { x, y, z } = p;
+              const dx = x - _lodCamPos.x;
+              const dy = y - _lodCamPos.y;
+              const dz = z - _lodCamPos.z;
+              const distSq = dx * dx + dy * dy + dz * dz;
+              if (distSq > maxSq) {
+                treesCulledDistance++;
+                continue;
+              }
+              const useLod1 = !!(chunk.lod1ims && distSq >= thrSq);
+              const groups = useLod1 ? chunk.lod1ims : chunk.lod0ims;
+              _lodEmitTreeToGroups(
+                groups,
+                p,
+                useLod1,
+                lodMeshMul,
+                instanceCap,
+              );
+            }
+          }
+        } else {
+          for (const p of chunk.positions) {
+            const { x, y, z } = p;
+            const dx = x - _lodCamPos.x;
+            const dy = y - _lodCamPos.y;
+            const dz = z - _lodCamPos.z;
+            const distSq = dx * dx + dy * dy + dz * dz;
+            if (distSq > maxSq) {
+              treesCulledDistance++;
+              continue;
+            }
+            const ti = p._lodIdx ?? 0;
+            if (distSq >= tMegaSq && pineMegaW < capIm) {
+              pineImpostor.paintWriteMegaSlot(pineMegaW++, ti);
+              continue;
+            }
+            if (distSq >= tImpSq && pineImpW < capIm) {
+              pineImpostor.paintWriteImpostorSlot(pineImpW++, ti);
+              continue;
+            }
+            const useLod1 = !!(chunk.lod1ims && distSq >= thrSq);
+            const groups = useLod1 ? chunk.lod1ims : chunk.lod0ims;
+            _lodEmitTreeToGroups(
+              groups,
+              p,
+              useLod1,
+              lodMeshMul,
+              instanceCap,
+            );
+          }
+        }
+        chunk.lod0ims.forEach((g) => {
+          if (g.im.count > 0) g.im.instanceMatrix.needsUpdate = true;
+        });
+        if (chunk.lod1ims) {
+          chunk.lod1ims.forEach((g) => {
+            if (g.im.count > 0) g.im.instanceMatrix.needsUpdate = true;
+          });
+        }
+        count0 += chunk.lod0ims[0]?.im.count ?? 0;
+        if (chunk.lod1ims) count1 += chunk.lod1ims[0]?.im.count ?? 0;
+        if (chunkCanCache) {
+          chunk._lodWriteCacheKey = cacheKey;
+          chunk._lodCachedCount0 = chunk.lod0ims[0]?.im.count ?? 0;
+          chunk._lodCachedCount1 = chunk.lod1ims
+            ? (chunk.lod1ims[0]?.im.count ?? 0)
+            : 0;
+        } else {
+          chunk._lodWriteCacheKey = null;
+        }
+      }
+    }
+    if (pineImpostor) {
+      pineImpostor.paintFinishImpostorMega(pineImpW, pineMegaW);
+      count2 += pineImpW;
+      count3 += pineMegaW;
+    }
+  }
+  const active = LOD_SLOTS[activeLodSlot];
+  lodParams.slotName = active.name;
+  lodParams.threshold = active.lodThreshold;
+  lodParams.minSpacing = active.minSpacing;
+  lodParams.scaleMin = active.scaleMin;
+  lodParams.scaleMax = active.scaleMax;
+  lodParams.meshScale = active.meshScale ?? 1;
+  lodParams.density = active.density;
+  lodParams.treesPerStroke = active.treesPerStroke;
+  lodParams.lodImpostorDist = active.lodImpostorDist ?? 115;
+  lodParams.lodMegaDist = active.lodMegaDist ?? 220;
+  lodParams.count0 = count0;
+  lodParams.count1 = count1;
+  lodParams.count2 = count2;
+  lodParams.count3 = count3;
+  lodParams.totalTrees = totalTrees;
+  lodParams.chunks = totalChunks;
+  lodParams.chunksVisible = totalVisible;
+  lodParams.chunksCulledDistance = chunksCulledDistance;
+  lodParams.treesCulledDistance = treesCulledDistance;
+}
+
+function updatePTreeInstances() {
+  if (!PTREE_SLOTS.some((s) => s.ready && s.chunks.size > 0)) return;
+  const posMoved =
+    _ptreeLastPos.distanceToSquared(camera.position) >
+    _LOD_POS_THR * _LOD_POS_THR;
+  const camQ = camera.quaternion;
+  const rotChanged = Math.abs(_ptreeLastQuat.dot(camQ)) < _LOD_ROT_THR;
+  if (!_ptreeDirty && !posMoved && !rotChanged) return;
+  _ptreeDirty = false;
+  _ptreeLastPos.copy(camera.position);
+  _ptreeLastQuat.copy(camQ);
+  _ptreeProjMat.multiplyMatrices(
+    camera.projectionMatrix,
+    camera.matrixWorldInverse,
+  );
+  _ptreeFrustum.setFromProjectionMatrix(_ptreeProjMat);
+  _ptreeCamPos.copy(camera.position);
+  const pMaxDraw = ptreeParams.maxDrawDistance;
+  let totalVisible = 0;
+  let totalChunks = 0;
+  let totalTrunks = 0;
+  let totalLeaves = 0;
+  for (const slot of PTREE_SLOTS) {
+    if (!slot.ready || !slot.trunkDefs) continue;
+    totalTrunks += slot.positions.length;
+    for (const chunk of slot.chunks.values()) {
+      totalChunks++;
+      chunk.ims.forEach((g) => {
+        g.im.count = 0;
+      });
+      const inFrustum = _ptreeFrustum.intersectsSphere(chunk.sphere);
+      let inDrawRange = true;
+      if (pMaxDraw > 0) {
+        const c = chunk.sphere.center;
+        const dx = c.x - _ptreeCamPos.x;
+        const dy = c.y - _ptreeCamPos.y;
+        const dz = c.z - _ptreeCamPos.z;
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist - chunk.sphere.radius > pMaxDraw) inDrawRange = false;
+      }
+      const chunkDrawn = inFrustum && inDrawRange;
+      if (chunk.leafMeshes?.length) {
+        let leafInDraw = true;
+        if (pMaxDraw > 0) {
+          const lc = chunk.leafSphere.center;
+          const ldx = lc.x - _ptreeCamPos.x;
+          const ldy = lc.y - _ptreeCamPos.y;
+          const ldz = lc.z - _ptreeCamPos.z;
+          const ld = Math.sqrt(ldx * ldx + ldy * ldy + ldz * ldz);
+          if (ld - chunk.leafSphere.radius > pMaxDraw) leafInDraw = false;
+        }
+        const dLod = _ptreeCamPos.distanceTo(chunk.sphere.center);
+        let lodIdx = 0;
+        if (ptreeParams.leafDistLod && chunk.leafMeshes.length > 1) {
+          const n1 = ptreeParams.leafLod1Dist;
+          const n2 = ptreeParams.leafLod2Dist;
+          if (n2 > 0 && chunk.leafMeshes.length > 2 && dLod >= n2) {
+            lodIdx = 2;
+          } else if (chunk.leafMeshes.length > 1 && dLod >= n1) {
+            lodIdx = 1;
+          }
+        }
+        const sphFr = chunk.leafSpheres?.[lodIdx] ?? chunk.leafSphere;
+        const leafFr = _ptreeFrustum.intersectsSphere(sphFr);
+        for (let L = 0; L < chunk.leafMeshes.length; L++) {
+          const m = chunk.leafMeshes[L];
+          m.visible = leafInDraw && leafFr && L === lodIdx;
+          if (m.visible) totalLeaves += m.count;
+        }
+      }
+      if (!chunkDrawn) continue;
+      totalVisible++;
+      const n = Math.min(chunk.positions.length, PTREE_MAX_PER_CHUNK);
+      if (
+        n > 0 &&
+        (!chunk.ptreeBaked ||
+          chunk.ptreeBaked.length !== chunk.ims.length)
+      ) {
+        _ptreeBakeChunkTrunkMatrices(slot, chunk);
+      }
+      const bakeRev = chunk._ptreeBakeRev | 0;
+      const skipGpuUpload =
+        n > 0 &&
+        chunk._ptreeTrunkUploadedRev === bakeRev &&
+        chunk._ptreeTrunkUploadedN === n;
+      chunk.ims.forEach((g, mi) => {
+        const im = g.im;
+        im.count = n;
+        if (n === 0 || !chunk.ptreeBaked?.[mi]) return;
+        if (skipGpuUpload) return;
+        im.instanceMatrix.array.set(
+          chunk.ptreeBaked[mi].subarray(0, n * 16),
+        );
+        im.instanceMatrix.needsUpdate = true;
+      });
+      if (n > 0) {
+        chunk._ptreeTrunkUploadedRev = bakeRev;
+        chunk._ptreeTrunkUploadedN = n;
+      }
+    }
+    if (slot.leafMeshes?.length && slot.leafCullSphere) {
+      let leafInDraw = true;
+      if (pMaxDraw > 0) {
+        const lc = slot.leafCullSphere.center;
+        const dx = lc.x - _ptreeCamPos.x;
+        const dy = lc.y - _ptreeCamPos.y;
+        const dz = lc.z - _ptreeCamPos.z;
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (d - slot.leafCullSphere.radius > pMaxDraw) leafInDraw = false;
+      }
+      const dLod = _ptreeCamPos.distanceTo(slot.leafCullSphere.center);
+      let lodIdx = 0;
+      if (ptreeParams.leafDistLod && slot.leafMeshes.length > 1) {
+        const n1 = ptreeParams.leafLod1Dist;
+        const n2 = ptreeParams.leafLod2Dist;
+        if (n2 > 0 && slot.leafMeshes.length > 2 && dLod >= n2) {
+          lodIdx = 2;
+        } else if (slot.leafMeshes.length > 1 && dLod >= n1) {
+          lodIdx = 1;
+        }
+      }
+      const sphFr = slot.leafSpheres?.[lodIdx] ?? slot.leafCullSphere;
+      const leafFr = _ptreeFrustum.intersectsSphere(sphFr);
+      for (let L = 0; L < slot.leafMeshes.length; L++) {
+        const m = slot.leafMeshes[L];
+        m.visible = leafInDraw && leafFr && L === lodIdx;
+        if (m.visible) totalLeaves += m.count;
+      }
+    }
+  }
+  ptreeParams.totalTrunks = totalTrunks;
+  ptreeParams.totalLeaves = totalLeaves;
+  ptreeParams.chunks = totalChunks;
+  ptreeParams.chunksVisible = totalVisible;
+}
+
+function loadTreeLodSlot(slot) {
+  if (!slot.modelPath) return;
+  const candidates = [slot.modelPath, slot.fallbackModelPath].filter(
+    Boolean,
+  );
+  const lod1SameAsModel =
+    slot.lod1Path && slot.lod1Path === slot.modelPath;
+
+  function finishLod0(usedPrimaryRel) {
+    if (!slot.lod1Path) {
+      _tryBuildSlot(slot);
+      return;
+    }
+    if (lod1SameAsModel || slot.lod1Path === usedPrimaryRel) {
+      slot.lod1Defs = slot.lod0Defs;
+      _tryBuildSlot(slot);
+      return;
+    }
+    const l1Url = resolveModelUrl(slot.lod1Path);
+    gltfLoader.load(
+      l1Url,
+      (g2) => {
+        slot.lod1Defs = _extractLODDefs(g2);
+        _tryBuildSlot(slot);
+      },
+      undefined,
+      () => {
+        console.warn(
+          `[Tree LOD] LOD1 failed (${slot.name}) — using LOD0 mesh only`,
+        );
+        slot.lod1Defs = null;
+        _tryBuildSlot(slot);
+      },
+    );
+  }
+
+  function tryCandidate(i) {
+    if (i >= candidates.length) {
+      console.warn(
+        `[Tree LOD] Failed to load any model for slot "${slot.name}" (tried: ${candidates.join(", ")})`,
+      );
+      return;
+    }
+    const rel = candidates[i];
+    const url = resolveModelUrl(rel);
+    gltfLoader.load(
+      url,
+      (g) => {
+        slot.lod0Defs = _extractLODDefs(g);
+        finishLod0(rel);
+      },
+      undefined,
+      (err) => {
+        console.warn(
+          `[Tree LOD] slot "${slot.name}": could not load "${rel}"\n` +
+            `  → resolved URL: ${url}\n` +
+            `  (parentheses in older messages were the slot name, not part of the file path.)`,
+          err,
+        );
+        tryCandidate(i + 1);
+      },
+    );
+  }
+  tryCandidate(0);
+}
+
+LOD_SLOTS.forEach((slot) => loadTreeLodSlot(slot));
+
+// ── PROC TREES INIT (same as painter — user loads JSON + trunk GLB per slot) ──
+function _ptreeBuildLeafMat(slot) {
+  const m = slot.preset.material || {};
+  const w = slot.preset.wind || {};
+  const mapNode = texture(new THREE.Texture());
+  slot.leafMapNode = mapNode;
+  const u = {
+    yMin: uniform(0.0),
+    yMax: uniform(10.0),
+    bottomColor: uniform(new THREE.Color(m.bottomColor || "#1d4d22")),
+    topColor: uniform(new THREE.Color(m.topColor || "#a8e360")),
+    alphaCutoff: uniform(m.alphaCutoff ?? 0.5),
+    sssColor: uniform(new THREE.Color(m.sssColor || "#ffea00")),
+    sssStr: uniform(m.sssStrength ?? 0.9),
+    sssPow: uniform(2.0),
+    rimColor: uniform(new THREE.Color(m.rimColor || "#ffffff")),
+    rimStr: uniform(m.rimStrength ?? 2.0),
+    rimPow: uniform(m.rimPower ?? 4.0),
+    aoStr: uniform(m.aoStrength ?? 0.65),
+    sunDir: uniform(new THREE.Vector3(5, 12, 4).normalize()),
+    windSpeed: uniform(w.windSpeed ?? 1.8),
+    windStr: uniform(w.windStrength ?? 0.25),
+    leafMipBias: uniform(ptreeParams.leafMipBias),
+  };
+  slot.uniforms = u;
+  const aRand = attribute("aRand", "vec2");
+  const posNode = Fn(() => {
+    const phase = aRand.x.mul(6.2832);
+    const tipFactor = positionLocal.y.add(0.5);
+    const sway = sin(uFTreeTime.mul(u.windSpeed).add(phase))
+      .mul(u.windStr)
+      .mul(tipFactor);
+    const swayZ = cos(
+      uFTreeTime.mul(u.windSpeed.mul(0.8)).add(phase.mul(1.3)),
+    )
+      .mul(u.windStr.mul(0.5))
+      .mul(tipFactor);
+    return positionLocal.add(vec3(sway, float(0), swayZ));
+  })();
+  const colNode = Fn(() => {
+    const h1 = aRand.x;
+    const heightFactor = clamp(
+      positionWorld.y
+        .sub(u.yMin)
+        .div(max(u.yMax.sub(u.yMin), float(0.001))),
+      float(0),
+      float(1),
+    );
+    let col = mix(u.bottomColor, u.topColor, heightFactor);
+    col = col.mul(h1.mul(float(0.24)).add(float(0.88)));
+    col = col.mul(
+      mix(
+        float(1.0).sub(u.aoStr),
+        float(1.0),
+        heightFactor.mul(0.8).add(0.2),
+      ),
+    );
+    const viewDir = normalize(cameraPosition.sub(positionWorld));
+    const n = normalWorld;
+    const sss = pow(
+      max(dot(negate(u.sunDir), n), float(0)),
+      u.sssPow,
+    ).mul(u.sssStr);
+    col = col.add(u.sssColor.mul(sss));
+    const rim = pow(
+      float(1.0).sub(max(dot(n, viewDir), float(0))),
+      u.rimPow,
+    ).mul(u.rimStr);
+    col = col.add(u.rimColor.mul(rim));
+    return clamp(col, float(0), float(2));
+  })();
+  const opNode = Fn(() =>
+    smoothstep(
+      u.alphaCutoff.sub(0.05),
+      u.alphaCutoff.add(0.05),
+      mapNode.bias(u.leafMipBias).r,
+    ),
+  )();
+  const mat = new MeshStandardNodeMaterial({
+    side: THREE.DoubleSide,
+    transparent: false,
+    alphaTest: 0.01,
+    roughness: 0.88,
+    metalness: 0.0,
+    depthWrite: true,
+    alphaToCoverage: true,
+  });
+  mat.positionNode = posNode;
+  mat.colorNode = colNode;
+  mat.opacityNode = opNode;
+  mat.castShadowNode = Fn(() => {
+    const a = smoothstep(
+      u.alphaCutoff.sub(0.05),
+      u.alphaCutoff.add(0.05),
+      mapNode.bias(u.leafMipBias).r,
+    );
+    a.lessThan(float(0.5)).discard();
+    return vec4(0, 0, 0, 1);
+  })();
+  slot.leafMat = mat;
+}
+
+function _ptreeLoadLeafTex(slot) {
+  if (!slot.leafTexPath || !slot.leafMapNode) return;
+  new THREE.TextureLoader().load(slot.leafTexPath, (tex) => {
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.generateMipmaps = true;
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.anisotropy = renderer.capabilities?.maxAnisotropy ?? 8;
+    tex.needsUpdate = true;
+    slot.leafMapNode.value = tex;
+  });
+}
+
+_ptreeRebuildLeaves = function (slot) {
+  if (slot.leafMeshes) {
+    slot.leafMeshes.forEach((m) => {
+      scene.remove(m);
+      m.geometry.dispose();
+    });
+    slot.leafMeshes = null;
+  }
+  slot.leafSpheres = null;
+  slot.leafCullSphere = null;
+  for (const chunk of slot.chunks.values()) {
+    if (chunk.leafMeshes) {
+      chunk.leafMeshes.forEach((m) => {
+        scene.remove(m);
+        m.geometry.dispose();
+      });
+      chunk.leafMeshes = null;
+    }
+    chunk.leafSpheres = null;
+  }
+  _markPtreeDirty();
+  if (!slot.leafMat || !slot.preset || slot.positions.length === 0)
+    return;
+  const localLeaves = _ptreeSampleLeaves(slot.preset);
+  if (localLeaves.length === 0) return;
+  let yMin = Infinity;
+  let yMax = -Infinity;
+  slot.positions.forEach((p) => {
+    localLeaves.forEach((l) => {
+      const wy = p.y + l.ly * p.scale;
+      if (wy < yMin) yMin = wy;
+      if (wy > yMax) yMax = wy;
+    });
+  });
+  if (slot.uniforms) {
+    slot.uniforms.yMin.value = yMin - 0.3;
+    slot.uniforms.yMax.value = yMax + 0.5;
+  }
+  const leafLodTiers = (() => {
+    const tiers = [{ subset: localLeaves, mul: 1, shadow: true }];
+    if (!ptreeParams.leafDistLod) return tiers;
+    const half = localLeaves.filter((_, i) => (i & 1) === 0);
+    if (half.length > 0 && half.length < localLeaves.length) {
+      tiers.push({ subset: half, mul: Math.SQRT2, shadow: true });
+    }
+    if (
+      ptreeParams.leafLod2Dist > 0 &&
+      localLeaves.length > 3 &&
+      tiers.length >= 2
+    ) {
+      const quarter = localLeaves.filter((_, i) => (i & 3) === 0);
+      const halfSubset = tiers[1].subset;
+      if (quarter.length > 0 && quarter.length < halfSubset.length) {
+        tiers.push({
+          subset: quarter,
+          mul: 2,
+          shadow: ptreeParams.leafLod2Shadow,
+        });
+      }
+    }
+    return tiers;
+  })();
+  function buildLeafLodMesh(
+    positions,
+    leafSubset,
+    quadScaleMul,
+    castSh,
+    boundsSphere,
+  ) {
+    const n = positions.length * leafSubset.length;
+    if (n === 0) return null;
+    const geo = new THREE.PlaneGeometry(1, 1);
+    const randData = new Float32Array(n * 2);
+    for (let i = 0; i < n; i++) {
+      randData[i * 2] = Math.random();
+      randData[i * 2 + 1] = Math.random();
+    }
+    geo.setAttribute(
+      "aRand",
+      new THREE.InstancedBufferAttribute(randData, 2),
+    );
+    const mesh = new THREE.InstancedMesh(geo, slot.leafMat, n);
+    mesh.frustumCulled = false;
+    mesh.castShadow = castSh;
+    mesh.receiveShadow = false;
+    const dummy = new THREE.Object3D();
+    let idx = 0;
+    let lcx = 0;
+    let lcy = 0;
+    let lcz = 0;
+    positions.forEach((p) => {
+      leafSubset.forEach((l) => {
+        const wx = p.x + l.lx * p.scale;
+        const wy = p.y + l.ly * p.scale;
+        const wz = p.z + l.lz * p.scale;
+        lcx += wx;
+        lcy += wy;
+        lcz += wz;
+        dummy.position.set(wx, wy, wz);
+        if (l.bushLeaf === true) {
+          dummy.rotation.order = "YXZ";
+          dummy.rotation.set(l.rotX, l.rotY, l.rotZ);
+        } else {
+          dummy.rotation.order = "XYZ";
+          dummy.rotation.set(
+            Math.random() * Math.PI,
+            Math.random() * Math.PI,
+            Math.random() * Math.PI,
+          );
+        }
+        const s = Math.max(0.05, l.leafSize * p.scale * quadScaleMul);
+        dummy.scale.setScalar(s);
+        dummy.updateMatrix();
+        mesh.setMatrixAt(idx++, dummy.matrix);
+      });
+    });
+    const invN = 1 / n;
+    lcx *= invN;
+    lcy *= invN;
+    lcz *= invN;
+    let lr = 0;
+    positions.forEach((p) => {
+      leafSubset.forEach((l) => {
+        const wx = p.x + l.lx * p.scale;
+        const wy = p.y + l.ly * p.scale;
+        const wz = p.z + l.lz * p.scale;
+        const half =
+          Math.max(0.05, l.leafSize * p.scale * quadScaleMul) * 0.71;
+        const d = Math.sqrt(
+          (wx - lcx) ** 2 + (wy - lcy) ** 2 + (wz - lcz) ** 2,
+        );
+        const ext = d + half + 0.35;
+        if (ext > lr) lr = ext;
+      });
+    });
+    boundsSphere.set(new THREE.Vector3(lcx, lcy, lcz), lr);
+    mesh.instanceMatrix.needsUpdate = true;
+    scene.add(mesh);
+    return mesh;
+  }
+  function buildLeafLodsForPositions(positions, envelopeSphere) {
+    const meshes = [];
+    const spheres = [];
+    for (const tier of leafLodTiers) {
+      const sph = new THREE.Sphere();
+      const m = buildLeafLodMesh(
+        positions,
+        tier.subset,
+        tier.mul,
+        tier.shadow,
+        sph,
+      );
+      if (m) {
+        meshes.push(m);
+        spheres.push(sph);
+      }
+    }
+    if (meshes.length === 0) return;
+    if (!envelopeSphere) envelopeSphere = new THREE.Sphere();
+    _ptreeUnionLeafSpheres(spheres, envelopeSphere);
+    return { meshes, spheres, envelopeSphere };
+  }
+  const useChunks = slot.ready && slot.trunkDefs && slot.chunks.size > 0;
+  if (useChunks) {
+    for (const chunk of slot.chunks.values()) {
+      if (!chunk.leafSphere) chunk.leafSphere = new THREE.Sphere();
+      const built = buildLeafLodsForPositions(
+        chunk.positions,
+        chunk.leafSphere,
+      );
+      if (built) {
+        chunk.leafMeshes = built.meshes;
+        chunk.leafSpheres = built.spheres;
+      }
+    }
+    return;
+  }
+  slot.leafCullSphere = new THREE.Sphere();
+  const built = buildLeafLodsForPositions(
+    slot.positions,
+    slot.leafCullSphere,
+  );
+  if (built) {
+    slot.leafMeshes = built.meshes;
+    slot.leafSpheres = built.spheres;
+  }
+};
+
+_rebuildPTreeChunks = function (slot) {
+  _markPtreeDirty();
+  if (!slot || !slot.ready || !slot.trunkDefs) return;
+  const byChunk = new Map();
+  slot.positions.forEach((pos) => {
+    const key = `${Math.floor(pos.x / PTREE_CHUNK_SIZE)},${Math.floor(pos.z / PTREE_CHUNK_SIZE)}`;
+    if (!byChunk.has(key)) byChunk.set(key, []);
+    byChunk.get(key).push(pos);
+  });
+  for (const key of [...slot.chunks.keys()]) {
+    if (!byChunk.has(key)) {
+      const rm = slot.chunks.get(key);
+      rm.ims.forEach((g) => scene.remove(g.im));
+      if (rm.leafMeshes) {
+        rm.leafMeshes.forEach((m) => {
+          scene.remove(m);
+          m.geometry.dispose();
+        });
+        rm.leafMeshes = null;
+      }
+      rm.leafSpheres = null;
+      slot.chunks.delete(key);
+    }
+  }
+  for (const [key, positions] of byChunk) {
+    let chunk = slot.chunks.get(key);
+    if (!chunk) {
+      chunk = {
+        positions: [],
+        sphere: new THREE.Sphere(),
+        ims: _makeChunkIMs(slot.trunkDefs),
+        leafMeshes: null,
+        leafSpheres: null,
+        leafSphere: new THREE.Sphere(),
+      };
+      slot.chunks.set(key, chunk);
+    }
+    if (!chunk.leafSphere) chunk.leafSphere = new THREE.Sphere();
+    chunk.positions = positions;
+    let cx = 0;
+    let cy = 0;
+    let cz = 0;
+    positions.forEach((p) => {
+      cx += p.x;
+      cy += p.y;
+      cz += p.z;
+    });
+    cx /= positions.length;
+    cy /= positions.length;
+    cz /= positions.length;
+    let r = 0;
+    positions.forEach((p) => {
+      const d = Math.sqrt(
+        (p.x - cx) ** 2 + (p.y - cy) ** 2 + (p.z - cz) ** 2,
+      );
+      if (d > r) r = d;
+    });
+    chunk.sphere.set(new THREE.Vector3(cx, cy, cz), r + 20);
+    _ptreeBakeChunkTrunkMatrices(slot, chunk);
+  }
+};
+
+PTREE_SLOTS.forEach((slot) => {
+  slot.ready = true;
+});
+
+/**
+ * Removes T-junction cracks when this chunk is higher-res than an active neighbor:
+ * each boundary vertex is snapped to the neighbor's coarse edge polyline (same as
+ * that mesh's triangle strip along the seam). Also overwrites the vertex normal
+ * with the LERPED normal between the two coarse endpoints, so lighting is
+ * continuous across the LOD seam (otherwise you get a visible "ring" at LOD
+ * transitions even though geometry has no crack).
+ */
+const _stitchN0 = new THREE.Vector3();
+const _stitchN1 = new THREE.Vector3();
+function stitchMeshEdgesToCoarserNeighbors(geom, cx, cz, mySeg) {
+  const maxC = getMaxChunkIndex();
+  const half = CONFIG.chunkSize * 0.5;
+  const eps = CONFIG.chunkSize * 2e-5;
+  const pos = geom.attributes.position;
+  const normal = geom.attributes.normal;
+  const minXw = chunkMinWorldX(cx);
+  const minZw = chunkMinWorldZ(cz);
+  const _cc = chunkCenterWorld(cx, cz);
+  const cwx = _cc.x;
+  const cwz = _cc.z;
+
+  const neighborSeg = (ncx, ncz) =>
+    activeChunks.get(chunkKey(ncx, ncz))?.segments;
+
+  // Snap the vertex onto the chord between two coarse-neighbor edge vertices,
+  // and set its normal to the lerped FD normal of those two endpoints.
+  // (`alongAxis` = "z" for vertical seams, "x" for horizontal seams.)
+  function snapToCoarseSeam(
+    i,
+    alongAxis,
+    S_n,
+    seamWX,
+    seamWZ,
+    worldAlong,
+  ) {
+    const minAlong = alongAxis === "z" ? minZw : minXw;
+    const t = THREE.MathUtils.clamp(
+      (worldAlong - minAlong) / CONFIG.chunkSize,
+      0,
+      1,
+    );
+    const f = t * S_n;
+    const k = Math.min(Math.floor(f + 1e-8), S_n - 1);
+    const alpha = THREE.MathUtils.clamp(f - k, 0, 1);
+
+    // World coords of coarse endpoints k and k+1 along the seam.
+    let wx0, wz0, wx1, wz1;
+    if (alongAxis === "z") {
+      wx0 = wx1 = seamWX;
+      wz0 = minZw + (k / S_n) * CONFIG.chunkSize;
+      wz1 = minZw + ((k + 1) / S_n) * CONFIG.chunkSize;
+    } else {
+      wz0 = wz1 = seamWZ;
+      wx0 = minXw + (k / S_n) * CONFIG.chunkSize;
+      wx1 = minXw + ((k + 1) / S_n) * CONFIG.chunkSize;
+    }
+
+    // Position: lerp Y on the coarse polyline (chunk heightfield only — not baked BVH).
+    const y0 = getChunkHeightfieldHeight(wx0, wz0);
+    const y1 = getChunkHeightfieldHeight(wx1, wz1);
+    pos.setY(i, y0 + alpha * (y1 - y0));
+
+    // Normal: lerp the FD normals of the two coarse endpoints. This matches the
+    // normal field along the coarse neighbor's edge triangle, so the seam
+    // becomes lighting-continuous.
+    heightfieldNormalAt(wx0, wz0, _stitchN0);
+    heightfieldNormalAt(wx1, wz1, _stitchN1);
+    const nx = _stitchN0.x + alpha * (_stitchN1.x - _stitchN0.x);
+    const ny = _stitchN0.y + alpha * (_stitchN1.y - _stitchN0.y);
+    const nz = _stitchN0.z + alpha * (_stitchN1.z - _stitchN0.z);
+    const len = Math.hypot(nx, ny, nz) || 1;
+    normal.setXYZ(i, nx / len, ny / len, nz / len);
+  }
+
+  for (let i = 0; i < pos.count; i++) {
+    const lx = pos.getX(i);
+    const lz = pos.getZ(i);
+    const worldX = cwx + lx;
+    const worldZ = cwz + lz;
+
+    if (cx < maxC) {
+      const Sn = neighborSeg(cx + 1, cz);
+      if (Sn != null && Sn < mySeg && Math.abs(lx - half) < eps) {
+        snapToCoarseSeam(i, "z", Sn, cwx + half, 0, worldZ);
+        continue;
+      }
+    }
+    if (cx > 0) {
+      const Sn = neighborSeg(cx - 1, cz);
+      if (Sn != null && Sn < mySeg && Math.abs(lx + half) < eps) {
+        snapToCoarseSeam(i, "z", Sn, cwx - half, 0, worldZ);
+        continue;
+      }
+    }
+    if (cz > 0) {
+      const Sn = neighborSeg(cx, cz - 1);
+      if (Sn != null && Sn < mySeg && Math.abs(lz + half) < eps) {
+        snapToCoarseSeam(i, "x", Sn, 0, cwz - half, worldX);
+        continue;
+      }
+    }
+    if (cz < maxC) {
+      const Sn = neighborSeg(cx, cz + 1);
+      if (Sn != null && Sn < mySeg && Math.abs(lz - half) < eps) {
+        snapToCoarseSeam(i, "x", Sn, 0, cwz + half, worldX);
+        continue;
+      }
+    }
+  }
+}
+
+/**
+ * CCW perimeter walk on Three.js PlaneGeometry (widthSegments = heightSegments = segments).
+ * Used to build Unity-style skirts that hide micro-gaps between chunk meshes.
+ */
+const _perimeterRingCache = new Map();
+function getChunkPerimeterRingIndices(segments) {
+  let ring = _perimeterRingCache.get(segments);
+  if (ring) return ring;
+  const w = segments + 1;
+  ring = [];
+  for (let ix = 0; ix <= segments; ix++) ring.push(ix);
+  for (let iy = 1; iy <= segments; iy++) ring.push(iy * w + segments);
+  for (let ix = segments - 1; ix >= 0; ix--) ring.push(segments * w + ix);
+  for (let iy = segments - 1; iy >= 1; iy--) ring.push(iy * w);
+  _perimeterRingCache.set(segments, ring);
+  return ring;
+}
+
+/**
+ * Append downward extrusion along the chunk boundary (must run on a fresh
+ * `(segments+1)²` plane only — not on geometry that already has a skirt).
+ */
+function appendChunkTerrainSkirt(geom, segments, skirtDepth) {
+  const expected = (segments + 1) * (segments + 1);
+  if (geom.attributes.position.count !== expected) {
+    delete geom.userData.terrainTriCount;
+    return;
+  }
+  const idx = geom.index;
+  if (!idx) {
+    delete geom.userData.terrainTriCount;
+    return;
+  }
+
+  const ring = getChunkPerimeterRingIndices(segments);
+  const baseCount = expected;
+  const botCount = ring.length;
+  const newCount = baseCount + botCount;
+
+  const posArr = geom.attributes.position.array;
+  const uvArr = geom.attributes.uv.array;
+  const nArr = geom.attributes.normal.array;
+
+  const newPos = new Float32Array(newCount * 3);
+  newPos.set(posArr);
+  const newUv = new Float32Array(newCount * 2);
+  newUv.set(uvArr);
+  const newN = new Float32Array(newCount * 3);
+  newN.set(nArr);
+
+  for (let r = 0; r < botCount; r++) {
+    const ti = ring[r];
+    const bi = baseCount + r;
+    newPos[bi * 3] = posArr[ti * 3];
+    newPos[bi * 3 + 1] = posArr[ti * 3 + 1] - skirtDepth;
+    newPos[bi * 3 + 2] = posArr[ti * 3 + 2];
+    newUv[bi * 2] = uvArr[ti * 2];
+    newUv[bi * 2 + 1] = uvArr[ti * 2 + 1];
+    newN[bi * 3] = nArr[ti * 3];
+    newN[bi * 3 + 1] = nArr[ti * 3 + 1];
+    newN[bi * 3 + 2] = nArr[ti * 3 + 2];
+  }
+
+  const oldIdx = idx.array;
+  // Raycasts must ignore skirt triangles (first hit can be a vertical skirt face → wrong xz).
+  geom.userData.terrainTriCount = oldIdx.length / 3;
+  const newIdxLen = oldIdx.length + ring.length * 6;
+  const maxVertIndex = newCount - 1;
+  const newIdx =
+    maxVertIndex > 65535
+      ? new Uint32Array(newIdxLen)
+      : new Uint16Array(newIdxLen);
+  newIdx.set(oldIdx);
+  let o = oldIdx.length;
+  const L = ring.length;
+  for (let r = 0; r < L; r++) {
+    const r1 = (r + 1) % L;
+    const T0 = ring[r];
+    const T1 = ring[r1];
+    const B0 = baseCount + r;
+    const B1 = baseCount + r1;
+    newIdx[o++] = T0;
+    newIdx[o++] = T1;
+    newIdx[o++] = B0;
+    newIdx[o++] = T1;
+    newIdx[o++] = B1;
+    newIdx[o++] = B0;
+  }
+
+  geom.setAttribute("position", new THREE.BufferAttribute(newPos, 3));
+  geom.setAttribute("normal", new THREE.BufferAttribute(newN, 3));
+  geom.setAttribute("uv", new THREE.BufferAttribute(newUv, 2));
+  // setIndex() only wraps plain Arrays; raw TypedArray ends up as index with no .array — WebGPU breaks.
+  const indexBuf =
+    maxVertIndex > 65535
+      ? new THREE.Uint32BufferAttribute(newIdx, 1)
+      : new THREE.Uint16BufferAttribute(newIdx, 1);
+  geom.setIndex(indexBuf);
+  // Do NOT computeVertexNormals() here. Skirt wall triangles share the top-ring
+  // vertices with the terrain surface; averaging would blend outward wall normals
+  // into the rim and MeshStandard lighting draws a dark grid on every chunk edge.
+  geom.computeBoundingSphere();
+}
+
+function applyChunkHeightsToGeometry(geom, cx, cz, mySegments) {
+  const heights = ensureChunkData(cx, cz);
+  const pos = geom.attributes.position;
+  const baseCount = geom.userData._baseVertCount || pos.count;
+
+  // 1) Set positions from this chunk's height field (base vertices only).
+  for (let i = 0; i < baseCount; i++) {
+    const localX = pos.getX(i);
+    const localZ = pos.getZ(i);
+    const u = (localX / CONFIG.chunkSize + 0.5) * CONFIG.dataResolution;
+    const v = (localZ / CONFIG.chunkSize + 0.5) * CONFIG.dataResolution;
+    pos.setY(i, sampleChunkDataBilinear(heights, u, v));
+  }
+
+  // 2) Compute normals analytically from the world heightfield via central
+  //    differences. Both sides of any seam evaluate the same finite difference
+  //    at the same world (x,z), so edge normals match exactly across chunks
+  //    and same-LOD lighting seams disappear.
+  const center = chunkCenterWorld(cx, cz);
+  const cwx = center.x;
+  const cwz = center.z;
+  let normalAttr = geom.attributes.normal;
+  if (!normalAttr || normalAttr.count !== pos.count) {
+    normalAttr = new THREE.BufferAttribute(
+      new Float32Array(pos.count * 3),
+      3,
+    );
+    geom.setAttribute("normal", normalAttr);
+  }
+  const _n = new THREE.Vector3();
+  for (let i = 0; i < baseCount; i++) {
+    heightfieldNormalAt(cwx + pos.getX(i), cwz + pos.getZ(i), _n);
+    normalAttr.setXYZ(i, _n.x, _n.y, _n.z);
+  }
+
+  // 3) Snap LOD-boundary edges (position AND normal) to the coarse neighbor's
+  //    polyline so LOD seams are both crack-free and lighting-continuous.
+  stitchMeshEdgesToCoarserNeighbors(geom, cx, cz, mySegments);
+
+  // 4) Update skirt vertices in-place (if geometry already has skirt buffers).
+  //    Skirt verts mirror the perimeter ring, dropped by skirtDepth.
+  if (pos.count > baseCount) {
+    const ring = getChunkPerimeterRingIndices(mySegments);
+    const skirtDepth = CONFIG.terrainSkirtDepth;
+    for (let r = 0; r < ring.length; r++) {
+      const ti = ring[r];
+      const bi = baseCount + r;
+      pos.setXYZ(
+        bi,
+        pos.getX(ti),
+        pos.getY(ti) - skirtDepth,
+        pos.getZ(ti),
+      );
+      normalAttr.setXYZ(
+        bi,
+        normalAttr.getX(ti),
+        normalAttr.getY(ti),
+        normalAttr.getZ(ti),
+      );
+    }
+  } else {
+    // Fallback for geometries without pre-built skirts (e.g. from old clone path)
+    appendChunkTerrainSkirt(geom, mySegments, CONFIG.terrainSkirtDepth);
+  }
+
+  pos.needsUpdate = true;
+  normalAttr.needsUpdate = true;
+  geom.computeBoundingSphere();
+}
+
+/** Hysteresis factor — downgrade requires 20% more distance than upgrade. */
+const LOD_HYSTERESIS = 0.2;
+
+function pickLodByDistance(distance) {
+  for (const level of CONFIG.lodLevels) {
+    if (distance <= level.maxDistance) return level;
+  }
+  return CONFIG.lodLevels[CONFIG.lodLevels.length - 1];
+}
+
+/** Pick LOD with hysteresis: upgrading uses normal thresholds,
+ *  downgrading requires crossing threshold + hysteresis band. */
+function pickLodWithHysteresis(distance, currentSegments) {
+  const levels = CONFIG.lodLevels;
+  // Find the current LOD level index
+  let curIdx = levels.findIndex((l) => l.segments === currentSegments);
+  if (curIdx < 0) curIdx = 0;
+
+  // What LOD would a fresh pick give?
+  const freshLod = pickLodByDistance(distance);
+  const freshIdx = levels.indexOf(freshLod);
+
+  // Upgrading (closer = lower index = more detail) — use normal threshold
+  if (freshIdx <= curIdx) return freshLod;
+
+  // Downgrading (farther = higher index = less detail) — require extra distance
+  // Stay at current LOD unless distance exceeds current level's maxDistance + hysteresis
+  const curMax = levels[curIdx].maxDistance;
+  if (curMax === Infinity) return levels[curIdx];
+  if (distance <= curMax * (1 + LOD_HYSTERESIS)) return levels[curIdx];
+
+  // Passed the hysteresis band — allow downgrade
+  return freshLod;
+}
+
+function createChunk(cx, cz, lodLevel) {
+  const center = chunkCenterWorld(cx, cz);
+  const geom = acquireChunkGeometry(lodLevel.segments);
+  applyChunkHeightsToGeometry(geom, cx, cz, lodLevel.segments);
+
+  const mesh = new THREE.Mesh(
+    geom,
+    resolveTerrainMaterial(cx, cz, lodLevel),
+  );
+  mesh.position.copy(center);
+  // Per-mesh frustum culling forced off: WebGPU bind-group cold-start on
+  // chunks entering the frustum during orbit causes visible frame hitches.
+  mesh.frustumCulled = false;
+  mesh.receiveShadow = true;
+  mesh.userData.chunkKey = chunkKey(cx, cz);
+  // Store per-chunk textures for shared TSL ground material's onBeforeRender
+  const splat = ensureChunkSplat(cx, cz);
+  mesh.userData._tslSplat = splat.tex;
+  mesh.userData._tslImg = splat.imgTex;
+  mesh.userData._tslMeadow = splat.meadowTex;
+  setupTslGroundMeshSwap(mesh, sharedTslGround);
+  setupImgTexMeshSwap(mesh, sharedImgTex);
+  scene.add(mesh);
+
+  return {
+    cx,
+    cz,
+    lodLabel: lodLevel.label,
+    segments: lodLevel.segments,
+    mesh,
+    triCount: geom.index
+      ? geom.index.count / 3
+      : geom.attributes.position.count / 3,
+    stitchSig: undefined,
+  };
+}
+
+function removeChunk(chunk) {
+  scene.remove(chunk.mesh);
+  releaseChunkGeometry(chunk.mesh.geometry, chunk.segments);
+}
+
+/** Clear so LOD seam pass will rebuild after height / neighbor changes. */
+function invalidateLodStitchSignaturesForKeys(chunkKeys) {
+  const expanded = expandChunkKeysWithNeighbors(chunkKeys);
+  for (const k of expanded) {
+    const ch = activeChunks.get(k);
+    if (ch) ch.stitchSig = undefined;
+  }
+}
+
+/**
+ * Signature of LOD neighborhood — when unchanged, skip expensive dispose+rebuild seam pass.
+ * (Previously we rebuilt every ~120ms on every abutsCoarser chunk → huge idle CPU/GPU cost.)
+ */
+const _stitchDirs = [
+  [1, 0],
+  [-1, 0],
+  [0, 1],
+  [0, -1],
+];
+function computeLodStitchSignature(key, chunk) {
+  const { cx, cz } = parseChunkKey(key);
+  const maxIdx = getMaxChunkIndex();
+  // Pack into a single integer: seg(8) | abuts(1) | 4x neighbor seg slots (8 each)
+  // Segment values: 16,32,64 or -1(none) or 0(OOB) — all fit in 8 bits (signed +128 offset)
+  let sig = (chunk.segments & 0xff) << 25;
+  let abutsCoarser = false;
+  for (let d = 0; d < 4; d++) {
+    const ncx = cx + _stitchDirs[d][0];
+    const ncz = cz + _stitchDirs[d][1];
+    let s = 0; // OOB sentinel
+    if (ncx >= 0 && ncz >= 0 && ncx <= maxIdx && ncz <= maxIdx) {
+      const nb = activeChunks.get(chunkKey(ncx, ncz));
+      s = nb ? nb.segments : -1;
+      if (nb && nb.segments < chunk.segments) abutsCoarser = true;
+    }
+    sig |= ((s + 128) & 0xff) << (d * 6);
+  }
+  if (abutsCoarser) sig |= 1 << 24;
+  return sig;
+}
+
+const _neededChunks = new Set();
+let _lastFrustumCullParam = PARAMS.terrainChunkCulling;
+let _ucAnchor = new THREE.Vector3();
+let _ucChunksCreated = 0;
+let _ucCheapCreated = 0;
+const _UC_MAX_CREATES = 2;
+/** Distant chunks (≤8 segments) are nearly free — allow many per frame so mountains don't pop in. */
+const _UC_MAX_CHEAP = 32;
+const _UC_CHEAP_THRESHOLD = 8;
+
+function _canCreate(lod) {
+  if (lod.segments <= _UC_CHEAP_THRESHOLD)
+    return _ucCheapCreated < _UC_MAX_CHEAP;
+  return _ucChunksCreated < _UC_MAX_CREATES;
+}
+function _countCreate(lod) {
+  if (lod.segments <= _UC_CHEAP_THRESHOLD) _ucCheapCreated++;
+  else _ucChunksCreated++;
+}
+
+function _visitChunk(cx, cz, camChunkX, camChunkZ, maxChunk) {
+  const key = chunkKey(cx, cz);
+  _neededChunks.add(key);
+
+  const center = chunkCenterWorld(cx, cz);
+  const dist = center.distanceTo(_ucAnchor);
+
+  const existing = activeChunks.get(key);
+  if (!existing) {
+    const lod = PARAMS.terrainLodEnabled
+      ? pickLodByDistance(dist)
+      : CONFIG.lodLevels[0];
+    if (_canCreate(lod)) {
+      activeChunks.set(key, createChunk(cx, cz, lod));
+      dirtyChunks.delete(key);
+      _countCreate(lod);
+    }
+    return;
+  }
+
+  // Use hysteresis for existing chunks to prevent LOD flipping during orbit
+  const lod = PARAMS.terrainLodEnabled
+    ? pickLodWithHysteresis(dist, existing.segments)
+    : CONFIG.lodLevels[0];
+
+  if (existing.segments !== lod.segments) {
+    if (_canCreate(lod)) {
+      removeChunk(existing);
+      activeChunks.set(key, createChunk(cx, cz, lod));
+      dirtyChunks.delete(key);
+      _countCreate(lod);
+    }
+    return;
+  }
+
+  if (dirtyChunks.has(key)) {
+    if (_canCreate(lod)) {
+      removeChunk(existing);
+      activeChunks.set(key, createChunk(cx, cz, lod));
+      dirtyChunks.delete(key);
+      _countCreate(lod);
+    }
+  }
+}
+
+function updateChunkSet() {
+  _ucAnchor.copy(playMode ? playerPos : camera.position);
+  const camChunkX = Math.floor(
+    (_ucAnchor.x + worldHalf) / CONFIG.chunkSize,
+  );
+  const camChunkZ = Math.floor(
+    (_ucAnchor.z + worldHalf) / CONFIG.chunkSize,
+  );
+
+  _neededChunks.clear();
+  _ucChunksCreated = 0;
+  _ucCheapCreated = 0;
+  const maxChunk = Math.floor(CONFIG.worldSize / CONFIG.chunkSize);
+
+  if (PARAMS.terrainChunkCulling) {
+    for (
+      let dz = -CONFIG.activeRadiusInChunks;
+      dz <= CONFIG.activeRadiusInChunks;
+      dz++
+    ) {
+      for (
+        let dx = -CONFIG.activeRadiusInChunks;
+        dx <= CONFIG.activeRadiusInChunks;
+        dx++
+      ) {
+        const cx = camChunkX + dx;
+        const cz = camChunkZ + dz;
+        if (cx < 0 || cz < 0 || cx >= maxChunk || cz >= maxChunk)
+          continue;
+        _visitChunk(cx, cz, camChunkX, camChunkZ, maxChunk);
+      }
+    }
+  } else {
+    for (let cz = 0; cz < maxChunk; cz++) {
+      for (let cx = 0; cx < maxChunk; cx++) {
+        _visitChunk(cx, cz, camChunkX, camChunkZ, maxChunk);
+      }
+    }
+  }
+
+  // terrainChunkCulling now only controls ring streaming; per-mesh
+  // frustumCulled stays false to avoid WebGPU bind-group cold-start hitches.
+  if (_lastFrustumCullParam !== PARAMS.terrainChunkCulling) {
+    _lastFrustumCullParam = PARAMS.terrainChunkCulling;
+    for (const ch of activeChunks.values()) {
+      ch.mesh.frustumCulled = false;
+    }
+  }
+
+  const maxIdx = getMaxChunkIndex();
+  const MAX_STITCH_REBUILDS = 2;
+  let stitchRebuilds = 0;
+  for (const [, chunk] of activeChunks) {
+    const key = chunk.mesh.userData.chunkKey;
+    if (!_neededChunks.has(key)) continue;
+    const cx = chunk.cx;
+    const cz = chunk.cz;
+    let abutsCoarser = false;
+    for (let d = 0; d < 4; d++) {
+      const ncx = cx + _stitchDirs[d][0];
+      const ncz = cz + _stitchDirs[d][1];
+      if (ncx < 0 || ncz < 0 || ncx > maxIdx || ncz > maxIdx) continue;
+      const nb = activeChunks.get(chunkKey(ncx, ncz));
+      if (nb && nb.segments < chunk.segments) {
+        abutsCoarser = true;
+        break;
+      }
+    }
+
+    const sig = computeLodStitchSignature(key, chunk);
+    if (chunk.stitchSig === sig) continue;
+
+    const needGeomRebuild = abutsCoarser || chunk.stitchSig !== undefined;
+    if (needGeomRebuild) {
+      if (stitchRebuilds >= MAX_STITCH_REBUILDS) continue;
+      const oldG = chunk.mesh.geometry;
+      releaseChunkGeometry(oldG, chunk.segments);
+      chunk.mesh.geometry = acquireChunkGeometry(chunk.segments);
+      applyChunkHeightsToGeometry(
+        chunk.mesh.geometry,
+        cx,
+        cz,
+        chunk.segments,
+      );
+      const g = chunk.mesh.geometry;
+      chunk.triCount = g.index
+        ? g.index.count / 3
+        : g.attributes.position.count / 3;
+      stitchRebuilds++;
+    }
+    chunk.stitchSig = sig;
+  }
+
+  for (const [key, chunk] of activeChunks) {
+    if (!_neededChunks.has(key)) {
+      removeChunk(chunk);
+      activeChunks.delete(key);
+    }
+  }
+}
+
+function enterPlayMode() {
+  if (playMode) return;
+  playMode = true;
+  playMovementMode = "capsule";
+  playCamView = "follow";
+  isoYaw = Math.PI / 4;
+  isoDist = ISO_DIST_DEFAULT;
+  playFlyHeight = 0;
+  playPlaneForwardSpeed = 0;
+  PARAMS.mode = "play";
+  savedCamPos = camera.position.clone();
+  savedTarget = controls.target.clone();
+  playerPos.set(controls.target.x, 0, controls.target.z);
+  playerPos.y = getWorldHeight(playerPos.x, playerPos.z);
+  camYaw = 0;
+  camPitch = 0.35;
+  capsuleMesh.visible = true;
+  if (playPlaneRoot) playPlaneRoot.visible = false;
+  if (playCharRoot) playCharRoot.visible = false;
+  if (playCarRoot) playCarRoot.visible = false;
+  syncRoadHandlesVisibility();
+  controls.enabled = false;
+  brushMarker.visible = false;
+  rampMarkerA.visible = false;
+  if (barrierOverlayMesh) barrierOverlayMesh.visible = false;
+  if (holeOverlayMesh) holeOverlayMesh.visible = false;
+  transformControls.enabled = false;
+  transformControls.detach();
+  if (tcHelper) tcHelper.visible = false;
+  selectedCliff = null;
+  cliffInstancer.clearSelection();
+  selectWaterfall(null);
+  selectWater(null);
+  selectProp(null);
+  selectDecal(null);
+  syncModeBadge();
+  if (editorPane) editorPane.refresh();
+  const tpEl = document.querySelector(".tp-dfwv");
+  if (tpEl) tpEl.style.display = "none";
+  updateChunkSet();
+  renderer.domElement.style.cursor = "none";
+  renderer.domElement.requestPointerLock();
+}
+
+function exitPlayMode() {
+  if (!playMode) return;
+  playMode = false;
+  playMovementMode = "capsule";
+  playCamView = "follow";
+  playFlyHeight = 0;
+  playPlaneForwardSpeed = 0;
+  playPlaneRingBoostT = 0;
+  clearFlightRings();
+  moveTarget = null;
+  moveRing.visible = false;
+  flyBarrelActive = false;
+  flyBarrelPhase = 0;
+  flyBarrelSign = 1;
+  flyGroundCamYawOff = 0;
+  for (const k of Object.keys(keysHeld)) delete keysHeld[k];
+  capsuleMesh.visible = false;
+  if (playPlaneRoot) playPlaneRoot.visible = false;
+  if (playCharRoot) playCharRoot.visible = false;
+  if (playCarRoot) playCarRoot.visible = false;
+  clearWingTrails();
+  flyHudEl.classList.remove("visible");
+  _flyHudVisible = false;
+  if (savedCamPos) camera.position.copy(savedCamPos);
+  if (savedTarget) {
+    controls.target.copy(savedTarget);
+    camera.lookAt(savedTarget);
+  }
+  controls.enabled = true;
+  const tpEl = document.querySelector(".tp-dfwv");
+  if (tpEl) tpEl.style.display = "";
+  if (document.pointerLockElement) document.exitPointerLock();
+  renderer.domElement.style.cursor = "";
+  syncModeBadge();
+  syncRoadHandlesVisibility();
+  syncBarrierOverlayFromParams();
+  syncHoleOverlayFromParams();
+}
+
+function rebuildDirtyActiveChunks(limit = 8) {
+  let done = 0;
+  for (const key of dirtyChunks) {
+    const active = activeChunks.get(key);
+    if (active) {
+      const lod =
+        CONFIG.lodLevels.find((l) => l.segments === active.segments) ??
+        CONFIG.lodLevels[0];
+      removeChunk(active);
+      activeChunks.set(key, createChunk(active.cx, active.cz, lod));
+    }
+    dirtyChunks.delete(key);
+    done++;
+    if (done >= limit) break;
+  }
+}
+
+function worldToChunkIndex(worldX, worldZ) {
+  return {
+    cx: Math.floor((worldX + worldHalf) / CONFIG.chunkSize),
+    cz: Math.floor((worldZ + worldHalf) / CONFIG.chunkSize),
+  };
+}
+
+/** Matches splatmap-painter sculptAt: (brushStrength/100)*0.4 per frame factor. */
+function sculptPainterStrengthFactor() {
+  return (PARAMS.brushStrength / 100) * 0.4;
+}
+
+function finalizeSculpt(brushedChunkKeys, seamLimit) {
+  syncSeamsAfterSculpt(brushedChunkKeys, seamLimit);
+  invalidateLodStitchSignaturesForKeys(brushedChunkKeys);
+  heightTexDirty = true;
+  invalidateBvhHeight();
+}
+
+/** Global height grid vertex count along one axis (Nc * RES inclusive indices 0..maxG). */
+function erosionGlobalGridMax() {
+  return (getMaxChunkIndex() + 1) * CONFIG.dataResolution;
+}
+
+function globalGridVertToChunk(ig) {
+  const RES = CONFIG.dataResolution;
+  const maxC = getMaxChunkIndex();
+  const maxG = erosionGlobalGridMax();
+  if (ig < 0 || ig > maxG) return null;
+  if (ig === maxG) return { c: maxC, i: RES };
+  const c = Math.floor(ig / RES);
+  const i = ig - c * RES;
+  return { c, i };
+}
+
+function heightAtGlobalGrid(igx, igz) {
+  const STEP = CONFIG.chunkSize / CONFIG.dataResolution;
+  const wx = -worldHalf + igx * STEP;
+  const wz = -worldHalf + igz * STEP;
+  return getChunkHeightfieldHeight(wx, wz);
+}
+
+function addHeightDeltaGlobalVertex(igx, igz, delta, brushedChunkKeys) {
+  if (Math.abs(delta) < 1e-14) return;
+  const locX = globalGridVertToChunk(igx);
+  const locZ = globalGridVertToChunk(igz);
+  if (!locX || !locZ) return;
+  const heights = ensureChunkData(locX.c, locZ.c);
+  const idx = getChunkDataIndex(locX.i, locZ.i);
+  heights[idx] = THREE.MathUtils.clamp(
+    heights[idx] + delta,
+    PARAMS.sculptClampMin,
+    PARAMS.sculptClampMax,
+  );
+  const k = chunkKey(locX.c, locZ.c);
+  dirtyChunks.add(k);
+  brushedChunkKeys.add(k);
+}
+
+function erosionSampleHG(px, pz) {
+  const maxG = erosionGlobalGridMax();
+  const x0 = Math.floor(px);
+  const z0 = Math.floor(pz);
+  const x1 = Math.min(maxG, x0 + 1);
+  const z1 = Math.min(maxG, z0 + 1);
+  const tx = px - x0;
+  const tz = pz - z0;
+  const h00 = heightAtGlobalGrid(x0, z0);
+  const h10 = heightAtGlobalGrid(x1, z0);
+  const h01 = heightAtGlobalGrid(x0, z1);
+  const h11 = heightAtGlobalGrid(x1, z1);
+  return {
+    h:
+      h00 * (1 - tx) * (1 - tz) +
+      h10 * tx * (1 - tz) +
+      h01 * (1 - tx) * tz +
+      h11 * tx * tz,
+    gx: (h10 - h00) * (1 - tz) + (h11 - h01) * tz,
+    gz: (h01 - h00) * (1 - tx) + (h11 - h10) * tx,
+  };
+}
+
+function erosionDepositGrid(px, pz, amt, brushedChunkKeys) {
+  if (Math.abs(amt) < 1e-14) return;
+  const maxG = erosionGlobalGridMax();
+  const x0 = Math.floor(px);
+  const z0 = Math.floor(pz);
+  const x1 = Math.min(maxG, x0 + 1);
+  const z1 = Math.min(maxG, z0 + 1);
+  const tx = px - x0;
+  const tz = pz - z0;
+  addHeightDeltaGlobalVertex(
+    x0,
+    z0,
+    amt * (1 - tx) * (1 - tz),
+    brushedChunkKeys,
+  );
+  addHeightDeltaGlobalVertex(
+    x1,
+    z0,
+    amt * tx * (1 - tz),
+    brushedChunkKeys,
+  );
+  addHeightDeltaGlobalVertex(
+    x0,
+    z1,
+    amt * (1 - tx) * tz,
+    brushedChunkKeys,
+  );
+  addHeightDeltaGlobalVertex(x1, z1, amt * tx * tz, brushedChunkKeys);
+}
+
+function erosionErodeKernel(
+  px,
+  pz,
+  amt,
+  bOffX,
+  bOffZ,
+  bW,
+  brushedChunkKeys,
+) {
+  const maxG = erosionGlobalGridMax();
+  const cx = Math.floor(px);
+  const cz = Math.floor(pz);
+  for (let i = 0; i < bW.length; i++) {
+    const nx = cx + bOffX[i];
+    const nz = cz + bOffZ[i];
+    if (nx < 0 || nx > maxG || nz < 0 || nz > maxG) continue;
+    addHeightDeltaGlobalVertex(nx, nz, -amt * bW[i], brushedChunkKeys);
+  }
+}
+
+function buildErosionKernel(erRad) {
+  const r = Math.ceil(erRad);
+  const bOffX = [];
+  const bOffZ = [];
+  const bW = [];
+  let totalW = 0;
+  for (let dz = -r; dz <= r; dz++) {
+    for (let dx = -r; dx <= r; dx++) {
+      const dist = Math.sqrt(dx * dx + dz * dz);
+      if (dist >= erRad) continue;
+      const w = erRad - dist;
+      bOffX.push(dx);
+      bOffZ.push(dz);
+      bW.push(w);
+      totalW += w;
+    }
+  }
+  for (let i = 0; i < bW.length; i++) bW[i] /= totalW;
+  return { bOffX, bOffZ, bW };
+}
+
+/** One brush stroke — splatmap-painter sculptAt erosion block (chunked heightfield). */
+function applyErosionBrushAt(worldPoint) {
+  const Ke = PARAMS.erosion.erosionRate;
+  const Kd = PARAMS.erosion.depositionRate;
+  const Kev = PARAMS.erosion.evaporation;
+  const Kin = PARAMS.erosion.inertia;
+  const Kc = PARAMS.erosion.capacity;
+  const erRad = PARAMS.erosion.radius;
+  const G = 4;
+  const maxSteps = 60;
+  const minSlope = 0.001;
+
+  const radius = sculptBrushWorldRadius();
+  const STEP = CONFIG.chunkSize / CONFIG.dataResolution;
+  const maxG = erosionGlobalGridMax();
+  const gcx = (worldPoint.x + worldHalf) / STEP;
+  const gcz = (worldPoint.z + worldHalf) / STEP;
+  const gridR = radius / STEP;
+  const N = Math.max(1, Math.round(PARAMS.brushStrength * 1.5));
+
+  const { bOffX, bOffZ, bW } = buildErosionKernel(erRad);
+  const brushedChunkKeys = new Set();
+
+  for (let iter = 0; iter < N; iter++) {
+    const angle = Math.random() * 2 * Math.PI;
+    const rr = Math.sqrt(Math.random()) * gridR;
+    let px = gcx + Math.cos(angle) * rr;
+    let pz = gcz + Math.sin(angle) * rr;
+    if (px < 1 || px >= maxG - 1 || pz < 1 || pz >= maxG - 1) continue;
+
+    let ddx = 0;
+    let ddz = 0;
+    let speed = 1;
+    let water = 1;
+    let sediment = 0;
+
+    for (let step = 0; step < maxSteps; step++) {
+      const { h, gx, gz } = erosionSampleHG(px, pz);
+      ddx = ddx * Kin - gx * (1 - Kin);
+      ddz = ddz * Kin - gz * (1 - Kin);
+      const len = Math.sqrt(ddx * ddx + ddz * ddz) || 1;
+      ddx /= len;
+      ddz /= len;
+      const nx2 = px + ddx;
+      const nz2 = pz + ddz;
+      if (nx2 < 0 || nx2 >= maxG || nz2 < 0 || nz2 >= maxG) break;
+
+      const dh = erosionSampleHG(nx2, nz2).h - h;
+      const cap = Math.max(minSlope, -dh) * speed * water * Kc;
+      if (sediment > cap || dh > 0) {
+        const amt =
+          dh > 0 ? Math.min(sediment, dh) : (sediment - cap) * Kd;
+        sediment -= amt;
+        erosionDepositGrid(px, pz, amt, brushedChunkKeys);
+      } else {
+        const amt = Math.min((cap - sediment) * Ke, -dh + 0.001);
+        sediment += amt;
+        erosionErodeKernel(
+          px,
+          pz,
+          amt,
+          bOffX,
+          bOffZ,
+          bW,
+          brushedChunkKeys,
+        );
+      }
+      speed = Math.min(8, Math.sqrt(Math.max(0, speed * speed - dh * G)));
+      water *= 1 - Kev;
+      if (water < 0.005) break;
+      px = nx2;
+      pz = nz2;
+    }
+    erosionDepositGrid(px, pz, sediment * Kd, brushedChunkKeys);
+  }
+
+  finalizeSculpt(brushedChunkKeys, {
+    wx: worldPoint.x,
+    wz: worldPoint.z,
+    radius,
+  });
+}
+
+/** Full-world pass — splatmap-painter runErosion (chunked). */
+function runGlobalErosion() {
+  pushTerrainUndo();
+  const Ke = PARAMS.erosion.erosionRate;
+  const Kd = PARAMS.erosion.depositionRate;
+  const Kev = PARAMS.erosion.evaporation;
+  const Kin = PARAMS.erosion.inertia;
+  const Kc = PARAMS.erosion.capacity;
+  const erRad = PARAMS.erosion.radius;
+  const G = 4;
+  const maxSteps = 80;
+  const minSlope = 0.001;
+  const N = PARAMS.erosion.iterations;
+
+  const { bOffX, bOffZ, bW } = buildErosionKernel(erRad);
+  const maxG = erosionGlobalGridMax();
+  const brushedChunkKeys = new Set();
+
+  for (let iter = 0; iter < N; iter++) {
+    let px = 1 + Math.random() * (maxG - 2);
+    let pz = 1 + Math.random() * (maxG - 2);
+    let dx = 0;
+    let dz = 0;
+    let speed = 1;
+    let water = 1;
+    let sediment = 0;
+
+    for (let step = 0; step < maxSteps; step++) {
+      const { h, gx, gz } = erosionSampleHG(px, pz);
+      dx = dx * Kin - gx * (1 - Kin);
+      dz = dz * Kin - gz * (1 - Kin);
+      const len = Math.sqrt(dx * dx + dz * dz) || 1;
+      dx /= len;
+      dz /= len;
+      const nx = px + dx;
+      const nz = pz + dz;
+      if (nx < 0 || nx >= maxG || nz < 0 || nz >= maxG) break;
+
+      const newH = erosionSampleHG(nx, nz).h;
+      const dh = newH - h;
+      const slope = Math.max(minSlope, -dh);
+      const cap = slope * speed * water * Kc;
+
+      if (sediment > cap || dh > 0) {
+        const amt =
+          dh > 0 ? Math.min(sediment, dh) : (sediment - cap) * Kd;
+        sediment -= amt;
+        erosionDepositGrid(px, pz, amt, brushedChunkKeys);
+      } else {
+        const amt = Math.min((cap - sediment) * Ke, -dh + 0.001);
+        sediment += amt;
+        erosionErodeKernel(
+          px,
+          pz,
+          amt,
+          bOffX,
+          bOffZ,
+          bW,
+          brushedChunkKeys,
+        );
+      }
+      speed = Math.sqrt(Math.max(0, speed * speed - dh * G));
+      speed = Math.min(speed, 8);
+      water *= 1 - Kev;
+      if (water < 0.005) break;
+      px = nx;
+      pz = nz;
+    }
+    erosionDepositGrid(px, pz, sediment * Kd, brushedChunkKeys);
+  }
+
+  finalizeSculpt(brushedChunkKeys, null);
+  syncTreeLodHeights();
+  syncPTreeHeights();
+  syncObjectSlotsHeights();
+  syncPropObjectsHeights();
+  rebuildAllActiveChunkMeshes();
+  if (editorPane) editorPane.refresh();
+}
+
+// CPU FBM for sculpt shapes (same math as splatmap-painter _fbm / _fbmRidge)
+function _sculptH2(x, y) {
+  const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+  return n - Math.floor(n);
+}
+function _sculptSn2(x, y) {
+  const ix = Math.floor(x);
+  const iy = Math.floor(y);
+  const fx = x - ix;
+  const fy = y - iy;
+  const u = fx * fx * (3 - 2 * fx);
+  const v = fy * fy * (3 - 2 * fy);
+  return (
+    _sculptH2(ix, iy) * (1 - u) * (1 - v) +
+    _sculptH2(ix + 1, iy) * u * (1 - v) +
+    _sculptH2(ix, iy + 1) * (1 - u) * v +
+    _sculptH2(ix + 1, iy + 1) * u * v
+  );
+}
+function _sculptFbm(x, y, oct = 5) {
+  const o = Math.max(1, Math.min(8, Math.round(oct)));
+  let s = 0;
+  let a = 0.5;
+  let f = 1;
+  let m = 0;
+  for (let i = 0; i < o; i++) {
+    s += _sculptSn2(x * f, y * f) * a;
+    m += a;
+    a *= 0.5;
+    f *= 2;
+  }
+  return m > 0 ? s / m : 0;
+}
+function _sculptFbmRidge(x, y, oct = 6) {
+  let s = 0;
+  let a = 0.5;
+  let f = 1;
+  let m = 0;
+  for (let i = 0; i < oct; i++) {
+    const n = _sculptSn2(x * f, y * f);
+    s += (1.0 - Math.abs(n * 2.0 - 1.0)) * a;
+    m += a;
+    a *= 0.5;
+    f *= 2.1;
+  }
+  return s / m;
+}
+
+/** New seed each sculpt mousedown — FBM peak variation (painter: brushNoiseSeed). */
+let sculptBrushNoiseSeed = 0;
+
+function applyRaiseLowerAt(worldPoint, sign) {
+  const radius = sculptBrushWorldRadius();
+  const strength = sculptPainterStrengthFactor();
+  const brush = PARAMS.sculptBrush;
+  const step = CONFIG.chunkSize / CONFIG.dataResolution;
+  const min = worldToChunkIndex(
+    worldPoint.x - radius,
+    worldPoint.z - radius,
+  );
+  const max = worldToChunkIndex(
+    worldPoint.x + radius,
+    worldPoint.z + radius,
+  );
+  const maxChunk = getMaxChunkIndex();
+
+  const minCx = THREE.MathUtils.clamp(min.cx, 0, maxChunk);
+  const minCz = THREE.MathUtils.clamp(min.cz, 0, maxChunk);
+  const maxCx = THREE.MathUtils.clamp(max.cx, 0, maxChunk);
+  const maxCz = THREE.MathUtils.clamp(max.cz, 0, maxChunk);
+
+  const brushedChunkKeys = new Set();
+  const r2 = radius * radius;
+
+  for (let cz = minCz; cz <= maxCz; cz++) {
+    for (let cx = minCx; cx <= maxCx; cx++) {
+      const heights = ensureChunkData(cx, cz);
+      const minX = chunkMinWorldX(cx);
+      const minZ = chunkMinWorldZ(cz);
+      let changed = false;
+
+      for (let iz = 0; iz <= CONFIG.dataResolution; iz++) {
+        const wz = minZ + iz * step;
+        const dz = wz - worldPoint.z;
+        if (Math.abs(dz) > radius) continue;
+
+        for (let ix = 0; ix <= CONFIG.dataResolution; ix++) {
+          const wx = minX + ix * step;
+          const dx = wx - worldPoint.x;
+          if (Math.abs(dx) > radius) continue;
+
+          const distSq = dx * dx + dz * dz;
+          if (distSq > r2) continue;
+          const dist = Math.sqrt(distSq);
+          const t = dist / radius;
+
+          let delta = 0;
+          if (brush === "fbm_peak") {
+            const ridgeSc = 3.5 / radius;
+            const ridge = _sculptFbmRidge(
+              dx * ridgeSc + sculptBrushNoiseSeed,
+              dz * ridgeSc + sculptBrushNoiseSeed,
+              6,
+            );
+            const spike = Math.pow(Math.max(0, 1 - t), 2.5);
+            const shape = spike * (0.35 + ridge * 1.8);
+            delta = sign * Math.max(0, shape) * strength * 2.0;
+          } else if (brush === "crater") {
+            const rim = Math.exp(-Math.pow(t - 0.55, 2) / 0.04) * 1.2;
+            const pit = Math.max(0, 1 - t * 4) * 0.6;
+            delta = sign * (rim - pit) * strength * 0.8;
+          } else if (brush === "plateau") {
+            const flat = Math.max(
+              0,
+              1 - Math.pow(Math.max(0, t - 0.6) / 0.4, 2),
+            );
+            delta = sign * flat * strength * 0.7;
+          } else {
+            delta = sign * brushFalloff(t) * strength;
+          }
+
+          const idx = getChunkDataIndex(ix, iz);
+          heights[idx] = THREE.MathUtils.clamp(
+            heights[idx] + delta,
+            PARAMS.sculptClampMin,
+            PARAMS.sculptClampMax,
+          );
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        const k = chunkKey(cx, cz);
+        dirtyChunks.add(k);
+        brushedChunkKeys.add(k);
+      }
+    }
+  }
+
+  finalizeSculpt(brushedChunkKeys, {
+    wx: worldPoint.x,
+    wz: worldPoint.z,
+    radius,
+  });
+}
+
+function applyNoiseAt(worldPoint) {
+  const radius = sculptBrushWorldRadius();
+  const strength = sculptPainterStrengthFactor();
+  const freq = PARAMS.noiseScale / Math.max(radius, 1e-6);
+  const oct = Math.max(1, Math.min(8, Math.round(PARAMS.noiseOctaves)));
+  const step = CONFIG.chunkSize / CONFIG.dataResolution;
+  const min = worldToChunkIndex(
+    worldPoint.x - radius,
+    worldPoint.z - radius,
+  );
+  const max = worldToChunkIndex(
+    worldPoint.x + radius,
+    worldPoint.z + radius,
+  );
+  const maxChunk = getMaxChunkIndex();
+  const minCx = THREE.MathUtils.clamp(min.cx, 0, maxChunk);
+  const minCz = THREE.MathUtils.clamp(min.cz, 0, maxChunk);
+  const maxCx = THREE.MathUtils.clamp(max.cx, 0, maxChunk);
+  const maxCz = THREE.MathUtils.clamp(max.cz, 0, maxChunk);
+  const brushedChunkKeys = new Set();
+  const r2 = radius * radius;
+
+  for (let cz = minCz; cz <= maxCz; cz++) {
+    for (let cx = minCx; cx <= maxCx; cx++) {
+      const heights = ensureChunkData(cx, cz);
+      const minX = chunkMinWorldX(cx);
+      const minZ = chunkMinWorldZ(cz);
+      let changed = false;
+
+      for (let iz = 0; iz <= CONFIG.dataResolution; iz++) {
+        const wz = minZ + iz * step;
+        const dz = wz - worldPoint.z;
+        if (Math.abs(dz) > radius) continue;
+
+        for (let ix = 0; ix <= CONFIG.dataResolution; ix++) {
+          const wx = minX + ix * step;
+          const dx = wx - worldPoint.x;
+          if (Math.abs(dx) > radius) continue;
+
+          const distSq = dx * dx + dz * dz;
+          if (distSq > r2) continue;
+          const dist = Math.sqrt(distSq);
+          const t = dist / radius;
+          const falloff = (1 - t) * (1 - t);
+          const n =
+            _sculptFbm(
+              wx * freq + sculptBrushNoiseSeed,
+              wz * freq + sculptBrushNoiseSeed * 1.3,
+              oct,
+            ) - 0.5;
+          const delta = n * falloff * strength * 4;
+          const idx = getChunkDataIndex(ix, iz);
+          heights[idx] = THREE.MathUtils.clamp(
+            heights[idx] + delta,
+            PARAMS.sculptClampMin,
+            PARAMS.sculptClampMax,
+          );
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        const k = chunkKey(cx, cz);
+        dirtyChunks.add(k);
+        brushedChunkKeys.add(k);
+      }
+    }
+  }
+
+  finalizeSculpt(brushedChunkKeys, {
+    wx: worldPoint.x,
+    wz: worldPoint.z,
+    radius,
+  });
+}
+
+function applyTerraceAt(worldPoint) {
+  const radius = sculptBrushWorldRadius();
+  const strength = sculptPainterStrengthFactor();
+  const stepH = Math.max(0.25, PARAMS.terraceStep);
+  const sharpRaw = PARAMS.terraceSharpness;
+  const sharpness = THREE.MathUtils.clamp(sharpRaw, 0.05, 0.95);
+  const step = CONFIG.chunkSize / CONFIG.dataResolution;
+  const min = worldToChunkIndex(
+    worldPoint.x - radius,
+    worldPoint.z - radius,
+  );
+  const max = worldToChunkIndex(
+    worldPoint.x + radius,
+    worldPoint.z + radius,
+  );
+  const maxChunk = getMaxChunkIndex();
+  const minCx = THREE.MathUtils.clamp(min.cx, 0, maxChunk);
+  const minCz = THREE.MathUtils.clamp(min.cz, 0, maxChunk);
+  const maxCx = THREE.MathUtils.clamp(max.cx, 0, maxChunk);
+  const maxCz = THREE.MathUtils.clamp(max.cz, 0, maxChunk);
+  const brushedChunkKeys = new Set();
+  const r2 = radius * radius;
+
+  for (let cz = minCz; cz <= maxCz; cz++) {
+    for (let cx = minCx; cx <= maxCx; cx++) {
+      const heights = ensureChunkData(cx, cz);
+      const minX = chunkMinWorldX(cx);
+      const minZ = chunkMinWorldZ(cz);
+      let changed = false;
+
+      for (let iz = 0; iz <= CONFIG.dataResolution; iz++) {
+        const wz = minZ + iz * step;
+        const dz = wz - worldPoint.z;
+        if (Math.abs(dz) > radius) continue;
+
+        for (let ix = 0; ix <= CONFIG.dataResolution; ix++) {
+          const wx = minX + ix * step;
+          const dx = wx - worldPoint.x;
+          if (Math.abs(dx) > radius) continue;
+
+          const distSq = dx * dx + dz * dz;
+          if (distSq > r2) continue;
+          const dist = Math.sqrt(distSq);
+          const t = dist / radius;
+          const falloff = (1 - t * t) * (1 - t * t);
+          const idx = getChunkDataIndex(ix, iz);
+          const h = heights[idx];
+          const floored = Math.floor(h / stepH) * stepH;
+          const frac = (h - floored) / stepH;
+          const curved =
+            frac < sharpness
+              ? (frac * (1 - sharpness)) / sharpness
+              : ((frac - sharpness) / (1 - sharpness)) * sharpness +
+                (1 - sharpness);
+          const snapped = floored + curved * stepH;
+          const delta = (snapped - h) * falloff * strength * 3;
+          heights[idx] = THREE.MathUtils.clamp(
+            h + delta,
+            PARAMS.sculptClampMin,
+            PARAMS.sculptClampMax,
+          );
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        const k = chunkKey(cx, cz);
+        dirtyChunks.add(k);
+        brushedChunkKeys.add(k);
+      }
+    }
+  }
+
+  finalizeSculpt(brushedChunkKeys, {
+    wx: worldPoint.x,
+    wz: worldPoint.z,
+    radius,
+  });
+}
+
+function applyFlattenAt(worldPoint, flattenTargetY) {
+  const radius = sculptBrushWorldRadius();
+  const strength = sculptPainterStrengthFactor();
+  const step = CONFIG.chunkSize / CONFIG.dataResolution;
+  const min = worldToChunkIndex(
+    worldPoint.x - radius,
+    worldPoint.z - radius,
+  );
+  const max = worldToChunkIndex(
+    worldPoint.x + radius,
+    worldPoint.z + radius,
+  );
+  const maxChunk = getMaxChunkIndex();
+  const minCx = THREE.MathUtils.clamp(min.cx, 0, maxChunk);
+  const minCz = THREE.MathUtils.clamp(min.cz, 0, maxChunk);
+  const maxCx = THREE.MathUtils.clamp(max.cx, 0, maxChunk);
+  const maxCz = THREE.MathUtils.clamp(max.cz, 0, maxChunk);
+  const brushedChunkKeys = new Set();
+  const r2 = radius * radius;
+
+  for (let cz = minCz; cz <= maxCz; cz++) {
+    for (let cx = minCx; cx <= maxCx; cx++) {
+      const heights = ensureChunkData(cx, cz);
+      const minX = chunkMinWorldX(cx);
+      const minZ = chunkMinWorldZ(cz);
+      let changed = false;
+
+      for (let iz = 0; iz <= CONFIG.dataResolution; iz++) {
+        const wz = minZ + iz * step;
+        const dz = wz - worldPoint.z;
+        if (Math.abs(dz) > radius) continue;
+
+        for (let ix = 0; ix <= CONFIG.dataResolution; ix++) {
+          const wx = minX + ix * step;
+          const dx = wx - worldPoint.x;
+          if (Math.abs(dx) > radius) continue;
+
+          const distSq = dx * dx + dz * dz;
+          if (distSq > r2) continue;
+          const dist = Math.sqrt(distSq);
+          const falloff = 1.0 - dist / radius;
+          const smooth = falloff * falloff;
+          const idx = getChunkDataIndex(ix, iz);
+          const current = heights[idx];
+          const delta =
+            (flattenTargetY - current) * smooth * strength * 2;
+          heights[idx] = THREE.MathUtils.clamp(
+            current + delta,
+            PARAMS.sculptClampMin,
+            PARAMS.sculptClampMax,
+          );
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        const k = chunkKey(cx, cz);
+        dirtyChunks.add(k);
+        brushedChunkKeys.add(k);
+      }
+    }
+  }
+
+  finalizeSculpt(brushedChunkKeys, {
+    wx: worldPoint.x,
+    wz: worldPoint.z,
+    radius,
+  });
+}
+
+function applySmoothAt(worldPoint) {
+  const radius = sculptBrushWorldRadius();
+  const strength = sculptPainterStrengthFactor();
+  const step = CONFIG.chunkSize / CONFIG.dataResolution;
+  const min = worldToChunkIndex(
+    worldPoint.x - radius - step,
+    worldPoint.z - radius - step,
+  );
+  const max = worldToChunkIndex(
+    worldPoint.x + radius + step,
+    worldPoint.z + radius + step,
+  );
+  const maxChunk = getMaxChunkIndex();
+  const minCx = THREE.MathUtils.clamp(min.cx, 0, maxChunk);
+  const minCz = THREE.MathUtils.clamp(min.cz, 0, maxChunk);
+  const maxCx = THREE.MathUtils.clamp(max.cx, 0, maxChunk);
+  const maxCz = THREE.MathUtils.clamp(max.cz, 0, maxChunk);
+  const r2 = radius * radius;
+
+  const samples = [];
+  for (let cz = minCz; cz <= maxCz; cz++) {
+    for (let cx = minCx; cx <= maxCx; cx++) {
+      const heights = ensureChunkData(cx, cz);
+      const minX = chunkMinWorldX(cx);
+      const minZ = chunkMinWorldZ(cz);
+
+      for (let iz = 0; iz <= CONFIG.dataResolution; iz++) {
+        const wz = minZ + iz * step;
+        const dz = wz - worldPoint.z;
+        if (Math.abs(dz) > radius) continue;
+
+        for (let ix = 0; ix <= CONFIG.dataResolution; ix++) {
+          const wx = minX + ix * step;
+          const dx = wx - worldPoint.x;
+          if (Math.abs(dx) > radius) continue;
+
+          const distSq = dx * dx + dz * dz;
+          if (distSq > r2) continue;
+          const dist = Math.sqrt(distSq);
+          const falloff = 1.0 - dist / radius;
+          const idx = getChunkDataIndex(ix, iz);
+          samples.push({
+            cx,
+            cz,
+            idx,
+            wx,
+            wz,
+            curH: heights[idx],
+            falloff,
+          });
+        }
+      }
+    }
+  }
+
+  const brushedChunkKeys = new Set();
+  const n = samples.length;
+  for (let i = 0; i < n; i++) {
+    const s = samples[i];
+    let sum = 0;
+    for (let oz = -1; oz <= 1; oz++) {
+      for (let ox = -1; ox <= 1; ox++) {
+        sum += getChunkHeightfieldHeight(
+          s.wx + ox * step,
+          s.wz + oz * step,
+        );
+      }
+    }
+    const avg = sum / 9;
+    const heights = ensureChunkData(s.cx, s.cz);
+    const nh = s.curH + (avg - s.curH) * s.falloff * strength * 2;
+    heights[s.idx] = THREE.MathUtils.clamp(
+      nh,
+      PARAMS.sculptClampMin,
+      PARAMS.sculptClampMax,
+    );
+    dirtyChunks.add(chunkKey(s.cx, s.cz));
+    brushedChunkKeys.add(chunkKey(s.cx, s.cz));
+  }
+
+  finalizeSculpt(brushedChunkKeys, {
+    wx: worldPoint.x,
+    wz: worldPoint.z,
+    radius,
+  });
+}
+
+function applyRampAt(ptA, ptB) {
+  const dx = ptB.x - ptA.x;
+  const dz = ptB.z - ptA.z;
+  const lenSq = dx * dx + dz * dz;
+  if (lenSq < 0.001) return;
+
+  const radius = sculptBrushWorldRadius();
+  const radiusSq = radius * radius;
+  const strength = PARAMS.brushStrength / 100;
+  const step = CONFIG.chunkSize / CONFIG.dataResolution;
+
+  const minX = Math.min(ptA.x, ptB.x) - radius;
+  const maxX = Math.max(ptA.x, ptB.x) + radius;
+  const minZ = Math.min(ptA.z, ptB.z) - radius;
+  const maxZ = Math.max(ptA.z, ptB.z) + radius;
+
+  const maxChunk = getMaxChunkIndex();
+  const minC = worldToChunkIndex(minX, minZ);
+  const maxC = worldToChunkIndex(maxX, maxZ);
+  const minCx = THREE.MathUtils.clamp(minC.cx, 0, maxChunk);
+  const minCz = THREE.MathUtils.clamp(minC.cz, 0, maxChunk);
+  const maxCx = THREE.MathUtils.clamp(maxC.cx, 0, maxChunk);
+  const maxCz = THREE.MathUtils.clamp(maxC.cz, 0, maxChunk);
+
+  const brushedChunkKeys = new Set();
+
+  for (let cz = minCz; cz <= maxCz; cz++) {
+    for (let cx = minCx; cx <= maxCx; cx++) {
+      const heights = ensureChunkData(cx, cz);
+      const cminX = chunkMinWorldX(cx);
+      const cminZ = chunkMinWorldZ(cz);
+      let changed = false;
+
+      for (let iz = 0; iz <= CONFIG.dataResolution; iz++) {
+        const wz = cminZ + iz * step;
+        for (let ix = 0; ix <= CONFIG.dataResolution; ix++) {
+          const wx = cminX + ix * step;
+          const t = THREE.MathUtils.clamp(
+            ((wx - ptA.x) * dx + (wz - ptA.z) * dz) / lenSq,
+            0,
+            1,
+          );
+          const perpX = ptA.x + t * dx - wx;
+          const perpZ = ptA.z + t * dz - wz;
+          const perpSq = perpX * perpX + perpZ * perpZ;
+          if (perpSq > radiusSq) continue;
+          const falloff = Math.pow(1 - Math.sqrt(perpSq) / radius, 2);
+          const targetY = ptA.y + t * (ptB.y - ptA.y);
+          const idx = getChunkDataIndex(ix, iz);
+          const current = heights[idx];
+          heights[idx] = THREE.MathUtils.clamp(
+            current + (targetY - current) * falloff * strength,
+            PARAMS.sculptClampMin,
+            PARAMS.sculptClampMax,
+          );
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        const k = chunkKey(cx, cz);
+        dirtyChunks.add(k);
+        brushedChunkKeys.add(k);
+      }
+    }
+  }
+
+  const midx = (ptA.x + ptB.x) * 0.5;
+  const midz = (ptA.z + ptB.z) * 0.5;
+  const seamR = radius + Math.hypot(dx, dz) * 0.5 + step * 2;
+  finalizeSculpt(brushedChunkKeys, { wx: midx, wz: midz, radius: seamR });
+  syncTreeLodHeights();
+  syncPTreeHeights();
+  syncObjectSlotsHeights();
+  syncPropObjectsHeights();
+}
+
+function applySculptAt(worldPoint, event) {
+  if (event.altKey) {
+    applyFlattenAt(worldPoint, editState.sculptFlattenTargetY);
+  } else if (event.ctrlKey) {
+    applySmoothAt(worldPoint);
+  } else if (
+    (PARAMS.sculptTool === "noise" || PARAMS.sculptTool === "terrace") &&
+    event.shiftKey
+  ) {
+    applyRaiseLowerAt(worldPoint, -1);
+  } else if (PARAMS.sculptTool === "noise") {
+    applyNoiseAt(worldPoint);
+  } else if (PARAMS.sculptTool === "terrace") {
+    applyTerraceAt(worldPoint);
+  } else if (PARAMS.sculptTool === "erosion") {
+    applyErosionBrushAt(worldPoint);
+  } else {
+    applyRaiseLowerAt(worldPoint, editState.sculptSign);
+  }
+}
+
+/** Cheap deterministic 2D hash → [0, 1). Used by the paint mask fbm. */
+function _paintHash2(xi, yi) {
+  let h = (xi * 374761393 + yi * 668265263) | 0;
+  h = ((h ^ (h >>> 13)) * 1274126177) | 0;
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+}
+function _paintValueNoise2D(x, y) {
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  const xf = x - xi;
+  const yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf);
+  const v = yf * yf * (3 - 2 * yf);
+  const a = _paintHash2(xi, yi);
+  const b = _paintHash2(xi + 1, yi);
+  const c = _paintHash2(xi, yi + 1);
+  const d = _paintHash2(xi + 1, yi + 1);
+  return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
+}
+/** 2D fbm in [0,1], octaves ∈ {1..8}. */
+function _paintFbm2D(x, y, octaves) {
+  let n = 0;
+  let amp = 0.5;
+  let freq = 1;
+  let norm = 0;
+  for (let i = 0; i < octaves; i++) {
+    n += _paintValueNoise2D(x * freq, y * freq) * amp;
+    norm += amp;
+    amp *= 0.5;
+    freq *= 2;
+  }
+  return n / norm;
+}
+
+function applyPaintAtWorld(center, erase) {
+  const R = CONFIG.paint.radius;
+  const res = CONFIG.splatRes;
+  const maxChunk = getMaxChunkIndex();
+  const minC = worldToChunkIndex(center.x - R, center.z - R);
+  const maxC = worldToChunkIndex(center.x + R, center.z + R);
+  const minCx = THREE.MathUtils.clamp(minC.cx, 0, maxChunk);
+  const minCz = THREE.MathUtils.clamp(minC.cz, 0, maxChunk);
+  const maxCx = THREE.MathUtils.clamp(maxC.cx, 0, maxChunk);
+  const maxCz = THREE.MathUtils.clamp(maxC.cz, 0, maxChunk);
+  const ch = editState.paintChannel;
+  const flowBase = (brushStr / 100) * 255;
+  const layer = editState.paintLayer;
+  const useImg = layer === "img";
+  const useMeadow = layer === "meadow";
+  const noiseAmt = THREE.MathUtils.clamp(PARAMS.paintNoiseAmount, 0, 1);
+  const noiseScale = PARAMS.paintNoiseScale;
+  const noiseOct = Math.max(1, PARAMS.paintNoiseOctaves | 0);
+  const noiseSeed = editState.paintNoiseSeed;
+
+  for (let cz = minCz; cz <= maxCz; cz++) {
+    for (let cx = minCx; cx <= maxCx; cx++) {
+      const splat = ensureChunkSplat(cx, cz);
+      const ctx = useMeadow
+        ? splat.meadowCtx
+        : useImg
+          ? splat.imgCtx
+          : splat.ctx;
+      const glTex = useMeadow
+        ? splat.meadowTex
+        : useImg
+          ? splat.imgTex
+          : splat.tex;
+      const img = ctx.getImageData(0, 0, res, res);
+      const data = img.data;
+      const c = chunkCenterWorld(cx, cz);
+      const cs = CONFIG.chunkSize;
+      let touched = false;
+      for (let py = 0; py < res; py++) {
+        for (let px = 0; px < res; px++) {
+          const uTex = (px + 0.5) / res;
+          const vTex = (py + 0.5) / res;
+          const wx = c.x + (uTex - 0.5) * cs;
+          const wz = c.z + (vTex - 0.5) * cs;
+          const dx = wx - center.x;
+          const dz = wz - center.z;
+          const dist = Math.hypot(dx, dz);
+          if (dist > R) continue;
+          const falloff = 1 - dist / R;
+          let mask = falloff;
+          if (noiseAmt > 0) {
+            const n = _paintFbm2D(
+              (wx + noiseSeed) * noiseScale,
+              (wz + noiseSeed) * noiseScale,
+              noiseOct,
+            );
+            mask = falloff * (1 - noiseAmt + noiseAmt * n);
+          }
+          const delta = (erase ? -1 : 1) * flowBase * mask;
+          const i = (py * res + px) * 4;
+          if (useMeadow) {
+            data[i] = THREE.MathUtils.clamp(data[i] + delta, 0, 255);
+            data[i + 1] = data[i + 2] = 0;
+            data[i + 3] = 255;
+          } else if (useImg) {
+            data[i + ch] = THREE.MathUtils.clamp(
+              data[i + ch] + delta,
+              0,
+              255,
+            );
+            data[i + 3] = 255;
+          } else {
+            data[i + ch] = THREE.MathUtils.clamp(
+              data[i + ch] + delta,
+              0,
+              255,
+            );
+          }
+          touched = true;
+        }
+      }
+      if (touched) {
+        ctx.putImageData(img, 0, 0);
+        glTex.needsUpdate = true;
+      }
+    }
+  }
+}
+
+/** Path [ L ]: splatmap blue (path / “village” layer) + gentle flatten like splatmap-painter `pathPaintAt`. */
+function pathPaintAt(center) {
+  const R = CONFIG.paint.radius;
+  const res = CONFIG.splatRes;
+  const maxChunk = getMaxChunkIndex();
+  const minC = worldToChunkIndex(center.x - R, center.z - R);
+  const maxC = worldToChunkIndex(center.x + R, center.z + R);
+  const minCx = THREE.MathUtils.clamp(minC.cx, 0, maxChunk);
+  const minCz = THREE.MathUtils.clamp(minC.cz, 0, maxChunk);
+  const maxCx = THREE.MathUtils.clamp(maxC.cx, 0, maxChunk);
+  const maxCz = THREE.MathUtils.clamp(maxC.cz, 0, maxChunk);
+  const flowBase = (brushStr / 100) * 255;
+
+  for (let cz = minCz; cz <= maxCz; cz++) {
+    for (let cx = minCx; cx <= maxCx; cx++) {
+      const splat = ensureChunkSplat(cx, cz);
+      const img = splat.ctx.getImageData(0, 0, res, res);
+      const data = img.data;
+      const c = chunkCenterWorld(cx, cz);
+      const cs = CONFIG.chunkSize;
+      let touched = false;
+      for (let py = 0; py < res; py++) {
+        for (let px = 0; px < res; px++) {
+          const uTex = (px + 0.5) / res;
+          const vTex = (py + 0.5) / res;
+          const wx = c.x + (uTex - 0.5) * cs;
+          const wz = c.z + (vTex - 0.5) * cs;
+          const dx = wx - center.x;
+          const dz = wz - center.z;
+          const dist = Math.hypot(dx, dz);
+          if (dist > R) continue;
+          const falloff = 1 - dist / R;
+          const delta = flowBase * falloff;
+          const i = (py * res + px) * 4;
+          data[i + 2] = THREE.MathUtils.clamp(
+            data[i + 2] + delta,
+            0,
+            255,
+          );
+          touched = true;
+        }
+      }
+      if (touched) {
+        splat.ctx.putImageData(img, 0, 0);
+        splat.tex.needsUpdate = true;
+      }
+    }
+  }
+
+  if (PARAMS.path.flattenStrength <= 0) return;
+
+  const targetY = getWorldHeight(center.x, center.z);
+  const radiusSq = R * R;
+  const step = CONFIG.chunkSize / CONFIG.dataResolution;
+  const brushedChunkKeys = new Set();
+
+  for (let cz = minCz; cz <= maxCz; cz++) {
+    for (let cx = minCx; cx <= maxCx; cx++) {
+      const heights = ensureChunkData(cx, cz);
+      const minX = chunkMinWorldX(cx);
+      const minZ = chunkMinWorldZ(cz);
+      let changed = false;
+
+      for (let iz = 0; iz <= CONFIG.dataResolution; iz++) {
+        const wz = minZ + iz * step;
+        const dz = wz - center.z;
+        if (Math.abs(dz) > R) continue;
+
+        for (let ix = 0; ix <= CONFIG.dataResolution; ix++) {
+          const wx = minX + ix * step;
+          const dx = wx - center.x;
+          if (Math.abs(dx) > R) continue;
+
+          const distSq = dx * dx + dz * dz;
+          if (distSq > radiusSq) continue;
+          const t = Math.sqrt(distSq) / R;
+          const falloff = (1 - t) * (1 - t);
+          const idx = getChunkDataIndex(ix, iz);
+          const cur = heights[idx];
+          heights[idx] = THREE.MathUtils.clamp(
+            cur +
+              (targetY - cur) *
+                falloff *
+                PARAMS.path.flattenStrength *
+                0.08,
+            PARAMS.sculptClampMin,
+            PARAMS.sculptClampMax,
+          );
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        const k = chunkKey(cx, cz);
+        dirtyChunks.add(k);
+        brushedChunkKeys.add(k);
+      }
+    }
+  }
+
+  if (brushedChunkKeys.size > 0) {
+    finalizeSculpt(brushedChunkKeys, {
+      wx: center.x,
+      wz: center.z,
+      radius: R,
+    });
+    rebuildDirtyActiveChunks(12);
+  }
+}
+
+function clearPathSplatBlueAllChunks() {
+  const res = CONFIG.splatRes;
+  for (const splat of chunkSplatMap.values()) {
+    const img = splat.ctx.getImageData(0, 0, res, res);
+    const d = img.data;
+    for (let i = 0; i < d.length; i += 4) d[i + 2] = 0;
+    splat.ctx.putImageData(img, 0, 0);
+    splat.tex.needsUpdate = true;
+  }
+  refreshActiveChunkMaterials();
+}
+
+function updatePointerNdc(event) {
+  pointerNdc.x = (event.clientX / window.innerWidth) * 2 - 1;
+  pointerNdc.y = -(event.clientY / window.innerHeight) * 2 + 1;
+}
+
+function raycastTerrainPoint() {
+  const meshes = _terrainRaycastMeshes;
+  meshes.length = 0;
+  for (const chunk of activeChunks.values()) meshes.push(chunk.mesh);
+  if (meshes.length === 0) return null;
+
+  raycaster.setFromCamera(pointerNdc, camera);
+  const hits = raycaster.intersectObjects(meshes, false);
+  for (let i = 0; i < hits.length; i++) {
+    const h = hits[i];
+    const geom = h.object.geometry;
+    const nTerrain = geom.userData.terrainTriCount;
+    if (
+      typeof nTerrain === "number" &&
+      h.faceIndex != null &&
+      h.faceIndex >= nTerrain
+    ) {
+      continue;
+    }
+    return h.point;
+  }
+  return null;
+}
+
+/**
+ * Cheap screen-ray → terrain pick by marching against `getWorldHeight`
+ * (an O(1) grid lookup). Unlike `raycastTerrainPoint` this skips the
+ * per-triangle intersect of active chunk meshes — chunks here don't
+ * have three-mesh-bvh attached, so intersectObjects is brute force and
+ * chokes at pointer-move rates. ~200 height samples ≪ 1 triangle test.
+ * Used by iso-mode click-to-move / hover ring.
+ */
+const _cheapPickHit = new THREE.Vector3();
+function pickTerrainFast() {
+  raycaster.setFromCamera(pointerNdc, camera);
+  const origin = raycaster.ray.origin;
+  const dir = raycaster.ray.direction;
+  // Must be pointing downward for a downward-growing ground march to
+  // make sense. Horizontal/upward rays can't hit the terrain from
+  // above so we bail — avoids divide-by-zero and runaway loops.
+  if (dir.y > -1e-4) return null;
+
+  let t = 0.4;
+  let step = 0.4;
+  const MAX_T = 1200;
+  const MAX_STEP = 18;
+  let prevAbove = origin.y - getWorldHeight(origin.x, origin.z) > 0;
+  let prevT = 0;
+  for (let i = 0; i < 240; i++) {
+    const px = origin.x + dir.x * t;
+    const py = origin.y + dir.y * t;
+    const pz = origin.z + dir.z * t;
+    const above = py - getWorldHeight(px, pz) > 0;
+    if (!above && prevAbove) {
+      // Found a crossing between prevT and t — bisect for precision.
+      let lo = prevT;
+      let hi = t;
+      for (let j = 0; j < 12; j++) {
+        const mid = (lo + hi) * 0.5;
+        const mx = origin.x + dir.x * mid;
+        const my = origin.y + dir.y * mid;
+        const mz = origin.z + dir.z * mid;
+        if (my - getWorldHeight(mx, mz) > 0) lo = mid;
+        else hi = mid;
+      }
+      const ft = (lo + hi) * 0.5;
+      _cheapPickHit.set(
+        origin.x + dir.x * ft,
+        origin.y + dir.y * ft,
+        origin.z + dir.z * ft,
+      );
+      return _cheapPickHit;
+    }
+    prevAbove = above;
+    prevT = t;
+    t += step;
+    if (t > MAX_T) break;
+    // Gentle geometric growth — fine near camera, coarse far away.
+    if (step < MAX_STEP) step *= 1.025;
+  }
+  return null;
+}
+
+function generateRiverMesh(curve, width, segments, heightOffset) {
+  const pts = curve.getSpacedPoints(segments);
+  const arcLen = [0];
+  for (let i = 1; i <= segments; i++) {
+    arcLen.push(arcLen[i - 1] + pts[i].distanceTo(pts[i - 1]));
+  }
+  const totalLen = arcLen[segments] || 1;
+  const positions = [];
+  const uvs = [];
+  const indices = [];
+  for (let i = 0; i <= segments; i++) {
+    const u = arcLen[i] / totalLen;
+    const pos = pts[i];
+    const prev = pts[Math.max(0, i - 1)];
+    const next = pts[Math.min(segments, i + 1)];
+    const tan = next.clone().sub(prev).normalize();
+    const perp = new THREE.Vector3(-tan.z, 0, tan.x).normalize();
+    const half = width / 2;
+    const lx = pos.x - perp.x * half;
+    const lz = pos.z - perp.z * half;
+    const rx = pos.x + perp.x * half;
+    const rz = pos.z + perp.z * half;
+    positions.push(lx, getWorldHeight(lx, lz) + heightOffset, lz);
+    positions.push(rx, getWorldHeight(rx, rz) + heightOffset, rz);
+    uvs.push(u, 0, u, 1);
+    if (i < segments) {
+      const b = i * 2;
+      indices.push(b, b + 2, b + 1, b + 1, b + 2, b + 3);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(positions, 3),
+  );
+  geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+function riverClearMesh() {
+  if (riverMesh) {
+    scene.remove(riverMesh);
+    riverMesh.geometry.dispose();
+    riverMesh = null;
+  }
+}
+
+function riverGenerate() {
+  if (riverPoints.length < 2) return;
+  riverClearMesh();
+  const curve = new THREE.CatmullRomCurve3(
+    riverPoints,
+    false,
+    "catmullrom",
+    0.5,
+  );
+  const geo = generateRiverMesh(
+    curve,
+    PARAMS.river.width,
+    PARAMS.river.segments,
+    PARAMS.river.heightOffset,
+  );
+  riverMesh = new THREE.Mesh(geo, riverMat);
+  riverMesh.renderOrder = 2;
+  scene.add(riverMesh);
+}
+
+function riverRebuildVisual() {
+  while (riverGroup.children.length) {
+    const child = riverGroup.children[0];
+    riverGroup.remove(child);
+    if (child.geometry) child.geometry.dispose();
+    if (child.material) child.material.dispose();
+  }
+  riverPointMeshes = [];
+  riverPoints.forEach((pt, i) => {
+    const sphere = new THREE.Mesh(
+      new THREE.SphereGeometry(0.5, 8, 8),
+      new THREE.MeshBasicMaterial({
+        color: i === riverSelectedIdx ? 0xffff00 : 0x0088ff,
+      }),
+    );
+    sphere.position.copy(pt);
+    riverGroup.add(sphere);
+    riverPointMeshes.push(sphere);
+  });
+  if (riverPoints.length >= 2) {
+    const curve = new THREE.CatmullRomCurve3(
+      riverPoints,
+      false,
+      "catmullrom",
+      0.5,
+    );
+    const lineGeo = new THREE.BufferGeometry().setFromPoints(
+      curve.getPoints(60),
+    );
+    const line = new THREE.Line(
+      lineGeo,
+      new THREE.LineBasicMaterial({ color: 0x00aaff }),
+    );
+    riverGroup.add(line);
+    riverPointMeshes.push(line);
+    riverGenerate();
+  } else {
+    riverClearMesh();
+  }
+}
+
+function riverAddPoint(p) {
+  riverPoints.push(p.clone());
+  riverSelectedIdx = riverPoints.length - 1;
+  riverRebuildVisual();
+  riverUpdateSelectedYParam();
+}
+
+function riverDeleteSelected() {
+  if (riverSelectedIdx < 0 || riverPoints.length === 0) return;
+  riverPoints.splice(riverSelectedIdx, 1);
+  riverSelectedIdx = Math.min(riverSelectedIdx, riverPoints.length - 1);
+  riverRebuildVisual();
+  riverUpdateSelectedYParam();
+}
+
+function riverMoveSelected(pos) {
+  if (riverSelectedIdx < 0) return;
+  const currentY = riverPoints[riverSelectedIdx].y;
+  riverPoints[riverSelectedIdx].copy(pos);
+  riverPoints[riverSelectedIdx].y = currentY;
+  riverRebuildVisual();
+}
+
+function riverUpdateSelectedYParam() {
+  if (riverSelectedIdx >= 0 && riverSelectedIdx < riverPoints.length) {
+    PARAMS.river.selectedPointY = riverPoints[riverSelectedIdx].y;
+  }
+  if (editorPane) editorPane.refresh();
+}
+
+function riverPickPoint(event) {
+  updatePointerNdc(event);
+  raycaster.setFromCamera(pointerNdc, camera);
+  const hits = raycaster.intersectObjects(
+    riverPointMeshes.filter((m) => m.isMesh),
+    false,
+  );
+  if (hits.length === 0) return -1;
+  return riverPointMeshes.indexOf(hits[0].object);
+}
+
+function roadDisposeSegMesh(seg) {
+  if (!seg || !seg.mesh) return;
+  scene.remove(seg.mesh);
+  seg.mesh.geometry.dispose();
+  seg.mesh = null;
+}
+
+function roadClampParamActive() {
+  if (roadSegs.length === 0) {
+    PARAMS.road.activeRoadIndex = 0;
+    return;
+  }
+  PARAMS.road.activeRoadIndex = Math.max(
+    0,
+    Math.min(PARAMS.road.activeRoadIndex | 0, roadSegs.length - 1),
+  );
+}
+
+function roadActiveIdx() {
+  if (roadSegs.length === 0) return -1;
+  return Math.max(
+    0,
+    Math.min(PARAMS.road.activeRoadIndex | 0, roadSegs.length - 1),
+  );
+}
+
+function roadRebuildAllMeshes() {
+  for (let i = 0; i < roadSegs.length; i++) {
+    const seg = roadSegs[i];
+    roadDisposeSegMesh(seg);
+    if (seg.points.length < 2) continue;
+    const curve = new THREE.CatmullRomCurve3(
+      seg.points,
+      false,
+      "catmullrom",
+      0.5,
+    );
+    const geo = generateRiverMesh(
+      curve,
+      PARAMS.road.width,
+      PARAMS.road.segments,
+      PARAMS.road.heightOffset,
+    );
+    seg.mesh = new THREE.Mesh(geo, roadMat);
+    seg.mesh.renderOrder = 3;
+    scene.add(seg.mesh);
+  }
+}
+
+function roadRebuildHandles() {
+  while (roadGroup.children.length) {
+    const child = roadGroup.children[0];
+    roadGroup.remove(child);
+    if (child.geometry) child.geometry.dispose();
+    if (child.material) child.material.dispose();
+  }
+  roadPointMeshes = [];
+  const ai = roadActiveIdx();
+  if (ai < 0) {
+    syncRoadHandlesVisibility();
+    return;
+  }
+  const pts = roadSegs[ai].points;
+  pts.forEach((pt, i) => {
+    const sphere = new THREE.Mesh(
+      new THREE.SphereGeometry(0.5, 8, 8),
+      new THREE.MeshBasicMaterial({
+        color: i === roadSelectedIdx ? 0xffff00 : 0x886644,
+      }),
+    );
+    sphere.position.copy(pt);
+    roadGroup.add(sphere);
+    roadPointMeshes.push(sphere);
+  });
+  if (pts.length >= 2) {
+    const curve = new THREE.CatmullRomCurve3(
+      pts,
+      false,
+      "catmullrom",
+      0.5,
+    );
+    const lineGeo = new THREE.BufferGeometry().setFromPoints(
+      curve.getPoints(60),
+    );
+    const line = new THREE.Line(
+      lineGeo,
+      new THREE.LineBasicMaterial({ color: 0xaa7744 }),
+    );
+    roadGroup.add(line);
+    roadPointMeshes.push(line);
+  }
+  syncRoadHandlesVisibility();
+}
+
+function roadRebuildVisual() {
+  roadRebuildAllMeshes();
+  roadRebuildHandles();
+}
+
+/** Append an empty spline slot; LMB adds points to this road (others stay visible). */
+function roadStartNew() {
+  roadDragging = false;
+  if (!playMode) controls.enabled = true;
+  roadSegs.push({ points: [], mesh: null });
+  PARAMS.road.activeRoadIndex = roadSegs.length - 1;
+  roadSelectedIdx = -1;
+  roadRebuildVisual();
+  if (editorPane) editorPane.refresh();
+}
+
+function roadAddPoint(p) {
+  if (roadSegs.length === 0) {
+    roadSegs.push({ points: [], mesh: null });
+    PARAMS.road.activeRoadIndex = 0;
+  }
+  roadClampParamActive();
+  const ai = roadActiveIdx();
+  const pts = roadSegs[ai].points;
+  pts.push(p.clone());
+  roadSelectedIdx = pts.length - 1;
+  roadRebuildVisual();
+  roadUpdateSelectedYParam();
+}
+
+function roadDeleteSelected() {
+  const ai = roadActiveIdx();
+  if (ai < 0 || roadSelectedIdx < 0) return;
+  const pts = roadSegs[ai].points;
+  if (roadSelectedIdx >= pts.length) return;
+  pts.splice(roadSelectedIdx, 1);
+  roadSelectedIdx = Math.min(roadSelectedIdx, pts.length - 1);
+  roadRebuildVisual();
+  roadUpdateSelectedYParam();
+}
+
+function roadMoveSelected(pos) {
+  const ai = roadActiveIdx();
+  if (ai < 0 || roadSelectedIdx < 0) return;
+  const pts = roadSegs[ai].points;
+  if (roadSelectedIdx >= pts.length) return;
+  const currentY = pts[roadSelectedIdx].y;
+  pts[roadSelectedIdx].copy(pos);
+  pts[roadSelectedIdx].y = currentY;
+  roadRebuildVisual();
+}
+
+function roadUpdateSelectedYParam() {
+  const ai = roadActiveIdx();
+  if (
+    ai >= 0 &&
+    roadSelectedIdx >= 0 &&
+    roadSelectedIdx < roadSegs[ai].points.length
+  ) {
+    PARAMS.road.selectedPointY = roadSegs[ai].points[roadSelectedIdx].y;
+  }
+  if (editorPane) editorPane.refresh();
+}
+
+function roadPickPoint(event) {
+  updatePointerNdc(event);
+  raycaster.setFromCamera(pointerNdc, camera);
+  const hits = raycaster.intersectObjects(
+    roadPointMeshes.filter((m) => m.isMesh),
+    false,
+  );
+  if (hits.length === 0) return -1;
+  return roadPointMeshes.indexOf(hits[0].object);
+}
+
+/** Remove active spline and its strip; other roads unchanged. */
+function roadDeleteActiveRoad() {
+  const ai = roadActiveIdx();
+  if (ai < 0) return;
+  roadDisposeSegMesh(roadSegs[ai]);
+  roadSegs.splice(ai, 1);
+  roadSelectedIdx = -1;
+  roadDragging = false;
+  if (!playMode) controls.enabled = true;
+  roadClampParamActive();
+  roadRebuildVisual();
+  if (editorPane) editorPane.refresh();
+}
+
+function roadClearAllMeshesOnly() {
+  for (const seg of roadSegs) roadDisposeSegMesh(seg);
+  if (editorPane) editorPane.refresh();
+}
+
+function splineRebuildVisual() {
+  while (splineGroup.children.length) {
+    const child = splineGroup.children[0];
+    splineGroup.remove(child);
+    if (child.geometry) child.geometry.dispose();
+    if (child.material) child.material.dispose();
+  }
+  splinePointMeshes = [];
+  _cachedTrainCurve = null;
+  _cachedTrainLen = 0;
+  if (splinePoints.length === 0) return;
+
+  if (splinePoints.length >= 2) {
+    const curve = new THREE.CatmullRomCurve3(
+      splinePoints,
+      PARAMS.spline.closed,
+      "catmullrom",
+      0.5,
+    );
+    _cachedTrainCurve = curve;
+    _cachedTrainLen = curve.getLength();
+    const pts = curve.getPoints(Math.max(60, splinePoints.length * 20));
+    const geo = new THREE.BufferGeometry().setFromPoints(pts);
+    const mat = new THREE.LineBasicMaterial({
+      color: 0x00ccff,
+      depthTest: false,
+    });
+    const line = new THREE.Line(geo, mat);
+    line.renderOrder = 99;
+    splineGroup.add(line);
+  }
+
+  splinePoints.forEach((pt, i) => {
+    const geo = new THREE.SphereGeometry(0.45, 8, 6);
+    const mat = new THREE.MeshBasicMaterial({
+      color: i === splineSelectedIdx ? 0xffff00 : 0xff4400,
+      depthTest: false,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.copy(pt);
+    mesh.renderOrder = 100;
+    splineGroup.add(mesh);
+    splinePointMeshes.push(mesh);
+  });
+}
+
+function splineUpdateSelectedYParam() {
+  if (splineSelectedIdx >= 0 && splineSelectedIdx < splinePoints.length) {
+    PARAMS.spline.selectedPointY = splinePoints[splineSelectedIdx].y;
+  }
+  if (editorPane) editorPane.refresh();
+}
+
+function splineAddPoint(pos) {
+  splinePoints.push(pos.clone());
+  splineSelectedIdx = splinePoints.length - 1;
+  splineRebuildVisual();
+  splineUpdateSelectedYParam();
+}
+
+function splineMoveSelected(pos) {
+  if (splineSelectedIdx < 0) return;
+  const currentY = splinePoints[splineSelectedIdx].y;
+  splinePoints[splineSelectedIdx].copy(pos);
+  splinePoints[splineSelectedIdx].y = currentY;
+  splineRebuildVisual();
+}
+
+function splineDeleteSelected() {
+  if (splineSelectedIdx < 0 || splinePoints.length === 0) return;
+  splinePoints.splice(splineSelectedIdx, 1);
+  splineSelectedIdx = Math.min(
+    splineSelectedIdx,
+    splinePoints.length - 1,
+  );
+  splineRebuildVisual();
+  splineUpdateSelectedYParam();
+}
+
+function splineClearAll() {
+  splinePoints = [];
+  splineSelectedIdx = -1;
+  splineDragging = false;
+  splineRebuildVisual();
+  splineClearPreview();
+}
+
+function splinePickPoint(event) {
+  updatePointerNdc(event);
+  raycaster.setFromCamera(pointerNdc, camera);
+  const hits = raycaster.intersectObjects(splinePointMeshes, false);
+  if (hits.length > 0) return splinePointMeshes.indexOf(hits[0].object);
+  return -1;
+}
+
+function splineClearPreview() {
+  while (splinePreviewGroup.children.length) {
+    const child = splinePreviewGroup.children[0];
+    splinePreviewGroup.remove(child);
+    if (child.geometry) child.geometry.dispose();
+    if (child.material) child.material.dispose();
+  }
+}
+
+function splineGetSamples() {
+  if (splinePoints.length < 2) return [];
+  const curve = new THREE.CatmullRomCurve3(
+    splinePoints,
+    PARAMS.spline.closed,
+    "catmullrom",
+    0.5,
+  );
+  const totalLength = curve.getLength();
+  const count = Math.max(
+    1,
+    Math.floor(totalLength / PARAMS.spline.spacing),
+  );
+  const samples = [];
+  for (let i = 0; i <= count; i++) {
+    const t = i / count;
+    const pos = curve.getPoint(t);
+    const tangent = curve.getTangent(t);
+    const angleY = Math.atan2(tangent.x, tangent.z);
+    samples.push({ pos, angleY });
+  }
+  return samples;
+}
+
+function splinePreview() {
+  splineClearPreview();
+  const samples = splineGetSamples();
+  if (samples.length === 0) return;
+  const geo = new THREE.SphereGeometry(0.35, 6, 4);
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0x00ff88,
+    depthTest: false,
+  });
+  samples.forEach(({ pos }) => {
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(pos.x, pos.y + 0.5, pos.z);
+    mesh.renderOrder = 101;
+    splinePreviewGroup.add(mesh);
+  });
+}
+
+function splineBake() {
+  const samples = splineGetSamples();
+  if (samples.length === 0) return;
+  const type = PARAMS.spline.objectType;
+  const scaleRange = PARAMS.spline.scaleMax - PARAMS.spline.scaleMin;
+
+  if (type === "trees") {
+    const slot = LOD_SLOTS[activeLodSlot];
+    if (!slot.ready) {
+      console.warn("Spline bake: active Tree LOD slot has no model yet.");
+      return;
+    }
+    const ms2 = slot.minSpacing * slot.minSpacing;
+    samples.forEach(({ pos, angleY }) => {
+      const scale = PARAMS.spline.scaleMin + Math.random() * scaleRange;
+      const rot = PARAMS.spline.alignToPath
+        ? angleY
+        : Math.random() * Math.PI * 2;
+      let x = pos.x;
+      let z = pos.z;
+      x = THREE.MathUtils.clamp(x, worldBounds.min.x, worldBounds.max.x);
+      z = THREE.MathUtils.clamp(z, worldBounds.min.z, worldBounds.max.z);
+      if (
+        ms2 > 0 &&
+        slot.positions.some((p) => (p.x - x) ** 2 + (p.z - z) ** 2 < ms2)
+      )
+        return;
+      const y = getWorldHeight(x, z);
+      slot.positions.push({ x, y, z, scale, rot });
+    });
+    _rebuildLODChunks(slot);
+  } else if (type === "fleurs") {
+    if (!fleurSystem) return;
+    const existing = fleurSystem.getPositions();
+    samples.forEach(({ pos, angleY }) => {
+      const scale = PARAMS.spline.scaleMin + Math.random() * scaleRange;
+      const rot = PARAMS.spline.alignToPath
+        ? angleY
+        : Math.random() * Math.PI * 2;
+      existing.push({
+        x: pos.x,
+        z: pos.z,
+        rot,
+        scale,
+        yOffset:
+          fleurParams.hoverBase +
+          (Math.random() - 0.5) * 2 * fleurParams.hoverVariance,
+        colorSlot: fleurActiveSlot,
+        variant: "ground",
+        maskIndex: 0,
+      });
+    });
+    fleurSystem.setPositions(existing);
+    if (fleurSystem.syncHeights) fleurSystem.syncHeights();
+  } else if (type.startsWith("foliage")) {
+    const slotIdx = parseInt(type.replace("foliage", ""), 10);
+    const slot = FOLIAGE_SLOTS[slotIdx];
+    if (slot?.system) {
+      const existing = slot.system.getPositions();
+      samples.forEach(({ pos, angleY }) => {
+        const scale = PARAMS.spline.scaleMin + Math.random() * scaleRange;
+        const rot = PARAMS.spline.alignToPath
+          ? angleY
+          : Math.random() * Math.PI * 2;
+        existing.push({ x: pos.x, z: pos.z, rot, scale });
+      });
+      slot.system.setPositions(existing);
+      if (slot.system.syncHeights) slot.system.syncHeights();
+    }
+  } else if (type.startsWith("object")) {
+    const slotIdx = parseInt(type.replace("object", ""), 10);
+    const slot = OBJECT_SLOTS[slotIdx];
+    if (slot?.system) {
+      const existing = slot.system.getPositions();
+      samples.forEach(({ pos, angleY }) => {
+        const scale = PARAMS.spline.scaleMin + Math.random() * scaleRange;
+        const rot = PARAMS.spline.alignToPath
+          ? angleY
+          : Math.random() * Math.PI * 2;
+        existing.push({ x: pos.x, z: pos.z, rot, scale });
+      });
+      slot.system.setPositions(existing);
+      if (slot.system.syncHeights) slot.system.syncHeights();
+    }
+  } else {
+    console.warn(
+      "Spline bake: unsupported object type in chunks build:",
+      type,
+    );
+    return;
+  }
+
+  splineClearPreview();
+  splineClearAll();
+  bakeBVH();
+  syncTreeLodHeights();
+  syncPTreeHeights();
+  syncObjectSlotsHeights();
+  syncPropObjectsHeights();
+  if (fleurSystem) fleurSystem.syncHeights();
+}
+
+/**
+ * Raise / flatten terrain to `plateauHeight` using the spline footprint in XZ.
+ * Closed loop: fills interior with optional soft edge (plateauFalloff).
+ * Open path: flat strip of half-width plateauHalfWidth with optional outer blend.
+ */
+function splineApplyPlateau() {
+  const closed = PARAMS.spline.closed;
+  if (closed && splinePoints.length < 3) {
+    console.warn(
+      "Spline plateau: need at least 3 points for a closed path.",
+    );
+    return;
+  }
+  if (!closed && splinePoints.length < 2) {
+    console.warn(
+      "Spline plateau: need at least 2 points for an open path.",
+    );
+    return;
+  }
+
+  const curve = new THREE.CatmullRomCurve3(
+    splinePoints,
+    closed,
+    "catmullrom",
+    0.5,
+  );
+  const numPts = Math.max(96, splinePoints.length * 32);
+  const samples3 = curve.getPoints(numPts);
+  const polyX = [];
+  const polyZ = [];
+  for (let i = 0; i < samples3.length; i++) {
+    polyX.push(samples3[i].x);
+    polyZ.push(samples3[i].z);
+  }
+  if (closed && polyX.length >= 2) {
+    const last = polyX.length - 1;
+    const dx = polyX[last] - polyX[0];
+    const dz = polyZ[last] - polyZ[0];
+    if (dx * dx + dz * dz < 1e-6) {
+      polyX.pop();
+      polyZ.pop();
+    }
+  }
+  const nPoly = polyX.length;
+  if (closed && nPoly < 3) {
+    console.warn(
+      "Spline plateau: not enough vertices after sampling the closed path.",
+    );
+    return;
+  }
+  if (!closed && nPoly < 2) {
+    console.warn(
+      "Spline plateau: not enough vertices after sampling the path.",
+    );
+    return;
+  }
+
+  let bx0 = polyX[0],
+    bx1 = polyX[0],
+    bz0 = polyZ[0],
+    bz1 = polyZ[0];
+  for (let i = 1; i < nPoly; i++) {
+    bx0 = Math.min(bx0, polyX[i]);
+    bx1 = Math.max(bx1, polyX[i]);
+    bz0 = Math.min(bz0, polyZ[i]);
+    bz1 = Math.max(bz1, polyZ[i]);
+  }
+
+  const halfW = Math.max(0.25, PARAMS.spline.plateauHalfWidth);
+  const falloff = Math.max(0, PARAMS.spline.plateauFalloff);
+  const targetY = PARAMS.spline.plateauHeight;
+  const step = CONFIG.chunkSize / CONFIG.dataResolution;
+  const pad = (closed ? falloff : halfW + falloff) + step * 2;
+  let minX = bx0 - pad;
+  let maxX = bx1 + pad;
+  let minZ = bz0 - pad;
+  let maxZ = bz1 + pad;
+  minX = THREE.MathUtils.clamp(
+    minX,
+    worldBounds.min.x,
+    worldBounds.max.x,
+  );
+  maxX = THREE.MathUtils.clamp(
+    maxX,
+    worldBounds.min.x,
+    worldBounds.max.x,
+  );
+  minZ = THREE.MathUtils.clamp(
+    minZ,
+    worldBounds.min.z,
+    worldBounds.max.z,
+  );
+  maxZ = THREE.MathUtils.clamp(
+    maxZ,
+    worldBounds.min.z,
+    worldBounds.max.z,
+  );
+
+  function pointInPolygon(x, z) {
+    let inside = false;
+    for (let i = 0, j = nPoly - 1; i < nPoly; j = i++) {
+      const xi = polyX[i],
+        zi = polyZ[i];
+      const xj = polyX[j],
+        zj = polyZ[j];
+      const cross =
+        zi > z !== zj > z &&
+        x < ((xj - xi) * (z - zi)) / (zj - zi + 1e-12) + xi;
+      if (cross) inside = !inside;
+    }
+    return inside;
+  }
+
+  function distPointSegment2D(px, pz, ax, az, bx, bz) {
+    const abx = bx - ax,
+      abz = bz - az;
+    const apx = px - ax,
+      apz = pz - az;
+    const ab2 = abx * abx + abz * abz;
+    let t = ab2 > 1e-20 ? (apx * abx + apz * abz) / ab2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    const qx = ax + t * abx,
+      qz = az + t * abz;
+    return Math.hypot(px - qx, pz - qz);
+  }
+
+  function distToClosedRing(px, pz) {
+    let d = Infinity;
+    for (let i = 0; i < nPoly; i++) {
+      const j = (i + 1) % nPoly;
+      d = Math.min(
+        d,
+        distPointSegment2D(
+          px,
+          pz,
+          polyX[i],
+          polyZ[i],
+          polyX[j],
+          polyZ[j],
+        ),
+      );
+    }
+    return d;
+  }
+
+  function distToOpenPolyline(px, pz) {
+    let d = Infinity;
+    for (let i = 0; i < nPoly - 1; i++) {
+      d = Math.min(
+        d,
+        distPointSegment2D(
+          px,
+          pz,
+          polyX[i],
+          polyZ[i],
+          polyX[i + 1],
+          polyZ[i + 1],
+        ),
+      );
+    }
+    return d;
+  }
+
+  function weightAt(px, pz) {
+    if (closed) {
+      if (!pointInPolygon(px, pz)) return 0;
+      if (falloff <= 1e-6) return 1;
+      const dEdge = distToClosedRing(px, pz);
+      return THREE.MathUtils.smoothstep(dEdge, 0, falloff);
+    }
+    const d = distToOpenPolyline(px, pz);
+    const outer = halfW + falloff;
+    if (d > outer) return 0;
+    if (falloff <= 1e-6) return d <= halfW ? 1 : 0;
+    if (d <= halfW) return 1;
+    return 1 - THREE.MathUtils.smoothstep(halfW, outer, d);
+  }
+
+  const minCi = worldToChunkIndex(minX, minZ);
+  const maxCi = worldToChunkIndex(maxX, maxZ);
+  const maxChunk = getMaxChunkIndex();
+  const minCx = THREE.MathUtils.clamp(minCi.cx, 0, maxChunk);
+  const minCz = THREE.MathUtils.clamp(minCi.cz, 0, maxChunk);
+  const maxCx = THREE.MathUtils.clamp(maxCi.cx, 0, maxChunk);
+  const maxCz = THREE.MathUtils.clamp(maxCi.cz, 0, maxChunk);
+
+  pushTerrainUndo();
+  const brushedChunkKeys = new Set();
+
+  for (let cz = minCz; cz <= maxCz; cz++) {
+    for (let cx = minCx; cx <= maxCx; cx++) {
+      const heights = ensureChunkData(cx, cz);
+      const cminXw = chunkMinWorldX(cx);
+      const cminZw = chunkMinWorldZ(cz);
+      let changed = false;
+      for (let iz = 0; iz <= CONFIG.dataResolution; iz++) {
+        const wz = cminZw + iz * step;
+        if (wz < minZ || wz > maxZ) continue;
+        for (let ix = 0; ix <= CONFIG.dataResolution; ix++) {
+          const wx = cminXw + ix * step;
+          if (wx < minX || wx > maxX) continue;
+          const w = weightAt(wx, wz);
+          if (w < 1e-7) continue;
+          const idx = getChunkDataIndex(ix, iz);
+          const oldH = heights[idx];
+          const newH = THREE.MathUtils.lerp(oldH, targetY, w);
+          const clamped = THREE.MathUtils.clamp(
+            newH,
+            PARAMS.sculptClampMin,
+            PARAMS.sculptClampMax,
+          );
+          if (Math.abs(clamped - oldH) < 1e-9) continue;
+          heights[idx] = clamped;
+          changed = true;
+        }
+      }
+      if (changed) {
+        const k = chunkKey(cx, cz);
+        dirtyChunks.add(k);
+        brushedChunkKeys.add(k);
+      }
+    }
+  }
+
+  if (brushedChunkKeys.size === 0) {
+    if (terrainUndoStack.length > 0) terrainUndoStack.pop();
+    console.warn(
+      "Spline plateau: no height samples changed (try larger falloff / half-width or check path is over terrain).",
+    );
+    return;
+  }
+
+  finalizeSculpt(brushedChunkKeys, null);
+  rebuildAllActiveChunkMeshes();
+  syncTreeLodHeights();
+  syncPTreeHeights();
+  syncObjectSlotsHeights();
+  syncPropObjectsHeights();
+  if (fleurSystem) fleurSystem.syncHeights();
+  if (ambientFXSystem) ambientFXSystem.syncHeights();
+  bakeBVH();
+}
+
+const frameState = {
+  lastChunkUpdateMs: 0,
+  frames: 0,
+  fps: 0,
+  fpsWindowStartMs: performance.now(),
+};
+
+/** Same as painter: Tweakpane readonly bindings need periodic refresh to show live chunk/LOD stats. */
+let _treeLodStatsPaneRefreshMs = 0;
+const TREE_LOD_STATS_PANE_MS = 500;
+
+window.addEventListener("contextmenu", (event) => {
+  event.preventDefault();
+});
+
+function uiTypingTarget(el) {
+  if (!el || el === document.body) return false;
+  const tag = el.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT")
+    return true;
+  return el.closest?.(".tp-dfwv") != null;
+}
+
+/** True only for fields where Ctrl+Z should edit text, not terrain. */
+function isEditableTextTarget(el) {
+  if (!el) return false;
+  const tag = el.tagName;
+  if (tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (tag === "INPUT") {
+    const type = (el.type || "text").toLowerCase();
+    if (
+      type === "button" ||
+      type === "checkbox" ||
+      type === "color" ||
+      type === "file" ||
+      type === "hidden" ||
+      type === "radio" ||
+      type === "range" ||
+      type === "reset" ||
+      type === "submit"
+    ) {
+      return false;
+    }
+    return true;
+  }
+  if (el.isContentEditable) return true;
+  return false;
+}
+
+document.addEventListener("mousemove", (event) => {
+  if (!playMode || !document.pointerLockElement) return;
+  if (playMovementMode === "fly" && playPlaneLoaded) {
+    const mx = event.movementX;
+    const my = event.movementY;
+    if (planeFlightSurfaceLocked()) {
+      /* Taxi: mouse orbits camera only — no in-place yaw/roll/pitch on the runway. */
+      flyGroundCamYawOff -= mx * playParams.flyMouseSensX;
+      flyGroundCamYawOff = THREE.MathUtils.clamp(
+        flyGroundCamYawOff,
+        -1.65,
+        1.65,
+      );
+    } else {
+      flyHeading -= mx * playParams.flyMouseSensX;
+      flyPitch = THREE.MathUtils.clamp(
+        flyPitch + my * playParams.flyMouseSensY,
+        playParams.flyPitchMin,
+        playParams.flyPitchMax,
+      );
+      flyRollTarget = THREE.MathUtils.clamp(
+        flyRollTarget - mx * playParams.flyRollVelScale,
+        -playParams.flyRollMax,
+        playParams.flyRollMax,
+      );
+    }
+    return;
+  }
+  camYaw -= event.movementX * playParams.camSensX;
+  camPitch += event.movementY * playParams.camSensY;
+  camPitch = Math.max(0.05, Math.min(PI * 0.45, camPitch));
+});
+
+document.addEventListener("pointerlockchange", () => {
+  // Iso view intentionally releases pointer lock — don't treat that as
+  // an exit signal. Only exit play mode when the user drops out of the
+  // lock while still in follow view (e.g. Esc in follow mode).
+  if (!document.pointerLockElement && playMode && playCamView !== "iso") {
+    exitPlayMode();
+    setEditMode("view");
+  }
+});
+
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Shift") editState.isShiftDown = true;
+
+  if (playMode) {
+    if (!event.repeat && event.code === "KeyG") {
+      event.preventDefault();
+      /* Cycle: capsule → char → fly → car → capsule. */
+      const prevMode = playMovementMode;
+      if (prevMode === "capsule") playMovementMode = "char";
+      else if (prevMode === "char") playMovementMode = "fly";
+      else if (prevMode === "fly") playMovementMode = "car";
+      else playMovementMode = "capsule";
+
+      if (playMovementMode === "capsule") {
+        playFlyHeight = 0;
+        flyPitch = 0;
+        flyRoll = 0;
+        flyRollTarget = 0;
+        flyBarrelActive = false;
+        flyBarrelPhase = 0;
+        flyBarrelSign = 1;
+        flyGroundCamYawOff = 0;
+        clearWingTrails();
+      } else if (playMovementMode === "fly") {
+        flyHeading =
+          prevMode === "char" ? playCharYaw : capsuleMesh.rotation.y;
+        flyPitch = 0;
+        flyRoll = 0;
+        flyRollTarget = 0;
+        flyBarrelActive = false;
+        flyBarrelPhase = 0;
+        flyBarrelSign = 1;
+        flyGroundCamYawOff = 0;
+        playPlaneForwardSpeed = 0;
+        moveTarget = null;
+        moveRing.visible = false;
+        if (playPlaneLoaded && PARAMS.flightRings.enabled) {
+          flightRingsFixedLayoutDone = false;
+          ensureFixedFlightRingsPlaced();
+          updateFlightRings(0, camera);
+        }
+      } else if (playMovementMode === "char") {
+        /* Entering char mode from capsule: seed yaw + grounded state. */
+        playCharYaw = capsuleMesh.rotation.y;
+        playCharVelY = 0;
+        playCharInAir = false;
+        playCharGliding = false;
+        playCharGliderPoseActive = false;
+        playCharSpacePrev = false;
+        if (playCharKite) playCharKite.visible = false;
+        moveTarget = null;
+        moveRing.visible = false;
+      } else if (playMovementMode === "car") {
+        /* Entering car mode from fly: inherit heading so the cycle
+         * doesn't snap-rotate the world. Reset velocity/suspension. */
+        if (prevMode === "fly") playPlaneForwardSpeed = 0;
+        playCarHeading =
+          prevMode === "fly"
+            ? flyHeading
+            : prevMode === "char"
+              ? playCharYaw
+              : capsuleMesh.rotation.y;
+        playCarSpeed = 0;
+        playCarSteer = 0;
+        playCarPitch = 0;
+        playCarRoll = 0;
+        playCarY =
+          getWorldHeight(playerPos.x, playerPos.z) +
+          (PLAY_CAR_RIDE_HEIGHT + PLAY_CAR_WHEEL_RADIUS) * 1.6;
+        moveTarget = null;
+        moveRing.visible = false;
+      }
+      capsuleMesh.visible =
+        playMovementMode === "capsule" ||
+        (playMovementMode === "fly" && !playPlaneLoaded) ||
+        (playMovementMode === "char" && !playCharLoaded) ||
+        (playMovementMode === "car" && !playCarLoaded);
+      if (playPlaneRoot)
+        playPlaneRoot.visible =
+          playMovementMode === "fly" && playPlaneLoaded;
+      if (playCharRoot)
+        playCharRoot.visible =
+          playMovementMode === "char" && playCharLoaded;
+      if (playCarRoot)
+        playCarRoot.visible = playMovementMode === "car" && playCarLoaded;
+      syncModeBadge();
+      return;
+    }
+    if (!event.repeat && event.code === "KeyV") {
+      event.preventDefault();
+      playCamView = playCamView === "follow" ? "iso" : "follow";
+      if (playCamView === "iso") {
+        // Release pointer lock so the cursor returns — camera yaw is
+        // fixed in iso, so raw mouse-look has nothing useful to do.
+        // Bracket keys rotate, wheel zooms.
+        if (document.pointerLockElement) document.exitPointerLock();
+        renderer.domElement.style.cursor = "";
+        // Seed iso yaw from the current follow yaw (or plane heading)
+        // so the switch doesn't snap-rotate the world under you.
+        isoYaw =
+          playMovementMode === "fly" && playPlaneLoaded
+            ? flyHeading
+            : camYaw;
+      } else {
+        // Back to follow — re-hide cursor and re-acquire pointer lock.
+        // Drop any pending click-to-move target.
+        moveTarget = null;
+        moveRing.visible = false;
+        renderer.domElement.style.cursor = "none";
+        renderer.domElement.requestPointerLock();
+      }
+      syncModeBadge();
+      return;
+    }
+    if (
+      !event.repeat &&
+      event.code === "KeyQ" &&
+      playMovementMode === "fly" &&
+      playPlaneLoaded &&
+      !flyBarrelActive &&
+      !planeFlightSurfaceLocked()
+    ) {
+      event.preventDefault();
+      let rollHint = 0;
+      if (Math.abs(flyRoll) > FLY_BARREL_ROLL_DEAD) rollHint = flyRoll;
+      else if (Math.abs(flyRollTarget) > FLY_BARREL_ROLL_DEAD)
+        rollHint = flyRollTarget;
+      flyBarrelSign =
+        rollHint !== 0
+          ? Math.sign(rollHint)
+          : Math.random() < 0.5
+            ? 1
+            : -1;
+      flyBarrelActive = true;
+      flyBarrelPhase = 0;
+      return;
+    }
+    /* Char mode (game-unreal parity):
+     *   R = sword attack, C = roll,
+     *   X = slide (requires WASD + grounded),
+     *   Q = spell toggle, J = spell shoot. */
+    if (
+      !event.repeat &&
+      playMovementMode === "char" &&
+      playCharLoaded &&
+      playCharActions
+    ) {
+      const a = playCharActions;
+      const busy =
+        playCharAttacking ||
+        playCharRolling ||
+        playCharSlidePhase !== "none";
+      const inSpell = playCharSpellPhase !== "none";
+
+      if (
+        event.code === "KeyR" &&
+        a.attack &&
+        !busy &&
+        !inSpell &&
+        !playCharInAir
+      ) {
+        event.preventDefault();
+        playCharAttacking = true;
+        a.attack.enabled = true;
+        a.attack.reset();
+        a.attack.crossFadeFrom(playCharCurrentAction, 0.12, false).play();
+        playCharCurrentAction = a.attack;
+        return;
+      }
+      if (event.code === "KeyC" && a.roll && !busy && !inSpell) {
+        event.preventDefault();
+        playCharRolling = true;
+        playCharRollYaw = playCharYaw;
+        playCharRollStart = performance.now();
+        a.roll.enabled = true;
+        a.roll.reset();
+        a.roll.crossFadeFrom(playCharCurrentAction, 0.1, false).play();
+        playCharCurrentAction = a.roll;
+        return;
+      }
+      if (
+        event.code === "KeyX" &&
+        a.slideStart &&
+        !busy &&
+        !inSpell &&
+        !playCharInAir &&
+        (keysHeld.KeyW ||
+          keysHeld.KeyA ||
+          keysHeld.KeyS ||
+          keysHeld.KeyD ||
+          keysHeld.ArrowUp ||
+          keysHeld.ArrowDown ||
+          keysHeld.ArrowLeft ||
+          keysHeld.ArrowRight)
+      ) {
+        event.preventDefault();
+        playCharSlidePhase = "start";
+        playCharSlideYaw = playCharYaw;
+        playCharSlideStart = performance.now();
+        a.slideStart.enabled = true;
+        a.slideStart.reset();
+        a.slideStart
+          .crossFadeFrom(playCharCurrentAction, 0.1, false)
+          .play();
+        playCharCurrentAction = a.slideStart;
+        return;
+      }
+      if (event.code === "KeyQ") {
+        event.preventDefault();
+        /* Toggle spell stance. */
+        if (playCharSpellPhase === "none" && !busy && a.spellEnter) {
+          playCharSpellPhase = "enter";
+          playCharSpellExitRequested = false;
+          a.spellEnter.enabled = true;
+          a.spellEnter.reset();
+          a.spellEnter
+            .crossFadeFrom(playCharCurrentAction, 0.15, false)
+            .play();
+          playCharCurrentAction = a.spellEnter;
+        } else if (
+          (playCharSpellPhase === "idle" ||
+            playCharSpellPhase === "enter" ||
+            playCharSpellPhase === "shoot") &&
+          a.spellExit
+        ) {
+          /* Request exit; if already idle, transition now. */
+          playCharSpellExitRequested = true;
+          if (playCharSpellPhase === "idle") {
+            playCharSpellPhase = "exit";
+            a.spellExit.enabled = true;
+            a.spellExit.reset();
+            a.spellExit
+              .crossFadeFrom(playCharCurrentAction, 0.12, false)
+              .play();
+            playCharCurrentAction = a.spellExit;
+          }
+        }
+        return;
+      }
+      if (
+        event.code === "KeyJ" &&
+        playCharSpellPhase === "idle" &&
+        !playCharSpellExitRequested &&
+        a.spellShoot
+      ) {
+        event.preventDefault();
+        playCharSpellPhase = "shoot";
+        a.spellShoot.enabled = true;
+        a.spellShoot.reset();
+        a.spellShoot
+          .crossFadeFrom(playCharCurrentAction, 0.12, false)
+          .play();
+        playCharCurrentAction = a.spellShoot;
+        return;
+      }
+    }
+    keysHeld[event.code] = true;
+    if (event.code.startsWith("Arrow")) event.preventDefault();
+    // Iso mode releases pointer lock, so Space would otherwise
+    // scroll the page. Prevent it throughout play mode.
+    if (event.code === "Space") event.preventDefault();
+    if (
+      !event.repeat &&
+      (event.code === "Escape" || event.code === "KeyF")
+    ) {
+      event.preventDefault();
+      exitPlayMode();
+      setEditMode("view");
+    }
+    return;
+  }
+
+  if (
+    event.code === "Escape" &&
+    !event.repeat &&
+    editState.mode === "spline" &&
+    splineSelectedIdx >= 0
+  ) {
+    event.preventDefault();
+    splineSelectedIdx = -1;
+    splineDragging = false;
+    if (!playMode) controls.enabled = true;
+    splineRebuildVisual();
+    if (editorPane) editorPane.refresh();
+    return;
+  }
+
+  if (
+    event.code === "Escape" &&
+    !event.repeat &&
+    editState.mode === "river" &&
+    riverSelectedIdx >= 0
+  ) {
+    event.preventDefault();
+    riverSelectedIdx = -1;
+    riverDragging = false;
+    if (!playMode) controls.enabled = true;
+    riverRebuildVisual();
+    if (editorPane) editorPane.refresh();
+    return;
+  }
+
+  if (
+    event.code === "Escape" &&
+    !event.repeat &&
+    editState.mode === "road" &&
+    roadSelectedIdx >= 0
+  ) {
+    event.preventDefault();
+    roadSelectedIdx = -1;
+    roadDragging = false;
+    if (!playMode) controls.enabled = true;
+    roadRebuildVisual();
+    if (editorPane) editorPane.refresh();
+    return;
+  }
+
+  // Esc: always back to view from any edit mode (same rule as we add modes later).
+  if (event.code === "Escape" && !event.repeat) {
+    event.preventDefault();
+    setEditMode("view");
+    return;
+  }
+
+  if (event.repeat) return;
+
+  const modUndo = event.ctrlKey || event.metaKey;
+  if (
+    modUndo &&
+    (event.code === "KeyZ" || event.code === "KeyY") &&
+    !isEditableTextTarget(event.target)
+  ) {
+    event.preventDefault();
+    if (event.code === "KeyY") redoTerrainEdit();
+    else if (event.shiftKey) redoTerrainEdit();
+    else undoTerrainEdit();
+    return;
+  }
+
+  if (uiTypingTarget(event.target)) return;
+
+  if (
+    event.code === "KeyR" &&
+    editState.mode === "sculpt" &&
+    PARAMS.sculptTool === "ramp" &&
+    editState.rampPointA
+  ) {
+    event.preventDefault();
+    clearRampStart();
+    return;
+  }
+
+  if (event.code === "KeyF") {
+    event.preventDefault();
+    enterPlayMode();
+    return;
+  }
+
+  if (event.key === "d" || event.key === "D") {
+    debugChunkView = !debugChunkView;
+    if (!debugChunkView) disposeDebugChunkMaterials();
+    refreshActiveChunkMaterials();
+  }
+  if (event.code === "Backquote") {
+    const surfOrder = [
+      "tile",
+      "tslGround",
+      "splat",
+      "imgTex",
+      "greenGround",
+    ];
+    const si = surfOrder.indexOf(PARAMS.terrainSurface);
+    PARAMS.terrainSurface = surfOrder[(si + 1) % surfOrder.length];
+    refreshActiveChunkMaterials();
+    if (editorPane) editorPane.refresh();
+  }
+  if (event.code === "KeyS") {
+    event.preventDefault();
+    setEditMode(editState.mode === "sculpt" ? "view" : "sculpt");
+    return;
+  }
+  if (event.code === "KeyP") {
+    event.preventDefault();
+    setEditMode(editState.mode === "paint" ? "view" : "paint");
+    return;
+  }
+  if (event.code === "KeyG" && !event.shiftKey) {
+    event.preventDefault();
+    setEditMode(
+      editState.mode === "geminigrass" ? "view" : "geminigrass",
+    );
+    return;
+  }
+  if (event.code === "KeyJ") {
+    event.preventDefault();
+    setEditMode(editState.mode === "pinelod" ? "view" : "pinelod");
+    return;
+  }
+  if (event.code === "KeyO") {
+    event.preventDefault();
+    setEditMode(editState.mode === "place" ? "view" : "place");
+    return;
+  }
+  if (event.code === "KeyC") {
+    event.preventDefault();
+    setEditMode(editState.mode === "cliffs" ? "view" : "cliffs");
+    return;
+  }
+  if (event.code === "KeyB") {
+    event.preventDefault();
+    setEditMode(editState.mode === "cliffpaint" ? "view" : "cliffpaint");
+    return;
+  }
+  if (event.code === "KeyM") {
+    event.preventDefault();
+    setEditMode(editState.mode === "fleurs" ? "view" : "fleurs");
+    return;
+  }
+  if (event.code === "KeyN") {
+    event.preventDefault();
+    setEditMode(editState.mode === "foliage" ? "view" : "foliage");
+    return;
+  }
+  if (event.code === "KeyX") {
+    event.preventDefault();
+    setEditMode(editState.mode === "ambientfx" ? "view" : "ambientfx");
+    return;
+  }
+  if (event.code === "KeyH") {
+    event.preventDefault();
+    setEditMode(editState.mode === "waterfall" ? "view" : "waterfall");
+    return;
+  }
+  if (event.code === "KeyK") {
+    event.preventDefault();
+    setEditMode(editState.mode === "spline" ? "view" : "spline");
+    return;
+  }
+  if (event.code === "KeyV") {
+    event.preventDefault();
+    setEditMode(editState.mode === "river" ? "view" : "river");
+    return;
+  }
+  if (event.code === "KeyU" && editState.mode !== "paint") {
+    event.preventDefault();
+    setEditMode(editState.mode === "road" ? "view" : "road");
+    return;
+  }
+  if (
+    event.code === "KeyW" &&
+    editState.mode !== "place" &&
+    editState.mode !== "props" &&
+    editState.mode !== "cliffs" &&
+    editState.mode !== "decal" &&
+    editState.mode !== "water" &&
+    editState.mode !== "waterfall"
+  ) {
+    event.preventDefault();
+    setEditMode("water");
+    return;
+  }
+  if (event.code === "KeyW" && editState.mode === "water") {
+    event.preventDefault();
+    setEditMode("view");
+    return;
+  }
+  if (event.code === "KeyL") {
+    event.preventDefault();
+    setEditMode(editState.mode === "path" ? "view" : "path");
+    return;
+  }
+  if (event.code === "KeyD") {
+    event.preventDefault();
+    setEditMode(editState.mode === "decal" ? "view" : "decal");
+    return;
+  }
+  if (event.code === "KeyI") {
+    event.preventDefault();
+    setEditMode(editState.mode === "props" ? "view" : "props");
+    return;
+  }
+  if (editState.mode === "spline" && event.code === "Delete") {
+    event.preventDefault();
+    splineDeleteSelected();
+    if (editorPane) editorPane.refresh();
+    return;
+  }
+  if (editState.mode === "river" && event.code === "Delete") {
+    event.preventDefault();
+    riverDeleteSelected();
+    if (editorPane) editorPane.refresh();
+    return;
+  }
+  if (editState.mode === "road" && event.code === "Delete") {
+    event.preventDefault();
+    roadDeleteSelected();
+    if (editorPane) editorPane.refresh();
+    return;
+  }
+  if (
+    event.code === "KeyE" &&
+    editState.mode !== "place" &&
+    editState.mode !== "cliffs" &&
+    editState.mode !== "waterfall" &&
+    editState.mode !== "water" &&
+    editState.mode !== "props" &&
+    editState.mode !== "decal"
+  ) {
+    event.preventDefault();
+    setEditMode(editState.mode === "objects" ? "view" : "objects");
+    return;
+  }
+  if (
+    editState.mode === "place" ||
+    editState.mode === "cliffs" ||
+    editState.mode === "props" ||
+    editState.mode === "decal"
+  ) {
+    if (event.code === "KeyW") {
+      event.preventDefault();
+      transformControls.setMode("translate");
+      return;
+    }
+    if (event.code === "KeyE") {
+      event.preventDefault();
+      transformControls.setMode("rotate");
+      return;
+    }
+    if (event.code === "KeyR") {
+      event.preventDefault();
+      transformControls.setMode("scale");
+      return;
+    }
+    if (event.code === "Delete") {
+      event.preventDefault();
+      if (editState.mode === "cliffs" && cliffInstancer.hasSelection()) {
+        cliffInstancer.deleteSelected();
+        invalidateBvhHeight();
+        ciRefreshProxy();
+        if (editorPane) editorPane.refresh();
+        transformControls.detach();
+        tcHelper.visible = false;
+        return;
+      }
+      if (editState.mode === "place" && selectedCliff) {
+        scene.remove(selectedCliff);
+        cliffObjects = cliffObjects.filter((c) => c !== selectedCliff);
+        selectCliff(null);
+        invalidateBvhHeight();
+        return;
+      }
+      if (editState.mode === "props" && selectedProp) {
+        scene.remove(selectedProp);
+        propObjects = propObjects.filter((p) => p !== selectedProp);
+        selectProp(null);
+        invalidateBvhHeight();
+        if (editorPane) editorPane.refresh();
+      }
+      if (editState.mode === "decal" && selectedDecal)
+        deleteSelectedDecal();
+      return;
+    }
+  }
+  if (editState.mode === "waterfall") {
+    if (event.code === "KeyW") {
+      event.preventDefault();
+      transformControls.setMode("translate");
+      return;
+    }
+    if (event.code === "KeyE") {
+      event.preventDefault();
+      transformControls.setMode("rotate");
+      return;
+    }
+    if (event.code === "KeyR") {
+      event.preventDefault();
+      transformControls.setMode("scale");
+      return;
+    }
+    if (event.code === "Digit7") {
+      event.preventDefault();
+      transformControls.setMode("translate");
+      return;
+    }
+    if (event.code === "Digit8") {
+      event.preventDefault();
+      transformControls.setMode("rotate");
+      return;
+    }
+    if (event.code === "Digit9") {
+      event.preventDefault();
+      transformControls.setMode("scale");
+      return;
+    }
+    if (event.code === "Delete" && rwiRefs.selectedWaterfall) {
+      event.preventDefault();
+      scene.remove(rwiRefs.selectedWaterfall);
+      rwiRefs.waterfallObjects = rwiRefs.waterfallObjects.filter(
+        (m) => m !== rwiRefs.selectedWaterfall,
+      );
+      selectWaterfall(null);
+      if (editorPane) editorPane.refresh();
+      return;
+    }
+    if (event.code === "Delete" && rwiRefs.selectedSplashCap) {
+      event.preventDefault();
+      scene.remove(rwiRefs.selectedSplashCap);
+      rwiRefs.selectedSplashCap.geometry.dispose();
+      rwiRefs.splashCapObjects = rwiRefs.splashCapObjects.filter(
+        (m) => m !== rwiRefs.selectedSplashCap,
+      );
+      selectSplashCap(null);
+      if (editorPane) editorPane.refresh();
+      return;
+    }
+  }
+  if (editState.mode === "water") {
+    if (event.code === "KeyE") {
+      event.preventDefault();
+      transformControls.setMode("translate");
+      return;
+    }
+    if (event.code === "KeyR") {
+      event.preventDefault();
+      transformControls.setMode("rotate");
+      return;
+    }
+    if (event.code === "KeyT") {
+      event.preventDefault();
+      transformControls.setMode("scale");
+      return;
+    }
+    if (event.code === "Delete" && rwiRefs.selectedWater) {
+      event.preventDefault();
+      scene.remove(rwiRefs.selectedWater);
+      rwiRefs.waterObjects = rwiRefs.waterObjects.filter(
+        (m) => m !== rwiRefs.selectedWater,
+      );
+      _invalidateLakeCache();
+      selectWater(null);
+      if (editorPane) editorPane.refresh();
+      return;
+    }
+    if (event.code === "Delete" && rwiRefs.selectedWaterfall) {
+      event.preventDefault();
+      scene.remove(rwiRefs.selectedWaterfall);
+      rwiRefs.waterfallObjects = rwiRefs.waterfallObjects.filter(
+        (m) => m !== rwiRefs.selectedWaterfall,
+      );
+      selectWaterfall(null);
+      if (editorPane) editorPane.refresh();
+      return;
+    }
+    if (event.code === "Delete" && rwiRefs.selectedSplashCap) {
+      event.preventDefault();
+      scene.remove(rwiRefs.selectedSplashCap);
+      rwiRefs.selectedSplashCap.geometry.dispose();
+      rwiRefs.splashCapObjects = rwiRefs.splashCapObjects.filter(
+        (m) => m !== rwiRefs.selectedSplashCap,
+      );
+      selectSplashCap(null);
+      if (editorPane) editorPane.refresh();
+      return;
+    }
+  }
+  if (editState.mode === "pinelod") {
+    const dk = parseInt(event.key, 10);
+    if (dk >= 1 && dk <= 8) {
+      event.preventDefault();
+      assignLodSlot(dk - 1);
+    }
+  } else if (editState.mode !== "proctrees") {
+    if (event.key === "1") editState.paintChannel = 0;
+    if (event.key === "2") editState.paintChannel = 1;
+    if (event.key === "3") editState.paintChannel = 2;
+  }
+  if (
+    editState.mode === "paint" &&
+    (event.key === "u" || event.key === "U")
+  ) {
+    event.preventDefault();
+    const order = ["meadow", "splat", "img"];
+    const i = order.indexOf(PARAMS.paintLayerTarget);
+    PARAMS.paintLayerTarget = order[(i < 0 ? 0 : i + 1) % order.length];
+    editState.paintLayer = PARAMS.paintLayerTarget;
+    if (editorPane) editorPane.refresh();
+  }
+});
+
+window.addEventListener("keyup", (event) => {
+  if (playMode) keysHeld[event.code] = false;
+  if (event.key === "Shift") editState.isShiftDown = false;
+});
+
+renderer.domElement.addEventListener("pointermove", (event) => {
+  if (playMode) {
+    // Iso-capsule: move the hover ring under the cursor. Other play
+    // sub-modes (follow, iso-fly) ignore pointer move.
+    if (playCamView === "iso" && playMovementMode === "capsule") {
+      updatePointerNdc(event);
+      const hit = pickTerrainFast();
+      if (hit) {
+        moveRing.visible = true;
+        moveRing.position.set(hit.x, hit.y + 0.08, hit.z);
+      } else {
+        moveRing.visible = false;
+      }
+    }
+    return;
+  }
+  if (editState.mode === "water") return;
+  updatePointerNdc(event);
+  if (
+    editState.mode === "river" &&
+    riverDragging &&
+    riverSelectedIdx >= 0
+  ) {
+    const p = raycastTerrainPoint();
+    if (p) riverMoveSelected(p);
+    return;
+  }
+  if (editState.mode === "road" && roadDragging && roadSelectedIdx >= 0) {
+    const p = raycastTerrainPoint();
+    if (p) roadMoveSelected(p);
+    return;
+  }
+  if (
+    editState.mode === "spline" &&
+    splineDragging &&
+    splineSelectedIdx >= 0
+  ) {
+    const p = raycastTerrainPoint();
+    if (p) splineMoveSelected(p);
+    return;
+  }
+  const hit = raycastTerrainPoint();
+  editState.hasBrushHit = !!hit;
+  const showBrushRing =
+    editState.mode === "paint" ||
+    editState.mode === "path" ||
+    editState.mode === "geminigrass" ||
+    editState.mode === "geminicliffgrass" ||
+    editState.mode === "cliffpaint" ||
+    editState.mode === "fleurs" ||
+    editState.mode === "ambientfx" ||
+    editState.mode === "barrier" ||
+    editState.mode === "hole" ||
+    editState.mode === "pinelod" ||
+    editState.mode === "proctrees" ||
+    editState.mode === "objects" ||
+    editState.mode === "foliage" ||
+    (editState.mode === "sculpt" &&
+      (PARAMS.sculptTool === "brush" ||
+        PARAMS.sculptTool === "ramp" ||
+        PARAMS.sculptTool === "noise" ||
+        PARAMS.sculptTool === "terrace" ||
+        PARAMS.sculptTool === "erosion"));
+  if (showBrushRing && hit) {
+    editState.brushWorldPoint.copy(hit);
+    brushMarker.visible = true;
+    const lift =
+      editState.mode === "barrier" || editState.mode === "hole"
+        ? 0.15
+        : 0.04;
+    brushMarker.position.set(hit.x, hit.y + lift, hit.z);
+  } else {
+    brushMarker.visible = false;
+  }
+  if (
+    editState.mode === "path" ||
+    editState.mode === "geminigrass" ||
+    editState.mode === "geminicliffgrass" ||
+    editState.mode === "fleurs" ||
+    editState.mode === "ambientfx" ||
+    editState.mode === "barrier" ||
+    editState.mode === "hole" ||
+    editState.mode === "pinelod" ||
+    editState.mode === "proctrees" ||
+    editState.mode === "objects" ||
+    editState.mode === "foliage"
+  )
+    syncBrushVisual();
+
+  if (
+    editState.mode === "sculpt" &&
+    editState.isPointerDown &&
+    editState.pointerAction === "sculpt" &&
+    hit &&
+    (PARAMS.sculptTool === "brush" ||
+      PARAMS.sculptTool === "noise" ||
+      PARAMS.sculptTool === "terrace" ||
+      PARAMS.sculptTool === "erosion")
+  ) {
+    if (
+      editState.sculptSkipFirstMoveDup &&
+      event.movementX === 0 &&
+      event.movementY === 0
+    ) {
+      editState.sculptSkipFirstMoveDup = false;
+    } else {
+      editState.sculptSkipFirstMoveDup = false;
+      applySculptAt(hit, event);
+      rebuildDirtyActiveChunks(12);
+    }
+  }
+  if (PARAMS.sculptTool === "ramp" && editState.rampPointA)
+    syncRampMarkerVisual();
+  if (
+    editState.isPointerDown &&
+    editState.pointerAction === "paint" &&
+    hit
+  ) {
+    applyPaintAtWorld(hit, editState.paintErase);
+  }
+  if (
+    editState.isPointerDown &&
+    editState.pointerAction === "path" &&
+    hit
+  ) {
+    pathPaintAt(hit);
+  }
+  if (
+    editState.isPointerDown &&
+    editState.pointerAction === "geminigrass" &&
+    hit
+  ) {
+    paintGeminiGrassAt(hit.x, hit.z, editState.paintErase);
+  }
+  if (
+    editState.isPointerDown &&
+    editState.pointerAction === "geminicliffgrass" &&
+    hit
+  ) {
+    paintGeminiCliffGrassAt(hit.x, hit.z, editState.paintErase);
+  }
+  if (
+    editState.isPointerDown &&
+    editState.pointerAction === "cliffpaint" &&
+    hit
+  ) {
+    paintCliffAt(hit.x, hit.z, editState.paintErase);
+  }
+  if (
+    editState.isPointerDown &&
+    editState.pointerAction === "fleurs" &&
+    hit
+  ) {
+    paintFleurAt(hit.x, hit.z, editState.paintErase);
+  }
+  if (
+    editState.isPointerDown &&
+    editState.pointerAction === "ambientfx" &&
+    hit
+  ) {
+    paintAmbientFXAt(hit.x, hit.z, ambientFXErase || event.shiftKey);
+  }
+  if (
+    editState.isPointerDown &&
+    editState.pointerAction === "barrier" &&
+    hit
+  ) {
+    paintBarrierAt(hit.x, hit.z, barrierEraseMode || event.shiftKey);
+  }
+  if (
+    editState.isPointerDown &&
+    editState.pointerAction === "hole" &&
+    hit
+  ) {
+    paintHoleAtWorld(hit, holeEraseMode || event.shiftKey);
+  }
+  if (
+    editState.isPointerDown &&
+    editState.pointerAction === "pinelod" &&
+    hit
+  ) {
+    editState.paintErase = event.shiftKey;
+    paintLODAt(hit.x, hit.z, editState.paintErase);
+  }
+  if (
+    editState.isPointerDown &&
+    editState.pointerAction === "proctrees" &&
+    hit
+  ) {
+    editState.paintErase = event.shiftKey;
+    paintPTreeAt(hit.x, hit.z, editState.paintErase);
+  }
+  if (
+    editState.isPointerDown &&
+    editState.pointerAction === "objects" &&
+    hit
+  ) {
+    paintObjectAt(hit.x, hit.z, objectEraseMode || event.shiftKey);
+  }
+  if (
+    editState.isPointerDown &&
+    editState.pointerAction === "foliage" &&
+    hit
+  ) {
+    paintFoliageAt(hit.x, hit.z, foliageEraseMode || event.shiftKey);
+  }
+});
+
+renderer.domElement.addEventListener("pointerdown", (event) => {
+  if (playMode) {
+    // Iso-capsule LMB: click-to-move. Store target; the render loop
+    // walks toward it until arrival or until the user presses WASD.
+    if (
+      playCamView === "iso" &&
+      playMovementMode === "capsule" &&
+      event.button === 0
+    ) {
+      updatePointerNdc(event);
+      const hit = pickTerrainFast();
+      if (hit) {
+        if (!moveTarget) moveTarget = new THREE.Vector3();
+        moveTarget.copy(hit);
+      }
+    }
+    return;
+  }
+  updatePointerNdc(event);
+  if (event.button === 0) {
+    raycaster.setFromCamera(pointerNdc, camera);
+    const wHit = raycaster.intersectObject(oceanWater, false);
+    if (wHit.length > 0) rippleAdd(wHit[0].point.x, wHit[0].point.z);
+  }
+  const hit = raycastTerrainPoint();
+
+  if (editState.mode === "water" && event.button === 0) {
+    event.preventDefault();
+    if (transformControls.axis !== null) return;
+    raycaster.setFromCamera(pointerNdc, camera);
+    const waterHits = raycaster.intersectObjects(rwiRefs.waterObjects, false);
+    if (waterHits.length > 0) {
+      selectWater(
+        getWaterRoot(waterHits[0].object) ?? waterHits[0].object,
+      );
+      if (editorPane) editorPane.refresh();
+      return;
+    }
+    if (hit) {
+      placeWater(hit.x, hit.y, hit.z);
+      if (editorPane) editorPane.refresh();
+    }
+    return;
+  }
+
+  if (editState.mode === "river" && event.button === 0) {
+    event.preventDefault();
+    const picked = riverPickPoint(event);
+    if (picked >= 0) {
+      riverSelectedIdx = picked;
+      riverDragging = true;
+      controls.enabled = false;
+      riverRebuildVisual();
+      riverUpdateSelectedYParam();
+    } else if (hit) {
+      riverAddPoint(hit);
+    }
+    return;
+  }
+
+  if (editState.mode === "road" && event.button === 0) {
+    event.preventDefault();
+    const picked = roadPickPoint(event);
+    if (picked >= 0) {
+      roadSelectedIdx = picked;
+      roadDragging = true;
+      controls.enabled = false;
+      roadRebuildVisual();
+      roadUpdateSelectedYParam();
+    } else if (hit) {
+      roadAddPoint(hit);
+    }
+    return;
+  }
+
+  if (editState.mode === "spline" && event.button === 0) {
+    event.preventDefault();
+    const picked = splinePickPoint(event);
+    if (picked >= 0) {
+      splineSelectedIdx = picked;
+      splineDragging = true;
+      controls.enabled = false;
+      splineRebuildVisual();
+      splineUpdateSelectedYParam();
+    } else if (hit) {
+      splineAddPoint(hit);
+    }
+    return;
+  }
+
+  if (editState.mode === "cliffs" && event.button === 0) {
+    event.preventDefault();
+    if (transformControls.axis !== null) return;
+    if (hit) {
+      cliffInstancer.placeAt(hit.x, hit.y, hit.z);
+      invalidateBvhHeight();
+      ciRefreshProxy();
+      if (editorPane) editorPane.refresh();
+    }
+    return;
+  }
+
+  if (editState.mode === "place" && event.button === 0) {
+    event.preventDefault();
+    if (transformControls.axis !== null) return;
+    raycaster.setFromCamera(pointerNdc, camera);
+    const cliffMeshes = [];
+    cliffObjects.forEach((root) =>
+      root.traverse((o) => {
+        if (o.isMesh) cliffMeshes.push(o);
+      }),
+    );
+    const cliffHits = raycaster.intersectObjects(cliffMeshes, false);
+    if (cliffHits.length > 0) {
+      const root = getCliffRoot(cliffHits[0].object);
+      if (root) {
+        selectCliff(root);
+        return;
+      }
+    }
+    if (hit) placeCliff(hit.x, hit.y, hit.z, activeCliffModel);
+    return;
+  }
+
+  if (editState.mode === "props" && event.button === 0) {
+    event.preventDefault();
+    if (transformControls.axis !== null) return;
+    raycaster.setFromCamera(pointerNdc, camera);
+    const propMeshes = [];
+    propObjects.forEach((root) =>
+      root.traverse((o) => {
+        if (o.isMesh) propMeshes.push(o);
+      }),
+    );
+    const propHits = raycaster.intersectObjects(propMeshes, false);
+    if (propHits.length > 0) {
+      const root = getPropRoot(propHits[0].object);
+      if (root) {
+        selectProp(root);
+        if (editorPane) editorPane.refresh();
+        return;
+      }
+    }
+    if (hit) placeProp(hit.x, hit.y, hit.z);
+    return;
+  }
+
+  if (editState.mode === "decal" && event.button === 0) {
+    event.preventDefault();
+    if (transformControls.axis !== null) return;
+    raycaster.setFromCamera(pointerNdc, camera);
+    const dHits = raycaster.intersectObjects(decalObjects, false);
+    if (dHits.length > 0) {
+      selectDecal(dHits[0].object);
+      if (editorPane) editorPane.refresh();
+      return;
+    }
+    if (hit) placeDecal(hit.x, hit.y, hit.z);
+    return;
+  }
+
+  if (editState.mode === "waterfall" && event.button === 0) {
+    event.preventDefault();
+    if (transformControls.axis !== null) return;
+    raycaster.setFromCamera(pointerNdc, camera);
+    if (wfPlaceTool.tool === "splashCap") {
+      const capHits = raycaster.intersectObjects(rwiRefs.splashCapObjects, false);
+      if (capHits.length > 0) {
+        selectSplashCap(capHits[0].object);
+        if (editorPane) editorPane.refresh();
+        return;
+      }
+      const pt = raycastTerrainPoint();
+      if (pt) {
+        placeSplashCap(pt.x, pt.y, pt.z);
+        if (editorPane) editorPane.refresh();
+      }
+      return;
+    }
+    const wfHits = raycaster.intersectObjects(rwiRefs.waterfallObjects, false);
+    if (wfHits.length > 0) {
+      selectWaterfall(wfHits[0].object);
+      return;
+    }
+    const pt = raycastTerrainPoint();
+    if (pt) placeWaterfall(pt.x, pt.y, pt.z);
+    return;
+  }
+
+  if (editState.mode === "geminigrass" && event.button === 0) {
+    event.preventDefault();
+    pushTerrainUndo();
+    editState.isPointerDown = true;
+    editState.pointerAction = "geminigrass";
+    editState.paintErase = geminiGrassEraseMode || event.shiftKey;
+    controls.enabled = false;
+    if (hit) paintGeminiGrassAt(hit.x, hit.z, editState.paintErase);
+    return;
+  }
+
+  if (editState.mode === "geminicliffgrass" && event.button === 0) {
+    event.preventDefault();
+    pushTerrainUndo();
+    editState.isPointerDown = true;
+    editState.pointerAction = "geminicliffgrass";
+    editState.paintErase = geminiCliffGrassEraseMode || event.shiftKey;
+    controls.enabled = false;
+    if (hit) paintGeminiCliffGrassAt(hit.x, hit.z, editState.paintErase);
+    return;
+  }
+
+  if (editState.mode === "cliffpaint" && event.button === 0) {
+    event.preventDefault();
+    pushTerrainUndo();
+    editState.isPointerDown = true;
+    editState.pointerAction = "cliffpaint";
+    editState.paintErase = cliffPaintEraseMode || event.shiftKey;
+    controls.enabled = false;
+    if (hit) paintCliffAt(hit.x, hit.z, editState.paintErase);
+    return;
+  }
+
+  if (editState.mode === "fleurs" && event.button === 0) {
+    event.preventDefault();
+    editState.isPointerDown = true;
+    editState.pointerAction = "fleurs";
+    editState.paintErase = fleurEraseMode || event.shiftKey;
+    controls.enabled = false;
+    if (hit) paintFleurAt(hit.x, hit.z, editState.paintErase);
+    return;
+  }
+
+  if (editState.mode === "ambientfx" && event.button === 0) {
+    event.preventDefault();
+    editState.isPointerDown = true;
+    editState.pointerAction = "ambientfx";
+    editState.paintErase = ambientFXErase || event.shiftKey;
+    controls.enabled = false;
+    if (hit)
+      paintAmbientFXAt(hit.x, hit.z, ambientFXErase || event.shiftKey);
+    return;
+  }
+
+  if (editState.mode === "barrier" && event.button === 0) {
+    event.preventDefault();
+    editState.isPointerDown = true;
+    editState.pointerAction = "barrier";
+    editState.paintErase = barrierEraseMode || event.shiftKey;
+    controls.enabled = false;
+    if (hit)
+      paintBarrierAt(hit.x, hit.z, barrierEraseMode || event.shiftKey);
+    return;
+  }
+
+  if (editState.mode === "hole" && event.button === 0) {
+    event.preventDefault();
+    pushTerrainUndo();
+    editState.isPointerDown = true;
+    editState.pointerAction = "hole";
+    editState.paintErase = holeEraseMode || event.shiftKey;
+    controls.enabled = false;
+    if (hit) paintHoleAtWorld(hit, holeEraseMode || event.shiftKey);
+    return;
+  }
+
+  if (
+    editState.mode === "sculpt" &&
+    PARAMS.sculptTool === "ramp" &&
+    event.button === 0
+  ) {
+    event.preventDefault();
+    if (!hit) return;
+    if (!editState.rampPointA) {
+      editState.rampPointA = {
+        x: hit.x,
+        y: getWorldHeight(hit.x, hit.z),
+        z: hit.z,
+      };
+    } else {
+      pushTerrainUndo();
+      applyRampAt(editState.rampPointA, {
+        x: hit.x,
+        y: getWorldHeight(hit.x, hit.z),
+        z: hit.z,
+      });
+      editState.rampPointA = null;
+      rebuildDirtyActiveChunks(16);
+    }
+    syncBrushVisual();
+    return;
+  }
+
+  if (
+    editState.mode === "sculpt" &&
+    (PARAMS.sculptTool === "brush" ||
+      PARAMS.sculptTool === "noise" ||
+      PARAMS.sculptTool === "terrace" ||
+      PARAMS.sculptTool === "erosion") &&
+    event.button === 0
+  ) {
+    event.preventDefault();
+    if (!hit) return;
+    pushTerrainUndo();
+    sculptBrushNoiseSeed = Math.random() * 1000;
+    editState.isPointerDown = true;
+    editState.pointerAction = "sculpt";
+    editState.sculptSign = event.shiftKey ? -1 : 1;
+    if (event.altKey) {
+      editState.sculptFlattenTargetY = getWorldHeight(hit.x, hit.z);
+    }
+    editState.sculptSkipFirstMoveDup = true;
+    applySculptAt(hit, event);
+    rebuildDirtyActiveChunks(12);
+    return;
+  }
+
+  if (editState.mode === "paint" && event.button === 0) {
+    event.preventDefault();
+    pushTerrainUndo();
+    editState.isPointerDown = true;
+    editState.pointerAction = "paint";
+    editState.paintErase = event.shiftKey;
+    editState.paintNoiseSeed = Math.random() * 10000;
+    controls.enabled = false;
+    if (hit) applyPaintAtWorld(hit, editState.paintErase);
+    return;
+  }
+
+  if (editState.mode === "path" && event.button === 0) {
+    event.preventDefault();
+    pushTerrainUndo();
+    editState.isPointerDown = true;
+    editState.pointerAction = "path";
+    controls.enabled = false;
+    if (hit) pathPaintAt(hit);
+    return;
+  }
+
+  if (editState.mode === "pinelod" && event.button === 0) {
+    event.preventDefault();
+    editState.isPointerDown = true;
+    editState.pointerAction = "pinelod";
+    editState.paintErase = event.shiftKey;
+    controls.enabled = false;
+    if (hit) paintLODAt(hit.x, hit.z, editState.paintErase);
+  }
+
+  if (editState.mode === "proctrees" && event.button === 0) {
+    event.preventDefault();
+    editState.isPointerDown = true;
+    editState.pointerAction = "proctrees";
+    editState.paintErase = event.shiftKey;
+    controls.enabled = false;
+    if (hit) paintPTreeAt(hit.x, hit.z, editState.paintErase);
+  }
+
+  if (editState.mode === "objects" && event.button === 0) {
+    event.preventDefault();
+    editState.isPointerDown = true;
+    editState.pointerAction = "objects";
+    controls.enabled = false;
+    if (hit)
+      paintObjectAt(hit.x, hit.z, objectEraseMode || event.shiftKey);
+  }
+
+  if (editState.mode === "foliage" && event.button === 0) {
+    event.preventDefault();
+    editState.isPointerDown = true;
+    editState.pointerAction = "foliage";
+    controls.enabled = false;
+    if (hit)
+      paintFoliageAt(hit.x, hit.z, foliageEraseMode || event.shiftKey);
+  }
+});
+
+renderer.domElement.addEventListener("contextmenu", (e) => {
+  e.preventDefault();
+  if (playMode || editState.mode !== "cliffs") return;
+  updatePointerNdc(e);
+  raycaster.setFromCamera(pointerNdc, camera);
+  const ciHit = cliffInstancer.raycastInstances(raycaster);
+  if (ciHit) {
+    cliffInstancer.selectInstance(ciHit.typeIdx, ciHit.instIdx);
+    transformControls.attach(cliffInstancer.proxyObject);
+    tcHelper.visible = true;
+    ciRefreshProxy();
+    if (editorPane) editorPane.refresh();
+  } else {
+    cliffInstancer.clearSelection();
+    transformControls.detach();
+    tcHelper.visible = false;
+    ciRefreshProxy();
+    if (editorPane) editorPane.refresh();
+  }
+});
+
+window.addEventListener("pointerup", () => {
+  if (riverDragging) {
+    riverDragging = false;
+    if (!playMode) controls.enabled = true;
+  }
+  if (roadDragging) {
+    roadDragging = false;
+    if (!playMode) controls.enabled = true;
+  }
+  if (splineDragging) {
+    splineDragging = false;
+    if (!playMode) controls.enabled = true;
+  }
+  const pa = editState.pointerAction;
+  if (editState.isPointerDown) {
+    editState.isPointerDown = false;
+    editState.pointerAction = null;
+    editState.sculptSkipFirstMoveDup = false;
+    if (!playMode) controls.enabled = true;
+  }
+  if (!playMode && (pa === "sculpt" || pa === "path")) {
+    syncTreeLodHeights();
+    syncPTreeHeights();
+    syncObjectSlotsHeights();
+    syncPropObjectsHeights();
+  }
+});
+
+document
+  .getElementById("load-terrain-input")
+  .addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      importTerrainJson(await file.text());
+    } catch (err) {
+      alert(err?.message || String(err));
+    }
+    e.target.value = "";
+  });
+
+document
+  .getElementById("load-cliffs-input")
+  .addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      applyCliffs(JSON.parse(await file.text()));
+      if (editorPane) editorPane.refresh();
+    } catch (err) {
+      alert(err?.message || String(err));
+    }
+    e.target.value = "";
+  });
+
+let _lastHudUpdateMs = 0;
+function updateHud(dtMs) {
+  frameState.frames++;
+  const now = performance.now();
+  const elapsed = now - frameState.fpsWindowStartMs;
+  if (elapsed >= 500) {
+    frameState.fps = (frameState.frames * 1000) / elapsed;
+    frameState.frames = 0;
+    frameState.fpsWindowStartMs = now;
+  }
+
+  // Throttle the expensive DOM + string work to ~4 Hz
+  if (now - _lastHudUpdateMs < 250) return;
+  _lastHudUpdateMs = now;
+
+  let tris = 0;
+  let lodL0 = 0;
+  let lodL1 = 0;
+  let lodL2 = 0;
+  let lodL3 = 0;
+  let lodL4 = 0;
+  for (const chunk of activeChunks.values()) {
+    tris += chunk.triCount;
+    if (chunk.segments >= 64) lodL0++;
+    else if (chunk.segments >= 32) lodL1++;
+    else if (chunk.segments >= 16) lodL2++;
+    else if (chunk.segments >= 8) lodL3++;
+    else lodL4++;
+  }
+
+  const p = camera.position;
+  const totalLodChunks = LOD_SLOTS.reduce(
+    (s, sl) => s + sl.chunks.size,
+    0,
+  );
+  const treeLodFrustum =
+    totalLodChunks > 0
+      ? `  TreeLOD frustum: ${lodParams.chunksVisible}/${totalLodChunks} chunks`
+      : "";
+  const treeLodHud =
+    editState.mode === "pinelod"
+      ? `tree LOD: slot ${activeLodSlot + 1} ${LOD_SLOTS[activeLodSlot]?.name ?? ""}  total=${lodParams.totalTrees}  brush r=${sculptBrushWorldRadius().toFixed(1)}${treeLodFrustum}`
+      : `tree LOD: ${lodParams.totalTrees} trees (J to paint)${treeLodFrustum}`;
+  const treeChunkCullHud =
+    totalLodChunks > 0
+      ? `tree culling: chunk gates keep ${lodParams.chunksVisible}/${totalLodChunks} chunks active, skip ${lodParams.chunksCulledDistance} chunks by distance`
+      : "tree culling: no tree chunks yet (paint in Tree LOD mode)";
+  const relaxPaintHud =
+    lodParams.treeLodGpuCull &&
+    lodParams.treeLodRelaxGpuWhilePainting &&
+    editState.isPointerDown &&
+    editState.pointerAction === "pinelod"
+      ? "  [painting: CPU fill]"
+      : "";
+  const treeGpuCullHud = lodParams.treeLodGpuCull
+    ? `gpu tree cull: ON (GPU per-tree distance + LOD in active chunks; CPU chunk gates)${relaxPaintHud}`
+    : "gpu tree cull: OFF (CPU writes per-tree instance matrices; turn ON mainly for stable runtime/view mode)";
+  const totalPtreeChunks = PTREE_SLOTS.reduce(
+    (s, sl) => s + sl.chunks.size,
+    0,
+  );
+  const procFrustum =
+    totalPtreeChunks > 0
+      ? `  Proc frustum: ${ptreeParams.chunksVisible}/${totalPtreeChunks} chunks`
+      : "";
+  const procTreeHud =
+    editState.mode === "proctrees"
+      ? `proc trees: slot ${activePTreeSlot + 1} ${PTREE_SLOTS[activePTreeSlot]?.name ?? ""}  trunks=${ptreeParams.totalTrunks}  leaves=${ptreeParams.totalLeaves}  brush r=${sculptBrushWorldRadius().toFixed(1)}${procFrustum}`
+      : `proc trees: ${ptreeParams.totalTrunks} trunks (Mode → Proc Trees)${procFrustum}`;
+  let foliageVis = 0;
+  let foliageTotal = 0;
+  FOLIAGE_SLOTS.forEach((s) => {
+    if (s.system) {
+      const cs = s.system.getChunkStats(camera);
+      foliageVis += cs.visible;
+      foliageTotal += cs.total;
+    }
+  });
+  const foliageFrustum =
+    foliageTotal > 0
+      ? `  Foliage frustum: ${foliageVis}/${foliageTotal} chunks`
+      : "";
+  const foliageHud =
+    editState.mode === "foliage"
+      ? `foliage: slot ${activeFoliageSlot + 1} ${FOLIAGE_SLOTS[activeFoliageSlot]?.name ?? ""}  brush r=${sculptBrushWorldRadius().toFixed(1)}${foliageFrustum}`
+      : foliageTotal > 0
+        ? `foliage${foliageFrustum}`
+        : "";
+  let objVis = 0;
+  let objTotal = 0;
+  OBJECT_SLOTS.forEach((s) => {
+    if (s.system) {
+      const cs = s.system.getChunkStats(camera);
+      objVis += cs.visible;
+      objTotal += cs.total;
+    }
+  });
+  const objectsFrustum =
+    objTotal > 0 ? `  Objects frustum: ${objVis}/${objTotal} chunks` : "";
+  const objectsHud =
+    editState.mode === "objects"
+      ? `objects: slot ${activeObjectSlot + 1} ${OBJECT_SLOTS[activeObjectSlot]?.name ?? ""}  brush r=${sculptBrushWorldRadius().toFixed(1)}${objectsFrustum}`
+      : objTotal > 0
+        ? `objects${objectsFrustum}`
+        : "";
+  const ri = renderer.info.render;
+  const drawCallsHud =
+    typeof ri.drawCalls === "number" ? ri.drawCalls : ri.calls;
+  hudEl.textContent = `fps: ${frameState.fps.toFixed(1)}   frame: ${dtMs.toFixed(2)} ms
+draw calls (frame): ${drawCallsHud}
+terrain tris: ${Math.round(tris).toLocaleString()}
+active chunks: ${activeChunks.size}  (dist LOD: ${PARAMS.terrainLodEnabled ? "ON" : "OFF"})  (chunk cull: ${PARAMS.terrainChunkCulling ? "ON" : "OFF — full world"})  L0=${lodL0} L1=${lodL1} L2=${lodL2} L3=${lodL3} L4=${lodL4}
+${treeLodHud}
+${treeChunkCullHud}
+${treeGpuCullHud}
+${procTreeHud}
+${foliageHud}
+${objectsHud}
+dirty chunks: ${dirtyChunks.size}
+camera: ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}
+gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}`;
+}
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+globalHeightTexData = new Float32Array(HTEX_RES * HTEX_RES * 4);
+globalHeightTex = new THREE.DataTexture(
+  globalHeightTexData,
+  HTEX_RES,
+  HTEX_RES,
+  THREE.RGBAFormat,
+  THREE.FloatType,
+);
+globalHeightTex.wrapS = globalHeightTex.wrapT = THREE.ClampToEdgeWrapping;
+globalHeightTex.minFilter = THREE.LinearFilter;
+globalHeightTex.magFilter = THREE.LinearFilter;
+globalHeightTex.needsUpdate = true;
+
+// ── Ocean + water bodies (splatmap-painter10bvh+post.html) ─────────────
+const heightTex = globalHeightTex;
+const _waterTerrainSize = float(CONFIG.worldSize);
+const seabedGeo = new THREE.PlaneGeometry(
+  CONFIG.worldSize * 4,
+  CONFIG.worldSize * 4,
+);
+seabedGeo.rotateX(-PI / 2);
+const seabedMesh = new THREE.Mesh(
+  seabedGeo,
+  new MeshBasicNodeMaterial({ color: 0x1a3a52 }),
+);
+seabedMesh.position.y = PARAMS.ocean.oceanY - 3.5;
+seabedMesh.renderOrder = 0;
+seabedMesh.frustumCulled = false;
+scene.add(seabedMesh);
+
+const simpleWaterMat = new THREE.MeshBasicMaterial({
+  color: 0x2a6080,
+  transparent: true,
+  opacity: 0.88,
+});
+// Ocean plane: camera-locked (updated each frame), sized to reach the horizon
+// from any camera position. Large enough for `camera.far`, small enough that
+// frustum culling actually prunes it when the view points skyward.
+const OCEAN_PLANE_SIZE = 3000;
+const waterGeo = new THREE.PlaneGeometry(
+  OCEAN_PLANE_SIZE,
+  OCEAN_PLANE_SIZE,
+);
+waterGeo.rotateX(-PI / 2);
+const waterMat = new MeshBasicNodeMaterial({
+  transparent: true,
+  depthWrite: false,
+});
+const oceanWater = new THREE.Mesh(waterGeo, waterMat);
+oceanWater.position.y = PARAMS.ocean.oceanY;
+oceanWater.renderOrder = 1;
+oceanWater.frustumCulled = true;
+scene.add(oceanWater);
+
+const waterReflector = reflector({
+  resolutionScale: PARAMS.ocean.reflectionScale,
+});
+oceanWater.add(waterReflector.target);
+
+const uWaterTime = uniform(0.0);
+const uWScale = uniform(PARAMS.ocean.scale);
+const uWSmoothness = uniform(0.55);
+const uWEdgeThresh = uniform(PARAMS.ocean.edgeThreshold);
+const uWEdgeSoft = uniform(0.01);
+const uWFlowZ = uniform(PARAMS.ocean.flowZ);
+const uWCellSpeed = uniform(PARAMS.ocean.cellSpeed);
+const uWNoiseScale = uniform(PARAMS.ocean.noiseScale);
+const uWNoiseFlow = uniform(0.2);
+const uWNoiseTime = uniform(PARAMS.ocean.noiseTimeScale);
+const uWDistort = uniform(PARAMS.ocean.distort);
+const uWDeepColor = uniform(new THREE.Color(PARAMS.ocean.deepColor));
+const uWMidColor = uniform(new THREE.Color(PARAMS.ocean.midColor));
+const uWMidPos = uniform(0.084);
+const uWHighlight = uniform(new THREE.Color(PARAMS.ocean.highlightColor));
+const uWOpacity = uniform(PARAMS.ocean.opacity);
+const uWFadeDistance = uniform(400.0);
+const uWFadeStrength = uniform(1.4);
+const uWCamXZ = uniform(new THREE.Vector2(0, 0));
+const uWLineWidth = uniform(PARAMS.ocean.lineWidth);
+const uWGlowWidth = uniform(PARAMS.ocean.glowWidth);
+const uWLineIntensity = uniform(PARAMS.ocean.waterlineIntensity);
+const uWLineColor = uniform(new THREE.Color(PARAMS.ocean.foamColor));
+const uWGlowColor = uniform(new THREE.Color("#88ccff"));
+const MAX_RIPPLES_W = 8;
+const uRippleCenters = Array.from({ length: MAX_RIPPLES_W }, () =>
+  uniform(new THREE.Vector2(0, 0)),
+);
+const uRippleTimes = Array.from({ length: MAX_RIPPLES_W }, () =>
+  uniform(0.0),
+);
+const uRippleCount = uniform(0.0);
+const uRippleSpeed = uniform(1.5);
+const uRippleWidth = uniform(PARAMS.ocean.rippleWidth);
+const uRippleStr = uniform(PARAMS.ocean.rippleStrength);
+const uRippleDecay = uniform(1.6);
+
+const uWBScale = uniform(PARAMS.water.scale);
+const uWBEdgeThresh = uniform(PARAMS.water.edgeThreshold);
+const uWBFlowZ = uniform(PARAMS.water.flowZ);
+const uWBCellSpeed = uniform(PARAMS.water.cellSpeed);
+const uWBNoiseScale = uniform(PARAMS.water.noiseScale);
+const uWBNoiseTime = uniform(PARAMS.water.noiseTimeScale);
+const uWBDistort = uniform(PARAMS.water.distort);
+const uWBDeepColor = uniform(new THREE.Color(PARAMS.water.deepColor));
+const uWBMidColor = uniform(new THREE.Color(PARAMS.water.midColor));
+const uWBHighlight = uniform(
+  new THREE.Color(PARAMS.water.highlightColor),
+);
+const uWBOpacity = uniform(PARAMS.water.opacity);
+const uWBLineWidth = uniform(PARAMS.water.lineWidth);
+const uWBGlowWidth = uniform(PARAMS.water.glowWidth);
+const uWBLineIntensity = uniform(PARAMS.water.waterlineIntensity);
+const uWBLineColor = uniform(new THREE.Color(PARAMS.water.foamColor));
+
+const _shoreAboveFn = Fn(() => {
+  const hUV = vec2(
+    add(div(positionWorld.x, _waterTerrainSize), float(0.5)),
+    add(div(positionWorld.z, _waterTerrainSize), float(0.5)),
+  );
+  return sub(texture(heightTex, hUV).r, positionWorld.y);
+});
+
+const _rippleBuffer = [];
+function rippleAdd(x, z) {
+  if (_rippleBuffer.length >= MAX_RIPPLES_W) _rippleBuffer.shift();
+  _rippleBuffer.push({ x, z, t: uWaterTime.value });
+}
+function _syncRipples() {
+  uRippleCount.value = _rippleBuffer.length;
+  for (let i = 0; i < MAX_RIPPLES_W; i++) {
+    if (i < _rippleBuffer.length) {
+      uRippleCenters[i].value.set(_rippleBuffer[i].x, _rippleBuffer[i].z);
+      uRippleTimes[i].value = _rippleBuffer[i].t;
+    }
+  }
+}
+
+const buildWaterFrag = Fn(() => {
+  const worldXZ = positionWorld.xz;
+  const tNoise = uWaterTime.mul(uWNoiseTime);
+  const noiseUV = worldXZ
+    .mul(uWNoiseScale)
+    .add(vec2(tNoise.mul(uWNoiseFlow), float(0)));
+  const noiseFac = _wFbm2(noiseUV);
+  const distort = vec2(noiseFac.sub(0.5), noiseFac.sub(0.5)).mul(
+    uWDistort,
+  );
+  const uvVoro = worldXZ
+    .mul(uWScale)
+    .add(vec2(float(0), uWFlowZ.mul(tNoise)))
+    .add(distort);
+  const f1 = _wVoroF1(uvVoro, tNoise, uWCellSpeed);
+  const sf1 = _wVoroSmooth(uvVoro, tNoise, uWCellSpeed, uWSmoothness);
+  const edge = f1.sub(sf1);
+  const t = smoothstep(
+    uWEdgeThresh.sub(uWEdgeSoft),
+    uWEdgeThresh.add(uWEdgeSoft),
+    edge,
+  );
+  const safeMP = max(uWMidPos, float(0.0001));
+  const seg0 = clamp(t.div(safeMP), float(0), float(1));
+  const seg1 = clamp(
+    t.sub(safeMP).div(float(1).sub(safeMP).add(float(0.0001))),
+    float(0),
+    float(1),
+  );
+  const inSeg1 = smoothstep(safeMP.sub(0.001), safeMP.add(0.001), t);
+  const baseColor = mix(
+    mix(uWDeepColor, uWMidColor, seg0),
+    mix(uWMidColor, uWHighlight, seg1),
+    inSeg1,
+  );
+  const rippleAcc = float(0).toVar();
+  for (let i = 0; i < MAX_RIPPLES_W; i++) {
+    const isOn = step(float(i + 0.5), uRippleCount);
+    const elap = max(uWaterTime.sub(uRippleTimes[i]), float(0));
+    const d = length(worldXZ.sub(uRippleCenters[i]));
+    const ringR = elap.mul(uRippleSpeed);
+    const rdist = abs(d.sub(ringR));
+    const ring = float(1).sub(smoothstep(float(0), uRippleWidth, rdist));
+    const fade = exp(elap.mul(float(-1).mul(uRippleDecay)));
+    rippleAcc.addAssign(ring.mul(fade).mul(isOn));
+  }
+  const ripple = saturate(rippleAcc.mul(uRippleStr));
+  const waterColor = mix(baseColor, uWHighlight, ripple);
+  const distCam = length(worldXZ.sub(uWCamXZ));
+  const distFade = float(1).sub(
+    pow(saturate(distCam.div(uWFadeDistance)), uWFadeStrength),
+  );
+  const waterAlpha = mix(float(0.6), float(1), max(t, ripple))
+    .mul(uWOpacity)
+    .mul(distFade);
+  const terrainAbove = _shoreAboveFn();
+  const onShore = step(float(0), terrainAbove);
+  const line = sub(
+    float(1),
+    smoothstep(float(0), uWLineWidth, terrainAbove),
+  ).mul(onShore);
+  const glow = exp(
+    terrainAbove.div(max(uWGlowWidth, float(0.001))).mul(float(-1)),
+  ).mul(onShore);
+  const foamAlpha = saturate(
+    max(line, glow.mul(float(0.5))).mul(uWLineIntensity),
+  );
+  const foamCol = mix(uWGlowColor, uWLineColor, line);
+  const finalColor = saturate(waterColor.add(foamCol.mul(foamAlpha)));
+  return vec4(finalColor, waterAlpha);
+});
+
+const buildWaterBodyFrag = Fn(() => {
+  const worldXZ = positionWorld.xz;
+  const tNoise = uWaterTime.mul(uWBNoiseTime);
+  const noiseUV = worldXZ
+    .mul(uWBNoiseScale)
+    .add(vec2(tNoise.mul(uWNoiseFlow), float(0)));
+  const noiseFac = _wFbm2(noiseUV);
+  const distort = vec2(noiseFac.sub(0.5), noiseFac.sub(0.5)).mul(
+    uWBDistort,
+  );
+  const uvVoro = worldXZ
+    .mul(uWBScale)
+    .add(vec2(float(0), uWBFlowZ.mul(tNoise)))
+    .add(distort);
+  const f1 = _wVoroF1(uvVoro, tNoise, uWBCellSpeed);
+  const sf1 = _wVoroSmooth(uvVoro, tNoise, uWBCellSpeed, uWSmoothness);
+  const edge = f1.sub(sf1);
+  const t = smoothstep(
+    uWBEdgeThresh.sub(uWEdgeSoft),
+    uWBEdgeThresh.add(uWEdgeSoft),
+    edge,
+  );
+  const safeMP = max(uWMidPos, float(0.0001));
+  const seg0 = clamp(t.div(safeMP), float(0), float(1));
+  const seg1 = clamp(
+    t.sub(safeMP).div(float(1).sub(safeMP).add(float(0.0001))),
+    float(0),
+    float(1),
+  );
+  const inSeg1 = smoothstep(safeMP.sub(0.001), safeMP.add(0.001), t);
+  const baseColor = mix(
+    mix(uWBDeepColor, uWBMidColor, seg0),
+    mix(uWBMidColor, uWBHighlight, seg1),
+    inSeg1,
+  );
+  const waterAlpha = mix(float(0.6), float(1), t).mul(uWBOpacity);
+  const terrainAbove = _shoreAboveFn();
+  const onShore = step(float(0), terrainAbove);
+  const line = sub(
+    float(1),
+    smoothstep(float(0), uWBLineWidth, terrainAbove),
+  ).mul(onShore);
+  const glow = exp(
+    terrainAbove.div(max(uWBGlowWidth, float(0.001))).mul(float(-1)),
+  ).mul(onShore);
+  const foamAlpha = saturate(
+    max(line, glow.mul(float(0.5))).mul(uWBLineIntensity),
+  );
+  const foamCol = mix(uWGlowColor, uWBLineColor, line);
+  const finalColor = saturate(baseColor.add(foamCol.mul(foamAlpha)));
+  return vec4(finalColor, waterAlpha);
+});
+
+const uReflStrength = uniform(PARAMS.ocean.reflectionStrength);
+const buildWaterFragWithReflection = Fn(() => {
+  const base = buildWaterFrag();
+  const viewDir = normalize(sub(cameraPosition, positionWorld));
+  const fresnel = pow(
+    clamp(sub(float(1), dot(viewDir, vec3(0, 1, 0))), float(0), float(1)),
+    float(3),
+  ).mul(uReflStrength);
+  const reflected = mix(base.rgb, waterReflector.rgb, fresnel);
+  return vec4(reflected, base.a);
+});
+
+function setWaterReflections(enabled) {
+  if (!PARAMS.ocean.stylized) return;
+  const frag = enabled
+    ? buildWaterFragWithReflection()
+    : buildWaterFrag();
+  waterMat.colorNode = frag.rgb;
+  waterMat.opacityNode = frag.a;
+  waterMat.needsUpdate = true;
+  waterReflector.target.visible = enabled;
+}
+
+// New stylized ocean shader — turquoise depth ramp + dual-noise normals +
+// bounded Fresnel + animated coastal foam. See ocean-shader.js.
+const oceanShader = createOceanShader({
+  heightTex,
+  terrainSize: CONFIG.worldSize,
+});
+
+function setWaterStyle(stylized) {
+  if (stylized) {
+    oceanWater.material = oceanShader.material;
+    waterReflector.target.visible = false;
+    seabedMesh.visible = true;
+  } else {
+    oceanWater.material = simpleWaterMat;
+    waterReflector.target.visible = false;
+    seabedMesh.visible = false;
+  }
+}
+setWaterStyle(PARAMS.ocean.stylized);
+
+function syncOceanMat() {
+  oceanShader.syncParams(PARAMS.ocean);
+}
+syncOceanMat();
+
+const lakeShader = createLakeShader({
+  heightTex,
+  terrainSize: CONFIG.worldSize,
+});
+const WATER_PRESETS = {
+  Puddle: { w: 3, l: 3 },
+  "Small lake": { w: 20, l: 20 },
+  "Large lake": { w: 60, l: 60 },
+  "River strip": { w: 8, l: 50 },
+};
+const LAKE_PLANE_SEGMENTS = 64;
+const waterOceanTemplateMat = new MeshBasicNodeMaterial({
+  transparent: true,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+});
+{
+  const f = buildWaterBodyFrag();
+  waterOceanTemplateMat.colorNode = f.rgb;
+  waterOceanTemplateMat.opacityNode = f.a;
+}
+
+const LAKE_REFLECT_SCALE = 0.5;
+let lakeReflectRT = new THREE.RenderTarget(4, 4, {
+  minFilter: THREE.LinearFilter,
+  magFilter: THREE.LinearFilter,
+  depthBuffer: true,
+});
+lakeReflectRT.texture.name = "LakeReflect";
+const lakeReflectCam = new THREE.PerspectiveCamera(45, 1, 0.05, 4000);
+const _reflVPHelper = new THREE.Matrix4();
+const _reflClearColor = new THREE.Color(0x1a3048);
+const _reflLookDir = new THREE.Vector3();
+const _reflLookAt = new THREE.Vector3();
+
+function updateLakeReflectCamera(waterY) {
+  lakeReflectCam.fov = camera.fov;
+  lakeReflectCam.near = camera.near;
+  lakeReflectCam.far = camera.far;
+  const w = Math.max(
+    4,
+    Math.floor(window.innerWidth * LAKE_REFLECT_SCALE),
+  );
+  const h = Math.max(
+    4,
+    Math.floor(window.innerHeight * LAKE_REFLECT_SCALE),
+  );
+  lakeReflectCam.aspect = w / h;
+  lakeReflectCam.updateProjectionMatrix();
+  lakeReflectCam.position.copy(camera.position);
+  lakeReflectCam.position.y = 2 * waterY - camera.position.y;
+  camera.getWorldDirection(_reflLookDir);
+  _reflLookAt.copy(camera.position).addScaledVector(_reflLookDir, 10);
+  _reflLookAt.y = 2 * waterY - _reflLookAt.y;
+  lakeReflectCam.up.set(0, -1, 0);
+  lakeReflectCam.lookAt(_reflLookAt);
+  lakeReflectCam.updateMatrixWorld(true);
+  if (lakeReflectRT.width !== w || lakeReflectRT.height !== h)
+    lakeReflectRT.setSize(w, h);
+}
+
+const _reflFrustum = new THREE.Frustum();
+const _reflProjMat = new THREE.Matrix4();
+const _reflSphere = new THREE.Sphere();
+let _reflFrameCounter = 0;
+const _REFL_EVERY_N_FRAMES = 2;
+
+function renderLakeReflection(lakeBodies) {
+  if (lakeBodies.length === 0) return;
+
+  // Frustum cull — skip if no lake mesh is visible to the camera
+  _reflProjMat.multiplyMatrices(
+    camera.projectionMatrix,
+    camera.matrixWorldInverse,
+  );
+  _reflFrustum.setFromProjectionMatrix(_reflProjMat);
+  let anyVisible = false;
+  for (const m of lakeBodies) {
+    if (!m.visible) continue;
+    if (!m.geometry.boundingSphere) m.geometry.computeBoundingSphere();
+    _reflSphere
+      .copy(m.geometry.boundingSphere)
+      .applyMatrix4(m.matrixWorld);
+    if (_reflFrustum.intersectsSphere(_reflSphere)) {
+      anyVisible = true;
+      break;
+    }
+  }
+  if (!anyVisible) return;
+
+  // Throttle — render reflection every N frames instead of every frame
+  _reflFrameCounter++;
+  if (_reflFrameCounter % _REFL_EVERY_N_FRAMES !== 0) return;
+
+  const waterY = lakeBodies[0].position.y;
+  updateLakeReflectCamera(waterY);
+  _reflVPHelper.multiplyMatrices(
+    lakeReflectCam.projectionMatrix,
+    lakeReflectCam.matrixWorldInverse,
+  );
+  lakeShader.uniforms.reflectVP.value.copy(_reflVPHelper);
+  const savedVis = [];
+  for (const m of rwiRefs.waterObjects) {
+    savedVis.push(m.visible);
+    m.visible = false;
+  }
+  const tcVis = tcHelper.visible;
+  tcHelper.visible = false;
+  const prevBg = scene.background;
+  const prevAutoClear = renderer.autoClear;
+  scene.background = _reflClearColor;
+  renderer.autoClear = true;
+  const prevRT = renderer.getRenderTarget();
+  renderer.setRenderTarget(lakeReflectRT);
+  renderer.render(scene, lakeReflectCam);
+  renderer.setRenderTarget(prevRT);
+  renderer.autoClear = prevAutoClear;
+  scene.background = prevBg;
+  for (let i = 0; i < rwiRefs.waterObjects.length; i++)
+    rwiRefs.waterObjects[i].visible = savedVis[i];
+  tcHelper.visible = tcVis;
+  lakeShader.uniforms.reflectTex.value = lakeReflectRT.texture;
+  lakeShader.uniforms.reflectEnabled.value = 1;
+}
+
+function makeWaterMat(style) {
+  return (
+    style === "Lake" ? lakeShader.material : waterOceanTemplateMat
+  ).clone();
+}
+
+function syncWaterBodyMat() {
+  uWBScale.value = PARAMS.water.scale;
+  uWBEdgeThresh.value = PARAMS.water.edgeThreshold;
+  uWBFlowZ.value = PARAMS.water.flowZ;
+  uWBCellSpeed.value = PARAMS.water.cellSpeed;
+  uWBNoiseScale.value = PARAMS.water.noiseScale;
+  uWBNoiseTime.value = PARAMS.water.noiseTimeScale;
+  uWBDistort.value = PARAMS.water.distort;
+  uWBDeepColor.value.set(PARAMS.water.deepColor);
+  uWBMidColor.value.set(PARAMS.water.midColor);
+  uWBHighlight.value.set(PARAMS.water.highlightColor);
+  uWBOpacity.value = PARAMS.water.opacity;
+  uWBLineWidth.value = PARAMS.water.lineWidth;
+  uWBGlowWidth.value = PARAMS.water.glowWidth;
+  uWBLineIntensity.value = PARAMS.water.waterlineIntensity;
+  uWBLineColor.value.set(PARAMS.water.foamColor);
+  lakeShader.syncParams({
+    shoreColor: PARAMS.water.shoreColor,
+    midColor: PARAMS.water.midColor,
+    deepColor: PARAMS.water.deepColor,
+    highlightColor: PARAMS.water.highlightColor,
+    depthRampShoreMid: PARAMS.water.depthRampShoreMid,
+    depthRampMidDeep: PARAMS.water.depthRampMidDeep,
+    opacity: PARAMS.water.opacity,
+    foamColor: PARAMS.water.foamColor,
+  });
+}
+
+function applyImportedWaterOcean(data) {
+  const hasO = data.ocean && typeof data.ocean === "object";
+  const hasW = data.water && typeof data.water === "object";
+  if (!hasO && !hasW) return;
+  if (hasO) mergePlainDeep(PARAMS.ocean, data.ocean);
+  if (hasW) mergePlainDeep(PARAMS.water, data.water);
+  oceanWater.position.y = PARAMS.ocean.oceanY;
+  seabedMesh.position.y = PARAMS.ocean.oceanY - 3.5;
+  setWaterStyle(PARAMS.ocean.stylized);
+  syncOceanMat();
+  syncWaterBodyMat();
+  if (editorPane) editorPane.refresh();
+}
+
+function getWaterRoot(object) {
+  let obj = object;
+  while (obj) {
+    if (rwiRefs.waterObjects.includes(obj)) return obj;
+    obj = obj.parent;
+  }
+  return null;
+}
+
+function selectWater(mesh) {
+  rwiRefs.selectedWater = mesh;
+  if (mesh) {
+    transformControls.enabled = true;
+    tcHelper.visible = true;
+    transformControls.attach(mesh);
+  } else {
+    tcHelper.visible = false;
+    transformControls.detach();
+  }
+}
+
+function makeWaterGeo(w, l, style) {
+  const segs = style === "Lake" ? LAKE_PLANE_SEGMENTS : 1;
+  const geo = new THREE.PlaneGeometry(w, l, segs, segs);
+  geo.rotateX(-PI / 2);
+  return geo;
+}
+
+function placeWater(wx, wy, wz) {
+  const preset =
+    WATER_PRESETS[PARAMS.water.preset] ?? WATER_PRESETS["Small lake"];
+  const geo = makeWaterGeo(preset.w, preset.l, PARAMS.water.style);
+  const mesh = new THREE.Mesh(geo, makeWaterMat(PARAMS.water.style));
+  mesh.userData.waterStyle = PARAMS.water.style;
+  mesh.position.set(wx, wy + PARAMS.water.sinkOffset, wz);
+  mesh.renderOrder = 2;
+  mesh.frustumCulled = false;
+  scene.add(mesh);
+  rwiRefs.waterObjects.push(mesh);
+  _invalidateLakeCache();
+  selectWater(mesh);
+}
+
+function applyWaterBodies(data) {
+  rwiRefs.waterObjects.forEach((m) => scene.remove(m));
+  rwiRefs.waterObjects = [];
+  selectWater(null);
+  data.forEach((d) => {
+    const style = d.waterStyle ?? "Ocean";
+    const geo = makeWaterGeo(1, 1, style);
+    const mesh = new THREE.Mesh(geo, makeWaterMat(style));
+    mesh.userData.waterStyle = style;
+    mesh.position.set(d.x, d.y, d.z);
+    mesh.rotation.set(d.rx, d.ry, d.rz);
+    mesh.scale.set(d.sx, d.sy, d.sz);
+    mesh.renderOrder = 2;
+    scene.add(mesh);
+    rwiRefs.waterObjects.push(mesh);
+  });
+  _invalidateLakeCache();
+}
+
+function saveWaterBodies() {
+  const data = rwiRefs.waterObjects.map((m) => ({
+    x: m.position.x,
+    y: m.position.y,
+    z: m.position.z,
+    rx: m.rotation.x,
+    ry: m.rotation.y,
+    rz: m.rotation.z,
+    sx: m.scale.x,
+    sy: m.scale.y,
+    sz: m.scale.z,
+    waterStyle: m.userData.waterStyle ?? "Ocean",
+  }));
+  const blob = new Blob([JSON.stringify(data, null, 2)], {
+    type: "application/json",
+  });
+  const a = document.createElement("a");
+  a.download = "water-bodies.json";
+  a.href = URL.createObjectURL(blob);
+  a.click();
+}
+
+geminiTerrainOnlyHeightTexData = new Float32Array(
+  HTEX_RES * HTEX_RES * 4,
+);
+geminiTerrainOnlyHeightTex = new THREE.DataTexture(
+  geminiTerrainOnlyHeightTexData,
+  HTEX_RES,
+  HTEX_RES,
+  THREE.RGBAFormat,
+  THREE.FloatType,
+);
+geminiTerrainOnlyHeightTex.wrapS = geminiTerrainOnlyHeightTex.wrapT =
+  THREE.ClampToEdgeWrapping;
+geminiTerrainOnlyHeightTex.minFilter = THREE.LinearFilter;
+geminiTerrainOnlyHeightTex.magFilter = THREE.LinearFilter;
+geminiTerrainOnlyHeightTex.needsUpdate = true;
+
+cliffHeightTexData = new Float32Array(HTEX_RES * HTEX_RES * 4);
+for (let i = 0; i < HTEX_RES * HTEX_RES; i++) {
+  cliffHeightTexData[i * 4] =
+    cliffHeightTexData[i * 4 + 1] =
+    cliffHeightTexData[i * 4 + 2] =
+      -9999;
+  cliffHeightTexData[i * 4 + 3] = 1;
+}
+cliffHeightTex = new THREE.DataTexture(
+  cliffHeightTexData,
+  HTEX_RES,
+  HTEX_RES,
+  THREE.RGBAFormat,
+  THREE.FloatType,
+);
+cliffHeightTex.wrapS = cliffHeightTex.wrapT = THREE.ClampToEdgeWrapping;
+cliffHeightTex.minFilter = THREE.NearestFilter;
+cliffHeightTex.magFilter = THREE.NearestFilter;
+cliffHeightTex.needsUpdate = true;
+
+rebuildGeminiTerrainOnlyHeightTexture();
+
+syncCliffUniformsFromParams();
+loadRock028Textures()
+  .then(({ colorTex, dataTex }) => {
+    rock028Textures.colorTex = colorTex;
+    rock028Textures.dataTex = dataTex;
+    rock028Ready = true;
+    rebuildAllChunkSplatMaterials();
+    heightTexDirty = true;
+
+    cliffPaintCanvas = document.createElement("canvas");
+    cliffPaintCanvas.width = cliffPaintCanvas.height = HTEX_RES;
+    cliffPaintCtx = cliffPaintCanvas.getContext("2d", {
+      willReadFrequently: true,
+    });
+    cliffPaintCtx.fillStyle = "#000000";
+    cliffPaintCtx.fillRect(0, 0, HTEX_RES, HTEX_RES);
+    cliffPaintTex = new THREE.CanvasTexture(cliffPaintCanvas);
+    cliffPaintTex.wrapS = cliffPaintTex.wrapT = THREE.ClampToEdgeWrapping;
+    cliffPaintTex.needsUpdate = true;
+
+    cliffBlendPack = createCliffInstancerBlendMaterial(
+      CONFIG.worldSize,
+      worldHalf,
+      colorTex,
+      dataTex,
+      cliffU,
+      cliffPaintTex,
+    );
+    cliffInstancer.setMaterial(cliffBlendPack.material);
+    ciRefreshProxy();
+    if (cliffsBlendBindingsFn) cliffsBlendBindingsFn();
+  })
+  .catch((err) =>
+    console.warn(
+      "Auto cliff rock textures failed (auto cliff off):",
+      err,
+    ),
+  );
+
+geminiDensityCanvas = document.createElement("canvas");
+geminiDensityCanvas.width = geminiDensityCanvas.height = HTEX_RES;
+geminiDensityCtx = geminiDensityCanvas.getContext("2d", {
+  willReadFrequently: true,
+});
+geminiDensityCtx.fillStyle = "#000000";
+geminiDensityCtx.fillRect(0, 0, HTEX_RES, HTEX_RES);
+geminiDensityTex = new THREE.CanvasTexture(geminiDensityCanvas);
+geminiDensityTex.wrapS = geminiDensityTex.wrapT =
+  THREE.ClampToEdgeWrapping;
+geminiDensityTex.needsUpdate = true;
+
+geminiCliffDensityCanvas = document.createElement("canvas");
+geminiCliffDensityCanvas.width = geminiCliffDensityCanvas.height =
+  HTEX_RES;
+geminiCliffDensityCtx = geminiCliffDensityCanvas.getContext("2d", {
+  willReadFrequently: true,
+});
+geminiCliffDensityCtx.fillStyle = "#000000";
+geminiCliffDensityCtx.fillRect(0, 0, HTEX_RES, HTEX_RES);
+geminiCliffDensityTex = new THREE.CanvasTexture(geminiCliffDensityCanvas);
+geminiCliffDensityTex.wrapS = geminiCliffDensityTex.wrapT =
+  THREE.ClampToEdgeWrapping;
+geminiCliffDensityTex.needsUpdate = true;
+
+function _gemCol(hex) {
+  return new THREE.Color(hex);
+}
+
+const _gp = {
+  bladeHeight: 1.0,
+  bladeWidth: 0.15,
+  tipTaperStart: 0.5,
+  bladeYSegments: 7,
+  grassCount: 1516,
+  fieldSize: 10,
+  grassDensity: 1.0,
+  windSpeed: 0.2,
+  windStrength: 1.4,
+  maxAngle: 1.4,
+  naturalLean: 0.9,
+  windAngle: 0,
+  windWaveScale: 0.12,
+  windGust: 0.3,
+  bendFocus: 0.5,
+  stiffness: 0.0,
+  clumpScale: 1.5,
+  clumpStrength: 0.7,
+  crossed: true,
+  bladeColor: "#0e300e",
+  tipColor: "#004d05",
+  skyBlend: 0.8,
+  cylindrical: 0.3,
+  viewThicken: 0.45,
+  aoBase: 0.25,
+  aoPower: 2.0,
+  colorVariation: false,
+  cvHueSpread: 0.08,
+  cvSatSpread: 0.3,
+  cvDryAmount: 0.15,
+  cvDryColor: "#8a7a3a",
+  bssIntensity: 1.2,
+  bssPower: 2.0,
+  bssColor: "#2d7a2d",
+  frontScatter: 0.3,
+  rimSSS: 0.25,
+  specV1Enabled: false,
+  specV1Intensity: 1.5,
+  specV1Color: "#ffffff",
+  specV1DirX: -1.0,
+  specV1DirY: 1.0,
+  specV1DirZ: 0.5,
+  specV1Power: 25.6,
+  specV2Enabled: false,
+  specV2Intensity: 1.0,
+  specV2Color: "#ffffff",
+  specV2DirX: -1.0,
+  specV2DirY: 0.45,
+  specV2DirZ: 1.0,
+  specV2NoiseScale: 3.0,
+  specV2NoiseStr: 0.6,
+  specV2Power: 12.0,
+  specV2TipBias: 0.5,
+  lodEnabled: true,
+  lodMidDistance: 40,
+  lodFarDistance: 80,
+  lodMaxDistance: 200,
+  lodFadeStart: 0.75,
+  lodMidPatchSize: 18,
+  lodMidSegments: 3,
+  lodMidGrassCount: 1500,
+  lodFarPatchSize: 28,
+  lodFarSegments: 1,
+  lodFarGrassCount: 1300,
+  lodMegaMaxDistance: 400,
+  lodMegaPatchSize: 60,
+  lodMegaSegments: 1,
+  lodMegaGrassCount: 400,
+  lodDebug: false,
+  interactionRadius: 1.5,
+  interactionStrength: 0.7,
+  grassReceiveShadow: true,
+  terrainTintEnabled: false,
+  terrainTintStrength: 0.5,
+  terrainTintAutoSource: true,
+  terrainTintManualMode: 1,
+  terrainTintRootBias: 0.35,
+};
+window._geminiGrassParams = _gp;
+
+const _gemGrassTintImgPhData = new Uint8Array([255, 255, 255, 255]);
+const _gemGrassTintImgPh = new THREE.DataTexture(
+  _gemGrassTintImgPhData,
+  1,
+  1,
+  THREE.RGBAFormat,
+);
+_gemGrassTintImgPh.colorSpace = THREE.SRGBColorSpace;
+_gemGrassTintImgPh.needsUpdate = true;
+
+geminiGrassUniforms = {
+  uTerrainSize: uniform(CONFIG.worldSize),
+  uSunDir: uniform(sunDir.clone()),
+  uPlayerPos: uniform(new THREE.Vector3(0, 0, 0)),
+  uBladeHeight: uniform(_gp.bladeHeight),
+  uGrassDensity: uniform(_gp.grassDensity),
+  uWindSpeed: uniform(_gp.windSpeed),
+  uWindStrength: uniform(_gp.windStrength),
+  uMaxAngle: uniform(_gp.maxAngle),
+  uNaturalLean: uniform(_gp.naturalLean),
+  uWindDirX: uniform(Math.cos(_gp.windAngle)),
+  uWindDirZ: uniform(Math.sin(_gp.windAngle)),
+  uWindWaveScale: uniform(_gp.windWaveScale),
+  uWindGust: uniform(_gp.windGust),
+  uBendFocus: uniform(_gp.bendFocus),
+  uStiffness: uniform(_gp.stiffness),
+  uClumpScale: uniform(_gp.clumpScale),
+  uClumpStrength: uniform(_gp.clumpStrength),
+  uCrossed: uniform(_gp.crossed ? 1 : 0),
+  uBladeCol: uniform(_gemCol(_gp.bladeColor)),
+  uTipCol: uniform(_gemCol(_gp.tipColor)),
+  uSkyBlend: uniform(_gp.skyBlend),
+  uCylindrical: uniform(_gp.cylindrical),
+  uViewThicken: uniform(_gp.viewThicken),
+  uAoBase: uniform(_gp.aoBase),
+  uAoPower: uniform(_gp.aoPower),
+  uColorVar: uniform(_gp.colorVariation ? 1 : 0),
+  uCvHueSpread: uniform(_gp.cvHueSpread),
+  uCvSatSpread: uniform(_gp.cvSatSpread),
+  uCvDryAmount: uniform(_gp.cvDryAmount),
+  uCvDryCol: uniform(_gemCol(_gp.cvDryColor)),
+  uBssCol: uniform(_gemCol(_gp.bssColor)),
+  uBssIntensity: uniform(_gp.bssIntensity),
+  uBssPower: uniform(_gp.bssPower),
+  uFrontScatter: uniform(_gp.frontScatter),
+  uRimSSS: uniform(_gp.rimSSS),
+  uSpecV1Enabled: uniform(_gp.specV1Enabled ? 1 : 0),
+  uSpecV1Intensity: uniform(_gp.specV1Intensity),
+  uSpecV1Col: uniform(_gemCol(_gp.specV1Color)),
+  uSpecV1Dir: uniform(
+    new THREE.Vector3(
+      _gp.specV1DirX,
+      _gp.specV1DirY,
+      _gp.specV1DirZ,
+    ).normalize(),
+  ),
+  uSpecV1Power: uniform(_gp.specV1Power),
+  uSpecV2Enabled: uniform(_gp.specV2Enabled ? 1 : 0),
+  uSpecV2Intensity: uniform(_gp.specV2Intensity),
+  uSpecV2Col: uniform(_gemCol(_gp.specV2Color)),
+  uSpecV2Dir: uniform(
+    new THREE.Vector3(
+      _gp.specV2DirX,
+      _gp.specV2DirY,
+      _gp.specV2DirZ,
+    ).normalize(),
+  ),
+  uSpecV2NoiseScale: uniform(_gp.specV2NoiseScale),
+  uSpecV2NoiseStr: uniform(_gp.specV2NoiseStr),
+  uSpecV2Power: uniform(_gp.specV2Power),
+  uSpecV2TipBias: uniform(_gp.specV2TipBias),
+  uLodEnabled: uniform(_gp.lodEnabled ? 1 : 0),
+  uLodMidDist: uniform(_gp.lodMidDistance),
+  uLodFarDist: uniform(_gp.lodFarDistance),
+  uLodMaxDist: uniform(
+    Math.max(_gp.lodMaxDistance, _gp.lodMegaMaxDistance),
+  ),
+  uLodFadeStart: uniform(_gp.lodFadeStart),
+  uLodDebug: uniform(_gp.lodDebug ? 1 : 0),
+  uInteractionEnabled: uniform(1),
+  uInteractionRadius: uniform(_gp.interactionRadius),
+  uInteractionStrength: uniform(_gp.interactionStrength),
+  uTerrainTintMode: uniform(0),
+  uTerrainTintStrength: uniform(_gp.terrainTintStrength),
+  uTerrainTintRootBias: uniform(_gp.terrainTintRootBias),
+};
+
+function syncGeminiGrassTerrainTintRuntime(gp, gu) {
+  if (!gp || !gu) return;
+  if (!gp.terrainTintEnabled) {
+    gu.uTerrainTintMode.value = 0;
+    return;
+  }
+  let mode = 0;
+  if (gp.terrainTintAutoSource) {
+    const s = PARAMS.terrainSurface;
+    if (s === "imgTex") mode = 2;
+    else if (s === "tslGround" || s === "splat" || s === "tile") mode = 1;
+  } else {
+    mode = Math.max(0, Math.min(2, gp.terrainTintManualMode | 0));
+  }
+  gu.uTerrainTintMode.value = mode;
+}
+
+function syncGeminiGrassUniformsFromGp(gp, gu) {
+  gu.uBladeHeight.value = gp.bladeHeight;
+  gu.uGrassDensity.value = gp.grassDensity;
+  gu.uWindSpeed.value = gp.windSpeed;
+  gu.uWindStrength.value = gp.windStrength;
+  gu.uMaxAngle.value = gp.maxAngle;
+  gu.uNaturalLean.value = gp.naturalLean;
+  const wr = (gp.windAngle * PI) / 180;
+  gu.uWindDirX.value = Math.cos(wr);
+  gu.uWindDirZ.value = Math.sin(wr);
+  gu.uWindWaveScale.value = gp.windWaveScale;
+  gu.uWindGust.value = gp.windGust;
+  gu.uBendFocus.value = gp.bendFocus;
+  gu.uStiffness.value = gp.stiffness;
+  gu.uClumpScale.value = gp.clumpScale;
+  gu.uClumpStrength.value = gp.clumpStrength;
+  gu.uCrossed.value = gp.crossed ? 1 : 0;
+  gu.uBladeCol.value.set(gp.bladeColor);
+  gu.uTipCol.value.set(gp.tipColor);
+  gu.uSkyBlend.value = gp.skyBlend;
+  gu.uCylindrical.value = gp.cylindrical;
+  gu.uViewThicken.value = gp.viewThicken;
+  gu.uAoBase.value = gp.aoBase;
+  gu.uAoPower.value = gp.aoPower;
+  gu.uColorVar.value = gp.colorVariation ? 1 : 0;
+  gu.uCvHueSpread.value = gp.cvHueSpread;
+  gu.uCvSatSpread.value = gp.cvSatSpread;
+  gu.uCvDryAmount.value = gp.cvDryAmount;
+  gu.uCvDryCol.value.set(gp.cvDryColor);
+  gu.uBssCol.value.set(gp.bssColor);
+  gu.uBssIntensity.value = gp.bssIntensity;
+  gu.uBssPower.value = gp.bssPower;
+  gu.uFrontScatter.value = gp.frontScatter;
+  gu.uRimSSS.value = gp.rimSSS;
+  gu.uSpecV1Enabled.value = gp.specV1Enabled ? 1 : 0;
+  gu.uSpecV1Intensity.value = gp.specV1Intensity;
+  gu.uSpecV1Col.value.set(gp.specV1Color);
+  gu.uSpecV1Dir.value
+    .set(gp.specV1DirX, gp.specV1DirY, gp.specV1DirZ)
+    .normalize();
+  gu.uSpecV1Power.value = gp.specV1Power;
+  gu.uSpecV2Enabled.value = gp.specV2Enabled ? 1 : 0;
+  gu.uSpecV2Intensity.value = gp.specV2Intensity;
+  gu.uSpecV2Col.value.set(gp.specV2Color);
+  gu.uSpecV2Dir.value
+    .set(gp.specV2DirX, gp.specV2DirY, gp.specV2DirZ)
+    .normalize();
+  gu.uSpecV2NoiseScale.value = gp.specV2NoiseScale;
+  gu.uSpecV2NoiseStr.value = gp.specV2NoiseStr;
+  gu.uSpecV2Power.value = gp.specV2Power;
+  gu.uSpecV2TipBias.value = gp.specV2TipBias;
+  gu.uLodEnabled.value = gp.lodEnabled ? 1 : 0;
+  gu.uLodMidDist.value = gp.lodMidDistance;
+  gu.uLodFarDist.value = gp.lodFarDistance;
+  gu.uLodMaxDist.value = Math.max(
+    gp.lodMaxDistance,
+    gp.lodMegaMaxDistance,
+  );
+  gu.uLodFadeStart.value = gp.lodFadeStart;
+  gu.uLodDebug.value = gp.lodDebug ? 1 : 0;
+  gu.uInteractionRadius.value = gp.interactionRadius;
+  gu.uInteractionStrength.value = gp.interactionStrength;
+  gu.uTerrainTintStrength.value =
+    gp.terrainTintStrength !== undefined ? gp.terrainTintStrength : 0.5;
+  gu.uTerrainTintRootBias.value =
+    gp.terrainTintRootBias !== undefined ? gp.terrainTintRootBias : 0.35;
+}
+
+syncGeminiGrassUniformsFromGp(_gp, geminiGrassUniforms);
+syncGeminiGrassTerrainTintRuntime(_gp, geminiGrassUniforms);
+
+const _geminiCtx = {
+  ...geminiGrassUniforms,
+  heightTex: geminiTerrainOnlyHeightTex,
+  grassDensityTex: geminiDensityTex,
+  cliffHeightTex,
+  cliffDensityTex: geminiCliffDensityTex,
+  terrainRes: HTEX_RES,
+  groundColorAtWorldXZ: chunkGroundBundle.groundColorAtWorldXZ,
+  uGemImgTexUVScale: sharedImgTex.uUVScale,
+  gemGrassTintPlaceholderTex: _gemGrassTintImgPh,
+};
+
+const _geminiMat = geminiGrassMat(_geminiCtx);
+const _geminiMatMega = geminiGrassMatMega(_geminiCtx);
+gemGrassTintTexNodeMain = _geminiMat.userData._gemTintTexNode ?? null;
+gemGrassTintTexNodeMega = _geminiMatMega.userData._gemTintTexNode ?? null;
+
+function _buildGeminiGeos() {
+  const highBase = geminiBladeGeo(
+    _gp.bladeHeight,
+    _gp.bladeWidth,
+    Math.round(_gp.bladeYSegments),
+    _gp.tipTaperStart,
+  );
+  const geoHigh = geminiFieldGeo(
+    highBase,
+    _gp.fieldSize,
+    Math.round(_gp.grassCount),
+    _gp.bladeHeight,
+    true,
+  );
+  highBase.dispose();
+
+  const midBase = geminiBladeGeo(
+    _gp.bladeHeight,
+    _gp.bladeWidth,
+    Math.round(_gp.lodMidSegments),
+    _gp.tipTaperStart,
+  );
+  const geoMid = geminiFieldGeo(
+    midBase,
+    _gp.lodMidPatchSize,
+    Math.round(_gp.lodMidGrassCount),
+    _gp.bladeHeight,
+    true,
+  );
+  midBase.dispose();
+
+  const farBase = geminiBladeGeo(
+    _gp.bladeHeight,
+    _gp.bladeWidth,
+    Math.round(_gp.lodFarSegments),
+    _gp.tipTaperStart,
+  );
+  const geoFar = geminiFieldGeo(
+    farBase,
+    _gp.lodFarPatchSize,
+    Math.round(_gp.lodFarGrassCount),
+    _gp.bladeHeight,
+    false,
+  );
+  farBase.dispose();
+
+  const megaBase = geminiBladeGeo(
+    _gp.bladeHeight,
+    _gp.bladeWidth,
+    Math.round(_gp.lodMegaSegments),
+    _gp.tipTaperStart,
+  );
+  const geoMega = geminiFieldGeo(
+    megaBase,
+    _gp.lodMegaPatchSize,
+    Math.round(_gp.lodMegaGrassCount),
+    _gp.bladeHeight,
+    false,
+  );
+  megaBase.dispose();
+
+  return { geoHigh, geoMid, geoFar, geoMega };
+}
+
+let _geminiGeos = _buildGeminiGeos();
+geminiGrassGroup = new THREE.Group();
+geminiGrassGroup.name = "GeminiGrass";
+scene.add(geminiGrassGroup);
+
+geminiGrassPatchSystem = geminiSetupPatches(
+  scene,
+  camera,
+  geminiGrassGroup,
+  { ..._geminiGeos, material: _geminiMat, materialMega: _geminiMatMega },
+  {
+    patchSize: _gp.fieldSize,
+    patchSizeMid: _gp.lodMidPatchSize,
+    patchSizeFar: _gp.lodFarPatchSize,
+    patchSizeMega: _gp.lodMegaPatchSize,
+    lodMidDistance: _gp.lodMidDistance,
+    lodFarDistance: _gp.lodFarDistance,
+    maxDistance: _gp.lodMaxDistance,
+    megaMaxDistance: _gp.lodMegaMaxDistance,
+    lodHysteresis: 2,
+    lodEnabled: _gp.lodEnabled,
+    grassReceiveShadow: _gp.grassReceiveShadow,
+    mapWorldHalf: CONFIG.worldSize * 0.5,
+  },
+);
+
+syncImgTexSlot();
+
+window._geminiRebuildGeos = () => {
+  const oldGeos = _geminiGeos;
+  _geminiGeos = _buildGeminiGeos();
+  geminiGrassPatchSystem.updateGeometries(_geminiGeos);
+  if (oldGeos.geoHigh) oldGeos.geoHigh.dispose();
+  if (oldGeos.geoMid) oldGeos.geoMid.dispose();
+  if (oldGeos.geoFar) oldGeos.geoFar.dispose();
+  if (oldGeos.geoMega) oldGeos.geoMega.dispose();
+};
+
+function applyImportedGrassTuning(data) {
+  if (data.meadow && typeof data.meadow === "object") {
+    mergePlainDeep(PARAMS.meadow, data.meadow);
+    chunkMeadowBundle.syncFromParams(PARAMS.meadow);
+    refreshActiveChunkMaterials();
+  }
+  if (data.ground && typeof data.ground === "object") {
+    mergePlainDeep(PARAMS.ground, data.ground);
+    chunkGroundBundle.syncFromParams(PARAMS.ground);
+    refreshActiveChunkMaterials();
+  }
+  const gp = window._geminiGrassParams;
+  const gu = geminiGrassUniforms;
+  if (
+    data.geminiGrassParams &&
+    typeof data.geminiGrassParams === "object" &&
+    gp &&
+    gu
+  ) {
+    mergePlainDeep(
+      gp,
+      JSON.parse(JSON.stringify(data.geminiGrassParams)),
+    );
+    syncGeminiGrassUniformsFromGp(gp, gu);
+    syncGeminiGrassTerrainTintRuntime(gp, gu);
+    if (window._geminiRebuildGeos) window._geminiRebuildGeos();
+  }
+  if (editorPane) editorPane.refresh();
+}
+
+fleurSystem = createFleurSystem(scene, getWorldHeight, () => {
+  if (!fleurSystem) return;
+  fleurSystem.setColorA(
+    fleurColorA.inner,
+    fleurColorA.outer,
+    fleurColorA.glow,
+  );
+  fleurSystem.setColorB(
+    fleurColorB.inner,
+    fleurColorB.outer,
+    fleurColorB.glow,
+  );
+  fleurSystem.setStemColors(fleurParams.stemBase, fleurParams.stemTop);
+  fleurSystem.setStemStaticCurve(fleurParams.stemStaticCurve);
+  _syncFleurInteractionToSystem();
+});
+
+ambientFXSystem = createAmbientFXSystem(scene, getWorldHeight);
+ambientFXSystem.setFlapSpeed(ambientFXParams.flapSpeed);
+ambientFXSystem.setFlapAngle(ambientFXParams.flapAngle);
+ambientFXSystem.setGlideRatio(ambientFXParams.glideRatio);
+ambientFXSystem.setRingsVisible(false);
+
+queueMicrotask(() => {
+Object.assign(UIctx, {
+  BARRIER_RES,
+  FLEUR_PRESETS,
+  FOLIAGE_SLOTS,
+  HTEX_RES,
+  LOD_SLOTS,
+  OBJECT_SLOTS,
+  PARAMS,
+  PI,
+  PTREE_SLOTS,
+  Pane,
+  THREE,
+  _disposePineImpostor,
+  _extractLODDefs,
+  _gp,
+  _invalidateLakeCache,
+  _markLodDirty,
+  _markPtreeDirty,
+  _ptreeBuildLeafMat,
+  _ptreeLoadLeafTex,
+  _ptreeRebuildLeaves,
+  _rebakePineImpostorAtlas,
+  _rebuildAllTreeLodChunksFromParams,
+  _rebuildLODChunks,
+  _rebuildPTreeChunks,
+  _syncFleurInteractionToSystem,
+  activeLodSlot,
+  activePTreeSlot,
+  agents,
+  ambientFXParams,
+  ambientFXSystem,
+  applyDecalsFromData,
+  applyGroundPresetToParams,
+  applyImpactFoamVisibility,
+  applyLodTierVisibility,
+  applyMeadowPresetToParams,
+  applyPineImpostorMaterialFromLodParams,
+  applyProceduralTerrainToAllChunks,
+  applyRiverStyle,
+  applyWaterBodies,
+  assignLodSlot,
+  bakeBVH,
+  barrierCtx,
+  barrierPARAMS,
+  barrierTex,
+  billboardClouds,
+  camera,
+  chunkGroundBundle,
+  chunkImageSlots,
+  chunkMeadowBundle,
+  ciRefreshProxy,
+  clearAllHoles,
+  clearDecals,
+  clearFlightRings,
+  clearPathSplatBlueAllChunks,
+  clearRampStart,
+  cliffBlendPack,
+  cliffInstancer,
+  cliffPaintCtx,
+  cliffPaintTex,
+  cliffsBlendBindingsFn,
+  cliffsBlendSlidersAdded,
+  controls,
+  deleteSelectedDecal,
+  despawnAgent,
+  editState,
+  enterPlayMode,
+  exitPlayMode,
+  exportTerrainJson,
+  fleurColorA,
+  fleurColorB,
+  fleurParams,
+  fleurSystem,
+  geminiCliffDensityCtx,
+  geminiCliffDensityTex,
+  geminiDensityCtx,
+  geminiDensityTex,
+  geminiGrassUniforms,
+  getWorldHeight,
+  gltfLoader,
+  holePARAMS,
+  impactFoamParams,
+  invalidateBarrierCache,
+  invalidateBvhHeight,
+  loadDecalPng,
+  loadPropsJson,
+  lodFolderRef,
+  lodParams,
+  oceanWater,
+  planeBulletMat,
+  playMode,
+  playParams,
+  propLibrary,
+  propObjects,
+  ptreeParams,
+  pushTerrainUndo,
+  rebuildAllChunkSplatMaterials,
+  rebuildAllImpactFoamGeometry,
+  redoTerrainEdit,
+  refitDecalToTerrain,
+  refreshActiveChunkMaterials,
+  resolveModelUrl,
+  riverClearMesh,
+  riverDeleteSelected,
+  riverGenerate,
+  riverPoints,
+  riverRebuildVisual,
+  riverSelectedIdx,
+  roadActiveIdx,
+  roadClampParamActive,
+  roadClearAllMeshesOnly,
+  roadDeleteActiveRoad,
+  roadDeleteSelected,
+  roadRebuildAllMeshes,
+  roadRebuildHandles,
+  roadRebuildVisual,
+  roadSegs,
+  roadSelectedIdx,
+  roadStartNew,
+  roadUpdateSelectedYParam,
+  rsU,
+  runGlobalErosion,
+  saveCliffs,
+  saveDecalsJsonFile,
+  saveProps,
+  saveSplashCaps,
+  saveWaterBodies,
+  saveWaterfalls,
+  scene,
+  seabedMesh,
+  selectProp,
+  selectSplashCap,
+  selectWater,
+  selectWaterfall,
+  selectedDecal,
+  selectedProp,
+  setCsmEnabled,
+  setEditMode,
+  setSkyMode,
+  setWaterStyle,
+  spawnTestDeer,
+  splineApplyPlateau,
+  splineBake,
+  splineClearAll,
+  splineClearPreview,
+  splineDeleteSelected,
+  splinePoints,
+  splinePreview,
+  splineRebuildVisual,
+  splineSelectedIdx,
+  stylizedSky,
+  sunDir,
+  syncAmbientFXFolderVisibility,
+  syncBarrierOverlay,
+  syncBarrierOverlayFromParams,
+  syncBrushVisual,
+  syncCliffUniformsFromParams,
+  syncDecalFolderVisibility,
+  syncDemoTankEnabled,
+  syncFog,
+  syncFoliageFolderVisibility,
+  syncGeminiGrassHasPaintedFromCanvas,
+  syncGeminiGrassTerrainTintRuntime,
+  syncHoleFolderVisibility,
+  syncHoleOverlayFromParams,
+  syncImgTexSlot,
+  syncImpactFoamUniforms,
+  syncLodFolderVisibility,
+  syncModeBadge,
+  syncObjectSlotsHeights,
+  syncObjectsFolderVisibility,
+  syncOceanMat,
+  syncPTreeHeights,
+  syncPathFolderVisibility,
+  syncPlaceFolderVisibility,
+  syncPropObjectsHeights,
+  syncPropsFolderVisibility,
+  syncPtreeFolderVisibility,
+  syncRiverFolderVisibility,
+  syncRiverMat,
+  syncRoadFolderVisibility,
+  syncRoadHandlesVisibility,
+  syncRoadMat,
+  syncSplineFolderVisibility,
+  syncTreeLodHeights,
+  syncWaterBodyMat,
+  syncWaterFolderVisibility,
+  syncWaterfallFolderVisibility,
+  transformControls,
+  uFlightRingTint,
+  undoTerrainEdit,
+  updateChunkSet,
+  updateFlightRings,
+  wfPlaceTool,
+  wfU,
+});
+  for (const _k of ["waterfallObjects","splashCapObjects","waterObjects","selectedWaterfall","selectedSplashCap","selectedWater","_cachedLakeBodies"]) {
+    Object.defineProperty(UIctx, _k, {
+      get() {
+        return rwiRefs[_k];
+      },
+      set(v) {
+        rwiRefs[_k] = v;
+      },
+      enumerable: true,
+      configurable: true,
+    });
+  }
+
+editorPane = mountTerrainStudioPane();
+});
+
+renderer.domElement.addEventListener(
+  "wheel",
+  (e) => {
+    if (playMode) {
+      // Iso view: wheel zooms camera distance in/out.
+      if (playCamView === "iso") {
+        e.preventDefault();
+        e.stopPropagation();
+        const factor = e.deltaY < 0 ? ISO_ZOOM_STEP : 1 / ISO_ZOOM_STEP;
+        isoDist = THREE.MathUtils.clamp(
+          isoDist * factor,
+          ISO_DIST_MIN,
+          ISO_DIST_MAX,
+        );
+      }
+      return;
+    }
+    if (!e.shiftKey && !e.altKey) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const dir = e.deltaY < 0 ? 1 : -1;
+    if (e.shiftKey) {
+      PARAMS.brushSize = Math.min(
+        80,
+        Math.max(2, PARAMS.brushSize + dir * 2),
+      );
+      brushSize = PARAMS.brushSize;
+    } else {
+      PARAMS.brushStrength = Math.min(
+        100,
+        Math.max(5, PARAMS.brushStrength + dir * 5),
+      );
+      brushStr = PARAMS.brushStrength;
+    }
+    if (editorPane) editorPane.refresh();
+    syncBrushVisual();
+  },
+  { passive: false, capture: true },
+);
+
+rebuildGlobalHeightTexture();
+heightTexDirty = false;
+lastHeightTexSyncMs = performance.now();
+
+updateChunkSet();
+
+// Periodic Tweakpane refresh for live tree LOD stats — outside the render loop
+setInterval(() => {
+  if (!editorPane) return;
+  if (!(lodFolderRef || ptreeFolderRef)) return;
+  const hasChunks =
+    LOD_SLOTS.some((s) => s.chunks.size > 0) ||
+    PTREE_SLOTS.some((s) => s.chunks.size > 0);
+  if (hasChunks) editorPane.refresh();
+}, TREE_LOD_STATS_PANE_MS);
+
+let lastTime = performance.now();
+let appTimeSec = 0;
+renderer.setAnimationLoop(() => {
+  const now = performance.now();
+  const dt = now - lastTime;
+  lastTime = now;
+
+  shadowTarget.position.set(camera.position.x, 0, camera.position.z);
+  const _lightChanged = _lightSkySnap;
+  syncLightAndSkyFromParams();
+  // Only recompute sun axes when light params changed; always sync camera pos
+  if (_lightChanged !== _lightSkySnap) {
+    stylizedSky.update(sunDir, camera.position);
+  } else {
+    stylizedSky.mesh.position.copy(camera.position);
+  }
+
+  const _csmChanged =
+    csm &&
+    PARAMS.csm.enabled &&
+    (PARAMS.csm.cascades !== _lastCsmCascades ||
+      PARAMS.csm.maxFar !== _lastCsmMaxFar ||
+      PARAMS.csm.lightMargin !== _lastCsmMargin ||
+      PARAMS.csm.mapSize !== _lastCsmMapSize);
+  if (csm?.mainFrustum && _csmChanged) {
+    _lastCsmCascades = PARAMS.csm.cascades;
+    _lastCsmMaxFar = PARAMS.csm.maxFar;
+    _lastCsmMargin = PARAMS.csm.lightMargin;
+    _lastCsmMapSize = PARAMS.csm.mapSize;
+    csm.cascades = PARAMS.csm.cascades;
+    csm.maxFar = PARAMS.csm.maxFar;
+    csm.lightMargin = PARAMS.csm.lightMargin;
+    sun.shadow.mapSize.set(PARAMS.csm.mapSize, PARAMS.csm.mapSize);
+    csm.updateFrustums();
+  }
+  if (
+    csm?.mainFrustum &&
+    PARAMS.csm.enabled &&
+    PARAMS.csm.updateEveryFrame
+  ) {
+    csm.updateFrustums();
+  }
+
+  const dtSec = Math.min(0.05, dt * 0.001);
+  appTimeSec += dtSec;
+  if (PARAMS.demoTank.enabled) updateDemoTank(dtSec);
+  uFTreeTime.value = appTimeSec;
+  uRiverTime.value = appTimeSec;
+  uWaterTime.value = appTimeSec;
+  if (playPlaneRoot?.visible && wingTrails.length > 0) {
+    const planeInner = playPlaneRoot.children[0];
+    planeInner.updateMatrixWorld(true);
+    const accel = !!(keysHeld.KeyW || keysHeld.ArrowUp);
+    sampleWingTrails(planeInner, accel);
+    rebuildWingTrails();
+    for (const t of wingTrails) t.mesh.visible = t.history.length > 1;
+  } else if (wingTrails.length > 0) {
+    clearWingTrails();
+  }
+
+  /* ── Plane gun: fire on E, update bullets, check hits ── */
+  if (_planeGunCooldown > 0) _planeGunCooldown -= dtSec;
+  if (
+    PARAMS.planeGun.enabled &&
+    playPlaneRoot?.visible &&
+    playPlaneLoaded &&
+    playPlaneMuzzles.length > 0 &&
+    keysHeld.KeyE &&
+    _planeGunCooldown <= 0
+  ) {
+    const planeInner = playPlaneRoot.children[0];
+    planeInner.updateMatrixWorld(true);
+    _bulletForwardWS
+      .set(0, 0, -1)
+      .applyQuaternion(playPlaneRoot.quaternion);
+    const muz = playPlaneMuzzles[_planeMuzzleIdx];
+    _planeMuzzleIdx = (_planeMuzzleIdx + 1) % playPlaneMuzzles.length;
+    _bulletMuzzleWS.copy(muz);
+    planeInner.localToWorld(_bulletMuzzleWS);
+    firePlaneBullet(_bulletMuzzleWS, _bulletForwardWS);
+    _planeGunCooldown = 1 / PARAMS.planeGun.fireRate;
+  }
+  updatePlaneBullets(dtSec);
+  updateAgents(dtSec, now);
+  ensureFixedFlightRingsPlaced();
+  updateFlightRings(dtSec, camera);
+  checkPlaneBulletHits();
+  updateBloodFX(dtSec);
+  if (_rippleBuffer.length > 0) _syncRipples();
+  if (rwiRefs._cachedLakeBodies.length > 0 || rwiRefs.waterObjects.length > 0) {
+    uWCamXZ.value.set(camera.position.x, camera.position.z);
+    lakeShader.update(dtSec, appTimeSec, rwiRefs._cachedLakeBodies);
+  }
+  // Camera-follow the main ocean plane so it stays centered on the viewer,
+  // and drive the ocean shader's time/waterY uniforms. World-space sampling
+  // inside the shader means the surface doesn't slide with the mesh.
+  oceanWater.position.x = camera.position.x;
+  oceanWater.position.z = camera.position.z;
+  oceanShader.update(dtSec, appTimeSec, [oceanWater]);
+  if (rwiRefs.waterfallObjects.length > 0)
+    wfU.wfFlowTime.value += dtSec * wfU.wfFlowSpeed.value;
+  if (rwiRefs.splashCapObjects.length > 0) {
+    uIFTime.value = appTimeSec;
+    syncImpactFoamUniforms();
+  }
+
+  if (
+    PARAMS.spline.showTrain &&
+    _cachedTrainCurve &&
+    _cachedTrainLen > 0
+  ) {
+    splineTrainT =
+      (splineTrainT +
+        (dtSec * PARAMS.spline.trainSpeed) / _cachedTrainLen) %
+      1;
+    const pos = _cachedTrainCurve.getPoint(splineTrainT);
+    const tangent = _cachedTrainCurve.getTangent(splineTrainT);
+    splineTrainMesh.position.copy(pos);
+    splineTrainMesh.scale.setScalar(PARAMS.spline.trainScale);
+    splineTrainMesh.lookAt(
+      pos.x + tangent.x,
+      pos.y + tangent.y,
+      pos.z + tangent.z,
+    );
+    splineTrainMesh.visible = true;
+  } else {
+    splineTrainMesh.visible = false;
+  }
+
+  if (playMode) {
+    const flying = playMovementMode === "fly" && playPlaneLoaded;
+    const charMode = playMovementMode === "char" && playCharLoaded;
+    const carMode = playMovementMode === "car" && playCarLoaded;
+    if (!flying && playPlaneRingBoostT > 0) playPlaneRingBoostT = 0;
+    const charRunning =
+      charMode && (keysHeld.ShiftLeft || keysHeld.ShiftRight);
+    const iso = playCamView === "iso";
+    let flyBarrelAdd = 0;
+    // Iso capsule: [ / ] rotate the fixed camera yaw manually.
+    // Iso fly: camera chases flyHeading instead (see below), brackets
+    // would fight the chase so we ignore them there.
+    if (iso && !flying) {
+      if (keysHeld.BracketLeft) isoYaw += ISO_YAW_ROT_SPEED * dtSec;
+      if (keysHeld.BracketRight) isoYaw -= ISO_YAW_ROT_SPEED * dtSec;
+    }
+    // Iso fly: A/D yaw the plane before we build the thrust vector,
+    // so W/S push along the new heading in the same frame.
+    if (flying && iso && !planeFlightSurfaceLocked()) {
+      if (keysHeld.KeyA || keysHeld.ArrowLeft)
+        flyHeading += ISO_FLY_YAW_RATE * dtSec;
+      if (keysHeld.KeyD || keysHeld.ArrowRight)
+        flyHeading -= ISO_FLY_YAW_RATE * dtSec;
+    }
+    let mx = 0;
+    let mz = 0;
+    if (carMode) {
+      /* Car handles its own input below — skip the generic WASD
+       * direction accumulation so the mlen-based playerPos step
+       * stays at zero. */
+    } else if (flying) {
+      if (!PARAMS.flightRings.enabled) {
+        playPlaneRingBoostT = 0;
+      } else if (playPlaneRingBoostT > 0) {
+        playPlaneRingBoostT = Math.max(0, playPlaneRingBoostT - dtSec);
+      }
+      // Throttle-style airspeed: ramp up/down; HUD shows live speed.
+      const thr =
+        keysHeld.KeyW || keysHeld.ArrowUp
+          ? 1
+          : keysHeld.KeyS || keysHeld.ArrowDown
+            ? -1
+            : 0;
+      const drag =
+        PLAY_PLANE_DRAG *
+        playPlaneForwardSpeed *
+        Math.abs(playPlaneForwardSpeed);
+      let coast = PLAY_PLANE_COAST;
+      if (playFlyHeight < PLAY_PLANE_DECK_ALT)
+        coast *= PLAY_PLANE_DECK_COAST_MULT;
+      if (thr === 1) {
+        let a = PLAY_PLANE_ACCEL;
+        if (keysHeld.ShiftLeft || keysHeld.ShiftRight)
+          a *= PLAY_PLANE_SHIFT_ACCEL_MULT;
+        playPlaneForwardSpeed += a * dtSec;
+      } else if (thr === -1) {
+        if (playPlaneForwardSpeed > 0.55) {
+          playPlaneForwardSpeed -= PLAY_PLANE_BRAKE * dtSec;
+        } else {
+          playPlaneForwardSpeed -= PLAY_PLANE_REV_ACCEL * dtSec;
+        }
+      } else {
+        if (playPlaneForwardSpeed > 0) {
+          playPlaneForwardSpeed = Math.max(
+            0,
+            playPlaneForwardSpeed - (coast * dtSec + drag * dtSec),
+          );
+        } else if (playPlaneForwardSpeed < 0) {
+          playPlaneForwardSpeed = Math.min(
+            0,
+            playPlaneForwardSpeed + (coast * dtSec + drag * dtSec),
+          );
+        }
+      }
+      const _ringCapExtra =
+        PARAMS.flightRings.enabled && playPlaneRingBoostT > 0
+          ? PARAMS.flightRings.boostMaxAdd
+          : 0;
+      const maxFwdPlane =
+        (keysHeld.ShiftLeft || keysHeld.ShiftRight
+          ? PLAY_PLANE_MAX_FWD_BOOST
+          : PLAY_PLANE_MAX_FWD) + _ringCapExtra;
+      playPlaneForwardSpeed = THREE.MathUtils.clamp(
+        playPlaneForwardSpeed,
+        -PLAY_PLANE_MAX_REV,
+        maxFwdPlane,
+      );
+      if (Math.abs(playPlaneForwardSpeed) < 0.04 && thr === 0)
+        playPlaneForwardSpeed = 0;
+      const spdAbs = Math.abs(playPlaneForwardSpeed);
+      if (spdAbs > 1e-4) {
+        const sg = Math.sign(playPlaneForwardSpeed);
+        mx = -Math.sin(flyHeading) * sg;
+        mz = -Math.cos(flyHeading) * sg;
+      }
+    } else {
+      // Capsule — follow uses camYaw, iso uses the manually-rotated
+      // isoYaw. Both are screen-relative 8-direction movement.
+      const moveYaw = iso ? isoYaw : camYaw;
+      if (keysHeld.KeyW || keysHeld.ArrowUp) {
+        mx -= Math.sin(moveYaw);
+        mz -= Math.cos(moveYaw);
+      }
+      if (keysHeld.KeyS || keysHeld.ArrowDown) {
+        mx += Math.sin(moveYaw);
+        mz += Math.cos(moveYaw);
+      }
+      if (keysHeld.KeyA || keysHeld.ArrowLeft) {
+        mx -= Math.cos(moveYaw);
+        mz += Math.sin(moveYaw);
+      }
+      if (keysHeld.KeyD || keysHeld.ArrowRight) {
+        mx += Math.cos(moveYaw);
+        mz -= Math.sin(moveYaw);
+      }
+    }
+    // Iso-capsule click-to-move: if a click target is set, walk toward
+    // it when no WASD input is active. Any WASD press cancels it.
+    if (iso && !flying && moveTarget) {
+      if (mx !== 0 || mz !== 0) {
+        moveTarget = null;
+      } else {
+        const dx = moveTarget.x - playerPos.x;
+        const dz = moveTarget.z - playerPos.z;
+        if (Math.hypot(dx, dz) < 0.35) {
+          moveTarget = null;
+        } else {
+          mx = dx;
+          mz = dz;
+        }
+      }
+    }
+    /* Early roll exit (game-unreal parity): once past 75% of the
+     * roll dash, if a direction key is still held, abort the roll
+     * and crossfade straight into walk/run so movement is seamless. */
+    const _inputHeld =
+      keysHeld.KeyW ||
+      keysHeld.KeyA ||
+      keysHeld.KeyS ||
+      keysHeld.KeyD ||
+      keysHeld.ArrowUp ||
+      keysHeld.ArrowDown ||
+      keysHeld.ArrowLeft ||
+      keysHeld.ArrowRight;
+    if (
+      charMode &&
+      playCharRolling &&
+      _inputHeld &&
+      !playCharInAir &&
+      playCharActions
+    ) {
+      const rollT =
+        (performance.now() - playCharRollStart) /
+        1000 /
+        playCharRollDuration;
+      if (rollT >= 0.75) {
+        playCharRolling = false;
+        const running = keysHeld.ShiftLeft || keysHeld.ShiftRight;
+        const tgt = playCharCrouching
+          ? playCharActions.crouchWalk
+          : running
+            ? playCharActions.run
+            : playCharActions.walk;
+        if (tgt && playCharActions.roll) {
+          tgt.enabled = true;
+          tgt.reset();
+          tgt.crossFadeFrom(playCharActions.roll, 0.15, false).play();
+          playCharCurrentAction = tgt;
+        }
+      }
+    }
+    /* Char roll: ease-out dash along locked yaw (direction only —
+     * speed goes into _moveSpeed so the (mx/mlen)*speed step math
+     * still works). */
+    let _charRollSpeed = 0;
+    if (charMode && playCharRolling) {
+      const elapsed = (performance.now() - playCharRollStart) / 1000;
+      const t = Math.min(1, elapsed / playCharRollDuration);
+      /* cos(0)=1, cos(π/2)=0 — starts at PEAK, eases out to 0. */
+      _charRollSpeed = PLAY_CHAR_ROLL_PEAK * Math.cos(t * Math.PI * 0.5);
+      mx = Math.sin(playCharRollYaw);
+      mz = Math.cos(playCharRollYaw);
+    }
+    /* Char slide: dash along locked yaw during start, loop AND exit
+     * (velocity keeps going through the exit clip so the character
+     * doesn't snap to a stop — matches game-unreal). */
+    if (charMode && playCharSlidePhase !== "none") {
+      mx = Math.sin(playCharSlideYaw);
+      mz = Math.cos(playCharSlideYaw);
+      if (playCharSlidePhase === "loop") {
+        const elapsed = (performance.now() - playCharSlideStart) / 1000;
+        if (
+          (elapsed >= PLAY_CHAR_SLIDE_MAX_TIME || !keysHeld.KeyX) &&
+          playCharActions?.slideExit
+        ) {
+          playCharSlidePhase = "exit";
+          const se = playCharActions.slideExit;
+          se.reset();
+          se.enabled = true;
+          se.crossFadeFrom(playCharCurrentAction, 0.12, false).play();
+          playCharCurrentAction = se;
+        }
+      }
+    }
+    /* Attack and spell stance still freeze input. */
+    if (
+      charMode &&
+      (playCharAttacking || playCharSpellPhase !== "none")
+    ) {
+      mx = 0;
+      mz = 0;
+    }
+    const mlen = Math.hypot(mx, mz);
+    const _moveSpeed = charMode
+      ? playCharRolling
+        ? _charRollSpeed
+        : playCharSlidePhase !== "none"
+          ? PLAY_CHAR_SLIDE_SPEED
+          : playCharCrouching
+            ? PLAY_CHAR_WALK_SPEED * 0.5
+            : charRunning
+              ? PLAY_CHAR_RUN_SPEED
+              : PLAY_CHAR_WALK_SPEED
+      : flying
+        ? Math.abs(playPlaneForwardSpeed)
+        : playParams.speed;
+    if (mlen > 0) {
+      const stepX = (mx / mlen) * _moveSpeed * dtSec;
+      const stepZ = (mz / mlen) * _moveSpeed * dtSec;
+      let newX = playerPos.x + stepX;
+      let newZ = playerPos.z + stepZ;
+      newX = THREE.MathUtils.clamp(
+        newX,
+        worldBounds.min.x,
+        worldBounds.max.x,
+      );
+      newZ = THREE.MathUtils.clamp(
+        newZ,
+        worldBounds.min.z,
+        worldBounds.max.z,
+      );
+      if (isBarrierBlocked(newX, newZ)) {
+        const slideX = !isBarrierBlocked(newX, playerPos.z);
+        const slideZ = !isBarrierBlocked(playerPos.x, newZ);
+        if (slideX) newZ = playerPos.z;
+        else if (slideZ) newX = playerPos.x;
+        else {
+          newX = playerPos.x;
+          newZ = playerPos.z;
+        }
+      }
+      playerPos.x = newX;
+      playerPos.z = newZ;
+    }
+    playerPos.y = getWorldHeight(playerPos.x, playerPos.z);
+    const groundY = playerPos.y;
+    if (flying) {
+      if (iso) {
+        // Iso fly: Space climbs, Shift descends. Nose slews with intent
+        // so the mesh dives/climbs visually (follow used to be the only
+        // mode with pitch on the GLB).
+        let climbDelta = 0;
+        if (keysHeld.Space) climbDelta += ISO_FLY_CLIMB_RATE * dtSec;
+        if (keysHeld.ShiftLeft || keysHeld.ShiftRight)
+          climbDelta -= ISO_FLY_DESCEND_RATE * dtSec;
+        playFlyHeight = Math.max(0, playFlyHeight + climbDelta);
+        let isoPitchTarget = 0;
+        if (keysHeld.Space)
+          isoPitchTarget = playParams.flyPitchMax * 0.92;
+        else if (keysHeld.ShiftLeft || keysHeld.ShiftRight)
+          isoPitchTarget = playParams.flyPitchMin * 0.96;
+        const pk =
+          1 - Math.exp(-ISO_FLY_PITCH_SLEW * Math.min(dtSec, 0.1));
+        flyPitch += (isoPitchTarget - flyPitch) * pk;
+      } else {
+        let vScale = playParams.flyPitchClimbScale;
+        if (flyPitch < 0) vScale *= PLAY_FLY_VERT_DIVE_MULT;
+        playFlyHeight = Math.max(
+          0,
+          playFlyHeight + flyPitch * vScale * dtSec,
+        );
+      }
+      if (flyBarrelActive) {
+        flyBarrelPhase += dtSec / playParams.flyBarrelRollDuration;
+        const t = Math.min(1, flyBarrelPhase);
+        const sm = t * t * (3 - 2 * t);
+        flyBarrelAdd = sm * PI * 2 * flyBarrelSign;
+        if (flyBarrelPhase >= 1) {
+          const wrap = (a) => {
+            const T = PI * 2;
+            while (a > PI) a -= T;
+            while (a < -PI) a += T;
+            return a;
+          };
+          flyRoll += PI * 2 * flyBarrelSign;
+          flyRollTarget += PI * 2 * flyBarrelSign;
+          flyRoll = wrap(flyRoll);
+          flyRollTarget = wrap(flyRollTarget);
+          flyBarrelActive = false;
+          flyBarrelPhase = 0;
+        }
+      }
+      const dtRoll = Math.min(dtSec, 0.08);
+      flyRollTarget = THREE.MathUtils.lerp(
+        flyRollTarget,
+        0,
+        1 - Math.exp(-playParams.flyRollTargetDecay * dtRoll),
+      );
+      flyRoll = THREE.MathUtils.lerp(
+        flyRoll,
+        flyRollTarget,
+        1 - Math.exp(-playParams.flyRollSmooth * dtRoll),
+      );
+      if (planeFlightSurfaceLocked()) {
+        const sk = 1 - Math.exp(-14 * Math.min(dtSec, 0.1));
+        /* Follow: level nose on deck. Iso: keep pitch for Space/Shift takeoff. */
+        if (!iso) flyPitch += (0 - flyPitch) * sk;
+        flyRollTarget += (0 - flyRollTarget) * sk;
+        /* Without this, flare height stays in playFlyHeight — plane hovers
+         * above the runway after landing while pitch is zeroed. */
+        const ag = 1 - Math.exp(-17 * Math.min(dtSec, 0.1));
+        playFlyHeight += (0 - playFlyHeight) * ag;
+        playFlyHeight = Math.max(0, playFlyHeight);
+      } else {
+        flyGroundCamYawOff *= Math.exp(-10 * Math.min(dtSec, 0.12));
+      }
+    } else {
+      playFlyHeight = 0;
+    }
+    const planeY = groundY + playFlyHeight;
+    if (flying) tryFlightRingPlaneBoost(playerPos.x, planeY, playerPos.z);
+    const capsuleCY = groundY + PLAYER_CAP_R + PLAYER_CAP_H * 0.5;
+
+    /* ── Character mode: jump integration + ground clamp ── */
+    let charY = groundY;
+    if (charMode) {
+      const inSpell = playCharSpellPhase !== "none";
+      const inSlide = playCharSlidePhase !== "none";
+      playCharCrouching =
+        !playCharInAir &&
+        !playCharRolling &&
+        !inSlide &&
+        !inSpell &&
+        !playCharAttacking &&
+        (keysHeld.ControlLeft || keysHeld.ControlRight);
+      /* Glider: Space pressed mid-air toggles the kite. Rising-
+       * edge only so holding Space from the jump press doesn't
+       * immediately open it. Mirrors player-parkourtsushima. */
+      const _charSpaceEdge = keysHeld.Space && !playCharSpacePrev;
+      if (_charSpaceEdge && playCharInAir) {
+        playCharGliding = !playCharGliding;
+      }
+      /* Can't jump while crouched / busy / in stance / already mid-air
+       * or mid-land. */
+      if (
+        !playCharInAir &&
+        !playCharCrouching &&
+        !playCharRolling &&
+        !playCharAttacking &&
+        !inSlide &&
+        !inSpell &&
+        playCharJumpPhase !== "land" &&
+        keysHeld.Space
+      ) {
+        playCharVelY = PLAY_CHAR_JUMP_VEL;
+        playCharInAir = true;
+        /* Kick off the Start clip; finished listener switches to Loop. */
+        if (playCharActions?.jumpStart) {
+          playCharJumpPhase = "start";
+          const js = playCharActions.jumpStart;
+          js.reset();
+          js.enabled = true;
+          js.crossFadeFrom(playCharCurrentAction, 0.08, false).play();
+          playCharCurrentAction = js;
+        } else if (playCharActions?.jumpLoop) {
+          playCharJumpPhase = "loop";
+          const jl = playCharActions.jumpLoop;
+          jl.reset();
+          jl.enabled = true;
+          jl.crossFadeFrom(playCharCurrentAction, 0.08, false).play();
+          playCharCurrentAction = jl;
+        }
+      }
+      if (playCharInAir) {
+        playCharVelY -= PLAY_CHAR_GRAVITY * dtSec;
+        /* Glider caps downward velocity — player drifts instead
+         * of falling. Upward motion is unaffected. */
+        if (playCharGliding) {
+          playCharVelY = Math.max(
+            playCharVelY,
+            -PLAY_CHAR_GLIDE_FALL_SPEED,
+          );
+        }
+        charY =
+          (playCharRoot?.position.y ?? groundY) + playCharVelY * dtSec;
+        if (charY <= groundY) {
+          charY = groundY;
+          playCharVelY = 0;
+          playCharInAir = false;
+          playCharGliding = false;
+          /* Touchdown. If a direction is held, skip Land — crossfade
+           * straight to walk/run so WASD movement doesn't "slide"
+           * over a stationary Land clip. Otherwise play Land. */
+          const _landInputHeld =
+            keysHeld.KeyW ||
+            keysHeld.KeyA ||
+            keysHeld.KeyS ||
+            keysHeld.KeyD ||
+            keysHeld.ArrowUp ||
+            keysHeld.ArrowDown ||
+            keysHeld.ArrowLeft ||
+            keysHeld.ArrowRight;
+          if (_landInputHeld && playCharActions) {
+            playCharJumpPhase = "none";
+            const running = keysHeld.ShiftLeft || keysHeld.ShiftRight;
+            const tgt = running
+              ? playCharActions.run
+              : playCharActions.walk;
+            if (tgt) {
+              tgt.enabled = true;
+              tgt.reset();
+              tgt
+                .crossFadeFrom(playCharCurrentAction, 0.12, false)
+                .play();
+              playCharCurrentAction = tgt;
+            }
+          } else if (playCharActions?.jumpLand) {
+            playCharJumpPhase = "land";
+            const jlnd = playCharActions.jumpLand;
+            jlnd.reset();
+            jlnd.enabled = true;
+            jlnd.crossFadeFrom(playCharCurrentAction, 0.1, false).play();
+            playCharCurrentAction = jlnd;
+          } else {
+            playCharJumpPhase = "none";
+          }
+        }
+      } else {
+        charY = groundY;
+      }
+      /* Yaw: face movement direction. Spell / roll / slide / attack
+       * all freeze yaw (no auto-rotate toward camera). GLB forward
+       * is +Z (Godot convention). */
+      if (
+        mlen > 0 &&
+        !playCharRolling &&
+        !playCharAttacking &&
+        !inSlide &&
+        !inSpell
+      ) {
+        const targetYaw = Math.atan2(mx, mz);
+        let dYaw = targetYaw - playCharYaw;
+        while (dYaw > PI) dYaw -= 2 * PI;
+        while (dYaw < -PI) dYaw += 2 * PI;
+        playCharYaw += dYaw * (1 - Math.exp(-14 * dtSec));
+      }
+      playCharSpacePrev = !!keysHeld.Space;
+    }
+
+    /* ── Car mode physics ──
+     * Arcade 4-wheeler. W/S throttle+brake, A/D steering, Space
+     * handbrake. Heading integrates from steer × speed. Position
+     * integrates from heading × speed along the XZ plane. Each
+     * wheel raycasts against the heightmap for suspension height;
+     * the chassis Y/pitch/roll come from the 4 wheel contact points. */
+    if (carMode) {
+      const forward = keysHeld.KeyW || keysHeld.ArrowUp;
+      const backward = keysHeld.KeyS || keysHeld.ArrowDown;
+      const leftKey = keysHeld.KeyA || keysHeld.ArrowLeft;
+      const rightKey = keysHeld.KeyD || keysHeld.ArrowRight;
+      const handbrake = keysHeld.Space;
+      /* Target steer: A = +, D = −. Smooth toward target. */
+      let steerTarget = 0;
+      if (leftKey) steerTarget += PLAY_CAR_STEER_MAX;
+      if (rightKey) steerTarget -= PLAY_CAR_STEER_MAX;
+      const steerBlend = 1 - Math.exp(-PLAY_CAR_STEER_RATE * dtSec);
+      playCarSteer += (steerTarget - playCarSteer) * steerBlend;
+      /* Throttle / brake — brake is "press S while moving forward",
+       * reverse kicks in only once we've come to a near-stop. */
+      if (forward) {
+        playCarSpeed += PLAY_CAR_ACCEL * dtSec;
+      } else if (backward) {
+        if (playCarSpeed > 0.5) {
+          playCarSpeed -= PLAY_CAR_BRAKE * dtSec;
+        } else {
+          playCarSpeed -= PLAY_CAR_REVERSE * dtSec;
+        }
+      } else {
+        /* Coast: rolling friction pulls speed toward 0. */
+        if (playCarSpeed > 0) {
+          playCarSpeed = Math.max(
+            0,
+            playCarSpeed - PLAY_CAR_ROLL_FRICTION * dtSec,
+          );
+        } else if (playCarSpeed < 0) {
+          playCarSpeed = Math.min(
+            0,
+            playCarSpeed + PLAY_CAR_ROLL_FRICTION * dtSec,
+          );
+        }
+      }
+      if (handbrake) {
+        if (playCarSpeed > 0) {
+          playCarSpeed = Math.max(
+            0,
+            playCarSpeed - PLAY_CAR_HANDBRAKE * dtSec,
+          );
+        } else if (playCarSpeed < 0) {
+          playCarSpeed = Math.min(
+            0,
+            playCarSpeed + PLAY_CAR_HANDBRAKE * dtSec,
+          );
+        }
+      }
+      /* Aero drag — v² term gives a natural top speed. */
+      const dragA = PLAY_CAR_DRAG * playCarSpeed * Math.abs(playCarSpeed);
+      playCarSpeed -= dragA * dtSec;
+      playCarSpeed = THREE.MathUtils.clamp(
+        playCarSpeed,
+        -PLAY_CAR_MAX_REVERSE,
+        PLAY_CAR_MAX_SPEED,
+      );
+      /* Turn rate depends on speed (no free pivot at 0) and is
+       * capped so handling stays predictable at top speed. */
+      const speedNorm = Math.min(
+        1,
+        Math.abs(playCarSpeed) / (PLAY_CAR_MAX_SPEED * 0.5),
+      );
+      const yawRate =
+        PLAY_CAR_TURN_RATE *
+        playCarSteer *
+        speedNorm *
+        Math.sign(playCarSpeed || 1);
+      playCarHeading += yawRate * dtSec;
+      /* Integrate position. Our physics "forward" is -Z (matches
+       * the capsule/char modes and the camera which sits at +Z
+       * behind the player at heading=0). The chassis visual is
+       * rotated MODEL_YAW=π/2 which turns bruno.glb's model-frame
+       * +X front into -Z, so physics/visual line up. */
+      const fwdX = -Math.sin(playCarHeading);
+      const fwdZ = -Math.cos(playCarHeading);
+      let nX = playerPos.x + fwdX * playCarSpeed * dtSec;
+      let nZ = playerPos.z + fwdZ * playCarSpeed * dtSec;
+      nX = THREE.MathUtils.clamp(
+        nX,
+        worldBounds.min.x,
+        worldBounds.max.x,
+      );
+      nZ = THREE.MathUtils.clamp(
+        nZ,
+        worldBounds.min.z,
+        worldBounds.max.z,
+      );
+      if (isBarrierBlocked(nX, nZ)) {
+        /* Barrier hit — kill forward speed, keep the car in place. */
+        playCarSpeed *= 0.2;
+        nX = playerPos.x;
+        nZ = playerPos.z;
+      }
+      /* Slope barrier: if the ground ahead rises faster than the
+       * car can climb, treat it as a wall. Measured as a height
+       * delta per metre of horizontal travel — tan(55°) ≈ 1.43,
+       * so we block anything steeper than that. */
+      const stepDist = Math.hypot(nX - playerPos.x, nZ - playerPos.z);
+      if (stepDist > 1e-4) {
+        const hereY = getWorldHeight(playerPos.x, playerPos.z);
+        const thereY = getWorldHeight(nX, nZ);
+        const slopeTan = (thereY - hereY) / stepDist;
+        if (slopeTan > 1.0) {
+          playCarSpeed *= 0.1;
+          nX = playerPos.x;
+          nZ = playerPos.z;
+        }
+      }
+      playerPos.x = nX;
+      playerPos.z = nZ;
+      playerPos.y = getWorldHeight(nX, nZ);
+      /* Sample ground under each wheel, in world space. Wheels sit
+       * at (offset.x, offset.z) in chassis-local space; rotate by
+       * heading to get world offset, then sample the heightmap. */
+      const scaleFactor = playCarRoot?.scale.x || 1;
+      let maxY = -Infinity;
+      let frontY = 0;
+      let rearY = 0;
+      let leftY = 0;
+      let rightY = 0;
+      for (const w of playCarWheels) {
+        const lx = w.offset.x * scaleFactor;
+        const lz = w.offset.z * scaleFactor;
+        /* Rotate local offset by heading. The chassis local frame
+         * has +Z = rear (physics forward is -Z), so the rotation
+         * below is a standard 2D rotation around Y; "front" is
+         * detected below by lz < 0. */
+        const wx =
+          nX +
+          lx * Math.cos(playCarHeading) +
+          lz * Math.sin(playCarHeading);
+        const wz =
+          nZ -
+          lx * Math.sin(playCarHeading) +
+          lz * Math.cos(playCarHeading);
+        const h = getWorldHeight(wx, wz);
+        w._groundY = h;
+        if (h > maxY) maxY = h;
+        if (lz < 0) frontY += h;
+        else rearY += h;
+        if (lx < 0) leftY += h;
+        else rightY += h;
+      }
+      /* Chassis center = max(wheel ground) + (ride-height +
+       * wheel-radius) × scale. Max (not average) guarantees the
+       * body is never below any wheel, so steep slopes never let
+       * the chassis clip into the hillside. Downhill wheels can
+       * look slightly floaty in exchange, which is fine. */
+      playCarY =
+        maxY +
+        (PLAY_CAR_RIDE_HEIGHT + PLAY_CAR_WHEEL_RADIUS) * scaleFactor;
+      /* Pitch/roll from wheel height deltas. frontY/rearY are sums
+       * of two wheels each → divide by 2 for averages. */
+      const pitchDelta = (rearY - frontY) * 0.5;
+      const rollDelta = (leftY - rightY) * 0.5;
+      const pitchRaw = Math.atan2(
+        pitchDelta,
+        PLAY_CAR_WHEEL_BASE * scaleFactor,
+      );
+      const rollRaw = Math.atan2(rollDelta, PLAY_CAR_TRACK * scaleFactor);
+      /* Cap tilt to ±25° — arcade cars don't physically match a
+       * 45° slope, and unclamped pitch looks absurd on cliffs. */
+      const TILT_CAP = 0.436; // ~25°
+      const pitchClamped = THREE.MathUtils.clamp(
+        pitchRaw,
+        -TILT_CAP,
+        TILT_CAP,
+      );
+      const rollClamped = THREE.MathUtils.clamp(
+        rollRaw,
+        -TILT_CAP,
+        TILT_CAP,
+      );
+      const ktilt = 1 - Math.exp(-12 * dtSec);
+      playCarPitch += (pitchClamped - playCarPitch) * ktilt;
+      playCarRoll += (rollClamped - playCarRoll) * ktilt;
+      /* Spin wheels based on forward speed. Wheel radius ≈ 0.35m. */
+      playCarWheelSpin -= (playCarSpeed / 0.35) * dtSec;
+    }
+
+    capsuleMesh.visible =
+      playMovementMode === "capsule" ||
+      (playMovementMode === "fly" && !playPlaneLoaded) ||
+      (playMovementMode === "char" && !playCharLoaded) ||
+      (playMovementMode === "car" && !playCarLoaded);
+    capsuleMesh.position.set(playerPos.x, capsuleCY, playerPos.z);
+    if (mlen > 0) capsuleMesh.rotation.y = Math.atan2(mx, mz) + PI;
+
+    if (playPlaneRoot) {
+      playPlaneRoot.visible = flying;
+      if (flying) {
+        playPlaneRoot.position.set(playerPos.x, planeY, playerPos.z);
+        playPlaneRoot.rotation.set(
+          flyPitch,
+          flyHeading,
+          flyRoll + flyBarrelAdd,
+        );
+      }
+    }
+
+    if (playCarRoot) {
+      playCarRoot.visible = carMode;
+      if (carMode) {
+        playCarRoot.position.set(playerPos.x, playCarY, playerPos.z);
+        /* Chassis orientation: yaw (heading) + pitch/roll from
+         * wheel suspension sampling. Y-first rotation so pitch
+         * and roll stay in the car's local frame. */
+        playCarRoot.rotation.set(0, playCarHeading, 0);
+        if (playCarChassis) {
+          playCarChassis.rotation.set(playCarPitch, 0, playCarRoll);
+        }
+        /* Per-wheel: steer the front wheel containers (left side
+         * also needs the PI mirror baked in), spin the cylinders on
+         * local Z (matches folio's VisualVehicle.update()). The
+         * MODEL_YAW offset must be included so we don't clobber
+         * the chassis-to-physics-frame bake at load time. */
+        for (const w of playCarWheels) {
+          const baseYaw = PLAY_CAR_MODEL_YAW + (w.isLeft ? Math.PI : 0);
+          if (w.steer) {
+            w.container.rotation.y = baseYaw + playCarSteer;
+          }
+          if (w.cylinder) {
+            /* Left wheels already flipped 180° around Y, so they
+             * must spin the opposite direction to visually roll
+             * forward at the same rate as right wheels. */
+            w.cylinder.rotation.z =
+              (w.isLeft ? -1 : 1) * playCarWheelSpin;
+          }
+        }
+      }
+    }
+
+    if (playCharRoot) {
+      playCharRoot.visible = charMode;
+      if (charMode) {
+        playCharRoot.position.set(playerPos.x, charY, playerPos.z);
+        playCharRoot.rotation.y = playCharYaw;
+        /* Kite is only visible while actively gliding. */
+        if (playCharKite) playCharKite.visible = playCharGliding;
+        /* Glider pose: while gliding, crossfade into the
+         * NinjaJump_Idle loop (character holds the kite bar);
+         * when gliding ends, fall back to the normal jump loop
+         * so the existing jump state machine continues. */
+        if (playCharActions) {
+          const wantGlide = playCharGliding && playCharActions.glide;
+          if (wantGlide && !playCharGliderPoseActive) {
+            playCharGliderPoseActive = true;
+            const ga = playCharActions.glide;
+            ga.reset();
+            ga.enabled = true;
+            ga.crossFadeFrom(playCharCurrentAction, 0.15, false).play();
+            playCharCurrentAction = ga;
+          } else if (!wantGlide && playCharGliderPoseActive) {
+            playCharGliderPoseActive = false;
+            /* Pick a sensible exit clip: if still airborne,
+             * return to jumpLoop; otherwise let the locomotion
+             * picker below re-enter idle/walk/run. */
+            if (playCharInAir && playCharActions.jumpLoop) {
+              const jl = playCharActions.jumpLoop;
+              jl.reset();
+              jl.enabled = true;
+              jl.crossFadeFrom(playCharCurrentAction, 0.15, false).play();
+              playCharCurrentAction = jl;
+              playCharJumpPhase = "loop";
+            }
+          }
+        }
+        /* Locomotion picker — only runs when no special state owns
+         * the mixer (slide/spell/attack/roll/jump phases manage
+         * their own clips via keydown handlers + the finished
+         * listener). */
+        if (
+          playCharActions &&
+          !playCharAttacking &&
+          !playCharRolling &&
+          !playCharGliderPoseActive &&
+          playCharSlidePhase === "none" &&
+          playCharSpellPhase === "none" &&
+          playCharJumpPhase === "none"
+        ) {
+          let target = null;
+          if (playCharCrouching)
+            target =
+              mlen > 0
+                ? playCharActions.crouchWalk
+                : playCharActions.crouch;
+          else if (mlen > 0)
+            target = charRunning
+              ? playCharActions.run
+              : playCharActions.walk;
+          else target = playCharActions.idle;
+          if (target) _playCharSetAction(target);
+        }
+        if (playCharMixer) playCharMixer.update(dtSec);
+      }
+    }
+
+    /* Flight HUD — speed & altitude. Pure DOM, ~free. */
+    if (flying) {
+      if (!_flyHudVisible) {
+        flyHudEl.classList.add("visible");
+        _flyHudVisible = true;
+      }
+      const spdNow = Math.round(Math.abs(playPlaneForwardSpeed));
+      const altNow = Math.round(playFlyHeight);
+      if (spdNow !== _flyHudSpdShown) {
+        flySpdEl.textContent = spdNow;
+        _flyHudSpdShown = spdNow;
+      }
+      if (altNow !== _flyHudAltShown) {
+        flyAltEl.textContent = altNow;
+        _flyHudAltShown = altNow;
+      }
+    } else if (_flyHudVisible) {
+      flyHudEl.classList.remove("visible");
+      _flyHudVisible = false;
+    }
+
+    const lookAtY = flying
+      ? planeY + 0.45
+      : charMode
+        ? charY + PLAY_CHAR_HEIGHT * 0.6
+        : carMode
+          ? playCarY + 1.1
+          : capsuleCY + 0.6;
+    if (iso) {
+      // Fixed-angle tilted top-down camera. For capsule: yaw is
+      // manually rotated via [ / ]. For fly: yaw smoothly chases
+      // flyHeading so the plane always points "up" on screen.
+      // Car iso follows playCarHeading the same way fly follows flyHeading.
+      if (flying) {
+        let yawDelta = flyHeading - isoYaw;
+        while (yawDelta > Math.PI) yawDelta -= 2 * Math.PI;
+        while (yawDelta < -Math.PI) yawDelta += 2 * Math.PI;
+        const chaseK =
+          1 - Math.exp(-ISO_FLY_CHASE_SMOOTH * Math.min(dtSec, 0.1));
+        isoYaw += yawDelta * chaseK;
+      } else if (carMode) {
+        let yawDelta = playCarHeading - isoYaw;
+        while (yawDelta > Math.PI) yawDelta -= 2 * Math.PI;
+        while (yawDelta < -Math.PI) yawDelta += 2 * Math.PI;
+        const chaseK =
+          1 - Math.exp(-ISO_FLY_CHASE_SMOOTH * Math.min(dtSec, 0.1));
+        isoYaw += yawDelta * chaseK;
+      }
+      const hDistIso = isoDist * Math.cos(ISO_PITCH);
+      const vDistIso = isoDist * Math.sin(ISO_PITCH);
+      camera.position.set(
+        playerPos.x + Math.sin(isoYaw) * hDistIso,
+        lookAtY + vDistIso,
+        playerPos.z + Math.cos(isoYaw) * hDistIso,
+      );
+      camera.lookAt(playerPos.x, lookAtY, playerPos.z);
+    } else {
+      /* Follow cam: car chases its heading (like fly) so the view
+       * stays behind the car during turns. camYaw drifts toward
+       * playCarHeading + π so "behind" stays behind. */
+      if (carMode) {
+        const targetCamYaw = playCarHeading;
+        let d = targetCamYaw - camYaw;
+        while (d > Math.PI) d -= 2 * Math.PI;
+        while (d < -Math.PI) d += 2 * Math.PI;
+        camYaw += d * (1 - Math.exp(-4.0 * Math.min(dtSec, 0.1)));
+      }
+      const camOrbitYaw = flying
+        ? flyHeading + flyGroundCamYawOff
+        : camYaw;
+      const camDistUse = carMode
+        ? Math.max(playParams.camDist, 9.0)
+        : playParams.camDist;
+      const hDist = camDistUse * Math.cos(camPitch);
+      const vDist = camDistUse * Math.sin(camPitch);
+      camera.position.set(
+        playerPos.x + Math.sin(camOrbitYaw) * hDist,
+        lookAtY + vDist,
+        playerPos.z + Math.cos(camOrbitYaw) * hDist,
+      );
+      camera.lookAt(playerPos.x, lookAtY, playerPos.z);
+    }
+  } else {
+    controls.update();
+  }
+
+  if (fleurSystem) {
+    if (playMode) fleurSystem.update(playerPos, appTimeSec);
+    else fleurSystem.update(camera.position, appTimeSec);
+  }
+
+  if (playMode) {
+    FOLIAGE_SLOTS.forEach((s) => {
+      if (s.system) s.system.update(appTimeSec, playerPos);
+    });
+  } else {
+    FOLIAGE_SLOTS.forEach((s) => {
+      if (s.system) s.system.update(appTimeSec, null);
+    });
+  }
+
+  if (ambientFXSystem) {
+    ambientFXSystem.update(
+      dtSec,
+      appTimeSec,
+      ambientFXParams.windX,
+      ambientFXParams.windZ,
+      ambientFXParams.windStrength,
+    );
+  }
+
+  if (now - frameState.lastChunkUpdateMs > 60) {
+    updateChunkSet();
+    frameState.lastChunkUpdateMs = now;
+  }
+
+  if (dirtyChunks.size > 0) rebuildDirtyActiveChunks(2);
+
+  if (heightTexDirty && now - lastHeightTexSyncMs > 500) {
+    rebuildGlobalHeightTexture();
+    heightTexDirty = false;
+    lastHeightTexSyncMs = now;
+  }
+
+  if (geminiGrassPatchSystem && geminiGrassUniforms && geminiGrassGroup) {
+    if (geminiGrassHasPaintedDensity) {
+      geminiGrassGroup.visible = true;
+      const gp = window._geminiGrassParams;
+      _geminiUpdateOpts.patchSize = gp.fieldSize;
+      _geminiUpdateOpts.patchSizeMid = gp.lodMidPatchSize;
+      _geminiUpdateOpts.patchSizeFar = gp.lodFarPatchSize;
+      _geminiUpdateOpts.patchSizeMega = gp.lodMegaPatchSize;
+      _geminiUpdateOpts.lodMidDistance = gp.lodMidDistance;
+      _geminiUpdateOpts.lodFarDistance = gp.lodFarDistance;
+      _geminiUpdateOpts.maxDistance = gp.lodMaxDistance;
+      _geminiUpdateOpts.megaMaxDistance = gp.lodMegaMaxDistance;
+      _geminiUpdateOpts.lodEnabled = gp.lodEnabled;
+      _geminiUpdateOpts.grassReceiveShadow = gp.grassReceiveShadow;
+      const stats = geminiGrassPatchSystem.update(_geminiUpdateOpts);
+      lastGeminiPatchCount = stats.patchCount;
+      geminiGrassUniforms.uPlayerPos.value.copy(
+        playMode ? playerPos : camera.position,
+      );
+      geminiGrassUniforms.uSunDir.value.copy(sunDir);
+      syncGeminiGrassTerrainTintRuntime(gp, geminiGrassUniforms);
+    } else {
+      geminiGrassGroup.visible = false;
+    }
+  }
+
+  {
+    const _pineSlot = LOD_SLOTS[0];
+    const _pineApi = _pineSlot?.pineImpostorApi;
+    if (_pineApi && _pineSlot.name === "Pine") {
+      const _sd = sunDirectionFromAngles(
+        PARAMS.light.sunAzimuth,
+        PARAMS.light.sunElevation,
+      );
+      _pineApi.updateSunDir(_sd);
+      _tmpPineSunCol.set(
+        sun.color.r * sun.intensity,
+        sun.color.g * sun.intensity,
+        sun.color.b * sun.intensity,
+      );
+      _pineApi.updateSunColor(_tmpPineSunCol);
+      _tmpPineAmbCol.set(0.22, 0.24, 0.28);
+      _pineApi.updateAmbColor(_tmpPineAmbCol);
+      const _hi = hemi.intensity * 0.5;
+      _tmpPineHemiSky.set(
+        hemi.color.r * _hi,
+        hemi.color.g * _hi,
+        hemi.color.b * _hi,
+      );
+      _tmpPineHemiGnd.set(
+        hemi.groundColor.r * _hi,
+        hemi.groundColor.g * _hi,
+        hemi.groundColor.b * _hi,
+      );
+      _pineApi.updateHemiColors(_tmpPineHemiSky, _tmpPineHemiGnd);
+    }
+  }
+
+  updateLODInstances();
+  updatePTreeInstances();
+  if (rwiRefs._cachedLakeBodies.length > 0)
+    renderLakeReflection(rwiRefs._cachedLakeBodies);
+  updateLensFlare();
+  billboardClouds.update(dtSec, camera, sunDir, appTimeSec);
+  renderer.render(scene, camera);
+  updateHud(dt);
+});
