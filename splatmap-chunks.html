@@ -979,6 +979,25 @@
         if (!playMode) renderer.domElement.focus({ preventScroll: true });
       });
       await renderer.init();
+      // Surface WebGPU device-lost events so they show up as a real error
+      // instead of a silent white flash. Chromium kills the device when a
+      // frame stalls past its GPU watchdog (typically pipeline-compilation
+      // storms or long sculpt frames) — see console for the reason.
+      try {
+        const _gpuDevice = renderer.backend?.device ?? renderer.getDevice?.();
+        if (_gpuDevice?.lost) {
+          _gpuDevice.lost.then((info) => {
+            console.error(
+              "[WebGPU] Device lost — reason:",
+              info?.reason,
+              "message:",
+              info?.message,
+            );
+          });
+        }
+      } catch (e) {
+        console.warn("[WebGPU] could not attach device-lost listener", e);
+      }
       // Same as splatmap-painter10bvh+post.html init — SkyMesh is HDR; without ACES it looks flat/wrong.
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
       renderer.toneMappingExposure = PARAMS.light.exposure;
@@ -2841,6 +2860,12 @@
       );
       const _combinedFogNode = fog(_blendedFogColor, _combinedFactor);
 
+      // Assign fogNode ONCE — toggling scene.fogNode at runtime forces every
+      // material in the scene to recompile its pipeline in one frame, which
+      // blows past the WebGPU GPU watchdog and triggers "Device Lost". The
+      // uHFogEnabled/uDFogEnabled uniforms already zero the factors when off,
+      // so leaving the node attached costs nothing when both fogs are disabled.
+      scene.fogNode = _combinedFogNode;
       function syncFog() {
         uHFogEnabled.value = PARAMS.fog.height.enabled ? 1 : 0;
         uHFogColor.value.set(PARAMS.fog.height.color).convertSRGBToLinear();
@@ -2849,9 +2874,6 @@
         uDFogEnabled.value = PARAMS.fog.distance.enabled ? 1 : 0;
         uDFogColor.value.set(PARAMS.fog.distance.color).convertSRGBToLinear();
         uDFogDensity.value = PARAMS.fog.distance.density;
-        const anyEnabled =
-          PARAMS.fog.height.enabled || PARAMS.fog.distance.enabled;
-        scene.fogNode = anyEnabled ? _combinedFogNode : null;
       }
       syncFog();
 
@@ -4391,6 +4413,22 @@
       const chunkDataMap = new Map();
       const chunkSplatMap = new Map();
       const dirtyChunks = new Set();
+      // Per-chunk brush-touch AABB in world space — when present, the chunk
+      // can use the in-place partial update path instead of a full mesh
+      // remove+create. Cleared as chunks are consumed by rebuildDirtyActiveChunks.
+      const _dirtyChunkRects = new Map();
+      const _tmpSculptN = new THREE.Vector3();
+      function _sculptUnionRectForKey(key, minWX, maxWX, minWZ, maxWZ) {
+        const prev = _dirtyChunkRects.get(key);
+        if (!prev) {
+          _dirtyChunkRects.set(key, { minWX, maxWX, minWZ, maxWZ });
+          return;
+        }
+        if (minWX < prev.minWX) prev.minWX = minWX;
+        if (maxWX > prev.maxWX) prev.maxWX = maxWX;
+        if (minWZ < prev.minWZ) prev.minWZ = minWZ;
+        if (maxWZ > prev.maxWZ) prev.maxWZ = maxWZ;
+      }
 
       /** Tree LOD (J) — instanced GLB + WebGPU octahedral impostor (Pine slot). */
       const LOD_SLOTS = [
@@ -5245,6 +5283,7 @@
         refreshActiveChunkMaterials();
         heightTexDirty = true;
         dirtyChunks.clear();
+        _dirtyChunkRects.clear();
         invalidateLodStitchSignaturesForKeys(new Set(activeChunks.keys()));
         syncGeminiGrassHasPaintedFromCanvas();
         syncTreeLodHeights();
@@ -10088,7 +10127,7 @@
         });
       }
 
-      function _makeChunkIMs(defs, instanceCap) {
+      function _makeChunkIMs(defs, instanceCap, castShadow = true) {
         const cap = Math.max(
           32,
           Math.min(8192, Math.floor(instanceCap) || 1024),
@@ -10096,7 +10135,7 @@
         return defs.map(({ geometry, material, localMatrix }) => {
           const im = new THREE.InstancedMesh(geometry, material, cap);
           im.count = 0;
-          im.castShadow = true;
+          im.castShadow = castShadow;
           im.receiveShadow = true;
           im.frustumCulled = false;
           scene.add(im);
@@ -10133,9 +10172,9 @@
             chunk = {
               positions: [],
               sphere: new THREE.Sphere(),
-              lod0ims: _makeChunkIMs(slot.lod0Defs, instanceCap),
+              lod0ims: _makeChunkIMs(slot.lod0Defs, instanceCap, true),
               lod1ims: slot.lod1Defs
-                ? _makeChunkIMs(slot.lod1Defs, instanceCap)
+                ? _makeChunkIMs(slot.lod1Defs, instanceCap, false)
                 : null,
             };
             slot.chunks.set(key, chunk);
@@ -11531,6 +11570,142 @@
         geom.computeBoundingSphere();
       }
 
+      /**
+       * In-place partial update of a chunk's geometry for a bounded brush rect.
+       * Rewrites only the (ix, iz) sub-grid whose world position falls inside
+       * the rect (+1 padding ring for FD normals). Reuses the existing mesh and
+       * buffers — no Mesh create/destroy, no material reattach, no full vertex
+       * scan. Falls back to the full rebuild path when the fast path can't
+       * safely apply (missing normals, unexpected vertex count, etc.).
+       */
+      function updateChunkHeightsGeometryPartial(chunk, rect) {
+        const mySegments = chunk.segments;
+        const geom = chunk.mesh.geometry;
+        const pos = geom.attributes.position;
+        const normalAttr = geom.attributes.normal;
+        const baseCount =
+          geom.userData._baseVertCount || (mySegments + 1) * (mySegments + 1);
+
+        // Safety net — if anything looks off, fall back to the full path.
+        if (!normalAttr || normalAttr.count !== pos.count) {
+          applyChunkHeightsToGeometry(geom, chunk.cx, chunk.cz, mySegments);
+          return;
+        }
+        const expectedBase = (mySegments + 1) * (mySegments + 1);
+        if (baseCount !== expectedBase || pos.count < expectedBase) {
+          applyChunkHeightsToGeometry(geom, chunk.cx, chunk.cz, mySegments);
+          return;
+        }
+
+        const W = CONFIG.chunkSize;
+        const seg = mySegments;
+        const stride = seg + 1;
+        const stepXZ = W / seg;
+        const halfW = W * 0.5;
+
+        const heights = ensureChunkData(chunk.cx, chunk.cz);
+        const center = chunkCenterWorld(chunk.cx, chunk.cz);
+        const centerX = center.x;
+        const centerZ = center.z;
+        const minXworld = centerX - halfW;
+        const minZworld = centerZ - halfW;
+        const maxXworld = centerX + halfW;
+        const maxZworld = centerZ + halfW;
+
+        // Early out — rect doesn't overlap this chunk at all.
+        if (
+          rect.maxWX < minXworld ||
+          rect.minWX > maxXworld ||
+          rect.maxWZ < minZworld ||
+          rect.minWZ > maxZworld
+        ) {
+          return;
+        }
+
+        // Vertex index range (padded by 1 cell so FD normals at the outer
+        // ring re-sample with fresh neighbor heights).
+        // PlaneGeometry after rotateX(-π/2): ix=0 at localX=-halfW, ix=seg at
+        // +halfW; iy=0 at localZ=+halfW, iy=seg at -halfW (z axis is flipped
+        // relative to the iy index).
+        const padded = stepXZ;
+        const wxMinPad = rect.minWX - padded;
+        const wxMaxPad = rect.maxWX + padded;
+        const wzMinPad = rect.minWZ - padded;
+        const wzMaxPad = rect.maxWZ + padded;
+        const ix0 = Math.max(
+          0,
+          Math.floor((wxMinPad - centerX + halfW) / stepXZ),
+        );
+        const ix1 = Math.min(
+          seg,
+          Math.ceil((wxMaxPad - centerX + halfW) / stepXZ),
+        );
+        // Inverse: larger wz → smaller iy. Low iy corresponds to high wz.
+        const iy0 = Math.max(
+          0,
+          Math.floor((halfW - (wzMaxPad - centerZ)) / stepXZ),
+        );
+        const iy1 = Math.min(
+          seg,
+          Math.ceil((halfW - (wzMinPad - centerZ)) / stepXZ),
+        );
+        if (ix0 > ix1 || iy0 > iy1) return;
+
+        const posArr = pos.array;
+        const nArr = normalAttr.array;
+
+        // Rewrite positions + normals for the affected sub-rect only.
+        for (let iy = iy0; iy <= iy1; iy++) {
+          const localZ = halfW - iy * stepXZ;
+          const wz = centerZ + localZ;
+          const v = (localZ / W + 0.5) * CONFIG.dataResolution;
+          for (let ix = ix0; ix <= ix1; ix++) {
+            const localX = -halfW + ix * stepXZ;
+            const wx = centerX + localX;
+            const u = (localX / W + 0.5) * CONFIG.dataResolution;
+            const y = sampleChunkDataBilinear(heights, u, v);
+            const i = iy * stride + ix;
+            posArr[i * 3 + 1] = y;
+            heightfieldNormalAt(wx, wz, _tmpSculptN);
+            nArr[i * 3] = _tmpSculptN.x;
+            nArr[i * 3 + 1] = _tmpSculptN.y;
+            nArr[i * 3 + 2] = _tmpSculptN.z;
+          }
+        }
+
+        // If the rect touches a chunk edge, re-run the LOD-stitch pass (cheap
+        // — it only touches perimeter verts) and re-sync the skirt ring so
+        // seams stay crack-free. Interior strokes skip both entirely.
+        const touchesEdge =
+          ix0 === 0 || ix1 === seg || iy0 === 0 || iy1 === seg;
+        if (touchesEdge) {
+          stitchMeshEdgesToCoarserNeighbors(
+            geom,
+            chunk.cx,
+            chunk.cz,
+            mySegments,
+          );
+          if (pos.count > baseCount) {
+            const ring = getChunkPerimeterRingIndices(mySegments);
+            const skirtDepth = CONFIG.terrainSkirtDepth;
+            for (let r = 0; r < ring.length; r++) {
+              const ti = ring[r];
+              const bi = baseCount + r;
+              posArr[bi * 3] = posArr[ti * 3];
+              posArr[bi * 3 + 1] = posArr[ti * 3 + 1] - skirtDepth;
+              posArr[bi * 3 + 2] = posArr[ti * 3 + 2];
+              nArr[bi * 3] = nArr[ti * 3];
+              nArr[bi * 3 + 1] = nArr[ti * 3 + 1];
+              nArr[bi * 3 + 2] = nArr[ti * 3 + 2];
+            }
+          }
+        }
+
+        pos.needsUpdate = true;
+        normalAttr.needsUpdate = true;
+        geom.computeBoundingSphere();
+      }
+
       /** Hysteresis factor — downgrade requires 20% more distance than upgrade. */
       const LOD_HYSTERESIS = 0.2;
 
@@ -11684,6 +11859,7 @@
           if (_canCreate(lod)) {
             activeChunks.set(key, createChunk(cx, cz, lod));
             dirtyChunks.delete(key);
+            _dirtyChunkRects.delete(key);
             _countCreate(lod);
           }
           return;
@@ -11699,6 +11875,7 @@
             removeChunk(existing);
             activeChunks.set(key, createChunk(cx, cz, lod));
             dirtyChunks.delete(key);
+            _dirtyChunkRects.delete(key);
             _countCreate(lod);
           }
           return;
@@ -11709,6 +11886,7 @@
             removeChunk(existing);
             activeChunks.set(key, createChunk(cx, cz, lod));
             dirtyChunks.delete(key);
+            _dirtyChunkRects.delete(key);
             _countCreate(lod);
           }
         }
@@ -11909,6 +12087,7 @@
             removeChunk(active);
             activeChunks.set(key, createChunk(active.cx, active.cz, lod));
           }
+          _dirtyChunkRects.delete(key);
           dirtyChunks.delete(key);
           done++;
           if (done >= limit) break;
@@ -11930,6 +12109,26 @@
       function finalizeSculpt(brushedChunkKeys, seamLimit) {
         syncSeamsAfterSculpt(brushedChunkKeys, seamLimit);
         invalidateLodStitchSignaturesForKeys(brushedChunkKeys);
+        // Record the brush AABB for every chunk that may now be dirty so the
+        // in-place rebuild path can update just that rect instead of running
+        // a full chunk rebuild. Covers brushed chunks and their 1-ring
+        // neighbors (the seam pass may have marked them dirty on an edge
+        // merge). When `seamLimit` is null (runGlobalErosion / paste path),
+        // we leave the rect map alone and those chunks go through the full
+        // rebuild fallback.
+        if (seamLimit && seamLimit.radius > 0) {
+          const r = seamLimit.radius;
+          const minWX = seamLimit.wx - r;
+          const maxWX = seamLimit.wx + r;
+          const minWZ = seamLimit.wz - r;
+          const maxWZ = seamLimit.wz + r;
+          const affected = expandChunkKeysWithNeighbors(brushedChunkKeys);
+          for (const key of affected) {
+            if (dirtyChunks.has(key)) {
+              _sculptUnionRectForKey(key, minWX, maxWX, minWZ, maxWZ);
+            }
+          }
+        }
         heightTexDirty = true;
         invalidateBvhHeight();
       }
@@ -22335,6 +22534,45 @@ gemini grass patches: ${geminiGrassHasPaintedDensity ? lastGeminiPatchCount : 0}
           PTREE_SLOTS.some((s) => s.chunks.size > 0);
         if (hasChunks) editorPane.refresh();
       }, TREE_LOD_STATS_PANE_MS);
+
+      // Pre-warm every pipeline in the current scene graph so the first time
+      // something enters the frustum (ocean revealed by sculpting, tree LOD
+      // toggled, etc.) we don't block inside render() compiling — that stall
+      // is what trips Chromium's WebGPU watchdog and kills the device.
+      //
+      // Grass group is invisible at startup (density not painted yet), so
+      // compileAsync would normally skip it. Insert temporary stub meshes
+      // that share the real materials + geometries so the pipelines get
+      // compiled now, then remove them before the render loop starts.
+      const _prewarmGrassStubs = [];
+      if (geminiGrassGroup && _geminiGeos && _geminiMat) {
+        const stubDefs = [
+          { geo: _geminiGeos.geoHigh, mat: _geminiMat },
+          { geo: _geminiGeos.geoMid, mat: _geminiMat },
+          { geo: _geminiGeos.geoFar, mat: _geminiMat },
+          { geo: _geminiGeos.geoMega, mat: _geminiMatMega ?? _geminiMat },
+        ];
+        geminiGrassGroup.visible = true;
+        for (const { geo, mat } of stubDefs) {
+          if (!geo || !mat) continue;
+          const m = new THREE.Mesh(geo, mat);
+          m.frustumCulled = false;
+          m.castShadow = false;
+          m.receiveShadow = true;
+          geminiGrassGroup.add(m);
+          _prewarmGrassStubs.push(m);
+        }
+      }
+      try {
+        await renderer.compileAsync(scene, camera);
+      } catch (e) {
+        console.warn("[WebGPU] compileAsync failed", e);
+      }
+      if (_prewarmGrassStubs.length > 0) {
+        for (const m of _prewarmGrassStubs) geminiGrassGroup.remove(m);
+        geminiGrassGroup.visible = false;
+        _prewarmGrassStubs.length = 0;
+      }
 
       let lastTime = performance.now();
       let appTimeSec = 0;
