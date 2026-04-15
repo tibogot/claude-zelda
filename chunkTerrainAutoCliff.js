@@ -1,6 +1,6 @@
 /**
  * Auto cliff shading matching splatmap-painter10bvh+post.html:
- * heightTex finite-difference flatness → slope mask, cliff rock triplanar albedo/normal/roughness + AO.
+ * heightTex finite-difference flatness → slope mask, Rock028 triplanar albedo/normal/roughness + AO.
  */
 import * as THREE from "three";
 import {
@@ -57,7 +57,7 @@ function packNormalIntoDataTextureBA(dt, imgEl) {
 }
 
 const ROCK028_RES = 1024;
-const TEX_BASE = "textures/cliff_rocks_07_2k";
+const TEX_BASE = "textures/Rock028";
 
 /**
  * @returns {Promise<{ colorTex: THREE.Texture, dataTex: THREE.DataTexture }>}
@@ -66,7 +66,7 @@ export function loadRock028Textures() {
   const loader = new THREE.TextureLoader();
   return new Promise((resolve, reject) => {
     const colorTex = loader.load(
-      `${TEX_BASE}/cliff_rocks_07_basecolor_2k.png`,
+      `${TEX_BASE}/Rock028_2K-JPG_Color.jpg`,
       () => {},
       undefined,
       reject,
@@ -89,15 +89,15 @@ export function loadRock028Textures() {
       if (pending === 0) resolve({ colorTex, dataTex });
     };
 
-    loader.load(`${TEX_BASE}/cliff_rocks_07_roughness_2k.png`, (t) => {
+    loader.load(`${TEX_BASE}/Rock028_2K-JPG_Roughness.jpg`, (t) => {
       packChannelIntoDataTexture(dataTex, t.image, 0);
       doneOne();
     });
-    loader.load(`${TEX_BASE}/cliff_rocks_07_ambientocclusion_2k.png`, (t) => {
+    loader.load(`${TEX_BASE}/Rock028_2K-JPG_AmbientOcclusion.jpg`, (t) => {
       packChannelIntoDataTexture(dataTex, t.image, 1);
       doneOne();
     });
-    loader.load(`${TEX_BASE}/cliff_rocks_07_normal_gl_2k.png`, (t) => {
+    loader.load(`${TEX_BASE}/Rock028_2K-JPG_NormalGL.jpg`, (t) => {
       packNormalIntoDataTextureBA(dataTex, t.image);
       doneOne();
     });

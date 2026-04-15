@@ -28,7 +28,7 @@ export const PARAMS = {
   })(),
   /** Painter-style TSL ground proc (chunkGroundTsl.js) — base color + 2 noise layers, live uniforms. */
   ground: (() => JSON.parse(JSON.stringify(GROUND_DEFAULT_PARAMS)))(),
-  /** Painter-style cliff_rocks_07 + heightTex slope mask on splat + TSL ground surfaces. */
+  /** Painter-style Rock028 + heightTex slope mask on splat + TSL ground surfaces. */
   autoCliffEnabled: true,
   autoCliff: {
     slopeStart: 0.05,
