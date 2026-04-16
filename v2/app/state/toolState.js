@@ -4,6 +4,8 @@ export function createToolState() {
   return {
     mode: "sculpt",
     sculptMode: "raiseLower",
+    /** v1 `sculptBrush` for brush tool: `smooth` | `plateau` (FBM peak / noise / ramp are separate modes). */
+    raiseLowerStamp: V2_CONFIG.sculpt.defaultRaiseLowerStamp,
     brush: {
       radius: V2_CONFIG.sculpt.defaultRadius,
       strength: V2_CONFIG.sculpt.defaultStrength,
@@ -11,6 +13,12 @@ export function createToolState() {
       spacingFactor: V2_CONFIG.sculpt.spacingFactor,
       previewShape: V2_CONFIG.sculpt.previewShape,
     },
+    noiseBrush: {
+      noiseScale: V2_CONFIG.sculpt.noiseScale,
+      noiseOctaves: V2_CONFIG.sculpt.noiseOctaves,
+    },
+    ramp: { ...V2_CONFIG.sculpt.ramp },
+    erosion: { ...V2_CONFIG.sculpt.erosion },
     fbmPeak: { ...V2_CONFIG.sculpt.fbmPeak },
     gen: { ...V2_CONFIG.sculpt.gen },
     terrain: {

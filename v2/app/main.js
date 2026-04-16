@@ -215,6 +215,7 @@ export async function startV2App() {
     onCsmEnabledChange: setCsmEnabled,
     onFogChange: syncFog,
     onGenerateProceduralTerrain: () => sculptSystem.applyProceduralTerrainAllChunks(),
+    onRampCleared: () => syncRampMarker(),
   });
 
   /** Engine-style brush preview: translucent hemisphere + edge lines, aligned to surface normal. */
@@ -260,6 +261,16 @@ export async function startV2App() {
   brushRing.material.fog = false;
   brushRing.renderOrder = 5;
   scene.add(brushRing);
+
+  const rampMarkerA = new THREE.Mesh(
+    new THREE.TorusGeometry(1, 0.045, 8, 64),
+    new THREE.MeshBasicMaterial({ color: 0xcc66ff }),
+  );
+  rampMarkerA.rotation.x = Math.PI * 0.5;
+  rampMarkerA.visible = false;
+  rampMarkerA.material.fog = false;
+  rampMarkerA.renderOrder = 5;
+  scene.add(rampMarkerA);
 
   /** Hemisphere: pole +Y; torus (`TorusGeometry`): ring in XY, symmetry axis +Z. */
   const _brushY = new THREE.Vector3(0, 1, 0);
@@ -327,10 +338,26 @@ export async function startV2App() {
     return brushPick;
   }
 
+  function syncRampMarker() {
+    if (
+      toolState.mode !== "sculpt" ||
+      toolState.sculptMode !== "ramp" ||
+      !sculptSystem.hasRampPointA()
+    ) {
+      rampMarkerA.visible = false;
+      return;
+    }
+    const a = sculptSystem.rampPointA;
+    rampMarkerA.visible = true;
+    rampMarkerA.position.set(a.x, a.y + 0.04, a.z);
+    rampMarkerA.scale.setScalar(toolState.brush.radius);
+  }
+
   function updateBrushPreviewFromPick(hit) {
     if (!hit || toolState.mode !== "sculpt") {
       brushPreview.visible = false;
       brushRing.visible = false;
+      syncRampMarker();
       return;
     }
     const r = toolState.brush.radius;
@@ -342,6 +369,7 @@ export async function startV2App() {
       brushRing.scale.setScalar(r);
       brushRing.position.copy(hit.point).addScaledVector(hit.normal, nudge);
       brushRing.quaternion.setFromUnitVectors(_brushZ, hit.normal);
+      syncRampMarker();
       return;
     }
     brushRing.visible = false;
@@ -349,6 +377,7 @@ export async function startV2App() {
     brushPreview.scale.setScalar(r);
     brushPreview.position.copy(hit.point).addScaledVector(hit.normal, nudge);
     brushPreview.quaternion.setFromUnitVectors(_brushY, hit.normal);
+    syncRampMarker();
   }
 
   function updateBrushPreview(event) {
@@ -358,6 +387,17 @@ export async function startV2App() {
   renderer.domElement.addEventListener("pointerdown", (event) => {
     if (event.button !== 0 || toolState.mode !== "sculpt") return;
     const hit = pickTerrain(event);
+    if (toolState.sculptMode === "ramp") {
+      if (!hit) return;
+      event.preventDefault();
+      if (!sculptSystem.hasRampPointA()) {
+        sculptSystem.setRampPointA(hit.point);
+      } else {
+        sculptSystem.commitRampSecondClick(hit.point);
+      }
+      syncRampMarker();
+      return;
+    }
     if (!hit) return;
     event.preventDefault();
     pointerDown = true;
@@ -415,6 +455,15 @@ export async function startV2App() {
     } else if (ctrl && event.code === "KeyY") {
       event.preventDefault();
       sculptSystem.redo();
+    } else if (
+      event.code === "KeyR" &&
+      toolState.mode === "sculpt" &&
+      toolState.sculptMode === "ramp" &&
+      sculptSystem.hasRampPointA()
+    ) {
+      event.preventDefault();
+      sculptSystem.clearRampPoint();
+      syncRampMarker();
     }
   });
 
@@ -503,6 +552,8 @@ export async function startV2App() {
       brushDomeLineMat.dispose();
       brushRing.geometry.dispose();
       brushRing.material.dispose();
+      rampMarkerA.geometry.dispose();
+      rampMarkerA.material.dispose();
       controls.dispose();
       renderer.dispose();
     },

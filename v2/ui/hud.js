@@ -11,6 +11,10 @@ export function createHud() {
         `mode: ${toolState.mode} (${toolState.sculptMode})`,
         `brush radius=${toolState.brush.radius.toFixed(1)} strength=${toolState.brush.strength.toFixed(2)} shape=${toolState.brush.falloff.toFixed(2)}`,
         `LMB raise · Shift+LMB lower · Ctrl+LMB smooth · Alt+LMB flatten`,
+        `Raise/lower: Smooth = Shape falloff · Plateau = v1 flat inner 60% ring (ignores Shape)`,
+        `Noise stamp: Shift+LMB = lower brush (v1); radial falloff is (1-r)^2, not Shape slider`,
+        `Ramp: A/B LMB · R clears A · strength/2.5 blend · Ramp shape: edge + grade curve (see pane)`,
+        `Erosion stamp: v1 hydraulic droplets · Brush strength scales droplet count (~90 at default)`,
         `wheel: Shift = radius, Alt = strength`,
         `undo=${sculptSystem.undoStack.length} redo=${sculptSystem.redoStack.length}`,
       ];

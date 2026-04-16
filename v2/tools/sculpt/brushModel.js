@@ -14,6 +14,13 @@ export function resolveSculptStrokeMode(toolState, pointerEvent = {}) {
   if (pointerEvent.ctrlKey || pointerEvent.metaKey) {
     return { mode: "smooth" };
   }
+  if (toolState.sculptMode === "erosion") {
+    return { mode: "erosion" };
+  }
+  // v1: Shift + noise (or terrace) uses raise/lower at -1 instead of the noise stamp.
+  if (toolState.sculptMode === "noise" && pointerEvent.shiftKey) {
+    return { mode: "raiseLower" };
+  }
   if (toolState.sculptMode === "noise") {
     return { mode: "noise" };
   }
@@ -30,16 +37,23 @@ export function createBrushStrokeFromHit({
 }) {
   const radius = toolState.brush.radius;
   const strength = toolState.brush.strength;
-  const useSessionSeed = toolState.sculptMode === "fbmPeak";
+  const useSessionSeed =
+    toolState.sculptMode === "fbmPeak" || toolState.sculptMode === "noise";
   const { mode: resolvedMode } = resolveSculptStrokeMode(toolState, pointerEvent);
+  let strokeSign = sign;
+  if (resolvedMode === "raiseLower" && toolState.sculptMode === "noise" && pointerEvent.shiftKey) {
+    strokeSign = -1;
+  }
   return {
     mode: resolvedMode,
-    sign,
+    sign: strokeSign,
     cx: hitPoint.x,
     cz: hitPoint.z,
     radius,
     strength,
     falloff: toolState.brush.falloff,
+    raiseLowerStamp:
+      resolvedMode === "raiseLower" ? toolState.raiseLowerStamp ?? "smooth" : "smooth",
     flattenTargetY,
     seed: useSessionSeed ? (sessionBrushSeed ?? 0) : Math.random() * 10000,
     minX: hitPoint.x - radius,
@@ -48,6 +62,12 @@ export function createBrushStrokeFromHit({
     maxZ: hitPoint.z + radius,
     ...(toolState.sculptMode === "fbmPeak"
       ? { fbmPeak: { ...toolState.fbmPeak } }
+      : {}),
+    ...(toolState.sculptMode === "noise"
+      ? {
+          noiseScale: toolState.noiseBrush.noiseScale,
+          noiseOctaves: toolState.noiseBrush.noiseOctaves,
+        }
       : {}),
   };
 }

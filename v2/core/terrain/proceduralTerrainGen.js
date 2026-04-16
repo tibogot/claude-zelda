@@ -86,16 +86,34 @@ export function terrainGenHeightAtWorld(wx, wz, g, worldSize) {
 
   const dx = (nx - cx0) * 2;
   const dz = (nz - cz0) * 2;
-  let r;
-  if (g.dropoffShape === "box") {
-    r = Math.max(Math.abs(dx), Math.abs(dz));
-  } else if (g.dropoffShape === "noise") {
+  const rCircle = Math.sqrt(dx * dx + dz * dz);
+  const rBox = Math.max(Math.abs(dx), Math.abs(dz));
+
+  /** Circle / box / noise: high in center → `1 - r^drop`. Ring variants: high at edges → `t^drop`, t = normalized distance from center. */
+  let falloff;
+  const shape = g.dropoffShape;
+  if (shape === "ring") {
+    const rCap = Math.SQRT2;
+    const t = Math.min(1, Math.max(0, rCircle / rCap));
+    falloff = Math.pow(t, drop);
+  } else if (shape === "invertedBox") {
+    const t = Math.min(1, Math.max(0, rBox));
+    falloff = Math.pow(t, drop);
+  } else if (shape === "noiseRing") {
     const nr = genFbm(nx * 3.1 + seed + 7.3, nz * 3.1 + seed + 12.1, 3) * 0.45;
-    r = Math.sqrt(dx * dx + dz * dz) - nr;
+    const r = rCircle + nr;
+    const rCap = Math.SQRT2 + 0.55;
+    const t = Math.min(1, Math.max(0, r / rCap));
+    falloff = Math.pow(t, drop);
+  } else if (shape === "box") {
+    falloff = Math.max(0, 1 - Math.pow(Math.max(0, rBox), drop));
+  } else if (shape === "noise") {
+    const nr = genFbm(nx * 3.1 + seed + 7.3, nz * 3.1 + seed + 12.1, 3) * 0.45;
+    const r = rCircle - nr;
+    falloff = Math.max(0, 1 - Math.pow(Math.max(0, r), drop));
   } else {
-    r = Math.sqrt(dx * dx + dz * dz);
+    falloff = Math.max(0, 1 - Math.pow(Math.max(0, rCircle), drop));
   }
-  const falloff = Math.max(0, 1 - Math.pow(Math.max(0, r), drop));
 
   const tilt = g.tiltX * (nx - 0.5) * 2 + g.tiltZ * (nz - 0.5) * 2;
 

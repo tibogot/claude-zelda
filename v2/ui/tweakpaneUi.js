@@ -11,6 +11,7 @@ export function createTweakpaneUi({
   onCsmEnabledChange,
   onFogChange,
   onGenerateProceduralTerrain,
+  onRampCleared,
 }) {
   const pane = new Pane({ title: "V2 Terrain Core" });
 
@@ -291,20 +292,147 @@ export function createTweakpaneUi({
     .on("change", onFogChange);
 
   const sculptFolder = pane.addFolder({ title: "Sculpt" });
-  sculptFolder.addBinding(toolState, "sculptMode", {
-    label: "Stamp",
+  sculptFolder
+    .addBinding(toolState, "sculptMode", {
+      label: "Stamp",
+      options: {
+        "Brush (smooth)": "raiseLower",
+        "FBM peak": "fbmPeak",
+        Noise: "noise",
+        "Flatten only": "flatten",
+        Ramp: "ramp",
+        Erosion: "erosion",
+      },
+    })
+    .on("change", () => {
+      sculptSystem.clearRampPoint();
+      onRampCleared?.();
+    });
+  sculptFolder.addBinding(toolState, "raiseLowerStamp", {
+    label: "Raise/lower stamp",
     options: {
-      "Brush (smooth)": "raiseLower",
-      "FBM peak": "fbmPeak",
-      Noise: "noise",
-      "Flatten only": "flatten",
+      Smooth: "smooth",
+      Plateau: "plateau",
     },
+  });
+  sculptFolder.addButton({ title: "Clear ramp start (R)" }).on("click", () => {
+    sculptSystem.clearRampPoint();
+    onRampCleared?.();
+  });
+  sculptFolder.addBlade({ view: "separator" });
+  const enforceSculptClampGap = () => {
+    const minV = config.sculpt.sculptClampMin;
+    const maxV = config.sculpt.sculptClampMax;
+    if (maxV < minV + 10) config.sculpt.sculptClampMax = minV + 10;
+    if (minV > config.sculpt.sculptClampMax - 10) {
+      config.sculpt.sculptClampMin = config.sculpt.sculptClampMax - 10;
+    }
+  };
+  sculptFolder
+    .addBinding(config.sculpt, "sculptClampMax", {
+      label: "Max height (clamp)",
+      min: 40,
+      max: 4000,
+      step: 10,
+    })
+    .on("change", () => {
+      enforceSculptClampGap();
+      pane.refresh();
+      onConfigChanged?.();
+    });
+  sculptFolder
+    .addBinding(config.sculpt, "sculptClampMin", {
+      label: "Min height (floor)",
+      min: -800,
+      max: 3990,
+      step: 5,
+    })
+    .on("change", () => {
+      enforceSculptClampGap();
+      pane.refresh();
+      onConfigChanged?.();
+    });
+  const rampShapeFolder = sculptFolder.addFolder({
+    title: "Ramp shape",
+    expanded: false,
+  });
+  rampShapeFolder.addBinding(toolState.ramp, "crossExponent", {
+    label: "Corridor edge",
+    min: 0.5,
+    max: 10,
+    step: 0.05,
+    hint: "Lower = wider flat strip; higher = steep sides (v1 = 2).",
+  });
+  rampShapeFolder.addBinding(toolState.ramp, "alongExponent", {
+    label: "Grade curve",
+    min: 0.25,
+    max: 4,
+    step: 0.05,
+    hint: "1 = linear; >1 = flat start / steep end; <1 = steep start / flat end.",
   });
   sculptFolder.addBinding(toolState.brush, "spacingFactor", {
     min: 0.05,
     max: 1.0,
     step: 0.01,
     label: "Stroke spacing",
+  });
+
+  const noiseBrushFolder = sculptFolder.addFolder({
+    title: "Noise stamp",
+    expanded: false,
+  });
+  noiseBrushFolder.addBinding(toolState.noiseBrush, "noiseScale", {
+    label: "Noise scale",
+    min: 0.3,
+    max: 10,
+    step: 0.1,
+  });
+  noiseBrushFolder.addBinding(toolState.noiseBrush, "noiseOctaves", {
+    label: "Noise octaves",
+    min: 1,
+    max: 8,
+    step: 1,
+  });
+
+  const erosionBrushFolder = sculptFolder.addFolder({
+    title: "Erosion brush",
+    expanded: false,
+  });
+  erosionBrushFolder.addBinding(toolState.erosion, "erosionRate", {
+    label: "Erode rate",
+    min: 0.01,
+    max: 1,
+    step: 0.01,
+  });
+  erosionBrushFolder.addBinding(toolState.erosion, "depositionRate", {
+    label: "Deposit rate",
+    min: 0.01,
+    max: 1,
+    step: 0.01,
+  });
+  erosionBrushFolder.addBinding(toolState.erosion, "evaporation", {
+    label: "Evaporation",
+    min: 0,
+    max: 0.1,
+    step: 0.001,
+  });
+  erosionBrushFolder.addBinding(toolState.erosion, "inertia", {
+    label: "Inertia",
+    min: 0,
+    max: 1,
+    step: 0.01,
+  });
+  erosionBrushFolder.addBinding(toolState.erosion, "capacity", {
+    label: "Capacity",
+    min: 0.5,
+    max: 20,
+    step: 0.5,
+  });
+  erosionBrushFolder.addBinding(toolState.erosion, "radius", {
+    label: "Kernel (grid)",
+    min: 0.5,
+    max: 12,
+    step: 0.5,
   });
 
   const fbmPeakFolder = sculptFolder.addFolder({
@@ -394,8 +522,11 @@ export function createTweakpaneUi({
     label: "Edge shape",
     options: {
       Circle: "circle",
+      "Ring (mountains at edge)": "ring",
       "Box (fills terrain)": "box",
+      "Box ring (edges up)": "invertedBox",
       "Organic (noise edge)": "noise",
+      "Organic ring (edges up)": "noiseRing",
     },
   });
   genFolder.addBinding(toolState.gen, "dropoff", {

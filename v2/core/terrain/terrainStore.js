@@ -10,6 +10,7 @@ import {
   worldToChunkIndex,
 } from "./chunkMath.js";
 import { terrainGenHeightAtWorld } from "./proceduralTerrainGen.js";
+import { sculptFbm } from "./sculptNoiseFbm.js";
 
 export class TerrainStore {
   constructor(config) {
@@ -174,7 +175,16 @@ export class TerrainStore {
             const t = 1 - dist * invR;
             if (t <= 0) continue;
             let falloff = 1;
-            if (stroke.mode !== "fbmPeak") {
+            if (stroke.mode === "noise") {
+              // v1 `applyNoiseAt`: (1 - dist/r)^2, independent of brush falloff slider.
+              falloff = t * t;
+            } else if (stroke.mode === "raiseLower" && stroke.raiseLowerStamp === "plateau") {
+              // v1 `applyRaiseLowerAt` + `brush === "plateau"`: td = dist/r, flat mesa, ×0.7 (ignores Shape slider).
+              const td = dist * invR;
+              const flat = Math.max(0, 1 - Math.pow(Math.max(0, td - 0.6) / 0.4, 2));
+              falloff = flat * 0.7;
+              if (falloff <= 0) continue;
+            } else if (stroke.mode !== "fbmPeak") {
               falloff = Math.pow(t, stroke.falloff);
               if (falloff <= 0) continue;
             }
@@ -227,8 +237,17 @@ export class TerrainStore {
             } else if (stroke.mode === "flatten") {
               next = current + (stroke.flattenTargetY - current) * (falloff * stroke.strength);
             } else if (stroke.mode === "noise") {
-              const n = hashNoise(wx * 0.11 + stroke.seed, wz * 0.11 - stroke.seed) * 2 - 1;
-              next = current + n * stroke.strength * falloff;
+              // v1 `applyNoiseAt`: freq = noiseScale / radius, FBM octaves, delta = (fbm-0.5)*falloff*strength*4
+              const freq = (stroke.noiseScale ?? 2.5) / Math.max(r, 1e-6);
+              const oct = THREE.MathUtils.clamp(Math.round(stroke.noiseOctaves ?? 2), 1, 8);
+              const n =
+                sculptFbm(
+                  wx * freq + stroke.seed,
+                  wz * freq + stroke.seed * 1.3,
+                  oct,
+                ) - 0.5;
+              const delta = n * falloff * stroke.strength * 4;
+              next = current + delta;
             } else if (stroke.mode === "smooth") {
               const avg = this.sampleNeighborhood(wx, wz, step * 1.4);
               next = current + (avg - current) * (falloff * stroke.strength);
@@ -390,6 +409,116 @@ export class TerrainStore {
         this.ensureChunkData(x, z);
       }
     }
+  }
+
+  /**
+   * Two-point height ramp — `splatmap-chunks.html` `applyRampAt`.
+   * @param {{x:number,y:number,z:number}} ptA
+   * @param {{x:number,y:number,z:number}} ptB
+   * @param {number} radius — brush radius (corridor half-width in XZ)
+   * @param {number} strength — v1 uses `PARAMS.brushStrength / 100`; pass same order (~0.02–1)
+   * @param {{ crossExponent?: number, alongExponent?: number }} [rampOpts]
+   * @returns {Set<string>} touched chunk keys
+   */
+  applyRampStroke(ptA, ptB, radius, strength, rampOpts = {}) {
+    const dx = ptB.x - ptA.x;
+    const dz = ptB.z - ptA.z;
+    const lenSq = dx * dx + dz * dz;
+    const touched = new Set();
+    if (lenSq < 0.001) return touched;
+
+    const crossExp = THREE.MathUtils.clamp(Number(rampOpts.crossExponent) || 2, 0.5, 12);
+    const alongExp = THREE.MathUtils.clamp(Number(rampOpts.alongExponent) || 1, 0.2, 6);
+
+    const radiusSq = radius * radius;
+    const res = this.config.world.dataResolution;
+    const stride = res + 1;
+    const step = this.config.world.chunkSize / res;
+    const cs = this.config.world.chunkSize;
+    const cminH = this.config.sculpt.sculptClampMin;
+    const cmaxH = this.config.sculpt.sculptClampMax;
+    const worldHalfV = this.config.world.size * 0.5;
+    const maxC = getChunkCountPerAxis(this.config) - 1;
+
+    const minWX = Math.min(ptA.x, ptB.x) - radius;
+    const maxWX = Math.max(ptA.x, ptB.x) + radius;
+    const minWZ = Math.min(ptA.z, ptB.z) - radius;
+    const maxWZ = Math.max(ptA.z, ptB.z) + radius;
+
+    const minCX = THREE.MathUtils.clamp(Math.floor((minWX + worldHalfV) / cs), 0, maxC);
+    const maxCX = THREE.MathUtils.clamp(Math.floor((maxWX + worldHalfV) / cs), 0, maxC);
+    const minCZ = THREE.MathUtils.clamp(Math.floor((minWZ + worldHalfV) / cs), 0, maxC);
+    const maxCZ = THREE.MathUtils.clamp(Math.floor((maxWZ + worldHalfV) / cs), 0, maxC);
+
+    for (let cz = minCZ; cz <= maxCZ; cz++) {
+      for (let cx = minCX; cx <= maxCX; cx++) {
+        const heights = this.ensureChunkData(cx, cz);
+        const chunkMinX = chunkMinWorldX(cx, this.config);
+        const chunkMinZ = chunkMinWorldZ(cz, this.config);
+        let changed = false;
+
+        for (let iz = 0; iz <= res; iz++) {
+          const wz = chunkMinZ + iz * step;
+          for (let ix = 0; ix <= res; ix++) {
+            const wx = chunkMinX + ix * step;
+            const t = THREE.MathUtils.clamp(
+              ((wx - ptA.x) * dx + (wz - ptA.z) * dz) / lenSq,
+              0,
+              1,
+            );
+            const perpX = ptA.x + t * dx - wx;
+            const perpZ = ptA.z + t * dz - wz;
+            const perpSq = perpX * perpX + perpZ * perpZ;
+            if (perpSq > radiusSq) continue;
+            const u = Math.sqrt(perpSq) / radius;
+            const falloff = Math.pow(Math.max(0, 1 - u), crossExp);
+            const tH = Math.pow(t, alongExp);
+            const targetY = ptA.y + tH * (ptB.y - ptA.y);
+            const idx = iz * stride + ix;
+            const current = heights[idx];
+            const next = THREE.MathUtils.clamp(
+              current + (targetY - current) * falloff * strength,
+              cminH,
+              cmaxH,
+            );
+            heights[idx] = next;
+            changed = true;
+          }
+        }
+
+        if (changed) {
+          touched.add(chunkKey(cx, cz));
+        }
+      }
+    }
+
+    this.syncChunkEdgesAround(touched);
+    return touched;
+  }
+
+  /** Chunk keys overlapping the ramp corridor AABB (for undo snapshots). */
+  getChunkKeysInRampBounds(ptA, ptB, radius) {
+    const keys = new Set();
+    const dx = ptB.x - ptA.x;
+    const dz = ptB.z - ptA.z;
+    if (dx * dx + dz * dz < 0.001) return keys;
+    const cs = this.config.world.chunkSize;
+    const worldHalfV = this.config.world.size * 0.5;
+    const maxC = getChunkCountPerAxis(this.config) - 1;
+    const minWX = Math.min(ptA.x, ptB.x) - radius;
+    const maxWX = Math.max(ptA.x, ptB.x) + radius;
+    const minWZ = Math.min(ptA.z, ptB.z) - radius;
+    const maxWZ = Math.max(ptA.z, ptB.z) + radius;
+    const minCX = THREE.MathUtils.clamp(Math.floor((minWX + worldHalfV) / cs), 0, maxC);
+    const maxCX = THREE.MathUtils.clamp(Math.floor((maxWX + worldHalfV) / cs), 0, maxC);
+    const minCZ = THREE.MathUtils.clamp(Math.floor((minWZ + worldHalfV) / cs), 0, maxC);
+    const maxCZ = THREE.MathUtils.clamp(Math.floor((maxWZ + worldHalfV) / cs), 0, maxC);
+    for (let cz = minCZ; cz <= maxCZ; cz++) {
+      for (let cx = minCX; cx <= maxCX; cx++) {
+        keys.add(chunkKey(cx, cz));
+      }
+    }
+    return keys;
   }
 
   /**

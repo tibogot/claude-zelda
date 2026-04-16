@@ -1,6 +1,10 @@
 import * as THREE from "three";
 import { createBrushStrokeFromHit, shouldApplyStroke, worldBrushBounds } from "./brushModel.js";
 import { chunkKey, getChunkCountPerAxis, parseChunkKey } from "../../core/terrain/chunkMath.js";
+import {
+  applyErosionBrushToTerrain,
+  erosionSnapshotMarginWorld,
+} from "../../core/terrain/erosionBrush.js";
 
 export class SculptSystem {
   constructor({ toolState, terrainStore, chunkStream }) {
@@ -17,6 +21,62 @@ export class SculptSystem {
     this.redoStack = [];
     /** Matches splatmap-chunks `sculptBrushNoiseSeed` — stable for whole LMB drag. */
     this.sessionBrushSeed = 0;
+    /** v1 `editState.rampPointA` — first click when `sculptMode === "ramp"`. */
+    this.rampPointA = null;
+  }
+
+  clearRampPoint() {
+    this.rampPointA = null;
+  }
+
+  hasRampPointA() {
+    return this.rampPointA != null;
+  }
+
+  /**
+   * First LMB in ramp mode — stores A with terrain height at (x,z).
+   * @param {THREE.Vector3} hitPoint
+   */
+  setRampPointA(hitPoint) {
+    const y = this.terrainStore.getWorldHeight(hitPoint.x, hitPoint.z);
+    this.rampPointA = { x: hitPoint.x, y, z: hitPoint.z };
+  }
+
+  /**
+   * Second LMB — v1 `applyRampAt` + undo. Clears ramp A after success.
+   * @param {THREE.Vector3} hitPoint
+   */
+  commitRampSecondClick(hitPoint) {
+    if (!this.rampPointA) return;
+    const ptA = this.rampPointA;
+    const ptB = {
+      x: hitPoint.x,
+      y: this.terrainStore.getWorldHeight(hitPoint.x, hitPoint.z),
+      z: hitPoint.z,
+    };
+    const radius = this.toolState.brush.radius;
+    const strength = THREE.MathUtils.clamp(this.toolState.brush.strength / 2.5, 0.02, 1);
+
+    const keys = this.terrainStore.getChunkKeysInRampBounds(ptA, ptB, radius);
+    const before = new Map();
+    for (const key of keys) {
+      const { cx, cz } = parseChunkKey(key);
+      before.set(key, new Float32Array(this.terrainStore.ensureChunkData(cx, cz)));
+    }
+
+    const touched = this.terrainStore.applyRampStroke(ptA, ptB, radius, strength, this.toolState.ramp);
+    if (touched.size === 0) return;
+
+    const after = new Map();
+    for (const key of touched) {
+      const arr = this.terrainStore.getChunkHeightsByKey(key);
+      if (arr) after.set(key, new Float32Array(arr));
+    }
+    this.undoStack.push({ before, after });
+    this.redoStack.length = 0;
+    if (this.undoStack.length > 64) this.undoStack.shift();
+    this.chunkStream.markDirtyFull(touched);
+    this.rampPointA = null;
   }
 
   /**
@@ -60,6 +120,41 @@ export class SculptSystem {
       sessionBrushSeed: this.sessionBrushSeed,
       pointerEvent: event,
     });
+
+    if (stroke.mode === "erosion") {
+      const margin = erosionSnapshotMarginWorld(
+        this.terrainStore.config,
+        stroke.radius,
+        this.toolState.erosion.radius,
+      );
+      const keys = this.chunkStream.getChunkKeysInBrushBounds(
+        hitPoint.x - margin,
+        hitPoint.z - margin,
+        hitPoint.x + margin,
+        hitPoint.z + margin,
+      );
+      for (const key of keys) {
+        if (!this.beforeMap.has(key)) {
+          let current = this.terrainStore.getChunkHeightsByKey(key);
+          if (!current) {
+            const { cx, cz } = parseChunkKey(key);
+            current = this.terrainStore.ensureChunkData(cx, cz);
+          }
+          this.beforeMap.set(key, new Float32Array(current));
+        }
+      }
+      const touched = applyErosionBrushToTerrain(
+        this.terrainStore,
+        hitPoint,
+        stroke.radius,
+        stroke.strength,
+        this.toolState.erosion,
+      );
+      this.terrainStore.syncChunkEdgesAround(touched);
+      this.chunkStream.markDirtyFull(touched);
+      return;
+    }
+
     const touchedKeys = this.chunkStream.getChunkKeysInBrushBounds(
       stroke.minX,
       stroke.minZ,

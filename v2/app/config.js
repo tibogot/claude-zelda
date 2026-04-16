@@ -38,9 +38,33 @@ export const V2_CONFIG = {
     defaultRadius: 28,
     defaultStrength: 0.55,
     defaultFalloff: 1.8,
+    /** v1 `PARAMS.sculptBrush` for raise/lower only: `smooth` uses Shape slider; `plateau` is fixed v1 mesa falloff. */
+    defaultRaiseLowerStamp: "smooth",
     spacingFactor: 0.22,
+    /** v1 `PARAMS.noiseScale` / `noiseOctaves` — sculpt noise brush FBM. */
+    noiseScale: 2.5,
+    noiseOctaves: 2,
     /** Viewport brush cursor: `"dome"` (hemisphere + edges) or `"circle"` (flat ring). */
     previewShape: "dome",
+    /**
+     * Two-point ramp shaping (v1 used fixed cross falloff ^2 and linear height).
+     * - crossExponent: power on (1 - dist_perp/r); lower ≈ wider “flat” corridor, higher ≈ sharp sides.
+     * - alongExponent: power on t along A→B for height only; >1 = gentler start / steeper finish, <1 opposite.
+     */
+    ramp: {
+      crossExponent: 2,
+      alongExponent: 1,
+    },
+    /** v1 `PARAMS.erosion` — hydraulic brush + future global pass (`iterations` unused by brush). */
+    erosion: {
+      iterations: 30000,
+      erosionRate: 0.3,
+      depositionRate: 0.3,
+      evaporation: 0.015,
+      inertia: 0.1,
+      capacity: 6,
+      radius: 3,
+    },
     /** Same idea as `splatmap-chunks.html` PARAMS.sculptClamp* — not the initial noise range. */
     sculptClampMin: -200,
     sculptClampMax: 2000,
