@@ -9,8 +9,13 @@ function deepCloneJson(x) {
 export function createToolState() {
   return {
     mode: "sculpt",
-    /** `tile` = grid material; `tsl` = shared v1 painter ground + meadow stacks (see `proceduralGroundMaterial.js`). */
+    /** `tile` = grid material; `tsl` = procedural TSL; `image` = tiled image-slot material. */
     terrainSurface: "tile",
+    /** Texture-library slot ids picked by the surface modes that use slots. */
+    textureSlots: {
+      cliffSlotId: "cliff_rock",
+      groundSlotId: "grass_005",
+    },
     groundTsl: deepCloneJson(GROUND_DEFAULT_PARAMS),
     meadowTsl: deepCloneJson(MEADOW_DEFAULT_PARAMS),
     tslGroundUi: {

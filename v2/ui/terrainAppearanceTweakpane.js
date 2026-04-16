@@ -56,7 +56,18 @@ function addNoiseLayerFolder(parent, layer, label, onSync) {
   );
 }
 
-export function addTerrainAppearanceFolder(pane, toolState, { onTerrainSurfaceChanged, onTslTerrainSync, onAutoCliffChanged }) {
+export function addTerrainAppearanceFolder(
+  pane,
+  toolState,
+  {
+    textureLibrary,
+    onTerrainSurfaceChanged,
+    onTslTerrainSync,
+    onAutoCliffChanged,
+    onCliffSlotChanged,
+    onGroundSlotChanged,
+  },
+) {
   const sync = () => onTslTerrainSync?.();
 
   const terrainFolder = pane.addFolder({ title: "Terrain appearance", expanded: true });
@@ -66,11 +77,22 @@ export function addTerrainAppearanceFolder(pane, toolState, { onTerrainSurfaceCh
       options: {
         "Tile grid (debug)": "tile",
         "Procedural TSL (v1)": "tsl",
+        "Image texture": "image",
       },
     })
     .on("change", () => {
       onTerrainSurfaceChanged?.();
     });
+
+  if (textureLibrary) {
+    const slotOptions = textureLibrary.getSlotOptionsForUi();
+    terrainFolder
+      .addBinding(toolState.textureSlots, "groundSlotId", {
+        label: "Ground texture",
+        options: slotOptions,
+      })
+      .on("change", () => onGroundSlotChanged?.());
+  }
 
   const tslBlend = terrainFolder.addFolder({ title: "TSL — slope meadow blend", expanded: false });
   tslBlend
@@ -120,6 +142,14 @@ export function addTerrainAppearanceFolder(pane, toolState, { onTerrainSurfaceCh
   const cliffSync = () => onAutoCliffChanged?.("uniform");
   const cliffFolder = terrainFolder.addFolder({ title: "Auto cliff on steep slopes", expanded: false });
   cliffFolder.addBinding(toolState, "autoCliffEnabled", { label: "Enabled" }).on("change", () => onAutoCliffChanged?.("toggle"));
+  if (textureLibrary) {
+    cliffFolder
+      .addBinding(toolState.textureSlots, "cliffSlotId", {
+        label: "Cliff texture",
+        options: textureLibrary.getSlotOptionsForUi(),
+      })
+      .on("change", () => onCliffSlotChanged?.());
+  }
   cliffFolder.addBinding(toolState.autoCliff, "slopeStart", { label: "Slope start (flat→cliff)", min: 0.1, max: 1, step: 0.01 }).on("change", cliffSync);
   cliffFolder.addBinding(toolState.autoCliff, "slopeEnd", { label: "Slope end", min: 0.1, max: 1, step: 0.01 }).on("change", cliffSync);
   cliffFolder.addBinding(toolState.autoCliff, "rockScale", { label: "Rock scale", min: 0.001, max: 0.1, step: 0.001 }).on("change", cliffSync);

@@ -21,10 +21,9 @@ import { SculptSystem } from "../tools/sculpt/sculptSystem.js";
 import { createTweakpaneUi } from "../ui/tweakpaneUi.js";
 import { createHud } from "../ui/hud.js";
 import { createLensFlareSystem } from "../effects/lensFlare.js";
-import {
-  loadRock028Textures,
-  createAutoCliffUniforms,
-} from "../../chunkTerrainAutoCliff.js";
+import { createAutoCliffUniforms } from "../../chunkTerrainAutoCliff.js";
+import { createTextureLibrary } from "../core/textures/textureLibrary.js";
+import { createV2ImageTexGroundMaterial } from "../render/terrain/sharedImgTexMaterial.js";
 
 export async function startV2App() {
   const config = structuredClone(V2_CONFIG);
@@ -227,17 +226,21 @@ export async function startV2App() {
   let lastHeightTexSyncMs = 0;
 
   const cliffU = createAutoCliffUniforms();
-  const rock028Textures = { colorTex: null, dataTex: null };
-  let rock028Ready = false;
 
-  loadRock028Textures()
-    .then(({ colorTex, dataTex }) => {
-      rock028Textures.colorTex = colorTex;
-      rock028Textures.dataTex = dataTex;
-      rock028Ready = true;
-      invalidateProceduralMaterial();
+  const textureLibrary = createTextureLibrary();
+  let textureLibraryReady = false;
+  textureLibrary
+    .loadDefaultsAsync()
+    .then(() => {
+      textureLibraryReady = true;
+      invalidateSurfaceMaterials();
     })
-    .catch((err) => console.warn("Auto cliff rock textures failed:", err));
+    .catch((err) => console.warn("TextureLibrary defaults failed:", err));
+  textureLibrary.addOnChange(({ kind }) => {
+    if (typeof kind === "string" && kind.startsWith("map:")) {
+      invalidateSurfaceMaterials();
+    }
+  });
 
   function syncCliffUniformsFromParams() {
     const ac = toolState.autoCliff;
@@ -254,13 +257,13 @@ export async function startV2App() {
   }
 
   function buildCliffDeps() {
-    if (!toolState.autoCliffEnabled || !rock028Ready || !rock028Textures.colorTex) {
-      return null;
-    }
+    if (!toolState.autoCliffEnabled || !textureLibraryReady) return null;
+    const slot = textureLibrary.getSlot(toolState.textureSlots.cliffSlotId);
+    if (!slot) return null;
     return {
       heightTex: globalHeightTex,
-      rockColorTex: rock028Textures.colorTex,
-      rockDataTex: rock028Textures.dataTex,
+      rockColorTex: slot.albedoTex,
+      rockDataTex: slot.ormTex,
       cliffU,
       worldSize: config.world.size,
       worldHalf: config.world.size * 0.5,
@@ -270,6 +273,7 @@ export async function startV2App() {
 
   const tileTerrainMaterial = createSharedTileMaterial();
   let proceduralTerrainBundle = null;
+  let imageTexTerrainBundle = null;
 
   const terrainMesher = new TerrainMesher(config);
   const chunkStream = new ChunkStreamManager({
@@ -281,14 +285,23 @@ export async function startV2App() {
     perf,
   });
 
-  function invalidateProceduralMaterial() {
+  function disposeProceduralBundle() {
     if (proceduralTerrainBundle) {
       proceduralTerrainBundle.material.dispose();
       proceduralTerrainBundle = null;
     }
-    if (toolState.terrainSurface === "tsl") {
-      applyTerrainSurfaceFromToolState();
+  }
+  function disposeImageTexBundle() {
+    if (imageTexTerrainBundle) {
+      imageTexTerrainBundle.material.dispose();
+      imageTexTerrainBundle = null;
     }
+  }
+  /** Rebuild whichever cliff-consuming material is live (cliff swap / auto-cliff toggle). */
+  function invalidateSurfaceMaterials() {
+    disposeProceduralBundle();
+    disposeImageTexBundle();
+    applyTerrainSurfaceFromToolState();
   }
 
   function getProceduralTerrainBundle() {
@@ -302,6 +315,19 @@ export async function startV2App() {
     return proceduralTerrainBundle;
   }
 
+  function getImageTexTerrainBundle() {
+    if (!imageTexTerrainBundle) {
+      syncCliffUniformsFromParams();
+      const groundSlot = textureLibrary.getSlot(toolState.textureSlots.groundSlotId);
+      imageTexTerrainBundle = createV2ImageTexGroundMaterial(
+        groundSlot,
+        config.world.size,
+        buildCliffDeps(),
+      );
+    }
+    return imageTexTerrainBundle;
+  }
+
   function syncProceduralTerrainTsl() {
     if (toolState.terrainSurface !== "tsl") return;
     const b = getProceduralTerrainBundle();
@@ -312,6 +338,8 @@ export async function startV2App() {
     if (toolState.terrainSurface === "tsl") {
       syncProceduralTerrainTsl();
       chunkStream.setSharedMaterial(getProceduralTerrainBundle().material);
+    } else if (toolState.terrainSurface === "image") {
+      chunkStream.setSharedMaterial(getImageTexTerrainBundle().material);
     } else {
       chunkStream.setSharedMaterial(tileTerrainMaterial);
     }
@@ -335,6 +363,7 @@ export async function startV2App() {
     config,
     sculptSystem,
     perf,
+    textureLibrary,
     onConfigChanged: () => {
       chunkStream.update(camera.position);
     },
@@ -353,7 +382,14 @@ export async function startV2App() {
     },
     onAutoCliffChanged: (kind) => {
       syncCliffUniformsFromParams();
-      if (kind === "toggle") invalidateProceduralMaterial();
+      if (kind === "toggle") invalidateSurfaceMaterials();
+    },
+    onCliffSlotChanged: () => {
+      invalidateSurfaceMaterials();
+    },
+    onGroundSlotChanged: () => {
+      disposeImageTexBundle();
+      if (toolState.terrainSurface === "image") applyTerrainSurfaceFromToolState();
     },
   });
 

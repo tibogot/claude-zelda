@@ -1,6 +1,7 @@
 import { Pane } from "tweakpane";
 import { V2_CONFIG } from "../app/config.js";
 import { addTerrainAppearanceFolder } from "./terrainAppearanceTweakpane.js";
+import { addTextureLibraryFolder } from "./textureLibraryTweakpane.js";
 
 export function createTweakpaneUi({
   toolState,
@@ -8,6 +9,7 @@ export function createTweakpaneUi({
   sculptSystem,
   onConfigChanged,
   perf,
+  textureLibrary,
   onRebuildSkyEnv,
   onCsmEnabledChange,
   onFogChange,
@@ -17,6 +19,8 @@ export function createTweakpaneUi({
   onTerrainSurfaceChanged,
   onTslTerrainSync,
   onAutoCliffChanged,
+  onCliffSlotChanged,
+  onGroundSlotChanged,
 }) {
   const pane = new Pane({ title: "V2 Terrain Core" });
 
@@ -31,10 +35,17 @@ export function createTweakpaneUi({
   globalFolder.addButton({ title: "Redo" }).on("click", () => sculptSystem.redo());
 
   addTerrainAppearanceFolder(pane, toolState, {
+    textureLibrary,
     onTerrainSurfaceChanged,
     onTslTerrainSync,
     onAutoCliffChanged,
+    onCliffSlotChanged,
+    onGroundSlotChanged,
   });
+
+  if (textureLibrary) {
+    addTextureLibraryFolder(pane, toolState, textureLibrary);
+  }
 
   /** Shared across sculpt, future paint, foliage, props — same as v1 brush UX. */
   const brushFolder = pane.addFolder({ title: "Brush" });
