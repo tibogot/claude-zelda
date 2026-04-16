@@ -15,6 +15,7 @@ export function createTweakpaneUi({
   onRampCleared,
   onTerrainSurfaceChanged,
   onTslTerrainSync,
+  onAutoCliffChanged,
 }) {
   const pane = new Pane({ title: "V2 Terrain Core" });
 
@@ -31,6 +32,7 @@ export function createTweakpaneUi({
   addTerrainAppearanceFolder(pane, toolState, {
     onTerrainSurfaceChanged,
     onTslTerrainSync,
+    onAutoCliffChanged,
   });
 
   /** Shared across sculpt, future paint, foliage, props — same as v1 brush UX. */

@@ -56,7 +56,7 @@ function addNoiseLayerFolder(parent, layer, label, onSync) {
   );
 }
 
-export function addTerrainAppearanceFolder(pane, toolState, { onTerrainSurfaceChanged, onTslTerrainSync }) {
+export function addTerrainAppearanceFolder(pane, toolState, { onTerrainSurfaceChanged, onTslTerrainSync, onAutoCliffChanged }) {
   const sync = () => onTslTerrainSync?.();
 
   const terrainFolder = pane.addFolder({ title: "Terrain appearance", expanded: true });
@@ -116,6 +116,20 @@ export function addTerrainAppearanceFolder(pane, toolState, { onTerrainSurfaceCh
     .on("change", sync);
   addNoiseLayerFolder(groundHdr, toolState.groundTsl.layer1, "Layer 1", sync);
   addNoiseLayerFolder(groundHdr, toolState.groundTsl.layer2, "Layer 2", sync);
+
+  const cliffSync = () => onAutoCliffChanged?.("uniform");
+  const cliffFolder = terrainFolder.addFolder({ title: "Auto cliff on steep slopes", expanded: false });
+  cliffFolder.addBinding(toolState, "autoCliffEnabled", { label: "Enabled" }).on("change", () => onAutoCliffChanged?.("toggle"));
+  cliffFolder.addBinding(toolState.autoCliff, "slopeStart", { label: "Slope start (flat→cliff)", min: 0.1, max: 1, step: 0.01 }).on("change", cliffSync);
+  cliffFolder.addBinding(toolState.autoCliff, "slopeEnd", { label: "Slope end", min: 0.1, max: 1, step: 0.01 }).on("change", cliffSync);
+  cliffFolder.addBinding(toolState.autoCliff, "rockScale", { label: "Rock scale", min: 0.001, max: 0.1, step: 0.001 }).on("change", cliffSync);
+  cliffFolder.addBinding(toolState.autoCliff, "rockBrightness", { label: "Rock brightness", min: 0.2, max: 4, step: 0.05 }).on("change", cliffSync);
+  cliffFolder.addBinding(toolState.autoCliff, "rockContrast", { label: "Rock contrast", min: 0.5, max: 2, step: 0.02 }).on("change", cliffSync);
+  cliffFolder.addBinding(toolState.autoCliff, "rockTint", { label: "Rock tint", view: "color" }).on("change", cliffSync);
+  cliffFolder.addBinding(toolState.autoCliff, "rockNormalStr", { label: "Normal strength", min: 0, max: 2, step: 0.05 }).on("change", cliffSync);
+  cliffFolder.addBinding(toolState.autoCliff, "rockBlendSharp", { label: "Blend sharpness", min: 0.2, max: 4, step: 0.05 }).on("change", cliffSync);
+  cliffFolder.addBinding(toolState.autoCliff, "rockRoughMul", { label: "Roughness mul", min: 0.2, max: 3, step: 0.05 }).on("change", cliffSync);
+  cliffFolder.addBinding(toolState.autoCliff, "triplanarSharp", { label: "Triplanar sharpness", min: 1, max: 12, step: 0.5 }).on("change", cliffSync);
 
   const meadowHdr = terrainFolder.addFolder({ title: "Meadow TSL (v1 stack)", expanded: false });
   meadowHdr

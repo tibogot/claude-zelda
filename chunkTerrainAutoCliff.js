@@ -57,7 +57,7 @@ function packNormalIntoDataTextureBA(dt, imgEl) {
 }
 
 const ROCK028_RES = 1024;
-const TEX_BASE = "textures/Rock028";
+const TEX_BASE = "/textures/Rock028";
 
 /**
  * @returns {Promise<{ colorTex: THREE.Texture, dataTex: THREE.DataTexture }>}

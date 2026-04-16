@@ -21,6 +21,10 @@ import { SculptSystem } from "../tools/sculpt/sculptSystem.js";
 import { createTweakpaneUi } from "../ui/tweakpaneUi.js";
 import { createHud } from "../ui/hud.js";
 import { createLensFlareSystem } from "../effects/lensFlare.js";
+import {
+  loadRock028Textures,
+  createAutoCliffUniforms,
+} from "../../chunkTerrainAutoCliff.js";
 
 export async function startV2App() {
   const config = structuredClone(V2_CONFIG);
@@ -187,8 +191,84 @@ export async function startV2App() {
   const terrainStore = new TerrainStore(config);
   terrainStore.preloadChunksInRadius(0, 0, 4);
 
+  const HTEX_RES = 512;
+  const globalHeightTexData = new Float32Array(HTEX_RES * HTEX_RES * 4);
+  const globalHeightTex = new THREE.DataTexture(
+    globalHeightTexData,
+    HTEX_RES,
+    HTEX_RES,
+    THREE.RGBAFormat,
+    THREE.FloatType,
+  );
+  globalHeightTex.wrapS = globalHeightTex.wrapT = THREE.ClampToEdgeWrapping;
+  globalHeightTex.minFilter = THREE.LinearFilter;
+  globalHeightTex.magFilter = THREE.LinearFilter;
+  globalHeightTex.needsUpdate = true;
+
+  function rebuildGlobalHeightTexture() {
+    const ws = config.world.size;
+    for (let iz = 0; iz < HTEX_RES; iz++) {
+      for (let ix = 0; ix < HTEX_RES; ix++) {
+        const wx = ws * ((ix + 0.5) / HTEX_RES - 0.5);
+        const wz = ws * ((iz + 0.5) / HTEX_RES - 0.5);
+        const h = terrainStore.getWorldHeight(wx, wz);
+        const i = (iz * HTEX_RES + ix) * 4;
+        globalHeightTexData[i] = h;
+        globalHeightTexData[i + 1] = 0;
+        globalHeightTexData[i + 2] = 0;
+        globalHeightTexData[i + 3] = 1;
+      }
+    }
+    globalHeightTex.needsUpdate = true;
+  }
+
+  rebuildGlobalHeightTexture();
+  let heightTexDirty = false;
+  let lastHeightTexSyncMs = 0;
+
+  const cliffU = createAutoCliffUniforms();
+  const rock028Textures = { colorTex: null, dataTex: null };
+  let rock028Ready = false;
+
+  loadRock028Textures()
+    .then(({ colorTex, dataTex }) => {
+      rock028Textures.colorTex = colorTex;
+      rock028Textures.dataTex = dataTex;
+      rock028Ready = true;
+      invalidateProceduralMaterial();
+    })
+    .catch((err) => console.warn("Auto cliff rock textures failed:", err));
+
+  function syncCliffUniformsFromParams() {
+    const ac = toolState.autoCliff;
+    cliffU.uSlopeStart.value = ac.slopeStart;
+    cliffU.uSlopeEnd.value = ac.slopeEnd;
+    cliffU.uRockScale.value = ac.rockScale;
+    cliffU.uRockBrightness.value = ac.rockBrightness;
+    cliffU.uRockContrast.value = ac.rockContrast;
+    cliffU.uRockTint.value.set(ac.rockTint).convertSRGBToLinear();
+    cliffU.uRockNormalStr.value = ac.rockNormalStr;
+    cliffU.uRockBlendSharp.value = ac.rockBlendSharp;
+    cliffU.uRockRoughMul.value = ac.rockRoughMul;
+    cliffU.uTriplanarSharp.value = ac.triplanarSharp;
+  }
+
+  function buildCliffDeps() {
+    if (!toolState.autoCliffEnabled || !rock028Ready || !rock028Textures.colorTex) {
+      return null;
+    }
+    return {
+      heightTex: globalHeightTex,
+      rockColorTex: rock028Textures.colorTex,
+      rockDataTex: rock028Textures.dataTex,
+      cliffU,
+      worldSize: config.world.size,
+      worldHalf: config.world.size * 0.5,
+      htexRes: HTEX_RES,
+    };
+  }
+
   const tileTerrainMaterial = createSharedTileMaterial();
-  /** Lazily built — matches v1 `chunkGroundTsl` + `chunkMeadowTsl` shared stacks. */
   let proceduralTerrainBundle = null;
 
   const terrainMesher = new TerrainMesher(config);
@@ -201,10 +281,22 @@ export async function startV2App() {
     perf,
   });
 
+  function invalidateProceduralMaterial() {
+    if (proceduralTerrainBundle) {
+      proceduralTerrainBundle.material.dispose();
+      proceduralTerrainBundle = null;
+    }
+    if (toolState.terrainSurface === "tsl") {
+      applyTerrainSurfaceFromToolState();
+    }
+  }
+
   function getProceduralTerrainBundle() {
     if (!proceduralTerrainBundle) {
+      syncCliffUniformsFromParams();
       proceduralTerrainBundle = createV2ProceduralGroundMaterial(
         toolState.groundTsl,
+        buildCliffDeps(),
       );
     }
     return proceduralTerrainBundle;
@@ -224,10 +316,15 @@ export async function startV2App() {
       chunkStream.setSharedMaterial(tileTerrainMaterial);
     }
   }
+
+  function markHeightTexDirty() {
+    heightTexDirty = true;
+  }
   const sculptSystem = new SculptSystem({
     toolState,
     terrainStore,
     chunkStream,
+    onHeightsChanged: markHeightTexDirty,
   });
 
   const hud = createHud();
@@ -252,6 +349,10 @@ export async function startV2App() {
     },
     onTslTerrainSync: () => {
       syncProceduralTerrainTsl();
+    },
+    onAutoCliffChanged: (kind) => {
+      syncCliffUniformsFromParams();
+      if (kind === "toggle") invalidateProceduralMaterial();
     },
   });
 
@@ -546,6 +647,12 @@ export async function startV2App() {
     }
     if (csm?.mainFrustum && csmCfg.enabled && csmCfg.updateEveryFrame) {
       csm.updateFrustums();
+    }
+
+    if (heightTexDirty && now - lastHeightTexSyncMs > 500) {
+      rebuildGlobalHeightTexture();
+      heightTexDirty = false;
+      lastHeightTexSyncMs = now;
     }
 
     chunkStream.update(camera.position);

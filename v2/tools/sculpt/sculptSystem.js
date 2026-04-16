@@ -7,10 +7,11 @@ import {
 } from "../../core/terrain/erosionBrush.js";
 
 export class SculptSystem {
-  constructor({ toolState, terrainStore, chunkStream }) {
+  constructor({ toolState, terrainStore, chunkStream, onHeightsChanged }) {
     this.toolState = toolState;
     this.terrainStore = terrainStore;
     this.chunkStream = chunkStream;
+    this.onHeightsChanged = onHeightsChanged || (() => {});
     this.isSculpting = false;
     this.sign = 1;
     this.flattenTargetY = 0;
@@ -200,6 +201,7 @@ export class SculptSystem {
     this.redoStack.length = 0;
     if (this.undoStack.length > 64) this.undoStack.shift();
     this.chunkStream.markDirtyFull(touched);
+    this.onHeightsChanged();
   }
 
   endStroke() {
@@ -222,6 +224,7 @@ export class SculptSystem {
     }
     this.beforeMap.clear();
     this.afterMap.clear();
+    this.onHeightsChanged();
   }
 
   undo() {
@@ -232,6 +235,7 @@ export class SculptSystem {
     this.terrainStore.syncChunkEdgesAround(dirty);
     this.chunkStream.markDirtyFull(dirty);
     this.redoStack.push(cmd);
+    this.onHeightsChanged();
   }
 
   redo() {
@@ -242,6 +246,7 @@ export class SculptSystem {
     this.terrainStore.syncChunkEdgesAround(dirty);
     this.chunkStream.markDirtyFull(dirty);
     this.undoStack.push(cmd);
+    this.onHeightsChanged();
   }
 
   get canUndo() {
