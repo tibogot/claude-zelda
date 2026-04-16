@@ -148,26 +148,14 @@ export class TerrainMesher {
     const nArr = normal.array;
     const eps = cs / res;
 
-    // FD normals per mesh vertex. Interior verts can read heights directly from
-    // the cached array; edge verts need neighbor-chunk heights and fall back to
-    // the Map-based heightfield helper.
-    const cachedNeighbors = gatherNeighborHeights(terrainStore, cx, cz);
-
+    // FD normals: same rule as v1 `heightfieldNormalAt` — always sample the
+    // authoritative heightfield (`getChunkHeightfieldHeight`) at world XZ so
+    // both sides of a same-LOD seam use identical central differences. Also
+    // snap boundary XZ to exact chunk edges (avoids float drift vs neighbors).
     for (let iz = 0; iz <= segments; iz++) {
-      const wz = chunkMinZ + (iz / segments) * cs;
       for (let ix = 0; ix <= segments; ix++) {
-        const wx = chunkMinX + (ix / segments) * cs;
-        sampleHeightfieldNormal(
-          wx,
-          wz,
-          eps,
-          terrainStore,
-          cx,
-          cz,
-          heights,
-          cachedNeighbors,
-          _terrainHfN,
-        );
+        const { wx, wz } = chunkMeshWorldXZ(chunkMinX, chunkMinZ, cs, segments, ix, iz);
+        sampleHeightfieldNormal(wx, wz, eps, terrainStore, _terrainHfN);
         const i3 = (iz * w + ix) * 3;
         nArr[i3] = _terrainHfN.x;
         nArr[i3 + 1] = _terrainHfN.y;
@@ -286,23 +274,11 @@ export class TerrainMesher {
     const nMaxZ = Math.min(segments, mMaxZ + 1);
 
     const eps = cs / res;
-    const cachedNeighbors = gatherNeighborHeights(terrainStore, cx, cz);
 
     for (let iz = nMinZ; iz <= nMaxZ; iz++) {
-      const wz = chunkMinZ + (iz / segments) * cs;
       for (let ix = nMinX; ix <= nMaxX; ix++) {
-        const wx = chunkMinX + (ix / segments) * cs;
-        sampleHeightfieldNormal(
-          wx,
-          wz,
-          eps,
-          terrainStore,
-          cx,
-          cz,
-          heights,
-          cachedNeighbors,
-          _terrainHfN,
-        );
+        const { wx, wz } = chunkMeshWorldXZ(chunkMinX, chunkMinZ, cs, segments, ix, iz);
+        sampleHeightfieldNormal(wx, wz, eps, terrainStore, _terrainHfN);
         const i3 = (iz * w + ix) * 3;
         nArr[i3] = _terrainHfN.x;
         nArr[i3 + 1] = _terrainHfN.y;
@@ -345,123 +321,29 @@ export class TerrainMesher {
   }
 }
 
-function gatherNeighborHeights(terrainStore, cx, cz) {
-  return {
-    W: terrainStore.chunkDataMap.get(chunkKey(cx - 1, cz)) || null,
-    E: terrainStore.chunkDataMap.get(chunkKey(cx + 1, cz)) || null,
-    N: terrainStore.chunkDataMap.get(chunkKey(cx, cz - 1)) || null,
-    S: terrainStore.chunkDataMap.get(chunkKey(cx, cz + 1)) || null,
-  };
+/**
+ * World XZ for mesh vertex (ix, iz) on the chunk plane — snaps perimeter verts
+ * to exact chunk bounds so adjacent chunks share bit-identical coordinates at seams.
+ */
+function chunkMeshWorldXZ(chunkMinX, chunkMinZ, cs, segments, ix, iz) {
+  const wx =
+    ix <= 0 ? chunkMinX : ix >= segments ? chunkMinX + cs : chunkMinX + (ix / segments) * cs;
+  const wz =
+    iz <= 0 ? chunkMinZ : iz >= segments ? chunkMinZ + cs : chunkMinZ + (iz / segments) * cs;
+  return { wx, wz };
 }
 
 /**
- * FD normal sampler that reads directly from the provided heights buffer when
- * the sample stays inside the chunk, and from cached neighbor buffers (or the
- * store helper as a last resort) when it crosses a chunk edge.
+ * FD normal at world (x,z) — v1 `heightfieldNormalAt`: all four taps go through
+ * `getChunkHeightfieldHeight` so chunk boundaries are continuous for lighting.
  */
-function sampleHeightfieldNormal(
-  worldX,
-  worldZ,
-  eps,
-  terrainStore,
-  cx,
-  cz,
-  heights,
-  cachedNeighbors,
-  out,
-) {
+function sampleHeightfieldNormal(worldX, worldZ, eps, terrainStore, out) {
   const inv2eps = 1 / (2 * eps);
-  const hL = sampleHeightFast(
-    worldX - eps,
-    worldZ,
-    terrainStore,
-    cx,
-    cz,
-    heights,
-    cachedNeighbors,
-  );
-  const hR = sampleHeightFast(
-    worldX + eps,
-    worldZ,
-    terrainStore,
-    cx,
-    cz,
-    heights,
-    cachedNeighbors,
-  );
-  const hD = sampleHeightFast(
-    worldX,
-    worldZ - eps,
-    terrainStore,
-    cx,
-    cz,
-    heights,
-    cachedNeighbors,
-  );
-  const hU = sampleHeightFast(
-    worldX,
-    worldZ + eps,
-    terrainStore,
-    cx,
-    cz,
-    heights,
-    cachedNeighbors,
-  );
+  const hL = terrainStore.getChunkHeightfieldHeight(worldX - eps, worldZ);
+  const hR = terrainStore.getChunkHeightfieldHeight(worldX + eps, worldZ);
+  const hD = terrainStore.getChunkHeightfieldHeight(worldX, worldZ - eps);
+  const hU = terrainStore.getChunkHeightfieldHeight(worldX, worldZ + eps);
   out.set((hL - hR) * inv2eps, 1, (hD - hU) * inv2eps).normalize();
-}
-
-function sampleHeightFast(worldX, worldZ, terrainStore, cx, cz, heights, cachedNeighbors) {
-  const config = terrainStore.config;
-  const cs = config.world.chunkSize;
-  const res = config.world.dataResolution;
-  const stride = res + 1;
-  const minX = chunkMinWorldX(cx, config);
-  const minZ = chunkMinWorldZ(cz, config);
-  const u = ((worldX - minX) / cs) * res;
-  const v = ((worldZ - minZ) / cs) * res;
-
-  // Fast path: sample is inside this chunk's heightfield.
-  if (u >= 0 && u <= res && v >= 0 && v <= res) {
-    return bilinearSample(heights, stride, u, v, res);
-  }
-
-  // One-step crossing into cached neighbor.
-  if (u < 0 && v >= 0 && v <= res && cachedNeighbors.W) {
-    return bilinearSample(cachedNeighbors.W, stride, u + res, v, res);
-  }
-  if (u > res && v >= 0 && v <= res && cachedNeighbors.E) {
-    return bilinearSample(cachedNeighbors.E, stride, u - res, v, res);
-  }
-  if (v < 0 && u >= 0 && u <= res && cachedNeighbors.N) {
-    return bilinearSample(cachedNeighbors.N, stride, u, v + res, res);
-  }
-  if (v > res && u >= 0 && u <= res && cachedNeighbors.S) {
-    return bilinearSample(cachedNeighbors.S, stride, u, v - res, res);
-  }
-
-  // Fallback (corner / out-of-world) — authoritative but slower.
-  return terrainStore.getChunkHeightfieldHeight(worldX, worldZ);
-}
-
-function bilinearSample(heights, stride, u, v, res) {
-  const x = u < 0 ? 0 : u > res ? res : u;
-  const z = v < 0 ? 0 : v > res ? res : v;
-  const x0 = Math.floor(x);
-  const z0 = Math.floor(z);
-  const x1 = x0 >= res ? res : x0 + 1;
-  const z1 = z0 >= res ? res : z0 + 1;
-  const tx = x - x0;
-  const tz = z - z0;
-  const h00 = heights[z0 * stride + x0];
-  const h10 = heights[z0 * stride + x1];
-  const h01 = heights[z1 * stride + x0];
-  const h11 = heights[z1 * stride + x1];
-  return (
-    h00 * (1 - tx) * (1 - tz) +
-    h10 * tx * (1 - tz) +
-    h01 * (1 - tx) * tz +
-    h11 * tx * tz
-  );
 }
 
 function snapLodBoundaries({

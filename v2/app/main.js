@@ -15,6 +15,7 @@ import { createPerfState, createToolState, tickPerf } from "./state/toolState.js
 import { TerrainStore } from "../core/terrain/terrainStore.js";
 import { TerrainMesher } from "../render/terrain/terrainMesher.js";
 import { createSharedTileMaterial } from "../render/terrain/sharedTileMaterial.js";
+import { createV2ProceduralGroundMaterial } from "../render/terrain/proceduralGroundMaterial.js";
 import { ChunkStreamManager } from "../core/streaming/chunkStreamManager.js";
 import { SculptSystem } from "../tools/sculpt/sculptSystem.js";
 import { createTweakpaneUi } from "../ui/tweakpaneUi.js";
@@ -186,16 +187,48 @@ export async function startV2App() {
   const terrainStore = new TerrainStore(config);
   terrainStore.preloadChunksInRadius(0, 0, 4);
 
-  const terrainMaterial = createSharedTileMaterial();
+  const tileTerrainMaterial = createSharedTileMaterial();
+  /** Lazily built — matches v1 `chunkGroundTsl` + `chunkMeadowTsl` shared stacks. */
+  let proceduralTerrainBundle = null;
+
   const terrainMesher = new TerrainMesher(config);
   const chunkStream = new ChunkStreamManager({
     config,
     scene,
     terrainStore,
     mesher: terrainMesher,
-    material: terrainMaterial,
+    material: tileTerrainMaterial,
     perf,
   });
+
+  function getProceduralTerrainBundle() {
+    if (!proceduralTerrainBundle) {
+      proceduralTerrainBundle = createV2ProceduralGroundMaterial(
+        toolState.groundTsl,
+        toolState.meadowTsl,
+      );
+    }
+    return proceduralTerrainBundle;
+  }
+
+  function syncProceduralTerrainTsl() {
+    if (toolState.terrainSurface !== "tsl") return;
+    const b = getProceduralTerrainBundle();
+    b.syncGround(toolState.groundTsl);
+    b.syncMeadow(toolState.meadowTsl);
+    b.uMeadowMix.value = toolState.tslGroundUi.meadowMix;
+    b.uSlopeMin.value = toolState.tslGroundUi.meadowSlopeMin;
+    b.uSlopeMax.value = toolState.tslGroundUi.meadowSlopeMax;
+  }
+
+  function applyTerrainSurfaceFromToolState() {
+    if (toolState.terrainSurface === "tsl") {
+      syncProceduralTerrainTsl();
+      chunkStream.setSharedMaterial(getProceduralTerrainBundle().material);
+    } else {
+      chunkStream.setSharedMaterial(tileTerrainMaterial);
+    }
+  }
   const sculptSystem = new SculptSystem({
     toolState,
     terrainStore,
@@ -203,7 +236,9 @@ export async function startV2App() {
   });
 
   const hud = createHud();
-  const ui = createTweakpaneUi({
+  /** @type {ReturnType<typeof createTweakpaneUi>} */
+  let ui;
+  ui = createTweakpaneUi({
     toolState,
     config,
     sculptSystem,
@@ -216,6 +251,13 @@ export async function startV2App() {
     onFogChange: syncFog,
     onGenerateProceduralTerrain: () => sculptSystem.applyProceduralTerrainAllChunks(),
     onRampCleared: () => syncRampMarker(),
+    onTerrainSurfaceChanged: () => {
+      applyTerrainSurfaceFromToolState();
+      ui?.pane.refresh();
+    },
+    onTslTerrainSync: () => {
+      syncProceduralTerrainTsl();
+    },
   });
 
   /** Engine-style brush preview: translucent hemisphere + edge lines, aligned to surface normal. */

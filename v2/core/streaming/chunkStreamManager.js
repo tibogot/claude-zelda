@@ -249,6 +249,15 @@ export class ChunkStreamManager {
     return this._raycastMeshesCache;
   }
 
+  /** Swap shared terrain material for all active chunk meshes (tile ↔ TSL). Caller owns disposal. */
+  setSharedMaterial(material) {
+    this.material = material;
+    for (const ch of this.activeChunks.values()) {
+      ch.mesh.material = material;
+    }
+    this._raycastMeshesCache = null;
+  }
+
   getChunkKeysInBrushBounds(minX, minZ, maxX, maxZ) {
     const half = this.config.world.size * 0.5;
     const chunkSize = this.config.world.chunkSize;

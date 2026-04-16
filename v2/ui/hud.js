@@ -8,7 +8,7 @@ export function createHud() {
         `chunks active: ${perf.activeChunks}  tris≈ ${perf.trisApprox.toLocaleString()}`,
         `stream created/remesh/unload: ${perf.stream.created}/${perf.stream.remeshed}/${perf.stream.unloaded}`,
         `queues create/remesh/unload: ${perf.queues.create}/${perf.queues.remesh}/${perf.queues.unload}`,
-        `mode: ${toolState.mode} (${toolState.sculptMode})`,
+        `mode: ${toolState.mode} (${toolState.sculptMode})  surface: ${toolState.terrainSurface}`,
         `brush radius=${toolState.brush.radius.toFixed(1)} strength=${toolState.brush.strength.toFixed(2)} shape=${toolState.brush.falloff.toFixed(2)}`,
         `LMB raise · Shift+LMB lower · Ctrl+LMB smooth · Alt+LMB flatten`,
         `Raise/lower: Smooth = Shape falloff · Plateau = v1 flat inner 60% ring (ignores Shape)`,

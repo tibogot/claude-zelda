@@ -1,8 +1,25 @@
 import { V2_CONFIG } from "../config.js";
+import { GROUND_DEFAULT_PARAMS } from "../../../chunkGroundTsl.js";
+import { MEADOW_DEFAULT_PARAMS } from "../../../chunkMeadowTsl.js";
+
+function deepCloneJson(x) {
+  return JSON.parse(JSON.stringify(x));
+}
 
 export function createToolState() {
   return {
     mode: "sculpt",
+    /** `tile` = grid material; `tsl` = shared v1 painter ground + meadow stacks (see `proceduralGroundMaterial.js`). */
+    terrainSurface: "tile",
+    groundTsl: deepCloneJson(GROUND_DEFAULT_PARAMS),
+    meadowTsl: deepCloneJson(MEADOW_DEFAULT_PARAMS),
+    tslGroundUi: {
+      groundPresetKey: "default",
+      meadowPresetKey: "default",
+      meadowMix: 0.55,
+      meadowSlopeMin: 0.45,
+      meadowSlopeMax: 0.92,
+    },
     sculptMode: "raiseLower",
     /** v1 `sculptBrush` for brush tool: `smooth` | `plateau` (FBM peak / noise / ramp are separate modes). */
     raiseLowerStamp: V2_CONFIG.sculpt.defaultRaiseLowerStamp,
