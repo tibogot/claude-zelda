@@ -17,12 +17,18 @@ export function resolveSculptStrokeMode(toolState, pointerEvent = {}) {
   if (toolState.sculptMode === "erosion") {
     return { mode: "erosion" };
   }
-  // v1: Shift + noise (or terrace) uses raise/lower at -1 instead of the noise stamp.
-  if (toolState.sculptMode === "noise" && pointerEvent.shiftKey) {
+  // v1: Shift + noise (or terrace) uses raise/lower at -1 instead of the mode stamp.
+  if (
+    (toolState.sculptMode === "noise" || toolState.sculptMode === "terrace") &&
+    pointerEvent.shiftKey
+  ) {
     return { mode: "raiseLower" };
   }
   if (toolState.sculptMode === "noise") {
     return { mode: "noise" };
+  }
+  if (toolState.sculptMode === "terrace") {
+    return { mode: "terrace" };
   }
   return { mode: toolState.sculptMode };
 }
@@ -41,7 +47,11 @@ export function createBrushStrokeFromHit({
     toolState.sculptMode === "fbmPeak" || toolState.sculptMode === "noise";
   const { mode: resolvedMode } = resolveSculptStrokeMode(toolState, pointerEvent);
   let strokeSign = sign;
-  if (resolvedMode === "raiseLower" && toolState.sculptMode === "noise" && pointerEvent.shiftKey) {
+  if (
+    resolvedMode === "raiseLower" &&
+    (toolState.sculptMode === "noise" || toolState.sculptMode === "terrace") &&
+    pointerEvent.shiftKey
+  ) {
     strokeSign = -1;
   }
   return {
@@ -54,6 +64,7 @@ export function createBrushStrokeFromHit({
     falloff: toolState.brush.falloff,
     raiseLowerStamp:
       resolvedMode === "raiseLower" ? toolState.raiseLowerStamp ?? "smooth" : "smooth",
+    brushFalloff: toolState.brush.brushFalloff ?? "smooth",
     flattenTargetY,
     seed: useSessionSeed ? (sessionBrushSeed ?? 0) : Math.random() * 10000,
     minX: hitPoint.x - radius,
@@ -68,6 +79,9 @@ export function createBrushStrokeFromHit({
           noiseScale: toolState.noiseBrush.noiseScale,
           noiseOctaves: toolState.noiseBrush.noiseOctaves,
         }
+      : {}),
+    ...(toolState.sculptMode === "terrace"
+      ? { terrace: { ...toolState.terrace } }
       : {}),
   };
 }

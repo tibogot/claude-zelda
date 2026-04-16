@@ -342,6 +342,7 @@ export async function startV2App() {
     onCsmEnabledChange: setCsmEnabled,
     onFogChange: syncFog,
     onGenerateProceduralTerrain: () => sculptSystem.applyProceduralTerrainAllChunks(),
+    onRunGlobalErosion: () => sculptSystem.applyGlobalErosion(),
     onRampCleared: () => syncRampMarker(),
     onTerrainSurfaceChanged: () => {
       applyTerrainSurfaceFromToolState();

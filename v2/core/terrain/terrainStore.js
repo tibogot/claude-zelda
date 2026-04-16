@@ -184,6 +184,26 @@ export class TerrainStore {
               const flat = Math.max(0, 1 - Math.pow(Math.max(0, td - 0.6) / 0.4, 2));
               falloff = flat * 0.7;
               if (falloff <= 0) continue;
+            } else if (stroke.mode === "raiseLower" && stroke.raiseLowerStamp === "crater") {
+              // v1 `applyRaiseLowerAt` + `brush === "crater"`: rim at td≈0.55 minus pit near center, ×0.8.
+              // Signed delta (can be negative near the pit); keep it here and multiply by strength*sign in the stamp branch.
+              // Stored in `falloff` for uniformity; stamp branch detects crater via raiseLowerStamp.
+              const td = dist * invR;
+              const rim = Math.exp(-Math.pow(td - 0.55, 2) / 0.04) * 1.2;
+              const pit = Math.max(0, 1 - td * 4) * 0.6;
+              falloff = (rim - pit) * 0.8;
+              if (falloff === 0) continue;
+            } else if (stroke.mode === "terrace") {
+              // v1 `applyTerraceAt`: falloff = (1 - t^2)^2 ≈ (1 - (dist/r)^2)^2, independent of falloff slider.
+              const tt = dist * invR;
+              const one = 1 - tt * tt;
+              falloff = one * one;
+              if (falloff <= 0) continue;
+            } else if (stroke.mode === "raiseLower") {
+              // Default `smooth` stamp: v1 `brushFalloff(td)` enum — cosine / linear / sphere / hard.
+              // v1 passes td = dist/radius (0 at center → 1 at edge); our `t` is the complement.
+              falloff = evalBrushFalloff(1 - t, stroke.brushFalloff);
+              if (falloff <= 0) continue;
             } else if (stroke.mode !== "fbmPeak") {
               falloff = Math.pow(t, stroke.falloff);
               if (falloff <= 0) continue;
@@ -214,7 +234,20 @@ export class TerrainStore {
             const current = heights[idx];
             let next = current;
             if (stroke.mode === "raiseLower") {
+              // Plateau / crater / default smooth all end here; `falloff` already baked in per-stamp.
               next = current + stroke.strength * stroke.sign * falloff;
+            } else if (stroke.mode === "terrace") {
+              // v1 `applyTerraceAt`: snap to floor(h/stepH)*stepH + S-curve inside the step, lerp by falloff*strength*3.
+              const stepH = stroke.terrace?.step ?? 4;
+              const sharp = THREE.MathUtils.clamp(stroke.terrace?.sharpness ?? 0.6, 0.05, 0.95);
+              const floored = Math.floor(current / stepH) * stepH;
+              const frac = (current - floored) / stepH;
+              const curved =
+                frac < sharp
+                  ? (frac * (1 - sharp)) / sharp
+                  : ((frac - sharp) / (1 - sharp)) * sharp + (1 - sharp);
+              const snapped = floored + curved * stepH;
+              next = current + (snapped - current) * falloff * stroke.strength * 3;
             } else if (stroke.mode === "fbmPeak") {
               // splatmap-chunks.html `fbm_peak` — ridge FBM in brush space + radial spike (v2: tunable).
               const fp = stroke.fbmPeak;
@@ -560,6 +593,26 @@ export class TerrainStore {
 
     this.syncChunkEdgesAround(touched);
     return touched;
+  }
+}
+
+/**
+ * v1 `brushFalloff(t)` — shape of the default raise/lower "smooth" stamp.
+ * t = dist/radius. Returns 0..1.
+ */
+function evalBrushFalloff(t, kind) {
+  if (t >= 1) return 0;
+  if (t <= 0) return 1;
+  switch (kind) {
+    case "linear":
+      return 1 - t;
+    case "sphere":
+      return Math.sqrt(1 - t * t);
+    case "hard":
+      return 1;
+    case "smooth":
+    default:
+      return (1 + Math.cos(t * Math.PI)) * 0.5;
   }
 }
 

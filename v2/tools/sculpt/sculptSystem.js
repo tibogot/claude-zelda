@@ -3,6 +3,7 @@ import { createBrushStrokeFromHit, shouldApplyStroke, worldBrushBounds } from ".
 import { chunkKey, getChunkCountPerAxis, parseChunkKey } from "../../core/terrain/chunkMath.js";
 import {
   applyErosionBrushToTerrain,
+  applyGlobalErosionToTerrain,
   erosionSnapshotMarginWorld,
 } from "../../core/terrain/erosionBrush.js";
 
@@ -176,6 +177,36 @@ export class SculptSystem {
     const dirtyRects = new Map();
     this.terrainStore.applySculptStroke(stroke, dirtyRects);
     this.chunkStream.markDirtyRects(dirtyRects);
+  }
+
+  /**
+   * v1 `runGlobalErosion` — hydraulic erosion across the whole map. Snapshots every
+   * existing chunk for undo, runs the droplet sim, and then marks only touched
+   * chunks + their neighbors for a full mesh rebuild (LOD stitch-safe).
+   */
+  applyGlobalErosion() {
+    const maxC = getChunkCountPerAxis(this.terrainStore.config) - 1;
+    const before = new Map();
+    for (let cz = 0; cz <= maxC; cz++) {
+      for (let cx = 0; cx <= maxC; cx++) {
+        const key = chunkKey(cx, cz);
+        const h = this.terrainStore.ensureChunkData(cx, cz);
+        before.set(key, new Float32Array(h));
+      }
+    }
+    const touched = applyGlobalErosionToTerrain(this.terrainStore, this.toolState.erosion);
+    if (touched.size === 0) return;
+    this.terrainStore.syncChunkEdgesAround(touched);
+    const after = new Map();
+    for (const key of touched) {
+      const arr = this.terrainStore.getChunkHeightsByKey(key);
+      if (arr) after.set(key, new Float32Array(arr));
+    }
+    this.undoStack.push({ before, after });
+    this.redoStack.length = 0;
+    if (this.undoStack.length > 64) this.undoStack.shift();
+    this.chunkStream.markDirtyFull(touched);
+    this.onHeightsChanged();
   }
 
   /**

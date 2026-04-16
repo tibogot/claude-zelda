@@ -21,12 +21,17 @@ export function createToolState() {
       meadowSlopeMax: 0.92,
     },
     sculptMode: "raiseLower",
-    /** v1 `sculptBrush` for brush tool: `smooth` | `plateau` (FBM peak / noise / ramp are separate modes). */
+    /**
+     * v1 `sculptBrush` for raise/lower: `smooth` (uses brushFalloff enum) | `plateau` (mesa) | `crater` (rim-pit).
+     * FBM peak / noise / terrace / ramp / erosion are separate modes via `sculptMode`.
+     */
     raiseLowerStamp: V2_CONFIG.sculpt.defaultRaiseLowerStamp,
     brush: {
       radius: V2_CONFIG.sculpt.defaultRadius,
       strength: V2_CONFIG.sculpt.defaultStrength,
       falloff: V2_CONFIG.sculpt.defaultFalloff,
+      /** Only affects raise/lower `smooth` stamp — v1 `PARAMS.brushFalloff`. */
+      brushFalloff: V2_CONFIG.sculpt.defaultBrushFalloff,
       spacingFactor: V2_CONFIG.sculpt.spacingFactor,
       previewShape: V2_CONFIG.sculpt.previewShape,
     },
@@ -34,6 +39,7 @@ export function createToolState() {
       noiseScale: V2_CONFIG.sculpt.noiseScale,
       noiseOctaves: V2_CONFIG.sculpt.noiseOctaves,
     },
+    terrace: { ...V2_CONFIG.sculpt.terrace },
     ramp: { ...V2_CONFIG.sculpt.ramp },
     erosion: { ...V2_CONFIG.sculpt.erosion },
     fbmPeak: { ...V2_CONFIG.sculpt.fbmPeak },

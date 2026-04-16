@@ -12,6 +12,7 @@ export function createTweakpaneUi({
   onCsmEnabledChange,
   onFogChange,
   onGenerateProceduralTerrain,
+  onRunGlobalErosion,
   onRampCleared,
   onTerrainSurfaceChanged,
   onTslTerrainSync,
@@ -306,9 +307,10 @@ export function createTweakpaneUi({
     .addBinding(toolState, "sculptMode", {
       label: "Stamp",
       options: {
-        "Brush (smooth)": "raiseLower",
+        "Brush (raise/lower)": "raiseLower",
         "FBM peak": "fbmPeak",
         Noise: "noise",
+        Terrace: "terrace",
         "Flatten only": "flatten",
         Ramp: "ramp",
         Erosion: "erosion",
@@ -323,7 +325,18 @@ export function createTweakpaneUi({
     options: {
       Smooth: "smooth",
       Plateau: "plateau",
+      Crater: "crater",
     },
+  });
+  sculptFolder.addBinding(toolState.brush, "brushFalloff", {
+    label: "Smooth falloff",
+    options: {
+      "Cosine (smooth)": "smooth",
+      Linear: "linear",
+      Sphere: "sphere",
+      "Hard edge": "hard",
+    },
+    hint: "Only affects raise/lower 'Smooth' stamp — matches v1 brushFalloff.",
   });
   sculptFolder.addButton({ title: "Clear ramp start (R)" }).on("click", () => {
     sculptSystem.clearRampPoint();
@@ -387,6 +400,25 @@ export function createTweakpaneUi({
     label: "Stroke spacing",
   });
 
+  const terraceFolder = sculptFolder.addFolder({
+    title: "Terrace stamp",
+    expanded: false,
+  });
+  terraceFolder.addBinding(toolState.terrace, "step", {
+    label: "Step height",
+    min: 0.25,
+    max: 30,
+    step: 0.25,
+    hint: "World-units between terrace plateaus (v1 PARAMS.terraceStep).",
+  });
+  terraceFolder.addBinding(toolState.terrace, "sharpness", {
+    label: "Sharpness",
+    min: 0.05,
+    max: 0.95,
+    step: 0.01,
+    hint: "Higher = sharper step edges; lower = more ramp-like transitions.",
+  });
+
   const noiseBrushFolder = sculptFolder.addFolder({
     title: "Noise stamp",
     expanded: false,
@@ -444,6 +476,17 @@ export function createTweakpaneUi({
     max: 12,
     step: 0.5,
   });
+  erosionBrushFolder.addBlade({ view: "separator" });
+  erosionBrushFolder.addBinding(toolState.erosion, "iterations", {
+    label: "Global iterations",
+    min: 500,
+    max: 200000,
+    step: 500,
+    hint: "Droplet count for the whole-map erosion pass (brush ignores this).",
+  });
+  erosionBrushFolder
+    .addButton({ title: "Run global erosion (all chunks)" })
+    .on("click", () => onRunGlobalErosion?.());
 
   const fbmPeakFolder = sculptFolder.addFolder({
     title: "FBM peak stamp",

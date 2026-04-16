@@ -11,13 +11,16 @@ export const V2_CONFIG = {
   },
   lod: {
     enabled: true,
-    hysteresis: 0.15,
-    activeRadiusInChunks: 9,
+    /** v1 used 0.2; 0.15 is slightly snappier but may thrash near threshold boundaries. */
+    hysteresis: 0.2,
+    /** v1 default: 16 (covers full 1600m world from any corner). Keeps L4 chunks streaming but they are cheap. */
+    activeRadiusInChunks: 16,
+    /** Thresholds match `splatmap-chunks.html` CONFIG.lodLevels: 200/420/800/1400/∞. */
     levels: [
-      { maxDistance: 180, segments: 64, label: "L0" },
-      { maxDistance: 360, segments: 32, label: "L1" },
-      { maxDistance: 720, segments: 16, label: "L2" },
-      { maxDistance: 1200, segments: 8, label: "L3" },
+      { maxDistance: 200, segments: 64, label: "L0" },
+      { maxDistance: 420, segments: 32, label: "L1" },
+      { maxDistance: 800, segments: 16, label: "L2" },
+      { maxDistance: 1400, segments: 8, label: "L3" },
       { maxDistance: Infinity, segments: 4, label: "L4" },
     ],
   },
@@ -38,8 +41,21 @@ export const V2_CONFIG = {
     defaultRadius: 28,
     defaultStrength: 0.55,
     defaultFalloff: 1.8,
-    /** v1 `PARAMS.sculptBrush` for raise/lower only: `smooth` uses Shape slider; `plateau` is fixed v1 mesa falloff. */
+    /**
+     * v1 `PARAMS.brushFalloff` enum — only affects raise/lower default "smooth" stamp.
+     * "smooth" (cosine) | "linear" | "sphere" | "hard".
+     */
+    defaultBrushFalloff: "smooth",
+    /**
+     * v1 `PARAMS.sculptBrush` for raise/lower only: `smooth` uses brushFalloff enum;
+     * `plateau` is the v1 mesa curve; `crater` is the v1 rim-minus-pit curve.
+     */
     defaultRaiseLowerStamp: "smooth",
+    /** v1 `PARAMS.terraceStep` / `PARAMS.terraceSharpness` — `terrace` sculpt mode. */
+    terrace: {
+      step: 4,
+      sharpness: 0.6,
+    },
     spacingFactor: 0.22,
     /** v1 `PARAMS.noiseScale` / `noiseOctaves` — sculpt noise brush FBM. */
     noiseScale: 2.5,
