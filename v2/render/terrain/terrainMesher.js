@@ -3,6 +3,8 @@ import { chunkKey, chunkMinWorldX, chunkMinWorldZ } from "../../core/terrain/chu
 import { getChunkPerimeterRingIndices, TerrainGeometryPool } from "./terrainGeometryPool.js";
 
 const _terrainHfN = new THREE.Vector3();
+const _stitchN0 = new THREE.Vector3();
+const _stitchN1 = new THREE.Vector3();
 
 export class TerrainMesher {
   constructor(config) {
@@ -125,21 +127,6 @@ export class TerrainMesher {
       }
     }
 
-    /** @type {Uint8Array | null} */
-    let snappedMask = null;
-    if (neighborSegments) {
-      snappedMask = snapLodBoundaries({
-        pos,
-        segments,
-        cx,
-        cz,
-        chunkMinX,
-        chunkMinZ,
-        terrainStore,
-        neighborSegments,
-      });
-    }
-
     let normal = geometry.attributes.normal;
     if (!normal || normal.count !== pos.count) {
       normal = new THREE.BufferAttribute(new Float32Array(pos.count * 3), 3);
@@ -148,10 +135,6 @@ export class TerrainMesher {
     const nArr = normal.array;
     const eps = cs / res;
 
-    // FD normals: same rule as v1 `heightfieldNormalAt` — always sample the
-    // authoritative heightfield (`getChunkHeightfieldHeight`) at world XZ so
-    // both sides of a same-LOD seam use identical central differences. Also
-    // snap boundary XZ to exact chunk edges (avoids float drift vs neighbors).
     for (let iz = 0; iz <= segments; iz++) {
       for (let ix = 0; ix <= segments; ix++) {
         const { wx, wz } = chunkMeshWorldXZ(chunkMinX, chunkMinZ, cs, segments, ix, iz);
@@ -163,10 +146,10 @@ export class TerrainMesher {
       }
     }
 
-    if (snappedMask) {
-      fixLodSnappedBoundaryNormals({
+    if (neighborSegments) {
+      snapLodBoundaries({
+        pos,
         normal,
-        snappedMask,
         segments,
         cx,
         cz,
@@ -174,6 +157,7 @@ export class TerrainMesher {
         chunkMinZ,
         terrainStore,
         neighborSegments,
+        eps,
       });
     }
 
@@ -246,26 +230,6 @@ export class TerrainMesher {
       }
     }
 
-    // Re-snap any LOD-seam edge that falls inside the dirty mesh rect.
-    // Sculpt on seam verts should still follow the coarse neighbor boundary.
-    let snappedMask = null;
-    if (neighborSegments) {
-      snappedMask = snapLodBoundariesPartial({
-        pos,
-        segments,
-        cx,
-        cz,
-        chunkMinX,
-        chunkMinZ,
-        terrainStore,
-        neighborSegments,
-        mMinX,
-        mMaxX,
-        mMinZ,
-        mMaxZ,
-      });
-    }
-
     // Expand the rect by 1 for normal-pass margin so normals at the boundary
     // of the sculpted region blend into the surrounding surface smoothly.
     const nMinX = Math.max(0, mMinX - 1);
@@ -286,10 +250,11 @@ export class TerrainMesher {
       }
     }
 
-    if (snappedMask) {
-      fixLodSnappedBoundaryNormals({
+    // Re-snap any LOD-seam edge that falls inside the dirty mesh rect.
+    if (neighborSegments) {
+      snapLodBoundariesPartial({
+        pos,
         normal,
-        snappedMask,
         segments,
         cx,
         cz,
@@ -297,6 +262,11 @@ export class TerrainMesher {
         chunkMinZ,
         terrainStore,
         neighborSegments,
+        eps,
+        mMinX,
+        mMaxX,
+        mMinZ,
+        mMaxZ,
       });
     }
 
@@ -348,6 +318,7 @@ function sampleHeightfieldNormal(worldX, worldZ, eps, terrainStore, out) {
 
 function snapLodBoundaries({
   pos,
+  normal,
   segments,
   cx,
   cz,
@@ -355,6 +326,7 @@ function snapLodBoundaries({
   chunkMinZ,
   terrainStore,
   neighborSegments,
+  eps,
 }) {
   const cs = terrainStore.config.world.chunkSize;
   const dataScale =
@@ -393,6 +365,32 @@ function snapLodBoundaries({
       });
       const vi = vertexIndexOnEdge(segments, edge, k);
       pos.setY(vi, y);
+
+      const worldAlong = axis === "z" ? wzFinal : wxFinal;
+      const minAlong = axis === "z" ? chunkMinZ : chunkMinX;
+      const tCoarse = THREE.MathUtils.clamp((worldAlong - minAlong) / cs, 0, 1);
+      const f = tCoarse * neighborSeg;
+      const i0 = Math.min(Math.floor(f + 1e-8), Math.max(0, neighborSeg - 1));
+      const i1 = Math.min(i0 + 1, neighborSeg);
+      const alpha = THREE.MathUtils.clamp(f - i0, 0, 1);
+      let wx0, wz0, wx1, wz1;
+      if (axis === "z") {
+        wx0 = wx1 = wxFinal;
+        wz0 = chunkMinZ + (i0 / neighborSeg) * cs;
+        wz1 = chunkMinZ + (i1 / neighborSeg) * cs;
+      } else {
+        wz0 = wz1 = wzFinal;
+        wx0 = chunkMinX + (i0 / neighborSeg) * cs;
+        wx1 = chunkMinX + (i1 / neighborSeg) * cs;
+      }
+      sampleHeightfieldNormal(wx0, wz0, eps, terrainStore, _stitchN0);
+      sampleHeightfieldNormal(wx1, wz1, eps, terrainStore, _stitchN1);
+      const nx = _stitchN0.x + alpha * (_stitchN1.x - _stitchN0.x);
+      const ny = _stitchN0.y + alpha * (_stitchN1.y - _stitchN0.y);
+      const nz = _stitchN0.z + alpha * (_stitchN1.z - _stitchN0.z);
+      const len = Math.hypot(nx, ny, nz) || 1;
+      normal.setXYZ(vi, nx / len, ny / len, nz / len);
+
       snapped[vi] = 1;
       any = true;
     }
@@ -408,6 +406,7 @@ function snapLodBoundaries({
 
 function snapLodBoundariesPartial({
   pos,
+  normal,
   segments,
   cx,
   cz,
@@ -415,17 +414,44 @@ function snapLodBoundariesPartial({
   chunkMinZ,
   terrainStore,
   neighborSegments,
+  eps,
   mMinX,
   mMaxX,
   mMinZ,
   mMaxZ,
 }) {
-  // Only re-snap the portion of each LOD seam that intersects the dirty rect.
   const cs = terrainStore.config.world.chunkSize;
   const dataScale =
     terrainStore.config.world.dataResolution / terrainStore.config.world.chunkSize;
   const snapped = new Uint8Array(pos.count);
   let any = false;
+
+  const snapEdgeNormal = (vi, axis, wxFinal, wzFinal, neighborSeg) => {
+    const worldAlong = axis === "z" ? wzFinal : wxFinal;
+    const minAlong = axis === "z" ? chunkMinZ : chunkMinX;
+    const tCoarse = THREE.MathUtils.clamp((worldAlong - minAlong) / cs, 0, 1);
+    const f = tCoarse * neighborSeg;
+    const i0 = Math.min(Math.floor(f + 1e-8), Math.max(0, neighborSeg - 1));
+    const i1 = Math.min(i0 + 1, neighborSeg);
+    const alpha = THREE.MathUtils.clamp(f - i0, 0, 1);
+    let wx0, wz0, wx1, wz1;
+    if (axis === "z") {
+      wx0 = wx1 = wxFinal;
+      wz0 = chunkMinZ + (i0 / neighborSeg) * cs;
+      wz1 = chunkMinZ + (i1 / neighborSeg) * cs;
+    } else {
+      wz0 = wz1 = wzFinal;
+      wx0 = chunkMinX + (i0 / neighborSeg) * cs;
+      wx1 = chunkMinX + (i1 / neighborSeg) * cs;
+    }
+    sampleHeightfieldNormal(wx0, wz0, eps, terrainStore, _stitchN0);
+    sampleHeightfieldNormal(wx1, wz1, eps, terrainStore, _stitchN1);
+    const nx = _stitchN0.x + alpha * (_stitchN1.x - _stitchN0.x);
+    const ny = _stitchN0.y + alpha * (_stitchN1.y - _stitchN0.y);
+    const nz = _stitchN0.z + alpha * (_stitchN1.z - _stitchN0.z);
+    const len = Math.hypot(nx, ny, nz) || 1;
+    normal.setXYZ(vi, nx / len, ny / len, nz / len);
+  };
 
   const touchEast = mMaxX === segments && neighborSegments.east != null && neighborSegments.east < segments;
   const touchWest = mMinX === 0 && neighborSegments.west != null && neighborSegments.west < segments;
@@ -436,19 +462,15 @@ function snapLodBoundariesPartial({
     const neighborSeg = neighborSegments.east;
     for (let k = mMinZ; k <= mMaxZ; k++) {
       const t = k / segments;
+      const wz = chunkMinZ + t * cs;
+      const wx = chunkMinX + cs;
       const y = sampleCoarseNeighborEdgeY({
-        terrainStore,
-        ncx: cx + 1,
-        ncz: cz,
-        neighborSeg,
-        wx: chunkMinX + cs,
-        wz: chunkMinZ + t * cs,
-        axis: "z",
-        neighborBoundary: "west",
-        dataScale,
+        terrainStore, ncx: cx + 1, ncz: cz, neighborSeg, wx, wz,
+        axis: "z", neighborBoundary: "west", dataScale,
       });
       const vi = vertexIndexOnEdge(segments, "east", k);
       pos.setY(vi, y);
+      snapEdgeNormal(vi, "z", wx, wz, neighborSeg);
       snapped[vi] = 1;
       any = true;
     }
@@ -457,19 +479,15 @@ function snapLodBoundariesPartial({
     const neighborSeg = neighborSegments.west;
     for (let k = mMinZ; k <= mMaxZ; k++) {
       const t = k / segments;
+      const wz = chunkMinZ + t * cs;
+      const wx = chunkMinX;
       const y = sampleCoarseNeighborEdgeY({
-        terrainStore,
-        ncx: cx - 1,
-        ncz: cz,
-        neighborSeg,
-        wx: chunkMinX,
-        wz: chunkMinZ + t * cs,
-        axis: "z",
-        neighborBoundary: "east",
-        dataScale,
+        terrainStore, ncx: cx - 1, ncz: cz, neighborSeg, wx, wz,
+        axis: "z", neighborBoundary: "east", dataScale,
       });
       const vi = vertexIndexOnEdge(segments, "west", k);
       pos.setY(vi, y);
+      snapEdgeNormal(vi, "z", wx, wz, neighborSeg);
       snapped[vi] = 1;
       any = true;
     }
@@ -478,19 +496,15 @@ function snapLodBoundariesPartial({
     const neighborSeg = neighborSegments.south;
     for (let k = mMinX; k <= mMaxX; k++) {
       const t = k / segments;
+      const wx = chunkMinX + t * cs;
+      const wz = chunkMinZ + cs;
       const y = sampleCoarseNeighborEdgeY({
-        terrainStore,
-        ncx: cx,
-        ncz: cz + 1,
-        neighborSeg,
-        wx: chunkMinX + t * cs,
-        wz: chunkMinZ + cs,
-        axis: "x",
-        neighborBoundary: "north",
-        dataScale,
+        terrainStore, ncx: cx, ncz: cz + 1, neighborSeg, wx, wz,
+        axis: "x", neighborBoundary: "north", dataScale,
       });
       const vi = vertexIndexOnEdge(segments, "south", k);
       pos.setY(vi, y);
+      snapEdgeNormal(vi, "x", wx, wz, neighborSeg);
       snapped[vi] = 1;
       any = true;
     }
@@ -499,19 +513,15 @@ function snapLodBoundariesPartial({
     const neighborSeg = neighborSegments.north;
     for (let k = mMinX; k <= mMaxX; k++) {
       const t = k / segments;
+      const wx = chunkMinX + t * cs;
+      const wz = chunkMinZ;
       const y = sampleCoarseNeighborEdgeY({
-        terrainStore,
-        ncx: cx,
-        ncz: cz - 1,
-        neighborSeg,
-        wx: chunkMinX + t * cs,
-        wz: chunkMinZ,
-        axis: "x",
-        neighborBoundary: "south",
-        dataScale,
+        terrainStore, ncx: cx, ncz: cz - 1, neighborSeg, wx, wz,
+        axis: "x", neighborBoundary: "south", dataScale,
       });
       const vi = vertexIndexOnEdge(segments, "north", k);
       pos.setY(vi, y);
+      snapEdgeNormal(vi, "x", wx, wz, neighborSeg);
       snapped[vi] = 1;
       any = true;
     }
@@ -601,190 +611,6 @@ function sampleCoarseNeighborEdgeY({
     (lzEdgeLocal + nHalf) * dataScale,
   );
   return THREE.MathUtils.lerp(y0, y1, f);
-}
-
-function fixLodSnappedBoundaryNormals({
-  normal,
-  snappedMask,
-  segments,
-  cx,
-  cz,
-  chunkMinX,
-  chunkMinZ,
-  terrainStore,
-  neighborSegments,
-}) {
-  const cs = terrainStore.config.world.chunkSize;
-  const dataScale =
-    terrainStore.config.world.dataResolution / terrainStore.config.world.chunkSize;
-
-  const east = neighborSegments.east;
-  if (east != null && east < segments) {
-    const ncx = cx + 1;
-    const ncz = cz;
-    for (let k = 0; k <= segments; k++) {
-      const vi = vertexIndexOnEdge(segments, "east", k);
-      if (!snappedMask[vi]) continue;
-      const t = segments > 0 ? k / segments : 0;
-      const wz = chunkMinZ + t * cs;
-      const wx = chunkMinX + cs;
-      setNormalFromCoarseEdge({
-        normal,
-        vi,
-        wx,
-        wz,
-        outwardWorld: new THREE.Vector3(1, 0, 0),
-        terrainStore,
-        ncx,
-        ncz,
-        neighborSeg: east,
-        axis: "z",
-        neighborBoundary: "west",
-        dataScale,
-      });
-    }
-  }
-
-  const west = neighborSegments.west;
-  if (west != null && west < segments) {
-    const ncx = cx - 1;
-    const ncz = cz;
-    for (let k = 0; k <= segments; k++) {
-      const vi = vertexIndexOnEdge(segments, "west", k);
-      if (!snappedMask[vi]) continue;
-      const t = segments > 0 ? k / segments : 0;
-      const wz = chunkMinZ + t * cs;
-      const wx = chunkMinX;
-      setNormalFromCoarseEdge({
-        normal,
-        vi,
-        wx,
-        wz,
-        outwardWorld: new THREE.Vector3(-1, 0, 0),
-        terrainStore,
-        ncx,
-        ncz,
-        neighborSeg: west,
-        axis: "z",
-        neighborBoundary: "east",
-        dataScale,
-      });
-    }
-  }
-
-  const south = neighborSegments.south;
-  if (south != null && south < segments) {
-    const ncx = cx;
-    const ncz = cz + 1;
-    for (let k = 0; k <= segments; k++) {
-      const vi = vertexIndexOnEdge(segments, "south", k);
-      if (!snappedMask[vi]) continue;
-      const t = segments > 0 ? k / segments : 0;
-      const wx = chunkMinX + t * cs;
-      const wz = chunkMinZ + cs;
-      setNormalFromCoarseEdge({
-        normal,
-        vi,
-        wx,
-        wz,
-        outwardWorld: new THREE.Vector3(0, 0, 1),
-        terrainStore,
-        ncx,
-        ncz,
-        neighborSeg: south,
-        axis: "x",
-        neighborBoundary: "north",
-        dataScale,
-      });
-    }
-  }
-
-  const north = neighborSegments.north;
-  if (north != null && north < segments) {
-    const ncx = cx;
-    const ncz = cz - 1;
-    for (let k = 0; k <= segments; k++) {
-      const vi = vertexIndexOnEdge(segments, "north", k);
-      if (!snappedMask[vi]) continue;
-      const t = segments > 0 ? k / segments : 0;
-      const wx = chunkMinX + t * cs;
-      const wz = chunkMinZ;
-      setNormalFromCoarseEdge({
-        normal,
-        vi,
-        wx,
-        wz,
-        outwardWorld: new THREE.Vector3(0, 0, -1),
-        terrainStore,
-        ncx,
-        ncz,
-        neighborSeg: north,
-        axis: "x",
-        neighborBoundary: "south",
-        dataScale,
-      });
-    }
-  }
-}
-
-const _tmpEdgeTan = new THREE.Vector3();
-const _tmpOut = new THREE.Vector3();
-const _tmpN = new THREE.Vector3();
-
-function setNormalFromCoarseEdge({
-  normal,
-  vi,
-  wx,
-  wz,
-  outwardWorld,
-  terrainStore,
-  ncx,
-  ncz,
-  neighborSeg,
-  axis,
-  neighborBoundary,
-  dataScale,
-}) {
-  const cs = terrainStore.config.world.chunkSize;
-  const dt = 1 / Math.max(1, neighborSeg);
-  const hWorld = dt * cs;
-  const y0 = sampleCoarseNeighborEdgeY({
-    terrainStore,
-    ncx,
-    ncz,
-    neighborSeg,
-    wx: axis === "z" ? wx : wx - hWorld,
-    wz: axis === "z" ? wz - hWorld : wz,
-    axis,
-    neighborBoundary,
-    dataScale,
-  });
-  const y1 = sampleCoarseNeighborEdgeY({
-    terrainStore,
-    ncx,
-    ncz,
-    neighborSeg,
-    wx: axis === "z" ? wx : wx + hWorld,
-    wz: axis === "z" ? wz + hWorld : wz,
-    axis,
-    neighborBoundary,
-    dataScale,
-  });
-
-  if (axis === "z") {
-    _tmpEdgeTan.set(0, y1 - y0, 2 * hWorld);
-  } else {
-    _tmpEdgeTan.set(2 * hWorld, y1 - y0, 0);
-  }
-  _tmpEdgeTan.normalize();
-
-  _tmpOut.copy(outwardWorld).normalize();
-  _tmpN.copy(_tmpOut).cross(_tmpEdgeTan);
-  _tmpN.normalize();
-
-  if (_tmpN.y < 0) _tmpN.multiplyScalar(-1);
-
-  normal.setXYZ(vi, _tmpN.x, _tmpN.y, _tmpN.z);
 }
 
 function syncSkirtRing({ pos, normal, segments, skirtDepth }) {

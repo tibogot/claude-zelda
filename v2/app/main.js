@@ -205,7 +205,6 @@ export async function startV2App() {
     if (!proceduralTerrainBundle) {
       proceduralTerrainBundle = createV2ProceduralGroundMaterial(
         toolState.groundTsl,
-        toolState.meadowTsl,
       );
     }
     return proceduralTerrainBundle;
@@ -215,10 +214,6 @@ export async function startV2App() {
     if (toolState.terrainSurface !== "tsl") return;
     const b = getProceduralTerrainBundle();
     b.syncGround(toolState.groundTsl);
-    b.syncMeadow(toolState.meadowTsl);
-    b.uMeadowMix.value = toolState.tslGroundUi.meadowMix;
-    b.uSlopeMin.value = toolState.tslGroundUi.meadowSlopeMin;
-    b.uSlopeMax.value = toolState.tslGroundUi.meadowSlopeMax;
   }
 
   function applyTerrainSurfaceFromToolState() {
