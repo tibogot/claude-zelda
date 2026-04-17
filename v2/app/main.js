@@ -27,6 +27,18 @@ import { createV2ImageTexGroundMaterial } from "../render/terrain/sharedImgTexMa
 import { createSplatOverlay } from "../render/terrain/splatOverlayTsl.js";
 import { SplatStore } from "../core/paint/splatStore.js";
 import { PaintSystem } from "../tools/paint/paintSystem.js";
+import {
+  serializeProject,
+  deserializeProject,
+  downloadBlob,
+  openFilePicker,
+  applySettings,
+} from "../core/io/terrainSerializer.js";
+import { TreeStore } from "../core/foliage/treeStore.js";
+import { TreeLodRenderer } from "../render/foliage/treeLodRenderer.js";
+import { TreeSystem } from "../tools/foliage/treeSystem.js";
+import { loadTreeGlbFromFile, openGlbPicker, initGlbLoaderRenderer } from "../core/foliage/glbLoader.js";
+import { GrassManager } from "../render/foliage/grassManager.js";
 
 export async function startV2App() {
   const config = structuredClone(V2_CONFIG);
@@ -53,6 +65,7 @@ export async function startV2App() {
   renderer.shadowMap.enabled = true;
   document.body.appendChild(renderer.domElement);
   await renderer.init();
+  initGlbLoaderRenderer(renderer);
 
   /** Same convention as `splatmap-chunks.html` `sunDirectionFromAngles`. */
   const sunDir = new THREE.Vector3();
@@ -399,9 +412,18 @@ export async function startV2App() {
     toolState,
     terrainStore,
     chunkStream,
-    onHeightsChanged: markHeightTexDirty,
+    onHeightsChanged: () => {
+      markHeightTexDirty();
+      treeStore.syncAllHeights(terrainStore);
+    },
   });
   const paintSystem = new PaintSystem({ toolState, splatStore, config });
+
+  const treeStore = new TreeStore(config);
+  const treeLodRenderer = new TreeLodRenderer(scene, config);
+  const treeSystem = new TreeSystem({ toolState, treeStore, terrainStore, config });
+
+  const grassManager = new GrassManager({ scene, camera, config });
 
   const hud = createHud();
   /** @type {ReturnType<typeof createTweakpaneUi>} */
@@ -448,6 +470,11 @@ export async function startV2App() {
         applyTerrainSurfaceFromToolState();
         ui?.pane.refresh();
       }
+      if (toolState.mode === "grass" && !toolState.grass.enabled) {
+        toolState.grass.enabled = true;
+        grassManager.syncUniforms(toolState.grass, sunDir);
+        ui?.pane.refresh();
+      }
       updateBrushPreviewFromPick(null);
     },
     onPaintLayersChanged: () => {
@@ -455,6 +482,109 @@ export async function startV2App() {
     },
     onPaintFill: () => paintSystem.fillWithActiveLayer(),
     onPaintClear: () => paintSystem.clearAll(),
+    onImportTreeGlb: async (slotIdx, lod) => {
+      const file = await openGlbPicker();
+      if (!file) return;
+      try {
+        const { submeshes, name } = await loadTreeGlbFromFile(file);
+        treeLodRenderer.setSlotModel(slotIdx, lod, submeshes, toolState.treeLod.castShadow);
+        if (lod === 0) toolState.treeSlots[slotIdx].name = name;
+        ui?.pane.refresh();
+        console.log(`[V2] Tree slot ${slotIdx} LOD${lod}: loaded ${submeshes.length} submesh(es) from ${file.name}`);
+      } catch (err) {
+        console.error(`[V2] Failed to load GLB for slot ${slotIdx} LOD${lod}:`, err);
+      }
+    },
+    onRemoveTreeSlot: (slotIdx) => {
+      treeLodRenderer.disposeSlot(slotIdx);
+      console.log(`[V2] Tree slot ${slotIdx} models removed`);
+    },
+    onClearAllTrees: () => {
+      treeSystem.clearAll();
+    },
+    onTreeLodChanged: () => {},
+    onGrassChanged: () => {
+      grassManager.syncUniforms(toolState.grass, sunDir);
+    },
+    onGrassRebuildGeos: () => {
+      grassManager.syncUniforms(toolState.grass, sunDir);
+      grassManager.rebuildGeometries(toolState.grass);
+    },
+    onGrassFill: () => {
+      toolState.grass.enabled = true;
+      grassManager.fillDensity();
+      grassManager.syncUniforms(toolState.grass, sunDir);
+      ui?.pane.refresh();
+    },
+    onGrassClear: () => {
+      grassManager.clearDensity();
+    },
+    onGrassSaveDensity: () => {
+      const data = grassManager.densityTex.image.data;
+      const blob = new Blob([data.buffer], { type: "application/octet-stream" });
+      downloadBlob(blob, "gemini-grass-density.bin");
+    },
+    onGrassLoadDensity: async () => {
+      const file = await openFilePicker(".bin,image/png");
+      if (!file) return;
+      const buf = await file.arrayBuffer();
+      const loaded = new Uint8Array(buf);
+      const texData = grassManager.densityTex.image.data;
+      texData.set(loaded.subarray(0, texData.length));
+      grassManager.densityTex.needsUpdate = true;
+      if (!toolState.grass.enabled) {
+        toolState.grass.enabled = true;
+        grassManager.syncUniforms(toolState.grass, sunDir);
+        ui?.pane.refresh();
+      }
+    },
+    onTreeCastShadowChanged: () => {
+      for (let i = 0; i < toolState.treeSlots.length; i++) {
+        treeLodRenderer.setCastShadow(i, toolState.treeLod.castShadow);
+      }
+    },
+    onSaveProject: () => {
+      const buf = serializeProject({ terrainStore, splatStore, treeStore, config, toolState });
+      const blob = new Blob([buf], { type: "application/octet-stream" });
+      const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      downloadBlob(blob, `terrain-${ts}.v2terrain`);
+    },
+    onLoadProject: async () => {
+      const file = await openFilePicker(".v2terrain");
+      if (!file) return;
+      try {
+        const buf = await file.arrayBuffer();
+        const project = deserializeProject(buf);
+        // Restore terrain heights
+        for (const [key, heights] of project.terrainChunks) {
+          terrainStore.chunkDataMap.set(key, heights);
+        }
+        // Restore splat paint
+        splatStore.restoreFromSnapshot(project.splatChunks);
+        // Restore trees
+        if (project.treeChunks) {
+          treeStore.clear();
+          treeStore.restoreFromSnapshot(project.treeChunks);
+          treeStore.syncAllHeights(terrainStore);
+        }
+        // Restore settings
+        applySettings(toolState, project.settings);
+        // Rebuild everything
+        invalidateSurfaceMaterials();
+        rebuildGlobalHeightTexture();
+        syncFog();
+        rebuildSkyEnv();
+        chunkStream.markAllDirty();
+        chunkStream.update(camera.position);
+        grassManager.syncUniforms(toolState.grass, sunDir);
+        grassManager.rebuildGeometries(toolState.grass);
+        ui?.pane.refresh();
+        const treeCount = treeStore.totalCount;
+        console.log(`[V2] Loaded project: ${project.terrainChunks.size} terrain chunks, ${project.splatChunks.size} splat chunks, ${treeCount} trees`);
+      } catch (err) {
+        console.error("[V2] Failed to load project:", err);
+      }
+    },
   });
 
   /** Engine-style brush preview: translucent hemisphere + edge lines, aligned to surface normal. */
@@ -546,6 +676,8 @@ export async function startV2App() {
   updateSunSky();
   rebuildSkyEnv();
 
+  grassManager.init(globalHeightTex, sunDir, toolState.grass);
+
   const lensFlare = createLensFlareSystem({
     scene,
     camera,
@@ -593,7 +725,7 @@ export async function startV2App() {
   }
 
   function isBrushMode() {
-    return toolState.mode === "sculpt" || toolState.mode === "paint";
+    return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint";
   }
 
   function updateBrushPreviewFromPick(hit) {
@@ -649,6 +781,8 @@ export async function startV2App() {
       sculptSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "paint") {
       paintSystem.beginStroke(hit.point, event);
+    } else if (toolState.mode === "treePaint") {
+      treeSystem.beginStroke(hit.point, event);
     }
   });
 
@@ -660,6 +794,8 @@ export async function startV2App() {
       sculptSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "paint") {
       paintSystem.applyAt(hit.point, event);
+    } else if (toolState.mode === "treePaint") {
+      treeSystem.applyAt(hit.point, event);
     }
   });
 
@@ -697,11 +833,15 @@ export async function startV2App() {
       sculptSystem.endStroke();
     } else if (toolState.mode === "paint") {
       paintSystem.endStroke();
+    } else if (toolState.mode === "treePaint") {
+      treeSystem.endStroke();
     }
   });
 
   function activeEditSystem() {
-    return toolState.mode === "paint" ? paintSystem : sculptSystem;
+    if (toolState.mode === "paint") return paintSystem;
+    if (toolState.mode === "treePaint") return treeSystem;
+    return sculptSystem;
   }
 
   window.addEventListener("keydown", (event) => {
@@ -741,6 +881,7 @@ export async function startV2App() {
 
     controls.update();
     updateSunSky();
+    if (grassManager.uniforms) grassManager.uniforms.uSunDir.value.copy(sunDir);
     lensFlare.update();
 
     shadowTarget.position.set(camera.position.x, 0, camera.position.z);
@@ -777,6 +918,8 @@ export async function startV2App() {
     }
 
     chunkStream.update(camera.position);
+    treeLodRenderer.update(treeStore, camera, toolState.treeLod);
+    grassManager.update(toolState.grass);
 
     let tris = 0;
     for (const ch of chunkStream.activeChunks.values()) {
@@ -810,6 +953,8 @@ export async function startV2App() {
       lensFlare.dispose();
       ui.dispose();
       chunkStream.dispose();
+      treeLodRenderer.dispose();
+      grassManager.dispose();
       tileTerrainMaterial.dispose();
       disposeProceduralBundle();
       disposeImageTexBundle();

@@ -7,7 +7,7 @@ function sculptH2(x, y) {
   return n - Math.floor(n);
 }
 
-function sculptSn2(x, y) {
+export function sculptSn2(x, y) {
   const ix = Math.floor(x);
   const iy = Math.floor(y);
   const fx = x - ix;

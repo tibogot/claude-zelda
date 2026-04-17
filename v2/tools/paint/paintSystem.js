@@ -73,6 +73,7 @@ export class PaintSystem {
       1,
     );
 
+    const paint = this.toolState.paint;
     this.splatStore.applySplatStroke({
       cx: hitPoint.x,
       cz: hitPoint.z,
@@ -80,6 +81,10 @@ export class PaintSystem {
       strength,
       falloff: brush.falloff,
       activeLayer,
+      noiseMask: paint.noiseMask,
+      noiseScale: paint.noiseScale,
+      noiseOctaves: paint.noiseOctaves,
+      noiseEdgeOnly: paint.noiseEdgeOnly,
     });
   }
 

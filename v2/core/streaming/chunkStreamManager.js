@@ -58,6 +58,11 @@ export class ChunkStreamManager {
     for (const key of keys) this.dirtyChunks.set(key, null);
   }
 
+  /** Mark every active chunk as dirty for full rebuild (used on project load). */
+  markAllDirty() {
+    for (const key of this.activeChunks.keys()) this.dirtyChunks.set(key, null);
+  }
+
   update(anchorWorldPos) {
     this.needed.clear();
     this.createQueue.length = 0;

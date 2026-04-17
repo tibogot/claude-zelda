@@ -1,0 +1,308 @@
+import * as THREE from "three";
+import { uniform } from "three/tsl";
+import {
+  createBladeGeometry,
+  createFieldInstancedGeometry,
+  createGrassMaterial,
+  createGrassMaterialMega,
+  setupGrassPatches,
+} from "../../core/foliage/grassGemini.js";
+import { createWindTexture } from "../../core/foliage/windTexture.js";
+
+export class GrassManager {
+  constructor({ scene, camera, config }) {
+    this.scene = scene;
+    this.camera = camera;
+    this.config = config;
+    this.group = new THREE.Group();
+    this.group.name = "GeminiGrass";
+    scene.add(this.group);
+
+    this.patchSystem = null;
+    this.uniforms = null;
+    this.geosAndMats = null;
+    this._currentGeos = null;
+    this._initialized = false;
+    this._enabled = false;
+
+    this.densityRes = 512;
+    const res = this.densityRes;
+    const data = new Uint8Array(res * res * 4);
+    this.densityTex = new THREE.DataTexture(data, res, res, THREE.RGBAFormat);
+    this.densityTex.wrapS = this.densityTex.wrapT = THREE.ClampToEdgeWrapping;
+    this.densityTex.minFilter = THREE.LinearFilter;
+    this.densityTex.magFilter = THREE.LinearFilter;
+    this.densityTex.needsUpdate = true;
+  }
+
+  init(heightTex, sunDir, grassState) {
+    if (this._initialized) return;
+    this._initialized = true;
+
+    const gp = grassState;
+    const ws = this.config.world.size;
+
+    const col = (hex) => new THREE.Color(hex).convertSRGBToLinear();
+
+    this.uniforms = {
+      uTerrainSize: uniform(ws),
+      uSunDir: uniform(sunDir.clone()),
+      uPlayerPos: uniform(new THREE.Vector3(0, 0, 0)),
+      uBladeHeight: uniform(gp.bladeHeight),
+      uGrassDensity: uniform(gp.grassDensity),
+      uWindSpeed: uniform(gp.windSpeed),
+      uWindStrength: uniform(gp.windStrength),
+      uMaxAngle: uniform(gp.maxAngle),
+      uNaturalLean: uniform(gp.naturalLean),
+      uWindDirX: uniform(Math.cos(gp.windAngle * Math.PI / 180)),
+      uWindDirZ: uniform(Math.sin(gp.windAngle * Math.PI / 180)),
+      uWindWaveScale: uniform(gp.windWaveScale),
+      uWindGust: uniform(gp.windGust),
+      uBendFocus: uniform(gp.bendFocus),
+      uStiffness: uniform(gp.stiffness),
+      uClumpScale: uniform(gp.clumpScale),
+      uClumpStrength: uniform(gp.clumpStrength),
+      uCrossed: uniform(gp.crossed ? 1 : 0),
+      uBladeCol: uniform(col(gp.bladeColor)),
+      uTipCol: uniform(col(gp.tipColor)),
+      uSkyBlend: uniform(gp.skyBlend),
+      uCylindrical: uniform(gp.cylindrical),
+      uViewThicken: uniform(gp.viewThicken),
+      uAoBase: uniform(gp.aoBase),
+      uAoPower: uniform(gp.aoPower),
+      uColorVar: uniform(gp.colorVariation ? 1 : 0),
+      uCvHueSpread: uniform(gp.cvHueSpread),
+      uCvSatSpread: uniform(gp.cvSatSpread),
+      uCvDryAmount: uniform(gp.cvDryAmount),
+      uCvDryCol: uniform(col(gp.cvDryColor)),
+      uBssCol: uniform(col(gp.bssColor)),
+      uBssIntensity: uniform(gp.bssIntensity),
+      uBssPower: uniform(gp.bssPower),
+      uFrontScatter: uniform(gp.frontScatter),
+      uRimSSS: uniform(gp.rimSSS),
+      uSpecV1Enabled: uniform(gp.specV1Enabled ? 1 : 0),
+      uSpecV1Intensity: uniform(gp.specV1Intensity),
+      uSpecV1Col: uniform(col(gp.specV1Color)),
+      uSpecV1Dir: uniform(new THREE.Vector3(gp.specV1DirX, gp.specV1DirY, gp.specV1DirZ).normalize()),
+      uSpecV1Power: uniform(gp.specV1Power),
+      uSpecV2Enabled: uniform(gp.specV2Enabled ? 1 : 0),
+      uSpecV2Intensity: uniform(gp.specV2Intensity),
+      uSpecV2Col: uniform(col(gp.specV2Color)),
+      uSpecV2Dir: uniform(new THREE.Vector3(gp.specV2DirX, gp.specV2DirY, gp.specV2DirZ).normalize()),
+      uSpecV2NoiseScale: uniform(gp.specV2NoiseScale),
+      uSpecV2NoiseStr: uniform(gp.specV2NoiseStr),
+      uSpecV2Power: uniform(gp.specV2Power),
+      uSpecV2TipBias: uniform(gp.specV2TipBias),
+      uLodEnabled: uniform(gp.lodEnabled ? 1 : 0),
+      uLodMidDist: uniform(gp.lodMidDistance),
+      uLodFarDist: uniform(gp.lodFarDistance),
+      uLodMaxDist: uniform(Math.max(gp.lodMaxDistance, gp.lodMegaMaxDistance)),
+      uLodFadeStart: uniform(gp.lodFadeStart),
+      uLodDebug: uniform(gp.lodDebug ? 1 : 0),
+      uInteractionEnabled: uniform(0),
+      uInteractionRadius: uniform(gp.interactionRadius),
+      uInteractionStrength: uniform(gp.interactionStrength),
+      uTerrainTintMode: uniform(0),
+      uTerrainTintStrength: uniform(gp.terrainTintStrength ?? 0.5),
+      uTerrainTintRootBias: uniform(gp.terrainTintRootBias ?? 0.35),
+    };
+
+    this.windTex = createWindTexture();
+
+    const ctx = {
+      ...this.uniforms,
+      heightTex,
+      grassDensityTex: this.densityTex,
+      windTex: this.windTex,
+      terrainRes: 512,
+    };
+
+    const material = createGrassMaterial(ctx);
+    const materialMega = createGrassMaterialMega(ctx);
+
+    this._currentGeos = this._buildGeos(gp);
+    this.geosAndMats = {
+      ...this._currentGeos,
+      material,
+      materialMega,
+    };
+
+    this.patchSystem = setupGrassPatches(
+      this.scene,
+      this.camera,
+      this.group,
+      this.geosAndMats,
+      {
+        patchSize: gp.fieldSize,
+        patchSizeMid: gp.lodMidPatchSize,
+        patchSizeFar: gp.lodFarPatchSize,
+        patchSizeMega: gp.lodMegaPatchSize,
+        lodMidDistance: gp.lodMidDistance,
+        lodFarDistance: gp.lodFarDistance,
+        maxDistance: gp.lodMaxDistance,
+        megaMaxDistance: gp.lodMegaMaxDistance,
+        lodHysteresis: 2,
+        lodEnabled: gp.lodEnabled,
+        grassReceiveShadow: gp.receiveShadow,
+        mapWorldHalf: ws * 0.5,
+      },
+    );
+
+    this._enabled = gp.enabled;
+    this.group.visible = this._enabled;
+  }
+
+  _buildGeos(gp) {
+    const highBase = createBladeGeometry(gp.bladeHeight, gp.bladeWidth, Math.round(gp.bladeYSegments), gp.tipTaperStart);
+    const geoHigh = createFieldInstancedGeometry(highBase, gp.fieldSize, Math.round(gp.grassCount), gp.bladeHeight, true);
+    highBase.dispose();
+
+    const midBase = createBladeGeometry(gp.bladeHeight, gp.bladeWidth, Math.round(gp.lodMidSegments), gp.tipTaperStart);
+    const geoMid = createFieldInstancedGeometry(midBase, gp.lodMidPatchSize, Math.round(gp.lodMidGrassCount), gp.bladeHeight, true);
+    midBase.dispose();
+
+    const farBase = createBladeGeometry(gp.bladeHeight, gp.bladeWidth, Math.round(gp.lodFarSegments), gp.tipTaperStart);
+    const geoFar = createFieldInstancedGeometry(farBase, gp.lodFarPatchSize, Math.round(gp.lodFarGrassCount), gp.bladeHeight, false);
+    farBase.dispose();
+
+    const megaBase = createBladeGeometry(gp.bladeHeight, gp.bladeWidth, Math.round(gp.lodMegaSegments), gp.tipTaperStart);
+    const geoMega = createFieldInstancedGeometry(megaBase, gp.lodMegaPatchSize, Math.round(gp.lodMegaGrassCount), gp.bladeHeight, false);
+    megaBase.dispose();
+
+    return { geoHigh, geoMid, geoFar, geoMega };
+  }
+
+  syncUniforms(gp, sunDir) {
+    if (!this.uniforms) return;
+    const u = this.uniforms;
+    u.uBladeHeight.value = gp.bladeHeight;
+    u.uGrassDensity.value = gp.grassDensity;
+    u.uWindSpeed.value = gp.windSpeed;
+    u.uWindStrength.value = gp.windStrength;
+    u.uMaxAngle.value = gp.maxAngle;
+    u.uNaturalLean.value = gp.naturalLean;
+    const wr = gp.windAngle * Math.PI / 180;
+    u.uWindDirX.value = Math.cos(wr);
+    u.uWindDirZ.value = Math.sin(wr);
+    u.uWindWaveScale.value = gp.windWaveScale;
+    u.uWindGust.value = gp.windGust;
+    u.uBendFocus.value = gp.bendFocus;
+    u.uStiffness.value = gp.stiffness;
+    u.uClumpScale.value = gp.clumpScale;
+    u.uClumpStrength.value = gp.clumpStrength;
+    u.uCrossed.value = gp.crossed ? 1 : 0;
+    u.uBladeCol.value.set(gp.bladeColor);
+    u.uTipCol.value.set(gp.tipColor);
+    u.uSkyBlend.value = gp.skyBlend;
+    u.uCylindrical.value = gp.cylindrical;
+    u.uViewThicken.value = gp.viewThicken;
+    u.uAoBase.value = gp.aoBase;
+    u.uAoPower.value = gp.aoPower;
+    u.uColorVar.value = gp.colorVariation ? 1 : 0;
+    u.uCvHueSpread.value = gp.cvHueSpread;
+    u.uCvSatSpread.value = gp.cvSatSpread;
+    u.uCvDryAmount.value = gp.cvDryAmount;
+    u.uCvDryCol.value.set(gp.cvDryColor);
+    u.uBssCol.value.set(gp.bssColor);
+    u.uBssIntensity.value = gp.bssIntensity;
+    u.uBssPower.value = gp.bssPower;
+    u.uFrontScatter.value = gp.frontScatter;
+    u.uRimSSS.value = gp.rimSSS;
+    u.uSpecV1Enabled.value = gp.specV1Enabled ? 1 : 0;
+    u.uSpecV1Intensity.value = gp.specV1Intensity;
+    u.uSpecV1Col.value.set(gp.specV1Color);
+    u.uSpecV1Dir.value.set(gp.specV1DirX, gp.specV1DirY, gp.specV1DirZ).normalize();
+    u.uSpecV1Power.value = gp.specV1Power;
+    u.uSpecV2Enabled.value = gp.specV2Enabled ? 1 : 0;
+    u.uSpecV2Intensity.value = gp.specV2Intensity;
+    u.uSpecV2Col.value.set(gp.specV2Color);
+    u.uSpecV2Dir.value.set(gp.specV2DirX, gp.specV2DirY, gp.specV2DirZ).normalize();
+    u.uSpecV2NoiseScale.value = gp.specV2NoiseScale;
+    u.uSpecV2NoiseStr.value = gp.specV2NoiseStr;
+    u.uSpecV2Power.value = gp.specV2Power;
+    u.uSpecV2TipBias.value = gp.specV2TipBias;
+    u.uLodEnabled.value = gp.lodEnabled ? 1 : 0;
+    u.uLodMidDist.value = gp.lodMidDistance;
+    u.uLodFarDist.value = gp.lodFarDistance;
+    u.uLodMaxDist.value = Math.max(gp.lodMaxDistance, gp.lodMegaMaxDistance);
+    u.uLodFadeStart.value = gp.lodFadeStart;
+    u.uLodDebug.value = gp.lodDebug ? 1 : 0;
+    u.uInteractionRadius.value = gp.interactionRadius;
+    u.uInteractionStrength.value = gp.interactionStrength;
+    if (gp.terrainTintEnabled) {
+      if (gp.terrainTintAutoSource) {
+        u.uTerrainTintMode.value = 1;
+      } else {
+        u.uTerrainTintMode.value = Math.max(0, Math.min(2, gp.terrainTintManualMode | 0));
+      }
+    } else {
+      u.uTerrainTintMode.value = 0;
+    }
+    u.uTerrainTintStrength.value = gp.terrainTintStrength ?? 0.5;
+    u.uTerrainTintRootBias.value = gp.terrainTintRootBias ?? 0.35;
+    if (sunDir) u.uSunDir.value.copy(sunDir);
+  }
+
+  rebuildGeometries(gp) {
+    if (!this.patchSystem) return;
+    const old = this._currentGeos;
+    this._currentGeos = this._buildGeos(gp);
+    this.patchSystem.updateGeometries(this._currentGeos);
+    if (old) {
+      old.geoHigh?.dispose();
+      old.geoMid?.dispose();
+      old.geoFar?.dispose();
+      old.geoMega?.dispose();
+    }
+  }
+
+  update(grassState) {
+    if (!this._initialized || !this.patchSystem) return;
+    const enabled = grassState.enabled;
+    if (enabled !== this._enabled) {
+      this._enabled = enabled;
+      this.group.visible = enabled;
+    }
+    if (!enabled) return;
+
+    const gp = grassState;
+    this.patchSystem.update({
+      patchSize: gp.fieldSize,
+      patchSizeMid: gp.lodMidPatchSize,
+      patchSizeFar: gp.lodFarPatchSize,
+      patchSizeMega: gp.lodMegaPatchSize,
+      lodMidDistance: gp.lodMidDistance,
+      lodFarDistance: gp.lodFarDistance,
+      maxDistance: gp.lodMaxDistance,
+      megaMaxDistance: gp.lodMegaMaxDistance,
+      lodEnabled: gp.lodEnabled,
+      grassReceiveShadow: gp.receiveShadow,
+    });
+  }
+
+  fillDensity() {
+    this.densityTex.image.data.fill(255);
+    this.densityTex.needsUpdate = true;
+  }
+
+  clearDensity() {
+    this.densityTex.image.data.fill(0);
+    this.densityTex.needsUpdate = true;
+  }
+
+  dispose() {
+    if (this._currentGeos) {
+      this._currentGeos.geoHigh?.dispose();
+      this._currentGeos.geoMid?.dispose();
+      this._currentGeos.geoFar?.dispose();
+      this._currentGeos.geoMega?.dispose();
+    }
+    if (this.geosAndMats) {
+      this.geosAndMats.material?.dispose();
+      this.geosAndMats.materialMega?.dispose();
+    }
+    this.densityTex.dispose();
+    this.windTex?.dispose();
+    this.scene.remove(this.group);
+  }
+}

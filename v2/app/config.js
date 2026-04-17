@@ -180,6 +180,10 @@ export const V2_CONFIG = {
     mapSize: 2048,
     updateEveryFrame: false,
   },
+  tree: {
+    maxSlots: 4,
+    maxInstancesPerMesh: 4096,
+  },
   /** WebGPU TSL fog — same defaults as `splatmap-chunks.html` PARAMS.fog. */
   fog: {
     height: {

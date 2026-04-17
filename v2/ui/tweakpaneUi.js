@@ -3,6 +3,8 @@ import { V2_CONFIG } from "../app/config.js";
 import { addTerrainAppearanceFolder } from "./terrainAppearanceTweakpane.js";
 import { addTextureLibraryFolder } from "./textureLibraryTweakpane.js";
 import { addPaintFolder } from "./paintTweakpane.js";
+import { addTreeFolder } from "./treeTweakpane.js";
+import { addGrassFolder } from "./grassTweakpane.js";
 
 export function createTweakpaneUi({
   toolState,
@@ -26,6 +28,19 @@ export function createTweakpaneUi({
   onPaintLayersChanged,
   onPaintFill,
   onPaintClear,
+  onSaveProject,
+  onLoadProject,
+  onImportTreeGlb,
+  onRemoveTreeSlot,
+  onClearAllTrees,
+  onTreeLodChanged,
+  onTreeCastShadowChanged,
+  onGrassChanged,
+  onGrassRebuildGeos,
+  onGrassFill,
+  onGrassClear,
+  onGrassSaveDensity,
+  onGrassLoadDensity,
 }) {
   const pane = new Pane({ title: "V2 Terrain Core" });
 
@@ -37,11 +52,16 @@ export function createTweakpaneUi({
         View: "view",
         Sculpt: "sculpt",
         Paint: "paint",
+        "Tree Paint": "treePaint",
+        Grass: "grass",
       },
     })
     .on("change", () => onModeChanged?.());
   globalFolder.addButton({ title: "Undo" }).on("click", () => sculptSystem.undo());
   globalFolder.addButton({ title: "Redo" }).on("click", () => sculptSystem.redo());
+  globalFolder.addBlade({ view: "separator" });
+  globalFolder.addButton({ title: "💾 Save project" }).on("click", () => onSaveProject?.());
+  globalFolder.addButton({ title: "📂 Load project" }).on("click", () => onLoadProject?.());
 
   addTerrainAppearanceFolder(pane, toolState, {
     textureLibrary,
@@ -62,6 +82,23 @@ export function createTweakpaneUi({
       onPaintClear,
     });
   }
+
+  addTreeFolder(pane, toolState, {
+    onImportGlb: onImportTreeGlb,
+    onRemoveSlot: onRemoveTreeSlot,
+    onClearAllTrees,
+    onTreeLodChanged,
+    onCastShadowChanged: onTreeCastShadowChanged,
+  });
+
+  addGrassFolder(pane, toolState, {
+    onGrassChanged,
+    onGrassRebuildGeos,
+    onGrassFill,
+    onGrassClear,
+    onGrassSaveDensity,
+    onGrassLoadDensity,
+  });
 
   /** Shared across sculpt, future paint, foliage, props — same as v1 brush UX. */
   const brushFolder = pane.addFolder({ title: "Brush" });

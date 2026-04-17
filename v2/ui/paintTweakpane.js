@@ -37,6 +37,29 @@ export function addPaintFolder(pane, toolState, opts) {
     step: 0.01,
   });
 
+  const noiseFolder = folder.addFolder({ title: "Noise Mask", expanded: false });
+  noiseFolder.addBinding(toolState.paint, "noiseMask", {
+    label: "Amount",
+    min: 0,
+    max: 1,
+    step: 0.02,
+  });
+  noiseFolder.addBinding(toolState.paint, "noiseScale", {
+    label: "Scale",
+    min: 0.5,
+    max: 20,
+    step: 0.25,
+  });
+  noiseFolder.addBinding(toolState.paint, "noiseOctaves", {
+    label: "Detail",
+    min: 1,
+    max: 6,
+    step: 1,
+  });
+  noiseFolder.addBinding(toolState.paint, "noiseEdgeOnly", {
+    label: "Edge only",
+  });
+
   folder.addBlade({ view: "separator" });
 
   const slotOptions = textureLibrary.getSlotOptionsForUi();

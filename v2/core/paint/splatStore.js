@@ -21,6 +21,7 @@ import {
   parseChunkKey,
   worldToChunkIndex,
 } from "../terrain/chunkMath.js";
+import { sculptSn2 } from "../terrain/sculptNoiseFbm.js";
 
 export class SplatStore {
   constructor(config) {
@@ -73,7 +74,7 @@ export class SplatStore {
   }
 
   /**
-   * Paint brush stamp.
+   * Paint brush stamp with optional noise mask.
    * @param {object} stroke
    * @param {number} stroke.cx - brush center world X
    * @param {number} stroke.cz - brush center world Z
@@ -81,6 +82,10 @@ export class SplatStore {
    * @param {number} stroke.strength - 0..1 per-pixel max delta
    * @param {number} stroke.falloff - power applied to `(1 - dist/radius)`
    * @param {number} stroke.activeLayer - 0 = base (eraser), 1..3 = R/G/B channel
+   * @param {number} [stroke.noiseMask=0] - 0 = clean circle, 1 = fully noise-masked edge
+   * @param {number} [stroke.noiseScale=3] - world-space noise frequency
+   * @param {number} [stroke.noiseOctaves=3] - FBM octaves for mask
+   * @param {boolean} [stroke.noiseEdgeOnly=false] - noise only breaks the edge, not the interior
    * @returns {Set<string>} chunk keys touched by this stamp
    */
   applySplatStroke(stroke) {
@@ -90,6 +95,11 @@ export class SplatStore {
     const r = stroke.radius;
     const invR = 1 / r;
     const touched = new Set();
+
+    const noiseMask = stroke.noiseMask ?? 0;
+    const noiseScale = stroke.noiseScale ?? 3;
+    const noiseOctaves = Math.round(stroke.noiseOctaves ?? 3);
+    const noiseEdgeOnly = stroke.noiseEdgeOnly ?? false;
 
     const chunks = this.getChunkIndicesInBounds(
       stroke.cx - r,
@@ -123,7 +133,19 @@ export class SplatStore {
           const d = Math.sqrt(dx * dx + dz * dz);
           if (d > r) continue;
           const t = 1 - d * invR;
-          const falloff = Math.pow(t, stroke.falloff);
+          let falloff = Math.pow(t, stroke.falloff);
+
+          if (noiseMask > 0) {
+            let n = _fbmNoise(wx * noiseScale, wz * noiseScale, noiseOctaves);
+            if (noiseEdgeOnly) {
+              const edgeFactor = 1 - t;
+              n = 1 - edgeFactor * (1 - n) * noiseMask;
+            } else {
+              n = n * noiseMask + (1 - noiseMask);
+            }
+            falloff *= Math.max(0, n);
+          }
+
           const w = falloff * stroke.strength;
           if (w <= 0) continue;
           const delta = w * 255;
@@ -205,4 +227,18 @@ export class SplatStore {
     for (const entry of this.chunks.values()) entry.tex.dispose();
     this.chunks.clear();
   }
+}
+
+function _fbmNoise(x, y, octaves) {
+  let s = 0;
+  let a = 0.5;
+  let f = 1;
+  let m = 0;
+  for (let i = 0; i < octaves; i++) {
+    s += sculptSn2(x * f, y * f) * a;
+    m += a;
+    a *= 0.5;
+    f *= 2;
+  }
+  return m > 0 ? s / m : 0;
 }
