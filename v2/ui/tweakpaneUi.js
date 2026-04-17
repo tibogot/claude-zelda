@@ -2,6 +2,7 @@ import { Pane } from "tweakpane";
 import { V2_CONFIG } from "../app/config.js";
 import { addTerrainAppearanceFolder } from "./terrainAppearanceTweakpane.js";
 import { addTextureLibraryFolder } from "./textureLibraryTweakpane.js";
+import { addPaintFolder } from "./paintTweakpane.js";
 
 export function createTweakpaneUi({
   toolState,
@@ -21,16 +22,24 @@ export function createTweakpaneUi({
   onAutoCliffChanged,
   onCliffSlotChanged,
   onGroundSlotChanged,
+  onModeChanged,
+  onPaintLayersChanged,
+  onPaintFill,
+  onPaintClear,
 }) {
   const pane = new Pane({ title: "V2 Terrain Core" });
 
   const globalFolder = pane.addFolder({ title: "Global" });
-  globalFolder.addBinding(toolState, "mode", {
-    label: "Mode",
-    options: {
-      Sculpt: "sculpt",
-    },
-  });
+  globalFolder
+    .addBinding(toolState, "mode", {
+      label: "Mode",
+      options: {
+        View: "view",
+        Sculpt: "sculpt",
+        Paint: "paint",
+      },
+    })
+    .on("change", () => onModeChanged?.());
   globalFolder.addButton({ title: "Undo" }).on("click", () => sculptSystem.undo());
   globalFolder.addButton({ title: "Redo" }).on("click", () => sculptSystem.redo());
 
@@ -45,6 +54,13 @@ export function createTweakpaneUi({
 
   if (textureLibrary) {
     addTextureLibraryFolder(pane, toolState, textureLibrary);
+    addPaintFolder(pane, toolState, {
+      config,
+      textureLibrary,
+      onPaintLayersChanged,
+      onPaintFill,
+      onPaintClear,
+    });
   }
 
   /** Shared across sculpt, future paint, foliage, props — same as v1 brush UX. */

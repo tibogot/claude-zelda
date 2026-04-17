@@ -3,13 +3,14 @@ import { chunkCenterWorld, chunkKey, getChunkCountPerAxis } from "../terrain/chu
 import { pickLodByDistance, pickLodWithHysteresis } from "./lodPolicy.js";
 
 export class ChunkStreamManager {
-  constructor({ config, scene, terrainStore, mesher, material, perf }) {
+  constructor({ config, scene, terrainStore, mesher, material, perf, onChunkCreated = null }) {
     this.config = config;
     this.scene = scene;
     this.terrainStore = terrainStore;
     this.mesher = mesher;
     this.material = material;
     this.perf = perf;
+    this.onChunkCreated = onChunkCreated;
 
     this.activeChunks = new Map();
     this.needed = new Set();
@@ -205,6 +206,7 @@ export class ChunkStreamManager {
     this.activeChunks.set(key, { key, cx, cz, segments: lod.segments, mesh });
     this.dirtyChunks.delete(key);
     this._raycastMeshesCache = null;
+    if (this.onChunkCreated) this.onChunkCreated(mesh, key, cx, cz);
     // Neighbor LOD stitching depends on this chunk's segment count; refresh adjacent meshes.
     this.markNeighborStitchDirty(cx, cz, lod.segments);
   }

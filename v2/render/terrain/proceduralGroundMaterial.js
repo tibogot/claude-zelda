@@ -1,14 +1,19 @@
 import * as THREE from "three";
-import { Fn } from "three/tsl";
+import { Fn, float, vec2, vec3 } from "three/tsl";
+import { normalMap } from "three/tsl";
 import { createGroundTslBundle } from "../../../chunkGroundTsl.js";
+import { createMeadowTslBundle } from "../../../chunkMeadowTsl.js";
 import { createCliffShadingContext } from "../../../chunkTerrainAutoCliff.js";
 
 /**
- * @param {import("../../../chunkGroundTsl.js").GROUND_DEFAULT_PARAMS} groundParams
- * @param {null | { heightTex, rockColorTex, rockDataTex, cliffU, worldSize, worldHalf, htexRes }} [cliffDeps]
+ * @param {object} groundParams
+ * @param {object} meadowParams
+ * @param {null | object} [cliffDeps]
+ * @param {null | ReturnType<import("./splatOverlayTsl.js").createSplatOverlay>} [splatOverlay]
  */
-export function createV2ProceduralGroundMaterial(groundParams, cliffDeps = null) {
+export function createV2ProceduralGroundMaterial(groundParams, meadowParams, cliffDeps = null, splatOverlay = null) {
   const groundBundle = createGroundTslBundle(groundParams);
+  const meadowBundle = createMeadowTslBundle(meadowParams);
 
   const cliff =
     cliffDeps &&
@@ -29,17 +34,54 @@ export function createV2ProceduralGroundMaterial(groundParams, cliffDeps = null)
   mat.envMapIntensity = 0;
 
   mat.colorNode = Fn(() => {
-    const g = groundBundle.groundProc();
-    return cliff ? cliff.augmentColor(g) : g;
+    let col = groundBundle.groundProc();
+    if (splatOverlay) {
+      col = splatOverlay.blendColor(col);
+      col = splatOverlay.blendMeadow(col, meadowBundle.meadowProc);
+    }
+    return cliff ? cliff.augmentColor(col) : col;
   })();
 
-  if (cliff) {
+  if (cliff && splatOverlay) {
+    mat.roughnessNode = Fn(() => {
+      const baseRough = float(0.9);
+      const overlaid = splatOverlay.blendRoughness(baseRough);
+      const slope = cliff.getSlopeMask().pow(cliffDeps.cliffU.uRockBlendSharp);
+      return Fn(() => cliff.evaluateRockRoughnessRawInFn())().mul(float(1).sub(slope)).add(overlaid.mul(slope));
+    })();
+    mat.normalNode = Fn(() => {
+      const baseRaw = vec3(0.5, 0.5, 1.0);
+      const overlaid = splatOverlay.blendNormalRaw(baseRaw);
+      const nstr = splatOverlay.blendNormalStrength(float(1.0));
+      const rockRaw = cliff.evaluateRockNormalRawInFn();
+      const slope = cliff.getSlopeMask().pow(cliffDeps.cliffU.uRockBlendSharp);
+      const combined = Fn(() => {
+        const mx = rockRaw.x.mul(float(1).sub(slope)).add(overlaid.x.mul(slope));
+        const my = rockRaw.y.mul(float(1).sub(slope)).add(overlaid.y.mul(slope));
+        const mz = rockRaw.z.mul(float(1).sub(slope)).add(overlaid.z.mul(slope));
+        return vec3(mx, my, mz);
+      })();
+      return normalMap(combined, vec2(nstr, nstr));
+    })();
+  } else if (cliff) {
     mat.normalNode = cliff.buildNormalNode();
     mat.roughnessNode = cliff.buildRoughnessNode();
+  } else if (splatOverlay) {
+    mat.roughnessNode = Fn(() => {
+      return splatOverlay.blendRoughness(float(0.9));
+    })();
+    mat.normalNode = Fn(() => {
+      const baseRaw = vec3(0.5, 0.5, 1.0);
+      const overlaid = splatOverlay.blendNormalRaw(baseRaw);
+      const nstr = splatOverlay.blendNormalStrength(float(1.0));
+      return normalMap(overlaid, vec2(nstr, nstr));
+    })();
   }
 
   return {
     material: mat,
+    splatTexNode: splatOverlay?.splatTexNode ?? null,
     syncGround: (p) => groundBundle.syncFromParams(p),
+    syncMeadow: (p) => meadowBundle.syncFromParams(p),
   };
 }

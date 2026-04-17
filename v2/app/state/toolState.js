@@ -8,13 +8,22 @@ function deepCloneJson(x) {
 
 export function createToolState() {
   return {
-    mode: "sculpt",
+    /** `view` (orbit only) | `sculpt` | `paint`. Defaults to `view` — matches v1. */
+    mode: "view",
     /** `tile` = grid material; `tsl` = procedural TSL; `image` = tiled image-slot material. */
     terrainSurface: "tile",
     /** Texture-library slot ids picked by the surface modes that use slots. */
     textureSlots: {
       cliffSlotId: "cliff_rock",
       groundSlotId: "grass_005",
+    },
+    /**
+     * Paint mode — 4 layers (layer 0 is base, layers 1..3 are R/G/B splat channels).
+     * `activeLayer` selects what the brush paints (0 = eraser → pulls toward base).
+     */
+    paint: {
+      activeLayer: V2_CONFIG.paint.defaultActiveLayer,
+      layerSlotIds: ["ground_037", "cobblestone", "cliff_rock"],
     },
     groundTsl: deepCloneJson(GROUND_DEFAULT_PARAMS),
     meadowTsl: deepCloneJson(MEADOW_DEFAULT_PARAMS),

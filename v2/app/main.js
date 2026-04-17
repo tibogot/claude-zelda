@@ -24,6 +24,9 @@ import { createLensFlareSystem } from "../effects/lensFlare.js";
 import { createAutoCliffUniforms } from "../../chunkTerrainAutoCliff.js";
 import { createTextureLibrary } from "../core/textures/textureLibrary.js";
 import { createV2ImageTexGroundMaterial } from "../render/terrain/sharedImgTexMaterial.js";
+import { createSplatOverlay } from "../render/terrain/splatOverlayTsl.js";
+import { SplatStore } from "../core/paint/splatStore.js";
+import { PaintSystem } from "../tools/paint/paintSystem.js";
 
 export async function startV2App() {
   const config = structuredClone(V2_CONFIG);
@@ -275,6 +278,43 @@ export async function startV2App() {
   let proceduralTerrainBundle = null;
   let imageTexTerrainBundle = null;
 
+  const splatStore = new SplatStore(config);
+  const placeholderSplatTex = (() => {
+    const t = new THREE.DataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, THREE.RGBAFormat);
+    t.needsUpdate = true;
+    return t;
+  })();
+
+  function buildSplatOverlay() {
+    if (!textureLibraryReady) return null;
+    const slots = toolState.paint.layerSlotIds.map((id) => textureLibrary.getSlot(id));
+    if (slots.some((s) => !s)) return null;
+    return createSplatOverlay(slots, config.world.chunkSize, config.world.size);
+  }
+
+  /** Returns the splatTexNode from whichever surface material is active (if any). */
+  function getActiveSplatTexNode() {
+    if (toolState.terrainSurface === "tsl" && proceduralTerrainBundle) {
+      return proceduralTerrainBundle.splatTexNode;
+    }
+    if (toolState.terrainSurface === "image" && imageTexTerrainBundle) {
+      return imageTexTerrainBundle.splatTexNode;
+    }
+    return null;
+  }
+
+  function setupSplatSwapFromStore(mesh) {
+    const prev = mesh.onBeforeRender;
+    mesh.onBeforeRender = (renderer, scene, camera, geometry, material, group) => {
+      if (prev) prev(renderer, scene, camera, geometry, material, group);
+      const node = getActiveSplatTexNode();
+      if (!node) return;
+      const key = mesh.userData.chunkKey;
+      const entry = splatStore.getChunkSplatByKey(key);
+      node.value = entry?.tex ?? placeholderSplatTex;
+    };
+  }
+
   const terrainMesher = new TerrainMesher(config);
   const chunkStream = new ChunkStreamManager({
     config,
@@ -283,6 +323,9 @@ export async function startV2App() {
     mesher: terrainMesher,
     material: tileTerrainMaterial,
     perf,
+    onChunkCreated: (mesh) => {
+      setupSplatSwapFromStore(mesh);
+    },
   });
 
   function disposeProceduralBundle() {
@@ -297,7 +340,6 @@ export async function startV2App() {
       imageTexTerrainBundle = null;
     }
   }
-  /** Rebuild whichever cliff-consuming material is live (cliff swap / auto-cliff toggle). */
   function invalidateSurfaceMaterials() {
     disposeProceduralBundle();
     disposeImageTexBundle();
@@ -309,7 +351,9 @@ export async function startV2App() {
       syncCliffUniformsFromParams();
       proceduralTerrainBundle = createV2ProceduralGroundMaterial(
         toolState.groundTsl,
+        toolState.meadowTsl,
         buildCliffDeps(),
+        buildSplatOverlay(),
       );
     }
     return proceduralTerrainBundle;
@@ -323,6 +367,8 @@ export async function startV2App() {
         groundSlot,
         config.world.size,
         buildCliffDeps(),
+        buildSplatOverlay(),
+        toolState.meadowTsl,
       );
     }
     return imageTexTerrainBundle;
@@ -332,6 +378,7 @@ export async function startV2App() {
     if (toolState.terrainSurface !== "tsl") return;
     const b = getProceduralTerrainBundle();
     b.syncGround(toolState.groundTsl);
+    b.syncMeadow(toolState.meadowTsl);
   }
 
   function applyTerrainSurfaceFromToolState() {
@@ -354,6 +401,7 @@ export async function startV2App() {
     chunkStream,
     onHeightsChanged: markHeightTexDirty,
   });
+  const paintSystem = new PaintSystem({ toolState, splatStore, config });
 
   const hud = createHud();
   /** @type {ReturnType<typeof createTweakpaneUi>} */
@@ -391,6 +439,22 @@ export async function startV2App() {
       disposeImageTexBundle();
       if (toolState.terrainSurface === "image") applyTerrainSurfaceFromToolState();
     },
+    onModeChanged: () => {
+      if (toolState.mode !== "sculpt") {
+        sculptSystem.clearRampPoint();
+      }
+      if (toolState.mode === "paint" && toolState.terrainSurface === "tile") {
+        toolState.terrainSurface = "tsl";
+        applyTerrainSurfaceFromToolState();
+        ui?.pane.refresh();
+      }
+      updateBrushPreviewFromPick(null);
+    },
+    onPaintLayersChanged: () => {
+      invalidateSurfaceMaterials();
+    },
+    onPaintFill: () => paintSystem.fillWithActiveLayer(),
+    onPaintClear: () => paintSystem.clearAll(),
   });
 
   /** Engine-style brush preview: translucent hemisphere + edge lines, aligned to surface normal. */
@@ -528,8 +592,12 @@ export async function startV2App() {
     rampMarkerA.scale.setScalar(toolState.brush.radius);
   }
 
+  function isBrushMode() {
+    return toolState.mode === "sculpt" || toolState.mode === "paint";
+  }
+
   function updateBrushPreviewFromPick(hit) {
-    if (!hit || toolState.mode !== "sculpt") {
+    if (!hit || !isBrushMode()) {
       brushPreview.visible = false;
       brushRing.visible = false;
       syncRampMarker();
@@ -560,9 +628,9 @@ export async function startV2App() {
   }
 
   renderer.domElement.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0 || toolState.mode !== "sculpt") return;
+    if (event.button !== 0 || !isBrushMode()) return;
     const hit = pickTerrain(event);
-    if (toolState.sculptMode === "ramp") {
+    if (toolState.mode === "sculpt" && toolState.sculptMode === "ramp") {
       if (!hit) return;
       event.preventDefault();
       if (!sculptSystem.hasRampPointA()) {
@@ -577,15 +645,22 @@ export async function startV2App() {
     event.preventDefault();
     pointerDown = true;
     controls.enabled = false;
-    sculptSystem.beginStroke(hit.point, event);
+    if (toolState.mode === "sculpt") {
+      sculptSystem.beginStroke(hit.point, event);
+    } else if (toolState.mode === "paint") {
+      paintSystem.beginStroke(hit.point, event);
+    }
   });
 
   renderer.domElement.addEventListener("pointermove", (event) => {
     const hit = pickTerrain(event);
     updateBrushPreviewFromPick(hit);
-    if (!pointerDown || toolState.mode !== "sculpt") return;
-    if (!hit) return;
-    sculptSystem.applyAt(hit.point, event);
+    if (!pointerDown || !isBrushMode() || !hit) return;
+    if (toolState.mode === "sculpt") {
+      sculptSystem.applyAt(hit.point, event);
+    } else if (toolState.mode === "paint") {
+      paintSystem.applyAt(hit.point, event);
+    }
   });
 
   // splatmap-chunks-main.js: Shift+wheel → brush size, Alt+wheel → strength (Shift wins if both).
@@ -618,18 +693,27 @@ export async function startV2App() {
     if (!pointerDown) return;
     pointerDown = false;
     controls.enabled = true;
-    sculptSystem.endStroke();
+    if (toolState.mode === "sculpt") {
+      sculptSystem.endStroke();
+    } else if (toolState.mode === "paint") {
+      paintSystem.endStroke();
+    }
   });
+
+  function activeEditSystem() {
+    return toolState.mode === "paint" ? paintSystem : sculptSystem;
+  }
 
   window.addEventListener("keydown", (event) => {
     const ctrl = event.ctrlKey || event.metaKey;
     if (ctrl && event.code === "KeyZ") {
       event.preventDefault();
-      if (event.shiftKey) sculptSystem.redo();
-      else sculptSystem.undo();
+      const sys = activeEditSystem();
+      if (event.shiftKey) sys.redo();
+      else sys.undo();
     } else if (ctrl && event.code === "KeyY") {
       event.preventDefault();
-      sculptSystem.redo();
+      activeEditSystem().redo();
     } else if (
       event.code === "KeyR" &&
       toolState.mode === "sculpt" &&
@@ -726,7 +810,10 @@ export async function startV2App() {
       lensFlare.dispose();
       ui.dispose();
       chunkStream.dispose();
-      terrainMaterial.dispose();
+      tileTerrainMaterial.dispose();
+      disposeProceduralBundle();
+      disposeImageTexBundle();
+      splatStore.dispose();
       brushDomeGeom.dispose();
       brushDomeFillMat.dispose();
       brushDomeEdgesGeom.dispose();

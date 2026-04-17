@@ -119,6 +119,19 @@ export const V2_CONFIG = {
     maxPixelRatio: 2,
     clearColor: 0xa3c7df,
   },
+  /**
+   * Paint mode — 4 layer splat (layer0 base + R/G/B weights → layers 1/2/3).
+   * Shader normalizes per-pixel so R+G+B can freely exceed 1 (over-paint) and
+   * the material still blends meaningfully.
+   */
+  paint: {
+    /** Per-chunk splat texture resolution. 100m chunk / 128 ≈ 0.78 m/texel. */
+    splatResolution: 128,
+    /** Default active layer (0 = base, 1..3 = R/G/B). Unreal-style palette starts on layer 1. */
+    defaultActiveLayer: 1,
+    /** Brush opacity scale for paint strokes — strength maps 0..1 onto this. */
+    brushOpacity: 0.6,
+  },
   /** Defaults from `splatmap-chunks.html` PARAMS.light (sun + fill + tone exposure). */
   light: {
     sunAzimuth: 135,
