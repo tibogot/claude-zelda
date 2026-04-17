@@ -1355,19 +1355,19 @@ export function setupGrassPatches(
       farCount = 0,
       megaCount = 0;
 
-    // ── HIGH tier grid (spacing = ps) ──
-    // Track HIGH coverage so MID/FAR can skip fully-covered cells
+    // ── HIGH tier grid (spacing = ps) — world-aligned ──
     const highMaxEdge = useLod ? midDist + lodHysteresis : maxDist;
     {
-      const snapX = Math.floor(camera.position.x / ps) * ps;
-      const snapZ = Math.floor(camera.position.z / ps) * ps;
-      const cells = Math.ceil(highMaxEdge / ps) + 1;
+      const camX = camera.position.x;
+      const camZ = camera.position.z;
+      const minCellX = Math.floor((camX - highMaxEdge) / ps) * ps;
+      const maxCellX = Math.floor((camX + highMaxEdge) / ps) * ps;
+      const minCellZ = Math.floor((camZ - highMaxEdge) / ps) * ps;
+      const maxCellZ = Math.floor((camZ + highMaxEdge) / ps) * ps;
       _aabbSize.set(ps, 1000, ps);
 
-      for (let r = -cells; r <= cells; r++) {
-        for (let c = -cells; c <= cells; c++) {
-          const cellX = snapX + c * ps;
-          const cellZ = snapZ + r * ps;
+      for (let cellZ = minCellZ; cellZ <= maxCellZ; cellZ += ps) {
+        for (let cellX = minCellX; cellX <= maxCellX; cellX += ps) {
           _cellPos.set(cellX, 0, cellZ);
           _aabb.setFromCenterAndSize(_cellPos, _aabbSize);
           const dist = _aabb.distanceToPoint(_camPosXZ);
@@ -1388,22 +1388,21 @@ export function setupGrassPatches(
       }
     }
 
-    // ── MID tier grid (spacing = psMid) ──
+    // ── MID tier grid (spacing = psMid) — world-aligned ──
     // Skip cells whose farthest corner is inside HIGH zone (fully covered).
-    // Cells that partially overlap HIGH are still rendered — overlap is OK,
-    // blade hashing + density culling prevent visual doubling.
     const midMaxEdge = farDist + lodHysteresis;
     if (useLod) {
-      const snapX = Math.floor(camera.position.x / psMid) * psMid;
-      const snapZ = Math.floor(camera.position.z / psMid) * psMid;
-      const cells = Math.ceil((midMaxEdge + psMid) / psMid) + 1;
+      const camX = camera.position.x;
+      const camZ = camera.position.z;
+      const minCellX = Math.floor((camX - midMaxEdge - psMid) / psMid) * psMid;
+      const maxCellX = Math.floor((camX + midMaxEdge + psMid) / psMid) * psMid;
+      const minCellZ = Math.floor((camZ - midMaxEdge - psMid) / psMid) * psMid;
+      const maxCellZ = Math.floor((camZ + midMaxEdge + psMid) / psMid) * psMid;
       _aabbSize.set(psMid, 1000, psMid);
       const halfMid = psMid * 0.5;
 
-      for (let r = -cells; r <= cells; r++) {
-        for (let c = -cells; c <= cells; c++) {
-          const cellX = snapX + c * psMid;
-          const cellZ = snapZ + r * psMid;
+      for (let cellZ = minCellZ; cellZ <= maxCellZ; cellZ += psMid) {
+        for (let cellX = minCellX; cellX <= maxCellX; cellX += psMid) {
           _cellPos.set(cellX, 0, cellZ);
           _aabb.setFromCenterAndSize(_cellPos, _aabbSize);
           const dist = _aabb.distanceToPoint(_camPosXZ);
@@ -1436,18 +1435,19 @@ export function setupGrassPatches(
       }
     }
 
-    // ── FAR tier grid (spacing = psFar) ──
+    // ── FAR tier grid (spacing = psFar) — world-aligned ──
     if (useLod) {
-      const snapX = Math.floor(camera.position.x / psFar) * psFar;
-      const snapZ = Math.floor(camera.position.z / psFar) * psFar;
-      const cells = Math.ceil((maxDist + psFar) / psFar) + 1;
+      const camX = camera.position.x;
+      const camZ = camera.position.z;
+      const minCellX = Math.floor((camX - maxDist - psFar) / psFar) * psFar;
+      const maxCellX = Math.floor((camX + maxDist + psFar) / psFar) * psFar;
+      const minCellZ = Math.floor((camZ - maxDist - psFar) / psFar) * psFar;
+      const maxCellZ = Math.floor((camZ + maxDist + psFar) / psFar) * psFar;
       _aabbSize.set(psFar, 1000, psFar);
       const halfFar = psFar * 0.5;
 
-      for (let r = -cells; r <= cells; r++) {
-        for (let c = -cells; c <= cells; c++) {
-          const cellX = snapX + c * psFar;
-          const cellZ = snapZ + r * psFar;
+      for (let cellZ = minCellZ; cellZ <= maxCellZ; cellZ += psFar) {
+        for (let cellX = minCellX; cellX <= maxCellX; cellX += psFar) {
           _cellPos.set(cellX, 0, cellZ);
           _aabb.setFromCenterAndSize(_cellPos, _aabbSize);
           const dist = _aabb.distanceToPoint(_camPosXZ);
@@ -1480,18 +1480,19 @@ export function setupGrassPatches(
       }
     }
 
-    // ── MEGA tier grid (spacing = psMega), beyond FAR until megaMax ──
+    // ── MEGA tier grid (spacing = psMega) — world-aligned, beyond FAR until megaMax ──
     if (useLod && geoMega && megaMax > maxDist) {
-      const snapX = Math.floor(camera.position.x / psMega) * psMega;
-      const snapZ = Math.floor(camera.position.z / psMega) * psMega;
-      const cells = Math.ceil((megaMax + psMega) / psMega) + 1;
+      const camX = camera.position.x;
+      const camZ = camera.position.z;
+      const minCellX = Math.floor((camX - megaMax - psMega) / psMega) * psMega;
+      const maxCellX = Math.floor((camX + megaMax + psMega) / psMega) * psMega;
+      const minCellZ = Math.floor((camZ - megaMax - psMega) / psMega) * psMega;
+      const maxCellZ = Math.floor((camZ + megaMax + psMega) / psMega) * psMega;
       _aabbSize.set(psMega, 1000, psMega);
       const halfMega = psMega * 0.5;
 
-      for (let r = -cells; r <= cells; r++) {
-        for (let c = -cells; c <= cells; c++) {
-          const cellX = snapX + c * psMega;
-          const cellZ = snapZ + r * psMega;
+      for (let cellZ = minCellZ; cellZ <= maxCellZ; cellZ += psMega) {
+        for (let cellX = minCellX; cellX <= maxCellX; cellX += psMega) {
           _cellPos.set(cellX, 0, cellZ);
           _aabb.setFromCenterAndSize(_cellPos, _aabbSize);
           const dist = _aabb.distanceToPoint(_camPosXZ);

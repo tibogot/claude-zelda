@@ -35,7 +35,7 @@ export class GrassManager {
     this.densityTex.needsUpdate = true;
   }
 
-  init(heightTex, sunDir, grassState) {
+  init(heightTex, sunDir, grassState, { groundColorAtWorldXZ } = {}) {
     if (this._initialized) return;
     this._initialized = true;
 
@@ -115,6 +115,7 @@ export class GrassManager {
       grassDensityTex: this.densityTex,
       windTex: this.windTex,
       terrainRes: 512,
+      groundColorAtWorldXZ: groundColorAtWorldXZ ?? undefined,
     };
 
     const material = createGrassMaterial(ctx);
@@ -278,6 +279,62 @@ export class GrassManager {
       lodEnabled: gp.lodEnabled,
       grassReceiveShadow: gp.receiveShadow,
     });
+  }
+
+  async precompile(renderer, camera) {
+    if (!this._initialized) return;
+    const wasVisible = this.group.visible;
+    this.group.visible = true;
+    try {
+      await renderer.compileAsync(this.scene, camera);
+    } catch (_) {}
+    this.group.visible = wasVisible;
+  }
+
+  stampDensity({ cx, cz, radius, strength, falloff, worldSize, erase }) {
+    const res = this.densityRes;
+    const data = this.densityTex.image.data;
+    const half = worldSize * 0.5;
+    const rPx = (radius / worldSize) * res;
+    const cxPx = ((cx + half) / worldSize) * res;
+    const czPx = ((cz + half) / worldSize) * res;
+    const r2 = rPx * rPx;
+    const minX = Math.max(0, Math.floor(cxPx - rPx));
+    const maxX = Math.min(res - 1, Math.ceil(cxPx + rPx));
+    const minZ = Math.max(0, Math.floor(czPx - rPx));
+    const maxZ = Math.min(res - 1, Math.ceil(czPx + rPx));
+
+    for (let z = minZ; z <= maxZ; z++) {
+      for (let x = minX; x <= maxX; x++) {
+        const dx = x - cxPx;
+        const dz = z - czPx;
+        const d2 = dx * dx + dz * dz;
+        if (d2 > r2) continue;
+        const t = Math.sqrt(d2) / rPx;
+        const falloffWeight = Math.pow(Math.max(0, 1 - t), falloff);
+        const idx = (z * res + x) * 4;
+        if (erase) {
+          const sub = strength * falloffWeight * 255;
+          data[idx] = Math.max(0, data[idx] - sub);
+        } else {
+          const add = strength * falloffWeight * 255;
+          data[idx] = Math.min(255, data[idx] + add);
+        }
+        data[idx + 1] = data[idx];
+        data[idx + 2] = data[idx];
+        data[idx + 3] = 255;
+      }
+    }
+    this.densityTex.needsUpdate = true;
+  }
+
+  getDensitySnapshot() {
+    return new Uint8Array(this.densityTex.image.data);
+  }
+
+  restoreDensitySnapshot(snapshot) {
+    this.densityTex.image.data.set(snapshot);
+    this.densityTex.needsUpdate = true;
   }
 
   fillDensity() {

@@ -39,6 +39,8 @@ import { TreeLodRenderer } from "../render/foliage/treeLodRenderer.js";
 import { TreeSystem } from "../tools/foliage/treeSystem.js";
 import { loadTreeGlbFromFile, openGlbPicker, initGlbLoaderRenderer } from "../core/foliage/glbLoader.js";
 import { GrassManager } from "../render/foliage/grassManager.js";
+import { GrassPaintSystem } from "../tools/foliage/grassPaintSystem.js";
+import { createGroundTslBundle } from "../../chunkGroundTsl.js";
 
 export async function startV2App() {
   const config = structuredClone(V2_CONFIG);
@@ -288,6 +290,7 @@ export async function startV2App() {
   }
 
   const tileTerrainMaterial = createSharedTileMaterial();
+  const sharedGroundBundle = createGroundTslBundle(toolState.groundTsl);
   let proceduralTerrainBundle = null;
   let imageTexTerrainBundle = null;
 
@@ -367,6 +370,7 @@ export async function startV2App() {
         toolState.meadowTsl,
         buildCliffDeps(),
         buildSplatOverlay(),
+        sharedGroundBundle,
       );
     }
     return proceduralTerrainBundle;
@@ -388,9 +392,8 @@ export async function startV2App() {
   }
 
   function syncProceduralTerrainTsl() {
-    if (toolState.terrainSurface !== "tsl") return;
+    sharedGroundBundle.syncFromParams(toolState.groundTsl);
     const b = getProceduralTerrainBundle();
-    b.syncGround(toolState.groundTsl);
     b.syncMeadow(toolState.meadowTsl);
   }
 
@@ -424,6 +427,7 @@ export async function startV2App() {
   const treeSystem = new TreeSystem({ toolState, treeStore, terrainStore, config });
 
   const grassManager = new GrassManager({ scene, camera, config });
+  const grassPaintSystem = new GrassPaintSystem({ toolState, grassManager, config });
 
   const hud = createHud();
   /** @type {ReturnType<typeof createTweakpaneUi>} */
@@ -569,6 +573,7 @@ export async function startV2App() {
         }
         // Restore settings
         applySettings(toolState, project.settings);
+        sharedGroundBundle.syncFromParams(toolState.groundTsl);
         // Rebuild everything
         invalidateSurfaceMaterials();
         rebuildGlobalHeightTexture();
@@ -676,7 +681,10 @@ export async function startV2App() {
   updateSunSky();
   rebuildSkyEnv();
 
-  grassManager.init(globalHeightTex, sunDir, toolState.grass);
+  grassManager.init(globalHeightTex, sunDir, toolState.grass, {
+    groundColorAtWorldXZ: sharedGroundBundle.groundColorAtWorldXZ,
+  });
+  grassManager.precompile(renderer, camera);
 
   const lensFlare = createLensFlareSystem({
     scene,
@@ -725,7 +733,7 @@ export async function startV2App() {
   }
 
   function isBrushMode() {
-    return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint";
+    return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint" || toolState.mode === "grass";
   }
 
   function updateBrushPreviewFromPick(hit) {
@@ -783,6 +791,8 @@ export async function startV2App() {
       paintSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "treePaint") {
       treeSystem.beginStroke(hit.point, event);
+    } else if (toolState.mode === "grass") {
+      grassPaintSystem.beginStroke(hit.point, event);
     }
   });
 
@@ -796,6 +806,8 @@ export async function startV2App() {
       paintSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "treePaint") {
       treeSystem.applyAt(hit.point, event);
+    } else if (toolState.mode === "grass") {
+      grassPaintSystem.applyAt(hit.point, event);
     }
   });
 
@@ -835,12 +847,15 @@ export async function startV2App() {
       paintSystem.endStroke();
     } else if (toolState.mode === "treePaint") {
       treeSystem.endStroke();
+    } else if (toolState.mode === "grass") {
+      grassPaintSystem.endStroke();
     }
   });
 
   function activeEditSystem() {
     if (toolState.mode === "paint") return paintSystem;
     if (toolState.mode === "treePaint") return treeSystem;
+    if (toolState.mode === "grass") return grassPaintSystem;
     return sculptSystem;
   }
 

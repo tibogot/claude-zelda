@@ -10,9 +10,10 @@ import { createCliffShadingContext } from "../../../chunkTerrainAutoCliff.js";
  * @param {object} meadowParams
  * @param {null | object} [cliffDeps]
  * @param {null | ReturnType<import("./splatOverlayTsl.js").createSplatOverlay>} [splatOverlay]
+ * @param {ReturnType<import("../../../chunkGroundTsl.js").createGroundTslBundle>} [groundBundle]
  */
-export function createV2ProceduralGroundMaterial(groundParams, meadowParams, cliffDeps = null, splatOverlay = null) {
-  const groundBundle = createGroundTslBundle(groundParams);
+export function createV2ProceduralGroundMaterial(groundParams, meadowParams, cliffDeps = null, splatOverlay = null, groundBundle = null) {
+  if (!groundBundle) groundBundle = createGroundTslBundle(groundParams);
   const meadowBundle = createMeadowTslBundle(meadowParams);
 
   const cliff =
@@ -81,6 +82,8 @@ export function createV2ProceduralGroundMaterial(groundParams, meadowParams, cli
   return {
     material: mat,
     splatTexNode: splatOverlay?.splatTexNode ?? null,
+    groundColorAtWorldXZ: groundBundle.groundColorAtWorldXZ,
+    groundUniforms: groundBundle.groundUniforms,
     syncGround: (p) => groundBundle.syncFromParams(p),
     syncMeadow: (p) => meadowBundle.syncFromParams(p),
   };
