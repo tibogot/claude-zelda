@@ -50,7 +50,6 @@ import {
   PI,
   mx_noise_float,
   reflect,
-  screenCoordinate,
 } from "three/tsl";
 import { hash42, hash22 } from "./tsl-utils.js";
 
@@ -387,7 +386,6 @@ export function createGrassMaterial(ctx) {
     metalness: 0,
   });
   material.envMapIntensity = 0;
-  material.alphaTest = 0.01;
   material.polygonOffset = true;
   material.polygonOffsetFactor = 1;
   material.polygonOffsetUnits = 1;
@@ -867,17 +865,6 @@ export function createGrassMaterial(ctx) {
   })();
 
   // ════════════════════════════════════════════════════════════
-  // OPACITY NODE — Interleaved gradient noise dithered LOD crossfade
-  // ════════════════════════════════════════════════════════════
-  material.opacityNode = Fn(() => {
-    const distFade = vPackGrass0.y;
-    const ditherZone = smoothstep(float(0.35), float(0.0), distFade);
-    const screenPos = floor(screenCoordinate.xy);
-    const ign = fract(float(52.9829189).mul(fract(dot(screenPos, vec2(0.06711056, 0.00583715)))));
-    return step(ditherZone, ign);
-  })();
-
-  // ════════════════════════════════════════════════════════════
   // EMISSIVE NODE — SSS + dual specular
   // ════════════════════════════════════════════════════════════
   material.emissiveNode = Fn(() => {
@@ -1051,7 +1038,6 @@ export function createGrassMaterialMega(ctx) {
     metalness: 0,
   });
   material.envMapIntensity = 0;
-  material.alphaTest = 0.01;
   material.polygonOffset = true;
   material.polygonOffsetFactor = 1;
   material.polygonOffsetUnits = 1;
@@ -1216,13 +1202,6 @@ export function createGrassMaterialMega(ctx) {
   })();
 
   material.emissiveNode = Fn(() => vec3(float(0), float(0), float(0)))();
-
-  material.opacityNode = Fn(() => {
-    const ditherZone = smoothstep(float(0.35), float(0.0), vDistFade);
-    const screenPos = floor(screenCoordinate.xy);
-    const ign = fract(float(52.9829189).mul(fract(dot(screenPos, vec2(0.06711056, 0.00583715)))));
-    return step(ditherZone, ign);
-  })();
 
   return material;
 }
