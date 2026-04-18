@@ -2,6 +2,8 @@ import * as THREE from "three";
 import { MeshBVH } from "three-mesh-bvh";
 
 const _ray = new THREE.Ray(new THREE.Vector3(), new THREE.Vector3(0, -1, 0));
+const _latRay = new THREE.Ray(new THREE.Vector3(), new THREE.Vector3());
+const _latHit = { point: new THREE.Vector3(), normal: new THREE.Vector3() };
 
 export class CliffBvh {
   constructor(cliffStore) {
@@ -96,6 +98,30 @@ export class CliffBvh {
     _ray.direction.set(0, -1, 0);
     const hit = this._bvh.raycastFirst(_ray);
     return hit ? hit.point.y : null;
+  }
+
+  raycastHeightFrom(wx, wy, wz) {
+    if (!this.baked || !this._bvh) return null;
+    _ray.origin.set(wx, wy, wz);
+    _ray.direction.set(0, -1, 0);
+    const hit = this._bvh.raycastFirst(_ray);
+    return hit ? hit.point.y : null;
+  }
+
+  raycastLateral(ox, oy, oz, dirX, dirZ, maxDist) {
+    if (!this.baked || !this._bvh) return null;
+    const len = Math.hypot(dirX, dirZ);
+    if (len < 1e-8) return null;
+    _latRay.origin.set(ox, oy, oz);
+    _latRay.direction.set(dirX / len, 0, dirZ / len);
+    const hit = this._bvh.raycastFirst(_latRay);
+    if (hit && hit.distance <= maxDist) {
+      _latHit.point.copy(hit.point);
+      _latHit.normal.copy(hit.face.normal);
+      _latHit.distance = hit.distance;
+      return _latHit;
+    }
+    return null;
   }
 
   sampleHeight(wx, wz) {

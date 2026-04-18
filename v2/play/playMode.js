@@ -3,13 +3,27 @@ import { MeshBasicNodeMaterial } from "three";
 import {
   attribute, float, vec3, pow, sub, abs, smoothstep, mul, mix, add,
 } from "three/tsl";
-import { loadTreeGlbFromUrl } from "../core/foliage/glbLoader.js";
+import { loadTreeGlbFromUrl, getSharedGltfLoader } from "../core/foliage/glbLoader.js";
 
 const CAP_R = 0.4;
 const CAP_H = 1.2;
 const GRAVITY = 20.0;
 const JUMP_VEL = 11.0;
 const MOVE_SPEED = 12;
+
+const CHAR_MODEL = "../models/UA1+UA2_compressed.glb";
+const CHAR_KATANA = "../models/katana.glb";
+const CHAR_HAT = "../models/asian_conical_hat_compressed.glb";
+const CHAR_HEIGHT = 2.5;
+const CHAR_WALK_SPEED = 4.0;
+const CHAR_RUN_SPEED = 8.0;
+const CHAR_JUMP_VEL = 11.0;
+const CHAR_GRAVITY = 20.0;
+const CHAR_ROLL_PEAK = 13.0;
+const CHAR_GLIDE_FALL_SPEED = 3.0;
+const CHAR_SLIDE_SPEED = 10.0;
+const CHAR_SLIDE_MAX_TIME = 1.2;
+const PI = Math.PI;
 const CAM_DIST = 8;
 const CAM_SENS_X = 0.002;
 const CAM_SENS_Y = 0.002;
@@ -211,13 +225,16 @@ function clearBullets(pool) {
 }
 
 export class PlayMode {
-  constructor({ scene, camera, renderer, controls, getWorldHeight, worldHalf }) {
+  constructor({ scene, camera, renderer, controls, getWorldHeight, getTerrainHeight, worldHalf, cliffBvh }) {
     this.scene = scene;
     this.camera = camera;
     this.renderer = renderer;
     this.controls = controls;
     this.getWorldHeight = getWorldHeight;
+    this.getTerrainHeight = getTerrainHeight || getWorldHeight;
     this.worldHalf = worldHalf;
+    this.cliffBvh = cliffBvh || null;
+    this._playerGroundY = 0;
 
     this.active = false;
     this.camView = "follow";
@@ -276,6 +293,244 @@ export class PlayMode {
 
     this._raycaster = new THREE.Raycaster();
     this._pointer = new THREE.Vector2();
+
+    // Character state
+    this.charRoot = null;
+    this.charInner = null;
+    this.charMixer = null;
+    this.charActions = null;
+    this.charCurrentAction = null;
+    this.charLoaded = false;
+    this.charYaw = 0;
+    this.charVelY = 0;
+    this.charInAir = false;
+    this.charCrouching = false;
+    this.charAttacking = false;
+    this.charRolling = false;
+    this.charRollYaw = 0;
+    this.charRollStart = 0;
+    this.charRollDuration = 0.8;
+    this.charJumpPhase = "none";
+    this.charGliding = false;
+    this.charGliderPoseActive = false;
+    this.charSpacePrev = false;
+    this.charKite = null;
+    this.charSlidePhase = "none";
+    this.charSlideYaw = 0;
+    this.charSlideStart = 0;
+    this._loadCharacter();
+  }
+
+  _loadCharacter() {
+    const loader = getSharedGltfLoader();
+
+    loader.load(CHAR_MODEL, (gltf) => {
+      const model = gltf.scene;
+      model.traverse((o) => {
+        if (o.isMesh || o.isSkinnedMesh) {
+          o.castShadow = true;
+          o.receiveShadow = true;
+          o.frustumCulled = false;
+        }
+      });
+      const box = new THREE.Box3().setFromObject(model);
+      const size = new THREE.Vector3();
+      box.getSize(size);
+      const scale = CHAR_HEIGHT / (size.y || 1);
+      model.scale.setScalar(scale);
+      box.setFromObject(model);
+      model.position.y -= box.min.y;
+
+      this.charInner = model;
+      this.charRoot = new THREE.Group();
+      this.charRoot.add(model);
+      this.charRoot.visible = false;
+      this.scene.add(this.charRoot);
+
+      // Kite (paraglider)
+      {
+        const kg = new THREE.Group();
+        const shape = new THREE.Shape();
+        shape.moveTo(0, -0.7);
+        shape.lineTo(-1.6, 0.6);
+        shape.lineTo(1.6, 0.6);
+        shape.closePath();
+        const canopy = new THREE.Mesh(
+          new THREE.ShapeGeometry(shape),
+          new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.5, metalness: 0.1, side: THREE.DoubleSide }),
+        );
+        canopy.castShadow = true;
+        canopy.rotation.x = -0.5;
+        canopy.position.set(0, 0.15, 0);
+        kg.add(canopy);
+        const bar = new THREE.Mesh(
+          new THREE.BoxGeometry(0.7, 0.04, 0.04),
+          new THREE.MeshStandardMaterial({ color: 0x1f2937, roughness: 0.4, metalness: 0.3 }),
+        );
+        bar.castShadow = true;
+        bar.position.set(0, -0.6, 0.35);
+        bar.rotation.x = 0.25;
+        kg.add(bar);
+        kg.position.set(0, CHAR_HEIGHT * 0.95, -0.35);
+        kg.rotation.set(0.12, PI / 2, 0);
+        kg.visible = false;
+        this.charRoot.add(kg);
+        this.charKite = kg;
+      }
+
+      // Bone lookup
+      const findBone = (names) => {
+        for (const n of names) {
+          const b = model.getObjectByName(n);
+          if (b) return b;
+        }
+        let hit = null;
+        model.traverse((o) => {
+          if (hit) return;
+          const nm = (o.name || "").toLowerCase();
+          if (/hand[_.-]?r|righthand|handright/.test(nm) && names[0].toLowerCase().includes("hand")) hit = o;
+          if (/head/.test(nm) && names[0].toLowerCase().includes("head")) hit = o;
+        });
+        return hit;
+      };
+      const rightHand = findBone(["DEF-handR", "hand.R", "mixamorigRightHand", "RightHand"]);
+      const headBone = findBone(["DEF-head", "head", "Head", "mixamorigHead"]);
+
+      // Katana
+      if (rightHand) {
+        const sg = new THREE.Group();
+        sg.position.set(-0.07, 0.115, -0.2);
+        sg.rotation.set(-1.37, 1.8, -2.21);
+        rightHand.add(sg);
+        loader.load(CHAR_KATANA, (kg) => {
+          const ks = kg.scene;
+          ks.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+          const kb = new THREE.Box3().setFromObject(ks);
+          const ksz = new THREE.Vector3();
+          kb.getSize(ksz);
+          const kscale = 1.0 / (Math.max(ksz.x, ksz.y, ksz.z) || 1);
+          ks.scale.setScalar(kscale);
+          kb.setFromObject(ks);
+          ks.position.set(-kb.min.x, -kb.min.y, -kb.min.z);
+          sg.add(ks);
+        }, undefined, (e) => console.warn("[char] katana load failed:", e));
+      }
+
+      // Hat
+      if (headBone) {
+        loader.load(CHAR_HAT, (hg) => {
+          const hs = hg.scene;
+          hs.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+          const hatScale = CHAR_HEIGHT / 1.8;
+          hs.scale.setScalar(0.65 * hatScale);
+          hs.position.set(0, 0.2, 0);
+          headBone.add(hs);
+        }, undefined, (e) => console.warn("[char] hat load failed:", e));
+      }
+
+      // Animations
+      if (gltf.animations?.length) {
+        this.charMixer = new THREE.AnimationMixer(model);
+        const pick = (baseNames) => {
+          for (const base of baseNames) {
+            const hit = gltf.animations.find((a) => a.name === base + "_Armature" || a.name === base);
+            if (hit) return hit;
+          }
+          return null;
+        };
+        const idleClip = pick(["Idle_Loop"]) || gltf.animations[0];
+        const walkClip = pick(["Walk_Loop"]) || idleClip;
+        const runClip = pick(["Sprint_Loop", "Jog_Fwd_Loop"]) || walkClip;
+        const jumpStartClip = pick(["Jump_Start"]);
+        const jumpLoopClip = pick(["Jump_Loop", "NinjaJump_Idle_Loop"]) || jumpStartClip || idleClip;
+        const jumpLandClip = pick(["Jump_Land"]) || idleClip;
+        const glideClip = pick(["NinjaJump_Idle_Loop"]) || jumpLoopClip;
+        const attackClip = pick(["Sword_Attack", "Sword_Attack_RM"]);
+        const crouchClip = pick(["Crouch_Idle_Loop"]) || idleClip;
+        const crouchWalkClip = pick(["Crouch_Fwd_Loop"]) || crouchClip;
+        const rollClip = pick(["Roll", "Roll_RM"]) || idleClip;
+        const slideStartClip = pick(["Slide_Start"]);
+        const slideLoopClip = pick(["Slide_Loop"]) || slideStartClip;
+        const slideExitClip = pick(["Slide_Exit"]) || slideLoopClip;
+
+        const mk = (clip, loopOnce) => {
+          if (!clip) return null;
+          const a = this.charMixer.clipAction(clip).setLoop(loopOnce ? THREE.LoopOnce : THREE.LoopRepeat);
+          if (loopOnce) a.clampWhenFinished = true;
+          return a;
+        };
+
+        const idleAction = mk(idleClip, false);
+        const walkAction = mk(walkClip, false);
+        const runAction = mk(runClip, false);
+        const jumpStartAction = mk(jumpStartClip, true);
+        const jumpLoopAction = mk(jumpLoopClip, false);
+        const jumpLandAction = mk(jumpLandClip, true);
+        const glideAction = mk(glideClip, false);
+        if (jumpStartAction) jumpStartAction.timeScale = 1.4;
+        if (jumpLandAction) jumpLandAction.timeScale = 1.8;
+        const crouchAction = mk(crouchClip, false);
+        const crouchWalkAction = mk(crouchWalkClip, false);
+        const attackAction = mk(attackClip, true);
+        const rollAction = mk(rollClip, true);
+        if (rollAction) {
+          const d = rollAction.getClip()?.duration;
+          if (d && d > 0) this.charRollDuration = d;
+        }
+        const slideStartAction = mk(slideStartClip, true);
+        const slideLoopAction = mk(slideLoopClip, false);
+        const slideExitAction = mk(slideExitClip, true);
+
+        idleAction.play();
+        this.charActions = {
+          idle: idleAction, walk: walkAction, run: runAction,
+          jumpStart: jumpStartAction, jumpLoop: jumpLoopAction, jumpLand: jumpLandAction,
+          glide: glideAction, crouch: crouchAction, crouchWalk: crouchWalkAction,
+          attack: attackAction, roll: rollAction,
+          slideStart: slideStartAction, slideLoop: slideLoopAction, slideExit: slideExitAction,
+        };
+        this.charCurrentAction = idleAction;
+
+        this.charMixer.addEventListener("finished", (e) => {
+          if (attackAction && e.action === attackAction) { this.charAttacking = false; return; }
+          if (rollAction && e.action === rollAction) { this.charRolling = false; return; }
+          if (jumpStartAction && e.action === jumpStartAction) {
+            if (this.charInAir && jumpLoopAction) {
+              this.charJumpPhase = "loop";
+              jumpLoopAction.reset().enabled = true;
+              jumpLoopAction.crossFadeFrom(jumpStartAction, 0.08, false).play();
+              this.charCurrentAction = jumpLoopAction;
+            }
+            return;
+          }
+          if (jumpLandAction && e.action === jumpLandAction) { this.charJumpPhase = "none"; return; }
+          if (slideStartAction && e.action === slideStartAction) {
+            if (this.charSlidePhase === "start" && slideLoopAction) {
+              this.charSlidePhase = "loop";
+              slideLoopAction.reset().enabled = true;
+              slideLoopAction.crossFadeFrom(slideStartAction, 0.1, false).play();
+              this.charCurrentAction = slideLoopAction;
+            }
+            return;
+          }
+          if (slideExitAction && e.action === slideExitAction) { this.charSlidePhase = "none"; return; }
+        });
+      }
+      this.charLoaded = true;
+      if (this.active && this.moveMode === "char") {
+        this.charRoot.visible = true;
+        this.capsule.visible = false;
+      }
+      console.log("[V2] Character loaded");
+    }, undefined, (err) => console.warn("[V2] Character load failed:", err));
+  }
+
+  _charSetAction(next, fade = 0.18) {
+    if (!this.charActions || !next || next === this.charCurrentAction) return;
+    next.enabled = true;
+    next.reset();
+    next.crossFadeFrom(this.charCurrentAction, fade, false).play();
+    this.charCurrentAction = next;
   }
 
   async _loadPlane() {
@@ -404,6 +659,7 @@ export class PlayMode {
 
     this.capsule.visible = true;
     if (this.planeRoot) this.planeRoot.visible = false;
+    if (this.charRoot) this.charRoot.visible = false;
     this._clearTrails(); clearBullets(this._bullets.pool);
     this.controls.enabled = false;
 
@@ -426,6 +682,7 @@ export class PlayMode {
 
     this.capsule.visible = false;
     if (this.planeRoot) this.planeRoot.visible = false;
+    if (this.charRoot) this.charRoot.visible = false;
     this._clearTrails(); clearBullets(this._bullets.pool);
 
     if (this.savedCamPos) this.camera.position.copy(this.savedCamPos);
@@ -494,17 +751,105 @@ export class PlayMode {
       }
     }
 
+    const charMode = this.moveMode === "char" && this.charLoaded;
+    const charRunning = charMode && (keys.ShiftLeft || keys.ShiftRight);
+    const inRoll = charMode && this.charRolling;
+    const inSlide = charMode && this.charSlidePhase !== "none";
+
+    // Character roll/slide override movement
+    if (inRoll) {
+      const elapsed = performance.now() / 1000 - this.charRollStart;
+      const t = Math.min(elapsed / this.charRollDuration, 1);
+      if (t >= 0.75) { this.charRolling = false; }
+      const spd = CHAR_ROLL_PEAK * Math.cos(t * PI / 2);
+      mx = -Math.sin(this.charRollYaw);
+      mz = -Math.cos(this.charRollYaw);
+      const rollStep = spd * dtSec;
+      mx *= rollStep / (Math.hypot(mx, mz) || 1);
+      mz *= rollStep / (Math.hypot(mx, mz) || 1);
+    }
+    if (inSlide) {
+      const elapsed = performance.now() / 1000 - this.charSlideStart;
+      if (this.charSlidePhase === "loop" && elapsed > CHAR_SLIDE_MAX_TIME) {
+        this.charSlidePhase = "exit";
+        if (this.charActions?.slideExit) {
+          const se = this.charActions.slideExit;
+          se.reset().enabled = true;
+          se.crossFadeFrom(this.charCurrentAction, 0.1, false).play();
+          this.charCurrentAction = se;
+        }
+      }
+      if (this.charSlidePhase !== "exit") {
+        mx = -Math.sin(this.charSlideYaw) * CHAR_SLIDE_SPEED * dtSec;
+        mz = -Math.cos(this.charSlideYaw) * CHAR_SLIDE_SPEED * dtSec;
+      }
+    }
+
     const mlen = Math.hypot(mx, mz);
+    const moveSpeed = charMode
+      ? (charRunning ? CHAR_RUN_SPEED : CHAR_WALK_SPEED)
+      : MOVE_SPEED;
     if (mlen > 0) {
-      const stepX = (mx / mlen) * MOVE_SPEED * dtSec;
-      const stepZ = (mz / mlen) * MOVE_SPEED * dtSec;
+      let stepX, stepZ;
+      if (inRoll || inSlide) {
+        stepX = mx; stepZ = mz;
+      } else {
+        stepX = (mx / mlen) * moveSpeed * dtSec;
+        stepZ = (mz / mlen) * moveSpeed * dtSec;
+      }
+
+      if (this.cliffBvh?.baked) {
+        const capsuleBase = CAP_R + CAP_H * 0.5;
+        const oy = this.playerPos.y + capsuleBase;
+        const margin = CAP_R + 0.05;
+        const stepLen = Math.hypot(stepX, stepZ);
+        const castDist = stepLen + margin;
+
+        const hit = this.cliffBvh.raycastLateral(
+          this.playerPos.x, oy, this.playerPos.z,
+          stepX, stepZ, castDist,
+        );
+        if (hit) {
+          const nx = hit.normal.x;
+          const nz = hit.normal.z;
+          const nLen = Math.hypot(nx, nz);
+          if (nLen > 0.01) {
+            const nnx = nx / nLen;
+            const nnz = nz / nLen;
+            const dot = stepX * nnx + stepZ * nnz;
+            if (dot < 0) {
+              stepX -= dot * nnx;
+              stepZ -= dot * nnz;
+
+              const slideHit = this.cliffBvh.raycastLateral(
+                this.playerPos.x, oy, this.playerPos.z,
+                stepX, stepZ, Math.hypot(stepX, stepZ) + margin,
+              );
+              if (slideHit) {
+                stepX = 0;
+                stepZ = 0;
+              }
+            }
+          }
+        }
+      }
+
       const wh = this.worldHalf;
       this.playerPos.x = THREE.MathUtils.clamp(this.playerPos.x + stepX, -wh, wh);
       this.playerPos.z = THREE.MathUtils.clamp(this.playerPos.z + stepZ, -wh, wh);
     }
 
-    // Ground height
-    const groundY = this.getWorldHeight(this.playerPos.x, this.playerPos.z);
+    // Ground height — cast downward from player's current Y + step-up margin,
+    // not from infinity. This prevents teleporting to wall tops when walking
+    // through doorways/holes — the ray only sees surfaces at or below the player.
+    const terrainY = this.getTerrainHeight(this.playerPos.x, this.playerPos.z);
+    let groundY = terrainY;
+    if (this.cliffBvh?.baked) {
+      const stepUp = 1.0;
+      const fromY = this.playerPos.y + stepUp;
+      const bvhY = this.cliffBvh.raycastHeightFrom(this.playerPos.x, fromY, this.playerPos.z);
+      if (bvhY != null && bvhY > terrainY) groundY = bvhY;
+    }
     this.playerPos.y = groundY;
     const capsuleBase = CAP_R + CAP_H * 0.5;
 
@@ -532,6 +877,76 @@ export class PlayMode {
       const dtRoll = Math.min(dtSec, 0.08);
       this.flyRollTarget = THREE.MathUtils.lerp(this.flyRollTarget, 0, 1 - Math.exp(-FLY_ROLL_TARGET_DECAY * dtRoll));
       this.flyRoll = THREE.MathUtils.lerp(this.flyRoll, this.flyRollTarget, 1 - Math.exp(-FLY_ROLL_SMOOTH * dtRoll));
+    } else if (charMode) {
+      this.flyHeight = 0;
+
+      // Character jump
+      if (
+        !this.charInAir && !this.charCrouching && !this.charRolling &&
+        !this.charAttacking && !inSlide && this.charJumpPhase !== "land" &&
+        keys.Space
+      ) {
+        this.charVelY = CHAR_JUMP_VEL;
+        this.charInAir = true;
+        if (this.charActions?.jumpStart) {
+          this.charJumpPhase = "start";
+          const js = this.charActions.jumpStart;
+          js.reset().enabled = true;
+          js.crossFadeFrom(this.charCurrentAction, 0.08, false).play();
+          this.charCurrentAction = js;
+        } else if (this.charActions?.jumpLoop) {
+          this.charJumpPhase = "loop";
+          const jl = this.charActions.jumpLoop;
+          jl.reset().enabled = true;
+          jl.crossFadeFrom(this.charCurrentAction, 0.08, false).play();
+          this.charCurrentAction = jl;
+        }
+      }
+      // Glider toggle (Space mid-air, not held from jump)
+      if (this.charInAir && keys.Space && !this.charSpacePrev && this.charVelY < 0) {
+        this.charGliding = !this.charGliding;
+      }
+      this.charSpacePrev = !!keys.Space;
+
+      if (this.charInAir) {
+        this.charVelY -= CHAR_GRAVITY * dtSec;
+        if (this.charGliding) {
+          this.charVelY = Math.max(this.charVelY, -CHAR_GLIDE_FALL_SPEED);
+        }
+        this.playerPos.y = (this.playerPos.y || groundY) + this.charVelY * dtSec;
+        if (this.playerPos.y <= groundY) {
+          this.playerPos.y = groundY;
+          this.charVelY = 0;
+          this.charInAir = false;
+          this.charGliding = false;
+          const landInputHeld = keys.KeyW || keys.KeyA || keys.KeyS || keys.KeyD ||
+            keys.ArrowUp || keys.ArrowDown || keys.ArrowLeft || keys.ArrowRight;
+          if (landInputHeld && this.charActions) {
+            this.charJumpPhase = "none";
+            const tgt = charRunning ? this.charActions.run : this.charActions.walk;
+            if (tgt) { tgt.enabled = true; tgt.reset(); tgt.crossFadeFrom(this.charCurrentAction, 0.12, false).play(); this.charCurrentAction = tgt; }
+          } else if (this.charActions?.jumpLand) {
+            this.charJumpPhase = "land";
+            const jl = this.charActions.jumpLand;
+            jl.reset().enabled = true;
+            jl.crossFadeFrom(this.charCurrentAction, 0.1, false).play();
+            this.charCurrentAction = jl;
+          } else {
+            this.charJumpPhase = "none";
+          }
+        }
+      } else {
+        this.playerPos.y = groundY;
+      }
+
+      // Yaw
+      if (mlen > 0 && !this.charRolling && !this.charAttacking && !inSlide) {
+        const targetYaw = Math.atan2(mx, mz);
+        let dYaw = targetYaw - this.charYaw;
+        while (dYaw > PI) dYaw -= 2 * PI;
+        while (dYaw < -PI) dYaw += 2 * PI;
+        this.charYaw += dYaw * (1 - Math.exp(-14 * dtSec));
+      }
     } else {
       this.flyHeight = 0;
 
@@ -560,7 +975,7 @@ export class PlayMode {
 
     // Capsule visual
     const capsuleCY = this.playerPos.y + capsuleBase;
-    this.capsule.visible = this.moveMode === "capsule" || (this.moveMode === "fly" && !this.planeLoaded);
+    this.capsule.visible = this.moveMode === "capsule" || (this.moveMode === "fly" && !this.planeLoaded) || (this.moveMode === "char" && !this.charLoaded);
     this.capsule.position.set(this.playerPos.x, capsuleCY, this.playerPos.z);
     if (mlen > 0) {
       this._lastMx = mx / mlen;
@@ -568,6 +983,51 @@ export class PlayMode {
     }
     if (this._lastMx !== 0 || this._lastMz !== 0) {
       this.capsule.rotation.y = Math.atan2(this._lastMx, this._lastMz) + Math.PI;
+    }
+
+    // Character visual + animation
+    if (this.charRoot) {
+      this.charRoot.visible = charMode;
+      if (charMode) {
+        this.charRoot.position.set(this.playerPos.x, this.playerPos.y, this.playerPos.z);
+        this.charRoot.rotation.y = this.charYaw;
+        if (this.charKite) this.charKite.visible = this.charGliding;
+        // Glider pose
+        if (this.charActions) {
+          const wantGlide = this.charGliding && this.charActions.glide;
+          if (wantGlide && !this.charGliderPoseActive) {
+            this.charGliderPoseActive = true;
+            const ga = this.charActions.glide;
+            ga.reset().enabled = true;
+            ga.crossFadeFrom(this.charCurrentAction, 0.15, false).play();
+            this.charCurrentAction = ga;
+          } else if (!wantGlide && this.charGliderPoseActive) {
+            this.charGliderPoseActive = false;
+            if (this.charInAir && this.charActions.jumpLoop) {
+              const jl = this.charActions.jumpLoop;
+              jl.reset().enabled = true;
+              jl.crossFadeFrom(this.charCurrentAction, 0.15, false).play();
+              this.charCurrentAction = jl;
+              this.charJumpPhase = "loop";
+            }
+          }
+        }
+        // Locomotion picker
+        if (
+          this.charActions && !this.charAttacking && !this.charRolling &&
+          !this.charGliderPoseActive && this.charSlidePhase === "none" &&
+          this.charJumpPhase === "none"
+        ) {
+          let target = null;
+          if (this.charCrouching)
+            target = mlen > 0 ? this.charActions.crouchWalk : this.charActions.crouch;
+          else if (mlen > 0)
+            target = charRunning ? this.charActions.run : this.charActions.walk;
+          else target = this.charActions.idle;
+          if (target) this._charSetAction(target);
+        }
+        if (this.charMixer) this.charMixer.update(dtSec);
+      }
     }
 
     // Plane visual
@@ -606,7 +1066,8 @@ export class PlayMode {
     updateBullets(this._bullets.pool, this.camera, dtSec);
 
     // Camera
-    const lookAtY = flying ? planeY + 0.45 : capsuleCY + 0.6;
+    const charLookY = this.playerPos.y + CHAR_HEIGHT * 0.75;
+    const lookAtY = flying ? planeY + 0.45 : charMode ? charLookY : capsuleCY + 0.6;
     if (iso) {
       if (flying) {
         let yawDelta = this.flyHeading - this.isoYaw;
@@ -635,9 +1096,24 @@ export class PlayMode {
   }
 
   _toggleMoveMode() {
-    if (this.moveMode === "capsule") {
+    const prev = this.moveMode;
+    if (prev === "capsule") {
+      this.moveMode = "char";
+      this.charYaw = this.capsule.rotation.y;
+      this.charVelY = 0;
+      this.charInAir = false;
+      this.charGliding = false;
+      this.charGliderPoseActive = false;
+      this.charSpacePrev = false;
+      this.charCrouching = false;
+      this.charAttacking = false;
+      this.charRolling = false;
+      this.charSlidePhase = "none";
+      this.charJumpPhase = "none";
+      if (this.charKite) this.charKite.visible = false;
+    } else if (prev === "char") {
       this.moveMode = "fly";
-      this.flyHeading = this.capsule.rotation.y;
+      this.flyHeading = this.charYaw;
       this.flyPitch = 0;
       this.flyRoll = 0;
       this.flyRollTarget = 0;
@@ -671,6 +1147,58 @@ export class PlayMode {
       this.flyBarrelPhase = 0;
       this.flyBarrelDir = this.flyRoll >= 0 ? 1 : -1;
       return;
+    }
+
+    // Character actions
+    const _charMode = this.moveMode === "char" && this.charLoaded;
+    if (_charMode && !event.repeat) {
+      const inSlide = this.charSlidePhase !== "none";
+      // Attack (J)
+      if (event.code === "KeyJ" && !this.charAttacking && !this.charRolling && !inSlide && !this.charInAir) {
+        event.preventDefault();
+        this.charAttacking = true;
+        if (this.charActions?.attack) {
+          const a = this.charActions.attack;
+          a.reset().enabled = true;
+          a.crossFadeFrom(this.charCurrentAction, 0.1, false).play();
+          this.charCurrentAction = a;
+        }
+        return;
+      }
+      // Roll (C)
+      if (event.code === "KeyC" && !this.charRolling && !this.charAttacking && !inSlide && !this.charInAir) {
+        event.preventDefault();
+        this.charRolling = true;
+        this.charRollYaw = this.charYaw;
+        this.charRollStart = performance.now() / 1000;
+        if (this.charActions?.roll) {
+          const r = this.charActions.roll;
+          r.reset().enabled = true;
+          r.crossFadeFrom(this.charCurrentAction, 0.08, false).play();
+          this.charCurrentAction = r;
+        }
+        return;
+      }
+      // Slide (F)
+      if (event.code === "KeyF" && !this.charRolling && !this.charAttacking && !inSlide && !this.charInAir) {
+        event.preventDefault();
+        this.charSlidePhase = "start";
+        this.charSlideYaw = this.charYaw;
+        this.charSlideStart = performance.now() / 1000;
+        if (this.charActions?.slideStart) {
+          const ss = this.charActions.slideStart;
+          ss.reset().enabled = true;
+          ss.crossFadeFrom(this.charCurrentAction, 0.08, false).play();
+          this.charCurrentAction = ss;
+        }
+        return;
+      }
+      // Crouch toggle (X)
+      if (event.code === "KeyX" && !this.charRolling && !this.charAttacking && !inSlide && !this.charInAir) {
+        event.preventDefault();
+        this.charCrouching = !this.charCrouching;
+        return;
+      }
     }
 
     if (!event.repeat && event.code === "KeyV") {
@@ -770,6 +1298,12 @@ export class PlayMode {
       this.scene.remove(this.planeRoot);
       this.planeRoot.traverse((o) => {
         if (o.isMesh) { o.geometry?.dispose(); o.material?.dispose(); }
+      });
+    }
+    if (this.charRoot) {
+      this.scene.remove(this.charRoot);
+      this.charRoot.traverse((o) => {
+        if (o.isMesh || o.isSkinnedMesh) { o.geometry?.dispose(); o.material?.dispose(); }
       });
     }
   }

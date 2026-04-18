@@ -503,7 +503,9 @@ export async function startV2App() {
   const playMode = new PlayMode({
     scene, camera, renderer, controls,
     getWorldHeight,
+    getTerrainHeight: (x, z) => terrainStore.getWorldHeight(x, z),
     worldHalf: config.world.size * 0.5,
+    cliffBvh,
   });
 
   const hud = createHud();

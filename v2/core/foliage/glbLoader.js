@@ -16,6 +16,8 @@ _draco.setDecoderConfig({ type: "js" });
 const _loader = new GLTFLoader();
 _loader.setDRACOLoader(_draco);
 
+export function getSharedGltfLoader() { return _loader; }
+
 let _ktx2Ready = false;
 
 /** Must be called once with the WebGPU renderer before loading KTX2-textured GLBs. */
