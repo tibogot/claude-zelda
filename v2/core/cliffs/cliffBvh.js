@@ -72,16 +72,14 @@ export class CliffBvh {
         const wx = -worldHalf + (ix + 0.5) * cellSize;
         const wz = -worldHalf + (iz + 0.5) * cellSize;
 
+        const terrainY = terrainStore.getWorldHeight(wx, wz);
         _ray.origin.set(wx, 99999, wz);
         _ray.direction.set(0, -1, 0);
 
         const hit = this._bvh.raycastFirst(_ray);
-        if (hit) {
-          const terrainY = terrainStore.getWorldHeight(wx, wz);
-          if (hit.point.y > terrainY + 0.08) {
-            grid[iz * gridRes + ix] = hit.point.y;
-          }
-        }
+        grid[iz * gridRes + ix] = (hit && hit.point.y > terrainY)
+          ? hit.point.y
+          : terrainY;
       }
     }
 
@@ -90,6 +88,14 @@ export class CliffBvh {
     this._worldSize = worldSize;
     this._worldHalf = worldHalf;
     this.baked = true;
+  }
+
+  raycastHeight(wx, wz) {
+    if (!this.baked || !this._bvh) return null;
+    _ray.origin.set(wx, 99999, wz);
+    _ray.direction.set(0, -1, 0);
+    const hit = this._bvh.raycastFirst(_ray);
+    return hit ? hit.point.y : null;
   }
 
   sampleHeight(wx, wz) {
@@ -101,35 +107,15 @@ export class CliffBvh {
 
     const ix0 = Math.max(0, Math.min(this._gridRes - 2, Math.floor(fx)));
     const iz0 = Math.max(0, Math.min(this._gridRes - 2, Math.floor(fz)));
-    const ix1 = ix0 + 1;
-    const iz1 = iz0 + 1;
     const tx = fx - ix0;
     const tz = fz - iz0;
 
     const res = this._gridRes;
     const h00 = this._heightGrid[iz0 * res + ix0];
-    const h10 = this._heightGrid[iz0 * res + ix1];
-    const h01 = this._heightGrid[iz1 * res + ix0];
-    const h11 = this._heightGrid[iz1 * res + ix1];
+    const h10 = this._heightGrid[iz0 * res + ix0 + 1];
+    const h01 = this._heightGrid[(iz0 + 1) * res + ix0];
+    const h11 = this._heightGrid[(iz0 + 1) * res + ix0 + 1];
 
-    const valid00 = h00 > -9000;
-    const valid10 = h10 > -9000;
-    const valid01 = h01 > -9000;
-    const valid11 = h11 > -9000;
-    const validCount = (valid00 ? 1 : 0) + (valid10 ? 1 : 0) + (valid01 ? 1 : 0) + (valid11 ? 1 : 0);
-    if (validCount === 0) return null;
-
-    const s00 = valid00 ? h00 : 0;
-    const s10 = valid10 ? h10 : 0;
-    const s01 = valid01 ? h01 : 0;
-    const s11 = valid11 ? h11 : 0;
-    const w00 = valid00 ? (1 - tx) * (1 - tz) : 0;
-    const w10 = valid10 ? tx * (1 - tz) : 0;
-    const w01 = valid01 ? (1 - tx) * tz : 0;
-    const w11 = valid11 ? tx * tz : 0;
-    const wSum = w00 + w10 + w01 + w11;
-    if (wSum < 0.001) return null;
-
-    return (s00 * w00 + s10 * w10 + s01 * w01 + s11 * w11) / wSum;
+    return h00 + (h10 - h00) * tx + (h01 - h00) * tz + (h00 - h10 - h01 + h11) * tx * tz;
   }
 }

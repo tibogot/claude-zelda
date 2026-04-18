@@ -195,6 +195,15 @@ export class CliffInstancer {
     this._selectionBox.visible = true;
   }
 
+  setMaterial(mat) {
+    for (const tr of this._typeRender) {
+      if (!tr) continue;
+      for (const entry of tr.entries) {
+        entry.im.material = mat;
+      }
+    }
+  }
+
   update() {
     this.rebuild();
   }

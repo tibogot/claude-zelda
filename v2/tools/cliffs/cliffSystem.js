@@ -18,10 +18,8 @@ export class CliffSystem {
     if (this._undoStack.length > this._maxUndo) this._undoStack.shift();
   }
 
-  handlePlace(hitPoint) {
-    if (this.store.types.length === 0) return;
-    const typeIdx = this.toolState.cliffs.activeTypeIdx;
-    if (typeIdx < 0 || typeIdx >= this.store.types.length) return;
+  handlePlace(hitPoint, typeIdx) {
+    if (typeIdx == null || typeIdx < 0 || typeIdx >= this.store.types.length) return;
 
     const before = this.store.snapshot();
     const sinkOffset = this.toolState.cliffs.sinkOffset || 0;

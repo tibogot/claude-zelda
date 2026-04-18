@@ -1,11 +1,12 @@
 import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 const CAP_R = 0.4;
 const CAP_H = 1.2;
 const GRAVITY = 20.0;
 const JUMP_VEL = 11.0;
 const MOVE_SPEED = 12;
-const CAM_DIST = 6;
+const CAM_DIST = 8;
 const CAM_SENS_X = 0.002;
 const CAM_SENS_Y = 0.002;
 const ISO_PITCH = 1.0;
@@ -13,6 +14,22 @@ const ISO_DIST_DEFAULT = 26;
 const ISO_DIST_MIN = 10;
 const ISO_DIST_MAX = 70;
 const ISO_YAW_ROT_SPEED = 1.6;
+
+const FLY_MOUSE_SENS_X = 0.0022;
+const FLY_MOUSE_SENS_Y = 0.0018;
+const FLY_PITCH_MIN = -0.62;
+const FLY_PITCH_MAX = 0.68;
+const FLY_PITCH_CLIMB_SCALE = 14;
+const FLY_ROLL_MAX = 0.78;
+const FLY_ROLL_VEL_SCALE = 0.0042;
+const FLY_ROLL_SMOOTH = 10;
+const FLY_ROLL_TARGET_DECAY = 5;
+const FLY_BARREL_DURATION = 0.88;
+const ISO_FLY_YAW_RATE = 1.9;
+const ISO_FLY_CLIMB_RATE = 22;
+const ISO_FLY_CHASE_SMOOTH = 5.5;
+
+const PLANE_MODEL = "../../models/wenning_carsten_gameart_plane_compressed.glb";
 
 export class PlayMode {
   constructor({ scene, camera, renderer, controls, getWorldHeight, worldHalf }) {
@@ -25,6 +42,7 @@ export class PlayMode {
 
     this.active = false;
     this.camView = "follow";
+    this.moveMode = "capsule";
     this.playerPos = new THREE.Vector3();
     this.velY = 0;
     this.inAir = false;
@@ -38,12 +56,27 @@ export class PlayMode {
     this._lastMx = 0;
     this._lastMz = 0;
 
+    // Fly state
+    this.flyHeading = 0;
+    this.flyPitch = 0;
+    this.flyRoll = 0;
+    this.flyRollTarget = 0;
+    this.flyHeight = 0;
+    this.flyBarrelActive = false;
+    this.flyBarrelPhase = 0;
+
+    // Capsule mesh
     const geo = new THREE.CapsuleGeometry(CAP_R, CAP_H, 4, 8);
     const mat = new THREE.MeshStandardMaterial({ color: 0xff6633, roughness: 0.7 });
     this.capsule = new THREE.Mesh(geo, mat);
     this.capsule.castShadow = true;
     this.capsule.visible = false;
     scene.add(this.capsule);
+
+    // Plane mesh
+    this.planeRoot = null;
+    this.planeLoaded = false;
+    this._loadPlane();
 
     this._onKeyDown = this._onKeyDown.bind(this);
     this._onKeyUp = this._onKeyUp.bind(this);
@@ -57,15 +90,60 @@ export class PlayMode {
     this._pointer = new THREE.Vector2();
   }
 
+  _loadPlane() {
+    const loader = new GLTFLoader();
+    loader.load(PLANE_MODEL, (gltf) => {
+      const inner = gltf.scene;
+      inner.traverse((o) => {
+        if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; }
+      });
+      inner.rotation.y = Math.PI;
+      inner.updateMatrixWorld(true);
+      const box0 = new THREE.Box3().setFromObject(inner);
+      if (!box0.isEmpty()) {
+        const size0 = box0.getSize(new THREE.Vector3());
+        const max0 = Math.max(size0.x, size0.y, size0.z);
+        const targetSpan = 2.8 * (CAP_H + 2 * CAP_R);
+        inner.scale.setScalar(targetSpan / max0);
+        inner.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(inner);
+        inner.position.set(
+          -((box.min.x + box.max.x) * 0.5),
+          -box.min.y,
+          -((box.min.z + box.max.z) * 0.5),
+        );
+      }
+      this.planeRoot = new THREE.Group();
+      this.planeRoot.rotation.order = "YXZ";
+      this.planeRoot.add(inner);
+      this.planeRoot.visible = false;
+      this.scene.add(this.planeRoot);
+      this.planeLoaded = true;
+      if (this.active && this.moveMode === "fly") {
+        this.planeRoot.visible = true;
+        this.capsule.visible = false;
+      }
+    });
+  }
+
+  get flying() { return this.moveMode === "fly" && this.planeLoaded; }
+
   enter() {
     if (this.active) return;
     this.active = true;
     this.camView = "follow";
+    this.moveMode = "capsule";
     this.velY = 0;
     this.inAir = false;
     this.isoYaw = Math.PI / 4;
     this.isoDist = ISO_DIST_DEFAULT;
     this._moveTarget = null;
+    this.flyHeight = 0;
+    this.flyPitch = 0;
+    this.flyRoll = 0;
+    this.flyRollTarget = 0;
+    this.flyBarrelActive = false;
+    this.flyBarrelPhase = 0;
 
     this.savedCamPos = this.camera.position.clone();
     this.savedTarget = this.controls.target.clone();
@@ -75,6 +153,7 @@ export class PlayMode {
     this.camPitch = 0.35;
 
     this.capsule.visible = true;
+    if (this.planeRoot) this.planeRoot.visible = false;
     this.controls.enabled = false;
 
     document.addEventListener("keydown", this._onKeyDown);
@@ -95,6 +174,7 @@ export class PlayMode {
     for (const k of Object.keys(this.keysHeld)) delete this.keysHeld[k];
 
     this.capsule.visible = false;
+    if (this.planeRoot) this.planeRoot.visible = false;
 
     if (this.savedCamPos) this.camera.position.copy(this.savedCamPos);
     if (this.savedTarget) {
@@ -120,17 +200,35 @@ export class PlayMode {
 
     const iso = this.camView === "iso";
     const keys = this.keysHeld;
+    const flying = this.flying;
+
+    // Iso yaw rotation (capsule only, fly chases heading)
+    if (iso && !flying) {
+      if (keys.BracketLeft) this.isoYaw += ISO_YAW_ROT_SPEED * dtSec;
+      if (keys.BracketRight) this.isoYaw -= ISO_YAW_ROT_SPEED * dtSec;
+    }
+
+    // Iso fly: A/D yaw the plane
+    if (flying && iso) {
+      if (keys.KeyA || keys.ArrowLeft) this.flyHeading += ISO_FLY_YAW_RATE * dtSec;
+      if (keys.KeyD || keys.ArrowRight) this.flyHeading -= ISO_FLY_YAW_RATE * dtSec;
+    }
 
     // Movement direction
-    const moveYaw = iso ? this.isoYaw : this.camYaw;
     let mx = 0, mz = 0;
-    if (keys.KeyW || keys.ArrowUp)    { mx -= Math.sin(moveYaw); mz -= Math.cos(moveYaw); }
-    if (keys.KeyS || keys.ArrowDown)  { mx += Math.sin(moveYaw); mz += Math.cos(moveYaw); }
-    if (keys.KeyA || keys.ArrowLeft)  { mx -= Math.cos(moveYaw); mz += Math.sin(moveYaw); }
-    if (keys.KeyD || keys.ArrowRight) { mx += Math.cos(moveYaw); mz -= Math.sin(moveYaw); }
+    if (flying) {
+      if (keys.KeyW || keys.ArrowUp) { mx -= Math.sin(this.flyHeading); mz -= Math.cos(this.flyHeading); }
+      if (keys.KeyS || keys.ArrowDown) { mx += Math.sin(this.flyHeading); mz += Math.cos(this.flyHeading); }
+    } else {
+      const moveYaw = iso ? this.isoYaw : this.camYaw;
+      if (keys.KeyW || keys.ArrowUp)    { mx -= Math.sin(moveYaw); mz -= Math.cos(moveYaw); }
+      if (keys.KeyS || keys.ArrowDown)  { mx += Math.sin(moveYaw); mz += Math.cos(moveYaw); }
+      if (keys.KeyA || keys.ArrowLeft)  { mx -= Math.cos(moveYaw); mz += Math.sin(moveYaw); }
+      if (keys.KeyD || keys.ArrowRight) { mx += Math.cos(moveYaw); mz -= Math.sin(moveYaw); }
+    }
 
-    // Iso click-to-move
-    if (iso && this._moveTarget) {
+    // Iso click-to-move (capsule only)
+    if (iso && !flying && this._moveTarget) {
       if (mx !== 0 || mz !== 0) {
         this._moveTarget = null;
       } else {
@@ -155,37 +253,62 @@ export class PlayMode {
 
     // Ground height
     const groundY = this.getWorldHeight(this.playerPos.x, this.playerPos.z);
+    this.playerPos.y = groundY;
     const capsuleBase = CAP_R + CAP_H * 0.5;
 
-    // Jump / gravity
-    if (keys.Space && !this.inAir) {
-      this.velY = JUMP_VEL;
-      this.inAir = true;
-    }
-
-    if (this.inAir) {
-      this.velY -= GRAVITY * dtSec;
-      this.playerPos.y += this.velY * dtSec;
-      if (this.playerPos.y <= groundY) {
-        this.playerPos.y = groundY;
-        this.velY = 0;
-        this.inAir = false;
+    // Fly altitude
+    if (flying) {
+      if (iso) {
+        let climbDelta = 0;
+        if (keys.Space) climbDelta += ISO_FLY_CLIMB_RATE * dtSec;
+        if (keys.ShiftLeft || keys.ShiftRight) climbDelta -= ISO_FLY_CLIMB_RATE * dtSec;
+        this.flyHeight = Math.max(0, this.flyHeight + climbDelta);
+      } else {
+        this.flyHeight = Math.max(0, this.flyHeight + this.flyPitch * FLY_PITCH_CLIMB_SCALE * dtSec);
       }
+
+      // Barrel roll
+      if (this.flyBarrelActive) {
+        this.flyBarrelPhase += dtSec / FLY_BARREL_DURATION;
+        if (this.flyBarrelPhase >= 1) {
+          this.flyBarrelActive = false;
+          this.flyBarrelPhase = 0;
+        }
+      }
+
+      // Roll smoothing
+      const dtRoll = Math.min(dtSec, 0.08);
+      this.flyRollTarget = THREE.MathUtils.lerp(this.flyRollTarget, 0, 1 - Math.exp(-FLY_ROLL_TARGET_DECAY * dtRoll));
+      this.flyRoll = THREE.MathUtils.lerp(this.flyRoll, this.flyRollTarget, 1 - Math.exp(-FLY_ROLL_SMOOTH * dtRoll));
     } else {
-      this.playerPos.y = groundY;
-      if (this.playerPos.y > groundY + 0.15) {
+      this.flyHeight = 0;
+
+      // Capsule jump / gravity
+      if (keys.Space && !this.inAir) {
+        this.velY = JUMP_VEL;
         this.inAir = true;
       }
+      if (this.inAir) {
+        this.velY -= GRAVITY * dtSec;
+        this.playerPos.y += this.velY * dtSec;
+        if (this.playerPos.y <= groundY) {
+          this.playerPos.y = groundY;
+          this.velY = 0;
+          this.inAir = false;
+        }
+      } else {
+        this.playerPos.y = groundY;
+        if (this.playerPos.y > groundY + 0.15) {
+          this.inAir = true;
+        }
+      }
     }
 
-    // Iso yaw rotation
-    if (iso) {
-      if (keys.BracketLeft) this.isoYaw += ISO_YAW_ROT_SPEED * dtSec;
-      if (keys.BracketRight) this.isoYaw -= ISO_YAW_ROT_SPEED * dtSec;
-    }
+    const planeY = groundY + this.flyHeight;
 
     // Capsule visual
     const capsuleCY = this.playerPos.y + capsuleBase;
+    this.capsule.visible = this.moveMode === "capsule" || (this.moveMode === "fly" && !this.planeLoaded);
     this.capsule.position.set(this.playerPos.x, capsuleCY, this.playerPos.z);
     if (mlen > 0) {
       this._lastMx = mx / mlen;
@@ -195,9 +318,33 @@ export class PlayMode {
       this.capsule.rotation.y = Math.atan2(this._lastMx, this._lastMz) + Math.PI;
     }
 
+    // Plane visual
+    if (this.planeRoot) {
+      this.planeRoot.visible = flying;
+      if (flying) {
+        this.planeRoot.position.set(this.playerPos.x, planeY, this.playerPos.z);
+        let barrelAdd = 0;
+        if (this.flyBarrelActive) {
+          const t = Math.min(1, this.flyBarrelPhase);
+          barrelAdd = t * t * (3 - 2 * t) * Math.PI * 2;
+        }
+        if (iso) {
+          this.planeRoot.rotation.set(0, this.flyHeading, barrelAdd);
+        } else {
+          this.planeRoot.rotation.set(this.flyPitch, this.flyHeading, this.flyRoll + barrelAdd);
+        }
+      }
+    }
+
     // Camera
-    const lookAtY = this.playerPos.y + capsuleBase;
+    const lookAtY = flying ? planeY + 0.45 : capsuleCY + 0.6;
     if (iso) {
+      if (flying) {
+        let yawDelta = this.flyHeading - this.isoYaw;
+        while (yawDelta > Math.PI) yawDelta -= 2 * Math.PI;
+        while (yawDelta < -Math.PI) yawDelta += 2 * Math.PI;
+        this.isoYaw += yawDelta * (1 - Math.exp(-ISO_FLY_CHASE_SMOOTH * Math.min(dtSec, 0.1)));
+      }
       const hDist = this.isoDist * Math.cos(ISO_PITCH);
       const vDist = this.isoDist * Math.sin(ISO_PITCH);
       this.camera.position.set(
@@ -206,20 +353,54 @@ export class PlayMode {
         this.playerPos.z + Math.cos(this.isoYaw) * hDist,
       );
     } else {
+      const camOrbitYaw = flying ? this.flyHeading : this.camYaw;
       const hDist = CAM_DIST * Math.cos(this.camPitch);
       const vDist = CAM_DIST * Math.sin(this.camPitch);
       this.camera.position.set(
-        this.playerPos.x + Math.sin(this.camYaw) * hDist,
+        this.playerPos.x + Math.sin(camOrbitYaw) * hDist,
         lookAtY + vDist,
-        this.playerPos.z + Math.cos(this.camYaw) * hDist,
+        this.playerPos.z + Math.cos(camOrbitYaw) * hDist,
       );
     }
     this.camera.lookAt(this.playerPos.x, lookAtY, this.playerPos.z);
   }
 
+  _toggleMoveMode() {
+    if (this.moveMode === "capsule") {
+      this.moveMode = "fly";
+      this.flyHeading = this.capsule.rotation.y;
+      this.flyPitch = 0;
+      this.flyRoll = 0;
+      this.flyRollTarget = 0;
+      this.flyBarrelActive = false;
+      this.flyBarrelPhase = 0;
+    } else {
+      this.moveMode = "capsule";
+      this.flyHeight = 0;
+      this.flyPitch = 0;
+      this.flyRoll = 0;
+      this.flyRollTarget = 0;
+      this.flyBarrelActive = false;
+      this.flyBarrelPhase = 0;
+    }
+  }
+
   _onKeyDown(event) {
     if (!this.active) return;
     this.keysHeld[event.code] = true;
+
+    if (!event.repeat && event.code === "KeyG") {
+      event.preventDefault();
+      this._toggleMoveMode();
+      return;
+    }
+
+    if (!event.repeat && event.code === "KeyQ" && this.flying && !this.flyBarrelActive) {
+      event.preventDefault();
+      this.flyBarrelActive = true;
+      this.flyBarrelPhase = 0;
+      return;
+    }
 
     if (!event.repeat && event.code === "KeyV") {
       event.preventDefault();
@@ -227,13 +408,16 @@ export class PlayMode {
       if (this.camView === "iso") {
         if (document.pointerLockElement) document.exitPointerLock();
         this.renderer.domElement.style.cursor = "";
-        this.isoYaw = this.camYaw;
+        this.isoYaw = this.flying ? this.flyHeading : this.camYaw;
       } else {
         this._moveTarget = null;
         this.renderer.domElement.style.cursor = "none";
         this.renderer.domElement.requestPointerLock();
       }
     }
+
+    if (event.code.startsWith("Arrow")) event.preventDefault();
+    if (event.code === "Space") event.preventDefault();
   }
 
   _onKeyUp(event) {
@@ -243,6 +427,22 @@ export class PlayMode {
 
   _onMouseMove(event) {
     if (!this.active || !document.pointerLockElement) return;
+
+    if (this.flying) {
+      const mx = event.movementX;
+      const my = event.movementY;
+      this.flyHeading -= mx * FLY_MOUSE_SENS_X;
+      this.flyPitch = THREE.MathUtils.clamp(
+        this.flyPitch + my * FLY_MOUSE_SENS_Y,
+        FLY_PITCH_MIN, FLY_PITCH_MAX,
+      );
+      this.flyRollTarget = THREE.MathUtils.clamp(
+        this.flyRollTarget - mx * FLY_ROLL_VEL_SCALE,
+        -FLY_ROLL_MAX, FLY_ROLL_MAX,
+      );
+      return;
+    }
+
     this.camYaw -= event.movementX * CAM_SENS_X;
     this.camPitch += event.movementY * CAM_SENS_Y;
     this.camPitch = Math.max(0.05, Math.min(Math.PI * 0.45, this.camPitch));
@@ -256,6 +456,7 @@ export class PlayMode {
 
   _onIsoClick(event) {
     if (!this.active || this.camView !== "iso" || event.button !== 0) return;
+    if (this.flying) return;
     const rect = this.renderer.domElement.getBoundingClientRect();
     this._pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     this._pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -286,5 +487,11 @@ export class PlayMode {
     this.scene.remove(this.capsule);
     this.capsule.geometry.dispose();
     this.capsule.material.dispose();
+    if (this.planeRoot) {
+      this.scene.remove(this.planeRoot);
+      this.planeRoot.traverse((o) => {
+        if (o.isMesh) { o.geometry?.dispose(); o.material?.dispose(); }
+      });
+    }
   }
 }

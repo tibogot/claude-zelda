@@ -46,6 +46,7 @@ import { CliffStore } from "../core/cliffs/cliffStore.js";
 import { CliffInstancer } from "../core/cliffs/cliffInstancer.js";
 import { CliffSystem } from "../tools/cliffs/cliffSystem.js";
 import { CliffBvh } from "../core/cliffs/cliffBvh.js";
+import { createCliffInstancerBlendMaterial } from "../../cliffInstancerBlendMaterial.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 
 export async function startV2App() {
@@ -258,6 +259,7 @@ export async function startV2App() {
     .then(() => {
       textureLibraryReady = true;
       invalidateSurfaceMaterials();
+      tryBuildCliffBlendMaterial();
     })
     .catch((err) => console.warn("TextureLibrary defaults failed:", err));
   textureLibrary.addOnChange(({ kind }) => {
@@ -439,14 +441,45 @@ export async function startV2App() {
   const cliffInstancer = new CliffInstancer(scene, cliffStore);
   const cliffBvh = new CliffBvh(cliffStore);
   const cliffSystem = new CliffSystem({ toolState, cliffStore, cliffInstancer, cliffBvh, terrainStore });
+  const cliffSlotToType = {};
+
+  const dummyCliffPaintTex = (() => {
+    const t = new THREE.DataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, THREE.RGBAFormat);
+    t.needsUpdate = true;
+    return t;
+  })();
+  let cliffBlendPack = null;
+
+  function tryBuildCliffBlendMaterial() {
+    if (cliffBlendPack) return;
+    if (!textureLibraryReady) return;
+    const slot = textureLibrary.getSlot(toolState.textureSlots.cliffSlotId);
+    if (!slot) return;
+    const c = toolState.cliffs;
+    cliffU.uRockScale.value = c.blendRockScale;
+    cliffU.uRockBrightness.value = c.blendRockBrightness;
+    cliffU.uRockContrast.value = c.blendRockContrast;
+    cliffU.uTriplanarSharp.value = c.blendTriplanarSharp;
+    cliffBlendPack = createCliffInstancerBlendMaterial(
+      config.world.size, config.world.size * 0.5,
+      slot.albedoTex, slot.ormTex,
+      cliffU, dummyCliffPaintTex
+    );
+    cliffBlendPack.uCBSlopeLow.value = c.blendSlopeLow;
+    cliffBlendPack.uCBSlopeHigh.value = c.blendSlopeHigh;
+    cliffBlendPack.uCBNoiseScale.value = c.blendNoiseScale;
+    cliffBlendPack.uCBNoiseStr.value = c.blendNoiseStr;
+    cliffBlendPack.uCBGroundScale.value = c.blendGroundScale;
+    cliffInstancer.setMaterial(cliffBlendPack.material);
+    console.log("[V2] Cliff blend material created");
+  }
 
   function getWorldHeight(x, z) {
-    const terrainY = terrainStore.getWorldHeight(x, z);
     if (cliffBvh.baked) {
-      const cliffY = cliffBvh.sampleHeight(x, z);
-      if (cliffY != null && cliffY > terrainY) return cliffY;
+      const h = cliffBvh.sampleHeight(x, z);
+      if (h != null) return h;
     }
-    return terrainY;
+    return terrainStore.getWorldHeight(x, z);
   }
 
   const transformControls = new TransformControls(camera, renderer.domElement);
@@ -603,7 +636,8 @@ export async function startV2App() {
         treeLodRenderer.setCastShadow(i, toolState.treeLod.castShadow);
       }
     },
-    onImportCliffGlb: async () => {
+    onImportCliffGlb: async (slotIdx) => {
+      tryBuildCliffBlendMaterial();
       const file = await openGlbPicker();
       if (!file) return;
       try {
@@ -617,13 +651,24 @@ export async function startV2App() {
         const typeIdx = cliffStore.registerType(gltfScene, name);
         if (typeIdx >= 0) {
           cliffInstancer.onTypeRegistered(typeIdx);
-          toolState.cliffs.activeTypeIdx = typeIdx;
-          console.log(`[V2] Cliff type "${name}" loaded (${submeshes.length} submeshes)`);
+          if (cliffBlendPack) cliffInstancer.setMaterial(cliffBlendPack.material);
+          cliffSlotToType[slotIdx] = typeIdx;
+          toolState.cliffSlots[slotIdx].name = name;
+          toolState.cliffSlots[slotIdx].loaded = true;
+          toolState.cliffs.activeSlot = slotIdx;
+          console.log(`[V2] Cliff slot ${slotIdx} "${name}" loaded (${submeshes.length} submeshes)`);
         }
         ui?.pane.refresh();
       } catch (err) {
         console.error("[V2] Failed to load cliff GLB:", err);
       }
+    },
+    onRemoveCliffSlot: (slotIdx) => {
+      delete cliffSlotToType[slotIdx];
+      toolState.cliffSlots[slotIdx].loaded = false;
+      toolState.cliffSlots[slotIdx].name = `Cliff ${slotIdx + 1}`;
+      ui?.pane.refresh();
+      console.log(`[V2] Cliff slot ${slotIdx} cleared`);
     },
     onDeleteSelectedCliff: () => cliffSystem.handleDelete(),
     onClearAllCliffs: () => cliffSystem.clearAll(),
@@ -633,6 +678,19 @@ export async function startV2App() {
     },
     onCliffTransformModeChanged: () => {
       transformControls.setMode(toolState.cliffs.transformMode);
+    },
+    onCliffBlendChanged: () => {
+      if (!cliffBlendPack) return;
+      const c = toolState.cliffs;
+      cliffBlendPack.uCBSlopeLow.value = c.blendSlopeLow;
+      cliffBlendPack.uCBSlopeHigh.value = c.blendSlopeHigh;
+      cliffBlendPack.uCBNoiseScale.value = c.blendNoiseScale;
+      cliffBlendPack.uCBNoiseStr.value = c.blendNoiseStr;
+      cliffBlendPack.uCBGroundScale.value = c.blendGroundScale;
+      cliffU.uRockScale.value = c.blendRockScale;
+      cliffU.uRockBrightness.value = c.blendRockBrightness;
+      cliffU.uRockContrast.value = c.blendRockContrast;
+      cliffU.uTriplanarSharp.value = c.blendTriplanarSharp;
     },
     onSaveProject: () => {
       toolState._cliffExportData = () => cliffStore.exportData();
@@ -911,8 +969,10 @@ export async function startV2App() {
     if (toolState.mode === "cliffs" && event.button === 0 && !transformControls.dragging) {
       const hit = pickTerrain(event);
       if (hit) {
+        const typeIdx = cliffSlotToType[toolState.cliffs.activeSlot];
+        if (typeIdx == null) return;
         event.preventDefault();
-        const instIdx = cliffSystem.handlePlace(hit.point);
+        const instIdx = cliffSystem.handlePlace(hit.point, typeIdx);
         if (instIdx != null) activateCliffSelection(instIdx);
       }
       return;
@@ -1058,6 +1118,12 @@ export async function startV2App() {
         toolState.cliffs.transformMode = "scale";
         transformControls.setMode("scale");
         ui?.pane.refresh();
+      } else if (event.code >= "Digit1" && event.code <= "Digit5") {
+        const slot = parseInt(event.code.charAt(5)) - 1;
+        if (slot < toolState.cliffSlots.length) {
+          toolState.cliffs.activeSlot = slot;
+          ui?.pane.refresh();
+        }
       }
     }
   });

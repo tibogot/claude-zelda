@@ -43,10 +43,12 @@ export function createTweakpaneUi({
   onGrassSaveDensity,
   onGrassLoadDensity,
   onImportCliffGlb,
+  onRemoveCliffSlot,
   onDeleteSelectedCliff,
   onClearAllCliffs,
   onRebakeBvh,
   onCliffTransformModeChanged,
+  onCliffBlendChanged,
 }) {
   const pane = new Pane({ title: "V2 Terrain Core" });
 
@@ -110,10 +112,12 @@ export function createTweakpaneUi({
 
   addCliffFolder(pane, toolState, {
     onImportCliffGlb,
+    onRemoveCliffSlot,
     onDeleteSelected: onDeleteSelectedCliff,
     onClearAllCliffs,
     onRebakeBvh,
     onTransformModeChanged: onCliffTransformModeChanged,
+    onCliffBlendChanged,
   });
 
   /** Shared across sculpt, future paint, foliage, props — same as v1 brush UX. */
