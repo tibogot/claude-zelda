@@ -42,6 +42,11 @@ import { GrassManager } from "../render/foliage/grassManager.js";
 import { GrassPaintSystem } from "../tools/foliage/grassPaintSystem.js";
 import { PlayMode } from "../play/playMode.js";
 import { createGroundTslBundle } from "../../chunkGroundTsl.js";
+import { CliffStore } from "../core/cliffs/cliffStore.js";
+import { CliffInstancer } from "../core/cliffs/cliffInstancer.js";
+import { CliffSystem } from "../tools/cliffs/cliffSystem.js";
+import { CliffBvh } from "../core/cliffs/cliffBvh.js";
+import { TransformControls } from "three/addons/controls/TransformControls.js";
 
 export async function startV2App() {
   const config = structuredClone(V2_CONFIG);
@@ -430,9 +435,41 @@ export async function startV2App() {
   const grassManager = new GrassManager({ scene, camera, config });
   const grassPaintSystem = new GrassPaintSystem({ toolState, grassManager, config });
 
+  const cliffStore = new CliffStore();
+  const cliffInstancer = new CliffInstancer(scene, cliffStore);
+  const cliffBvh = new CliffBvh(cliffStore);
+  const cliffSystem = new CliffSystem({ toolState, cliffStore, cliffInstancer, cliffBvh, terrainStore });
+
+  function getWorldHeight(x, z) {
+    const terrainY = terrainStore.getWorldHeight(x, z);
+    if (cliffBvh.baked) {
+      const cliffY = cliffBvh.sampleHeight(x, z);
+      if (cliffY != null && cliffY > terrainY) return cliffY;
+    }
+    return terrainY;
+  }
+
+  const transformControls = new TransformControls(camera, renderer.domElement);
+  transformControls.setMode("translate");
+  transformControls.enabled = false;
+  transformControls.visible = false;
+  scene.add(transformControls.getHelper());
+  transformControls.addEventListener("change", () => {
+    if (toolState.mode === "cliffs" && cliffInstancer.hasSelection) {
+      cliffSystem.handleTransformChange();
+    }
+  });
+  transformControls.addEventListener("mouseDown", () => {
+    controls.enabled = false;
+  });
+  transformControls.addEventListener("mouseUp", () => {
+    controls.enabled = toolState.mode !== "play";
+    cliffSystem.handleTransformEnd();
+  });
+
   const playMode = new PlayMode({
     scene, camera, renderer, controls,
-    getWorldHeight: (x, z) => terrainStore.getWorldHeight(x, z),
+    getWorldHeight,
     worldHalf: config.world.size * 0.5,
   });
 
@@ -485,6 +522,9 @@ export async function startV2App() {
         toolState.grass.enabled = true;
         grassManager.syncUniforms(toolState.grass, sunDir);
         ui?.pane.refresh();
+      }
+      if (toolState.mode !== "cliffs") {
+        deactivateCliffSelection();
       }
       if (toolState.mode === "play") {
         playMode.enter();
@@ -563,8 +603,41 @@ export async function startV2App() {
         treeLodRenderer.setCastShadow(i, toolState.treeLod.castShadow);
       }
     },
+    onImportCliffGlb: async () => {
+      const file = await openGlbPicker();
+      if (!file) return;
+      try {
+        const { submeshes, name } = await loadTreeGlbFromFile(file);
+        const gltfScene = new THREE.Group();
+        for (const sm of submeshes) {
+          const mesh = new THREE.Mesh(sm.geometry, sm.material);
+          mesh.applyMatrix4(sm.localMatrix);
+          gltfScene.add(mesh);
+        }
+        const typeIdx = cliffStore.registerType(gltfScene, name);
+        if (typeIdx >= 0) {
+          cliffInstancer.onTypeRegistered(typeIdx);
+          toolState.cliffs.activeTypeIdx = typeIdx;
+          console.log(`[V2] Cliff type "${name}" loaded (${submeshes.length} submeshes)`);
+        }
+        ui?.pane.refresh();
+      } catch (err) {
+        console.error("[V2] Failed to load cliff GLB:", err);
+      }
+    },
+    onDeleteSelectedCliff: () => cliffSystem.handleDelete(),
+    onClearAllCliffs: () => cliffSystem.clearAll(),
+    onRebakeBvh: () => {
+      cliffBvh.bake(terrainStore, config);
+      console.log("[V2] BVH rebaked");
+    },
+    onCliffTransformModeChanged: () => {
+      transformControls.setMode(toolState.cliffs.transformMode);
+    },
     onSaveProject: () => {
+      toolState._cliffExportData = () => cliffStore.exportData();
       const buf = serializeProject({ terrainStore, splatStore, treeStore, config, toolState });
+      delete toolState._cliffExportData;
       const blob = new Blob([buf], { type: "application/octet-stream" });
       const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       downloadBlob(blob, `terrain-${ts}.v2terrain`);
@@ -589,6 +662,15 @@ export async function startV2App() {
         }
         // Restore settings
         applySettings(toolState, project.settings);
+        // Restore cliff instances (types must be re-imported by user)
+        if (project.settings?.cliffInstances) {
+          const typeNameToIdx = {};
+          for (let i = 0; i < cliffStore.types.length; i++) {
+            typeNameToIdx[cliffStore.types[i].name] = i;
+          }
+          cliffStore.clear();
+          cliffStore.importData(project.settings.cliffInstances, typeNameToIdx);
+        }
         sharedGroundBundle.syncFromParams(toolState.groundTsl);
         // Rebuild everything
         invalidateSurfaceMaterials();
@@ -810,7 +892,31 @@ export async function startV2App() {
     updateBrushPreviewFromPick(pickTerrain(event));
   }
 
+  function activateCliffSelection(instIdx) {
+    cliffInstancer.select(instIdx);
+    transformControls.attach(cliffInstancer.proxyObject);
+    transformControls.setMode(toolState.cliffs.transformMode);
+    transformControls.enabled = true;
+    transformControls.visible = true;
+  }
+
+  function deactivateCliffSelection() {
+    cliffInstancer.clearSelection();
+    transformControls.detach();
+    transformControls.enabled = false;
+    transformControls.visible = false;
+  }
+
   renderer.domElement.addEventListener("pointerdown", (event) => {
+    if (toolState.mode === "cliffs" && event.button === 0 && !transformControls.dragging) {
+      const hit = pickTerrain(event);
+      if (hit) {
+        event.preventDefault();
+        const instIdx = cliffSystem.handlePlace(hit.point);
+        if (instIdx != null) activateCliffSelection(instIdx);
+      }
+      return;
+    }
     if (event.button !== 0 || !isBrushMode()) return;
     const hit = pickTerrain(event);
     if (toolState.mode === "sculpt" && toolState.sculptMode === "ramp") {
@@ -880,6 +986,19 @@ export async function startV2App() {
     capture: true,
   });
 
+  renderer.domElement.addEventListener("contextmenu", (event) => {
+    if (toolState.mode !== "cliffs") return;
+    event.preventDefault();
+    updatePointer(event);
+    raycaster.setFromCamera(pointerNdc, camera);
+    const hit = cliffInstancer.raycast(raycaster);
+    if (hit) {
+      activateCliffSelection(hit.instIdx);
+    } else {
+      deactivateCliffSelection();
+    }
+  });
+
   window.addEventListener("pointerup", () => {
     if (!pointerDown) return;
     pointerDown = false;
@@ -899,6 +1018,7 @@ export async function startV2App() {
     if (toolState.mode === "paint") return paintSystem;
     if (toolState.mode === "treePaint") return treeSystem;
     if (toolState.mode === "grass") return grassPaintSystem;
+    if (toolState.mode === "cliffs") return cliffSystem;
     return sculptSystem;
   }
 
@@ -921,6 +1041,24 @@ export async function startV2App() {
       event.preventDefault();
       sculptSystem.clearRampPoint();
       syncRampMarker();
+    } else if (event.code === "Delete" && toolState.mode === "cliffs") {
+      event.preventDefault();
+      cliffSystem.handleDelete();
+      deactivateCliffSelection();
+    } else if (toolState.mode === "cliffs" && !ctrl) {
+      if (event.code === "KeyW") {
+        toolState.cliffs.transformMode = "translate";
+        transformControls.setMode("translate");
+        ui?.pane.refresh();
+      } else if (event.code === "KeyE") {
+        toolState.cliffs.transformMode = "rotate";
+        transformControls.setMode("rotate");
+        ui?.pane.refresh();
+      } else if (event.code === "KeyR") {
+        toolState.cliffs.transformMode = "scale";
+        transformControls.setMode("scale");
+        ui?.pane.refresh();
+      }
     }
   });
 
@@ -987,6 +1125,7 @@ export async function startV2App() {
     }
 
     chunkStream.update(focusPos);
+    cliffInstancer.update();
     treeLodRenderer.update(treeStore, camera, toolState.treeLod);
     if (grassManager.uniforms) {
       grassManager.uniforms.uPlayerPos.value.copy(focusPos);
@@ -1025,6 +1164,8 @@ export async function startV2App() {
       ui.dispose();
       chunkStream.dispose();
       treeLodRenderer.dispose();
+      cliffInstancer.dispose();
+      transformControls.dispose();
       grassManager.dispose();
       playMode.dispose();
       tileTerrainMaterial.dispose();

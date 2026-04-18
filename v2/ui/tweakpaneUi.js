@@ -5,6 +5,7 @@ import { addTextureLibraryFolder } from "./textureLibraryTweakpane.js";
 import { addPaintFolder } from "./paintTweakpane.js";
 import { addTreeFolder } from "./treeTweakpane.js";
 import { addGrassFolder } from "./grassTweakpane.js";
+import { addCliffFolder } from "./cliffTweakpane.js";
 
 export function createTweakpaneUi({
   toolState,
@@ -41,6 +42,11 @@ export function createTweakpaneUi({
   onGrassClear,
   onGrassSaveDensity,
   onGrassLoadDensity,
+  onImportCliffGlb,
+  onDeleteSelectedCliff,
+  onClearAllCliffs,
+  onRebakeBvh,
+  onCliffTransformModeChanged,
 }) {
   const pane = new Pane({ title: "V2 Terrain Core" });
 
@@ -54,6 +60,7 @@ export function createTweakpaneUi({
         Paint: "paint",
         "Tree Paint": "treePaint",
         Grass: "grass",
+        Cliffs: "cliffs",
         Play: "play",
       },
     })
@@ -99,6 +106,14 @@ export function createTweakpaneUi({
     onGrassClear,
     onGrassSaveDensity,
     onGrassLoadDensity,
+  });
+
+  addCliffFolder(pane, toolState, {
+    onImportCliffGlb,
+    onDeleteSelected: onDeleteSelectedCliff,
+    onClearAllCliffs,
+    onRebakeBvh,
+    onTransformModeChanged: onCliffTransformModeChanged,
   });
 
   /** Shared across sculpt, future paint, foliage, props — same as v1 brush UX. */

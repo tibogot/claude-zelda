@@ -107,6 +107,11 @@ export function createToolState() {
       { name: "Slot 3", enabled: true },
       { name: "Slot 4", enabled: true },
     ],
+    cliffs: {
+      activeTypeIdx: 0,
+      sinkOffset: 2,
+      transformMode: "translate",
+    },
     grass: {
       enabled: false,
       bladeHeight: 1.0,
