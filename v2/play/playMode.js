@@ -1,5 +1,9 @@
 import * as THREE from "three";
-import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { MeshBasicNodeMaterial } from "three";
+import {
+  attribute, float, vec3, pow, sub, abs, smoothstep, mul, mix, add,
+} from "three/tsl";
+import { loadTreeGlbFromUrl } from "../core/foliage/glbLoader.js";
 
 const CAP_R = 0.4;
 const CAP_H = 1.2;
@@ -29,7 +33,182 @@ const ISO_FLY_YAW_RATE = 1.9;
 const ISO_FLY_CLIMB_RATE = 22;
 const ISO_FLY_CHASE_SMOOTH = 5.5;
 
-const PLANE_MODEL = "../../models/wenning_carsten_gameart_plane_compressed.glb";
+const TRAIL_SEG = 90;
+const TRAIL_HALF_W = 0.038;
+const TRAIL_MAX_DIST = 0.6;
+
+const GUN_FIRE_RATE = 12;
+const GUN_BULLET_SPEED = 240;
+const GUN_BULLET_MAX_DIST = 600;
+const GUN_BULLET_SIZE = 0.7;
+const GUN_BULLET_POOL = 64;
+const GUN_TRACER_COLOR = 0xfff0a0;
+
+const PLANE_MODEL = "../models/wenning_carsten_gameart_plane_compressed.glb";
+
+/* ── Shared TSL trail material ── */
+function createTrailMaterial() {
+  const mat = new MeshBasicNodeMaterial({
+    side: THREE.DoubleSide,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const trUV = attribute("trailUV");
+  const lenT = trUV.x;
+  const lenFade = pow(sub(float(1.0), lenT), float(1.6));
+  const edge = abs(sub(trUV.y, float(0.5))).mul(float(2));
+  const edgeFade = sub(float(1.0), smoothstep(float(0.15), float(0.95), edge));
+  const alpha = mul(lenFade, edgeFade, float(0.72));
+  const coreColor = mix(vec3(1.0, 1.0, 1.0), vec3(0.65, 0.85, 1.0), lenT);
+  const coreBright = sub(float(1.0), smoothstep(float(0.0), float(0.55), edge));
+  mat.colorNode = add(coreColor, mul(vec3(0.3, 0.25, 0.2), coreBright));
+  mat.opacityNode = alpha;
+  return mat;
+}
+
+const _trDir = new THREE.Vector3();
+const _trSide = new THREE.Vector3();
+const _trUp = new THREE.Vector3(0, 1, 0);
+const _trTipWorld = new THREE.Vector3();
+
+function createWingTrailMesh(scene, trailMat) {
+  const vertCount = (TRAIL_SEG + 1) * 2;
+  const positions = new Float32Array(vertCount * 3);
+  const trailUVs = new Float32Array(vertCount * 2);
+  const indices = [];
+  for (let i = 0; i < TRAIL_SEG; i++) {
+    const v = i * 2;
+    indices.push(v, v + 1, v + 2, v + 1, v + 3, v + 2);
+  }
+  for (let i = 0; i <= TRAIL_SEG; i++) {
+    const u = i / TRAIL_SEG;
+    trailUVs[i * 2 * 2] = u;
+    trailUVs[i * 2 * 2 + 1] = 0;
+    trailUVs[(i * 2 + 1) * 2] = u;
+    trailUVs[(i * 2 + 1) * 2 + 1] = 1;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute("trailUV", new THREE.BufferAttribute(trailUVs, 2));
+  geo.setIndex(indices);
+  const mesh = new THREE.Mesh(geo, trailMat);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = 12;
+  mesh.visible = false;
+  scene.add(mesh);
+  return { mesh, history: [] };
+}
+
+function sampleTrail(trail, planeInner, localOffset) {
+  _trTipWorld.copy(localOffset);
+  planeInner.localToWorld(_trTipWorld);
+  const hist = trail.history;
+  if (hist.length > 0) {
+    const d = _trTipWorld.distanceTo(hist[0]);
+    if (d < 0.002) return;
+    if (d > TRAIL_MAX_DIST && hist.length > 1) hist.length = 0;
+  }
+  hist.unshift(_trTipWorld.clone());
+  if (hist.length > TRAIL_SEG + 1) hist.length = TRAIL_SEG + 1;
+}
+
+function rebuildTrail(trail) {
+  const pos = trail.mesh.geometry.attributes.position;
+  const hist = trail.history;
+  const n = Math.min(hist.length, TRAIL_SEG + 1);
+  for (let i = 0; i < n; i++) {
+    const p = hist[i];
+    if (i < n - 1) _trDir.subVectors(hist[i], hist[i + 1]).normalize();
+    else if (n > 1) _trDir.subVectors(hist[n - 2], hist[n - 1]).normalize();
+    else _trDir.set(0, 0, 1);
+    _trSide.crossVectors(_trDir, _trUp);
+    if (_trSide.lengthSq() < 1e-6) _trSide.set(1, 0, 0);
+    else _trSide.normalize();
+    const t = i / TRAIL_SEG;
+    const w = TRAIL_HALF_W * (1 - t * 0.4);
+    const vi = i * 2;
+    pos.setXYZ(vi, p.x - _trSide.x * w, p.y - _trSide.y * w, p.z - _trSide.z * w);
+    pos.setXYZ(vi + 1, p.x + _trSide.x * w, p.y + _trSide.y * w, p.z + _trSide.z * w);
+  }
+  for (let i = n; i <= TRAIL_SEG; i++) {
+    const vi = i * 2;
+    const lp = n > 0 ? hist[n - 1] : { x: 0, y: 0, z: 0 };
+    pos.setXYZ(vi, lp.x, lp.y, lp.z);
+    pos.setXYZ(vi + 1, lp.x, lp.y, lp.z);
+  }
+  pos.needsUpdate = true;
+}
+
+/* ── Bullet pool helpers ── */
+const _bFwd = new THREE.Vector3();
+const _bMuz = new THREE.Vector3();
+const _bToCam = new THREE.Vector3();
+const _bRight = new THREE.Vector3();
+const _bPerp = new THREE.Vector3();
+const _bMat4 = new THREE.Matrix4();
+const _bStep = new THREE.Vector3();
+
+function createBulletPool(scene) {
+  const geo = new THREE.PlaneGeometry(0.18, 1.4);
+  const mat = new THREE.MeshBasicMaterial({
+    color: new THREE.Color(GUN_TRACER_COLOR),
+    transparent: true, opacity: 1, depthWrite: false,
+    blending: THREE.AdditiveBlending, side: THREE.DoubleSide, toneMapped: false,
+  });
+  const group = new THREE.Group();
+  group.frustumCulled = false;
+  scene.add(group);
+  const pool = [];
+  for (let i = 0; i < GUN_BULLET_POOL; i++) {
+    const m = new THREE.Mesh(geo, mat);
+    m.frustumCulled = false;
+    m.matrixAutoUpdate = false;
+    m.visible = false;
+    m.renderOrder = 11;
+    group.add(m);
+    pool.push({ mesh: m, pos: new THREE.Vector3(), dir: new THREE.Vector3(), dist: 0, alive: false });
+  }
+  return { group, pool, geo, mat };
+}
+
+function fireBullet(pool, origin, dir) {
+  for (const b of pool) {
+    if (!b.alive) {
+      b.alive = true;
+      b.pos.copy(origin);
+      b.dir.copy(dir).normalize();
+      b.dist = 0;
+      b.mesh.visible = true;
+      return;
+    }
+  }
+}
+
+function updateBullets(pool, camera, dtSec) {
+  for (const b of pool) {
+    if (!b.alive) continue;
+    _bStep.copy(b.dir).multiplyScalar(GUN_BULLET_SPEED * dtSec);
+    b.pos.add(_bStep);
+    b.dist += GUN_BULLET_SPEED * dtSec;
+    if (b.dist > GUN_BULLET_MAX_DIST) { b.alive = false; b.mesh.visible = false; continue; }
+    _bToCam.subVectors(camera.position, b.pos);
+    _bRight.crossVectors(b.dir, _bToCam);
+    if (_bRight.lengthSq() < 1e-6) _bRight.set(1, 0, 0); else _bRight.normalize();
+    _bPerp.crossVectors(_bRight, b.dir).normalize();
+    const sz = GUN_BULLET_SIZE;
+    _bRight.multiplyScalar(sz);
+    const dScaled = _bStep.copy(b.dir).multiplyScalar(sz);
+    _bPerp.multiplyScalar(sz);
+    _bMat4.makeBasis(_bRight, dScaled, _bPerp);
+    _bMat4.setPosition(b.pos);
+    b.mesh.matrix.copy(_bMat4);
+  }
+}
+
+function clearBullets(pool) {
+  for (const b of pool) { b.alive = false; b.mesh.visible = false; }
+}
 
 export class PlayMode {
   constructor({ scene, camera, renderer, controls, getWorldHeight, worldHalf }) {
@@ -64,6 +243,7 @@ export class PlayMode {
     this.flyHeight = 0;
     this.flyBarrelActive = false;
     this.flyBarrelPhase = 0;
+    this.flyBarrelDir = 1;
 
     // Capsule mesh
     const geo = new THREE.CapsuleGeometry(CAP_R, CAP_H, 4, 8);
@@ -73,9 +253,17 @@ export class PlayMode {
     this.capsule.visible = false;
     scene.add(this.capsule);
 
-    // Plane mesh
+    // Plane mesh + contrails
     this.planeRoot = null;
+    this._planeInner = null;
     this.planeLoaded = false;
+    this._trailMat = createTrailMaterial();
+    this._wingTrails = [];
+    this._wingOffsets = [];
+    this._bullets = createBulletPool(scene);
+    this._muzzleOffsets = [];
+    this._muzzleIdx = 0;
+    this._gunCooldown = 0;
     this._loadPlane();
 
     this._onKeyDown = this._onKeyDown.bind(this);
@@ -90,13 +278,17 @@ export class PlayMode {
     this._pointer = new THREE.Vector2();
   }
 
-  _loadPlane() {
-    const loader = new GLTFLoader();
-    loader.load(PLANE_MODEL, (gltf) => {
-      const inner = gltf.scene;
-      inner.traverse((o) => {
-        if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; }
-      });
+  async _loadPlane() {
+    try {
+      const { submeshes } = await loadTreeGlbFromUrl(PLANE_MODEL);
+      const inner = new THREE.Group();
+      for (const sm of submeshes) {
+        const mesh = new THREE.Mesh(sm.geometry, sm.material);
+        mesh.applyMatrix4(sm.localMatrix);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        inner.add(mesh);
+      }
       inner.rotation.y = Math.PI;
       inner.updateMatrixWorld(true);
       const box0 = new THREE.Box3().setFromObject(inner);
@@ -118,15 +310,73 @@ export class PlayMode {
       this.planeRoot.add(inner);
       this.planeRoot.visible = false;
       this.scene.add(this.planeRoot);
+      this._planeInner = inner;
+
+      // Create wingtip contrails
+      inner.updateMatrixWorld(true);
+      const wingBox = new THREE.Box3().setFromObject(inner);
+      const wbSz = new THREE.Vector3();
+      wingBox.getSize(wbSz);
+      const tipXL = wingBox.min.x;
+      const tipXR = wingBox.max.x;
+      const zBack = wingBox.max.z - wbSz.z * 0.08;
+      const yMid = (wingBox.min.y + wingBox.max.y) * 0.5;
+      const tmpW = new THREE.Vector3();
+
+      tmpW.set(tipXL, yMid, zBack);
+      inner.worldToLocal(tmpW);
+      this._wingOffsets.push(tmpW.clone());
+      this._wingTrails.push(createWingTrailMesh(this.scene, this._trailMat));
+
+      tmpW.set(tipXR, yMid, zBack);
+      inner.worldToLocal(tmpW);
+      this._wingOffsets.push(tmpW.clone());
+      this._wingTrails.push(createWingTrailMesh(this.scene, this._trailMat));
+
+      // Gun muzzle offsets (inboard from wingtips, near nose)
+      const zFront = wingBox.min.z + wbSz.z * 0.05;
+      const wingHalfX = wbSz.x * 0.5;
+      const muzzleHalfSpan = wingHalfX * 0.42;
+      const cxW = (wingBox.min.x + wingBox.max.x) * 0.5;
+      tmpW.set(cxW - muzzleHalfSpan, yMid, zFront);
+      inner.worldToLocal(tmpW);
+      this._muzzleOffsets.push(tmpW.clone());
+      tmpW.set(cxW + muzzleHalfSpan, yMid, zFront);
+      inner.worldToLocal(tmpW);
+      this._muzzleOffsets.push(tmpW.clone());
+
       this.planeLoaded = true;
       if (this.active && this.moveMode === "fly") {
         this.planeRoot.visible = true;
         this.capsule.visible = false;
       }
-    });
+    } catch (err) {
+      console.warn("[V2] Failed to load plane model:", err);
+    }
   }
 
   get flying() { return this.moveMode === "fly" && this.planeLoaded; }
+
+  _clearTrails() {
+    for (const trail of this._wingTrails) {
+      trail.history.length = 0;
+      trail.mesh.visible = false;
+    }
+  }
+
+  _updateTrails() {
+    if (!this._planeInner || this._wingTrails.length === 0) return;
+    if (this.planeRoot?.visible) {
+      this._planeInner.updateMatrixWorld(true);
+      for (let i = 0; i < this._wingTrails.length; i++) {
+        sampleTrail(this._wingTrails[i], this._planeInner, this._wingOffsets[i]);
+        rebuildTrail(this._wingTrails[i]);
+        this._wingTrails[i].mesh.visible = true;
+      }
+    } else {
+      this._clearTrails(); clearBullets(this._bullets.pool);
+    }
+  }
 
   enter() {
     if (this.active) return;
@@ -154,6 +404,7 @@ export class PlayMode {
 
     this.capsule.visible = true;
     if (this.planeRoot) this.planeRoot.visible = false;
+    this._clearTrails(); clearBullets(this._bullets.pool);
     this.controls.enabled = false;
 
     document.addEventListener("keydown", this._onKeyDown);
@@ -175,6 +426,7 @@ export class PlayMode {
 
     this.capsule.visible = false;
     if (this.planeRoot) this.planeRoot.visible = false;
+    this._clearTrails(); clearBullets(this._bullets.pool);
 
     if (this.savedCamPos) this.camera.position.copy(this.savedCamPos);
     if (this.savedTarget) {
@@ -326,7 +578,7 @@ export class PlayMode {
         let barrelAdd = 0;
         if (this.flyBarrelActive) {
           const t = Math.min(1, this.flyBarrelPhase);
-          barrelAdd = t * t * (3 - 2 * t) * Math.PI * 2;
+          barrelAdd = t * t * (3 - 2 * t) * Math.PI * 2 * this.flyBarrelDir;
         }
         if (iso) {
           this.planeRoot.rotation.set(0, this.flyHeading, barrelAdd);
@@ -335,6 +587,23 @@ export class PlayMode {
         }
       }
     }
+
+    // Wingtip contrails
+    this._updateTrails();
+
+    // Plane gun
+    if (this._gunCooldown > 0) this._gunCooldown -= dtSec;
+    if (flying && this._muzzleOffsets.length > 0 && keys.KeyE && this._gunCooldown <= 0) {
+      this._planeInner.updateMatrixWorld(true);
+      _bFwd.set(0, 0, -1).applyQuaternion(this.planeRoot.quaternion);
+      const muz = this._muzzleOffsets[this._muzzleIdx];
+      this._muzzleIdx = (this._muzzleIdx + 1) % this._muzzleOffsets.length;
+      _bMuz.copy(muz);
+      this._planeInner.localToWorld(_bMuz);
+      fireBullet(this._bullets.pool, _bMuz, _bFwd);
+      this._gunCooldown = 1 / GUN_FIRE_RATE;
+    }
+    updateBullets(this._bullets.pool, this.camera, dtSec);
 
     // Camera
     const lookAtY = flying ? planeY + 0.45 : capsuleCY + 0.6;
@@ -382,6 +651,7 @@ export class PlayMode {
       this.flyRollTarget = 0;
       this.flyBarrelActive = false;
       this.flyBarrelPhase = 0;
+      this._clearTrails(); clearBullets(this._bullets.pool);
     }
   }
 
@@ -399,6 +669,7 @@ export class PlayMode {
       event.preventDefault();
       this.flyBarrelActive = true;
       this.flyBarrelPhase = 0;
+      this.flyBarrelDir = this.flyRoll >= 0 ? 1 : -1;
       return;
     }
 
@@ -487,6 +758,14 @@ export class PlayMode {
     this.scene.remove(this.capsule);
     this.capsule.geometry.dispose();
     this.capsule.material.dispose();
+    for (const trail of this._wingTrails) {
+      this.scene.remove(trail.mesh);
+      trail.mesh.geometry.dispose();
+    }
+    this._trailMat.dispose();
+    this.scene.remove(this._bullets.group);
+    this._bullets.geo.dispose();
+    this._bullets.mat.dispose();
     if (this.planeRoot) {
       this.scene.remove(this.planeRoot);
       this.planeRoot.traverse((o) => {
