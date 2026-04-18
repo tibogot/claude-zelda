@@ -756,47 +756,73 @@ export class PlayMode {
     const inRoll = charMode && this.charRolling;
     const inSlide = charMode && this.charSlidePhase !== "none";
 
-    // Character roll/slide override movement
-    if (inRoll) {
-      const elapsed = performance.now() / 1000 - this.charRollStart;
-      const t = Math.min(elapsed / this.charRollDuration, 1);
-      if (t >= 0.75) { this.charRolling = false; }
-      const spd = CHAR_ROLL_PEAK * Math.cos(t * PI / 2);
-      mx = -Math.sin(this.charRollYaw);
-      mz = -Math.cos(this.charRollYaw);
-      const rollStep = spd * dtSec;
-      mx *= rollStep / (Math.hypot(mx, mz) || 1);
-      mz *= rollStep / (Math.hypot(mx, mz) || 1);
+    // Crouch (hold Ctrl, matches v1)
+    if (charMode) {
+      this.charCrouching = !this.charInAir && !this.charRolling && !inSlide &&
+        !this.charAttacking && (keys.ControlLeft || keys.ControlRight);
     }
-    if (inSlide) {
-      const elapsed = performance.now() / 1000 - this.charSlideStart;
-      if (this.charSlidePhase === "loop" && elapsed > CHAR_SLIDE_MAX_TIME) {
-        this.charSlidePhase = "exit";
-        if (this.charActions?.slideExit) {
-          const se = this.charActions.slideExit;
-          se.reset().enabled = true;
-          se.crossFadeFrom(this.charCurrentAction, 0.1, false).play();
-          this.charCurrentAction = se;
+
+    // Roll early exit at 75% when input held (matches v1)
+    if (inRoll) {
+      const _inputHeld = keys.KeyW || keys.KeyA || keys.KeyS || keys.KeyD ||
+        keys.ArrowUp || keys.ArrowDown || keys.ArrowLeft || keys.ArrowRight;
+      if (_inputHeld) {
+        const rollT = (performance.now() - this.charRollStart) / 1000 / this.charRollDuration;
+        if (rollT >= 0.75) {
+          this.charRolling = false;
+          const tgt = this.charCrouching
+            ? this.charActions?.crouchWalk
+            : charRunning ? this.charActions?.run : this.charActions?.walk;
+          if (tgt && this.charActions?.roll) {
+            tgt.enabled = true;
+            tgt.reset();
+            tgt.crossFadeFrom(this.charActions.roll, 0.15, false).play();
+            this.charCurrentAction = tgt;
+          }
         }
-      }
-      if (this.charSlidePhase !== "exit") {
-        mx = -Math.sin(this.charSlideYaw) * CHAR_SLIDE_SPEED * dtSec;
-        mz = -Math.cos(this.charSlideYaw) * CHAR_SLIDE_SPEED * dtSec;
       }
     }
 
+    // Roll direction override (v1 uses sin/cos without negation, speed via _moveSpeed)
+    let _charRollSpeed = 0;
+    if (charMode && this.charRolling) {
+      const elapsed = (performance.now() - this.charRollStart) / 1000;
+      const t = Math.min(1, elapsed / this.charRollDuration);
+      _charRollSpeed = CHAR_ROLL_PEAK * Math.cos(t * PI * 0.5);
+      mx = Math.sin(this.charRollYaw);
+      mz = Math.cos(this.charRollYaw);
+    }
+
+    // Slide direction override
+    if (charMode && this.charSlidePhase !== "none") {
+      mx = Math.sin(this.charSlideYaw);
+      mz = Math.cos(this.charSlideYaw);
+      if (this.charSlidePhase === "loop") {
+        const elapsed = (performance.now() - this.charSlideStart) / 1000;
+        if ((elapsed >= CHAR_SLIDE_MAX_TIME || !keys.KeyX) && this.charActions?.slideExit) {
+          this.charSlidePhase = "exit";
+          const se = this.charActions.slideExit;
+          se.reset().enabled = true;
+          se.crossFadeFrom(this.charCurrentAction, 0.12, false).play();
+          this.charCurrentAction = se;
+        }
+      }
+    }
+
+    // Attack/spell freeze movement
+    if (charMode && this.charAttacking) { mx = 0; mz = 0; }
+
     const mlen = Math.hypot(mx, mz);
     const moveSpeed = charMode
-      ? (charRunning ? CHAR_RUN_SPEED : CHAR_WALK_SPEED)
+      ? (this.charRolling ? _charRollSpeed
+        : inSlide ? CHAR_SLIDE_SPEED
+        : this.charCrouching ? CHAR_WALK_SPEED * 0.5
+        : charRunning ? CHAR_RUN_SPEED
+        : CHAR_WALK_SPEED)
       : MOVE_SPEED;
     if (mlen > 0) {
-      let stepX, stepZ;
-      if (inRoll || inSlide) {
-        stepX = mx; stepZ = mz;
-      } else {
-        stepX = (mx / mlen) * moveSpeed * dtSec;
-        stepZ = (mz / mlen) * moveSpeed * dtSec;
-      }
+      let stepX = (mx / mlen) * moveSpeed * dtSec;
+      let stepZ = (mz / mlen) * moveSpeed * dtSec;
 
       if (this.cliffBvh?.baked) {
         const capsuleBase = CAP_R + CAP_H * 0.5;
@@ -880,6 +906,13 @@ export class PlayMode {
     } else if (charMode) {
       this.flyHeight = 0;
 
+      // Glider toggle: rising-edge Space while airborne (checked BEFORE jump
+      // so holding Space from the jump press doesn't immediately open it)
+      const _charSpaceEdge = keys.Space && !this.charSpacePrev;
+      if (_charSpaceEdge && this.charInAir) {
+        this.charGliding = !this.charGliding;
+      }
+
       // Character jump
       if (
         !this.charInAir && !this.charCrouching && !this.charRolling &&
@@ -902,10 +935,6 @@ export class PlayMode {
           this.charCurrentAction = jl;
         }
       }
-      // Glider toggle (Space mid-air, not held from jump)
-      if (this.charInAir && keys.Space && !this.charSpacePrev && this.charVelY < 0) {
-        this.charGliding = !this.charGliding;
-      }
       this.charSpacePrev = !!keys.Space;
 
       if (this.charInAir) {
@@ -913,7 +942,8 @@ export class PlayMode {
         if (this.charGliding) {
           this.charVelY = Math.max(this.charVelY, -CHAR_GLIDE_FALL_SPEED);
         }
-        this.playerPos.y = (this.playerPos.y || groundY) + this.charVelY * dtSec;
+        const prevY = this.charRoot ? this.charRoot.position.y : groundY;
+        this.playerPos.y = prevY + this.charVelY * dtSec;
         if (this.playerPos.y <= groundY) {
           this.playerPos.y = groundY;
           this.charVelY = 0;
@@ -1149,55 +1179,50 @@ export class PlayMode {
       return;
     }
 
-    // Character actions
+    // Character actions (matches v1 keybindings: R=attack, C=roll, X=slide)
     const _charMode = this.moveMode === "char" && this.charLoaded;
     if (_charMode && !event.repeat) {
       const inSlide = this.charSlidePhase !== "none";
-      // Attack (J)
-      if (event.code === "KeyJ" && !this.charAttacking && !this.charRolling && !inSlide && !this.charInAir) {
+      const busy = this.charRolling || this.charAttacking || inSlide;
+      // Attack (R)
+      if (event.code === "KeyR" && this.charActions?.attack && !busy && !this.charInAir) {
         event.preventDefault();
         this.charAttacking = true;
-        if (this.charActions?.attack) {
-          const a = this.charActions.attack;
-          a.reset().enabled = true;
-          a.crossFadeFrom(this.charCurrentAction, 0.1, false).play();
-          this.charCurrentAction = a;
-        }
+        const a = this.charActions.attack;
+        a.reset().enabled = true;
+        a.crossFadeFrom(this.charCurrentAction, 0.12, false).play();
+        this.charCurrentAction = a;
         return;
       }
-      // Roll (C)
-      if (event.code === "KeyC" && !this.charRolling && !this.charAttacking && !inSlide && !this.charInAir) {
+      // Roll (C) — works mid-air too (matches v1)
+      if (event.code === "KeyC" && this.charActions?.roll && !busy) {
         event.preventDefault();
         this.charRolling = true;
         this.charRollYaw = this.charYaw;
-        this.charRollStart = performance.now() / 1000;
-        if (this.charActions?.roll) {
-          const r = this.charActions.roll;
-          r.reset().enabled = true;
-          r.crossFadeFrom(this.charCurrentAction, 0.08, false).play();
-          this.charCurrentAction = r;
-        }
+        this.charRollStart = performance.now();
+        const r = this.charActions.roll;
+        r.reset().enabled = true;
+        r.crossFadeFrom(this.charCurrentAction, 0.1, false).play();
+        this.charCurrentAction = r;
         return;
       }
-      // Slide (F)
-      if (event.code === "KeyF" && !this.charRolling && !this.charAttacking && !inSlide && !this.charInAir) {
-        event.preventDefault();
-        this.charSlidePhase = "start";
-        this.charSlideYaw = this.charYaw;
-        this.charSlideStart = performance.now() / 1000;
-        if (this.charActions?.slideStart) {
+      // Slide (X) — requires movement keys held, ground only
+      if (event.code === "KeyX" && this.charActions?.slideStart && !busy && !this.charInAir) {
+        const movingKeys = this.keysHeld.KeyW || this.keysHeld.KeyA ||
+          this.keysHeld.KeyS || this.keysHeld.KeyD ||
+          this.keysHeld.ArrowUp || this.keysHeld.ArrowDown ||
+          this.keysHeld.ArrowLeft || this.keysHeld.ArrowRight;
+        if (movingKeys) {
+          event.preventDefault();
+          this.charSlidePhase = "start";
+          this.charSlideYaw = this.charYaw;
+          this.charSlideStart = performance.now();
           const ss = this.charActions.slideStart;
           ss.reset().enabled = true;
-          ss.crossFadeFrom(this.charCurrentAction, 0.08, false).play();
+          ss.crossFadeFrom(this.charCurrentAction, 0.1, false).play();
           this.charCurrentAction = ss;
+          return;
         }
-        return;
-      }
-      // Crouch toggle (X)
-      if (event.code === "KeyX" && !this.charRolling && !this.charAttacking && !inSlide && !this.charInAir) {
-        event.preventDefault();
-        this.charCrouching = !this.charCrouching;
-        return;
       }
     }
 
