@@ -40,6 +40,7 @@ import { TreeSystem } from "../tools/foliage/treeSystem.js";
 import { loadTreeGlbFromFile, openGlbPicker, initGlbLoaderRenderer } from "../core/foliage/glbLoader.js";
 import { GrassManager } from "../render/foliage/grassManager.js";
 import { GrassPaintSystem } from "../tools/foliage/grassPaintSystem.js";
+import { PlayMode } from "../play/playMode.js";
 import { createGroundTslBundle } from "../../chunkGroundTsl.js";
 
 export async function startV2App() {
@@ -429,6 +430,12 @@ export async function startV2App() {
   const grassManager = new GrassManager({ scene, camera, config });
   const grassPaintSystem = new GrassPaintSystem({ toolState, grassManager, config });
 
+  const playMode = new PlayMode({
+    scene, camera, renderer, controls,
+    getWorldHeight: (x, z) => terrainStore.getWorldHeight(x, z),
+    worldHalf: config.world.size * 0.5,
+  });
+
   const hud = createHud();
   /** @type {ReturnType<typeof createTweakpaneUi>} */
   let ui;
@@ -478,6 +485,15 @@ export async function startV2App() {
         toolState.grass.enabled = true;
         grassManager.syncUniforms(toolState.grass, sunDir);
         ui?.pane.refresh();
+      }
+      if (toolState.mode === "play") {
+        playMode.enter();
+        const tpEl = document.querySelector(".tp-dfwv");
+        if (tpEl) tpEl.style.display = "none";
+      } else if (playMode.active) {
+        playMode.exit();
+        const tpEl = document.querySelector(".tp-dfwv");
+        if (tpEl) tpEl.style.display = "";
       }
       updateBrushPreviewFromPick(null);
     },
@@ -592,6 +608,14 @@ export async function startV2App() {
     },
   });
 
+  playMode.onExit = () => {
+    toolState.mode = "view";
+    playMode.exit();
+    const tpEl = document.querySelector(".tp-dfwv");
+    if (tpEl) tpEl.style.display = "";
+    ui?.pane.refresh();
+  };
+
   /** Engine-style brush preview: translucent hemisphere + edge lines, aligned to surface normal. */
   const brushDomeGeom = new THREE.SphereGeometry(
     1,
@@ -685,6 +709,25 @@ export async function startV2App() {
     groundColorAtWorldXZ: sharedGroundBundle.groundColorAtWorldXZ,
   });
   grassManager.precompile(renderer, camera);
+
+  // Pre-compile terrain pipelines for all LOD segment counts to avoid hitches
+  {
+    const tmpMeshes = [];
+    for (const level of config.lod.levels) {
+      const geo = terrainMesher.pool.acquire(level.segments);
+      const m = new THREE.Mesh(geo, tileTerrainMaterial);
+      m.frustumCulled = false;
+      m.receiveShadow = true;
+      m.position.set(0, -9999, 0);
+      scene.add(m);
+      tmpMeshes.push({ mesh: m, geo, segs: level.segments });
+    }
+    await renderer.compileAsync(scene, camera);
+    for (const { mesh, geo, segs } of tmpMeshes) {
+      scene.remove(mesh);
+      terrainMesher.pool.release(segs, geo);
+    }
+  }
 
   const lensFlare = createLensFlareSystem({
     scene,
@@ -888,18 +931,29 @@ export async function startV2App() {
   });
 
   let last = performance.now();
+  let _lastLightSnap = "";
   renderer.setAnimationLoop(() => {
     const now = performance.now();
     const dtMs = now - last;
     last = now;
     tickPerf(perf, now, dtMs);
 
-    controls.update();
-    updateSunSky();
-    if (grassManager.uniforms) grassManager.uniforms.uSunDir.value.copy(sunDir);
+    if (!playMode.active) controls.update();
+    playMode.update(dtMs * 0.001);
+    if (playMode.active) camera.updateMatrixWorld(true);
+    const focusPos = playMode.active ? playMode.playerPos : camera.position;
+
+    const Li = toolState.light;
+    const S = toolState.physicalSky;
+    const lightSnap = `${Li.sunAzimuth},${Li.sunElevation},${Li.dirColor},${Li.dirIntensity},${Li.hemiSkyColor},${Li.hemiGroundColor},${Li.hemiIntensity},${Li.shadowBias},${Li.shadowNormalBias},${Li.exposure},${Li.envIntensity},${Li.sunDistance},${S.turbidity},${S.rayleigh},${S.mie},${S.mieG},${S.cloudCoverage},${S.cloudDensity},${S.cloudElevation},${S.meshScale}`;
+    if (lightSnap !== _lastLightSnap) {
+      _lastLightSnap = lightSnap;
+      updateSunSky();
+      if (grassManager.uniforms) grassManager.uniforms.uSunDir.value.copy(sunDir);
+    }
     lensFlare.update();
 
-    shadowTarget.position.set(camera.position.x, 0, camera.position.z);
+    shadowTarget.position.set(focusPos.x, 0, focusPos.z);
     const csmCfg = toolState.csm;
     const csmChanged =
       csm &&
@@ -932,17 +986,19 @@ export async function startV2App() {
       lastHeightTexSyncMs = now;
     }
 
-    chunkStream.update(camera.position);
+    chunkStream.update(focusPos);
     treeLodRenderer.update(treeStore, camera, toolState.treeLod);
-    grassManager.update(toolState.grass);
-
-    let tris = 0;
-    for (const ch of chunkStream.activeChunks.values()) {
-      tris += ch.segments * ch.segments * 2;
+    if (grassManager.uniforms) {
+      grassManager.uniforms.uPlayerPos.value.copy(focusPos);
     }
-    perf.trisApprox = tris;
+    grassManager.update(toolState.grass, playMode.active ? playMode.playerPos : null);
 
     if (now - hudLastMs > 180) {
+      let tris = 0;
+      for (const ch of chunkStream.activeChunks.values()) {
+        tris += ch.segments * ch.segments * 2;
+      }
+      perf.trisApprox = tris;
       hud.update({ perf, toolState, sculptSystem });
       ui.refreshPerf();
       hudLastMs = now;
@@ -970,6 +1026,7 @@ export async function startV2App() {
       chunkStream.dispose();
       treeLodRenderer.dispose();
       grassManager.dispose();
+      playMode.dispose();
       tileTerrainMaterial.dispose();
       disposeProceduralBundle();
       disposeImageTexBundle();

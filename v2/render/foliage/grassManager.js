@@ -257,7 +257,7 @@ export class GrassManager {
     }
   }
 
-  update(grassState) {
+  update(grassState, focusPoint) {
     if (!this._initialized || !this.patchSystem) return;
     const enabled = grassState.enabled;
     if (enabled !== this._enabled) {
@@ -278,6 +278,7 @@ export class GrassManager {
       megaMaxDistance: gp.lodMegaMaxDistance,
       lodEnabled: gp.lodEnabled,
       grassReceiveShadow: gp.receiveShadow,
+      focusPoint,
     });
   }
 

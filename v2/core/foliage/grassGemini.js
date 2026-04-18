@@ -467,8 +467,8 @@ export function createGrassMaterial(ctx) {
     const terrainNormal = normalize(mix(tNorm, cNorm, useCliff));
 
     // ── LOD morph + distance fade ──
-    const camXZ = vec2(cameraPosition.x, cameraPosition.z);
-    const bladeCamDist = length(bladeXZ.sub(camXZ));
+    const lodFocusXZ = vec2(uPlayerPos.x, uPlayerPos.z);
+    const bladeCamDist = length(bladeXZ.sub(lodFocusXZ));
     const morphToMid = smoothstep(
       uLodMidDist.mul(float(0.6)),
       uLodMidDist,
@@ -1012,6 +1012,7 @@ export function createGrassMaterialMega(ctx) {
     uLodMaxDist,
     uLodFadeStart,
     uLodDebug,
+    uPlayerPos,
     groundColorAtWorldXZ: _groundColorAtWorldXZMega,
     uTerrainTintMode: _uTerrainTintModeMega,
     uTerrainTintStrength: _uTerrainTintStrengthMega,
@@ -1116,8 +1117,8 @@ export function createGrassMaterialMega(ctx) {
     );
     const terrainNormal = normalize(mix(tNorm, cNorm, useCliff));
 
-    const camXZ = vec2(cameraPosition.x, cameraPosition.z);
-    const bladeCamDist = length(bladeXZ.sub(camXZ));
+    const lodFocusXZMega = vec2(uPlayerPos.x, uPlayerPos.z);
+    const bladeCamDist = length(bladeXZ.sub(lodFocusXZMega));
     const fadeBegin = uLodMaxDist.mul(uLodFadeStart);
     const distFadeLinear = smoothstep(uLodMaxDist, fadeBegin, bladeCamDist);
     const distFade = distFadeLinear.mul(distFadeLinear);
@@ -1333,6 +1334,9 @@ export function setupGrassPatches(
     const mapHalf =
       opts.mapWorldHalf !== undefined ? opts.mapWorldHalf : initialMapWorldHalf;
 
+    const focusX = opts.focusPoint ? opts.focusPoint.x : camera.position.x;
+    const focusZ = opts.focusPoint ? opts.focusPoint.z : camera.position.z;
+
     // Hide all, reset pools
     for (const child of grassGroup.children) child.visible = false;
     poolHigh.idx = 0;
@@ -1347,7 +1351,7 @@ export function setupGrassPatches(
     );
     _frustum.setFromProjectionMatrix(_projScreenMatrix);
 
-    _camPosXZ.set(camera.position.x, 0, camera.position.z);
+    _camPosXZ.set(focusX, 0, focusZ);
 
     let patchCount = 0;
     let highCount = 0,
@@ -1358,8 +1362,8 @@ export function setupGrassPatches(
     // ── HIGH tier grid (spacing = ps) — world-aligned ──
     const highMaxEdge = useLod ? midDist + lodHysteresis : maxDist;
     {
-      const camX = camera.position.x;
-      const camZ = camera.position.z;
+      const camX = focusX;
+      const camZ = focusZ;
       const minCellX = Math.floor((camX - highMaxEdge) / ps) * ps;
       const maxCellX = Math.floor((camX + highMaxEdge) / ps) * ps;
       const minCellZ = Math.floor((camZ - highMaxEdge) / ps) * ps;
@@ -1392,8 +1396,8 @@ export function setupGrassPatches(
     // Skip cells whose farthest corner is inside HIGH zone (fully covered).
     const midMaxEdge = farDist + lodHysteresis;
     if (useLod) {
-      const camX = camera.position.x;
-      const camZ = camera.position.z;
+      const camX = focusX;
+      const camZ = focusZ;
       const minCellX = Math.floor((camX - midMaxEdge - psMid) / psMid) * psMid;
       const maxCellX = Math.floor((camX + midMaxEdge + psMid) / psMid) * psMid;
       const minCellZ = Math.floor((camZ - midMaxEdge - psMid) / psMid) * psMid;
@@ -1410,11 +1414,11 @@ export function setupGrassPatches(
           // Skip if the farthest corner of this cell is still inside HIGH zone
           const farthestCornerDist = Math.sqrt(
             Math.pow(
-              Math.max(Math.abs(cellX - camera.position.x) + halfMid, 0),
+              Math.max(Math.abs(cellX - focusX) + halfMid, 0),
               2,
             ) +
               Math.pow(
-                Math.max(Math.abs(cellZ - camera.position.z) + halfMid, 0),
+                Math.max(Math.abs(cellZ - focusZ) + halfMid, 0),
                 2,
               ),
           );
@@ -1437,8 +1441,8 @@ export function setupGrassPatches(
 
     // ── FAR tier grid (spacing = psFar) — world-aligned ──
     if (useLod) {
-      const camX = camera.position.x;
-      const camZ = camera.position.z;
+      const camX = focusX;
+      const camZ = focusZ;
       const minCellX = Math.floor((camX - maxDist - psFar) / psFar) * psFar;
       const maxCellX = Math.floor((camX + maxDist + psFar) / psFar) * psFar;
       const minCellZ = Math.floor((camZ - maxDist - psFar) / psFar) * psFar;
@@ -1455,11 +1459,11 @@ export function setupGrassPatches(
           // Skip if the farthest corner is still inside MID zone
           const farthestCornerDist = Math.sqrt(
             Math.pow(
-              Math.max(Math.abs(cellX - camera.position.x) + halfFar, 0),
+              Math.max(Math.abs(cellX - focusX) + halfFar, 0),
               2,
             ) +
               Math.pow(
-                Math.max(Math.abs(cellZ - camera.position.z) + halfFar, 0),
+                Math.max(Math.abs(cellZ - focusZ) + halfFar, 0),
                 2,
               ),
           );
@@ -1482,8 +1486,8 @@ export function setupGrassPatches(
 
     // ── MEGA tier grid (spacing = psMega) — world-aligned, beyond FAR until megaMax ──
     if (useLod && geoMega && megaMax > maxDist) {
-      const camX = camera.position.x;
-      const camZ = camera.position.z;
+      const camX = focusX;
+      const camZ = focusZ;
       const minCellX = Math.floor((camX - megaMax - psMega) / psMega) * psMega;
       const maxCellX = Math.floor((camX + megaMax + psMega) / psMega) * psMega;
       const minCellZ = Math.floor((camZ - megaMax - psMega) / psMega) * psMega;
@@ -1499,11 +1503,11 @@ export function setupGrassPatches(
           if (dist > megaMax) continue;
           const farthestCornerDist = Math.sqrt(
             Math.pow(
-              Math.max(Math.abs(cellX - camera.position.x) + halfMega, 0),
+              Math.max(Math.abs(cellX - focusX) + halfMega, 0),
               2,
             ) +
               Math.pow(
-                Math.max(Math.abs(cellZ - camera.position.z) + halfMega, 0),
+                Math.max(Math.abs(cellZ - focusZ) + halfMega, 0),
                 2,
               ),
           );

@@ -54,6 +54,7 @@ export function createTweakpaneUi({
         Paint: "paint",
         "Tree Paint": "treePaint",
         Grass: "grass",
+        Play: "play",
       },
     })
     .on("change", () => onModeChanged?.());
@@ -740,7 +741,7 @@ export function createTweakpaneUi({
       perfView.frameMs = perf.frameMs.toFixed(2);
       perfView.activeChunks = String(perf.activeChunks);
       perfView.queues = `${perf.queues.create}/${perf.queues.remesh}/${perf.queues.unload}`;
-      pane.refresh();
+      perfFolder.refresh();
     },
     dispose() {
       pane.dispose();
