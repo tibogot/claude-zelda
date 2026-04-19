@@ -6,6 +6,7 @@ import { addPaintFolder } from "./paintTweakpane.js";
 import { addTreeFolder } from "./treeTweakpane.js";
 import { addGrassFolder } from "./grassTweakpane.js";
 import { addCliffFolder } from "./cliffTweakpane.js";
+import { addRoadFolder } from "./roadTweakpane.js";
 
 export function createTweakpaneUi({
   toolState,
@@ -51,6 +52,13 @@ export function createTweakpaneUi({
   onRebakeBvh,
   onCliffTransformModeChanged,
   onCliffBlendChanged,
+  onRoadChanged,
+  onRoadNewRoad,
+  onRoadDeleteActive,
+  onRoadDeleteSelected,
+  onRoadSnapY,
+  onRoadSelectedYChanged,
+  onRoadActiveIndexChanged,
 }) {
   const pane = new Pane({ title: "V2 Terrain Core" });
 
@@ -65,6 +73,7 @@ export function createTweakpaneUi({
         "Tree Paint": "treePaint",
         Grass: "grass",
         "Cliff Grass": "cliffGrass",
+        Road: "road",
         Cliffs: "cliffs",
         Play: "play",
       },
@@ -116,6 +125,16 @@ export function createTweakpaneUi({
   const cliffGrassFolder = pane.addFolder({ title: "Cliff Grass", expanded: false });
   cliffGrassFolder.addButton({ title: "Fill cliff grass" }).on("click", () => onCliffGrassFill?.());
   cliffGrassFolder.addButton({ title: "Clear cliff grass" }).on("click", () => onCliffGrassClear?.());
+
+  addRoadFolder(pane, toolState, {
+    onRoadChanged,
+    onRoadNewRoad,
+    onRoadDeleteActive,
+    onRoadDeleteSelected,
+    onRoadSnapY,
+    onRoadSelectedYChanged,
+    onRoadActiveIndexChanged,
+  });
 
   addCliffFolder(pane, toolState, {
     onImportCliffGlb,

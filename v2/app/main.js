@@ -43,6 +43,7 @@ import { GrassPaintSystem } from "../tools/foliage/grassPaintSystem.js";
 import { CliffGrassPaintSystem } from "../tools/foliage/cliffGrassPaintSystem.js";
 import { PlayMode } from "../play/playMode.js";
 import { createGroundTslBundle } from "../../chunkGroundTsl.js";
+import { RoadSystem } from "../tools/road/roadSystem.js";
 import { CliffStore } from "../core/cliffs/cliffStore.js";
 import { CliffInstancer } from "../core/cliffs/cliffInstancer.js";
 import { CliffSystem } from "../tools/cliffs/cliffSystem.js";
@@ -438,6 +439,10 @@ export async function startV2App() {
   const grassManager = new GrassManager({ scene, camera, config });
   const grassPaintSystem = new GrassPaintSystem({ toolState, grassManager, config });
   const cliffGrassPaintSystem = new CliffGrassPaintSystem({ toolState, grassManager, config });
+  const roadSystem = new RoadSystem({
+    scene, camera, toolState,
+    getWorldHeight: (x, z) => terrainStore.getWorldHeight(x, z),
+  });
 
   const cliffStore = new CliffStore();
   const cliffInstancer = new CliffInstancer(scene, cliffStore);
@@ -692,6 +697,22 @@ export async function startV2App() {
     },
     onCliffTransformModeChanged: () => {
       transformControls.setMode(toolState.cliffs.transformMode);
+    },
+    onRoadChanged: () => {
+      roadSystem.syncMaterial();
+      roadSystem.rebuildAllMeshes();
+      ui?.pane.refresh();
+    },
+    onRoadNewRoad: () => roadSystem.startNewRoad(),
+    onRoadDeleteActive: () => { roadSystem.deleteActiveRoad(); ui?.pane.refresh(); },
+    onRoadDeleteSelected: () => { roadSystem.deleteSelected(); ui?.pane.refresh(); },
+    onRoadSnapY: () => { roadSystem.snapSelectedYToTerrain(); ui?.pane.refresh(); },
+    onRoadSelectedYChanged: () => roadSystem.setSelectedPointY(toolState.road.selectedPointY),
+    onRoadActiveIndexChanged: () => {
+      roadSystem._clampActive();
+      roadSystem.selectedIdx = -1;
+      roadSystem._rebuildVisual();
+      ui?.pane.refresh();
     },
     onCliffBlendChanged: () => {
       if (!cliffBlendPack) return;
@@ -991,6 +1012,27 @@ export async function startV2App() {
       }
       return;
     }
+    if (toolState.mode === "road" && event.button === 0) {
+      event.preventDefault();
+      updatePointer(event);
+      raycaster.setFromCamera(pointerNdc, camera);
+      const picked = roadSystem.pickPoint(raycaster);
+      if (picked >= 0) {
+        roadSystem.selectedIdx = picked;
+        roadSystem.dragging = true;
+        controls.enabled = false;
+        roadSystem._rebuildHandles();
+        roadSystem._updateSelectedY();
+        ui?.pane.refresh();
+      } else {
+        const hit = pickTerrain(event);
+        if (hit) {
+          roadSystem.addPoint(hit.point);
+          ui?.pane.refresh();
+        }
+      }
+      return;
+    }
     if (event.button !== 0 || !isBrushMode()) return;
     const hit = pickTerrain(event);
     if (toolState.mode === "sculpt" && toolState.sculptMode === "ramp") {
@@ -1022,6 +1064,11 @@ export async function startV2App() {
   });
 
   renderer.domElement.addEventListener("pointermove", (event) => {
+    if (toolState.mode === "road" && roadSystem.dragging && roadSystem.selectedIdx >= 0) {
+      const hit = pickTerrain(event);
+      if (hit) roadSystem.moveSelected(hit.point);
+      return;
+    }
     const hit = pickTerrain(event);
     updateBrushPreviewFromPick(hit);
     if (!pointerDown || !isBrushMode() || !hit) return;
@@ -1078,6 +1125,10 @@ export async function startV2App() {
   });
 
   window.addEventListener("pointerup", () => {
+    if (roadSystem.dragging) {
+      roadSystem.dragging = false;
+      controls.enabled = true;
+    }
     if (!pointerDown) return;
     pointerDown = false;
     controls.enabled = true;
@@ -1099,6 +1150,7 @@ export async function startV2App() {
     if (toolState.mode === "treePaint") return treeSystem;
     if (toolState.mode === "grass") return grassPaintSystem;
     if (toolState.mode === "cliffGrass") return cliffGrassPaintSystem;
+    if (toolState.mode === "road") return roadSystem;
     if (toolState.mode === "cliffs") return cliffSystem;
     return sculptSystem;
   }
@@ -1113,6 +1165,10 @@ export async function startV2App() {
     } else if (ctrl && event.code === "KeyY") {
       event.preventDefault();
       activeEditSystem().redo();
+    } else if (event.code === "Delete" && toolState.mode === "road") {
+      event.preventDefault();
+      roadSystem.deleteSelected();
+      ui?.pane.refresh();
     } else if (
       event.code === "KeyR" &&
       toolState.mode === "sculpt" &&
@@ -1254,6 +1310,7 @@ export async function startV2App() {
       cliffInstancer.dispose();
       transformControls.dispose();
       grassManager.dispose();
+      roadSystem.dispose();
       playMode.dispose();
       tileTerrainMaterial.dispose();
       disposeProceduralBundle();
