@@ -24,6 +24,18 @@ const CHAR_GLIDE_FALL_SPEED = 3.0;
 const CHAR_SLIDE_SPEED = 10.0;
 const CHAR_SLIDE_MAX_TIME = 1.2;
 const PI = Math.PI;
+
+const PLANE_MAX_FWD = 56;
+const PLANE_MAX_FWD_BOOST = 78;
+const PLANE_SHIFT_ACCEL_MULT = 1.5;
+const PLANE_MAX_REV = 18;
+const PLANE_ACCEL = 10.5;
+const PLANE_BRAKE = 26;
+const PLANE_REV_ACCEL = 8;
+const PLANE_COAST = 3.8;
+const PLANE_DRAG = 0.014;
+const PLANE_DECK_ALT = 1.15;
+const PLANE_DECK_COAST_MULT = 2.1;
 const CAM_DIST = 8;
 const CAM_SENS_X = 0.002;
 const CAM_SENS_Y = 0.002;
@@ -293,6 +305,11 @@ export class PlayMode {
 
     this._raycaster = new THREE.Raycaster();
     this._pointer = new THREE.Vector2();
+    this.planeSpeed = 0;
+    this._flyHud = null;
+    this._flyHudSpd = null;
+    this._flyHudAlt = null;
+    this._createFlyHud();
 
     // Character state
     this.charRoot = null;
@@ -318,7 +335,23 @@ export class PlayMode {
     this.charSlidePhase = "none";
     this.charSlideYaw = 0;
     this.charSlideStart = 0;
+    this.charSpellPhase = "none";
+    this.charSpellExitRequested = false;
     this._loadCharacter();
+  }
+
+  _createFlyHud() {
+    const el = document.createElement("div");
+    el.id = "fly-hud";
+    el.style.cssText = "position:fixed;bottom:16px;left:50%;transform:translateX(-50%);" +
+      "background:rgba(0,0,0,0.6);border:1px solid rgba(255,255,255,0.2);border-radius:8px;" +
+      "padding:8px 18px;font-family:monospace;font-size:14px;color:#d7e4ef;z-index:5;" +
+      "display:none;pointer-events:none;white-space:nowrap;";
+    el.innerHTML = 'SPD <span id="fly-hud-spd">0</span> m/s &nbsp; ALT <span id="fly-hud-alt">0</span> m';
+    document.body.appendChild(el);
+    this._flyHud = el;
+    this._flyHudSpd = el.querySelector("#fly-hud-spd");
+    this._flyHudAlt = el.querySelector("#fly-hud-alt");
   }
 
   _loadCharacter() {
@@ -452,6 +485,10 @@ export class PlayMode {
         const slideStartClip = pick(["Slide_Start"]);
         const slideLoopClip = pick(["Slide_Loop"]) || slideStartClip;
         const slideExitClip = pick(["Slide_Exit"]) || slideLoopClip;
+        const spellEnterClip = pick(["Spell_Simple_Enter"]);
+        const spellIdleClip = pick(["Spell_Simple_Idle_Loop"]);
+        const spellShootClip = pick(["Spell_Simple_Shoot"]);
+        const spellExitClip = pick(["Spell_Simple_Exit"]);
 
         const mk = (clip, loopOnce) => {
           if (!clip) return null;
@@ -480,6 +517,10 @@ export class PlayMode {
         const slideStartAction = mk(slideStartClip, true);
         const slideLoopAction = mk(slideLoopClip, false);
         const slideExitAction = mk(slideExitClip, true);
+        const spellEnterAction = mk(spellEnterClip, true);
+        const spellIdleAction = mk(spellIdleClip, false);
+        const spellShootAction = mk(spellShootClip, true);
+        const spellExitAction = mk(spellExitClip, true);
 
         idleAction.play();
         this.charActions = {
@@ -488,6 +529,8 @@ export class PlayMode {
           glide: glideAction, crouch: crouchAction, crouchWalk: crouchWalkAction,
           attack: attackAction, roll: rollAction,
           slideStart: slideStartAction, slideLoop: slideLoopAction, slideExit: slideExitAction,
+          spellEnter: spellEnterAction, spellIdle: spellIdleAction,
+          spellShoot: spellShootAction, spellExit: spellExitAction,
         };
         this.charCurrentAction = idleAction;
 
@@ -514,6 +557,46 @@ export class PlayMode {
             return;
           }
           if (slideExitAction && e.action === slideExitAction) { this.charSlidePhase = "none"; return; }
+          if (spellEnterAction && e.action === spellEnterAction) {
+            if (this.charSpellPhase !== "enter") return;
+            if (this.charSpellExitRequested && spellExitAction) {
+              this.charSpellPhase = "exit";
+              spellExitAction.reset().enabled = true;
+              spellExitAction.crossFadeFrom(spellEnterAction, 0.12, false).play();
+              this.charCurrentAction = spellExitAction;
+            } else if (spellIdleAction) {
+              this.charSpellPhase = "idle";
+              spellIdleAction.reset().enabled = true;
+              spellIdleAction.crossFadeFrom(spellEnterAction, 0.12, false).play();
+              this.charCurrentAction = spellIdleAction;
+            }
+            return;
+          }
+          if (spellShootAction && e.action === spellShootAction) {
+            if (this.charSpellPhase !== "shoot") return;
+            if (this.charSpellExitRequested && spellExitAction) {
+              this.charSpellPhase = "exit";
+              spellExitAction.reset().enabled = true;
+              spellExitAction.crossFadeFrom(spellShootAction, 0.12, false).play();
+              this.charCurrentAction = spellExitAction;
+            } else if (spellIdleAction) {
+              this.charSpellPhase = "idle";
+              spellIdleAction.reset().enabled = true;
+              spellIdleAction.crossFadeFrom(spellShootAction, 0.12, false).play();
+              this.charCurrentAction = spellIdleAction;
+            }
+            return;
+          }
+          if (spellExitAction && e.action === spellExitAction) {
+            this.charSpellPhase = "none";
+            this.charSpellExitRequested = false;
+            if (idleAction) {
+              idleAction.reset().enabled = true;
+              idleAction.crossFadeFrom(spellExitAction, 0.2, false).play();
+              this.charCurrentAction = idleAction;
+            }
+            return;
+          }
         });
       }
       this.charLoaded = true;
@@ -683,6 +766,8 @@ export class PlayMode {
     this.capsule.visible = false;
     if (this.planeRoot) this.planeRoot.visible = false;
     if (this.charRoot) this.charRoot.visible = false;
+    if (this._flyHud) this._flyHud.style.display = "none";
+    this.planeSpeed = 0;
     this._clearTrails(); clearBullets(this._bullets.pool);
 
     if (this.savedCamPos) this.camera.position.copy(this.savedCamPos);
@@ -726,8 +811,31 @@ export class PlayMode {
     // Movement direction
     let mx = 0, mz = 0;
     if (flying) {
-      if (keys.KeyW || keys.ArrowUp) { mx -= Math.sin(this.flyHeading); mz -= Math.cos(this.flyHeading); }
-      if (keys.KeyS || keys.ArrowDown) { mx += Math.sin(this.flyHeading); mz += Math.cos(this.flyHeading); }
+      // Throttle-style airspeed
+      const thr = (keys.KeyW || keys.ArrowUp) ? 1 : (keys.KeyS || keys.ArrowDown) ? -1 : 0;
+      const drag = PLANE_DRAG * this.planeSpeed * Math.abs(this.planeSpeed);
+      let coast = PLANE_COAST;
+      if (this.flyHeight < PLANE_DECK_ALT) coast *= PLANE_DECK_COAST_MULT;
+      if (thr === 1) {
+        let a = PLANE_ACCEL;
+        if (keys.ShiftLeft || keys.ShiftRight) a *= PLANE_SHIFT_ACCEL_MULT;
+        this.planeSpeed += a * dtSec;
+      } else if (thr === -1) {
+        if (this.planeSpeed > 0.55) this.planeSpeed -= PLANE_BRAKE * dtSec;
+        else this.planeSpeed -= PLANE_REV_ACCEL * dtSec;
+      } else {
+        if (this.planeSpeed > 0) this.planeSpeed = Math.max(0, this.planeSpeed - (coast + drag) * dtSec);
+        else if (this.planeSpeed < 0) this.planeSpeed = Math.min(0, this.planeSpeed + (coast + drag) * dtSec);
+      }
+      const maxFwd = (keys.ShiftLeft || keys.ShiftRight) ? PLANE_MAX_FWD_BOOST : PLANE_MAX_FWD;
+      this.planeSpeed = THREE.MathUtils.clamp(this.planeSpeed, -PLANE_MAX_REV, maxFwd);
+      if (Math.abs(this.planeSpeed) < 0.04 && thr === 0) this.planeSpeed = 0;
+      const spdAbs = Math.abs(this.planeSpeed);
+      if (spdAbs > 1e-4) {
+        const sg = Math.sign(this.planeSpeed);
+        mx = -Math.sin(this.flyHeading) * sg;
+        mz = -Math.cos(this.flyHeading) * sg;
+      }
     } else {
       const moveYaw = iso ? this.isoYaw : this.camYaw;
       if (keys.KeyW || keys.ArrowUp)    { mx -= Math.sin(moveYaw); mz -= Math.cos(moveYaw); }
@@ -810,16 +918,19 @@ export class PlayMode {
     }
 
     // Attack/spell freeze movement
-    if (charMode && this.charAttacking) { mx = 0; mz = 0; }
+    const inSpell = this.charSpellPhase !== "none";
+    if (charMode && (this.charAttacking || inSpell)) { mx = 0; mz = 0; }
 
     const mlen = Math.hypot(mx, mz);
-    const moveSpeed = charMode
-      ? (this.charRolling ? _charRollSpeed
-        : inSlide ? CHAR_SLIDE_SPEED
-        : this.charCrouching ? CHAR_WALK_SPEED * 0.5
-        : charRunning ? CHAR_RUN_SPEED
-        : CHAR_WALK_SPEED)
-      : MOVE_SPEED;
+    const moveSpeed = flying
+      ? Math.abs(this.planeSpeed)
+      : charMode
+        ? (this.charRolling ? _charRollSpeed
+          : inSlide ? CHAR_SLIDE_SPEED
+          : this.charCrouching ? CHAR_WALK_SPEED * 0.5
+          : charRunning ? CHAR_RUN_SPEED
+          : CHAR_WALK_SPEED)
+        : MOVE_SPEED;
     if (mlen > 0) {
       let stepX = (mx / mlen) * moveSpeed * dtSec;
       let stepZ = (mz / mlen) * moveSpeed * dtSec;
@@ -970,7 +1081,15 @@ export class PlayMode {
       }
 
       // Yaw
-      if (mlen > 0 && !this.charRolling && !this.charAttacking && !inSlide) {
+      if (inSpell) {
+        let targetYaw = this.camYaw + PI;
+        while (targetYaw > PI) targetYaw -= 2 * PI;
+        while (targetYaw < -PI) targetYaw += 2 * PI;
+        let dYaw = targetYaw - this.charYaw;
+        while (dYaw > PI) dYaw -= 2 * PI;
+        while (dYaw < -PI) dYaw += 2 * PI;
+        this.charYaw += dYaw * (1 - Math.exp(-14 * dtSec));
+      } else if (mlen > 0 && !this.charRolling && !this.charAttacking && !inSlide) {
         const targetYaw = Math.atan2(mx, mz);
         let dYaw = targetYaw - this.charYaw;
         while (dYaw > PI) dYaw -= 2 * PI;
@@ -1002,6 +1121,28 @@ export class PlayMode {
     }
 
     const planeY = groundY + this.flyHeight;
+
+    // Plane BVH collision — cast a ray in the flight direction
+    if (flying && this.cliffBvh?.baked) {
+      const px = this.playerPos.x;
+      const py = planeY;
+      const pz = this.playerPos.z;
+      const fwdX = -Math.sin(this.flyHeading);
+      const fwdZ = -Math.cos(this.flyHeading);
+      const fwdY = this.flyPitch || 0;
+      const planeRadius = 2.5;
+      const hit = this.cliffBvh.raycast3D(px, py, pz, fwdX, fwdY, fwdZ, planeRadius);
+      if (hit) {
+        const nx = hit.normal.x, ny = hit.normal.y, nz = hit.normal.z;
+        const pushDist = planeRadius - hit.distance;
+        if (pushDist > 0) {
+          this.playerPos.x += nx * pushDist;
+          this.flyHeight += ny * pushDist;
+          this.playerPos.z += nz * pushDist;
+          if (this.flyHeight < 0) this.flyHeight = 0;
+        }
+      }
+    }
 
     // Capsule visual
     const capsuleCY = this.playerPos.y + capsuleBase;
@@ -1046,7 +1187,7 @@ export class PlayMode {
         if (
           this.charActions && !this.charAttacking && !this.charRolling &&
           !this.charGliderPoseActive && this.charSlidePhase === "none" &&
-          this.charJumpPhase === "none"
+          this.charJumpPhase === "none" && this.charSpellPhase === "none"
         ) {
           let target = null;
           if (this.charCrouching)
@@ -1075,6 +1216,17 @@ export class PlayMode {
         } else {
           this.planeRoot.rotation.set(this.flyPitch, this.flyHeading, this.flyRoll + barrelAdd);
         }
+      }
+    }
+
+    // Flight HUD
+    if (this._flyHud) {
+      if (flying) {
+        this._flyHud.style.display = "";
+        this._flyHudSpd.textContent = Math.round(Math.abs(this.planeSpeed));
+        this._flyHudAlt.textContent = Math.round(this.flyHeight);
+      } else {
+        this._flyHud.style.display = "none";
       }
     }
 
@@ -1140,6 +1292,8 @@ export class PlayMode {
       this.charRolling = false;
       this.charSlidePhase = "none";
       this.charJumpPhase = "none";
+      this.charSpellPhase = "none";
+      this.charSpellExitRequested = false;
       if (this.charKite) this.charKite.visible = false;
     } else if (prev === "char") {
       this.moveMode = "fly";
@@ -1149,6 +1303,7 @@ export class PlayMode {
       this.flyRollTarget = 0;
       this.flyBarrelActive = false;
       this.flyBarrelPhase = 0;
+      this.planeSpeed = 0;
     } else {
       this.moveMode = "capsule";
       this.flyHeight = 0;
@@ -1157,6 +1312,7 @@ export class PlayMode {
       this.flyRollTarget = 0;
       this.flyBarrelActive = false;
       this.flyBarrelPhase = 0;
+      this.planeSpeed = 0;
       this._clearTrails(); clearBullets(this._bullets.pool);
     }
   }
@@ -1183,9 +1339,10 @@ export class PlayMode {
     const _charMode = this.moveMode === "char" && this.charLoaded;
     if (_charMode && !event.repeat) {
       const inSlide = this.charSlidePhase !== "none";
+      const _inSpell = this.charSpellPhase !== "none";
       const busy = this.charRolling || this.charAttacking || inSlide;
       // Attack (R)
-      if (event.code === "KeyR" && this.charActions?.attack && !busy && !this.charInAir) {
+      if (event.code === "KeyR" && this.charActions?.attack && !busy && !_inSpell && !this.charInAir) {
         event.preventDefault();
         this.charAttacking = true;
         const a = this.charActions.attack;
@@ -1195,7 +1352,7 @@ export class PlayMode {
         return;
       }
       // Roll (C) — works mid-air too (matches v1)
-      if (event.code === "KeyC" && this.charActions?.roll && !busy) {
+      if (event.code === "KeyC" && this.charActions?.roll && !busy && !_inSpell) {
         event.preventDefault();
         this.charRolling = true;
         this.charRollYaw = this.charYaw;
@@ -1207,7 +1364,7 @@ export class PlayMode {
         return;
       }
       // Slide (X) — requires movement keys held, ground only
-      if (event.code === "KeyX" && this.charActions?.slideStart && !busy && !this.charInAir) {
+      if (event.code === "KeyX" && this.charActions?.slideStart && !busy && !_inSpell && !this.charInAir) {
         const movingKeys = this.keysHeld.KeyW || this.keysHeld.KeyA ||
           this.keysHeld.KeyS || this.keysHeld.KeyD ||
           this.keysHeld.ArrowUp || this.keysHeld.ArrowDown ||
@@ -1223,6 +1380,46 @@ export class PlayMode {
           this.charCurrentAction = ss;
           return;
         }
+      }
+      // Spell toggle (Q)
+      if (event.code === "KeyQ") {
+        event.preventDefault();
+        if (this.charSpellPhase === "none" && !busy && this.charActions?.spellEnter) {
+          this.charSpellPhase = "enter";
+          this.charSpellExitRequested = false;
+          const se = this.charActions.spellEnter;
+          se.reset().enabled = true;
+          se.crossFadeFrom(this.charCurrentAction, 0.15, false).play();
+          this.charCurrentAction = se;
+        } else if (
+          (this.charSpellPhase === "idle" || this.charSpellPhase === "enter" || this.charSpellPhase === "shoot") &&
+          this.charActions?.spellExit
+        ) {
+          this.charSpellExitRequested = true;
+          if (this.charSpellPhase === "idle") {
+            this.charSpellPhase = "exit";
+            const sx = this.charActions.spellExit;
+            sx.reset().enabled = true;
+            sx.crossFadeFrom(this.charCurrentAction, 0.12, false).play();
+            this.charCurrentAction = sx;
+          }
+        }
+        return;
+      }
+      // Spell shoot (J)
+      if (
+        event.code === "KeyJ" &&
+        this.charSpellPhase === "idle" &&
+        !this.charSpellExitRequested &&
+        this.charActions?.spellShoot
+      ) {
+        event.preventDefault();
+        this.charSpellPhase = "shoot";
+        const ss = this.charActions.spellShoot;
+        ss.reset().enabled = true;
+        ss.crossFadeFrom(this.charCurrentAction, 0.12, false).play();
+        this.charCurrentAction = ss;
+        return;
       }
     }
 
