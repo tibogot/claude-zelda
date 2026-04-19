@@ -42,6 +42,8 @@ export function createTweakpaneUi({
   onGrassClear,
   onGrassSaveDensity,
   onGrassLoadDensity,
+  onCliffGrassFill,
+  onCliffGrassClear,
   onImportCliffGlb,
   onRemoveCliffSlot,
   onDeleteSelectedCliff,
@@ -62,6 +64,7 @@ export function createTweakpaneUi({
         Paint: "paint",
         "Tree Paint": "treePaint",
         Grass: "grass",
+        "Cliff Grass": "cliffGrass",
         Cliffs: "cliffs",
         Play: "play",
       },
@@ -109,6 +112,10 @@ export function createTweakpaneUi({
     onGrassSaveDensity,
     onGrassLoadDensity,
   });
+
+  const cliffGrassFolder = pane.addFolder({ title: "Cliff Grass", expanded: false });
+  cliffGrassFolder.addButton({ title: "Fill cliff grass" }).on("click", () => onCliffGrassFill?.());
+  cliffGrassFolder.addButton({ title: "Clear cliff grass" }).on("click", () => onCliffGrassClear?.());
 
   addCliffFolder(pane, toolState, {
     onImportCliffGlb,

@@ -40,6 +40,7 @@ import { TreeSystem } from "../tools/foliage/treeSystem.js";
 import { loadTreeGlbFromFile, openGlbPicker, initGlbLoaderRenderer } from "../core/foliage/glbLoader.js";
 import { GrassManager } from "../render/foliage/grassManager.js";
 import { GrassPaintSystem } from "../tools/foliage/grassPaintSystem.js";
+import { CliffGrassPaintSystem } from "../tools/foliage/cliffGrassPaintSystem.js";
 import { PlayMode } from "../play/playMode.js";
 import { createGroundTslBundle } from "../../chunkGroundTsl.js";
 import { CliffStore } from "../core/cliffs/cliffStore.js";
@@ -436,6 +437,7 @@ export async function startV2App() {
 
   const grassManager = new GrassManager({ scene, camera, config });
   const grassPaintSystem = new GrassPaintSystem({ toolState, grassManager, config });
+  const cliffGrassPaintSystem = new CliffGrassPaintSystem({ toolState, grassManager, config });
 
   const cliffStore = new CliffStore();
   const cliffInstancer = new CliffInstancer(scene, cliffStore);
@@ -614,6 +616,15 @@ export async function startV2App() {
     onGrassClear: () => {
       grassManager.clearDensity();
     },
+    onCliffGrassFill: () => {
+      toolState.grass.enabled = true;
+      grassManager.fillCliffDensity();
+      grassManager.syncUniforms(toolState.grass, sunDir);
+      ui?.pane.refresh();
+    },
+    onCliffGrassClear: () => {
+      grassManager.clearCliffDensity();
+    },
     onGrassSaveDensity: () => {
       const data = grassManager.densityTex.image.data;
       const blob = new Blob([data.buffer], { type: "application/octet-stream" });
@@ -676,7 +687,8 @@ export async function startV2App() {
     onClearAllCliffs: () => cliffSystem.clearAll(),
     onRebakeBvh: () => {
       cliffBvh.bake(terrainStore, config);
-      console.log("[V2] BVH rebaked");
+      grassManager.rebuildCliffHeightTex(cliffBvh, terrainStore, config.world.size);
+      console.log("[V2] BVH rebaked + cliff height tex updated");
     },
     onCliffTransformModeChanged: () => {
       transformControls.setMode(toolState.cliffs.transformMode);
@@ -918,7 +930,7 @@ export async function startV2App() {
   }
 
   function isBrushMode() {
-    return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint" || toolState.mode === "grass";
+    return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint" || toolState.mode === "grass" || toolState.mode === "cliffGrass";
   }
 
   function updateBrushPreviewFromPick(hit) {
@@ -1004,6 +1016,8 @@ export async function startV2App() {
       treeSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "grass") {
       grassPaintSystem.beginStroke(hit.point, event);
+    } else if (toolState.mode === "cliffGrass") {
+      cliffGrassPaintSystem.beginStroke(hit.point, event);
     }
   });
 
@@ -1019,6 +1033,8 @@ export async function startV2App() {
       treeSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "grass") {
       grassPaintSystem.applyAt(hit.point, event);
+    } else if (toolState.mode === "cliffGrass") {
+      cliffGrassPaintSystem.applyAt(hit.point, event);
     }
   });
 
@@ -1073,6 +1089,8 @@ export async function startV2App() {
       treeSystem.endStroke();
     } else if (toolState.mode === "grass") {
       grassPaintSystem.endStroke();
+    } else if (toolState.mode === "cliffGrass") {
+      cliffGrassPaintSystem.endStroke();
     }
   });
 
@@ -1080,6 +1098,7 @@ export async function startV2App() {
     if (toolState.mode === "paint") return paintSystem;
     if (toolState.mode === "treePaint") return treeSystem;
     if (toolState.mode === "grass") return grassPaintSystem;
+    if (toolState.mode === "cliffGrass") return cliffGrassPaintSystem;
     if (toolState.mode === "cliffs") return cliffSystem;
     return sculptSystem;
   }

@@ -33,6 +33,26 @@ export class GrassManager {
     this.densityTex.minFilter = THREE.LinearFilter;
     this.densityTex.magFilter = THREE.LinearFilter;
     this.densityTex.needsUpdate = true;
+
+    // Cliff grass: height texture (Float32 RGBA — .x = cliff Y, -9999 where invalid)
+    const chData = new Float32Array(res * res * 4);
+    for (let i = 0; i < res * res; i++) {
+      chData[i * 4] = chData[i * 4 + 1] = chData[i * 4 + 2] = -9999;
+      chData[i * 4 + 3] = 1;
+    }
+    this.cliffHeightTex = new THREE.DataTexture(chData, res, res, THREE.RGBAFormat, THREE.FloatType);
+    this.cliffHeightTex.wrapS = this.cliffHeightTex.wrapT = THREE.ClampToEdgeWrapping;
+    this.cliffHeightTex.minFilter = THREE.NearestFilter;
+    this.cliffHeightTex.magFilter = THREE.NearestFilter;
+    this.cliffHeightTex.needsUpdate = true;
+
+    // Cliff grass: painted density (Uint8 RGBA)
+    const cdData = new Uint8Array(res * res * 4);
+    this.cliffDensityTex = new THREE.DataTexture(cdData, res, res, THREE.RGBAFormat);
+    this.cliffDensityTex.wrapS = this.cliffDensityTex.wrapT = THREE.ClampToEdgeWrapping;
+    this.cliffDensityTex.minFilter = THREE.LinearFilter;
+    this.cliffDensityTex.magFilter = THREE.LinearFilter;
+    this.cliffDensityTex.needsUpdate = true;
   }
 
   init(heightTex, sunDir, grassState, { groundColorAtWorldXZ } = {}) {
@@ -113,6 +133,8 @@ export class GrassManager {
       ...this.uniforms,
       heightTex,
       grassDensityTex: this.densityTex,
+      cliffHeightTex: this.cliffHeightTex,
+      cliffDensityTex: this.cliffDensityTex,
       windTex: this.windTex,
       terrainRes: 512,
       groundColorAtWorldXZ: groundColorAtWorldXZ ?? undefined,
@@ -348,6 +370,90 @@ export class GrassManager {
     this.densityTex.needsUpdate = true;
   }
 
+  rebuildCliffHeightTex(cliffBvh, terrainStore, worldSize) {
+    if (!cliffBvh?.baked) return;
+    const res = this.densityRes;
+    const data = this.cliffHeightTex.image.data;
+    const ray = new THREE.Ray(new THREE.Vector3(), new THREE.Vector3(0, -1, 0));
+    for (let iz = 0; iz < res; iz++) {
+      for (let ix = 0; ix < res; ix++) {
+        const wx = worldSize * ((ix + 0.5) / res - 0.5);
+        const wz = worldSize * ((iz + 0.5) / res - 0.5);
+        const terrainY = terrainStore.getWorldHeight(wx, wz);
+        ray.origin.set(wx, 99999, wz);
+        const hit = cliffBvh._bvh.raycastFirst(ray);
+        const i4 = (iz * res + ix) * 4;
+        let h = -9999;
+        if (
+          hit && hit.face && hit.face.normal &&
+          hit.face.normal.y > 0.3 &&
+          hit.point.y > terrainY + 0.08
+        ) {
+          h = hit.point.y;
+        }
+        data[i4] = data[i4 + 1] = data[i4 + 2] = h;
+        data[i4 + 3] = 1;
+      }
+    }
+    this.cliffHeightTex.needsUpdate = true;
+  }
+
+  stampCliffDensity({ cx, cz, radius, strength, falloff, worldSize, erase }) {
+    const res = this.densityRes;
+    const data = this.cliffDensityTex.image.data;
+    const half = worldSize * 0.5;
+    const rPx = (radius / worldSize) * res;
+    const cxPx = ((cx + half) / worldSize) * res;
+    const czPx = ((cz + half) / worldSize) * res;
+    const r2 = rPx * rPx;
+    const minX = Math.max(0, Math.floor(cxPx - rPx));
+    const maxX = Math.min(res - 1, Math.ceil(cxPx + rPx));
+    const minZ = Math.max(0, Math.floor(czPx - rPx));
+    const maxZ = Math.min(res - 1, Math.ceil(czPx + rPx));
+
+    for (let z = minZ; z <= maxZ; z++) {
+      for (let x = minX; x <= maxX; x++) {
+        const dx = x - cxPx;
+        const dz = z - czPx;
+        const d2 = dx * dx + dz * dz;
+        if (d2 > r2) continue;
+        const t = Math.sqrt(d2) / rPx;
+        const falloffWeight = Math.pow(Math.max(0, 1 - t), falloff);
+        const idx = (z * res + x) * 4;
+        if (erase) {
+          const sub = strength * falloffWeight * 255;
+          data[idx] = Math.max(0, data[idx] - sub);
+        } else {
+          const add = strength * falloffWeight * 255;
+          data[idx] = Math.min(255, data[idx] + add);
+        }
+        data[idx + 1] = data[idx];
+        data[idx + 2] = data[idx];
+        data[idx + 3] = 255;
+      }
+    }
+    this.cliffDensityTex.needsUpdate = true;
+  }
+
+  getCliffDensitySnapshot() {
+    return new Uint8Array(this.cliffDensityTex.image.data);
+  }
+
+  restoreCliffDensitySnapshot(snapshot) {
+    this.cliffDensityTex.image.data.set(snapshot);
+    this.cliffDensityTex.needsUpdate = true;
+  }
+
+  fillCliffDensity() {
+    this.cliffDensityTex.image.data.fill(255);
+    this.cliffDensityTex.needsUpdate = true;
+  }
+
+  clearCliffDensity() {
+    this.cliffDensityTex.image.data.fill(0);
+    this.cliffDensityTex.needsUpdate = true;
+  }
+
   dispose() {
     if (this._currentGeos) {
       this._currentGeos.geoHigh?.dispose();
@@ -360,6 +466,8 @@ export class GrassManager {
       this.geosAndMats.materialMega?.dispose();
     }
     this.densityTex.dispose();
+    this.cliffHeightTex.dispose();
+    this.cliffDensityTex.dispose();
     this.windTex?.dispose();
     this.scene.remove(this.group);
   }
