@@ -2,6 +2,9 @@ import * as THREE from "three";
 import { generateRoadGeometry } from "../../core/road/roadMesh.js";
 import { createRoadUniforms, createRoadMaterial, syncRoadUniforms } from "../../core/road/roadMaterial.js";
 
+const NORMAL_TEX_PATH = "../textures/terrain-normal.jpg";
+const ROUGHNESS_TEX_PATH = "../textures/terrain-roughness.jpg";
+
 export class RoadSystem {
   constructor({ scene, camera, toolState, getWorldHeight }) {
     this.scene = scene;
@@ -18,11 +21,38 @@ export class RoadSystem {
     scene.add(this.handleGroup);
     this.handleMeshes = [];
 
+    this._normalTex = null;
+    this._roughnessTex = null;
+    this._matReady = false;
     this.roadUniforms = createRoadUniforms(toolState.road);
-    this.roadMat = createRoadMaterial(this.roadUniforms);
+    this._loadTextures();
 
     this.undoStack = [];
     this.redoStack = [];
+  }
+
+  _loadTextures() {
+    const loader = new THREE.TextureLoader();
+    let loaded = 0;
+    const onLoaded = () => {
+      loaded++;
+      if (loaded >= 2) {
+        this.roadMat = createRoadMaterial(this.roadUniforms, this._normalTex, this._roughnessTex);
+        this._matReady = true;
+        this._rebuildVisual();
+      }
+    };
+    loader.load(NORMAL_TEX_PATH, (tex) => {
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      this._normalTex = tex;
+      onLoaded();
+    }, undefined, () => onLoaded());
+    loader.load(ROUGHNESS_TEX_PATH, (tex) => {
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      this._roughnessTex = tex;
+      onLoaded();
+    }, undefined, () => onLoaded());
+    this.roadMat = createRoadMaterial(this.roadUniforms, null, null);
   }
 
   _activeIdx() {

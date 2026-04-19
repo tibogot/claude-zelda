@@ -33,5 +33,16 @@ export function addRoadFolder(pane, toolState, opts) {
   geoFolder.addBinding(rp, "segments", { label: "Segments", min: 20, max: 600, step: 10 }).on("change", onRoadChanged);
   geoFolder.addBinding(rp, "heightOffset", { label: "Height offset", min: 0, max: 2, step: 0.01 }).on("change", onRoadChanged);
 
+  const enhFolder = folder.addFolder({ title: "Enhanced (PBR + Reflect)", expanded: false });
+  enhFolder.addBinding(rp, "enhanced", { label: "Enable" }).on("change", onRoadChanged);
+  enhFolder.addBinding(rp, "normalStrength", { label: "Normal strength", min: 0, max: 3, step: 0.05 }).on("change", onRoadChanged);
+  enhFolder.addBinding(rp, "roughnessBase", { label: "Roughness", min: 0.05, max: 1, step: 0.01 }).on("change", onRoadChanged);
+  enhFolder.addBinding(rp, "reflectStrength", { label: "Reflect strength", min: 0, max: 1, step: 0.05 }).on("change", onRoadChanged);
+  enhFolder.addBinding(rp, "texScale", { label: "Texture scale", min: 0.5, max: 20, step: 0.5 }).on("change", onRoadChanged);
+  const lodFolder = enhFolder.addFolder({ title: "LOD distances", expanded: false });
+  lodFolder.addBinding(rp, "lodNear", { label: "Near (full)", min: 5, max: 100, step: 1 }).on("change", onRoadChanged);
+  lodFolder.addBinding(rp, "lodMid", { label: "Mid (reduced)", min: 20, max: 200, step: 5 }).on("change", onRoadChanged);
+  lodFolder.addBinding(rp, "lodFar", { label: "Far (TSL only)", min: 50, max: 500, step: 10 }).on("change", onRoadChanged);
+
   return folder;
 }
