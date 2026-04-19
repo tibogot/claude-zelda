@@ -63,43 +63,31 @@ const ISO_FLY_CLIMB_RATE = 28;
 const ISO_FLY_DESCEND_RATE = 48;
 const ISO_FLY_CHASE_SMOOTH = 5.5;
 
-// Drift car physics
+// Drift car physics — arcade model
 const CAR_MODEL = "../models/car_low-poly.glb";
-const CAR_ACCEL = 24;
-const CAR_BRAKE = 40;
-const CAR_REVERSE_ACCEL = 10;
-const CAR_MAX_SPEED = 42;
-const CAR_MAX_REVERSE = 8;
-const CAR_COAST = 1.6;
-const CAR_DRAG = 0.008;
-const CAR_STEER_MAX = 0.95;
-const CAR_STEER_SPEED = 14;
-const CAR_STEER_RETURN_SPEED = 16;
-const CAR_FRONT_GRIP = 6.0;
-const CAR_REAR_GRIP = 4.5;
-const CAR_REAR_GRIP_HANDBRAKE = 0.15;
-const CAR_GRIP_RECOVERY_RATE = 1.8;
-const CAR_MASS = 1100;
-const CAR_INERTIA = 1400;
-const CAR_WHEELBASE_F = 1.3;
-const CAR_WHEELBASE_R = 1.1;
-const CAR_TRACK_WIDTH = 1.3;
+const CAR_ACCEL = 28;
+const CAR_ACCEL_BOOST = 40;
+const CAR_BRAKE = 35;
+const CAR_REVERSE_ACCEL = 12;
+const CAR_MAX_SPEED = 45;
+const CAR_MAX_SPEED_BOOST = 72;
+const CAR_MAX_REVERSE = 10;
+const CAR_COAST = 2.0;
+const CAR_DRAG = 0.006;
+const CAR_TURN_RATE = 1.0;
+const CAR_TURN_RATE_DRIFT = 2.0;
+const CAR_GRIP_NORMAL = 12;
+const CAR_GRIP_DRIFT = 0.8;
+const CAR_GRIP_BRAKE_TURN = 2.0;
+const CAR_DRIFT_ENTRY_SPEED = 8;
 const CAR_RIDE_HEIGHT = 0.32;
 const CAR_WHEEL_RADIUS = 0.34;
-const CAR_YAW_FRICTION = 3.5;
-const CAR_LATERAL_FRICTION = 4.0;
-const CAR_BODY_LEAN = 0.05;
-const CAR_BODY_PITCH_ACCEL = 0.0015;
-const CAR_BODY_PITCH_BRAKE = 0.003;
-const CAR_DRIFT_ANGLE_MIN = 0.08;
+const CAR_DRIFT_ANGLE_MIN = 0.1;
 const CAR_CAM_DIST = 10;
 const CAR_CAM_HEIGHT = 3.5;
 const CAR_CAM_CHASE_SPEED = 3.5;
 const CAR_CAM_DRIFT_LAG = 1.8;
-const CAR_COUNTER_STEER_FACTOR = 1.6;
-const CAR_THROTTLE_OVERSTEER = 0.85;
-const CAR_HANDBRAKE_DECEL = 2;
-const CAR_TILT_CAP = 0.42;
+const CAR_HANDBRAKE_DECEL = 3;
 
 const TRAIL_SEG = 90;
 const TRAIL_HALF_W = 0.038;
@@ -388,15 +376,10 @@ export class PlayMode {
     this.carWheels = [];
     this.carLoaded = false;
     this.carHeading = 0;
-    this.carSpeed = 0;
-    this.carLateral = 0;
-    this.carYawRate = 0;
-    this.carSteer = 0;
-    this.carRearGrip = CAR_REAR_GRIP;
+    this.carVx = 0;
+    this.carVz = 0;
     this.carDrifting = false;
     this.carDriftAngle = 0;
-    this.carPitch = 0;
-    this.carRoll = 0;
     this.carWheelSpin = 0;
     this.carCamYaw = 0;
     this._carHud = null;
@@ -449,7 +432,7 @@ export class PlayMode {
       const box = new THREE.Box3().setFromObject(inner);
       const size = box.getSize(new THREE.Vector3());
       const center = box.getCenter(new THREE.Vector3());
-      const targetLen = (CAR_WHEELBASE_F + CAR_WHEELBASE_R) * 2.2;
+      const targetLen = 5.3;
       const maxDim = Math.max(size.x, size.z);
       const sc = targetLen / maxDim;
       inner.scale.setScalar(sc);
@@ -917,7 +900,7 @@ export class PlayMode {
     if (this._flyHud) this._flyHud.style.display = "none";
     if (this._carHud) this._carHud.style.display = "none";
     this.planeSpeed = 0;
-    this.carSpeed = 0;
+    this.carVx = 0; this.carVz = 0;
     this._clearTrails(); clearBullets(this._bullets.pool);
 
     if (this.savedCamPos) this.camera.position.copy(this.savedCamPos);
@@ -987,111 +970,108 @@ export class PlayMode {
         mz = -Math.cos(this.flyHeading) * sg;
       }
     } else if (this.carMode) {
-      // ── Arcade drift physics ──
+      // ── Arcade drift: heading + world velocity model ──
       const forward = keys.KeyW || keys.ArrowUp;
       const backward = keys.KeyS || keys.ArrowDown;
       const leftKey = keys.KeyA || keys.ArrowLeft;
       const rightKey = keys.KeyD || keys.ArrowRight;
       const handbrake = keys.Space;
 
-      // Steering — faster at low speed, still responsive at high speed
-      let steerTarget = 0;
-      if (leftKey) steerTarget += CAR_STEER_MAX;
-      if (rightKey) steerTarget -= CAR_STEER_MAX;
-      const spdFactor = 1 - Math.min(Math.abs(this.carSpeed) / CAR_MAX_SPEED, 0.5);
-      const effectiveSteerMax = CAR_STEER_MAX * (0.5 + spdFactor * 0.5);
-      steerTarget = THREE.MathUtils.clamp(steerTarget, -effectiveSteerMax, effectiveSteerMax);
-      const steerSpeed = steerTarget !== 0 ? CAR_STEER_SPEED : CAR_STEER_RETURN_SPEED;
-      this.carSteer += (steerTarget - this.carSteer) * (1 - Math.exp(-steerSpeed * dtSec));
+      // Current speed from velocity vector
+      const curSpeed = Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz);
 
-      // Throttle / brake
+      // Heading direction
+      const hx = -Math.sin(this.carHeading);
+      const hz = -Math.cos(this.carHeading);
+
+      // Throttle / brake applied along heading
+      const boost = keys.ShiftLeft || keys.ShiftRight;
+      const accel = boost ? CAR_ACCEL_BOOST : CAR_ACCEL;
       if (forward) {
-        this.carSpeed += CAR_ACCEL * dtSec;
+        this.carVx += hx * accel * dtSec;
+        this.carVz += hz * accel * dtSec;
       } else if (backward) {
-        if (this.carSpeed > 0.5) this.carSpeed -= CAR_BRAKE * dtSec;
-        else this.carSpeed -= CAR_REVERSE_ACCEL * dtSec;
-      } else {
-        if (this.carSpeed > 0) this.carSpeed = Math.max(0, this.carSpeed - CAR_COAST * dtSec);
-        else if (this.carSpeed < 0) this.carSpeed = Math.min(0, this.carSpeed + CAR_COAST * dtSec);
-      }
-
-      // Handbrake: slight speed loss + rear grip drops hard
-      if (handbrake) {
-        if (this.carSpeed > 0) this.carSpeed = Math.max(0, this.carSpeed - CAR_HANDBRAKE_DECEL * dtSec);
-        else if (this.carSpeed < 0) this.carSpeed = Math.min(0, this.carSpeed + CAR_HANDBRAKE_DECEL * dtSec);
-        this.carRearGrip = THREE.MathUtils.lerp(this.carRearGrip, CAR_REAR_GRIP_HANDBRAKE, 1 - Math.exp(-16 * dtSec));
-      } else {
-        this.carRearGrip = THREE.MathUtils.lerp(this.carRearGrip, CAR_REAR_GRIP, 1 - Math.exp(-CAR_GRIP_RECOVERY_RATE * dtSec));
-      }
-
-      // Aero drag
-      const dragF = CAR_DRAG * this.carSpeed * Math.abs(this.carSpeed);
-      this.carSpeed -= dragF * dtSec;
-      this.carSpeed = THREE.MathUtils.clamp(this.carSpeed, -CAR_MAX_REVERSE, CAR_MAX_SPEED);
-      if (Math.abs(this.carSpeed) < 0.03 && !forward && !backward) this.carSpeed = 0;
-
-      // Slip angles (bicycle model)
-      const absSpd = Math.max(Math.abs(this.carSpeed), 0.5);
-      const sgn = Math.sign(this.carSpeed) || 1;
-      const slipFront = Math.atan2(this.carLateral + this.carYawRate * CAR_WHEELBASE_F, absSpd) - this.carSteer * sgn;
-      const slipRear = Math.atan2(this.carLateral - this.carYawRate * CAR_WHEELBASE_R, absSpd);
-
-      // Tire lateral forces — use saturating tire curve for arcade feel
-      const maxFyFront = CAR_FRONT_GRIP * 2;
-      const maxFyRear = this.carRearGrip * 2;
-      let fyFront = -CAR_FRONT_GRIP * slipFront;
-      fyFront = THREE.MathUtils.clamp(fyFront, -maxFyFront, maxFyFront);
-      let fyRear = -this.carRearGrip * slipRear;
-      fyRear = THREE.MathUtils.clamp(fyRear, -maxFyRear, maxFyRear);
-
-      // Throttle oversteer: gas while drifting weakens rear grip further
-      if (forward && this.carDrifting) {
-        const gripLoss = 1 - this.carRearGrip / CAR_REAR_GRIP;
-        fyRear *= (1 - CAR_THROTTLE_OVERSTEER * gripLoss);
-      }
-
-      // Counter-steer assist: steering into the drift boosts front force
-      if (this.carDrifting && steerTarget !== 0) {
-        const driftDir = Math.sign(this.carLateral);
-        const steerDir = Math.sign(steerTarget);
-        if (driftDir === steerDir) {
-          fyFront *= CAR_COUNTER_STEER_FACTOR;
+        if (curSpeed > 1) {
+          this.carVx -= hx * CAR_BRAKE * dtSec;
+          this.carVz -= hz * CAR_BRAKE * dtSec;
+        } else {
+          this.carVx -= hx * CAR_REVERSE_ACCEL * dtSec;
+          this.carVz -= hz * CAR_REVERSE_ACCEL * dtSec;
         }
+      } else if (curSpeed > 0.05) {
+        const decel = CAR_COAST / curSpeed;
+        this.carVx -= this.carVx * decel * dtSec;
+        this.carVz -= this.carVz * decel * dtSec;
+      } else {
+        this.carVx = 0; this.carVz = 0;
       }
 
-      // Direct yaw from steering (arcade boost — makes turning immediate)
-      const directYaw = this.carSteer * Math.min(Math.abs(this.carSpeed), 15) * 0.04;
+      // Handbrake: slight decel
+      if (handbrake && curSpeed > 0.1) {
+        const decel = CAR_HANDBRAKE_DECEL / curSpeed;
+        this.carVx -= this.carVx * decel * dtSec;
+        this.carVz -= this.carVz * decel * dtSec;
+      }
 
-      // Yaw torque from tire forces
-      const torque = fyFront * Math.cos(this.carSteer) * CAR_WHEELBASE_F - fyRear * CAR_WHEELBASE_R;
-      this.carYawRate += (torque / CAR_INERTIA) * CAR_MASS * dtSec;
-      this.carYawRate += directYaw * dtSec;
-      // Time-based friction instead of per-frame multiply
-      this.carYawRate -= this.carYawRate * CAR_YAW_FRICTION * dtSec;
+      // Drag
+      const speed2 = this.carVx * this.carVx + this.carVz * this.carVz;
+      if (speed2 > 0.01) {
+        const spd = Math.sqrt(speed2);
+        const dragForce = CAR_DRAG * spd;
+        const factor = Math.max(0, 1 - dragForce * dtSec);
+        this.carVx *= factor;
+        this.carVz *= factor;
+      }
 
-      // Lateral velocity from tire forces
-      const latAccel = (fyFront * Math.cos(this.carSteer) + fyRear) / CAR_MASS;
-      this.carLateral += latAccel * CAR_MASS * dtSec;
-      // Time-based friction
-      this.carLateral -= this.carLateral * CAR_LATERAL_FRICTION * dtSec;
+      // Clamp speed
+      const maxSpd = boost ? CAR_MAX_SPEED_BOOST : CAR_MAX_SPEED;
+      const newSpeed = Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz);
+      if (newSpeed > maxSpd) {
+        const s = maxSpd / newSpeed;
+        this.carVx *= s; this.carVz *= s;
+      }
 
-      // Update heading
-      this.carHeading += this.carYawRate * dtSec;
+      // Steering — rotate heading
+      let steerInput = 0;
+      if (leftKey) steerInput = 1;
+      if (rightKey) steerInput = -1;
+
+      if (steerInput !== 0 && curSpeed > 0.5) {
+        const turnRate = this.carDrifting ? CAR_TURN_RATE_DRIFT : CAR_TURN_RATE;
+        this.carHeading += steerInput * turnRate * dtSec;
+      }
+
+      // Grip: project velocity onto heading, get forward and lateral components
+      const fwdDot = this.carVx * hx + this.carVz * hz;
+      const rx = Math.cos(this.carHeading);
+      const rz = -Math.sin(this.carHeading);
+      const latDot = this.carVx * rx + this.carVz * rz;
+
+      // Choose grip strength
+      let grip;
+      if (handbrake && curSpeed > CAR_DRIFT_ENTRY_SPEED && steerInput !== 0) {
+        grip = CAR_GRIP_DRIFT;
+      } else if (backward && steerInput !== 0 && curSpeed > 3) {
+        grip = CAR_GRIP_BRAKE_TURN;
+      } else {
+        grip = CAR_GRIP_NORMAL;
+      }
+
+      // Kill lateral velocity based on grip (high grip = car follows heading)
+      const lateralKill = 1 - Math.exp(-grip * dtSec);
+      this.carVx -= rx * latDot * lateralKill;
+      this.carVz -= rz * latDot * lateralKill;
 
       // Drift detection
-      this.carDriftAngle = Math.abs(Math.atan2(this.carLateral, Math.max(1, Math.abs(this.carSpeed))));
-      this.carDrifting = this.carDriftAngle > CAR_DRIFT_ANGLE_MIN && Math.abs(this.carSpeed) > 3;
-
-      // World-space velocity
-      const fwdX = -Math.sin(this.carHeading);
-      const fwdZ = -Math.cos(this.carHeading);
-      const rightX = Math.cos(this.carHeading);
-      const rightZ = -Math.sin(this.carHeading);
-      mx = fwdX * this.carSpeed + rightX * this.carLateral;
-      mz = fwdZ * this.carSpeed + rightZ * this.carLateral;
+      this.carDriftAngle = curSpeed > 1 ? Math.abs(Math.atan2(latDot, Math.abs(fwdDot))) : 0;
+      this.carDrifting = this.carDriftAngle > CAR_DRIFT_ANGLE_MIN && curSpeed > CAR_DRIFT_ENTRY_SPEED;
 
       // Wheel spin
-      this.carWheelSpin -= (this.carSpeed / CAR_WHEEL_RADIUS) * dtSec;
+      this.carWheelSpin -= (fwdDot / CAR_WHEEL_RADIUS) * dtSec;
+
+      // Movement output
+      mx = this.carVx;
+      mz = this.carVz;
     } else {
       const moveYaw = iso ? this.isoYaw : this.camYaw;
       if (keys.KeyW || keys.ArrowUp)    { mx -= Math.sin(moveYaw); mz -= Math.cos(moveYaw); }
@@ -1506,26 +1486,13 @@ export class PlayMode {
       if (carDriving && this.carLoaded) {
         this.carRoot.position.set(this.playerPos.x, this.playerPos.y + CAR_RIDE_HEIGHT, this.playerPos.z);
         this.carRoot.rotation.y = this.carHeading + Math.PI;
+        this.carChassis.rotation.set(0, 0, 0);
 
-        const lateralG = this.carLateral * this.carYawRate;
-        const targetRoll = -THREE.MathUtils.clamp(lateralG * CAR_BODY_LEAN, -CAR_TILT_CAP, CAR_TILT_CAP);
-        this.carRoll = THREE.MathUtils.lerp(this.carRoll, targetRoll, 1 - Math.exp(-8 * dtSec));
-
-        let pitchTarget = 0;
-        const _carFwd = keys.KeyW || keys.ArrowUp;
-        const _carBrk = keys.KeyS || keys.ArrowDown || keys.Space;
-        if (_carFwd) pitchTarget = -CAR_BODY_PITCH_ACCEL * Math.min(Math.abs(this.carSpeed), CAR_MAX_SPEED);
-        else if (_carBrk) pitchTarget = CAR_BODY_PITCH_BRAKE * Math.min(Math.abs(this.carSpeed), 20);
-        this.carPitch = THREE.MathUtils.lerp(this.carPitch, pitchTarget, 1 - Math.exp(-6 * dtSec));
-
-        this.carChassis.rotation.set(this.carPitch, 0, this.carRoll);
-
+        const _steerVis = ((keys.KeyA || keys.ArrowLeft) ? 0.4 : 0) + ((keys.KeyD || keys.ArrowRight) ? -0.4 : 0);
         for (const w of this.carWheels) {
           const n = w.name;
           const isFront = n.includes("front") || n.includes("fl") || n.includes("fr") || n.includes("avant");
-          if (isFront) {
-            w.obj.rotation.y = this.carSteer;
-          }
+          if (isFront) w.obj.rotation.y = _steerVis;
           w.obj.rotation.x = this.carWheelSpin;
         }
       }
@@ -1546,7 +1513,7 @@ export class PlayMode {
     if (this._carHud) {
       if (carDriving) {
         this._carHud.style.display = "";
-        const kmh = Math.round(Math.abs(this.carSpeed) * 3.6);
+        const kmh = Math.round(Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz) * 3.6);
         this._carHudSpd.textContent = kmh;
         this._carHudAngle.textContent = Math.round(this.carDriftAngle * 180 / Math.PI);
         this._carHudAngle.style.color = this.carDrifting ? "#ff3300" : "#ff6633";
@@ -1580,7 +1547,10 @@ export class PlayMode {
     if (carDriving) {
       let chaseTarget = this.carHeading;
       if (this.carDrifting) {
-        const driftOff = Math.sign(this.carLateral) * this.carDriftAngle * CAR_CAM_DRIFT_LAG;
+        const rx = Math.cos(this.carHeading);
+        const rz = -Math.sin(this.carHeading);
+        const latSign = Math.sign(this.carVx * rx + this.carVz * rz);
+        const driftOff = latSign * this.carDriftAngle * CAR_CAM_DRIFT_LAG;
         chaseTarget += driftOff;
       }
       let camDelta = chaseTarget - this.carCamYaw;
@@ -1652,23 +1622,17 @@ export class PlayMode {
     } else if (prev === "fly") {
       this.moveMode = "car";
       this.carHeading = this.flyHeading;
-      this.carSpeed = 0;
-      this.carLateral = 0;
-      this.carYawRate = 0;
-      this.carSteer = 0;
-      this.carRearGrip = CAR_REAR_GRIP;
+      this.carVx = 0;
+      this.carVz = 0;
       this.carDrifting = false;
       this.carDriftAngle = 0;
-      this.carPitch = 0;
-      this.carRoll = 0;
       this.carCamYaw = this.flyHeading;
       this.flyHeight = 0;
       this._clearTrails(); clearBullets(this._bullets.pool);
     } else {
       this.moveMode = "capsule";
-      this.carSpeed = 0;
-      this.carLateral = 0;
-      this.carYawRate = 0;
+      this.carVx = 0;
+      this.carVz = 0;
       this.flyHeight = 0;
       this.flyPitch = 0;
       this.flyRoll = 0;
