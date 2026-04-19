@@ -6,11 +6,12 @@ const NORMAL_TEX_PATH = "../textures/terrain-normal.jpg";
 const ROUGHNESS_TEX_PATH = "../textures/terrain-roughness.jpg";
 
 export class RoadSystem {
-  constructor({ scene, camera, toolState, getWorldHeight }) {
+  constructor({ scene, camera, toolState, getWorldHeight, reflectTex }) {
     this.scene = scene;
     this.camera = camera;
     this.toolState = toolState;
     this.getWorldHeight = getWorldHeight;
+    this._reflectTex = reflectTex ?? null;
 
     this.segments = [];
     this.selectedIdx = -1;
@@ -37,7 +38,7 @@ export class RoadSystem {
     const onLoaded = () => {
       loaded++;
       if (loaded >= 2) {
-        this.roadMat = createRoadMaterial(this.roadUniforms, this._normalTex, this._roughnessTex);
+        this.roadMat = createRoadMaterial(this.roadUniforms, this._normalTex, this._roughnessTex, this._reflectTex);
         this._matReady = true;
         this._rebuildVisual();
       }
@@ -52,7 +53,7 @@ export class RoadSystem {
       this._roughnessTex = tex;
       onLoaded();
     }, undefined, () => onLoaded());
-    this.roadMat = createRoadMaterial(this.roadUniforms, null, null);
+    this.roadMat = createRoadMaterial(this.roadUniforms, null, null, this._reflectTex);
   }
 
   _activeIdx() {
@@ -198,12 +199,25 @@ export class RoadSystem {
 
   rebuildAllMeshes() {
     const rp = this.toolState.road;
+    const curves = [];
     for (let i = 0; i < this.segments.length; i++) {
       const seg = this.segments[i];
       this._disposeSegMesh(seg);
-      if (seg.points.length < 2) continue;
-      const curve = new THREE.CatmullRomCurve3(seg.points, false, "catmullrom", 0.5);
-      const geo = generateRoadGeometry(curve, rp.width, rp.segments, rp.heightOffset, this.getWorldHeight);
+      if (seg.points.length < 2) {
+        curves.push(null);
+      } else {
+        curves.push(new THREE.CatmullRomCurve3(seg.points, false, "catmullrom", 0.5));
+      }
+    }
+    for (let i = 0; i < this.segments.length; i++) {
+      const seg = this.segments[i];
+      const curve = curves[i];
+      if (!curve) continue;
+      const otherCurves = [];
+      for (let j = 0; j < curves.length; j++) {
+        if (j !== i && curves[j]) otherCurves.push({ curve: curves[j], segments: rp.segments });
+      }
+      const geo = generateRoadGeometry(curve, rp.width, rp.segments, rp.heightOffset, this.getWorldHeight, otherCurves);
       seg.mesh = new THREE.Mesh(geo, this.roadMat);
       seg.mesh.renderOrder = 3;
       this.scene.add(seg.mesh);
@@ -282,6 +296,25 @@ export class RoadSystem {
     if (this.selectedIdx >= pts.length) return;
     pts[this.selectedIdx].y = y;
     this._rebuildVisual();
+  }
+
+  getRoadMeshes() {
+    return this.segments.filter(s => s.mesh).map(s => s.mesh);
+  }
+
+  getAverageY() {
+    let sum = 0, count = 0;
+    for (const seg of this.segments) {
+      for (const p of seg.points) {
+        sum += p.y;
+        count++;
+      }
+    }
+    return count > 0 ? sum / count : 0;
+  }
+
+  updateReflectVP(matrix) {
+    this.roadUniforms.uReflectVP.value.copy(matrix);
   }
 
   exportData() {

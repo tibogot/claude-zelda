@@ -44,6 +44,7 @@ import { CliffGrassPaintSystem } from "../tools/foliage/cliffGrassPaintSystem.js
 import { PlayMode } from "../play/playMode.js";
 import { createGroundTslBundle } from "../../chunkGroundTsl.js";
 import { RoadSystem } from "../tools/road/roadSystem.js";
+import { RoadPlanarReflection } from "../core/road/roadReflection.js";
 import { CliffStore } from "../core/cliffs/cliffStore.js";
 import { CliffInstancer } from "../core/cliffs/cliffInstancer.js";
 import { CliffSystem } from "../tools/cliffs/cliffSystem.js";
@@ -439,9 +440,13 @@ export async function startV2App() {
   const grassManager = new GrassManager({ scene, camera, config });
   const grassPaintSystem = new GrassPaintSystem({ toolState, grassManager, config });
   const cliffGrassPaintSystem = new CliffGrassPaintSystem({ toolState, grassManager, config });
+  const roadReflection = new RoadPlanarReflection({
+    renderer, scene, camera, resScale: 0.35,
+  });
   const roadSystem = new RoadSystem({
     scene, camera, toolState,
     getWorldHeight: (x, z) => terrainStore.getWorldHeight(x, z),
+    reflectTex: roadReflection.texture,
   });
 
   const cliffStore = new CliffStore();
@@ -834,6 +839,10 @@ export async function startV2App() {
   brushRing.material.fog = false;
   brushRing.renderOrder = 5;
   scene.add(brushRing);
+
+  roadReflection.excludeFromReflection(brushPreview);
+  roadReflection.excludeFromReflection(brushRing);
+  roadReflection.excludeFromReflection(roadSystem.handleGroup);
 
   const rampMarkerA = new THREE.Mesh(
     new THREE.TorusGeometry(1, 0.045, 8, 64),
@@ -1285,6 +1294,12 @@ export async function startV2App() {
       ui.refreshPerf();
       hudLastMs = now;
     }
+    if (toolState.road.enhanced && roadSystem.segments.length > 0 && toolState.road.reflectStrength > 0) {
+      roadReflection.setReflectY(roadSystem.getAverageY());
+      const roadMeshes = roadSystem.getRoadMeshes();
+      roadReflection.render(roadMeshes);
+      roadSystem.updateReflectVP(roadReflection.reflectVP);
+    }
     renderer.render(scene, camera);
   });
 
@@ -1311,6 +1326,7 @@ export async function startV2App() {
       transformControls.dispose();
       grassManager.dispose();
       roadSystem.dispose();
+      roadReflection.dispose();
       playMode.dispose();
       tileTerrainMaterial.dispose();
       disposeProceduralBundle();

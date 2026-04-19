@@ -1,9 +1,9 @@
 import * as THREE from "three";
 import { MeshBasicNodeMaterial, MeshPhysicalNodeMaterial } from "three";
 import {
-  Fn, float, vec2, vec3, uv, mix, max, min, step, smoothstep,
+  Fn, float, vec2, vec3, vec4, uv, mix, max, min, step, smoothstep,
   fract, floor, dot, texture, positionWorld, cameraPosition, length,
-  normalize, sub,
+  normalize, sub, attribute,
 } from "three/tsl";
 import { uniform } from "three/tsl";
 
@@ -31,6 +31,7 @@ const _fbm2 = Fn(([p]) => {
 const _buildAsphaltColor = (uAsphaltDark, uAsphaltLight, uLineColor, uGrainScale, uGrainStrength, uLineWidth, uLineSoftness) => {
   return Fn(() => {
     const uvCoord = uv();
+    const junction = attribute("aJunction");
     const grainUV = uvCoord.mul(uGrainScale);
     const g1 = _fbm2(grainUV);
     const g2 = _fbm2(grainUV.mul(2.35).add(vec2(0.61, 1.93)));
@@ -49,7 +50,8 @@ const _buildAsphaltColor = (uAsphaltDark, uAsphaltLight, uLineColor, uGrainScale
     const useSoft = step(float(1e-6), s);
     const leftLine = mix(hardL, softL, useSoft);
     const rightLine = mix(hardR, softR, useSoft);
-    const edgeBlend = max(leftLine, rightLine).clamp(float(0), float(1));
+    const junctionMask = float(1).sub(step(float(0.2), junction));
+    const edgeBlend = max(leftLine, rightLine).mul(junctionMask).clamp(float(0), float(1));
     return mix(base, uLineColor, edgeBlend).saturate();
   })();
 };
@@ -71,15 +73,23 @@ export function createRoadUniforms(params) {
     uLodMid: uniform(params.lodMid ?? 80),
     uLodFar: uniform(params.lodFar ?? 200),
     uTexScale: uniform(params.texScale ?? 4.0),
+    uMixBlur: uniform(params.mixBlur ?? 0.08),
+    uMixStrength: uniform(params.mixStrength ?? 1.5),
+    uMixContrast: uniform(params.mixContrast ?? 1.0),
+    uNormalDistort: uniform(params.normalDistort ?? 0.12),
+    uReflectVP: uniform(new THREE.Matrix4()),
+    uReflectTex: null,
   };
 }
 
-export function createRoadMaterial(uniforms, normalTex, roughnessTex) {
+export function createRoadMaterial(uniforms, normalTex, roughnessTex, reflectTex) {
   const {
     uAsphaltDark, uAsphaltLight, uLineColor,
     uGrainScale, uGrainStrength, uLineWidth, uLineSoftness,
     uEnhanced, uNormalStrength, uRoughnessBase, uReflectStrength,
     uLodNear, uLodMid, uLodFar, uTexScale,
+    uMixBlur, uMixStrength, uMixContrast, uNormalDistort,
+    uReflectVP,
   } = uniforms;
 
   const asphaltColor = _buildAsphaltColor(
@@ -88,17 +98,18 @@ export function createRoadMaterial(uniforms, normalTex, roughnessTex) {
   );
 
   const distLod = Fn(() => {
-    const worldPos = positionWorld;
-    const camPos = cameraPosition;
-    const dist = length(sub(worldPos.xz, camPos.xz));
+    const dist = length(sub(positionWorld.xz, cameraPosition.xz));
     return smoothstep(uLodNear, uLodFar, dist);
   })();
 
   const nearFactor = Fn(() => {
-    const worldPos = positionWorld;
-    const camPos = cameraPosition;
-    const dist = length(sub(worldPos.xz, camPos.xz));
+    const dist = length(sub(positionWorld.xz, cameraPosition.xz));
     return float(1).sub(smoothstep(uLodNear, uLodMid, dist));
+  })();
+
+  const reflectFade = Fn(() => {
+    const dist = length(sub(positionWorld.xz, cameraPosition.xz));
+    return float(1).sub(smoothstep(uLodMid, uLodFar, dist));
   })();
 
   const mat = new MeshPhysicalNodeMaterial({
@@ -106,11 +117,58 @@ export function createRoadMaterial(uniforms, normalTex, roughnessTex) {
     polygonOffset: true,
     polygonOffsetFactor: -1,
     polygonOffsetUnits: -1,
+    stencilWrite: true,
+    stencilFunc: THREE.NotEqualStencilFunc,
+    stencilRef: 1,
+    stencilZPass: THREE.ReplaceStencilOp,
+    stencilFail: THREE.KeepStencilOp,
+    stencilZFail: THREE.KeepStencilOp,
   });
 
-  mat.colorNode = asphaltColor;
+  const tiledUV = Fn(() => positionWorld.xz.mul(uTexScale))();
 
-  const tiledUV = Fn(() => uv().mul(uTexScale))();
+  const getReflectUV = Fn(() => {
+    const clip = uReflectVP.mul(vec4(positionWorld, 1.0));
+    const ndc = clip.xy.div(clip.w);
+    const screenUV = ndc.mul(0.5).add(0.5);
+    return vec2(screenUV.x, float(1).sub(screenUV.y));
+  });
+
+  const sampleNormalDistort = Fn(() => {
+    if (!normalTex) return vec2(0, 0);
+    const n = texture(normalTex, tiledUV).xy.mul(2).sub(1);
+    return n.mul(uNormalDistort).mul(uEnhanced);
+  });
+
+  const blurredReflect = Fn(() => {
+    if (!reflectTex) return vec3(0, 0, 0);
+    const baseUV = getReflectUV();
+    const distort = sampleNormalDistort();
+    const centerUV = baseUV.add(distort);
+
+    const blur = uMixBlur.mul(uEnhanced);
+    const acc = texture(reflectTex, centerUV).rgb.toVar();
+    acc.addAssign(texture(reflectTex, centerUV.add(vec2(blur, 0))).rgb);
+    acc.addAssign(texture(reflectTex, centerUV.add(vec2(blur.negate(), 0))).rgb);
+    acc.addAssign(texture(reflectTex, centerUV.add(vec2(0, blur))).rgb);
+    acc.addAssign(texture(reflectTex, centerUV.add(vec2(0, blur.negate()))).rgb);
+    acc.addAssign(texture(reflectTex, centerUV.add(vec2(blur.mul(0.7), blur.mul(0.7)))).rgb);
+    acc.addAssign(texture(reflectTex, centerUV.add(vec2(blur.mul(-0.7), blur.mul(0.7)))).rgb);
+    acc.addAssign(texture(reflectTex, centerUV.add(vec2(blur.mul(0.7), blur.mul(-0.7)))).rgb);
+    acc.addAssign(texture(reflectTex, centerUV.add(vec2(blur.mul(-0.7), blur.mul(-0.7)))).rgb);
+    const avg = acc.div(9);
+
+    const contrasted = mix(vec3(0.5, 0.5, 0.5), avg, uMixContrast);
+    return contrasted.max(vec3(0, 0, 0));
+  });
+
+  mat.colorNode = Fn(() => {
+    const base = asphaltColor;
+    if (!reflectTex) return base;
+    const refl = blurredReflect();
+    const blendAlpha = uReflectStrength.mul(uEnhanced).mul(reflectFade).mul(uMixStrength).clamp(float(0), float(1));
+    return mix(base, refl, blendAlpha);
+  })();
 
   if (normalTex) {
     mat.normalNode = Fn(() => {
@@ -124,8 +182,9 @@ export function createRoadMaterial(uniforms, normalTex, roughnessTex) {
   mat.roughnessNode = Fn(() => {
     if (roughnessTex) {
       const sampled = texture(roughnessTex, tiledUV).x;
-      const texRough = mix(uRoughnessBase, sampled, uEnhanced.mul(float(1).sub(distLod)));
-      return texRough;
+      const texDetail = sampled.mul(uRoughnessBase);
+      const enhFactor = uEnhanced.mul(float(1).sub(distLod));
+      return mix(uRoughnessBase, texDetail, enhFactor);
     }
     return mix(float(0.95), uRoughnessBase, uEnhanced);
   })();
@@ -135,7 +194,7 @@ export function createRoadMaterial(uniforms, normalTex, roughnessTex) {
   })();
 
   mat.clearcoatNode = Fn(() => {
-    return uReflectStrength.mul(uEnhanced).mul(nearFactor);
+    return uReflectStrength.mul(uEnhanced).mul(nearFactor).mul(0.3);
   })();
   mat.clearcoatRoughnessNode = Fn(() => {
     return mix(float(0.4), float(0.1), nearFactor.mul(uEnhanced));
@@ -160,4 +219,8 @@ export function syncRoadUniforms(uniforms, params) {
   uniforms.uLodMid.value = params.lodMid ?? 80;
   uniforms.uLodFar.value = params.lodFar ?? 200;
   uniforms.uTexScale.value = params.texScale ?? 4.0;
+  uniforms.uMixBlur.value = params.mixBlur ?? 0.08;
+  uniforms.uMixStrength.value = params.mixStrength ?? 1.5;
+  uniforms.uMixContrast.value = params.mixContrast ?? 1.0;
+  uniforms.uNormalDistort.value = params.normalDistort ?? 0.12;
 }

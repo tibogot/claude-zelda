@@ -46,18 +46,60 @@ const ISO_DIST_MAX = 70;
 const ISO_YAW_ROT_SPEED = 1.6;
 
 const FLY_MOUSE_SENS_X = 0.0022;
-const FLY_MOUSE_SENS_Y = 0.0018;
-const FLY_PITCH_MIN = -0.62;
-const FLY_PITCH_MAX = 0.68;
-const FLY_PITCH_CLIMB_SCALE = 14;
+const FLY_MOUSE_SENS_Y = 0.00235;
+const FLY_PITCH_MIN = -1.22;
+const FLY_PITCH_MAX = 0.9;
+const FLY_PITCH_CLIMB_SCALE = 26;
+const FLY_PITCH_DIVE_MULT = 1.82;
 const FLY_ROLL_MAX = 0.78;
 const FLY_ROLL_VEL_SCALE = 0.0042;
 const FLY_ROLL_SMOOTH = 10;
 const FLY_ROLL_TARGET_DECAY = 5;
 const FLY_BARREL_DURATION = 0.88;
+const FLY_SURFACE_ALT = 1.35;
+const FLY_SURFACE_SPEED = 16;
 const ISO_FLY_YAW_RATE = 1.9;
-const ISO_FLY_CLIMB_RATE = 22;
+const ISO_FLY_CLIMB_RATE = 28;
+const ISO_FLY_DESCEND_RATE = 48;
 const ISO_FLY_CHASE_SMOOTH = 5.5;
+
+// Drift car physics
+const CAR_MODEL = "../models/car_low-poly.glb";
+const CAR_ACCEL = 24;
+const CAR_BRAKE = 40;
+const CAR_REVERSE_ACCEL = 10;
+const CAR_MAX_SPEED = 42;
+const CAR_MAX_REVERSE = 8;
+const CAR_COAST = 1.6;
+const CAR_DRAG = 0.008;
+const CAR_STEER_MAX = 0.95;
+const CAR_STEER_SPEED = 14;
+const CAR_STEER_RETURN_SPEED = 16;
+const CAR_FRONT_GRIP = 6.0;
+const CAR_REAR_GRIP = 4.5;
+const CAR_REAR_GRIP_HANDBRAKE = 0.15;
+const CAR_GRIP_RECOVERY_RATE = 1.8;
+const CAR_MASS = 1100;
+const CAR_INERTIA = 1400;
+const CAR_WHEELBASE_F = 1.3;
+const CAR_WHEELBASE_R = 1.1;
+const CAR_TRACK_WIDTH = 1.3;
+const CAR_RIDE_HEIGHT = 0.32;
+const CAR_WHEEL_RADIUS = 0.34;
+const CAR_YAW_FRICTION = 3.5;
+const CAR_LATERAL_FRICTION = 4.0;
+const CAR_BODY_LEAN = 0.05;
+const CAR_BODY_PITCH_ACCEL = 0.0015;
+const CAR_BODY_PITCH_BRAKE = 0.003;
+const CAR_DRIFT_ANGLE_MIN = 0.08;
+const CAR_CAM_DIST = 10;
+const CAR_CAM_HEIGHT = 3.5;
+const CAR_CAM_CHASE_SPEED = 3.5;
+const CAR_CAM_DRIFT_LAG = 1.8;
+const CAR_COUNTER_STEER_FACTOR = 1.6;
+const CAR_THROTTLE_OVERSTEER = 0.85;
+const CAR_HANDBRAKE_DECEL = 2;
+const CAR_TILT_CAP = 0.42;
 
 const TRAIL_SEG = 90;
 const TRAIL_HALF_W = 0.038;
@@ -273,6 +315,7 @@ export class PlayMode {
     this.flyBarrelActive = false;
     this.flyBarrelPhase = 0;
     this.flyBarrelDir = 1;
+    this.flyGroundCamYawOff = 0;
 
     // Capsule mesh
     const geo = new THREE.CapsuleGeometry(CAP_R, CAP_H, 4, 8);
@@ -338,6 +381,29 @@ export class PlayMode {
     this.charSpellPhase = "none";
     this.charSpellExitRequested = false;
     this._loadCharacter();
+
+    // Car drift state
+    this.carRoot = null;
+    this.carChassis = null;
+    this.carWheels = [];
+    this.carLoaded = false;
+    this.carHeading = 0;
+    this.carSpeed = 0;
+    this.carLateral = 0;
+    this.carYawRate = 0;
+    this.carSteer = 0;
+    this.carRearGrip = CAR_REAR_GRIP;
+    this.carDrifting = false;
+    this.carDriftAngle = 0;
+    this.carPitch = 0;
+    this.carRoll = 0;
+    this.carWheelSpin = 0;
+    this.carCamYaw = 0;
+    this._carHud = null;
+    this._carHudSpd = null;
+    this._carHudAngle = null;
+    this._loadCar();
+    this._createCarHud();
   }
 
   _createFlyHud() {
@@ -352,6 +418,85 @@ export class PlayMode {
     this._flyHud = el;
     this._flyHudSpd = el.querySelector("#fly-hud-spd");
     this._flyHudAlt = el.querySelector("#fly-hud-alt");
+  }
+
+  _createCarHud() {
+    const el = document.createElement("div");
+    el.id = "car-hud";
+    el.style.cssText = "position:fixed;bottom:16px;left:50%;transform:translateX(-50%);" +
+      "background:rgba(0,0,0,0.7);border:1px solid rgba(255,200,60,0.3);border-radius:8px;" +
+      "padding:10px 22px;font-family:monospace;font-size:15px;color:#ffe066;z-index:5;" +
+      "display:none;pointer-events:none;white-space:nowrap;";
+    el.innerHTML = '<span id="car-hud-spd">0</span> km/h &nbsp; DRIFT <span id="car-hud-angle" style="color:#ff6633">0</span>°';
+    document.body.appendChild(el);
+    this._carHud = el;
+    this._carHudSpd = el.querySelector("#car-hud-spd");
+    this._carHudAngle = el.querySelector("#car-hud-angle");
+  }
+
+  async _loadCar() {
+    try {
+      const { submeshes } = await loadTreeGlbFromUrl(CAR_MODEL);
+      const inner = new THREE.Group();
+      for (const sm of submeshes) {
+        const mesh = new THREE.Mesh(sm.geometry, sm.material);
+        mesh.applyMatrix4(sm.localMatrix);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        inner.add(mesh);
+      }
+      inner.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(inner);
+      const size = box.getSize(new THREE.Vector3());
+      const center = box.getCenter(new THREE.Vector3());
+      const targetLen = (CAR_WHEELBASE_F + CAR_WHEELBASE_R) * 2.2;
+      const maxDim = Math.max(size.x, size.z);
+      const sc = targetLen / maxDim;
+      inner.scale.setScalar(sc);
+      inner.updateMatrixWorld(true);
+      const box2 = new THREE.Box3().setFromObject(inner);
+      const center2 = box2.getCenter(new THREE.Vector3());
+      inner.position.set(-center2.x, -box2.min.y, -center2.z);
+
+      const chassis = new THREE.Group();
+      chassis.add(inner);
+      this.carChassis = chassis;
+
+      this.carRoot = new THREE.Group();
+      this.carRoot.rotation.order = "YXZ";
+      this.carRoot.add(chassis);
+      this.carRoot.visible = false;
+      this.scene.add(this.carRoot);
+
+      this.carWheels = [];
+      inner.updateMatrixWorld(true);
+      const bFinal = new THREE.Box3().setFromObject(inner);
+      const sz = bFinal.getSize(new THREE.Vector3());
+      const wheelNames = [];
+      inner.traverse(child => {
+        const n = (child.name || "").toLowerCase();
+        if (n.includes("wheel") || n.includes("tire") || n.includes("roue")) {
+          wheelNames.push({ obj: child, name: n });
+        }
+      });
+      if (wheelNames.length >= 4) {
+        for (const w of wheelNames) {
+          const wp = new THREE.Vector3();
+          w.obj.getWorldPosition(wp);
+          this.carRoot.worldToLocal(wp);
+          this.carWheels.push({ obj: w.obj, offset: wp, name: w.name });
+        }
+      }
+
+      this.carLoaded = true;
+      if (this.active && this.moveMode === "car") {
+        this.carRoot.visible = true;
+        this.capsule.visible = false;
+      }
+      console.log("[V2] Car loaded:", submeshes.length, "submeshes, wheels found:", this.carWheels.length);
+    } catch (err) {
+      console.warn("[V2] Failed to load car model:", err);
+    }
   }
 
   _loadCharacter() {
@@ -694,6 +839,7 @@ export class PlayMode {
   }
 
   get flying() { return this.moveMode === "fly" && this.planeLoaded; }
+  get carMode() { return this.moveMode === "car"; }
 
   _clearTrails() {
     for (const trail of this._wingTrails) {
@@ -743,6 +889,7 @@ export class PlayMode {
     this.capsule.visible = true;
     if (this.planeRoot) this.planeRoot.visible = false;
     if (this.charRoot) this.charRoot.visible = false;
+    if (this.carRoot) this.carRoot.visible = false;
     this._clearTrails(); clearBullets(this._bullets.pool);
     this.controls.enabled = false;
 
@@ -766,8 +913,11 @@ export class PlayMode {
     this.capsule.visible = false;
     if (this.planeRoot) this.planeRoot.visible = false;
     if (this.charRoot) this.charRoot.visible = false;
+    if (this.carRoot) this.carRoot.visible = false;
     if (this._flyHud) this._flyHud.style.display = "none";
+    if (this._carHud) this._carHud.style.display = "none";
     this.planeSpeed = 0;
+    this.carSpeed = 0;
     this._clearTrails(); clearBullets(this._bullets.pool);
 
     if (this.savedCamPos) this.camera.position.copy(this.savedCamPos);
@@ -836,6 +986,112 @@ export class PlayMode {
         mx = -Math.sin(this.flyHeading) * sg;
         mz = -Math.cos(this.flyHeading) * sg;
       }
+    } else if (this.carMode) {
+      // ── Arcade drift physics ──
+      const forward = keys.KeyW || keys.ArrowUp;
+      const backward = keys.KeyS || keys.ArrowDown;
+      const leftKey = keys.KeyA || keys.ArrowLeft;
+      const rightKey = keys.KeyD || keys.ArrowRight;
+      const handbrake = keys.Space;
+
+      // Steering — faster at low speed, still responsive at high speed
+      let steerTarget = 0;
+      if (leftKey) steerTarget += CAR_STEER_MAX;
+      if (rightKey) steerTarget -= CAR_STEER_MAX;
+      const spdFactor = 1 - Math.min(Math.abs(this.carSpeed) / CAR_MAX_SPEED, 0.5);
+      const effectiveSteerMax = CAR_STEER_MAX * (0.5 + spdFactor * 0.5);
+      steerTarget = THREE.MathUtils.clamp(steerTarget, -effectiveSteerMax, effectiveSteerMax);
+      const steerSpeed = steerTarget !== 0 ? CAR_STEER_SPEED : CAR_STEER_RETURN_SPEED;
+      this.carSteer += (steerTarget - this.carSteer) * (1 - Math.exp(-steerSpeed * dtSec));
+
+      // Throttle / brake
+      if (forward) {
+        this.carSpeed += CAR_ACCEL * dtSec;
+      } else if (backward) {
+        if (this.carSpeed > 0.5) this.carSpeed -= CAR_BRAKE * dtSec;
+        else this.carSpeed -= CAR_REVERSE_ACCEL * dtSec;
+      } else {
+        if (this.carSpeed > 0) this.carSpeed = Math.max(0, this.carSpeed - CAR_COAST * dtSec);
+        else if (this.carSpeed < 0) this.carSpeed = Math.min(0, this.carSpeed + CAR_COAST * dtSec);
+      }
+
+      // Handbrake: slight speed loss + rear grip drops hard
+      if (handbrake) {
+        if (this.carSpeed > 0) this.carSpeed = Math.max(0, this.carSpeed - CAR_HANDBRAKE_DECEL * dtSec);
+        else if (this.carSpeed < 0) this.carSpeed = Math.min(0, this.carSpeed + CAR_HANDBRAKE_DECEL * dtSec);
+        this.carRearGrip = THREE.MathUtils.lerp(this.carRearGrip, CAR_REAR_GRIP_HANDBRAKE, 1 - Math.exp(-16 * dtSec));
+      } else {
+        this.carRearGrip = THREE.MathUtils.lerp(this.carRearGrip, CAR_REAR_GRIP, 1 - Math.exp(-CAR_GRIP_RECOVERY_RATE * dtSec));
+      }
+
+      // Aero drag
+      const dragF = CAR_DRAG * this.carSpeed * Math.abs(this.carSpeed);
+      this.carSpeed -= dragF * dtSec;
+      this.carSpeed = THREE.MathUtils.clamp(this.carSpeed, -CAR_MAX_REVERSE, CAR_MAX_SPEED);
+      if (Math.abs(this.carSpeed) < 0.03 && !forward && !backward) this.carSpeed = 0;
+
+      // Slip angles (bicycle model)
+      const absSpd = Math.max(Math.abs(this.carSpeed), 0.5);
+      const sgn = Math.sign(this.carSpeed) || 1;
+      const slipFront = Math.atan2(this.carLateral + this.carYawRate * CAR_WHEELBASE_F, absSpd) - this.carSteer * sgn;
+      const slipRear = Math.atan2(this.carLateral - this.carYawRate * CAR_WHEELBASE_R, absSpd);
+
+      // Tire lateral forces — use saturating tire curve for arcade feel
+      const maxFyFront = CAR_FRONT_GRIP * 2;
+      const maxFyRear = this.carRearGrip * 2;
+      let fyFront = -CAR_FRONT_GRIP * slipFront;
+      fyFront = THREE.MathUtils.clamp(fyFront, -maxFyFront, maxFyFront);
+      let fyRear = -this.carRearGrip * slipRear;
+      fyRear = THREE.MathUtils.clamp(fyRear, -maxFyRear, maxFyRear);
+
+      // Throttle oversteer: gas while drifting weakens rear grip further
+      if (forward && this.carDrifting) {
+        const gripLoss = 1 - this.carRearGrip / CAR_REAR_GRIP;
+        fyRear *= (1 - CAR_THROTTLE_OVERSTEER * gripLoss);
+      }
+
+      // Counter-steer assist: steering into the drift boosts front force
+      if (this.carDrifting && steerTarget !== 0) {
+        const driftDir = Math.sign(this.carLateral);
+        const steerDir = Math.sign(steerTarget);
+        if (driftDir === steerDir) {
+          fyFront *= CAR_COUNTER_STEER_FACTOR;
+        }
+      }
+
+      // Direct yaw from steering (arcade boost — makes turning immediate)
+      const directYaw = this.carSteer * Math.min(Math.abs(this.carSpeed), 15) * 0.04;
+
+      // Yaw torque from tire forces
+      const torque = fyFront * Math.cos(this.carSteer) * CAR_WHEELBASE_F - fyRear * CAR_WHEELBASE_R;
+      this.carYawRate += (torque / CAR_INERTIA) * CAR_MASS * dtSec;
+      this.carYawRate += directYaw * dtSec;
+      // Time-based friction instead of per-frame multiply
+      this.carYawRate -= this.carYawRate * CAR_YAW_FRICTION * dtSec;
+
+      // Lateral velocity from tire forces
+      const latAccel = (fyFront * Math.cos(this.carSteer) + fyRear) / CAR_MASS;
+      this.carLateral += latAccel * CAR_MASS * dtSec;
+      // Time-based friction
+      this.carLateral -= this.carLateral * CAR_LATERAL_FRICTION * dtSec;
+
+      // Update heading
+      this.carHeading += this.carYawRate * dtSec;
+
+      // Drift detection
+      this.carDriftAngle = Math.abs(Math.atan2(this.carLateral, Math.max(1, Math.abs(this.carSpeed))));
+      this.carDrifting = this.carDriftAngle > CAR_DRIFT_ANGLE_MIN && Math.abs(this.carSpeed) > 3;
+
+      // World-space velocity
+      const fwdX = -Math.sin(this.carHeading);
+      const fwdZ = -Math.cos(this.carHeading);
+      const rightX = Math.cos(this.carHeading);
+      const rightZ = -Math.sin(this.carHeading);
+      mx = fwdX * this.carSpeed + rightX * this.carLateral;
+      mz = fwdZ * this.carSpeed + rightZ * this.carLateral;
+
+      // Wheel spin
+      this.carWheelSpin -= (this.carSpeed / CAR_WHEEL_RADIUS) * dtSec;
     } else {
       const moveYaw = iso ? this.isoYaw : this.camYaw;
       if (keys.KeyW || keys.ArrowUp)    { mx -= Math.sin(moveYaw); mz -= Math.cos(moveYaw); }
@@ -922,8 +1178,10 @@ export class PlayMode {
     if (charMode && (this.charAttacking || inSpell)) { mx = 0; mz = 0; }
 
     const mlen = Math.hypot(mx, mz);
+    const carDriving = this.carMode;
     const moveSpeed = flying
       ? Math.abs(this.planeSpeed)
+      : carDriving ? 1
       : charMode
         ? (this.charRolling ? _charRollSpeed
           : inSlide ? CHAR_SLIDE_SPEED
@@ -932,8 +1190,14 @@ export class PlayMode {
           : CHAR_WALK_SPEED)
         : MOVE_SPEED;
     if (mlen > 0) {
-      let stepX = (mx / mlen) * moveSpeed * dtSec;
-      let stepZ = (mz / mlen) * moveSpeed * dtSec;
+      let stepX, stepZ;
+      if (carDriving) {
+        stepX = mx * dtSec;
+        stepZ = mz * dtSec;
+      } else {
+        stepX = (mx / mlen) * moveSpeed * dtSec;
+        stepZ = (mz / mlen) * moveSpeed * dtSec;
+      }
 
       if (this.cliffBvh?.baked) {
         const capsuleBase = CAP_R + CAP_H * 0.5;
@@ -992,13 +1256,28 @@ export class PlayMode {
 
     // Fly altitude
     if (flying) {
+      const agl = this.flyHeight;
+      const spd = Math.abs(this.planeSpeed);
+      const onDeck = agl < FLY_SURFACE_ALT && spd < FLY_SURFACE_SPEED;
+
       if (iso) {
         let climbDelta = 0;
         if (keys.Space) climbDelta += ISO_FLY_CLIMB_RATE * dtSec;
-        if (keys.ShiftLeft || keys.ShiftRight) climbDelta -= ISO_FLY_CLIMB_RATE * dtSec;
+        if (keys.ShiftLeft || keys.ShiftRight) climbDelta -= ISO_FLY_DESCEND_RATE * dtSec;
         this.flyHeight = Math.max(0, this.flyHeight + climbDelta);
+        const pitchTarget = climbDelta > 0.01 ? 0.3 : climbDelta < -0.01 ? -0.3 : 0;
+        this.flyPitch = THREE.MathUtils.lerp(this.flyPitch, pitchTarget, 1 - Math.exp(-9 * dtSec));
       } else {
-        this.flyHeight = Math.max(0, this.flyHeight + this.flyPitch * FLY_PITCH_CLIMB_SCALE * dtSec);
+        const diveMult = this.flyPitch < 0 ? FLY_PITCH_DIVE_MULT : 1;
+        this.flyHeight = Math.max(0, this.flyHeight + this.flyPitch * FLY_PITCH_CLIMB_SCALE * diveMult * dtSec);
+      }
+
+      // Surface lock — taxi mode: decay pitch/roll/altitude near ground at low speed
+      if (onDeck) {
+        const deckRate = 1 - Math.exp(-4 * dtSec);
+        this.flyPitch = THREE.MathUtils.lerp(this.flyPitch, 0, deckRate);
+        this.flyRollTarget = THREE.MathUtils.lerp(this.flyRollTarget, 0, deckRate);
+        this.flyHeight = THREE.MathUtils.lerp(this.flyHeight, 0, deckRate);
       }
 
       // Barrel roll
@@ -1096,6 +1375,8 @@ export class PlayMode {
         while (dYaw < -PI) dYaw += 2 * PI;
         this.charYaw += dYaw * (1 - Math.exp(-14 * dtSec));
       }
+    } else if (carDriving) {
+      this.flyHeight = 0;
     } else {
       this.flyHeight = 0;
 
@@ -1146,7 +1427,7 @@ export class PlayMode {
 
     // Capsule visual
     const capsuleCY = this.playerPos.y + capsuleBase;
-    this.capsule.visible = this.moveMode === "capsule" || (this.moveMode === "fly" && !this.planeLoaded) || (this.moveMode === "char" && !this.charLoaded);
+    this.capsule.visible = this.moveMode === "capsule" || (this.moveMode === "fly" && !this.planeLoaded) || (this.moveMode === "char" && !this.charLoaded) || (this.moveMode === "car" && !this.carLoaded);
     this.capsule.position.set(this.playerPos.x, capsuleCY, this.playerPos.z);
     if (mlen > 0) {
       this._lastMx = mx / mlen;
@@ -1219,6 +1500,37 @@ export class PlayMode {
       }
     }
 
+    // Car visual
+    if (this.carRoot) {
+      this.carRoot.visible = carDriving && this.carLoaded;
+      if (carDriving && this.carLoaded) {
+        this.carRoot.position.set(this.playerPos.x, this.playerPos.y + CAR_RIDE_HEIGHT, this.playerPos.z);
+        this.carRoot.rotation.y = this.carHeading + Math.PI;
+
+        const lateralG = this.carLateral * this.carYawRate;
+        const targetRoll = -THREE.MathUtils.clamp(lateralG * CAR_BODY_LEAN, -CAR_TILT_CAP, CAR_TILT_CAP);
+        this.carRoll = THREE.MathUtils.lerp(this.carRoll, targetRoll, 1 - Math.exp(-8 * dtSec));
+
+        let pitchTarget = 0;
+        const _carFwd = keys.KeyW || keys.ArrowUp;
+        const _carBrk = keys.KeyS || keys.ArrowDown || keys.Space;
+        if (_carFwd) pitchTarget = -CAR_BODY_PITCH_ACCEL * Math.min(Math.abs(this.carSpeed), CAR_MAX_SPEED);
+        else if (_carBrk) pitchTarget = CAR_BODY_PITCH_BRAKE * Math.min(Math.abs(this.carSpeed), 20);
+        this.carPitch = THREE.MathUtils.lerp(this.carPitch, pitchTarget, 1 - Math.exp(-6 * dtSec));
+
+        this.carChassis.rotation.set(this.carPitch, 0, this.carRoll);
+
+        for (const w of this.carWheels) {
+          const n = w.name;
+          const isFront = n.includes("front") || n.includes("fl") || n.includes("fr") || n.includes("avant");
+          if (isFront) {
+            w.obj.rotation.y = this.carSteer;
+          }
+          w.obj.rotation.x = this.carWheelSpin;
+        }
+      }
+    }
+
     // Flight HUD
     if (this._flyHud) {
       if (flying) {
@@ -1227,6 +1539,19 @@ export class PlayMode {
         this._flyHudAlt.textContent = Math.round(this.flyHeight);
       } else {
         this._flyHud.style.display = "none";
+      }
+    }
+
+    // Car HUD
+    if (this._carHud) {
+      if (carDriving) {
+        this._carHud.style.display = "";
+        const kmh = Math.round(Math.abs(this.carSpeed) * 3.6);
+        this._carHudSpd.textContent = kmh;
+        this._carHudAngle.textContent = Math.round(this.carDriftAngle * 180 / Math.PI);
+        this._carHudAngle.style.color = this.carDrifting ? "#ff3300" : "#ff6633";
+      } else {
+        this._carHud.style.display = "none";
       }
     }
 
@@ -1249,8 +1574,26 @@ export class PlayMode {
 
     // Camera
     const charLookY = this.playerPos.y + CHAR_HEIGHT * 0.75;
-    const lookAtY = flying ? planeY + 0.45 : charMode ? charLookY : capsuleCY + 0.6;
-    if (iso) {
+    const carLookY = carDriving ? (this.carRoot ? this.carRoot.position.y + 1.2 : this.playerPos.y + 1.2) : 0;
+    const lookAtY = flying ? planeY + 0.45 : carDriving ? carLookY : charMode ? charLookY : capsuleCY + 0.6;
+
+    if (carDriving) {
+      let chaseTarget = this.carHeading;
+      if (this.carDrifting) {
+        const driftOff = Math.sign(this.carLateral) * this.carDriftAngle * CAR_CAM_DRIFT_LAG;
+        chaseTarget += driftOff;
+      }
+      let camDelta = chaseTarget - this.carCamYaw;
+      while (camDelta > Math.PI) camDelta -= 2 * Math.PI;
+      while (camDelta < -Math.PI) camDelta += 2 * Math.PI;
+      this.carCamYaw += camDelta * (1 - Math.exp(-CAR_CAM_CHASE_SPEED * dtSec));
+
+      const camBehindX = this.playerPos.x + Math.sin(this.carCamYaw) * CAR_CAM_DIST;
+      const camBehindZ = this.playerPos.z + Math.cos(this.carCamYaw) * CAR_CAM_DIST;
+      const camY = lookAtY + CAR_CAM_HEIGHT;
+      this.camera.position.set(camBehindX, camY, camBehindZ);
+      this.camera.lookAt(this.playerPos.x, lookAtY, this.playerPos.z);
+    } else if (iso) {
       if (flying) {
         let yawDelta = this.flyHeading - this.isoYaw;
         while (yawDelta > Math.PI) yawDelta -= 2 * Math.PI;
@@ -1264,8 +1607,9 @@ export class PlayMode {
         lookAtY + vDist,
         this.playerPos.z + Math.cos(this.isoYaw) * hDist,
       );
+      this.camera.lookAt(this.playerPos.x, lookAtY, this.playerPos.z);
     } else {
-      const camOrbitYaw = flying ? this.flyHeading : this.camYaw;
+      const camOrbitYaw = flying ? this.flyHeading + this.flyGroundCamYawOff : this.camYaw;
       const hDist = CAM_DIST * Math.cos(this.camPitch);
       const vDist = CAM_DIST * Math.sin(this.camPitch);
       this.camera.position.set(
@@ -1273,8 +1617,8 @@ export class PlayMode {
         lookAtY + vDist,
         this.playerPos.z + Math.cos(camOrbitYaw) * hDist,
       );
+      this.camera.lookAt(this.playerPos.x, lookAtY, this.playerPos.z);
     }
-    this.camera.lookAt(this.playerPos.x, lookAtY, this.playerPos.z);
   }
 
   _toggleMoveMode() {
@@ -1303,9 +1647,28 @@ export class PlayMode {
       this.flyRollTarget = 0;
       this.flyBarrelActive = false;
       this.flyBarrelPhase = 0;
+      this.flyGroundCamYawOff = 0;
       this.planeSpeed = 0;
+    } else if (prev === "fly") {
+      this.moveMode = "car";
+      this.carHeading = this.flyHeading;
+      this.carSpeed = 0;
+      this.carLateral = 0;
+      this.carYawRate = 0;
+      this.carSteer = 0;
+      this.carRearGrip = CAR_REAR_GRIP;
+      this.carDrifting = false;
+      this.carDriftAngle = 0;
+      this.carPitch = 0;
+      this.carRoll = 0;
+      this.carCamYaw = this.flyHeading;
+      this.flyHeight = 0;
+      this._clearTrails(); clearBullets(this._bullets.pool);
     } else {
       this.moveMode = "capsule";
+      this.carSpeed = 0;
+      this.carLateral = 0;
+      this.carYawRate = 0;
       this.flyHeight = 0;
       this.flyPitch = 0;
       this.flyRoll = 0;
@@ -1313,7 +1676,6 @@ export class PlayMode {
       this.flyBarrelActive = false;
       this.flyBarrelPhase = 0;
       this.planeSpeed = 0;
-      this._clearTrails(); clearBullets(this._bullets.pool);
     }
   }
 
@@ -1452,17 +1814,27 @@ export class PlayMode {
     if (this.flying) {
       const mx = event.movementX;
       const my = event.movementY;
-      this.flyHeading -= mx * FLY_MOUSE_SENS_X;
-      this.flyPitch = THREE.MathUtils.clamp(
-        this.flyPitch + my * FLY_MOUSE_SENS_Y,
-        FLY_PITCH_MIN, FLY_PITCH_MAX,
-      );
-      this.flyRollTarget = THREE.MathUtils.clamp(
-        this.flyRollTarget - mx * FLY_ROLL_VEL_SCALE,
-        -FLY_ROLL_MAX, FLY_ROLL_MAX,
-      );
+      const agl = this.flyHeight;
+      const spd = Math.abs(this.planeSpeed);
+      const onDeck = agl < FLY_SURFACE_ALT && spd < FLY_SURFACE_SPEED;
+      if (onDeck) {
+        this.flyGroundCamYawOff -= mx * FLY_MOUSE_SENS_X;
+      } else {
+        this.flyGroundCamYawOff = 0;
+        this.flyHeading -= mx * FLY_MOUSE_SENS_X;
+        this.flyPitch = THREE.MathUtils.clamp(
+          this.flyPitch + my * FLY_MOUSE_SENS_Y,
+          FLY_PITCH_MIN, FLY_PITCH_MAX,
+        );
+        this.flyRollTarget = THREE.MathUtils.clamp(
+          this.flyRollTarget - mx * FLY_ROLL_VEL_SCALE,
+          -FLY_ROLL_MAX, FLY_ROLL_MAX,
+        );
+      }
       return;
     }
+
+    if (this.carMode) return;
 
     this.camYaw -= event.movementX * CAM_SENS_X;
     this.camPitch += event.movementY * CAM_SENS_Y;
@@ -1528,5 +1900,12 @@ export class PlayMode {
         if (o.isMesh || o.isSkinnedMesh) { o.geometry?.dispose(); o.material?.dispose(); }
       });
     }
+    if (this.carRoot) {
+      this.scene.remove(this.carRoot);
+      this.carRoot.traverse((o) => {
+        if (o.isMesh) { o.geometry?.dispose(); o.material?.dispose(); }
+      });
+    }
+    if (this._carHud) this._carHud.remove();
   }
 }

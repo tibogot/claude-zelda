@@ -38,6 +38,10 @@ export function addRoadFolder(pane, toolState, opts) {
   enhFolder.addBinding(rp, "normalStrength", { label: "Normal strength", min: 0, max: 3, step: 0.05 }).on("change", onRoadChanged);
   enhFolder.addBinding(rp, "roughnessBase", { label: "Roughness", min: 0.05, max: 1, step: 0.01 }).on("change", onRoadChanged);
   enhFolder.addBinding(rp, "reflectStrength", { label: "Reflect strength", min: 0, max: 1, step: 0.05 }).on("change", onRoadChanged);
+  enhFolder.addBinding(rp, "mixBlur", { label: "Reflect blur", min: 0, max: 0.3, step: 0.005 }).on("change", onRoadChanged);
+  enhFolder.addBinding(rp, "mixStrength", { label: "Reflect mix", min: 0, max: 4, step: 0.1 }).on("change", onRoadChanged);
+  enhFolder.addBinding(rp, "mixContrast", { label: "Reflect contrast", min: 0.2, max: 3, step: 0.05 }).on("change", onRoadChanged);
+  enhFolder.addBinding(rp, "normalDistort", { label: "Normal distort", min: 0, max: 0.5, step: 0.01 }).on("change", onRoadChanged);
   enhFolder.addBinding(rp, "texScale", { label: "Texture scale", min: 0.5, max: 20, step: 0.5 }).on("change", onRoadChanged);
   const lodFolder = enhFolder.addFolder({ title: "LOD distances", expanded: false });
   lodFolder.addBinding(rp, "lodNear", { label: "Near (full)", min: 5, max: 100, step: 1 }).on("change", onRoadChanged);
