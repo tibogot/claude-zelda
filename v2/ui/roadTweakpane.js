@@ -7,6 +7,7 @@ export function addRoadFolder(pane, toolState, opts) {
     onRoadSnapY,
     onRoadSelectedYChanged,
     onRoadActiveIndexChanged,
+    onRoadFlattenTerrain,
   } = opts;
   const rp = toolState.road;
   const folder = pane.addFolder({ title: "Road", expanded: true });
@@ -18,6 +19,7 @@ export function addRoadFolder(pane, toolState, opts) {
   folder.addButton({ title: "Delete selected point" }).on("click", () => onRoadDeleteSelected?.());
   folder.addBinding(rp, "selectedPointY", { label: "Point Y", min: -50, max: 200, step: 0.1 }).on("change", () => onRoadSelectedYChanged?.());
   folder.addButton({ title: "Snap selected Y to terrain" }).on("click", () => onRoadSnapY?.());
+  folder.addButton({ title: "Flatten terrain under roads" }).on("click", () => onRoadFlattenTerrain?.());
 
   const matFolder = folder.addFolder({ title: "Material", expanded: false });
   matFolder.addBinding(rp, "asphaltDark", { label: "Dark", view: "color" }).on("change", onRoadChanged);

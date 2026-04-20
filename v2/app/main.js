@@ -447,6 +447,8 @@ export async function startV2App() {
     scene, camera, toolState,
     getWorldHeight: (x, z) => terrainStore.getWorldHeight(x, z),
     reflectTex: roadReflection.texture,
+    terrainStore,
+    chunkStream,
   });
 
   const cliffStore = new CliffStore();
@@ -712,6 +714,10 @@ export async function startV2App() {
     onRoadDeleteActive: () => { roadSystem.deleteActiveRoad(); ui?.pane.refresh(); },
     onRoadDeleteSelected: () => { roadSystem.deleteSelected(); ui?.pane.refresh(); },
     onRoadSnapY: () => { roadSystem.snapSelectedYToTerrain(); ui?.pane.refresh(); },
+    onRoadFlattenTerrain: () => {
+      roadSystem.flattenTerrainUnderRoads();
+      roadSystem.rebuildAllMeshes();
+    },
     onRoadSelectedYChanged: () => roadSystem.setSelectedPointY(toolState.road.selectedPointY),
     onRoadActiveIndexChanged: () => {
       roadSystem._clampActive();

@@ -343,6 +343,132 @@ export class TerrainStore {
     }
   }
 
+  flattenUnderRoad(curve, width, segments, dirtyChunks) {
+    const res = this.config.world.dataResolution;
+    const stride = res + 1;
+    const cs = this.config.world.chunkSize;
+    const step = cs / res;
+    const half = this.config.world.size * 0.5;
+    const maxC = getChunkCountPerAxis(this.config) - 1;
+
+    const halfW = width * 0.5;
+    const margin = halfW * 1.5;
+    const pts = curve.getSpacedPoints(segments);
+
+    const minWX = Math.min(...pts.map(p => p.x)) - margin;
+    const maxWX = Math.max(...pts.map(p => p.x)) + margin;
+    const minWZ = Math.min(...pts.map(p => p.z)) - margin;
+    const maxWZ = Math.max(...pts.map(p => p.z)) + margin;
+
+    const minCX = Math.max(0, Math.floor((minWX + half) / cs));
+    const maxCX = Math.min(maxC, Math.floor((maxWX + half) / cs));
+    const minCZ = Math.max(0, Math.floor((minWZ + half) / cs));
+    const maxCZ = Math.min(maxC, Math.floor((maxWZ + half) / cs));
+
+    for (let cz = minCZ; cz <= maxCZ; cz++) {
+      for (let cx = minCX; cx <= maxCX; cx++) {
+        const heights = this.ensureChunkData(cx, cz);
+        const chunkMinX = chunkMinWorldX(cx, this.config);
+        const chunkMinZ = chunkMinWorldZ(cz, this.config);
+
+        const lMinX = Math.max(0, Math.floor((minWX - chunkMinX) / step));
+        const lMaxX = Math.min(res, Math.ceil((maxWX - chunkMinX) / step));
+        const lMinZ = Math.max(0, Math.floor((minWZ - chunkMinZ) / step));
+        const lMaxZ = Math.min(res, Math.ceil((maxWZ - chunkMinZ) / step));
+        if (lMinX > lMaxX || lMinZ > lMaxZ) continue;
+
+        for (let iz = lMinZ; iz <= lMaxZ; iz++) {
+          const wz = chunkMinZ + iz * step;
+          for (let ix = lMinX; ix <= lMaxX; ix++) {
+            const wx = chunkMinX + ix * step;
+
+            let bestDist = Infinity;
+            let bestY = 0;
+            for (let k = 0; k < pts.length - 1; k++) {
+              const ax = pts[k].x, az = pts[k].z;
+              const bx = pts[k + 1].x, bz = pts[k + 1].z;
+              const dx = bx - ax, dz = bz - az;
+              const lenSq = dx * dx + dz * dz;
+              let t = 0;
+              if (lenSq > 1e-8) {
+                t = ((wx - ax) * dx + (wz - az) * dz) / lenSq;
+                t = Math.max(0, Math.min(1, t));
+              }
+              const px = ax + t * dx, pz = az + t * dz;
+              const ex = wx - px, ez = wz - pz;
+              const d = Math.sqrt(ex * ex + ez * ez);
+              if (d < bestDist) {
+                bestDist = d;
+                bestY = pts[k].y * (1 - t) + pts[k + 1].y * t;
+              }
+            }
+
+            if (bestDist > margin) continue;
+
+            const idx = iz * stride + ix;
+            const current = heights[idx];
+            let blend;
+            if (bestDist <= halfW) {
+              blend = 1;
+            } else {
+              blend = 1 - (bestDist - halfW) / (margin - halfW);
+              blend = blend * blend * (3 - 2 * blend);
+            }
+
+            const next = current + (bestY - current) * blend;
+            heights[idx] = next;
+
+            const key = chunkKey(cx, cz);
+            const existing = dirtyChunks.get(key);
+            if (!existing) {
+              dirtyChunks.set(key, { minIx: ix, maxIx: ix, minIz: iz, maxIz: iz });
+            } else {
+              if (ix < existing.minIx) existing.minIx = ix;
+              if (ix > existing.maxIx) existing.maxIx = ix;
+              if (iz < existing.minIz) existing.minIz = iz;
+              if (iz > existing.maxIz) existing.maxIz = iz;
+            }
+
+            const onL = ix === 0, onR = ix === res;
+            const onT = iz === 0, onB = iz === res;
+            if (onL && cx > 0) {
+              const h = this.ensureChunkData(cx - 1, cz);
+              h[iz * stride + res] = next;
+              const k2 = chunkKey(cx - 1, cz);
+              const e2 = dirtyChunks.get(k2);
+              if (!e2) dirtyChunks.set(k2, { minIx: res, maxIx: res, minIz: iz, maxIz: iz });
+              else { if (res < e2.minIx) e2.minIx = res; if (res > e2.maxIx) e2.maxIx = res; if (iz < e2.minIz) e2.minIz = iz; if (iz > e2.maxIz) e2.maxIz = iz; }
+            }
+            if (onR && cx < maxC) {
+              const h = this.ensureChunkData(cx + 1, cz);
+              h[iz * stride + 0] = next;
+              const k2 = chunkKey(cx + 1, cz);
+              const e2 = dirtyChunks.get(k2);
+              if (!e2) dirtyChunks.set(k2, { minIx: 0, maxIx: 0, minIz: iz, maxIz: iz });
+              else { if (0 < e2.minIx) e2.minIx = 0; if (0 > e2.maxIx) e2.maxIx = 0; if (iz < e2.minIz) e2.minIz = iz; if (iz > e2.maxIz) e2.maxIz = iz; }
+            }
+            if (onT && cz > 0) {
+              const h = this.ensureChunkData(cx, cz - 1);
+              h[res * stride + ix] = next;
+              const k2 = chunkKey(cx, cz - 1);
+              const e2 = dirtyChunks.get(k2);
+              if (!e2) dirtyChunks.set(k2, { minIx: ix, maxIx: ix, minIz: res, maxIz: res });
+              else { if (ix < e2.minIx) e2.minIx = ix; if (ix > e2.maxIx) e2.maxIx = ix; if (res < e2.minIz) e2.minIz = res; if (res > e2.maxIz) e2.maxIz = res; }
+            }
+            if (onB && cz < maxC) {
+              const h = this.ensureChunkData(cx, cz + 1);
+              h[0 * stride + ix] = next;
+              const k2 = chunkKey(cx, cz + 1);
+              const e2 = dirtyChunks.get(k2);
+              if (!e2) dirtyChunks.set(k2, { minIx: ix, maxIx: ix, minIz: 0, maxIz: 0 });
+              else { if (ix < e2.minIx) e2.minIx = ix; if (ix > e2.maxIx) e2.maxIx = ix; if (0 < e2.minIz) e2.minIz = 0; if (0 > e2.maxIz) e2.maxIz = 0; }
+            }
+          }
+        }
+      }
+    }
+  }
+
   sampleNeighborhood(wx, wz, radius) {
     const taps = [
       [0, 0],

@@ -6,12 +6,14 @@ const NORMAL_TEX_PATH = "../textures/terrain-normal.jpg";
 const ROUGHNESS_TEX_PATH = "../textures/terrain-roughness.jpg";
 
 export class RoadSystem {
-  constructor({ scene, camera, toolState, getWorldHeight, reflectTex }) {
+  constructor({ scene, camera, toolState, getWorldHeight, reflectTex, terrainStore, chunkStream }) {
     this.scene = scene;
     this.camera = camera;
     this.toolState = toolState;
     this.getWorldHeight = getWorldHeight;
     this._reflectTex = reflectTex ?? null;
+    this.terrainStore = terrainStore ?? null;
+    this.chunkStream = chunkStream ?? null;
 
     this.segments = [];
     this.selectedIdx = -1;
@@ -195,6 +197,20 @@ export class RoadSystem {
   syncMaterial() {
     syncRoadUniforms(this.roadUniforms, this.toolState.road);
     this.roadMat.needsUpdate = true;
+  }
+
+  flattenTerrainUnderRoads() {
+    if (!this.terrainStore || !this.chunkStream) return;
+    const rp = this.toolState.road;
+    const dirtyChunks = new Map();
+    for (const seg of this.segments) {
+      if (seg.points.length < 2) continue;
+      const curve = new THREE.CatmullRomCurve3(seg.points, false, "catmullrom", 0.5);
+      this.terrainStore.flattenUnderRoad(curve, rp.width, rp.segments, dirtyChunks);
+    }
+    if (dirtyChunks.size > 0) {
+      this.chunkStream.markDirtyRects(dirtyChunks);
+    }
   }
 
   rebuildAllMeshes() {
