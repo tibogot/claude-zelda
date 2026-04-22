@@ -38,6 +38,8 @@ import { TreeStore } from "../core/foliage/treeStore.js";
 import { TreeLodRenderer } from "../render/foliage/treeLodRenderer.js";
 import { TreeSystem } from "../tools/foliage/treeSystem.js";
 import { loadTreeGlbFromFile, openGlbPicker, initGlbLoaderRenderer } from "../core/foliage/glbLoader.js";
+import { FoliageLodRenderer } from "../render/foliage/foliageLodRenderer.js";
+import { loadFoliagePresetFromFile } from "../core/foliage/presetLoader.js";
 import { GrassManager } from "../render/foliage/grassManager.js";
 import { GrassPaintSystem } from "../tools/foliage/grassPaintSystem.js";
 import { CliffGrassPaintSystem } from "../tools/foliage/cliffGrassPaintSystem.js";
@@ -436,6 +438,7 @@ export async function startV2App() {
   const treeStore = new TreeStore(config);
   const treeLodRenderer = new TreeLodRenderer(scene, config);
   const treeSystem = new TreeSystem({ toolState, treeStore, terrainStore, config });
+  const foliageLodRenderer = new FoliageLodRenderer(scene, config);
 
   const grassManager = new GrassManager({ scene, camera, config });
   const grassPaintSystem = new GrassPaintSystem({ toolState, grassManager, config });
@@ -604,14 +607,35 @@ export async function startV2App() {
         console.error(`[V2] Failed to load GLB for slot ${slotIdx} LOD${lod}:`, err);
       }
     },
+    onImportFoliagePreset: async (slotIdx) => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = ".json";
+      input.onchange = async () => {
+        const file = input.files?.[0];
+        if (!file) return;
+        try {
+          const { preset, json } = await loadFoliagePresetFromFile(file);
+          foliageLodRenderer.setSlotPreset(slotIdx, preset);
+          toolState.treeSlots[slotIdx].presetFile = file.name;
+          ui?.pane.refresh();
+          console.log(`[V2] Foliage preset loaded for slot ${slotIdx}: ${json.presetName || file.name} (${preset.lods[0]?.count ?? 0} leaves LOD0)`);
+        } catch (err) {
+          console.error(`[V2] Failed to load foliage preset for slot ${slotIdx}:`, err);
+        }
+      };
+      input.click();
+    },
     onRemoveTreeSlot: (slotIdx) => {
       treeLodRenderer.disposeSlot(slotIdx);
+      foliageLodRenderer.clearSlot(slotIdx);
       console.log(`[V2] Tree slot ${slotIdx} models removed`);
     },
     onClearAllTrees: () => {
       treeSystem.clearAll();
     },
     onTreeLodChanged: () => {},
+    onFoliageLodChanged: () => {},
     onGrassChanged: () => {
       grassManager.syncUniforms(toolState.grass, sunDir);
     },
@@ -1246,6 +1270,7 @@ export async function startV2App() {
       _lastLightSnap = lightSnap;
       updateSunSky();
       if (grassManager.uniforms) grassManager.uniforms.uSunDir.value.copy(sunDir);
+      foliageLodRenderer.updateSunDirection(sunDir);
     }
     lensFlare.update();
 
@@ -1285,6 +1310,8 @@ export async function startV2App() {
     chunkStream.update(focusPos);
     cliffInstancer.update();
     treeLodRenderer.update(treeStore, camera, toolState.treeLod);
+    foliageLodRenderer.update(treeStore, camera, toolState.foliageLod);
+    foliageLodRenderer.updateTime(now * 0.001);
     if (grassManager.uniforms) {
       grassManager.uniforms.uPlayerPos.value.copy(focusPos);
     }

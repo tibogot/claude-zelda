@@ -33,10 +33,12 @@ export function createTweakpaneUi({
   onSaveProject,
   onLoadProject,
   onImportTreeGlb,
+  onImportFoliagePreset,
   onRemoveTreeSlot,
   onClearAllTrees,
   onTreeLodChanged,
   onTreeCastShadowChanged,
+  onFoliageLodChanged,
   onGrassChanged,
   onGrassRebuildGeos,
   onGrassFill,
@@ -107,9 +109,11 @@ export function createTweakpaneUi({
 
   addTreeFolder(pane, toolState, {
     onImportGlb: onImportTreeGlb,
+    onImportFoliagePreset,
     onRemoveSlot: onRemoveTreeSlot,
     onClearAllTrees,
     onTreeLodChanged,
+    onFoliageLodChanged,
     onCastShadowChanged: onTreeCastShadowChanged,
   });
 

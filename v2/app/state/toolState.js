@@ -101,11 +101,16 @@ export function createToolState() {
       fadeOutDistance: 600,
       castShadow: true,
     },
+    foliageLod: {
+      lod0Distance: 80,
+      lod1Distance: 200,
+      fadeOutDistance: 600,
+    },
     treeSlots: [
-      { name: "Slot 1", enabled: true },
-      { name: "Slot 2", enabled: true },
-      { name: "Slot 3", enabled: true },
-      { name: "Slot 4", enabled: true },
+      { name: "Slot 1", enabled: true, presetFile: null },
+      { name: "Slot 2", enabled: true, presetFile: null },
+      { name: "Slot 3", enabled: true, presetFile: null },
+      { name: "Slot 4", enabled: true, presetFile: null },
     ],
     cliffs: {
       activeSlot: 0,

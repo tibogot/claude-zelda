@@ -7,18 +7,22 @@
  * @param {*} toolState
  * @param {object} opts
  * @param {(slotIdx: number, lod: 0|1) => void} opts.onImportGlb
+ * @param {(slotIdx: number) => void} opts.onImportFoliagePreset
  * @param {(slotIdx: number) => void} opts.onRemoveSlot
  * @param {() => void} opts.onClearAllTrees
  * @param {() => void} opts.onTreeLodChanged
  * @param {() => void} opts.onCastShadowChanged
+ * @param {() => void} opts.onFoliageLodChanged
  */
 export function addTreeFolder(pane, toolState, opts) {
   const {
     onImportGlb,
+    onImportFoliagePreset,
     onRemoveSlot,
     onClearAllTrees,
     onTreeLodChanged,
     onCastShadowChanged,
+    onFoliageLodChanged,
   } = opts;
 
   const folder = pane.addFolder({ title: "Tree LOD", expanded: true });
@@ -80,6 +84,9 @@ export function addTreeFolder(pane, toolState, opts) {
       .addButton({ title: "📂 Import LOD1 (simplified)" })
       .on("click", () => onImportGlb?.(i, 1));
     slotFolder
+      .addButton({ title: "🌿 Import foliage preset" })
+      .on("click", () => onImportFoliagePreset?.(i));
+    slotFolder
       .addButton({ title: "🗑 Remove models" })
       .on("click", () => onRemoveSlot?.(i));
   }
@@ -113,6 +120,33 @@ export function addTreeFolder(pane, toolState, opts) {
   lodFolder
     .addBinding(toolState.treeLod, "castShadow", { label: "Cast shadow" })
     .on("change", () => onCastShadowChanged?.());
+
+  // Foliage LOD distances
+  const fLodFolder = folder.addFolder({ title: "Foliage LOD Distances", expanded: false });
+  fLodFolder
+    .addBinding(toolState.foliageLod, "lod0Distance", {
+      label: "LOD0 → LOD1",
+      min: 20,
+      max: 300,
+      step: 5,
+    })
+    .on("change", () => onFoliageLodChanged?.());
+  fLodFolder
+    .addBinding(toolState.foliageLod, "lod1Distance", {
+      label: "LOD1 → LOD2",
+      min: 50,
+      max: 600,
+      step: 10,
+    })
+    .on("change", () => onFoliageLodChanged?.());
+  fLodFolder
+    .addBinding(toolState.foliageLod, "fadeOutDistance", {
+      label: "Fade-out dist",
+      min: 100,
+      max: 2000,
+      step: 10,
+    })
+    .on("change", () => onFoliageLodChanged?.());
 
   folder.addBlade({ view: "separator" });
   folder.addButton({ title: "🗑 Clear all trees" }).on("click", () => onClearAllTrees?.());
