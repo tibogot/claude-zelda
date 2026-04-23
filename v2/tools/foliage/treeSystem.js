@@ -83,8 +83,9 @@ export class TreeSystem {
       if (this.treeStore.hasTreeNearby(tx, tz, spacing)) continue;
 
       const rotY = tp.randomRotation ? Math.random() * Math.PI * 2 : 0;
+      const baseScale = this.toolState.treeSlots[slotIdx]?.baseScale ?? 1.0;
       const scale =
-        tp.scaleMin + Math.random() * (tp.scaleMax - tp.scaleMin);
+        (tp.scaleMin + Math.random() * (tp.scaleMax - tp.scaleMin)) * baseScale;
       const y = this.terrainStore.getWorldHeight(tx, tz);
       this.treeStore.addTree(tx, tz, y, rotY, scale, slotIdx);
     }

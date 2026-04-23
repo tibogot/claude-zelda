@@ -39,7 +39,7 @@ import { TreeLodRenderer } from "../render/foliage/treeLodRenderer.js";
 import { TreeSystem } from "../tools/foliage/treeSystem.js";
 import { loadTreeGlbFromFile, openGlbPicker, initGlbLoaderRenderer } from "../core/foliage/glbLoader.js";
 import { FoliageLodRenderer } from "../render/foliage/foliageLodRenderer.js";
-import { loadFoliagePresetFromFile } from "../core/foliage/presetLoader.js";
+import { loadFullPresetFromFile } from "../core/foliage/presetLoader.js";
 import { GrassManager } from "../render/foliage/grassManager.js";
 import { GrassPaintSystem } from "../tools/foliage/grassPaintSystem.js";
 import { CliffGrassPaintSystem } from "../tools/foliage/cliffGrassPaintSystem.js";
@@ -607,7 +607,7 @@ export async function startV2App() {
         console.error(`[V2] Failed to load GLB for slot ${slotIdx} LOD${lod}:`, err);
       }
     },
-    onImportFoliagePreset: async (slotIdx) => {
+    onLoadTreePreset: async (slotIdx) => {
       const input = document.createElement("input");
       input.type = "file";
       input.accept = ".json";
@@ -615,13 +615,29 @@ export async function startV2App() {
         const file = input.files?.[0];
         if (!file) return;
         try {
-          const { preset, json } = await loadFoliagePresetFromFile(file);
-          foliageLodRenderer.setSlotPreset(slotIdx, preset);
+          const { foliagePreset, trunkSubmeshes, trunkLod1Submeshes, json } = await loadFullPresetFromFile(file);
+
+          if (trunkSubmeshes) {
+            treeLodRenderer.setSlotModel(slotIdx, 0, trunkSubmeshes, toolState.treeLod.castShadow);
+            console.log(`[V2] Trunk LOD0 loaded: ${json.trunkFile} (${trunkSubmeshes.length} submesh)`);
+          }
+          if (trunkLod1Submeshes) {
+            treeLodRenderer.setSlotModel(slotIdx, 1, trunkLod1Submeshes, toolState.treeLod.castShadow);
+            console.log(`[V2] Trunk LOD1 loaded: ${json.trunkLod1File}`);
+          }
+
+          foliageLodRenderer.setSlotPreset(slotIdx, foliagePreset);
+
           toolState.treeSlots[slotIdx].presetFile = file.name;
+          toolState.treeSlots[slotIdx].name = json.presetName || file.name.replace(/\.json$/, "");
+          if (json.trunkScale != null) {
+            toolState.treeSlots[slotIdx].baseScale = json.trunkScale;
+          }
+
           ui?.pane.refresh();
-          console.log(`[V2] Foliage preset loaded for slot ${slotIdx}: ${json.presetName || file.name} (${preset.lods[0]?.count ?? 0} leaves LOD0)`);
+          console.log(`[V2] Tree preset "${json.presetName}" loaded into slot ${slotIdx} (baseScale=${json.trunkScale ?? 1}, ${foliagePreset.lods[0]?.count ?? 0} leaves LOD0)`);
         } catch (err) {
-          console.error(`[V2] Failed to load foliage preset for slot ${slotIdx}:`, err);
+          console.error(`[V2] Failed to load tree preset for slot ${slotIdx}:`, err);
         }
       };
       input.click();

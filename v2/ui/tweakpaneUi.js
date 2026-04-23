@@ -33,7 +33,7 @@ export function createTweakpaneUi({
   onSaveProject,
   onLoadProject,
   onImportTreeGlb,
-  onImportFoliagePreset,
+  onLoadTreePreset,
   onRemoveTreeSlot,
   onClearAllTrees,
   onTreeLodChanged,
@@ -109,7 +109,7 @@ export function createTweakpaneUi({
 
   addTreeFolder(pane, toolState, {
     onImportGlb: onImportTreeGlb,
-    onImportFoliagePreset,
+    onLoadTreePreset,
     onRemoveSlot: onRemoveTreeSlot,
     onClearAllTrees,
     onTreeLodChanged,

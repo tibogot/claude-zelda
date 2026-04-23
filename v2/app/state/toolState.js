@@ -107,10 +107,10 @@ export function createToolState() {
       fadeOutDistance: 600,
     },
     treeSlots: [
-      { name: "Slot 1", enabled: true, presetFile: null },
-      { name: "Slot 2", enabled: true, presetFile: null },
-      { name: "Slot 3", enabled: true, presetFile: null },
-      { name: "Slot 4", enabled: true, presetFile: null },
+      { name: "Slot 1", enabled: true, presetFile: null, baseScale: 1.0 },
+      { name: "Slot 2", enabled: true, presetFile: null, baseScale: 1.0 },
+      { name: "Slot 3", enabled: true, presetFile: null, baseScale: 1.0 },
+      { name: "Slot 4", enabled: true, presetFile: null, baseScale: 1.0 },
     ],
     cliffs: {
       activeSlot: 0,

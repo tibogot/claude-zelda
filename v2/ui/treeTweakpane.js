@@ -7,7 +7,7 @@
  * @param {*} toolState
  * @param {object} opts
  * @param {(slotIdx: number, lod: 0|1) => void} opts.onImportGlb
- * @param {(slotIdx: number) => void} opts.onImportFoliagePreset
+ * @param {(slotIdx: number) => void} opts.onLoadTreePreset
  * @param {(slotIdx: number) => void} opts.onRemoveSlot
  * @param {() => void} opts.onClearAllTrees
  * @param {() => void} opts.onTreeLodChanged
@@ -17,7 +17,7 @@
 export function addTreeFolder(pane, toolState, opts) {
   const {
     onImportGlb,
-    onImportFoliagePreset,
+    onLoadTreePreset,
     onRemoveSlot,
     onClearAllTrees,
     onTreeLodChanged,
@@ -84,8 +84,14 @@ export function addTreeFolder(pane, toolState, opts) {
       .addButton({ title: "📂 Import LOD1 (simplified)" })
       .on("click", () => onImportGlb?.(i, 1));
     slotFolder
-      .addButton({ title: "🌿 Import foliage preset" })
-      .on("click", () => onImportFoliagePreset?.(i));
+      .addButton({ title: "🌳 Load tree preset" })
+      .on("click", () => onLoadTreePreset?.(i));
+    slotFolder.addBinding(toolState.treeSlots[i], "baseScale", {
+      label: "Base scale",
+      min: 0.01,
+      max: 5,
+      step: 0.01,
+    });
     slotFolder
       .addButton({ title: "🗑 Remove models" })
       .on("click", () => onRemoveSlot?.(i));

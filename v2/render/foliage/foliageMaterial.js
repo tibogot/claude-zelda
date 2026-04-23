@@ -94,13 +94,16 @@ export function createFoliageMaterial(opts = {}) {
   })();
 
   const opacityNode = Fn(() => {
-    return smoothstep(u.alphaCutoff.sub(0.05), u.alphaCutoff.add(0.05), leafMapNode.r);
+    const camDist = length(cameraPosition.sub(positionWorld));
+    const distFade = clamp(camDist.div(float(150.0)), float(0), float(1));
+    const adaptiveCutoff = mix(u.alphaCutoff, float(0.15), distFade);
+    return smoothstep(adaptiveCutoff.sub(0.05), adaptiveCutoff.add(0.05), leafMapNode.r);
   })();
 
   const mat = new MeshStandardNodeMaterial({
     side:        THREE.DoubleSide,
     transparent: false,
-    alphaTest:   0.5,
+    alphaTest:   0.3,
     roughness:   0.88,
     metalness:   0.0,
     depthWrite:  true,
@@ -110,17 +113,15 @@ export function createFoliageMaterial(opts = {}) {
   mat.colorNode    = colorNode;
   mat.opacityNode  = opacityNode;
   mat.envMapIntensity = 0;
-  mat.castShadowNode = Fn(() => {
-    const a = smoothstep(u.alphaCutoff.sub(0.05), u.alphaCutoff.add(0.05), leafMapNode.r);
-    a.lessThan(float(0.5)).discard();
-    return vec4(0, 0, 0, 1);
-  })();
 
   return { material: mat, uniforms: u, leafMapNode };
 }
 
 export function setFoliageTexture(foliageMat, tex) {
   tex.colorSpace = THREE.SRGBColorSpace;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = true;
   tex.needsUpdate = true;
   foliageMat.leafMapNode.value = tex;
 }

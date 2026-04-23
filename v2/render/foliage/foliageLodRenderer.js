@@ -54,6 +54,7 @@ export class FoliageLodRenderer {
     while (this.slotPresets.length <= slotIdx) this.slotPresets.push(null);
     this._clearSlotChunkMeshes(slotIdx);
     this.slotPresets[slotIdx] = preset;
+    this._invalidateAllChunks();
   }
 
   hasSlot(slotIdx) {
@@ -63,6 +64,12 @@ export class FoliageLodRenderer {
   clearSlot(slotIdx) {
     this._clearSlotChunkMeshes(slotIdx);
     if (slotIdx < this.slotPresets.length) this.slotPresets[slotIdx] = null;
+  }
+
+  _invalidateAllChunks() {
+    for (const [, entry] of this._chunkMeshes) {
+      entry.gen = -1;
+    }
   }
 
   _clearSlotChunkMeshes(slotIdx) {
