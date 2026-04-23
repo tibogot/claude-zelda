@@ -140,6 +140,17 @@ export class CliffBvh {
     return null;
   }
 
+  raycastUp(ox, oy, oz, maxDist) {
+    if (!this.baked || !this._bvh) return null;
+    _latRay.origin.set(ox, oy, oz);
+    _latRay.direction.set(0, 1, 0);
+    const hit = this._bvh.raycastFirst(_latRay);
+    if (hit && hit.distance <= maxDist) {
+      return hit.point.y;
+    }
+    return null;
+  }
+
   sampleHeight(wx, wz) {
     if (!this.baked || !this._heightGrid) return null;
 

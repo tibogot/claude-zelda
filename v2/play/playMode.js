@@ -1180,35 +1180,43 @@ export class PlayMode {
       }
 
       if (this.cliffBvh?.baked) {
-        const capsuleBase = CAP_R + CAP_H * 0.5;
-        const oy = this.playerPos.y + capsuleBase;
         const margin = CAP_R + 0.05;
         const stepLen = Math.hypot(stepX, stepZ);
         const castDist = stepLen + margin;
+        const px = this.playerPos.x;
+        const pz = this.playerPos.z;
+        const footY  = this.playerPos.y + CAP_R;
+        const waistY = this.playerPos.y + CAP_R + CAP_H * 0.5;
+        const headY  = this.playerPos.y + CAP_R + CAP_H;
 
-        const hit = this.cliffBvh.raycastLateral(
-          this.playerPos.x, oy, this.playerPos.z,
-          stepX, stepZ, castDist,
-        );
-        if (hit) {
-          const nx = hit.normal.x;
-          const nz = hit.normal.z;
-          const nLen = Math.hypot(nx, nz);
-          if (nLen > 0.01) {
-            const nnx = nx / nLen;
-            const nnz = nz / nLen;
-            const dot = stepX * nnx + stepZ * nnz;
-            if (dot < 0) {
-              stepX -= dot * nnx;
-              stepZ -= dot * nnz;
+        let blocked = false;
+        const rayHeights = [footY, waistY, headY];
+        for (let ri = 0; ri < 3; ri++) {
+          const hit = this.cliffBvh.raycastLateral(
+            px, rayHeights[ri], pz, stepX, stepZ, castDist,
+          );
+          if (hit) {
+            const nx = hit.normal.x;
+            const nz = hit.normal.z;
+            const nLen = Math.hypot(nx, nz);
+            if (nLen > 0.01) {
+              const nnx = nx / nLen;
+              const nnz = nz / nLen;
+              const dot = stepX * nnx + stepZ * nnz;
+              if (dot < 0) {
+                stepX -= dot * nnx;
+                stepZ -= dot * nnz;
 
-              const slideHit = this.cliffBvh.raycastLateral(
-                this.playerPos.x, oy, this.playerPos.z,
-                stepX, stepZ, Math.hypot(stepX, stepZ) + margin,
-              );
-              if (slideHit) {
-                stepX = 0;
-                stepZ = 0;
+                const slideHit = this.cliffBvh.raycastLateral(
+                  px, rayHeights[ri], pz,
+                  stepX, stepZ, Math.hypot(stepX, stepZ) + margin,
+                );
+                if (slideHit) {
+                  stepX = 0;
+                  stepZ = 0;
+                  blocked = true;
+                }
+                break;
               }
             }
           }
@@ -1314,6 +1322,14 @@ export class PlayMode {
         }
         const prevY = this.charRoot ? this.charRoot.position.y : groundY;
         this.playerPos.y = prevY + this.charVelY * dtSec;
+        if (this.charVelY > 0 && this.cliffBvh?.baked) {
+          const headTop = this.playerPos.y + CAP_R * 2 + CAP_H;
+          const ceilY = this.cliffBvh.raycastUp(this.playerPos.x, headTop, this.playerPos.z, this.charVelY * dtSec + 0.1);
+          if (ceilY != null) {
+            this.playerPos.y = ceilY - CAP_R * 2 - CAP_H;
+            this.charVelY = 0;
+          }
+        }
         if (this.playerPos.y <= groundY) {
           this.playerPos.y = groundY;
           this.charVelY = 0;
@@ -1368,6 +1384,14 @@ export class PlayMode {
       if (this.inAir) {
         this.velY -= GRAVITY * dtSec;
         this.playerPos.y += this.velY * dtSec;
+        if (this.velY > 0 && this.cliffBvh?.baked) {
+          const headTop = this.playerPos.y + CAP_R * 2 + CAP_H;
+          const ceilY = this.cliffBvh.raycastUp(this.playerPos.x, headTop, this.playerPos.z, this.velY * dtSec + 0.1);
+          if (ceilY != null) {
+            this.playerPos.y = ceilY - CAP_R * 2 - CAP_H;
+            this.velY = 0;
+          }
+        }
         if (this.playerPos.y <= groundY) {
           this.playerPos.y = groundY;
           this.velY = 0;
