@@ -20,34 +20,41 @@ export class CliffBvh {
     this.baked = false;
   }
 
-  bake(terrainStore, config) {
+  bake(terrainStore, config, extraStores) {
     const positions = [];
     const indices = [];
     let vertexOffset = 0;
 
-    this.store.forEachMeshInstance((geo, worldMatrix) => {
-      const posAttr = geo.getAttribute("position");
-      if (!posAttr) return;
-      const idx = geo.getIndex();
-      const v = new THREE.Vector3();
+    const collectStore = (store) => {
+      store.forEachMeshInstance((geo, worldMatrix) => {
+        const posAttr = geo.getAttribute("position");
+        if (!posAttr) return;
+        const idx = geo.getIndex();
+        const v = new THREE.Vector3();
 
-      for (let i = 0; i < posAttr.count; i++) {
-        v.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i));
-        v.applyMatrix4(worldMatrix);
-        positions.push(v.x, v.y, v.z);
-      }
-
-      if (idx) {
-        for (let i = 0; i < idx.count; i++) {
-          indices.push(idx.getX(i) + vertexOffset);
-        }
-      } else {
         for (let i = 0; i < posAttr.count; i++) {
-          indices.push(i + vertexOffset);
+          v.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i));
+          v.applyMatrix4(worldMatrix);
+          positions.push(v.x, v.y, v.z);
         }
-      }
-      vertexOffset += posAttr.count;
-    });
+
+        if (idx) {
+          for (let i = 0; i < idx.count; i++) {
+            indices.push(idx.getX(i) + vertexOffset);
+          }
+        } else {
+          for (let i = 0; i < posAttr.count; i++) {
+            indices.push(i + vertexOffset);
+          }
+        }
+        vertexOffset += posAttr.count;
+      });
+    };
+
+    collectStore(this.store);
+    if (extraStores) {
+      for (const es of extraStores) collectStore(es);
+    }
 
     if (positions.length === 0) {
       this.baked = false;

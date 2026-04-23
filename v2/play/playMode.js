@@ -1239,7 +1239,7 @@ export class PlayMode {
       const bvhY = this.cliffBvh.raycastHeightFrom(this.playerPos.x, fromY, this.playerPos.z);
       if (bvhY != null && bvhY > terrainY) groundY = bvhY;
     }
-    this.playerPos.y = groundY;
+    const prevY = this.playerPos.y;
     const capsuleBase = CAP_R + CAP_H * 0.5;
 
     // Fly altitude
@@ -1352,7 +1352,21 @@ export class PlayMode {
           }
         }
       } else {
-        this.playerPos.y = groundY;
+        const drop = prevY - groundY;
+        if (drop > 0.4) {
+          this.charInAir = true;
+          this.charVelY = 0;
+          this.playerPos.y = prevY;
+          if (this.charActions?.jumpLoop && this.charJumpPhase !== "loop") {
+            this.charJumpPhase = "loop";
+            const jl = this.charActions.jumpLoop;
+            jl.reset().enabled = true;
+            jl.crossFadeFrom(this.charCurrentAction, 0.15, false).play();
+            this.charCurrentAction = jl;
+          }
+        } else {
+          this.playerPos.y = groundY;
+        }
       }
 
       // Yaw
@@ -1398,9 +1412,13 @@ export class PlayMode {
           this.inAir = false;
         }
       } else {
-        this.playerPos.y = groundY;
-        if (this.playerPos.y > groundY + 0.15) {
+        const drop = prevY - groundY;
+        if (drop > 0.4) {
           this.inAir = true;
+          this.velY = 0;
+          this.playerPos.y = prevY;
+        } else {
+          this.playerPos.y = groundY;
         }
       }
     }

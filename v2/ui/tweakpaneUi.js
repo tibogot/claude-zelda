@@ -6,6 +6,7 @@ import { addPaintFolder } from "./paintTweakpane.js";
 import { addTreeFolder } from "./treeTweakpane.js";
 import { addGrassFolder } from "./grassTweakpane.js";
 import { addCliffFolder } from "./cliffTweakpane.js";
+import { addPropFolder } from "./propTweakpane.js";
 import { addRoadFolder } from "./roadTweakpane.js";
 
 export function createTweakpaneUi({
@@ -54,6 +55,11 @@ export function createTweakpaneUi({
   onRebakeBvh,
   onCliffTransformModeChanged,
   onCliffBlendChanged,
+  onImportPropGlb,
+  onRemovePropSlot,
+  onDeleteSelectedProp,
+  onClearAllProps,
+  onPropTransformModeChanged,
   onRoadChanged,
   onRoadNewRoad,
   onRoadDeleteActive,
@@ -77,6 +83,7 @@ export function createTweakpaneUi({
         "Cliff Grass": "cliffGrass",
         Road: "road",
         Cliffs: "cliffs",
+        Props: "props",
         Play: "play",
       },
     })
@@ -148,6 +155,15 @@ export function createTweakpaneUi({
     onRebakeBvh,
     onTransformModeChanged: onCliffTransformModeChanged,
     onCliffBlendChanged,
+  });
+
+  addPropFolder(pane, toolState, {
+    onImportPropGlb,
+    onRemovePropSlot,
+    onDeleteSelectedProp,
+    onClearAllProps,
+    onRebakeBvh,
+    onPropTransformModeChanged,
   });
 
   /** Shared across sculpt, future paint, foliage, props — same as v1 brush UX. */

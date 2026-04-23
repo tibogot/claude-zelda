@@ -281,6 +281,8 @@ function extractSerializableSettings(toolState) {
     grass: { ...toolState.grass },
     cliffs: { ...toolState.cliffs },
     cliffInstances: toolState._cliffExportData?.() ?? null,
+    props: { ...toolState.props },
+    propInstances: toolState._propExportData?.() ?? null,
   };
 }
 
@@ -321,4 +323,5 @@ export function applySettings(toolState, settings) {
   }
   if (settings.grass) Object.assign(toolState.grass, settings.grass);
   if (settings.cliffs) Object.assign(toolState.cliffs, settings.cliffs);
+  if (settings.props) Object.assign(toolState.props, settings.props);
 }

@@ -133,6 +133,18 @@ export function createToolState() {
       { name: "Cliff 4", loaded: false },
       { name: "Cliff 5", loaded: false },
     ],
+    props: {
+      activeSlot: 0,
+      sinkOffset: 0,
+      transformMode: "translate",
+    },
+    propSlots: [
+      { name: "Prop 1", loaded: false },
+      { name: "Prop 2", loaded: false },
+      { name: "Prop 3", loaded: false },
+      { name: "Prop 4", loaded: false },
+      { name: "Prop 5", loaded: false },
+    ],
     road: {
       width: 5,
       segments: 200,
