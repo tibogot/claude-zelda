@@ -465,8 +465,8 @@ export async function startV2App() {
 
   const propStore = new PropStore();
   const propInstancer = new PropInstancer(scene, propStore);
-  const propSystem = new PropSystem({ toolState, propStore, propInstancer, cliffBvh });
-  const propSlotToType = {};
+  const propSystem = new PropSystem({ toolState, propStore, propInstancer, cliffBvh, terrainStore, config });
+  let propUiCallbacks = {};
 
   const dummyCliffPaintTex = (() => {
     const t = new THREE.DataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, THREE.RGBAFormat);
@@ -793,7 +793,7 @@ export async function startV2App() {
       cliffU.uRockContrast.value = c.blendRockContrast;
       cliffU.uTriplanarSharp.value = c.blendTriplanarSharp;
     },
-    onImportPropGlb: async (slotIdx) => {
+    onImportPropGlb: async () => {
       const file = await openGlbPicker();
       if (!file) return;
       try {
@@ -807,11 +807,11 @@ export async function startV2App() {
         const typeIdx = propStore.registerType(gltfScene, name);
         if (typeIdx >= 0) {
           propInstancer.onTypeRegistered(typeIdx);
-          propSlotToType[slotIdx] = typeIdx;
-          toolState.propSlots[slotIdx].name = name;
-          toolState.propSlots[slotIdx].loaded = true;
+          const slotIdx = toolState.propSlots.length;
+          toolState.propSlots.push({ name, loaded: true, typeIdx });
           toolState.props.activeSlot = slotIdx;
-          console.log(`[V2] Prop slot ${slotIdx} "${name}" loaded (${submeshes.length} submeshes)`);
+          propUiCallbacks._rebuildPropUi?.();
+          console.log(`[V2] Prop "${name}" imported (type ${typeIdx}, ${submeshes.length} submeshes)`);
         }
         ui?.pane.refresh();
       } catch (err) {
@@ -819,11 +819,12 @@ export async function startV2App() {
       }
     },
     onRemovePropSlot: (slotIdx) => {
-      delete propSlotToType[slotIdx];
-      toolState.propSlots[slotIdx].loaded = false;
-      toolState.propSlots[slotIdx].name = `Prop ${slotIdx + 1}`;
+      toolState.propSlots.splice(slotIdx, 1);
+      if (toolState.props.activeSlot >= toolState.propSlots.length) {
+        toolState.props.activeSlot = Math.max(0, toolState.propSlots.length - 1);
+      }
       ui?.pane.refresh();
-      console.log(`[V2] Prop slot ${slotIdx} cleared`);
+      console.log(`[V2] Prop slot ${slotIdx} removed`);
     },
     onDeleteSelectedProp: () => {
       propSystem.handleDelete();
@@ -899,6 +900,8 @@ export async function startV2App() {
       }
     },
   });
+
+  propUiCallbacks = ui.propCallbacks;
 
   playMode.onExit = () => {
     toolState.mode = "view";
@@ -1072,7 +1075,7 @@ export async function startV2App() {
   }
 
   function isBrushMode() {
-    return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint" || toolState.mode === "grass" || toolState.mode === "cliffGrass";
+    return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint" || toolState.mode === "grass" || toolState.mode === "cliffGrass" || (toolState.mode === "props" && toolState.props.placementMode === "paint");
   }
 
   function updateBrushPreviewFromPick(hit) {
@@ -1148,13 +1151,13 @@ export async function startV2App() {
       }
       return;
     }
-    if (toolState.mode === "props" && event.button === 0 && !transformControls.dragging) {
+    if (toolState.mode === "props" && toolState.props.placementMode === "place" && event.button === 0 && !transformControls.dragging) {
       const hit = pickTerrain(event);
       if (hit) {
-        const typeIdx = propSlotToType[toolState.props.activeSlot];
-        if (typeIdx == null) return;
+        const slot = toolState.propSlots[toolState.props.activeSlot];
+        if (!slot || slot.typeIdx == null) return;
         event.preventDefault();
-        const instIdx = propSystem.handlePlace(hit.point, typeIdx);
+        const instIdx = propSystem.handlePlace(hit.point, slot.typeIdx);
         if (instIdx != null) activatePropSelection(instIdx);
       }
       return;
@@ -1207,6 +1210,8 @@ export async function startV2App() {
       grassPaintSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "cliffGrass") {
       cliffGrassPaintSystem.beginStroke(hit.point, event);
+    } else if (toolState.mode === "props") {
+      propSystem.beginStroke(hit.point, event);
     }
   });
 
@@ -1229,6 +1234,8 @@ export async function startV2App() {
       grassPaintSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "cliffGrass") {
       cliffGrassPaintSystem.applyAt(hit.point, event);
+    } else if (toolState.mode === "props") {
+      propSystem.applyAt(hit.point, event);
     }
   });
 
@@ -1300,6 +1307,8 @@ export async function startV2App() {
       grassPaintSystem.endStroke();
     } else if (toolState.mode === "cliffGrass") {
       cliffGrassPaintSystem.endStroke();
+    } else if (toolState.mode === "props") {
+      propSystem.endStroke();
     }
   });
 
@@ -1378,12 +1387,6 @@ export async function startV2App() {
         toolState.props.transformMode = "scale";
         transformControls.setMode("scale");
         ui?.pane.refresh();
-      } else if (event.code >= "Digit1" && event.code <= "Digit5") {
-        const slot = parseInt(event.code.charAt(5)) - 1;
-        if (slot < toolState.propSlots.length) {
-          toolState.props.activeSlot = slot;
-          ui?.pane.refresh();
-        }
       }
     }
   });

@@ -282,6 +282,7 @@ function extractSerializableSettings(toolState) {
     cliffs: { ...toolState.cliffs },
     cliffInstances: toolState._cliffExportData?.() ?? null,
     props: { ...toolState.props },
+    propSlots: toolState.propSlots.map((s) => ({ name: s.name })),
     propInstances: toolState._propExportData?.() ?? null,
   };
 }

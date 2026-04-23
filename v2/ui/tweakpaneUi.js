@@ -157,14 +157,15 @@ export function createTweakpaneUi({
     onCliffBlendChanged,
   });
 
-  addPropFolder(pane, toolState, {
+  const propCallbacks = {
     onImportPropGlb,
     onRemovePropSlot,
     onDeleteSelectedProp,
     onClearAllProps,
     onRebakeBvh,
     onPropTransformModeChanged,
-  });
+  };
+  addPropFolder(pane, toolState, propCallbacks);
 
   /** Shared across sculpt, future paint, foliage, props — same as v1 brush UX. */
   const brushFolder = pane.addFolder({ title: "Brush" });
@@ -797,6 +798,7 @@ export function createTweakpaneUi({
 
   return {
     pane,
+    propCallbacks,
     /** Call after hotkey / wheel edits to `toolState.brush` so bindings stay in sync. */
     refreshBrush() {
       pane.refresh();

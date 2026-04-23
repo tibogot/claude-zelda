@@ -1,29 +1,43 @@
 export function addPropFolder(pane, toolState, callbacks) {
   const folder = pane.addFolder({ title: "Props", expanded: false });
 
-  const slotOptions = {};
-  for (let i = 0; i < toolState.propSlots.length; i++) {
-    slotOptions[toolState.propSlots[i].name] = i;
-  }
-  folder.addBinding(toolState.props, "activeSlot", {
-    label: "Active [1-5]",
-    options: slotOptions,
+  folder.addBinding(toolState.props, "placementMode", {
+    label: "Mode",
+    options: { "Place (click)": "place", "Paint (brush)": "paint" },
   });
 
-  const slotsFolder = folder.addFolder({ title: "Prop Slots (GLB Import)", expanded: true });
-  for (let i = 0; i < toolState.propSlots.length; i++) {
-    const slotFolder = slotsFolder.addFolder({
-      title: toolState.propSlots[i].name,
-      expanded: i === 0,
+  function rebuildSlotDropdown() {
+    if (activeBinding) activeBinding.dispose();
+    const options = {};
+    toolState.propSlots.forEach((s, i) => { options[s.name] = i; });
+    if (Object.keys(options).length === 0) options["(none)"] = -1;
+    activeBinding = folder.addBinding(toolState.props, "activeSlot", {
+      label: "Active type",
+      options,
+      index: 1,
     });
-    slotFolder.addBinding(toolState.propSlots[i], "name", { label: "Name" });
-    slotFolder
-      .addButton({ title: "Load GLB..." })
-      .on("click", () => callbacks.onImportPropGlb?.(i));
-    slotFolder
-      .addButton({ title: "Remove model" })
-      .on("click", () => callbacks.onRemovePropSlot?.(i));
   }
+  let activeBinding = null;
+  rebuildSlotDropdown();
+
+  folder.addButton({ title: "Import GLB..." }).on("click", () => callbacks.onImportPropGlb?.());
+
+  const slotsFolder = folder.addFolder({ title: "Loaded Props", expanded: false });
+
+  function rebuildSlotsFolder() {
+    const children = [...slotsFolder.children];
+    children.forEach((c) => c.dispose());
+    toolState.propSlots.forEach((slot, i) => {
+      const sf = slotsFolder.addFolder({ title: slot.name, expanded: false });
+      sf.addButton({ title: "Remove" }).on("click", () => {
+        callbacks.onRemovePropSlot?.(i);
+        rebuildSlotsFolder();
+        rebuildSlotDropdown();
+      });
+    });
+  }
+  rebuildSlotsFolder();
+  callbacks._rebuildPropUi = () => { rebuildSlotsFolder(); rebuildSlotDropdown(); };
 
   folder.addBlade({ view: "separator" });
 
@@ -40,6 +54,25 @@ export function addPropFolder(pane, toolState, callbacks) {
       "Scale (R)": "scale",
     },
   }).on("change", () => callbacks.onPropTransformModeChanged?.());
+
+  folder.addBlade({ view: "separator" });
+
+  const paintFolder = folder.addFolder({ title: "Paint Settings", expanded: true });
+  paintFolder.addBinding(toolState.props, "density", {
+    label: "Density", min: 0.05, max: 5, step: 0.05,
+  });
+  paintFolder.addBinding(toolState.props, "minSpacing", {
+    label: "Min spacing", min: 0.5, max: 20, step: 0.5,
+  });
+  paintFolder.addBinding(toolState.props, "scaleMin", {
+    label: "Scale min", min: 0.1, max: 5, step: 0.05,
+  });
+  paintFolder.addBinding(toolState.props, "scaleMax", {
+    label: "Scale max", min: 0.1, max: 5, step: 0.05,
+  });
+  paintFolder.addBinding(toolState.props, "randomRotation", {
+    label: "Random rotation",
+  });
 
   folder.addBlade({ view: "separator" });
 

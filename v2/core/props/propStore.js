@@ -96,6 +96,34 @@ export class PropStore {
     return n;
   }
 
+  hasNearby(px, pz, minDist) {
+    const d2 = minDist * minDist;
+    for (const inst of this.instances) {
+      const dx = inst.px - px;
+      const dz = inst.pz - pz;
+      if (dx * dx + dz * dz < d2) return true;
+    }
+    return false;
+  }
+
+  removeInRadius(wx, wz, radius) {
+    const r2 = radius * radius;
+    let removed = false;
+    for (let i = this.instances.length - 1; i >= 0; i--) {
+      const inst = this.instances[i];
+      const dx = inst.px - wx;
+      const dz = inst.pz - wz;
+      if (dx * dx + dz * dz < r2) {
+        const last = this.instances.length - 1;
+        if (i !== last) this.instances[i] = this.instances[last];
+        this.instances.pop();
+        removed = true;
+      }
+    }
+    if (removed) this._bump();
+    return removed;
+  }
+
   get totalCount() { return this.instances.length; }
 
   snapshot() {
