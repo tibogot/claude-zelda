@@ -408,9 +408,9 @@ export function createTweakpaneUi({
   hFogFolder
     .addBinding(toolState.fog.height, "height", {
       label: "Base height",
-      min: -10,
-      max: 40,
-      step: 0.5,
+      min: -60,
+      max: 500,
+      step: 1,
     })
     .on("change", onFogChange);
 

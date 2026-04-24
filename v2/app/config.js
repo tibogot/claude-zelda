@@ -190,7 +190,7 @@ export const V2_CONFIG = {
       enabled: false,
       color: "#a8c4e0",
       density: 0.05,
-      height: 2.0,
+      height: 30.0,
     },
     distance: {
       enabled: false,
