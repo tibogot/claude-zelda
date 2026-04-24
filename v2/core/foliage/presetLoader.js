@@ -78,6 +78,36 @@ async function loadTrunkGlb(filename) {
   return null;
 }
 
+const PRESET_SEARCH_PATHS = [
+  "../tree-presets/",
+  "tree-presets/",
+];
+
+/**
+ * Load a preset by filename (used during project restore).
+ * Searches standard preset directories for the JSON file.
+ */
+export async function loadFullPresetFromUrl(filename) {
+  let json = null;
+  for (const base of PRESET_SEARCH_PATHS) {
+    try {
+      const resp = await fetch(base + filename);
+      if (!resp.ok) continue;
+      json = await resp.json();
+      break;
+    } catch (_) { /* try next */ }
+  }
+  if (!json) throw new Error(`Preset "${filename}" not found in search paths`);
+
+  const [foliagePreset, trunkSubmeshes, trunkLod1Submeshes] = await Promise.all([
+    loadFoliagePreset(json),
+    loadTrunkGlb(json.trunkFile),
+    json.trunkLod1File ? loadTrunkGlb(json.trunkLod1File) : Promise.resolve(null),
+  ]);
+
+  return { foliagePreset, trunkSubmeshes, trunkLod1Submeshes, json };
+}
+
 /**
  * Full one-click preset load: parses JSON, loads trunk GLB + leaf texture,
  * samples foliage clusters. Returns { foliagePreset, trunkSubmeshes, trunkLod1Submeshes, json }.

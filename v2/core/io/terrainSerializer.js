@@ -277,7 +277,8 @@ function extractSerializableSettings(toolState) {
     tslGroundUi: { ...toolState.tslGroundUi },
     treePaint: { ...toolState.treePaint },
     treeLod: { ...toolState.treeLod },
-    treeSlots: toolState.treeSlots.map((s) => ({ ...s })),
+    foliageLod: { ...toolState.foliageLod },
+    treeSlots: toolState.treeSlots.map((s) => ({ ...s, foliage: { ...s.foliage } })),
     grass: { ...toolState.grass },
     cliffs: { ...toolState.cliffs },
     cliffInstances: toolState._cliffExportData?.() ?? null,
@@ -317,6 +318,7 @@ export function applySettings(toolState, settings) {
   if (settings.tslGroundUi) Object.assign(toolState.tslGroundUi, settings.tslGroundUi);
   if (settings.treePaint) Object.assign(toolState.treePaint, settings.treePaint);
   if (settings.treeLod) Object.assign(toolState.treeLod, settings.treeLod);
+  if (settings.foliageLod) Object.assign(toolState.foliageLod, settings.foliageLod);
   if (settings.treeSlots) {
     for (let i = 0; i < settings.treeSlots.length && i < toolState.treeSlots.length; i++) {
       Object.assign(toolState.treeSlots[i], settings.treeSlots[i]);

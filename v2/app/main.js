@@ -39,7 +39,7 @@ import { TreeLodRenderer } from "../render/foliage/treeLodRenderer.js";
 import { TreeSystem } from "../tools/foliage/treeSystem.js";
 import { loadTreeGlbFromFile, openGlbPicker, initGlbLoaderRenderer } from "../core/foliage/glbLoader.js";
 import { FoliageLodRenderer } from "../render/foliage/foliageLodRenderer.js";
-import { loadFullPresetFromFile } from "../core/foliage/presetLoader.js";
+import { loadFullPresetFromFile, loadFullPresetFromUrl } from "../core/foliage/presetLoader.js";
 import { GrassManager } from "../render/foliage/grassManager.js";
 import { GrassPaintSystem } from "../tools/foliage/grassPaintSystem.js";
 import { CliffGrassPaintSystem } from "../tools/foliage/cliffGrassPaintSystem.js";
@@ -925,6 +925,33 @@ export async function startV2App() {
           propStore.clear();
           propStore.importData(project.settings.propInstances, typeNameToIdx);
         }
+        // Auto-reload tree presets (trunk GLBs + foliage) for slots that had them
+        const presetLoads = [];
+        for (let si = 0; si < toolState.treeSlots.length; si++) {
+          const slot = toolState.treeSlots[si];
+          if (!slot.presetFile) continue;
+          presetLoads.push((async (slotIdx, filename) => {
+            try {
+              const { foliagePreset, trunkSubmeshes, trunkLod1Submeshes, json } = await loadFullPresetFromUrl(filename);
+              if (trunkSubmeshes) {
+                treeLodRenderer.setSlotModel(slotIdx, 0, trunkSubmeshes, toolState.treeLod.castShadow);
+              }
+              if (trunkLod1Submeshes) {
+                treeLodRenderer.setSlotModel(slotIdx, 1, trunkLod1Submeshes, toolState.treeLod.castShadow);
+              }
+              foliageLodRenderer.setSlotPreset(slotIdx, foliagePreset);
+              console.log(`[V2] Auto-loaded preset "${filename}" into slot ${slotIdx}`);
+            } catch (err) {
+              console.warn(`[V2] Could not auto-load preset "${filename}" for slot ${slotIdx}:`, err.message);
+            }
+          })(si, slot.presetFile));
+        }
+        if (presetLoads.length > 0) {
+          Promise.all(presetLoads).then(() => {
+            console.log(`[V2] All tree presets restored (${presetLoads.length} slot(s))`);
+          });
+        }
+
         sharedGroundBundle.syncFromParams(toolState.groundTsl);
         // Rebuild everything
         invalidateSurfaceMaterials();
