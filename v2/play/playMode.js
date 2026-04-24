@@ -91,7 +91,7 @@ const CAR_HANDBRAKE_DECEL = 3;
 
 const TRAIL_SEG = 90;
 const TRAIL_HALF_W = 0.038;
-const TRAIL_MAX_DIST = 0.6;
+const TRAIL_MAX_DIST = 8.0;
 
 const GUN_FIRE_RATE = 12;
 const GUN_BULLET_SPEED = 240;
@@ -1425,24 +1425,41 @@ export class PlayMode {
 
     const planeY = groundY + this.flyHeight;
 
-    // Plane BVH collision — cast a ray in the flight direction
+    // Plane BVH collision — multi-ray: forward, left wing, right wing, up, down
     if (flying && this.cliffBvh?.baked) {
       const px = this.playerPos.x;
       const py = planeY;
       const pz = this.playerPos.z;
-      const fwdX = -Math.sin(this.flyHeading);
-      const fwdZ = -Math.cos(this.flyHeading);
-      const fwdY = this.flyPitch || 0;
+      const cosP = Math.cos(this.flyPitch);
+      const sinP = Math.sin(this.flyPitch);
+      const sinH = Math.sin(this.flyHeading);
+      const cosH = Math.cos(this.flyHeading);
+      const fwdX = -sinH * cosP;
+      const fwdY = sinP;
+      const fwdZ = -cosH * cosP;
+      const rightX = cosH;
+      const rightZ = -sinH;
       const planeRadius = 2.5;
-      const hit = this.cliffBvh.raycast3D(px, py, pz, fwdX, fwdY, fwdZ, planeRadius);
-      if (hit) {
-        const nx = hit.normal.x, ny = hit.normal.y, nz = hit.normal.z;
-        const pushDist = planeRadius - hit.distance;
-        if (pushDist > 0) {
-          this.playerPos.x += nx * pushDist;
-          this.flyHeight += ny * pushDist;
-          this.playerPos.z += nz * pushDist;
-          if (this.flyHeight < 0) this.flyHeight = 0;
+      const wingSpan = 3.0;
+
+      const rays = [
+        { dx: fwdX, dy: fwdY, dz: fwdZ, dist: planeRadius },
+        { dx: rightX, dy: 0, dz: rightZ, dist: wingSpan },
+        { dx: -rightX, dy: 0, dz: -rightZ, dist: wingSpan },
+        { dx: 0, dy: 1, dz: 0, dist: 1.5 },
+        { dx: 0, dy: -1, dz: 0, dist: 1.5 },
+      ];
+
+      for (const r of rays) {
+        const hit = this.cliffBvh.raycast3D(px, py, pz, r.dx, r.dy, r.dz, r.dist);
+        if (hit) {
+          const pushDist = r.dist - hit.distance;
+          if (pushDist > 0) {
+            this.playerPos.x -= r.dx * pushDist;
+            this.flyHeight -= r.dy * pushDist;
+            this.playerPos.z -= r.dz * pushDist;
+            if (this.flyHeight < 0) this.flyHeight = 0;
+          }
         }
       }
     }
