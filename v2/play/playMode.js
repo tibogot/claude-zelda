@@ -1192,7 +1192,7 @@ export class PlayMode {
         stepZ = (mz / mlen) * moveSpeed * dtSec;
       }
 
-      if (this.cliffBvh?.baked) {
+      if (this.cliffBvh?.baked && !flying) {
         if (carDriving) {
           const px = this.playerPos.x;
           const pz = this.playerPos.z;
