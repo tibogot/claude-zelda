@@ -311,7 +311,6 @@ export class PlayMode {
     this.flyBarrelDir = 1;
     this.flyGroundCamYawOff = 0;
     this.flyAileronAngle = 0;
-    this.flyGroundRef = 0;
 
     // Capsule mesh
     const geo = new THREE.CapsuleGeometry(CAP_R, CAP_H, 4, 8);
@@ -877,7 +876,6 @@ export class PlayMode {
     this.savedTarget = this.controls.target.clone();
     this.playerPos.set(this.controls.target.x, 0, this.controls.target.z);
     this.playerPos.y = this.getWorldHeight(this.playerPos.x, this.playerPos.z);
-    this.flyGroundRef = this.playerPos.y;
     this.camYaw = 0;
     this.camPitch = 0.35;
 
@@ -961,7 +959,8 @@ export class PlayMode {
       const thr = (keys.KeyW || keys.ArrowUp) ? 1 : (keys.KeyS || keys.ArrowDown) ? -1 : 0;
       const drag = PLANE_DRAG * this.planeSpeed * Math.abs(this.planeSpeed);
       let coast = PLANE_COAST;
-      if (this.flyHeight < PLANE_DECK_ALT) coast *= PLANE_DECK_COAST_MULT;
+      const deckAgl = this.flyHeight - this.getWorldHeight(this.playerPos.x, this.playerPos.z);
+      if (deckAgl < PLANE_DECK_ALT) coast *= PLANE_DECK_COAST_MULT;
       if (thr === 1) {
         let a = PLANE_ACCEL;
         if (keys.ShiftLeft || keys.ShiftRight) a *= PLANE_SHIFT_ACCEL_MULT;
@@ -1303,9 +1302,9 @@ export class PlayMode {
     const prevY = this.playerPos.y;
     const capsuleBase = CAP_R + CAP_H * 0.5;
 
-    // Fly altitude
+    // Fly altitude — flyHeight is absolute world Y
     if (flying) {
-      const agl = this.flyHeight;
+      const agl = this.flyHeight - groundY;
       const spd = Math.abs(this.planeSpeed);
       const onDeck = agl < FLY_SURFACE_ALT && spd < FLY_SURFACE_SPEED;
 
@@ -1313,20 +1312,20 @@ export class PlayMode {
         let climbDelta = 0;
         if (keys.Space) climbDelta += ISO_FLY_CLIMB_RATE * dtSec;
         if (keys.ShiftLeft || keys.ShiftRight) climbDelta -= ISO_FLY_DESCEND_RATE * dtSec;
-        this.flyHeight = Math.max(0, this.flyHeight + climbDelta);
+        this.flyHeight = Math.max(groundY, this.flyHeight + climbDelta);
         const pitchTarget = climbDelta > 0.01 ? 0.3 : climbDelta < -0.01 ? -0.3 : 0;
         this.flyPitch = THREE.MathUtils.lerp(this.flyPitch, pitchTarget, 1 - Math.exp(-9 * dtSec));
       } else {
         const diveMult = this.flyPitch < 0 ? FLY_PITCH_DIVE_MULT : 1;
-        this.flyHeight = Math.max(0, this.flyHeight + this.flyPitch * FLY_PITCH_CLIMB_SCALE * diveMult * dtSec);
+        this.flyHeight = Math.max(groundY, this.flyHeight + this.flyPitch * FLY_PITCH_CLIMB_SCALE * diveMult * dtSec);
       }
 
-      // Surface lock — taxi mode: decay pitch/roll/altitude near ground at low speed
+      // Surface lock — taxi mode: decay pitch/roll/altitude toward ground when near surface at low speed
       if (onDeck) {
         const deckRate = 1 - Math.exp(-4 * dtSec);
         this.flyPitch = THREE.MathUtils.lerp(this.flyPitch, 0, deckRate);
         this.flyRollTarget = THREE.MathUtils.lerp(this.flyRollTarget, 0, deckRate);
-        this.flyHeight = THREE.MathUtils.lerp(this.flyHeight, 0, deckRate);
+        this.flyHeight = THREE.MathUtils.lerp(this.flyHeight, groundY, deckRate);
       }
 
       // Barrel roll
@@ -1512,18 +1511,10 @@ export class PlayMode {
       }
     }
 
-    if (flying) {
-      const smoothRate = 1 - Math.exp(-(0.8 / (1 + this.flyHeight * 0.08)) * dtSec);
-      this.flyGroundRef = THREE.MathUtils.lerp(this.flyGroundRef, groundY, smoothRate);
-    } else {
-      this.flyGroundRef = groundY;
-    }
-    const planeY = Math.max(groundY, this.flyGroundRef) + this.flyHeight;
-
     // Plane BVH collision — multi-ray: forward, left wing, right wing, up, down
     if (flying && this.cliffBvh?.baked) {
       const px = this.playerPos.x;
-      const py = planeY;
+      const py = this.flyHeight;
       const pz = this.playerPos.z;
       const cosP = Math.cos(this.flyPitch);
       const sinP = Math.sin(this.flyPitch);
@@ -1553,7 +1544,7 @@ export class PlayMode {
             this.playerPos.x -= r.dx * pushDist;
             this.flyHeight -= r.dy * pushDist;
             this.playerPos.z -= r.dz * pushDist;
-            if (this.flyHeight < 0) this.flyHeight = 0;
+            if (this.flyHeight < groundY) this.flyHeight = groundY;
           }
         }
       }
@@ -1620,7 +1611,7 @@ export class PlayMode {
     if (this.planeRoot) {
       this.planeRoot.visible = flying;
       if (flying) {
-        this.planeRoot.position.set(this.playerPos.x, planeY, this.playerPos.z);
+        this.planeRoot.position.set(this.playerPos.x, this.flyHeight, this.playerPos.z);
         let barrelAdd = 0;
         if (this.flyBarrelActive) {
           const t = Math.min(1, this.flyBarrelPhase);
@@ -1657,7 +1648,7 @@ export class PlayMode {
       if (flying) {
         this._flyHud.style.display = "";
         this._flyHudSpd.textContent = Math.round(Math.abs(this.planeSpeed));
-        this._flyHudAlt.textContent = Math.round(this.flyHeight);
+        this._flyHudAlt.textContent = Math.round(this.flyHeight - groundY);
       } else {
         this._flyHud.style.display = "none";
       }
@@ -1696,7 +1687,7 @@ export class PlayMode {
     // Camera
     const charLookY = this.playerPos.y + CHAR_HEIGHT * 0.75;
     const carLookY = carDriving ? (this.carRoot ? this.carRoot.position.y + 1.2 : this.playerPos.y + 1.2) : 0;
-    const lookAtY = flying ? planeY + 0.45 : carDriving ? carLookY : charMode ? charLookY : capsuleCY + 0.6;
+    const lookAtY = flying ? this.flyHeight + 0.45 : carDriving ? carLookY : charMode ? charLookY : capsuleCY + 0.6;
 
     if (carDriving) {
       let chaseTarget = this.carHeading;
@@ -1772,6 +1763,7 @@ export class PlayMode {
     } else if (prev === "char") {
       this.moveMode = "fly";
       this.flyHeading = this.charYaw;
+      this.flyHeight = this.playerPos.y;
       this.flyPitch = 0;
       this.flyRoll = 0;
       this.flyRollTarget = 0;
@@ -1788,6 +1780,7 @@ export class PlayMode {
       this.carDrifting = false;
       this.carDriftAngle = 0;
       this.carCamYaw = this.flyHeading;
+      this.playerPos.y = this.getWorldHeight(this.playerPos.x, this.playerPos.z);
       this.flyHeight = 0;
       this.flyAileronAngle = 0;
       this.carVelY = 0;
@@ -1797,6 +1790,7 @@ export class PlayMode {
       this.moveMode = "capsule";
       this.carVx = 0;
       this.carVz = 0;
+      this.playerPos.y = this.getWorldHeight(this.playerPos.x, this.playerPos.z);
       this.flyHeight = 0;
       this.flyPitch = 0;
       this.flyRoll = 0;
@@ -1943,7 +1937,7 @@ export class PlayMode {
     if (this.flying) {
       const mx = event.movementX;
       const my = event.movementY;
-      const agl = this.flyHeight;
+      const agl = this.flyHeight - this.getWorldHeight(this.playerPos.x, this.playerPos.z);
       const spd = Math.abs(this.planeSpeed);
       const onDeck = agl < FLY_SURFACE_ALT && spd < FLY_SURFACE_SPEED;
       if (onDeck) {

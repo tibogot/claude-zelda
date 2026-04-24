@@ -56,6 +56,9 @@ import { PropStore } from "../core/props/propStore.js";
 import { PropInstancer } from "../core/props/propInstancer.js";
 import { PropSystem } from "../tools/props/propSystem.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
+import { WaterStore } from "../core/water/waterStore.js";
+import { createWaterMaterials } from "../render/water/waterMaterial.js";
+import { WaterSystem } from "../tools/water/waterSystem.js";
 
 export async function startV2App() {
   const config = structuredClone(V2_CONFIG);
@@ -530,6 +533,20 @@ export async function startV2App() {
     if (toolState.mode === "props") propSystem.handleTransformEnd();
   });
 
+  // ── Water system ──────────────────────────────────────────────────────────
+  const waterStore = new WaterStore(scene);
+  const waterMaterials = createWaterMaterials({
+    heightTex: globalHeightTex,
+    terrainSize: config.world.size,
+  });
+  const waterSystem = new WaterSystem({
+    waterStore,
+    waterMaterials,
+    toolState,
+    transformControls,
+  });
+  let _appTimeSec = 0;
+
   const playMode = new PlayMode({
     scene, camera, renderer, controls,
     getWorldHeight,
@@ -594,6 +611,11 @@ export async function startV2App() {
       if (toolState.mode !== "props") {
         deactivatePropSelection();
       }
+      if (toolState.mode !== "water") {
+        waterSystem.deselect();
+      }
+      // Toggle water folder visibility
+      if (ui?.waterFolder) ui.waterFolder.hidden = toolState.mode !== "water";
       if (toolState.mode === "play") {
         playMode.enter();
         const tpEl = document.querySelector(".tp-dfwv");
@@ -877,12 +899,36 @@ export async function startV2App() {
     onPropTransformModeChanged: () => {
       transformControls.setMode(toolState.props.transformMode);
     },
+    onWaterChanged: () => {
+      waterMaterials.syncUniforms(toolState.water);
+    },
+    onSaveWater: () => waterSystem.saveJSON(),
+    onLoadWater: async () => {
+      const file = await openFilePicker(".json");
+      if (!file) return;
+      try {
+        await waterSystem.loadJSON(file);
+        ui?.pane.refresh();
+      } catch (err) {
+        console.error("[V2] Failed to load water-bodies.json", err);
+      }
+    },
+    onDeleteSelectedWater: () => {
+      waterSystem.deleteSelected();
+      ui?.pane.refresh();
+    },
+    onClearAllWater: () => {
+      waterSystem.clearAll();
+      ui?.pane.refresh();
+    },
     onSaveProject: () => {
       toolState._cliffExportData = () => cliffStore.exportData();
       toolState._propExportData = () => propStore.exportData();
+      toolState._waterExportData = () => waterStore.exportData();
       const buf = serializeProject({ terrainStore, splatStore, treeStore, config, toolState });
       delete toolState._cliffExportData;
       delete toolState._propExportData;
+      delete toolState._waterExportData;
       const blob = new Blob([buf], { type: "application/octet-stream" });
       const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       downloadBlob(blob, `terrain-${ts}.v2terrain`);
@@ -924,6 +970,11 @@ export async function startV2App() {
           }
           propStore.clear();
           propStore.importData(project.settings.propInstances, typeNameToIdx);
+        }
+        // Restore water bodies
+        if (project.settings?.waterBodies) {
+          waterSystem.applyBodies(project.settings.waterBodies);
+          waterMaterials.syncUniforms(toolState.water);
         }
         // Auto-reload tree presets (trunk GLBs + foliage) for slots that had them
         const presetLoads = [];
@@ -1210,6 +1261,15 @@ export async function startV2App() {
   }
 
   renderer.domElement.addEventListener("pointerdown", (event) => {
+    if (toolState.mode === "water" && event.button === 0) {
+      if (transformControls.dragging) return;
+      event.preventDefault();
+      updatePointer(event);
+      const hit = pickTerrain(event);
+      const consumed = waterSystem.handlePointerDown(pointerNdc, camera, hit?.point);
+      if (consumed) ui?.pane.refresh();
+      return;
+    }
     if (toolState.mode === "cliffs" && event.button === 0 && !transformControls.dragging) {
       const hit = pickTerrain(event);
       if (hit) {
@@ -1390,6 +1450,7 @@ export async function startV2App() {
     if (toolState.mode === "road") return roadSystem;
     if (toolState.mode === "cliffs") return cliffSystem;
     if (toolState.mode === "props") return propSystem;
+    if (toolState.mode === "water") return waterSystem;
     return sculptSystem;
   }
 
@@ -1424,6 +1485,39 @@ export async function startV2App() {
       event.preventDefault();
       propSystem.handleDelete();
       deactivatePropSelection();
+    } else if (
+      event.code === "KeyW" && !ctrl &&
+      toolState.mode !== "cliffs" &&
+      toolState.mode !== "props" &&
+      toolState.mode !== "water" &&
+      toolState.mode !== "play"
+    ) {
+      event.preventDefault();
+      toolState.mode = "water";
+      if (ui?.waterFolder) ui.waterFolder.hidden = false;
+      ui?.pane.refresh();
+      updateBrushPreviewFromPick(null);
+    } else if (event.code === "KeyW" && !ctrl && toolState.mode === "water") {
+      event.preventDefault();
+      toolState.mode = "view";
+      waterSystem.deselect();
+      if (ui?.waterFolder) ui.waterFolder.hidden = true;
+      ui?.pane.refresh();
+    } else if (event.code === "Delete" && toolState.mode === "water") {
+      event.preventDefault();
+      waterSystem.deleteSelected();
+      ui?.pane.refresh();
+    } else if (toolState.mode === "water" && !ctrl) {
+      if (event.code === "KeyE") {
+        event.preventDefault();
+        waterSystem.setTransformMode("translate");
+      } else if (event.code === "KeyR") {
+        event.preventDefault();
+        waterSystem.setTransformMode("rotate");
+      } else if (event.code === "KeyT") {
+        event.preventDefault();
+        waterSystem.setTransformMode("scale");
+      }
     } else if (toolState.mode === "cliffs" && !ctrl) {
       if (event.code === "KeyW") {
         toolState.cliffs.transformMode = "translate";
@@ -1535,6 +1629,17 @@ export async function startV2App() {
     }
     grassManager.update(toolState.grass, playMode.active ? playMode.playerPos : null);
 
+    // Water: advance time + lake reflections
+    const dtSec = dtMs * 0.001;
+    _appTimeSec += Math.min(0.05, dtSec);
+    waterMaterials.updateTime(_appTimeSec);
+    if (waterStore.lakeBodies.length > 0) {
+      waterMaterials.lakeShader.update(dtSec, _appTimeSec, waterStore.lakeBodies);
+      waterMaterials.renderLakeReflection(
+        camera, renderer, scene, waterStore.bodies, waterStore.lakeBodies,
+      );
+    }
+
     if (now - hudLastMs > 180) {
       let tris = 0;
       for (const ch of chunkStream.activeChunks.values()) {
@@ -1579,6 +1684,7 @@ export async function startV2App() {
       grassManager.dispose();
       roadSystem.dispose();
       roadReflection.dispose();
+      waterMaterials.dispose();
       playMode.dispose();
       tileTerrainMaterial.dispose();
       disposeProceduralBundle();

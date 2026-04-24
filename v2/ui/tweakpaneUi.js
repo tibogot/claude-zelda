@@ -8,6 +8,7 @@ import { addGrassFolder } from "./grassTweakpane.js";
 import { addCliffFolder } from "./cliffTweakpane.js";
 import { addPropFolder } from "./propTweakpane.js";
 import { addRoadFolder } from "./roadTweakpane.js";
+import { addWaterFolder } from "./waterTweakpane.js";
 
 export function createTweakpaneUi({
   toolState,
@@ -68,6 +69,11 @@ export function createTweakpaneUi({
   onRoadSnapY,
   onRoadSelectedYChanged,
   onRoadActiveIndexChanged,
+  onWaterChanged,
+  onSaveWater,
+  onLoadWater,
+  onDeleteSelectedWater,
+  onClearAllWater,
 }) {
   const pane = new Pane({ title: "V2 Terrain Core" });
 
@@ -85,6 +91,7 @@ export function createTweakpaneUi({
         Road: "road",
         Cliffs: "cliffs",
         Props: "props",
+        Water: "water",
         Play: "play",
       },
     })
@@ -168,6 +175,14 @@ export function createTweakpaneUi({
     onPropTransformModeChanged,
   };
   addPropFolder(pane, toolState, propCallbacks);
+
+  const waterFolder = addWaterFolder(pane, toolState, {
+    onWaterChanged,
+    onSaveWater,
+    onLoadWater,
+    onDeleteSelected: onDeleteSelectedWater,
+    onClearAll: onClearAllWater,
+  });
 
   /** Shared across sculpt, future paint, foliage, props — same as v1 brush UX. */
   const brushFolder = pane.addFolder({ title: "Brush" });
@@ -801,6 +816,7 @@ export function createTweakpaneUi({
   return {
     pane,
     propCallbacks,
+    waterFolder,
     /** Call after hotkey / wheel edits to `toolState.brush` so bindings stay in sync. */
     refreshBrush() {
       pane.refresh();
