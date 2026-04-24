@@ -13,6 +13,7 @@
  * @param {() => void} opts.onTreeLodChanged
  * @param {() => void} opts.onCastShadowChanged
  * @param {() => void} opts.onFoliageLodChanged
+ * @param {(slotIdx: number) => void} opts.onFoliageParamChanged
  */
 export function addTreeFolder(pane, toolState, opts) {
   const {
@@ -23,6 +24,7 @@ export function addTreeFolder(pane, toolState, opts) {
     onTreeLodChanged,
     onCastShadowChanged,
     onFoliageLodChanged,
+    onFoliageParamChanged,
   } = opts;
 
   const folder = pane.addFolder({ title: "Tree LOD", expanded: true });
@@ -48,7 +50,7 @@ export function addTreeFolder(pane, toolState, opts) {
   brushFolder.addBinding(toolState.treePaint, "minSpacing", {
     label: "Min spacing",
     min: 1,
-    max: 30,
+    max: 100,
     step: 0.5,
   });
   brushFolder.addBinding(toolState.treePaint, "scaleMin", {
@@ -92,6 +94,35 @@ export function addTreeFolder(pane, toolState, opts) {
       max: 5,
       step: 0.01,
     });
+
+    const fi = toolState.treeSlots[i].foliage;
+    const foliageFolder = slotFolder.addFolder({ title: "Foliage Material", expanded: false });
+    const fChange = () => onFoliageParamChanged?.(i);
+
+    const colF = foliageFolder.addFolder({ title: "Colors", expanded: false });
+    colF.addBinding(fi, "bottomColor", { label: "Base color", view: "color" }).on("change", fChange);
+    colF.addBinding(fi, "topColor",    { label: "Top color",  view: "color" }).on("change", fChange);
+    colF.addBinding(fi, "colorVar",    { label: "Variation",  min: 0, max: 0.5, step: 0.01 }).on("change", fChange);
+    colF.addBinding(fi, "alphaCutoff", { label: "Alpha cutoff", min: 0.1, max: 0.9, step: 0.01 }).on("change", fChange);
+
+    const litF = foliageFolder.addFolder({ title: "Lighting", expanded: false });
+    litF.addBinding(fi, "normalBias", { label: "Sphere normals", min: 0, max: 1, step: 0.01 }).on("change", fChange);
+    litF.addBinding(fi, "leafWarp",   { label: "Leaf warp",      min: 0, max: 1, step: 0.01 }).on("change", fChange);
+    litF.addBinding(fi, "aoStr",      { label: "AO strength",    min: 0, max: 1, step: 0.01 }).on("change", fChange);
+
+    const sssF = foliageFolder.addFolder({ title: "SSS & Rim", expanded: false });
+    sssF.addBinding(fi, "sssStr",   { label: "SSS strength", min: 0, max: 2, step: 0.01 }).on("change", fChange);
+    sssF.addBinding(fi, "sssPow",   { label: "SSS power",    min: 0.5, max: 8, step: 0.1 }).on("change", fChange);
+    sssF.addBinding(fi, "sssColor", { label: "SSS color",    view: "color" }).on("change", fChange);
+    sssF.addBinding(fi, "rimStr",   { label: "Rim strength",  min: 0, max: 2, step: 0.01 }).on("change", fChange);
+    sssF.addBinding(fi, "rimPow",   { label: "Rim power",     min: 0.5, max: 8, step: 0.1 }).on("change", fChange);
+    sssF.addBinding(fi, "rimColor", { label: "Rim color",     view: "color" }).on("change", fChange);
+
+    const windF = foliageFolder.addFolder({ title: "Wind", expanded: false });
+    windF.addBinding(fi, "windSpeed", { label: "Speed",      min: 0, max: 5, step: 0.05 }).on("change", fChange);
+    windF.addBinding(fi, "windStr",   { label: "Strength",   min: 0, max: 0.5, step: 0.005 }).on("change", fChange);
+    windF.addBinding(fi, "windMicro", { label: "Micro sway", min: 0, max: 0.3, step: 0.005 }).on("change", fChange);
+
     slotFolder
       .addButton({ title: "🗑 Remove models" })
       .on("click", () => onRemoveSlot?.(i));

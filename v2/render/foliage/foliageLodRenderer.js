@@ -10,7 +10,7 @@
  */
 import * as THREE from "three";
 
-const MAX_LEAVES_PER_CHUNK = 16384;
+const MAX_LEAVES_PER_CHUNK = 65536;
 
 export class FoliageLodRenderer {
   constructor(scene, config) {

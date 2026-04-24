@@ -66,7 +66,8 @@ export class TreeSystem {
   _scatter(wx, wz, radius) {
     const tp = this.toolState.treePaint;
     const slotIdx = tp.activeSlot;
-    const spacing = tp.minSpacing;
+    const baseScale = this.toolState.treeSlots[slotIdx]?.baseScale ?? 1.0;
+    const spacing = tp.minSpacing * Math.max(baseScale, 0.1);
     const area = Math.PI * radius * radius;
     const attempts = Math.ceil(area * tp.density * 0.01);
 
@@ -83,7 +84,6 @@ export class TreeSystem {
       if (this.treeStore.hasTreeNearby(tx, tz, spacing)) continue;
 
       const rotY = tp.randomRotation ? Math.random() * Math.PI * 2 : 0;
-      const baseScale = this.toolState.treeSlots[slotIdx]?.baseScale ?? 1.0;
       const scale =
         (tp.scaleMin + Math.random() * (tp.scaleMax - tp.scaleMin)) * baseScale;
       const y = this.terrainStore.getWorldHeight(tx, tz);

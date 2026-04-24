@@ -649,6 +649,26 @@ export async function startV2App() {
             toolState.treeSlots[slotIdx].baseScale = json.trunkScale;
           }
 
+          const f = toolState.treeSlots[slotIdx].foliage;
+          const m = json.material || {};
+          const w = json.wind || {};
+          if (m.bottomColor) f.bottomColor = m.bottomColor;
+          if (m.topColor)    f.topColor    = m.topColor;
+          if (m.colorVar != null)    f.colorVar    = m.colorVar;
+          if (m.alphaCutoff != null) f.alphaCutoff = m.alphaCutoff;
+          if (m.normalBias != null)  f.normalBias  = m.normalBias;
+          if (m.leafWarp != null)    f.leafWarp    = m.leafWarp;
+          if (m.aoStr != null)       f.aoStr       = m.aoStr;
+          if (m.sssStr != null)      f.sssStr      = m.sssStr;
+          if (m.sssPow != null)      f.sssPow      = m.sssPow;
+          if (m.sssColor)            f.sssColor    = m.sssColor;
+          if (m.rimStr != null)      f.rimStr      = m.rimStr;
+          if (m.rimPow != null)      f.rimPow      = m.rimPow;
+          if (m.rimColor)            f.rimColor    = m.rimColor;
+          if (w.windSpeed != null)   f.windSpeed   = w.windSpeed;
+          if (w.windStr != null)     f.windStr     = w.windStr;
+          if (w.windMicro != null)   f.windMicro   = w.windMicro;
+
           ui?.pane.refresh();
           console.log(`[V2] Tree preset "${json.presetName}" loaded into slot ${slotIdx} (baseScale=${json.trunkScale ?? 1}, ${foliagePreset.lods[0]?.count ?? 0} leaves LOD0)`);
         } catch (err) {
@@ -656,6 +676,28 @@ export async function startV2App() {
         }
       };
       input.click();
+    },
+    onFoliageParamChanged: (slotIdx) => {
+      const preset = foliageLodRenderer.slotPresets[slotIdx];
+      if (!preset) return;
+      const f = toolState.treeSlots[slotIdx].foliage;
+      const u = preset.uniforms;
+      u.bottomColor.value.set(f.bottomColor);
+      u.topColor.value.set(f.topColor);
+      u.colorVar.value    = f.colorVar;
+      u.alphaCutoff.value = f.alphaCutoff;
+      u.normalBias.value  = f.normalBias;
+      u.leafWarp.value    = f.leafWarp;
+      u.aoStr.value       = f.aoStr;
+      u.sssStr.value      = f.sssStr;
+      u.sssPow.value      = f.sssPow;
+      u.sssColor.value.set(f.sssColor);
+      u.rimStr.value      = f.rimStr;
+      u.rimPow.value      = f.rimPow;
+      u.rimColor.value.set(f.rimColor);
+      u.windSpeed.value   = f.windSpeed;
+      u.windStr.value     = f.windStr;
+      u.windMicro.value   = f.windMicro;
     },
     onRemoveTreeSlot: (slotIdx) => {
       treeLodRenderer.disposeSlot(slotIdx);

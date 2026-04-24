@@ -40,6 +40,7 @@ export function createTweakpaneUi({
   onTreeLodChanged,
   onTreeCastShadowChanged,
   onFoliageLodChanged,
+  onFoliageParamChanged,
   onGrassChanged,
   onGrassRebuildGeos,
   onGrassFill,
@@ -122,6 +123,7 @@ export function createTweakpaneUi({
     onTreeLodChanged,
     onFoliageLodChanged,
     onCastShadowChanged: onTreeCastShadowChanged,
+    onFoliageParamChanged,
   });
 
   addGrassFolder(pane, toolState, {

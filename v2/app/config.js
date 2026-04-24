@@ -181,7 +181,7 @@ export const V2_CONFIG = {
     updateEveryFrame: false,
   },
   tree: {
-    maxSlots: 4,
+    maxSlots: 8,
     maxInstancesPerMesh: 4096,
   },
   /** WebGPU TSL fog — same defaults as `splatmap-chunks.html` PARAMS.fog. */
