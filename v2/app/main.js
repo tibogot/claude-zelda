@@ -80,6 +80,7 @@ export async function startV2App() {
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.shadowMap.enabled = true;
+  renderer.shadowMap.transmitted = true;
   document.body.appendChild(renderer.domElement);
   await renderer.init();
   initGlbLoaderRenderer(renderer);

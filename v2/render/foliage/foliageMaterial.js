@@ -114,6 +114,12 @@ export function createFoliageMaterial(opts = {}) {
   mat.opacityNode  = opacityNode;
   mat.envMapIntensity = 0;
 
+  mat.castShadowNode = Fn(() => {
+    const a = smoothstep(u.alphaCutoff.sub(0.05), u.alphaCutoff.add(0.05), leafMapNode.r);
+    a.lessThan(float(0.5)).discard();
+    return vec4(0, 0, 0, 1);
+  })();
+
   return { material: mat, uniforms: u, leafMapNode };
 }
 
