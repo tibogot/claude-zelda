@@ -59,6 +59,9 @@ import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { WaterStore } from "../core/water/waterStore.js";
 import { createWaterMaterials } from "../render/water/waterMaterial.js";
 import { WaterSystem } from "../tools/water/waterSystem.js";
+import { BarrierStore } from "../core/barrier/barrierStore.js";
+import { BarrierSystem } from "../tools/barrier/barrierSystem.js";
+import { BarrierOverlay } from "../render/barrier/barrierOverlay.js";
 
 export async function startV2App() {
   const config = structuredClone(V2_CONFIG);
@@ -547,12 +550,17 @@ export async function startV2App() {
   });
   let _appTimeSec = 0;
 
+  const barrierStore = new BarrierStore(config);
+  const barrierSystem = new BarrierSystem({ toolState, barrierStore, config });
+  const barrierOverlay = new BarrierOverlay(scene, config);
+
   const playMode = new PlayMode({
     scene, camera, renderer, controls,
     getWorldHeight,
     getTerrainHeight: (x, z) => terrainStore.getWorldHeight(x, z),
     worldHalf: config.world.size * 0.5,
     cliffBvh,
+    isBarrierBlocked: (wx, wz) => barrierStore.isBlocked(wx, wz),
   });
 
   const hud = createHud();
@@ -614,8 +622,9 @@ export async function startV2App() {
       if (toolState.mode !== "water") {
         waterSystem.deselect();
       }
-      // Toggle water folder visibility
+      // Toggle water/barrier folder visibility
       if (ui?.waterFolder) ui.waterFolder.hidden = toolState.mode !== "water";
+      if (ui?.barrierFolder) ui.barrierFolder.expanded = toolState.mode === "barrier";
       if (toolState.mode === "play") {
         playMode.enter();
         const tpEl = document.querySelector(".tp-dfwv");
@@ -921,14 +930,27 @@ export async function startV2App() {
       waterSystem.clearAll();
       ui?.pane.refresh();
     },
+    onBarrierOverlayChanged: () => {
+      syncBarrierOverlay();
+    },
+    onBarrierClear: () => {
+      barrierSystem.clearAll();
+      syncBarrierOverlay();
+    },
+    onBarrierFill: () => {
+      barrierSystem.fillAll();
+      syncBarrierOverlay();
+    },
     onSaveProject: () => {
       toolState._cliffExportData = () => cliffStore.exportData();
       toolState._propExportData = () => propStore.exportData();
       toolState._waterExportData = () => waterStore.exportData();
+      toolState._barrierExportData = () => barrierStore.exportData();
       const buf = serializeProject({ terrainStore, splatStore, treeStore, config, toolState });
       delete toolState._cliffExportData;
       delete toolState._propExportData;
       delete toolState._waterExportData;
+      delete toolState._barrierExportData;
       const blob = new Blob([buf], { type: "application/octet-stream" });
       const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       downloadBlob(blob, `terrain-${ts}.v2terrain`);
@@ -976,6 +998,12 @@ export async function startV2App() {
           waterSystem.applyBodies(project.settings.waterBodies);
           waterMaterials.syncUniforms(toolState.water);
         }
+        // Restore barriers
+        barrierOverlay.clear();
+        barrierStore.dispose();
+        if (project.settings?.barrierChunks) {
+          barrierStore.importData(project.settings.barrierChunks);
+        }
         // Auto-reload tree presets (trunk GLBs + foliage) for slots that had them
         const presetLoads = [];
         for (let si = 0; si < toolState.treeSlots.length; si++) {
@@ -1021,6 +1049,17 @@ export async function startV2App() {
       }
     },
   });
+
+  function syncBarrierOverlay() {
+    if (playMode.active) {
+      barrierOverlay.sync(barrierStore, false, 0);
+      return;
+    }
+    const showInMode = toolState.mode === "barrier";
+    const visible = showInMode || toolState.barrier.showOverlay;
+    barrierOverlay.sync(barrierStore, visible, toolState.barrier.overlayOpacity);
+  }
+  syncBarrierOverlay();
 
   propUiCallbacks = ui.propCallbacks;
 
@@ -1079,6 +1118,7 @@ export async function startV2App() {
   roadReflection.excludeFromReflection(brushPreview);
   roadReflection.excludeFromReflection(brushRing);
   roadReflection.excludeFromReflection(roadSystem.handleGroup);
+  roadReflection.excludeFromReflection(barrierOverlay.group);
 
   const rampMarkerA = new THREE.Mesh(
     new THREE.TorusGeometry(1, 0.045, 8, 64),
@@ -1196,7 +1236,7 @@ export async function startV2App() {
   }
 
   function isBrushMode() {
-    return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint" || toolState.mode === "grass" || toolState.mode === "cliffGrass" || (toolState.mode === "props" && toolState.props.placementMode === "paint");
+    return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint" || toolState.mode === "grass" || toolState.mode === "cliffGrass" || toolState.mode === "barrier" || (toolState.mode === "props" && toolState.props.placementMode === "paint");
   }
 
   function updateBrushPreviewFromPick(hit) {
@@ -1342,6 +1382,8 @@ export async function startV2App() {
       cliffGrassPaintSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "props") {
       propSystem.beginStroke(hit.point, event);
+    } else if (toolState.mode === "barrier") {
+      barrierSystem.beginStroke(hit.point, event);
     }
   });
 
@@ -1366,6 +1408,8 @@ export async function startV2App() {
       cliffGrassPaintSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "props") {
       propSystem.applyAt(hit.point, event);
+    } else if (toolState.mode === "barrier") {
+      barrierSystem.applyAt(hit.point, event);
     }
   });
 
@@ -1439,6 +1483,8 @@ export async function startV2App() {
       cliffGrassPaintSystem.endStroke();
     } else if (toolState.mode === "props") {
       propSystem.endStroke();
+    } else if (toolState.mode === "barrier") {
+      barrierSystem.endStroke();
     }
   });
 
@@ -1451,6 +1497,7 @@ export async function startV2App() {
     if (toolState.mode === "cliffs") return cliffSystem;
     if (toolState.mode === "props") return propSystem;
     if (toolState.mode === "water") return waterSystem;
+    if (toolState.mode === "barrier") return barrierSystem;
     return sculptSystem;
   }
 
@@ -1629,6 +1676,8 @@ export async function startV2App() {
     }
     grassManager.update(toolState.grass, playMode.active ? playMode.playerPos : null);
 
+    syncBarrierOverlay();
+
     // Water: advance time + lake reflections
     const dtSec = dtMs * 0.001;
     _appTimeSec += Math.min(0.05, dtSec);
@@ -1690,6 +1739,8 @@ export async function startV2App() {
       disposeProceduralBundle();
       disposeImageTexBundle();
       splatStore.dispose();
+      barrierStore.dispose();
+      barrierOverlay.dispose();
       brushDomeGeom.dispose();
       brushDomeFillMat.dispose();
       brushDomeEdgesGeom.dispose();

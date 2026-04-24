@@ -163,6 +163,11 @@ export function createToolState() {
       randomRotation: true,
     },
     propSlots: [],
+    barrier: {
+      erase: false,
+      showOverlay: true,
+      overlayOpacity: 0.35,
+    },
     water: {
       scale: 0.3,
       cellSpeed: 0.45,

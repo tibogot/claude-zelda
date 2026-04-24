@@ -273,7 +273,7 @@ function clearBullets(pool) {
 }
 
 export class PlayMode {
-  constructor({ scene, camera, renderer, controls, getWorldHeight, getTerrainHeight, worldHalf, cliffBvh }) {
+  constructor({ scene, camera, renderer, controls, getWorldHeight, getTerrainHeight, worldHalf, cliffBvh, isBarrierBlocked }) {
     this.scene = scene;
     this.camera = camera;
     this.renderer = renderer;
@@ -282,6 +282,7 @@ export class PlayMode {
     this.getTerrainHeight = getTerrainHeight || getWorldHeight;
     this.worldHalf = worldHalf;
     this.cliffBvh = cliffBvh || null;
+    this.isBarrierBlocked = isBarrierBlocked || null;
     this._playerGroundY = 0;
 
     this.active = false;
@@ -1279,6 +1280,26 @@ export class PlayMode {
                 }
               }
             }
+          }
+        }
+      }
+
+      if (this.isBarrierBlocked) {
+        const nx = this.playerPos.x + stepX;
+        const nz = this.playerPos.z + stepZ;
+        if (this.isBarrierBlocked(nx, nz)) {
+          const canSlideX = !this.isBarrierBlocked(nx, this.playerPos.z);
+          const canSlideZ = !this.isBarrierBlocked(this.playerPos.x, nz);
+          if (canSlideX) {
+            stepZ = 0;
+            if (carDriving) this.carVz *= 0.25;
+          } else if (canSlideZ) {
+            stepX = 0;
+            if (carDriving) this.carVx *= 0.25;
+          } else {
+            stepX = 0;
+            stepZ = 0;
+            if (carDriving) { this.carVx *= 0.1; this.carVz *= 0.1; }
           }
         }
       }

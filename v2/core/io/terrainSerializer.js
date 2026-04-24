@@ -287,6 +287,8 @@ function extractSerializableSettings(toolState) {
     propInstances: toolState._propExportData?.() ?? null,
     water: { ...toolState.water },
     waterBodies: toolState._waterExportData?.() ?? null,
+    barrier: { ...toolState.barrier },
+    barrierChunks: toolState._barrierExportData?.() ?? null,
   };
 }
 
@@ -330,4 +332,5 @@ export function applySettings(toolState, settings) {
   if (settings.cliffs) Object.assign(toolState.cliffs, settings.cliffs);
   if (settings.props) Object.assign(toolState.props, settings.props);
   if (settings.water) Object.assign(toolState.water, settings.water);
+  if (settings.barrier) Object.assign(toolState.barrier, settings.barrier);
 }

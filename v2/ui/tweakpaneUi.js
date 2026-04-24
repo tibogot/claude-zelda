@@ -9,6 +9,7 @@ import { addCliffFolder } from "./cliffTweakpane.js";
 import { addPropFolder } from "./propTweakpane.js";
 import { addRoadFolder } from "./roadTweakpane.js";
 import { addWaterFolder } from "./waterTweakpane.js";
+import { addBarrierFolder } from "./barrierTweakpane.js";
 
 export function createTweakpaneUi({
   toolState,
@@ -74,6 +75,9 @@ export function createTweakpaneUi({
   onLoadWater,
   onDeleteSelectedWater,
   onClearAllWater,
+  onBarrierOverlayChanged,
+  onBarrierClear,
+  onBarrierFill,
 }) {
   const pane = new Pane({ title: "V2 Terrain Core" });
 
@@ -92,6 +96,7 @@ export function createTweakpaneUi({
         Cliffs: "cliffs",
         Props: "props",
         Water: "water",
+        Barrier: "barrier",
         Play: "play",
       },
     })
@@ -182,6 +187,12 @@ export function createTweakpaneUi({
     onLoadWater,
     onDeleteSelected: onDeleteSelectedWater,
     onClearAll: onClearAllWater,
+  });
+
+  const barrierFolder = addBarrierFolder(pane, toolState, {
+    onBarrierOverlayChanged,
+    onBarrierClear,
+    onBarrierFill,
   });
 
   /** Shared across sculpt, future paint, foliage, props — same as v1 brush UX. */
@@ -817,6 +828,7 @@ export function createTweakpaneUi({
     pane,
     propCallbacks,
     waterFolder,
+    barrierFolder,
     /** Call after hotkey / wheel edits to `toolState.brush` so bindings stay in sync. */
     refreshBrush() {
       pane.refresh();
