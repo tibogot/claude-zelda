@@ -58,6 +58,7 @@ const FLY_ROLL_TARGET_DECAY = 5;
 const FLY_BARREL_DURATION = 0.88;
 const FLY_SURFACE_ALT = 1.35;
 const FLY_SURFACE_SPEED = 16;
+const FLY_AILERON_RATE = 2.8;
 const ISO_FLY_YAW_RATE = 1.9;
 const ISO_FLY_CLIMB_RATE = 28;
 const ISO_FLY_DESCEND_RATE = 48;
@@ -88,6 +89,11 @@ const CAR_CAM_HEIGHT = 3.5;
 const CAR_CAM_CHASE_SPEED = 3.5;
 const CAR_CAM_DRIFT_LAG = 1.8;
 const CAR_HANDBRAKE_DECEL = 3;
+const CAR_HALF_WIDTH = 1.1;
+const CAR_HALF_LENGTH = 2.5;
+const CAR_BODY_HEIGHT = 0.8;
+const CAR_GRAVITY = 28;
+const CAR_EDGE_DROP_THRESHOLD = 0.45;
 
 const TRAIL_SEG = 90;
 const TRAIL_HALF_W = 0.038;
@@ -304,6 +310,8 @@ export class PlayMode {
     this.flyBarrelPhase = 0;
     this.flyBarrelDir = 1;
     this.flyGroundCamYawOff = 0;
+    this.flyAileronAngle = 0;
+    this.flyGroundRef = 0;
 
     // Capsule mesh
     const geo = new THREE.CapsuleGeometry(CAP_R, CAP_H, 4, 8);
@@ -382,6 +390,8 @@ export class PlayMode {
     this.carDriftAngle = 0;
     this.carWheelSpin = 0;
     this.carCamYaw = 0;
+    this.carVelY = 0;
+    this.carInAir = false;
     this._carHud = null;
     this._carHudSpd = null;
     this._carHudAngle = null;
@@ -861,11 +871,13 @@ export class PlayMode {
     this.flyRollTarget = 0;
     this.flyBarrelActive = false;
     this.flyBarrelPhase = 0;
+    this.flyAileronAngle = 0;
 
     this.savedCamPos = this.camera.position.clone();
     this.savedTarget = this.controls.target.clone();
     this.playerPos.set(this.controls.target.x, 0, this.controls.target.z);
     this.playerPos.y = this.getWorldHeight(this.playerPos.x, this.playerPos.z);
+    this.flyGroundRef = this.playerPos.y;
     this.camYaw = 0;
     this.camPitch = 0.35;
 
@@ -903,6 +915,7 @@ export class PlayMode {
     this.carVx = 0; this.carVz = 0;
     this._clearTrails(); clearBullets(this._bullets.pool);
 
+    this.camera.up.set(0, 1, 0);
     if (this.savedCamPos) this.camera.position.copy(this.savedCamPos);
     if (this.savedTarget) {
       this.controls.target.copy(this.savedTarget);
@@ -1180,43 +1193,91 @@ export class PlayMode {
       }
 
       if (this.cliffBvh?.baked) {
-        const margin = CAP_R + 0.05;
-        const stepLen = Math.hypot(stepX, stepZ);
-        const castDist = stepLen + margin;
-        const px = this.playerPos.x;
-        const pz = this.playerPos.z;
-        const footY  = this.playerPos.y + CAP_R;
-        const waistY = this.playerPos.y + CAP_R + CAP_H * 0.5;
-        const headY  = this.playerPos.y + CAP_R + CAP_H;
+        if (carDriving) {
+          const px = this.playerPos.x;
+          const pz = this.playerPos.z;
+          const lowY = this.playerPos.y + CAR_RIDE_HEIGHT + 0.15;
+          const highY = this.playerPos.y + CAR_RIDE_HEIGHT + CAR_BODY_HEIGHT;
+          const fwdX = -Math.sin(this.carHeading);
+          const fwdZ = -Math.cos(this.carHeading);
+          const rightX = Math.cos(this.carHeading);
+          const rightZ = -Math.sin(this.carHeading);
 
-        let blocked = false;
-        const rayHeights = [footY, waistY, headY];
-        for (let ri = 0; ri < 3; ri++) {
-          const hit = this.cliffBvh.raycastLateral(
-            px, rayHeights[ri], pz, stepX, stepZ, castDist,
-          );
-          if (hit) {
-            const nx = hit.normal.x;
-            const nz = hit.normal.z;
-            const nLen = Math.hypot(nx, nz);
-            if (nLen > 0.01) {
-              const nnx = nx / nLen;
-              const nnz = nz / nLen;
-              const dot = stepX * nnx + stepZ * nnz;
-              if (dot < 0) {
-                stepX -= dot * nnx;
-                stepZ -= dot * nnz;
+          const carRays = [
+            { dx: fwdX, dz: fwdZ, dist: CAR_HALF_LENGTH + 0.2 },
+            { dx: -fwdX, dz: -fwdZ, dist: CAR_HALF_LENGTH * 0.6 },
+            { dx: fwdX + rightX, dz: fwdZ + rightZ, dist: CAR_HALF_LENGTH },
+            { dx: fwdX - rightX, dz: fwdZ - rightZ, dist: CAR_HALF_LENGTH },
+            { dx: rightX, dz: rightZ, dist: CAR_HALF_WIDTH + 0.1 },
+            { dx: -rightX, dz: -rightZ, dist: CAR_HALF_WIDTH + 0.1 },
+          ];
 
-                const slideHit = this.cliffBvh.raycastLateral(
-                  px, rayHeights[ri], pz,
-                  stepX, stepZ, Math.hypot(stepX, stepZ) + margin,
-                );
-                if (slideHit) {
-                  stepX = 0;
-                  stepZ = 0;
-                  blocked = true;
+          for (const r of carRays) {
+            const rLen = Math.hypot(r.dx, r.dz);
+            const ndx = r.dx / rLen;
+            const ndz = r.dz / rLen;
+            for (const ry of [lowY, highY]) {
+              const hit = this.cliffBvh.raycastLateral(px, ry, pz, ndx, ndz, r.dist);
+              if (hit) {
+                const nx = hit.normal.x;
+                const nz = hit.normal.z;
+                const nLen = Math.hypot(nx, nz);
+                if (nLen > 0.01) {
+                  const nnx = nx / nLen;
+                  const nnz = nz / nLen;
+                  const pen = r.dist - hit.distance;
+                  if (pen > 0) {
+                    stepX += nnx * pen;
+                    stepZ += nnz * pen;
+                    const vDot = this.carVx * nnx + this.carVz * nnz;
+                    if (vDot < 0) {
+                      this.carVx -= vDot * nnx;
+                      this.carVz -= vDot * nnz;
+                    }
+                  }
                 }
-                break;
+              }
+            }
+          }
+        } else {
+          const margin = CAP_R + 0.05;
+          const stepLen = Math.hypot(stepX, stepZ);
+          const castDist = stepLen + margin;
+          const px = this.playerPos.x;
+          const pz = this.playerPos.z;
+          const footY  = this.playerPos.y + CAP_R;
+          const waistY = this.playerPos.y + CAP_R + CAP_H * 0.5;
+          const headY  = this.playerPos.y + CAP_R + CAP_H;
+
+          let blocked = false;
+          const rayHeights = [footY, waistY, headY];
+          for (let ri = 0; ri < 3; ri++) {
+            const hit = this.cliffBvh.raycastLateral(
+              px, rayHeights[ri], pz, stepX, stepZ, castDist,
+            );
+            if (hit) {
+              const nx = hit.normal.x;
+              const nz = hit.normal.z;
+              const nLen = Math.hypot(nx, nz);
+              if (nLen > 0.01) {
+                const nnx = nx / nLen;
+                const nnz = nz / nLen;
+                const dot = stepX * nnx + stepZ * nnz;
+                if (dot < 0) {
+                  stepX -= dot * nnx;
+                  stepZ -= dot * nnz;
+
+                  const slideHit = this.cliffBvh.raycastLateral(
+                    px, rayHeights[ri], pz,
+                    stepX, stepZ, Math.hypot(stepX, stepZ) + margin,
+                  );
+                  if (slideHit) {
+                    stepX = 0;
+                    stepZ = 0;
+                    blocked = true;
+                  }
+                  break;
+                }
               }
             }
           }
@@ -1281,6 +1342,16 @@ export class PlayMode {
       const dtRoll = Math.min(dtSec, 0.08);
       this.flyRollTarget = THREE.MathUtils.lerp(this.flyRollTarget, 0, 1 - Math.exp(-FLY_ROLL_TARGET_DECAY * dtRoll));
       this.flyRoll = THREE.MathUtils.lerp(this.flyRoll, this.flyRollTarget, 1 - Math.exp(-FLY_ROLL_SMOOTH * dtRoll));
+
+      // Aileron roll (Z / C) — persistent, camera follows
+      if (!onDeck) {
+        if (keys.KeyZ) this.flyAileronAngle += FLY_AILERON_RATE * dtSec;
+        if (keys.KeyC) this.flyAileronAngle -= FLY_AILERON_RATE * dtSec;
+      } else {
+        const lvl = 1 - Math.exp(-3 * dtSec);
+        this.flyAileronAngle *= 1 - lvl;
+        if (Math.abs(this.flyAileronAngle) < 0.01) this.flyAileronAngle = 0;
+      }
     } else if (charMode) {
       this.flyHeight = 0;
 
@@ -1387,6 +1458,24 @@ export class PlayMode {
       }
     } else if (carDriving) {
       this.flyHeight = 0;
+      if (this.carInAir) {
+        this.carVelY -= CAR_GRAVITY * dtSec;
+        this.playerPos.y += this.carVelY * dtSec;
+        if (this.playerPos.y <= groundY) {
+          this.playerPos.y = groundY;
+          this.carVelY = 0;
+          this.carInAir = false;
+        }
+      } else {
+        const drop = prevY - groundY;
+        if (drop > CAR_EDGE_DROP_THRESHOLD) {
+          this.carInAir = true;
+          this.carVelY = 0;
+          this.playerPos.y = prevY;
+        } else {
+          this.playerPos.y = groundY;
+        }
+      }
     } else {
       this.flyHeight = 0;
 
@@ -1423,7 +1512,13 @@ export class PlayMode {
       }
     }
 
-    const planeY = groundY + this.flyHeight;
+    if (flying) {
+      const smoothRate = 1 - Math.exp(-(0.8 / (1 + this.flyHeight * 0.08)) * dtSec);
+      this.flyGroundRef = THREE.MathUtils.lerp(this.flyGroundRef, groundY, smoothRate);
+    } else {
+      this.flyGroundRef = groundY;
+    }
+    const planeY = Math.max(groundY, this.flyGroundRef) + this.flyHeight;
 
     // Plane BVH collision — multi-ray: forward, left wing, right wing, up, down
     if (flying && this.cliffBvh?.baked) {
@@ -1532,9 +1627,9 @@ export class PlayMode {
           barrelAdd = t * t * (3 - 2 * t) * Math.PI * 2 * this.flyBarrelDir;
         }
         if (iso) {
-          this.planeRoot.rotation.set(0, this.flyHeading, barrelAdd);
+          this.planeRoot.rotation.set(0, this.flyHeading, barrelAdd + this.flyAileronAngle);
         } else {
-          this.planeRoot.rotation.set(this.flyPitch, this.flyHeading, this.flyRoll + barrelAdd);
+          this.planeRoot.rotation.set(this.flyPitch, this.flyHeading, this.flyRoll + barrelAdd + this.flyAileronAngle);
         }
       }
     }
@@ -1641,11 +1736,17 @@ export class PlayMode {
       const camOrbitYaw = flying ? this.flyHeading + this.flyGroundCamYawOff : this.camYaw;
       const hDist = CAM_DIST * Math.cos(this.camPitch);
       const vDist = CAM_DIST * Math.sin(this.camPitch);
+      const sinH = Math.sin(camOrbitYaw);
+      const cosH = Math.cos(camOrbitYaw);
+      const a = flying ? this.flyAileronAngle : 0;
+      const sinA = Math.sin(a);
+      const cosA = Math.cos(a);
       this.camera.position.set(
-        this.playerPos.x + Math.sin(camOrbitYaw) * hDist,
-        lookAtY + vDist,
-        this.playerPos.z + Math.cos(camOrbitYaw) * hDist,
+        this.playerPos.x + sinH * hDist - cosH * sinA * vDist,
+        lookAtY + cosA * vDist,
+        this.playerPos.z + cosH * hDist + sinH * sinA * vDist,
       );
+      this.camera.up.set(-cosH * sinA, cosA, sinH * sinA);
       this.camera.lookAt(this.playerPos.x, lookAtY, this.playerPos.z);
     }
   }
@@ -1677,6 +1778,7 @@ export class PlayMode {
       this.flyBarrelActive = false;
       this.flyBarrelPhase = 0;
       this.flyGroundCamYawOff = 0;
+      this.flyAileronAngle = 0;
       this.planeSpeed = 0;
     } else if (prev === "fly") {
       this.moveMode = "car";
@@ -1687,6 +1789,9 @@ export class PlayMode {
       this.carDriftAngle = 0;
       this.carCamYaw = this.flyHeading;
       this.flyHeight = 0;
+      this.flyAileronAngle = 0;
+      this.carVelY = 0;
+      this.carInAir = false;
       this._clearTrails(); clearBullets(this._bullets.pool);
     } else {
       this.moveMode = "capsule";
@@ -1698,6 +1803,7 @@ export class PlayMode {
       this.flyRollTarget = 0;
       this.flyBarrelActive = false;
       this.flyBarrelPhase = 0;
+      this.flyAileronAngle = 0;
       this.planeSpeed = 0;
     }
   }
