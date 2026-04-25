@@ -57,6 +57,23 @@ export function addWaterFolder(pane, toolState, {
 
   folder.addBlade({ view: "separator" });
 
+  const reflFolder = folder.addFolder({ title: "Lake Reflection", expanded: false });
+  reflFolder.addBinding(w, "reflectionEnabled", { label: "Enabled" });
+  reflFolder.addBinding(w, "reflectionScale", {
+    label: "Resolution",
+    min: 0.1,
+    max: 1,
+    step: 0.05,
+  });
+  reflFolder.addBinding(w, "reflectionEveryN", {
+    label: "Every N frames",
+    min: 1,
+    max: 6,
+    step: 1,
+  });
+
+  folder.addBlade({ view: "separator" });
+
   folder.addButton({ title: "Save water JSON" }).on("click", () => onSaveWater?.());
   folder.addButton({ title: "Load water JSON…" }).on("click", () => onLoadWater?.());
   folder

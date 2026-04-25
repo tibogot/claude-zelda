@@ -1684,9 +1684,15 @@ export async function startV2App() {
     waterMaterials.updateTime(_appTimeSec);
     if (waterStore.lakeBodies.length > 0) {
       waterMaterials.lakeShader.update(dtSec, _appTimeSec, waterStore.lakeBodies);
-      waterMaterials.renderLakeReflection(
-        camera, renderer, scene, waterStore.bodies, waterStore.lakeBodies,
-      );
+      if (toolState.water.reflectionEnabled) {
+        waterMaterials.setReflectionParams(toolState.water.reflectionScale, toolState.water.reflectionEveryN);
+        waterMaterials.renderLakeReflection(
+          camera, renderer, scene, waterStore.bodies, waterStore.lakeBodies,
+          [grassManager.group],
+        );
+      } else {
+        waterMaterials.lakeShader.uniforms.reflectEnabled.value = 0;
+      }
     }
 
     if (now - hudLastMs > 180) {

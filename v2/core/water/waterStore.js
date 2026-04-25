@@ -34,7 +34,7 @@ export class WaterStore {
 
   add(mesh) {
     mesh.renderOrder = 2;
-    mesh.frustumCulled = false;
+    mesh.frustumCulled = true;
     this._scene.add(mesh);
     this.bodies.push(mesh);
     this.invalidateLakeCache();

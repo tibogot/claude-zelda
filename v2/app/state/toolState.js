@@ -191,6 +191,9 @@ export function createToolState() {
       preset: "Small lake",
       style: "Ocean",
       transformMode: "translate",
+      reflectionEnabled: true,
+      reflectionScale: 0.5,
+      reflectionEveryN: 2,
     },
     road: {
       width: 28,

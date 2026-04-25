@@ -211,7 +211,8 @@ export function createWaterMaterials({ heightTex, terrainSize }) {
   const lakeShader = createLakeShader({ heightTex, terrainSize });
 
   // Lake reflection state
-  const LAKE_REFLECT_SCALE = 0.5;
+  let _reflScale = 0.5;
+  let _reflEveryN = 2;
   let lakeReflectRT = new THREE.RenderTarget(4, 4, {
     minFilter: THREE.LinearFilter,
     magFilter: THREE.LinearFilter,
@@ -227,9 +228,16 @@ export function createWaterMaterials({ heightTex, terrainSize }) {
   const _reflProjMat = new THREE.Matrix4();
   const _reflSphere = new THREE.Sphere();
   let _reflFrameCounter = 0;
-  const REFL_EVERY_N_FRAMES = 2;
 
-  function renderLakeReflection(camera, renderer, scene, waterBodies, lakeBodies) {
+  /**
+   * @param {THREE.Camera} camera
+   * @param {THREE.WebGPURenderer} renderer
+   * @param {THREE.Scene} scene
+   * @param {THREE.Mesh[]} waterBodies
+   * @param {THREE.Mesh[]} lakeBodies
+   * @param {THREE.Object3D[]} [excludeObjects] — hidden during the reflection pass (e.g. grass group)
+   */
+  function renderLakeReflection(camera, renderer, scene, waterBodies, lakeBodies, excludeObjects) {
     if (lakeBodies.length === 0) return;
 
     _reflProjMat.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
@@ -247,7 +255,7 @@ export function createWaterMaterials({ heightTex, terrainSize }) {
     if (!anyVisible) return;
 
     _reflFrameCounter++;
-    if (_reflFrameCounter % REFL_EVERY_N_FRAMES !== 0) return;
+    if (_reflFrameCounter % _reflEveryN !== 0) return;
 
     const waterY = lakeBodies[0].position.y;
 
@@ -255,8 +263,8 @@ export function createWaterMaterials({ heightTex, terrainSize }) {
     lakeReflectCam.fov = camera.fov;
     lakeReflectCam.near = camera.near;
     lakeReflectCam.far = camera.far;
-    const w = Math.max(4, Math.floor(window.innerWidth * LAKE_REFLECT_SCALE));
-    const h = Math.max(4, Math.floor(window.innerHeight * LAKE_REFLECT_SCALE));
+    const w = Math.max(4, Math.floor(window.innerWidth * _reflScale));
+    const h = Math.max(4, Math.floor(window.innerHeight * _reflScale));
     lakeReflectCam.aspect = w / h;
     lakeReflectCam.updateProjectionMatrix();
     lakeReflectCam.position.copy(camera.position);
@@ -276,12 +284,20 @@ export function createWaterMaterials({ heightTex, terrainSize }) {
     );
     lakeShader.uniforms.reflectVP.value.copy(_reflVPHelper);
 
-    // Hide water bodies during reflection render
+    // Hide water bodies + excluded objects during reflection render
     const savedVis = [];
     for (const m of waterBodies) {
       savedVis.push(m.visible);
       m.visible = false;
     }
+    const savedExcludeVis = [];
+    if (excludeObjects) {
+      for (const obj of excludeObjects) {
+        savedExcludeVis.push(obj.visible);
+        obj.visible = false;
+      }
+    }
+
     const prevBg = scene.background;
     const prevAutoClear = renderer.autoClear;
     scene.background = _reflClearColor;
@@ -292,11 +308,21 @@ export function createWaterMaterials({ heightTex, terrainSize }) {
     renderer.setRenderTarget(prevRT);
     renderer.autoClear = prevAutoClear;
     scene.background = prevBg;
+
     for (let i = 0; i < waterBodies.length; i++)
       waterBodies[i].visible = savedVis[i];
+    if (excludeObjects) {
+      for (let i = 0; i < excludeObjects.length; i++)
+        excludeObjects[i].visible = savedExcludeVis[i];
+    }
 
     lakeShader.uniforms.reflectTex.value = lakeReflectRT.texture;
     lakeShader.uniforms.reflectEnabled.value = 1;
+  }
+
+  function setReflectionParams(scale, everyN) {
+    _reflScale = Math.max(0.1, Math.min(1, scale));
+    _reflEveryN = Math.max(1, Math.round(everyN));
   }
 
   function syncUniforms(waterParams) {
@@ -359,6 +385,7 @@ export function createWaterMaterials({ heightTex, terrainSize }) {
     makeGeo,
     makeMat,
     renderLakeReflection,
+    setReflectionParams,
     dispose,
   };
 }
