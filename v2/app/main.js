@@ -436,6 +436,7 @@ export async function startV2App() {
     } else {
       chunkStream.setSharedMaterial(tileTerrainMaterial);
     }
+    syncSoloLayer();
   }
 
   function markHeightTexDirty() {
@@ -611,6 +612,10 @@ export async function startV2App() {
     onModeChanged: () => {
       if (toolState.mode !== "sculpt") {
         sculptSystem.clearRampPoint();
+      }
+      if (toolState.mode !== "paint" && toolState.paint.soloLayer >= 0) {
+        toolState.paint.soloLayer = -1;
+        syncSoloLayer();
       }
       if (toolState.mode === "paint" && toolState.terrainSurface === "tile") {
         toolState.terrainSurface = "tsl";
