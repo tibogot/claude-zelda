@@ -2,12 +2,12 @@
  * Composable 7-layer splat overlay for TSL NodeMaterials.
  *
  * Uses DataArrayTexture (1 binding for 7 albedos, 1 for 7 ORMs) to stay within
- * the WebGPU 16 texture binding limit. Two splatmaps encode 7 overlay weights +
- * meadow density.
+ * the WebGPU 16 texture binding limit. A single 2-layer DataArrayTexture per
+ * chunk encodes 7 overlay weights + meadow density.
  *
- * Splatmap encoding (per-chunk 128² RGBA DataTextures — from SplatStore):
- *   splat0: R=L1, G=L2, B=L3, A=L4
- *   splat1: R=L5, G=L6, B=L7, A=meadow
+ * Splatmap encoding (per-chunk 128² RGBA, 2-layer DataArrayTexture — from SplatStore):
+ *   layer 0: R=L1, G=L2, B=L3, A=L4
+ *   layer 1: R=L5, G=L6, B=L7, A=meadow
  *   Layer 0 (base surface) is implicit: w0 = max(0, 1 - sum(L1..L7)).
  *   Shader normalizes so sum = 1.
  *
@@ -22,7 +22,6 @@ import {
   int,
   vec2,
   vec3,
-  vec4,
   texture,
   positionLocal,
   positionWorld,
@@ -34,11 +33,13 @@ import {
   step,
 } from "three/tsl";
 
-function makePlaceholderSplatTex() {
-  const d = new Uint8Array([0, 0, 0, 0]);
-  const t = new THREE.DataTexture(d, 1, 1, THREE.RGBAFormat);
+function makePlaceholderSplatArray() {
+  const d = new Uint8Array(1 * 1 * 2 * 4);
+  const t = new THREE.DataArrayTexture(d, 1, 1, 2);
+  t.format = THREE.RGBAFormat;
   t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
-  t.flipY = false;
+  t.minFilter = THREE.LinearFilter;
+  t.magFilter = THREE.LinearFilter;
   t.needsUpdate = true;
   return t;
 }
@@ -61,10 +62,12 @@ export function createSplatOverlay(layerSlots, chunkSize, worldSize, albedoArray
   const cs = float(chunkSize);
   const invWorldSize = float(1.0 / worldSize);
 
-  // ── splatmap texture nodes (swapped per-chunk in onBeforeRender) ────────
+  // ── splatmap reads (swapped per-chunk in onBeforeRender) ────────────────
+  // Both reads come from the same 2-layer DataArrayTexture but use different
+  // .depth() indices, which prevents TSL from deduplicating them.
   const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));
-  const splatTexNode = texture(makePlaceholderSplatTex(), splatUV);
-  const splat1TexNode = texture(makePlaceholderSplatTex(), splatUV);
+  const splatTexNode = texture(makePlaceholderSplatArray(), splatUV).depth(int(0));
+  const splat1TexNode = texture(makePlaceholderSplatArray(), splatUV).depth(int(1));
 
   // ── uniforms ───────────────────────────────────────────────────────────
   const uSoloLayer = uniform(-1.0);

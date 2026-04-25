@@ -323,7 +323,12 @@ export async function startV2App() {
 
   const splatStore = new SplatStore(config);
   const placeholderSplatTex = (() => {
-    const t = new THREE.DataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, THREE.RGBAFormat);
+    const d = new Uint8Array(1 * 1 * 2 * 4);
+    const t = new THREE.DataArrayTexture(d, 1, 1, 2);
+    t.format = THREE.RGBAFormat;
+    t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+    t.minFilter = THREE.LinearFilter;
+    t.magFilter = THREE.LinearFilter;
     t.needsUpdate = true;
     return t;
   })();
@@ -385,8 +390,9 @@ export async function startV2App() {
       if (!nodes) return;
       const key = mesh.userData.chunkKey;
       const entry = splatStore.getChunkSplatByKey(key);
-      if (nodes.node0) nodes.node0.value = entry?.tex0 ?? placeholderSplatTex;
-      if (nodes.node1) nodes.node1.value = entry?.tex1 ?? placeholderSplatTex;
+      const tex = entry?.combinedTex ?? placeholderSplatTex;
+      if (nodes.node0) nodes.node0.value = tex;
+      if (nodes.node1) nodes.node1.value = tex;
     };
   }
 

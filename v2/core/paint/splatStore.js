@@ -26,12 +26,12 @@ import {
 } from "../terrain/chunkMath.js";
 import { sculptSn2 } from "../terrain/sculptNoiseFbm.js";
 
-function _makeSplatTex(data, res) {
-  const tex = new THREE.DataTexture(data, res, res, THREE.RGBAFormat);
+function _makeSplatArrayTex(data, res) {
+  const tex = new THREE.DataArrayTexture(data, res, res, 2);
+  tex.format = THREE.RGBAFormat;
   tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
   tex.minFilter = THREE.LinearFilter;
   tex.magFilter = THREE.LinearFilter;
-  tex.colorSpace = THREE.LinearSRGBColorSpace;
   tex.needsUpdate = true;
   return tex;
 }
@@ -40,7 +40,7 @@ export class SplatStore {
   constructor(config) {
     this.config = config;
     this.resolution = config.paint.splatResolution;
-    /** @type {Map<string, { data0: Uint8Array, tex0: THREE.DataTexture, data1: Uint8Array, tex1: THREE.DataTexture }>} */
+    /** @type {Map<string, { data0: Uint8Array, data1: Uint8Array, combinedTex: THREE.DataArrayTexture }>} */
     this.chunks = new Map();
   }
 
@@ -58,12 +58,13 @@ export class SplatStore {
     if (existing) return existing;
 
     const res = this.resolution;
-    const data0 = new Uint8Array(res * res * 4);
-    const data1 = new Uint8Array(res * res * 4);
-    const tex0 = _makeSplatTex(data0, res);
-    const tex1 = _makeSplatTex(data1, res);
+    const pixelBytes = res * res * 4;
+    const combinedData = new Uint8Array(pixelBytes * 2);
+    const data0 = new Uint8Array(combinedData.buffer, 0, pixelBytes);
+    const data1 = new Uint8Array(combinedData.buffer, pixelBytes, pixelBytes);
+    const combinedTex = _makeSplatArrayTex(combinedData, res);
 
-    const entry = { data0, tex0, data1, tex1 };
+    const entry = { data0, data1, combinedTex };
     this.chunks.set(key, entry);
     return entry;
   }
@@ -214,8 +215,7 @@ export class SplatStore {
       }
 
       if (anyTouched) {
-        entry.tex0.needsUpdate = true;
-        entry.tex1.needsUpdate = true;
+        entry.combinedTex.needsUpdate = true;
         touched.add(chunkKey(cx, cz));
       }
     }
@@ -247,16 +247,13 @@ export class SplatStore {
       }
       if (snap.d0) {
         entry.data0.set(snap.d0);
-        entry.tex0.needsUpdate = true;
       } else if (snap instanceof Uint8Array) {
-        // Legacy single-buffer format (from old saves)
         entry.data0.set(snap);
-        entry.tex0.needsUpdate = true;
       }
       if (snap.d1) {
         entry.data1.set(snap.d1);
-        entry.tex1.needsUpdate = true;
       }
+      entry.combinedTex.needsUpdate = true;
     }
   }
 
@@ -264,8 +261,7 @@ export class SplatStore {
     for (const entry of this.chunks.values()) {
       entry.data0.fill(0);
       entry.data1.fill(0);
-      entry.tex0.needsUpdate = true;
-      entry.tex1.needsUpdate = true;
+      entry.combinedTex.needsUpdate = true;
     }
   }
 
@@ -290,15 +286,13 @@ export class SplatStore {
           buf[i + chan] = 255;
         }
       }
-      entry.tex0.needsUpdate = true;
-      entry.tex1.needsUpdate = true;
+      entry.combinedTex.needsUpdate = true;
     }
   }
 
   dispose() {
     for (const entry of this.chunks.values()) {
-      entry.tex0.dispose();
-      entry.tex1.dispose();
+      entry.combinedTex.dispose();
     }
     this.chunks.clear();
   }
