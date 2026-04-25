@@ -318,6 +318,38 @@ export function createTextureLibrary() {
     return () => listeners.delete(fn);
   }
 
+  let _nextSlotIdx = slots.length + 1;
+
+  function addSlot(name, uvScale = 3.0) {
+    const id = `custom_${Date.now()}_${_nextSlotIdx}`;
+    const displayName = name || `Texture ${_nextSlotIdx}`;
+    _nextSlotIdx++;
+    const slot = createSlot({ id, name: displayName, uvScale });
+    slots.push(slot);
+    syncSlotUvUniform(slot);
+    syncSlotStrengthUniforms(slot);
+    emitChange(id, "slots");
+    return slot;
+  }
+
+  function removeSlot(slotId) {
+    const idx = slots.findIndex((s) => s.id === slotId);
+    if (idx < 0 || slots.length <= 1) return false;
+    const slot = slots[idx];
+    slot.albedoTex.dispose();
+    slot.ormTex.dispose();
+    slots.splice(idx, 1);
+    emitChange(slotId, "slots");
+    return true;
+  }
+
+  function renameSlot(slotId, newName) {
+    const slot = getSlot(slotId);
+    if (!slot) return;
+    slot.name = newName;
+    emitChange(slotId, "slots");
+  }
+
   function dispose() {
     for (const s of slots) {
       s.albedoTex.dispose();
@@ -340,6 +372,9 @@ export function createTextureLibrary() {
     setSlotStrength,
     replaceMapFromUrl,
     replaceMapFromFile,
+    addSlot,
+    removeSlot,
+    renameSlot,
     loadDefaultsAsync,
     addOnChange,
     dispose,

@@ -25,7 +25,8 @@ const SOLO_OPTIONS = {
 /**
  * @param {*} pane
  * @param {*} toolState
- * @param {*} opts - { config, textureLibrary, onPaintLayersChanged, onPaintFill, onPaintClear, onSoloLayerChanged, onHeightBlendChanged, brushMask }
+ * @param {*} opts
+ * @returns {{ refreshSlotOptions: Function }}
  */
 export function addPaintFolder(pane, toolState, opts) {
   const {
@@ -176,23 +177,42 @@ export function addPaintFolder(pane, toolState, opts) {
   folder.addBlade({ view: "separator" });
 
   // ── Layer texture pickers (7 overlay layers) ───────────────────────────
-  const slotOptions = textureLibrary.getSlotOptionsForUi();
   const layersFolder = folder.addFolder({ title: "Layer Textures", expanded: true });
-  const slotProxy = {};
-  for (let i = 0; i < 7; i++) {
-    const key = `layer${i + 1}`;
-    slotProxy[key] = toolState.paint.layerSlotIds[i];
-    layersFolder
-      .addBinding(slotProxy, key, { label: `Layer ${i + 1}`, options: slotOptions })
-      .on("change", () => {
-        toolState.paint.layerSlotIds[i] = slotProxy[key];
-        onPaintLayersChanged?.();
-      });
+  const layerBindings = [];
+
+  function buildLayerPickers() {
+    for (const b of layerBindings) b.dispose();
+    layerBindings.length = 0;
+
+    const slotOptions = textureLibrary.getSlotOptionsForUi();
+    const slotProxy = {};
+    for (let i = 0; i < 7; i++) {
+      const key = `layer${i + 1}`;
+      if (!textureLibrary.getSlot(toolState.paint.layerSlotIds[i])) {
+        toolState.paint.layerSlotIds[i] = textureLibrary.slots[0]?.id ?? "";
+      }
+      slotProxy[key] = toolState.paint.layerSlotIds[i];
+      const binding = layersFolder
+        .addBinding(slotProxy, key, { label: `Layer ${i + 1}`, options: slotOptions })
+        .on("change", () => {
+          toolState.paint.layerSlotIds[i] = slotProxy[key];
+          onPaintLayersChanged?.();
+        });
+      layerBindings.push(binding);
+    }
   }
+
+  buildLayerPickers();
 
   folder.addBlade({ view: "separator" });
   folder
     .addButton({ title: "Fill world with active layer" })
     .on("click", () => onPaintFill?.());
   folder.addButton({ title: "Clear all paint" }).on("click", () => onPaintClear?.());
+
+  return {
+    refreshSlotOptions() {
+      buildLayerPickers();
+    },
+  };
 }

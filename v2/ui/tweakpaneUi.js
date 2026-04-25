@@ -119,9 +119,15 @@ export function createTweakpaneUi({
     onGroundSlotChanged,
   });
 
+  let texLibUi = null;
+  let paintUi = null;
   if (textureLibrary) {
-    addTextureLibraryFolder(pane, toolState, textureLibrary);
-    addPaintFolder(pane, toolState, {
+    texLibUi = addTextureLibraryFolder(pane, toolState, textureLibrary, {
+      onSlotsChanged() {
+        paintUi?.refreshSlotOptions();
+      },
+    });
+    paintUi = addPaintFolder(pane, toolState, {
       config,
       textureLibrary,
       onPaintLayersChanged,

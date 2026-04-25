@@ -2,27 +2,49 @@
  * Texture Library pane — Unity/Unreal-style catalog UI.
  *
  * Browse slots, swap maps per slot via file upload, tune per-slot UV tiling
- * and strength multipliers. The slot bindings are live: the material samples
- * the slot's stable albedo/orm textures + uniforms directly, so edits
- * propagate without material rebuild. Map swaps invalidate the live surface
- * material from main.js (cliff-slope path reads from the same slot too).
+ * and strength multipliers. Add/remove slots to grow the palette beyond the
+ * 4 defaults.
  */
 
 /**
  * @param {*} pane
  * @param {*} toolState
  * @param {ReturnType<typeof import("../core/textures/textureLibrary.js").createTextureLibrary>} textureLibrary
+ * @param {object} opts
+ * @param {Function} [opts.onSlotsChanged]
+ * @returns {{ refreshSlotPicker: Function }}
  */
-export function addTextureLibraryFolder(pane, toolState, textureLibrary) {
+export function addTextureLibraryFolder(pane, toolState, textureLibrary, opts = {}) {
+  const { onSlotsChanged } = opts;
   const folder = pane.addFolder({ title: "Texture library", expanded: false });
 
   const slotPicker = { activeSlotId: textureLibrary.slots[0]?.id ?? "" };
-  folder
-    .addBinding(slotPicker, "activeSlotId", {
-      label: "Active slot",
-      options: textureLibrary.getSlotOptionsForUi(),
-    })
-    .on("change", () => rebuildSlotEditor());
+  let pickerBinding = null;
+
+  function buildSlotPicker() {
+    if (pickerBinding) pickerBinding.dispose();
+    const options = textureLibrary.getSlotOptionsForUi();
+    if (!textureLibrary.getSlot(slotPicker.activeSlotId)) {
+      slotPicker.activeSlotId = textureLibrary.slots[0]?.id ?? "";
+    }
+    pickerBinding = folder
+      .addBinding(slotPicker, "activeSlotId", {
+        label: "Active slot",
+        options,
+        index: 0,
+      })
+      .on("change", () => rebuildSlotEditor());
+  }
+
+  buildSlotPicker();
+
+  folder.addButton({ title: "+ Add texture slot" }).on("click", () => {
+    const slot = textureLibrary.addSlot();
+    slotPicker.activeSlotId = slot.id;
+    buildSlotPicker();
+    rebuildSlotEditor();
+    onSlotsChanged?.();
+  });
 
   const slotEditor = folder.addFolder({ title: "Slot properties", expanded: true });
 
@@ -30,6 +52,15 @@ export function addTextureLibraryFolder(pane, toolState, textureLibrary) {
     for (const child of [...slotEditor.children]) child.dispose();
     const slot = textureLibrary.getSlot(slotPicker.activeSlotId);
     if (!slot) return;
+
+    const nameProxy = { name: slot.name };
+    slotEditor
+      .addBinding(nameProxy, "name", { label: "Name" })
+      .on("change", () => {
+        textureLibrary.renameSlot(slot.id, nameProxy.name);
+        buildSlotPicker();
+        onSlotsChanged?.();
+      });
 
     slotEditor
       .addBinding(slot, "uvScale", { label: "UV tile", min: 0.25, max: 80, step: 0.25 })
@@ -54,12 +85,29 @@ export function addTextureLibraryFolder(pane, toolState, textureLibrary) {
         });
       });
     }
+
+    if (textureLibrary.slots.length > 1) {
+      slotEditor.addBlade({ view: "separator" });
+      slotEditor.addButton({ title: "Remove this slot" }).on("click", () => {
+        textureLibrary.removeSlot(slot.id);
+        slotPicker.activeSlotId = textureLibrary.slots[0]?.id ?? "";
+        buildSlotPicker();
+        rebuildSlotEditor();
+        onSlotsChanged?.();
+      });
+    }
   }
 
   rebuildSlotEditor();
+
+  return {
+    refreshSlotPicker() {
+      buildSlotPicker();
+      rebuildSlotEditor();
+    },
+  };
 }
 
-/** One-shot hidden `<input type="file">` — resolves on selection. */
 function openFileDialog(onPicked) {
   const input = document.createElement("input");
   input.type = "file";
