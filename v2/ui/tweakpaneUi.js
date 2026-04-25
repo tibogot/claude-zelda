@@ -78,6 +78,7 @@ export function createTweakpaneUi({
   onBarrierOverlayChanged,
   onBarrierClear,
   onBarrierFill,
+  brushMask,
 }) {
   const pane = new Pane({ title: "V2 Terrain Core" });
 
@@ -124,6 +125,7 @@ export function createTweakpaneUi({
       onPaintLayersChanged,
       onPaintFill,
       onPaintClear,
+      brushMask,
     });
   }
 

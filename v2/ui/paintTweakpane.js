@@ -12,10 +12,10 @@ const LAYER_LABELS = ["Eraser (restore base)", "Layer 1 (R)", "Layer 2 (G)", "La
 /**
  * @param {*} pane
  * @param {*} toolState
- * @param {*} opts - { config, textureLibrary, onPaintLayersChanged, onPaintFill, onPaintClear }
+ * @param {*} opts - { config, textureLibrary, onPaintLayersChanged, onPaintFill, onPaintClear, brushMask }
  */
 export function addPaintFolder(pane, toolState, opts) {
-  const { config, textureLibrary, onPaintLayersChanged, onPaintFill, onPaintClear } = opts;
+  const { config, textureLibrary, onPaintLayersChanged, onPaintFill, onPaintClear, brushMask } = opts;
   const folder = pane.addFolder({ title: "Paint", expanded: true });
 
   const activePicker = { activeLayer: toolState.paint.activeLayer };
@@ -59,6 +59,68 @@ export function addPaintFolder(pane, toolState, opts) {
   noiseFolder.addBinding(toolState.paint, "noiseEdgeOnly", {
     label: "Edge only",
   });
+
+  if (brushMask) {
+    const maskFolder = folder.addFolder({ title: "Brush Mask", expanded: false });
+
+    const previewCanvas = document.createElement("canvas");
+    previewCanvas.width = 64;
+    previewCanvas.height = 64;
+    previewCanvas.style.cssText =
+      "display:block;margin:4px auto 6px;border:1px solid rgba(255,255,255,0.2);border-radius:4px;image-rendering:pixelated;";
+    brushMask.renderPreview(previewCanvas);
+
+    const maskPresetProxy = { preset: toolState.paint.maskPreset };
+    maskFolder
+      .addBinding(maskPresetProxy, "preset", {
+        label: "Preset",
+        options: {
+          None: "none",
+          Soft: "soft",
+          Hard: "hard",
+          Splatter: "splatter",
+          Grunge: "grunge",
+        },
+      })
+      .on("change", () => {
+        toolState.paint.maskPreset = maskPresetProxy.preset;
+        brushMask.generateBuiltin(maskPresetProxy.preset);
+        brushMask.renderPreview(previewCanvas);
+      });
+
+    maskFolder
+      .addButton({ title: "Load PNG mask" })
+      .on("click", () => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = "image/png,image/jpeg,image/webp";
+        input.onchange = async () => {
+          const file = input.files?.[0];
+          if (!file) return;
+          await brushMask.loadFromFile(file);
+          maskPresetProxy.preset = "none";
+          toolState.paint.maskPreset = "custom:" + brushMask.name;
+          brushMask.renderPreview(previewCanvas);
+        };
+        input.click();
+      });
+
+    const containerEl = maskFolder.element.querySelector(".tp-fldv_c") ?? maskFolder.element;
+    containerEl.appendChild(previewCanvas);
+
+    maskFolder.addBinding(toolState.paint, "maskRotation", {
+      label: "Rotation",
+      min: 0,
+      max: 360,
+      step: 1,
+    });
+    maskFolder.addBinding(toolState.paint, "maskRandomRotation", {
+      label: "Random rotation",
+    });
+    maskFolder.addBinding(toolState.paint, "maskFollowStroke", {
+      label: "Follow stroke",
+    });
+  }
 
   folder.addBlade({ view: "separator" });
 

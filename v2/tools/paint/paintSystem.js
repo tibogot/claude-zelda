@@ -10,12 +10,15 @@ import { shouldApplyStroke } from "../sculpt/brushModel.js";
 import { chunkKey } from "../../core/terrain/chunkMath.js";
 
 export class PaintSystem {
-  constructor({ toolState, splatStore, config }) {
+  constructor({ toolState, splatStore, config, brushMask }) {
     this.toolState = toolState;
     this.splatStore = splatStore;
     this.config = config;
+    /** @type {import('../../core/paint/brushMask.js').BrushMask|null} */
+    this.brushMask = brushMask ?? null;
     this.isPainting = false;
     this.lastStrokePoint = null;
+    this._strokeDirection = 0;
     /** @type {Map<string, Uint8Array>} */
     this.beforeMap = new Map();
     /** @type {Map<string, Uint8Array>} */
@@ -58,6 +61,14 @@ export class PaintSystem {
     ) {
       return;
     }
+    if (this.lastStrokePoint) {
+      const dx = hitPoint.x - this.lastStrokePoint.x;
+      const dz = hitPoint.z - this.lastStrokePoint.z;
+      if (dx * dx + dz * dz > 0.01) {
+        this._strokeDirection = Math.atan2(dz, dx);
+      }
+    }
+
     this.lastStrokePoint = this.lastStrokePoint ?? new THREE.Vector3();
     this.lastStrokePoint.copy(hitPoint);
 
@@ -74,6 +85,25 @@ export class PaintSystem {
     );
 
     const paint = this.toolState.paint;
+
+    let maskData = null;
+    let maskSize = 0;
+    let maskRotation = 0;
+    const bm = this.brushMask;
+    if (bm && bm.active && bm.data) {
+      maskData = bm.data;
+      maskSize = bm.size;
+      const baseDeg = paint.maskRotation ?? 0;
+      const baseRad = (baseDeg * Math.PI) / 180;
+      if (paint.maskRandomRotation) {
+        maskRotation = Math.random() * Math.PI * 2;
+      } else if (paint.maskFollowStroke) {
+        maskRotation = this._strokeDirection + baseRad;
+      } else {
+        maskRotation = baseRad;
+      }
+    }
+
     this.splatStore.applySplatStroke({
       cx: hitPoint.x,
       cz: hitPoint.z,
@@ -85,6 +115,9 @@ export class PaintSystem {
       noiseScale: paint.noiseScale,
       noiseOctaves: paint.noiseOctaves,
       noiseEdgeOnly: paint.noiseEdgeOnly,
+      maskData,
+      maskSize,
+      maskRotation,
     });
   }
 

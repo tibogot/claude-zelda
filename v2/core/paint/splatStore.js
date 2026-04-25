@@ -86,6 +86,9 @@ export class SplatStore {
    * @param {number} [stroke.noiseScale=3] - world-space noise frequency
    * @param {number} [stroke.noiseOctaves=3] - FBM octaves for mask
    * @param {boolean} [stroke.noiseEdgeOnly=false] - noise only breaks the edge, not the interior
+   * @param {Float32Array} [stroke.maskData=null] - grayscale brush mask (0-1), square
+   * @param {number} [stroke.maskSize=0] - mask width/height
+   * @param {number} [stroke.maskRotation=0] - mask rotation in radians
    * @returns {Set<string>} chunk keys touched by this stamp
    */
   applySplatStroke(stroke) {
@@ -100,6 +103,13 @@ export class SplatStore {
     const noiseScale = stroke.noiseScale ?? 3;
     const noiseOctaves = Math.round(stroke.noiseOctaves ?? 3);
     const noiseEdgeOnly = stroke.noiseEdgeOnly ?? false;
+
+    const maskData = stroke.maskData ?? null;
+    const maskSize = stroke.maskSize ?? 0;
+    const maskRot = stroke.maskRotation ?? 0;
+    const maskCos = maskData ? Math.cos(maskRot) : 1;
+    const maskSin = maskData ? Math.sin(maskRot) : 0;
+    const invDiameter = 1 / (2 * r);
 
     const chunks = this.getChunkIndicesInBounds(
       stroke.cx - r,
@@ -131,9 +141,22 @@ export class SplatStore {
           const wx = minWX + (px + 0.5) * pxSize;
           const dx = wx - stroke.cx;
           const d = Math.sqrt(dx * dx + dz * dz);
-          if (d > r) continue;
-          const t = 1 - d * invR;
-          let falloff = Math.pow(t, stroke.falloff);
+          if (!maskData && d > r) continue;
+          const t = Math.max(0, 1 - d * invR);
+
+          let falloff;
+          if (maskData) {
+            const rx = dx * maskCos - dz * maskSin;
+            const rz = dx * maskSin + dz * maskCos;
+            const mu = rx * invDiameter + 0.5;
+            const mv = rz * invDiameter + 0.5;
+            if (mu < 0 || mu > 1 || mv < 0 || mv > 1) continue;
+            const maskVal = _sampleMask(maskData, maskSize, mu, mv);
+            if (maskVal <= 0.001) continue;
+            falloff = maskVal;
+          } else {
+            falloff = Math.pow(t, stroke.falloff);
+          }
 
           if (noiseMask > 0) {
             let n = _fbmNoise(wx * noiseScale, wz * noiseScale, noiseOctaves);
@@ -227,6 +250,23 @@ export class SplatStore {
     for (const entry of this.chunks.values()) entry.tex.dispose();
     this.chunks.clear();
   }
+}
+
+function _sampleMask(data, size, u, v) {
+  const fx = u * (size - 1);
+  const fy = v * (size - 1);
+  const x0 = Math.floor(fx);
+  const y0 = Math.floor(fy);
+  const x1 = Math.min(x0 + 1, size - 1);
+  const y1 = Math.min(y0 + 1, size - 1);
+  const tx = fx - x0;
+  const ty = fy - y0;
+  return (
+    data[y0 * size + x0] * (1 - tx) * (1 - ty) +
+    data[y0 * size + x1] * tx * (1 - ty) +
+    data[y1 * size + x0] * (1 - tx) * ty +
+    data[y1 * size + x1] * tx * ty
+  );
 }
 
 function _fbmNoise(x, y, octaves) {

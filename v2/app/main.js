@@ -27,6 +27,7 @@ import { createV2ImageTexGroundMaterial } from "../render/terrain/sharedImgTexMa
 import { createSplatOverlay } from "../render/terrain/splatOverlayTsl.js";
 import { SplatStore } from "../core/paint/splatStore.js";
 import { PaintSystem } from "../tools/paint/paintSystem.js";
+import { BrushMask } from "../core/paint/brushMask.js";
 import {
   serializeProject,
   deserializeProject,
@@ -443,7 +444,8 @@ export async function startV2App() {
       treeStore.syncAllHeights(terrainStore);
     },
   });
-  const paintSystem = new PaintSystem({ toolState, splatStore, config });
+  const brushMask = new BrushMask();
+  const paintSystem = new PaintSystem({ toolState, splatStore, config, brushMask });
 
   const treeStore = new TreeStore(config);
   const treeLodRenderer = new TreeLodRenderer(scene, config);
@@ -572,6 +574,7 @@ export async function startV2App() {
     sculptSystem,
     perf,
     textureLibrary,
+    brushMask,
     onConfigChanged: () => {
       chunkStream.update(camera.position);
     },
