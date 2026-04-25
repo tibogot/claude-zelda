@@ -28,6 +28,7 @@ import { createSplatOverlay } from "../render/terrain/splatOverlayTsl.js";
 import { SplatStore } from "../core/paint/splatStore.js";
 import { PaintSystem } from "../tools/paint/paintSystem.js";
 import { BrushMask } from "../core/paint/brushMask.js";
+import { buildLayerArrayTextures } from "../core/paint/layerArrayBuilder.js";
 import {
   serializeProject,
   deserializeProject,
@@ -213,6 +214,8 @@ export async function startV2App() {
 
   function rebuildSkyEnv() {
     try {
+      applyPhysicalSkyMeshUniforms();
+      updateSunSky();
       if (disposeSkyEnv) {
         disposeSkyEnv();
         disposeSkyEnv = null;
@@ -325,22 +328,34 @@ export async function startV2App() {
     return t;
   })();
 
+  let _layerArrayAlbedo = null;
+  let _layerArrayOrm = null;
+
   function buildSplatOverlay() {
     if (!textureLibraryReady) return null;
     const slots = toolState.paint.layerSlotIds.map((id) => textureLibrary.getSlot(id));
     if (slots.some((s) => !s)) return null;
-    return createSplatOverlay(slots, config.world.chunkSize, config.world.size);
+    // Dispose previous array textures
+    _layerArrayAlbedo?.dispose();
+    _layerArrayOrm?.dispose();
+    const { albedoArrayTex, ormArrayTex } = buildLayerArrayTextures(
+      textureLibrary, toolState.paint.layerSlotIds,
+    );
+    _layerArrayAlbedo = albedoArrayTex;
+    _layerArrayOrm = ormArrayTex;
+    return createSplatOverlay(slots, config.world.chunkSize, config.world.size, albedoArrayTex, ormArrayTex);
   }
 
-  /** Returns the splatTexNode from whichever surface material is active (if any). */
-  function getActiveSplatTexNode() {
+  /** Returns both splatmap texture nodes from whichever surface material is active. */
+  function getActiveSplatNodes() {
+    let bundle = null;
     if (toolState.terrainSurface === "tsl" && proceduralTerrainBundle) {
-      return proceduralTerrainBundle.splatTexNode;
+      bundle = proceduralTerrainBundle;
+    } else if (toolState.terrainSurface === "image" && imageTexTerrainBundle) {
+      bundle = imageTexTerrainBundle;
     }
-    if (toolState.terrainSurface === "image" && imageTexTerrainBundle) {
-      return imageTexTerrainBundle.splatTexNode;
-    }
-    return null;
+    if (!bundle) return null;
+    return { node0: bundle.splatTexNode, node1: bundle.splat1TexNode };
   }
 
   function syncSoloLayer() {
@@ -349,15 +364,29 @@ export async function startV2App() {
     if (imageTexTerrainBundle?.uSoloLayer) imageTexTerrainBundle.uSoloLayer.value = v;
   }
 
+  function syncHeightBlend() {
+    const hb = toolState.paint.heightBlend;
+    const hc = toolState.paint.heightContrast;
+    if (proceduralTerrainBundle?.uHeightBlend) {
+      proceduralTerrainBundle.uHeightBlend.value = hb;
+      proceduralTerrainBundle.uHeightContrast.value = hc;
+    }
+    if (imageTexTerrainBundle?.uHeightBlend) {
+      imageTexTerrainBundle.uHeightBlend.value = hb;
+      imageTexTerrainBundle.uHeightContrast.value = hc;
+    }
+  }
+
   function setupSplatSwapFromStore(mesh) {
     const prev = mesh.onBeforeRender;
     mesh.onBeforeRender = (renderer, scene, camera, geometry, material, group) => {
       if (prev) prev(renderer, scene, camera, geometry, material, group);
-      const node = getActiveSplatTexNode();
-      if (!node) return;
+      const nodes = getActiveSplatNodes();
+      if (!nodes) return;
       const key = mesh.userData.chunkKey;
       const entry = splatStore.getChunkSplatByKey(key);
-      node.value = entry?.tex ?? placeholderSplatTex;
+      if (nodes.node0) nodes.node0.value = entry?.tex0 ?? placeholderSplatTex;
+      if (nodes.node1) nodes.node1.value = entry?.tex1 ?? placeholderSplatTex;
     };
   }
 
@@ -437,6 +466,7 @@ export async function startV2App() {
       chunkStream.setSharedMaterial(tileTerrainMaterial);
     }
     syncSoloLayer();
+    syncHeightBlend();
   }
 
   function markHeightTexDirty() {
@@ -656,6 +686,7 @@ export async function startV2App() {
     onPaintFill: () => paintSystem.fillWithActiveLayer(),
     onPaintClear: () => paintSystem.clearAll(),
     onSoloLayerChanged: () => syncSoloLayer(),
+    onHeightBlendChanged: () => syncHeightBlend(),
     onImportTreeGlb: async (slotIdx, lod) => {
       const file = await openGlbPicker();
       if (!file) return;
@@ -1759,6 +1790,8 @@ export async function startV2App() {
       tileTerrainMaterial.dispose();
       disposeProceduralBundle();
       disposeImageTexBundle();
+      _layerArrayAlbedo?.dispose();
+      _layerArrayOrm?.dispose();
       splatStore.dispose();
       barrierStore.dispose();
       barrierOverlay.dispose();

@@ -30,7 +30,7 @@
 import { parseChunkKey } from "../terrain/chunkMath.js";
 
 const MAGIC = "V2TR";
-const VERSION = 2;
+const VERSION = 3;
 const HEADER_V1 = 26;
 const HEADER_V2 = 28;
 const TREE_INSTANCE_BYTES = 18;
@@ -56,7 +56,8 @@ export function serializeProject({ terrainStore, splatStore, treeStore, config, 
   const heightsBytesPerChunk = heightsPerChunk * 4;
 
   const splatRes = config.paint.splatResolution;
-  const splatBytesPerChunk = splatRes * splatRes * 4;
+  const splatBytesPerBuf = splatRes * splatRes * 4;
+  const splatBytesPerChunk = splatBytesPerBuf * 2;
 
   const terrainEntries = [...terrainStore.chunkDataMap.entries()];
   const splatEntries = [...splatStore.chunks.entries()];
@@ -104,13 +105,15 @@ export function serializeProject({ terrainStore, splatStore, treeStore, config, 
     offset += heightsBytesPerChunk;
   }
 
-  // Splat chunks
+  // Splat chunks (v3: dual splatmaps — data0 + data1 per chunk)
   for (const [key, entry] of splatEntries) {
     const { cx, cz } = parseChunkKey(key);
     view.setInt16(offset, cx, true); offset += 2;
     view.setInt16(offset, cz, true); offset += 2;
-    u8.set(entry.data, offset);
-    offset += splatBytesPerChunk;
+    u8.set(entry.data0, offset);
+    offset += splatBytesPerBuf;
+    u8.set(entry.data1, offset);
+    offset += splatBytesPerBuf;
   }
 
   // Tree chunks
@@ -183,16 +186,24 @@ export function deserializeProject(buffer) {
     terrainChunks.set(`${cx},${cz}`, heights);
   }
 
-  // Splat chunks
-  const splatBytesPerChunk = splatResolution * splatResolution * 4;
+  // Splat chunks — v3 saves dual buffers (data0 + data1); v2 saves single buffer (= data0)
+  const splatBytesPerBuf = splatResolution * splatResolution * 4;
   const splatChunks = new Map();
   for (let i = 0; i < splatChunkCount; i++) {
     const cx = view.getInt16(offset, true); offset += 2;
     const cz = view.getInt16(offset, true); offset += 2;
-    const data = new Uint8Array(splatBytesPerChunk);
-    data.set(u8.slice(offset, offset + splatBytesPerChunk));
-    offset += splatBytesPerChunk;
-    splatChunks.set(`${cx},${cz}`, data);
+    const d0 = new Uint8Array(splatBytesPerBuf);
+    d0.set(u8.slice(offset, offset + splatBytesPerBuf));
+    offset += splatBytesPerBuf;
+    let d1;
+    if (version >= 3) {
+      d1 = new Uint8Array(splatBytesPerBuf);
+      d1.set(u8.slice(offset, offset + splatBytesPerBuf));
+      offset += splatBytesPerBuf;
+    } else {
+      d1 = new Uint8Array(splatBytesPerBuf);
+    }
+    splatChunks.set(`${cx},${cz}`, { d0, d1 });
   }
 
   // Tree chunks (version ≥ 2)
@@ -261,6 +272,8 @@ function extractSerializableSettings(toolState) {
       noiseScale: toolState.paint.noiseScale,
       noiseOctaves: toolState.paint.noiseOctaves,
       noiseEdgeOnly: toolState.paint.noiseEdgeOnly,
+      heightBlend: toolState.paint.heightBlend,
+      heightContrast: toolState.paint.heightContrast,
     },
     autoCliffEnabled: toolState.autoCliffEnabled,
     autoCliff: { ...toolState.autoCliff },
@@ -306,6 +319,8 @@ export function applySettings(toolState, settings) {
     if (settings.paint.noiseScale != null) toolState.paint.noiseScale = settings.paint.noiseScale;
     if (settings.paint.noiseOctaves != null) toolState.paint.noiseOctaves = settings.paint.noiseOctaves;
     if (settings.paint.noiseEdgeOnly != null) toolState.paint.noiseEdgeOnly = settings.paint.noiseEdgeOnly;
+    if (settings.paint.heightBlend != null) toolState.paint.heightBlend = settings.paint.heightBlend;
+    if (settings.paint.heightContrast != null) toolState.paint.heightContrast = settings.paint.heightContrast;
   }
   if (settings.autoCliffEnabled != null) toolState.autoCliffEnabled = settings.autoCliffEnabled;
   if (settings.autoCliff) Object.assign(toolState.autoCliff, settings.autoCliff);

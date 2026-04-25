@@ -23,7 +23,7 @@ export function createToolState() {
      */
     paint: {
       activeLayer: V2_CONFIG.paint.defaultActiveLayer,
-      layerSlotIds: ["ground_037", "cobblestone", "cliff_rock"],
+      layerSlotIds: ["ground_037", "cobblestone", "cliff_rock", "grass_005", "ground_037", "cobblestone", "cliff_rock"],
       noiseMask: 0,
       noiseScale: 3.0,
       noiseOctaves: 3,
@@ -33,6 +33,8 @@ export function createToolState() {
       maskRandomRotation: false,
       maskFollowStroke: false,
       soloLayer: -1,
+      heightBlend: 0,
+      heightContrast: 0.5,
     },
     groundTsl: deepCloneJson(GROUND_DEFAULT_PARAMS),
     meadowTsl: deepCloneJson(MEADOW_DEFAULT_PARAMS),

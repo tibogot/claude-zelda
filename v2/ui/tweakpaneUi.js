@@ -34,6 +34,7 @@ export function createTweakpaneUi({
   onPaintFill,
   onPaintClear,
   onSoloLayerChanged,
+  onHeightBlendChanged,
   onSaveProject,
   onLoadProject,
   onImportTreeGlb,
@@ -127,6 +128,7 @@ export function createTweakpaneUi({
       onPaintFill,
       onPaintClear,
       onSoloLayerChanged,
+      onHeightBlendChanged,
       brushMask,
     });
   }
@@ -400,20 +402,20 @@ export function createTweakpaneUi({
     title: "Sky & fog",
     expanded: false,
   });
-  const skyChange = () => onRebuildSkyEnv?.();
   skyFolder.addBinding(toolState.physicalSky, "meshScale", {
     label: "Dome scale",
     min: 2000,
     max: 20000,
     step: 100,
-  }).on("change", skyChange);
-  skyFolder.addBinding(toolState.physicalSky, "turbidity", { min: 0, max: 20, step: 0.1 }).on("change", skyChange);
-  skyFolder.addBinding(toolState.physicalSky, "rayleigh", { min: 0, max: 4, step: 0.05 }).on("change", skyChange);
-  skyFolder.addBinding(toolState.physicalSky, "mie", { min: 0, max: 0.1, step: 0.001 }).on("change", skyChange);
-  skyFolder.addBinding(toolState.physicalSky, "mieG", { min: 0, max: 1, step: 0.01 }).on("change", skyChange);
-  skyFolder.addBinding(toolState.physicalSky, "cloudCoverage", { min: 0, max: 1, step: 0.02 }).on("change", skyChange);
-  skyFolder.addBinding(toolState.physicalSky, "cloudDensity", { min: 0, max: 1, step: 0.02 }).on("change", skyChange);
-  skyFolder.addBinding(toolState.physicalSky, "cloudElevation", { min: 0, max: 1, step: 0.02 }).on("change", skyChange);
+  });
+  skyFolder.addBinding(toolState.physicalSky, "turbidity", { min: 0, max: 20, step: 0.1 });
+  skyFolder.addBinding(toolState.physicalSky, "rayleigh", { min: 0, max: 4, step: 0.05 });
+  skyFolder.addBinding(toolState.physicalSky, "mie", { min: 0, max: 0.1, step: 0.001 });
+  skyFolder.addBinding(toolState.physicalSky, "mieG", { min: 0, max: 1, step: 0.01 });
+  skyFolder.addBinding(toolState.physicalSky, "cloudCoverage", { min: 0, max: 1, step: 0.02 });
+  skyFolder.addBinding(toolState.physicalSky, "cloudDensity", { min: 0, max: 1, step: 0.02 });
+  skyFolder.addBinding(toolState.physicalSky, "cloudElevation", { min: 0, max: 1, step: 0.02 });
+  skyFolder.addButton({ title: "Rebake Sky IBL" }).on("click", () => onRebuildSkyEnv?.());
 
   const fogFolder = skyFolder.addFolder({
     title: "Fog",

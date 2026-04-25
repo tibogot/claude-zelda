@@ -1,9 +1,8 @@
 /**
  * PaintSystem — brush stamps into SplatStore chunks with undo/redo.
  *
- * Mirrors `SculptSystem`: `beginStroke → applyAt(*) → endStroke` with spacing
- * throttling and a 64-step undo stack. Strokes accumulate per-chunk before/after
- * buffers so painting across multiple chunks is a single undo step.
+ * Dual-buffer undo: each snapshot captures both data0 and data1 per chunk
+ * so painting across layers 1..7 + meadow is a single undo step.
  */
 import * as THREE from "three";
 import { shouldApplyStroke } from "../sculpt/brushModel.js";
@@ -14,21 +13,18 @@ export class PaintSystem {
     this.toolState = toolState;
     this.splatStore = splatStore;
     this.config = config;
-    /** @type {import('../../core/paint/brushMask.js').BrushMask|null} */
     this.brushMask = brushMask ?? null;
     this.isPainting = false;
     this.lastStrokePoint = null;
     this._strokeDirection = 0;
-    /** @type {Map<string, Uint8Array>} */
+    /** @type {Map<string, { d0: Uint8Array, d1: Uint8Array }>} */
     this.beforeMap = new Map();
-    /** @type {Map<string, Uint8Array>} */
+    /** @type {Map<string, { d0: Uint8Array, d1: Uint8Array }>} */
     this.afterMap = new Map();
-    /** @type {{ before: Map<string, Uint8Array>, after: Map<string, Uint8Array> }[]} */
     this.undoStack = [];
     this.redoStack = [];
   }
 
-  /** Snapshot splat data of chunks the brush footprint overlaps (pre-paint). */
   _snapshotAffectedChunks(worldX, worldZ, radius) {
     const affected = this.splatStore.getChunkIndicesInBounds(
       worldX - radius,
@@ -40,7 +36,10 @@ export class PaintSystem {
       const entry = this.splatStore.ensureChunkSplat(cx, cz);
       const key = chunkKey(cx, cz);
       if (!this.beforeMap.has(key)) {
-        this.beforeMap.set(key, new Uint8Array(entry.data));
+        this.beforeMap.set(key, {
+          d0: new Uint8Array(entry.data0),
+          d1: new Uint8Array(entry.data1),
+        });
       }
     }
   }
@@ -74,7 +73,6 @@ export class PaintSystem {
 
     this._snapshotAffectedChunks(hitPoint.x, hitPoint.z, brush.radius);
 
-    /** Alt → eraser (shortcut), else the selected active layer. */
     const requestedLayer = this.toolState.paint.activeLayer;
     const activeLayer = event.altKey ? 0 : requestedLayer;
 
@@ -130,7 +128,10 @@ export class PaintSystem {
     for (const key of touched) {
       const entry = this.splatStore.getChunkSplatByKey(key);
       if (!entry) continue;
-      this.afterMap.set(key, new Uint8Array(entry.data));
+      this.afterMap.set(key, {
+        d0: new Uint8Array(entry.data0),
+        d1: new Uint8Array(entry.data1),
+      });
     }
     if (this.afterMap.size === 0) {
       this.beforeMap.clear();
@@ -160,21 +161,22 @@ export class PaintSystem {
     this.undoStack.push(cmd);
   }
 
-  /**
-   * "Fill world with active layer" — Unity-style Fill button. Snapshots every
-   * currently allocated chunk + all chunks in the world, so undo restores
-   * pre-fill state across everything.
-   */
   fillWithActiveLayer() {
     const activeLayer = this.toolState.paint.activeLayer;
     const before = new Map();
     for (const [key, entry] of this.splatStore.chunks) {
-      before.set(key, new Uint8Array(entry.data));
+      before.set(key, {
+        d0: new Uint8Array(entry.data0),
+        d1: new Uint8Array(entry.data1),
+      });
     }
     this.splatStore.fillAllWithLayer(activeLayer);
     const after = new Map();
     for (const [key, entry] of this.splatStore.chunks) {
-      after.set(key, new Uint8Array(entry.data));
+      after.set(key, {
+        d0: new Uint8Array(entry.data0),
+        d1: new Uint8Array(entry.data1),
+      });
     }
     if (before.size === 0 && after.size === 0) return;
     this.undoStack.push({ before, after });
@@ -185,12 +187,18 @@ export class PaintSystem {
   clearAll() {
     const before = new Map();
     for (const [key, entry] of this.splatStore.chunks) {
-      before.set(key, new Uint8Array(entry.data));
+      before.set(key, {
+        d0: new Uint8Array(entry.data0),
+        d1: new Uint8Array(entry.data1),
+      });
     }
     this.splatStore.clearAll();
     const after = new Map();
     for (const [key, entry] of this.splatStore.chunks) {
-      after.set(key, new Uint8Array(entry.data));
+      after.set(key, {
+        d0: new Uint8Array(entry.data0),
+        d1: new Uint8Array(entry.data1),
+      });
     }
     if (before.size === 0) return;
     this.undoStack.push({ before, after });

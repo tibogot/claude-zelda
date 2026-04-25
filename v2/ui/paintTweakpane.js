@@ -1,26 +1,43 @@
 /**
- * Paint panel — 3-layer weight-blended overlay painting UI (v1 parity).
+ * Paint panel — 7-layer weight-blended overlay painting UI.
  *
  * The base surface (TSL procedural or Image texture) is "layer 0" — it shows
- * wherever the splat is unpainted. Layers 1/2/3 = R/G/B channels painted on top.
+ * wherever the splat is unpainted. Layers 1..7 = overlay channels painted on top.
+ * Meadow (TSL) writes to splat1.A independently.
  *
- * `activeLayer` in state: 0 = eraser (restore base), 1/2/3 = paint R/G/B overlay.
+ * `activeLayer` in state: 0 = eraser (restore base), 1..7 = paint overlay, 8 = meadow.
  */
 
-const LAYER_LABELS = ["Eraser (restore base)", "Layer 1 (R)", "Layer 2 (G)", "Layer 3 (B)", "Meadow (TSL)"];
+const LAYER_LABELS = [
+  "Eraser (restore base)",
+  "Layer 1", "Layer 2", "Layer 3", "Layer 4",
+  "Layer 5", "Layer 6", "Layer 7",
+  "Meadow (TSL)",
+];
+
+const SOLO_OPTIONS = {
+  Off: -1,
+  "Base (layer 0)": 0,
+  "Layer 1": 1, "Layer 2": 2, "Layer 3": 3, "Layer 4": 4,
+  "Layer 5": 5, "Layer 6": 6, "Layer 7": 7,
+};
 
 /**
  * @param {*} pane
  * @param {*} toolState
- * @param {*} opts - { config, textureLibrary, onPaintLayersChanged, onPaintFill, onPaintClear, brushMask }
+ * @param {*} opts - { config, textureLibrary, onPaintLayersChanged, onPaintFill, onPaintClear, onSoloLayerChanged, onHeightBlendChanged, brushMask }
  */
 export function addPaintFolder(pane, toolState, opts) {
-  const { config, textureLibrary, onPaintLayersChanged, onPaintFill, onPaintClear, onSoloLayerChanged, brushMask } = opts;
+  const {
+    config, textureLibrary, onPaintLayersChanged, onPaintFill, onPaintClear,
+    onSoloLayerChanged, onHeightBlendChanged, brushMask,
+  } = opts;
   const folder = pane.addFolder({ title: "Paint", expanded: true });
 
+  // ── Active layer ───────────────────────────────────────────────────────
   const activePicker = { activeLayer: toolState.paint.activeLayer };
   const activeLayerOptions = {};
-  for (let i = 0; i < 5; i++) activeLayerOptions[LAYER_LABELS[i]] = i;
+  for (let i = 0; i < LAYER_LABELS.length; i++) activeLayerOptions[LAYER_LABELS[i]] = i;
   folder
     .addBinding(activePicker, "activeLayer", {
       label: "Active layer",
@@ -30,23 +47,19 @@ export function addPaintFolder(pane, toolState, opts) {
       toolState.paint.activeLayer = activePicker.activeLayer;
     });
 
+  // ── Solo layer ─────────────────────────────────────────────────────────
   const soloProxy = { soloLayer: toolState.paint.soloLayer };
   folder
     .addBinding(soloProxy, "soloLayer", {
       label: "Solo layer",
-      options: {
-        Off: -1,
-        "Base (layer 0)": 0,
-        "Layer 1 (R)": 1,
-        "Layer 2 (G)": 2,
-        "Layer 3 (B)": 3,
-      },
+      options: SOLO_OPTIONS,
     })
     .on("change", () => {
       toolState.paint.soloLayer = soloProxy.soloLayer;
       onSoloLayerChanged?.();
     });
 
+  // ── Brush opacity ──────────────────────────────────────────────────────
   folder.addBinding(config.paint, "brushOpacity", {
     label: "Brush opacity",
     min: 0.02,
@@ -54,6 +67,26 @@ export function addPaintFolder(pane, toolState, opts) {
     step: 0.01,
   });
 
+  // ── Height-based blending ──────────────────────────────────────────────
+  const hbFolder = folder.addFolder({ title: "Height Blend", expanded: false });
+  hbFolder
+    .addBinding(toolState.paint, "heightBlend", {
+      label: "Strength",
+      min: 0,
+      max: 1,
+      step: 0.01,
+    })
+    .on("change", () => onHeightBlendChanged?.());
+  hbFolder
+    .addBinding(toolState.paint, "heightContrast", {
+      label: "Contrast",
+      min: 0.01,
+      max: 1,
+      step: 0.01,
+    })
+    .on("change", () => onHeightBlendChanged?.());
+
+  // ── Noise mask ─────────────────────────────────────────────────────────
   const noiseFolder = folder.addFolder({ title: "Noise Mask", expanded: false });
   noiseFolder.addBinding(toolState.paint, "noiseMask", {
     label: "Amount",
@@ -77,6 +110,7 @@ export function addPaintFolder(pane, toolState, opts) {
     label: "Edge only",
   });
 
+  // ── Brush mask (PNG) ───────────────────────────────────────────────────
   if (brushMask) {
     const maskFolder = folder.addFolder({ title: "Brush Mask", expanded: false });
 
@@ -141,16 +175,15 @@ export function addPaintFolder(pane, toolState, opts) {
 
   folder.addBlade({ view: "separator" });
 
+  // ── Layer texture pickers (7 overlay layers) ───────────────────────────
   const slotOptions = textureLibrary.getSlotOptionsForUi();
-  const slotProxy = {
-    layer1: toolState.paint.layerSlotIds[0],
-    layer2: toolState.paint.layerSlotIds[1],
-    layer3: toolState.paint.layerSlotIds[2],
-  };
-  for (let i = 0; i < 3; i++) {
+  const layersFolder = folder.addFolder({ title: "Layer Textures", expanded: true });
+  const slotProxy = {};
+  for (let i = 0; i < 7; i++) {
     const key = `layer${i + 1}`;
-    folder
-      .addBinding(slotProxy, key, { label: `Layer ${i + 1} texture`, options: slotOptions })
+    slotProxy[key] = toolState.paint.layerSlotIds[i];
+    layersFolder
+      .addBinding(slotProxy, key, { label: `Layer ${i + 1}`, options: slotOptions })
       .on("change", () => {
         toolState.paint.layerSlotIds[i] = slotProxy[key];
         onPaintLayersChanged?.();

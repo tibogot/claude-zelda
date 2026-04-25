@@ -1,16 +1,19 @@
 /**
- * SplatStore — per-chunk lazy RGBA splat textures for 4-layer paint mode.
+ * SplatStore — per-chunk dual RGBA splat textures for 8-layer paint mode.
  *
  * Memory model:
- *   - One 128×128 RGBA8 DataTexture per chunk, created on first paint only.
- *   - Splat channels R/G/B store the weights of layers 1/2/3 (0..255).
- *   - Layer 0 is the implicit base — w0 = 1 - (R + G + B), clamped/normalized in shader.
+ *   - Two 128×128 RGBA8 DataTextures per chunk, created on first paint only.
+ *   - splat0 channels R/G/B/A store weights of layers 1/2/3/4 (0..255).
+ *   - splat1 channels R/G/B   store weights of layers 5/6/7 (0..255).
+ *   - splat1 channel  A       stores meadow density.
+ *   - Layer 0 is the implicit base — w0 = 1 - sum(all 7 layers), clamped/normalized in shader.
  *   - Default = all zeros → every chunk shows 100% layer 0 with no allocation cost.
  *
- * Blending model (Unreal-style "weight-blended layers"):
- *   Over-painting is allowed; the shader normalizes `(w0, w1, w2, w3)` so values
- *   always sum to 1. Users paint intuitively — "add more of this layer" — and the
- *   math stays well-defined when R+G+B > 1.
+ * activeLayer mapping:
+ *   0       = eraser (clears all channels in both buffers)
+ *   1..4    = splat0 channels R/G/B/A
+ *   5..7    = splat1 channels R/G/B
+ *   8       = meadow (splat1.A)
  */
 import * as THREE from "three";
 import {
@@ -23,11 +26,21 @@ import {
 } from "../terrain/chunkMath.js";
 import { sculptSn2 } from "../terrain/sculptNoiseFbm.js";
 
+function _makeSplatTex(data, res) {
+  const tex = new THREE.DataTexture(data, res, res, THREE.RGBAFormat);
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.colorSpace = THREE.LinearSRGBColorSpace;
+  tex.needsUpdate = true;
+  return tex;
+}
+
 export class SplatStore {
   constructor(config) {
     this.config = config;
     this.resolution = config.paint.splatResolution;
-    /** @type {Map<string, { data: Uint8Array, tex: THREE.DataTexture }>} */
+    /** @type {Map<string, { data0: Uint8Array, tex0: THREE.DataTexture, data1: Uint8Array, tex1: THREE.DataTexture }>} */
     this.chunks = new Map();
   }
 
@@ -39,27 +52,22 @@ export class SplatStore {
     return this.chunks.get(key) ?? null;
   }
 
-  /** Lazy-create the splat buffer + texture for a chunk. All-zero init = 100% layer 0. */
   ensureChunkSplat(cx, cz) {
     const key = chunkKey(cx, cz);
     const existing = this.chunks.get(key);
     if (existing) return existing;
 
     const res = this.resolution;
-    const data = new Uint8Array(res * res * 4);
-    const tex = new THREE.DataTexture(data, res, res, THREE.RGBAFormat);
-    tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
-    tex.minFilter = THREE.LinearFilter;
-    tex.magFilter = THREE.LinearFilter;
-    tex.colorSpace = THREE.LinearSRGBColorSpace;
-    tex.needsUpdate = true;
+    const data0 = new Uint8Array(res * res * 4);
+    const data1 = new Uint8Array(res * res * 4);
+    const tex0 = _makeSplatTex(data0, res);
+    const tex1 = _makeSplatTex(data1, res);
 
-    const entry = { data, tex };
+    const entry = { data0, tex0, data1, tex1 };
     this.chunks.set(key, entry);
     return entry;
   }
 
-  /** Returns {cx, cz} pairs for every chunk whose footprint overlaps the world AABB. */
   getChunkIndicesInBounds(minX, minZ, maxX, maxZ) {
     const { cx: cx0, cz: cz0 } = worldToChunkIndex(minX, minZ, this.config);
     const { cx: cx1, cz: cz1 } = worldToChunkIndex(maxX, maxZ, this.config);
@@ -78,18 +86,18 @@ export class SplatStore {
    * @param {object} stroke
    * @param {number} stroke.cx - brush center world X
    * @param {number} stroke.cz - brush center world Z
-   * @param {number} stroke.radius - brush radius (world meters)
-   * @param {number} stroke.strength - 0..1 per-pixel max delta
-   * @param {number} stroke.falloff - power applied to `(1 - dist/radius)`
-   * @param {number} stroke.activeLayer - 0 = base (eraser), 1..3 = R/G/B channel
-   * @param {number} [stroke.noiseMask=0] - 0 = clean circle, 1 = fully noise-masked edge
-   * @param {number} [stroke.noiseScale=3] - world-space noise frequency
-   * @param {number} [stroke.noiseOctaves=3] - FBM octaves for mask
-   * @param {boolean} [stroke.noiseEdgeOnly=false] - noise only breaks the edge, not the interior
-   * @param {Float32Array} [stroke.maskData=null] - grayscale brush mask (0-1), square
-   * @param {number} [stroke.maskSize=0] - mask width/height
-   * @param {number} [stroke.maskRotation=0] - mask rotation in radians
-   * @returns {Set<string>} chunk keys touched by this stamp
+   * @param {number} stroke.radius
+   * @param {number} stroke.strength - 0..1
+   * @param {number} stroke.falloff
+   * @param {number} stroke.activeLayer - 0=eraser, 1..7=overlay, 8=meadow
+   * @param {number} [stroke.noiseMask=0]
+   * @param {number} [stroke.noiseScale=3]
+   * @param {number} [stroke.noiseOctaves=3]
+   * @param {boolean} [stroke.noiseEdgeOnly=false]
+   * @param {Float32Array} [stroke.maskData=null]
+   * @param {number} [stroke.maskSize=0]
+   * @param {number} [stroke.maskRotation=0]
+   * @returns {Set<string>}
    */
   applySplatStroke(stroke) {
     const res = this.resolution;
@@ -111,6 +119,22 @@ export class SplatStore {
     const maskSin = maskData ? Math.sin(maskRot) : 0;
     const invDiameter = 1 / (2 * r);
 
+    const activeLayer = stroke.activeLayer;
+    const isEraser = activeLayer === 0;
+
+    // Map activeLayer → which buffer + channel
+    let targetBuf = 0; // 0 = data0, 1 = data1
+    let targetChan = 0;
+    if (!isEraser) {
+      if (activeLayer <= 4) {
+        targetBuf = 0;
+        targetChan = activeLayer - 1;
+      } else {
+        targetBuf = 1;
+        targetChan = activeLayer - 5;
+      }
+    }
+
     const chunks = this.getChunkIndicesInBounds(
       stroke.cx - r,
       stroke.cz - r,
@@ -129,10 +153,8 @@ export class SplatStore {
       const pxMaxZ = Math.min(res - 1, Math.ceil((stroke.cz + r - minWZ) / pxSize));
 
       let anyTouched = false;
-      const data = entry.data;
-      const activeLayer = stroke.activeLayer;
-      const isEraser = activeLayer === 0;
-      const targetChan = activeLayer - 1;
+      const d0 = entry.data0;
+      const d1 = entry.data1;
 
       for (let pz = pxMinZ; pz <= pxMaxZ; pz++) {
         const wz = minWZ + (pz + 0.5) * pxSize;
@@ -173,81 +195,111 @@ export class SplatStore {
           if (w <= 0) continue;
           const delta = w * 255;
           const idx = (pz * res + px) * 4;
+
           if (isEraser) {
-            data[idx] = Math.max(0, data[idx] - delta);
-            data[idx + 1] = Math.max(0, data[idx + 1] - delta);
-            data[idx + 2] = Math.max(0, data[idx + 2] - delta);
-            data[idx + 3] = Math.max(0, data[idx + 3] - delta);
+            d0[idx] = Math.max(0, d0[idx] - delta);
+            d0[idx + 1] = Math.max(0, d0[idx + 1] - delta);
+            d0[idx + 2] = Math.max(0, d0[idx + 2] - delta);
+            d0[idx + 3] = Math.max(0, d0[idx + 3] - delta);
+            d1[idx] = Math.max(0, d1[idx] - delta);
+            d1[idx + 1] = Math.max(0, d1[idx + 1] - delta);
+            d1[idx + 2] = Math.max(0, d1[idx + 2] - delta);
+            d1[idx + 3] = Math.max(0, d1[idx + 3] - delta);
           } else {
-            data[idx + targetChan] = Math.min(255, data[idx + targetChan] + delta);
+            const buf = targetBuf === 0 ? d0 : d1;
+            buf[idx + targetChan] = Math.min(255, buf[idx + targetChan] + delta);
           }
           anyTouched = true;
         }
       }
 
       if (anyTouched) {
-        entry.tex.needsUpdate = true;
+        entry.tex0.needsUpdate = true;
+        entry.tex1.needsUpdate = true;
         touched.add(chunkKey(cx, cz));
       }
     }
     return touched;
   }
 
-  /** Take a defensive copy of splat data for an iterable of chunk keys (undo snapshot). */
+  /** Snapshot both buffers for undo. */
   snapshotChunks(keys) {
     const snap = new Map();
     for (const key of keys) {
       const entry = this.chunks.get(key);
-      if (entry) snap.set(key, new Uint8Array(entry.data));
+      if (entry) {
+        snap.set(key, {
+          d0: new Uint8Array(entry.data0),
+          d1: new Uint8Array(entry.data1),
+        });
+      }
     }
     return snap;
   }
 
-  /** Restore data from an undo snapshot. Creates entries for any keys not yet allocated. */
+  /** Restore from snapshot (dual-buffer format). */
   restoreFromSnapshot(snapshotMap) {
-    for (const [key, data] of snapshotMap) {
+    for (const [key, snap] of snapshotMap) {
       let entry = this.chunks.get(key);
       if (!entry) {
         const { cx, cz } = parseChunkKey(key);
         entry = this.ensureChunkSplat(cx, cz);
       }
-      entry.data.set(data);
-      entry.tex.needsUpdate = true;
+      if (snap.d0) {
+        entry.data0.set(snap.d0);
+        entry.tex0.needsUpdate = true;
+      } else if (snap instanceof Uint8Array) {
+        // Legacy single-buffer format (from old saves)
+        entry.data0.set(snap);
+        entry.tex0.needsUpdate = true;
+      }
+      if (snap.d1) {
+        entry.data1.set(snap.d1);
+        entry.tex1.needsUpdate = true;
+      }
     }
   }
 
-  /** Clear every allocated chunk back to 100% layer 0. */
   clearAll() {
     for (const entry of this.chunks.values()) {
-      entry.data.fill(0);
-      entry.tex.needsUpdate = true;
+      entry.data0.fill(0);
+      entry.data1.fill(0);
+      entry.tex0.needsUpdate = true;
+      entry.tex1.needsUpdate = true;
     }
   }
 
-  /**
-   * Fill every allocated chunk with a single layer (255 in that channel, 0 elsewhere).
-   * Eraser layer (0) is equivalent to `clearAll()`.
-   */
   fillAllWithLayer(activeLayer) {
-    const targetChan = activeLayer - 1;
     for (const entry of this.chunks.values()) {
-      const d = entry.data;
       if (activeLayer === 0) {
-        d.fill(0);
+        entry.data0.fill(0);
+        entry.data1.fill(0);
       } else {
-        for (let i = 0; i < d.length; i += 4) {
-          d[i] = targetChan === 0 ? 255 : 0;
-          d[i + 1] = targetChan === 1 ? 255 : 0;
-          d[i + 2] = targetChan === 2 ? 255 : 0;
-          d[i + 3] = targetChan === 3 ? 255 : 0;
+        entry.data0.fill(0);
+        entry.data1.fill(0);
+
+        let buf, chan;
+        if (activeLayer <= 4) {
+          buf = entry.data0;
+          chan = activeLayer - 1;
+        } else {
+          buf = entry.data1;
+          chan = activeLayer - 5;
+        }
+        for (let i = 0; i < buf.length; i += 4) {
+          buf[i + chan] = 255;
         }
       }
-      entry.tex.needsUpdate = true;
+      entry.tex0.needsUpdate = true;
+      entry.tex1.needsUpdate = true;
     }
   }
 
   dispose() {
-    for (const entry of this.chunks.values()) entry.tex.dispose();
+    for (const entry of this.chunks.values()) {
+      entry.tex0.dispose();
+      entry.tex1.dispose();
+    }
     this.chunks.clear();
   }
 }

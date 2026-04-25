@@ -82,7 +82,10 @@ export function createV2ProceduralGroundMaterial(groundParams, meadowParams, cli
   return {
     material: mat,
     splatTexNode: splatOverlay?.splatTexNode ?? null,
+    splat1TexNode: splatOverlay?.splat1TexNode ?? null,
     uSoloLayer: splatOverlay?.uSoloLayer ?? null,
+    uHeightBlend: splatOverlay?.uHeightBlend ?? null,
+    uHeightContrast: splatOverlay?.uHeightContrast ?? null,
     groundColorAtWorldXZ: groundBundle.groundColorAtWorldXZ,
     groundUniforms: groundBundle.groundUniforms,
     syncGround: (p) => groundBundle.syncFromParams(p),

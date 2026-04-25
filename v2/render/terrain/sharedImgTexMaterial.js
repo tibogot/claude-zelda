@@ -107,7 +107,10 @@ export function createV2ImageTexGroundMaterial(groundSlot, worldSize, cliffDeps 
   return {
     material: mat,
     splatTexNode: splatOverlay?.splatTexNode ?? null,
+    splat1TexNode: splatOverlay?.splat1TexNode ?? null,
     uSoloLayer: splatOverlay?.uSoloLayer ?? null,
+    uHeightBlend: splatOverlay?.uHeightBlend ?? null,
+    uHeightContrast: splatOverlay?.uHeightContrast ?? null,
     syncMeadow: meadowBundle ? (p) => meadowBundle.syncFromParams(p) : () => {},
   };
 }
