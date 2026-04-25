@@ -61,7 +61,7 @@ export function generateRoadGeometry(curve, width, segments, heightOffset, getWo
     const rz = pos.z + perp.z * halfW;
     positions.push(lx, getWorldHeight(lx, lz) + heightOffset, lz);
     positions.push(rx, getWorldHeight(rx, rz) + heightOffset, rz);
-    uvs.push(u, 0, u, 1);
+    uvs.push(arcLen[i], 0, arcLen[i], 1);
 
     let jL = 0, jR = 0;
     if (otherPolylines) {

@@ -2,8 +2,9 @@ import * as THREE from "three";
 import { generateRoadGeometry } from "../../core/road/roadMesh.js";
 import { createRoadUniforms, createRoadMaterial, syncRoadUniforms } from "../../core/road/roadMaterial.js";
 
-const NORMAL_TEX_PATH = "../textures/terrain-normal.jpg";
-const ROUGHNESS_TEX_PATH = "../textures/terrain-roughness.jpg";
+const DIFFUSE_TEX_PATH = "../textures/asphalt_track/asphalt_track_diff_2k.jpg";
+const ARM_TEX_PATH = "../textures/asphalt_track/asphalt_track_arm_2k.jpg";
+const NORMAL_TEX_PATH = "../textures/asphalt_track/asphalt_track_nor_gl_2k.jpg";
 
 export class RoadSystem {
   constructor({ scene, camera, toolState, getWorldHeight, reflectTex, terrainStore, chunkStream }) {
@@ -24,8 +25,9 @@ export class RoadSystem {
     scene.add(this.handleGroup);
     this.handleMeshes = [];
 
+    this._diffuseTex = null;
+    this._armTex = null;
     this._normalTex = null;
-    this._roughnessTex = null;
     this._matReady = false;
     this.roadUniforms = createRoadUniforms(toolState.road);
     this._loadTextures();
@@ -37,25 +39,31 @@ export class RoadSystem {
   _loadTextures() {
     const loader = new THREE.TextureLoader();
     let loaded = 0;
+    const total = 3;
     const onLoaded = () => {
       loaded++;
-      if (loaded >= 2) {
-        this.roadMat = createRoadMaterial(this.roadUniforms, this._normalTex, this._roughnessTex, this._reflectTex);
+      if (loaded >= total) {
+        this.roadMat = createRoadMaterial(this.roadUniforms, this._diffuseTex, this._armTex, this._normalTex, this._reflectTex);
         this._matReady = true;
         this._rebuildVisual();
       }
     };
+    loader.load(DIFFUSE_TEX_PATH, (tex) => {
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      this._diffuseTex = tex;
+      onLoaded();
+    }, undefined, () => onLoaded());
+    loader.load(ARM_TEX_PATH, (tex) => {
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      this._armTex = tex;
+      onLoaded();
+    }, undefined, () => onLoaded());
     loader.load(NORMAL_TEX_PATH, (tex) => {
       tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
       this._normalTex = tex;
       onLoaded();
     }, undefined, () => onLoaded());
-    loader.load(ROUGHNESS_TEX_PATH, (tex) => {
-      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-      this._roughnessTex = tex;
-      onLoaded();
-    }, undefined, () => onLoaded());
-    this.roadMat = createRoadMaterial(this.roadUniforms, null, null, this._reflectTex);
+    this.roadMat = createRoadMaterial(this.roadUniforms, null, null, null, this._reflectTex);
   }
 
   _activeIdx() {
@@ -206,7 +214,7 @@ export class RoadSystem {
     for (const seg of this.segments) {
       if (seg.points.length < 2) continue;
       const curve = new THREE.CatmullRomCurve3(seg.points, false, "catmullrom", 0.5);
-      this.terrainStore.flattenUnderRoad(curve, rp.width, rp.segments, dirtyChunks);
+      this.terrainStore.flattenUnderRoad(curve, rp.width, rp.segments, rp.heightOffset, dirtyChunks);
     }
     if (dirtyChunks.size > 0) {
       this.chunkStream.markDirtyRects(dirtyChunks);

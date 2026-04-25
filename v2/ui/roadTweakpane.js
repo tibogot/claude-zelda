@@ -22,16 +22,27 @@ export function addRoadFolder(pane, toolState, opts) {
   folder.addButton({ title: "Flatten terrain under roads" }).on("click", () => onRoadFlattenTerrain?.());
 
   const matFolder = folder.addFolder({ title: "Material", expanded: false });
-  matFolder.addBinding(rp, "asphaltDark", { label: "Dark", view: "color" }).on("change", onRoadChanged);
-  matFolder.addBinding(rp, "asphaltLight", { label: "Light", view: "color" }).on("change", onRoadChanged);
-  matFolder.addBinding(rp, "grainScale", { label: "Grain scale", min: 1, max: 40, step: 0.5 }).on("change", onRoadChanged);
-  matFolder.addBinding(rp, "grainStrength", { label: "Grain strength", min: 0, max: 1, step: 0.01 }).on("change", onRoadChanged);
-  matFolder.addBinding(rp, "lineColor", { label: "Line color", view: "color" }).on("change", onRoadChanged);
-  matFolder.addBinding(rp, "lineWidth", { label: "Line width", min: 0, max: 0.2, step: 0.005 }).on("change", onRoadChanged);
-  matFolder.addBinding(rp, "lineSoftness", { label: "Line softness", min: 0, max: 0.1, step: 0.002 }).on("change", onRoadChanged);
+  matFolder.addBinding(rp, "colorTint", { label: "Color tint", view: "color" }).on("change", onRoadChanged);
+  matFolder.addBinding(rp, "colorBrightness", { label: "Brightness", min: 0.2, max: 2.0, step: 0.05 }).on("change", onRoadChanged);
+  matFolder.addBinding(rp, "lineColor", { label: "Edge color", view: "color" }).on("change", onRoadChanged);
+  matFolder.addBinding(rp, "lineWidth", { label: "Edge width", min: 0, max: 0.2, step: 0.005 }).on("change", onRoadChanged);
+  matFolder.addBinding(rp, "lineSoftness", { label: "Edge softness", min: 0, max: 0.1, step: 0.002 }).on("change", onRoadChanged);
+  matFolder.addBinding(rp, "lineInset", { label: "Edge inset", min: 0, max: 0.15, step: 0.005 }).on("change", onRoadChanged);
+
+  const edgeBlendFolder = matFolder.addFolder({ title: "Edge blend", expanded: false });
+  edgeBlendFolder.addBinding(rp, "edgeBlendWidth", { label: "Blend width", min: 0, max: 0.3, step: 0.01 }).on("change", onRoadChanged);
+  edgeBlendFolder.addBinding(rp, "edgeBlendNoise", { label: "Noise scale", min: 1, max: 30, step: 0.5 }).on("change", onRoadChanged);
+
+  const centerFolder = matFolder.addFolder({ title: "Center line", expanded: false });
+  centerFolder.addBinding(rp, "centerLine", { label: "Enable" }).on("change", onRoadChanged);
+  centerFolder.addBinding(rp, "centerLineColor", { label: "Color", view: "color" }).on("change", onRoadChanged);
+  centerFolder.addBinding(rp, "centerLineWidth", { label: "Width", min: 0.005, max: 0.1, step: 0.002 }).on("change", onRoadChanged);
+  centerFolder.addBinding(rp, "centerLineSoftness", { label: "Softness", min: 0, max: 0.05, step: 0.002 }).on("change", onRoadChanged);
+  centerFolder.addBinding(rp, "centerLineDashed", { label: "Dashed" }).on("change", onRoadChanged);
+  centerFolder.addBinding(rp, "centerLineDashScale", { label: "Dash density", min: 0.05, max: 2, step: 0.05 }).on("change", onRoadChanged);
 
   const geoFolder = folder.addFolder({ title: "Geometry", expanded: false });
-  geoFolder.addBinding(rp, "width", { label: "Width", min: 1, max: 30, step: 0.5 }).on("change", onRoadChanged);
+  geoFolder.addBinding(rp, "width", { label: "Width", min: 1, max: 50, step: 0.5 }).on("change", onRoadChanged);
   geoFolder.addBinding(rp, "segments", { label: "Segments", min: 20, max: 600, step: 10 }).on("change", onRoadChanged);
   geoFolder.addBinding(rp, "heightOffset", { label: "Height offset", min: 0, max: 2, step: 0.01 }).on("change", onRoadChanged);
 

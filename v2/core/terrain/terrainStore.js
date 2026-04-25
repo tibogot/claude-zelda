@@ -343,7 +343,7 @@ export class TerrainStore {
     }
   }
 
-  flattenUnderRoad(curve, width, segments, dirtyChunks) {
+  flattenUnderRoad(curve, width, segments, heightOffset, dirtyChunks) {
     const res = this.config.world.dataResolution;
     const stride = res + 1;
     const cs = this.config.world.chunkSize;
@@ -407,15 +407,17 @@ export class TerrainStore {
 
             const idx = iz * stride + ix;
             const current = heights[idx];
-            let blend;
+            let blend, targetY;
             if (bestDist <= halfW) {
               blend = 1;
+              targetY = bestY - heightOffset;
             } else {
               blend = 1 - (bestDist - halfW) / (margin - halfW);
               blend = blend * blend * (3 - 2 * blend);
+              targetY = bestY;
             }
 
-            const next = current + (bestY - current) * blend;
+            const next = current + (targetY - current) * blend;
             heights[idx] = next;
 
             const key = chunkKey(cx, cz);
