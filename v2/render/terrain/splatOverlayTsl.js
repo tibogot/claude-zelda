@@ -34,6 +34,8 @@ import {
   max,
   clamp,
   sqrt,
+  uniform,
+  step,
 } from "three/tsl";
 
 function makePlaceholderSplatTex() {
@@ -70,6 +72,8 @@ export function createSplatOverlay(layerSlots, chunkSize, worldSize) {
     };
   });
 
+  const uSoloLayer = uniform(-1.0);
+
   const splatWeights = Fn(() => {
     const r = splatTexNode.r;
     const g = splatTexNode.g;
@@ -90,7 +94,15 @@ export function createSplatOverlay(layerSlots, chunkSize, worldSize) {
     const c3 = layerNodes[2].albedo.rgb.mul(
       mix(float(1), layerNodes[2].orm.g, layerSlots[2].uAOStr),
     );
-    return baseColor.mul(w.x).add(c1.mul(w.y)).add(c2.mul(w.z)).add(c3.mul(w.w));
+    const blended = baseColor.mul(w.x).add(c1.mul(w.y)).add(c2.mul(w.z)).add(c3.mul(w.w));
+
+    const isSolo = step(float(0), uSoloLayer);
+    const s0 = step(float(0.5), uSoloLayer);
+    const s1 = step(float(1.5), uSoloLayer);
+    const s2 = step(float(2.5), uSoloLayer);
+    const soloW = mix(w.x, mix(w.y, mix(w.z, w.w, s2), s1), s0);
+    const soloColor = vec3(soloW, soloW, soloW);
+    return mix(blended, soloColor, isSolo);
   }
 
   function blendRoughness(baseRough) {
@@ -142,5 +154,5 @@ export function createSplatOverlay(layerSlots, chunkSize, worldSize) {
     return mix(col, meadowProcFn(), mW);
   }
 
-  return { splatTexNode, splatWeights, blendColor, blendRoughness, blendNormalRaw, blendNormalStrength, blendMeadow };
+  return { splatTexNode, uSoloLayer, splatWeights, blendColor, blendRoughness, blendNormalRaw, blendNormalStrength, blendMeadow };
 }

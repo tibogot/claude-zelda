@@ -343,6 +343,12 @@ export async function startV2App() {
     return null;
   }
 
+  function syncSoloLayer() {
+    const v = toolState.paint.soloLayer;
+    if (proceduralTerrainBundle?.uSoloLayer) proceduralTerrainBundle.uSoloLayer.value = v;
+    if (imageTexTerrainBundle?.uSoloLayer) imageTexTerrainBundle.uSoloLayer.value = v;
+  }
+
   function setupSplatSwapFromStore(mesh) {
     const prev = mesh.onBeforeRender;
     mesh.onBeforeRender = (renderer, scene, camera, geometry, material, group) => {
@@ -644,6 +650,7 @@ export async function startV2App() {
     },
     onPaintFill: () => paintSystem.fillWithActiveLayer(),
     onPaintClear: () => paintSystem.clearAll(),
+    onSoloLayerChanged: () => syncSoloLayer(),
     onImportTreeGlb: async (slotIdx, lod) => {
       const file = await openGlbPicker();
       if (!file) return;

@@ -33,6 +33,7 @@ export function createTweakpaneUi({
   onPaintLayersChanged,
   onPaintFill,
   onPaintClear,
+  onSoloLayerChanged,
   onSaveProject,
   onLoadProject,
   onImportTreeGlb,
@@ -125,6 +126,7 @@ export function createTweakpaneUi({
       onPaintLayersChanged,
       onPaintFill,
       onPaintClear,
+      onSoloLayerChanged,
       brushMask,
     });
   }

@@ -107,6 +107,7 @@ export function createV2ImageTexGroundMaterial(groundSlot, worldSize, cliffDeps 
   return {
     material: mat,
     splatTexNode: splatOverlay?.splatTexNode ?? null,
+    uSoloLayer: splatOverlay?.uSoloLayer ?? null,
     syncMeadow: meadowBundle ? (p) => meadowBundle.syncFromParams(p) : () => {},
   };
 }

@@ -32,6 +32,7 @@ export function createToolState() {
       maskRotation: 0,
       maskRandomRotation: false,
       maskFollowStroke: false,
+      soloLayer: -1,
     },
     groundTsl: deepCloneJson(GROUND_DEFAULT_PARAMS),
     meadowTsl: deepCloneJson(MEADOW_DEFAULT_PARAMS),

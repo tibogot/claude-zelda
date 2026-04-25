@@ -15,7 +15,7 @@ const LAYER_LABELS = ["Eraser (restore base)", "Layer 1 (R)", "Layer 2 (G)", "La
  * @param {*} opts - { config, textureLibrary, onPaintLayersChanged, onPaintFill, onPaintClear, brushMask }
  */
 export function addPaintFolder(pane, toolState, opts) {
-  const { config, textureLibrary, onPaintLayersChanged, onPaintFill, onPaintClear, brushMask } = opts;
+  const { config, textureLibrary, onPaintLayersChanged, onPaintFill, onPaintClear, onSoloLayerChanged, brushMask } = opts;
   const folder = pane.addFolder({ title: "Paint", expanded: true });
 
   const activePicker = { activeLayer: toolState.paint.activeLayer };
@@ -28,6 +28,23 @@ export function addPaintFolder(pane, toolState, opts) {
     })
     .on("change", () => {
       toolState.paint.activeLayer = activePicker.activeLayer;
+    });
+
+  const soloProxy = { soloLayer: toolState.paint.soloLayer };
+  folder
+    .addBinding(soloProxy, "soloLayer", {
+      label: "Solo layer",
+      options: {
+        Off: -1,
+        "Base (layer 0)": 0,
+        "Layer 1 (R)": 1,
+        "Layer 2 (G)": 2,
+        "Layer 3 (B)": 3,
+      },
+    })
+    .on("change", () => {
+      toolState.paint.soloLayer = soloProxy.soloLayer;
+      onSoloLayerChanged?.();
     });
 
   folder.addBinding(config.paint, "brushOpacity", {
@@ -67,7 +84,7 @@ export function addPaintFolder(pane, toolState, opts) {
     previewCanvas.width = 64;
     previewCanvas.height = 64;
     previewCanvas.style.cssText =
-      "display:block;margin:4px auto 6px;border:1px solid rgba(255,255,255,0.2);border-radius:4px;image-rendering:pixelated;";
+      "display:block;width:48px;height:48px;margin:4px auto 6px;border:1px solid rgba(255,255,255,0.2);border-radius:4px;image-rendering:pixelated;";
     brushMask.renderPreview(previewCanvas);
 
     const maskPresetProxy = { preset: toolState.paint.maskPreset };
