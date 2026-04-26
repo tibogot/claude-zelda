@@ -13,6 +13,7 @@ export function addRoadFolder(pane, toolState, opts) {
   const folder = pane.addFolder({ title: "Road", expanded: true });
 
   folder.addBinding(rp, "showHandles", { label: "Show handles" }).on("change", onRoadChanged);
+  folder.addBinding(rp, "closed", { label: "Close path (loop)" }).on("change", onRoadChanged);
   folder.addBinding(rp, "activeRoadIndex", { label: "Active road #", min: 0, max: 63, step: 1 }).on("change", () => onRoadActiveIndexChanged?.());
   folder.addButton({ title: "New road" }).on("click", () => onRoadNewRoad?.());
   folder.addButton({ title: "Delete active road" }).on("click", () => onRoadDeleteActive?.());

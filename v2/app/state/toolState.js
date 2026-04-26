@@ -207,6 +207,7 @@ export function createToolState() {
       width: 40,
       segments: 400,
       heightOffset: 0.15,
+      closed: false,
       selectedPointY: 0,
       showHandles: true,
       activeRoadIndex: 0,

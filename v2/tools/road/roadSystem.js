@@ -213,7 +213,7 @@ export class RoadSystem {
     const dirtyChunks = new Map();
     for (const seg of this.segments) {
       if (seg.points.length < 2) continue;
-      const curve = new THREE.CatmullRomCurve3(seg.points, false, "catmullrom", 0.5);
+      const curve = new THREE.CatmullRomCurve3(seg.points, !!rp.closed, "catmullrom", 0.5);
       this.terrainStore.flattenUnderRoad(curve, rp.width, rp.segments, rp.heightOffset, dirtyChunks);
     }
     if (dirtyChunks.size > 0) {
@@ -230,7 +230,7 @@ export class RoadSystem {
       if (seg.points.length < 2) {
         curves.push(null);
       } else {
-        curves.push(new THREE.CatmullRomCurve3(seg.points, false, "catmullrom", 0.5));
+        curves.push(new THREE.CatmullRomCurve3(seg.points, !!rp.closed, "catmullrom", 0.5));
       }
     }
     for (let i = 0; i < this.segments.length; i++) {
@@ -275,7 +275,7 @@ export class RoadSystem {
     }
 
     if (pts.length >= 2) {
-      const curve = new THREE.CatmullRomCurve3(pts, false, "catmullrom", 0.5);
+      const curve = new THREE.CatmullRomCurve3(pts, !!this.toolState.road.closed, "catmullrom", 0.5);
       const lineGeo = new THREE.BufferGeometry().setFromPoints(curve.getPoints(60));
       const line = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0xaa7744 }));
       this.handleGroup.add(line);
