@@ -125,6 +125,9 @@ export class GrassManager {
       uTerrainTintMode: uniform(0),
       uTerrainTintStrength: uniform(gp.terrainTintStrength ?? 0.5),
       uTerrainTintRootBias: uniform(gp.terrainTintRootBias ?? 0.35),
+      uSlopeEnabled: uniform(gp.slopeEnabled ? 1 : 0),
+      uSlopeMin: uniform(gp.slopeMin ?? 0.65),
+      uSlopeMax: uniform(gp.slopeMax ?? 0.85),
     };
 
     this.windTex = createWindTexture();
@@ -263,6 +266,9 @@ export class GrassManager {
     }
     u.uTerrainTintStrength.value = gp.terrainTintStrength ?? 0.5;
     u.uTerrainTintRootBias.value = gp.terrainTintRootBias ?? 0.35;
+    u.uSlopeEnabled.value = gp.slopeEnabled ? 1 : 0;
+    u.uSlopeMin.value = gp.slopeMin ?? 0.65;
+    u.uSlopeMax.value = gp.slopeMax ?? 0.85;
     if (sunDir) u.uSunDir.value.copy(sunDir);
   }
 

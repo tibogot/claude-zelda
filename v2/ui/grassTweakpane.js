@@ -9,6 +9,11 @@ export function addGrassFolder(pane, toolState, opts) {
   folder.addButton({ title: "Save density map" }).on("click", () => onGrassSaveDensity?.());
   folder.addButton({ title: "Load density map" }).on("click", () => onGrassLoadDensity?.());
 
+  const slopeFolder = folder.addFolder({ title: "Slope rejection", expanded: false });
+  slopeFolder.addBinding(gp, "slopeEnabled", { label: "Enabled" }).on("change", onGrassChanged);
+  slopeFolder.addBinding(gp, "slopeMin", { label: "Fade end (steep)", min: 0.0, max: 1.0, step: 0.01 }).on("change", onGrassChanged);
+  slopeFolder.addBinding(gp, "slopeMax", { label: "Fade start (gentle)", min: 0.0, max: 1.0, step: 0.01 }).on("change", onGrassChanged);
+
   const bladeFolder = folder.addFolder({ title: "Blade", expanded: false });
   bladeFolder.addBinding(gp, "bladeHeight", { label: "Height", min: 0.3, max: 5, step: 0.05 }).on("change", () => { onGrassChanged?.(); onGrassRebuildGeos?.(); });
   bladeFolder.addBinding(gp, "bladeWidth", { label: "Width", min: 0.02, max: 0.5, step: 0.01 }).on("change", onGrassRebuildGeos);

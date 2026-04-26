@@ -324,6 +324,9 @@ export function createToolState() {
       terrainTintAutoSource: true,
       terrainTintManualMode: 1,
       terrainTintRootBias: 0.35,
+      slopeEnabled: true,
+      slopeMin: 0.65,
+      slopeMax: 0.85,
     },
   };
 }

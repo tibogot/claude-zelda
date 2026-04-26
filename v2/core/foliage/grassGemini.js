@@ -348,6 +348,9 @@ export function createGrassMaterial(ctx) {
     uTerrainTintRootBias: _uTerrainTintRootBias,
     gemGrassTintPlaceholderTex: _gemGrassTintPh,
     uGemImgTexUVScale: _uGemImgTexUVScale,
+    uSlopeEnabled: _uSlopeEnabled,
+    uSlopeMin: _uSlopeMin,
+    uSlopeMax: _uSlopeMax,
   } = ctx;
 
   const groundColorAtWorldXZ =
@@ -357,6 +360,9 @@ export function createGrassMaterial(ctx) {
   const uTerrainTintRootBias = _uTerrainTintRootBias ?? uniform(0);
   const uGemImgTexUVScale = _uGemImgTexUVScale ?? uniform(1);
   const gemGrassTintPh = _gemGrassTintPh ?? _getGrassTintPlaceholderTex();
+  const uSlopeEnabled = _uSlopeEnabled ?? uniform(0);
+  const uSlopeMin = _uSlopeMin ?? uniform(0.65);
+  const uSlopeMax = _uSlopeMax ?? uniform(0.85);
 
   const cliffHTex = _cliffHTex ?? _getDummyCliffHTex();
   const cliffDTex = _cliffDTex ?? _getDummyCliffDTex();
@@ -523,6 +529,10 @@ export function createGrassMaterial(ctx) {
       smoothstep(mapHalf.sub(mapEdgeW), mapHalf.add(float(0.35)), outMax),
     );
     densityCull = densityCull.mul(mapStay);
+
+    // ── Slope rejection — suppress grass on steep terrain ──
+    const slopeGrass = smoothstep(uSlopeMin, uSlopeMax, terrainNormal.y);
+    densityCull = densityCull.mul(mix(float(1), slopeGrass, uSlopeEnabled));
 
     // ── Voronoi clumping ──
     const cellP = bladeXZ.div(uClumpScale);
@@ -1006,6 +1016,9 @@ export function createGrassMaterialMega(ctx) {
     uTerrainTintRootBias: _uTerrainTintRootBiasMega,
     gemGrassTintPlaceholderTex: _gemGrassTintPhMega,
     uGemImgTexUVScale: _uGemImgTexUVScaleMega,
+    uSlopeEnabled: _uSlopeEnabledMega,
+    uSlopeMin: _uSlopeMinMega,
+    uSlopeMax: _uSlopeMaxMega,
   } = ctx;
 
   const groundColorAtWorldXZ =
@@ -1015,6 +1028,9 @@ export function createGrassMaterialMega(ctx) {
   const uTerrainTintRootBias = _uTerrainTintRootBiasMega ?? uniform(0);
   const uGemImgTexUVScale = _uGemImgTexUVScaleMega ?? uniform(1);
   const gemGrassTintPh = _gemGrassTintPhMega ?? _getGrassTintPlaceholderTex();
+  const uSlopeEnabled = _uSlopeEnabledMega ?? uniform(0);
+  const uSlopeMin = _uSlopeMinMega ?? uniform(0.65);
+  const uSlopeMax = _uSlopeMaxMega ?? uniform(0.85);
 
   const cliffHTex = _cliffHTex ?? _getDummyCliffHTex();
   const cliffDTex = _cliffDTex ?? _getDummyCliffDTex();
@@ -1130,6 +1146,9 @@ export function createGrassMaterialMega(ctx) {
       smoothstep(mapHalfM.sub(mapEdgeWM), mapHalfM.add(float(0.35)), outMaxM),
     );
     densityCull = densityCull.mul(mapStayM);
+
+    const slopeGrassM = smoothstep(uSlopeMin, uSlopeMax, terrainNormal.y);
+    densityCull = densityCull.mul(mix(float(1), slopeGrassM, uSlopeEnabled));
 
     const hv = hash42(bladeXZ);
     const h0 = hv.x;
