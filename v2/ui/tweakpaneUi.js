@@ -19,6 +19,8 @@ export function createTweakpaneUi({
   perf,
   textureLibrary,
   onRebuildSkyEnv,
+  onSkyModeChanged,
+  onImportHdr,
   onCsmEnabledChange,
   onFogChange,
   onGenerateProceduralTerrain,
@@ -408,20 +410,43 @@ export function createTweakpaneUi({
     title: "Sky & fog",
     expanded: false,
   });
-  skyFolder.addBinding(toolState.physicalSky, "meshScale", {
+
+  const physicalSkyBlades = [];
+  function syncSkyModeVisibility() {
+    const isPhysical = toolState.skyMode === "physical";
+    for (const b of physicalSkyBlades) b.hidden = !isPhysical;
+    hdrImportBtn.hidden = isPhysical;
+  }
+
+  skyFolder.addBinding(toolState, "skyMode", {
+    label: "Sky mode",
+    options: { Physical: "physical", "Import HDR": "hdr" },
+  }).on("change", (ev) => {
+    syncSkyModeVisibility();
+    onSkyModeChanged?.(ev.value);
+  });
+
+  const hdrImportBtn = skyFolder.addButton({ title: "Load HDR file..." });
+  hdrImportBtn.on("click", () => onImportHdr?.());
+
+  physicalSkyBlades.push(skyFolder.addBinding(toolState.physicalSky, "meshScale", {
     label: "Dome scale",
     min: 2000,
     max: 20000,
     step: 100,
-  });
-  skyFolder.addBinding(toolState.physicalSky, "turbidity", { min: 0, max: 20, step: 0.1 });
-  skyFolder.addBinding(toolState.physicalSky, "rayleigh", { min: 0, max: 4, step: 0.05 });
-  skyFolder.addBinding(toolState.physicalSky, "mie", { min: 0, max: 0.1, step: 0.001 });
-  skyFolder.addBinding(toolState.physicalSky, "mieG", { min: 0, max: 1, step: 0.01 });
-  skyFolder.addBinding(toolState.physicalSky, "cloudCoverage", { min: 0, max: 1, step: 0.02 });
-  skyFolder.addBinding(toolState.physicalSky, "cloudDensity", { min: 0, max: 1, step: 0.02 });
-  skyFolder.addBinding(toolState.physicalSky, "cloudElevation", { min: 0, max: 1, step: 0.02 });
-  skyFolder.addButton({ title: "Rebake Sky IBL" }).on("click", () => onRebuildSkyEnv?.());
+  }));
+  physicalSkyBlades.push(skyFolder.addBinding(toolState.physicalSky, "turbidity", { min: 0, max: 20, step: 0.1 }));
+  physicalSkyBlades.push(skyFolder.addBinding(toolState.physicalSky, "rayleigh", { min: 0, max: 4, step: 0.05 }));
+  physicalSkyBlades.push(skyFolder.addBinding(toolState.physicalSky, "mie", { min: 0, max: 0.1, step: 0.001 }));
+  physicalSkyBlades.push(skyFolder.addBinding(toolState.physicalSky, "mieG", { min: 0, max: 1, step: 0.01 }));
+  physicalSkyBlades.push(skyFolder.addBinding(toolState.physicalSky, "cloudCoverage", { min: 0, max: 1, step: 0.02 }));
+  physicalSkyBlades.push(skyFolder.addBinding(toolState.physicalSky, "cloudDensity", { min: 0, max: 1, step: 0.02 }));
+  physicalSkyBlades.push(skyFolder.addBinding(toolState.physicalSky, "cloudElevation", { min: 0, max: 1, step: 0.02 }));
+  const rebakeBtn = skyFolder.addButton({ title: "Rebake Sky IBL" });
+  rebakeBtn.on("click", () => onRebuildSkyEnv?.());
+  physicalSkyBlades.push(rebakeBtn);
+
+  syncSkyModeVisibility();
 
   const fogFolder = skyFolder.addFolder({
     title: "Fog",

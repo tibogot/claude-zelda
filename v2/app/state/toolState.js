@@ -87,6 +87,7 @@ export function createToolState() {
       triplanarSharp: 4.0,
     },
     light: { ...V2_CONFIG.light },
+    skyMode: "physical",
     physicalSky: { ...V2_CONFIG.physicalSky },
     lensFlare: { ...V2_CONFIG.lensFlare },
     csm: { ...V2_CONFIG.csm },

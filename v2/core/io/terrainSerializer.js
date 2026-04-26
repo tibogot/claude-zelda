@@ -278,6 +278,7 @@ function extractSerializableSettings(toolState) {
     autoCliffEnabled: toolState.autoCliffEnabled,
     autoCliff: { ...toolState.autoCliff },
     light: { ...toolState.light },
+    skyMode: toolState.skyMode,
     physicalSky: { ...toolState.physicalSky },
     lensFlare: { ...toolState.lensFlare },
     csm: { ...toolState.csm },
@@ -325,6 +326,7 @@ export function applySettings(toolState, settings) {
   if (settings.autoCliffEnabled != null) toolState.autoCliffEnabled = settings.autoCliffEnabled;
   if (settings.autoCliff) Object.assign(toolState.autoCliff, settings.autoCliff);
   if (settings.light) Object.assign(toolState.light, settings.light);
+  if (settings.skyMode) toolState.skyMode = settings.skyMode;
   if (settings.physicalSky) Object.assign(toolState.physicalSky, settings.physicalSky);
   if (settings.lensFlare) Object.assign(toolState.lensFlare, settings.lensFlare);
   if (settings.csm) Object.assign(toolState.csm, settings.csm);

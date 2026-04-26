@@ -10,6 +10,7 @@ import {
 import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { SkyMesh } from "three/addons/objects/SkyMesh.js";
+import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
 import { V2_CONFIG } from "./config.js";
 import { createPerfState, createToolState, tickPerf } from "./state/toolState.js";
 import { TerrainStore } from "../core/terrain/terrainStore.js";
@@ -229,6 +230,49 @@ export async function startV2App() {
     } catch (err) {
       console.warn("[V2] PMREM from SkyMesh failed; IBL disabled.", err);
     }
+  }
+
+  let hdrTexture = null;
+  let hdrFileName = null;
+
+  function applySkyMode(mode) {
+    toolState.skyMode = mode;
+    if (mode === "physical") {
+      sky.visible = true;
+      scene.background = null;
+      rebuildSkyEnv();
+    } else if (mode === "hdr") {
+      sky.visible = false;
+      if (hdrTexture) {
+        scene.background = hdrTexture;
+        scene.environment = hdrTexture;
+      } else {
+        scene.background = null;
+        scene.environment = null;
+      }
+    }
+  }
+
+  function importHdr() {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".hdr";
+    input.onchange = () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      const url = URL.createObjectURL(file);
+      const loader = new HDRLoader();
+      loader.load(url, (tex) => {
+        URL.revokeObjectURL(url);
+        tex.mapping = THREE.EquirectangularReflectionMapping;
+        if (hdrTexture) hdrTexture.dispose();
+        hdrTexture = tex;
+        hdrFileName = file.name;
+        applySkyMode("hdr");
+        ui?.pane.refresh();
+      });
+    };
+    input.click();
   }
 
   const terrainStore = new TerrainStore(config);
@@ -622,6 +666,8 @@ export async function startV2App() {
       chunkStream.update(camera.position);
     },
     onRebuildSkyEnv: rebuildSkyEnv,
+    onSkyModeChanged: applySkyMode,
+    onImportHdr: importHdr,
     onCsmEnabledChange: setCsmEnabled,
     onFogChange: syncFog,
     onGenerateProceduralTerrain: () => sculptSystem.applyProceduralTerrainAllChunks(),
@@ -1090,7 +1136,8 @@ export async function startV2App() {
         rebuildGlobalHeightTexture();
         grassManager.rebuildTerrainNormalTex(config.world.size);
         syncFog();
-        rebuildSkyEnv();
+        if (toolState.skyMode === "hdr" && !hdrTexture) toolState.skyMode = "physical";
+        applySkyMode(toolState.skyMode);
         chunkStream.markAllDirty();
         chunkStream.update(camera.position);
         grassManager.syncUniforms(toolState.grass, sunDir);
@@ -1782,6 +1829,8 @@ export async function startV2App() {
         csm = null;
       }
       scene.environment = null;
+      scene.background = null;
+      if (hdrTexture) hdrTexture.dispose();
       if (disposeSkyEnv) disposeSkyEnv();
       if (pmremGenerator) pmremGenerator.dispose();
       sky.dispose?.();
