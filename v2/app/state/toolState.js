@@ -8,7 +8,7 @@ function deepCloneJson(x) {
 
 export function createToolState() {
   return {
-    /** `view` (orbit only) | `sculpt` | `paint` | `treePaint`. Defaults to `view` — matches v1. */
+    /** `view` (orbit only) | `sculpt` | `paint` | `treePaint` | `spline`. Defaults to `view` — matches v1. */
     mode: "view",
     /** `tile` = grid material; `tsl` = procedural TSL; `image` = tiled image-slot material. */
     terrainSurface: "tile",
@@ -245,6 +245,22 @@ export function createToolState() {
       lodMid: 80,
       lodFar: 200,
       texScale: 4.0,
+    },
+    spline: {
+      objectType: "trees",
+      spacing: 4,
+      scaleMin: 1.0,
+      scaleMax: 1.0,
+      alignToPath: true,
+      selectedPointY: 0,
+      closed: false,
+      showHandles: true,
+      showTrain: false,
+      trainSpeed: 8,
+      trainScale: 1,
+      plateauHeight: 24,
+      plateauFalloff: 4,
+      plateauHalfWidth: 10,
     },
     grass: {
       enabled: false,

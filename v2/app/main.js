@@ -50,6 +50,7 @@ import { PlayMode } from "../play/playMode.js";
 import { createGroundTslBundle } from "../../chunkGroundTsl.js";
 import { RoadSystem } from "../tools/road/roadSystem.js";
 import { RoadPlanarReflection } from "../core/road/roadReflection.js";
+import { SplineSystem } from "../tools/spline/splineSystem.js";
 import { CliffStore } from "../core/cliffs/cliffStore.js";
 import { CliffInstancer } from "../core/cliffs/cliffInstancer.js";
 import { CliffSystem } from "../tools/cliffs/cliffSystem.js";
@@ -552,7 +553,6 @@ export async function startV2App() {
     terrainStore,
     chunkStream,
   });
-
   const cliffStore = new CliffStore();
   const cliffInstancer = new CliffInstancer(scene, cliffStore);
   const cliffBvh = new CliffBvh(cliffStore);
@@ -562,6 +562,16 @@ export async function startV2App() {
   const propStore = new PropStore();
   const propInstancer = new PropInstancer(scene, propStore);
   const propSystem = new PropSystem({ toolState, propStore, propInstancer, cliffBvh, terrainStore, config });
+  const splineSystem = new SplineSystem({
+    scene,
+    toolState,
+    config,
+    terrainStore,
+    chunkStream,
+    treeStore,
+    propStore,
+    getWorldHeight: (x, z) => terrainStore.getWorldHeight(x, z),
+  });
   let propUiCallbacks = {};
 
   const dummyCliffPaintTex = (() => {
@@ -718,7 +728,12 @@ export async function startV2App() {
       if (toolState.mode !== "water") {
         waterSystem.deselect();
       }
+      if (toolState.mode !== "spline") {
+        splineSystem.dragging = false;
+      }
       roadSystem.handleGroup.visible = toolState.mode === "road" && toolState.road.showHandles;
+      splineSystem.handleGroup.visible = toolState.mode === "spline" && toolState.spline.showHandles;
+      if (toolState.mode !== "spline") splineSystem.clearPreview();
       // Toggle water/barrier folder visibility
       if (ui?.waterFolder) ui.waterFolder.hidden = toolState.mode !== "water";
       if (ui?.barrierFolder) ui.barrierFolder.expanded = toolState.mode === "barrier";
@@ -947,10 +962,47 @@ export async function startV2App() {
       roadSystem.rebuildAllMeshes();
     },
     onRoadSelectedYChanged: () => roadSystem.setSelectedPointY(toolState.road.selectedPointY),
+    onRoadFlattenTerrain: () => {
+      roadSystem.flattenTerrainUnderRoads();
+      roadSystem.rebuildAllMeshes();
+    },
     onRoadActiveIndexChanged: () => {
       roadSystem._clampActive();
       roadSystem.selectedIdx = -1;
       roadSystem._rebuildVisual();
+      ui?.pane.refresh();
+    },
+    onSplineChanged: () => {
+      splineSystem._rebuildVisual();
+      ui?.pane.refresh();
+    },
+    onSplineDeleteSelected: () => {
+      splineSystem.deleteSelected();
+      ui?.pane.refresh();
+    },
+    onSplineClearAll: () => {
+      splineSystem.clearAll();
+      ui?.pane.refresh();
+    },
+    onSplineSelectedYChanged: () => {
+      splineSystem.setSelectedPointY(toolState.spline.selectedPointY);
+      ui?.pane.refresh();
+    },
+    onSplineClosedChanged: () => {
+      splineSystem.setClosed(toolState.spline.closed);
+      ui?.pane.refresh();
+    },
+    onSplinePreview: () => splineSystem.preview(),
+    onSplineBake: () => {
+      splineSystem.bakePlacement();
+      ui?.pane.refresh();
+    },
+    onSplineClearPreview: () => splineSystem.clearPreview(),
+    onSplineApplyPlateau: () => {
+      const changed = splineSystem.applyPlateau();
+      if (!changed) return;
+      markHeightTexDirty();
+      treeStore.syncAllHeights(terrainStore);
       ui?.pane.refresh();
     },
     onCliffBlendChanged: () => {
@@ -1045,11 +1097,15 @@ export async function startV2App() {
       toolState._propExportData = () => propStore.exportData();
       toolState._waterExportData = () => waterStore.exportData();
       toolState._barrierExportData = () => barrierStore.exportData();
+      toolState._roadExportData = () => roadSystem.exportData();
+      toolState._splineExportData = () => splineSystem.exportData();
       const buf = serializeProject({ terrainStore, splatStore, treeStore, config, toolState });
       delete toolState._cliffExportData;
       delete toolState._propExportData;
       delete toolState._waterExportData;
       delete toolState._barrierExportData;
+      delete toolState._roadExportData;
+      delete toolState._splineExportData;
       const blob = new Blob([buf], { type: "application/octet-stream" });
       const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       downloadBlob(blob, `terrain-${ts}.v2terrain`);
@@ -1074,6 +1130,9 @@ export async function startV2App() {
         }
         // Restore settings
         applySettings(toolState, project.settings);
+        if (project.settings?.roads) roadSystem.importData(project.settings.roads);
+        if (project.settings?.splinePath) splineSystem.importData(project.settings.splinePath);
+        else splineSystem.importData({ points: [] });
         // Restore cliff instances (types must be re-imported by user)
         if (project.settings?.cliffInstances) {
           const typeNameToIdx = {};
@@ -1219,6 +1278,9 @@ export async function startV2App() {
   roadReflection.excludeFromReflection(brushPreview);
   roadReflection.excludeFromReflection(brushRing);
   roadReflection.excludeFromReflection(roadSystem.handleGroup);
+  roadReflection.excludeFromReflection(splineSystem.handleGroup);
+  roadReflection.excludeFromReflection(splineSystem.previewGroup);
+  roadReflection.excludeFromReflection(splineSystem.trainMesh);
   roadReflection.excludeFromReflection(barrierOverlay.group);
 
   const rampMarkerA = new THREE.Mesh(
@@ -1455,6 +1517,27 @@ export async function startV2App() {
       }
       return;
     }
+    if (toolState.mode === "spline" && event.button === 0) {
+      event.preventDefault();
+      updatePointer(event);
+      raycaster.setFromCamera(pointerNdc, camera);
+      const picked = splineSystem.pickPoint(raycaster);
+      if (picked >= 0) {
+        splineSystem.selectedIdx = picked;
+        splineSystem.dragging = true;
+        controls.enabled = false;
+        splineSystem._rebuildVisual();
+        splineSystem._updateSelectedY();
+        ui?.pane.refresh();
+      } else {
+        const hit = pickTerrain(event);
+        if (hit) {
+          splineSystem.addPoint(hit.point);
+          ui?.pane.refresh();
+        }
+      }
+      return;
+    }
     if (event.button !== 0 || !isBrushMode()) return;
     const hit = pickTerrain(event);
     if (toolState.mode === "sculpt" && toolState.sculptMode === "ramp") {
@@ -1493,6 +1576,11 @@ export async function startV2App() {
     if (toolState.mode === "road" && roadSystem.dragging && roadSystem.selectedIdx >= 0) {
       const hit = pickTerrain(event);
       if (hit) roadSystem.moveSelected(hit.point);
+      return;
+    }
+    if (toolState.mode === "spline" && splineSystem.dragging && splineSystem.selectedIdx >= 0) {
+      const hit = pickTerrain(event);
+      if (hit) splineSystem.moveSelected(hit.point);
       return;
     }
     const hit = pickTerrain(event);
@@ -1570,6 +1658,10 @@ export async function startV2App() {
       roadSystem.dragging = false;
       controls.enabled = true;
     }
+    if (splineSystem.dragging) {
+      splineSystem.dragging = false;
+      controls.enabled = true;
+    }
     if (!pointerDown) return;
     pointerDown = false;
     controls.enabled = true;
@@ -1596,6 +1688,7 @@ export async function startV2App() {
     if (toolState.mode === "grass") return grassPaintSystem;
     if (toolState.mode === "cliffGrass") return cliffGrassPaintSystem;
     if (toolState.mode === "road") return roadSystem;
+    if (toolState.mode === "spline") return splineSystem;
     if (toolState.mode === "cliffs") return cliffSystem;
     if (toolState.mode === "props") return propSystem;
     if (toolState.mode === "water") return waterSystem;
@@ -1616,6 +1709,10 @@ export async function startV2App() {
     } else if (event.code === "Delete" && toolState.mode === "road") {
       event.preventDefault();
       roadSystem.deleteSelected();
+      ui?.pane.refresh();
+    } else if (event.code === "Delete" && toolState.mode === "spline") {
+      event.preventDefault();
+      splineSystem.deleteSelected();
       ui?.pane.refresh();
     } else if (
       event.code === "KeyR" &&
@@ -1701,6 +1798,11 @@ export async function startV2App() {
         transformControls.setMode("scale");
         ui?.pane.refresh();
       }
+    } else if (event.code === "KeyK" && !ctrl) {
+      event.preventDefault();
+      toolState.mode = toolState.mode === "spline" ? "view" : "spline";
+      ui?.pane.refresh();
+      updateBrushPreviewFromPick(null);
     }
   });
 
@@ -1814,6 +1916,7 @@ export async function startV2App() {
       roadReflection.render(roadMeshes);
       roadSystem.updateReflectVP(roadReflection.reflectVP);
     }
+    splineSystem.update(dtMs * 0.001);
     renderer.render(scene, camera);
   });
 
@@ -1843,6 +1946,7 @@ export async function startV2App() {
       transformControls.dispose();
       grassManager.dispose();
       roadSystem.dispose();
+      splineSystem.dispose();
       roadReflection.dispose();
       waterMaterials.dispose();
       playMode.dispose();

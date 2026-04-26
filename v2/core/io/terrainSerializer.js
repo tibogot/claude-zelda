@@ -299,6 +299,10 @@ function extractSerializableSettings(toolState) {
     props: { ...toolState.props },
     propSlots: toolState.propSlots.map((s) => ({ name: s.name })),
     propInstances: toolState._propExportData?.() ?? null,
+    road: { ...toolState.road },
+    roads: toolState._roadExportData?.() ?? null,
+    spline: { ...toolState.spline },
+    splinePath: toolState._splineExportData?.() ?? null,
     water: { ...toolState.water },
     waterBodies: toolState._waterExportData?.() ?? null,
     barrier: { ...toolState.barrier },
@@ -348,6 +352,8 @@ export function applySettings(toolState, settings) {
   if (settings.grass) Object.assign(toolState.grass, settings.grass);
   if (settings.cliffs) Object.assign(toolState.cliffs, settings.cliffs);
   if (settings.props) Object.assign(toolState.props, settings.props);
+  if (settings.road) Object.assign(toolState.road, settings.road);
+  if (settings.spline) Object.assign(toolState.spline, settings.spline);
   if (settings.water) Object.assign(toolState.water, settings.water);
   if (settings.barrier) Object.assign(toolState.barrier, settings.barrier);
 }

@@ -8,6 +8,7 @@ import { addGrassFolder } from "./grassTweakpane.js";
 import { addCliffFolder } from "./cliffTweakpane.js";
 import { addPropFolder } from "./propTweakpane.js";
 import { addRoadFolder } from "./roadTweakpane.js";
+import { addSplineFolder } from "./splineTweakpane.js";
 import { addWaterFolder } from "./waterTweakpane.js";
 import { addBarrierFolder } from "./barrierTweakpane.js";
 
@@ -74,6 +75,16 @@ export function createTweakpaneUi({
   onRoadSnapY,
   onRoadSelectedYChanged,
   onRoadActiveIndexChanged,
+  onRoadFlattenTerrain,
+  onSplineChanged,
+  onSplineDeleteSelected,
+  onSplineClearAll,
+  onSplineSelectedYChanged,
+  onSplineClosedChanged,
+  onSplinePreview,
+  onSplineBake,
+  onSplineClearPreview,
+  onSplineApplyPlateau,
   onWaterChanged,
   onSaveWater,
   onLoadWater,
@@ -98,6 +109,7 @@ export function createTweakpaneUi({
         Grass: "grass",
         "Cliff Grass": "cliffGrass",
         Road: "road",
+        Spline: "spline",
         Cliffs: "cliffs",
         Props: "props",
         Water: "water",
@@ -173,6 +185,18 @@ export function createTweakpaneUi({
     onRoadSnapY,
     onRoadSelectedYChanged,
     onRoadActiveIndexChanged,
+    onRoadFlattenTerrain,
+  });
+  addSplineFolder(pane, toolState, {
+    onSplineChanged,
+    onSplineDeleteSelected,
+    onSplineClearAll,
+    onSplineSelectedYChanged,
+    onSplineClosedChanged,
+    onSplinePreview,
+    onSplineBake,
+    onSplineClearPreview,
+    onSplineApplyPlateau,
   });
 
   addCliffFolder(pane, toolState, {
