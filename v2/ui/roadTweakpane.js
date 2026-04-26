@@ -41,6 +41,13 @@ export function addRoadFolder(pane, toolState, opts) {
   centerFolder.addBinding(rp, "centerLineDashed", { label: "Dashed" }).on("change", onRoadChanged);
   centerFolder.addBinding(rp, "centerLineDashScale", { label: "Dash density", min: 0.05, max: 2, step: 0.05 }).on("change", onRoadChanged);
 
+  const highwayFolder = centerFolder.addFolder({ title: "Highway lanes", expanded: false });
+  highwayFolder.addBinding(rp, "doubleCenterLine", { label: "Double center" }).on("change", onRoadChanged);
+  highwayFolder.addBinding(rp, "centerLineGap", { label: "Center gap", min: 0.002, max: 0.05, step: 0.001 }).on("change", onRoadChanged);
+  highwayFolder.addBinding(rp, "laneLines", { label: "Lane separators" }).on("change", onRoadChanged);
+  highwayFolder.addBinding(rp, "laneLineWidth", { label: "Lane line width", min: 0.001, max: 0.02, step: 0.001 }).on("change", onRoadChanged);
+  highwayFolder.addBinding(rp, "laneDashScale", { label: "Lane dash density", min: 0.005, max: 2, step: 0.005 }).on("change", onRoadChanged);
+
   const geoFolder = folder.addFolder({ title: "Geometry", expanded: false });
   geoFolder.addBinding(rp, "width", { label: "Width", min: 1, max: 50, step: 0.5 }).on("change", onRoadChanged);
   geoFolder.addBinding(rp, "segments", { label: "Segments", min: 20, max: 600, step: 10 }).on("change", onRoadChanged);

@@ -63,6 +63,12 @@ export class CliffBvh {
       return;
     }
 
+    // duplicate every triangle with flipped winding for double-sided collision
+    const origLen = indices.length;
+    for (let i = 0; i < origLen; i += 3) {
+      indices.push(indices[i], indices[i + 2], indices[i + 1]);
+    }
+
     const mergedGeo = new THREE.BufferGeometry();
     mergedGeo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
     mergedGeo.setIndex(indices);

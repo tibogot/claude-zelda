@@ -672,6 +672,7 @@ export async function startV2App() {
       if (toolState.mode !== "water") {
         waterSystem.deselect();
       }
+      roadSystem.handleGroup.visible = toolState.mode === "road" && toolState.road.showHandles;
       // Toggle water/barrier folder visibility
       if (ui?.waterFolder) ui.waterFolder.hidden = toolState.mode !== "water";
       if (ui?.barrierFolder) ui.barrierFolder.expanded = toolState.mode === "barrier";

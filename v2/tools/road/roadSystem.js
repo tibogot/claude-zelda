@@ -286,7 +286,7 @@ export class RoadSystem {
   }
 
   _syncHandlesVisibility() {
-    this.handleGroup.visible = this.toolState.road.showHandles;
+    this.handleGroup.visible = this.toolState.mode === "road" && this.toolState.road.showHandles;
   }
 
   _rebuildVisual() {
