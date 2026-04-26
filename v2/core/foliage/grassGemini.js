@@ -266,6 +266,17 @@ function _getDummyCliffDTex() {
   return _dummyCliffDTex;
 }
 
+let _dummySpecNoiseTex = null;
+function _getDummySpecNoiseTex() {
+  if (!_dummySpecNoiseTex) {
+    const d = new Float32Array([0.5, 0.5, 0.5, 1]);
+    _dummySpecNoiseTex = new THREE.DataTexture(d, 1, 1, THREE.RGBAFormat, THREE.FloatType);
+    _dummySpecNoiseTex.wrapS = _dummySpecNoiseTex.wrapT = THREE.RepeatWrapping;
+    _dummySpecNoiseTex.needsUpdate = true;
+  }
+  return _dummySpecNoiseTex;
+}
+
 let _grassTintPlaceholderTex = null;
 function _getGrassTintPlaceholderTex() {
   if (!_grassTintPlaceholderTex) {
@@ -342,6 +353,7 @@ export function createGrassMaterial(ctx) {
     uInteractionRadius,
     uInteractionStrength,
     windTex: _windTex,
+    specNoiseTex: _specNoiseTex,
     groundColorAtWorldXZ: _groundColorAtWorldXZ,
     uTerrainTintMode: _uTerrainTintMode,
     uTerrainTintStrength: _uTerrainTintStrength,
@@ -366,6 +378,7 @@ export function createGrassMaterial(ctx) {
 
   const cliffHTex = _cliffHTex ?? _getDummyCliffHTex();
   const cliffDTex = _cliffDTex ?? _getDummyCliffDTex();
+  const specNoiseTex = _specNoiseTex ?? _getDummySpecNoiseTex();
   const useWindTex = !!_windTex;
 
   // Packed varyings: WebGPU allows 16 user interpolants; MeshStandardNodeMaterial
@@ -431,7 +444,8 @@ export function createGrassMaterial(ctx) {
     const terrainH = texture(heightTex, terrainUV).x;
 
     // ── Cliff layer sampling (optional — dummy textures produce useCliff=0) ──
-    const cliffH = texture(cliffHTex, terrainUV).x;
+    const cliffSample = texture(cliffHTex, terrainUV);
+    const cliffH = cliffSample.x;
     const cliffD = texture(cliffDTex, terrainUV).x;
     const cliffValid = smoothstep(float(-9990), float(-9000), cliffH);
     const cliffPainted = smoothstep(float(0.01), float(0.03), cliffD);
@@ -455,18 +469,8 @@ export function createGrassMaterial(ctx) {
       vec3(hL.sub(hR), worldStep.mul(float(2)), hD.sub(hU)),
     );
 
-    // Cliff normal — clamp -9999 neighbors to center to avoid wild gradients at cliff edges
-    const chL = texture(cliffHTex, uvL).x;
-    const chR = texture(cliffHTex, uvR).x;
-    const chD = texture(cliffHTex, uvD).x;
-    const chU = texture(cliffHTex, uvU).x;
-    const chLs = mix(cliffH, chL, smoothstep(float(-9990), float(-9000), chL));
-    const chRs = mix(cliffH, chR, smoothstep(float(-9990), float(-9000), chR));
-    const chDs = mix(cliffH, chD, smoothstep(float(-9990), float(-9000), chD));
-    const chUs = mix(cliffH, chU, smoothstep(float(-9990), float(-9000), chU));
-    const cNorm = normalize(
-      vec3(chLs.sub(chRs), worldStep.mul(float(2)), chDs.sub(chUs)),
-    );
+    // Cliff normal — precomputed in rebuildCliffHeightTex (stored in GBA)
+    const cNorm = normalize(vec3(cliffSample.y, cliffSample.z, cliffSample.w));
 
     const terrainNormal = normalize(mix(tNorm, cNorm, useCliff));
 
@@ -933,30 +937,19 @@ export function createGrassMaterial(ctx) {
       .mul(float(3.0))
       .mul(uSpecV1Enabled);
 
-    // ── Specular V2: noisy textured highlights (3-octave Perlin) ──
+    // ── Specular V2: noisy textured highlights (baked noise texture) ──
     const worldPos = positionLocal;
-    const noiseP1 = mx_noise_float(
-      vec3(
-        worldPos.x.mul(uSpecV2NoiseScale),
-        worldPos.y.mul(uSpecV2NoiseScale),
-        worldPos.z.mul(uSpecV2NoiseScale),
-      ),
+    const specNoiseUV = vec2(
+      worldPos.x.mul(uSpecV2NoiseScale).mul(0.125),
+      worldPos.z.mul(uSpecV2NoiseScale).mul(0.125),
     );
-    const noiseP2 = mx_noise_float(
-      vec3(
-        worldPos.x.mul(uSpecV2NoiseScale).add(float(17.3)),
-        worldPos.y.mul(uSpecV2NoiseScale).add(float(31.7)),
-        worldPos.z.mul(uSpecV2NoiseScale).add(float(47.1)),
-      ),
-    );
-    const noiseP3 = mx_noise_float(
-      vec3(
-        worldPos.x.mul(uSpecV2NoiseScale).mul(float(2.7)).add(float(59.3)),
-        worldPos.y.mul(uSpecV2NoiseScale).mul(float(2.7)).add(float(73.1)),
-        worldPos.z.mul(uSpecV2NoiseScale).mul(float(2.7)).add(float(89.7)),
-      ),
-    );
-    const noiseCombined = noiseP1.add(noiseP2).add(noiseP3).mul(float(0.333));
+    const specNoiseSamp = texture(specNoiseTex, specNoiseUV);
+    const noiseCombined = specNoiseSamp.x
+      .add(specNoiseSamp.y)
+      .add(specNoiseSamp.z)
+      .mul(float(0.333))
+      .mul(2.0)
+      .sub(1.0);
     const perturbedN = normalize(
       mix(N, vec3(noiseCombined, float(1), noiseCombined), uSpecV2NoiseStr),
     );
@@ -1086,7 +1079,8 @@ export function createGrassMaterialMega(ctx) {
     const terrainUV = add(div(bladeXZ, uTerrainSize), vec2(0.5));
     const terrainH = texture(heightTex, terrainUV).x;
 
-    const cliffH = texture(cliffHTex, terrainUV).x;
+    const cliffSample = texture(cliffHTex, terrainUV);
+    const cliffH = cliffSample.x;
     const cliffD = texture(cliffDTex, terrainUV).x;
     const cliffValid = smoothstep(float(-9990), float(-9000), cliffH);
     const cliffPainted = smoothstep(float(0.01), float(0.03), cliffD);
@@ -1106,17 +1100,7 @@ export function createGrassMaterialMega(ctx) {
     const tNorm = normalize(
       vec3(hL.sub(hR), worldStep.mul(float(2)), hD.sub(hU)),
     );
-    const chL = texture(cliffHTex, uvL).x;
-    const chR = texture(cliffHTex, uvR).x;
-    const chD = texture(cliffHTex, uvD).x;
-    const chU = texture(cliffHTex, uvU).x;
-    const chLs = mix(cliffH, chL, smoothstep(float(-9990), float(-9000), chL));
-    const chRs = mix(cliffH, chR, smoothstep(float(-9990), float(-9000), chR));
-    const chDs = mix(cliffH, chD, smoothstep(float(-9990), float(-9000), chD));
-    const chUs = mix(cliffH, chU, smoothstep(float(-9990), float(-9000), chU));
-    const cNorm = normalize(
-      vec3(chLs.sub(chRs), worldStep.mul(float(2)), chDs.sub(chUs)),
-    );
+    const cNorm = normalize(vec3(cliffSample.y, cliffSample.z, cliffSample.w));
     const terrainNormal = normalize(mix(tNorm, cNorm, useCliff));
 
     const lodFocusXZMega = vec2(uPlayerPos.x, uPlayerPos.z);
@@ -1469,8 +1453,9 @@ export function setupGrassPatches(
           if (!_frustum.intersectsBox(_aabb)) continue;
           if (!patchOverlapsPlayableMap(cellX, cellZ, psFar, mapHalf)) continue;
 
-          const mesh = getMesh(poolFar, geoFar);
+          const mesh = getMesh(poolFar, geoFar, materialMega);
           mesh.geometry = geoFar;
+          mesh.material = materialMega;
           mesh.visible = true;
           mesh.position.set(cellX, 0, cellZ);
           mesh.scale.set(1, 1, 1);

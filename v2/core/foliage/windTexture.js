@@ -54,6 +54,27 @@ function fbm2(x, y, octaves) {
   return m > 0 ? s / m : 0;
 }
 
+export function createSpecNoiseTexture(size = 256) {
+  const data = new Float32Array(size * size * 4);
+  for (let iy = 0; iy < size; iy++) {
+    for (let ix = 0; ix < size; ix++) {
+      const u = ix / size;
+      const v = iy / size;
+      const idx = (iy * size + ix) * 4;
+      data[idx]     = fbm2(u * 8 + 431.7, v * 8 + 293.1, 3) * 0.5 + 0.5;
+      data[idx + 1] = fbm2(u * 8 + 17.3,  v * 8 + 31.7,  3) * 0.5 + 0.5;
+      data[idx + 2] = fbm2(u * 8 * 2.7 + 59.3, v * 8 * 2.7 + 73.1, 3) * 0.5 + 0.5;
+      data[idx + 3] = 1;
+    }
+  }
+  const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat, THREE.FloatType);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
 export function createWindTexture() {
   const data = new Float32Array(WIND_RES * WIND_RES * 4);
 

@@ -7,7 +7,7 @@ import {
   createGrassMaterialMega,
   setupGrassPatches,
 } from "../../core/foliage/grassGemini.js";
-import { createWindTexture } from "../../core/foliage/windTexture.js";
+import { createWindTexture, createSpecNoiseTexture } from "../../core/foliage/windTexture.js";
 
 export class GrassManager {
   constructor({ scene, camera, config }) {
@@ -131,6 +131,7 @@ export class GrassManager {
     };
 
     this.windTex = createWindTexture();
+    this.specNoiseTex = createSpecNoiseTexture();
 
     const ctx = {
       ...this.uniforms,
@@ -139,6 +140,7 @@ export class GrassManager {
       cliffHeightTex: this.cliffHeightTex,
       cliffDensityTex: this.cliffDensityTex,
       windTex: this.windTex,
+      specNoiseTex: this.specNoiseTex,
       terrainRes: 512,
       groundColorAtWorldXZ: groundColorAtWorldXZ ?? undefined,
     };
@@ -397,8 +399,34 @@ export class GrassManager {
         ) {
           h = hit.point.y;
         }
-        data[i4] = data[i4 + 1] = data[i4 + 2] = h;
-        data[i4 + 3] = 1;
+        data[i4] = h;
+        data[i4 + 1] = 0;
+        data[i4 + 2] = 1;
+        data[i4 + 3] = 0;
+      }
+    }
+    const ws2 = (worldSize / res) * 2;
+    for (let iz = 0; iz < res; iz++) {
+      for (let ix = 0; ix < res; ix++) {
+        const i4 = (iz * res + ix) * 4;
+        const h = data[i4];
+        if (h < -9000) continue;
+        const getH = (x, z) => {
+          const cx = Math.max(0, Math.min(res - 1, x));
+          const cz = Math.max(0, Math.min(res - 1, z));
+          const val = data[(cz * res + cx) * 4];
+          return val > -9000 ? val : h;
+        };
+        const hL = getH(ix - 1, iz);
+        const hR = getH(ix + 1, iz);
+        const hD = getH(ix, iz - 1);
+        const hU = getH(ix, iz + 1);
+        const nx = hL - hR;
+        const nz = hD - hU;
+        const len = Math.sqrt(nx * nx + ws2 * ws2 + nz * nz);
+        data[i4 + 1] = nx / len;
+        data[i4 + 2] = ws2 / len;
+        data[i4 + 3] = nz / len;
       }
     }
     this.cliffHeightTex.needsUpdate = true;
@@ -475,6 +503,7 @@ export class GrassManager {
     this.cliffHeightTex.dispose();
     this.cliffDensityTex.dispose();
     this.windTex?.dispose();
+    this.specNoiseTex?.dispose();
     this.scene.remove(this.group);
   }
 }
