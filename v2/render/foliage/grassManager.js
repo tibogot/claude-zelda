@@ -146,7 +146,7 @@ export class GrassManager {
     this.windTex = createWindTexture();
     this.specNoiseTex = createSpecNoiseTexture();
 
-    const ctx = {
+    const baseCtx = {
       ...this.uniforms,
       heightTex,
       terrainNormalTex: this.terrainNormalTex,
@@ -159,8 +159,13 @@ export class GrassManager {
       groundColorAtWorldXZ: groundColorAtWorldXZ ?? undefined,
     };
 
-    const material = createGrassMaterial(ctx);
-    const materialMega = createGrassMaterialMega(ctx);
+    // Terrain grass layer (ignores cliff entirely)
+    const material = createGrassMaterial({ ...baseCtx, cliffMode: false });
+    const materialMega = createGrassMaterialMega({ ...baseCtx, cliffMode: false });
+
+    // Cliff grass layer (only renders on cliff surfaces)
+    const materialCliff = createGrassMaterial({ ...baseCtx, cliffMode: true });
+    const materialMegaCliff = createGrassMaterialMega({ ...baseCtx, cliffMode: true });
 
     this._currentGeos = this._buildGeos(gp);
     this.geosAndMats = {
@@ -169,29 +174,41 @@ export class GrassManager {
       materialMega,
     };
 
+    const patchOpts = {
+      patchSize: gp.fieldSize,
+      patchSizeMid: gp.lodMidPatchSize,
+      patchSizeFar: gp.lodFarPatchSize,
+      patchSizeMega: gp.lodMegaPatchSize,
+      lodMidDistance: gp.lodMidDistance,
+      lodFarDistance: gp.lodFarDistance,
+      maxDistance: gp.lodMaxDistance,
+      megaMaxDistance: gp.lodMegaMaxDistance,
+      lodHysteresis: 2,
+      lodEnabled: gp.lodEnabled,
+      grassReceiveShadow: gp.receiveShadow,
+      mapWorldHalf: ws * 0.5,
+    };
+
     this.patchSystem = setupGrassPatches(
-      this.scene,
-      this.camera,
-      this.group,
-      this.geosAndMats,
-      {
-        patchSize: gp.fieldSize,
-        patchSizeMid: gp.lodMidPatchSize,
-        patchSizeFar: gp.lodFarPatchSize,
-        patchSizeMega: gp.lodMegaPatchSize,
-        lodMidDistance: gp.lodMidDistance,
-        lodFarDistance: gp.lodFarDistance,
-        maxDistance: gp.lodMaxDistance,
-        megaMaxDistance: gp.lodMegaMaxDistance,
-        lodHysteresis: 2,
-        lodEnabled: gp.lodEnabled,
-        grassReceiveShadow: gp.receiveShadow,
-        mapWorldHalf: ws * 0.5,
-      },
+      this.scene, this.camera, this.group, this.geosAndMats, patchOpts,
+    );
+
+    // Second independent patch system for cliff grass (shares geometries)
+    this.cliffGroup = new THREE.Group();
+    this.cliffGroup.name = "GeminiCliffGrass";
+    this.scene.add(this.cliffGroup);
+    this.cliffGeosAndMats = {
+      ...this._currentGeos,
+      material: materialCliff,
+      materialMega: materialMegaCliff,
+    };
+    this.cliffPatchSystem = setupGrassPatches(
+      this.scene, this.camera, this.cliffGroup, this.cliffGeosAndMats, patchOpts,
     );
 
     this._enabled = gp.enabled;
     this.group.visible = this._enabled;
+    this.cliffGroup.visible = this._enabled;
   }
 
   _buildGeos(gp) {
@@ -293,6 +310,9 @@ export class GrassManager {
     const old = this._currentGeos;
     this._currentGeos = this._buildGeos(gp);
     this.patchSystem.updateGeometries(this._currentGeos);
+    if (this.cliffPatchSystem) {
+      this.cliffPatchSystem.updateGeometries(this._currentGeos);
+    }
     if (old) {
       old.geoHigh?.dispose();
       old.geoMid?.dispose();
@@ -307,11 +327,12 @@ export class GrassManager {
     if (enabled !== this._enabled) {
       this._enabled = enabled;
       this.group.visible = enabled;
+      if (this.cliffGroup) this.cliffGroup.visible = enabled;
     }
     if (!enabled) return;
 
     const gp = grassState;
-    this.patchSystem.update({
+    const updateOpts = {
       patchSize: gp.fieldSize,
       patchSizeMid: gp.lodMidPatchSize,
       patchSizeFar: gp.lodFarPatchSize,
@@ -323,17 +344,24 @@ export class GrassManager {
       lodEnabled: gp.lodEnabled,
       grassReceiveShadow: gp.receiveShadow,
       focusPoint,
-    });
+    };
+    this.patchSystem.update(updateOpts);
+    if (this.cliffPatchSystem) {
+      this.cliffPatchSystem.update(updateOpts);
+    }
   }
 
   async precompile(renderer, camera) {
     if (!this._initialized) return;
     const wasVisible = this.group.visible;
+    const wasCliffVisible = this.cliffGroup?.visible;
     this.group.visible = true;
+    if (this.cliffGroup) this.cliffGroup.visible = true;
     try {
       await renderer.compileAsync(this.scene, camera);
     } catch (_) {}
     this.group.visible = wasVisible;
+    if (this.cliffGroup) this.cliffGroup.visible = wasCliffVisible;
   }
 
   stampDensity({ cx, cz, radius, strength, falloff, worldSize, erase }) {
@@ -539,6 +567,10 @@ export class GrassManager {
       this.geosAndMats.material?.dispose();
       this.geosAndMats.materialMega?.dispose();
     }
+    if (this.cliffGeosAndMats) {
+      this.cliffGeosAndMats.material?.dispose();
+      this.cliffGeosAndMats.materialMega?.dispose();
+    }
     this.densityTex.dispose();
     this.terrainNormalTex.dispose();
     this.cliffHeightTex.dispose();
@@ -546,5 +578,6 @@ export class GrassManager {
     this.windTex?.dispose();
     this.specNoiseTex?.dispose();
     this.scene.remove(this.group);
+    if (this.cliffGroup) this.scene.remove(this.cliffGroup);
   }
 }

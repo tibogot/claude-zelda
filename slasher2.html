@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Slasher 2 - WebGPU TSL Slash Editor</title>
+    <style>
+      body {
+        margin: 0;
+        background: #050507;
+        color: #fff;
+        font-family: monospace;
+        overflow: hidden;
+      }
+      #ui {
+        position: absolute;
+        left: 0;
+        top: 0;
+        z-index: 10;
+        width: 360px;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.88);
+        border-right: 1px solid #3c3c3c;
+        overflow-y: auto;
+        box-sizing: border-box;
+        padding: 12px;
+      }
+      #viewport {
+        position: absolute;
+        inset: 0;
+      }
+      .upload-btn {
+        width: 100%;
+        margin-top: 8px;
+        padding: 8px;
+        box-sizing: border-box;
+        border: 1px solid #5c5c5c;
+        background: #2a2a2a;
+        color: #fff;
+        cursor: pointer;
+      }
+      .hint {
+        margin: 10px 0 0;
+        color: #919191;
+        font-size: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="ui">
+      <div id="pane-container"></div>
+      <p class="hint">Optional detail mask (grit/noise), not full silhouette:</p>
+      <input type="file" id="maskUpload" class="upload-btn" accept="image/*" />
+    </div>
+    <div id="viewport"></div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.3/dist/tweakpane.min.js"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { Pane } from "tweakpane";
+      import {
+        Fn,
+        uv,
+        vec2,
+        vec4,
+        float,
+        sin,
+        fract,
+        floor,
+        dot,
+        smoothstep,
+        uniform,
+        color,
+        mix,
+        texture,
+        abs,
+      } from "three/tsl";
+      import { pass } from "three/tsl";
+
+      let renderer;
+      let scene;
+      let camera;
+      let controls;
+      let renderPipeline;
+      let slashGroup = null;
+      let pane;
+      const alphaTexture = new THREE.Texture();
+
+      const params = {
+        sides: 25,
+        geoHeight: 0.66,
+        r1x: 0.5,
+        r1z: 0.5,
+        r2x: 1.0,
+        r2z: 1.0,
+        r3x: 1.5,
+        r3z: 1.5,
+        r4x: 1.0,
+        r4z: 1.0,
+        r5x: 0.5,
+        r5z: 0.5,
+        y2: 0.2,
+        y3: 0.5,
+        y4: 0.8,
+        yScale: 0.34,
+        progress: 0.0,
+        autoPlay: true,
+        animationSpeed: 1.0,
+        showFullArc: false,
+        trailLength: 0.62,
+        headSoftness: 0.08,
+        tailSoftness: 0.2,
+        headAngle: 0.2,
+        tailAngle: 0.1,
+        baseWidth: 0.62,
+        taperAmount: 0.58,
+        taperPower: 1.35,
+        crescent: 0.34,
+        edgeSoftness: 0.12,
+        noiseScale: 18.0,
+        noiseAmount: 0.045,
+        noiseSpeed: 0.8,
+        useTextureDetail: false,
+        detailStrength: 0.35,
+        color: "#ffffff",
+        glowColor: "#dfe8ff",
+        glowIntensity: 0.7,
+        glowWidthBoost: 0.28,
+        glowSoftnessBoost: 0.22,
+        /** Full mesh sculpting: see topology before tuning the blade mask. */
+        showBaseGeometry: true,
+        baseGeometryWireframe: false,
+        hideBladeEffect: false,
+      };
+
+      const su = {
+        time: uniform(0),
+        color: uniform(color(params.color)),
+        glowColor: uniform(color(params.glowColor)),
+        progress: uniform(params.progress),
+        showFullArc: uniform(params.showFullArc ? 1 : 0),
+        trailLength: uniform(params.trailLength),
+        headSoftness: uniform(params.headSoftness),
+        tailSoftness: uniform(params.tailSoftness),
+        headAngle: uniform(params.headAngle),
+        tailAngle: uniform(params.tailAngle),
+        baseWidth: uniform(params.baseWidth),
+        taperAmount: uniform(params.taperAmount),
+        taperPower: uniform(params.taperPower),
+        crescent: uniform(params.crescent),
+        edgeSoftness: uniform(params.edgeSoftness),
+        noiseScale: uniform(params.noiseScale),
+        noiseAmount: uniform(params.noiseAmount),
+        noiseSpeed: uniform(params.noiseSpeed),
+        useTextureDetail: uniform(params.useTextureDetail ? 1 : 0),
+        detailStrength: uniform(params.detailStrength),
+        glowIntensity: uniform(params.glowIntensity),
+        glowWidthBoost: uniform(params.glowWidthBoost),
+        glowSoftnessBoost: uniform(params.glowSoftnessBoost),
+      };
+
+      const hash21 = Fn(([p]) =>
+        fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453123)),
+      );
+
+      const valueNoise = Fn(([p]) => {
+        const i = floor(p);
+        const f = fract(p);
+        const u = f.mul(f).mul(float(3).sub(f.mul(2)));
+        return mix(
+          mix(hash21(i), hash21(i.add(vec2(1, 0))), u.x),
+          mix(hash21(i.add(vec2(0, 1))), hash21(i.add(vec2(1, 1))), u.x),
+          u.y,
+        );
+      });
+
+      function buildSlashGeometry() {
+        const { sides, geoHeight, r1x, r1z, r2x, r2z, r3x, r3z, r4x, r4z, r5x, r5z, y2, y3, y4 } =
+          params;
+
+        const positions = [];
+        const uvs = [];
+        const indices = [];
+
+        const levels = [
+          { y: -geoHeight * 0.5, rx: r1x, rz: r1z, v: 0.0 },
+          { y: -geoHeight * 0.5 + geoHeight * y2, rx: r2x, rz: r2z, v: y2 },
+          { y: -geoHeight * 0.5 + geoHeight * y3, rx: r3x, rz: r3z, v: y3 },
+          { y: -geoHeight * 0.5 + geoHeight * y4, rx: r4x, rz: r4z, v: y4 },
+          { y: geoHeight * 0.5, rx: r5x, rz: r5z, v: 1.0 },
+        ];
+        const ringVerts = sides + 1;
+
+        for (let l = 0; l < levels.length; l++) {
+          const level = levels[l];
+          for (let s = 0; s <= sides; s++) {
+            const t = s / sides;
+            const angle = t * Math.PI * 2;
+            positions.push(Math.cos(angle) * level.rx, level.y, Math.sin(angle) * level.rz);
+            uvs.push(t, level.v);
+          }
+        }
+
+        for (let l = 0; l < 4; l++) {
+          const startCurrent = l * ringVerts;
+          const startNext = (l + 1) * ringVerts;
+          for (let s = 0; s < sides; s++) {
+            const a = startCurrent + s;
+            const b = startCurrent + s + 1;
+            const c = startNext + s;
+            const d = startNext + s + 1;
+            indices.push(a, b, c, b, d, c);
+          }
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+        geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+        geo.setIndex(indices);
+        geo.computeVertexNormals();
+        return geo;
+      }
+
+      function buildOutputNode(layer) {
+        return Fn(() => {
+          const vUv = uv();
+          const ySigned = vUv.y.sub(0.5);
+          const timeShift = su.time.mul(su.noiseSpeed);
+
+          const headPos = su.progress.mul(float(1).add(su.trailLength));
+          const tailPos = headPos.sub(su.trailLength);
+          const windowU = vUv.x.sub(tailPos).div(su.trailLength.max(0.001));
+
+          const headThreshold = float(1).sub(su.headAngle.mul(ySigned));
+          const tailThreshold = su.tailAngle.mul(ySigned);
+
+          const tailMask = smoothstep(
+            tailThreshold,
+            tailThreshold.add(su.tailSoftness.max(0.001)),
+            windowU,
+          );
+          const headMask = smoothstep(
+            headThreshold.sub(su.headSoftness.max(0.001)),
+            headThreshold,
+            windowU,
+          ).oneMinus();
+
+          const windowVisibility = tailMask.mul(headMask);
+          const showFull = su.showFullArc;
+          const visibility = mix(windowVisibility, float(1), showFull);
+
+          const profileU = mix(windowU.clamp(0, 1), vUv.x, showFull);
+          const centerBias = su.crescent.mul(profileU.sub(0.2)).mul(0.35);
+          const centerDist = abs(vUv.y.sub(0.5).sub(centerBias)).mul(2.0);
+
+          const taper = profileU
+            .clamp(0, 1)
+            .pow(su.taperPower.max(0.01))
+            .mul(su.taperAmount)
+            .clamp(0, 0.95);
+
+          const widthBoost = layer === "glow" ? su.glowWidthBoost : float(0);
+          const softBoost = layer === "glow" ? su.glowSoftnessBoost : float(0);
+
+          const width = su.baseWidth
+            .mul(float(1).sub(taper))
+            .add(widthBoost)
+            .clamp(0.02, 1.5);
+          const softness = su.edgeSoftness.add(softBoost).clamp(0.001, 1.0);
+
+          const nUv = vUv
+            .mul(vec2(su.noiseScale, 2.0))
+            .add(vec2(timeShift.negate(), timeShift.mul(0.2)));
+          const n = valueNoise(nUv);
+          const warpedDist = centerDist.add(n.sub(0.5).mul(su.noiseAmount));
+
+          const bodyMask = smoothstep(width, width.sub(softness), warpedDist);
+          const detailSample = texture(alphaTexture, vUv).r;
+          const detailMul = mix(float(1), detailSample, su.detailStrength);
+          const textureBlend = mix(
+            float(1),
+            detailMul,
+            su.useTextureDetail.mul(alphaTexture.image ? 1 : 0),
+          );
+
+          const layerAlpha =
+            layer === "glow"
+              ? bodyMask.mul(visibility).mul(su.glowIntensity).mul(0.75)
+              : bodyMask.mul(visibility).mul(textureBlend);
+
+          const layerColor = layer === "glow" ? su.glowColor : su.color;
+          return vec4(layerColor, layerAlpha);
+        })();
+      }
+
+      function applyViewState() {
+        if (!slashGroup?.userData?.previewMesh) return;
+        const { previewMesh, previewMat, coreMesh, glowMesh } = slashGroup.userData;
+        previewMesh.visible = params.showBaseGeometry;
+        previewMat.wireframe = params.baseGeometryWireframe;
+        previewMat.opacity = params.baseGeometryWireframe ? 0.65 : 0.22;
+        previewMat.depthWrite = !params.baseGeometryWireframe;
+        const showFx = !params.hideBladeEffect;
+        coreMesh.visible = showFx;
+        glowMesh.visible = showFx;
+      }
+
+      function rebuildSlash() {
+        if (slashGroup) scene.remove(slashGroup);
+        slashGroup = new THREE.Group();
+
+        const geo = buildSlashGeometry();
+
+        const previewMat = new THREE.MeshBasicMaterial({
+          color: 0x5c6b88,
+          transparent: true,
+          opacity: 0.22,
+          depthWrite: true,
+          depthTest: true,
+          side: THREE.DoubleSide,
+          wireframe: params.baseGeometryWireframe,
+        });
+        const previewMesh = new THREE.Mesh(geo, previewMat);
+        previewMesh.renderOrder = -1;
+
+        const coreMat = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+        });
+        coreMat.outputNode = buildOutputNode("core");
+
+        const glowMat = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+        });
+        glowMat.outputNode = buildOutputNode("glow");
+
+        const glowMesh = new THREE.Mesh(geo, glowMat);
+        const coreMesh = new THREE.Mesh(geo, coreMat);
+        glowMesh.renderOrder = 0;
+        coreMesh.renderOrder = 1;
+
+        slashGroup.add(previewMesh, glowMesh, coreMesh);
+        slashGroup.userData = { previewMesh, previewMat, coreMesh, glowMesh };
+        slashGroup.scale.y = params.yScale;
+        scene.add(slashGroup);
+        applyViewState();
+      }
+
+      function setCameraFrame() {
+        camera.position.set(3.2, 2.2, 3.2);
+        controls.target.set(0, 0, 0);
+        controls.update();
+      }
+
+      function bindUniform(folder, obj, key, opts = {}) {
+        folder.addBinding(obj, key, opts).on("change", (e) => {
+          const value = typeof e.value === "boolean" ? (e.value ? 1 : 0) : e.value;
+          su[key].value = value;
+        });
+      }
+
+      async function init() {
+        renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.getElementById("viewport").appendChild(renderer.domElement);
+        await renderer.init();
+
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x050507);
+        camera = new THREE.PerspectiveCamera(
+          50,
+          window.innerWidth / window.innerHeight,
+          0.05,
+          150,
+        );
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.08;
+        setCameraFrame();
+
+        rebuildSlash();
+
+        renderPipeline = new THREE.RenderPipeline(renderer);
+        renderPipeline.outputNode = pass(scene, camera);
+
+        pane = new Pane({
+          container: document.getElementById("pane-container"),
+          title: "Slasher 2",
+        });
+
+        const view = pane.addFolder({ title: "View (mesh sculpting)", expanded: true });
+        view
+          .addBinding(params, "showBaseGeometry", { label: "Show base geometry" })
+          .on("change", applyViewState);
+        view
+          .addBinding(params, "baseGeometryWireframe", { label: "Wireframe" })
+          .on("change", applyViewState);
+        view
+          .addBinding(params, "hideBladeEffect", { label: "Hide blade FX" })
+          .on("change", applyViewState);
+        view.addButton({ title: "Toggle wireframe" }).on("click", () => {
+          params.baseGeometryWireframe = !params.baseGeometryWireframe;
+          applyViewState();
+          pane.refresh();
+        });
+
+        const playback = pane.addFolder({ title: "Playback" });
+        bindUniform(playback, params, "progress", { min: 0, max: 1 });
+        playback.addBinding(params, "autoPlay");
+        playback.addBinding(params, "animationSpeed", { min: 0.1, max: 3, step: 0.01 });
+        bindUniform(playback, params, "showFullArc");
+
+        const baseShape = pane.addFolder({ title: "Base Shape (VFX Unreal)" });
+        baseShape
+          .addBinding(params, "sides", { min: 8, max: 96, step: 1 })
+          .on("change", rebuildSlash);
+        baseShape
+          .addBinding(params, "geoHeight", { min: 0.1, max: 2.2, step: 0.01 })
+          .on("change", rebuildSlash);
+        baseShape
+          .addBinding(params, "yScale", { min: 0.05, max: 1.4, step: 0.01 })
+          .on("change", () => {
+            if (slashGroup) slashGroup.scale.y = params.yScale;
+          });
+        baseShape
+          .addBinding(params, "r1x", { min: 0.01, max: 3, step: 0.01 })
+          .on("change", rebuildSlash);
+        baseShape
+          .addBinding(params, "r1z", { min: 0.01, max: 3, step: 0.01 })
+          .on("change", rebuildSlash);
+        baseShape
+          .addBinding(params, "r2x", { min: 0.01, max: 3, step: 0.01 })
+          .on("change", rebuildSlash);
+        baseShape
+          .addBinding(params, "r2z", { min: 0.01, max: 3, step: 0.01 })
+          .on("change", rebuildSlash);
+        baseShape
+          .addBinding(params, "r3x", { min: 0.01, max: 3, step: 0.01 })
+          .on("change", rebuildSlash);
+        baseShape
+          .addBinding(params, "r3z", { min: 0.01, max: 3, step: 0.01 })
+          .on("change", rebuildSlash);
+        baseShape
+          .addBinding(params, "r4x", { min: 0.01, max: 3, step: 0.01 })
+          .on("change", rebuildSlash);
+        baseShape
+          .addBinding(params, "r4z", { min: 0.01, max: 3, step: 0.01 })
+          .on("change", rebuildSlash);
+        baseShape
+          .addBinding(params, "r5x", { min: 0.01, max: 3, step: 0.01 })
+          .on("change", rebuildSlash);
+        baseShape
+          .addBinding(params, "r5z", { min: 0.01, max: 3, step: 0.01 })
+          .on("change", rebuildSlash);
+        baseShape
+          .addBinding(params, "y2", { min: 0.01, max: 0.95, step: 0.001 })
+          .on("change", rebuildSlash);
+        baseShape
+          .addBinding(params, "y3", { min: 0.02, max: 0.98, step: 0.001 })
+          .on("change", rebuildSlash);
+        baseShape
+          .addBinding(params, "y4", { min: 0.03, max: 0.99, step: 0.001 })
+          .on("change", rebuildSlash);
+
+        const shape = pane.addFolder({ title: "Shape Mask" });
+        bindUniform(shape, params, "baseWidth", { min: 0.08, max: 1.4, step: 0.001 });
+        bindUniform(shape, params, "taperAmount", { min: 0, max: 0.95, step: 0.001 });
+        bindUniform(shape, params, "taperPower", { min: 0.2, max: 4, step: 0.001 });
+        bindUniform(shape, params, "crescent", { min: -0.8, max: 0.8, step: 0.001 });
+        bindUniform(shape, params, "edgeSoftness", { min: 0.01, max: 0.8, step: 0.001 });
+
+        const reveal = pane.addFolder({ title: "Reveal Window" });
+        bindUniform(reveal, params, "trailLength", { min: 0.08, max: 1.2, step: 0.001 });
+        bindUniform(reveal, params, "headSoftness", { min: 0.005, max: 0.5, step: 0.001 });
+        bindUniform(reveal, params, "tailSoftness", { min: 0.005, max: 0.7, step: 0.001 });
+        bindUniform(reveal, params, "headAngle", { min: -1, max: 1, step: 0.001 });
+        bindUniform(reveal, params, "tailAngle", { min: -1, max: 1, step: 0.001 });
+
+        const noise = pane.addFolder({ title: "Noise / Detail" });
+        bindUniform(noise, params, "noiseScale", { min: 1, max: 60, step: 0.01 });
+        bindUniform(noise, params, "noiseAmount", { min: 0, max: 0.3, step: 0.001 });
+        bindUniform(noise, params, "noiseSpeed", { min: 0, max: 3, step: 0.001 });
+        bindUniform(noise, params, "useTextureDetail");
+        bindUniform(noise, params, "detailStrength", { min: 0, max: 1, step: 0.001 });
+
+        const look = pane.addFolder({ title: "Look (Core + Glow)" });
+        look.addBinding(params, "color").on("change", (e) => su.color.value.set(e.value));
+        look.addBinding(params, "glowColor").on("change", (e) => su.glowColor.value.set(e.value));
+        bindUniform(look, params, "glowIntensity", { min: 0, max: 2, step: 0.001 });
+        bindUniform(look, params, "glowWidthBoost", { min: 0, max: 1, step: 0.001 });
+        bindUniform(look, params, "glowSoftnessBoost", { min: 0, max: 0.7, step: 0.001 });
+
+        const cameraFolder = pane.addFolder({ title: "Camera" });
+        cameraFolder
+          .addButton({ title: "Reset Framing" })
+          .on("click", () => setCameraFrame());
+
+        document.getElementById("maskUpload").addEventListener("change", (event) => {
+          const file = event.target.files[0];
+          if (!file) return;
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            const img = new Image();
+            img.onload = () => {
+              alphaTexture.image = img;
+              alphaTexture.needsUpdate = true;
+              params.useTextureDetail = true;
+              su.useTextureDetail.value = 1;
+              pane.refresh();
+            };
+            img.src = ev.target.result;
+          };
+          reader.readAsDataURL(file);
+        });
+
+        window.addEventListener("resize", () => {
+          camera.aspect = window.innerWidth / window.innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        function animate() {
+          requestAnimationFrame(animate);
+          su.time.value += 0.016;
+
+          if (params.autoPlay && !params.showFullArc) {
+            const t = (Date.now() * 0.001 * params.animationSpeed) % 1.5;
+            su.progress.value = t > 1 ? 0 : t;
+            params.progress = su.progress.value;
+            pane.refresh();
+          }
+
+          controls.update();
+          renderPipeline.render();
+        }
+
+        animate();
+      }
+
+      init().catch(console.error);
+    </script>
+  </body>
+</html>

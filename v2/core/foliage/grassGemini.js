@@ -364,8 +364,10 @@ export function createGrassMaterial(ctx) {
     uSlopeEnabled: _uSlopeEnabled,
     uSlopeMin: _uSlopeMin,
     uSlopeMax: _uSlopeMax,
+    cliffMode: _cliffMode,
   } = ctx;
 
+  const cliffMode = _cliffMode ?? false;
   const groundColorAtWorldXZ =
     _groundColorAtWorldXZ ?? ((_xz) => vec3(1, 1, 1));
   const uTerrainTintMode = _uTerrainTintMode ?? uniform(0);
@@ -445,17 +447,14 @@ export function createGrassMaterial(ctx) {
     const terrainUV = add(div(bladeXZ, uTerrainSize), vec2(0.5));
     const terrainH = texture(heightTex, terrainUV).x;
 
-    // ── Cliff layer sampling (optional — dummy textures produce useCliff=0) ──
+    // ── Cliff layer sampling ──
     const cliffSample = texture(cliffHTex, terrainUV);
     const cliffH = cliffSample.x;
     const cliffD = texture(cliffDTex, terrainUV).x;
     const cliffValid = smoothstep(float(-9990), float(-9000), cliffH);
     const cliffPainted = smoothstep(float(0.01), float(0.03), cliffD);
-    const useCliff = cliffValid.mul(cliffPainted);
 
-    const finalH = mix(terrainH, cliffH, useCliff);
-
-    // ── Terrain normal (precomputed or FD fallback) ──
+    // ── Normals ──
     const tNorm = terrainNormalTex
       ? normalize(texture(terrainNormalTex, terrainUV).xyz)
       : (() => {
@@ -467,11 +466,11 @@ export function createGrassMaterial(ctx) {
           const worldStep = uTerrainSize.div(float(terrainRes));
           return normalize(vec3(hL.sub(hR), worldStep.mul(float(2)), hD.sub(hU)));
         })();
-
-    // Cliff normal — precomputed in rebuildCliffHeightTex (stored in GBA)
     const cNorm = normalize(vec3(cliffSample.y, cliffSample.z, cliffSample.w));
 
-    const terrainNormal = normalize(mix(tNorm, cNorm, useCliff));
+    // ── Surface selection (compile-time: terrain-only or cliff-only) ──
+    const finalH = cliffMode ? cliffH : terrainH;
+    const terrainNormal = cliffMode ? cNorm : tNorm;
 
     // ── LOD morph + distance fade ──
     const lodFocusXZ = vec2(uPlayerPos.x, uPlayerPos.z);
@@ -500,11 +499,6 @@ export function createGrassMaterial(ctx) {
     const distFadeLinear = smoothstep(uLodMaxDist, fadeBegin, bladeCamDist);
     const distFade = distFadeLinear.mul(distFadeLinear);
 
-    // ── Painted density (cliff density overrides terrain when cliff surface exists) ──
-    const terrainDensity = texture(grassDensityTex, terrainUV).x;
-    const paintedDensity = max(terrainDensity, cliffD.mul(useCliff));
-    const hasDensity = smoothstep(float(0.0), float(0.005), paintedDensity);
-
     // ── Per-blade randomization (4 decorrelated outputs) ──
     const hv = hash42(bladeXZ);
     const h0 = hv.x; // yaw
@@ -515,6 +509,15 @@ export function createGrassMaterial(ctx) {
     // Stochastic density culling (decorrelated hash)
     const densityHv = hash22(bladeXZ.add(vec2(853.1, 137.9)));
     const densityHash = densityHv.x;
+
+    // ── Density (terrain-only or cliff-only, never mixed) ──
+    const paintedDensity = cliffMode
+      ? cliffD
+      : texture(grassDensityTex, terrainUV).x;
+    const hasDensity = cliffMode
+      ? cliffValid.mul(cliffPainted)
+      : smoothstep(float(0.0), float(0.005), paintedDensity);
+
     let densityCull = smoothstep(
       uGrassDensity.mul(paintedDensity),
       uGrassDensity.mul(paintedDensity).add(float(0.01)),
@@ -523,8 +526,7 @@ export function createGrassMaterial(ctx) {
       .oneMinus()
       .mul(hasDensity);
 
-    // Fade blades near / past the playable terrain square (same centered extent as
-    // terrain UV: xz in [-uTerrainSize/2, +uTerrainSize/2]). Stops grass on ocean.
+    // Fade blades near / past the playable terrain square
     const mapHalf = uTerrainSize.mul(0.5);
     const mapEdgeW = max(float(1.5), uTerrainSize.mul(0.004));
     const outMax = max(abs(bladeXZ.x), abs(bladeXZ.y));
@@ -533,9 +535,11 @@ export function createGrassMaterial(ctx) {
     );
     densityCull = densityCull.mul(mapStay);
 
-    // ── Slope rejection — suppress grass on steep terrain ──
-    const slopeGrass = smoothstep(uSlopeMin, uSlopeMax, terrainNormal.y);
-    densityCull = densityCull.mul(mix(float(1), slopeGrass, uSlopeEnabled));
+    // ── Slope rejection — terrain mode only ──
+    if (!cliffMode) {
+      const slopeGrass = smoothstep(uSlopeMin, uSlopeMax, terrainNormal.y);
+      densityCull = densityCull.mul(mix(float(1), slopeGrass, uSlopeEnabled));
+    }
 
     // ── Voronoi clumping ──
     const cellP = bladeXZ.div(uClumpScale);
@@ -1012,8 +1016,10 @@ export function createGrassMaterialMega(ctx) {
     uSlopeEnabled: _uSlopeEnabledMega,
     uSlopeMin: _uSlopeMinMega,
     uSlopeMax: _uSlopeMaxMega,
+    cliffMode: _cliffModeMega,
   } = ctx;
 
+  const cliffMode = _cliffModeMega ?? false;
   const groundColorAtWorldXZ =
     _groundColorAtWorldXZMega ?? ((_xz) => vec3(1, 1, 1));
   const uTerrainTintMode = _uTerrainTintModeMega ?? uniform(0);
@@ -1085,8 +1091,6 @@ export function createGrassMaterialMega(ctx) {
     const cliffD = texture(cliffDTex, terrainUV).x;
     const cliffValid = smoothstep(float(-9990), float(-9000), cliffH);
     const cliffPainted = smoothstep(float(0.01), float(0.03), cliffD);
-    const useCliff = cliffValid.mul(cliffPainted);
-    const finalH = mix(terrainH, cliffH, useCliff);
 
     const tNorm = terrainNormalTex
       ? normalize(texture(terrainNormalTex, terrainUV).xyz)
@@ -1100,7 +1104,9 @@ export function createGrassMaterialMega(ctx) {
           return normalize(vec3(hL.sub(hR), worldStep.mul(float(2)), hD.sub(hU)));
         })();
     const cNorm = normalize(vec3(cliffSample.y, cliffSample.z, cliffSample.w));
-    const terrainNormal = normalize(mix(tNorm, cNorm, useCliff));
+
+    const finalH = cliffMode ? cliffH : terrainH;
+    const terrainNormal = cliffMode ? cNorm : tNorm;
 
     const lodFocusXZMega = vec2(uPlayerPos.x, uPlayerPos.z);
     const bladeCamDist = length(bladeXZ.sub(lodFocusXZMega));
@@ -1109,11 +1115,16 @@ export function createGrassMaterialMega(ctx) {
     const distFade = distFadeLinear.mul(distFadeLinear);
     vDistFade.assign(distFade);
 
-    const terrainDensity = texture(grassDensityTex, terrainUV).x;
-    const paintedDensity = max(terrainDensity, cliffD.mul(useCliff));
-    const hasDensity = smoothstep(float(0.0), float(0.005), paintedDensity);
     const densityHv = hash22(bladeXZ.add(vec2(853.1, 137.9)));
     const densityHash = densityHv.x;
+
+    const paintedDensity = cliffMode
+      ? cliffD
+      : texture(grassDensityTex, terrainUV).x;
+    const hasDensity = cliffMode
+      ? cliffValid.mul(cliffPainted)
+      : smoothstep(float(0.0), float(0.005), paintedDensity);
+
     let densityCull = smoothstep(
       uGrassDensity.mul(paintedDensity),
       uGrassDensity.mul(paintedDensity).add(float(0.01)),
@@ -1130,8 +1141,10 @@ export function createGrassMaterialMega(ctx) {
     );
     densityCull = densityCull.mul(mapStayM);
 
-    const slopeGrassM = smoothstep(uSlopeMin, uSlopeMax, terrainNormal.y);
-    densityCull = densityCull.mul(mix(float(1), slopeGrassM, uSlopeEnabled));
+    if (!cliffMode) {
+      const slopeGrassM = smoothstep(uSlopeMin, uSlopeMax, terrainNormal.y);
+      densityCull = densityCull.mul(mix(float(1), slopeGrassM, uSlopeEnabled));
+    }
 
     const hv = hash42(bladeXZ);
     const h0 = hv.x;
