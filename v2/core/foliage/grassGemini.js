@@ -294,6 +294,7 @@ export function createGrassMaterial(ctx) {
     grassDensityTex,
     cliffHeightTex: _cliffHTex,
     cliffDensityTex: _cliffDTex,
+    terrainNormalTex: _terrainNormalTex,
     terrainRes,
     uTerrainSize,
     uSunDir,
@@ -379,6 +380,7 @@ export function createGrassMaterial(ctx) {
   const cliffHTex = _cliffHTex ?? _getDummyCliffHTex();
   const cliffDTex = _cliffDTex ?? _getDummyCliffDTex();
   const specNoiseTex = _specNoiseTex ?? _getDummySpecNoiseTex();
+  const terrainNormalTex = _terrainNormalTex ?? null;
   const useWindTex = !!_windTex;
 
   // Packed varyings: WebGPU allows 16 user interpolants; MeshStandardNodeMaterial
@@ -453,21 +455,18 @@ export function createGrassMaterial(ctx) {
 
     const finalH = mix(terrainH, cliffH, useCliff);
 
-    // ── Terrain normal via central differences ──
-    const texelSize = float(1).div(float(terrainRes));
-    const uvL = terrainUV.add(vec2(negate(texelSize), float(0)));
-    const uvR = terrainUV.add(vec2(texelSize, float(0)));
-    const uvD = terrainUV.add(vec2(float(0), negate(texelSize)));
-    const uvU = terrainUV.add(vec2(float(0), texelSize));
-
-    const hL = texture(heightTex, uvL).x;
-    const hR = texture(heightTex, uvR).x;
-    const hD = texture(heightTex, uvD).x;
-    const hU = texture(heightTex, uvU).x;
-    const worldStep = uTerrainSize.div(float(terrainRes));
-    const tNorm = normalize(
-      vec3(hL.sub(hR), worldStep.mul(float(2)), hD.sub(hU)),
-    );
+    // ── Terrain normal (precomputed or FD fallback) ──
+    const tNorm = terrainNormalTex
+      ? normalize(texture(terrainNormalTex, terrainUV).xyz)
+      : (() => {
+          const texelSize = float(1).div(float(terrainRes));
+          const hL = texture(heightTex, terrainUV.add(vec2(negate(texelSize), float(0)))).x;
+          const hR = texture(heightTex, terrainUV.add(vec2(texelSize, float(0)))).x;
+          const hD = texture(heightTex, terrainUV.add(vec2(float(0), negate(texelSize)))).x;
+          const hU = texture(heightTex, terrainUV.add(vec2(float(0), texelSize))).x;
+          const worldStep = uTerrainSize.div(float(terrainRes));
+          return normalize(vec3(hL.sub(hR), worldStep.mul(float(2)), hD.sub(hU)));
+        })();
 
     // Cliff normal — precomputed in rebuildCliffHeightTex (stored in GBA)
     const cNorm = normalize(vec3(cliffSample.y, cliffSample.z, cliffSample.w));
@@ -985,6 +984,7 @@ export function createGrassMaterialMega(ctx) {
     grassDensityTex,
     cliffHeightTex: _cliffHTex,
     cliffDensityTex: _cliffDTex,
+    terrainNormalTex: _terrainNormalTexMega,
     terrainRes,
     uTerrainSize,
     uSunDir,
@@ -1024,6 +1024,7 @@ export function createGrassMaterialMega(ctx) {
   const uSlopeEnabled = _uSlopeEnabledMega ?? uniform(0);
   const uSlopeMin = _uSlopeMinMega ?? uniform(0.65);
   const uSlopeMax = _uSlopeMaxMega ?? uniform(0.85);
+  const terrainNormalTex = _terrainNormalTexMega ?? null;
 
   const cliffHTex = _cliffHTex ?? _getDummyCliffHTex();
   const cliffDTex = _cliffDTex ?? _getDummyCliffDTex();
@@ -1087,19 +1088,17 @@ export function createGrassMaterialMega(ctx) {
     const useCliff = cliffValid.mul(cliffPainted);
     const finalH = mix(terrainH, cliffH, useCliff);
 
-    const texelSize = float(1).div(float(terrainRes));
-    const uvL = terrainUV.add(vec2(negate(texelSize), float(0)));
-    const uvR = terrainUV.add(vec2(texelSize, float(0)));
-    const uvD = terrainUV.add(vec2(float(0), negate(texelSize)));
-    const uvU = terrainUV.add(vec2(float(0), texelSize));
-    const hL = texture(heightTex, uvL).x;
-    const hR = texture(heightTex, uvR).x;
-    const hD = texture(heightTex, uvD).x;
-    const hU = texture(heightTex, uvU).x;
-    const worldStep = uTerrainSize.div(float(terrainRes));
-    const tNorm = normalize(
-      vec3(hL.sub(hR), worldStep.mul(float(2)), hD.sub(hU)),
-    );
+    const tNorm = terrainNormalTex
+      ? normalize(texture(terrainNormalTex, terrainUV).xyz)
+      : (() => {
+          const texelSize = float(1).div(float(terrainRes));
+          const hL = texture(heightTex, terrainUV.add(vec2(negate(texelSize), float(0)))).x;
+          const hR = texture(heightTex, terrainUV.add(vec2(texelSize, float(0)))).x;
+          const hD = texture(heightTex, terrainUV.add(vec2(float(0), negate(texelSize)))).x;
+          const hU = texture(heightTex, terrainUV.add(vec2(float(0), texelSize))).x;
+          const worldStep = uTerrainSize.div(float(terrainRes));
+          return normalize(vec3(hL.sub(hR), worldStep.mul(float(2)), hD.sub(hU)));
+        })();
     const cNorm = normalize(vec3(cliffSample.y, cliffSample.z, cliffSample.w));
     const terrainNormal = normalize(mix(tNorm, cNorm, useCliff));
 

@@ -1088,6 +1088,7 @@ export async function startV2App() {
         // Rebuild everything
         invalidateSurfaceMaterials();
         rebuildGlobalHeightTexture();
+        grassManager.rebuildTerrainNormalTex(config.world.size);
         syncFog();
         rebuildSkyEnv();
         chunkStream.markAllDirty();
@@ -1221,6 +1222,7 @@ export async function startV2App() {
   grassManager.init(globalHeightTex, sunDir, toolState.grass, {
     groundColorAtWorldXZ: sharedGroundBundle.groundColorAtWorldXZ,
   });
+  grassManager.rebuildTerrainNormalTex(config.world.size);
   grassManager.precompile(renderer, camera);
 
   // Pre-compile terrain pipelines for all LOD segment counts to avoid hitches
@@ -1714,6 +1716,7 @@ export async function startV2App() {
 
     if (heightTexDirty && now - lastHeightTexSyncMs > 500) {
       rebuildGlobalHeightTexture();
+      grassManager.rebuildTerrainNormalTex(config.world.size);
       heightTexDirty = false;
       lastHeightTexSyncMs = now;
     }

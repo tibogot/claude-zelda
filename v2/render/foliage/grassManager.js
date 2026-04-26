@@ -34,6 +34,18 @@ export class GrassManager {
     this.densityTex.magFilter = THREE.LinearFilter;
     this.densityTex.needsUpdate = true;
 
+    // Terrain normal texture (Float32 RGBA — xyz = precomputed FD normal)
+    const tnData = new Float32Array(res * res * 4);
+    for (let i = 0; i < res * res; i++) {
+      tnData[i * 4 + 1] = 1;
+      tnData[i * 4 + 3] = 1;
+    }
+    this.terrainNormalTex = new THREE.DataTexture(tnData, res, res, THREE.RGBAFormat, THREE.FloatType);
+    this.terrainNormalTex.wrapS = this.terrainNormalTex.wrapT = THREE.ClampToEdgeWrapping;
+    this.terrainNormalTex.minFilter = THREE.LinearFilter;
+    this.terrainNormalTex.magFilter = THREE.LinearFilter;
+    this.terrainNormalTex.needsUpdate = true;
+
     // Cliff grass: height texture (Float32 RGBA — .x = cliff Y, -9999 where invalid)
     const chData = new Float32Array(res * res * 4);
     for (let i = 0; i < res * res; i++) {
@@ -58,6 +70,7 @@ export class GrassManager {
   init(heightTex, sunDir, grassState, { groundColorAtWorldXZ } = {}) {
     if (this._initialized) return;
     this._initialized = true;
+    this._heightTex = heightTex;
 
     const gp = grassState;
     const ws = this.config.world.size;
@@ -136,6 +149,7 @@ export class GrassManager {
     const ctx = {
       ...this.uniforms,
       heightTex,
+      terrainNormalTex: this.terrainNormalTex,
       grassDensityTex: this.densityTex,
       cliffHeightTex: this.cliffHeightTex,
       cliffDensityTex: this.cliffDensityTex,
@@ -378,6 +392,32 @@ export class GrassManager {
     this.densityTex.needsUpdate = true;
   }
 
+  rebuildTerrainNormalTex(worldSize) {
+    if (!this._heightTex) return;
+    const res = this.densityRes;
+    const hData = this._heightTex.image.data;
+    const nData = this.terrainNormalTex.image.data;
+    const ws2 = (worldSize / res) * 2;
+    const getH = (x, z) => hData[(Math.max(0, Math.min(res - 1, z)) * res + Math.max(0, Math.min(res - 1, x))) * 4];
+    for (let iz = 0; iz < res; iz++) {
+      for (let ix = 0; ix < res; ix++) {
+        const hL = getH(ix - 1, iz);
+        const hR = getH(ix + 1, iz);
+        const hD = getH(ix, iz - 1);
+        const hU = getH(ix, iz + 1);
+        const nx = hL - hR;
+        const nz = hD - hU;
+        const len = Math.sqrt(nx * nx + ws2 * ws2 + nz * nz);
+        const i4 = (iz * res + ix) * 4;
+        nData[i4]     = nx / len;
+        nData[i4 + 1] = ws2 / len;
+        nData[i4 + 2] = nz / len;
+        nData[i4 + 3] = 1;
+      }
+    }
+    this.terrainNormalTex.needsUpdate = true;
+  }
+
   rebuildCliffHeightTex(cliffBvh, terrainStore, worldSize) {
     if (!cliffBvh?.baked) return;
     const res = this.densityRes;
@@ -500,6 +540,7 @@ export class GrassManager {
       this.geosAndMats.materialMega?.dispose();
     }
     this.densityTex.dispose();
+    this.terrainNormalTex.dispose();
     this.cliffHeightTex.dispose();
     this.cliffDensityTex.dispose();
     this.windTex?.dispose();
