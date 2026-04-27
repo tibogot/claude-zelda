@@ -338,6 +338,12 @@ export class RoadSystem {
     return this.segments.filter(s => s.mesh).map(s => s.mesh);
   }
 
+  getSegmentsSnapshot() {
+    return this.segments.map((s) => ({
+      points: s.points.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+    }));
+  }
+
   getAverageY() {
     let sum = 0, count = 0;
     for (const seg of this.segments) {

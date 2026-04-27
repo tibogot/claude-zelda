@@ -38,6 +38,7 @@ export function addSplineFolder(pane, toolState, opts) {
       "Props (active prop slot)": "props",
       "Procedural tunnel": "tunnel",
       "Guardrail (W profile)": "guardrail",
+      "Guardrail From Road": "guardrailFromRoad",
     },
   });
   folder.addBinding(sp, "spacing", { label: "Spacing", min: 0.5, max: 40, step: 0.5 });
@@ -63,6 +64,20 @@ export function addSplineFolder(pane, toolState, opts) {
   guardrailFolder.addBinding(sp, "guardrailRailYOffset", { label: "Rail Y offset", min: 0.0, max: 3, step: 0.01 });
   guardrailFolder.addBinding(sp, "guardrailPostSink", { label: "Post sink", min: 0.0, max: 0.6, step: 0.005 });
   guardrailFolder.addBinding(sp, "guardrailColor", { label: "Color", view: "color" });
+  const fromRoadFolder = folder.addFolder({ title: "Guardrail From Road", expanded: false });
+  fromRoadFolder.addBinding(sp, "guardrailFromRoadIndex", { label: "Road index", min: 0, max: 63, step: 1 });
+  fromRoadFolder.addBinding(sp, "guardrailFromRoadSide", {
+    label: "Side",
+    options: {
+      Left: "left",
+      Right: "right",
+      Both: "both",
+    },
+  });
+  fromRoadFolder.addBinding(sp, "guardrailFromRoadEdgeOffset", { label: "Edge offset", min: -2, max: 8, step: 0.05 });
+  fromRoadFolder.addBinding(sp, "guardrailFromRoadStart", { label: "Start %", min: 0, max: 1, step: 0.01 });
+  fromRoadFolder.addBinding(sp, "guardrailFromRoadEnd", { label: "End %", min: 0, max: 1, step: 0.01 });
+  fromRoadFolder.addBinding(sp, "guardrailFromRoadPostSpacingMul", { label: "Post spacing x", min: 1, max: 12, step: 0.25 });
   folder.addButton({ title: "Preview placement" }).on("click", () => onSplinePreview?.());
   folder.addButton({ title: "Bake placement" }).on("click", () => onSplineBake?.());
   folder.addButton({ title: "Clear preview" }).on("click", () => onSplineClearPreview?.());

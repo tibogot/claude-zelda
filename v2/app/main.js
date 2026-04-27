@@ -579,6 +579,7 @@ export async function startV2App() {
     treeStore,
     propStore,
     getWorldHeight: (x, z) => terrainStore.getWorldHeight(x, z),
+    getRoadSegments: () => roadSystem.getSegmentsSnapshot(),
   });
   let propUiCallbacks = {};
 

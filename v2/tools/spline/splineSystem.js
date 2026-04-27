@@ -18,6 +18,7 @@ export class SplineSystem {
     treeStore,
     propStore,
     getWorldHeight,
+    getRoadSegments,
   }) {
     this.scene = scene;
     this.toolState = toolState;
@@ -27,6 +28,7 @@ export class SplineSystem {
     this.treeStore = treeStore;
     this.propStore = propStore;
     this.getWorldHeight = getWorldHeight;
+    this.getRoadSegments = getRoadSegments || (() => []);
 
     this.points = [];
     this.selectedIdx = -1;
@@ -419,6 +421,125 @@ export class SplineSystem {
     return true;
   }
 
+  _slicePointsByRange(points, startT, endT) {
+    if (!Array.isArray(points) || points.length < 2) return [];
+    const a = THREE.MathUtils.clamp(Math.min(startT, endT), 0, 1);
+    const b = THREE.MathUtils.clamp(Math.max(startT, endT), 0, 1);
+    if (b - a < 1e-4) return [];
+    const n = points.length;
+    const i0 = Math.max(0, Math.floor(a * (n - 1)));
+    const i1 = Math.min(n - 1, Math.ceil(b * (n - 1)));
+    if (i1 - i0 < 1) return [];
+    return points.slice(i0, i1 + 1);
+  }
+
+  _offsetPointsBySide(points, sideSign, lateralOffset) {
+    const out = [];
+    const tangent = new THREE.Vector3();
+    const next = new THREE.Vector3();
+    const prev = new THREE.Vector3();
+    for (let i = 0; i < points.length; i++) {
+      const p = points[i];
+      if (i === 0) {
+        next.copy(points[Math.min(points.length - 1, i + 1)]).sub(p);
+        tangent.copy(next);
+      } else if (i === points.length - 1) {
+        prev.copy(p).sub(points[Math.max(0, i - 1)]);
+        tangent.copy(prev);
+      } else {
+        prev.copy(p).sub(points[i - 1]);
+        next.copy(points[i + 1]).sub(p);
+        tangent.copy(prev.add(next));
+      }
+      const len = Math.hypot(tangent.x, tangent.z);
+      let nx = 0;
+      let nz = 0;
+      if (len > 1e-6) {
+        const tx = tangent.x / len;
+        const tz = tangent.z / len;
+        nx = tz * sideSign;
+        nz = -tx * sideSign;
+      }
+      out.push({
+        x: p.x + nx * lateralOffset,
+        y: p.y,
+        z: p.z + nz * lateralOffset,
+      });
+    }
+    return out;
+  }
+
+  _createGuardrailFromRoad() {
+    const s = this.toolState.spline;
+    const roads = this.getRoadSegments();
+    if (!Array.isArray(roads) || roads.length === 0) return false;
+    const roadIdx = THREE.MathUtils.clamp(s.guardrailFromRoadIndex | 0, 0, roads.length - 1);
+    const road = roads[roadIdx];
+    const roadPoints = Array.isArray(road?.points) ? road.points : [];
+    if (roadPoints.length < 2) return false;
+    const baseCurve = new THREE.CatmullRomCurve3(
+      roadPoints.map((p) => new THREE.Vector3(p.x, p.y, p.z)),
+      !!this.toolState.road?.closed,
+      "catmullrom",
+      0.5,
+    );
+    const sampleCount = Math.max(24, (s.guardrailPathSegments | 0) + 1);
+    const sampled = baseCurve.getSpacedPoints(sampleCount);
+    const sliced = this._slicePointsByRange(
+      sampled,
+      s.guardrailFromRoadStart ?? 0,
+      s.guardrailFromRoadEnd ?? 1,
+    );
+    if (sliced.length < 2) return false;
+
+    const scaleMid = Math.max(0.05, (Math.max(0.05, s.scaleMin) + Math.max(0.05, s.scaleMax)) * 0.5);
+    const halfRoadW = Math.max(0.25, (this.toolState.road?.width ?? 8) * 0.5);
+    const edgeOffset = s.guardrailFromRoadEdgeOffset ?? 0;
+    const lateralOffset = Math.max(0.1, halfRoadW + edgeOffset);
+    const sides = s.guardrailFromRoadSide === "both"
+      ? [1, -1]
+      : [s.guardrailFromRoadSide === "left" ? 1 : -1];
+
+    let placed = 0;
+    for (const sideSign of sides) {
+      const pts = this._offsetPointsBySide(sliced, sideSign, lateralOffset);
+      if (pts.length < 2) continue;
+      const height = Math.max(0.05, s.guardrailHeight * scaleMid);
+      const depth = Math.max(0.05, s.guardrailDepth * scaleMid);
+      const thickness = Math.max(0.01, s.guardrailThickness * scaleMid);
+      const crown = Math.max(0, s.guardrailCrownDepth * scaleMid);
+      const profile = [
+        { y: -0.5 * height, z: 0.5 },
+        { y: -0.16 * height, z: 0.35 },
+        { y: 0.0, z: -crown / Math.max(depth, 1e-6) },
+        { y: 0.16 * height, z: 0.35 },
+        { y: 0.5 * height, z: 0.5 },
+      ];
+      const guardrail = {
+        points: pts,
+        closed: false,
+        pathSegs: Math.max(40, s.guardrailPathSegments | 0),
+        height,
+        depth,
+        thickness,
+        crown,
+        railYOffset: Math.max(0, s.guardrailRailYOffset * scaleMid),
+        postSpacing: Math.max(0.5, s.guardrailPostSpacing * Math.max(1, s.guardrailFromRoadPostSpacingMul ?? 1)),
+        postWidth: Math.max(0.03, s.guardrailPostWidth * scaleMid),
+        postDepth: Math.max(0.03, s.guardrailPostDepth * scaleMid),
+        postHeight: Math.max(0.2, s.guardrailPostHeight * scaleMid),
+        postSink: Math.max(0, s.guardrailPostSink * scaleMid),
+        color: s.guardrailColor,
+        profile,
+        group: null,
+      };
+      this._buildGuardrailMesh(guardrail);
+      this.guardrails.push(guardrail);
+      placed++;
+    }
+    return placed > 0;
+  }
+
   _buildGuardrailMesh(guardrail) {
     if (guardrail.group) {
       this.scene.remove(guardrail.group);
@@ -629,6 +750,9 @@ export class SplineSystem {
       if (ok) placed = 1;
     } else if (s.objectType === "guardrail") {
       const ok = this._createGuardrailFromCurrentSpline();
+      if (ok) placed = 1;
+    } else if (s.objectType === "guardrailFromRoad") {
+      const ok = this._createGuardrailFromRoad();
       if (ok) placed = 1;
     }
 

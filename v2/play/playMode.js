@@ -94,6 +94,8 @@ const CAR_HALF_LENGTH = 2.5;
 const CAR_BODY_HEIGHT = 0.8;
 const CAR_GRAVITY = 28;
 const CAR_EDGE_DROP_THRESHOLD = 0.45;
+const CAR_COLLISION_SKIN = 0.08;
+const CAR_COLLISION_ITERS = 3;
 
 const TRAIL_SEG = 90;
 const TRAIL_HALF_W = 0.038;
@@ -1205,42 +1207,83 @@ export class PlayMode {
           const rightX = Math.cos(this.carHeading);
           const rightZ = -Math.sin(this.carHeading);
 
-          const carRays = [
-            { dx: fwdX, dz: fwdZ, dist: CAR_HALF_LENGTH + 0.2 },
-            { dx: -fwdX, dz: -fwdZ, dist: CAR_HALF_LENGTH * 0.6 },
-            { dx: fwdX + rightX, dz: fwdZ + rightZ, dist: CAR_HALF_LENGTH },
-            { dx: fwdX - rightX, dz: fwdZ - rightZ, dist: CAR_HALF_LENGTH },
-            { dx: rightX, dz: rightZ, dist: CAR_HALF_WIDTH + 0.1 },
-            { dx: -rightX, dz: -rightZ, dist: CAR_HALF_WIDTH + 0.1 },
-          ];
+          const baseStepLen = Math.hypot(stepX, stepZ);
+          if (baseStepLen > 1e-6) {
+            const sweepDist = baseStepLen + CAR_HALF_LENGTH + CAR_COLLISION_SKIN;
+            const sweepSamples = [
+              { ox: 0, oz: 0, y: lowY },
+              { ox: 0, oz: 0, y: highY },
+              { ox: rightX * CAR_HALF_WIDTH, oz: rightZ * CAR_HALF_WIDTH, y: lowY },
+              { ox: -rightX * CAR_HALF_WIDTH, oz: -rightZ * CAR_HALF_WIDTH, y: lowY },
+            ];
+            let minSafe = baseStepLen;
+            const dirX = stepX / baseStepLen;
+            const dirZ = stepZ / baseStepLen;
+            for (const s of sweepSamples) {
+              const hit = this.cliffBvh.raycast3D(
+                px + s.ox,
+                s.y,
+                pz + s.oz,
+                stepX,
+                0,
+                stepZ,
+                sweepDist,
+              );
+              if (!hit) continue;
+              const safe = Math.max(0, hit.distance - (CAR_HALF_LENGTH + CAR_COLLISION_SKIN));
+              if (safe < minSafe) minSafe = safe;
+            }
+            if (minSafe < baseStepLen) {
+              stepX = dirX * minSafe;
+              stepZ = dirZ * minSafe;
+            }
+          }
 
-          for (const r of carRays) {
-            const rLen = Math.hypot(r.dx, r.dz);
-            const ndx = r.dx / rLen;
-            const ndz = r.dz / rLen;
-            for (const ry of [lowY, highY]) {
-              const hit = this.cliffBvh.raycastLateral(px, ry, pz, ndx, ndz, r.dist);
-              if (hit) {
+          let posX = px + stepX;
+          let posZ = pz + stepZ;
+          for (let iter = 0; iter < CAR_COLLISION_ITERS; iter++) {
+            let changed = false;
+            const carRays = [
+              { dx: fwdX, dz: fwdZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN },
+              { dx: -fwdX, dz: -fwdZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN },
+              { dx: fwdX + rightX, dz: fwdZ + rightZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN },
+              { dx: fwdX - rightX, dz: fwdZ - rightZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN },
+              { dx: -fwdX + rightX, dz: -fwdZ + rightZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN },
+              { dx: -fwdX - rightX, dz: -fwdZ - rightZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN },
+              { dx: rightX, dz: rightZ, dist: CAR_HALF_WIDTH + CAR_COLLISION_SKIN },
+              { dx: -rightX, dz: -rightZ, dist: CAR_HALF_WIDTH + CAR_COLLISION_SKIN },
+            ];
+
+            for (const r of carRays) {
+              const rLen = Math.hypot(r.dx, r.dz);
+              const ndx = r.dx / Math.max(1e-6, rLen);
+              const ndz = r.dz / Math.max(1e-6, rLen);
+              for (const ry of [lowY, highY]) {
+                const hit = this.cliffBvh.raycastLateral(posX, ry, posZ, ndx, ndz, r.dist);
+                if (!hit) continue;
                 const nx = hit.normal.x;
                 const nz = hit.normal.z;
                 const nLen = Math.hypot(nx, nz);
-                if (nLen > 0.01) {
-                  const nnx = nx / nLen;
-                  const nnz = nz / nLen;
-                  const pen = r.dist - hit.distance;
-                  if (pen > 0) {
-                    stepX += nnx * pen;
-                    stepZ += nnz * pen;
-                    const vDot = this.carVx * nnx + this.carVz * nnz;
-                    if (vDot < 0) {
-                      this.carVx -= vDot * nnx;
-                      this.carVz -= vDot * nnz;
-                    }
+                if (nLen <= 0.01) continue;
+                const nnx = nx / nLen;
+                const nnz = nz / nLen;
+                const pen = r.dist - hit.distance;
+                if (pen > 1e-4) {
+                  posX += nnx * pen;
+                  posZ += nnz * pen;
+                  changed = true;
+                  const vDot = this.carVx * nnx + this.carVz * nnz;
+                  if (vDot < 0) {
+                    this.carVx -= vDot * nnx;
+                    this.carVz -= vDot * nnz;
                   }
                 }
               }
             }
+            if (!changed) break;
           }
+          stepX = posX - px;
+          stepZ = posZ - pz;
         } else {
           const margin = CAP_R + 0.05;
           const stepLen = Math.hypot(stepX, stepZ);
