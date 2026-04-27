@@ -1067,6 +1067,35 @@ export async function startV2App() {
       splineSystem.clearTunnels();
       ui?.pane.refresh();
     },
+    onSplineKerbSelect: () => {
+      splineSystem.selectActiveKerb();
+      ui?.pane.refresh();
+    },
+    onSplineKerbApply: () => {
+      splineSystem.syncActiveKerbFromToolState();
+      ui?.pane.refresh();
+    },
+    onSplineKerbDelete: () => {
+      splineSystem.deleteActiveKerb();
+      ui?.pane.refresh();
+    },
+    onSplineKerbDuplicate: () => {
+      splineSystem.duplicateActiveKerb();
+      ui?.pane.refresh();
+    },
+    onSplineKerbSuggestFromCurvature: () => {
+      splineSystem.suggestKerbFromRoadCurvature();
+      ui?.pane.refresh();
+    },
+    onSplineKerbLiveChanged: (changedKey) => {
+      if (changedKey === "activeKerbIndex") {
+        splineSystem.selectActiveKerb();
+        ui?.pane.refresh();
+        return;
+      }
+      if (!toolState.spline.kerbAutoApplyActive) return;
+      splineSystem.syncActiveKerbFromToolState();
+    },
     onCliffBlendChanged: () => {
       if (!cliffBlendPack) return;
       const c = toolState.cliffs;

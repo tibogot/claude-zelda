@@ -95,6 +95,12 @@ export function createTweakpaneUi({
   onSplineClearPreview,
   onSplineApplyPlateau,
   onSplineClearTunnels,
+  onSplineKerbSelect,
+  onSplineKerbApply,
+  onSplineKerbDelete,
+  onSplineKerbDuplicate,
+  onSplineKerbSuggestFromCurvature,
+  onSplineKerbLiveChanged,
   onWaterChanged,
   onSaveWater,
   onLoadWater,
@@ -222,6 +228,12 @@ export function createTweakpaneUi({
     onSplineClearPreview,
     onSplineApplyPlateau,
     onSplineClearTunnels,
+    onSplineKerbSelect,
+    onSplineKerbApply,
+    onSplineKerbDelete,
+    onSplineKerbDuplicate,
+    onSplineKerbSuggestFromCurvature,
+    onSplineKerbLiveChanged,
   });
 
   addCliffFolder(pane, toolState, {

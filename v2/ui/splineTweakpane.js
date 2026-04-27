@@ -10,6 +10,12 @@ export function addSplineFolder(pane, toolState, opts) {
     onSplineClearPreview,
     onSplineApplyPlateau,
     onSplineClearTunnels,
+    onSplineKerbSelect,
+    onSplineKerbApply,
+    onSplineKerbDelete,
+    onSplineKerbDuplicate,
+    onSplineKerbSuggestFromCurvature,
+    onSplineKerbLiveChanged,
   } = opts;
 
   const sp = toolState.spline;
@@ -80,8 +86,18 @@ export function addSplineFolder(pane, toolState, opts) {
   fromRoadFolder.addBinding(sp, "guardrailFromRoadEnd", { label: "End %", min: 0, max: 1, step: 0.01 });
   fromRoadFolder.addBinding(sp, "guardrailFromRoadPostSpacingMul", { label: "Post spacing x", min: 1, max: 12, step: 0.25 });
   const kerbFolder = folder.addFolder({ title: "Kerb From Road", expanded: false });
-  kerbFolder.addBinding(sp, "kerbFromRoadIndex", { label: "Road index", min: 0, max: 63, step: 1 });
-  kerbFolder.addBinding(sp, "kerbFromRoadSide", {
+  const bindKerb = (key, params) =>
+    kerbFolder.addBinding(sp, key, params).on("change", () => onSplineKerbLiveChanged?.(key));
+  bindKerb("activeKerbIndex", { label: "Active kerb", min: 0, max: 255, step: 1 });
+  kerbFolder.addBinding(sp, "kerbAutoApplyActive", { label: "Auto-apply active" });
+  kerbFolder.addButton({ title: "Load active kerb settings" }).on("click", () => onSplineKerbSelect?.());
+  kerbFolder.addButton({ title: "Apply settings to active kerb" }).on("click", () => onSplineKerbApply?.());
+  kerbFolder.addButton({ title: "Suggest from strongest turn" }).on("click", () => onSplineKerbSuggestFromCurvature?.());
+  kerbFolder.addButton({ title: "Duplicate active kerb" }).on("click", () => onSplineKerbDuplicate?.());
+  kerbFolder.addButton({ title: "Delete active kerb" }).on("click", () => onSplineKerbDelete?.());
+  kerbFolder.addBlade({ view: "separator" });
+  bindKerb("kerbFromRoadIndex", { label: "Road index", min: 0, max: 63, step: 1 });
+  bindKerb("kerbFromRoadSide", {
     label: "Side",
     options: {
       Left: "left",
@@ -89,17 +105,24 @@ export function addSplineFolder(pane, toolState, opts) {
       Both: "both",
     },
   });
-  kerbFolder.addBinding(sp, "kerbFromRoadEdgeOffset", { label: "Edge offset", min: -2, max: 4, step: 0.01 });
-  kerbFolder.addBinding(sp, "kerbFromRoadStart", { label: "Start %", min: 0, max: 1, step: 0.01 });
-  kerbFolder.addBinding(sp, "kerbFromRoadEnd", { label: "End %", min: 0, max: 1, step: 0.01 });
+  bindKerb("kerbFromRoadEdgeOffset", { label: "Edge offset", min: -2, max: 4, step: 0.01 });
+  bindKerb("kerbFromRoadStart", { label: "Start %", min: 0, max: 1, step: 0.01 });
+  bindKerb("kerbFromRoadEnd", { label: "End %", min: 0, max: 1, step: 0.01 });
   kerbFolder.addBlade({ view: "separator" });
-  kerbFolder.addBinding(sp, "kerbWidth", { label: "Width", min: 0.1, max: 3, step: 0.01 });
-  kerbFolder.addBinding(sp, "kerbHeight", { label: "Height", min: 0.02, max: 0.8, step: 0.005 });
-  kerbFolder.addBinding(sp, "kerbLipHeight", { label: "Inner lip", min: 0.0, max: 0.25, step: 0.005 });
-  kerbFolder.addBinding(sp, "kerbPathSegments", { label: "Path segs", min: 40, max: 1200, step: 10 });
-  kerbFolder.addBinding(sp, "kerbStripeLength", { label: "Stripe length", min: 0.25, max: 10, step: 0.05 });
-  kerbFolder.addBinding(sp, "kerbColorA", { label: "Color A", view: "color" });
-  kerbFolder.addBinding(sp, "kerbColorB", { label: "Color B", view: "color" });
+  bindKerb("kerbWidth", { label: "Width", min: 0.1, max: 3, step: 0.01 });
+  bindKerb("kerbHeight", { label: "Height", min: 0.02, max: 0.8, step: 0.005 });
+  bindKerb("kerbLipHeight", { label: "Inner lip", min: 0.0, max: 0.25, step: 0.005 });
+  bindKerb("kerbTopInset", { label: "Top inset", min: 0.0, max: 0.95, step: 0.01 });
+  bindKerb("kerbPathSegments", { label: "Path segs", min: 40, max: 1200, step: 10 });
+  bindKerb("kerbSquareStripes", { label: "Square stripes" });
+  bindKerb("kerbStripeLength", { label: "Stripe length", min: 0.25, max: 10, step: 0.05 });
+  bindKerb("kerbStripeSharpness", { label: "Stripe sharpness", min: 0.5, max: 1.0, step: 0.005 });
+  bindKerb("kerbColorA", { label: "Color A", view: "color" });
+  bindKerb("kerbColorB", { label: "Color B", view: "color" });
+  kerbFolder.addBlade({ view: "separator" });
+  bindKerb("kerbNormalStrength", { label: "Normal strength", min: 0.0, max: 2.0, step: 0.01 });
+  bindKerb("kerbRoughnessMul", { label: "Roughness x", min: 0.2, max: 2.0, step: 0.01 });
+  bindKerb("kerbMetalness", { label: "Metalness", min: 0.0, max: 1.0, step: 0.01 });
   folder.addButton({ title: "Preview placement" }).on("click", () => onSplinePreview?.());
   folder.addButton({ title: "Bake placement" }).on("click", () => onSplineBake?.());
   folder.addButton({ title: "Clear preview" }).on("click", () => onSplineClearPreview?.());

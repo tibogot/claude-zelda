@@ -8,6 +8,14 @@ import {
   worldToChunkIndex,
 } from "../../core/terrain/chunkMath.js";
 
+const KERB_DIFFUSE_TEX_PATH = "../textures/asphalt_track/asphalt_track_diff_2k.jpg";
+const KERB_ARM_TEX_PATH = "../textures/asphalt_track/asphalt_track_arm_2k.jpg";
+const KERB_NORMAL_TEX_PATH = "../textures/asphalt_track/asphalt_track_nor_gl_2k.jpg";
+let _kerbTexLoadStarted = false;
+let _kerbDiffuseTex = null;
+let _kerbArmTex = null;
+let _kerbNormalTex = null;
+
 export class SplineSystem {
   constructor({
     scene,
@@ -383,7 +391,7 @@ export class SplineSystem {
     return geo;
   }
 
-  _buildKerbStripGeometry(curve, pathSegs, width, height, lipHeight, closed) {
+  _buildKerbStripGeometry(curve, pathSegs, width, height, lipHeight, topInset, closed) {
     const segs = Math.max(16, pathSegs | 0);
     const ringVerts = 4;
     const rings = segs + 1;
@@ -397,11 +405,15 @@ export class SplineSystem {
     const frames = curve.computeFrenetFrames(segs, closed);
     const up = new THREE.Vector3();
     const right = new THREE.Vector3();
+    const sign = Math.sign(width || 1);
+    const absW = Math.max(0.001, Math.abs(width));
+    const insetRatio = THREE.MathUtils.clamp(topInset ?? 0, 0, 0.98);
+    const topX = sign * (absW * (1 - insetRatio));
     const profile = [
       { y: 0, x: 0.0 },
       { y: 0, x: width },
       { y: lipHeight, x: width },
-      { y: height, x: 0.0 },
+      { y: height, x: topX },
     ];
     let vi3 = 0;
     let vi2 = 0;
@@ -539,6 +551,79 @@ export class SplineSystem {
       });
     }
     return out;
+  }
+
+  suggestKerbFromRoadCurvature() {
+    const s = this.toolState.spline;
+    const roads = this.getRoadSegments();
+    if (!Array.isArray(roads) || roads.length === 0) return false;
+    const roadIdx = THREE.MathUtils.clamp(s.kerbFromRoadIndex | 0, 0, roads.length - 1);
+    const road = roads[roadIdx];
+    const roadPoints = Array.isArray(road?.points) ? road.points : [];
+    if (roadPoints.length < 3) return false;
+    const curve = new THREE.CatmullRomCurve3(
+      roadPoints.map((p) => new THREE.Vector3(p.x, p.y, p.z)),
+      !!this.toolState.road?.closed,
+      "catmullrom",
+      0.5,
+    );
+    const sampleCount = Math.max(80, (s.kerbPathSegments | 0));
+    const turn = new Float32Array(sampleCount + 1);
+    const tangentA = new THREE.Vector3();
+    const tangentB = new THREE.Vector3();
+    let maxAbsTurn = 0;
+    for (let i = 1; i < sampleCount; i++) {
+      const t0 = (i - 1) / sampleCount;
+      const t1 = i / sampleCount;
+      const t2 = (i + 1) / sampleCount;
+      tangentA.copy(curve.getTangentAt(t0)).setY(0).normalize();
+      tangentB.copy(curve.getTangentAt(t2)).setY(0).normalize();
+      const crossY = tangentA.x * tangentB.z - tangentA.z * tangentB.x;
+      const dot = THREE.MathUtils.clamp(tangentA.dot(tangentB), -1, 1);
+      const angle = Math.acos(dot);
+      turn[i] = crossY * angle;
+      maxAbsTurn = Math.max(maxAbsTurn, Math.abs(turn[i]));
+    }
+    if (maxAbsTurn < 1e-5) return false;
+
+    const threshold = maxAbsTurn * 0.55;
+    let bestStart = -1;
+    let bestEnd = -1;
+    let bestScore = -Infinity;
+    let i = 1;
+    while (i < sampleCount) {
+      if (Math.abs(turn[i]) < threshold) {
+        i++;
+        continue;
+      }
+      const start = i;
+      let sumAbs = 0;
+      let sumSigned = 0;
+      while (i < sampleCount && Math.abs(turn[i]) >= threshold) {
+        sumAbs += Math.abs(turn[i]);
+        sumSigned += turn[i];
+        i++;
+      }
+      const end = i - 1;
+      const len = end - start + 1;
+      const score = sumAbs * Math.max(1, len * 0.15);
+      if (score > bestScore) {
+        bestScore = score;
+        bestStart = start;
+        bestEnd = end;
+      }
+      if (bestScore > -Infinity) {
+        s.kerbFromRoadSide = sumSigned >= 0 ? "left" : "right";
+      }
+    }
+    if (bestStart < 0 || bestEnd < 0) return false;
+
+    const pad = Math.max(2, Math.floor((bestEnd - bestStart + 1) * 0.15));
+    const startI = Math.max(0, bestStart - pad);
+    const endI = Math.min(sampleCount, bestEnd + pad);
+    s.kerbFromRoadStart = THREE.MathUtils.clamp(startI / sampleCount, 0, 1);
+    s.kerbFromRoadEnd = THREE.MathUtils.clamp(endI / sampleCount, 0, 1);
+    return true;
   }
 
   _createGuardrailFromRoad() {
@@ -747,7 +832,13 @@ export class SplineSystem {
         width: Math.max(0.05, s.kerbWidth),
         height: Math.max(0.01, s.kerbHeight),
         lipHeight: Math.max(0, Math.min(s.kerbHeight, s.kerbLipHeight)),
+        topInset: THREE.MathUtils.clamp(s.kerbTopInset ?? 0, 0, 0.98),
         stripeLength: Math.max(0.1, s.kerbStripeLength),
+        squareStripes: s.kerbSquareStripes !== false,
+        stripeSharpness: THREE.MathUtils.clamp(s.kerbStripeSharpness ?? 0.98, 0.5, 1.0),
+        normalStrength: Math.max(0, s.kerbNormalStrength ?? 0.45),
+        roughnessMul: Math.max(0.2, s.kerbRoughnessMul ?? 1.0),
+        metalness: THREE.MathUtils.clamp(s.kerbMetalness ?? 0.02, 0, 1),
         colorA: s.kerbColorA,
         colorB: s.kerbColorB,
         sideSign,
@@ -757,6 +848,8 @@ export class SplineSystem {
       this.kerbs.push(kerb);
       placed++;
     }
+    this.toolState.spline.activeKerbIndex = Math.max(0, this.kerbs.length - 1);
+    this._syncToolStateFromActiveKerb();
     return placed > 0;
   }
 
@@ -784,36 +877,81 @@ export class SplineSystem {
       kerb.width * Math.sign(kerb.sideSign || 1),
       kerb.height,
       kerb.lipHeight,
+      kerb.topInset,
       kerb.closed,
     );
+    this._ensureKerbTexturesLoaded();
     const mat = new THREE.MeshStandardMaterial({
-      roughness: 0.92,
-      metalness: 0.02,
-      vertexColors: true,
+      roughness: THREE.MathUtils.clamp(0.92 * (kerb.roughnessMul ?? 1.0), 0.02, 1.0),
+      metalness: THREE.MathUtils.clamp(kerb.metalness ?? 0.02, 0, 1),
       side: THREE.DoubleSide,
+      map: _kerbDiffuseTex,
+      roughnessMap: _kerbArmTex,
+      metalnessMap: _kerbArmTex,
+      normalMap: _kerbNormalTex,
+      normalScale: new THREE.Vector2(
+        Math.max(0, kerb.normalStrength ?? 0.45),
+        Math.max(0, kerb.normalStrength ?? 0.45),
+      ),
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
     });
     const uv = geo.getAttribute("uv");
     const color = new Float32Array(uv.count * 3);
     const a = new THREE.Color(kerb.colorA ?? "#c92c2c").convertSRGBToLinear();
     const b = new THREE.Color(kerb.colorB ?? "#f2f2f2").convertSRGBToLinear();
-    const stripeLength = Math.max(0.1, kerb.stripeLength ?? 1);
+    const stripeLength = (kerb.squareStripes !== false)
+      ? Math.max(0.1, Math.abs(kerb.width ?? 1))
+      : Math.max(0.1, kerb.stripeLength ?? 1);
     const curveLength = Math.max(0.1, curve.getLength());
     const stripes = Math.max(1, curveLength / stripeLength);
+    const edge = THREE.MathUtils.clamp((1 - (kerb.stripeSharpness ?? 0.98)) * 0.08, 0.0001, 0.02);
     for (let i = 0; i < uv.count; i++) {
       const u = uv.getX(i);
-      const stripe = Math.floor(u * stripes);
-      const c = (stripe % 2 === 0) ? a : b;
+      const local = (u * stripes) % 1;
+      const blend = THREE.MathUtils.smoothstep(local, 0.5 - edge, 0.5 + edge);
       const ci = i * 3;
-      color[ci] = c.r;
-      color[ci + 1] = c.g;
-      color[ci + 2] = c.b;
+      color[ci] = THREE.MathUtils.lerp(a.r, b.r, blend);
+      color[ci + 1] = THREE.MathUtils.lerp(a.g, b.g, blend);
+      color[ci + 2] = THREE.MathUtils.lerp(a.b, b.b, blend);
     }
     geo.setAttribute("color", new THREE.BufferAttribute(color, 3));
+    mat.vertexColors = true;
     const mesh = new THREE.Mesh(geo, mat);
+    const roadLift = Math.max(0.01, Math.min(0.03, (this.toolState.road?.heightOffset ?? 0.12) * 0.25));
+    mesh.position.y += roadLift;
+    mesh.renderOrder = 4;
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     kerb.mesh = mesh;
     this.scene.add(mesh);
+  }
+
+  _ensureKerbTexturesLoaded() {
+    if (_kerbTexLoadStarted) return;
+    _kerbTexLoadStarted = true;
+    const loader = new THREE.TextureLoader();
+    const applyDefaults = (tex) => {
+      if (!tex) return;
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.anisotropy = 8;
+    };
+    loader.load(KERB_DIFFUSE_TEX_PATH, (tex) => {
+      applyDefaults(tex);
+      _kerbDiffuseTex = tex;
+      this.syncKerbsToGround();
+    });
+    loader.load(KERB_ARM_TEX_PATH, (tex) => {
+      applyDefaults(tex);
+      _kerbArmTex = tex;
+      this.syncKerbsToGround();
+    });
+    loader.load(KERB_NORMAL_TEX_PATH, (tex) => {
+      applyDefaults(tex);
+      _kerbNormalTex = tex;
+      this.syncKerbsToGround();
+    });
   }
 
   syncGuardrailsToGround() {
@@ -828,6 +966,103 @@ export class SplineSystem {
     for (const kerb of this.kerbs) {
       this._buildKerbMesh(kerb);
     }
+  }
+
+  _activeKerb() {
+    if (this.kerbs.length === 0) return null;
+    const i = THREE.MathUtils.clamp(this.toolState.spline.activeKerbIndex | 0, 0, this.kerbs.length - 1);
+    this.toolState.spline.activeKerbIndex = i;
+    return this.kerbs[i];
+  }
+
+  _syncToolStateFromActiveKerb() {
+    const k = this._activeKerb();
+    if (!k) return false;
+    const s = this.toolState.spline;
+    s.kerbWidth = k.width;
+    s.kerbHeight = k.height;
+    s.kerbLipHeight = k.lipHeight;
+    s.kerbTopInset = k.topInset ?? 0;
+    s.kerbPathSegments = k.pathSegs;
+    s.kerbStripeLength = k.stripeLength;
+    s.kerbSquareStripes = k.squareStripes !== false;
+    s.kerbStripeSharpness = k.stripeSharpness ?? 0.98;
+    s.kerbNormalStrength = k.normalStrength ?? 0.45;
+    s.kerbRoughnessMul = k.roughnessMul ?? 1.0;
+    s.kerbMetalness = k.metalness ?? 0.02;
+    s.kerbColorA = k.colorA;
+    s.kerbColorB = k.colorB;
+    return true;
+  }
+
+  selectActiveKerb() {
+    return this._syncToolStateFromActiveKerb();
+  }
+
+  syncActiveKerbFromToolState() {
+    const k = this._activeKerb();
+    if (!k) return false;
+    const s = this.toolState.spline;
+    k.width = Math.max(0.05, s.kerbWidth);
+    k.height = Math.max(0.01, s.kerbHeight);
+    k.lipHeight = Math.max(0, Math.min(k.height, s.kerbLipHeight));
+    k.topInset = THREE.MathUtils.clamp(s.kerbTopInset ?? 0, 0, 0.98);
+    k.pathSegs = Math.max(40, s.kerbPathSegments | 0);
+    k.stripeLength = Math.max(0.1, s.kerbStripeLength);
+    k.squareStripes = s.kerbSquareStripes !== false;
+    k.stripeSharpness = THREE.MathUtils.clamp(s.kerbStripeSharpness ?? 0.98, 0.5, 1.0);
+    k.normalStrength = Math.max(0, s.kerbNormalStrength ?? 0.45);
+    k.roughnessMul = Math.max(0.2, s.kerbRoughnessMul ?? 1.0);
+    k.metalness = THREE.MathUtils.clamp(s.kerbMetalness ?? 0.02, 0, 1);
+    k.colorA = s.kerbColorA;
+    k.colorB = s.kerbColorB;
+    this._buildKerbMesh(k);
+    return true;
+  }
+
+  deleteActiveKerb() {
+    if (this.kerbs.length === 0) return false;
+    const idx = THREE.MathUtils.clamp(this.toolState.spline.activeKerbIndex | 0, 0, this.kerbs.length - 1);
+    const k = this.kerbs[idx];
+    if (k.mesh) {
+      this.scene.remove(k.mesh);
+      k.mesh.geometry.dispose();
+      k.mesh.material.dispose();
+      k.mesh = null;
+    }
+    this.kerbs.splice(idx, 1);
+    this.toolState.spline.activeKerbIndex = Math.max(0, Math.min(idx, this.kerbs.length - 1));
+    this._syncToolStateFromActiveKerb();
+    return true;
+  }
+
+  duplicateActiveKerb() {
+    const src = this._activeKerb();
+    if (!src) return false;
+    const dup = {
+      points: src.points.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+      closed: !!src.closed,
+      pathSegs: src.pathSegs,
+      width: src.width,
+      height: src.height,
+      lipHeight: src.lipHeight,
+      topInset: src.topInset ?? 0,
+      stripeLength: src.stripeLength,
+      squareStripes: src.squareStripes !== false,
+      stripeSharpness: src.stripeSharpness ?? 0.98,
+      normalStrength: src.normalStrength ?? 0.45,
+      roughnessMul: src.roughnessMul ?? 1.0,
+      metalness: src.metalness ?? 0.02,
+      colorA: src.colorA,
+      colorB: src.colorB,
+      sideSign: Math.sign(src.sideSign || 1),
+      mesh: null,
+    };
+    this._buildKerbMesh(dup);
+    this.kerbs.push(dup);
+    this.toolState.spline.activeKerbIndex = this.kerbs.length - 1;
+    this._syncToolStateFromActiveKerb();
+    return true;
   }
 
   _createTunnelFromCurrentSpline() {
@@ -1192,7 +1427,13 @@ export class SplineSystem {
         width: k.width,
         height: k.height,
         lipHeight: k.lipHeight,
+        topInset: k.topInset ?? 0,
         stripeLength: k.stripeLength,
+        squareStripes: k.squareStripes !== false,
+        stripeSharpness: k.stripeSharpness ?? 0.98,
+        normalStrength: k.normalStrength ?? 0.45,
+        roughnessMul: k.roughnessMul ?? 1.0,
+        metalness: k.metalness ?? 0.02,
         colorA: k.colorA ?? "#c92c2c",
         colorB: k.colorB ?? "#f2f2f2",
         sideSign: Math.sign(k.sideSign || 1),
@@ -1261,7 +1502,13 @@ export class SplineSystem {
         width: Math.max(0.05, k.width ?? 0.95),
         height: Math.max(0.01, k.height ?? 0.14),
         lipHeight: Math.max(0, Math.min(Math.max(0.01, k.height ?? 0.14), k.lipHeight ?? 0.04)),
+        topInset: THREE.MathUtils.clamp(k.topInset ?? 0.0, 0, 0.98),
         stripeLength: Math.max(0.1, k.stripeLength ?? 1.4),
+        squareStripes: k.squareStripes !== false,
+        stripeSharpness: THREE.MathUtils.clamp(k.stripeSharpness ?? 0.98, 0.5, 1.0),
+        normalStrength: Math.max(0, k.normalStrength ?? 0.45),
+        roughnessMul: Math.max(0.2, k.roughnessMul ?? 1.0),
+        metalness: THREE.MathUtils.clamp(k.metalness ?? 0.02, 0, 1),
         colorA: k.colorA ?? "#c92c2c",
         colorB: k.colorB ?? "#f2f2f2",
         sideSign: Math.sign(k.sideSign || 1),
@@ -1270,6 +1517,8 @@ export class SplineSystem {
       this._buildKerbMesh(kerb);
       this.kerbs.push(kerb);
     }
+    this.toolState.spline.activeKerbIndex = 0;
+    this._syncToolStateFromActiveKerb();
     this.selectedIdx = -1;
     this.dragging = false;
     this.clearPreview();
