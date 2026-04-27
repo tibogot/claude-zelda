@@ -76,6 +76,7 @@ export function createTweakpaneUi({
   onRoadSelectedYChanged,
   onRoadActiveIndexChanged,
   onRoadFlattenTerrain,
+  onRoadApplyStabilityPreset,
   onSplineChanged,
   onSplineDeleteSelected,
   onSplineClearAll,
@@ -186,6 +187,7 @@ export function createTweakpaneUi({
     onRoadSelectedYChanged,
     onRoadActiveIndexChanged,
     onRoadFlattenTerrain,
+    onRoadApplyStabilityPreset,
   });
   addSplineFolder(pane, toolState, {
     onSplineChanged,

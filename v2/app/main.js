@@ -961,6 +961,16 @@ export async function startV2App() {
       roadSystem.flattenTerrainUnderRoads();
       roadSystem.rebuildAllMeshes();
     },
+    onRoadApplyStabilityPreset: () => {
+      const rp = toolState.road;
+      rp.heightOffset = 0.15;
+      rp.adaptiveLift = true;
+      rp.slopeLift = 0.35;
+      rp.liftMax = 0.6;
+      roadSystem.syncMaterial();
+      roadSystem.rebuildAllMeshes();
+      ui?.pane.refresh();
+    },
     onRoadSelectedYChanged: () => roadSystem.setSelectedPointY(toolState.road.selectedPointY),
     onRoadFlattenTerrain: () => {
       roadSystem.flattenTerrainUnderRoads();

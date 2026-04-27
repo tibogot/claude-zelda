@@ -204,8 +204,8 @@ export function createRoadMaterial(uniforms, diffuseTex, armTex, normalTex, refl
   const mat = new MeshPhysicalNodeMaterial({
     side: THREE.DoubleSide,
     polygonOffset: true,
-    polygonOffsetFactor: -1,
-    polygonOffsetUnits: -1,
+    polygonOffsetFactor: -3,
+    polygonOffsetUnits: -3,
     stencilWrite: true,
     stencilFunc: THREE.NotEqualStencilFunc,
     stencilRef: 1,

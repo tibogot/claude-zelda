@@ -241,7 +241,19 @@ export class RoadSystem {
       for (let j = 0; j < curves.length; j++) {
         if (j !== i && curves[j]) otherCurves.push({ curve: curves[j], segments: rp.segments });
       }
-      const geo = generateRoadGeometry(curve, rp.width, rp.segments, rp.heightOffset, this.getWorldHeight, otherCurves);
+      const geo = generateRoadGeometry(
+        curve,
+        rp.width,
+        rp.segments,
+        rp.heightOffset,
+        this.getWorldHeight,
+        otherCurves,
+        {
+          adaptiveLift: rp.adaptiveLift,
+          slopeLift: rp.slopeLift,
+          liftMax: rp.liftMax,
+        },
+      );
       seg.mesh = new THREE.Mesh(geo, this.roadMat);
       seg.mesh.renderOrder = 3;
       this.scene.add(seg.mesh);

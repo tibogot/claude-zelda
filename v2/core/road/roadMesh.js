@@ -28,7 +28,28 @@ function distToPolyline(x, z, polyPts) {
   return minD;
 }
 
-export function generateRoadGeometry(curve, width, segments, heightOffset, getWorldHeight, otherCurves) {
+function sampleSlope01(x, z, eps, getWorldHeight) {
+  const hL = getWorldHeight(x - eps, z);
+  const hR = getWorldHeight(x + eps, z);
+  const hD = getWorldHeight(x, z - eps);
+  const hU = getWorldHeight(x, z + eps);
+  const nx = hL - hR;
+  const ny = 2 * eps;
+  const nz = hD - hU;
+  const invLen = 1 / Math.max(1e-6, Math.hypot(nx, ny, nz));
+  const normalY = ny * invLen;
+  return Math.max(0, Math.min(1, 1 - normalY));
+}
+
+function roadSurfaceY(x, z, baseOffset, getWorldHeight, adaptiveLift, slopeLift, liftMax, eps) {
+  const h = getWorldHeight(x, z);
+  if (!adaptiveLift) return h + baseOffset;
+  const slope01 = sampleSlope01(x, z, eps, getWorldHeight);
+  const extra = Math.min(liftMax, slope01 * slopeLift);
+  return h + baseOffset + extra;
+}
+
+export function generateRoadGeometry(curve, width, segments, heightOffset, getWorldHeight, otherCurves, opts = null) {
   const pts = curve.getSpacedPoints(segments);
   const arcLen = [0];
   for (let i = 1; i <= segments; i++) {
@@ -47,6 +68,10 @@ export function generateRoadGeometry(curve, width, segments, heightOffset, getWo
   const indices = [];
   const halfW = width / 2;
   const margin = halfW * 0.5;
+  const adaptiveLift = opts?.adaptiveLift !== false;
+  const slopeLift = Math.max(0, opts?.slopeLift ?? 0.35);
+  const liftMax = Math.max(0, opts?.liftMax ?? 0.6);
+  const slopeEps = Math.max(0.35, Math.min(2.5, width * 0.1));
 
   for (let i = 0; i <= segments; i++) {
     const u = arcLen[i] / totalLen;
@@ -59,8 +84,16 @@ export function generateRoadGeometry(curve, width, segments, heightOffset, getWo
     const lz = pos.z - perp.z * halfW;
     const rx = pos.x + perp.x * halfW;
     const rz = pos.z + perp.z * halfW;
-    positions.push(lx, getWorldHeight(lx, lz) + heightOffset, lz);
-    positions.push(rx, getWorldHeight(rx, rz) + heightOffset, rz);
+    positions.push(
+      lx,
+      roadSurfaceY(lx, lz, heightOffset, getWorldHeight, adaptiveLift, slopeLift, liftMax, slopeEps),
+      lz,
+    );
+    positions.push(
+      rx,
+      roadSurfaceY(rx, rz, heightOffset, getWorldHeight, adaptiveLift, slopeLift, liftMax, slopeEps),
+      rz,
+    );
     uvs.push(arcLen[i], 0, arcLen[i], 1);
 
     let jL = 0, jR = 0;

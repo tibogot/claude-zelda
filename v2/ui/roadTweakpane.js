@@ -8,6 +8,7 @@ export function addRoadFolder(pane, toolState, opts) {
     onRoadSelectedYChanged,
     onRoadActiveIndexChanged,
     onRoadFlattenTerrain,
+    onRoadApplyStabilityPreset,
   } = opts;
   const rp = toolState.road;
   const folder = pane.addFolder({ title: "Road", expanded: true });
@@ -21,6 +22,7 @@ export function addRoadFolder(pane, toolState, opts) {
   folder.addBinding(rp, "selectedPointY", { label: "Point Y", min: -50, max: 200, step: 0.1 }).on("change", () => onRoadSelectedYChanged?.());
   folder.addButton({ title: "Snap selected Y to terrain" }).on("click", () => onRoadSnapY?.());
   folder.addButton({ title: "Flatten terrain under roads" }).on("click", () => onRoadFlattenTerrain?.());
+  folder.addButton({ title: "Apply Stability Preset (Racing)" }).on("click", () => onRoadApplyStabilityPreset?.());
 
   const matFolder = folder.addFolder({ title: "Material", expanded: false });
   matFolder.addBinding(rp, "colorTint", { label: "Color tint", view: "color" }).on("change", onRoadChanged);
@@ -53,6 +55,9 @@ export function addRoadFolder(pane, toolState, opts) {
   geoFolder.addBinding(rp, "width", { label: "Width", min: 1, max: 50, step: 0.5 }).on("change", onRoadChanged);
   geoFolder.addBinding(rp, "segments", { label: "Segments", min: 20, max: 600, step: 10 }).on("change", onRoadChanged);
   geoFolder.addBinding(rp, "heightOffset", { label: "Height offset", min: 0, max: 2, step: 0.01 }).on("change", onRoadChanged);
+  geoFolder.addBinding(rp, "adaptiveLift", { label: "Adaptive lift" }).on("change", onRoadChanged);
+  geoFolder.addBinding(rp, "slopeLift", { label: "Slope lift", min: 0, max: 2, step: 0.01 }).on("change", onRoadChanged);
+  geoFolder.addBinding(rp, "liftMax", { label: "Lift cap", min: 0, max: 2, step: 0.01 }).on("change", onRoadChanged);
 
   const enhFolder = folder.addFolder({ title: "Enhanced (PBR + Reflect)", expanded: false });
   enhFolder.addBinding(rp, "enhanced", { label: "Enable" }).on("change", onRoadChanged);
