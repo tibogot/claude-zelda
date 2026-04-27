@@ -66,15 +66,15 @@ const ISO_FLY_CHASE_SMOOTH = 5.5;
 
 // Drift car physics — arcade model
 const CAR_MODEL = "../models/car_low-poly.glb";
-const CAR_ACCEL = 28;
-const CAR_ACCEL_BOOST = 40;
+const CAR_ACCEL = 26;
+const CAR_ACCEL_BOOST = 52;
 const CAR_BRAKE = 35;
 const CAR_REVERSE_ACCEL = 12;
 const CAR_MAX_SPEED = 45;
 const CAR_MAX_SPEED_BOOST = 72;
 const CAR_MAX_REVERSE = 10;
-const CAR_COAST = 2.0;
-const CAR_DRAG = 0.006;
+const CAR_COAST = 1.35;
+const CAR_DRAG = 0.0042;
 const CAR_TURN_RATE = 1.0;
 const CAR_TURN_RATE_DRIFT = 2.0;
 const CAR_GRIP_NORMAL = 12;
@@ -96,6 +96,20 @@ const CAR_GRAVITY = 28;
 const CAR_EDGE_DROP_THRESHOLD = 0.45;
 const CAR_COLLISION_SKIN = 0.08;
 const CAR_COLLISION_ITERS = 3;
+const CAR_NITRO_KEY = "KeyN";
+const CAR_NITRO_ACCEL_BONUS = 22;
+const CAR_NITRO_MAX_SPEED_BONUS = 26;
+const CAR_NITRO_DRAIN_PER_SEC = 0.32;
+const CAR_NITRO_REGEN_PER_SEC = 0.14;
+const CAR_NITRO_MIN_TO_USE = 0.05;
+const CAR_BASE_ACCEL_LOW_SPEED_MUL = 0.52;
+const CAR_BASE_ACCEL_RAMP_TO_KMH = 100;
+const CAR_BODY_ROLL_MAX = 0.2;
+const CAR_BODY_PITCH_MAX = 0.14;
+const CAR_BODY_TERRAIN_ROLL_MAX = 0.16;
+const CAR_BODY_TERRAIN_PITCH_MAX = 0.14;
+const CAR_BODY_SMOOTH = 14;
+const CAR_TERRAIN_BODY_SMOOTH = 9;
 
 const TRAIL_SEG = 90;
 const TRAIL_HALF_W = 0.038;
@@ -394,9 +408,15 @@ export class PlayMode {
     this.carCamYaw = 0;
     this.carVelY = 0;
     this.carInAir = false;
+    this.carNitro = 1.0;
+    this.carBodyRoll = 0;
+    this.carBodyPitch = 0;
+    this.carTerrainRoll = 0;
+    this.carTerrainPitch = 0;
     this._carHud = null;
     this._carHudSpd = null;
     this._carHudAngle = null;
+    this._carHudNitro = null;
     this._loadCar();
     this._createCarHud();
   }
@@ -418,15 +438,40 @@ export class PlayMode {
   _createCarHud() {
     const el = document.createElement("div");
     el.id = "car-hud";
-    el.style.cssText = "position:fixed;bottom:16px;left:50%;transform:translateX(-50%);" +
-      "background:rgba(0,0,0,0.7);border:1px solid rgba(255,200,60,0.3);border-radius:8px;" +
-      "padding:10px 22px;font-family:monospace;font-size:15px;color:#ffe066;z-index:5;" +
-      "display:none;pointer-events:none;white-space:nowrap;";
-    el.innerHTML = '<span id="car-hud-spd">0</span> km/h &nbsp; DRIFT <span id="car-hud-angle" style="color:#ff6633">0</span>°';
+    el.style.cssText = "position:fixed;bottom:18px;left:50%;transform:translateX(-50%);" +
+      "background:linear-gradient(180deg,rgba(15,19,28,0.9),rgba(8,10,16,0.86));" +
+      "border:1px solid rgba(120,160,220,0.35);border-radius:12px;" +
+      "padding:10px 16px 12px;min-width:330px;z-index:5;display:none;pointer-events:none;" +
+      "box-shadow:0 10px 30px rgba(0,0,0,0.45),inset 0 1px 0 rgba(255,255,255,0.06);" +
+      "font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif;";
+    el.innerHTML = `
+      <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:14px;">
+        <div style="display:flex;flex-direction:column;gap:2px;">
+          <div style="font-size:11px;letter-spacing:1.5px;color:#9db2d3;">SPEED</div>
+          <div style="display:flex;align-items:flex-end;gap:8px;">
+            <span id="car-hud-spd" style="font-size:44px;line-height:1;font-weight:800;color:#eaf2ff;text-shadow:0 0 16px rgba(116,176,255,0.3);">0</span>
+            <span style="font-size:13px;color:#9db2d3;padding-bottom:5px;letter-spacing:1px;">KM/H</span>
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:5px;min-width:110px;">
+          <div style="font-size:11px;letter-spacing:1.2px;color:#9db2d3;">DRIFT ANGLE</div>
+          <div><span id="car-hud-angle" style="font-size:24px;font-weight:700;color:#ff8a5c;">0</span><span style="font-size:14px;color:#ffb293;">°</span></div>
+        </div>
+      </div>
+      <div style="margin-top:9px;display:flex;align-items:center;gap:10px;">
+        <span style="font-size:11px;letter-spacing:1.2px;color:#8ed8ff;min-width:42px;">NITRO</span>
+        <div style="flex:1;height:8px;background:rgba(120,150,190,0.22);border-radius:999px;overflow:hidden;">
+          <div id="car-hud-nitro-bar" style="width:100%;height:100%;background:linear-gradient(90deg,#36c2ff,#7de8ff);box-shadow:0 0 12px rgba(94,220,255,0.55);"></div>
+        </div>
+        <span id="car-hud-nitro" style="font-size:12px;color:#9ee8ff;min-width:40px;text-align:right;">100%</span>
+      </div>
+    `;
     document.body.appendChild(el);
     this._carHud = el;
     this._carHudSpd = el.querySelector("#car-hud-spd");
     this._carHudAngle = el.querySelector("#car-hud-angle");
+    this._carHudNitro = el.querySelector("#car-hud-nitro");
+    this._carHudNitroBar = el.querySelector("#car-hud-nitro-bar");
   }
 
   async _loadCar() {
@@ -914,6 +959,11 @@ export class PlayMode {
     if (this._carHud) this._carHud.style.display = "none";
     this.planeSpeed = 0;
     this.carVx = 0; this.carVz = 0;
+    this.carNitro = 1.0;
+    this.carBodyRoll = 0;
+    this.carBodyPitch = 0;
+    this.carTerrainRoll = 0;
+    this.carTerrainPitch = 0;
     this._clearTrails(); clearBullets(this._bullets.pool);
 
     this.camera.up.set(0, 1, 0);
@@ -991,6 +1041,7 @@ export class PlayMode {
       const leftKey = keys.KeyA || keys.ArrowLeft;
       const rightKey = keys.KeyD || keys.ArrowRight;
       const handbrake = keys.Space;
+      const nitroHeld = !!keys[CAR_NITRO_KEY];
 
       // Current speed from velocity vector
       const curSpeed = Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz);
@@ -1001,7 +1052,14 @@ export class PlayMode {
 
       // Throttle / brake applied along heading
       const boost = keys.ShiftLeft || keys.ShiftRight;
-      const accel = boost ? CAR_ACCEL_BOOST : CAR_ACCEL;
+      const nitroActive = nitroHeld && this.carNitro > CAR_NITRO_MIN_TO_USE && !backward;
+      let accel = (boost ? CAR_ACCEL_BOOST : CAR_ACCEL) + (nitroActive ? CAR_NITRO_ACCEL_BONUS : 0);
+      if (!boost && !nitroActive) {
+        const speedKmh = curSpeed * 3.6;
+        const rampT = THREE.MathUtils.smoothstep(speedKmh, 0, CAR_BASE_ACCEL_RAMP_TO_KMH);
+        const accelMul = THREE.MathUtils.lerp(CAR_BASE_ACCEL_LOW_SPEED_MUL, 1.0, rampT);
+        accel *= accelMul;
+      }
       if (forward) {
         this.carVx += hx * accel * dtSec;
         this.carVz += hz * accel * dtSec;
@@ -1039,11 +1097,18 @@ export class PlayMode {
       }
 
       // Clamp speed
-      const maxSpd = boost ? CAR_MAX_SPEED_BOOST : CAR_MAX_SPEED;
+      const maxSpd = (boost ? CAR_MAX_SPEED_BOOST : CAR_MAX_SPEED) + (nitroActive ? CAR_NITRO_MAX_SPEED_BONUS : 0);
       const newSpeed = Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz);
       if (newSpeed > maxSpd) {
         const s = maxSpd / newSpeed;
         this.carVx *= s; this.carVz *= s;
+      }
+
+      // Nitro tank
+      if (nitroActive && curSpeed > 1) {
+        this.carNitro = Math.max(0, this.carNitro - CAR_NITRO_DRAIN_PER_SEC * dtSec);
+      } else {
+        this.carNitro = Math.min(1, this.carNitro + CAR_NITRO_REGEN_PER_SEC * dtSec);
       }
 
       // Steering — rotate heading
@@ -1080,6 +1145,19 @@ export class PlayMode {
       // Drift detection
       this.carDriftAngle = curSpeed > 1 ? Math.abs(Math.atan2(latDot, Math.abs(fwdDot))) : 0;
       this.carDrifting = this.carDriftAngle > CAR_DRIFT_ANGLE_MIN && curSpeed > CAR_DRIFT_ENTRY_SPEED;
+
+      const latSign = Math.sign(latDot);
+      const speedForRoll = Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz);
+      const driftRollSpeedGain = THREE.MathUtils.smoothstep(speedForRoll, 8, 24);
+      const driftRoll = latSign * Math.min(CAR_BODY_ROLL_MAX, this.carDriftAngle * 0.85) * driftRollSpeedGain;
+      const throttlePitch = forward ? 0.055 : backward ? -0.08 : 0;
+      const speedNorm = Math.min(1, curSpeed / Math.max(1, CAR_MAX_SPEED));
+      const dynamicPitch = -speedNorm * 0.05;
+      const targetDynRoll = this.carDrifting ? driftRoll : 0;
+      const targetDynPitch = dynamicPitch + throttlePitch;
+      const smooth = 1 - Math.exp(-CAR_BODY_SMOOTH * dtSec);
+      this.carBodyRoll = THREE.MathUtils.lerp(this.carBodyRoll, targetDynRoll, smooth);
+      this.carBodyPitch = THREE.MathUtils.lerp(this.carBodyPitch, targetDynPitch, smooth);
 
       // Wheel spin
       this.carWheelSpin -= (fwdDot / CAR_WHEEL_RADIUS) * dtSec;
@@ -1722,7 +1800,30 @@ export class PlayMode {
       if (carDriving && this.carLoaded) {
         this.carRoot.position.set(this.playerPos.x, this.playerPos.y + CAR_RIDE_HEIGHT, this.playerPos.z);
         this.carRoot.rotation.y = this.carHeading + Math.PI;
-        this.carChassis.rotation.set(0, 0, 0);
+        const fwdX = -Math.sin(this.carHeading);
+        const fwdZ = -Math.cos(this.carHeading);
+        const rightX = Math.cos(this.carHeading);
+        const rightZ = -Math.sin(this.carHeading);
+        const sx = CAR_HALF_WIDTH * 0.92;
+        const sz = CAR_HALF_LENGTH * 0.86;
+        const hFL = this.getWorldHeight(this.playerPos.x + rightX * sx + fwdX * sz, this.playerPos.z + rightZ * sx + fwdZ * sz);
+        const hFR = this.getWorldHeight(this.playerPos.x - rightX * sx + fwdX * sz, this.playerPos.z - rightZ * sx + fwdZ * sz);
+        const hRL = this.getWorldHeight(this.playerPos.x + rightX * sx - fwdX * sz, this.playerPos.z + rightZ * sx - fwdZ * sz);
+        const hRR = this.getWorldHeight(this.playerPos.x - rightX * sx - fwdX * sz, this.playerPos.z - rightZ * sx - fwdZ * sz);
+        const leftAvg = 0.5 * (hFL + hRL);
+        const rightAvg = 0.5 * (hFR + hRR);
+        const frontAvg = 0.5 * (hFL + hFR);
+        const rearAvg = 0.5 * (hRL + hRR);
+        const terrainRollRaw = Math.atan2(leftAvg - rightAvg, sx * 2);
+        const terrainPitchRaw = -Math.atan2(frontAvg - rearAvg, sz * 2);
+        const terrainRollTarget = THREE.MathUtils.clamp(terrainRollRaw, -CAR_BODY_TERRAIN_ROLL_MAX, CAR_BODY_TERRAIN_ROLL_MAX);
+        const terrainPitchTarget = THREE.MathUtils.clamp(terrainPitchRaw, -CAR_BODY_TERRAIN_PITCH_MAX, CAR_BODY_TERRAIN_PITCH_MAX);
+        const terrainSmooth = 1 - Math.exp(-CAR_TERRAIN_BODY_SMOOTH * dtSec);
+        this.carTerrainRoll = THREE.MathUtils.lerp(this.carTerrainRoll, terrainRollTarget, terrainSmooth);
+        this.carTerrainPitch = THREE.MathUtils.lerp(this.carTerrainPitch, terrainPitchTarget, terrainSmooth);
+        const finalPitch = THREE.MathUtils.clamp(this.carTerrainPitch + this.carBodyPitch, -CAR_BODY_PITCH_MAX, CAR_BODY_PITCH_MAX);
+        const finalRoll = THREE.MathUtils.clamp(this.carTerrainRoll + this.carBodyRoll, -CAR_BODY_ROLL_MAX, CAR_BODY_ROLL_MAX);
+        this.carChassis.rotation.set(finalPitch, 0, finalRoll);
 
         const _steerVis = ((keys.KeyA || keys.ArrowLeft) ? 0.4 : 0) + ((keys.KeyD || keys.ArrowRight) ? -0.4 : 0);
         for (const w of this.carWheels) {
@@ -1753,6 +1854,17 @@ export class PlayMode {
         this._carHudSpd.textContent = kmh;
         this._carHudAngle.textContent = Math.round(this.carDriftAngle * 180 / Math.PI);
         this._carHudAngle.style.color = this.carDrifting ? "#ff3300" : "#ff6633";
+        if (this._carHudNitro) {
+          const nitroPct = Math.round(this.carNitro * 100);
+          this._carHudNitro.textContent = `${nitroPct}%`;
+          this._carHudNitro.style.color = this.carNitro > 0.2 ? "#9ee8ff" : "#ff8c8c";
+          if (this._carHudNitroBar) {
+            this._carHudNitroBar.style.width = `${nitroPct}%`;
+            this._carHudNitroBar.style.background = this.carNitro > 0.2
+              ? "linear-gradient(90deg,#36c2ff,#7de8ff)"
+              : "linear-gradient(90deg,#ff7a7a,#ffb36b)";
+          }
+        }
       } else {
         this._carHud.style.display = "none";
       }
