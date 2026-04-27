@@ -311,6 +311,15 @@ function extractSerializableSettings(toolState) {
     waterfallItems: toolState._waterfallExportData?.() ?? null,
     barrier: { ...toolState.barrier },
     barrierChunks: toolState._barrierExportData?.() ?? null,
+    fleur: { ...toolState.fleur, colorA: { ...toolState.fleur.colorA }, colorB: { ...toolState.fleur.colorB } },
+    fleurPositions: toolState._fleurExportData?.() ?? null,
+    fleurInteraction: {
+      interactRadius: toolState.fleur.interactRadius,
+      interactStrength: toolState.fleur.interactStrength,
+      interactGain: toolState.fleur.interactGain,
+      windAmp: toolState.fleur.windAmp,
+      windSpeed: toolState.fleur.windSpeed,
+    },
   };
 }
 
@@ -362,4 +371,15 @@ export function applySettings(toolState, settings) {
   if (settings.water) Object.assign(toolState.water, settings.water);
   if (settings.waterfall) Object.assign(toolState.waterfall, settings.waterfall);
   if (settings.barrier) Object.assign(toolState.barrier, settings.barrier);
+  if (settings.fleur) {
+    const src = settings.fleur;
+    const dst = toolState.fleur;
+    for (const k of Object.keys(src)) {
+      if (k === "colorA" || k === "colorB") {
+        if (src[k]) Object.assign(dst[k], src[k]);
+      } else if (k in dst) {
+        dst[k] = src[k];
+      }
+    }
+  }
 }

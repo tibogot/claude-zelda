@@ -13,6 +13,7 @@ import { addSplineFolder } from "./splineTweakpane.js";
 import { addWaterFolder } from "./waterTweakpane.js";
 import { addWaterfallFolder } from "./waterfallTweakpane.js";
 import { addBarrierFolder } from "./barrierTweakpane.js";
+import { addFleurFolder } from "./fleurTweakpane.js";
 
 export function createTweakpaneUi({
   toolState,
@@ -112,6 +113,12 @@ export function createTweakpaneUi({
   onBarrierOverlayChanged,
   onBarrierClear,
   onBarrierFill,
+  onFleurChanged,
+  onFleurColorChanged,
+  onFleurStemChanged,
+  onFleurStemCurveChanged,
+  onFleurInteractionChanged,
+  onFleurClear,
   brushMask,
 }) {
   const pane = new Pane({ title: "V2 Terrain Core" });
@@ -134,6 +141,7 @@ export function createTweakpaneUi({
         Props: "props",
         Water: "water",
         Waterfall: "waterfall",
+        Flowers: "fleurs",
         Barrier: "barrier",
         Play: "play",
       },
@@ -273,6 +281,15 @@ export function createTweakpaneUi({
     onBarrierOverlayChanged,
     onBarrierClear,
     onBarrierFill,
+  });
+
+  const fleurFolder = addFleurFolder(pane, toolState, {
+    onFleurChanged,
+    onFleurColorChanged,
+    onFleurStemChanged,
+    onFleurStemCurveChanged,
+    onFleurInteractionChanged,
+    onFleurClear,
   });
 
   /** Shared across sculpt, future paint, foliage, props — same as v1 brush UX. */
@@ -932,6 +949,7 @@ export function createTweakpaneUi({
     propCallbacks,
     waterFolder,
     barrierFolder,
+    fleurFolder,
     /** Call after hotkey / wheel edits to `toolState.brush` so bindings stay in sync. */
     refreshBrush() {
       pane.refresh();
