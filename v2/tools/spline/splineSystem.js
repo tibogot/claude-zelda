@@ -39,6 +39,7 @@ export class SplineSystem {
     this._trainT = 0;
     this.tunnels = [];
     this.guardrails = [];
+    this.kerbs = [];
 
     this.handleGroup = new THREE.Group();
     this.handleGroup.name = "SplineHandles";
@@ -382,6 +383,77 @@ export class SplineSystem {
     return geo;
   }
 
+  _buildKerbStripGeometry(curve, pathSegs, width, height, lipHeight, closed) {
+    const segs = Math.max(16, pathSegs | 0);
+    const ringVerts = 4;
+    const rings = segs + 1;
+    const positions = new Float32Array(rings * ringVerts * 3);
+    const normals = new Float32Array(rings * ringVerts * 3);
+    const uvs = new Float32Array(rings * ringVerts * 2);
+    const indexCount = segs * (ringVerts - 1) * 6;
+    const indices = (rings * ringVerts > 65535)
+      ? new Uint32Array(indexCount)
+      : new Uint16Array(indexCount);
+    const frames = curve.computeFrenetFrames(segs, closed);
+    const up = new THREE.Vector3();
+    const right = new THREE.Vector3();
+    const profile = [
+      { y: 0, x: 0.0 },
+      { y: 0, x: width },
+      { y: lipHeight, x: width },
+      { y: height, x: 0.0 },
+    ];
+    let vi3 = 0;
+    let vi2 = 0;
+    for (let i = 0; i <= segs; i++) {
+      const t = i / segs;
+      const center = curve.getPointAt(t);
+      const centerY = this.getWorldHeight(center.x, center.z);
+      const n = frames.normals[i];
+      const b = frames.binormals[i];
+      for (let j = 0; j < ringVerts; j++) {
+        const p = profile[j];
+        up.copy(n).multiplyScalar(p.y);
+        right.copy(b).multiplyScalar(p.x);
+        positions[vi3] = center.x + up.x + right.x;
+        positions[vi3 + 1] = centerY + up.y + right.y;
+        positions[vi3 + 2] = center.z + up.z + right.z;
+        normals[vi3] = n.x;
+        normals[vi3 + 1] = n.y;
+        normals[vi3 + 2] = n.z;
+        uvs[vi2] = t;
+        uvs[vi2 + 1] = j / (ringVerts - 1);
+        vi3 += 3;
+        vi2 += 2;
+      }
+    }
+    let ii = 0;
+    for (let i = 0; i < segs; i++) {
+      const r0 = i * ringVerts;
+      const r1 = (i + 1) * ringVerts;
+      for (let j = 0; j < ringVerts - 1; j++) {
+        const a = r0 + j;
+        const b = r1 + j;
+        const c = r0 + j + 1;
+        const d = r1 + j + 1;
+        indices[ii++] = a;
+        indices[ii++] = b;
+        indices[ii++] = c;
+        indices[ii++] = c;
+        indices[ii++] = b;
+        indices[ii++] = d;
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+    geo.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+    geo.setIndex(new THREE.BufferAttribute(indices, 1));
+    geo.computeVertexNormals();
+    geo.computeBoundingSphere();
+    return geo;
+  }
+
   _createGuardrailFromCurrentSpline() {
     const curve = this._makeCurve();
     if (!curve) return false;
@@ -635,10 +707,126 @@ export class SplineSystem {
     this.scene.add(group);
   }
 
+  _createKerbFromRoad() {
+    const s = this.toolState.spline;
+    const roads = this.getRoadSegments();
+    if (!Array.isArray(roads) || roads.length === 0) return false;
+    const roadIdx = THREE.MathUtils.clamp(s.kerbFromRoadIndex | 0, 0, roads.length - 1);
+    const road = roads[roadIdx];
+    const roadPoints = Array.isArray(road?.points) ? road.points : [];
+    if (roadPoints.length < 2) return false;
+    const baseCurve = new THREE.CatmullRomCurve3(
+      roadPoints.map((p) => new THREE.Vector3(p.x, p.y, p.z)),
+      !!this.toolState.road?.closed,
+      "catmullrom",
+      0.5,
+    );
+    const sampleCount = Math.max(24, (s.kerbPathSegments | 0) + 1);
+    const sampled = baseCurve.getSpacedPoints(sampleCount);
+    const sliced = this._slicePointsByRange(
+      sampled,
+      s.kerbFromRoadStart ?? 0,
+      s.kerbFromRoadEnd ?? 1,
+    );
+    if (sliced.length < 2) return false;
+
+    const halfRoadW = Math.max(0.25, (this.toolState.road?.width ?? 8) * 0.5);
+    const edgeOffset = s.kerbFromRoadEdgeOffset ?? 0;
+    const lateralOffset = halfRoadW + edgeOffset;
+    const sides = s.kerbFromRoadSide === "both"
+      ? [1, -1]
+      : [s.kerbFromRoadSide === "left" ? 1 : -1];
+    let placed = 0;
+    for (const sideSign of sides) {
+      const pts = this._offsetPointsBySide(sliced, sideSign, lateralOffset);
+      if (pts.length < 2) continue;
+      const kerb = {
+        points: pts,
+        closed: false,
+        pathSegs: Math.max(40, s.kerbPathSegments | 0),
+        width: Math.max(0.05, s.kerbWidth),
+        height: Math.max(0.01, s.kerbHeight),
+        lipHeight: Math.max(0, Math.min(s.kerbHeight, s.kerbLipHeight)),
+        stripeLength: Math.max(0.1, s.kerbStripeLength),
+        colorA: s.kerbColorA,
+        colorB: s.kerbColorB,
+        sideSign,
+        mesh: null,
+      };
+      this._buildKerbMesh(kerb);
+      this.kerbs.push(kerb);
+      placed++;
+    }
+    return placed > 0;
+  }
+
+  _buildKerbMesh(kerb) {
+    if (kerb.mesh) {
+      this.scene.remove(kerb.mesh);
+      kerb.mesh.geometry.dispose();
+      kerb.mesh.material.dispose();
+      kerb.mesh = null;
+    }
+    const groundedPoints = kerb.points.map((p) => new THREE.Vector3(
+      p.x,
+      this.getWorldHeight(p.x, p.z),
+      p.z,
+    ));
+    const curve = new THREE.CatmullRomCurve3(
+      groundedPoints,
+      kerb.closed,
+      "catmullrom",
+      0.5,
+    );
+    const geo = this._buildKerbStripGeometry(
+      curve,
+      kerb.pathSegs,
+      kerb.width * Math.sign(kerb.sideSign || 1),
+      kerb.height,
+      kerb.lipHeight,
+      kerb.closed,
+    );
+    const mat = new THREE.MeshStandardMaterial({
+      roughness: 0.92,
+      metalness: 0.02,
+      vertexColors: true,
+      side: THREE.DoubleSide,
+    });
+    const uv = geo.getAttribute("uv");
+    const color = new Float32Array(uv.count * 3);
+    const a = new THREE.Color(kerb.colorA ?? "#c92c2c").convertSRGBToLinear();
+    const b = new THREE.Color(kerb.colorB ?? "#f2f2f2").convertSRGBToLinear();
+    const stripeLength = Math.max(0.1, kerb.stripeLength ?? 1);
+    const curveLength = Math.max(0.1, curve.getLength());
+    const stripes = Math.max(1, curveLength / stripeLength);
+    for (let i = 0; i < uv.count; i++) {
+      const u = uv.getX(i);
+      const stripe = Math.floor(u * stripes);
+      const c = (stripe % 2 === 0) ? a : b;
+      const ci = i * 3;
+      color[ci] = c.r;
+      color[ci + 1] = c.g;
+      color[ci + 2] = c.b;
+    }
+    geo.setAttribute("color", new THREE.BufferAttribute(color, 3));
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    kerb.mesh = mesh;
+    this.scene.add(mesh);
+  }
+
   syncGuardrailsToGround() {
     if (this.guardrails.length === 0) return;
     for (const guardrail of this.guardrails) {
       this._buildGuardrailMesh(guardrail);
+    }
+  }
+
+  syncKerbsToGround() {
+    if (this.kerbs.length === 0) return;
+    for (const kerb of this.kerbs) {
+      this._buildKerbMesh(kerb);
     }
   }
 
@@ -753,6 +941,9 @@ export class SplineSystem {
       if (ok) placed = 1;
     } else if (s.objectType === "guardrailFromRoad") {
       const ok = this._createGuardrailFromRoad();
+      if (ok) placed = 1;
+    } else if (s.objectType === "kerbFromRoad") {
+      const ok = this._createKerbFromRoad();
       if (ok) placed = 1;
     }
 
@@ -994,6 +1185,18 @@ export class SplineSystem {
         postSink: g.postSink,
         color: g.color ?? "#9aa0a8",
       })),
+      kerbs: this.kerbs.map((k) => ({
+        points: k.points.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+        closed: !!k.closed,
+        pathSegs: k.pathSegs,
+        width: k.width,
+        height: k.height,
+        lipHeight: k.lipHeight,
+        stripeLength: k.stripeLength,
+        colorA: k.colorA ?? "#c92c2c",
+        colorB: k.colorB ?? "#f2f2f2",
+        sideSign: Math.sign(k.sideSign || 1),
+      })),
     };
   }
 
@@ -1001,6 +1204,7 @@ export class SplineSystem {
     const pts = Array.isArray(data?.points) ? data.points : [];
     this.clearTunnels();
     this.clearGuardrails();
+    this.clearKerbs();
     this.points = pts.map((p) => new THREE.Vector3(p.x, p.y, p.z));
     const tunnels = Array.isArray(data?.tunnels) ? data.tunnels : [];
     for (const t of tunnels) {
@@ -1047,6 +1251,25 @@ export class SplineSystem {
       this._buildGuardrailMesh(guardrail);
       this.guardrails.push(guardrail);
     }
+    const kerbs = Array.isArray(data?.kerbs) ? data.kerbs : [];
+    for (const k of kerbs) {
+      if (!Array.isArray(k.points) || k.points.length < 2) continue;
+      const kerb = {
+        points: k.points.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+        closed: !!k.closed,
+        pathSegs: Math.max(40, k.pathSegs ?? 260),
+        width: Math.max(0.05, k.width ?? 0.95),
+        height: Math.max(0.01, k.height ?? 0.14),
+        lipHeight: Math.max(0, Math.min(Math.max(0.01, k.height ?? 0.14), k.lipHeight ?? 0.04)),
+        stripeLength: Math.max(0.1, k.stripeLength ?? 1.4),
+        colorA: k.colorA ?? "#c92c2c",
+        colorB: k.colorB ?? "#f2f2f2",
+        sideSign: Math.sign(k.sideSign || 1),
+        mesh: null,
+      };
+      this._buildKerbMesh(kerb);
+      this.kerbs.push(kerb);
+    }
     this.selectedIdx = -1;
     this.dragging = false;
     this.clearPreview();
@@ -1077,6 +1300,17 @@ export class SplineSystem {
     this.guardrails.length = 0;
   }
 
+  clearKerbs() {
+    for (const k of this.kerbs) {
+      if (!k.mesh) continue;
+      this.scene.remove(k.mesh);
+      k.mesh.geometry.dispose();
+      k.mesh.material.dispose();
+      k.mesh = null;
+    }
+    this.kerbs.length = 0;
+  }
+
   /**
    * BVH integration hook — same shape used by CliffStore/PropStore.
    * Feeds baked tunnel triangle meshes into CliffBvh.bake(..., extraStores).
@@ -1096,11 +1330,18 @@ export class SplineSystem {
         cb(obj.geometry, obj.matrixWorld);
       });
     }
+    for (const k of this.kerbs) {
+      const mesh = k.mesh;
+      if (!mesh || !mesh.geometry) continue;
+      mesh.updateMatrixWorld(true);
+      cb(mesh.geometry, mesh.matrixWorld);
+    }
   }
 
   dispose() {
     this.clearTunnels();
     this.clearGuardrails();
+    this.clearKerbs();
     this._disposeGroup(this.handleGroup);
     this._disposeGroup(this.previewGroup);
     this.scene.remove(this.handleGroup);

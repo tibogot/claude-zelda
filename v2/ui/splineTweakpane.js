@@ -39,6 +39,7 @@ export function addSplineFolder(pane, toolState, opts) {
       "Procedural tunnel": "tunnel",
       "Guardrail (W profile)": "guardrail",
       "Guardrail From Road": "guardrailFromRoad",
+      "Kerb From Road": "kerbFromRoad",
     },
   });
   folder.addBinding(sp, "spacing", { label: "Spacing", min: 0.5, max: 40, step: 0.5 });
@@ -78,6 +79,27 @@ export function addSplineFolder(pane, toolState, opts) {
   fromRoadFolder.addBinding(sp, "guardrailFromRoadStart", { label: "Start %", min: 0, max: 1, step: 0.01 });
   fromRoadFolder.addBinding(sp, "guardrailFromRoadEnd", { label: "End %", min: 0, max: 1, step: 0.01 });
   fromRoadFolder.addBinding(sp, "guardrailFromRoadPostSpacingMul", { label: "Post spacing x", min: 1, max: 12, step: 0.25 });
+  const kerbFolder = folder.addFolder({ title: "Kerb From Road", expanded: false });
+  kerbFolder.addBinding(sp, "kerbFromRoadIndex", { label: "Road index", min: 0, max: 63, step: 1 });
+  kerbFolder.addBinding(sp, "kerbFromRoadSide", {
+    label: "Side",
+    options: {
+      Left: "left",
+      Right: "right",
+      Both: "both",
+    },
+  });
+  kerbFolder.addBinding(sp, "kerbFromRoadEdgeOffset", { label: "Edge offset", min: -2, max: 4, step: 0.01 });
+  kerbFolder.addBinding(sp, "kerbFromRoadStart", { label: "Start %", min: 0, max: 1, step: 0.01 });
+  kerbFolder.addBinding(sp, "kerbFromRoadEnd", { label: "End %", min: 0, max: 1, step: 0.01 });
+  kerbFolder.addBlade({ view: "separator" });
+  kerbFolder.addBinding(sp, "kerbWidth", { label: "Width", min: 0.1, max: 3, step: 0.01 });
+  kerbFolder.addBinding(sp, "kerbHeight", { label: "Height", min: 0.02, max: 0.8, step: 0.005 });
+  kerbFolder.addBinding(sp, "kerbLipHeight", { label: "Inner lip", min: 0.0, max: 0.25, step: 0.005 });
+  kerbFolder.addBinding(sp, "kerbPathSegments", { label: "Path segs", min: 40, max: 1200, step: 10 });
+  kerbFolder.addBinding(sp, "kerbStripeLength", { label: "Stripe length", min: 0.25, max: 10, step: 0.05 });
+  kerbFolder.addBinding(sp, "kerbColorA", { label: "Color A", view: "color" });
+  kerbFolder.addBinding(sp, "kerbColorB", { label: "Color B", view: "color" });
   folder.addButton({ title: "Preview placement" }).on("click", () => onSplinePreview?.());
   folder.addButton({ title: "Bake placement" }).on("click", () => onSplineBake?.());
   folder.addButton({ title: "Clear preview" }).on("click", () => onSplineClearPreview?.());
