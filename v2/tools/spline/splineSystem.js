@@ -36,6 +36,7 @@ export class SplineSystem {
     this._curveLength = 0;
     this._trainT = 0;
     this.tunnels = [];
+    this.guardrails = [];
 
     this.handleGroup = new THREE.Group();
     this.handleGroup.name = "SplineHandles";
@@ -310,6 +311,216 @@ export class SplineSystem {
     return geo;
   }
 
+  _buildGuardrailProfileGeometry(curve, pathSegs, profile, depth, closed) {
+    const segs = Math.max(16, pathSegs | 0);
+    const prof = Array.isArray(profile) && profile.length >= 2 ? profile : [
+      { y: -0.5, z: 0.5 },
+      { y: 0.5, z: 0.5 },
+    ];
+    const ringVerts = prof.length;
+    const rings = segs + 1;
+    const positions = new Float32Array(rings * ringVerts * 3);
+    const normals = new Float32Array(rings * ringVerts * 3);
+    const uvs = new Float32Array(rings * ringVerts * 2);
+    const indexCount = segs * (ringVerts - 1) * 6;
+    const indices = (rings * ringVerts > 65535)
+      ? new Uint32Array(indexCount)
+      : new Uint16Array(indexCount);
+    const frames = curve.computeFrenetFrames(segs, closed);
+    const up = new THREE.Vector3();
+    const out = new THREE.Vector3();
+    let vi3 = 0;
+    let vi2 = 0;
+    for (let i = 0; i <= segs; i++) {
+      const t = i / segs;
+      const center = curve.getPointAt(t);
+      const centerY = this.getWorldHeight(center.x, center.z);
+      const n = frames.normals[i];
+      const b = frames.binormals[i];
+      for (let j = 0; j < ringVerts; j++) {
+        const p = prof[j];
+        up.copy(n).multiplyScalar(p.y);
+        out.copy(b).multiplyScalar(p.z * depth);
+        positions[vi3] = center.x + up.x + out.x;
+        positions[vi3 + 1] = centerY + up.y + out.y;
+        positions[vi3 + 2] = center.z + up.z + out.z;
+        normals[vi3] = b.x;
+        normals[vi3 + 1] = b.y;
+        normals[vi3 + 2] = b.z;
+        uvs[vi2] = t * Math.max(1, segs * 0.2);
+        uvs[vi2 + 1] = j / Math.max(1, ringVerts - 1);
+        vi3 += 3;
+        vi2 += 2;
+      }
+    }
+    let ii = 0;
+    for (let i = 0; i < segs; i++) {
+      const r0 = i * ringVerts;
+      const r1 = (i + 1) * ringVerts;
+      for (let j = 0; j < ringVerts - 1; j++) {
+        const a = r0 + j;
+        const b = r1 + j;
+        const c = r0 + j + 1;
+        const d = r1 + j + 1;
+        indices[ii++] = a;
+        indices[ii++] = b;
+        indices[ii++] = c;
+        indices[ii++] = c;
+        indices[ii++] = b;
+        indices[ii++] = d;
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+    geo.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+    geo.setIndex(new THREE.BufferAttribute(indices, 1));
+    geo.computeVertexNormals();
+    geo.computeBoundingSphere();
+    return geo;
+  }
+
+  _createGuardrailFromCurrentSpline() {
+    const curve = this._makeCurve();
+    if (!curve) return false;
+    const s = this.toolState.spline;
+    const scaleMid = Math.max(0.05, (Math.max(0.05, s.scaleMin) + Math.max(0.05, s.scaleMax)) * 0.5);
+    const height = Math.max(0.05, s.guardrailHeight * scaleMid);
+    const depth = Math.max(0.05, s.guardrailDepth * scaleMid);
+    const thickness = Math.max(0.01, s.guardrailThickness * scaleMid);
+    const crown = Math.max(0, s.guardrailCrownDepth * scaleMid);
+    const profile = [
+      { y: -0.5 * height, z: 0.5 },
+      { y: -0.16 * height, z: 0.35 },
+      { y: 0.0, z: -crown / Math.max(depth, 1e-6) },
+      { y: 0.16 * height, z: 0.35 },
+      { y: 0.5 * height, z: 0.5 },
+    ];
+    const guardrail = {
+      points: this.points.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+      closed: !!s.closed,
+      pathSegs: Math.max(40, s.guardrailPathSegments | 0),
+      height,
+      depth,
+      thickness,
+      crown,
+      railYOffset: Math.max(0, s.guardrailRailYOffset * scaleMid),
+      postSpacing: Math.max(0.5, s.guardrailPostSpacing),
+      postWidth: Math.max(0.03, s.guardrailPostWidth * scaleMid),
+      postDepth: Math.max(0.03, s.guardrailPostDepth * scaleMid),
+      postHeight: Math.max(0.2, s.guardrailPostHeight * scaleMid),
+      postSink: Math.max(0, s.guardrailPostSink * scaleMid),
+      color: s.guardrailColor,
+      profile,
+      group: null,
+    };
+    this._buildGuardrailMesh(guardrail);
+    this.guardrails.push(guardrail);
+    return true;
+  }
+
+  _buildGuardrailMesh(guardrail) {
+    if (guardrail.group) {
+      this.scene.remove(guardrail.group);
+      guardrail.group.traverse((obj) => {
+        if (obj.geometry) obj.geometry.dispose();
+        if (obj.material) obj.material.dispose();
+      });
+      guardrail.group = null;
+    }
+    const groundedPoints = guardrail.points.map((p) => new THREE.Vector3(
+      p.x,
+      this.getWorldHeight(p.x, p.z),
+      p.z,
+    ));
+    const curve = new THREE.CatmullRomCurve3(
+      groundedPoints,
+      guardrail.closed,
+      "catmullrom",
+      0.5,
+    );
+    const railMat = new THREE.MeshStandardMaterial({
+      color: guardrail.color ?? "#9aa0a8",
+      roughness: 0.45,
+      metalness: 0.85,
+      side: THREE.DoubleSide,
+    });
+    const postMat = new THREE.MeshStandardMaterial({
+      color: guardrail.color ?? "#9aa0a8",
+      roughness: 0.55,
+      metalness: 0.7,
+    });
+    const group = new THREE.Group();
+    const railOuterGeo = this._buildGuardrailProfileGeometry(
+      curve,
+      guardrail.pathSegs,
+      guardrail.profile,
+      guardrail.depth,
+      guardrail.closed,
+    );
+    const railOuter = new THREE.Mesh(railOuterGeo, railMat);
+    railOuter.castShadow = true;
+    railOuter.receiveShadow = true;
+    group.add(railOuter);
+    if (guardrail.thickness > 0.002) {
+      const innerDepth = Math.max(0.01, guardrail.depth - guardrail.thickness * 2);
+      const innerHeight = Math.max(0.02, guardrail.height - guardrail.thickness * 2);
+      const innerProfile = [
+        { y: -0.5 * innerHeight, z: 0.44 },
+        { y: -0.16 * innerHeight, z: 0.31 },
+        { y: 0.0, z: -guardrail.crown / Math.max(guardrail.depth, 1e-6) },
+        { y: 0.16 * innerHeight, z: 0.31 },
+        { y: 0.5 * innerHeight, z: 0.44 },
+      ];
+      const railInnerGeo = this._buildGuardrailProfileGeometry(
+        curve,
+        guardrail.pathSegs,
+        innerProfile,
+        innerDepth,
+        guardrail.closed,
+      );
+      const railInner = new THREE.Mesh(railInnerGeo, postMat);
+      railInner.castShadow = true;
+      railInner.receiveShadow = true;
+      group.add(railInner);
+    }
+    railOuter.position.y += guardrail.railYOffset;
+    if (group.children[1]) group.children[1].position.y += guardrail.railYOffset;
+
+    const length = curve.getLength();
+    const postCount = Math.max(2, Math.floor(length / Math.max(0.5, guardrail.postSpacing)) + 1);
+    const tangent = new THREE.Vector3();
+    for (let i = 0; i < postCount; i++) {
+      const t = guardrail.closed ? (i / postCount) : (i / Math.max(1, postCount - 1));
+      const pos = curve.getPointAt(t);
+      tangent.copy(curve.getTangentAt(t));
+      const groundY = this.getWorldHeight(pos.x, pos.z) - guardrail.postSink;
+      const railBottomY = pos.y + guardrail.railYOffset - (guardrail.height * 0.5);
+      const postHeight = Math.max(guardrail.postHeight, railBottomY - groundY + guardrail.thickness * 0.5);
+      const postGeo = new THREE.BoxGeometry(
+        guardrail.postWidth,
+        postHeight,
+        guardrail.postDepth,
+      );
+      const post = new THREE.Mesh(postGeo, postMat);
+      post.position.set(pos.x, groundY + postHeight * 0.5, pos.z);
+      post.rotation.y = Math.atan2(tangent.x, tangent.z);
+      post.castShadow = true;
+      post.receiveShadow = true;
+      group.add(post);
+    }
+
+    guardrail.group = group;
+    this.scene.add(group);
+  }
+
+  syncGuardrailsToGround() {
+    if (this.guardrails.length === 0) return;
+    for (const guardrail of this.guardrails) {
+      this._buildGuardrailMesh(guardrail);
+    }
+  }
+
   _createTunnelFromCurrentSpline() {
     const curve = this._makeCurve();
     if (!curve) return false;
@@ -415,6 +626,9 @@ export class SplineSystem {
       if (placed > 0) this.propStore._bump();
     } else if (s.objectType === "tunnel") {
       const ok = this._createTunnelFromCurrentSpline();
+      if (ok) placed = 1;
+    } else if (s.objectType === "guardrail") {
+      const ok = this._createGuardrailFromCurrentSpline();
       if (ok) placed = 1;
     }
 
@@ -640,12 +854,29 @@ export class SplineSystem {
         pathSegs: t.pathSegs,
         color: t.color ?? "#6c727a",
       })),
+      guardrails: this.guardrails.map((g) => ({
+        points: g.points.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+        closed: !!g.closed,
+        pathSegs: g.pathSegs,
+        height: g.height,
+        thickness: g.thickness,
+        depth: g.depth,
+        crown: g.crown,
+        railYOffset: g.railYOffset,
+        postSpacing: g.postSpacing,
+        postWidth: g.postWidth,
+        postDepth: g.postDepth,
+        postHeight: g.postHeight,
+        postSink: g.postSink,
+        color: g.color ?? "#9aa0a8",
+      })),
     };
   }
 
   importData(data) {
     const pts = Array.isArray(data?.points) ? data.points : [];
     this.clearTunnels();
+    this.clearGuardrails();
     this.points = pts.map((p) => new THREE.Vector3(p.x, p.y, p.z));
     const tunnels = Array.isArray(data?.tunnels) ? data.tunnels : [];
     for (const t of tunnels) {
@@ -661,6 +892,36 @@ export class SplineSystem {
       };
       this._buildTunnelMesh(tunnel);
       this.tunnels.push(tunnel);
+    }
+    const guardrails = Array.isArray(data?.guardrails) ? data.guardrails : [];
+    for (const g of guardrails) {
+      if (!Array.isArray(g.points) || g.points.length < 2) continue;
+      const guardrail = {
+        points: g.points.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+        closed: !!g.closed,
+        pathSegs: Math.max(40, g.pathSegs ?? 260),
+        height: Math.max(0.05, g.height ?? 0.36),
+        thickness: Math.max(0.01, g.thickness ?? 0.03),
+        depth: Math.max(0.05, g.depth ?? 0.22),
+        crown: Math.max(0, g.crown ?? 0.08),
+        railYOffset: Math.max(0, g.railYOffset ?? 0.68),
+        postSpacing: Math.max(0.5, g.postSpacing ?? 2.25),
+        postWidth: Math.max(0.03, g.postWidth ?? 0.12),
+        postDepth: Math.max(0.03, g.postDepth ?? 0.1),
+        postHeight: Math.max(0.2, g.postHeight ?? 0.95),
+        postSink: Math.max(0, g.postSink ?? 0.08),
+        color: g.color ?? "#9aa0a8",
+        profile: [
+          { y: -0.5 * Math.max(0.05, g.height ?? 0.36), z: 0.5 },
+          { y: -0.16 * Math.max(0.05, g.height ?? 0.36), z: 0.35 },
+          { y: 0.0, z: -Math.max(0, g.crown ?? 0.08) / Math.max(Math.max(0.05, g.depth ?? 0.22), 1e-6) },
+          { y: 0.16 * Math.max(0.05, g.height ?? 0.36), z: 0.35 },
+          { y: 0.5 * Math.max(0.05, g.height ?? 0.36), z: 0.5 },
+        ],
+        group: null,
+      };
+      this._buildGuardrailMesh(guardrail);
+      this.guardrails.push(guardrail);
     }
     this.selectedIdx = -1;
     this.dragging = false;
@@ -679,6 +940,19 @@ export class SplineSystem {
     this.tunnels.length = 0;
   }
 
+  clearGuardrails() {
+    for (const g of this.guardrails) {
+      if (!g.group) continue;
+      this.scene.remove(g.group);
+      g.group.traverse((obj) => {
+        if (obj.geometry) obj.geometry.dispose();
+        if (obj.material) obj.material.dispose();
+      });
+      g.group = null;
+    }
+    this.guardrails.length = 0;
+  }
+
   /**
    * BVH integration hook — same shape used by CliffStore/PropStore.
    * Feeds baked tunnel triangle meshes into CliffBvh.bake(..., extraStores).
@@ -690,10 +964,19 @@ export class SplineSystem {
       mesh.updateMatrixWorld(true);
       cb(mesh.geometry, mesh.matrixWorld);
     }
+    for (const g of this.guardrails) {
+      if (!g.group) continue;
+      g.group.updateMatrixWorld(true);
+      g.group.traverse((obj) => {
+        if (!obj.isMesh || !obj.geometry) return;
+        cb(obj.geometry, obj.matrixWorld);
+      });
+    }
   }
 
   dispose() {
     this.clearTunnels();
+    this.clearGuardrails();
     this._disposeGroup(this.handleGroup);
     this._disposeGroup(this.previewGroup);
     this.scene.remove(this.handleGroup);

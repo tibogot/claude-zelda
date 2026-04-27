@@ -532,6 +532,7 @@ export async function startV2App() {
     onHeightsChanged: () => {
       markHeightTexDirty();
       treeStore.syncAllHeights(terrainStore);
+      splineSystem?.syncGuardrailsToGround?.();
     },
   });
   const brushMask = new BrushMask();
@@ -1046,6 +1047,7 @@ export async function startV2App() {
       if (!changed) return;
       markHeightTexDirty();
       treeStore.syncAllHeights(terrainStore);
+      splineSystem.syncGuardrailsToGround();
       ui?.pane.refresh();
     },
     onSplineClearTunnels: () => {

@@ -37,6 +37,7 @@ export function addSplineFolder(pane, toolState, opts) {
       "Trees (active tree slot)": "trees",
       "Props (active prop slot)": "props",
       "Procedural tunnel": "tunnel",
+      "Guardrail (W profile)": "guardrail",
     },
   });
   folder.addBinding(sp, "spacing", { label: "Spacing", min: 0.5, max: 40, step: 0.5 });
@@ -49,6 +50,19 @@ export function addSplineFolder(pane, toolState, opts) {
   tunnelFolder.addBinding(sp, "tunnelPathSegments", { label: "Path segs", min: 40, max: 800, step: 10 });
   tunnelFolder.addBinding(sp, "tunnelColor", { label: "Color", view: "color" });
   tunnelFolder.addButton({ title: "Clear all tunnels" }).on("click", () => onSplineClearTunnels?.());
+  const guardrailFolder = folder.addFolder({ title: "Guardrail", expanded: false });
+  guardrailFolder.addBinding(sp, "guardrailHeight", { label: "Rail height", min: 0.05, max: 2.5, step: 0.01 });
+  guardrailFolder.addBinding(sp, "guardrailThickness", { label: "Rail thickness", min: 0.01, max: 0.35, step: 0.005 });
+  guardrailFolder.addBinding(sp, "guardrailDepth", { label: "Rail depth", min: 0.05, max: 1.4, step: 0.01 });
+  guardrailFolder.addBinding(sp, "guardrailCrownDepth", { label: "W crown depth", min: 0.0, max: 0.35, step: 0.005 });
+  guardrailFolder.addBinding(sp, "guardrailPathSegments", { label: "Path segs", min: 40, max: 1200, step: 10 });
+  guardrailFolder.addBinding(sp, "guardrailPostSpacing", { label: "Post spacing", min: 0.5, max: 8, step: 0.05 });
+  guardrailFolder.addBinding(sp, "guardrailPostWidth", { label: "Post width", min: 0.03, max: 0.4, step: 0.005 });
+  guardrailFolder.addBinding(sp, "guardrailPostDepth", { label: "Post depth", min: 0.03, max: 0.4, step: 0.005 });
+  guardrailFolder.addBinding(sp, "guardrailPostHeight", { label: "Post height", min: 0.2, max: 3, step: 0.01 });
+  guardrailFolder.addBinding(sp, "guardrailRailYOffset", { label: "Rail Y offset", min: 0.0, max: 3, step: 0.01 });
+  guardrailFolder.addBinding(sp, "guardrailPostSink", { label: "Post sink", min: 0.0, max: 0.6, step: 0.005 });
+  guardrailFolder.addBinding(sp, "guardrailColor", { label: "Color", view: "color" });
   folder.addButton({ title: "Preview placement" }).on("click", () => onSplinePreview?.());
   folder.addButton({ title: "Bake placement" }).on("click", () => onSplineBake?.());
   folder.addButton({ title: "Clear preview" }).on("click", () => onSplineClearPreview?.());
