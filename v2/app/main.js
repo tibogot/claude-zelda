@@ -980,6 +980,10 @@ export async function startV2App() {
     onRoadFlattenTerrain: () => {
       roadSystem.flattenTerrainUnderRoads();
       roadSystem.rebuildAllMeshes();
+      markHeightTexDirty();
+      treeStore.syncAllHeights(terrainStore);
+      splineSystem.syncGuardrailsToGround();
+      ui?.pane.refresh();
     },
     onRoadApplyStabilityPreset: () => {
       const rp = toolState.road;
@@ -1010,6 +1014,10 @@ export async function startV2App() {
     onRoadFlattenTerrain: () => {
       roadSystem.flattenTerrainUnderRoads();
       roadSystem.rebuildAllMeshes();
+      markHeightTexDirty();
+      treeStore.syncAllHeights(terrainStore);
+      splineSystem.syncGuardrailsToGround();
+      ui?.pane.refresh();
     },
     onRoadActiveIndexChanged: () => {
       roadSystem._clampActive();
