@@ -1182,6 +1182,8 @@ export class PlayMode {
           : charRunning ? CHAR_RUN_SPEED
           : CHAR_WALK_SPEED)
         : MOVE_SPEED;
+    const prevPosX = this.playerPos.x;
+    const prevPosZ = this.playerPos.z;
     if (mlen > 0) {
       let stepX, stepZ;
       if (carDriving) {
@@ -1549,8 +1551,33 @@ export class PlayMode {
       const planeRadius = 2.5;
       const wingSpan = 3.0;
 
+      const moveDx = px - prevPosX;
+      const moveDz = pz - prevPosZ;
+      const moveLen = Math.hypot(moveDx, moveDz);
+      // Swept collision stops high-speed tunneling through thin geometry.
+      if (moveLen > 1e-5) {
+        const sweep = this.cliffBvh.raycast3D(
+          prevPosX,
+          py,
+          prevPosZ,
+          moveDx,
+          0,
+          moveDz,
+          moveLen + planeRadius,
+        );
+        if (sweep) {
+          const nx = moveDx / moveLen;
+          const nz = moveDz / moveLen;
+          const safeDist = Math.max(0, sweep.distance - planeRadius * 0.9);
+          this.playerPos.x = prevPosX + nx * safeDist;
+          this.playerPos.z = prevPosZ + nz * safeDist;
+          this.planeSpeed *= 0.75;
+        }
+      }
+
+      const probeDist = Math.max(planeRadius, planeRadius + moveLen);
       const rays = [
-        { dx: fwdX, dy: fwdY, dz: fwdZ, dist: planeRadius },
+        { dx: fwdX, dy: fwdY, dz: fwdZ, dist: probeDist },
         { dx: rightX, dy: 0, dz: rightZ, dist: wingSpan },
         { dx: -rightX, dy: 0, dz: -rightZ, dist: wingSpan },
         { dx: 0, dy: 1, dz: 0, dist: 1.5 },
