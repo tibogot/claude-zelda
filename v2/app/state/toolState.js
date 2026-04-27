@@ -265,6 +265,10 @@ export function createToolState() {
       plateauHeight: 24,
       plateauFalloff: 4,
       plateauHalfWidth: 10,
+      tunnelRadius: 6,
+      tunnelRadialSegments: 20,
+      tunnelPathSegments: 220,
+      tunnelColor: "#6c727a",
     },
     grass: {
       enabled: false,

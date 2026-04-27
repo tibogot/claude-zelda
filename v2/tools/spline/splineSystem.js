@@ -35,6 +35,7 @@ export class SplineSystem {
     this._curve = null;
     this._curveLength = 0;
     this._trainT = 0;
+    this.tunnels = [];
 
     this.handleGroup = new THREE.Group();
     this.handleGroup.name = "SplineHandles";
@@ -241,6 +242,132 @@ export class SplineSystem {
     this._disposeGroup(this.previewGroup);
   }
 
+  _buildTunnelGeometry(curve, pathSegs, radialSegs, radius, closed) {
+    const segs = Math.max(8, pathSegs | 0);
+    const rSegs = Math.max(6, radialSegs | 0);
+    const frames = curve.computeFrenetFrames(segs, closed);
+    const ringVerts = rSegs + 1;
+    const rings = segs + 1;
+    const positions = new Float32Array(rings * ringVerts * 3);
+    const normals = new Float32Array(rings * ringVerts * 3);
+    const uvs = new Float32Array(rings * ringVerts * 2);
+    const indexCount = segs * rSegs * 6;
+    const indices = (rings * ringVerts > 65535)
+      ? new Uint32Array(indexCount)
+      : new Uint16Array(indexCount);
+
+    let vi3 = 0;
+    let vi2 = 0;
+    for (let i = 0; i <= segs; i++) {
+      const t = i / segs;
+      const center = curve.getPointAt(t);
+      const n = frames.normals[i];
+      const b = frames.binormals[i];
+      for (let j = 0; j <= rSegs; j++) {
+        const a = (j / rSegs) * Math.PI * 2;
+        const c = Math.cos(a);
+        const s = Math.sin(a);
+        const rx = n.x * c + b.x * s;
+        const ry = n.y * c + b.y * s;
+        const rz = n.z * c + b.z * s;
+        positions[vi3] = center.x + rx * radius;
+        positions[vi3 + 1] = center.y + ry * radius;
+        positions[vi3 + 2] = center.z + rz * radius;
+        normals[vi3] = rx;
+        normals[vi3 + 1] = ry;
+        normals[vi3 + 2] = rz;
+        uvs[vi2] = t * Math.max(1, segs * radius * 0.08);
+        uvs[vi2 + 1] = j / rSegs;
+        vi3 += 3;
+        vi2 += 2;
+      }
+    }
+
+    let ii = 0;
+    for (let i = 0; i < segs; i++) {
+      const r0 = i * ringVerts;
+      const r1 = (i + 1) * ringVerts;
+      for (let j = 0; j < rSegs; j++) {
+        const a = r0 + j;
+        const b = r1 + j;
+        const c = r0 + j + 1;
+        const d = r1 + j + 1;
+        indices[ii++] = a;
+        indices[ii++] = b;
+        indices[ii++] = c;
+        indices[ii++] = c;
+        indices[ii++] = b;
+        indices[ii++] = d;
+      }
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+    geo.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+    geo.setIndex(new THREE.BufferAttribute(indices, 1));
+    geo.computeBoundingSphere();
+    return geo;
+  }
+
+  _createTunnelFromCurrentSpline() {
+    const curve = this._makeCurve();
+    if (!curve) return false;
+    const s = this.toolState.spline;
+    const scaleMid = Math.max(0.05, (Math.max(0.05, s.scaleMin) + Math.max(0.05, s.scaleMax)) * 0.5);
+    const radius = Math.max(0.5, s.tunnelRadius * scaleMid);
+    const radialSegs = Math.max(6, s.tunnelRadialSegments | 0);
+    const pathSegs = Math.max(40, s.tunnelPathSegments | 0);
+    const closed = !!s.closed;
+    const points = this.points.map((p) => ({ x: p.x, y: p.y, z: p.z }));
+    const tunnel = {
+      points,
+      closed,
+      radius,
+      radialSegs,
+      pathSegs,
+      color: s.tunnelColor,
+      mesh: null,
+    };
+    this._buildTunnelMesh(tunnel);
+    this.tunnels.push(tunnel);
+    return true;
+  }
+
+  _buildTunnelMesh(tunnel) {
+    if (tunnel.mesh) {
+      this.scene.remove(tunnel.mesh);
+      tunnel.mesh.geometry.dispose();
+      tunnel.mesh.material.dispose();
+      tunnel.mesh = null;
+    }
+    const curve = new THREE.CatmullRomCurve3(
+      tunnel.points.map((p) => new THREE.Vector3(p.x, p.y, p.z)),
+      tunnel.closed,
+      "catmullrom",
+      0.5,
+    );
+    const geo = this._buildTunnelGeometry(
+      curve,
+      tunnel.pathSegs,
+      tunnel.radialSegs,
+      tunnel.radius,
+      tunnel.closed,
+    );
+    const mat = new THREE.MeshStandardMaterial({
+      color: tunnel.color ?? "#6c727a",
+      roughness: 0.88,
+      metalness: 0.04,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.renderOrder = 2;
+    tunnel.mesh = mesh;
+    this.scene.add(mesh);
+  }
+
   bakePlacement() {
     const samples = this._samples();
     if (samples.length === 0) return { placed: 0 };
@@ -286,6 +413,9 @@ export class SplineSystem {
         placed++;
       }
       if (placed > 0) this.propStore._bump();
+    } else if (s.objectType === "tunnel") {
+      const ok = this._createTunnelFromCurrentSpline();
+      if (ok) placed = 1;
     }
 
     this.clearPreview();
@@ -500,19 +630,70 @@ export class SplineSystem {
   }
 
   exportData() {
-    return { points: this.points.map((p) => ({ x: p.x, y: p.y, z: p.z })) };
+    return {
+      points: this.points.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+      tunnels: this.tunnels.map((t) => ({
+        points: t.points.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+        closed: !!t.closed,
+        radius: t.radius,
+        radialSegs: t.radialSegs,
+        pathSegs: t.pathSegs,
+        color: t.color ?? "#6c727a",
+      })),
+    };
   }
 
   importData(data) {
     const pts = Array.isArray(data?.points) ? data.points : [];
+    this.clearTunnels();
     this.points = pts.map((p) => new THREE.Vector3(p.x, p.y, p.z));
+    const tunnels = Array.isArray(data?.tunnels) ? data.tunnels : [];
+    for (const t of tunnels) {
+      if (!Array.isArray(t.points) || t.points.length < 2) continue;
+      const tunnel = {
+        points: t.points.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+        closed: !!t.closed,
+        radius: Math.max(0.5, t.radius ?? 6),
+        radialSegs: Math.max(6, t.radialSegs ?? 20),
+        pathSegs: Math.max(40, t.pathSegs ?? 220),
+        color: t.color ?? "#6c727a",
+        mesh: null,
+      };
+      this._buildTunnelMesh(tunnel);
+      this.tunnels.push(tunnel);
+    }
     this.selectedIdx = -1;
     this.dragging = false;
     this.clearPreview();
     this._rebuildVisual();
   }
 
+  clearTunnels() {
+    for (const t of this.tunnels) {
+      if (!t.mesh) continue;
+      this.scene.remove(t.mesh);
+      t.mesh.geometry.dispose();
+      t.mesh.material.dispose();
+      t.mesh = null;
+    }
+    this.tunnels.length = 0;
+  }
+
+  /**
+   * BVH integration hook — same shape used by CliffStore/PropStore.
+   * Feeds baked tunnel triangle meshes into CliffBvh.bake(..., extraStores).
+   */
+  forEachMeshInstance(cb) {
+    for (const t of this.tunnels) {
+      const mesh = t.mesh;
+      if (!mesh || !mesh.geometry) continue;
+      mesh.updateMatrixWorld(true);
+      cb(mesh.geometry, mesh.matrixWorld);
+    }
+  }
+
   dispose() {
+    this.clearTunnels();
     this._disposeGroup(this.handleGroup);
     this._disposeGroup(this.previewGroup);
     this.scene.remove(this.handleGroup);

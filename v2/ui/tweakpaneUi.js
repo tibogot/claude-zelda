@@ -86,6 +86,7 @@ export function createTweakpaneUi({
   onSplineBake,
   onSplineClearPreview,
   onSplineApplyPlateau,
+  onSplineClearTunnels,
   onWaterChanged,
   onSaveWater,
   onLoadWater,
@@ -199,6 +200,7 @@ export function createTweakpaneUi({
     onSplineBake,
     onSplineClearPreview,
     onSplineApplyPlateau,
+    onSplineClearTunnels,
   });
 
   addCliffFolder(pane, toolState, {

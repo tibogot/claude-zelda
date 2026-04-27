@@ -9,6 +9,7 @@ export function addSplineFolder(pane, toolState, opts) {
     onSplineBake,
     onSplineClearPreview,
     onSplineApplyPlateau,
+    onSplineClearTunnels,
   } = opts;
 
   const sp = toolState.spline;
@@ -35,12 +36,19 @@ export function addSplineFolder(pane, toolState, opts) {
     options: {
       "Trees (active tree slot)": "trees",
       "Props (active prop slot)": "props",
+      "Procedural tunnel": "tunnel",
     },
   });
   folder.addBinding(sp, "spacing", { label: "Spacing", min: 0.5, max: 40, step: 0.5 });
-  folder.addBinding(sp, "scaleMin", { label: "Scale min", min: 0.05, max: 8, step: 0.05 });
-  folder.addBinding(sp, "scaleMax", { label: "Scale max", min: 0.05, max: 8, step: 0.05 });
+  folder.addBinding(sp, "scaleMin", { label: "Scale min", min: 0.05, max: 20, step: 0.05 });
+  folder.addBinding(sp, "scaleMax", { label: "Scale max", min: 0.05, max: 20, step: 0.05 });
   folder.addBinding(sp, "alignToPath", { label: "Align to path" });
+  const tunnelFolder = folder.addFolder({ title: "Tunnel", expanded: false });
+  tunnelFolder.addBinding(sp, "tunnelRadius", { label: "Base radius", min: 1, max: 200, step: 0.25 });
+  tunnelFolder.addBinding(sp, "tunnelRadialSegments", { label: "Radial segs", min: 6, max: 48, step: 1 });
+  tunnelFolder.addBinding(sp, "tunnelPathSegments", { label: "Path segs", min: 40, max: 800, step: 10 });
+  tunnelFolder.addBinding(sp, "tunnelColor", { label: "Color", view: "color" });
+  tunnelFolder.addButton({ title: "Clear all tunnels" }).on("click", () => onSplineClearTunnels?.());
   folder.addButton({ title: "Preview placement" }).on("click", () => onSplinePreview?.());
   folder.addButton({ title: "Bake placement" }).on("click", () => onSplineBake?.());
   folder.addButton({ title: "Clear preview" }).on("click", () => onSplineClearPreview?.());
