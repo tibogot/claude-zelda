@@ -10,6 +10,7 @@ export function addSplineFolder(pane, toolState, opts) {
     onSplineClearPreview,
     onSplineApplyPlateau,
     onSplineClearTunnels,
+    onSplineClearLinearFeatures,
     onSplineKerbSelect,
     onSplineKerbApply,
     onSplineKerbDelete,
@@ -47,6 +48,9 @@ export function addSplineFolder(pane, toolState, opts) {
       "Guardrail From Road": "guardrailFromRoad",
       "Kerb (spline path)": "kerbSpline",
       "Kerb From Road": "kerbFromRoad",
+      "Wall (spline path)": "wallSpline",
+      "Fence (spline path)": "fenceSpline",
+      "Barrier (spline path)": "barrierSpline",
     },
   });
   folder.addBinding(sp, "spacing", { label: "Spacing", min: 0.5, max: 40, step: 0.5 });
@@ -59,6 +63,24 @@ export function addSplineFolder(pane, toolState, opts) {
   tunnelFolder.addBinding(sp, "tunnelPathSegments", { label: "Path segs", min: 40, max: 800, step: 10 });
   tunnelFolder.addBinding(sp, "tunnelColor", { label: "Color", view: "color" });
   tunnelFolder.addButton({ title: "Clear all tunnels" }).on("click", () => onSplineClearTunnels?.());
+  const linearFolder = folder.addFolder({ title: "Wall / fence / barrier", expanded: false });
+  linearFolder.addBinding(sp, "splineWallHeight", { label: "Wall height", min: 0.2, max: 40, step: 0.05 });
+  linearFolder.addBinding(sp, "splineWallWidth", { label: "Wall thickness", min: 0.02, max: 2, step: 0.01 });
+  linearFolder.addBinding(sp, "splineWallPathSegs", { label: "Wall path segs", min: 12, max: 160, step: 1 });
+  linearFolder.addBinding(sp, "splineWallColor", { label: "Wall color", view: "color" });
+  linearFolder.addBlade({ view: "separator" });
+  linearFolder.addBinding(sp, "splineFenceHeight", { label: "Fence height", min: 0.35, max: 8, step: 0.05 });
+  linearFolder.addBinding(sp, "splineFencePostSpacing", { label: "Fence post spacing", min: 0.5, max: 12, step: 0.05 });
+  linearFolder.addBinding(sp, "splineFencePostWidth", { label: "Fence post width", min: 0.02, max: 0.35, step: 0.005 });
+  linearFolder.addBinding(sp, "splineFencePostDepth", { label: "Fence post depth", min: 0.02, max: 0.35, step: 0.005 });
+  linearFolder.addBinding(sp, "splineFenceRailThick", { label: "Fence rail thick", min: 0.015, max: 0.2, step: 0.005 });
+  linearFolder.addBinding(sp, "splineFenceColor", { label: "Fence color", view: "color" });
+  linearFolder.addBlade({ view: "separator" });
+  linearFolder.addBinding(sp, "splineBarrierHeight", { label: "Barrier height", min: 0.12, max: 3, step: 0.01 });
+  linearFolder.addBinding(sp, "splineBarrierDepth", { label: "Barrier depth", min: 0.08, max: 2.5, step: 0.01 });
+  linearFolder.addBinding(sp, "splineBarrierPathSegs", { label: "Barrier path segs", min: 12, max: 160, step: 1 });
+  linearFolder.addBinding(sp, "splineBarrierColor", { label: "Barrier color", view: "color" });
+  linearFolder.addButton({ title: "Clear walls / fences / barriers" }).on("click", () => onSplineClearLinearFeatures?.());
   const guardrailFolder = folder.addFolder({ title: "Guardrail", expanded: false });
   guardrailFolder.addBinding(sp, "guardrailHeight", { label: "Rail height", min: 0.05, max: 2.5, step: 0.01 });
   guardrailFolder.addBinding(sp, "guardrailThickness", { label: "Rail thickness", min: 0.01, max: 0.35, step: 0.005 });

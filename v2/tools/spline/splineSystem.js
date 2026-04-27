@@ -8,6 +8,11 @@ import {
   worldToChunkIndex,
 } from "../../core/terrain/chunkMath.js";
 import { createKerbStripNodeMaterial } from "./kerbStripMaterial.js";
+import {
+  buildWallGeometry,
+  buildBarrierGeometry,
+  buildFenceGeometry,
+} from "./splineLinearMesh.js";
 
 const KERB_DIFFUSE_TEX_PATH = "../textures/asphalt_track/asphalt_track_diff_2k.jpg";
 const KERB_ARM_TEX_PATH = "../textures/asphalt_track/asphalt_track_arm_2k.jpg";
@@ -68,6 +73,7 @@ export class SplineSystem {
     this.tunnels = [];
     this.guardrails = [];
     this.kerbs = [];
+    this.linearFeatures = [];
 
     this.handleGroup = new THREE.Group();
     this.handleGroup.name = "SplineHandles";
@@ -526,6 +532,138 @@ export class SplineSystem {
     this._buildGuardrailMesh(guardrail);
     this.guardrails.push(guardrail);
     return true;
+  }
+
+  _buildLinearFeatureMesh(item) {
+    if (item.mesh) {
+      this.scene.remove(item.mesh);
+      item.mesh.geometry.dispose();
+      item.mesh.material.dispose();
+      item.mesh = null;
+    }
+    const groundedPoints = item.points.map((p) => new THREE.Vector3(
+      p.x,
+      this.getWorldHeight(p.x, p.z),
+      p.z,
+    ));
+    const curve = new THREE.CatmullRomCurve3(
+      groundedPoints,
+      item.closed,
+      "catmullrom",
+      0.5,
+    );
+    const gh = (x, z) => this.getWorldHeight(x, z);
+    let geo;
+    if (item.kind === "wall") {
+      geo = buildWallGeometry(gh, curve, item.pathSegs, item.width, item.height, item.closed);
+    } else if (item.kind === "barrier") {
+      geo = buildBarrierGeometry(gh, curve, item.pathSegs, item.depth, item.height, item.closed);
+    } else if (item.kind === "fence") {
+      geo = buildFenceGeometry(
+        gh,
+        curve,
+        item.closed,
+        item.postSpacing,
+        item.postW,
+        item.postD,
+        item.height,
+        item.railThick,
+      );
+    } else {
+      return;
+    }
+    const mat = new THREE.MeshStandardMaterial({
+      color: item.color ?? "#7a7d82",
+      roughness: item.kind === "fence" ? 0.58 : 0.82,
+      metalness: item.kind === "fence" ? 0.12 : 0.04,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.renderOrder = 3;
+    item.mesh = mesh;
+    this.scene.add(mesh);
+  }
+
+  syncLinearFeaturesToGround() {
+    if (this.linearFeatures.length === 0) return;
+    for (const item of this.linearFeatures) {
+      this._buildLinearFeatureMesh(item);
+    }
+  }
+
+  _createWallFromSpline() {
+    const curve = this._makeCurve();
+    if (!curve) return false;
+    const s = this.toolState.spline;
+    const scaleMid = Math.max(0.05, (Math.max(0.05, s.scaleMin) + Math.max(0.05, s.scaleMax)) * 0.5);
+    const item = {
+      kind: "wall",
+      points: this.points.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+      closed: !!s.closed,
+      pathSegs: Math.max(16, s.splineWallPathSegs | 0),
+      height: Math.max(0.2, s.splineWallHeight * scaleMid),
+      width: Math.max(0.02, s.splineWallWidth * scaleMid),
+      color: s.splineWallColor,
+      mesh: null,
+    };
+    this._buildLinearFeatureMesh(item);
+    this.linearFeatures.push(item);
+    return true;
+  }
+
+  _createFenceFromSpline() {
+    const curve = this._makeCurve();
+    if (!curve) return false;
+    const s = this.toolState.spline;
+    const scaleMid = Math.max(0.05, (Math.max(0.05, s.scaleMin) + Math.max(0.05, s.scaleMax)) * 0.5);
+    const item = {
+      kind: "fence",
+      points: this.points.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+      closed: !!s.closed,
+      postSpacing: Math.max(0.4, s.splineFencePostSpacing * scaleMid),
+      postW: Math.max(0.02, s.splineFencePostWidth * scaleMid),
+      postD: Math.max(0.02, s.splineFencePostDepth * scaleMid),
+      height: Math.max(0.35, s.splineFenceHeight * scaleMid),
+      railThick: Math.max(0.015, s.splineFenceRailThick * scaleMid),
+      color: s.splineFenceColor,
+      mesh: null,
+    };
+    this._buildLinearFeatureMesh(item);
+    this.linearFeatures.push(item);
+    return true;
+  }
+
+  _createBarrierFromSpline() {
+    const curve = this._makeCurve();
+    if (!curve) return false;
+    const s = this.toolState.spline;
+    const scaleMid = Math.max(0.05, (Math.max(0.05, s.scaleMin) + Math.max(0.05, s.scaleMax)) * 0.5);
+    const item = {
+      kind: "barrier",
+      points: this.points.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+      closed: !!s.closed,
+      pathSegs: Math.max(16, s.splineBarrierPathSegs | 0),
+      height: Math.max(0.12, s.splineBarrierHeight * scaleMid),
+      depth: Math.max(0.08, s.splineBarrierDepth * scaleMid),
+      color: s.splineBarrierColor,
+      mesh: null,
+    };
+    this._buildLinearFeatureMesh(item);
+    this.linearFeatures.push(item);
+    return true;
+  }
+
+  clearLinearFeatures() {
+    for (const item of this.linearFeatures) {
+      if (!item.mesh) continue;
+      this.scene.remove(item.mesh);
+      item.mesh.geometry.dispose();
+      item.mesh.material.dispose();
+      item.mesh = null;
+    }
+    this.linearFeatures.length = 0;
   }
 
   _slicePointsByRange(points, startT, endT) {
@@ -1300,6 +1438,15 @@ export class SplineSystem {
     } else if (s.objectType === "guardrailFromRoad") {
       const ok = this._createGuardrailFromRoad();
       if (ok) placed = 1;
+    } else if (s.objectType === "wallSpline") {
+      const ok = this._createWallFromSpline();
+      if (ok) placed = 1;
+    } else if (s.objectType === "fenceSpline") {
+      const ok = this._createFenceFromSpline();
+      if (ok) placed = 1;
+    } else if (s.objectType === "barrierSpline") {
+      const ok = this._createBarrierFromSpline();
+      if (ok) placed = 1;
     } else if (s.objectType === "kerbSpline") {
       const ok = this._createKerbFromCurrentSpline();
       if (ok) placed = 1;
@@ -1578,6 +1725,30 @@ export class SplineSystem {
         }
         return row;
       }),
+      linearFeatures: this.linearFeatures.map((f) => {
+        const row = {
+          kind: f.kind,
+          points: f.points.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+          closed: !!f.closed,
+          color: f.color ?? "#7a7d82",
+        };
+        if (f.kind === "wall") {
+          row.pathSegs = f.pathSegs;
+          row.height = f.height;
+          row.width = f.width;
+        } else if (f.kind === "fence") {
+          row.postSpacing = f.postSpacing;
+          row.postW = f.postW;
+          row.postD = f.postD;
+          row.height = f.height;
+          row.railThick = f.railThick;
+        } else if (f.kind === "barrier") {
+          row.pathSegs = f.pathSegs;
+          row.height = f.height;
+          row.depth = f.depth;
+        }
+        return row;
+      }),
     };
   }
 
@@ -1586,6 +1757,7 @@ export class SplineSystem {
     this.clearTunnels();
     this.clearGuardrails();
     this.clearKerbs();
+    this.clearLinearFeatures();
     this.points = pts.map((p) => new THREE.Vector3(p.x, p.y, p.z));
     const tunnels = Array.isArray(data?.tunnels) ? data.tunnels : [];
     for (const t of tunnels) {
@@ -1670,6 +1842,46 @@ export class SplineSystem {
       this._buildKerbMesh(kerb);
       this.kerbs.push(kerb);
     }
+    const linearFeatures = Array.isArray(data?.linearFeatures) ? data.linearFeatures : [];
+    for (const lf of linearFeatures) {
+      const kind = lf.kind;
+      if (kind !== "wall" && kind !== "fence" && kind !== "barrier") continue;
+      if (!Array.isArray(lf.points) || lf.points.length < 2) continue;
+      const base = {
+        kind,
+        points: lf.points.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+        closed: !!lf.closed,
+        color: lf.color ?? "#7a7d82",
+        mesh: null,
+      };
+      let item;
+      if (kind === "wall") {
+        item = {
+          ...base,
+          pathSegs: Math.max(16, lf.pathSegs ?? 80),
+          height: Math.max(0.2, lf.height ?? 3),
+          width: Math.max(0.02, lf.width ?? 0.25),
+        };
+      } else if (kind === "fence") {
+        item = {
+          ...base,
+          postSpacing: Math.max(0.4, lf.postSpacing ?? 2.2),
+          postW: Math.max(0.02, lf.postW ?? 0.06),
+          postD: Math.max(0.02, lf.postD ?? 0.04),
+          height: Math.max(0.35, lf.height ?? 1.4),
+          railThick: Math.max(0.015, lf.railThick ?? 0.04),
+        };
+      } else {
+        item = {
+          ...base,
+          pathSegs: Math.max(16, lf.pathSegs ?? 72),
+          height: Math.max(0.12, lf.height ?? 0.78),
+          depth: Math.max(0.08, lf.depth ?? 0.55),
+        };
+      }
+      this._buildLinearFeatureMesh(item);
+      this.linearFeatures.push(item);
+    }
     this.toolState.spline.activeKerbIndex = 0;
     this._syncToolStateFromActiveKerb();
     this.selectedIdx = -1;
@@ -1738,12 +1950,19 @@ export class SplineSystem {
       mesh.updateMatrixWorld(true);
       cb(mesh.geometry, mesh.matrixWorld);
     }
+    for (const f of this.linearFeatures) {
+      const mesh = f.mesh;
+      if (!mesh || !mesh.geometry) continue;
+      mesh.updateMatrixWorld(true);
+      cb(mesh.geometry, mesh.matrixWorld);
+    }
   }
 
   dispose() {
     this.clearTunnels();
     this.clearGuardrails();
     this.clearKerbs();
+    this.clearLinearFeatures();
     this._disposeGroup(this.handleGroup);
     this._disposeGroup(this.previewGroup);
     this.scene.remove(this.handleGroup);

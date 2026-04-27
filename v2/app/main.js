@@ -536,6 +536,7 @@ export async function startV2App() {
       fleurSystem.syncHeights();
       splineSystem?.syncGuardrailsToGround?.();
       splineSystem?.syncKerbsToGround?.();
+      splineSystem?.syncLinearFeaturesToGround?.();
     },
   });
   const brushMask = new BrushMask();
@@ -1025,6 +1026,7 @@ export async function startV2App() {
       treeStore.syncAllHeights(terrainStore);
       splineSystem.syncGuardrailsToGround();
       splineSystem.syncKerbsToGround();
+      splineSystem.syncLinearFeaturesToGround();
       ui?.pane.refresh();
     },
     onRoadApplyStabilityPreset: () => {
@@ -1060,6 +1062,7 @@ export async function startV2App() {
       treeStore.syncAllHeights(terrainStore);
       splineSystem.syncGuardrailsToGround();
       splineSystem.syncKerbsToGround();
+      splineSystem.syncLinearFeaturesToGround();
       ui?.pane.refresh();
     },
     onRoadActiveIndexChanged: () => {
@@ -1101,10 +1104,15 @@ export async function startV2App() {
       treeStore.syncAllHeights(terrainStore);
       splineSystem.syncGuardrailsToGround();
       splineSystem.syncKerbsToGround();
+      splineSystem.syncLinearFeaturesToGround();
       ui?.pane.refresh();
     },
     onSplineClearTunnels: () => {
       splineSystem.clearTunnels();
+      ui?.pane.refresh();
+    },
+    onSplineClearLinearFeatures: () => {
+      splineSystem.clearLinearFeatures();
       ui?.pane.refresh();
     },
     onSplineKerbSelect: () => {
