@@ -307,6 +307,8 @@ function extractSerializableSettings(toolState) {
     splinePath: toolState._splineExportData?.() ?? null,
     water: { ...toolState.water },
     waterBodies: toolState._waterExportData?.() ?? null,
+    waterfall: { ...toolState.waterfall },
+    waterfallItems: toolState._waterfallExportData?.() ?? null,
     barrier: { ...toolState.barrier },
     barrierChunks: toolState._barrierExportData?.() ?? null,
   };
@@ -358,5 +360,6 @@ export function applySettings(toolState, settings) {
   if (settings.river) Object.assign(toolState.river, settings.river);
   if (settings.spline) Object.assign(toolState.spline, settings.spline);
   if (settings.water) Object.assign(toolState.water, settings.water);
+  if (settings.waterfall) Object.assign(toolState.waterfall, settings.waterfall);
   if (settings.barrier) Object.assign(toolState.barrier, settings.barrier);
 }

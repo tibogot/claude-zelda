@@ -11,6 +11,7 @@ import { addRoadFolder } from "./roadTweakpane.js";
 import { addRiverFolder } from "./riverTweakpane.js";
 import { addSplineFolder } from "./splineTweakpane.js";
 import { addWaterFolder } from "./waterTweakpane.js";
+import { addWaterfallFolder } from "./waterfallTweakpane.js";
 import { addBarrierFolder } from "./barrierTweakpane.js";
 
 export function createTweakpaneUi({
@@ -99,6 +100,9 @@ export function createTweakpaneUi({
   onLoadWater,
   onDeleteSelectedWater,
   onClearAllWater,
+  onWaterfallChanged,
+  onDeleteSelectedWaterfall,
+  onClearAllWaterfalls,
   onBarrierOverlayChanged,
   onBarrierClear,
   onBarrierFill,
@@ -123,6 +127,7 @@ export function createTweakpaneUi({
         Cliffs: "cliffs",
         Props: "props",
         Water: "water",
+        Waterfall: "waterfall",
         Barrier: "barrier",
         Play: "play",
       },
@@ -245,6 +250,11 @@ export function createTweakpaneUi({
     onLoadWater,
     onDeleteSelected: onDeleteSelectedWater,
     onClearAll: onClearAllWater,
+  });
+  addWaterfallFolder(pane, toolState, {
+    onWaterfallChanged,
+    onDeleteSelectedWaterfall,
+    onClearAllWaterfalls,
   });
 
   const barrierFolder = addBarrierFolder(pane, toolState, {

@@ -64,6 +64,7 @@ import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { WaterStore } from "../core/water/waterStore.js";
 import { createWaterMaterials } from "../render/water/waterMaterial.js";
 import { WaterSystem } from "../tools/water/waterSystem.js";
+import { WaterfallSystem } from "../tools/waterfall/waterfallSystem.js";
 import { BarrierStore } from "../core/barrier/barrierStore.js";
 import { BarrierSystem } from "../tools/barrier/barrierSystem.js";
 import { BarrierOverlay } from "../render/barrier/barrierOverlay.js";
@@ -653,6 +654,11 @@ export async function startV2App() {
     toolState,
     transformControls,
   });
+  const waterfallSystem = new WaterfallSystem({
+    scene,
+    toolState,
+    transformControls,
+  });
   let _appTimeSec = 0;
 
   const barrierStore = new BarrierStore(config);
@@ -733,6 +739,11 @@ export async function startV2App() {
       }
       if (toolState.mode !== "water") {
         waterSystem.deselect();
+      }
+      if (toolState.mode !== "waterfall") {
+        waterfallSystem.deselect();
+      } else {
+        transformControls.setMode(toolState.waterfall.transformMode || "translate");
       }
       if (toolState.mode !== "spline") {
         splineSystem.dragging = false;
@@ -948,9 +959,9 @@ export async function startV2App() {
     onDeleteSelectedCliff: () => cliffSystem.handleDelete(),
     onClearAllCliffs: () => cliffSystem.clearAll(),
     onRebakeBvh: () => {
-      cliffBvh.bake(terrainStore, config, [propStore, splineSystem]);
+      cliffBvh.bake(terrainStore, config, [propStore, splineSystem, waterfallSystem]);
       grassManager.rebuildCliffHeightTex(cliffBvh, terrainStore, config.world.size);
-      console.log("[V2] BVH rebaked (cliffs + props + spline tunnels) + cliff height tex updated");
+      console.log("[V2] BVH rebaked (cliffs + props + spline tunnels + waterfalls) + cliff height tex updated");
     },
     onCliffTransformModeChanged: () => {
       transformControls.setMode(toolState.cliffs.transformMode);
@@ -1117,6 +1128,19 @@ export async function startV2App() {
       waterSystem.clearAll();
       ui?.pane.refresh();
     },
+    onWaterfallChanged: () => {
+      waterfallSystem.syncMaterial();
+      waterfallSystem.refreshMeshesFromParams();
+      ui?.pane.refresh();
+    },
+    onDeleteSelectedWaterfall: () => {
+      waterfallSystem.deleteSelected();
+      ui?.pane.refresh();
+    },
+    onClearAllWaterfalls: () => {
+      waterfallSystem.clearAll();
+      ui?.pane.refresh();
+    },
     onBarrierOverlayChanged: () => {
       syncBarrierOverlay();
     },
@@ -1132,6 +1156,7 @@ export async function startV2App() {
       toolState._cliffExportData = () => cliffStore.exportData();
       toolState._propExportData = () => propStore.exportData();
       toolState._waterExportData = () => waterStore.exportData();
+      toolState._waterfallExportData = () => waterfallSystem.exportData();
       toolState._barrierExportData = () => barrierStore.exportData();
       toolState._roadExportData = () => roadSystem.exportData();
       toolState._riverExportData = () => riverSystem.exportData();
@@ -1140,6 +1165,7 @@ export async function startV2App() {
       delete toolState._cliffExportData;
       delete toolState._propExportData;
       delete toolState._waterExportData;
+      delete toolState._waterfallExportData;
       delete toolState._barrierExportData;
       delete toolState._roadExportData;
       delete toolState._riverExportData;
@@ -1196,6 +1222,12 @@ export async function startV2App() {
         if (project.settings?.waterBodies) {
           waterSystem.applyBodies(project.settings.waterBodies);
           waterMaterials.syncUniforms(toolState.water);
+        }
+        waterfallSystem.syncMaterial();
+        if (project.settings?.waterfallItems) {
+          waterfallSystem.importData(project.settings.waterfallItems);
+        } else {
+          waterfallSystem.clearAll();
         }
         // Restore barriers
         barrierOverlay.clear();
@@ -1516,6 +1548,15 @@ export async function startV2App() {
       if (consumed) ui?.pane.refresh();
       return;
     }
+    if (toolState.mode === "waterfall" && event.button === 0) {
+      if (transformControls.dragging) return;
+      event.preventDefault();
+      updatePointer(event);
+      const hit = pickTerrain(event);
+      const consumed = waterfallSystem.handlePointerDown(pointerNdc, camera, hit?.point);
+      if (consumed) ui?.pane.refresh();
+      return;
+    }
     if (toolState.mode === "cliffs" && event.button === 0 && !transformControls.dragging) {
       const hit = pickTerrain(event);
       if (hit) {
@@ -1765,6 +1806,7 @@ export async function startV2App() {
     if (toolState.mode === "cliffs") return cliffSystem;
     if (toolState.mode === "props") return propSystem;
     if (toolState.mode === "water") return waterSystem;
+    if (toolState.mode === "waterfall") return waterfallSystem;
     if (toolState.mode === "barrier") return barrierSystem;
     return sculptSystem;
   }
@@ -1813,6 +1855,7 @@ export async function startV2App() {
       toolState.mode !== "cliffs" &&
       toolState.mode !== "props" &&
       toolState.mode !== "water" &&
+      toolState.mode !== "waterfall" &&
       toolState.mode !== "play"
     ) {
       event.preventDefault();
@@ -1830,6 +1873,10 @@ export async function startV2App() {
       event.preventDefault();
       waterSystem.deleteSelected();
       ui?.pane.refresh();
+    } else if (event.code === "Delete" && toolState.mode === "waterfall") {
+      event.preventDefault();
+      waterfallSystem.deleteSelected();
+      ui?.pane.refresh();
     } else if (toolState.mode === "water" && !ctrl) {
       if (event.code === "KeyE") {
         event.preventDefault();
@@ -1840,6 +1887,28 @@ export async function startV2App() {
       } else if (event.code === "KeyT") {
         event.preventDefault();
         waterSystem.setTransformMode("scale");
+      }
+    } else if (event.code === "KeyH" && !ctrl) {
+      event.preventDefault();
+      toolState.mode = toolState.mode === "waterfall" ? "view" : "waterfall";
+      ui?.pane.refresh();
+      updateBrushPreviewFromPick(null);
+    } else if (toolState.mode === "waterfall" && !ctrl) {
+      if (event.code === "KeyW") {
+        event.preventDefault();
+        toolState.waterfall.transformMode = "translate";
+        transformControls.setMode("translate");
+        ui?.pane.refresh();
+      } else if (event.code === "KeyE") {
+        event.preventDefault();
+        toolState.waterfall.transformMode = "rotate";
+        transformControls.setMode("rotate");
+        ui?.pane.refresh();
+      } else if (event.code === "KeyR") {
+        event.preventDefault();
+        toolState.waterfall.transformMode = "scale";
+        transformControls.setMode("scale");
+        ui?.pane.refresh();
       }
     } else if (toolState.mode === "cliffs" && !ctrl) {
       if (event.code === "KeyW") {
@@ -1981,6 +2050,7 @@ export async function startV2App() {
         waterMaterials.lakeShader.uniforms.reflectEnabled.value = 0;
       }
     }
+    waterfallSystem.update(dtSec);
 
     if (now - hudLastMs > 180) {
       let tris = 0;
@@ -2033,6 +2103,7 @@ export async function startV2App() {
       splineSystem.dispose();
       roadReflection.dispose();
       waterMaterials.dispose();
+      waterfallSystem.dispose();
       playMode.dispose();
       tileTerrainMaterial.dispose();
       disposeProceduralBundle();
