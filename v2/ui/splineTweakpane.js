@@ -45,6 +45,7 @@ export function addSplineFolder(pane, toolState, opts) {
       "Procedural tunnel": "tunnel",
       "Guardrail (W profile)": "guardrail",
       "Guardrail From Road": "guardrailFromRoad",
+      "Kerb (spline path)": "kerbSpline",
       "Kerb From Road": "kerbFromRoad",
     },
   });
@@ -65,6 +66,12 @@ export function addSplineFolder(pane, toolState, opts) {
   guardrailFolder.addBinding(sp, "guardrailCrownDepth", { label: "W crown depth", min: 0.0, max: 0.35, step: 0.005 });
   guardrailFolder.addBinding(sp, "guardrailPathSegments", { label: "Path segs", min: 40, max: 1200, step: 10 });
   guardrailFolder.addBinding(sp, "guardrailPostSpacing", { label: "Post spacing", min: 0.5, max: 8, step: 0.05 });
+  guardrailFolder.addBinding(sp, "guardrailFromRoadPostSpacingMul", {
+    label: "Post spacing ×",
+    min: 1,
+    max: 12,
+    step: 0.25,
+  });
   guardrailFolder.addBinding(sp, "guardrailPostWidth", { label: "Post width", min: 0.03, max: 0.4, step: 0.005 });
   guardrailFolder.addBinding(sp, "guardrailPostDepth", { label: "Post depth", min: 0.03, max: 0.4, step: 0.005 });
   guardrailFolder.addBinding(sp, "guardrailPostHeight", { label: "Post height", min: 0.2, max: 3, step: 0.01 });
@@ -84,7 +91,6 @@ export function addSplineFolder(pane, toolState, opts) {
   fromRoadFolder.addBinding(sp, "guardrailFromRoadEdgeOffset", { label: "Edge offset", min: -2, max: 8, step: 0.05 });
   fromRoadFolder.addBinding(sp, "guardrailFromRoadStart", { label: "Start %", min: 0, max: 1, step: 0.01 });
   fromRoadFolder.addBinding(sp, "guardrailFromRoadEnd", { label: "End %", min: 0, max: 1, step: 0.01 });
-  fromRoadFolder.addBinding(sp, "guardrailFromRoadPostSpacingMul", { label: "Post spacing x", min: 1, max: 12, step: 0.25 });
   const kerbFolder = folder.addFolder({ title: "Kerb From Road", expanded: false });
   const bindKerb = (key, params) =>
     kerbFolder.addBinding(sp, key, params).on("change", () => onSplineKerbLiveChanged?.(key));
@@ -95,6 +101,16 @@ export function addSplineFolder(pane, toolState, opts) {
   kerbFolder.addButton({ title: "Suggest from strongest turn" }).on("click", () => onSplineKerbSuggestFromCurvature?.());
   kerbFolder.addButton({ title: "Duplicate active kerb" }).on("click", () => onSplineKerbDuplicate?.());
   kerbFolder.addButton({ title: "Delete active kerb" }).on("click", () => onSplineKerbDelete?.());
+  kerbFolder.addBlade({ view: "separator" });
+  bindKerb("kerbSplineSide", {
+    label: "Spline side",
+    options: {
+      Left: "left",
+      Right: "right",
+      Both: "both",
+    },
+  });
+  bindKerb("kerbSplineLateralOffset", { label: "Spline lateral", min: -2, max: 4, step: 0.01 });
   kerbFolder.addBlade({ view: "separator" });
   bindKerb("kerbFromRoadIndex", { label: "Road index", min: 0, max: 63, step: 1 });
   bindKerb("kerbFromRoadSide", {
@@ -123,6 +139,14 @@ export function addSplineFolder(pane, toolState, opts) {
   bindKerb("kerbNormalStrength", { label: "Normal strength", min: 0.0, max: 2.0, step: 0.01 });
   bindKerb("kerbRoughnessMul", { label: "Roughness x", min: 0.2, max: 2.0, step: 0.01 });
   bindKerb("kerbMetalness", { label: "Metalness", min: 0.0, max: 1.0, step: 0.01 });
+  kerbFolder.addBlade({ view: "separator" });
+  bindKerb("kerbTexUvScaleU", { label: "Tex UV scale U", min: 0.1, max: 24, step: 0.05 });
+  bindKerb("kerbTexUvScaleV", { label: "Tex UV scale V", min: 0.1, max: 24, step: 0.05 });
+  bindKerb("kerbTexUvOffsetU", { label: "Tex UV offset U", min: -4, max: 4, step: 0.01 });
+  bindKerb("kerbTexUvOffsetV", { label: "Tex UV offset V", min: -4, max: 4, step: 0.01 });
+  bindKerb("kerbTexBrightness", { label: "Tex brightness", min: -0.35, max: 0.35, step: 0.005 });
+  bindKerb("kerbTexContrast", { label: "Tex contrast", min: 0.4, max: 2.2, step: 0.01 });
+  bindKerb("kerbTexSaturation", { label: "Tex saturation", min: 0, max: 2, step: 0.01 });
   folder.addButton({ title: "Preview placement" }).on("click", () => onSplinePreview?.());
   folder.addButton({ title: "Bake placement" }).on("click", () => onSplineBake?.());
   folder.addButton({ title: "Clear preview" }).on("click", () => onSplineClearPreview?.());

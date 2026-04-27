@@ -7,6 +7,7 @@ import {
   getChunkDataIndex,
   worldToChunkIndex,
 } from "../../core/terrain/chunkMath.js";
+import { createKerbStripNodeMaterial } from "./kerbStripMaterial.js";
 
 const KERB_DIFFUSE_TEX_PATH = "../textures/asphalt_track/asphalt_track_diff_2k.jpg";
 const KERB_ARM_TEX_PATH = "../textures/asphalt_track/asphalt_track_arm_2k.jpg";
@@ -15,6 +16,25 @@ let _kerbTexLoadStarted = false;
 let _kerbDiffuseTex = null;
 let _kerbArmTex = null;
 let _kerbNormalTex = null;
+let _kerbFbDiffuse = null;
+let _kerbFbArm = null;
+let _kerbFbNormal = null;
+
+function _ensureKerbPlaceholderTextures() {
+  if (_kerbFbDiffuse) return;
+  const d = new Uint8Array([235, 235, 235, 255]);
+  _kerbFbDiffuse = new THREE.DataTexture(d, 1, 1);
+  _kerbFbDiffuse.colorSpace = THREE.SRGBColorSpace;
+  _kerbFbDiffuse.needsUpdate = true;
+  const a = new Uint8Array([255, Math.round(0.92 * 255), 0, 255]);
+  _kerbFbArm = new THREE.DataTexture(a, 1, 1);
+  _kerbFbArm.colorSpace = THREE.LinearSRGBColorSpace;
+  _kerbFbArm.needsUpdate = true;
+  const n = new Uint8Array([128, 128, 255, 255]);
+  _kerbFbNormal = new THREE.DataTexture(n, 1, 1);
+  _kerbFbNormal.colorSpace = THREE.LinearSRGBColorSpace;
+  _kerbFbNormal.needsUpdate = true;
+}
 
 export class SplineSystem {
   constructor({
@@ -491,7 +511,10 @@ export class SplineSystem {
       thickness,
       crown,
       railYOffset: Math.max(0, s.guardrailRailYOffset * scaleMid),
-      postSpacing: Math.max(0.5, s.guardrailPostSpacing),
+      postSpacing: Math.max(
+        0.5,
+        s.guardrailPostSpacing * Math.max(1, s.guardrailFromRoadPostSpacingMul ?? 1),
+      ),
       postWidth: Math.max(0.03, s.guardrailPostWidth * scaleMid),
       postDepth: Math.max(0.03, s.guardrailPostDepth * scaleMid),
       postHeight: Math.max(0.2, s.guardrailPostHeight * scaleMid),
@@ -842,6 +865,7 @@ export class SplineSystem {
         colorA: s.kerbColorA,
         colorB: s.kerbColorB,
         sideSign,
+        ...this._kerbTexFieldsFromSplineState(),
         mesh: null,
       };
       this._buildKerbMesh(kerb);
@@ -851,6 +875,66 @@ export class SplineSystem {
     this.toolState.spline.activeKerbIndex = Math.max(0, this.kerbs.length - 1);
     this._syncToolStateFromActiveKerb();
     return placed > 0;
+  }
+
+  _createKerbFromCurrentSpline() {
+    const s = this.toolState.spline;
+    const curve = this._makeCurve();
+    if (!curve) return false;
+    const sampleCount = Math.max(24, (s.kerbPathSegments | 0) + 1);
+    const sampled = curve.getSpacedPoints(sampleCount);
+    const basePts = sampled.map((p) => ({ x: p.x, y: p.y, z: p.z }));
+    if (basePts.length < 2) return false;
+    const lateral = s.kerbSplineLateralOffset ?? 0;
+    const sides = s.kerbSplineSide === "both"
+      ? [1, -1]
+      : [s.kerbSplineSide === "left" ? 1 : -1];
+    let placed = 0;
+    for (const sideSign of sides) {
+      const pts = this._offsetPointsBySide(basePts, sideSign, lateral);
+      if (pts.length < 2) continue;
+      const kerb = {
+        points: pts,
+        closed: !!s.closed,
+        pathSegs: Math.max(40, s.kerbPathSegments | 0),
+        width: Math.max(0.05, s.kerbWidth),
+        height: Math.max(0.01, s.kerbHeight),
+        lipHeight: Math.max(0, Math.min(s.kerbHeight, s.kerbLipHeight)),
+        topInset: THREE.MathUtils.clamp(s.kerbTopInset ?? 0, 0, 0.98),
+        stripeLength: Math.max(0.1, s.kerbStripeLength),
+        squareStripes: s.kerbSquareStripes !== false,
+        stripeSharpness: THREE.MathUtils.clamp(s.kerbStripeSharpness ?? 0.98, 0.5, 1.0),
+        normalStrength: Math.max(0, s.kerbNormalStrength ?? 0.45),
+        roughnessMul: Math.max(0.2, s.kerbRoughnessMul ?? 1.0),
+        metalness: THREE.MathUtils.clamp(s.kerbMetalness ?? 0.02, 0, 1),
+        colorA: s.kerbColorA,
+        colorB: s.kerbColorB,
+        sideSign,
+        splineBasePoints: basePts.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+        splineLateralOffset: lateral,
+        ...this._kerbTexFieldsFromSplineState(),
+        mesh: null,
+      };
+      this._buildKerbMesh(kerb);
+      this.kerbs.push(kerb);
+      placed++;
+    }
+    this.toolState.spline.activeKerbIndex = Math.max(0, this.kerbs.length - 1);
+    this._syncToolStateFromActiveKerb();
+    return placed > 0;
+  }
+
+  _kerbTexFieldsFromSplineState() {
+    const s = this.toolState.spline;
+    return {
+      texUvScaleU: Math.max(0.05, s.kerbTexUvScaleU ?? 1),
+      texUvScaleV: Math.max(0.05, s.kerbTexUvScaleV ?? 1),
+      texUvOffsetU: s.kerbTexUvOffsetU ?? 0,
+      texUvOffsetV: s.kerbTexUvOffsetV ?? 0,
+      texBrightness: s.kerbTexBrightness ?? 0,
+      texContrast: Math.max(0.05, s.kerbTexContrast ?? 1),
+      texSaturation: THREE.MathUtils.clamp(s.kerbTexSaturation ?? 1, 0, 3),
+    };
   }
 
   _buildKerbMesh(kerb) {
@@ -881,21 +965,20 @@ export class SplineSystem {
       kerb.closed,
     );
     this._ensureKerbTexturesLoaded();
-    const mat = new THREE.MeshStandardMaterial({
-      roughness: THREE.MathUtils.clamp(0.92 * (kerb.roughnessMul ?? 1.0), 0.02, 1.0),
-      metalness: THREE.MathUtils.clamp(kerb.metalness ?? 0.02, 0, 1),
-      side: THREE.DoubleSide,
-      map: _kerbDiffuseTex,
-      roughnessMap: _kerbArmTex,
-      metalnessMap: _kerbArmTex,
-      normalMap: _kerbNormalTex,
-      normalScale: new THREE.Vector2(
-        Math.max(0, kerb.normalStrength ?? 0.45),
-        Math.max(0, kerb.normalStrength ?? 0.45),
-      ),
-      polygonOffset: true,
-      polygonOffsetFactor: -2,
-      polygonOffsetUnits: -2,
+    _ensureKerbPlaceholderTextures();
+    try {
+      geo.computeTangents();
+    } catch (_) {
+      /* narrow strips can fail tangent generation */
+    }
+    const diffuseT = _kerbDiffuseTex || _kerbFbDiffuse;
+    const armT = _kerbArmTex || _kerbFbArm;
+    const normT = _kerbNormalTex || _kerbFbNormal;
+    const { material: mat } = createKerbStripNodeMaterial({
+      diffuseTex: diffuseT,
+      armTex: armT,
+      normalTex: normT,
+      kerb,
     });
     const uv = geo.getAttribute("uv");
     const color = new Float32Array(uv.count * 3);
@@ -917,7 +1000,6 @@ export class SplineSystem {
       color[ci + 2] = THREE.MathUtils.lerp(a.b, b.b, blend);
     }
     geo.setAttribute("color", new THREE.BufferAttribute(color, 3));
-    mat.vertexColors = true;
     const mesh = new THREE.Mesh(geo, mat);
     const roadLift = Math.max(0.01, Math.min(0.03, (this.toolState.road?.heightOffset ?? 0.12) * 0.25));
     mesh.position.y += roadLift;
@@ -939,16 +1021,19 @@ export class SplineSystem {
     };
     loader.load(KERB_DIFFUSE_TEX_PATH, (tex) => {
       applyDefaults(tex);
+      tex.colorSpace = THREE.SRGBColorSpace;
       _kerbDiffuseTex = tex;
       this.syncKerbsToGround();
     });
     loader.load(KERB_ARM_TEX_PATH, (tex) => {
       applyDefaults(tex);
+      tex.colorSpace = THREE.LinearSRGBColorSpace;
       _kerbArmTex = tex;
       this.syncKerbsToGround();
     });
     loader.load(KERB_NORMAL_TEX_PATH, (tex) => {
       applyDefaults(tex);
+      tex.colorSpace = THREE.LinearSRGBColorSpace;
       _kerbNormalTex = tex;
       this.syncKerbsToGround();
     });
@@ -992,6 +1077,17 @@ export class SplineSystem {
     s.kerbMetalness = k.metalness ?? 0.02;
     s.kerbColorA = k.colorA;
     s.kerbColorB = k.colorB;
+    s.kerbTexUvScaleU = k.texUvScaleU ?? 1;
+    s.kerbTexUvScaleV = k.texUvScaleV ?? 1;
+    s.kerbTexUvOffsetU = k.texUvOffsetU ?? 0;
+    s.kerbTexUvOffsetV = k.texUvOffsetV ?? 0;
+    s.kerbTexBrightness = k.texBrightness ?? 0;
+    s.kerbTexContrast = k.texContrast ?? 1;
+    s.kerbTexSaturation = k.texSaturation ?? 1;
+    if (Array.isArray(k.splineBasePoints) && k.splineBasePoints.length >= 2) {
+      s.kerbSplineLateralOffset = k.splineLateralOffset ?? 0;
+      s.kerbSplineSide = Math.sign(k.sideSign || 1) >= 0 ? "left" : "right";
+    }
     return true;
   }
 
@@ -1003,6 +1099,15 @@ export class SplineSystem {
     const k = this._activeKerb();
     if (!k) return false;
     const s = this.toolState.spline;
+    if (Array.isArray(k.splineBasePoints) && k.splineBasePoints.length >= 2) {
+      const lat = s.kerbSplineLateralOffset ?? 0;
+      let sign = Math.sign(k.sideSign || 1);
+      if (s.kerbSplineSide === "left") sign = 1;
+      else if (s.kerbSplineSide === "right") sign = -1;
+      k.points = this._offsetPointsBySide(k.splineBasePoints, sign, lat);
+      k.sideSign = sign;
+      k.splineLateralOffset = lat;
+    }
     k.width = Math.max(0.05, s.kerbWidth);
     k.height = Math.max(0.01, s.kerbHeight);
     k.lipHeight = Math.max(0, Math.min(k.height, s.kerbLipHeight));
@@ -1016,6 +1121,13 @@ export class SplineSystem {
     k.metalness = THREE.MathUtils.clamp(s.kerbMetalness ?? 0.02, 0, 1);
     k.colorA = s.kerbColorA;
     k.colorB = s.kerbColorB;
+    k.texUvScaleU = Math.max(0.05, s.kerbTexUvScaleU ?? 1);
+    k.texUvScaleV = Math.max(0.05, s.kerbTexUvScaleV ?? 1);
+    k.texUvOffsetU = s.kerbTexUvOffsetU ?? 0;
+    k.texUvOffsetV = s.kerbTexUvOffsetV ?? 0;
+    k.texBrightness = s.kerbTexBrightness ?? 0;
+    k.texContrast = Math.max(0.05, s.kerbTexContrast ?? 1);
+    k.texSaturation = THREE.MathUtils.clamp(s.kerbTexSaturation ?? 1, 0, 3);
     this._buildKerbMesh(k);
     return true;
   }
@@ -1056,6 +1168,17 @@ export class SplineSystem {
       colorA: src.colorA,
       colorB: src.colorB,
       sideSign: Math.sign(src.sideSign || 1),
+      splineBasePoints: Array.isArray(src.splineBasePoints)
+        ? src.splineBasePoints.map((p) => ({ x: p.x, y: p.y, z: p.z }))
+        : undefined,
+      splineLateralOffset: src.splineLateralOffset,
+      texUvScaleU: Math.max(0.05, src.texUvScaleU ?? 1),
+      texUvScaleV: Math.max(0.05, src.texUvScaleV ?? 1),
+      texUvOffsetU: src.texUvOffsetU ?? 0,
+      texUvOffsetV: src.texUvOffsetV ?? 0,
+      texBrightness: src.texBrightness ?? 0,
+      texContrast: Math.max(0.05, src.texContrast ?? 1),
+      texSaturation: THREE.MathUtils.clamp(src.texSaturation ?? 1, 0, 3),
       mesh: null,
     };
     this._buildKerbMesh(dup);
@@ -1176,6 +1299,9 @@ export class SplineSystem {
       if (ok) placed = 1;
     } else if (s.objectType === "guardrailFromRoad") {
       const ok = this._createGuardrailFromRoad();
+      if (ok) placed = 1;
+    } else if (s.objectType === "kerbSpline") {
+      const ok = this._createKerbFromCurrentSpline();
       if (ok) placed = 1;
     } else if (s.objectType === "kerbFromRoad") {
       const ok = this._createKerbFromRoad();
@@ -1420,24 +1546,38 @@ export class SplineSystem {
         postSink: g.postSink,
         color: g.color ?? "#9aa0a8",
       })),
-      kerbs: this.kerbs.map((k) => ({
-        points: k.points.map((p) => ({ x: p.x, y: p.y, z: p.z })),
-        closed: !!k.closed,
-        pathSegs: k.pathSegs,
-        width: k.width,
-        height: k.height,
-        lipHeight: k.lipHeight,
-        topInset: k.topInset ?? 0,
-        stripeLength: k.stripeLength,
-        squareStripes: k.squareStripes !== false,
-        stripeSharpness: k.stripeSharpness ?? 0.98,
-        normalStrength: k.normalStrength ?? 0.45,
-        roughnessMul: k.roughnessMul ?? 1.0,
-        metalness: k.metalness ?? 0.02,
-        colorA: k.colorA ?? "#c92c2c",
-        colorB: k.colorB ?? "#f2f2f2",
-        sideSign: Math.sign(k.sideSign || 1),
-      })),
+      kerbs: this.kerbs.map((k) => {
+        const row = {
+          points: k.points.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+          closed: !!k.closed,
+          pathSegs: k.pathSegs,
+          width: k.width,
+          height: k.height,
+          lipHeight: k.lipHeight,
+          topInset: k.topInset ?? 0,
+          stripeLength: k.stripeLength,
+          squareStripes: k.squareStripes !== false,
+          stripeSharpness: k.stripeSharpness ?? 0.98,
+          normalStrength: k.normalStrength ?? 0.45,
+          roughnessMul: k.roughnessMul ?? 1.0,
+          metalness: k.metalness ?? 0.02,
+          colorA: k.colorA ?? "#c92c2c",
+          colorB: k.colorB ?? "#f2f2f2",
+          sideSign: Math.sign(k.sideSign || 1),
+          texUvScaleU: Math.max(0.05, k.texUvScaleU ?? 1),
+          texUvScaleV: Math.max(0.05, k.texUvScaleV ?? 1),
+          texUvOffsetU: k.texUvOffsetU ?? 0,
+          texUvOffsetV: k.texUvOffsetV ?? 0,
+          texBrightness: k.texBrightness ?? 0,
+          texContrast: Math.max(0.05, k.texContrast ?? 1),
+          texSaturation: THREE.MathUtils.clamp(k.texSaturation ?? 1, 0, 3),
+        };
+        if (Array.isArray(k.splineBasePoints) && k.splineBasePoints.length >= 2) {
+          row.splineBasePoints = k.splineBasePoints.map((p) => ({ x: p.x, y: p.y, z: p.z }));
+          row.splineLateralOffset = k.splineLateralOffset ?? 0;
+        }
+        return row;
+      }),
     };
   }
 
@@ -1512,6 +1652,19 @@ export class SplineSystem {
         colorA: k.colorA ?? "#c92c2c",
         colorB: k.colorB ?? "#f2f2f2",
         sideSign: Math.sign(k.sideSign || 1),
+        splineBasePoints: Array.isArray(k.splineBasePoints) && k.splineBasePoints.length >= 2
+          ? k.splineBasePoints.map((p) => ({ x: p.x, y: p.y, z: p.z }))
+          : undefined,
+        splineLateralOffset: Array.isArray(k.splineBasePoints) && k.splineBasePoints.length >= 2
+          ? (k.splineLateralOffset ?? 0)
+          : undefined,
+        texUvScaleU: Math.max(0.05, k.texUvScaleU ?? 1),
+        texUvScaleV: Math.max(0.05, k.texUvScaleV ?? 1),
+        texUvOffsetU: k.texUvOffsetU ?? 0,
+        texUvOffsetV: k.texUvOffsetV ?? 0,
+        texBrightness: k.texBrightness ?? 0,
+        texContrast: Math.max(0.05, k.texContrast ?? 1),
+        texSaturation: THREE.MathUtils.clamp(k.texSaturation ?? 1, 0, 3),
         mesh: null,
       };
       this._buildKerbMesh(kerb);
