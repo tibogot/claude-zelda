@@ -69,6 +69,7 @@ import { BarrierStore } from "../core/barrier/barrierStore.js";
 import { BarrierSystem } from "../tools/barrier/barrierSystem.js";
 import { BarrierOverlay } from "../render/barrier/barrierOverlay.js";
 import { createFleurSystem, FLEUR_PRESETS, FLEUR_ALPHA_URLS } from "../../fleur-painter.js";
+import { createAmbientFxStore } from "../core/ambientfx/ambientFxStore.js";
 
 export async function startV2App() {
   const config = structuredClone(V2_CONFIG);
@@ -534,6 +535,7 @@ export async function startV2App() {
       markHeightTexDirty();
       treeStore.syncAllHeights(terrainStore);
       fleurSystem.syncHeights();
+      ambientFxStore.syncHeights();
       splineSystem?.syncGuardrailsToGround?.();
       splineSystem?.syncKerbsToGround?.();
       splineSystem?.syncLinearFeaturesToGround?.();
@@ -690,6 +692,33 @@ export async function startV2App() {
     fleurSystem.setWindSpeed(fp.windSpeed);
   }
 
+  // ── Ambient FX system ──
+  const ambientFxStore = createAmbientFxStore(
+    scene,
+    (x, z) => terrainStore.getWorldHeight(x, z),
+    "../textures/",
+  );
+  ambientFxStore.setFlapSpeed(toolState.ambientFx.flapSpeed);
+  ambientFxStore.setFlapAngle(toolState.ambientFx.flapAngle);
+  ambientFxStore.setGlideRatio(toolState.ambientFx.glideRatio);
+  ambientFxStore.setRingsVisible(false);
+
+  function syncAmbientFxUniforms() {
+    const afx = toolState.ambientFx;
+    ambientFxStore.setFlapSpeed(afx.flapSpeed);
+    ambientFxStore.setFlapAngle(afx.flapAngle);
+    ambientFxStore.setGlideRatio(afx.glideRatio);
+  }
+
+  function paintAmbientFxAt(wx, wz, erase) {
+    const afx = toolState.ambientFx;
+    if (erase) {
+      ambientFxStore.removeInBrush(wx, wz, afx.emitterRadius);
+    } else {
+      ambientFxStore.addInBrush(wx, wz, afx.emitterRadius, afx.effectType, afx.density);
+    }
+  }
+
   function paintFleurAt(wx, wz, erase) {
     const fp = toolState.fleur;
     const radius = toolState.brush.radius;
@@ -799,6 +828,12 @@ export async function startV2App() {
       if (ui?.waterFolder) ui.waterFolder.hidden = toolState.mode !== "water";
       if (ui?.barrierFolder) ui.barrierFolder.expanded = toolState.mode === "barrier";
       if (ui?.fleurFolder) ui.fleurFolder.hidden = toolState.mode !== "fleurs";
+      if (ui?.ambientFxFolder) ui.ambientFxFolder.hidden = toolState.mode !== "ambientfx";
+      if (toolState.mode === "ambientfx") {
+        ambientFxStore.setRingsVisible(toolState.ambientFx.showRings);
+      } else {
+        ambientFxStore.setRingsVisible(false);
+      }
       if (toolState.mode === "play") {
         playMode.enter();
         const tpEl = document.querySelector(".tp-dfwv");
@@ -1265,6 +1300,15 @@ export async function startV2App() {
     onFleurClear: () => {
       fleurSystem.clear();
     },
+    onAmbientFxFlapChanged: () => {
+      syncAmbientFxUniforms();
+    },
+    onAmbientFxRingsChanged: () => {
+      ambientFxStore.setRingsVisible(toolState.ambientFx.showRings && toolState.mode === "ambientfx");
+    },
+    onAmbientFxClear: () => {
+      ambientFxStore.clear();
+    },
     onSaveProject: () => {
       toolState._cliffExportData = () => cliffStore.exportData();
       toolState._propExportData = () => propStore.exportData();
@@ -1272,6 +1316,7 @@ export async function startV2App() {
       toolState._waterfallExportData = () => waterfallSystem.exportData();
       toolState._barrierExportData = () => barrierStore.exportData();
       toolState._fleurExportData = () => fleurSystem.getPositions();
+      toolState._ambientFxExportData = () => ambientFxStore.getEmitters();
       toolState._roadExportData = () => roadSystem.exportData();
       toolState._riverExportData = () => riverSystem.exportData();
       toolState._splineExportData = () => splineSystem.exportData();
@@ -1282,6 +1327,7 @@ export async function startV2App() {
       delete toolState._waterfallExportData;
       delete toolState._barrierExportData;
       delete toolState._fleurExportData;
+      delete toolState._ambientFxExportData;
       delete toolState._roadExportData;
       delete toolState._riverExportData;
       delete toolState._splineExportData;
@@ -1366,6 +1412,14 @@ export async function startV2App() {
           if (fi.windSpeed != null) fp.windSpeed = fi.windSpeed;
           syncFleurInteraction();
         }
+        // Restore ambient FX emitters
+        if (project.settings?.ambientFxEmitters && Array.isArray(project.settings.ambientFxEmitters)) {
+          ambientFxStore.setEmitters(project.settings.ambientFxEmitters);
+        } else {
+          ambientFxStore.clear();
+        }
+        syncAmbientFxUniforms();
+
         // Auto-reload tree presets (trunk GLBs + foliage) for slots that had them
         const presetLoads = [];
         for (let si = 0; si < toolState.treeSlots.length; si++) {
@@ -1605,7 +1659,7 @@ export async function startV2App() {
   }
 
   function isBrushMode() {
-    return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint" || toolState.mode === "grass" || toolState.mode === "cliffGrass" || toolState.mode === "barrier" || toolState.mode === "fleurs" || (toolState.mode === "props" && toolState.props.placementMode === "paint");
+    return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint" || toolState.mode === "grass" || toolState.mode === "cliffGrass" || toolState.mode === "barrier" || toolState.mode === "fleurs" || toolState.mode === "ambientfx" || (toolState.mode === "props" && toolState.props.placementMode === "paint");
   }
 
   function updateBrushPreviewFromPick(hit) {
@@ -1615,7 +1669,7 @@ export async function startV2App() {
       syncRampMarker();
       return;
     }
-    const r = toolState.brush.radius;
+    const r = toolState.mode === "ambientfx" ? toolState.ambientFx.emitterRadius : toolState.brush.radius;
     const nudge = 0.012 + Math.min(0.08, r * 0.0004);
     const useCircle = toolState.brush.previewShape === "circle";
     if (useCircle) {
@@ -1806,6 +1860,8 @@ export async function startV2App() {
       barrierSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "fleurs") {
       paintFleurAt(hit.point.x, hit.point.z, toolState.fleur.erase || event.shiftKey);
+    } else if (toolState.mode === "ambientfx") {
+      paintAmbientFxAt(hit.point.x, hit.point.z, toolState.ambientFx.erase || event.shiftKey);
     }
   });
 
@@ -1844,6 +1900,8 @@ export async function startV2App() {
       barrierSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "fleurs") {
       paintFleurAt(hit.point.x, hit.point.z, toolState.fleur.erase || event.shiftKey);
+    } else if (toolState.mode === "ambientfx") {
+      paintAmbientFxAt(hit.point.x, hit.point.z, toolState.ambientFx.erase || event.shiftKey);
     }
   });
 
@@ -2095,6 +2153,13 @@ export async function startV2App() {
       if (ui?.fleurFolder) ui.fleurFolder.hidden = toolState.mode !== "fleurs";
       ui?.pane.refresh();
       updateBrushPreviewFromPick(null);
+    } else if (event.code === "KeyX" && !ctrl) {
+      event.preventDefault();
+      toolState.mode = toolState.mode === "ambientfx" ? "view" : "ambientfx";
+      if (ui?.ambientFxFolder) ui.ambientFxFolder.hidden = toolState.mode !== "ambientfx";
+      ambientFxStore.setRingsVisible(toolState.mode === "ambientfx" && toolState.ambientFx.showRings);
+      ui?.pane.refresh();
+      updateBrushPreviewFromPick(null);
     }
   });
 
@@ -2175,6 +2240,9 @@ export async function startV2App() {
 
     fleurSystem.update(playMode.active ? playMode.playerPos : focusPos, _appTimeSec);
 
+    const afx = toolState.ambientFx;
+    ambientFxStore.update(focusPos, _appTimeSec, afx.windX, afx.windZ, afx.windStrength);
+
     syncBarrierOverlay();
 
     // Water: advance time + lake reflections
@@ -2241,6 +2309,7 @@ export async function startV2App() {
       propInstancer.dispose();
       transformControls.dispose();
       grassManager.dispose();
+      ambientFxStore.clear();
       roadSystem.dispose();
       riverSystem.dispose();
       splineSystem.dispose();

@@ -311,6 +311,8 @@ function extractSerializableSettings(toolState) {
     waterfallItems: toolState._waterfallExportData?.() ?? null,
     barrier: { ...toolState.barrier },
     barrierChunks: toolState._barrierExportData?.() ?? null,
+    ambientFx: { ...toolState.ambientFx },
+    ambientFxEmitters: toolState._ambientFxExportData?.() ?? null,
     fleur: { ...toolState.fleur, colorA: { ...toolState.fleur.colorA }, colorB: { ...toolState.fleur.colorB } },
     fleurPositions: toolState._fleurExportData?.() ?? null,
     fleurInteraction: {
@@ -371,6 +373,7 @@ export function applySettings(toolState, settings) {
   if (settings.water) Object.assign(toolState.water, settings.water);
   if (settings.waterfall) Object.assign(toolState.waterfall, settings.waterfall);
   if (settings.barrier) Object.assign(toolState.barrier, settings.barrier);
+  if (settings.ambientFx) Object.assign(toolState.ambientFx, settings.ambientFx);
   if (settings.fleur) {
     const src = settings.fleur;
     const dst = toolState.fleur;
