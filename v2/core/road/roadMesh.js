@@ -50,7 +50,14 @@ function roadSurfaceY(x, z, baseOffset, getWorldHeight, adaptiveLift, slopeLift,
 }
 
 export function generateRoadGeometry(curve, width, segments, heightOffset, getWorldHeight, otherCurves, opts = null) {
-  const pts = curve.getSpacedPoints(segments);
+  const startT = Math.max(0, Math.min(1, opts?.startT ?? 0));
+  const endT = Math.max(startT, Math.min(1, opts?.endT ?? 1));
+  const arcOffset = Math.max(0, opts?.arcOffset ?? 0);
+  const pts = [];
+  for (let i = 0; i <= segments; i++) {
+    const localT = segments > 0 ? i / segments : 0;
+    pts.push(curve.getPointAt(startT + (endT - startT) * localT));
+  }
   const arcLen = [0];
   for (let i = 1; i <= segments; i++) {
     arcLen.push(arcLen[i - 1] + pts[i].distanceTo(pts[i - 1]));
@@ -94,7 +101,7 @@ export function generateRoadGeometry(curve, width, segments, heightOffset, getWo
       roadSurfaceY(rx, rz, heightOffset, getWorldHeight, adaptiveLift, slopeLift, liftMax, slopeEps),
       rz,
     );
-    uvs.push(arcLen[i], 0, arcLen[i], 1);
+    uvs.push(arcOffset + arcLen[i], 0, arcOffset + arcLen[i], 1);
 
     let jL = 0, jR = 0;
     if (otherPolylines) {

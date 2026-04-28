@@ -1114,6 +1114,19 @@ export async function startV2App() {
       ui?.pane.refresh();
     },
     onRoadSelectedYChanged: () => roadSystem.setSelectedPointY(toolState.road.selectedPointY),
+    onRoadStyleSectionChanged: () => {
+      roadSystem._clampActiveStyleSection();
+      roadSystem.loadActiveStyle();
+      ui?.pane.refresh();
+    },
+    onRoadNewStyleSection: () => {
+      roadSystem.createStyleSectionAtSelected();
+      ui?.pane.refresh();
+    },
+    onRoadDeleteStyleSection: () => {
+      roadSystem.deleteActiveStyleSection();
+      ui?.pane.refresh();
+    },
     onRoadFlattenTerrain: () => {
       roadSystem.flattenTerrainUnderRoads();
       roadSystem.rebuildAllMeshes();
@@ -1126,6 +1139,7 @@ export async function startV2App() {
     },
     onRoadActiveIndexChanged: () => {
       roadSystem._clampActive();
+      toolState.road.activeStyleSectionIndex = 0;
       roadSystem.selectedIdx = -1;
       roadSystem.loadActiveStyle();
       roadSystem._rebuildVisual();
@@ -2383,7 +2397,7 @@ export async function startV2App() {
       ui.refreshPerf();
       hudLastMs = now;
     }
-    if (toolState.road.enhanced && roadSystem.segments.length > 0 && toolState.road.reflectStrength > 0) {
+    if (roadSystem.hasReflectiveRoads()) {
       roadReflection.setReflectY(roadSystem.getAverageY());
       const roadMeshes = roadSystem.getRoadMeshes();
       roadReflection.render(roadMeshes);

@@ -29,6 +29,12 @@ export function createRoadUniforms(params) {
     // double-lane highway
     uDoubleCenterLine: uniform(params.doubleCenterLine ? 1 : 0),
     uCenterLineGap: uniform(params.centerLineGap ?? 0.012),
+    uCenterLeftEnabled: uniform(params.centerLeftEnabled !== false ? 1 : 0),
+    uCenterLeftColor: uniform(new THREE.Color(params.centerLeftColor ?? params.centerLineColor ?? "#f0c040")),
+    uCenterLeftDashed: uniform(params.centerLeftDashed ? 1 : 0),
+    uCenterRightEnabled: uniform(params.centerRightEnabled !== false ? 1 : 0),
+    uCenterRightColor: uniform(new THREE.Color(params.centerRightColor ?? params.centerLineColor ?? "#f0c040")),
+    uCenterRightDashed: uniform(params.centerRightDashed ? 1 : 0),
     uLaneLines: uniform(params.laneLines ? 1 : 0),
     uLaneLineWidth: uniform(params.laneLineWidth ?? 0.004),
     uLaneDashScale: uniform(params.laneDashScale ?? 0.3),
@@ -85,6 +91,8 @@ function _buildRoadColor(diffuseTex, u) {
     uCenterLine, uCenterLineColor, uCenterLineWidth, uCenterLineSoftness,
     uCenterLineDashed, uCenterLineDashScale,
     uDoubleCenterLine, uCenterLineGap,
+    uCenterLeftEnabled, uCenterLeftColor, uCenterLeftDashed,
+    uCenterRightEnabled, uCenterRightColor, uCenterRightDashed,
     uLaneLines, uLaneLineWidth, uLaneDashScale,
     uColorTint, uColorBrightness,
     uAsphaltDark, uAsphaltLight, uGrainScale, uGrainStrength,
@@ -142,13 +150,21 @@ function _buildRoadColor(diffuseTex, u) {
     const rightCenterPos = float(0.5).add(halfGap).add(cw.mul(0.5));
     const distLeftCenter = abs(v.sub(leftCenterPos));
     const distRightCenter = abs(v.sub(rightCenterPos));
-    const doubleCenterBand = max(
-      float(1).sub(smoothstep(cw.mul(0.5), cw.mul(0.5).add(cs), distLeftCenter)),
-      float(1).sub(smoothstep(cw.mul(0.5), cw.mul(0.5).add(cs), distRightCenter)),
+    const leftCenterBand = float(1).sub(smoothstep(cw.mul(0.5), cw.mul(0.5).add(cs), distLeftCenter));
+    const rightCenterBand = float(1).sub(smoothstep(cw.mul(0.5), cw.mul(0.5).add(cs), distRightCenter));
+    const leftCenterDashMask = mix(
+      float(1),
+      step(float(0.5), fract(arcLen.mul(uCenterLineDashScale))),
+      uCenterLeftDashed,
     );
-
-    const centerBand = mix(singleCenterBand.mul(singleDashMask), doubleCenterBand, uDoubleCenterLine);
-    const centerMask = centerBand.mul(uCenterLine);
+    const rightCenterDashMask = mix(
+      float(1),
+      step(float(0.5), fract(arcLen.mul(uCenterLineDashScale))),
+      uCenterRightDashed,
+    );
+    const singleCenterMask = singleCenterBand.mul(singleDashMask).mul(uCenterLine).mul(float(1).sub(uDoubleCenterLine));
+    const leftCenterMask = leftCenterBand.mul(leftCenterDashMask).mul(uCenterLeftEnabled).mul(uCenterLine).mul(uDoubleCenterLine);
+    const rightCenterMask = rightCenterBand.mul(rightCenterDashMask).mul(uCenterRightEnabled).mul(uCenterLine).mul(uDoubleCenterLine);
 
     // lane separator lines (dashed white, between edge line and center)
     const lw = max(uLaneLineWidth, float(0.0001));
@@ -167,10 +183,12 @@ function _buildRoadColor(diffuseTex, u) {
     const junctionMask = float(1).sub(step(float(0.2), junction));
     const edgeMask = max(leftLine, rightLine).mul(junctionMask).clamp(float(0), float(1));
 
-    // compose: base → edge lines (white) → lane lines (white) → center lines (yellow)
+    // compose: base → edge lines → lane lines → single/double center markings
     const result = mix(base, uLineColor, edgeMask);
     const withLanes = mix(result, uLineColor, laneMask.mul(junctionMask).clamp(float(0), float(1)));
-    return mix(withLanes, uCenterLineColor, centerMask.mul(junctionMask).clamp(float(0), float(1))).saturate();
+    const withSingleCenter = mix(withLanes, uCenterLineColor, singleCenterMask.mul(junctionMask).clamp(float(0), float(1)));
+    const withLeftCenter = mix(withSingleCenter, uCenterLeftColor, leftCenterMask.mul(junctionMask).clamp(float(0), float(1)));
+    return mix(withLeftCenter, uCenterRightColor, rightCenterMask.mul(junctionMask).clamp(float(0), float(1))).saturate();
   })();
 }
 
@@ -331,6 +349,12 @@ export function syncRoadUniforms(uniforms, params) {
   // double-lane highway
   uniforms.uDoubleCenterLine.value = params.doubleCenterLine ? 1 : 0;
   uniforms.uCenterLineGap.value = params.centerLineGap ?? 0.012;
+  uniforms.uCenterLeftEnabled.value = params.centerLeftEnabled !== false ? 1 : 0;
+  uniforms.uCenterLeftColor.value.set(params.centerLeftColor ?? params.centerLineColor ?? "#f0c040");
+  uniforms.uCenterLeftDashed.value = params.centerLeftDashed ? 1 : 0;
+  uniforms.uCenterRightEnabled.value = params.centerRightEnabled !== false ? 1 : 0;
+  uniforms.uCenterRightColor.value.set(params.centerRightColor ?? params.centerLineColor ?? "#f0c040");
+  uniforms.uCenterRightDashed.value = params.centerRightDashed ? 1 : 0;
   uniforms.uLaneLines.value = params.laneLines ? 1 : 0;
   uniforms.uLaneLineWidth.value = params.laneLineWidth ?? 0.004;
   uniforms.uLaneDashScale.value = params.laneDashScale ?? 0.3;

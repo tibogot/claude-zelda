@@ -14,6 +14,8 @@ const STYLE_KEYS = [
   "centerLine", "centerLineColor", "centerLineWidth", "centerLineSoftness",
   "centerLineDashed", "centerLineDashScale",
   "doubleCenterLine", "centerLineGap",
+  "centerLeftEnabled", "centerLeftColor", "centerLeftDashed",
+  "centerRightEnabled", "centerRightColor", "centerRightDashed",
   "laneLines", "laneLineWidth", "laneDashScale",
   "colorTint", "colorBrightness",
   "asphaltDark", "asphaltLight", "grainScale", "grainStrength",
@@ -41,7 +43,35 @@ function mergeStyleWithDefaults(style, rp) {
       if (k in style) merged[k] = style[k];
     }
   }
+  if (merged.centerLeftColor == null) merged.centerLeftColor = merged.centerLineColor;
+  if (merged.centerRightColor == null) merged.centerRightColor = merged.centerLineColor;
   return merged;
+}
+
+function normalizeStyleSpans(rawSpans, fallbackStyle, rp) {
+  const source = Array.isArray(rawSpans) && rawSpans.length > 0
+    ? rawSpans
+    : [{ start: 0, style: fallbackStyle }];
+  const spans = source
+    .map((span) => ({
+      start: Math.max(0, Math.min(1, Number(span.start) || 0)),
+      style: mergeStyleWithDefaults(span.style ?? fallbackStyle, rp),
+      mesh: null,
+      uniforms: null,
+      mat: null,
+    }))
+    .sort((a, b) => a.start - b.start);
+  spans[0].start = 0;
+  const deduped = [];
+  for (const span of spans) {
+    const prev = deduped[deduped.length - 1];
+    if (prev && Math.abs(prev.start - span.start) < 1e-4) {
+      prev.style = span.style;
+    } else {
+      deduped.push(span);
+    }
+  }
+  return deduped;
 }
 
 export class RoadSystem {
@@ -81,7 +111,9 @@ export class RoadSystem {
       loaded++;
       if (loaded >= total) {
         this._matReady = true;
-        for (const seg of this.segments) this._rebuildSegMaterial(seg);
+        for (const seg of this.segments) {
+          for (const span of seg.styleSpans ?? []) this._rebuildSpanMaterial(span);
+        }
         this._rebuildVisual();
       }
     };
@@ -109,17 +141,17 @@ export class RoadSystem {
     return { uniforms, mat };
   }
 
-  _rebuildSegMaterial(seg) {
-    if (seg.mat) seg.mat.dispose();
-    const { uniforms, mat } = this._createSegMaterial(seg.style);
-    seg.uniforms = uniforms;
-    seg.mat = mat;
+  _rebuildSpanMaterial(span) {
+    if (span.mat) span.mat.dispose();
+    const { uniforms, mat } = this._createSegMaterial(span.style);
+    span.uniforms = uniforms;
+    span.mat = mat;
   }
 
   _createSegment(style) {
-    const s = { ...style };
-    const { uniforms, mat } = this._createSegMaterial(s);
-    return { points: [], mesh: null, style: s, uniforms, mat };
+    const styleSpans = normalizeStyleSpans(null, style, this.toolState.road);
+    for (const span of styleSpans) this._rebuildSpanMaterial(span);
+    return { points: [], meshes: [], styleSpans };
   }
 
   _activeIdx() {
@@ -135,6 +167,26 @@ export class RoadSystem {
     this.toolState.road.activeRoadIndex = Math.max(0, Math.min(this.toolState.road.activeRoadIndex | 0, this.segments.length - 1));
   }
 
+  _clampActiveStyleSection() {
+    const seg = this.segments[this._activeIdx()];
+    const count = seg?.styleSpans?.length ?? 0;
+    if (count === 0) {
+      this.toolState.road.activeStyleSectionIndex = 0;
+      return;
+    }
+    this.toolState.road.activeStyleSectionIndex = Math.max(
+      0,
+      Math.min(this.toolState.road.activeStyleSectionIndex | 0, count - 1),
+    );
+  }
+
+  _activeStyleSpan() {
+    const seg = this.segments[this._activeIdx()];
+    if (!seg) return null;
+    this._clampActiveStyleSection();
+    return seg.styleSpans[this.toolState.road.activeStyleSectionIndex | 0] ?? null;
+  }
+
   _pushUndo() {
     this.undoStack.push(this._snapshot());
     this.redoStack.length = 0;
@@ -145,9 +197,13 @@ export class RoadSystem {
     return {
       segments: this.segments.map(s => ({
         points: s.points.map(p => ({ x: p.x, y: p.y, z: p.z })),
-        style: { ...s.style },
+        styleSpans: (s.styleSpans ?? []).map(span => ({
+          start: span.start,
+          style: { ...span.style },
+        })),
       })),
       activeRoadIndex: this.toolState.road.activeRoadIndex,
+      activeStyleSectionIndex: this.toolState.road.activeStyleSectionIndex,
       selectedIdx: this.selectedIdx,
     };
   }
@@ -155,19 +211,20 @@ export class RoadSystem {
   _restore(snap) {
     this._disposeAllFull();
     this.segments = snap.segments.map(s => {
-      const style = mergeStyleWithDefaults(s.style, this.toolState.road);
-      const { uniforms, mat } = this._createSegMaterial(style);
+      const fallbackStyle = mergeStyleWithDefaults(s.style, this.toolState.road);
+      const styleSpans = normalizeStyleSpans(s.styleSpans, fallbackStyle, this.toolState.road);
+      for (const span of styleSpans) this._rebuildSpanMaterial(span);
       return {
         points: s.points.map(p => new THREE.Vector3(p.x, p.y, p.z)),
-        mesh: null,
-        style,
-        uniforms,
-        mat,
+        meshes: [],
+        styleSpans,
       };
     });
     this.toolState.road.activeRoadIndex = snap.activeRoadIndex;
+    this.toolState.road.activeStyleSectionIndex = snap.activeStyleSectionIndex ?? 0;
     this.selectedIdx = snap.selectedIdx;
     this._clampActive();
+    this._clampActiveStyleSection();
     this._rebuildVisual();
   }
 
@@ -263,6 +320,7 @@ export class RoadSystem {
     this._pushUndo();
     this.segments.push(this._createSegment(extractStyle(this.toolState.road)));
     this.toolState.road.activeRoadIndex = this.segments.length - 1;
+    this.toolState.road.activeStyleSectionIndex = 0;
     this.selectedIdx = -1;
     this._rebuildVisual();
   }
@@ -276,6 +334,8 @@ export class RoadSystem {
     this.selectedIdx = -1;
     this.dragging = false;
     this._clampActive();
+    this._clampActiveStyleSection();
+    if (this.segments.length > 0) this.loadActiveStyle();
     this._rebuildVisual();
   }
 
@@ -288,25 +348,84 @@ export class RoadSystem {
   }
 
   saveActiveStyle() {
-    const ai = this._activeIdx();
-    if (ai < 0) return;
-    const seg = this.segments[ai];
+    const span = this._activeStyleSpan();
+    if (!span) return;
     const rp = this.toolState.road;
-    for (const k of STYLE_KEYS) seg.style[k] = rp[k];
+    for (const k of STYLE_KEYS) span.style[k] = rp[k];
   }
 
   loadActiveStyle() {
-    const ai = this._activeIdx();
-    if (ai < 0) return;
-    applyStyle(this.toolState.road, this.segments[ai].style);
+    const span = this._activeStyleSpan();
+    if (!span) return;
+    applyStyle(this.toolState.road, span.style);
   }
 
   syncMaterial() {
+    const span = this._activeStyleSpan();
+    if (!span?.uniforms) return;
+    syncRoadUniforms(span.uniforms, this.toolState.road);
+    span.mat.needsUpdate = true;
+  }
+
+  _selectedPointStart01() {
+    const ai = this._activeIdx();
+    if (ai < 0 || this.selectedIdx < 0) return null;
+    const pts = this.segments[ai].points;
+    if (this.selectedIdx <= 0 || this.selectedIdx >= pts.length) return this.selectedIdx <= 0 ? 0 : 1;
+    let total = 0;
+    let before = 0;
+    for (let i = 1; i < pts.length; i++) {
+      const d = pts[i].distanceTo(pts[i - 1]);
+      total += d;
+      if (i <= this.selectedIdx) before += d;
+    }
+    if (total <= 1e-6) return 0;
+    return Math.max(0, Math.min(1, before / total));
+  }
+
+  createStyleSectionAtSelected() {
+    const ai = this._activeIdx();
+    const start = this._selectedPointStart01();
+    if (ai < 0 || start == null || start <= 1e-4 || start >= 0.9999) return;
+    this._pushUndo();
+    const seg = this.segments[ai];
+    const styleSpans = normalizeStyleSpans(seg.styleSpans, extractStyle(this.toolState.road), this.toolState.road);
+    let insertIdx = styleSpans.findIndex(span => Math.abs(span.start - start) < 1e-4);
+    if (insertIdx >= 0) {
+      styleSpans[insertIdx].style = extractStyle(this.toolState.road);
+    } else {
+      styleSpans.push({
+        start,
+        style: extractStyle(this.toolState.road),
+        mesh: null,
+        uniforms: null,
+        mat: null,
+      });
+      styleSpans.sort((a, b) => a.start - b.start);
+      insertIdx = styleSpans.findIndex(span => Math.abs(span.start - start) < 1e-4);
+    }
+    for (const span of seg.styleSpans ?? []) this._disposeSpanFull(span);
+    seg.styleSpans = styleSpans;
+    for (const span of seg.styleSpans) this._rebuildSpanMaterial(span);
+    this.toolState.road.activeStyleSectionIndex = Math.max(0, insertIdx);
+    this.loadActiveStyle();
+    this._rebuildVisual();
+  }
+
+  deleteActiveStyleSection() {
     const ai = this._activeIdx();
     if (ai < 0) return;
     const seg = this.segments[ai];
-    syncRoadUniforms(seg.uniforms, this.toolState.road);
-    seg.mat.needsUpdate = true;
+    if (!seg.styleSpans || seg.styleSpans.length <= 1) return;
+    this._pushUndo();
+    this._clampActiveStyleSection();
+    const idx = this.toolState.road.activeStyleSectionIndex | 0;
+    const [removed] = seg.styleSpans.splice(idx, 1);
+    this._disposeSpanFull(removed);
+    if (idx === 0) seg.styleSpans[0].start = 0;
+    this._clampActiveStyleSection();
+    this.loadActiveStyle();
+    this._rebuildVisual();
   }
 
   flattenTerrainUnderRoads() {
@@ -364,6 +483,7 @@ export class RoadSystem {
       const seg = this.segments[i];
       const curve = curves[i];
       if (!curve) continue;
+      const totalLen = Math.max(1e-6, curve.getLength());
       const otherCurves = [];
       const ptsI = this.segments[i].points;
       for (let j = 0; j < curves.length; j++) {
@@ -372,23 +492,42 @@ export class RoadSystem {
         if (_sharesEndpoint(ptsI, ptsJ)) continue;
         otherCurves.push({ curve: curves[j], segments: rp.segments });
       }
-      const geo = generateRoadGeometry(
-        curve,
-        rp.width,
-        rp.segments,
-        rp.heightOffset,
-        this.getWorldHeight,
-        otherCurves,
-        {
-          adaptiveLift: rp.adaptiveLift,
-          slopeLift: rp.slopeLift,
-          liftMax: rp.liftMax,
-        },
-      );
-      seg.mesh = new THREE.Mesh(geo, seg.mat);
-      seg.mesh.receiveShadow = true;
-      seg.mesh.renderOrder = 3;
-      this.scene.add(seg.mesh);
+      if (!seg.styleSpans || seg.styleSpans.length === 0) {
+        seg.styleSpans = normalizeStyleSpans(null, extractStyle(this.toolState.road), this.toolState.road);
+      }
+      seg.styleSpans.sort((a, b) => a.start - b.start);
+      seg.styleSpans[0].start = 0;
+      const spans = seg.styleSpans;
+      seg.meshes = [];
+      for (let si = 0; si < spans.length; si++) {
+        const span = spans[si];
+        if (!span.mat) this._rebuildSpanMaterial(span);
+        const startT = Math.max(0, Math.min(1, span.start));
+        const endT = Math.max(startT, Math.min(1, spans[si + 1]?.start ?? 1));
+        if (endT - startT < 1e-4) continue;
+        const spanSegments = Math.max(4, Math.round(rp.segments * (endT - startT)));
+        const geo = generateRoadGeometry(
+          curve,
+          rp.width,
+          spanSegments,
+          rp.heightOffset,
+          this.getWorldHeight,
+          otherCurves,
+          {
+            adaptiveLift: rp.adaptiveLift,
+            slopeLift: rp.slopeLift,
+            liftMax: rp.liftMax,
+            startT,
+            endT,
+            arcOffset: totalLen * startT,
+          },
+        );
+        span.mesh = new THREE.Mesh(geo, span.mat);
+        span.mesh.receiveShadow = true;
+        span.mesh.renderOrder = 3;
+        seg.meshes.push(span.mesh);
+        this.scene.add(span.mesh);
+      }
     }
   }
 
@@ -456,16 +595,33 @@ export class RoadSystem {
   }
 
   _disposeSegMesh(seg) {
-    if (seg.mesh) {
-      this.scene.remove(seg.mesh);
-      seg.mesh.geometry.dispose();
-      seg.mesh = null;
+    for (const span of seg.styleSpans ?? []) {
+      if (span.mesh) {
+        this.scene.remove(span.mesh);
+        span.mesh.geometry.dispose();
+        span.mesh = null;
+      }
     }
+    seg.meshes = [];
   }
 
   _disposeSegFull(seg) {
     this._disposeSegMesh(seg);
-    if (seg.mat) { seg.mat.dispose(); seg.mat = null; }
+    for (const span of seg.styleSpans ?? []) this._disposeSpanFull(span);
+  }
+
+  _disposeSpanFull(span) {
+    if (!span) return;
+    if (span.mesh) {
+      this.scene.remove(span.mesh);
+      span.mesh.geometry.dispose();
+      span.mesh = null;
+    }
+    if (span.mat) {
+      span.mat.dispose();
+      span.mat = null;
+    }
+    span.uniforms = null;
   }
 
   _disposeAllMeshes() {
@@ -493,7 +649,7 @@ export class RoadSystem {
   }
 
   getRoadMeshes() {
-    return this.segments.filter(s => s.mesh).map(s => s.mesh);
+    return this.segments.flatMap(s => s.meshes ?? []);
   }
 
   getSegmentsSnapshot() {
@@ -513,35 +669,46 @@ export class RoadSystem {
     return count > 0 ? sum / count : 0;
   }
 
+  hasReflectiveRoads() {
+    return this.segments.some(seg =>
+      (seg.styleSpans ?? []).some(span => span.style.enhanced && (span.style.reflectStrength ?? 0) > 0),
+    );
+  }
+
   updateReflectVP(matrix) {
     for (const seg of this.segments) {
-      if (seg.uniforms) seg.uniforms.uReflectVP.value.copy(matrix);
+      for (const span of seg.styleSpans ?? []) {
+        if (span.uniforms) span.uniforms.uReflectVP.value.copy(matrix);
+      }
     }
   }
 
   exportData() {
     return this.segments.map(s => ({
       points: s.points.map(p => ({ x: p.x, y: p.y, z: p.z })),
-      style: { ...s.style },
+      styleSpans: (s.styleSpans ?? []).map(span => ({
+        start: span.start,
+        style: { ...span.style },
+      })),
     }));
   }
 
   importData(data) {
     this._disposeAllFull();
     this.segments = data.map(s => {
-      const style = mergeStyleWithDefaults(s.style, this.toolState.road);
-      const { uniforms, mat } = this._createSegMaterial(style);
+      const fallbackStyle = mergeStyleWithDefaults(s.style, this.toolState.road);
+      const styleSpans = normalizeStyleSpans(s.styleSpans, fallbackStyle, this.toolState.road);
+      for (const span of styleSpans) this._rebuildSpanMaterial(span);
       return {
         points: Array.isArray(s.points) ? s.points.map(p => new THREE.Vector3(p.x, p.y, p.z)) : [],
-        mesh: null,
-        style,
-        uniforms,
-        mat,
+        meshes: [],
+        styleSpans,
       };
     });
     this.selectedIdx = -1;
     this.dragging = false;
     this._clampActive();
+    this._clampActiveStyleSection();
     if (this.segments.length > 0) this.loadActiveStyle();
     this._rebuildVisual();
   }

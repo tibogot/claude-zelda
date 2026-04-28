@@ -7,6 +7,9 @@ export function addRoadFolder(pane, toolState, opts) {
     onRoadSnapY,
     onRoadSelectedYChanged,
     onRoadActiveIndexChanged,
+    onRoadStyleSectionChanged,
+    onRoadNewStyleSection,
+    onRoadDeleteStyleSection,
     onRoadFlattenTerrain,
     onRoadApplyStabilityPreset,
   } = opts;
@@ -18,6 +21,9 @@ export function addRoadFolder(pane, toolState, opts) {
   folder.addBinding(rp, "activeRoadIndex", { label: "Active road #", min: 0, max: 63, step: 1 }).on("change", () => onRoadActiveIndexChanged?.());
   folder.addButton({ title: "New road" }).on("click", () => onRoadNewRoad?.());
   folder.addButton({ title: "Delete active road" }).on("click", () => onRoadDeleteActive?.());
+  folder.addBinding(rp, "activeStyleSectionIndex", { label: "Style section #", min: 0, max: 63, step: 1 }).on("change", () => onRoadStyleSectionChanged?.());
+  folder.addButton({ title: "New style from selected point" }).on("click", () => onRoadNewStyleSection?.());
+  folder.addButton({ title: "Delete style section" }).on("click", () => onRoadDeleteStyleSection?.());
   folder.addButton({ title: "Delete selected point" }).on("click", () => onRoadDeleteSelected?.());
   folder.addBinding(rp, "selectedPointY", { label: "Point Y", min: -50, max: 200, step: 0.1 }).on("change", () => onRoadSelectedYChanged?.());
   folder.addButton({ title: "Snap selected Y to terrain" }).on("click", () => onRoadSnapY?.());
@@ -47,6 +53,12 @@ export function addRoadFolder(pane, toolState, opts) {
   const highwayFolder = centerFolder.addFolder({ title: "Highway lanes", expanded: false });
   highwayFolder.addBinding(rp, "doubleCenterLine", { label: "Double center" }).on("change", onRoadChanged);
   highwayFolder.addBinding(rp, "centerLineGap", { label: "Center gap", min: 0.002, max: 0.05, step: 0.001 }).on("change", onRoadChanged);
+  highwayFolder.addBinding(rp, "centerLeftEnabled", { label: "Left center on" }).on("change", onRoadChanged);
+  highwayFolder.addBinding(rp, "centerLeftColor", { label: "Left center color", view: "color" }).on("change", onRoadChanged);
+  highwayFolder.addBinding(rp, "centerLeftDashed", { label: "Left center dashed" }).on("change", onRoadChanged);
+  highwayFolder.addBinding(rp, "centerRightEnabled", { label: "Right center on" }).on("change", onRoadChanged);
+  highwayFolder.addBinding(rp, "centerRightColor", { label: "Right center color", view: "color" }).on("change", onRoadChanged);
+  highwayFolder.addBinding(rp, "centerRightDashed", { label: "Right center dashed" }).on("change", onRoadChanged);
   highwayFolder.addBinding(rp, "laneLines", { label: "Lane separators" }).on("change", onRoadChanged);
   highwayFolder.addBinding(rp, "laneLineWidth", { label: "Lane line width", min: 0.001, max: 0.02, step: 0.001 }).on("change", onRoadChanged);
   highwayFolder.addBinding(rp, "laneDashScale", { label: "Lane dash density", min: 0.005, max: 2, step: 0.005 }).on("change", onRoadChanged);
