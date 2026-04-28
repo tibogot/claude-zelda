@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { generateRoadGeometry } from "../../core/road/roadMesh.js";
 import { createRoadUniforms, createRoadMaterial, syncRoadUniforms } from "../../core/road/roadMaterial.js";
+import { createDecalMaterial } from "./roadDecalMaterial.js";
 
 const DIFFUSE_TEX_PATH = "../textures/asphalt_track/asphalt_track_diff_2k.jpg";
 const ARM_TEX_PATH = "../textures/asphalt_track/asphalt_track_arm_2k.jpg";
@@ -87,6 +88,7 @@ export class FullRoadSystem {
     this._reflectTex = reflectTex ?? null;
     this.terrainStore = terrainStore ?? null;
     this.chunkStream = chunkStream ?? null;
+    this.transformControls = null;
 
     this.nodes = [];
     this.edges = [];
@@ -103,12 +105,25 @@ export class FullRoadSystem {
     this._nextAccessoryId = 1;
     this._paintingAccessory = null; // Active painting state
 
+    // Road decals: { id, type, x, z, rotation, width, length, params }
+    this.decals = [];
+    this._nextDecalId = 1;
+    this._decalPreview = null;
+    this.selectedDecalId = null;
+    this._selectedDecalMesh = null;
+    this._decalProxy = new THREE.Object3D();
+    this._decalProxy.name = "FullRoadDecalProxy";
+    scene.add(this._decalProxy); // Must be in scene graph for TransformControls
+
     this.meshGroup = new THREE.Group();
     this.meshGroup.name = "FullRoadMeshes";
+    this.decalGroup = new THREE.Group();
+    this.decalGroup.name = "FullRoadDecals";
     scene.add(this.meshGroup);
     this.accessoryGroup = new THREE.Group();
     this.accessoryGroup.name = "FullRoadAccessories";
     scene.add(this.accessoryGroup);
+    scene.add(this.decalGroup);
     this.handleGroup = new THREE.Group();
     this.handleGroup.name = "FullRoadHandles";
     scene.add(this.handleGroup);
@@ -1091,6 +1106,7 @@ export class FullRoadSystem {
   _rebuildVisual() {
     this.rebuildAllMeshes();
     this.rebuildAllGuardrails();
+    this.rebuildAllDecals();
     this._rebuildHandles();
   }
 
@@ -1912,6 +1928,261 @@ export class FullRoadSystem {
   deleteGuardrail(id) { return this.deleteAccessory(id, "guardrail"); }
   clearAllGuardrails() { this.clearAllAccessories("guardrail"); }
 
+  // ─────────────────────────────────────────────────────────────────────────────
+  // ROAD DECALS SYSTEM
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  _findRoadSurfacePoint(pos) {
+    const paths = this._buildRoadPaths();
+    const p = this.toolState.fullRoad;
+    const halfWidth = p.width * 0.5;
+    
+    let best = null;
+    
+    for (let pathIdx = 0; pathIdx < paths.length; pathIdx++) {
+      const path = paths[pathIdx];
+      const curve = this._curveForPath(path);
+      if (!curve) continue;
+      
+      const samples = Math.max(64, path.nodeIds.length * 32);
+      const pts = curve.getSpacedPoints(samples);
+      
+      for (let i = 0; i < pts.length; i++) {
+        const t = i / (pts.length - 1);
+        const pt = pts[i];
+        const dx = pos.x - pt.x;
+        const dz = pos.z - pt.z;
+        const distSq = dx * dx + dz * dz;
+        
+        // Check if within road width
+        if (distSq < halfWidth * halfWidth && (!best || distSq < best.distSq)) {
+          const tangent = curve.getTangentAt(t);
+          const rotation = Math.atan2(tangent.x, tangent.z);
+          best = {
+            distSq,
+            pathIdx,
+            t,
+            x: pt.x,
+            y: pt.y + p.heightOffset + 0.05,
+            z: pt.z,
+            rotation,
+          };
+        }
+      }
+    }
+    
+    return best;
+  }
+
+  updateDecalPreview(pos) {
+    this._clearDecalPreview();
+    
+    const p = this.toolState.fullRoad;
+    const hit = this._findRoadSurfacePoint(pos);
+    
+    // Use road surface point if found, otherwise fallback to terrain click position
+    const x = hit ? hit.x : pos.x;
+    const y = hit ? hit.y : pos.y + p.heightOffset + 0.05;
+    const z = hit ? hit.z : pos.z;
+    const rotation = p.decalSnapToRoad && hit 
+      ? hit.rotation 
+      : p.decalRotation * Math.PI / 180;
+    
+    const mesh = this._createDecalMesh(
+      p.decalType,
+      x, y, z,
+      rotation,
+      p.decalWidth,
+      p.decalLength,
+      p.decalColor,
+      p.decalStripeCount,
+      true
+    );
+    
+    if (mesh) {
+      mesh.name = "DecalPreview";
+      this.decalGroup.add(mesh);
+      this._decalPreview = mesh;
+    }
+  }
+
+  _clearDecalPreview() {
+    if (this._decalPreview) {
+      this.decalGroup.remove(this._decalPreview);
+      if (this._decalPreview.geometry) this._decalPreview.geometry.dispose();
+      if (this._decalPreview.material) this._decalPreview.material.dispose();
+      this._decalPreview = null;
+    }
+  }
+
+  placeDecal(pos) {
+    const p = this.toolState.fullRoad;
+    const hit = this._findRoadSurfacePoint(pos);
+    
+    // Use road surface point if found, otherwise fallback to terrain click position
+    const x = hit ? hit.x : pos.x;
+    const y = hit ? hit.y : pos.y + p.heightOffset + 0.05;
+    const z = hit ? hit.z : pos.z;
+    const rotation = p.decalSnapToRoad && hit 
+      ? hit.rotation 
+      : p.decalRotation * Math.PI / 180;
+    
+    const decal = {
+      id: this._nextDecalId++,
+      type: p.decalType,
+      x, y, z,
+      rotation,
+      width: p.decalWidth,
+      length: p.decalLength,
+      color: p.decalColor,
+      stripeCount: p.decalStripeCount,
+    };
+    
+    this.decals.push(decal);
+    this._clearDecalPreview();
+    this.rebuildAllDecals();
+    
+    return decal;
+  }
+
+  deleteDecal(id) {
+    const idx = this.decals.findIndex(d => d.id === id);
+    if (idx < 0) return false;
+    this.decals.splice(idx, 1);
+    this.rebuildAllDecals();
+    return true;
+  }
+
+  clearAllDecals() {
+    this.decals.length = 0;
+    this._clearDecalPreview();
+    this.rebuildAllDecals();
+  }
+
+  rebuildAllDecals() {
+    // Clear existing decals (except preview)
+    const toRemove = this.decalGroup.children.filter(c => c.name !== "DecalPreview");
+    for (const child of toRemove) {
+      this.decalGroup.remove(child);
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) child.material.dispose();
+    }
+    
+    // Rebuild all decals
+    for (const decal of this.decals) {
+      const mesh = this._createDecalMesh(
+        decal.type,
+        decal.x,
+        decal.y,
+        decal.z,
+        decal.rotation,
+        decal.width,
+        decal.length,
+        decal.color,
+        decal.stripeCount,
+        false
+      );
+      
+      if (mesh) {
+        mesh.userData.decalId = decal.id;
+        this.decalGroup.add(mesh);
+      }
+    }
+  }
+
+  _createDecalMesh(type, x, y, z, rotation, width, length, color, stripeCount, isPreview) {
+    const material = createDecalMaterial(type, { color, stripeCount }, isPreview);
+    
+    const geometry = new THREE.PlaneGeometry(width, length);
+    const mesh = new THREE.Mesh(geometry, material);
+    
+    // Position slightly above the road surface to avoid z-fighting
+    mesh.position.set(x, y + 0.02, z);
+    mesh.rotation.x = -Math.PI / 2; // Lay flat
+    mesh.rotation.z = rotation;
+    mesh.renderOrder = 15; // Higher than road (10)
+    
+    return mesh;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // DECAL SELECTION & TRANSFORM
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  pickDecal(raycaster) {
+    const meshes = this.decalGroup.children.filter(c => c.name !== "DecalPreview" && c.isMesh);
+    const hits = raycaster.intersectObjects(meshes, false);
+    if (hits.length > 0) {
+      const decalId = hits[0].object.userData.decalId;
+      return this.decals.find(d => d.id === decalId) || null;
+    }
+    return null;
+  }
+
+  _findDecalMesh(decalId) {
+    return this.decalGroup.children.find(c => c.userData.decalId === decalId);
+  }
+
+  selectDecal(decalId) {
+    const decal = this.decals.find(d => d.id === decalId);
+    if (!decal) return false;
+
+    this.selectedDecalId = decalId;
+    this._selectedDecalMesh = this._findDecalMesh(decalId);
+    
+    if (!this._selectedDecalMesh) return false;
+    
+    // Attach transform controls directly to the mesh
+    if (this.transformControls) {
+      this.transformControls.attach(this._selectedDecalMesh);
+      this.transformControls.setMode(this.toolState.fullRoad.decalTransformMode || "translate");
+      this.transformControls.enabled = true;
+      this.transformControls.visible = true;
+    }
+    
+    return true;
+  }
+
+  deselectDecal() {
+    this.selectedDecalId = null;
+    this._selectedDecalMesh = null;
+    if (this.transformControls) {
+      this.transformControls.detach();
+      this.transformControls.enabled = false;
+      this.transformControls.visible = false;
+    }
+  }
+
+  handleDecalTransformChange() {
+    // Nothing needed during drag - mesh is directly attached to controls
+  }
+
+  handleDecalTransformEnd() {
+    if (this.selectedDecalId == null || !this._selectedDecalMesh) return;
+    
+    const decal = this.decals.find(d => d.id === this.selectedDecalId);
+    if (!decal) return;
+    
+    // Save final position from mesh to data
+    decal.x = this._selectedDecalMesh.position.x;
+    decal.y = this._selectedDecalMesh.position.y - 0.02; // Remove render offset
+    decal.z = this._selectedDecalMesh.position.z;
+    decal.rotation = this._selectedDecalMesh.rotation.z;
+  }
+
+  deleteSelectedDecal() {
+    if (this.selectedDecalId == null) return false;
+    const success = this.deleteDecal(this.selectedDecalId);
+    if (success) {
+      this.deselectDecal();
+    }
+    return success;
+  }
+
+  setTransformControls(tc) {
+    this.transformControls = tc;
+  }
+
   exportData() {
     const serializeAccessories = (arr) => arr.map(a => ({
       id: a.id,
@@ -1935,10 +2206,23 @@ export class FullRoadSystem {
       kerbs: serializeAccessories(this.kerbs),
       barriers: serializeAccessories(this.barriers),
       fences: serializeAccessories(this.fences),
+      decals: this.decals.map(d => ({
+        id: d.id,
+        type: d.type,
+        x: d.x,
+        y: d.y,
+        z: d.z,
+        rotation: d.rotation,
+        width: d.width,
+        length: d.length,
+        color: d.color,
+        stripeCount: d.stripeCount,
+      })),
       selectedNodeId: this.selectedNodeId,
       nextNodeId: this._nextNodeId,
       nextEdgeId: this._nextEdgeId,
       nextAccessoryId: this._nextAccessoryId,
+      nextDecalId: this._nextDecalId,
     };
   }
 
@@ -1982,6 +2266,23 @@ export class FullRoadSystem {
     ].map(a => a.id);
     this._nextAccessoryId = Math.max(data?.nextAccessoryId ?? 1, Math.max(0, ...allAccessoryIds) + 1);
     
+    // Import decals
+    this.decals = Array.isArray(data?.decals)
+      ? data.decals.map(d => ({
+        id: Number(d.id),
+        type: d.type,
+        x: Number(d.x),
+        y: Number(d.y),
+        z: Number(d.z),
+        rotation: Number(d.rotation),
+        width: Number(d.width),
+        length: Number(d.length),
+        color: d.color,
+        stripeCount: Number(d.stripeCount),
+      })).filter(d => Number.isFinite(d.id))
+      : [];
+    this._nextDecalId = Math.max(data?.nextDecalId ?? 1, Math.max(0, ...this.decals.map(d => d.id)) + 1);
+    
     this.undoStack.length = 0;
     this.redoStack.length = 0;
     this._rebuildVisual();
@@ -1992,14 +2293,26 @@ export class FullRoadSystem {
     this._clearGroup(this.meshGroup);
     this._clearGroup(this.handleGroup);
     this._clearAccessoryGroup();
+    this._clearDecalGroup();
     this.scene.remove(this.meshGroup);
     this.scene.remove(this.handleGroup);
     this.scene.remove(this.accessoryGroup);
+    this.scene.remove(this.decalGroup);
+    this.scene.remove(this._decalProxy);
     if (this._roadMat) this._roadMat.dispose();
     if (this._junctionMat) this._junctionMat.dispose();
     this._lineMat.dispose();
     this._junctionLineMat.dispose();
     this._junctionCenterLineMat.dispose();
+  }
+
+  _clearDecalGroup() {
+    while (this.decalGroup.children.length) {
+      const child = this.decalGroup.children[0];
+      this.decalGroup.remove(child);
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) child.material.dispose();
+    }
   }
 
   _clearAccessoryGroup() {

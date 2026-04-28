@@ -12,6 +12,12 @@ export function addFullRoadFolder(pane, toolState, opts) {
     onAccessoryTypeChanged,
     onAccessoryParamsChanged,
     onAccessoryClearAll,
+    onDecalModeToggle,
+    onDecalTypeChanged,
+    onDecalParamsChanged,
+    onDecalClearAll,
+    onDecalTransformModeChanged,
+    onDecalDeleteSelected,
   } = opts;
   const rp = toolState.fullRoad;
   const folder = pane.addFolder({ title: "Full Road", expanded: false });
@@ -111,6 +117,38 @@ export function addFullRoadFolder(pane, toolState, opts) {
   
   // Clear buttons
   accFolder.addButton({ title: "Clear all accessories" }).on("click", () => onAccessoryClearAll?.());
+
+  // Road Decals (markings on road surface)
+  const decalFolder = folder.addFolder({ title: "Road Decals", expanded: false });
+  decalFolder.addBinding(rp, "decalMode", { label: "Decal mode" }).on("change", () => onDecalModeToggle?.());
+  decalFolder.addBinding(rp, "decalTransformMode", {
+    label: "Gizmo mode",
+    options: { Translate: "translate", Rotate: "rotate" },
+  }).on("change", () => onDecalTransformModeChanged?.());
+  decalFolder.addButton({ title: "Delete selected decal" }).on("click", () => onDecalDeleteSelected?.());
+  decalFolder.addBinding(rp, "decalType", {
+    label: "Type",
+    options: {
+      "Zebra Crossing": "zebraCrossing",
+      "Ladder Crossing": "ladderCrossing",
+      "Stop Line": "stopLine",
+      "Arrow ↑": "arrowStraight",
+      "Arrow ←": "arrowLeft",
+      "Arrow →": "arrowRight",
+      "Arrow ↑←": "arrowStraightLeft",
+      "Arrow ↑→": "arrowStraightRight",
+      "Give Way △": "giveWay",
+      "Speed Circle ○": "speedCircle",
+      "Parking Lines": "parkingLines",
+    },
+  }).on("change", () => onDecalTypeChanged?.());
+  decalFolder.addBinding(rp, "decalWidth", { label: "Width", min: 1, max: 20, step: 0.5 }).on("change", () => onDecalParamsChanged?.());
+  decalFolder.addBinding(rp, "decalLength", { label: "Length", min: 1, max: 20, step: 0.5 }).on("change", () => onDecalParamsChanged?.());
+  decalFolder.addBinding(rp, "decalColor", { label: "Color", view: "color" }).on("change", () => onDecalParamsChanged?.());
+  decalFolder.addBinding(rp, "decalStripeCount", { label: "Stripe count", min: 2, max: 20, step: 1 }).on("change", () => onDecalParamsChanged?.());
+  decalFolder.addBinding(rp, "decalSnapToRoad", { label: "Snap rotation" }).on("change", () => onDecalParamsChanged?.());
+  decalFolder.addBinding(rp, "decalRotation", { label: "Manual rotation", min: 0, max: 360, step: 5 }).on("change", () => onDecalParamsChanged?.());
+  decalFolder.addButton({ title: "Clear all decals" }).on("click", () => onDecalClearAll?.());
 
   return folder;
 }

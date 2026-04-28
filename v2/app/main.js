@@ -685,6 +685,7 @@ export async function startV2App() {
   transformControls.enabled = false;
   transformControls.visible = false;
   scene.add(transformControls.getHelper());
+  fullRoadSystem.setTransformControls(transformControls);
   transformControls.addEventListener("change", () => {
     if (toolState.mode === "cliffs" && cliffInstancer.hasSelection) {
       cliffSystem.handleTransformChange();
@@ -696,6 +697,9 @@ export async function startV2App() {
       const dd = decalSystem.decals[decalSystem.selectedIndex];
       if (dd && !dd.soloMesh) decalSystem.handleTransformChange();
     }
+    if (toolState.mode === "fullRoad" && fullRoadSystem.selectedDecalId != null) {
+      fullRoadSystem.handleDecalTransformChange();
+    }
   });
   transformControls.addEventListener("mouseDown", () => {
     controls.enabled = false;
@@ -705,6 +709,7 @@ export async function startV2App() {
     if (toolState.mode === "cliffs") cliffSystem.handleTransformEnd();
     if (toolState.mode === "props") propSystem.handleTransformEnd();
     if (toolState.mode === "decals") decalSystem.handleTransformEnd();
+    if (toolState.mode === "fullRoad") fullRoadSystem.handleDecalTransformEnd();
   });
 
   // ── Water system ──────────────────────────────────────────────────────────
@@ -895,6 +900,12 @@ export async function startV2App() {
         if (decalSystem.selectedIndex >= 0) {
           decalSystem.selectByIndex(decalSystem.selectedIndex);
         }
+      }
+      if (toolState.mode !== "fullRoad") {
+        fullRoadSystem.deselectDecal();
+        fullRoadSystem._clearDecalPreview();
+      } else if (toolState.fullRoad.decalMode && fullRoadSystem.selectedDecalId != null) {
+        transformControls.setMode(toolState.fullRoad.decalTransformMode || "translate");
       }
       if (toolState.mode !== "spline") {
         splineSystem.dragging = false;
@@ -1225,6 +1236,33 @@ export async function startV2App() {
     },
     onAccessoryClearAll: () => {
       fullRoadSystem.clearAllAccessories();
+      ui?.pane.refresh();
+    },
+    onDecalModeToggle: () => {
+      if (!toolState.fullRoad.decalMode) {
+        fullRoadSystem._clearDecalPreview();
+        fullRoadSystem.deselectDecal();
+      }
+      ui?.pane.refresh();
+    },
+    onDecalTransformModeChanged: () => {
+      if (fullRoadSystem.selectedDecalId != null) {
+        transformControls.setMode(toolState.fullRoad.decalTransformMode);
+      }
+    },
+    onDecalDeleteSelected: () => {
+      fullRoadSystem.deleteSelectedDecal();
+      ui?.pane.refresh();
+    },
+    onDecalTypeChanged: () => {
+      ui?.pane.refresh();
+    },
+    onDecalParamsChanged: () => {
+      fullRoadSystem.rebuildAllDecals();
+      ui?.pane.refresh();
+    },
+    onDecalClearAll: () => {
+      fullRoadSystem.clearAllDecals();
       ui?.pane.refresh();
     },
     onRiverChanged: () => {
@@ -2092,6 +2130,29 @@ export async function startV2App() {
       updatePointer(event);
       raycaster.setFromCamera(pointerNdc, camera);
       
+      // Decal placement/selection mode
+      if (toolState.fullRoad.decalMode) {
+        // Don't interfere with gizmo dragging
+        if (transformControls.dragging) return;
+        
+        // First try to pick an existing decal
+        const pickedDecal = fullRoadSystem.pickDecal(raycaster);
+        if (pickedDecal) {
+          fullRoadSystem.selectDecal(pickedDecal.id);
+          ui?.pane.refresh();
+          return;
+        }
+
+        // No decal clicked - place a new one
+        const hit = pickTerrain(event);
+        if (hit) {
+          fullRoadSystem.deselectDecal(); // Deselect any selected decal
+          fullRoadSystem.placeDecal(hit.point);
+          ui?.pane.refresh();
+        }
+        return;
+      }
+      
       // Accessory painting mode (guardrails, kerbs, barriers, fences)
       const accType = toolState.fullRoad.accessoryType;
       const isPaintMode = accType && (
@@ -2228,6 +2289,13 @@ export async function startV2App() {
       const hit = pickTerrain(event);
       if (hit) fullRoadSystem.continueAccessoryPaint(hit.point);
       return;
+    }
+    // Decal preview on hover
+    if (toolState.mode === "fullRoad" && toolState.fullRoad.decalMode) {
+      const hit = pickTerrain(event);
+      if (hit) {
+        fullRoadSystem.updateDecalPreview(hit.point);
+      }
     }
     if (toolState.mode === "river" && riverSystem.dragging && riverSystem.selectedIdx >= 0) {
       const hit = pickTerrain(event);

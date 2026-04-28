@@ -453,6 +453,16 @@ export function createToolState() {
       fenceColor: "#5a5a5a",
       // Active accessory type for painting
       accessoryType: "guardrail",
+      // Road decals
+      decalMode: false,
+      decalType: "zebraCrossing",
+      decalWidth: 4.0,
+      decalLength: 3.0,
+      decalColor: "#ffffff",
+      decalStripeCount: 8,
+      decalRotation: 0,
+      decalSnapToRoad: true,
+      decalTransformMode: "translate",
     },
     river: {
       width: 8,
