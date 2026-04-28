@@ -655,7 +655,7 @@ function clearBullets(pool) {
 }
 
 export class PlayMode {
-  constructor({ scene, camera, renderer, controls, getWorldHeight, getTerrainHeight, worldHalf, cliffBvh, isBarrierBlocked, smokeSettings, carSettings }) {
+  constructor({ scene, camera, renderer, controls, getWorldHeight, getTerrainHeight, worldHalf, cliffBvh, isBarrierBlocked, smokeSettings, carSettings, spawnSettings }) {
     this.scene = scene;
     this.camera = camera;
     this.renderer = renderer;
@@ -666,6 +666,7 @@ export class PlayMode {
     this.cliffBvh = cliffBvh || null;
     this.isBarrierBlocked = isBarrierBlocked || null;
     this.carSettings = carSettings || {};
+    this.spawnSettings = spawnSettings || null;
     this._playerGroundY = 0;
 
     this.active = false;
@@ -1340,9 +1341,19 @@ export class PlayMode {
 
     this.savedCamPos = this.camera.position.clone();
     this.savedTarget = this.controls.target.clone();
-    this.playerPos.set(this.controls.target.x, 0, this.controls.target.z);
+    const spawn = this.spawnSettings;
+    if (spawn?.enabled) {
+      const half = this.worldHalf || Infinity;
+      this.playerPos.set(
+        THREE.MathUtils.clamp(spawn.x || 0, -half, half),
+        0,
+        THREE.MathUtils.clamp(spawn.z || 0, -half, half),
+      );
+    } else {
+      this.playerPos.set(this.controls.target.x, 0, this.controls.target.z);
+    }
     this.playerPos.y = this.getWorldHeight(this.playerPos.x, this.playerPos.z);
-    this.camYaw = 0;
+    this.camYaw = spawn?.enabled ? THREE.MathUtils.degToRad(spawn.yawDeg || 0) : 0;
     this.camPitch = 0.35;
 
     this.capsule.visible = true;

@@ -286,6 +286,7 @@ function extractSerializableSettings(toolState) {
       height: { ...toolState.fog.height },
       distance: { ...toolState.fog.distance },
     },
+    playSpawn: { ...toolState.playSpawn },
     groundTsl: JSON.parse(JSON.stringify(toolState.groundTsl)),
     meadowTsl: JSON.parse(JSON.stringify(toolState.meadowTsl)),
     tslGroundUi: { ...toolState.tslGroundUi },
@@ -357,6 +358,7 @@ export function applySettings(toolState, settings) {
     if (settings.fog.height) Object.assign(toolState.fog.height, settings.fog.height);
     if (settings.fog.distance) Object.assign(toolState.fog.distance, settings.fog.distance);
   }
+  if (settings.playSpawn) Object.assign(toolState.playSpawn, settings.playSpawn);
   if (settings.groundTsl) Object.assign(toolState.groundTsl, JSON.parse(JSON.stringify(settings.groundTsl)));
   if (settings.meadowTsl) Object.assign(toolState.meadowTsl, JSON.parse(JSON.stringify(settings.meadowTsl)));
   if (settings.tslGroundUi) Object.assign(toolState.tslGroundUi, settings.tslGroundUi);

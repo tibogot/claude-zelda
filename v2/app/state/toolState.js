@@ -119,6 +119,13 @@ export function createToolState() {
       cameraChaseSpeed: 3.5,
       cameraDriftLag: 1.8,
     },
+    playSpawn: {
+      enabled: false,
+      x: 0,
+      y: 0,
+      z: 0,
+      yawDeg: 0,
+    },
     treePaint: {
       activeSlot: 0,
       density: 0.5,

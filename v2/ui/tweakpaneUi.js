@@ -39,6 +39,7 @@ export function createTweakpaneUi({
   onCliffSlotChanged,
   onGroundSlotChanged,
   onModeChanged,
+  onPlaySpawnChanged,
   onPaintLayersChanged,
   onPaintFill,
   onPaintClear,
@@ -167,6 +168,7 @@ export function createTweakpaneUi({
         "Ambient FX": "ambientfx",
         Barrier: "barrier",
         Hole: "hole",
+        "Play Spawn": "playSpawn",
         Play: "play",
       },
     })
@@ -202,6 +204,30 @@ export function createTweakpaneUi({
   carFolder.addBinding(car, "cameraHeight", { label: "cam height", min: 1, max: 10, step: 0.1 });
   carFolder.addBinding(car, "cameraChaseSpeed", { label: "cam chase", min: 0.5, max: 12, step: 0.1 });
   carFolder.addBinding(car, "cameraDriftLag", { label: "drift cam lag", min: 0, max: 5, step: 0.1 });
+
+  const spawnFolder = pane.addFolder({ title: "Play / Spawn", expanded: false });
+  const spawn = toolState.playSpawn;
+  spawnFolder.addBinding(spawn, "enabled", { label: "use spawn" }).on("change", () => onPlaySpawnChanged?.());
+  spawnFolder.addBinding(spawn, "x", { label: "x", readonly: true });
+  spawnFolder.addBinding(spawn, "y", { label: "y", readonly: true });
+  spawnFolder.addBinding(spawn, "z", { label: "z", readonly: true });
+  spawnFolder
+    .addBinding(spawn, "yawDeg", { label: "yaw", min: -180, max: 180, step: 1 })
+    .on("change", () => onPlaySpawnChanged?.());
+  spawnFolder
+    .addButton({ title: "Place by clicking terrain" })
+    .on("click", () => {
+      toolState.mode = "playSpawn";
+      onModeChanged?.();
+      pane.refresh();
+    });
+  spawnFolder
+    .addButton({ title: "Clear spawn" })
+    .on("click", () => {
+      spawn.enabled = false;
+      onPlaySpawnChanged?.();
+      pane.refresh();
+    });
 
   addTerrainAppearanceFolder(pane, toolState, {
     textureLibrary,

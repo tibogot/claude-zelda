@@ -802,6 +802,7 @@ export async function startV2App() {
     isBarrierBlocked: (wx, wz) => barrierStore.isBlocked(wx, wz),
     smokeSettings: toolState.playSmoke,
     carSettings: toolState.playCar,
+    spawnSettings: toolState.playSpawn,
   });
 
   const hud = createHud();
@@ -842,6 +843,9 @@ export async function startV2App() {
     onGroundSlotChanged: () => {
       disposeImageTexBundle();
       if (toolState.terrainSurface === "image") applyTerrainSurfaceFromToolState();
+    },
+    onPlaySpawnChanged: () => {
+      syncPlaySpawnMarker();
     },
     onModeChanged: () => {
       if (toolState.mode !== "sculpt") {
@@ -912,6 +916,7 @@ export async function startV2App() {
         if (tpEl) tpEl.style.display = "";
       }
       updateBrushPreviewFromPick(null);
+      syncPlaySpawnMarker();
     },
     onPaintLayersChanged: () => {
       invalidateSurfaceMaterials();
@@ -1601,6 +1606,7 @@ export async function startV2App() {
         chunkStream.update(camera.position);
         grassManager.syncUniforms(toolState.grass, sunDir);
         grassManager.rebuildGeometries(toolState.grass);
+        syncPlaySpawnMarker();
         ui?.pane.refresh();
         const treeCount = treeStore.totalCount;
         console.log(`[V2] Loaded project: ${project.terrainChunks.size} terrain chunks, ${project.splatChunks.size} splat chunks, ${treeCount} trees`);
@@ -1639,6 +1645,7 @@ export async function startV2App() {
     playMode.exit();
     const tpEl = document.querySelector(".tp-dfwv");
     if (tpEl) tpEl.style.display = "";
+    syncPlaySpawnMarker();
     ui?.pane.refresh();
   };
 
@@ -1686,8 +1693,29 @@ export async function startV2App() {
   brushRing.renderOrder = 5;
   scene.add(brushRing);
 
+  const spawnMarker = new THREE.Group();
+  const spawnRing = new THREE.Mesh(
+    new THREE.TorusGeometry(1.4, 0.055, 8, 72),
+    new THREE.MeshBasicMaterial({ color: 0x4de3ff }),
+  );
+  spawnRing.rotation.x = Math.PI * 0.5;
+  spawnRing.material.fog = false;
+  spawnRing.renderOrder = 6;
+  const spawnArrow = new THREE.Mesh(
+    new THREE.ConeGeometry(0.28, 1.1, 4),
+    new THREE.MeshBasicMaterial({ color: 0x4de3ff }),
+  );
+  spawnArrow.position.set(0, 1.15, -1.15);
+  spawnArrow.rotation.x = -Math.PI * 0.5;
+  spawnArrow.material.fog = false;
+  spawnArrow.renderOrder = 6;
+  spawnMarker.add(spawnRing, spawnArrow);
+  spawnMarker.visible = false;
+  scene.add(spawnMarker);
+
   roadReflection.excludeFromReflection(brushPreview);
   roadReflection.excludeFromReflection(brushRing);
+  roadReflection.excludeFromReflection(spawnMarker);
   roadReflection.excludeFromReflection(roadSystem.handleGroup);
   roadReflection.excludeFromReflection(riverSystem.handleGroup);
   roadReflection.excludeFromReflection(splineSystem.handleGroup);
@@ -1812,6 +1840,19 @@ export async function startV2App() {
     rampMarkerA.scale.setScalar(toolState.brush.radius);
   }
 
+  function syncPlaySpawnMarker() {
+    const spawn = toolState.playSpawn;
+    if (!spawn?.enabled || playMode.active) {
+      spawnMarker.visible = false;
+      return;
+    }
+    const y = terrainStore.getWorldHeight(spawn.x, spawn.z);
+    spawn.y = y;
+    spawnMarker.visible = true;
+    spawnMarker.position.set(spawn.x, y + 0.08, spawn.z);
+    spawnMarker.rotation.y = THREE.MathUtils.degToRad(spawn.yawDeg || 0);
+  }
+
   function isBrushMode() {
     return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint" || toolState.mode === "grass" || toolState.mode === "cliffGrass" || toolState.mode === "barrier" || toolState.mode === "hole" || toolState.mode === "fleurs" || toolState.mode === "ambientfx" || (toolState.mode === "props" && toolState.props.placementMode === "paint");
   }
@@ -1878,6 +1919,20 @@ export async function startV2App() {
   }
 
   renderer.domElement.addEventListener("pointerdown", (event) => {
+    if (toolState.mode === "playSpawn" && event.button === 0) {
+      const hit = pickTerrain(event);
+      if (hit) {
+        event.preventDefault();
+        const spawn = toolState.playSpawn;
+        spawn.enabled = true;
+        spawn.x = hit.point.x;
+        spawn.y = hit.point.y;
+        spawn.z = hit.point.z;
+        syncPlaySpawnMarker();
+        ui?.pane.refresh();
+      }
+      return;
+    }
     if (toolState.mode === "water" && event.button === 0) {
       if (transformControls.dragging) return;
       event.preventDefault();
