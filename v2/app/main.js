@@ -1215,6 +1215,18 @@ export async function startV2App() {
       fullRoadSystem._rebuildHandles();
       ui?.pane.refresh();
     },
+    onAccessoryTypeChanged: () => {
+      fullRoadSystem.cancelAccessoryPaint();
+      ui?.pane.refresh();
+    },
+    onAccessoryParamsChanged: () => {
+      fullRoadSystem.rebuildAllAccessories();
+      ui?.pane.refresh();
+    },
+    onAccessoryClearAll: () => {
+      fullRoadSystem.clearAllAccessories();
+      ui?.pane.refresh();
+    },
     onRiverChanged: () => {
       riverSystem.syncMaterial();
       riverSystem.rebuildAllMeshes();
@@ -2079,6 +2091,28 @@ export async function startV2App() {
       event.preventDefault();
       updatePointer(event);
       raycaster.setFromCamera(pointerNdc, camera);
+      
+      // Accessory painting mode (guardrails, kerbs, barriers, fences)
+      const accType = toolState.fullRoad.accessoryType;
+      const isPaintMode = accType && (
+        (accType === "guardrail" && toolState.fullRoad.guardrailMode) ||
+        (accType === "kerb" && toolState.fullRoad.kerbMode) ||
+        (accType === "barrier" && toolState.fullRoad.barrierMode) ||
+        (accType === "fence" && toolState.fullRoad.fenceMode)
+      );
+      // Also check if shift key is held as quick paint mode
+      if (isPaintMode || event.shiftKey) {
+        const hit = pickTerrain(event);
+        if (hit) {
+          const started = fullRoadSystem.startAccessoryPaint(hit.point, accType);
+          if (started) {
+            fullRoadSystem._paintingAccessoryActive = true;
+            controls.enabled = false;
+          }
+        }
+        return;
+      }
+      
       const picked = fullRoadSystem.pickNode(raycaster);
       if (picked != null) {
         fullRoadSystem.selectedNodeId = picked;
@@ -2190,6 +2224,11 @@ export async function startV2App() {
       if (hit) fullRoadSystem.moveSelected(hit.point);
       return;
     }
+    if (toolState.mode === "fullRoad" && fullRoadSystem._paintingAccessoryActive) {
+      const hit = pickTerrain(event);
+      if (hit) fullRoadSystem.continueAccessoryPaint(hit.point);
+      return;
+    }
     if (toolState.mode === "river" && riverSystem.dragging && riverSystem.selectedIdx >= 0) {
       const hit = pickTerrain(event);
       if (hit) riverSystem.moveSelected(hit.point);
@@ -2284,6 +2323,12 @@ export async function startV2App() {
     if (fullRoadSystem.dragging) {
       fullRoadSystem.dragging = false;
       controls.enabled = true;
+    }
+    if (fullRoadSystem._paintingAccessoryActive) {
+      fullRoadSystem._paintingAccessoryActive = false;
+      fullRoadSystem.endAccessoryPaint();
+      controls.enabled = true;
+      ui?.pane.refresh();
     }
     if (riverSystem.dragging) {
       riverSystem.dragging = false;

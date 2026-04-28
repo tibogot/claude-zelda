@@ -95,9 +95,20 @@ export class FullRoadSystem {
     this._nextNodeId = 1;
     this._nextEdgeId = 1;
 
+    // Road accessories: { id, pathIdx, side, startT, endT }
+    this.guardrails = [];
+    this.kerbs = [];
+    this.barriers = [];
+    this.fences = [];
+    this._nextAccessoryId = 1;
+    this._paintingAccessory = null; // Active painting state
+
     this.meshGroup = new THREE.Group();
     this.meshGroup.name = "FullRoadMeshes";
     scene.add(this.meshGroup);
+    this.accessoryGroup = new THREE.Group();
+    this.accessoryGroup.name = "FullRoadAccessories";
+    scene.add(this.accessoryGroup);
     this.handleGroup = new THREE.Group();
     this.handleGroup.name = "FullRoadHandles";
     scene.add(this.handleGroup);
@@ -1079,6 +1090,7 @@ export class FullRoadSystem {
 
   _rebuildVisual() {
     this.rebuildAllMeshes();
+    this.rebuildAllGuardrails();
     this._rebuildHandles();
   }
 
@@ -1124,7 +1136,792 @@ export class FullRoadSystem {
     if (this._junctionUniforms) this._junctionUniforms.uReflectVP.value.copy(matrix);
   }
 
+  // ─────────────────────────────────────────────────────────────────────────────
+  // GUARDRAIL PAINTING SYSTEM
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  _findNearestRoadEdgePoint(pos, maxDist = 20, edgeOffset = null) {
+    const paths = this._buildRoadPaths();
+    const p = this.toolState.fullRoad;
+    const halfWidth = p.width * 0.5;
+    const offset = edgeOffset ?? p.guardrailEdgeOffset ?? 0.3;
+    const lateralDist = halfWidth + offset;
+    
+    let best = null;
+    
+    for (let pathIdx = 0; pathIdx < paths.length; pathIdx++) {
+      const path = paths[pathIdx];
+      const curve = this._curveForPath(path);
+      if (!curve) continue;
+      
+      const samples = Math.max(64, path.nodeIds.length * 32);
+      const pts = curve.getSpacedPoints(samples);
+      
+      for (let i = 0; i < pts.length - 1; i++) {
+        const t = i / (pts.length - 1);
+        const tangent = curve.getTangentAt(t);
+        const perp = perpXZ(normalizeXZ(tangent));
+        
+        // Check both sides
+        for (const sideSign of [1, -1]) {
+          const edgeX = pts[i].x + perp.x * lateralDist * sideSign;
+          const edgeZ = pts[i].z + perp.z * lateralDist * sideSign;
+          const dx = pos.x - edgeX;
+          const dz = pos.z - edgeZ;
+          const distSq = dx * dx + dz * dz;
+          
+          if (distSq < maxDist * maxDist && (!best || distSq < best.distSq)) {
+            best = {
+              distSq,
+              pathIdx,
+              path,
+              curve,
+              t,
+              side: sideSign > 0 ? "left" : "right",
+              x: edgeX,
+              y: pts[i].y,
+              z: edgeZ,
+            };
+          }
+        }
+      }
+    }
+    
+    return best;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // GENERIC ACCESSORY PAINTING (guardrails, kerbs, barriers, fences)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  _getAccessoryEdgeOffset(type) {
+    const p = this.toolState.fullRoad;
+    switch (type) {
+      case "guardrail": return p.guardrailEdgeOffset ?? 0.3;
+      case "kerb": return p.kerbEdgeOffset ?? 0.0;
+      case "barrier": return p.barrierEdgeOffset ?? 0.5;
+      case "fence": return p.fenceEdgeOffset ?? 0.5;
+      default: return 0.3;
+    }
+  }
+
+  _getAccessorySide(type) {
+    const p = this.toolState.fullRoad;
+    switch (type) {
+      case "guardrail": return p.guardrailSide ?? "right";
+      case "kerb": return p.kerbSide ?? "right";
+      case "barrier": return p.barrierSide ?? "right";
+      case "fence": return p.fenceSide ?? "right";
+      default: return "right";
+    }
+  }
+
+  _getAccessoryArray(type) {
+    switch (type) {
+      case "guardrail": return this.guardrails;
+      case "kerb": return this.kerbs;
+      case "barrier": return this.barriers;
+      case "fence": return this.fences;
+      default: return this.guardrails;
+    }
+  }
+
+  startAccessoryPaint(pos, type = null) {
+    const p = this.toolState.fullRoad;
+    const accessoryType = type || p.accessoryType || "guardrail";
+    const edgeOffset = this._getAccessoryEdgeOffset(accessoryType);
+    const hit = this._findNearestRoadEdgePoint(pos, 20, edgeOffset);
+    if (!hit) return false;
+    
+    const side = this._getAccessorySide(accessoryType);
+    this._paintingAccessory = {
+      type: accessoryType,
+      pathIdx: hit.pathIdx,
+      side: side === "auto" ? hit.side : side,
+      startT: hit.t,
+      endT: hit.t,
+      curve: hit.curve,
+      path: hit.path,
+    };
+    
+    this._updateAccessoryPreview();
+    return true;
+  }
+
+  continueAccessoryPaint(pos) {
+    if (!this._paintingAccessory) return false;
+    
+    const pa = this._paintingAccessory;
+    const curve = pa.curve;
+    if (!curve) return false;
+    
+    const p = this.toolState.fullRoad;
+    const halfWidth = p.width * 0.5;
+    const edgeOffset = this._getAccessoryEdgeOffset(pa.type);
+    const lateralDist = halfWidth + edgeOffset;
+    const sideSign = pa.side === "left" ? 1 : -1;
+    
+    const samples = 128;
+    let bestT = pa.endT;
+    let bestDistSq = Infinity;
+    
+    for (let i = 0; i <= samples; i++) {
+      const t = i / samples;
+      const pt = curve.getPointAt(t);
+      const tangent = curve.getTangentAt(t);
+      const perp = perpXZ(normalizeXZ(tangent));
+      
+      const edgeX = pt.x + perp.x * lateralDist * sideSign;
+      const edgeZ = pt.z + perp.z * lateralDist * sideSign;
+      const dx = pos.x - edgeX;
+      const dz = pos.z - edgeZ;
+      const distSq = dx * dx + dz * dz;
+      
+      if (distSq < bestDistSq) {
+        bestDistSq = distSq;
+        bestT = t;
+      }
+    }
+    
+    pa.endT = bestT;
+    this._updateAccessoryPreview();
+    return true;
+  }
+
+  endAccessoryPaint() {
+    if (!this._paintingAccessory) return null;
+    
+    const pa = this._paintingAccessory;
+    const startT = Math.min(pa.startT, pa.endT);
+    const endT = Math.max(pa.startT, pa.endT);
+    
+    if (endT - startT < 0.02) {
+      this._paintingAccessory = null;
+      this._clearAccessoryPreview();
+      return null;
+    }
+    
+    const accessory = {
+      id: this._nextAccessoryId++,
+      type: pa.type,
+      pathIdx: pa.pathIdx,
+      side: pa.side,
+      startT,
+      endT,
+    };
+    
+    this._getAccessoryArray(pa.type).push(accessory);
+    this._paintingAccessory = null;
+    this._clearAccessoryPreview();
+    this.rebuildAllAccessories();
+    
+    return accessory;
+  }
+
+  cancelAccessoryPaint() {
+    this._paintingAccessory = null;
+    this._clearAccessoryPreview();
+  }
+
+  _updateAccessoryPreview() {
+    this._clearAccessoryPreview();
+    if (!this._paintingAccessory) return;
+    
+    const pa = this._paintingAccessory;
+    const mesh = this._buildAccessoryMesh(pa.type, pa.curve, pa.side, pa.startT, pa.endT, true);
+    if (mesh) {
+      mesh.name = "AccessoryPreview";
+      this.accessoryGroup.add(mesh);
+    }
+  }
+
+  _clearAccessoryPreview() {
+    const preview = this.accessoryGroup.children.find(c => c.name === "AccessoryPreview");
+    if (preview) {
+      this.accessoryGroup.remove(preview);
+      if (preview.traverse) {
+        preview.traverse(obj => {
+          if (obj.geometry) obj.geometry.dispose();
+          if (obj.material) obj.material.dispose();
+        });
+      }
+    }
+  }
+
+  rebuildAllAccessories() {
+    const toRemove = this.accessoryGroup.children.filter(c => c.name !== "AccessoryPreview");
+    for (const child of toRemove) {
+      this.accessoryGroup.remove(child);
+      if (child.traverse) {
+        child.traverse(obj => {
+          if (obj.geometry) obj.geometry.dispose();
+          if (obj.material) obj.material.dispose();
+        });
+      }
+    }
+    
+    const paths = this._buildRoadPaths();
+    
+    const buildAll = (arr, type) => {
+      for (const item of arr) {
+        const path = paths[item.pathIdx];
+        if (!path) continue;
+        const curve = this._curveForPath(path);
+        if (!curve) continue;
+        
+        const group = this._buildAccessoryMesh(type, curve, item.side, item.startT, item.endT, false);
+        if (group) {
+          group.userData.accessoryId = item.id;
+          group.userData.accessoryType = type;
+          this.accessoryGroup.add(group);
+        }
+      }
+    };
+    
+    buildAll(this.guardrails, "guardrail");
+    buildAll(this.kerbs, "kerb");
+    buildAll(this.barriers, "barrier");
+    buildAll(this.fences, "fence");
+  }
+
+  // Backwards compatibility
+  rebuildAllGuardrails() { this.rebuildAllAccessories(); }
+  startGuardrailPaint(pos) { return this.startAccessoryPaint(pos, "guardrail"); }
+  continueGuardrailPaint(pos) { return this.continueAccessoryPaint(pos); }
+  endGuardrailPaint() { return this.endAccessoryPaint(); }
+  cancelGuardrailPaint() { this.cancelAccessoryPaint(); }
+
+  _buildAccessoryMesh(type, curve, side, startT, endT, isPreview = false) {
+    switch (type) {
+      case "guardrail": return this._buildGuardrailMesh(curve, side, startT, endT, isPreview);
+      case "kerb": return this._buildKerbMesh(curve, side, startT, endT, isPreview);
+      case "barrier": return this._buildBarrierMesh(curve, side, startT, endT, isPreview);
+      case "fence": return this._buildFenceMesh(curve, side, startT, endT, isPreview);
+      default: return null;
+    }
+  }
+
+  _buildGuardrailMesh(curve, side, startT, endT, isPreview = false) {
+    const p = this.toolState.fullRoad;
+    const halfWidth = p.width * 0.5;
+    const edgeOffset = p.guardrailEdgeOffset ?? 0.3;
+    const lateralDist = halfWidth + edgeOffset;
+    const sideSign = side === "left" ? 1 : -1;
+    
+    // Sample points along the road edge
+    const tMin = Math.min(startT, endT);
+    const tMax = Math.max(startT, endT);
+    const segCount = Math.max(8, Math.ceil((tMax - tMin) * p.guardrailPathSegments));
+    
+    const edgePoints = [];
+    for (let i = 0; i <= segCount; i++) {
+      const t = tMin + (tMax - tMin) * (i / segCount);
+      const pt = curve.getPointAt(t);
+      const tangent = curve.getTangentAt(t);
+      const perp = perpXZ(normalizeXZ(tangent));
+      
+      const groundY = this.getWorldHeight(
+        pt.x + perp.x * lateralDist * sideSign,
+        pt.z + perp.z * lateralDist * sideSign,
+      );
+      
+      edgePoints.push(new THREE.Vector3(
+        pt.x + perp.x * lateralDist * sideSign,
+        groundY,
+        pt.z + perp.z * lateralDist * sideSign,
+      ));
+    }
+    
+    if (edgePoints.length < 2) return null;
+    
+    const railCurve = new THREE.CatmullRomCurve3(edgePoints, false, "catmullrom", 0.5);
+    
+    // Build guardrail profile (W-beam shape)
+    const height = p.guardrailHeight;
+    const depth = p.guardrailDepth;
+    const crown = p.guardrailCrownDepth;
+    const profile = [
+      { y: -0.5 * height, z: 0.5 },
+      { y: -0.16 * height, z: 0.35 },
+      { y: 0.0, z: -crown / Math.max(depth, 0.001) },
+      { y: 0.16 * height, z: 0.35 },
+      { y: 0.5 * height, z: 0.5 },
+    ];
+    
+    const railGeo = this._buildGuardrailProfileGeometry(railCurve, segCount, profile, depth);
+    const railMat = new THREE.MeshStandardMaterial({
+      color: p.guardrailColor ?? "#9aa0a8",
+      roughness: 0.45,
+      metalness: 0.85,
+      side: THREE.DoubleSide,
+      transparent: isPreview,
+      opacity: isPreview ? 0.6 : 1.0,
+    });
+    
+    const group = new THREE.Group();
+    const rail = new THREE.Mesh(railGeo, railMat);
+    rail.position.y = p.guardrailRailYOffset;
+    rail.castShadow = true;
+    rail.receiveShadow = true;
+    group.add(rail);
+    
+    // Add posts
+    const postMat = new THREE.MeshStandardMaterial({
+      color: p.guardrailColor ?? "#9aa0a8",
+      roughness: 0.55,
+      metalness: 0.7,
+      transparent: isPreview,
+      opacity: isPreview ? 0.6 : 1.0,
+    });
+    
+    const length = railCurve.getLength();
+    const postCount = Math.max(2, Math.floor(length / Math.max(0.5, p.guardrailPostSpacing)) + 1);
+    
+    for (let i = 0; i < postCount; i++) {
+      const t = i / Math.max(1, postCount - 1);
+      const pos = railCurve.getPointAt(t);
+      const tangent = railCurve.getTangentAt(t);
+      
+      const groundY = this.getWorldHeight(pos.x, pos.z) - p.guardrailPostSink;
+      const railBottomY = pos.y + p.guardrailRailYOffset - height * 0.5;
+      const postHeight = Math.max(p.guardrailPostHeight, railBottomY - groundY + p.guardrailThickness * 0.5);
+      
+      const postGeo = new THREE.BoxGeometry(p.guardrailPostWidth, postHeight, p.guardrailPostDepth);
+      const post = new THREE.Mesh(postGeo, postMat);
+      post.position.set(pos.x, groundY + postHeight * 0.5, pos.z);
+      post.rotation.y = Math.atan2(tangent.x, tangent.z);
+      post.castShadow = true;
+      post.receiveShadow = true;
+      group.add(post);
+    }
+    
+    return group;
+  }
+
+  _buildGuardrailProfileGeometry(curve, pathSegs, profile, depth) {
+    const segs = Math.max(8, pathSegs | 0);
+    const prof = Array.isArray(profile) && profile.length >= 2 ? profile : [
+      { y: -0.5, z: 0.5 },
+      { y: 0.5, z: 0.5 },
+    ];
+    const profLen = prof.length;
+    const pts = curve.getSpacedPoints(segs);
+    const totalVerts = (segs + 1) * profLen;
+    const positions = new Float32Array(totalVerts * 3);
+    const uvs = new Float32Array(totalVerts * 2);
+    const tangent = new THREE.Vector3();
+    const right = new THREE.Vector3();
+    const up = new THREE.Vector3(0, 1, 0);
+    
+    let vIdx = 0;
+    let uvIdx = 0;
+    let arcLen = 0;
+    
+    for (let i = 0; i <= segs; i++) {
+      if (i > 0) arcLen += pts[i].distanceTo(pts[i - 1]);
+      const t = i / segs;
+      tangent.copy(curve.getTangentAt(Math.min(t, 1)));
+      right.crossVectors(up, tangent).normalize();
+      
+      for (let j = 0; j < profLen; j++) {
+        const pj = prof[j];
+        const px = pts[i].x + right.x * pj.z * depth;
+        const py = pts[i].y + pj.y;
+        const pz = pts[i].z + right.z * pj.z * depth;
+        positions[vIdx++] = px;
+        positions[vIdx++] = py;
+        positions[vIdx++] = pz;
+        uvs[uvIdx++] = arcLen;
+        uvs[uvIdx++] = j / (profLen - 1);
+      }
+    }
+    
+    const indices = [];
+    for (let i = 0; i < segs; i++) {
+      for (let j = 0; j < profLen - 1; j++) {
+        const a = i * profLen + j;
+        const b = a + profLen;
+        const c = b + 1;
+        const d = a + 1;
+        indices.push(a, b, d);
+        indices.push(b, c, d);
+      }
+    }
+    
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+    geo.setIndex(indices);
+    geo.computeVertexNormals();
+    geo.computeBoundingSphere();
+    
+    return geo;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // KERB MESH (Racing curbs - red/white stripes)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  _buildKerbMesh(curve, side, startT, endT, isPreview = false) {
+    const p = this.toolState.fullRoad;
+    const halfWidth = p.width * 0.5;
+    const edgeOffset = p.kerbEdgeOffset ?? 0.0;
+    const lateralDist = halfWidth + edgeOffset;
+    const sideSign = side === "left" ? 1 : -1;
+    
+    const tMin = Math.min(startT, endT);
+    const tMax = Math.max(startT, endT);
+    
+    const kerbWidth = p.kerbWidth ?? 0.8;
+    const kerbHeight = p.kerbHeight ?? 0.12;
+    const lipHeight = p.kerbLipHeight ?? 0.03;
+    const squareSize = p.kerbStripeLength ?? 0.8; // Square size = stripe length
+    const colorA = new THREE.Color(p.kerbColorA ?? "#cc2222");
+    const colorB = new THREE.Color(p.kerbColorB ?? "#f2f2f2");
+    
+    // Sample path to get total length
+    const sampleCount = 128;
+    const pathPoints = [];
+    for (let i = 0; i <= sampleCount; i++) {
+      const t = tMin + (tMax - tMin) * (i / sampleCount);
+      pathPoints.push({ t, pt: curve.getPointAt(t) });
+    }
+    
+    // Calculate total arc length
+    let totalLength = 0;
+    for (let i = 1; i < pathPoints.length; i++) {
+      totalLength += pathPoints[i].pt.distanceTo(pathPoints[i - 1].pt);
+    }
+    
+    // Calculate number of squares
+    const squareCount = Math.max(1, Math.round(totalLength / squareSize));
+    const actualSquareLen = totalLength / squareCount;
+    
+    const group = new THREE.Group();
+    
+    // Build each square as a separate mesh (no color blending)
+    let currentLen = 0;
+    let squareIdx = 0;
+    let squareStartT = tMin;
+    
+    for (let i = 1; i < pathPoints.length; i++) {
+      const segLen = pathPoints[i].pt.distanceTo(pathPoints[i - 1].pt);
+      const prevLen = currentLen;
+      currentLen += segLen;
+      
+      // Check if we've completed a square
+      const targetLen = (squareIdx + 1) * actualSquareLen;
+      
+      if (currentLen >= targetLen || i === pathPoints.length - 1) {
+        // Interpolate to find exact end t
+        const overshoot = currentLen - targetLen;
+        const ratio = segLen > 0.001 ? Math.max(0, 1 - overshoot / segLen) : 1;
+        const squareEndT = pathPoints[i - 1].t + (pathPoints[i].t - pathPoints[i - 1].t) * ratio;
+        
+        if (i === pathPoints.length - 1) {
+          // Last segment - extend to end
+          this._buildKerbSquare(
+            group, curve, side, squareStartT, tMax,
+            lateralDist, kerbWidth, kerbHeight, lipHeight, sideSign,
+            squareIdx % 2 === 0 ? colorA : colorB, isPreview
+          );
+        } else {
+          this._buildKerbSquare(
+            group, curve, side, squareStartT, squareEndT,
+            lateralDist, kerbWidth, kerbHeight, lipHeight, sideSign,
+            squareIdx % 2 === 0 ? colorA : colorB, isPreview
+          );
+        }
+        
+        squareStartT = squareEndT;
+        squareIdx++;
+      }
+    }
+    
+    return group;
+  }
+  
+  _buildKerbSquare(group, curve, side, startT, endT, lateralDist, kerbWidth, kerbHeight, lipHeight, sideSign, color, isPreview) {
+    const segCount = Math.max(4, Math.ceil((endT - startT) * 40));
+    
+    const positions = [];
+    const indices = [];
+    
+    for (let i = 0; i <= segCount; i++) {
+      const t = startT + (endT - startT) * (i / segCount);
+      const pt = curve.getPointAt(t);
+      const tangent = curve.getTangentAt(t);
+      const perp = perpXZ(normalizeXZ(tangent));
+      
+      const groundY = this.getWorldHeight(
+        pt.x + perp.x * lateralDist * sideSign,
+        pt.z + perp.z * lateralDist * sideSign,
+      );
+      
+      const innerX = pt.x + perp.x * lateralDist * sideSign;
+      const innerZ = pt.z + perp.z * lateralDist * sideSign;
+      const outerX = pt.x + perp.x * (lateralDist + kerbWidth) * sideSign;
+      const outerZ = pt.z + perp.z * (lateralDist + kerbWidth) * sideSign;
+      
+      // 4 vertices: inner-bottom, inner-top, outer-top, outer-bottom
+      positions.push(innerX, groundY, innerZ);
+      positions.push(innerX, groundY + kerbHeight + lipHeight, innerZ);
+      positions.push(outerX, groundY + kerbHeight, outerZ);
+      positions.push(outerX, groundY, outerZ);
+    }
+    
+    // Build indices for quads
+    for (let i = 0; i < segCount; i++) {
+      const base = i * 4;
+      // Inner face (lip)
+      indices.push(base, base + 4, base + 1);
+      indices.push(base + 4, base + 5, base + 1);
+      // Top face
+      indices.push(base + 1, base + 5, base + 2);
+      indices.push(base + 5, base + 6, base + 2);
+      // Outer face
+      indices.push(base + 2, base + 6, base + 3);
+      indices.push(base + 6, base + 7, base + 3);
+    }
+    
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geo.setIndex(indices);
+    geo.computeVertexNormals();
+    
+    const mat = new THREE.MeshStandardMaterial({
+      color: color,
+      roughness: 0.6,
+      metalness: 0.0,
+      side: THREE.DoubleSide,
+      transparent: isPreview,
+      opacity: isPreview ? 0.6 : 1.0,
+      flatShading: true, // Sharp edges, no smoothing
+    });
+    
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    group.add(mesh);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // CONCRETE BARRIER MESH (Jersey barriers)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  _buildBarrierMesh(curve, side, startT, endT, isPreview = false) {
+    const p = this.toolState.fullRoad;
+    const halfWidth = p.width * 0.5;
+    const edgeOffset = p.barrierEdgeOffset ?? 0.5;
+    const lateralDist = halfWidth + edgeOffset;
+    const sideSign = side === "left" ? 1 : -1;
+    
+    const tMin = Math.min(startT, endT);
+    const tMax = Math.max(startT, endT);
+    const segCount = Math.max(16, Math.ceil((tMax - tMin) * 60));
+    
+    const height = p.barrierHeight ?? 0.85;
+    const topWidth = p.barrierTopWidth ?? 0.15;
+    const bottomWidth = p.barrierBottomWidth ?? 0.45;
+    
+    // Jersey barrier profile (trapezoidal with slight curves)
+    const profile = [
+      { y: 0, z: -bottomWidth * 0.5 },
+      { y: height * 0.3, z: -bottomWidth * 0.35 },
+      { y: height * 0.7, z: -topWidth * 0.6 },
+      { y: height, z: -topWidth * 0.5 },
+      { y: height, z: topWidth * 0.5 },
+      { y: height * 0.7, z: topWidth * 0.6 },
+      { y: height * 0.3, z: bottomWidth * 0.35 },
+      { y: 0, z: bottomWidth * 0.5 },
+    ];
+    
+    const edgePoints = [];
+    for (let i = 0; i <= segCount; i++) {
+      const t = tMin + (tMax - tMin) * (i / segCount);
+      const pt = curve.getPointAt(t);
+      const tangent = curve.getTangentAt(t);
+      const perp = perpXZ(normalizeXZ(tangent));
+      
+      const groundY = this.getWorldHeight(
+        pt.x + perp.x * lateralDist * sideSign,
+        pt.z + perp.z * lateralDist * sideSign,
+      );
+      
+      edgePoints.push(new THREE.Vector3(
+        pt.x + perp.x * lateralDist * sideSign,
+        groundY,
+        pt.z + perp.z * lateralDist * sideSign,
+      ));
+    }
+    
+    if (edgePoints.length < 2) return null;
+    
+    const barrierCurve = new THREE.CatmullRomCurve3(edgePoints, false, "catmullrom", 0.5);
+    const geo = this._buildGuardrailProfileGeometry(barrierCurve, segCount, profile, 1.0);
+    
+    const mat = new THREE.MeshStandardMaterial({
+      color: p.barrierColor ?? "#7d7d7d",
+      roughness: 0.85,
+      metalness: 0.0,
+      side: THREE.DoubleSide,
+      transparent: isPreview,
+      opacity: isPreview ? 0.6 : 1.0,
+    });
+    
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    
+    const group = new THREE.Group();
+    group.add(mesh);
+    return group;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // FENCE MESH (Posts + horizontal rails)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  _buildFenceMesh(curve, side, startT, endT, isPreview = false) {
+    const p = this.toolState.fullRoad;
+    const halfWidth = p.width * 0.5;
+    const edgeOffset = p.fenceEdgeOffset ?? 0.5;
+    const lateralDist = halfWidth + edgeOffset;
+    const sideSign = side === "left" ? 1 : -1;
+    
+    const tMin = Math.min(startT, endT);
+    const tMax = Math.max(startT, endT);
+    
+    const fenceHeight = p.fenceHeight ?? 1.5;
+    const postSpacing = p.fencePostSpacing ?? 2.5;
+    const postWidth = p.fencePostWidth ?? 0.06;
+    const postDepth = p.fencePostDepth ?? 0.04;
+    const railCount = p.fenceRailCount ?? 3;
+    const railThick = p.fenceRailThickness ?? 0.04;
+    
+    const edgePoints = [];
+    const segCount = Math.max(16, Math.ceil((tMax - tMin) * 60));
+    
+    for (let i = 0; i <= segCount; i++) {
+      const t = tMin + (tMax - tMin) * (i / segCount);
+      const pt = curve.getPointAt(t);
+      const tangent = curve.getTangentAt(t);
+      const perp = perpXZ(normalizeXZ(tangent));
+      
+      const groundY = this.getWorldHeight(
+        pt.x + perp.x * lateralDist * sideSign,
+        pt.z + perp.z * lateralDist * sideSign,
+      );
+      
+      edgePoints.push(new THREE.Vector3(
+        pt.x + perp.x * lateralDist * sideSign,
+        groundY,
+        pt.z + perp.z * lateralDist * sideSign,
+      ));
+    }
+    
+    if (edgePoints.length < 2) return null;
+    
+    const fenceCurve = new THREE.CatmullRomCurve3(edgePoints, false, "catmullrom", 0.5);
+    const length = fenceCurve.getLength();
+    
+    const mat = new THREE.MeshStandardMaterial({
+      color: p.fenceColor ?? "#5a5a5a",
+      roughness: 0.6,
+      metalness: 0.3,
+      transparent: isPreview,
+      opacity: isPreview ? 0.6 : 1.0,
+    });
+    
+    const group = new THREE.Group();
+    
+    // Posts
+    const postCount = Math.max(2, Math.floor(length / postSpacing) + 1);
+    for (let i = 0; i < postCount; i++) {
+      const t = i / Math.max(1, postCount - 1);
+      const pos = fenceCurve.getPointAt(t);
+      const tangent = fenceCurve.getTangentAt(t);
+      const groundY = this.getWorldHeight(pos.x, pos.z);
+      
+      const postGeo = new THREE.BoxGeometry(postWidth, fenceHeight, postDepth);
+      const post = new THREE.Mesh(postGeo, mat);
+      post.position.set(pos.x, groundY + fenceHeight * 0.5, pos.z);
+      post.rotation.y = Math.atan2(tangent.x, tangent.z);
+      post.castShadow = true;
+      post.receiveShadow = true;
+      group.add(post);
+    }
+    
+    // Horizontal rails (using tube geometry for smooth curves)
+    for (let r = 0; r < railCount; r++) {
+      const railY = fenceHeight * (0.2 + 0.6 * r / Math.max(1, railCount - 1));
+      const railPoints = [];
+      
+      for (let i = 0; i <= segCount; i++) {
+        const t = i / segCount;
+        const pos = fenceCurve.getPointAt(t);
+        const groundY = this.getWorldHeight(pos.x, pos.z);
+        railPoints.push(new THREE.Vector3(pos.x, groundY + railY, pos.z));
+      }
+      
+      const railCurve = new THREE.CatmullRomCurve3(railPoints, false, "catmullrom", 0.5);
+      const tubeGeo = new THREE.TubeGeometry(railCurve, segCount, railThick * 0.5, 6, false);
+      const rail = new THREE.Mesh(tubeGeo, mat);
+      rail.castShadow = true;
+      rail.receiveShadow = true;
+      group.add(rail);
+    }
+    
+    return group;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // DELETE / CLEAR ACCESSORIES
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  deleteAccessory(id, type = null) {
+    const arrays = type 
+      ? [this._getAccessoryArray(type)]
+      : [this.guardrails, this.kerbs, this.barriers, this.fences];
+    
+    for (const arr of arrays) {
+      const idx = arr.findIndex(g => g.id === id);
+      if (idx >= 0) {
+        arr.splice(idx, 1);
+        this.rebuildAllAccessories();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  clearAllAccessories(type = null) {
+    if (type) {
+      this._getAccessoryArray(type).length = 0;
+    } else {
+      this.guardrails.length = 0;
+      this.kerbs.length = 0;
+      this.barriers.length = 0;
+      this.fences.length = 0;
+    }
+    this._paintingAccessory = null;
+    this.rebuildAllAccessories();
+  }
+
+  // Backwards compatibility
+  deleteGuardrail(id) { return this.deleteAccessory(id, "guardrail"); }
+  clearAllGuardrails() { this.clearAllAccessories("guardrail"); }
+
   exportData() {
+    const serializeAccessories = (arr) => arr.map(a => ({
+      id: a.id,
+      type: a.type,
+      pathIdx: a.pathIdx,
+      side: a.side,
+      startT: a.startT,
+      endT: a.endT,
+    }));
+    
     return {
       nodes: this.nodes.map(n => ({
         id: n.id,
@@ -1134,13 +1931,29 @@ export class FullRoadSystem {
         forceJunction: !!n.forceJunction,
       })),
       edges: this.edges.map(e => ({ id: e.id, a: e.a, b: e.b })),
+      guardrails: serializeAccessories(this.guardrails),
+      kerbs: serializeAccessories(this.kerbs),
+      barriers: serializeAccessories(this.barriers),
+      fences: serializeAccessories(this.fences),
       selectedNodeId: this.selectedNodeId,
       nextNodeId: this._nextNodeId,
       nextEdgeId: this._nextEdgeId,
+      nextAccessoryId: this._nextAccessoryId,
     };
   }
 
   importData(data) {
+    const parseAccessories = (arr) => Array.isArray(arr)
+      ? arr.map(a => ({
+        id: Number(a.id),
+        type: a.type,
+        pathIdx: Number(a.pathIdx),
+        side: a.side,
+        startT: Number(a.startT),
+        endT: Number(a.endT),
+      })).filter(a => Number.isFinite(a.id) && Number.isFinite(a.pathIdx))
+      : [];
+    
     this.nodes = Array.isArray(data?.nodes)
       ? data.nodes.map(n => ({
         id: Number(n.id),
@@ -1154,9 +1967,21 @@ export class FullRoadSystem {
         .map(e => ({ id: Number(e.id), a: Number(e.a), b: Number(e.b) }))
         .filter(e => Number.isFinite(e.id) && nodeIds.has(e.a) && nodeIds.has(e.b) && e.a !== e.b)
       : [];
+    
+    this.guardrails = parseAccessories(data?.guardrails);
+    this.kerbs = parseAccessories(data?.kerbs);
+    this.barriers = parseAccessories(data?.barriers);
+    this.fences = parseAccessories(data?.fences);
+    
     this.selectedNodeId = nodeIds.has(data?.selectedNodeId) ? data.selectedNodeId : null;
     this._nextNodeId = Math.max(data?.nextNodeId ?? 1, Math.max(0, ...this.nodes.map(n => n.id)) + 1);
     this._nextEdgeId = Math.max(data?.nextEdgeId ?? 1, Math.max(0, ...this.edges.map(e => e.id)) + 1);
+    
+    const allAccessoryIds = [
+      ...this.guardrails, ...this.kerbs, ...this.barriers, ...this.fences
+    ].map(a => a.id);
+    this._nextAccessoryId = Math.max(data?.nextAccessoryId ?? 1, Math.max(0, ...allAccessoryIds) + 1);
+    
     this.undoStack.length = 0;
     this.redoStack.length = 0;
     this._rebuildVisual();
@@ -1166,12 +1991,27 @@ export class FullRoadSystem {
   dispose() {
     this._clearGroup(this.meshGroup);
     this._clearGroup(this.handleGroup);
+    this._clearAccessoryGroup();
     this.scene.remove(this.meshGroup);
     this.scene.remove(this.handleGroup);
+    this.scene.remove(this.accessoryGroup);
     if (this._roadMat) this._roadMat.dispose();
     if (this._junctionMat) this._junctionMat.dispose();
     this._lineMat.dispose();
     this._junctionLineMat.dispose();
     this._junctionCenterLineMat.dispose();
+  }
+
+  _clearAccessoryGroup() {
+    while (this.accessoryGroup.children.length) {
+      const child = this.accessoryGroup.children[0];
+      this.accessoryGroup.remove(child);
+      if (child.traverse) {
+        child.traverse(obj => {
+          if (obj.geometry) obj.geometry.dispose();
+          if (obj.material) obj.material.dispose();
+        });
+      }
+    }
   }
 }
