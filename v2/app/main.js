@@ -55,6 +55,7 @@ import { CliffGrassPaintSystem } from "../tools/foliage/cliffGrassPaintSystem.js
 import { PlayMode } from "../play/playMode.js";
 import { createGroundTslBundle } from "../../chunkGroundTsl.js";
 import { RoadSystem } from "../tools/road/roadSystem.js";
+import { FullRoadSystem } from "../tools/fullRoad/fullRoadSystem.js";
 import { RoadPlanarReflection } from "../core/road/roadReflection.js";
 import { RiverSystem } from "../tools/river/riverSystem.js";
 import { SplineSystem } from "../tools/spline/splineSystem.js";
@@ -605,6 +606,14 @@ export async function startV2App() {
     terrainStore,
     chunkStream,
   });
+  const fullRoadSystem = new FullRoadSystem({
+    scene,
+    toolState,
+    getWorldHeight: (x, z) => terrainStore.getWorldHeight(x, z),
+    reflectTex: roadReflection.texture,
+    terrainStore,
+    chunkStream,
+  });
   const riverSystem = new RiverSystem({
     scene,
     toolState,
@@ -891,6 +900,7 @@ export async function startV2App() {
         splineSystem.dragging = false;
       }
       roadSystem.handleGroup.visible = toolState.mode === "road" && toolState.road.showHandles;
+      fullRoadSystem.handleGroup.visible = toolState.mode === "fullRoad" && toolState.fullRoad.showHandles;
       riverSystem.handleGroup.visible = toolState.mode === "river" && toolState.river.showHandles;
       splineSystem.handleGroup.visible = toolState.mode === "spline" && toolState.spline.showHandles;
       if (toolState.mode !== "spline") splineSystem.clearPreview();
@@ -1146,6 +1156,63 @@ export async function startV2App() {
       rp.liftMax = 0.6;
       roadSystem.syncMaterial();
       roadSystem.rebuildAllMeshes();
+      ui?.pane.refresh();
+    },
+    onFullRoadChanged: () => {
+      fullRoadSystem.syncMaterial();
+      fullRoadSystem.rebuildAllMeshes();
+      fullRoadSystem._rebuildHandles();
+      ui?.pane.refresh();
+    },
+    onFullRoadStartBranch: () => {
+      fullRoadSystem.startBranch();
+      ui?.pane.refresh();
+    },
+    onFullRoadDeleteSelected: () => {
+      fullRoadSystem.deleteSelected();
+      ui?.pane.refresh();
+    },
+    onFullRoadClearAll: () => {
+      fullRoadSystem.clearAll();
+      ui?.pane.refresh();
+    },
+    onFullRoadSnapY: () => {
+      fullRoadSystem.snapSelectedYToTerrain();
+      ui?.pane.refresh();
+    },
+    onFullRoadSelectedYChanged: () => {
+      fullRoadSystem.setSelectedPointY(toolState.fullRoad.selectedPointY);
+      ui?.pane.refresh();
+    },
+    onFullRoadToggleJunction: () => {
+      fullRoadSystem.toggleSelectedJunction();
+      ui?.pane.refresh();
+    },
+    onFullRoadFlattenTerrain: () => {
+      fullRoadSystem.flattenTerrainUnderRoads();
+      fullRoadSystem.rebuildAllMeshes();
+      markHeightTexDirty();
+      treeStore.syncAllHeights(terrainStore);
+      splineSystem.syncGuardrailsToGround();
+      splineSystem.syncKerbsToGround();
+      splineSystem.syncLinearFeaturesToGround();
+      ui?.pane.refresh();
+    },
+    onFullRoadApplyCityPreset: () => {
+      const rp = toolState.fullRoad;
+      rp.width = 12;
+      rp.heightOffset = 0.08;
+      rp.junctionRadius = 10;
+      rp.centerLine = true;
+      rp.centerLineDashed = true;
+      rp.doubleCenterLine = false;
+      rp.laneLines = false;
+      rp.lineWidth = 0.025;
+      rp.colorBrightness = 0.65;
+      rp.texScale = 3.0;
+      fullRoadSystem.syncMaterial();
+      fullRoadSystem.rebuildAllMeshes();
+      fullRoadSystem._rebuildHandles();
       ui?.pane.refresh();
     },
     onRiverChanged: () => {
@@ -1452,6 +1519,7 @@ export async function startV2App() {
       toolState._fleurExportData = () => fleurSystem.getPositions();
       toolState._ambientFxExportData = () => ambientFxStore.getEmitters();
       toolState._roadExportData = () => roadSystem.exportData();
+      toolState._fullRoadExportData = () => fullRoadSystem.exportData();
       toolState._riverExportData = () => riverSystem.exportData();
       toolState._splineExportData = () => splineSystem.exportData();
       toolState._decalExportData = () => decalSystem.exportData();
@@ -1465,6 +1533,7 @@ export async function startV2App() {
       delete toolState._fleurExportData;
       delete toolState._ambientFxExportData;
       delete toolState._roadExportData;
+      delete toolState._fullRoadExportData;
       delete toolState._riverExportData;
       delete toolState._splineExportData;
       delete toolState._decalExportData;
@@ -1493,7 +1562,10 @@ export async function startV2App() {
         // Restore settings
         applySettings(toolState, project.settings);
         riverSystem.syncMaterial();
+        fullRoadSystem.syncMaterial();
         if (project.settings?.roads) roadSystem.importData(project.settings.roads);
+        if (project.settings?.fullRoadNetwork) fullRoadSystem.importData(project.settings.fullRoadNetwork);
+        else fullRoadSystem.importData(null);
         if (project.settings?.rivers) riverSystem.importData(project.settings.rivers);
         else riverSystem.importData([]);
         if (project.settings?.splinePath) splineSystem.importData(project.settings.splinePath);
@@ -1717,6 +1789,7 @@ export async function startV2App() {
   roadReflection.excludeFromReflection(brushRing);
   roadReflection.excludeFromReflection(spawnMarker);
   roadReflection.excludeFromReflection(roadSystem.handleGroup);
+  roadReflection.excludeFromReflection(fullRoadSystem.handleGroup);
   roadReflection.excludeFromReflection(riverSystem.handleGroup);
   roadReflection.excludeFromReflection(splineSystem.handleGroup);
   roadReflection.excludeFromReflection(splineSystem.previewGroup);
@@ -2002,6 +2075,27 @@ export async function startV2App() {
       }
       return;
     }
+    if (toolState.mode === "fullRoad" && event.button === 0) {
+      event.preventDefault();
+      updatePointer(event);
+      raycaster.setFromCamera(pointerNdc, camera);
+      const picked = fullRoadSystem.pickNode(raycaster);
+      if (picked != null) {
+        fullRoadSystem.selectedNodeId = picked;
+        fullRoadSystem.dragging = true;
+        controls.enabled = false;
+        fullRoadSystem._rebuildHandles();
+        fullRoadSystem._updateSelectedY();
+        ui?.pane.refresh();
+      } else {
+        const hit = pickTerrain(event);
+        if (hit) {
+          fullRoadSystem.addOrConnect(hit.point);
+          ui?.pane.refresh();
+        }
+      }
+      return;
+    }
     if (toolState.mode === "river" && event.button === 0) {
       event.preventDefault();
       updatePointer(event);
@@ -2089,6 +2183,11 @@ export async function startV2App() {
     if (toolState.mode === "road" && roadSystem.dragging && roadSystem.selectedIdx >= 0) {
       const hit = pickTerrain(event);
       if (hit) roadSystem.moveSelected(hit.point);
+      return;
+    }
+    if (toolState.mode === "fullRoad" && fullRoadSystem.dragging && fullRoadSystem.selectedNodeId != null) {
+      const hit = pickTerrain(event);
+      if (hit) fullRoadSystem.moveSelected(hit.point);
       return;
     }
     if (toolState.mode === "river" && riverSystem.dragging && riverSystem.selectedIdx >= 0) {
@@ -2182,6 +2281,10 @@ export async function startV2App() {
       roadSystem.dragging = false;
       controls.enabled = true;
     }
+    if (fullRoadSystem.dragging) {
+      fullRoadSystem.dragging = false;
+      controls.enabled = true;
+    }
     if (riverSystem.dragging) {
       riverSystem.dragging = false;
       controls.enabled = true;
@@ -2218,6 +2321,7 @@ export async function startV2App() {
     if (toolState.mode === "grass") return grassPaintSystem;
     if (toolState.mode === "cliffGrass") return cliffGrassPaintSystem;
     if (toolState.mode === "road") return roadSystem;
+    if (toolState.mode === "fullRoad") return fullRoadSystem;
     if (toolState.mode === "river") return riverSystem;
     if (toolState.mode === "spline") return splineSystem;
     if (toolState.mode === "cliffs") return cliffSystem;
@@ -2244,6 +2348,10 @@ export async function startV2App() {
     } else if (event.code === "Delete" && toolState.mode === "road") {
       event.preventDefault();
       roadSystem.deleteSelected();
+      ui?.pane.refresh();
+    } else if (event.code === "Delete" && toolState.mode === "fullRoad") {
+      event.preventDefault();
+      fullRoadSystem.deleteSelected();
       ui?.pane.refresh();
     } else if (event.code === "Delete" && toolState.mode === "river") {
       event.preventDefault();
@@ -2533,11 +2641,12 @@ export async function startV2App() {
       ui.refreshPerf();
       hudLastMs = now;
     }
-    if (roadSystem.hasReflectiveRoads()) {
-      roadReflection.setReflectY(roadSystem.getAverageY());
-      const roadMeshes = roadSystem.getRoadMeshes();
+    if (roadSystem.hasReflectiveRoads() || fullRoadSystem.hasReflectiveRoads()) {
+      roadReflection.setReflectY(roadSystem.hasReflectiveRoads() ? roadSystem.getAverageY() : fullRoadSystem.getAverageY());
+      const roadMeshes = [...roadSystem.getRoadMeshes(), ...fullRoadSystem.getRoadMeshes()];
       roadReflection.render(roadMeshes);
       roadSystem.updateReflectVP(roadReflection.reflectVP);
+      fullRoadSystem.updateReflectVP(roadReflection.reflectVP);
     }
     riverSystem.update(dtMs * 0.001);
     splineSystem.update(dtMs * 0.001);

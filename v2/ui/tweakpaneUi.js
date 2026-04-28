@@ -8,6 +8,7 @@ import { addGrassFolder } from "./grassTweakpane.js";
 import { addCliffFolder } from "./cliffTweakpane.js";
 import { addPropFolder } from "./propTweakpane.js";
 import { addRoadFolder } from "./roadTweakpane.js";
+import { addFullRoadFolder } from "./fullRoadTweakpane.js";
 import { addRiverFolder } from "./riverTweakpane.js";
 import { addSplineFolder } from "./splineTweakpane.js";
 import { addWaterFolder } from "./waterTweakpane.js";
@@ -87,6 +88,15 @@ export function createTweakpaneUi({
   onRoadDeleteStyleSection,
   onRoadFlattenTerrain,
   onRoadApplyStabilityPreset,
+  onFullRoadChanged,
+  onFullRoadStartBranch,
+  onFullRoadDeleteSelected,
+  onFullRoadClearAll,
+  onFullRoadSnapY,
+  onFullRoadSelectedYChanged,
+  onFullRoadToggleJunction,
+  onFullRoadFlattenTerrain,
+  onFullRoadApplyCityPreset,
   onRiverChanged,
   onRiverNewRiver,
   onRiverDeleteActive,
@@ -157,6 +167,7 @@ export function createTweakpaneUi({
         Grass: "grass",
         "Cliff Grass": "cliffGrass",
         Road: "road",
+        "Full Road": "fullRoad",
         River: "river",
         Spline: "spline",
         Cliffs: "cliffs",
@@ -295,6 +306,17 @@ export function createTweakpaneUi({
     onRoadDeleteStyleSection,
     onRoadFlattenTerrain,
     onRoadApplyStabilityPreset,
+  });
+  addFullRoadFolder(pane, toolState, {
+    onFullRoadChanged,
+    onFullRoadStartBranch,
+    onFullRoadDeleteSelected,
+    onFullRoadClearAll,
+    onFullRoadSnapY,
+    onFullRoadSelectedYChanged,
+    onFullRoadToggleJunction,
+    onFullRoadFlattenTerrain,
+    onFullRoadApplyCityPreset,
   });
   addRiverFolder(pane, toolState, {
     onRiverChanged,
