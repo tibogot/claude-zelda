@@ -173,6 +173,22 @@ export function createTweakpaneUi({
   globalFolder.addButton({ title: "💾 Save project" }).on("click", () => onSaveProject?.());
   globalFolder.addButton({ title: "📂 Load project" }).on("click", () => onLoadProject?.());
 
+  const playFolder = pane.addFolder({ title: "Play / Drift Smoke", expanded: false });
+  const smoke = toolState.playSmoke;
+  playFolder.addBinding(smoke, "enabled", { label: "enabled" });
+  playFolder.addBinding(smoke, "color", { label: "color" });
+  playFolder.addBinding(smoke, "opacity", { min: 0, max: 1, step: 0.01 });
+  playFolder.addBinding(smoke, "emitRate", { label: "emit rate", min: 0, max: 120, step: 1 });
+  playFolder.addBinding(smoke, "trigger", { label: "trigger", min: 0, max: 0.5, step: 0.01 });
+  playFolder.addBinding(smoke, "sizeMin", { label: "size min", min: 0.05, max: 3, step: 0.01 });
+  playFolder.addBinding(smoke, "sizeMax", { label: "size max", min: 0.05, max: 4, step: 0.01 });
+  playFolder.addBinding(smoke, "sizeGrowth", { label: "growth", min: 0, max: 6, step: 0.05 });
+  playFolder.addBinding(smoke, "lifeMin", { label: "life min", min: 0.1, max: 4, step: 0.05 });
+  playFolder.addBinding(smoke, "lifeMax", { label: "life max", min: 0.1, max: 5, step: 0.05 });
+  playFolder.addBinding(smoke, "rise", { min: 0, max: 3, step: 0.02 });
+  playFolder.addBinding(smoke, "spread", { min: 0, max: 3, step: 0.02 });
+  playFolder.addBinding(smoke, "drag", { min: 0, max: 0.6, step: 0.01 });
+
   addTerrainAppearanceFolder(pane, toolState, {
     textureLibrary,
     onTerrainSurfaceChanged,

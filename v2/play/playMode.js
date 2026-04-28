@@ -65,7 +65,9 @@ const ISO_FLY_DESCEND_RATE = 48;
 const ISO_FLY_CHASE_SMOOTH = 5.5;
 
 // Drift car physics — arcade model
-const CAR_MODEL = "../models/car_low-poly.glb";
+const CAR_MODEL = "../models/bruno.glb";
+const CAR_MODEL_YAW = Math.PI / 2;
+const CAR_MODEL_SCALE = 1.6;
 const CAR_ACCEL = 26;
 const CAR_ACCEL_BOOST = 52;
 const CAR_BRAKE = 35;
@@ -81,8 +83,8 @@ const CAR_GRIP_NORMAL = 12;
 const CAR_GRIP_DRIFT = 0.8;
 const CAR_GRIP_BRAKE_TURN = 2.0;
 const CAR_DRIFT_ENTRY_SPEED = 8;
-const CAR_RIDE_HEIGHT = 0.32;
-const CAR_WHEEL_RADIUS = 0.34;
+const CAR_RIDE_HEIGHT = 0.35;
+const CAR_WHEEL_RADIUS = 0.42;
 const CAR_DRIFT_ANGLE_MIN = 0.1;
 const CAR_CAM_DIST = 10;
 const CAR_CAM_HEIGHT = 3.5;
@@ -110,6 +112,38 @@ const CAR_BODY_TERRAIN_ROLL_MAX = 0.16;
 const CAR_BODY_TERRAIN_PITCH_MAX = 0.14;
 const CAR_BODY_SMOOTH = 14;
 const CAR_TERRAIN_BODY_SMOOTH = 9;
+const CAR_WHEEL_BASE = 1.9;
+const CAR_TRACK = 1.1;
+
+const DRIFT_MARK_MAX_SEGMENTS = 4096;
+const DRIFT_MARK_VERTS_PER_SEGMENT = 6;
+const DRIFT_MARK_FLOATS_PER_SEGMENT = DRIFT_MARK_VERTS_PER_SEGMENT * 3;
+const DRIFT_MARK_COLOR_FLOATS_PER_SEGMENT = DRIFT_MARK_VERTS_PER_SEGMENT * 4;
+const DRIFT_MARK_WIDTH = 0.09;
+const DRIFT_MARK_Y_OFFSET = 0.045;
+const DRIFT_MARK_MIN_SEGMENT_LENGTH = 0.035;
+const DRIFT_MARK_INTENSITY_MIN = 0.15;
+const DRIFT_MARK_INTENSITY_MAX = 0.9;
+const DRIFT_MARK_INV_INTENSITY_RANGE = 1 / (DRIFT_MARK_INTENSITY_MAX - DRIFT_MARK_INTENSITY_MIN);
+
+const DRIFT_SMOKE_POOL_SIZE = 256;
+const DRIFT_SMOKE_VERTS_PER_PARTICLE = 6;
+const DRIFT_SMOKE_FLOATS_PER_PARTICLE = DRIFT_SMOKE_VERTS_PER_PARTICLE * 3;
+const DRIFT_SMOKE_COLOR_FLOATS_PER_PARTICLE = DRIFT_SMOKE_VERTS_PER_PARTICLE * 4;
+const DRIFT_SMOKE_UV_FLOATS_PER_PARTICLE = DRIFT_SMOKE_VERTS_PER_PARTICLE * 2;
+const DRIFT_SMOKE_TEXTURE = "../Starter-Kit-Racing-master/sprites/smoke.png";
+const DRIFT_SMOKE_EMIT_RATE = 48;
+const DRIFT_SMOKE_LIFE_MIN = 0.65;
+const DRIFT_SMOKE_LIFE_MAX = 1.45;
+const DRIFT_SMOKE_SIZE_MIN = 0.55;
+const DRIFT_SMOKE_SIZE_MAX = 1.05;
+const DRIFT_SMOKE_SIZE_GROWTH = 2.6;
+const DRIFT_SMOKE_OPACITY = 0.55;
+const DRIFT_SMOKE_RISE = 0.75;
+const DRIFT_SMOKE_SPREAD = 0.55;
+const DRIFT_SMOKE_SPEED_DRAG = 0.12;
+const DRIFT_SMOKE_COLOR = new THREE.Color(0x6a6c76);
+const DRIFT_SMOKE_INTENSITY_MIN = 0.04;
 
 const TRAIL_SEG = 90;
 const TRAIL_HALF_W = 0.038;
@@ -149,6 +183,336 @@ const _trDir = new THREE.Vector3();
 const _trSide = new THREE.Vector3();
 const _trUp = new THREE.Vector3(0, 1, 0);
 const _trTipWorld = new THREE.Vector3();
+const _dmDir = new THREE.Vector3();
+const _dmSide = new THREE.Vector3();
+const _dmPL = new THREE.Vector3();
+const _dmPR = new THREE.Vector3();
+const _dmCL = new THREE.Vector3();
+const _dmCR = new THREE.Vector3();
+const _smokeRight = new THREE.Vector3();
+const _smokeUp = new THREE.Vector3();
+const _smokeCorner = new THREE.Vector3();
+const _smokeHalfRight = new THREE.Vector3();
+const _smokeHalfUp = new THREE.Vector3();
+const _smokeUvs = [
+  0, 0,
+  1, 0,
+  0, 1,
+  1, 0,
+  1, 1,
+  0, 1,
+];
+
+class DriftMarks {
+  constructor(scene) {
+    const positions = new Float32Array(DRIFT_MARK_MAX_SEGMENTS * DRIFT_MARK_FLOATS_PER_SEGMENT);
+    const colors = new Float32Array(DRIFT_MARK_MAX_SEGMENTS * DRIFT_MARK_COLOR_FLOATS_PER_SEGMENT);
+    for (let i = 0; i < DRIFT_MARK_MAX_SEGMENTS * DRIFT_MARK_VERTS_PER_SEGMENT; i++) {
+      const o = i * 4;
+      colors[o] = 1;
+      colors[o + 1] = 1;
+      colors[o + 2] = 1;
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    const posAttr = new THREE.BufferAttribute(positions, 3);
+    posAttr.setUsage(THREE.DynamicDrawUsage);
+    geometry.setAttribute("position", posAttr);
+
+    const colorAttr = new THREE.BufferAttribute(colors, 4);
+    colorAttr.setUsage(THREE.DynamicDrawUsage);
+    geometry.setAttribute("color", colorAttr);
+    geometry.setDrawRange(0, 0);
+
+    const material = new THREE.MeshBasicMaterial({
+      color: 0x111111,
+      transparent: true,
+      vertexColors: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: -4,
+      polygonOffsetUnits: -4,
+    });
+
+    this.mesh = new THREE.Mesh(geometry, material);
+    this.mesh.frustumCulled = false;
+    this.mesh.renderOrder = 20;
+    this.mesh.visible = false;
+    scene.add(this.mesh);
+
+    this.positions = positions;
+    this.colors = colors;
+    this.geometry = geometry;
+    this.segmentIndex = 0;
+    this.drawCount = 0;
+    this.states = [
+      { prev: new THREE.Vector3(), active: false },
+      { prev: new THREE.Vector3(), active: false },
+    ];
+  }
+
+  reset() {
+    this.segmentIndex = 0;
+    this.drawCount = 0;
+    this.geometry.setDrawRange(0, 0);
+    this.mesh.visible = false;
+    this.states[0].active = false;
+    this.states[1].active = false;
+  }
+
+  update(rearPoints, emit, intensity) {
+    this._track(rearPoints[0], emit, intensity, this.states[0]);
+    this._track(rearPoints[1], emit, intensity, this.states[1]);
+  }
+
+  _track(point, emit, intensity, state) {
+    if (!point) {
+      state.active = false;
+      return;
+    }
+    if (emit && state.active) this._addSegment(state.prev, point, intensity);
+    state.prev.copy(point);
+    state.active = emit;
+  }
+
+  _addSegment(prev, curr, intensity) {
+    _dmDir.subVectors(curr, prev);
+    _dmDir.y = 0;
+    const len = _dmDir.length();
+    if (len < DRIFT_MARK_MIN_SEGMENT_LENGTH) return;
+    _dmDir.divideScalar(len);
+
+    _dmSide.set(_dmDir.z, 0, -_dmDir.x).multiplyScalar(DRIFT_MARK_WIDTH);
+    _dmPL.copy(prev).add(_dmSide);
+    _dmPR.copy(prev).sub(_dmSide);
+    _dmCL.copy(curr).add(_dmSide);
+    _dmCR.copy(curr).sub(_dmSide);
+
+    const offset = this.segmentIndex * DRIFT_MARK_FLOATS_PER_SEGMENT;
+    const p = this.positions;
+    p[offset + 0] = _dmPL.x; p[offset + 1] = _dmPL.y; p[offset + 2] = _dmPL.z;
+    p[offset + 3] = _dmPR.x; p[offset + 4] = _dmPR.y; p[offset + 5] = _dmPR.z;
+    p[offset + 6] = _dmCL.x; p[offset + 7] = _dmCL.y; p[offset + 8] = _dmCL.z;
+    p[offset + 9] = _dmPR.x; p[offset + 10] = _dmPR.y; p[offset + 11] = _dmPR.z;
+    p[offset + 12] = _dmCR.x; p[offset + 13] = _dmCR.y; p[offset + 14] = _dmCR.z;
+    p[offset + 15] = _dmCL.x; p[offset + 16] = _dmCL.y; p[offset + 17] = _dmCL.z;
+
+    const alpha = THREE.MathUtils.clamp(
+      (intensity - DRIFT_MARK_INTENSITY_MIN) * DRIFT_MARK_INV_INTENSITY_RANGE,
+      0,
+      1,
+    );
+    const colorOffset = this.segmentIndex * DRIFT_MARK_COLOR_FLOATS_PER_SEGMENT;
+    for (let i = 0; i < DRIFT_MARK_VERTS_PER_SEGMENT; i++) {
+      this.colors[colorOffset + i * 4 + 3] = alpha;
+    }
+
+    const posAttr = this.geometry.attributes.position;
+    posAttr.addUpdateRange(offset, DRIFT_MARK_FLOATS_PER_SEGMENT);
+    posAttr.needsUpdate = true;
+    const colorAttr = this.geometry.attributes.color;
+    colorAttr.addUpdateRange(colorOffset, DRIFT_MARK_COLOR_FLOATS_PER_SEGMENT);
+    colorAttr.needsUpdate = true;
+
+    this.segmentIndex = (this.segmentIndex + 1) % DRIFT_MARK_MAX_SEGMENTS;
+    if (this.drawCount < DRIFT_MARK_MAX_SEGMENTS * DRIFT_MARK_VERTS_PER_SEGMENT) {
+      this.drawCount += DRIFT_MARK_VERTS_PER_SEGMENT;
+      this.geometry.setDrawRange(0, this.drawCount);
+    }
+    this.mesh.visible = this.drawCount > 0;
+  }
+}
+
+class DriftSmoke {
+  constructor(scene, settings) {
+    this.settings = settings || {};
+    const positions = new Float32Array(DRIFT_SMOKE_POOL_SIZE * DRIFT_SMOKE_FLOATS_PER_PARTICLE);
+    const colors = new Float32Array(DRIFT_SMOKE_POOL_SIZE * DRIFT_SMOKE_COLOR_FLOATS_PER_PARTICLE);
+    const uvs = new Float32Array(DRIFT_SMOKE_POOL_SIZE * DRIFT_SMOKE_UV_FLOATS_PER_PARTICLE);
+    for (let i = 0; i < DRIFT_SMOKE_POOL_SIZE; i++) {
+      uvs.set(_smokeUvs, i * DRIFT_SMOKE_UV_FLOATS_PER_PARTICLE);
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    const posAttr = new THREE.BufferAttribute(positions, 3);
+    posAttr.setUsage(THREE.DynamicDrawUsage);
+    geometry.setAttribute("position", posAttr);
+    const colorAttr = new THREE.BufferAttribute(colors, 4);
+    colorAttr.setUsage(THREE.DynamicDrawUsage);
+    geometry.setAttribute("color", colorAttr);
+    geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+    geometry.setDrawRange(0, 0);
+
+    const map = new THREE.TextureLoader().load(
+      DRIFT_SMOKE_TEXTURE,
+      undefined,
+      undefined,
+      (err) => console.warn("[V2] Failed to load drift smoke texture:", DRIFT_SMOKE_TEXTURE, err),
+    );
+    map.colorSpace = THREE.SRGBColorSpace;
+    const material = new THREE.MeshBasicMaterial({
+      map,
+      color: 0xffffff,
+      transparent: true,
+      vertexColors: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+
+    this.mesh = new THREE.Mesh(geometry, material);
+    this.mesh.frustumCulled = false;
+    this.mesh.renderOrder = 22;
+    this.mesh.visible = false;
+    scene.add(this.mesh);
+
+    this.positions = positions;
+    this.colors = colors;
+    this.geometry = geometry;
+    this.material = material;
+    this.map = map;
+    this.particles = Array.from({ length: DRIFT_SMOKE_POOL_SIZE }, () => ({
+      life: 0,
+      maxLife: 1,
+      position: new THREE.Vector3(),
+      velocity: new THREE.Vector3(),
+      size: 1,
+      rotation: 0,
+      spin: 0,
+    }));
+    this.emitIndex = 0;
+    this.emitAccum = [0, 0];
+  }
+
+  reset() {
+    for (const p of this.particles) p.life = 0;
+    this.emitAccum[0] = 0;
+    this.emitAccum[1] = 0;
+    this.geometry.setDrawRange(0, 0);
+    this.mesh.visible = false;
+  }
+
+  update(dt, rearPoints, emit, intensity, velocityX, velocityZ, camera) {
+    const s = this.settings;
+    if (s.enabled === false) emit = false;
+    if (emit) {
+      const emitRate = (s.emitRate ?? DRIFT_SMOKE_EMIT_RATE) * THREE.MathUtils.clamp(intensity, 0, 1);
+      for (let i = 0; i < rearPoints.length; i++) {
+        const point = rearPoints[i];
+        if (!point) continue;
+        this.emitAccum[i] += emitRate * dt;
+        while (this.emitAccum[i] >= 1) {
+          this.emitAt(point, intensity, velocityX, velocityZ);
+          this.emitAccum[i] -= 1;
+        }
+      }
+    } else {
+      this.emitAccum[0] = 0;
+      this.emitAccum[1] = 0;
+    }
+
+    camera.updateMatrixWorld();
+    _smokeRight.set(1, 0, 0).applyQuaternion(camera.quaternion).normalize();
+    _smokeUp.set(0, 1, 0).applyQuaternion(camera.quaternion).normalize();
+
+    let alive = 0;
+    for (const p of this.particles) {
+      if (p.life <= 0) continue;
+      p.life -= dt;
+      if (p.life <= 0) continue;
+
+      const age = 1 - p.life / p.maxLife;
+      p.velocity.multiplyScalar(Math.max(0, 1 - dt * 0.85));
+      p.position.addScaledVector(p.velocity, dt);
+      p.rotation += p.spin * dt;
+
+      const size = p.size * (1 + age * (s.sizeGrowth ?? DRIFT_SMOKE_SIZE_GROWTH));
+      const alpha = (s.opacity ?? DRIFT_SMOKE_OPACITY) * (1 - age) * (1 - age);
+      this._writeParticle(alive++, p.position, size, p.rotation, alpha);
+    }
+
+    const vertCount = alive * DRIFT_SMOKE_VERTS_PER_PARTICLE;
+    this.geometry.setDrawRange(0, vertCount);
+    this.mesh.visible = vertCount > 0;
+    if (vertCount > 0) {
+      const posAttr = this.geometry.attributes.position;
+      posAttr.addUpdateRange(0, alive * DRIFT_SMOKE_FLOATS_PER_PARTICLE);
+      posAttr.needsUpdate = true;
+      const colorAttr = this.geometry.attributes.color;
+      colorAttr.addUpdateRange(0, alive * DRIFT_SMOKE_COLOR_FLOATS_PER_PARTICLE);
+      colorAttr.needsUpdate = true;
+    }
+  }
+
+  emitAt(point, intensity, velocityX, velocityZ) {
+    const s = this.settings;
+    const p = this.particles[this.emitIndex];
+    this.emitIndex = (this.emitIndex + 1) % DRIFT_SMOKE_POOL_SIZE;
+
+    const speed = Math.hypot(velocityX, velocityZ);
+    const dirX = speed > 1e-4 ? velocityX / speed : 0;
+    const dirZ = speed > 1e-4 ? velocityZ / speed : 0;
+    const sideJitter = (Math.random() - 0.5) * (s.spread ?? DRIFT_SMOKE_SPREAD);
+    p.position.set(
+      point.x - dirX * (0.12 + Math.random() * 0.25) + sideJitter * dirZ,
+      point.y + 0.02 + Math.random() * 0.1,
+      point.z - dirZ * (0.12 + Math.random() * 0.25) - sideJitter * dirX,
+    );
+    p.velocity.set(
+      -dirX * speed * (s.drag ?? DRIFT_SMOKE_SPEED_DRAG) + (Math.random() - 0.5) * 0.45,
+      (s.rise ?? DRIFT_SMOKE_RISE) * (0.65 + Math.random() * 0.7),
+      -dirZ * speed * (s.drag ?? DRIFT_SMOKE_SPEED_DRAG) + (Math.random() - 0.5) * 0.45,
+    );
+    const lifeMin = Math.max(0.05, s.lifeMin ?? DRIFT_SMOKE_LIFE_MIN);
+    const lifeMax = Math.max(lifeMin, s.lifeMax ?? DRIFT_SMOKE_LIFE_MAX);
+    p.maxLife = THREE.MathUtils.lerp(lifeMin, lifeMax, Math.random());
+    p.life = p.maxLife;
+    const sizeMin = Math.max(0.01, s.sizeMin ?? DRIFT_SMOKE_SIZE_MIN);
+    const sizeMax = Math.max(sizeMin, s.sizeMax ?? DRIFT_SMOKE_SIZE_MAX);
+    p.size = THREE.MathUtils.lerp(sizeMin, sizeMax, Math.random()) *
+      THREE.MathUtils.lerp(0.75, 1.25, THREE.MathUtils.clamp(intensity, 0, 1));
+    p.rotation = Math.random() * Math.PI * 2;
+    p.spin = (Math.random() - 0.5) * 1.7;
+  }
+
+  _writeParticle(index, center, size, rotation, alpha) {
+    const smokeColor = DRIFT_SMOKE_COLOR;
+    if (this.settings.color) smokeColor.set(this.settings.color);
+    const half = size * 0.5;
+    const cosR = Math.cos(rotation);
+    const sinR = Math.sin(rotation);
+    const posOffset = index * DRIFT_SMOKE_FLOATS_PER_PARTICLE;
+    const colorOffset = index * DRIFT_SMOKE_COLOR_FLOATS_PER_PARTICLE;
+    const corners = [
+      [-1, -1],
+      [1, -1],
+      [-1, 1],
+      [1, -1],
+      [1, 1],
+      [-1, 1],
+    ];
+    for (let i = 0; i < DRIFT_SMOKE_VERTS_PER_PARTICLE; i++) {
+      const x = corners[i][0];
+      const y = corners[i][1];
+      const rx = (x * cosR - y * sinR) * half;
+      const ry = (x * sinR + y * cosR) * half;
+      _smokeHalfRight.copy(_smokeRight).multiplyScalar(rx);
+      _smokeHalfUp.copy(_smokeUp).multiplyScalar(ry);
+      _smokeCorner.copy(center).add(_smokeHalfRight).add(_smokeHalfUp);
+
+      const po = posOffset + i * 3;
+      this.positions[po] = _smokeCorner.x;
+      this.positions[po + 1] = _smokeCorner.y;
+      this.positions[po + 2] = _smokeCorner.z;
+
+      const co = colorOffset + i * 4;
+      this.colors[co] = smokeColor.r;
+      this.colors[co + 1] = smokeColor.g;
+      this.colors[co + 2] = smokeColor.b;
+      this.colors[co + 3] = alpha;
+    }
+  }
+}
 
 function createWingTrailMesh(scene, trailMat) {
   const vertCount = (TRAIL_SEG + 1) * 2;
@@ -289,7 +653,7 @@ function clearBullets(pool) {
 }
 
 export class PlayMode {
-  constructor({ scene, camera, renderer, controls, getWorldHeight, getTerrainHeight, worldHalf, cliffBvh, isBarrierBlocked }) {
+  constructor({ scene, camera, renderer, controls, getWorldHeight, getTerrainHeight, worldHalf, cliffBvh, isBarrierBlocked, smokeSettings }) {
     this.scene = scene;
     this.camera = camera;
     this.renderer = renderer;
@@ -413,6 +777,10 @@ export class PlayMode {
     this.carBodyPitch = 0;
     this.carTerrainRoll = 0;
     this.carTerrainPitch = 0;
+    this.driftMarks = new DriftMarks(scene);
+    this.smokeSettings = smokeSettings || {};
+    this.driftSmoke = new DriftSmoke(scene, this.smokeSettings);
+    this._carRearContactPoints = [new THREE.Vector3(), new THREE.Vector3()];
     this._carHud = null;
     this._carHudSpd = null;
     this._carHudAngle = null;
@@ -476,64 +844,89 @@ export class PlayMode {
 
   async _loadCar() {
     try {
-      const { submeshes } = await loadTreeGlbFromUrl(CAR_MODEL);
-      const inner = new THREE.Group();
-      for (const sm of submeshes) {
-        const mesh = new THREE.Mesh(sm.geometry, sm.material);
-        mesh.applyMatrix4(sm.localMatrix);
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        inner.add(mesh);
+      const gltf = await new Promise((resolve, reject) => {
+        getSharedGltfLoader().load(`${CAR_MODEL}?v=bruno-v2`, resolve, undefined, reject);
+      });
+      const src = gltf.scene;
+      let chassisSrc = null;
+      let wheelSrc = null;
+      src.traverse((o) => {
+        if (!chassisSrc && /^chassis(\.|\d|$)/.test(o.name)) chassisSrc = o;
+        if (!wheelSrc && /^wheelContainer(\.|\d|$)/.test(o.name)) wheelSrc = o;
+      });
+      if (!chassisSrc || !wheelSrc) {
+        console.warn("[V2] bruno.glb missing chassis/wheelContainer nodes; falling back to raw scene.");
+        if (!chassisSrc) chassisSrc = src;
+        if (!wheelSrc) wheelSrc = src.clone(true);
       }
-      inner.updateMatrixWorld(true);
-      const box = new THREE.Box3().setFromObject(inner);
-      const size = box.getSize(new THREE.Vector3());
-      const center = box.getCenter(new THREE.Vector3());
-      const targetLen = 5.3;
-      const maxDim = Math.max(size.x, size.z);
-      const sc = targetLen / maxDim;
-      inner.scale.setScalar(sc);
-      inner.updateMatrixWorld(true);
-      const box2 = new THREE.Box3().setFromObject(inner);
-      const center2 = box2.getCenter(new THREE.Vector3());
-      inner.position.set(-center2.x, -box2.min.y, -center2.z);
 
-      const chassis = new THREE.Group();
-      chassis.add(inner);
-      this.carChassis = chassis;
+      const chassisVisual = chassisSrc.clone(true);
+      chassisVisual.position.set(0, 0, 0);
+      chassisVisual.rotation.set(0, CAR_MODEL_YAW, 0);
+      chassisVisual.scale.setScalar(1);
+      const strays = [];
+      chassisVisual.traverse((o) => {
+        if (/^wheelContainer(\.|\d|$)/.test(o.name)) strays.push(o);
+        if (o.isMesh || o.isSkinnedMesh) {
+          o.castShadow = true;
+          o.receiveShadow = true;
+        }
+      });
+      strays.forEach((s) => s.parent?.remove(s));
+
+      this.carChassis = new THREE.Group();
+      this.carChassis.rotation.order = "YXZ";
+      this.carChassis.add(chassisVisual);
 
       this.carRoot = new THREE.Group();
       this.carRoot.rotation.order = "YXZ";
-      this.carRoot.add(chassis);
+      this.carRoot.scale.setScalar(CAR_MODEL_SCALE);
+      this.carRoot.add(this.carChassis);
       this.carRoot.visible = false;
       this.scene.add(this.carRoot);
 
-      this.carWheels = [];
-      inner.updateMatrixWorld(true);
-      const bFinal = new THREE.Box3().setFromObject(inner);
-      const sz = bFinal.getSize(new THREE.Vector3());
-      const wheelNames = [];
-      inner.traverse(child => {
-        const n = (child.name || "").toLowerCase();
-        if (n.includes("wheel") || n.includes("tire") || n.includes("roue")) {
-          wheelNames.push({ obj: child, name: n });
-        }
+      const hw = CAR_WHEEL_BASE * 0.5;
+      const ht = CAR_TRACK * 0.5;
+      const wheelOffsets = [
+        { x: -ht, z: -hw, steer: true, name: "FL" },
+        { x: ht, z: -hw, steer: true, name: "FR" },
+        { x: -ht, z: hw, steer: false, name: "RL" },
+        { x: ht, z: hw, steer: false, name: "RR" },
+      ];
+      this.carWheels = wheelOffsets.map((w) => {
+        const container = wheelSrc.clone(true);
+        container.position.set(w.x, -CAR_RIDE_HEIGHT, w.z);
+        const isLeft = w.x < 0;
+        container.rotation.set(0, CAR_MODEL_YAW + (isLeft ? Math.PI : 0), 0);
+        let suspension = null;
+        let cylinder = null;
+        container.traverse((c) => {
+          if (!suspension && /^wheelSuspension(\.|\d|$)/.test(c.name)) suspension = c;
+          if (!cylinder && /^wheelCylinder(\.|\d|$)/.test(c.name)) cylinder = c;
+          if (c.isMesh || c.isSkinnedMesh) {
+            c.castShadow = true;
+            c.receiveShadow = true;
+          }
+        });
+        this.carChassis.add(container);
+        return {
+          container,
+          suspension: suspension || container,
+          cylinder: cylinder || container,
+          offset: new THREE.Vector3(w.x, 0, w.z),
+          steer: w.steer,
+          isLeft,
+          name: w.name,
+          contactWorld: new THREE.Vector3(),
+        };
       });
-      if (wheelNames.length >= 4) {
-        for (const w of wheelNames) {
-          const wp = new THREE.Vector3();
-          w.obj.getWorldPosition(wp);
-          this.carRoot.worldToLocal(wp);
-          this.carWheels.push({ obj: w.obj, offset: wp, name: w.name });
-        }
-      }
 
       this.carLoaded = true;
       if (this.active && this.moveMode === "car") {
         this.carRoot.visible = true;
         this.capsule.visible = false;
       }
-      console.log("[V2] Car loaded:", submeshes.length, "submeshes, wheels found:", this.carWheels.length);
+      console.log("[V2] Bruno car loaded, wheels:", this.carWheels.map((w) => w.name).join(", "));
     } catch (err) {
       console.warn("[V2] Failed to load car model:", err);
     }
@@ -931,6 +1324,8 @@ export class PlayMode {
     if (this.planeRoot) this.planeRoot.visible = false;
     if (this.charRoot) this.charRoot.visible = false;
     if (this.carRoot) this.carRoot.visible = false;
+    this.driftMarks.reset();
+    this.driftSmoke.reset();
     this._clearTrails(); clearBullets(this._bullets.pool);
     this.controls.enabled = false;
 
@@ -964,6 +1359,8 @@ export class PlayMode {
     this.carBodyPitch = 0;
     this.carTerrainRoll = 0;
     this.carTerrainPitch = 0;
+    this.driftMarks.reset();
+    this.driftSmoke.reset();
     this._clearTrails(); clearBullets(this._bullets.pool);
 
     this.camera.up.set(0, 1, 0);
@@ -1149,7 +1546,7 @@ export class PlayMode {
       const latSign = Math.sign(latDot);
       const speedForRoll = Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz);
       const driftRollSpeedGain = THREE.MathUtils.smoothstep(speedForRoll, 8, 24);
-      const driftRoll = latSign * Math.min(CAR_BODY_ROLL_MAX, this.carDriftAngle * 0.85) * driftRollSpeedGain;
+      const driftRoll = -latSign * Math.min(CAR_BODY_ROLL_MAX, this.carDriftAngle * 0.85) * driftRollSpeedGain;
       const throttlePitch = forward ? 0.055 : backward ? -0.08 : 0;
       const speedNorm = Math.min(1, curSpeed / Math.max(1, CAR_MAX_SPEED));
       const dynamicPitch = -speedNorm * 0.05;
@@ -1798,24 +2195,46 @@ export class PlayMode {
     if (this.carRoot) {
       this.carRoot.visible = carDriving && this.carLoaded;
       if (carDriving && this.carLoaded) {
-        this.carRoot.position.set(this.playerPos.x, this.playerPos.y + CAR_RIDE_HEIGHT, this.playerPos.z);
-        this.carRoot.rotation.y = this.carHeading + Math.PI;
-        const fwdX = -Math.sin(this.carHeading);
-        const fwdZ = -Math.cos(this.carHeading);
-        const rightX = Math.cos(this.carHeading);
-        const rightZ = -Math.sin(this.carHeading);
-        const sx = CAR_HALF_WIDTH * 0.92;
-        const sz = CAR_HALF_LENGTH * 0.86;
-        const hFL = this.getWorldHeight(this.playerPos.x + rightX * sx + fwdX * sz, this.playerPos.z + rightZ * sx + fwdZ * sz);
-        const hFR = this.getWorldHeight(this.playerPos.x - rightX * sx + fwdX * sz, this.playerPos.z - rightZ * sx + fwdZ * sz);
-        const hRL = this.getWorldHeight(this.playerPos.x + rightX * sx - fwdX * sz, this.playerPos.z + rightZ * sx - fwdZ * sz);
-        const hRR = this.getWorldHeight(this.playerPos.x - rightX * sx - fwdX * sz, this.playerPos.z - rightZ * sx - fwdZ * sz);
-        const leftAvg = 0.5 * (hFL + hRL);
-        const rightAvg = 0.5 * (hFR + hRR);
-        const frontAvg = 0.5 * (hFL + hFR);
-        const rearAvg = 0.5 * (hRL + hRR);
-        const terrainRollRaw = Math.atan2(leftAvg - rightAvg, sx * 2);
-        const terrainPitchRaw = -Math.atan2(frontAvg - rearAvg, sz * 2);
+        const scaleFactor = this.carRoot.scale.x || CAR_MODEL_SCALE;
+        const rootY = this.playerPos.y + (CAR_RIDE_HEIGHT + CAR_WHEEL_RADIUS) * scaleFactor;
+        this.carRoot.position.set(this.playerPos.x, rootY, this.playerPos.z);
+        this.carRoot.rotation.y = this.carHeading;
+
+        let frontY = 0;
+        let rearY = 0;
+        let leftY = 0;
+        let rightY = 0;
+        let rearIdx = 0;
+        for (const w of this.carWheels) {
+          const lx = w.offset.x * scaleFactor;
+          const lz = w.offset.z * scaleFactor;
+          const wx =
+            this.playerPos.x +
+            lx * Math.cos(this.carHeading) +
+            lz * Math.sin(this.carHeading);
+          const wz =
+            this.playerPos.z -
+            lx * Math.sin(this.carHeading) +
+            lz * Math.cos(this.carHeading);
+          const h = this.getWorldHeight(wx, wz);
+          w.contactWorld.set(wx, h + DRIFT_MARK_Y_OFFSET, wz);
+          if (w.offset.z < 0) frontY += h;
+          else {
+            rearY += h;
+            if (rearIdx < this._carRearContactPoints.length) {
+              this._carRearContactPoints[rearIdx++].copy(w.contactWorld);
+            }
+          }
+          if (w.offset.x < 0) leftY += h;
+          else rightY += h;
+        }
+
+        const leftAvg = leftY * 0.5;
+        const rightAvg = rightY * 0.5;
+        const frontAvg = frontY * 0.5;
+        const rearAvg = rearY * 0.5;
+        const terrainRollRaw = Math.atan2(rightAvg - leftAvg, CAR_TRACK * scaleFactor);
+        const terrainPitchRaw = Math.atan2(frontAvg - rearAvg, CAR_WHEEL_BASE * scaleFactor);
         const terrainRollTarget = THREE.MathUtils.clamp(terrainRollRaw, -CAR_BODY_TERRAIN_ROLL_MAX, CAR_BODY_TERRAIN_ROLL_MAX);
         const terrainPitchTarget = THREE.MathUtils.clamp(terrainPitchRaw, -CAR_BODY_TERRAIN_PITCH_MAX, CAR_BODY_TERRAIN_PITCH_MAX);
         const terrainSmooth = 1 - Math.exp(-CAR_TERRAIN_BODY_SMOOTH * dtSec);
@@ -1827,12 +2246,33 @@ export class PlayMode {
 
         const _steerVis = ((keys.KeyA || keys.ArrowLeft) ? 0.4 : 0) + ((keys.KeyD || keys.ArrowRight) ? -0.4 : 0);
         for (const w of this.carWheels) {
-          const n = w.name;
-          const isFront = n.includes("front") || n.includes("fl") || n.includes("fr") || n.includes("avant");
-          if (isFront) w.obj.rotation.y = _steerVis;
-          w.obj.rotation.x = this.carWheelSpin;
+          const baseYaw = CAR_MODEL_YAW + (w.isLeft ? Math.PI : 0);
+          w.container.rotation.y = baseYaw + (w.steer ? _steerVis : 0);
+          if (w.cylinder) {
+            w.cylinder.rotation.z = (w.isLeft ? -1 : 1) * this.carWheelSpin;
+          }
         }
+
+        const speed = Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz);
+        const handbrake = keys.Space;
+        const driftAmount = THREE.MathUtils.clamp((this.carDriftAngle - CAR_DRIFT_ANGLE_MIN) / 0.5, 0, 1);
+        const handbrakeAmount = handbrake ? THREE.MathUtils.smoothstep(speed, CAR_DRIFT_ENTRY_SPEED, CAR_DRIFT_ENTRY_SPEED * 2.2) : 0;
+        const driftIntensity = Math.max(driftAmount, handbrakeAmount);
+        const emitMarks = !this.carInAir && speed > CAR_DRIFT_ENTRY_SPEED && driftIntensity > DRIFT_MARK_INTENSITY_MIN;
+        const emitSmoke =
+          !this.carInAir &&
+          speed > CAR_DRIFT_ENTRY_SPEED * 0.55 &&
+          (driftIntensity > (this.smokeSettings.trigger ?? DRIFT_SMOKE_INTENSITY_MIN) ||
+            (handbrake && speed > CAR_DRIFT_ENTRY_SPEED * 0.55));
+        this.driftMarks.update(this._carRearContactPoints, emitMarks, driftIntensity);
+        this.driftSmoke.update(dtSec, this._carRearContactPoints, emitSmoke, Math.max(driftIntensity, handbrake ? 0.45 : 0), this.carVx, this.carVz, this.camera);
+      } else {
+        this.driftMarks.update(this._carRearContactPoints, false, 0);
+        this.driftSmoke.update(dtSec, this._carRearContactPoints, false, 0, 0, 0, this.camera);
       }
+    } else {
+      this.driftMarks.update(this._carRearContactPoints, false, 0);
+      this.driftSmoke.update(dtSec, this._carRearContactPoints, false, 0, 0, 0, this.camera);
     }
 
     // Flight HUD
@@ -1988,6 +2428,8 @@ export class PlayMode {
       this.flyAileronAngle = 0;
       this.carVelY = 0;
       this.carInAir = false;
+      this.driftMarks.reset();
+      this.driftSmoke.reset();
       this._clearTrails(); clearBullets(this._bullets.pool);
     } else {
       this.moveMode = "capsule";
@@ -2002,6 +2444,8 @@ export class PlayMode {
       this.flyBarrelPhase = 0;
       this.flyAileronAngle = 0;
       this.planeSpeed = 0;
+      this.driftMarks.reset();
+      this.driftSmoke.reset();
     }
   }
 

@@ -758,6 +758,7 @@ export async function startV2App() {
     worldHalf: config.world.size * 0.5,
     cliffBvh,
     isBarrierBlocked: (wx, wz) => barrierStore.isBlocked(wx, wz),
+    smokeSettings: toolState.playSmoke,
   });
 
   const hud = createHud();
