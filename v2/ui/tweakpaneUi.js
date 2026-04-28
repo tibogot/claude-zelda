@@ -594,7 +594,7 @@ export function createTweakpaneUi({
     })
     .on("change", onFogChange);
 
-  const sculptFolder = pane.addFolder({ title: "Sculpt" });
+  const sculptFolder = pane.addFolder({ title: "Sculpt", expanded: false });
   sculptFolder
     .addBinding(toolState, "sculptMode", {
       label: "Stamp",
@@ -918,7 +918,7 @@ export function createTweakpaneUi({
     .addButton({ title: "Generate terrain (all chunks)" })
     .on("click", () => onGenerateProceduralTerrain?.());
 
-  const lodFolder = pane.addFolder({ title: "Terrain/LOD" });
+  const lodFolder = pane.addFolder({ title: "Terrain/LOD", expanded: false });
   lodFolder
     .addBinding(config.lod, "enabled", { label: "LOD enabled" })
     .on("change", onConfigChanged);

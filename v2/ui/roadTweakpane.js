@@ -11,7 +11,7 @@ export function addRoadFolder(pane, toolState, opts) {
     onRoadApplyStabilityPreset,
   } = opts;
   const rp = toolState.road;
-  const folder = pane.addFolder({ title: "Road", expanded: true });
+  const folder = pane.addFolder({ title: "Road", expanded: false });
 
   folder.addBinding(rp, "showHandles", { label: "Show handles" }).on("change", onRoadChanged);
   folder.addBinding(rp, "closed", { label: "Close path (loop)" }).on("change", onRoadChanged);

@@ -1,7 +1,7 @@
 export function addGrassFolder(pane, toolState, opts) {
   const { onGrassChanged, onGrassRebuildGeos, onGrassFill, onGrassClear, onGrassSaveDensity, onGrassLoadDensity } = opts;
   const gp = toolState.grass;
-  const folder = pane.addFolder({ title: "Grass", expanded: true });
+  const folder = pane.addFolder({ title: "Grass", expanded: false });
 
   folder.addBinding(gp, "enabled", { label: "Enabled" }).on("change", onGrassChanged);
   folder.addButton({ title: "Fill all grass" }).on("click", () => onGrassFill?.());

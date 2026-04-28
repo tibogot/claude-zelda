@@ -27,7 +27,7 @@ export function addTreeFolder(pane, toolState, opts) {
     onFoliageParamChanged,
   } = opts;
 
-  const folder = pane.addFolder({ title: "Tree LOD", expanded: true });
+  const folder = pane.addFolder({ title: "Tree LOD", expanded: false });
 
   // Active slot picker
   const slotOptions = {};

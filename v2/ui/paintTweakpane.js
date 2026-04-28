@@ -33,7 +33,7 @@ export function addPaintFolder(pane, toolState, opts) {
     config, textureLibrary, onPaintLayersChanged, onPaintFill, onPaintClear,
     onSoloLayerChanged, onHeightBlendChanged, brushMask,
   } = opts;
-  const folder = pane.addFolder({ title: "Paint", expanded: true });
+  const folder = pane.addFolder({ title: "Paint", expanded: false });
 
   // ── Active layer ───────────────────────────────────────────────────────
   const activePicker = { activeLayer: toolState.paint.activeLayer };
