@@ -189,6 +189,16 @@ export function createTweakpaneUi({
   playFolder.addBinding(smoke, "spread", { min: 0, max: 3, step: 0.02 });
   playFolder.addBinding(smoke, "drag", { min: 0, max: 0.6, step: 0.01 });
 
+  const carFolder = pane.addFolder({ title: "Play / Car Feel", expanded: false });
+  const car = toolState.playCar;
+  carFolder.addBinding(car, "accelScale", { label: "acceleration", min: 0.25, max: 3, step: 0.05 });
+  carFolder.addBinding(car, "maxSpeedScale", { label: "top speed", min: 0.25, max: 3, step: 0.05 });
+  carFolder.addBinding(car, "speedometerScale", { label: "speedometer", min: 0.1, max: 2, step: 0.05 });
+  carFolder.addBinding(car, "cameraDistance", { label: "cam distance", min: 4, max: 24, step: 0.25 });
+  carFolder.addBinding(car, "cameraHeight", { label: "cam height", min: 1, max: 10, step: 0.1 });
+  carFolder.addBinding(car, "cameraChaseSpeed", { label: "cam chase", min: 0.5, max: 12, step: 0.1 });
+  carFolder.addBinding(car, "cameraDriftLag", { label: "drift cam lag", min: 0, max: 5, step: 0.1 });
+
   addTerrainAppearanceFolder(pane, toolState, {
     textureLibrary,
     onTerrainSurfaceChanged,

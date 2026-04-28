@@ -759,6 +759,7 @@ export async function startV2App() {
     cliffBvh,
     isBarrierBlocked: (wx, wz) => barrierStore.isBlocked(wx, wz),
     smokeSettings: toolState.playSmoke,
+    carSettings: toolState.playCar,
   });
 
   const hud = createHud();

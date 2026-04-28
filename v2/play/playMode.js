@@ -653,7 +653,7 @@ function clearBullets(pool) {
 }
 
 export class PlayMode {
-  constructor({ scene, camera, renderer, controls, getWorldHeight, getTerrainHeight, worldHalf, cliffBvh, isBarrierBlocked, smokeSettings }) {
+  constructor({ scene, camera, renderer, controls, getWorldHeight, getTerrainHeight, worldHalf, cliffBvh, isBarrierBlocked, smokeSettings, carSettings }) {
     this.scene = scene;
     this.camera = camera;
     this.renderer = renderer;
@@ -663,6 +663,7 @@ export class PlayMode {
     this.worldHalf = worldHalf;
     this.cliffBvh = cliffBvh || null;
     this.isBarrierBlocked = isBarrierBlocked || null;
+    this.carSettings = carSettings || {};
     this._playerGroundY = 0;
 
     this.active = false;
@@ -1433,6 +1434,9 @@ export class PlayMode {
       }
     } else if (this.carMode) {
       // ── Arcade drift: heading + world velocity model ──
+      const carFeel = this.carSettings;
+      const accelScale = carFeel.accelScale ?? 1;
+      const maxSpeedScale = carFeel.maxSpeedScale ?? 1;
       const forward = keys.KeyW || keys.ArrowUp;
       const backward = keys.KeyS || keys.ArrowDown;
       const leftKey = keys.KeyA || keys.ArrowLeft;
@@ -1450,7 +1454,7 @@ export class PlayMode {
       // Throttle / brake applied along heading
       const boost = keys.ShiftLeft || keys.ShiftRight;
       const nitroActive = nitroHeld && this.carNitro > CAR_NITRO_MIN_TO_USE && !backward;
-      let accel = (boost ? CAR_ACCEL_BOOST : CAR_ACCEL) + (nitroActive ? CAR_NITRO_ACCEL_BONUS : 0);
+      let accel = ((boost ? CAR_ACCEL_BOOST : CAR_ACCEL) + (nitroActive ? CAR_NITRO_ACCEL_BONUS : 0)) * accelScale;
       if (!boost && !nitroActive) {
         const speedKmh = curSpeed * 3.6;
         const rampT = THREE.MathUtils.smoothstep(speedKmh, 0, CAR_BASE_ACCEL_RAMP_TO_KMH);
@@ -1462,11 +1466,11 @@ export class PlayMode {
         this.carVz += hz * accel * dtSec;
       } else if (backward) {
         if (curSpeed > 1) {
-          this.carVx -= hx * CAR_BRAKE * dtSec;
-          this.carVz -= hz * CAR_BRAKE * dtSec;
+          this.carVx -= hx * CAR_BRAKE * accelScale * dtSec;
+          this.carVz -= hz * CAR_BRAKE * accelScale * dtSec;
         } else {
-          this.carVx -= hx * CAR_REVERSE_ACCEL * dtSec;
-          this.carVz -= hz * CAR_REVERSE_ACCEL * dtSec;
+          this.carVx -= hx * CAR_REVERSE_ACCEL * accelScale * dtSec;
+          this.carVz -= hz * CAR_REVERSE_ACCEL * accelScale * dtSec;
         }
       } else if (curSpeed > 0.05) {
         const decel = CAR_COAST / curSpeed;
@@ -1494,7 +1498,7 @@ export class PlayMode {
       }
 
       // Clamp speed
-      const maxSpd = (boost ? CAR_MAX_SPEED_BOOST : CAR_MAX_SPEED) + (nitroActive ? CAR_NITRO_MAX_SPEED_BONUS : 0);
+      const maxSpd = ((boost ? CAR_MAX_SPEED_BOOST : CAR_MAX_SPEED) + (nitroActive ? CAR_NITRO_MAX_SPEED_BONUS : 0)) * maxSpeedScale;
       const newSpeed = Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz);
       if (newSpeed > maxSpd) {
         const s = maxSpd / newSpeed;
@@ -2290,7 +2294,11 @@ export class PlayMode {
     if (this._carHud) {
       if (carDriving) {
         this._carHud.style.display = "";
-        const kmh = Math.round(Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz) * 3.6);
+        const kmh = Math.round(
+          Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz) *
+          3.6 *
+          (this.carSettings.speedometerScale ?? 1),
+        );
         this._carHudSpd.textContent = kmh;
         this._carHudAngle.textContent = Math.round(this.carDriftAngle * 180 / Math.PI);
         this._carHudAngle.style.color = this.carDrifting ? "#ff3300" : "#ff6633";
@@ -2338,17 +2346,17 @@ export class PlayMode {
         const rx = Math.cos(this.carHeading);
         const rz = -Math.sin(this.carHeading);
         const latSign = Math.sign(this.carVx * rx + this.carVz * rz);
-        const driftOff = latSign * this.carDriftAngle * CAR_CAM_DRIFT_LAG;
+        const driftOff = latSign * this.carDriftAngle * (this.carSettings.cameraDriftLag ?? CAR_CAM_DRIFT_LAG);
         chaseTarget += driftOff;
       }
       let camDelta = chaseTarget - this.carCamYaw;
       while (camDelta > Math.PI) camDelta -= 2 * Math.PI;
       while (camDelta < -Math.PI) camDelta += 2 * Math.PI;
-      this.carCamYaw += camDelta * (1 - Math.exp(-CAR_CAM_CHASE_SPEED * dtSec));
+      this.carCamYaw += camDelta * (1 - Math.exp(-(this.carSettings.cameraChaseSpeed ?? CAR_CAM_CHASE_SPEED) * dtSec));
 
-      const camBehindX = this.playerPos.x + Math.sin(this.carCamYaw) * CAR_CAM_DIST;
-      const camBehindZ = this.playerPos.z + Math.cos(this.carCamYaw) * CAR_CAM_DIST;
-      const camY = lookAtY + CAR_CAM_HEIGHT;
+      const camBehindX = this.playerPos.x + Math.sin(this.carCamYaw) * (this.carSettings.cameraDistance ?? CAR_CAM_DIST);
+      const camBehindZ = this.playerPos.z + Math.cos(this.carCamYaw) * (this.carSettings.cameraDistance ?? CAR_CAM_DIST);
+      const camY = lookAtY + (this.carSettings.cameraHeight ?? CAR_CAM_HEIGHT);
       this.camera.position.set(camBehindX, camY, camBehindZ);
       this.camera.lookAt(this.playerPos.x, lookAtY, this.playerPos.z);
     } else if (iso) {

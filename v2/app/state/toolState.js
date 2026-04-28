@@ -110,6 +110,15 @@ export function createToolState() {
       drag: 0.12,
       color: "#6a6c76",
     },
+    playCar: {
+      accelScale: 1.0,
+      maxSpeedScale: 1.0,
+      speedometerScale: 1.0,
+      cameraDistance: 10,
+      cameraHeight: 3.5,
+      cameraChaseSpeed: 3.5,
+      cameraDriftLag: 1.8,
+    },
     treePaint: {
       activeSlot: 0,
       density: 0.5,
