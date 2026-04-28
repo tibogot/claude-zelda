@@ -1959,6 +1959,7 @@ export async function startV2App() {
   });
 
   renderer.domElement.addEventListener("pointermove", (event) => {
+    if (toolState.mode === "play") return;
     if (toolState.mode === "road" && roadSystem.dragging && roadSystem.selectedIdx >= 0) {
       const hit = pickTerrain(event);
       if (hit) roadSystem.moveSelected(hit.point);
@@ -2099,6 +2100,7 @@ export async function startV2App() {
   }
 
   window.addEventListener("keydown", (event) => {
+    if (event.defaultPrevented) return;
     const ctrl = event.ctrlKey || event.metaKey;
     if (ctrl && event.code === "KeyZ") {
       event.preventDefault();

@@ -44,6 +44,8 @@ const ISO_DIST_DEFAULT = 26;
 const ISO_DIST_MIN = 10;
 const ISO_DIST_MAX = 70;
 const ISO_YAW_ROT_SPEED = 1.6;
+const ISO_MOVE_RING_Y_OFFSET = 0.08;
+const ISO_HOVER_PICK_MIN_MS = 16;
 
 const FLY_MOUSE_SENS_X = 0.0022;
 const FLY_MOUSE_SENS_Y = 0.00235;
@@ -720,11 +722,33 @@ export class PlayMode {
     this._onMouseMove = this._onMouseMove.bind(this);
     this._onPointerLockChange = this._onPointerLockChange.bind(this);
     this._onIsoClick = this._onIsoClick.bind(this);
+    this._onIsoPointerMove = this._onIsoPointerMove.bind(this);
     this._onIsoWheel = this._onIsoWheel.bind(this);
     this._moveTarget = null;
 
     this._raycaster = new THREE.Raycaster();
     this._pointer = new THREE.Vector2();
+    this._isoPickHit = new THREE.Vector3();
+    this._lastIsoHoverPickMs = 0;
+    const isoRingGeo = new THREE.RingGeometry(1.05, 1.35, 48);
+    const isoRingMat = new THREE.MeshBasicMaterial({
+      color: 0x66ddff,
+      transparent: true,
+      opacity: 0.65,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    this.isoHoverRing = new THREE.Mesh(isoRingGeo, isoRingMat);
+    this.isoHoverRing.rotation.x = -Math.PI / 2;
+    this.isoHoverRing.renderOrder = 1;
+    this.isoHoverRing.visible = false;
+    scene.add(this.isoHoverRing);
+    this.isoTargetRing = new THREE.Mesh(isoRingGeo, isoRingMat.clone());
+    this.isoTargetRing.material.opacity = 0.9;
+    this.isoTargetRing.rotation.x = -Math.PI / 2;
+    this.isoTargetRing.renderOrder = 1;
+    this.isoTargetRing.visible = false;
+    scene.add(this.isoTargetRing);
     this.planeSpeed = 0;
     this._flyHud = null;
     this._flyHudSpd = null;
@@ -1335,6 +1359,7 @@ export class PlayMode {
     document.addEventListener("mousemove", this._onMouseMove);
     document.addEventListener("pointerlockchange", this._onPointerLockChange);
     this.renderer.domElement.addEventListener("click", this._onIsoClick);
+    this.renderer.domElement.addEventListener("pointermove", this._onIsoPointerMove);
     this.renderer.domElement.addEventListener("wheel", this._onIsoWheel, { passive: false });
 
     this.renderer.domElement.style.cursor = "none";
@@ -1345,6 +1370,8 @@ export class PlayMode {
     if (!this.active) return;
     this.active = false;
     this._moveTarget = null;
+    this.isoHoverRing.visible = false;
+    this.isoTargetRing.visible = false;
     for (const k of Object.keys(this.keysHeld)) delete this.keysHeld[k];
 
     this.capsule.visible = false;
@@ -1377,6 +1404,7 @@ export class PlayMode {
     document.removeEventListener("mousemove", this._onMouseMove);
     document.removeEventListener("pointerlockchange", this._onPointerLockChange);
     this.renderer.domElement.removeEventListener("click", this._onIsoClick);
+    this.renderer.domElement.removeEventListener("pointermove", this._onIsoPointerMove);
     this.renderer.domElement.removeEventListener("wheel", this._onIsoWheel);
 
     if (document.pointerLockElement) document.exitPointerLock();
@@ -1574,15 +1602,17 @@ export class PlayMode {
       if (keys.KeyD || keys.ArrowRight) { mx += Math.cos(moveYaw); mz -= Math.sin(moveYaw); }
     }
 
-    // Iso click-to-move (capsule only)
-    if (iso && !flying && this._moveTarget) {
+    // Iso click-to-move is for on-foot modes; vehicles keep their own controls.
+    if (iso && !flying && !this.carMode && this._moveTarget) {
       if (mx !== 0 || mz !== 0) {
         this._moveTarget = null;
+        this.isoTargetRing.visible = false;
       } else {
         const dx = this._moveTarget.x - this.playerPos.x;
         const dz = this._moveTarget.z - this.playerPos.z;
         if (Math.hypot(dx, dz) < 0.35) {
           this._moveTarget = null;
+          this.isoTargetRing.visible = false;
         } else {
           mx = dx; mz = dz;
         }
@@ -2340,7 +2370,7 @@ export class PlayMode {
     const carLookY = carDriving ? (this.carRoot ? this.carRoot.position.y + 1.2 : this.playerPos.y + 1.2) : 0;
     const lookAtY = flying ? this.flyHeight + 0.45 : carDriving ? carLookY : charMode ? charLookY : capsuleCY + 0.6;
 
-    if (carDriving) {
+    if (carDriving && !iso) {
       let chaseTarget = this.carHeading;
       if (this.carDrifting) {
         const rx = Math.cos(this.carHeading);
@@ -2395,6 +2425,9 @@ export class PlayMode {
 
   _toggleMoveMode() {
     const prev = this.moveMode;
+    this._moveTarget = null;
+    this.isoHoverRing.visible = false;
+    this.isoTargetRing.visible = false;
     if (prev === "capsule") {
       this.moveMode = "char";
       this.charYaw = this.capsule.rotation.y;
@@ -2569,9 +2602,11 @@ export class PlayMode {
       if (this.camView === "iso") {
         if (document.pointerLockElement) document.exitPointerLock();
         this.renderer.domElement.style.cursor = "";
-        this.isoYaw = this.flying ? this.flyHeading : this.camYaw;
+        this.isoYaw = this.carMode ? this.carHeading : this.flying ? this.flyHeading : this.camYaw;
       } else {
         this._moveTarget = null;
+        this.isoHoverRing.visible = false;
+        this.isoTargetRing.visible = false;
         this.renderer.domElement.style.cursor = "none";
         this.renderer.domElement.requestPointerLock();
       }
@@ -2627,17 +2662,92 @@ export class PlayMode {
 
   _onIsoClick(event) {
     if (!this.active || this.camView !== "iso" || event.button !== 0) return;
-    if (this.flying) return;
+    if (this.flying || this.carMode) return;
+    event.preventDefault();
+    const hit = this._pickIsoTerrain(event);
+    if (!hit) return;
+    if (!this._moveTarget) this._moveTarget = new THREE.Vector3();
+    this._moveTarget.copy(hit);
+    this.isoTargetRing.visible = true;
+    this.isoTargetRing.position.set(hit.x, hit.y + ISO_MOVE_RING_Y_OFFSET, hit.z);
+  }
+
+  _onIsoPointerMove(event) {
+    if (!this.active || this.camView !== "iso" || this.flying || this.carMode) {
+      this.isoHoverRing.visible = false;
+      return;
+    }
+    if (event.timeStamp - this._lastIsoHoverPickMs < ISO_HOVER_PICK_MIN_MS) return;
+    this._lastIsoHoverPickMs = event.timeStamp;
+    const hit = this._pickIsoTerrainApprox(event);
+    if (!hit) {
+      this.isoHoverRing.visible = false;
+      return;
+    }
+    this.isoHoverRing.visible = true;
+    this.isoHoverRing.position.set(hit.x, hit.y + ISO_MOVE_RING_Y_OFFSET, hit.z);
+  }
+
+  _pickIsoTerrainApprox(event) {
     const rect = this.renderer.domElement.getBoundingClientRect();
     this._pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     this._pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
     this._raycaster.setFromCamera(this._pointer, this.camera);
+    const origin = this._raycaster.ray.origin;
+    const dir = this._raycaster.ray.direction;
+    if (dir.y > -1e-4) return null;
 
-    const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -this.playerPos.y);
-    const target = new THREE.Vector3();
-    if (this._raycaster.ray.intersectPlane(groundPlane, target)) {
-      this._moveTarget = target;
+    const t = (this.playerPos.y - origin.y) / dir.y;
+    if (t < 0) return null;
+    const x = origin.x + dir.x * t;
+    const z = origin.z + dir.z * t;
+    return this._isoPickHit.set(x, this.getTerrainHeight(x, z), z);
+  }
+
+  _pickIsoTerrain(event) {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this._pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    this._pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    this._raycaster.setFromCamera(this._pointer, this.camera);
+    const origin = this._raycaster.ray.origin;
+    const dir = this._raycaster.ray.direction;
+    if (dir.y > -1e-4) return null;
+
+    let t = 0.4;
+    let step = 0.4;
+    let prevT = 0;
+    let prevAbove = origin.y - this.getTerrainHeight(origin.x, origin.z) > 0;
+    for (let i = 0; i < 240; i++) {
+      const px = origin.x + dir.x * t;
+      const py = origin.y + dir.y * t;
+      const pz = origin.z + dir.z * t;
+      const groundY = this.getTerrainHeight(px, pz);
+      const above = py - groundY > 0;
+      if (!above && prevAbove) {
+        let lo = prevT;
+        let hi = t;
+        for (let j = 0; j < 12; j++) {
+          const mid = (lo + hi) * 0.5;
+          const mx = origin.x + dir.x * mid;
+          const my = origin.y + dir.y * mid;
+          const mz = origin.z + dir.z * mid;
+          if (my - this.getTerrainHeight(mx, mz) > 0) lo = mid;
+          else hi = mid;
+        }
+        const ft = (lo + hi) * 0.5;
+        return this._isoPickHit.set(
+          origin.x + dir.x * ft,
+          origin.y + dir.y * ft,
+          origin.z + dir.z * ft,
+        );
+      }
+      prevAbove = above;
+      prevT = t;
+      t += step;
+      if (t > 1200) break;
+      if (step < 18) step *= 1.025;
     }
+    return null;
   }
 
   _onIsoWheel(event) {
@@ -2658,6 +2768,11 @@ export class PlayMode {
     this.scene.remove(this.capsule);
     this.capsule.geometry.dispose();
     this.capsule.material.dispose();
+    this.scene.remove(this.isoHoverRing);
+    this.scene.remove(this.isoTargetRing);
+    this.isoHoverRing.geometry.dispose();
+    this.isoHoverRing.material.dispose();
+    this.isoTargetRing.material.dispose();
     for (const trail of this._wingTrails) {
       this.scene.remove(trail.mesh);
       trail.mesh.geometry.dispose();
