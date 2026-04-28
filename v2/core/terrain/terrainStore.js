@@ -407,17 +407,19 @@ export class TerrainStore {
 
             const idx = iz * stride + ix;
             const current = heights[idx];
-            let blend, targetY;
+            let next;
             if (bestDist <= halfW) {
-              blend = 1;
-              targetY = bestY - heightOffset;
+              // Under the road: fully flatten to the spline height
+              next = bestY - heightOffset;
             } else {
-              blend = 1 - (bestDist - halfW) / (margin - halfW);
+              // Margin zone: smoothly blend from spline height at road edge
+              // back to the CURRENT terrain height (not spline Y) so the
+              // transition doesn't carve deep corridors into hillsides.
+              let blend = 1 - (bestDist - halfW) / (margin - halfW);
               blend = blend * blend * (3 - 2 * blend);
-              targetY = bestY;
+              const roadEdgeY = bestY - heightOffset;
+              next = current + (roadEdgeY - current) * blend;
             }
-
-            const next = current + (targetY - current) * blend;
             heights[idx] = next;
 
             const key = chunkKey(cx, cz);

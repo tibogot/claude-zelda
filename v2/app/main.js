@@ -1046,6 +1046,7 @@ export async function startV2App() {
       transformControls.setMode(toolState.cliffs.transformMode);
     },
     onRoadChanged: () => {
+      roadSystem.saveActiveStyle();
       roadSystem.syncMaterial();
       roadSystem.rebuildAllMeshes();
       ui?.pane.refresh();
@@ -1103,6 +1104,7 @@ export async function startV2App() {
     onRoadActiveIndexChanged: () => {
       roadSystem._clampActive();
       roadSystem.selectedIdx = -1;
+      roadSystem.loadActiveStyle();
       roadSystem._rebuildVisual();
       ui?.pane.refresh();
     },
