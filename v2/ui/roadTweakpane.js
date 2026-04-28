@@ -42,7 +42,7 @@ export function addRoadFolder(pane, toolState, opts) {
   centerFolder.addBinding(rp, "centerLineWidth", { label: "Width", min: 0.005, max: 0.1, step: 0.002 }).on("change", onRoadChanged);
   centerFolder.addBinding(rp, "centerLineSoftness", { label: "Softness", min: 0, max: 0.05, step: 0.002 }).on("change", onRoadChanged);
   centerFolder.addBinding(rp, "centerLineDashed", { label: "Dashed" }).on("change", onRoadChanged);
-  centerFolder.addBinding(rp, "centerLineDashScale", { label: "Dash density", min: 0.05, max: 2, step: 0.05 }).on("change", onRoadChanged);
+  centerFolder.addBinding(rp, "centerLineDashScale", { label: "Dash density", min: 0.002, max: 2, step: 0.002 }).on("change", onRoadChanged);
 
   const highwayFolder = centerFolder.addFolder({ title: "Highway lanes", expanded: false });
   highwayFolder.addBinding(rp, "doubleCenterLine", { label: "Double center" }).on("change", onRoadChanged);

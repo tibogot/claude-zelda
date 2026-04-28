@@ -255,6 +255,7 @@ export class RoadSystem {
         },
       );
       seg.mesh = new THREE.Mesh(geo, this.roadMat);
+      seg.mesh.receiveShadow = true;
       seg.mesh.renderOrder = 3;
       this.scene.add(seg.mesh);
     }

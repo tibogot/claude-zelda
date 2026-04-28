@@ -265,7 +265,7 @@ export function createToolState() {
     road: {
       width: 40,
       segments: 400,
-      heightOffset: 0.15,
+      heightOffset: 0,
       adaptiveLift: true,
       slopeLift: 0.35,
       liftMax: 0.6,
