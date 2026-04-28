@@ -200,6 +200,11 @@ export function createToolState() {
       showOverlay: true,
       overlayOpacity: 0.35,
     },
+    hole: {
+      erase: false,
+      showOverlay: true,
+      overlayOpacity: 0.35,
+    },
     ambientFx: {
       erase: false,
       effectType: "butterflies",

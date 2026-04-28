@@ -14,6 +14,7 @@ import { addWaterFolder } from "./waterTweakpane.js";
 import { addWaterfallFolder } from "./waterfallTweakpane.js";
 import { addDecalFolder } from "./decalTweakpane.js";
 import { addBarrierFolder } from "./barrierTweakpane.js";
+import { addHoleFolder } from "./holeTweakpane.js";
 import { addFleurFolder } from "./fleurTweakpane.js";
 import { addAmbientFxFolder } from "./ambientFxTweakpane.js";
 
@@ -128,6 +129,8 @@ export function createTweakpaneUi({
   onBarrierOverlayChanged,
   onBarrierClear,
   onBarrierFill,
+  onHoleOverlayChanged,
+  onHoleClear,
   onFleurChanged,
   onFleurColorChanged,
   onFleurStemChanged,
@@ -163,6 +166,7 @@ export function createTweakpaneUi({
         Flowers: "fleurs",
         "Ambient FX": "ambientfx",
         Barrier: "barrier",
+        Hole: "hole",
         Play: "play",
       },
     })
@@ -343,6 +347,10 @@ export function createTweakpaneUi({
     onBarrierOverlayChanged,
     onBarrierClear,
     onBarrierFill,
+  });
+  const holeFolder = addHoleFolder(pane, toolState, {
+    onHoleOverlayChanged,
+    onHoleClear,
   });
 
   const fleurFolder = addFleurFolder(pane, toolState, {
@@ -1018,6 +1026,7 @@ export function createTweakpaneUi({
     waterFolder,
     decalFolder,
     barrierFolder,
+    holeFolder,
     fleurFolder,
     ambientFxFolder,
     /** Call after hotkey / wheel edits to `toolState.brush` so bindings stay in sync. */

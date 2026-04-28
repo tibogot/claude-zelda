@@ -79,10 +79,17 @@ export function createV2ProceduralGroundMaterial(groundParams, meadowParams, cli
     })();
   }
 
+  if (splatOverlay?.holeMask) {
+    mat.opacityNode = Fn(() => splatOverlay.holeMask())();
+    mat.alphaTest = 0.5;
+    mat.transparent = false;
+  }
+
   return {
     material: mat,
     splatTexNode: splatOverlay?.splatTexNode ?? null,
     splat1TexNode: splatOverlay?.splat1TexNode ?? null,
+    holeTexNode: splatOverlay?.holeTexNode ?? null,
     uSoloLayer: splatOverlay?.uSoloLayer ?? null,
     uHeightBlend: splatOverlay?.uHeightBlend ?? null,
     uHeightContrast: splatOverlay?.uHeightContrast ?? null,

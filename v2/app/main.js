@@ -1,6 +1,12 @@
 import * as THREE from "three";
 import {
   uniform,
+  Fn,
+  float,
+  vec2,
+  step,
+  texture,
+  positionLocal,
   mix,
   clamp,
   fog,
@@ -69,6 +75,9 @@ import { WaterfallSystem } from "../tools/waterfall/waterfallSystem.js";
 import { BarrierStore } from "../core/barrier/barrierStore.js";
 import { BarrierSystem } from "../tools/barrier/barrierSystem.js";
 import { BarrierOverlay } from "../render/barrier/barrierOverlay.js";
+import { HoleStore } from "../core/hole/holeStore.js";
+import { HoleSystem } from "../tools/hole/holeSystem.js";
+import { HoleOverlay } from "../render/hole/holeOverlay.js";
 import { createFleurSystem, FLEUR_PRESETS, FLEUR_ALPHA_URLS } from "../../fleur-painter.js";
 import { createAmbientFxStore } from "../core/ambientfx/ambientFxStore.js";
 
@@ -382,6 +391,16 @@ export async function startV2App() {
     t.needsUpdate = true;
     return t;
   })();
+  const placeholderHoleTex = (() => {
+    const d = new Uint8Array([0, 0, 0, 0]);
+    const t = new THREE.DataTexture(d, 1, 1, THREE.RGBAFormat);
+    t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+    t.minFilter = THREE.LinearFilter;
+    t.magFilter = THREE.LinearFilter;
+    t.needsUpdate = true;
+    return t;
+  })();
+  let tileHoleTexNode = null;
 
   let _layerArrayAlbedo = null;
   let _layerArrayOrm = null;
@@ -410,7 +429,11 @@ export async function startV2App() {
       bundle = imageTexTerrainBundle;
     }
     if (!bundle) return null;
-    return { node0: bundle.splatTexNode, node1: bundle.splat1TexNode };
+    return {
+      node0: bundle.splatTexNode,
+      node1: bundle.splat1TexNode,
+      holeNode: bundle.holeTexNode,
+    };
   }
 
   function syncSoloLayer() {
@@ -441,8 +464,12 @@ export async function startV2App() {
       const key = mesh.userData.chunkKey;
       const entry = splatStore.getChunkSplatByKey(key);
       const tex = entry?.combinedTex ?? placeholderSplatTex;
+      const holeEntry = holeStore.getChunkByKey(key);
+      const holeTex = holeEntry?.tex ?? placeholderHoleTex;
       if (nodes.node0) nodes.node0.value = tex;
       if (nodes.node1) nodes.node1.value = tex;
+      if (nodes.holeNode) nodes.holeNode.value = holeTex;
+      if (tileHoleTexNode) tileHoleTexNode.value = holeTex;
     };
   }
 
@@ -544,6 +571,21 @@ export async function startV2App() {
   });
   const brushMask = new BrushMask();
   const paintSystem = new PaintSystem({ toolState, splatStore, config, brushMask });
+  const holeStore = new HoleStore(config);
+  const holeSystem = new HoleSystem({ toolState, holeStore, chunkStream });
+  const holeOverlay = new HoleOverlay(scene, config);
+  {
+    const cs = float(config.world.chunkSize);
+    tileHoleTexNode = texture(
+      placeholderHoleTex,
+      positionLocal.xz.div(cs).add(vec2(0.5, 0.5)),
+    );
+    tileTerrainMaterial.opacityNode = Fn(() => {
+      return float(1.0).sub(step(float(0.25), tileHoleTexNode.r));
+    })();
+    tileTerrainMaterial.alphaTest = 0.5;
+    tileTerrainMaterial.transparent = false;
+  }
 
   const treeStore = new TreeStore(config);
   const treeLodRenderer = new TreeLodRenderer(scene, config);
@@ -852,6 +894,7 @@ export async function startV2App() {
       if (ui?.waterFolder) ui.waterFolder.hidden = toolState.mode !== "water";
       if (ui?.decalFolder) ui.decalFolder.hidden = toolState.mode !== "decals";
       if (ui?.barrierFolder) ui.barrierFolder.expanded = toolState.mode === "barrier";
+      if (ui?.holeFolder) ui.holeFolder.expanded = toolState.mode === "hole";
       if (ui?.fleurFolder) ui.fleurFolder.hidden = toolState.mode !== "fleurs";
       if (ui?.ambientFxFolder) ui.ambientFxFolder.hidden = toolState.mode !== "ambientfx";
       if (toolState.mode === "ambientfx") {
@@ -1357,6 +1400,13 @@ export async function startV2App() {
       barrierSystem.fillAll();
       syncBarrierOverlay();
     },
+    onHoleOverlayChanged: () => {
+      syncHoleOverlay();
+    },
+    onHoleClear: () => {
+      holeSystem.clearAll();
+      syncHoleOverlay();
+    },
     onFleurChanged: () => {},
     onFleurColorChanged: (slot) => {
       const fp = toolState.fleur;
@@ -1393,6 +1443,7 @@ export async function startV2App() {
       toolState._waterExportData = () => waterStore.exportData();
       toolState._waterfallExportData = () => waterfallSystem.exportData();
       toolState._barrierExportData = () => barrierStore.exportData();
+      toolState._holeExportData = () => holeStore.exportData();
       toolState._fleurExportData = () => fleurSystem.getPositions();
       toolState._ambientFxExportData = () => ambientFxStore.getEmitters();
       toolState._roadExportData = () => roadSystem.exportData();
@@ -1405,6 +1456,7 @@ export async function startV2App() {
       delete toolState._waterExportData;
       delete toolState._waterfallExportData;
       delete toolState._barrierExportData;
+      delete toolState._holeExportData;
       delete toolState._fleurExportData;
       delete toolState._ambientFxExportData;
       delete toolState._roadExportData;
@@ -1480,6 +1532,11 @@ export async function startV2App() {
         barrierStore.dispose();
         if (project.settings?.barrierChunks) {
           barrierStore.importData(project.settings.barrierChunks);
+        }
+        holeOverlay.clear();
+        holeStore.dispose();
+        if (project.settings?.holeChunks) {
+          holeStore.importData(project.settings.holeChunks);
         }
         // Restore flowers
         if (project.settings?.fleurPositions && Array.isArray(project.settings.fleurPositions)) {
@@ -1564,6 +1621,17 @@ export async function startV2App() {
   }
   syncBarrierOverlay();
 
+  function syncHoleOverlay() {
+    if (playMode.active) {
+      holeOverlay.sync(holeStore, false, 0);
+      return;
+    }
+    const showInMode = toolState.mode === "hole";
+    const visible = showInMode || toolState.hole.showOverlay;
+    holeOverlay.sync(holeStore, visible, toolState.hole.overlayOpacity);
+  }
+  syncHoleOverlay();
+
   propUiCallbacks = ui.propCallbacks;
 
   playMode.onExit = () => {
@@ -1626,6 +1694,7 @@ export async function startV2App() {
   roadReflection.excludeFromReflection(splineSystem.previewGroup);
   roadReflection.excludeFromReflection(splineSystem.trainMesh);
   roadReflection.excludeFromReflection(barrierOverlay.group);
+  roadReflection.excludeFromReflection(holeOverlay.group);
 
   const rampMarkerA = new THREE.Mesh(
     new THREE.TorusGeometry(1, 0.045, 8, 64),
@@ -1744,7 +1813,7 @@ export async function startV2App() {
   }
 
   function isBrushMode() {
-    return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint" || toolState.mode === "grass" || toolState.mode === "cliffGrass" || toolState.mode === "barrier" || toolState.mode === "fleurs" || toolState.mode === "ambientfx" || (toolState.mode === "props" && toolState.props.placementMode === "paint");
+    return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint" || toolState.mode === "grass" || toolState.mode === "cliffGrass" || toolState.mode === "barrier" || toolState.mode === "hole" || toolState.mode === "fleurs" || toolState.mode === "ambientfx" || (toolState.mode === "props" && toolState.props.placementMode === "paint");
   }
 
   function updateBrushPreviewFromPick(hit) {
@@ -1951,6 +2020,8 @@ export async function startV2App() {
       propSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "barrier") {
       barrierSystem.beginStroke(hit.point, event);
+    } else if (toolState.mode === "hole") {
+      holeSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "fleurs") {
       paintFleurAt(hit.point.x, hit.point.z, toolState.fleur.erase || event.shiftKey);
     } else if (toolState.mode === "ambientfx") {
@@ -1992,6 +2063,8 @@ export async function startV2App() {
       propSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "barrier") {
       barrierSystem.applyAt(hit.point, event);
+    } else if (toolState.mode === "hole") {
+      holeSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "fleurs") {
       paintFleurAt(hit.point.x, hit.point.z, toolState.fleur.erase || event.shiftKey);
     } else if (toolState.mode === "ambientfx") {
@@ -2079,6 +2152,8 @@ export async function startV2App() {
       propSystem.endStroke();
     } else if (toolState.mode === "barrier") {
       barrierSystem.endStroke();
+    } else if (toolState.mode === "hole") {
+      holeSystem.endStroke();
     }
   });
 
@@ -2096,6 +2171,7 @@ export async function startV2App() {
     if (toolState.mode === "waterfall") return waterfallSystem;
     if (toolState.mode === "decals") return decalSystem;
     if (toolState.mode === "barrier") return barrierSystem;
+    if (toolState.mode === "hole") return holeSystem;
     return sculptSystem;
   }
 
@@ -2372,6 +2448,7 @@ export async function startV2App() {
     ambientFxStore.update(focusPos, _appTimeSec, afx.windX, afx.windZ, afx.windStrength);
 
     syncBarrierOverlay();
+    syncHoleOverlay();
 
     // Water: advance time + lake reflections
     const dtSec = dtMs * 0.001;
@@ -2453,6 +2530,8 @@ export async function startV2App() {
       splatStore.dispose();
       barrierStore.dispose();
       barrierOverlay.dispose();
+      holeStore.dispose();
+      holeOverlay.dispose();
       brushDomeGeom.dispose();
       brushDomeFillMat.dispose();
       brushDomeEdgesGeom.dispose();

@@ -44,6 +44,16 @@ function makePlaceholderSplatArray() {
   return t;
 }
 
+function makePlaceholderHoleTex() {
+  const d = new Uint8Array([0, 0, 0, 0]);
+  const t = new THREE.DataTexture(d, 1, 1, THREE.RGBAFormat);
+  t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+  t.minFilter = THREE.LinearFilter;
+  t.magFilter = THREE.LinearFilter;
+  t.needsUpdate = true;
+  return t;
+}
+
 const NUM_LAYERS = 7;
 const LUM = vec3(0.299, 0.587, 0.114);
 
@@ -68,6 +78,7 @@ export function createSplatOverlay(layerSlots, chunkSize, worldSize, albedoArray
   const splatUV = positionLocal.xz.div(cs).add(vec2(0.5, 0.5));
   const splatTexNode = texture(makePlaceholderSplatArray(), splatUV).depth(int(0));
   const splat1TexNode = texture(makePlaceholderSplatArray(), splatUV).depth(int(1));
+  const holeTexNode = texture(makePlaceholderHoleTex(), splatUV);
 
   // ── uniforms ───────────────────────────────────────────────────────────
   const uSoloLayer = uniform(-1.0);
@@ -196,9 +207,14 @@ export function createSplatOverlay(layerSlots, chunkSize, worldSize, albedoArray
     return mix(col, meadowProcFn(), meadowW);
   }
 
+  function holeMask() {
+    return float(1.0).sub(step(float(0.25), holeTexNode.r));
+  }
+
   return {
     splatTexNode,
     splat1TexNode,
+    holeTexNode,
     uSoloLayer,
     uHeightBlend,
     uHeightContrast,
@@ -208,5 +224,6 @@ export function createSplatOverlay(layerSlots, chunkSize, worldSize, albedoArray
     blendNormalRaw,
     blendNormalStrength,
     blendMeadow,
+    holeMask,
   };
 }
