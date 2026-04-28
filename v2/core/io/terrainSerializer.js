@@ -309,6 +309,8 @@ function extractSerializableSettings(toolState) {
     waterBodies: toolState._waterExportData?.() ?? null,
     waterfall: { ...toolState.waterfall },
     waterfallItems: toolState._waterfallExportData?.() ?? null,
+    decal: { ...toolState.decal },
+    decals: toolState._decalExportData?.() ?? null,
     barrier: { ...toolState.barrier },
     barrierChunks: toolState._barrierExportData?.() ?? null,
     ambientFx: { ...toolState.ambientFx },
@@ -372,6 +374,7 @@ export function applySettings(toolState, settings) {
   if (settings.spline) Object.assign(toolState.spline, settings.spline);
   if (settings.water) Object.assign(toolState.water, settings.water);
   if (settings.waterfall) Object.assign(toolState.waterfall, settings.waterfall);
+  if (settings.decal) Object.assign(toolState.decal, settings.decal);
   if (settings.barrier) Object.assign(toolState.barrier, settings.barrier);
   if (settings.ambientFx) Object.assign(toolState.ambientFx, settings.ambientFx);
   if (settings.fleur) {

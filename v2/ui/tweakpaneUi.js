@@ -12,6 +12,7 @@ import { addRiverFolder } from "./riverTweakpane.js";
 import { addSplineFolder } from "./splineTweakpane.js";
 import { addWaterFolder } from "./waterTweakpane.js";
 import { addWaterfallFolder } from "./waterfallTweakpane.js";
+import { addDecalFolder } from "./decalTweakpane.js";
 import { addBarrierFolder } from "./barrierTweakpane.js";
 import { addFleurFolder } from "./fleurTweakpane.js";
 import { addAmbientFxFolder } from "./ambientFxTweakpane.js";
@@ -112,6 +113,15 @@ export function createTweakpaneUi({
   onWaterfallChanged,
   onDeleteSelectedWaterfall,
   onClearAllWaterfalls,
+  onDecalLoadImage,
+  onDecalOpacityChanged,
+  onDecalAlignChanged,
+  onDecalRefit,
+  onDecalDeleteSelected,
+  onDecalClearAll,
+  onDecalSaveJson,
+  onDecalLoadJson,
+  onDecalTransformModeChanged,
   onBarrierOverlayChanged,
   onBarrierClear,
   onBarrierFill,
@@ -146,6 +156,7 @@ export function createTweakpaneUi({
         Props: "props",
         Water: "water",
         Waterfall: "waterfall",
+        Decals: "decals",
         Flowers: "fleurs",
         "Ambient FX": "ambientfx",
         Barrier: "barrier",
@@ -282,6 +293,18 @@ export function createTweakpaneUi({
     onWaterfallChanged,
     onDeleteSelectedWaterfall,
     onClearAllWaterfalls,
+  });
+
+  const decalFolder = addDecalFolder(pane, toolState, {
+    onLoadImage: onDecalLoadImage,
+    onOpacityChanged: onDecalOpacityChanged,
+    onAlignChanged: onDecalAlignChanged,
+    onRefit: onDecalRefit,
+    onDeleteSelected: onDecalDeleteSelected,
+    onClearAll: onDecalClearAll,
+    onSaveJson: onDecalSaveJson,
+    onLoadJson: onDecalLoadJson,
+    onTransformModeChanged: onDecalTransformModeChanged,
   });
 
   const barrierFolder = addBarrierFolder(pane, toolState, {
@@ -961,6 +984,7 @@ export function createTweakpaneUi({
     pane,
     propCallbacks,
     waterFolder,
+    decalFolder,
     barrierFolder,
     fleurFolder,
     ambientFxFolder,

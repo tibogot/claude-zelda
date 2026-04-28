@@ -64,6 +64,7 @@ import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { WaterStore } from "../core/water/waterStore.js";
 import { createWaterMaterials } from "../render/water/waterMaterial.js";
 import { WaterSystem } from "../tools/water/waterSystem.js";
+import { DecalSystem } from "../tools/decals/decalSystem.js";
 import { WaterfallSystem } from "../tools/waterfall/waterfallSystem.js";
 import { BarrierStore } from "../core/barrier/barrierStore.js";
 import { BarrierSystem } from "../tools/barrier/barrierSystem.js";
@@ -640,6 +641,10 @@ export async function startV2App() {
     if (toolState.mode === "props" && propInstancer.hasSelection) {
       propSystem.handleTransformChange();
     }
+    if (toolState.mode === "decals" && decalSystem.selectedIndex >= 0) {
+      const dd = decalSystem.decals[decalSystem.selectedIndex];
+      if (dd && !dd.soloMesh) decalSystem.handleTransformChange();
+    }
   });
   transformControls.addEventListener("mouseDown", () => {
     controls.enabled = false;
@@ -648,6 +653,7 @@ export async function startV2App() {
     controls.enabled = toolState.mode !== "play";
     if (toolState.mode === "cliffs") cliffSystem.handleTransformEnd();
     if (toolState.mode === "props") propSystem.handleTransformEnd();
+    if (toolState.mode === "decals") decalSystem.handleTransformEnd();
   });
 
   // ── Water system ──────────────────────────────────────────────────────────
@@ -666,6 +672,14 @@ export async function startV2App() {
     scene,
     toolState,
     transformControls,
+  });
+  const decalSystem = new DecalSystem({
+    scene,
+    toolState,
+    transformControls,
+    getWorldHeight,
+    roadSystem,
+    chunkStream,
   });
   let _appTimeSec = 0;
 
@@ -817,6 +831,14 @@ export async function startV2App() {
       } else {
         transformControls.setMode(toolState.waterfall.transformMode || "translate");
       }
+      if (toolState.mode !== "decals") {
+        decalSystem.deselect();
+      } else {
+        transformControls.setMode(toolState.decal.transformMode || "translate");
+        if (decalSystem.selectedIndex >= 0) {
+          decalSystem.selectByIndex(decalSystem.selectedIndex);
+        }
+      }
       if (toolState.mode !== "spline") {
         splineSystem.dragging = false;
       }
@@ -826,6 +848,7 @@ export async function startV2App() {
       if (toolState.mode !== "spline") splineSystem.clearPreview();
       // Toggle water/barrier folder visibility
       if (ui?.waterFolder) ui.waterFolder.hidden = toolState.mode !== "water";
+      if (ui?.decalFolder) ui.decalFolder.hidden = toolState.mode !== "decals";
       if (ui?.barrierFolder) ui.barrierFolder.expanded = toolState.mode === "barrier";
       if (ui?.fleurFolder) ui.fleurFolder.hidden = toolState.mode !== "fleurs";
       if (ui?.ambientFxFolder) ui.ambientFxFolder.hidden = toolState.mode !== "ambientfx";
@@ -1270,6 +1293,43 @@ export async function startV2App() {
       waterfallSystem.clearAll();
       ui?.pane.refresh();
     },
+    onDecalLoadImage: () => decalSystem.openImagePicker(),
+    onDecalOpacityChanged: () => {
+      decalSystem.applyOpacityToSelected();
+      ui?.pane.refresh();
+    },
+    onDecalAlignChanged: () => {},
+    onDecalRefit: () => {
+      decalSystem.refitSelectedToTerrain();
+      ui?.pane.refresh();
+    },
+    onDecalDeleteSelected: () => {
+      decalSystem.deleteSelected();
+      ui?.pane.refresh();
+    },
+    onDecalClearAll: () => {
+      decalSystem.clearAll();
+      ui?.pane.refresh();
+    },
+    onDecalSaveJson: () => {
+      const data = decalSystem.exportData();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      downloadBlob(blob, "decals.json");
+    },
+    onDecalLoadJson: async () => {
+      const file = await openFilePicker(".json");
+      if (!file) return;
+      try {
+        const text = await file.text();
+        await decalSystem.importData(JSON.parse(text));
+        ui?.pane.refresh();
+      } catch (err) {
+        console.error("[V2] Failed to load decals.json", err);
+      }
+    },
+    onDecalTransformModeChanged: () => {
+      transformControls.setMode(toolState.decal.transformMode);
+    },
     onBarrierOverlayChanged: () => {
       syncBarrierOverlay();
     },
@@ -1322,6 +1382,7 @@ export async function startV2App() {
       toolState._roadExportData = () => roadSystem.exportData();
       toolState._riverExportData = () => riverSystem.exportData();
       toolState._splineExportData = () => splineSystem.exportData();
+      toolState._decalExportData = () => decalSystem.exportData();
       const buf = serializeProject({ terrainStore, splatStore, treeStore, config, toolState });
       delete toolState._cliffExportData;
       delete toolState._propExportData;
@@ -1333,6 +1394,7 @@ export async function startV2App() {
       delete toolState._roadExportData;
       delete toolState._riverExportData;
       delete toolState._splineExportData;
+      delete toolState._decalExportData;
       const blob = new Blob([buf], { type: "application/octet-stream" });
       const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       downloadBlob(blob, `terrain-${ts}.v2terrain`);
@@ -1391,6 +1453,11 @@ export async function startV2App() {
           waterfallSystem.importData(project.settings.waterfallItems);
         } else {
           waterfallSystem.clearAll();
+        }
+        if (project.settings?.decals && Array.isArray(project.settings.decals)) {
+          await decalSystem.importData(project.settings.decals);
+        } else {
+          decalSystem.clearAll();
         }
         // Restore barriers
         barrierOverlay.clear();
@@ -1744,6 +1811,14 @@ export async function startV2App() {
       if (consumed) ui?.pane.refresh();
       return;
     }
+    if (toolState.mode === "decals" && event.button === 0) {
+      if (transformControls.dragging) return;
+      event.preventDefault();
+      if (decalSystem.handlePointerDown(camera, event.clientX, event.clientY, renderer.domElement)) {
+        ui?.pane.refresh();
+      }
+      return;
+    }
     if (toolState.mode === "cliffs" && event.button === 0 && !transformControls.dragging) {
       const hit = pickTerrain(event);
       if (hit) {
@@ -2002,6 +2077,7 @@ export async function startV2App() {
     if (toolState.mode === "props") return propSystem;
     if (toolState.mode === "water") return waterSystem;
     if (toolState.mode === "waterfall") return waterfallSystem;
+    if (toolState.mode === "decals") return decalSystem;
     if (toolState.mode === "barrier") return barrierSystem;
     return sculptSystem;
   }
@@ -2051,6 +2127,7 @@ export async function startV2App() {
       toolState.mode !== "props" &&
       toolState.mode !== "water" &&
       toolState.mode !== "waterfall" &&
+      toolState.mode !== "decals" &&
       toolState.mode !== "play"
     ) {
       event.preventDefault();
@@ -2072,6 +2149,23 @@ export async function startV2App() {
       event.preventDefault();
       waterfallSystem.deleteSelected();
       ui?.pane.refresh();
+    } else if (event.code === "Delete" && toolState.mode === "decals") {
+      event.preventDefault();
+      decalSystem.deleteSelected();
+      ui?.pane.refresh();
+    } else if (event.code === "KeyD" && !ctrl && toolState.mode !== "play" && toolState.mode !== "decals") {
+      event.preventDefault();
+      toolState.mode = "decals";
+      if (ui?.decalFolder) ui.decalFolder.hidden = false;
+      ui?.pane.refresh();
+      updateBrushPreviewFromPick(null);
+    } else if (event.code === "KeyD" && !ctrl && toolState.mode === "decals") {
+      event.preventDefault();
+      toolState.mode = "view";
+      decalSystem.deselect();
+      if (ui?.decalFolder) ui.decalFolder.hidden = true;
+      ui?.pane.refresh();
+      updateBrushPreviewFromPick(null);
     } else if (toolState.mode === "water" && !ctrl) {
       if (event.code === "KeyE") {
         event.preventDefault();
@@ -2088,6 +2182,20 @@ export async function startV2App() {
       toolState.mode = toolState.mode === "waterfall" ? "view" : "waterfall";
       ui?.pane.refresh();
       updateBrushPreviewFromPick(null);
+    } else if (toolState.mode === "decals" && !ctrl) {
+      if (event.code === "KeyW") {
+        event.preventDefault();
+        decalSystem.setTransformMode("translate");
+        ui?.pane.refresh();
+      } else if (event.code === "KeyE") {
+        event.preventDefault();
+        decalSystem.setTransformMode("rotate");
+        ui?.pane.refresh();
+      } else if (event.code === "KeyR") {
+        event.preventDefault();
+        decalSystem.setTransformMode("scale");
+        ui?.pane.refresh();
+      }
     } else if (toolState.mode === "waterfall" && !ctrl) {
       if (event.code === "KeyW") {
         event.preventDefault();

@@ -8,7 +8,7 @@ function deepCloneJson(x) {
 
 export function createToolState() {
   return {
-    /** `view` (orbit only) | `sculpt` | `paint` | `treePaint` | `spline`. Defaults to `view` — matches v1. */
+    /** `view` (orbit only) | `sculpt` | `paint` | `treePaint` | `spline` | `decals` | … Defaults to `view` — matches v1. */
     mode: "view",
     /** `tile` = grid material; `tsl` = procedural TSL; `image` = tiled image-slot material. */
     terrainSurface: "tile",
@@ -489,6 +489,15 @@ export function createToolState() {
       slopeEnabled: true,
       slopeMin: 0.65,
       slopeMax: 0.85,
+    },
+    /** Decals mode (D) — textured quads; instanced per texture+opacity. */
+    decal: {
+      opacity: 1,
+      heightOffset: 0.05,
+      defaultScale: 4,
+      alignToNormal: true,
+      conformSubdiv: 32,
+      transformMode: "translate",
     },
   };
 }
