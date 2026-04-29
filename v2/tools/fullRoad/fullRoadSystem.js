@@ -20,6 +20,10 @@ const STYLE_KEYS = [
   "asphaltDark", "asphaltLight", "grainScale", "grainStrength",
   "enhanced", "normalStrength", "roughnessBase", "reflectStrength",
   "mixBlur", "mixStrength", "mixContrast", "normalDistort",
+  "dirtAmount", "dirtScale", "dirtContrast", "dirtTint", "edgeDirtBoost",
+  "wearAmount", "wearScale", "wearContrast", "wearDarken",
+  "scratchAmount", "scratchScale", "scratchThinness",
+  "roughnessDirtBoost", "roughnessWearReduce",
   "lodNear", "lodMid", "lodFar", "texScale",
 ];
 

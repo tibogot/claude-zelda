@@ -69,6 +69,22 @@ export function addFullRoadFolder(pane, toolState, opts) {
   enhFolder.addBinding(rp, "mixContrast", { label: "Reflect contrast", min: 0.2, max: 3, step: 0.05 }).on("change", onFullRoadChanged);
   enhFolder.addBinding(rp, "normalDistort", { label: "Normal distort", min: 0, max: 0.5, step: 0.01 }).on("change", onFullRoadChanged);
 
+  const agingFolder = folder.addFolder({ title: "Road Aging (Dirt/Wear)", expanded: false });
+  agingFolder.addBinding(rp, "dirtAmount", { label: "Dirt amount", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
+  agingFolder.addBinding(rp, "dirtScale", { label: "Dirt scale", min: 0.5, max: 20, step: 0.1 }).on("change", onFullRoadChanged);
+  agingFolder.addBinding(rp, "dirtContrast", { label: "Dirt contrast", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
+  agingFolder.addBinding(rp, "dirtTint", { label: "Dirt tint", view: "color" }).on("change", onFullRoadChanged);
+  agingFolder.addBinding(rp, "edgeDirtBoost", { label: "Edge boost", min: 0, max: 2, step: 0.01 }).on("change", onFullRoadChanged);
+  agingFolder.addBinding(rp, "wearAmount", { label: "Wear amount", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
+  agingFolder.addBinding(rp, "wearScale", { label: "Wear scale", min: 0.5, max: 30, step: 0.1 }).on("change", onFullRoadChanged);
+  agingFolder.addBinding(rp, "wearContrast", { label: "Wear contrast", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
+  agingFolder.addBinding(rp, "wearDarken", { label: "Wear darken", min: 0, max: 0.8, step: 0.01 }).on("change", onFullRoadChanged);
+  agingFolder.addBinding(rp, "scratchAmount", { label: "Scratch amount", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
+  agingFolder.addBinding(rp, "scratchScale", { label: "Scratch scale", min: 2, max: 80, step: 0.5 }).on("change", onFullRoadChanged);
+  agingFolder.addBinding(rp, "scratchThinness", { label: "Scratch thinness", min: 0.1, max: 0.98, step: 0.01 }).on("change", onFullRoadChanged);
+  agingFolder.addBinding(rp, "roughnessDirtBoost", { label: "Dirt roughness+", min: 0, max: 0.5, step: 0.01 }).on("change", onFullRoadChanged);
+  agingFolder.addBinding(rp, "roughnessWearReduce", { label: "Wear roughness-", min: 0, max: 0.4, step: 0.01 }).on("change", onFullRoadChanged);
+
   // Road Accessories (paint along road edge)
   const accFolder = folder.addFolder({ title: "Road Accessories", expanded: false });
   accFolder.addBinding(rp, "accessoryType", {
