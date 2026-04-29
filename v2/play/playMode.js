@@ -98,6 +98,8 @@ const CAR_HALF_LENGTH = 2.5;
 const CAR_BODY_HEIGHT = 0.8;
 const CAR_GRAVITY = 28;
 const CAR_EDGE_DROP_THRESHOLD = 0.45;
+const CAR_MAX_SLOPE_COS = 0.5; // ~60° max climbable slope (cos(60°) ≈ 0.5)
+const CAR_SLOPE_SAMPLE_EPS = 0.5;
 const CAR_COLLISION_SKIN = 0.08;
 const CAR_COLLISION_ITERS = 3;
 const CAR_NITRO_KEY = "KeyN";
@@ -798,6 +800,7 @@ export class PlayMode {
     this.carCamYaw = 0;
     this.carVelY = 0;
     this.carInAir = false;
+    this.carOnSteepSlope = false;
     this.carNitro = 1.0;
     this.carBodyRoll = 0;
     this.carBodyPitch = 0;
@@ -1500,6 +1503,10 @@ export class PlayMode {
         const accelMul = THREE.MathUtils.lerp(CAR_BASE_ACCEL_LOW_SPEED_MUL, 1.0, rampT);
         accel *= accelMul;
       }
+      // Reduce acceleration on steep slopes
+      if (this.carOnSteepSlope) {
+        accel *= 0.1;
+      }
       if (forward) {
         this.carVx += hx * accel * dtSec;
         this.carVz += hz * accel * dtSec;
@@ -2043,6 +2050,25 @@ export class PlayMode {
       }
     } else if (carDriving) {
       this.flyHeight = 0;
+
+      // Compute terrain normal via finite differences
+      const eps = CAR_SLOPE_SAMPLE_EPS;
+      const px = this.playerPos.x;
+      const pz = this.playerPos.z;
+      const hL = this.getWorldHeight(px - eps, pz);
+      const hR = this.getWorldHeight(px + eps, pz);
+      const hD = this.getWorldHeight(px, pz - eps);
+      const hU = this.getWorldHeight(px, pz + eps);
+      const inv2eps = 1 / (2 * eps);
+      const nx = (hL - hR) * inv2eps;
+      const nz = (hD - hU) * inv2eps;
+      const nLen = Math.sqrt(nx * nx + 1 + nz * nz);
+      const normalY = 1 / nLen; // normalized Y component
+
+      // Check if slope is too steep
+      const tooSteep = normalY < CAR_MAX_SLOPE_COS;
+      this.carOnSteepSlope = tooSteep && !this.carInAir;
+
       if (this.carInAir) {
         this.carVelY -= CAR_GRAVITY * dtSec;
         this.playerPos.y += this.carVelY * dtSec;
@@ -2057,6 +2083,19 @@ export class PlayMode {
           this.carInAir = true;
           this.carVelY = 0;
           this.playerPos.y = prevY;
+        } else if (tooSteep) {
+          // Slope too steep: slide down along slope direction
+          const slideX = (nx / nLen) * CAR_GRAVITY * 0.5 * dtSec;
+          const slideZ = (nz / nLen) * CAR_GRAVITY * 0.5 * dtSec;
+          this.carVx += slideX;
+          this.carVz += slideZ;
+          // Dampen uphill velocity component
+          const upDot = this.carVx * (nx / nLen) + this.carVz * (nz / nLen);
+          if (upDot < 0) {
+            this.carVx -= (nx / nLen) * upDot * 0.8;
+            this.carVz -= (nz / nLen) * upDot * 0.8;
+          }
+          this.playerPos.y = groundY;
         } else {
           this.playerPos.y = groundY;
         }
@@ -2280,11 +2319,18 @@ export class PlayMode {
         const rearAvg = rearY * 0.5;
         const terrainRollRaw = Math.atan2(rightAvg - leftAvg, CAR_TRACK * scaleFactor);
         const terrainPitchRaw = Math.atan2(frontAvg - rearAvg, CAR_WHEEL_BASE * scaleFactor);
-        const terrainRollTarget = THREE.MathUtils.clamp(terrainRollRaw, -CAR_BODY_TERRAIN_ROLL_MAX, CAR_BODY_TERRAIN_ROLL_MAX);
-        const terrainPitchTarget = THREE.MathUtils.clamp(terrainPitchRaw, -CAR_BODY_TERRAIN_PITCH_MAX, CAR_BODY_TERRAIN_PITCH_MAX);
         const terrainSmooth = 1 - Math.exp(-CAR_TERRAIN_BODY_SMOOTH * dtSec);
-        this.carTerrainRoll = THREE.MathUtils.lerp(this.carTerrainRoll, terrainRollTarget, terrainSmooth);
-        this.carTerrainPitch = THREE.MathUtils.lerp(this.carTerrainPitch, terrainPitchTarget, terrainSmooth);
+        if (this.carInAir) {
+          // In air: lerp toward neutral (no terrain influence)
+          this.carTerrainRoll = THREE.MathUtils.lerp(this.carTerrainRoll, 0, terrainSmooth);
+          this.carTerrainPitch = THREE.MathUtils.lerp(this.carTerrainPitch, 0, terrainSmooth);
+        } else {
+          // On ground: follow terrain
+          const terrainRollTarget = THREE.MathUtils.clamp(terrainRollRaw, -CAR_BODY_TERRAIN_ROLL_MAX, CAR_BODY_TERRAIN_ROLL_MAX);
+          const terrainPitchTarget = THREE.MathUtils.clamp(terrainPitchRaw, -CAR_BODY_TERRAIN_PITCH_MAX, CAR_BODY_TERRAIN_PITCH_MAX);
+          this.carTerrainRoll = THREE.MathUtils.lerp(this.carTerrainRoll, terrainRollTarget, terrainSmooth);
+          this.carTerrainPitch = THREE.MathUtils.lerp(this.carTerrainPitch, terrainPitchTarget, terrainSmooth);
+        }
         const finalPitch = THREE.MathUtils.clamp(this.carTerrainPitch + this.carBodyPitch, -CAR_BODY_PITCH_MAX, CAR_BODY_PITCH_MAX);
         const finalRoll = THREE.MathUtils.clamp(this.carTerrainRoll + this.carBodyRoll, -CAR_BODY_ROLL_MAX, CAR_BODY_ROLL_MAX);
         this.carChassis.rotation.set(finalPitch, 0, finalRoll);
@@ -2480,6 +2526,7 @@ export class PlayMode {
       this.flyAileronAngle = 0;
       this.carVelY = 0;
       this.carInAir = false;
+      this.carOnSteepSlope = false;
       this.driftMarks.reset();
       this.driftSmoke.reset();
       this._clearTrails(); clearBullets(this._bullets.pool);
