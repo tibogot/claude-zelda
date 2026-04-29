@@ -24,6 +24,8 @@ const STYLE_KEYS = [
   "wearAmount", "wearScale", "wearContrast", "wearDarken",
   "scratchAmount", "scratchScale", "scratchThinness",
   "roughnessDirtBoost", "roughnessWearReduce",
+  "wetAmount", "wetCoverage", "puddleAmount", "puddleScale", "puddleContrast", "puddleEdgeBoost",
+  "wetDarkening", "wetRoughnessMin", "puddleReflectStrength", "puddleSkySuppress", "puddleTint",
   "lodNear", "lodMid", "lodFar", "texScale",
 ];
 
@@ -1148,7 +1150,7 @@ export class FullRoadSystem {
 
   hasReflectiveRoads() {
     const p = this.toolState.fullRoad;
-    return !!p.enhanced && (p.reflectStrength ?? 0) > 0 && this.edges.length > 0;
+    return (p.reflectStrength ?? 0) > 0 && this.edges.length > 0;
   }
 
   updateReflectVP(matrix) {

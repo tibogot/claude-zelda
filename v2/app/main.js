@@ -598,7 +598,7 @@ export async function startV2App() {
   const grassPaintSystem = new GrassPaintSystem({ toolState, grassManager, config });
   const cliffGrassPaintSystem = new CliffGrassPaintSystem({ toolState, grassManager, config });
   const roadReflection = new RoadPlanarReflection({
-    renderer, scene, camera, resScale: 0.35,
+    renderer, scene, camera, resScale: 0.75,
   });
   const roadSystem = new RoadSystem({
     scene, camera, toolState,
@@ -2768,7 +2768,18 @@ export async function startV2App() {
       hudLastMs = now;
     }
     if (roadSystem.hasReflectiveRoads() || fullRoadSystem.hasReflectiveRoads()) {
-      roadReflection.setReflectY(roadSystem.hasReflectiveRoads() ? roadSystem.getAverageY() : fullRoadSystem.getAverageY());
+      // Set reflection plane Y and center based on mode
+      if (playMode.active) {
+        roadReflection.setReflectY(focusPos.y + 0.02);
+        roadReflection.setReflectCenter(focusPos); // Center on player for better coverage
+      } else {
+        roadReflection.setReflectCenter(null);
+        const activeMode = toolState.mode;
+        const useFullRoadPlane = activeMode === "fullRoad"
+          ? fullRoadSystem.hasReflectiveRoads()
+          : (!roadSystem.hasReflectiveRoads() && fullRoadSystem.hasReflectiveRoads());
+        roadReflection.setReflectY(useFullRoadPlane ? fullRoadSystem.getAverageY() : roadSystem.getAverageY());
+      }
       const roadMeshes = [...roadSystem.getRoadMeshes(), ...fullRoadSystem.getRoadMeshes()];
       roadReflection.render(roadMeshes);
       roadSystem.updateReflectVP(roadReflection.reflectVP);

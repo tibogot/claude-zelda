@@ -85,6 +85,19 @@ export function addFullRoadFolder(pane, toolState, opts) {
   agingFolder.addBinding(rp, "roughnessDirtBoost", { label: "Dirt roughness+", min: 0, max: 0.5, step: 0.01 }).on("change", onFullRoadChanged);
   agingFolder.addBinding(rp, "roughnessWearReduce", { label: "Wear roughness-", min: 0, max: 0.4, step: 0.01 }).on("change", onFullRoadChanged);
 
+  const wetFolder = folder.addFolder({ title: "Wet Road / Puddles", expanded: false });
+  wetFolder.addBinding(rp, "wetAmount", { label: "Wet amount", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
+  wetFolder.addBinding(rp, "wetCoverage", { label: "Wet coverage", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
+  wetFolder.addBinding(rp, "puddleAmount", { label: "Puddle amount", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
+  wetFolder.addBinding(rp, "puddleScale", { label: "Puddle scale", min: 0.4, max: 12, step: 0.1 }).on("change", onFullRoadChanged);
+  wetFolder.addBinding(rp, "puddleContrast", { label: "Puddle contrast", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
+  wetFolder.addBinding(rp, "puddleEdgeBoost", { label: "Edge puddles", min: 0, max: 1.5, step: 0.01 }).on("change", onFullRoadChanged);
+  wetFolder.addBinding(rp, "wetDarkening", { label: "Wet darkening", min: 0, max: 0.6, step: 0.01 }).on("change", onFullRoadChanged);
+  wetFolder.addBinding(rp, "wetRoughnessMin", { label: "Min roughness", min: 0.02, max: 0.5, step: 0.01 }).on("change", onFullRoadChanged);
+  wetFolder.addBinding(rp, "puddleReflectStrength", { label: "Puddle reflect", min: 0, max: 1.5, step: 0.01 }).on("change", onFullRoadChanged);
+  wetFolder.addBinding(rp, "puddleSkySuppress", { label: "Sky suppress", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
+  wetFolder.addBinding(rp, "puddleTint", { label: "Puddle tint", view: "color" }).on("change", onFullRoadChanged);
+
   // Road Accessories (paint along road edge)
   const accFolder = folder.addFolder({ title: "Road Accessories", expanded: false });
   accFolder.addBinding(rp, "accessoryType", {

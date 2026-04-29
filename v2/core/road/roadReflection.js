@@ -7,6 +7,7 @@ export class RoadPlanarReflection {
     this.srcCamera = camera;
     this.resScale = resScale;
     this.reflectY = 0;
+    this.reflectCenter = null; // Optional: center reflection on this XZ position instead of camera
 
     const w = Math.floor(window.innerWidth * resScale);
     const h = Math.floor(window.innerHeight * resScale);
@@ -39,6 +40,12 @@ export class RoadPlanarReflection {
     this.reflectY = y;
   }
 
+  // Set the XZ center for reflection (e.g., player/car position)
+  // This makes reflection coverage centered on the car, not the camera behind it
+  setReflectCenter(pos) {
+    this.reflectCenter = pos ? pos.clone() : null;
+  }
+
   excludeFromReflection(obj) {
     this._excludeSet.add(obj);
   }
@@ -54,17 +61,24 @@ export class RoadPlanarReflection {
     const ref = this.refCamera;
     const waterY = this.reflectY;
 
-    ref.fov = src.fov;
+    // Use VERY wide FOV to capture entire visible road - avoids "edge update" artifacts
+    ref.fov = 160;
     ref.aspect = src.aspect;
     ref.near = src.near;
-    ref.far = src.far;
+    ref.far = src.far * 2;
     ref.updateProjectionMatrix();
 
-    ref.position.copy(src.position);
-    ref.position.y = 2 * waterY - src.position.y;
+    // Position reflection camera at player position if available, else camera position
+    if (this.reflectCenter) {
+      ref.position.set(this.reflectCenter.x, src.position.y, this.reflectCenter.z);
+    } else {
+      ref.position.copy(src.position);
+    }
+    ref.position.y = 2 * waterY - ref.position.y;
+    
+    // Look in the same direction as main camera but mirrored
     ref.quaternion.copy(src.quaternion);
     ref.up.set(0, -1, 0);
-
     const target = new THREE.Vector3();
     src.getWorldDirection(target);
     target.y = -target.y;
