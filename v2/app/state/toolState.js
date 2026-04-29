@@ -550,6 +550,13 @@ export function createToolState() {
       fenceRailThickness: 0.04,
       fenceEdgeOffset: 0.5,
       fenceColor: "#5a5a5a",
+      // Tunnel painting (centerline accessory)
+      tunnelMode: false,
+      tunnelRadius: 6,
+      tunnelYOffset: 0,
+      tunnelRadialSegments: 20,
+      tunnelPathSegments: 160,
+      tunnelColor: "#6c727a",
       // Active accessory type for painting
       accessoryType: "guardrail",
       // Road decals

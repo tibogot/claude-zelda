@@ -108,6 +108,7 @@ export class FullRoadSystem {
     this.kerbs = [];
     this.barriers = [];
     this.fences = [];
+    this.tunnels = [];
     this._nextAccessoryId = 1;
     this._paintingAccessory = null; // Active painting state
 
@@ -1212,6 +1213,43 @@ export class FullRoadSystem {
     return best;
   }
 
+  _findNearestRoadCenterPoint(pos, maxDist = 20) {
+    const paths = this._buildRoadPaths();
+    let best = null;
+
+    for (let pathIdx = 0; pathIdx < paths.length; pathIdx++) {
+      const path = paths[pathIdx];
+      const curve = this._curveForPath(path);
+      if (!curve) continue;
+
+      const samples = Math.max(64, path.nodeIds.length * 32);
+      const pts = curve.getSpacedPoints(samples);
+
+      for (let i = 0; i < pts.length; i++) {
+        const t = i / Math.max(1, pts.length - 1);
+        const dx = pos.x - pts[i].x;
+        const dz = pos.z - pts[i].z;
+        const distSq = dx * dx + dz * dz;
+
+        if (distSq < maxDist * maxDist && (!best || distSq < best.distSq)) {
+          best = {
+            distSq,
+            pathIdx,
+            path,
+            curve,
+            t,
+            side: "center",
+            x: pts[i].x,
+            y: pts[i].y,
+            z: pts[i].z,
+          };
+        }
+      }
+    }
+
+    return best;
+  }
+
   // ─────────────────────────────────────────────────────────────────────────────
   // GENERIC ACCESSORY PAINTING (guardrails, kerbs, barriers, fences)
   // ─────────────────────────────────────────────────────────────────────────────
@@ -1223,6 +1261,7 @@ export class FullRoadSystem {
       case "kerb": return p.kerbEdgeOffset ?? 0.0;
       case "barrier": return p.barrierEdgeOffset ?? 0.5;
       case "fence": return p.fenceEdgeOffset ?? 0.5;
+      case "tunnel": return 0;
       default: return 0.3;
     }
   }
@@ -1234,6 +1273,7 @@ export class FullRoadSystem {
       case "kerb": return p.kerbSide ?? "right";
       case "barrier": return p.barrierSide ?? "right";
       case "fence": return p.fenceSide ?? "right";
+      case "tunnel": return "center";
       default: return "right";
     }
   }
@@ -1244,6 +1284,7 @@ export class FullRoadSystem {
       case "kerb": return this.kerbs;
       case "barrier": return this.barriers;
       case "fence": return this.fences;
+      case "tunnel": return this.tunnels;
       default: return this.guardrails;
     }
   }
@@ -1252,7 +1293,9 @@ export class FullRoadSystem {
     const p = this.toolState.fullRoad;
     const accessoryType = type || p.accessoryType || "guardrail";
     const edgeOffset = this._getAccessoryEdgeOffset(accessoryType);
-    const hit = this._findNearestRoadEdgePoint(pos, 20, edgeOffset);
+    const hit = accessoryType === "tunnel"
+      ? this._findNearestRoadCenterPoint(pos, 20)
+      : this._findNearestRoadEdgePoint(pos, 20, edgeOffset);
     if (!hit) return false;
     
     const side = this._getAccessorySide(accessoryType);
@@ -1293,8 +1336,8 @@ export class FullRoadSystem {
       const tangent = curve.getTangentAt(t);
       const perp = perpXZ(normalizeXZ(tangent));
       
-      const edgeX = pt.x + perp.x * lateralDist * sideSign;
-      const edgeZ = pt.z + perp.z * lateralDist * sideSign;
+      const edgeX = pa.type === "tunnel" ? pt.x : pt.x + perp.x * lateralDist * sideSign;
+      const edgeZ = pa.type === "tunnel" ? pt.z : pt.z + perp.z * lateralDist * sideSign;
       const dx = pos.x - edgeX;
       const dz = pos.z - edgeZ;
       const distSq = dx * dx + dz * dz;
@@ -1404,6 +1447,7 @@ export class FullRoadSystem {
     buildAll(this.kerbs, "kerb");
     buildAll(this.barriers, "barrier");
     buildAll(this.fences, "fence");
+    buildAll(this.tunnels, "tunnel");
   }
 
   // Backwards compatibility
@@ -1419,6 +1463,7 @@ export class FullRoadSystem {
       case "kerb": return this._buildKerbMesh(curve, side, startT, endT, isPreview);
       case "barrier": return this._buildBarrierMesh(curve, side, startT, endT, isPreview);
       case "fence": return this._buildFenceMesh(curve, side, startT, endT, isPreview);
+      case "tunnel": return this._buildTunnelMesh(curve, startT, endT, isPreview);
       default: return null;
     }
   }
@@ -1898,13 +1943,61 @@ export class FullRoadSystem {
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
+  // TUNNEL MESH (centerline tube)
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  _buildTunnelMesh(curve, startT, endT, isPreview = false) {
+    const p = this.toolState.fullRoad;
+    const tMin = Math.min(startT, endT);
+    const tMax = Math.max(startT, endT);
+    const span = Math.max(0.001, tMax - tMin);
+    const segCount = Math.max(16, Math.ceil(span * (p.tunnelPathSegments ?? 160)));
+    const radius = Math.max(0.5, p.tunnelRadius ?? 6);
+    const radialSegments = Math.max(6, p.tunnelRadialSegments | 0);
+    const yOffset = p.tunnelYOffset ?? 0;
+
+    const centerPoints = [];
+    for (let i = 0; i <= segCount; i++) {
+      const t = tMin + span * (i / segCount);
+      const pt = curve.getPointAt(t);
+      centerPoints.push(new THREE.Vector3(
+        pt.x,
+        pt.y + (p.heightOffset ?? 0) + yOffset,
+        pt.z,
+      ));
+    }
+
+    if (centerPoints.length < 2) return null;
+
+    const tunnelCurve = new THREE.CatmullRomCurve3(centerPoints, false, "catmullrom", 0.5);
+    const geo = new THREE.TubeGeometry(tunnelCurve, segCount, radius, radialSegments, false);
+    const mat = new THREE.MeshStandardMaterial({
+      color: p.tunnelColor ?? "#6c727a",
+      roughness: 0.88,
+      metalness: 0.04,
+      side: THREE.DoubleSide,
+      transparent: isPreview,
+      opacity: isPreview ? 0.45 : 1.0,
+    });
+
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.renderOrder = 2;
+
+    const group = new THREE.Group();
+    group.add(mesh);
+    return group;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
   // DELETE / CLEAR ACCESSORIES
   // ─────────────────────────────────────────────────────────────────────────────
 
   deleteAccessory(id, type = null) {
     const arrays = type 
       ? [this._getAccessoryArray(type)]
-      : [this.guardrails, this.kerbs, this.barriers, this.fences];
+      : [this.guardrails, this.kerbs, this.barriers, this.fences, this.tunnels];
     
     for (const arr of arrays) {
       const idx = arr.findIndex(g => g.id === id);
@@ -1925,6 +2018,7 @@ export class FullRoadSystem {
       this.kerbs.length = 0;
       this.barriers.length = 0;
       this.fences.length = 0;
+      this.tunnels.length = 0;
     }
     this._paintingAccessory = null;
     this.rebuildAllAccessories();
@@ -2212,6 +2306,7 @@ export class FullRoadSystem {
       kerbs: serializeAccessories(this.kerbs),
       barriers: serializeAccessories(this.barriers),
       fences: serializeAccessories(this.fences),
+      tunnels: serializeAccessories(this.tunnels),
       decals: this.decals.map(d => ({
         id: d.id,
         type: d.type,
@@ -2262,13 +2357,14 @@ export class FullRoadSystem {
     this.kerbs = parseAccessories(data?.kerbs);
     this.barriers = parseAccessories(data?.barriers);
     this.fences = parseAccessories(data?.fences);
+    this.tunnels = parseAccessories(data?.tunnels);
     
     this.selectedNodeId = nodeIds.has(data?.selectedNodeId) ? data.selectedNodeId : null;
     this._nextNodeId = Math.max(data?.nextNodeId ?? 1, Math.max(0, ...this.nodes.map(n => n.id)) + 1);
     this._nextEdgeId = Math.max(data?.nextEdgeId ?? 1, Math.max(0, ...this.edges.map(e => e.id)) + 1);
     
     const allAccessoryIds = [
-      ...this.guardrails, ...this.kerbs, ...this.barriers, ...this.fences
+      ...this.guardrails, ...this.kerbs, ...this.barriers, ...this.fences, ...this.tunnels
     ].map(a => a.id);
     this._nextAccessoryId = Math.max(data?.nextAccessoryId ?? 1, Math.max(0, ...allAccessoryIds) + 1);
     
@@ -2300,7 +2396,7 @@ export class FullRoadSystem {
    * button can include collidable Full Road accessories.
    */
   forEachMeshInstance(cb) {
-    const collidableTypes = new Set(["guardrail", "barrier", "fence"]);
+    const collidableTypes = new Set(["guardrail", "barrier", "fence", "tunnel"]);
 
     for (const child of this.accessoryGroup.children) {
       const accessoryType = child.userData?.accessoryType;

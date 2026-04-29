@@ -2165,13 +2165,14 @@ export async function startV2App() {
         return;
       }
       
-      // Accessory painting mode (guardrails, kerbs, barriers, fences)
+      // Accessory painting mode (guardrails, kerbs, barriers, fences, tunnels)
       const accType = toolState.fullRoad.accessoryType;
       const isPaintMode = accType && (
         (accType === "guardrail" && toolState.fullRoad.guardrailMode) ||
         (accType === "kerb" && toolState.fullRoad.kerbMode) ||
         (accType === "barrier" && toolState.fullRoad.barrierMode) ||
-        (accType === "fence" && toolState.fullRoad.fenceMode)
+        (accType === "fence" && toolState.fullRoad.fenceMode) ||
+        (accType === "tunnel" && toolState.fullRoad.tunnelMode)
       );
       // Also check if shift key is held as quick paint mode
       if (isPaintMode || event.shiftKey) {

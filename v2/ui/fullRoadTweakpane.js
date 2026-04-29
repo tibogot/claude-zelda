@@ -102,7 +102,7 @@ export function addFullRoadFolder(pane, toolState, opts) {
   const accFolder = folder.addFolder({ title: "Road Accessories", expanded: false });
   accFolder.addBinding(rp, "accessoryType", {
     label: "Type",
-    options: { Guardrail: "guardrail", Kerb: "kerb", Barrier: "barrier", Fence: "fence" },
+    options: { Guardrail: "guardrail", Kerb: "kerb", Barrier: "barrier", Fence: "fence", Tunnel: "tunnel" },
   }).on("change", () => onAccessoryTypeChanged?.());
   
   // Guardrail settings
@@ -143,6 +143,15 @@ export function addFullRoadFolder(pane, toolState, opts) {
   fenceFolder.addBinding(rp, "fencePostSpacing", { label: "Post spacing", min: 1, max: 6, step: 0.25 }).on("change", () => onAccessoryParamsChanged?.());
   fenceFolder.addBinding(rp, "fenceRailCount", { label: "Rail count", min: 1, max: 6, step: 1 }).on("change", () => onAccessoryParamsChanged?.());
   fenceFolder.addBinding(rp, "fenceColor", { label: "Color", view: "color" }).on("change", () => onAccessoryParamsChanged?.());
+
+  // Tunnel settings (centerline tube)
+  const tunnelFolder = accFolder.addFolder({ title: "Tunnel Settings", expanded: false });
+  tunnelFolder.addBinding(rp, "tunnelMode", { label: "Paint mode" }).on("change", () => onAccessoryParamsChanged?.());
+  tunnelFolder.addBinding(rp, "tunnelRadius", { label: "Radius", min: 1, max: 20, step: 0.25 }).on("change", () => onAccessoryParamsChanged?.());
+  tunnelFolder.addBinding(rp, "tunnelYOffset", { label: "Y offset", min: -5, max: 10, step: 0.1 }).on("change", () => onAccessoryParamsChanged?.());
+  tunnelFolder.addBinding(rp, "tunnelRadialSegments", { label: "Radial segs", min: 6, max: 48, step: 1 }).on("change", () => onAccessoryParamsChanged?.());
+  tunnelFolder.addBinding(rp, "tunnelPathSegments", { label: "Path segs", min: 32, max: 400, step: 4 }).on("change", () => onAccessoryParamsChanged?.());
+  tunnelFolder.addBinding(rp, "tunnelColor", { label: "Color", view: "color" }).on("change", () => onAccessoryParamsChanged?.());
   
   // Clear buttons
   accFolder.addButton({ title: "Clear all accessories" }).on("click", () => onAccessoryClearAll?.());
