@@ -2295,6 +2295,25 @@ export class FullRoadSystem {
     this._updateSelectedY();
   }
 
+  /**
+   * BVH integration hook — mirrors SplineSystem so the manual "Rebake BVH"
+   * button can include collidable Full Road accessories.
+   */
+  forEachMeshInstance(cb) {
+    const collidableTypes = new Set(["guardrail", "barrier", "fence"]);
+
+    for (const child of this.accessoryGroup.children) {
+      const accessoryType = child.userData?.accessoryType;
+      if (!collidableTypes.has(accessoryType)) continue;
+
+      child.updateMatrixWorld(true);
+      child.traverse((obj) => {
+        if (!obj.isMesh || !obj.geometry) return;
+        cb(obj.geometry, obj.matrixWorld);
+      });
+    }
+  }
+
   dispose() {
     this._clearGroup(this.meshGroup);
     this._clearGroup(this.handleGroup);

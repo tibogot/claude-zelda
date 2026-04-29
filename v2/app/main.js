@@ -1144,9 +1144,9 @@ export async function startV2App() {
     onDeleteSelectedCliff: () => cliffSystem.handleDelete(),
     onClearAllCliffs: () => cliffSystem.clearAll(),
     onRebakeBvh: () => {
-      cliffBvh.bake(terrainStore, config, [propStore, splineSystem, waterfallSystem]);
+      cliffBvh.bake(terrainStore, config, [propStore, splineSystem, fullRoadSystem, waterfallSystem]);
       grassManager.rebuildCliffHeightTex(cliffBvh, terrainStore, config.world.size);
-      console.log("[V2] BVH rebaked (cliffs + props + spline tunnels + waterfalls) + cliff height tex updated");
+      console.log("[V2] BVH rebaked (cliffs + props + spline/full-road accessories + waterfalls) + cliff height tex updated");
     },
     onCliffTransformModeChanged: () => {
       transformControls.setMode(toolState.cliffs.transformMode);
