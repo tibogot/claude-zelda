@@ -18,6 +18,7 @@ import { addBarrierFolder } from "./barrierTweakpane.js";
 import { addHoleFolder } from "./holeTweakpane.js";
 import { addFleurFolder } from "./fleurTweakpane.js";
 import { addAmbientFxFolder } from "./ambientFxTweakpane.js";
+import { addAudioMixerFolder } from "./audioTweakpane.js";
 
 export function createTweakpaneUi({
   toolState,
@@ -151,6 +152,7 @@ export function createTweakpaneUi({
   onAmbientFxFlapChanged,
   onAmbientFxRingsChanged,
   onAmbientFxClear,
+  onRebuildCarAudio,
   brushMask,
 }) {
   const pane = new Pane({ title: "V2 Terrain Core" });
@@ -216,6 +218,64 @@ export function createTweakpaneUi({
   carFolder.addBinding(car, "cameraChaseSpeed", { label: "cam chase", min: 0.5, max: 12, step: 0.1 });
   carFolder.addBinding(car, "cameraDriftLag", { label: "drift cam lag", min: 0, max: 5, step: 0.1 });
 
+  const carAudioFolder = pane.addFolder({ title: "Play / Car audio", expanded: false });
+  const carAu = toolState.playCarAudio;
+  carAudioFolder.addBinding(carAu, "enabled", { label: "enabled" });
+  const carVolFolder = carAudioFolder.addFolder({ title: "Layer volumes", expanded: false });
+  carVolFolder.addBinding(carAu, "engineMul", { label: "accel engine", min: 0, max: 1.5, step: 0.02 });
+  carVolFolder.addBinding(carAu, "idleMul", { label: "idle engine", min: 0, max: 1.5, step: 0.02 });
+  carVolFolder.addBinding(carAu, "windMul", { label: "wind / speed", min: 0, max: 1, step: 0.05 });
+  carVolFolder.addBinding(carAu, "wheelsMul", { label: "wheels surface", min: 0, max: 1, step: 0.05 });
+  carVolFolder.addBinding(carAu, "nitroMul", { label: "nitro (one-shot)", min: 0, max: 1, step: 0.05 });
+  carVolFolder.addBinding(carAu, "driftBrakeMul", { label: "drift brake (Space)", min: 0, max: 1.2, step: 0.05 });
+  const engFolder = carAudioFolder.addFolder({ title: "Accel engine curve", expanded: false });
+  engFolder.addBinding(carAu, "engineRefTopSpeed", { label: "ref top speed m/s", min: 20, max: 90, step: 1 });
+  engFolder.addBinding(carAu, "engineVolAtTop", { label: "vol at top spd (W)", min: 0, max: 1.2, step: 0.02 });
+  engFolder.addBinding(carAu, "enginePitchMin", { label: "pitch min", min: 0.5, max: 1.2, step: 0.01 });
+  engFolder.addBinding(carAu, "enginePitchMax", { label: "pitch max", min: 0.9, max: 2.2, step: 0.01 });
+  const accelRespFolder = carAudioFolder.addFolder({ title: "Accel / coast response", expanded: false });
+  accelRespFolder.addBinding(carAu, "engineAccelThrottleFloor", {
+    label: "W floor (idle→accel)",
+    min: 0.05,
+    max: 0.55,
+    step: 0.01,
+  });
+  accelRespFolder.addBinding(carAu, "engineAccelEaseUp", { label: "accel rise speed", min: 6, max: 40, step: 0.5 });
+  accelRespFolder.addBinding(carAu, "engineCoastFadeEaseLo", {
+    label: "coast fade (slow spd)",
+    min: 0.5,
+    max: 8,
+    step: 0.1,
+  });
+  accelRespFolder.addBinding(carAu, "engineCoastFadeEaseHi", {
+    label: "coast fade (fast spd)",
+    min: 0.15,
+    max: 4,
+    step: 0.02,
+  });
+  const idleFolder = carAudioFolder.addFolder({ title: "Idle engine bed", expanded: false });
+  idleFolder.addBinding(carAu, "idleVolRest", { label: "vol at rest", min: 0, max: 0.5, step: 0.01 });
+  idleFolder.addBinding(carAu, "idleVolRoll", { label: "vol roll w speed", min: 0, max: 0.6, step: 0.01 });
+  idleFolder.addBinding(carAu, "idleRefSpeed", { label: "ref speed m/s", min: 10, max: 80, step: 1 });
+  idleFolder.addBinding(carAu, "idlePitchMin", { label: "pitch min", min: 0.5, max: 1.2, step: 0.01 });
+  idleFolder.addBinding(carAu, "idlePitchMax", { label: "pitch max", min: 0.9, max: 1.5, step: 0.01 });
+  const carLoopFolder = carAudioFolder.addFolder({ title: "Loop regions (Howler sprites)", expanded: false });
+  carLoopFolder.addBinding(carAu, "engineLoopStartMs", { label: "engine start ms", min: 0, max: 120000, step: 10 });
+  carLoopFolder.addBinding(carAu, "engineLoopDurationMs", { label: "engine dur ms (0=full)", min: 0, max: 120000, step: 10 });
+  carLoopFolder.addBinding(carAu, "idleLoopStartMs", { label: "idle start ms", min: 0, max: 120000, step: 10 });
+  carLoopFolder.addBinding(carAu, "idleLoopDurationMs", { label: "idle dur ms (0=full)", min: 0, max: 120000, step: 10 });
+  carLoopFolder.addBinding(carAu, "windLoopStartMs", { label: "wind start ms", min: 0, max: 120000, step: 10 });
+  carLoopFolder.addBinding(carAu, "windLoopDurationMs", { label: "wind dur ms (0=full)", min: 0, max: 120000, step: 10 });
+  carLoopFolder.addBinding(carAu, "wheelsLoopStartMs", { label: "wheels start ms", min: 0, max: 120000, step: 10 });
+  carLoopFolder.addBinding(carAu, "wheelsLoopDurationMs", { label: "wheels dur ms (0=full)", min: 0, max: 120000, step: 10 });
+  carLoopFolder.addBinding(carAu, "driftBrakeLoopStartMs", { label: "drift start ms", min: 0, max: 120000, step: 10 });
+  carLoopFolder.addBinding(carAu, "driftBrakeLoopDurationMs", { label: "drift dur ms (0=full)", min: 0, max: 120000, step: 10 });
+  carLoopFolder
+    .addButton({ title: "Apply loop / clip rebuild" })
+    .on("click", () => {
+      onRebuildCarAudio?.();
+    });
+
   const spawnFolder = pane.addFolder({ title: "Play / Spawn", expanded: false });
   const spawn = toolState.playSpawn;
   spawnFolder.addBinding(spawn, "enabled", { label: "use spawn" }).on("change", () => onPlaySpawnChanged?.());
@@ -239,6 +299,8 @@ export function createTweakpaneUi({
       onPlaySpawnChanged?.();
       pane.refresh();
     });
+
+  addAudioMixerFolder(pane, toolState);
 
   addTerrainAppearanceFolder(pane, toolState, {
     textureLibrary,

@@ -4,6 +4,7 @@ import {
   attribute, float, vec3, pow, sub, abs, smoothstep, mul, mix, add,
 } from "three/tsl";
 import { loadTreeGlbFromUrl, getSharedGltfLoader } from "../core/foliage/glbLoader.js";
+import { setupPlayModeCarAudio } from "./carAudioSetup.js";
 
 const CAP_R = 0.4;
 const CAP_H = 1.2;
@@ -657,7 +658,10 @@ function clearBullets(pool) {
 }
 
 export class PlayMode {
-  constructor({ scene, camera, renderer, controls, getWorldHeight, getTerrainHeight, worldHalf, cliffBvh, isBarrierBlocked, smokeSettings, carSettings, spawnSettings }) {
+  constructor({
+    scene, camera, renderer, controls, getWorldHeight, getTerrainHeight, worldHalf, cliffBvh,
+    isBarrierBlocked, smokeSettings, carSettings, carAudioSettings, spawnSettings, audioSystem,
+  }) {
     this.scene = scene;
     this.camera = camera;
     this.renderer = renderer;
@@ -668,7 +672,15 @@ export class PlayMode {
     this.cliffBvh = cliffBvh || null;
     this.isBarrierBlocked = isBarrierBlocked || null;
     this.carSettings = carSettings || {};
+    this.carAudioSettings = carAudioSettings || {};
     this.spawnSettings = spawnSettings || null;
+    /** @type {object | null} */
+    this._audioSystem = audioSystem || null;
+    /** @type {(() => void) | null} */
+    this._disposeCarAudio = null;
+    if (audioSystem) {
+      this._disposeCarAudio = setupPlayModeCarAudio(this, audioSystem);
+    }
     this._playerGroundY = 0;
 
     this.active = false;
@@ -2821,8 +2833,25 @@ export class PlayMode {
 
   set onExit(fn) { this._exitCallback = fn; }
 
+  /**
+   * Rebuild car Howls (loop sprite regions, clip paths). Call after editing loop ms in Tweakpane.
+   */
+  rebuildCarAudio() {
+    if (this._disposeCarAudio) {
+      this._disposeCarAudio();
+      this._disposeCarAudio = null;
+    }
+    if (this._audioSystem) {
+      this._disposeCarAudio = setupPlayModeCarAudio(this, this._audioSystem);
+    }
+  }
+
   dispose() {
     this.exit();
+    if (this._disposeCarAudio) {
+      this._disposeCarAudio();
+      this._disposeCarAudio = null;
+    }
     this.scene.remove(this.capsule);
     this.capsule.geometry.dispose();
     this.capsule.material.dispose();

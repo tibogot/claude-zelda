@@ -119,6 +119,66 @@ export function createToolState() {
       cameraChaseSpeed: 3.5,
       cameraDriftLag: 1.8,
     },
+    /** Car Howler layers (vehicle bus). Assets: `v2/static/sounds/vehicle/` */
+    playCarAudio: {
+      enabled: false,
+      /** Overall gain on the accel engine layer */
+      engineMul: 0.85,
+      /** Speed (m/s) at which accel vol + pitch reach their max while W held */
+      engineRefTopSpeed: 52,
+      /** Volume at ref top speed when W held (× engineMul) */
+      engineVolAtTop: 0.78,
+      /** Howler playback rate at low / high speed while accelerating */
+      enginePitchMin: 0.88,
+      enginePitchMax: 1.32,
+      /** Min “drive” while W from standstill so accel layer is audible immediately (0–1) */
+      engineAccelThrottleFloor: 0.24,
+      /** Volume rise speed when pressing W (smoothVolume ease-up) */
+      engineAccelEaseUp: 22,
+      /** Coast fade ease when releasing W at ~0 speed (higher = faster mute) */
+      engineCoastFadeEaseLo: 2.6,
+      /** Coast fade ease at ref top speed (lower = longer tail while coasting fast) */
+      engineCoastFadeEaseHi: 0.4,
+      /** Idle bed layer gain */
+      idleMul: 1,
+      idleVolRest: 0.32,
+      idleVolRoll: 0.38,
+      idleRefSpeed: 45,
+      idlePitchMin: 0.88,
+      idlePitchMax: 1.06,
+      windMul: 0,
+      nitroMul: 0.3,
+      wheelsMul: 0,
+      /** Handbrake (Space) drift / brake loop gain */
+      driftBrakeMul: 0.45,
+      /** Howler sprite loop window (ms). Duration 0 = loop whole file. Rebuild car audio to apply. */
+      engineLoopStartMs: 0,
+      engineLoopDurationMs: 0,
+      idleLoopStartMs: 0,
+      idleLoopDurationMs: 0,
+      windLoopStartMs: 0,
+      windLoopDurationMs: 0,
+      wheelsLoopStartMs: 0,
+      wheelsLoopDurationMs: 0,
+      driftBrakeLoopStartMs: 0,
+      driftBrakeLoopDurationMs: 0,
+    },
+    /**
+     * Runtime mixer (Howler) — Unity-style buses: master × category.
+     * Persisted in project JSON via terrainSerializer.
+     */
+    audio: {
+      muteAll: false,
+      pauseWhenHidden: true,
+      buses: {
+        master: { volume: 1, mute: false },
+        sfx: { volume: 1, mute: false },
+        music: { volume: 0.85, mute: false },
+        voice: { volume: 1, mute: false },
+        ui: { volume: 1, mute: false },
+        vehicle: { volume: 1, mute: false },
+      },
+    },
     playSpawn: {
       enabled: false,
       x: 0,

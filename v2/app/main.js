@@ -53,6 +53,7 @@ import { GrassManager } from "../render/foliage/grassManager.js";
 import { GrassPaintSystem } from "../tools/foliage/grassPaintSystem.js";
 import { CliffGrassPaintSystem } from "../tools/foliage/cliffGrassPaintSystem.js";
 import { PlayMode } from "../play/playMode.js";
+import { createV2AudioSystem } from "../audio/createV2AudioSystem.js";
 import { createGroundTslBundle } from "../../chunkGroundTsl.js";
 import { RoadSystem } from "../tools/road/roadSystem.js";
 import { FullRoadSystem } from "../tools/fullRoad/fullRoadSystem.js";
@@ -807,6 +808,7 @@ export async function startV2App() {
     }
   }
 
+  const audioSystem = createV2AudioSystem({ toolState });
   const playMode = new PlayMode({
     scene, camera, renderer, controls,
     getWorldHeight,
@@ -816,8 +818,15 @@ export async function startV2App() {
     isBarrierBlocked: (wx, wz) => barrierStore.isBlocked(wx, wz),
     smokeSettings: toolState.playSmoke,
     carSettings: toolState.playCar,
+    carAudioSettings: toolState.playCarAudio,
     spawnSettings: toolState.playSpawn,
+    audioSystem,
   });
+  const gestureAudioUnlock = () => {
+    audioSystem.unlock();
+  };
+  window.addEventListener("pointerdown", gestureAudioUnlock, { once: true, capture: true });
+  window.addEventListener("keydown", gestureAudioUnlock, { once: true, capture: true });
 
   const hud = createHud();
   /** @type {ReturnType<typeof createTweakpaneUi>} */
@@ -860,6 +869,9 @@ export async function startV2App() {
     },
     onPlaySpawnChanged: () => {
       syncPlaySpawnMarker();
+    },
+    onRebuildCarAudio: () => {
+      playMode.rebuildCarAudio();
     },
     onModeChanged: () => {
       if (toolState.mode !== "sculpt") {
@@ -2658,7 +2670,9 @@ export async function startV2App() {
     tickPerf(perf, now, dtMs);
 
     if (!playMode.active) controls.update();
-    playMode.update(dtMs * 0.001);
+    const dtSec = dtMs * 0.001;
+    playMode.update(dtSec);
+    audioSystem.update(dtSec);
     if (playMode.active) camera.updateMatrixWorld(true);
     const focusPos = playMode.active ? playMode.playerPos : camera.position;
 
@@ -2727,7 +2741,6 @@ export async function startV2App() {
     syncHoleOverlay();
 
     // Water: advance time + lake reflections
-    const dtSec = dtMs * 0.001;
     _appTimeSec += Math.min(0.05, dtSec);
     waterMaterials.updateTime(_appTimeSec);
     if (waterStore.lakeBodies.length > 0) {
@@ -2770,6 +2783,8 @@ export async function startV2App() {
     scene,
     camera,
     renderer,
+    /** Howler-based mixer + `register()` for gameplay sounds */
+    audioSystem,
     dispose() {
       renderer.domElement.removeEventListener("wheel", onCanvasWheelBrush, { capture: true });
       if (csm) {
@@ -2799,6 +2814,7 @@ export async function startV2App() {
       waterMaterials.dispose();
       waterfallSystem.dispose();
       playMode.dispose();
+      audioSystem.dispose();
       tileTerrainMaterial.dispose();
       disposeProceduralBundle();
       disposeImageTexBundle();

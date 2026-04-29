@@ -287,6 +287,13 @@ function extractSerializableSettings(toolState) {
       distance: { ...toolState.fog.distance },
     },
     playSpawn: { ...toolState.playSpawn },
+    audio: {
+      muteAll: toolState.audio.muteAll,
+      pauseWhenHidden: toolState.audio.pauseWhenHidden,
+      buses: Object.fromEntries(
+        Object.entries(toolState.audio.buses).map(([k, v]) => [k, { ...v }]),
+      ),
+    },
     groundTsl: JSON.parse(JSON.stringify(toolState.groundTsl)),
     meadowTsl: JSON.parse(JSON.stringify(toolState.meadowTsl)),
     tslGroundUi: { ...toolState.tslGroundUi },
@@ -361,6 +368,19 @@ export function applySettings(toolState, settings) {
     if (settings.fog.distance) Object.assign(toolState.fog.distance, settings.fog.distance);
   }
   if (settings.playSpawn) Object.assign(toolState.playSpawn, settings.playSpawn);
+  if (settings.audio) {
+    if (settings.audio.muteAll != null) toolState.audio.muteAll = settings.audio.muteAll;
+    if (settings.audio.pauseWhenHidden != null) {
+      toolState.audio.pauseWhenHidden = settings.audio.pauseWhenHidden;
+    }
+    if (settings.audio.buses) {
+      for (const k of Object.keys(settings.audio.buses)) {
+        if (toolState.audio.buses[k]) {
+          Object.assign(toolState.audio.buses[k], settings.audio.buses[k]);
+        }
+      }
+    }
+  }
   if (settings.groundTsl) Object.assign(toolState.groundTsl, JSON.parse(JSON.stringify(settings.groundTsl)));
   if (settings.meadowTsl) Object.assign(toolState.meadowTsl, JSON.parse(JSON.stringify(settings.meadowTsl)));
   if (settings.tslGroundUi) Object.assign(toolState.tslGroundUi, settings.tslGroundUi);
