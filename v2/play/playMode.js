@@ -826,8 +826,15 @@ export class PlayMode {
     this._carHudSpd = null;
     this._carHudAngle = null;
     this._carHudNitro = null;
+    // Circular speedometer refs
+    this._carSpeedometer = null;
+    this._speedoNeedle = null;
+    this._speedoDigital = null;
+    this._speedoRpmBar = null;
+    this._speedoGear = null;
     this._loadCar();
     this._createCarHud();
+    this._createCarSpeedometer();
   }
 
   _createFlyHud() {
@@ -881,6 +888,150 @@ export class PlayMode {
     this._carHudAngle = el.querySelector("#car-hud-angle");
     this._carHudNitro = el.querySelector("#car-hud-nitro");
     this._carHudNitroBar = el.querySelector("#car-hud-nitro-bar");
+  }
+
+  _createCarSpeedometer() {
+    const size = 200;
+    const el = document.createElement("div");
+    el.id = "car-speedometer";
+    el.style.cssText = `
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      width: ${size}px;
+      height: ${size}px;
+      z-index: 6;
+      display: none;
+      pointer-events: none;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    `;
+
+    const maxSpeed = 280;
+    const startAngle = 135;
+    const endAngle = 405;
+    const tickCount = 15;
+
+    let ticksHtml = "";
+    let labelsHtml = "";
+    for (let i = 0; i <= tickCount; i++) {
+      const speed = (i / tickCount) * maxSpeed;
+      const angle = startAngle + (i / tickCount) * (endAngle - startAngle);
+      const rad = (angle * Math.PI) / 180;
+      const cx = size / 2;
+      const cy = size / 2;
+      const innerR = size * 0.36;
+      const outerR = size * 0.42;
+      const labelR = size * 0.29;
+
+      const x1 = cx + Math.cos(rad) * innerR;
+      const y1 = cy + Math.sin(rad) * innerR;
+      const x2 = cx + Math.cos(rad) * outerR;
+      const y2 = cy + Math.sin(rad) * outerR;
+      const lx = cx + Math.cos(rad) * labelR;
+      const ly = cy + Math.sin(rad) * labelR;
+
+      const isMajor = i % 3 === 0;
+      const tickColor = speed > 220 ? "#ff4444" : "#ffffff";
+      const tickWidth = isMajor ? 3 : 1.5;
+      const tickOpacity = isMajor ? 0.9 : 0.4;
+
+      ticksHtml += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" 
+        stroke="${tickColor}" stroke-width="${tickWidth}" opacity="${tickOpacity}" stroke-linecap="round"/>`;
+
+      if (isMajor) {
+        const labelColor = speed > 220 ? "#ff6666" : "#aabbcc";
+        labelsHtml += `<text x="${lx}" y="${ly}" fill="${labelColor}" font-size="11" 
+          font-weight="600" text-anchor="middle" dominant-baseline="middle">${Math.round(speed)}</text>`;
+      }
+    }
+
+    el.innerHTML = `
+      <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" style="position:absolute;top:0;left:0;">
+        <defs>
+          <radialGradient id="speedoBg" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="#1a2233"/>
+            <stop offset="70%" stop-color="#0d1219"/>
+            <stop offset="100%" stop-color="#060a0f"/>
+          </radialGradient>
+          <linearGradient id="rpmGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="#00aaff"/>
+            <stop offset="50%" stop-color="#00ff88"/>
+            <stop offset="80%" stop-color="#ffaa00"/>
+            <stop offset="100%" stop-color="#ff3333"/>
+          </linearGradient>
+          <filter id="needleGlow" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="3" result="blur"/>
+            <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+          <filter id="outerGlow" x="-20%" y="-20%" width="140%" height="140%">
+            <feGaussianBlur stdDeviation="8" result="blur"/>
+            <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+        </defs>
+        
+        <!-- Outer ring glow -->
+        <circle cx="${size/2}" cy="${size/2}" r="${size*0.48}" fill="none" stroke="rgba(0,170,255,0.15)" stroke-width="4" filter="url(#outerGlow)"/>
+        
+        <!-- Background -->
+        <circle cx="${size/2}" cy="${size/2}" r="${size*0.46}" fill="url(#speedoBg)" stroke="rgba(100,140,180,0.3)" stroke-width="2"/>
+        
+        <!-- Speed arc background -->
+        <circle cx="${size/2}" cy="${size/2}" r="${size*0.39}" fill="none" stroke="rgba(255,255,255,0.05)" stroke-width="8"
+          stroke-dasharray="${size*2.45*0.75} ${size*2.45}" stroke-dashoffset="${-size*2.45*0.125}"
+          transform="rotate(0 ${size/2} ${size/2})"/>
+        
+        <!-- Ticks -->
+        ${ticksHtml}
+        
+        <!-- Labels -->
+        ${labelsHtml}
+        
+        <!-- RPM arc background -->
+        <path id="rpm-arc-bg" d="M ${size*0.25} ${size*0.72} A ${size*0.22} ${size*0.22} 0 0 1 ${size*0.75} ${size*0.72}"
+          fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="6" stroke-linecap="round"/>
+        
+        <!-- RPM arc fill -->
+        <path id="speedo-rpm-bar" d="M ${size*0.25} ${size*0.72} A ${size*0.22} ${size*0.22} 0 0 1 ${size*0.75} ${size*0.72}"
+          fill="none" stroke="url(#rpmGrad)" stroke-width="6" stroke-linecap="round"
+          stroke-dasharray="0 999"/>
+        
+        <!-- Center decorative rings -->
+        <circle cx="${size/2}" cy="${size/2}" r="${size*0.15}" fill="rgba(20,30,45,0.9)" stroke="rgba(100,150,200,0.3)" stroke-width="1"/>
+        <circle cx="${size/2}" cy="${size/2}" r="${size*0.08}" fill="rgba(40,60,90,0.8)" stroke="rgba(150,200,255,0.2)" stroke-width="1"/>
+        
+        <!-- Needle -->
+        <g id="speedo-needle" transform="rotate(${startAngle} ${size/2} ${size/2})" filter="url(#needleGlow)">
+          <polygon points="${size/2},${size*0.18} ${size/2-4},${size/2} ${size/2+4},${size/2}" 
+            fill="#ff3333" stroke="#ff6666" stroke-width="0.5"/>
+          <circle cx="${size/2}" cy="${size/2}" r="6" fill="#222" stroke="#ff4444" stroke-width="2"/>
+        </g>
+      </svg>
+      
+      <!-- Digital speed display -->
+      <div style="position:absolute;top:58%;left:50%;transform:translate(-50%,-50%);text-align:center;">
+        <div id="speedo-digital" style="font-size:32px;font-weight:800;color:#fff;text-shadow:0 0 20px rgba(0,170,255,0.6);letter-spacing:-1px;">0</div>
+        <div style="font-size:10px;color:#6688aa;letter-spacing:2px;margin-top:-2px;">KM/H</div>
+      </div>
+      
+      <!-- Gear indicator -->
+      <div style="position:absolute;bottom:12%;left:50%;transform:translateX(-50%);text-align:center;">
+        <div style="font-size:9px;color:#556677;letter-spacing:1px;">GEAR</div>
+        <div id="speedo-gear" style="font-size:22px;font-weight:700;color:#00ddff;text-shadow:0 0 12px rgba(0,220,255,0.5);">N</div>
+      </div>
+      
+      <!-- Nitro indicator (small) -->
+      <div style="position:absolute;top:12%;left:50%;transform:translateX(-50%);text-align:center;">
+        <div id="speedo-nitro-icon" style="font-size:11px;font-weight:700;color:#36c2ff;text-shadow:0 0 8px rgba(54,194,255,0.6);opacity:0.3;">N2O</div>
+      </div>
+    `;
+
+    document.body.appendChild(el);
+    this._carSpeedometer = el;
+    this._speedoNeedle = el.querySelector("#speedo-needle");
+    this._speedoDigital = el.querySelector("#speedo-digital");
+    this._speedoRpmBar = el.querySelector("#speedo-rpm-bar");
+    this._speedoGear = el.querySelector("#speedo-gear");
+    this._speedoNitroIcon = el.querySelector("#speedo-nitro-icon");
   }
 
   async _loadCar() {
@@ -1406,6 +1557,7 @@ export class PlayMode {
     if (this.carRoot) this.carRoot.visible = false;
     if (this._flyHud) this._flyHud.style.display = "none";
     if (this._carHud) this._carHud.style.display = "none";
+    if (this._carSpeedometer) this._carSpeedometer.style.display = "none";
     this.planeSpeed = 0;
     this.carVx = 0; this.carVz = 0;
     this.carNitro = 1.0;
@@ -2413,8 +2565,51 @@ export class PlayMode {
               : "linear-gradient(90deg,#ff7a7a,#ffb36b)";
           }
         }
+        // Update circular speedometer
+        if (this._carSpeedometer) {
+          this._carSpeedometer.style.display = "";
+          const maxSpeed = 280;
+          const startAngle = 135;
+          const endAngle = 405;
+          const speedRatio = Math.min(kmh / maxSpeed, 1);
+          const needleAngle = startAngle + speedRatio * (endAngle - startAngle);
+          if (this._speedoNeedle) {
+            this._speedoNeedle.setAttribute("transform", `rotate(${needleAngle} 100 100)`);
+          }
+          if (this._speedoDigital) {
+            this._speedoDigital.textContent = kmh;
+            this._speedoDigital.style.color = kmh > 220 ? "#ff6666" : "#ffffff";
+          }
+          // Simulated RPM based on speed (cycles through gears)
+          const gearSpeeds = [0, 40, 80, 130, 180, 230, 280];
+          let gear = 1;
+          for (let g = 1; g < gearSpeeds.length; g++) {
+            if (kmh >= gearSpeeds[g - 1]) gear = g;
+          }
+          const gearMin = gearSpeeds[gear - 1] || 0;
+          const gearMax = gearSpeeds[gear] || maxSpeed;
+          const rpmRatio = Math.min((kmh - gearMin) / (gearMax - gearMin + 1), 1);
+          if (this._speedoRpmBar) {
+            const arcLength = 110;
+            const fillLen = rpmRatio * arcLength;
+            this._speedoRpmBar.setAttribute("stroke-dasharray", `${fillLen} 999`);
+          }
+          if (this._speedoGear) {
+            this._speedoGear.textContent = kmh < 5 ? "N" : gear;
+            this._speedoGear.style.color = gear >= 5 ? "#ff8844" : "#00ddff";
+          }
+          // Nitro glow
+          if (this._speedoNitroIcon) {
+            const nitroActive = this.carNitro > 0.2;
+            this._speedoNitroIcon.style.opacity = nitroActive ? "1" : "0.3";
+            this._speedoNitroIcon.style.textShadow = nitroActive
+              ? "0 0 16px rgba(54,194,255,1), 0 0 30px rgba(54,194,255,0.8)"
+              : "0 0 8px rgba(54,194,255,0.6)";
+          }
+        }
       } else {
         this._carHud.style.display = "none";
+        if (this._carSpeedometer) this._carSpeedometer.style.display = "none";
       }
     }
 
@@ -2888,5 +3083,6 @@ export class PlayMode {
       });
     }
     if (this._carHud) this._carHud.remove();
+    if (this._carSpeedometer) this._carSpeedometer.remove();
   }
 }
