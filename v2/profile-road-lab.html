@@ -58,6 +58,16 @@
           <output id="junctionOut">90</output>
         </div>
         <div class="row">
+          <label for="curveSegments">Curve segments</label>
+          <input id="curveSegments" type="range" min="8" max="96" step="2" value="34" />
+          <output id="curveSegmentsOut">34</output>
+        </div>
+        <div class="row">
+          <label for="junctionSegments">Junction segments</label>
+          <input id="junctionSegments" type="range" min="4" max="40" step="1" value="14" />
+          <output id="junctionSegmentsOut">14</output>
+        </div>
+        <div class="row">
           <label for="debug">Show debug</label>
           <input id="debug" type="checkbox" checked />
           <span></span>
@@ -104,12 +114,13 @@
         <div class="buttons">
           <button id="exportNetwork" type="button">Export</button>
           <button id="importNetwork" type="button">Import</button>
+          <button id="splitEdge" type="button">Split selected</button>
           <button id="clearNetwork" type="button">Clear</button>
         </div>
         <div id="status"></div>
         <div class="line"></div>
         <div id="tips">
-          Network mode: click a node to continue, click a segment to select it, click empty space to extend, Ctrl/Cmd-click a node to connect, Delete removes selected.<br />
+          Network mode: click a node to continue, click a segment to select it, Alt-click or Split selected inserts a point, click empty space to extend, Delete removes selected.<br />
           Two-road nodes are spline bends by default; 3+ road nodes become junctions.<br />
           Purple lines show lane boundaries; white is road fill.<br />
           Based on ideas from
@@ -129,6 +140,10 @@
       const lanesOut = document.getElementById("lanesOut");
       const junctionRadiusEl = document.getElementById("junctionRadius");
       const junctionOut = document.getElementById("junctionOut");
+      const curveSegmentsEl = document.getElementById("curveSegments");
+      const curveSegmentsOut = document.getElementById("curveSegmentsOut");
+      const junctionSegmentsEl = document.getElementById("junctionSegments");
+      const junctionSegmentsOut = document.getElementById("junctionSegmentsOut");
       const debugEl = document.getElementById("debug");
       const hideJunctionSeamsEl = document.getElementById("hideJunctionSeams");
       const blendJunctionFillEl = document.getElementById("blendJunctionFill");
@@ -142,6 +157,7 @@
       const networkJsonEl = document.getElementById("networkJson");
       const exportNetworkEl = document.getElementById("exportNetwork");
       const importNetworkEl = document.getElementById("importNetwork");
+      const splitEdgeEl = document.getElementById("splitEdge");
       const clearNetworkEl = document.getElementById("clearNetwork");
       const statusEl = document.getElementById("status");
       const ROAD_SURFACE = "#1c2126";
@@ -155,6 +171,8 @@
         width: Number(widthEl.value),
         lanesPerDir: Number(lanesPerDirEl.value),
         junctionRadius: Number(junctionRadiusEl.value),
+        curveSegments: Number(curveSegmentsEl.value),
+        junctionSegments: Number(junctionSegmentsEl.value),
         hideJunctionSeams: hideJunctionSeamsEl.checked,
         blendJunctionFill: blendJunctionFillEl.checked,
         twoRoadNodes: twoRoadNodesEl.value,
@@ -170,6 +188,7 @@
           nextId: 6,
           activeNodeId: 2,
           selectedEdgeKey: null,
+          selectedEdgeSplitPoint: null,
           nodes: [
             { id: 1, p: { x: 150, y: 330 } },
             { id: 2, p: { x: 360, y: 330 } },
@@ -481,7 +500,7 @@
         return add(mul(sub(P1, P0), 2 * (1 - t)), mul(sub(P2, P1), 2 * t));
       }
 
-      function sampleQuadraticOffset(P0, P1, P2, offset, samples = 30) {
+      function sampleQuadraticOffset(P0, P1, P2, offset, samples = state.curveSegments) {
         const out = [];
         for (let i = 0; i <= samples; i++) {
           const t = i / samples;
@@ -494,9 +513,10 @@
 
       function buildNetworkBend(start, control, end) {
         const hw = state.width * 0.5;
-        const left = sampleQuadraticOffset(start, control, end, hw, 34);
-        const right = sampleQuadraticOffset(start, control, end, -hw, 34);
-        const center = sampleQuadraticOffset(start, control, end, 0, 34);
+        const samples = Math.max(4, state.curveSegments | 0);
+        const left = sampleQuadraticOffset(start, control, end, hw, samples);
+        const right = sampleQuadraticOffset(start, control, end, -hw, samples);
+        const center = sampleQuadraticOffset(start, control, end, 0, samples);
         return {
           polygon: [...left, ...right.slice().reverse()],
           left: { path: left, debug: [] },
@@ -541,8 +561,9 @@
           }
 
           const segment = [];
-          for (let s = 0; s <= 14; s++) {
-            const t = s / 14;
+          const segmentCount = Math.max(3, state.junctionSegments | 0);
+          for (let s = 0; s <= segmentCount; s++) {
+            const t = s / segmentCount;
             const a = lerp(start, corner, t);
             const b = lerp(corner, end, t);
             segment.push(lerp(a, b, t));
@@ -701,8 +722,9 @@
             const base = Math.atan2(back.y, back.x);
             const a0 = base - Math.PI * 0.5;
             const a1 = base + Math.PI * 0.5;
-            for (let i = 0; i <= 14; i++) {
-              const a = angleLerp(a0, a1, i / 14);
+            const segmentCount = Math.max(6, state.junctionSegments | 0);
+            for (let i = 0; i <= segmentCount; i++) {
+              const a = angleLerp(a0, a1, i / segmentCount);
               pts.push(add(node.p, vec(Math.cos(a) * hw, Math.sin(a) * hw)));
             }
             pieces.push({
@@ -729,7 +751,7 @@
             for (let i = 1; i < count; i++) {
               const off = -hw + i * laneW;
               markings.push({
-                path: sampleQuadraticOffset(mouthA, node.p, mouthB, off, 34),
+                path: sampleQuadraticOffset(mouthA, node.p, mouthB, off, Math.max(4, state.curveSegments | 0)),
                 type: i === state.lanesPerDir ? "center" : "divider",
               });
             }
@@ -1056,7 +1078,7 @@
           const hit = pointSegmentDistance(worldP, a.p, b.p);
           if (hit.d < bestD && hit.t > 0.04 && hit.t < 0.96) {
             bestD = hit.d;
-            best = edge;
+            best = { edge, hit };
           }
         }
         return best;
@@ -1087,6 +1109,7 @@
       function activateNetworkNode(id) {
         state.network.activeNodeId = id;
         state.network.selectedEdgeKey = null;
+        state.network.selectedEdgeSplitPoint = null;
       }
 
       function addNetworkNode(p) {
@@ -1111,6 +1134,34 @@
         if (!key) return;
         state.network.edges = state.network.edges.filter((edge) => edgeKey(edge.a, edge.b) !== key);
         if (state.network.selectedEdgeKey === key) state.network.selectedEdgeKey = null;
+        if (state.network.selectedEdgeKey === null) state.network.selectedEdgeSplitPoint = null;
+      }
+
+      function splitNetworkEdge(edge, point) {
+        if (!edge) return null;
+        const key = edgeKey(edge.a, edge.b);
+        const nodeById = new Map(state.network.nodes.map((node) => [node.id, node]));
+        const a = nodeById.get(edge.a);
+        const b = nodeById.get(edge.b);
+        if (!a || !b) return null;
+        const p = point || lerp(a.p, b.p, 0.5);
+        const snapped = snapPoint(p);
+        if (dist(snapped, a.p) < 4 || dist(snapped, b.p) < 4) return null;
+        const node = { id: state.network.nextId++, p: snapped };
+        state.network.nodes.push(node);
+        state.network.edges = state.network.edges.filter((candidate) => edgeKey(candidate.a, candidate.b) !== key);
+        state.network.edges.push({ a: edge.a, b: node.id }, { a: node.id, b: edge.b });
+        state.network.activeNodeId = node.id;
+        state.network.selectedEdgeKey = null;
+        state.network.selectedEdgeSplitPoint = null;
+        render();
+        return node;
+      }
+
+      function splitSelectedEdge() {
+        if (!state.network.selectedEdgeKey) return null;
+        const edge = state.network.edges.find((candidate) => edgeKey(candidate.a, candidate.b) === state.network.selectedEdgeKey);
+        return splitNetworkEdge(edge, state.network.selectedEdgeSplitPoint);
       }
 
       function exportNetworkJson() {
@@ -1119,6 +1170,8 @@
           width: state.width,
           lanesPerDir: state.lanesPerDir,
           junctionRadius: state.junctionRadius,
+          curveSegments: state.curveSegments,
+          junctionSegments: state.junctionSegments,
           twoRoadNodes: state.twoRoadNodes,
           nodes: state.network.nodes.map((node) => ({ id: node.id, x: Math.round(node.p.x * 1000) / 1000, y: Math.round(node.p.y * 1000) / 1000 })),
           edges: state.network.edges.map((edge) => ({ a: edge.a, b: edge.b })),
@@ -1164,6 +1217,7 @@
         state.network.nextId = Math.max(0, ...nodes.map((node) => node.id)) + 1;
         state.network.activeNodeId = nodes[0] ? nodes[0].id : null;
         state.network.selectedEdgeKey = null;
+        state.network.selectedEdgeSplitPoint = null;
         if (Number.isFinite(Number(data.width))) {
           state.width = clamp(Number(data.width), Number(widthEl.min), Number(widthEl.max));
           widthEl.value = String(state.width);
@@ -1179,6 +1233,16 @@
           junctionRadiusEl.value = String(state.junctionRadius);
           junctionOut.value = String(state.junctionRadius);
         }
+        if (Number.isFinite(Number(data.curveSegments))) {
+          state.curveSegments = clamp(Math.round(Number(data.curveSegments)), Number(curveSegmentsEl.min), Number(curveSegmentsEl.max));
+          curveSegmentsEl.value = String(state.curveSegments);
+          curveSegmentsOut.value = String(state.curveSegments);
+        }
+        if (Number.isFinite(Number(data.junctionSegments))) {
+          state.junctionSegments = clamp(Math.round(Number(data.junctionSegments)), Number(junctionSegmentsEl.min), Number(junctionSegmentsEl.max));
+          junctionSegmentsEl.value = String(state.junctionSegments);
+          junctionSegmentsOut.value = String(state.junctionSegments);
+        }
         if (data.twoRoadNodes === "smooth" || data.twoRoadNodes === "junction") {
           state.twoRoadNodes = data.twoRoadNodes;
           twoRoadNodesEl.value = data.twoRoadNodes;
@@ -1193,6 +1257,7 @@
         state.network.nextId = 1;
         state.network.activeNodeId = null;
         state.network.selectedEdgeKey = null;
+        state.network.selectedEdgeSplitPoint = null;
         render();
       }
 
@@ -1221,9 +1286,14 @@
             connectOnClick: evt.ctrlKey || evt.metaKey,
           };
         } else {
-          const edge = nearestNetworkEdge(p.x, p.y);
-          if (edge) {
-            state.network.selectedEdgeKey = edgeKey(edge.a, edge.b);
+          const edgeHit = nearestNetworkEdge(p.x, p.y);
+          if (edgeHit) {
+            if (evt.altKey) {
+              splitNetworkEdge(edgeHit.edge, edgeHit.hit.p);
+              return;
+            }
+            state.network.selectedEdgeKey = edgeKey(edgeHit.edge.a, edgeHit.edge.b);
+            state.network.selectedEdgeSplitPoint = edgeHit.hit.p;
             state.network.activeNodeId = null;
           } else {
             addNetworkNode(screenToWorld(p));
@@ -1300,6 +1370,16 @@
         junctionOut.value = String(state.junctionRadius);
         render();
       });
+      curveSegmentsEl.addEventListener("input", () => {
+        state.curveSegments = Number(curveSegmentsEl.value);
+        curveSegmentsOut.value = String(state.curveSegments);
+        render();
+      });
+      junctionSegmentsEl.addEventListener("input", () => {
+        state.junctionSegments = Number(junctionSegmentsEl.value);
+        junctionSegmentsOut.value = String(state.junctionSegments);
+        render();
+      });
       debugEl.addEventListener("change", render);
       hideJunctionSeamsEl.addEventListener("change", () => {
         state.hideJunctionSeams = hideJunctionSeamsEl.checked;
@@ -1333,6 +1413,7 @@
       });
       exportNetworkEl.addEventListener("click", exportNetworkJson);
       importNetworkEl.addEventListener("click", importNetworkJson);
+      splitEdgeEl.addEventListener("click", splitSelectedEdge);
       clearNetworkEl.addEventListener("click", clearNetwork);
       window.addEventListener("keydown", (evt) => {
         if (evt.key === "Delete" || evt.key === "Backspace") {
@@ -1366,6 +1447,8 @@
       widthOut.value = widthEl.value;
       lanesOut.value = lanesPerDirEl.value;
       junctionOut.value = junctionRadiusEl.value;
+      curveSegmentsOut.value = curveSegmentsEl.value;
+      junctionSegmentsOut.value = junctionSegmentsEl.value;
       gridSizeOut.value = gridSizeEl.value;
       angleStepOut.value = angleStepEl.value;
       state.view.x = window.innerWidth * 0.08;
