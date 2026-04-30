@@ -625,6 +625,24 @@ export async function startV2App() {
     reflectTex: roadReflection.texture,
     terrainStore,
     chunkStream,
+    graphMode: "fullRoad",
+  });
+  const smartRoadToolStateView = {};
+  Object.defineProperty(smartRoadToolStateView, "fullRoad", {
+    get: () => toolState.smartRoad,
+  });
+  Object.defineProperty(smartRoadToolStateView, "mode", {
+    get: () => toolState.mode,
+  });
+  const smartRoadSystem = new FullRoadSystem({
+    scene,
+    toolState: smartRoadToolStateView,
+    getWorldHeight: (x, z) => terrainStore.getWorldHeight(x, z),
+    reflectTex: roadReflection.texture,
+    terrainStore,
+    chunkStream,
+    useLabNetworkGeometry: true,
+    graphMode: "smartRoad",
   });
   const riverSystem = new RiverSystem({
     scene,
@@ -698,6 +716,11 @@ export async function startV2App() {
   transformControls.visible = false;
   scene.add(transformControls.getHelper());
   fullRoadSystem.setTransformControls(transformControls);
+  smartRoadSystem.setTransformControls(transformControls);
+  const activeGraphRoadSystem = () =>
+    toolState.mode === "smartRoad" ? smartRoadSystem : fullRoadSystem;
+  const activeGraphRoadParams = () =>
+    toolState.mode === "smartRoad" ? toolState.smartRoad : toolState.fullRoad;
   transformControls.addEventListener("change", () => {
     if (toolState.mode === "cliffs" && cliffInstancer.hasSelection) {
       cliffSystem.handleTransformChange();
@@ -712,6 +735,9 @@ export async function startV2App() {
     if (toolState.mode === "fullRoad" && fullRoadSystem.selectedDecalId != null) {
       fullRoadSystem.handleDecalTransformChange();
     }
+    if (toolState.mode === "smartRoad" && smartRoadSystem.selectedDecalId != null) {
+      smartRoadSystem.handleDecalTransformChange();
+    }
   });
   transformControls.addEventListener("mouseDown", () => {
     controls.enabled = false;
@@ -722,6 +748,7 @@ export async function startV2App() {
     if (toolState.mode === "props") propSystem.handleTransformEnd();
     if (toolState.mode === "decals") decalSystem.handleTransformEnd();
     if (toolState.mode === "fullRoad") fullRoadSystem.handleDecalTransformEnd();
+    if (toolState.mode === "smartRoad") smartRoadSystem.handleDecalTransformEnd();
   });
 
   // ── Water system ──────────────────────────────────────────────────────────
@@ -924,17 +951,20 @@ export async function startV2App() {
           decalSystem.selectByIndex(decalSystem.selectedIndex);
         }
       }
-      if (toolState.mode !== "fullRoad") {
+      if (toolState.mode !== "fullRoad" && toolState.mode !== "smartRoad") {
         fullRoadSystem.deselectDecal();
         fullRoadSystem._clearDecalPreview();
-      } else if (toolState.fullRoad.decalMode && fullRoadSystem.selectedDecalId != null) {
-        transformControls.setMode(toolState.fullRoad.decalTransformMode || "translate");
+        smartRoadSystem.deselectDecal();
+        smartRoadSystem._clearDecalPreview();
+      } else if (activeGraphRoadParams().decalMode && activeGraphRoadSystem().selectedDecalId != null) {
+        transformControls.setMode(activeGraphRoadParams().decalTransformMode || "translate");
       }
       if (toolState.mode !== "spline") {
         splineSystem.dragging = false;
       }
       roadSystem.handleGroup.visible = toolState.mode === "road" && toolState.road.showHandles;
       fullRoadSystem.handleGroup.visible = toolState.mode === "fullRoad" && toolState.fullRoad.showHandles;
+      smartRoadSystem.handleGroup.visible = toolState.mode === "smartRoad" && toolState.smartRoad.showHandles;
       riverSystem.handleGroup.visible = toolState.mode === "river" && toolState.river.showHandles;
       splineSystem.handleGroup.visible = toolState.mode === "spline" && toolState.spline.showHandles;
       if (toolState.mode !== "spline") splineSystem.clearPreview();
@@ -1182,9 +1212,9 @@ export async function startV2App() {
     onDeleteSelectedCliff: () => cliffSystem.handleDelete(),
     onClearAllCliffs: () => cliffSystem.clearAll(),
     onRebakeBvh: () => {
-      cliffBvh.bake(terrainStore, config, [propStore, splineSystem, fullRoadSystem, waterfallSystem]);
+      cliffBvh.bake(terrainStore, config, [propStore, splineSystem, fullRoadSystem, smartRoadSystem, waterfallSystem]);
       grassManager.rebuildCliffHeightTex(cliffBvh, terrainStore, config.world.size);
-      console.log("[V2] BVH rebaked (cliffs + props + spline/full-road accessories + waterfalls) + cliff height tex updated");
+      console.log("[V2] BVH rebaked (cliffs + props + spline/full-road/smart-road accessories + waterfalls) + cliff height tex updated");
     },
     onCliffTransformModeChanged: () => {
       transformControls.setMode(toolState.cliffs.transformMode);
@@ -1220,38 +1250,40 @@ export async function startV2App() {
       ui?.pane.refresh();
     },
     onFullRoadChanged: () => {
-      fullRoadSystem.syncMaterial();
-      fullRoadSystem.rebuildAllMeshes();
-      fullRoadSystem._rebuildHandles();
+      const sys = activeGraphRoadSystem();
+      sys.syncMaterial();
+      sys.rebuildAllMeshes();
+      sys._rebuildHandles();
       ui?.pane.refresh();
     },
     onFullRoadStartBranch: () => {
-      fullRoadSystem.startBranch();
+      activeGraphRoadSystem().startBranch();
       ui?.pane.refresh();
     },
     onFullRoadDeleteSelected: () => {
-      fullRoadSystem.deleteSelected();
+      activeGraphRoadSystem().deleteSelected();
       ui?.pane.refresh();
     },
     onFullRoadClearAll: () => {
-      fullRoadSystem.clearAll();
+      activeGraphRoadSystem().clearAll();
       ui?.pane.refresh();
     },
     onFullRoadSnapY: () => {
-      fullRoadSystem.snapSelectedYToTerrain();
+      activeGraphRoadSystem().snapSelectedYToTerrain();
       ui?.pane.refresh();
     },
     onFullRoadSelectedYChanged: () => {
-      fullRoadSystem.setSelectedPointY(toolState.fullRoad.selectedPointY);
+      activeGraphRoadSystem().setSelectedPointY(activeGraphRoadParams().selectedPointY);
       ui?.pane.refresh();
     },
     onFullRoadToggleJunction: () => {
-      fullRoadSystem.toggleSelectedJunction();
+      activeGraphRoadSystem().toggleSelectedJunction();
       ui?.pane.refresh();
     },
     onFullRoadFlattenTerrain: () => {
-      fullRoadSystem.flattenTerrainUnderRoads();
-      fullRoadSystem.rebuildAllMeshes();
+      const sys = activeGraphRoadSystem();
+      sys.flattenTerrainUnderRoads();
+      sys.rebuildAllMeshes();
       markHeightTexDirty();
       treeStore.syncAllHeights(terrainStore);
       splineSystem.syncGuardrailsToGround();
@@ -1260,7 +1292,7 @@ export async function startV2App() {
       ui?.pane.refresh();
     },
     onFullRoadApplyCityPreset: () => {
-      const rp = toolState.fullRoad;
+      const rp = activeGraphRoadParams();
       rp.width = 12;
       rp.heightOffset = 0.08;
       rp.junctionRadius = 10;
@@ -1271,48 +1303,50 @@ export async function startV2App() {
       rp.lineWidth = 0.025;
       rp.colorBrightness = 0.65;
       rp.texScale = 3.0;
-      fullRoadSystem.syncMaterial();
-      fullRoadSystem.rebuildAllMeshes();
-      fullRoadSystem._rebuildHandles();
+      const sys = activeGraphRoadSystem();
+      sys.syncMaterial();
+      sys.rebuildAllMeshes();
+      sys._rebuildHandles();
       ui?.pane.refresh();
     },
     onAccessoryTypeChanged: () => {
-      fullRoadSystem.cancelAccessoryPaint();
+      activeGraphRoadSystem().cancelAccessoryPaint();
       ui?.pane.refresh();
     },
     onAccessoryParamsChanged: () => {
-      fullRoadSystem.rebuildAllAccessories();
+      activeGraphRoadSystem().rebuildAllAccessories();
       ui?.pane.refresh();
     },
     onAccessoryClearAll: () => {
-      fullRoadSystem.clearAllAccessories();
+      activeGraphRoadSystem().clearAllAccessories();
       ui?.pane.refresh();
     },
     onDecalModeToggle: () => {
-      if (!toolState.fullRoad.decalMode) {
-        fullRoadSystem._clearDecalPreview();
-        fullRoadSystem.deselectDecal();
+      if (!activeGraphRoadParams().decalMode) {
+        const sys = activeGraphRoadSystem();
+        sys._clearDecalPreview();
+        sys.deselectDecal();
       }
       ui?.pane.refresh();
     },
     onDecalTransformModeChanged: () => {
-      if (fullRoadSystem.selectedDecalId != null) {
-        transformControls.setMode(toolState.fullRoad.decalTransformMode);
+      if (activeGraphRoadSystem().selectedDecalId != null) {
+        transformControls.setMode(activeGraphRoadParams().decalTransformMode);
       }
     },
     onDecalDeleteSelected: () => {
-      fullRoadSystem.deleteSelectedDecal();
+      activeGraphRoadSystem().deleteSelectedDecal();
       ui?.pane.refresh();
     },
     onDecalTypeChanged: () => {
       ui?.pane.refresh();
     },
     onDecalParamsChanged: () => {
-      fullRoadSystem.rebuildAllDecals();
+      activeGraphRoadSystem().rebuildAllDecals();
       ui?.pane.refresh();
     },
     onDecalClearAll: () => {
-      fullRoadSystem.clearAllDecals();
+      activeGraphRoadSystem().clearAllDecals();
       ui?.pane.refresh();
     },
     onRiverChanged: () => {
@@ -1620,6 +1654,7 @@ export async function startV2App() {
       toolState._ambientFxExportData = () => ambientFxStore.getEmitters();
       toolState._roadExportData = () => roadSystem.exportData();
       toolState._fullRoadExportData = () => fullRoadSystem.exportData();
+      toolState._smartRoadExportData = () => smartRoadSystem.exportData();
       toolState._riverExportData = () => riverSystem.exportData();
       toolState._splineExportData = () => splineSystem.exportData();
       toolState._decalExportData = () => decalSystem.exportData();
@@ -1634,6 +1669,7 @@ export async function startV2App() {
       delete toolState._ambientFxExportData;
       delete toolState._roadExportData;
       delete toolState._fullRoadExportData;
+      delete toolState._smartRoadExportData;
       delete toolState._riverExportData;
       delete toolState._splineExportData;
       delete toolState._decalExportData;
@@ -1663,9 +1699,12 @@ export async function startV2App() {
         applySettings(toolState, project.settings);
         riverSystem.syncMaterial();
         fullRoadSystem.syncMaterial();
+        smartRoadSystem.syncMaterial();
         if (project.settings?.roads) roadSystem.importData(project.settings.roads);
         if (project.settings?.fullRoadNetwork) fullRoadSystem.importData(project.settings.fullRoadNetwork);
         else fullRoadSystem.importData(null);
+        if (project.settings?.smartRoadNetwork) smartRoadSystem.importData(project.settings.smartRoadNetwork);
+        else smartRoadSystem.importData(null);
         if (project.settings?.rivers) riverSystem.importData(project.settings.rivers);
         else riverSystem.importData([]);
         if (project.settings?.splinePath) splineSystem.importData(project.settings.splinePath);
@@ -1890,6 +1929,7 @@ export async function startV2App() {
   roadReflection.excludeFromReflection(spawnMarker);
   roadReflection.excludeFromReflection(roadSystem.handleGroup);
   roadReflection.excludeFromReflection(fullRoadSystem.handleGroup);
+  roadReflection.excludeFromReflection(smartRoadSystem.handleGroup);
   roadReflection.excludeFromReflection(riverSystem.handleGroup);
   roadReflection.excludeFromReflection(splineSystem.handleGroup);
   roadReflection.excludeFromReflection(splineSystem.previewGroup);
@@ -2175,20 +2215,21 @@ export async function startV2App() {
       }
       return;
     }
-    if (toolState.mode === "fullRoad" && event.button === 0) {
+    if ((toolState.mode === "fullRoad" || toolState.mode === "smartRoad") && event.button === 0) {
       event.preventDefault();
       updatePointer(event);
       raycaster.setFromCamera(pointerNdc, camera);
+      const graphRoadSystem = activeGraphRoadSystem();
       
       // Decal placement/selection mode
-      if (toolState.fullRoad.decalMode) {
+      if (activeGraphRoadParams().decalMode) {
         // Don't interfere with gizmo dragging
         if (transformControls.dragging) return;
         
         // First try to pick an existing decal
-        const pickedDecal = fullRoadSystem.pickDecal(raycaster);
+        const pickedDecal = graphRoadSystem.pickDecal(raycaster);
         if (pickedDecal) {
-          fullRoadSystem.selectDecal(pickedDecal.id);
+          graphRoadSystem.selectDecal(pickedDecal.id);
           ui?.pane.refresh();
           return;
         }
@@ -2196,47 +2237,48 @@ export async function startV2App() {
         // No decal clicked - place a new one
         const hit = pickTerrain(event);
         if (hit) {
-          fullRoadSystem.deselectDecal(); // Deselect any selected decal
-          fullRoadSystem.placeDecal(hit.point);
+          graphRoadSystem.deselectDecal(); // Deselect any selected decal
+          graphRoadSystem.placeDecal(hit.point);
           ui?.pane.refresh();
         }
         return;
       }
       
       // Accessory painting mode (guardrails, kerbs, barriers, fences, tunnels)
-      const accType = toolState.fullRoad.accessoryType;
+      const activeRoadParams = activeGraphRoadParams();
+      const accType = activeRoadParams.accessoryType;
       const isPaintMode = accType && (
-        (accType === "guardrail" && toolState.fullRoad.guardrailMode) ||
-        (accType === "kerb" && toolState.fullRoad.kerbMode) ||
-        (accType === "barrier" && toolState.fullRoad.barrierMode) ||
-        (accType === "fence" && toolState.fullRoad.fenceMode) ||
-        (accType === "tunnel" && toolState.fullRoad.tunnelMode)
+        (accType === "guardrail" && activeRoadParams.guardrailMode) ||
+        (accType === "kerb" && activeRoadParams.kerbMode) ||
+        (accType === "barrier" && activeRoadParams.barrierMode) ||
+        (accType === "fence" && activeRoadParams.fenceMode) ||
+        (accType === "tunnel" && activeRoadParams.tunnelMode)
       );
       // Also check if shift key is held as quick paint mode
       if (isPaintMode || event.shiftKey) {
         const hit = pickTerrain(event);
         if (hit) {
-          const started = fullRoadSystem.startAccessoryPaint(hit.point, accType);
+          const started = graphRoadSystem.startAccessoryPaint(hit.point, accType);
           if (started) {
-            fullRoadSystem._paintingAccessoryActive = true;
+            graphRoadSystem._paintingAccessoryActive = true;
             controls.enabled = false;
           }
         }
         return;
       }
       
-      const picked = fullRoadSystem.pickNode(raycaster);
+      const picked = graphRoadSystem.pickNode(raycaster);
       if (picked != null) {
-        fullRoadSystem.selectedNodeId = picked;
-        fullRoadSystem.dragging = true;
+        graphRoadSystem.selectedNodeId = picked;
+        graphRoadSystem.dragging = true;
         controls.enabled = false;
-        fullRoadSystem._rebuildHandles();
-        fullRoadSystem._updateSelectedY();
+        graphRoadSystem._rebuildHandles();
+        graphRoadSystem._updateSelectedY();
         ui?.pane.refresh();
       } else {
         const hit = pickTerrain(event);
         if (hit) {
-          fullRoadSystem.addOrConnect(hit.point);
+          graphRoadSystem.addOrConnect(hit.point);
           ui?.pane.refresh();
         }
       }
@@ -2333,21 +2375,21 @@ export async function startV2App() {
       if (hit) roadSystem.moveSelected(hit.point);
       return;
     }
-    if (toolState.mode === "fullRoad" && fullRoadSystem.dragging && fullRoadSystem.selectedNodeId != null) {
+    if ((toolState.mode === "fullRoad" || toolState.mode === "smartRoad") && activeGraphRoadSystem().dragging && activeGraphRoadSystem().selectedNodeId != null) {
       const hit = pickTerrain(event);
-      if (hit) fullRoadSystem.moveSelected(hit.point);
+      if (hit) activeGraphRoadSystem().moveSelected(hit.point);
       return;
     }
-    if (toolState.mode === "fullRoad" && fullRoadSystem._paintingAccessoryActive) {
+    if ((toolState.mode === "fullRoad" || toolState.mode === "smartRoad") && activeGraphRoadSystem()._paintingAccessoryActive) {
       const hit = pickTerrain(event);
-      if (hit) fullRoadSystem.continueAccessoryPaint(hit.point);
+      if (hit) activeGraphRoadSystem().continueAccessoryPaint(hit.point);
       return;
     }
     // Decal preview on hover
-    if (toolState.mode === "fullRoad" && toolState.fullRoad.decalMode) {
+    if ((toolState.mode === "fullRoad" || toolState.mode === "smartRoad") && activeGraphRoadParams().decalMode) {
       const hit = pickTerrain(event);
       if (hit) {
-        fullRoadSystem.updateDecalPreview(hit.point);
+        activeGraphRoadSystem().updateDecalPreview(hit.point);
       }
     }
     if (toolState.mode === "river" && riverSystem.dragging && riverSystem.selectedIdx >= 0) {
@@ -2447,9 +2489,19 @@ export async function startV2App() {
       fullRoadSystem.dragging = false;
       controls.enabled = true;
     }
+    if (smartRoadSystem.dragging) {
+      smartRoadSystem.dragging = false;
+      controls.enabled = true;
+    }
     if (fullRoadSystem._paintingAccessoryActive) {
       fullRoadSystem._paintingAccessoryActive = false;
       fullRoadSystem.endAccessoryPaint();
+      controls.enabled = true;
+      ui?.pane.refresh();
+    }
+    if (smartRoadSystem._paintingAccessoryActive) {
+      smartRoadSystem._paintingAccessoryActive = false;
+      smartRoadSystem.endAccessoryPaint();
       controls.enabled = true;
       ui?.pane.refresh();
     }
@@ -2493,6 +2545,7 @@ export async function startV2App() {
     if (toolState.mode === "cliffGrass") return cliffGrassPaintSystem;
     if (toolState.mode === "road") return roadSystem;
     if (toolState.mode === "fullRoad") return fullRoadSystem;
+    if (toolState.mode === "smartRoad") return smartRoadSystem;
     if (toolState.mode === "river") return riverSystem;
     if (toolState.mode === "spline") return splineSystem;
     if (toolState.mode === "cliffs") return cliffSystem;
@@ -2520,9 +2573,9 @@ export async function startV2App() {
       event.preventDefault();
       roadSystem.deleteSelected();
       ui?.pane.refresh();
-    } else if (event.code === "Delete" && toolState.mode === "fullRoad") {
+    } else if (event.code === "Delete" && (toolState.mode === "fullRoad" || toolState.mode === "smartRoad")) {
       event.preventDefault();
-      fullRoadSystem.deleteSelected();
+      activeGraphRoadSystem().deleteSelected();
       ui?.pane.refresh();
     } else if (event.code === "Delete" && toolState.mode === "river") {
       event.preventDefault();
@@ -2816,7 +2869,7 @@ export async function startV2App() {
       ui.refreshPerf();
       hudLastMs = now;
     }
-    if (roadSystem.hasReflectiveRoads() || fullRoadSystem.hasReflectiveRoads()) {
+    if (roadSystem.hasReflectiveRoads() || fullRoadSystem.hasReflectiveRoads() || smartRoadSystem.hasReflectiveRoads()) {
       // Set reflection plane Y and center based on mode
       if (playMode.active) {
         roadReflection.setReflectY(focusPos.y + 0.02);
@@ -2824,15 +2877,20 @@ export async function startV2App() {
       } else {
         roadReflection.setReflectCenter(null);
         const activeMode = toolState.mode;
-        const useFullRoadPlane = activeMode === "fullRoad"
-          ? fullRoadSystem.hasReflectiveRoads()
-          : (!roadSystem.hasReflectiveRoads() && fullRoadSystem.hasReflectiveRoads());
-        roadReflection.setReflectY(useFullRoadPlane ? fullRoadSystem.getAverageY() : roadSystem.getAverageY());
+        const activeGraph = activeMode === "smartRoad" ? smartRoadSystem : fullRoadSystem;
+        const useGraphRoadPlane = (activeMode === "fullRoad" || activeMode === "smartRoad")
+          ? activeGraph.hasReflectiveRoads()
+          : (!roadSystem.hasReflectiveRoads() && (fullRoadSystem.hasReflectiveRoads() || smartRoadSystem.hasReflectiveRoads()));
+        const fallbackGraphY = fullRoadSystem.hasReflectiveRoads()
+          ? fullRoadSystem.getAverageY()
+          : smartRoadSystem.getAverageY();
+        roadReflection.setReflectY(useGraphRoadPlane ? (activeGraph.hasReflectiveRoads() ? activeGraph.getAverageY() : fallbackGraphY) : roadSystem.getAverageY());
       }
-      const roadMeshes = [...roadSystem.getRoadMeshes(), ...fullRoadSystem.getRoadMeshes()];
+      const roadMeshes = [...roadSystem.getRoadMeshes(), ...fullRoadSystem.getRoadMeshes(), ...smartRoadSystem.getRoadMeshes()];
       roadReflection.render(roadMeshes);
       roadSystem.updateReflectVP(roadReflection.reflectVP);
       fullRoadSystem.updateReflectVP(roadReflection.reflectVP);
+      smartRoadSystem.updateReflectVP(roadReflection.reflectVP);
     }
     riverSystem.update(dtMs * 0.001);
     splineSystem.update(dtMs * 0.001);
@@ -2868,6 +2926,8 @@ export async function startV2App() {
       grassManager.dispose();
       ambientFxStore.clear();
       roadSystem.dispose();
+      fullRoadSystem.dispose();
+      smartRoadSystem.dispose();
       riverSystem.dispose();
       splineSystem.dispose();
       roadReflection.dispose();

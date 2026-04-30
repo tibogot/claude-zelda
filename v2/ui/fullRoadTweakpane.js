@@ -18,9 +18,11 @@ export function addFullRoadFolder(pane, toolState, opts) {
     onDecalClearAll,
     onDecalTransformModeChanged,
     onDecalDeleteSelected,
+    stateKey = "fullRoad",
+    title = "Full Road",
   } = opts;
-  const rp = toolState.fullRoad;
-  const folder = pane.addFolder({ title: "Full Road", expanded: false });
+  const rp = toolState[stateKey] ?? toolState.fullRoad;
+  const folder = pane.addFolder({ title, expanded: false });
 
   folder.addBinding(rp, "showHandles", { label: "Show handles" }).on("change", onFullRoadChanged);
   folder.addButton({ title: "Start new branch" }).on("click", () => onFullRoadStartBranch?.());
@@ -37,6 +39,22 @@ export function addFullRoadFolder(pane, toolState, opts) {
   graphFolder.addBinding(rp, "branchSnapRadius", { label: "Branch snap", min: 0.5, max: 30, step: 0.25 }).on("change", onFullRoadChanged);
   graphFolder.addBinding(rp, "junctionRadius", { label: "Junction radius", min: 2, max: 80, step: 0.5 }).on("change", onFullRoadChanged);
   graphFolder.addBinding(rp, "junctionSegments", { label: "Junction segs", min: 12, max: 96, step: 4 }).on("change", onFullRoadChanged);
+
+  if (stateKey === "smartRoad") {
+    graphFolder.addBinding(rp, "lanesPerDir", { label: "Lanes / dir", min: 1, max: 3, step: 1 }).on("change", onFullRoadChanged);
+    graphFolder
+      .addBinding(rp, "twoRoadNodes", {
+        label: "2-way nodes",
+        options: { "Smooth bend": "smooth", Junction: "junction" },
+      })
+      .on("change", onFullRoadChanged);
+    graphFolder
+      .addBinding(rp, "endCapStyle", {
+        label: "Road ends",
+        options: { Flat: "flat", Round: "round" },
+      })
+      .on("change", onFullRoadChanged);
+  }
 
   const geoFolder = folder.addFolder({ title: "Geometry", expanded: false });
   geoFolder.addBinding(rp, "width", { label: "Width", min: 2, max: 60, step: 0.5 }).on("change", onFullRoadChanged);

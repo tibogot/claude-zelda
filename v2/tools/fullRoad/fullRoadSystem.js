@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { generateRoadGeometry } from "../../core/road/roadMesh.js";
+import { buildLabNetworkGeometry } from "../../core/road/roadNetworkLabGeometry.js";
 import { createRoadUniforms, createRoadMaterial, syncRoadUniforms } from "../../core/road/roadMaterial.js";
 import { createDecalMaterial } from "./roadDecalMaterial.js";
 
@@ -90,7 +91,16 @@ function makeRoadParams(params, style, markingsEnabled) {
 }
 
 export class FullRoadSystem {
-  constructor({ scene, toolState, getWorldHeight, reflectTex, terrainStore, chunkStream }) {
+  constructor({
+    scene,
+    toolState,
+    getWorldHeight,
+    reflectTex,
+    terrainStore,
+    chunkStream,
+    useLabNetworkGeometry = false,
+    graphMode = "fullRoad",
+  }) {
     this.scene = scene;
     this.toolState = toolState;
     this.getWorldHeight = getWorldHeight;
@@ -98,6 +108,10 @@ export class FullRoadSystem {
     this.terrainStore = terrainStore ?? null;
     this.chunkStream = chunkStream ?? null;
     this.transformControls = null;
+    /** When true, use `profile-road-lab0`-style piecewise network meshing (Smart Road). */
+    this._useLabNetworkGeometry = useLabNetworkGeometry;
+    /** Which editor mode shows handles for this system instance (`fullRoad` | `smartRoad`). */
+    this._graphMode = graphMode;
 
     this.nodes = [];
     this.edges = [];
@@ -707,6 +721,10 @@ export class FullRoadSystem {
   rebuildAllMeshes() {
     this._clearGroup(this.meshGroup);
     if (!this._roadMat) this._rebuildMaterials();
+    if (this._useLabNetworkGeometry) {
+      this._rebuildLabNetworkMeshes();
+      return;
+    }
     const p = this.toolState.fullRoad;
     const degree = this._degreeMap();
 
@@ -757,7 +775,149 @@ export class FullRoadSystem {
     // Dispose individual geometries
     for (const geo of geometries) geo.dispose();
   }
-  
+
+  _sampleSlope01Lab(x, z, eps) {
+    const hL = this.getWorldHeight(x - eps, z);
+    const hR = this.getWorldHeight(x + eps, z);
+    const hD = this.getWorldHeight(x, z - eps);
+    const hU = this.getWorldHeight(x, z + eps);
+    const nx = hL - hR;
+    const ny = 2 * eps;
+    const nz = hD - hU;
+    const invLen = 1 / Math.max(1e-6, Math.hypot(nx, ny, nz));
+    const normalY = ny * invLen;
+    return Math.max(0, Math.min(1, 1 - normalY));
+  }
+
+  _roadSurfaceYLab(x, z, p) {
+    const h = this.getWorldHeight(x, z);
+    const slopeEps = Math.max(0.35, Math.min(2.5, p.width * 0.1));
+    if (!p.adaptiveLift) return h + p.heightOffset;
+    const slope01 = this._sampleSlope01Lab(x, z, slopeEps);
+    const extra = Math.min(p.liftMax, slope01 * p.slopeLift);
+    return h + p.heightOffset + extra;
+  }
+
+  _rebuildLabNetworkMeshes() {
+    const p = this.toolState.fullRoad;
+    if (!this.nodes.length || !this.edges.length) return;
+
+    const nodes2 = this.nodes.map((n) => ({
+      id: n.id,
+      x: n.position.x,
+      z: n.position.z,
+      forceJunction: !!n.forceJunction,
+    }));
+    const edges2 = this.edges.map((e) => ({ a: e.a, b: e.b }));
+
+    const { pieces, markings } = buildLabNetworkGeometry(nodes2, edges2, {
+      width: p.width,
+      lanesPerDir: p.lanesPerDir ?? 1,
+      junctionRadius: p.junctionRadius,
+      curveSegments: Math.max(8, Math.min(96, p.segments | 0 || 34)),
+      junctionSegments: Math.max(3, p.junctionSegments | 0 || 14),
+      twoRoadNodes: p.twoRoadNodes ?? "smooth",
+      endCapStyle: p.endCapStyle ?? "flat",
+    });
+
+    // Lab colors
+    const ROAD_SURFACE = 0x1c2126;
+    const JUNCTION_SURFACE = 0x22282e;
+    const EDGE_COLOR = 0x8b35ff;
+    const CENTER_LINE_COLOR = 0xf7d05f;
+    const DIVIDER_LINE_COLOR = 0xefefef;
+
+    // Create materials (cached on instance)
+    if (!this._labRoadMat) {
+      this._labRoadMat = new THREE.MeshBasicMaterial({ color: ROAD_SURFACE, side: THREE.DoubleSide });
+      this._labJunctionMat = new THREE.MeshBasicMaterial({ color: JUNCTION_SURFACE, side: THREE.DoubleSide });
+      this._labEdgeLineMat = new THREE.LineBasicMaterial({ color: EDGE_COLOR, linewidth: 2 });
+      this._labCenterLineMat = new THREE.LineBasicMaterial({ color: CENTER_LINE_COLOR, linewidth: 2 });
+      this._labDividerLineMat = new THREE.LineBasicMaterial({ color: DIVIDER_LINE_COLOR, linewidth: 1 });
+    }
+
+    // Build road surface meshes
+    for (const piece of pieces) {
+      if (!piece.polygon || piece.polygon.length < 3) continue;
+      const mat = piece.isJunctionCore ? this._labJunctionMat : this._labRoadMat;
+      const geo = this._labPolygon2DToPlaneGeometry(piece.polygon, p);
+      if (geo) {
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.renderOrder = 3;
+        this.meshGroup.add(mesh);
+      }
+
+      // Road edge lines (left/right purple edges)
+      if (piece.left?.path?.length >= 2) {
+        const line = this._labPathToLine3D(piece.left.path, p, this._labEdgeLineMat);
+        if (line) this.meshGroup.add(line);
+      }
+      if (piece.right?.path?.length >= 2) {
+        const line = this._labPathToLine3D(piece.right.path, p, this._labEdgeLineMat);
+        if (line) this.meshGroup.add(line);
+      }
+    }
+
+    // Lane markings
+    for (const m of markings || []) {
+      if (!m.path || m.path.length < 2) continue;
+      const mat = m.type === "center" || m.type === "junctionCenter"
+        ? this._labCenterLineMat
+        : this._labDividerLineMat;
+      const line = this._labPathToLine3D(m.path, p, mat);
+      if (line) this.meshGroup.add(line);
+    }
+  }
+
+  /** Convert lab 2D polygon (x,y where y=worldZ) to flat 3D PlaneGeometry on terrain. */
+  _labPolygon2DToPlaneGeometry(polygon, p) {
+    if (!polygon || polygon.length < 3) return null;
+
+    // Use earcut for robust triangulation
+    const flatVerts = [];
+    for (const pt of polygon) {
+      flatVerts.push(pt.x, pt.y);
+    }
+    const indices = THREE.ShapeUtils.triangulateShape(
+      polygon.map((pt) => new THREE.Vector2(pt.x, pt.y)),
+      []
+    );
+
+    const positions = [];
+    const uvs = [];
+    for (const [i0, i1, i2] of indices) {
+      for (const idx of [i0, i1, i2]) {
+        const x = polygon[idx].x;
+        const z = polygon[idx].y; // lab y -> world z
+        const y = this._roadSurfaceYLab(x, z, p);
+        positions.push(x, y, z);
+        uvs.push(x / 10, z / 10);
+      }
+    }
+
+    if (positions.length === 0) return null;
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+    geo.computeVertexNormals();
+    return geo;
+  }
+
+  /** Convert lab 2D path to 3D Line on terrain. */
+  _labPathToLine3D(path, p, material) {
+    if (!path || path.length < 2) return null;
+    const pts = [];
+    for (const pt of path) {
+      const x = pt.x;
+      const z = pt.y; // lab y -> world z
+      const y = this._roadSurfaceYLab(x, z, p) + 0.05; // slight lift above road surface
+      pts.push(new THREE.Vector3(x, y, z));
+    }
+    const geo = new THREE.BufferGeometry().setFromPoints(pts);
+    return new THREE.Line(geo, material);
+  }
+
   _markJunctionVertices(geo, degree, roadWidth) {
     const junctionAttr = geo.getAttribute("aJunction");
     const posAttr = geo.getAttribute("position");
@@ -1110,7 +1270,8 @@ export class FullRoadSystem {
   }
 
   _syncHandlesVisibility() {
-    this.handleGroup.visible = this.toolState.mode === "fullRoad" && this.toolState.fullRoad.showHandles;
+    this.handleGroup.visible =
+      this.toolState.mode === this._graphMode && this.toolState.fullRoad.showHandles;
   }
 
   _rebuildVisual() {
@@ -2429,6 +2590,11 @@ export class FullRoadSystem {
     this.scene.remove(this._decalProxy);
     if (this._roadMat) this._roadMat.dispose();
     if (this._junctionMat) this._junctionMat.dispose();
+    if (this._labRoadMat) this._labRoadMat.dispose();
+    if (this._labJunctionMat) this._labJunctionMat.dispose();
+    if (this._labEdgeLineMat) this._labEdgeLineMat.dispose();
+    if (this._labCenterLineMat) this._labCenterLineMat.dispose();
+    if (this._labDividerLineMat) this._labDividerLineMat.dispose();
     this._lineMat.dispose();
     this._junctionLineMat.dispose();
     this._junctionCenterLineMat.dispose();

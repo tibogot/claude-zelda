@@ -176,6 +176,7 @@ export function createTweakpaneUi({
         "Cliff Grass": "cliffGrass",
         Road: "road",
         "Full Road": "fullRoad",
+        "Smart Road": "smartRoad",
         River: "river",
         Spline: "spline",
         Cliffs: "cliffs",
@@ -395,6 +396,21 @@ export function createTweakpaneUi({
     onFullRoadToggleJunction,
     onFullRoadFlattenTerrain,
     onFullRoadApplyCityPreset,
+    stateKey: "fullRoad",
+    title: "Full Road",
+  });
+  addFullRoadFolder(pane, toolState, {
+    onFullRoadChanged,
+    onFullRoadStartBranch,
+    onFullRoadDeleteSelected,
+    onFullRoadClearAll,
+    onFullRoadSnapY,
+    onFullRoadSelectedYChanged,
+    onFullRoadToggleJunction,
+    onFullRoadFlattenTerrain,
+    onFullRoadApplyCityPreset,
+    stateKey: "smartRoad",
+    title: "Smart Road",
   });
   addRiverFolder(pane, toolState, {
     onRiverChanged,
