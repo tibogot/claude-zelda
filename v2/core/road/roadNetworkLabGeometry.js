@@ -142,7 +142,8 @@ function junctionBoundary(node, roads, clipDistance, hw, junctionRadius, junctio
 /**
  * @param nodes { id, x, z, forceJunction? }[]
  * @param edges { a, b }[]
- * @param params { width, lanesPerDir, junctionRadius, curveSegments, junctionSegments, twoRoadNodes, endCapStyle }
+ * @param params { width, lanesPerDir, junctionRadius, curveSegments, junctionSegments, twoRoadNodes, endCapStyle,
+ *   centerLine?, laneLines?, doubleCenterLine?, centerLineGap?, centerLineWidth?, centerLeftEnabled?, centerRightEnabled? }
  */
 export function buildLabNetworkGeometry(nodes, edges, params) {
   const width = params.width;
@@ -152,6 +153,25 @@ export function buildLabNetworkGeometry(nodes, edges, params) {
   const junctionSegments = Math.max(3, params.junctionSegments ?? 14);
   const twoRoadNodes = params.twoRoadNodes ?? "smooth";
   const endCapStyle = params.endCapStyle ?? "flat";
+  const centerLine = params.centerLine !== false;
+  const laneLines = !!params.laneLines;
+  const doubleCenterLine = !!params.doubleCenterLine;
+  const centerLineGap = params.centerLineGap ?? 0.012;
+  const centerLineWidth = params.centerLineWidth ?? 0.02;
+  const centerLeftEnabled = params.centerLeftEnabled !== false;
+  const centerRightEnabled = params.centerRightEnabled !== false;
+
+  /** Physical lateral offsets along `side` from road spine (matches Full Road normalized gap/width). */
+  function centerStripeOffsets() {
+    if (!doubleCenterLine) return [{ off: 0, role: "center" }];
+    const halfGap = centerLineGap * 0.5;
+    const halfW = centerLineWidth * 0.5;
+    const d = (halfGap + halfW) * width;
+    const out = [];
+    if (centerLeftEnabled) out.push({ off: -d, role: "centerLeft" });
+    if (centerRightEnabled) out.push({ off: d, role: "centerRight" });
+    return out;
+  }
 
   const nodeById = new Map(
     nodes.map((n) => [
@@ -209,11 +229,22 @@ export function buildLabNetworkGeometry(nodes, edges, params) {
     });
 
     for (let i = 1; i < count; i++) {
-      const off = -hw + i * laneW;
-      markings.push({
-        path: [add(start, mul(side, off)), add(end, mul(side, off))],
-        type: i === lanesPerDir ? "center" : "divider",
-      });
+      if (i === lanesPerDir) {
+        if (!centerLine) continue;
+        for (const { off: cOff, role } of centerStripeOffsets()) {
+          markings.push({
+            path: [add(start, mul(side, cOff)), add(end, mul(side, cOff))],
+            type: role,
+          });
+        }
+      } else {
+        if (!laneLines) continue;
+        const off = -hw + i * laneW;
+        markings.push({
+          path: [add(start, mul(side, off)), add(end, mul(side, off))],
+          type: "divider",
+        });
+      }
     }
   }
 
@@ -263,12 +294,24 @@ export function buildLabNetworkGeometry(nodes, edges, params) {
       const mouthB = add(node.p, mul(second.dir, clipB));
       pieces.push(buildNetworkBend(mouthA, node.p, mouthB, width, curveSegments));
 
+      const bendSamples = Math.max(4, curveSegments | 0);
       for (let i = 1; i < count; i++) {
-        const off = -hw + i * laneW;
-        markings.push({
-          path: sampleQuadraticOffset(mouthA, node.p, mouthB, off, Math.max(4, curveSegments | 0)),
-          type: i === lanesPerDir ? "center" : "divider",
-        });
+        if (i === lanesPerDir) {
+          if (!centerLine) continue;
+          for (const { off: cOff, role } of centerStripeOffsets()) {
+            markings.push({
+              path: sampleQuadraticOffset(mouthA, node.p, mouthB, cOff, bendSamples),
+              type: role,
+            });
+          }
+        } else {
+          if (!laneLines) continue;
+          const off = -hw + i * laneW;
+          markings.push({
+            path: sampleQuadraticOffset(mouthA, node.p, mouthB, off, bendSamples),
+            type: "divider",
+          });
+        }
       }
       continue;
     }

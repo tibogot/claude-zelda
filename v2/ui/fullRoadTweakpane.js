@@ -22,17 +22,28 @@ export function addFullRoadFolder(pane, toolState, opts) {
     title = "Full Road",
   } = opts;
   const rp = toolState[stateKey] ?? toolState.fullRoad;
-  const folder = pane.addFolder({ title, expanded: false });
+  const isSmartRoad = stateKey === "smartRoad";
+  const folder = pane.addFolder({ title, expanded: isSmartRoad });
 
   folder.addBinding(rp, "showHandles", { label: "Show handles" }).on("change", onFullRoadChanged);
   folder.addButton({ title: "Start new branch" }).on("click", () => onFullRoadStartBranch?.());
   folder.addButton({ title: "Toggle selected junction" }).on("click", () => onFullRoadToggleJunction?.());
   folder.addButton({ title: "Delete selected node" }).on("click", () => onFullRoadDeleteSelected?.());
-  folder.addButton({ title: "Clear full road network" }).on("click", () => onFullRoadClearAll?.());
+  folder
+    .addButton({
+      title: isSmartRoad ? "Clear Smart Road network" : "Clear full road network",
+    })
+    .on("click", () => onFullRoadClearAll?.());
   folder.addBinding(rp, "selectedPointY", { label: "Node Y", min: -50, max: 200, step: 0.1 }).on("change", () => onFullRoadSelectedYChanged?.());
   folder.addButton({ title: "Snap selected Y to terrain" }).on("click", () => onFullRoadSnapY?.());
-  folder.addButton({ title: "Flatten terrain under full roads" }).on("click", () => onFullRoadFlattenTerrain?.());
-  folder.addButton({ title: "Apply City Road Preset" }).on("click", () => onFullRoadApplyCityPreset?.());
+  folder
+    .addButton({
+      title: isSmartRoad ? "Flatten terrain under Smart roads" : "Flatten terrain under full roads",
+    })
+    .on("click", () => onFullRoadFlattenTerrain?.());
+  if (!isSmartRoad) {
+    folder.addButton({ title: "Apply City Road Preset" }).on("click", () => onFullRoadApplyCityPreset?.());
+  }
 
   const graphFolder = folder.addFolder({ title: "Graph / Junctions", expanded: true });
   graphFolder.addBinding(rp, "nodeSnapRadius", { label: "Node snap", min: 0.5, max: 20, step: 0.25 }).on("change", onFullRoadChanged);
@@ -40,7 +51,7 @@ export function addFullRoadFolder(pane, toolState, opts) {
   graphFolder.addBinding(rp, "junctionRadius", { label: "Junction radius", min: 2, max: 80, step: 0.5 }).on("change", onFullRoadChanged);
   graphFolder.addBinding(rp, "junctionSegments", { label: "Junction segs", min: 12, max: 96, step: 4 }).on("change", onFullRoadChanged);
 
-  if (stateKey === "smartRoad") {
+  if (isSmartRoad) {
     graphFolder.addBinding(rp, "lanesPerDir", { label: "Lanes / dir", min: 1, max: 3, step: 1 }).on("change", onFullRoadChanged);
     graphFolder
       .addBinding(rp, "twoRoadNodes", {
@@ -58,11 +69,42 @@ export function addFullRoadFolder(pane, toolState, opts) {
 
   const geoFolder = folder.addFolder({ title: "Geometry", expanded: false });
   geoFolder.addBinding(rp, "width", { label: "Width", min: 2, max: 60, step: 0.5 }).on("change", onFullRoadChanged);
-  geoFolder.addBinding(rp, "segments", { label: "Edge segments", min: 8, max: 300, step: 4 }).on("change", onFullRoadChanged);
+  geoFolder
+    .addBinding(rp, "segments", {
+      label: isSmartRoad ? "Curve segments" : "Edge segments",
+      min: 8,
+      max: 300,
+      step: 4,
+    })
+    .on("change", onFullRoadChanged);
   geoFolder.addBinding(rp, "heightOffset", { label: "Height offset", min: 0, max: 2, step: 0.01 }).on("change", onFullRoadChanged);
   geoFolder.addBinding(rp, "adaptiveLift", { label: "Adaptive lift" }).on("change", onFullRoadChanged);
   geoFolder.addBinding(rp, "slopeLift", { label: "Slope lift", min: 0, max: 2, step: 0.01 }).on("change", onFullRoadChanged);
   geoFolder.addBinding(rp, "liftMax", { label: "Lift cap", min: 0, max: 2, step: 0.01 }).on("change", onFullRoadChanged);
+
+  if (isSmartRoad) {
+    const mk = folder.addFolder({ title: "Center & lane markings", expanded: false });
+    mk.addBinding(rp, "lineColor", { label: "Edge & lane color", view: "color" }).on("change", onFullRoadChanged);
+    mk.addBinding(rp, "lineWidth", { label: "Edge width", min: 0, max: 0.2, step: 0.005 }).on("change", onFullRoadChanged);
+    mk.addBinding(rp, "lineInset", { label: "Edge inset", min: 0, max: 0.15, step: 0.005 }).on("change", onFullRoadChanged);
+    mk.addBinding(rp, "centerLine", { label: "Center line" }).on("change", onFullRoadChanged);
+    mk.addBinding(rp, "centerLineColor", { label: "Center color", view: "color" }).on("change", onFullRoadChanged);
+    mk.addBinding(rp, "centerLineWidth", { label: "Center width", min: 0.002, max: 0.08, step: 0.001 }).on("change", onFullRoadChanged);
+    mk.addBinding(rp, "centerLineDashed", { label: "Center dashed" }).on("change", onFullRoadChanged);
+    mk.addBinding(rp, "centerLineDashScale", { label: "Center dash density", min: 0.005, max: 2, step: 0.005 }).on("change", onFullRoadChanged);
+    mk.addBinding(rp, "doubleCenterLine", { label: "Double center" }).on("change", onFullRoadChanged);
+    mk.addBinding(rp, "centerLineGap", { label: "Center gap", min: 0.004, max: 0.06, step: 0.001 }).on("change", onFullRoadChanged);
+    mk.addBinding(rp, "centerLeftEnabled", { label: "Center left on" }).on("change", onFullRoadChanged);
+    mk.addBinding(rp, "centerLeftColor", { label: "Center left color", view: "color" }).on("change", onFullRoadChanged);
+    mk.addBinding(rp, "centerLeftDashed", { label: "Center left dashed" }).on("change", onFullRoadChanged);
+    mk.addBinding(rp, "centerRightEnabled", { label: "Center right on" }).on("change", onFullRoadChanged);
+    mk.addBinding(rp, "centerRightColor", { label: "Center right color", view: "color" }).on("change", onFullRoadChanged);
+    mk.addBinding(rp, "centerRightDashed", { label: "Center right dashed" }).on("change", onFullRoadChanged);
+    mk.addBinding(rp, "laneLines", { label: "Lane separators" }).on("change", onFullRoadChanged);
+    mk.addBinding(rp, "laneLineWidth", { label: "Lane width", min: 0.002, max: 0.06, step: 0.001 }).on("change", onFullRoadChanged);
+    mk.addBinding(rp, "laneDashScale", { label: "Lane dash density", min: 0.005, max: 2, step: 0.005 }).on("change", onFullRoadChanged);
+    return folder;
+  }
 
   const matFolder = folder.addFolder({ title: "Material / Lines", expanded: false });
   matFolder.addBinding(rp, "colorTint", { label: "Color tint", view: "color" }).on("change", onFullRoadChanged);

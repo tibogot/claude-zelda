@@ -818,23 +818,40 @@ export class FullRoadSystem {
       junctionSegments: Math.max(3, p.junctionSegments | 0 || 14),
       twoRoadNodes: p.twoRoadNodes ?? "smooth",
       endCapStyle: p.endCapStyle ?? "flat",
+      centerLine: p.centerLine !== false,
+      laneLines: !!p.laneLines,
+      doubleCenterLine: !!p.doubleCenterLine,
+      centerLineGap: p.centerLineGap ?? 0.012,
+      centerLineWidth: p.centerLineWidth ?? 0.02,
+      centerLeftEnabled: p.centerLeftEnabled !== false,
+      centerRightEnabled: p.centerRightEnabled !== false,
     });
 
-    // Lab colors
     const ROAD_SURFACE = 0x1c2126;
     const JUNCTION_SURFACE = 0x22282e;
-    const EDGE_COLOR = 0x8b35ff;
-    const CENTER_LINE_COLOR = 0xf7d05f;
-    const DIVIDER_LINE_COLOR = 0xefefef;
 
-    // Create materials (cached on instance)
     if (!this._labRoadMat) {
       this._labRoadMat = new THREE.MeshBasicMaterial({ color: ROAD_SURFACE, side: THREE.DoubleSide });
       this._labJunctionMat = new THREE.MeshBasicMaterial({ color: JUNCTION_SURFACE, side: THREE.DoubleSide });
-      this._labEdgeLineMat = new THREE.LineBasicMaterial({ color: EDGE_COLOR, linewidth: 2 });
-      this._labCenterLineMat = new THREE.LineBasicMaterial({ color: CENTER_LINE_COLOR, linewidth: 2 });
-      this._labDividerLineMat = new THREE.LineBasicMaterial({ color: DIVIDER_LINE_COLOR, linewidth: 1 });
+      const stripeOpts = {
+        side: THREE.DoubleSide,
+        depthTest: true,
+        polygonOffset: true,
+        polygonOffsetFactor: -4,
+        polygonOffsetUnits: -4,
+      };
+      this._labCenterLineMat = new THREE.MeshBasicMaterial({ color: p.centerLineColor ?? "#f0c040", ...stripeOpts });
+      this._labCenterLeftMat = new THREE.MeshBasicMaterial({ color: p.centerLeftColor ?? "#f0c040", ...stripeOpts });
+      this._labCenterRightMat = new THREE.MeshBasicMaterial({ color: p.centerRightColor ?? "#f0c040", ...stripeOpts });
+      this._labDividerLineMat = new THREE.MeshBasicMaterial({ color: p.lineColor ?? "#f2f2f2", ...stripeOpts });
     }
+
+    this._labCenterLineMat.color.set(p.centerLineColor ?? "#f0c040");
+    this._labCenterLeftMat.color.set(p.centerLeftColor ?? p.centerLineColor ?? "#f0c040");
+    this._labCenterRightMat.color.set(p.centerRightColor ?? p.centerLineColor ?? "#f0c040");
+    this._labDividerLineMat.color.set(p.lineColor ?? "#f2f2f2");
+
+    const roadW = Math.max(1e-6, p.width ?? 16);
 
     // Build road surface meshes
     for (const piece of pieces) {
@@ -847,26 +864,268 @@ export class FullRoadSystem {
         this.meshGroup.add(mesh);
       }
 
-      // Road edge lines (left/right purple edges)
-      if (piece.left?.path?.length >= 2) {
-        const line = this._labPathToLine3D(piece.left.path, p, this._labEdgeLineMat);
-        if (line) this.meshGroup.add(line);
-      }
-      if (piece.right?.path?.length >= 2) {
-        const line = this._labPathToLine3D(piece.right.path, p, this._labEdgeLineMat);
-        if (line) this.meshGroup.add(line);
+      // Edge stripes (white): inset + width match Full Road shader (lineInset / lineWidth × road width).
+      const ew = Math.max(0, p.lineWidth ?? 0);
+      const insetNorm = Math.max(0, p.lineInset ?? 0.055);
+      if (ew > 1e-6 && piece.polygon?.length >= 3) {
+        let insetDist = (insetNorm + ew * 0.5) * roadW;
+        insetDist = Math.min(insetDist, roadW * 0.42);
+        const halfEdge = Math.max(0.004, ew * roadW * 0.5);
+        if (piece.left?.path?.length >= 2) {
+          const offsetPath = this._labOffsetPathTowardInterior(piece.left.path, piece.polygon, insetDist);
+          const stripe = this._labPathToStripeMesh3D(offsetPath, p, this._labDividerLineMat, halfEdge);
+          if (stripe) {
+            stripe.renderOrder = 5;
+            this.meshGroup.add(stripe);
+          }
+        }
+        if (piece.right?.path?.length >= 2) {
+          const offsetPath = this._labOffsetPathTowardInterior(piece.right.path, piece.polygon, insetDist);
+          const stripe = this._labPathToStripeMesh3D(offsetPath, p, this._labDividerLineMat, halfEdge);
+          if (stripe) {
+            stripe.renderOrder = 5;
+            this.meshGroup.add(stripe);
+          }
+        }
       }
     }
 
-    // Lane markings
+    // Lane markings (colors / dash pattern match Smart Road tweakpane → Full Road defaults)
     for (const m of markings || []) {
       if (!m.path || m.path.length < 2) continue;
-      const mat = m.type === "center" || m.type === "junctionCenter"
-        ? this._labCenterLineMat
-        : this._labDividerLineMat;
-      const line = this._labPathToLine3D(m.path, p, mat);
-      if (line) this.meshGroup.add(line);
+      const mat = this._labMatForMarkingType(m.type);
+      if (!mat) continue;
+      const { dashed, dashScale } = this._labDashOptsForMarking(m.type, p);
+      const paths = dashed ? this._labDashFragments2d(m.path, dashScale) : [m.path];
+      const usePaths = paths.length ? paths : [m.path];
+      const halfStripe = this._labMarkingHalfWidthWorld(m.type, roadW, p);
+      for (const path2d of usePaths) {
+        if (!path2d || path2d.length < 2) continue;
+        const stripe = this._labPathToStripeMesh3D(path2d, p, mat, halfStripe);
+        if (stripe) {
+          stripe.renderOrder = 4;
+          this.meshGroup.add(stripe);
+        }
+      }
     }
+  }
+
+  _labPolygonCentroid2d(poly) {
+    if (!poly?.length) return { x: 0, y: 0 };
+    let sx = 0;
+    let sy = 0;
+    for (const pt of poly) {
+      sx += pt.x;
+      sy += pt.y;
+    }
+    const n = poly.length;
+    return { x: sx / n, y: sy / n };
+  }
+
+  /** Shift boundary path toward piece interior (same plane as lab xz). */
+  _labOffsetPathTowardInterior(path2d, polygon2d, distance) {
+    if (!path2d?.length || distance < 1e-8) return path2d;
+    const centroid =
+      polygon2d?.length >= 3 ? this._labPolygonCentroid2d(polygon2d) : this._labPolygonCentroid2d(path2d);
+
+    const out = [];
+    const n = path2d.length;
+    for (let i = 0; i < n; i++) {
+      let dx;
+      let dz;
+      if (i === 0) {
+        dx = path2d[1].x - path2d[0].x;
+        dz = path2d[1].y - path2d[0].y;
+      } else if (i === n - 1) {
+        dx = path2d[n - 1].x - path2d[n - 2].x;
+        dz = path2d[n - 1].y - path2d[n - 2].y;
+      } else {
+        dx = path2d[i + 1].x - path2d[i - 1].x;
+        dz = path2d[i + 1].y - path2d[i - 1].y;
+      }
+      let len = Math.hypot(dx, dz);
+      if (len < 1e-8) {
+        dx = path2d[Math.min(i + 1, n - 1)].x - path2d[Math.max(i - 1, 0)].x;
+        dz = path2d[Math.min(i + 1, n - 1)].y - path2d[Math.max(i - 1, 0)].y;
+        len = Math.hypot(dx, dz) || 1;
+      }
+      let ux = -dz / len;
+      let uy = dx / len;
+      const vx = centroid.x - path2d[i].x;
+      const vy = centroid.y - path2d[i].y;
+      if (ux * vx + uy * vy < 0) {
+        ux *= -1;
+        uy *= -1;
+      }
+      out.push({ x: path2d[i].x + ux * distance, y: path2d[i].y + uy * distance });
+    }
+    return out;
+  }
+
+  /** Half-width in world meters (Full Road uses stripe width ≈ normalized × road width). */
+  _labMarkingHalfWidthWorld(type, roadWidth, p) {
+    const cw = Math.max(1e-6, p.centerLineWidth ?? 0.012);
+    const lw = Math.max(1e-6, p.laneLineWidth ?? 0.004);
+    switch (type) {
+      case "center":
+      case "centerLeft":
+      case "centerRight":
+        return Math.max(0.004, cw * roadWidth * 0.5);
+      case "divider":
+      case "junctionCenter":
+      default:
+        return Math.max(0.004, lw * roadWidth * 0.5);
+    }
+  }
+
+  /** Ribbon mesh along lab 2D polyline (y → world Z), extruded ±halfWidth in XZ. */
+  _labPathToStripeMesh3D(path2d, p, material, halfWidthWorld) {
+    const hw = Math.max(0.004, halfWidthWorld);
+    const n = path2d.length;
+    if (n < 2) return null;
+
+    const left = [];
+    const right = [];
+    for (let i = 0; i < n; i++) {
+      let dx;
+      let dz;
+      if (i === 0) {
+        dx = path2d[1].x - path2d[0].x;
+        dz = path2d[1].y - path2d[0].y;
+      } else if (i === n - 1) {
+        dx = path2d[n - 1].x - path2d[n - 2].x;
+        dz = path2d[n - 1].y - path2d[n - 2].y;
+      } else {
+        dx = path2d[i + 1].x - path2d[i - 1].x;
+        dz = path2d[i + 1].y - path2d[i - 1].y;
+      }
+      let len = Math.hypot(dx, dz);
+      if (len < 1e-8) {
+        dx = path2d[Math.min(i + 1, n - 1)].x - path2d[Math.max(i - 1, 0)].x;
+        dz = path2d[Math.min(i + 1, n - 1)].y - path2d[Math.max(i - 1, 0)].y;
+        len = Math.hypot(dx, dz) || 1;
+      }
+      const px = (-dz / len) * hw;
+      const py = (dx / len) * hw;
+      left.push({ x: path2d[i].x + px, y: path2d[i].y + py });
+      right.push({ x: path2d[i].x - px, y: path2d[i].y - py });
+    }
+
+    const lift = 0.055;
+    const yAt = (x, z) => this._roadSurfaceYLab(x, z, p) + lift;
+
+    const positions = new Float32Array(n * 2 * 3);
+    let pi = 0;
+    for (let i = 0; i < n; i++) {
+      positions[pi++] = left[i].x;
+      positions[pi++] = yAt(left[i].x, left[i].y);
+      positions[pi++] = left[i].y;
+      positions[pi++] = right[i].x;
+      positions[pi++] = yAt(right[i].x, right[i].y);
+      positions[pi++] = right[i].y;
+    }
+
+    const indices = [];
+    for (let i = 0; i < n - 1; i++) {
+      const b = i * 2;
+      indices.push(b, b + 2, b + 1, b + 1, b + 2, b + 3);
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geo.setIndex(indices);
+    geo.computeVertexNormals();
+    return new THREE.Mesh(geo, material);
+  }
+
+  _labMatForMarkingType(type) {
+    switch (type) {
+      case "center":
+        return this._labCenterLineMat;
+      case "centerLeft":
+        return this._labCenterLeftMat;
+      case "centerRight":
+        return this._labCenterRightMat;
+      case "divider":
+      case "junctionCenter":
+        return this._labDividerLineMat;
+      default:
+        return this._labDividerLineMat;
+    }
+  }
+
+  _labDashOptsForMarking(type, p) {
+    const laneDash = p.laneDashScale ?? 0.08;
+    const centerDash = p.centerLineDashScale ?? 0.08;
+    switch (type) {
+      case "divider":
+        return { dashed: !!p.laneLines, dashScale: laneDash };
+      case "center":
+        return { dashed: !!p.centerLineDashed, dashScale: centerDash };
+      case "centerLeft":
+        return { dashed: !!p.centerLeftDashed, dashScale: centerDash };
+      case "centerRight":
+        return { dashed: !!p.centerRightDashed, dashScale: centerDash };
+      default:
+        return { dashed: false, dashScale: centerDash };
+    }
+  }
+
+  _labPolylineDense2d(points2d, stepMeters) {
+    const out = [];
+    if (!points2d?.length) return out;
+    out.push(points2d[0]);
+    const step = Math.max(0.05, Math.min(0.35, stepMeters));
+    for (let i = 0; i < points2d.length - 1; i++) {
+      const a = points2d[i];
+      const b = points2d[i + 1];
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const segLen = Math.hypot(dx, dy);
+      const n = Math.max(1, Math.ceil(segLen / step));
+      for (let k = 1; k <= n; k++) {
+        const t = k / n;
+        out.push({ x: a.x + dx * t, y: a.y + dy * t });
+      }
+    }
+    return out;
+  }
+
+  /** Split polyline using same dash mask as Full Road: visible when fract(s·scale) ≥ 0.5 */
+  _labDashFragments2d(points2d, dashScale) {
+    if (!points2d || points2d.length < 2 || !(dashScale > 1e-9)) return [];
+    const dense = this._labPolylineDense2d(points2d, 0.14);
+    if (dense.length < 2) return [];
+    const cum = [0];
+    for (let i = 1; i < dense.length; i++) {
+      const a = dense[i - 1];
+      const b = dense[i];
+      cum[i] = cum[i - 1] + Math.hypot(b.x - a.x, b.y - a.y);
+    }
+    const frags = [];
+    let run = [];
+    const dashOn = (s) => {
+      const ph = s * dashScale;
+      const frac = ph - Math.floor(ph);
+      return frac >= 0.5 - 1e-7;
+    };
+    for (let i = 0; i < dense.length; i++) {
+      const on = dashOn(cum[i]);
+      if (i === 0) {
+        if (on) run.push(dense[i]);
+        continue;
+      }
+      const prevOn = dashOn(cum[i - 1]);
+      if (on !== prevOn) {
+        if (prevOn && run.length >= 2) frags.push(run);
+        run = [];
+        if (on) run.push(dense[i - 1], dense[i]);
+      } else if (on) {
+        run.push(dense[i]);
+      }
+    }
+    if (run.length >= 2) frags.push(run);
+    return frags.length ? frags : [];
   }
 
   /** Convert lab 2D polygon (x,y where y=worldZ) to flat 3D PlaneGeometry on terrain. */
@@ -1292,7 +1551,13 @@ export class FullRoadSystem {
         child.material !== this._junctionMat &&
         child.material !== this._lineMat &&
         child.material !== this._junctionLineMat &&
-        child.material !== this._junctionCenterLineMat
+        child.material !== this._junctionCenterLineMat &&
+        child.material !== this._labRoadMat &&
+        child.material !== this._labJunctionMat &&
+        child.material !== this._labCenterLineMat &&
+        child.material !== this._labCenterLeftMat &&
+        child.material !== this._labCenterRightMat &&
+        child.material !== this._labDividerLineMat
       ) {
         child.material.dispose();
       }
@@ -2592,8 +2857,9 @@ export class FullRoadSystem {
     if (this._junctionMat) this._junctionMat.dispose();
     if (this._labRoadMat) this._labRoadMat.dispose();
     if (this._labJunctionMat) this._labJunctionMat.dispose();
-    if (this._labEdgeLineMat) this._labEdgeLineMat.dispose();
     if (this._labCenterLineMat) this._labCenterLineMat.dispose();
+    if (this._labCenterLeftMat) this._labCenterLeftMat.dispose();
+    if (this._labCenterRightMat) this._labCenterRightMat.dispose();
     if (this._labDividerLineMat) this._labDividerLineMat.dispose();
     this._lineMat.dispose();
     this._junctionLineMat.dispose();
