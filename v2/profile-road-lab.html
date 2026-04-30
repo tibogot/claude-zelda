@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Profile Road Lab</title>
+    <title>Network Road Lab</title>
     <style>
       * { box-sizing: border-box; }
       html, body { margin: 0; height: 100%; background: #05070a; color: #d8e2ef; font-family: Inter, Segoe UI, Arial, sans-serif; }
@@ -26,6 +26,10 @@
       .row { display: grid; grid-template-columns: 132px 1fr auto; align-items: center; gap: 8px; margin: 6px 0; font-size: 12px; }
       .row input[type="range"] { width: 100%; }
       .row output { min-width: 46px; text-align: right; opacity: 0.95; }
+      .buttons { display: flex; gap: 6px; margin-top: 6px; }
+      button { color: #d8e2ef; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.18); border-radius: 6px; padding: 5px 8px; cursor: pointer; }
+      button:hover { background: rgba(255,255,255,0.14); }
+      #networkJson { width: 100%; min-height: 54px; margin-top: 6px; resize: vertical; color: #d8e2ef; background: rgba(0,0,0,0.36); border: 1px solid rgba(255,255,255,0.16); border-radius: 6px; padding: 6px; font: 11px Consolas, monospace; }
       .line { height: 1px; background: rgba(255, 255, 255, 0.12); margin: 8px 0; }
       #tips { margin-top: 8px; font-size: 11px; opacity: 0.82; line-height: 1.35; }
       #status { font-size: 11px; margin-top: 6px; opacity: 0.95; }
@@ -37,25 +41,7 @@
     <div id="root">
       <canvas id="c"></canvas>
       <div id="hud">
-        <h3>Profile Road Lab (article-inspired)</h3>
-        <div class="row">
-          <label for="layout">Layout</label>
-          <select id="layout">
-            <option value="two">2 profiles</option>
-            <option value="tjunction">T junction (3 profiles)</option>
-            <option value="network">Network draw</option>
-          </select>
-          <span></span>
-        </div>
-        <div class="row">
-          <label for="mode">Connection mode</label>
-          <select id="mode">
-            <option value="auto">Auto</option>
-            <option value="direct">Direct fillet</option>
-            <option value="mid">Intermediary profile</option>
-          </select>
-          <span></span>
-        </div>
+        <h3>Network Road Lab</h3>
         <div class="row">
           <label for="width">Road width</label>
           <input id="width" type="range" min="20" max="170" step="1" value="74" />
@@ -70,11 +56,6 @@
           <label for="junctionRadius">Junction radius</label>
           <input id="junctionRadius" type="range" min="20" max="220" step="1" value="90" />
           <output id="junctionOut">90</output>
-        </div>
-        <div class="row">
-          <label for="tangentScale">Hermite tangent scale</label>
-          <input id="tangentScale" type="range" min="0.5" max="2.5" step="0.05" value="1.2" />
-          <output id="tangentOut">1.20</output>
         </div>
         <div class="row">
           <label for="debug">Show debug</label>
@@ -99,11 +80,36 @@
           </select>
           <span></span>
         </div>
+        <div class="row">
+          <label for="snapGrid">Grid snap</label>
+          <input id="snapGrid" type="checkbox" />
+          <span></span>
+        </div>
+        <div class="row">
+          <label for="gridSize">Grid size</label>
+          <input id="gridSize" type="range" min="8" max="96" step="4" value="24" />
+          <output id="gridSizeOut">24</output>
+        </div>
+        <div class="row">
+          <label for="snapAngle">Angle snap</label>
+          <input id="snapAngle" type="checkbox" />
+          <span></span>
+        </div>
+        <div class="row">
+          <label for="angleStep">Angle step</label>
+          <input id="angleStep" type="range" min="5" max="90" step="5" value="15" />
+          <output id="angleStepOut">15</output>
+        </div>
+        <textarea id="networkJson" placeholder="Road network JSON export/import"></textarea>
+        <div class="buttons">
+          <button id="exportNetwork" type="button">Export</button>
+          <button id="importNetwork" type="button">Import</button>
+          <button id="clearNetwork" type="button">Clear</button>
+        </div>
         <div id="status"></div>
         <div class="line"></div>
         <div id="tips">
-          Profile mode: drag centers and heading handles.<br />
-          Network mode: click a node to continue from it, click empty space to extend, Ctrl/Cmd-click a node to connect, Delete removes active, Esc clears active.<br />
+          Network mode: click a node to continue, click a segment to select it, click empty space to extend, Ctrl/Cmd-click a node to connect, Delete removes selected.<br />
           Two-road nodes are spline bends by default; 3+ road nodes become junctions.<br />
           Purple lines show lane boundaries; white is road fill.<br />
           Based on ideas from
@@ -117,36 +123,45 @@
     <script>
       const canvas = document.getElementById("c");
       const ctx = canvas.getContext("2d");
-      const layoutEl = document.getElementById("layout");
-      const modeEl = document.getElementById("mode");
       const widthEl = document.getElementById("width");
       const widthOut = document.getElementById("widthOut");
       const lanesPerDirEl = document.getElementById("lanesPerDir");
       const lanesOut = document.getElementById("lanesOut");
       const junctionRadiusEl = document.getElementById("junctionRadius");
       const junctionOut = document.getElementById("junctionOut");
-      const tangentScaleEl = document.getElementById("tangentScale");
-      const tangentOut = document.getElementById("tangentOut");
       const debugEl = document.getElementById("debug");
       const hideJunctionSeamsEl = document.getElementById("hideJunctionSeams");
       const blendJunctionFillEl = document.getElementById("blendJunctionFill");
       const twoRoadNodesEl = document.getElementById("twoRoadNodes");
+      const snapGridEl = document.getElementById("snapGrid");
+      const gridSizeEl = document.getElementById("gridSize");
+      const gridSizeOut = document.getElementById("gridSizeOut");
+      const snapAngleEl = document.getElementById("snapAngle");
+      const angleStepEl = document.getElementById("angleStep");
+      const angleStepOut = document.getElementById("angleStepOut");
+      const networkJsonEl = document.getElementById("networkJson");
+      const exportNetworkEl = document.getElementById("exportNetwork");
+      const importNetworkEl = document.getElementById("importNetwork");
+      const clearNetworkEl = document.getElementById("clearNetwork");
       const statusEl = document.getElementById("status");
       const ROAD_SURFACE = "#1c2126";
       const JUNCTION_SURFACE = "#22282e";
 
       const state = {
-        layout: "two",
+        layout: "network",
         profileA: { c: { x: 270, y: 210 }, heading: 0.64 },
         profileB: { c: { x: 660, y: 360 }, heading: -1.42 },
         profileC: { c: { x: 670, y: 190 }, heading: Math.PI },
         width: Number(widthEl.value),
         lanesPerDir: Number(lanesPerDirEl.value),
         junctionRadius: Number(junctionRadiusEl.value),
-        tangentScale: Number(tangentScaleEl.value),
         hideJunctionSeams: hideJunctionSeamsEl.checked,
         blendJunctionFill: blendJunctionFillEl.checked,
         twoRoadNodes: twoRoadNodesEl.value,
+        snapGrid: snapGridEl.checked,
+        gridSize: Number(gridSizeEl.value),
+        snapAngle: snapAngleEl.checked,
+        angleStep: Number(angleStepEl.value),
         view: { x: 0, y: 0, zoom: 1 },
         drag: null,
         panning: false,
@@ -154,6 +169,7 @@
         network: {
           nextId: 6,
           activeNodeId: 2,
+          selectedEdgeKey: null,
           nodes: [
             { id: 1, p: { x: 150, y: 330 } },
             { id: 2, p: { x: 360, y: 330 } },
@@ -196,6 +212,7 @@
       function dist(a, b) { return len(sub(a, b)); }
       function lerp(a, b, t) { return vec(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t); }
       function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+      function edgeKey(a, b) { return a < b ? `${a}:${b}` : `${b}:${a}`; }
 
       function worldToScreen(p) {
         return vec(
@@ -209,6 +226,32 @@
           (p.x - state.view.x) / state.view.zoom,
           (p.y - state.view.y) / state.view.zoom,
         );
+      }
+
+      function pointSegmentDistance(p, a, b) {
+        const ab = sub(b, a);
+        const l2 = dot(ab, ab);
+        const t = l2 > 1e-8 ? clamp(dot(sub(p, a), ab) / l2, 0, 1) : 0;
+        const q = add(a, mul(ab, t));
+        return { d: dist(p, q), t, p: q };
+      }
+
+      function snapPoint(p, origin = null) {
+        let out = vec(p.x, p.y);
+        if (origin && state.snapAngle) {
+          const delta = sub(out, origin);
+          const l = len(delta);
+          if (l > 1e-5) {
+            const step = Math.PI / 180 * Math.max(1, state.angleStep);
+            const a = Math.round(Math.atan2(delta.y, delta.x) / step) * step;
+            out = add(origin, vec(Math.cos(a) * l, Math.sin(a) * l));
+          }
+        }
+        if (state.snapGrid) {
+          const g = Math.max(1, state.gridSize);
+          out = vec(Math.round(out.x / g) * g, Math.round(out.y / g) * g);
+        }
+        return out;
       }
 
       function lineIntersection(p, d, q, e) {
@@ -576,28 +619,9 @@
         const a = projectProfile(state.profileA, state.width);
         const b = projectProfile(state.profileB, state.width);
         const c = projectProfile(state.profileC, state.width);
-        const strategy = modeEl.value;
-        const pieces = [];
-        const markings = [];
-
-        if (state.layout === "network") {
-          const result = buildNetworkRoadSystem();
-          if (!result.ok) return { a, b, c, ok: false, reason: result.reason };
-          return { a, b, c, ok: true, network: true, pieces: result.pieces, markings: result.markings, nodes: result.nodes };
-        } else if (state.layout !== "tjunction") {
-          const main = buildRoadPiece(a, b, strategy, state.tangentScale);
-          if (!main) return { a, b, c, ok: false, reason: "Main A->B segment failed for this angle." };
-          pieces.push(main);
-          markings.push(...buildLaneMarks(a, b, strategy, state.tangentScale));
-        } else {
-          // Clean T-junction: A-B is trunk (through road), C is branch
-          const result = buildCleanTJunction(a, b, c, strategy, state.tangentScale);
-          if (!result.ok) return { a, b, c, ok: false, reason: result.reason };
-          pieces.push(...result.pieces);
-          markings.push(...result.markings);
-        }
-
-        return { a, b, c, ok: true, pieces, markings };
+        const result = buildNetworkRoadSystem();
+        if (!result.ok) return { a, b, c, ok: false, reason: result.reason };
+        return { a, b, c, ok: true, network: true, pieces: result.pieces, markings: result.markings, nodes: result.nodes };
       }
 
       function buildNetworkRoadSystem() {
@@ -941,8 +965,8 @@
         if (road.ok) {
           for (const piece of road.pieces) {
             if (piece.isJunctionCore) {
-              const hideNetworkSeams = state.layout === "network" && state.hideJunctionSeams && piece.networkNode;
-              const fill = state.layout === "network" && state.blendJunctionFill
+              const hideNetworkSeams = state.hideJunctionSeams && piece.networkNode;
+              const fill = state.blendJunctionFill
                 ? ROAD_SURFACE
                 : JUNCTION_SURFACE;
               const edgeColor = hideNetworkSeams ? null : piece.networkNode ? "#8b35ff" : "#f4f7fc";
@@ -954,7 +978,7 @@
               }
               continue;
             }
-            const hideSpanCaps = state.layout === "network" && state.hideJunctionSeams && (piece.networkSpan || piece.networkBend);
+            const hideSpanCaps = state.hideJunctionSeams && (piece.networkSpan || piece.networkBend);
             drawPath(piece.polygon, hideSpanCaps ? null : "#dfe6ef", hideSpanCaps ? 0 : 1.5, true, ROAD_SURFACE, 1);
             drawPath(piece.left.path, "#8b35ff", 3, false, null, 0.96);
             drawPath(piece.right.path, "#8b35ff", 3, false, null, 0.96);
@@ -970,13 +994,7 @@
           }
         }
 
-        if (state.layout === "network") {
-          drawNetworkEditor(road);
-        } else {
-          drawProfile(road.a, "#61d2ff");
-          drawProfile(road.b, "#ffb14e");
-          if (state.layout === "tjunction") drawProfile(road.c, "#7ff07f");
-        }
+        drawNetworkEditor(road);
 
         if (debugEl.checked && road.ok) {
           for (const piece of road.pieces) {
@@ -992,9 +1010,7 @@
         }
 
         statusEl.textContent = road.ok
-          ? state.layout === "network"
-            ? `Status: ${state.network.nodes.length} nodes, ${state.network.edges.length} roads, ${state.lanesPerDir * 2} lanes`
-            : `Status: ${road.pieces.length} piece(s), ${state.lanesPerDir * 2} lanes, ${modeEl.value === "auto" ? "auto" : modeEl.value} solve`
+          ? `Status: ${state.network.nodes.length} nodes, ${state.network.edges.length} roads, ${state.lanesPerDir * 2} lanes${state.network.selectedEdgeKey ? ", edge selected" : state.network.activeNodeId ? ", node selected" : ""}`
           : `Status: ${road.reason}`;
       }
 
@@ -1002,20 +1018,14 @@
         for (const edge of state.network.edges) {
           const a = state.network.nodes.find((n) => n.id === edge.a);
           const b = state.network.nodes.find((n) => n.id === edge.b);
-          if (a && b) drawLine(a.p, b.p, "#ffffff", 1, [6, 6], 0.16);
+          if (!a || !b) continue;
+          const selected = edgeKey(edge.a, edge.b) === state.network.selectedEdgeKey;
+          drawLine(a.p, b.p, selected ? "#ffdf70" : "#ffffff", selected ? 3 : 1, selected ? null : [6, 6], selected ? 0.9 : 0.16);
         }
         for (const node of state.network.nodes) {
           const active = node.id === state.network.activeNodeId;
           drawCircle(node.p, active ? 8 : 6, active ? "#ffdf70" : "#61d2ff", "#05070a", 0.98);
         }
-      }
-
-      function drawProfile(p, color) {
-        drawLine(p.left, p.right, color, 2.2);
-        drawCircle(p.c, 6, color, "#05070a");
-        const headingEnd = add(p.c, mul(p.fwd, 72));
-        drawLine(p.c, headingEnd, color, 2);
-        drawCircle(headingEnd, 5, color, color, 0.95);
       }
 
       function drawDebug(boundary, color) {
@@ -1034,25 +1044,20 @@
         }
       }
 
-      function nearestHandle(x, y) {
-        if (state.layout === "network") return nearestNetworkNode(x, y);
+      function nearestNetworkEdge(x, y) {
         const worldP = screenToWorld(vec(x, y));
-        const pA = projectProfile(state.profileA, state.width);
-        const pB = projectProfile(state.profileB, state.width);
-        const pC = projectProfile(state.profileC, state.width);
-        const handles = [
-          { id: "A_center", p: state.profileA.c },
-          { id: "B_center", p: state.profileB.c },
-          { id: "C_center", p: state.profileC.c },
-          { id: "A_heading", p: add(state.profileA.c, mul(pA.fwd, 72)) },
-          { id: "B_heading", p: add(state.profileB.c, mul(pB.fwd, 72)) },
-          { id: "C_heading", p: add(state.profileC.c, mul(pC.fwd, 72)) },
-        ];
+        const nodeById = new Map(state.network.nodes.map((node) => [node.id, node]));
         let best = null;
-        let bestD = 18 / Math.max(0.001, state.view.zoom);
-        for (const h of handles) {
-          const d = Math.hypot(h.p.x - worldP.x, h.p.y - worldP.y);
-          if (d < bestD) { bestD = d; best = h.id; }
+        let bestD = 12 / Math.max(0.001, state.view.zoom);
+        for (const edge of state.network.edges) {
+          const a = nodeById.get(edge.a);
+          const b = nodeById.get(edge.b);
+          if (!a || !b) continue;
+          const hit = pointSegmentDistance(worldP, a.p, b.p);
+          if (hit.d < bestD && hit.t > 0.04 && hit.t < 0.96) {
+            bestD = hit.d;
+            best = edge;
+          }
         }
         return best;
       }
@@ -1081,10 +1086,13 @@
 
       function activateNetworkNode(id) {
         state.network.activeNodeId = id;
+        state.network.selectedEdgeKey = null;
       }
 
       function addNetworkNode(p) {
-        const node = { id: state.network.nextId++, p };
+        const active = state.network.nodes.find((node) => node.id === state.network.activeNodeId);
+        const snapped = snapPoint(p, active ? active.p : null);
+        const node = { id: state.network.nextId++, p: snapped };
         state.network.nodes.push(node);
         if (state.network.activeNodeId) connectNetworkNodes(state.network.activeNodeId, node.id);
         activateNetworkNode(node.id);
@@ -1099,6 +1107,95 @@
         if (state.drag && state.drag.type === "network_node" && state.drag.id === id) state.drag = null;
       }
 
+      function deleteNetworkEdge(key) {
+        if (!key) return;
+        state.network.edges = state.network.edges.filter((edge) => edgeKey(edge.a, edge.b) !== key);
+        if (state.network.selectedEdgeKey === key) state.network.selectedEdgeKey = null;
+      }
+
+      function exportNetworkJson() {
+        const data = {
+          version: 1,
+          width: state.width,
+          lanesPerDir: state.lanesPerDir,
+          junctionRadius: state.junctionRadius,
+          twoRoadNodes: state.twoRoadNodes,
+          nodes: state.network.nodes.map((node) => ({ id: node.id, x: Math.round(node.p.x * 1000) / 1000, y: Math.round(node.p.y * 1000) / 1000 })),
+          edges: state.network.edges.map((edge) => ({ a: edge.a, b: edge.b })),
+        };
+        networkJsonEl.value = JSON.stringify(data, null, 2);
+      }
+
+      function importNetworkJson() {
+        let data;
+        try {
+          data = JSON.parse(networkJsonEl.value);
+        } catch (err) {
+          statusEl.textContent = `Import failed: ${err.message}`;
+          return false;
+        }
+        if (!Array.isArray(data.nodes) || !Array.isArray(data.edges)) {
+          statusEl.textContent = "Import failed: JSON needs nodes and edges arrays.";
+          return false;
+        }
+
+        const nodes = [];
+        const seen = new Set();
+        for (const raw of data.nodes) {
+          const id = Number(raw.id);
+          const x = Number(raw.x);
+          const y = Number(raw.y);
+          if (!Number.isFinite(id) || !Number.isFinite(x) || !Number.isFinite(y) || seen.has(id)) continue;
+          seen.add(id);
+          nodes.push({ id, p: { x, y } });
+        }
+        const edges = [];
+        const edgeSeen = new Set();
+        for (const raw of data.edges) {
+          const a = Number(raw.a);
+          const b = Number(raw.b);
+          const key = edgeKey(a, b);
+          if (!seen.has(a) || !seen.has(b) || a === b || edgeSeen.has(key)) continue;
+          edgeSeen.add(key);
+          edges.push({ a, b });
+        }
+        state.network.nodes = nodes;
+        state.network.edges = edges;
+        state.network.nextId = Math.max(0, ...nodes.map((node) => node.id)) + 1;
+        state.network.activeNodeId = nodes[0] ? nodes[0].id : null;
+        state.network.selectedEdgeKey = null;
+        if (Number.isFinite(Number(data.width))) {
+          state.width = clamp(Number(data.width), Number(widthEl.min), Number(widthEl.max));
+          widthEl.value = String(state.width);
+          widthOut.value = String(state.width);
+        }
+        if (Number.isFinite(Number(data.lanesPerDir))) {
+          state.lanesPerDir = clamp(Math.round(Number(data.lanesPerDir)), Number(lanesPerDirEl.min), Number(lanesPerDirEl.max));
+          lanesPerDirEl.value = String(state.lanesPerDir);
+          lanesOut.value = String(state.lanesPerDir);
+        }
+        if (Number.isFinite(Number(data.junctionRadius))) {
+          state.junctionRadius = clamp(Number(data.junctionRadius), Number(junctionRadiusEl.min), Number(junctionRadiusEl.max));
+          junctionRadiusEl.value = String(state.junctionRadius);
+          junctionOut.value = String(state.junctionRadius);
+        }
+        if (data.twoRoadNodes === "smooth" || data.twoRoadNodes === "junction") {
+          state.twoRoadNodes = data.twoRoadNodes;
+          twoRoadNodesEl.value = data.twoRoadNodes;
+        }
+        render();
+        return true;
+      }
+
+      function clearNetwork() {
+        state.network.nodes = [];
+        state.network.edges = [];
+        state.network.nextId = 1;
+        state.network.activeNodeId = null;
+        state.network.selectedEdgeKey = null;
+        render();
+      }
+
       function pointerPos(evt) {
         const r = canvas.getBoundingClientRect();
         return { x: evt.clientX - r.left, y: evt.clientY - r.top };
@@ -1111,25 +1208,28 @@
           state.panStart = { x: p.x, y: p.y, vx: state.view.x, vy: state.view.y };
           return;
         }
-        if (state.layout === "network") {
-          const nodeId = nearestNetworkNode(p.x, p.y);
-          if (nodeId) {
-            const node = state.network.nodes.find((n) => n.id === nodeId);
-            state.drag = {
-              type: "network_node",
-              id: nodeId,
-              start: p,
-              startWorld: node ? { x: node.p.x, y: node.p.y } : null,
-              moved: false,
-              connectOnClick: evt.ctrlKey || evt.metaKey,
-            };
+        const nodeId = nearestNetworkNode(p.x, p.y);
+        if (nodeId) {
+          const node = state.network.nodes.find((n) => n.id === nodeId);
+          state.network.selectedEdgeKey = null;
+          state.drag = {
+            type: "network_node",
+            id: nodeId,
+            start: p,
+            startWorld: node ? { x: node.p.x, y: node.p.y } : null,
+            moved: false,
+            connectOnClick: evt.ctrlKey || evt.metaKey,
+          };
+        } else {
+          const edge = nearestNetworkEdge(p.x, p.y);
+          if (edge) {
+            state.network.selectedEdgeKey = edgeKey(edge.a, edge.b);
+            state.network.activeNodeId = null;
           } else {
             addNetworkNode(screenToWorld(p));
-            render();
           }
-          return;
+          render();
         }
-        state.drag = nearestHandle(p.x, p.y);
       }
 
       function onMove(evt) {
@@ -1147,7 +1247,7 @@
           if (!node || !state.drag.startWorld) return;
           const movedPx = Math.hypot(p.x - state.drag.start.x, p.y - state.drag.start.y);
           if (movedPx > 3) state.drag.moved = true;
-          node.p = w;
+          node.p = snapPoint(w);
           render();
           return;
         }
@@ -1185,10 +1285,6 @@
         render();
       }
 
-      layoutEl.addEventListener("change", () => {
-        state.layout = layoutEl.value;
-        render();
-      });
       widthEl.addEventListener("input", () => {
         state.width = Number(widthEl.value);
         widthOut.value = String(state.width);
@@ -1204,12 +1300,6 @@
         junctionOut.value = String(state.junctionRadius);
         render();
       });
-      tangentScaleEl.addEventListener("input", () => {
-        state.tangentScale = Number(tangentScaleEl.value);
-        tangentOut.value = state.tangentScale.toFixed(2);
-        render();
-      });
-      modeEl.addEventListener("change", render);
       debugEl.addEventListener("change", render);
       hideJunctionSeamsEl.addEventListener("change", () => {
         state.hideJunctionSeams = hideJunctionSeamsEl.checked;
@@ -1223,9 +1313,35 @@
         state.twoRoadNodes = twoRoadNodesEl.value;
         render();
       });
+      snapGridEl.addEventListener("change", () => {
+        state.snapGrid = snapGridEl.checked;
+        render();
+      });
+      gridSizeEl.addEventListener("input", () => {
+        state.gridSize = Number(gridSizeEl.value);
+        gridSizeOut.value = String(state.gridSize);
+        render();
+      });
+      snapAngleEl.addEventListener("change", () => {
+        state.snapAngle = snapAngleEl.checked;
+        render();
+      });
+      angleStepEl.addEventListener("input", () => {
+        state.angleStep = Number(angleStepEl.value);
+        angleStepOut.value = String(state.angleStep);
+        render();
+      });
+      exportNetworkEl.addEventListener("click", exportNetworkJson);
+      importNetworkEl.addEventListener("click", importNetworkJson);
+      clearNetworkEl.addEventListener("click", clearNetwork);
       window.addEventListener("keydown", (evt) => {
-        if (state.layout === "network" && (evt.key === "Delete" || evt.key === "Backspace")) {
-          if (state.network.activeNodeId) {
+        if (evt.key === "Delete" || evt.key === "Backspace") {
+          if (document.activeElement === networkJsonEl) return;
+          if (state.network.selectedEdgeKey) {
+            evt.preventDefault();
+            deleteNetworkEdge(state.network.selectedEdgeKey);
+            render();
+          } else if (state.network.activeNodeId) {
             evt.preventDefault();
             deleteNetworkNode(state.network.activeNodeId);
             render();
@@ -1234,6 +1350,7 @@
         }
         if (evt.key === "Escape") {
           state.network.activeNodeId = null;
+          state.network.selectedEdgeKey = null;
           state.drag = null;
           render();
         }
@@ -1249,7 +1366,8 @@
       widthOut.value = widthEl.value;
       lanesOut.value = lanesPerDirEl.value;
       junctionOut.value = junctionRadiusEl.value;
-      tangentOut.value = state.tangentScale.toFixed(2);
+      gridSizeOut.value = gridSizeEl.value;
+      angleStepOut.value = angleStepEl.value;
       state.view.x = window.innerWidth * 0.08;
       state.view.y = window.innerHeight * 0.08;
       resize();
