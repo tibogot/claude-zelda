@@ -82,6 +82,15 @@ export function addFullRoadFolder(pane, toolState, opts) {
   agingFolder.addBinding(rp, "scratchAmount", { label: "Scratch amount", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
   agingFolder.addBinding(rp, "scratchScale", { label: "Scratch scale", min: 2, max: 80, step: 0.5 }).on("change", onFullRoadChanged);
   agingFolder.addBinding(rp, "scratchThinness", { label: "Scratch thinness", min: 0.1, max: 0.98, step: 0.01 }).on("change", onFullRoadChanged);
+  // Line paint scratches (directional wear on painted lines)
+  agingFolder.addBinding(rp, "lineScratchAmount", { label: "Line scratch amt", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
+  agingFolder.addBinding(rp, "lineScratchScale", { label: "Line scratch scale", min: 1, max: 20, step: 0.5 }).on("change", onFullRoadChanged);
+  agingFolder.addBinding(rp, "lineScratchStretch", { label: "Line scratch stretch", min: 1, max: 20, step: 0.5 }).on("change", onFullRoadChanged);
+  agingFolder.addBinding(rp, "lineScratchThreshold", { label: "Line scratch thresh", min: 0.05, max: 0.8, step: 0.01 }).on("change", onFullRoadChanged);
+  agingFolder.addBinding(rp, "lineScratchSoftness", { label: "Line scratch soft", min: 0.02, max: 0.5, step: 0.01 }).on("change", onFullRoadChanged);
+  agingFolder.addBinding(rp, "lineScratchWarp", { label: "Line scratch warp", min: 0, max: 2, step: 0.05 }).on("change", onFullRoadChanged);
+  agingFolder.addBinding(rp, "lineScratchDetail", { label: "Line scratch detail", min: 0, max: 1, step: 0.05 }).on("change", onFullRoadChanged);
+  agingFolder.addBinding(rp, "lineScratchEdge", { label: "Line scratch edge", min: 0, max: 1, step: 0.05 }).on("change", onFullRoadChanged);
   agingFolder.addBinding(rp, "roughnessDirtBoost", { label: "Dirt roughness+", min: 0, max: 0.5, step: 0.01 }).on("change", onFullRoadChanged);
   agingFolder.addBinding(rp, "roughnessWearReduce", { label: "Wear roughness-", min: 0, max: 0.4, step: 0.01 }).on("change", onFullRoadChanged);
 

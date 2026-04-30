@@ -3,7 +3,7 @@ import { MeshPhysicalNodeMaterial } from "three";
 import {
   Fn, float, vec2, vec3, vec4, uv, mix, max, min, step, smoothstep,
   fract, dot, texture, positionWorld, cameraPosition, length,
-  normalize, sub, attribute, abs,
+  normalize, sub, attribute, abs, sin, floor,
 } from "three/tsl";
 import { uniform, screenUV } from "three/tsl";
 
@@ -66,6 +66,15 @@ export function createRoadUniforms(params) {
     uScratchAmount: uniform(params.scratchAmount ?? 0.0),
     uScratchScale: uniform(params.scratchScale ?? 24.0),
     uScratchThinness: uniform(params.scratchThinness ?? 0.8),
+    // line paint scratches (directional wear)
+    uLineScratchAmount: uniform(params.lineScratchAmount ?? 0.5),
+    uLineScratchScale: uniform(params.lineScratchScale ?? 5.0),
+    uLineScratchStretch: uniform(params.lineScratchStretch ?? 8.0),
+    uLineScratchThreshold: uniform(params.lineScratchThreshold ?? 0.35),
+    uLineScratchSoftness: uniform(params.lineScratchSoftness ?? 0.15),
+    uLineScratchWarp: uniform(params.lineScratchWarp ?? 0.4),
+    uLineScratchDetail: uniform(params.lineScratchDetail ?? 0.5),
+    uLineScratchEdge: uniform(params.lineScratchEdge ?? 0.3),
     uRoughnessDirtBoost: uniform(params.roughnessDirtBoost ?? 0.0),
     uRoughnessWearReduce: uniform(params.roughnessWearReduce ?? 0.0),
     // wet road / puddles
@@ -111,6 +120,86 @@ const _fbm2 = Fn(([p]) => {
   return v;
 });
 
+// hash22: vec2 → vec2 for Voronoi cell jittering (same as voronoi-foam)
+const _hash22 = Fn(([p]) => {
+  const px = dot(p, vec2(127.1, 311.7));
+  const py = dot(p, vec2(269.5, 183.3));
+  return fract(sin(vec2(px, py)).mul(43758.5453));
+});
+
+// Voronoi F1 distance (same pattern as voronoi-foam)
+const _voronoiF1 = Fn(([p]) => {
+  const ip = floor(p).toVar();
+  const fp = fract(p).toVar();
+  const md = float(10.0).toVar();
+  // 3x3 neighbor search (JS-unrolled to avoid WGSL scoping issues)
+  for (const [nx, ny] of [[-1,-1],[0,-1],[1,-1],[-1,0],[0,0],[1,0],[-1,1],[0,1],[1,1]]) {
+    const cellOffset = vec2(float(nx), float(ny));
+    const rnd = _hash22(ip.add(cellOffset));
+    md.assign(min(md, length(cellOffset.add(rnd).sub(fp))));
+  }
+  return md;
+});
+
+// Voronoi F2-F1: returns difference between 2nd closest and closest cell distance
+// This creates natural crack/edge patterns between cells - thin lines at cell boundaries
+const _voronoiF2F1 = Fn(([p]) => {
+  const ip = floor(p).toVar();
+  const fp = fract(p).toVar();
+  const f1 = float(10.0).toVar();
+  const f2 = float(10.0).toVar();
+  // 3x3 neighbor search (JS-unrolled)
+  for (const [nx, ny] of [[-1,-1],[0,-1],[1,-1],[-1,0],[0,0],[1,0],[-1,1],[0,1],[1,1]]) {
+    const cellOffset = vec2(float(nx), float(ny));
+    const rnd = _hash22(ip.add(cellOffset));
+    const d = length(cellOffset.add(rnd).sub(fp));
+    // track two closest distances
+    const newF2 = max(f1, min(f2, d));
+    f1.assign(min(f1, d));
+    f2.assign(newF2);
+  }
+  return f2.sub(f1);
+});
+
+// Line scratch mask with configurable FBM and edge detection for realistic scratches
+const _lineScratchMask = Fn(([arcLen, vCoord, scale, stretch, threshold, softness, warpAmt, detail, edgeAmount]) => {
+  // Anisotropic UV: heavily stretched along road direction for elongated scratches
+  const scratchUV = vec2(arcLen.mul(scale).div(stretch), vCoord.mul(scale));
+  
+  // Domain warp for organic irregularity
+  const warpedUV = scratchUV.add(vec2(
+    _fbm2(scratchUV.mul(0.5)).sub(0.5).mul(warpAmt),
+    _fbm2(scratchUV.mul(0.6).add(vec2(3.7, 1.2))).sub(0.5).mul(warpAmt)
+  ));
+  
+  // Multi-octave directional noise (more octaves = more fine detail)
+  const baseFreq = float(2.0);
+  const n1 = _vNoise(warpedUV.mul(baseFreq));
+  const n2 = _vNoise(warpedUV.mul(baseFreq.mul(2.3)).add(vec2(1.7, 3.2))).mul(0.5);
+  const n3 = _vNoise(warpedUV.mul(baseFreq.mul(5.1)).add(vec2(4.3, 1.8))).mul(0.25);
+  const n4 = _vNoise(warpedUV.mul(baseFreq.mul(10.7)).add(vec2(2.1, 5.4))).mul(0.125);
+  
+  // Blend detail levels based on detail parameter
+  const coarse = n1.add(n2).div(1.5);
+  const fine = n1.add(n2).add(n3).add(n4).div(1.875);
+  const directNoise = mix(coarse, fine, detail);
+  
+  // Edge detection for sharper vein-like patterns
+  const eps = float(0.015);
+  const center = _fbm2(warpedUV.mul(baseFreq));
+  const right = _fbm2(warpedUV.add(vec2(eps, 0)).mul(baseFreq));
+  const up = _fbm2(warpedUV.add(vec2(0, eps.mul(stretch))).mul(baseFreq)); // stretch-aware
+  const dx = right.sub(center);
+  const dy = up.sub(center);
+  const edges = dx.mul(dx).add(dy.mul(dy)).mul(500.0).clamp(float(0), float(1));
+  
+  // Blend between soft noise pattern and sharp edges
+  const pattern = mix(directNoise, edges, edgeAmount);
+  
+  // Threshold to get scratch pattern
+  return smoothstep(threshold, threshold.add(softness), pattern);
+});
+
 function _buildRoadColor(diffuseTex, u) {
   const {
     uRoadWidth, uTexScale,
@@ -126,6 +215,9 @@ function _buildRoadColor(diffuseTex, u) {
     uDirtAmount, uDirtScale, uDirtContrast, uDirtTint, uEdgeDirtBoost,
     uWearAmount, uWearScale, uWearContrast, uWearDarken,
     uScratchAmount, uScratchScale, uScratchThinness,
+    uLineScratchAmount, uLineScratchScale, uLineScratchStretch,
+    uLineScratchThreshold, uLineScratchSoftness, uLineScratchWarp,
+    uLineScratchDetail, uLineScratchEdge,
     uWetAmount, uWetCoverage, uPuddleAmount, uPuddleScale, uPuddleContrast, uPuddleEdgeBoost,
     uWetDarkening, uPuddleTint,
   } = u;
@@ -201,6 +293,17 @@ function _buildRoadColor(diffuseTex, u) {
       puddleMask
     );
 
+    // Line paint scratch mask (elongated directional scratches)
+    // This creates scratches that "chip away" the painted lines
+    const lineScratch = _lineScratchMask(
+      arcLen, v,
+      uLineScratchScale, uLineScratchStretch,
+      uLineScratchThreshold, uLineScratchSoftness, uLineScratchWarp,
+      uLineScratchDetail, uLineScratchEdge
+    ).mul(uLineScratchAmount).clamp(float(0), float(1));
+    // Paint survival factor: where paint remains after scratching
+    const paintSurvival = float(1).sub(lineScratch);
+
     // edge lines — inset from road edge
     const ew = max(uLineWidth, float(0.0001));
     const softEps = max(uLineSoftness, float(1e-6));
@@ -261,14 +364,16 @@ function _buildRoadColor(diffuseTex, u) {
 
     // junction mask — fade lines at intersections
     const junctionMask = float(1).sub(step(float(0.2), junction));
-    const edgeMask = max(leftLine, rightLine).mul(junctionMask).clamp(float(0), float(1));
+    // Apply paint scratch mask to all line masks (scratches chip away the paint)
+    const edgeMask = max(leftLine, rightLine).mul(junctionMask).mul(paintSurvival).clamp(float(0), float(1));
 
     // compose: base → edge lines → lane lines → single/double center markings
+    // All line masks are multiplied by paintSurvival to create scratched/worn look
     const result = mix(wetBase, uLineColor, edgeMask);
-    const withLanes = mix(result, uLineColor, laneMask.mul(junctionMask).clamp(float(0), float(1)));
-    const withSingleCenter = mix(withLanes, uCenterLineColor, singleCenterMask.mul(junctionMask).clamp(float(0), float(1)));
-    const withLeftCenter = mix(withSingleCenter, uCenterLeftColor, leftCenterMask.mul(junctionMask).clamp(float(0), float(1)));
-    return mix(withLeftCenter, uCenterRightColor, rightCenterMask.mul(junctionMask).clamp(float(0), float(1))).saturate();
+    const withLanes = mix(result, uLineColor, laneMask.mul(junctionMask).mul(paintSurvival).clamp(float(0), float(1)));
+    const withSingleCenter = mix(withLanes, uCenterLineColor, singleCenterMask.mul(junctionMask).mul(paintSurvival).clamp(float(0), float(1)));
+    const withLeftCenter = mix(withSingleCenter, uCenterLeftColor, leftCenterMask.mul(junctionMask).mul(paintSurvival).clamp(float(0), float(1)));
+    return mix(withLeftCenter, uCenterRightColor, rightCenterMask.mul(junctionMask).mul(paintSurvival).clamp(float(0), float(1))).saturate();
   })();
 }
 
@@ -564,6 +669,15 @@ export function syncRoadUniforms(uniforms, params) {
   uniforms.uScratchAmount.value = params.scratchAmount ?? 0.0;
   uniforms.uScratchScale.value = params.scratchScale ?? 24.0;
   uniforms.uScratchThinness.value = params.scratchThinness ?? 0.8;
+  // line paint scratches
+  uniforms.uLineScratchAmount.value = params.lineScratchAmount ?? 0.5;
+  uniforms.uLineScratchScale.value = params.lineScratchScale ?? 5.0;
+  uniforms.uLineScratchStretch.value = params.lineScratchStretch ?? 8.0;
+  uniforms.uLineScratchThreshold.value = params.lineScratchThreshold ?? 0.35;
+  uniforms.uLineScratchSoftness.value = params.lineScratchSoftness ?? 0.15;
+  uniforms.uLineScratchWarp.value = params.lineScratchWarp ?? 0.4;
+  uniforms.uLineScratchDetail.value = params.lineScratchDetail ?? 0.5;
+  uniforms.uLineScratchEdge.value = params.lineScratchEdge ?? 0.3;
   uniforms.uRoughnessDirtBoost.value = params.roughnessDirtBoost ?? 0.0;
   uniforms.uRoughnessWearReduce.value = params.roughnessWearReduce ?? 0.0;
   uniforms.uWetAmount.value = params.wetAmount ?? 0.0;
