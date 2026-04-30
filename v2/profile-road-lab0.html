@@ -83,11 +83,6 @@
           <span></span>
         </div>
         <div class="row">
-          <label for="showJunctionCorners">Junction purple corners</label>
-          <input id="showJunctionCorners" type="checkbox" />
-          <span></span>
-        </div>
-        <div class="row">
           <label for="twoRoadNodes">2-road nodes</label>
           <select id="twoRoadNodes">
             <option value="smooth">Smooth bend</option>
@@ -160,7 +155,6 @@
       const debugEl = document.getElementById("debug");
       const hideJunctionSeamsEl = document.getElementById("hideJunctionSeams");
       const blendJunctionFillEl = document.getElementById("blendJunctionFill");
-      const showJunctionCornersEl = document.getElementById("showJunctionCorners");
       const twoRoadNodesEl = document.getElementById("twoRoadNodes");
       const endCapStyleEl = document.getElementById("endCapStyle");
       const snapGridEl = document.getElementById("snapGrid");
@@ -190,7 +184,6 @@
         junctionSegments: Number(junctionSegmentsEl.value),
         hideJunctionSeams: hideJunctionSeamsEl.checked,
         blendJunctionFill: blendJunctionFillEl.checked,
-        showJunctionCorners: showJunctionCornersEl.checked,
         twoRoadNodes: twoRoadNodesEl.value,
         endCapStyle: endCapStyleEl.value,
         snapGrid: snapGridEl.checked,
@@ -568,14 +561,14 @@
 
           const start = current.left;
           const end = next.right;
+          const cornerHit = lineIntersection(start, current.dir, end, next.dir);
           const fallbackMid = lerp(start, end, 0.5);
           const fallbackOut = norm(sub(fallbackMid, node.p));
-          const gapLen = dist(start, end);
-          let angleGap = next.angle - current.angle;
-          if (angleGap <= 0) angleGap += Math.PI * 2;
-          const isSharpGap = angleGap < Math.PI * 0.42;
-          const bulge = isSharpGap ? 0 : Math.min(hw * 0.55, gapLen * 0.22, state.junctionRadius * 0.22);
-          const corner = add(fallbackMid, mul(fallbackOut, bulge));
+          let corner = cornerHit ? cornerHit.p : add(fallbackMid, mul(fallbackOut, hw));
+          const maxCornerReach = Math.max(hw * 2.2, state.junctionRadius * 1.25);
+          if (dist(corner, start) > maxCornerReach || dist(corner, end) > maxCornerReach) {
+            corner = add(fallbackMid, mul(fallbackOut, hw * 0.65));
+          }
 
           const segment = [];
           const segmentCount = Math.max(3, state.junctionSegments | 0);
@@ -706,12 +699,6 @@
           const start = add(a.p, mul(dir, ca));
           const end = add(b.p, mul(dir, -cb));
           if (dist(start, end) < 1) continue;
-          const degreeA = adjacency.get(a.id).length;
-          const degreeB = adjacency.get(b.id).length;
-          const trimA = degreeA >= 3 ? Math.min(hw * 0.55, dist(start, end) * 0.22) : 0;
-          const trimB = degreeB >= 3 ? Math.min(hw * 0.55, dist(start, end) * 0.22) : 0;
-          const edgeLineStart = add(start, mul(dir, trimA));
-          const edgeLineEnd = add(end, mul(dir, -trimB));
           pieces.push({
             polygon: [
               add(start, mul(side, hw)),
@@ -719,8 +706,8 @@
               add(end, mul(side, -hw)),
               add(start, mul(side, -hw)),
             ],
-            left: { path: [add(edgeLineStart, mul(side, hw)), add(edgeLineEnd, mul(side, hw))], debug: [] },
-            right: { path: [add(edgeLineStart, mul(side, -hw)), add(edgeLineEnd, mul(side, -hw))], debug: [] },
+            left: { path: [add(start, mul(side, hw)), add(end, mul(side, hw))], debug: [] },
+            right: { path: [add(start, mul(side, -hw)), add(end, mul(side, -hw))], debug: [] },
             center: [start, end],
             networkSpan: true,
           });
@@ -1022,7 +1009,7 @@
                 : JUNCTION_SURFACE;
               const edgeColor = hideNetworkSeams ? null : piece.networkNode ? "#8b35ff" : "#f4f7fc";
               drawPath(piece.polygon, edgeColor, hideNetworkSeams ? 0 : 2.4, true, fill, 1);
-              if (hideNetworkSeams && state.showJunctionCorners) {
+              if (hideNetworkSeams) {
                 for (const segment of piece.outlineSegments || []) {
                   drawPath(segment, "#8b35ff", 2.4, false, null, 0.96);
                 }
@@ -1203,7 +1190,6 @@
           junctionSegments: state.junctionSegments,
           twoRoadNodes: state.twoRoadNodes,
           endCapStyle: state.endCapStyle,
-          showJunctionCorners: state.showJunctionCorners,
           nodes: state.network.nodes.map((node) => ({ id: node.id, x: Math.round(node.p.x * 1000) / 1000, y: Math.round(node.p.y * 1000) / 1000 })),
           edges: state.network.edges.map((edge) => ({ a: edge.a, b: edge.b })),
         };
@@ -1281,10 +1267,6 @@
         if (data.endCapStyle === "flat" || data.endCapStyle === "round") {
           state.endCapStyle = data.endCapStyle;
           endCapStyleEl.value = data.endCapStyle;
-        }
-        if (typeof data.showJunctionCorners === "boolean") {
-          state.showJunctionCorners = data.showJunctionCorners;
-          showJunctionCornersEl.checked = data.showJunctionCorners;
         }
         render();
         return true;
@@ -1426,10 +1408,6 @@
       });
       blendJunctionFillEl.addEventListener("change", () => {
         state.blendJunctionFill = blendJunctionFillEl.checked;
-        render();
-      });
-      showJunctionCornersEl.addEventListener("change", () => {
-        state.showJunctionCorners = showJunctionCornersEl.checked;
         render();
       });
       twoRoadNodesEl.addEventListener("change", () => {
