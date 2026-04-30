@@ -1987,6 +1987,10 @@ export class FullRoadSystem {
 
     const group = new THREE.Group();
     group.add(mesh);
+
+    // No separate collision geometry needed - car sweep fix allows entering tunnels now.
+    // The visual mesh is used directly for BVH collision.
+
     return group;
   }
 

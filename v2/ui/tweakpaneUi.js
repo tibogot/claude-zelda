@@ -191,6 +191,8 @@ export function createTweakpaneUi({
   globalFolder.addBlade({ view: "separator" });
   globalFolder.addButton({ title: "💾 Save project" }).on("click", () => onSaveProject?.());
   globalFolder.addButton({ title: "📂 Load project" }).on("click", () => onLoadProject?.());
+  globalFolder.addBlade({ view: "separator" });
+  globalFolder.addButton({ title: "Rebake BVH (collision)" }).on("click", () => onRebakeBvh?.());
 
   const playFolder = pane.addFolder({ title: "Play / Drift Smoke", expanded: false });
   const smoke = toolState.playSmoke;

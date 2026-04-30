@@ -1746,14 +1746,16 @@ export class PlayMode {
           const rightX = Math.cos(this.carHeading);
           const rightZ = -Math.sin(this.carHeading);
 
+          // DEBUG: Temporarily log which collision check blocks the car
           const baseStepLen = Math.hypot(stepX, stepZ);
+          let sweepBlocked = false;
+          let staticBlocked = false;
+          
           if (baseStepLen > 1e-6) {
             const sweepDist = baseStepLen + CAR_HALF_LENGTH + CAR_COLLISION_SKIN;
             const sweepSamples = [
-              { ox: 0, oz: 0, y: lowY },
-              { ox: 0, oz: 0, y: highY },
-              { ox: rightX * CAR_HALF_WIDTH, oz: rightZ * CAR_HALF_WIDTH, y: lowY },
-              { ox: -rightX * CAR_HALF_WIDTH, oz: -rightZ * CAR_HALF_WIDTH, y: lowY },
+              { ox: 0, oz: 0, y: lowY, name: "center-low" },
+              { ox: 0, oz: 0, y: highY, name: "center-high" },
             ];
             let minSafe = baseStepLen;
             const dirX = stepX / baseStepLen;
@@ -1770,7 +1772,11 @@ export class PlayMode {
               );
               if (!hit) continue;
               const safe = Math.max(0, hit.distance - (CAR_HALF_LENGTH + CAR_COLLISION_SKIN));
-              if (safe < minSafe) minSafe = safe;
+              if (safe < minSafe) {
+                minSafe = safe;
+                sweepBlocked = true;
+                console.log(`[CAR SWEEP] Blocked by ${s.name} at dist=${hit.distance.toFixed(2)}, safe=${safe.toFixed(2)}, hitY=${hit.point.y.toFixed(2)}`);
+              }
             }
             if (minSafe < baseStepLen) {
               stepX = dirX * minSafe;
@@ -1783,14 +1789,14 @@ export class PlayMode {
           for (let iter = 0; iter < CAR_COLLISION_ITERS; iter++) {
             let changed = false;
             const carRays = [
-              { dx: fwdX, dz: fwdZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN },
-              { dx: -fwdX, dz: -fwdZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN },
-              { dx: fwdX + rightX, dz: fwdZ + rightZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN },
-              { dx: fwdX - rightX, dz: fwdZ - rightZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN },
-              { dx: -fwdX + rightX, dz: -fwdZ + rightZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN },
-              { dx: -fwdX - rightX, dz: -fwdZ - rightZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN },
-              { dx: rightX, dz: rightZ, dist: CAR_HALF_WIDTH + CAR_COLLISION_SKIN },
-              { dx: -rightX, dz: -rightZ, dist: CAR_HALF_WIDTH + CAR_COLLISION_SKIN },
+              { dx: fwdX, dz: fwdZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN, name: "fwd" },
+              { dx: -fwdX, dz: -fwdZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN, name: "back" },
+              { dx: fwdX + rightX, dz: fwdZ + rightZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN, name: "fwd-right" },
+              { dx: fwdX - rightX, dz: fwdZ - rightZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN, name: "fwd-left" },
+              { dx: -fwdX + rightX, dz: -fwdZ + rightZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN, name: "back-right" },
+              { dx: -fwdX - rightX, dz: -fwdZ - rightZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN, name: "back-left" },
+              { dx: rightX, dz: rightZ, dist: CAR_HALF_WIDTH + CAR_COLLISION_SKIN, name: "right" },
+              { dx: -rightX, dz: -rightZ, dist: CAR_HALF_WIDTH + CAR_COLLISION_SKIN, name: "left" },
             ];
 
             for (const r of carRays) {
@@ -1808,6 +1814,10 @@ export class PlayMode {
                 const nnz = nz / nLen;
                 const pen = r.dist - hit.distance;
                 if (pen > 1e-4) {
+                  if (!staticBlocked) {
+                    staticBlocked = true;
+                    console.log(`[CAR STATIC] Blocked by ${r.name} at Y=${ry.toFixed(2)}, dist=${hit.distance.toFixed(2)}, pen=${pen.toFixed(2)}, hitY=${hit.point.y.toFixed(2)}`);
+                  }
                   posX += nnx * pen;
                   posZ += nnz * pen;
                   changed = true;
@@ -1872,6 +1882,7 @@ export class PlayMode {
         const nx = this.playerPos.x + stepX;
         const nz = this.playerPos.z + stepZ;
         if (this.isBarrierBlocked(nx, nz)) {
+          if (carDriving) console.log(`[CAR BARRIER] Blocked at (${nx.toFixed(1)}, ${nz.toFixed(1)})`);
           const canSlideX = !this.isBarrierBlocked(nx, this.playerPos.z);
           const canSlideZ = !this.isBarrierBlocked(this.playerPos.x, nz);
           if (canSlideX) {
@@ -1903,6 +1914,11 @@ export class PlayMode {
       const fromY = this.playerPos.y + stepUp;
       const bvhY = this.cliffBvh.raycastHeightFrom(this.playerPos.x, fromY, this.playerPos.z);
       if (bvhY != null && bvhY > terrainY) groundY = bvhY;
+      
+      // DEBUG: Log if BVH ground is way above terrain (might be tunnel top)
+      if (carDriving && bvhY != null && bvhY - terrainY > 2) {
+        console.log(`[CAR GROUND] BVH ground ${bvhY.toFixed(2)} is ${(bvhY - terrainY).toFixed(2)} above terrain ${terrainY.toFixed(2)}`);
+      }
     }
     const prevY = this.playerPos.y;
     const capsuleBase = CAP_R + CAP_H * 0.5;
@@ -2063,14 +2079,15 @@ export class PlayMode {
     } else if (carDriving) {
       this.flyHeight = 0;
 
-      // Compute terrain normal via finite differences
+      // Compute terrain normal via finite differences.
+      // Use terrain-only height (not BVH) so tunnels/props don't create false steep slopes.
       const eps = CAR_SLOPE_SAMPLE_EPS;
       const px = this.playerPos.x;
       const pz = this.playerPos.z;
-      const hL = this.getWorldHeight(px - eps, pz);
-      const hR = this.getWorldHeight(px + eps, pz);
-      const hD = this.getWorldHeight(px, pz - eps);
-      const hU = this.getWorldHeight(px, pz + eps);
+      const hL = this.getTerrainHeight(px - eps, pz);
+      const hR = this.getTerrainHeight(px + eps, pz);
+      const hD = this.getTerrainHeight(px, pz - eps);
+      const hU = this.getTerrainHeight(px, pz + eps);
       const inv2eps = 1 / (2 * eps);
       const nx = (hL - hR) * inv2eps;
       const nz = (hD - hU) * inv2eps;
@@ -2080,6 +2097,11 @@ export class PlayMode {
       // Check if slope is too steep
       const tooSteep = normalY < CAR_MAX_SLOPE_COS;
       this.carOnSteepSlope = tooSteep && !this.carInAir;
+      
+      // DEBUG: Log if car thinks slope is too steep
+      if (tooSteep && !this.carInAir && Math.abs(this.carVx) + Math.abs(this.carVz) > 0.5) {
+        console.log(`[CAR SLOPE] Too steep! normalY=${normalY.toFixed(3)}, threshold=${CAR_MAX_SLOPE_COS.toFixed(3)}, groundY=${groundY.toFixed(2)}`);
+      }
 
       if (this.carInAir) {
         this.carVelY -= CAR_GRAVITY * dtSec;
@@ -2312,7 +2334,8 @@ export class PlayMode {
             this.playerPos.z -
             lx * Math.sin(this.carHeading) +
             lz * Math.cos(this.carHeading);
-          const h = this.getWorldHeight(wx, wz);
+          // Use terrain-only height for wheel contact so tunnels don't cause body roll turbulence.
+          const h = this.getTerrainHeight(wx, wz);
           w.contactWorld.set(wx, h + DRIFT_MARK_Y_OFFSET, wz);
           if (w.offset.z < 0) frontY += h;
           else {

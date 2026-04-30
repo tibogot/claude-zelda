@@ -1382,6 +1382,9 @@ export class SplineSystem {
     mesh.renderOrder = 2;
     tunnel.mesh = mesh;
     this.scene.add(mesh);
+
+    // No separate collision geometry needed - car sweep fix allows entering tunnels now.
+    // The visual mesh is used directly for BVH collision.
   }
 
   bakePlacement() {
@@ -1892,11 +1895,12 @@ export class SplineSystem {
 
   clearTunnels() {
     for (const t of this.tunnels) {
-      if (!t.mesh) continue;
-      this.scene.remove(t.mesh);
-      t.mesh.geometry.dispose();
-      t.mesh.material.dispose();
-      t.mesh = null;
+      if (t.mesh) {
+        this.scene.remove(t.mesh);
+        t.mesh.geometry.dispose();
+        t.mesh.material.dispose();
+        t.mesh = null;
+      }
     }
     this.tunnels.length = 0;
   }
@@ -1934,6 +1938,7 @@ export class SplineSystem {
       const mesh = t.mesh;
       if (!mesh || !mesh.geometry) continue;
       mesh.updateMatrixWorld(true);
+      // Use visual mesh directly for collision (car sweep fix allows entering now).
       cb(mesh.geometry, mesh.matrixWorld);
     }
     for (const g of this.guardrails) {
