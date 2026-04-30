@@ -48,6 +48,9 @@ import { TreeLodRenderer } from "../render/foliage/treeLodRenderer.js";
 import { TreeSystem } from "../tools/foliage/treeSystem.js";
 import { loadTreeGlbFromFile, openGlbPicker, initGlbLoaderRenderer } from "../core/foliage/glbLoader.js";
 import { FoliageLodRenderer } from "../render/foliage/foliageLodRenderer.js";
+import { FoliageStore } from "../core/foliage/foliageStore.js";
+import { FoliagePaintSystem } from "../tools/foliage/foliagePaintSystem.js";
+import { BillboardRenderer } from "../render/foliage/billboardRenderer.js";
 import { loadFullPresetFromFile, loadFullPresetFromUrl } from "../core/foliage/presetLoader.js";
 import { GrassManager } from "../render/foliage/grassManager.js";
 import { GrassPaintSystem } from "../tools/foliage/grassPaintSystem.js";
@@ -594,6 +597,14 @@ export async function startV2App() {
   const treeSystem = new TreeSystem({ toolState, treeStore, terrainStore, config });
   const foliageLodRenderer = new FoliageLodRenderer(scene, config);
 
+  const foliageStore = new FoliageStore(config);
+  const billboardRenderer = new BillboardRenderer(scene, config);
+  const foliagePaintSystem = new FoliagePaintSystem({ toolState, foliageStore, terrainStore, config });
+
+  for (let i = 0; i < toolState.foliageSlots.length; i++) {
+    billboardRenderer.rebuildSlot(i, toolState.foliageSlots[i]);
+  }
+
   const grassManager = new GrassManager({ scene, camera, config });
   const grassPaintSystem = new GrassPaintSystem({ toolState, grassManager, config });
   const cliffGrassPaintSystem = new CliffGrassPaintSystem({ toolState, grassManager, config });
@@ -1058,6 +1069,33 @@ export async function startV2App() {
     },
     onTreeLodChanged: () => {},
     onFoliageLodChanged: () => {},
+    onLoadFoliageTexture: async (slotIdx) => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = "image/*";
+      input.onchange = async () => {
+        const file = input.files?.[0];
+        if (!file) return;
+        const url = URL.createObjectURL(file);
+        const loader = new THREE.TextureLoader();
+        loader.load(url, (tex) => {
+          tex.colorSpace = THREE.SRGBColorSpace;
+          toolState.foliageSlots[slotIdx].textureUrl = url;
+          billboardRenderer.setSlotTexture(slotIdx, tex, toolState.foliageSlots[slotIdx]);
+          console.log(`[V2] Foliage slot ${slotIdx} texture loaded`);
+        });
+      };
+      input.click();
+    },
+    onFoliageSlotStructureChanged: (slotIdx) => {
+      billboardRenderer.rebuildSlot(slotIdx, toolState.foliageSlots[slotIdx]);
+    },
+    onFoliageSlotMaterialChanged: (slotIdx) => {
+      billboardRenderer.updateSlotUniforms(slotIdx, toolState.foliageSlots[slotIdx]);
+    },
+    onClearAllFoliage: () => {
+      foliagePaintSystem.clearAll();
+    },
     onGrassChanged: () => {
       grassManager.syncUniforms(toolState.grass, sunDir);
     },
@@ -1989,7 +2027,7 @@ export async function startV2App() {
   }
 
   function isBrushMode() {
-    return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint" || toolState.mode === "grass" || toolState.mode === "cliffGrass" || toolState.mode === "barrier" || toolState.mode === "hole" || toolState.mode === "fleurs" || toolState.mode === "ambientfx" || (toolState.mode === "props" && toolState.props.placementMode === "paint");
+    return toolState.mode === "sculpt" || toolState.mode === "paint" || toolState.mode === "treePaint" || toolState.mode === "foliagePaint" || toolState.mode === "grass" || toolState.mode === "cliffGrass" || toolState.mode === "barrier" || toolState.mode === "hole" || toolState.mode === "fleurs" || toolState.mode === "ambientfx" || (toolState.mode === "props" && toolState.props.placementMode === "paint");
   }
 
   function updateBrushPreviewFromPick(hit) {
@@ -2269,6 +2307,8 @@ export async function startV2App() {
       paintSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "treePaint") {
       treeSystem.beginStroke(hit.point, event);
+    } else if (toolState.mode === "foliagePaint") {
+      foliagePaintSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "grass") {
       grassPaintSystem.beginStroke(hit.point, event);
     } else if (toolState.mode === "cliffGrass") {
@@ -2329,6 +2369,8 @@ export async function startV2App() {
       paintSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "treePaint") {
       treeSystem.applyAt(hit.point, event);
+    } else if (toolState.mode === "foliagePaint") {
+      foliagePaintSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "grass") {
       grassPaintSystem.applyAt(hit.point, event);
     } else if (toolState.mode === "cliffGrass") {
@@ -2428,6 +2470,8 @@ export async function startV2App() {
       paintSystem.endStroke();
     } else if (toolState.mode === "treePaint") {
       treeSystem.endStroke();
+    } else if (toolState.mode === "foliagePaint") {
+      foliagePaintSystem.endStroke();
     } else if (toolState.mode === "grass") {
       grassPaintSystem.endStroke();
     } else if (toolState.mode === "cliffGrass") {
@@ -2444,6 +2488,7 @@ export async function startV2App() {
   function activeEditSystem() {
     if (toolState.mode === "paint") return paintSystem;
     if (toolState.mode === "treePaint") return treeSystem;
+    if (toolState.mode === "foliagePaint") return foliagePaintSystem;
     if (toolState.mode === "grass") return grassPaintSystem;
     if (toolState.mode === "cliffGrass") return cliffGrassPaintSystem;
     if (toolState.mode === "road") return roadSystem;
@@ -2685,6 +2730,7 @@ export async function startV2App() {
       updateSunSky();
       if (grassManager.uniforms) grassManager.uniforms.uSunDir.value.copy(sunDir);
       foliageLodRenderer.updateSunDirection(sunDir);
+      billboardRenderer.updateSunDirection(sunDir);
     }
     lensFlare.update();
 
@@ -2728,6 +2774,8 @@ export async function startV2App() {
     treeLodRenderer.update(treeStore, camera, toolState.treeLod);
     foliageLodRenderer.update(treeStore, camera, toolState.foliageLod);
     foliageLodRenderer.updateTime(now * 0.001);
+    billboardRenderer.update(foliageStore, camera, toolState.foliageLod);
+    billboardRenderer.updateTime(now * 0.001);
     if (grassManager.uniforms) {
       grassManager.uniforms.uPlayerPos.value.copy(focusPos);
     }

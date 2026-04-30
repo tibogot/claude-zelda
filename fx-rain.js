@@ -75,6 +75,14 @@ export function createRainFX(scene, shared, getTerrainHeight) {
 
   const drops = new Array(maxCount);
   const dummy = new THREE.Object3D();
+  
+  // Reusable vectors for billboard calculation
+  const _camPos = new THREE.Vector3();
+  const _fallDir = new THREE.Vector3();
+  const _toCamera = new THREE.Vector3();
+  const _right = new THREE.Vector3();
+  const _up = new THREE.Vector3();
+  const _matrix = new THREE.Matrix4();
 
   const randRange = (min, max) => min + Math.random() * (max - min);
 
@@ -95,6 +103,9 @@ export function createRainFX(scene, shared, getTerrainHeight) {
     spawnDrop(i);
   }
 
+  // Store camera reference for billboarding
+  let camera = null;
+
   function applyMatrices(time) {
     const n = Math.min(params.count, maxCount);
     mesh.count = n;
@@ -102,6 +113,16 @@ export function createRainFX(scene, shared, getTerrainHeight) {
     const halfArea = params.areaSize * 0.5;
     const windX = shared.windX * shared.windStrength;
     const windZ = shared.windZ * shared.windStrength;
+
+    // Get camera position for billboarding
+    if (camera) {
+      _camPos.copy(camera.position);
+    } else {
+      _camPos.set(0, 10, 20);
+    }
+
+    // Fall direction (slanted by wind)
+    _fallDir.set(windX * 0.6, -1, windZ * 0.6).normalize();
 
     for (let i = 0; i < n; i++) {
       const d = drops[i];
@@ -112,16 +133,27 @@ export function createRainFX(scene, shared, getTerrainHeight) {
       const pz = d.z;
       const py = d.y;
 
-      // Direction: mostly vertical down, strongly slanted by wind for a stylized streak.
-      const dir = new THREE.Vector3(
-        windX * 0.6,
-        -1,
-        windZ * 0.6
-      ).normalize();
-
       dummy.position.set(px, py, pz);
-      dummy.lookAt(px + dir.x, py + dir.y, pz + dir.z);
-      dummy.scale.set(params.dropWidth, params.dropLength, params.dropWidth);
+
+      // Billboard calculation: make plane face camera while aligning Y with fall direction
+      _toCamera.subVectors(_camPos, dummy.position).normalize();
+      
+      // Right vector: perpendicular to both camera direction and fall direction
+      _right.crossVectors(_toCamera, _fallDir);
+      if (_right.lengthSq() < 0.001) {
+        // Fallback if fall direction is parallel to camera view
+        _right.set(1, 0, 0);
+      }
+      _right.normalize();
+      
+      // Up vector: along the fall direction, projected to be perpendicular to right
+      _up.crossVectors(_right, _toCamera).normalize();
+      
+      // Build rotation from basis vectors (right = X, up = Y, toCamera = Z)
+      _matrix.makeBasis(_right, _up, _toCamera);
+      dummy.quaternion.setFromRotationMatrix(_matrix);
+      
+      dummy.scale.set(params.dropWidth, params.dropLength, 1);
       dummy.updateMatrix();
       mesh.setMatrixAt(i, dummy.matrix);
 
@@ -132,6 +164,10 @@ export function createRainFX(scene, shared, getTerrainHeight) {
     }
 
     mesh.instanceMatrix.needsUpdate = true;
+  }
+  
+  function setCamera(cam) {
+    camera = cam;
   }
 
   function update(dt, elapsed, sh) {
@@ -165,7 +201,7 @@ export function createRainFX(scene, shared, getTerrainHeight) {
     mesh.material.dispose();
   }
 
-  return { update, dispose, params };
+  return { update, dispose, params, setCamera };
 }
 
 export function buildRainUI(folder, state) {

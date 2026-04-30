@@ -4,6 +4,7 @@ import { addTerrainAppearanceFolder } from "./terrainAppearanceTweakpane.js";
 import { addTextureLibraryFolder } from "./textureLibraryTweakpane.js";
 import { addPaintFolder } from "./paintTweakpane.js";
 import { addTreeFolder } from "./treeTweakpane.js";
+import { addFoliageFolder } from "./foliageTweakpane.js";
 import { addGrassFolder } from "./grassTweakpane.js";
 import { addCliffFolder } from "./cliffTweakpane.js";
 import { addPropFolder } from "./propTweakpane.js";
@@ -57,6 +58,10 @@ export function createTweakpaneUi({
   onTreeCastShadowChanged,
   onFoliageLodChanged,
   onFoliageParamChanged,
+  onLoadFoliageTexture,
+  onFoliageSlotStructureChanged,
+  onFoliageSlotMaterialChanged,
+  onClearAllFoliage,
   onGrassChanged,
   onGrassRebuildGeos,
   onGrassFill,
@@ -166,6 +171,7 @@ export function createTweakpaneUi({
         Sculpt: "sculpt",
         Paint: "paint",
         "Tree Paint": "treePaint",
+        "Foliage Paint": "foliagePaint",
         Grass: "grass",
         "Cliff Grass": "cliffGrass",
         Road: "road",
@@ -342,6 +348,14 @@ export function createTweakpaneUi({
     onFoliageLodChanged,
     onCastShadowChanged: onTreeCastShadowChanged,
     onFoliageParamChanged,
+  });
+
+  const foliageFolder = addFoliageFolder(pane, toolState, {
+    onLoadTexture: onLoadFoliageTexture,
+    onSlotStructureChanged: onFoliageSlotStructureChanged,
+    onSlotMaterialChanged: onFoliageSlotMaterialChanged,
+    onClearAllFoliage,
+    onFoliageLodChanged,
   });
 
   addGrassFolder(pane, toolState, {
@@ -1135,6 +1149,7 @@ export function createTweakpaneUi({
   return {
     pane,
     propCallbacks,
+    foliageFolder,
     waterFolder,
     decalFolder,
     barrierFolder,
