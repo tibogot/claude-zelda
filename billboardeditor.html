@@ -1,0 +1,803 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Billboard & foliage preset lab</title>
+    <style>
+      body {
+        margin: 0;
+        background: #020205;
+        color: #e8f4ff;
+        font-family: ui-monospace, "Cascadia Code", monospace;
+        overflow: hidden;
+      }
+      #ui {
+        position: absolute;
+        left: 0;
+        top: 0;
+        z-index: 10;
+        width: 360px;
+        height: 100%;
+        background: rgba(0, 8, 16, 0.94);
+        backdrop-filter: blur(16px);
+        border-right: 1px solid rgba(0, 213, 255, 0.35);
+        overflow-y: auto;
+        padding: 16px 16px 24px;
+        box-sizing: border-box;
+      }
+      #viewport {
+        position: absolute;
+        inset: 0;
+      }
+      #toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      #toolbar button {
+        flex: 1 1 45%;
+        min-width: 0;
+        padding: 8px 10px;
+        border-radius: 6px;
+        border: 1px solid #2a4055;
+        background: #0f1820;
+        color: #7ee8ff;
+        cursor: pointer;
+        font: inherit;
+        font-size: 11px;
+      }
+      #toolbar button:hover {
+        border-color: #00d5ff;
+        color: #fff;
+      }
+      input[type="file"] {
+        display: none;
+      }
+      .file-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-top: 6px;
+      }
+      .file-row button {
+        flex: 0 0 auto;
+        padding: 8px 12px;
+        border-radius: 6px;
+        border: 1px solid #2a4055;
+        background: #0f1820;
+        color: #7ee8ff;
+        cursor: pointer;
+        font: inherit;
+        font-size: 11px;
+      }
+      .file-row span {
+        font-size: 10px;
+        color: #6a8fa8;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .label {
+        font-size: 10px;
+        color: #00d5ff;
+        margin: 14px 0 6px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-weight: 700;
+      }
+      .hint {
+        font-size: 10px;
+        color: #5a7a90;
+        line-height: 1.4;
+        margin-top: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="ui">
+      <div id="toolbar">
+        <button type="button" id="btn-export">Export preset JSON</button>
+        <button type="button" id="btn-import">Import preset…</button>
+        <button type="button" id="btn-shuffle">Shuffle structure seed</button>
+        <button type="button" id="btn-frame">Frame hero</button>
+      </div>
+      <input type="file" id="presetImport" accept="application/json,.json" />
+      <div id="pane-container"></div>
+      <div class="label">Texture</div>
+      <div class="file-row">
+        <button type="button" id="btn-pick-tex">Choose image…</button>
+        <span id="tex-name">Default placeholder</span>
+      </div>
+      <input type="file" id="texUpload" accept="image/*" />
+      <p class="hint">
+        Deterministic structure (seed + tilt mode), GPU-safe rebuilds, hero vs
+        scatter preview, JSON presets. Sun + directional target light the scene;
+        slopes on the heightmap stay darker (N·L). Use ambient / hemi and a
+        lighter terrain color if you want the whole pad evenly bright.
+      </p>
+    </div>
+    <div id="viewport"></div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.3/dist/tweakpane.min.js"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import * as BufferGeometryUtils from "three/addons/utils/BufferGeometryUtils.js";
+      import { Pane } from "tweakpane";
+      import {
+        Fn,
+        uv,
+        vec3,
+        vec4,
+        sin,
+        uniform,
+        texture,
+        positionLocal,
+        color,
+        normalLocal,
+        normalize,
+        dot,
+        cameraPosition,
+        positionWorld,
+        max,
+        mix,
+      } from "three/tsl";
+
+      const PRESET_MAGIC = "claudeZeldaBillboardPreset";
+      const PRESET_VERSION = 1;
+
+      let renderer,
+        scene,
+        camera,
+        controls,
+        instMesh,
+        dirLight,
+        dirLightTarget,
+        ambientLight,
+        hemiLight,
+        terrainMesh;
+      let foliageTexture = null;
+      let textureObjectUrl = null;
+      let lastTextureFileName = "";
+      let timer;
+
+      const params = {
+        previewMode: "scatter",
+        instanceCount: 4500,
+        terrainSize: 150,
+        planeCount: 3,
+        planeSpread: "full",
+        tilt: 0.28,
+        tiltMode: "stable",
+        structureSeed: 42_069,
+        scatterSeed: 9001,
+        width: 2.2,
+        height: 2.2,
+        swaySpeed: 0,
+        swayStrength: 0.15,
+        sssIntensity: 2.0,
+        groundOcclusion: 0.7,
+        normalBending: 0.8,
+        alphaTest: 0.5,
+        roughness: 0.85,
+        colorTint: "#ffffff",
+        sunIntensity: 2.5,
+        sunElevation: 25,
+        sunAzimuth: 145,
+        terrainColor: "#0f1810",
+        ambientIntensity: 0.38,
+        hemiIntensity: 0.42,
+      };
+
+      const su = {
+        time: uniform(0),
+        swaySpeed: uniform(params.swaySpeed),
+        swayStrength: uniform(params.swayStrength),
+        sssIntensity: uniform(params.sssIntensity),
+        groundOcclusion: uniform(params.groundOcclusion),
+        normalBending: uniform(params.normalBending),
+        colorTint: uniform(color(params.colorTint)),
+        sunPos: uniform(vec3(0, 1, 0)),
+      };
+
+      function getHeight(x, z) {
+        return (
+          Math.sin(x * 0.08) * Math.cos(z * 0.08) * 3.0 + Math.sin(x * 0.04) * 5
+        );
+      }
+
+      /** 0..1 deterministic from plane index + seed */
+      function stableHash01(i, seed) {
+        const x = Math.sin(i * 12.9898 + seed * 78.233) * 43758.5453123;
+        return x - Math.floor(x);
+      }
+
+      function mulberry32(a) {
+        return function () {
+          let t = (a += 0x6d2b79f5);
+          t = Math.imul(t ^ (t >>> 15), t | 1);
+          t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+
+      function planeYawRadians(i, count, spread) {
+        if (count <= 0) return 0;
+        if (spread === "half") return (i / count) * Math.PI;
+        return (i / count) * Math.PI * 2;
+      }
+
+      function planeTiltRadians(i, count) {
+        const t = params.tilt;
+        if (params.tiltMode === "symmetric") {
+          if (count <= 1) return 0;
+          const u = i / (count - 1);
+          return (u - 0.5) * 2 * t;
+        }
+        return (stableHash01(i, params.structureSeed) - 0.5) * 2 * t;
+      }
+
+      function rebuildTerrain() {
+        if (!scene) return;
+        if (terrainMesh) {
+          terrainMesh.geometry.dispose();
+          terrainMesh.material.dispose();
+          scene.remove(terrainMesh);
+        }
+        const terrainGeo = new THREE.PlaneGeometry(
+          params.terrainSize,
+          params.terrainSize,
+          128,
+          128,
+        );
+        terrainGeo.rotateX(-Math.PI / 2);
+        const v = terrainGeo.attributes.position.array;
+        for (let i = 0; i < v.length; i += 3)
+          v[i + 1] = getHeight(v[i], v[i + 2]);
+        terrainGeo.computeVertexNormals();
+        terrainMesh = new THREE.Mesh(
+          terrainGeo,
+          new THREE.MeshStandardMaterial({
+            color: params.terrainColor,
+            roughness: 1,
+          }),
+        );
+        scene.add(terrainMesh);
+        syncFillAndGround();
+      }
+
+      function updateSun() {
+        const phi = THREE.MathUtils.degToRad(90 - params.sunElevation);
+        const theta = THREE.MathUtils.degToRad(params.sunAzimuth);
+        const sunPos = new THREE.Vector3().setFromSphericalCoords(
+          100,
+          phi,
+          theta,
+        );
+        su.sunPos.value.copy(sunPos);
+        if (dirLight) {
+          dirLight.position.copy(sunPos);
+          dirLight.intensity = params.sunIntensity;
+          if (dirLightTarget) {
+            dirLightTarget.position.set(0, 0, 0);
+            dirLight.updateMatrixWorld();
+            dirLightTarget.updateMatrixWorld();
+          }
+        }
+      }
+
+      function syncFillAndGround() {
+        if (terrainMesh?.material?.color)
+          terrainMesh.material.color.set(params.terrainColor);
+        if (ambientLight) ambientLight.intensity = params.ambientIntensity;
+        if (hemiLight) {
+          hemiLight.intensity = params.hemiIntensity;
+          hemiLight.groundColor.set(params.terrainColor);
+        }
+      }
+
+      function buildMergedFoliageGeometry() {
+        const geometries = [];
+        const n = Math.max(1, Math.floor(params.planeCount));
+        for (let i = 0; i < n; i++) {
+          const p = new THREE.PlaneGeometry(params.width, params.height);
+          p.translate(0, params.height / 2, 0);
+          p.rotateY(planeYawRadians(i, n, params.planeSpread));
+          p.rotateX(planeTiltRadians(i, n));
+          geometries.push(p);
+        }
+        const merged = BufferGeometryUtils.mergeGeometries(geometries, false);
+        for (const g of geometries) g.dispose();
+        return merged;
+      }
+
+      function buildFoliageInstances() {
+        if (instMesh) {
+          instMesh.geometry.dispose();
+          instMesh.material.dispose();
+          scene.remove(instMesh);
+        }
+
+        const geometry = buildMergedFoliageGeometry();
+        const material = new THREE.MeshStandardNodeMaterial({
+          side: THREE.DoubleSide,
+          alphaTest: params.alphaTest,
+          transparent: false,
+          roughness: params.roughness,
+          metalness: 0,
+        });
+
+        const heightUniform = uniform(params.height);
+
+        material.normalNode = Fn(() => {
+          const localPos = positionLocal;
+          const sphericalNormal = normalize(
+            vec3(localPos.x, localPos.y.add(heightUniform.mul(0.1)), localPos.z),
+          );
+          const bent = normalize(
+            mix(normalLocal, sphericalNormal, su.normalBending),
+          );
+          return bent;
+        })();
+
+        material.colorNode = Fn(() => {
+          const tex = foliageTexture
+            ? texture(foliageTexture, uv())
+            : vec4(0.28, 0.62, 0.22, 1.0);
+          const ao = uv().y.smoothstep(0.0, su.groundOcclusion).add(0.1);
+          return vec4(tex.rgb.mul(su.colorTint).mul(ao), tex.a);
+        })();
+
+        material.emissiveNode = Fn(() => {
+          const tex = foliageTexture
+            ? texture(foliageTexture, uv())
+            : vec4(0.28, 0.62, 0.22, 1.0);
+          const lightDir = normalize(su.sunPos);
+          const viewDir = normalize(cameraPosition.sub(positionWorld));
+          const sssDot = max(0.0, dot(viewDir, lightDir.negate())).pow(3.0);
+          const sssGlow = tex.rgb
+            .mul(sssDot)
+            .mul(su.sssIntensity)
+            .mul(uv().y);
+          return sssGlow;
+        })();
+
+        material.positionNode = Fn(() => {
+          const wind = sin(su.time.mul(su.swaySpeed))
+            .mul(su.swayStrength)
+            .mul(uv().y.pow(1.5));
+          return vec3(
+            positionLocal.x.add(wind),
+            positionLocal.y,
+            positionLocal.z.add(wind),
+          );
+        })();
+
+        const count = Math.max(
+          1,
+          Math.min(25_000, Math.floor(params.instanceCount)),
+        );
+        instMesh = new THREE.InstancedMesh(geometry, material, count);
+        instMesh.frustumCulled = true;
+
+        const dummy = new THREE.Object3D();
+        const rng = mulberry32(params.scatterSeed >>> 0);
+
+        if (params.previewMode === "hero") {
+          dummy.position.set(0, getHeight(0, 0) + 0.02, 0);
+          dummy.rotation.set(0, 0, 0);
+          dummy.scale.setScalar(1.2);
+          dummy.updateMatrix();
+          instMesh.setMatrixAt(0, dummy.matrix);
+          for (let i = 1; i < count; i++) {
+            dummy.position.set(0, -1e6, 0);
+            dummy.rotation.set(0, 0, 0);
+            dummy.scale.setScalar(0.0001);
+            dummy.updateMatrix();
+            instMesh.setMatrixAt(i, dummy.matrix);
+          }
+        } else if (params.previewMode === "grid") {
+          const side = Math.ceil(Math.sqrt(count));
+          const step = 3.5;
+          const off = ((side - 1) * step) / 2;
+          let idx = 0;
+          for (let gy = 0; gy < side && idx < count; gy++) {
+            for (let gx = 0; gx < side && idx < count; gx++) {
+              const x = gx * step - off;
+              const z = gy * step - off;
+              dummy.position.set(x, getHeight(x, z) + 0.02, z);
+              dummy.rotation.y = (gx * 0.37 + gy * 0.19) * Math.PI;
+              dummy.scale.setScalar(0.85 + (gx + gy) * 0.01);
+              dummy.updateMatrix();
+              instMesh.setMatrixAt(idx++, dummy.matrix);
+            }
+          }
+        } else {
+          const ts = params.terrainSize;
+          for (let i = 0; i < count; i++) {
+            const x = (rng() - 0.5) * ts;
+            const z = (rng() - 0.5) * ts;
+            dummy.position.set(x, getHeight(x, z) + 0.02, z);
+            dummy.rotation.y = rng() * Math.PI * 2;
+            dummy.scale.setScalar(0.65 + rng() * 0.95);
+            dummy.updateMatrix();
+            instMesh.setMatrixAt(i, dummy.matrix);
+          }
+        }
+
+        instMesh.instanceMatrix.needsUpdate = true;
+        scene.add(instMesh);
+      }
+
+      function buildSky() {
+        const skyGeo = new THREE.SphereGeometry(600, 32, 15);
+        const skyMat = new THREE.MeshBasicNodeMaterial({
+          side: THREE.BackSide,
+        });
+        skyMat.colorNode = Fn(() => {
+          const viewDir = normalize(positionLocal);
+          const sunDir = normalize(su.sunPos);
+          const skyBlue = vec3(0.01, 0.04, 0.15);
+          const horizonColor = vec3(0.3, 0.5, 0.9);
+          const sunColor = vec3(1.0, 0.8, 0.5);
+          const finalSky = mix(
+            horizonColor,
+            skyBlue,
+            viewDir.y.smoothstep(0.0, 0.7),
+          );
+          const sunGlow = max(0, dot(viewDir, sunDir)).pow(800).mul(4.0);
+          return vec4(finalSky.add(sunColor.mul(sunGlow)), 1.0);
+        })();
+        scene.add(new THREE.Mesh(skyGeo, skyMat));
+      }
+
+      function onResize() {
+        if (!renderer || !camera) return;
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+        renderer.setSize(w, h);
+      }
+
+      function collectPresetPayload() {
+        return {
+          magic: PRESET_MAGIC,
+          version: PRESET_VERSION,
+          exportedAt: new Date().toISOString(),
+          textureHint: lastTextureFileName || null,
+          params: {
+            previewMode: params.previewMode,
+            instanceCount: params.instanceCount,
+            terrainSize: params.terrainSize,
+            planeCount: params.planeCount,
+            planeSpread: params.planeSpread,
+            tilt: params.tilt,
+            tiltMode: params.tiltMode,
+            structureSeed: params.structureSeed,
+            scatterSeed: params.scatterSeed,
+            width: params.width,
+            height: params.height,
+            swaySpeed: params.swaySpeed,
+            swayStrength: params.swayStrength,
+            sssIntensity: params.sssIntensity,
+            groundOcclusion: params.groundOcclusion,
+            normalBending: params.normalBending,
+            alphaTest: params.alphaTest,
+            roughness: params.roughness,
+            colorTint: params.colorTint,
+            sunElevation: params.sunElevation,
+            sunAzimuth: params.sunAzimuth,
+            sunIntensity: params.sunIntensity,
+            terrainColor: params.terrainColor,
+            ambientIntensity: params.ambientIntensity,
+            hemiIntensity: params.hemiIntensity,
+          },
+        };
+      }
+
+      function applyPresetPayload(data) {
+        if (!data || data.magic !== PRESET_MAGIC || typeof data.params !== "object")
+          throw new Error("Invalid preset file");
+        const p = data.params;
+        const keys = [
+          "previewMode",
+          "instanceCount",
+          "terrainSize",
+          "planeCount",
+          "planeSpread",
+          "tilt",
+          "tiltMode",
+          "structureSeed",
+          "scatterSeed",
+          "width",
+          "height",
+          "swaySpeed",
+          "swayStrength",
+          "groundOcclusion",
+          "normalBending",
+          "alphaTest",
+          "roughness",
+          "colorTint",
+          "sunElevation",
+          "sunAzimuth",
+          "sunIntensity",
+          "terrainColor",
+          "ambientIntensity",
+          "hemiIntensity",
+        ];
+        for (const k of keys) {
+          if (p[k] !== undefined) params[k] = p[k];
+        }
+        if (p.sssIntensity !== undefined) params.sssIntensity = p.sssIntensity;
+        if (data.textureHint) lastTextureFileName = data.textureHint;
+        su.swaySpeed.value = params.swaySpeed;
+        su.swayStrength.value = params.swayStrength;
+        su.sssIntensity.value = params.sssIntensity;
+        su.groundOcclusion.value = params.groundOcclusion;
+        su.normalBending.value = params.normalBending;
+        su.colorTint.value.set(params.colorTint);
+        updateSun();
+        rebuildTerrain();
+        syncFillAndGround();
+      }
+
+      function exportPreset() {
+        const json = JSON.stringify(collectPresetPayload(), null, 2);
+        const blob = new Blob([json], { type: "application/json" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `foliage-preset-${Date.now()}.json`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }
+
+      function frameHero() {
+        if (!camera || !controls) return;
+        camera.position.set(4.2, 2.4, 5.8);
+        controls.target.set(0, 1.1, 0);
+        controls.update();
+      }
+
+      async function init() {
+        renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.getElementById("viewport").appendChild(renderer.domElement);
+        await renderer.init();
+
+        timer = new THREE.Timer();
+        timer.connect(document);
+
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(
+          50,
+          window.innerWidth / window.innerHeight,
+          0.1,
+          1500,
+        );
+        camera.position.set(50, 30, 50);
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+
+        dirLight = new THREE.DirectionalLight(0xffffff, params.sunIntensity);
+        dirLightTarget = dirLight.target;
+        dirLightTarget.position.set(0, 0, 0);
+        scene.add(dirLight);
+        scene.add(dirLightTarget);
+
+        ambientLight = new THREE.AmbientLight(0xffffff, params.ambientIntensity);
+        scene.add(ambientLight);
+
+        hemiLight = new THREE.HemisphereLight(
+          0xb8dcff,
+          0x1a1410,
+          params.hemiIntensity,
+        );
+        hemiLight.position.set(0, 1, 0);
+        scene.add(hemiLight);
+
+        updateSun();
+        buildSky();
+
+        rebuildTerrain();
+
+        buildFoliageInstances();
+
+        const pane = new Pane({
+          container: document.getElementById("pane-container"),
+          title: "Preset lab",
+        });
+
+        const bindUniform = (u, key) => (ev) => {
+          const val = ev.value;
+          u.value = val;
+        };
+
+        const fPrev = pane.addFolder({ title: "Preview" });
+        fPrev
+          .addBinding(params, "previewMode", {
+            options: {
+              Scatter: "scatter",
+              "Hero (single)": "hero",
+              "Instanced grid": "grid",
+            },
+          })
+          .on("change", () => {
+            buildFoliageInstances();
+            if (params.previewMode === "hero") frameHero();
+          });
+        fPrev
+          .addBinding(params, "instanceCount", {
+            min: 1,
+            max: 25_000,
+            step: 1,
+          })
+          .on("change", buildFoliageInstances);
+        fPrev
+          .addBinding(params, "terrainSize", { min: 40, max: 220, step: 1 })
+          .on("change", () => {
+            rebuildTerrain();
+            buildFoliageInstances();
+          });
+
+        const fSky = pane.addFolder({ title: "Sun & lighting" });
+        fSky.addBinding(params, "sunElevation", { min: -5, max: 90 }).on(
+          "change",
+          updateSun,
+        );
+        fSky.addBinding(params, "sunAzimuth", { min: 0, max: 360 }).on(
+          "change",
+          updateSun,
+        );
+        fSky.addBinding(params, "sunIntensity", { min: 0, max: 10 }).on(
+          "change",
+          updateSun,
+        );
+
+        const fGround = pane.addFolder({ title: "Ground & fill" });
+        fGround.addBinding(params, "terrainColor").on("change", syncFillAndGround);
+        fGround
+          .addBinding(params, "ambientIntensity", { min: 0, max: 1.5, step: 0.01 })
+          .on("change", syncFillAndGround);
+        fGround
+          .addBinding(params, "hemiIntensity", { min: 0, max: 2, step: 0.01 })
+          .on("change", syncFillAndGround);
+
+        const fGeo = pane.addFolder({ title: "Card structure" });
+        fGeo
+          .addBinding(params, "planeCount", { min: 1, max: 8, step: 1 })
+          .on("change", buildFoliageInstances);
+        fGeo
+          .addBinding(params, "planeSpread", {
+            options: { "360° radial": "full", "180° fan": "half" },
+          })
+          .on("change", buildFoliageInstances);
+        fGeo
+          .addBinding(params, "tiltMode", {
+            options: { "Stable random": "stable", Symmetric: "symmetric" },
+          })
+          .on("change", buildFoliageInstances);
+        fGeo
+          .addBinding(params, "structureSeed", { min: 0, max: 999_999, step: 1 })
+          .on("change", buildFoliageInstances);
+        fGeo
+          .addBinding(params, "scatterSeed", { min: 0, max: 999_999, step: 1 })
+          .on("change", buildFoliageInstances);
+        fGeo.addBinding(params, "width", { min: 0.1, max: 10 }).on(
+          "change",
+          buildFoliageInstances,
+        );
+        fGeo.addBinding(params, "height", { min: 0.1, max: 10 }).on(
+          "change",
+          buildFoliageInstances,
+        );
+        fGeo.addBinding(params, "tilt", { min: 0, max: 1.5 }).on(
+          "change",
+          buildFoliageInstances,
+        );
+
+        const fShade = pane.addFolder({ title: "Material" });
+        fShade
+          .addBinding(params, "alphaTest", { min: 0, max: 0.99, step: 0.01 })
+          .on("change", buildFoliageInstances);
+        fShade.addBinding(params, "roughness", { min: 0, max: 1, step: 0.01 }).on(
+          "change",
+          buildFoliageInstances,
+        );
+        fShade
+          .addBinding(params, "groundOcclusion", { min: 0, max: 2 })
+          .on("change", bindUniform(su.groundOcclusion, "groundOcclusion"));
+        fShade
+          .addBinding(params, "normalBending", { min: 0, max: 1 })
+          .on("change", bindUniform(su.normalBending, "normalBending"));
+        fShade
+          .addBinding(params, "sssIntensity", { min: 0, max: 5 })
+          .on("change", bindUniform(su.sssIntensity, "sssIntensity"));
+        fShade.addBinding(params, "colorTint").on("change", (ev) => {
+          su.colorTint.value.set(ev.value);
+        });
+
+        const fWind = pane.addFolder({ title: "Wind" });
+        fWind
+          .addBinding(params, "swaySpeed", { min: 0, max: 10 })
+          .on("change", bindUniform(su.swaySpeed, "swaySpeed"));
+        fWind
+          .addBinding(params, "swayStrength", { min: 0, max: 1 })
+          .on("change", bindUniform(su.swayStrength, "swayStrength"));
+
+        document.getElementById("btn-export").addEventListener("click", exportPreset);
+        document.getElementById("btn-import").addEventListener("click", () => {
+          document.getElementById("presetImport").click();
+        });
+        document.getElementById("btn-shuffle").addEventListener("click", () => {
+          params.structureSeed = Math.floor(Math.random() * 999_999);
+          if (typeof pane.refresh === "function") pane.refresh();
+          buildFoliageInstances();
+        });
+        document.getElementById("btn-frame").addEventListener("click", frameHero);
+        document.getElementById("presetImport").addEventListener("change", (e) => {
+          const file = e.target.files?.[0];
+          if (!file) return;
+          file.text().then((text) => {
+            applyPresetPayload(JSON.parse(text));
+            if (typeof pane.refresh === "function") pane.refresh();
+            buildFoliageInstances();
+            if (params.previewMode === "hero") frameHero();
+          }).catch((err) => {
+            console.error(err);
+            alert("Could not import preset: " + err.message);
+          });
+          e.target.value = "";
+        });
+
+        document.getElementById("btn-pick-tex").addEventListener("click", () => {
+          document.getElementById("texUpload").click();
+        });
+
+        document.getElementById("texUpload").addEventListener("change", (e) => {
+          const file = e.target.files?.[0];
+          if (!file) return;
+          if (textureObjectUrl) URL.revokeObjectURL(textureObjectUrl);
+          textureObjectUrl = URL.createObjectURL(file);
+          lastTextureFileName = file.name;
+          document.getElementById("tex-name").textContent = file.name;
+          new THREE.TextureLoader().load(textureObjectUrl, (tex) => {
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.anisotropy = 4;
+            if (foliageTexture) foliageTexture.dispose();
+            foliageTexture = tex;
+            buildFoliageInstances();
+          });
+          e.target.value = "";
+        });
+
+        window.addEventListener("resize", onResize);
+
+        function animate(timestamp) {
+          requestAnimationFrame(animate);
+          timer.update(timestamp ?? performance.now());
+          su.time.value = timer.getElapsed();
+          controls.update();
+          renderer.render(scene, camera);
+        }
+        requestAnimationFrame(animate);
+      }
+
+      init().catch(console.error);
+    </script>
+  </body>
+</html>
