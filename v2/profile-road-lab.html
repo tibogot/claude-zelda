@@ -91,6 +91,14 @@
           <span></span>
         </div>
         <div class="row">
+          <label for="endCapStyle">Road ends</label>
+          <select id="endCapStyle">
+            <option value="flat">Flat</option>
+            <option value="round">Round</option>
+          </select>
+          <span></span>
+        </div>
+        <div class="row">
           <label for="snapGrid">Grid snap</label>
           <input id="snapGrid" type="checkbox" />
           <span></span>
@@ -148,6 +156,7 @@
       const hideJunctionSeamsEl = document.getElementById("hideJunctionSeams");
       const blendJunctionFillEl = document.getElementById("blendJunctionFill");
       const twoRoadNodesEl = document.getElementById("twoRoadNodes");
+      const endCapStyleEl = document.getElementById("endCapStyle");
       const snapGridEl = document.getElementById("snapGrid");
       const gridSizeEl = document.getElementById("gridSize");
       const gridSizeOut = document.getElementById("gridSizeOut");
@@ -176,6 +185,7 @@
         hideJunctionSeams: hideJunctionSeamsEl.checked,
         blendJunctionFill: blendJunctionFillEl.checked,
         twoRoadNodes: twoRoadNodesEl.value,
+        endCapStyle: endCapStyleEl.value,
         snapGrid: snapGridEl.checked,
         gridSize: Number(gridSizeEl.value),
         snapAngle: snapAngleEl.checked,
@@ -717,16 +727,22 @@
 
           if (roads.length === 1) {
             const road = roads[0];
-            const pts = [];
-            const back = mul(road.dir, -1);
-            const base = Math.atan2(back.y, back.x);
-            const a0 = base - Math.PI * 0.5;
-            const a1 = base + Math.PI * 0.5;
-            const segmentCount = Math.max(6, state.junctionSegments | 0);
-            for (let i = 0; i <= segmentCount; i++) {
-              const a = angleLerp(a0, a1, i / segmentCount);
-              pts.push(add(node.p, vec(Math.cos(a) * hw, Math.sin(a) * hw)));
-            }
+            const side = perpLeft(road.dir);
+            const pts = state.endCapStyle === "flat"
+              ? [add(node.p, mul(side, -hw)), add(node.p, mul(side, hw))]
+              : (() => {
+                const out = [];
+                const back = mul(road.dir, -1);
+                const base = Math.atan2(back.y, back.x);
+                const a0 = base - Math.PI * 0.5;
+                const a1 = base + Math.PI * 0.5;
+                const segmentCount = Math.max(6, state.junctionSegments | 0);
+                for (let i = 0; i <= segmentCount; i++) {
+                  const a = angleLerp(a0, a1, i / segmentCount);
+                  out.push(add(node.p, vec(Math.cos(a) * hw, Math.sin(a) * hw)));
+                }
+                return out;
+              })();
             pieces.push({
               polygon: pts,
               left: { path: [] },
@@ -1173,6 +1189,7 @@
           curveSegments: state.curveSegments,
           junctionSegments: state.junctionSegments,
           twoRoadNodes: state.twoRoadNodes,
+          endCapStyle: state.endCapStyle,
           nodes: state.network.nodes.map((node) => ({ id: node.id, x: Math.round(node.p.x * 1000) / 1000, y: Math.round(node.p.y * 1000) / 1000 })),
           edges: state.network.edges.map((edge) => ({ a: edge.a, b: edge.b })),
         };
@@ -1246,6 +1263,10 @@
         if (data.twoRoadNodes === "smooth" || data.twoRoadNodes === "junction") {
           state.twoRoadNodes = data.twoRoadNodes;
           twoRoadNodesEl.value = data.twoRoadNodes;
+        }
+        if (data.endCapStyle === "flat" || data.endCapStyle === "round") {
+          state.endCapStyle = data.endCapStyle;
+          endCapStyleEl.value = data.endCapStyle;
         }
         render();
         return true;
@@ -1391,6 +1412,10 @@
       });
       twoRoadNodesEl.addEventListener("change", () => {
         state.twoRoadNodes = twoRoadNodesEl.value;
+        render();
+      });
+      endCapStyleEl.addEventListener("change", () => {
+        state.endCapStyle = endCapStyleEl.value;
         render();
       });
       snapGridEl.addEventListener("change", () => {
