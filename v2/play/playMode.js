@@ -812,6 +812,7 @@ export class PlayMode {
     this.carDrifting = false;
     this.carDriftAngle = 0;
     this.carWheelSpin = 0;
+    this.carSteerSmooth = 0;
     this.carCamYaw = 0;
     this.carVelY = 0;
     this.carInAir = false;
@@ -2706,10 +2707,11 @@ export class PlayMode {
         const finalRoll = THREE.MathUtils.clamp(this.carTerrainRoll + this.carBodyRoll, -CAR_BODY_ROLL_MAX, CAR_BODY_ROLL_MAX);
         this.carChassis.rotation.set(finalPitch, 0, finalRoll);
 
-        const _steerVis = ((keys.KeyA || keys.ArrowLeft) ? 0.4 : 0) + ((keys.KeyD || keys.ArrowRight) ? -0.4 : 0);
+        const _steerTarget = ((keys.KeyA || keys.ArrowLeft) ? 0.4 : 0) + ((keys.KeyD || keys.ArrowRight) ? -0.4 : 0);
+        this.carSteerSmooth = THREE.MathUtils.lerp(this.carSteerSmooth, _steerTarget, 1 - Math.exp(-12 * dtSec));
         for (const w of this.carWheels) {
           const baseYaw = CAR_MODEL_YAW + (w.isLeft ? Math.PI : 0);
-          w.container.rotation.y = baseYaw + (w.steer ? _steerVis : 0);
+          w.container.rotation.y = baseYaw + (w.steer ? this.carSteerSmooth : 0);
           if (w.cylinder) w.cylinder.rotation.z = (w.isLeft ? -1 : 1) * this.carWheelSpin;
         }
       }
@@ -2767,10 +2769,11 @@ export class PlayMode {
         // Lotus axes are swapped + roll inverted due to chassis yaw orientation
         this.lotusChassis.rotation.set(-finalRoll, 0, finalPitch);
 
-        const _steerVis = ((keys.KeyA || keys.ArrowLeft) ? 0.4 : 0) + ((keys.KeyD || keys.ArrowRight) ? -0.4 : 0);
+        const _steerTarget = ((keys.KeyA || keys.ArrowLeft) ? 0.4 : 0) + ((keys.KeyD || keys.ArrowRight) ? -0.4 : 0);
+        this.carSteerSmooth = THREE.MathUtils.lerp(this.carSteerSmooth, _steerTarget, 1 - Math.exp(-12 * dtSec));
         for (const w of this.lotusWheels) {
           const baseYaw = CAR_MODEL_YAW + (w.isLeft ? 0 : Math.PI);
-          w.container.rotation.y = baseYaw + (w.steer ? _steerVis : 0);
+          w.container.rotation.y = baseYaw + (w.steer ? this.carSteerSmooth : 0);
           if (w.cylinder) {
             w.cylinder.rotation.x = (w.isLeft ? 1 : -1) * this.carWheelSpin;
             w.cylinder.rotation.z = 0;
