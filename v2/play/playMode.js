@@ -1179,6 +1179,35 @@ export class PlayMode {
       });
       strays.forEach((s) => s.parent?.remove(s));
 
+      // Setup emissive lights on headlights, taillights, brake lights
+      this._lotusLightMeshes = { headlights: [], taillights: [], brakes: [] };
+      chassisVisual.traverse((o) => {
+        if (!o.isMesh) return;
+        const n = o.name;
+        if (/HEADLIGHT_LENS/i.test(n)) {
+          this._lotusLightMeshes.headlights.push(o);
+          if (o.material) {
+            o.material = o.material.clone();
+            o.material.emissive = new THREE.Color(1.0, 0.95, 0.8);
+            o.material.emissiveIntensity = 4;
+          }
+        } else if (/TAILLIGHT_LENS/i.test(n)) {
+          this._lotusLightMeshes.taillights.push(o);
+          if (o.material) {
+            o.material = o.material.clone();
+            o.material.emissive = new THREE.Color(1.0, 0.05, 0.02);
+            o.material.emissiveIntensity = 2;
+          }
+        } else if (/BRAKES_/i.test(n)) {
+          this._lotusLightMeshes.brakes.push(o);
+          if (o.material) {
+            o.material = o.material.clone();
+            o.material.emissive = new THREE.Color(1.0, 0.0, 0.0);
+            o.material.emissiveIntensity = 2;
+          }
+        }
+      });
+
       this.lotusChassis = new THREE.Group();
       this.lotusChassis.rotation.order = "YXZ";
       this.lotusChassis.add(chassisVisual);
@@ -1232,6 +1261,18 @@ export class PlayMode {
       this.lotusRoot.rotation.order = "YXZ";
       this.lotusRoot.scale.setScalar(CAR_MODEL_SCALE);
       this.lotusRoot.add(this.lotusChassis);
+
+      // Headlight ground spill (warm white, front of car)
+      const headlightGlow = new THREE.PointLight(0xfff5e0, 2.5, 8, 1.5);
+      headlightGlow.position.set(cCenter.x + cSize.x * 0.45, cCenter.y, cCenter.z);
+      this.lotusChassis.add(headlightGlow);
+
+      // Taillight ground spill (red, rear of car)
+      const taillightGlow = new THREE.PointLight(0xff1a00, 1.8, 5, 1.5);
+      taillightGlow.position.set(cCenter.x - cSize.x * 0.45, cCenter.y, cCenter.z);
+      this.lotusChassis.add(taillightGlow);
+      this._lotusTaillightGlow = taillightGlow;
+
       this.lotusRoot.visible = false;
       this.scene.add(this.lotusRoot);
       if (this._excludeFromReflection) this._excludeFromReflection(this.lotusRoot);
@@ -2734,6 +2775,21 @@ export class PlayMode {
             w.cylinder.rotation.x = (w.isLeft ? 1 : -1) * this.carWheelSpin;
             w.cylinder.rotation.z = 0;
           }
+        }
+
+        // Brake lights — boost emissive when braking
+        const braking = keys.Space || keys.KeyS || keys.ArrowDown;
+        if (this._lotusLightMeshes) {
+          const brakeIntensity = braking ? 8 : 2;
+          for (const m of this._lotusLightMeshes.brakes) {
+            if (m.material) m.material.emissiveIntensity = brakeIntensity;
+          }
+          for (const m of this._lotusLightMeshes.taillights) {
+            if (m.material) m.material.emissiveIntensity = braking ? 4 : 2;
+          }
+        }
+        if (this._lotusTaillightGlow) {
+          this._lotusTaillightGlow.intensity = braking ? 4.5 : 1.8;
         }
       }
     }
