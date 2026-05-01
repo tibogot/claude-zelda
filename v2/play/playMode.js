@@ -69,6 +69,7 @@ const ISO_FLY_CHASE_SMOOTH = 5.5;
 
 // Drift car physics — arcade model
 const CAR_MODEL = "../models/bruno.glb";
+const LOTUS_MODEL = "../models/lotusclaude2.glb";
 const CAR_MODEL_YAW = Math.PI / 2;
 const CAR_MODEL_SCALE = 1.6;
 const CAR_ACCEL = 26;
@@ -661,6 +662,7 @@ export class PlayMode {
   constructor({
     scene, camera, renderer, controls, getWorldHeight, getTerrainHeight, worldHalf, cliffBvh,
     isBarrierBlocked, smokeSettings, carSettings, carAudioSettings, spawnSettings, audioSystem,
+    excludeFromReflection,
   }) {
     this.scene = scene;
     this.camera = camera;
@@ -673,6 +675,7 @@ export class PlayMode {
     this.isBarrierBlocked = isBarrierBlocked || null;
     this.carSettings = carSettings || {};
     this.carAudioSettings = carAudioSettings || {};
+    this._excludeFromReflection = excludeFromReflection || null;
     this.spawnSettings = spawnSettings || null;
     /** @type {object | null} */
     this._audioSystem = audioSystem || null;
@@ -835,6 +838,28 @@ export class PlayMode {
     this._loadCar();
     this._createCarHud();
     this._createCarSpeedometer();
+
+    // Lotus car state
+    this.lotusRoot = null;
+    this.lotusChassis = null;
+    this.lotusWheels = [];
+    this.lotusLoaded = false;
+    this._lotusChassisMetrics = null;
+    this.lotusCam = {
+      distance: 6,
+      height: 2.2,
+      lookAtY: 1.2,
+      chaseSpeed: 4.5,
+      driftLag: 1.8,
+      fov: 65,
+      speedPullBack: 3.0,
+      rollMax: 0.08,
+      pitchMax: 0.06,
+    };
+    this._lotusCamDistSmooth = 0;
+    this._lotusCamGui = null;
+    this._loadLotus();
+    this._initLotusCamGui();
   }
 
   _createFlyHud() {
@@ -1076,6 +1101,7 @@ export class PlayMode {
       this.carRoot.add(this.carChassis);
       this.carRoot.visible = false;
       this.scene.add(this.carRoot);
+      if (this._excludeFromReflection) this._excludeFromReflection(this.carRoot);
 
       const hw = CAR_WHEEL_BASE * 0.5;
       const ht = CAR_TRACK * 0.5;
@@ -1124,6 +1150,159 @@ export class PlayMode {
     }
   }
 
+  async _loadLotus() {
+    try {
+      const gltf = await new Promise((resolve, reject) => {
+        getSharedGltfLoader().load(`${LOTUS_MODEL}?v=lotus-v1`, resolve, undefined, reject);
+      });
+      const src = gltf.scene;
+      let chassisSrc = null;
+      let wheelSrc = null;
+      src.traverse((o) => {
+        if (!chassisSrc && /^chassis(\.|\d|$)/.test(o.name)) chassisSrc = o;
+        if (!wheelSrc && /^wheelContainer(\.|\d|$)/.test(o.name)) wheelSrc = o;
+      });
+      if (!chassisSrc || !wheelSrc) {
+        console.warn("[V2] lotusclaude2.glb missing chassis/wheelContainer nodes; fallback.");
+        if (!chassisSrc) chassisSrc = src;
+        if (!wheelSrc) wheelSrc = src.clone(true);
+      }
+
+      const chassisVisual = chassisSrc.clone(true);
+      chassisVisual.position.set(0, 0, 0);
+      chassisVisual.rotation.set(0, CAR_MODEL_YAW, 0);
+      chassisVisual.scale.setScalar(1);
+      const strays = [];
+      chassisVisual.traverse((o) => {
+        if (/^wheelContainer(\.|\d|$)/.test(o.name)) strays.push(o);
+        if (o.isMesh || o.isSkinnedMesh) { o.castShadow = true; o.receiveShadow = true; }
+      });
+      strays.forEach((s) => s.parent?.remove(s));
+
+      this.lotusChassis = new THREE.Group();
+      this.lotusChassis.rotation.order = "YXZ";
+      this.lotusChassis.add(chassisVisual);
+
+      chassisVisual.updateMatrixWorld(true);
+      const cBox = new THREE.Box3().setFromObject(chassisVisual);
+      const cSize = new THREE.Vector3();
+      const cCenter = new THREE.Vector3();
+      cBox.getSize(cSize);
+      cBox.getCenter(cCenter);
+      this._lotusChassisMetrics = { cSize, cCenter, cMinY: cBox.min.y };
+
+      const halfTrack = cSize.z * 0.459;
+      const halfWB = cSize.x * 0.287;
+      const wheelYOff = cBox.min.y + cSize.y * 0.23;
+      const wbShift = cSize.x * (-0.024);
+
+      const layout = [
+        { x: halfWB + wbShift, z: -halfTrack, steer: true, name: "FL" },
+        { x: halfWB + wbShift, z: halfTrack, steer: true, name: "FR" },
+        { x: -halfWB + wbShift, z: -halfTrack, steer: false, name: "RL" },
+        { x: -halfWB + wbShift, z: halfTrack, steer: false, name: "RR" },
+      ];
+
+      this.lotusWheels = layout.map((w) => {
+        const container = wheelSrc.clone(true);
+        container.position.set(cCenter.x + w.x, wheelYOff, cCenter.z + w.z);
+        const isLeft = w.z < 0;
+        container.rotation.set(0, CAR_MODEL_YAW + (isLeft ? 0 : Math.PI), 0);
+        let suspension = null;
+        let cylinder = null;
+        container.traverse((c) => {
+          if (!suspension && /^wheelSuspension(\.|\d|$)/.test(c.name)) suspension = c;
+          if (!cylinder && /^wheelCylinder(\.|\d|$)/.test(c.name)) cylinder = c;
+          if (c.isMesh || c.isSkinnedMesh) { c.castShadow = true; c.receiveShadow = true; }
+        });
+        this.lotusChassis.add(container);
+        return {
+          container,
+          suspension: suspension || container,
+          cylinder: cylinder || container,
+          offset: new THREE.Vector3(w.x, 0, w.z),
+          steer: w.steer,
+          isLeft,
+          name: w.name,
+          contactWorld: new THREE.Vector3(),
+        };
+      });
+
+      this.lotusRoot = new THREE.Group();
+      this.lotusRoot.rotation.order = "YXZ";
+      this.lotusRoot.scale.setScalar(CAR_MODEL_SCALE);
+      this.lotusRoot.add(this.lotusChassis);
+      this.lotusRoot.visible = false;
+      this.scene.add(this.lotusRoot);
+      if (this._excludeFromReflection) this._excludeFromReflection(this.lotusRoot);
+
+      // Normalize footprint to match Bruno's visual size
+      this.lotusRoot.position.set(0, 0, 0);
+      this.lotusRoot.updateMatrixWorld(true);
+      const fitBox = new THREE.Box3().setFromObject(this.lotusRoot, true);
+      const fitSize = new THREE.Vector3();
+      fitBox.getSize(fitSize);
+      const footprint = Math.max(fitSize.x, fitSize.z, 0.001);
+      const TARGET_FOOTPRINT = 5.5;
+      const normalize = TARGET_FOOTPRINT / footprint;
+      if (Number.isFinite(normalize) && normalize > 0.08 && normalize < 200) {
+        this.lotusRoot.scale.multiplyScalar(normalize);
+      }
+
+      // Compute ground offset once (avoids per-frame AABB which churns WebGPU render targets)
+      this.lotusRoot.updateMatrixWorld(true);
+      const groundBox = new THREE.Box3().setFromObject(this.lotusRoot, true);
+      this._lotusGroundOffset = -groundBox.min.y;
+
+      this.lotusLoaded = true;
+      if (this.active && this.moveMode === "lotus") {
+        this.lotusRoot.visible = true;
+        this.capsule.visible = false;
+      }
+      console.log("[V2] Lotus car loaded, wheels:", this.lotusWheels.map((w) => w.name).join(", "));
+    } catch (err) {
+      console.warn("[V2] Failed to load Lotus model:", err);
+    }
+  }
+
+  async _initLotusCamGui() {
+    try {
+      const { GUI } = await import("https://cdn.jsdelivr.net/npm/lil-gui@0.20.0/dist/lil-gui.esm.min.js");
+      const gui = new GUI({ title: "Lotus Camera", width: 260 });
+      gui.domElement.style.position = "fixed";
+      gui.domElement.style.top = "10px";
+      gui.domElement.style.right = "10px";
+      gui.add(this.lotusCam, "distance", 2, 16, 0.1).name("Distance");
+      gui.add(this.lotusCam, "height", 0.5, 8, 0.1).name("Height");
+      gui.add(this.lotusCam, "lookAtY", 0, 4, 0.1).name("Look-at Y");
+      gui.add(this.lotusCam, "chaseSpeed", 1, 12, 0.1).name("Chase Speed");
+      gui.add(this.lotusCam, "driftLag", 0, 5, 0.1).name("Drift Lag");
+      gui.add(this.lotusCam, "speedPullBack", 0, 8, 0.1).name("Speed Pull-back");
+      gui.add(this.lotusCam, "rollMax", 0.01, 0.3, 0.01).name("Roll Max");
+      gui.add(this.lotusCam, "pitchMax", 0.01, 0.2, 0.01).name("Pitch Max");
+      gui.add(this.lotusCam, "fov", 40, 110, 1).name("FOV").onChange(() => this._applyLotusFov());
+      gui.add({ log: () => console.log("lotusCam:", JSON.stringify(this.lotusCam)) }, "log").name("Log to console");
+      gui.domElement.style.display = "none";
+      this._lotusCamGui = gui;
+    } catch (err) {
+      console.warn("[V2] lil-gui load failed:", err);
+    }
+  }
+
+  _applyLotusFov() {
+    if (this.camera.fov !== this.lotusCam.fov) {
+      this.camera.fov = this.lotusCam.fov;
+      this.camera.updateProjectionMatrix();
+    }
+  }
+
+  _restoreDefaultFov() {
+    if (this.camera.fov !== 60) {
+      this.camera.fov = 60;
+      this.camera.updateProjectionMatrix();
+    }
+  }
+
   _loadCharacter() {
     const loader = getSharedGltfLoader();
 
@@ -1149,6 +1328,7 @@ export class PlayMode {
       this.charRoot.add(model);
       this.charRoot.visible = false;
       this.scene.add(this.charRoot);
+      if (this._excludeFromReflection) this._excludeFromReflection(this.charRoot);
 
       // Kite (paraglider)
       {
@@ -1418,6 +1598,7 @@ export class PlayMode {
       this.planeRoot.add(inner);
       this.planeRoot.visible = false;
       this.scene.add(this.planeRoot);
+      if (this._excludeFromReflection) this._excludeFromReflection(this.planeRoot);
       this._planeInner = inner;
 
       // Create wingtip contrails
@@ -1464,7 +1645,7 @@ export class PlayMode {
   }
 
   get flying() { return this.moveMode === "fly" && this.planeLoaded; }
-  get carMode() { return this.moveMode === "car"; }
+  get carMode() { return this.moveMode === "car" || this.moveMode === "lotus"; }
 
   _clearTrails() {
     for (const trail of this._wingTrails) {
@@ -1526,6 +1707,7 @@ export class PlayMode {
     if (this.planeRoot) this.planeRoot.visible = false;
     if (this.charRoot) this.charRoot.visible = false;
     if (this.carRoot) this.carRoot.visible = false;
+    if (this.lotusRoot) this.lotusRoot.visible = false;
     this.driftMarks.reset();
     this.driftSmoke.reset();
     this._clearTrails(); clearBullets(this._bullets.pool);
@@ -1555,9 +1737,11 @@ export class PlayMode {
     if (this.planeRoot) this.planeRoot.visible = false;
     if (this.charRoot) this.charRoot.visible = false;
     if (this.carRoot) this.carRoot.visible = false;
+    if (this.lotusRoot) this.lotusRoot.visible = false;
     if (this._flyHud) this._flyHud.style.display = "none";
     if (this._carHud) this._carHud.style.display = "none";
     if (this._carSpeedometer) this._carSpeedometer.style.display = "none";
+    if (this._lotusCamGui) this._lotusCamGui.domElement.style.display = "none";
     this.planeSpeed = 0;
     this.carVx = 0; this.carVz = 0;
     this.carNitro = 1.0;
@@ -2366,7 +2550,7 @@ export class PlayMode {
 
     // Capsule visual
     const capsuleCY = this.playerPos.y + capsuleBase;
-    this.capsule.visible = this.moveMode === "capsule" || (this.moveMode === "fly" && !this.planeLoaded) || (this.moveMode === "char" && !this.charLoaded) || (this.moveMode === "car" && !this.carLoaded);
+    this.capsule.visible = this.moveMode === "capsule" || (this.moveMode === "fly" && !this.planeLoaded) || (this.moveMode === "char" && !this.charLoaded) || (this.moveMode === "car" && !this.carLoaded) || (this.moveMode === "lotus" && !this.lotusLoaded);
     this.capsule.position.set(this.playerPos.x, capsuleCY, this.playerPos.z);
     if (mlen > 0) {
       this._lastMx = mx / mlen;
@@ -2439,62 +2623,43 @@ export class PlayMode {
       }
     }
 
-    // Car visual
+    // Car visual — Bruno
+    const isBruno = this.moveMode === "car";
+    const isLotus = this.moveMode === "lotus";
+    let anyCarRendered = false;
+
     if (this.carRoot) {
-      this.carRoot.visible = carDriving && this.carLoaded;
-      if (carDriving && this.carLoaded) {
+      this.carRoot.visible = isBruno && this.carLoaded;
+      if (isBruno && this.carLoaded) {
+        anyCarRendered = true;
         const scaleFactor = this.carRoot.scale.x || CAR_MODEL_SCALE;
         const rootY = this.playerPos.y + (CAR_RIDE_HEIGHT + CAR_WHEEL_RADIUS) * scaleFactor;
         this.carRoot.position.set(this.playerPos.x, rootY, this.playerPos.z);
         this.carRoot.rotation.y = this.carHeading;
 
-        let frontY = 0;
-        let rearY = 0;
-        let leftY = 0;
-        let rightY = 0;
-        let rearIdx = 0;
+        let frontY = 0, rearY = 0, leftY = 0, rightY = 0, rearIdx = 0;
         for (const w of this.carWheels) {
           const lx = w.offset.x * scaleFactor;
           const lz = w.offset.z * scaleFactor;
-          const wx =
-            this.playerPos.x +
-            lx * Math.cos(this.carHeading) +
-            lz * Math.sin(this.carHeading);
-          const wz =
-            this.playerPos.z -
-            lx * Math.sin(this.carHeading) +
-            lz * Math.cos(this.carHeading);
-          // Use terrain-only height for wheel contact so tunnels don't cause body roll turbulence.
+          const wx = this.playerPos.x + lx * Math.cos(this.carHeading) + lz * Math.sin(this.carHeading);
+          const wz = this.playerPos.z - lx * Math.sin(this.carHeading) + lz * Math.cos(this.carHeading);
           const h = this.getTerrainHeight(wx, wz);
           w.contactWorld.set(wx, h + DRIFT_MARK_Y_OFFSET, wz);
           if (w.offset.z < 0) frontY += h;
-          else {
-            rearY += h;
-            if (rearIdx < this._carRearContactPoints.length) {
-              this._carRearContactPoints[rearIdx++].copy(w.contactWorld);
-            }
-          }
-          if (w.offset.x < 0) leftY += h;
-          else rightY += h;
+          else { rearY += h; if (rearIdx < this._carRearContactPoints.length) this._carRearContactPoints[rearIdx++].copy(w.contactWorld); }
+          if (w.offset.x < 0) leftY += h; else rightY += h;
         }
 
-        const leftAvg = leftY * 0.5;
-        const rightAvg = rightY * 0.5;
-        const frontAvg = frontY * 0.5;
-        const rearAvg = rearY * 0.5;
+        const leftAvg = leftY * 0.5, rightAvg = rightY * 0.5, frontAvg = frontY * 0.5, rearAvg = rearY * 0.5;
         const terrainRollRaw = Math.atan2(rightAvg - leftAvg, CAR_TRACK * scaleFactor);
         const terrainPitchRaw = Math.atan2(frontAvg - rearAvg, CAR_WHEEL_BASE * scaleFactor);
         const terrainSmooth = 1 - Math.exp(-CAR_TERRAIN_BODY_SMOOTH * dtSec);
         if (this.carInAir) {
-          // In air: lerp toward neutral (no terrain influence)
           this.carTerrainRoll = THREE.MathUtils.lerp(this.carTerrainRoll, 0, terrainSmooth);
           this.carTerrainPitch = THREE.MathUtils.lerp(this.carTerrainPitch, 0, terrainSmooth);
         } else {
-          // On ground: follow terrain
-          const terrainRollTarget = THREE.MathUtils.clamp(terrainRollRaw, -CAR_BODY_TERRAIN_ROLL_MAX, CAR_BODY_TERRAIN_ROLL_MAX);
-          const terrainPitchTarget = THREE.MathUtils.clamp(terrainPitchRaw, -CAR_BODY_TERRAIN_PITCH_MAX, CAR_BODY_TERRAIN_PITCH_MAX);
-          this.carTerrainRoll = THREE.MathUtils.lerp(this.carTerrainRoll, terrainRollTarget, terrainSmooth);
-          this.carTerrainPitch = THREE.MathUtils.lerp(this.carTerrainPitch, terrainPitchTarget, terrainSmooth);
+          this.carTerrainRoll = THREE.MathUtils.lerp(this.carTerrainRoll, THREE.MathUtils.clamp(terrainRollRaw, -CAR_BODY_TERRAIN_ROLL_MAX, CAR_BODY_TERRAIN_ROLL_MAX), terrainSmooth);
+          this.carTerrainPitch = THREE.MathUtils.lerp(this.carTerrainPitch, THREE.MathUtils.clamp(terrainPitchRaw, -CAR_BODY_TERRAIN_PITCH_MAX, CAR_BODY_TERRAIN_PITCH_MAX), terrainSmooth);
         }
         const finalPitch = THREE.MathUtils.clamp(this.carTerrainPitch + this.carBodyPitch, -CAR_BODY_PITCH_MAX, CAR_BODY_PITCH_MAX);
         const finalRoll = THREE.MathUtils.clamp(this.carTerrainRoll + this.carBodyRoll, -CAR_BODY_ROLL_MAX, CAR_BODY_ROLL_MAX);
@@ -2504,28 +2669,87 @@ export class PlayMode {
         for (const w of this.carWheels) {
           const baseYaw = CAR_MODEL_YAW + (w.isLeft ? Math.PI : 0);
           w.container.rotation.y = baseYaw + (w.steer ? _steerVis : 0);
-          if (w.cylinder) {
-            w.cylinder.rotation.z = (w.isLeft ? -1 : 1) * this.carWheelSpin;
-          }
+          if (w.cylinder) w.cylinder.rotation.z = (w.isLeft ? -1 : 1) * this.carWheelSpin;
+        }
+      }
+    }
+
+    // Car visual — Lotus
+    if (this.lotusRoot) {
+      this.lotusRoot.visible = isLotus && this.lotusLoaded;
+      if (isLotus && this.lotusLoaded) {
+        anyCarRendered = true;
+        const scaleFactor = this.lotusRoot.scale.x || CAR_MODEL_SCALE;
+
+        // Lotus yaw: PI offset because the GLB front faces +Z (opposite to Bruno)
+        this.lotusRoot.rotation.y = this.carHeading - CAR_MODEL_YAW + Math.PI;
+
+        // Terrain wheel sampling — sample all 4 wheels first, use max height as base
+        const hyWheel = this.carHeading - CAR_MODEL_YAW + Math.PI;
+        let frontY = 0, rearY = 0, leftY = 0, rightY = 0, rearIdx = 0;
+        let sumWheelH = 0;
+        for (const w of this.lotusWheels) {
+          const lx = w.offset.x * scaleFactor;
+          const lz = w.offset.z * scaleFactor;
+          const wx = this.playerPos.x + lx * Math.cos(hyWheel) + lz * Math.sin(hyWheel);
+          const wz = this.playerPos.z - lx * Math.sin(hyWheel) + lz * Math.cos(hyWheel);
+          const h = this.getTerrainHeight(wx, wz);
+          sumWheelH += h;
+          w.contactWorld.set(wx, h + DRIFT_MARK_Y_OFFSET, wz);
+          if (w.steer) frontY += h;
+          else { rearY += h; if (rearIdx < this._carRearContactPoints.length) this._carRearContactPoints[rearIdx++].copy(w.contactWorld); }
+          if (w.isLeft) leftY += h; else rightY += h;
         }
 
-        const speed = Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz);
-        const handbrake = keys.Space;
-        const driftAmount = THREE.MathUtils.clamp((this.carDriftAngle - CAR_DRIFT_ANGLE_MIN) / 0.5, 0, 1);
-        const handbrakeAmount = handbrake ? THREE.MathUtils.smoothstep(speed, CAR_DRIFT_ENTRY_SPEED, CAR_DRIFT_ENTRY_SPEED * 2.2) : 0;
-        const driftIntensity = Math.max(driftAmount, handbrakeAmount);
-        const emitMarks = !this.carInAir && speed > CAR_DRIFT_ENTRY_SPEED && driftIntensity > DRIFT_MARK_INTENSITY_MIN;
-        const emitSmoke =
-          !this.carInAir &&
-          speed > CAR_DRIFT_ENTRY_SPEED * 0.55 &&
-          (driftIntensity > (this.smokeSettings.trigger ?? DRIFT_SMOKE_INTENSITY_MIN) ||
-            (handbrake && speed > CAR_DRIFT_ENTRY_SPEED * 0.55));
-        this.driftMarks.update(this._carRearContactPoints, emitMarks, driftIntensity);
-        this.driftSmoke.update(dtSec, this._carRearContactPoints, emitSmoke, Math.max(driftIntensity, handbrake ? 0.45 : 0), this.carVx, this.carVz, this.camera);
-      } else {
-        this.driftMarks.update(this._carRearContactPoints, false, 0);
-        this.driftSmoke.update(dtSec, this._carRearContactPoints, false, 0, 0, 0, this.camera);
+        // Position car at average wheel height + ground offset
+        const baseY = sumWheelH / 4;
+        const rootY = baseY + (this._lotusGroundOffset || 0);
+        this.lotusRoot.position.set(this.playerPos.x, rootY, this.playerPos.z);
+
+        const leftAvg = leftY * 0.5, rightAvg = rightY * 0.5, frontAvg = frontY * 0.5, rearAvg = rearY * 0.5;
+        const trackSpan = Math.abs(this.lotusWheels[1].offset.z - this.lotusWheels[0].offset.z) * scaleFactor || CAR_TRACK * scaleFactor;
+        const wbSpan = Math.abs(this.lotusWheels[2].offset.x - this.lotusWheels[0].offset.x) * scaleFactor || CAR_WHEEL_BASE * scaleFactor;
+        const terrainRollRaw = Math.atan2(rightAvg - leftAvg, trackSpan);
+        const terrainPitchRaw = Math.atan2(frontAvg - rearAvg, wbSpan);
+        const terrainSmooth = 1 - Math.exp(-CAR_TERRAIN_BODY_SMOOTH * dtSec);
+        if (this.carInAir) {
+          this.carTerrainRoll = THREE.MathUtils.lerp(this.carTerrainRoll, 0, terrainSmooth);
+          this.carTerrainPitch = THREE.MathUtils.lerp(this.carTerrainPitch, 0, terrainSmooth);
+        } else {
+          this.carTerrainRoll = THREE.MathUtils.lerp(this.carTerrainRoll, THREE.MathUtils.clamp(terrainRollRaw, -CAR_BODY_TERRAIN_ROLL_MAX, CAR_BODY_TERRAIN_ROLL_MAX), terrainSmooth);
+          this.carTerrainPitch = THREE.MathUtils.lerp(this.carTerrainPitch, THREE.MathUtils.clamp(terrainPitchRaw, -CAR_BODY_TERRAIN_PITCH_MAX, CAR_BODY_TERRAIN_PITCH_MAX), terrainSmooth);
+        }
+        const _lotusRollMax = this.lotusCam.rollMax;
+        const _lotusPitchMax = this.lotusCam.pitchMax;
+        const finalPitch = THREE.MathUtils.clamp(this.carTerrainPitch + this.carBodyPitch, -_lotusPitchMax, _lotusPitchMax);
+        const finalRoll = THREE.MathUtils.clamp(this.carTerrainRoll + this.carBodyRoll, -_lotusRollMax, _lotusRollMax);
+        // Lotus axes are swapped + roll inverted due to chassis yaw orientation
+        this.lotusChassis.rotation.set(-finalRoll, 0, finalPitch);
+
+        const _steerVis = ((keys.KeyA || keys.ArrowLeft) ? 0.4 : 0) + ((keys.KeyD || keys.ArrowRight) ? -0.4 : 0);
+        for (const w of this.lotusWheels) {
+          const baseYaw = CAR_MODEL_YAW + (w.isLeft ? 0 : Math.PI);
+          w.container.rotation.y = baseYaw + (w.steer ? _steerVis : 0);
+          if (w.cylinder) {
+            w.cylinder.rotation.x = (w.isLeft ? 1 : -1) * this.carWheelSpin;
+            w.cylinder.rotation.z = 0;
+          }
+        }
       }
+    }
+
+    // Drift marks & smoke (shared by both car modes)
+    if (anyCarRendered) {
+      const speed = Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz);
+      const handbrake = keys.Space;
+      const driftAmount = THREE.MathUtils.clamp((this.carDriftAngle - CAR_DRIFT_ANGLE_MIN) / 0.5, 0, 1);
+      const handbrakeAmount = handbrake ? THREE.MathUtils.smoothstep(speed, CAR_DRIFT_ENTRY_SPEED, CAR_DRIFT_ENTRY_SPEED * 2.2) : 0;
+      const driftIntensity = Math.max(driftAmount, handbrakeAmount);
+      const emitMarks = !this.carInAir && speed > CAR_DRIFT_ENTRY_SPEED && driftIntensity > DRIFT_MARK_INTENSITY_MIN;
+      const emitSmoke = !this.carInAir && speed > CAR_DRIFT_ENTRY_SPEED * 0.55 &&
+        (driftIntensity > (this.smokeSettings.trigger ?? DRIFT_SMOKE_INTENSITY_MIN) || (handbrake && speed > CAR_DRIFT_ENTRY_SPEED * 0.55));
+      this.driftMarks.update(this._carRearContactPoints, emitMarks, driftIntensity);
+      this.driftSmoke.update(dtSec, this._carRearContactPoints, emitSmoke, Math.max(driftIntensity, handbrake ? 0.45 : 0), this.carVx, this.carVz, this.camera);
     } else {
       this.driftMarks.update(this._carRearContactPoints, false, 0);
       this.driftSmoke.update(dtSec, this._carRearContactPoints, false, 0, 0, 0, this.camera);
@@ -2632,8 +2856,15 @@ export class PlayMode {
 
     // Camera
     const charLookY = this.playerPos.y + CHAR_HEIGHT * 0.75;
-    const carLookY = carDriving ? (this.carRoot ? this.carRoot.position.y + 1.2 : this.playerPos.y + 1.2) : 0;
+    const isLotusMode = this.moveMode === "lotus";
+    const _lc = isLotusMode ? this.lotusCam : null;
+    const _carLookYOff = _lc ? _lc.lookAtY : 1.2;
+    const carLookY = carDriving ? ((isLotusMode ? this.lotusRoot : this.carRoot)?.position.y + _carLookYOff || this.playerPos.y + _carLookYOff) : 0;
     const lookAtY = flying ? this.flyHeight + 0.45 : carDriving ? carLookY : charMode ? charLookY : capsuleCY + 0.6;
+
+    // Lotus camera GUI visibility
+    if (this._lotusCamGui) this._lotusCamGui.domElement.style.display = isLotusMode ? "" : "none";
+
 
     if (carDriving && !iso) {
       let chaseTarget = this.carHeading;
@@ -2641,17 +2872,28 @@ export class PlayMode {
         const rx = Math.cos(this.carHeading);
         const rz = -Math.sin(this.carHeading);
         const latSign = Math.sign(this.carVx * rx + this.carVz * rz);
-        const driftOff = latSign * this.carDriftAngle * (this.carSettings.cameraDriftLag ?? CAR_CAM_DRIFT_LAG);
+        const driftOff = latSign * this.carDriftAngle * (_lc ? _lc.driftLag : (this.carSettings.cameraDriftLag ?? CAR_CAM_DRIFT_LAG));
         chaseTarget += driftOff;
       }
       let camDelta = chaseTarget - this.carCamYaw;
       while (camDelta > Math.PI) camDelta -= 2 * Math.PI;
       while (camDelta < -Math.PI) camDelta += 2 * Math.PI;
-      this.carCamYaw += camDelta * (1 - Math.exp(-(this.carSettings.cameraChaseSpeed ?? CAR_CAM_CHASE_SPEED) * dtSec));
+      this.carCamYaw += camDelta * (1 - Math.exp(-(_lc ? _lc.chaseSpeed : (this.carSettings.cameraChaseSpeed ?? CAR_CAM_CHASE_SPEED)) * dtSec));
 
-      const camBehindX = this.playerPos.x + Math.sin(this.carCamYaw) * (this.carSettings.cameraDistance ?? CAR_CAM_DIST);
-      const camBehindZ = this.playerPos.z + Math.cos(this.carCamYaw) * (this.carSettings.cameraDistance ?? CAR_CAM_DIST);
-      const camY = lookAtY + (this.carSettings.cameraHeight ?? CAR_CAM_HEIGHT);
+      const _camBaseDist = _lc ? _lc.distance : (this.carSettings.cameraDistance ?? CAR_CAM_DIST);
+      const _camHeight = _lc ? _lc.height : (this.carSettings.cameraHeight ?? CAR_CAM_HEIGHT);
+      // Speed-dependent pull-back (racing game feel)
+      let _camDist = _camBaseDist;
+      if (_lc) {
+        const carSpeed = Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz);
+        const speedRatio = THREE.MathUtils.clamp(carSpeed / Math.max(1, CAR_MAX_SPEED), 0, 1);
+        const targetPullBack = speedRatio * _lc.speedPullBack;
+        this._lotusCamDistSmooth = THREE.MathUtils.lerp(this._lotusCamDistSmooth, targetPullBack, 1 - Math.exp(-3 * dtSec));
+        _camDist = _camBaseDist + this._lotusCamDistSmooth;
+      }
+      const camBehindX = this.playerPos.x + Math.sin(this.carCamYaw) * _camDist;
+      const camBehindZ = this.playerPos.z + Math.cos(this.carCamYaw) * _camDist;
+      const camY = lookAtY + _camHeight;
       this.camera.position.set(camBehindX, camY, camBehindZ);
       this.camera.lookAt(this.playerPos.x, lookAtY, this.playerPos.z);
     } else if (iso) {
@@ -2738,6 +2980,17 @@ export class PlayMode {
       this.driftMarks.reset();
       this.driftSmoke.reset();
       this._clearTrails(); clearBullets(this._bullets.pool);
+    } else if (prev === "car") {
+      this.moveMode = "lotus";
+      this.carVx = 0;
+      this.carVz = 0;
+      this.carDrifting = false;
+      this.carDriftAngle = 0;
+      this.carVelY = 0;
+      this.carInAir = false;
+      this.carOnSteepSlope = false;
+      this.driftMarks.reset();
+      this.driftSmoke.reset();
     } else {
       this.moveMode = "capsule";
       this.carVx = 0;
@@ -3082,7 +3335,14 @@ export class PlayMode {
         if (o.isMesh) { o.geometry?.dispose(); o.material?.dispose(); }
       });
     }
+    if (this.lotusRoot) {
+      this.scene.remove(this.lotusRoot);
+      this.lotusRoot.traverse((o) => {
+        if (o.isMesh) { o.geometry?.dispose(); o.material?.dispose(); }
+      });
+    }
     if (this._carHud) this._carHud.remove();
     if (this._carSpeedometer) this._carSpeedometer.remove();
+    if (this._lotusCamGui) { this._lotusCamGui.destroy(); this._lotusCamGui = null; }
   }
 }

@@ -859,6 +859,7 @@ export async function startV2App() {
     carAudioSettings: toolState.playCarAudio,
     spawnSettings: toolState.playSpawn,
     audioSystem,
+    excludeFromReflection: (obj) => roadReflection.excludeFromReflection(obj),
   });
   const gestureAudioUnlock = () => {
     audioSystem.unlock();
@@ -2905,29 +2906,10 @@ export async function startV2App() {
       ui.refreshPerf();
       hudLastMs = now;
     }
-    if (roadSystem.hasReflectiveRoads() || fullRoadSystem.hasReflectiveRoads() || smartRoadSystem.hasReflectiveRoads()) {
-      // Set reflection plane Y and center based on mode
-      if (playMode.active) {
-        roadReflection.setReflectY(focusPos.y + 0.02);
-        roadReflection.setReflectCenter(focusPos); // Center on player for better coverage
-      } else {
-        roadReflection.setReflectCenter(null);
-        const activeMode = toolState.mode;
-        const activeGraph = activeMode === "smartRoad" ? smartRoadSystem : fullRoadSystem;
-        const useGraphRoadPlane = (activeMode === "fullRoad" || activeMode === "smartRoad")
-          ? activeGraph.hasReflectiveRoads()
-          : (!roadSystem.hasReflectiveRoads() && (fullRoadSystem.hasReflectiveRoads() || smartRoadSystem.hasReflectiveRoads()));
-        const fallbackGraphY = fullRoadSystem.hasReflectiveRoads()
-          ? fullRoadSystem.getAverageY()
-          : smartRoadSystem.getAverageY();
-        roadReflection.setReflectY(useGraphRoadPlane ? (activeGraph.hasReflectiveRoads() ? activeGraph.getAverageY() : fallbackGraphY) : roadSystem.getAverageY());
-      }
-      const roadMeshes = [...roadSystem.getRoadMeshes(), ...fullRoadSystem.getRoadMeshes(), ...smartRoadSystem.getRoadMeshes()];
-      roadReflection.render(roadMeshes);
-      roadSystem.updateReflectVP(roadReflection.reflectVP);
-      fullRoadSystem.updateReflectVP(roadReflection.reflectVP);
-      smartRoadSystem.updateReflectVP(roadReflection.reflectVP);
-    }
+    // Road reflection disabled for now (re-enable later)
+    // if (roadSystem.hasReflectiveRoads() || fullRoadSystem.hasReflectiveRoads() || smartRoadSystem.hasReflectiveRoads()) {
+    //   roadReflection.render(...);
+    // }
     riverSystem.update(dtMs * 0.001);
     splineSystem.update(dtMs * 0.001);
     renderer.render(scene, camera);
