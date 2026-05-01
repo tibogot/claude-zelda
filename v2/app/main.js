@@ -1507,6 +1507,36 @@ export async function startV2App() {
         console.error("[V2] Failed to load prop GLB:", err);
       }
     },
+    onAddPrimitive: (primitiveName) => {
+      const existing = toolState.propSlots.find((s) => s.name === primitiveName && s.builtin);
+      if (existing) {
+        toolState.props.activeSlot = toolState.propSlots.indexOf(existing);
+        ui?.pane.refresh();
+        return;
+      }
+      const defs = {
+        Cube:     () => new THREE.BoxGeometry(1, 1, 1),
+        Sphere:   () => new THREE.SphereGeometry(0.5, 32, 16),
+        Cylinder: () => new THREE.CylinderGeometry(0.5, 0.5, 1, 32),
+        Plane:    () => new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2),
+        Cone:     () => new THREE.ConeGeometry(0.5, 1, 32),
+        Torus:    () => new THREE.TorusGeometry(0.4, 0.15, 16, 32),
+      };
+      const factory = defs[primitiveName];
+      if (!factory) return;
+      const geometry = factory();
+      const material = new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.6, metalness: 0.1 });
+      const typeIdx = propStore.registerPrimitive(primitiveName, geometry, material);
+      if (typeIdx >= 0) {
+        propInstancer.onTypeRegistered(typeIdx);
+        const slotIdx = toolState.propSlots.length;
+        toolState.propSlots.push({ name: primitiveName, loaded: true, typeIdx, builtin: true });
+        toolState.props.activeSlot = slotIdx;
+        propUiCallbacks._rebuildPropUi?.();
+        console.log(`[V2] Primitive "${primitiveName}" added (type ${typeIdx})`);
+      }
+      ui?.pane.refresh();
+    },
     onRemovePropSlot: (slotIdx) => {
       toolState.propSlots.splice(slotIdx, 1);
       if (toolState.props.activeSlot >= toolState.propSlots.length) {
@@ -1718,7 +1748,13 @@ export async function startV2App() {
           cliffStore.clear();
           cliffStore.importData(project.settings.cliffInstances, typeNameToIdx);
         }
-        // Restore prop instances (types must be re-imported by user)
+        // Auto-restore primitive prop types from saved slots
+        if (project.settings?.propSlots) {
+          for (const slot of project.settings.propSlots) {
+            if (slot.builtin) propUiCallbacks.onAddPrimitive?.(slot.name);
+          }
+        }
+        // Restore prop instances (GLB types must be re-imported by user)
         if (project.settings?.propInstances) {
           const typeNameToIdx = {};
           for (let i = 0; i < propStore.types.length; i++) {

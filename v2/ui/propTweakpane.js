@@ -22,6 +22,11 @@ export function addPropFolder(pane, toolState, callbacks) {
 
   folder.addButton({ title: "Import GLB..." }).on("click", () => callbacks.onImportPropGlb?.());
 
+  const primFolder = folder.addFolder({ title: "Add Primitive", expanded: false });
+  for (const shape of ["Cube", "Sphere", "Cylinder", "Plane", "Cone", "Torus"]) {
+    primFolder.addButton({ title: shape }).on("click", () => callbacks.onAddPrimitive?.(shape));
+  }
+
   const slotsFolder = folder.addFolder({ title: "Loaded Props", expanded: false });
 
   function rebuildSlotsFolder() {

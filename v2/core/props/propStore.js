@@ -14,6 +14,19 @@ export class PropStore {
 
   _bump() { this._gen++; }
 
+  registerPrimitive(name, geometry, material) {
+    if (!geometry.boundingBox) geometry.computeBoundingBox();
+    const yShift = -geometry.boundingBox.min.y;
+    if (yShift !== 0) geometry.translate(0, yShift, 0);
+    geometry.computeBoundingBox();
+    const localMatrix = new THREE.Matrix4();
+    const mergedBox = geometry.boundingBox.clone();
+    const entries = [{ geometry, material, localMatrix }];
+    const idx = this.types.length;
+    this.types.push({ name, entries, mergedBox, builtin: true });
+    return idx;
+  }
+
   registerType(gltfScene, name) {
     const entries = [];
     gltfScene.updateMatrixWorld(true);

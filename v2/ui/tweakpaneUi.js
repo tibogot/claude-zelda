@@ -78,6 +78,7 @@ export function createTweakpaneUi({
   onCliffTransformModeChanged,
   onCliffBlendChanged,
   onImportPropGlb,
+  onAddPrimitive,
   onRemovePropSlot,
   onDeleteSelectedProp,
   onClearAllProps,
@@ -452,6 +453,7 @@ export function createTweakpaneUi({
 
   const propCallbacks = {
     onImportPropGlb,
+    onAddPrimitive,
     onRemovePropSlot,
     onDeleteSelectedProp,
     onClearAllProps,

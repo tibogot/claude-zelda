@@ -305,7 +305,7 @@ function extractSerializableSettings(toolState) {
     cliffs: { ...toolState.cliffs },
     cliffInstances: toolState._cliffExportData?.() ?? null,
     props: { ...toolState.props },
-    propSlots: toolState.propSlots.map((s) => ({ name: s.name })),
+    propSlots: toolState.propSlots.map((s) => ({ name: s.name, ...(s.builtin ? { builtin: true } : {}) })),
     propInstances: toolState._propExportData?.() ?? null,
     road: { ...toolState.road },
     roads: toolState._roadExportData?.() ?? null,
