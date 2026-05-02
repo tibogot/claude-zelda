@@ -69,6 +69,7 @@ export function createToolState() {
     erosion: { ...V2_CONFIG.sculpt.erosion },
     fbmPeak: { ...V2_CONFIG.sculpt.fbmPeak },
     gen: { ...V2_CONFIG.sculpt.gen },
+    borderMountains: { ...V2_CONFIG.borderMountains },
     terrain: {
       lodEnabled: true,
       activeRadiusInChunks: V2_CONFIG.lod.activeRadiusInChunks,

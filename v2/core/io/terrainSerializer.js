@@ -286,6 +286,7 @@ function extractSerializableSettings(toolState) {
       height: { ...toolState.fog.height },
       distance: { ...toolState.fog.distance },
     },
+    borderMountains: { ...toolState.borderMountains },
     playSpawn: { ...toolState.playSpawn },
     audio: {
       muteAll: toolState.audio.muteAll,
@@ -369,6 +370,7 @@ export function applySettings(toolState, settings) {
     if (settings.fog.height) Object.assign(toolState.fog.height, settings.fog.height);
     if (settings.fog.distance) Object.assign(toolState.fog.distance, settings.fog.distance);
   }
+  if (settings.borderMountains) Object.assign(toolState.borderMountains, settings.borderMountains);
   if (settings.playSpawn) Object.assign(toolState.playSpawn, settings.playSpawn);
   if (settings.audio) {
     if (settings.audio.muteAll != null) toolState.audio.muteAll = settings.audio.muteAll;

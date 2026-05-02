@@ -114,6 +114,15 @@ export const V2_CONFIG = {
       tiltZ: 0,
     },
   },
+  borderMountains: {
+    enabled: false,
+    extent: 400,
+    height: 200,
+    steepness: 1.5,
+    noiseScale: 3,
+    noiseOctaves: 5,
+    seed: 42,
+  },
   render: {
     terrainSkirtDepth: 80,
     maxPixelRatio: 2,

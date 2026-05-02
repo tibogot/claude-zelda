@@ -85,6 +85,7 @@ import { HoleSystem } from "../tools/hole/holeSystem.js";
 import { HoleOverlay } from "../render/hole/holeOverlay.js";
 import { createFleurSystem, FLEUR_PRESETS, FLEUR_ALPHA_URLS } from "../../fleur-painter.js";
 import { createAmbientFxStore } from "../core/ambientfx/ambientFxStore.js";
+import { BorderMountains } from "../render/terrain/borderMountains.js";
 
 export async function startV2App() {
   const config = structuredClone(V2_CONFIG);
@@ -491,6 +492,16 @@ export async function startV2App() {
     },
   });
 
+  const borderMountains = new BorderMountains(config);
+  borderMountains.setMaterial(tileTerrainMaterial);
+  scene.add(borderMountains.group);
+
+  function rebuildBorderMountains() {
+    borderMountains.rebuild(terrainStore, toolState.borderMountains, (mesh) => {
+      setupSplatSwapFromStore(mesh);
+    });
+  }
+
   function disposeProceduralBundle() {
     if (proceduralTerrainBundle) {
       proceduralTerrainBundle.material.dispose();
@@ -545,14 +556,17 @@ export async function startV2App() {
   }
 
   function applyTerrainSurfaceFromToolState() {
+    let mat;
     if (toolState.terrainSurface === "tsl") {
       syncProceduralTerrainTsl();
-      chunkStream.setSharedMaterial(getProceduralTerrainBundle().material);
+      mat = getProceduralTerrainBundle().material;
     } else if (toolState.terrainSurface === "image") {
-      chunkStream.setSharedMaterial(getImageTexTerrainBundle().material);
+      mat = getImageTexTerrainBundle().material;
     } else {
-      chunkStream.setSharedMaterial(tileTerrainMaterial);
+      mat = tileTerrainMaterial;
     }
+    chunkStream.setSharedMaterial(mat);
+    borderMountains.setMaterial(mat);
     syncSoloLayer();
     syncHeightBlend();
   }
@@ -966,8 +980,12 @@ export async function startV2App() {
     onImportHdr: importHdr,
     onCsmEnabledChange: setCsmEnabled,
     onFogChange: syncFog,
-    onGenerateProceduralTerrain: () => sculptSystem.applyProceduralTerrainAllChunks(),
+    onGenerateProceduralTerrain: () => {
+      sculptSystem.applyProceduralTerrainAllChunks();
+      if (toolState.borderMountains.enabled) rebuildBorderMountains();
+    },
     onRunGlobalErosion: () => sculptSystem.applyGlobalErosion(),
+    onBorderMountainsRebuild: rebuildBorderMountains,
     onRampCleared: () => syncRampMarker(),
     onTerrainSurfaceChanged: () => {
       applyTerrainSurfaceFromToolState();
@@ -1853,6 +1871,7 @@ export async function startV2App() {
         applySkyMode(toolState.skyMode);
         chunkStream.markAllDirty();
         chunkStream.update(camera.position);
+        if (toolState.borderMountains.enabled) rebuildBorderMountains();
         grassManager.syncUniforms(toolState.grass, sunDir);
         grassManager.rebuildGeometries(toolState.grass);
         syncPlaySpawnMarker();

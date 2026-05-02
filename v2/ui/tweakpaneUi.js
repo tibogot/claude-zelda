@@ -35,6 +35,7 @@ export function createTweakpaneUi({
   onFogChange,
   onGenerateProceduralTerrain,
   onRunGlobalErosion,
+  onBorderMountainsRebuild,
   onRampCleared,
   onTerrainSurfaceChanged,
   onTslTerrainSync,
@@ -1124,6 +1125,54 @@ export function createTweakpaneUi({
   genFolder
     .addButton({ title: "Generate terrain (all chunks)" })
     .on("click", () => onGenerateProceduralTerrain?.());
+
+  const borderFolder = sculptFolder.addFolder({
+    title: "Border mountains (edge extend)",
+    expanded: false,
+  });
+  borderFolder.addBinding(toolState.borderMountains, "enabled", {
+    label: "Enabled",
+  });
+  borderFolder.addBinding(toolState.borderMountains, "extent", {
+    label: "Extent (m)",
+    min: 100,
+    max: 800,
+    step: 25,
+  });
+  borderFolder.addBinding(toolState.borderMountains, "height", {
+    label: "Height",
+    min: 20,
+    max: 500,
+    step: 5,
+  });
+  borderFolder.addBinding(toolState.borderMountains, "steepness", {
+    label: "Steepness",
+    min: 0.5,
+    max: 4,
+    step: 0.1,
+  });
+  borderFolder.addBlade({ view: "separator" });
+  borderFolder.addBinding(toolState.borderMountains, "noiseScale", {
+    label: "Noise scale",
+    min: 0.5,
+    max: 10,
+    step: 0.25,
+  });
+  borderFolder.addBinding(toolState.borderMountains, "noiseOctaves", {
+    label: "Noise octaves",
+    min: 1,
+    max: 8,
+    step: 1,
+  });
+  borderFolder.addBinding(toolState.borderMountains, "seed", {
+    label: "Seed",
+    min: 0,
+    max: 999,
+    step: 1,
+  });
+  borderFolder
+    .addButton({ title: "Generate border mountains" })
+    .on("click", () => onBorderMountainsRebuild?.());
 
   const lodFolder = pane.addFolder({ title: "Terrain/LOD", expanded: false });
   lodFolder
