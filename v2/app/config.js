@@ -116,11 +116,11 @@ export const V2_CONFIG = {
   },
   borderMountains: {
     enabled: false,
-    extent: 400,
-    height: 200,
-    steepness: 1.5,
-    noiseScale: 3,
-    noiseOctaves: 5,
+    extent: 500,
+    height: 280,
+    steepness: 1.2,
+    noiseScale: 2,
+    noiseOctaves: 4,
     seed: 42,
   },
   render: {

@@ -1,6 +1,6 @@
 import * as THREE from "three";
 
-// ── Compact noise (same algorithm as proceduralTerrainGen.js) ───────────
+// ── Smooth value noise with quintic interpolation ───────────────────────
 
 function _hash(x, y) {
   const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
@@ -10,8 +10,8 @@ function _hash(x, y) {
 function _sn(x, y) {
   const ix = Math.floor(x), iy = Math.floor(y);
   const fx = x - ix, fy = y - iy;
-  const u = fx * fx * (3 - 2 * fx);
-  const v = fy * fy * (3 - 2 * fy);
+  const u = fx * fx * fx * (fx * (fx * 6 - 15) + 10);
+  const v = fy * fy * fy * (fy * (fy * 6 - 15) + 10);
   return (
     _hash(ix, iy) * (1 - u) * (1 - v) +
     _hash(ix + 1, iy) * u * (1 - v) +
@@ -20,14 +20,13 @@ function _sn(x, y) {
   );
 }
 
-function _fbmRidge(x, y, oct) {
+function _fbm(x, y, oct) {
   let s = 0, a = 0.5, f = 1, m = 0;
   for (let i = 0; i < oct; i++) {
-    const n = _sn(x * f, y * f);
-    s += (1 - Math.abs(n * 2 - 1)) * a;
+    s += _sn(x * f, y * f) * a;
     m += a;
     a *= 0.5;
-    f *= 2.1;
+    f *= 2.0;
   }
   return s / m;
 }
@@ -50,11 +49,18 @@ function borderHeightAt(wx, wz, half, terrainStore, p) {
   const rise = Math.pow(t, p.steepness);
 
   const seed = p.seed * 100;
-  const noise = _fbmRidge(
-    wx * p.noiseScale * 0.005 + seed + 7.3,
-    wz * p.noiseScale * 0.005 + seed + 13.1,
+  const freq = p.noiseScale * 0.005;
+
+  const macro = _fbm(wx * freq * 0.15 + seed, wz * freq * 0.15 + seed + 50, 2);
+  const macroShaped = Math.pow(Math.max(0, macro * 1.5 - 0.2), 1.2);
+
+  const detail = _fbm(
+    wx * freq + seed + 7.3,
+    wz * freq + seed + 13.1,
     Math.round(p.noiseOctaves),
   );
+
+  const noise = macroShaped * (0.55 + 0.45 * detail);
 
   return edgeH + rise * p.height * noise;
 }
