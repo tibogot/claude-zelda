@@ -112,6 +112,19 @@ const CAR_NITRO_REGEN_PER_SEC = 0.14;
 const CAR_NITRO_MIN_TO_USE = 0.05;
 /** Center-bottom speed / drift / nitro panel — kept in DOM for future readouts; hidden by default. */
 const SHOW_LEGACY_CAR_HUD_RECT = false;
+/** Mechanical speedo: faster rise, slower fall (inertia). */
+const CAR_HUD_SPEED_SMOOTH_UP = 15;
+const CAR_HUD_SPEED_SMOOTH_DOWN = 6;
+const CAR_HUD_NITRO_SMOOTH = 10;
+/** Ease Shift boost & nitro power in/out so speed cap / thrust don’t snap on key release. */
+const CAR_BOOST_BLEND_SMOOTH = 12;
+const CAR_NITRO_FX_BLEND_SMOOTH = 16;
+
+function _expSmoothStep(current, target, dtSec, rate) {
+  const a = 1 - Math.exp(-rate * dtSec);
+  return current + (target - current) * a;
+}
+
 const CAR_BASE_ACCEL_LOW_SPEED_MUL = 0.52;
 const CAR_BASE_ACCEL_RAMP_TO_KMH = 100;
 const CAR_BODY_ROLL_MAX = 0.2;
@@ -820,6 +833,10 @@ export class PlayMode {
     this.carInAir = false;
     this.carOnSteepSlope = false;
     this.carNitro = 1.0;
+    this._hudKmhSmooth = 0;
+    this._hudNitroSmooth = 1;
+    this._carBoostBlend = 0;
+    this._carNitroFxBlend = 0;
     this.carBodyRoll = 0;
     this.carBodyPitch = 0;
     this.carTerrainRoll = 0;
@@ -1802,6 +1819,10 @@ export class PlayMode {
     this.planeSpeed = 0;
     this.carVx = 0; this.carVz = 0;
     this.carNitro = 1.0;
+    this._hudKmhSmooth = 0;
+    this._hudNitroSmooth = 1;
+    this._carBoostBlend = 0;
+    this._carNitroFxBlend = 0;
     this.carBodyRoll = 0;
     this.carBodyPitch = 0;
     this.carTerrainRoll = 0;
@@ -1899,10 +1920,15 @@ export class PlayMode {
       const hz = -Math.cos(this.carHeading);
 
       // Throttle / brake applied along heading
-      const boost = keys.ShiftLeft || keys.ShiftRight;
+      const boostKeys = keys.ShiftLeft || keys.ShiftRight;
       const nitroActive = nitroHeld && this.carNitro > CAR_NITRO_MIN_TO_USE && !backward;
-      let accel = ((boost ? CAR_ACCEL_BOOST : CAR_ACCEL) + (nitroActive ? CAR_NITRO_ACCEL_BONUS : 0)) * accelScale;
-      if (!boost && !nitroActive) {
+
+      this._carBoostBlend = _expSmoothStep(this._carBoostBlend, boostKeys ? 1 : 0, dtSec, CAR_BOOST_BLEND_SMOOTH);
+      this._carNitroFxBlend = _expSmoothStep(this._carNitroFxBlend, nitroActive ? 1 : 0, dtSec, CAR_NITRO_FX_BLEND_SMOOTH);
+
+      const accelBase = THREE.MathUtils.lerp(CAR_ACCEL, CAR_ACCEL_BOOST, this._carBoostBlend);
+      let accel = (accelBase + this._carNitroFxBlend * CAR_NITRO_ACCEL_BONUS) * accelScale;
+      if (!boostKeys && !nitroActive) {
         const speedKmh = curSpeed * 3.6;
         const rampT = THREE.MathUtils.smoothstep(speedKmh, 0, CAR_BASE_ACCEL_RAMP_TO_KMH);
         const accelMul = THREE.MathUtils.lerp(CAR_BASE_ACCEL_LOW_SPEED_MUL, 1.0, rampT);
@@ -1948,8 +1974,9 @@ export class PlayMode {
         this.carVz *= factor;
       }
 
-      // Clamp speed
-      const maxSpd = ((boost ? CAR_MAX_SPEED_BOOST : CAR_MAX_SPEED) + (nitroActive ? CAR_NITRO_MAX_SPEED_BONUS : 0)) * maxSpeedScale;
+      // Clamp speed (boost / nitro caps ease via blended factors — avoids instant snap on Shift release)
+      const maxBase = THREE.MathUtils.lerp(CAR_MAX_SPEED, CAR_MAX_SPEED_BOOST, this._carBoostBlend);
+      const maxSpd = (maxBase + this._carNitroFxBlend * CAR_NITRO_MAX_SPEED_BONUS) * maxSpeedScale;
       const newSpeed = Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz);
       if (newSpeed > maxSpd) {
         const s = maxSpd / newSpeed;
@@ -2023,6 +2050,11 @@ export class PlayMode {
       if (keys.KeyS || keys.ArrowDown)  { mx += Math.sin(moveYaw); mz += Math.cos(moveYaw); }
       if (keys.KeyA || keys.ArrowLeft)  { mx -= Math.cos(moveYaw); mz += Math.sin(moveYaw); }
       if (keys.KeyD || keys.ArrowRight) { mx += Math.cos(moveYaw); mz -= Math.sin(moveYaw); }
+    }
+
+    if (!this.carMode) {
+      this._carBoostBlend = 0;
+      this._carNitroFxBlend = 0;
     }
 
     // Iso click-to-move is for on-foot modes; vehicles keep their own controls.
@@ -2880,14 +2912,22 @@ export class PlayMode {
     }
 
     // Car HUD: optional legacy center panel + circular speedometer (always when driving)
-    let kmh = 0;
+    let kmhTrue = 0;
     if (carDriving) {
-      kmh = Math.round(
+      kmhTrue =
         Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz) *
-          3.6 *
-          (this.carSettings.speedometerScale ?? 1),
-      );
+        3.6 *
+        (this.carSettings.speedometerScale ?? 1);
+      const dK = kmhTrue - this._hudKmhSmooth;
+      const rate = dK > 0 ? CAR_HUD_SPEED_SMOOTH_UP : CAR_HUD_SPEED_SMOOTH_DOWN;
+      this._hudKmhSmooth += dK * (1 - Math.exp(-rate * dtSec));
+      this._hudNitroSmooth = _expSmoothStep(this._hudNitroSmooth, this.carNitro, dtSec, CAR_HUD_NITRO_SMOOTH);
+    } else {
+      this._hudKmhSmooth = 0;
+      this._hudNitroSmooth = this.carNitro;
     }
+    const kmh = Math.round(this._hudKmhSmooth);
+    const kmhDisp = this._hudKmhSmooth;
     if (SHOW_LEGACY_CAR_HUD_RECT && this._carHud) {
       if (carDriving) {
         this._carHud.style.display = "";
@@ -2895,12 +2935,12 @@ export class PlayMode {
         this._carHudAngle.textContent = Math.round(this.carDriftAngle * 180 / Math.PI);
         this._carHudAngle.style.color = this.carDrifting ? "#ff3300" : "#ff6633";
         if (this._carHudNitro) {
-          const nitroPct = Math.round(this.carNitro * 100);
+          const nitroPct = Math.round(this._hudNitroSmooth * 100);
           this._carHudNitro.textContent = `${nitroPct}%`;
-          this._carHudNitro.style.color = this.carNitro > 0.2 ? "#9ee8ff" : "#ff8c8c";
+          this._carHudNitro.style.color = this._hudNitroSmooth > 0.2 ? "#9ee8ff" : "#ff8c8c";
           if (this._carHudNitroBar) {
             this._carHudNitroBar.style.width = `${nitroPct}%`;
-            this._carHudNitroBar.style.background = this.carNitro > 0.2
+            this._carHudNitroBar.style.background = this._hudNitroSmooth > 0.2
               ? "linear-gradient(90deg,#36c2ff,#7de8ff)"
               : "linear-gradient(90deg,#ff7a7a,#ffb36b)";
           }
@@ -2917,7 +2957,7 @@ export class PlayMode {
         const maxSpeed = 280;
         const startAngle = 135;
         const endAngle = 405;
-        const speedRatio = Math.min(kmh / maxSpeed, 1);
+        const speedRatio = Math.min(kmhDisp / maxSpeed, 1);
         const tickAngle = startAngle + speedRatio * (endAngle - startAngle);
         // Ticks use clockwise-from-right angles; needle mesh points up (=270°). SVG rotate(clockwise).
         const needleRotateDeg = tickAngle - 270;
@@ -2926,29 +2966,29 @@ export class PlayMode {
         }
         if (this._speedoDigital) {
           this._speedoDigital.textContent = kmh;
-          this._speedoDigital.style.color = kmh > 220 ? "#ff6666" : "#ffffff";
+          this._speedoDigital.style.color = kmhDisp > 220 ? "#ff6666" : "#ffffff";
         }
         const gearSpeeds = [0, 40, 80, 130, 180, 230, 280];
         let gear = 1;
         for (let g = 1; g < gearSpeeds.length; g++) {
-          if (kmh >= gearSpeeds[g - 1]) gear = g;
+          if (kmhDisp >= gearSpeeds[g - 1]) gear = g;
         }
         const gearMin = gearSpeeds[gear - 1] || 0;
         const gearMax = gearSpeeds[gear] || maxSpeed;
-        const rpmRatio = Math.min((kmh - gearMin) / (gearMax - gearMin + 1), 1);
+        const rpmRatio = Math.min((kmhDisp - gearMin) / (gearMax - gearMin + 1), 1);
         if (this._speedoRpmBar) {
           const arcLength = 110;
           const fillLen = rpmRatio * arcLength;
           this._speedoRpmBar.setAttribute("stroke-dasharray", `${fillLen} 999`);
         }
         if (this._speedoGear) {
-          this._speedoGear.textContent = kmh < 5 ? "N" : gear;
+          this._speedoGear.textContent = kmhDisp < 5 ? "N" : gear;
           this._speedoGear.style.color = gear >= 5 ? "#ff8844" : "#00ddff";
         }
         if (this._speedoNitroFill) {
-          const nitroPct = Math.round(this.carNitro * 100);
+          const nitroPct = Math.round(this._hudNitroSmooth * 100);
           this._speedoNitroFill.style.width = `${nitroPct}%`;
-          this._speedoNitroFill.style.background = this.carNitro > 0.2
+          this._speedoNitroFill.style.background = this._hudNitroSmooth > 0.2
             ? "linear-gradient(90deg,#36c2ff,#7de8ff)"
             : "linear-gradient(90deg,#ff7a7a,#ffb36b)";
         }
