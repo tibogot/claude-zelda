@@ -494,9 +494,12 @@ export function createGrassMaterial(ctx) {
     );
     const farMorph = smoothstep(float(0.5), float(1.0), lodMorph);
 
-    // Distance fade — squared falloff, prevents hard cutoff at field edge
-    const fadeBegin = uLodMaxDist.mul(uLodFadeStart);
-    const distFadeLinear = smoothstep(uLodMaxDist, fadeBegin, bladeCamDist);
+    // Per-blade stochastic distance fade — dissolves outer boundary per blade
+    const edgeHash = hash22(bladeXZ.add(vec2(317.7, 519.3))).x;
+    const edgeScatter = float(10.0);
+    const personalMaxDist = uLodMaxDist.sub(edgeHash.mul(edgeScatter));
+    const fadeBegin = personalMaxDist.mul(uLodFadeStart);
+    const distFadeLinear = smoothstep(personalMaxDist, fadeBegin, bladeCamDist);
     const distFade = distFadeLinear.mul(distFadeLinear);
 
     // ── Per-blade randomization (4 decorrelated outputs) ──
@@ -801,9 +804,12 @@ export function createGrassMaterial(ctx) {
     normalLocal.assign(nFinal);
     vCustomNormal.assign(nFinal);
 
+    // Compensate terrain height for mesh scaleY (used for temporal fade-in)
+    const meshScaleY = length(modelWorldMatrix.mul(vec4(float(0), float(1), float(0), float(0))).xyz);
+    const compensatedH = finalH.div(max(meshScaleY, float(0.01)));
     return vec3(
       pRotated.x.add(off.x),
-      pRotated.y.add(finalH),
+      pRotated.y.add(compensatedH),
       pRotated.z.add(off.z),
     );
   })();
@@ -1110,8 +1116,11 @@ export function createGrassMaterialMega(ctx) {
 
     const lodFocusXZMega = vec2(uPlayerPos.x, uPlayerPos.z);
     const bladeCamDist = length(bladeXZ.sub(lodFocusXZMega));
-    const fadeBegin = uLodMaxDist.mul(uLodFadeStart);
-    const distFadeLinear = smoothstep(uLodMaxDist, fadeBegin, bladeCamDist);
+    const edgeHash = hash22(bladeXZ.add(vec2(317.7, 519.3))).x;
+    const edgeScatter = float(10.0);
+    const personalMaxDist = uLodMaxDist.sub(edgeHash.mul(edgeScatter));
+    const fadeBegin = personalMaxDist.mul(uLodFadeStart);
+    const distFadeLinear = smoothstep(personalMaxDist, fadeBegin, bladeCamDist);
     const distFade = distFadeLinear.mul(distFadeLinear);
     vDistFade.assign(distFade);
 
@@ -1181,7 +1190,9 @@ export function createGrassMaterialMega(ctx) {
     normalLocal.assign(nBlend);
     vCustomNormal.assign(nBlend);
 
-    return vec3(pYaw.x.add(off.x), pYaw.y.add(finalH), pYaw.z.add(off.z));
+    const meshScaleY = length(modelWorldMatrix.mul(vec4(float(0), float(1), float(0), float(0))).xyz);
+    const compensatedH = finalH.div(max(meshScaleY, float(0.01)));
+    return vec3(pYaw.x.add(off.x), pYaw.y.add(compensatedH), pYaw.z.add(off.z));
   })();
 
   material.colorNode = Fn(() => {
@@ -1257,12 +1268,18 @@ export function setupGrassPatches(
     patchSizeFar = patchSize,
     patchSizeMega = 60,
     mapWorldHalf: initialMapWorldHalf = null,
+    patchHasData = null,
   } = options;
 
   const poolHigh = { meshes: [], idx: 0 };
   const poolMid = { meshes: [], idx: 0 };
   const poolFar = { meshes: [], idx: 0 };
   const poolMega = { meshes: [], idx: 0 };
+
+  // Temporal fade-in: track when each patch cell first becomes visible
+  const _fadeDur = 0.35;
+  const _birthMap = new Map();
+  const _aliveKeys = new Set();
 
   // Reusable objects — zero allocation per frame
   const _cellPos = new THREE.Vector3();
@@ -1347,6 +1364,9 @@ export function setupGrassPatches(
 
     _camPosXZ.set(focusX, 0, focusZ);
 
+    const _now = performance.now() * 0.001;
+    _aliveKeys.clear();
+
     let patchCount = 0;
     let highCount = 0,
       midCount = 0,
@@ -1372,12 +1392,18 @@ export function setupGrassPatches(
           if (dist > highMaxEdge) continue;
           if (!_frustum.intersectsBox(_aabb)) continue;
           if (!patchOverlapsPlayableMap(cellX, cellZ, ps, mapHalf)) continue;
+          if (patchHasData && !patchHasData(cellX - ps * 0.5, cellX + ps * 0.5, cellZ - ps * 0.5, cellZ + ps * 0.5)) continue;
+
+          const _pk = `H${cellX},${cellZ}`;
+          _aliveKeys.add(_pk);
+          if (!_birthMap.has(_pk)) _birthMap.set(_pk, _now);
+          const _fi = Math.min((_now - _birthMap.get(_pk)) / _fadeDur, 1.0);
 
           const mesh = getMesh(poolHigh, geoHigh);
           mesh.geometry = geoHigh;
           mesh.visible = true;
           mesh.position.set(cellX, 0, cellZ);
-          mesh.scale.set(1, 1, 1);
+          mesh.scale.set(1, Math.max(_fi, 0.01), 1);
           mesh.receiveShadow = recvShadow;
           mesh.castShadow = castShadow;
           highCount++;
@@ -1419,12 +1445,18 @@ export function setupGrassPatches(
           if (farthestCornerDist < midDist - lodHysteresis) continue;
           if (!_frustum.intersectsBox(_aabb)) continue;
           if (!patchOverlapsPlayableMap(cellX, cellZ, psMid, mapHalf)) continue;
+          if (patchHasData && !patchHasData(cellX - psMid * 0.5, cellX + psMid * 0.5, cellZ - psMid * 0.5, cellZ + psMid * 0.5)) continue;
+
+          const _pk = `M${cellX},${cellZ}`;
+          _aliveKeys.add(_pk);
+          if (!_birthMap.has(_pk)) _birthMap.set(_pk, _now);
+          const _fi = Math.min((_now - _birthMap.get(_pk)) / _fadeDur, 1.0);
 
           const mesh = getMesh(poolMid, geoMid);
           mesh.geometry = geoMid;
           mesh.visible = true;
           mesh.position.set(cellX, 0, cellZ);
-          mesh.scale.set(1, 1, 1);
+          mesh.scale.set(1, Math.max(_fi, 0.01), 1);
           mesh.receiveShadow = recvShadow;
           mesh.castShadow = castShadow;
           midCount++;
@@ -1464,13 +1496,19 @@ export function setupGrassPatches(
           if (farthestCornerDist < farDist - lodHysteresis) continue;
           if (!_frustum.intersectsBox(_aabb)) continue;
           if (!patchOverlapsPlayableMap(cellX, cellZ, psFar, mapHalf)) continue;
+          if (patchHasData && !patchHasData(cellX - psFar * 0.5, cellX + psFar * 0.5, cellZ - psFar * 0.5, cellZ + psFar * 0.5)) continue;
+
+          const _pk = `F${cellX},${cellZ}`;
+          _aliveKeys.add(_pk);
+          if (!_birthMap.has(_pk)) _birthMap.set(_pk, _now);
+          const _fi = Math.min((_now - _birthMap.get(_pk)) / _fadeDur, 1.0);
 
           const mesh = getMesh(poolFar, geoFar, materialMega);
           mesh.geometry = geoFar;
           mesh.material = materialMega;
           mesh.visible = true;
           mesh.position.set(cellX, 0, cellZ);
-          mesh.scale.set(1, 1, 1);
+          mesh.scale.set(1, Math.max(_fi, 0.01), 1);
           mesh.receiveShadow = false;
           mesh.castShadow = castShadow;
           farCount++;
@@ -1510,19 +1548,30 @@ export function setupGrassPatches(
           if (!_frustum.intersectsBox(_aabb)) continue;
           if (!patchOverlapsPlayableMap(cellX, cellZ, psMega, mapHalf))
             continue;
+          if (patchHasData && !patchHasData(cellX - psMega * 0.5, cellX + psMega * 0.5, cellZ - psMega * 0.5, cellZ + psMega * 0.5)) continue;
+
+          const _pk = `G${cellX},${cellZ}`;
+          _aliveKeys.add(_pk);
+          if (!_birthMap.has(_pk)) _birthMap.set(_pk, _now);
+          const _fi = Math.min((_now - _birthMap.get(_pk)) / _fadeDur, 1.0);
 
           const mesh = getMesh(poolMega, geoMega, materialMega);
           mesh.geometry = geoMega;
           mesh.material = materialMega;
           mesh.visible = true;
           mesh.position.set(cellX, 0, cellZ);
-          mesh.scale.set(1, 1, 1);
+          mesh.scale.set(1, Math.max(_fi, 0.01), 1);
           mesh.receiveShadow = false;
           mesh.castShadow = castShadow;
           megaCount++;
           patchCount++;
         }
       }
+    }
+
+    // Purge birth times for patches no longer visible
+    for (const k of _birthMap.keys()) {
+      if (!_aliveKeys.has(k)) _birthMap.delete(k);
     }
 
     lastPatchCount = patchCount;

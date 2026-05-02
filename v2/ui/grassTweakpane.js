@@ -109,11 +109,13 @@ export function addGrassFolder(pane, toolState, opts) {
   lodFarFolder.addBinding(gp, "lodFarPatchSize", { label: "Patch size", min: 10, max: 60, step: 1 }).on("change", onGrassRebuildGeos);
   lodFarFolder.addBinding(gp, "lodFarSegments", { label: "Segments", min: 1, max: 4, step: 1 }).on("change", onGrassRebuildGeos);
   lodFarFolder.addBinding(gp, "lodFarGrassCount", { label: "Blades/patch", min: 16, max: 2000, step: 16 }).on("change", onGrassRebuildGeos);
+  lodFarFolder.addBinding(gp, "lodFarBladeWidth", { label: "Blade width", min: 0.05, max: 1.5, step: 0.05 }).on("change", onGrassRebuildGeos);
 
   const lodMegaFolder = lodFolder.addFolder({ title: "MEGA tier", expanded: false });
   lodMegaFolder.addBinding(gp, "lodMegaPatchSize", { label: "Patch size", min: 24, max: 120, step: 1 }).on("change", onGrassRebuildGeos);
   lodMegaFolder.addBinding(gp, "lodMegaSegments", { label: "Segments", min: 1, max: 4, step: 1 }).on("change", onGrassRebuildGeos);
   lodMegaFolder.addBinding(gp, "lodMegaGrassCount", { label: "Blades/patch", min: 16, max: 2000, step: 16 }).on("change", onGrassRebuildGeos);
+  lodMegaFolder.addBinding(gp, "lodMegaBladeWidth", { label: "Blade width", min: 0.1, max: 2.0, step: 0.05 }).on("change", onGrassRebuildGeos);
 
   lodFolder.addButton({ title: "Rebuild LOD geometries" }).on("click", () => onGrassRebuildGeos?.());
 }

@@ -65,6 +65,11 @@ export class GrassManager {
     this.cliffDensityTex.minFilter = THREE.LinearFilter;
     this.cliffDensityTex.magFilter = THREE.LinearFilter;
     this.cliffDensityTex.needsUpdate = true;
+
+    this._hasCliffData = false;
+
+    this._cliffOccRes = 32;
+    this._cliffOccupancy = new Uint8Array(32 * 32);
   }
 
   init(heightTex, sunDir, grassState, { groundColorAtWorldXZ } = {}) {
@@ -203,7 +208,8 @@ export class GrassManager {
       materialMega: materialMegaCliff,
     };
     this.cliffPatchSystem = setupGrassPatches(
-      this.scene, this.camera, this.cliffGroup, this.cliffGeosAndMats, patchOpts,
+      this.scene, this.camera, this.cliffGroup, this.cliffGeosAndMats,
+      { ...patchOpts, patchHasData: (minX, maxX, minZ, maxZ) => this.cliffPatchHasData(minX, maxX, minZ, maxZ) },
     );
 
     this._enabled = gp.enabled;
@@ -220,11 +226,11 @@ export class GrassManager {
     const geoMid = createFieldInstancedGeometry(midBase, gp.lodMidPatchSize, Math.round(gp.lodMidGrassCount), gp.bladeHeight, true);
     midBase.dispose();
 
-    const farBase = createBladeGeometry(gp.bladeHeight, gp.bladeWidth, Math.round(gp.lodFarSegments), gp.tipTaperStart);
+    const farBase = createBladeGeometry(gp.bladeHeight, gp.lodFarBladeWidth ?? gp.bladeWidth, Math.round(gp.lodFarSegments), gp.tipTaperStart);
     const geoFar = createFieldInstancedGeometry(farBase, gp.lodFarPatchSize, Math.round(gp.lodFarGrassCount), gp.bladeHeight, false);
     farBase.dispose();
 
-    const megaBase = createBladeGeometry(gp.bladeHeight, gp.bladeWidth, Math.round(gp.lodMegaSegments), gp.tipTaperStart);
+    const megaBase = createBladeGeometry(gp.bladeHeight, gp.lodMegaBladeWidth ?? gp.bladeWidth, Math.round(gp.lodMegaSegments), gp.tipTaperStart);
     const geoMega = createFieldInstancedGeometry(megaBase, gp.lodMegaPatchSize, Math.round(gp.lodMegaGrassCount), gp.bladeHeight, false);
     megaBase.dispose();
 
@@ -327,7 +333,7 @@ export class GrassManager {
     if (enabled !== this._enabled) {
       this._enabled = enabled;
       this.group.visible = enabled;
-      if (this.cliffGroup) this.cliffGroup.visible = enabled;
+      if (this.cliffGroup) this.cliffGroup.visible = enabled && this._hasCliffData;
     }
     if (!enabled) return;
 
@@ -347,7 +353,12 @@ export class GrassManager {
     };
     this.patchSystem.update(updateOpts);
     if (this.cliffPatchSystem) {
-      this.cliffPatchSystem.update(updateOpts);
+      if (this._hasCliffData) {
+        this.cliffGroup.visible = true;
+        this.cliffPatchSystem.update(updateOpts);
+      } else {
+        this.cliffGroup.visible = false;
+      }
     }
   }
 
@@ -500,6 +511,79 @@ export class GrassManager {
     this.cliffHeightTex.needsUpdate = true;
   }
 
+  _rebuildCliffOccupancy() {
+    const occ = this._cliffOccupancy;
+    const occRes = this._cliffOccRes;
+    const res = this.densityRes;
+    const data = this.cliffDensityTex.image.data;
+    const blockSize = res / occRes;
+    occ.fill(0);
+    this._hasCliffData = false;
+    for (let oz = 0; oz < occRes; oz++) {
+      for (let ox = 0; ox < occRes; ox++) {
+        const pxMinX = Math.floor(ox * blockSize);
+        const pxMaxX = Math.floor((ox + 1) * blockSize);
+        const pxMinZ = Math.floor(oz * blockSize);
+        const pxMaxZ = Math.floor((oz + 1) * blockSize);
+        let found = false;
+        for (let z = pxMinZ; z < pxMaxZ && !found; z++) {
+          for (let x = pxMinX; x < pxMaxX; x++) {
+            if (data[(z * res + x) * 4] > 0) { found = true; break; }
+          }
+        }
+        if (found) {
+          occ[oz * occRes + ox] = 1;
+          this._hasCliffData = true;
+        }
+      }
+    }
+  }
+
+  _updateCliffOccupancyRegion(pxMinX, pxMaxX, pxMinZ, pxMaxZ) {
+    const occ = this._cliffOccupancy;
+    const occRes = this._cliffOccRes;
+    const res = this.densityRes;
+    const data = this.cliffDensityTex.image.data;
+    const blockSize = res / occRes;
+    const oMinX = Math.max(0, Math.floor(pxMinX / blockSize));
+    const oMaxX = Math.min(occRes - 1, Math.floor(pxMaxX / blockSize));
+    const oMinZ = Math.max(0, Math.floor(pxMinZ / blockSize));
+    const oMaxZ = Math.min(occRes - 1, Math.floor(pxMaxZ / blockSize));
+    for (let oz = oMinZ; oz <= oMaxZ; oz++) {
+      for (let ox = oMinX; ox <= oMaxX; ox++) {
+        const bxMin = Math.floor(ox * blockSize);
+        const bxMax = Math.floor((ox + 1) * blockSize);
+        const bzMin = Math.floor(oz * blockSize);
+        const bzMax = Math.floor((oz + 1) * blockSize);
+        let found = false;
+        for (let z = bzMin; z < bzMax && !found; z++) {
+          for (let x = bxMin; x < bxMax; x++) {
+            if (data[(z * res + x) * 4] > 0) { found = true; break; }
+          }
+        }
+        occ[oz * occRes + ox] = found ? 1 : 0;
+      }
+    }
+    this._hasCliffData = occ.includes(1);
+  }
+
+  cliffPatchHasData(worldMinX, worldMaxX, worldMinZ, worldMaxZ) {
+    const ws = this.config.world.size;
+    const half = ws * 0.5;
+    const occRes = this._cliffOccRes;
+    const oMinX = Math.max(0, Math.floor(((worldMinX + half) / ws) * occRes));
+    const oMaxX = Math.min(occRes - 1, Math.floor(((worldMaxX + half) / ws) * occRes));
+    const oMinZ = Math.max(0, Math.floor(((worldMinZ + half) / ws) * occRes));
+    const oMaxZ = Math.min(occRes - 1, Math.floor(((worldMaxZ + half) / ws) * occRes));
+    const occ = this._cliffOccupancy;
+    for (let oz = oMinZ; oz <= oMaxZ; oz++) {
+      for (let ox = oMinX; ox <= oMaxX; ox++) {
+        if (occ[oz * occRes + ox]) return true;
+      }
+    }
+    return false;
+  }
+
   stampCliffDensity({ cx, cz, radius, strength, falloff, worldSize, erase }) {
     const res = this.densityRes;
     const data = this.cliffDensityTex.image.data;
@@ -535,6 +619,7 @@ export class GrassManager {
       }
     }
     this.cliffDensityTex.needsUpdate = true;
+    this._updateCliffOccupancyRegion(minX, maxX, minZ, maxZ);
   }
 
   getCliffDensitySnapshot() {
@@ -544,16 +629,21 @@ export class GrassManager {
   restoreCliffDensitySnapshot(snapshot) {
     this.cliffDensityTex.image.data.set(snapshot);
     this.cliffDensityTex.needsUpdate = true;
+    this._rebuildCliffOccupancy();
   }
 
   fillCliffDensity() {
     this.cliffDensityTex.image.data.fill(255);
     this.cliffDensityTex.needsUpdate = true;
+    this._cliffOccupancy.fill(1);
+    this._hasCliffData = true;
   }
 
   clearCliffDensity() {
     this.cliffDensityTex.image.data.fill(0);
     this.cliffDensityTex.needsUpdate = true;
+    this._cliffOccupancy.fill(0);
+    this._hasCliffData = false;
   }
 
   dispose() {
