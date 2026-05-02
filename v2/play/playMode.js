@@ -858,6 +858,9 @@ export class PlayMode {
       pitchMax: 0.06,
     };
     this._lotusCamDistSmooth = 0;
+    this._lotusBlinkerSide = 0;
+    this._lotusBlinkerTime = 0;
+    this._lotusBlinkerAutoHold = 0;
     this._lotusCamGui = null;
     this._loadLotus();
     this._initLotusCamGui();
@@ -1180,8 +1183,12 @@ export class PlayMode {
       });
       strays.forEach((s) => s.parent?.remove(s));
 
-      // Setup emissive lights on headlights, taillights, brake lights
-      this._lotusLightMeshes = { headlights: [], taillights: [], brakes: [] };
+      // Setup emissive lights on headlights, taillights, brake lights (split left/right for blinkers)
+      this._lotusLightMeshes = {
+        headlights: [],
+        taillightLeft: [], taillightRight: [],
+        brakeLeft: [], brakeRight: [],
+      };
       chassisVisual.traverse((o) => {
         if (!o.isMesh) return;
         const n = o.name;
@@ -1193,14 +1200,16 @@ export class PlayMode {
             o.material.emissiveIntensity = 4;
           }
         } else if (/TAILLIGHT_LENS/i.test(n)) {
-          this._lotusLightMeshes.taillights.push(o);
+          const isLeft = /_LEFT/i.test(n);
+          (isLeft ? this._lotusLightMeshes.taillightLeft : this._lotusLightMeshes.taillightRight).push(o);
           if (o.material) {
             o.material = o.material.clone();
             o.material.emissive = new THREE.Color(1.0, 0.05, 0.02);
             o.material.emissiveIntensity = 2;
           }
         } else if (/BRAKES_/i.test(n)) {
-          this._lotusLightMeshes.brakes.push(o);
+          const isLeft = /_LEFT/i.test(n);
+          (isLeft ? this._lotusLightMeshes.brakeLeft : this._lotusLightMeshes.brakeRight).push(o);
           if (o.material) {
             o.material = o.material.clone();
             o.material.emissive = new THREE.Color(1.0, 0.0, 0.0);
@@ -2780,15 +2789,54 @@ export class PlayMode {
           }
         }
 
-        // Brake lights — boost emissive when braking
+        // Brake lights + turn signals (blinkers)
         const braking = keys.Space || keys.KeyS || keys.ArrowDown;
-        if (this._lotusLightMeshes) {
-          const brakeIntensity = braking ? 8 : 2;
-          for (const m of this._lotusLightMeshes.brakes) {
-            if (m.material) m.material.emissiveIntensity = brakeIntensity;
+        const leftKey = keys.KeyA || keys.ArrowLeft;
+        const rightKey = keys.KeyD || keys.ArrowRight;
+        const carSpeed = Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz);
+
+        // Blinker: manual Q/E override, or auto when holding turn key >0.3s at speed
+        let blinkerSide = 0;
+        if (keys.KeyQ) blinkerSide = -1;
+        else if (keys.KeyE) blinkerSide = 1;
+        else {
+          if (leftKey && carSpeed > 3) this._lotusBlinkerAutoHold += dtSec;
+          else if (rightKey && carSpeed > 3) this._lotusBlinkerAutoHold += dtSec;
+          else this._lotusBlinkerAutoHold = 0;
+
+          if (this._lotusBlinkerAutoHold > 0.3) {
+            blinkerSide = leftKey ? -1 : 1;
           }
-          for (const m of this._lotusLightMeshes.taillights) {
-            if (m.material) m.material.emissiveIntensity = braking ? 4 : 2;
+        }
+
+        if (blinkerSide !== 0) {
+          this._lotusBlinkerTime += dtSec;
+          this._lotusBlinkerSide = blinkerSide;
+        } else {
+          this._lotusBlinkerTime = 0;
+          this._lotusBlinkerSide = 0;
+        }
+
+        const blinkOn = this._lotusBlinkerSide !== 0 && (Math.floor(this._lotusBlinkerTime * 3 * 2) % 2 === 0);
+        const blinkLeft = blinkOn && this._lotusBlinkerSide === -1;
+        const blinkRight = blinkOn && this._lotusBlinkerSide === 1;
+
+        if (this._lotusLightMeshes) {
+          const brakeBase = braking ? 8 : 2;
+          const tailBase = braking ? 4 : 2;
+          const blinkBoost = 10;
+
+          for (const m of this._lotusLightMeshes.brakeLeft) {
+            if (m.material) m.material.emissiveIntensity = blinkLeft ? blinkBoost : brakeBase;
+          }
+          for (const m of this._lotusLightMeshes.brakeRight) {
+            if (m.material) m.material.emissiveIntensity = blinkRight ? blinkBoost : brakeBase;
+          }
+          for (const m of this._lotusLightMeshes.taillightLeft) {
+            if (m.material) m.material.emissiveIntensity = blinkLeft ? blinkBoost : tailBase;
+          }
+          for (const m of this._lotusLightMeshes.taillightRight) {
+            if (m.material) m.material.emissiveIntensity = blinkRight ? blinkBoost : tailBase;
           }
         }
         if (this._lotusTaillightGlow) {
