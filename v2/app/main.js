@@ -867,6 +867,87 @@ export async function startV2App() {
   window.addEventListener("pointerdown", gestureAudioUnlock, { once: true, capture: true });
   window.addEventListener("keydown", gestureAudioUnlock, { once: true, capture: true });
 
+  function applyModeChangedEffects() {
+    if (toolState.mode !== "sculpt") {
+      sculptSystem.clearRampPoint();
+    }
+    if (toolState.mode !== "paint" && toolState.paint.soloLayer >= 0) {
+      toolState.paint.soloLayer = -1;
+      syncSoloLayer();
+    }
+    if (toolState.mode === "paint" && toolState.terrainSurface === "tile") {
+      toolState.terrainSurface = "tsl";
+      applyTerrainSurfaceFromToolState();
+      ui?.pane.refresh();
+    }
+    if (toolState.mode === "grass" && !toolState.grass.enabled) {
+      toolState.grass.enabled = true;
+      grassManager.syncUniforms(toolState.grass, sunDir);
+      ui?.pane.refresh();
+    }
+    if (toolState.mode !== "cliffs") {
+      deactivateCliffSelection();
+    }
+    if (toolState.mode !== "props") {
+      deactivatePropSelection();
+    }
+    if (toolState.mode !== "water") {
+      waterSystem.deselect();
+    }
+    if (toolState.mode !== "waterfall") {
+      waterfallSystem.deselect();
+    } else {
+      transformControls.setMode(toolState.waterfall.transformMode || "translate");
+    }
+    if (toolState.mode !== "decals") {
+      decalSystem.deselect();
+    } else {
+      transformControls.setMode(toolState.decal.transformMode || "translate");
+      if (decalSystem.selectedIndex >= 0) {
+        decalSystem.selectByIndex(decalSystem.selectedIndex);
+      }
+    }
+    if (toolState.mode !== "fullRoad" && toolState.mode !== "smartRoad") {
+      fullRoadSystem.deselectDecal();
+      fullRoadSystem._clearDecalPreview();
+      smartRoadSystem.deselectDecal();
+      smartRoadSystem._clearDecalPreview();
+    } else if (activeGraphRoadParams().decalMode && activeGraphRoadSystem().selectedDecalId != null) {
+      transformControls.setMode(activeGraphRoadParams().decalTransformMode || "translate");
+    }
+    if (toolState.mode !== "spline") {
+      splineSystem.dragging = false;
+    }
+    roadSystem.handleGroup.visible = toolState.mode === "road" && toolState.road.showHandles;
+    fullRoadSystem.handleGroup.visible = toolState.mode === "fullRoad" && toolState.fullRoad.showHandles;
+    smartRoadSystem.handleGroup.visible = toolState.mode === "smartRoad" && toolState.smartRoad.showHandles;
+    riverSystem.handleGroup.visible = toolState.mode === "river" && toolState.river.showHandles;
+    splineSystem.handleGroup.visible = toolState.mode === "spline" && toolState.spline.showHandles;
+    if (toolState.mode !== "spline") splineSystem.clearPreview();
+    if (ui?.waterFolder) ui.waterFolder.hidden = toolState.mode !== "water";
+    if (ui?.decalFolder) ui.decalFolder.hidden = toolState.mode !== "decals";
+    if (ui?.barrierFolder) ui.barrierFolder.expanded = toolState.mode === "barrier";
+    if (ui?.holeFolder) ui.holeFolder.expanded = toolState.mode === "hole";
+    if (ui?.fleurFolder) ui.fleurFolder.hidden = toolState.mode !== "fleurs";
+    if (ui?.ambientFxFolder) ui.ambientFxFolder.hidden = toolState.mode !== "ambientfx";
+    if (toolState.mode === "ambientfx") {
+      ambientFxStore.setRingsVisible(toolState.ambientFx.showRings);
+    } else {
+      ambientFxStore.setRingsVisible(false);
+    }
+    if (toolState.mode === "play") {
+      playMode.enter();
+      const tpEl = document.querySelector(".tp-dfwv");
+      if (tpEl) tpEl.style.display = "none";
+    } else if (playMode.active) {
+      playMode.exit();
+      const tpEl = document.querySelector(".tp-dfwv");
+      if (tpEl) tpEl.style.display = "";
+    }
+    updateBrushPreviewFromPick(null);
+    syncPlaySpawnMarker();
+  }
+
   const hud = createHud();
   /** @type {ReturnType<typeof createTweakpaneUi>} */
   let ui;
@@ -912,87 +993,7 @@ export async function startV2App() {
     onRebuildCarAudio: () => {
       playMode.rebuildCarAudio();
     },
-    onModeChanged: () => {
-      if (toolState.mode !== "sculpt") {
-        sculptSystem.clearRampPoint();
-      }
-      if (toolState.mode !== "paint" && toolState.paint.soloLayer >= 0) {
-        toolState.paint.soloLayer = -1;
-        syncSoloLayer();
-      }
-      if (toolState.mode === "paint" && toolState.terrainSurface === "tile") {
-        toolState.terrainSurface = "tsl";
-        applyTerrainSurfaceFromToolState();
-        ui?.pane.refresh();
-      }
-      if (toolState.mode === "grass" && !toolState.grass.enabled) {
-        toolState.grass.enabled = true;
-        grassManager.syncUniforms(toolState.grass, sunDir);
-        ui?.pane.refresh();
-      }
-      if (toolState.mode !== "cliffs") {
-        deactivateCliffSelection();
-      }
-      if (toolState.mode !== "props") {
-        deactivatePropSelection();
-      }
-      if (toolState.mode !== "water") {
-        waterSystem.deselect();
-      }
-      if (toolState.mode !== "waterfall") {
-        waterfallSystem.deselect();
-      } else {
-        transformControls.setMode(toolState.waterfall.transformMode || "translate");
-      }
-      if (toolState.mode !== "decals") {
-        decalSystem.deselect();
-      } else {
-        transformControls.setMode(toolState.decal.transformMode || "translate");
-        if (decalSystem.selectedIndex >= 0) {
-          decalSystem.selectByIndex(decalSystem.selectedIndex);
-        }
-      }
-      if (toolState.mode !== "fullRoad" && toolState.mode !== "smartRoad") {
-        fullRoadSystem.deselectDecal();
-        fullRoadSystem._clearDecalPreview();
-        smartRoadSystem.deselectDecal();
-        smartRoadSystem._clearDecalPreview();
-      } else if (activeGraphRoadParams().decalMode && activeGraphRoadSystem().selectedDecalId != null) {
-        transformControls.setMode(activeGraphRoadParams().decalTransformMode || "translate");
-      }
-      if (toolState.mode !== "spline") {
-        splineSystem.dragging = false;
-      }
-      roadSystem.handleGroup.visible = toolState.mode === "road" && toolState.road.showHandles;
-      fullRoadSystem.handleGroup.visible = toolState.mode === "fullRoad" && toolState.fullRoad.showHandles;
-      smartRoadSystem.handleGroup.visible = toolState.mode === "smartRoad" && toolState.smartRoad.showHandles;
-      riverSystem.handleGroup.visible = toolState.mode === "river" && toolState.river.showHandles;
-      splineSystem.handleGroup.visible = toolState.mode === "spline" && toolState.spline.showHandles;
-      if (toolState.mode !== "spline") splineSystem.clearPreview();
-      // Toggle water/barrier folder visibility
-      if (ui?.waterFolder) ui.waterFolder.hidden = toolState.mode !== "water";
-      if (ui?.decalFolder) ui.decalFolder.hidden = toolState.mode !== "decals";
-      if (ui?.barrierFolder) ui.barrierFolder.expanded = toolState.mode === "barrier";
-      if (ui?.holeFolder) ui.holeFolder.expanded = toolState.mode === "hole";
-      if (ui?.fleurFolder) ui.fleurFolder.hidden = toolState.mode !== "fleurs";
-      if (ui?.ambientFxFolder) ui.ambientFxFolder.hidden = toolState.mode !== "ambientfx";
-      if (toolState.mode === "ambientfx") {
-        ambientFxStore.setRingsVisible(toolState.ambientFx.showRings);
-      } else {
-        ambientFxStore.setRingsVisible(false);
-      }
-      if (toolState.mode === "play") {
-        playMode.enter();
-        const tpEl = document.querySelector(".tp-dfwv");
-        if (tpEl) tpEl.style.display = "none";
-      } else if (playMode.active) {
-        playMode.exit();
-        const tpEl = document.querySelector(".tp-dfwv");
-        if (tpEl) tpEl.style.display = "";
-      }
-      updateBrushPreviewFromPick(null);
-      syncPlaySpawnMarker();
-    },
+    onModeChanged: applyModeChangedEffects,
     onPaintLayersChanged: () => {
       invalidateSurfaceMaterials();
     },
@@ -2650,15 +2651,11 @@ export async function startV2App() {
     ) {
       event.preventDefault();
       toolState.mode = "water";
-      if (ui?.waterFolder) ui.waterFolder.hidden = false;
-      ui?.pane.refresh();
-      updateBrushPreviewFromPick(null);
+      applyModeChangedEffects();
     } else if (event.code === "KeyW" && !ctrl && toolState.mode === "water") {
       event.preventDefault();
       toolState.mode = "view";
-      waterSystem.deselect();
-      if (ui?.waterFolder) ui.waterFolder.hidden = true;
-      ui?.pane.refresh();
+      applyModeChangedEffects();
     } else if (event.code === "Delete" && toolState.mode === "water") {
       event.preventDefault();
       waterSystem.deleteSelected();
@@ -2674,16 +2671,11 @@ export async function startV2App() {
     } else if (event.code === "KeyD" && !ctrl && toolState.mode !== "play" && toolState.mode !== "decals") {
       event.preventDefault();
       toolState.mode = "decals";
-      if (ui?.decalFolder) ui.decalFolder.hidden = false;
-      ui?.pane.refresh();
-      updateBrushPreviewFromPick(null);
+      applyModeChangedEffects();
     } else if (event.code === "KeyD" && !ctrl && toolState.mode === "decals") {
       event.preventDefault();
       toolState.mode = "view";
-      decalSystem.deselect();
-      if (ui?.decalFolder) ui.decalFolder.hidden = true;
-      ui?.pane.refresh();
-      updateBrushPreviewFromPick(null);
+      applyModeChangedEffects();
     } else if (toolState.mode === "water" && !ctrl) {
       if (event.code === "KeyE") {
         event.preventDefault();
@@ -2695,11 +2687,10 @@ export async function startV2App() {
         event.preventDefault();
         waterSystem.setTransformMode("scale");
       }
-    } else if (event.code === "KeyH" && !ctrl) {
+    } else if (event.code === "KeyH" && !ctrl && !playMode.active) {
       event.preventDefault();
       toolState.mode = toolState.mode === "waterfall" ? "view" : "waterfall";
-      ui?.pane.refresh();
-      updateBrushPreviewFromPick(null);
+      applyModeChangedEffects();
     } else if (toolState.mode === "decals" && !ctrl) {
       if (event.code === "KeyW") {
         event.preventDefault();
@@ -2765,29 +2756,62 @@ export async function startV2App() {
         transformControls.setMode("scale");
         ui?.pane.refresh();
       }
-    } else if (event.code === "KeyK" && !ctrl) {
+    } else if (event.code === "KeyK" && !ctrl && !playMode.active) {
       event.preventDefault();
       toolState.mode = toolState.mode === "spline" ? "view" : "spline";
-      ui?.pane.refresh();
-      updateBrushPreviewFromPick(null);
-    } else if (event.code === "KeyV" && !ctrl) {
+      applyModeChangedEffects();
+    } else if (event.code === "KeyV" && !ctrl && !playMode.active) {
       event.preventDefault();
       toolState.mode = toolState.mode === "river" ? "view" : "river";
-      ui?.pane.refresh();
-      updateBrushPreviewFromPick(null);
-    } else if (event.code === "KeyM" && !ctrl) {
+      applyModeChangedEffects();
+    } else if (event.code === "KeyM" && !ctrl && !playMode.active) {
       event.preventDefault();
       toolState.mode = toolState.mode === "fleurs" ? "view" : "fleurs";
-      if (ui?.fleurFolder) ui.fleurFolder.hidden = toolState.mode !== "fleurs";
-      ui?.pane.refresh();
-      updateBrushPreviewFromPick(null);
-    } else if (event.code === "KeyX" && !ctrl) {
+      applyModeChangedEffects();
+    } else if (event.code === "KeyX" && !ctrl && !playMode.active) {
       event.preventDefault();
       toolState.mode = toolState.mode === "ambientfx" ? "view" : "ambientfx";
-      if (ui?.ambientFxFolder) ui.ambientFxFolder.hidden = toolState.mode !== "ambientfx";
-      ambientFxStore.setRingsVisible(toolState.mode === "ambientfx" && toolState.ambientFx.showRings);
-      ui?.pane.refresh();
-      updateBrushPreviewFromPick(null);
+      applyModeChangedEffects();
+    } else if (event.code === "KeyF" && !ctrl && !playMode.active && toolState.mode !== "play") {
+      event.preventDefault();
+      toolState.mode = "play";
+      applyModeChangedEffects();
+    } else if (event.code === "KeyP" && !ctrl && !playMode.active) {
+      event.preventDefault();
+      toolState.mode = toolState.mode === "paint" ? "view" : "paint";
+      applyModeChangedEffects();
+    } else if (event.code === "KeyT" && !ctrl && !playMode.active) {
+      event.preventDefault();
+      toolState.mode = toolState.mode === "treePaint" ? "view" : "treePaint";
+      applyModeChangedEffects();
+    } else if (event.code === "KeyS" && !ctrl && !playMode.active) {
+      event.preventDefault();
+      toolState.mode = toolState.mode === "sculpt" ? "view" : "sculpt";
+      applyModeChangedEffects();
+    } else if (event.code === "KeyG" && !ctrl && !playMode.active) {
+      event.preventDefault();
+      toolState.mode = toolState.mode === "grass" ? "view" : "grass";
+      applyModeChangedEffects();
+    } else if (event.code === "KeyI" && !ctrl && !playMode.active) {
+      event.preventDefault();
+      toolState.mode = toolState.mode === "props" ? "view" : "props";
+      applyModeChangedEffects();
+    } else if (event.code === "KeyO" && !ctrl && !playMode.active) {
+      event.preventDefault();
+      toolState.mode = toolState.mode === "cliffs" ? "view" : "cliffs";
+      applyModeChangedEffects();
+    } else if (event.code === "KeyL" && !ctrl && !playMode.active) {
+      event.preventDefault();
+      toolState.mode = toolState.mode === "foliagePaint" ? "view" : "foliagePaint";
+      applyModeChangedEffects();
+    } else if (event.code === "KeyB" && !ctrl && !playMode.active) {
+      event.preventDefault();
+      toolState.mode = toolState.mode === "barrier" ? "view" : "barrier";
+      applyModeChangedEffects();
+    } else if (event.code === "KeyZ" && !ctrl && !playMode.active) {
+      event.preventDefault();
+      toolState.mode = toolState.mode === "playSpawn" ? "view" : "playSpawn";
+      applyModeChangedEffects();
     }
   });
 

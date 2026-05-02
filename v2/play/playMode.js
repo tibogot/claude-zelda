@@ -1,9 +1,21 @@
 import * as THREE from "three";
 import { MeshBasicNodeMaterial } from "three";
 import {
-  attribute, float, vec3, pow, sub, abs, smoothstep, mul, mix, add,
+  attribute,
+  float,
+  vec3,
+  pow,
+  sub,
+  abs,
+  smoothstep,
+  mul,
+  mix,
+  add,
 } from "three/tsl";
-import { loadTreeGlbFromUrl, getSharedGltfLoader } from "../core/foliage/glbLoader.js";
+import {
+  loadTreeGlbFromUrl,
+  getSharedGltfLoader,
+} from "../core/foliage/glbLoader.js";
 import { setupPlayModeCarAudio } from "./carAudioSetup.js";
 
 const CAP_R = 0.4;
@@ -145,12 +157,14 @@ const DRIFT_MARK_Y_OFFSET = 0.045;
 const DRIFT_MARK_MIN_SEGMENT_LENGTH = 0.035;
 const DRIFT_MARK_INTENSITY_MIN = 0.15;
 const DRIFT_MARK_INTENSITY_MAX = 0.9;
-const DRIFT_MARK_INV_INTENSITY_RANGE = 1 / (DRIFT_MARK_INTENSITY_MAX - DRIFT_MARK_INTENSITY_MIN);
+const DRIFT_MARK_INV_INTENSITY_RANGE =
+  1 / (DRIFT_MARK_INTENSITY_MAX - DRIFT_MARK_INTENSITY_MIN);
 
 const DRIFT_SMOKE_POOL_SIZE = 256;
 const DRIFT_SMOKE_VERTS_PER_PARTICLE = 6;
 const DRIFT_SMOKE_FLOATS_PER_PARTICLE = DRIFT_SMOKE_VERTS_PER_PARTICLE * 3;
-const DRIFT_SMOKE_COLOR_FLOATS_PER_PARTICLE = DRIFT_SMOKE_VERTS_PER_PARTICLE * 4;
+const DRIFT_SMOKE_COLOR_FLOATS_PER_PARTICLE =
+  DRIFT_SMOKE_VERTS_PER_PARTICLE * 4;
 const DRIFT_SMOKE_UV_FLOATS_PER_PARTICLE = DRIFT_SMOKE_VERTS_PER_PARTICLE * 2;
 const DRIFT_SMOKE_TEXTURE = "../Starter-Kit-Racing-master/sprites/smoke.png";
 const DRIFT_SMOKE_EMIT_RATE = 48;
@@ -215,20 +229,21 @@ const _smokeUp = new THREE.Vector3();
 const _smokeCorner = new THREE.Vector3();
 const _smokeHalfRight = new THREE.Vector3();
 const _smokeHalfUp = new THREE.Vector3();
-const _smokeUvs = [
-  0, 0,
-  1, 0,
-  0, 1,
-  1, 0,
-  1, 1,
-  0, 1,
-];
+const _smokeUvs = [0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1];
 
 class DriftMarks {
   constructor(scene) {
-    const positions = new Float32Array(DRIFT_MARK_MAX_SEGMENTS * DRIFT_MARK_FLOATS_PER_SEGMENT);
-    const colors = new Float32Array(DRIFT_MARK_MAX_SEGMENTS * DRIFT_MARK_COLOR_FLOATS_PER_SEGMENT);
-    for (let i = 0; i < DRIFT_MARK_MAX_SEGMENTS * DRIFT_MARK_VERTS_PER_SEGMENT; i++) {
+    const positions = new Float32Array(
+      DRIFT_MARK_MAX_SEGMENTS * DRIFT_MARK_FLOATS_PER_SEGMENT,
+    );
+    const colors = new Float32Array(
+      DRIFT_MARK_MAX_SEGMENTS * DRIFT_MARK_COLOR_FLOATS_PER_SEGMENT,
+    );
+    for (
+      let i = 0;
+      i < DRIFT_MARK_MAX_SEGMENTS * DRIFT_MARK_VERTS_PER_SEGMENT;
+      i++
+    ) {
       const o = i * 4;
       colors[o] = 1;
       colors[o + 1] = 1;
@@ -312,12 +327,24 @@ class DriftMarks {
 
     const offset = this.segmentIndex * DRIFT_MARK_FLOATS_PER_SEGMENT;
     const p = this.positions;
-    p[offset + 0] = _dmPL.x; p[offset + 1] = _dmPL.y; p[offset + 2] = _dmPL.z;
-    p[offset + 3] = _dmPR.x; p[offset + 4] = _dmPR.y; p[offset + 5] = _dmPR.z;
-    p[offset + 6] = _dmCL.x; p[offset + 7] = _dmCL.y; p[offset + 8] = _dmCL.z;
-    p[offset + 9] = _dmPR.x; p[offset + 10] = _dmPR.y; p[offset + 11] = _dmPR.z;
-    p[offset + 12] = _dmCR.x; p[offset + 13] = _dmCR.y; p[offset + 14] = _dmCR.z;
-    p[offset + 15] = _dmCL.x; p[offset + 16] = _dmCL.y; p[offset + 17] = _dmCL.z;
+    p[offset + 0] = _dmPL.x;
+    p[offset + 1] = _dmPL.y;
+    p[offset + 2] = _dmPL.z;
+    p[offset + 3] = _dmPR.x;
+    p[offset + 4] = _dmPR.y;
+    p[offset + 5] = _dmPR.z;
+    p[offset + 6] = _dmCL.x;
+    p[offset + 7] = _dmCL.y;
+    p[offset + 8] = _dmCL.z;
+    p[offset + 9] = _dmPR.x;
+    p[offset + 10] = _dmPR.y;
+    p[offset + 11] = _dmPR.z;
+    p[offset + 12] = _dmCR.x;
+    p[offset + 13] = _dmCR.y;
+    p[offset + 14] = _dmCR.z;
+    p[offset + 15] = _dmCL.x;
+    p[offset + 16] = _dmCL.y;
+    p[offset + 17] = _dmCL.z;
 
     const alpha = THREE.MathUtils.clamp(
       (intensity - DRIFT_MARK_INTENSITY_MIN) * DRIFT_MARK_INV_INTENSITY_RANGE,
@@ -337,7 +364,10 @@ class DriftMarks {
     colorAttr.needsUpdate = true;
 
     this.segmentIndex = (this.segmentIndex + 1) % DRIFT_MARK_MAX_SEGMENTS;
-    if (this.drawCount < DRIFT_MARK_MAX_SEGMENTS * DRIFT_MARK_VERTS_PER_SEGMENT) {
+    if (
+      this.drawCount <
+      DRIFT_MARK_MAX_SEGMENTS * DRIFT_MARK_VERTS_PER_SEGMENT
+    ) {
       this.drawCount += DRIFT_MARK_VERTS_PER_SEGMENT;
       this.geometry.setDrawRange(0, this.drawCount);
     }
@@ -348,9 +378,15 @@ class DriftMarks {
 class DriftSmoke {
   constructor(scene, settings) {
     this.settings = settings || {};
-    const positions = new Float32Array(DRIFT_SMOKE_POOL_SIZE * DRIFT_SMOKE_FLOATS_PER_PARTICLE);
-    const colors = new Float32Array(DRIFT_SMOKE_POOL_SIZE * DRIFT_SMOKE_COLOR_FLOATS_PER_PARTICLE);
-    const uvs = new Float32Array(DRIFT_SMOKE_POOL_SIZE * DRIFT_SMOKE_UV_FLOATS_PER_PARTICLE);
+    const positions = new Float32Array(
+      DRIFT_SMOKE_POOL_SIZE * DRIFT_SMOKE_FLOATS_PER_PARTICLE,
+    );
+    const colors = new Float32Array(
+      DRIFT_SMOKE_POOL_SIZE * DRIFT_SMOKE_COLOR_FLOATS_PER_PARTICLE,
+    );
+    const uvs = new Float32Array(
+      DRIFT_SMOKE_POOL_SIZE * DRIFT_SMOKE_UV_FLOATS_PER_PARTICLE,
+    );
     for (let i = 0; i < DRIFT_SMOKE_POOL_SIZE; i++) {
       uvs.set(_smokeUvs, i * DRIFT_SMOKE_UV_FLOATS_PER_PARTICLE);
     }
@@ -369,7 +405,12 @@ class DriftSmoke {
       DRIFT_SMOKE_TEXTURE,
       undefined,
       undefined,
-      (err) => console.warn("[V2] Failed to load drift smoke texture:", DRIFT_SMOKE_TEXTURE, err),
+      (err) =>
+        console.warn(
+          "[V2] Failed to load drift smoke texture:",
+          DRIFT_SMOKE_TEXTURE,
+          err,
+        ),
     );
     map.colorSpace = THREE.SRGBColorSpace;
     const material = new THREE.MeshBasicMaterial({
@@ -417,7 +458,9 @@ class DriftSmoke {
     const s = this.settings;
     if (s.enabled === false) emit = false;
     if (emit) {
-      const emitRate = (s.emitRate ?? DRIFT_SMOKE_EMIT_RATE) * THREE.MathUtils.clamp(intensity, 0, 1);
+      const emitRate =
+        (s.emitRate ?? DRIFT_SMOKE_EMIT_RATE) *
+        THREE.MathUtils.clamp(intensity, 0, 1);
       for (let i = 0; i < rearPoints.length; i++) {
         const point = rearPoints[i];
         if (!point) continue;
@@ -447,7 +490,8 @@ class DriftSmoke {
       p.position.addScaledVector(p.velocity, dt);
       p.rotation += p.spin * dt;
 
-      const size = p.size * (1 + age * (s.sizeGrowth ?? DRIFT_SMOKE_SIZE_GROWTH));
+      const size =
+        p.size * (1 + age * (s.sizeGrowth ?? DRIFT_SMOKE_SIZE_GROWTH));
       const alpha = (s.opacity ?? DRIFT_SMOKE_OPACITY) * (1 - age) * (1 - age);
       this._writeParticle(alive++, p.position, size, p.rotation, alpha);
     }
@@ -460,7 +504,10 @@ class DriftSmoke {
       posAttr.addUpdateRange(0, alive * DRIFT_SMOKE_FLOATS_PER_PARTICLE);
       posAttr.needsUpdate = true;
       const colorAttr = this.geometry.attributes.color;
-      colorAttr.addUpdateRange(0, alive * DRIFT_SMOKE_COLOR_FLOATS_PER_PARTICLE);
+      colorAttr.addUpdateRange(
+        0,
+        alive * DRIFT_SMOKE_COLOR_FLOATS_PER_PARTICLE,
+      );
       colorAttr.needsUpdate = true;
     }
   }
@@ -480,9 +527,11 @@ class DriftSmoke {
       point.z - dirZ * (0.12 + Math.random() * 0.25) - sideJitter * dirX,
     );
     p.velocity.set(
-      -dirX * speed * (s.drag ?? DRIFT_SMOKE_SPEED_DRAG) + (Math.random() - 0.5) * 0.45,
+      -dirX * speed * (s.drag ?? DRIFT_SMOKE_SPEED_DRAG) +
+        (Math.random() - 0.5) * 0.45,
       (s.rise ?? DRIFT_SMOKE_RISE) * (0.65 + Math.random() * 0.7),
-      -dirZ * speed * (s.drag ?? DRIFT_SMOKE_SPEED_DRAG) + (Math.random() - 0.5) * 0.45,
+      -dirZ * speed * (s.drag ?? DRIFT_SMOKE_SPEED_DRAG) +
+        (Math.random() - 0.5) * 0.45,
     );
     const lifeMin = Math.max(0.05, s.lifeMin ?? DRIFT_SMOKE_LIFE_MIN);
     const lifeMax = Math.max(lifeMin, s.lifeMax ?? DRIFT_SMOKE_LIFE_MAX);
@@ -490,7 +539,8 @@ class DriftSmoke {
     p.life = p.maxLife;
     const sizeMin = Math.max(0.01, s.sizeMin ?? DRIFT_SMOKE_SIZE_MIN);
     const sizeMax = Math.max(sizeMin, s.sizeMax ?? DRIFT_SMOKE_SIZE_MAX);
-    p.size = THREE.MathUtils.lerp(sizeMin, sizeMax, Math.random()) *
+    p.size =
+      THREE.MathUtils.lerp(sizeMin, sizeMax, Math.random()) *
       THREE.MathUtils.lerp(0.75, 1.25, THREE.MathUtils.clamp(intensity, 0, 1));
     p.rotation = Math.random() * Math.PI * 2;
     p.spin = (Math.random() - 0.5) * 1.7;
@@ -591,8 +641,18 @@ function rebuildTrail(trail) {
     const t = i / TRAIL_SEG;
     const w = TRAIL_HALF_W * (1 - t * 0.4);
     const vi = i * 2;
-    pos.setXYZ(vi, p.x - _trSide.x * w, p.y - _trSide.y * w, p.z - _trSide.z * w);
-    pos.setXYZ(vi + 1, p.x + _trSide.x * w, p.y + _trSide.y * w, p.z + _trSide.z * w);
+    pos.setXYZ(
+      vi,
+      p.x - _trSide.x * w,
+      p.y - _trSide.y * w,
+      p.z - _trSide.z * w,
+    );
+    pos.setXYZ(
+      vi + 1,
+      p.x + _trSide.x * w,
+      p.y + _trSide.y * w,
+      p.z + _trSide.z * w,
+    );
   }
   for (let i = n; i <= TRAIL_SEG; i++) {
     const vi = i * 2;
@@ -616,8 +676,12 @@ function createBulletPool(scene) {
   const geo = new THREE.PlaneGeometry(0.18, 1.4);
   const mat = new THREE.MeshBasicMaterial({
     color: new THREE.Color(GUN_TRACER_COLOR),
-    transparent: true, opacity: 1, depthWrite: false,
-    blending: THREE.AdditiveBlending, side: THREE.DoubleSide, toneMapped: false,
+    transparent: true,
+    opacity: 1,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    side: THREE.DoubleSide,
+    toneMapped: false,
   });
   const group = new THREE.Group();
   group.frustumCulled = false;
@@ -630,7 +694,13 @@ function createBulletPool(scene) {
     m.visible = false;
     m.renderOrder = 11;
     group.add(m);
-    pool.push({ mesh: m, pos: new THREE.Vector3(), dir: new THREE.Vector3(), dist: 0, alive: false });
+    pool.push({
+      mesh: m,
+      pos: new THREE.Vector3(),
+      dir: new THREE.Vector3(),
+      dist: 0,
+      alive: false,
+    });
   }
   return { group, pool, geo, mat };
 }
@@ -654,10 +724,15 @@ function updateBullets(pool, camera, dtSec) {
     _bStep.copy(b.dir).multiplyScalar(GUN_BULLET_SPEED * dtSec);
     b.pos.add(_bStep);
     b.dist += GUN_BULLET_SPEED * dtSec;
-    if (b.dist > GUN_BULLET_MAX_DIST) { b.alive = false; b.mesh.visible = false; continue; }
+    if (b.dist > GUN_BULLET_MAX_DIST) {
+      b.alive = false;
+      b.mesh.visible = false;
+      continue;
+    }
     _bToCam.subVectors(camera.position, b.pos);
     _bRight.crossVectors(b.dir, _bToCam);
-    if (_bRight.lengthSq() < 1e-6) _bRight.set(1, 0, 0); else _bRight.normalize();
+    if (_bRight.lengthSq() < 1e-6) _bRight.set(1, 0, 0);
+    else _bRight.normalize();
     _bPerp.crossVectors(_bRight, b.dir).normalize();
     const sz = GUN_BULLET_SIZE;
     _bRight.multiplyScalar(sz);
@@ -670,13 +745,28 @@ function updateBullets(pool, camera, dtSec) {
 }
 
 function clearBullets(pool) {
-  for (const b of pool) { b.alive = false; b.mesh.visible = false; }
+  for (const b of pool) {
+    b.alive = false;
+    b.mesh.visible = false;
+  }
 }
 
 export class PlayMode {
   constructor({
-    scene, camera, renderer, controls, getWorldHeight, getTerrainHeight, worldHalf, cliffBvh,
-    isBarrierBlocked, smokeSettings, carSettings, carAudioSettings, spawnSettings, audioSystem,
+    scene,
+    camera,
+    renderer,
+    controls,
+    getWorldHeight,
+    getTerrainHeight,
+    worldHalf,
+    cliffBvh,
+    isBarrierBlocked,
+    smokeSettings,
+    carSettings,
+    carAudioSettings,
+    spawnSettings,
+    audioSystem,
     excludeFromReflection,
   }) {
     this.scene = scene;
@@ -731,7 +821,10 @@ export class PlayMode {
 
     // Capsule mesh
     const geo = new THREE.CapsuleGeometry(CAP_R, CAP_H, 4, 8);
-    const mat = new THREE.MeshStandardMaterial({ color: 0xff6633, roughness: 0.7 });
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xff6633,
+      roughness: 0.7,
+    });
     this.capsule = new THREE.Mesh(geo, mat);
     this.capsule.castShadow = true;
     this.capsule.visible = false;
@@ -888,11 +981,13 @@ export class PlayMode {
   _createFlyHud() {
     const el = document.createElement("div");
     el.id = "fly-hud";
-    el.style.cssText = "position:fixed;bottom:16px;left:50%;transform:translateX(-50%);" +
+    el.style.cssText =
+      "position:fixed;bottom:16px;left:50%;transform:translateX(-50%);" +
       "background:rgba(0,0,0,0.6);border:1px solid rgba(255,255,255,0.2);border-radius:8px;" +
       "padding:8px 18px;font-family:monospace;font-size:14px;color:#d7e4ef;z-index:5;" +
       "display:none;pointer-events:none;white-space:nowrap;";
-    el.innerHTML = 'SPD <span id="fly-hud-spd">0</span> m/s &nbsp; ALT <span id="fly-hud-alt">0</span> m';
+    el.innerHTML =
+      'SPD <span id="fly-hud-spd">0</span> m/s &nbsp; ALT <span id="fly-hud-alt">0</span> m';
     document.body.appendChild(el);
     this._flyHud = el;
     this._flyHudSpd = el.querySelector("#fly-hud-spd");
@@ -903,7 +998,8 @@ export class PlayMode {
     /* Legacy rectangular HUD — still mounted so SHOW_LEGACY_CAR_HUD_RECT can re-enable it without rebuilding. */
     const el = document.createElement("div");
     el.id = "car-hud";
-    el.style.cssText = "position:fixed;bottom:18px;left:50%;transform:translateX(-50%);" +
+    el.style.cssText =
+      "position:fixed;bottom:18px;left:50%;transform:translateX(-50%);" +
       "background:linear-gradient(180deg,rgba(15,19,28,0.9),rgba(8,10,16,0.86));" +
       "border:1px solid rgba(120,160,220,0.35);border-radius:12px;" +
       "padding:10px 16px 12px;min-width:330px;z-index:5;display:none;pointer-events:none;" +
@@ -1019,15 +1115,15 @@ export class PlayMode {
         </defs>
         
         <!-- Outer ring glow -->
-        <circle cx="${size/2}" cy="${size/2}" r="${size*0.48}" fill="none" stroke="rgba(0,170,255,0.15)" stroke-width="4" filter="url(#outerGlow)"/>
+        <circle cx="${size / 2}" cy="${size / 2}" r="${size * 0.48}" fill="none" stroke="rgba(0,170,255,0.15)" stroke-width="4" filter="url(#outerGlow)"/>
         
         <!-- Background -->
-        <circle cx="${size/2}" cy="${size/2}" r="${size*0.46}" fill="url(#speedoBg)" stroke="rgba(100,140,180,0.3)" stroke-width="2"/>
+        <circle cx="${size / 2}" cy="${size / 2}" r="${size * 0.46}" fill="url(#speedoBg)" stroke="rgba(100,140,180,0.3)" stroke-width="2"/>
         
         <!-- Speed arc background -->
-        <circle cx="${size/2}" cy="${size/2}" r="${size*0.39}" fill="none" stroke="rgba(255,255,255,0.05)" stroke-width="8"
-          stroke-dasharray="${size*2.45*0.75} ${size*2.45}" stroke-dashoffset="${-size*2.45*0.125}"
-          transform="rotate(0 ${size/2} ${size/2})"/>
+        <circle cx="${size / 2}" cy="${size / 2}" r="${size * 0.39}" fill="none" stroke="rgba(255,255,255,0.05)" stroke-width="8"
+          stroke-dasharray="${size * 2.45 * 0.75} ${size * 2.45}" stroke-dashoffset="${-size * 2.45 * 0.125}"
+          transform="rotate(0 ${size / 2} ${size / 2})"/>
         
         <!-- Ticks -->
         ${ticksHtml}
@@ -1036,23 +1132,23 @@ export class PlayMode {
         ${labelsHtml}
         
         <!-- RPM arc background -->
-        <path id="rpm-arc-bg" d="M ${size*0.25} ${size*0.72} A ${size*0.22} ${size*0.22} 0 0 1 ${size*0.75} ${size*0.72}"
+        <path id="rpm-arc-bg" d="M ${size * 0.25} ${size * 0.72} A ${size * 0.22} ${size * 0.22} 0 0 1 ${size * 0.75} ${size * 0.72}"
           fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="6" stroke-linecap="round"/>
         
         <!-- RPM arc fill -->
-        <path id="speedo-rpm-bar" d="M ${size*0.25} ${size*0.72} A ${size*0.22} ${size*0.22} 0 0 1 ${size*0.75} ${size*0.72}"
+        <path id="speedo-rpm-bar" d="M ${size * 0.25} ${size * 0.72} A ${size * 0.22} ${size * 0.22} 0 0 1 ${size * 0.75} ${size * 0.72}"
           fill="none" stroke="url(#rpmGrad)" stroke-width="6" stroke-linecap="round"
           stroke-dasharray="0 999"/>
         
         <!-- Center decorative rings -->
-        <circle cx="${size/2}" cy="${size/2}" r="${size*0.15}" fill="rgba(20,30,45,0.9)" stroke="rgba(100,150,200,0.3)" stroke-width="1"/>
-        <circle cx="${size/2}" cy="${size/2}" r="${size*0.08}" fill="rgba(40,60,90,0.8)" stroke="rgba(150,200,255,0.2)" stroke-width="1"/>
+        <circle cx="${size / 2}" cy="${size / 2}" r="${size * 0.15}" fill="rgba(20,30,45,0.9)" stroke="rgba(100,150,200,0.3)" stroke-width="1"/>
+        <circle cx="${size / 2}" cy="${size / 2}" r="${size * 0.08}" fill="rgba(40,60,90,0.8)" stroke="rgba(150,200,255,0.2)" stroke-width="1"/>
         
         <!-- Needle (polygon points up = 270° in same convention as tick angles; rotate by tickAngle − 270) -->
-        <g id="speedo-needle" transform="rotate(${startAngle - 270} ${size/2} ${size/2})" filter="url(#needleGlow)">
-          <polygon points="${size/2},${size*0.18} ${size/2-4},${size/2} ${size/2+4},${size/2}" 
+        <g id="speedo-needle" transform="rotate(${startAngle - 270} ${size / 2} ${size / 2})" filter="url(#needleGlow)">
+          <polygon points="${size / 2},${size * 0.18} ${size / 2 - 4},${size / 2} ${size / 2 + 4},${size / 2}" 
             fill="#ff3333" stroke="#ff6666" stroke-width="0.5"/>
-          <circle cx="${size/2}" cy="${size/2}" r="6" fill="#222" stroke="#ff4444" stroke-width="2"/>
+          <circle cx="${size / 2}" cy="${size / 2}" r="6" fill="#222" stroke="#ff4444" stroke-width="2"/>
         </g>
       </svg>
       
@@ -1089,7 +1185,12 @@ export class PlayMode {
   async _loadCar() {
     try {
       const gltf = await new Promise((resolve, reject) => {
-        getSharedGltfLoader().load(`${CAR_MODEL}?v=bruno-v2`, resolve, undefined, reject);
+        getSharedGltfLoader().load(
+          `${CAR_MODEL}?v=bruno-v2`,
+          resolve,
+          undefined,
+          reject,
+        );
       });
       const src = gltf.scene;
       let chassisSrc = null;
@@ -1099,7 +1200,9 @@ export class PlayMode {
         if (!wheelSrc && /^wheelContainer(\.|\d|$)/.test(o.name)) wheelSrc = o;
       });
       if (!chassisSrc || !wheelSrc) {
-        console.warn("[V2] bruno.glb missing chassis/wheelContainer nodes; falling back to raw scene.");
+        console.warn(
+          "[V2] bruno.glb missing chassis/wheelContainer nodes; falling back to raw scene.",
+        );
         if (!chassisSrc) chassisSrc = src;
         if (!wheelSrc) wheelSrc = src.clone(true);
       }
@@ -1128,7 +1231,8 @@ export class PlayMode {
       this.carRoot.add(this.carChassis);
       this.carRoot.visible = false;
       this.scene.add(this.carRoot);
-      if (this._excludeFromReflection) this._excludeFromReflection(this.carRoot);
+      if (this._excludeFromReflection)
+        this._excludeFromReflection(this.carRoot);
 
       const hw = CAR_WHEEL_BASE * 0.5;
       const ht = CAR_TRACK * 0.5;
@@ -1146,7 +1250,8 @@ export class PlayMode {
         let suspension = null;
         let cylinder = null;
         container.traverse((c) => {
-          if (!suspension && /^wheelSuspension(\.|\d|$)/.test(c.name)) suspension = c;
+          if (!suspension && /^wheelSuspension(\.|\d|$)/.test(c.name))
+            suspension = c;
           if (!cylinder && /^wheelCylinder(\.|\d|$)/.test(c.name)) cylinder = c;
           if (c.isMesh || c.isSkinnedMesh) {
             c.castShadow = true;
@@ -1171,7 +1276,10 @@ export class PlayMode {
         this.carRoot.visible = true;
         this.capsule.visible = false;
       }
-      console.log("[V2] Bruno car loaded, wheels:", this.carWheels.map((w) => w.name).join(", "));
+      console.log(
+        "[V2] Bruno car loaded, wheels:",
+        this.carWheels.map((w) => w.name).join(", "),
+      );
     } catch (err) {
       console.warn("[V2] Failed to load car model:", err);
     }
@@ -1180,7 +1288,12 @@ export class PlayMode {
   async _loadLotus() {
     try {
       const gltf = await new Promise((resolve, reject) => {
-        getSharedGltfLoader().load(`${LOTUS_MODEL}?v=lotus-v1`, resolve, undefined, reject);
+        getSharedGltfLoader().load(
+          `${LOTUS_MODEL}?v=lotus-v1`,
+          resolve,
+          undefined,
+          reject,
+        );
       });
       const src = gltf.scene;
       let chassisSrc = null;
@@ -1190,7 +1303,9 @@ export class PlayMode {
         if (!wheelSrc && /^wheelContainer(\.|\d|$)/.test(o.name)) wheelSrc = o;
       });
       if (!chassisSrc || !wheelSrc) {
-        console.warn("[V2] lotusclaude2.glb missing chassis/wheelContainer nodes; fallback.");
+        console.warn(
+          "[V2] lotusclaude2.glb missing chassis/wheelContainer nodes; fallback.",
+        );
         if (!chassisSrc) chassisSrc = src;
         if (!wheelSrc) wheelSrc = src.clone(true);
       }
@@ -1202,15 +1317,20 @@ export class PlayMode {
       const strays = [];
       chassisVisual.traverse((o) => {
         if (/^wheelContainer(\.|\d|$)/.test(o.name)) strays.push(o);
-        if (o.isMesh || o.isSkinnedMesh) { o.castShadow = true; o.receiveShadow = true; }
+        if (o.isMesh || o.isSkinnedMesh) {
+          o.castShadow = true;
+          o.receiveShadow = true;
+        }
       });
       strays.forEach((s) => s.parent?.remove(s));
 
       // Setup emissive lights on headlights, taillights, brake lights (split left/right for blinkers)
       this._lotusLightMeshes = {
         headlights: [],
-        taillightLeft: [], taillightRight: [],
-        brakeLeft: [], brakeRight: [],
+        taillightLeft: [],
+        taillightRight: [],
+        brakeLeft: [],
+        brakeRight: [],
       };
       chassisVisual.traverse((o) => {
         if (!o.isMesh) return;
@@ -1224,7 +1344,10 @@ export class PlayMode {
           }
         } else if (/TAILLIGHT_LENS/i.test(n)) {
           const isLeft = /_LEFT/i.test(n);
-          (isLeft ? this._lotusLightMeshes.taillightLeft : this._lotusLightMeshes.taillightRight).push(o);
+          (isLeft
+            ? this._lotusLightMeshes.taillightLeft
+            : this._lotusLightMeshes.taillightRight
+          ).push(o);
           if (o.material) {
             o.material = o.material.clone();
             o.material.emissive = new THREE.Color(1.0, 0.05, 0.02);
@@ -1232,7 +1355,10 @@ export class PlayMode {
           }
         } else if (/BRAKES_/i.test(n)) {
           const isLeft = /_LEFT/i.test(n);
-          (isLeft ? this._lotusLightMeshes.brakeLeft : this._lotusLightMeshes.brakeRight).push(o);
+          (isLeft
+            ? this._lotusLightMeshes.brakeLeft
+            : this._lotusLightMeshes.brakeRight
+          ).push(o);
           if (o.material) {
             o.material = o.material.clone();
             o.material.emissive = new THREE.Color(1.0, 0.0, 0.0);
@@ -1256,7 +1382,7 @@ export class PlayMode {
       const halfTrack = cSize.z * 0.459;
       const halfWB = cSize.x * 0.287;
       const wheelYOff = cBox.min.y + cSize.y * 0.23;
-      const wbShift = cSize.x * (-0.024);
+      const wbShift = cSize.x * -0.024;
 
       const layout = [
         { x: halfWB + wbShift, z: -halfTrack, steer: true, name: "FL" },
@@ -1273,9 +1399,13 @@ export class PlayMode {
         let suspension = null;
         let cylinder = null;
         container.traverse((c) => {
-          if (!suspension && /^wheelSuspension(\.|\d|$)/.test(c.name)) suspension = c;
+          if (!suspension && /^wheelSuspension(\.|\d|$)/.test(c.name))
+            suspension = c;
           if (!cylinder && /^wheelCylinder(\.|\d|$)/.test(c.name)) cylinder = c;
-          if (c.isMesh || c.isSkinnedMesh) { c.castShadow = true; c.receiveShadow = true; }
+          if (c.isMesh || c.isSkinnedMesh) {
+            c.castShadow = true;
+            c.receiveShadow = true;
+          }
         });
         this.lotusChassis.add(container);
         return {
@@ -1297,18 +1427,27 @@ export class PlayMode {
 
       // Headlight ground spill (warm white, front of car)
       const headlightGlow = new THREE.PointLight(0xfff5e0, 2.5, 8, 1.5);
-      headlightGlow.position.set(cCenter.x + cSize.x * 0.45, cCenter.y, cCenter.z);
+      headlightGlow.position.set(
+        cCenter.x + cSize.x * 0.45,
+        cCenter.y,
+        cCenter.z,
+      );
       this.lotusChassis.add(headlightGlow);
 
       // Taillight ground spill (red, rear of car)
       const taillightGlow = new THREE.PointLight(0xff1a00, 1.8, 5, 1.5);
-      taillightGlow.position.set(cCenter.x - cSize.x * 0.45, cCenter.y, cCenter.z);
+      taillightGlow.position.set(
+        cCenter.x - cSize.x * 0.45,
+        cCenter.y,
+        cCenter.z,
+      );
       this.lotusChassis.add(taillightGlow);
       this._lotusTaillightGlow = taillightGlow;
 
       this.lotusRoot.visible = false;
       this.scene.add(this.lotusRoot);
-      if (this._excludeFromReflection) this._excludeFromReflection(this.lotusRoot);
+      if (this._excludeFromReflection)
+        this._excludeFromReflection(this.lotusRoot);
 
       // Normalize footprint to match Bruno's visual size
       this.lotusRoot.position.set(0, 0, 0);
@@ -1333,7 +1472,10 @@ export class PlayMode {
         this.lotusRoot.visible = true;
         this.capsule.visible = false;
       }
-      console.log("[V2] Lotus car loaded, wheels:", this.lotusWheels.map((w) => w.name).join(", "));
+      console.log(
+        "[V2] Lotus car loaded, wheels:",
+        this.lotusWheels.map((w) => w.name).join(", "),
+      );
     } catch (err) {
       console.warn("[V2] Failed to load Lotus model:", err);
     }
@@ -1341,7 +1483,8 @@ export class PlayMode {
 
   async _initLotusCamGui() {
     try {
-      const { GUI } = await import("https://cdn.jsdelivr.net/npm/lil-gui@0.20.0/dist/lil-gui.esm.min.js");
+      const { GUI } =
+        await import("https://cdn.jsdelivr.net/npm/lil-gui@0.20.0/dist/lil-gui.esm.min.js");
       const gui = new GUI({ title: "Lotus Camera", width: 260 });
       gui.domElement.style.position = "fixed";
       gui.domElement.style.top = "10px";
@@ -1351,11 +1494,23 @@ export class PlayMode {
       gui.add(this.lotusCam, "lookAtY", 0, 4, 0.1).name("Look-at Y");
       gui.add(this.lotusCam, "chaseSpeed", 1, 12, 0.1).name("Chase Speed");
       gui.add(this.lotusCam, "driftLag", 0, 5, 0.1).name("Drift Lag");
-      gui.add(this.lotusCam, "speedPullBack", 0, 8, 0.1).name("Speed Pull-back");
+      gui
+        .add(this.lotusCam, "speedPullBack", 0, 8, 0.1)
+        .name("Speed Pull-back");
       gui.add(this.lotusCam, "rollMax", 0.01, 0.3, 0.01).name("Roll Max");
       gui.add(this.lotusCam, "pitchMax", 0.01, 0.2, 0.01).name("Pitch Max");
-      gui.add(this.lotusCam, "fov", 40, 110, 1).name("FOV").onChange(() => this._applyLotusFov());
-      gui.add({ log: () => console.log("lotusCam:", JSON.stringify(this.lotusCam)) }, "log").name("Log to console");
+      gui
+        .add(this.lotusCam, "fov", 40, 110, 1)
+        .name("FOV")
+        .onChange(() => this._applyLotusFov());
+      gui
+        .add(
+          {
+            log: () => console.log("lotusCam:", JSON.stringify(this.lotusCam)),
+          },
+          "log",
+        )
+        .name("Log to console");
       gui.domElement.style.display = "none";
       this._lotusCamGui = gui;
     } catch (err) {
@@ -1380,256 +1535,348 @@ export class PlayMode {
   _loadCharacter() {
     const loader = getSharedGltfLoader();
 
-    loader.load(CHAR_MODEL, (gltf) => {
-      const model = gltf.scene;
-      model.traverse((o) => {
-        if (o.isMesh || o.isSkinnedMesh) {
-          o.castShadow = true;
-          o.receiveShadow = true;
-          o.frustumCulled = false;
-        }
-      });
-      const box = new THREE.Box3().setFromObject(model);
-      const size = new THREE.Vector3();
-      box.getSize(size);
-      const scale = CHAR_HEIGHT / (size.y || 1);
-      model.scale.setScalar(scale);
-      box.setFromObject(model);
-      model.position.y -= box.min.y;
-
-      this.charInner = model;
-      this.charRoot = new THREE.Group();
-      this.charRoot.add(model);
-      this.charRoot.visible = false;
-      this.scene.add(this.charRoot);
-      if (this._excludeFromReflection) this._excludeFromReflection(this.charRoot);
-
-      // Kite (paraglider)
-      {
-        const kg = new THREE.Group();
-        const shape = new THREE.Shape();
-        shape.moveTo(0, -0.7);
-        shape.lineTo(-1.6, 0.6);
-        shape.lineTo(1.6, 0.6);
-        shape.closePath();
-        const canopy = new THREE.Mesh(
-          new THREE.ShapeGeometry(shape),
-          new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.5, metalness: 0.1, side: THREE.DoubleSide }),
-        );
-        canopy.castShadow = true;
-        canopy.rotation.x = -0.5;
-        canopy.position.set(0, 0.15, 0);
-        kg.add(canopy);
-        const bar = new THREE.Mesh(
-          new THREE.BoxGeometry(0.7, 0.04, 0.04),
-          new THREE.MeshStandardMaterial({ color: 0x1f2937, roughness: 0.4, metalness: 0.3 }),
-        );
-        bar.castShadow = true;
-        bar.position.set(0, -0.6, 0.35);
-        bar.rotation.x = 0.25;
-        kg.add(bar);
-        kg.position.set(0, CHAR_HEIGHT * 0.95, -0.35);
-        kg.rotation.set(0.12, PI / 2, 0);
-        kg.visible = false;
-        this.charRoot.add(kg);
-        this.charKite = kg;
-      }
-
-      // Bone lookup
-      const findBone = (names) => {
-        for (const n of names) {
-          const b = model.getObjectByName(n);
-          if (b) return b;
-        }
-        let hit = null;
+    loader.load(
+      CHAR_MODEL,
+      (gltf) => {
+        const model = gltf.scene;
         model.traverse((o) => {
-          if (hit) return;
-          const nm = (o.name || "").toLowerCase();
-          if (/hand[_.-]?r|righthand|handright/.test(nm) && names[0].toLowerCase().includes("hand")) hit = o;
-          if (/head/.test(nm) && names[0].toLowerCase().includes("head")) hit = o;
-        });
-        return hit;
-      };
-      const rightHand = findBone(["DEF-handR", "hand.R", "mixamorigRightHand", "RightHand"]);
-      const headBone = findBone(["DEF-head", "head", "Head", "mixamorigHead"]);
-
-      // Katana
-      if (rightHand) {
-        const sg = new THREE.Group();
-        sg.position.set(-0.07, 0.115, -0.2);
-        sg.rotation.set(-1.37, 1.8, -2.21);
-        rightHand.add(sg);
-        loader.load(CHAR_KATANA, (kg) => {
-          const ks = kg.scene;
-          ks.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
-          const kb = new THREE.Box3().setFromObject(ks);
-          const ksz = new THREE.Vector3();
-          kb.getSize(ksz);
-          const kscale = 1.0 / (Math.max(ksz.x, ksz.y, ksz.z) || 1);
-          ks.scale.setScalar(kscale);
-          kb.setFromObject(ks);
-          ks.position.set(-kb.min.x, -kb.min.y, -kb.min.z);
-          sg.add(ks);
-        }, undefined, (e) => console.warn("[char] katana load failed:", e));
-      }
-
-      // Hat
-      if (headBone) {
-        loader.load(CHAR_HAT, (hg) => {
-          const hs = hg.scene;
-          hs.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
-          const hatScale = CHAR_HEIGHT / 1.8;
-          hs.scale.setScalar(0.65 * hatScale);
-          hs.position.set(0, 0.2, 0);
-          headBone.add(hs);
-        }, undefined, (e) => console.warn("[char] hat load failed:", e));
-      }
-
-      // Animations
-      if (gltf.animations?.length) {
-        this.charMixer = new THREE.AnimationMixer(model);
-        const pick = (baseNames) => {
-          for (const base of baseNames) {
-            const hit = gltf.animations.find((a) => a.name === base + "_Armature" || a.name === base);
-            if (hit) return hit;
+          if (o.isMesh || o.isSkinnedMesh) {
+            o.castShadow = true;
+            o.receiveShadow = true;
+            o.frustumCulled = false;
           }
-          return null;
-        };
-        const idleClip = pick(["Idle_Loop"]) || gltf.animations[0];
-        const walkClip = pick(["Walk_Loop"]) || idleClip;
-        const runClip = pick(["Sprint_Loop", "Jog_Fwd_Loop"]) || walkClip;
-        const jumpStartClip = pick(["Jump_Start"]);
-        const jumpLoopClip = pick(["Jump_Loop", "NinjaJump_Idle_Loop"]) || jumpStartClip || idleClip;
-        const jumpLandClip = pick(["Jump_Land"]) || idleClip;
-        const glideClip = pick(["NinjaJump_Idle_Loop"]) || jumpLoopClip;
-        const attackClip = pick(["Sword_Attack", "Sword_Attack_RM"]);
-        const crouchClip = pick(["Crouch_Idle_Loop"]) || idleClip;
-        const crouchWalkClip = pick(["Crouch_Fwd_Loop"]) || crouchClip;
-        const rollClip = pick(["Roll", "Roll_RM"]) || idleClip;
-        const slideStartClip = pick(["Slide_Start"]);
-        const slideLoopClip = pick(["Slide_Loop"]) || slideStartClip;
-        const slideExitClip = pick(["Slide_Exit"]) || slideLoopClip;
-        const spellEnterClip = pick(["Spell_Simple_Enter"]);
-        const spellIdleClip = pick(["Spell_Simple_Idle_Loop"]);
-        const spellShootClip = pick(["Spell_Simple_Shoot"]);
-        const spellExitClip = pick(["Spell_Simple_Exit"]);
+        });
+        const box = new THREE.Box3().setFromObject(model);
+        const size = new THREE.Vector3();
+        box.getSize(size);
+        const scale = CHAR_HEIGHT / (size.y || 1);
+        model.scale.setScalar(scale);
+        box.setFromObject(model);
+        model.position.y -= box.min.y;
 
-        const mk = (clip, loopOnce) => {
-          if (!clip) return null;
-          const a = this.charMixer.clipAction(clip).setLoop(loopOnce ? THREE.LoopOnce : THREE.LoopRepeat);
-          if (loopOnce) a.clampWhenFinished = true;
-          return a;
-        };
+        this.charInner = model;
+        this.charRoot = new THREE.Group();
+        this.charRoot.add(model);
+        this.charRoot.visible = false;
+        this.scene.add(this.charRoot);
+        if (this._excludeFromReflection)
+          this._excludeFromReflection(this.charRoot);
 
-        const idleAction = mk(idleClip, false);
-        const walkAction = mk(walkClip, false);
-        const runAction = mk(runClip, false);
-        const jumpStartAction = mk(jumpStartClip, true);
-        const jumpLoopAction = mk(jumpLoopClip, false);
-        const jumpLandAction = mk(jumpLandClip, true);
-        const glideAction = mk(glideClip, false);
-        if (jumpStartAction) jumpStartAction.timeScale = 1.4;
-        if (jumpLandAction) jumpLandAction.timeScale = 1.8;
-        const crouchAction = mk(crouchClip, false);
-        const crouchWalkAction = mk(crouchWalkClip, false);
-        const attackAction = mk(attackClip, true);
-        const rollAction = mk(rollClip, true);
-        if (rollAction) {
-          const d = rollAction.getClip()?.duration;
-          if (d && d > 0) this.charRollDuration = d;
+        // Kite (paraglider)
+        {
+          const kg = new THREE.Group();
+          const shape = new THREE.Shape();
+          shape.moveTo(0, -0.7);
+          shape.lineTo(-1.6, 0.6);
+          shape.lineTo(1.6, 0.6);
+          shape.closePath();
+          const canopy = new THREE.Mesh(
+            new THREE.ShapeGeometry(shape),
+            new THREE.MeshStandardMaterial({
+              color: 0x2563eb,
+              roughness: 0.5,
+              metalness: 0.1,
+              side: THREE.DoubleSide,
+            }),
+          );
+          canopy.castShadow = true;
+          canopy.rotation.x = -0.5;
+          canopy.position.set(0, 0.15, 0);
+          kg.add(canopy);
+          const bar = new THREE.Mesh(
+            new THREE.BoxGeometry(0.7, 0.04, 0.04),
+            new THREE.MeshStandardMaterial({
+              color: 0x1f2937,
+              roughness: 0.4,
+              metalness: 0.3,
+            }),
+          );
+          bar.castShadow = true;
+          bar.position.set(0, -0.6, 0.35);
+          bar.rotation.x = 0.25;
+          kg.add(bar);
+          kg.position.set(0, CHAR_HEIGHT * 0.95, -0.35);
+          kg.rotation.set(0.12, PI / 2, 0);
+          kg.visible = false;
+          this.charRoot.add(kg);
+          this.charKite = kg;
         }
-        const slideStartAction = mk(slideStartClip, true);
-        const slideLoopAction = mk(slideLoopClip, false);
-        const slideExitAction = mk(slideExitClip, true);
-        const spellEnterAction = mk(spellEnterClip, true);
-        const spellIdleAction = mk(spellIdleClip, false);
-        const spellShootAction = mk(spellShootClip, true);
-        const spellExitAction = mk(spellExitClip, true);
 
-        idleAction.play();
-        this.charActions = {
-          idle: idleAction, walk: walkAction, run: runAction,
-          jumpStart: jumpStartAction, jumpLoop: jumpLoopAction, jumpLand: jumpLandAction,
-          glide: glideAction, crouch: crouchAction, crouchWalk: crouchWalkAction,
-          attack: attackAction, roll: rollAction,
-          slideStart: slideStartAction, slideLoop: slideLoopAction, slideExit: slideExitAction,
-          spellEnter: spellEnterAction, spellIdle: spellIdleAction,
-          spellShoot: spellShootAction, spellExit: spellExitAction,
+        // Bone lookup
+        const findBone = (names) => {
+          for (const n of names) {
+            const b = model.getObjectByName(n);
+            if (b) return b;
+          }
+          let hit = null;
+          model.traverse((o) => {
+            if (hit) return;
+            const nm = (o.name || "").toLowerCase();
+            if (
+              /hand[_.-]?r|righthand|handright/.test(nm) &&
+              names[0].toLowerCase().includes("hand")
+            )
+              hit = o;
+            if (/head/.test(nm) && names[0].toLowerCase().includes("head"))
+              hit = o;
+          });
+          return hit;
         };
-        this.charCurrentAction = idleAction;
+        const rightHand = findBone([
+          "DEF-handR",
+          "hand.R",
+          "mixamorigRightHand",
+          "RightHand",
+        ]);
+        const headBone = findBone([
+          "DEF-head",
+          "head",
+          "Head",
+          "mixamorigHead",
+        ]);
 
-        this.charMixer.addEventListener("finished", (e) => {
-          if (attackAction && e.action === attackAction) { this.charAttacking = false; return; }
-          if (rollAction && e.action === rollAction) { this.charRolling = false; return; }
-          if (jumpStartAction && e.action === jumpStartAction) {
-            if (this.charInAir && jumpLoopAction) {
-              this.charJumpPhase = "loop";
-              jumpLoopAction.reset().enabled = true;
-              jumpLoopAction.crossFadeFrom(jumpStartAction, 0.08, false).play();
-              this.charCurrentAction = jumpLoopAction;
+        // Katana
+        if (rightHand) {
+          const sg = new THREE.Group();
+          sg.position.set(-0.07, 0.115, -0.2);
+          sg.rotation.set(-1.37, 1.8, -2.21);
+          rightHand.add(sg);
+          loader.load(
+            CHAR_KATANA,
+            (kg) => {
+              const ks = kg.scene;
+              ks.traverse((o) => {
+                if (o.isMesh) {
+                  o.castShadow = true;
+                  o.receiveShadow = true;
+                }
+              });
+              const kb = new THREE.Box3().setFromObject(ks);
+              const ksz = new THREE.Vector3();
+              kb.getSize(ksz);
+              const kscale = 1.0 / (Math.max(ksz.x, ksz.y, ksz.z) || 1);
+              ks.scale.setScalar(kscale);
+              kb.setFromObject(ks);
+              ks.position.set(-kb.min.x, -kb.min.y, -kb.min.z);
+              sg.add(ks);
+            },
+            undefined,
+            (e) => console.warn("[char] katana load failed:", e),
+          );
+        }
+
+        // Hat
+        if (headBone) {
+          loader.load(
+            CHAR_HAT,
+            (hg) => {
+              const hs = hg.scene;
+              hs.traverse((o) => {
+                if (o.isMesh) {
+                  o.castShadow = true;
+                  o.receiveShadow = true;
+                }
+              });
+              const hatScale = CHAR_HEIGHT / 1.8;
+              hs.scale.setScalar(0.65 * hatScale);
+              hs.position.set(0, 0.2, 0);
+              headBone.add(hs);
+            },
+            undefined,
+            (e) => console.warn("[char] hat load failed:", e),
+          );
+        }
+
+        // Animations
+        if (gltf.animations?.length) {
+          this.charMixer = new THREE.AnimationMixer(model);
+          const pick = (baseNames) => {
+            for (const base of baseNames) {
+              const hit = gltf.animations.find(
+                (a) => a.name === base + "_Armature" || a.name === base,
+              );
+              if (hit) return hit;
             }
-            return;
+            return null;
+          };
+          const idleClip = pick(["Idle_Loop"]) || gltf.animations[0];
+          const walkClip = pick(["Walk_Loop"]) || idleClip;
+          const runClip = pick(["Sprint_Loop", "Jog_Fwd_Loop"]) || walkClip;
+          const jumpStartClip = pick(["Jump_Start"]);
+          const jumpLoopClip =
+            pick(["Jump_Loop", "NinjaJump_Idle_Loop"]) ||
+            jumpStartClip ||
+            idleClip;
+          const jumpLandClip = pick(["Jump_Land"]) || idleClip;
+          const glideClip = pick(["NinjaJump_Idle_Loop"]) || jumpLoopClip;
+          const attackClip = pick(["Sword_Attack", "Sword_Attack_RM"]);
+          const crouchClip = pick(["Crouch_Idle_Loop"]) || idleClip;
+          const crouchWalkClip = pick(["Crouch_Fwd_Loop"]) || crouchClip;
+          const rollClip = pick(["Roll", "Roll_RM"]) || idleClip;
+          const slideStartClip = pick(["Slide_Start"]);
+          const slideLoopClip = pick(["Slide_Loop"]) || slideStartClip;
+          const slideExitClip = pick(["Slide_Exit"]) || slideLoopClip;
+          const spellEnterClip = pick(["Spell_Simple_Enter"]);
+          const spellIdleClip = pick(["Spell_Simple_Idle_Loop"]);
+          const spellShootClip = pick(["Spell_Simple_Shoot"]);
+          const spellExitClip = pick(["Spell_Simple_Exit"]);
+
+          const mk = (clip, loopOnce) => {
+            if (!clip) return null;
+            const a = this.charMixer
+              .clipAction(clip)
+              .setLoop(loopOnce ? THREE.LoopOnce : THREE.LoopRepeat);
+            if (loopOnce) a.clampWhenFinished = true;
+            return a;
+          };
+
+          const idleAction = mk(idleClip, false);
+          const walkAction = mk(walkClip, false);
+          const runAction = mk(runClip, false);
+          const jumpStartAction = mk(jumpStartClip, true);
+          const jumpLoopAction = mk(jumpLoopClip, false);
+          const jumpLandAction = mk(jumpLandClip, true);
+          const glideAction = mk(glideClip, false);
+          if (jumpStartAction) jumpStartAction.timeScale = 1.4;
+          if (jumpLandAction) jumpLandAction.timeScale = 1.8;
+          const crouchAction = mk(crouchClip, false);
+          const crouchWalkAction = mk(crouchWalkClip, false);
+          const attackAction = mk(attackClip, true);
+          const rollAction = mk(rollClip, true);
+          if (rollAction) {
+            const d = rollAction.getClip()?.duration;
+            if (d && d > 0) this.charRollDuration = d;
           }
-          if (jumpLandAction && e.action === jumpLandAction) { this.charJumpPhase = "none"; return; }
-          if (slideStartAction && e.action === slideStartAction) {
-            if (this.charSlidePhase === "start" && slideLoopAction) {
-              this.charSlidePhase = "loop";
-              slideLoopAction.reset().enabled = true;
-              slideLoopAction.crossFadeFrom(slideStartAction, 0.1, false).play();
-              this.charCurrentAction = slideLoopAction;
+          const slideStartAction = mk(slideStartClip, true);
+          const slideLoopAction = mk(slideLoopClip, false);
+          const slideExitAction = mk(slideExitClip, true);
+          const spellEnterAction = mk(spellEnterClip, true);
+          const spellIdleAction = mk(spellIdleClip, false);
+          const spellShootAction = mk(spellShootClip, true);
+          const spellExitAction = mk(spellExitClip, true);
+
+          idleAction.play();
+          this.charActions = {
+            idle: idleAction,
+            walk: walkAction,
+            run: runAction,
+            jumpStart: jumpStartAction,
+            jumpLoop: jumpLoopAction,
+            jumpLand: jumpLandAction,
+            glide: glideAction,
+            crouch: crouchAction,
+            crouchWalk: crouchWalkAction,
+            attack: attackAction,
+            roll: rollAction,
+            slideStart: slideStartAction,
+            slideLoop: slideLoopAction,
+            slideExit: slideExitAction,
+            spellEnter: spellEnterAction,
+            spellIdle: spellIdleAction,
+            spellShoot: spellShootAction,
+            spellExit: spellExitAction,
+          };
+          this.charCurrentAction = idleAction;
+
+          this.charMixer.addEventListener("finished", (e) => {
+            if (attackAction && e.action === attackAction) {
+              this.charAttacking = false;
+              return;
             }
-            return;
-          }
-          if (slideExitAction && e.action === slideExitAction) { this.charSlidePhase = "none"; return; }
-          if (spellEnterAction && e.action === spellEnterAction) {
-            if (this.charSpellPhase !== "enter") return;
-            if (this.charSpellExitRequested && spellExitAction) {
-              this.charSpellPhase = "exit";
-              spellExitAction.reset().enabled = true;
-              spellExitAction.crossFadeFrom(spellEnterAction, 0.12, false).play();
-              this.charCurrentAction = spellExitAction;
-            } else if (spellIdleAction) {
-              this.charSpellPhase = "idle";
-              spellIdleAction.reset().enabled = true;
-              spellIdleAction.crossFadeFrom(spellEnterAction, 0.12, false).play();
-              this.charCurrentAction = spellIdleAction;
+            if (rollAction && e.action === rollAction) {
+              this.charRolling = false;
+              return;
             }
-            return;
-          }
-          if (spellShootAction && e.action === spellShootAction) {
-            if (this.charSpellPhase !== "shoot") return;
-            if (this.charSpellExitRequested && spellExitAction) {
-              this.charSpellPhase = "exit";
-              spellExitAction.reset().enabled = true;
-              spellExitAction.crossFadeFrom(spellShootAction, 0.12, false).play();
-              this.charCurrentAction = spellExitAction;
-            } else if (spellIdleAction) {
-              this.charSpellPhase = "idle";
-              spellIdleAction.reset().enabled = true;
-              spellIdleAction.crossFadeFrom(spellShootAction, 0.12, false).play();
-              this.charCurrentAction = spellIdleAction;
+            if (jumpStartAction && e.action === jumpStartAction) {
+              if (this.charInAir && jumpLoopAction) {
+                this.charJumpPhase = "loop";
+                jumpLoopAction.reset().enabled = true;
+                jumpLoopAction
+                  .crossFadeFrom(jumpStartAction, 0.08, false)
+                  .play();
+                this.charCurrentAction = jumpLoopAction;
+              }
+              return;
             }
-            return;
-          }
-          if (spellExitAction && e.action === spellExitAction) {
-            this.charSpellPhase = "none";
-            this.charSpellExitRequested = false;
-            if (idleAction) {
-              idleAction.reset().enabled = true;
-              idleAction.crossFadeFrom(spellExitAction, 0.2, false).play();
-              this.charCurrentAction = idleAction;
+            if (jumpLandAction && e.action === jumpLandAction) {
+              this.charJumpPhase = "none";
+              return;
             }
-            return;
-          }
-        });
-      }
-      this.charLoaded = true;
-      if (this.active && this.moveMode === "char") {
-        this.charRoot.visible = true;
-        this.capsule.visible = false;
-      }
-      console.log("[V2] Character loaded");
-    }, undefined, (err) => console.warn("[V2] Character load failed:", err));
+            if (slideStartAction && e.action === slideStartAction) {
+              if (this.charSlidePhase === "start" && slideLoopAction) {
+                this.charSlidePhase = "loop";
+                slideLoopAction.reset().enabled = true;
+                slideLoopAction
+                  .crossFadeFrom(slideStartAction, 0.1, false)
+                  .play();
+                this.charCurrentAction = slideLoopAction;
+              }
+              return;
+            }
+            if (slideExitAction && e.action === slideExitAction) {
+              this.charSlidePhase = "none";
+              return;
+            }
+            if (spellEnterAction && e.action === spellEnterAction) {
+              if (this.charSpellPhase !== "enter") return;
+              if (this.charSpellExitRequested && spellExitAction) {
+                this.charSpellPhase = "exit";
+                spellExitAction.reset().enabled = true;
+                spellExitAction
+                  .crossFadeFrom(spellEnterAction, 0.12, false)
+                  .play();
+                this.charCurrentAction = spellExitAction;
+              } else if (spellIdleAction) {
+                this.charSpellPhase = "idle";
+                spellIdleAction.reset().enabled = true;
+                spellIdleAction
+                  .crossFadeFrom(spellEnterAction, 0.12, false)
+                  .play();
+                this.charCurrentAction = spellIdleAction;
+              }
+              return;
+            }
+            if (spellShootAction && e.action === spellShootAction) {
+              if (this.charSpellPhase !== "shoot") return;
+              if (this.charSpellExitRequested && spellExitAction) {
+                this.charSpellPhase = "exit";
+                spellExitAction.reset().enabled = true;
+                spellExitAction
+                  .crossFadeFrom(spellShootAction, 0.12, false)
+                  .play();
+                this.charCurrentAction = spellExitAction;
+              } else if (spellIdleAction) {
+                this.charSpellPhase = "idle";
+                spellIdleAction.reset().enabled = true;
+                spellIdleAction
+                  .crossFadeFrom(spellShootAction, 0.12, false)
+                  .play();
+                this.charCurrentAction = spellIdleAction;
+              }
+              return;
+            }
+            if (spellExitAction && e.action === spellExitAction) {
+              this.charSpellPhase = "none";
+              this.charSpellExitRequested = false;
+              if (idleAction) {
+                idleAction.reset().enabled = true;
+                idleAction.crossFadeFrom(spellExitAction, 0.2, false).play();
+                this.charCurrentAction = idleAction;
+              }
+              return;
+            }
+          });
+        }
+        this.charLoaded = true;
+        if (this.active && this.moveMode === "char") {
+          this.charRoot.visible = true;
+          this.capsule.visible = false;
+        }
+        console.log("[V2] Character loaded");
+      },
+      undefined,
+      (err) => console.warn("[V2] Character load failed:", err),
+    );
   }
 
   _charSetAction(next, fade = 0.18) {
@@ -1672,7 +1919,8 @@ export class PlayMode {
       this.planeRoot.add(inner);
       this.planeRoot.visible = false;
       this.scene.add(this.planeRoot);
-      if (this._excludeFromReflection) this._excludeFromReflection(this.planeRoot);
+      if (this._excludeFromReflection)
+        this._excludeFromReflection(this.planeRoot);
       this._planeInner = inner;
 
       // Create wingtip contrails
@@ -1718,8 +1966,12 @@ export class PlayMode {
     }
   }
 
-  get flying() { return this.moveMode === "fly" && this.planeLoaded; }
-  get carMode() { return this.moveMode === "car" || this.moveMode === "lotus"; }
+  get flying() {
+    return this.moveMode === "fly" && this.planeLoaded;
+  }
+  get carMode() {
+    return this.moveMode === "car" || this.moveMode === "lotus";
+  }
 
   _clearTrails() {
     for (const trail of this._wingTrails) {
@@ -1733,12 +1985,17 @@ export class PlayMode {
     if (this.planeRoot?.visible) {
       this._planeInner.updateMatrixWorld(true);
       for (let i = 0; i < this._wingTrails.length; i++) {
-        sampleTrail(this._wingTrails[i], this._planeInner, this._wingOffsets[i]);
+        sampleTrail(
+          this._wingTrails[i],
+          this._planeInner,
+          this._wingOffsets[i],
+        );
         rebuildTrail(this._wingTrails[i]);
         this._wingTrails[i].mesh.visible = true;
       }
     } else {
-      this._clearTrails(); clearBullets(this._bullets.pool);
+      this._clearTrails();
+      clearBullets(this._bullets.pool);
     }
   }
 
@@ -1774,7 +2031,9 @@ export class PlayMode {
       this.playerPos.set(this.controls.target.x, 0, this.controls.target.z);
     }
     this.playerPos.y = this.getWorldHeight(this.playerPos.x, this.playerPos.z);
-    this.camYaw = spawn?.enabled ? THREE.MathUtils.degToRad(spawn.yawDeg || 0) : 0;
+    this.camYaw = spawn?.enabled
+      ? THREE.MathUtils.degToRad(spawn.yawDeg || 0)
+      : 0;
     this.camPitch = 0.35;
 
     this.capsule.visible = true;
@@ -1784,7 +2043,8 @@ export class PlayMode {
     if (this.lotusRoot) this.lotusRoot.visible = false;
     this.driftMarks.reset();
     this.driftSmoke.reset();
-    this._clearTrails(); clearBullets(this._bullets.pool);
+    this._clearTrails();
+    clearBullets(this._bullets.pool);
     this.controls.enabled = false;
 
     document.addEventListener("keydown", this._onKeyDown);
@@ -1792,8 +2052,13 @@ export class PlayMode {
     document.addEventListener("mousemove", this._onMouseMove);
     document.addEventListener("pointerlockchange", this._onPointerLockChange);
     this.renderer.domElement.addEventListener("click", this._onIsoClick);
-    this.renderer.domElement.addEventListener("pointermove", this._onIsoPointerMove);
-    this.renderer.domElement.addEventListener("wheel", this._onIsoWheel, { passive: false });
+    this.renderer.domElement.addEventListener(
+      "pointermove",
+      this._onIsoPointerMove,
+    );
+    this.renderer.domElement.addEventListener("wheel", this._onIsoWheel, {
+      passive: false,
+    });
 
     this.renderer.domElement.style.cursor = "none";
     this.renderer.domElement.requestPointerLock();
@@ -1817,7 +2082,8 @@ export class PlayMode {
     if (this._carSpeedometer) this._carSpeedometer.style.display = "none";
     if (this._lotusCamGui) this._lotusCamGui.domElement.style.display = "none";
     this.planeSpeed = 0;
-    this.carVx = 0; this.carVz = 0;
+    this.carVx = 0;
+    this.carVz = 0;
     this.carNitro = 1.0;
     this._hudKmhSmooth = 0;
     this._hudNitroSmooth = 1;
@@ -1829,7 +2095,8 @@ export class PlayMode {
     this.carTerrainPitch = 0;
     this.driftMarks.reset();
     this.driftSmoke.reset();
-    this._clearTrails(); clearBullets(this._bullets.pool);
+    this._clearTrails();
+    clearBullets(this._bullets.pool);
 
     this.camera.up.set(0, 1, 0);
     if (this.savedCamPos) this.camera.position.copy(this.savedCamPos);
@@ -1842,9 +2109,15 @@ export class PlayMode {
     document.removeEventListener("keydown", this._onKeyDown);
     document.removeEventListener("keyup", this._onKeyUp);
     document.removeEventListener("mousemove", this._onMouseMove);
-    document.removeEventListener("pointerlockchange", this._onPointerLockChange);
+    document.removeEventListener(
+      "pointerlockchange",
+      this._onPointerLockChange,
+    );
     this.renderer.domElement.removeEventListener("click", this._onIsoClick);
-    this.renderer.domElement.removeEventListener("pointermove", this._onIsoPointerMove);
+    this.renderer.domElement.removeEventListener(
+      "pointermove",
+      this._onIsoPointerMove,
+    );
     this.renderer.domElement.removeEventListener("wheel", this._onIsoWheel);
 
     if (document.pointerLockElement) document.exitPointerLock();
@@ -1867,18 +2140,24 @@ export class PlayMode {
 
     // Iso fly: A/D yaw the plane
     if (flying && iso) {
-      if (keys.KeyA || keys.ArrowLeft) this.flyHeading += ISO_FLY_YAW_RATE * dtSec;
-      if (keys.KeyD || keys.ArrowRight) this.flyHeading -= ISO_FLY_YAW_RATE * dtSec;
+      if (keys.KeyA || keys.ArrowLeft)
+        this.flyHeading += ISO_FLY_YAW_RATE * dtSec;
+      if (keys.KeyD || keys.ArrowRight)
+        this.flyHeading -= ISO_FLY_YAW_RATE * dtSec;
     }
 
     // Movement direction
-    let mx = 0, mz = 0;
+    let mx = 0,
+      mz = 0;
     if (flying) {
       // Throttle-style airspeed
-      const thr = (keys.KeyW || keys.ArrowUp) ? 1 : (keys.KeyS || keys.ArrowDown) ? -1 : 0;
+      const thr =
+        keys.KeyW || keys.ArrowUp ? 1 : keys.KeyS || keys.ArrowDown ? -1 : 0;
       const drag = PLANE_DRAG * this.planeSpeed * Math.abs(this.planeSpeed);
       let coast = PLANE_COAST;
-      const deckAgl = this.flyHeight - this.getWorldHeight(this.playerPos.x, this.playerPos.z);
+      const deckAgl =
+        this.flyHeight -
+        this.getWorldHeight(this.playerPos.x, this.playerPos.z);
       if (deckAgl < PLANE_DECK_ALT) coast *= PLANE_DECK_COAST_MULT;
       if (thr === 1) {
         let a = PLANE_ACCEL;
@@ -1888,11 +2167,24 @@ export class PlayMode {
         if (this.planeSpeed > 0.55) this.planeSpeed -= PLANE_BRAKE * dtSec;
         else this.planeSpeed -= PLANE_REV_ACCEL * dtSec;
       } else {
-        if (this.planeSpeed > 0) this.planeSpeed = Math.max(0, this.planeSpeed - (coast + drag) * dtSec);
-        else if (this.planeSpeed < 0) this.planeSpeed = Math.min(0, this.planeSpeed + (coast + drag) * dtSec);
+        if (this.planeSpeed > 0)
+          this.planeSpeed = Math.max(
+            0,
+            this.planeSpeed - (coast + drag) * dtSec,
+          );
+        else if (this.planeSpeed < 0)
+          this.planeSpeed = Math.min(
+            0,
+            this.planeSpeed + (coast + drag) * dtSec,
+          );
       }
-      const maxFwd = (keys.ShiftLeft || keys.ShiftRight) ? PLANE_MAX_FWD_BOOST : PLANE_MAX_FWD;
-      this.planeSpeed = THREE.MathUtils.clamp(this.planeSpeed, -PLANE_MAX_REV, maxFwd);
+      const maxFwd =
+        keys.ShiftLeft || keys.ShiftRight ? PLANE_MAX_FWD_BOOST : PLANE_MAX_FWD;
+      this.planeSpeed = THREE.MathUtils.clamp(
+        this.planeSpeed,
+        -PLANE_MAX_REV,
+        maxFwd,
+      );
       if (Math.abs(this.planeSpeed) < 0.04 && thr === 0) this.planeSpeed = 0;
       const spdAbs = Math.abs(this.planeSpeed);
       if (spdAbs > 1e-4) {
@@ -1913,7 +2205,9 @@ export class PlayMode {
       const nitroHeld = !!keys[CAR_NITRO_KEY];
 
       // Current speed from velocity vector
-      const curSpeed = Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz);
+      const curSpeed = Math.sqrt(
+        this.carVx * this.carVx + this.carVz * this.carVz,
+      );
 
       // Heading direction
       const hx = -Math.sin(this.carHeading);
@@ -1921,17 +2215,42 @@ export class PlayMode {
 
       // Throttle / brake applied along heading
       const boostKeys = keys.ShiftLeft || keys.ShiftRight;
-      const nitroActive = nitroHeld && this.carNitro > CAR_NITRO_MIN_TO_USE && !backward;
+      const nitroActive =
+        nitroHeld && this.carNitro > CAR_NITRO_MIN_TO_USE && !backward;
 
-      this._carBoostBlend = _expSmoothStep(this._carBoostBlend, boostKeys ? 1 : 0, dtSec, CAR_BOOST_BLEND_SMOOTH);
-      this._carNitroFxBlend = _expSmoothStep(this._carNitroFxBlend, nitroActive ? 1 : 0, dtSec, CAR_NITRO_FX_BLEND_SMOOTH);
+      this._carBoostBlend = _expSmoothStep(
+        this._carBoostBlend,
+        boostKeys ? 1 : 0,
+        dtSec,
+        CAR_BOOST_BLEND_SMOOTH,
+      );
+      this._carNitroFxBlend = _expSmoothStep(
+        this._carNitroFxBlend,
+        nitroActive ? 1 : 0,
+        dtSec,
+        CAR_NITRO_FX_BLEND_SMOOTH,
+      );
 
-      const accelBase = THREE.MathUtils.lerp(CAR_ACCEL, CAR_ACCEL_BOOST, this._carBoostBlend);
-      let accel = (accelBase + this._carNitroFxBlend * CAR_NITRO_ACCEL_BONUS) * accelScale;
+      const accelBase = THREE.MathUtils.lerp(
+        CAR_ACCEL,
+        CAR_ACCEL_BOOST,
+        this._carBoostBlend,
+      );
+      let accel =
+        (accelBase + this._carNitroFxBlend * CAR_NITRO_ACCEL_BONUS) *
+        accelScale;
       if (!boostKeys && !nitroActive) {
         const speedKmh = curSpeed * 3.6;
-        const rampT = THREE.MathUtils.smoothstep(speedKmh, 0, CAR_BASE_ACCEL_RAMP_TO_KMH);
-        const accelMul = THREE.MathUtils.lerp(CAR_BASE_ACCEL_LOW_SPEED_MUL, 1.0, rampT);
+        const rampT = THREE.MathUtils.smoothstep(
+          speedKmh,
+          0,
+          CAR_BASE_ACCEL_RAMP_TO_KMH,
+        );
+        const accelMul = THREE.MathUtils.lerp(
+          CAR_BASE_ACCEL_LOW_SPEED_MUL,
+          1.0,
+          rampT,
+        );
         accel *= accelMul;
       }
       // Reduce acceleration on steep slopes
@@ -1954,7 +2273,8 @@ export class PlayMode {
         this.carVx -= this.carVx * decel * dtSec;
         this.carVz -= this.carVz * decel * dtSec;
       } else {
-        this.carVx = 0; this.carVz = 0;
+        this.carVx = 0;
+        this.carVz = 0;
       }
 
       // Handbrake: slight decel
@@ -1975,19 +2295,34 @@ export class PlayMode {
       }
 
       // Clamp speed (boost / nitro caps ease via blended factors — avoids instant snap on Shift release)
-      const maxBase = THREE.MathUtils.lerp(CAR_MAX_SPEED, CAR_MAX_SPEED_BOOST, this._carBoostBlend);
-      const maxSpd = (maxBase + this._carNitroFxBlend * CAR_NITRO_MAX_SPEED_BONUS) * maxSpeedScale;
-      const newSpeed = Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz);
+      const maxBase = THREE.MathUtils.lerp(
+        CAR_MAX_SPEED,
+        CAR_MAX_SPEED_BOOST,
+        this._carBoostBlend,
+      );
+      const maxSpd =
+        (maxBase + this._carNitroFxBlend * CAR_NITRO_MAX_SPEED_BONUS) *
+        maxSpeedScale;
+      const newSpeed = Math.sqrt(
+        this.carVx * this.carVx + this.carVz * this.carVz,
+      );
       if (newSpeed > maxSpd) {
         const s = maxSpd / newSpeed;
-        this.carVx *= s; this.carVz *= s;
+        this.carVx *= s;
+        this.carVz *= s;
       }
 
       // Nitro tank
       if (nitroActive && curSpeed > 1) {
-        this.carNitro = Math.max(0, this.carNitro - CAR_NITRO_DRAIN_PER_SEC * dtSec);
+        this.carNitro = Math.max(
+          0,
+          this.carNitro - CAR_NITRO_DRAIN_PER_SEC * dtSec,
+        );
       } else {
-        this.carNitro = Math.min(1, this.carNitro + CAR_NITRO_REGEN_PER_SEC * dtSec);
+        this.carNitro = Math.min(
+          1,
+          this.carNitro + CAR_NITRO_REGEN_PER_SEC * dtSec,
+        );
       }
 
       // Steering — rotate heading
@@ -2022,21 +2357,41 @@ export class PlayMode {
       this.carVz -= rz * latDot * lateralKill;
 
       // Drift detection
-      this.carDriftAngle = curSpeed > 1 ? Math.abs(Math.atan2(latDot, Math.abs(fwdDot))) : 0;
-      this.carDrifting = this.carDriftAngle > CAR_DRIFT_ANGLE_MIN && curSpeed > CAR_DRIFT_ENTRY_SPEED;
+      this.carDriftAngle =
+        curSpeed > 1 ? Math.abs(Math.atan2(latDot, Math.abs(fwdDot))) : 0;
+      this.carDrifting =
+        this.carDriftAngle > CAR_DRIFT_ANGLE_MIN &&
+        curSpeed > CAR_DRIFT_ENTRY_SPEED;
 
       const latSign = Math.sign(latDot);
-      const speedForRoll = Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz);
-      const driftRollSpeedGain = THREE.MathUtils.smoothstep(speedForRoll, 8, 24);
-      const driftRoll = -latSign * Math.min(CAR_BODY_ROLL_MAX, this.carDriftAngle * 0.85) * driftRollSpeedGain;
+      const speedForRoll = Math.sqrt(
+        this.carVx * this.carVx + this.carVz * this.carVz,
+      );
+      const driftRollSpeedGain = THREE.MathUtils.smoothstep(
+        speedForRoll,
+        8,
+        24,
+      );
+      const driftRoll =
+        -latSign *
+        Math.min(CAR_BODY_ROLL_MAX, this.carDriftAngle * 0.85) *
+        driftRollSpeedGain;
       const throttlePitch = forward ? 0.055 : backward ? -0.08 : 0;
       const speedNorm = Math.min(1, curSpeed / Math.max(1, CAR_MAX_SPEED));
       const dynamicPitch = -speedNorm * 0.05;
       const targetDynRoll = this.carDrifting ? driftRoll : 0;
       const targetDynPitch = dynamicPitch + throttlePitch;
       const smooth = 1 - Math.exp(-CAR_BODY_SMOOTH * dtSec);
-      this.carBodyRoll = THREE.MathUtils.lerp(this.carBodyRoll, targetDynRoll, smooth);
-      this.carBodyPitch = THREE.MathUtils.lerp(this.carBodyPitch, targetDynPitch, smooth);
+      this.carBodyRoll = THREE.MathUtils.lerp(
+        this.carBodyRoll,
+        targetDynRoll,
+        smooth,
+      );
+      this.carBodyPitch = THREE.MathUtils.lerp(
+        this.carBodyPitch,
+        targetDynPitch,
+        smooth,
+      );
 
       // Wheel spin
       this.carWheelSpin -= (fwdDot / CAR_WHEEL_RADIUS) * dtSec;
@@ -2046,10 +2401,22 @@ export class PlayMode {
       mz = this.carVz;
     } else {
       const moveYaw = iso ? this.isoYaw : this.camYaw;
-      if (keys.KeyW || keys.ArrowUp)    { mx -= Math.sin(moveYaw); mz -= Math.cos(moveYaw); }
-      if (keys.KeyS || keys.ArrowDown)  { mx += Math.sin(moveYaw); mz += Math.cos(moveYaw); }
-      if (keys.KeyA || keys.ArrowLeft)  { mx -= Math.cos(moveYaw); mz += Math.sin(moveYaw); }
-      if (keys.KeyD || keys.ArrowRight) { mx += Math.cos(moveYaw); mz -= Math.sin(moveYaw); }
+      if (keys.KeyW || keys.ArrowUp) {
+        mx -= Math.sin(moveYaw);
+        mz -= Math.cos(moveYaw);
+      }
+      if (keys.KeyS || keys.ArrowDown) {
+        mx += Math.sin(moveYaw);
+        mz += Math.cos(moveYaw);
+      }
+      if (keys.KeyA || keys.ArrowLeft) {
+        mx -= Math.cos(moveYaw);
+        mz += Math.sin(moveYaw);
+      }
+      if (keys.KeyD || keys.ArrowRight) {
+        mx += Math.cos(moveYaw);
+        mz -= Math.sin(moveYaw);
+      }
     }
 
     if (!this.carMode) {
@@ -2069,7 +2436,8 @@ export class PlayMode {
           this._moveTarget = null;
           this.isoTargetRing.visible = false;
         } else {
-          mx = dx; mz = dz;
+          mx = dx;
+          mz = dz;
         }
       }
     }
@@ -2081,21 +2449,37 @@ export class PlayMode {
 
     // Crouch (hold Ctrl, matches v1)
     if (charMode) {
-      this.charCrouching = !this.charInAir && !this.charRolling && !inSlide &&
-        !this.charAttacking && (keys.ControlLeft || keys.ControlRight);
+      this.charCrouching =
+        !this.charInAir &&
+        !this.charRolling &&
+        !inSlide &&
+        !this.charAttacking &&
+        (keys.ControlLeft || keys.ControlRight);
     }
 
     // Roll early exit at 75% when input held (matches v1)
     if (inRoll) {
-      const _inputHeld = keys.KeyW || keys.KeyA || keys.KeyS || keys.KeyD ||
-        keys.ArrowUp || keys.ArrowDown || keys.ArrowLeft || keys.ArrowRight;
+      const _inputHeld =
+        keys.KeyW ||
+        keys.KeyA ||
+        keys.KeyS ||
+        keys.KeyD ||
+        keys.ArrowUp ||
+        keys.ArrowDown ||
+        keys.ArrowLeft ||
+        keys.ArrowRight;
       if (_inputHeld) {
-        const rollT = (performance.now() - this.charRollStart) / 1000 / this.charRollDuration;
+        const rollT =
+          (performance.now() - this.charRollStart) /
+          1000 /
+          this.charRollDuration;
         if (rollT >= 0.75) {
           this.charRolling = false;
           const tgt = this.charCrouching
             ? this.charActions?.crouchWalk
-            : charRunning ? this.charActions?.run : this.charActions?.walk;
+            : charRunning
+              ? this.charActions?.run
+              : this.charActions?.walk;
           if (tgt && this.charActions?.roll) {
             tgt.enabled = true;
             tgt.reset();
@@ -2122,7 +2506,10 @@ export class PlayMode {
       mz = Math.cos(this.charSlideYaw);
       if (this.charSlidePhase === "loop") {
         const elapsed = (performance.now() - this.charSlideStart) / 1000;
-        if ((elapsed >= CHAR_SLIDE_MAX_TIME || !keys.KeyX) && this.charActions?.slideExit) {
+        if (
+          (elapsed >= CHAR_SLIDE_MAX_TIME || !keys.KeyX) &&
+          this.charActions?.slideExit
+        ) {
           this.charSlidePhase = "exit";
           const se = this.charActions.slideExit;
           se.reset().enabled = true;
@@ -2134,20 +2521,28 @@ export class PlayMode {
 
     // Attack/spell freeze movement
     const inSpell = this.charSpellPhase !== "none";
-    if (charMode && (this.charAttacking || inSpell)) { mx = 0; mz = 0; }
+    if (charMode && (this.charAttacking || inSpell)) {
+      mx = 0;
+      mz = 0;
+    }
 
     const mlen = Math.hypot(mx, mz);
     const carDriving = this.carMode;
     const moveSpeed = flying
       ? Math.abs(this.planeSpeed)
-      : carDriving ? 1
-      : charMode
-        ? (this.charRolling ? _charRollSpeed
-          : inSlide ? CHAR_SLIDE_SPEED
-          : this.charCrouching ? CHAR_WALK_SPEED * 0.5
-          : charRunning ? CHAR_RUN_SPEED
-          : CHAR_WALK_SPEED)
-        : MOVE_SPEED;
+      : carDriving
+        ? 1
+        : charMode
+          ? this.charRolling
+            ? _charRollSpeed
+            : inSlide
+              ? CHAR_SLIDE_SPEED
+              : this.charCrouching
+                ? CHAR_WALK_SPEED * 0.5
+                : charRunning
+                  ? CHAR_RUN_SPEED
+                  : CHAR_WALK_SPEED
+          : MOVE_SPEED;
     const prevPosX = this.playerPos.x;
     const prevPosZ = this.playerPos.z;
     if (mlen > 0) {
@@ -2173,7 +2568,8 @@ export class PlayMode {
 
           const baseStepLen = Math.hypot(stepX, stepZ);
           if (baseStepLen > 1e-6) {
-            const sweepDist = baseStepLen + CAR_HALF_LENGTH + CAR_COLLISION_SKIN;
+            const sweepDist =
+              baseStepLen + CAR_HALF_LENGTH + CAR_COLLISION_SKIN;
             // Only check center samples for sweep (not corners) - allows entering curved openings like tunnels.
             const sweepSamples = [
               { ox: 0, oz: 0, y: lowY },
@@ -2193,7 +2589,10 @@ export class PlayMode {
                 sweepDist,
               );
               if (!hit) continue;
-              const safe = Math.max(0, hit.distance - (CAR_HALF_LENGTH + CAR_COLLISION_SKIN));
+              const safe = Math.max(
+                0,
+                hit.distance - (CAR_HALF_LENGTH + CAR_COLLISION_SKIN),
+              );
               if (safe < minSafe) minSafe = safe;
             }
             if (minSafe < baseStepLen) {
@@ -2207,14 +2606,46 @@ export class PlayMode {
           for (let iter = 0; iter < CAR_COLLISION_ITERS; iter++) {
             let changed = false;
             const carRays = [
-              { dx: fwdX, dz: fwdZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN },
-              { dx: -fwdX, dz: -fwdZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN },
-              { dx: fwdX + rightX, dz: fwdZ + rightZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN },
-              { dx: fwdX - rightX, dz: fwdZ - rightZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN },
-              { dx: -fwdX + rightX, dz: -fwdZ + rightZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN },
-              { dx: -fwdX - rightX, dz: -fwdZ - rightZ, dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN },
-              { dx: rightX, dz: rightZ, dist: CAR_HALF_WIDTH + CAR_COLLISION_SKIN },
-              { dx: -rightX, dz: -rightZ, dist: CAR_HALF_WIDTH + CAR_COLLISION_SKIN },
+              {
+                dx: fwdX,
+                dz: fwdZ,
+                dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN,
+              },
+              {
+                dx: -fwdX,
+                dz: -fwdZ,
+                dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN,
+              },
+              {
+                dx: fwdX + rightX,
+                dz: fwdZ + rightZ,
+                dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN,
+              },
+              {
+                dx: fwdX - rightX,
+                dz: fwdZ - rightZ,
+                dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN,
+              },
+              {
+                dx: -fwdX + rightX,
+                dz: -fwdZ + rightZ,
+                dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN,
+              },
+              {
+                dx: -fwdX - rightX,
+                dz: -fwdZ - rightZ,
+                dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN,
+              },
+              {
+                dx: rightX,
+                dz: rightZ,
+                dist: CAR_HALF_WIDTH + CAR_COLLISION_SKIN,
+              },
+              {
+                dx: -rightX,
+                dz: -rightZ,
+                dist: CAR_HALF_WIDTH + CAR_COLLISION_SKIN,
+              },
             ];
 
             for (const r of carRays) {
@@ -2222,7 +2653,14 @@ export class PlayMode {
               const ndx = r.dx / Math.max(1e-6, rLen);
               const ndz = r.dz / Math.max(1e-6, rLen);
               for (const ry of [lowY, highY]) {
-                const hit = this.cliffBvh.raycastLateral(posX, ry, posZ, ndx, ndz, r.dist);
+                const hit = this.cliffBvh.raycastLateral(
+                  posX,
+                  ry,
+                  posZ,
+                  ndx,
+                  ndz,
+                  r.dist,
+                );
                 if (!hit) continue;
                 const nx = hit.normal.x;
                 const nz = hit.normal.z;
@@ -2253,15 +2691,20 @@ export class PlayMode {
           const castDist = stepLen + margin;
           const px = this.playerPos.x;
           const pz = this.playerPos.z;
-          const footY  = this.playerPos.y + CAP_R;
+          const footY = this.playerPos.y + CAP_R;
           const waistY = this.playerPos.y + CAP_R + CAP_H * 0.5;
-          const headY  = this.playerPos.y + CAP_R + CAP_H;
+          const headY = this.playerPos.y + CAP_R + CAP_H;
 
           let blocked = false;
           const rayHeights = [footY, waistY, headY];
           for (let ri = 0; ri < 3; ri++) {
             const hit = this.cliffBvh.raycastLateral(
-              px, rayHeights[ri], pz, stepX, stepZ, castDist,
+              px,
+              rayHeights[ri],
+              pz,
+              stepX,
+              stepZ,
+              castDist,
             );
             if (hit) {
               const nx = hit.normal.x;
@@ -2276,8 +2719,12 @@ export class PlayMode {
                   stepZ -= dot * nnz;
 
                   const slideHit = this.cliffBvh.raycastLateral(
-                    px, rayHeights[ri], pz,
-                    stepX, stepZ, Math.hypot(stepX, stepZ) + margin,
+                    px,
+                    rayHeights[ri],
+                    pz,
+                    stepX,
+                    stepZ,
+                    Math.hypot(stepX, stepZ) + margin,
                   );
                   if (slideHit) {
                     stepX = 0;
@@ -2307,14 +2754,25 @@ export class PlayMode {
           } else {
             stepX = 0;
             stepZ = 0;
-            if (carDriving) { this.carVx *= 0.1; this.carVz *= 0.1; }
+            if (carDriving) {
+              this.carVx *= 0.1;
+              this.carVz *= 0.1;
+            }
           }
         }
       }
 
       const wh = this.worldHalf;
-      this.playerPos.x = THREE.MathUtils.clamp(this.playerPos.x + stepX, -wh, wh);
-      this.playerPos.z = THREE.MathUtils.clamp(this.playerPos.z + stepZ, -wh, wh);
+      this.playerPos.x = THREE.MathUtils.clamp(
+        this.playerPos.x + stepX,
+        -wh,
+        wh,
+      );
+      this.playerPos.z = THREE.MathUtils.clamp(
+        this.playerPos.z + stepZ,
+        -wh,
+        wh,
+      );
     }
 
     // Ground height — cast downward from player's current Y + step-up margin,
@@ -2325,7 +2783,11 @@ export class PlayMode {
     if (this.cliffBvh?.baked) {
       const stepUp = 1.0;
       const fromY = this.playerPos.y + stepUp;
-      const bvhY = this.cliffBvh.raycastHeightFrom(this.playerPos.x, fromY, this.playerPos.z);
+      const bvhY = this.cliffBvh.raycastHeightFrom(
+        this.playerPos.x,
+        fromY,
+        this.playerPos.z,
+      );
       if (bvhY != null && bvhY > terrainY) groundY = bvhY;
     }
     const prevY = this.playerPos.y;
@@ -2340,21 +2802,39 @@ export class PlayMode {
       if (iso) {
         let climbDelta = 0;
         if (keys.Space) climbDelta += ISO_FLY_CLIMB_RATE * dtSec;
-        if (keys.ShiftLeft || keys.ShiftRight) climbDelta -= ISO_FLY_DESCEND_RATE * dtSec;
+        if (keys.ShiftLeft || keys.ShiftRight)
+          climbDelta -= ISO_FLY_DESCEND_RATE * dtSec;
         this.flyHeight = Math.max(groundY, this.flyHeight + climbDelta);
-        const pitchTarget = climbDelta > 0.01 ? 0.3 : climbDelta < -0.01 ? -0.3 : 0;
-        this.flyPitch = THREE.MathUtils.lerp(this.flyPitch, pitchTarget, 1 - Math.exp(-9 * dtSec));
+        const pitchTarget =
+          climbDelta > 0.01 ? 0.3 : climbDelta < -0.01 ? -0.3 : 0;
+        this.flyPitch = THREE.MathUtils.lerp(
+          this.flyPitch,
+          pitchTarget,
+          1 - Math.exp(-9 * dtSec),
+        );
       } else {
         const diveMult = this.flyPitch < 0 ? FLY_PITCH_DIVE_MULT : 1;
-        this.flyHeight = Math.max(groundY, this.flyHeight + this.flyPitch * FLY_PITCH_CLIMB_SCALE * diveMult * dtSec);
+        this.flyHeight = Math.max(
+          groundY,
+          this.flyHeight +
+            this.flyPitch * FLY_PITCH_CLIMB_SCALE * diveMult * dtSec,
+        );
       }
 
       // Surface lock — taxi mode: decay pitch/roll/altitude toward ground when near surface at low speed
       if (onDeck) {
         const deckRate = 1 - Math.exp(-4 * dtSec);
         this.flyPitch = THREE.MathUtils.lerp(this.flyPitch, 0, deckRate);
-        this.flyRollTarget = THREE.MathUtils.lerp(this.flyRollTarget, 0, deckRate);
-        this.flyHeight = THREE.MathUtils.lerp(this.flyHeight, groundY, deckRate);
+        this.flyRollTarget = THREE.MathUtils.lerp(
+          this.flyRollTarget,
+          0,
+          deckRate,
+        );
+        this.flyHeight = THREE.MathUtils.lerp(
+          this.flyHeight,
+          groundY,
+          deckRate,
+        );
       }
 
       // Barrel roll
@@ -2368,8 +2848,16 @@ export class PlayMode {
 
       // Roll smoothing
       const dtRoll = Math.min(dtSec, 0.08);
-      this.flyRollTarget = THREE.MathUtils.lerp(this.flyRollTarget, 0, 1 - Math.exp(-FLY_ROLL_TARGET_DECAY * dtRoll));
-      this.flyRoll = THREE.MathUtils.lerp(this.flyRoll, this.flyRollTarget, 1 - Math.exp(-FLY_ROLL_SMOOTH * dtRoll));
+      this.flyRollTarget = THREE.MathUtils.lerp(
+        this.flyRollTarget,
+        0,
+        1 - Math.exp(-FLY_ROLL_TARGET_DECAY * dtRoll),
+      );
+      this.flyRoll = THREE.MathUtils.lerp(
+        this.flyRoll,
+        this.flyRollTarget,
+        1 - Math.exp(-FLY_ROLL_SMOOTH * dtRoll),
+      );
 
       // Aileron roll (Z / C) — persistent, camera follows
       if (!onDeck) {
@@ -2392,8 +2880,12 @@ export class PlayMode {
 
       // Character jump
       if (
-        !this.charInAir && !this.charCrouching && !this.charRolling &&
-        !this.charAttacking && !inSlide && this.charJumpPhase !== "land" &&
+        !this.charInAir &&
+        !this.charCrouching &&
+        !this.charRolling &&
+        !this.charAttacking &&
+        !inSlide &&
+        this.charJumpPhase !== "land" &&
         keys.Space
       ) {
         this.charVelY = CHAR_JUMP_VEL;
@@ -2423,7 +2915,12 @@ export class PlayMode {
         this.playerPos.y = prevY + this.charVelY * dtSec;
         if (this.charVelY > 0 && this.cliffBvh?.baked) {
           const headTop = this.playerPos.y + CAP_R * 2 + CAP_H;
-          const ceilY = this.cliffBvh.raycastUp(this.playerPos.x, headTop, this.playerPos.z, this.charVelY * dtSec + 0.1);
+          const ceilY = this.cliffBvh.raycastUp(
+            this.playerPos.x,
+            headTop,
+            this.playerPos.z,
+            this.charVelY * dtSec + 0.1,
+          );
           if (ceilY != null) {
             this.playerPos.y = ceilY - CAP_R * 2 - CAP_H;
             this.charVelY = 0;
@@ -2434,12 +2931,26 @@ export class PlayMode {
           this.charVelY = 0;
           this.charInAir = false;
           this.charGliding = false;
-          const landInputHeld = keys.KeyW || keys.KeyA || keys.KeyS || keys.KeyD ||
-            keys.ArrowUp || keys.ArrowDown || keys.ArrowLeft || keys.ArrowRight;
+          const landInputHeld =
+            keys.KeyW ||
+            keys.KeyA ||
+            keys.KeyS ||
+            keys.KeyD ||
+            keys.ArrowUp ||
+            keys.ArrowDown ||
+            keys.ArrowLeft ||
+            keys.ArrowRight;
           if (landInputHeld && this.charActions) {
             this.charJumpPhase = "none";
-            const tgt = charRunning ? this.charActions.run : this.charActions.walk;
-            if (tgt) { tgt.enabled = true; tgt.reset(); tgt.crossFadeFrom(this.charCurrentAction, 0.12, false).play(); this.charCurrentAction = tgt; }
+            const tgt = charRunning
+              ? this.charActions.run
+              : this.charActions.walk;
+            if (tgt) {
+              tgt.enabled = true;
+              tgt.reset();
+              tgt.crossFadeFrom(this.charCurrentAction, 0.12, false).play();
+              this.charCurrentAction = tgt;
+            }
           } else if (this.charActions?.jumpLand) {
             this.charJumpPhase = "land";
             const jl = this.charActions.jumpLand;
@@ -2477,7 +2988,12 @@ export class PlayMode {
         while (dYaw > PI) dYaw -= 2 * PI;
         while (dYaw < -PI) dYaw += 2 * PI;
         this.charYaw += dYaw * (1 - Math.exp(-14 * dtSec));
-      } else if (mlen > 0 && !this.charRolling && !this.charAttacking && !inSlide) {
+      } else if (
+        mlen > 0 &&
+        !this.charRolling &&
+        !this.charAttacking &&
+        !inSlide
+      ) {
         const targetYaw = Math.atan2(mx, mz);
         let dYaw = targetYaw - this.charYaw;
         while (dYaw > PI) dYaw -= 2 * PI;
@@ -2550,7 +3066,12 @@ export class PlayMode {
         this.playerPos.y += this.velY * dtSec;
         if (this.velY > 0 && this.cliffBvh?.baked) {
           const headTop = this.playerPos.y + CAP_R * 2 + CAP_H;
-          const ceilY = this.cliffBvh.raycastUp(this.playerPos.x, headTop, this.playerPos.z, this.velY * dtSec + 0.1);
+          const ceilY = this.cliffBvh.raycastUp(
+            this.playerPos.x,
+            headTop,
+            this.playerPos.z,
+            this.velY * dtSec + 0.1,
+          );
           if (ceilY != null) {
             this.playerPos.y = ceilY - CAP_R * 2 - CAP_H;
             this.velY = 0;
@@ -2624,7 +3145,15 @@ export class PlayMode {
       ];
 
       for (const r of rays) {
-        const hit = this.cliffBvh.raycast3D(px, py, pz, r.dx, r.dy, r.dz, r.dist);
+        const hit = this.cliffBvh.raycast3D(
+          px,
+          py,
+          pz,
+          r.dx,
+          r.dy,
+          r.dz,
+          r.dist,
+        );
         if (hit) {
           const pushDist = r.dist - hit.distance;
           if (pushDist > 0) {
@@ -2639,21 +3168,31 @@ export class PlayMode {
 
     // Capsule visual
     const capsuleCY = this.playerPos.y + capsuleBase;
-    this.capsule.visible = this.moveMode === "capsule" || (this.moveMode === "fly" && !this.planeLoaded) || (this.moveMode === "char" && !this.charLoaded) || (this.moveMode === "car" && !this.carLoaded) || (this.moveMode === "lotus" && !this.lotusLoaded);
+    this.capsule.visible =
+      this.moveMode === "capsule" ||
+      (this.moveMode === "fly" && !this.planeLoaded) ||
+      (this.moveMode === "char" && !this.charLoaded) ||
+      (this.moveMode === "car" && !this.carLoaded) ||
+      (this.moveMode === "lotus" && !this.lotusLoaded);
     this.capsule.position.set(this.playerPos.x, capsuleCY, this.playerPos.z);
     if (mlen > 0) {
       this._lastMx = mx / mlen;
       this._lastMz = mz / mlen;
     }
     if (this._lastMx !== 0 || this._lastMz !== 0) {
-      this.capsule.rotation.y = Math.atan2(this._lastMx, this._lastMz) + Math.PI;
+      this.capsule.rotation.y =
+        Math.atan2(this._lastMx, this._lastMz) + Math.PI;
     }
 
     // Character visual + animation
     if (this.charRoot) {
       this.charRoot.visible = charMode;
       if (charMode) {
-        this.charRoot.position.set(this.playerPos.x, this.playerPos.y, this.playerPos.z);
+        this.charRoot.position.set(
+          this.playerPos.x,
+          this.playerPos.y,
+          this.playerPos.z,
+        );
         this.charRoot.rotation.y = this.charYaw;
         if (this.charKite) this.charKite.visible = this.charGliding;
         // Glider pose
@@ -2678,13 +3217,18 @@ export class PlayMode {
         }
         // Locomotion picker
         if (
-          this.charActions && !this.charAttacking && !this.charRolling &&
-          !this.charGliderPoseActive && this.charSlidePhase === "none" &&
-          this.charJumpPhase === "none" && this.charSpellPhase === "none"
+          this.charActions &&
+          !this.charAttacking &&
+          !this.charRolling &&
+          !this.charGliderPoseActive &&
+          this.charSlidePhase === "none" &&
+          this.charJumpPhase === "none" &&
+          this.charSpellPhase === "none"
         ) {
           let target = null;
           if (this.charCrouching)
-            target = mlen > 0 ? this.charActions.crouchWalk : this.charActions.crouch;
+            target =
+              mlen > 0 ? this.charActions.crouchWalk : this.charActions.crouch;
           else if (mlen > 0)
             target = charRunning ? this.charActions.run : this.charActions.walk;
           else target = this.charActions.idle;
@@ -2698,16 +3242,28 @@ export class PlayMode {
     if (this.planeRoot) {
       this.planeRoot.visible = flying;
       if (flying) {
-        this.planeRoot.position.set(this.playerPos.x, this.flyHeight, this.playerPos.z);
+        this.planeRoot.position.set(
+          this.playerPos.x,
+          this.flyHeight,
+          this.playerPos.z,
+        );
         let barrelAdd = 0;
         if (this.flyBarrelActive) {
           const t = Math.min(1, this.flyBarrelPhase);
           barrelAdd = t * t * (3 - 2 * t) * Math.PI * 2 * this.flyBarrelDir;
         }
         if (iso) {
-          this.planeRoot.rotation.set(0, this.flyHeading, barrelAdd + this.flyAileronAngle);
+          this.planeRoot.rotation.set(
+            0,
+            this.flyHeading,
+            barrelAdd + this.flyAileronAngle,
+          );
         } else {
-          this.planeRoot.rotation.set(this.flyPitch, this.flyHeading, this.flyRoll + barrelAdd + this.flyAileronAngle);
+          this.planeRoot.rotation.set(
+            this.flyPitch,
+            this.flyHeading,
+            this.flyRoll + barrelAdd + this.flyAileronAngle,
+          );
         }
       }
     }
@@ -2722,44 +3278,109 @@ export class PlayMode {
       if (isBruno && this.carLoaded) {
         anyCarRendered = true;
         const scaleFactor = this.carRoot.scale.x || CAR_MODEL_SCALE;
-        const rootY = this.playerPos.y + (CAR_RIDE_HEIGHT + CAR_WHEEL_RADIUS) * scaleFactor;
+        const rootY =
+          this.playerPos.y + (CAR_RIDE_HEIGHT + CAR_WHEEL_RADIUS) * scaleFactor;
         this.carRoot.position.set(this.playerPos.x, rootY, this.playerPos.z);
         this.carRoot.rotation.y = this.carHeading;
 
-        let frontY = 0, rearY = 0, leftY = 0, rightY = 0, rearIdx = 0;
+        let frontY = 0,
+          rearY = 0,
+          leftY = 0,
+          rightY = 0,
+          rearIdx = 0;
         for (const w of this.carWheels) {
           const lx = w.offset.x * scaleFactor;
           const lz = w.offset.z * scaleFactor;
-          const wx = this.playerPos.x + lx * Math.cos(this.carHeading) + lz * Math.sin(this.carHeading);
-          const wz = this.playerPos.z - lx * Math.sin(this.carHeading) + lz * Math.cos(this.carHeading);
+          const wx =
+            this.playerPos.x +
+            lx * Math.cos(this.carHeading) +
+            lz * Math.sin(this.carHeading);
+          const wz =
+            this.playerPos.z -
+            lx * Math.sin(this.carHeading) +
+            lz * Math.cos(this.carHeading);
           const h = this.getTerrainHeight(wx, wz);
           w.contactWorld.set(wx, h + DRIFT_MARK_Y_OFFSET, wz);
           if (w.offset.z < 0) frontY += h;
-          else { rearY += h; if (rearIdx < this._carRearContactPoints.length) this._carRearContactPoints[rearIdx++].copy(w.contactWorld); }
-          if (w.offset.x < 0) leftY += h; else rightY += h;
+          else {
+            rearY += h;
+            if (rearIdx < this._carRearContactPoints.length)
+              this._carRearContactPoints[rearIdx++].copy(w.contactWorld);
+          }
+          if (w.offset.x < 0) leftY += h;
+          else rightY += h;
         }
 
-        const leftAvg = leftY * 0.5, rightAvg = rightY * 0.5, frontAvg = frontY * 0.5, rearAvg = rearY * 0.5;
-        const terrainRollRaw = Math.atan2(rightAvg - leftAvg, CAR_TRACK * scaleFactor);
-        const terrainPitchRaw = Math.atan2(frontAvg - rearAvg, CAR_WHEEL_BASE * scaleFactor);
+        const leftAvg = leftY * 0.5,
+          rightAvg = rightY * 0.5,
+          frontAvg = frontY * 0.5,
+          rearAvg = rearY * 0.5;
+        const terrainRollRaw = Math.atan2(
+          rightAvg - leftAvg,
+          CAR_TRACK * scaleFactor,
+        );
+        const terrainPitchRaw = Math.atan2(
+          frontAvg - rearAvg,
+          CAR_WHEEL_BASE * scaleFactor,
+        );
         const terrainSmooth = 1 - Math.exp(-CAR_TERRAIN_BODY_SMOOTH * dtSec);
         if (this.carInAir) {
-          this.carTerrainRoll = THREE.MathUtils.lerp(this.carTerrainRoll, 0, terrainSmooth);
-          this.carTerrainPitch = THREE.MathUtils.lerp(this.carTerrainPitch, 0, terrainSmooth);
+          this.carTerrainRoll = THREE.MathUtils.lerp(
+            this.carTerrainRoll,
+            0,
+            terrainSmooth,
+          );
+          this.carTerrainPitch = THREE.MathUtils.lerp(
+            this.carTerrainPitch,
+            0,
+            terrainSmooth,
+          );
         } else {
-          this.carTerrainRoll = THREE.MathUtils.lerp(this.carTerrainRoll, THREE.MathUtils.clamp(terrainRollRaw, -CAR_BODY_TERRAIN_ROLL_MAX, CAR_BODY_TERRAIN_ROLL_MAX), terrainSmooth);
-          this.carTerrainPitch = THREE.MathUtils.lerp(this.carTerrainPitch, THREE.MathUtils.clamp(terrainPitchRaw, -CAR_BODY_TERRAIN_PITCH_MAX, CAR_BODY_TERRAIN_PITCH_MAX), terrainSmooth);
+          this.carTerrainRoll = THREE.MathUtils.lerp(
+            this.carTerrainRoll,
+            THREE.MathUtils.clamp(
+              terrainRollRaw,
+              -CAR_BODY_TERRAIN_ROLL_MAX,
+              CAR_BODY_TERRAIN_ROLL_MAX,
+            ),
+            terrainSmooth,
+          );
+          this.carTerrainPitch = THREE.MathUtils.lerp(
+            this.carTerrainPitch,
+            THREE.MathUtils.clamp(
+              terrainPitchRaw,
+              -CAR_BODY_TERRAIN_PITCH_MAX,
+              CAR_BODY_TERRAIN_PITCH_MAX,
+            ),
+            terrainSmooth,
+          );
         }
-        const finalPitch = THREE.MathUtils.clamp(this.carTerrainPitch + this.carBodyPitch, -CAR_BODY_PITCH_MAX, CAR_BODY_PITCH_MAX);
-        const finalRoll = THREE.MathUtils.clamp(this.carTerrainRoll + this.carBodyRoll, -CAR_BODY_ROLL_MAX, CAR_BODY_ROLL_MAX);
+        const finalPitch = THREE.MathUtils.clamp(
+          this.carTerrainPitch + this.carBodyPitch,
+          -CAR_BODY_PITCH_MAX,
+          CAR_BODY_PITCH_MAX,
+        );
+        const finalRoll = THREE.MathUtils.clamp(
+          this.carTerrainRoll + this.carBodyRoll,
+          -CAR_BODY_ROLL_MAX,
+          CAR_BODY_ROLL_MAX,
+        );
         this.carChassis.rotation.set(finalPitch, 0, finalRoll);
 
-        const _steerTarget = ((keys.KeyA || keys.ArrowLeft) ? 0.4 : 0) + ((keys.KeyD || keys.ArrowRight) ? -0.4 : 0);
-        this.carSteerSmooth = THREE.MathUtils.lerp(this.carSteerSmooth, _steerTarget, 1 - Math.exp(-12 * dtSec));
+        const _steerTarget =
+          (keys.KeyA || keys.ArrowLeft ? 0.4 : 0) +
+          (keys.KeyD || keys.ArrowRight ? -0.4 : 0);
+        this.carSteerSmooth = THREE.MathUtils.lerp(
+          this.carSteerSmooth,
+          _steerTarget,
+          1 - Math.exp(-12 * dtSec),
+        );
         for (const w of this.carWheels) {
           const baseYaw = CAR_MODEL_YAW + (w.isLeft ? Math.PI : 0);
-          w.container.rotation.y = baseYaw + (w.steer ? this.carSteerSmooth : 0);
-          if (w.cylinder) w.cylinder.rotation.z = (w.isLeft ? -1 : 1) * this.carWheelSpin;
+          w.container.rotation.y =
+            baseYaw + (w.steer ? this.carSteerSmooth : 0);
+          if (w.cylinder)
+            w.cylinder.rotation.z = (w.isLeft ? -1 : 1) * this.carWheelSpin;
         }
       }
     }
@@ -2776,19 +3397,30 @@ export class PlayMode {
 
         // Terrain wheel sampling — sample all 4 wheels first, use max height as base
         const hyWheel = this.carHeading - CAR_MODEL_YAW + Math.PI;
-        let frontY = 0, rearY = 0, leftY = 0, rightY = 0, rearIdx = 0;
+        let frontY = 0,
+          rearY = 0,
+          leftY = 0,
+          rightY = 0,
+          rearIdx = 0;
         let sumWheelH = 0;
         for (const w of this.lotusWheels) {
           const lx = w.offset.x * scaleFactor;
           const lz = w.offset.z * scaleFactor;
-          const wx = this.playerPos.x + lx * Math.cos(hyWheel) + lz * Math.sin(hyWheel);
-          const wz = this.playerPos.z - lx * Math.sin(hyWheel) + lz * Math.cos(hyWheel);
+          const wx =
+            this.playerPos.x + lx * Math.cos(hyWheel) + lz * Math.sin(hyWheel);
+          const wz =
+            this.playerPos.z - lx * Math.sin(hyWheel) + lz * Math.cos(hyWheel);
           const h = this.getTerrainHeight(wx, wz);
           sumWheelH += h;
           w.contactWorld.set(wx, h + DRIFT_MARK_Y_OFFSET, wz);
           if (w.steer) frontY += h;
-          else { rearY += h; if (rearIdx < this._carRearContactPoints.length) this._carRearContactPoints[rearIdx++].copy(w.contactWorld); }
-          if (w.isLeft) leftY += h; else rightY += h;
+          else {
+            rearY += h;
+            if (rearIdx < this._carRearContactPoints.length)
+              this._carRearContactPoints[rearIdx++].copy(w.contactWorld);
+          }
+          if (w.isLeft) leftY += h;
+          else rightY += h;
         }
 
         // Position car at average wheel height + ground offset
@@ -2796,31 +3428,79 @@ export class PlayMode {
         const rootY = baseY + (this._lotusGroundOffset || 0);
         this.lotusRoot.position.set(this.playerPos.x, rootY, this.playerPos.z);
 
-        const leftAvg = leftY * 0.5, rightAvg = rightY * 0.5, frontAvg = frontY * 0.5, rearAvg = rearY * 0.5;
-        const trackSpan = Math.abs(this.lotusWheels[1].offset.z - this.lotusWheels[0].offset.z) * scaleFactor || CAR_TRACK * scaleFactor;
-        const wbSpan = Math.abs(this.lotusWheels[2].offset.x - this.lotusWheels[0].offset.x) * scaleFactor || CAR_WHEEL_BASE * scaleFactor;
+        const leftAvg = leftY * 0.5,
+          rightAvg = rightY * 0.5,
+          frontAvg = frontY * 0.5,
+          rearAvg = rearY * 0.5;
+        const trackSpan =
+          Math.abs(
+            this.lotusWheels[1].offset.z - this.lotusWheels[0].offset.z,
+          ) * scaleFactor || CAR_TRACK * scaleFactor;
+        const wbSpan =
+          Math.abs(
+            this.lotusWheels[2].offset.x - this.lotusWheels[0].offset.x,
+          ) * scaleFactor || CAR_WHEEL_BASE * scaleFactor;
         const terrainRollRaw = Math.atan2(rightAvg - leftAvg, trackSpan);
         const terrainPitchRaw = Math.atan2(frontAvg - rearAvg, wbSpan);
         const terrainSmooth = 1 - Math.exp(-CAR_TERRAIN_BODY_SMOOTH * dtSec);
         if (this.carInAir) {
-          this.carTerrainRoll = THREE.MathUtils.lerp(this.carTerrainRoll, 0, terrainSmooth);
-          this.carTerrainPitch = THREE.MathUtils.lerp(this.carTerrainPitch, 0, terrainSmooth);
+          this.carTerrainRoll = THREE.MathUtils.lerp(
+            this.carTerrainRoll,
+            0,
+            terrainSmooth,
+          );
+          this.carTerrainPitch = THREE.MathUtils.lerp(
+            this.carTerrainPitch,
+            0,
+            terrainSmooth,
+          );
         } else {
-          this.carTerrainRoll = THREE.MathUtils.lerp(this.carTerrainRoll, THREE.MathUtils.clamp(terrainRollRaw, -CAR_BODY_TERRAIN_ROLL_MAX, CAR_BODY_TERRAIN_ROLL_MAX), terrainSmooth);
-          this.carTerrainPitch = THREE.MathUtils.lerp(this.carTerrainPitch, THREE.MathUtils.clamp(terrainPitchRaw, -CAR_BODY_TERRAIN_PITCH_MAX, CAR_BODY_TERRAIN_PITCH_MAX), terrainSmooth);
+          this.carTerrainRoll = THREE.MathUtils.lerp(
+            this.carTerrainRoll,
+            THREE.MathUtils.clamp(
+              terrainRollRaw,
+              -CAR_BODY_TERRAIN_ROLL_MAX,
+              CAR_BODY_TERRAIN_ROLL_MAX,
+            ),
+            terrainSmooth,
+          );
+          this.carTerrainPitch = THREE.MathUtils.lerp(
+            this.carTerrainPitch,
+            THREE.MathUtils.clamp(
+              terrainPitchRaw,
+              -CAR_BODY_TERRAIN_PITCH_MAX,
+              CAR_BODY_TERRAIN_PITCH_MAX,
+            ),
+            terrainSmooth,
+          );
         }
         const _lotusRollMax = this.lotusCam.rollMax;
         const _lotusPitchMax = this.lotusCam.pitchMax;
-        const finalPitch = THREE.MathUtils.clamp(this.carTerrainPitch + this.carBodyPitch, -_lotusPitchMax, _lotusPitchMax);
-        const finalRoll = THREE.MathUtils.clamp(this.carTerrainRoll + this.carBodyRoll, -_lotusRollMax, _lotusRollMax);
+        const finalPitch = THREE.MathUtils.clamp(
+          this.carTerrainPitch + this.carBodyPitch,
+          -_lotusPitchMax,
+          _lotusPitchMax,
+        );
+        const finalRoll = THREE.MathUtils.clamp(
+          this.carTerrainRoll + this.carBodyRoll,
+          -_lotusRollMax,
+          _lotusRollMax,
+        );
         // Lotus axes are swapped + roll inverted due to chassis yaw orientation
         this.lotusChassis.rotation.set(-finalRoll, 0, finalPitch);
 
-        const _steerTarget = ((keys.KeyA || keys.ArrowLeft) ? 0.4 : 0) + ((keys.KeyD || keys.ArrowRight) ? -0.4 : 0);
-        this.carSteerSmooth = THREE.MathUtils.lerp(this.carSteerSmooth, _steerTarget, 1 - Math.exp(-12 * dtSec));
+        const _steerTarget =
+          (keys.KeyA || keys.ArrowLeft ? 0.4 : 0) +
+          (keys.KeyD || keys.ArrowRight ? -0.4 : 0);
+        this.carSteerSmooth = THREE.MathUtils.lerp(
+          this.carSteerSmooth,
+          _steerTarget,
+          1 - Math.exp(-12 * dtSec),
+        );
         for (const w of this.lotusWheels) {
           const baseYaw = CAR_MODEL_YAW + (w.isLeft ? 0 : Math.PI);
-          w.container.rotation.y = baseYaw + (w.steer ? this.carSteerSmooth : 0);
+          w.container.rotation.y =
+            baseYaw + (w.steer ? this.carSteerSmooth : 0);
           if (w.cylinder) {
             w.cylinder.rotation.x = (w.isLeft ? 1 : -1) * this.carWheelSpin;
             w.cylinder.rotation.z = 0;
@@ -2831,7 +3511,9 @@ export class PlayMode {
         const braking = keys.Space || keys.KeyS || keys.ArrowDown;
         const leftKey = keys.KeyA || keys.ArrowLeft;
         const rightKey = keys.KeyD || keys.ArrowRight;
-        const carSpeed = Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz);
+        const carSpeed = Math.sqrt(
+          this.carVx * this.carVx + this.carVz * this.carVz,
+        );
 
         // Blinker: manual Q/E override, or auto when holding turn key >0.3s at speed
         let blinkerSide = 0;
@@ -2839,7 +3521,8 @@ export class PlayMode {
         else if (keys.KeyE) blinkerSide = 1;
         else {
           if (leftKey && carSpeed > 3) this._lotusBlinkerAutoHold += dtSec;
-          else if (rightKey && carSpeed > 3) this._lotusBlinkerAutoHold += dtSec;
+          else if (rightKey && carSpeed > 3)
+            this._lotusBlinkerAutoHold += dtSec;
           else this._lotusBlinkerAutoHold = 0;
 
           if (this._lotusBlinkerAutoHold > 0.3) {
@@ -2855,7 +3538,9 @@ export class PlayMode {
           this._lotusBlinkerSide = 0;
         }
 
-        const blinkOn = this._lotusBlinkerSide !== 0 && (Math.floor(this._lotusBlinkerTime * 3 * 2) % 2 === 0);
+        const blinkOn =
+          this._lotusBlinkerSide !== 0 &&
+          Math.floor(this._lotusBlinkerTime * 3 * 2) % 2 === 0;
         const blinkLeft = blinkOn && this._lotusBlinkerSide === -1;
         const blinkRight = blinkOn && this._lotusBlinkerSide === 1;
 
@@ -2865,16 +3550,22 @@ export class PlayMode {
           const blinkBoost = 10;
 
           for (const m of this._lotusLightMeshes.brakeLeft) {
-            if (m.material) m.material.emissiveIntensity = blinkLeft ? blinkBoost : brakeBase;
+            if (m.material)
+              m.material.emissiveIntensity = blinkLeft ? blinkBoost : brakeBase;
           }
           for (const m of this._lotusLightMeshes.brakeRight) {
-            if (m.material) m.material.emissiveIntensity = blinkRight ? blinkBoost : brakeBase;
+            if (m.material)
+              m.material.emissiveIntensity = blinkRight
+                ? blinkBoost
+                : brakeBase;
           }
           for (const m of this._lotusLightMeshes.taillightLeft) {
-            if (m.material) m.material.emissiveIntensity = blinkLeft ? blinkBoost : tailBase;
+            if (m.material)
+              m.material.emissiveIntensity = blinkLeft ? blinkBoost : tailBase;
           }
           for (const m of this._lotusLightMeshes.taillightRight) {
-            if (m.material) m.material.emissiveIntensity = blinkRight ? blinkBoost : tailBase;
+            if (m.material)
+              m.material.emissiveIntensity = blinkRight ? blinkBoost : tailBase;
           }
         }
         if (this._lotusTaillightGlow) {
@@ -2885,19 +3576,58 @@ export class PlayMode {
 
     // Drift marks & smoke (shared by both car modes)
     if (anyCarRendered) {
-      const speed = Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz);
+      const speed = Math.sqrt(
+        this.carVx * this.carVx + this.carVz * this.carVz,
+      );
       const handbrake = keys.Space;
-      const driftAmount = THREE.MathUtils.clamp((this.carDriftAngle - CAR_DRIFT_ANGLE_MIN) / 0.5, 0, 1);
-      const handbrakeAmount = handbrake ? THREE.MathUtils.smoothstep(speed, CAR_DRIFT_ENTRY_SPEED, CAR_DRIFT_ENTRY_SPEED * 2.2) : 0;
+      const driftAmount = THREE.MathUtils.clamp(
+        (this.carDriftAngle - CAR_DRIFT_ANGLE_MIN) / 0.5,
+        0,
+        1,
+      );
+      const handbrakeAmount = handbrake
+        ? THREE.MathUtils.smoothstep(
+            speed,
+            CAR_DRIFT_ENTRY_SPEED,
+            CAR_DRIFT_ENTRY_SPEED * 2.2,
+          )
+        : 0;
       const driftIntensity = Math.max(driftAmount, handbrakeAmount);
-      const emitMarks = !this.carInAir && speed > CAR_DRIFT_ENTRY_SPEED && driftIntensity > DRIFT_MARK_INTENSITY_MIN;
-      const emitSmoke = !this.carInAir && speed > CAR_DRIFT_ENTRY_SPEED * 0.55 &&
-        (driftIntensity > (this.smokeSettings.trigger ?? DRIFT_SMOKE_INTENSITY_MIN) || (handbrake && speed > CAR_DRIFT_ENTRY_SPEED * 0.55));
-      this.driftMarks.update(this._carRearContactPoints, emitMarks, driftIntensity);
-      this.driftSmoke.update(dtSec, this._carRearContactPoints, emitSmoke, Math.max(driftIntensity, handbrake ? 0.45 : 0), this.carVx, this.carVz, this.camera);
+      const emitMarks =
+        !this.carInAir &&
+        speed > CAR_DRIFT_ENTRY_SPEED &&
+        driftIntensity > DRIFT_MARK_INTENSITY_MIN;
+      const emitSmoke =
+        !this.carInAir &&
+        speed > CAR_DRIFT_ENTRY_SPEED * 0.55 &&
+        (driftIntensity >
+          (this.smokeSettings.trigger ?? DRIFT_SMOKE_INTENSITY_MIN) ||
+          (handbrake && speed > CAR_DRIFT_ENTRY_SPEED * 0.55));
+      this.driftMarks.update(
+        this._carRearContactPoints,
+        emitMarks,
+        driftIntensity,
+      );
+      this.driftSmoke.update(
+        dtSec,
+        this._carRearContactPoints,
+        emitSmoke,
+        Math.max(driftIntensity, handbrake ? 0.45 : 0),
+        this.carVx,
+        this.carVz,
+        this.camera,
+      );
     } else {
       this.driftMarks.update(this._carRearContactPoints, false, 0);
-      this.driftSmoke.update(dtSec, this._carRearContactPoints, false, 0, 0, 0, this.camera);
+      this.driftSmoke.update(
+        dtSec,
+        this._carRearContactPoints,
+        false,
+        0,
+        0,
+        0,
+        this.camera,
+      );
     }
 
     // Flight HUD
@@ -2921,7 +3651,12 @@ export class PlayMode {
       const dK = kmhTrue - this._hudKmhSmooth;
       const rate = dK > 0 ? CAR_HUD_SPEED_SMOOTH_UP : CAR_HUD_SPEED_SMOOTH_DOWN;
       this._hudKmhSmooth += dK * (1 - Math.exp(-rate * dtSec));
-      this._hudNitroSmooth = _expSmoothStep(this._hudNitroSmooth, this.carNitro, dtSec, CAR_HUD_NITRO_SMOOTH);
+      this._hudNitroSmooth = _expSmoothStep(
+        this._hudNitroSmooth,
+        this.carNitro,
+        dtSec,
+        CAR_HUD_NITRO_SMOOTH,
+      );
     } else {
       this._hudKmhSmooth = 0;
       this._hudNitroSmooth = this.carNitro;
@@ -2932,17 +3667,23 @@ export class PlayMode {
       if (carDriving) {
         this._carHud.style.display = "";
         this._carHudSpd.textContent = kmh;
-        this._carHudAngle.textContent = Math.round(this.carDriftAngle * 180 / Math.PI);
-        this._carHudAngle.style.color = this.carDrifting ? "#ff3300" : "#ff6633";
+        this._carHudAngle.textContent = Math.round(
+          (this.carDriftAngle * 180) / Math.PI,
+        );
+        this._carHudAngle.style.color = this.carDrifting
+          ? "#ff3300"
+          : "#ff6633";
         if (this._carHudNitro) {
           const nitroPct = Math.round(this._hudNitroSmooth * 100);
           this._carHudNitro.textContent = `${nitroPct}%`;
-          this._carHudNitro.style.color = this._hudNitroSmooth > 0.2 ? "#9ee8ff" : "#ff8c8c";
+          this._carHudNitro.style.color =
+            this._hudNitroSmooth > 0.2 ? "#9ee8ff" : "#ff8c8c";
           if (this._carHudNitroBar) {
             this._carHudNitroBar.style.width = `${nitroPct}%`;
-            this._carHudNitroBar.style.background = this._hudNitroSmooth > 0.2
-              ? "linear-gradient(90deg,#36c2ff,#7de8ff)"
-              : "linear-gradient(90deg,#ff7a7a,#ffb36b)";
+            this._carHudNitroBar.style.background =
+              this._hudNitroSmooth > 0.2
+                ? "linear-gradient(90deg,#36c2ff,#7de8ff)"
+                : "linear-gradient(90deg,#ff7a7a,#ffb36b)";
           }
         }
       } else {
@@ -2962,11 +3703,15 @@ export class PlayMode {
         // Ticks use clockwise-from-right angles; needle mesh points up (=270°). SVG rotate(clockwise).
         const needleRotateDeg = tickAngle - 270;
         if (this._speedoNeedle) {
-          this._speedoNeedle.setAttribute("transform", `rotate(${needleRotateDeg} 100 100)`);
+          this._speedoNeedle.setAttribute(
+            "transform",
+            `rotate(${needleRotateDeg} 100 100)`,
+          );
         }
         if (this._speedoDigital) {
           this._speedoDigital.textContent = kmh;
-          this._speedoDigital.style.color = kmhDisp > 220 ? "#ff6666" : "#ffffff";
+          this._speedoDigital.style.color =
+            kmhDisp > 220 ? "#ff6666" : "#ffffff";
         }
         const gearSpeeds = [0, 40, 80, 130, 180, 230, 280];
         let gear = 1;
@@ -2975,7 +3720,10 @@ export class PlayMode {
         }
         const gearMin = gearSpeeds[gear - 1] || 0;
         const gearMax = gearSpeeds[gear] || maxSpeed;
-        const rpmRatio = Math.min((kmhDisp - gearMin) / (gearMax - gearMin + 1), 1);
+        const rpmRatio = Math.min(
+          (kmhDisp - gearMin) / (gearMax - gearMin + 1),
+          1,
+        );
         if (this._speedoRpmBar) {
           const arcLength = 110;
           const fillLen = rpmRatio * arcLength;
@@ -2988,9 +3736,10 @@ export class PlayMode {
         if (this._speedoNitroFill) {
           const nitroPct = Math.round(this._hudNitroSmooth * 100);
           this._speedoNitroFill.style.width = `${nitroPct}%`;
-          this._speedoNitroFill.style.background = this._hudNitroSmooth > 0.2
-            ? "linear-gradient(90deg,#36c2ff,#7de8ff)"
-            : "linear-gradient(90deg,#ff7a7a,#ffb36b)";
+          this._speedoNitroFill.style.background =
+            this._hudNitroSmooth > 0.2
+              ? "linear-gradient(90deg,#36c2ff,#7de8ff)"
+              : "linear-gradient(90deg,#ff7a7a,#ffb36b)";
         }
       } else {
         this._carSpeedometer.style.display = "none";
@@ -3002,7 +3751,12 @@ export class PlayMode {
 
     // Plane gun
     if (this._gunCooldown > 0) this._gunCooldown -= dtSec;
-    if (flying && this._muzzleOffsets.length > 0 && keys.KeyE && this._gunCooldown <= 0) {
+    if (
+      flying &&
+      this._muzzleOffsets.length > 0 &&
+      keys.KeyE &&
+      this._gunCooldown <= 0
+    ) {
       this._planeInner.updateMatrixWorld(true);
       _bFwd.set(0, 0, -1).applyQuaternion(this.planeRoot.quaternion);
       const muz = this._muzzleOffsets[this._muzzleIdx];
@@ -3019,12 +3773,21 @@ export class PlayMode {
     const isLotusMode = this.moveMode === "lotus";
     const _lc = isLotusMode ? this.lotusCam : null;
     const _carLookYOff = _lc ? _lc.lookAtY : 1.2;
-    const carLookY = carDriving ? ((isLotusMode ? this.lotusRoot : this.carRoot)?.position.y + _carLookYOff || this.playerPos.y + _carLookYOff) : 0;
-    const lookAtY = flying ? this.flyHeight + 0.45 : carDriving ? carLookY : charMode ? charLookY : capsuleCY + 0.6;
+    const carLookY = carDriving
+      ? (isLotusMode ? this.lotusRoot : this.carRoot)?.position.y +
+          _carLookYOff || this.playerPos.y + _carLookYOff
+      : 0;
+    const lookAtY = flying
+      ? this.flyHeight + 0.45
+      : carDriving
+        ? carLookY
+        : charMode
+          ? charLookY
+          : capsuleCY + 0.6;
 
     // Lotus camera GUI visibility
-    if (this._lotusCamGui) this._lotusCamGui.domElement.style.display = isLotusMode ? "" : "none";
-
+    if (this._lotusCamGui)
+      this._lotusCamGui.domElement.style.display = isLotusMode ? "" : "none";
 
     if (carDriving && !iso) {
       let chaseTarget = this.carHeading;
@@ -3032,23 +3795,50 @@ export class PlayMode {
         const rx = Math.cos(this.carHeading);
         const rz = -Math.sin(this.carHeading);
         const latSign = Math.sign(this.carVx * rx + this.carVz * rz);
-        const driftOff = latSign * this.carDriftAngle * (_lc ? _lc.driftLag : (this.carSettings.cameraDriftLag ?? CAR_CAM_DRIFT_LAG));
+        const driftOff =
+          latSign *
+          this.carDriftAngle *
+          (_lc
+            ? _lc.driftLag
+            : (this.carSettings.cameraDriftLag ?? CAR_CAM_DRIFT_LAG));
         chaseTarget += driftOff;
       }
       let camDelta = chaseTarget - this.carCamYaw;
       while (camDelta > Math.PI) camDelta -= 2 * Math.PI;
       while (camDelta < -Math.PI) camDelta += 2 * Math.PI;
-      this.carCamYaw += camDelta * (1 - Math.exp(-(_lc ? _lc.chaseSpeed : (this.carSettings.cameraChaseSpeed ?? CAR_CAM_CHASE_SPEED)) * dtSec));
+      this.carCamYaw +=
+        camDelta *
+        (1 -
+          Math.exp(
+            -(_lc
+              ? _lc.chaseSpeed
+              : (this.carSettings.cameraChaseSpeed ?? CAR_CAM_CHASE_SPEED)) *
+              dtSec,
+          ));
 
-      const _camBaseDist = _lc ? _lc.distance : (this.carSettings.cameraDistance ?? CAR_CAM_DIST);
-      const _camHeight = _lc ? _lc.height : (this.carSettings.cameraHeight ?? CAR_CAM_HEIGHT);
+      const _camBaseDist = _lc
+        ? _lc.distance
+        : (this.carSettings.cameraDistance ?? CAR_CAM_DIST);
+      const _camHeight = _lc
+        ? _lc.height
+        : (this.carSettings.cameraHeight ?? CAR_CAM_HEIGHT);
       // Speed-dependent pull-back (racing game feel)
       let _camDist = _camBaseDist;
       if (_lc) {
-        const carSpeed = Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz);
-        const speedRatio = THREE.MathUtils.clamp(carSpeed / Math.max(1, CAR_MAX_SPEED), 0, 1);
+        const carSpeed = Math.sqrt(
+          this.carVx * this.carVx + this.carVz * this.carVz,
+        );
+        const speedRatio = THREE.MathUtils.clamp(
+          carSpeed / Math.max(1, CAR_MAX_SPEED),
+          0,
+          1,
+        );
         const targetPullBack = speedRatio * _lc.speedPullBack;
-        this._lotusCamDistSmooth = THREE.MathUtils.lerp(this._lotusCamDistSmooth, targetPullBack, 1 - Math.exp(-3 * dtSec));
+        this._lotusCamDistSmooth = THREE.MathUtils.lerp(
+          this._lotusCamDistSmooth,
+          targetPullBack,
+          1 - Math.exp(-3 * dtSec),
+        );
         _camDist = _camBaseDist + this._lotusCamDistSmooth;
       }
       const camBehindX = this.playerPos.x + Math.sin(this.carCamYaw) * _camDist;
@@ -3061,7 +3851,9 @@ export class PlayMode {
         let yawDelta = this.flyHeading - this.isoYaw;
         while (yawDelta > Math.PI) yawDelta -= 2 * Math.PI;
         while (yawDelta < -Math.PI) yawDelta += 2 * Math.PI;
-        this.isoYaw += yawDelta * (1 - Math.exp(-ISO_FLY_CHASE_SMOOTH * Math.min(dtSec, 0.1)));
+        this.isoYaw +=
+          yawDelta *
+          (1 - Math.exp(-ISO_FLY_CHASE_SMOOTH * Math.min(dtSec, 0.1)));
       }
       const hDist = this.isoDist * Math.cos(ISO_PITCH);
       const vDist = this.isoDist * Math.sin(ISO_PITCH);
@@ -3072,7 +3864,9 @@ export class PlayMode {
       );
       this.camera.lookAt(this.playerPos.x, lookAtY, this.playerPos.z);
     } else {
-      const camOrbitYaw = flying ? this.flyHeading + this.flyGroundCamYawOff : this.camYaw;
+      const camOrbitYaw = flying
+        ? this.flyHeading + this.flyGroundCamYawOff
+        : this.camYaw;
       const hDist = CAM_DIST * Math.cos(this.camPitch);
       const vDist = CAM_DIST * Math.sin(this.camPitch);
       const sinH = Math.sin(camOrbitYaw);
@@ -3131,7 +3925,10 @@ export class PlayMode {
       this.carDrifting = false;
       this.carDriftAngle = 0;
       this.carCamYaw = this.flyHeading;
-      this.playerPos.y = this.getWorldHeight(this.playerPos.x, this.playerPos.z);
+      this.playerPos.y = this.getWorldHeight(
+        this.playerPos.x,
+        this.playerPos.z,
+      );
       this.flyHeight = 0;
       this.flyAileronAngle = 0;
       this.carVelY = 0;
@@ -3139,7 +3936,8 @@ export class PlayMode {
       this.carOnSteepSlope = false;
       this.driftMarks.reset();
       this.driftSmoke.reset();
-      this._clearTrails(); clearBullets(this._bullets.pool);
+      this._clearTrails();
+      clearBullets(this._bullets.pool);
     } else if (prev === "car") {
       this.moveMode = "lotus";
       this.carVx = 0;
@@ -3155,7 +3953,10 @@ export class PlayMode {
       this.moveMode = "capsule";
       this.carVx = 0;
       this.carVz = 0;
-      this.playerPos.y = this.getWorldHeight(this.playerPos.x, this.playerPos.z);
+      this.playerPos.y = this.getWorldHeight(
+        this.playerPos.x,
+        this.playerPos.z,
+      );
       this.flyHeight = 0;
       this.flyPitch = 0;
       this.flyRoll = 0;
@@ -3179,7 +3980,12 @@ export class PlayMode {
       return;
     }
 
-    if (!event.repeat && event.code === "KeyQ" && this.flying && !this.flyBarrelActive) {
+    if (
+      !event.repeat &&
+      event.code === "KeyQ" &&
+      this.flying &&
+      !this.flyBarrelActive
+    ) {
       event.preventDefault();
       this.flyBarrelActive = true;
       this.flyBarrelPhase = 0;
@@ -3194,7 +4000,13 @@ export class PlayMode {
       const _inSpell = this.charSpellPhase !== "none";
       const busy = this.charRolling || this.charAttacking || inSlide;
       // Attack (R)
-      if (event.code === "KeyR" && this.charActions?.attack && !busy && !_inSpell && !this.charInAir) {
+      if (
+        event.code === "KeyR" &&
+        this.charActions?.attack &&
+        !busy &&
+        !_inSpell &&
+        !this.charInAir
+      ) {
         event.preventDefault();
         this.charAttacking = true;
         const a = this.charActions.attack;
@@ -3204,7 +4016,12 @@ export class PlayMode {
         return;
       }
       // Roll (C) — works mid-air too (matches v1)
-      if (event.code === "KeyC" && this.charActions?.roll && !busy && !_inSpell) {
+      if (
+        event.code === "KeyC" &&
+        this.charActions?.roll &&
+        !busy &&
+        !_inSpell
+      ) {
         event.preventDefault();
         this.charRolling = true;
         this.charRollYaw = this.charYaw;
@@ -3216,11 +4033,22 @@ export class PlayMode {
         return;
       }
       // Slide (X) — requires movement keys held, ground only
-      if (event.code === "KeyX" && this.charActions?.slideStart && !busy && !_inSpell && !this.charInAir) {
-        const movingKeys = this.keysHeld.KeyW || this.keysHeld.KeyA ||
-          this.keysHeld.KeyS || this.keysHeld.KeyD ||
-          this.keysHeld.ArrowUp || this.keysHeld.ArrowDown ||
-          this.keysHeld.ArrowLeft || this.keysHeld.ArrowRight;
+      if (
+        event.code === "KeyX" &&
+        this.charActions?.slideStart &&
+        !busy &&
+        !_inSpell &&
+        !this.charInAir
+      ) {
+        const movingKeys =
+          this.keysHeld.KeyW ||
+          this.keysHeld.KeyA ||
+          this.keysHeld.KeyS ||
+          this.keysHeld.KeyD ||
+          this.keysHeld.ArrowUp ||
+          this.keysHeld.ArrowDown ||
+          this.keysHeld.ArrowLeft ||
+          this.keysHeld.ArrowRight;
         if (movingKeys) {
           event.preventDefault();
           this.charSlidePhase = "start";
@@ -3236,7 +4064,11 @@ export class PlayMode {
       // Spell toggle (Q)
       if (event.code === "KeyQ") {
         event.preventDefault();
-        if (this.charSpellPhase === "none" && !busy && this.charActions?.spellEnter) {
+        if (
+          this.charSpellPhase === "none" &&
+          !busy &&
+          this.charActions?.spellEnter
+        ) {
           this.charSpellPhase = "enter";
           this.charSpellExitRequested = false;
           const se = this.charActions.spellEnter;
@@ -3244,7 +4076,9 @@ export class PlayMode {
           se.crossFadeFrom(this.charCurrentAction, 0.15, false).play();
           this.charCurrentAction = se;
         } else if (
-          (this.charSpellPhase === "idle" || this.charSpellPhase === "enter" || this.charSpellPhase === "shoot") &&
+          (this.charSpellPhase === "idle" ||
+            this.charSpellPhase === "enter" ||
+            this.charSpellPhase === "shoot") &&
           this.charActions?.spellExit
         ) {
           this.charSpellExitRequested = true;
@@ -3281,7 +4115,11 @@ export class PlayMode {
       if (this.camView === "iso") {
         if (document.pointerLockElement) document.exitPointerLock();
         this.renderer.domElement.style.cursor = "";
-        this.isoYaw = this.carMode ? this.carHeading : this.flying ? this.flyHeading : this.camYaw;
+        this.isoYaw = this.carMode
+          ? this.carHeading
+          : this.flying
+            ? this.flyHeading
+            : this.camYaw;
       } else {
         this._moveTarget = null;
         this.isoHoverRing.visible = false;
@@ -3306,7 +4144,9 @@ export class PlayMode {
     if (this.flying) {
       const mx = event.movementX;
       const my = event.movementY;
-      const agl = this.flyHeight - this.getWorldHeight(this.playerPos.x, this.playerPos.z);
+      const agl =
+        this.flyHeight -
+        this.getWorldHeight(this.playerPos.x, this.playerPos.z);
       const spd = Math.abs(this.planeSpeed);
       const onDeck = agl < FLY_SURFACE_ALT && spd < FLY_SURFACE_SPEED;
       if (onDeck) {
@@ -3316,11 +4156,13 @@ export class PlayMode {
         this.flyHeading -= mx * FLY_MOUSE_SENS_X;
         this.flyPitch = THREE.MathUtils.clamp(
           this.flyPitch + my * FLY_MOUSE_SENS_Y,
-          FLY_PITCH_MIN, FLY_PITCH_MAX,
+          FLY_PITCH_MIN,
+          FLY_PITCH_MAX,
         );
         this.flyRollTarget = THREE.MathUtils.clamp(
           this.flyRollTarget - mx * FLY_ROLL_VEL_SCALE,
-          -FLY_ROLL_MAX, FLY_ROLL_MAX,
+          -FLY_ROLL_MAX,
+          FLY_ROLL_MAX,
         );
       }
       return;
@@ -3348,7 +4190,11 @@ export class PlayMode {
     if (!this._moveTarget) this._moveTarget = new THREE.Vector3();
     this._moveTarget.copy(hit);
     this.isoTargetRing.visible = true;
-    this.isoTargetRing.position.set(hit.x, hit.y + ISO_MOVE_RING_Y_OFFSET, hit.z);
+    this.isoTargetRing.position.set(
+      hit.x,
+      hit.y + ISO_MOVE_RING_Y_OFFSET,
+      hit.z,
+    );
   }
 
   _onIsoPointerMove(event) {
@@ -3356,7 +4202,8 @@ export class PlayMode {
       this.isoHoverRing.visible = false;
       return;
     }
-    if (event.timeStamp - this._lastIsoHoverPickMs < ISO_HOVER_PICK_MIN_MS) return;
+    if (event.timeStamp - this._lastIsoHoverPickMs < ISO_HOVER_PICK_MIN_MS)
+      return;
     this._lastIsoHoverPickMs = event.timeStamp;
     const hit = this._pickIsoTerrainApprox(event);
     if (!hit) {
@@ -3364,7 +4211,11 @@ export class PlayMode {
       return;
     }
     this.isoHoverRing.visible = true;
-    this.isoHoverRing.position.set(hit.x, hit.y + ISO_MOVE_RING_Y_OFFSET, hit.z);
+    this.isoHoverRing.position.set(
+      hit.x,
+      hit.y + ISO_MOVE_RING_Y_OFFSET,
+      hit.z,
+    );
   }
 
   _pickIsoTerrainApprox(event) {
@@ -3440,7 +4291,9 @@ export class PlayMode {
     );
   }
 
-  set onExit(fn) { this._exitCallback = fn; }
+  set onExit(fn) {
+    this._exitCallback = fn;
+  }
 
   /**
    * Rebuild car Howls (loop sprite regions, clip paths). Call after editing loop ms in Tweakpane.
@@ -3480,29 +4333,44 @@ export class PlayMode {
     if (this.planeRoot) {
       this.scene.remove(this.planeRoot);
       this.planeRoot.traverse((o) => {
-        if (o.isMesh) { o.geometry?.dispose(); o.material?.dispose(); }
+        if (o.isMesh) {
+          o.geometry?.dispose();
+          o.material?.dispose();
+        }
       });
     }
     if (this.charRoot) {
       this.scene.remove(this.charRoot);
       this.charRoot.traverse((o) => {
-        if (o.isMesh || o.isSkinnedMesh) { o.geometry?.dispose(); o.material?.dispose(); }
+        if (o.isMesh || o.isSkinnedMesh) {
+          o.geometry?.dispose();
+          o.material?.dispose();
+        }
       });
     }
     if (this.carRoot) {
       this.scene.remove(this.carRoot);
       this.carRoot.traverse((o) => {
-        if (o.isMesh) { o.geometry?.dispose(); o.material?.dispose(); }
+        if (o.isMesh) {
+          o.geometry?.dispose();
+          o.material?.dispose();
+        }
       });
     }
     if (this.lotusRoot) {
       this.scene.remove(this.lotusRoot);
       this.lotusRoot.traverse((o) => {
-        if (o.isMesh) { o.geometry?.dispose(); o.material?.dispose(); }
+        if (o.isMesh) {
+          o.geometry?.dispose();
+          o.material?.dispose();
+        }
       });
     }
     if (this._carHud) this._carHud.remove();
     if (this._carSpeedometer) this._carSpeedometer.remove();
-    if (this._lotusCamGui) { this._lotusCamGui.destroy(); this._lotusCamGui = null; }
+    if (this._lotusCamGui) {
+      this._lotusCamGui.destroy();
+      this._lotusCamGui = null;
+    }
   }
 }
