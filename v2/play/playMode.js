@@ -110,6 +110,8 @@ const CAR_NITRO_MAX_SPEED_BONUS = 26;
 const CAR_NITRO_DRAIN_PER_SEC = 0.32;
 const CAR_NITRO_REGEN_PER_SEC = 0.14;
 const CAR_NITRO_MIN_TO_USE = 0.05;
+/** Center-bottom speed / drift / nitro panel — kept in DOM for future readouts; hidden by default. */
+const SHOW_LEGACY_CAR_HUD_RECT = false;
 const CAR_BASE_ACCEL_LOW_SPEED_MUL = 0.52;
 const CAR_BASE_ACCEL_RAMP_TO_KMH = 100;
 const CAR_BODY_ROLL_MAX = 0.2;
@@ -881,6 +883,7 @@ export class PlayMode {
   }
 
   _createCarHud() {
+    /* Legacy rectangular HUD — still mounted so SHOW_LEGACY_CAR_HUD_RECT can re-enable it without rebuilding. */
     const el = document.createElement("div");
     el.id = "car-hud";
     el.style.cssText = "position:fixed;bottom:18px;left:50%;transform:translateX(-50%);" +
@@ -1028,8 +1031,8 @@ export class PlayMode {
         <circle cx="${size/2}" cy="${size/2}" r="${size*0.15}" fill="rgba(20,30,45,0.9)" stroke="rgba(100,150,200,0.3)" stroke-width="1"/>
         <circle cx="${size/2}" cy="${size/2}" r="${size*0.08}" fill="rgba(40,60,90,0.8)" stroke="rgba(150,200,255,0.2)" stroke-width="1"/>
         
-        <!-- Needle -->
-        <g id="speedo-needle" transform="rotate(${startAngle} ${size/2} ${size/2})" filter="url(#needleGlow)">
+        <!-- Needle (polygon points up = 270° in same convention as tick angles; rotate by tickAngle − 270) -->
+        <g id="speedo-needle" transform="rotate(${startAngle - 270} ${size/2} ${size/2})" filter="url(#needleGlow)">
           <polygon points="${size/2},${size*0.18} ${size/2-4},${size/2} ${size/2+4},${size/2}" 
             fill="#ff3333" stroke="#ff6666" stroke-width="0.5"/>
           <circle cx="${size/2}" cy="${size/2}" r="6" fill="#222" stroke="#ff4444" stroke-width="2"/>
@@ -1048,9 +1051,12 @@ export class PlayMode {
         <div id="speedo-gear" style="font-size:22px;font-weight:700;color:#00ddff;text-shadow:0 0 12px rgba(0,220,255,0.5);">N</div>
       </div>
       
-      <!-- Nitro indicator (small) -->
-      <div style="position:absolute;top:12%;left:50%;transform:translateX(-50%);text-align:center;">
-        <div id="speedo-nitro-icon" style="font-size:11px;font-weight:700;color:#36c2ff;text-shadow:0 0 8px rgba(54,194,255,0.6);opacity:0.3;">N2O</div>
+      <!-- N2O: label + compact refill/drain bar (no % — saves space) -->
+      <div style="position:absolute;top:9%;left:50%;transform:translateX(-50%);width:58px;text-align:center;">
+        <div style="font-size:10px;font-weight:700;color:#36c2ff;text-shadow:0 0 8px rgba(54,194,255,0.55);letter-spacing:0.4px;">N2O</div>
+        <div style="margin-top:3px;height:4px;background:rgba(120,150,190,0.28);border-radius:999px;overflow:hidden;">
+          <div id="speedo-nitro-fill" style="width:100%;height:100%;border-radius:999px;background:linear-gradient(90deg,#36c2ff,#7de8ff);box-shadow:0 0 8px rgba(94,220,255,0.45);"></div>
+        </div>
       </div>
     `;
 
@@ -1060,7 +1066,7 @@ export class PlayMode {
     this._speedoDigital = el.querySelector("#speedo-digital");
     this._speedoRpmBar = el.querySelector("#speedo-rpm-bar");
     this._speedoGear = el.querySelector("#speedo-gear");
-    this._speedoNitroIcon = el.querySelector("#speedo-nitro-icon");
+    this._speedoNitroFill = el.querySelector("#speedo-nitro-fill");
   }
 
   async _loadCar() {
@@ -2873,15 +2879,18 @@ export class PlayMode {
       }
     }
 
-    // Car HUD
-    if (this._carHud) {
-      if (carDriving) {
-        this._carHud.style.display = "";
-        const kmh = Math.round(
-          Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz) *
+    // Car HUD: optional legacy center panel + circular speedometer (always when driving)
+    let kmh = 0;
+    if (carDriving) {
+      kmh = Math.round(
+        Math.sqrt(this.carVx * this.carVx + this.carVz * this.carVz) *
           3.6 *
           (this.carSettings.speedometerScale ?? 1),
-        );
+      );
+    }
+    if (SHOW_LEGACY_CAR_HUD_RECT && this._carHud) {
+      if (carDriving) {
+        this._carHud.style.display = "";
         this._carHudSpd.textContent = kmh;
         this._carHudAngle.textContent = Math.round(this.carDriftAngle * 180 / Math.PI);
         this._carHudAngle.style.color = this.carDrifting ? "#ff3300" : "#ff6633";
@@ -2896,51 +2905,55 @@ export class PlayMode {
               : "linear-gradient(90deg,#ff7a7a,#ffb36b)";
           }
         }
-        // Update circular speedometer
-        if (this._carSpeedometer) {
-          this._carSpeedometer.style.display = "";
-          const maxSpeed = 280;
-          const startAngle = 135;
-          const endAngle = 405;
-          const speedRatio = Math.min(kmh / maxSpeed, 1);
-          const needleAngle = startAngle + speedRatio * (endAngle - startAngle);
-          if (this._speedoNeedle) {
-            this._speedoNeedle.setAttribute("transform", `rotate(${needleAngle} 100 100)`);
-          }
-          if (this._speedoDigital) {
-            this._speedoDigital.textContent = kmh;
-            this._speedoDigital.style.color = kmh > 220 ? "#ff6666" : "#ffffff";
-          }
-          // Simulated RPM based on speed (cycles through gears)
-          const gearSpeeds = [0, 40, 80, 130, 180, 230, 280];
-          let gear = 1;
-          for (let g = 1; g < gearSpeeds.length; g++) {
-            if (kmh >= gearSpeeds[g - 1]) gear = g;
-          }
-          const gearMin = gearSpeeds[gear - 1] || 0;
-          const gearMax = gearSpeeds[gear] || maxSpeed;
-          const rpmRatio = Math.min((kmh - gearMin) / (gearMax - gearMin + 1), 1);
-          if (this._speedoRpmBar) {
-            const arcLength = 110;
-            const fillLen = rpmRatio * arcLength;
-            this._speedoRpmBar.setAttribute("stroke-dasharray", `${fillLen} 999`);
-          }
-          if (this._speedoGear) {
-            this._speedoGear.textContent = kmh < 5 ? "N" : gear;
-            this._speedoGear.style.color = gear >= 5 ? "#ff8844" : "#00ddff";
-          }
-          // Nitro glow
-          if (this._speedoNitroIcon) {
-            const nitroActive = this.carNitro > 0.2;
-            this._speedoNitroIcon.style.opacity = nitroActive ? "1" : "0.3";
-            this._speedoNitroIcon.style.textShadow = nitroActive
-              ? "0 0 16px rgba(54,194,255,1), 0 0 30px rgba(54,194,255,0.8)"
-              : "0 0 8px rgba(54,194,255,0.6)";
-          }
-        }
       } else {
         this._carHud.style.display = "none";
-        if (this._carSpeedometer) this._carSpeedometer.style.display = "none";
+      }
+    } else if (this._carHud) {
+      this._carHud.style.display = "none";
+    }
+    if (this._carSpeedometer) {
+      if (carDriving) {
+        this._carSpeedometer.style.display = "";
+        const maxSpeed = 280;
+        const startAngle = 135;
+        const endAngle = 405;
+        const speedRatio = Math.min(kmh / maxSpeed, 1);
+        const tickAngle = startAngle + speedRatio * (endAngle - startAngle);
+        // Ticks use clockwise-from-right angles; needle mesh points up (=270°). SVG rotate(clockwise).
+        const needleRotateDeg = tickAngle - 270;
+        if (this._speedoNeedle) {
+          this._speedoNeedle.setAttribute("transform", `rotate(${needleRotateDeg} 100 100)`);
+        }
+        if (this._speedoDigital) {
+          this._speedoDigital.textContent = kmh;
+          this._speedoDigital.style.color = kmh > 220 ? "#ff6666" : "#ffffff";
+        }
+        const gearSpeeds = [0, 40, 80, 130, 180, 230, 280];
+        let gear = 1;
+        for (let g = 1; g < gearSpeeds.length; g++) {
+          if (kmh >= gearSpeeds[g - 1]) gear = g;
+        }
+        const gearMin = gearSpeeds[gear - 1] || 0;
+        const gearMax = gearSpeeds[gear] || maxSpeed;
+        const rpmRatio = Math.min((kmh - gearMin) / (gearMax - gearMin + 1), 1);
+        if (this._speedoRpmBar) {
+          const arcLength = 110;
+          const fillLen = rpmRatio * arcLength;
+          this._speedoRpmBar.setAttribute("stroke-dasharray", `${fillLen} 999`);
+        }
+        if (this._speedoGear) {
+          this._speedoGear.textContent = kmh < 5 ? "N" : gear;
+          this._speedoGear.style.color = gear >= 5 ? "#ff8844" : "#00ddff";
+        }
+        if (this._speedoNitroFill) {
+          const nitroPct = Math.round(this.carNitro * 100);
+          this._speedoNitroFill.style.width = `${nitroPct}%`;
+          this._speedoNitroFill.style.background = this.carNitro > 0.2
+            ? "linear-gradient(90deg,#36c2ff,#7de8ff)"
+            : "linear-gradient(90deg,#ff7a7a,#ffb36b)";
+        }
+      } else {
+        this._carSpeedometer.style.display = "none";
       }
     }
 
