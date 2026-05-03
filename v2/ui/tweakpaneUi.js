@@ -716,9 +716,11 @@ export function createTweakpaneUi({
   });
 
   const physicalSkyBlades = [];
+  const hdrSkyBlades = [];
   function syncSkyModeVisibility() {
     const isPhysical = toolState.skyMode === "physical";
     for (const b of physicalSkyBlades) b.hidden = !isPhysical;
+    for (const b of hdrSkyBlades) b.hidden = isPhysical;
     hdrImportBtn.hidden = isPhysical;
   }
 
@@ -732,6 +734,23 @@ export function createTweakpaneUi({
 
   const hdrImportBtn = skyFolder.addButton({ title: "Load HDR file..." });
   hdrImportBtn.on("click", () => onImportHdr?.());
+
+  hdrSkyBlades.push(
+    skyFolder.addBinding(toolState.light, "hdrEnvIntensity", {
+      label: "HDR env (IBL)",
+      min: 0,
+      max: 5,
+      step: 0.05,
+    }),
+  );
+  hdrSkyBlades.push(
+    skyFolder.addBinding(toolState.light, "hdrBackgroundIntensity", {
+      label: "HDR background",
+      min: 0,
+      max: 5,
+      step: 0.05,
+    }),
+  );
 
   physicalSkyBlades.push(skyFolder.addBinding(toolState.physicalSky, "meshScale", {
     label: "Dome scale",

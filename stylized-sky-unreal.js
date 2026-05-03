@@ -11,6 +11,9 @@
  *  - Pink-lavender sunset band for Ghibli feel
  *  - Vertical gradient cloud shading (bright tops, blue undersides)
  *  - Anti-banding dither
+ *
+ *  Performance (60fps target): hero cloud uses 4-oct fBm; shadow/rim/detail use 2-oct;
+ *  far cloud layer uses 3-oct + 2-oct aux; god rays march 6 steps; stars use analytic hash.
  */
 
 import * as THREE from "three/webgpu";
@@ -29,6 +32,7 @@ import {
   dot,
   abs,
   cos,
+  sin,
   atan,
   normalize,
   floor,
@@ -164,6 +168,14 @@ export function createStylizedSky() {
     return clamp(n1.add(n2).mul(0.667).add(0.5), 0, 1);
   });
 
+  // ── 3-octave fBm — high-detail layer for far clouds (fewer samples than hero 4-oct) ──
+  const fbmCloudMed = Fn(([p]) => {
+    const n1 = mx_noise_float(vec3(p, float(0.0)));
+    const n2 = mx_noise_float(vec3(p.mul(2.07), float(1.3))).mul(0.5);
+    const n3 = mx_noise_float(vec3(p.mul(4.31), float(2.7))).mul(0.25);
+    return clamp(n1.add(n2).add(n3).mul(0.571428).add(0.5), 0, 1);
+  });
+
   // ── Cloud layer: returns vec4(rgb, alpha) ──
   const cloudLayer = Fn(
     ([
@@ -179,7 +191,7 @@ export function createStylizedSky() {
       const threshold = float(1.0).sub(coverage);
       const noise = fbmCloud(uvBase);
       const shadowUV = uvBase.add(sunHoriz.mul(0.2));
-      const shadowNoise = fbmCloud(shadowUV);
+      const shadowNoise = fbmCloudFast(shadowUV);
       const rawDensity = smoothstep(threshold, threshold.add(softness), noise);
       const density = clamp(
         rawDensity.sub(float(0.5)).mul(contrast).add(float(0.5)),
@@ -213,7 +225,7 @@ export function createStylizedSky() {
         const detailUV = uvBase
           .mul(uCloudDetailScale)
           .add(vec2(float(5.73), float(3.17)));
-        const bumpHeight = fbmCloud(detailUV);
+        const bumpHeight = fbmCloudFast(detailUV);
         const bumpLit = vertGrad.mul(
           float(0.5).add(bumpHeight.mul(float(0.5))),
         );
@@ -228,7 +240,85 @@ export function createStylizedSky() {
 
       // Silver lining: bright rim on sun-facing cloud edges
       const rimUV = uvBase.sub(sunHoriz.mul(uCloudRimWidth));
-      const rimNoise = fbmCloud(rimUV);
+      const rimNoise = fbmCloudFast(rimUV);
+      const rimSolid = smoothstep(
+        threshold.sub(float(0.02)),
+        threshold.add(softness),
+        rimNoise,
+      );
+      const rimFactor = rimSolid
+        .mul(rawDensity.oneMinus())
+        .mul(uCloudRimStr)
+        .mul(horizMask);
+      const cloudColRim = cloudCol.add(
+        vec3(float(1.0), float(0.98), float(0.92)).mul(rimFactor),
+      );
+      return vec4(cloudColRim, density);
+    },
+  );
+
+  /** Second cloud layer: 3-oct density + 2-oct aux — ~35% fewer noise taps than hero layer. */
+  const cloudLayerFar = Fn(
+    ([
+      uvBase,
+      coverage,
+      softness,
+      sunHoriz,
+      litColor,
+      horizMask,
+      contrast,
+      upDotParam,
+    ]) => {
+      const threshold = float(1.0).sub(coverage);
+      const noise = fbmCloudMed(uvBase);
+      const shadowUV = uvBase.add(sunHoriz.mul(0.2));
+      const shadowNoise = fbmCloudFast(shadowUV);
+      const rawDensity = smoothstep(threshold, threshold.add(softness), noise);
+      const density = clamp(
+        rawDensity.sub(float(0.5)).mul(contrast).add(float(0.5)),
+        float(0),
+        float(1),
+      ).mul(horizMask);
+      const inShadow = smoothstep(
+        threshold.sub(0.05),
+        threshold.add(softness),
+        shadowNoise,
+      );
+      const shadowBlend = clamp(
+        inShadow.mul(uCloudShadowStr),
+        float(0),
+        float(1),
+      );
+      const directionalCol = mix(
+        vec3(litColor),
+        vec3(uCloudShadow),
+        shadowBlend,
+      );
+
+      const vertGrad = smoothstep(float(0.05), float(0.4), upDotParam);
+      const vertCol = mix(vec3(uCloudGradientDark), vec3(litColor), vertGrad);
+
+      const cloudColVar = mix(directionalCol, vertCol, uCloudVertStr).toVar();
+
+      If(uCloudGradientStr.greaterThan(float(0.001)), () => {
+        const detailUV = uvBase
+          .mul(uCloudDetailScale)
+          .add(vec2(float(5.73), float(3.17)));
+        const bumpHeight = fbmCloudFast(detailUV);
+        const bumpLit = vertGrad.mul(
+          float(0.5).add(bumpHeight.mul(float(0.5))),
+        );
+        const bumpCol = mix(
+          vec3(uCloudGradientDark),
+          vec3(litColor),
+          clamp(bumpLit, float(0), float(1)),
+        );
+        cloudColVar.assign(mix(cloudColVar, bumpCol, uCloudGradientStr));
+      });
+      let cloudCol = cloudColVar;
+
+      const rimUV = uvBase.sub(sunHoriz.mul(uCloudRimWidth));
+      const rimNoise = fbmCloudFast(rimUV);
       const rimSolid = smoothstep(
         threshold.sub(float(0.02)),
         threshold.add(softness),
@@ -332,7 +422,7 @@ export function createStylizedSky() {
     const sunRays = rayPat.mul(rayFalloff).mul(uSunRayStr).mul(sunDot);
 
     const sunBaseCol = vec3(uSunColor);
-    const sunCoreCol = sunBaseCol.add(float(0.4));
+    const sunCoreCol = sunBaseCol.add(float(0.28));
     const sunFinal = sunBaseCol
       .mul(sunGlow.add(sunDisc).add(sunHalo).add(sunRays))
       .add(sunCoreCol.mul(sunCore));
@@ -397,7 +487,7 @@ export function createStylizedSky() {
       vec3(uCloudSunset),
       sunsetBlend.mul(0.35),
     );
-    const c2 = cloudLayer(
+    const c2 = cloudLayerFar(
       warpedUV2,
       uC2Coverage,
       uC2Softness,
@@ -417,12 +507,13 @@ export function createStylizedSky() {
         .mul(uC1Scale)
         .add(time.mul(uC1WindDir));
       const grBaseUV = cloudUV1;
-      const grStep = grSunUV.sub(grBaseUV).mul(float(1.0 / 8.0));
+      const grSteps = float(6.0);
+      const grStep = grSunUV.sub(grBaseUV).div(grSteps);
       const c1Thresh = float(1.0).sub(uC1Coverage);
       const grUVPos = grBaseUV.toVar();
       const grAcc = float(0.0).toVar();
       const grDecay = float(1.0).toVar();
-      Loop(8, () => {
+      Loop(6, () => {
         grUVPos.addAssign(grStep);
         const s = fbmCloudFast(grUVPos);
         const occluded = smoothstep(c1Thresh, c1Thresh.add(uC1Softness), s);
@@ -433,7 +524,7 @@ export function createStylizedSky() {
       grContrib.assign(
         vec3(uSunColor).mul(
           grAcc
-            .div(float(8.0))
+            .div(grSteps)
             .mul(uGodRayStr)
             .mul(nightBlend.oneMinus())
             .mul(grVis),
@@ -446,9 +537,11 @@ export function createStylizedSky() {
     const starUV = dir.xz.div(dir.y.max(float(0.01))).mul(uStarsDensity);
     const starCell = floor(starUV);
     const starFrac = fract(starUV);
-    const starHash = mx_noise_float(vec3(starCell, float(7.13)))
-      .mul(0.5)
-      .add(0.5);
+    const starHash = fract(
+      sin(dot(starCell, vec2(float(12.9898), float(78.233)))).mul(
+        float(43758.5453),
+      ),
+    );
     const starDist = length(starFrac.sub(0.5));
     const starPt = smoothstep(uStarsSize, float(0.0), starDist).mul(
       step(float(0.85), starHash),
@@ -476,7 +569,7 @@ export function createStylizedSky() {
     fog: false,
   });
 
-  const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 16), mat);
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 44, 22), mat);
   mesh.scale.setScalar(6000);
   mesh.frustumCulled = false;
   mesh.visible = false;

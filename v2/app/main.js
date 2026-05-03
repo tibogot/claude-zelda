@@ -223,6 +223,7 @@ export async function startV2App() {
 
   let pmremGenerator = null;
   let disposeSkyEnv = null;
+  let disposeHdrEnv = null;
   function applyPhysicalSkyMeshUniforms() {
     const S = toolState.physicalSky;
     sky.turbidity.value = S.turbidity;
@@ -256,22 +257,55 @@ export async function startV2App() {
   let hdrTexture = null;
   let hdrFileName = null;
 
+  function rebuildHdrEnv() {
+    if (!hdrTexture) return;
+    try {
+      if (disposeHdrEnv) {
+        disposeHdrEnv();
+        disposeHdrEnv = null;
+      }
+      pmremGenerator = pmremGenerator ?? new THREE.PMREMGenerator(renderer);
+      const pmremRT = pmremGenerator.fromEquirectangular(hdrTexture);
+      scene.environment = pmremRT.texture;
+      scene.background = hdrTexture;
+      disposeHdrEnv = () => pmremRT.dispose();
+    } catch (err) {
+      console.warn("[V2] PMREM from HDR failed; IBL disabled.", err);
+      scene.environment = null;
+      scene.background = hdrTexture;
+    }
+  }
+
   function applySkyMode(mode) {
     toolState.skyMode = mode;
     if (mode === "physical") {
+      if (disposeHdrEnv) {
+        disposeHdrEnv();
+        disposeHdrEnv = null;
+      }
       sky.visible = true;
       scene.background = null;
+      scene.backgroundIntensity = 1;
       rebuildSkyEnv();
     } else if (mode === "hdr") {
       sky.visible = false;
       if (hdrTexture) {
-        scene.background = hdrTexture;
-        scene.environment = hdrTexture;
+        if (disposeSkyEnv) {
+          disposeSkyEnv();
+          disposeSkyEnv = null;
+        }
+        rebuildHdrEnv();
       } else {
+        if (disposeHdrEnv) {
+          disposeHdrEnv();
+          disposeHdrEnv = null;
+        }
         scene.background = null;
+        scene.backgroundIntensity = 1;
         scene.environment = null;
       }
     }
+    updateSunSky();
   }
 
   function importHdr() {
@@ -2026,7 +2060,13 @@ export async function startV2App() {
     sun.shadow.bias = Li.shadowBias;
     sun.shadow.normalBias = Li.shadowNormalBias;
     renderer.toneMappingExposure = Li.exposure;
-    scene.environmentIntensity = Li.envIntensity;
+    if (toolState.skyMode === "hdr") {
+      scene.environmentIntensity = Li.hdrEnvIntensity ?? 1;
+      scene.backgroundIntensity = Li.hdrBackgroundIntensity ?? 0.7;
+    } else {
+      scene.environmentIntensity = Li.envIntensity;
+      scene.backgroundIntensity = 1;
+    }
     applyPhysicalSkyMeshUniforms();
     sky.scale.setScalar(toolState.physicalSky.meshScale);
     if (sky.sunPosition?.value?.copy) {
@@ -2837,7 +2877,9 @@ export async function startV2App() {
   window.addEventListener("resize", () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
+    camera.updateMatrixWorld();
     renderer.setSize(window.innerWidth, window.innerHeight);
+    if (csm?.mainFrustum && toolState.csm.enabled) csm.updateFrustums();
   });
 
   let last = performance.now();
@@ -2852,12 +2894,12 @@ export async function startV2App() {
     const dtSec = dtMs * 0.001;
     playMode.update(dtSec);
     audioSystem.update(dtSec);
-    if (playMode.active) camera.updateMatrixWorld(true);
+    camera.updateMatrixWorld();
     const focusPos = playMode.active ? playMode.playerPos : camera.position;
 
     const Li = toolState.light;
     const S = toolState.physicalSky;
-    const lightSnap = `${Li.sunAzimuth},${Li.sunElevation},${Li.dirColor},${Li.dirIntensity},${Li.hemiSkyColor},${Li.hemiGroundColor},${Li.hemiIntensity},${Li.shadowBias},${Li.shadowNormalBias},${Li.exposure},${Li.envIntensity},${Li.sunDistance},${S.turbidity},${S.rayleigh},${S.mie},${S.mieG},${S.cloudCoverage},${S.cloudDensity},${S.cloudElevation},${S.meshScale}`;
+    const lightSnap = `${Li.sunAzimuth},${Li.sunElevation},${Li.dirColor},${Li.dirIntensity},${Li.hemiSkyColor},${Li.hemiGroundColor},${Li.hemiIntensity},${Li.shadowBias},${Li.shadowNormalBias},${Li.exposure},${Li.envIntensity},${Li.hdrEnvIntensity},${Li.hdrBackgroundIntensity},${Li.sunDistance},${S.turbidity},${S.rayleigh},${S.mie},${S.mieG},${S.cloudCoverage},${S.cloudDensity},${S.cloudElevation},${S.meshScale}`;
     if (lightSnap !== _lastLightSnap) {
       _lastLightSnap = lightSnap;
       updateSunSky();
@@ -2973,6 +3015,7 @@ export async function startV2App() {
       }
       scene.environment = null;
       scene.background = null;
+      if (disposeHdrEnv) disposeHdrEnv();
       if (hdrTexture) hdrTexture.dispose();
       if (disposeSkyEnv) disposeSkyEnv();
       if (pmremGenerator) pmremGenerator.dispose();

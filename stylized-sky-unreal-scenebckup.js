@@ -177,8 +177,7 @@ export async function createStylizedSkyUnrealScene({
   container = document.body,
 } = {}) {
   const scene = new THREE.Scene();
-  // Null so the stylized skydome fills the view; IBL comes from PMREM bake of that sky.
-  scene.background = null;
+  scene.background = new THREE.Color(0x8db9ff);
 
   const camera = new THREE.PerspectiveCamera(
     60,
@@ -249,8 +248,6 @@ export async function createStylizedSkyUnrealScene({
       hemiGroundColor: "#35421e",
       hemiIntensity: 0.45,
       exposure: 1.0,
-      /** IBL strength for `scene.environment` (PMREM from stylized sky). */
-      envIntensity: 1.0,
     },
     dayNight: {
       time: 15.2,
@@ -276,7 +273,7 @@ export async function createStylizedSkyUnrealScene({
     groundRoughnessBase: 0.72,
     groundBrightness: 1.0,
     fogEnabled: true,
-    fogDensity: 0.00008,
+    fogDensity: 0.00016,
     fogAutoSkyColor: true,
     fogColor: "#9bb9c7",
     fogSkyMix: 0.9,
@@ -360,7 +357,6 @@ export async function createStylizedSkyUnrealScene({
     hemi.color.set(params.light.hemiSkyColor).convertSRGBToLinear();
     hemi.groundColor.set(params.light.hemiGroundColor).convertSRGBToLinear();
     hemi.intensity = params.light.hemiIntensity;
-    scene.environmentIntensity = params.light.envIntensity;
   };
   const syncDayNight = (hours) => {
     const h = ((hours % 24) + 24) % 24;
@@ -396,25 +392,12 @@ export async function createStylizedSkyUnrealScene({
   };
   applyLighting();
 
-  let envRebakeTimer = null;
-  function scheduleSkyEnvRebake() {
-    if (params.dayNight.enabled) return;
-    if (envRebakeTimer) clearTimeout(envRebakeTimer);
-    envRebakeTimer = setTimeout(() => {
-      envRebakeTimer = null;
-      rebuildSkyEnv();
-    }, 220);
-  }
-
   const fScene = pane.addFolder({ title: "Scene", expanded: true });
   fScene.addBinding(params, "skyVisible").on("change", (ev) => {
     sky.mesh.visible = ev.value;
   });
   fScene.addBinding(params, "groundVisible").on("change", (ev) => {
     ground.visible = ev.value;
-  });
-  fScene.addButton({ title: "Rebake sky IBL (PMREM)" }).on("click", () => {
-    rebuildSkyEnv();
   });
 
   const fGround = pane.addFolder({ title: "Ground", expanded: false });
@@ -452,25 +435,13 @@ export async function createStylizedSkyUnrealScene({
   fFog.addBinding(params, "fogBrightness", { min: 0.4, max: 2, step: 0.01, label: "brightness" }).on("change", () => applyFogSettings(sunDir.y));
 
   const lightFolder = pane.addFolder({ title: "Lighting", expanded: false });
-  lightFolder
-    .addBinding(params.light, "sunAzimuth", { label: "Sun azimuth", min: 0, max: 360, step: 1 })
-    .on("change", scheduleSkyEnvRebake);
-  lightFolder
-    .addBinding(params.light, "sunElevation", { label: "Sun elevation", min: -10, max: 90, step: 1 })
-    .on("change", scheduleSkyEnvRebake);
+  lightFolder.addBinding(params.light, "sunAzimuth", { label: "Sun azimuth", min: 0, max: 360, step: 1 });
+  lightFolder.addBinding(params.light, "sunElevation", { label: "Sun elevation", min: -10, max: 90, step: 1 });
   lightFolder.addBinding(params.light, "dirColor", { label: "Sun color", view: "color" }).on("change", applyLighting);
   lightFolder.addBinding(params.light, "dirIntensity", { label: "Sun intensity", min: 0, max: 5, step: 0.1 }).on("change", applyLighting);
   lightFolder.addBinding(params.light, "hemiSkyColor", { label: "Ambient sky", view: "color" }).on("change", applyLighting);
   lightFolder.addBinding(params.light, "hemiGroundColor", { label: "Ambient ground", view: "color" }).on("change", applyLighting);
   lightFolder.addBinding(params.light, "hemiIntensity", { label: "Ambient intensity", min: 0, max: 3, step: 0.1 }).on("change", applyLighting);
-  lightFolder
-    .addBinding(params.light, "envIntensity", {
-      label: "Sky IBL (env)",
-      min: 0,
-      max: 3,
-      step: 0.05,
-    })
-    .on("change", applyLighting);
   lightFolder.addBinding(params.light, "exposure", { label: "Exposure", min: 0.1, max: 2, step: 0.05 }).on("change", applyLighting);
 
   const dnFolder = pane.addFolder({ title: "Day / Night", expanded: false });
@@ -493,19 +464,16 @@ export async function createStylizedSkyUnrealScene({
     params.dayNight.time = 12;
     syncDayNight(12);
     dnTimeBinding.refresh();
-    rebuildSkyEnv();
   });
   dnFolder.addButton({ title: "Set to Sunset" }).on("click", () => {
     params.dayNight.time = 18;
     syncDayNight(18);
     dnTimeBinding.refresh();
-    rebuildSkyEnv();
   });
   dnFolder.addButton({ title: "Set to Night" }).on("click", () => {
     params.dayNight.time = 0;
     syncDayNight(0);
     dnTimeBinding.refresh();
-    rebuildSkyEnv();
   });
 
   const fWind = pane.addFolder({ title: "Cloud Wind", expanded: false });
@@ -612,34 +580,6 @@ export async function createStylizedSkyUnrealScene({
   timer.connect(document);
   const sunDir = new THREE.Vector3();
 
-  let pmremGenerator = null;
-  let disposeSkyEnv = null;
-
-  function rebuildSkyEnv() {
-    sunDir.copy(computeSunDir(params.light.sunAzimuth, params.light.sunElevation));
-    sky.update(sunDir, camera.position);
-    try {
-      if (disposeSkyEnv) {
-        disposeSkyEnv();
-        disposeSkyEnv = null;
-      }
-      pmremGenerator = pmremGenerator ?? new THREE.PMREMGenerator(renderer);
-      const envScene = new THREE.Scene();
-      const probe = new THREE.Mesh(sky.mesh.geometry, sky.mesh.material);
-      probe.position.copy(sky.mesh.position);
-      probe.scale.copy(sky.mesh.scale);
-      probe.rotation.copy(sky.mesh.rotation);
-      probe.quaternion.copy(sky.mesh.quaternion);
-      probe.visible = true;
-      envScene.add(probe);
-      const pmremRT = pmremGenerator.fromScene(envScene, 0.04);
-      scene.environment = pmremRT.texture;
-      disposeSkyEnv = () => pmremRT.dispose();
-    } catch (err) {
-      console.warn("[stylized-sky-unreal-scene] PMREM from sky failed:", err);
-    }
-  }
-
   function updateSunAndSky() {
     sunDir.copy(computeSunDir(params.light.sunAzimuth, params.light.sunElevation));
 
@@ -655,13 +595,9 @@ export async function createStylizedSkyUnrealScene({
   function onResize() {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
-    camera.updateMatrixWorld();
     renderer.setSize(window.innerWidth, window.innerHeight);
   }
   window.addEventListener("resize", onResize);
-
-  updateSunAndSky();
-  rebuildSkyEnv();
 
   renderer.setAnimationLoop(() => {
     timer.update();
@@ -673,7 +609,6 @@ export async function createStylizedSkyUnrealScene({
     }
     applyLighting();
     controls.update();
-    camera.updateMatrixWorld();
     updateSunAndSky();
     renderer.render(scene, camera);
   });
@@ -687,10 +622,6 @@ export async function createStylizedSkyUnrealScene({
     pane,
     dispose() {
       renderer.setAnimationLoop(null);
-      if (envRebakeTimer !== null) {
-        clearTimeout(envRebakeTimer);
-        envRebakeTimer = null;
-      }
       if (groundRebuildTimer !== null) {
         clearTimeout(groundRebuildTimer);
       }
@@ -702,13 +633,16 @@ export async function createStylizedSkyUnrealScene({
       ground.material.dispose();
       groundTex.colorMap.dispose();
       groundTex.roughnessMap.dispose();
-      if (disposeSkyEnv) disposeSkyEnv();
-      scene.environment = null;
-      if (pmremGenerator) pmremGenerator.dispose();
       renderer.dispose();
       if (renderer.domElement.parentElement) {
         renderer.domElement.parentElement.removeChild(renderer.domElement);
       }
     },
   };
+}
+
+if (typeof window !== "undefined") {
+  createStylizedSkyUnrealScene().catch((err) => {
+    console.error("[stylized-sky-unreal-scene] failed to start:", err);
+  });
 }

@@ -151,6 +151,10 @@ export const V2_CONFIG = {
     hemiGroundColor: "#88aa55",
     hemiIntensity: 0.4,
     envIntensity: 0.2,
+    /** Used only when sky mode is Import HDR (physical sky uses `envIntensity`). */
+    hdrEnvIntensity: 1,
+    /** Equirect `scene.background` strength in HDR mode (drei-style). */
+    hdrBackgroundIntensity: 0.7,
     exposure: 0.5,
     sunDistance: 600,
     shadowBias: -0.0005,
