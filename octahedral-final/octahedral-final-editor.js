@@ -42,13 +42,6 @@ import {
   tangentLocal,
   viewportCoordinate,
   uv,
-  shadowPositionWorld,
-  lightShadowMatrix,
-  reference,
-  renderGroup,
-  BasicShadowFilter,
-  PCFShadowFilter,
-  PCFSoftShadowFilter,
 } from "three/tsl";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
@@ -217,6 +210,34 @@ function linearToSrgb(pixels) {
   }
 }
 
+function downsample2x(src, srcSize) {
+  const dstSize = srcSize >> 1;
+  const dst = new Uint8Array(dstSize * dstSize * 4);
+  for (let y = 0; y < dstSize; y++) {
+    for (let x = 0; x < dstSize; x++) {
+      let r = 0, g = 0, b = 0, a = 0;
+      for (let dy = 0; dy < 2; dy++) {
+        for (let dx = 0; dx < 2; dx++) {
+          const si = ((y * 2 + dy) * srcSize + (x * 2 + dx)) * 4;
+          const sa = src[si + 3];
+          r += src[si] * sa;
+          g += src[si + 1] * sa;
+          b += src[si + 2] * sa;
+          a += sa;
+        }
+      }
+      const di = (y * dstSize + x) * 4;
+      if (a > 0) {
+        dst[di] = Math.round(r / a);
+        dst[di + 1] = Math.round(g / a);
+        dst[di + 2] = Math.round(b / a);
+        dst[di + 3] = Math.round(a / 4);
+      }
+    }
+  }
+  return dst;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  Atlas edge dilation — per-cell flood-fill, sets alpha=1 on dilated pixels
 // ═══════════════════════════════════════════════════════════════════════════
@@ -272,7 +293,7 @@ function dilateAtlasEdges(pixels, size, grid, iterations = 8) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /** Padding on bake ortho vs tight bounding sphere (same as legacy sphereMargin). */
-const BAKE_SPHERE_MARGIN = 1.04;
+const BAKE_SPHERE_MARGIN = 1.02;
 
 async function bakeAtlases(renderer, bakeMeshData, opts) {
   const { grid, atlasSize, maxAniso, cellPad = 4, fullOctahedral = false } = opts;
@@ -313,6 +334,7 @@ async function bakeAtlases(renderer, bakeMeshData, opts) {
 
   for (const { geometry, material } of bakeMeshData) {
     const hasAlpha = !!(material.map || material.alphaMap);
+    const hasVertexColors = !!(geometry.attributes.color && material.vertexColors);
 
     if (material.normalMap && !geometry.attributes.tangent) {
       try { geometry.computeTangents(); } catch (e) { /* skip if tangents fail */ }
@@ -323,6 +345,7 @@ async function bakeAtlases(renderer, bakeMeshData, opts) {
         ? material.color.clone()
         : new THREE.Color(0xffffff),
       map: material.map || null,
+      vertexColors: hasVertexColors,
       alphaTest: hasAlpha ? BAKE_ALPHA : 0,
       alphaMap: material.alphaMap || null,
       side: THREE.DoubleSide,
@@ -374,10 +397,13 @@ async function bakeAtlases(renderer, bakeMeshData, opts) {
     depthScene.add(new THREE.Mesh(geometry.clone(), dMat));
   }
 
-  const cellRT = new THREE.RenderTarget(innerCS, innerCS, {
+  const ssScale = 2;
+  const ssCS = innerCS * ssScale;
+  const cellRT = new THREE.RenderTarget(ssCS, ssCS, {
     format: THREE.RGBAFormat,
     type: THREE.UnsignedByteType,
     colorSpace: THREE.LinearSRGBColorSpace,
+    samples: 1,
   });
 
   const savedTM = renderer.toneMapping;
@@ -396,8 +422,9 @@ async function bakeAtlases(renderer, bakeMeshData, opts) {
   const rmPixels = new Uint8Array(atlasSize * atlasSize * 4);
   const depthPixels = new Uint8Array(atlasSize * atlasSize * 4);
 
-  const tightRow = innerCS * 4;
-  const paddedRow = Math.ceil(tightRow / 256) * 256;
+  const ssTightRow = ssCS * 4;
+  const ssPaddedRow = Math.ceil(ssTightRow / 256) * 256;
+  const ssFlipped = new Uint8Array(ssCS * ssCS * 4);
 
   const scenes = [
     [colorScene, colorPixels],
@@ -419,21 +446,25 @@ async function bakeAtlases(renderer, bakeMeshData, opts) {
         renderer.render(sc, ortho);
 
         const buf = await renderer.readRenderTargetPixelsAsync(
-          cellRT,
-          0,
-          0,
-          innerCS,
-          innerCS,
+          cellRT, 0, 0, ssCS, ssCS,
         );
         const src = new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
         const srcStride =
-          src.length > innerCS * innerCS * 4 ? paddedRow : tightRow;
+          src.length > ssCS * ssCS * 4 ? ssPaddedRow : ssTightRow;
 
+        for (let row = 0; row < ssCS; row++) {
+          const srcOff = (ssCS - 1 - row) * srcStride;
+          const dstOff = row * ssTightRow;
+          ssFlipped.set(src.subarray(srcOff, srcOff + ssTightRow), dstOff);
+        }
+
+        const dsCell = downsample2x(ssFlipped, ssCS);
+        const dsRow = innerCS * 4;
         for (let row = 0; row < innerCS; row++) {
-          const srcOff = (innerCS - 1 - row) * srcStride;
           const dy = gy * cs + pad + row;
           const dstOff = (dy * atlasSize + gx * cs + pad) * 4;
-          dest.set(src.subarray(srcOff, srcOff + tightRow), dstOff);
+          const srcOff = row * dsRow;
+          dest.set(dsCell.subarray(srcOff, srcOff + dsRow), dstOff);
         }
       }
     }
@@ -478,47 +509,6 @@ async function bakeAtlases(renderer, bakeMeshData, opts) {
 //  Impostor Material  —  TSL PBR + RM atlas + debug + freeze + dither
 // ═══════════════════════════════════════════════════════════════════════════
 
-/**
- * Sample the directional light's shadow map without calling TSL shadow(light).
- * shadow(light) always allocates a NEW ShadowNode; the scene light already has one,
- * so two nodes fight over light.shadow.map and the impostor often sees no shadowing.
- * This path uses the same depth texture the renderer fills each frame (uDepth.value
- * updated from dirLight.shadow.map.depthTexture in the render loop).
- * `depthTexNode` must be from `texture(depthTex)`, not `uniform(depthTex)` — filters call `texture(depth, uv)` internally.
- */
-function directionalShadowVisibility(dirLight, depthTexNode, filterFn) {
-  const sh = dirLight.shadow;
-  const normalBias = reference("normalBias", "float", sh).setGroup(renderGroup);
-  const bias = reference("bias", "float", sh).setGroup(renderGroup);
-
-  const biasedWorld = add(shadowPositionWorld, mul(normalWorld, normalBias));
-  const clip = lightShadowMatrix(dirLight).mul(vec4(biasedWorld, float(1)));
-  const ndc = div(clip.xyz, clip.w);
-  const coordZ = ndc.z;
-  const shadowCoord = vec3(
-    ndc.x,
-    sub(float(1), ndc.y),
-    add(coordZ, bias),
-  );
-
-  const frustumTest = shadowCoord.x
-    .greaterThanEqual(float(0))
-    .and(shadowCoord.x.lessThanEqual(float(1)))
-    .and(shadowCoord.y.greaterThanEqual(float(0)))
-    .and(shadowCoord.y.lessThanEqual(float(1)))
-    .and(shadowCoord.z.lessThanEqual(float(1)));
-
-  const raw = filterFn({
-    depthTexture: depthTexNode,
-    shadowCoord,
-    shadow: sh,
-    depthLayer: 0,
-  });
-  const shadowIntensity = reference("intensity", "float", sh).setGroup(renderGroup);
-  const filtered = frustumTest.select(raw, float(1));
-  return mix(float(1), filtered, shadowIntensity);
-}
-
 function createImpostorMaterial(
   colorTex,
   normalTex,
@@ -528,9 +518,6 @@ function createImpostorMaterial(
   gridVal,
   atlasSize,
   cellPad,
-  /** Scene sun — shadow map depth is sampled each frame via uShadowMapDepth. */
-  dirLight,
-  renderer,
   { fullOctahedral = false } = {},
 ) {
   const fullOcta = fullOctahedral;
@@ -538,20 +525,13 @@ function createImpostorMaterial(
   const uScale = uniform(float(impostorScale));
   const uCenter = uniform(new THREE.Vector3());
 
-  const uSunDir = uniform(new THREE.Vector3(0.5, 0.8, 0.3).normalize());
-  const uSunColor = uniform(new THREE.Vector3(3.0, 2.562, 2.169));
-  const uAmbColor = uniform(new THREE.Vector3(0.062, 0.08, 0.101));
-  const uHemiSky = uniform(new THREE.Vector3(0.053, 0.098, 0.242));
-  const uHemiGround = uniform(new THREE.Vector3(0.02, 0.013, 0.006));
   const uNormStr = uniform(float(1.0));
-  const uRimStr = uniform(float(0.14));
-  const uRimPow = uniform(float(3.0));
-  const uRimCol = uniform(new THREE.Vector3(0.4, 0.5, 0.65));
   const uAlphaCutoff = uniform(float(0.15));
   const uEdgeSmooth = uniform(float(1.5));
-  const uDiffuseWrap = uniform(float(0.0));
   const uParallaxStr = uniform(float(0.0));
   const uDither = uniform(float(0));
+  /** 1 = barycentric blend across the 3 cells, 0 = dominant cell (same weights as solid color). */
+  const uNormRmBarycentric = uniform(float(0));
   const uDebugMode = uniform(float(0)); // 0=lit, 1=normals, 2=raw atlas
   const uFreeze = uniform(float(0));
   const uFreezeDir = uniform(new THREE.Vector3(0, 0, 1));
@@ -711,209 +691,120 @@ function createImpostorMaterial(
     return getUV(uv3, frame);
   });
 
-  const phDepth = new THREE.DepthTexture(4, 4);
-  phDepth.compareFunction = THREE.LessEqualCompare;
-  const uShadowMapDepth = texture(phDepth);
+  // ── fragment: atlas sampling (nodes computed directly, shared across material slots) ──
+  const nm1_f = vec2(sub(uSPS, 1), sub(uSPS, 1));
 
-  let shadowFilterFn = PCFSoftShadowFilter;
-  const smt = renderer.shadowMap.type;
-  if (smt === THREE.BasicShadowMap) shadowFilterFn = BasicShadowFilter;
-  else if (smt === THREE.PCFShadowMap) shadowFilterFn = PCFShadowFilter;
+  const cn1 = decode(vS1, nm1_f);
+  const cn2 = decode(vS2, nm1_f);
+  const cn3 = decode(vS3, nm1_f);
 
-  const sunShadow = directionalShadowVisibility(
-    dirLight,
-    uShadowMapDepth,
-    shadowFilterFn,
+  const puv1 = depthParallax(vUV1, cn1, vS1);
+  const puv2 = depthParallax(vUV2, cn2, vS2);
+  const puv3 = depthParallax(vUV3, cn3, vS3);
+
+  const c1 = texture(colorTex, puv1);
+  const c2 = texture(colorTex, puv2);
+  const c3 = texture(colorTex, puv3);
+
+  const isDom1 = vWeight.x
+    .greaterThanEqual(vWeight.y)
+    .and(vWeight.x.greaterThanEqual(vWeight.z));
+  const isDom2 = vWeight.y.greaterThanEqual(vWeight.z);
+  const domAlpha = select(isDom1, c1.a, select(isDom2, c2.a, c3.a));
+  const domRgb = select(isDom1, c1.rgb, select(isDom2, c2.rgb, c3.rgb));
+
+  const wSum = add(add(vWeight.x, vWeight.y), vWeight.z);
+  const nw1 = div(vWeight.x, max(wSum, float(0.001)));
+  const nw2 = div(vWeight.y, max(wSum, float(0.001)));
+  const nw3 = div(vWeight.z, max(wSum, float(0.001)));
+  const px = viewportCoordinate.xy;
+  const ign = fract(
+    mul(
+      float(52.9829189),
+      fract(add(mul(float(0.06711056), px.x), mul(float(0.00583715), px.y))),
+    ),
   );
+  const nw12 = add(nw1, nw2);
+  const ditS1 = ign.lessThan(nw1);
+  const ditS2 = ign.lessThan(nw12);
+  const ditAlpha = select(ditS1, c1.a, select(ditS2, c2.a, c3.a));
+  const ditRgb = select(ditS1, c1.rgb, select(ditS2, c2.rgb, c3.rgb));
 
-  // ── fragment stage ──
-  const colorNodeFn = Fn(() => {
-    const nm1_f = vec2(sub(uSPS, 1), sub(uSPS, 1));
+  const useDit = uDither.greaterThan(float(0.5));
+  const selAlpha = select(useDit, ditAlpha, domAlpha);
+  const selRgb = select(useDit, ditRgb, domRgb);
 
-    const cn1 = decode(vS1, nm1_f);
-    const cn2 = decode(vS2, nm1_f);
-    const cn3 = decode(vS3, nm1_f);
+  const edgeW = mul(fwidth(selAlpha), uEdgeSmooth);
+  const atlasAlpha = smoothstep(
+    sub(uAlphaCutoff, edgeW),
+    add(uAlphaCutoff, edgeW),
+    selAlpha,
+  );
+  const atlasAlbedo = selRgb;
 
-    const puv1 = depthParallax(vUV1, cn1, vS1);
-    const puv2 = depthParallax(vUV2, cn2, vS2);
-    const puv3 = depthParallax(vUV3, cn3, vS3);
+  const n1 = texture(normalTex, puv1).xyz;
+  const n2 = texture(normalTex, puv2).xyz;
+  const n3 = texture(normalTex, puv3).xyz;
+  const wN1 = normalize(sub(mul(n1, 2.0), 1.0));
+  const wN2 = normalize(sub(mul(n2, 2.0), 1.0));
+  const wN3 = normalize(sub(mul(n3, 2.0), 1.0));
+  const blendedNorm = normalize(
+    add(add(mul(wN1, nw1), mul(wN2, nw2)), mul(wN3, nw3)),
+  );
+  const domN = select(isDom1, wN1, select(isDom2, wN2, wN3));
 
-    const c1 = texture(colorTex, puv1);
-    const c2 = texture(colorTex, puv2);
-    const c3 = texture(colorTex, puv3);
+  const rm1 = texture(rmTex, puv1);
+  const rm2 = texture(rmTex, puv2);
+  const rm3 = texture(rmTex, puv3);
+  const rmBlend = add(add(mul(rm1.xy, nw1), mul(rm2.xy, nw2)), mul(rm3.xy, nw3));
+  const domRm = select(isDom1, rm1.xy, select(isDom2, rm2.xy, rm3.xy));
 
-    // Dominant sprite selection (single cell — crisp silhouettes, no ghosting)
-    const isDom1 = vWeight.x
-      .greaterThanEqual(vWeight.y)
-      .and(vWeight.x.greaterThanEqual(vWeight.z));
-    const isDom2 = vWeight.y.greaterThanEqual(vWeight.z);
-    const domAlpha = select(isDom1, c1.a, select(isDom2, c2.a, c3.a));
-    const domRgb = select(isDom1, c1.rgb, select(isDom2, c2.rgb, c3.rgb));
+  const roughB = clamp(rmBlend.x, float(0.05), float(1));
+  const metalB = clamp(rmBlend.y, float(0), float(1));
+  const roughD = clamp(domRm.x, float(0.05), float(1));
+  const metalD = clamp(domRm.y, float(0), float(1));
+  const atlasRough = mix(roughD, roughB, uNormRmBarycentric);
+  const atlasMetal = mix(metalD, metalB, uNormRmBarycentric);
 
-    // IGN dither (optional alternative)
-    const wSum = add(add(vWeight.x, vWeight.y), vWeight.z);
-    const nw1 = div(vWeight.x, max(wSum, float(0.001)));
-    const px = viewportCoordinate.xy;
-    const ign = fract(
-      mul(
-        float(52.9829189),
-        fract(add(mul(float(0.06711056), px.x), mul(float(0.00583715), px.y))),
-      ),
-    );
-    const nw12 = div(add(vWeight.x, vWeight.y), max(wSum, float(0.001)));
-    const ditS1 = ign.lessThan(nw1);
-    const ditS2 = ign.lessThan(nw12);
-    const ditAlpha = select(ditS1, c1.a, select(ditS2, c2.a, c3.a));
-    const ditRgb = select(ditS1, c1.rgb, select(ditS2, c2.rgb, c3.rgb));
+  const nBlend = normalize(mix(vec3(0, 1, 0), blendedNorm, uNormStr));
+  const nDom = normalize(mix(vec3(0, 1, 0), domN, uNormStr));
+  const atlasNormal = normalize(mix(nDom, nBlend, uNormRmBarycentric));
 
-    const useDit = uDither.greaterThan(float(0.5));
-    const selAlpha = select(useDit, ditAlpha, domAlpha);
-    const selRgb = select(useDit, ditRgb, domRgb);
+  // Debug modes: use emissive to bypass PBR lighting
+  const isNormViz = uDebugMode
+    .greaterThan(float(0.5))
+    .and(uDebugMode.lessThan(float(1.5)));
+  const isRawViz = uDebugMode.greaterThan(float(1.5));
+  const isDebug = uDebugMode.greaterThan(float(0.5));
+  const normVizColor = mul(add(atlasNormal, float(1)), float(0.5));
+  const debugEmissive = select(isRawViz, atlasAlbedo, select(isNormViz, normVizColor, vec3(0)));
 
-    const edgeW = mul(fwidth(selAlpha), uEdgeSmooth);
-    const alpha = smoothstep(
-      sub(uAlphaCutoff, edgeW),
-      add(uAlphaCutoff, edgeW),
-      selAlpha,
-    );
-    const albedo = saturate(mul(selRgb, div(1, max(selAlpha, float(0.001)))));
-
-    // Normals
-    const n1 = texture(normalTex, puv1).xyz;
-    const n2 = texture(normalTex, puv2).xyz;
-    const n3 = texture(normalTex, puv3).xyz;
-    const normEnc = select(
-      useDit,
-      select(ditS1, n1, select(ditS2, n2, n3)),
-      select(isDom1, n1, select(isDom2, n2, n3)),
-    );
-    const wNormRaw = normalize(sub(mul(normEnc, 2.0), 1.0));
-    const wNorm = normalize(mix(vec3(0, 1, 0), wNormRaw, uNormStr));
-
-    // Roughness / metalness
-    const rm1 = texture(rmTex, puv1);
-    const rm2 = texture(rmTex, puv2);
-    const rm3 = texture(rmTex, puv3);
-    const rmSel = select(
-      useDit,
-      select(ditS1, rm1, select(ditS2, rm2, rm3)),
-      select(isDom1, rm1, select(isDom2, rm2, rm3)),
-    );
-    const rough = clamp(rmSel.x, float(0.05), float(1));
-    const metal = clamp(rmSel.y, float(0), float(1));
-    const oneMinusMetal = sub(float(1), metal);
-
-    // ── Debug: normals viz ──
-    const isNormViz = uDebugMode
-      .greaterThan(float(0.5))
-      .and(uDebugMode.lessThan(float(1.5)));
-    // ── Debug: raw atlas ──
-    const isRawViz = uDebugMode.greaterThan(float(1.5));
-
-    // ── PBR lighting ──
-    const INV_PI = float(0.31831);
-    const viewDir = normalize(sub(cameraPosition, positionWorld));
-    const rawNdotL = dot(wNorm, uSunDir);
-    const NdotL = max(rawNdotL, float(0));
-    const NdotLWrap = div(
-      add(NdotL, uDiffuseWrap),
-      add(float(1), uDiffuseWrap),
-    );
-    const NdotV = max(dot(wNorm, viewDir), float(0.001));
-
-    const diffuse = mul(
-      mul(mul(mul(NdotLWrap, INV_PI), oneMinusMetal), albedo),
-      uSunColor,
-    );
-
-    const H = normalize(add(uSunDir, viewDir));
-    const NdotH = max(dot(wNorm, H), float(0));
-    const HdotV = max(dot(H, viewDir), float(0.001));
-    const a2 = pow(rough, float(4));
-    const dNH = add(mul(mul(NdotH, NdotH), sub(a2, 1)), 1);
-    const D = div(a2, add(mul(float(3.14159), mul(dNH, dNH)), float(0.001)));
-    const F0 = mix(vec3(0.04, 0.04, 0.04), albedo, metal);
-    const F = add(
-      F0,
-      mul(sub(vec3(1, 1, 1), F0), pow(sub(1, HdotV), float(5))),
-    );
-    const k = div(mul(add(rough, 1), add(rough, 1)), 8);
-    const G1V = div(NdotV, add(mul(NdotV, sub(1, k)), k));
-    const G1L = div(NdotL, add(mul(NdotL, sub(1, k)), add(k, float(0.001))));
-    const spec = mul(
-      div(
-        mul(mul(D, F), mul(G1V, G1L)),
-        add(mul(mul(4, NdotV), NdotL), float(0.001)),
-      ),
-      mul(uSunColor, max(NdotL, float(0))),
-    );
-
-    const hemiT = mul(add(wNorm.y, 1.0), 0.5);
-    const hemiIrrad = add(uAmbColor, mix(uHemiGround, uHemiSky, hemiT));
-    const ambient = mul(mul(mul(hemiIrrad, INV_PI), oneMinusMetal), albedo);
-
-    const oneMinusRough = sub(float(1), rough);
-    const maxSmooth = max(
-      vec3(oneMinusRough, oneMinusRough, oneMinusRough),
-      F0,
-    );
-    const envF = add(
-      F0,
-      mul(sub(maxSmooth, F0), pow(sub(float(1), NdotV), float(5))),
-    );
-    const envColor = mix(uHemiGround, uHemiSky, hemiT);
-    const indirectSpec = mul(envF, envColor);
-
-    const rim = mul(mul(uRimStr, pow(sub(1, NdotV), uRimPow)), uRimCol);
-    const sunLit = add(diffuse, spec);
-    const shadowedSun = mul(sunLit, sunShadow);
-    const lit = add(add(add(shadowedSun, ambient), indirectSpec), rim);
-
-    // Final output: pick debug mode or full PBR
-    const normVizColor = mul(add(wNorm, float(1)), float(0.5));
-    const finalRgb = select(
-      isRawViz,
-      albedo,
-      select(isNormViz, normVizColor, lit),
-    );
-
-    return vec4(finalRgb, alpha);
-  });
-
-  const mat = new THREE.MeshBasicNodeMaterial({ side: THREE.FrontSide });
+  const mat = new THREE.MeshStandardNodeMaterial({ side: THREE.FrontSide });
   mat.positionNode = posNodeFn();
-  mat.colorNode = colorNodeFn();
+  mat.colorNode = select(isDebug, vec3(0), atlasAlbedo);
+  mat.normalNode = atlasNormal;
+  mat.roughnessNode = select(isDebug, float(1), atlasRough);
+  mat.metalnessNode = select(isDebug, float(0), atlasMetal);
+  mat.opacityNode = atlasAlpha;
+  mat.emissiveNode = debugEmissive;
   mat.transparent = false;
   mat.alphaTest = 0.005;
   mat.depthWrite = true;
 
-  mat.receiveShadow = true;
-  mat.receivedShadowPositionNode = Fn(() => positionWorld)();
-
   return {
     mat,
     uCenter,
-    uSunDir,
-    uSunColor,
-    uAmbColor,
-    uHemiSky,
-    uHemiGround,
     uNormStr,
-    uRimStr,
-    uRimPow,
-    uRimCol,
     uAlphaCutoff,
     uEdgeSmooth,
-    uDiffuseWrap,
     uParallaxStr,
     uScale,
     uSPS,
     uDither,
+    uNormRmBarycentric,
     uDebugMode,
     uFreeze,
     uFreezeDir,
-    uShadowMapDepth,
-    shadowPlaceholder: phDepth,
   };
 }
 
@@ -1284,8 +1175,6 @@ export async function run() {
         P.grid,
         P.atlasSize,
         P.cellPad,
-        dirLight,
-        renderer,
         { fullOctahedral: P.fullOctahedral },
       );
 
@@ -1304,7 +1193,6 @@ export async function run() {
       impostor.scale.setScalar(2 * R);
       impostor.frustumCulled = false;
       imp.uCenter.value.copy(impWorldCenter);
-      impostor.castShadow = P.impostorCastShadow;
       impostor.receiveShadow = true;
       scene.add(impostor);
 
@@ -1588,14 +1476,12 @@ export async function run() {
     roughness: 0.35,
     metalness: 0.15,
     normalStr: 1.0,
+    /** Impostor: 'dominant' matches solid color cell; 'blend' barycentrics N+RM (can ghost). */
+    impNormRmMode: "dominant",
     dither: false,
-    rimStr: 0.14,
-    rimPow: 3.0,
     alphaCutoff: 0.15,
     edgeSmooth: 1.5,
-    diffuseWrap: 0.0,
     parallaxStr: 0.0,
-    impostorCastShadow: false,
     debugMode: 0,
     freeze: false,
     autoOrbit: false,
@@ -1616,34 +1502,11 @@ export async function run() {
     renderer.toneMappingExposure = P.exposure;
 
     if (imp) {
-      imp.uSunDir.value.copy(d);
-      imp.uSunColor.value.set(
-        1.0 * P.sunIntensity,
-        0.854 * P.sunIntensity,
-        0.723 * P.sunIntensity,
-      );
-      imp.uHemiSky.value.set(
-        hemiLight.color.r * hemiLight.intensity,
-        hemiLight.color.g * hemiLight.intensity,
-        hemiLight.color.b * hemiLight.intensity,
-      );
-      imp.uHemiGround.value.set(
-        hemiLight.groundColor.r * hemiLight.intensity,
-        hemiLight.groundColor.g * hemiLight.intensity,
-        hemiLight.groundColor.b * hemiLight.intensity,
-      );
-      imp.uAmbColor.value.set(
-        ambLight.color.r * ambLight.intensity,
-        ambLight.color.g * ambLight.intensity,
-        ambLight.color.b * ambLight.intensity,
-      );
       imp.uNormStr.value = P.normalStr;
       imp.uDither.value = P.dither ? 1 : 0;
-      imp.uRimStr.value = P.rimStr;
-      imp.uRimPow.value = P.rimPow;
+      imp.uNormRmBarycentric.value = P.impNormRmMode === "blend" ? 1 : 0;
       imp.uAlphaCutoff.value = P.alphaCutoff;
       imp.uEdgeSmooth.value = P.edgeSmooth;
-      imp.uDiffuseWrap.value = P.diffuseWrap;
       imp.uParallaxStr.value = P.parallaxStr;
       imp.uDebugMode.value = P.debugMode;
       imp.uFreeze.value = P.freeze ? 1 : 0;
@@ -1660,7 +1523,6 @@ export async function run() {
     }
     if (impostor) {
       impostor.visible = P.showImpostor;
-      impostor.castShadow = P.impostorCastShadow;
     }
     if (elDockAp) elDockAp.style.display = P.showAtlas ? "flex" : "none";
 
@@ -1772,26 +1634,20 @@ export async function run() {
   const fRender = gui.addFolder("Rendering");
   fRender.add(P, "dither").name("Dither crossfade").onChange(syncParams);
   fRender
-    .add(P, "rimStr", 0, 0.5, 0.01)
-    .name("Rim strength")
+    .add(P, "impNormRmMode", {
+      "Dominant cell (N+R/M)": "dominant",
+      "Barycentric blend (N+R/M)": "blend",
+    })
+    .name("N / rough·metal cells")
     .onChange(syncParams);
-  fRender.add(P, "rimPow", 1, 8, 0.5).name("Rim power").onChange(syncParams);
   fRender
     .add(P, "alphaCutoff", 0.01, 0.5, 0.01)
     .name("Alpha cutoff")
     .onChange(syncParams);
   fRender.add(P, "edgeSmooth", 0, 4, 0.1).name("Edge AA").onChange(syncParams);
   fRender
-    .add(P, "diffuseWrap", 0, 0.8, 0.05)
-    .name("Diffuse wrap")
-    .onChange(syncParams);
-  fRender
     .add(P, "parallaxStr", 0, 0.5, 0.01)
     .name("Depth parallax")
-    .onChange(syncParams);
-  fRender
-    .add(P, "impostorCastShadow")
-    .name("Cast shadow")
     .onChange(syncParams);
 
   const fDebug = gui.addFolder("Debug / View");
@@ -1978,15 +1834,6 @@ export async function run() {
       camera.position.copy(controls.target).add(offset);
     }
     controls.update();
-
-    if (imp?.uShadowMapDepth) {
-      if (P.impostorCastShadow) {
-        imp.uShadowMapDepth.value = imp.shadowPlaceholder;
-      } else {
-        const smDt = dirLight.shadow.map?.depthTexture;
-        if (smDt) imp.uShadowMapDepth.value = smDt;
-      }
-    }
 
     updateStatsPanel();
 
