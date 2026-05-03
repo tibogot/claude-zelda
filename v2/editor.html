@@ -461,8 +461,12 @@
 </div>
 
 <div class="status-bar">
-  <div class="status-dot"></div>
+  <div class="status-dot" id="statusDot"></div>
   <span id="statusText">Booting...</span>
+  <span id="statusFps" style="font-family:var(--font-mono)"></span>
+  <span id="statusCam" style="font-family:var(--font-mono)"></span>
+  <span id="statusChunks"></span>
+  <span id="statusTris"></span>
 </div>
 
 <script type="module">
@@ -709,7 +713,8 @@ function _dropdown(parent, obj, key, opts) {
   }
   row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><select class="prop-dropdown">${optHtml}</select></div>`;
   const sel = row.querySelector('.prop-dropdown');
-  sel.addEventListener('change', () => { obj[key] = sel.value; onChange?.(); });
+  const _isNum = typeof obj[key] === 'number';
+  sel.addEventListener('change', () => { obj[key] = _isNum ? Number(sel.value) : sel.value; onChange?.(); });
   parent.appendChild(row);
   return { refresh() { sel.value = obj[key]; } };
 }
@@ -758,14 +763,240 @@ const MODE_FOLDERS = {
 const ALWAYS_HIDDEN = new Set(['Global', 'Lighting & atmosphere']);
 const ALWAYS_VISIBLE = new Set(['Terrain/LOD', 'Perf Gate']);
 
+const CUSTOM_MODES = new Set(['sculpt', 'paint']);
+const CUSTOM_KEEP_FOLDERS = {
+  paint: ['Terrain appearance', 'Texture library'],
+};
+
 function syncToolsTab(pane, mode) {
   if (!pane) return;
-  const show = new Set(MODE_FOLDERS[mode] || []);
+  const hasCustom = CUSTOM_MODES.has(mode);
+  const sculptPanel = document.getElementById('sculpt-panel');
+  if (sculptPanel) sculptPanel.style.display = mode === 'sculpt' ? '' : 'none';
+  const paintPanel = document.getElementById('paint-panel');
+  if (paintPanel) paintPanel.style.display = mode === 'paint' ? '' : 'none';
+
+  const kept = CUSTOM_KEEP_FOLDERS[mode] || [];
+  const show = hasCustom ? new Set(kept) : new Set(MODE_FOLDERS[mode] || []);
   for (const child of pane.children) {
     if (ALWAYS_HIDDEN.has(child.title)) { child.hidden = true; continue; }
     if (ALWAYS_VISIBLE.has(child.title)) { child.hidden = false; continue; }
     child.hidden = !show.has(child.title);
   }
+}
+
+// === Build custom Sculpt panel ===
+function buildSculptPanel(app) {
+  const panel = document.createElement('div');
+  panel.id = 'sculpt-panel';
+  const ts = app.toolState;
+  const cfg = app.config;
+  const refreshTp = () => app.ui?.pane.refresh();
+
+  // --- Brush ---
+  const brushBody = _section(panel, 'Brush');
+  _slider(brushBody, ts.brush, 'radius', { label: 'Radius', min: cfg.sculpt.brushMin, max: cfg.sculpt.brushMax, step: 0.5 });
+  _slider(brushBody, ts.brush, 'strength', { label: 'Strength', min: cfg.sculpt.strengthMin, max: cfg.sculpt.strengthMax, step: 0.01 });
+  _slider(brushBody, ts.brush, 'falloff', { label: 'Shape', min: 0.5, max: 4, step: 0.05 });
+  _dropdown(brushBody, ts.brush, 'previewShape', { label: 'Preview', options: { Dome: 'dome', Circle: 'circle' } });
+
+  // --- Stamp mode ---
+  const sculptBody = _section(panel, 'Sculpt');
+  _dropdown(sculptBody, ts, 'sculptMode', { label: 'Stamp', options: {
+    'Brush (raise/lower)': 'raiseLower', 'FBM peak': 'fbmPeak', Noise: 'noise',
+    Terrace: 'terrace', 'Flatten only': 'flatten', Ramp: 'ramp', Erosion: 'erosion',
+  }, onChange: () => { app.clearRampPoint(); refreshTp(); } });
+  _dropdown(sculptBody, ts, 'raiseLowerStamp', { label: 'R/L stamp', options: {
+    Smooth: 'smooth', Plateau: 'plateau', Crater: 'crater',
+  } });
+  _dropdown(sculptBody, ts.brush, 'brushFalloff', { label: 'Falloff', options: {
+    'Cosine (smooth)': 'smooth', Linear: 'linear', Sphere: 'sphere', 'Hard edge': 'hard',
+  } });
+  _button(sculptBody, { title: 'Clear ramp start (R)', onClick: () => app.clearRampPoint() });
+  _separator(sculptBody);
+
+  const enforceSculptClampGap = () => {
+    const minV = cfg.sculpt.sculptClampMin;
+    const maxV = cfg.sculpt.sculptClampMax;
+    if (maxV < minV + 10) cfg.sculpt.sculptClampMax = minV + 10;
+    if (minV > cfg.sculpt.sculptClampMax - 10) cfg.sculpt.sculptClampMin = cfg.sculpt.sculptClampMax - 10;
+  };
+  _slider(sculptBody, cfg.sculpt, 'sculptClampMax', { label: 'Max height', min: 40, max: 4000, step: 10, onChange: () => { enforceSculptClampGap(); app.onConfigChanged(); } });
+  _slider(sculptBody, cfg.sculpt, 'sculptClampMin', { label: 'Min height', min: -800, max: 3990, step: 5, onChange: () => { enforceSculptClampGap(); app.onConfigChanged(); } });
+  _slider(sculptBody, ts.brush, 'spacingFactor', { label: 'Stroke spacing', min: 0.05, max: 1.0, step: 0.01 });
+
+  // --- Ramp shape ---
+  const rampBody = _section(panel, 'Ramp Shape', false);
+  _slider(rampBody, ts.ramp, 'crossExponent', { label: 'Corridor edge', min: 0.5, max: 10, step: 0.05 });
+  _slider(rampBody, ts.ramp, 'alongExponent', { label: 'Grade curve', min: 0.25, max: 4, step: 0.05 });
+
+  // --- Terrace stamp ---
+  const terraceBody = _section(panel, 'Terrace Stamp', false);
+  _slider(terraceBody, ts.terrace, 'step', { label: 'Step height', min: 0.25, max: 30, step: 0.25 });
+  _slider(terraceBody, ts.terrace, 'sharpness', { label: 'Sharpness', min: 0.05, max: 0.95, step: 0.01 });
+
+  // --- Noise stamp ---
+  const noiseBody = _section(panel, 'Noise Stamp', false);
+  _slider(noiseBody, ts.noiseBrush, 'noiseScale', { label: 'Scale', min: 0.3, max: 10, step: 0.1 });
+  _slider(noiseBody, ts.noiseBrush, 'noiseOctaves', { label: 'Octaves', min: 1, max: 8, step: 1 });
+
+  // --- Erosion brush ---
+  const erosionBody = _section(panel, 'Erosion Brush', false);
+  _slider(erosionBody, ts.erosion, 'erosionRate', { label: 'Erode rate', min: 0.01, max: 1, step: 0.01 });
+  _slider(erosionBody, ts.erosion, 'depositionRate', { label: 'Deposit rate', min: 0.01, max: 1, step: 0.01 });
+  _slider(erosionBody, ts.erosion, 'evaporation', { label: 'Evaporation', min: 0, max: 0.1, step: 0.001 });
+  _slider(erosionBody, ts.erosion, 'inertia', { label: 'Inertia', min: 0, max: 1, step: 0.01 });
+  _slider(erosionBody, ts.erosion, 'capacity', { label: 'Capacity', min: 0.5, max: 20, step: 0.5 });
+  _slider(erosionBody, ts.erosion, 'radius', { label: 'Kernel (grid)', min: 0.5, max: 12, step: 0.5 });
+  _separator(erosionBody);
+  _slider(erosionBody, ts.erosion, 'iterations', { label: 'Global iters', min: 500, max: 200000, step: 500 });
+  _button(erosionBody, { title: 'Run global erosion (all chunks)', onClick: () => app.runGlobalErosion() });
+
+  // --- FBM peak stamp ---
+  const fbmBody = _section(panel, 'FBM Peak Stamp', false);
+  _slider(fbmBody, ts.fbmPeak, 'freqMul', { label: 'Detail scale', min: 0.25, max: 4, step: 0.05 });
+  _slider(fbmBody, ts.fbmPeak, 'octaves', { label: 'Octaves', min: 1, max: 8, step: 1 });
+  _slider(fbmBody, ts.fbmPeak, 'spikePower', { label: 'Radial falloff', min: 1, max: 5, step: 0.05 });
+  _slider(fbmBody, ts.fbmPeak, 'base', { label: 'Base lift', min: 0, max: 1.2, step: 0.01 });
+  _slider(fbmBody, ts.fbmPeak, 'ridgeWeight', { label: 'Ridge weight', min: 0, max: 4, step: 0.05 });
+  _slider(fbmBody, ts.fbmPeak, 'gain', { label: 'Strength gain', min: 0.25, max: 6, step: 0.05 });
+
+  // --- Procedural height generator ---
+  const genBody = _section(panel, 'Procedural Height (all chunks)', false);
+  _dropdown(genBody, ts.gen, 'mode', { label: 'Mode', options: { 'Ridge (sharp peaks)': 'ridge', 'FBM (rolling hills)': 'fbm' } });
+  _slider(genBody, ts.gen, 'scale', { label: 'Scale', min: 0.5, max: 12, step: 0.1 });
+  _slider(genBody, ts.gen, 'octaves', { label: 'Octaves', min: 1, max: 8, step: 1 });
+  _slider(genBody, ts.gen, 'height', { label: 'Height', min: 10, max: 300, step: 1 });
+  _slider(genBody, ts.gen, 'seed', { label: 'Seed', min: 0, max: 999, step: 1 });
+  _slider(genBody, ts.gen, 'domainWarp', { label: 'Domain warp', min: 0, max: 2, step: 0.05 });
+  _separator(genBody);
+  _dropdown(genBody, ts.gen, 'dropoffShape', { label: 'Edge shape', options: {
+    Circle: 'circle', 'Ring (mountains)': 'ring', 'Box (fills)': 'box',
+    'Box ring (edges up)': 'invertedBox', 'Organic (noise)': 'noise', 'Organic ring': 'noiseRing',
+  } });
+  _slider(genBody, ts.gen, 'dropoff', { label: 'Edge dropoff', min: 0.3, max: 4, step: 0.05 });
+  _slider(genBody, ts.gen, 'offsetX', { label: 'Offset X', min: -0.45, max: 0.45, step: 0.01 });
+  _slider(genBody, ts.gen, 'offsetZ', { label: 'Offset Z', min: -0.45, max: 0.45, step: 0.01 });
+  _separator(genBody);
+  _slider(genBody, ts.gen, 'plains', { label: 'Plains', min: 0, max: 0.8, step: 0.01 });
+  _slider(genBody, ts.gen, 'tiltX', { label: 'Tilt X', min: -1, max: 1, step: 0.05 });
+  _slider(genBody, ts.gen, 'tiltZ', { label: 'Tilt Z', min: -1, max: 1, step: 0.05 });
+  _toggle(genBody, ts.gen, 'additive', { label: 'Additive' });
+  _button(genBody, { title: 'Generate terrain (all chunks)', onClick: () => app.generateTerrain() });
+
+  // --- Border mountains ---
+  const borderBody = _section(panel, 'Border Mountains', false);
+  _toggle(borderBody, ts.borderMountains, 'enabled', { label: 'Enabled' });
+  _slider(borderBody, ts.borderMountains, 'extent', { label: 'Extent (m)', min: 100, max: 800, step: 25 });
+  _slider(borderBody, ts.borderMountains, 'height', { label: 'Height', min: 20, max: 500, step: 5 });
+  _slider(borderBody, ts.borderMountains, 'steepness', { label: 'Steepness', min: 0.5, max: 4, step: 0.1 });
+  _separator(borderBody);
+  _slider(borderBody, ts.borderMountains, 'noiseScale', { label: 'Noise scale', min: 0.5, max: 10, step: 0.25 });
+  _slider(borderBody, ts.borderMountains, 'noiseOctaves', { label: 'Noise octaves', min: 1, max: 8, step: 1 });
+  _slider(borderBody, ts.borderMountains, 'seed', { label: 'Seed', min: 0, max: 999, step: 1 });
+  _button(borderBody, { title: 'Generate border mountains', onClick: () => app.rebuildBorderMountains() });
+
+  return panel;
+}
+
+// === Build custom Paint panel ===
+function buildPaintPanel(app) {
+  const panel = document.createElement('div');
+  panel.id = 'paint-panel';
+  const ts = app.toolState;
+  const cfg = app.config;
+
+  // --- Brush ---
+  const brushBody = _section(panel, 'Brush');
+  _slider(brushBody, ts.brush, 'radius', { label: 'Radius', min: cfg.sculpt.brushMin, max: cfg.sculpt.brushMax, step: 0.5 });
+  _slider(brushBody, ts.brush, 'strength', { label: 'Strength', min: cfg.sculpt.strengthMin, max: cfg.sculpt.strengthMax, step: 0.01 });
+  _slider(brushBody, ts.brush, 'falloff', { label: 'Shape', min: 0.5, max: 4, step: 0.05 });
+
+  // --- Paint ---
+  const paintBody = _section(panel, 'Paint');
+  const layerLabels = [
+    'Eraser (restore base)', 'Layer 1', 'Layer 2', 'Layer 3', 'Layer 4',
+    'Layer 5', 'Layer 6', 'Layer 7', 'Meadow (TSL)',
+  ];
+  const activeLayerOpts = {};
+  layerLabels.forEach((l, i) => activeLayerOpts[l] = i);
+  _dropdown(paintBody, ts.paint, 'activeLayer', { label: 'Active layer', options: activeLayerOpts });
+
+  const soloOpts = { Off: -1, 'Base (layer 0)': 0, 'Layer 1': 1, 'Layer 2': 2, 'Layer 3': 3, 'Layer 4': 4, 'Layer 5': 5, 'Layer 6': 6, 'Layer 7': 7 };
+  _dropdown(paintBody, ts.paint, 'soloLayer', { label: 'Solo layer', options: soloOpts, onChange: () => app.syncSoloLayer() });
+
+  _slider(paintBody, cfg.paint, 'brushOpacity', { label: 'Brush opacity', min: 0.02, max: 1, step: 0.01 });
+
+  // --- Height Blend ---
+  const hbBody = _section(panel, 'Height Blend', false);
+  _slider(hbBody, ts.paint, 'heightBlend', { label: 'Strength', min: 0, max: 1, step: 0.01, onChange: () => app.syncHeightBlend() });
+  _slider(hbBody, ts.paint, 'heightContrast', { label: 'Contrast', min: 0.01, max: 1, step: 0.01, onChange: () => app.syncHeightBlend() });
+
+  // --- Noise Mask ---
+  const noiseBody = _section(panel, 'Noise Mask', false);
+  _slider(noiseBody, ts.paint, 'noiseMask', { label: 'Amount', min: 0, max: 1, step: 0.02 });
+  _slider(noiseBody, ts.paint, 'noiseScale', { label: 'Scale', min: 0.5, max: 20, step: 0.25 });
+  _slider(noiseBody, ts.paint, 'noiseOctaves', { label: 'Detail', min: 1, max: 6, step: 1 });
+  _toggle(noiseBody, ts.paint, 'noiseEdgeOnly', { label: 'Edge only' });
+
+  // --- Brush Mask ---
+  const maskBody = _section(panel, 'Brush Mask', false);
+  const previewCanvas = document.createElement('canvas');
+  previewCanvas.width = 64;
+  previewCanvas.height = 64;
+  previewCanvas.style.cssText = 'display:block;width:48px;height:48px;margin:6px auto 8px;border:1px solid rgba(255,255,255,0.2);border-radius:4px;image-rendering:pixelated;background:var(--bg-input);';
+  const bm = app.brushMask;
+  bm.renderPreview(previewCanvas);
+
+  _dropdown(maskBody, ts.paint, 'maskPreset', { label: 'Preset', options: {
+    None: 'none', Soft: 'soft', Hard: 'hard', Splatter: 'splatter', Grunge: 'grunge',
+  }, onChange: () => {
+    bm.generateBuiltin(ts.paint.maskPreset);
+    bm.renderPreview(previewCanvas);
+  } });
+  _button(maskBody, { title: 'Load PNG mask', onClick: () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/png,image/jpeg,image/webp';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      await bm.loadFromFile(file);
+      ts.paint.maskPreset = 'custom:' + bm.name;
+      bm.renderPreview(previewCanvas);
+    };
+    input.click();
+  } });
+  maskBody.appendChild(previewCanvas);
+  _slider(maskBody, ts.paint, 'maskRotation', { label: 'Rotation', min: 0, max: 360, step: 1 });
+  _toggle(maskBody, ts.paint, 'maskRandomRotation', { label: 'Random rot.' });
+  _toggle(maskBody, ts.paint, 'maskFollowStroke', { label: 'Follow stroke' });
+
+  // --- Layer Textures ---
+  const layerBody = _section(panel, 'Layer Textures');
+  function buildLayerPickers() {
+    layerBody.innerHTML = '';
+    const lib = app.textureLibrary;
+    const slotOpts = {};
+    for (const s of lib.slots) slotOpts[s.name || s.id] = s.id;
+    for (let i = 0; i < 7; i++) {
+      const idx = i;
+      if (!lib.getSlot(ts.paint.layerSlotIds[idx])) {
+        ts.paint.layerSlotIds[idx] = lib.slots[0]?.id ?? '';
+      }
+      _dropdown(layerBody, ts.paint.layerSlotIds, idx, {
+        label: `Layer ${idx + 1}`, options: slotOpts,
+        onChange: () => app.invalidateSurfaceMaterials(),
+      });
+    }
+  }
+  buildLayerPickers();
+
+  _separator(paintBody);
+  _button(paintBody, { title: 'Fill world with active layer', onClick: () => app.paintFill() });
+  _button(paintBody, { title: 'Clear all paint', onClick: () => app.paintClear() });
+
+  return panel;
 }
 
 // === Build World tab ===
@@ -884,6 +1115,11 @@ let app = null;
 try {
   app = await startV2App({ container: document.getElementById('viewport') });
 
+  // Build custom panels and insert into Tools tab
+  const toolsTab = document.getElementById('tab-tools');
+  toolsTab.appendChild(buildSculptPanel(app));
+  toolsTab.appendChild(buildPaintPanel(app));
+
   // Move Tweakpane pane into the Tools tab & apply mode-aware folder visibility
   requestAnimationFrame(() => {
     const tp = document.querySelector('.tp-dfwv');
@@ -939,19 +1175,35 @@ document.getElementById('tb-load').addEventListener('click', () => app?.loadProj
 document.getElementById('tb-undo').addEventListener('click', () => app?.undo());
 document.getElementById('tb-redo').addEventListener('click', () => app?.redo());
 
-// Keep toolbar highlight in sync when mode changes via Tweakpane or keyboard
+// Keep toolbar + status bar in sync via single rAF loop
 if (app) {
   let _lastMode = app.toolState.mode;
-  const _pollMode = () => {
+  const _elFps = document.getElementById('statusFps');
+  const _elCam = document.getElementById('statusCam');
+  const _elChunks = document.getElementById('statusChunks');
+  const _elTris = document.getElementById('statusTris');
+  const _elDot = document.getElementById('statusDot');
+  let _statusTick = 0;
+
+  const _poll = () => {
     if (app.toolState.mode !== _lastMode) {
       _lastMode = app.toolState.mode;
       syncToolbarHighlight();
       syncToolsTab(app.ui?.pane, _lastMode);
       toolsModeSelect.value = _lastMode;
     }
-    requestAnimationFrame(_pollMode);
+    if (++_statusTick % 15 === 0) {
+      const p = app.perf;
+      const c = app.camera.position;
+      _elFps.textContent = `${p.fps.toFixed(0)} fps  ${p.frameMs.toFixed(1)} ms`;
+      _elCam.textContent = `X ${c.x.toFixed(0)}  Y ${c.y.toFixed(0)}  Z ${c.z.toFixed(0)}`;
+      _elChunks.textContent = `${p.activeChunks} chunks`;
+      _elTris.textContent = `${(p.trisApprox / 1000).toFixed(0)}k tris`;
+      _elDot.style.background = p.fps >= 50 ? 'var(--green)' : p.fps >= 30 ? 'var(--orange)' : 'var(--red)';
+    }
+    requestAnimationFrame(_poll);
   };
-  requestAnimationFrame(_pollMode);
+  requestAnimationFrame(_poll);
 }
 
 // === Init shell icons ===

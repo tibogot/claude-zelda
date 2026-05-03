@@ -3018,6 +3018,7 @@ export async function startV2App(opts = {}) {
     audioSystem,
     toolState,
     ui,
+    perf,
     setMode(mode) {
       toolState.mode = mode;
       applyModeChangedEffects();
@@ -3040,6 +3041,13 @@ export async function startV2App(opts = {}) {
       if (toolState.borderMountains.enabled) rebuildBorderMountains();
     },
     rebuildBorderMountains,
+    textureLibrary,
+    brushMask,
+    paintFill() { paintSystem.fillWithActiveLayer(); },
+    paintClear() { paintSystem.clearAll(); },
+    syncSoloLayer,
+    syncHeightBlend,
+    invalidateSurfaceMaterials,
     onConfigChanged() { chunkStream.update(camera.position); },
     dispose() {
       renderer.domElement.removeEventListener("wheel", onCanvasWheelBrush, { capture: true });
