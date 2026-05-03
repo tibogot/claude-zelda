@@ -39,6 +39,7 @@ import {
   fwidth,
   pow,
   normalWorld,
+  tangentLocal,
   viewportCoordinate,
   uv,
   shadowPositionWorld,
@@ -203,38 +204,62 @@ function makeTexWithMips(mipLevels, atlasSize, maxAniso, srgb) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  Atlas edge dilation — flood-fill transparent pixels with nearest opaque RGB
+//  Linear → sRGB conversion (8-bit in-place, RGB only)
 // ═══════════════════════════════════════════════════════════════════════════
 
-function dilateAtlasEdges(pixels, size, iterations = 8) {
+function linearToSrgb(pixels) {
+  for (let i = 0; i < pixels.length; i += 4) {
+    for (let c = 0; c < 3; c++) {
+      let v = pixels[i + c] / 255;
+      v = v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
+      pixels[i + c] = Math.round(Math.min(1, Math.max(0, v)) * 255);
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Atlas edge dilation — per-cell flood-fill, sets alpha=1 on dilated pixels
+// ═══════════════════════════════════════════════════════════════════════════
+
+function dilateAtlasEdges(pixels, size, grid, iterations = 8) {
+  const cellSize = size / grid;
   const tmp = new Uint8Array(pixels.length);
   for (let iter = 0; iter < iterations; iter++) {
     tmp.set(pixels);
-    for (let y = 0; y < size; y++) {
-      for (let x = 0; x < size; x++) {
-        const i = (y * size + x) * 4;
-        if (pixels[i + 3] > 0) continue;
-        let r = 0, g = 0, b = 0, cnt = 0;
-        for (let dy = -1; dy <= 1; dy++) {
-          const ny = y + dy;
-          if (ny < 0 || ny >= size) continue;
-          for (let dx = -1; dx <= 1; dx++) {
-            if (dx === 0 && dy === 0) continue;
-            const nx = x + dx;
-            if (nx < 0 || nx >= size) continue;
-            const ni = (ny * size + nx) * 4;
-            if (pixels[ni + 3] > 0) {
-              r += pixels[ni];
-              g += pixels[ni + 1];
-              b += pixels[ni + 2];
-              cnt++;
+    for (let cy = 0; cy < grid; cy++) {
+      for (let cx = 0; cx < grid; cx++) {
+        const x0 = Math.floor(cx * cellSize);
+        const y0 = Math.floor(cy * cellSize);
+        const x1 = Math.floor((cx + 1) * cellSize);
+        const y1 = Math.floor((cy + 1) * cellSize);
+        for (let y = y0; y < y1; y++) {
+          for (let x = x0; x < x1; x++) {
+            const i = (y * size + x) * 4;
+            if (pixels[i + 3] > 0) continue;
+            let r = 0, g = 0, b = 0, cnt = 0;
+            for (let dy = -1; dy <= 1; dy++) {
+              const ny = y + dy;
+              if (ny < y0 || ny >= y1) continue;
+              for (let dx = -1; dx <= 1; dx++) {
+                if (dx === 0 && dy === 0) continue;
+                const nx = x + dx;
+                if (nx < x0 || nx >= x1) continue;
+                const ni = (ny * size + nx) * 4;
+                if (pixels[ni + 3] > 0) {
+                  r += pixels[ni];
+                  g += pixels[ni + 1];
+                  b += pixels[ni + 2];
+                  cnt++;
+                }
+              }
+            }
+            if (cnt > 0) {
+              tmp[i]     = Math.round(r / cnt);
+              tmp[i + 1] = Math.round(g / cnt);
+              tmp[i + 2] = Math.round(b / cnt);
+              tmp[i + 3] = 1;
             }
           }
-        }
-        if (cnt > 0) {
-          tmp[i]     = Math.round(r / cnt);
-          tmp[i + 1] = Math.round(g / cnt);
-          tmp[i + 2] = Math.round(b / cnt);
         }
       }
     }
@@ -247,10 +272,10 @@ function dilateAtlasEdges(pixels, size, iterations = 8) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /** Padding on bake ortho vs tight bounding sphere (same as legacy sphereMargin). */
-const BAKE_SPHERE_MARGIN = 1.08;
+const BAKE_SPHERE_MARGIN = 1.04;
 
 async function bakeAtlases(renderer, bakeMeshData, opts) {
-  const { grid, atlasSize, maxAniso, cellPad = 2, fullOctahedral = false } = opts;
+  const { grid, atlasSize, maxAniso, cellPad = 4, fullOctahedral = false } = opts;
   const gridToDir = fullOctahedral ? fullOctaGridToDir : hemiOctaGridToDir;
   const cs = Math.floor(atlasSize / grid);
   const pad = cellPad;
@@ -282,12 +307,16 @@ async function bakeAtlases(renderer, bakeMeshData, opts) {
   const rmScene = new THREE.Scene();
   const depthScene = new THREE.Scene();
 
-  const BAKE_ALPHA = 0.05;
+  const BAKE_ALPHA = 0.02;
   const depthNear = radius;
   const depthSpan = 2 * radius;
 
   for (const { geometry, material } of bakeMeshData) {
     const hasAlpha = !!(material.map || material.alphaMap);
+
+    if (material.normalMap && !geometry.attributes.tangent) {
+      try { geometry.computeTangents(); } catch (e) { /* skip if tangents fail */ }
+    }
 
     const colorMat = new THREE.MeshBasicMaterial({
       color: material.color
@@ -301,9 +330,19 @@ async function bakeAtlases(renderer, bakeMeshData, opts) {
     colorScene.add(new THREE.Mesh(geometry, colorMat));
 
     const alphaNode = material.map ? texture(material.map, uv()).a : float(1);
+    let bakeNormal = normalWorld;
+    if (material.normalMap && geometry.attributes.tangent) {
+      const tAttr = tangentLocal;
+      const T = normalize(tAttr.xyz);
+      const N = normalWorld;
+      const B = mul(normalize(cross(N, T)), tAttr.w);
+      const mapSamp = texture(material.normalMap, uv());
+      const mapN = sub(mul(mapSamp.xyz, float(2)), float(1));
+      bakeNormal = normalize(add(add(mul(T, mapN.x), mul(B, mapN.y)), mul(N, mapN.z)));
+    }
     const nMat = new THREE.MeshBasicNodeMaterial({
       side: THREE.DoubleSide,
-      colorNode: vec4(mul(add(normalWorld, 1), 0.5), alphaNode),
+      colorNode: vec4(mul(add(bakeNormal, 1), 0.5), alphaNode),
     });
     if (hasAlpha) nMat.alphaTest = BAKE_ALPHA;
     normalScene.add(new THREE.Mesh(geometry.clone(), nMat));
@@ -406,10 +445,12 @@ async function bakeAtlases(renderer, bakeMeshData, opts) {
   renderer.toneMapping = savedTM;
   renderer.outputColorSpace = savedOCS;
 
-  dilateAtlasEdges(colorPixels, atlasSize, 8);
-  dilateAtlasEdges(normalPixels, atlasSize, 8);
-  dilateAtlasEdges(rmPixels, atlasSize, 8);
-  dilateAtlasEdges(depthPixels, atlasSize, 8);
+  linearToSrgb(colorPixels);
+
+  dilateAtlasEdges(colorPixels, atlasSize, grid, 8);
+  dilateAtlasEdges(normalPixels, atlasSize, grid, 8);
+  dilateAtlasEdges(rmPixels, atlasSize, grid, 8);
+  dilateAtlasEdges(depthPixels, atlasSize, grid, 8);
 
   const colorMips = generatePerCellMipmaps(colorPixels, atlasSize, grid);
   const normalMips = generatePerCellMipmaps(normalPixels, atlasSize, grid);
@@ -417,7 +458,7 @@ async function bakeAtlases(renderer, bakeMeshData, opts) {
   const depthMips = generatePerCellMipmaps(depthPixels, atlasSize, grid);
 
   return {
-    colorTex: makeTexWithMips(colorMips, atlasSize, maxAniso, false),
+    colorTex: makeTexWithMips(colorMips, atlasSize, maxAniso, true),
     normalTex: makeTexWithMips(normalMips, atlasSize, maxAniso, false),
     rmTex: makeTexWithMips(rmMips, atlasSize, maxAniso, false),
     depthTex: makeTexWithMips(depthMips, atlasSize, maxAniso, false),
@@ -498,7 +539,7 @@ function createImpostorMaterial(
   const uCenter = uniform(new THREE.Vector3());
 
   const uSunDir = uniform(new THREE.Vector3(0.5, 0.8, 0.3).normalize());
-  const uSunColor = uniform(new THREE.Vector3(2.0, 1.708, 1.446));
+  const uSunColor = uniform(new THREE.Vector3(3.0, 2.562, 2.169));
   const uAmbColor = uniform(new THREE.Vector3(0.062, 0.08, 0.101));
   const uHemiSky = uniform(new THREE.Vector3(0.053, 0.098, 0.242));
   const uHemiGround = uniform(new THREE.Vector3(0.02, 0.013, 0.006));
@@ -650,20 +691,24 @@ function createImpostorMaterial(
     return add(mul(frame, uCellFrac), add(uPadFrac, mul(clamped, uInnerFrac)));
   });
 
-  // ── depth parallax UV offset ──
+  // ── depth parallax UV offset (3-step iterative refinement) ──
   const depthParallax = Fn(([localUV, cellNorm, frame]) => {
-    const baseAtlasUV = getUV(localUV, frame);
-    const d = texture(depthTex, baseAtlasUV).r;
-    const relD = sub(float(0.5), d);
     const V = normalize(sub(cameraPosition, positionWorld));
     const T = planeTangent(cellNorm);
     const B = planeUp(cellNorm, T);
     const VdotN = max(dot(V, cellNorm), float(0.3));
-    const off = mul(
-      vec2(dot(V, T), dot(V, B)),
-      div(mul(relD, uParallaxStr), VdotN),
-    );
-    return getUV(add(localUV, off), frame);
+    const viewTS = div(vec2(dot(V, T), dot(V, B)), VdotN);
+
+    const d0 = texture(depthTex, getUV(localUV, frame)).r;
+    const uv1 = add(localUV, mul(viewTS, mul(sub(float(0.5), d0), uParallaxStr)));
+
+    const d1 = texture(depthTex, getUV(uv1, frame)).r;
+    const uv2 = add(localUV, mul(viewTS, mul(sub(float(0.5), d1), uParallaxStr)));
+
+    const d2 = texture(depthTex, getUV(uv2, frame)).r;
+    const uv3 = add(localUV, mul(viewTS, mul(sub(float(0.5), d2), uParallaxStr)));
+
+    return getUV(uv3, frame);
   });
 
   const phDepth = new THREE.DepthTexture(4, 4);
@@ -697,7 +742,7 @@ function createImpostorMaterial(
     const c2 = texture(colorTex, puv2);
     const c3 = texture(colorTex, puv3);
 
-    // Dominant sprite selection (single cell — avoids ghosting on complex shapes)
+    // Dominant sprite selection (single cell — crisp silhouettes, no ghosting)
     const isDom1 = vWeight.x
       .greaterThanEqual(vWeight.y)
       .and(vWeight.x.greaterThanEqual(vWeight.z));
@@ -706,6 +751,8 @@ function createImpostorMaterial(
     const domRgb = select(isDom1, c1.rgb, select(isDom2, c2.rgb, c3.rgb));
 
     // IGN dither (optional alternative)
+    const wSum = add(add(vWeight.x, vWeight.y), vWeight.z);
+    const nw1 = div(vWeight.x, max(wSum, float(0.001)));
     const px = viewportCoordinate.xy;
     const ign = fract(
       mul(
@@ -713,8 +760,6 @@ function createImpostorMaterial(
         fract(add(mul(float(0.06711056), px.x), mul(float(0.00583715), px.y))),
       ),
     );
-    const wSum = add(add(vWeight.x, vWeight.y), vWeight.z);
-    const nw1 = div(vWeight.x, max(wSum, float(0.001)));
     const nw12 = div(add(vWeight.x, vWeight.y), max(wSum, float(0.001)));
     const ditS1 = ign.lessThan(nw1);
     const ditS2 = ign.lessThan(nw12);
@@ -868,6 +913,7 @@ function createImpostorMaterial(
     uFreeze,
     uFreezeDir,
     uShadowMapDepth,
+    shadowPlaceholder: phDepth,
   };
 }
 
@@ -940,7 +986,7 @@ export async function run() {
     : 16;
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x20252f);
+  scene.background = new THREE.Color(0x87ceeb);
 
   const camera = new THREE.PerspectiveCamera(
     50,
@@ -954,7 +1000,7 @@ export async function run() {
   controls.enableDamping = true;
   controls.dampingFactor = 0.06;
 
-  const dirLight = new THREE.DirectionalLight(0xffeedd, 2.0);
+  const dirLight = new THREE.DirectionalLight(0xfff5e0, 3.0);
   dirLight.position.set(5, 10, 5);
   dirLight.castShadow = true;
   dirLight.shadow.mapSize.set(2048, 2048);
@@ -970,14 +1016,16 @@ export async function run() {
   dirLight.target.position.copy(controls.target);
   scene.add(dirLight);
   scene.add(dirLight.target);
-  scene.add(new THREE.HemisphereLight(0x6688cc, 0x443322, 0.4));
-  scene.add(new THREE.AmbientLight(0x8899aa, 0.18));
+  const hemiLight = new THREE.HemisphereLight(0x88bbee, 0x556633, 0.7);
+  scene.add(hemiLight);
+  const ambLight = new THREE.AmbientLight(0xc0d0e0, 0.35);
+  scene.add(ambLight);
 
   const ground = new THREE.Mesh(
     new THREE.PlaneGeometry(60, 60),
     new THREE.MeshStandardMaterial({
-      color: 0x3a4a3a,
-      roughness: 0.9,
+      color: 0x5a7a4a,
+      roughness: 0.85,
       polygonOffset: true,
       polygonOffsetFactor: 1,
       polygonOffsetUnits: 1,
@@ -1256,9 +1304,7 @@ export async function run() {
       impostor.scale.setScalar(2 * R);
       impostor.frustumCulled = false;
       imp.uCenter.value.copy(impWorldCenter);
-      // Must stay false while colorNode uses shadow(dirLight): shadow pass writes the same
-      // ShadowDepthTexture this shader samples → WebGPU "writable + binding" in one scope.
-      impostor.castShadow = false;
+      impostor.castShadow = P.impostorCastShadow;
       impostor.receiveShadow = true;
       scene.add(impostor);
 
@@ -1529,7 +1575,7 @@ export async function run() {
     model: "TorusKnot",
     grid: 12,
     atlasSize: 2048,
-    cellPad: 2,
+    cellPad: 4,
     showAtlas: true,
     showAtlasGrid: false,
     showAtlasActive: true,
@@ -1537,7 +1583,7 @@ export async function run() {
     showImpostor: true,
     sunAzimuth: 225,
     sunElevation: 56,
-    sunIntensity: 2.0,
+    sunIntensity: 3.0,
     exposure: 1.0,
     roughness: 0.35,
     metalness: 0.15,
@@ -1549,6 +1595,7 @@ export async function run() {
     edgeSmooth: 1.5,
     diffuseWrap: 0.0,
     parallaxStr: 0.0,
+    impostorCastShadow: false,
     debugMode: 0,
     freeze: false,
     autoOrbit: false,
@@ -1575,6 +1622,21 @@ export async function run() {
         0.854 * P.sunIntensity,
         0.723 * P.sunIntensity,
       );
+      imp.uHemiSky.value.set(
+        hemiLight.color.r * hemiLight.intensity,
+        hemiLight.color.g * hemiLight.intensity,
+        hemiLight.color.b * hemiLight.intensity,
+      );
+      imp.uHemiGround.value.set(
+        hemiLight.groundColor.r * hemiLight.intensity,
+        hemiLight.groundColor.g * hemiLight.intensity,
+        hemiLight.groundColor.b * hemiLight.intensity,
+      );
+      imp.uAmbColor.value.set(
+        ambLight.color.r * ambLight.intensity,
+        ambLight.color.g * ambLight.intensity,
+        ambLight.color.b * ambLight.intensity,
+      );
       imp.uNormStr.value = P.normalStr;
       imp.uDither.value = P.dither ? 1 : 0;
       imp.uRimStr.value = P.rimStr;
@@ -1596,7 +1658,10 @@ export async function run() {
         }
       });
     }
-    if (impostor) impostor.visible = P.showImpostor;
+    if (impostor) {
+      impostor.visible = P.showImpostor;
+      impostor.castShadow = P.impostorCastShadow;
+    }
     if (elDockAp) elDockAp.style.display = P.showAtlas ? "flex" : "none";
 
     updateInfo();
@@ -1723,6 +1788,10 @@ export async function run() {
   fRender
     .add(P, "parallaxStr", 0, 0.5, 0.01)
     .name("Depth parallax")
+    .onChange(syncParams);
+  fRender
+    .add(P, "impostorCastShadow")
+    .name("Cast shadow")
     .onChange(syncParams);
 
   const fDebug = gui.addFolder("Debug / View");
@@ -1910,8 +1979,14 @@ export async function run() {
     }
     controls.update();
 
-    const smDt = dirLight.shadow.map?.depthTexture;
-    if (smDt && imp?.uShadowMapDepth) imp.uShadowMapDepth.value = smDt;
+    if (imp?.uShadowMapDepth) {
+      if (P.impostorCastShadow) {
+        imp.uShadowMapDepth.value = imp.shadowPlaceholder;
+      } else {
+        const smDt = dirLight.shadow.map?.depthTexture;
+        if (smDt) imp.uShadowMapDepth.value = smDt;
+      }
+    }
 
     updateStatsPanel();
 
