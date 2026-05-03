@@ -1163,7 +1163,6 @@ export async function run() {
     applyShadowToMeshes(sourceGroup, true, true);
     P.roughness = firstMat.roughness !== undefined ? firstMat.roughness : 0.5;
     P.metalness = firstMat.metalness !== undefined ? firstMat.metalness : 0.0;
-    await rebake();
   }
 
   async function loadGLBPath(path, name) {
@@ -1676,7 +1675,6 @@ export async function run() {
         loadGLBPath(GLB_MODELS[v], v);
       } else {
         loadPrimitive(v);
-        rebake();
       }
     });
   fModel.add({ load: () => fileInput.click() }, "load").name("Load GLB…");
@@ -1684,19 +1682,10 @@ export async function run() {
   fModel.add(P, "showImpostor").name("Show impostor").onChange(syncParams);
 
   const fAtlas = gui.addFolder("Atlas");
-  fAtlas
-    .add(P, "grid", [4, 6, 8, 10, 12, 14, 16])
-    .name("Grid")
-    .onChange(() => rebake());
-  fAtlas
-    .add(P, "atlasSize", [512, 1024, 2048, 4096])
-    .name("Resolution")
-    .onChange(() => rebake());
-  fAtlas
-    .add(P, "cellPad", 0, 8, 1)
-    .name("Cell padding")
-    .onChange(() => rebake());
-  fAtlas.add(P, "fullOctahedral").name("Full octahedral").onChange(() => rebake());
+  fAtlas.add(P, "grid", [4, 6, 8, 10, 12, 14, 16]).name("Grid");
+  fAtlas.add(P, "atlasSize", [512, 1024, 2048, 4096]).name("Resolution");
+  fAtlas.add(P, "cellPad", 0, 8, 1).name("Cell padding");
+  fAtlas.add(P, "fullOctahedral").name("Full octahedral");
   fAtlas.add(P, "showAtlas").name("Show atlas panel").onChange(syncParams);
   fAtlas.add({ rebake: () => rebake() }, "rebake").name("Rebake now");
 
