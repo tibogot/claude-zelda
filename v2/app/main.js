@@ -87,10 +87,13 @@ import { createFleurSystem, FLEUR_PRESETS, FLEUR_ALPHA_URLS } from "../../fleur-
 import { createAmbientFxStore } from "../core/ambientfx/ambientFxStore.js";
 import { BorderMountains } from "../render/terrain/borderMountains.js";
 
-export async function startV2App() {
+export async function startV2App(opts = {}) {
   const config = structuredClone(V2_CONFIG);
   const toolState = createToolState();
   const perf = createPerfState();
+  const _uiContainer = opts.container || null;
+  const _initW = _uiContainer ? _uiContainer.clientWidth : window.innerWidth;
+  const _initH = _uiContainer ? _uiContainer.clientHeight : window.innerHeight;
 
   const scene = new THREE.Scene();
   // splatmap-chunks.html: physical sky + PMREM — background stays null so SkyMesh fills the view.
@@ -98,7 +101,7 @@ export async function startV2App() {
 
   const camera = new THREE.PerspectiveCamera(
     65,
-    window.innerWidth / window.innerHeight,
+    _initW / Math.max(_initH, 1),
     0.1,
     5000,
   );
@@ -106,12 +109,12 @@ export async function startV2App() {
 
   const renderer = new THREE.WebGPURenderer({ antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, config.render.maxPixelRatio));
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setSize(_initW, _initH);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.transmitted = true;
-  document.body.appendChild(renderer.domElement);
+  (_uiContainer || document.body).appendChild(renderer.domElement);
   await renderer.init();
   initGlbLoaderRenderer(renderer);
 
@@ -999,6 +1002,7 @@ export async function startV2App() {
   const hud = createHud();
   /** @type {ReturnType<typeof createTweakpaneUi>} */
   let ui;
+  let _saveProject, _loadProject;
   ui = createTweakpaneUi({
     toolState,
     config,
@@ -1727,7 +1731,7 @@ export async function startV2App() {
     onAmbientFxClear: () => {
       ambientFxStore.clear();
     },
-    onSaveProject: () => {
+    onSaveProject: (_saveProject = () => {
       toolState._cliffExportData = () => cliffStore.exportData();
       toolState._propExportData = () => propStore.exportData();
       toolState._waterExportData = () => waterStore.exportData();
@@ -1760,8 +1764,8 @@ export async function startV2App() {
       const blob = new Blob([buf], { type: "application/octet-stream" });
       const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       downloadBlob(blob, `terrain-${ts}.v2terrain`);
-    },
-    onLoadProject: async () => {
+    }),
+    onLoadProject: (_loadProject = async () => {
       const file = await openFilePicker(".v2terrain");
       if (!file) return;
       try {
@@ -1915,7 +1919,7 @@ export async function startV2App() {
       } catch (err) {
         console.error("[V2] Failed to load project:", err);
       }
-    },
+    }),
   });
 
   function syncBarrierOverlay() {
@@ -2874,13 +2878,20 @@ export async function startV2App() {
     }
   });
 
-  window.addEventListener("resize", () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
+  function _onViewportResize() {
+    const rw = _uiContainer ? _uiContainer.clientWidth : window.innerWidth;
+    const rh = _uiContainer ? _uiContainer.clientHeight : window.innerHeight;
+    camera.aspect = rw / Math.max(rh, 1);
     camera.updateProjectionMatrix();
     camera.updateMatrixWorld();
-    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setSize(rw, rh);
     if (csm?.mainFrustum && toolState.csm.enabled) csm.updateFrustums();
-  });
+  }
+  if (_uiContainer) {
+    new ResizeObserver(_onViewportResize).observe(_uiContainer);
+  } else {
+    window.addEventListener("resize", _onViewportResize);
+  }
 
   let last = performance.now();
   let _lastLightSnap = "";
@@ -3004,8 +3015,32 @@ export async function startV2App() {
     scene,
     camera,
     renderer,
-    /** Howler-based mixer + `register()` for gameplay sounds */
     audioSystem,
+    toolState,
+    ui,
+    setMode(mode) {
+      toolState.mode = mode;
+      applyModeChangedEffects();
+      ui?.pane.refresh();
+    },
+    undo() { sculptSystem.undo(); },
+    redo() { sculptSystem.redo(); },
+    saveProject() { _saveProject(); },
+    loadProject() { _loadProject(); },
+    config,
+    syncFog,
+    setCsmEnabled,
+    rebuildSkyEnv,
+    applySkyMode,
+    importHdr,
+    clearRampPoint() { sculptSystem.clearRampPoint(); syncRampMarker(); },
+    runGlobalErosion() { sculptSystem.applyGlobalErosion(); },
+    generateTerrain() {
+      sculptSystem.applyProceduralTerrainAllChunks();
+      if (toolState.borderMountains.enabled) rebuildBorderMountains();
+    },
+    rebuildBorderMountains,
+    onConfigChanged() { chunkStream.update(camera.position); },
     dispose() {
       renderer.domElement.removeEventListener("wheel", onCanvasWheelBrush, { capture: true });
       if (csm) {

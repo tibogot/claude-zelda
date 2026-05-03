@@ -1,0 +1,961 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>V2 Terrain Editor</title>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+    "tweakpane": "https://esm.sh/tweakpane@4.0.4",
+    "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.9/build/index.module.js",
+    "howler": "https://esm.sh/howler@2.2.4"
+  }
+}
+</script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg-darkest: #1a1a1a;
+    --bg-dark: #222222;
+    --bg-panel: #2a2a2a;
+    --bg-item: #333333;
+    --bg-hover: #3a3a3a;
+    --bg-selected: #264f78;
+    --bg-input: #1e1e1e;
+    --border: #3c3c3c;
+    --border-light: #4a4a4a;
+    --text: #cccccc;
+    --text-dim: #888888;
+    --text-bright: #e0e0e0;
+    --accent: #4a9eff;
+    --accent-dim: #2a6fbb;
+    --accent-glow: rgba(74, 158, 255, 0.15);
+    --green: #5cb85c;
+    --orange: #e8912d;
+    --red: #d9534f;
+    --yellow: #f0c040;
+    --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    --font-mono: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    --radius: 4px;
+    --left-w: 260px;
+    --right-w: 320px;
+    --bottom-h: 220px;
+    --toolbar-h: 36px;
+  }
+
+  html, body { height: 100%; overflow: hidden; font-family: var(--font); font-size: 13px; color: var(--text); background: var(--bg-darkest); user-select: none; }
+
+  /* === MAIN GRID === */
+  #app {
+    display: grid;
+    grid-template-columns: var(--left-w) 4px 1fr 4px var(--right-w);
+    grid-template-rows: var(--toolbar-h) 1fr 4px var(--bottom-h);
+    height: 100%;
+    width: 100%;
+  }
+
+  /* === SPLITTERS === */
+  .splitter { background: var(--bg-darkest); position: relative; z-index: 20; }
+  .splitter::after { content: ''; position: absolute; transition: background 0.15s; }
+  .splitter:hover::after, .splitter.active::after { background: var(--accent); }
+  .splitter-h { cursor: col-resize; }
+  .splitter-h::after { top: 0; bottom: 0; left: 1px; width: 2px; }
+  .splitter-v { cursor: row-resize; }
+  .splitter-v::after { left: 0; right: 0; top: 1px; height: 2px; }
+  #splitter-left  { grid-column: 2; grid-row: 2 / -1; }
+  #splitter-right { grid-column: 4; grid-row: 2 / -1; }
+  #splitter-bottom { grid-column: 3; grid-row: 3; }
+
+  /* === TOP TOOLBAR === */
+  #toolbar {
+    grid-column: 1 / -1; grid-row: 1;
+    background: var(--bg-dark); border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; padding: 0 8px; gap: 2px;
+  }
+  .toolbar-group { display: flex; align-items: center; gap: 2px; padding: 0 6px; border-right: 1px solid var(--border); height: 100%; }
+  .toolbar-group:last-child { border-right: none; }
+  .toolbar-btn {
+    display: flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px; background: none; border: none; border-radius: var(--radius);
+    color: var(--text-dim); cursor: pointer;
+  }
+  .toolbar-btn:hover { background: var(--bg-hover); color: var(--text-bright); }
+  .toolbar-btn.active { background: var(--bg-selected); color: var(--accent); }
+  .toolbar-btn i { width: 16px; height: 16px; }
+  .toolbar-title { font-weight: 600; font-size: 12px; color: var(--text-dim); letter-spacing: 0.5px; margin-right: auto; padding-left: 4px; }
+  .toolbar-btn-text {
+    display: flex; align-items: center; gap: 4px; padding: 4px 10px; height: 28px;
+    background: none; border: none; border-radius: var(--radius);
+    color: var(--text-dim); cursor: pointer; font-size: 12px; font-family: var(--font); white-space: nowrap;
+  }
+  .toolbar-btn-text:hover { background: var(--bg-hover); color: var(--text-bright); }
+
+  /* === LEFT: SCENE HIERARCHY === */
+  #hierarchy {
+    grid-column: 1; grid-row: 2 / -1;
+    background: var(--bg-panel); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .panel-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 10px; height: 32px; min-height: 32px;
+    background: var(--bg-dark); border-bottom: 1px solid var(--border);
+    font-size: 11px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; color: var(--text-dim);
+  }
+  .panel-header-actions { display: flex; gap: 2px; }
+  .panel-header-actions button {
+    display: flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; background: none; border: none; border-radius: var(--radius);
+    color: var(--text-dim); cursor: pointer;
+  }
+  .panel-header-actions button:hover { background: var(--bg-hover); color: var(--text-bright); }
+  .panel-search {
+    display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-bottom: 1px solid var(--border);
+  }
+  .panel-search input {
+    flex: 1; height: 24px; background: var(--bg-input); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 0 8px; color: var(--text); font-size: 12px; font-family: var(--font); outline: none;
+  }
+  .panel-search input:focus { border-color: var(--accent); }
+  .panel-search i { color: var(--text-dim); width: 14px; height: 14px; }
+  .tree-list { flex: 1; overflow-y: auto; padding: 4px 0; }
+  .empty-panel {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    flex: 1; color: var(--text-dim); gap: 8px; padding: 40px; text-align: center;
+  }
+  .empty-panel i { width: 32px; height: 32px; opacity: 0.3; }
+  .empty-panel p { font-size: 12px; line-height: 1.5; }
+
+  /* === CENTER: VIEWPORT === */
+  #viewport {
+    grid-column: 3; grid-row: 2; background: var(--bg-darkest);
+    position: relative; overflow: hidden;
+  }
+  #viewport canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    display: block;
+    z-index: 2;
+    outline: none;
+  }
+  #hud {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 5;
+    pointer-events: none;
+    background: rgba(0, 0, 0, 0.58);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 8px;
+    padding: 9px 11px;
+    white-space: pre-wrap;
+    line-height: 1.35;
+    font-size: 12px;
+    min-width: 260px;
+    font-family: 'SF Mono', Consolas, monospace;
+    color: #d7e4ef;
+  }
+
+  /* === BOTTOM: FILE BROWSER === */
+  #assets {
+    grid-column: 3; grid-row: 4; background: var(--bg-panel); border-top: 1px solid var(--border);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .asset-toolbar {
+    display: flex; align-items: center; gap: 4px; padding: 0 8px; height: 32px; min-height: 32px;
+    background: var(--bg-dark); border-bottom: 1px solid var(--border);
+  }
+  .asset-toolbar .breadcrumb {
+    display: flex; align-items: center; gap: 2px; flex: 1; font-size: 12px; color: var(--text-dim);
+  }
+  .breadcrumb span { cursor: pointer; padding: 2px 4px; border-radius: var(--radius); }
+  .breadcrumb span:hover { background: var(--bg-hover); color: var(--text); }
+  .breadcrumb .sep { color: var(--border-light); cursor: default; }
+  .breadcrumb .sep:hover { background: none; }
+  .breadcrumb .current { color: var(--text); }
+  .asset-body { display: flex; flex: 1; overflow: hidden; }
+  .asset-sidebar { width: 160px; min-width: 160px; border-right: 1px solid var(--border); overflow-y: auto; padding: 4px 0; }
+  .asset-folder {
+    display: flex; align-items: center; gap: 6px; padding: 4px 10px; cursor: pointer; font-size: 12px; white-space: nowrap;
+  }
+  .asset-folder:hover { background: var(--bg-hover); }
+  .asset-folder.selected { background: var(--bg-selected); }
+  .asset-folder i { width: 14px; height: 14px; color: var(--yellow); flex-shrink: 0; }
+  .asset-grid-wrap { flex: 1; overflow-y: auto; padding: 8px; }
+  .asset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 8px; }
+  .asset-card {
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    padding: 6px; border-radius: var(--radius); cursor: grab; border: 1px solid transparent;
+  }
+  .asset-card:hover { background: var(--bg-hover); border-color: var(--border); }
+  .asset-card.selected { background: var(--accent-glow); border-color: var(--accent); }
+  .asset-thumb {
+    width: 64px; height: 64px; border-radius: var(--radius);
+    display: flex; align-items: center; justify-content: center; overflow: hidden;
+  }
+  .asset-thumb.texture { border: 1px solid var(--border); }
+  .asset-thumb.file-icon { background: var(--bg-dark); border: 1px solid var(--border); }
+  .asset-thumb.file-icon i { width: 28px; height: 28px; color: var(--accent); }
+  .asset-name {
+    font-size: 10px; color: var(--text-dim); text-align: center;
+    max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .fs-empty {
+    grid-column: 1 / -1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 30px; color: var(--text-dim); gap: 10px; text-align: center;
+  }
+  .fs-empty i { width: 32px; height: 32px; opacity: 0.3; }
+  .fs-open-btn {
+    margin-top: 6px; padding: 6px 16px; background: var(--accent); color: white; border: none;
+    border-radius: var(--radius); font-size: 12px; font-family: var(--font); cursor: pointer; font-weight: 600;
+  }
+  .fs-open-btn:hover { background: var(--accent-dim); }
+
+  /* === RIGHT PANEL (TABBED) === */
+  #right-panel {
+    grid-column: 5; grid-row: 2 / -1; background: var(--bg-panel); border-left: 1px solid var(--border);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .tab-bar {
+    display: flex; background: var(--bg-dark); border-bottom: 1px solid var(--border); min-height: 32px;
+  }
+  .tab-btn {
+    flex: 1; display: flex; align-items: center; justify-content: center; gap: 5px;
+    padding: 0 10px; height: 32px; background: none; border: none;
+    font-size: 11px; font-weight: 600; letter-spacing: 0.3px; text-transform: uppercase;
+    color: var(--text-dim); cursor: pointer; border-bottom: 2px solid transparent;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .tab-btn:hover { color: var(--text); background: var(--bg-hover); }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-btn i { width: 14px; height: 14px; }
+  .tab-content { flex: 1; overflow-y: auto; display: none; }
+  .tab-content.active { display: block; }
+
+  /* === STATUS BAR === */
+  .status-bar {
+    position: fixed; bottom: 0; left: 0; right: 0; height: 22px;
+    background: var(--bg-dark); border-top: 1px solid var(--border);
+    display: flex; align-items: center; padding: 0 10px; gap: 16px;
+    font-size: 11px; color: var(--text-dim); z-index: 100;
+  }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
+
+  /* === SCROLLBAR === */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--border-light); }
+
+  /* === INSPECTOR / PROPERTY CONTROLS === */
+  .inspector-section { border-bottom: 1px solid var(--border); }
+  .section-header {
+    display: flex; align-items: center; gap: 6px; padding: 6px 12px; cursor: pointer;
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; color: var(--text-dim);
+  }
+  .section-header:hover { background: var(--bg-hover); }
+  .section-header .section-arrow { width: 14px; height: 14px; transition: transform 0.15s; flex-shrink: 0; }
+  .section-header.collapsed .section-arrow { transform: rotate(-90deg); }
+  .section-body { padding: 6px 12px 10px; }
+  .section-body.hidden { display: none; }
+  .prop-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; min-height: 26px; }
+  .prop-label { width: 90px; min-width: 90px; font-size: 11px; color: var(--text-dim); text-align: right; padding-right: 4px; }
+  .prop-value { flex: 1; display: flex; gap: 4px; align-items: center; }
+  .prop-input {
+    flex: 1; height: 22px; background: var(--bg-input); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 0 6px; color: var(--text); font-size: 12px; font-family: var(--font-mono); outline: none; min-width: 0;
+  }
+  .prop-input:focus { border-color: var(--accent); }
+  .prop-color-wrap { display: flex; align-items: center; gap: 6px; flex: 1; }
+  .prop-color {
+    width: 22px; height: 22px; border-radius: var(--radius); border: 1px solid var(--border);
+    cursor: pointer; flex-shrink: 0; padding: 0; -webkit-appearance: none; appearance: none;
+  }
+  .prop-color::-webkit-color-swatch-wrapper { padding: 0; }
+  .prop-color::-webkit-color-swatch { border: none; border-radius: 2px; }
+  .prop-slider-wrap { flex: 1; display: flex; align-items: center; gap: 6px; }
+  .prop-slider {
+    flex: 1; height: 4px; -webkit-appearance: none; appearance: none;
+    background: var(--bg-input); border-radius: 2px; outline: none;
+  }
+  .prop-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%; background: var(--accent); cursor: pointer; }
+  .prop-slider-val { width: 44px; font-size: 11px; color: var(--text-dim); font-family: var(--font-mono); text-align: right; }
+  .prop-dropdown {
+    flex: 1; height: 22px; background: var(--bg-input); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 0 6px; color: var(--text); font-size: 12px; font-family: var(--font); outline: none; cursor: pointer;
+  }
+  .prop-toggle {
+    width: 14px; height: 14px; border: 1px solid var(--border-light); border-radius: 3px;
+    background: var(--bg-input); cursor: pointer; display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; padding: 0; color: transparent;
+  }
+  .prop-toggle.checked { background: var(--accent); border-color: var(--accent); color: white; }
+  .prop-toggle svg { width: 10px; height: 10px; }
+  .section-btn {
+    display: flex; align-items: center; justify-content: center; gap: 4px;
+    width: 100%; height: 26px; margin-top: 4px;
+    background: var(--bg-item); border: 1px solid var(--border); border-radius: var(--radius);
+    color: var(--text-dim); cursor: pointer; font-size: 11px; font-family: var(--font);
+  }
+  .section-btn:hover { background: var(--bg-hover); color: var(--text); border-color: var(--border-light); }
+  .section-separator { height: 1px; background: var(--border); margin: 6px 0; }
+
+  /* === TOOLS MODE BAR === */
+  .tools-mode-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; border-bottom: 1px solid var(--border);
+    background: var(--bg-dark);
+  }
+  .tools-mode-label {
+    font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.4px; color: var(--text-dim); flex-shrink: 0;
+  }
+
+  /* === TWEAKPANE OVERRIDE — embed inside Tools tab === */
+  .tp-dfwv {
+    position: relative !important;
+    top: auto !important;
+    right: auto !important;
+    width: 100% !important;
+    max-height: none !important;
+    overflow-y: visible !important;
+    z-index: auto !important;
+    border-radius: 0 !important;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- TOOLBAR -->
+  <div id="toolbar">
+    <div class="toolbar-group"><span class="toolbar-title">TERRAIN ENGINE</span></div>
+    <div class="toolbar-group">
+      <button class="toolbar-btn" id="tb-save" title="Save"><i data-lucide="save"></i></button>
+      <button class="toolbar-btn" id="tb-load" title="Load"><i data-lucide="folder-open"></i></button>
+      <button class="toolbar-btn" id="tb-undo" title="Undo"><i data-lucide="undo-2"></i></button>
+      <button class="toolbar-btn" id="tb-redo" title="Redo"><i data-lucide="redo-2"></i></button>
+    </div>
+    <div class="toolbar-group" id="tb-modes">
+      <button class="toolbar-btn" data-mode="sculpt" title="Sculpt (S)"><i data-lucide="mountain"></i></button>
+      <button class="toolbar-btn" data-mode="paint" title="Paint (P)"><i data-lucide="paintbrush"></i></button>
+      <button class="toolbar-btn" data-mode="props" title="Props (I)"><i data-lucide="box"></i></button>
+      <button class="toolbar-btn" data-mode="treePaint" title="Trees (T)"><i data-lucide="tree-pine"></i></button>
+      <button class="toolbar-btn" data-mode="water" title="Water (W)"><i data-lucide="waves"></i></button>
+      <button class="toolbar-btn" data-mode="road" title="Roads"><i data-lucide="route"></i></button>
+      <button class="toolbar-btn" data-mode="grass" title="Grass (G)"><i data-lucide="sprout"></i></button>
+      <button class="toolbar-btn" data-mode="cliffs" title="Cliffs (O)"><i data-lucide="triangle"></i></button>
+      <button class="toolbar-btn" data-mode="river" title="River (V)"><i data-lucide="droplets"></i></button>
+    </div>
+    <div class="toolbar-group" style="margin-left:auto">
+      <button class="toolbar-btn-text" id="tb-play" data-mode="play" title="Play (F)"><i data-lucide="play" style="width:14px;height:14px;color:var(--green)"></i> Play</button>
+    </div>
+  </div>
+
+  <!-- LEFT: SCENE HIERARCHY -->
+  <div id="hierarchy">
+    <div class="panel-header">
+      <span>Scene Hierarchy</span>
+      <div class="panel-header-actions">
+        <button title="Add object"><i data-lucide="plus" style="width:14px;height:14px"></i></button>
+        <button title="Filter"><i data-lucide="filter" style="width:14px;height:14px"></i></button>
+      </div>
+    </div>
+    <div class="panel-search"><i data-lucide="search"></i><input type="text" placeholder="Search scene..."></div>
+    <div class="tree-list">
+      <div class="empty-panel">
+        <i data-lucide="layers"></i>
+        <p>Scene hierarchy<br>(coming soon)</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- SPLITTERS -->
+  <div id="splitter-left" class="splitter splitter-h"></div>
+  <div id="splitter-right" class="splitter splitter-h"></div>
+  <div id="splitter-bottom" class="splitter splitter-v"></div>
+
+  <!-- CENTER: VIEWPORT -->
+  <div id="viewport">
+    <!-- <div id="hud">booting V2 terrain editor...</div> -->
+  </div>
+
+  <!-- BOTTOM: FILE BROWSER -->
+  <div id="assets">
+    <div class="asset-toolbar">
+      <div class="breadcrumb" id="fsBreadcrumb">
+        <span class="current">File Browser</span>
+      </div>
+      <div class="panel-header-actions">
+        <button title="Open folder from disk" id="fsOpenBtn"><i data-lucide="hard-drive" style="width:14px;height:14px"></i></button>
+        <button title="Import file" id="fsImportBtn"><i data-lucide="upload" style="width:14px;height:14px"></i></button>
+      </div>
+    </div>
+    <div class="asset-body">
+      <div class="asset-sidebar" id="assetFolders"></div>
+      <div class="asset-grid-wrap">
+        <div class="asset-grid" id="assetGrid"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: TABBED PANEL -->
+  <div id="right-panel">
+    <div class="tab-bar">
+      <button class="tab-btn" data-tab="inspector"><i data-lucide="scan-search"></i> Inspector</button>
+      <button class="tab-btn active" data-tab="tools"><i data-lucide="wrench"></i> Tools</button>
+      <button class="tab-btn" data-tab="environment"><i data-lucide="sun-moon"></i> World</button>
+    </div>
+    <div class="tab-content" id="tab-inspector">
+      <div class="empty-panel">
+        <i data-lucide="mouse-pointer-click"></i>
+        <p>Select an object to inspect</p>
+      </div>
+    </div>
+    <div class="tab-content active" id="tab-tools">
+      <div class="tools-mode-bar">
+        <span class="tools-mode-label">Mode</span>
+        <select class="prop-dropdown" id="tools-mode-select">
+          <option value="view">View</option>
+          <option value="sculpt">Sculpt (S)</option>
+          <option value="paint">Paint (P)</option>
+          <option value="treePaint">Tree Paint (T)</option>
+          <option value="foliagePaint">Foliage Paint (L)</option>
+          <option value="grass">Grass (G)</option>
+          <option value="cliffGrass">Cliff Grass</option>
+          <option value="road">Road</option>
+          <option value="fullRoad">Full Road</option>
+          <option value="smartRoad">Smart Road</option>
+          <option value="river">River (V)</option>
+          <option value="spline">Spline (K)</option>
+          <option value="cliffs">Cliffs (O)</option>
+          <option value="props">Props (I)</option>
+          <option value="water">Water (W)</option>
+          <option value="waterfall">Waterfall (H)</option>
+          <option value="decals">Decals (D)</option>
+          <option value="fleurs">Flowers (M)</option>
+          <option value="ambientfx">Ambient FX (X)</option>
+          <option value="barrier">Barrier (B)</option>
+          <option value="hole">Hole</option>
+          <option value="playSpawn">Play Spawn (Z)</option>
+          <option value="play">Play (F)</option>
+        </select>
+      </div>
+    </div>
+    <div class="tab-content" id="tab-environment">
+      <div class="empty-panel">
+        <i data-lucide="sun"></i>
+        <p>World settings will be migrated here</p>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div class="status-bar">
+  <div class="status-dot"></div>
+  <span id="statusText">Booting...</span>
+</div>
+
+<script type="module">
+import { startV2App } from "./app/main.js";
+
+// === Tab switching ===
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+  });
+});
+
+// === Resizable splitters ===
+function initSplitter(id, cssVar, axis, invert = false) {
+  const el = document.getElementById(id);
+  const root = document.documentElement;
+  el.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    el.classList.add('active');
+    const startPos = axis === 'x' ? e.clientX : e.clientY;
+    const startSize = parseFloat(getComputedStyle(root).getPropertyValue(cssVar));
+    document.body.style.cursor = axis === 'x' ? 'col-resize' : 'row-resize';
+    const onMove = (ev) => {
+      const delta = (axis === 'x' ? ev.clientX : ev.clientY) - startPos;
+      const maxPx = (axis === 'x' ? window.innerWidth : window.innerHeight) * 0.45;
+      root.style.setProperty(cssVar, Math.max(180, Math.min(maxPx, startSize + delta * (invert ? -1 : 1))) + 'px');
+    };
+    const onUp = () => {
+      el.classList.remove('active');
+      document.body.style.cursor = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  });
+}
+initSplitter('splitter-left', '--left-w', 'x');
+initSplitter('splitter-right', '--right-w', 'x', true);
+initSplitter('splitter-bottom', '--bottom-h', 'y', true);
+
+// === File browser (File System Access API) ===
+let fsRootHandle = null;
+let fsCurrentHandle = null;
+let fsPathStack = [];
+
+const EXT_ICONS = {
+  png:'image', jpg:'image', jpeg:'image', webp:'image', bmp:'image', tga:'image',
+  glb:'box', gltf:'box', fbx:'box', obj:'box',
+  mp3:'volume-2', ogg:'volume-2', wav:'volume-2',
+  json:'file-json', js:'file-code', ts:'file-code', html:'file-code',
+};
+const IMG_EXTS = new Set(['png','jpg','jpeg','webp','bmp']);
+
+async function openFolder() {
+  try {
+    fsRootHandle = await window.showDirectoryPicker();
+    fsCurrentHandle = fsRootHandle;
+    fsPathStack = [{ name: fsRootHandle.name, handle: fsRootHandle }];
+    await renderFileSystem();
+  } catch (e) { /* user cancelled */ }
+}
+
+async function navigateToFolder(dirHandle, name) {
+  fsCurrentHandle = dirHandle;
+  fsPathStack.push({ name, handle: dirHandle });
+  await renderFileSystem();
+}
+
+async function navigateBreadcrumb(idx) {
+  fsPathStack = fsPathStack.slice(0, idx + 1);
+  fsCurrentHandle = fsPathStack[idx].handle;
+  await renderFileSystem();
+}
+
+async function renderFileSystem() {
+  const breadcrumb = document.getElementById('fsBreadcrumb');
+  let bc = '';
+  for (let i = 0; i < fsPathStack.length; i++) {
+    if (i > 0) bc += '<span class="sep">/</span>';
+    const cls = i === fsPathStack.length - 1 ? 'current' : '';
+    bc += `<span class="${cls}" data-bc="${i}">${fsPathStack[i].name}</span>`;
+  }
+  breadcrumb.innerHTML = bc;
+  breadcrumb.querySelectorAll('span[data-bc]').forEach(s => {
+    s.addEventListener('click', () => navigateBreadcrumb(parseInt(s.dataset.bc)));
+  });
+
+  const dirs = [], files = [];
+  for await (const [name, handle] of fsCurrentHandle.entries()) {
+    if (handle.kind === 'directory') dirs.push({ name, handle });
+    else files.push({ name, handle });
+  }
+  dirs.sort((a,b) => a.name.localeCompare(b.name));
+  files.sort((a,b) => a.name.localeCompare(b.name));
+
+  const sidebar = document.getElementById('assetFolders');
+  let sh = '';
+  for (const d of dirs) sh += `<div class="asset-folder" data-dir="${d.name}"><i data-lucide="folder"></i><span>${d.name}</span></div>`;
+  if (dirs.length === 0) sh = '<div style="padding:10px;color:var(--text-dim);font-size:11px">No subfolders</div>';
+  sidebar.innerHTML = sh;
+  sidebar.querySelectorAll('.asset-folder').forEach(el => {
+    el.addEventListener('click', async () => {
+      const d = dirs.find(x => x.name === el.dataset.dir);
+      if (d) await navigateToFolder(d.handle, d.name);
+    });
+  });
+
+  const grid = document.getElementById('assetGrid');
+  let gh = '';
+  for (const d of dirs) {
+    gh += `<div class="asset-card" data-dir="${d.name}"><div class="asset-thumb file-icon"><i data-lucide="folder" style="color:var(--yellow)"></i></div><span class="asset-name">${d.name}</span></div>`;
+  }
+  for (const f of files) {
+    const ext = f.name.split('.').pop().toLowerCase();
+    const icon = EXT_ICONS[ext] || 'file';
+    const isImg = IMG_EXTS.has(ext);
+    if (isImg) {
+      try {
+        const file = await f.handle.getFile();
+        const url = URL.createObjectURL(file);
+        gh += `<div class="asset-card" draggable="true" data-name="${f.name}"><div class="asset-thumb texture" style="background:url(${url}) center/cover"></div><span class="asset-name">${f.name}</span></div>`;
+      } catch {
+        gh += `<div class="asset-card" draggable="true" data-name="${f.name}"><div class="asset-thumb file-icon"><i data-lucide="${icon}"></i></div><span class="asset-name">${f.name}</span></div>`;
+      }
+    } else {
+      gh += `<div class="asset-card" draggable="true" data-name="${f.name}"><div class="asset-thumb file-icon"><i data-lucide="${icon}"></i></div><span class="asset-name">${f.name}</span></div>`;
+    }
+  }
+  if (dirs.length === 0 && files.length === 0) {
+    gh = '<div class="fs-empty"><i data-lucide="folder-open"></i><span style="font-size:12px">This folder is empty</span></div>';
+  }
+  grid.innerHTML = gh;
+
+  grid.querySelectorAll('.asset-card[data-dir]').forEach(card => {
+    card.addEventListener('dblclick', async () => {
+      const d = dirs.find(x => x.name === card.dataset.dir);
+      if (d) await navigateToFolder(d.handle, d.name);
+    });
+  });
+  grid.querySelectorAll('.asset-card[draggable]').forEach(card => {
+    card.addEventListener('dragstart', e => {
+      card.classList.add('dragging');
+      e.dataTransfer.setData('text/plain', card.dataset.name);
+      e.dataTransfer.effectAllowed = 'copy';
+    });
+    card.addEventListener('dragend', () => card.classList.remove('dragging'));
+    card.addEventListener('click', () => {
+      grid.querySelectorAll('.asset-card').forEach(c => c.classList.remove('selected'));
+      card.classList.add('selected');
+    });
+  });
+
+  lucide.createIcons({ nameAttr: 'data-lucide', attrs: {} });
+}
+
+function renderFallbackBrowser() {
+  document.getElementById('assetFolders').innerHTML = '';
+  document.getElementById('assetGrid').innerHTML = `<div class="fs-empty">
+    <i data-lucide="hard-drive"></i>
+    <span style="font-size:12px">Browse files from your drive</span>
+    <span style="font-size:11px;color:var(--text-dim)">Click the drive icon to open a folder</span>
+    <button class="fs-open-btn" id="fsOpenBtn2">Open Folder</button>
+  </div>`;
+  document.getElementById('fsBreadcrumb').innerHTML = '<span class="current">File Browser</span>';
+  lucide.createIcons({ nameAttr: 'data-lucide', attrs: {} });
+  document.getElementById('fsOpenBtn2')?.addEventListener('click', openFolder);
+}
+
+document.getElementById('fsOpenBtn').addEventListener('click', openFolder);
+renderFallbackBrowser();
+
+// === Widget factory ===
+const _checkSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+const _arrowSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="section-arrow"><polyline points="6 9 12 15 18 9"></polyline></svg>';
+
+function _fmt(v, step) {
+  if (step >= 1) return String(Math.round(v));
+  const d = Math.max(0, -Math.floor(Math.log10(step)));
+  return v.toFixed(d);
+}
+
+function _section(parent, title, expanded = true) {
+  const sec = document.createElement('div');
+  sec.className = 'inspector-section';
+  const hdr = document.createElement('div');
+  hdr.className = 'section-header' + (expanded ? '' : ' collapsed');
+  hdr.innerHTML = _arrowSvg + ' ' + title;
+  const body = document.createElement('div');
+  body.className = 'section-body' + (expanded ? '' : ' hidden');
+  hdr.addEventListener('click', () => { hdr.classList.toggle('collapsed'); body.classList.toggle('hidden'); });
+  sec.appendChild(hdr);
+  sec.appendChild(body);
+  parent.appendChild(sec);
+  return body;
+}
+
+function _slider(parent, obj, key, opts) {
+  const { label, min, max, step = 0.01, onChange } = opts;
+  const row = document.createElement('div');
+  row.className = 'prop-row';
+  const cur = obj[key];
+  row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><div class="prop-slider-wrap"><input type="range" class="prop-slider" min="${min}" max="${max}" step="${step}" value="${cur}"><span class="prop-slider-val">${_fmt(cur, step)}</span></div></div>`;
+  const sl = row.querySelector('.prop-slider');
+  const vl = row.querySelector('.prop-slider-val');
+  sl.addEventListener('input', () => { obj[key] = parseFloat(sl.value); vl.textContent = _fmt(obj[key], step); onChange?.(); });
+  parent.appendChild(row);
+  return { row, refresh() { sl.value = obj[key]; vl.textContent = _fmt(obj[key], step); } };
+}
+
+function _color(parent, obj, key, opts) {
+  const { label, onChange } = opts;
+  const row = document.createElement('div');
+  row.className = 'prop-row';
+  row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><div class="prop-color-wrap"><input type="color" class="prop-color" value="${obj[key]}"><span class="prop-slider-val" style="width:auto">${obj[key]}</span></div></div>`;
+  const inp = row.querySelector('.prop-color');
+  const hex = row.querySelector('.prop-slider-val');
+  inp.addEventListener('input', () => { obj[key] = inp.value; hex.textContent = inp.value; onChange?.(); });
+  parent.appendChild(row);
+  return { row, refresh() { inp.value = obj[key]; hex.textContent = obj[key]; } };
+}
+
+function _toggle(parent, obj, key, opts) {
+  const { label, onChange } = opts;
+  const row = document.createElement('div');
+  row.className = 'prop-row';
+  row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><button class="prop-toggle ${obj[key] ? 'checked' : ''}">${_checkSvg}</button></div>`;
+  const btn = row.querySelector('.prop-toggle');
+  btn.addEventListener('click', () => { obj[key] = !obj[key]; btn.classList.toggle('checked', obj[key]); onChange?.(); });
+  parent.appendChild(row);
+  return { refresh() { btn.classList.toggle('checked', obj[key]); } };
+}
+
+function _dropdown(parent, obj, key, opts) {
+  const { label, options, onChange } = opts;
+  const row = document.createElement('div');
+  row.className = 'prop-row';
+  let optHtml = '';
+  for (const [text, val] of Object.entries(options)) {
+    optHtml += `<option value="${val}" ${obj[key] === val ? 'selected' : ''}>${text}</option>`;
+  }
+  row.innerHTML = `<span class="prop-label">${label}</span><div class="prop-value"><select class="prop-dropdown">${optHtml}</select></div>`;
+  const sel = row.querySelector('.prop-dropdown');
+  sel.addEventListener('change', () => { obj[key] = sel.value; onChange?.(); });
+  parent.appendChild(row);
+  return { refresh() { sel.value = obj[key]; } };
+}
+
+function _button(parent, opts) {
+  const { title, onClick } = opts;
+  const btn = document.createElement('button');
+  btn.className = 'section-btn';
+  btn.textContent = title;
+  btn.addEventListener('click', onClick);
+  parent.appendChild(btn);
+}
+
+function _separator(parent) {
+  const div = document.createElement('div');
+  div.className = 'section-separator';
+  parent.appendChild(div);
+}
+
+// === Mode → Tweakpane folder mapping ===
+const MODE_FOLDERS = {
+  view: [],
+  sculpt: ['Brush', 'Sculpt'],
+  paint: ['Brush', 'Paint', 'Terrain appearance', 'Texture library'],
+  treePaint: ['Brush', 'Tree LOD'],
+  foliagePaint: ['Brush', 'Billboard Foliage'],
+  grass: ['Brush', 'Grass'],
+  cliffGrass: ['Brush', 'Cliff Grass'],
+  road: ['Road'],
+  fullRoad: ['Full Road'],
+  smartRoad: ['Smart Road'],
+  river: ['River'],
+  spline: ['Spline'],
+  cliffs: ['Brush', 'Cliffs'],
+  props: ['Props'],
+  water: ['Water bodies · W'],
+  waterfall: ['Waterfall'],
+  decals: ['Decals · D'],
+  fleurs: ['Flowers · M'],
+  ambientfx: ['Ambient FX · X'],
+  barrier: ['Barrier'],
+  hole: ['Terrain holes'],
+  playSpawn: ['Play / Spawn'],
+  play: ['Play / Drift Smoke', 'Play / Car Feel', 'Play / Car audio', 'Play / Spawn', 'Audio (mixer)'],
+};
+const ALWAYS_HIDDEN = new Set(['Global', 'Lighting & atmosphere']);
+const ALWAYS_VISIBLE = new Set(['Terrain/LOD', 'Perf Gate']);
+
+function syncToolsTab(pane, mode) {
+  if (!pane) return;
+  const show = new Set(MODE_FOLDERS[mode] || []);
+  for (const child of pane.children) {
+    if (ALWAYS_HIDDEN.has(child.title)) { child.hidden = true; continue; }
+    if (ALWAYS_VISIBLE.has(child.title)) { child.hidden = false; continue; }
+    child.hidden = !show.has(child.title);
+  }
+}
+
+// === Build World tab ===
+function buildWorldTab(app) {
+  const container = document.getElementById('tab-environment');
+  container.innerHTML = '';
+  const ts = app.toolState;
+  const refreshTp = () => app.ui?.pane.refresh();
+
+  // --- Sun & Exposure ---
+  const sunBody = _section(container, 'Sun & Exposure');
+  _slider(sunBody, ts.light, 'sunAzimuth', { label: 'Azimuth', min: 0, max: 360, step: 1 });
+  _slider(sunBody, ts.light, 'sunElevation', { label: 'Elevation', min: -10, max: 90, step: 1 });
+  _color(sunBody, ts.light, 'dirColor', { label: 'Sun color' });
+  _slider(sunBody, ts.light, 'dirIntensity', { label: 'Intensity', min: 0, max: 5, step: 0.1 });
+  _slider(sunBody, ts.light, 'sunDistance', { label: 'Distance', min: 200, max: 2000, step: 10 });
+  _separator(sunBody);
+  _color(sunBody, ts.light, 'hemiSkyColor', { label: 'Ambient sky' });
+  _color(sunBody, ts.light, 'hemiGroundColor', { label: 'Ambient gnd' });
+  _slider(sunBody, ts.light, 'hemiIntensity', { label: 'Ambient int.', min: 0, max: 3, step: 0.1 });
+  _separator(sunBody);
+  _slider(sunBody, ts.light, 'envIntensity', { label: 'Env map', min: 0, max: 2, step: 0.01 });
+  _slider(sunBody, ts.light, 'exposure', { label: 'Exposure', min: 0.1, max: 2, step: 0.05 });
+
+  // --- Shadows (CSM) ---
+  const csmBody = _section(container, 'Shadows (CSM)', false);
+  _toggle(csmBody, ts.csm, 'enabled', { label: 'Enabled', onChange: () => { app.setCsmEnabled(ts.csm.enabled); refreshTp(); } });
+  _toggle(csmBody, ts.csm, 'updateEveryFrame', { label: 'Every frame' });
+  _slider(csmBody, ts.light, 'shadowBias', { label: 'Bias', min: -0.01, max: 0.001, step: 0.0001 });
+  _slider(csmBody, ts.light, 'shadowNormalBias', { label: 'Normal bias', min: 0, max: 0.2, step: 0.001 });
+  _slider(csmBody, ts.csm, 'cascades', { label: 'Cascades', min: 1, max: 4, step: 1 });
+  _slider(csmBody, ts.csm, 'maxFar', { label: 'Max far', min: 30, max: 600, step: 10 });
+  _slider(csmBody, ts.csm, 'lightMargin', { label: 'Light margin', min: 0, max: 400, step: 10 });
+  _slider(csmBody, ts.csm, 'mapSize', { label: 'Map size', min: 512, max: 4096, step: 512 });
+
+  // --- Lens Flare ---
+  const lensBody = _section(container, 'Lens Flare', false);
+  _toggle(lensBody, ts.lensFlare, 'enabled', { label: 'Enabled' });
+  _slider(lensBody, ts.lensFlare, 'intensity', { label: 'Intensity', min: 0, max: 5, step: 0.05 });
+  _slider(lensBody, ts.lensFlare, 'halationSize', { label: 'Halation size', min: 0, max: 3, step: 0.05 });
+  _color(lensBody, ts.lensFlare, 'halationColor', { label: 'Halation color' });
+  _slider(lensBody, ts.lensFlare, 'streakLength', { label: 'Streak len', min: 0, max: 4, step: 0.05 });
+  _slider(lensBody, ts.lensFlare, 'streakOpacity', { label: 'Streak opac.', min: 0, max: 2, step: 0.05 });
+  _color(lensBody, ts.lensFlare, 'streakColor', { label: 'Streak color' });
+  _slider(lensBody, ts.lensFlare, 'ghostOpacity', { label: 'Ghost opac.', min: 0, max: 2, step: 0.05 });
+  _slider(lensBody, ts.lensFlare, 'ghostSpacing', { label: 'Ghost spacing', min: 0, max: 2, step: 0.02 });
+  _slider(lensBody, ts.lensFlare, 'dirtOpacity', { label: 'Lens dirt', min: 0, max: 2, step: 0.05 });
+
+  // --- Sky ---
+  const skyBody = _section(container, 'Sky');
+  const skyModeWidgets = [];
+  _dropdown(skyBody, ts, 'skyMode', { label: 'Mode', options: { Physical: 'physical', 'Import HDR': 'hdr' }, onChange: () => {
+    app.applySkyMode(ts.skyMode);
+    syncSkyWidgets();
+    refreshTp();
+  }});
+
+  const hdrRow = document.createElement('div');
+  hdrRow.style.padding = '2px 0';
+  skyBody.appendChild(hdrRow);
+  _button(hdrRow, { title: 'Load HDR file...', onClick: () => app.importHdr() });
+
+  const hdrEnv = _slider(skyBody, ts.light, 'hdrEnvIntensity', { label: 'HDR env', min: 0, max: 5, step: 0.05 });
+  const hdrBg = _slider(skyBody, ts.light, 'hdrBackgroundIntensity', { label: 'HDR bg', min: 0, max: 5, step: 0.05 });
+  skyModeWidgets.push({ el: hdrRow, mode: 'hdr' });
+  skyModeWidgets.push({ el: hdrEnv, mode: 'hdr' });
+  skyModeWidgets.push({ el: hdrBg, mode: 'hdr' });
+
+  const physWidgets = [];
+  physWidgets.push(_slider(skyBody, ts.physicalSky, 'meshScale', { label: 'Dome scale', min: 2000, max: 20000, step: 100 }));
+  physWidgets.push(_slider(skyBody, ts.physicalSky, 'turbidity', { label: 'Turbidity', min: 0, max: 20, step: 0.1 }));
+  physWidgets.push(_slider(skyBody, ts.physicalSky, 'rayleigh', { label: 'Rayleigh', min: 0, max: 4, step: 0.05 }));
+  physWidgets.push(_slider(skyBody, ts.physicalSky, 'mie', { label: 'Mie', min: 0, max: 0.1, step: 0.001 }));
+  physWidgets.push(_slider(skyBody, ts.physicalSky, 'mieG', { label: 'Mie G', min: 0, max: 1, step: 0.01 }));
+  physWidgets.push(_slider(skyBody, ts.physicalSky, 'cloudCoverage', { label: 'Cloud cover', min: 0, max: 1, step: 0.02 }));
+  physWidgets.push(_slider(skyBody, ts.physicalSky, 'cloudDensity', { label: 'Cloud dense', min: 0, max: 1, step: 0.02 }));
+  physWidgets.push(_slider(skyBody, ts.physicalSky, 'cloudElevation', { label: 'Cloud elev.', min: 0, max: 1, step: 0.02 }));
+
+  const rebakeRow = document.createElement('div');
+  rebakeRow.style.padding = '2px 0';
+  skyBody.appendChild(rebakeRow);
+  _button(rebakeRow, { title: 'Rebake Sky IBL', onClick: () => app.rebuildSkyEnv() });
+  physWidgets.push(rebakeRow);
+
+  for (const w of physWidgets) skyModeWidgets.push({ el: w, mode: 'physical' });
+
+  function syncSkyWidgets() {
+    const isPhysical = ts.skyMode === 'physical';
+    for (const { el, mode } of skyModeWidgets) {
+      const domEl = el instanceof HTMLElement ? el : el?.row;
+      if (!domEl) continue;
+      const show = mode === 'physical' ? isPhysical : !isPhysical;
+      domEl.style.display = show ? '' : 'none';
+    }
+  }
+  syncSkyWidgets();
+
+  // --- Height Fog ---
+  const hfBody = _section(container, 'Height Fog', false);
+  const fogCb = () => { app.syncFog(); refreshTp(); };
+  _toggle(hfBody, ts.fog.height, 'enabled', { label: 'Enabled', onChange: fogCb });
+  _color(hfBody, ts.fog.height, 'color', { label: 'Color', onChange: fogCb });
+  _slider(hfBody, ts.fog.height, 'density', { label: 'Density', min: 0.001, max: 0.3, step: 0.001, onChange: fogCb });
+  _slider(hfBody, ts.fog.height, 'height', { label: 'Base height', min: -60, max: 500, step: 1, onChange: fogCb });
+
+  // --- Distance Fog ---
+  const dfBody = _section(container, 'Distance Fog', false);
+  _toggle(dfBody, ts.fog.distance, 'enabled', { label: 'Enabled', onChange: fogCb });
+  _color(dfBody, ts.fog.distance, 'color', { label: 'Color', onChange: fogCb });
+  _slider(dfBody, ts.fog.distance, 'density', { label: 'Density', min: 0.0001, max: 0.05, step: 0.0001, onChange: fogCb });
+}
+
+// === Boot V2 app into viewport ===
+const statusText = document.getElementById('statusText');
+let app = null;
+try {
+  app = await startV2App({ container: document.getElementById('viewport') });
+
+  // Move Tweakpane pane into the Tools tab & apply mode-aware folder visibility
+  requestAnimationFrame(() => {
+    const tp = document.querySelector('.tp-dfwv');
+    if (tp) {
+      document.getElementById('tab-tools').appendChild(tp);
+    }
+    syncToolsTab(app.ui?.pane, app.toolState.mode);
+    toolsModeSelect.value = app.toolState.mode;
+    statusText.textContent = 'Ready';
+  });
+
+  // Build the World tab with custom controls
+  buildWorldTab(app);
+} catch (err) {
+  console.error('[Editor] V2 startup failed:', err);
+  const hud = document.getElementById('hud');
+  if (hud) hud.textContent = `Startup error: ${err?.message || err}`;
+  statusText.textContent = 'Error';
+}
+
+// === Toolbar wiring ===
+const modeButtons = document.querySelectorAll('#tb-modes .toolbar-btn, #tb-play');
+
+function syncToolbarHighlight() {
+  if (!app) return;
+  const current = app.toolState.mode;
+  modeButtons.forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.mode === current);
+  });
+}
+
+modeButtons.forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (!app) return;
+    app.setMode(btn.dataset.mode);
+    syncToolbarHighlight();
+    syncToolsTab(app.ui?.pane, btn.dataset.mode);
+    toolsModeSelect.value = btn.dataset.mode;
+  });
+});
+
+// Tools tab mode dropdown
+const toolsModeSelect = document.getElementById('tools-mode-select');
+toolsModeSelect.addEventListener('change', () => {
+  if (!app) return;
+  app.setMode(toolsModeSelect.value);
+  syncToolbarHighlight();
+  syncToolsTab(app.ui?.pane, toolsModeSelect.value);
+});
+
+document.getElementById('tb-save').addEventListener('click', () => app?.saveProject());
+document.getElementById('tb-load').addEventListener('click', () => app?.loadProject());
+document.getElementById('tb-undo').addEventListener('click', () => app?.undo());
+document.getElementById('tb-redo').addEventListener('click', () => app?.redo());
+
+// Keep toolbar highlight in sync when mode changes via Tweakpane or keyboard
+if (app) {
+  let _lastMode = app.toolState.mode;
+  const _pollMode = () => {
+    if (app.toolState.mode !== _lastMode) {
+      _lastMode = app.toolState.mode;
+      syncToolbarHighlight();
+      syncToolsTab(app.ui?.pane, _lastMode);
+      toolsModeSelect.value = _lastMode;
+    }
+    requestAnimationFrame(_pollMode);
+  };
+  requestAnimationFrame(_pollMode);
+}
+
+// === Init shell icons ===
+lucide.createIcons({ nameAttr: 'data-lucide', attrs: {} });
+</script>
+</body>
+</html>
