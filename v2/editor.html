@@ -126,6 +126,18 @@
   .panel-search input:focus { border-color: var(--accent); }
   .panel-search i { color: var(--text-dim); width: 14px; height: 14px; }
   .tree-list { flex: 1; overflow-y: auto; padding: 4px 0; }
+  .tree-item {
+    display: flex; align-items: center; gap: 8px; padding: 4px 12px; cursor: pointer;
+    font-size: 12px; color: var(--text); border-left: 2px solid transparent;
+  }
+  .tree-item:hover { background: var(--bg-hover); }
+  .tree-item.selected { background: var(--bg-selected); border-left-color: var(--accent); color: var(--text-bright); }
+  .tree-item i { width: 14px; height: 14px; color: var(--text-dim); flex-shrink: 0; }
+  .tree-item.selected i { color: var(--accent); }
+  .tree-item .tree-type { margin-left: auto; font-size: 10px; color: var(--text-dim); opacity: 0.5; }
+  .info-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; min-height: 26px; }
+  .info-label { width: 90px; min-width: 90px; font-size: 11px; color: var(--text-dim); text-align: right; padding-right: 4px; }
+  .info-value { flex: 1; font-size: 12px; color: var(--text); font-family: var(--font-mono); }
   .empty-panel {
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     flex: 1; color: var(--text-dim); gap: 8px; padding: 40px; text-align: center;
@@ -728,6 +740,18 @@ function _button(parent, opts) {
   parent.appendChild(btn);
 }
 
+function _info(parent, label, value) {
+  const row = document.createElement('div');
+  row.className = 'info-row';
+  const valSpan = document.createElement('span');
+  valSpan.className = 'info-value';
+  valSpan.textContent = value;
+  row.innerHTML = `<span class="info-label">${label}</span>`;
+  row.appendChild(valSpan);
+  parent.appendChild(row);
+  return { update(v) { valSpan.textContent = v; } };
+}
+
 function _separator(parent) {
   const div = document.createElement('div');
   div.className = 'section-separator';
@@ -1109,6 +1133,124 @@ function buildWorldTab(app) {
   _slider(dfBody, ts.fog.distance, 'density', { label: 'Density', min: 0.0001, max: 0.05, step: 0.0001, onChange: fogCb });
 }
 
+// === Scene Hierarchy + Inspector ===
+const HIERARCHY_ITEMS = [
+  { id: 'sun', name: 'Sun', icon: 'sun', type: 'Light' },
+  { id: 'ambient', name: 'Ambient Light', icon: 'sunrise', type: 'Light' },
+  { id: 'sky', name: 'Sky', icon: 'cloud', type: 'Environment' },
+  { id: 'terrain', name: 'Terrain', icon: 'mountain', type: 'Mesh' },
+  { id: 'lensFlare', name: 'Lens Flare', icon: 'sparkles', type: 'Effect' },
+];
+
+let _selectedItem = null;
+let _inspectorLiveUpdaters = [];
+
+function buildHierarchy(app) {
+  const list = document.querySelector('#hierarchy .tree-list');
+  list.innerHTML = '';
+  for (const item of HIERARCHY_ITEMS) {
+    const el = document.createElement('div');
+    el.className = 'tree-item';
+    el.dataset.id = item.id;
+    el.innerHTML = `<i data-lucide="${item.icon}"></i><span>${item.name}</span><span class="tree-type">${item.type}</span>`;
+    el.addEventListener('click', () => {
+      list.querySelectorAll('.tree-item').forEach(t => t.classList.remove('selected'));
+      el.classList.add('selected');
+      _selectedItem = item.id;
+      buildInspector(app, item.id);
+      // Switch to Inspector tab
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      document.querySelector('.tab-btn[data-tab="inspector"]').classList.add('active');
+      document.getElementById('tab-inspector').classList.add('active');
+    });
+    list.appendChild(el);
+  }
+  lucide.createIcons({ nameAttr: 'data-lucide', attrs: {} });
+}
+
+function buildInspector(app, itemId) {
+  const container = document.getElementById('tab-inspector');
+  container.innerHTML = '';
+  _inspectorLiveUpdaters = [];
+  const ts = app.toolState;
+  const cfg = app.config;
+
+  switch (itemId) {
+    case 'sun': {
+      const hdr = _section(container, 'Sun · DirectionalLight');
+      _slider(hdr, ts.light, 'sunAzimuth', { label: 'Azimuth', min: 0, max: 360, step: 1 });
+      _slider(hdr, ts.light, 'sunElevation', { label: 'Elevation', min: -10, max: 90, step: 1 });
+      _slider(hdr, ts.light, 'sunDistance', { label: 'Distance', min: 200, max: 2000, step: 10 });
+      _color(hdr, ts.light, 'dirColor', { label: 'Color' });
+      _slider(hdr, ts.light, 'dirIntensity', { label: 'Intensity', min: 0, max: 5, step: 0.1 });
+      const shd = _section(container, 'Shadows');
+      _slider(shd, ts.light, 'shadowBias', { label: 'Bias', min: -0.01, max: 0.001, step: 0.0001 });
+      _slider(shd, ts.light, 'shadowNormalBias', { label: 'Normal bias', min: 0, max: 0.2, step: 0.001 });
+      break;
+    }
+    case 'ambient': {
+      const amb = _section(container, 'Ambient · HemisphereLight');
+      _color(amb, ts.light, 'hemiSkyColor', { label: 'Sky color' });
+      _color(amb, ts.light, 'hemiGroundColor', { label: 'Ground color' });
+      _slider(amb, ts.light, 'hemiIntensity', { label: 'Intensity', min: 0, max: 3, step: 0.1 });
+      _separator(amb);
+      _slider(amb, ts.light, 'envIntensity', { label: 'Env map', min: 0, max: 2, step: 0.01 });
+      _slider(amb, ts.light, 'exposure', { label: 'Exposure', min: 0.1, max: 2, step: 0.05 });
+      break;
+    }
+    case 'sky': {
+      const sk = _section(container, 'Sky · Environment');
+      _dropdown(sk, ts, 'skyMode', { label: 'Mode', options: { Physical: 'physical', 'Import HDR': 'hdr' }, onChange: () => app.applySkyMode(ts.skyMode) });
+      _separator(sk);
+      const phys = _section(container, 'Physical Sky', ts.skyMode === 'physical');
+      _slider(phys, ts.physicalSky, 'turbidity', { label: 'Turbidity', min: 0, max: 20, step: 0.1 });
+      _slider(phys, ts.physicalSky, 'rayleigh', { label: 'Rayleigh', min: 0, max: 4, step: 0.05 });
+      _slider(phys, ts.physicalSky, 'mie', { label: 'Mie', min: 0, max: 0.1, step: 0.001 });
+      _slider(phys, ts.physicalSky, 'mieG', { label: 'Mie G', min: 0, max: 1, step: 0.01 });
+      _slider(phys, ts.physicalSky, 'meshScale', { label: 'Dome scale', min: 2000, max: 20000, step: 100 });
+      _button(phys, { title: 'Rebake Sky IBL', onClick: () => app.rebuildSkyEnv() });
+      const hdrSec = _section(container, 'HDR', ts.skyMode === 'hdr');
+      _button(hdrSec, { title: 'Load HDR file...', onClick: () => app.importHdr() });
+      _slider(hdrSec, ts.light, 'hdrEnvIntensity', { label: 'Env intensity', min: 0, max: 5, step: 0.05 });
+      _slider(hdrSec, ts.light, 'hdrBackgroundIntensity', { label: 'Bg intensity', min: 0, max: 5, step: 0.05 });
+      break;
+    }
+    case 'terrain': {
+      const info = _section(container, 'Terrain · Info');
+      _info(info, 'World size', `${cfg.world.size} × ${cfg.world.size}`);
+      _info(info, 'Chunk size', `${cfg.world.chunkSize}`);
+      _info(info, 'Resolution', `${cfg.world.dataResolution}`);
+      const chunksInfo = _info(info, 'Active chunks', `${app.perf.activeChunks}`);
+      const trisInfo = _info(info, 'Triangles', `${(app.perf.trisApprox / 1000).toFixed(0)}k`);
+      _inspectorLiveUpdaters.push(() => {
+        chunksInfo.update(`${app.perf.activeChunks}`);
+        trisInfo.update(`${(app.perf.trisApprox / 1000).toFixed(0)}k`);
+      });
+      const lod = _section(container, 'LOD Settings', false);
+      _toggle(lod, cfg.lod, 'enabled', { label: 'LOD enabled', onChange: () => app.onConfigChanged() });
+      _slider(lod, cfg.lod, 'activeRadiusInChunks', { label: 'Radius', min: 2, max: 20, step: 1, onChange: () => app.onConfigChanged() });
+      _slider(lod, cfg.lod, 'hysteresis', { label: 'Hysteresis', min: 0, max: 0.5, step: 0.01, onChange: () => app.onConfigChanged() });
+      break;
+    }
+    case 'lensFlare': {
+      const lf = _section(container, 'Lens Flare · Effect');
+      _toggle(lf, ts.lensFlare, 'enabled', { label: 'Enabled' });
+      _slider(lf, ts.lensFlare, 'intensity', { label: 'Intensity', min: 0, max: 5, step: 0.05 });
+      _separator(lf);
+      _slider(lf, ts.lensFlare, 'halationSize', { label: 'Halation size', min: 0, max: 3, step: 0.05 });
+      _color(lf, ts.lensFlare, 'halationColor', { label: 'Halation color' });
+      _slider(lf, ts.lensFlare, 'streakLength', { label: 'Streak len', min: 0, max: 4, step: 0.05 });
+      _slider(lf, ts.lensFlare, 'streakOpacity', { label: 'Streak opac.', min: 0, max: 2, step: 0.05 });
+      _color(lf, ts.lensFlare, 'streakColor', { label: 'Streak color' });
+      _slider(lf, ts.lensFlare, 'ghostOpacity', { label: 'Ghost opac.', min: 0, max: 2, step: 0.05 });
+      _slider(lf, ts.lensFlare, 'ghostSpacing', { label: 'Ghost spacing', min: 0, max: 2, step: 0.02 });
+      _slider(lf, ts.lensFlare, 'dirtOpacity', { label: 'Lens dirt', min: 0, max: 2, step: 0.05 });
+      break;
+    }
+  }
+}
+
 // === Boot V2 app into viewport ===
 const statusText = document.getElementById('statusText');
 let app = null;
@@ -1133,6 +1275,9 @@ try {
 
   // Build the World tab with custom controls
   buildWorldTab(app);
+
+  // Build scene hierarchy
+  buildHierarchy(app);
 } catch (err) {
   console.error('[Editor] V2 startup failed:', err);
   const hud = document.getElementById('hud');
@@ -1200,6 +1345,7 @@ if (app) {
       _elChunks.textContent = `${p.activeChunks} chunks`;
       _elTris.textContent = `${(p.trisApprox / 1000).toFixed(0)}k tris`;
       _elDot.style.background = p.fps >= 50 ? 'var(--green)' : p.fps >= 30 ? 'var(--orange)' : 'var(--red)';
+      for (const fn of _inspectorLiveUpdaters) fn();
     }
     requestAnimationFrame(_poll);
   };
