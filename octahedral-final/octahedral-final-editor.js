@@ -69,6 +69,32 @@ function hemiOctaGridToDir(gx, gy, out) {
   return out.normalize();
 }
 
+/** View direction → hemi-octahedral atlas UV (for active-cell overlay). */
+function hemiOctaEncode(dir) {
+  const sx = Math.sign(dir.x) || 1;
+  const sy = Math.sign(dir.y) || 1;
+  const sz = Math.sign(dir.z) || 1;
+  const d = dir.x * sx + dir.y * sy + dir.z * sz;
+  return {
+    u: 0.5 * (1 + dir.x / d + dir.z / d),
+    v: 0.5 * (1 + dir.z / d - dir.x / d),
+  };
+}
+
+function countRefTriangles(meshData) {
+  let t = 0;
+  for (const { geometry } of meshData) {
+    if (!geometry) continue;
+    const ix = geometry.index;
+    if (ix) t += ix.count / 3;
+    else {
+      const n = geometry.attributes?.position?.count || 0;
+      t += n / 3;
+    }
+  }
+  return Math.floor(t);
+}
+
 function fullOctaGridToDir(gx, gy, out) {
   const ox = gx * 2 - 1;
   const oz = gy * 2 - 1;
@@ -877,6 +903,25 @@ function exportPNG(pixels, width, height, filename) {
 export async function run() {
   const info = document.getElementById("info");
   const dropOverlay = document.getElementById("drop-overlay");
+  const elLd = document.getElementById("ld");
+  const elLdMsg = document.getElementById("ld-msg");
+  const elLst = document.getElementById("lst");
+  const elDockAp = document.getElementById("dock-ap");
+  const elCz = document.getElementById("cz");
+  const zcCanvas = document.getElementById("zc");
+  const elZl = document.getElementById("zl");
+
+  function setBakeOverlay(visible, msg = "", sub = "") {
+    if (!elLd) return;
+    if (visible) {
+      elLd.classList.add("visible");
+      if (elLdMsg) elLdMsg.textContent = msg || "Working…";
+      if (elLst) elLst.textContent = sub;
+    } else {
+      elLd.classList.remove("visible");
+    }
+  }
+
   info.textContent = "Initialising WebGPU…";
 
   const renderer = new THREE.WebGPURenderer({ antialias: true });
@@ -887,7 +932,8 @@ export async function run() {
   renderer.toneMappingExposure = 1.0;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-  document.body.appendChild(renderer.domElement);
+  document.body.insertBefore(renderer.domElement, document.body.firstChild);
+  renderer.domElement.style.touchAction = "none";
 
   const maxAniso = renderer.capabilities
     ? renderer.capabilities.maxAnisotropy || 16
@@ -969,17 +1015,26 @@ export async function run() {
   let impostor = null;
   let imp = null;
   let atlasResult = null;
-  let debugAtlasColor = null;
-  let debugAtlasNormal = null;
-  let debugAtlasRM = null;
-  let debugAtlasDepth = null;
   let isBaking = false;
+  /** Hemi-octa triplet of cells + weights for atlas overlay; null if full octa or no imp. */
+  let activeCells = null;
+  let lastDockRedraw = 0;
   let currentModelName = "TorusKnot";
 
   // FPS counter
   let frameCount = 0,
     lastFpsTime = performance.now(),
     fps = 0;
+
+  function clearDockCanvases() {
+    for (const id of ["dock-ac", "dock-an", "dock-arm", "dock-ad"]) {
+      const c = document.getElementById(id);
+      if (!c) continue;
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = "#12121a";
+      ctx.fillRect(0, 0, c.width, c.height);
+    }
+  }
 
   function clearScene() {
     if (sourceGroup) {
@@ -991,22 +1046,6 @@ export async function run() {
       impostor.geometry.dispose();
       impostor = null;
     }
-    if (debugAtlasColor) {
-      scene.remove(debugAtlasColor);
-      debugAtlasColor = null;
-    }
-    if (debugAtlasNormal) {
-      scene.remove(debugAtlasNormal);
-      debugAtlasNormal = null;
-    }
-    if (debugAtlasRM) {
-      scene.remove(debugAtlasRM);
-      debugAtlasRM = null;
-    }
-    if (debugAtlasDepth) {
-      scene.remove(debugAtlasDepth);
-      debugAtlasDepth = null;
-    }
     if (atlasResult) {
       atlasResult.colorTex.dispose();
       atlasResult.normalTex.dispose();
@@ -1015,7 +1054,9 @@ export async function run() {
       atlasResult = null;
     }
     imp = null;
+    activeCells = null;
     bakeMeshData = [];
+    clearDockCanvases();
   }
 
   function extractBakeData(obj) {
@@ -1103,6 +1144,7 @@ export async function run() {
     bakeMeshData = extractBakeData(gltf.scene);
     if (bakeMeshData.length === 0) {
       info.textContent = "No meshes found.";
+      clearDockCanvases();
       return;
     }
     const bounds = computeBounds(bakeMeshData);
@@ -1154,28 +1196,17 @@ export async function run() {
   async function rebake() {
     if (isBaking || bakeMeshData.length === 0) return;
     isBaking = true;
-    info.textContent = "Baking atlas (3-pass)…";
+    setBakeOverlay(
+      true,
+      "Baking atlas…",
+      "Color, normal, RM, depth — each cell read back from GPU",
+    );
+    info.textContent = "Baking…";
 
     if (impostor) {
       scene.remove(impostor);
       impostor.geometry.dispose();
       impostor = null;
-    }
-    if (debugAtlasColor) {
-      scene.remove(debugAtlasColor);
-      debugAtlasColor = null;
-    }
-    if (debugAtlasNormal) {
-      scene.remove(debugAtlasNormal);
-      debugAtlasNormal = null;
-    }
-    if (debugAtlasRM) {
-      scene.remove(debugAtlasRM);
-      debugAtlasRM = null;
-    }
-    if (debugAtlasDepth) {
-      scene.remove(debugAtlasDepth);
-      debugAtlasDepth = null;
     }
     if (atlasResult) {
       atlasResult.colorTex.dispose();
@@ -1185,6 +1216,7 @@ export async function run() {
     }
 
     try {
+      if (elLst) elLst.textContent = "Rendering ortho views + readPixels…";
       atlasResult = await bakeAtlases(renderer, bakeMeshData, {
         grid: P.grid,
         atlasSize: P.atlasSize,
@@ -1193,6 +1225,7 @@ export async function run() {
         fullOctahedral: P.fullOctahedral,
       });
 
+      if (elLst) elLst.textContent = "Building impostor material…";
       info.textContent = "Creating impostor…";
       imp = createImpostorMaterial(
         atlasResult.colorTex,
@@ -1229,85 +1262,263 @@ export async function run() {
       impostor.receiveShadow = true;
       scene.add(impostor);
 
-      const ps = 2.5;
-      debugAtlasColor = new THREE.Mesh(
-        new THREE.PlaneGeometry(ps, ps),
-        new THREE.MeshBasicMaterial({
-          map: atlasResult.colorTex,
-          side: THREE.DoubleSide,
-        }),
-      );
-      debugAtlasColor.position.set(-3.2, 5.5, -6);
-      debugAtlasColor.visible = P.showAtlas;
-      scene.add(debugAtlasColor);
-
-      debugAtlasNormal = new THREE.Mesh(
-        new THREE.PlaneGeometry(ps, ps),
-        new THREE.MeshBasicMaterial({
-          map: atlasResult.normalTex,
-          side: THREE.DoubleSide,
-        }),
-      );
-      debugAtlasNormal.position.set(0, 5.5, -6);
-      debugAtlasNormal.visible = P.showAtlas;
-      scene.add(debugAtlasNormal);
-
-      debugAtlasRM = new THREE.Mesh(
-        new THREE.PlaneGeometry(ps, ps),
-        new THREE.MeshBasicMaterial({
-          map: atlasResult.rmTex,
-          side: THREE.DoubleSide,
-        }),
-      );
-      debugAtlasRM.position.set(3.2, 5.5, -6);
-      debugAtlasRM.visible = P.showAtlas;
-      scene.add(debugAtlasRM);
-
-      debugAtlasDepth = new THREE.Mesh(
-        new THREE.PlaneGeometry(ps, ps),
-        new THREE.MeshBasicMaterial({
-          map: atlasResult.depthTex,
-          side: THREE.DoubleSide,
-        }),
-      );
-      debugAtlasDepth.position.set(6.4, 5.5, -6);
-      debugAtlasDepth.visible = P.showAtlas;
-      scene.add(debugAtlasDepth);
-
-      for (const p of [
-        debugAtlasColor,
-        debugAtlasNormal,
-        debugAtlasRM,
-        debugAtlasDepth,
-      ]) {
-        p.castShadow = false;
-        p.receiveShadow = false;
-      }
-
       info.textContent = "Compiling shaders…";
+      if (elLst) elLst.textContent = "compileAsync(scene, camera)…";
       await renderer.compileAsync(scene, camera);
+      computeActiveCellsForDock();
+      drawAtlasDock();
       syncParams();
       updateInfo();
     } catch (e) {
       info.textContent = "Bake error: " + e.message;
       console.error(e);
+      atlasResult = null;
+      activeCells = null;
+      clearDockCanvases();
+      updateStatsPanel();
     }
+    setBakeOverlay(false);
     isBaking = false;
   }
 
+  function computeActiveCellsForDock() {
+    if (!atlasResult || !imp || P.fullOctahedral) {
+      activeCells = null;
+      return;
+    }
+    const center = imp.uCenter.value;
+    const vd = new THREE.Vector3()
+      .subVectors(camera.position, center)
+      .normalize();
+    const enc = hemiOctaEncode(vd);
+    const S = P.grid;
+    const Nm1 = S - 1;
+    const gx = enc.u * Nm1;
+    const gy = enc.v * Nm1;
+    const fx = Math.min(Math.floor(gx), Nm1);
+    const fy = Math.min(Math.floor(gy), Nm1);
+    const frx = gx - fx;
+    const fry = gy - fy;
+    const wx = Math.min(1 - frx, 1 - fry);
+    const wy = Math.abs(frx - fry);
+    const wz = Math.min(frx, fry);
+    const ww = frx > fry ? 1 : 0;
+    activeCells = {
+      s1: [fx, fy],
+      s2: [
+        Math.min(fx + (ww ? 1 : 0), Nm1),
+        Math.min(fy + (ww ? 0 : 1), Nm1),
+      ],
+      s3: [Math.min(fx + 1, Nm1), Math.min(fy + 1, Nm1)],
+      weights: [wx, wy, wz],
+    };
+  }
+
+  function drawAtlasDock() {
+    if (!atlasResult) {
+      clearDockCanvases();
+      return;
+    }
+    const w = atlasResult.atlasSize;
+    const S = atlasResult.grid;
+    const sz = 152;
+    const showGrid = P.showAtlasGrid;
+    const showActive = P.showAtlasActive && !P.fullOctahedral;
+
+    const drawLayer = (pixels, canvasId, overlayGrid) => {
+      const c = document.getElementById(canvasId);
+      if (!c || !pixels) return;
+      const ctx = c.getContext("2d");
+      const tmp = document.createElement("canvas");
+      tmp.width = w;
+      tmp.height = w;
+      const clamped = new Uint8ClampedArray(
+        pixels.buffer,
+        pixels.byteOffset,
+        w * w * 4,
+      );
+      tmp.getContext("2d").putImageData(new ImageData(clamped, w, w), 0, 0);
+      ctx.clearRect(0, 0, sz, sz);
+      ctx.save();
+      ctx.translate(0, sz);
+      ctx.scale(1, -1);
+      ctx.drawImage(tmp, 0, 0, sz, sz);
+      ctx.restore();
+
+      if (overlayGrid) {
+        const step = sz / S;
+        ctx.strokeStyle = "rgba(255,255,255,0.28)";
+        ctx.lineWidth = 0.5;
+        for (let i = 0; i <= S; i++) {
+          const p = i * step;
+          ctx.beginPath();
+          ctx.moveTo(p, 0);
+          ctx.lineTo(p, sz);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(0, p);
+          ctx.lineTo(sz, p);
+          ctx.stroke();
+        }
+      }
+      if (showActive && activeCells && overlayGrid) {
+        const step = sz / S;
+        const { s1, s2, s3, weights } = activeCells;
+        [
+          [s1, weights[0], "255,80,80"],
+          [s2, weights[1], "80,255,80"],
+          [s3, weights[2], "80,80,255"],
+        ].forEach(([cell, wt, col]) => {
+          if (wt < 0.01) return;
+          const a = 0.14 + wt * 0.5;
+          const x = cell[0] * step;
+          const y = (S - 1 - cell[1]) * step;
+          ctx.fillStyle = `rgba(${col},${a})`;
+          ctx.fillRect(x, y, step, step);
+          ctx.strokeStyle = `rgba(${col},0.95)`;
+          ctx.lineWidth = 1;
+          ctx.strokeRect(x + 0.5, y + 0.5, step - 1, step - 1);
+          ctx.fillStyle = "rgba(255,255,255,0.92)";
+          ctx.font = "bold 8px monospace";
+          ctx.fillText(((wt * 100) | 0) + "%", x + 2, y + step - 2);
+        });
+      }
+    };
+
+    const colorOverlay = showGrid || (showActive && activeCells);
+    drawLayer(atlasResult.colorPixels, "dock-ac", colorOverlay);
+    drawLayer(atlasResult.normalPixels, "dock-an", showGrid);
+    drawLayer(atlasResult.rmPixels, "dock-arm", showGrid);
+    drawLayer(atlasResult.depthPixels, "dock-ad", showGrid);
+  }
+
+  function updateStatsPanel() {
+    const q = (id, t) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = t;
+    };
+    q("st-fps", String(fps));
+    if (atlasResult) {
+      q("st-atlas", `${atlasResult.atlasSize}²`);
+      q("st-grid", `${atlasResult.grid}×${atlasResult.grid}`);
+      q(
+        "st-csz",
+        `${Math.floor(atlasResult.atlasSize / atlasResult.grid)}px`,
+      );
+      q("st-pad", `${atlasResult.cellPad}px`);
+    } else {
+      q("st-atlas", "—");
+      q("st-grid", "—");
+      q("st-csz", "—");
+      q("st-pad", "—");
+    }
+    q("st-mesh", bakeMeshData.length ? String(bakeMeshData.length) : "—");
+    q(
+      "st-tri",
+      bakeMeshData.length
+        ? countRefTriangles(bakeMeshData).toLocaleString()
+        : "—",
+    );
+    const t = controls.target;
+    const dist = camera.position.distanceTo(t);
+    q("st-dist", dist.toFixed(1));
+    const dx = camera.position.x - t.x;
+    const dz = camera.position.z - t.z;
+    q(
+      "st-ang",
+      `${(((Math.atan2(dx, dz) * 180) / Math.PI + 360) % 360).toFixed(0)}°`,
+    );
+    if (activeCells && !P.fullOctahedral) {
+      const { s1, s2, s3 } = activeCells;
+      q(
+        "st-act",
+        `(${s1[0]},${s1[1]})·(${s2[0]},${s2[1]})·(${s3[0]},${s3[1]})`,
+      );
+    } else if (P.fullOctahedral) {
+      q("st-act", "full octa");
+    } else {
+      q("st-act", "—");
+    }
+  }
+
   function updateInfo() {
-    const parts = [
-      `${currentModelName}`,
-      `Grid ${P.grid}×${P.grid}`,
-      `Atlas ${P.atlasSize}px`,
-      `${bakeMeshData.length} mesh(es)`,
-      `FPS ${fps}`,
-    ];
+    const parts = [currentModelName];
     if (P.freeze) parts.push("FROZEN [F]");
     if (P.autoOrbit) parts.push("ORBIT [O]");
     if (P.debugMode === 1) parts.push("NORMALS [N]");
     if (P.debugMode === 2) parts.push("RAW [R]");
     info.textContent = parts.join(" · ");
+  }
+
+  function openCellZoomFromEvent(e, pixels, channelLabel) {
+    if (!atlasResult || !zcCanvas || !elCz || !elZl) return;
+    const w = atlasResult.atlasSize;
+    const S = atlasResult.grid;
+    const cs = w / S;
+    const pd = atlasResult.cellPad;
+    const r = e.currentTarget.getBoundingClientRect();
+    const x = (e.clientX - r.left) / r.width;
+    const y = (e.clientY - r.top) / r.height;
+    const col = Math.min(Math.floor(x * S), S - 1);
+    const row = S - 1 - Math.min(Math.floor(y * S), S - 1);
+    const tmp = document.createElement("canvas");
+    tmp.width = w;
+    tmp.height = w;
+    const clamped = new Uint8ClampedArray(
+      pixels.buffer,
+      pixels.byteOffset,
+      w * w * 4,
+    );
+    tmp.getContext("2d").putImageData(new ImageData(clamped, w, w), 0, 0);
+    const ctx = zcCanvas.getContext("2d");
+    ctx.clearRect(0, 0, 200, 200);
+    ctx.imageSmoothingEnabled = false;
+    ctx.save();
+    ctx.translate(0, 200);
+    ctx.scale(1, -1);
+    ctx.drawImage(tmp, col * cs, row * cs, cs, cs, 0, 0, 200, 200);
+    ctx.restore();
+    const pp = (pd / cs) * 200;
+    if (pp > 0 && pd > 0) {
+      ctx.strokeStyle = "rgba(255,100,100,0.75)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.strokeRect(pp, pp, 200 - pp * 2, 200 - pp * 2);
+      ctx.setLineDash([]);
+      ctx.fillStyle = "rgba(255,100,100,0.55)";
+      ctx.font = "9px monospace";
+      ctx.fillText(`pad=${pd}px`, 2, 10);
+    }
+    elZl.textContent = `${channelLabel} cell (${col},${row})`;
+    elCz.style.display = "block";
+    elCz.style.left = `${Math.min(e.clientX + 10, innerWidth - 220)}px`;
+    elCz.style.top = `${Math.min(e.clientY + 10, innerHeight - 240)}px`;
+    setTimeout(() => {
+      elCz.style.display = "none";
+    }, 4500);
+  }
+
+  function attachDockZoomHandlers() {
+    const pairs = [
+      ["dock-ac", () => atlasResult?.colorPixels, "Color"],
+      ["dock-an", () => atlasResult?.normalPixels, "Normal"],
+      ["dock-arm", () => atlasResult?.rmPixels, "R/M"],
+      ["dock-ad", () => atlasResult?.depthPixels, "Depth"],
+    ];
+    for (const [id, getPx, label] of pairs) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const pixels = getPx();
+        if (!atlasResult || !pixels) return;
+        openCellZoomFromEvent(e, pixels, label);
+      });
+    }
+    document.addEventListener("click", (e) => {
+      if (!e.target.closest("#dock-ap") && !e.target.closest("#cz"))
+        elCz.style.display = "none";
+    });
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -1320,6 +1531,8 @@ export async function run() {
     atlasSize: 2048,
     cellPad: 2,
     showAtlas: true,
+    showAtlasGrid: false,
+    showAtlasActive: true,
     showOriginal: true,
     showImpostor: true,
     sunAzimuth: 225,
@@ -1384,10 +1597,7 @@ export async function run() {
       });
     }
     if (impostor) impostor.visible = P.showImpostor;
-    if (debugAtlasColor) debugAtlasColor.visible = P.showAtlas;
-    if (debugAtlasNormal) debugAtlasNormal.visible = P.showAtlas;
-    if (debugAtlasRM) debugAtlasRM.visible = P.showAtlas;
-    if (debugAtlasDepth) debugAtlasDepth.visible = P.showAtlas;
+    if (elDockAp) elDockAp.style.display = P.showAtlas ? "flex" : "none";
 
     updateInfo();
   }
@@ -1468,7 +1678,7 @@ export async function run() {
     .name("Cell padding")
     .onChange(() => rebake());
   fAtlas.add(P, "fullOctahedral").name("Full octahedral").onChange(() => rebake());
-  fAtlas.add(P, "showAtlas").name("Show preview").onChange(syncParams);
+  fAtlas.add(P, "showAtlas").name("Show atlas panel").onChange(syncParams);
   fAtlas.add({ rebake: () => rebake() }, "rebake").name("Rebake now");
 
   const fSun = gui.addFolder("Sun");
@@ -1537,6 +1747,22 @@ export async function run() {
       syncParams();
     });
   fDebug.add(P, "autoOrbit").name("Auto-orbit [O]").onChange(syncParams);
+  fDebug
+    .add(P, "showAtlasGrid")
+    .name("Dock: grid lines")
+    .onChange(() => {
+      drawAtlasDock();
+      updateStatsPanel();
+    });
+  fDebug
+    .add(P, "showAtlasActive")
+    .name("Dock: active cells")
+    .onChange(() => {
+      drawAtlasDock();
+      updateStatsPanel();
+    });
+
+  attachDockZoomHandlers();
 
   const fExport = gui.addFolder("Export");
   fExport
@@ -1609,7 +1835,8 @@ export async function run() {
   // ═══════════════════════════════════════════════════════════════════════
 
   addEventListener("keydown", (e) => {
-    if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+    const tag = e.target.tagName;
+    if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
     switch (e.code) {
       case "KeyN":
         P.debugMode = P.debugMode === 1 ? 0 : 1;
@@ -1686,9 +1913,21 @@ export async function run() {
     const smDt = dirLight.shadow.map?.depthTexture;
     if (smDt && imp?.uShadowMapDepth) imp.uShadowMapDepth.value = smDt;
 
-    // FPS
-    frameCount++;
+    updateStatsPanel();
+
     const now = performance.now();
+    if (now - lastDockRedraw >= 100) {
+      lastDockRedraw = now;
+      if (atlasResult && imp) computeActiveCellsForDock();
+      if (
+        P.showAtlas &&
+        atlasResult &&
+        (P.showAtlasGrid || P.showAtlasActive)
+      )
+        drawAtlasDock();
+    }
+
+    frameCount++;
     if (now - lastFpsTime >= 500) {
       fps = Math.round(frameCount / ((now - lastFpsTime) / 1000));
       frameCount = 0;

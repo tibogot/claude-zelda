@@ -5,33 +5,288 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Octahedral Final Editor — WebGPU</title>
     <style>
-      * { margin: 0; padding: 0; box-sizing: border-box; }
-      body { overflow: hidden; background: #1a1a2e; font-family: 'Segoe UI', system-ui, sans-serif; }
-      canvas { display: block; width: 100vw; height: 100vh; }
+      @import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap");
+      :root {
+        --bg: #0d0d14;
+        --panel: rgba(12, 12, 22, 0.92);
+        --border: rgba(255, 255, 255, 0.08);
+        --accent: #4af;
+        --accent2: #6d6;
+        --text: #c0c8d8;
+        --text-dim: #5a6070;
+        --mono: "JetBrains Mono", "SF Mono", "Fira Code", monospace;
+        --radius: 6px;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: var(--bg);
+        font-family: var(--mono);
+        color: var(--text);
+      }
+      body > canvas {
+        position: fixed;
+        inset: 0;
+        z-index: 0;
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
       #info {
-        position: fixed; bottom: 12px; left: 12px; z-index: 10;
-        font: 12px/1.5 "SF Mono", "Fira Code", monospace;
-        color: #b0d890; background: rgba(0,0,0,0.6);
-        padding: 8px 14px; border-radius: 6px;
-        pointer-events: none; max-width: 50vw;
+        position: fixed;
+        top: 48px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 15;
+        font: 11px/1.4 var(--mono);
+        color: #b0d890;
+        background: rgba(0, 0, 0, 0.65);
+        padding: 6px 14px;
+        border-radius: 6px;
+        pointer-events: none;
+        max-width: min(560px, 90vw);
+        text-align: center;
       }
       .label {
-        position: fixed; top: 14px; z-index: 10;
-        font: 600 13px/1 "SF Mono", "Fira Code", monospace;
-        text-transform: uppercase; letter-spacing: 2px;
-        padding: 5px 12px; border-radius: 4px; pointer-events: none;
+        position: fixed;
+        top: 14px;
+        z-index: 15;
+        font: 600 11px/1 var(--mono);
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        padding: 5px 12px;
+        border-radius: 4px;
+        pointer-events: none;
       }
-      #lbl-orig { left: 25%; transform: translateX(-50%); color: #8ce68c; background: rgba(0,0,0,0.5); }
-      #lbl-imp  { left: 75%; transform: translateX(-50%); color: #8cc8e6; background: rgba(0,0,0,0.5); }
+      #lbl-orig {
+        left: calc(25% - 48px);
+        color: var(--accent2);
+        background: rgba(80, 255, 80, 0.12);
+        border: 1px solid rgba(80, 255, 80, 0.25);
+      }
+      #lbl-imp {
+        left: calc(75% - 52px);
+        color: var(--accent);
+        background: rgba(68, 170, 255, 0.12);
+        border: 1px solid rgba(68, 170, 255, 0.25);
+      }
+      #dv {
+        position: fixed;
+        left: 50%;
+        top: 0;
+        width: 1px;
+        height: 100vh;
+        background: linear-gradient(
+          180deg,
+          transparent 0%,
+          rgba(255, 255, 255, 0.1) 12%,
+          rgba(255, 255, 255, 0.1) 88%,
+          transparent 100%
+        );
+        pointer-events: none;
+        z-index: 4;
+      }
       #drop-overlay {
-        position: fixed; inset: 0; z-index: 200;
-        display: none; align-items: center; justify-content: center;
-        background: rgba(20,60,120,0.55); backdrop-filter: blur(4px);
-        border: 3px dashed rgba(120,180,255,0.6);
+        position: fixed;
+        inset: 0;
+        z-index: 200;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(20, 60, 120, 0.5);
+        backdrop-filter: blur(4px);
+        border: 3px dashed rgba(120, 180, 255, 0.55);
       }
       #drop-overlay span {
-        color: #fff; font-size: 22px; font-weight: 600;
-        background: rgba(0,0,0,0.4); padding: 14px 28px; border-radius: 10px;
+        color: #fff;
+        font-size: 20px;
+        font-weight: 600;
+        background: rgba(0, 0, 0, 0.45);
+        padding: 14px 28px;
+        border-radius: 10px;
+      }
+      #so {
+        position: fixed;
+        left: 50%;
+        bottom: 64px;
+        transform: translateX(-50%);
+        z-index: 25;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        backdrop-filter: blur(12px);
+        padding: 8px 10px;
+        font-size: 10px;
+        min-width: 168px;
+        max-width: min(520px, calc(100vw - 24px));
+      }
+      #so h3 {
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--text-dim);
+        margin-bottom: 6px;
+      }
+      .sr {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 3px;
+        gap: 10px;
+      }
+      .sr .sl {
+        color: var(--text-dim);
+      }
+      .sr .sv {
+        color: var(--accent);
+        font-weight: 500;
+      }
+      .sr .sv.g {
+        color: var(--accent2);
+      }
+      .sr .sv.o {
+        color: #fa4;
+      }
+      #dock-ap {
+        position: fixed;
+        left: 8px;
+        top: 88px;
+        bottom: auto;
+        max-height: calc(100vh - 100px);
+        overflow-y: auto;
+        overflow-x: hidden;
+        z-index: 25;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        backdrop-filter: blur(12px);
+        padding: 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      #dock-ap::-webkit-scrollbar {
+        width: 4px;
+      }
+      #dock-ap::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.12);
+        border-radius: 2px;
+      }
+      .dock-ar {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+      .dock-al {
+        writing-mode: vertical-lr;
+        text-orientation: mixed;
+        font-size: 8px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        color: var(--text-dim);
+        text-transform: uppercase;
+        width: 14px;
+        flex-shrink: 0;
+      }
+      #dock-ap canvas {
+        border-radius: 3px;
+        border: 1px solid var(--border);
+        width: 152px;
+        height: 152px;
+        image-rendering: auto;
+        cursor: zoom-in;
+      }
+      #dock-hint {
+        font-size: 8px;
+        color: var(--text-dim);
+        text-align: center;
+        margin-top: 2px;
+      }
+      #bi {
+        position: fixed;
+        bottom: 8px;
+        left: 8px;
+        z-index: 26;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        backdrop-filter: blur(12px);
+        padding: 8px 12px;
+        font-size: 10px;
+        line-height: 1.65;
+        max-width: 300px;
+      }
+      #bi .key {
+        color: var(--accent);
+        font-weight: 600;
+      }
+      #bi .dim {
+        color: var(--text-dim);
+        font-size: 9px;
+      }
+      #ld {
+        position: fixed;
+        inset: 0;
+        background: rgba(8, 8, 16, 0.88);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 12px;
+        z-index: 100;
+        color: var(--accent);
+        font-size: 13px;
+        font-weight: 500;
+      }
+      #ld.visible {
+        display: flex;
+      }
+      .spinner {
+        width: 28px;
+        height: 28px;
+        border: 2px solid rgba(68, 170, 255, 0.15);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 0.75s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      #lst {
+        font-size: 11px;
+        color: var(--text-dim);
+        max-width: 80vw;
+        text-align: center;
+      }
+      #cz {
+        position: fixed;
+        z-index: 50;
+        background: var(--panel);
+        border: 2px solid var(--accent);
+        border-radius: var(--radius);
+        padding: 4px;
+        display: none;
+      }
+      #cz canvas {
+        width: 200px;
+        height: 200px;
+        image-rendering: pixelated;
+        border-radius: 3px;
+      }
+      #cz .czl {
+        font-size: 9px;
+        color: var(--accent);
+        text-align: center;
+        margin-top: 2px;
+      }
+      .tp-dfwv {
+        z-index: 40 !important;
       }
     </style>
     <script type="importmap">
@@ -46,13 +301,88 @@
     </script>
   </head>
   <body>
-    <div class="label" id="lbl-orig">Original</div>
+    <div id="dv" aria-hidden="true"></div>
+    <div class="label" id="lbl-orig">Reference</div>
     <div class="label" id="lbl-imp">Impostor</div>
     <div id="info">Initialising WebGPU…</div>
+
+    <div id="so">
+      <h3>Stats</h3>
+      <div class="sr">
+        <span class="sl">FPS</span><span class="sv g" id="st-fps">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Atlas</span><span class="sv" id="st-atlas">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Grid</span><span class="sv" id="st-grid">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Cell px</span><span class="sv" id="st-csz">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Pad</span><span class="sv" id="st-pad">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Meshes</span><span class="sv" id="st-mesh">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Ref tris</span><span class="sv o" id="st-tri">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Cam dist</span><span class="sv" id="st-dist">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Yaw</span><span class="sv" id="st-ang">—</span>
+      </div>
+      <div class="sr">
+        <span class="sl">Active</span><span class="sv" id="st-act">—</span>
+      </div>
+    </div>
+
+    <div id="dock-ap">
+      <div class="dock-ar">
+        <span class="dock-al">Color</span>
+        <canvas id="dock-ac" width="152" height="152"></canvas>
+      </div>
+      <div class="dock-ar">
+        <span class="dock-al">Normal</span>
+        <canvas id="dock-an" width="152" height="152"></canvas>
+      </div>
+      <div class="dock-ar">
+        <span class="dock-al">R/M</span>
+        <canvas id="dock-arm" width="152" height="152"></canvas>
+      </div>
+      <div class="dock-ar">
+        <span class="dock-al">Depth</span>
+        <canvas id="dock-ad" width="152" height="152"></canvas>
+      </div>
+      <div id="dock-hint">Click a preview to zoom one cell · Hemi active overlay</div>
+    </div>
+
+    <div id="bi">
+      <span class="key">Drag</span> orbit · <span class="key">Scroll</span> zoom ·
+      <span class="key">Right-drag</span> pan<br />
+      <span class="key">N</span> normals · <span class="key">R</span> raw atlas ·
+      <span class="key">F</span> freeze · <span class="key">O</span> auto-orbit<br />
+      <span class="dim">WebGPU bake: color, normal, RM, depth · Rebake from Atlas panel</span>
+    </div>
+
+    <div id="ld" aria-live="polite">
+      <div class="spinner"></div>
+      <span id="ld-msg">Working…</span>
+      <div class="lst" id="lst"></div>
+    </div>
+
+    <div id="cz">
+      <canvas id="zc" width="200" height="200"></canvas>
+      <div class="czl" id="zl">Cell</div>
+    </div>
+
     <div id="drop-overlay"><span>Drop .glb file to load</span></div>
     <script type="module">
       import { run } from "./octahedral-final-editor.js";
-      run().catch(err => {
+      run().catch((err) => {
         document.getElementById("info").textContent = "Error: " + err.message;
         console.error(err);
       });
