@@ -1,0 +1,4640 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Parkour Scene</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #000;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #info {
+        position: fixed;
+        bottom: 16px;
+        left: 16px;
+        z-index: 10;
+        font:
+          12px/1.5 "SF Mono",
+          "Fira Code",
+          monospace;
+        color: #b0d890;
+        background: rgba(0, 0, 0, 0.55);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: none;
+        user-select: none;
+        backdrop-filter: blur(4px);
+      }
+      #info span {
+        color: #e0f0c0;
+        font-weight: 600;
+      }
+      .tp-dfwv {
+        z-index: 20 !important;
+        max-height: 90vh !important;
+        overflow-y: auto !important;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+          "stats-gl": "https://cdn.jsdelivr.net/npm/stats-gl/dist/main.js",
+          "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.9/build/index.module.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">
+      Parkour &mdash; <span id="backend">loading…</span> &bull;
+      <span id="stats">—</span> &bull; WASD + click to look &bull; Shift run
+      &bull; Ctrl crouch &bull; F roll &bull; right-click / E attack &bull;
+      Space jump &bull; Space mid-air glide &bull; Church (-40, -35) god rays
+    </div>
+    <script type="module">
+      const Tweakpane =
+        await import("https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/dist/tweakpane.min.js");
+
+      import * as THREE from "three";
+      import {
+        pass,
+        color,
+        fog,
+        float,
+        mrt,
+        output,
+        emissive,
+        renderOutput,
+        positionWorld,
+        positionView,
+        positionLocal,
+        triNoise3D,
+        uniform,
+        mul,
+        div,
+        sub,
+        add,
+        clamp,
+        mix,
+        vec2,
+        vec3,
+        vec4,
+        step,
+        abs,
+        smoothstep,
+        uv,
+        Loop,
+        Fn,
+        int,
+        convertToTexture,
+        nodeObject,
+        normalView,
+        directionToColor,
+        colorToDirection,
+        sample,
+        screenUV,
+        sin,
+        cos,
+        length,
+        pow,
+        dot,
+        normalize,
+        negate,
+        texture,
+        mx_noise_float,
+        fract,
+        floor,
+        max,
+        min,
+      } from "three/tsl";
+      import { bloom } from "three/addons/tsl/display/BloomNode.js";
+      import { fxaa } from "three/addons/tsl/display/FXAANode.js";
+      import { lensflare } from "three/addons/tsl/display/LensflareNode.js";
+      import { gaussianBlur } from "three/addons/tsl/display/GaussianBlurNode.js";
+      import { boxBlur } from "three/addons/tsl/display/boxBlur.js";
+      import { ao } from "three/addons/tsl/display/GTAONode.js";
+      import { denoise } from "three/addons/tsl/display/DenoiseNode.js";
+      import Stats from "stats-gl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+      import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
+      import { CSMShadowNode } from "three/addons/csm/CSMShadowNode.js";
+      import RAPIER from "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.19.3/+esm";
+      import {
+        createPhysicsWorld,
+        createPlayerController,
+        createPhysicsDebug,
+      } from "./physics.js";
+      import { createPlayer } from "./player-parkourtsushima.js";
+      import { createFloatingLeaves } from "./floating-leaves.js";
+      import { createFlowingLines } from "./flowing-lines.js";
+      import { PARAMS } from "./params.js";
+      import { PI } from "./constants.js";
+      import { createTileMaterial } from "./tileMaterial.js";
+      import { createHorizonSky } from "./horizon-webgpu-tsl.js";
+      import { MeshBVH, acceleratedRaycast } from "three-mesh-bvh";
+
+      const PARKOUR_SIZE = 800;
+
+      // Enable BVH-accelerated raycasting on THREE.Mesh
+      THREE.Mesh.prototype.raycast = acceleratedRaycast;
+
+      // Floor surface height — parkour ground sits on top of createPhysicsWorld's default ground
+      const FLOOR_Y = 1;
+      const TOWER_GUN_SPAWN_X = 20;
+      const TOWER_GUN_SPAWN_Z = 12;
+      const TANK_SPAWN_X = -14;
+      const TANK_SPAWN_Z = 8;
+
+      /** Poly Haven — same HDRI as `wawa-game-2` `useLightsControls` default. */
+      const INDUSTRIAL_SUNSET_PURESKY_HDR =
+        "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/4k/industrial_sunset_02_puresky_4k.hdr";
+
+      const _tankFootCorner = new THREE.Vector3();
+
+      const parkourParams = {
+        tile: {
+          textureScale: 1500,
+          gradientIntensity: 0.5,
+          gradientBias: 0.1,
+          tileColor: "#d4d4d4",
+          gridColor: "#707070",
+          gridLineColor: "#404040",
+          roughness: 1,
+          metalness: 0,
+        },
+        ground: {
+          planeSize: 800,
+        },
+        csm: {
+          cascades: 3,
+          maxFar: 300,
+          lightMargin: 150,
+          mapSize: 2048,
+          updateEveryFrame: true,
+        },
+        // Matches `wawa-game-2` Experience + useLightsControls (Map1 defaults).
+        light: {
+          sunAzimuth: 315,
+          sunElevation: 43,
+          dirColor: "#ffffff",
+          dirIntensity: 1.5,
+          ambientColor: "#ffffff",
+          ambientIntensity: 0.4,
+          envIntensity: 1,
+          backgroundIntensity: 0.7,
+          exposure: 1,
+          shadowBias: -0.00005,
+          shadowNormalBias: 0,
+        },
+        horizonGradient: {
+          enabled: false,
+          drawOnTop: true,
+          topColor: "#0077ff",
+          bottomColor: "#ffffff",
+          offset: 33,
+          exponent: 0.6,
+          radius: 4000,
+          ringStrength: 0,
+          ringWidth: 0.12,
+          ringColor: "#fff0d0",
+        },
+        debug: {
+          rapierDebug: false,
+        },
+        foliage: {
+          floatingLeaves: false,
+          count: 40,
+          areaSize: 25,
+          spawnHeight: 12,
+          leafSize: 0.5,
+          scale: 2,
+          opacity: 0.9,
+          windInfluence: 0.2,
+          gravity: 0.0003,
+          terminalVelocity: 0.004,
+          rotationSpeed: 0.0003,
+          airResistance: 0.995,
+          maxAge: 2000,
+          terrainFloorOffset: 2,
+          windStr: 0.08,
+          windSpeed: 0.4,
+        },
+        katana: {
+          posX: -0.085,
+          posY: 0.18,
+          posZ: -0.17,
+          rotX: -1.07,
+          rotY: 1.35,
+          rotZ: -2.21,
+        },
+        swordTrail: {
+          enabled: true,
+          trailColor: "#66dfff",
+          edgeColor: "#ffffff",
+          trailLength: 8,
+          tipOffset: 0.85,
+          baseOffset: 0.0,
+          widthScale: 1.0,
+          opacity: 0.8,
+          fadeOutTime: 0.12,
+          lightIntensity: 1.5,
+          lightRange: 3.0,
+        },
+        deer: {
+          count: 10,
+        },
+        flowingLines: {
+          enabled: false,
+          lineCount: 8,
+          lineLength: 12,
+          lineWidth: 0.15,
+          segments: 20,
+          heightOffset: 0.3,
+          verticalWave: 0.08,
+          animationSpeed: 1,
+          pathRadius: 25,
+          pathFrequency: 0.8,
+          lineColor: "#a8d8ea",
+          lineOpacity: 0.7,
+        },
+        bloodFX: {
+          enabled: true,
+          burstCount: 10,
+          bloodColor: "#8b0000",
+          bloodColor2: "#cc1100",
+          burstSpeed: 3.5,
+          burstSpread: 2.0,
+          gravity: 6.0,
+          spriteSize: 0.12,
+          lifetime: 0.6,
+          poolColor: "#550000",
+          poolSize: 3.0,
+          poolLifetime: 8.0,
+          poolPersist: true,
+          poolAnimDuration: 2.25,
+          poolFlipbookByFps: false,
+          poolMinWorldScale: 0.08,
+          poolYOffset: 0.03,
+          flashDuration: 0.12,
+          flashColor: "#ff2200",
+          poolAtlasBasePath: "./textures/BloodPool/",
+          poolColorAtlasFile: "ContactSheet.png",
+          poolAlphaAtlasFile: "ContactSheet-001.png",
+          poolAtlasCols: 14,
+          poolAtlasRows: 14,
+          poolAnimFps: 14,
+          poolAlphaCutoff: 0.02,
+          poolInvertAlphaMask: true,
+          poolFlipRowUV: false,
+          poolAtlasLinear: false,
+        },
+        tank: {
+          enabled: true,
+          scale: 1,
+          spawnX: TANK_SPAWN_X,
+          spawnZ: TANK_SPAWN_Z,
+          spawnYaw: 0,
+          yawOffset: 0,
+          patrol: true,
+          patrolRadius: 22,
+          patrolCenterX: 0,
+          patrolCenterZ: 0,
+          boundarySoft: 0.82,
+          boundarySteerWeight: 0.92,
+          maxSpeed: 4.2,
+          accel: 5.5,
+          turnSpeed: 0.95,
+          steerSmooth: 3.2,
+          steerAggression: 0.85,
+          reverseChance: 0.14,
+          pauseChance: 0.1,
+          pauseDurationMin: 0.9,
+          pauseDurationMax: 2.4,
+          maneuverTimeMin: 2.0,
+          maneuverTimeMax: 5.2,
+        },
+        towerGun: {
+          enabled: true,
+          scale: 0.28,
+          aimEnabled: true,
+          aimMaxRange: 140,
+          aimTurnSpeed: 2.8,
+          aimRetargetInterval: 0.18,
+          aimRequireLos: false,
+          aimDeerYOffset: 0.85,
+          aimPivotYOffset: 0.45,
+          aimYawOffset: 0,
+          shootEnabled: false,
+          shootCooldown: 0.85,
+          shootMuzzleAlongAim: 0.08,
+          shootYawTolerance: 0.2,
+        },
+        spellVFX: {
+          enabled: true,
+          orbColor: "#33ccff",
+          orbCoreColor: "#ffffff",
+          orbSize: 0.12,
+          orbIntensity: 6.0,
+          orbPulseSpeed: 3.0,
+          orbPulseAmount: 0.25,
+          orbLightIntensity: 2.5,
+          orbLightRange: 4.0,
+          orbOffsetX: 0,
+          orbOffsetY: 0,
+          orbOffsetZ: 0,
+          projectileSpeed: 28,
+          projectileSize: 0.1,
+          projectileMaxDist: 35,
+          trailLength: 12,
+          trailSpacing: 0.06,
+          impactSize: 0.8,
+          impactDuration: 0.3,
+          sparkCount: 8,
+          sparkOrbitRadius: 0.2,
+          sparkOrbitSpeed: 5.0,
+          sparkSize: 0.02,
+        },
+        enemies: undefined,
+      };
+      const hazeParams = {
+        enabled: false,
+        thickness: 35,
+        opacity: 0.9,
+        falloff: 2.2,
+        hazeColor: "#f5f5f0",
+        noiseScaleA: 0.004,
+        noiseScaleB: 0.008,
+        noiseAmountA: 0.22,
+        noiseAmountB: 0.18,
+        noiseDetail: 0.12,
+        noiseSpeed: 1,
+      };
+
+      // Post-processing params (enable/disable + per-effect settings)
+      const postParams = {
+        enabled: false,
+        bloom: { enabled: false, strength: 0.4, radius: 0.4, threshold: 0.6 },
+        lensflare: {
+          enabled: false,
+          bloomThreshold: 0.72,
+          threshold: 0.6,
+          ghostAttenuation: 25,
+          ghostSpacing: 0.25,
+        },
+        godRays: {
+          enabled: true,
+          strength: 0.15,
+          decay: 0.96,
+          density: 0.8,
+          samples: 32,
+        },
+        dof: {
+          enabled: false,
+          focusDistance: 25,
+          blurStart: 5,
+          blurEnd: 60,
+          blurSize: 1,
+          blurSpread: 3,
+        },
+        gtao: {
+          enabled: false,
+          intensity: 1.2,
+          radius: 1.2,
+          samples: 14,
+          resolutionScale: 0.5,
+          scale: 1,
+          distanceFallOff: 1,
+          distanceExponent: 1,
+          thickness: 1,
+          denoiseEnabled: true,
+          denoiseRadius: 5,
+          denoiseLumaPhi: 5,
+          denoiseDepthPhi: 5,
+          denoiseNormalPhi: 5,
+        },
+      };
+
+      function srgbToLinear(hex) {
+        const c = new THREE.Color(hex);
+        c.convertSRGBToLinear();
+        return c;
+      }
+
+      function sunDirectionFromAngles(azimuthDeg, elevationDeg) {
+        const az = (azimuthDeg * Math.PI) / 180;
+        const el = (elevationDeg * Math.PI) / 180;
+        const cosEl = Math.cos(el);
+        return new THREE.Vector3(
+          cosEl * Math.cos(az),
+          Math.sin(el),
+          cosEl * Math.sin(az),
+        ).normalize();
+      }
+
+      /* ── Sword Trail VFX (ribbon trail, zero shader compilation) ─ */
+      function makeTrailTexture(w, h) {
+        const c = document.createElement("canvas");
+        c.width = w;
+        c.height = h;
+        const ctx = c.getContext("2d");
+        const g = ctx.createLinearGradient(0, 0, 0, h);
+        g.addColorStop(0, "rgba(255,255,255,0)");
+        g.addColorStop(0.15, "rgba(255,255,255,0.6)");
+        g.addColorStop(0.5, "rgba(255,255,255,1)");
+        g.addColorStop(0.85, "rgba(255,255,255,0.6)");
+        g.addColorStop(1, "rgba(255,255,255,0)");
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, w, h);
+        const tex = new THREE.CanvasTexture(c);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        return tex;
+      }
+
+      const swordTrail = {
+        mesh: null,
+        geo: null,
+        mat: null,
+        edgeMat: null,
+        edgeMesh: null,
+        light: null,
+        history: [],
+        maxSamples: 12,
+        wasAttacking: false,
+        fadeTimer: 0,
+        currentOpacity: 0,
+        initialized: false,
+        _tipLocal: new THREE.Vector3(),
+        _baseLocal: new THREE.Vector3(),
+        _tipWorld: new THREE.Vector3(),
+        _baseWorld: new THREE.Vector3(),
+      };
+
+      function initSwordTrail(scene) {
+        if (swordTrail.initialized) return;
+        swordTrail.initialized = true;
+        const p = parkourParams.swordTrail;
+        swordTrail.maxSamples = p.trailLength + 2;
+
+        const maxVerts = swordTrail.maxSamples * 2;
+        const maxTris = (swordTrail.maxSamples - 1) * 2;
+        const positions = new Float32Array(maxVerts * 3);
+        const uvs = new Float32Array(maxVerts * 2);
+        const colors = new Float32Array(maxVerts * 4);
+        const indices = new Uint16Array(maxTris * 3);
+
+        swordTrail.geo = new THREE.BufferGeometry();
+        swordTrail.geo.setAttribute(
+          "position",
+          new THREE.BufferAttribute(positions, 3),
+        );
+        swordTrail.geo.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+        swordTrail.geo.setAttribute(
+          "color",
+          new THREE.BufferAttribute(colors, 4),
+        );
+        swordTrail.geo.setIndex(new THREE.BufferAttribute(indices, 1));
+        swordTrail.geo.setDrawRange(0, 0);
+
+        const trailTex = makeTrailTexture(4, 64);
+
+        swordTrail.mat = new THREE.MeshBasicMaterial({
+          vertexColors: true,
+          transparent: true,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          map: trailTex,
+          color: new THREE.Color(p.trailColor),
+        });
+
+        swordTrail.mesh = new THREE.Mesh(swordTrail.geo, swordTrail.mat);
+        swordTrail.mesh.frustumCulled = false;
+        swordTrail.mesh.renderOrder = 998;
+        swordTrail.mesh.visible = false;
+        scene.add(swordTrail.mesh);
+
+        swordTrail.edgeMat = new THREE.MeshBasicMaterial({
+          vertexColors: true,
+          transparent: true,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          color: new THREE.Color(p.edgeColor),
+        });
+
+        const edgeGeo = new THREE.BufferGeometry();
+        edgeGeo.setAttribute(
+          "position",
+          new THREE.BufferAttribute(new Float32Array(maxVerts * 3), 3),
+        );
+        edgeGeo.setAttribute(
+          "color",
+          new THREE.BufferAttribute(new Float32Array(maxVerts * 4), 4),
+        );
+        edgeGeo.setIndex(
+          new THREE.BufferAttribute(new Uint16Array(maxTris * 3), 1),
+        );
+        edgeGeo.setDrawRange(0, 0);
+        swordTrail.edgeMesh = new THREE.Mesh(edgeGeo, swordTrail.edgeMat);
+        swordTrail.edgeMesh.frustumCulled = false;
+        swordTrail.edgeMesh.renderOrder = 999;
+        swordTrail.edgeMesh.visible = false;
+        scene.add(swordTrail.edgeMesh);
+
+        swordTrail.light = new THREE.PointLight(0x33ccff, 0, p.lightRange);
+        scene.add(swordTrail.light);
+      }
+
+      function updateSwordTrail(dt, swordGroup, isAttacking) {
+        if (!swordTrail.initialized) return;
+        const p = parkourParams.swordTrail;
+        if (!p.enabled) {
+          swordTrail.geo.setDrawRange(0, 0);
+          swordTrail.edgeMesh.geometry.setDrawRange(0, 0);
+          swordTrail.mesh.visible = false;
+          swordTrail.edgeMesh.visible = false;
+          swordTrail.light.intensity = 0;
+          swordTrail.history.length = 0;
+          return;
+        }
+
+        swordTrail.mat.color.set(p.trailColor);
+        swordTrail.edgeMat.color.set(p.edgeColor);
+        swordTrail.maxSamples = p.trailLength + 2;
+
+        if (isAttacking) {
+          swordTrail.currentOpacity = Math.min(
+            swordTrail.currentOpacity + dt * 16,
+            1,
+          );
+          swordTrail._tipLocal.set(0, 0, p.tipOffset);
+          swordTrail._baseLocal.set(0, 0, p.baseOffset);
+          swordGroup.localToWorld(
+            swordTrail._tipWorld.copy(swordTrail._tipLocal),
+          );
+          swordGroup.localToWorld(
+            swordTrail._baseWorld.copy(swordTrail._baseLocal),
+          );
+          swordTrail.history.unshift({
+            tip: swordTrail._tipWorld.clone(),
+            base: swordTrail._baseWorld.clone(),
+          });
+          if (swordTrail.history.length > swordTrail.maxSamples) {
+            swordTrail.history.length = swordTrail.maxSamples;
+          }
+          swordTrail.wasAttacking = true;
+          swordTrail.fadeTimer = 0;
+        } else {
+          if (swordTrail.wasAttacking) {
+            swordTrail.fadeTimer += dt;
+            swordTrail.currentOpacity = Math.max(
+              1 - swordTrail.fadeTimer / Math.max(p.fadeOutTime, 0.01),
+              0,
+            );
+            if (swordTrail.currentOpacity <= 0) {
+              swordTrail.wasAttacking = false;
+              swordTrail.history.length = 0;
+            }
+          }
+        }
+
+        const n = swordTrail.history.length;
+        if (n < 2) {
+          swordTrail.geo.setDrawRange(0, 0);
+          swordTrail.edgeMesh.geometry.setDrawRange(0, 0);
+          swordTrail.mesh.visible = false;
+          swordTrail.edgeMesh.visible = false;
+          swordTrail.light.intensity = 0;
+          return;
+        }
+
+        const posAttr = swordTrail.geo.attributes.position;
+        const uvAttr = swordTrail.geo.attributes.uv;
+        const colAttr = swordTrail.geo.attributes.color;
+        const idxAttr = swordTrail.geo.index;
+        const eposAttr = swordTrail.edgeMesh.geometry.attributes.position;
+        const ecolAttr = swordTrail.edgeMesh.geometry.attributes.color;
+        const eidxAttr = swordTrail.edgeMesh.geometry.index;
+        const trailCol = new THREE.Color(p.trailColor);
+
+        for (let i = 0; i < n; i++) {
+          const { tip, base } = swordTrail.history[i];
+          const frac = i / (n - 1);
+          const alpha = (1 - frac) * p.opacity * swordTrail.currentOpacity;
+          const edgeAlpha = (1 - frac * frac) * swordTrail.currentOpacity;
+          const ws = p.widthScale;
+
+          const vi = i * 2;
+          posAttr.array[vi * 3] = base.x;
+          posAttr.array[vi * 3 + 1] = base.y;
+          posAttr.array[vi * 3 + 2] = base.z;
+          posAttr.array[(vi + 1) * 3] = tip.x;
+          posAttr.array[(vi + 1) * 3 + 1] = tip.y;
+          posAttr.array[(vi + 1) * 3 + 2] = tip.z;
+
+          uvAttr.array[vi * 2] = frac;
+          uvAttr.array[vi * 2 + 1] = 0;
+          uvAttr.array[(vi + 1) * 2] = frac;
+          uvAttr.array[(vi + 1) * 2 + 1] = 1;
+
+          colAttr.array[vi * 4] = trailCol.r;
+          colAttr.array[vi * 4 + 1] = trailCol.g;
+          colAttr.array[vi * 4 + 2] = trailCol.b;
+          colAttr.array[vi * 4 + 3] = alpha;
+          colAttr.array[(vi + 1) * 4] = 1;
+          colAttr.array[(vi + 1) * 4 + 1] = 1;
+          colAttr.array[(vi + 1) * 4 + 2] = 1;
+          colAttr.array[(vi + 1) * 4 + 3] = alpha * 1.2;
+
+          eposAttr.array[vi * 3] = tip.x;
+          eposAttr.array[vi * 3 + 1] = tip.y;
+          eposAttr.array[vi * 3 + 2] = tip.z;
+          eposAttr.array[(vi + 1) * 3] = tip.x;
+          eposAttr.array[(vi + 1) * 3 + 1] = tip.y;
+          eposAttr.array[(vi + 1) * 3 + 2] = tip.z;
+
+          ecolAttr.array[vi * 4] = 1;
+          ecolAttr.array[vi * 4 + 1] = 1;
+          ecolAttr.array[vi * 4 + 2] = 1;
+          ecolAttr.array[vi * 4 + 3] = edgeAlpha * 0.8;
+          ecolAttr.array[(vi + 1) * 4] = trailCol.r;
+          ecolAttr.array[(vi + 1) * 4 + 1] = trailCol.g;
+          ecolAttr.array[(vi + 1) * 4 + 2] = trailCol.b;
+          ecolAttr.array[(vi + 1) * 4 + 3] = edgeAlpha * 0.3;
+        }
+
+        let triIdx = 0;
+        for (let i = 0; i < n - 1; i++) {
+          const a = i * 2,
+            b = a + 1,
+            c = (i + 1) * 2,
+            d = c + 1;
+          idxAttr.array[triIdx++] = a;
+          idxAttr.array[triIdx++] = b;
+          idxAttr.array[triIdx++] = c;
+          idxAttr.array[triIdx++] = b;
+          idxAttr.array[triIdx++] = d;
+          idxAttr.array[triIdx++] = c;
+          eidxAttr.array[i * 6] = a;
+          eidxAttr.array[i * 6 + 1] = b;
+          eidxAttr.array[i * 6 + 2] = c;
+          eidxAttr.array[i * 6 + 3] = b;
+          eidxAttr.array[i * 6 + 4] = d;
+          eidxAttr.array[i * 6 + 5] = c;
+        }
+
+        posAttr.needsUpdate = true;
+        uvAttr.needsUpdate = true;
+        colAttr.needsUpdate = true;
+        idxAttr.needsUpdate = true;
+        eposAttr.needsUpdate = true;
+        ecolAttr.needsUpdate = true;
+        eidxAttr.needsUpdate = true;
+
+        swordTrail.geo.setDrawRange(0, (n - 1) * 6);
+        swordTrail.edgeMesh.geometry.setDrawRange(0, (n - 1) * 6);
+        swordTrail.mesh.visible = true;
+        swordTrail.edgeMesh.visible = true;
+
+        const midTip = swordTrail.history[0].tip;
+        swordTrail.light.position.copy(midTip);
+        swordTrail.light.intensity =
+          p.lightIntensity * swordTrail.currentOpacity;
+        swordTrail.light.distance = p.lightRange;
+        swordTrail.light.color.set(p.trailColor);
+      }
+
+      /* ── Blood FX: burst sprites (canvas) + floor pools (atlas or fallback) ─ */
+      function makeBloodTexture(size) {
+        const c = document.createElement("canvas");
+        c.width = c.height = size;
+        const ctx = c.getContext("2d");
+        const g = ctx.createRadialGradient(
+          size / 2,
+          size / 2,
+          0,
+          size / 2,
+          size / 2,
+          size / 2,
+        );
+        g.addColorStop(0, "rgba(255,255,255,1)");
+        g.addColorStop(0.3, "rgba(255,200,200,0.8)");
+        g.addColorStop(0.6, "rgba(200,50,50,0.4)");
+        g.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, size, size);
+        const tex = new THREE.CanvasTexture(c);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        return tex;
+      }
+
+      function applyBloodPoolTextureFilters(tex, linear) {
+        const f = linear ? THREE.LinearFilter : THREE.NearestFilter;
+        tex.magFilter = f;
+        tex.minFilter = f;
+        tex.needsUpdate = true;
+      }
+
+      function createBloodPoolAtlasMaterial(colorMap, alphaMap) {
+        const p0 = parkourParams.bloodFX;
+        const uCellScale = uniform(
+          new THREE.Vector2(1 / p0.poolAtlasCols, 1 / p0.poolAtlasRows),
+        );
+        const uCellOffset = uniform(new THREE.Vector2(0, 0));
+        const uTint = uniform(new THREE.Color(p0.poolColor));
+        const uBrightness = uniform(1);
+        const uCut = uniform(p0.poolAlphaCutoff);
+        const uInvertMask = uniform(p0.poolInvertAlphaMask ? 1 : 0);
+        const atlasUv = uv().mul(uCellScale).add(uCellOffset);
+        const samp = texture(colorMap, atlasUv);
+        const maskSamp = texture(alphaMap, atlasUv);
+        const maskR = maskSamp.r;
+        const invR = float(1).sub(maskR);
+        const a = mix(maskR, invR, uInvertMask);
+        const rgb = samp.rgb.mul(uTint).mul(uBrightness);
+        const mat = new THREE.MeshBasicNodeMaterial({
+          transparent: true,
+          depthWrite: false,
+          depthTest: true,
+          side: THREE.DoubleSide,
+        });
+        mat.colorNode = vec4(rgb, a);
+        mat.alphaTestNode = uCut;
+        return {
+          mat,
+          uCellScale,
+          uCellOffset,
+          uTint,
+          uBrightness,
+          uCut,
+          uInvertMask,
+        };
+      }
+
+      const MAX_BLOOD_PARTICLES = 60;
+      const MAX_BLOOD_POOLS = 12;
+
+      const bloodFx = {
+        particles: [],
+        pools: [],
+        mat: null,
+        poolMat: null,
+        poolMeshMat: null,
+        poolPlaneGeo: null,
+        poolAtlasOk: false,
+        poolColorTex: null,
+        poolAlphaTex: null,
+        initialized: false,
+      };
+
+      async function initBloodFX(scene) {
+        if (bloodFx.initialized) return;
+        bloodFx.initialized = true;
+        const tex = makeBloodTexture(32);
+
+        bloodFx.mat = new THREE.SpriteMaterial({
+          map: tex,
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.NormalBlending,
+          color: 0x8b0000,
+        });
+        bloodFx.poolMat = new THREE.SpriteMaterial({
+          map: tex,
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.NormalBlending,
+          color: 0x550000,
+        });
+        bloodFx.poolMeshMat = new THREE.MeshBasicMaterial({
+          map: tex,
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.NormalBlending,
+          color: 0x550000,
+        });
+        bloodFx.poolPlaneGeo = new THREE.PlaneGeometry(1, 1);
+
+        for (let i = 0; i < MAX_BLOOD_PARTICLES; i++) {
+          const s = new THREE.Sprite(bloodFx.mat);
+          s.renderOrder = 990;
+          s.scale.set(0.001, 0.001, 1);
+          scene.add(s);
+          bloodFx.particles.push({
+            sprite: s,
+            alive: false,
+            timer: 0,
+            lifetime: 0,
+            vx: 0,
+            vy: 0,
+            vz: 0,
+            size: 0,
+          });
+        }
+
+        const p = parkourParams.bloodFX;
+        const loader = new THREE.TextureLoader();
+        const base = p.poolAtlasBasePath.endsWith("/")
+          ? p.poolAtlasBasePath
+          : `${p.poolAtlasBasePath}/`;
+        const colorUrl = base + p.poolColorAtlasFile;
+        const alphaUrl = base + p.poolAlphaAtlasFile;
+
+        let colorTex = null;
+        let alphaTex = null;
+        try {
+          colorTex = await loader.loadAsync(colorUrl);
+          alphaTex = await loader.loadAsync(alphaUrl);
+        } catch (err) {
+          console.warn(
+            "[bloodFX] Pool atlas load failed (using soft blob fallback). Expected:",
+            colorUrl,
+            alphaUrl,
+            err,
+          );
+        }
+
+        if (colorTex && alphaTex) {
+          bloodFx.poolAtlasOk = true;
+          bloodFx.poolColorTex = colorTex;
+          bloodFx.poolAlphaTex = alphaTex;
+          colorTex.colorSpace = THREE.SRGBColorSpace;
+          colorTex.wrapS = colorTex.wrapT = THREE.ClampToEdgeWrapping;
+          alphaTex.colorSpace = THREE.NoColorSpace;
+          alphaTex.wrapS = alphaTex.wrapT = THREE.ClampToEdgeWrapping;
+          applyBloodPoolTextureFilters(colorTex, p.poolAtlasLinear);
+          applyBloodPoolTextureFilters(alphaTex, p.poolAtlasLinear);
+
+          for (let i = 0; i < MAX_BLOOD_POOLS; i++) {
+            const u = createBloodPoolAtlasMaterial(colorTex, alphaTex);
+            const s = new THREE.Mesh(bloodFx.poolPlaneGeo, u.mat);
+            s.rotation.x = -Math.PI / 2;
+            s.renderOrder = 989;
+            s.scale.set(0.001, 0.001, 0.001);
+            scene.add(s);
+            bloodFx.pools.push({
+              sprite: s,
+              alive: false,
+              animTimer: 0,
+              lifetime: 0,
+              size: 0,
+              uni: u,
+            });
+          }
+        } else {
+          for (let i = 0; i < MAX_BLOOD_POOLS; i++) {
+            const s = new THREE.Mesh(bloodFx.poolPlaneGeo, bloodFx.poolMeshMat);
+            s.rotation.x = -Math.PI / 2;
+            s.renderOrder = 989;
+            s.scale.set(0.001, 0.001, 0.001);
+            scene.add(s);
+            bloodFx.pools.push({
+              sprite: s,
+              alive: false,
+              animTimer: 0,
+              lifetime: 0,
+              size: 0,
+              uni: null,
+            });
+          }
+        }
+      }
+
+      function spawnBloodBurst(position, floorY) {
+        const p = parkourParams.bloodFX;
+        if (!p.enabled) return;
+        const col1 = new THREE.Color(p.bloodColor);
+        const col2 = new THREE.Color(p.bloodColor2);
+
+        for (let i = 0; i < p.burstCount; i++) {
+          const part = bloodFx.particles.find((x) => !x.alive);
+          if (!part) break;
+          part.alive = true;
+          part.timer = 0;
+          part.lifetime = p.lifetime * (0.6 + Math.random() * 0.8);
+          part.size = p.spriteSize * (0.5 + Math.random());
+          const angle = Math.random() * Math.PI * 2;
+          const upward = 0.5 + Math.random() * 1.0;
+          const spread = p.burstSpread * (0.3 + Math.random() * 0.7);
+          part.vx = Math.cos(angle) * spread * p.burstSpeed;
+          part.vy = upward * p.burstSpeed;
+          part.vz = Math.sin(angle) * spread * p.burstSpeed;
+          part.sprite.position.copy(position);
+          part.floorY = floorY;
+          const t = Math.random();
+          part.sprite.material = bloodFx.mat;
+        }
+
+        const pool = bloodFx.pools.find((x) => !x.alive);
+        if (pool) {
+          pool.alive = true;
+          pool.animTimer = 0;
+          pool.lifetime = p.poolLifetime;
+          pool.size = p.poolSize * (0.7 + Math.random() * 0.6);
+          pool.sprite.position.set(
+            position.x + (Math.random() - 0.5) * 0.5,
+            floorY + p.poolYOffset,
+            position.z + (Math.random() - 0.5) * 0.5,
+          );
+          pool.sprite.scale.set(0.001, 0.001, 0.001);
+          if (bloodFx.poolAtlasOk && pool.uni) {
+            setBloodPoolAtlasFrame(pool, 0);
+            pool.uni.uTint.value.set(p.poolColor);
+            pool.uni.uBrightness.value = 1;
+            pool.uni.uCut.value = p.poolAlphaCutoff;
+            pool.uni.uInvertMask.value = p.poolInvertAlphaMask ? 1 : 0;
+          }
+        }
+      }
+
+      const _bloodHideScale = new THREE.Vector3(0.001, 0.001, 1);
+      const _bloodPoolHideScale = new THREE.Vector3(0.001, 0.001, 0.001);
+
+      function setBloodPoolAtlasFrame(pool, frameIndex) {
+        if (!bloodFx.poolAtlasOk || !pool.uni) return;
+        const p = parkourParams.bloodFX;
+        const cols = Math.max(1, p.poolAtlasCols);
+        const rows = Math.max(1, p.poolAtlasRows);
+        const n = cols * rows;
+        const fi = Math.max(0, Math.min(n - 1, Math.floor(frameIndex)));
+        const cw = 1 / cols;
+        const ch = 1 / rows;
+        pool.uni.uCellScale.value.set(cw, ch);
+        const col = fi % cols;
+        const row = Math.floor(fi / cols);
+        const u = col * cw;
+        const v = p.poolFlipRowUV ? row * ch : 1 - (row + 1) * ch;
+        pool.uni.uCellOffset.value.set(u, v);
+      }
+
+      function updateBloodFX(dt) {
+        if (!bloodFx.initialized) return;
+        const p = parkourParams.bloodFX;
+        bloodFx.mat.color.set(p.bloodColor);
+        bloodFx.poolMat.color.set(p.poolColor);
+        if (bloodFx.poolMeshMat) bloodFx.poolMeshMat.color.set(p.poolColor);
+
+        for (const part of bloodFx.particles) {
+          if (!part.alive) continue;
+          part.timer += dt;
+          if (part.timer >= part.lifetime) {
+            part.alive = false;
+            part.sprite.scale.copy(_bloodHideScale);
+            continue;
+          }
+          part.vy -= p.gravity * dt;
+          part.sprite.position.x += part.vx * dt;
+          part.sprite.position.y += part.vy * dt;
+          part.sprite.position.z += part.vz * dt;
+          if (part.sprite.position.y < part.floorY + 0.05) {
+            part.sprite.position.y = part.floorY + 0.05;
+            part.vy = 0;
+            part.vx *= 0.5;
+            part.vz *= 0.5;
+          }
+          const t = part.timer / part.lifetime;
+          const fade = t < 0.1 ? t / 0.1 : 1 - (t - 0.1) / 0.9;
+          const sz = part.size * fade;
+          part.sprite.scale.set(sz, sz, 1);
+        }
+
+        for (const pool of bloodFx.pools) {
+          if (!pool.alive) continue;
+          pool.animTimer += dt;
+
+          if (!p.poolPersist && pool.animTimer >= pool.lifetime) {
+            pool.alive = false;
+            pool.sprite.scale.copy(_bloodPoolHideScale);
+            continue;
+          }
+
+          const growT = Math.min(pool.animTimer / 0.28, 1);
+          let sz = pool.size * growT;
+          sz = Math.max(sz, p.poolMinWorldScale, 0.05);
+          pool.sprite.scale.set(sz, sz, 1);
+
+          let fadeT = 1;
+          if (!p.poolPersist && pool.lifetime > 0) {
+            const t = pool.animTimer / pool.lifetime;
+            fadeT = t > 0.6 ? 1 - (t - 0.6) / 0.4 : 1;
+          }
+
+          if (bloodFx.poolAtlasOk && pool.uni) {
+            const cols = Math.max(1, p.poolAtlasCols);
+            const rows = Math.max(1, p.poolAtlasRows);
+            const n = cols * rows;
+            let fi;
+            if (p.poolFlipbookByFps) {
+              fi = Math.min(n - 1, Math.floor(pool.animTimer * p.poolAnimFps));
+            } else {
+              const dur = Math.max(0.04, p.poolAnimDuration);
+              const ap = Math.min(1, pool.animTimer / dur);
+              fi = Math.min(n - 1, Math.round((n - 1) * ap));
+            }
+            setBloodPoolAtlasFrame(pool, fi);
+            pool.uni.uTint.value.set(p.poolColor);
+            pool.uni.uBrightness.value = p.poolPersist ? 1 : fadeT;
+            pool.uni.uCut.value = p.poolAlphaCutoff;
+            pool.uni.uInvertMask.value = p.poolInvertAlphaMask ? 1 : 0;
+          }
+        }
+      }
+
+      function flashDeerRed(deer) {
+        const p = parkourParams.bloodFX;
+        if (!p.enabled || !deer.root) return;
+        deer._flashTimer = p.flashDuration;
+        deer._origColors = deer._origColors || new Map();
+        deer.root.traverse((child) => {
+          if (!child.isMesh || !child.material) return;
+          if (!deer._origColors.has(child)) {
+            deer._origColors.set(
+              child,
+              child.material.color
+                ? child.material.color.clone()
+                : new THREE.Color(1, 1, 1),
+            );
+          }
+          if (child.material.color) child.material.color.set(p.flashColor);
+        });
+      }
+
+      function updateDeerFlash(deer, dt) {
+        if (!deer._flashTimer || deer._flashTimer <= 0) return;
+        deer._flashTimer -= dt;
+        if (deer._flashTimer <= 0) {
+          deer._flashTimer = 0;
+          if (deer._origColors) {
+            deer._origColors.forEach((origCol, child) => {
+              if (child.material && child.material.color)
+                child.material.color.copy(origCol);
+            });
+          }
+        }
+      }
+
+      /* ── Spell VFX System ────────────────────────────────────── */
+      /* ── Spell VFX: 2 shared Sprites, zero shader compilation ──── */
+      function makeGlowTexture(size) {
+        const c = document.createElement("canvas");
+        c.width = c.height = size;
+        const ctx = c.getContext("2d");
+        const g = ctx.createRadialGradient(
+          size / 2,
+          size / 2,
+          0,
+          size / 2,
+          size / 2,
+          size / 2,
+        );
+        g.addColorStop(0, "rgba(255,255,255,1)");
+        g.addColorStop(0.15, "rgba(200,240,255,0.9)");
+        g.addColorStop(0.4, "rgba(80,200,255,0.4)");
+        g.addColorStop(0.7, "rgba(40,140,255,0.1)");
+        g.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, size, size);
+        const tex = new THREE.CanvasTexture(c);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        return tex;
+      }
+
+      const MAX_PROJECTILES = 4;
+      const MAX_TRAIL = 8;
+      const MAX_IMPACTS = 3;
+      let _spellTime = 0;
+
+      const spellVfx = {
+        orbSprite: null,
+        orbInner: null,
+        orbLight: null,
+        sparks: [],
+        projPool: [],
+        impactPool: [],
+        glowMat: null,
+        brightMat: null,
+        scene: null,
+        initialized: false,
+        orbOpacity: 0,
+      };
+
+      function initSpellVFX(scene, camera) {
+        if (spellVfx.initialized) return;
+        spellVfx.scene = scene;
+        spellVfx.initialized = true;
+        const p = parkourParams.spellVFX;
+        const glowTex = makeGlowTexture(64);
+
+        spellVfx.glowMat = new THREE.SpriteMaterial({
+          map: glowTex,
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+          color: 0x33ccff,
+        });
+        spellVfx.brightMat = new THREE.SpriteMaterial({
+          map: glowTex,
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+          color: 0xffffff,
+        });
+
+        spellVfx.orbSprite = new THREE.Sprite(spellVfx.glowMat);
+        spellVfx.orbSprite.renderOrder = 1000;
+        spellVfx.orbSprite.scale.set(0.001, 0.001, 1);
+        scene.add(spellVfx.orbSprite);
+
+        spellVfx.orbInner = new THREE.Sprite(spellVfx.brightMat);
+        spellVfx.orbInner.renderOrder = 1001;
+        spellVfx.orbInner.scale.set(0.001, 0.001, 1);
+        scene.add(spellVfx.orbInner);
+
+        spellVfx.orbLight = new THREE.PointLight(0x33ccff, 0, p.orbLightRange);
+        scene.add(spellVfx.orbLight);
+
+        for (let i = 0; i < p.sparkCount; i++) {
+          const spark = new THREE.Sprite(spellVfx.brightMat);
+          spark.renderOrder = 1002;
+          spark.scale.set(0.001, 0.001, 1);
+          spark.userData.phase = Math.random() * Math.PI * 2;
+          spark.userData.yOffset = (Math.random() - 0.5) * 0.3;
+          spark.userData.radiusScale = 0.7 + Math.random() * 0.6;
+          scene.add(spark);
+          spellVfx.sparks.push(spark);
+        }
+
+        for (let i = 0; i < MAX_PROJECTILES; i++) {
+          const outer = new THREE.Sprite(spellVfx.glowMat);
+          outer.renderOrder = 1000;
+          outer.scale.set(0.001, 0.001, 1);
+          scene.add(outer);
+          const inner = new THREE.Sprite(spellVfx.brightMat);
+          inner.renderOrder = 1001;
+          inner.scale.set(0.001, 0.001, 1);
+          scene.add(inner);
+          const light = new THREE.PointLight(
+            0x33ccff,
+            0,
+            p.orbLightRange * 0.6,
+          );
+          scene.add(light);
+
+          const trail = [];
+          for (let j = 0; j < MAX_TRAIL; j++) {
+            const t = new THREE.Sprite(spellVfx.glowMat);
+            t.renderOrder = 999;
+            t.scale.set(0.001, 0.001, 1);
+            scene.add(t);
+            trail.push(t);
+          }
+
+          spellVfx.projPool.push({
+            outer,
+            inner,
+            light,
+            trail,
+            pos: new THREE.Vector3(),
+            dir: new THREE.Vector3(),
+            speed: 0,
+            distance: 0,
+            maxDist: 0,
+            alive: false,
+            trailPositions: [],
+            _trailTimer: 0,
+          });
+        }
+
+        for (let i = 0; i < MAX_IMPACTS; i++) {
+          const outer = new THREE.Sprite(spellVfx.glowMat);
+          outer.renderOrder = 1002;
+          outer.scale.set(0.001, 0.001, 1);
+          scene.add(outer);
+          const inner = new THREE.Sprite(spellVfx.brightMat);
+          inner.renderOrder = 1003;
+          inner.scale.set(0.001, 0.001, 1);
+          scene.add(inner);
+          const light = new THREE.PointLight(
+            0x33ccff,
+            0,
+            p.orbLightRange * 1.5,
+          );
+          scene.add(light);
+          spellVfx.impactPool.push({
+            outer,
+            inner,
+            light,
+            timer: 0,
+            duration: 0,
+            alive: false,
+          });
+        }
+      }
+
+      const _hideScale = new THREE.Vector3(0.001, 0.001, 1);
+      const _handWorldPos = new THREE.Vector3();
+
+      function spawnProjectile(origin, direction) {
+        const p = parkourParams.spellVFX;
+        const proj = spellVfx.projPool.find((x) => !x.alive);
+        if (!proj) return;
+        proj.alive = true;
+        proj.distance = 0;
+        proj.speed = p.projectileSpeed;
+        proj.maxDist = p.projectileMaxDist;
+        proj.dir.copy(direction).normalize();
+        proj.pos.copy(origin);
+        const sz = p.projectileSize * 2;
+        proj.outer.position.copy(origin);
+        proj.outer.scale.set(sz * 2.5, sz * 2.5, 1);
+        proj.inner.position.copy(origin);
+        proj.inner.scale.set(sz, sz, 1);
+        proj.light.position.copy(origin);
+        proj.light.intensity = p.orbLightIntensity * 0.8;
+        proj.trailPositions.length = 0;
+        proj.trailPositions.push(origin.clone());
+        proj._trailTimer = 0;
+        for (const t of proj.trail) t.scale.copy(_hideScale);
+      }
+
+      function spawnImpact(position) {
+        const p = parkourParams.spellVFX;
+        const imp = spellVfx.impactPool.find((x) => !x.alive);
+        if (!imp) return;
+        imp.alive = true;
+        imp.timer = 0;
+        imp.duration = p.impactDuration;
+        imp.outer.position.copy(position);
+        imp.inner.position.copy(position);
+        imp.light.position.copy(position);
+        imp.light.intensity = p.orbLightIntensity * 3;
+      }
+
+      function updateSpellVFX(dt, camera, udPlayer) {
+        if (!spellVfx.initialized) return;
+        const p = parkourParams.spellVFX;
+        if (!p.enabled) {
+          spellVfx.orbSprite.scale.copy(_hideScale);
+          spellVfx.orbInner.scale.copy(_hideScale);
+          spellVfx.orbLight.intensity = 0;
+          for (const s of spellVfx.sparks) s.scale.copy(_hideScale);
+          return;
+        }
+
+        _spellTime += dt;
+        spellVfx.glowMat.color.set(p.orbColor);
+        spellVfx.brightMat.color.set(p.orbCoreColor);
+
+        const isCasting = udPlayer.isCastingSpell;
+        const phase = udPlayer.spellPhase || "none";
+        const handBone = udPlayer.leftHandBone;
+        const showOrb =
+          isCasting &&
+          handBone &&
+          (phase === "enter" || phase === "idle" || phase === "shoot");
+
+        if (showOrb) {
+          const targetOp = phase === "enter" ? 0.6 : 1;
+          spellVfx.orbOpacity +=
+            (targetOp - spellVfx.orbOpacity) * Math.min(dt * 8, 1);
+        } else {
+          spellVfx.orbOpacity *= Math.max(1 - dt * 12, 0);
+          if (spellVfx.orbOpacity < 0.01) spellVfx.orbOpacity = 0;
+        }
+
+        if (spellVfx.orbOpacity > 0 && handBone) {
+          handBone.getWorldPosition(_handWorldPos);
+          _handWorldPos.x += p.orbOffsetX;
+          _handWorldPos.y += p.orbOffsetY;
+          _handWorldPos.z += p.orbOffsetZ;
+
+          const pulse =
+            1 + Math.sin(_spellTime * p.orbPulseSpeed) * p.orbPulseAmount;
+          const os = p.orbSize * 2 * pulse * spellVfx.orbOpacity;
+
+          spellVfx.orbSprite.position.copy(_handWorldPos);
+          spellVfx.orbSprite.scale.set(os * 2.5, os * 2.5, 1);
+          spellVfx.orbInner.position.copy(_handWorldPos);
+          spellVfx.orbInner.scale.set(os, os, 1);
+          spellVfx.orbLight.position.copy(_handWorldPos);
+          spellVfx.orbLight.intensity =
+            p.orbLightIntensity * pulse * spellVfx.orbOpacity;
+          spellVfx.orbLight.distance = p.orbLightRange;
+
+          for (const spark of spellVfx.sparks) {
+            const angle = _spellTime * p.sparkOrbitSpeed + spark.userData.phase;
+            const r = p.sparkOrbitRadius * spark.userData.radiusScale * pulse;
+            spark.position.set(
+              _handWorldPos.x + Math.cos(angle) * r,
+              _handWorldPos.y + spark.userData.yOffset * pulse,
+              _handWorldPos.z + Math.sin(angle) * r,
+            );
+            const ss = p.sparkSize * 2 * spellVfx.orbOpacity;
+            spark.scale.set(ss, ss, 1);
+          }
+        } else {
+          spellVfx.orbSprite.scale.copy(_hideScale);
+          spellVfx.orbInner.scale.copy(_hideScale);
+          spellVfx.orbLight.intensity = 0;
+          for (const s of spellVfx.sparks) s.scale.copy(_hideScale);
+        }
+
+        for (const proj of spellVfx.projPool) {
+          if (!proj.alive) continue;
+          const moveStep = proj.speed * dt;
+          proj.pos.addScaledVector(proj.dir, moveStep);
+          proj.distance += moveStep;
+
+          proj.outer.position.copy(proj.pos);
+          proj.inner.position.copy(proj.pos);
+          proj.light.position.copy(proj.pos);
+
+          proj._trailTimer += dt;
+          if (proj._trailTimer >= p.trailSpacing) {
+            proj._trailTimer = 0;
+            proj.trailPositions.push(proj.pos.clone());
+            if (proj.trailPositions.length > MAX_TRAIL + 1)
+              proj.trailPositions.shift();
+          }
+
+          const sz = p.projectileSize * 2;
+          for (let i = 0; i < proj.trail.length; i++) {
+            const tIdx = proj.trailPositions.length - 2 - i;
+            if (tIdx >= 0) {
+              const tm = proj.trail[i];
+              tm.position.copy(proj.trailPositions[tIdx]);
+              const frac = (i + 1) / MAX_TRAIL;
+              const ts = sz * (2.5 - frac * 2);
+              tm.scale.set(ts, ts, 1);
+            } else {
+              proj.trail[i].scale.copy(_hideScale);
+            }
+          }
+
+          if (proj.distance >= proj.maxDist) {
+            releaseProjectile(proj);
+            spawnImpact(proj.pos.clone());
+          }
+        }
+
+        for (const imp of spellVfx.impactPool) {
+          if (!imp.alive) continue;
+          imp.timer += dt;
+          const t = imp.timer / imp.duration;
+          if (t >= 1) {
+            imp.alive = false;
+            imp.outer.scale.copy(_hideScale);
+            imp.inner.scale.copy(_hideScale);
+            imp.light.intensity = 0;
+            continue;
+          }
+          const ease = 1 - t;
+          const scale = p.impactSize * (1 + t * 3) * ease;
+          imp.outer.scale.set(scale, scale, 1);
+          const innerScale = p.impactSize * (0.5 + t) * ease;
+          imp.inner.scale.set(innerScale, innerScale, 1);
+          imp.light.intensity = p.orbLightIntensity * 3 * ease;
+        }
+      }
+
+      function releaseProjectile(proj) {
+        proj.alive = false;
+        proj.outer.scale.copy(_hideScale);
+        proj.inner.scale.copy(_hideScale);
+        proj.light.intensity = 0;
+        for (const t of proj.trail) t.scale.copy(_hideScale);
+      }
+
+      // Flat terrain: sampleHeight returns floor height for player ground checks
+      const sampleHeight = () => FLOOR_Y;
+
+      const DEER_MAX_COUNT = 30;
+      const DEER_DEFAULT_SPAWNS = [
+        new THREE.Vector3(6, FLOOR_Y, -4),
+        new THREE.Vector3(-4, FLOOR_Y, -8),
+        new THREE.Vector3(10, FLOOR_Y, 6),
+        new THREE.Vector3(-10, FLOOR_Y, 10),
+        new THREE.Vector3(14, FLOOR_Y, -12),
+        new THREE.Vector3(-16, FLOOR_Y, -6),
+        new THREE.Vector3(4, FLOOR_Y, 14),
+        new THREE.Vector3(-12, FLOOR_Y, 4),
+        new THREE.Vector3(18, FLOOR_Y, 2),
+        new THREE.Vector3(-18, FLOOR_Y, -2),
+      ];
+
+      function clampDeerCount(n) {
+        return Math.max(
+          1,
+          Math.min(DEER_MAX_COUNT, Math.round(Number(n) || 0)),
+        );
+      }
+
+      function randomDeerSpawnXZ() {
+        const half = PARKOUR_SIZE * 0.42;
+        const x = (Math.random() * 2 - 1) * half;
+        const z = (Math.random() * 2 - 1) * half;
+        return new THREE.Vector3(x, FLOOR_Y, z);
+      }
+
+      function disposeDeerTarget(scene, d) {
+        if (!d?.root) return;
+        d.mixer?.stopAllAction();
+        scene.remove(d.root);
+        d.root.traverse((o) => {
+          if (o.isMesh) {
+            o.geometry?.dispose();
+            const m = o.material;
+            if (Array.isArray(m)) m.forEach((mat) => mat?.dispose?.());
+            else m?.dispose?.();
+          }
+        });
+      }
+
+      /** Grow/shrink `deerTargets` to match `parkourParams.deer.count` (slider); only runs when applied, not every frame. */
+      async function syncDeerPopulation(scene, deerTargets) {
+        let want = clampDeerCount(parkourParams.deer.count);
+        parkourParams.deer.count = want;
+
+        while (deerTargets.length > want) {
+          const d = deerTargets.pop();
+          disposeDeerTarget(scene, d);
+        }
+
+        while (deerTargets.length < want) {
+          want = clampDeerCount(parkourParams.deer.count);
+          if (deerTargets.length >= want) break;
+
+          const i = deerTargets.length;
+          const pos =
+            i < DEER_DEFAULT_SPAWNS.length
+              ? DEER_DEFAULT_SPAWNS[i].clone()
+              : randomDeerSpawnXZ();
+
+          let d;
+          try {
+            d = await loadDeerTarget(scene);
+          } catch (e) {
+            console.warn("Deer load failed", e);
+            break;
+          }
+
+          want = clampDeerCount(parkourParams.deer.count);
+          if (deerTargets.length >= want) {
+            disposeDeerTarget(scene, d);
+            break;
+          }
+
+          d.root.position.copy(pos);
+          d.homePos.copy(pos);
+          d.targetPos.copy(pos);
+          deerTargets.push(d);
+        }
+      }
+
+      // Load a simple deer target (for testing spells + ambient life)
+      async function loadDeerTarget(scene) {
+        const loader = new GLTFLoader();
+        return new Promise((resolve, reject) => {
+          loader.load(
+            "models/deer.gltf",
+            (gltf) => {
+              const root = gltf.scene;
+              let deerMesh = null;
+              root.traverse((o) => {
+                if (o.isMesh) {
+                  o.castShadow = true;
+                  o.receiveShadow = true;
+                  // Use a single combined skinned mesh for BVH if possible
+                  if (!deerMesh) deerMesh = o;
+                }
+              });
+              // Scale and place the deer near origin
+              root.scale.setScalar(0.8);
+              root.position.set(6, FLOOR_Y, -4);
+              scene.add(root);
+
+              const mixer = new THREE.AnimationMixer(root);
+              const anims = gltf.animations || [];
+              const findClip = (candidates) =>
+                anims.find((a) => candidates.some((n) => a.name === n)) || null;
+              const idleClip =
+                findClip([
+                  "Idle",
+                  "idle",
+                  "Idle_Loop",
+                  "Idle_Loop_Armature",
+                  "Idle_01",
+                ]) ||
+                anims[0] ||
+                null;
+              const walkClip = findClip([
+                "Walk",
+                "Walk_Loop",
+                "Walk_Fwd",
+                "Walk_Fwd_Loop",
+              ]);
+              const runClip = findClip([
+                "Run",
+                "Run_Loop",
+                "Run_Fwd",
+                "Gallop",
+              ]);
+              const grazeClip = findClip([
+                "Graze",
+                "Eat",
+                "Eat_Loop",
+                "Idle_Eat",
+              ]);
+              const lookClip = findClip(["Look", "Look_Around"]);
+              const deathClip = findClip([
+                "Die",
+                "Death",
+                "Death_Armature",
+                "Death01",
+              ]);
+
+              const idleAction = idleClip
+                ? mixer.clipAction(idleClip).setLoop(THREE.LoopRepeat)
+                : null;
+              const walkAction = walkClip
+                ? mixer.clipAction(walkClip).setLoop(THREE.LoopRepeat)
+                : null;
+              const runAction = runClip
+                ? mixer.clipAction(runClip).setLoop(THREE.LoopRepeat)
+                : null;
+              const grazeAction = grazeClip
+                ? mixer.clipAction(grazeClip).setLoop(THREE.LoopRepeat)
+                : null;
+              const lookAction = lookClip
+                ? mixer.clipAction(lookClip).setLoop(THREE.LoopRepeat)
+                : null;
+              const deathAction = deathClip
+                ? mixer.clipAction(deathClip).setLoop(THREE.LoopOnce)
+                : null;
+              if (deathAction) deathAction.clampWhenFinished = true;
+
+              if (idleAction) idleAction.play();
+
+              // Build BVH for precise ray hits if we found a mesh
+              let deerBvh = null;
+              if (deerMesh && deerMesh.geometry) {
+                // Ensure geometry is non-indexed for best BVH behavior
+                if (deerMesh.geometry.index) {
+                  deerMesh.geometry = deerMesh.geometry.toNonIndexed();
+                }
+                deerMesh.geometry.computeBoundsTree?.();
+                if (!deerMesh.geometry.boundsTree) {
+                  deerMesh.geometry.boundsTree = new MeshBVH(
+                    deerMesh.geometry,
+                    { lazyGeneration: false },
+                  );
+                }
+                deerBvh = deerMesh;
+              }
+
+              const homePos = root.position.clone();
+
+              resolve({
+                root,
+                mixer,
+                idleAction,
+                walkAction,
+                runAction,
+                grazeAction,
+                lookAction,
+                deathAction,
+                isDead: false,
+                bvhMesh: deerBvh,
+                // Simple ambient state machine
+                state: "idle", // "idle" | "graze" | "walk" | "run" | "dead"
+                stateTime: 0,
+                homePos,
+                targetPos: homePos.clone(),
+                walkSpeed: 1.5,
+                runSpeed: 4.0,
+              });
+            },
+            undefined,
+            (err) => reject(err),
+          );
+        });
+      }
+
+      /** `newtowergun.glb`: node names with `base` (e.g. `base_low_glow_0_1`) stay on the plinth; `body1_*` meshes rotate under `rotateGroup`. */
+      function isTowerGunBasePartName(name) {
+        if (!name) return false;
+        return name.toLowerCase().includes("base");
+      }
+
+      /** Base parts (name contains `base`) and their descendants stay on the root; all other meshes (e.g. `body1_*`) attach under `rotateGroup` for yaw. */
+      function reparentTowerGunRotatingParts(root, rotateGroup, fixedSet) {
+        function subtreeMeshFlags(obj) {
+          let fixed = false;
+          let other = false;
+          obj.traverse((o) => {
+            if (!o.isMesh) return;
+            if (fixedSet.has(o)) fixed = true;
+            else other = true;
+          });
+          return { fixed, other };
+        }
+
+        function processParent(parent) {
+          for (const child of [...parent.children]) {
+            if (child === rotateGroup) continue;
+            const { fixed, other } = subtreeMeshFlags(child);
+            if (!fixed && !other) {
+              processParent(child);
+              continue;
+            }
+            if (fixed && !other) continue;
+            if (!fixed && other) {
+              rotateGroup.attach(child);
+              continue;
+            }
+            processParent(child);
+          }
+        }
+
+        processParent(root);
+      }
+
+      /**
+       * Barrel muzzle in `towerGun_turret` local space: furthest horizontal rim of the
+       * turret mesh AABB (avoids firing from the pivot at the bottom).
+       */
+      function recomputeTowerGunBarrelMuzzleLocal(rotateGroup) {
+        if (!rotateGroup) return;
+        const corner = new THREE.Vector3();
+        const box = new THREE.Box3().makeEmpty();
+        rotateGroup.updateMatrixWorld(true);
+        rotateGroup.traverse((o) => {
+          if (!o.isMesh || !o.geometry) return;
+          const g = o.geometry;
+          if (!g.boundingBox) g.computeBoundingBox();
+          const { min: mn, max: mx } = g.boundingBox;
+          const xs = [mn.x, mx.x];
+          const ys = [mn.y, mx.y];
+          const zs = [mn.z, mx.z];
+          for (const x of xs) {
+            for (const y of ys) {
+              for (const z of zs) {
+                corner.set(x, y, z);
+                o.localToWorld(corner);
+                rotateGroup.worldToLocal(corner);
+                box.expandByPoint(corner);
+              }
+            }
+          }
+        });
+        if (box.isEmpty()) {
+          rotateGroup.userData.barrelMuzzleLocal = new THREE.Vector3(
+            0,
+            0.35,
+            0.55,
+          );
+          return;
+        }
+        const cx = (box.min.x + box.max.x) * 0.5;
+        const cy = (box.min.y + box.max.y) * 0.5;
+        const cz = (box.min.z + box.max.z) * 0.5;
+        const candidates = [
+          [cx, cy, box.max.z],
+          [cx, cy, box.min.z],
+          [box.max.x, cy, cz],
+          [box.min.x, cy, cz],
+        ];
+        let bestD2 = -1;
+        const tip = new THREE.Vector3();
+        for (const [x, y, z] of candidates) {
+          const d2 = x * x + z * z;
+          if (d2 > bestD2) {
+            bestD2 = d2;
+            tip.set(x, y, z);
+          }
+        }
+        rotateGroup.userData.barrelMuzzleLocal = tip;
+      }
+
+      /** Uniform scale + keep world AABB bottom on `FLOOR_Y` and center XZ on spawn. */
+      function syncTowerGunScaleAndGround(root) {
+        if (!root) return;
+        root.scale.setScalar(parkourParams.towerGun.scale);
+        root.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(root);
+        const midX = (box.min.x + box.max.x) * 0.5;
+        const midZ = (box.min.z + box.max.z) * 0.5;
+        root.position.set(
+          TOWER_GUN_SPAWN_X - midX,
+          FLOOR_Y - box.min.y,
+          TOWER_GUN_SPAWN_Z - midZ,
+        );
+        root.updateMatrixWorld(true);
+        const rg = root.getObjectByName("towerGun_turret");
+        if (rg) recomputeTowerGunBarrelMuzzleLocal(rg);
+      }
+
+      /**
+       * Lowest world Y of visible mesh hulls (geometry AABB corners × matrixWorld).
+       * Avoids Box3.setFromObject(), which can jitter each frame on some GLTFs (skins/helpers).
+       */
+      function computeTankHullMinWorldY(root) {
+        if (!root) return null;
+        const box = new THREE.Box3().makeEmpty();
+        let any = false;
+        root.traverse((o) => {
+          if (!o.isMesh || !o.geometry || o.visible === false) return;
+          const g = o.geometry;
+          if (!g.boundingBox) g.computeBoundingBox();
+          const b = g.boundingBox;
+          if (!b) return;
+          any = true;
+          const { min, max } = b;
+          for (let i = 0; i < 8; i++) {
+            _tankFootCorner.set(
+              i & 1 ? max.x : min.x,
+              i & 2 ? max.y : min.y,
+              i & 4 ? max.z : min.z,
+            );
+            _tankFootCorner.applyMatrix4(o.matrixWorld);
+            box.expandByPoint(_tankFootCorner);
+          }
+        });
+        return any ? box.min.y : null;
+      }
+
+      function applyTankGroundY(root) {
+        if (!root) return;
+        root.updateMatrixWorld(true);
+        let minY = computeTankHullMinWorldY(root);
+        if (minY == null || !Number.isFinite(minY)) {
+          const box = new THREE.Box3().setFromObject(root);
+          if (box.isEmpty()) return;
+          minY = box.min.y;
+        }
+        // Additive snap: once the hull bottom is on FLOOR_Y, minY ≈ FLOOR_Y and delta → 0.
+        // Using `y = FLOOR_Y - minY` every frame wrongly drives y → 0 after the first good frame.
+        const d = FLOOR_Y - minY;
+        if (Math.abs(d) > 1e-6) root.position.y += d;
+        root.updateMatrixWorld(true);
+      }
+
+      /** Static placement: spawn XZ + optional yaw, feet on `FLOOR_Y`. */
+      function placeTankStaticAtSpawn(root) {
+        if (!root) return;
+        const p = parkourParams.tank;
+        root.scale.setScalar(p.scale);
+        root.rotation.y = p.spawnYaw + p.yawOffset;
+        root.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(root);
+        const midX = (box.min.x + box.max.x) * 0.5;
+        const midZ = (box.min.z + box.max.z) * 0.5;
+        root.position.set(p.spawnX - midX, 0, p.spawnZ - midZ);
+        applyTankGroundY(root);
+      }
+
+      function createTankPatrolState() {
+        const p = parkourParams.tank;
+        return {
+          x: p.spawnX,
+          z: p.spawnZ,
+          yaw: Math.random() * PI * 2,
+          speed: 0,
+          speedTarget: 0,
+          steerSmoothed: 0,
+          steerTarget: 0,
+          phase: "drive",
+          phaseT: 0.35 + Math.random() * 0.5,
+        };
+      }
+
+      function pickTankManeuver(state, p) {
+        state.phase = "drive";
+        state.steerTarget = (Math.random() * 2 - 1) * p.steerAggression;
+        state.speedTarget =
+          Math.random() < p.reverseChance
+            ? -p.maxSpeed * (0.32 + Math.random() * 0.58)
+            : p.maxSpeed * (0.38 + Math.random() * 0.62);
+        state.phaseT =
+          p.maneuverTimeMin +
+          Math.random() * (p.maneuverTimeMax - p.maneuverTimeMin);
+      }
+
+      /** Patrol pose: world XZ + yaw from `state`, scale from params, Y from AABB. */
+      function applyTankPatrolTransform(root, state) {
+        if (!root || !state) return;
+        const p = parkourParams.tank;
+        root.scale.setScalar(p.scale);
+        root.position.x = state.x;
+        root.position.z = state.z;
+        root.rotation.y = state.yaw + p.yawOffset;
+        applyTankGroundY(root);
+      }
+
+      function updateTankPatrol(dt, root, state) {
+        const p = parkourParams.tank;
+        if (!root || !state || !p.patrol || !p.enabled) return;
+
+        const cx = p.patrolCenterX;
+        const cz = p.patrolCenterZ;
+        const R = p.patrolRadius;
+        const soft = R * p.boundarySoft;
+
+        let dx = state.x - cx;
+        let dz = state.z - cz;
+        let dist = Math.hypot(dx, dz);
+
+        state.phaseT -= dt;
+        if (state.phaseT <= 0) {
+          if (state.phase === "pause") {
+            pickTankManeuver(state, p);
+          } else if (Math.random() < p.pauseChance) {
+            state.phase = "pause";
+            state.speedTarget = 0;
+            state.steerTarget *= 0.35;
+            state.phaseT =
+              p.pauseDurationMin +
+              Math.random() * (p.pauseDurationMax - p.pauseDurationMin);
+          } else {
+            pickTankManeuver(state, p);
+          }
+        }
+
+        let steerDesired = state.steerTarget;
+        if (dist > soft) {
+          const w = Math.min(1, (dist - soft) / (R - soft + 0.001));
+          const toCenter = Math.atan2(-dx, -dz);
+          let angDiff = toCenter - state.yaw;
+          while (angDiff > PI) angDiff -= 2 * PI;
+          while (angDiff < -PI) angDiff += 2 * PI;
+          const towardCenter = THREE.MathUtils.clamp(angDiff * 2.2, -1, 1);
+          steerDesired = THREE.MathUtils.lerp(
+            state.steerTarget,
+            towardCenter,
+            w * p.boundarySteerWeight,
+          );
+        }
+
+        state.steerSmoothed +=
+          (steerDesired - state.steerSmoothed) *
+          Math.min(1, p.steerSmooth * dt);
+
+        const spdAbs = Math.abs(state.speed);
+        const turnScale = THREE.MathUtils.clamp(
+          1.12 - 0.62 * (spdAbs / (p.maxSpeed + 0.001)),
+          0.36,
+          1.08,
+        );
+        state.yaw += state.steerSmoothed * p.turnSpeed * turnScale * dt;
+
+        const dv = p.accel * dt;
+        if (state.speed < state.speedTarget) {
+          state.speed = Math.min(state.speedTarget, state.speed + dv);
+        } else if (state.speed > state.speedTarget) {
+          state.speed = Math.max(state.speedTarget, state.speed - dv);
+        }
+
+        const sn = Math.sin(state.yaw);
+        const cs = Math.cos(state.yaw);
+        state.x += sn * state.speed * dt;
+        state.z += cs * state.speed * dt;
+
+        dx = state.x - cx;
+        dz = state.z - cz;
+        dist = Math.hypot(dx, dz);
+        if (dist > R) {
+          const t = (R * 0.991) / dist;
+          state.x = cx + dx * t;
+          state.z = cz + dz * t;
+          state.speed *= 0.32;
+          state.speedTarget *= 0.45;
+        }
+
+        applyTankPatrolTransform(root, state);
+      }
+
+      /** Tweakpane: static spawn, or reset patrol position to spawn. */
+      function syncTankGround(root, state) {
+        if (!root) return;
+        const p = parkourParams.tank;
+        if (p.patrol && state) {
+          state.x = p.spawnX;
+          state.z = p.spawnZ;
+          state.speed = 0;
+          state.speedTarget = 0;
+          applyTankPatrolTransform(root, state);
+        } else {
+          placeTankStaticAtSpawn(root);
+        }
+      }
+
+      /** Place `models/tank.glb` on the parkour floor. */
+      async function loadTankModel(scene) {
+        const loader = new GLTFLoader();
+        const dracoLoader = new DRACOLoader();
+        dracoLoader.setDecoderPath(
+          "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/libs/draco/",
+        );
+        loader.setDRACOLoader(dracoLoader);
+
+        return new Promise((resolve, reject) => {
+          loader.load(
+            "models/tank.glb",
+            (gltf) => {
+              const root = gltf.scene;
+              root.traverse((o) => {
+                if (o.isMesh) {
+                  o.castShadow = true;
+                  o.receiveShadow = true;
+                  if (o.geometry && !o.geometry.boundingBox) {
+                    o.geometry.computeBoundingBox();
+                  }
+                }
+              });
+              scene.add(root);
+              resolve({ root });
+            },
+            undefined,
+            (err) => reject(err),
+          );
+        });
+      }
+
+      /** Place `models/newtowergun.glb` on the parkour floor (bottom of bounds on FLOOR_Y). */
+      async function loadTowerGunModel(scene) {
+        const loader = new GLTFLoader();
+        const dracoLoader = new DRACOLoader();
+        dracoLoader.setDecoderPath(
+          "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/libs/draco/",
+        );
+        loader.setDRACOLoader(dracoLoader);
+
+        return new Promise((resolve, reject) => {
+          loader.load(
+            "models/newtowergun.glb",
+            (gltf) => {
+              const root = gltf.scene;
+              root.traverse((o) => {
+                if (o.isMesh) {
+                  o.castShadow = true;
+                  o.receiveShadow = true;
+                }
+              });
+
+              const fixedSet = new Set();
+              root.traverse((o) => {
+                if (isTowerGunBasePartName(o.name))
+                  o.traverse((x) => fixedSet.add(x));
+              });
+
+              const rotateGroup = new THREE.Group();
+              rotateGroup.name = "towerGun_turret";
+              root.add(rotateGroup);
+              reparentTowerGunRotatingParts(root, rotateGroup, fixedSet);
+              syncTowerGunScaleAndGround(root);
+              scene.add(root);
+              resolve({ root, rotateGroup });
+            },
+            undefined,
+            (err) => reject(err),
+          );
+        });
+      }
+
+      async function init() {
+        const renderer = new THREE.WebGPURenderer({ antialias: true });
+        await renderer.init();
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = parkourParams.light.exposure;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+        document.getElementById("backend").textContent =
+          renderer.backend?.constructor?.name?.includes("WebGPU")
+            ? "WebGPU ✓"
+            : "WebGL fallback";
+
+        const stats = new Stats({ trackGPU: false });
+        stats.init(renderer);
+        document.body.appendChild(stats.dom);
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(
+          60,
+          innerWidth / innerHeight,
+          0.5,
+          1000,
+        );
+        camera.position.set(0, 4, 12);
+
+        const orbitControls = new OrbitControls(camera, renderer.domElement);
+        orbitControls.target.set(0, 2, 0);
+        orbitControls.maxPolarAngle = PI * 0.48;
+        orbitControls.enableDamping = true;
+        orbitControls.dampingFactor = 0.05;
+        orbitControls.enabled = false;
+        orbitControls.update();
+
+        // ── LIGHTING ──
+        const _sunDir = sunDirectionFromAngles(
+          parkourParams.light.sunAzimuth,
+          parkourParams.light.sunElevation,
+        );
+        const dirLight = new THREE.DirectionalLight(
+          parkourParams.light.dirColor,
+          parkourParams.light.dirIntensity,
+        );
+        dirLight.position.copy(_sunDir.clone().multiplyScalar(50));
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.width = parkourParams.csm.mapSize;
+        dirLight.shadow.mapSize.height = parkourParams.csm.mapSize;
+        dirLight.shadow.camera.near = 0.1;
+        dirLight.shadow.camera.far = 1000;
+        dirLight.shadow.camera.left = -120;
+        dirLight.shadow.camera.right = 120;
+        dirLight.shadow.camera.top = 120;
+        dirLight.shadow.camera.bottom = -120;
+        dirLight.shadow.bias = parkourParams.light.shadowBias;
+        dirLight.shadow.normalBias = parkourParams.light.shadowNormalBias;
+
+        const csm = new CSMShadowNode(dirLight, {
+          cascades: parkourParams.csm.cascades,
+          maxFar: parkourParams.csm.maxFar,
+          mode: "practical",
+          lightMargin: parkourParams.csm.lightMargin,
+        });
+        dirLight.shadow.shadowNode = csm;
+        scene.add(dirLight);
+
+        // Fixed shadow target — sun points at scene center so fixed objects have stable shadows
+        const shadowTarget = new THREE.Object3D();
+        shadowTarget.position.set(0, FLOOR_Y, 0);
+        scene.add(shadowTarget);
+        dirLight.target = shadowTarget;
+
+        const ambientLight = new THREE.AmbientLight(
+          parkourParams.light.ambientColor,
+          parkourParams.light.ambientIntensity,
+        );
+        scene.add(ambientLight);
+
+        // ── FLAT PLANE TERRAIN ──
+        const floorGeo = new THREE.PlaneGeometry(PARKOUR_SIZE, PARKOUR_SIZE);
+        floorGeo.rotateX(-PI / 2);
+        const floorMat = createTileMaterial({
+          textureScale: parkourParams.tile.textureScale,
+          gradientIntensity: parkourParams.tile.gradientIntensity,
+          gradientBias: parkourParams.tile.gradientBias,
+          tileColor: parkourParams.tile.tileColor,
+          gridColor: parkourParams.tile.gridColor,
+          gridLineColor: parkourParams.tile.gridLineColor,
+          roughness: parkourParams.tile.roughness,
+          metalness: parkourParams.tile.metalness,
+        });
+        const floor = new THREE.Mesh(floorGeo, floorMat);
+        floor.position.y = FLOOR_Y;
+        floor.receiveShadow = true;
+        scene.add(floor);
+
+        // ── TOWER (tile material, casts & receives shadows) ──
+        const towerMat = createTileMaterial({
+          textureScale: parkourParams.tile.textureScale,
+          gradientIntensity: parkourParams.tile.gradientIntensity,
+          gradientBias: parkourParams.tile.gradientBias,
+          tileColor: parkourParams.tile.tileColor,
+          gridColor: parkourParams.tile.gridColor,
+          gridLineColor: parkourParams.tile.gridLineColor,
+          roughness: parkourParams.tile.roughness,
+          metalness: parkourParams.tile.metalness,
+        });
+        // Tower and spiral staircase removed for a simpler, open parkour arena.
+
+        // ── SKY (HDRI background + PMREM IBL; horizon gradient optional) ──
+        const horizonSky = createHorizonSky({
+          topColor: parkourParams.horizonGradient.topColor,
+          bottomColor: parkourParams.horizonGradient.bottomColor,
+          offset: parkourParams.horizonGradient.offset,
+          exponent: parkourParams.horizonGradient.exponent,
+          radius: parkourParams.horizonGradient.radius,
+          ringStrength: parkourParams.horizonGradient.ringStrength,
+          ringWidth: parkourParams.horizonGradient.ringWidth,
+          ringColor: parkourParams.horizonGradient.ringColor,
+        });
+        horizonSky.mesh.visible = parkourParams.horizonGradient.enabled;
+        horizonSky.mesh.renderOrder = parkourParams.horizonGradient.drawOnTop
+          ? 5
+          : -10;
+        scene.add(horizonSky.mesh);
+
+        {
+          const pmremGenerator = new THREE.PMREMGenerator(renderer);
+          const hdrLoader = new HDRLoader();
+          hdrLoader.setCrossOrigin("anonymous");
+          const hdrTexture = await hdrLoader.loadAsync(
+            INDUSTRIAL_SUNSET_PURESKY_HDR,
+          );
+          hdrTexture.mapping = THREE.EquirectangularReflectionMapping;
+          const pmrem = pmremGenerator.fromEquirectangular(hdrTexture);
+          scene.environment = pmrem.texture;
+          scene.background = hdrTexture;
+          scene.environmentIntensity = parkourParams.light.envIntensity;
+          scene.backgroundIntensity = parkourParams.light.backgroundIntensity;
+          pmremGenerator.dispose();
+        }
+
+        // ── VOLUMETRIC HAZE (ground mist, Ghost of Tsushima style) ──
+        const uHazeThickness = uniform(hazeParams.thickness);
+        const uHazeOpacity = uniform(hazeParams.opacity);
+        const uHazeFalloff = uniform(hazeParams.falloff);
+        const uHazeColor = uniform(new THREE.Color(hazeParams.hazeColor));
+        const uNoiseScaleA = uniform(hazeParams.noiseScaleA);
+        const uNoiseScaleB = uniform(hazeParams.noiseScaleB);
+        const uNoiseAmountA = uniform(hazeParams.noiseAmountA);
+        const uNoiseAmountB = uniform(hazeParams.noiseAmountB);
+        const uNoiseDetail = uniform(hazeParams.noiseDetail);
+        const uNoiseSpeed = uniform(hazeParams.noiseSpeed);
+        const hazeTimer = uniform(0).onFrameUpdate((frame) => frame.time);
+
+        function applyVolumetricHaze() {
+          if (!hazeParams.enabled) {
+            scene.fogNode = null;
+            return;
+          }
+          const fogNoiseDistance = positionView.z
+            .negate()
+            .smoothstep(0, camera.far - 200);
+          const distance = fogNoiseDistance.mul(uHazeThickness).max(8);
+          const heightAboveFloor = positionWorld.y.sub(float(FLOOR_Y));
+          const groundFogArea = float(distance)
+            .sub(heightAboveFloor)
+            .div(distance)
+            .pow(uHazeFalloff)
+            .saturate()
+            .mul(uHazeOpacity);
+          const fogNoiseA = triNoise3D(
+            positionWorld.mul(uNoiseScaleA),
+            uNoiseAmountA,
+            hazeTimer,
+          );
+          const fogNoiseB = triNoise3D(
+            positionWorld.mul(uNoiseScaleB),
+            uNoiseAmountB,
+            hazeTimer.mul(uNoiseSpeed),
+          );
+          const fogNoiseC = triNoise3D(
+            positionWorld.mul(0.015),
+            uNoiseDetail,
+            hazeTimer.mul(0.5),
+          );
+          const fogNoise = fogNoiseA
+            .add(fogNoiseB)
+            .add(fogNoiseC)
+            .mul(color(uHazeColor));
+          const groundColor = color(
+            new THREE.Color(parkourParams.light.ambientColor),
+          );
+          scene.fogNode = fog(
+            fogNoiseDistance.oneMinus().mix(groundColor, fogNoise),
+            groundFogArea,
+          );
+        }
+        applyVolumetricHaze();
+
+        // ── FLOATING LEAVES ──
+        const windParams = {
+          uTime: { value: 0 },
+          uWindStr: { value: parkourParams.foliage.windStr },
+          uWindSpeed: { value: parkourParams.foliage.windSpeed },
+        };
+        const leaves = createFloatingLeaves({
+          scene,
+          enabled: parkourParams.foliage.floatingLeaves,
+          count: parkourParams.foliage.count,
+          maxCount: 500,
+          areaSize: parkourParams.foliage.areaSize,
+          spawnHeight: parkourParams.foliage.spawnHeight,
+          leafSize: parkourParams.foliage.leafSize,
+          scale: parkourParams.foliage.scale,
+          opacity: parkourParams.foliage.opacity,
+          windInfluence: parkourParams.foliage.windInfluence,
+          gravity: parkourParams.foliage.gravity,
+          terminalVelocity: parkourParams.foliage.terminalVelocity,
+          rotationSpeed: parkourParams.foliage.rotationSpeed,
+          airResistance: parkourParams.foliage.airResistance,
+          maxAge: parkourParams.foliage.maxAge,
+          terrainFloorOffset: parkourParams.foliage.terrainFloorOffset,
+          getTerrainHeight: () => FLOOR_Y,
+          windParams,
+        });
+
+        // ── FLOWING LINES ──
+        const flowing = createFlowingLines({
+          scene,
+          getTerrainHeight: (x, z) => FLOOR_Y,
+          enabled: parkourParams.flowingLines.enabled,
+          lineCount: parkourParams.flowingLines.lineCount,
+          lineLength: parkourParams.flowingLines.lineLength,
+          lineWidth: parkourParams.flowingLines.lineWidth,
+          segments: parkourParams.flowingLines.segments,
+          heightOffset: parkourParams.flowingLines.heightOffset,
+          verticalWave: parkourParams.flowingLines.verticalWave,
+          animationSpeed: parkourParams.flowingLines.animationSpeed,
+          pathRadius: parkourParams.flowingLines.pathRadius,
+          pathFrequency: parkourParams.flowingLines.pathFrequency,
+          lineColor: parkourParams.flowingLines.lineColor,
+          lineOpacity: parkourParams.flowingLines.lineOpacity,
+        });
+
+        // ── PHYSICS ──
+        await RAPIER.init({});
+        const { physicsWorld, physicsCubes } = createPhysicsWorld(
+          RAPIER,
+          scene,
+          PARKOUR_SIZE,
+          sampleHeight,
+          { noDefaultGround: true },
+        );
+
+        // Parkour ground: fixed body so floor surface is at FLOOR_Y (top of cuboid) — matches index physics setup
+        const groundHalfY = 0.5;
+        const groundBodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(
+          0,
+          FLOOR_Y - groundHalfY,
+          0,
+        );
+        const groundBody = physicsWorld.createRigidBody(groundBodyDesc);
+        physicsWorld.createCollider(
+          RAPIER.ColliderDesc.cuboid(
+            PARKOUR_SIZE * 0.5,
+            groundHalfY,
+            PARKOUR_SIZE * 0.5,
+          ),
+          groundBody,
+        );
+
+        // Three separate cuboids — one per visual part — so each exactly matches its mesh.
+        // Tower colliders removed (no central tower in simplified scene).
+
+        // Spiral staircase tower colliders
+        // Tower and staircase colliders removed.
+
+        // Hide the default world cubes (they spawn far away)
+        physicsCubes.forEach(({ mesh }) => {
+          mesh.visible = false;
+        });
+
+        // ── DYNAMIC PROPS ──────────────────────────────────────────────────────
+        // Removed for simplified parkour scene (no loose cubes/balls/dominos).
+
+        const dynamicObjects = []; // kept as empty array for compatibility
+
+        // ── MOVING PLATFORM / GAUNTLETS ───────────────────────────────────────
+        // Removed extra moving platforms and step-test blocks for a cleaner scene.
+
+        // ── PUSHABLE BOX / PENDULUM GAUNTLETS ─────────────────────────────────
+        // Removed crate puzzle and pendulum obstacles for a minimal parkour layout.
+
+        const { physicsDebugGroup, buildRapierDebugMeshes } =
+          createPhysicsDebug(RAPIER, scene, physicsWorld);
+        physicsDebugGroup.visible = false;
+
+        // ── PLAYER ──
+        const charPos = new THREE.Vector3(0, 0, 0);
+        const capR = PARAMS.capsuleRadius;
+        const capHalfH = Math.max(0.1, (PARAMS.characterHeight - 2 * capR) / 2);
+        charPos.y = FLOOR_Y + capHalfH + capR;
+
+        const { playerBody, playerCollider, characterController } =
+          createPlayerController(RAPIER, physicsWorld, charPos, PARAMS, {
+            enableSnapToGround: true,
+            characterOffset: 0.01,
+            maxSlopeClimbAngle: (60 * Math.PI) / 180,
+            minSlopeSlideAngle: (65 * Math.PI) / 180,
+          });
+
+        for (let i = 0; i < 250; i++) physicsWorld.step();
+
+        const player = createPlayer({
+          scene,
+          renderer,
+          camera,
+          PARAMS,
+          charPos,
+          playerBody,
+          playerCollider,
+          characterController,
+          physicsWorld,
+          RAPIER,
+          // no sampleHeight → parkour mode: Rapier trimesh colliders + computedGrounded()
+          footstepSoundsPath: "sounds",
+          TERRAIN_SIZE: PARKOUR_SIZE,
+        });
+
+        /** @type {Array<any>} */
+        const deerTargets = [];
+        parkourParams.deer.count = clampDeerCount(parkourParams.deer.count);
+        await syncDeerPopulation(scene, deerTargets);
+
+        let towerGunRoot = null;
+        /** @type {THREE.Group | null} */
+        let towerGunRotateGroup = null;
+        try {
+          const tg = await loadTowerGunModel(scene);
+          towerGunRoot = tg.root;
+          towerGunRotateGroup = tg.rotateGroup;
+          towerGunRoot.visible = parkourParams.towerGun.enabled;
+        } catch (e) {
+          console.warn("Tower gun model failed to load", e);
+        }
+
+        let tankRoot = null;
+        /** @type {ReturnType<typeof createTankPatrolState> | null} */
+        let tankState = null;
+        try {
+          const tk = await loadTankModel(scene);
+          tankRoot = tk.root;
+          tankState = createTankPatrolState();
+          if (parkourParams.tank.patrol) {
+            pickTankManeuver(tankState, parkourParams.tank);
+            applyTankPatrolTransform(tankRoot, tankState);
+          } else {
+            placeTankStaticAtSpawn(tankRoot);
+          }
+          tankRoot.visible = parkourParams.tank.enabled;
+        } catch (e) {
+          console.warn("Tank model failed to load", e);
+        }
+
+        // ── TWEAKPANE CONTROLS ──
+        const pane = new Tweakpane.Pane({ title: "Parkour", expanded: true });
+
+        const tileFolder = pane.addFolder({
+          title: "Tile Material",
+          expanded: true,
+        });
+        tileFolder.addBinding(parkourParams.tile, "textureScale", {
+          min: 1,
+          max: 3000,
+          step: 1,
+          label: "scale",
+        });
+        tileFolder.addBinding(parkourParams.tile, "gradientIntensity", {
+          min: 0,
+          max: 2,
+          step: 0.01,
+        });
+        tileFolder.addBinding(parkourParams.tile, "gradientBias", {
+          min: -0.5,
+          max: 0.5,
+          step: 0.01,
+        });
+        tileFolder.addBinding(parkourParams.tile, "tileColor", {
+          view: "color",
+          label: "tile",
+        });
+        tileFolder.addBinding(parkourParams.tile, "gridColor", {
+          view: "color",
+          label: "grid",
+        });
+        tileFolder.addBinding(parkourParams.tile, "gridLineColor", {
+          view: "color",
+          label: "lines",
+        });
+        tileFolder.addBinding(parkourParams.tile, "roughness", {
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+        tileFolder.addBinding(parkourParams.tile, "metalness", {
+          min: 0,
+          max: 1,
+          step: 0.01,
+        });
+
+        const groundFolder = pane.addFolder({
+          title: "Ground",
+          expanded: true,
+        });
+        groundFolder.addBinding(parkourParams.ground, "planeSize", {
+          min: 100,
+          max: 1500,
+          step: 50,
+        });
+
+        const deerFolder = pane.addFolder({ title: "Deer", expanded: false });
+        deerFolder
+          .addBinding(parkourParams.deer, "count", {
+            min: 1,
+            max: DEER_MAX_COUNT,
+            step: 1,
+            label: "count (async)",
+          })
+          .on("change", () => {
+            void syncDeerPopulation(scene, deerTargets);
+          });
+
+        const tankFolder = pane.addFolder({ title: "Tank", expanded: false });
+        tankFolder
+          .addBinding(parkourParams.tank, "enabled", { label: "visible" })
+          .on("change", () => {
+            if (tankRoot) tankRoot.visible = parkourParams.tank.enabled;
+          });
+        tankFolder
+          .addBinding(parkourParams.tank, "patrol", { label: "patrol AI" })
+          .on("change", () => {
+            if (!tankRoot) return;
+            if (parkourParams.tank.patrol) {
+              if (!tankState) tankState = createTankPatrolState();
+              else syncTankGround(tankRoot, tankState);
+              pickTankManeuver(tankState, parkourParams.tank);
+              applyTankPatrolTransform(tankRoot, tankState);
+            } else {
+              placeTankStaticAtSpawn(tankRoot);
+            }
+          });
+        tankFolder.addBinding(parkourParams.tank, "patrolRadius", {
+          min: 6,
+          max: 120,
+          step: 1,
+          label: "radius",
+        });
+        tankFolder.addBinding(parkourParams.tank, "patrolCenterX", {
+          min: -80,
+          max: 80,
+          step: 0.5,
+          label: "center X",
+        });
+        tankFolder.addBinding(parkourParams.tank, "patrolCenterZ", {
+          min: -80,
+          max: 80,
+          step: 0.5,
+          label: "center Z",
+        });
+        tankFolder.addBinding(parkourParams.tank, "maxSpeed", {
+          min: 0.5,
+          max: 14,
+          step: 0.1,
+          label: "max speed",
+        });
+        tankFolder.addBinding(parkourParams.tank, "accel", {
+          min: 1,
+          max: 20,
+          step: 0.25,
+        });
+        tankFolder.addBinding(parkourParams.tank, "turnSpeed", {
+          min: 0.2,
+          max: 2.5,
+          step: 0.05,
+          label: "turn speed",
+        });
+        tankFolder
+          .addBinding(parkourParams.tank, "scale", {
+            min: 0.05,
+            max: 5,
+            step: 0.01,
+            label: "scale",
+          })
+          .on("change", () => {
+            if (!tankRoot) return;
+            if (parkourParams.tank.patrol && tankState) {
+              applyTankPatrolTransform(tankRoot, tankState);
+            } else {
+              placeTankStaticAtSpawn(tankRoot);
+            }
+          });
+        tankFolder
+          .addBinding(parkourParams.tank, "spawnX", {
+            min: -200,
+            max: 200,
+            step: 1,
+            label: "spawn X",
+          })
+          .on("change", () => {
+            if (!tankRoot) return;
+            if (parkourParams.tank.patrol && tankState) {
+              tankState.x = parkourParams.tank.spawnX;
+              applyTankPatrolTransform(tankRoot, tankState);
+            } else {
+              placeTankStaticAtSpawn(tankRoot);
+            }
+          });
+        tankFolder
+          .addBinding(parkourParams.tank, "spawnZ", {
+            min: -200,
+            max: 200,
+            step: 1,
+            label: "spawn Z",
+          })
+          .on("change", () => {
+            if (!tankRoot) return;
+            if (parkourParams.tank.patrol && tankState) {
+              tankState.z = parkourParams.tank.spawnZ;
+              applyTankPatrolTransform(tankRoot, tankState);
+            } else {
+              placeTankStaticAtSpawn(tankRoot);
+            }
+          });
+        tankFolder
+          .addBinding(parkourParams.tank, "yawOffset", {
+            min: -PI,
+            max: PI,
+            step: 0.02,
+            label: "model yaw fix",
+          })
+          .on("change", () => {
+            if (!tankRoot) return;
+            if (parkourParams.tank.patrol && tankState) {
+              applyTankPatrolTransform(tankRoot, tankState);
+            } else {
+              placeTankStaticAtSpawn(tankRoot);
+            }
+          });
+
+        const towerGunFolder = pane.addFolder({
+          title: "Tower gun",
+          expanded: true,
+        });
+        towerGunFolder
+          .addBinding(parkourParams.towerGun, "enabled", { label: "visible" })
+          .on("change", () => {
+            if (towerGunRoot)
+              towerGunRoot.visible = parkourParams.towerGun.enabled;
+          });
+        towerGunFolder
+          .addBinding(parkourParams.towerGun, "scale", {
+            min: 0.05,
+            max: 2,
+            step: 0.01,
+            label: "scale",
+          })
+          .on("change", () => syncTowerGunScaleAndGround(towerGunRoot));
+        towerGunFolder.addBinding(parkourParams.towerGun, "aimEnabled", {
+          label: "aim deer",
+        });
+        towerGunFolder.addBinding(parkourParams.towerGun, "aimMaxRange", {
+          min: 10,
+          max: 400,
+          step: 5,
+          label: "aim range",
+        });
+        towerGunFolder.addBinding(parkourParams.towerGun, "aimTurnSpeed", {
+          min: 0.2,
+          max: 12,
+          step: 0.1,
+          label: "turn speed (rad/s)",
+        });
+        towerGunFolder.addBinding(
+          parkourParams.towerGun,
+          "aimRetargetInterval",
+          {
+            min: 0.05,
+            max: 0.6,
+            step: 0.01,
+            label: "LOS refresh (s)",
+          },
+        );
+        towerGunFolder.addBinding(parkourParams.towerGun, "aimRequireLos", {
+          label: "require LOS (BVH)",
+        });
+        towerGunFolder.addBinding(parkourParams.towerGun, "aimYawOffset", {
+          min: -Math.PI,
+          max: Math.PI,
+          step: 0.02,
+          label: "yaw offset (fix mesh fwd)",
+        });
+        towerGunFolder.addBinding(parkourParams.towerGun, "shootEnabled", {
+          label: "shoot (spell proj)",
+        });
+        towerGunFolder.addBinding(parkourParams.towerGun, "shootCooldown", {
+          min: 0.15,
+          max: 4,
+          step: 0.05,
+          label: "shoot cooldown (s)",
+        });
+        towerGunFolder.addBinding(
+          parkourParams.towerGun,
+          "shootMuzzleAlongAim",
+          {
+            min: 0,
+            max: 1.5,
+            step: 0.02,
+            label: "muzzle along aim (clear)",
+          },
+        );
+        towerGunFolder.addBinding(parkourParams.towerGun, "shootYawTolerance", {
+          min: 0.02,
+          max: 0.6,
+          step: 0.01,
+          label: "shoot aim tolerance (rad)",
+        });
+
+        const katanaFolder = pane.addFolder({
+          title: "Katana (in hand)",
+          expanded: true,
+        });
+        katanaFolder.addBinding(parkourParams.katana, "posX", {
+          min: -0.2,
+          max: 0.2,
+          step: 0.005,
+          label: "pos X",
+        });
+        katanaFolder.addBinding(parkourParams.katana, "posY", {
+          min: -0.2,
+          max: 0.2,
+          step: 0.005,
+          label: "pos Y",
+        });
+        katanaFolder.addBinding(parkourParams.katana, "posZ", {
+          min: -0.2,
+          max: 0.2,
+          step: 0.005,
+          label: "pos Z",
+        });
+        katanaFolder.addBinding(parkourParams.katana, "rotX", {
+          min: -Math.PI * 2,
+          max: Math.PI * 2,
+          step: 0.05,
+          label: "rot X (rad)",
+        });
+        katanaFolder.addBinding(parkourParams.katana, "rotY", {
+          min: -Math.PI * 2,
+          max: Math.PI * 2,
+          step: 0.05,
+          label: "rot Y (rad)",
+        });
+        katanaFolder.addBinding(parkourParams.katana, "rotZ", {
+          min: -Math.PI * 2,
+          max: Math.PI * 2,
+          step: 0.05,
+          label: "rot Z (rad)",
+        });
+
+        const swordTrailFolder = pane.addFolder({
+          title: "Sword Trail VFX",
+          expanded: false,
+        });
+        swordTrailFolder.addBinding(parkourParams.swordTrail, "enabled", {
+          label: "enabled",
+        });
+        swordTrailFolder.addBinding(parkourParams.swordTrail, "trailColor", {
+          label: "trail color",
+        });
+        swordTrailFolder.addBinding(parkourParams.swordTrail, "edgeColor", {
+          label: "edge color",
+        });
+        swordTrailFolder.addBinding(parkourParams.swordTrail, "trailLength", {
+          min: 3,
+          max: 16,
+          step: 1,
+          label: "trail length",
+        });
+        swordTrailFolder.addBinding(parkourParams.swordTrail, "tipOffset", {
+          min: 0,
+          max: 1.5,
+          step: 0.01,
+          label: "tip offset",
+        });
+        swordTrailFolder.addBinding(parkourParams.swordTrail, "baseOffset", {
+          min: -0.5,
+          max: 0.5,
+          step: 0.01,
+          label: "base offset",
+        });
+        swordTrailFolder.addBinding(parkourParams.swordTrail, "widthScale", {
+          min: 0.1,
+          max: 3,
+          step: 0.1,
+          label: "width scale",
+        });
+        swordTrailFolder.addBinding(parkourParams.swordTrail, "opacity", {
+          min: 0,
+          max: 1,
+          step: 0.01,
+          label: "opacity",
+        });
+        swordTrailFolder.addBinding(parkourParams.swordTrail, "fadeOutTime", {
+          min: 0.01,
+          max: 0.5,
+          step: 0.01,
+          label: "fade out (s)",
+        });
+        swordTrailFolder.addBinding(
+          parkourParams.swordTrail,
+          "lightIntensity",
+          { min: 0, max: 5, step: 0.1, label: "light intensity" },
+        );
+        swordTrailFolder.addBinding(parkourParams.swordTrail, "lightRange", {
+          min: 0,
+          max: 10,
+          step: 0.5,
+          label: "light range",
+        });
+
+        const bloodFolder = pane.addFolder({
+          title: "Blood FX",
+          expanded: false,
+        });
+        bloodFolder.addBinding(parkourParams.bloodFX, "enabled", {
+          label: "enabled",
+        });
+        bloodFolder.addBinding(parkourParams.bloodFX, "burstCount", {
+          min: 3,
+          max: 20,
+          step: 1,
+          label: "burst count",
+        });
+        bloodFolder.addBinding(parkourParams.bloodFX, "bloodColor", {
+          label: "blood color",
+        });
+        bloodFolder.addBinding(parkourParams.bloodFX, "bloodColor2", {
+          label: "blood color 2",
+        });
+        bloodFolder.addBinding(parkourParams.bloodFX, "burstSpeed", {
+          min: 0.5,
+          max: 8,
+          step: 0.1,
+          label: "burst speed",
+        });
+        bloodFolder.addBinding(parkourParams.bloodFX, "burstSpread", {
+          min: 0.5,
+          max: 5,
+          step: 0.1,
+          label: "spread",
+        });
+        bloodFolder.addBinding(parkourParams.bloodFX, "gravity", {
+          min: 1,
+          max: 15,
+          step: 0.5,
+          label: "gravity",
+        });
+        bloodFolder.addBinding(parkourParams.bloodFX, "spriteSize", {
+          min: 0.02,
+          max: 0.4,
+          step: 0.01,
+          label: "sprite size",
+        });
+        bloodFolder.addBinding(parkourParams.bloodFX, "lifetime", {
+          min: 0.2,
+          max: 2,
+          step: 0.05,
+          label: "lifetime",
+        });
+        bloodFolder.addBinding(parkourParams.bloodFX, "poolColor", {
+          label: "pool color",
+        });
+        bloodFolder.addBinding(parkourParams.bloodFX, "poolSize", {
+          min: 0.1,
+          max: 3,
+          step: 0.05,
+          label: "pool size",
+        });
+        bloodFolder.addBinding(parkourParams.bloodFX, "poolMinWorldScale", {
+          min: 0.02,
+          max: 0.6,
+          step: 0.01,
+          label: "pool min size (world)",
+        });
+        bloodFolder.addBinding(parkourParams.bloodFX, "poolYOffset", {
+          min: 0,
+          max: 0.2,
+          step: 0.005,
+          label: "pool Y above floor",
+        });
+        bloodFolder.addBinding(parkourParams.bloodFX, "poolPersist", {
+          label: "pool stays (no fade out)",
+        });
+        bloodFolder.addBinding(parkourParams.bloodFX, "poolLifetime", {
+          min: 0.5,
+          max: 30,
+          step: 0.5,
+          label: "pool lifetime (if persist off)",
+        });
+        bloodFolder.addBinding(parkourParams.bloodFX, "flashDuration", {
+          min: 0.02,
+          max: 0.5,
+          step: 0.01,
+          label: "flash time",
+        });
+        bloodFolder.addBinding(parkourParams.bloodFX, "flashColor", {
+          label: "flash color",
+        });
+
+        const bloodPoolAtlasFolder = bloodFolder.addFolder({
+          title: "Pool atlas (floor)",
+          expanded: false,
+        });
+        bloodPoolAtlasFolder.addBinding(
+          parkourParams.bloodFX,
+          "poolAtlasBasePath",
+          { label: "folder URL" },
+        );
+        bloodPoolAtlasFolder.addBinding(
+          parkourParams.bloodFX,
+          "poolColorAtlasFile",
+          { label: "color file" },
+        );
+        bloodPoolAtlasFolder.addBinding(
+          parkourParams.bloodFX,
+          "poolAlphaAtlasFile",
+          { label: "alpha file" },
+        );
+        bloodPoolAtlasFolder.addBinding(
+          parkourParams.bloodFX,
+          "poolAtlasCols",
+          { min: 1, max: 32, step: 1, label: "cols" },
+        );
+        bloodPoolAtlasFolder.addBinding(
+          parkourParams.bloodFX,
+          "poolAtlasRows",
+          { min: 1, max: 32, step: 1, label: "rows" },
+        );
+        bloodPoolAtlasFolder.addBinding(
+          parkourParams.bloodFX,
+          "poolAnimDuration",
+          {
+            min: 0.2,
+            max: 12,
+            step: 0.05,
+            label: "flipbook duration (s)",
+          },
+        );
+        bloodPoolAtlasFolder.addBinding(
+          parkourParams.bloodFX,
+          "poolFlipbookByFps",
+          { label: "use FPS mode (not duration)" },
+        );
+        bloodPoolAtlasFolder.addBinding(parkourParams.bloodFX, "poolAnimFps", {
+          min: 1,
+          max: 60,
+          step: 1,
+          label: "anim fps (FPS mode)",
+        });
+        bloodPoolAtlasFolder.addBinding(
+          parkourParams.bloodFX,
+          "poolAlphaCutoff",
+          { min: 0, max: 0.5, step: 0.01, label: "alpha cutoff" },
+        );
+        bloodPoolAtlasFolder.addBinding(
+          parkourParams.bloodFX,
+          "poolInvertAlphaMask",
+          { label: "invert mask" },
+        );
+        bloodPoolAtlasFolder.addBinding(
+          parkourParams.bloodFX,
+          "poolFlipRowUV",
+          { label: "flip row UV" },
+        );
+        bloodPoolAtlasFolder
+          .addBinding(parkourParams.bloodFX, "poolAtlasLinear", {
+            label: "linear filter",
+          })
+          .on("change", () => {
+            const bx = parkourParams.bloodFX;
+            if (
+              bloodFx.poolAtlasOk &&
+              bloodFx.poolColorTex &&
+              bloodFx.poolAlphaTex
+            ) {
+              applyBloodPoolTextureFilters(
+                bloodFx.poolColorTex,
+                bx.poolAtlasLinear,
+              );
+              applyBloodPoolTextureFilters(
+                bloodFx.poolAlphaTex,
+                bx.poolAtlasLinear,
+              );
+            }
+          });
+
+        const spellVfxFolder = pane.addFolder({
+          title: "Spell VFX",
+          expanded: false,
+        });
+        spellVfxFolder.addBinding(parkourParams.spellVFX, "enabled", {
+          label: "enabled",
+        });
+        const svOrb = spellVfxFolder.addFolder({
+          title: "Orb",
+          expanded: true,
+        });
+        svOrb.addBinding(parkourParams.spellVFX, "orbColor", {
+          label: "color",
+        });
+        svOrb.addBinding(parkourParams.spellVFX, "orbCoreColor", {
+          label: "core color",
+        });
+        svOrb.addBinding(parkourParams.spellVFX, "orbSize", {
+          min: 0.02,
+          max: 0.5,
+          step: 0.01,
+          label: "size",
+        });
+        svOrb.addBinding(parkourParams.spellVFX, "orbIntensity", {
+          min: 0,
+          max: 15,
+          step: 0.1,
+          label: "intensity",
+        });
+        svOrb.addBinding(parkourParams.spellVFX, "orbPulseSpeed", {
+          min: 0,
+          max: 10,
+          step: 0.1,
+          label: "pulse speed",
+        });
+        svOrb.addBinding(parkourParams.spellVFX, "orbPulseAmount", {
+          min: 0,
+          max: 1,
+          step: 0.01,
+          label: "pulse amount",
+        });
+        svOrb.addBinding(parkourParams.spellVFX, "orbLightIntensity", {
+          min: 0,
+          max: 10,
+          step: 0.1,
+          label: "light intensity",
+        });
+        svOrb.addBinding(parkourParams.spellVFX, "orbLightRange", {
+          min: 0,
+          max: 15,
+          step: 0.5,
+          label: "light range",
+        });
+        svOrb.addBinding(parkourParams.spellVFX, "orbOffsetX", {
+          min: -1,
+          max: 1,
+          step: 0.01,
+          label: "offset X",
+        });
+        svOrb.addBinding(parkourParams.spellVFX, "orbOffsetY", {
+          min: -1,
+          max: 1,
+          step: 0.01,
+          label: "offset Y",
+        });
+        svOrb.addBinding(parkourParams.spellVFX, "orbOffsetZ", {
+          min: -1,
+          max: 1,
+          step: 0.01,
+          label: "offset Z",
+        });
+        const svSparks = spellVfxFolder.addFolder({
+          title: "Sparks",
+          expanded: false,
+        });
+        svSparks.addBinding(parkourParams.spellVFX, "sparkOrbitRadius", {
+          min: 0.05,
+          max: 1,
+          step: 0.01,
+          label: "orbit radius",
+        });
+        svSparks.addBinding(parkourParams.spellVFX, "sparkOrbitSpeed", {
+          min: 0,
+          max: 15,
+          step: 0.1,
+          label: "orbit speed",
+        });
+        svSparks.addBinding(parkourParams.spellVFX, "sparkSize", {
+          min: 0.005,
+          max: 0.1,
+          step: 0.005,
+          label: "size",
+        });
+        const svProj = spellVfxFolder.addFolder({
+          title: "Projectile",
+          expanded: false,
+        });
+        svProj.addBinding(parkourParams.spellVFX, "projectileSpeed", {
+          min: 5,
+          max: 60,
+          step: 1,
+          label: "speed",
+        });
+        svProj.addBinding(parkourParams.spellVFX, "projectileSize", {
+          min: 0.03,
+          max: 0.5,
+          step: 0.01,
+          label: "size",
+        });
+        svProj.addBinding(parkourParams.spellVFX, "projectileMaxDist", {
+          min: 5,
+          max: 80,
+          step: 1,
+          label: "max distance",
+        });
+        svProj.addBinding(parkourParams.spellVFX, "trailLength", {
+          min: 0,
+          max: 30,
+          step: 1,
+          label: "trail length",
+        });
+        svProj.addBinding(parkourParams.spellVFX, "trailSpacing", {
+          min: 0.01,
+          max: 0.2,
+          step: 0.01,
+          label: "trail spacing",
+        });
+        svProj.addBinding(parkourParams.spellVFX, "impactSize", {
+          min: 0.2,
+          max: 3,
+          step: 0.1,
+          label: "impact size",
+        });
+        svProj.addBinding(parkourParams.spellVFX, "impactDuration", {
+          min: 0.1,
+          max: 1,
+          step: 0.05,
+          label: "impact time",
+        });
+
+        const playerCameraFolder = pane.addFolder({
+          title: "Player & Camera",
+          expanded: true,
+        });
+        playerCameraFolder.addBinding(PARAMS, "cameraMode", {
+          options: { "Third person": "thirdPerson", Orbit: "orbit" },
+          label: "camera",
+        });
+        playerCameraFolder.addBinding(PARAMS, "camDist", {
+          min: 2,
+          max: 20,
+          step: 0.5,
+          label: "camera distance",
+        });
+        playerCameraFolder.addBinding(PARAMS, "camHeight", {
+          min: -2,
+          max: 3,
+          step: 0.1,
+          label: "camera height",
+        });
+        playerCameraFolder.addBinding(PARAMS, "camPitchMin", {
+          min: -1.5,
+          max: 0.5,
+          step: 0.05,
+          label: "pitch min (rad)",
+        });
+        playerCameraFolder.addBinding(PARAMS, "camPitchMax", {
+          min: 0.5,
+          max: 2,
+          step: 0.05,
+          label: "pitch max (rad)",
+        });
+        playerCameraFolder.addBinding(PARAMS, "mouseSensitivity", {
+          min: 0.0005,
+          max: 0.01,
+          step: 0.0005,
+          label: "mouse sensitivity",
+        });
+        playerCameraFolder.addBinding(PARAMS, "keyTurnSpeed", {
+          min: 0.5,
+          max: 5,
+          step: 0.1,
+          label: "key turn speed",
+        });
+        playerCameraFolder.addBinding(PARAMS, "playerSpeed", {
+          min: 1,
+          max: 8,
+          step: 0.1,
+          label: "walk speed",
+        });
+        playerCameraFolder.addBinding(PARAMS, "runSpeedMultiplier", {
+          min: 1,
+          max: 3,
+          step: 0.05,
+          label: "run multiplier",
+        });
+        playerCameraFolder.addBinding(PARAMS, "jumpSpeed", {
+          min: 2,
+          max: 12,
+          step: 0.25,
+          label: "jump speed",
+        });
+        playerCameraFolder.addBinding(PARAMS, "gravity", {
+          min: 5,
+          max: 25,
+          step: 0.5,
+          label: "gravity",
+        });
+        playerCameraFolder.addBinding(PARAMS, "glideFallSpeed", {
+          min: 1,
+          max: 8,
+          step: 0.25,
+          label: "glide fall speed",
+        });
+        playerCameraFolder.addBinding(PARAMS, "characterHeight", {
+          min: 1.5,
+          max: 3.5,
+          step: 0.05,
+          label: "character height",
+        });
+        playerCameraFolder.addBinding(PARAMS, "capsuleRadius", {
+          min: 0.2,
+          max: 0.6,
+          step: 0.01,
+          label: "capsule radius",
+        });
+
+        const lightingFolder = pane.addFolder({
+          title: "Lighting",
+          expanded: true,
+        });
+        lightingFolder.addBinding(parkourParams.light, "sunAzimuth", {
+          min: 0,
+          max: 360,
+          step: 1,
+          label: "sun azimuth",
+        });
+        lightingFolder.addBinding(parkourParams.light, "sunElevation", {
+          min: -10,
+          max: 90,
+          step: 1,
+          label: "sun elevation",
+        });
+        lightingFolder.addBinding(parkourParams.light, "dirColor", {
+          view: "color",
+          label: "sun color",
+        });
+        lightingFolder.addBinding(parkourParams.light, "dirIntensity", {
+          min: 0,
+          max: 5,
+          step: 0.1,
+          label: "sun intensity",
+        });
+        lightingFolder.addBinding(parkourParams.light, "ambientColor", {
+          view: "color",
+          label: "ambient color",
+        });
+        lightingFolder.addBinding(parkourParams.light, "ambientIntensity", {
+          min: 0,
+          max: 2,
+          step: 0.05,
+          label: "ambient intensity",
+        });
+        lightingFolder.addBinding(parkourParams.light, "envIntensity", {
+          min: 0,
+          max: 5,
+          step: 0.1,
+          label: "env (IBL) intensity",
+        });
+        lightingFolder.addBinding(parkourParams.light, "backgroundIntensity", {
+          min: 0,
+          max: 5,
+          step: 0.05,
+          label: "HDRI background intensity",
+        });
+        lightingFolder.addBinding(parkourParams.light, "exposure", {
+          min: 0.1,
+          max: 2,
+          step: 0.05,
+          label: "exposure",
+        });
+        lightingFolder.addBinding(parkourParams.light, "shadowBias", {
+          min: -0.001,
+          max: 0.001,
+          step: 0.00001,
+          label: "shadow bias",
+        });
+        lightingFolder.addBinding(parkourParams.light, "shadowNormalBias", {
+          min: 0,
+          max: 0.1,
+          step: 0.001,
+          label: "shadow normal bias",
+        });
+
+        const hazeFolder = pane.addFolder({
+          title: "Volumetric Haze",
+          expanded: true,
+        });
+        hazeFolder
+          .addBinding(hazeParams, "enabled", { label: "enable" })
+          .on("change", () => applyVolumetricHaze());
+        hazeFolder
+          .addBinding(hazeParams, "thickness", {
+            min: 15,
+            max: 80,
+            step: 1,
+          })
+          .on("change", (e) => {
+            uHazeThickness.value = e.value;
+          });
+        hazeFolder
+          .addBinding(hazeParams, "opacity", {
+            min: 0.4,
+            max: 1,
+            step: 0.02,
+          })
+          .on("change", (e) => {
+            uHazeOpacity.value = e.value;
+          });
+        hazeFolder
+          .addBinding(hazeParams, "falloff", {
+            min: 1.2,
+            max: 4,
+            step: 0.1,
+          })
+          .on("change", (e) => {
+            uHazeFalloff.value = e.value;
+          });
+        hazeFolder
+          .addBinding(hazeParams, "hazeColor", {
+            view: "color",
+            label: "color",
+          })
+          .on("change", (e) => {
+            uHazeColor.value.set(e.value);
+          });
+        hazeFolder
+          .addBinding(hazeParams, "noiseScaleA", {
+            min: 0.001,
+            max: 0.02,
+            step: 0.001,
+            label: "noise scale A",
+          })
+          .on("change", (e) => {
+            uNoiseScaleA.value = e.value;
+          });
+        hazeFolder
+          .addBinding(hazeParams, "noiseScaleB", {
+            min: 0.003,
+            max: 0.02,
+            step: 0.001,
+            label: "noise scale B",
+          })
+          .on("change", (e) => {
+            uNoiseScaleB.value = e.value;
+          });
+        hazeFolder
+          .addBinding(hazeParams, "noiseAmountA", {
+            min: 0.1,
+            max: 0.5,
+            step: 0.02,
+          })
+          .on("change", (e) => {
+            uNoiseAmountA.value = e.value;
+          });
+        hazeFolder
+          .addBinding(hazeParams, "noiseAmountB", {
+            min: 0.05,
+            max: 0.4,
+            step: 0.02,
+          })
+          .on("change", (e) => {
+            uNoiseAmountB.value = e.value;
+          });
+        hazeFolder
+          .addBinding(hazeParams, "noiseDetail", {
+            min: 0,
+            max: 0.35,
+            step: 0.02,
+          })
+          .on("change", (e) => {
+            uNoiseDetail.value = e.value;
+          });
+        hazeFolder
+          .addBinding(hazeParams, "noiseSpeed", {
+            min: 0,
+            max: 2,
+            step: 0.1,
+          })
+          .on("change", (e) => {
+            uNoiseSpeed.value = e.value;
+          });
+
+        const skyFolder = pane.addFolder({
+          title: "Sky (Poly Haven HDRI)",
+          expanded: true,
+        });
+        const horizonFolder = skyFolder.addFolder({
+          title: "Gradient dome (TSL)",
+          expanded: false,
+        });
+        horizonFolder.addBinding(parkourParams.horizonGradient, "enabled", {
+          label: "enable",
+        });
+        horizonFolder.addBinding(parkourParams.horizonGradient, "drawOnTop", {
+          label: "draw on top",
+        });
+        horizonFolder.addBinding(parkourParams.horizonGradient, "topColor", {
+          view: "color",
+          label: "top (zenith)",
+        });
+        horizonFolder.addBinding(parkourParams.horizonGradient, "bottomColor", {
+          view: "color",
+          label: "bottom (horizon)",
+        });
+        horizonFolder.addBinding(parkourParams.horizonGradient, "offset", {
+          min: -200,
+          max: 200,
+          step: 1,
+          label: "bias / offset",
+        });
+        horizonFolder.addBinding(parkourParams.horizonGradient, "exponent", {
+          min: 0.1,
+          max: 4,
+          step: 0.05,
+          label: "exponent",
+        });
+        horizonFolder.addBinding(parkourParams.horizonGradient, "radius", {
+          min: 500,
+          max: 20000,
+          step: 100,
+          label: "sphere radius",
+        });
+        horizonFolder.addBinding(
+          parkourParams.horizonGradient,
+          "ringStrength",
+          {
+            min: 0,
+            max: 1,
+            step: 0.01,
+            label: "horizon ring",
+          },
+        );
+        horizonFolder.addBinding(parkourParams.horizonGradient, "ringWidth", {
+          min: 0.02,
+          max: 0.5,
+          step: 0.01,
+          label: "ring width",
+        });
+        horizonFolder.addBinding(parkourParams.horizonGradient, "ringColor", {
+          view: "color",
+          label: "ring color",
+        });
+
+        const foliageFolder = pane.addFolder({
+          title: "Foliage",
+          expanded: true,
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "floatingLeaves", {
+          label: "enable",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "count", {
+          min: 10,
+          max: 500,
+          step: 10,
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "areaSize", {
+          min: 20,
+          max: 400,
+          step: 10,
+          label: "area size",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "spawnHeight", {
+          min: 5,
+          max: 80,
+          step: 5,
+          label: "spawn height",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "leafSize", {
+          min: 0.05,
+          max: 1,
+          step: 0.05,
+          label: "leaf size",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "scale", {
+          min: 0.2,
+          max: 3,
+          step: 0.1,
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "opacity", {
+          min: 0.1,
+          max: 1,
+          step: 0.05,
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "windInfluence", {
+          min: 0,
+          max: 3,
+          step: 0.1,
+          label: "wind influence",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "windStr", {
+          min: 0,
+          max: 1,
+          step: 0.05,
+          label: "wind strength",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "windSpeed", {
+          min: 0.2,
+          max: 3,
+          step: 0.1,
+          label: "wind speed",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "gravity", {
+          min: 0,
+          max: 0.01,
+          step: 0.0005,
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "terminalVelocity", {
+          min: 0.005,
+          max: 0.1,
+          step: 0.005,
+          label: "terminal vel",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "rotationSpeed", {
+          min: 0,
+          max: 0.01,
+          step: 0.0005,
+          label: "rotation speed",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "airResistance", {
+          min: 0.9,
+          max: 1,
+          step: 0.005,
+          label: "air resistance",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "maxAge", {
+          min: 200,
+          max: 2000,
+          step: 100,
+          label: "max age (respawn)",
+        });
+        foliageFolder.addBinding(parkourParams.foliage, "terrainFloorOffset", {
+          min: 0.5,
+          max: 10,
+          step: 0.5,
+          label: "floor offset",
+        });
+
+        const flowingFolder = pane.addFolder({
+          title: "Flowing Lines",
+          expanded: true,
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "enabled", {
+          label: "enable",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "lineCount", {
+          min: 1,
+          max: 24,
+          step: 1,
+          label: "count",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "lineLength", {
+          min: 4,
+          max: 30,
+          step: 1,
+          label: "length",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "lineWidth", {
+          min: 0.05,
+          max: 0.5,
+          step: 0.01,
+          label: "width",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "segments", {
+          min: 8,
+          max: 40,
+          step: 2,
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "heightOffset", {
+          min: 0,
+          max: 2,
+          step: 0.1,
+          label: "height offset",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "verticalWave", {
+          min: 0,
+          max: 0.3,
+          step: 0.01,
+          label: "vertical wave",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "animationSpeed", {
+          min: 0.2,
+          max: 3,
+          step: 0.1,
+          label: "speed",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "pathRadius", {
+          min: 10,
+          max: 80,
+          step: 5,
+          label: "path radius",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "pathFrequency", {
+          min: 0.2,
+          max: 2,
+          step: 0.1,
+          label: "path frequency",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "lineColor", {
+          view: "color",
+          label: "color",
+        });
+        flowingFolder.addBinding(parkourParams.flowingLines, "lineOpacity", {
+          min: 0.2,
+          max: 1,
+          step: 0.05,
+          label: "opacity",
+        });
+
+        const debugFolder = pane.addFolder({ title: "Debug", expanded: false });
+        debugFolder.addBinding(parkourParams.debug, "rapierDebug", {
+          label: "Rapier colliders",
+        });
+
+        const lightFolder = pane.addFolder({
+          title: "Shadows (CSM)",
+          expanded: true,
+        });
+        lightFolder.addBinding(parkourParams.csm, "updateEveryFrame", {
+          label: "update every frame",
+        });
+        lightFolder.addBinding(PARAMS, "shadowBias", {
+          min: -0.01,
+          max: 0.001,
+          step: 0.0001,
+          label: "bias",
+        });
+        lightFolder.addBinding(PARAMS, "shadowNormalBias", {
+          min: 0,
+          max: 0.2,
+          step: 0.01,
+          label: "normalBias",
+        });
+        lightFolder.addBinding(parkourParams.csm, "cascades", {
+          min: 1,
+          max: 4,
+          step: 1,
+          label: "cascades",
+        });
+        lightFolder.addBinding(parkourParams.csm, "maxFar", {
+          min: 50,
+          max: 500,
+          step: 10,
+          label: "maxFar",
+        });
+        lightFolder.addBinding(parkourParams.csm, "lightMargin", {
+          min: 0,
+          max: 300,
+          step: 10,
+          label: "lightMargin",
+        });
+        lightFolder.addBinding(parkourParams.csm, "mapSize", {
+          min: 512,
+          max: 4096,
+          step: 512,
+          label: "mapSize",
+        });
+
+        // ── POST-PROCESSING ──
+        const postFolder = pane.addFolder({
+          title: "Post-Processing",
+          expanded: true,
+        });
+        postFolder.addBinding(postParams, "enabled", { label: "master" });
+
+        const postBloomFolder = postFolder.addFolder({
+          title: "Bloom",
+          expanded: false,
+        });
+        postBloomFolder.addBinding(postParams.bloom, "enabled");
+        postBloomFolder.addBinding(postParams.bloom, "strength", {
+          min: 0,
+          max: 2,
+          step: 0.05,
+        });
+        postBloomFolder.addBinding(postParams.bloom, "radius", {
+          min: 0,
+          max: 1,
+          step: 0.02,
+        });
+        postBloomFolder.addBinding(postParams.bloom, "threshold", {
+          min: 0,
+          max: 2,
+          step: 0.02,
+        });
+
+        const postLensflareFolder = postFolder.addFolder({
+          title: "Lens Flare / Sun Flare",
+          expanded: true,
+        });
+        postLensflareFolder.addBinding(postParams.lensflare, "enabled");
+        postLensflareFolder.addBinding(postParams.lensflare, "bloomThreshold", {
+          min: 0.4,
+          max: 1.2,
+          step: 0.02,
+          label: "sky bloom thresh",
+        });
+        postLensflareFolder.addBinding(postParams.lensflare, "threshold", {
+          min: 0.2,
+          max: 1,
+          step: 0.02,
+        });
+        postLensflareFolder.addBinding(
+          postParams.lensflare,
+          "ghostAttenuation",
+          {
+            min: 5,
+            max: 50,
+            step: 1,
+          },
+        );
+        postLensflareFolder.addBinding(postParams.lensflare, "ghostSpacing", {
+          min: 0.1,
+          max: 0.5,
+          step: 0.01,
+        });
+
+        const postGodRaysFolder = postFolder.addFolder({
+          title: "God Rays (Volumetric Sun)",
+          expanded: true,
+        });
+        postGodRaysFolder.addBinding(postParams.godRays, "enabled");
+        postGodRaysFolder.addBinding(postParams.godRays, "strength", {
+          min: 0,
+          max: 0.5,
+          step: 0.01,
+        });
+        postGodRaysFolder.addBinding(postParams.godRays, "decay", {
+          min: 0.9,
+          max: 0.99,
+          step: 0.005,
+        });
+        postGodRaysFolder.addBinding(postParams.godRays, "density", {
+          min: 0.2,
+          max: 1.5,
+          step: 0.05,
+        });
+        postGodRaysFolder.addBinding(postParams.godRays, "samples", {
+          min: 8,
+          max: 64,
+          step: 4,
+        });
+
+        const postDofFolder = postFolder.addFolder({
+          title: "Depth of Field",
+          expanded: false,
+        });
+        postDofFolder.addBinding(postParams.dof, "enabled");
+        postDofFolder.addBinding(postParams.dof, "focusDistance", {
+          min: 5,
+          max: 100,
+          step: 1,
+        });
+        postDofFolder.addBinding(postParams.dof, "blurStart", {
+          min: 1,
+          max: 30,
+          step: 1,
+        });
+        postDofFolder.addBinding(postParams.dof, "blurEnd", {
+          min: 30,
+          max: 150,
+          step: 5,
+        });
+        postDofFolder.addBinding(postParams.dof, "blurSize", {
+          min: 1,
+          max: 3,
+          step: 1,
+        });
+        postDofFolder.addBinding(postParams.dof, "blurSpread", {
+          min: 1,
+          max: 8,
+          step: 0.5,
+        });
+
+        const postGtaoFolder = postFolder.addFolder({
+          title: "GTAO (Ambient Occlusion)",
+          expanded: false,
+        });
+        postGtaoFolder.addBinding(postParams.gtao, "enabled");
+        postGtaoFolder.addBinding(postParams.gtao, "intensity", {
+          min: 0.5,
+          max: 2.5,
+          step: 0.1,
+        });
+        postGtaoFolder.addBinding(postParams.gtao, "radius", {
+          min: 0.5,
+          max: 2.5,
+          step: 0.1,
+        });
+        postGtaoFolder.addBinding(postParams.gtao, "samples", {
+          min: 8,
+          max: 24,
+          step: 2,
+        });
+        postGtaoFolder.addBinding(postParams.gtao, "resolutionScale", {
+          min: 0.25,
+          max: 1,
+          step: 0.05,
+          label: "resolution",
+        });
+        postGtaoFolder.addBinding(postParams.gtao, "scale", {
+          min: 0.5,
+          max: 2,
+          step: 0.1,
+        });
+        postGtaoFolder.addBinding(postParams.gtao, "denoiseEnabled", {
+          label: "denoise",
+        });
+        postGtaoFolder.addBinding(postParams.gtao, "denoiseRadius", {
+          min: 1,
+          max: 10,
+          step: 1,
+        });
+
+        // ── RENDER PIPELINE (full post-processing) ──
+        const renderPipeline = new THREE.RenderPipeline(renderer);
+        renderPipeline.outputColorTransform = false;
+        // MRT: output (beauty), emissive (glow), normal (GTAO)
+        const scenePass = pass(scene, camera);
+        scenePass.setMRT(
+          mrt({
+            output,
+            emissive,
+            normal: directionToColor(normalView),
+          }),
+        );
+        const scenePassColor = scenePass.getTextureNode("output");
+        const emissivePass = scenePass.getTextureNode("emissive");
+        const scenePassDepth = scenePass.getTextureNode("depth");
+        const scenePassNormalEncoded = scenePass.getTextureNode("normal");
+        const scenePassNormal = sample((uvCoord) =>
+          colorToDirection(scenePassNormalEncoded.sample(uvCoord)),
+        );
+        const normalTexture = scenePass.getTexture("normal");
+        if (normalTexture) normalTexture.type = THREE.UnsignedByteType;
+
+        // Emissive bloom (glowing elements)
+        const emissiveBloomPass = bloom(emissivePass, 2);
+        let baseColor = scenePassColor.add(emissiveBloomPass);
+
+        // GTAO (screen-space ambient occlusion)
+        const uGtaoEnabled = uniform(
+          postParams.enabled && postParams.gtao.enabled ? 1 : 0,
+        );
+        const uGtaoIntensity = uniform(postParams.gtao.intensity);
+        const aoPass = ao(scenePassDepth, scenePassNormal, camera);
+        aoPass.resolutionScale = postParams.gtao.resolutionScale;
+        aoPass.radius.value = postParams.gtao.radius;
+        aoPass.samples.value = postParams.gtao.samples;
+        aoPass.scale.value = postParams.gtao.scale;
+        aoPass.distanceFallOff.value = postParams.gtao.distanceFallOff;
+        aoPass.distanceExponent.value = postParams.gtao.distanceExponent;
+        aoPass.thickness.value = postParams.gtao.thickness;
+        const aoTex = aoPass.getTextureNode();
+        const denoisePass = denoise(
+          aoTex,
+          scenePassDepth,
+          scenePassNormal,
+          camera,
+        );
+        denoisePass.updateBefore = () => {};
+        denoisePass.radius.value = postParams.gtao.denoiseRadius;
+        denoisePass.lumaPhi.value = postParams.gtao.denoiseLumaPhi;
+        denoisePass.depthPhi.value = postParams.gtao.denoiseDepthPhi;
+        denoisePass.normalPhi.value = postParams.gtao.denoiseNormalPhi;
+        const uGtaoDenoiseEnabled = uniform(
+          postParams.gtao.denoiseEnabled ? 1 : 0,
+        );
+        const rawAoVal = aoTex.sample(screenUV).r;
+        const denoisedAoVal = denoisePass.r;
+        const aoVal = mix(rawAoVal, denoisedAoVal, uGtaoDenoiseEnabled);
+        baseColor = vec4(
+          baseColor.rgb.mul(
+            sub(1, mul(mul(aoVal, uGtaoIntensity), uGtaoEnabled)),
+          ),
+          baseColor.a,
+        );
+
+        // Depth for DoF, sky mask, god rays
+        const linearDepth = scenePass.getLinearDepthNode
+          ? scenePass.getLinearDepthNode()
+          : float(0.5);
+        const uCameraFar = uniform(camera.far);
+        const worldDepth = mul(linearDepth, uCameraFar);
+        const skyMask = step(float(0.999), linearDepth);
+
+        // DoF (depth of field)
+        const uDofEnabled = uniform(
+          postParams.enabled && postParams.dof.enabled ? 1 : 0,
+        );
+        const uDofFocusDistance = uniform(postParams.dof.focusDistance);
+        const uDofBlurStart = uniform(postParams.dof.blurStart);
+        const uDofBlurEnd = uniform(postParams.dof.blurEnd);
+        const uDofBlurSize = uniform(postParams.dof.blurSize);
+        const uDofBlurSpread = uniform(postParams.dof.blurSpread);
+        const sceneBlurred = boxBlur(baseColor, {
+          size: uDofBlurSize,
+          separation: uDofBlurSpread,
+        });
+        const dofBlurAmount = smoothstep(
+          uDofBlurStart,
+          uDofBlurEnd,
+          abs(sub(worldDepth, uDofFocusDistance)),
+        );
+        baseColor = mix(
+          baseColor,
+          sceneBlurred,
+          mul(dofBlurAmount, uDofEnabled),
+        );
+
+        // Scene bloom (full scene glow)
+        const uBloomEnabled = uniform(
+          postParams.enabled && postParams.bloom.enabled ? 1 : 0,
+        );
+        const bloomScenePass = bloom(
+          baseColor,
+          postParams.bloom.strength,
+          postParams.bloom.radius,
+          postParams.bloom.threshold,
+        );
+
+        // Lens flare: bloom sky only (sun/sky at far depth)
+        const skyOnlyColor = mix(vec4(0, 0, 0, 0), baseColor, skyMask);
+        const skyBloomPass = bloom(
+          skyOnlyColor,
+          1,
+          0.5,
+          postParams.lensflare.bloomThreshold,
+        );
+        const flareThreshold = uniform(postParams.lensflare.threshold);
+        const flareGhostAttenuation = uniform(
+          postParams.lensflare.ghostAttenuation,
+        );
+        const flareGhostSpacing = uniform(postParams.lensflare.ghostSpacing);
+        const flarePass = lensflare(skyBloomPass, {
+          threshold: flareThreshold,
+          ghostAttenuationFactor: flareGhostAttenuation,
+          ghostSpacing: flareGhostSpacing,
+        });
+        const flareBlurPass = gaussianBlur(flarePass, null, 8);
+        const uLensflareEnabled = uniform(
+          postParams.enabled && postParams.lensflare.enabled ? 1 : 0,
+        );
+
+        // God rays (volumetric sunlight)
+        const uSunScreenPos = uniform(new THREE.Vector2(0.5, 0.5));
+        const uGodRaysEnabled = uniform(
+          postParams.enabled && postParams.godRays.enabled ? 1 : 0,
+        );
+        const uGodRaysStrength = uniform(postParams.godRays.strength);
+        const uGodRaysDecay = uniform(postParams.godRays.decay);
+        const uGodRaysDensity = uniform(postParams.godRays.density);
+        const uGodRaysSamples = uniform(postParams.godRays.samples);
+        const sceneTex = convertToTexture(baseColor);
+        const godRaysFn = Fn(() => {
+          const uvNode = uv();
+          const stepUV = sub(nodeObject(uSunScreenPos), uvNode)
+            .mul(uGodRaysDensity)
+            .div(uGodRaysSamples);
+          const illumination = float(0).toVar();
+          const decayVar = float(1).toVar();
+          Loop(
+            {
+              start: int(0),
+              end: int(uGodRaysSamples),
+              type: "int",
+              condition: "<",
+            },
+            ({ i }) => {
+              const sampleUV = add(uvNode, stepUV.mul(float(i)));
+              const s = sceneTex.sample(sampleUV);
+              const lum = add(
+                add(mul(s.r, 0.299), mul(s.g, 0.587)),
+                mul(s.b, 0.114),
+              );
+              illumination.addAssign(mul(lum, decayVar));
+              decayVar.mulAssign(uGodRaysDecay);
+            },
+          );
+          const normalized = illumination.div(uGodRaysSamples);
+          return vec4(normalized, normalized, normalized, 1)
+            .mul(uGodRaysStrength)
+            .mul(uGodRaysEnabled);
+        });
+        const godRaysNode = godRaysFn();
+
+        // Final composite (each effect gated by postParams.enabled && effect.enabled)
+        const finalOutput = baseColor
+          .add(bloomScenePass.mul(uBloomEnabled))
+          .add(flareBlurPass.mul(uLensflareEnabled))
+          .add(godRaysNode);
+
+        renderPipeline.outputNode = fxaa(renderOutput(finalOutput));
+
+        await renderer.compileAsync(scene, camera);
+        csm.camera = camera;
+        csm.updateFrustums();
+
+        const timer = new THREE.Timer();
+        let lastTime = 0;
+        let lastPlaneSize = parkourParams.ground.planeSize;
+        const smoothCamPos = new THREE.Vector3();
+        const smoothLookAt = new THREE.Vector3();
+        const smoothCharPos = new THREE.Vector3();
+        let camSmoothInit = false;
+        let charSmoothInit = false;
+        const CAM_SMOOTH = 12; // higher = snappier, lower = smoother (filters jitter)
+        const CHAR_SMOOTH = 14; // character visual smoothing
+        let lastCsmCascades = parkourParams.csm.cascades;
+        let lastCsmMaxFar = parkourParams.csm.maxFar;
+        let lastCsmLightMargin = parkourParams.csm.lightMargin;
+        let lastCsmMapSize = parkourParams.csm.mapSize;
+
+        initSpellVFX(scene, camera);
+        await initBloodFX(scene);
+
+        const _towerAimOrigin = new THREE.Vector3();
+        const _towerAimDeer = new THREE.Vector3();
+        const _towerAimRayDir = new THREE.Vector3();
+        const _towerShootDir = new THREE.Vector3();
+        const _towerMuzzlePos = new THREE.Vector3();
+        const towerLosRaycaster = new THREE.Raycaster();
+        towerLosRaycaster.firstHitOnly = true;
+
+        const _towerLosMeshesScratch = [];
+
+        /** Ray vs deer BVH meshes; first hit must be `targetDeer` (uses shared mesh list). */
+        function towerGunLosToDeer(
+          origin,
+          aimPoint,
+          targetDeer,
+          deerBvhMeshes,
+        ) {
+          if (!targetDeer.bvhMesh) return true;
+          _towerAimRayDir.subVectors(aimPoint, origin);
+          const dist = _towerAimRayDir.length();
+          if (dist < 0.02) return true;
+          _towerAimRayDir.multiplyScalar(1 / dist);
+          towerLosRaycaster.set(origin, _towerAimRayDir);
+          towerLosRaycaster.near = 0.05;
+          towerLosRaycaster.far = dist + 0.35;
+          if (deerBvhMeshes.length === 0) return true;
+          const hits = towerLosRaycaster.intersectObjects(deerBvhMeshes, false);
+          if (hits.length === 0) return false;
+          return hits[0].object === targetDeer.bvhMesh;
+        }
+
+        function collectTowerGunDeerBvhMeshes() {
+          _towerLosMeshesScratch.length = 0;
+          for (const d of deerTargets) {
+            if (!d || d.isDead || !d.bvhMesh) continue;
+            _towerLosMeshesScratch.push(d.bvhMesh);
+          }
+          return _towerLosMeshesScratch;
+        }
+
+        /** Nearest in range; with LOS, try sorted candidates so we raycast at most a few times per call (not every frame × every deer). */
+        function pickTowerGunTargetDeer(origin, rSq) {
+          const p = parkourParams.towerGun;
+          const candidates = [];
+          for (const deer of deerTargets) {
+            if (!deer || deer.isDead) continue;
+            deer.root.getWorldPosition(_towerAimDeer);
+            _towerAimDeer.y += p.aimDeerYOffset;
+            const distSq = origin.distanceToSquared(_towerAimDeer);
+            if (distSq > rSq) continue;
+            candidates.push({ deer, distSq });
+          }
+          candidates.sort((a, b) => a.distSq - b.distSq);
+          if (candidates.length === 0) return null;
+          if (!p.aimRequireLos) return candidates[0].deer;
+
+          const losMeshes = collectTowerGunDeerBvhMeshes();
+          for (const c of candidates) {
+            c.deer.root.getWorldPosition(_towerAimDeer);
+            _towerAimDeer.y += p.aimDeerYOffset;
+            if (towerGunLosToDeer(origin, _towerAimDeer, c.deer, losMeshes))
+              return c.deer;
+          }
+          return null;
+        }
+
+        let towerGunLockedDeer = null;
+        let towerGunAimRetargetAcc = 0;
+        let towerGunShootAcc = 0;
+        let towerGunIdlePause = false;
+        let towerGunIdlePhaseT = 0;
+        let towerGunIdleSpinRate = 0;
+
+        /** Slow scan + random pauses when no deer is locked (searching). */
+        function updateTowerGunIdleSearch(dt) {
+          if (!towerGunRotateGroup) return;
+          towerGunIdlePhaseT -= dt;
+          if (towerGunIdlePhaseT <= 0) {
+            if (towerGunIdlePause) {
+              towerGunIdlePause = false;
+              towerGunIdleSpinRate = (Math.random() - 0.5) * 1.15;
+              towerGunIdlePhaseT = 0.65 + Math.random() * 2.0;
+            } else {
+              if (Math.random() < 0.42) {
+                towerGunIdlePause = true;
+                towerGunIdleSpinRate = 0;
+                towerGunIdlePhaseT = 0.4 + Math.random() * 1.6;
+              } else {
+                towerGunIdleSpinRate = (Math.random() - 0.5) * 1.15;
+                towerGunIdlePhaseT = 0.55 + Math.random() * 1.9;
+              }
+            }
+          }
+          if (!towerGunIdlePause) {
+            towerGunRotateGroup.rotation.y += towerGunIdleSpinRate * dt;
+          }
+        }
+
+        function updateTowerGunTargeting(dt) {
+          if (
+            !towerGunRotateGroup ||
+            !parkourParams.towerGun.enabled ||
+            !towerGunRoot?.visible
+          )
+            return;
+          const p = parkourParams.towerGun;
+          if (!p.aimEnabled) {
+            towerGunLockedDeer = null;
+            towerGunShootAcc = 0;
+            updateTowerGunIdleSearch(dt);
+            return;
+          }
+
+          towerGunRotateGroup.getWorldPosition(_towerAimOrigin);
+          _towerAimOrigin.y += p.aimPivotYOffset;
+
+          const rSq = p.aimMaxRange * p.aimMaxRange;
+
+          if (towerGunLockedDeer) {
+            if (towerGunLockedDeer.isDead) towerGunLockedDeer = null;
+            else {
+              towerGunLockedDeer.root.getWorldPosition(_towerAimDeer);
+              _towerAimDeer.y += p.aimDeerYOffset;
+              if (_towerAimOrigin.distanceToSquared(_towerAimDeer) > rSq)
+                towerGunLockedDeer = null;
+            }
+          }
+
+          towerGunAimRetargetAcc += dt;
+          const interval = Math.max(0.04, p.aimRetargetInterval);
+          if (!towerGunLockedDeer || towerGunAimRetargetAcc >= interval) {
+            towerGunAimRetargetAcc = 0;
+            towerGunLockedDeer = pickTowerGunTargetDeer(_towerAimOrigin, rSq);
+          }
+
+          if (!towerGunLockedDeer) {
+            updateTowerGunIdleSearch(dt);
+            return;
+          }
+
+          towerGunLockedDeer.root.getWorldPosition(_towerAimDeer);
+          _towerAimDeer.y += p.aimDeerYOffset;
+
+          const dx = _towerAimDeer.x - _towerAimOrigin.x;
+          const dz = _towerAimDeer.z - _towerAimOrigin.z;
+          const targetYaw = Math.atan2(dx, dz) + p.aimYawOffset;
+
+          let cur = towerGunRotateGroup.rotation.y;
+          let delta = targetYaw - cur;
+          delta = Math.atan2(Math.sin(delta), Math.cos(delta));
+          const maxStep = p.aimTurnSpeed * dt;
+          towerGunRotateGroup.rotation.y +=
+            Math.sign(delta) * Math.min(Math.abs(delta), maxStep);
+
+          // Same projectile pool + hit logic as player spell (checkProjectileHits).
+          if (
+            p.shootEnabled &&
+            parkourParams.spellVFX.enabled &&
+            spellVfx.initialized
+          ) {
+            towerGunShootAcc += dt;
+            const lenSqH = dx * dx + dz * dz;
+            if (lenSqH >= 0.04 && towerGunShootAcc >= p.shootCooldown) {
+              _towerShootDir
+                .set(dx, 0, dz)
+                .multiplyScalar(1 / Math.sqrt(lenSqH));
+              const curYaw = towerGunRotateGroup.rotation.y;
+              let aimErr = targetYaw - curYaw;
+              aimErr = Math.atan2(Math.sin(aimErr), Math.cos(aimErr));
+              if (Math.abs(aimErr) <= p.shootYawTolerance) {
+                towerGunShootAcc = 0;
+                const bm = towerGunRotateGroup.userData.barrelMuzzleLocal;
+                if (bm) {
+                  _towerMuzzlePos.copy(bm);
+                  towerGunRotateGroup.localToWorld(_towerMuzzlePos);
+                } else {
+                  _towerMuzzlePos
+                    .copy(_towerAimOrigin)
+                    .addScaledVector(_towerShootDir, 0.35);
+                }
+                _towerMuzzlePos.addScaledVector(
+                  _towerShootDir,
+                  p.shootMuzzleAlongAim,
+                );
+                spawnProjectile(_towerMuzzlePos, _towerShootDir);
+              }
+            }
+          }
+        }
+
+        function trySpellHit() {
+          const ud = player.characterGroup.userData;
+          const handBone = ud.leftHandBone;
+          const charPos = player.characterGroup.position;
+          const yaw = player.state.camYaw;
+          const dir = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
+          let origin;
+          if (handBone) {
+            origin = new THREE.Vector3();
+            handBone.getWorldPosition(origin);
+            const sp = parkourParams.spellVFX;
+            origin.x += sp.orbOffsetX;
+            origin.y += sp.orbOffsetY;
+            origin.z += sp.orbOffsetZ;
+          } else {
+            origin = new THREE.Vector3(
+              charPos.x,
+              charPos.y + 0.9,
+              charPos.z,
+            ).addScaledVector(dir, 0.4);
+          }
+          spawnProjectile(origin, dir);
+        }
+
+        const _deerPosHit = new THREE.Vector3();
+        function checkProjectileHits() {
+          for (const proj of spellVfx.projPool) {
+            if (!proj.alive) continue;
+            const pos = proj.pos;
+            const hitRadius = 1.8;
+            for (const deer of deerTargets) {
+              if (!deer || deer.isDead) continue;
+              deer.root.getWorldPosition(_deerPosHit);
+              _deerPosHit.y += 0.8;
+              const distSq = pos.distanceToSquared(_deerPosHit);
+              if (distSq <= hitRadius * hitRadius) {
+                deer.isDead = true;
+                deer.state = "dead";
+                if (deer.deathAction) {
+                  if (deer.idleAction) deer.idleAction.stop();
+                  if (deer.walkAction) deer.walkAction.stop();
+                  if (deer.runAction) deer.runAction.stop();
+                  if (deer.grazeAction) deer.grazeAction.stop();
+                  if (deer.lookAction) deer.lookAction.stop();
+                  deer.deathAction.reset();
+                  deer.deathAction.play();
+                }
+                spawnBloodBurst(_deerPosHit, FLOOR_Y);
+                flashDeerRed(deer);
+                spawnImpact(pos.clone());
+                releaseProjectile(proj);
+                break;
+              }
+            }
+          }
+        }
+
+        renderer.setAnimationLoop(() => {
+          timer.update();
+          const elapsed = timer.getElapsed();
+          const dt = Math.min(elapsed - lastTime, 0.05);
+          lastTime = elapsed;
+
+          // ─── PRE-STEP: kinematic body updates ─────────────────────────────────
+          // setNextKinematicTranslation MUST be called before physicsWorld.step()
+          // (which runs inside player.update). This way Rapier sees the correct
+          // frame-N target positions during collision detection and computes
+          // accurate linvel() for platform-riding.
+
+          // Moving platforms / pendulums removed for simplified layout
+          // ──────────────────────────────────────────────────────────────────────
+
+          player.update(dt);
+
+          // When a spell shoot is happening, fire a hit test once per shoot phase
+          const udPlayer = player.characterGroup.userData;
+          if (!udPlayer._spellHitMarker) udPlayer._spellHitMarker = false;
+          if (udPlayer.isCastingSpell && udPlayer.spellPhase === "shoot") {
+            if (!udPlayer._spellHitMarker) {
+              udPlayer._spellHitMarker = true;
+              trySpellHit();
+            }
+          } else {
+            udPlayer._spellHitMarker = false;
+          }
+
+          if (towerGunRoot)
+            towerGunRoot.visible = parkourParams.towerGun.enabled;
+          if (tankRoot) tankRoot.visible = parkourParams.tank.enabled;
+          updateTankPatrol(dt, tankRoot, tankState);
+          updateTowerGunTargeting(dt);
+
+          updateSpellVFX(dt, camera, udPlayer);
+          checkProjectileHits();
+
+          const swordGroup = player.characterGroup.userData.sword;
+          if (swordGroup && parkourParams.katana) {
+            const k = parkourParams.katana;
+            swordGroup.position.set(k.posX, k.posY, k.posZ);
+            swordGroup.rotation.set(k.rotX, k.rotY, k.rotZ);
+
+            if (!swordTrail.initialized) initSwordTrail(scene);
+            const udForVfx = player.characterGroup.userData;
+            updateSwordTrail(dt, swordGroup, !!udForVfx.isAttacking);
+
+            // Simple sword → deer hit: check distance from sword tip to each deer center
+            if (deerTargets.length) {
+              const ud = player.characterGroup.userData;
+              if (ud.isAttacking) {
+                const localTip = new THREE.Vector3(0, 0, 0.9);
+                const worldTip = swordGroup.localToWorld(localTip.clone());
+                const hitRadius = 2.2;
+                const deerPos = new THREE.Vector3();
+                for (const deer of deerTargets) {
+                  if (!deer || deer.isDead) continue;
+                  deer.root.getWorldPosition(deerPos);
+                  const distSq = worldTip.distanceToSquared(deerPos);
+                  if (distSq <= hitRadius * hitRadius) {
+                    deer.isDead = true;
+                    deer.state = "dead";
+                    if (deer.deathAction) {
+                      if (deer.idleAction) deer.idleAction.stop();
+                      if (deer.walkAction) deer.walkAction.stop();
+                      if (deer.runAction) deer.runAction.stop();
+                      if (deer.grazeAction) deer.grazeAction.stop();
+                      if (deer.lookAction) deer.lookAction.stop();
+                      deer.deathAction.reset();
+                      deer.deathAction.play();
+                    }
+                    const bloodPos = deerPos.clone();
+                    bloodPos.y += 0.8;
+                    spawnBloodBurst(bloodPos, FLOOR_Y);
+                    flashDeerRed(deer);
+                  }
+                }
+              }
+            }
+          }
+
+          // Sync dynamic props visual → physics
+          for (const { body, mesh } of dynamicObjects) {
+            const t = body.translation();
+            const r = body.rotation();
+            mesh.position.set(t.x, t.y, t.z);
+            mesh.quaternion.set(r.x, r.y, r.z, r.w);
+          }
+
+          windParams.uTime.value = elapsed;
+          windParams.uWindStr.value = parkourParams.foliage.windStr;
+          windParams.uWindSpeed.value = parkourParams.foliage.windSpeed;
+          leaves.params.enabled = parkourParams.foliage.floatingLeaves;
+          leaves.params.count = parkourParams.foliage.count;
+          leaves.params.areaSize = parkourParams.foliage.areaSize;
+          leaves.params.spawnHeight = parkourParams.foliage.spawnHeight;
+          leaves.params.leafSize = parkourParams.foliage.leafSize;
+          leaves.params.scale = parkourParams.foliage.scale;
+          leaves.params.opacity = parkourParams.foliage.opacity;
+          leaves.params.windInfluence = parkourParams.foliage.windInfluence;
+          leaves.params.gravity = parkourParams.foliage.gravity;
+          leaves.params.terminalVelocity =
+            parkourParams.foliage.terminalVelocity;
+          leaves.params.rotationSpeed = parkourParams.foliage.rotationSpeed;
+          leaves.params.airResistance = parkourParams.foliage.airResistance;
+          leaves.params.maxAge = parkourParams.foliage.maxAge;
+          leaves.params.terrainFloorOffset =
+            parkourParams.foliage.terrainFloorOffset;
+          leaves.update();
+
+          flowing.params.enabled = parkourParams.flowingLines.enabled;
+          flowing.params.heightOffset = parkourParams.flowingLines.heightOffset;
+          flowing.params.verticalWave = parkourParams.flowingLines.verticalWave;
+          flowing.params.animationSpeed =
+            parkourParams.flowingLines.animationSpeed;
+          flowing.params.pathRadius = parkourParams.flowingLines.pathRadius;
+          flowing.params.pathFrequency =
+            parkourParams.flowingLines.pathFrequency;
+          flowing.group.visible = parkourParams.flowingLines.enabled;
+          flowing.setParams({
+            lineColor: parkourParams.flowingLines.lineColor,
+            lineOpacity: parkourParams.flowingLines.lineOpacity,
+          });
+          flowing.update(elapsed);
+
+          // Update deer animation mixers + simple ambient behavior
+          for (const deer of deerTargets) {
+            if (!deer || !deer.mixer) continue;
+
+            if (!deer.isDead) {
+              deer.stateTime += dt;
+
+              // Decide on next state when timer expires
+              if (deer.state === "idle" || deer.state === "graze") {
+                if (deer.stateTime > 4 + Math.random() * 3) {
+                  deer.stateTime = 0;
+                  const r = Math.random();
+                  if (r < 0.4 && deer.grazeAction) {
+                    // Stay in place and graze
+                    if (deer.idleAction) deer.idleAction.stop();
+                    if (deer.lookAction) deer.lookAction.stop();
+                    deer.grazeAction.reset();
+                    deer.grazeAction.play();
+                    deer.state = "graze";
+                  } else {
+                    // Pick a new wander target near home
+                    const radius = 10;
+                    const angle = Math.random() * Math.PI * 2;
+                    deer.targetPos.set(
+                      deer.homePos.x + Math.cos(angle) * radius,
+                      FLOOR_Y,
+                      deer.homePos.z + Math.sin(angle) * radius,
+                    );
+                    const useRun = r > 0.8 && deer.runAction;
+                    deer.state = useRun ? "run" : "walk";
+                    if (deer.idleAction) deer.idleAction.stop();
+                    if (deer.grazeAction) deer.grazeAction.stop();
+                    if (useRun) {
+                      deer.runAction.reset();
+                      deer.runAction.play();
+                    } else if (deer.walkAction) {
+                      deer.walkAction.reset();
+                      deer.walkAction.play();
+                    }
+                  }
+                }
+              } else if (deer.state === "walk" || deer.state === "run") {
+                // Move toward target
+                const pos = deer.root.position;
+                const dir = deer.targetPos.clone().sub(pos);
+                const dist = dir.length();
+                if (dist < 0.2) {
+                  // Arrived
+                  deer.state = "idle";
+                  deer.stateTime = 0;
+                  if (deer.walkAction) deer.walkAction.stop();
+                  if (deer.runAction) deer.runAction.stop();
+                  if (deer.idleAction) {
+                    deer.idleAction.reset();
+                    deer.idleAction.play();
+                  }
+                } else {
+                  dir.normalize();
+                  const speed =
+                    deer.state === "run" ? deer.runSpeed : deer.walkSpeed;
+                  pos.addScaledVector(dir, speed * dt);
+                  // Face movement direction
+                  const yaw = Math.atan2(dir.x, dir.z);
+                  deer.root.rotation.y = yaw;
+                }
+              }
+            }
+
+            deer.mixer.update(dt);
+            updateDeerFlash(deer, dt);
+          }
+          updateBloodFX(dt);
+
+          // Smooth character visual + camera to filter physics jitter (ground appears to shake otherwise)
+          const inAir = !player.state.isGrounded;
+          if (!charSmoothInit) {
+            smoothCharPos.copy(charPos);
+            charSmoothInit = true;
+          }
+          if (inAir) {
+            smoothCharPos.copy(charPos);
+            player.characterGroup.position.copy(charPos);
+          } else {
+            const charAlpha = 1 - Math.exp(-CHAR_SMOOTH * dt);
+            smoothCharPos.lerp(charPos, charAlpha);
+            player.characterGroup.position.copy(smoothCharPos);
+          }
+
+          const syncTileMat = (mat) => {
+            const u = mat._tileUniforms;
+            if (u) {
+              u.textureScale.value = parkourParams.tile.textureScale;
+              u.gradientIntensity.value = parkourParams.tile.gradientIntensity;
+              u.gradientBias.value = parkourParams.tile.gradientBias;
+              u.tileColor.value.copy(
+                srgbToLinear(parkourParams.tile.tileColor),
+              );
+              u.gridColor.value.copy(
+                srgbToLinear(parkourParams.tile.gridColor),
+              );
+              u.gridLineColor.value.copy(
+                srgbToLinear(parkourParams.tile.gridLineColor),
+              );
+              mat.roughness = parkourParams.tile.roughness;
+              mat.metalness = parkourParams.tile.metalness;
+            }
+          };
+          syncTileMat(floorMat);
+          syncTileMat(towerMat);
+
+          if (parkourParams.ground.planeSize !== lastPlaneSize) {
+            lastPlaneSize = parkourParams.ground.planeSize;
+            const scale = lastPlaneSize / PARKOUR_SIZE;
+            floor.scale.set(scale, 1, scale);
+          }
+
+          if (PARAMS.cameraMode === "thirdPerson") {
+            const camDist = PARAMS.camDist;
+            const cx =
+              smoothCharPos.x -
+              Math.sin(player.state.camYaw) *
+                Math.cos(player.state.camPitch) *
+                camDist;
+            const cy =
+              smoothCharPos.y +
+              Math.sin(player.state.camPitch) * camDist +
+              PARAMS.camHeight;
+            const cz =
+              smoothCharPos.z -
+              Math.cos(player.state.camYaw) *
+                Math.cos(player.state.camPitch) *
+                camDist;
+            const camTerrainY = sampleHeight(cx, cz) + 1.5;
+            const targetPos = new THREE.Vector3(
+              cx,
+              Math.max(cy, camTerrainY),
+              cz,
+            );
+            const targetLook = new THREE.Vector3(
+              smoothCharPos.x,
+              smoothCharPos.y + 0.5,
+              smoothCharPos.z,
+            );
+            if (!camSmoothInit) {
+              smoothCamPos.copy(targetPos);
+              smoothLookAt.copy(targetLook);
+              camSmoothInit = true;
+            }
+            const alpha = 1 - Math.exp(-CAM_SMOOTH * dt);
+            smoothCamPos.lerp(targetPos, alpha);
+            smoothLookAt.lerp(targetLook, alpha);
+            camera.position.copy(smoothCamPos);
+            camera.lookAt(smoothLookAt);
+            orbitControls.enabled = false;
+          } else {
+            orbitControls.target.set(
+              smoothCharPos.x,
+              smoothCharPos.y + 0.5,
+              smoothCharPos.z,
+            );
+            orbitControls.enabled = true;
+            orbitControls.update();
+          }
+
+          camera.updateMatrixWorld();
+
+          dirLight.shadow.bias = parkourParams.light.shadowBias;
+          dirLight.shadow.normalBias = parkourParams.light.shadowNormalBias;
+
+          // Apply lighting params
+          const sunDir = sunDirectionFromAngles(
+            parkourParams.light.sunAzimuth,
+            parkourParams.light.sunElevation,
+          );
+          dirLight.position.copy(sunDir.clone().multiplyScalar(50));
+          dirLight.color.set(parkourParams.light.dirColor);
+          dirLight.intensity = parkourParams.light.dirIntensity;
+          ambientLight.color.set(parkourParams.light.ambientColor);
+          ambientLight.intensity = parkourParams.light.ambientIntensity;
+
+          horizonSky.mesh.visible = parkourParams.horizonGradient.enabled;
+          horizonSky.mesh.renderOrder = parkourParams.horizonGradient.drawOnTop
+            ? 5
+            : -10;
+          horizonSky.uniforms.topColor.value
+            .set(parkourParams.horizonGradient.topColor)
+            .convertSRGBToLinear();
+          horizonSky.uniforms.bottomColor.value
+            .set(parkourParams.horizonGradient.bottomColor)
+            .convertSRGBToLinear();
+          horizonSky.uniforms.offset.value =
+            parkourParams.horizonGradient.offset;
+          horizonSky.uniforms.exponent.value =
+            parkourParams.horizonGradient.exponent;
+          horizonSky.uniforms.ringStrength.value =
+            parkourParams.horizonGradient.ringStrength;
+          horizonSky.uniforms.ringWidth.value =
+            parkourParams.horizonGradient.ringWidth;
+          horizonSky.uniforms.ringColor.value
+            .set(parkourParams.horizonGradient.ringColor)
+            .convertSRGBToLinear();
+          horizonSky.setRadius(parkourParams.horizonGradient.radius);
+          horizonSky.update(camera);
+
+          scene.environmentIntensity = parkourParams.light.envIntensity;
+          scene.backgroundIntensity = parkourParams.light.backgroundIntensity;
+          renderer.toneMappingExposure = parkourParams.light.exposure;
+
+          // Post-processing uniform sync
+          uGtaoEnabled.value =
+            postParams.enabled && postParams.gtao.enabled ? 1 : 0;
+          uGtaoIntensity.value = postParams.gtao.intensity;
+          aoPass.radius.value = postParams.gtao.radius;
+          aoPass.samples.value = postParams.gtao.samples;
+          aoPass.scale.value = postParams.gtao.scale;
+          aoPass.distanceFallOff.value = postParams.gtao.distanceFallOff;
+          aoPass.distanceExponent.value = postParams.gtao.distanceExponent;
+          aoPass.thickness.value = postParams.gtao.thickness;
+          denoisePass.radius.value = postParams.gtao.denoiseRadius;
+          denoisePass.lumaPhi.value = postParams.gtao.denoiseLumaPhi;
+          denoisePass.depthPhi.value = postParams.gtao.denoiseDepthPhi;
+          denoisePass.normalPhi.value = postParams.gtao.denoiseNormalPhi;
+          uGtaoDenoiseEnabled.value = postParams.gtao.denoiseEnabled ? 1 : 0;
+          if (denoisePass._resolution) {
+            const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+            denoisePass._resolution.value.set(size.x, size.y);
+          }
+
+          uDofEnabled.value =
+            postParams.enabled && postParams.dof.enabled ? 1 : 0;
+          uDofFocusDistance.value = postParams.dof.focusDistance;
+          uDofBlurStart.value = postParams.dof.blurStart;
+          uDofBlurEnd.value = postParams.dof.blurEnd;
+          uDofBlurSize.value = postParams.dof.blurSize;
+          uDofBlurSpread.value = postParams.dof.blurSpread;
+
+          uBloomEnabled.value =
+            postParams.enabled && postParams.bloom.enabled ? 1 : 0;
+          bloomScenePass.strength.value = postParams.bloom.strength;
+          bloomScenePass.radius.value = postParams.bloom.radius;
+          bloomScenePass.threshold.value = postParams.bloom.threshold;
+
+          uLensflareEnabled.value =
+            postParams.enabled && postParams.lensflare.enabled ? 1 : 0;
+          skyBloomPass.threshold.value = postParams.lensflare.bloomThreshold;
+          flareThreshold.value = postParams.lensflare.threshold;
+          flareGhostAttenuation.value = postParams.lensflare.ghostAttenuation;
+          flareGhostSpacing.value = postParams.lensflare.ghostSpacing;
+
+          uGodRaysEnabled.value =
+            postParams.enabled && postParams.godRays.enabled ? 1 : 0;
+          uGodRaysStrength.value = postParams.godRays.strength;
+          uGodRaysDecay.value = postParams.godRays.decay;
+          uGodRaysDensity.value = postParams.godRays.density;
+          uGodRaysSamples.value = postParams.godRays.samples;
+
+          // Sun screen position for god rays (project sun direction to NDC)
+          const sunWorld = camera.position
+            .clone()
+            .add(sunDir.clone().multiplyScalar(500000));
+          const v4 = new THREE.Vector4(sunWorld.x, sunWorld.y, sunWorld.z, 1);
+          v4.applyMatrix4(camera.matrixWorldInverse);
+          v4.applyMatrix4(camera.projectionMatrix);
+          const ndcX = v4.x / v4.w;
+          const ndcY = v4.y / v4.w;
+          uSunScreenPos.value.set(ndcX * 0.5 + 0.5, ndcY * 0.5 + 0.5);
+
+          physicsDebugGroup.visible = !!parkourParams.debug.rapierDebug;
+          if (parkourParams.debug.rapierDebug) buildRapierDebugMeshes();
+
+          // Apply CSM param changes (only when changed — updateFrustums is expensive)
+          const csmChanged =
+            parkourParams.csm.cascades !== lastCsmCascades ||
+            parkourParams.csm.maxFar !== lastCsmMaxFar ||
+            parkourParams.csm.lightMargin !== lastCsmLightMargin ||
+            parkourParams.csm.mapSize !== lastCsmMapSize;
+          if (csmChanged) {
+            lastCsmCascades = parkourParams.csm.cascades;
+            lastCsmMaxFar = parkourParams.csm.maxFar;
+            lastCsmLightMargin = parkourParams.csm.lightMargin;
+            lastCsmMapSize = parkourParams.csm.mapSize;
+            csm.cascades = parkourParams.csm.cascades;
+            csm.maxFar = parkourParams.csm.maxFar;
+            csm.lightMargin = parkourParams.csm.lightMargin;
+            dirLight.shadow.mapSize.width = parkourParams.csm.mapSize;
+            dirLight.shadow.mapSize.height = parkourParams.csm.mapSize;
+            if (csm.frustums) csm.updateFrustums();
+          }
+
+          // Update frustums every frame when enabled — CSM is camera-relative
+          if (parkourParams.csm.updateEveryFrame && csm.frustums) {
+            csm.updateFrustums();
+          }
+
+          renderPipeline.render();
+          stats.update();
+        });
+
+        window.addEventListener("resize", () => {
+          camera.aspect = innerWidth / innerHeight;
+          camera.updateProjectionMatrix();
+          camera.updateMatrixWorld();
+          renderer.setSize(innerWidth, innerHeight);
+          if (csm.frustums) csm.updateFrustums(); // Only on resize
+        });
+      }
+
+      init().catch((e) => {
+        console.error("Init failed:", e);
+        document.getElementById("backend").textContent = "Error: " + e.message;
+      });
+    </script>
+  </body>
+</html>
