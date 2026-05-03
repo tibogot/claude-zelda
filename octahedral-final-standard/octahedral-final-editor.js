@@ -530,20 +530,11 @@ function createImpostorMaterial(
   const uEdgeSmooth = uniform(float(1.5));
   const uParallaxStr = uniform(float(0.0));
   const uDither = uniform(float(0));
+  /** 1 = barycentric blend across the 3 cells, 0 = dominant cell (same weights as solid color). */
   const uNormRmBarycentric = uniform(float(0));
   const uDebugMode = uniform(float(0)); // 0=lit, 1=normals, 2=raw atlas
   const uFreeze = uniform(float(0));
   const uFreezeDir = uniform(new THREE.Vector3(0, 0, 1));
-
-  // Lighting uniforms (custom PBR on MeshBasicNodeMaterial)
-  const uSunDir = uniform(new THREE.Vector3(0.5, 0.7, 0.5).normalize());
-  const uSunColor = uniform(new THREE.Vector3(1, 1, 1));
-  const uAmbColor = uniform(new THREE.Vector3(0.15, 0.17, 0.2));
-  const uHemiSky = uniform(new THREE.Vector3(0.35, 0.45, 0.55));
-  const uHemiGround = uniform(new THREE.Vector3(0.2, 0.18, 0.12));
-  const uAoStr = uniform(float(0.4));
-  const uDiffuseWrap = uniform(float(0.15));
-  const uLightScale = uniform(float(1.0));
 
   const uCellFrac = uniform(float(1 / gridVal));
   const uPadFrac = uniform(float(cellPad / atlasSize));
@@ -779,69 +770,23 @@ function createImpostorMaterial(
   const nDom = normalize(mix(vec3(0, 1, 0), domN, uNormStr));
   const atlasNormal = normalize(mix(nDom, nBlend, uNormRmBarycentric));
 
-  // ── Depth-based AO ──
-  const dep1 = texture(depthTex, puv1).r;
-  const dep2 = texture(depthTex, puv2).r;
-  const dep3 = texture(depthTex, puv3).r;
-  const blendDepth = add(add(mul(dep1, nw1), mul(dep2, nw2)), mul(dep3, nw3));
-  const ao = sub(float(1), mul(uAoStr, blendDepth));
-
-  // ── Custom PBR lighting ──
-  const wNorm = atlasNormal;
-  const albedo = atlasAlbedo;
-  const rough = atlasRough;
-  const metal = atlasMetal;
-  const oneMinusMetal = sub(float(1), metal);
-  const INV_PI = float(0.31831);
-
-  const viewDir = normalize(sub(cameraPosition, positionWorld));
-  const NdotL = max(dot(wNorm, uSunDir), float(0));
-  const NdotLWrap = div(add(NdotL, uDiffuseWrap), add(float(1), uDiffuseWrap));
-  const NdotV = max(dot(wNorm, viewDir), float(0.001));
-
-  const diffuse = mul(mul(mul(mul(NdotLWrap, INV_PI), oneMinusMetal), albedo), uSunColor);
-
-  const H = normalize(add(uSunDir, viewDir));
-  const NdotH = max(dot(wNorm, H), float(0));
-  const HdotV = max(dot(H, viewDir), float(0.001));
-  const a2 = pow(rough, float(4));
-  const dNH = add(mul(mul(NdotH, NdotH), sub(a2, 1)), 1);
-  const D = div(a2, add(mul(float(3.14159), mul(dNH, dNH)), float(0.001)));
-  const F0 = mix(vec3(0.04, 0.04, 0.04), albedo, metal);
-  const F = add(F0, mul(sub(vec3(1, 1, 1), F0), pow(sub(1, HdotV), float(5))));
-  const k = div(mul(add(rough, 1), add(rough, 1)), 8);
-  const G1V = div(NdotV, add(mul(NdotV, sub(1, k)), k));
-  const G1L = div(NdotL, add(mul(NdotL, sub(1, k)), add(k, float(0.001))));
-  const spec = mul(
-    div(mul(mul(D, F), mul(G1V, G1L)), add(mul(mul(4, NdotV), NdotL), float(0.001))),
-    mul(uSunColor, NdotL),
-  );
-
-  const hemiT = mul(add(wNorm.y, 1.0), 0.5);
-  const hemiIrrad = add(uAmbColor, mix(uHemiGround, uHemiSky, hemiT));
-  const ambient = mul(mul(mul(hemiIrrad, INV_PI), oneMinusMetal), albedo);
-
-  const oneMinusRough = sub(float(1), rough);
-  const maxSmooth = max(vec3(oneMinusRough, oneMinusRough, oneMinusRough), F0);
-  const envF = add(F0, mul(sub(maxSmooth, F0), pow(sub(float(1), NdotV), float(5))));
-  const envColor = mix(uHemiGround, uHemiSky, hemiT);
-  const indirectSpec = mul(envF, envColor);
-
-  const lit = mul(add(add(add(diffuse, spec), ambient), indirectSpec), ao);
-  const litScaled = mul(lit, uLightScale);
-
-  // Debug modes
+  // Debug modes: use emissive to bypass PBR lighting
   const isNormViz = uDebugMode
     .greaterThan(float(0.5))
     .and(uDebugMode.lessThan(float(1.5)));
   const isRawViz = uDebugMode.greaterThan(float(1.5));
   const isDebug = uDebugMode.greaterThan(float(0.5));
-  const normVizColor = mul(add(wNorm, float(1)), float(0.5));
-  const finalColor = select(isRawViz, albedo, select(isNormViz, normVizColor, litScaled));
+  const normVizColor = mul(add(atlasNormal, float(1)), float(0.5));
+  const debugEmissive = select(isRawViz, atlasAlbedo, select(isNormViz, normVizColor, vec3(0)));
 
-  const mat = new THREE.MeshBasicNodeMaterial({ side: THREE.FrontSide });
+  const mat = new THREE.MeshStandardNodeMaterial({ side: THREE.FrontSide });
   mat.positionNode = posNodeFn();
-  mat.colorNode = vec4(finalColor, atlasAlpha);
+  mat.colorNode = select(isDebug, vec3(0), atlasAlbedo);
+  mat.normalNode = atlasNormal;
+  mat.roughnessNode = select(isDebug, float(1), atlasRough);
+  mat.metalnessNode = select(isDebug, float(0), atlasMetal);
+  mat.opacityNode = atlasAlpha;
+  mat.emissiveNode = debugEmissive;
   mat.transparent = false;
   mat.alphaTest = 0.005;
   mat.depthWrite = true;
@@ -860,14 +805,6 @@ function createImpostorMaterial(
     uDebugMode,
     uFreeze,
     uFreezeDir,
-    uSunDir,
-    uSunColor,
-    uAmbColor,
-    uHemiSky,
-    uHemiGround,
-    uAoStr,
-    uDiffuseWrap,
-    uLightScale,
   };
 }
 
@@ -1549,9 +1486,6 @@ export async function run() {
     freeze: false,
     autoOrbit: false,
     fullOctahedral: false,
-    aoStr: 0.4,
-    diffuseWrap: 0.15,
-    lightScale: 1.0,
   };
 
   function syncParams() {
@@ -1576,32 +1510,6 @@ export async function run() {
       imp.uParallaxStr.value = P.parallaxStr;
       imp.uDebugMode.value = P.debugMode;
       imp.uFreeze.value = P.freeze ? 1 : 0;
-
-      imp.uSunDir.value.copy(d);
-      const lc = dirLight.color;
-      imp.uSunColor.value.set(
-        lc.r * P.sunIntensity,
-        lc.g * P.sunIntensity,
-        lc.b * P.sunIntensity,
-      );
-      imp.uAmbColor.value.set(
-        ambLight.color.r * ambLight.intensity,
-        ambLight.color.g * ambLight.intensity,
-        ambLight.color.b * ambLight.intensity,
-      );
-      imp.uHemiSky.value.set(
-        hemiLight.color.r * hemiLight.intensity,
-        hemiLight.color.g * hemiLight.intensity,
-        hemiLight.color.b * hemiLight.intensity,
-      );
-      imp.uHemiGround.value.set(
-        hemiLight.groundColor.r * hemiLight.intensity,
-        hemiLight.groundColor.g * hemiLight.intensity,
-        hemiLight.groundColor.b * hemiLight.intensity,
-      );
-      imp.uAoStr.value = P.aoStr;
-      imp.uDiffuseWrap.value = P.diffuseWrap;
-      imp.uLightScale.value = P.lightScale;
     }
 
     if (sourceGroup) {
@@ -1740,18 +1648,6 @@ export async function run() {
   fRender
     .add(P, "parallaxStr", 0, 0.5, 0.01)
     .name("Depth parallax")
-    .onChange(syncParams);
-  fRender
-    .add(P, "aoStr", 0, 1, 0.02)
-    .name("AO strength")
-    .onChange(syncParams);
-  fRender
-    .add(P, "diffuseWrap", 0, 0.5, 0.01)
-    .name("Diffuse wrap")
-    .onChange(syncParams);
-  fRender
-    .add(P, "lightScale", 0.2, 3, 0.05)
-    .name("Light scale")
     .onChange(syncParams);
 
   const fDebug = gui.addFolder("Debug / View");
