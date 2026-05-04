@@ -1003,6 +1003,12 @@ export async function startV2App(opts = {}) {
   /** @type {ReturnType<typeof createTweakpaneUi>} */
   let ui;
   let _saveProject, _loadProject;
+  let _importTreeGlb, _loadTreePreset, _removeTreeSlot, _clearAllTrees, _treeCastShadowChanged, _foliageParamChanged;
+  let _importPropGlb, _addPrimitive, _removePropSlot, _deleteSelectedProp, _clearAllProps, _propTransformModeChanged, _rebakeBvh;
+  let _loadFoliageTexture, _foliageSlotStructureChanged, _foliageSlotMaterialChanged, _clearAllFoliage, _foliageLodChanged;
+  let _playSpawnChanged, _barrierOverlayChanged, _barrierClear, _barrierFill, _holeOverlayChanged, _holeClear;
+  let _ambientFxFlapChanged, _ambientFxRingsChanged, _ambientFxClear;
+  let _fleurChanged, _fleurColorChanged, _fleurStemChanged, _fleurStemCurveChanged, _fleurInteractionChanged, _fleurClear;
   ui = createTweakpaneUi({
     toolState,
     config,
@@ -1043,9 +1049,9 @@ export async function startV2App(opts = {}) {
       disposeImageTexBundle();
       if (toolState.terrainSurface === "image") applyTerrainSurfaceFromToolState();
     },
-    onPlaySpawnChanged: () => {
+    onPlaySpawnChanged: (_playSpawnChanged = () => {
       syncPlaySpawnMarker();
-    },
+    }),
     onRebuildCarAudio: () => {
       playMode.rebuildCarAudio();
     },
@@ -1057,7 +1063,7 @@ export async function startV2App(opts = {}) {
     onPaintClear: () => paintSystem.clearAll(),
     onSoloLayerChanged: () => syncSoloLayer(),
     onHeightBlendChanged: () => syncHeightBlend(),
-    onImportTreeGlb: async (slotIdx, lod) => {
+    onImportTreeGlb: (_importTreeGlb = async (slotIdx, lod) => {
       const file = await openGlbPicker();
       if (!file) return;
       try {
@@ -1069,8 +1075,8 @@ export async function startV2App(opts = {}) {
       } catch (err) {
         console.error(`[V2] Failed to load GLB for slot ${slotIdx} LOD${lod}:`, err);
       }
-    },
-    onLoadTreePreset: async (slotIdx) => {
+    }),
+    onLoadTreePreset: (_loadTreePreset = async (slotIdx) => {
       const input = document.createElement("input");
       input.type = "file";
       input.accept = ".json";
@@ -1124,8 +1130,8 @@ export async function startV2App(opts = {}) {
         }
       };
       input.click();
-    },
-    onFoliageParamChanged: (slotIdx) => {
+    }),
+    onFoliageParamChanged: (_foliageParamChanged = (slotIdx) => {
       const preset = foliageLodRenderer.slotPresets[slotIdx];
       if (!preset) return;
       const f = toolState.treeSlots[slotIdx].foliage;
@@ -1146,18 +1152,18 @@ export async function startV2App(opts = {}) {
       u.windSpeed.value   = f.windSpeed;
       u.windStr.value     = f.windStr;
       u.windMicro.value   = f.windMicro;
-    },
-    onRemoveTreeSlot: (slotIdx) => {
+    }),
+    onRemoveTreeSlot: (_removeTreeSlot = (slotIdx) => {
       treeLodRenderer.disposeSlot(slotIdx);
       foliageLodRenderer.clearSlot(slotIdx);
       console.log(`[V2] Tree slot ${slotIdx} models removed`);
-    },
-    onClearAllTrees: () => {
+    }),
+    onClearAllTrees: (_clearAllTrees = () => {
       treeSystem.clearAll();
-    },
+    }),
     onTreeLodChanged: () => {},
-    onFoliageLodChanged: () => {},
-    onLoadFoliageTexture: async (slotIdx) => {
+    onFoliageLodChanged: (_foliageLodChanged = () => {}),
+    onLoadFoliageTexture: (_loadFoliageTexture = async (slotIdx) => {
       const input = document.createElement("input");
       input.type = "file";
       input.accept = "image/*";
@@ -1174,16 +1180,16 @@ export async function startV2App(opts = {}) {
         });
       };
       input.click();
-    },
-    onFoliageSlotStructureChanged: (slotIdx) => {
+    }),
+    onFoliageSlotStructureChanged: (_foliageSlotStructureChanged = (slotIdx) => {
       billboardRenderer.rebuildSlot(slotIdx, toolState.foliageSlots[slotIdx]);
-    },
-    onFoliageSlotMaterialChanged: (slotIdx) => {
+    }),
+    onFoliageSlotMaterialChanged: (_foliageSlotMaterialChanged = (slotIdx) => {
       billboardRenderer.updateSlotUniforms(slotIdx, toolState.foliageSlots[slotIdx]);
-    },
-    onClearAllFoliage: () => {
+    }),
+    onClearAllFoliage: (_clearAllFoliage = () => {
       foliagePaintSystem.clearAll();
-    },
+    }),
     onGrassChanged: () => {
       grassManager.syncUniforms(toolState.grass, sunDir);
     },
@@ -1228,11 +1234,11 @@ export async function startV2App(opts = {}) {
         ui?.pane.refresh();
       }
     },
-    onTreeCastShadowChanged: () => {
+    onTreeCastShadowChanged: (_treeCastShadowChanged = () => {
       for (let i = 0; i < toolState.treeSlots.length; i++) {
         treeLodRenderer.setCastShadow(i, toolState.treeLod.castShadow);
       }
-    },
+    }),
     onImportCliffGlb: async (slotIdx) => {
       tryBuildCliffBlendMaterial();
       const file = await openGlbPicker();
@@ -1269,11 +1275,11 @@ export async function startV2App(opts = {}) {
     },
     onDeleteSelectedCliff: () => cliffSystem.handleDelete(),
     onClearAllCliffs: () => cliffSystem.clearAll(),
-    onRebakeBvh: () => {
+    onRebakeBvh: (_rebakeBvh = () => {
       cliffBvh.bake(terrainStore, config, [propStore, splineSystem, fullRoadSystem, smartRoadSystem, waterfallSystem]);
       grassManager.rebuildCliffHeightTex(cliffBvh, terrainStore, config.world.size);
       console.log("[V2] BVH rebaked (cliffs + props + spline/full-road/smart-road accessories + waterfalls) + cliff height tex updated");
-    },
+    }),
     onCliffTransformModeChanged: () => {
       transformControls.setMode(toolState.cliffs.transformMode);
     },
@@ -1540,7 +1546,7 @@ export async function startV2App(opts = {}) {
       cliffU.uRockContrast.value = c.blendRockContrast;
       cliffU.uTriplanarSharp.value = c.blendTriplanarSharp;
     },
-    onImportPropGlb: async () => {
+    onImportPropGlb: (_importPropGlb = async () => {
       const file = await openGlbPicker();
       if (!file) return;
       try {
@@ -1564,8 +1570,8 @@ export async function startV2App(opts = {}) {
       } catch (err) {
         console.error("[V2] Failed to load prop GLB:", err);
       }
-    },
-    onAddPrimitive: (primitiveName) => {
+    }),
+    onAddPrimitive: (_addPrimitive = (primitiveName) => {
       const existing = toolState.propSlots.find((s) => s.name === primitiveName && s.builtin);
       if (existing) {
         toolState.props.activeSlot = toolState.propSlots.indexOf(existing);
@@ -1594,23 +1600,23 @@ export async function startV2App(opts = {}) {
         console.log(`[V2] Primitive "${primitiveName}" added (type ${typeIdx})`);
       }
       ui?.pane.refresh();
-    },
-    onRemovePropSlot: (slotIdx) => {
+    }),
+    onRemovePropSlot: (_removePropSlot = (slotIdx) => {
       toolState.propSlots.splice(slotIdx, 1);
       if (toolState.props.activeSlot >= toolState.propSlots.length) {
         toolState.props.activeSlot = Math.max(0, toolState.propSlots.length - 1);
       }
       ui?.pane.refresh();
       console.log(`[V2] Prop slot ${slotIdx} removed`);
-    },
-    onDeleteSelectedProp: () => {
+    }),
+    onDeleteSelectedProp: (_deleteSelectedProp = () => {
       propSystem.handleDelete();
       deactivatePropSelection();
-    },
-    onClearAllProps: () => propSystem.clearAll(),
-    onPropTransformModeChanged: () => {
+    }),
+    onClearAllProps: (_clearAllProps = () => propSystem.clearAll()),
+    onPropTransformModeChanged: (_propTransformModeChanged = () => {
       transformControls.setMode(toolState.props.transformMode);
-    },
+    }),
     onWaterChanged: () => {
       waterMaterials.syncUniforms(toolState.water);
     },
@@ -1683,54 +1689,54 @@ export async function startV2App(opts = {}) {
     onDecalTransformModeChanged: () => {
       transformControls.setMode(toolState.decal.transformMode);
     },
-    onBarrierOverlayChanged: () => {
+    onBarrierOverlayChanged: (_barrierOverlayChanged = () => {
       syncBarrierOverlay();
-    },
-    onBarrierClear: () => {
+    }),
+    onBarrierClear: (_barrierClear = () => {
       barrierSystem.clearAll();
       syncBarrierOverlay();
-    },
-    onBarrierFill: () => {
+    }),
+    onBarrierFill: (_barrierFill = () => {
       barrierSystem.fillAll();
       syncBarrierOverlay();
-    },
-    onHoleOverlayChanged: () => {
+    }),
+    onHoleOverlayChanged: (_holeOverlayChanged = () => {
       syncHoleOverlay();
-    },
-    onHoleClear: () => {
+    }),
+    onHoleClear: (_holeClear = () => {
       holeSystem.clearAll();
       syncHoleOverlay();
-    },
-    onFleurChanged: () => {},
-    onFleurColorChanged: (slot) => {
+    }),
+    onFleurChanged: (_fleurChanged = () => {}),
+    onFleurColorChanged: (_fleurColorChanged = (slot) => {
       const fp = toolState.fleur;
       if (slot === "A") {
         fleurSystem.setColorA(fp.colorA.inner, fp.colorA.outer, fp.colorA.glow);
       } else {
         fleurSystem.setColorB(fp.colorB.inner, fp.colorB.outer, fp.colorB.glow);
       }
-    },
-    onFleurStemChanged: () => {
+    }),
+    onFleurStemChanged: (_fleurStemChanged = () => {
       fleurSystem.setStemColors(toolState.fleur.stemBase, toolState.fleur.stemTop);
-    },
-    onFleurStemCurveChanged: () => {
+    }),
+    onFleurStemCurveChanged: (_fleurStemCurveChanged = () => {
       fleurSystem.setStemStaticCurve(toolState.fleur.stemStaticCurve);
-    },
-    onFleurInteractionChanged: () => {
+    }),
+    onFleurInteractionChanged: (_fleurInteractionChanged = () => {
       syncFleurInteraction();
-    },
-    onFleurClear: () => {
+    }),
+    onFleurClear: (_fleurClear = () => {
       fleurSystem.clear();
-    },
-    onAmbientFxFlapChanged: () => {
+    }),
+    onAmbientFxFlapChanged: (_ambientFxFlapChanged = () => {
       syncAmbientFxUniforms();
-    },
-    onAmbientFxRingsChanged: () => {
+    }),
+    onAmbientFxRingsChanged: (_ambientFxRingsChanged = () => {
       ambientFxStore.setRingsVisible(toolState.ambientFx.showRings && toolState.mode === "ambientfx");
-    },
-    onAmbientFxClear: () => {
+    }),
+    onAmbientFxClear: (_ambientFxClear = () => {
       ambientFxStore.clear();
-    },
+    }),
     onSaveProject: (_saveProject = () => {
       toolState._cliffExportData = () => cliffStore.exportData();
       toolState._propExportData = () => propStore.exportData();
@@ -3019,6 +3025,15 @@ export async function startV2App(opts = {}) {
     toolState,
     ui,
     perf,
+    waterStore,
+    roadSystem,
+    fullRoadSystem,
+    smartRoadSystem,
+    riverSystem,
+    splineSystem,
+    propStore,
+    decalSystem,
+    waterfallSystem,
     setMode(mode) {
       toolState.mode = mode;
       applyModeChangedEffects();
@@ -3048,6 +3063,39 @@ export async function startV2App(opts = {}) {
     syncSoloLayer,
     syncHeightBlend,
     invalidateSurfaceMaterials,
+    importTreeGlb(slotIdx, lod) { _importTreeGlb(slotIdx, lod); },
+    loadTreePreset(slotIdx) { _loadTreePreset(slotIdx); },
+    removeTreeSlot(slotIdx) { _removeTreeSlot(slotIdx); },
+    clearAllTrees() { _clearAllTrees(); },
+    treeCastShadowChanged() { _treeCastShadowChanged(); },
+    foliageParamChanged(slotIdx) { _foliageParamChanged(slotIdx); },
+    importPropGlb() { _importPropGlb(); },
+    addPrimitive(name) { _addPrimitive(name); },
+    removePropSlot(idx) { _removePropSlot(idx); },
+    deleteSelectedProp() { _deleteSelectedProp(); },
+    clearAllProps() { _clearAllProps(); },
+    propTransformModeChanged() { _propTransformModeChanged(); },
+    rebakeBvh() { _rebakeBvh(); },
+    loadFoliageTexture(slotIdx) { _loadFoliageTexture(slotIdx); },
+    foliageSlotStructureChanged(slotIdx) { _foliageSlotStructureChanged(slotIdx); },
+    foliageSlotMaterialChanged(slotIdx) { _foliageSlotMaterialChanged(slotIdx); },
+    clearAllFoliage() { _clearAllFoliage(); },
+    foliageLodChanged() { _foliageLodChanged(); },
+    playSpawnChanged() { _playSpawnChanged(); },
+    barrierOverlayChanged() { _barrierOverlayChanged(); },
+    barrierClear() { _barrierClear(); },
+    barrierFill() { _barrierFill(); },
+    holeOverlayChanged() { _holeOverlayChanged(); },
+    holeClear() { _holeClear(); },
+    ambientFxFlapChanged() { _ambientFxFlapChanged(); },
+    ambientFxRingsChanged() { _ambientFxRingsChanged(); },
+    ambientFxClear() { _ambientFxClear(); },
+    fleurChanged() { _fleurChanged(); },
+    fleurColorChanged(slot) { _fleurColorChanged(slot); },
+    fleurStemChanged() { _fleurStemChanged(); },
+    fleurStemCurveChanged() { _fleurStemCurveChanged(); },
+    fleurInteractionChanged() { _fleurInteractionChanged(); },
+    fleurClear() { _fleurClear(); },
     onConfigChanged() { chunkStream.update(camera.position); },
     dispose() {
       renderer.domElement.removeEventListener("wheel", onCanvasWheelBrush, { capture: true });

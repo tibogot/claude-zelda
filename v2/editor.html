@@ -135,6 +135,33 @@
   .tree-item i { width: 14px; height: 14px; color: var(--text-dim); flex-shrink: 0; }
   .tree-item.selected i { color: var(--accent); }
   .tree-item .tree-type { margin-left: auto; font-size: 10px; color: var(--text-dim); opacity: 0.5; }
+  .tree-category {
+    display: flex; align-items: center; gap: 6px; padding: 6px 8px 2px;
+    font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--text-dim); opacity: 0.6;
+  }
+  .tree-count {
+    margin-left: auto; font-size: 10px; color: var(--text-dim); opacity: 0.5;
+    font-weight: 400; font-family: var(--font-mono);
+  }
+  /* === CONTEXT MENU === */
+  .ctx-menu {
+    position: fixed; z-index: 1000; min-width: 160px;
+    background: var(--bg-dark); border: 1px solid var(--border-light);
+    border-radius: 6px; padding: 4px 0; box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  }
+  .ctx-menu-item {
+    display: flex; align-items: center; gap: 8px; padding: 6px 14px;
+    font-size: 12px; color: var(--text); cursor: pointer; border: none;
+    background: none; width: 100%; text-align: left; font-family: var(--font);
+  }
+  .ctx-menu-item:hover { background: var(--bg-selected); color: var(--text-bright); }
+  .ctx-menu-item.danger { color: var(--red); }
+  .ctx-menu-item.danger:hover { background: rgba(217,83,79,0.2); }
+  .ctx-menu-item i { width: 14px; height: 14px; flex-shrink: 0; }
+  .ctx-menu-sep { height: 1px; background: var(--border); margin: 4px 0; }
+  .ctx-menu-item.disabled { color: var(--text-dim); opacity: 0.4; pointer-events: none; }
+
   .info-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; min-height: 26px; }
   .info-label { width: 90px; min-width: 90px; font-size: 11px; color: var(--text-dim); text-align: right; padding-right: 4px; }
   .info-value { flex: 1; font-size: 12px; color: var(--text); font-family: var(--font-mono); }
@@ -381,7 +408,7 @@
         <button title="Filter"><i data-lucide="filter" style="width:14px;height:14px"></i></button>
       </div>
     </div>
-    <div class="panel-search"><i data-lucide="search"></i><input type="text" placeholder="Search scene..."></div>
+    <div class="panel-search"><i data-lucide="search"></i><input type="text" placeholder="Search scene..." id="hierarchySearch"></div>
     <div class="tree-list">
       <div class="empty-panel">
         <i data-lucide="layers"></i>
@@ -679,6 +706,7 @@ function _section(parent, title, expanded = true) {
   return body;
 }
 
+const _liveSliders = [];
 function _slider(parent, obj, key, opts) {
   const { label, min, max, step = 0.01, onChange } = opts;
   const row = document.createElement('div');
@@ -689,7 +717,9 @@ function _slider(parent, obj, key, opts) {
   const vl = row.querySelector('.prop-slider-val');
   sl.addEventListener('input', () => { obj[key] = parseFloat(sl.value); vl.textContent = _fmt(obj[key], step); onChange?.(); });
   parent.appendChild(row);
-  return { row, refresh() { sl.value = obj[key]; vl.textContent = _fmt(obj[key], step); } };
+  const handle = { row, refresh() { sl.value = obj[key]; vl.textContent = _fmt(obj[key], step); }, _obj: obj, _key: key, _sl: sl, _vl: vl, _step: step };
+  _liveSliders.push(handle);
+  return handle;
 }
 
 function _color(parent, obj, key, opts) {
@@ -787,7 +817,7 @@ const MODE_FOLDERS = {
 const ALWAYS_HIDDEN = new Set(['Global', 'Lighting & atmosphere']);
 const ALWAYS_VISIBLE = new Set(['Terrain/LOD', 'Perf Gate']);
 
-const CUSTOM_MODES = new Set(['sculpt', 'paint']);
+const CUSTOM_MODES = new Set(['sculpt', 'paint', 'treePaint', 'props', 'foliagePaint', 'playSpawn', 'hole', 'barrier', 'ambientfx', 'fleurs']);
 const CUSTOM_KEEP_FOLDERS = {
   paint: ['Terrain appearance', 'Texture library'],
 };
@@ -799,6 +829,22 @@ function syncToolsTab(pane, mode) {
   if (sculptPanel) sculptPanel.style.display = mode === 'sculpt' ? '' : 'none';
   const paintPanel = document.getElementById('paint-panel');
   if (paintPanel) paintPanel.style.display = mode === 'paint' ? '' : 'none';
+  const treePanel = document.getElementById('tree-panel');
+  if (treePanel) treePanel.style.display = mode === 'treePaint' ? '' : 'none';
+  const propsPanel = document.getElementById('props-panel');
+  if (propsPanel) propsPanel.style.display = mode === 'props' ? '' : 'none';
+  const foliagePanel = document.getElementById('foliage-panel');
+  if (foliagePanel) foliagePanel.style.display = mode === 'foliagePaint' ? '' : 'none';
+  const playspawnPanel = document.getElementById('playspawn-panel');
+  if (playspawnPanel) playspawnPanel.style.display = mode === 'playSpawn' ? '' : 'none';
+  const holePanel = document.getElementById('hole-panel');
+  if (holePanel) holePanel.style.display = mode === 'hole' ? '' : 'none';
+  const barrierPanel = document.getElementById('barrier-panel');
+  if (barrierPanel) barrierPanel.style.display = mode === 'barrier' ? '' : 'none';
+  const ambientfxPanel = document.getElementById('ambientfx-panel');
+  if (ambientfxPanel) ambientfxPanel.style.display = mode === 'ambientfx' ? '' : 'none';
+  const fleurPanel = document.getElementById('fleur-panel');
+  if (fleurPanel) fleurPanel.style.display = mode === 'fleurs' ? '' : 'none';
 
   const kept = CUSTOM_KEEP_FOLDERS[mode] || [];
   const show = hasCustom ? new Set(kept) : new Set(MODE_FOLDERS[mode] || []);
@@ -1023,6 +1069,432 @@ function buildPaintPanel(app) {
   return panel;
 }
 
+// === Build custom Tree panel ===
+function buildTreePanel(app) {
+  const panel = document.createElement('div');
+  panel.id = 'tree-panel';
+  const ts = app.toolState;
+  const cfg = app.config;
+
+  // --- Brush ---
+  const brushBody = _section(panel, 'Brush');
+  _slider(brushBody, ts.brush, 'radius', { label: 'Radius', min: cfg.sculpt.brushMin, max: cfg.sculpt.brushMax, step: 0.5 });
+  _slider(brushBody, ts.brush, 'strength', { label: 'Strength', min: cfg.sculpt.strengthMin, max: cfg.sculpt.strengthMax, step: 0.01 });
+
+  // --- Active slot ---
+  const slotBody = _section(panel, 'Tree Slot');
+  function rebuildSlotPicker() {
+    slotBody.innerHTML = '';
+    const slotOpts = {};
+    for (let i = 0; i < ts.treeSlots.length; i++) slotOpts[ts.treeSlots[i].name] = i;
+    _dropdown(slotBody, ts.treePaint, 'activeSlot', { label: 'Active slot', options: slotOpts });
+    _slider(slotBody, ts.treePaint, 'density', { label: 'Density', min: 0.05, max: 3, step: 0.05 });
+    _slider(slotBody, ts.treePaint, 'minSpacing', { label: 'Min spacing', min: 1, max: 100, step: 0.5 });
+    _slider(slotBody, ts.treePaint, 'scaleMin', { label: 'Scale min', min: 0.1, max: 3, step: 0.05 });
+    _slider(slotBody, ts.treePaint, 'scaleMax', { label: 'Scale max', min: 0.1, max: 3, step: 0.05 });
+    _toggle(slotBody, ts.treePaint, 'randomRotation', { label: 'Random rot.' });
+  }
+  rebuildSlotPicker();
+
+  // --- Per-slot management ---
+  for (let i = 0; i < ts.treeSlots.length; i++) {
+    const slot = ts.treeSlots[i];
+    const slBody = _section(panel, `Slot ${i}: ${slot.name}`, false);
+    _slider(slBody, slot, 'baseScale', { label: 'Base scale', min: 0.01, max: 5, step: 0.01 });
+    _toggle(slBody, slot, 'enabled', { label: 'Enabled' });
+    _button(slBody, { title: 'Import LOD0 (detail)', onClick: () => app.importTreeGlb(i, 0) });
+    _button(slBody, { title: 'Import LOD1 (simplified)', onClick: () => app.importTreeGlb(i, 1) });
+    _button(slBody, { title: 'Load tree preset', onClick: () => app.loadTreePreset(i) });
+
+    // Foliage material
+    const fi = slot.foliage;
+    const fChange = () => app.foliageParamChanged(i);
+    const colBody = _section(slBody.parentElement, `  Slot ${i} · Colors`, false);
+    _color(colBody, fi, 'bottomColor', { label: 'Base color', onChange: fChange });
+    _color(colBody, fi, 'topColor', { label: 'Top color', onChange: fChange });
+    _slider(colBody, fi, 'colorVar', { label: 'Variation', min: 0, max: 0.5, step: 0.01, onChange: fChange });
+    _slider(colBody, fi, 'alphaCutoff', { label: 'Alpha cutoff', min: 0.1, max: 0.9, step: 0.01, onChange: fChange });
+
+    const litBody = _section(slBody.parentElement, `  Slot ${i} · Lighting`, false);
+    _slider(litBody, fi, 'normalBias', { label: 'Sphere normals', min: 0, max: 1, step: 0.01, onChange: fChange });
+    _slider(litBody, fi, 'leafWarp', { label: 'Leaf warp', min: 0, max: 1, step: 0.01, onChange: fChange });
+    _slider(litBody, fi, 'aoStr', { label: 'AO strength', min: 0, max: 1, step: 0.01, onChange: fChange });
+
+    const sssBody = _section(slBody.parentElement, `  Slot ${i} · SSS & Rim`, false);
+    _slider(sssBody, fi, 'sssStr', { label: 'SSS strength', min: 0, max: 2, step: 0.01, onChange: fChange });
+    _slider(sssBody, fi, 'sssPow', { label: 'SSS power', min: 0.5, max: 8, step: 0.1, onChange: fChange });
+    _color(sssBody, fi, 'sssColor', { label: 'SSS color', onChange: fChange });
+    _slider(sssBody, fi, 'rimStr', { label: 'Rim strength', min: 0, max: 2, step: 0.01, onChange: fChange });
+    _slider(sssBody, fi, 'rimPow', { label: 'Rim power', min: 0.5, max: 8, step: 0.1, onChange: fChange });
+    _color(sssBody, fi, 'rimColor', { label: 'Rim color', onChange: fChange });
+
+    const windBody = _section(slBody.parentElement, `  Slot ${i} · Wind`, false);
+    _slider(windBody, fi, 'windSpeed', { label: 'Speed', min: 0, max: 5, step: 0.05, onChange: fChange });
+    _slider(windBody, fi, 'windStr', { label: 'Strength', min: 0, max: 0.5, step: 0.005, onChange: fChange });
+    _slider(windBody, fi, 'windMicro', { label: 'Micro sway', min: 0, max: 0.3, step: 0.005, onChange: fChange });
+
+    _button(slBody, { title: 'Remove models', onClick: () => app.removeTreeSlot(i) });
+  }
+
+  // --- LOD ---
+  const lodBody = _section(panel, 'LOD Distances', false);
+  _slider(lodBody, ts.treeLod, 'lod0Distance', { label: 'LOD0 > LOD1', min: 20, max: 500, step: 5 });
+  _slider(lodBody, ts.treeLod, 'lod1Distance', { label: 'LOD1 > hide', min: 50, max: 1000, step: 10 });
+  _slider(lodBody, ts.treeLod, 'fadeOutDistance', { label: 'Fade-out', min: 100, max: 2000, step: 10 });
+  _toggle(lodBody, ts.treeLod, 'castShadow', { label: 'Cast shadow', onChange: () => app.treeCastShadowChanged() });
+
+  // --- Foliage LOD ---
+  const fLodBody = _section(panel, 'Foliage LOD Distances', false);
+  _slider(fLodBody, ts.foliageLod, 'lod0Distance', { label: 'LOD0 > LOD1', min: 20, max: 300, step: 5 });
+  _slider(fLodBody, ts.foliageLod, 'lod1Distance', { label: 'LOD1 > LOD2', min: 50, max: 600, step: 10 });
+  _slider(fLodBody, ts.foliageLod, 'fadeOutDistance', { label: 'Fade-out', min: 100, max: 2000, step: 10 });
+
+  _separator(panel);
+  _button(panel, { title: 'Clear all trees', onClick: () => app.clearAllTrees() });
+
+  return panel;
+}
+
+// === Build custom Props panel ===
+function buildPropsPanel(app) {
+  const panel = document.createElement('div');
+  panel.id = 'props-panel';
+  const ts = app.toolState;
+
+  // --- Placement Mode ---
+  const modeBody = _section(panel, 'Placement');
+  _dropdown(modeBody, ts.props, 'placementMode', { label: 'Mode', options: { 'Place (click)': 'place', 'Paint (brush)': 'paint' } });
+
+  // --- Active slot ---
+  const slotBody = _section(panel, 'Active Type');
+  function rebuildSlotPicker() {
+    slotBody.innerHTML = '';
+    const slotOpts = {};
+    for (let i = 0; i < ts.propSlots.length; i++) slotOpts[ts.propSlots[i].name] = i;
+    if (Object.keys(slotOpts).length === 0) slotOpts['(none)'] = -1;
+    _dropdown(slotBody, ts.props, 'activeSlot', { label: 'Active type', options: slotOpts });
+  }
+  rebuildSlotPicker();
+
+  // --- Import / Primitives ---
+  const importBody = _section(panel, 'Import');
+  _button(importBody, { title: 'Import GLB...', onClick: async () => { await app.importPropGlb(); rebuildAll(); } });
+
+  const primBody = _section(panel, 'Add Primitive', false);
+  for (const shape of ['Cube', 'Sphere', 'Cylinder', 'Plane', 'Cone', 'Torus']) {
+    _button(primBody, { title: shape, onClick: () => { app.addPrimitive(shape); rebuildAll(); } });
+  }
+
+  // --- Loaded Props ---
+  const loadedBody = _section(panel, 'Loaded Props', false);
+  function rebuildLoadedSlots() {
+    loadedBody.innerHTML = '';
+    ts.propSlots.forEach((slot, i) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex; align-items:center; justify-content:space-between; padding:2px 0;';
+      const label = document.createElement('span');
+      label.textContent = slot.name;
+      label.style.cssText = 'font-size:12px; color:var(--text);';
+      row.appendChild(label);
+      const rmBtn = document.createElement('button');
+      rmBtn.textContent = 'Remove';
+      rmBtn.className = 'prop-row-btn';
+      rmBtn.style.cssText = 'font-size:11px; padding:2px 8px; background:var(--bg-item); color:var(--text-dim); border:1px solid var(--border); border-radius:var(--radius); cursor:pointer;';
+      rmBtn.addEventListener('click', () => { app.removePropSlot(i); rebuildAll(); });
+      row.appendChild(rmBtn);
+      loadedBody.appendChild(row);
+    });
+  }
+  rebuildLoadedSlots();
+
+  _separator(panel);
+
+  // --- Sink / Gizmo ---
+  const gizmoBody = _section(panel, 'Transform');
+  _slider(gizmoBody, ts.props, 'sinkOffset', { label: 'Sink offset', min: 0, max: 10, step: 0.1 });
+  _dropdown(gizmoBody, ts.props, 'transformMode', {
+    label: 'Gizmo [W/E/R]',
+    options: { 'Translate (W)': 'translate', 'Rotate (E)': 'rotate', 'Scale (R)': 'scale' },
+    onChange: () => app.propTransformModeChanged(),
+  });
+
+  _separator(panel);
+
+  // --- Paint Settings ---
+  const paintBody = _section(panel, 'Paint Settings');
+  _slider(paintBody, ts.props, 'density', { label: 'Density', min: 0.05, max: 5, step: 0.05 });
+  _slider(paintBody, ts.props, 'minSpacing', { label: 'Min spacing', min: 0.5, max: 20, step: 0.5 });
+  _slider(paintBody, ts.props, 'scaleMin', { label: 'Scale min', min: 0.1, max: 5, step: 0.05 });
+  _slider(paintBody, ts.props, 'scaleMax', { label: 'Scale max', min: 0.1, max: 5, step: 0.05 });
+  _toggle(paintBody, ts.props, 'randomRotation', { label: 'Random rotation' });
+
+  _separator(panel);
+
+  // --- Actions ---
+  _button(panel, { title: 'Rebake BVH', onClick: () => app.rebakeBvh() });
+  _separator(panel);
+  _button(panel, { title: 'Delete Selected [Del]', onClick: () => app.deleteSelectedProp() });
+  _button(panel, { title: 'Clear All Props', onClick: () => app.clearAllProps() });
+
+  function rebuildAll() {
+    rebuildSlotPicker();
+    rebuildLoadedSlots();
+  }
+
+  panel._rebuildPropUi = rebuildAll;
+
+  return panel;
+}
+
+// === Build custom Foliage panel ===
+function buildFoliagePanel(app) {
+  const panel = document.createElement('div');
+  panel.id = 'foliage-panel';
+  const ts = app.toolState;
+  const cfg = app.config;
+
+  // --- Brush ---
+  const brushBody = _section(panel, 'Brush');
+  _slider(brushBody, ts.brush, 'radius', { label: 'Radius', min: cfg.sculpt.brushMin, max: cfg.sculpt.brushMax, step: 0.5 });
+  _slider(brushBody, ts.brush, 'strength', { label: 'Strength', min: cfg.sculpt.strengthMin, max: cfg.sculpt.strengthMax, step: 0.01 });
+
+  // --- Active slot ---
+  const slotBody = _section(panel, 'Active Slot');
+  const slotOpts = {};
+  for (let i = 0; i < ts.foliageSlots.length; i++) slotOpts[ts.foliageSlots[i].name] = i;
+  _dropdown(slotBody, ts.foliagePaint, 'activeSlot', { label: 'Active slot', options: slotOpts });
+
+  // --- Foliage Brush ---
+  const fbBody = _section(panel, 'Foliage Brush');
+  _slider(fbBody, ts.foliagePaint, 'density', { label: 'Density', min: 0.1, max: 5, step: 0.1 });
+  _slider(fbBody, ts.foliagePaint, 'minSpacing', { label: 'Min spacing', min: 0.3, max: 10, step: 0.1 });
+  _slider(fbBody, ts.foliagePaint, 'scaleMin', { label: 'Scale min', min: 0.1, max: 3, step: 0.05 });
+  _slider(fbBody, ts.foliagePaint, 'scaleMax', { label: 'Scale max', min: 0.1, max: 3, step: 0.05 });
+  _toggle(fbBody, ts.foliagePaint, 'randomRotation', { label: 'Random rotation' });
+
+  // --- Per-slot settings ---
+  for (let i = 0; i < ts.foliageSlots.length; i++) {
+    const slot = ts.foliageSlots[i];
+    const sBody = _section(panel, `Slot ${i}: ${slot.name}`, i === 0);
+    const structCb = () => app.foliageSlotStructureChanged(i);
+    const matCb = () => app.foliageSlotMaterialChanged(i);
+
+    _toggle(sBody, slot, 'enabled', { label: 'Enabled', onChange: structCb });
+    _button(sBody, { title: 'Load texture', onClick: () => app.loadFoliageTexture(i) });
+    _slider(sBody, slot, 'baseScale', { label: 'Base scale', min: 0.1, max: 5, step: 0.05, onChange: structCb });
+
+    // Card Structure
+    const csBody = _section(sBody.parentElement, `  Slot ${i} · Card Structure`, false);
+    _slider(csBody, slot, 'planeCount', { label: 'Plane count', min: 1, max: 6, step: 1, onChange: structCb });
+    _dropdown(csBody, slot, 'planeSpread', { label: 'Spread', options: { '360° radial': 'full', '180° fan': 'half' }, onChange: structCb });
+    _dropdown(csBody, slot, 'tiltMode', { label: 'Tilt mode', options: { 'Stable random': 'stable', 'Symmetric': 'symmetric' }, onChange: structCb });
+    _slider(csBody, slot, 'tilt', { label: 'Tilt amount', min: 0, max: 1.5, step: 0.01, onChange: structCb });
+    _slider(csBody, slot, 'structureSeed', { label: 'Seed', min: 0, max: 999999, step: 1, onChange: structCb });
+    _slider(csBody, slot, 'width', { label: 'Width', min: 0.1, max: 10, step: 0.1, onChange: structCb });
+    _slider(csBody, slot, 'height', { label: 'Height', min: 0.1, max: 10, step: 0.1, onChange: structCb });
+
+    // Material
+    const mBody = _section(sBody.parentElement, `  Slot ${i} · Material`, false);
+    _slider(mBody, slot, 'alphaTest', { label: 'Alpha test', min: 0.1, max: 0.95, step: 0.01, onChange: structCb });
+    _slider(mBody, slot, 'roughness', { label: 'Roughness', min: 0, max: 1, step: 0.01, onChange: structCb });
+    _color(mBody, slot, 'colorTint', { label: 'Color tint', onChange: matCb });
+    _slider(mBody, slot, 'groundOcclusion', { label: 'Ground AO', min: 0, max: 2, step: 0.01, onChange: matCb });
+    _slider(mBody, slot, 'normalBending', { label: 'Normal bend', min: 0, max: 1, step: 0.01, onChange: matCb });
+    _slider(mBody, slot, 'sssIntensity', { label: 'SSS intensity', min: 0, max: 5, step: 0.1, onChange: matCb });
+
+    // Wind
+    const wBody = _section(sBody.parentElement, `  Slot ${i} · Wind`, false);
+    _slider(wBody, slot, 'swaySpeed', { label: 'Speed', min: 0, max: 5, step: 0.1, onChange: matCb });
+    _slider(wBody, slot, 'swayStrength', { label: 'Strength', min: 0, max: 0.5, step: 0.01, onChange: matCb });
+  }
+
+  // --- LOD ---
+  const lodBody = _section(panel, 'LOD Distances', false);
+  _slider(lodBody, ts.foliageLod, 'lod0Distance', { label: 'LOD0 dist', min: 20, max: 300, step: 5, onChange: () => app.foliageLodChanged() });
+  _slider(lodBody, ts.foliageLod, 'fadeOutDistance', { label: 'Fade out', min: 50, max: 600, step: 10, onChange: () => app.foliageLodChanged() });
+
+  _separator(panel);
+  _button(panel, { title: 'Clear all foliage', onClick: () => { if (confirm('Clear ALL placed foliage?')) app.clearAllFoliage(); } });
+
+  return panel;
+}
+
+// === Build custom Play Spawn panel ===
+function buildPlaySpawnPanel(app) {
+  const panel = document.createElement('div');
+  panel.id = 'playspawn-panel';
+  const spawn = app.toolState.playSpawn;
+  const refreshTp = () => app.ui?.pane.refresh();
+
+  const body = _section(panel, 'Spawn Point');
+  _toggle(body, spawn, 'enabled', { label: 'Use spawn', onChange: () => app.playSpawnChanged() });
+  const infoX = _info(body, 'X', spawn.x.toFixed(1));
+  const infoY = _info(body, 'Y', spawn.y.toFixed(1));
+  const infoZ = _info(body, 'Z', spawn.z.toFixed(1));
+  _slider(body, spawn, 'yawDeg', { label: 'Yaw', min: -180, max: 180, step: 1, onChange: () => app.playSpawnChanged() });
+  panel._updateCoords = () => { infoX.update(spawn.x.toFixed(1)); infoY.update(spawn.y.toFixed(1)); infoZ.update(spawn.z.toFixed(1)); };
+
+  _separator(panel);
+  _button(panel, { title: 'Place by clicking terrain', onClick: () => { app.setMode('playSpawn'); } });
+  _button(panel, { title: 'Clear spawn', onClick: () => { spawn.enabled = false; app.playSpawnChanged(); refreshTp(); } });
+
+  return panel;
+}
+
+// === Build custom Hole panel ===
+function buildHolePanel(app) {
+  const panel = document.createElement('div');
+  panel.id = 'hole-panel';
+  const ts = app.toolState;
+  const cfg = app.config;
+
+  const brushBody = _section(panel, 'Brush');
+  _slider(brushBody, ts.brush, 'radius', { label: 'Radius', min: cfg.sculpt.brushMin, max: cfg.sculpt.brushMax, step: 0.5 });
+
+  const body = _section(panel, 'Terrain Holes');
+  _toggle(body, ts.hole, 'erase', { label: 'Erase (or Shift)' });
+  _toggle(body, ts.hole, 'showOverlay', { label: 'Show overlay', onChange: () => app.holeOverlayChanged() });
+  _slider(body, ts.hole, 'overlayOpacity', { label: 'Overlay opacity', min: 0.1, max: 0.8, step: 0.05, onChange: () => app.holeOverlayChanged() });
+
+  _separator(panel);
+  _button(panel, { title: 'Clear all holes', onClick: () => app.holeClear() });
+
+  return panel;
+}
+
+// === Build custom Barrier panel ===
+function buildBarrierPanel(app) {
+  const panel = document.createElement('div');
+  panel.id = 'barrier-panel';
+  const ts = app.toolState;
+  const cfg = app.config;
+
+  const brushBody = _section(panel, 'Brush');
+  _slider(brushBody, ts.brush, 'radius', { label: 'Radius', min: cfg.sculpt.brushMin, max: cfg.sculpt.brushMax, step: 0.5 });
+
+  const body = _section(panel, 'Barrier');
+  _toggle(body, ts.barrier, 'erase', { label: 'Erase (or Shift)' });
+  _toggle(body, ts.barrier, 'showOverlay', { label: 'Show overlay', onChange: () => app.barrierOverlayChanged() });
+  _slider(body, ts.barrier, 'overlayOpacity', { label: 'Overlay opacity', min: 0.1, max: 0.8, step: 0.05, onChange: () => app.barrierOverlayChanged() });
+
+  _separator(panel);
+  _button(panel, { title: 'Clear all barriers', onClick: () => app.barrierClear() });
+  _button(panel, { title: 'Fill entire world', onClick: () => app.barrierFill() });
+
+  return panel;
+}
+
+// === Build custom Ambient FX panel ===
+function buildAmbientFxPanel(app) {
+  const panel = document.createElement('div');
+  panel.id = 'ambientfx-panel';
+  const afx = app.toolState.ambientFx;
+  const cfg = app.config;
+
+  const brushBody = _section(panel, 'Brush');
+  _slider(brushBody, app.toolState.brush, 'radius', { label: 'Radius', min: cfg.sculpt.brushMin, max: cfg.sculpt.brushMax, step: 0.5 });
+
+  const body = _section(panel, 'Ambient FX');
+  _toggle(body, afx, 'erase', { label: 'Erase (or Shift)' });
+  _dropdown(body, afx, 'effectType', { label: 'Effect', options: { 'Butterflies': 'butterflies' } });
+  _separator(body);
+  _slider(body, afx, 'emitterRadius', { label: 'Emitter radius', min: 3, max: 40, step: 1 });
+  _slider(body, afx, 'density', { label: 'Density', min: 1, max: 10, step: 0.5 });
+
+  const bfBody = _section(panel, 'Butterfly Params', false);
+  _slider(bfBody, afx, 'flapSpeed', { label: 'Flap speed', min: 2, max: 20, step: 0.5, onChange: () => app.ambientFxFlapChanged() });
+  _slider(bfBody, afx, 'flapAngle', { label: 'Flap angle', min: 0.1, max: 1.5, step: 0.05, onChange: () => app.ambientFxFlapChanged() });
+  _slider(bfBody, afx, 'glideRatio', { label: 'Glide ratio', min: 0, max: 0.8, step: 0.05, onChange: () => app.ambientFxFlapChanged() });
+
+  _separator(panel);
+  _toggle(panel, afx, 'showRings', { label: 'Show rings', onChange: () => app.ambientFxRingsChanged() });
+  _button(panel, { title: 'Clear all ambient FX', onClick: () => app.ambientFxClear() });
+
+  return panel;
+}
+
+// === Build custom Flowers panel ===
+function buildFleurPanel(app) {
+  const panel = document.createElement('div');
+  panel.id = 'fleur-panel';
+  const fp = app.toolState.fleur;
+  const cfg = app.config;
+
+  const PRESETS = {
+    main: { inner: '#fff4b8', outer: '#fb8da0', glow: 0.28 },
+    sakura: { inner: '#ffd9ea', outer: '#ff7ab2', glow: 0.32 },
+    zeldaBlue: { inner: '#e8fbff', outer: '#7db8ff', glow: 0.24 },
+    sunflower: { inner: '#ffe78c', outer: '#ff9f40', glow: 0.26 },
+  };
+
+  const brushBody = _section(panel, 'Brush');
+  _slider(brushBody, app.toolState.brush, 'radius', { label: 'Radius', min: cfg.sculpt.brushMin, max: cfg.sculpt.brushMax, step: 0.5 });
+
+  const body = _section(panel, 'Flowers');
+  _toggle(body, fp, 'erase', { label: 'Erase (or Shift)' });
+  _dropdown(body, fp, 'activeSlot', { label: 'Paint color', options: { 'Color A': 0, 'Color B': 1 } });
+  _dropdown(body, fp, 'subMode', { label: 'Placement', options: { 'Ground bloom': 'ground', 'Stemmed': 'stem' }, onChange: () => {
+    stemSec.style.display = fp.subMode === 'stem' ? '' : 'none';
+    hoverSec.style.display = fp.subMode !== 'stem' ? '' : 'none';
+    app.fleurChanged();
+  }});
+  _dropdown(body, fp, 'bloomShape', { label: 'Bloom shape', options: { 'A (mask 1)': 0, 'B (mask 2)': 1, 'C (mask 3)': 2 } });
+
+  // Stem
+  const stemBody = _section(panel, 'Stem Colors');
+  const stemSec = stemBody.parentElement;
+  stemSec.style.display = fp.subMode === 'stem' ? '' : 'none';
+  _color(stemBody, fp, 'stemBase', { label: 'Stem base', onChange: () => app.fleurStemChanged() });
+  _color(stemBody, fp, 'stemTop', { label: 'Stem top', onChange: () => app.fleurStemChanged() });
+  _slider(stemBody, fp, 'stemStaticCurve', { label: 'Stem lean', min: 0, max: 0.25, step: 0.005, onChange: () => app.fleurStemCurveChanged() });
+
+  // Hover
+  const hoverBody = _section(panel, 'Hover (ground bloom)');
+  const hoverSec = hoverBody.parentElement;
+  hoverSec.style.display = fp.subMode !== 'stem' ? '' : 'none';
+  _slider(hoverBody, fp, 'hoverBase', { label: 'Base Y', min: 0, max: 2, step: 0.01 });
+  _slider(hoverBody, fp, 'hoverVariance', { label: 'Variance', min: 0, max: 1, step: 0.01 });
+
+  // Brush settings
+  const fbBody = _section(panel, 'Flower Brush', false);
+  _slider(fbBody, fp, 'perStroke', { label: 'Per stroke', min: 1, max: 100, step: 1 });
+  _slider(fbBody, fp, 'minSpacing', { label: 'Min spacing', min: 0.1, max: 4, step: 0.05 });
+  _slider(fbBody, fp, 'scaleMin', { label: 'Scale min', min: 0.05, max: 3, step: 0.01 });
+  _slider(fbBody, fp, 'scaleMax', { label: 'Scale max', min: 0.05, max: 3, step: 0.01 });
+
+  // Color A
+  function applyPreset(slot, key) {
+    const p = PRESETS[key];
+    if (!p) return;
+    const c = slot === 'A' ? fp.colorA : fp.colorB;
+    c.inner = p.inner; c.outer = p.outer; c.glow = p.glow;
+    app.fleurColorChanged(slot);
+  }
+
+  function buildColorSection(label, slot, colorObj) {
+    const sec = _section(panel, label);
+    _dropdown(sec, colorObj, 'preset', { label: 'Preset', options: { 'Main': 'main', 'Sakura': 'sakura', 'Zelda Blue': 'zeldaBlue', 'Sunflower': 'sunflower' }, onChange: () => applyPreset(slot, colorObj.preset) });
+    _color(sec, colorObj, 'inner', { label: 'Center color', onChange: () => app.fleurColorChanged(slot) });
+    _color(sec, colorObj, 'outer', { label: 'Edge color', onChange: () => app.fleurColorChanged(slot) });
+    _slider(sec, colorObj, 'glow', { label: 'Center glow', min: 0, max: 1, step: 0.01, onChange: () => app.fleurColorChanged(slot) });
+  }
+  buildColorSection('Color A', 'A', fp.colorA);
+  buildColorSection('Color B', 'B', fp.colorB);
+
+  // Interaction & Wind
+  const intBody = _section(panel, 'Interaction & Wind', false);
+  _slider(intBody, fp, 'interactRadius', { label: 'Interact radius', min: 0, max: 5, step: 0.1, onChange: () => app.fleurInteractionChanged() });
+  _slider(intBody, fp, 'interactStrength', { label: 'Interact strength', min: 0, max: 2, step: 0.01, onChange: () => app.fleurInteractionChanged() });
+  _slider(intBody, fp, 'interactGain', { label: 'Repulse gain', min: 0, max: 3, step: 0.01, onChange: () => app.fleurInteractionChanged() });
+  _slider(intBody, fp, 'windAmp', { label: 'Wind amp', min: 0, max: 0.2, step: 0.001, onChange: () => app.fleurInteractionChanged() });
+  _slider(intBody, fp, 'windSpeed', { label: 'Wind speed', min: 0, max: 5, step: 0.01, onChange: () => app.fleurInteractionChanged() });
+
+  _separator(panel);
+  _button(panel, { title: 'Clear all flowers', onClick: () => app.fleurClear() });
+
+  return panel;
+}
+
 // === Build World tab ===
 function buildWorldTab(app) {
   const container = document.getElementById('tab-environment');
@@ -1134,35 +1606,236 @@ function buildWorldTab(app) {
 }
 
 // === Scene Hierarchy + Inspector ===
-const HIERARCHY_ITEMS = [
-  { id: 'sun', name: 'Sun', icon: 'sun', type: 'Light' },
-  { id: 'ambient', name: 'Ambient Light', icon: 'sunrise', type: 'Light' },
-  { id: 'sky', name: 'Sky', icon: 'cloud', type: 'Environment' },
-  { id: 'terrain', name: 'Terrain', icon: 'mountain', type: 'Mesh' },
-  { id: 'lensFlare', name: 'Lens Flare', icon: 'sparkles', type: 'Effect' },
+const STATIC_ITEMS = [
+  { id: 'sun', name: 'Sun', icon: 'sun', category: 'Lighting' },
+  { id: 'ambient', name: 'Ambient Light', icon: 'sunrise', category: 'Lighting' },
+  { id: 'sky', name: 'Sky', icon: 'cloud', category: 'Environment' },
+  { id: 'terrain', name: 'Terrain', icon: 'mountain', category: 'Environment' },
+  { id: 'lensFlare', name: 'Lens Flare', icon: 'sparkles', category: 'Environment' },
 ];
 
 let _selectedItem = null;
 let _inspectorLiveUpdaters = [];
+let _lastHierarchySnapshot = '';
+
+function gatherHierarchyItems(app) {
+  const items = [...STATIC_ITEMS];
+
+  // Water bodies
+  for (let i = 0; i < app.waterStore.bodies.length; i++) {
+    const b = app.waterStore.bodies[i];
+    const style = b.userData.waterStyle || 'Water';
+    items.push({ id: `water_${i}`, name: `${style} ${i}`, icon: 'waves', category: 'Water' });
+  }
+
+  // Waterfalls
+  for (let i = 0; i < app.waterfallSystem.waterfallObjects.length; i++) {
+    items.push({ id: `waterfall_${i}`, name: `Waterfall ${i}`, icon: 'droplets', category: 'Water' });
+  }
+
+  // Roads (simple)
+  for (let i = 0; i < app.roadSystem.segments.length; i++) {
+    items.push({ id: `road_${i}`, name: `Road ${i}`, icon: 'route', category: 'Roads' });
+  }
+
+  // Full roads
+  if (app.fullRoadSystem.edges.length > 0) {
+    items.push({ id: 'fullRoadNetwork', name: `Full Road (${app.fullRoadSystem.nodes.length}n ${app.fullRoadSystem.edges.length}e)`, icon: 'route', category: 'Roads' });
+  }
+
+  // Smart roads
+  if (app.smartRoadSystem.edges.length > 0) {
+    items.push({ id: 'smartRoadNetwork', name: `Smart Road (${app.smartRoadSystem.nodes.length}n ${app.smartRoadSystem.edges.length}e)`, icon: 'route', category: 'Roads' });
+  }
+
+  // Rivers
+  for (let i = 0; i < app.riverSystem.segments.length; i++) {
+    items.push({ id: `river_${i}`, name: `River ${i}`, icon: 'droplets', category: 'Rivers' });
+  }
+
+  // Spline points
+  if (app.splineSystem.points.length > 0) {
+    items.push({ id: 'splineSystem', name: `Spline (${app.splineSystem.points.length} pts)`, icon: 'spline', category: 'Splines' });
+  }
+
+  // Props (grouped by type)
+  for (let i = 0; i < app.toolState.propSlots.length; i++) {
+    const slot = app.toolState.propSlots[i];
+    const count = app.propStore.instances.filter(inst => inst.typeIdx === i).length;
+    if (count > 0) {
+      items.push({ id: `propType_${i}`, name: `${slot.name} (${count})`, icon: 'box', category: 'Props' });
+    }
+  }
+
+  // Decals
+  if (app.decalSystem.decals.length > 0) {
+    items.push({ id: 'decals', name: `Decals (${app.decalSystem.decals.length})`, icon: 'stamp', category: 'Decals' });
+  }
+
+  return items;
+}
+
+let _hierarchySearchTerm = '';
+const _hierarchySearchInput = document.getElementById('hierarchySearch');
+_hierarchySearchInput.addEventListener('input', () => {
+  _hierarchySearchTerm = _hierarchySearchInput.value.toLowerCase();
+  _lastHierarchySnapshot = '';
+});
+
+function _closeContextMenu() {
+  document.querySelector('.ctx-menu')?.remove();
+}
+document.addEventListener('click', _closeContextMenu);
+document.addEventListener('contextmenu', (e) => {
+  if (!e.target.closest('.tree-item')) _closeContextMenu();
+});
+
+function _showContextMenu(x, y, actions) {
+  _closeContextMenu();
+  const menu = document.createElement('div');
+  menu.className = 'ctx-menu';
+  for (const action of actions) {
+    if (action === '---') {
+      const sep = document.createElement('div');
+      sep.className = 'ctx-menu-sep';
+      menu.appendChild(sep);
+      continue;
+    }
+    const btn = document.createElement('button');
+    btn.className = 'ctx-menu-item' + (action.danger ? ' danger' : '') + (action.disabled ? ' disabled' : '');
+    btn.innerHTML = `<i data-lucide="${action.icon}"></i>${action.label}`;
+    btn.addEventListener('click', (e) => { e.stopPropagation(); _closeContextMenu(); action.onClick?.(); });
+    menu.appendChild(btn);
+  }
+  const maxX = window.innerWidth - 180;
+  const maxY = window.innerHeight - (actions.length * 32 + 20);
+  menu.style.left = Math.min(x, maxX) + 'px';
+  menu.style.top = Math.min(y, maxY) + 'px';
+  document.body.appendChild(menu);
+  lucide.createIcons({ nameAttr: 'data-lucide', attrs: {}, node: menu });
+}
+
+function _getContextActions(app, item) {
+  const actions = [
+    { label: 'Inspect', icon: 'scan-search', onClick: () => {
+      _selectedItem = item.id;
+      buildInspector(app, item.id);
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      document.querySelector('.tab-btn[data-tab="inspector"]').classList.add('active');
+      document.getElementById('tab-inspector').classList.add('active');
+      _lastHierarchySnapshot = '';
+    }},
+  ];
+
+  const waterMatch = item.id.match(/^water_(\d+)$/);
+  const roadMatch = item.id.match(/^road_(\d+)$/);
+  const riverMatch = item.id.match(/^river_(\d+)$/);
+  const propMatch = item.id.match(/^propType_(\d+)$/);
+
+  // Focus camera on object
+  if (waterMatch) {
+    const idx = parseInt(waterMatch[1]);
+    actions.push({ label: 'Focus camera', icon: 'eye', onClick: () => {
+      const b = app.waterStore.bodies[idx];
+      if (b) { app.camera.position.set(b.position.x + 30, b.position.y + 20, b.position.z + 30); app.camera.lookAt(b.position); }
+    }});
+  }
+  if (roadMatch) {
+    const idx = parseInt(roadMatch[1]);
+    actions.push({ label: 'Focus camera', icon: 'eye', onClick: () => {
+      const seg = app.roadSystem.segments[idx];
+      if (seg?.points.length > 0) {
+        const mid = seg.points[Math.floor(seg.points.length / 2)];
+        app.camera.position.set(mid.x + 30, mid.y + 40, mid.z + 30);
+        app.camera.lookAt(mid);
+      }
+    }});
+  }
+  if (riverMatch) {
+    const idx = parseInt(riverMatch[1]);
+    actions.push({ label: 'Focus camera', icon: 'eye', onClick: () => {
+      const seg = app.riverSystem.segments[idx];
+      if (seg?.points.length > 0) {
+        const mid = seg.points[Math.floor(seg.points.length / 2)];
+        app.camera.position.set(mid.x + 30, mid.y + 40, mid.z + 30);
+        app.camera.lookAt(mid);
+      }
+    }});
+  }
+
+  // Delete actions for dynamic items
+  if (waterMatch || roadMatch || riverMatch || propMatch || item.id === 'decals') {
+    actions.push('---');
+    if (waterMatch) {
+      const idx = parseInt(waterMatch[1]);
+      actions.push({ label: 'Delete', icon: 'trash-2', danger: true, onClick: () => {
+        const b = app.waterStore.bodies[idx];
+        if (b) { app.waterStore.remove(b); _lastHierarchySnapshot = ''; }
+      }});
+    }
+    if (item.id === 'decals') {
+      actions.push({ label: 'Clear all decals', icon: 'trash-2', danger: true, onClick: () => {
+        app.decalSystem.clearAll(); _lastHierarchySnapshot = '';
+      }});
+    }
+    if (propMatch) {
+      const typeIdx = parseInt(propMatch[1]);
+      actions.push({ label: 'Remove all instances', icon: 'trash-2', danger: true, onClick: () => {
+        const toRemove = [];
+        for (let i = app.propStore.instances.length - 1; i >= 0; i--) {
+          if (app.propStore.instances[i].typeIdx === typeIdx) toRemove.push(i);
+        }
+        for (const i of toRemove) app.propStore.removeInstance(i);
+        _lastHierarchySnapshot = '';
+      }});
+    }
+  }
+
+  return actions;
+}
 
 function buildHierarchy(app) {
+  const items = gatherHierarchyItems(app);
+
+  const filtered = _hierarchySearchTerm
+    ? items.filter(i => i.name.toLowerCase().includes(_hierarchySearchTerm) || i.category.toLowerCase().includes(_hierarchySearchTerm))
+    : items;
+
+  const snapshot = filtered.map(i => i.id + i.name).join('|');
+  if (snapshot === _lastHierarchySnapshot) return;
+  _lastHierarchySnapshot = snapshot;
+
   const list = document.querySelector('#hierarchy .tree-list');
   list.innerHTML = '';
-  for (const item of HIERARCHY_ITEMS) {
+
+  let lastCategory = '';
+  for (const item of filtered) {
+    if (item.category !== lastCategory) {
+      lastCategory = item.category;
+      const catEl = document.createElement('div');
+      catEl.className = 'tree-category';
+      const catItems = filtered.filter(i => i.category === lastCategory);
+      catEl.innerHTML = `${lastCategory}<span class="tree-count">${catItems.length}</span>`;
+      list.appendChild(catEl);
+    }
     const el = document.createElement('div');
-    el.className = 'tree-item';
+    el.className = 'tree-item' + (item.id === _selectedItem ? ' selected' : '');
     el.dataset.id = item.id;
-    el.innerHTML = `<i data-lucide="${item.icon}"></i><span>${item.name}</span><span class="tree-type">${item.type}</span>`;
+    el.innerHTML = `<i data-lucide="${item.icon}"></i><span>${item.name}</span>`;
     el.addEventListener('click', () => {
       list.querySelectorAll('.tree-item').forEach(t => t.classList.remove('selected'));
       el.classList.add('selected');
       _selectedItem = item.id;
       buildInspector(app, item.id);
-      // Switch to Inspector tab
       document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
       document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
       document.querySelector('.tab-btn[data-tab="inspector"]').classList.add('active');
       document.getElementById('tab-inspector').classList.add('active');
+    });
+    el.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      _showContextMenu(e.clientX, e.clientY, _getContextActions(app, item));
     });
     list.appendChild(el);
   }
@@ -1248,6 +1921,148 @@ function buildInspector(app, itemId) {
       _slider(lf, ts.lensFlare, 'dirtOpacity', { label: 'Lens dirt', min: 0, max: 2, step: 0.05 });
       break;
     }
+    default: {
+      // --- Water body ---
+      const waterMatch = itemId.match(/^water_(\d+)$/);
+      if (waterMatch) {
+        const idx = parseInt(waterMatch[1]);
+        const body = app.waterStore.bodies[idx];
+        if (body) {
+          const pos = body.position;
+          const rot = body.rotation;
+          const scl = body.scale;
+          const sec = _section(container, `${body.userData.waterStyle || 'Water'} · Body`);
+          _info(sec, 'Style', body.userData.waterStyle || 'Ocean');
+          _separator(sec);
+          const posProxy = { x: pos.x, y: pos.y, z: pos.z };
+          _slider(sec, posProxy, 'x', { label: 'Position X', min: -2000, max: 2000, step: 0.5, onChange: () => { pos.x = posProxy.x; } });
+          _slider(sec, posProxy, 'y', { label: 'Position Y', min: -200, max: 500, step: 0.5, onChange: () => { pos.y = posProxy.y; } });
+          _slider(sec, posProxy, 'z', { label: 'Position Z', min: -2000, max: 2000, step: 0.5, onChange: () => { pos.z = posProxy.z; } });
+          _separator(sec);
+          const rotProxy = { x: rot.x * 180 / Math.PI, y: rot.y * 180 / Math.PI, z: rot.z * 180 / Math.PI };
+          _slider(sec, rotProxy, 'x', { label: 'Rotation X', min: -180, max: 180, step: 1, onChange: () => { rot.x = rotProxy.x * Math.PI / 180; } });
+          _slider(sec, rotProxy, 'y', { label: 'Rotation Y', min: -180, max: 180, step: 1, onChange: () => { rot.y = rotProxy.y * Math.PI / 180; } });
+          _slider(sec, rotProxy, 'z', { label: 'Rotation Z', min: -180, max: 180, step: 1, onChange: () => { rot.z = rotProxy.z * Math.PI / 180; } });
+          _separator(sec);
+          const sclProxy = { x: scl.x, y: scl.y, z: scl.z };
+          _slider(sec, sclProxy, 'x', { label: 'Scale X', min: 0.1, max: 50, step: 0.1, onChange: () => { scl.x = sclProxy.x; } });
+          _slider(sec, sclProxy, 'y', { label: 'Scale Y', min: 0.1, max: 50, step: 0.1, onChange: () => { scl.y = sclProxy.y; } });
+          _slider(sec, sclProxy, 'z', { label: 'Scale Z', min: 0.1, max: 50, step: 0.1, onChange: () => { scl.z = sclProxy.z; } });
+        }
+        break;
+      }
+
+      // --- Waterfall ---
+      const wfMatch = itemId.match(/^waterfall_(\d+)$/);
+      if (wfMatch) {
+        const idx = parseInt(wfMatch[1]);
+        const wf = app.waterfallSystem.waterfallObjects[idx];
+        if (wf) {
+          const sec = _section(container, `Waterfall ${idx}`);
+          _info(sec, 'Position X', wf.position.x.toFixed(1));
+          _info(sec, 'Position Y', wf.position.y.toFixed(1));
+          _info(sec, 'Position Z', wf.position.z.toFixed(1));
+        }
+        break;
+      }
+
+      // --- Road (simple) ---
+      const roadMatch = itemId.match(/^road_(\d+)$/);
+      if (roadMatch) {
+        const idx = parseInt(roadMatch[1]);
+        const seg = app.roadSystem.segments[idx];
+        if (seg) {
+          const sec = _section(container, `Road ${idx}`);
+          _info(sec, 'Points', `${seg.points.length}`);
+          _info(sec, 'Style spans', `${(seg.styleSpans ?? []).length}`);
+          if (seg.points.length > 0) {
+            const first = seg.points[0];
+            const last = seg.points[seg.points.length - 1];
+            _separator(sec);
+            _info(sec, 'Start', `${first.x.toFixed(0)}, ${first.y.toFixed(0)}, ${first.z.toFixed(0)}`);
+            _info(sec, 'End', `${last.x.toFixed(0)}, ${last.y.toFixed(0)}, ${last.z.toFixed(0)}`);
+          }
+        }
+        break;
+      }
+
+      // --- Full Road / Smart Road network ---
+      if (itemId === 'fullRoadNetwork' || itemId === 'smartRoadNetwork') {
+        const sys = itemId === 'fullRoadNetwork' ? app.fullRoadSystem : app.smartRoadSystem;
+        const label = itemId === 'fullRoadNetwork' ? 'Full Road' : 'Smart Road';
+        const sec = _section(container, `${label} · Network`);
+        _info(sec, 'Nodes', `${sys.nodes.length}`);
+        _info(sec, 'Edges', `${sys.edges.length}`);
+        break;
+      }
+
+      // --- River ---
+      const riverMatch = itemId.match(/^river_(\d+)$/);
+      if (riverMatch) {
+        const idx = parseInt(riverMatch[1]);
+        const seg = app.riverSystem.segments[idx];
+        if (seg) {
+          const sec = _section(container, `River ${idx}`);
+          _info(sec, 'Points', `${seg.points.length}`);
+          if (seg.points.length > 0) {
+            const first = seg.points[0];
+            const last = seg.points[seg.points.length - 1];
+            _separator(sec);
+            _info(sec, 'Start', `${first.x.toFixed(0)}, ${first.y.toFixed(0)}, ${first.z.toFixed(0)}`);
+            _info(sec, 'End', `${last.x.toFixed(0)}, ${last.y.toFixed(0)}, ${last.z.toFixed(0)}`);
+          }
+        }
+        break;
+      }
+
+      // --- Spline ---
+      if (itemId === 'splineSystem') {
+        const sec = _section(container, 'Spline · System');
+        _info(sec, 'Points', `${app.splineSystem.points.length}`);
+        _info(sec, 'Tunnels', `${app.splineSystem.tunnels.length}`);
+        _info(sec, 'Guardrails', `${app.splineSystem.guardrails.length}`);
+        _info(sec, 'Kerbs', `${app.splineSystem.kerbs.length}`);
+        _info(sec, 'Linear feat.', `${app.splineSystem.linearFeatures.length}`);
+        break;
+      }
+
+      // --- Props (by type) ---
+      const propMatch = itemId.match(/^propType_(\d+)$/);
+      if (propMatch) {
+        const typeIdx = parseInt(propMatch[1]);
+        const slot = ts.propSlots[typeIdx];
+        const instances = app.propStore.instances.filter(inst => inst.typeIdx === typeIdx);
+        const sec = _section(container, `${slot?.name || 'Prop'} · Instances`);
+        _info(sec, 'Type', slot?.name || '?');
+        _info(sec, 'Instances', `${instances.length}`);
+        if (instances.length > 0) {
+          const list = _section(container, 'Instance List', instances.length <= 20);
+          for (let i = 0; i < Math.min(instances.length, 50); i++) {
+            const inst = instances[i];
+            _info(list, `#${i}`, `(${inst.px.toFixed(0)}, ${inst.py.toFixed(0)}, ${inst.pz.toFixed(0)})  S:${inst.sx.toFixed(1)} R:${inst.ry.toFixed(0)}°`);
+          }
+          if (instances.length > 50) {
+            _info(list, '...', `${instances.length - 50} more`);
+          }
+        }
+        break;
+      }
+
+      // --- Decals ---
+      if (itemId === 'decals') {
+        const decals = app.decalSystem.decals;
+        const sec = _section(container, `Decals · ${decals.length} total`);
+        for (let i = 0; i < Math.min(decals.length, 30); i++) {
+          const d = decals[i];
+          const name = d.textureSrc?.split('/').pop() || `Decal ${i}`;
+          _info(sec, `#${i}`, `${name}  (${d.px.toFixed(0)}, ${d.py.toFixed(0)}, ${d.pz.toFixed(0)})`);
+        }
+        if (decals.length > 30) {
+          _info(sec, '...', `${decals.length - 30} more`);
+        }
+        break;
+      }
+    }
   }
 }
 
@@ -1261,6 +2076,15 @@ try {
   const toolsTab = document.getElementById('tab-tools');
   toolsTab.appendChild(buildSculptPanel(app));
   toolsTab.appendChild(buildPaintPanel(app));
+  toolsTab.appendChild(buildTreePanel(app));
+  const propsPanel = buildPropsPanel(app);
+  toolsTab.appendChild(propsPanel);
+  toolsTab.appendChild(buildFoliagePanel(app));
+  toolsTab.appendChild(buildPlaySpawnPanel(app));
+  toolsTab.appendChild(buildHolePanel(app));
+  toolsTab.appendChild(buildBarrierPanel(app));
+  toolsTab.appendChild(buildAmbientFxPanel(app));
+  toolsTab.appendChild(buildFleurPanel(app));
 
   // Move Tweakpane pane into the Tools tab & apply mode-aware folder visibility
   requestAnimationFrame(() => {
@@ -1271,6 +2095,15 @@ try {
     syncToolsTab(app.ui?.pane, app.toolState.mode);
     toolsModeSelect.value = app.toolState.mode;
     statusText.textContent = 'Ready';
+
+    // Chain editor props panel rebuild into the Tweakpane propCallbacks
+    const origRebuild = app.ui?.propCallbacks?._rebuildPropUi;
+    if (app.ui?.propCallbacks) {
+      app.ui.propCallbacks._rebuildPropUi = () => {
+        origRebuild?.();
+        propsPanel._rebuildPropUi?.();
+      };
+    }
   });
 
   // Build the World tab with custom controls
@@ -1346,6 +2179,9 @@ if (app) {
       _elTris.textContent = `${(p.trisApprox / 1000).toFixed(0)}k tris`;
       _elDot.style.background = p.fps >= 50 ? 'var(--green)' : p.fps >= 30 ? 'var(--orange)' : 'var(--red)';
       for (const fn of _inspectorLiveUpdaters) fn();
+      for (const h of _liveSliders) { if (parseFloat(h._sl.value) !== h._obj[h._key]) h.refresh(); }
+      document.getElementById('playspawn-panel')?._updateCoords?.();
+      buildHierarchy(app);
     }
     requestAnimationFrame(_poll);
   };

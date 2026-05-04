@@ -181,7 +181,7 @@ export function createToolState() {
       },
     },
     playSpawn: {
-      enabled: false,
+      enabled: true,
       x: 0,
       y: 0,
       z: 0,
