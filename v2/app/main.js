@@ -1010,6 +1010,9 @@ export async function startV2App(opts = {}) {
   let _ambientFxFlapChanged, _ambientFxRingsChanged, _ambientFxClear;
   let _fleurChanged, _fleurColorChanged, _fleurStemChanged, _fleurStemCurveChanged, _fleurInteractionChanged, _fleurClear;
   let _cliffGrassFill, _cliffGrassClear, _importCliffGlb, _removeCliffSlot, _deleteSelectedCliff, _clearAllCliffs, _cliffTransformModeChanged, _cliffBlendChanged;
+  let _waterChanged, _saveWater, _loadWater, _deleteSelectedWater, _clearAllWater;
+  let _waterfallChanged, _deleteSelectedWaterfall, _clearAllWaterfalls;
+  let _decalLoadImage, _decalOpacityChanged, _decalAlignChanged, _decalRefit, _decalDeleteSelected, _decalClearAll, _decalSaveJson, _decalLoadJson, _decalTransformModeChanged;
   ui = createTweakpaneUi({
     toolState,
     config,
@@ -1618,11 +1621,11 @@ export async function startV2App(opts = {}) {
     onPropTransformModeChanged: (_propTransformModeChanged = () => {
       transformControls.setMode(toolState.props.transformMode);
     }),
-    onWaterChanged: () => {
+    onWaterChanged: (_waterChanged = () => {
       waterMaterials.syncUniforms(toolState.water);
-    },
-    onSaveWater: () => waterSystem.saveJSON(),
-    onLoadWater: async () => {
+    }),
+    onSaveWater: (_saveWater = () => waterSystem.saveJSON()),
+    onLoadWater: (_loadWater = async () => {
       const file = await openFilePicker(".json");
       if (!file) return;
       try {
@@ -1631,52 +1634,52 @@ export async function startV2App(opts = {}) {
       } catch (err) {
         console.error("[V2] Failed to load water-bodies.json", err);
       }
-    },
-    onDeleteSelectedWater: () => {
+    }),
+    onDeleteSelectedWater: (_deleteSelectedWater = () => {
       waterSystem.deleteSelected();
       ui?.pane.refresh();
-    },
-    onClearAllWater: () => {
+    }),
+    onClearAllWater: (_clearAllWater = () => {
       waterSystem.clearAll();
       ui?.pane.refresh();
-    },
-    onWaterfallChanged: () => {
+    }),
+    onWaterfallChanged: (_waterfallChanged = () => {
       waterfallSystem.syncMaterial();
       waterfallSystem.refreshMeshesFromParams();
       ui?.pane.refresh();
-    },
-    onDeleteSelectedWaterfall: () => {
+    }),
+    onDeleteSelectedWaterfall: (_deleteSelectedWaterfall = () => {
       waterfallSystem.deleteSelected();
       ui?.pane.refresh();
-    },
-    onClearAllWaterfalls: () => {
+    }),
+    onClearAllWaterfalls: (_clearAllWaterfalls = () => {
       waterfallSystem.clearAll();
       ui?.pane.refresh();
-    },
-    onDecalLoadImage: () => decalSystem.openImagePicker(),
-    onDecalOpacityChanged: () => {
+    }),
+    onDecalLoadImage: (_decalLoadImage = () => decalSystem.openImagePicker()),
+    onDecalOpacityChanged: (_decalOpacityChanged = () => {
       decalSystem.applyOpacityToSelected();
       ui?.pane.refresh();
-    },
-    onDecalAlignChanged: () => {},
-    onDecalRefit: () => {
+    }),
+    onDecalAlignChanged: (_decalAlignChanged = () => {}),
+    onDecalRefit: (_decalRefit = () => {
       decalSystem.refitSelectedToTerrain();
       ui?.pane.refresh();
-    },
-    onDecalDeleteSelected: () => {
+    }),
+    onDecalDeleteSelected: (_decalDeleteSelected = () => {
       decalSystem.deleteSelected();
       ui?.pane.refresh();
-    },
-    onDecalClearAll: () => {
+    }),
+    onDecalClearAll: (_decalClearAll = () => {
       decalSystem.clearAll();
       ui?.pane.refresh();
-    },
-    onDecalSaveJson: () => {
+    }),
+    onDecalSaveJson: (_decalSaveJson = () => {
       const data = decalSystem.exportData();
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
       downloadBlob(blob, "decals.json");
-    },
-    onDecalLoadJson: async () => {
+    }),
+    onDecalLoadJson: (_decalLoadJson = async () => {
       const file = await openFilePicker(".json");
       if (!file) return;
       try {
@@ -1686,10 +1689,10 @@ export async function startV2App(opts = {}) {
       } catch (err) {
         console.error("[V2] Failed to load decals.json", err);
       }
-    },
-    onDecalTransformModeChanged: () => {
+    }),
+    onDecalTransformModeChanged: (_decalTransformModeChanged = () => {
       transformControls.setMode(toolState.decal.transformMode);
-    },
+    }),
     onBarrierOverlayChanged: (_barrierOverlayChanged = () => {
       syncBarrierOverlay();
     }),
@@ -3105,6 +3108,23 @@ export async function startV2App(opts = {}) {
     clearAllCliffs() { _clearAllCliffs(); },
     cliffTransformModeChanged() { _cliffTransformModeChanged(); },
     cliffBlendChanged() { _cliffBlendChanged(); },
+    waterChanged() { _waterChanged(); },
+    saveWater() { _saveWater(); },
+    loadWater() { _loadWater(); },
+    deleteSelectedWater() { _deleteSelectedWater(); },
+    clearAllWater() { _clearAllWater(); },
+    waterfallChanged() { _waterfallChanged(); },
+    deleteSelectedWaterfall() { _deleteSelectedWaterfall(); },
+    clearAllWaterfalls() { _clearAllWaterfalls(); },
+    decalLoadImage() { _decalLoadImage(); },
+    decalOpacityChanged() { _decalOpacityChanged(); },
+    decalAlignChanged() { _decalAlignChanged(); },
+    decalRefit() { _decalRefit(); },
+    decalDeleteSelected() { _decalDeleteSelected(); },
+    decalClearAll() { _decalClearAll(); },
+    decalSaveJson() { _decalSaveJson(); },
+    decalLoadJson() { _decalLoadJson(); },
+    decalTransformModeChanged() { _decalTransformModeChanged(); },
     onConfigChanged() { chunkStream.update(camera.position); },
     dispose() {
       renderer.domElement.removeEventListener("wheel", onCanvasWheelBrush, { capture: true });

@@ -841,7 +841,7 @@ const MODE_FOLDERS = {
 const ALWAYS_HIDDEN = new Set(['Global', 'Lighting & atmosphere']);
 const ALWAYS_VISIBLE = new Set(['Terrain/LOD', 'Perf Gate']);
 
-const CUSTOM_MODES = new Set(['sculpt', 'paint', 'treePaint', 'props', 'foliagePaint', 'playSpawn', 'hole', 'barrier', 'ambientfx', 'fleurs', 'cliffGrass', 'cliffs']);
+const CUSTOM_MODES = new Set(['sculpt', 'paint', 'treePaint', 'props', 'foliagePaint', 'playSpawn', 'hole', 'barrier', 'ambientfx', 'fleurs', 'cliffGrass', 'cliffs', 'water', 'waterfall', 'decals']);
 const CUSTOM_KEEP_FOLDERS = {
   paint: ['Terrain appearance'],
 };
@@ -873,6 +873,12 @@ function syncToolsTab(pane, mode) {
   if (cliffGrassPanel) cliffGrassPanel.style.display = mode === 'cliffGrass' ? '' : 'none';
   const cliffsPanel = document.getElementById('cliffs-panel');
   if (cliffsPanel) cliffsPanel.style.display = mode === 'cliffs' ? '' : 'none';
+  const waterPanel = document.getElementById('water-panel');
+  if (waterPanel) waterPanel.style.display = mode === 'water' ? '' : 'none';
+  const waterfallPanel = document.getElementById('waterfall-panel');
+  if (waterfallPanel) waterfallPanel.style.display = mode === 'waterfall' ? '' : 'none';
+  const decalsPanel = document.getElementById('decals-panel');
+  if (decalsPanel) decalsPanel.style.display = mode === 'decals' ? '' : 'none';
 
   const kept = CUSTOM_KEEP_FOLDERS[mode] || [];
   const show = hasCustom ? new Set(kept) : new Set(MODE_FOLDERS[mode] || []);
@@ -1681,6 +1687,123 @@ function buildFleurPanel(app) {
   return panel;
 }
 
+// === Build custom Water panel ===
+function buildWaterPanel(app) {
+  const panel = document.createElement('div');
+  panel.id = 'water-panel';
+  const w = app.toolState.water;
+  const wc = () => app.waterChanged();
+
+  const body = _section(panel, 'Water Bodies');
+  _dropdown(body, w, 'style', { label: 'Next body style', options: { 'Ocean': 'Ocean', 'Lake': 'Lake' } });
+
+  _separator(body);
+  _color(body, w, 'deepColor', { label: 'Deep color', onChange: wc });
+  _color(body, w, 'midColor', { label: 'Mid color', onChange: wc });
+  _color(body, w, 'highlightColor', { label: 'Highlight', onChange: wc });
+  _slider(body, w, 'opacity', { label: 'Opacity', min: 0, max: 1, step: 0.01, onChange: wc });
+  _color(body, w, 'foamColor', { label: 'Foam color', onChange: wc });
+
+  _separator(body);
+  _slider(body, w, 'sinkOffset', { label: 'Sink offset', min: -2, max: 2, step: 0.01 });
+  _dropdown(body, w, 'preset', { label: 'Size preset', options: {
+    'Puddle': 'Puddle', 'Small lake': 'Small lake', 'Large lake': 'Large lake', 'River strip': 'River strip',
+  }});
+
+  // Reflection
+  const reflBody = _section(panel, 'Lake Reflection', false);
+  _toggle(reflBody, w, 'reflectionEnabled', { label: 'Enabled' });
+  _slider(reflBody, w, 'reflectionScale', { label: 'Resolution', min: 0.1, max: 1, step: 0.05 });
+  _slider(reflBody, w, 'reflectionEveryN', { label: 'Every N frames', min: 1, max: 6, step: 1 });
+
+  _separator(panel);
+  _button(panel, { title: 'Save water JSON', onClick: () => app.saveWater() });
+  _button(panel, { title: 'Load water JSON...', onClick: () => app.loadWater() });
+  _button(panel, { title: 'Delete selected (Del)', onClick: () => app.deleteSelectedWater() });
+  _button(panel, { title: 'Clear all water bodies', onClick: () => app.clearAllWater() });
+
+  return panel;
+}
+
+// === Build custom Waterfall panel ===
+function buildWaterfallPanel(app) {
+  const panel = document.createElement('div');
+  panel.id = 'waterfall-panel';
+  const p = app.toolState.waterfall;
+  const wc = () => app.waterfallChanged();
+
+  const body = _section(panel, 'Waterfall');
+  _dropdown(body, p, 'placeTool', { label: 'Place tool', options: { 'Waterfall': 'waterfall', 'Impact splash cap': 'splashCap' } });
+  _toggle(body, p, 'splashVisible', { label: 'Show splash caps', onChange: wc });
+  _button(body, { title: 'Delete selected [Del]', onClick: () => app.deleteSelectedWaterfall() });
+  _button(body, { title: 'Clear all waterfalls', onClick: () => app.clearAllWaterfalls() });
+
+  // Geometry
+  const geomBody = _section(panel, 'Geometry', false);
+  _slider(geomBody, p, 'width', { label: 'Width', min: 0.5, max: 30, step: 0.1, onChange: wc });
+  _slider(geomBody, p, 'totalHeight', { label: 'Height', min: 1, max: 80, step: 0.25, onChange: wc });
+  _slider(geomBody, p, 'topLength', { label: 'Top length', min: 0.2, max: 40, step: 0.1, onChange: wc });
+  _slider(geomBody, p, 'radius', { label: 'Radius', min: 0.1, max: 20, step: 0.05, onChange: wc });
+  _slider(geomBody, p, 'segments', { label: 'Segments', min: 24, max: 300, step: 4, onChange: wc });
+  _slider(geomBody, p, 'splashRadius', { label: 'Splash radius', min: 0.2, max: 20, step: 0.1, onChange: wc });
+  _slider(geomBody, p, 'splashCapAngle', { label: 'Splash cap angle', min: 0.08, max: 0.48, step: 0.01, onChange: wc });
+  _slider(geomBody, p, 'splashYOffset', { label: 'Splash Y offset', min: -5, max: 10, step: 0.05, onChange: wc });
+
+  // Shader
+  const matBody = _section(panel, 'Shader', false);
+  _slider(matBody, p, 'flowSpeed', { label: 'Flow speed', min: 0, max: 4, step: 0.01, onChange: wc });
+  _slider(matBody, p, 'opacity', { label: 'Opacity', min: 0.05, max: 1, step: 0.01, onChange: wc });
+  _color(matBody, p, 'colorA', { label: 'Color A', onChange: wc });
+  _color(matBody, p, 'colorB', { label: 'Color B', onChange: wc });
+  _color(matBody, p, 'colorC', { label: 'Color C', onChange: wc });
+
+  // Splash cap
+  const splashBody = _section(panel, 'Splash Cap', false);
+  _slider(splashBody, p, 'splashOpacity', { label: 'Opacity', min: 0.05, max: 1, step: 0.01, onChange: wc });
+  _slider(splashBody, p, 'splashNoiseScale', { label: 'Noise scale', min: 0.2, max: 10, step: 0.05, onChange: wc });
+  _slider(splashBody, p, 'splashFlow', { label: 'Flow', min: 0, max: 4, step: 0.01, onChange: wc });
+  _slider(splashBody, p, 'splashDisp', { label: 'Displacement', min: 0, max: 2, step: 0.01, onChange: wc });
+  _color(splashBody, p, 'splashColorA', { label: 'Color A', onChange: wc });
+  _color(splashBody, p, 'splashColorB', { label: 'Color B', onChange: wc });
+
+  return panel;
+}
+
+// === Build custom Decals panel ===
+function buildDecalsPanel(app) {
+  const panel = document.createElement('div');
+  panel.id = 'decals-panel';
+  const d = app.toolState.decal;
+
+  const body = _section(panel, 'Decals');
+  _button(body, { title: 'Load image (brush)...', onClick: () => app.decalLoadImage() });
+
+  _separator(body);
+  _slider(body, d, 'opacity', { label: 'Opacity', min: 0, max: 1, step: 0.01, onChange: () => app.decalOpacityChanged() });
+  _slider(body, d, 'heightOffset', { label: 'Height offset', min: -1, max: 2, step: 0.01 });
+  _slider(body, d, 'defaultScale', { label: 'New decal scale', min: 0.25, max: 40, step: 0.25 });
+  _toggle(body, d, 'alignToNormal', { label: 'Align to surface', onChange: () => app.decalAlignChanged() });
+  _slider(body, d, 'conformSubdiv', { label: 'Conform subdiv', min: 4, max: 64, step: 1 });
+
+  _separator(body);
+  _button(body, { title: 'Conform selected to terrain', onClick: () => app.decalRefit() });
+  _button(body, { title: 'Delete selected (Del)', onClick: () => app.decalDeleteSelected() });
+  _button(body, { title: 'Clear all decals', onClick: () => app.decalClearAll() });
+
+  _separator(body);
+  _button(body, { title: 'Save decals JSON', onClick: () => app.decalSaveJson() });
+  _button(body, { title: 'Load decals JSON...', onClick: () => app.decalLoadJson() });
+
+  _separator(body);
+  _dropdown(body, d, 'transformMode', {
+    label: 'Gizmo',
+    options: { 'Translate': 'translate', 'Rotate': 'rotate', 'Scale': 'scale' },
+    onChange: () => app.decalTransformModeChanged(),
+  });
+
+  return panel;
+}
+
 // === Build custom Cliff Grass panel ===
 function buildCliffGrassPanel(app) {
   const panel = document.createElement('div');
@@ -2352,6 +2475,9 @@ try {
   toolsTab.appendChild(buildFleurPanel(app));
   toolsTab.appendChild(buildCliffGrassPanel(app));
   toolsTab.appendChild(buildCliffsPanel(app));
+  toolsTab.appendChild(buildWaterPanel(app));
+  toolsTab.appendChild(buildWaterfallPanel(app));
+  toolsTab.appendChild(buildDecalsPanel(app));
 
   // Move Tweakpane pane into the Tools tab & apply mode-aware folder visibility
   requestAnimationFrame(() => {
