@@ -258,6 +258,28 @@
   }
   .fs-open-btn:hover { background: var(--accent-dim); }
 
+  /* === PAINT LAYER CARDS === */
+  .layer-cards { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0; }
+  .layer-card {
+    width: 56px; display: flex; flex-direction: column; align-items: center; gap: 2px;
+    padding: 4px; border-radius: var(--radius); cursor: pointer;
+    border: 2px solid transparent; transition: border-color 0.15s;
+  }
+  .layer-card:hover { background: var(--bg-hover); }
+  .layer-card.active { border-color: var(--accent); background: var(--accent-glow); }
+  .layer-card.drag-over { border-color: var(--green); background: rgba(92,184,92,0.15); }
+  .layer-card-thumb {
+    width: 44px; height: 44px; border-radius: 3px; background: var(--bg-dark);
+    border: 1px solid var(--border); overflow: hidden; position: relative;
+  }
+  .layer-card-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .layer-card-thumb .empty-tex {
+    width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
+    font-size: 9px; color: var(--text-dim); text-align: center;
+  }
+  .layer-card-label { font-size: 9px; color: var(--text-dim); text-align: center; max-width: 56px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .layer-card.active .layer-card-label { color: var(--accent); font-weight: 600; }
+
   /* === RIGHT PANEL (TABBED) === */
   #right-panel {
     grid-column: 5; grid-row: 2 / -1; background: var(--bg-panel); border-left: 1px solid var(--border);
@@ -554,6 +576,7 @@ initSplitter('splitter-bottom', '--bottom-h', 'y', true);
 let fsRootHandle = null;
 let fsCurrentHandle = null;
 let fsPathStack = [];
+const fsFileHandles = new Map();
 
 const EXT_ICONS = {
   png:'image', jpg:'image', jpeg:'image', webp:'image', bmp:'image', tga:'image',
@@ -598,9 +621,10 @@ async function renderFileSystem() {
   });
 
   const dirs = [], files = [];
+  fsFileHandles.clear();
   for await (const [name, handle] of fsCurrentHandle.entries()) {
     if (handle.kind === 'directory') dirs.push({ name, handle });
-    else files.push({ name, handle });
+    else { files.push({ name, handle }); fsFileHandles.set(name, handle); }
   }
   dirs.sort((a,b) => a.name.localeCompare(b.name));
   files.sort((a,b) => a.name.localeCompare(b.name));
@@ -819,7 +843,7 @@ const ALWAYS_VISIBLE = new Set(['Terrain/LOD', 'Perf Gate']);
 
 const CUSTOM_MODES = new Set(['sculpt', 'paint', 'treePaint', 'props', 'foliagePaint', 'playSpawn', 'hole', 'barrier', 'ambientfx', 'fleurs', 'cliffGrass', 'cliffs']);
 const CUSTOM_KEEP_FOLDERS = {
-  paint: ['Terrain appearance', 'Texture library'],
+  paint: ['Terrain appearance'],
 };
 
 function syncToolsTab(pane, mode) {
@@ -979,6 +1003,7 @@ function buildPaintPanel(app) {
   panel.id = 'paint-panel';
   const ts = app.toolState;
   const cfg = app.config;
+  const lib = app.textureLibrary;
 
   // --- Brush ---
   const brushBody = _section(panel, 'Brush');
@@ -986,20 +1011,121 @@ function buildPaintPanel(app) {
   _slider(brushBody, ts.brush, 'strength', { label: 'Strength', min: cfg.sculpt.strengthMin, max: cfg.sculpt.strengthMax, step: 0.01 });
   _slider(brushBody, ts.brush, 'falloff', { label: 'Shape', min: 0.5, max: 4, step: 0.05 });
 
-  // --- Paint ---
-  const paintBody = _section(panel, 'Paint');
-  const layerLabels = [
-    'Eraser (restore base)', 'Layer 1', 'Layer 2', 'Layer 3', 'Layer 4',
-    'Layer 5', 'Layer 6', 'Layer 7', 'Meadow (TSL)',
-  ];
-  const activeLayerOpts = {};
-  layerLabels.forEach((l, i) => activeLayerOpts[l] = i);
-  _dropdown(paintBody, ts.paint, 'activeLayer', { label: 'Active layer', options: activeLayerOpts });
+  // --- Layer cards with texture thumbnails ---
+  const layerSection = _section(panel, 'Paint Layers');
 
+  function getThumbUrl(slotId) {
+    const slot = lib.getSlot(slotId);
+    if (!slot) return null;
+    const canvas = slot.albedoTex?.image;
+    if (canvas && canvas.toDataURL) {
+      try { return canvas.toDataURL('image/jpeg', 0.5); } catch { return null; }
+    }
+    return null;
+  }
+
+  const layerLabels = ['Eraser', 'Layer 1', 'Layer 2', 'Layer 3', 'Layer 4', 'Layer 5', 'Layer 6', 'Layer 7', 'Meadow'];
+  const cardContainer = document.createElement('div');
+  cardContainer.className = 'layer-cards';
+  layerSection.appendChild(cardContainer);
+
+  function buildLayerCards() {
+    cardContainer.innerHTML = '';
+    for (let i = 0; i < layerLabels.length; i++) {
+      const card = document.createElement('div');
+      card.className = 'layer-card' + (ts.paint.activeLayer === i ? ' active' : '');
+      card.dataset.layer = i;
+
+      const thumb = document.createElement('div');
+      thumb.className = 'layer-card-thumb';
+      if (i === 0) {
+        thumb.innerHTML = '<div class="empty-tex">Eraser</div>';
+      } else if (i === 8) {
+        thumb.innerHTML = '<div class="empty-tex">TSL</div>';
+      } else {
+        const slotId = ts.paint.layerSlotIds[i - 1];
+        const url = getThumbUrl(slotId);
+        if (url) {
+          const img = document.createElement('img');
+          img.src = url;
+          thumb.appendChild(img);
+        } else {
+          thumb.innerHTML = `<div class="empty-tex">L${i}</div>`;
+        }
+      }
+      card.appendChild(thumb);
+
+      const label = document.createElement('div');
+      label.className = 'layer-card-label';
+      if (i > 0 && i < 8) {
+        const slotId = ts.paint.layerSlotIds[i - 1];
+        const slot = lib.getSlot(slotId);
+        label.textContent = slot?.name || layerLabels[i];
+      } else {
+        label.textContent = layerLabels[i];
+      }
+      card.appendChild(label);
+
+      card.addEventListener('click', () => {
+        ts.paint.activeLayer = i;
+        cardContainer.querySelectorAll('.layer-card').forEach(c => c.classList.remove('active'));
+        card.classList.add('active');
+      });
+
+      // Drop target for layers 1-7
+      if (i >= 1 && i <= 7) {
+        card.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; card.classList.add('drag-over'); });
+        card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
+        card.addEventListener('drop', async e => {
+          e.preventDefault();
+          card.classList.remove('drag-over');
+          const fileName = e.dataTransfer.getData('text/plain');
+          if (!fileName) return;
+          const handle = fsFileHandles.get(fileName);
+          if (!handle) return;
+          const ext = fileName.split('.').pop().toLowerCase();
+          if (!IMG_EXTS.has(ext)) return;
+          try {
+            const file = await handle.getFile();
+            const slotId = ts.paint.layerSlotIds[i - 1];
+            await lib.replaceMapFromFile(slotId, 'albedo', file);
+            const slot = lib.getSlot(slotId);
+            if (slot) lib.renameSlot(slotId, fileName.replace(/\.[^.]+$/, ''));
+            app.invalidateSurfaceMaterials();
+            buildLayerCards();
+          } catch (err) { console.error('[Paint] Drop failed:', err); }
+        });
+      }
+
+      cardContainer.appendChild(card);
+    }
+  }
+  buildLayerCards();
+
+  // --- Layer texture assignment (dropdown fallback) ---
+  const texBody = _section(panel, 'Layer Textures', false);
+  function buildLayerPickers() {
+    texBody.innerHTML = '';
+    const slotOpts = {};
+    for (const s of lib.slots) slotOpts[s.name || s.id] = s.id;
+    for (let i = 0; i < 7; i++) {
+      const idx = i;
+      if (!lib.getSlot(ts.paint.layerSlotIds[idx])) {
+        ts.paint.layerSlotIds[idx] = lib.slots[0]?.id ?? '';
+      }
+      _dropdown(texBody, ts.paint.layerSlotIds, idx, {
+        label: `Layer ${idx + 1}`, options: slotOpts,
+        onChange: () => { app.invalidateSurfaceMaterials(); buildLayerCards(); },
+      });
+    }
+  }
+  buildLayerPickers();
+
+  // --- Solo / Opacity ---
+  const soloBody = _section(panel, 'Solo & Opacity', false);
   const soloOpts = { Off: -1, 'Base (layer 0)': 0, 'Layer 1': 1, 'Layer 2': 2, 'Layer 3': 3, 'Layer 4': 4, 'Layer 5': 5, 'Layer 6': 6, 'Layer 7': 7 };
-  _dropdown(paintBody, ts.paint, 'soloLayer', { label: 'Solo layer', options: soloOpts, onChange: () => app.syncSoloLayer() });
-
-  _slider(paintBody, cfg.paint, 'brushOpacity', { label: 'Brush opacity', min: 0.02, max: 1, step: 0.01 });
+  _dropdown(soloBody, ts.paint, 'soloLayer', { label: 'Solo layer', options: soloOpts, onChange: () => app.syncSoloLayer() });
+  _slider(soloBody, cfg.paint, 'brushOpacity', { label: 'Brush opacity', min: 0.02, max: 1, step: 0.01 });
 
   // --- Height Blend ---
   const hbBody = _section(panel, 'Height Blend', false);
@@ -1046,29 +1172,85 @@ function buildPaintPanel(app) {
   _toggle(maskBody, ts.paint, 'maskRandomRotation', { label: 'Random rot.' });
   _toggle(maskBody, ts.paint, 'maskFollowStroke', { label: 'Follow stroke' });
 
-  // --- Layer Textures ---
-  const layerBody = _section(panel, 'Layer Textures');
-  function buildLayerPickers() {
-    layerBody.innerHTML = '';
-    const lib = app.textureLibrary;
-    const slotOpts = {};
-    for (const s of lib.slots) slotOpts[s.name || s.id] = s.id;
-    for (let i = 0; i < 7; i++) {
-      const idx = i;
-      if (!lib.getSlot(ts.paint.layerSlotIds[idx])) {
-        ts.paint.layerSlotIds[idx] = lib.slots[0]?.id ?? '';
-      }
-      _dropdown(layerBody, ts.paint.layerSlotIds, idx, {
-        label: `Layer ${idx + 1}`, options: slotOpts,
-        onChange: () => app.invalidateSurfaceMaterials(),
-      });
+  // --- Texture Library ---
+  const libBody = _section(panel, 'Texture Library', false);
+  const libState = { activeSlotId: lib.slots[0]?.id ?? '' };
+
+  function buildLibSlotEditor() {
+    libEditor.innerHTML = '';
+    const slot = lib.getSlot(libState.activeSlotId);
+    if (!slot) return;
+
+    // Thumbnail preview
+    const previewDiv = document.createElement('div');
+    previewDiv.style.cssText = 'width:64px;height:64px;border:1px solid var(--border);border-radius:4px;margin:4px auto 8px;overflow:hidden;';
+    const thumbUrl = getThumbUrl(slot.id);
+    if (thumbUrl) previewDiv.innerHTML = `<img src="${thumbUrl}" style="width:100%;height:100%;object-fit:cover;">`;
+    else previewDiv.innerHTML = '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--text-dim)">No tex</div>';
+    libEditor.appendChild(previewDiv);
+
+    _slider(libEditor, slot, 'uvScale', { label: 'UV tile', min: 0.25, max: 80, step: 0.25, onChange: () => lib.setSlotUvScale(slot.id, slot.uvScale) });
+    _slider(libEditor, slot, 'normalStrength', { label: 'Normal str', min: 0, max: 3, step: 0.02, onChange: () => lib.setSlotStrength(slot.id, 'normal', slot.normalStrength) });
+    _slider(libEditor, slot, 'aoStrength', { label: 'AO str', min: 0, max: 2, step: 0.02, onChange: () => lib.setSlotStrength(slot.id, 'ao', slot.aoStrength) });
+    _slider(libEditor, slot, 'roughStrength', { label: 'Rough str', min: 0, max: 2, step: 0.02, onChange: () => lib.setSlotStrength(slot.id, 'rough', slot.roughStrength) });
+
+    _separator(libEditor);
+    for (const kind of ['albedo', 'normal', 'ao', 'rough']) {
+      _button(libEditor, { title: `Upload ${kind}...`, onClick: () => {
+        const input = document.createElement('input');
+        input.type = 'file'; input.accept = 'image/*';
+        input.onchange = async () => {
+          const file = input.files?.[0];
+          if (file) { await lib.replaceMapFromFile(slot.id, kind, file); buildLibSlotEditor(); buildLayerCards(); }
+        };
+        input.click();
+      }});
+    }
+
+    if (lib.slots.length > 1) {
+      _separator(libEditor);
+      _button(libEditor, { title: 'Remove this slot', onClick: () => {
+        lib.removeSlot(slot.id);
+        libState.activeSlotId = lib.slots[0]?.id ?? '';
+        buildLibSlotPicker();
+        buildLibSlotEditor();
+        buildLayerPickers();
+        buildLayerCards();
+      }});
     }
   }
-  buildLayerPickers();
 
-  _separator(paintBody);
-  _button(paintBody, { title: 'Fill world with active layer', onClick: () => app.paintFill() });
-  _button(paintBody, { title: 'Clear all paint', onClick: () => app.paintClear() });
+  function buildLibSlotPicker() {
+    libPicker.innerHTML = '';
+    const opts = {};
+    for (const s of lib.slots) opts[s.name || s.id] = s.id;
+    if (!lib.getSlot(libState.activeSlotId)) libState.activeSlotId = lib.slots[0]?.id ?? '';
+    _dropdown(libPicker, libState, 'activeSlotId', { label: 'Slot', options: opts, onChange: () => buildLibSlotEditor() });
+  }
+
+  const libPicker = document.createElement('div');
+  libBody.appendChild(libPicker);
+
+  _button(libBody, { title: '+ Add texture slot', onClick: () => {
+    const slot = lib.addSlot();
+    libState.activeSlotId = slot.id;
+    buildLibSlotPicker();
+    buildLibSlotEditor();
+    buildLayerPickers();
+    buildLayerCards();
+  }});
+
+  const libEditor = document.createElement('div');
+  libBody.appendChild(libEditor);
+
+  buildLibSlotPicker();
+  buildLibSlotEditor();
+
+  _separator(panel);
+  _button(panel, { title: 'Fill world with active layer', onClick: () => app.paintFill() });
+  _button(panel, { title: 'Clear all paint', onClick: () => app.paintClear() });
+
+  panel._rebuildLayerCards = buildLayerCards;
 
   return panel;
 }
