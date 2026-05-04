@@ -193,6 +193,17 @@ const DEFAULT_SLOT_PRESETS = [
       rough: "/textures/Ground037_1K-JPG_Roughness.jpg",
     },
   },
+  {
+    id: "snow_010a",
+    name: "Snow 010A",
+    uvScale: 3.0,
+    paths: {
+      albedo: "/textures/Snow010A/Snow010A_1K-JPG_Color.jpg",
+      normal: "/textures/Snow010A/Snow010A_1K-JPG_NormalGL.jpg",
+      ao: "/textures/Snow010A/Snow010A_1K-JPG_AmbientOcclusion.jpg",
+      rough: "/textures/Snow010A/Snow010A_1K-JPG_Roughness.jpg",
+    },
+  },
 ];
 
 /**
