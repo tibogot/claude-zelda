@@ -817,7 +817,7 @@ const MODE_FOLDERS = {
 const ALWAYS_HIDDEN = new Set(['Global', 'Lighting & atmosphere']);
 const ALWAYS_VISIBLE = new Set(['Terrain/LOD', 'Perf Gate']);
 
-const CUSTOM_MODES = new Set(['sculpt', 'paint', 'treePaint', 'props', 'foliagePaint', 'playSpawn', 'hole', 'barrier', 'ambientfx', 'fleurs']);
+const CUSTOM_MODES = new Set(['sculpt', 'paint', 'treePaint', 'props', 'foliagePaint', 'playSpawn', 'hole', 'barrier', 'ambientfx', 'fleurs', 'cliffGrass', 'cliffs']);
 const CUSTOM_KEEP_FOLDERS = {
   paint: ['Terrain appearance', 'Texture library'],
 };
@@ -845,6 +845,10 @@ function syncToolsTab(pane, mode) {
   if (ambientfxPanel) ambientfxPanel.style.display = mode === 'ambientfx' ? '' : 'none';
   const fleurPanel = document.getElementById('fleur-panel');
   if (fleurPanel) fleurPanel.style.display = mode === 'fleurs' ? '' : 'none';
+  const cliffGrassPanel = document.getElementById('cliffgrass-panel');
+  if (cliffGrassPanel) cliffGrassPanel.style.display = mode === 'cliffGrass' ? '' : 'none';
+  const cliffsPanel = document.getElementById('cliffs-panel');
+  if (cliffsPanel) cliffsPanel.style.display = mode === 'cliffs' ? '' : 'none';
 
   const kept = CUSTOM_KEEP_FOLDERS[mode] || [];
   const show = hasCustom ? new Set(kept) : new Set(MODE_FOLDERS[mode] || []);
@@ -1495,6 +1499,85 @@ function buildFleurPanel(app) {
   return panel;
 }
 
+// === Build custom Cliff Grass panel ===
+function buildCliffGrassPanel(app) {
+  const panel = document.createElement('div');
+  panel.id = 'cliffgrass-panel';
+  const cfg = app.config;
+
+  const brushBody = _section(panel, 'Brush');
+  _slider(brushBody, app.toolState.brush, 'radius', { label: 'Radius', min: cfg.sculpt.brushMin, max: cfg.sculpt.brushMax, step: 0.5 });
+  _slider(brushBody, app.toolState.brush, 'strength', { label: 'Strength', min: cfg.sculpt.strengthMin, max: cfg.sculpt.strengthMax, step: 0.01 });
+
+  const body = _section(panel, 'Cliff Grass');
+  _button(body, { title: 'Fill cliff grass', onClick: () => app.cliffGrassFill() });
+  _button(body, { title: 'Clear cliff grass', onClick: () => app.cliffGrassClear() });
+
+  return panel;
+}
+
+// === Build custom Cliffs panel ===
+function buildCliffsPanel(app) {
+  const panel = document.createElement('div');
+  panel.id = 'cliffs-panel';
+  const ts = app.toolState;
+  const cfg = app.config;
+
+  const brushBody = _section(panel, 'Brush');
+  _slider(brushBody, ts.brush, 'radius', { label: 'Radius', min: cfg.sculpt.brushMin, max: cfg.sculpt.brushMax, step: 0.5 });
+
+  // Active slot
+  const slotBody = _section(panel, 'Active Slot');
+  const slotOpts = {};
+  for (let i = 0; i < ts.cliffSlots.length; i++) slotOpts[ts.cliffSlots[i].name] = i;
+  _dropdown(slotBody, ts.cliffs, 'activeSlot', { label: 'Active [1-5]', options: slotOpts });
+
+  // Per-slot GLB import
+  const slotsBody = _section(panel, 'Cliff Slots (GLB Import)');
+  for (let i = 0; i < ts.cliffSlots.length; i++) {
+    const slot = ts.cliffSlots[i];
+    const sb = _section(slotsBody.parentElement, `Slot ${i + 1}: ${slot.name}`, i === 0);
+    _button(sb, { title: 'Load GLB...', onClick: () => app.importCliffGlb(i) });
+    _button(sb, { title: 'Remove model', onClick: () => app.removeCliffSlot(i) });
+  }
+
+  _separator(panel);
+
+  // Transform
+  const gizmoBody = _section(panel, 'Transform');
+  _slider(gizmoBody, ts.cliffs, 'sinkOffset', { label: 'Sink offset', min: 0, max: 10, step: 0.1 });
+  _dropdown(gizmoBody, ts.cliffs, 'transformMode', {
+    label: 'Gizmo [W/E/R]',
+    options: { 'Translate (W)': 'translate', 'Rotate (E)': 'rotate', 'Scale (R)': 'scale' },
+    onChange: () => app.cliffTransformModeChanged(),
+  });
+
+  _separator(panel);
+
+  // Blend Material
+  const blendBody = _section(panel, 'Blend Material', false);
+  const bc = () => app.cliffBlendChanged();
+  _slider(blendBody, ts.cliffs, 'blendRockScale', { label: 'Rock UV Scale', min: 0.001, max: 0.1, step: 0.001, onChange: bc });
+  _slider(blendBody, ts.cliffs, 'blendRockBrightness', { label: 'Rock Brightness', min: 0.1, max: 5, step: 0.05, onChange: bc });
+  _slider(blendBody, ts.cliffs, 'blendRockContrast', { label: 'Rock Contrast', min: 0.1, max: 3, step: 0.05, onChange: bc });
+  _slider(blendBody, ts.cliffs, 'blendTriplanarSharp', { label: 'Triplanar Sharp', min: 1, max: 16, step: 0.5, onChange: bc });
+  _slider(blendBody, ts.cliffs, 'blendSlopeLow', { label: 'Slope Low', min: 0, max: 1, step: 0.01, onChange: bc });
+  _slider(blendBody, ts.cliffs, 'blendSlopeHigh', { label: 'Slope High', min: 0, max: 1, step: 0.01, onChange: bc });
+  _slider(blendBody, ts.cliffs, 'blendNoiseScale', { label: 'Slope Noise Scale', min: 0.001, max: 0.5, step: 0.001, onChange: bc });
+  _slider(blendBody, ts.cliffs, 'blendNoiseStr', { label: 'Slope Noise Str', min: 0, max: 1, step: 0.01, onChange: bc });
+  _slider(blendBody, ts.cliffs, 'blendGroundScale', { label: 'Ground UV Scale', min: 0.1, max: 5, step: 0.1, onChange: bc });
+
+  _separator(panel);
+
+  // Actions
+  _button(panel, { title: 'Rebake BVH', onClick: () => app.rebakeBvh() });
+  _separator(panel);
+  _button(panel, { title: 'Delete Selected [Del]', onClick: () => app.deleteSelectedCliff() });
+  _button(panel, { title: 'Clear All Cliffs', onClick: () => app.clearAllCliffs() });
+
+  return panel;
+}
+
 // === Build World tab ===
 function buildWorldTab(app) {
   const container = document.getElementById('tab-environment');
@@ -2085,6 +2168,8 @@ try {
   toolsTab.appendChild(buildBarrierPanel(app));
   toolsTab.appendChild(buildAmbientFxPanel(app));
   toolsTab.appendChild(buildFleurPanel(app));
+  toolsTab.appendChild(buildCliffGrassPanel(app));
+  toolsTab.appendChild(buildCliffsPanel(app));
 
   // Move Tweakpane pane into the Tools tab & apply mode-aware folder visibility
   requestAnimationFrame(() => {

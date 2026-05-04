@@ -1009,6 +1009,7 @@ export async function startV2App(opts = {}) {
   let _playSpawnChanged, _barrierOverlayChanged, _barrierClear, _barrierFill, _holeOverlayChanged, _holeClear;
   let _ambientFxFlapChanged, _ambientFxRingsChanged, _ambientFxClear;
   let _fleurChanged, _fleurColorChanged, _fleurStemChanged, _fleurStemCurveChanged, _fleurInteractionChanged, _fleurClear;
+  let _cliffGrassFill, _cliffGrassClear, _importCliffGlb, _removeCliffSlot, _deleteSelectedCliff, _clearAllCliffs, _cliffTransformModeChanged, _cliffBlendChanged;
   ui = createTweakpaneUi({
     toolState,
     config,
@@ -1206,15 +1207,15 @@ export async function startV2App(opts = {}) {
     onGrassClear: () => {
       grassManager.clearDensity();
     },
-    onCliffGrassFill: () => {
+    onCliffGrassFill: (_cliffGrassFill = () => {
       toolState.grass.enabled = true;
       grassManager.fillCliffDensity();
       grassManager.syncUniforms(toolState.grass, sunDir);
       ui?.pane.refresh();
-    },
-    onCliffGrassClear: () => {
+    }),
+    onCliffGrassClear: (_cliffGrassClear = () => {
       grassManager.clearCliffDensity();
-    },
+    }),
     onGrassSaveDensity: () => {
       const data = grassManager.densityTex.image.data;
       const blob = new Blob([data.buffer], { type: "application/octet-stream" });
@@ -1239,7 +1240,7 @@ export async function startV2App(opts = {}) {
         treeLodRenderer.setCastShadow(i, toolState.treeLod.castShadow);
       }
     }),
-    onImportCliffGlb: async (slotIdx) => {
+    onImportCliffGlb: (_importCliffGlb = async (slotIdx) => {
       tryBuildCliffBlendMaterial();
       const file = await openGlbPicker();
       if (!file) return;
@@ -1265,24 +1266,24 @@ export async function startV2App(opts = {}) {
       } catch (err) {
         console.error("[V2] Failed to load cliff GLB:", err);
       }
-    },
-    onRemoveCliffSlot: (slotIdx) => {
+    }),
+    onRemoveCliffSlot: (_removeCliffSlot = (slotIdx) => {
       delete cliffSlotToType[slotIdx];
       toolState.cliffSlots[slotIdx].loaded = false;
       toolState.cliffSlots[slotIdx].name = `Cliff ${slotIdx + 1}`;
       ui?.pane.refresh();
       console.log(`[V2] Cliff slot ${slotIdx} cleared`);
-    },
-    onDeleteSelectedCliff: () => cliffSystem.handleDelete(),
-    onClearAllCliffs: () => cliffSystem.clearAll(),
+    }),
+    onDeleteSelectedCliff: (_deleteSelectedCliff = () => cliffSystem.handleDelete()),
+    onClearAllCliffs: (_clearAllCliffs = () => cliffSystem.clearAll()),
     onRebakeBvh: (_rebakeBvh = () => {
       cliffBvh.bake(terrainStore, config, [propStore, splineSystem, fullRoadSystem, smartRoadSystem, waterfallSystem]);
       grassManager.rebuildCliffHeightTex(cliffBvh, terrainStore, config.world.size);
       console.log("[V2] BVH rebaked (cliffs + props + spline/full-road/smart-road accessories + waterfalls) + cliff height tex updated");
     }),
-    onCliffTransformModeChanged: () => {
+    onCliffTransformModeChanged: (_cliffTransformModeChanged = () => {
       transformControls.setMode(toolState.cliffs.transformMode);
-    },
+    }),
     onRoadChanged: () => {
       roadSystem.saveActiveStyle();
       roadSystem.syncMaterial();
@@ -1533,7 +1534,7 @@ export async function startV2App(opts = {}) {
       if (!toolState.spline.kerbAutoApplyActive) return;
       splineSystem.syncActiveKerbFromToolState();
     },
-    onCliffBlendChanged: () => {
+    onCliffBlendChanged: (_cliffBlendChanged = () => {
       if (!cliffBlendPack) return;
       const c = toolState.cliffs;
       cliffBlendPack.uCBSlopeLow.value = c.blendSlopeLow;
@@ -1545,7 +1546,7 @@ export async function startV2App(opts = {}) {
       cliffU.uRockBrightness.value = c.blendRockBrightness;
       cliffU.uRockContrast.value = c.blendRockContrast;
       cliffU.uTriplanarSharp.value = c.blendTriplanarSharp;
-    },
+    }),
     onImportPropGlb: (_importPropGlb = async () => {
       const file = await openGlbPicker();
       if (!file) return;
@@ -3096,6 +3097,14 @@ export async function startV2App(opts = {}) {
     fleurStemCurveChanged() { _fleurStemCurveChanged(); },
     fleurInteractionChanged() { _fleurInteractionChanged(); },
     fleurClear() { _fleurClear(); },
+    cliffGrassFill() { _cliffGrassFill(); },
+    cliffGrassClear() { _cliffGrassClear(); },
+    importCliffGlb(slotIdx) { _importCliffGlb(slotIdx); },
+    removeCliffSlot(slotIdx) { _removeCliffSlot(slotIdx); },
+    deleteSelectedCliff() { _deleteSelectedCliff(); },
+    clearAllCliffs() { _clearAllCliffs(); },
+    cliffTransformModeChanged() { _cliffTransformModeChanged(); },
+    cliffBlendChanged() { _cliffBlendChanged(); },
     onConfigChanged() { chunkStream.update(camera.position); },
     dispose() {
       renderer.domElement.removeEventListener("wheel", onCanvasWheelBrush, { capture: true });
