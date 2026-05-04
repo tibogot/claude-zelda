@@ -128,6 +128,12 @@ const SHOW_LEGACY_CAR_HUD_RECT = false;
 const CAR_HUD_SPEED_SMOOTH_UP = 15;
 const CAR_HUD_SPEED_SMOOTH_DOWN = 6;
 const CAR_HUD_NITRO_SMOOTH = 10;
+/** Flight HUD readouts (separate from car nitro tank until plane boost is wired). */
+const PLANE_HUD_SPEED_SMOOTH = 14;
+const PLANE_HUD_ALT_SMOOTH = 10;
+const PLANE_HUD_NITRO_SMOOTH = 10;
+/** Thrust reserve shown in flight HUD; gameplay drain/regen hooks in later. */
+const PLANE_NITRO_FULL = 1;
 /** Ease Shift boost & nitro power in/out so speed cap / thrust don’t snap on key release. */
 const CAR_BOOST_BLEND_SMOOTH = 12;
 const CAR_NITRO_FX_BLEND_SMOOTH = 16;
@@ -135,6 +141,13 @@ const CAR_NITRO_FX_BLEND_SMOOTH = 16;
 function _expSmoothStep(current, target, dtSec, rate) {
   const a = 1 - Math.exp(-rate * dtSec);
   return current + (target - current) * a;
+}
+
+/** Degrees in (-180, 180] for HUD bank readout. */
+function _bankDegFromRad(rad) {
+  let d = (rad * 180) / Math.PI;
+  d = ((((d + 180) % 360) + 360) % 360) - 180;
+  return d;
 }
 
 const CAR_BASE_ACCEL_LOW_SPEED_MUL = 0.52;
@@ -876,9 +889,20 @@ export class PlayMode {
     this.isoTargetRing.visible = false;
     scene.add(this.isoTargetRing);
     this.planeSpeed = 0;
+    /** Plane-only thrust reserve (HUD + future boost); not shared with `carNitro`. */
+    this.planeNitro = PLANE_NITRO_FULL;
+    this._planeHudSpdSmooth = 0;
+    this._planeHudAltSmooth = 0;
+    this._planeHudNitroSmooth = PLANE_NITRO_FULL;
     this._flyHud = null;
     this._flyHudSpd = null;
     this._flyHudAlt = null;
+    this._flyHudPitch = null;
+    this._flyHudBank = null;
+    this._flyHudHorizonLayer = null;
+    this._flyHudNitroPct = null;
+    this._flyHudNitroBar = null;
+    this._flyHudLevelHint = null;
     this._createFlyHud();
 
     // Character state
@@ -981,17 +1005,82 @@ export class PlayMode {
   _createFlyHud() {
     const el = document.createElement("div");
     el.id = "fly-hud";
-    el.style.cssText =
-      "position:fixed;bottom:16px;left:50%;transform:translateX(-50%);" +
-      "background:rgba(0,0,0,0.6);border:1px solid rgba(255,255,255,0.2);border-radius:8px;" +
-      "padding:8px 18px;font-family:monospace;font-size:14px;color:#d7e4ef;z-index:5;" +
-      "display:none;pointer-events:none;white-space:nowrap;";
-    el.innerHTML =
-      'SPD <span id="fly-hud-spd">0</span> m/s &nbsp; ALT <span id="fly-hud-alt">0</span> m';
+    el.style.cssText = [
+      "position:fixed",
+      "bottom:20px",
+      "right:20px",
+      "z-index:6",
+      "display:none",
+      "pointer-events:none",
+      "font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif",
+      "font-variant-numeric:tabular-nums",
+      "-webkit-font-smoothing:antialiased",
+      "filter:drop-shadow(0 16px 40px rgba(0,0,0,0.65))",
+    ].join(";");
+    el.innerHTML = `
+      <div style="display:flex;align-items:stretch;gap:0;border-radius:18px;overflow:hidden;background:rgba(6,10,14,0.72);backdrop-filter:blur(14px) saturate(1.2);-webkit-backdrop-filter:blur(14px) saturate(1.2);border:1px solid rgba(120,175,200,0.22);box-shadow:inset 0 1px 0 rgba(255,255,255,0.06),0 0 0 1px rgba(0,0,0,0.35),0 8px 32px rgba(0,0,0,0.4);">
+        <div style="display:flex;flex-direction:column;justify-content:space-between;padding:14px 16px 14px 18px;min-width:188px;gap:10px;border-right:1px solid rgba(255,255,255,0.06);">
+          <div>
+            <div style="font-size:9px;font-weight:600;letter-spacing:0.2em;color:rgba(140,175,195,0.75);text-transform:uppercase;">Indicated airspeed</div>
+            <div style="display:flex;align-items:baseline;gap:8px;margin-top:4px;">
+              <span id="fly-hud-spd" style="font-size:38px;font-weight:700;line-height:1;color:#f2f8fc;letter-spacing:-0.02em;text-shadow:0 1px 0 rgba(0,0,0,0.45),0 0 24px rgba(100,180,220,0.2);">0</span>
+              <span style="font-size:11px;font-weight:500;color:rgba(130,160,180,0.65);">m/s</span>
+            </div>
+          </div>
+          <div style="display:flex;align-items:stretch;gap:0;border-radius:10px;background:rgba(0,0,0,0.22);border:1px solid rgba(255,255,255,0.05);overflow:hidden;">
+            <div style="flex:1;padding:8px 10px;text-align:center;">
+              <div style="font-size:8px;font-weight:600;letter-spacing:0.16em;color:rgba(130,165,188,0.7);">AGL</div>
+              <div style="margin-top:2px;"><span id="fly-hud-alt" style="font-size:19px;font-weight:700;color:#e8f2f8;">0</span><span style="font-size:10px;color:rgba(120,150,170,0.55);">m</span></div>
+            </div>
+            <div style="width:1px;background:rgba(255,255,255,0.07);flex-shrink:0;"></div>
+            <div style="flex:1;padding:8px 10px;text-align:center;">
+              <div style="font-size:8px;font-weight:600;letter-spacing:0.16em;color:rgba(130,165,188,0.7);">PITCH</div>
+              <div style="margin-top:2px;"><span id="fly-hud-pitch" style="font-size:19px;font-weight:700;color:#e8f2f8;">0</span><span style="font-size:10px;color:rgba(120,150,170,0.55);">°</span></div>
+            </div>
+            <div style="width:1px;background:rgba(255,255,255,0.07);flex-shrink:0;"></div>
+            <div style="flex:1;padding:8px 10px;text-align:center;">
+              <div style="font-size:8px;font-weight:600;letter-spacing:0.16em;color:rgba(130,165,188,0.7);">BANK</div>
+              <div style="margin-top:2px;"><span id="fly-hud-bank" style="font-size:19px;font-weight:700;color:#e8f2f8;">0</span><span style="font-size:10px;color:rgba(120,150,170,0.55);">°</span></div>
+            </div>
+          </div>
+          <div id="fly-hud-level-hint" style="align-self:flex-end;font-size:8px;font-weight:600;letter-spacing:0.18em;padding:5px 11px;border-radius:999px;opacity:0;transition:opacity 0.22s ease;color:rgba(185,245,215,0.95);background:rgba(45,120,85,0.35);border:1px solid rgba(100,200,150,0.35);text-transform:uppercase;">Wings level</div>
+          <div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;">
+              <span style="font-size:8px;font-weight:600;letter-spacing:0.18em;color:rgba(200,155,115,0.85);text-transform:uppercase;">Thrust reserve</span>
+              <span id="fly-hud-nitro-pct" style="font-size:10px;font-weight:700;color:rgba(255,220,185,0.95);">100%</span>
+            </div>
+            <div style="height:6px;border-radius:999px;overflow:hidden;background:rgba(0,0,0,0.35);box-shadow:inset 0 1px 2px rgba(0,0,0,0.5);">
+              <div id="fly-hud-nitro-bar" style="width:100%;height:100%;border-radius:999px;background:linear-gradient(90deg,#c45a28,#e8a060);box-shadow:0 0 12px rgba(230,140,70,0.35);"></div>
+            </div>
+          </div>
+        </div>
+        <div style="padding:12px 14px 12px 10px;display:flex;align-items:center;justify-content:center;background:linear-gradient(180deg,rgba(255,255,255,0.03),transparent);">
+          <div style="position:relative;width:124px;height:124px;border-radius:50%;padding:3px;background:linear-gradient(145deg,rgba(90,110,125,0.5),rgba(20,28,36,0.9));box-shadow:inset 0 1px 0 rgba(255,255,255,0.12),0 4px 16px rgba(0,0,0,0.35);">
+            <div style="position:relative;width:100%;height:100%;border-radius:50%;overflow:hidden;background:#030608;box-shadow:inset 0 0 0 1px rgba(0,0,0,0.6);">
+              <div id="fly-hud-horizon-layer" style="position:absolute;left:50%;top:50%;width:260%;height:260%;margin-left:-130%;margin-top:-130%;transform:rotate(0deg);background:radial-gradient(ellipse 55% 42% at 50% 18%,rgba(180,220,255,0.35) 0%,transparent 55%),linear-gradient(180deg,#0d2844 0%,#1e5078 32%,#4e8eb8 47%,#7ab8cf 49.2%,#c9a06a 50.2%,#6d5a42 51.5%,#2a241c 100%);"></div>
+              <div style="position:absolute;inset:0;border-radius:50%;pointer-events:none;box-shadow:inset 0 0 36px rgba(0,0,0,0.55);"></div>
+              <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;">
+                <div style="display:flex;align-items:center;gap:0;">
+                  <div style="width:22px;height:3px;border-radius:2px 0 0 2px;background:linear-gradient(90deg,rgba(255,255,255,0.08),rgba(255,250,235,0.95));box-shadow:-1px 0 6px rgba(255,255,255,0.25);"></div>
+                  <div style="width:5px;height:5px;border-radius:50%;background:#f8fafc;box-shadow:0 0 6px rgba(255,255,255,0.5);"></div>
+                  <div style="width:22px;height:3px;border-radius:0 2px 2px 0;background:linear-gradient(90deg,rgba(255,250,235,0.95),rgba(255,255,255,0.08));box-shadow:1px 0 6px rgba(255,255,255,0.25);"></div>
+                </div>
+              </div>
+              <div style="position:absolute;top:8px;left:0;right:0;text-align:center;font-size:7px;font-weight:600;letter-spacing:0.24em;color:rgba(160,195,215,0.55);text-transform:uppercase;">Horizon</div>
+            </div>
+          </div>
+        </div>
+      </div>`;
     document.body.appendChild(el);
     this._flyHud = el;
     this._flyHudSpd = el.querySelector("#fly-hud-spd");
     this._flyHudAlt = el.querySelector("#fly-hud-alt");
+    this._flyHudPitch = el.querySelector("#fly-hud-pitch");
+    this._flyHudBank = el.querySelector("#fly-hud-bank");
+    this._flyHudHorizonLayer = el.querySelector("#fly-hud-horizon-layer");
+    this._flyHudNitroPct = el.querySelector("#fly-hud-nitro-pct");
+    this._flyHudNitroBar = el.querySelector("#fly-hud-nitro-bar");
+    this._flyHudLevelHint = el.querySelector("#fly-hud-level-hint");
   }
 
   _createCarHud() {
@@ -2082,6 +2171,10 @@ export class PlayMode {
     if (this._carSpeedometer) this._carSpeedometer.style.display = "none";
     if (this._lotusCamGui) this._lotusCamGui.domElement.style.display = "none";
     this.planeSpeed = 0;
+    this.planeNitro = PLANE_NITRO_FULL;
+    this._planeHudSpdSmooth = 0;
+    this._planeHudAltSmooth = 0;
+    this._planeHudNitroSmooth = PLANE_NITRO_FULL;
     this.carVx = 0;
     this.carVz = 0;
     this.carNitro = 1.0;
@@ -3630,12 +3723,72 @@ export class PlayMode {
       );
     }
 
-    // Flight HUD
+    // Flight HUD (avionics strip + mini attitude)
     if (this._flyHud) {
       if (flying) {
         this._flyHud.style.display = "";
-        this._flyHudSpd.textContent = Math.round(Math.abs(this.planeSpeed));
-        this._flyHudAlt.textContent = Math.round(this.flyHeight - groundY);
+        let barrelAdd = 0;
+        if (this.flyBarrelActive) {
+          const t = Math.min(1, this.flyBarrelPhase);
+          barrelAdd = t * t * (3 - 2 * t) * Math.PI * 2 * this.flyBarrelDir;
+        }
+        const bankRad = iso
+          ? barrelAdd + this.flyAileronAngle
+          : this.flyRoll + barrelAdd + this.flyAileronAngle;
+        const bankDeg = _bankDegFromRad(bankRad);
+        const pitchDeg = Math.round((this.flyPitch * 180) / Math.PI);
+
+        const spdTgt = Math.abs(this.planeSpeed);
+        const dSpd = spdTgt - this._planeHudSpdSmooth;
+        const spdRate =
+          dSpd > 0 ? PLANE_HUD_SPEED_SMOOTH : PLANE_HUD_SPEED_SMOOTH * 0.55;
+        this._planeHudSpdSmooth = _expSmoothStep(
+          this._planeHudSpdSmooth,
+          spdTgt,
+          dtSec,
+          spdRate,
+        );
+        const aglTgt = this.flyHeight - groundY;
+        this._planeHudAltSmooth = _expSmoothStep(
+          this._planeHudAltSmooth,
+          aglTgt,
+          dtSec,
+          PLANE_HUD_ALT_SMOOTH,
+        );
+        this._planeHudNitroSmooth = _expSmoothStep(
+          this._planeHudNitroSmooth,
+          this.planeNitro,
+          dtSec,
+          PLANE_HUD_NITRO_SMOOTH,
+        );
+
+        this._flyHudSpd.textContent = Math.round(this._planeHudSpdSmooth);
+        this._flyHudAlt.textContent = Math.round(this._planeHudAltSmooth);
+        this._flyHudPitch.textContent = pitchDeg;
+        this._flyHudBank.textContent = Math.round(bankDeg);
+
+        if (this._flyHudHorizonLayer) {
+          this._flyHudHorizonLayer.style.transform = `rotate(${-bankDeg}deg)`;
+        }
+        const level = Math.abs(bankDeg) < 3.5;
+        if (this._flyHudLevelHint) {
+          this._flyHudLevelHint.style.opacity = level ? "1" : "0";
+        }
+        const nitroPct = Math.round(this._planeHudNitroSmooth * 100);
+        if (this._flyHudNitroPct) {
+          this._flyHudNitroPct.textContent = `${nitroPct}%`;
+          this._flyHudNitroPct.style.color =
+            this._planeHudNitroSmooth > 0.2
+              ? "rgba(255,220,190,0.95)"
+              : "rgba(255,150,150,0.95)";
+        }
+        if (this._flyHudNitroBar) {
+          this._flyHudNitroBar.style.width = `${nitroPct}%`;
+          this._flyHudNitroBar.style.background =
+            this._planeHudNitroSmooth > 0.2
+              ? "linear-gradient(90deg,#b84820,#e8a060)"
+              : "linear-gradient(90deg,#a03030,#c07070)";
+        }
       } else {
         this._flyHud.style.display = "none";
       }
@@ -4368,6 +4521,10 @@ export class PlayMode {
     }
     if (this._carHud) this._carHud.remove();
     if (this._carSpeedometer) this._carSpeedometer.remove();
+    if (this._flyHud) {
+      this._flyHud.remove();
+      this._flyHud = null;
+    }
     if (this._lotusCamGui) {
       this._lotusCamGui.destroy();
       this._lotusCamGui = null;
