@@ -152,14 +152,16 @@ function _bankDegFromRad(rad) {
 
 const CAR_BASE_ACCEL_LOW_SPEED_MUL = 0.52;
 const CAR_BASE_ACCEL_RAMP_TO_KMH = 100;
-const CAR_BODY_ROLL_MAX = 0.2;
-const CAR_BODY_PITCH_MAX = 0.14;
-const CAR_BODY_TERRAIN_ROLL_MAX = 0.16;
-const CAR_BODY_TERRAIN_PITCH_MAX = 0.14;
+const CAR_BODY_ROLL_MAX = 0.35;
+const CAR_BODY_PITCH_MAX = 0.4;
+const CAR_BODY_TERRAIN_ROLL_MAX = 0.38;
+const CAR_BODY_TERRAIN_PITCH_MAX = 0.42;
 const CAR_BODY_SMOOTH = 14;
-const CAR_TERRAIN_BODY_SMOOTH = 9;
+const CAR_TERRAIN_BODY_SMOOTH = 14;
 const CAR_WHEEL_BASE = 1.9;
 const CAR_TRACK = 1.1;
+const CAR_SUSP_TRAVEL = 0.2;
+const CAR_SUSP_SMOOTH = 18;
 
 const DRIFT_MARK_MAX_SEGMENTS = 4096;
 const DRIFT_MARK_VERTS_PER_SEGMENT = 6;
@@ -990,8 +992,8 @@ export class PlayMode {
       driftLag: 1.8,
       fov: 65,
       speedPullBack: 3.0,
-      rollMax: 0.08,
-      pitchMax: 0.06,
+      rollMax: 0.35,
+      pitchMax: 0.4,
     };
     this._lotusCamDistSmooth = 0;
     this._lotusBlinkerSide = 0;
@@ -1586,8 +1588,8 @@ export class PlayMode {
       gui
         .add(this.lotusCam, "speedPullBack", 0, 8, 0.1)
         .name("Speed Pull-back");
-      gui.add(this.lotusCam, "rollMax", 0.01, 0.3, 0.01).name("Roll Max");
-      gui.add(this.lotusCam, "pitchMax", 0.01, 0.2, 0.01).name("Pitch Max");
+      gui.add(this.lotusCam, "rollMax", 0.01, 0.5, 0.01).name("Roll Max");
+      gui.add(this.lotusCam, "pitchMax", 0.01, 0.5, 0.01).name("Pitch Max");
       gui
         .add(this.lotusCam, "fov", 40, 110, 1)
         .name("FOV")
@@ -3371,16 +3373,17 @@ export class PlayMode {
       if (isBruno && this.carLoaded) {
         anyCarRendered = true;
         const scaleFactor = this.carRoot.scale.x || CAR_MODEL_SCALE;
-        const rootY =
-          this.playerPos.y + (CAR_RIDE_HEIGHT + CAR_WHEEL_RADIUS) * scaleFactor;
-        this.carRoot.position.set(this.playerPos.x, rootY, this.playerPos.z);
-        this.carRoot.rotation.y = this.carHeading;
+        const halfWB = CAR_WHEEL_BASE * 0.5;
+        const halfTr = CAR_TRACK * 0.5;
 
+        // Step 1: Sample terrain at each wheel — wheels are ground truth
         let frontY = 0,
           rearY = 0,
           leftY = 0,
           rightY = 0,
+          sumH = 0,
           rearIdx = 0;
+        const wheelHeights = [];
         for (const w of this.carWheels) {
           const lx = w.offset.x * scaleFactor;
           const lz = w.offset.z * scaleFactor;
@@ -3393,6 +3396,8 @@ export class PlayMode {
             lx * Math.sin(this.carHeading) +
             lz * Math.cos(this.carHeading);
           const h = this.getTerrainHeight(wx, wz);
+          wheelHeights.push(h);
+          sumH += h;
           w.contactWorld.set(wx, h + DRIFT_MARK_Y_OFFSET, wz);
           if (w.offset.z < 0) frontY += h;
           else {
@@ -3404,6 +3409,16 @@ export class PlayMode {
           else rightY += h;
         }
 
+        // Step 2: Body position derived FROM wheel contacts
+        const avgWheelH = sumH / 4;
+        const rootY = this.carInAir
+          ? this.playerPos.y +
+            (CAR_RIDE_HEIGHT + CAR_WHEEL_RADIUS) * scaleFactor
+          : avgWheelH + (CAR_RIDE_HEIGHT + CAR_WHEEL_RADIUS) * scaleFactor;
+        this.carRoot.position.set(this.playerPos.x, rootY, this.playerPos.z);
+        this.carRoot.rotation.y = this.carHeading;
+
+        // Step 3: Body pitch/roll derived from wheel contact plane
         const leftAvg = leftY * 0.5,
           rightAvg = rightY * 0.5,
           frontAvg = frontY * 0.5,
@@ -3460,6 +3475,31 @@ export class PlayMode {
         );
         this.carChassis.rotation.set(finalPitch, 0, finalRoll);
 
+        // Step 4: Per-wheel suspension — close the gap between body plane and actual terrain
+        const suspSmooth = 1 - Math.exp(-CAR_SUSP_SMOOTH * dtSec);
+        for (let i = 0; i < this.carWheels.length; i++) {
+          const w = this.carWheels[i];
+          const actualH = wheelHeights[i];
+          const planeH =
+            avgWheelH +
+            (rearAvg - frontAvg) * (w.offset.z / halfWB) * 0.5 +
+            (rightAvg - leftAvg) * (w.offset.x / halfTr) * 0.5;
+          const suspOffset = this.carInAir
+            ? 0
+            : (actualH - planeH) / scaleFactor;
+          const clampedOffset = THREE.MathUtils.clamp(
+            suspOffset,
+            -CAR_SUSP_TRAVEL,
+            CAR_SUSP_TRAVEL,
+          );
+          if (w._suspY === undefined) w._suspY = 0;
+          w._suspY = THREE.MathUtils.lerp(w._suspY, clampedOffset, suspSmooth);
+          if (w._suspBaseY === undefined)
+            w._suspBaseY = w.suspension.position.y;
+          w.suspension.position.y = w._suspBaseY + w._suspY;
+        }
+
+        // Steering + wheel spin
         const _steerTarget =
           (keys.KeyA || keys.ArrowLeft ? 0.4 : 0) +
           (keys.KeyD || keys.ArrowRight ? -0.4 : 0);
@@ -3581,6 +3621,30 @@ export class PlayMode {
         );
         // Lotus axes are swapped + roll inverted due to chassis yaw orientation
         this.lotusChassis.rotation.set(-finalRoll, 0, finalPitch);
+
+        // Per-wheel suspension for Lotus
+        const suspSmooth = 1 - Math.exp(-CAR_SUSP_SMOOTH * dtSec);
+        for (let i = 0; i < this.lotusWheels.length; i++) {
+          const w = this.lotusWheels[i];
+          const wheelTerrainH = w.contactWorld.y - DRIFT_MARK_Y_OFFSET;
+          const planeH =
+            baseY +
+            (rearAvg - frontAvg) * (w.steer ? -0.5 : 0.5) +
+            (rightAvg - leftAvg) * (w.isLeft ? -0.5 : 0.5);
+          const suspOffset = this.carInAir
+            ? 0
+            : (wheelTerrainH - planeH) / scaleFactor;
+          const clampedOffset = THREE.MathUtils.clamp(
+            suspOffset,
+            -CAR_SUSP_TRAVEL,
+            CAR_SUSP_TRAVEL,
+          );
+          if (w._suspY === undefined) w._suspY = 0;
+          w._suspY = THREE.MathUtils.lerp(w._suspY, clampedOffset, suspSmooth);
+          if (w._suspBaseY === undefined)
+            w._suspBaseY = w.suspension.position.y;
+          w.suspension.position.y = w._suspBaseY + w._suspY;
+        }
 
         const _steerTarget =
           (keys.KeyA || keys.ArrowLeft ? 0.4 : 0) +
