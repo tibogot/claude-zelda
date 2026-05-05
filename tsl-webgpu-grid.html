@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TSL WebGPU infinite grid (r184)</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        overflow: hidden;
+        background: #0a0a12;
+      }
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #hint {
+        position: fixed;
+        bottom: 12px;
+        left: 12px;
+        z-index: 10;
+        font:
+          12px/1.45 ui-monospace,
+          monospace;
+        color: #c8d4e8;
+        background: rgba(12, 16, 28, 0.72);
+        padding: 8px 12px;
+        border-radius: 6px;
+        pointer-events: none;
+        user-select: none;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="hint">
+      Orbit: drag · Dolly: wheel · Pan: right-drag · Three.js r184 WebGPU + TSL
+      procedural grid
+    </div>
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import {
+        Fn,
+        float,
+        vec3,
+        color,
+        uniform,
+        positionWorld,
+        mix,
+        min,
+        max,
+        abs,
+        fract,
+        fwidth,
+        smoothstep,
+        length,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+      /** IQ-style anti-aliased grid line mask in [0, 1], p = world.xz / cellSize */
+      const gridMask = Fn(([p]) => {
+        const g = fract(p.sub(0.5)).sub(0.5).abs().div(fwidth(p));
+        return float(1.0)
+          .sub(min(min(g.x, g.y), float(1.0)))
+          .saturate();
+      });
+
+      let camera, scene, renderer, controls;
+      let gridMesh;
+
+      const uCellSize = uniform(1.0);
+      const uMajorEvery = uniform(10);
+      const uBg = uniform(new THREE.Color(0x1a1f2e));
+      const uMinor = uniform(new THREE.Color(0x3d4a66));
+      const uMajor = uniform(new THREE.Color(0x6a7a9a));
+      const uAxisX = uniform(new THREE.Color(0xff3355));
+      const uAxisZ = uniform(new THREE.Color(0x3388ff));
+      const uOrigin = uniform(new THREE.Color(0xffcc00));
+      const uAxisPx = uniform(0.06);
+
+      function createGridMaterial() {
+        const mat = new THREE.MeshBasicNodeMaterial();
+        mat.transparent = true;
+        mat.depthWrite = false;
+        mat.side = THREE.DoubleSide;
+
+        const colorNode = Fn(() => {
+          const w = positionWorld;
+          const p = w.xz.div(uCellSize);
+          const pM = w.xz.div(uCellSize.mul(uMajorEvery));
+
+          const mMinor = gridMask(p);
+          const mMajor = gridMask(pM);
+
+          const lineMix = max(mMinor, mMajor);
+          const lineCol = mix(uMinor, uMajor, mMajor);
+
+          const onZAxis = float(1).sub(smoothstep(float(0), uAxisPx, abs(w.x)));
+          const onXAxis = float(1).sub(smoothstep(float(0), uAxisPx, abs(w.z)));
+          const atOrigin = float(1).sub(
+            smoothstep(float(0), uAxisPx.mul(1.5), length(w.xz)),
+          );
+
+          let outCol = mix(uBg, lineCol, lineMix);
+          outCol = mix(outCol, uAxisZ, onZAxis.mul(lineMix));
+          outCol = mix(outCol, uAxisX, onXAxis.mul(lineMix));
+          outCol = mix(outCol, uOrigin, atOrigin.mul(lineMix));
+          return vec3(outCol.r, outCol.g, outCol.b);
+        })();
+
+        mat.colorNode = colorNode;
+        mat.opacityNode = float(1.0);
+        return mat;
+      }
+
+      async function init() {
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0a0a12);
+
+        camera = new THREE.PerspectiveCamera(
+          55,
+          window.innerWidth / window.innerHeight,
+          0.05,
+          5000,
+        );
+        camera.position.set(18, 14, 22);
+
+        const geo = new THREE.PlaneGeometry(4000, 4000, 1, 1);
+        geo.rotateX(-Math.PI / 2);
+        gridMesh = new THREE.Mesh(geo, createGridMaterial());
+        gridMesh.position.y = 0;
+        scene.add(gridMesh);
+
+        renderer = new THREE.WebGPURenderer({ antialias: true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setAnimationLoop(animate);
+        document.body.appendChild(renderer.domElement);
+        await renderer.init();
+
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.06;
+        controls.target.set(0, 0, 0);
+        controls.maxPolarAngle = Math.PI * 0.49;
+        controls.minDistance = 2;
+        controls.maxDistance = 800;
+
+        window.addEventListener("resize", onResize);
+      }
+
+      function onResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      }
+
+      function animate() {
+        controls.update();
+        gridMesh.position.x = controls.target.x;
+        gridMesh.position.z = controls.target.z;
+        renderer.render(scene, camera);
+      }
+
+      init().catch((err) => {
+        document.getElementById("hint").textContent =
+          "WebGPU init failed: " +
+          (err && err.message ? err.message : String(err));
+        console.error(err);
+      });
+    </script>
+  </body>
+</html>
