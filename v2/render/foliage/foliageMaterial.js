@@ -4,10 +4,10 @@
  */
 import * as THREE from "three";
 import {
-  Fn, float, vec3, vec4,
+  Fn, float, vec2, vec3, vec4,
   uniform, attribute,
   texture, uv,
-  mix, smoothstep, clamp,
+  mix, smoothstep, clamp, fract,
   sin, cos, max, pow, dot, normalize, length, sub, negate,
   positionLocal, positionWorld,
   normalLocal, normalWorld,
@@ -39,6 +39,7 @@ export function createFoliageMaterial(opts = {}) {
     aoRadius:     uniform(opts.aoRadius ?? 6.0),
     normalBias:   uniform(opts.normalBias ?? 0.75),
     leafWarp:     uniform(opts.leafWarp ?? 0.28),
+    treeColorVar: uniform(opts.treeColorVar ?? 0.0),
   };
 
   const leafTex = new THREE.Texture();
@@ -72,6 +73,16 @@ export function createFoliageMaterial(opts = {}) {
     col = col.mul(varMul);
     const hueShift = h2.sub(0.5).mul(u.colorVar.mul(0.4));
     col = vec3(col.x.add(hueShift.mul(0.3)), col.y, col.z.sub(hueShift.mul(0.2)));
+
+    const treeOrigin = modelWorldMatrix.mul(vec4(0, 0, 0, 1)).xyz;
+    const treeSeed = fract(sin(dot(treeOrigin.xz, vec2(127.1, 311.7))).mul(43758.5453));
+    const treeBright = treeSeed.sub(0.5).mul(u.treeColorVar);
+    const treeHue = fract(sin(treeSeed.mul(78.233)).mul(43758.5453)).sub(0.5).mul(u.treeColorVar.mul(0.6));
+    col = vec3(
+      col.x.add(treeHue.mul(0.4)).add(treeBright),
+      col.y.add(treeBright),
+      col.z.sub(treeHue.mul(0.3)).add(treeBright)
+    );
 
     const aoHeight = mix(float(1.0).sub(u.aoStr), float(1.0), heightFactor.mul(0.8).add(0.2));
     col = col.mul(aoHeight);
@@ -140,6 +151,7 @@ export function applyPresetMaterial(foliageMat, preset) {
   if (m.bottomColor) u.bottomColor.value.set(m.bottomColor);
   if (m.topColor)    u.topColor.value.set(m.topColor);
   if (m.colorVar != null)    u.colorVar.value    = m.colorVar;
+  if (m.treeColorVar != null) u.treeColorVar.value = m.treeColorVar;
   if (m.alphaCutoff != null) u.alphaCutoff.value  = m.alphaCutoff;
   if (m.roughness != null)   foliageMat.material.roughness = m.roughness;
   if (m.sssStr != null)      u.sssStr.value       = m.sssStr;

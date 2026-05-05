@@ -246,6 +246,7 @@ export function createToolState() {
         bottomColor: "#2d5a1b",
         topColor: "#5aaa2a",
         colorVar: 0.12,
+        treeColorVar: 0.15,
         alphaCutoff: 0.45,
         normalBias: 0.75,
         leafWarp: 0.28,

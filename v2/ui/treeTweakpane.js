@@ -119,7 +119,8 @@ export function addTreeFolder(pane, toolState, opts) {
     const colF = foliageFolder.addFolder({ title: "Colors", expanded: false });
     colF.addBinding(fi, "bottomColor", { label: "Base color", view: "color" }).on("change", fChange);
     colF.addBinding(fi, "topColor",    { label: "Top color",  view: "color" }).on("change", fChange);
-    colF.addBinding(fi, "colorVar",    { label: "Variation",  min: 0, max: 0.5, step: 0.01 }).on("change", fChange);
+    colF.addBinding(fi, "colorVar",    { label: "Leaf variation",  min: 0, max: 0.5, step: 0.01 }).on("change", fChange);
+    colF.addBinding(fi, "treeColorVar", { label: "Tree variation", min: 0, max: 0.5, step: 0.01 }).on("change", fChange);
     colF.addBinding(fi, "alphaCutoff", { label: "Alpha cutoff", min: 0.1, max: 0.9, step: 0.01 }).on("change", fChange);
 
     const litF = foliageFolder.addFolder({ title: "Lighting", expanded: false });

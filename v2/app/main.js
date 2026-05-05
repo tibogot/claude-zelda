@@ -1117,6 +1117,7 @@ export async function startV2App(opts = {}) {
           if (m.bottomColor) f.bottomColor = m.bottomColor;
           if (m.topColor)    f.topColor    = m.topColor;
           if (m.colorVar != null)    f.colorVar    = m.colorVar;
+          if (m.treeColorVar != null) f.treeColorVar = m.treeColorVar;
           if (m.alphaCutoff != null) f.alphaCutoff = m.alphaCutoff;
           if (m.normalBias != null)  f.normalBias  = m.normalBias;
           if (m.leafWarp != null)    f.leafWarp    = m.leafWarp;
@@ -1147,6 +1148,7 @@ export async function startV2App(opts = {}) {
       u.bottomColor.value.set(f.bottomColor);
       u.topColor.value.set(f.topColor);
       u.colorVar.value    = f.colorVar;
+      u.treeColorVar.value = f.treeColorVar;
       u.alphaCutoff.value = f.alphaCutoff;
       u.normalBias.value  = f.normalBias;
       u.leafWarp.value    = f.leafWarp;
