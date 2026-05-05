@@ -34,6 +34,14 @@ export function addPropFolder(pane, toolState, callbacks) {
     children.forEach((c) => c.dispose());
     toolState.propSlots.forEach((slot, i) => {
       const sf = slotsFolder.addFolder({ title: slot.name, expanded: false });
+      if (!slot.builtin) {
+        sf.addButton({ title: "Import LOD1 (medium)" }).on("click", () => {
+          callbacks.onImportPropLod?.(i, 1);
+        });
+        sf.addButton({ title: "Import LOD2 (low)" }).on("click", () => {
+          callbacks.onImportPropLod?.(i, 2);
+        });
+      }
       sf.addButton({ title: "Remove" }).on("click", () => {
         callbacks.onRemovePropSlot?.(i);
         rebuildSlotsFolder();
@@ -78,6 +86,25 @@ export function addPropFolder(pane, toolState, callbacks) {
   paintFolder.addBinding(toolState.props, "randomRotation", {
     label: "Random rotation",
   });
+
+  folder.addBlade({ view: "separator" });
+
+  const lodFolder = folder.addFolder({ title: "LOD Distances", expanded: false });
+  lodFolder.addBinding(toolState.propLod, "lod0Distance", {
+    label: "LOD0 → LOD1",
+    min: 10, max: 300, step: 5,
+  }).on("change", () => callbacks.onPropLodChanged?.());
+  lodFolder.addBinding(toolState.propLod, "lod1Distance", {
+    label: "LOD1 → LOD2",
+    min: 20, max: 600, step: 10,
+  }).on("change", () => callbacks.onPropLodChanged?.());
+  lodFolder.addBinding(toolState.propLod, "fadeOutDistance", {
+    label: "Fade-out dist",
+    min: 50, max: 1500, step: 10,
+  }).on("change", () => callbacks.onPropLodChanged?.());
+  lodFolder.addBinding(toolState.propLod, "castShadow", {
+    label: "Cast shadow",
+  }).on("change", () => callbacks.onPropCastShadowChanged?.());
 
   folder.addBlade({ view: "separator" });
 

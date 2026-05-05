@@ -46,8 +46,28 @@ export class PropStore {
     if (entries.length === 0) return -1;
 
     const idx = this.types.length;
-    this.types.push({ name, entries, mergedBox });
+    this.types.push({ name, entries, lod1Entries: null, lod2Entries: null, mergedBox });
     return idx;
+  }
+
+  registerTypeLod(typeIdx, lod, gltfScene) {
+    const type = this.types[typeIdx];
+    if (!type) return;
+
+    const entries = [];
+    gltfScene.updateMatrixWorld(true);
+    const rootInv = new THREE.Matrix4().copy(gltfScene.matrixWorld).invert();
+
+    gltfScene.traverse((child) => {
+      if (!child.isMesh) return;
+      const localMatrix = new THREE.Matrix4().multiplyMatrices(rootInv, child.matrixWorld);
+      entries.push({ geometry: child.geometry, material: child.material, localMatrix });
+    });
+
+    if (entries.length === 0) return;
+
+    const key = lod === 1 ? "lod1Entries" : "lod2Entries";
+    type[key] = entries;
   }
 
   addInstance(typeIdx, px, py, pz) {

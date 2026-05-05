@@ -294,6 +294,12 @@ export function createToolState() {
       scaleMax: 1.2,
       randomRotation: true,
     },
+    propLod: {
+      lod0Distance: 80,
+      lod1Distance: 200,
+      fadeOutDistance: 500,
+      castShadow: true,
+    },
     propSlots: [],
     barrier: {
       erase: false,

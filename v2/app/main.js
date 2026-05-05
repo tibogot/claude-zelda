@@ -1008,7 +1008,7 @@ export async function startV2App(opts = {}) {
   let ui;
   let _saveProject, _loadProject;
   let _importTreeGlb, _loadTreePreset, _removeTreeSlot, _clearAllTrees, _treeCastShadowChanged, _foliageParamChanged;
-  let _importPropGlb, _addPrimitive, _removePropSlot, _deleteSelectedProp, _clearAllProps, _propTransformModeChanged, _rebakeBvh;
+  let _importPropGlb, _addPrimitive, _removePropSlot, _importPropLod, _propCastShadowChanged, _deleteSelectedProp, _clearAllProps, _propTransformModeChanged, _rebakeBvh;
   let _loadFoliageTexture, _foliageSlotStructureChanged, _foliageSlotMaterialChanged, _clearAllFoliage, _foliageLodChanged;
   let _playSpawnChanged, _barrierOverlayChanged, _barrierClear, _barrierFill, _holeOverlayChanged, _holeClear;
   let _ambientFxFlapChanged, _ambientFxRingsChanged, _ambientFxClear;
@@ -1622,6 +1622,30 @@ export async function startV2App(opts = {}) {
       }
       ui?.pane.refresh();
       console.log(`[V2] Prop slot ${slotIdx} removed`);
+    }),
+    onImportPropLod: (_importPropLod = async (slotIdx, lod) => {
+      const file = await openGlbPicker();
+      if (!file) return;
+      try {
+        const { submeshes, name } = await loadTreeGlbFromFile(file);
+        const gltfScene = new THREE.Group();
+        for (const sm of submeshes) {
+          const mesh = new THREE.Mesh(sm.geometry, sm.material);
+          mesh.applyMatrix4(sm.localMatrix);
+          gltfScene.add(mesh);
+        }
+        const slot = toolState.propSlots[slotIdx];
+        if (!slot) return;
+        propStore.registerTypeLod(slot.typeIdx, lod, gltfScene);
+        propInstancer.onTypeLodRegistered(slot.typeIdx, lod);
+        console.log(`[V2] Prop "${slot.name}" LOD${lod} imported (${submeshes.length} submeshes)`);
+      } catch (err) {
+        console.error(`[V2] Failed to load prop LOD${lod} GLB:`, err);
+      }
+    }),
+    onPropLodChanged: (() => {}),
+    onPropCastShadowChanged: (_propCastShadowChanged = () => {
+      propInstancer.setCastShadow(toolState.propLod.castShadow);
     }),
     onDeleteSelectedProp: (_deleteSelectedProp = () => {
       propSystem.handleDelete();
@@ -2978,7 +3002,7 @@ export async function startV2App(opts = {}) {
 
     chunkStream.update(focusPos);
     cliffInstancer.update();
-    propInstancer.update();
+    propInstancer.update(camera, toolState.propLod);
     treeLodRenderer.update(treeStore, camera, toolState.treeLod);
     foliageLodRenderer.update(treeStore, camera, toolState.foliageLod);
     foliageLodRenderer.updateTime(now * 0.001);
@@ -3089,6 +3113,8 @@ export async function startV2App(opts = {}) {
     importPropGlb() { _importPropGlb(); },
     addPrimitive(name) { _addPrimitive(name); },
     removePropSlot(idx) { _removePropSlot(idx); },
+    importPropLod(slotIdx, lod) { _importPropLod(slotIdx, lod); },
+    propCastShadowChanged() { _propCastShadowChanged(); },
     deleteSelectedProp() { _deleteSelectedProp(); },
     clearAllProps() { _clearAllProps(); },
     propTransformModeChanged() { _propTransformModeChanged(); },
