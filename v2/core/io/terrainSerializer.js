@@ -330,6 +330,7 @@ function extractSerializableSettings(toolState) {
     holeChunks: toolState._holeExportData?.() ?? null,
     ambientFx: { ...toolState.ambientFx },
     ambientFxEmitters: toolState._ambientFxExportData?.() ?? null,
+    leafFxEmitters: toolState._leafFxExportData?.() ?? null,
     fleur: { ...toolState.fleur, colorA: { ...toolState.fleur.colorA }, colorB: { ...toolState.fleur.colorB } },
     fleurPositions: toolState._fleurExportData?.() ?? null,
     fleurInteraction: {

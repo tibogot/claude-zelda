@@ -87,6 +87,7 @@ import { HoleSystem } from "../tools/hole/holeSystem.js";
 import { HoleOverlay } from "../render/hole/holeOverlay.js";
 import { createFleurSystem, FLEUR_PRESETS, FLEUR_ALPHA_URLS } from "../../fleur-painter.js";
 import { createAmbientFxStore } from "../core/ambientfx/ambientFxStore.js";
+import { createLeafFxStore } from "../core/ambientfx/leafFxStore.js";
 import { BorderMountains } from "../render/terrain/borderMountains.js";
 
 export async function startV2App(opts = {}) {
@@ -622,6 +623,7 @@ export async function startV2App(opts = {}) {
       treeStore.syncAllHeights(terrainStore);
       fleurSystem.syncHeights();
       ambientFxStore.syncHeights();
+      leafFxStore.syncHeights();
       splineSystem?.syncGuardrailsToGround?.();
       splineSystem?.syncKerbsToGround?.();
       splineSystem?.syncLinearFeaturesToGround?.();
@@ -868,6 +870,15 @@ export async function startV2App(opts = {}) {
   ambientFxStore.setGlideRatio(toolState.ambientFx.glideRatio);
   ambientFxStore.setRingsVisible(false);
 
+  // ── Leaf FX system ──
+  const leafFxStore = createLeafFxStore(
+    scene,
+    (x, z) => terrainStore.getWorldHeight(x, z),
+    "../textures/",
+  );
+  leafFxStore.setRingsVisible(false);
+  syncLeafFxParams();
+
   function syncAmbientFxUniforms() {
     const afx = toolState.ambientFx;
     ambientFxStore.setFlapSpeed(afx.flapSpeed);
@@ -875,12 +886,38 @@ export async function startV2App(opts = {}) {
     ambientFxStore.setGlideRatio(afx.glideRatio);
   }
 
+  function syncLeafFxParams() {
+    const afx = toolState.ambientFx;
+    const p = leafFxStore.params;
+    p.spawnHeight = afx.leafSpawnHeight;
+    p.leafSize = afx.leafSize;
+    p.gravity = afx.leafGravity;
+    p.terminalVelocity = afx.leafTerminalVelocity;
+    p.rotationSpeed = afx.leafRotationSpeed;
+    p.airResistance = afx.leafAirResistance;
+    p.windInfluence = afx.leafWindInfluence;
+    p.globalScale = afx.leafScale;
+    p.terrainFloorOffset = afx.leafFloorOffset;
+    leafFxStore.setOpacity(afx.leafOpacity);
+    leafFxStore.setLeafTint(0, afx.leafTint0);
+    leafFxStore.setLeafTint(1, afx.leafTint1);
+    leafFxStore.setLeafTint(2, afx.leafTint2);
+  }
+
   function paintAmbientFxAt(wx, wz, erase) {
     const afx = toolState.ambientFx;
-    if (erase) {
-      ambientFxStore.removeInBrush(wx, wz, afx.emitterRadius);
+    if (afx.effectType === "leaves") {
+      if (erase) {
+        leafFxStore.removeInBrush(wx, wz, afx.emitterRadius);
+      } else {
+        leafFxStore.addInBrush(wx, wz, afx.emitterRadius, afx.density, afx.leafActiveType);
+      }
     } else {
-      ambientFxStore.addInBrush(wx, wz, afx.emitterRadius, afx.effectType, afx.density);
+      if (erase) {
+        ambientFxStore.removeInBrush(wx, wz, afx.emitterRadius);
+      } else {
+        ambientFxStore.addInBrush(wx, wz, afx.emitterRadius, afx.effectType, afx.density);
+      }
     }
   }
 
@@ -988,8 +1025,10 @@ export async function startV2App(opts = {}) {
     if (ui?.ambientFxFolder) ui.ambientFxFolder.hidden = toolState.mode !== "ambientfx";
     if (toolState.mode === "ambientfx") {
       ambientFxStore.setRingsVisible(toolState.ambientFx.showRings);
+      leafFxStore.setRingsVisible(toolState.ambientFx.showRings);
     } else {
       ambientFxStore.setRingsVisible(false);
+      leafFxStore.setRingsVisible(false);
     }
     if (toolState.mode === "play") {
       playMode.enter();
@@ -1016,7 +1055,7 @@ export async function startV2App(opts = {}) {
   let _importPropGlb, _addPrimitive, _addLiveProp, _removePropSlot, _importPropLod, _propCastShadowChanged, _deleteSelectedProp, _clearAllProps, _propTransformModeChanged, _rebakeBvh;
   let _loadFoliageTexture, _foliageSlotStructureChanged, _foliageSlotMaterialChanged, _clearAllFoliage, _foliageLodChanged;
   let _playSpawnChanged, _barrierOverlayChanged, _barrierClear, _barrierFill, _holeOverlayChanged, _holeClear;
-  let _ambientFxFlapChanged, _ambientFxRingsChanged, _ambientFxClear;
+  let _ambientFxFlapChanged, _ambientFxRingsChanged, _ambientFxClear, _ambientFxLeafChanged, _ambientFxClearLeaves, _ambientFxLeafRespawn;
   let _fleurChanged, _fleurColorChanged, _fleurStemChanged, _fleurStemCurveChanged, _fleurInteractionChanged, _fleurClear;
   let _cliffGrassFill, _cliffGrassClear, _importCliffGlb, _removeCliffSlot, _deleteSelectedCliff, _clearAllCliffs, _cliffTransformModeChanged, _cliffBlendChanged;
   let _waterChanged, _saveWater, _loadWater, _deleteSelectedWater, _clearAllWater;
@@ -1798,11 +1837,23 @@ export async function startV2App(opts = {}) {
     onAmbientFxFlapChanged: (_ambientFxFlapChanged = () => {
       syncAmbientFxUniforms();
     }),
+    onAmbientFxLeafChanged: (_ambientFxLeafChanged = () => {
+      syncLeafFxParams();
+    }),
     onAmbientFxRingsChanged: (_ambientFxRingsChanged = () => {
-      ambientFxStore.setRingsVisible(toolState.ambientFx.showRings && toolState.mode === "ambientfx");
+      const vis = toolState.ambientFx.showRings && toolState.mode === "ambientfx";
+      ambientFxStore.setRingsVisible(vis);
+      leafFxStore.setRingsVisible(vis);
     }),
     onAmbientFxClear: (_ambientFxClear = () => {
       ambientFxStore.clear();
+      leafFxStore.clear();
+    }),
+    onAmbientFxClearLeaves: (_ambientFxClearLeaves = () => {
+      leafFxStore.clear();
+    }),
+    onAmbientFxLeafRespawn: (_ambientFxLeafRespawn = () => {
+      leafFxStore.respawnAll();
     }),
     onSaveProject: (_saveProject = () => {
       toolState._cliffExportData = () => cliffStore.exportData();
@@ -1813,6 +1864,7 @@ export async function startV2App(opts = {}) {
       toolState._holeExportData = () => holeStore.exportData();
       toolState._fleurExportData = () => fleurSystem.getPositions();
       toolState._ambientFxExportData = () => ambientFxStore.getEmitters();
+      toolState._leafFxExportData = () => leafFxStore.getEmitters();
       toolState._roadExportData = () => roadSystem.exportData();
       toolState._fullRoadExportData = () => fullRoadSystem.exportData();
       toolState._smartRoadExportData = () => smartRoadSystem.exportData();
@@ -1828,6 +1880,7 @@ export async function startV2App(opts = {}) {
       delete toolState._holeExportData;
       delete toolState._fleurExportData;
       delete toolState._ambientFxExportData;
+      delete toolState._leafFxExportData;
       delete toolState._roadExportData;
       delete toolState._fullRoadExportData;
       delete toolState._smartRoadExportData;
@@ -1945,6 +1998,13 @@ export async function startV2App(opts = {}) {
           ambientFxStore.clear();
         }
         syncAmbientFxUniforms();
+        // Restore leaf FX emitters
+        if (project.settings?.leafFxEmitters && Array.isArray(project.settings.leafFxEmitters)) {
+          leafFxStore.setEmitters(project.settings.leafFxEmitters);
+        } else {
+          leafFxStore.clear();
+        }
+        syncLeafFxParams();
 
         // Auto-reload tree presets (trunk GLBs + foliage) for slots that had them
         const presetLoads = [];
@@ -3065,6 +3125,7 @@ export async function startV2App(opts = {}) {
 
     const afx = toolState.ambientFx;
     ambientFxStore.update(focusPos, _appTimeSec, afx.windX, afx.windZ, afx.windStrength);
+    leafFxStore.update(focusPos, _appTimeSec, afx.windX, afx.windZ, afx.windStrength);
 
     syncBarrierOverlay();
     syncHoleOverlay();
@@ -3182,8 +3243,12 @@ export async function startV2App(opts = {}) {
     holeOverlayChanged() { _holeOverlayChanged(); },
     holeClear() { _holeClear(); },
     ambientFxFlapChanged() { _ambientFxFlapChanged(); },
+    ambientFxLeafChanged() { _ambientFxLeafChanged(); },
     ambientFxRingsChanged() { _ambientFxRingsChanged(); },
     ambientFxClear() { _ambientFxClear(); },
+    ambientFxClearLeaves() { _ambientFxClearLeaves(); },
+    ambientFxLeafRespawn() { _ambientFxLeafRespawn(); },
+    ambientFxSetLeafTexture(idx, url) { leafFxStore.setLeafTexture(idx, url); },
     fleurChanged() { _fleurChanged(); },
     fleurColorChanged(slot) { _fleurColorChanged(slot); },
     fleurStemChanged() { _fleurStemChanged(); },

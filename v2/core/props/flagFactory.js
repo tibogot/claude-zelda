@@ -94,7 +94,7 @@ function buildClothGeometry(xSegs, ySegs, restX, restY) {
       pos[i * 3 + 1] = v * restY;
       pos[i * 3 + 2] = 0;
       uvs[i * 2] = u / xSegs;
-      uvs[i * 2 + 1] = 1 - v / ySegs;
+      uvs[i * 2 + 1] = v / ySegs;
     }
   }
 
@@ -127,6 +127,8 @@ export const FLAG_DEFAULTS = {
   flagColor: "#cc0000",
   windIntensity: 300,
   windSpeed: 1000,
+  windDirection: 0,
+  showPole: true,
 };
 
 export function flagBoundingBox(params) {
@@ -154,6 +156,7 @@ export function createFlagProp(params = {}) {
   pole.position.y = p.poleHeight * 0.5;
   pole.castShadow = true;
   pole.receiveShadow = true;
+  pole.visible = p.showPole;
   group.add(pole);
 
   // Cloth mesh
@@ -175,13 +178,15 @@ export function createFlagProp(params = {}) {
   // State
   let windIntensity = p.windIntensity;
   let windSpeed = p.windSpeed;
+  let windDirection = p.windDirection;
   let elapsed = Math.random() * 5000;
 
   function update(dt) {
     elapsed += dt * 1000;
 
     const osc = Math.sin(elapsed / windSpeed);
-    _windForce.set(100, 0, 1 + osc).normalize().multiplyScalar(windIntensity);
+    const rad = windDirection * (Math.PI / 180);
+    _windForce.set(Math.cos(rad) * 100, 0, Math.sin(rad) * 100 + osc).normalize().multiplyScalar(windIntensity);
 
     const particles = cloth.particles;
     const normals = geometry.attributes.normal;
@@ -221,8 +226,10 @@ export function createFlagProp(params = {}) {
   function setParam(key, value) {
     if (key === "windIntensity") windIntensity = value;
     else if (key === "windSpeed") windSpeed = value;
+    else if (key === "windDirection") windDirection = value;
     else if (key === "flagColor") clothMat.color.set(value);
     else if (key === "textureUrl") _loadTexture(clothMat, value);
+    else if (key === "showPole") pole.visible = value;
   }
 
   function getParams() {
@@ -237,6 +244,8 @@ export function createFlagProp(params = {}) {
       flagColor: p.flagColor,
       windIntensity,
       windSpeed,
+      windDirection,
+      showPole: pole.visible,
     };
   }
 

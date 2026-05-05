@@ -1557,6 +1557,12 @@ function buildPropsPanel(app) {
     if ("windSpeed" in p) {
       _slider(sec, p, 'windSpeed', { label: 'Wind speed', min: 100, max: 3000, step: 50, onChange: () => syncParam('windSpeed', false) });
     }
+    if ("windDirection" in p) {
+      _slider(sec, p, 'windDirection', { label: 'Wind direction', min: 0, max: 360, step: 1, onChange: () => syncParam('windDirection', false) });
+    }
+    if ("showPole" in p) {
+      _toggle(sec, p, 'showPole', { label: 'Show pole', onChange: () => syncParam('showPole', false) });
+    }
   }
 
   app.onPropSelectionChanged = showLiveParamsUi;
@@ -1727,17 +1733,104 @@ function buildAmbientFxPanel(app) {
   const brushBody = _section(panel, 'Brush');
   _slider(brushBody, app.toolState.brush, 'radius', { label: 'Radius', min: cfg.sculpt.brushMin, max: cfg.sculpt.brushMax, step: 0.5 });
 
+  // Butterfly / Leaf section wrappers (created here, appended below)
+  const bfSec = document.createElement('div');
+  bfSec.className = 'afx-butterfly-sec';
+  const lfSec = document.createElement('div');
+  lfSec.className = 'afx-leaf-sec';
+  function syncSections() {
+    bfSec.style.display = afx.effectType === 'butterflies' ? '' : 'none';
+    lfSec.style.display = afx.effectType === 'leaves' ? '' : 'none';
+  }
+
   const body = _section(panel, 'Ambient FX');
   _toggle(body, afx, 'erase', { label: 'Erase (or Shift)' });
-  _dropdown(body, afx, 'effectType', { label: 'Effect', options: { 'Butterflies': 'butterflies' } });
+  _dropdown(body, afx, 'effectType', { label: 'Effect', options: { 'Butterflies': 'butterflies', 'Falling Leaves': 'leaves' }, onChange: syncSections });
   _separator(body);
   _slider(body, afx, 'emitterRadius', { label: 'Emitter radius', min: 3, max: 40, step: 1 });
   _slider(body, afx, 'density', { label: 'Density', min: 1, max: 10, step: 0.5 });
 
-  const bfBody = _section(panel, 'Butterfly Params', false);
+  // Butterfly params section
+  panel.appendChild(bfSec);
+  const bfBody = _section(bfSec, 'Butterfly Params', false);
   _slider(bfBody, afx, 'flapSpeed', { label: 'Flap speed', min: 2, max: 20, step: 0.5, onChange: () => app.ambientFxFlapChanged() });
   _slider(bfBody, afx, 'flapAngle', { label: 'Flap angle', min: 0.1, max: 1.5, step: 0.05, onChange: () => app.ambientFxFlapChanged() });
   _slider(bfBody, afx, 'glideRatio', { label: 'Glide ratio', min: 0, max: 0.8, step: 0.05, onChange: () => app.ambientFxFlapChanged() });
+
+  // Leaf params section
+  panel.appendChild(lfSec);
+
+  const lfPaint = _section(lfSec, 'Leaf Painting');
+  _dropdown(lfPaint, afx, 'leafActiveType', { label: 'Paint type', options: { 'Type 1': 0, 'Type 2': 1, 'Type 3': 2 } });
+
+  const lfBody = _section(lfSec, 'Leaf Physics');
+  const lc = () => app.ambientFxLeafChanged();
+  _slider(lfBody, afx, 'leafSpawnHeight', { label: 'Spawn height', min: 5, max: 60, step: 1, onChange: lc });
+  _slider(lfBody, afx, 'leafScale', { label: 'Scale', min: 0.3, max: 3, step: 0.1, onChange: lc });
+  _slider(lfBody, afx, 'leafSize', { label: 'Leaf size', min: 0.05, max: 0.6, step: 0.01, onChange: lc });
+  _slider(lfBody, afx, 'leafGravity', { label: 'Gravity', min: 0.0005, max: 0.01, step: 0.0005, onChange: lc });
+  _slider(lfBody, afx, 'leafTerminalVelocity', { label: 'Terminal vel.', min: 0.005, max: 0.08, step: 0.002, onChange: lc });
+  _slider(lfBody, afx, 'leafRotationSpeed', { label: 'Rotation', min: 0, max: 0.01, step: 0.0005, onChange: lc });
+  _slider(lfBody, afx, 'leafAirResistance', { label: 'Air resistance', min: 0.9, max: 0.999, step: 0.001, onChange: lc });
+  _slider(lfBody, afx, 'leafWindInfluence', { label: 'Wind influence', min: 0, max: 3, step: 0.05, onChange: lc });
+  _slider(lfBody, afx, 'leafOpacity', { label: 'Opacity', min: 0.1, max: 1, step: 0.05, onChange: lc });
+  _slider(lfBody, afx, 'leafFloorOffset', { label: 'Floor offset', min: 0, max: 5, step: 0.1, onChange: lc });
+
+  // Leaf types — each type gets its own tint + texture picker
+  const ltBody = _section(lfSec, 'Leaf Types');
+  for (let i = 0; i < 3; i++) {
+    const typeDiv = document.createElement('div');
+    typeDiv.style.marginBottom = '6px';
+    const typeLabel = document.createElement('div');
+    typeLabel.style.cssText = 'font-size:11px;color:#aaa;margin-bottom:2px;padding-left:4px;';
+    typeLabel.textContent = 'Type ' + (i + 1);
+    typeDiv.appendChild(typeLabel);
+
+    _color(typeDiv, afx, 'leafTint' + i, { label: 'Tint', onChange: lc });
+
+    // Texture file picker
+    const texRow = document.createElement('div');
+    texRow.className = 'prop-row';
+    const texNameSpan = document.createElement('span');
+    texNameSpan.className = 'prop-slider-val';
+    texNameSpan.style.cssText = 'font-size:10px;overflow:hidden;text-overflow:ellipsis;max-width:100px;';
+    texNameSpan.textContent = afx['leafTex' + i] ? 'custom' : 'default';
+    const texBtn = document.createElement('button');
+    texBtn.className = 'section-btn';
+    texBtn.style.cssText = 'font-size:10px;padding:2px 8px;margin:0;';
+    texBtn.textContent = 'Texture';
+    const texIdx = i;
+    texBtn.addEventListener('click', () => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/*';
+      input.addEventListener('change', () => {
+        const file = input.files[0];
+        if (!file) return;
+        const url = URL.createObjectURL(file);
+        afx['leafTex' + texIdx] = url;
+        texNameSpan.textContent = file.name;
+        app.ambientFxSetLeafTexture(texIdx, url);
+      });
+      input.click();
+    });
+    texRow.innerHTML = '<span class="prop-label">Texture</span>';
+    const texVal = document.createElement('div');
+    texVal.className = 'prop-value';
+    texVal.style.cssText = 'display:flex;gap:4px;align-items:center;';
+    texVal.appendChild(texBtn);
+    texVal.appendChild(texNameSpan);
+    texRow.appendChild(texVal);
+    typeDiv.appendChild(texRow);
+
+    ltBody.appendChild(typeDiv);
+    if (i < 2) _separator(ltBody);
+  }
+
+  _button(lfSec, { title: 'Respawn leaves', onClick: () => app.ambientFxLeafRespawn() });
+  _button(lfSec, { title: 'Clear leaf emitters', onClick: () => app.ambientFxClearLeaves() });
+
+  syncSections();
 
   _separator(panel);
   _toggle(panel, afx, 'showRings', { label: 'Show rings', onChange: () => app.ambientFxRingsChanged() });

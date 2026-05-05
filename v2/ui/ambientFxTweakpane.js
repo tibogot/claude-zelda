@@ -7,7 +7,7 @@ export function addAmbientFxFolder(pane, toolState, callbacks) {
 
   folder.addBinding(afx, "effectType", {
     label: "Effect",
-    options: { Butterflies: "butterflies" },
+    options: { Butterflies: "butterflies", "Falling Leaves": "leaves" },
   });
 
   folder.addBlade({ view: "separator" });

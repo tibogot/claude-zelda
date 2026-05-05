@@ -115,6 +115,14 @@ export function addPropFolder(pane, toolState, callbacks) {
       liveParamsFolder.addBinding(_liveParamsProxy, "windSpeed", { label: "Wind speed", min: 100, max: 3000, step: 50 })
         .on("change", () => _syncLiveParam(inst, "windSpeed", livePropManager));
     }
+    if ("windDirection" in _liveParamsProxy) {
+      liveParamsFolder.addBinding(_liveParamsProxy, "windDirection", { label: "Wind direction", min: 0, max: 360, step: 1 })
+        .on("change", () => _syncLiveParam(inst, "windDirection", livePropManager));
+    }
+    if ("showPole" in _liveParamsProxy) {
+      liveParamsFolder.addBinding(_liveParamsProxy, "showPole", { label: "Show pole" })
+        .on("change", () => _syncLiveParam(inst, "showPole", livePropManager));
+    }
   }
 
   function _syncLiveParam(inst, key, livePropManager) {
