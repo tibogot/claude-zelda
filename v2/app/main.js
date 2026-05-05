@@ -990,10 +990,14 @@ export async function startV2App(opts = {}) {
       playMode.enter();
       const tpEl = document.querySelector(".tp-dfwv");
       if (tpEl) tpEl.style.display = "none";
+      document.getElementById("app")?.classList.add("play-fullscreen");
+      document.getElementById("play-stop-bar")?.classList.add("visible");
     } else if (playMode.active) {
       playMode.exit();
       const tpEl = document.querySelector(".tp-dfwv");
       if (tpEl) tpEl.style.display = "";
+      document.getElementById("app")?.classList.remove("play-fullscreen");
+      document.getElementById("play-stop-bar")?.classList.remove("visible");
     }
     updateBrushPreviewFromPick(null);
     syncPlaySpawnMarker();
@@ -1961,6 +1965,8 @@ export async function startV2App(opts = {}) {
     playMode.exit();
     const tpEl = document.querySelector(".tp-dfwv");
     if (tpEl) tpEl.style.display = "";
+    document.getElementById("app")?.classList.remove("play-fullscreen");
+    document.getElementById("play-stop-bar")?.classList.remove("visible");
     syncPlaySpawnMarker();
     ui?.pane.refresh();
   };
