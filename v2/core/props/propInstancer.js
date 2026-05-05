@@ -64,6 +64,22 @@ export class PropInstancer {
     const type = this.store.types[typeIdx];
     if (!type) return;
 
+    while (this._typeRender.length <= typeIdx) this._typeRender.push(null);
+
+    if (type.live) {
+      const boxSize = new THREE.Vector3();
+      const boxCenter = new THREE.Vector3();
+      type.mergedBox.getSize(boxSize);
+      type.mergedBox.getCenter(boxCenter);
+      const boxCenterMatrix = new THREE.Matrix4().makeTranslation(boxCenter.x, boxCenter.y, boxCenter.z);
+      this._typeRender[typeIdx] = {
+        lod0: [], lod1: null, lod2: null,
+        hitboxIM: null, hitboxGeo: null, boxCenterMatrix, boxSize: boxSize.clone(),
+        _globalIndices: [], live: true,
+      };
+      return;
+    }
+
     const lod0 = this._createLodMeshes(type.entries, true);
 
     const boxSize = new THREE.Vector3();
@@ -79,7 +95,6 @@ export class PropInstancer {
 
     const boxCenterMatrix = new THREE.Matrix4().makeTranslation(boxCenter.x, boxCenter.y, boxCenter.z);
 
-    while (this._typeRender.length <= typeIdx) this._typeRender.push(null);
     this._typeRender[typeIdx] = {
       lod0,
       lod1: null,
@@ -153,6 +168,8 @@ export class PropInstancer {
       const indices = indicesByType.get(ti) || [];
       tr._globalIndices = indices;
 
+      if (tr.live || !tr.hitboxIM) continue;
+
       const len = indices.length;
       tr.hitboxIM.count = len;
       for (let j = 0; j < len; j++) {
@@ -197,7 +214,7 @@ export class PropInstancer {
       const ti = this._cacheTypes[i];
       if (ti >= this._typeRender.length) continue;
       const tr = this._typeRender[ti];
-      if (!tr) continue;
+      if (!tr || tr.live) continue;
 
       const dx = this._cacheXs[i] - camX;
       const dy = this._cacheYs[i] - camY;
@@ -267,7 +284,7 @@ export class PropInstancer {
 
   _assignAllLod0() {
     for (const tr of this._typeRender) {
-      if (!tr) continue;
+      if (!tr || tr.live) continue;
       const indices = tr._globalIndices;
       const n = indices.length;
       for (const { im, localMatrix } of tr.lod0) {
@@ -306,7 +323,7 @@ export class PropInstancer {
     let bestDist = Infinity;
     for (let ti = 0; ti < this._typeRender.length; ti++) {
       const tr = this._typeRender[ti];
-      if (!tr || tr.hitboxIM.count === 0) continue;
+      if (!tr || !tr.hitboxIM || tr.hitboxIM.count === 0) continue;
       const hits = raycaster.intersectObject(tr.hitboxIM, false);
       if (hits.length > 0 && hits[0].distance < bestDist) {
         bestDist = hits[0].distance;
@@ -408,9 +425,11 @@ export class PropInstancer {
       this._disposeLodMeshes(tr.lod0);
       this._disposeLodMeshes(tr.lod1);
       this._disposeLodMeshes(tr.lod2);
-      this.scene.remove(tr.hitboxIM);
-      tr.hitboxIM.dispose();
-      tr.hitboxGeo.dispose();
+      if (tr.hitboxIM) {
+        this.scene.remove(tr.hitboxIM);
+        tr.hitboxIM.dispose();
+      }
+      if (tr.hitboxGeo) tr.hitboxGeo.dispose();
     }
     this._typeRender.length = 0;
     this.scene.remove(this.proxyObject);

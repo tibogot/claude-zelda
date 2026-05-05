@@ -27,6 +27,9 @@ export function addPropFolder(pane, toolState, callbacks) {
     primFolder.addButton({ title: shape }).on("click", () => callbacks.onAddPrimitive?.(shape));
   }
 
+  const liveFolder = folder.addFolder({ title: "Add Live Prop", expanded: false });
+  liveFolder.addButton({ title: "Flag" }).on("click", () => callbacks.onAddLiveProp?.("Flag"));
+
   const slotsFolder = folder.addFolder({ title: "Loaded Props", expanded: false });
 
   function rebuildSlotsFolder() {
@@ -34,7 +37,7 @@ export function addPropFolder(pane, toolState, callbacks) {
     children.forEach((c) => c.dispose());
     toolState.propSlots.forEach((slot, i) => {
       const sf = slotsFolder.addFolder({ title: slot.name, expanded: false });
-      if (!slot.builtin) {
+      if (!slot.builtin && !slot.live) {
         sf.addButton({ title: "Import LOD1 (medium)" }).on("click", () => {
           callbacks.onImportPropLod?.(i, 1);
         });
@@ -69,6 +72,76 @@ export function addPropFolder(pane, toolState, callbacks) {
   }).on("change", () => callbacks.onPropTransformModeChanged?.());
 
   folder.addBlade({ view: "separator" });
+
+  // --- Live prop params (shown when a live prop is selected) ---
+  let liveParamsFolder = null;
+  let _liveParamsProxy = {};
+
+  function showLiveParams(inst, propStore, livePropManager) {
+    hideLiveParams();
+    if (!inst?.liveParams) return;
+
+    const type = propStore.types[inst.typeIdx];
+    if (!type?.live) return;
+
+    _liveParamsProxy = { ...inst.liveParams };
+    liveParamsFolder = folder.addFolder({ title: `${type.name} Params`, expanded: true });
+
+    if ("flagColor" in _liveParamsProxy) {
+      liveParamsFolder.addBinding(_liveParamsProxy, "flagColor", { label: "Color" })
+        .on("change", () => _syncLiveParam(inst, "flagColor", livePropManager));
+    }
+    if ("textureUrl" in _liveParamsProxy) {
+      liveParamsFolder.addBinding(_liveParamsProxy, "textureUrl", { label: "Texture URL" })
+        .on("change", () => _syncLiveParam(inst, "textureUrl", livePropManager));
+    }
+    if ("clothWidth" in _liveParamsProxy) {
+      liveParamsFolder.addBinding(_liveParamsProxy, "clothWidth", { label: "Cloth width", min: 0.5, max: 6, step: 0.1 })
+        .on("change", () => _syncLiveParam(inst, "clothWidth", livePropManager));
+    }
+    if ("clothHeight" in _liveParamsProxy) {
+      liveParamsFolder.addBinding(_liveParamsProxy, "clothHeight", { label: "Cloth height", min: 0.3, max: 8, step: 0.1 })
+        .on("change", () => _syncLiveParam(inst, "clothHeight", livePropManager));
+    }
+    if ("poleHeight" in _liveParamsProxy) {
+      liveParamsFolder.addBinding(_liveParamsProxy, "poleHeight", { label: "Pole height", min: 1, max: 12, step: 0.5 })
+        .on("change", () => _syncLiveParam(inst, "poleHeight", livePropManager));
+    }
+    if ("windIntensity" in _liveParamsProxy) {
+      liveParamsFolder.addBinding(_liveParamsProxy, "windIntensity", { label: "Wind intensity", min: 0, max: 800, step: 10 })
+        .on("change", () => _syncLiveParam(inst, "windIntensity", livePropManager));
+    }
+    if ("windSpeed" in _liveParamsProxy) {
+      liveParamsFolder.addBinding(_liveParamsProxy, "windSpeed", { label: "Wind speed", min: 100, max: 3000, step: 50 })
+        .on("change", () => _syncLiveParam(inst, "windSpeed", livePropManager));
+    }
+  }
+
+  function _syncLiveParam(inst, key, livePropManager) {
+    inst.liveParams[key] = _liveParamsProxy[key];
+    const instIdx = propStoreRef?.instances.indexOf(inst) ?? -1;
+
+    if (key === "clothWidth" || key === "clothHeight" || key === "poleHeight" || key === "poleRadius" || key === "xSegs" || key === "ySegs") {
+      propStoreRef?._bump();
+    } else {
+      const entry = livePropManager?.getLiveEntry(instIdx);
+      if (entry?.obj.setParam) {
+        entry.obj.setParam(key, _liveParamsProxy[key]);
+      }
+      livePropManager?.updateParamSnap(instIdx);
+    }
+  }
+
+  function hideLiveParams() {
+    if (liveParamsFolder) {
+      liveParamsFolder.dispose();
+      liveParamsFolder = null;
+    }
+  }
+
+  let propStoreRef = null;
+
+  // --- Paint Settings ---
 
   const paintFolder = folder.addFolder({ title: "Paint Settings", expanded: true });
   paintFolder.addBinding(toolState.props, "density", {
@@ -121,6 +194,10 @@ export function addPropFolder(pane, toolState, callbacks) {
   folder.addButton({ title: "Clear All Props" }).on("click", () => {
     callbacks.onClearAllProps?.();
   });
+
+  folder.showLiveParams = showLiveParams;
+  folder.hideLiveParams = hideLiveParams;
+  folder.setPropStoreRef = (ps) => { propStoreRef = ps; };
 
   return folder;
 }

@@ -81,6 +81,7 @@ export function createTweakpaneUi({
   onCliffBlendChanged,
   onImportPropGlb,
   onAddPrimitive,
+  onAddLiveProp,
   onRemovePropSlot,
   onImportPropLod,
   onPropLodChanged,
@@ -460,6 +461,7 @@ export function createTweakpaneUi({
   const propCallbacks = {
     onImportPropGlb,
     onAddPrimitive,
+    onAddLiveProp,
     onRemovePropSlot,
     onImportPropLod,
     onPropLodChanged,
@@ -469,7 +471,7 @@ export function createTweakpaneUi({
     onRebakeBvh,
     onPropTransformModeChanged,
   };
-  addPropFolder(pane, toolState, propCallbacks);
+  const propFolder = addPropFolder(pane, toolState, propCallbacks);
 
   const waterFolder = addWaterFolder(pane, toolState, {
     onWaterChanged,
@@ -1243,6 +1245,7 @@ export function createTweakpaneUi({
   return {
     pane,
     propCallbacks,
+    propFolder,
     foliageFolder,
     waterFolder,
     decalFolder,

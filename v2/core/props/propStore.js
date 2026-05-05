@@ -14,6 +14,16 @@ export class PropStore {
 
   _bump() { this._gen++; }
 
+  registerLiveType(name, factoryId, defaultParams, mergedBox) {
+    const idx = this.types.length;
+    this.types.push({ name, live: true, factoryId, defaultParams, mergedBox, entries: [] });
+    return idx;
+  }
+
+  isLiveType(typeIdx) {
+    return !!this.types[typeIdx]?.live;
+  }
+
   registerPrimitive(name, geometry, material) {
     if (!geometry.boundingBox) geometry.computeBoundingBox();
     const yShift = -geometry.boundingBox.min.y;
@@ -71,12 +81,14 @@ export class PropStore {
   }
 
   addInstance(typeIdx, px, py, pz) {
+    const type = this.types[typeIdx];
     const inst = {
       typeIdx,
       px, py, pz,
-      rx: 0, ry: Math.round(Math.random() * 360), rz: 0,
+      rx: 0, ry: type?.live ? 0 : Math.round(Math.random() * 360), rz: 0,
       sx: 1, sy: 1, sz: 1,
     };
+    if (type?.live) inst.liveParams = { ...type.defaultParams };
     const idx = this.instances.length;
     this.instances.push(inst);
     this._bump();
@@ -112,7 +124,7 @@ export class PropStore {
     const mat = new THREE.Matrix4();
     for (const inst of this.instances) {
       const type = this.types[inst.typeIdx];
-      if (!type) continue;
+      if (!type || type.live) continue;
       const M = this.computeInstanceMatrix(inst);
       for (const { geometry, localMatrix } of type.entries) {
         mat.multiplyMatrices(M, localMatrix);
@@ -160,27 +172,44 @@ export class PropStore {
   get totalCount() { return this.instances.length; }
 
   snapshot() {
-    return this.instances.map((i) => ({ ...i }));
+    return this.instances.map((i) => {
+      const c = { ...i };
+      if (c.liveParams) c.liveParams = { ...c.liveParams };
+      return c;
+    });
   }
 
   restoreFromSnapshot(snap) {
-    this.instances = snap.map((i) => ({ ...i }));
+    this.instances = snap.map((i) => {
+      const c = { ...i };
+      if (c.liveParams) c.liveParams = { ...c.liveParams };
+      return c;
+    });
     this._bump();
   }
 
   exportData() {
     return {
-      types: this.types.map((t) => t.name),
-      instances: this.instances.map((i) => ({ ...i })),
+      types: this.types.map((t) => ({ name: t.name, ...(t.live ? { live: true, factoryId: t.factoryId } : {}) })),
+      instances: this.instances.map((i) => {
+        const c = { ...i };
+        if (c.liveParams) c.liveParams = { ...c.liveParams };
+        return c;
+      }),
     };
   }
 
   importData(data, typeNameToIdx) {
     for (const saved of data.instances) {
-      const mappedIdx = typeNameToIdx?.[data.types[saved.typeIdx]];
+      const typeName = typeof data.types[saved.typeIdx] === "string"
+        ? data.types[saved.typeIdx]
+        : data.types[saved.typeIdx]?.name;
+      const mappedIdx = typeNameToIdx?.[typeName];
       if (mappedIdx == null) continue;
       saved.typeIdx = mappedIdx;
-      this.instances.push({ ...saved });
+      const c = { ...saved };
+      if (c.liveParams) c.liveParams = { ...c.liveParams };
+      this.instances.push(c);
     }
     this._bump();
   }

@@ -1414,6 +1414,9 @@ function buildPropsPanel(app) {
     _button(primBody, { title: shape, onClick: () => { app.addPrimitive(shape); rebuildAll(); } });
   }
 
+  const liveBody = _section(panel, 'Add Live Prop', false);
+  _button(liveBody, { title: 'Flag', onClick: () => { app.addLiveProp('Flag'); rebuildAll(); } });
+
   // --- Loaded Props ---
   const loadedBody = _section(panel, 'Loaded Props', false);
   function rebuildLoadedSlots() {
@@ -1434,7 +1437,7 @@ function buildPropsPanel(app) {
       rmBtn.addEventListener('click', () => { app.removePropSlot(i); rebuildAll(); });
       headerRow.appendChild(rmBtn);
       row.appendChild(headerRow);
-      if (!slot.builtin) {
+      if (!slot.builtin && !slot.live) {
         const lodRow = document.createElement('div');
         lodRow.style.cssText = 'display:flex; gap:4px;';
         const btnStyle = 'font-size:10px; padding:2px 6px; background:var(--bg-item); color:var(--text-dim); border:1px solid var(--border); border-radius:var(--radius); cursor:pointer; flex:1;';
@@ -1484,6 +1487,79 @@ function buildPropsPanel(app) {
   _slider(lodBody, ts.propLod, 'lod1Distance', { label: 'LOD1 → LOD2', min: 20, max: 600, step: 10 });
   _slider(lodBody, ts.propLod, 'fadeOutDistance', { label: 'Fade-out dist', min: 50, max: 1500, step: 10 });
   _toggle(lodBody, ts.propLod, 'castShadow', { label: 'Cast shadow', onChange: () => app.propCastShadowChanged() });
+
+  _separator(panel);
+
+  // --- Live Prop Params (shown when a live prop is selected) ---
+  const liveParamsContainer = document.createElement('div');
+  liveParamsContainer.id = 'live-params-container';
+  panel.appendChild(liveParamsContainer);
+
+  function showLiveParamsUi(instIdx) {
+    liveParamsContainer.innerHTML = '';
+    if (instIdx == null) return;
+    const inst = app.propStore.instances[instIdx];
+    if (!inst?.liveParams) return;
+    const type = app.propStore.types[inst.typeIdx];
+    if (!type?.live) return;
+
+    const sec = _section(liveParamsContainer, `${type.name} Params`);
+    const p = inst.liveParams;
+    const lpm = app.livePropManager;
+
+    function syncParam(key, geometry) {
+      if (geometry) {
+        app.propStore._bump();
+      } else {
+        const entry = lpm.getLiveEntry(instIdx);
+        if (entry?.obj.setParam) entry.obj.setParam(key, p[key]);
+        lpm.updateParamSnap(instIdx);
+      }
+    }
+
+    if ("flagColor" in p) {
+      _color(sec, p, 'flagColor', { label: 'Color', onChange: () => syncParam('flagColor', false) });
+    }
+    if ("textureUrl" in p) {
+      const row = document.createElement('div');
+      row.className = 'prop-row';
+      row.innerHTML = `<span class="prop-label">Texture</span><div class="prop-value" style="display:flex;gap:4px;align-items:center;"><span class="prop-slider-val" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${p.textureUrl ? p.textureUrl.split('/').pop() : '(none)'}</span><button class="section-btn" style="padding:2px 8px;font-size:11px;">Import...</button></div>`;
+      const btn = row.querySelector('button');
+      const label = row.querySelector('.prop-slider-val');
+      btn.addEventListener('click', () => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = 'image/*';
+        input.addEventListener('change', () => {
+          const file = input.files[0];
+          if (!file) return;
+          const url = URL.createObjectURL(file);
+          p.textureUrl = url;
+          label.textContent = file.name;
+          syncParam('textureUrl', false);
+        });
+        input.click();
+      });
+      sec.appendChild(row);
+    }
+    if ("clothWidth" in p) {
+      _slider(sec, p, 'clothWidth', { label: 'Cloth width', min: 0.5, max: 6, step: 0.1, onChange: () => syncParam('clothWidth', true) });
+    }
+    if ("clothHeight" in p) {
+      _slider(sec, p, 'clothHeight', { label: 'Cloth height', min: 0.3, max: 8, step: 0.1, onChange: () => syncParam('clothHeight', true) });
+    }
+    if ("poleHeight" in p) {
+      _slider(sec, p, 'poleHeight', { label: 'Pole height', min: 1, max: 12, step: 0.5, onChange: () => syncParam('poleHeight', true) });
+    }
+    if ("windIntensity" in p) {
+      _slider(sec, p, 'windIntensity', { label: 'Wind intensity', min: 0, max: 800, step: 10, onChange: () => syncParam('windIntensity', false) });
+    }
+    if ("windSpeed" in p) {
+      _slider(sec, p, 'windSpeed', { label: 'Wind speed', min: 100, max: 3000, step: 50, onChange: () => syncParam('windSpeed', false) });
+    }
+  }
+
+  app.onPropSelectionChanged = showLiveParamsUi;
 
   _separator(panel);
 

@@ -71,6 +71,8 @@ import { createCliffInstancerBlendMaterial } from "../../cliffInstancerBlendMate
 import { PropStore } from "../core/props/propStore.js";
 import { PropInstancer } from "../core/props/propInstancer.js";
 import { PropSystem } from "../tools/props/propSystem.js";
+import { LivePropManager } from "../core/props/livePropManager.js";
+import { createFlagProp, flagBoundingBox, FLAG_DEFAULTS } from "../core/props/flagFactory.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { WaterStore } from "../core/water/waterStore.js";
 import { createWaterMaterials } from "../render/water/waterMaterial.js";
@@ -709,6 +711,9 @@ export async function startV2App(opts = {}) {
   const propStore = new PropStore();
   const propInstancer = new PropInstancer(scene, propStore);
   const propSystem = new PropSystem({ toolState, propStore, propInstancer, cliffBvh, terrainStore, config });
+
+  const livePropManager = new LivePropManager(scene, propStore);
+  livePropManager.registerFactory("flag", (params) => createFlagProp(params));
   const splineSystem = new SplineSystem({
     scene,
     toolState,
@@ -1008,7 +1013,7 @@ export async function startV2App(opts = {}) {
   let ui;
   let _saveProject, _loadProject;
   let _importTreeGlb, _loadTreePreset, _removeTreeSlot, _clearAllTrees, _treeCastShadowChanged, _foliageParamChanged;
-  let _importPropGlb, _addPrimitive, _removePropSlot, _importPropLod, _propCastShadowChanged, _deleteSelectedProp, _clearAllProps, _propTransformModeChanged, _rebakeBvh;
+  let _importPropGlb, _addPrimitive, _addLiveProp, _removePropSlot, _importPropLod, _propCastShadowChanged, _deleteSelectedProp, _clearAllProps, _propTransformModeChanged, _rebakeBvh;
   let _loadFoliageTexture, _foliageSlotStructureChanged, _foliageSlotMaterialChanged, _clearAllFoliage, _foliageLodChanged;
   let _playSpawnChanged, _barrierOverlayChanged, _barrierClear, _barrierFill, _holeOverlayChanged, _holeClear;
   let _ambientFxFlapChanged, _ambientFxRingsChanged, _ambientFxClear;
@@ -1615,6 +1620,30 @@ export async function startV2App(opts = {}) {
       }
       ui?.pane.refresh();
     }),
+    onAddLiveProp: (_addLiveProp = (livePropName) => {
+      const defs = {
+        Flag: { factoryId: "flag", defaults: FLAG_DEFAULTS, bbox: flagBoundingBox },
+      };
+      const def = defs[livePropName];
+      if (!def) return;
+
+      const existing = toolState.propSlots.find((s) => s.name === livePropName && s.live);
+      if (existing) {
+        toolState.props.activeSlot = toolState.propSlots.indexOf(existing);
+        ui?.pane.refresh();
+        return;
+      }
+
+      const bbox = def.bbox(def.defaults);
+      const typeIdx = propStore.registerLiveType(livePropName, def.factoryId, def.defaults, bbox);
+      propInstancer.onTypeRegistered(typeIdx);
+      const slotIdx = toolState.propSlots.length;
+      toolState.propSlots.push({ name: livePropName, loaded: true, typeIdx, live: true, factoryId: def.factoryId });
+      toolState.props.activeSlot = slotIdx;
+      propUiCallbacks._rebuildPropUi?.();
+      console.log(`[V2] Live prop "${livePropName}" added (type ${typeIdx})`);
+      ui?.pane.refresh();
+    }),
     onRemovePropSlot: (_removePropSlot = (slotIdx) => {
       toolState.propSlots.splice(slotIdx, 1);
       if (toolState.props.activeSlot >= toolState.propSlots.length) {
@@ -1850,10 +1879,11 @@ export async function startV2App(opts = {}) {
           cliffStore.clear();
           cliffStore.importData(project.settings.cliffInstances, typeNameToIdx);
         }
-        // Auto-restore primitive prop types from saved slots
+        // Auto-restore primitive + live prop types from saved slots
         if (project.settings?.propSlots) {
           for (const slot of project.settings.propSlots) {
             if (slot.builtin) propUiCallbacks.onAddPrimitive?.(slot.name);
+            else if (slot.live) _addLiveProp?.(slot.name);
           }
         }
         // Restore prop instances (GLB types must be re-imported by user)
@@ -1989,6 +2019,7 @@ export async function startV2App(opts = {}) {
   syncHoleOverlay();
 
   propUiCallbacks = ui.propCallbacks;
+  ui.propFolder?.setPropStoreRef?.(propStore);
 
   playMode.onExit = () => {
     toolState.mode = "view";
@@ -2263,12 +2294,21 @@ export async function startV2App(opts = {}) {
     transformControls.visible = false;
   }
 
+  let _onPropSelectionChanged = null;
+
   function activatePropSelection(instIdx) {
     propInstancer.select(instIdx);
     transformControls.attach(propInstancer.proxyObject);
     transformControls.setMode(toolState.props.transformMode);
     transformControls.enabled = true;
     transformControls.visible = true;
+    const inst = propStore.instances[instIdx];
+    if (inst?.liveParams && ui?.propFolder) {
+      ui.propFolder.showLiveParams(inst, propStore, livePropManager);
+    } else {
+      ui?.propFolder?.hideLiveParams();
+    }
+    _onPropSelectionChanged?.(instIdx);
   }
 
   function deactivatePropSelection() {
@@ -2276,6 +2316,8 @@ export async function startV2App(opts = {}) {
     transformControls.detach();
     transformControls.enabled = false;
     transformControls.visible = false;
+    ui?.propFolder?.hideLiveParams();
+    _onPropSelectionChanged?.(null);
   }
 
   renderer.domElement.addEventListener("pointerdown", (event) => {
@@ -2618,7 +2660,12 @@ export async function startV2App(opts = {}) {
       event.preventDefault();
       updatePointer(event);
       raycaster.setFromCamera(pointerNdc, camera);
-      const hit = propInstancer.raycast(raycaster);
+      const hitStatic = propInstancer.raycast(raycaster);
+      const hitLive = livePropManager.raycast(raycaster);
+      const hit = (!hitStatic && !hitLive) ? null :
+        (!hitStatic) ? hitLive :
+        (!hitLive) ? hitStatic :
+        (hitLive.distance < hitStatic.distance) ? hitLive : hitStatic;
       if (hit) {
         activatePropSelection(hit.instIdx);
       } else {
@@ -3003,6 +3050,7 @@ export async function startV2App(opts = {}) {
     chunkStream.update(focusPos);
     cliffInstancer.update();
     propInstancer.update(camera, toolState.propLod);
+    livePropManager.update(dtSec);
     treeLodRenderer.update(treeStore, camera, toolState.treeLod);
     foliageLodRenderer.update(treeStore, camera, toolState.foliageLod);
     foliageLodRenderer.updateTime(now * 0.001);
@@ -3112,6 +3160,9 @@ export async function startV2App(opts = {}) {
     foliageParamChanged(slotIdx) { _foliageParamChanged(slotIdx); },
     importPropGlb() { _importPropGlb(); },
     addPrimitive(name) { _addPrimitive(name); },
+    addLiveProp(name) { _addLiveProp(name); },
+    livePropManager,
+    set onPropSelectionChanged(fn) { _onPropSelectionChanged = fn; },
     removePropSlot(idx) { _removePropSlot(idx); },
     importPropLod(slotIdx, lod) { _importPropLod(slotIdx, lod); },
     propCastShadowChanged() { _propCastShadowChanged(); },
@@ -3185,6 +3236,7 @@ export async function startV2App(opts = {}) {
       treeLodRenderer.dispose();
       cliffInstancer.dispose();
       propInstancer.dispose();
+      livePropManager.dispose();
       transformControls.dispose();
       grassManager.dispose();
       ambientFxStore.clear();
