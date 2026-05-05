@@ -123,6 +123,62 @@ export class TreeSystem {
     this.undoStack.push(cmd);
   }
 
+  massPlace(count) {
+    const tp = this.toolState.treePaint;
+    const slotIdx = tp.activeSlot;
+    if (slotIdx < 0) return;
+    const baseScale = this.toolState.treeSlots[slotIdx]?.baseScale ?? 1.0;
+    const spacing = tp.minSpacing * Math.max(baseScale, 0.1);
+    const halfW = this.config.world.size * 0.5;
+
+    const beforeKeys = new Set();
+    for (const key of this.treeStore.chunks.keys()) beforeKeys.add(key);
+    const before = new Map();
+    for (const key of beforeKeys) {
+      const trees = this.treeStore.chunks.get(key);
+      before.set(key, trees ? trees.map((t) => ({ ...t })) : []);
+    }
+
+    if (!tp.massPlaceKeepExisting) {
+      this.treeStore.clear();
+    }
+
+    let placed = 0;
+    let maxAttempts = count * 20;
+    while (placed < count && maxAttempts-- > 0) {
+      const tx = (Math.random() - 0.5) * this.config.world.size;
+      const tz = (Math.random() - 0.5) * this.config.world.size;
+
+      if (tx < -halfW || tx > halfW || tz < -halfW || tz > halfW) continue;
+      if (this.treeStore.hasTreeNearby(tx, tz, spacing)) continue;
+
+      const rotY = tp.randomRotation ? Math.random() * Math.PI * 2 : 0;
+      const scale =
+        (tp.scaleMin + Math.random() * (tp.scaleMax - tp.scaleMin)) * baseScale;
+      const y = this.terrainStore.getWorldHeight(tx, tz);
+      this.treeStore.addTree(tx, tz, y, rotY, scale, slotIdx);
+      placed++;
+    }
+
+    const afterKeys = new Set(beforeKeys);
+    for (const key of this.treeStore.chunks.keys()) afterKeys.add(key);
+    for (const key of afterKeys) {
+      if (!before.has(key)) before.set(key, []);
+    }
+    const after = new Map();
+    for (const key of afterKeys) {
+      const trees = this.treeStore.chunks.get(key);
+      after.set(key, trees ? trees.map((t) => ({ ...t })) : []);
+    }
+
+    this.undoStack.push({ before, after });
+    this.redoStack.length = 0;
+    if (this.undoStack.length > 64) this.undoStack.shift();
+
+    console.log(`[TreeSystem] Mass-placed ${placed} trees (requested ${count})`);
+    return placed;
+  }
+
   clearAll() {
     const before = new Map();
     for (const [key, trees] of this.treeStore.chunks) {

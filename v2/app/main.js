@@ -1166,6 +1166,10 @@ export async function startV2App(opts = {}) {
       foliageLodRenderer.clearSlot(slotIdx);
       console.log(`[V2] Tree slot ${slotIdx} models removed`);
     }),
+    onMassPlaceTrees: () => {
+      const count = toolState.treePaint.massPlaceCount;
+      treeSystem.massPlace(count);
+    },
     onClearAllTrees: (_clearAllTrees = () => {
       treeSystem.clearAll();
     }),
@@ -3077,6 +3081,7 @@ export async function startV2App(opts = {}) {
     loadTreePreset(slotIdx) { _loadTreePreset(slotIdx); },
     removeTreeSlot(slotIdx) { _removeTreeSlot(slotIdx); },
     clearAllTrees() { _clearAllTrees(); },
+    massPlaceTrees() { treeSystem.massPlace(toolState.treePaint.massPlaceCount); },
     treeCastShadowChanged() { _treeCastShadowChanged(); },
     foliageParamChanged(slotIdx) { _foliageParamChanged(slotIdx); },
     importPropGlb() { _importPropGlb(); },

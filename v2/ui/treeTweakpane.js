@@ -9,6 +9,7 @@
  * @param {(slotIdx: number, lod: 0|1) => void} opts.onImportGlb
  * @param {(slotIdx: number) => void} opts.onLoadTreePreset
  * @param {(slotIdx: number) => void} opts.onRemoveSlot
+ * @param {() => void} opts.onMassPlace
  * @param {() => void} opts.onClearAllTrees
  * @param {() => void} opts.onTreeLodChanged
  * @param {() => void} opts.onCastShadowChanged
@@ -20,6 +21,7 @@ export function addTreeFolder(pane, toolState, opts) {
     onImportGlb,
     onLoadTreePreset,
     onRemoveSlot,
+    onMassPlace,
     onClearAllTrees,
     onTreeLodChanged,
     onCastShadowChanged,
@@ -68,6 +70,21 @@ export function addTreeFolder(pane, toolState, opts) {
   brushFolder.addBinding(toolState.treePaint, "randomRotation", {
     label: "Random rotation",
   });
+
+  // Mass place
+  const massFolder = folder.addFolder({ title: "Mass Place Trees", expanded: true });
+  massFolder.addBinding(toolState.treePaint, "massPlaceCount", {
+    label: "Number of trees",
+    min: 1,
+    max: 50000,
+    step: 1,
+  });
+  massFolder.addBinding(toolState.treePaint, "massPlaceKeepExisting", {
+    label: "Keep existing trees",
+  });
+  massFolder
+    .addButton({ title: "🌳 Place" })
+    .on("click", () => onMassPlace?.());
 
   // Slot management
   const slotsFolder = folder.addFolder({ title: "Tree Slots (GLB Import)", expanded: true });
