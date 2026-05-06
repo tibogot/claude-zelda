@@ -116,6 +116,7 @@ const CAR_MAX_SLOPE_COS = 0.5; // ~60° max climbable slope (cos(60°) ≈ 0.5)
 const CAR_SLOPE_SAMPLE_EPS = 0.5;
 const CAR_COLLISION_SKIN = 0.08;
 const CAR_COLLISION_ITERS = 3;
+const CAR_STEP_OVER_HEIGHT = 1.0;
 const CAR_NITRO_KEY = "KeyN";
 const CAR_NITRO_ACCEL_BONUS = 22;
 const CAR_NITRO_MAX_SPEED_BONUS = 26;
@@ -2656,6 +2657,7 @@ export class PlayMode {
           const pz = this.playerPos.z;
           const lowY = this.playerPos.y + CAR_RIDE_HEIGHT + 0.15;
           const highY = this.playerPos.y + CAR_RIDE_HEIGHT + CAR_BODY_HEIGHT;
+          const stepOverY = this.playerPos.y + CAR_STEP_OVER_HEIGHT;
           const fwdX = -Math.sin(this.carHeading);
           const fwdZ = -Math.cos(this.carHeading);
           const rightX = Math.cos(this.carHeading);
@@ -2684,6 +2686,13 @@ export class PlayMode {
                 sweepDist,
               );
               if (!hit) continue;
+              // Check if surface is a low obstacle the car can drive over
+              const topY = this.cliffBvh.raycastHeightFrom(
+                hit.point.x,
+                stepOverY + 0.1,
+                hit.point.z,
+              );
+              if (topY != null && topY <= stepOverY) continue;
               const safe = Math.max(
                 0,
                 hit.distance - (CAR_HALF_LENGTH + CAR_COLLISION_SKIN),
@@ -2757,6 +2766,13 @@ export class PlayMode {
                   r.dist,
                 );
                 if (!hit) continue;
+                // Skip low surfaces the car can drive over (bridges, ramps)
+                const topY = this.cliffBvh.raycastHeightFrom(
+                  hit.point.x,
+                  stepOverY + 0.1,
+                  hit.point.z,
+                );
+                if (topY != null && topY <= stepOverY) continue;
                 const nx = hit.normal.x;
                 const nz = hit.normal.z;
                 const nLen = Math.hypot(nx, nz);
@@ -3395,7 +3411,15 @@ export class PlayMode {
             this.playerPos.z -
             lx * Math.sin(this.carHeading) +
             lz * Math.cos(this.carHeading);
-          const h = this.getTerrainHeight(wx, wz);
+          let h = this.getTerrainHeight(wx, wz);
+          if (this.cliffBvh?.baked) {
+            const bvhH = this.cliffBvh.raycastHeightFrom(
+              wx,
+              this.playerPos.y + 2.0,
+              wz,
+            );
+            if (bvhH != null && bvhH > h) h = bvhH;
+          }
           wheelHeights.push(h);
           sumH += h;
           w.contactWorld.set(wx, h + DRIFT_MARK_Y_OFFSET, wz);
@@ -3543,7 +3567,15 @@ export class PlayMode {
             this.playerPos.x + lx * Math.cos(hyWheel) + lz * Math.sin(hyWheel);
           const wz =
             this.playerPos.z - lx * Math.sin(hyWheel) + lz * Math.cos(hyWheel);
-          const h = this.getTerrainHeight(wx, wz);
+          let h = this.getTerrainHeight(wx, wz);
+          if (this.cliffBvh?.baked) {
+            const bvhH = this.cliffBvh.raycastHeightFrom(
+              wx,
+              this.playerPos.y + 2.0,
+              wz,
+            );
+            if (bvhH != null && bvhH > h) h = bvhH;
+          }
           sumWheelH += h;
           w.contactWorld.set(wx, h + DRIFT_MARK_Y_OFFSET, wz);
           if (w.steer) frontY += h;
