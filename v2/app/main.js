@@ -1061,6 +1061,7 @@ export async function startV2App(opts = {}) {
   let _waterChanged, _saveWater, _loadWater, _deleteSelectedWater, _clearAllWater;
   let _waterfallChanged, _deleteSelectedWaterfall, _clearAllWaterfalls;
   let _decalLoadImage, _decalOpacityChanged, _decalAlignChanged, _decalRefit, _decalDeleteSelected, _decalClearAll, _decalSaveJson, _decalLoadJson, _decalTransformModeChanged;
+  let _riverChanged, _riverNewRiver, _riverDeleteActive, _riverDeleteSelected, _riverSelectedYChanged, _riverActiveIndexChanged;
   ui = createTweakpaneUi({
     toolState,
     config,
@@ -1471,21 +1472,21 @@ export async function startV2App(opts = {}) {
       activeGraphRoadSystem().clearAllDecals();
       ui?.pane.refresh();
     },
-    onRiverChanged: () => {
+    onRiverChanged: (_riverChanged = () => {
       riverSystem.syncMaterial();
       riverSystem.rebuildAllMeshes();
       ui?.pane.refresh();
-    },
-    onRiverNewRiver: () => riverSystem.startNewRiver(),
-    onRiverDeleteActive: () => { riverSystem.deleteActiveRiver(); ui?.pane.refresh(); },
-    onRiverDeleteSelected: () => { riverSystem.deleteSelected(); ui?.pane.refresh(); },
-    onRiverSelectedYChanged: () => riverSystem.setSelectedPointY(toolState.river.selectedPointY),
-    onRiverActiveIndexChanged: () => {
+    }),
+    onRiverNewRiver: (_riverNewRiver = () => riverSystem.startNewRiver()),
+    onRiverDeleteActive: (_riverDeleteActive = () => { riverSystem.deleteActiveRiver(); ui?.pane.refresh(); }),
+    onRiverDeleteSelected: (_riverDeleteSelected = () => { riverSystem.deleteSelected(); ui?.pane.refresh(); }),
+    onRiverSelectedYChanged: (_riverSelectedYChanged = () => riverSystem.setSelectedPointY(toolState.river.selectedPointY)),
+    onRiverActiveIndexChanged: (_riverActiveIndexChanged = () => {
       riverSystem._clampActive();
       riverSystem.selectedIdx = -1;
       riverSystem._rebuildVisual();
       ui?.pane.refresh();
-    },
+    }),
     onRoadSelectedYChanged: () => roadSystem.setSelectedPointY(toolState.road.selectedPointY),
     onRoadStyleSectionChanged: () => {
       roadSystem._clampActiveStyleSection();
@@ -3280,6 +3281,12 @@ export async function startV2App(opts = {}) {
     decalSaveJson() { _decalSaveJson(); },
     decalLoadJson() { _decalLoadJson(); },
     decalTransformModeChanged() { _decalTransformModeChanged(); },
+    riverChanged() { _riverChanged(); },
+    riverNewRiver() { _riverNewRiver(); },
+    riverDeleteActive() { _riverDeleteActive(); },
+    riverDeleteSelected() { _riverDeleteSelected(); },
+    riverSelectedYChanged() { _riverSelectedYChanged(); },
+    riverActiveIndexChanged() { _riverActiveIndexChanged(); },
     onConfigChanged() { chunkStream.update(camera.position); },
     dispose() {
       renderer.domElement.removeEventListener("wheel", onCanvasWheelBrush, { capture: true });

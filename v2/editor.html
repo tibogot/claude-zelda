@@ -871,7 +871,7 @@ const MODE_FOLDERS = {
 const ALWAYS_HIDDEN = new Set(['Global', 'Lighting & atmosphere']);
 const ALWAYS_VISIBLE = new Set(['Terrain/LOD', 'Perf Gate']);
 
-const CUSTOM_MODES = new Set(['sculpt', 'paint', 'treePaint', 'props', 'foliagePaint', 'playSpawn', 'hole', 'barrier', 'ambientfx', 'fleurs', 'cliffGrass', 'cliffs', 'water', 'waterfall', 'decals']);
+const CUSTOM_MODES = new Set(['sculpt', 'paint', 'treePaint', 'props', 'foliagePaint', 'playSpawn', 'hole', 'barrier', 'ambientfx', 'fleurs', 'cliffGrass', 'cliffs', 'water', 'waterfall', 'decals', 'river']);
 const CUSTOM_KEEP_FOLDERS = {
   paint: ['Terrain appearance'],
 };
@@ -909,6 +909,8 @@ function syncToolsTab(pane, mode) {
   if (waterfallPanel) waterfallPanel.style.display = mode === 'waterfall' ? '' : 'none';
   const decalsPanel = document.getElementById('decals-panel');
   if (decalsPanel) decalsPanel.style.display = mode === 'decals' ? '' : 'none';
+  const riverPanel = document.getElementById('river-panel');
+  if (riverPanel) riverPanel.style.display = mode === 'river' ? '' : 'none';
 
   const kept = CUSTOM_KEEP_FOLDERS[mode] || [];
   const show = hasCustom ? new Set(kept) : new Set(MODE_FOLDERS[mode] || []);
@@ -2038,6 +2040,43 @@ function buildDecalsPanel(app) {
   return panel;
 }
 
+// === Build custom River panel ===
+function buildRiverPanel(app) {
+  const panel = document.createElement('div');
+  panel.id = 'river-panel';
+  const rp = app.toolState.river;
+
+  const body = _section(panel, 'River');
+  _toggle(body, rp, 'showHandles', { label: 'Show handles', onChange: () => app.riverChanged() });
+  _toggle(body, rp, 'closed', { label: 'Close path (loop)', onChange: () => app.riverChanged() });
+  _slider(body, rp, 'activeRiverIndex', { label: 'Active river #', min: 0, max: 63, step: 1, onChange: () => app.riverActiveIndexChanged() });
+  _button(body, { title: 'New river', onClick: () => app.riverNewRiver() });
+  _button(body, { title: 'Delete active river', onClick: () => app.riverDeleteActive() });
+  _button(body, { title: 'Delete selected point', onClick: () => app.riverDeleteSelected() });
+  _slider(body, rp, 'selectedPointY', { label: 'Point Y', min: -50, max: 200, step: 0.1, onChange: () => app.riverSelectedYChanged() });
+
+  const geoBody = _section(panel, 'Geometry');
+  _slider(geoBody, rp, 'width', { label: 'Width', min: 1, max: 80, step: 0.5, onChange: () => app.riverChanged() });
+  _slider(geoBody, rp, 'segments', { label: 'Segments', min: 20, max: 900, step: 10, onChange: () => app.riverChanged() });
+  _slider(geoBody, rp, 'heightOffset', { label: 'Height offset', min: 0, max: 3, step: 0.01, onChange: () => app.riverChanged() });
+
+  const matBody = _section(panel, 'Material');
+  _dropdown(matBody, rp, 'shaderStyle', {
+    label: 'Shader style',
+    options: { 'Basic': 'Basic', 'Stylized v1': 'Stylized' },
+    onChange: () => app.riverChanged(),
+  });
+  _color(matBody, rp, 'shallowColor', { label: 'Shallow', onChange: () => app.riverChanged() });
+  _color(matBody, rp, 'deepColor', { label: 'Deep', onChange: () => app.riverChanged() });
+  _color(matBody, rp, 'highlightColor', { label: 'Highlight', onChange: () => app.riverChanged() });
+  _color(matBody, rp, 'foamColor', { label: 'Foam', onChange: () => app.riverChanged() });
+  _slider(matBody, rp, 'foamWidth', { label: 'Foam width', min: 0.01, max: 0.6, step: 0.01, onChange: () => app.riverChanged() });
+  _slider(matBody, rp, 'opacity', { label: 'Opacity', min: 0.05, max: 1, step: 0.01, onChange: () => app.riverChanged() });
+  _slider(matBody, rp, 'flowSpeed', { label: 'Flow speed', min: 0, max: 5, step: 0.01, onChange: () => app.riverChanged() });
+
+  return panel;
+}
+
 // === Build custom Cliff Grass panel ===
 function buildCliffGrassPanel(app) {
   const panel = document.createElement('div');
@@ -2712,6 +2751,7 @@ try {
   toolsTab.appendChild(buildWaterPanel(app));
   toolsTab.appendChild(buildWaterfallPanel(app));
   toolsTab.appendChild(buildDecalsPanel(app));
+  toolsTab.appendChild(buildRiverPanel(app));
 
   // Move Tweakpane pane into the Tools tab & apply mode-aware folder visibility
   requestAnimationFrame(() => {
