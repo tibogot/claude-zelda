@@ -50,6 +50,8 @@ const PLANE_DRAG = 0.014;
 const PLANE_DECK_ALT = 1.15;
 const PLANE_DECK_COAST_MULT = 2.1;
 const CAM_DIST = 8;
+const CAM_COLLISION_OFFSET = 0.3;
+const CAM_COLLISION_EASE_OUT = 5;
 const CAM_SENS_X = 0.002;
 const CAM_SENS_Y = 0.002;
 const ISO_PITCH = 1.0;
@@ -684,6 +686,8 @@ const _bFwd = new THREE.Vector3();
 const _bMuz = new THREE.Vector3();
 const _bToCam = new THREE.Vector3();
 const _bRight = new THREE.Vector3();
+const _camColTarget = new THREE.Vector3();
+const _camColDir = new THREE.Vector3();
 const _bPerp = new THREE.Vector3();
 const _bMat4 = new THREE.Matrix4();
 const _bStep = new THREE.Vector3();
@@ -815,6 +819,7 @@ export class PlayMode {
     this.inAir = false;
     this.camYaw = 0;
     this.camPitch = 0.35;
+    this._camCollisionDist = 1;
     this.isoYaw = Math.PI / 4;
     this.isoDist = ISO_DIST_DEFAULT;
     this.savedCamPos = null;
@@ -2127,6 +2132,7 @@ export class PlayMode {
       ? THREE.MathUtils.degToRad(spawn.yawDeg || 0)
       : 0;
     this.camPitch = 0.35;
+    this._camCollisionDist = 1;
 
     this.capsule.visible = true;
     if (this.planeRoot) this.planeRoot.visible = false;
@@ -4130,6 +4136,55 @@ export class PlayMode {
       );
       this.camera.up.set(-cosH * sinA, cosA, sinH * sinA);
       this.camera.lookAt(this.playerPos.x, lookAtY, this.playerPos.z);
+    }
+
+    // Camera collision — pull camera in if terrain or BVH geometry is between target and camera
+    const camTarget = _camColTarget;
+    camTarget.set(this.playerPos.x, lookAtY, this.playerPos.z);
+    const camPos = this.camera.position;
+    _camColDir.subVectors(camPos, camTarget);
+    const fullDist = _camColDir.length();
+    if (fullDist > 0.01) {
+      _camColDir.divideScalar(fullDist);
+      let allowedDist = fullDist;
+
+      // Terrain floor check — sample height at camera XZ and ensure camera stays above
+      const terrainAtCam = this.getWorldHeight(camPos.x, camPos.z);
+      const minCamY = terrainAtCam + CAM_COLLISION_OFFSET;
+      if (camPos.y < minCamY) {
+        // Find how far along the ray we hit the terrain plane
+        if (_camColDir.y < 0) {
+          const t = (camTarget.y - minCamY) / -_camColDir.y;
+          if (t > 0 && t < allowedDist) allowedDist = t;
+        }
+      }
+
+      // BVH raycast (cliffs/props)
+      if (this.cliffBvh?.baked) {
+        const hit = this.cliffBvh.raycast3D(
+          camTarget.x, camTarget.y, camTarget.z,
+          _camColDir.x, _camColDir.y, _camColDir.z,
+          fullDist,
+        );
+        if (hit) {
+          const hitDist = hit.distance - CAM_COLLISION_OFFSET;
+          if (hitDist < allowedDist) allowedDist = hitDist;
+        }
+      }
+
+      // Smooth: snap inward instantly, ease outward
+      const ratio = Math.max(0.1, allowedDist / fullDist);
+      if (ratio < this._camCollisionDist) {
+        this._camCollisionDist = ratio;
+      } else {
+        this._camCollisionDist += (ratio - this._camCollisionDist) *
+          (1 - Math.exp(-CAM_COLLISION_EASE_OUT * dtSec));
+      }
+
+      if (this._camCollisionDist < 0.999) {
+        camPos.lerpVectors(camTarget, camPos, this._camCollisionDist);
+        this.camera.lookAt(camTarget.x, camTarget.y, camTarget.z);
+      }
     }
   }
 
