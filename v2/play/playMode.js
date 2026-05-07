@@ -17,6 +17,7 @@ import {
   getSharedGltfLoader,
 } from "../core/foliage/glbLoader.js";
 import { setupPlayModeCarAudio } from "./carAudioSetup.js";
+import { CarPhysics } from "./carPhysics.js";
 
 const CAP_R = 0.4;
 const CAP_H = 1.2;
@@ -958,6 +959,7 @@ export class PlayMode {
     this.carInAir = false;
     this.carOnSteepSlope = false;
     this.carNitro = 1.0;
+    this._carPhysics = new CarPhysics();
     this._hudKmhSmooth = 0;
     this._hudNitroSmooth = 1;
     this._carBoostBlend = 0;
@@ -2659,149 +2661,16 @@ export class PlayMode {
 
       if (this.cliffBvh?.baked && !flying) {
         if (carDriving) {
-          const px = this.playerPos.x;
-          const pz = this.playerPos.z;
-          const lowY = this.playerPos.y + CAR_RIDE_HEIGHT + 0.15;
-          const highY = this.playerPos.y + CAR_RIDE_HEIGHT + CAR_BODY_HEIGHT;
-          const stepOverY = this.playerPos.y + CAR_STEP_OVER_HEIGHT;
-          const fwdX = -Math.sin(this.carHeading);
-          const fwdZ = -Math.cos(this.carHeading);
-          const rightX = Math.cos(this.carHeading);
-          const rightZ = -Math.sin(this.carHeading);
-
-          const baseStepLen = Math.hypot(stepX, stepZ);
-          if (baseStepLen > 1e-6) {
-            const sweepDist =
-              baseStepLen + CAR_HALF_LENGTH + CAR_COLLISION_SKIN;
-            // Only check center samples for sweep (not corners) - allows entering curved openings like tunnels.
-            const sweepSamples = [
-              { ox: 0, oz: 0, y: lowY },
-              { ox: 0, oz: 0, y: highY },
-            ];
-            let minSafe = baseStepLen;
-            const dirX = stepX / baseStepLen;
-            const dirZ = stepZ / baseStepLen;
-            for (const s of sweepSamples) {
-              const hit = this.cliffBvh.raycast3D(
-                px + s.ox,
-                s.y,
-                pz + s.oz,
-                stepX,
-                0,
-                stepZ,
-                sweepDist,
-              );
-              if (!hit) continue;
-              // Check if surface is a low obstacle the car can drive over
-              const topY = this.cliffBvh.raycastHeightFrom(
-                hit.point.x,
-                stepOverY + 0.1,
-                hit.point.z,
-              );
-              if (topY != null && topY <= stepOverY) continue;
-              const safe = Math.max(
-                0,
-                hit.distance - (CAR_HALF_LENGTH + CAR_COLLISION_SKIN),
-              );
-              if (safe < minSafe) minSafe = safe;
-            }
-            if (minSafe < baseStepLen) {
-              stepX = dirX * minSafe;
-              stepZ = dirZ * minSafe;
-            }
-          }
-
-          let posX = px + stepX;
-          let posZ = pz + stepZ;
-          for (let iter = 0; iter < CAR_COLLISION_ITERS; iter++) {
-            let changed = false;
-            const carRays = [
-              {
-                dx: fwdX,
-                dz: fwdZ,
-                dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN,
-              },
-              {
-                dx: -fwdX,
-                dz: -fwdZ,
-                dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN,
-              },
-              {
-                dx: fwdX + rightX,
-                dz: fwdZ + rightZ,
-                dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN,
-              },
-              {
-                dx: fwdX - rightX,
-                dz: fwdZ - rightZ,
-                dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN,
-              },
-              {
-                dx: -fwdX + rightX,
-                dz: -fwdZ + rightZ,
-                dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN,
-              },
-              {
-                dx: -fwdX - rightX,
-                dz: -fwdZ - rightZ,
-                dist: CAR_HALF_LENGTH + CAR_COLLISION_SKIN,
-              },
-              {
-                dx: rightX,
-                dz: rightZ,
-                dist: CAR_HALF_WIDTH + CAR_COLLISION_SKIN,
-              },
-              {
-                dx: -rightX,
-                dz: -rightZ,
-                dist: CAR_HALF_WIDTH + CAR_COLLISION_SKIN,
-              },
-            ];
-
-            for (const r of carRays) {
-              const rLen = Math.hypot(r.dx, r.dz);
-              const ndx = r.dx / Math.max(1e-6, rLen);
-              const ndz = r.dz / Math.max(1e-6, rLen);
-              for (const ry of [lowY, highY]) {
-                const hit = this.cliffBvh.raycastLateral(
-                  posX,
-                  ry,
-                  posZ,
-                  ndx,
-                  ndz,
-                  r.dist,
-                );
-                if (!hit) continue;
-                // Skip low surfaces the car can drive over (bridges, ramps)
-                const topY = this.cliffBvh.raycastHeightFrom(
-                  hit.point.x,
-                  stepOverY + 0.1,
-                  hit.point.z,
-                );
-                if (topY != null && topY <= stepOverY) continue;
-                const nx = hit.normal.x;
-                const nz = hit.normal.z;
-                const nLen = Math.hypot(nx, nz);
-                if (nLen <= 0.01) continue;
-                const nnx = nx / nLen;
-                const nnz = nz / nLen;
-                const pen = r.dist - hit.distance;
-                if (pen > 1e-4) {
-                  posX += nnx * pen;
-                  posZ += nnz * pen;
-                  changed = true;
-                  const vDot = this.carVx * nnx + this.carVz * nnz;
-                  if (vDot < 0) {
-                    this.carVx -= vDot * nnx;
-                    this.carVz -= vDot * nnz;
-                  }
-                }
-              }
-            }
-            if (!changed) break;
-          }
-          stepX = posX - px;
-          stepZ = posZ - pz;
+          const resolved = this._carPhysics.resolveMovement(
+            this.playerPos.x, this.playerPos.z,
+            stepX, stepZ,
+            this.playerPos.y, this.carHeading,
+            this.carVx, this.carVz, this.cliffBvh,
+          );
+          stepX = resolved.x - this.playerPos.x;
+          stepZ = resolved.z - this.playerPos.z;
+          this.carVx = resolved.vx;
+          this.carVz = resolved.vz;
         } else {
           const margin = CAP_R + 0.05;
           const stepLen = Math.hypot(stepX, stepZ);
@@ -3120,54 +2989,41 @@ export class PlayMode {
     } else if (carDriving) {
       this.flyHeight = 0;
 
-      // Compute terrain normal via finite differences.
-      // Use terrain-only height (not BVH) so tunnels/props don't create false steep slopes.
-      const eps = CAR_SLOPE_SAMPLE_EPS;
-      const px = this.playerPos.x;
-      const pz = this.playerPos.z;
-      const hL = this.getTerrainHeight(px - eps, pz);
-      const hR = this.getTerrainHeight(px + eps, pz);
-      const hD = this.getTerrainHeight(px, pz - eps);
-      const hU = this.getTerrainHeight(px, pz + eps);
-      const inv2eps = 1 / (2 * eps);
-      const nx = (hL - hR) * inv2eps;
-      const nz = (hD - hU) * inv2eps;
-      const nLen = Math.sqrt(nx * nx + 1 + nz * nz);
-      const normalY = 1 / nLen; // normalized Y component
+      // Car uses its own ground height: raycast from high altitude so bridges/ramps are detected
+      const carGroundY = this._carPhysics.getGroundHeight(
+        this.playerPos.x, this.playerPos.z, this.playerPos.y,
+        this.getTerrainHeight, this.cliffBvh,
+      );
 
-      // Check if slope is too steep
-      const tooSteep = normalY < CAR_MAX_SLOPE_COS;
-      this.carOnSteepSlope = tooSteep && !this.carInAir;
-
-      if (this.carInAir) {
-        this.carVelY -= CAR_GRAVITY * dtSec;
-        this.playerPos.y += this.carVelY * dtSec;
-        if (this.playerPos.y <= groundY) {
-          this.playerPos.y = groundY;
-          this.carVelY = 0;
-          this.carInAir = false;
-        }
-      } else {
-        const drop = prevY - groundY;
-        if (drop > CAR_EDGE_DROP_THRESHOLD) {
-          this.carInAir = true;
-          this.carVelY = 0;
-          this.playerPos.y = prevY;
-        } else if (tooSteep) {
-          // Slope too steep: slide down along slope direction
-          const slideX = (nx / nLen) * CAR_GRAVITY * 0.5 * dtSec;
-          const slideZ = (nz / nLen) * CAR_GRAVITY * 0.5 * dtSec;
-          this.carVx += slideX;
-          this.carVz += slideZ;
-          // Dampen uphill velocity component
-          const upDot = this.carVx * (nx / nLen) + this.carVz * (nz / nLen);
-          if (upDot < 0) {
-            this.carVx -= (nx / nLen) * upDot * 0.8;
-            this.carVz -= (nz / nLen) * upDot * 0.8;
+      this._carPhysics.inAir = this.carInAir;
+      this._carPhysics.velY = this.carVelY;
+      const vert = this._carPhysics.updateVertical(
+        this.playerPos.y, carGroundY, prevY, dtSec,
+        this.getTerrainHeight, this.playerPos.x, this.playerPos.z,
+        this.carVx, this.carVz, this.cliffBvh,
+      );
+      this.playerPos.y = vert.y;
+      this.carVelY = this._carPhysics.velY;
+      this.carInAir = this._carPhysics.inAir;
+      this.carOnSteepSlope = this._carPhysics.onSteepSlope;
+      // On launch, reduce horizontal speed (energy goes into vertical)
+      if (vert.launchVxScale) {
+        this.carVx *= vert.launchVxScale;
+        this.carVz *= vert.launchVzScale;
+      }
+      if (vert.slideVx || vert.slideVz) {
+        this.carVx += vert.slideVx;
+        this.carVz += vert.slideVz;
+        if (vert.tooSteep) {
+          const nx2 = vert.slideVx, nz2 = vert.slideVz;
+          const nL = Math.hypot(nx2, nz2);
+          if (nL > 1e-6) {
+            const upDot = this.carVx * (nx2 / nL) + this.carVz * (nz2 / nL);
+            if (upDot < 0) {
+              this.carVx -= (nx2 / nL) * upDot * 0.8;
+              this.carVz -= (nz2 / nL) * upDot * 0.8;
+            }
           }
-          this.playerPos.y = groundY;
-        } else {
-          this.playerPos.y = groundY;
         }
       }
     } else {
@@ -3417,15 +3273,10 @@ export class PlayMode {
             this.playerPos.z -
             lx * Math.sin(this.carHeading) +
             lz * Math.cos(this.carHeading);
-          let h = this.getTerrainHeight(wx, wz);
-          if (this.cliffBvh?.baked) {
-            const bvhH = this.cliffBvh.raycastHeightFrom(
-              wx,
-              this.playerPos.y + 2.0,
-              wz,
-            );
-            if (bvhH != null && bvhH > h) h = bvhH;
-          }
+          let h = this._carPhysics.getWheelGroundHeight(
+            wx, wz, this.playerPos.y, this.getTerrainHeight, this.cliffBvh,
+          );
+          h = Math.max(h, this.playerPos.y - 1.5);
           wheelHeights.push(h);
           sumH += h;
           w.contactWorld.set(wx, h + DRIFT_MARK_Y_OFFSET, wz);
@@ -3439,12 +3290,16 @@ export class PlayMode {
           else rightY += h;
         }
 
-        // Step 2: Body position derived FROM wheel contacts
+        // Step 2: Body position derived FROM wheel contacts (smoothed to avoid pop on airborne transition)
         const avgWheelH = sumH / 4;
-        const rootY = this.carInAir
+        const targetRootY = this.carInAir
           ? this.playerPos.y +
             (CAR_RIDE_HEIGHT + CAR_WHEEL_RADIUS) * scaleFactor
           : avgWheelH + (CAR_RIDE_HEIGHT + CAR_WHEEL_RADIUS) * scaleFactor;
+        if (this._carRootYSmooth === undefined) this._carRootYSmooth = targetRootY;
+        const rootYSmooth = 1 - Math.exp(-18 * dtSec);
+        this._carRootYSmooth += (targetRootY - this._carRootYSmooth) * rootYSmooth;
+        const rootY = this._carRootYSmooth;
         this.carRoot.position.set(this.playerPos.x, rootY, this.playerPos.z);
         this.carRoot.rotation.y = this.carHeading;
 
@@ -3463,6 +3318,7 @@ export class PlayMode {
         );
         const terrainSmooth = 1 - Math.exp(-CAR_TERRAIN_BODY_SMOOTH * dtSec);
         if (this.carInAir) {
+          // Airborne: pitch follows velocity arc (nose up at launch, down on descent)
           this.carTerrainRoll = THREE.MathUtils.lerp(
             this.carTerrainRoll,
             0,
@@ -3470,7 +3326,11 @@ export class PlayMode {
           );
           this.carTerrainPitch = THREE.MathUtils.lerp(
             this.carTerrainPitch,
-            0,
+            THREE.MathUtils.clamp(
+              this._carPhysics.airPitch,
+              -CAR_BODY_TERRAIN_PITCH_MAX * 1.5,
+              CAR_BODY_TERRAIN_PITCH_MAX * 1.5,
+            ),
             terrainSmooth,
           );
         } else {
@@ -3495,8 +3355,8 @@ export class PlayMode {
         }
         const finalPitch = THREE.MathUtils.clamp(
           this.carTerrainPitch + this.carBodyPitch,
-          -CAR_BODY_PITCH_MAX,
-          CAR_BODY_PITCH_MAX,
+          -CAR_BODY_PITCH_MAX * 2,
+          CAR_BODY_PITCH_MAX * 2,
         );
         const finalRoll = THREE.MathUtils.clamp(
           this.carTerrainRoll + this.carBodyRoll,
@@ -3573,15 +3433,10 @@ export class PlayMode {
             this.playerPos.x + lx * Math.cos(hyWheel) + lz * Math.sin(hyWheel);
           const wz =
             this.playerPos.z - lx * Math.sin(hyWheel) + lz * Math.cos(hyWheel);
-          let h = this.getTerrainHeight(wx, wz);
-          if (this.cliffBvh?.baked) {
-            const bvhH = this.cliffBvh.raycastHeightFrom(
-              wx,
-              this.playerPos.y + 2.0,
-              wz,
-            );
-            if (bvhH != null && bvhH > h) h = bvhH;
-          }
+          let h = this._carPhysics.getWheelGroundHeight(
+            wx, wz, this.playerPos.y, this.getTerrainHeight, this.cliffBvh,
+          );
+          h = Math.max(h, this.playerPos.y - 1.5);
           sumWheelH += h;
           w.contactWorld.set(wx, h + DRIFT_MARK_Y_OFFSET, wz);
           if (w.steer) frontY += h;
@@ -3594,9 +3449,13 @@ export class PlayMode {
           else rightY += h;
         }
 
-        // Position car at average wheel height + ground offset
+        // Position car at average wheel height + ground offset (smoothed)
         const baseY = sumWheelH / 4;
-        const rootY = baseY + (this._lotusGroundOffset || 0);
+        const targetLotusY = baseY + (this._lotusGroundOffset || 0);
+        if (this._lotusRootYSmooth === undefined) this._lotusRootYSmooth = targetLotusY;
+        const lotusYSmooth = 1 - Math.exp(-18 * dtSec);
+        this._lotusRootYSmooth += (targetLotusY - this._lotusRootYSmooth) * lotusYSmooth;
+        const rootY = this._lotusRootYSmooth;
         this.lotusRoot.position.set(this.playerPos.x, rootY, this.playerPos.z);
 
         const leftAvg = leftY * 0.5,
@@ -3622,7 +3481,11 @@ export class PlayMode {
           );
           this.carTerrainPitch = THREE.MathUtils.lerp(
             this.carTerrainPitch,
-            0,
+            THREE.MathUtils.clamp(
+              this._carPhysics.airPitch,
+              -CAR_BODY_TERRAIN_PITCH_MAX * 1.5,
+              CAR_BODY_TERRAIN_PITCH_MAX * 1.5,
+            ),
             terrainSmooth,
           );
         } else {
@@ -3649,8 +3512,8 @@ export class PlayMode {
         const _lotusPitchMax = this.lotusCam.pitchMax;
         const finalPitch = THREE.MathUtils.clamp(
           this.carTerrainPitch + this.carBodyPitch,
-          -_lotusPitchMax,
-          _lotusPitchMax,
+          -_lotusPitchMax * 2,
+          _lotusPitchMax * 2,
         );
         const finalRoll = THREE.MathUtils.clamp(
           this.carTerrainRoll + this.carBodyRoll,
@@ -4138,28 +4001,28 @@ export class PlayMode {
       this.camera.lookAt(this.playerPos.x, lookAtY, this.playerPos.z);
     }
 
-    // Camera collision — pull camera in if terrain or BVH geometry is between target and camera
+    // Camera collision — raise camera above terrain/BVH surfaces, keep full distance
     const camTarget = _camColTarget;
     camTarget.set(this.playerPos.x, lookAtY, this.playerPos.z);
     const camPos = this.camera.position;
+
+    // Floor clamp: keep camera above terrain (not BVH — ramps/slopes are player surfaces, not camera barriers)
+    const floorAtCam = this.getWorldHeight(camPos.x, camPos.z);
+    const minCamY = floorAtCam + CAM_COLLISION_OFFSET + 1.0;
+    if (camPos.y < minCamY) {
+      const targetCamY = minCamY;
+      const liftSmooth = 1 - Math.exp(-8 * dtSec);
+      camPos.y = camPos.y + (targetCamY - camPos.y) * liftSmooth;
+      this.camera.lookAt(camTarget.x, camTarget.y, camTarget.z);
+    }
+
+    // Wall pull-in: only for vertical surfaces (walls, not floors/ramps)
     _camColDir.subVectors(camPos, camTarget);
     const fullDist = _camColDir.length();
     if (fullDist > 0.01) {
       _camColDir.divideScalar(fullDist);
       let allowedDist = fullDist;
 
-      // Terrain floor check — sample height at camera XZ and ensure camera stays above
-      const terrainAtCam = this.getWorldHeight(camPos.x, camPos.z);
-      const minCamY = terrainAtCam + CAM_COLLISION_OFFSET;
-      if (camPos.y < minCamY) {
-        // Find how far along the ray we hit the terrain plane
-        if (_camColDir.y < 0) {
-          const t = (camTarget.y - minCamY) / -_camColDir.y;
-          if (t > 0 && t < allowedDist) allowedDist = t;
-        }
-      }
-
-      // BVH raycast (cliffs/props)
       if (this.cliffBvh?.baked) {
         const hit = this.cliffBvh.raycast3D(
           camTarget.x,
@@ -4170,13 +4033,12 @@ export class PlayMode {
           _camColDir.z,
           fullDist,
         );
-        if (hit) {
+        if (hit && Math.abs(hit.normal.y) < 0.3) {
           const hitDist = hit.distance - CAM_COLLISION_OFFSET;
           if (hitDist < allowedDist) allowedDist = hitDist;
         }
       }
 
-      // Smooth: snap inward instantly, ease outward
       const ratio = Math.max(0.1, allowedDist / fullDist);
       if (ratio < this._camCollisionDist) {
         this._camCollisionDist = ratio;
