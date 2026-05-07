@@ -14,6 +14,7 @@ export class TreeSystem {
     this.treeStore = treeStore;
     this.terrainStore = terrainStore;
     this.config = config;
+    this._slopeEps = 0.5;
     this.isPlacing = false;
     this.lastStrokePoint = null;
     /** @type {Map<string, Array>} */
@@ -63,6 +64,24 @@ export class TreeSystem {
     }
   }
 
+  _terrainNormalY(x, z) {
+    const e = this._slopeEps;
+    const hL = this.terrainStore.getWorldHeight(x - e, z);
+    const hR = this.terrainStore.getWorldHeight(x + e, z);
+    const hD = this.terrainStore.getWorldHeight(x, z - e);
+    const hU = this.terrainStore.getWorldHeight(x, z + e);
+    const dx = hL - hR;
+    const dz = hD - hU;
+    const e2 = e * 2;
+    return e2 / Math.sqrt(dx * dx + e2 * e2 + dz * dz);
+  }
+
+  _isTooSteep(x, z) {
+    const tp = this.toolState.treePaint;
+    if (!tp.slopeEnabled) return false;
+    return this._terrainNormalY(x, z) < tp.slopeMax;
+  }
+
   _scatter(wx, wz, radius) {
     const tp = this.toolState.treePaint;
     const slotIdx = tp.activeSlot;
@@ -82,6 +101,7 @@ export class TreeSystem {
       if (tx < -halfW || tx > halfW || tz < -halfW || tz > halfW) continue;
 
       if (this.treeStore.hasTreeNearby(tx, tz, spacing)) continue;
+      if (this._isTooSteep(tx, tz)) continue;
 
       const rotY = tp.randomRotation ? Math.random() * Math.PI * 2 : 0;
       const scale =
@@ -151,6 +171,7 @@ export class TreeSystem {
 
       if (tx < -halfW || tx > halfW || tz < -halfW || tz > halfW) continue;
       if (this.treeStore.hasTreeNearby(tx, tz, spacing)) continue;
+      if (this._isTooSteep(tx, tz)) continue;
 
       const rotY = tp.randomRotation ? Math.random() * Math.PI * 2 : 0;
       const scale =

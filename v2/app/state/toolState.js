@@ -196,6 +196,8 @@ export function createToolState() {
       randomRotation: true,
       massPlaceCount: 1000,
       massPlaceKeepExisting: true,
+      slopeEnabled: true,
+      slopeMax: 0.7,
     },
     treeLod: {
       lod0Distance: 120,
