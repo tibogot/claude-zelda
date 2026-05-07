@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>WebGPU Volumetric Clouds — Improved Atmospheric Version</title>
+
+    <meta charset="utf-8" />
+
+    <meta
+      name="viewport"
+      content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0"
+    />
+
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        font-family: monospace;
+        background: black;
+      }
+
+      #info {
+        position: absolute;
+        top: 10px;
+        width: 100%;
+        text-align: center;
+        color: white;
+        z-index: 10;
+        text-shadow: 1px 1px 4px black;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="info">WebGPU Atmospheric Volumetric Clouds</div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three/webgpu";
+
+      import {
+        float,
+        vec3,
+        vec4,
+        Fn,
+        Loop,
+        If,
+        Break,
+        dot,
+        exp,
+        normalize,
+        texture3D,
+        texture,
+        uniform,
+        uv,
+        screenUV,
+        positionView,
+        positionViewDirection,
+        smoothstep,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { ImprovedNoise } from "three/addons/math/ImprovedNoise.js";
+      import { RaymarchingBox } from "three/addons/tsl/utils/Raymarching.js";
+      import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
+
+      // -------------------------------------------------------
+      // RENDERER
+      // -------------------------------------------------------
+
+      const renderer = new THREE.WebGPURenderer({
+        antialias: true,
+      });
+
+      renderer.setPixelRatio(window.devicePixelRatio);
+
+      renderer.setSize(window.innerWidth, window.innerHeight);
+
+      renderer.toneMapping = THREE.NoToneMapping;
+
+      renderer.toneMappingExposure = 1.0;
+
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+      document.body.appendChild(renderer.domElement);
+
+      await renderer.init();
+
+      // -------------------------------------------------------
+      // SCENE
+      // -------------------------------------------------------
+
+      const scene = new THREE.Scene();
+
+      scene.fog = new THREE.FogExp2(0xcfe8ff, 0.00012);
+
+      // -------------------------------------------------------
+      // HDRI
+      // -------------------------------------------------------
+
+      const pmrem = new THREE.PMREMGenerator(renderer);
+
+      new RGBELoader().load(
+        "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/golden_gate_hills_1k.hdr",
+        (hdr) => {
+          const envMap = pmrem.fromEquirectangular(hdr).texture;
+
+          scene.environment = envMap;
+          scene.background = envMap;
+
+          hdr.dispose();
+          pmrem.dispose();
+        },
+      );
+
+      // -------------------------------------------------------
+      // CAMERA
+      // -------------------------------------------------------
+
+      const camera = new THREE.PerspectiveCamera(
+        60,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        12000,
+      );
+
+      camera.position.set(0, 700, 1600);
+
+      // -------------------------------------------------------
+      // CONTROLS
+      // -------------------------------------------------------
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+
+      controls.enableDamping = true;
+
+      controls.target.set(0, 700, 0);
+
+      // -------------------------------------------------------
+      // LIGHTS
+      // -------------------------------------------------------
+
+      const ambient = new THREE.AmbientLight(0xffffff, 1.0);
+
+      scene.add(ambient);
+
+      const sun = new THREE.DirectionalLight(0xfff2da, 3.5);
+
+      sun.position.set(1, 1.1, 0.8).normalize();
+
+      scene.add(sun);
+
+      const sunSphere = new THREE.Mesh(
+        new THREE.SphereGeometry(70, 32, 16),
+
+        new THREE.MeshBasicMaterial({
+          color: 0xfff2c2,
+          transparent: true,
+          opacity: 0.95,
+        }),
+      );
+
+      scene.add(sunSphere);
+
+      // -------------------------------------------------------
+      // GROUND
+      // -------------------------------------------------------
+
+      const ground = new THREE.Mesh(
+        new THREE.PlaneGeometry(12000, 12000),
+
+        new THREE.MeshStandardMaterial({
+          color: 0x5c8c52,
+          roughness: 1.0,
+        }),
+      );
+
+      ground.rotation.x = -Math.PI / 2;
+
+      ground.position.y = -300;
+
+      scene.add(ground);
+
+      // -------------------------------------------------------
+      // CLOUD TEXTURE
+      // -------------------------------------------------------
+
+      function makeCloudTexture(size = 128) {
+        const data = new Uint8Array(size * size * size);
+
+        const perlin = new ImprovedNoise();
+
+        let i = 0;
+
+        for (let z = 0; z < size; z++) {
+          for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+              const nx = x / size;
+              const ny = y / size;
+              const nz = z / size;
+
+              let d = 0;
+
+              let f = 1;
+              let a = 1;
+
+              for (let o = 0; o < 5; o++) {
+                d += perlin.noise(nx * 3 * f, ny * 3 * f, nz * 3 * f) * a;
+
+                f *= 2.0;
+                a *= 0.5;
+              }
+
+              d = (d + 1.0) * 0.5;
+
+              const dx = nx - 0.5;
+              const dy = ny - 0.5;
+              const dz = nz - 0.5;
+
+              const radial = 1.0 - Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+              d *= radial * radial;
+
+              data[i++] = THREE.MathUtils.clamp(d * 255, 0, 255);
+            }
+          }
+        }
+
+        const tex = new THREE.Data3DTexture(data, size, size, size);
+
+        tex.format = THREE.RedFormat;
+
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+
+        tex.unpackAlignment = 1;
+
+        tex.needsUpdate = true;
+
+        return tex;
+      }
+
+      // -------------------------------------------------------
+      // BLUE NOISE
+      // -------------------------------------------------------
+
+      function makeBlueNoiseTexture(size = 128) {
+        const data = new Uint8Array(size * size * 4);
+
+        for (let i = 0; i < size * size; i++) {
+          const v = Math.random() * 255;
+
+          data[i * 4 + 0] = v;
+          data[i * 4 + 1] = v;
+          data[i * 4 + 2] = v;
+          data[i * 4 + 3] = 255;
+        }
+
+        const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+
+        tex.wrapS = THREE.RepeatWrapping;
+        tex.wrapT = THREE.RepeatWrapping;
+
+        tex.minFilter = THREE.NearestFilter;
+        tex.magFilter = THREE.NearestFilter;
+
+        tex.needsUpdate = true;
+
+        return tex;
+      }
+
+      // -------------------------------------------------------
+      // TEXTURES
+      // -------------------------------------------------------
+
+      const volumeTexture = makeCloudTexture(128);
+
+      const volumeTex = texture3D(volumeTexture, null, 0);
+
+      const blueNoiseTex = texture(makeBlueNoiseTexture(128), uv().mul(6.0));
+
+      // -------------------------------------------------------
+      // UNIFORMS
+      // -------------------------------------------------------
+
+      const thresholdU = uniform(0.32);
+
+      const rangeU = uniform(0.22);
+
+      const opacityU = uniform(2.0);
+
+      const densityMultU = uniform(0.7);
+
+      const stepsU = uniform(96);
+
+      const lightStepsU = uniform(8);
+
+      const ambientU = uniform(0.42);
+
+      const phaseGU = uniform(0.55);
+
+      const texOffsetU = uniform(new THREE.Vector3());
+
+      const textureTilingU = uniform(3.0);
+
+      const jitterStrengthU = uniform(0.008);
+
+      const sunDirU = uniform(new THREE.Vector3(1, 1.1, 0.8).normalize());
+
+      const sunColorU = uniform(new THREE.Color(0xfff2da));
+
+      // -------------------------------------------------------
+      // PHASE
+      // -------------------------------------------------------
+
+      const phaseFn = Fn(({ cosTheta }) => {
+        const g = phaseGU;
+
+        const gg = g.mul(g);
+
+        const denom = float(1.0).add(gg).sub(g.mul(cosTheta).mul(2.0));
+
+        return float(1.0)
+          .sub(gg)
+          .div(denom.pow(1.5))
+          .mul(0.25 / Math.PI);
+      });
+
+      // -------------------------------------------------------
+      // CLOUD NODE
+      // -------------------------------------------------------
+
+      const cloudNode = Fn(({ positionRay }) => {
+        const p = positionRay.toVar();
+
+        const jitter = blueNoiseTex.r.sub(0.5).mul(jitterStrengthU);
+
+        const texCoord = p
+          .add(0.5)
+          .mul(textureTilingU)
+          .add(texOffsetU)
+          .add(vec3(jitter))
+          .fract();
+
+        const densityRaw = volumeTex.sample(texCoord).r;
+
+        const densityNoise = densityRaw
+          .smoothstep(thresholdU.sub(rangeU), thresholdU.add(rangeU))
+          .mul(densityMultU);
+
+        // Vertical fading
+
+        const bottomFade = smoothstep(-0.5, -0.15, p.y);
+
+        const topFade = float(1.0).sub(smoothstep(0.2, 0.5, p.y));
+
+        const heightFade = bottomFade.mul(topFade);
+
+        // Radial edge fade
+
+        const radial = float(1.0).sub(p.xz.length());
+
+        const radialFade = radial.smoothstep(0.0, 0.25);
+
+        const density = densityNoise.mul(heightFade).mul(radialFade);
+
+        return density;
+      });
+
+      // -------------------------------------------------------
+      // RAYMARCH
+      // -------------------------------------------------------
+
+      const MAX_LIGHT_STEPS = 24;
+
+      const raymarchCloud = Fn(() => {
+        const finalColor = vec3(0.0).toVar();
+
+        const transmittance = float(1.0).toVar();
+
+        const lightDir = normalize(sunDirU);
+
+        const viewDir = normalize(positionViewDirection);
+        RaymarchingBox(stepsU, ({ positionRay }) => {
+          const density = cloudNode({
+            positionRay,
+          });
+
+          If(
+            density.greaterThan(0.001).and(transmittance.greaterThan(0.01)),
+
+            () => {
+              const lightAcc = float(0.0).toVar();
+
+              Loop(MAX_LIGHT_STEPS, ({ i }) => {
+                If(float(i).greaterThanEqual(lightStepsU), () => Break());
+
+                const lt = float(i).div(lightStepsU).mul(0.6);
+
+                const lp = positionRay.add(lightDir.mul(lt));
+
+                const inBounds = lp.x
+                  .abs()
+                  .lessThan(0.5)
+                  .and(lp.y.abs().lessThan(0.5))
+                  .and(lp.z.abs().lessThan(0.5));
+
+                If(inBounds, () => {
+                  lightAcc.addAssign(
+                    cloudNode({
+                      positionRay: lp,
+                    }).mul(0.12),
+                  );
+                });
+              });
+
+              const lightEnergy = exp(lightAcc.negate().mul(1.4));
+
+              const cosTheta = dot(viewDir, lightDir);
+
+              const phase = phaseFn({
+                cosTheta,
+              });
+
+              const warmLight = sunColorU.mul(vec3(1.0, 0.96, 0.9));
+
+              const scat = warmLight
+                .mul(lightEnergy)
+                .mul(phase.mul(1.4))
+                .add(vec3(0.52, 0.6, 0.72).mul(ambientU));
+
+              const extinction = exp(density.mul(opacityU).negate().mul(0.09));
+
+              const alphaStep = float(1.0).sub(extinction).mul(0.75);
+
+              finalColor.addAssign(scat.mul(alphaStep).mul(transmittance));
+
+              transmittance.mulAssign(float(1.0).sub(alphaStep));
+            },
+          );
+        });
+
+        const alpha = float(1.0).sub(transmittance);
+
+        return vec4(finalColor, alpha);
+      });
+
+      // -------------------------------------------------------
+      // MATERIAL
+      // -------------------------------------------------------
+
+      const cloudMat = new THREE.MeshBasicNodeMaterial();
+
+      cloudMat.colorNode = raymarchCloud();
+
+      cloudMat.transparent = true;
+
+      cloudMat.depthWrite = false;
+
+      cloudMat.side = THREE.DoubleSide;
+
+      // -------------------------------------------------------
+      // CLOUD MESH
+      // -------------------------------------------------------
+
+      const cloudMesh = new THREE.Mesh(
+        new THREE.BoxGeometry(1, 1, 1),
+
+        cloudMat,
+      );
+
+      cloudMesh.scale.set(6000, 1400, 6000);
+
+      cloudMesh.position.y = 900;
+
+      scene.add(cloudMesh);
+
+      // -------------------------------------------------------
+      // LOOP
+      // -------------------------------------------------------
+
+      renderer.setAnimationLoop(() => {
+        controls.update();
+
+        // Infinite cloud illusion
+
+        cloudMesh.position.x = camera.position.x;
+
+        cloudMesh.position.z = camera.position.z;
+
+        // Animate clouds
+
+        texOffsetU.value.x += 0.0008;
+        texOffsetU.value.z += 0.0004;
+
+        // Infinite sun illusion
+
+        sunSphere.position
+          .copy(camera.position)
+          .add(sun.position.clone().normalize().multiplyScalar(9000));
+
+        renderer.render(scene, camera);
+      });
+
+      // -------------------------------------------------------
+      // RESIZE
+      // -------------------------------------------------------
+
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+
+        camera.updateProjectionMatrix();
+
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>
