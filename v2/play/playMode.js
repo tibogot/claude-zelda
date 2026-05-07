@@ -4162,8 +4162,12 @@ export class PlayMode {
       // BVH raycast (cliffs/props)
       if (this.cliffBvh?.baked) {
         const hit = this.cliffBvh.raycast3D(
-          camTarget.x, camTarget.y, camTarget.z,
-          _camColDir.x, _camColDir.y, _camColDir.z,
+          camTarget.x,
+          camTarget.y,
+          camTarget.z,
+          _camColDir.x,
+          _camColDir.y,
+          _camColDir.z,
           fullDist,
         );
         if (hit) {
@@ -4177,7 +4181,8 @@ export class PlayMode {
       if (ratio < this._camCollisionDist) {
         this._camCollisionDist = ratio;
       } else {
-        this._camCollisionDist += (ratio - this._camCollisionDist) *
+        this._camCollisionDist +=
+          (ratio - this._camCollisionDist) *
           (1 - Math.exp(-CAM_COLLISION_EASE_OUT * dtSec));
       }
 
