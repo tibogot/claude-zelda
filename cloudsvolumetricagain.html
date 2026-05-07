@@ -1,666 +1,644 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <title>WebGPU TSL Volumetric Cloud (Mask + Detail)</title>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
-  <style>
-    body { margin: 0; overflow: hidden; font-family: monospace; }
-    #info { position: absolute; top: 10px; width: 100%; color: white; text-align: center; text-shadow: 1px 1px 3px black; z-index: 10; }
-  </style>
-</head>
-<body>
-<div id="info">
-Scalable Cloud Generator with Advanced Material<br/>
-Customizable cloud shape with PBR (Physically Based Rendering) lighting material.
-</div>
-<script type="importmap">
-{
-  "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
-    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
-    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
-  }
-}
-</script>
-<script type="module">
-import * as THREE from "three/webgpu";
-import { float, vec2, vec3, vec4, Fn, Loop, If, Break, dot, exp, normalize, texture3D, texture, uniform, uv, screenUV, positionView } from "three/tsl";
-import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { ImprovedNoise } from "three/addons/math/ImprovedNoise.js";
-import { GUI } from "three/addons/libs/lil-gui.module.min.js";
-import Stats from "three/addons/libs/stats.module.js";
-import { RaymarchingBox } from "three/addons/tsl/utils/Raymarching.js";
-import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
-
-const renderer = new THREE.WebGPURenderer({ antialias: true });
-renderer.setPixelRatio(window.devicePixelRatio);
-renderer.setSize(window.innerWidth, window.innerHeight);
-document.body.appendChild(renderer.domElement);
-await renderer.init();
-const stats = new Stats();
-stats.showPanel(0);
-document.body.appendChild(stats.dom);
-
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0561a0);
-
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 1.0, 20000);
-camera.position.set(-90, -30, -30);
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(0, 0, 0);
-controls.enableDamping = true;
-
-const ambientLight = new THREE.AmbientLight(0xffffff, 1.2);
-scene.add(ambientLight);
-const sun = new THREE.DirectionalLight(0xffffff, 2.5);
-sun.position.set(1.0, 1.0, 1.0).normalize();
-scene.add(sun);
-
-const sky = new THREE.Mesh(
-  new THREE.SphereGeometry(3800, 48, 24),
-  new THREE.MeshBasicMaterial({ color: 0x5f95d2, side: THREE.BackSide })
-);
-scene.add(sky);
-
-new HDRLoader().load(
-  "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/golden_gate_hills_2k.hdr",
-  (envMap) => {
-    envMap.mapping = THREE.EquirectangularReflectionMapping;
-    scene.environment = envMap;
-  },
-  undefined,
-  () => {
-    // HDR is optional in this local demo.
-  }
-);
-
-const ground = new THREE.Mesh(
-  new THREE.PlaneGeometry(200, 200),
-  new THREE.MeshStandardMaterial({ color: 0x666666, roughness: 0.8, side: THREE.DoubleSide })
-);
-ground.rotation.x = -Math.PI / 2;
-ground.position.y = -40;
-scene.add(ground);
-
-const greenSphere = new THREE.Mesh(
-  new THREE.SphereGeometry(15, 32, 16),
-  new THREE.MeshStandardMaterial({ color: 0x00ff00, roughness: 0.3, metalness: 0.1 })
-);
-greenSphere.position.set(0, 0, 0);
-scene.add(greenSphere);
-
-const magentaSphere = new THREE.Mesh(
-  new THREE.SphereGeometry(15, 32, 16),
-  new THREE.MeshStandardMaterial({ color: 0xff00ff, roughness: 0.3, metalness: 0.1 })
-);
-magentaSphere.position.set(0, 0, -50);
-scene.add(magentaSphere);
-
-const gridHelper = new THREE.GridHelper(200, 50);
-gridHelper.position.y = -39.9;
-scene.add(gridHelper);
-
-const sunDisc = new THREE.Mesh(
-  new THREE.SphereGeometry(200, 24, 16),
-  new THREE.MeshBasicMaterial({ color: 0xffddaa, transparent: true, depthWrite: false })
-);
-sunDisc.position.copy(sun.position).normalize().multiplyScalar(9000);
-scene.add(sunDisc);
-
-function makeCloudTexture(size, {
-  seed = 1,
-  scale = 0.05,
-  coverage = 0.55,
-  softness = 0.06,
-  octaves = 4,
-  persistence = 0.5,
-  lacunarity = 2.3,
-  noiseIntensity = 1.1
-} = {}) {
-  const data = new Uint8Array(size * size * size);
-  const perlin = new ImprovedNoise();
-  const v = new THREE.Vector3();
-  let i = 0;
-  const seedShift = seed * 0.001;
-
-  const fbm = (x, y, z) => {
-    let total = 0;
-    let freq = 1;
-    let amp = 1;
-    let maxV = 0;
-    for (let o = 0; o < octaves; o++) {
-      total += perlin.noise(x * freq, y * freq, z * freq) * amp;
-      maxV += amp;
-      amp *= persistence;
-      freq *= lacunarity;
-    }
-    return total / Math.max(0.0001, maxV);
-  };
-
-  const smoothstepJS = (e0, e1, x) => {
-    const t = THREE.MathUtils.clamp((x - e0) / Math.max(1e-5, e1 - e0), 0, 1);
-    return t * t * (3 - 2 * t);
-  };
-
-  for (let z = 0; z < size; z++) {
-    for (let y = 0; y < size; y++) {
-      for (let x = 0; x < size; x++) {
-        const nx = x / (size - 1);
-        const ny = y / (size - 1);
-        const nz = z / (size - 1);
-        const sx = nx * scale + seedShift;
-        const sy = ny * scale + seedShift;
-        const sz = nz * scale + seedShift;
-        const n = (fbm(sx, sy, sz) + 1) * 0.5;
-        const nPow = Math.pow(THREE.MathUtils.clamp(n, 0, 1), noiseIntensity);
-        const dens = smoothstepJS(coverage - softness, coverage + softness, nPow);
-        const d = 1.0 - v.set(x, y, z).subScalar(size / 2).divideScalar(size).length();
-        data[i++] = THREE.MathUtils.clamp(dens * d * d * 255, 0, 255);
+  <head>
+    <title>WebGPU TSL Volumetric Cloud (Mask + Detail)</title>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0"
+    />
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        font-family: monospace;
       }
-    }
-  }
-  const tex = new THREE.Data3DTexture(data, size, size, size);
-  tex.format = THREE.RedFormat;
-  tex.minFilter = THREE.LinearFilter;
-  tex.magFilter = THREE.LinearFilter;
-  tex.unpackAlignment = 1;
-  tex.needsUpdate = true;
-  return tex;
-}
+      #info {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        color: white;
+        text-shadow: 1px 1px 3px black;
+        z-index: 10;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="info">
+      TSL/WebGPU cloud port · deformable mask + detail noise · Orbit controls
+    </div>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+          "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/"
+        }
+      }
+    </script>
+    <script type="module">
+      import * as THREE from "three/webgpu";
+      import {
+        float,
+        vec3,
+        vec4,
+        Fn,
+        Loop,
+        If,
+        Break,
+        dot,
+        exp,
+        normalize,
+        texture3D,
+        texture,
+        uniform,
+        uv,
+        screenUV,
+        positionView,
+      } from "three/tsl";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+      import { ImprovedNoise } from "three/addons/math/ImprovedNoise.js";
+      import { GUI } from "three/addons/libs/lil-gui.module.min.js";
+      import { RaymarchingBox } from "three/addons/tsl/utils/Raymarching.js";
 
-function makeBlueNoiseTexture(size = 128, seed = 12345) {
-  const data = new Uint8Array(size * size * 4);
-  let state = seed >>> 0;
-  const rnd = () => {
-    state ^= state << 13;
-    state ^= state >>> 17;
-    state ^= state << 5;
-    return ((state >>> 0) % 256);
-  };
-  for (let i = 0; i < size * size; i++) {
-    const v = rnd();
-    data[i * 4 + 0] = v;
-    data[i * 4 + 1] = v;
-    data[i * 4 + 2] = v;
-    data[i * 4 + 3] = 255;
-  }
-  const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
-  tex.minFilter = THREE.NearestFilter;
-  tex.magFilter = THREE.NearestFilter;
-  tex.wrapS = THREE.RepeatWrapping;
-  tex.wrapT = THREE.RepeatWrapping;
-  tex.needsUpdate = true;
-  return tex;
-}
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.body.appendChild(renderer.domElement);
+      await renderer.init();
 
-const placeholderDepth = new THREE.DataTexture(new Uint8Array([255]), 1, 1, THREE.RedFormat);
-placeholderDepth.needsUpdate = true;
-const depthRT = new THREE.RenderTarget(window.innerWidth, window.innerHeight);
-depthRT.depthBuffer = true;
-depthRT.depthTexture = new THREE.DepthTexture(window.innerWidth, window.innerHeight);
-depthRT.depthTexture.type = THREE.UnsignedShortType;
-const depthScene = new THREE.Scene();
-const depthMat = new THREE.MeshBasicNodeMaterial({ color: 0x000000 });
-const depthGround = new THREE.Mesh(ground.geometry, depthMat);
-depthGround.rotation.copy(ground.rotation);
-depthGround.position.copy(ground.position);
-depthGround.scale.copy(ground.scale);
-depthScene.add(depthGround);
-const depthGreenSphere = new THREE.Mesh(greenSphere.geometry, depthMat);
-depthGreenSphere.position.copy(greenSphere.position);
-depthGreenSphere.rotation.copy(greenSphere.rotation);
-depthGreenSphere.scale.copy(greenSphere.scale);
-depthScene.add(depthGreenSphere);
-const depthMagentaSphere = new THREE.Mesh(magentaSphere.geometry, depthMat);
-depthMagentaSphere.position.copy(magentaSphere.position);
-depthMagentaSphere.rotation.copy(magentaSphere.rotation);
-depthMagentaSphere.scale.copy(magentaSphere.scale);
-depthScene.add(depthMagentaSphere);
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x4b86c5);
 
-const sceneRT = new THREE.RenderTarget(window.innerWidth, window.innerHeight);
-const godRaysRT = new THREE.RenderTarget(
-  Math.max(1, Math.floor(window.innerWidth * 0.5)),
-  Math.max(1, Math.floor(window.innerHeight * 0.5))
-);
-const postCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-const postScene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(
+        65,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        5000,
+      );
+      camera.position.set(-180, 90, 220);
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 0, 0);
+      controls.enableDamping = true;
 
-const params = {
-  textureResolution: 96,
-  textureSeed: Math.random() * 1000.0,
-  textureScale: 3.5,
-  textureCoverage: 0.55,
-  textureSoftness: 0.05,
-  textureOctaves: 5,
-  texturePersistence: 0.5,
-  textureLacunarity: 3.0,
-  textureNoiseIntensity: 1.0,
-  textureTiling: 2.0,
-  threshold: 0.0,
-  range: 0.05,
-  opacity: 6.0,
-  densityMult: 50.0,
-  steps: 44,
-  lightSteps: 1,
-  phaseG: 0.35,
-  phaseBlend: 0.8,
-  ambient: 0.28,
-  ambientLightIntensity: 1.2,
-  directionalLightIntensity: 2.5,
-  jitterStrength: 0.012,
-  maskRadius: 0.52,
-  maskSoftness: 0.17,
-  maskSeed: 1,
-  maskNoiseFrequency: 2.7,
-  maskNoiseStrength: 0.05,
-  detailSeed: 10,
-  detailFrequency: 10.5,
-  maskDetailStrength: 0.036,
-  flatTop: 0.7,
-  flatBottom: 0.3,
-  flatXPos: 0.9,
-  flatXNeg: 0.9,
-  flatZPos: 0.9,
-  flatZNeg: 0.9,
-  maskVisualize: false,
-  animateTexture: true,
-  animSpeedX: 0.02,
-  animSpeedY: 0.0,
-  animSpeedZ: 0.01,
-  scale: 120,
-  godRaysDensity: 0.98,
-  godRaysDecay: 0.98,
-  godRaysWeight: 0.4,
-  godRaysExposure: 0.4,
-  godRaysSamples: 120
-};
+      scene.add(new THREE.AmbientLight(0xffffff, 0.85));
+      const sun = new THREE.DirectionalLight(0xfff2da, 2.6);
+      sun.position.set(1.0, 1.1, 0.8).normalize();
+      scene.add(sun);
 
-const thresholdU = uniform(params.threshold);
-const rangeU = uniform(params.range);
-const opacityU = uniform(params.opacity);
-const densityMultU = uniform(params.densityMult);
-const stepsU = uniform(params.steps);
-const lightStepsU = uniform(params.lightSteps);
-const phaseGU = uniform(params.phaseG);
-const phaseBlendU = uniform(params.phaseBlend);
-const ambientU = uniform(params.ambient);
-const jitterStrengthU = uniform(params.jitterStrength);
-const uDepthNear = uniform(camera.near);
-const uDepthFar = uniform(camera.far);
-const maskRadiusU = uniform(params.maskRadius);
-const maskSoftnessU = uniform(params.maskSoftness);
-const maskNoiseStrengthU = uniform(params.maskNoiseStrength);
-const maskDetailStrengthU = uniform(params.maskDetailStrength);
-const flatTopU = uniform(params.flatTop);
-const flatBottomU = uniform(params.flatBottom);
-const flatXPosU = uniform(params.flatXPos);
-const flatXNegU = uniform(params.flatXNeg);
-const flatZPosU = uniform(params.flatZPos);
-const flatZNegU = uniform(params.flatZNeg);
-const maskVisualizeU = uniform(params.maskVisualize ? 1 : 0);
-const texOffsetU = uniform(new THREE.Vector3());
-const textureTilingU = uniform(params.textureTiling);
-const sunDirU = uniform(sun.position.clone().normalize());
-const sunColorU = uniform(sun.color.clone());
-const sunIntensityU = uniform(sun.intensity);
-const lightScreenPosU = uniform(new THREE.Vector2(0.5, 0.5));
-const godRaysDensityU = uniform(params.godRaysDensity);
-const godRaysDecayU = uniform(params.godRaysDecay);
-const godRaysWeightU = uniform(params.godRaysWeight);
-const godRaysExposureU = uniform(params.godRaysExposure);
-const godRaysSamplesU = uniform(params.godRaysSamples);
+      const sky = new THREE.Mesh(
+        new THREE.SphereGeometry(3800, 48, 24),
+        new THREE.MeshBasicMaterial({ color: 0x5f95d2, side: THREE.BackSide }),
+      );
+      scene.add(sky);
 
-let volumeTexture = makeCloudTexture(params.textureResolution, {
-  seed: params.textureSeed,
-  scale: params.textureScale,
-  coverage: params.textureCoverage,
-  softness: params.textureSoftness,
-  octaves: params.textureOctaves,
-  persistence: params.texturePersistence,
-  lacunarity: params.textureLacunarity,
-  noiseIntensity: params.textureNoiseIntensity
-});
-const maskTexture = makeCloudTexture(96, {
-  seed: params.maskSeed,
-  scale: params.maskNoiseFrequency,
-  coverage: 0.5,
-  softness: 0.2,
-  octaves: 3,
-  persistence: 0.6,
-  lacunarity: 2.3,
-  noiseIntensity: 1.0
-});
-const detailMaskTexture = makeCloudTexture(96, {
-  seed: params.detailSeed,
-  scale: params.detailFrequency,
-  coverage: 0.5,
-  softness: 0.2,
-  octaves: 3,
-  persistence: 0.6,
-  lacunarity: 2.5,
-  noiseIntensity: 1.0
-});
-const volumeTex = texture3D(volumeTexture, null, 0);
-const maskTex = texture3D(maskTexture, null, 0);
-const detailMaskTex = texture3D(detailMaskTexture, null, 0);
-const blueNoiseTex = texture(makeBlueNoiseTexture(128, 1337), uv().mul(8.0));
-const depthTexNode = texture(placeholderDepth, screenUV);
-const postUv = vec2(uv().x, float(1.0).sub(uv().y));
-const sceneTexNode = texture(sceneRT.texture, postUv);
-const godRaysTexNode = texture(godRaysRT.texture, postUv);
+      const ground = new THREE.Mesh(
+        new THREE.PlaneGeometry(2200, 2200, 64, 64),
+        new THREE.MeshStandardMaterial({ color: 0x4f8b45, roughness: 0.95 }),
+      );
+      ground.rotation.x = -Math.PI / 2;
+      ground.position.y = -140;
+      scene.add(ground);
 
-const MAX_STEPS = 128;
-const MAX_LIGHT_STEPS = 24;
+      const occluderSphere = new THREE.Mesh(
+        new THREE.SphereGeometry(90, 48, 24),
+        new THREE.MeshStandardMaterial({ color: 0x7b8f7a, roughness: 0.8 }),
+      );
+      occluderSphere.position.set(0, -40, 0);
 
-const phaseFn = Fn(({ cosTheta }) => {
-  const g = phaseGU;
-  const hg = Fn(({ signG }) => {
-    const gs = g.mul(signG);
-    const gg = gs.mul(gs);
-    const denom = float(1.0).add(gg).sub(gs.mul(cosTheta).mul(2.0));
-    return float(1.0).sub(gg).div(denom.pow(1.5)).mul(0.25 / Math.PI);
-  });
-  return hg({ signG: float(-1.0) }).mul(float(1.0).sub(phaseBlendU)).add(hg({ signG: float(1.0) }).mul(phaseBlendU));
-});
+      function makeCloudTexture(
+        size,
+        {
+          seed = 1,
+          scale = 0.05,
+          coverage = 0.55,
+          softness = 0.06,
+          octaves = 4,
+          persistence = 0.5,
+          lacunarity = 2.3,
+          noiseIntensity = 1.1,
+        } = {},
+      ) {
+        const data = new Uint8Array(size * size * size);
+        const perlin = new ImprovedNoise();
+        const v = new THREE.Vector3();
+        let i = 0;
+        const seedShift = seed * 0.001;
 
-const linearDepth = Fn(([raw, near, far]) => {
-  const z = raw.mul(2.0).sub(1.0);
-  const denom = far.add(near).sub(z.mul(far.sub(near)));
-  return float(2.0).mul(near).mul(far).div(denom);
-});
+        const fbm = (x, y, z) => {
+          let total = 0;
+          let freq = 1;
+          let amp = 1;
+          let maxV = 0;
+          for (let o = 0; o < octaves; o++) {
+            total += perlin.noise(x * freq, y * freq, z * freq) * amp;
+            maxV += amp;
+            amp *= persistence;
+            freq *= lacunarity;
+          }
+          return total / Math.max(0.0001, maxV);
+        };
 
-const cloudNode = Fn(({ positionRay }) => {
-  const p = positionRay.toVar(); // [-0.5, 0.5] inside box
-  const animOffset = vec3(texOffsetU);
-  const jitter = blueNoiseTex.r.sub(0.5).mul(jitterStrengthU);
-  const texCoord = p.add(0.5).mul(textureTilingU).add(animOffset).add(vec3(jitter)).fract().toVar();
+        const smoothstepJS = (e0, e1, x) => {
+          const t = THREE.MathUtils.clamp(
+            (x - e0) / Math.max(1e-5, e1 - e0),
+            0,
+            1,
+          );
+          return t * t * (3 - 2 * t);
+        };
 
-  const sy = flatTopU.add(flatBottomU).mul(0.5).add(p.y.sign().mul(flatTopU.sub(flatBottomU)).mul(0.5)).max(0.05);
-  const sx = flatXPosU.add(flatXNegU).mul(0.5).add(p.x.sign().mul(flatXPosU.sub(flatXNegU)).mul(0.5)).max(0.05);
-  const sz = flatZPosU.add(flatZNegU).mul(0.5).add(p.z.sign().mul(flatZPosU.sub(flatZNegU)).mul(0.5)).max(0.05);
-  const pDistorted = vec3(p.x.div(sx), p.y.div(sy), p.z.div(sz)).toVar();
-  const dir = normalize(pDistorted.add(vec3(0.0001)));
-  const maskCoord = dir.mul(maskRadiusU).mul(0.5).add(0.5).clamp(0.0, 1.0);
+        for (let z = 0; z < size; z++) {
+          for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+              const nx = x / (size - 1);
+              const ny = y / (size - 1);
+              const nz = z / (size - 1);
+              const sx = nx * scale + seedShift;
+              const sy = ny * scale + seedShift;
+              const sz = nz * scale + seedShift;
+              const n = (fbm(sx, sy, sz) + 1) * 0.5;
+              const nPow = Math.pow(
+                THREE.MathUtils.clamp(n, 0, 1),
+                noiseIntensity,
+              );
+              const dens = smoothstepJS(
+                coverage - softness,
+                coverage + softness,
+                nPow,
+              );
+              const d =
+                1.0 -
+                v
+                  .set(x, y, z)
+                  .subScalar(size / 2)
+                  .divideScalar(size)
+                  .length();
+              data[i++] = THREE.MathUtils.clamp(dens * d * d * 255, 0, 255);
+            }
+          }
+        }
+        const tex = new THREE.Data3DTexture(data, size, size, size);
+        tex.format = THREE.RedFormat;
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.unpackAlignment = 1;
+        tex.needsUpdate = true;
+        return tex;
+      }
 
-  const baseMaskN = maskTex.sample(maskCoord).r.mul(2.0).sub(1.0);
-  const detailMaskN = detailMaskTex.sample(maskCoord.mul(2.5).clamp(0.0, 1.0)).r.mul(2.0).sub(1.0);
-  const radial = float(1.0).sub(pDistorted.length()).toVar();
-  const sdf = maskRadiusU.add(baseMaskN.mul(maskNoiseStrengthU)).add(detailMaskN.mul(maskDetailStrengthU)).sub(pDistorted.length());
-  const mask = sdf.smoothstep(0.0, maskSoftnessU).mul(radial.clamp(0.0, 1.0));
+      function makeBlueNoiseTexture(size = 128, seed = 12345) {
+        const data = new Uint8Array(size * size * 4);
+        let state = seed >>> 0;
+        const rnd = () => {
+          state ^= state << 13;
+          state ^= state >>> 17;
+          state ^= state << 5;
+          return (state >>> 0) % 256;
+        };
+        for (let i = 0; i < size * size; i++) {
+          const v = rnd();
+          data[i * 4 + 0] = v;
+          data[i * 4 + 1] = v;
+          data[i * 4 + 2] = v;
+          data[i * 4 + 3] = 255;
+        }
+        const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+        tex.minFilter = THREE.NearestFilter;
+        tex.magFilter = THREE.NearestFilter;
+        tex.wrapS = THREE.RepeatWrapping;
+        tex.wrapT = THREE.RepeatWrapping;
+        tex.needsUpdate = true;
+        return tex;
+      }
 
-  const densityRaw = volumeTex.sample(texCoord).r;
-  const noiseDensity = densityRaw.smoothstep(thresholdU.sub(rangeU), thresholdU.add(rangeU))
-    .mul(densityMultU)
-    .toVar();
-  const baseDensity = noiseDensity.mul(float(1.0).sub(maskVisualizeU)).add(maskVisualizeU);
-  const density = baseDensity.mul(mask).toVar();
-  return density;
-});
+      const placeholderDepth = new THREE.DataTexture(
+        new Uint8Array([255]),
+        1,
+        1,
+        THREE.RedFormat,
+      );
+      placeholderDepth.needsUpdate = true;
+      const depthRT = new THREE.RenderTarget(
+        window.innerWidth,
+        window.innerHeight,
+      );
+      depthRT.depthBuffer = true;
+      depthRT.depthTexture = new THREE.DepthTexture(
+        window.innerWidth,
+        window.innerHeight,
+      );
+      depthRT.depthTexture.type = THREE.UnsignedShortType;
+      const depthScene = new THREE.Scene();
+      const depthMat = new THREE.MeshBasicNodeMaterial({ color: 0x000000 });
+      const depthGround = new THREE.Mesh(ground.geometry, depthMat);
+      depthGround.rotation.copy(ground.rotation);
+      depthGround.position.copy(ground.position);
+      depthGround.scale.copy(ground.scale);
+      depthScene.add(depthGround);
 
-const raymarchCloud = Fn(() => {
-  const finalColor = vec3(0.0).toVar();
-  const transmittance = float(1.0).toVar();
-  const lightDir = normalize(sunDirU).toVar();
+      const params = {
+        textureSeed: 11,
+        textureScale: 3.5,
+        textureCoverage: 0.55,
+        textureSoftness: 0.05,
+        textureOctaves: 5,
+        texturePersistence: 0.5,
+        textureLacunarity: 3.0,
+        textureNoiseIntensity: 1.0,
+        threshold: 0.18,
+        range: 0.1,
+        opacity: 4.5,
+        densityMult: 1.25,
+        steps: 88,
+        lightSteps: 8,
+        phaseG: 0.35,
+        phaseBlend: 0.8,
+        ambient: 0.28,
+        jitterStrength: 0.012,
+        maskRadius: 0.52,
+        maskSoftness: 0.14,
+        maskNoiseStrength: 0.07,
+        maskDetailStrength: 0.03,
+        flatTop: 0.8,
+        flatBottom: 0.6,
+        flatXPos: 0.9,
+        flatXNeg: 0.9,
+        flatZPos: 0.9,
+        flatZNeg: 0.9,
+        maskVisualize: false,
+        animateTexture: true,
+        animSpeedX: 0.02,
+        animSpeedY: 0.0,
+        animSpeedZ: 0.01,
+        scale: 180,
+      };
 
-  RaymarchingBox(stepsU, ({ positionRay }) => {
-    const samplePos = positionRay.toVar();
-    const density = cloudNode({ positionRay: samplePos });
+      const thresholdU = uniform(params.threshold);
+      const rangeU = uniform(params.range);
+      const opacityU = uniform(params.opacity);
+      const densityMultU = uniform(params.densityMult);
+      const stepsU = uniform(params.steps);
+      const lightStepsU = uniform(params.lightSteps);
+      const phaseGU = uniform(params.phaseG);
+      const phaseBlendU = uniform(params.phaseBlend);
+      const ambientU = uniform(params.ambient);
+      const jitterStrengthU = uniform(params.jitterStrength);
+      const uDepthNear = uniform(camera.near);
+      const uDepthFar = uniform(camera.far);
+      const maskRadiusU = uniform(params.maskRadius);
+      const maskSoftnessU = uniform(params.maskSoftness);
+      const maskNoiseStrengthU = uniform(params.maskNoiseStrength);
+      const maskDetailStrengthU = uniform(params.maskDetailStrength);
+      const flatTopU = uniform(params.flatTop);
+      const flatBottomU = uniform(params.flatBottom);
+      const flatXPosU = uniform(params.flatXPos);
+      const flatXNegU = uniform(params.flatXNeg);
+      const flatZPosU = uniform(params.flatZPos);
+      const flatZNegU = uniform(params.flatZNeg);
+      const maskVisualizeU = uniform(params.maskVisualize ? 1 : 0);
+      const texOffsetU = uniform(new THREE.Vector3());
+      const sunDirU = uniform(new THREE.Vector3(1.0, 1.1, 0.8).normalize());
+      const sunColorU = uniform(new THREE.Color(0xfff2da));
 
-    If(density.greaterThan(0.001).and(transmittance.greaterThan(0.01)), () => {
-      const lightAcc = float(0.0).toVar();
-      Loop(MAX_LIGHT_STEPS, ({ i: li }) => {
-        If(float(li).greaterThanEqual(lightStepsU), () => Break());
-        const lt = float(li).mul(float(1.0).div(lightStepsU.max(1.0))).mul(0.6);
-        const lp = samplePos.add(lightDir.mul(lt));
-        const inBounds = lp.x.abs().lessThan(0.5).and(lp.y.abs().lessThan(0.5)).and(lp.z.abs().lessThan(0.5));
-        If(inBounds, () => {
-          lightAcc.addAssign(cloudNode({ positionRay: lp }).mul(0.12));
+      let volumeTexture = makeCloudTexture(128, {
+        seed: params.textureSeed,
+        scale: params.textureScale,
+        coverage: params.textureCoverage,
+        softness: params.textureSoftness,
+        octaves: params.textureOctaves,
+        persistence: params.texturePersistence,
+        lacunarity: params.textureLacunarity,
+        noiseIntensity: params.textureNoiseIntensity,
+      });
+      const maskTexture = makeCloudTexture(96, {
+        seed: 71,
+        scale: 2.7,
+        coverage: 0.5,
+        softness: 0.2,
+        octaves: 3,
+        persistence: 0.6,
+        lacunarity: 2.3,
+        noiseIntensity: 1.0,
+      });
+      const detailMaskTexture = makeCloudTexture(96, {
+        seed: 131,
+        scale: 9.5,
+        coverage: 0.5,
+        softness: 0.2,
+        octaves: 3,
+        persistence: 0.6,
+        lacunarity: 2.5,
+        noiseIntensity: 1.0,
+      });
+      const volumeTex = texture3D(volumeTexture, null, 0);
+      const maskTex = texture3D(maskTexture, null, 0);
+      const detailMaskTex = texture3D(detailMaskTexture, null, 0);
+      const blueNoiseTex = texture(
+        makeBlueNoiseTexture(128, 1337),
+        uv().mul(8.0),
+      );
+      const depthTexNode = texture(placeholderDepth, screenUV);
+
+      const MAX_STEPS = 128;
+      const MAX_LIGHT_STEPS = 24;
+
+      const phaseFn = Fn(({ cosTheta }) => {
+        const g = phaseGU;
+        const hg = Fn(({ signG }) => {
+          const gs = g.mul(signG);
+          const gg = gs.mul(gs);
+          const denom = float(1.0).add(gg).sub(gs.mul(cosTheta).mul(2.0));
+          return float(1.0)
+            .sub(gg)
+            .div(denom.pow(1.5))
+            .mul(0.25 / Math.PI);
         });
+        return hg({ signG: float(-1.0) })
+          .mul(float(1.0).sub(phaseBlendU))
+          .add(hg({ signG: float(1.0) }).mul(phaseBlendU));
       });
 
-      const lightEnergy = exp(lightAcc.negate());
-      const cosTheta = dot(normalize(positionRay), lightDir);
-      const phase = phaseFn({ cosTheta });
-      const scat = sunColorU.mul(sunIntensityU).mul(lightEnergy).mul(phase).add(vec3(ambientU));
-      const extinction = exp(density.mul(opacityU).negate().mul(0.09));
-      const alphaStep = float(1.0).sub(extinction);
+      const linearDepth = Fn(([raw, near, far]) => {
+        const z = raw.mul(2.0).sub(1.0);
+        const denom = far.add(near).sub(z.mul(far.sub(near)));
+        return float(2.0).mul(near).mul(far).div(denom);
+      });
 
-      finalColor.addAssign(scat.mul(alphaStep).mul(transmittance));
-      transmittance.mulAssign(float(1.0).sub(alphaStep));
-    });
-  });
+      const cloudNode = Fn(({ positionRay }) => {
+        const p = positionRay.toVar(); // [-0.5, 0.5] inside box
+        const animOffset = vec3(texOffsetU);
+        const jitter = blueNoiseTex.r.sub(0.5).mul(jitterStrengthU);
+        const texCoord = p
+          .add(0.5)
+          .add(animOffset)
+          .add(vec3(jitter))
+          .fract()
+          .toVar();
 
-  const alpha = float(1.0).sub(transmittance);
-  const sceneD = linearDepth(depthTexNode.r, uDepthNear, uDepthFar);
-  const cloudD = positionView.z.negate();
-  const depthMask = sceneD.sub(cloudD).smoothstep(0.0, 2.0);
-  return vec4(finalColor.mul(depthMask), alpha.mul(depthMask));
-});
+        const sy = flatTopU
+          .add(flatBottomU)
+          .mul(0.5)
+          .add(p.y.sign().mul(flatTopU.sub(flatBottomU)).mul(0.5))
+          .max(0.05);
+        const sx = flatXPosU
+          .add(flatXNegU)
+          .mul(0.5)
+          .add(p.x.sign().mul(flatXPosU.sub(flatXNegU)).mul(0.5))
+          .max(0.05);
+        const sz = flatZPosU
+          .add(flatZNegU)
+          .mul(0.5)
+          .add(p.z.sign().mul(flatZPosU.sub(flatZNegU)).mul(0.5))
+          .max(0.05);
+        const pDistorted = vec3(p.x.div(sx), p.y.div(sy), p.z.div(sz)).toVar();
+        const dir = normalize(pDistorted.add(vec3(0.0001)));
+        const maskCoord = dir
+          .mul(maskRadiusU)
+          .mul(0.5)
+          .add(0.5)
+          .clamp(0.0, 1.0);
 
-const cloudMat = new THREE.MeshBasicNodeMaterial();
-cloudMat.colorNode = raymarchCloud();
-cloudMat.transparent = true;
-cloudMat.side = THREE.BackSide;
-cloudMat.depthWrite = false;
+        const baseMaskN = maskTex.sample(maskCoord).r.mul(2.0).sub(1.0);
+        const detailMaskN = detailMaskTex
+          .sample(maskCoord.mul(2.5).clamp(0.0, 1.0))
+          .r.mul(2.0)
+          .sub(1.0);
+        const radial = float(1.0).sub(pDistorted.length()).toVar();
+        const sdf = maskRadiusU
+          .add(baseMaskN.mul(maskNoiseStrengthU))
+          .add(detailMaskN.mul(maskDetailStrengthU))
+          .sub(pDistorted.length());
+        const mask = sdf
+          .smoothstep(0.0, maskSoftnessU)
+          .mul(radial.clamp(0.0, 1.0));
 
-const cloudMesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), cloudMat);
-cloudMesh.scale.setScalar(params.scale);
-scene.add(cloudMesh);
+        const densityRaw = volumeTex.sample(texCoord).r;
+        const noiseDensity = densityRaw
+          .smoothstep(thresholdU.sub(rangeU), thresholdU.add(rangeU))
+          .mul(densityMultU)
+          .toVar();
+        const baseDensity = noiseDensity
+          .mul(float(1.0).sub(maskVisualizeU))
+          .add(maskVisualizeU);
+        const density = baseDensity.mul(mask).toVar();
+        return density;
+      });
 
-const MAX_GODRAY_SAMPLES = 160;
-const godRaysNode = Fn(() => {
-  const uvv = postUv.toVar();
-  const delta = lightScreenPosU.sub(uvv).div(godRaysSamplesU.max(1.0)).toVar();
-  const colorAcc = vec3(0.0).toVar();
-  const illum = float(1.0).toVar();
+      const raymarchCloud = Fn(() => {
+        const finalColor = vec3(0.0).toVar();
+        const transmittance = float(1.0).toVar();
+        const lightDir = normalize(sunDirU).toVar();
 
-  Loop(MAX_GODRAY_SAMPLES, ({ i }) => {
-    If(float(i).greaterThanEqual(godRaysSamplesU), () => Break());
-    const sampleUv = uvv.add(delta.mul(float(i)));
-    const s = texture(sceneRT.texture, sampleUv).rgb;
-    const lumin = dot(s, vec3(0.2126, 0.7152, 0.0722));
-    colorAcc.addAssign(vec3(lumin).mul(illum).mul(godRaysWeightU));
-    illum.mulAssign(godRaysDecayU);
-  });
+        RaymarchingBox(stepsU, ({ positionRay }) => {
+          const samplePos = positionRay.toVar();
+          const density = cloudNode({ positionRay: samplePos });
 
-  return vec4(colorAcc.mul(godRaysDensityU).mul(godRaysExposureU), 1.0);
-});
+          If(
+            density.greaterThan(0.001).and(transmittance.greaterThan(0.01)),
+            () => {
+              const lightAcc = float(0.0).toVar();
+              Loop(MAX_LIGHT_STEPS, ({ i: li }) => {
+                If(float(li).greaterThanEqual(lightStepsU), () => Break());
+                const lt = float(li)
+                  .mul(float(1.0).div(lightStepsU.max(1.0)))
+                  .mul(0.6);
+                const lp = samplePos.add(lightDir.mul(lt));
+                const inBounds = lp.x
+                  .abs()
+                  .lessThan(0.5)
+                  .and(lp.y.abs().lessThan(0.5))
+                  .and(lp.z.abs().lessThan(0.5));
+                If(inBounds, () => {
+                  lightAcc.addAssign(cloudNode({ positionRay: lp }).mul(0.12));
+                });
+              });
 
-const godRaysMat = new THREE.MeshBasicNodeMaterial();
-godRaysMat.colorNode = godRaysNode().rgb;
+              const lightEnergy = exp(lightAcc.negate());
+              const cosTheta = dot(normalize(positionRay), lightDir);
+              const phase = phaseFn({ cosTheta });
+              const scat = sunColorU
+                .mul(lightEnergy)
+                .mul(phase)
+                .add(vec3(ambientU));
+              const extinction = exp(density.mul(opacityU).negate().mul(0.09));
+              const alphaStep = float(1.0).sub(extinction);
 
-const compositeMat = new THREE.MeshBasicNodeMaterial();
-compositeMat.colorNode = sceneTexNode.rgb.add(godRaysTexNode.rgb);
+              finalColor.addAssign(scat.mul(alphaStep).mul(transmittance));
+              transmittance.mulAssign(float(1.0).sub(alphaStep));
+            },
+          );
+        });
 
-const postQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), godRaysMat);
-postScene.add(postQuad);
+        const alpha = float(1.0).sub(transmittance);
+        const sceneD = linearDepth(depthTexNode.r, uDepthNear, uDepthFar);
+        const cloudD = positionView.z.negate();
+        const depthMask = sceneD.sub(cloudD).smoothstep(0.0, 2.0);
+        return vec4(finalColor.mul(depthMask), alpha.mul(depthMask));
+      });
 
-function rebakeMainVolume() {
-  const nextTexture = makeCloudTexture(params.textureResolution, {
-    seed: params.textureSeed,
-    scale: params.textureScale,
-    coverage: params.textureCoverage,
-    softness: params.textureSoftness,
-    octaves: params.textureOctaves,
-    persistence: params.texturePersistence,
-    lacunarity: params.textureLacunarity,
-    noiseIntensity: params.textureNoiseIntensity
-  });
-  if (volumeTexture.image.data.length !== nextTexture.image.data.length) {
-    volumeTexture.dispose();
-    volumeTexture = nextTexture;
-    volumeTex.value = volumeTexture;
-    return;
-  }
-  volumeTexture.image.data.set(nextTexture.image.data);
-  volumeTexture.needsUpdate = true;
-  nextTexture.dispose();
-}
+      const cloudMat = new THREE.MeshBasicNodeMaterial();
+      cloudMat.colorNode = raymarchCloud();
+      cloudMat.transparent = true;
+      cloudMat.side = THREE.BackSide;
+      cloudMat.depthWrite = false;
 
-function rebakeMaskTextures() {
-  const nextMask = makeCloudTexture(96, {
-    seed: params.maskSeed,
-    scale: params.maskNoiseFrequency,
-    coverage: 0.5,
-    softness: 0.2,
-    octaves: 3,
-    persistence: 0.6,
-    lacunarity: 2.3,
-    noiseIntensity: 1.0
-  });
-  const nextDetail = makeCloudTexture(96, {
-    seed: params.detailSeed,
-    scale: params.detailFrequency,
-    coverage: 0.5,
-    softness: 0.2,
-    octaves: 3,
-    persistence: 0.6,
-    lacunarity: 2.5,
-    noiseIntensity: 1.0
-  });
-  maskTexture.image.data.set(nextMask.image.data);
-  detailMaskTexture.image.data.set(nextDetail.image.data);
-  maskTexture.needsUpdate = true;
-  detailMaskTexture.needsUpdate = true;
-  nextMask.dispose();
-  nextDetail.dispose();
-}
+      const cloudMesh = new THREE.Mesh(
+        new THREE.BoxGeometry(1, 1, 1),
+        cloudMat,
+      );
+      cloudMesh.scale.setScalar(params.scale);
+      scene.add(cloudMesh);
 
-const gui = new GUI({ title: "TSL Cloud Controls" });
-const maskFolder = gui.addFolder("Cloud Shape (Mask)");
-maskFolder.add(params, "maskVisualize").name("Visualize Mask").onChange(v => maskVisualizeU.value = v ? 1 : 0);
-maskFolder.add(params, "maskSeed", 0, 100, 1);
-maskFolder.add(params, "maskNoiseFrequency", 0.1, 10.0, 0.1);
-maskFolder.add(params, "maskRadius", 0.2, 0.9, 0.01).name("Mask Radius").onChange(v => maskRadiusU.value = v);
-maskFolder.add(params, "maskSoftness", 0.0, 0.5, 0.005).name("Edge Softness").onChange(v => maskSoftnessU.value = v);
-maskFolder.add(params, "maskNoiseStrength", 0.0, 0.5, 0.01).name("Noise Strength (Deform.)").onChange(v => maskNoiseStrengthU.value = v);
+      function rebakeMainVolume() {
+        const nextTexture = makeCloudTexture(128, {
+          seed: params.textureSeed,
+          scale: params.textureScale,
+          coverage: params.textureCoverage,
+          softness: params.textureSoftness,
+          octaves: params.textureOctaves,
+          persistence: params.texturePersistence,
+          lacunarity: params.textureLacunarity,
+          noiseIntensity: params.textureNoiseIntensity,
+        });
+        volumeTexture.image.data.set(nextTexture.image.data);
+        volumeTexture.needsUpdate = true;
+        nextTexture.dispose();
+      }
 
-const flatFolder = maskFolder.addFolder("Flattening");
-flatFolder.add(params, "flatTop", 0.1, 2.0, 0.01).name("Top (Y+)").onChange(v => flatTopU.value = v);
-flatFolder.add(params, "flatBottom", 0.1, 2.0, 0.01).name("Bottom (Y-)").onChange(v => flatBottomU.value = v);
-flatFolder.add(params, "flatXPos", 0.1, 2.0, 0.01).name("Right (X+)").onChange(v => flatXPosU.value = v);
-flatFolder.add(params, "flatXNeg", 0.1, 2.0, 0.01).name("Left (X-)").onChange(v => flatXNegU.value = v);
-flatFolder.add(params, "flatZPos", 0.1, 2.0, 0.01).name("Front (Z+)").onChange(v => flatZPosU.value = v);
-flatFolder.add(params, "flatZNeg", 0.1, 2.0, 0.01).name("Back (Z-)").onChange(v => flatZNegU.value = v);
+      const gui = new GUI({ title: "TSL Cloud Controls" });
+      const genFolder = gui.addFolder("Texture Generation");
+      genFolder.add(params, "textureSeed", 0, 1000, 1);
+      genFolder.add(params, "textureScale", 0.5, 12.0, 0.1);
+      genFolder.add(params, "textureCoverage", 0.0, 1.0, 0.01);
+      genFolder.add(params, "textureSoftness", 0.0, 0.5, 0.005);
+      genFolder.add(params, "textureOctaves", 1, 8, 1);
+      genFolder.add(params, "texturePersistence", 0.1, 1.0, 0.01);
+      genFolder.add(params, "textureLacunarity", 1.1, 4.0, 0.1);
+      genFolder.add(params, "textureNoiseIntensity", 0.2, 4.0, 0.05);
+      genFolder
+        .add({ regenerate: () => rebakeMainVolume() }, "regenerate")
+        .name("Regenerate Texture");
 
-const detailFolder = maskFolder.addFolder("Detail Noise");
-detailFolder.add(params, "detailSeed", 0, 100, 1).name("SeedDetail");
-detailFolder.add(params, "detailFrequency", 0.1, 25.0, 0.1).name("Detail Frequency");
-detailFolder.add(params, "maskDetailStrength", 0.0, 0.1, 0.001).name("Detail Strength").onChange(v => maskDetailStrengthU.value = v);
-detailFolder.add({ regenerateDetail: () => rebakeMaskTextures() }, "regenerateDetail").name("Update Detail Noise");
-maskFolder.add({ regenerateMask: () => rebakeMaskTextures() }, "regenerateMask").name("Regenerate Mask Noise");
+      const renderFolder = gui.addFolder("Material");
+      renderFolder
+        .add(params, "threshold", 0.0, 0.8, 0.01)
+        .onChange((v) => (thresholdU.value = v));
+      renderFolder
+        .add(params, "range", 0.01, 0.5, 0.01)
+        .onChange((v) => (rangeU.value = v));
+      renderFolder
+        .add(params, "opacity", 0.5, 10.0, 0.1)
+        .onChange((v) => (opacityU.value = v));
+      renderFolder
+        .add(params, "densityMult", 0.2, 8.0, 0.01)
+        .onChange((v) => (densityMultU.value = v));
+      renderFolder
+        .add(params, "steps", 8, MAX_STEPS, 1)
+        .onChange((v) => (stepsU.value = v));
+      renderFolder
+        .add(params, "lightSteps", 1, MAX_LIGHT_STEPS, 1)
+        .onChange((v) => (lightStepsU.value = v));
+      renderFolder
+        .add(params, "phaseG", 0.0, 0.85, 0.01)
+        .onChange((v) => (phaseGU.value = v));
+      renderFolder
+        .add(params, "phaseBlend", 0.0, 1.0, 0.01)
+        .onChange((v) => (phaseBlendU.value = v));
+      renderFolder
+        .add(params, "ambient", 0.0, 1.5, 0.01)
+        .onChange((v) => (ambientU.value = v));
+      renderFolder
+        .add(params, "jitterStrength", 0.0, 0.05, 0.001)
+        .onChange((v) => (jitterStrengthU.value = v));
 
-const genFolder = gui.addFolder("Texture Generation (Requires Regenerate)");
-genFolder.add(params, "textureResolution", [32, 64, 96, 128, 256]).name("Texture Resolution");
-genFolder.add(params, "textureCoverage", 0.0, 1.0, 0.01).name("Coverage / Threshold");
-genFolder.add(params, "textureSoftness", 0.0, 0.5, 0.005);
-genFolder.add(params, "textureScale", 0.1, 20.0, 0.1).name("Scale (Zoom)");
-genFolder.add(params, "textureOctaves", 1, 8, 1).name("Octaves (Detail)");
-genFolder.add(params, "texturePersistence", 0.1, 1.0, 0.01).name("Persistence");
-genFolder.add(params, "textureLacunarity", 1.1, 4.0, 0.1).name("Lacunarity");
-genFolder.add(params, "textureNoiseIntensity", 0.1, 5.0, 0.05).name("Noise Intensity");
-genFolder.add(params, "textureSeed", 0, 1000, 0.01).name("Seed");
-genFolder.add({ regenerate: () => rebakeMainVolume() }, "regenerate").name("Regenerate Texture");
+      const maskFolder = gui.addFolder("Cloud Shape (Mask)");
+      maskFolder
+        .add(params, "maskRadius", 0.2, 0.9, 0.01)
+        .onChange((v) => (maskRadiusU.value = v));
+      maskFolder
+        .add(params, "maskSoftness", 0.01, 0.4, 0.005)
+        .onChange((v) => (maskSoftnessU.value = v));
+      maskFolder
+        .add(params, "maskNoiseStrength", 0.0, 0.2, 0.001)
+        .onChange((v) => (maskNoiseStrengthU.value = v));
+      maskFolder
+        .add(params, "maskDetailStrength", 0.0, 0.1, 0.001)
+        .onChange((v) => (maskDetailStrengthU.value = v));
+      maskFolder
+        .add(params, "maskVisualize")
+        .name("Visualize Mask")
+        .onChange((v) => (maskVisualizeU.value = v ? 1 : 0));
 
-const shapeFolder = gui.addFolder("Cloud Shape (Real-time)");
-shapeFolder.add(params, "textureTiling", 1.0, 10.0, 1).name("Tiling").onChange(v => textureTilingU.value = v);
+      const flatFolder = maskFolder.addFolder("Flattening");
+      flatFolder
+        .add(params, "flatTop", 0.1, 2.0, 0.01)
+        .onChange((v) => (flatTopU.value = v));
+      flatFolder
+        .add(params, "flatBottom", 0.1, 2.0, 0.01)
+        .onChange((v) => (flatBottomU.value = v));
+      flatFolder
+        .add(params, "flatXPos", 0.1, 2.0, 0.01)
+        .onChange((v) => (flatXPosU.value = v));
+      flatFolder
+        .add(params, "flatXNeg", 0.1, 2.0, 0.01)
+        .onChange((v) => (flatXNegU.value = v));
+      flatFolder
+        .add(params, "flatZPos", 0.1, 2.0, 0.01)
+        .onChange((v) => (flatZPosU.value = v));
+      flatFolder
+        .add(params, "flatZNeg", 0.1, 2.0, 0.01)
+        .onChange((v) => (flatZNegU.value = v));
 
-const renderFolder = gui.addFolder("Material & Rendering (Real-time)");
-renderFolder.add(params, "threshold", 0.0, 1.0, 0.01).name("Density Threshold").onChange(v => thresholdU.value = v);
-renderFolder.add(params, "opacity", 0.0, 20.0, 0.1).name("Overall Opacity").onChange(v => opacityU.value = v);
-renderFolder.add(params, "densityMult", 0.0, 100.0, 0.1).name("Density Multiplier").onChange(v => densityMultU.value = v);
-renderFolder.add(params, "steps", 10, 120, 1).name("Quality (Steps)").onChange(v => stepsU.value = v);
-renderFolder.add(params, "lightSteps", 0, 32, 1).name("Internal Shadow Quality").onChange(v => lightStepsU.value = v);
-renderFolder.add(params, "phaseG", 0.0, 0.85, 0.01).onChange(v => phaseGU.value = v);
-renderFolder.add(params, "phaseBlend", 0.0, 1.0, 0.01).onChange(v => phaseBlendU.value = v);
-renderFolder.add(params, "ambient", 0.0, 1.5, 0.01).onChange(v => ambientU.value = v);
-renderFolder.add(params, "jitterStrength", 0.0, 0.05, 0.001).onChange(v => jitterStrengthU.value = v);
+      const animFolder = gui.addFolder("Texture Animation");
+      animFolder.add(params, "animateTexture");
+      animFolder.add(params, "animSpeedX", -0.2, 0.2, 0.001);
+      animFolder.add(params, "animSpeedY", -0.2, 0.2, 0.001);
+      animFolder.add(params, "animSpeedZ", -0.2, 0.2, 0.001);
+      gui
+        .add(params, "scale", 30, 600, 1)
+        .onChange((v) => cloudMesh.scale.setScalar(v));
 
-const animFolder = gui.addFolder("Texture Animation");
-animFolder.add(params, "animateTexture").name("▶ Animate Cloud");
-animFolder.add(params, "animSpeedX", -0.2, 0.2, 0.001).name("Speed X");
-animFolder.add(params, "animSpeedY", -0.2, 0.2, 0.001).name("Speed Y");
-animFolder.add(params, "animSpeedZ", -0.2, 0.2, 0.001).name("Speed Z");
-renderFolder.add(params, "scale", 1, 10000, 1).name("Container Scale").onChange(v => cloudMesh.scale.setScalar(v));
+      renderer.setAnimationLoop(() => {
+        controls.update();
 
-const lightingFolder = gui.addFolder("Lighting");
-lightingFolder.add(params, "ambientLightIntensity", 0.0, 10.0, 0.05).name("Ambient Light").onChange(v => {
-  ambientLight.intensity = v;
-});
-lightingFolder.add(params, "directionalLightIntensity", 0.0, 10.0, 0.05).name("Directional Light").onChange(v => {
-  sun.intensity = v;
-  sunIntensityU.value = v;
-});
+        const prevRT = renderer.getRenderTarget();
+        renderer.setRenderTarget(depthRT);
+        renderer.render(depthScene, camera);
+        renderer.setRenderTarget(prevRT);
 
-const godRaysFolder = gui.addFolder("God Rays");
-godRaysFolder.add(params, "godRaysDensity", 0.0, 1.0, 0.01).name("Density").onChange(v => godRaysDensityU.value = v);
-godRaysFolder.add(params, "godRaysDecay", 0.8, 1.0, 0.001).name("Decay").onChange(v => godRaysDecayU.value = v);
-godRaysFolder.add(params, "godRaysWeight", 0.0, 1.0, 0.01).name("Weight").onChange(v => godRaysWeightU.value = v);
-godRaysFolder.add(params, "godRaysExposure", 0.0, 1.0, 0.01).name("Exposure").onChange(v => godRaysExposureU.value = v);
-godRaysFolder.add(params, "godRaysSamples", 10, MAX_GODRAY_SAMPLES, 1).name("Samples").onChange(v => godRaysSamplesU.value = v);
+        if (depthRT.depthTexture instanceof THREE.Texture) {
+          depthTexNode.value = depthRT.depthTexture;
+        }
+        if (params.animateTexture) {
+          texOffsetU.value.x += params.animSpeedX * 0.016;
+          texOffsetU.value.y += params.animSpeedY * 0.016;
+          texOffsetU.value.z += params.animSpeedZ * 0.016;
+          texOffsetU.value.x -= Math.floor(texOffsetU.value.x);
+          texOffsetU.value.y -= Math.floor(texOffsetU.value.y);
+          texOffsetU.value.z -= Math.floor(texOffsetU.value.z);
+        }
+        renderer.render(scene, camera);
+      });
 
-renderer.setAnimationLoop(() => {
-  stats.update();
-  controls.update();
-  sunDisc.position.copy(sun.position).normalize().multiplyScalar(9000);
-
-  const prevRT = renderer.getRenderTarget();
-  renderer.setRenderTarget(depthRT);
-  renderer.render(depthScene, camera);
-
-  if (depthRT.depthTexture instanceof THREE.Texture) {
-    depthTexNode.value = depthRT.depthTexture;
-  }
-  sunDirU.value.copy(sun.position).normalize();
-  sunColorU.value.copy(sun.color);
-  sunIntensityU.value = sun.intensity;
-  if (params.animateTexture) {
-    texOffsetU.value.x += params.animSpeedX * 0.016;
-    texOffsetU.value.y += params.animSpeedY * 0.016;
-    texOffsetU.value.z += params.animSpeedZ * 0.016;
-    texOffsetU.value.x -= Math.floor(texOffsetU.value.x);
-    texOffsetU.value.y -= Math.floor(texOffsetU.value.y);
-    texOffsetU.value.z -= Math.floor(texOffsetU.value.z);
-  }
-  sunDirU.value.copy(sun.position).normalize();
-  sunColorU.value.copy(sun.color);
-  sunIntensityU.value = sun.intensity;
-
-  renderer.setRenderTarget(sceneRT);
-  renderer.render(scene, camera);
-
-  const sunNdc = sunDisc.position.clone().project(camera);
-  lightScreenPosU.value.set(sunNdc.x * 0.5 + 0.5, sunNdc.y * 0.5 + 0.5);
-  postQuad.material = godRaysMat;
-  renderer.setRenderTarget(godRaysRT);
-  renderer.render(postScene, postCamera);
-
-  postQuad.material = compositeMat;
-  renderer.setRenderTarget(prevRT);
-  renderer.render(postScene, postCamera);
-});
-
-window.addEventListener("resize", () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  depthRT.setSize(window.innerWidth, window.innerHeight);
-  sceneRT.setSize(window.innerWidth, window.innerHeight);
-  godRaysRT.setSize(
-    Math.max(1, Math.floor(window.innerWidth * 0.5)),
-    Math.max(1, Math.floor(window.innerHeight * 0.5))
-  );
-  if (depthRT.depthTexture) {
-    depthRT.depthTexture.dispose();
-    depthRT.depthTexture = new THREE.DepthTexture(window.innerWidth, window.innerHeight);
-    depthRT.depthTexture.type = THREE.UnsignedShortType;
-    depthTexNode.value = depthRT.depthTexture;
-  }
-  uDepthNear.value = camera.near;
-  uDepthFar.value = camera.far;
-});
-</script>
-</body>
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        depthRT.setSize(window.innerWidth, window.innerHeight);
+        if (depthRT.depthTexture) {
+          depthRT.depthTexture.dispose();
+          depthRT.depthTexture = new THREE.DepthTexture(
+            window.innerWidth,
+            window.innerHeight,
+          );
+          depthRT.depthTexture.type = THREE.UnsignedShortType;
+          depthTexNode.value = depthRT.depthTexture;
+        }
+        uDepthNear.value = camera.near;
+        uDepthFar.value = camera.far;
+      });
+    </script>
+  </body>
 </html>
