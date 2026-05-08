@@ -196,11 +196,12 @@
           enabled: true,
           textureRepeat: 160,
           baseDisplacement: 0.03,
-          trailDepth: 0.18,
-          trailRadius: 0.28,
-          trailSpacing: 0.08,
-          recoveryPerSecond: 0.05,
-          stampStrength: 0.65,
+          trailDepth: 0.35,
+          trailRadius: 0.35,
+          trailSpacing: 0.04,
+          recoveryPerSecond: 0.015,
+          stampStrength: 0.5,
+          windowSize: 40,
           minTrackSpeed: 0.1,
           mapResolution: 1024,
           roughness: 0.92,
@@ -2147,7 +2148,7 @@
         scene.add(ambientLight);
 
         // ── FLAT PLANE TERRAIN (snow showcase) ──
-        const FLOOR_SEGMENTS = 220;
+        const FLOOR_SEGMENTS = 256;
         const floorGeo = new THREE.PlaneGeometry(
           PARKOUR_SIZE,
           PARKOUR_SIZE,
@@ -2200,22 +2201,87 @@
         snowDispTex.colorSpace = THREE.NoColorSpace;
         snowAoTex.colorSpace = THREE.NoColorSpace;
 
-        const trailSize = Math.max(
-          128,
-          Math.min(1024, parkourParams.snow.mapResolution | 0),
+        // ── Snow trail: sliding-window DataTexture centered on character ──
+        const snowDispSize = Math.max(256, Math.min(2048, parkourParams.snow.mapResolution | 0));
+        const SNOW_WINDOW = parkourParams.snow.windowSize;
+        const snowTrailData = new Uint8Array(snowDispSize * snowDispSize * 4);
+        snowTrailData.fill(128);
+        for (let i = 0; i < snowDispSize * snowDispSize; i++) {
+          snowTrailData[i * 4 + 3] = 255;
+        }
+        const snowTrailTex = new THREE.DataTexture(
+          snowTrailData, snowDispSize, snowDispSize,
+          THREE.RGBAFormat, THREE.UnsignedByteType,
         );
-        const snowTrailCanvas = document.createElement("canvas");
-        snowTrailCanvas.width = trailSize;
-        snowTrailCanvas.height = trailSize;
-        const snowTrailCtx = snowTrailCanvas.getContext("2d", { alpha: false });
-        snowTrailCtx.fillStyle = "rgb(128,128,128)";
-        snowTrailCtx.fillRect(0, 0, trailSize, trailSize);
-        const snowTrailTex = new THREE.CanvasTexture(snowTrailCanvas);
-        snowTrailTex.wrapS = snowTrailTex.wrapT = THREE.ClampToEdgeWrapping;
-        snowTrailTex.colorSpace = THREE.NoColorSpace;
         snowTrailTex.minFilter = THREE.LinearFilter;
         snowTrailTex.magFilter = THREE.LinearFilter;
+        snowTrailTex.wrapS = THREE.ClampToEdgeWrapping;
+        snowTrailTex.wrapT = THREE.ClampToEdgeWrapping;
+        snowTrailTex.colorSpace = THREE.NoColorSpace;
         snowTrailTex.generateMipmaps = false;
+        snowTrailTex.needsUpdate = true;
+
+        let snowWinCX = 0, snowWinCZ = 0;
+        const uSnowWinCenter = uniform(new THREE.Vector2(0, 0));
+        const uSnowWinSize = uniform(SNOW_WINDOW);
+
+        const stampSnowData = (worldX, worldZ, strength) => {
+          const relX = worldX - snowWinCX;
+          const relZ = worldZ - snowWinCZ;
+          const u = relX / SNOW_WINDOW + 0.5;
+          const v = relZ / SNOW_WINDOW + 0.5;
+          if (u < 0 || u > 1 || v < 0 || v > 1) return;
+          const radiusWorld = Math.max(0.08, parkourParams.snow.trailRadius);
+          const radiusPx = Math.max(1, Math.round((radiusWorld / SNOW_WINDOW) * snowDispSize));
+          const cx = Math.round(u * (snowDispSize - 1));
+          const cy = Math.round((1 - v) * (snowDispSize - 1));
+          const str = Math.min(0.95, Math.max(0.05, strength)) * 128;
+          for (let dy = -radiusPx; dy <= radiusPx; dy++) {
+            const py = cy + dy;
+            if (py < 0 || py >= snowDispSize) continue;
+            for (let dx = -radiusPx; dx <= radiusPx; dx++) {
+              const px = cx + dx;
+              if (px < 0 || px >= snowDispSize) continue;
+              const d = Math.sqrt(dx * dx + dy * dy) / radiusPx;
+              if (d >= 1) continue;
+              const falloff = (1 - d * d) * (1 - d * d);
+              const idx = (py * snowDispSize + px) * 4;
+              const push = str * falloff;
+              const cur = snowTrailData[idx];
+              snowTrailData[idx] = Math.max(0, cur - push) | 0;
+            }
+          }
+        };
+
+        const shiftSnowWindow = (newCX, newCZ) => {
+          const dxPx = Math.round(((newCX - snowWinCX) / SNOW_WINDOW) * snowDispSize);
+          const dzPx = Math.round(((newCZ - snowWinCZ) / SNOW_WINDOW) * snowDispSize);
+          if (dxPx === 0 && dzPx === 0) return;
+          const copy = new Uint8Array(snowTrailData.length);
+          copy.set(snowTrailData);
+          snowTrailData.fill(128);
+          for (let i = 0; i < snowDispSize * snowDispSize; i++) {
+            snowTrailData[i * 4 + 3] = 255;
+          }
+          for (let y = 0; y < snowDispSize; y++) {
+            const srcY = y + dzPx;
+            if (srcY < 0 || srcY >= snowDispSize) continue;
+            for (let x = 0; x < snowDispSize; x++) {
+              const srcX = x + dxPx;
+              if (srcX < 0 || srcX >= snowDispSize) continue;
+              const dstIdx = (y * snowDispSize + x) * 4;
+              const srcIdx = (srcY * snowDispSize + srcX) * 4;
+              snowTrailData[dstIdx] = copy[srcIdx];
+            }
+          }
+          snowWinCX = newCX;
+          snowWinCZ = newCZ;
+          uSnowWinCenter.value.set(newCX, newCZ);
+        };
+
+        let snowTrailDirty = false;
+        window.__stampSnow = stampSnowData;
+        window.__snowTrailTex = snowTrailTex;
 
         const snowRepeat = Math.max(1, parkourParams.snow.textureRepeat);
         snowColorTex.repeat.set(snowRepeat, snowRepeat);
@@ -2224,22 +2290,40 @@
         snowAoTex.repeat.set(snowRepeat, snowRepeat);
         snowDispTex.repeat.set(snowRepeat, snowRepeat);
 
-        const snowMat = new THREE.MeshStandardMaterial({
+        const snowMat = new THREE.MeshStandardNodeMaterial({
           map: snowColorTex,
           roughnessMap: snowRoughnessTex,
           normalMap: snowNormalTex,
           aoMap: snowAoTex,
-          displacementMap: snowTrailTex,
           roughness: parkourParams.snow.roughness,
           metalness: parkourParams.snow.metalness,
-          displacementScale: parkourParams.snow.trailDepth * 2.0,
-          displacementBias: -parkourParams.snow.trailDepth,
         });
         snowMat.color.setScalar(0.82);
         snowMat.normalScale.set(
           parkourParams.snow.normalScale,
           parkourParams.snow.normalScale,
         );
+
+        // TSL vertex displacement: sliding-window trail + static snow bump
+        {
+          const winUV = vec2(
+            positionLocal.x.sub(uSnowWinCenter.x).div(uSnowWinSize).add(0.5),
+            positionLocal.z.sub(uSnowWinCenter.y).div(uSnowWinSize).negate().add(0.5),
+          );
+          const inWin = step(float(0), winUV.x).mul(step(float(0), winUV.y))
+            .mul(step(winUV.x, float(1))).mul(step(winUV.y, float(1)));
+          const trailSample = texture(snowTrailTex, winUV);
+          const trailDisp = trailSample.r.sub(float(128.0 / 255.0))
+            .mul(float(parkourParams.snow.trailDepth * 2.0))
+            .mul(inWin);
+          const baseSample = texture(snowDispTex, uv().mul(float(snowRepeat)));
+          const baseDisp = baseSample.r
+            .mul(float(parkourParams.snow.baseDisplacement * 2.0))
+            .sub(float(parkourParams.snow.baseDisplacement));
+          snowMat.positionNode = positionLocal.add(
+            vec3(float(0), trailDisp.add(baseDisp), float(0)),
+          );
+        }
 
         const floorMat = parkourParams.snow.enabled
           ? snowMat
@@ -2258,56 +2342,6 @@
         floor.castShadow = true;
         floor.receiveShadow = true;
         scene.add(floor);
-
-        // CPU fallback deformation (repo-style): directly push floor vertices down at stamp points.
-        const floorPosAttr = floorGeo.getAttribute("position");
-        const floorPosArray = floorPosAttr.array;
-        const floorBaseY = new Float32Array(floorPosArray.length / 3);
-        for (let i = 0; i < floorBaseY.length; i++) {
-          floorBaseY[i] = floorPosArray[i * 3 + 1];
-        }
-        let floorNeedsNormalsUpdate = false;
-        let floorNormalRefreshAccum = 0;
-        const stampSnowCpu = (worldX, worldZ, strengthMul = 1, planeSizeNow = PARKOUR_SIZE) => {
-          const half = planeSizeNow * 0.5;
-          if (
-            worldX < -half ||
-            worldX > half ||
-            worldZ < -half ||
-            worldZ > half
-          )
-            return;
-          const segX = FLOOR_SEGMENTS;
-          const segZ = FLOOR_SEGMENTS;
-          const vertsPerRow = segX + 1;
-          const u = worldX / planeSizeNow + 0.5;
-          const v = worldZ / planeSizeNow + 0.5;
-          const cx = Math.round(u * segX);
-          const cz = Math.round((1 - v) * segZ);
-          const radiusWorld = Math.max(0.05, parkourParams.snow.trailRadius);
-          const radiusV = Math.max(1, Math.ceil((radiusWorld / planeSizeNow) * segX));
-          const depth = parkourParams.snow.trailDepth * 0.24 * strengthMul;
-
-          for (let dz = -radiusV; dz <= radiusV; dz++) {
-            const z = cz + dz;
-            if (z < 0 || z > segZ) continue;
-            for (let dx = -radiusV; dx <= radiusV; dx++) {
-              const x = cx + dx;
-              if (x < 0 || x > segX) continue;
-              const d = Math.hypot(dx, dz) / radiusV;
-              if (d >= 1) continue;
-              const falloff = 1 - d * d;
-              const vi = z * vertsPerRow + x;
-              const ai = vi * 3 + 1;
-              const nextY = floorPosArray[ai] - depth * falloff;
-              const minY = floorBaseY[vi] - parkourParams.snow.trailDepth;
-              floorPosArray[ai] = Math.max(minY, nextY);
-            }
-          }
-          floorPosAttr.needsUpdate = true;
-          floorNeedsNormalsUpdate = true;
-        };
-        // Diagnostic center dent removed after validation.
 
         // ── TOWER (tile material, casts & receives shadows) ──
         const towerMat = createTileMaterial({
@@ -4445,14 +4479,10 @@
         const timer = new THREE.Timer();
         let lastTime = 0;
         let lastPlaneSize = parkourParams.ground.planeSize;
-        let snowTrailNeedsUpload = false;
         const _snowFootPosL = new THREE.Vector3();
         const _snowFootPosR = new THREE.Vector3();
         const _snowFootPrevL = new THREE.Vector3();
         const _snowFootPrevR = new THREE.Vector3();
-        const _snowFootScratch = new THREE.Vector3();
-        const _snowFootFallbackL = new THREE.Vector3();
-        const _snowFootFallbackR = new THREE.Vector3();
         const _snowPrevCharPos = new THREE.Vector3(charPos.x, charPos.y, charPos.z);
         let _snowFeetInit = false;
         let _snowCharAccum = 0;
@@ -4933,11 +4963,20 @@
           }
 
           if (parkourParams.snow.enabled) {
-            const planeSizeNow = lastPlaneSize;
             const charDX = charPos.x - _snowPrevCharPos.x;
             const charDZ = charPos.z - _snowPrevCharPos.z;
             _snowCharAccum += Math.hypot(charDX, charDZ);
             _snowPrevCharPos.copy(charPos);
+
+            // Shift the displacement window to follow the character
+            const winDX = charPos.x - snowWinCX;
+            const winDZ = charPos.z - snowWinCZ;
+            if (Math.abs(winDX) > SNOW_WINDOW * 0.25 || Math.abs(winDZ) > SNOW_WINDOW * 0.25) {
+              shiftSnowWindow(charPos.x, charPos.z);
+              snowTrailDirty = true;
+            }
+
+            // Resolve foot bones once
             const udSnow = player.characterGroup.userData;
             if (!udSnow._snowFootBonesResolved) {
               const bones = [];
@@ -4961,138 +5000,67 @@
               udSnow._snowFootBonesResolved = true;
             }
             const leftFootBone =
-              udSnow.leftFootBone ||
-              udSnow.leftToeBone ||
-              udSnow.leftLegBone ||
-              null;
+              udSnow.leftFootBone || udSnow.leftToeBone || null;
             const rightFootBone =
-              udSnow.rightFootBone ||
-              udSnow.rightToeBone ||
-              udSnow.rightLegBone ||
-              null;
-            const stampWorldPoint = (wp, strengthMul = 1) => {
-              const u = wp.x / planeSizeNow + 0.5;
-              const v = wp.z / planeSizeNow + 0.5;
-              if (u < 0 || u > 1 || v < 0 || v > 1) return;
-              const px = u * snowTrailCanvas.width;
-              const py = (1 - v) * snowTrailCanvas.height;
-              const radiusPx =
-                (parkourParams.snow.trailRadius / Math.max(1, planeSizeNow)) *
-                snowTrailCanvas.width;
-              const alphaCenter = Math.min(
-                0.95,
-                Math.max(0.1, parkourParams.snow.stampStrength * strengthMul),
-              );
-              const g = snowTrailCtx.createRadialGradient(
-                px,
-                py,
-                0,
-                px,
-                py,
-                Math.max(1, radiusPx),
-              );
-              g.addColorStop(0, `rgba(0,0,0,${alphaCenter.toFixed(4)})`);
-              g.addColorStop(
-                0.55,
-                `rgba(0,0,0,${(alphaCenter * 0.42).toFixed(4)})`,
-              );
-              g.addColorStop(1, "rgba(0,0,0,0.0)");
-              snowTrailCtx.fillStyle = g;
-              snowTrailCtx.beginPath();
-              snowTrailCtx.arc(px, py, Math.max(1, radiusPx), 0, Math.PI * 2);
-              snowTrailCtx.fill();
-              snowTrailNeedsUpload = true;
-            };
+              udSnow.rightFootBone || udSnow.rightToeBone || null;
 
-            // Fallback while foot bones are unavailable: synthesize left/right feet
-            // from character transform instead of stamping the center every frame.
+            // Get foot world positions (fallback: synthesize from character yaw)
             if (!leftFootBone || !rightFootBone) {
               const yaw = player.characterGroup.rotation.y || player.state.camYaw || 0;
-              const side = 0.18;
-              const fwd = 0.06;
-              const s = Math.sin(yaw);
-              const c = Math.cos(yaw);
-              _snowFootFallbackL.set(
-                charPos.x + c * -side + s * fwd,
-                FLOOR_Y,
+              const side = 0.18, fwd = 0.06;
+              const s = Math.sin(yaw), c = Math.cos(yaw);
+              _snowFootPosL.set(
+                charPos.x + c * -side + s * fwd, FLOOR_Y,
                 charPos.z + -s * -side + c * fwd,
               );
-              _snowFootFallbackR.set(
-                charPos.x + c * side + s * fwd,
-                FLOOR_Y,
+              _snowFootPosR.set(
+                charPos.x + c * side + s * fwd, FLOOR_Y,
                 charPos.z + -s * side + c * fwd,
               );
-
-              if (!_snowFeetInit) {
-                _snowFootPrevL.copy(_snowFootFallbackL);
-                _snowFootPrevR.copy(_snowFootFallbackR);
-                _snowFeetInit = true;
-              }
-
-              _snowFootPrevL.copy(_snowFootFallbackL);
-              _snowFootPrevR.copy(_snowFootFallbackR);
-
-              if (
-                player.state.isGrounded &&
-                _snowCharAccum >= parkourParams.snow.trailSpacing
-              ) {
-                _snowCharAccum = 0;
-                stampWorldPoint(_snowFootFallbackL, 0.85);
-                stampWorldPoint(_snowFootFallbackR, 0.85);
-                stampSnowCpu(_snowFootFallbackL.x, _snowFootFallbackL.z, 1.0, planeSizeNow);
-                stampSnowCpu(_snowFootFallbackR.x, _snowFootFallbackR.z, 1.0, planeSizeNow);
-              }
             } else {
               leftFootBone.getWorldPosition(_snowFootPosL);
               rightFootBone.getWorldPosition(_snowFootPosR);
               _snowFootPosL.y = FLOOR_Y;
               _snowFootPosR.y = FLOOR_Y;
+            }
 
-              if (!_snowFeetInit) {
-                _snowFootPrevL.copy(_snowFootPosL);
-                _snowFootPrevR.copy(_snowFootPosR);
-                _snowFeetInit = true;
-              }
-
+            if (!_snowFeetInit) {
               _snowFootPrevL.copy(_snowFootPosL);
               _snowFootPrevR.copy(_snowFootPosR);
+              _snowFeetInit = true;
+            }
+            _snowFootPrevL.copy(_snowFootPosL);
+            _snowFootPrevR.copy(_snowFootPosR);
 
-              if (
-                player.state.isGrounded &&
-                _snowCharAccum >= parkourParams.snow.trailSpacing
-              ) {
-                _snowCharAccum = 0;
-                stampWorldPoint(_snowFootPosL, 1.0);
-                stampWorldPoint(_snowFootPosR, 1.0);
-                stampSnowCpu(_snowFootPosL.x, _snowFootPosL.z, 1.0, planeSizeNow);
-                stampSnowCpu(_snowFootPosR.x, _snowFootPosR.z, 1.0, planeSizeNow);
-              }
+            // Stamp DataTexture at foot positions when grounded + moved enough
+            const doStamp =
+              player.state.isGrounded &&
+              _snowCharAccum >= parkourParams.snow.trailSpacing;
+            if (doStamp) {
+              _snowCharAccum = 0;
+              stampSnowData(_snowFootPosL.x, _snowFootPosL.z, parkourParams.snow.stampStrength);
+              stampSnowData(_snowFootPosR.x, _snowFootPosR.z, parkourParams.snow.stampStrength);
+              snowTrailDirty = true;
             }
 
+            // Recovery: slowly blend all texels back toward 128 (neutral)
             if (parkourParams.snow.recoveryPerSecond > 0) {
-              const rec = Math.min(
-                1,
-                parkourParams.snow.recoveryPerSecond * dt * 0.6,
-              );
-              if (rec > 0) {
-                snowTrailCtx.fillStyle = `rgba(128,128,128,${rec.toFixed(5)})`;
-                snowTrailCtx.fillRect(0, 0, snowTrailCanvas.width, snowTrailCanvas.height);
-                snowTrailNeedsUpload = true;
+              const rec = Math.min(1, parkourParams.snow.recoveryPerSecond * dt * 0.6);
+              if (rec > 0.0001) {
+                const len = snowDispSize * snowDispSize;
+                const step = Math.max(1, (rec * 128) | 0);
+                for (let i = 0; i < len; i++) {
+                  const idx = i * 4;
+                  const v = snowTrailData[idx];
+                  if (v < 128) snowTrailData[idx] = Math.min(128, v + step);
+                }
+                snowTrailDirty = true;
               }
             }
 
-            if (snowTrailNeedsUpload) {
+            if (snowTrailDirty) {
               snowTrailTex.needsUpdate = true;
-              snowTrailNeedsUpload = false;
-            }
-            if (floorNeedsNormalsUpdate) {
-              floorNormalRefreshAccum += dt;
-            }
-            if (floorNeedsNormalsUpdate && floorNormalRefreshAccum >= 0.08) {
-              floorGeo.computeVertexNormals();
-              floorGeo.getAttribute("normal").needsUpdate = true;
-              floorNeedsNormalsUpdate = false;
-              floorNormalRefreshAccum = 0;
+              snowTrailDirty = false;
             }
           }
 
