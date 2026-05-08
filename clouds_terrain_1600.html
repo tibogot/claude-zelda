@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <title>WebGPU TSL — Volumetric Clouds (leoawen/volumetric-clouds port)</title>
+    <title>WebGPU TSL — Volumetric clouds over 1600×1600 terrain</title>
     <meta charset="utf-8" />
     <meta
       name="viewport"
@@ -50,13 +50,61 @@
         margin-top: 10px;
         color: #fff;
       }
+      #lod {
+        position: absolute;
+        left: 10px;
+        bottom: 10px;
+        color: #9cf;
+        font-size: 12px;
+        text-shadow: 1px 1px 2px black;
+        z-index: 10;
+        font-family: monospace;
+      }
+      #fly-hud {
+        position: absolute;
+        right: 16px;
+        bottom: 16px;
+        z-index: 15;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 6px;
+        font-family: ui-monospace, monospace;
+        pointer-events: none;
+      }
+      .fly-hud-row {
+        background: rgba(8, 20, 36, 0.72);
+        border: 1px solid rgba(120, 180, 220, 0.35);
+        border-radius: 8px;
+        padding: 6px 12px;
+        color: #dff;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+        font-size: 13px;
+      }
+      .fly-hud-big {
+        font-size: 26px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+      }
     </style>
   </head>
   <body>
     <div id="info">
-      Scalable Cloud Generator with Advanced Material<br />
-      Customizable cloud shape with PBR-style lighting material.
+      Flying starts immediately · clouds stay in world space ·
+      <strong>Play</strong>: click canvas for mouse-look (chase cam) ·
+      <strong>Orbit</strong>: drag to orbit aircraft — press <kbd>V</kbd> or use Controls → Camera
     </div>
+    <div id="fly-hud">
+      <div class="fly-hud-row">
+        <span class="fly-hud-big" id="fly-hud-spd">0</span>
+        <span style="opacity: 0.7"> speed</span>
+      </div>
+      <div class="fly-hud-row">
+        Alt <span id="fly-hud-alt">0</span>m · Pitch <span id="fly-hud-pitch">0</span>° · Bank
+        <span id="fly-hud-bank">0</span>°
+      </div>
+    </div>
+    <div id="lod"></div>
     <div id="progress-container">
       <div id="progress-text">Generating 3D Texture...</div>
       <div id="progress-bar"><div id="progress-fill"></div></div>
@@ -85,6 +133,7 @@
         Discard,
         dot,
         exp,
+        mix,
         normalize,
         texture,
         texture3D,
@@ -92,9 +141,11 @@
         uv,
         screenUV,
         modelViewMatrix,
+        modelWorldMatrix,
         modelWorldMatrixInverse,
         cameraPosition,
         positionGeometry,
+        positionWorld,
         varying,
         max,
         min,
@@ -103,12 +154,27 @@
         smoothstep,
         length,
         fract,
+        sin,
+        cos,
+        floor,
+        sqrt,
+        sub,
+        mul,
+        add,
+        div,
+        mod,
+        or,
+        equal,
+        clamp,
       } from "three/tsl";
-      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
       import { ImprovedNoise } from "three/addons/math/ImprovedNoise.js";
       import { GUI } from "three/addons/libs/lil-gui.module.min.js";
       import Stats from "three/addons/libs/stats.module.js";
       import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
+      import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
+      import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
       const SOLID_LAYER = 1;
       const VOLUME_LAYER = 2;
@@ -117,14 +183,90 @@
       const HDRI_FALLBACK =
         "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/golden_gate_hills_1k.hdr";
       const BLUE_NOISE_LOCAL = "assets/HDR_L_0.png";
+      /** Same asset as `v2/play/playMode.js` (PLANE_MODEL). */
+      const PLANE_GLB_URL = new URL(
+        "./models/wenning_carsten_gameart_plane_compressed.glb",
+        import.meta.url,
+      ).href;
 
+      const THREE_VERSION = "0.183.1";
+      const DRACO_DECODER_PATH = `https://cdn.jsdelivr.net/npm/three@${THREE_VERSION}/examples/jsm/libs/draco/`;
+      const BASIS_TRANSCODER_PATH = `https://cdn.jsdelivr.net/npm/three@${THREE_VERSION}/examples/jsm/libs/basis/`;
       const PI_VAL = 3.14159265359;
       const MAX_RM_STEPS = 120;
       const MAX_LIGHT_STEPS = 32;
       /* God-rays loop bound; lower = smaller shader / faster compile & runs. */
       const MAX_GOD_SAMPLES = 128;
 
+      /** `SphereGeometry` radius for sun mesh; world radius = this × scale from GUI. */
+      const SUN_DISC_GEOM_RADIUS = 340;
+      const _sunDirScratch = new THREE.Vector3();
+
       const _drawingBuf = new THREE.Vector2();
+      const TERRAIN_SIZE = 1600;
+      const _cloudCenter = new THREE.Vector3();
+      const _frustum = new THREE.Frustum();
+      const _camViewProj = new THREE.Matrix4();
+
+      const LOD_DIST_NEAR = 180;
+      const LOD_DIST_FAR = 1200;
+
+      const TERRAIN_SEGMENTS = 200;
+      const TERRAIN_HEIGHT_SCALE = 95;
+      const TERRAIN_WORLD_HALF = TERRAIN_SIZE * 0.5 - 15;
+
+      /** Stylized patchwork fields (Voronoi / Worley) + dirt paths on cell edges. */
+      /** Larger cells read more clearly as patchwork (screenshot-style). */
+      const FIELD_CELL_SIZE = 52;
+      const PATH_EDGE_START = 0.035;
+      const PATH_EDGE_END = 0.68;
+      const FIELD_HEIGHT_COLOR_MIX = 0.035;
+      /** Final albedo multiplier after palette (keeps ground readable, not blown out). */
+      const TERRAIN_ALBEDO_GLOBAL = 0.74;
+      const FOREST_GRID_STEP = 12;
+      const FOREST_MAX_SLOPE_SQ = 38 * 38;
+      const FOREST_MAX_INSTANCES = 3200;
+      const FOREST_PATH_SKIP = 0.32;
+      /** No instanced trees above this terrain height (summits stay clear of forest). */
+      const FOREST_MAX_ELEVATION = 72;
+
+      const FLY_MOUSE_SENS_X = 0.0022;
+      const FLY_MOUSE_SENS_Y = 0.00235;
+      const FLY_PITCH_MIN = -1.22;
+      const FLY_PITCH_MAX = 0.9;
+      const FLY_PITCH_CLIMB_SCALE = 26;
+      const FLY_PITCH_DIVE_MULT = 1.82;
+      const FLY_ROLL_MAX = 0.78;
+      const FLY_ROLL_VEL_SCALE = 0.0042;
+      const FLY_ROLL_SMOOTH = 10;
+      const FLY_ROLL_TARGET_DECAY = 5;
+      const FLY_SURFACE_ALT = 1.35;
+      const FLY_SURFACE_SPEED = 16;
+      const FLY_AILERON_RATE = 2.8;
+      /* v2/play/playMode.js — iso fly: yaw / altitude when camera is not chase. */
+      const ISO_FLY_YAW_RATE = 1.9;
+      const ISO_FLY_CLIMB_RATE = 28;
+      const ISO_FLY_DESCEND_RATE = 48;
+
+      const PLANE_MAX_FWD = 56;
+      const PLANE_MAX_FWD_BOOST = 78;
+      const PLANE_SHIFT_ACCEL_MULT = 1.5;
+      const PLANE_MAX_REV = 18;
+      const PLANE_ACCEL = 10.5;
+      const PLANE_BRAKE = 26;
+      const PLANE_REV_ACCEL = 8;
+      const PLANE_COAST = 3.8;
+      const PLANE_DRAG = 0.014;
+      const PLANE_DECK_ALT = 1.15;
+      const PLANE_DECK_COAST_MULT = 2.1;
+
+      /* Chase cam: slightly farther than v2’s CAM_DIST (8) so the larger plane fits the frame. */
+      const CAM_DIST_FLIGHT = 11;
+      const CAM_PITCH_FLIGHT = 0.35;
+      const CAM_COLLISION_OFFSET = 0.3;
+
+      /** v2 uses `2.8 * (CAP_H + 2*CAP_R)`; modest bump so it reads well at this camera distance. */
+      const PLANE_MODEL_EXTRA_SCALE = 1.45;
 
       /* ——— Repo: seeded random ——— */
       function createSeededRandom(seed) {
@@ -156,6 +298,406 @@
           frequency *= lacunarity;
         }
         return total / Math.max(1e-6, maxValue);
+      }
+
+      const terrainRng = createSeededRandom(4242);
+      const terrainPerlin = new ImprovedNoise(terrainRng);
+
+      function mountainRelief(x, z) {
+        let sum = 0;
+        const peaks = [
+          { cx: -405, cz: 315, r: 11000, a: 148 },
+          { cx: 398, cz: -288, r: 12400, a: 172 },
+          { cx: -105, cz: -465, r: 8600, a: 120 },
+          { cx: 525, cz: 195, r: 6400, a: 98 },
+        ];
+        for (const p of peaks) {
+          const dx = x - p.cx;
+          const dz = z - p.cz;
+          sum += Math.exp(-(dx * dx + dz * dz) / p.r) * p.a;
+        }
+        const ridge =
+          Math.exp(-((x - 165) * (x - 165) + (z + 135) * (z + 135)) / 20000) *
+          72;
+        return sum + ridge;
+      }
+
+      function terrainHeight(x, z) {
+        const fx = x * 0.0018;
+        const fz = z * 0.0018;
+        const h = fbm(terrainPerlin, fx, 0, fz, 5, 0.5, 2.15) * 2 - 1;
+        const ridge = Math.sin(fx * 2.1 + h) * Math.cos(fz * 2.0 - h * 0.5);
+        const detail = fbm(terrainPerlin, fx * 6, 2, fz * 6, 3, 0.45, 2.4);
+        const y =
+          (h * 0.72 + ridge * 0.18 + detail * 0.28) * TERRAIN_HEIGHT_SCALE;
+        return Math.max(-35, y + mountainRelief(x, z));
+      }
+
+      function getWorldHeight(x, z) {
+        return terrainHeight(x, z);
+      }
+
+      function hashCell2D(ix, iz) {
+        const a = (ix | 0) * 374761393;
+        const b = (iz | 0) * 668265263;
+        let n = (a ^ b) >>> 0;
+        n = Math.imul(n ^ (n >>> 15), 1274126177) >>> 0;
+        return (n ^ (n >>> 16)) >>> 0;
+      }
+
+      /** Nearest-cell Worley in XZ; `edge` is small on Voronoi boundaries (paths). */
+      function worleyFieldDecor(x, z) {
+        const S = FIELD_CELL_SIZE;
+        const ix0 = Math.floor(x / S);
+        const iz0 = Math.floor(z / S);
+        let d1 = 1e30;
+        let d2 = 1e30;
+        let cellHash = 0;
+        for (let jz = -2; jz <= 2; jz++) {
+          for (let jx = -2; jx <= 2; jx++) {
+            const ix = ix0 + jx;
+            const iz = iz0 + jz;
+            const h = hashCell2D(ix, iz);
+            const ox = (h & 0xffff) / 65536;
+            const oz = ((h >>> 16) & 0xffff) / 65536;
+            const fx = (ix + ox) * S;
+            const fz = (iz + oz) * S;
+            const dx = x - fx;
+            const dz = z - fz;
+            const d = dx * dx + dz * dz;
+            if (d < d1) {
+              d2 = d1;
+              d1 = d;
+              cellHash = h;
+            } else if (d < d2) {
+              d2 = d;
+            }
+          }
+        }
+        const s1 = Math.sqrt(d1);
+        const s2 = Math.sqrt(d2);
+        return { edge: s2 - s1, cellHash, d1: s1 };
+      }
+
+      function terrainSlopeMetricSq(x, z) {
+        const e = 2.5;
+        const hx =
+          terrainHeight(x + e, z) - terrainHeight(x - e, z);
+        const hz =
+          terrainHeight(x, z + e) - terrainHeight(x, z - e);
+        return hx * hx + hz * hz;
+      }
+
+      function createTerrainPaletteDataTexture() {
+        /* Natural patchwork: pasture greens, wheat/ochre, soil browns, dark forest. */
+        const FIELD_PALETTE = [
+          0x4a6b42, 0x557a4c, 0x5f8854, 0x456238, 0x6a945e, 0x3d5634,
+          0xa89a62, 0xb8aa72, 0x948858, 0xc8bc7a,
+          0x6e5844, 0x7d6650,
+          0x243224, 0x1a2218, 0x2e3a28, 0x162018,
+        ];
+        const data = new Uint8Array(16 * 4);
+        for (let i = 0; i < 16; i++) {
+          const c = new THREE.Color(FIELD_PALETTE[i]);
+          data[i * 4] = Math.round(c.r * 255);
+          data[i * 4 + 1] = Math.round(c.g * 255);
+          data[i * 4 + 2] = Math.round(c.b * 255);
+          data[i * 4 + 3] = 255;
+        }
+        const tex = new THREE.DataTexture(data, 16, 1, THREE.RGBAFormat);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.minFilter = THREE.NearestFilter;
+        tex.magFilter = THREE.NearestFilter;
+        tex.wrapS = THREE.ClampToEdgeWrapping;
+        tex.wrapT = THREE.ClampToEdgeWrapping;
+        tex.needsUpdate = true;
+        return tex;
+      }
+
+      function buildTerrainMesh() {
+        const geo = new THREE.PlaneGeometry(
+          TERRAIN_SIZE,
+          TERRAIN_SIZE,
+          TERRAIN_SEGMENTS,
+          TERRAIN_SEGMENTS,
+        );
+        geo.rotateX(-Math.PI / 2);
+        const pos = geo.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+          const x = pos.getX(i);
+          const z = pos.getZ(i);
+          pos.setY(i, terrainHeight(x, z));
+        }
+        geo.computeVertexNormals();
+        return geo;
+      }
+
+      function buildTerrainTSLNodes(terrainPaletteTex) {
+        const uFieldCell = uniform(FIELD_CELL_SIZE);
+        const uTerrAlbedo = uniform(TERRAIN_ALBEDO_GLOBAL);
+        const uPathEdge0 = uniform(PATH_EDGE_START);
+        const uPathEdge1 = uniform(PATH_EDGE_END);
+        const uPal = texture(terrainPaletteTex);
+        const terrainColorNode = Fn(() => {
+          const xz = positionWorld.xz;
+          const x0 = xz.x;
+          const z0 = xz.y;
+          const yW = positionWorld.y;
+          const S = uFieldCell;
+          const xz0 = vec2(x0, z0);
+          const n0 = fract(mul(sin(dot(xz0, vec2(12.9898, 78.233))), 43758.5453));
+          const n1 = fract(
+            mul(sin(dot(mul(xz0, float(2.17)), vec2(39.346, 11.135))), 23421.671),
+          );
+          const n2 = fract(
+            mul(sin(dot(mul(xz0, float(4.23)), vec2(73.156, 52.235))), 13244.89),
+          );
+          const fbmNoise = mul(
+            add(add(n0, mul(n1, float(0.52))), mul(n2, float(0.28))),
+            float(0.88),
+          );
+
+          const warpAmp = mul(S, float(0.11));
+          const warpX = mul(
+            sin(
+              add(
+                mul(z0, float(0.00112)),
+                mul(cos(mul(x0, float(0.00097))), float(2.1)),
+              ),
+            ),
+            warpAmp,
+          );
+          const warpZ = mul(
+            cos(
+              add(
+                mul(x0, float(0.00105)),
+                mul(sin(mul(z0, float(0.00108))), float(1.75)),
+              ),
+            ),
+            warpAmp,
+          );
+          const x = add(x0, warpX);
+          const zw = add(z0, warpZ);
+
+          const ix0 = floor(div(x, S));
+          const iz0 = floor(div(zw, S));
+          const d1 = float(1e10).toVar();
+          const d2 = float(1e10).toVar();
+          const winIx = float(0).toVar();
+          const winIz = float(0).toVar();
+          const cellH = float(0).toVar();
+
+          Loop(25, ({ i: ti }) => {
+            const t = float(ti);
+            const jx = sub(mod(t, float(5)), float(2));
+            const jz = sub(floor(div(t, float(5))), float(2));
+            const ix = add(ix0, jx);
+            const iz = add(iz0, jz);
+            const p = vec2(ix, iz);
+            const h = fract(mul(sin(dot(p, vec2(127.1, 311.7))), 43758.5453));
+            const h2 = fract(mul(sin(dot(p, vec2(269.5, 183.3))), 91823.131));
+            const fx = mul(add(ix, h), S);
+            const fz = mul(add(iz, h2), S);
+            const dx = sub(x, fx);
+            const dz = sub(zw, fz);
+            const d = add(mul(dx, dx), mul(dz, dz));
+            If(d.lessThan(d1), () => {
+              d2.assign(d1);
+              d1.assign(d);
+              winIx.assign(ix);
+              winIz.assign(iz);
+              cellH.assign(h);
+            }).Else(() => {
+              If(d.lessThan(d2), () => {
+                d2.assign(d);
+              });
+            });
+          });
+
+          const s1 = sqrt(d1);
+          const s2 = sqrt(d2);
+          const edgeRaw = sub(s2, s1);
+          const edgeSofter = max(
+            float(0.002),
+            add(edgeRaw, mul(sub(fbmNoise, float(0.5)), float(0.62))),
+          );
+
+          const rN = clamp(div(s1, mul(S, float(0.62))), float(0), float(1));
+          const fieldShape = mix(
+            float(0.92),
+            float(1.04),
+            smoothstep(float(0.16), float(0.88), rN),
+          );
+
+          const mixKey = fract(
+            mul(sin(dot(vec2(winIx, winIz), vec2(5023, 7919))), 43758.5453),
+          );
+          const forest = or(
+            equal(mod(floor(mul(mixKey, 503)), float(7)), float(0)),
+            equal(mod(floor(mul(mixKey, 311)), float(11)), float(3)),
+          );
+          const fieldIdx = mod(floor(mul(mixKey, 1007)), float(12));
+          const forestIdx = add(float(12), mod(floor(mul(mixKey, 401)), float(4)));
+          const idx = forest.select(forestIdx, fieldIdx);
+          const lift = fract(mul(cellH, 809.7));
+          const palUv = vec2(
+            div(add(idx, float(0.5)), float(16)),
+            float(0.5),
+          );
+          const palRgb = texture(uPal, palUv).rgb;
+          const cellSoft = mix(
+            palRgb,
+            mul(palRgb, vec3(0.96, 0.98, 0.95)),
+            smoothstep(float(0.35), float(1.6), edgeSofter),
+          );
+          const tinted = mul(
+            mul(cellSoft, add(float(0.93), mul(lift, float(0.07)))),
+            fieldShape,
+          );
+
+          const tH = clamp(
+            div(add(yW, float(10)), float(TERRAIN_HEIGHT_SCALE * 1.1)),
+            float(0),
+            float(1),
+          );
+          const hTint = mix(
+            vec3(1, 1, 1),
+            vec3(0.94, 0.97, 0.92),
+            smoothstep(float(0.45), float(1), tH),
+          );
+          const baseH = mix(
+            tinted,
+            mul(tinted, hTint),
+            float(FIELD_HEIGHT_COLOR_MIX),
+          );
+
+          const borderRead = smoothstep(
+            float(0.08),
+            float(0.68),
+            edgeSofter,
+          );
+          const afterBorder = mul(baseH, add(float(0.8), mul(float(0.2), borderRead)));
+
+          const pathRaw = sub(
+            float(1),
+            smoothstep(max(edgeSofter, float(0)), uPathEdge0, uPathEdge1),
+          );
+          const pathGrain = fract(
+            mul(sin(dot(mul(xz0, float(3.71)), vec2(127.2, 311.4))), 9182.15),
+          );
+          const pathGrain2 = fract(
+            mul(sin(dot(mul(xz0, float(5.03)), vec2(451.7, 88.44))), 4821.37),
+          );
+          const pathBreak = add(
+            float(0.68),
+            mul(add(pathGrain, pathGrain2), float(0.16)),
+          );
+          const pathTight = pow(pathRaw, float(1.5));
+          const pathMul = sub(float(1), mul(pathTight, mul(pathBreak, float(0.22))));
+          const withPath = mul(afterBorder, pathMul);
+
+          const mountW = smoothstep(float(62), float(128), yW);
+          const mLow = vec3(0.33, 0.32, 0.36);
+          const mMid = vec3(0.48, 0.46, 0.5);
+          const mountainCol = mix(
+            mLow,
+            mMid,
+            smoothstep(float(70), float(146), yW),
+          );
+          const snowW = smoothstep(float(118), float(162), yW);
+          const mountainCol2 = mix(
+            mountainCol,
+            vec3(0.78, 0.8, 0.84),
+            mul(snowW, float(0.4)),
+          );
+          const combined = mix(withPath, mountainCol2, mountW);
+          const organic = mul(
+            combined,
+            add(float(1), mul(sub(fbmNoise, float(0.5)), float(0.05))),
+          );
+          return mul(organic, uTerrAlbedo);
+        });
+
+        return { terrainColorNode, uFieldCell };
+      }
+
+      function buildForestInstancedMesh() {
+        const treeGeo = new THREE.ConeGeometry(2.3, 8.4, 5, 1, false);
+        treeGeo.translate(0, 4.2, 0);
+        const treeMat = new THREE.MeshStandardMaterial({
+          color: 0x153828,
+          roughness: 0.9,
+          metalness: 0.02,
+          flatShading: true,
+        });
+        const slots = [];
+        const half = TERRAIN_WORLD_HALF - 24;
+        let gx = -half;
+        outer: while (gx <= half) {
+          let gz = -half;
+          while (gz <= half) {
+            const hj = hashCell2D((gx / 3) | 0, (gz / 3) | 0);
+            const jx = ((hj & 0xfff) / 4096 - 0.5) * FOREST_GRID_STEP * 0.55;
+            const jz = (((hj >>> 12) & 0xfff) / 4096 - 0.5) * FOREST_GRID_STEP * 0.55;
+            const x = gx + jx;
+            const z = gz + jz;
+            const w = worleyFieldDecor(x, z);
+            const onPath =
+              1.0 -
+              THREE.MathUtils.smoothstep(
+                Math.max(0, w.edge),
+                PATH_EDGE_START,
+                PATH_EDGE_END,
+              );
+            if (onPath > FOREST_PATH_SKIP) {
+              gz += FOREST_GRID_STEP;
+              continue;
+            }
+            if (terrainSlopeMetricSq(x, z) > FOREST_MAX_SLOPE_SQ) {
+              gz += FOREST_GRID_STEP;
+              continue;
+            }
+            const h = w.cellHash;
+            const forestCell = (h % 7) === 0 || (h % 11) === 3;
+            const dens = forestCell ? 0.48 : (h >>> 5) % 4 === 0 ? 0.07 : 0.018;
+            const roll = (hashCell2D((x * 31.7) | 0, (z * 29.3) | 0) >>> 0) / 4294967296;
+            if (roll > dens) {
+              gz += FOREST_GRID_STEP;
+              continue;
+            }
+            const y = terrainHeight(x, z);
+            if (y > FOREST_MAX_ELEVATION) {
+              gz += FOREST_GRID_STEP;
+              continue;
+            }
+            slots.push({ x, z, y, h });
+            if (slots.length >= FOREST_MAX_INSTANCES) break outer;
+            gz += FOREST_GRID_STEP;
+          }
+          gx += FOREST_GRID_STEP;
+        }
+        if (slots.length === 0) return null;
+        const mesh = new THREE.InstancedMesh(treeGeo, treeMat, slots.length);
+        const dummy = new THREE.Object3D();
+        for (let i = 0; i < slots.length; i++) {
+          const s = slots[i];
+          const sc =
+            0.65 +
+            ((s.h >>> (i % 11)) & 255) / 255 * 0.85;
+          const yaw = ((s.h >>> 8) & 0xffff) / 65536 * Math.PI * 2;
+          const sBase =
+            0.72 + ((hashCell2D(i * 131 + 7, i * 17 + 3) & 255) / 255) * 0.22;
+          dummy.position.set(s.x, s.y, s.z);
+          dummy.rotation.set(0, yaw, 0);
+          dummy.scale.setScalar(sc * sBase);
+          dummy.updateMatrix();
+          mesh.setMatrixAt(i, dummy.matrix);
+        }
+        mesh.instanceMatrix.needsUpdate = true;
+        mesh.castShadow = true;
+        mesh.receiveShadow = false;
+        mesh.layers.set(SOLID_LAYER);
+        return mesh;
       }
 
       /* Repo-style permutation-table noise (mask textures) */
@@ -316,75 +858,344 @@
       document.body.appendChild(stats.dom);
 
       const camera = new THREE.PerspectiveCamera(
-        75,
+        60,
         window.innerWidth / window.innerHeight,
-        1.0,
-        20000,
+        2.0,
+        12000,
       );
-      camera.position.set(-90, -30, -30);
       camera.layers.enableAll();
-      const controls = new OrbitControls(camera, renderer.domElement);
-      controls.target.set(0, 0, 0);
-      controls.enableDamping = true;
+
+      const playerPos = { x: 0, z: 0 };
+      const spawnGroundY = getWorldHeight(playerPos.x, playerPos.z);
+      const fly = {
+        height: spawnGroundY,
+        heading: 0,
+        pitch: 0,
+        roll: 0,
+        rollTarget: 0,
+        aileron: 0,
+        groundCamYawOff: 0,
+        planeSpeed: 0,
+        camPitch: CAM_PITCH_FLIGHT,
+      };
+      const keysHeld = Object.create(null);
+      /** `play` = chase + pointer-lock mouse flight (v2 follow). `orbit` = OrbitControls on aircraft. */
+      const cameraView = { mode: "play" };
+      let camModeCtrl = null;
+
+      const flyHud = document.getElementById("fly-hud");
+      const flyHudSpd = document.getElementById("fly-hud-spd");
+      const flyHudAlt = document.getElementById("fly-hud-alt");
+      const flyHudPitch = document.getElementById("fly-hud-pitch");
+      const flyHudBank = document.getElementById("fly-hud-bank");
+
+      function updateFlight(dt) {
+        const keys = keysHeld;
+        if (cameraView.mode === "orbit") {
+          const groundY = getWorldHeight(playerPos.x, playerPos.z);
+          let climbDelta = 0;
+          if (keys.Space) climbDelta += ISO_FLY_CLIMB_RATE * dt;
+          if (keys.ShiftLeft || keys.ShiftRight)
+            climbDelta -= ISO_FLY_DESCEND_RATE * dt;
+          fly.height = Math.max(groundY, fly.height + climbDelta);
+          if (keys.KeyA || keys.ArrowLeft)
+            fly.heading += ISO_FLY_YAW_RATE * dt;
+          if (keys.KeyD || keys.ArrowRight)
+            fly.heading -= ISO_FLY_YAW_RATE * dt;
+        }
+        const thr = keys.KeyW || keys.ArrowUp
+          ? 1
+          : keys.KeyS || keys.ArrowDown
+            ? -1
+            : 0;
+        const drag = PLANE_DRAG * fly.planeSpeed * Math.abs(fly.planeSpeed);
+        let coast = PLANE_COAST;
+        const groundY = getWorldHeight(playerPos.x, playerPos.z);
+        const deckAgl = fly.height - groundY;
+        if (deckAgl < PLANE_DECK_ALT) coast *= PLANE_DECK_COAST_MULT;
+
+        if (thr === 1) {
+          let a = PLANE_ACCEL;
+          if (keys.ShiftLeft || keys.ShiftRight) a *= PLANE_SHIFT_ACCEL_MULT;
+          fly.planeSpeed += a * dt;
+        } else if (thr === -1) {
+          if (fly.planeSpeed > 0.55) fly.planeSpeed -= PLANE_BRAKE * dt;
+          else fly.planeSpeed -= PLANE_REV_ACCEL * dt;
+        } else {
+          if (fly.planeSpeed > 0)
+            fly.planeSpeed = Math.max(
+              0,
+              fly.planeSpeed - (coast + drag) * dt,
+            );
+          else if (fly.planeSpeed < 0)
+            fly.planeSpeed = Math.min(
+              0,
+              fly.planeSpeed + (coast + drag) * dt,
+            );
+        }
+        const maxFwd =
+          keys.ShiftLeft || keys.ShiftRight
+            ? PLANE_MAX_FWD_BOOST
+            : PLANE_MAX_FWD;
+        fly.planeSpeed = THREE.MathUtils.clamp(
+          fly.planeSpeed,
+          -PLANE_MAX_REV,
+          maxFwd,
+        );
+        if (Math.abs(fly.planeSpeed) < 0.04 && thr === 0) fly.planeSpeed = 0;
+
+        let mx = 0,
+          mz = 0;
+        const spdAbs = Math.abs(fly.planeSpeed);
+        if (spdAbs > 1e-4) {
+          const sg = Math.sign(fly.planeSpeed);
+          mx = -Math.sin(fly.heading) * sg;
+          mz = -Math.cos(fly.heading) * sg;
+        }
+        playerPos.x = THREE.MathUtils.clamp(
+          playerPos.x + mx * spdAbs * dt,
+          -TERRAIN_WORLD_HALF,
+          TERRAIN_WORLD_HALF,
+        );
+        playerPos.z = THREE.MathUtils.clamp(
+          playerPos.z + mz * spdAbs * dt,
+          -TERRAIN_WORLD_HALF,
+          TERRAIN_WORLD_HALF,
+        );
+
+        const agl = fly.height - groundY;
+        const spd = Math.abs(fly.planeSpeed);
+        const onDeck = agl < FLY_SURFACE_ALT && spd < FLY_SURFACE_SPEED;
+
+        const diveMult = fly.pitch < 0 ? FLY_PITCH_DIVE_MULT : 1;
+        fly.height = Math.max(
+          groundY,
+          fly.height +
+            fly.pitch * FLY_PITCH_CLIMB_SCALE * diveMult * dt,
+        );
+
+        if (onDeck) {
+          const deckRate = 1 - Math.exp(-4 * dt);
+          fly.pitch = THREE.MathUtils.lerp(fly.pitch, 0, deckRate);
+          fly.rollTarget = THREE.MathUtils.lerp(fly.rollTarget, 0, deckRate);
+          fly.height = THREE.MathUtils.lerp(fly.height, groundY, deckRate);
+        }
+
+        const dtRoll = Math.min(dt, 0.08);
+        fly.rollTarget = THREE.MathUtils.lerp(
+          fly.rollTarget,
+          0,
+          1 - Math.exp(-FLY_ROLL_TARGET_DECAY * dtRoll),
+        );
+        fly.roll = THREE.MathUtils.lerp(
+          fly.roll,
+          fly.rollTarget,
+          1 - Math.exp(-FLY_ROLL_SMOOTH * dtRoll),
+        );
+
+        if (!onDeck) {
+          if (keys.KeyZ) fly.aileron += FLY_AILERON_RATE * dt;
+          if (keys.KeyC) fly.aileron -= FLY_AILERON_RATE * dt;
+        } else {
+          const lvl = 1 - Math.exp(-3 * dt);
+          fly.aileron *= 1 - lvl;
+          if (Math.abs(fly.aileron) < 0.01) fly.aileron = 0;
+        }
+      }
+
+      function updateFlightCamera(dt) {
+        if (cameraView.mode !== "play") return;
+        const lookAtY = fly.height + 0.45;
+        const camOrbitYaw = fly.heading + fly.groundCamYawOff;
+        const hDist = CAM_DIST_FLIGHT * Math.cos(fly.camPitch);
+        const vDist = CAM_DIST_FLIGHT * Math.sin(fly.camPitch);
+        const sinH = Math.sin(camOrbitYaw);
+        const cosH = Math.cos(camOrbitYaw);
+        const a = fly.aileron;
+        const sinA = Math.sin(a);
+        const cosA = Math.cos(a);
+        camera.position.set(
+          playerPos.x + sinH * hDist - cosH * sinA * vDist,
+          lookAtY + cosA * vDist,
+          playerPos.z + cosH * hDist + sinH * sinA * vDist,
+        );
+        camera.up.set(-cosH * sinA, cosA, sinH * sinA);
+        camera.lookAt(playerPos.x, lookAtY, playerPos.z);
+
+        const floorAtCam = getWorldHeight(
+          camera.position.x,
+          camera.position.z,
+        );
+        const minCamY = floorAtCam + CAM_COLLISION_OFFSET + 1.0;
+        if (camera.position.y < minCamY) {
+          camera.position.y +=
+            (minCamY - camera.position.y) * (1 - Math.exp(-8 * dt));
+          camera.lookAt(playerPos.x, lookAtY, playerPos.z);
+        }
+      }
+
+      function onKeyDown(e) {
+        if (e.code === "KeyV" && !e.repeat) {
+          e.preventDefault();
+          cameraView.mode = cameraView.mode === "play" ? "orbit" : "play";
+          if (camModeCtrl) camModeCtrl.updateDisplay();
+          applyCameraMode();
+          return;
+        }
+        if (e.code === "Space") e.preventDefault();
+        keysHeld[e.code] = true;
+      }
+      function onKeyUp(e) {
+        delete keysHeld[e.code];
+      }
+      function onMouseMove(e) {
+        if (cameraView.mode !== "play") return;
+        if (document.pointerLockElement !== renderer.domElement) return;
+        const mx = e.movementX;
+        const my = e.movementY;
+        const groundY = getWorldHeight(playerPos.x, playerPos.z);
+        const agl = fly.height - groundY;
+        const spd = Math.abs(fly.planeSpeed);
+        const onDeck = agl < FLY_SURFACE_ALT && spd < FLY_SURFACE_SPEED;
+        if (onDeck) {
+          fly.groundCamYawOff -= mx * FLY_MOUSE_SENS_X;
+        } else {
+          fly.groundCamYawOff = 0;
+          fly.heading -= mx * FLY_MOUSE_SENS_X;
+          fly.pitch = THREE.MathUtils.clamp(
+            fly.pitch + my * FLY_MOUSE_SENS_Y,
+            FLY_PITCH_MIN,
+            FLY_PITCH_MAX,
+          );
+          fly.rollTarget = THREE.MathUtils.clamp(
+            fly.rollTarget - mx * FLY_ROLL_VEL_SCALE,
+            -FLY_ROLL_MAX,
+            FLY_ROLL_MAX,
+          );
+        }
+      }
+
+      function tryRequestPointerLock(e) {
+        if (cameraView.mode !== "play") return;
+        if (e && e.button !== 0 && e.button !== undefined) return;
+        if (document.pointerLockElement === renderer.domElement) return;
+        renderer.domElement.requestPointerLock();
+      }
+      renderer.domElement.addEventListener("pointerdown", tryRequestPointerLock, {
+        passive: true,
+      });
+      document.addEventListener("keydown", onKeyDown);
+      document.addEventListener("keyup", onKeyUp);
+      renderer.domElement.addEventListener("mousemove", onMouseMove);
+
+      let orbitControls;
+      function applyCameraMode() {
+        if (!orbitControls) return;
+        const play = cameraView.mode === "play";
+        orbitControls.enabled = !play;
+        if (play) {
+          renderer.domElement.style.cursor =
+            document.pointerLockElement === renderer.domElement
+              ? "none"
+              : "";
+        } else {
+          if (document.pointerLockElement === renderer.domElement) {
+            document.exitPointerLock();
+          }
+          const lookAtY = fly.height + 0.45;
+          orbitControls.target.set(playerPos.x, lookAtY, playerPos.z);
+          orbitControls.update();
+          renderer.domElement.style.cursor = "grab";
+        }
+      }
+
+      orbitControls = new OrbitControls(camera, renderer.domElement);
+      orbitControls.enableDamping = true;
+      orbitControls.dampingFactor = 0.07;
+      orbitControls.minDistance = 7;
+      orbitControls.maxDistance = 2400;
+      orbitControls.minPolarAngle = 0.08;
+      orbitControls.maxPolarAngle = Math.PI * 0.485;
+      orbitControls.enabled = false;
+
+      document.addEventListener("pointerlockchange", () => {
+        if (cameraView.mode !== "play") return;
+        renderer.domElement.style.cursor =
+          document.pointerLockElement === renderer.domElement
+            ? "none"
+            : "";
+      });
+
       const timer = new THREE.Timer();
       timer.connect(document);
 
-      const ambientLight = new THREE.AmbientLight(0xffffff, 1.2);
+      const ambientLight = new THREE.AmbientLight(0xffffff, 1.05);
       scene.add(ambientLight);
-      const sun = new THREE.DirectionalLight(0xffffff, 2.5);
-      sun.position.set(1, 1, 1).normalize();
+      const sun = new THREE.DirectionalLight(0xffffff, 2.65);
+      sun.position.set(0, 1, 0);
       sun.castShadow = true;
-      sun.shadow.camera.left = -50;
-      sun.shadow.camera.right = 50;
-      sun.shadow.camera.top = 50;
-      sun.shadow.camera.bottom = -50;
-      sun.shadow.camera.near = 0.5;
-      sun.shadow.camera.far = 500;
-      sun.shadow.mapSize.width = 1024;
-      sun.shadow.mapSize.height = 1024;
+      const shadowHalf = TERRAIN_SIZE * 0.52;
+      sun.shadow.camera.left = -shadowHalf;
+      sun.shadow.camera.right = shadowHalf;
+      sun.shadow.camera.top = shadowHalf;
+      sun.shadow.camera.bottom = -shadowHalf;
+      sun.shadow.camera.near = 10;
+      sun.shadow.camera.far = TERRAIN_SIZE * 2.5;
+      sun.shadow.mapSize.width = 2048;
+      sun.shadow.mapSize.height = 2048;
+      sun.shadow.bias = -0.00025;
+      sun.shadow.normalBias = 0.035;
+      sun.shadow.camera.updateProjectionMatrix();
       scene.add(sun);
+      sun.target.position.set(0, 0, 0);
+      scene.add(sun.target);
 
       const sunMaterial = new THREE.MeshBasicMaterial({
-        color: 0xffddaa,
+        color: 0xffe8cc,
         transparent: true,
+        fog: false,
+        toneMapped: false,
+        depthWrite: false,
       });
       const sunSphere = new THREE.Mesh(
-        new THREE.SphereGeometry(200, 32, 32),
+        new THREE.SphereGeometry(340, 32, 32),
         sunMaterial,
       );
-      sunSphere.position.copy(sun.position).normalize().multiplyScalar(9000);
+      sunSphere.renderOrder = 15;
       sunSphere.layers.set(VOLUME_LAYER);
       scene.add(sunSphere);
 
-      const ground = new THREE.Mesh(
-        new THREE.PlaneGeometry(200, 200),
-        new THREE.MeshStandardMaterial({
-          color: 0x666666,
-          roughness: 0.8,
-          side: THREE.DoubleSide,
-        }),
-      );
-      ground.rotation.x = -Math.PI / 2;
-      ground.position.y = -40;
+      const terrainGeo = buildTerrainMesh();
+      const terrainPaletteTex = createTerrainPaletteDataTexture();
+      const { terrainColorNode } = buildTerrainTSLNodes(terrainPaletteTex);
+      const groundMat = new THREE.MeshStandardNodeMaterial({
+        side: THREE.FrontSide,
+      });
+      groundMat.colorNode = terrainColorNode();
+      groundMat.roughnessNode = float(0.97);
+      groundMat.metalnessNode = float(0.02);
+      groundMat.envMapIntensity = 0.038;
+      groundMat.color = new THREE.Color(0.68, 0.7, 0.65);
+      const ground = new THREE.Mesh(terrainGeo, groundMat);
       ground.receiveShadow = true;
+      ground.castShadow = false;
       ground.layers.set(SOLID_LAYER);
       scene.add(ground);
 
-      const grid = new THREE.GridHelper(200, 50, 0x999999, 0x666666);
-      grid.position.y = -39.9;
-      grid.layers.set(SOLID_LAYER);
-      scene.add(grid);
+      const forestMesh = buildForestInstancedMesh();
+      if (forestMesh) scene.add(forestMesh);
 
-      const sphereGeom = new THREE.SphereGeometry(15, 32, 16);
+      const sphereGeom = new THREE.SphereGeometry(12, 24, 16);
       const greenSphere = new THREE.Mesh(
         sphereGeom,
         new THREE.MeshStandardMaterial({
-          color: 0x00ff00,
-          roughness: 0.3,
-          metalness: 0.1,
+          color: 0x00cc66,
+          roughness: 0.35,
+          metalness: 0.05,
         }),
       );
-      greenSphere.position.set(0, 0, 0);
+      greenSphere.position.set(180, 0, -140);
+      greenSphere.position.y = terrainHeight(180, -140) + 9;
       greenSphere.castShadow = true;
       greenSphere.layers.set(SOLID_LAYER);
       scene.add(greenSphere);
@@ -392,17 +1203,75 @@
       const magentaSphere = new THREE.Mesh(
         sphereGeom,
         new THREE.MeshStandardMaterial({
-          color: 0xff00ff,
-          roughness: 0.3,
-          metalness: 0.1,
+          color: 0xff44aa,
+          roughness: 0.35,
+          metalness: 0.05,
         }),
       );
-      magentaSphere.position.set(0, 0, -50);
+      magentaSphere.position.set(-220, 0, 200);
+      magentaSphere.position.y = terrainHeight(-220, 200) + 9;
       magentaSphere.castShadow = true;
       magentaSphere.layers.set(SOLID_LAYER);
       scene.add(magentaSphere);
 
-      const occluderMeshes = [ground, grid, greenSphere, magentaSphere];
+      const occluderMeshes = [ground, greenSphere, magentaSphere];
+      if (forestMesh) occluderMeshes.push(forestMesh);
+      let planeRoot = null;
+
+      async function loadPlaneFromGlb() {
+        const CAP_H = 1.2;
+        const CAP_R = 0.4;
+        const dracoLoader = new DRACOLoader();
+        dracoLoader.setDecoderPath(DRACO_DECODER_PATH);
+        const ktx2Loader = new KTX2Loader();
+        ktx2Loader.setTranscoderPath(BASIS_TRANSCODER_PATH);
+        ktx2Loader.detectSupport(renderer);
+        const loader = new GLTFLoader();
+        loader.setDRACOLoader(dracoLoader);
+        loader.setKTX2Loader(ktx2Loader);
+        try {
+          const gltf = await loader.loadAsync(PLANE_GLB_URL);
+          const inner = gltf.scene;
+          inner.rotation.y = Math.PI;
+          inner.updateMatrixWorld(true);
+          const box0 = new THREE.Box3().setFromObject(inner);
+          if (!box0.isEmpty()) {
+            const size0 = box0.getSize(new THREE.Vector3());
+            const max0 = Math.max(size0.x, size0.y, size0.z);
+            const targetSpan =
+              2.8 * (CAP_H + 2 * CAP_R) * PLANE_MODEL_EXTRA_SCALE;
+            inner.scale.setScalar(targetSpan / max0);
+            inner.updateMatrixWorld(true);
+            const box = new THREE.Box3().setFromObject(inner);
+            inner.position.set(
+              -((box.min.x + box.max.x) * 0.5),
+              -box.min.y,
+              -((box.min.z + box.max.z) * 0.5),
+            );
+          }
+          planeRoot = new THREE.Group();
+          planeRoot.rotation.order = "YXZ";
+          planeRoot.add(inner);
+          scene.add(planeRoot);
+          inner.updateMatrixWorld(true);
+          inner.traverse((o) => {
+            if (o.isMesh) {
+              o.castShadow = true;
+              o.receiveShadow = false;
+              o.layers.set(SOLID_LAYER);
+              occluderMeshes.push(o);
+            }
+          });
+        } catch (err) {
+          console.warn("[clouds_terrain] Plane GLB failed:", PLANE_GLB_URL, err);
+        } finally {
+          dracoLoader.dispose();
+          ktx2Loader.dispose();
+        }
+      }
+
+      await loadPlaneFromGlb();
+      fly.height = getWorldHeight(playerPos.x, playerPos.z);
 
       const finalRTDefaults = {
         minFilter: THREE.LinearFilter,
@@ -433,12 +1302,18 @@
 
       const occlusionMaterialBlack = new THREE.MeshBasicMaterial({
         color: 0x000000,
+        fog: false,
+        toneMapped: false,
       });
       const occlusionLineBlack = new THREE.LineBasicMaterial({
         color: 0x000000,
+        fog: false,
+        toneMapped: false,
       });
       const occlusionMaterialWhite = new THREE.MeshBasicMaterial({
         color: 0xffffff,
+        fog: false,
+        toneMapped: false,
       });
 
       const postScene = new THREE.Scene();
@@ -474,7 +1349,12 @@
         opacity: 6.0,
         raymarchSteps: 44,
         lightSteps: 1,
-        containerScale: 120.0,
+        containerScale: 420,
+        cloudHeightY: 268,
+        /* Fixed world cloud — do not follow aircraft (avoids “pushing” the volume). */
+        followCamera: false,
+        cloudFollowSmoothing: 0.12,
+        lodAuto: true,
         /* Portion of drawing-buffer size used for occlusion + god-rays (lower = faster). */
         effectBufferScale: 0.35,
         maxPixelRatio: 1.25,
@@ -482,8 +1362,8 @@
         animationSpeedX: 0.02,
         animationSpeedY: 0.0,
         animationSpeedZ: 0.01,
-        ambientLightIntensity: 1.2,
-        directionalLightIntensity: 2.5,
+        ambientLightIntensity: 1.05,
+        directionalLightIntensity: 2.65,
         maskSeed: 1,
         raio: 0.52,
         maskSoftness: 0.17,
@@ -499,7 +1379,40 @@
         forcaRuidoDetalhe: 0.036,
         frequenciaRuidoDetalhe: 10.5,
         visualizeMask: false,
+        /** Sun: azimuth 0° = +Z, 90° = +X (Y up); elevation 0° = horizon. */
+        sunAzimuthDeg: 40,
+        sunElevationDeg: 15,
+        sunMeshDistance: 8000,
+        sunDiscRadius: 260,
+        godRaysExposureUI: 0.58,
+        godRaysSamplesUI: 64,
+        frustumCullVolume: true,
+        frustumDimGodRays: false,
+        fogEnabled: true,
+        fogMode: "linear",
+        fogNear: 280,
+        fogFar: 5200,
+        fogDensity: 0.00022,
+        fogColor: "#9db8d4",
       };
+
+      function syncSceneFog() {
+        if (!parameters.fogEnabled) {
+          scene.fog = null;
+          return;
+        }
+        const c = new THREE.Color(parameters.fogColor);
+        if (parameters.fogMode === "exp2") {
+          scene.fog = new THREE.FogExp2(c, parameters.fogDensity);
+        } else {
+          scene.fog = new THREE.Fog(
+            c,
+            parameters.fogNear,
+            parameters.fogFar,
+          );
+        }
+      }
+      syncSceneFog();
 
       let volumeTexture = new THREE.Data3DTexture(new Uint8Array(8), 2, 2, 2);
       volumeTexture.format = THREE.RedFormat;
@@ -651,6 +1564,12 @@
       const uDensityMultiplier = uniform(parameters.densityMultiplier);
       const uCameraNear = uniform(camera.near);
       const uCameraFar = uniform(camera.far);
+      const uFogVolumeEnabled = uniform(1);
+      const uFogModeExp2 = uniform(0);
+      const uFogNear = uniform(parameters.fogNear);
+      const uFogFar = uniform(parameters.fogFar);
+      const uFogDensity = uniform(parameters.fogDensity);
+      const uFogColorVol = uniform(new THREE.Color(parameters.fogColor));
       const uResolution = uniform(new THREE.Vector2(w, h));
       const uBlueNoiseSize = uniform(
         new THREE.Vector2(
@@ -664,6 +1583,27 @@
       const uAmbientColor = uniform(ambientLight.color.clone());
       const uLightDir = uniform(sun.position.clone());
       const uOcclusionMode = uniform(0);
+
+      function applySunOrientation() {
+        const az = THREE.MathUtils.degToRad(parameters.sunAzimuthDeg);
+        const el = THREE.MathUtils.degToRad(parameters.sunElevationDeg);
+        const cEl = Math.cos(el);
+        _sunDirScratch.set(
+          Math.sin(az) * cEl,
+          Math.sin(el),
+          Math.cos(az) * cEl,
+        ).normalize();
+        sun.position.copy(_sunDirScratch);
+        sun.updateMatrixWorld(true);
+        sun.target.updateMatrixWorld(true);
+        sunSphere.position
+          .copy(_sunDirScratch)
+          .multiplyScalar(parameters.sunMeshDistance);
+        sunSphere.scale.setScalar(
+          parameters.sunDiscRadius / SUN_DISC_GEOM_RADIUS,
+        );
+        uLightDir.value.copy(_sunDirScratch);
+      }
 
       const u_mask_raio = uniform(parameters.raio);
       const u_mask_achatamentoCima = uniform(parameters.achatamentoCima);
@@ -925,10 +1865,34 @@
         });
 
         const alpha = float(1.0).sub(transmittance.r);
-        return vec4(accumulatedColor, alpha);
+        const rgbOut = accumulatedColor.toVar();
+        If(
+          uFogVolumeEnabled
+            .greaterThan(0.5)
+            .and(uOcclusionMode.lessThan(0.5)),
+          () => {
+            const entryLocal = vOriginVar.add(rayDir.mul(bounds.x));
+            const entryWorld = modelWorldMatrix.mul(vec4(entryLocal, 1.0)).xyz;
+            const fogDist = length(entryWorld.sub(cameraPosition));
+            const linearFog = smoothstep(uFogNear, uFogFar, fogDist);
+            const expFog = float(1.0).sub(
+              exp(
+                uFogDensity
+                  .mul(uFogDensity)
+                  .mul(fogDist)
+                  .mul(fogDist)
+                  .negate(),
+              ),
+            );
+            const fogMix = uFogModeExp2.greaterThan(0.5).select(expFog, linearFog);
+            rgbOut.assign(mix(rgbOut, uFogColorVol, fogMix));
+          },
+        );
+        return vec4(rgbOut, alpha);
       });
 
       const cloudMat = new THREE.MeshBasicNodeMaterial();
+      cloudMat.fog = false;
       cloudMat.colorNode = cloudColorNode();
       cloudMat.transparent = true;
       cloudMat.side = THREE.BackSide;
@@ -940,6 +1904,7 @@
         cloudMat,
       );
       cloudMesh.scale.setScalar(parameters.containerScale);
+      cloudMesh.position.set(0, parameters.cloudHeightY, 0);
       cloudMesh.layers.set(VOLUME_LAYER);
       scene.add(cloudMesh);
 
@@ -954,10 +1919,10 @@
       const godRaysLightUv = uniform(new THREE.Vector2(0.5, 0.5));
       const godRaysSunColor = uniform(new THREE.Color(0xffddaa));
       const godRaysDensity = uniform(0.98);
-      const godRaysDecay = uniform(0.98);
-      const godRaysWeight = uniform(0.4);
-      const godRaysExposure = uniform(0.4);
-      const godRaysSamples = uniform(64);
+      const godRaysDecay = uniform(0.975);
+      const godRaysWeight = uniform(0.55);
+      const godRaysExposure = uniform(parameters.godRaysExposureUI);
+      const godRaysSamples = uniform(parameters.godRaysSamplesUI);
 
       const godRaysNodeFixed = Fn(() => {
         /* Same radial march as reference; lightPos must be WebGPU post UV (getScreenPosition). */
@@ -989,6 +1954,7 @@
       godRaysMat.colorNode = godRaysNodeFixed();
       godRaysMat.depthTest = false;
       godRaysMat.depthWrite = false;
+      godRaysMat.toneMapped = false;
 
       const finalSceneTex = texture(finalRT.texture);
       const compositeMat = new THREE.MeshBasicNodeMaterial();
@@ -997,6 +1963,7 @@
       compositeMat.blending = THREE.AdditiveBlending;
       compositeMat.depthTest = false;
       compositeMat.depthWrite = false;
+      compositeMat.toneMapped = false;
 
       const screenMat = new THREE.MeshBasicNodeMaterial();
       /* WebGPU: RT → canvas blit is Y-flipped vs WebGL-style UV; fix upright scene. */
@@ -1008,6 +1975,13 @@
       bake3DTexture();
 
       const gui = new GUI({ title: "Controls" });
+      const folderCamera = gui.addFolder("Camera");
+      camModeCtrl = folderCamera
+        .add(cameraView, "mode", ["play", "orbit"])
+        .name("Mode (V to toggle)")
+        .onChange(() => applyCameraMode());
+      folderCamera.open();
+
       const folderGen = gui.addFolder("Texture Generation (Requires Regenerate)");
       folderGen
         .add(parameters, "textureSize", [32, 64, 96, 128, 256])
@@ -1166,18 +2140,67 @@
         });
       folderLighting.open();
 
-      const folderGodRays = gui.addFolder("God Rays");
+      const folderFog = gui.addFolder("Distance fog");
+      folderFog
+        .add(parameters, "fogEnabled")
+        .name("Enabled")
+        .onChange(() => syncSceneFog());
+      folderFog
+        .add(parameters, "fogMode", ["linear", "exp2"])
+        .name("Mode")
+        .onChange(() => syncSceneFog());
+      folderFog
+        .addColor(parameters, "fogColor")
+        .name("Color")
+        .onChange(() => syncSceneFog());
+      folderFog
+        .add(parameters, "fogNear", 0, 3000, 10)
+        .name("Near (linear)")
+        .onChange(() => syncSceneFog());
+      folderFog
+        .add(parameters, "fogFar", 500, 12000, 50)
+        .name("Far (linear)")
+        .onChange(() => syncSceneFog());
+      folderFog
+        .add(parameters, "fogDensity", 0, 0.002, 0.00001)
+        .name("Density (exp²)")
+        .onChange(() => syncSceneFog());
+      folderFog.open();
+
+      const folderGodRays = gui.addFolder("Sun & god rays");
+      folderGodRays
+        .add(parameters, "sunAzimuthDeg", 0, 360, 1)
+        .name("Sun azimuth° (+Z=0)")
+        .onChange(() => applySunOrientation());
+      folderGodRays
+        .add(parameters, "sunElevationDeg", -5, 88, 0.5)
+        .name("Sun elevation°")
+        .onChange(() => applySunOrientation());
+      folderGodRays
+        .add(parameters, "sunMeshDistance", 3500, 16000, 50)
+        .name("Sun distance")
+        .onChange(() => applySunOrientation());
+      folderGodRays
+        .add(parameters, "sunDiscRadius", 80, 650, 5)
+        .name("Sun disc radius")
+        .onChange(() => applySunOrientation());
       folderGodRays
         .add(godRaysDensity, "value", 0, 1, 0.01)
         .name("Density");
       folderGodRays.add(godRaysDecay, "value", 0.8, 1, 0.001).name("Decay");
       folderGodRays.add(godRaysWeight, "value", 0, 1, 0.01).name("Weight");
       folderGodRays
-        .add(godRaysExposure, "value", 0, 1, 0.01)
-        .name("Exposure");
+        .add(parameters, "godRaysExposureUI", 0, 1, 0.01)
+        .name("Exposure")
+        .onChange((v) => {
+          godRaysExposure.value = v;
+        });
       folderGodRays
-        .add(godRaysSamples, "value", 10, MAX_GOD_SAMPLES, 1)
-        .name("Samples");
+        .add(parameters, "godRaysSamplesUI", 10, MAX_GOD_SAMPLES, 1)
+        .name("Samples (base)")
+        .onChange((v) => {
+          godRaysSamples.value = v;
+        });
       folderGodRays.open();
 
       function resizeTargets() {
@@ -1239,18 +2262,145 @@
         .onChange(() => resizeTargets());
       folderPerf.open();
 
+      const folderWorld = gui.addFolder("Terrain & cloud placement");
+      folderWorld.add(parameters, "lodAuto").name("Auto LOD (distance)");
+      folderWorld
+        .add(parameters, "followCamera")
+        .name("Cloud follows aircraft (off = fixed world volume)");
+      folderWorld.add(parameters, "frustumCullVolume").name("Cull volume off-screen");
+      folderWorld
+        .add(parameters, "frustumDimGodRays")
+        .name("Also dim god-rays when culled");
+      folderWorld
+        .add(parameters, "cloudFollowSmoothing", 0.02, 0.5, 0.01)
+        .name("Follow smoothing");
+      folderWorld
+        .add(parameters, "cloudHeightY", 80, 600, 1)
+        .name("Cloud height (Y)")
+        .onChange((v) => {
+          cloudMesh.position.y = v;
+        });
+      folderWorld.open();
+
       resizeTargets();
+      updateFlight(0.016);
+      updateFlightCamera(0.016);
+      applyCameraMode();
+      applySunOrientation();
 
       renderer.setAnimationLoop(() => {
         stats.update();
-        controls.update();
         timer.update();
         const delta = timer.getDelta();
 
-        sunSphere.position.copy(sun.position).normalize().multiplyScalar(9000);
-        uLightDir.value.copy(sun.position);
+        updateFlight(delta);
+        if (cameraView.mode === "play") {
+          updateFlightCamera(delta);
+        } else {
+          const lookAtY = fly.height + 0.45;
+          orbitControls.target.set(playerPos.x, lookAtY, playerPos.z);
+          orbitControls.update();
+        }
+
+        if (planeRoot) {
+          planeRoot.position.set(playerPos.x, fly.height, playerPos.z);
+          planeRoot.rotation.set(
+            fly.pitch,
+            fly.heading,
+            fly.roll + fly.aileron,
+          );
+        }
+
+        flyHudSpd.textContent = String(Math.round(Math.abs(fly.planeSpeed)));
+        flyHudAlt.textContent = String(
+          Math.round(fly.height - getWorldHeight(playerPos.x, playerPos.z)),
+        );
+        flyHudPitch.textContent = String(
+          Math.round((fly.pitch * 180) / Math.PI),
+        );
+        flyHudBank.textContent = String(
+          Math.round((fly.roll * 180) / Math.PI),
+        );
+
+        const lodEl = document.getElementById("lod");
+        if (parameters.followCamera) {
+          const s = parameters.cloudFollowSmoothing;
+          cloudMesh.position.x +=
+            (playerPos.x - cloudMesh.position.x) * s;
+          cloudMesh.position.z +=
+            (playerPos.z - cloudMesh.position.z) * s;
+        }
+        cloudMesh.position.y = parameters.cloudHeightY;
+
+        cloudMesh.updateMatrixWorld(true);
+        _camViewProj.multiplyMatrices(
+          camera.projectionMatrix,
+          camera.matrixWorldInverse,
+        );
+        _frustum.setFromProjectionMatrix(
+          _camViewProj,
+          renderer.coordinateSystem,
+          camera.reversedDepth,
+        );
+        const inFrustum = _frustum.intersectsObject(cloudMesh);
+
+        if (!parameters.frustumCullVolume) {
+          cloudMesh.visible = true;
+        } else {
+          cloudMesh.visible = inFrustum;
+        }
+
+        const dimGod =
+          parameters.frustumCullVolume &&
+          parameters.frustumDimGodRays &&
+          !inFrustum;
+        godRaysExposure.value = dimGod ? 0 : parameters.godRaysExposureUI;
+
+        cloudMesh.getWorldPosition(_cloudCenter);
+        const dist = camera.position.distanceTo(_cloudCenter);
+        let lodBlend = 0;
+        if (parameters.lodAuto) {
+          lodBlend = THREE.MathUtils.smoothstep(
+            LOD_DIST_NEAR,
+            LOD_DIST_FAR,
+            dist,
+          );
+        }
+        const quality = 1 - lodBlend * 0.72;
+        if (parameters.lodAuto) {
+          uMaxSteps.value = Math.max(
+            12,
+            Math.round(parameters.raymarchSteps * quality),
+          );
+          godRaysSamples.value = Math.max(
+            10,
+            Math.round(
+              parameters.godRaysSamplesUI * (0.52 + 0.48 * quality),
+            ),
+          );
+        } else {
+          uMaxSteps.value = parameters.raymarchSteps;
+          godRaysSamples.value = parameters.godRaysSamplesUI;
+        }
+
+        lodEl.textContent = [
+          `dist ${dist.toFixed(0)}`,
+          `LOD ${lodBlend.toFixed(2)}`,
+          `steps ${uMaxSteps.value}`,
+          `god ${godRaysSamples.value}`,
+          inFrustum ? "vis" : "cul",
+        ].join(" · ");
+
+        applySunOrientation();
         uSunColor.value.copy(sun.color);
         uAmbientColor.value.copy(ambientLight.color);
+
+        uFogVolumeEnabled.value = parameters.fogEnabled ? 1 : 0;
+        uFogModeExp2.value = parameters.fogMode === "exp2" ? 1 : 0;
+        uFogNear.value = parameters.fogNear;
+        uFogFar.value = parameters.fogFar;
+        uFogDensity.value = parameters.fogDensity;
+        uFogColorVol.value.set(parameters.fogColor);
 
         if (parameters.isAnimating) {
           uTextureOffset.value.x += parameters.animationSpeedX * delta;
@@ -1269,15 +2419,24 @@
         depthTexNode.value = depthTarget.depthTexture;
 
         const bgSaved = scene.background;
+        const fogSaved = scene.fog;
+        scene.fog = null;
         scene.background = new THREE.Color(0x000000);
         sunSphere.material = occlusionMaterialWhite;
         uOcclusionMode.value = 1;
         for (const o of occluderMeshes) {
-          if (o !== cloudMesh) {
+          if (o !== cloudMesh && o.material !== undefined) {
             originalMaterials.set(o.uuid, o.material);
-            o.material = o.isLineSegments
-              ? occlusionLineBlack
-              : occlusionMaterialBlack;
+            if (Array.isArray(o.material)) {
+              const black = o.isLineSegments
+                ? occlusionLineBlack
+                : occlusionMaterialBlack;
+              o.material = o.material.map(() => black);
+            } else {
+              o.material = o.isLineSegments
+                ? occlusionLineBlack
+                : occlusionMaterialBlack;
+            }
           }
         }
 
@@ -1296,6 +2455,7 @@
         }
         originalMaterials.clear();
         scene.background = bgSaved;
+        scene.fog = fogSaved;
         camera.layers.enableAll();
 
         occlusionTexForGodRays.value = occlusionRT.texture;
