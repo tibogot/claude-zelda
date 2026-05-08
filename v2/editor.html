@@ -562,6 +562,8 @@
 
 <script type="module">
 import { startV2App } from "./app/main.js";
+import { GROUND_PRESETS, applyGroundPresetToParams } from "../chunkGroundTsl.js";
+import { MEADOW_PRESETS, applyMeadowPresetToParams } from "../chunkMeadowTsl.js";
 
 // === Tab switching ===
 document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -872,9 +874,6 @@ const ALWAYS_HIDDEN = new Set(['Global', 'Lighting & atmosphere']);
 const ALWAYS_VISIBLE = new Set(['Terrain/LOD', 'Perf Gate']);
 
 const CUSTOM_MODES = new Set(['sculpt', 'paint', 'treePaint', 'props', 'foliagePaint', 'playSpawn', 'hole', 'barrier', 'ambientfx', 'fleurs', 'cliffGrass', 'cliffs', 'water', 'waterfall', 'decals', 'river', 'spline', 'grass']);
-const CUSTOM_KEEP_FOLDERS = {
-  paint: ['Terrain appearance'],
-};
 
 function syncToolsTab(pane, mode) {
   if (!pane) return;
@@ -916,7 +915,7 @@ function syncToolsTab(pane, mode) {
   const grassPanel = document.getElementById('grass-panel');
   if (grassPanel) grassPanel.style.display = mode === 'grass' ? '' : 'none';
 
-  const kept = CUSTOM_KEEP_FOLDERS[mode] || [];
+  const kept = [];
   const show = hasCustom ? new Set(kept) : new Set(MODE_FOLDERS[mode] || []);
   for (const child of pane.children) {
     if (ALWAYS_HIDDEN.has(child.title)) { child.hidden = true; continue; }
@@ -1039,6 +1038,143 @@ function buildSculptPanel(app) {
   return panel;
 }
 
+const TERRAIN_NOISE_TYPE_OPTIONS = {
+  Value: 'value',
+  Perlin: 'perlin',
+  Simplex: 'simplex',
+  Voronoi: 'voronoi',
+  White: 'white',
+};
+
+function terrainPresetLabelOptions(presets) {
+  const o = {};
+  for (const k of Object.keys(presets)) {
+    const label =
+      k === 'default'
+        ? 'Default'
+        : k
+            .replace(/([A-Z])/g, ' $1')
+            .replace(/^./, (c) => c.toUpperCase())
+            .trim();
+    o[label] = k;
+  }
+  return o;
+}
+
+function buildTerrainNoiseLayerSection(parent, layer, title, onSync) {
+  const body = _section(parent, title, false);
+  _toggle(body, layer, 'enable', { label: 'Enable', onChange: onSync });
+  _dropdown(body, layer, 'noiseType', { label: 'Noise type', options: TERRAIN_NOISE_TYPE_OPTIONS, onChange: onSync });
+  _toggle(body, layer, 'useFbm', { label: 'Use FBM', onChange: onSync });
+  _color(body, layer, 'color', { label: 'Tint', onChange: onSync });
+  _slider(body, layer, 'strength', { label: 'Strength', min: 0, max: 1.2, step: 0.01, onChange: onSync });
+  _slider(body, layer, 'scale', { label: 'Scale', min: 0.001, max: 0.2, step: 0.0005, onChange: onSync });
+  _slider(body, layer, 'octaves', { label: 'Octaves', min: 1, max: 8, step: 0.5, onChange: onSync });
+  _slider(body, layer, 'lacunarity', { label: 'Lacunarity', min: 1.5, max: 4, step: 0.05, onChange: onSync });
+  _slider(body, layer, 'gain', { label: 'Gain', min: 0.2, max: 1, step: 0.02, onChange: onSync });
+  _slider(body, layer, 'offsetX', { label: 'Offset X', min: -200, max: 200, step: 0.5, onChange: onSync });
+  _slider(body, layer, 'offsetY', { label: 'Offset Y', min: -200, max: 200, step: 0.5, onChange: onSync });
+  _toggle(body, layer, 'invert', { label: 'Invert mask', onChange: onSync });
+  _slider(body, layer, 'maskLow', { label: 'Mask low', min: 0, max: 1, step: 0.01, onChange: onSync });
+  _slider(body, layer, 'maskHigh', { label: 'Mask high', min: 0, max: 1, step: 0.01, onChange: onSync });
+  _slider(body, layer, 'maskSharpness', { label: 'Mask sharpness', min: 0.2, max: 3, step: 0.05, onChange: onSync });
+  _slider(body, layer, 'voronoiJitter', { label: 'Voronoi jitter', min: 0.2, max: 1, step: 0.02, onChange: onSync });
+}
+
+/** Terrain appearance (parity with v2/ui/terrainAppearanceTweakpane.js). Returns { rebuildTexturePickers }. */
+function installTerrainAppearanceInPaintPanel(panel, app) {
+  const ts = app.toolState;
+  const lib = app.textureLibrary;
+  const sync = () => app.tslTerrainSync();
+  const cliffSync = () => app.autoCliffEditorChanged('uniform');
+  const tpRefresh = () => app.ui?.pane.refresh();
+
+  const taBody = _section(panel, 'Terrain appearance');
+  _dropdown(taBody, ts, 'terrainSurface', {
+    label: 'Surface shading',
+    options: {
+      'Tile grid (debug)': 'tile',
+      'Procedural TSL (v1)': 'tsl',
+      'Image texture': 'image',
+    },
+    onChange: () => app.terrainSurfaceChanged(),
+  });
+
+  const groundSlotHost = document.createElement('div');
+  taBody.appendChild(groundSlotHost);
+
+  const tslBlend = _section(panel, 'TSL — slope meadow blend', false);
+  _slider(tslBlend, ts.tslGroundUi, 'meadowMix', { label: 'Meadow mix max', min: 0, max: 1, step: 0.02, onChange: sync });
+  _slider(tslBlend, ts.tslGroundUi, 'meadowSlopeMin', { label: 'Slope blend min (Ny)', min: 0, max: 1, step: 0.01, onChange: sync });
+  _slider(tslBlend, ts.tslGroundUi, 'meadowSlopeMax', { label: 'Slope blend max (Ny)', min: 0, max: 1, step: 0.01, onChange: sync });
+
+  const groundHdr = _section(panel, 'Ground TSL (v1 stack)', false);
+  _dropdown(groundHdr, ts.tslGroundUi, 'groundPresetKey', {
+    label: 'Preset',
+    options: terrainPresetLabelOptions(GROUND_PRESETS),
+    onChange: () => {
+      applyGroundPresetToParams(ts.tslGroundUi.groundPresetKey, ts.groundTsl);
+      sync();
+      tpRefresh();
+    },
+  });
+  _slider(groundHdr, ts.groundTsl, 'brightness', { label: 'Brightness', min: 0.3, max: 2.5, step: 0.02, onChange: sync });
+  _slider(groundHdr, ts.groundTsl, 'contrast', { label: 'Contrast', min: 0.5, max: 1.5, step: 0.01, onChange: sync });
+  _color(groundHdr, ts.groundTsl, 'baseColor', { label: 'Base color', onChange: sync });
+  buildTerrainNoiseLayerSection(groundHdr, ts.groundTsl.layer1, 'Layer 1', sync);
+  buildTerrainNoiseLayerSection(groundHdr, ts.groundTsl.layer2, 'Layer 2', sync);
+
+  const cliffBody = _section(panel, 'Auto cliff on steep slopes', false);
+  _toggle(cliffBody, ts, 'autoCliffEnabled', { label: 'Enabled', onChange: () => app.autoCliffEditorChanged('toggle') });
+  const cliffSlotHost = document.createElement('div');
+  cliffBody.appendChild(cliffSlotHost);
+  _slider(cliffBody, ts.autoCliff, 'slopeStart', { label: 'Slope start (flat→cliff)', min: 0.1, max: 1, step: 0.01, onChange: cliffSync });
+  _slider(cliffBody, ts.autoCliff, 'slopeEnd', { label: 'Slope end', min: 0.1, max: 1, step: 0.01, onChange: cliffSync });
+  _slider(cliffBody, ts.autoCliff, 'rockScale', { label: 'Rock scale', min: 0.001, max: 0.1, step: 0.001, onChange: cliffSync });
+  _slider(cliffBody, ts.autoCliff, 'rockBrightness', { label: 'Rock brightness', min: 0.2, max: 4, step: 0.05, onChange: cliffSync });
+  _slider(cliffBody, ts.autoCliff, 'rockContrast', { label: 'Rock contrast', min: 0.5, max: 2, step: 0.02, onChange: cliffSync });
+  _color(cliffBody, ts.autoCliff, 'rockTint', { label: 'Rock tint', onChange: cliffSync });
+  _slider(cliffBody, ts.autoCliff, 'rockNormalStr', { label: 'Normal strength', min: 0, max: 2, step: 0.05, onChange: cliffSync });
+  _slider(cliffBody, ts.autoCliff, 'rockBlendSharp', { label: 'Blend sharpness', min: 0.2, max: 4, step: 0.05, onChange: cliffSync });
+  _slider(cliffBody, ts.autoCliff, 'rockRoughMul', { label: 'Roughness mul', min: 0.2, max: 3, step: 0.05, onChange: cliffSync });
+  _slider(cliffBody, ts.autoCliff, 'triplanarSharp', { label: 'Triplanar sharpness', min: 1, max: 12, step: 0.5, onChange: cliffSync });
+
+  const meadowHdr = _section(panel, 'Meadow TSL (v1 stack)', false);
+  _dropdown(meadowHdr, ts.tslGroundUi, 'meadowPresetKey', {
+    label: 'Preset',
+    options: terrainPresetLabelOptions(MEADOW_PRESETS),
+    onChange: () => {
+      applyMeadowPresetToParams(ts.tslGroundUi.meadowPresetKey, ts.meadowTsl);
+      sync();
+      tpRefresh();
+    },
+  });
+  _slider(meadowHdr, ts.meadowTsl, 'brightness', { label: 'Brightness', min: 0.3, max: 2.5, step: 0.02, onChange: sync });
+  _slider(meadowHdr, ts.meadowTsl, 'contrast', { label: 'Contrast', min: 0.5, max: 1.5, step: 0.01, onChange: sync });
+  _color(meadowHdr, ts.meadowTsl, 'baseColor', { label: 'Base color', onChange: sync });
+  buildTerrainNoiseLayerSection(meadowHdr, ts.meadowTsl.layer1, 'Layer 1', sync);
+  buildTerrainNoiseLayerSection(meadowHdr, ts.meadowTsl.layer2, 'Layer 2', sync);
+
+  function rebuildTexturePickers() {
+    groundSlotHost.innerHTML = '';
+    const opts = lib.getSlotOptionsForUi();
+    _dropdown(groundSlotHost, ts.textureSlots, 'groundSlotId', {
+      label: 'Ground texture',
+      options: opts,
+      onChange: () => app.groundTextureSlotChanged(),
+    });
+    cliffSlotHost.innerHTML = '';
+    _dropdown(cliffSlotHost, ts.textureSlots, 'cliffSlotId', {
+      label: 'Cliff texture',
+      options: opts,
+      onChange: () => app.cliffTextureSlotChanged(),
+    });
+  }
+  rebuildTexturePickers();
+
+  return { rebuildTexturePickers };
+}
+
 // === Build custom Paint panel ===
 function buildPaintPanel(app) {
   const panel = document.createElement('div');
@@ -1052,6 +1188,8 @@ function buildPaintPanel(app) {
   _slider(brushBody, ts.brush, 'radius', { label: 'Radius', min: cfg.sculpt.brushMin, max: cfg.sculpt.brushMax, step: 0.5 });
   _slider(brushBody, ts.brush, 'strength', { label: 'Strength', min: cfg.sculpt.strengthMin, max: cfg.sculpt.strengthMax, step: 0.01 });
   _slider(brushBody, ts.brush, 'falloff', { label: 'Shape', min: 0.5, max: 4, step: 0.05 });
+
+  const { rebuildTexturePickers } = installTerrainAppearanceInPaintPanel(panel, app);
 
   // --- Layer cards with texture thumbnails ---
   const layerSection = _section(panel, 'Paint Layers');
@@ -1258,6 +1396,7 @@ function buildPaintPanel(app) {
         buildLibSlotEditor();
         buildLayerPickers();
         buildLayerCards();
+        rebuildTexturePickers();
       }});
     }
   }
@@ -1280,6 +1419,7 @@ function buildPaintPanel(app) {
     buildLibSlotEditor();
     buildLayerPickers();
     buildLayerCards();
+    rebuildTexturePickers();
   }});
 
   const libEditor = document.createElement('div');
@@ -1293,6 +1433,7 @@ function buildPaintPanel(app) {
   _button(panel, { title: 'Clear all paint', onClick: () => app.paintClear() });
 
   panel._rebuildLayerCards = buildLayerCards;
+  panel._rebuildTerrainTexturePickers = rebuildTexturePickers;
 
   return panel;
 }

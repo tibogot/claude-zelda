@@ -1080,6 +1080,7 @@ export async function startV2App(opts = {}) {
     _splineKerbSuggestFromCurvature,
     _splineKerbLiveChanged;
   let _grassChanged, _grassRebuildGeos, _grassFill, _grassClear, _grassSaveDensity, _grassLoadDensity;
+  let _terrainSurfaceChanged, _tslTerrainSync, _autoCliffEditorChanged, _cliffTextureSlotChanged, _groundTextureSlotChanged;
   ui = createTweakpaneUi({
     toolState,
     config,
@@ -1102,24 +1103,24 @@ export async function startV2App(opts = {}) {
     onRunGlobalErosion: () => sculptSystem.applyGlobalErosion(),
     onBorderMountainsRebuild: rebuildBorderMountains,
     onRampCleared: () => syncRampMarker(),
-    onTerrainSurfaceChanged: () => {
+    onTerrainSurfaceChanged: (_terrainSurfaceChanged = () => {
       applyTerrainSurfaceFromToolState();
       ui?.pane.refresh();
-    },
-    onTslTerrainSync: () => {
+    }),
+    onTslTerrainSync: (_tslTerrainSync = () => {
       syncProceduralTerrainTsl();
-    },
-    onAutoCliffChanged: (kind) => {
+    }),
+    onAutoCliffChanged: (_autoCliffEditorChanged = (kind) => {
       syncCliffUniformsFromParams();
       if (kind === "toggle") invalidateSurfaceMaterials();
-    },
-    onCliffSlotChanged: () => {
+    }),
+    onCliffSlotChanged: (_cliffTextureSlotChanged = () => {
       invalidateSurfaceMaterials();
-    },
-    onGroundSlotChanged: () => {
+    }),
+    onGroundSlotChanged: (_groundTextureSlotChanged = () => {
       disposeImageTexBundle();
       if (toolState.terrainSurface === "image") applyTerrainSurfaceFromToolState();
-    },
+    }),
     onPlaySpawnChanged: (_playSpawnChanged = () => {
       syncPlaySpawnMarker();
     }),
@@ -3328,6 +3329,11 @@ export async function startV2App(opts = {}) {
     grassClear() { _grassClear(); },
     grassSaveDensity() { _grassSaveDensity(); },
     grassLoadDensity() { _grassLoadDensity(); },
+    terrainSurfaceChanged() { _terrainSurfaceChanged(); },
+    tslTerrainSync() { _tslTerrainSync(); },
+    autoCliffEditorChanged(kind) { _autoCliffEditorChanged(kind); },
+    cliffTextureSlotChanged() { _cliffTextureSlotChanged(); },
+    groundTextureSlotChanged() { _groundTextureSlotChanged(); },
     onConfigChanged() { chunkStream.update(camera.position); },
     dispose() {
       renderer.domElement.removeEventListener("wheel", onCanvasWheelBrush, { capture: true });
