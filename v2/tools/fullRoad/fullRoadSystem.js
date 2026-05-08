@@ -837,8 +837,8 @@ export class FullRoadSystem {
         side: THREE.DoubleSide,
         depthTest: true,
         polygonOffset: true,
-        polygonOffsetFactor: -4,
-        polygonOffsetUnits: -4,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1,
       };
       this._labCenterLineMat = new THREE.MeshBasicMaterial({ color: p.centerLineColor ?? "#f0c040", ...stripeOpts });
       this._labCenterLeftMat = new THREE.MeshBasicMaterial({ color: p.centerLeftColor ?? "#f0c040", ...stripeOpts });
@@ -872,19 +872,34 @@ export class FullRoadSystem {
         insetDist = Math.min(insetDist, roadW * 0.42);
         const halfEdge = Math.max(0.004, ew * roadW * 0.5);
         if (piece.left?.path?.length >= 2) {
-          const offsetPath = this._labOffsetPathTowardInterior(piece.left.path, piece.polygon, insetDist);
-          const stripe = this._labPathToStripeMesh3D(offsetPath, p, this._labDividerLineMat, halfEdge);
+          const offsetPath = this._labOffsetPathTowardInterior(piece.left.path, piece.polygon, insetDist, false);
+          const stripe = this._labPathToStripeMesh3D(offsetPath, p, this._labDividerLineMat, halfEdge, false);
           if (stripe) {
             stripe.renderOrder = 5;
             this.meshGroup.add(stripe);
           }
         }
         if (piece.right?.path?.length >= 2) {
-          const offsetPath = this._labOffsetPathTowardInterior(piece.right.path, piece.polygon, insetDist);
-          const stripe = this._labPathToStripeMesh3D(offsetPath, p, this._labDividerLineMat, halfEdge);
+          const offsetPath = this._labOffsetPathTowardInterior(piece.right.path, piece.polygon, insetDist, false);
+          const stripe = this._labPathToStripeMesh3D(offsetPath, p, this._labDividerLineMat, halfEdge, false);
           if (stripe) {
             stripe.renderOrder = 5;
             this.meshGroup.add(stripe);
+          }
+        }
+        // Junction cores / caps: no left/right paths. Do NOT trace the full fill polygon — it includes
+        // mouth chords (perpendicular across each road), which become transverse white bands. Use
+        // outlineSegments (fillets only), same idea as lab0 purple when seams are hidden.
+        if (piece.isJunctionCore && piece.polygon.length >= 3) {
+          const edgePaths = this._labJunctionCoreOuterEdgePaths(piece);
+          for (const path2d of edgePaths) {
+            if (!path2d || path2d.length < 2) continue;
+            const offsetPath = this._labOffsetPathTowardInterior(path2d, piece.polygon, insetDist, false);
+            const stripe = this._labPathToStripeMesh3D(offsetPath, p, this._labDividerLineMat, halfEdge, false);
+            if (stripe) {
+              stripe.renderOrder = 5;
+              this.meshGroup.add(stripe);
+            }
           }
         }
       }
@@ -922,8 +937,63 @@ export class FullRoadSystem {
     return { x: sx / n, y: sy / n };
   }
 
+  /**
+   * Open polylines along the outer road edge for junction caps, excluding mouth chords.
+   * Multi-way junctions: `outlineSegments` from roadNetworkLabGeometry (corner fillets only).
+   * Flat dead-end: quad [L,R,Rb,Lb] — omit edge L–R. Round dead-end: arc chain only.
+   */
+  _labJunctionCoreOuterEdgePaths(piece) {
+    const segs = piece.outlineSegments;
+    if (Array.isArray(segs) && segs.length > 0) {
+      return segs.filter((s) => s?.length >= 2);
+    }
+    const poly = piece.polygon;
+    if (!poly || poly.length < 3) return [];
+    // Flat cap quad [L,R,Rb,Lb]: omit mouth L–R and the rear chord Rb–Lb (full-width bar reads as a “cap” line).
+    if (poly.length === 4) {
+      const L = poly[0];
+      const R = poly[1];
+      const Rb = poly[2];
+      const Lb = poly[3];
+      return [
+        [R, Rb],
+        [Lb, L],
+      ];
+    }
+    return [poly.slice()];
+  }
+
+  _labPolylineTangent2d(path2d, i, closed) {
+    const n = path2d.length;
+    if (n < 2) return { dx: 1, dy: 0 };
+    let iPrev;
+    let iNext;
+    if (closed && n >= 3) {
+      iPrev = (i - 1 + n) % n;
+      iNext = (i + 1) % n;
+    } else if (i === 0) {
+      iPrev = 0;
+      iNext = 1;
+    } else if (i === n - 1) {
+      iPrev = n - 2;
+      iNext = n - 1;
+    } else {
+      iPrev = i - 1;
+      iNext = i + 1;
+    }
+    let dx = path2d[iNext].x - path2d[iPrev].x;
+    let dz = path2d[iNext].y - path2d[iPrev].y;
+    let len = Math.hypot(dx, dz);
+    if (len < 1e-8) {
+      dx = path2d[Math.min(i + 1, n - 1)].x - path2d[Math.max(i - 1, 0)].x;
+      dz = path2d[Math.min(i + 1, n - 1)].y - path2d[Math.max(i - 1, 0)].y;
+      len = Math.hypot(dx, dz) || 1;
+    }
+    return { dx, dy: dz, len };
+  }
+
   /** Shift boundary path toward piece interior (same plane as lab xz). */
-  _labOffsetPathTowardInterior(path2d, polygon2d, distance) {
+  _labOffsetPathTowardInterior(path2d, polygon2d, distance, closed = false) {
     if (!path2d?.length || distance < 1e-8) return path2d;
     const centroid =
       polygon2d?.length >= 3 ? this._labPolygonCentroid2d(polygon2d) : this._labPolygonCentroid2d(path2d);
@@ -931,24 +1001,9 @@ export class FullRoadSystem {
     const out = [];
     const n = path2d.length;
     for (let i = 0; i < n; i++) {
-      let dx;
-      let dz;
-      if (i === 0) {
-        dx = path2d[1].x - path2d[0].x;
-        dz = path2d[1].y - path2d[0].y;
-      } else if (i === n - 1) {
-        dx = path2d[n - 1].x - path2d[n - 2].x;
-        dz = path2d[n - 1].y - path2d[n - 2].y;
-      } else {
-        dx = path2d[i + 1].x - path2d[i - 1].x;
-        dz = path2d[i + 1].y - path2d[i - 1].y;
-      }
+      const { dx, dy: dz } = this._labPolylineTangent2d(path2d, i, closed && n >= 3);
       let len = Math.hypot(dx, dz);
-      if (len < 1e-8) {
-        dx = path2d[Math.min(i + 1, n - 1)].x - path2d[Math.max(i - 1, 0)].x;
-        dz = path2d[Math.min(i + 1, n - 1)].y - path2d[Math.max(i - 1, 0)].y;
-        len = Math.hypot(dx, dz) || 1;
-      }
+      if (len < 1e-8) len = 1;
       let ux = -dz / len;
       let uy = dx / len;
       const vx = centroid.x - path2d[i].x;
@@ -979,32 +1034,18 @@ export class FullRoadSystem {
   }
 
   /** Ribbon mesh along lab 2D polyline (y → world Z), extruded ±halfWidth in XZ. */
-  _labPathToStripeMesh3D(path2d, p, material, halfWidthWorld) {
+  _labPathToStripeMesh3D(path2d, p, material, halfWidthWorld, closed = false) {
     const hw = Math.max(0.004, halfWidthWorld);
     const n = path2d.length;
     if (n < 2) return null;
+    const isClosed = closed && n >= 3;
 
     const left = [];
     const right = [];
     for (let i = 0; i < n; i++) {
-      let dx;
-      let dz;
-      if (i === 0) {
-        dx = path2d[1].x - path2d[0].x;
-        dz = path2d[1].y - path2d[0].y;
-      } else if (i === n - 1) {
-        dx = path2d[n - 1].x - path2d[n - 2].x;
-        dz = path2d[n - 1].y - path2d[n - 2].y;
-      } else {
-        dx = path2d[i + 1].x - path2d[i - 1].x;
-        dz = path2d[i + 1].y - path2d[i - 1].y;
-      }
+      const { dx, dy: dz } = this._labPolylineTangent2d(path2d, i, isClosed);
       let len = Math.hypot(dx, dz);
-      if (len < 1e-8) {
-        dx = path2d[Math.min(i + 1, n - 1)].x - path2d[Math.max(i - 1, 0)].x;
-        dz = path2d[Math.min(i + 1, n - 1)].y - path2d[Math.max(i - 1, 0)].y;
-        len = Math.hypot(dx, dz) || 1;
-      }
+      if (len < 1e-8) len = 1;
       const px = (-dz / len) * hw;
       const py = (dx / len) * hw;
       left.push({ x: path2d[i].x + px, y: path2d[i].y + py });
@@ -1017,18 +1058,24 @@ export class FullRoadSystem {
     const positions = new Float32Array(n * 2 * 3);
     let pi = 0;
     for (let i = 0; i < n; i++) {
+      // One height per station (path spine). Sampling Y at left/right XZ tilts each cross-section and
+      // shows up as vertical facets along the stripe; lab0 is 2D so it never had that.
+      const y = yAt(path2d[i].x, path2d[i].y);
       positions[pi++] = left[i].x;
-      positions[pi++] = yAt(left[i].x, left[i].y);
+      positions[pi++] = y;
       positions[pi++] = left[i].y;
       positions[pi++] = right[i].x;
-      positions[pi++] = yAt(right[i].x, right[i].y);
+      positions[pi++] = y;
       positions[pi++] = right[i].y;
     }
 
     const indices = [];
-    for (let i = 0; i < n - 1; i++) {
+    const segCount = isClosed ? n : n - 1;
+    for (let i = 0; i < segCount; i++) {
+      const j = isClosed ? (i + 1) % n : i + 1;
       const b = i * 2;
-      indices.push(b, b + 2, b + 1, b + 1, b + 2, b + 3);
+      const bj = j * 2;
+      indices.push(b, bj, b + 1, b + 1, bj, bj + 1);
     }
 
     const geo = new THREE.BufferGeometry();
