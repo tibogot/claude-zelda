@@ -828,6 +828,9 @@ export class PlayMode {
     this.keysHeld = {};
     this._lastMx = 0;
     this._lastMz = 0;
+    /** Editor windowed play: no pointer lock; RMB drag to look; pointer unlock does not exit play. */
+    this._editorRelaxedPointer = false;
+    this._rmbLookActive = false;
 
     // Fly state
     this.flyHeading = 0;
@@ -872,6 +875,9 @@ export class PlayMode {
     this._onIsoClick = this._onIsoClick.bind(this);
     this._onIsoPointerMove = this._onIsoPointerMove.bind(this);
     this._onIsoWheel = this._onIsoWheel.bind(this);
+    this._onRelaxedPointerDown = this._onRelaxedPointerDown.bind(this);
+    this._onRelaxedPointerUp = this._onRelaxedPointerUp.bind(this);
+    this._onRelaxedContextMenu = this._onRelaxedContextMenu.bind(this);
     this._moveTarget = null;
 
     this._raycaster = new THREE.Raycaster();
@@ -2098,7 +2104,11 @@ export class PlayMode {
     }
   }
 
-  enter() {
+  /**
+   * @param {object} [opts]
+   * @param {boolean} [opts.editorRelaxedPointer] — If true, keep system cursor and UI (no pointer lock). Use RMB drag on canvas to look around in follow / fly.
+   */
+  enter(opts = {}) {
     if (this.active) return;
     this.active = true;
     this.camView = "follow";
@@ -2160,8 +2170,78 @@ export class PlayMode {
       passive: false,
     });
 
-    this.renderer.domElement.style.cursor = "none";
-    this.renderer.domElement.requestPointerLock();
+    this._editorRelaxedPointer = !!opts.editorRelaxedPointer;
+    this._rmbLookActive = false;
+    if (this._editorRelaxedPointer) {
+      this.renderer.domElement.style.cursor = "";
+      this._attachRelaxedPointerListeners();
+    } else {
+      this.renderer.domElement.style.cursor = "none";
+      this.renderer.domElement.requestPointerLock();
+    }
+  }
+
+  _attachRelaxedPointerListeners() {
+    const el = this.renderer.domElement;
+    el.addEventListener("pointerdown", this._onRelaxedPointerDown);
+    el.addEventListener("pointerup", this._onRelaxedPointerUp);
+    el.addEventListener("contextmenu", this._onRelaxedContextMenu);
+  }
+
+  _detachRelaxedPointerListeners() {
+    const el = this.renderer.domElement;
+    el.removeEventListener("pointerdown", this._onRelaxedPointerDown);
+    el.removeEventListener("pointerup", this._onRelaxedPointerUp);
+    el.removeEventListener("contextmenu", this._onRelaxedContextMenu);
+  }
+
+  /** Call when toggling editor immersive vs windowed while play stays active. */
+  setEditorPointerMode(relaxed) {
+    if (!this.active) return;
+    this._rmbLookActive = false;
+    this._detachRelaxedPointerListeners();
+    if (document.pointerLockElement) document.exitPointerLock();
+    this._editorRelaxedPointer = !!relaxed;
+    const el = this.renderer.domElement;
+    if (relaxed) {
+      el.style.cursor = "";
+      this._attachRelaxedPointerListeners();
+    } else if (this.camView === "follow") {
+      el.style.cursor = "none";
+      el.requestPointerLock();
+    } else {
+      el.style.cursor = "";
+    }
+  }
+
+  _onRelaxedPointerDown(e) {
+    if (!this.active || !this._editorRelaxedPointer) return;
+    if (e.button === 2) {
+      e.preventDefault();
+      this._rmbLookActive = true;
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+
+  _onRelaxedPointerUp(e) {
+    if (!this.active || !this._editorRelaxedPointer) return;
+    if (e.button === 2) {
+      this._rmbLookActive = false;
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+
+  _onRelaxedContextMenu(e) {
+    if (!this.active || !this._editorRelaxedPointer) return;
+    e.preventDefault();
   }
 
   exit() {
@@ -2224,6 +2304,9 @@ export class PlayMode {
     );
     this.renderer.domElement.removeEventListener("wheel", this._onIsoWheel);
 
+    this._detachRelaxedPointerListeners();
+    this._editorRelaxedPointer = false;
+    this._rmbLookActive = false;
     if (document.pointerLockElement) document.exitPointerLock();
     this.renderer.domElement.style.cursor = "";
   }
@@ -4295,8 +4378,12 @@ export class PlayMode {
         this._moveTarget = null;
         this.isoHoverRing.visible = false;
         this.isoTargetRing.visible = false;
-        this.renderer.domElement.style.cursor = "none";
-        this.renderer.domElement.requestPointerLock();
+        if (this._editorRelaxedPointer) {
+          this.renderer.domElement.style.cursor = "";
+        } else {
+          this.renderer.domElement.style.cursor = "none";
+          this.renderer.domElement.requestPointerLock();
+        }
       }
     }
 
@@ -4310,7 +4397,11 @@ export class PlayMode {
   }
 
   _onMouseMove(event) {
-    if (!this.active || !document.pointerLockElement) return;
+    if (!this.active) return;
+    const locked = !!document.pointerLockElement;
+    const relaxedLook =
+      this._editorRelaxedPointer && this._rmbLookActive && !locked;
+    if (!locked && !relaxedLook) return;
 
     if (this.flying) {
       const mx = event.movementX;
@@ -4347,6 +4438,7 @@ export class PlayMode {
   }
 
   _onPointerLockChange() {
+    if (this._editorRelaxedPointer) return;
     if (!document.pointerLockElement && this.active && this.camView !== "iso") {
       this._exitCallback?.();
     }

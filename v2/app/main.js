@@ -960,6 +960,21 @@ export async function startV2App(opts = {}) {
   window.addEventListener("pointerdown", gestureAudioUnlock, { once: true, capture: true });
   window.addEventListener("keydown", gestureAudioUnlock, { once: true, capture: true });
 
+  let _pendingPlayImmersive = false;
+
+  /** Editor shell: fullscreen viewport + hide Tweakpane vs keep chrome for tweaking. */
+  function syncPlayEditorChrome(immersive) {
+    const appEl = document.getElementById("app");
+    const tpEl = document.querySelector(".tp-dfwv");
+    if (immersive) {
+      appEl?.classList.add("play-fullscreen");
+      if (tpEl) tpEl.style.display = "none";
+    } else {
+      appEl?.classList.remove("play-fullscreen");
+      if (tpEl) tpEl.style.display = "";
+    }
+  }
+
   function applyModeChangedEffects() {
     if (toolState.mode !== "sculpt") {
       sculptSystem.clearRampPoint();
@@ -1031,16 +1046,14 @@ export async function startV2App(opts = {}) {
       leafFxStore.setRingsVisible(false);
     }
     if (toolState.mode === "play") {
-      playMode.enter();
-      const tpEl = document.querySelector(".tp-dfwv");
-      if (tpEl) tpEl.style.display = "none";
-      document.getElementById("app")?.classList.add("play-fullscreen");
+      const immersive = _pendingPlayImmersive === true;
+      _pendingPlayImmersive = false;
+      playMode.enter({ editorRelaxedPointer: !immersive });
+      syncPlayEditorChrome(immersive);
       document.getElementById("play-stop-bar")?.classList.add("visible");
     } else if (playMode.active) {
       playMode.exit();
-      const tpEl = document.querySelector(".tp-dfwv");
-      if (tpEl) tpEl.style.display = "";
-      document.getElementById("app")?.classList.remove("play-fullscreen");
+      syncPlayEditorChrome(false);
       document.getElementById("play-stop-bar")?.classList.remove("visible");
     }
     updateBrushPreviewFromPick(null);
@@ -2104,9 +2117,7 @@ export async function startV2App(opts = {}) {
   playMode.onExit = () => {
     toolState.mode = "view";
     playMode.exit();
-    const tpEl = document.querySelector(".tp-dfwv");
-    if (tpEl) tpEl.style.display = "";
-    document.getElementById("app")?.classList.remove("play-fullscreen");
+    syncPlayEditorChrome(false);
     document.getElementById("play-stop-bar")?.classList.remove("visible");
     syncPlaySpawnMarker();
     ui?.pane.refresh();
@@ -3010,6 +3021,7 @@ export async function startV2App(opts = {}) {
       applyModeChangedEffects();
     } else if (event.code === "KeyF" && !ctrl && !playMode.active && toolState.mode !== "play") {
       event.preventDefault();
+      _pendingPlayImmersive = event.shiftKey === true;
       toolState.mode = "play";
       applyModeChangedEffects();
     } else if (event.code === "KeyP" && !ctrl && !playMode.active) {
@@ -3203,10 +3215,23 @@ export async function startV2App(opts = {}) {
     propStore,
     decalSystem,
     waterfallSystem,
-    setMode(mode) {
+    setMode(mode, opts = {}) {
+      if (mode === "play") {
+        _pendingPlayImmersive = opts.immersive === true;
+      } else {
+        _pendingPlayImmersive = false;
+      }
       toolState.mode = mode;
       applyModeChangedEffects();
       ui?.pane.refresh();
+    },
+    setPlayImmersive(on) {
+      if (!playMode.active) return;
+      syncPlayEditorChrome(!!on);
+      playMode.setEditorPointerMode(!on);
+    },
+    getPlayImmersive() {
+      return document.getElementById("app")?.classList.contains("play-fullscreen") ?? false;
     },
     undo() { sculptSystem.undo(); },
     redo() { sculptSystem.redo(); },

@@ -327,13 +327,23 @@
     backdrop-filter: blur(6px);
   }
   #play-stop-bar.visible { display: flex; align-items: center; gap: 10px; }
-  #play-stop-bar span { font-size: 11px; color: var(--green); font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; }
+  #play-stop-bar > span:first-of-type { font-size: 11px; color: var(--green); font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; }
+  #play-stop-bar .play-hint {
+    font-size: 10px; color: var(--text-dim); font-weight: 400; text-transform: none; letter-spacing: 0;
+    max-width: 120px; line-height: 1.2;
+  }
   #play-stop-bar button {
     display: flex; align-items: center; gap: 4px; padding: 3px 12px; height: 24px;
-    background: var(--red); border: none; border-radius: var(--radius);
-    color: #fff; font-size: 11px; font-weight: 600; font-family: var(--font); cursor: pointer;
+    border: none; border-radius: var(--radius);
+    font-size: 11px; font-weight: 600; font-family: var(--font); cursor: pointer;
   }
-  #play-stop-bar button:hover { filter: brightness(1.15); }
+  #play-stop-bar button.play-stop-primary {
+    background: var(--red); color: #fff;
+  }
+  #play-stop-bar button.play-stop-secondary {
+    background: var(--bg-input); color: var(--text); border: 1px solid var(--border-light);
+  }
+  #play-stop-bar button:hover { filter: brightness(1.12); }
 
   /* === SCROLLBAR === */
   ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -442,7 +452,7 @@
       <button class="toolbar-btn" data-mode="river" title="River (V)"><i data-lucide="droplets"></i></button>
     </div>
     <div class="toolbar-group" style="margin-left:auto">
-      <button class="toolbar-btn-text" id="tb-play" data-mode="play" title="Play (F)"><i data-lucide="play" style="width:14px;height:14px;color:var(--green)"></i> Play</button>
+      <button class="toolbar-btn-text" id="tb-play" data-mode="play" title="Play (F) — Shift+click for immersive fullscreen"><i data-lucide="play" style="width:14px;height:14px;color:var(--green)"></i> Play</button>
     </div>
   </div>
 
@@ -548,7 +558,9 @@
 
 <div id="play-stop-bar">
   <span>PLAYING</span>
-  <button id="play-stop-btn">Stop (Esc)</button>
+  <span class="play-hint" title="Windowed play: use the mouse on panels; right-drag on the viewport to look.">RMB drag · look</span>
+  <button type="button" class="play-stop-secondary" id="play-immersive-btn" title="Toggle fullscreen viewport (hide side panels). F keeps editor layout.">Immersive</button>
+  <button type="button" class="play-stop-primary" id="play-stop-btn">Stop</button>
 </div>
 
 <div class="status-bar">
@@ -3280,13 +3292,27 @@ function syncToolbarHighlight() {
   });
 }
 
+function syncPlayImmersiveButtonLabel() {
+  const b = document.getElementById('play-immersive-btn');
+  if (!b || !app) return;
+  const on = app.getPlayImmersive?.() ?? false;
+  b.textContent = on ? 'Windowed' : 'Immersive';
+  b.title = on ? 'Show editor panels again' : 'Fullscreen viewport — hide side panels (or Shift+F when starting play)';
+}
+
 modeButtons.forEach(btn => {
-  btn.addEventListener('click', () => {
+  btn.addEventListener('click', (ev) => {
     if (!app) return;
-    app.setMode(btn.dataset.mode);
+    const m = btn.dataset.mode;
+    if (m === 'play') {
+      app.setMode('play', { immersive: ev.shiftKey });
+    } else {
+      app.setMode(m);
+    }
     syncToolbarHighlight();
-    syncToolsTab(app.ui?.pane, btn.dataset.mode);
-    toolsModeSelect.value = btn.dataset.mode;
+    syncToolsTab(app.ui?.pane, m);
+    toolsModeSelect.value = m;
+    if (m === 'play') syncPlayImmersiveButtonLabel();
   });
 });
 
@@ -3320,6 +3346,7 @@ if (app) {
       syncToolbarHighlight();
       syncToolsTab(app.ui?.pane, _lastMode);
       toolsModeSelect.value = _lastMode;
+      if (_lastMode === 'play') syncPlayImmersiveButtonLabel();
     }
     if (++_statusTick % 15 === 0) {
       const p = app.perf;
@@ -3340,6 +3367,12 @@ if (app) {
 }
 
 // === Play stop bar ===
+document.getElementById('play-immersive-btn')?.addEventListener('click', () => {
+  if (!app || app.toolState.mode !== 'play') return;
+  app.setPlayImmersive(!app.getPlayImmersive());
+  syncPlayImmersiveButtonLabel();
+});
+
 document.getElementById('play-stop-btn')?.addEventListener('click', () => {
   if (!app) return;
   app.setMode('view');
