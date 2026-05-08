@@ -1062,6 +1062,23 @@ export async function startV2App(opts = {}) {
   let _waterfallChanged, _deleteSelectedWaterfall, _clearAllWaterfalls;
   let _decalLoadImage, _decalOpacityChanged, _decalAlignChanged, _decalRefit, _decalDeleteSelected, _decalClearAll, _decalSaveJson, _decalLoadJson, _decalTransformModeChanged;
   let _riverChanged, _riverNewRiver, _riverDeleteActive, _riverDeleteSelected, _riverSelectedYChanged, _riverActiveIndexChanged;
+  let _splineChanged,
+    _splineDeleteSelected,
+    _splineClearAll,
+    _splineSelectedYChanged,
+    _splineClosedChanged,
+    _splinePreview,
+    _splineBake,
+    _splineClearPreview,
+    _splineApplyPlateau,
+    _splineClearTunnels,
+    _splineClearLinearFeatures,
+    _splineKerbSelect,
+    _splineKerbApply,
+    _splineKerbDelete,
+    _splineKerbDuplicate,
+    _splineKerbSuggestFromCurvature,
+    _splineKerbLiveChanged;
   ui = createTweakpaneUi({
     toolState,
     config,
@@ -1519,33 +1536,33 @@ export async function startV2App(opts = {}) {
       roadSystem._rebuildVisual();
       ui?.pane.refresh();
     },
-    onSplineChanged: () => {
+    onSplineChanged: (_splineChanged = () => {
       splineSystem._rebuildVisual();
       ui?.pane.refresh();
-    },
-    onSplineDeleteSelected: () => {
+    }),
+    onSplineDeleteSelected: (_splineDeleteSelected = () => {
       splineSystem.deleteSelected();
       ui?.pane.refresh();
-    },
-    onSplineClearAll: () => {
+    }),
+    onSplineClearAll: (_splineClearAll = () => {
       splineSystem.clearAll();
       ui?.pane.refresh();
-    },
-    onSplineSelectedYChanged: () => {
+    }),
+    onSplineSelectedYChanged: (_splineSelectedYChanged = () => {
       splineSystem.setSelectedPointY(toolState.spline.selectedPointY);
       ui?.pane.refresh();
-    },
-    onSplineClosedChanged: () => {
+    }),
+    onSplineClosedChanged: (_splineClosedChanged = () => {
       splineSystem.setClosed(toolState.spline.closed);
       ui?.pane.refresh();
-    },
-    onSplinePreview: () => splineSystem.preview(),
-    onSplineBake: () => {
+    }),
+    onSplinePreview: (_splinePreview = () => splineSystem.preview()),
+    onSplineBake: (_splineBake = () => {
       splineSystem.bakePlacement();
       ui?.pane.refresh();
-    },
-    onSplineClearPreview: () => splineSystem.clearPreview(),
-    onSplineApplyPlateau: () => {
+    }),
+    onSplineClearPreview: (_splineClearPreview = () => splineSystem.clearPreview()),
+    onSplineApplyPlateau: (_splineApplyPlateau = () => {
       const changed = splineSystem.applyPlateau();
       if (!changed) return;
       markHeightTexDirty();
@@ -1554,36 +1571,36 @@ export async function startV2App(opts = {}) {
       splineSystem.syncKerbsToGround();
       splineSystem.syncLinearFeaturesToGround();
       ui?.pane.refresh();
-    },
-    onSplineClearTunnels: () => {
+    }),
+    onSplineClearTunnels: (_splineClearTunnels = () => {
       splineSystem.clearTunnels();
       ui?.pane.refresh();
-    },
-    onSplineClearLinearFeatures: () => {
+    }),
+    onSplineClearLinearFeatures: (_splineClearLinearFeatures = () => {
       splineSystem.clearLinearFeatures();
       ui?.pane.refresh();
-    },
-    onSplineKerbSelect: () => {
+    }),
+    onSplineKerbSelect: (_splineKerbSelect = () => {
       splineSystem.selectActiveKerb();
       ui?.pane.refresh();
-    },
-    onSplineKerbApply: () => {
+    }),
+    onSplineKerbApply: (_splineKerbApply = () => {
       splineSystem.syncActiveKerbFromToolState();
       ui?.pane.refresh();
-    },
-    onSplineKerbDelete: () => {
+    }),
+    onSplineKerbDelete: (_splineKerbDelete = () => {
       splineSystem.deleteActiveKerb();
       ui?.pane.refresh();
-    },
-    onSplineKerbDuplicate: () => {
+    }),
+    onSplineKerbDuplicate: (_splineKerbDuplicate = () => {
       splineSystem.duplicateActiveKerb();
       ui?.pane.refresh();
-    },
-    onSplineKerbSuggestFromCurvature: () => {
+    }),
+    onSplineKerbSuggestFromCurvature: (_splineKerbSuggestFromCurvature = () => {
       splineSystem.suggestKerbFromRoadCurvature();
       ui?.pane.refresh();
-    },
-    onSplineKerbLiveChanged: (changedKey) => {
+    }),
+    onSplineKerbLiveChanged: (_splineKerbLiveChanged = (changedKey) => {
       if (changedKey === "activeKerbIndex") {
         splineSystem.selectActiveKerb();
         ui?.pane.refresh();
@@ -1591,7 +1608,7 @@ export async function startV2App(opts = {}) {
       }
       if (!toolState.spline.kerbAutoApplyActive) return;
       splineSystem.syncActiveKerbFromToolState();
-    },
+    }),
     onCliffBlendChanged: (_cliffBlendChanged = () => {
       if (!cliffBlendPack) return;
       const c = toolState.cliffs;
@@ -3287,6 +3304,23 @@ export async function startV2App(opts = {}) {
     riverDeleteSelected() { _riverDeleteSelected(); },
     riverSelectedYChanged() { _riverSelectedYChanged(); },
     riverActiveIndexChanged() { _riverActiveIndexChanged(); },
+    splineChanged() { _splineChanged(); },
+    splineDeleteSelected() { _splineDeleteSelected(); },
+    splineClearAll() { _splineClearAll(); },
+    splineSelectedYChanged() { _splineSelectedYChanged(); },
+    splineClosedChanged() { _splineClosedChanged(); },
+    splinePreview() { _splinePreview(); },
+    splineBake() { _splineBake(); },
+    splineClearPreview() { _splineClearPreview(); },
+    splineApplyPlateau() { _splineApplyPlateau(); },
+    splineClearTunnels() { _splineClearTunnels(); },
+    splineClearLinearFeatures() { _splineClearLinearFeatures(); },
+    splineKerbSelect() { _splineKerbSelect(); },
+    splineKerbApply() { _splineKerbApply(); },
+    splineKerbDelete() { _splineKerbDelete(); },
+    splineKerbDuplicate() { _splineKerbDuplicate(); },
+    splineKerbSuggestFromCurvature() { _splineKerbSuggestFromCurvature(); },
+    splineKerbLiveChanged(key) { _splineKerbLiveChanged(key); },
     onConfigChanged() { chunkStream.update(camera.position); },
     dispose() {
       renderer.domElement.removeEventListener("wheel", onCanvasWheelBrush, { capture: true });
