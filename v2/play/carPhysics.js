@@ -1,7 +1,7 @@
 const CAR_HALF_WIDTH = 1.1;
 const CAR_HALF_LENGTH = 2.5;
 const CAR_BODY_HEIGHT = 0.8;
-const CAR_RIDE_HEIGHT = 0.35;
+const CAR_RIDE_HEIGHT = 0.5;
 const CAR_WHEEL_RADIUS = 0.42;
 const CAR_GRAVITY = 28;
 const CAR_EDGE_DROP_THRESHOLD = 0.45;
@@ -257,6 +257,6 @@ export class CarPhysics {
       }
     }
 
-    return { y: newY, slideVx, slideVz, tooSteep, launchVxScale, launchVzScale };
+    return { y: newY, slideVx, slideVz, tooSteep, launchVxScale, launchVzScale, slopeX: nx / nLen, slopeZ: nz / nLen };
   }
 }

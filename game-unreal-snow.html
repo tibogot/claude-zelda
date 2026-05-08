@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Parkour Scene</title>
+    <title>Snow ball — terrain test</title>
     <style>
       * {
         margin: 0;
@@ -61,8 +61,8 @@
   </head>
   <body>
     <div id="info">
-      Parkour &mdash; <span id="backend">loading…</span> &bull;
-      <span id="stats">—</span> &bull; WASD + click to look &bull; Shift run
+      Snow ball &mdash; <span id="backend">loading…</span> &bull;
+      <span id="stats">—</span> &bull; WASD move &bull; orbit drag
       &bull; Ctrl crouch &bull; F roll &bull; right-click / E attack &bull;
       Space jump &bull; Space mid-air glide &bull; Church (-40, -35) god rays
     </div>
@@ -195,14 +195,20 @@
         },
         snow: {
           enabled: true,
-          textureRepeat: 160,
+          /** Lower = larger snow tiles on the ground (easier to read). */
+          textureRepeat: 14,
           baseDisplacement: 0.03,
-          trailDepth: 0.35,
-          trailRadius: 0.35,
+          trailDepth: 0.45,
+          trailRadius: 0.4,
           trailSpacing: 0.04,
-          recoveryPerSecond: 0.015,
-          stampStrength: 0.5,
-          windowSize: 40,
+          recoveryPerSecond: 0,
+          stampStrength: 0.92,
+          /** Max sink depth (m) for CPU overlay groove; subtractive only (no hills). */
+          cpuMaxSink: 0.55,
+          /** Lift overlay above floor (m) to kill z-fighting / “shader conflict” flicker. */
+          overlayLift: 0.025,
+          /** World size of the deformation patch (m). */
+          windowSize: 72,
           minTrackSpeed: 0.1,
           mapResolution: 1024,
           roughness: 0.92,
@@ -2089,6 +2095,10 @@
         document.body.appendChild(stats.dom);
 
         const scene = new THREE.Scene();
+        if (SIMPLE_SNOW_SPHERE_DEBUG) {
+          scene.background = new THREE.Color(0xd0dae6);
+          scene.environment = null;
+        }
         const camera = new THREE.PerspectiveCamera(
           60,
           innerWidth / innerHeight,
@@ -2222,18 +2232,21 @@
         snowTrailTex.generateMipmaps = false;
         snowTrailTex.needsUpdate = true;
 
-        let snowWinCX = 0, snowWinCZ = 0;
+        let snowTrailDirty = false;
+
+        let snowWinCX = 0,
+          snowWinCZ = 0;
+        /** Fractional scroll so small moves still shift texels (fixes round-to-zero stall). */
+        let snowScrollAccX = 0,
+          snowScrollAccZ = 0;
         let snowStampCount = 0;
-        const stampSnowData = (worldX, worldZ, strength) => {
-          const relX = worldX - snowWinCX;
-          const relZ = worldZ - snowWinCZ;
-          const u = relX / SNOW_WINDOW + 0.5;
-          const v = relZ / SNOW_WINDOW + 0.5;
-          if (u < 0 || u > 1 || v < 0 || v > 1) return 0;
+
+        const stampSnowPixels = (cx, cy, strength) => {
           const radiusWorld = Math.max(0.08, parkourParams.snow.trailRadius);
-          const radiusPx = Math.max(1, Math.round((radiusWorld / SNOW_WINDOW) * snowDispSize));
-          const cx = Math.round(u * (snowDispSize - 1));
-          const cy = Math.round((1 - v) * (snowDispSize - 1));
+          const radiusPx = Math.max(
+            1,
+            Math.round((radiusWorld / SNOW_WINDOW) * snowDispSize),
+          );
           const str = Math.min(0.95, Math.max(0.05, strength)) * 128;
           let writes = 0;
           for (let dy = -radiusPx; dy <= radiusPx; dy++) {
@@ -2256,10 +2269,26 @@
           return writes;
         };
 
-        const shiftSnowWindow = (newCX, newCZ) => {
-          const dxPx = Math.round(((newCX - snowWinCX) / SNOW_WINDOW) * snowDispSize);
-          const dzPx = Math.round(((newCZ - snowWinCZ) / SNOW_WINDOW) * snowDispSize);
-          if (dxPx === 0 && dzPx === 0) return;
+        /** Overlay follows sphere: contact is always local UV 0.5 → buffer center. */
+        const stampSnowTrailCenter = (strength) => {
+          const cx = (snowDispSize - 1) >> 1;
+          const cy = (snowDispSize - 1) >> 1;
+          return stampSnowPixels(cx, cy, strength);
+        };
+
+        const stampSnowData = (worldX, worldZ, strength) => {
+          const relX = worldX - snowWinCX;
+          const relZ = worldZ - snowWinCZ;
+          const u = relX / SNOW_WINDOW + 0.5;
+          const v = relZ / SNOW_WINDOW + 0.5;
+          if (u < 0 || u > 1 || v < 0 || v > 1) return 0;
+          const cx = Math.round(u * (snowDispSize - 1));
+          const cy = Math.round((1 - v) * (snowDispSize - 1));
+          return stampSnowPixels(cx, cy, strength);
+        };
+
+        const applySnowScrollPixels = (dxPx, dzPx) => {
+          if (dxPx === 0 && dzPx === 0) return false;
           const copy = new Uint8Array(snowTrailData.length);
           copy.set(snowTrailData);
           snowTrailData.fill(128);
@@ -2277,14 +2306,88 @@
               snowTrailData[dstIdx] = copy[srcIdx];
             }
           }
+          snowTrailDirty = true;
+          return true;
+        };
+
+        const shiftSnowWindow = (newCX, newCZ) => {
+          snowScrollAccX += ((newCX - snowWinCX) / SNOW_WINDOW) * snowDispSize;
+          snowScrollAccZ += ((newCZ - snowWinCZ) / SNOW_WINDOW) * snowDispSize;
+          const dxPx = Math.trunc(snowScrollAccX);
+          const dzPx = Math.trunc(snowScrollAccZ);
+          snowScrollAccX -= dxPx;
+          snowScrollAccZ -= dzPx;
+          if (dxPx !== 0 || dzPx !== 0) {
+            applySnowScrollPixels(dxPx, dzPx);
+          }
           snowWinCX = newCX;
           snowWinCZ = newCZ;
         };
 
-        let snowTrailDirty = false;
+        /** Push trail values down hard at center (debug / “ball sinks”). */
+        const stampSnowTrailCenterDeep = () => {
+          const cx = (snowDispSize - 1) >> 1;
+          const cy = (snowDispSize - 1) >> 1;
+          const rPx = Math.max(
+            8,
+            Math.round((parkourParams.snow.trailRadius / SNOW_WINDOW) * snowDispSize),
+          );
+          let writes = 0;
+          for (let dy = -rPx; dy <= rPx; dy++) {
+            const py = cy + dy;
+            if (py < 0 || py >= snowDispSize) continue;
+            for (let dx = -rPx; dx <= rPx; dx++) {
+              const px = cx + dx;
+              if (px < 0 || px >= snowDispSize) continue;
+              const d = Math.hypot(dx, dy) / rPx;
+              if (d >= 1) continue;
+              const falloff = (1 - d) * (1 - d);
+              const idx = (py * snowDispSize + px) * 4;
+              const push = 115 * falloff;
+              const cur = snowTrailData[idx];
+              snowTrailData[idx] = Math.max(0, cur - push) | 0;
+              writes++;
+            }
+          }
+          if (writes > 0) snowStampCount++;
+          return writes;
+        };
+
+        /**
+         * Scroll trail buffer by sphere movement (overlay-local); keeps world-fixed grooves.
+         * Uses incremental world delta so we never depend on snowWin round-trip.
+         */
+        let snowSpherePrevX = 0,
+          snowSpherePrevZ = 0;
+        let snowSphereScrollInit = false;
+        const shiftSnowTrailBySphereDelta = (worldX, worldZ) => {
+          if (!snowSphereScrollInit) {
+            snowSpherePrevX = worldX;
+            snowSpherePrevZ = worldZ;
+            snowSphereScrollInit = true;
+            return;
+          }
+          const dWorldX = worldX - snowSpherePrevX;
+          const dWorldZ = worldZ - snowSpherePrevZ;
+          snowSpherePrevX = worldX;
+          snowSpherePrevZ = worldZ;
+          snowScrollAccX += (dWorldX / SNOW_WINDOW) * snowDispSize;
+          snowScrollAccZ += (dWorldZ / SNOW_WINDOW) * snowDispSize;
+          const dxPx = Math.trunc(snowScrollAccX);
+          const dzPx = Math.trunc(snowScrollAccZ);
+          snowScrollAccX -= dxPx;
+          snowScrollAccZ -= dzPx;
+          if (dxPx !== 0 || dzPx !== 0) {
+            applySnowScrollPixels(dxPx, dzPx);
+          }
+          snowWinCX = worldX;
+          snowWinCZ = worldZ;
+        };
+
         window.__snowTrailData = snowTrailData;
         window.__snowTrailTex = snowTrailTex;
         window.__stampSnow = stampSnowData;
+        window.__stampSnowTrailCenter = stampSnowTrailCenter;
         window.__snowOverlay = null; // set after mesh creation
 
         const snowRepeat = Math.max(1, parkourParams.snow.textureRepeat);
@@ -2294,14 +2397,23 @@
         snowAoTex.repeat.set(snowRepeat, snowRepeat);
         snowDispTex.repeat.set(snowRepeat, snowRepeat);
 
-        const snowMat = new THREE.MeshStandardNodeMaterial({
-          map: snowColorTex,
-          roughnessMap: snowRoughnessTex,
-          normalMap: snowNormalTex,
-          aoMap: snowAoTex,
-          roughness: parkourParams.snow.roughness,
-          metalness: parkourParams.snow.metalness,
-        });
+        const snowMat = SIMPLE_SNOW_SPHERE_DEBUG
+          ? new THREE.MeshStandardMaterial({
+              map: snowColorTex,
+              roughnessMap: snowRoughnessTex,
+              normalMap: snowNormalTex,
+              aoMap: snowAoTex,
+              roughness: parkourParams.snow.roughness,
+              metalness: parkourParams.snow.metalness,
+            })
+          : new THREE.MeshStandardNodeMaterial({
+              map: snowColorTex,
+              roughnessMap: snowRoughnessTex,
+              normalMap: snowNormalTex,
+              aoMap: snowAoTex,
+              roughness: parkourParams.snow.roughness,
+              metalness: parkourParams.snow.metalness,
+            });
         snowMat.color.setScalar(0.82);
         snowMat.normalScale.set(
           parkourParams.snow.normalScale,
@@ -2325,83 +2437,161 @@
         floor.position.y = FLOOR_Y;
         floor.castShadow = true;
         floor.receiveShadow = true;
+        floor.renderOrder = 0;
         scene.add(floor);
 
-        // ── Snow overlay: high-res patch that follows the character for foot deformation ──
-        const OVERLAY_SEGS = 256;
-        const overlayGeo = new THREE.PlaneGeometry(SNOW_WINDOW, SNOW_WINDOW, OVERLAY_SEGS, OVERLAY_SEGS);
+        // ── Snow overlay: high-res patch (TSL) or CPU-synced mesh (sphere debug) ──
+        const OVERLAY_SEGS = SIMPLE_SNOW_SPHERE_DEBUG ? 200 : 256;
+        const overlayGeo = new THREE.PlaneGeometry(
+          SNOW_WINDOW,
+          SNOW_WINDOW,
+          OVERLAY_SEGS,
+          OVERLAY_SEGS,
+        );
         overlayGeo.rotateX(-PI / 2);
 
-        const snowOverlayMat = new THREE.MeshStandardNodeMaterial({
-          roughness: parkourParams.snow.roughness,
-          metalness: parkourParams.snow.metalness,
-        });
-        snowOverlayMat.color.setScalar(0.82);
-        snowOverlayMat.polygonOffset = true;
-        snowOverlayMat.polygonOffsetFactor = -1;
-        snowOverlayMat.polygonOffsetUnits = -1;
-
-        const uOverlayPos = uniform(new THREE.Vector2(0, 0));
-        {
-          const worldX = positionLocal.x.add(uOverlayPos.x);
-          const worldZ = positionLocal.z.add(uOverlayPos.y);
-          const worldUV = vec2(
-            worldX.div(float(PARKOUR_SIZE)).add(0.5),
-            worldZ.negate().div(float(PARKOUR_SIZE)).add(0.5),
-          );
-          const tiledUV = worldUV.mul(float(snowRepeat));
-          snowOverlayMat.colorNode = texture(snowColorTex, tiledUV).mul(float(0.82));
-
-          const localUV = vec2(
-            positionLocal.x.div(float(SNOW_WINDOW)).add(0.5),
-            positionLocal.z.negate().div(float(SNOW_WINDOW)).add(0.5),
-          );
-          const trailSample = texture(snowTrailTex, localUV);
-          const trailDisp = trailSample.r.sub(float(128.0 / 255.0))
-            .mul(float(parkourParams.snow.trailDepth * 2.0));
-          const baseSample = texture(snowDispTex, tiledUV);
-          const baseDisp = baseSample.r
-            .mul(float(parkourParams.snow.baseDisplacement * 2.0))
-            .sub(float(parkourParams.snow.baseDisplacement));
-          snowOverlayMat.positionNode = positionLocal.add(
-            vec3(float(0), trailDisp.add(baseDisp), float(0)),
-          );
+        /** Base XYZ per overlay vertex (reset every sync — avoids drift / odd slabs). */
+        const overlayN = overlayGeo.attributes.position.count;
+        const overlayBaseX = new Float32Array(overlayN);
+        const overlayBaseY = new Float32Array(overlayN);
+        const overlayBaseZ = new Float32Array(overlayN);
+        const posInit = overlayGeo.attributes.position;
+        for (let i = 0; i < overlayN; i++) {
+          overlayBaseX[i] = posInit.getX(i);
+          overlayBaseY[i] = posInit.getY(i);
+          overlayBaseZ[i] = posInit.getZ(i);
         }
 
+        let snowOverlayMat;
+        /** @type {THREE.UniformNode | null} */
+        let uOverlayPos = null;
+
+        if (SIMPLE_SNOW_SPHERE_DEBUG) {
+          // WebGPU: dynamic DataTexture + MeshStandardNodeMaterial.positionNode often shows no displacement.
+          // CPU sync from trail buffer → guaranteed visible groove (“ball sinks”).
+          snowOverlayMat = new THREE.MeshStandardMaterial({
+            map: snowColorTex,
+            roughness: parkourParams.snow.roughness,
+            metalness: parkourParams.snow.metalness,
+          });
+          snowOverlayMat.color.setScalar(0.82);
+        } else {
+          snowOverlayMat = new THREE.MeshStandardNodeMaterial({
+            roughness: parkourParams.snow.roughness,
+            metalness: parkourParams.snow.metalness,
+          });
+          snowOverlayMat.color.setScalar(0.82);
+          snowOverlayMat.polygonOffset = true;
+          snowOverlayMat.polygonOffsetFactor = -1;
+          snowOverlayMat.polygonOffsetUnits = -1;
+
+          uOverlayPos = uniform(new THREE.Vector2(0, 0));
+          {
+            const worldX = positionLocal.x.add(uOverlayPos.x);
+            const worldZ = positionLocal.z.add(uOverlayPos.y);
+            const worldUV = vec2(
+              worldX.div(float(PARKOUR_SIZE)).add(0.5),
+              worldZ.negate().div(float(PARKOUR_SIZE)).add(0.5),
+            );
+            const tiledUV = worldUV.mul(float(snowRepeat));
+            snowOverlayMat.colorNode = texture(snowColorTex, tiledUV).mul(float(0.82));
+
+            const localUV = vec2(
+              positionLocal.x.div(float(SNOW_WINDOW)).add(0.5),
+              positionLocal.z.negate().div(float(SNOW_WINDOW)).add(0.5),
+            );
+            const trailSample = texture(snowTrailTex, localUV);
+            const trailDisp = trailSample.r
+              .sub(float(128.0 / 255.0))
+              .mul(float(parkourParams.snow.trailDepth * 2.0));
+            const baseSample = texture(snowDispTex, tiledUV);
+            const baseDisp = baseSample.r
+              .mul(float(parkourParams.snow.baseDisplacement * 2.0))
+              .sub(float(parkourParams.snow.baseDisplacement));
+            snowOverlayMat.positionNode = positionLocal.add(
+              vec3(float(0), trailDisp.add(baseDisp), float(0)),
+            );
+          }
+        }
+
+        const sampleTrailRByteBilinear = (tu, tv) => {
+          const w = snowDispSize;
+          const x = THREE.MathUtils.clamp(tu, 0, 1) * (w - 1);
+          const y = THREE.MathUtils.clamp(1 - tv, 0, 1) * (w - 1);
+          const x0 = Math.floor(x);
+          const y0 = Math.floor(y);
+          const x1 = Math.min(w - 1, x0 + 1);
+          const y1 = Math.min(w - 1, y0 + 1);
+          const fx = x - x0;
+          const fy = y - y0;
+          const r = (yy, xx) => snowTrailData[(yy * w + xx) * 4];
+          const v00 = r(y0, x0);
+          const v10 = r(y0, x1);
+          const v01 = r(y1, x0);
+          const v11 = r(y1, x1);
+          return (v00 * (1 - fx) + v10 * fx) * (1 - fy) + (v01 * (1 - fx) + v11 * fx) * fy;
+        };
+
+        const syncSnowOverlayCpuFromTrail = () => {
+          if (!SIMPLE_SNOW_SPHERE_DEBUG) return;
+          const posAttr = overlayGeo.attributes.position;
+          const maxSink = Math.max(0.04, parkourParams.snow.cpuMaxSink ?? 0.55);
+          for (let i = 0; i < posAttr.count; i++) {
+            const bx = overlayBaseX[i];
+            const by = overlayBaseY[i];
+            const bz = overlayBaseZ[i];
+            const tu = bx / SNOW_WINDOW + 0.5;
+            const tv = -bz / SNOW_WINDOW + 0.5;
+            if (tu < 0 || tu > 1 || tv < 0 || tv > 1) {
+              posAttr.setXYZ(i, bx, by, bz);
+              continue;
+            }
+            const Rbyte = sampleTrailRByteBilinear(tu, tv);
+            const deepen = Math.max(0, (128 - Rbyte) / 128);
+            const disp = -deepen * maxSink;
+            posAttr.setXYZ(i, bx, by + disp, bz);
+          }
+          posAttr.needsUpdate = true;
+          overlayGeo.computeVertexNormals();
+          overlayGeo.getAttribute("normal").needsUpdate = true;
+        };
+
         const snowOverlay = new THREE.Mesh(overlayGeo, snowOverlayMat);
-        snowOverlay.position.set(0, FLOOR_Y, 0);
+        const snowOverlayLift = SIMPLE_SNOW_SPHERE_DEBUG
+          ? Math.max(0, parkourParams.snow.overlayLift ?? 0.025)
+          : 0;
+        snowOverlay.position.set(0, FLOOR_Y + snowOverlayLift, 0);
         snowOverlay.receiveShadow = true;
+        snowOverlay.castShadow = true;
+        snowOverlay.renderOrder = 1;
         snowOverlay.visible = parkourParams.snow.enabled;
         scene.add(snowOverlay);
         window.__snowOverlay = snowOverlay;
+        window.__syncSnowOverlayCpuFromTrail = syncSnowOverlayCpuFromTrail;
 
         if (SIMPLE_SNOW_SPHERE_DEBUG) {
           const sphere = new THREE.Mesh(
-            new THREE.SphereGeometry(0.35, 24, 16),
+            new THREE.SphereGeometry(0.35, 48, 32),
             new THREE.MeshStandardMaterial({
-              color: 0xff6a00,
-              roughness: 0.35,
-              metalness: 0.05,
+              color: 0xd03838,
+              roughness: 0.45,
+              metalness: 0.02,
             }),
           );
-          sphere.position.set(0, FLOOR_Y + 0.35, 0);
+          sphere.position.set(0, FLOOR_Y + snowOverlayLift + 0.35, 0);
           sphere.castShadow = true;
           sphere.receiveShadow = true;
           scene.add(sphere);
 
-          const dirArrow = new THREE.ArrowHelper(
-            new THREE.Vector3(0, 0, 1),
-            sphere.position.clone(),
-            1.2,
-            0x111111,
-            0.22,
-            0.12,
-          );
-          scene.add(dirArrow);
-
           orbitControls.enabled = true;
           orbitControls.target.copy(sphere.position);
           orbitControls.update();
+
+          window.addEventListener("resize", () => {
+            camera.aspect = innerWidth / innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(innerWidth, innerHeight);
+          });
 
           const keyState = {
             KeyW: false,
@@ -2421,6 +2611,10 @@
           };
           addEventListener("keydown", onKey(true));
           addEventListener("keyup", onKey(false));
+
+          stampSnowTrailCenterDeep();
+          snowTrailTex.needsUpdate = true;
+          syncSnowOverlayCpuFromTrail();
 
           const timer = new THREE.Timer();
           let lastTime = 0;
@@ -2472,7 +2666,7 @@
 
             sphere.position.x += sphereVel.x * dt;
             sphere.position.z += sphereVel.z * dt;
-            sphere.position.y = FLOOR_Y + 0.35;
+            sphere.position.y = FLOOR_Y + snowOverlayLift + 0.35;
             sphere.position.x = THREE.MathUtils.clamp(
               sphere.position.x,
               -PARKOUR_SIZE * 0.48,
@@ -2487,13 +2681,15 @@
             if (speed > 0.05) {
               sphereDir.set(sphereVel.x / speed, 0, sphereVel.z / speed);
             }
-            dirArrow.position.copy(sphere.position);
-            dirArrow.setDirection(sphereDir);
 
             snowOverlay.position.x = sphere.position.x;
             snowOverlay.position.z = sphere.position.z;
-            uOverlayPos.value.set(sphere.position.x, sphere.position.z);
-            shiftSnowWindow(sphere.position.x, sphere.position.z);
+            if (uOverlayPos) {
+              uOverlayPos.value.set(sphere.position.x, sphere.position.z);
+            }
+            // Sphere debug: overlay moves with the ball — groove stays in local UV at texture
+            // center. Scrolling the trail buffer here caused stepped “slab” artifacts and
+            // mismatched resync; full scene still uses shiftSnowWindow / shiftSnowTrailBySphereDelta.
 
             if (parkourParams.snow.recoveryPerSecond > 0) {
               const relax = Math.min(1, parkourParams.snow.recoveryPerSecond * dt);
@@ -2508,21 +2704,24 @@
               }
             }
 
-            stampAccum += speed * dt;
+            const moveStep = Math.hypot(sphereVel.x * dt, sphereVel.z * dt);
+            stampAccum += moveStep;
             if (stampAccum >= parkourParams.snow.trailSpacing) {
               stampAccum = 0;
-              const writes = stampSnowData(
-                sphere.position.x,
-                sphere.position.z,
-                parkourParams.snow.stampStrength,
-              );
+              const writes = stampSnowTrailCenterDeep();
               if (writes > 0) snowTrailDirty = true;
             }
 
             if (snowTrailDirty) {
               snowTrailTex.needsUpdate = true;
+              if (!SIMPLE_SNOW_SPHERE_DEBUG) {
+                snowOverlayMat.needsUpdate = true;
+              }
               snowTrailDirty = false;
             }
+            syncSnowOverlayCpuFromTrail();
+
+            snowOverlay.position.y = FLOOR_Y + snowOverlayLift;
 
             camDesired
               .copy(sphere.position)
@@ -2541,6 +2740,7 @@
           return;
         }
 
+        if (!SIMPLE_SNOW_SPHERE_DEBUG) {
         // ── TOWER (tile material, casts & receives shadows) ──
         const towerMat = createTileMaterial({
           textureScale: parkourParams.tile.textureScale,
@@ -5176,7 +5376,9 @@
 
             // Move overlay to track the displacement window center
             snowOverlay.position.set(snowWinCX, FLOOR_Y, snowWinCZ);
-            uOverlayPos.value.set(snowWinCX, snowWinCZ);
+            if (uOverlayPos) {
+              uOverlayPos.value.set(snowWinCX, snowWinCZ);
+            }
 
             // Resolve foot bones once
             const udSnow = player.characterGroup.userData;
@@ -5483,6 +5685,7 @@
           renderer.setSize(innerWidth, innerHeight);
           if (csm.frustums) csm.updateFrustums(); // Only on resize
         });
+        } // end if (!SIMPLE_SNOW_SPHERE_DEBUG) — full parkour / post stack
       }
 
       init().catch((e) => {

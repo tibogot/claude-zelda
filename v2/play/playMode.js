@@ -102,7 +102,7 @@ const CAR_GRIP_NORMAL = 12;
 const CAR_GRIP_DRIFT = 0.8;
 const CAR_GRIP_BRAKE_TURN = 2.0;
 const CAR_DRIFT_ENTRY_SPEED = 8;
-const CAR_RIDE_HEIGHT = 0.35;
+const CAR_RIDE_HEIGHT = 0.5;
 const CAR_WHEEL_RADIUS = 0.42;
 const CAR_DRIFT_ANGLE_MIN = 0.1;
 const CAR_CAM_DIST = 10;
@@ -156,15 +156,15 @@ function _bankDegFromRad(rad) {
 
 const CAR_BASE_ACCEL_LOW_SPEED_MUL = 0.52;
 const CAR_BASE_ACCEL_RAMP_TO_KMH = 100;
-const CAR_BODY_ROLL_MAX = 0.35;
-const CAR_BODY_PITCH_MAX = 0.4;
-const CAR_BODY_TERRAIN_ROLL_MAX = 0.38;
-const CAR_BODY_TERRAIN_PITCH_MAX = 0.42;
-const CAR_BODY_SMOOTH = 14;
-const CAR_TERRAIN_BODY_SMOOTH = 14;
+const CAR_BODY_ROLL_MAX = 0.2;
+const CAR_BODY_PITCH_MAX = 0.25;
+const CAR_BODY_TERRAIN_ROLL_MAX = 0.28;
+const CAR_BODY_TERRAIN_PITCH_MAX = 0.32;
+const CAR_BODY_SMOOTH = 5;
+const CAR_TERRAIN_BODY_SMOOTH = 8;
 const CAR_WHEEL_BASE = 1.9;
 const CAR_TRACK = 1.1;
-const CAR_SUSP_TRAVEL = 0.2;
+const CAR_SUSP_TRAVEL = 0.45;
 const CAR_SUSP_SMOOTH = 18;
 
 const DRIFT_MARK_MAX_SEGMENTS = 4096;
@@ -1363,7 +1363,8 @@ export class PlayMode {
             c.receiveShadow = true;
           }
         });
-        this.carChassis.add(container);
+        // Wheels go on carRoot (not carChassis) so they don't rotate with body pitch/roll
+        this.carRoot.add(container);
         return {
           container,
           suspension: suspension || container,
@@ -1381,6 +1382,34 @@ export class PlayMode {
         this.carRoot.visible = true;
         this.capsule.visible = false;
       }
+
+      // Debug wireframe mode for Bruno
+      this._carDebugWire = false;
+      if (this._carDebugWire) {
+        chassisVisual.visible = false;
+        const bodyGeo = new THREE.BoxGeometry(
+          CAR_TRACK * 2, CAR_BODY_HEIGHT, CAR_WHEEL_BASE * 2,
+        );
+        const bodyWire = new THREE.Mesh(
+          bodyGeo,
+          new THREE.MeshBasicMaterial({ color: 0x00ff88, wireframe: true }),
+        );
+        bodyWire.position.y = CAR_RIDE_HEIGHT + CAR_BODY_HEIGHT * 0.5;
+        bodyWire.rotation.y = CAR_MODEL_YAW;
+        this.carChassis.add(bodyWire);
+        this._carDebugBody = bodyWire;
+
+        // Ground contact dots
+        this._carDebugContactDots = [];
+        const dotGeo = new THREE.SphereGeometry(0.08, 6, 4);
+        const dotMat = new THREE.MeshBasicMaterial({ color: 0xffff00 });
+        for (let i = 0; i < 4; i++) {
+          const dot = new THREE.Mesh(dotGeo, dotMat);
+          this.scene.add(dot);
+          this._carDebugContactDots.push(dot);
+        }
+      }
+
       console.log(
         "[V2] Bruno car loaded, wheels:",
         this.carWheels.map((w) => w.name).join(", "),
@@ -3089,6 +3118,8 @@ export class PlayMode {
       this.carVelY = this._carPhysics.velY;
       this.carInAir = this._carPhysics.inAir;
       this.carOnSteepSlope = this._carPhysics.onSteepSlope;
+      this._carSlopeX = vert.slopeX;
+      this._carSlopeZ = vert.slopeZ;
       // On launch, reduce horizontal speed (energy goes into vertical)
       if (vert.launchVxScale) {
         this.carVx *= vert.launchVxScale;
@@ -3329,6 +3360,12 @@ export class PlayMode {
     const isLotus = this.moveMode === "lotus";
     let anyCarRendered = false;
 
+    // Hide debug contact dots when not in Bruno mode
+    if (this._carDebugContactDots) {
+      const show = isBruno && this.carLoaded;
+      for (const d of this._carDebugContactDots) d.visible = show;
+    }
+
     if (this.carRoot) {
       this.carRoot.visible = isBruno && this.carLoaded;
       if (isBruno && this.carLoaded) {
@@ -3337,109 +3374,39 @@ export class PlayMode {
         const halfWB = CAR_WHEEL_BASE * 0.5;
         const halfTr = CAR_TRACK * 0.5;
 
-        // Step 1: Sample terrain at each wheel — wheels are ground truth
-        let frontY = 0,
-          rearY = 0,
-          leftY = 0,
-          rightY = 0,
-          sumH = 0,
-          rearIdx = 0;
-        const wheelHeights = [];
-        for (const w of this.carWheels) {
-          const lx = w.offset.x * scaleFactor;
-          const lz = w.offset.z * scaleFactor;
-          const wx =
-            this.playerPos.x +
-            lx * Math.cos(this.carHeading) +
-            lz * Math.sin(this.carHeading);
-          const wz =
-            this.playerPos.z -
-            lx * Math.sin(this.carHeading) +
-            lz * Math.cos(this.carHeading);
-          let h = this._carPhysics.getWheelGroundHeight(
-            wx, wz, this.playerPos.y, this.getTerrainHeight, this.cliffBvh,
-          );
-          h = Math.max(h, this.playerPos.y - 1.5);
-          wheelHeights.push(h);
-          sumH += h;
-          w.contactWorld.set(wx, h + DRIFT_MARK_Y_OFFSET, wz);
-          if (w.offset.z < 0) frontY += h;
-          else {
-            rearY += h;
-            if (rearIdx < this._carRearContactPoints.length)
-              this._carRearContactPoints[rearIdx++].copy(w.contactWorld);
-          }
-          if (w.offset.x < 0) leftY += h;
-          else rightY += h;
-        }
-
-        // Step 2: Body position derived FROM wheel contacts (smoothed to avoid pop on airborne transition)
-        const avgWheelH = sumH / 4;
-        const targetRootY = this.carInAir
-          ? this.playerPos.y +
-            (CAR_RIDE_HEIGHT + CAR_WHEEL_RADIUS) * scaleFactor
-          : avgWheelH + (CAR_RIDE_HEIGHT + CAR_WHEEL_RADIUS) * scaleFactor;
-        if (this._carRootYSmooth === undefined) this._carRootYSmooth = targetRootY;
-        const rootYSmooth = 1 - Math.exp(-18 * dtSec);
-        this._carRootYSmooth += (targetRootY - this._carRootYSmooth) * rootYSmooth;
-        const rootY = this._carRootYSmooth;
+        // Step 1: Body position from center ground (stable, single sample)
+        const rootY = this.playerPos.y + (CAR_RIDE_HEIGHT + CAR_WHEEL_RADIUS) * scaleFactor;
         this.carRoot.position.set(this.playerPos.x, rootY, this.playerPos.z);
         this.carRoot.rotation.y = this.carHeading;
 
-        // Step 3: Body pitch/roll derived from wheel contact plane
-        const leftAvg = leftY * 0.5,
-          rightAvg = rightY * 0.5,
-          frontAvg = frontY * 0.5,
-          rearAvg = rearY * 0.5;
-        const terrainRollRaw = Math.atan2(
-          rightAvg - leftAvg,
-          CAR_TRACK * scaleFactor,
-        );
-        const terrainPitchRaw = Math.atan2(
-          frontAvg - rearAvg,
-          CAR_WHEEL_BASE * scaleFactor,
-        );
+        // Step 2: Body pitch/roll from terrain normal at center (projected into car-local axes)
+        const sx = this._carSlopeX || 0;
+        const sz = this._carSlopeZ || 0;
+        const sinH = Math.sin(this.carHeading);
+        const cosHH = Math.cos(this.carHeading);
+        // Project world slope into car-local forward/right
+        const slopeFwd = sx * (-sinH) + sz * (-cosHH);
+        const slopeRight = sx * cosHH + sz * (-sinH);
+        const targetPitch = Math.atan2(slopeFwd, 1);
+        const targetRoll = Math.atan2(slopeRight, 1);
+
         const terrainSmooth = 1 - Math.exp(-CAR_TERRAIN_BODY_SMOOTH * dtSec);
         if (this.carInAir) {
-          // Airborne: pitch follows velocity arc (nose up at launch, down on descent)
-          this.carTerrainRoll = THREE.MathUtils.lerp(
-            this.carTerrainRoll,
-            0,
-            terrainSmooth,
-          );
           this.carTerrainPitch = THREE.MathUtils.lerp(
-            this.carTerrainPitch,
-            THREE.MathUtils.clamp(
-              this._carPhysics.airPitch,
-              -CAR_BODY_TERRAIN_PITCH_MAX * 1.5,
-              CAR_BODY_TERRAIN_PITCH_MAX * 1.5,
-            ),
-            terrainSmooth,
-          );
+            this.carTerrainPitch, this._carPhysics.airPitch, terrainSmooth);
+          this.carTerrainRoll = THREE.MathUtils.lerp(
+            this.carTerrainRoll, 0, terrainSmooth);
         } else {
-          this.carTerrainRoll = THREE.MathUtils.lerp(
-            this.carTerrainRoll,
-            THREE.MathUtils.clamp(
-              terrainRollRaw,
-              -CAR_BODY_TERRAIN_ROLL_MAX,
-              CAR_BODY_TERRAIN_ROLL_MAX,
-            ),
-            terrainSmooth,
-          );
           this.carTerrainPitch = THREE.MathUtils.lerp(
-            this.carTerrainPitch,
-            THREE.MathUtils.clamp(
-              terrainPitchRaw,
-              -CAR_BODY_TERRAIN_PITCH_MAX,
-              CAR_BODY_TERRAIN_PITCH_MAX,
-            ),
-            terrainSmooth,
-          );
+            this.carTerrainPitch, targetPitch, terrainSmooth);
+          this.carTerrainRoll = THREE.MathUtils.lerp(
+            this.carTerrainRoll, targetRoll, terrainSmooth);
         }
+
         const finalPitch = THREE.MathUtils.clamp(
           this.carTerrainPitch + this.carBodyPitch,
-          -CAR_BODY_PITCH_MAX * 2,
-          CAR_BODY_PITCH_MAX * 2,
+          -CAR_BODY_PITCH_MAX * 1.2,
+          CAR_BODY_PITCH_MAX * 1.2,
         );
         const finalRoll = THREE.MathUtils.clamp(
           this.carTerrainRoll + this.carBodyRoll,
@@ -3448,28 +3415,36 @@ export class PlayMode {
         );
         this.carChassis.rotation.set(finalPitch, 0, finalRoll);
 
-        // Step 4: Per-wheel suspension — close the gap between body plane and actual terrain
-        const suspSmooth = 1 - Math.exp(-CAR_SUSP_SMOOTH * dtSec);
+        // Step 3: Each wheel raycasts ground independently — visual only, doesn't affect body
+        const suspAlpha = 1 - Math.exp(-CAR_SUSP_SMOOTH * dtSec);
+        let rearIdx = 0;
         for (let i = 0; i < this.carWheels.length; i++) {
           const w = this.carWheels[i];
-          const actualH = wheelHeights[i];
-          const planeH =
-            avgWheelH +
-            (rearAvg - frontAvg) * (w.offset.z / halfWB) * 0.5 +
-            (rightAvg - leftAvg) * (w.offset.x / halfTr) * 0.5;
-          const suspOffset = this.carInAir
-            ? 0
-            : (actualH - planeH) / scaleFactor;
-          const clampedOffset = THREE.MathUtils.clamp(
-            suspOffset,
-            -CAR_SUSP_TRAVEL,
-            CAR_SUSP_TRAVEL,
-          );
-          if (w._suspY === undefined) w._suspY = 0;
-          w._suspY = THREE.MathUtils.lerp(w._suspY, clampedOffset, suspSmooth);
-          if (w._suspBaseY === undefined)
-            w._suspBaseY = w.suspension.position.y;
-          w.suspension.position.y = w._suspBaseY + w._suspY;
+          const lx = w.offset.x * scaleFactor;
+          const lz = w.offset.z * scaleFactor;
+          const wx = this.playerPos.x + lx * Math.cos(this.carHeading) + lz * Math.sin(this.carHeading);
+          const wz = this.playerPos.z - lx * Math.sin(this.carHeading) + lz * Math.cos(this.carHeading);
+
+          if (this.carInAir) {
+            w.container.position.set(w.offset.x, -CAR_RIDE_HEIGHT, w.offset.z);
+          } else {
+            let h = this._carPhysics.getWheelGroundHeight(
+              wx, wz, this.playerPos.y, this.getTerrainHeight, this.cliffBvh,
+            );
+            h = Math.max(h, this.playerPos.y - 1.5);
+            if (w._smoothWY === undefined) w._smoothWY = h;
+            w._smoothWY += (h - w._smoothWY) * suspAlpha;
+            const wheelCenterY = w._smoothWY + CAR_WHEEL_RADIUS * scaleFactor;
+            const localY = (wheelCenterY - rootY) / scaleFactor;
+            const clampedLocalY = THREE.MathUtils.clamp(localY, -CAR_RIDE_HEIGHT - CAR_SUSP_TRAVEL, -CAR_RIDE_HEIGHT + CAR_SUSP_TRAVEL);
+            w.container.position.set(w.offset.x, clampedLocalY, w.offset.z);
+          }
+
+          w.contactWorld.set(wx, (w._smoothWY ?? this.playerPos.y) + DRIFT_MARK_Y_OFFSET, wz);
+          if (!w.steer) {
+            if (rearIdx < this._carRearContactPoints.length)
+              this._carRearContactPoints[rearIdx++].copy(w.contactWorld);
+          }
         }
 
         // Steering + wheel spin
