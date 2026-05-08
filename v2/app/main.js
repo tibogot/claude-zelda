@@ -1079,6 +1079,7 @@ export async function startV2App(opts = {}) {
     _splineKerbDuplicate,
     _splineKerbSuggestFromCurvature,
     _splineKerbLiveChanged;
+  let _grassChanged, _grassRebuildGeos, _grassFill, _grassClear, _grassSaveDensity, _grassLoadDensity;
   ui = createTweakpaneUi({
     toolState,
     config,
@@ -1266,22 +1267,22 @@ export async function startV2App(opts = {}) {
     onClearAllFoliage: (_clearAllFoliage = () => {
       foliagePaintSystem.clearAll();
     }),
-    onGrassChanged: () => {
+    onGrassChanged: (_grassChanged = () => {
       grassManager.syncUniforms(toolState.grass, sunDir);
-    },
-    onGrassRebuildGeos: () => {
+    }),
+    onGrassRebuildGeos: (_grassRebuildGeos = () => {
       grassManager.syncUniforms(toolState.grass, sunDir);
       grassManager.rebuildGeometries(toolState.grass);
-    },
-    onGrassFill: () => {
+    }),
+    onGrassFill: (_grassFill = () => {
       toolState.grass.enabled = true;
       grassManager.fillDensity();
       grassManager.syncUniforms(toolState.grass, sunDir);
       ui?.pane.refresh();
-    },
-    onGrassClear: () => {
+    }),
+    onGrassClear: (_grassClear = () => {
       grassManager.clearDensity();
-    },
+    }),
     onCliffGrassFill: (_cliffGrassFill = () => {
       toolState.grass.enabled = true;
       grassManager.fillCliffDensity();
@@ -1291,12 +1292,12 @@ export async function startV2App(opts = {}) {
     onCliffGrassClear: (_cliffGrassClear = () => {
       grassManager.clearCliffDensity();
     }),
-    onGrassSaveDensity: () => {
+    onGrassSaveDensity: (_grassSaveDensity = () => {
       const data = grassManager.densityTex.image.data;
       const blob = new Blob([data.buffer], { type: "application/octet-stream" });
       downloadBlob(blob, "gemini-grass-density.bin");
-    },
-    onGrassLoadDensity: async () => {
+    }),
+    onGrassLoadDensity: (_grassLoadDensity = async () => {
       const file = await openFilePicker(".bin,image/png");
       if (!file) return;
       const buf = await file.arrayBuffer();
@@ -1309,7 +1310,7 @@ export async function startV2App(opts = {}) {
         grassManager.syncUniforms(toolState.grass, sunDir);
         ui?.pane.refresh();
       }
-    },
+    }),
     onTreeCastShadowChanged: (_treeCastShadowChanged = () => {
       for (let i = 0; i < toolState.treeSlots.length; i++) {
         treeLodRenderer.setCastShadow(i, toolState.treeLod.castShadow);
@@ -3321,6 +3322,12 @@ export async function startV2App(opts = {}) {
     splineKerbDuplicate() { _splineKerbDuplicate(); },
     splineKerbSuggestFromCurvature() { _splineKerbSuggestFromCurvature(); },
     splineKerbLiveChanged(key) { _splineKerbLiveChanged(key); },
+    grassChanged() { _grassChanged(); },
+    grassRebuildGeos() { _grassRebuildGeos(); },
+    grassFill() { _grassFill(); },
+    grassClear() { _grassClear(); },
+    grassSaveDensity() { _grassSaveDensity(); },
+    grassLoadDensity() { _grassLoadDensity(); },
     onConfigChanged() { chunkStream.update(camera.position); },
     dispose() {
       renderer.domElement.removeEventListener("wheel", onCanvasWheelBrush, { capture: true });

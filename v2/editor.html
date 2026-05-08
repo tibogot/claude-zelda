@@ -871,7 +871,7 @@ const MODE_FOLDERS = {
 const ALWAYS_HIDDEN = new Set(['Global', 'Lighting & atmosphere']);
 const ALWAYS_VISIBLE = new Set(['Terrain/LOD', 'Perf Gate']);
 
-const CUSTOM_MODES = new Set(['sculpt', 'paint', 'treePaint', 'props', 'foliagePaint', 'playSpawn', 'hole', 'barrier', 'ambientfx', 'fleurs', 'cliffGrass', 'cliffs', 'water', 'waterfall', 'decals', 'river', 'spline']);
+const CUSTOM_MODES = new Set(['sculpt', 'paint', 'treePaint', 'props', 'foliagePaint', 'playSpawn', 'hole', 'barrier', 'ambientfx', 'fleurs', 'cliffGrass', 'cliffs', 'water', 'waterfall', 'decals', 'river', 'spline', 'grass']);
 const CUSTOM_KEEP_FOLDERS = {
   paint: ['Terrain appearance'],
 };
@@ -913,6 +913,8 @@ function syncToolsTab(pane, mode) {
   if (riverPanel) riverPanel.style.display = mode === 'river' ? '' : 'none';
   const splinePanel = document.getElementById('spline-panel');
   if (splinePanel) splinePanel.style.display = mode === 'spline' ? '' : 'none';
+  const grassPanel = document.getElementById('grass-panel');
+  if (grassPanel) grassPanel.style.display = mode === 'grass' ? '' : 'none';
 
   const kept = CUSTOM_KEEP_FOLDERS[mode] || [];
   const show = hasCustom ? new Set(kept) : new Set(MODE_FOLDERS[mode] || []);
@@ -2239,6 +2241,143 @@ function buildSplinePanel(app) {
   return panel;
 }
 
+// === Build custom Grass panel (parity with v2/ui/grassTweakpane.js + Brush) ===
+function buildGrassPanel(app) {
+  const panel = document.createElement('div');
+  panel.id = 'grass-panel';
+  const gp = app.toolState.grass;
+  const cfg = app.config;
+  const gCh = () => app.grassChanged();
+  const gRb = () => app.grassRebuildGeos();
+  const gChRb = () => { app.grassChanged(); app.grassRebuildGeos(); };
+
+  const brushBody = _section(panel, 'Brush');
+  _slider(brushBody, app.toolState.brush, 'radius', { label: 'Radius', min: cfg.sculpt.brushMin, max: cfg.sculpt.brushMax, step: 0.5 });
+  _slider(brushBody, app.toolState.brush, 'strength', { label: 'Strength', min: cfg.sculpt.strengthMin, max: cfg.sculpt.strengthMax, step: 0.01 });
+
+  const mainBody = _section(panel, 'Grass');
+  _toggle(mainBody, gp, 'enabled', { label: 'Enabled', onChange: gCh });
+  _button(mainBody, { title: 'Fill all grass', onClick: () => app.grassFill() });
+  _button(mainBody, { title: 'Clear grass', onClick: () => app.grassClear() });
+  _button(mainBody, { title: 'Save density map', onClick: () => app.grassSaveDensity() });
+  _button(mainBody, { title: 'Load density map', onClick: () => app.grassLoadDensity() });
+
+  const slopeBody = _section(panel, 'Slope rejection', false);
+  _toggle(slopeBody, gp, 'slopeEnabled', { label: 'Enabled', onChange: gCh });
+  _slider(slopeBody, gp, 'slopeMin', { label: 'Fade end (steep)', min: 0.0, max: 1.0, step: 0.01, onChange: gCh });
+  _slider(slopeBody, gp, 'slopeMax', { label: 'Fade start (gentle)', min: 0.0, max: 1.0, step: 0.01, onChange: gCh });
+
+  const bladeBody = _section(panel, 'Blade', false);
+  _slider(bladeBody, gp, 'bladeHeight', { label: 'Height', min: 0.3, max: 5, step: 0.05, onChange: gChRb });
+  _slider(bladeBody, gp, 'bladeWidth', { label: 'Width', min: 0.02, max: 0.5, step: 0.01, onChange: gRb });
+  _slider(bladeBody, gp, 'tipTaperStart', { label: 'Taper start', min: 0.2, max: 0.98, step: 0.01, onChange: gRb });
+  _slider(bladeBody, gp, 'bladeYSegments', { label: 'Segments', min: 2, max: 16, step: 1, onChange: gRb });
+  _color(bladeBody, gp, 'bladeColor', { label: 'Base color', onChange: gCh });
+  _color(bladeBody, gp, 'tipColor', { label: 'Tip color', onChange: gCh });
+
+  const windBody = _section(panel, 'Wind', false);
+  _slider(windBody, gp, 'windSpeed', { label: 'Speed', min: 0.05, max: 2, step: 0.01, onChange: gCh });
+  _slider(windBody, gp, 'windStrength', { label: 'Strength', min: 0, max: 3, step: 0.01, onChange: gCh });
+  _slider(windBody, gp, 'maxAngle', { label: 'Max bend', min: 0.5, max: 2.5, step: 0.01, onChange: gCh });
+  _slider(windBody, gp, 'naturalLean', { label: 'Natural lean', min: 0, max: 1.5, step: 0.01, onChange: gCh });
+  _slider(windBody, gp, 'windAngle', { label: 'Direction (°)', min: 0, max: 360, step: 1, onChange: gCh });
+  _slider(windBody, gp, 'windWaveScale', { label: 'Wave scale', min: 0.01, max: 0.5, step: 0.01, onChange: gCh });
+  _slider(windBody, gp, 'windGust', { label: 'Gust', min: 0, max: 1, step: 0.05, onChange: gCh });
+  _slider(windBody, gp, 'bendFocus', { label: 'Bend focus', min: 0.5, max: 5, step: 0.01, onChange: gCh });
+  _slider(windBody, gp, 'stiffness', { label: 'Root stiffness', min: 0, max: 0.8, step: 0.01, onChange: gCh });
+
+  const fieldBody = _section(panel, 'Field', false);
+  _slider(fieldBody, gp, 'grassDensity', { label: 'Density', min: 0.05, max: 1, step: 0.05, onChange: gCh });
+  _slider(fieldBody, gp, 'grassCount', { label: 'Blades/patch', min: 32, max: 4000, step: 32, onChange: gRb });
+  _slider(fieldBody, gp, 'fieldSize', { label: 'Patch size', min: 4, max: 30, step: 0.5, onChange: gRb });
+  _slider(fieldBody, gp, 'clumpScale', { label: 'Clump size', min: 1, max: 20, step: 0.05, onChange: gCh });
+  _slider(fieldBody, gp, 'clumpStrength', { label: 'Clump strength', min: 0, max: 1, step: 0.01, onChange: gCh });
+  _toggle(fieldBody, gp, 'crossed', { label: 'Crossed ribbons', onChange: gRb });
+  _slider(fieldBody, gp, 'interactionRadius', { label: 'Interact radius', min: 0.5, max: 5, step: 0.1, onChange: gCh });
+  _slider(fieldBody, gp, 'interactionStrength', { label: 'Interact strength', min: 0.1, max: 2, step: 0.05, onChange: gCh });
+
+  const colorVarBody = _section(panel, 'Color variation', false);
+  _toggle(colorVarBody, gp, 'colorVariation', { label: 'Enable', onChange: gCh });
+  _slider(colorVarBody, gp, 'cvHueSpread', { label: 'Hue spread', min: 0, max: 0.3, step: 0.005, onChange: gCh });
+  _slider(colorVarBody, gp, 'cvSatSpread', { label: 'Sat spread', min: 0, max: 1, step: 0.01, onChange: gCh });
+  _slider(colorVarBody, gp, 'cvDryAmount', { label: 'Dry amount', min: 0, max: 0.5, step: 0.01, onChange: gCh });
+  _color(colorVarBody, gp, 'cvDryColor', { label: 'Dry color', onChange: gCh });
+  _slider(colorVarBody, gp, 'aoBase', { label: 'AO base', min: 0, max: 1, step: 0.01, onChange: gCh });
+  _slider(colorVarBody, gp, 'aoPower', { label: 'AO curve', min: 0.5, max: 6, step: 0.05, onChange: gCh });
+  _slider(colorVarBody, gp, 'skyBlend', { label: 'Sky normal blend', min: 0, max: 1, step: 0.01, onChange: gCh });
+  _slider(colorVarBody, gp, 'cylindrical', { label: 'Cylindrical normals', min: 0, max: 1, step: 0.01, onChange: gCh });
+  _slider(colorVarBody, gp, 'viewThicken', { label: 'View thicken', min: 0, max: 1, step: 0.01, onChange: gCh });
+
+  const tintBody = _section(panel, 'Terrain color tint', false);
+  _toggle(tintBody, gp, 'terrainTintEnabled', { label: 'Enable', onChange: gCh });
+  _slider(tintBody, gp, 'terrainTintStrength', { label: 'Blend amount', min: 0, max: 1, step: 0.02, onChange: gCh });
+  _slider(tintBody, gp, 'terrainTintRootBias', { label: 'Root bias (1 = base only)', min: 0, max: 1, step: 0.02, onChange: gCh });
+  _toggle(tintBody, gp, 'terrainTintAutoSource', { label: 'Auto: imgTex → image, else TSL base', onChange: gCh });
+  _dropdown(tintBody, gp, 'terrainTintManualMode', {
+    label: 'Manual (if auto off)',
+    options: { Off: 0, 'TSL ground': 1, 'Image albedo': 2 },
+    onChange: gCh,
+  });
+
+  const sssBody = _section(panel, 'SSS', false);
+  _slider(sssBody, gp, 'bssIntensity', { label: 'Intensity', min: 0, max: 3, step: 0.05, onChange: gCh });
+  _slider(sssBody, gp, 'bssPower', { label: 'Back sharpness', min: 0.5, max: 8, step: 0.05, onChange: gCh });
+  _slider(sssBody, gp, 'frontScatter', { label: 'Front scatter', min: 0, max: 1, step: 0.05, onChange: gCh });
+  _slider(sssBody, gp, 'rimSSS', { label: 'Rim glow', min: 0, max: 1, step: 0.05, onChange: gCh });
+  _color(sssBody, gp, 'bssColor', { label: 'Glow color', onChange: gCh });
+
+  const spec1Body = _section(panel, 'Specular V1', false);
+  _toggle(spec1Body, gp, 'specV1Enabled', { label: 'Enabled', onChange: gCh });
+  _slider(spec1Body, gp, 'specV1Intensity', { label: 'Intensity', min: 0, max: 5, step: 0.1, onChange: gCh });
+  _color(spec1Body, gp, 'specV1Color', { label: 'Color', onChange: gCh });
+  _slider(spec1Body, gp, 'specV1Power', { label: 'Power', min: 1, max: 100, step: 0.5, onChange: gCh });
+  _slider(spec1Body, gp, 'specV1DirX', { label: 'Dir X', min: -1, max: 1, step: 0.05, onChange: gCh });
+  _slider(spec1Body, gp, 'specV1DirY', { label: 'Dir Y', min: -1, max: 1, step: 0.05, onChange: gCh });
+  _slider(spec1Body, gp, 'specV1DirZ', { label: 'Dir Z', min: -1, max: 1, step: 0.05, onChange: gCh });
+
+  const spec2Body = _section(panel, 'Specular V2', false);
+  _toggle(spec2Body, gp, 'specV2Enabled', { label: 'Enabled', onChange: gCh });
+  _slider(spec2Body, gp, 'specV2Intensity', { label: 'Intensity', min: 0, max: 5, step: 0.1, onChange: gCh });
+  _color(spec2Body, gp, 'specV2Color', { label: 'Color', onChange: gCh });
+  _slider(spec2Body, gp, 'specV2Power', { label: 'Power', min: 1, max: 100, step: 0.5, onChange: gCh });
+  _slider(spec2Body, gp, 'specV2NoiseScale', { label: 'Noise scale', min: 0.5, max: 10, step: 0.1, onChange: gCh });
+  _slider(spec2Body, gp, 'specV2NoiseStr', { label: 'Noise str', min: 0, max: 1, step: 0.05, onChange: gCh });
+  _slider(spec2Body, gp, 'specV2TipBias', { label: 'Tip bias', min: 0, max: 1, step: 0.05, onChange: gCh });
+  _slider(spec2Body, gp, 'specV2DirX', { label: 'Dir X', min: -1, max: 1, step: 0.05, onChange: gCh });
+  _slider(spec2Body, gp, 'specV2DirY', { label: 'Dir Y', min: -1, max: 1, step: 0.05, onChange: gCh });
+  _slider(spec2Body, gp, 'specV2DirZ', { label: 'Dir Z', min: -1, max: 1, step: 0.05, onChange: gCh });
+
+  const lodBody = _section(panel, 'LOD', false);
+  _toggle(lodBody, gp, 'lodEnabled', { label: 'Enable LOD', onChange: gCh });
+  _slider(lodBody, gp, 'lodMidDistance', { label: 'HIGH→MID dist', min: 10, max: 120, step: 1, onChange: gCh });
+  _slider(lodBody, gp, 'lodFarDistance', { label: 'MID→FAR dist', min: 20, max: 200, step: 1, onChange: gCh });
+  _slider(lodBody, gp, 'lodMaxDistance', { label: 'FAR max (inner ring end)', min: 30, max: 500, step: 1, onChange: gCh });
+  _slider(lodBody, gp, 'lodMegaMaxDistance', { label: 'MEGA max (outer)', min: 50, max: 800, step: 5, onChange: gCh });
+  _slider(lodBody, gp, 'lodFadeStart', { label: 'Fade start', min: 0.1, max: 1, step: 0.05, onChange: gCh });
+  _toggle(lodBody, gp, 'lodDebug', { label: 'Debug colors', onChange: gCh });
+  _toggle(lodBody, gp, 'receiveShadow', { label: 'Receive shadow', onChange: gCh });
+  _button(lodBody, { title: 'Rebuild LOD geometries', onClick: () => app.grassRebuildGeos() });
+
+  const lodMidBody = _section(panel, 'LOD · MID tier', false);
+  _slider(lodMidBody, gp, 'lodMidPatchSize', { label: 'Patch size', min: 10, max: 40, step: 1, onChange: gRb });
+  _slider(lodMidBody, gp, 'lodMidSegments', { label: 'Segments', min: 2, max: 8, step: 1, onChange: gRb });
+  _slider(lodMidBody, gp, 'lodMidGrassCount', { label: 'Blades/patch', min: 32, max: 4000, step: 32, onChange: gRb });
+
+  const lodFarBody = _section(panel, 'LOD · FAR tier', false);
+  _slider(lodFarBody, gp, 'lodFarPatchSize', { label: 'Patch size', min: 10, max: 60, step: 1, onChange: gRb });
+  _slider(lodFarBody, gp, 'lodFarSegments', { label: 'Segments', min: 1, max: 4, step: 1, onChange: gRb });
+  _slider(lodFarBody, gp, 'lodFarGrassCount', { label: 'Blades/patch', min: 16, max: 2000, step: 16, onChange: gRb });
+  _slider(lodFarBody, gp, 'lodFarBladeWidth', { label: 'Blade width', min: 0.05, max: 1.5, step: 0.05, onChange: gRb });
+
+  const lodMegaBody = _section(panel, 'LOD · MEGA tier', false);
+  _slider(lodMegaBody, gp, 'lodMegaPatchSize', { label: 'Patch size', min: 24, max: 120, step: 1, onChange: gRb });
+  _slider(lodMegaBody, gp, 'lodMegaSegments', { label: 'Segments', min: 1, max: 4, step: 1, onChange: gRb });
+  _slider(lodMegaBody, gp, 'lodMegaGrassCount', { label: 'Blades/patch', min: 16, max: 2000, step: 16, onChange: gRb });
+  _slider(lodMegaBody, gp, 'lodMegaBladeWidth', { label: 'Blade width', min: 0.1, max: 2.0, step: 0.05, onChange: gRb });
+
+  return panel;
+}
+
 // === Build custom Cliff Grass panel ===
 function buildCliffGrassPanel(app) {
   const panel = document.createElement('div');
@@ -2915,6 +3054,7 @@ try {
   toolsTab.appendChild(buildDecalsPanel(app));
   toolsTab.appendChild(buildRiverPanel(app));
   toolsTab.appendChild(buildSplinePanel(app));
+  toolsTab.appendChild(buildGrassPanel(app));
 
   // Move Tweakpane pane into the Tools tab & apply mode-aware folder visibility
   requestAnimationFrame(() => {
