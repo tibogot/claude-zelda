@@ -870,8 +870,13 @@ const MODE_FOLDERS = {
   playSpawn: ['Play / Spawn'],
   play: ['Play / Drift Smoke', 'Play / Car Feel', 'Play / Car audio', 'Play / Spawn', 'Audio (mixer)'],
 };
-const ALWAYS_HIDDEN = new Set(['Global', 'Lighting & atmosphere']);
-const ALWAYS_VISIBLE = new Set(['Terrain/LOD', 'Perf Gate']);
+const ALWAYS_HIDDEN = new Set([
+  'Global',
+  'Lighting & atmosphere',
+  'Terrain/LOD',
+  'Perf Gate',
+]);
+const ALWAYS_VISIBLE = new Set();
 
 const CUSTOM_MODES = new Set(['sculpt', 'paint', 'treePaint', 'props', 'foliagePaint', 'playSpawn', 'hole', 'barrier', 'ambientfx', 'fleurs', 'cliffGrass', 'cliffs', 'water', 'waterfall', 'decals', 'river', 'spline', 'grass']);
 
@@ -2706,6 +2711,41 @@ function buildWorldTab(app) {
   _toggle(dfBody, ts.fog.distance, 'enabled', { label: 'Enabled', onChange: fogCb });
   _color(dfBody, ts.fog.distance, 'color', { label: 'Color', onChange: fogCb });
   _slider(dfBody, ts.fog.distance, 'density', { label: 'Density', min: 0.0001, max: 0.05, step: 0.0001, onChange: fogCb });
+
+  // --- Terrain / streaming LOD (was Tweakpane "Terrain/LOD") ---
+  const cfg = app.config;
+  const lodWorldBody = _section(container, 'Terrain / LOD', false);
+  _toggle(lodWorldBody, cfg.lod, 'enabled', { label: 'LOD enabled', onChange: () => app.onConfigChanged() });
+  _slider(lodWorldBody, cfg.lod, 'activeRadiusInChunks', {
+    label: 'Active radius',
+    min: 2,
+    max: 20,
+    step: 1,
+    onChange: () => app.onConfigChanged(),
+  });
+  _slider(lodWorldBody, cfg.lod, 'hysteresis', {
+    label: 'Hysteresis',
+    min: 0,
+    max: 0.5,
+    step: 0.01,
+    onChange: () => app.onConfigChanged(),
+  });
+
+  // --- Perf Gate (read-only; mirrors Tweakpane monitors) ---
+  const perfBody = _section(container, 'Perf Gate', false);
+  const perfFps = _info(perfBody, 'FPS', '0.0');
+  const perfMs = _info(perfBody, 'Frame ms', '0.00');
+  const perfChunks = _info(perfBody, 'Active chunks', '0');
+  const perfQueues = _info(perfBody, 'Queues C/R/U', '0/0/0');
+  function tickWorldPerfMonitors() {
+    const p = app.perf;
+    perfFps.update(p.fps.toFixed(1));
+    perfMs.update(p.frameMs.toFixed(2));
+    perfChunks.update(String(p.activeChunks));
+    perfQueues.update(`${p.queues.create}/${p.queues.remesh}/${p.queues.unload}`);
+    requestAnimationFrame(tickWorldPerfMonitors);
+  }
+  requestAnimationFrame(tickWorldPerfMonitors);
 }
 
 // === Scene Hierarchy + Inspector ===
