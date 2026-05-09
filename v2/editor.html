@@ -868,7 +868,7 @@ const MODE_FOLDERS = {
   cliffGrass: ['Brush', 'Cliff Grass'],
   road: ['Road'],
   fullRoad: ['Full Road'],
-  smartRoad: ['Smart Road'],
+  smartRoad: [],
   river: ['River'],
   spline: ['Spline'],
   cliffs: ['Brush', 'Cliffs'],
@@ -891,7 +891,7 @@ const ALWAYS_HIDDEN = new Set([
 ]);
 const ALWAYS_VISIBLE = new Set();
 
-const CUSTOM_MODES = new Set(['sculpt', 'paint', 'treePaint', 'props', 'foliagePaint', 'playSpawn', 'hole', 'barrier', 'ambientfx', 'fleurs', 'cliffGrass', 'cliffs', 'water', 'waterfall', 'decals', 'river', 'spline', 'grass']);
+const CUSTOM_MODES = new Set(['sculpt', 'paint', 'treePaint', 'props', 'foliagePaint', 'playSpawn', 'hole', 'barrier', 'ambientfx', 'fleurs', 'cliffGrass', 'cliffs', 'water', 'waterfall', 'decals', 'river', 'spline', 'grass', 'smartRoad']);
 
 function syncToolsTab(pane, mode) {
   if (!pane) return;
@@ -932,6 +932,8 @@ function syncToolsTab(pane, mode) {
   if (splinePanel) splinePanel.style.display = mode === 'spline' ? '' : 'none';
   const grassPanel = document.getElementById('grass-panel');
   if (grassPanel) grassPanel.style.display = mode === 'grass' ? '' : 'none';
+  const smartRoadPanel = document.getElementById('smartroad-panel');
+  if (smartRoadPanel) smartRoadPanel.style.display = mode === 'smartRoad' ? '' : 'none';
 
   const kept = [];
   const show = hasCustom ? new Set(kept) : new Set(MODE_FOLDERS[mode] || []);
@@ -2242,6 +2244,72 @@ function buildRiverPanel(app) {
   return panel;
 }
 
+// === Build custom Smart Road panel (parity with v2/ui/fullRoadTweakpane.js Smart Road branch only) ===
+function buildSmartRoadPanel(app) {
+  const panel = document.createElement('div');
+  panel.id = 'smartroad-panel';
+  const sr = app.toolState.smartRoad;
+  const ch = () => app.smartRoadChanged();
+
+  const main = _section(panel, 'Smart Road');
+  _toggle(main, sr, 'showHandles', { label: 'Show handles', onChange: ch });
+  _button(main, { title: 'Start new branch', onClick: () => app.smartRoadStartBranch() });
+  _button(main, { title: 'Toggle selected junction', onClick: () => app.smartRoadToggleJunction() });
+  _button(main, { title: 'Delete selected node', onClick: () => app.smartRoadDeleteSelected() });
+  _button(main, { title: 'Clear Smart Road network', onClick: () => app.smartRoadClearAll() });
+  _slider(main, sr, 'selectedPointY', { label: 'Node Y', min: -50, max: 200, step: 0.1, onChange: () => app.smartRoadSelectedYChanged() });
+  _button(main, { title: 'Snap selected Y to terrain', onClick: () => app.smartRoadSnapY() });
+  _button(main, { title: 'Flatten terrain under Smart roads', onClick: () => app.smartRoadFlattenTerrain() });
+
+  const graph = _section(panel, 'Graph / Junctions');
+  _slider(graph, sr, 'nodeSnapRadius', { label: 'Node snap', min: 0.5, max: 20, step: 0.25, onChange: ch });
+  _slider(graph, sr, 'branchSnapRadius', { label: 'Branch snap', min: 0.5, max: 30, step: 0.25, onChange: ch });
+  _slider(graph, sr, 'junctionRadius', { label: 'Junction radius', min: 2, max: 80, step: 0.5, onChange: ch });
+  _slider(graph, sr, 'junctionSegments', { label: 'Junction segs', min: 12, max: 96, step: 4, onChange: ch });
+  _slider(graph, sr, 'lanesPerDir', { label: 'Lanes / dir', min: 1, max: 3, step: 1, onChange: ch });
+  _dropdown(graph, sr, 'twoRoadNodes', {
+    label: '2-way nodes',
+    options: { 'Smooth bend': 'smooth', Junction: 'junction' },
+    onChange: ch,
+  });
+  _dropdown(graph, sr, 'endCapStyle', {
+    label: 'Road ends',
+    options: { Flat: 'flat', Round: 'round' },
+    onChange: ch,
+  });
+
+  const geo = _section(panel, 'Geometry', false);
+  _slider(geo, sr, 'width', { label: 'Width', min: 2, max: 60, step: 0.5, onChange: ch });
+  _slider(geo, sr, 'segments', { label: 'Curve segments', min: 8, max: 300, step: 4, onChange: ch });
+  _slider(geo, sr, 'heightOffset', { label: 'Height offset', min: 0, max: 2, step: 0.01, onChange: ch });
+  _toggle(geo, sr, 'adaptiveLift', { label: 'Adaptive lift', onChange: ch });
+  _slider(geo, sr, 'slopeLift', { label: 'Slope lift', min: 0, max: 2, step: 0.01, onChange: ch });
+  _slider(geo, sr, 'liftMax', { label: 'Lift cap', min: 0, max: 2, step: 0.01, onChange: ch });
+
+  const mk = _section(panel, 'Center & lane markings', false);
+  _color(mk, sr, 'lineColor', { label: 'Edge & lane color', onChange: ch });
+  _slider(mk, sr, 'lineWidth', { label: 'Edge width', min: 0, max: 0.2, step: 0.005, onChange: ch });
+  _slider(mk, sr, 'lineInset', { label: 'Edge inset', min: 0, max: 0.15, step: 0.005, onChange: ch });
+  _toggle(mk, sr, 'centerLine', { label: 'Center line', onChange: ch });
+  _color(mk, sr, 'centerLineColor', { label: 'Center color', onChange: ch });
+  _slider(mk, sr, 'centerLineWidth', { label: 'Center width', min: 0.002, max: 0.08, step: 0.001, onChange: ch });
+  _toggle(mk, sr, 'centerLineDashed', { label: 'Center dashed', onChange: ch });
+  _slider(mk, sr, 'centerLineDashScale', { label: 'Center dash density', min: 0.005, max: 2, step: 0.005, onChange: ch });
+  _toggle(mk, sr, 'doubleCenterLine', { label: 'Double center', onChange: ch });
+  _slider(mk, sr, 'centerLineGap', { label: 'Center gap', min: 0.004, max: 0.06, step: 0.001, onChange: ch });
+  _toggle(mk, sr, 'centerLeftEnabled', { label: 'Center left on', onChange: ch });
+  _color(mk, sr, 'centerLeftColor', { label: 'Center left color', onChange: ch });
+  _toggle(mk, sr, 'centerLeftDashed', { label: 'Center left dashed', onChange: ch });
+  _toggle(mk, sr, 'centerRightEnabled', { label: 'Center right on', onChange: ch });
+  _color(mk, sr, 'centerRightColor', { label: 'Center right color', onChange: ch });
+  _toggle(mk, sr, 'centerRightDashed', { label: 'Center right dashed', onChange: ch });
+  _toggle(mk, sr, 'laneLines', { label: 'Lane separators', onChange: ch });
+  _slider(mk, sr, 'laneLineWidth', { label: 'Lane width', min: 0.002, max: 0.06, step: 0.001, onChange: ch });
+  _slider(mk, sr, 'laneDashScale', { label: 'Lane dash density', min: 0.005, max: 2, step: 0.005, onChange: ch });
+
+  return panel;
+}
+
 // === Build custom Spline panel (parity with v2/ui/splineTweakpane.js) ===
 function buildSplinePanel(app) {
   const panel = document.createElement('div');
@@ -3338,6 +3406,7 @@ try {
   toolsTab.appendChild(buildRiverPanel(app));
   toolsTab.appendChild(buildSplinePanel(app));
   toolsTab.appendChild(buildGrassPanel(app));
+  toolsTab.appendChild(buildSmartRoadPanel(app));
 
   // Move Tweakpane pane into the Tools tab & apply mode-aware folder visibility
   requestAnimationFrame(() => {

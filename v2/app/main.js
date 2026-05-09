@@ -3364,6 +3364,46 @@ export async function startV2App(opts = {}) {
     riverDeleteSelected() { _riverDeleteSelected(); },
     riverSelectedYChanged() { _riverSelectedYChanged(); },
     riverActiveIndexChanged() { _riverActiveIndexChanged(); },
+    smartRoadChanged() {
+      smartRoadSystem.syncMaterial();
+      smartRoadSystem.rebuildAllMeshes();
+      smartRoadSystem._rebuildHandles();
+      ui?.pane.refresh();
+    },
+    smartRoadStartBranch() {
+      smartRoadSystem.startBranch();
+      ui?.pane.refresh();
+    },
+    smartRoadDeleteSelected() {
+      smartRoadSystem.deleteSelected();
+      ui?.pane.refresh();
+    },
+    smartRoadClearAll() {
+      smartRoadSystem.clearAll();
+      ui?.pane.refresh();
+    },
+    smartRoadSnapY() {
+      smartRoadSystem.snapSelectedYToTerrain();
+      ui?.pane.refresh();
+    },
+    smartRoadSelectedYChanged() {
+      smartRoadSystem.setSelectedPointY(toolState.smartRoad.selectedPointY);
+      ui?.pane.refresh();
+    },
+    smartRoadToggleJunction() {
+      smartRoadSystem.toggleSelectedJunction();
+      ui?.pane.refresh();
+    },
+    smartRoadFlattenTerrain() {
+      smartRoadSystem.flattenTerrainUnderRoads();
+      smartRoadSystem.rebuildAllMeshes();
+      markHeightTexDirty();
+      treeStore.syncAllHeights(terrainStore);
+      splineSystem.syncGuardrailsToGround();
+      splineSystem.syncKerbsToGround();
+      splineSystem.syncLinearFeaturesToGround();
+      ui?.pane.refresh();
+    },
     splineChanged() { _splineChanged(); },
     splineDeleteSelected() { _splineDeleteSelected(); },
     splineClearAll() { _splineClearAll(); },
