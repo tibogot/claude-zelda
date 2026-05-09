@@ -102,7 +102,7 @@ const CAR_GRIP_NORMAL = 12;
 const CAR_GRIP_DRIFT = 0.8;
 const CAR_GRIP_BRAKE_TURN = 2.0;
 const CAR_DRIFT_ENTRY_SPEED = 8;
-const CAR_RIDE_HEIGHT = 0.5;
+const CAR_RIDE_HEIGHT = 0.35;
 const CAR_WHEEL_RADIUS = 0.42;
 const CAR_DRIFT_ANGLE_MIN = 0.1;
 const CAR_CAM_DIST = 10;
@@ -114,7 +114,7 @@ const CAR_HALF_WIDTH = 1.1;
 const CAR_HALF_LENGTH = 2.5;
 const CAR_BODY_HEIGHT = 0.8;
 const CAR_GRAVITY = 28;
-const CAR_EDGE_DROP_THRESHOLD = 0.45;
+const CAR_EDGE_DROP_THRESHOLD = 0.25;
 const CAR_MAX_SLOPE_COS = 0.5; // ~60° max climbable slope (cos(60°) ≈ 0.5)
 const CAR_SLOPE_SAMPLE_EPS = 0.5;
 const CAR_COLLISION_SKIN = 0.08;
@@ -3387,8 +3387,8 @@ export class PlayMode {
         // Project world slope into car-local forward/right
         const slopeFwd = sx * (-sinH) + sz * (-cosHH);
         const slopeRight = sx * cosHH + sz * (-sinH);
-        const targetPitch = Math.atan2(slopeFwd, 1);
-        const targetRoll = Math.atan2(slopeRight, 1);
+        const targetPitch = -Math.atan2(slopeFwd, 1);
+        const targetRoll = -Math.atan2(slopeRight, 1);
 
         const terrainSmooth = 1 - Math.exp(-CAR_TERRAIN_BODY_SMOOTH * dtSec);
         if (this.carInAir) {

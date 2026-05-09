@@ -1,10 +1,10 @@
 const CAR_HALF_WIDTH = 1.1;
 const CAR_HALF_LENGTH = 2.5;
 const CAR_BODY_HEIGHT = 0.8;
-const CAR_RIDE_HEIGHT = 0.5;
+const CAR_RIDE_HEIGHT = 0.35;
 const CAR_WHEEL_RADIUS = 0.42;
 const CAR_GRAVITY = 28;
-const CAR_EDGE_DROP_THRESHOLD = 0.45;
+const CAR_EDGE_DROP_THRESHOLD = 0.25;
 const CAR_COLLISION_SKIN = 0.08;
 const CAR_MAX_SLOPE_COS = 0.5;
 const CAR_SLOPE_SAMPLE_EPS = 0.5;
@@ -155,25 +155,32 @@ export class CarPhysics {
   }
 
   updateVertical(carY, groundY, prevY, dtSec, getTerrainHeight, px, pz, vx, vz, cliffBvh) {
+    // Sample slope at PREVIOUS position (behind the car) for launch detection
+    // When car drives off a ramp edge, current pos is past the ramp — previous pos is still on it
+    const speed = Math.sqrt(vx * vx + vz * vz);
+    const backDist = Math.min(CAR_HALF_LENGTH, speed * dtSec + 0.5);
+    const sampleX = speed > 0.5 ? px - (vx / speed) * backDist : px;
+    const sampleZ = speed > 0.5 ? pz - (vz / speed) * backDist : pz;
+
     const eps = CAR_SLOPE_SAMPLE_EPS;
-    const hL = getTerrainHeight(px - eps, pz);
-    const hR = getTerrainHeight(px + eps, pz);
-    const hD = getTerrainHeight(px, pz - eps);
-    const hU = getTerrainHeight(px, pz + eps);
+    const hL = getTerrainHeight(sampleX - eps, sampleZ);
+    const hR = getTerrainHeight(sampleX + eps, sampleZ);
+    const hD = getTerrainHeight(sampleX, sampleZ - eps);
+    const hU = getTerrainHeight(sampleX, sampleZ + eps);
     const inv2eps = 1 / (2 * eps);
     let nx = (hL - hR) * inv2eps;
     let nz = (hD - hU) * inv2eps;
     let nLen = Math.sqrt(nx * nx + 1 + nz * nz);
     let normalY = 1 / nLen;
 
-    // Also sample BVH slope at car position for ramp launch detection
+    // Also sample BVH slope for ramp launch detection
     if (cliffBvh?.baked) {
-      const bvhC = cliffBvh.raycastHeight(px, pz);
+      const bvhC = cliffBvh.raycastHeight(sampleX, sampleZ);
       if (bvhC != null && bvhC > hL - 2) {
-        const bvhL = cliffBvh.raycastHeight(px - eps, pz);
-        const bvhR = cliffBvh.raycastHeight(px + eps, pz);
-        const bvhD = cliffBvh.raycastHeight(px, pz - eps);
-        const bvhU = cliffBvh.raycastHeight(px, pz + eps);
+        const bvhL = cliffBvh.raycastHeight(sampleX - eps, sampleZ);
+        const bvhR = cliffBvh.raycastHeight(sampleX + eps, sampleZ);
+        const bvhD = cliffBvh.raycastHeight(sampleX, sampleZ - eps);
+        const bvhU = cliffBvh.raycastHeight(sampleX, sampleZ + eps);
         if (bvhL != null && bvhR != null && bvhD != null && bvhU != null) {
           const bnx = (bvhL - bvhR) * inv2eps;
           const bnz = (bvhD - bvhU) * inv2eps;
