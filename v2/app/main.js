@@ -3404,6 +3404,45 @@ export async function startV2App(opts = {}) {
       splineSystem.syncLinearFeaturesToGround();
       ui?.pane.refresh();
     },
+    smartRoadGraphAccessoryTypeChanged() {
+      smartRoadSystem.cancelAccessoryPaint();
+      ui?.pane.refresh();
+    },
+    smartRoadGraphAccessoryParamsChanged() {
+      smartRoadSystem.rebuildAllAccessories();
+      ui?.pane.refresh();
+    },
+    smartRoadGraphAccessoryClearAll() {
+      smartRoadSystem.clearAllAccessories();
+      ui?.pane.refresh();
+    },
+    smartRoadGraphDecalModeToggled() {
+      if (!toolState.smartRoad.decalMode) {
+        smartRoadSystem._clearDecalPreview();
+        smartRoadSystem.deselectDecal();
+      }
+      ui?.pane.refresh();
+    },
+    smartRoadGraphDecalTransformModeChanged() {
+      if (smartRoadSystem.selectedDecalId != null) {
+        transformControls.setMode(toolState.smartRoad.decalTransformMode || "translate");
+      }
+    },
+    smartRoadGraphDecalDeleteSelected() {
+      smartRoadSystem.deleteSelectedDecal();
+      ui?.pane.refresh();
+    },
+    smartRoadGraphDecalTypeChanged() {
+      ui?.pane.refresh();
+    },
+    smartRoadGraphDecalParamsChanged() {
+      smartRoadSystem.rebuildAllDecals();
+      ui?.pane.refresh();
+    },
+    smartRoadGraphDecalClearAll() {
+      smartRoadSystem.clearAllDecals();
+      ui?.pane.refresh();
+    },
     splineChanged() { _splineChanged(); },
     splineDeleteSelected() { _splineDeleteSelected(); },
     splineClearAll() { _splineClearAll(); },

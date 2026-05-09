@@ -1,3 +1,104 @@
+/** Road Accessories + Road Decals — shared by Full Road and Smart Road tweakpanes. */
+function addRoadAccessoriesAndDecalsFolders(folder, rp, {
+  onAccessoryTypeChanged,
+  onAccessoryParamsChanged,
+  onAccessoryClearAll,
+  onDecalModeToggle,
+  onDecalTransformModeChanged,
+  onDecalDeleteSelected,
+  onDecalTypeChanged,
+  onDecalParamsChanged,
+  onDecalClearAll,
+}) {
+  const accFolder = folder.addFolder({ title: "Road Accessories", expanded: false });
+  accFolder.addBinding(rp, "accessoryType", {
+    label: "Type",
+    options: { Guardrail: "guardrail", Kerb: "kerb", Barrier: "barrier", Fence: "fence", Tunnel: "tunnel" },
+  }).on("change", () => onAccessoryTypeChanged?.());
+
+  const paintFolder = accFolder.addFolder({ title: "Click-drag paint on road", expanded: false });
+  paintFolder.addBinding(rp, "guardrailMode", { label: "Guardrail (Shift+drag still works)" }).on("change", () => onAccessoryParamsChanged?.());
+  paintFolder.addBinding(rp, "kerbMode", { label: "Kerb (Shift+drag still works)" }).on("change", () => onAccessoryParamsChanged?.());
+  paintFolder.addBinding(rp, "barrierMode", { label: "Barrier (Shift+drag still works)" }).on("change", () => onAccessoryParamsChanged?.());
+  paintFolder.addBinding(rp, "fenceMode", { label: "Fence (Shift+drag still works)" }).on("change", () => onAccessoryParamsChanged?.());
+
+  const grFolder = accFolder.addFolder({ title: "Guardrail Settings", expanded: false });
+  grFolder.addBinding(rp, "guardrailSide", { label: "Side", options: { Left: "left", Right: "right", Auto: "auto" } }).on("change", () => onAccessoryParamsChanged?.());
+  grFolder.addBinding(rp, "guardrailEdgeOffset", { label: "Edge offset", min: 0, max: 3, step: 0.05 }).on("change", () => onAccessoryParamsChanged?.());
+  grFolder.addBinding(rp, "guardrailHeight", { label: "Height", min: 0.1, max: 2, step: 0.05 }).on("change", () => onAccessoryParamsChanged?.());
+  grFolder.addBinding(rp, "guardrailDepth", { label: "Depth", min: 0.05, max: 1, step: 0.02 }).on("change", () => onAccessoryParamsChanged?.());
+  grFolder.addBinding(rp, "guardrailRailYOffset", { label: "Rail Y offset", min: 0, max: 2, step: 0.05 }).on("change", () => onAccessoryParamsChanged?.());
+  grFolder.addBinding(rp, "guardrailPostSpacing", { label: "Post spacing", min: 0.5, max: 8, step: 0.25 }).on("change", () => onAccessoryParamsChanged?.());
+  grFolder.addBinding(rp, "guardrailColor", { label: "Color", view: "color" }).on("change", () => onAccessoryParamsChanged?.());
+
+  const kerbFolder = accFolder.addFolder({ title: "Kerb Settings", expanded: false });
+  kerbFolder.addBinding(rp, "kerbSide", { label: "Side", options: { Left: "left", Right: "right", Auto: "auto" } }).on("change", () => onAccessoryParamsChanged?.());
+  kerbFolder.addBinding(rp, "kerbEdgeOffset", { label: "Edge offset", min: -1, max: 2, step: 0.05 }).on("change", () => onAccessoryParamsChanged?.());
+  kerbFolder.addBinding(rp, "kerbWidth", { label: "Width", min: 0.2, max: 2, step: 0.05 }).on("change", () => onAccessoryParamsChanged?.());
+  kerbFolder.addBinding(rp, "kerbHeight", { label: "Height", min: 0.02, max: 0.5, step: 0.01 }).on("change", () => onAccessoryParamsChanged?.());
+  kerbFolder.addBinding(rp, "kerbLipHeight", { label: "Lip height", min: 0, max: 0.2, step: 0.005 }).on("change", () => onAccessoryParamsChanged?.());
+  kerbFolder.addBinding(rp, "kerbStripeLength", { label: "Stripe length", min: 0.2, max: 3, step: 0.1 }).on("change", () => onAccessoryParamsChanged?.());
+  kerbFolder.addBinding(rp, "kerbColorA", { label: "Color A", view: "color" }).on("change", () => onAccessoryParamsChanged?.());
+  kerbFolder.addBinding(rp, "kerbColorB", { label: "Color B", view: "color" }).on("change", () => onAccessoryParamsChanged?.());
+
+  const barrierFolder = accFolder.addFolder({ title: "Barrier Settings", expanded: false });
+  barrierFolder.addBinding(rp, "barrierSide", { label: "Side", options: { Left: "left", Right: "right", Auto: "auto" } }).on("change", () => onAccessoryParamsChanged?.());
+  barrierFolder.addBinding(rp, "barrierEdgeOffset", { label: "Edge offset", min: 0, max: 4, step: 0.1 }).on("change", () => onAccessoryParamsChanged?.());
+  barrierFolder.addBinding(rp, "barrierHeight", { label: "Height", min: 0.3, max: 1.5, step: 0.05 }).on("change", () => onAccessoryParamsChanged?.());
+  barrierFolder.addBinding(rp, "barrierTopWidth", { label: "Top width", min: 0.05, max: 0.5, step: 0.02 }).on("change", () => onAccessoryParamsChanged?.());
+  barrierFolder.addBinding(rp, "barrierBottomWidth", { label: "Bottom width", min: 0.2, max: 1, step: 0.02 }).on("change", () => onAccessoryParamsChanged?.());
+  barrierFolder.addBinding(rp, "barrierColor", { label: "Color", view: "color" }).on("change", () => onAccessoryParamsChanged?.());
+
+  const fenceFolder = accFolder.addFolder({ title: "Fence Settings", expanded: false });
+  fenceFolder.addBinding(rp, "fenceSide", { label: "Side", options: { Left: "left", Right: "right", Auto: "auto" } }).on("change", () => onAccessoryParamsChanged?.());
+  fenceFolder.addBinding(rp, "fenceEdgeOffset", { label: "Edge offset", min: 0, max: 5, step: 0.1 }).on("change", () => onAccessoryParamsChanged?.());
+  fenceFolder.addBinding(rp, "fenceHeight", { label: "Height", min: 0.5, max: 3, step: 0.1 }).on("change", () => onAccessoryParamsChanged?.());
+  fenceFolder.addBinding(rp, "fencePostSpacing", { label: "Post spacing", min: 1, max: 6, step: 0.25 }).on("change", () => onAccessoryParamsChanged?.());
+  fenceFolder.addBinding(rp, "fenceRailCount", { label: "Rail count", min: 1, max: 6, step: 1 }).on("change", () => onAccessoryParamsChanged?.());
+  fenceFolder.addBinding(rp, "fenceColor", { label: "Color", view: "color" }).on("change", () => onAccessoryParamsChanged?.());
+
+  const tunnelFolder = accFolder.addFolder({ title: "Tunnel Settings", expanded: false });
+  tunnelFolder.addBinding(rp, "tunnelMode", { label: "Paint mode (Shift+drag still works)" }).on("change", () => onAccessoryParamsChanged?.());
+  tunnelFolder.addBinding(rp, "tunnelRadius", { label: "Radius", min: 1, max: 20, step: 0.25 }).on("change", () => onAccessoryParamsChanged?.());
+  tunnelFolder.addBinding(rp, "tunnelYOffset", { label: "Y offset", min: -5, max: 10, step: 0.1 }).on("change", () => onAccessoryParamsChanged?.());
+  tunnelFolder.addBinding(rp, "tunnelRadialSegments", { label: "Radial segs", min: 6, max: 48, step: 1 }).on("change", () => onAccessoryParamsChanged?.());
+  tunnelFolder.addBinding(rp, "tunnelPathSegments", { label: "Path segs", min: 32, max: 400, step: 4 }).on("change", () => onAccessoryParamsChanged?.());
+  tunnelFolder.addBinding(rp, "tunnelColor", { label: "Color", view: "color" }).on("change", () => onAccessoryParamsChanged?.());
+
+  accFolder.addButton({ title: "Clear all accessories" }).on("click", () => onAccessoryClearAll?.());
+
+  const decalFolder = folder.addFolder({ title: "Road Decals", expanded: false });
+  decalFolder.addBinding(rp, "decalMode", { label: "Decal mode" }).on("change", () => onDecalModeToggle?.());
+  decalFolder.addBinding(rp, "decalTransformMode", {
+    label: "Gizmo mode",
+    options: { Translate: "translate", Rotate: "rotate" },
+  }).on("change", () => onDecalTransformModeChanged?.());
+  decalFolder.addButton({ title: "Delete selected decal" }).on("click", () => onDecalDeleteSelected?.());
+  decalFolder.addBinding(rp, "decalType", {
+    label: "Type",
+    options: {
+      "Zebra Crossing": "zebraCrossing",
+      "Ladder Crossing": "ladderCrossing",
+      "Stop Line": "stopLine",
+      "Arrow ↑": "arrowStraight",
+      "Arrow ←": "arrowLeft",
+      "Arrow →": "arrowRight",
+      "Arrow ↑←": "arrowStraightLeft",
+      "Arrow ↑→": "arrowStraightRight",
+      "Give Way △": "giveWay",
+      "Speed Circle ○": "speedCircle",
+      "Parking Lines": "parkingLines",
+    },
+  }).on("change", () => onDecalTypeChanged?.());
+  decalFolder.addBinding(rp, "decalWidth", { label: "Width", min: 1, max: 20, step: 0.5 }).on("change", () => onDecalParamsChanged?.());
+  decalFolder.addBinding(rp, "decalLength", { label: "Length", min: 1, max: 20, step: 0.5 }).on("change", () => onDecalParamsChanged?.());
+  decalFolder.addBinding(rp, "decalColor", { label: "Color", view: "color" }).on("change", () => onDecalParamsChanged?.());
+  decalFolder.addBinding(rp, "decalStripeCount", { label: "Stripe count", min: 2, max: 20, step: 1 }).on("change", () => onDecalParamsChanged?.());
+  decalFolder.addBinding(rp, "decalSnapToRoad", { label: "Snap rotation" }).on("change", () => onDecalParamsChanged?.());
+  decalFolder.addBinding(rp, "decalRotation", { label: "Manual rotation", min: 0, max: 360, step: 5 }).on("change", () => onDecalParamsChanged?.());
+  decalFolder.addButton({ title: "Clear all decals" }).on("click", () => onDecalClearAll?.());
+}
+
 export function addFullRoadFolder(pane, toolState, opts) {
   const {
     onFullRoadChanged,
@@ -162,6 +263,17 @@ export function addFullRoadFolder(pane, toolState, opts) {
     wetFolder.addBinding(rp, "wetRoughnessMin", { label: "Min roughness", min: 0.02, max: 0.5, step: 0.01 }).on("change", onFullRoadChanged);
     wetFolder.addBinding(rp, "puddleTint", { label: "Puddle tint", view: "color" }).on("change", onFullRoadChanged);
 
+    addRoadAccessoriesAndDecalsFolders(folder, rp, {
+      onAccessoryTypeChanged,
+      onAccessoryParamsChanged,
+      onAccessoryClearAll,
+      onDecalModeToggle,
+      onDecalTransformModeChanged,
+      onDecalDeleteSelected,
+      onDecalTypeChanged,
+      onDecalParamsChanged,
+      onDecalClearAll,
+    });
     return folder;
   }
 
@@ -226,95 +338,17 @@ export function addFullRoadFolder(pane, toolState, opts) {
   wetFolder.addBinding(rp, "puddleSkySuppress", { label: "Sky suppress", min: 0, max: 1, step: 0.01 }).on("change", onFullRoadChanged);
   wetFolder.addBinding(rp, "puddleTint", { label: "Puddle tint", view: "color" }).on("change", onFullRoadChanged);
 
-  // Road Accessories (paint along road edge)
-  const accFolder = folder.addFolder({ title: "Road Accessories", expanded: false });
-  accFolder.addBinding(rp, "accessoryType", {
-    label: "Type",
-    options: { Guardrail: "guardrail", Kerb: "kerb", Barrier: "barrier", Fence: "fence", Tunnel: "tunnel" },
-  }).on("change", () => onAccessoryTypeChanged?.());
-  
-  // Guardrail settings
-  const grFolder = accFolder.addFolder({ title: "Guardrail Settings", expanded: false });
-  grFolder.addBinding(rp, "guardrailSide", { label: "Side", options: { Left: "left", Right: "right", Auto: "auto" } }).on("change", () => onAccessoryParamsChanged?.());
-  grFolder.addBinding(rp, "guardrailEdgeOffset", { label: "Edge offset", min: 0, max: 3, step: 0.05 }).on("change", () => onAccessoryParamsChanged?.());
-  grFolder.addBinding(rp, "guardrailHeight", { label: "Height", min: 0.1, max: 2, step: 0.05 }).on("change", () => onAccessoryParamsChanged?.());
-  grFolder.addBinding(rp, "guardrailDepth", { label: "Depth", min: 0.05, max: 1, step: 0.02 }).on("change", () => onAccessoryParamsChanged?.());
-  grFolder.addBinding(rp, "guardrailRailYOffset", { label: "Rail Y offset", min: 0, max: 2, step: 0.05 }).on("change", () => onAccessoryParamsChanged?.());
-  grFolder.addBinding(rp, "guardrailPostSpacing", { label: "Post spacing", min: 0.5, max: 8, step: 0.25 }).on("change", () => onAccessoryParamsChanged?.());
-  grFolder.addBinding(rp, "guardrailColor", { label: "Color", view: "color" }).on("change", () => onAccessoryParamsChanged?.());
-  
-  // Kerb settings (racing curbs)
-  const kerbFolder = accFolder.addFolder({ title: "Kerb Settings", expanded: false });
-  kerbFolder.addBinding(rp, "kerbSide", { label: "Side", options: { Left: "left", Right: "right", Auto: "auto" } }).on("change", () => onAccessoryParamsChanged?.());
-  kerbFolder.addBinding(rp, "kerbEdgeOffset", { label: "Edge offset", min: -1, max: 2, step: 0.05 }).on("change", () => onAccessoryParamsChanged?.());
-  kerbFolder.addBinding(rp, "kerbWidth", { label: "Width", min: 0.2, max: 2, step: 0.05 }).on("change", () => onAccessoryParamsChanged?.());
-  kerbFolder.addBinding(rp, "kerbHeight", { label: "Height", min: 0.02, max: 0.5, step: 0.01 }).on("change", () => onAccessoryParamsChanged?.());
-  kerbFolder.addBinding(rp, "kerbLipHeight", { label: "Lip height", min: 0, max: 0.2, step: 0.005 }).on("change", () => onAccessoryParamsChanged?.());
-  kerbFolder.addBinding(rp, "kerbStripeLength", { label: "Stripe length", min: 0.2, max: 3, step: 0.1 }).on("change", () => onAccessoryParamsChanged?.());
-  kerbFolder.addBinding(rp, "kerbColorA", { label: "Color A", view: "color" }).on("change", () => onAccessoryParamsChanged?.());
-  kerbFolder.addBinding(rp, "kerbColorB", { label: "Color B", view: "color" }).on("change", () => onAccessoryParamsChanged?.());
-  
-  // Barrier settings (Jersey barriers)
-  const barrierFolder = accFolder.addFolder({ title: "Barrier Settings", expanded: false });
-  barrierFolder.addBinding(rp, "barrierSide", { label: "Side", options: { Left: "left", Right: "right", Auto: "auto" } }).on("change", () => onAccessoryParamsChanged?.());
-  barrierFolder.addBinding(rp, "barrierEdgeOffset", { label: "Edge offset", min: 0, max: 4, step: 0.1 }).on("change", () => onAccessoryParamsChanged?.());
-  barrierFolder.addBinding(rp, "barrierHeight", { label: "Height", min: 0.3, max: 1.5, step: 0.05 }).on("change", () => onAccessoryParamsChanged?.());
-  barrierFolder.addBinding(rp, "barrierTopWidth", { label: "Top width", min: 0.05, max: 0.5, step: 0.02 }).on("change", () => onAccessoryParamsChanged?.());
-  barrierFolder.addBinding(rp, "barrierBottomWidth", { label: "Bottom width", min: 0.2, max: 1, step: 0.02 }).on("change", () => onAccessoryParamsChanged?.());
-  barrierFolder.addBinding(rp, "barrierColor", { label: "Color", view: "color" }).on("change", () => onAccessoryParamsChanged?.());
-  
-  // Fence settings
-  const fenceFolder = accFolder.addFolder({ title: "Fence Settings", expanded: false });
-  fenceFolder.addBinding(rp, "fenceSide", { label: "Side", options: { Left: "left", Right: "right", Auto: "auto" } }).on("change", () => onAccessoryParamsChanged?.());
-  fenceFolder.addBinding(rp, "fenceEdgeOffset", { label: "Edge offset", min: 0, max: 5, step: 0.1 }).on("change", () => onAccessoryParamsChanged?.());
-  fenceFolder.addBinding(rp, "fenceHeight", { label: "Height", min: 0.5, max: 3, step: 0.1 }).on("change", () => onAccessoryParamsChanged?.());
-  fenceFolder.addBinding(rp, "fencePostSpacing", { label: "Post spacing", min: 1, max: 6, step: 0.25 }).on("change", () => onAccessoryParamsChanged?.());
-  fenceFolder.addBinding(rp, "fenceRailCount", { label: "Rail count", min: 1, max: 6, step: 1 }).on("change", () => onAccessoryParamsChanged?.());
-  fenceFolder.addBinding(rp, "fenceColor", { label: "Color", view: "color" }).on("change", () => onAccessoryParamsChanged?.());
-
-  // Tunnel settings (centerline tube)
-  const tunnelFolder = accFolder.addFolder({ title: "Tunnel Settings", expanded: false });
-  tunnelFolder.addBinding(rp, "tunnelMode", { label: "Paint mode" }).on("change", () => onAccessoryParamsChanged?.());
-  tunnelFolder.addBinding(rp, "tunnelRadius", { label: "Radius", min: 1, max: 20, step: 0.25 }).on("change", () => onAccessoryParamsChanged?.());
-  tunnelFolder.addBinding(rp, "tunnelYOffset", { label: "Y offset", min: -5, max: 10, step: 0.1 }).on("change", () => onAccessoryParamsChanged?.());
-  tunnelFolder.addBinding(rp, "tunnelRadialSegments", { label: "Radial segs", min: 6, max: 48, step: 1 }).on("change", () => onAccessoryParamsChanged?.());
-  tunnelFolder.addBinding(rp, "tunnelPathSegments", { label: "Path segs", min: 32, max: 400, step: 4 }).on("change", () => onAccessoryParamsChanged?.());
-  tunnelFolder.addBinding(rp, "tunnelColor", { label: "Color", view: "color" }).on("change", () => onAccessoryParamsChanged?.());
-  
-  // Clear buttons
-  accFolder.addButton({ title: "Clear all accessories" }).on("click", () => onAccessoryClearAll?.());
-
-  // Road Decals (markings on road surface)
-  const decalFolder = folder.addFolder({ title: "Road Decals", expanded: false });
-  decalFolder.addBinding(rp, "decalMode", { label: "Decal mode" }).on("change", () => onDecalModeToggle?.());
-  decalFolder.addBinding(rp, "decalTransformMode", {
-    label: "Gizmo mode",
-    options: { Translate: "translate", Rotate: "rotate" },
-  }).on("change", () => onDecalTransformModeChanged?.());
-  decalFolder.addButton({ title: "Delete selected decal" }).on("click", () => onDecalDeleteSelected?.());
-  decalFolder.addBinding(rp, "decalType", {
-    label: "Type",
-    options: {
-      "Zebra Crossing": "zebraCrossing",
-      "Ladder Crossing": "ladderCrossing",
-      "Stop Line": "stopLine",
-      "Arrow ↑": "arrowStraight",
-      "Arrow ←": "arrowLeft",
-      "Arrow →": "arrowRight",
-      "Arrow ↑←": "arrowStraightLeft",
-      "Arrow ↑→": "arrowStraightRight",
-      "Give Way △": "giveWay",
-      "Speed Circle ○": "speedCircle",
-      "Parking Lines": "parkingLines",
-    },
-  }).on("change", () => onDecalTypeChanged?.());
-  decalFolder.addBinding(rp, "decalWidth", { label: "Width", min: 1, max: 20, step: 0.5 }).on("change", () => onDecalParamsChanged?.());
-  decalFolder.addBinding(rp, "decalLength", { label: "Length", min: 1, max: 20, step: 0.5 }).on("change", () => onDecalParamsChanged?.());
-  decalFolder.addBinding(rp, "decalColor", { label: "Color", view: "color" }).on("change", () => onDecalParamsChanged?.());
-  decalFolder.addBinding(rp, "decalStripeCount", { label: "Stripe count", min: 2, max: 20, step: 1 }).on("change", () => onDecalParamsChanged?.());
-  decalFolder.addBinding(rp, "decalSnapToRoad", { label: "Snap rotation" }).on("change", () => onDecalParamsChanged?.());
-  decalFolder.addBinding(rp, "decalRotation", { label: "Manual rotation", min: 0, max: 360, step: 5 }).on("change", () => onDecalParamsChanged?.());
-  decalFolder.addButton({ title: "Clear all decals" }).on("click", () => onDecalClearAll?.());
+  addRoadAccessoriesAndDecalsFolders(folder, rp, {
+    onAccessoryTypeChanged,
+    onAccessoryParamsChanged,
+    onAccessoryClearAll,
+    onDecalModeToggle,
+    onDecalTransformModeChanged,
+    onDecalDeleteSelected,
+    onDecalTypeChanged,
+    onDecalParamsChanged,
+    onDecalClearAll,
+  });
 
   return folder;
 }
