@@ -81,7 +81,8 @@ const tempVec = new THREE.Vector3();
 const tempVec2 = new THREE.Vector3();
 const towerInstanceData = [];
 const battlementInstanceData = [];
-const simClock = new THREE.Clock();
+const simTimer = new THREE.Timer();
+let debrisSleepCounter = 0;
 
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
@@ -122,6 +123,10 @@ const params = {
   gravity:18,
   bounce:0.28,
   angularDamping:0.985,
+  debrisMode:"fade",
+  debrisLifetime:6,
+  maxDebrisCount:800,
+  sleepThreshold:0.42,
 
   // material
   roughness:1,
@@ -417,6 +422,8 @@ function buildTower(){
         removed:false,
         hidden:false,
         falling:false,
+        sleeping:false,
+        sleepOrder:0,
         ttl:0
       });
 
@@ -527,6 +534,8 @@ function buildTower(){
       removed:false,
       hidden:false,
       falling:false,
+      sleeping:false,
+      sleepOrder:0,
       ttl:0
     });
 
@@ -781,8 +790,9 @@ function startFallingInstance(
   );
 
   instance.falling = true;
+  instance.sleeping = false;
   instance.hidden = false;
-  instance.ttl = 6;
+  instance.ttl = params.debrisLifetime;
 }
 
 function hideInstance(collection, mesh, index){
@@ -790,6 +800,8 @@ function hideInstance(collection, mesh, index){
   if(instance){
     instance.hidden = true;
     instance.falling = false;
+    instance.sleeping = false;
+    instance.sleepOrder = 0;
     instance.ttl = 0;
   }
 
@@ -971,16 +983,37 @@ function updateFallingCollection(
         instance.velocity.x *= 0.9;
         instance.velocity.z *= 0.9;
       }
+
+      const horizontalSpeed =
+        Math.hypot(
+          instance.velocity.x,
+          instance.velocity.z
+        );
+      const speed =
+        Math.hypot(horizontalSpeed, instance.velocity.y);
+
+      if(speed < params.sleepThreshold){
+        instance.velocity.set(0,0,0);
+        instance.angularVelocity.set(0,0,0);
+        instance.falling = false;
+        instance.sleeping = true;
+        instance.sleepOrder = ++debrisSleepCounter;
+      }
     }
 
-    instance.ttl -= dt;
-    if(
-      instance.ttl <= 0
-      || instance.position.y < groundY - 8
-    ){
-      hideInstance(collection, mesh, i);
-      updatedAny = true;
-      continue;
+    if(instance.falling){
+      instance.ttl -= dt;
+      if(
+        instance.position.y < groundY - 8
+        || (
+          params.debrisMode === "fade"
+          && instance.ttl <= 0
+        )
+      ){
+        hideInstance(collection, mesh, i);
+        updatedAny = true;
+        continue;
+      }
     }
 
     tempObj.position.copy(instance.position);
@@ -997,6 +1030,72 @@ function updateFallingCollection(
 
   if(updatedAny){
     mesh.instanceMatrix.needsUpdate = true;
+  }
+
+  enforceDebrisLimit();
+}
+
+function enforceDebrisLimit(){
+  if(params.debrisMode !== "keep"){
+    return;
+  }
+
+  const sleeping = [];
+
+  for(let i=0;i<towerInstanceData.length;i++){
+    const instance = towerInstanceData[i];
+    if(instance.sleeping && !instance.hidden){
+      sleeping.push({
+        collection:towerInstanceData,
+        mesh:towerMesh,
+        index:i,
+        order:instance.sleepOrder
+      });
+    }
+  }
+
+  for(let i=0;i<battlementInstanceData.length;i++){
+    const instance = battlementInstanceData[i];
+    if(instance.sleeping && !instance.hidden){
+      sleeping.push({
+        collection:battlementInstanceData,
+        mesh:battlementMesh,
+        index:i,
+        order:instance.sleepOrder
+      });
+    }
+  }
+
+  if(sleeping.length <= params.maxDebrisCount){
+    return;
+  }
+
+  sleeping.sort((a,b)=>a.order - b.order);
+  const overflow =
+    sleeping.length - params.maxDebrisCount;
+
+  let towerUpdated = false;
+  let battlementUpdated = false;
+
+  for(let i=0;i<overflow;i++){
+    const entry = sleeping[i];
+    hideInstance(
+      entry.collection,
+      entry.mesh,
+      entry.index
+    );
+    if(entry.mesh === towerMesh){
+      towerUpdated = true;
+    }else if(entry.mesh === battlementMesh){
+      battlementUpdated = true;
+    }
+  }
+
+  if(towerUpdated && towerMesh){
+    towerMesh.instanceMatrix.needsUpdate = true;
+  }
+  if(battlementUpdated && battlementMesh){
+    battlementMesh.instanceMatrix.needsUpdate = true;
   }
 }
 
@@ -1179,6 +1278,35 @@ function buildPane(){
     { min:0, max:0.9 }
   );
 
+  fDestroy.addBinding(
+    params,
+    "debrisMode",
+    {
+      options:{
+        fade:"fade",
+        keep:"keep"
+      }
+    }
+  );
+
+  fDestroy.addBinding(
+    params,
+    "debrisLifetime",
+    { min:1, max:20 }
+  );
+
+  fDestroy.addBinding(
+    params,
+    "maxDebrisCount",
+    { min:50, max:3000, step:10 }
+  );
+
+  fDestroy.addBinding(
+    params,
+    "sleepThreshold",
+    { min:0.05, max:2 }
+  );
+
   // battlements
 
   const fBattle =
@@ -1319,8 +1447,9 @@ function applyQualityPreset(level){
 function animate(){
 
   requestAnimationFrame(animate);
+  simTimer.update();
   const dt = Math.min(
-    simClock.getDelta(),
+    simTimer.getDelta(),
     0.033
   );
 
