@@ -895,6 +895,8 @@ export function createToolState() {
       kerbSplineLateralOffset: 0.0,
       activeKerbIndex: 0,
       kerbAutoApplyActive: true,
+      /** Spline kerb mesh: `"strip"` = PBR ribbon; `"chunk"` = Smart Road / Full Road style blocks */
+      kerbMeshStyle: "strip",
       splineWallHeight: 3.0,
       splineWallWidth: 0.22,
       splineWallPathSegs: 80,

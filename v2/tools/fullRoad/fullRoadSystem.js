@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { generateRoadGeometry } from "../../core/road/roadMesh.js";
 import { buildLabNetworkGeometry } from "../../core/road/roadNetworkLabGeometry.js";
+import { buildChunkedKerbGroup } from "../../core/road/kerbChunkGeometry.js";
 import {
   createRoadUniforms,
   createRoadMaterial,
@@ -2368,141 +2369,23 @@ export class FullRoadSystem {
     const edgeOffset = p.kerbEdgeOffset ?? 0.0;
     const lateralDist = halfWidth + edgeOffset;
     const sideSign = side === "left" ? 1 : -1;
-    
     const tMin = Math.min(startT, endT);
     const tMax = Math.max(startT, endT);
-    
-    const kerbWidth = p.kerbWidth ?? 0.8;
-    const kerbHeight = p.kerbHeight ?? 0.12;
-    const lipHeight = p.kerbLipHeight ?? 0.03;
-    const squareSize = p.kerbStripeLength ?? 0.8; // Square size = stripe length
-    const colorA = new THREE.Color(p.kerbColorA ?? "#cc2222");
-    const colorB = new THREE.Color(p.kerbColorB ?? "#f2f2f2");
-    
-    // Sample path to get total length
-    const sampleCount = 128;
-    const pathPoints = [];
-    for (let i = 0; i <= sampleCount; i++) {
-      const t = tMin + (tMax - tMin) * (i / sampleCount);
-      pathPoints.push({ t, pt: curve.getPointAt(t) });
-    }
-    
-    // Calculate total arc length
-    let totalLength = 0;
-    for (let i = 1; i < pathPoints.length; i++) {
-      totalLength += pathPoints[i].pt.distanceTo(pathPoints[i - 1].pt);
-    }
-    
-    // Calculate number of squares
-    const squareCount = Math.max(1, Math.round(totalLength / squareSize));
-    const actualSquareLen = totalLength / squareCount;
-    
-    const group = new THREE.Group();
-    
-    // Build each square as a separate mesh (no color blending)
-    let currentLen = 0;
-    let squareIdx = 0;
-    let squareStartT = tMin;
-    
-    for (let i = 1; i < pathPoints.length; i++) {
-      const segLen = pathPoints[i].pt.distanceTo(pathPoints[i - 1].pt);
-      const prevLen = currentLen;
-      currentLen += segLen;
-      
-      // Check if we've completed a square
-      const targetLen = (squareIdx + 1) * actualSquareLen;
-      
-      if (currentLen >= targetLen || i === pathPoints.length - 1) {
-        // Interpolate to find exact end t
-        const overshoot = currentLen - targetLen;
-        const ratio = segLen > 0.001 ? Math.max(0, 1 - overshoot / segLen) : 1;
-        const squareEndT = pathPoints[i - 1].t + (pathPoints[i].t - pathPoints[i - 1].t) * ratio;
-        
-        if (i === pathPoints.length - 1) {
-          // Last segment - extend to end
-          this._buildKerbSquare(
-            group, curve, side, squareStartT, tMax,
-            lateralDist, kerbWidth, kerbHeight, lipHeight, sideSign,
-            squareIdx % 2 === 0 ? colorA : colorB, isPreview
-          );
-        } else {
-          this._buildKerbSquare(
-            group, curve, side, squareStartT, squareEndT,
-            lateralDist, kerbWidth, kerbHeight, lipHeight, sideSign,
-            squareIdx % 2 === 0 ? colorA : colorB, isPreview
-          );
-        }
-        
-        squareStartT = squareEndT;
-        squareIdx++;
-      }
-    }
-    
-    return group;
-  }
-  
-  _buildKerbSquare(group, curve, side, startT, endT, lateralDist, kerbWidth, kerbHeight, lipHeight, sideSign, color, isPreview) {
-    const segCount = Math.max(4, Math.ceil((endT - startT) * 40));
-    
-    const positions = [];
-    const indices = [];
-    
-    for (let i = 0; i <= segCount; i++) {
-      const t = startT + (endT - startT) * (i / segCount);
-      const pt = curve.getPointAt(t);
-      const tangent = curve.getTangentAt(t);
-      const perp = perpXZ(normalizeXZ(tangent));
-      
-      const groundY = this.getWorldHeight(
-        pt.x + perp.x * lateralDist * sideSign,
-        pt.z + perp.z * lateralDist * sideSign,
-      );
-      
-      const innerX = pt.x + perp.x * lateralDist * sideSign;
-      const innerZ = pt.z + perp.z * lateralDist * sideSign;
-      const outerX = pt.x + perp.x * (lateralDist + kerbWidth) * sideSign;
-      const outerZ = pt.z + perp.z * (lateralDist + kerbWidth) * sideSign;
-      
-      // 4 vertices: inner-bottom, inner-top, outer-top, outer-bottom
-      positions.push(innerX, groundY, innerZ);
-      positions.push(innerX, groundY + kerbHeight + lipHeight, innerZ);
-      positions.push(outerX, groundY + kerbHeight, outerZ);
-      positions.push(outerX, groundY, outerZ);
-    }
-    
-    // Build indices for quads
-    for (let i = 0; i < segCount; i++) {
-      const base = i * 4;
-      // Inner face (lip)
-      indices.push(base, base + 4, base + 1);
-      indices.push(base + 4, base + 5, base + 1);
-      // Top face
-      indices.push(base + 1, base + 5, base + 2);
-      indices.push(base + 5, base + 6, base + 2);
-      // Outer face
-      indices.push(base + 2, base + 6, base + 3);
-      indices.push(base + 6, base + 7, base + 3);
-    }
-    
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-    geo.setIndex(indices);
-    geo.computeVertexNormals();
-    
-    const mat = new THREE.MeshStandardMaterial({
-      color: color,
-      roughness: 0.6,
-      metalness: 0.0,
-      side: THREE.DoubleSide,
-      transparent: isPreview,
-      opacity: isPreview ? 0.6 : 1.0,
-      flatShading: true, // Sharp edges, no smoothing
+    return buildChunkedKerbGroup({
+      curve,
+      startT: tMin,
+      endT: tMax,
+      sideSign,
+      lateralDist,
+      kerbWidth: p.kerbWidth ?? 0.8,
+      kerbHeight: p.kerbHeight ?? 0.12,
+      lipHeight: p.kerbLipHeight ?? 0.03,
+      squareSize: p.kerbStripeLength ?? 0.8,
+      colorA: p.kerbColorA ?? "#cc2222",
+      colorB: p.kerbColorB ?? "#f2f2f2",
+      getWorldHeight: (x, z) => this.getWorldHeight(x, z),
+      isPreview,
     });
-    
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    group.add(mesh);
   }
 
   // ─────────────────────────────────────────────────────────────────────────────

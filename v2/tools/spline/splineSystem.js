@@ -8,6 +8,7 @@ import {
   worldToChunkIndex,
 } from "../../core/terrain/chunkMath.js";
 import { createKerbStripNodeMaterial } from "./kerbStripMaterial.js";
+import { buildChunkedKerbGroup } from "../../core/road/kerbChunkGeometry.js";
 import {
   buildWallGeometry,
   buildBarrierGeometry,
@@ -1003,6 +1004,7 @@ export class SplineSystem {
         colorA: s.kerbColorA,
         colorB: s.kerbColorB,
         sideSign,
+        meshStyle: s.kerbMeshStyle === "chunk" ? "chunk" : "strip",
         ...this._kerbTexFieldsFromSplineState(),
         mesh: null,
       };
@@ -1048,6 +1050,7 @@ export class SplineSystem {
         colorA: s.kerbColorA,
         colorB: s.kerbColorB,
         sideSign,
+        meshStyle: s.kerbMeshStyle === "chunk" ? "chunk" : "strip",
         splineBasePoints: basePts.map((p) => ({ x: p.x, y: p.y, z: p.z })),
         splineLateralOffset: lateral,
         ...this._kerbTexFieldsFromSplineState(),
@@ -1076,12 +1079,8 @@ export class SplineSystem {
   }
 
   _buildKerbMesh(kerb) {
-    if (kerb.mesh) {
-      this.scene.remove(kerb.mesh);
-      kerb.mesh.geometry.dispose();
-      kerb.mesh.material.dispose();
-      kerb.mesh = null;
-    }
+    this._disposeKerbRoot(kerb);
+
     const groundedPoints = kerb.points.map((p) => new THREE.Vector3(
       p.x,
       this.getWorldHeight(p.x, p.z),
@@ -1093,6 +1092,33 @@ export class SplineSystem {
       "catmullrom",
       0.5,
     );
+
+    const roadLift = Math.max(0.01, Math.min(0.03, (this.toolState.road?.heightOffset ?? 0.12) * 0.25));
+    const sideSign = Math.sign(kerb.sideSign || 1);
+
+    if (kerb.meshStyle === "chunk") {
+      const group = buildChunkedKerbGroup({
+        curve,
+        startT: 0,
+        endT: 1,
+        sideSign,
+        lateralDist: 0,
+        kerbWidth: kerb.width,
+        kerbHeight: kerb.height,
+        lipHeight: kerb.lipHeight,
+        squareSize: Math.max(0.1, kerb.stripeLength ?? 0.8),
+        colorA: kerb.colorA ?? "#c92c2c",
+        colorB: kerb.colorB ?? "#f2f2f2",
+        getWorldHeight: (x, z) => this.getWorldHeight(x, z),
+        isPreview: false,
+      });
+      group.position.y += roadLift;
+      group.renderOrder = 4;
+      kerb.mesh = group;
+      this.scene.add(group);
+      return;
+    }
+
     const geo = this._buildKerbStripGeometry(
       curve,
       kerb.pathSegs,
@@ -1139,7 +1165,6 @@ export class SplineSystem {
     }
     geo.setAttribute("color", new THREE.BufferAttribute(color, 3));
     const mesh = new THREE.Mesh(geo, mat);
-    const roadLift = Math.max(0.01, Math.min(0.03, (this.toolState.road?.heightOffset ?? 0.12) * 0.25));
     mesh.position.y += roadLift;
     mesh.renderOrder = 4;
     mesh.castShadow = true;
@@ -1222,6 +1247,7 @@ export class SplineSystem {
     s.kerbTexBrightness = k.texBrightness ?? 0;
     s.kerbTexContrast = k.texContrast ?? 1;
     s.kerbTexSaturation = k.texSaturation ?? 1;
+    s.kerbMeshStyle = k.meshStyle === "chunk" ? "chunk" : "strip";
     if (Array.isArray(k.splineBasePoints) && k.splineBasePoints.length >= 2) {
       s.kerbSplineLateralOffset = k.splineLateralOffset ?? 0;
       s.kerbSplineSide = Math.sign(k.sideSign || 1) >= 0 ? "left" : "right";
@@ -1266,6 +1292,7 @@ export class SplineSystem {
     k.texBrightness = s.kerbTexBrightness ?? 0;
     k.texContrast = Math.max(0.05, s.kerbTexContrast ?? 1);
     k.texSaturation = THREE.MathUtils.clamp(s.kerbTexSaturation ?? 1, 0, 3);
+    k.meshStyle = s.kerbMeshStyle === "chunk" ? "chunk" : "strip";
     this._buildKerbMesh(k);
     return true;
   }
@@ -1274,12 +1301,7 @@ export class SplineSystem {
     if (this.kerbs.length === 0) return false;
     const idx = THREE.MathUtils.clamp(this.toolState.spline.activeKerbIndex | 0, 0, this.kerbs.length - 1);
     const k = this.kerbs[idx];
-    if (k.mesh) {
-      this.scene.remove(k.mesh);
-      k.mesh.geometry.dispose();
-      k.mesh.material.dispose();
-      k.mesh = null;
-    }
+    this._disposeKerbRoot(k);
     this.kerbs.splice(idx, 1);
     this.toolState.spline.activeKerbIndex = Math.max(0, Math.min(idx, this.kerbs.length - 1));
     this._syncToolStateFromActiveKerb();
@@ -1317,6 +1339,7 @@ export class SplineSystem {
       texBrightness: src.texBrightness ?? 0,
       texContrast: Math.max(0.05, src.texContrast ?? 1),
       texSaturation: THREE.MathUtils.clamp(src.texSaturation ?? 1, 0, 3),
+      meshStyle: src.meshStyle === "chunk" ? "chunk" : "strip",
       mesh: null,
     };
     this._buildKerbMesh(dup);
@@ -1726,6 +1749,7 @@ export class SplineSystem {
           row.splineBasePoints = k.splineBasePoints.map((p) => ({ x: p.x, y: p.y, z: p.z }));
           row.splineLateralOffset = k.splineLateralOffset ?? 0;
         }
+        if (k.meshStyle === "chunk") row.meshStyle = "chunk";
         return row;
       }),
       linearFeatures: this.linearFeatures.map((f) => {
@@ -1840,6 +1864,7 @@ export class SplineSystem {
         texBrightness: k.texBrightness ?? 0,
         texContrast: Math.max(0.05, k.texContrast ?? 1),
         texSaturation: THREE.MathUtils.clamp(k.texSaturation ?? 1, 0, 3),
+        meshStyle: k.meshStyle === "chunk" ? "chunk" : "strip",
         mesh: null,
       };
       this._buildKerbMesh(kerb);
@@ -1918,13 +1943,24 @@ export class SplineSystem {
     this.guardrails.length = 0;
   }
 
+  _disposeKerbRoot(kerb) {
+    if (!kerb?.mesh) return;
+    this.scene.remove(kerb.mesh);
+    if (kerb.mesh.isGroup) {
+      kerb.mesh.traverse((obj) => {
+        if (obj.geometry) obj.geometry.dispose();
+        if (obj.material) obj.material.dispose();
+      });
+    } else {
+      if (kerb.mesh.geometry) kerb.mesh.geometry.dispose();
+      if (kerb.mesh.material) kerb.mesh.material.dispose();
+    }
+    kerb.mesh = null;
+  }
+
   clearKerbs() {
     for (const k of this.kerbs) {
-      if (!k.mesh) continue;
-      this.scene.remove(k.mesh);
-      k.mesh.geometry.dispose();
-      k.mesh.material.dispose();
-      k.mesh = null;
+      this._disposeKerbRoot(k);
     }
     this.kerbs.length = 0;
   }
@@ -1950,10 +1986,17 @@ export class SplineSystem {
       });
     }
     for (const k of this.kerbs) {
-      const mesh = k.mesh;
-      if (!mesh || !mesh.geometry) continue;
-      mesh.updateMatrixWorld(true);
-      cb(mesh.geometry, mesh.matrixWorld);
+      const root = k.mesh;
+      if (!root) continue;
+      root.updateMatrixWorld(true);
+      if (root.isGroup) {
+        root.traverse((obj) => {
+          if (!obj.isMesh || !obj.geometry) return;
+          cb(obj.geometry, obj.matrixWorld);
+        });
+      } else if (root.isMesh && root.geometry) {
+        cb(root.geometry, root.matrixWorld);
+      }
     }
     for (const f of this.linearFeatures) {
       const mesh = f.mesh;

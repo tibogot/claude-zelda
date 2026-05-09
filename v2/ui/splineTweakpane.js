@@ -133,6 +133,12 @@ export function addSplineFolder(pane, toolState, opts) {
     },
   });
   bindKerb("kerbSplineLateralOffset", { label: "Spline lateral", min: -2, max: 4, step: 0.01 });
+  kerbFolder
+    .addBinding(sp, "kerbMeshStyle", {
+      label: "Kerb mesh",
+      options: { "Strip (PBR)": "strip", "Chunk (Smart Road)": "chunk" },
+    })
+    .on("change", () => onSplineKerbLiveChanged?.("kerbMeshStyle"));
   kerbFolder.addBlade({ view: "separator" });
   bindKerb("kerbFromRoadIndex", { label: "Road index", min: 0, max: 63, step: 1 });
   bindKerb("kerbFromRoadSide", {
