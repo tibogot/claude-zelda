@@ -286,6 +286,7 @@ function extractSerializableSettings(toolState) {
       height: { ...toolState.fog.height },
       distance: { ...toolState.fog.distance },
     },
+    volumetricCloud: { ...toolState.volumetricCloud },
     borderMountains: { ...toolState.borderMountains },
     playSpawn: { ...toolState.playSpawn },
     audio: {
@@ -370,6 +371,9 @@ export function applySettings(toolState, settings) {
   if (settings.fog) {
     if (settings.fog.height) Object.assign(toolState.fog.height, settings.fog.height);
     if (settings.fog.distance) Object.assign(toolState.fog.distance, settings.fog.distance);
+  }
+  if (settings.volumetricCloud) {
+    Object.assign(toolState.volumetricCloud, settings.volumetricCloud);
   }
   if (settings.borderMountains) Object.assign(toolState.borderMountains, settings.borderMountains);
   if (settings.playSpawn) Object.assign(toolState.playSpawn, settings.playSpawn);

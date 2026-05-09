@@ -2724,6 +2724,78 @@ function buildWorldTab(app) {
   _color(dfBody, ts.fog.distance, 'color', { label: 'Color', onChange: fogCb });
   _slider(dfBody, ts.fog.distance, 'density', { label: 'Density', min: 0.0001, max: 0.05, step: 0.0001, onChange: fogCb });
 
+  // --- Volumetric clouds — ranges match `clouds_terrain_1600-superjet.html` (no god-rays UI) ---
+  const vcBody = _section(container, 'Volumetric clouds', false);
+  const vc = ts.volumetricCloud;
+  const _vcRegenVol = () => app.rebuildVolumetricCloudVolume();
+  const _vcRegenMask = () => app.rebuildVolumetricCloudMasks();
+  _toggle(vcBody, vc, 'enabled', { label: 'Enabled' });
+
+  const vcGen = _section(vcBody, 'Texture generation (CPU regenerate)', false);
+  _dropdown(vcGen, vc, 'textureSize', {
+    label: 'Texture resolution',
+    options: { '32': 32, '64': 64, '96': 96, '128': 128, '256': 256 },
+  });
+  _slider(vcGen, vc, 'cloudCoverage', { label: 'Coverage / threshold', min: 0, max: 1, step: 0.01 });
+  _slider(vcGen, vc, 'cloudSoftness', { label: 'Edge softness', min: 0, max: 0.5, step: 0.005 });
+  _slider(vcGen, vc, 'noiseScale', { label: 'Scale (zoom)', min: 0.1, max: 20, step: 0.1 });
+  _slider(vcGen, vc, 'octaves', { label: 'Octaves (detail)', min: 1, max: 8, step: 1 });
+  _slider(vcGen, vc, 'persistence', { label: 'Persistence', min: 0.1, max: 1, step: 0.01 });
+  _slider(vcGen, vc, 'lacunarity', { label: 'Lacunarity', min: 1.1, max: 4, step: 0.1 });
+  _slider(vcGen, vc, 'noiseIntensity', { label: 'Noise intensity', min: 0.1, max: 5, step: 0.05 });
+  _slider(vcGen, vc, 'seed', { label: 'Seed', min: 0, max: 1000, step: 0.01 });
+  const vcGenBtns = document.createElement('div');
+  vcGenBtns.style.padding = '4px 0';
+  vcGen.appendChild(vcGenBtns);
+  _button(vcGenBtns, { title: '▶ Generate new 3D texture', onClick: _vcRegenVol });
+
+  const vcShape = _section(vcBody, 'Cloud shape (real-time)', false);
+  _slider(vcShape, vc, 'textureTiling', { label: 'Tiling', min: 1, max: 10, step: 1 });
+
+  const vcMat = _section(vcBody, 'Material & rendering (real-time)', false);
+  _slider(vcMat, vc, 'densityThreshold', { label: 'Density threshold', min: 0, max: 1, step: 0.01 });
+  _slider(vcMat, vc, 'densityMultiplier', { label: 'Density multiplier', min: 0, max: 100, step: 0.1 });
+  _slider(vcMat, vc, 'opacity', { label: 'Overall opacity', min: 0, max: 20, step: 0.1 });
+  _slider(vcMat, vc, 'raymarchSteps', { label: 'Quality (steps)', min: 10, max: 120, step: 1 });
+  _slider(vcMat, vc, 'lightSteps', { label: 'Internal shadow quality', min: 0, max: 32, step: 1 });
+  _slider(vcMat, vc, 'containerScale', { label: 'Container scale', min: 1, max: 10000, step: 1 });
+
+  const vcMask = _section(vcBody, 'Cloud shape (mask)', false);
+  _toggle(vcMask, vc, 'visualizeMask', { label: 'Visualize mask' });
+  _slider(vcMask, vc, 'maskSeed', { label: 'Mask seed', min: 0, max: 100, step: 1, onChange: _vcRegenMask });
+  _slider(vcMask, vc, 'frequenciaRuido', { label: 'Noise frequency', min: 0.1, max: 10, step: 0.1, onChange: _vcRegenMask });
+  _slider(vcMask, vc, 'raio', { label: 'Mask radius', min: 0.1, max: 0.7, step: 0.01 });
+  _slider(vcMask, vc, 'maskSoftness', { label: 'Mask edge softness', min: 0, max: 0.5, step: 0.005 });
+  _slider(vcMask, vc, 'forcaRuido', { label: 'Noise strength (deform.)', min: 0, max: 0.5, step: 0.01 });
+  const vcFlat = _section(vcMask, 'Flattening', false);
+  _slider(vcFlat, vc, 'achatamentoCima', { label: 'Top (Y+)', min: 0.1, max: 2, step: 0.05 });
+  _slider(vcFlat, vc, 'achatamentoBaixo', { label: 'Bottom (Y−)', min: 0.1, max: 2, step: 0.05 });
+  _slider(vcFlat, vc, 'achatamentoXpos', { label: 'Right (X+)', min: 0.1, max: 2, step: 0.05 });
+  _slider(vcFlat, vc, 'achatamentoXneg', { label: 'Left (X−)', min: 0.1, max: 2, step: 0.05 });
+  _slider(vcFlat, vc, 'achatamentoZpos', { label: 'Front (Z+)', min: 0.1, max: 2, step: 0.05 });
+  _slider(vcFlat, vc, 'achatamentoZneg', { label: 'Back (Z−)', min: 0.1, max: 2, step: 0.05 });
+  const vcDet = _section(vcMask, 'Detail noise', false);
+  _slider(vcDet, vc, 'seedDetalhe', { label: 'Detail seed', min: 0, max: 100, step: 1, onChange: _vcRegenMask });
+  _slider(vcDet, vc, 'frequenciaRuidoDetalhe', { label: 'Detail frequency', min: 0.1, max: 25, step: 0.1, onChange: _vcRegenMask });
+  _slider(vcDet, vc, 'forcaRuidoDetalhe', { label: 'Detail strength', min: 0, max: 0.1, step: 0.001 });
+
+  const vcAnim = _section(vcBody, 'Texture animation', false);
+  _toggle(vcAnim, vc, 'isAnimating', { label: '▶ Animate cloud' });
+  _slider(vcAnim, vc, 'animationSpeedX', { label: 'Speed X', min: -0.2, max: 0.2, step: 0.001 });
+  _slider(vcAnim, vc, 'animationSpeedY', { label: 'Speed Y', min: -0.2, max: 0.2, step: 0.001 });
+  _slider(vcAnim, vc, 'animationSpeedZ', { label: 'Speed Z', min: -0.2, max: 0.2, step: 0.001 });
+
+  const vcPlace = _section(vcBody, 'Placement & volume LOD', false);
+  _toggle(vcPlace, vc, 'lodAuto', { label: 'Auto LOD (distance)' });
+  _toggle(vcPlace, vc, 'followCamera', { label: 'Follow anchor XZ (pivot / car)' });
+  _toggle(vcPlace, vc, 'lodFrustumCull', { label: 'Frustum cull volume' });
+  _slider(vcPlace, vc, 'cloudFollowSmoothing', { label: 'Follow smoothing', min: 0.02, max: 0.5, step: 0.01 });
+  _slider(vcPlace, vc, 'cloudHeightY', { label: 'Cloud height Y', min: 80, max: 600, step: 1 });
+  const vcBtnRow = document.createElement('div');
+  vcBtnRow.style.padding = '4px 0';
+  vcPlace.appendChild(vcBtnRow);
+  _button(vcBtnRow, { title: 'Rebuild shape masks (CPU)', onClick: _vcRegenMask });
+
   // --- Terrain / streaming LOD (was Tweakpane "Terrain/LOD") ---
   const cfg = app.config;
   const lodWorldBody = _section(container, 'Terrain / LOD', false);

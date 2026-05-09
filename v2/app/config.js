@@ -211,6 +211,58 @@ export const V2_CONFIG = {
       density: 0.006,
     },
   },
+  /**
+   * Ray-marched volumetric cloud box (`v2/render/clouds/volumetricCloudSystem.js`).
+   * Off by default; enable from editor World tab.
+   */
+  volumetricCloud: {
+    enabled: false,
+    /** Same default as superjet: fixed world volume; enable to lerp XZ toward pivot / car. */
+    followCamera: false,
+    /** Same as superjet `lodAuto` — reduce raymarch steps when camera is far from the volume. */
+    lodAuto: true,
+    /** Same as superjet `isAnimating` — scroll 3D noise offset. */
+    isAnimating: true,
+    cloudFollowSmoothing: 0.12,
+    lodFrustumCull: true,
+    containerScale: 420,
+    /** Same default as `clouds_terrain_1600-superjet.html` `parameters.cloudHeightY`. */
+    cloudHeightY: 268,
+    textureSize: 96,
+    cloudCoverage: 0.55,
+    cloudSoftness: 0.05,
+    noiseScale: 3.5,
+    octaves: 5,
+    persistence: 0.5,
+    lacunarity: 3.0,
+    noiseIntensity: 1.0,
+    /** Overridden per session in `createToolState()` like superjet `Math.random() * 1000`. */
+    seed: 0,
+    textureTiling: 2.0,
+    densityThreshold: 0.0,
+    densityMultiplier: 50.0,
+    opacity: 6.0,
+    raymarchSteps: 44,
+    lightSteps: 1,
+    animationSpeedX: 0.02,
+    animationSpeedY: 0.0,
+    animationSpeedZ: 0.01,
+    raio: 0.52,
+    maskSoftness: 0.17,
+    achatamentoCima: 0.7,
+    achatamentoBaixo: 0.3,
+    achatamentoXpos: 0.9,
+    achatamentoXneg: 0.9,
+    achatamentoZpos: 0.9,
+    achatamentoZneg: 0.9,
+    maskSeed: 1,
+    forcaRuido: 0.05,
+    frequenciaRuido: 2.7,
+    seedDetalhe: 10,
+    forcaRuidoDetalhe: 0.036,
+    frequenciaRuidoDetalhe: 10.5,
+    visualizeMask: false,
+  },
 };
 
 export function getChunkCountPerAxis(config = V2_CONFIG) {

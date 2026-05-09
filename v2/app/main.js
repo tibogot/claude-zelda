@@ -89,6 +89,7 @@ import { createFleurSystem, FLEUR_PRESETS, FLEUR_ALPHA_URLS } from "../../fleur-
 import { createAmbientFxStore } from "../core/ambientfx/ambientFxStore.js";
 import { createLeafFxStore } from "../core/ambientfx/leafFxStore.js";
 import { BorderMountains } from "../render/terrain/borderMountains.js";
+import { createVolumetricCloudSystem } from "../render/clouds/volumetricCloudSystem.js";
 
 export async function startV2App(opts = {}) {
   const config = structuredClone(V2_CONFIG);
@@ -2283,6 +2284,21 @@ export async function startV2App(opts = {}) {
     getParams: () => toolState.lensFlare,
   });
 
+  let volumetricCloudSystem = null;
+  try {
+    volumetricCloudSystem = await createVolumetricCloudSystem({
+      renderer,
+      scene,
+      camera,
+      toolState,
+      getSunDir: () => sunDir,
+      sun,
+      hemi,
+    });
+  } catch (err) {
+    console.warn("[V2] Volumetric cloud volume failed to init:", err);
+  }
+
   function updatePointer(event) {
     const rect = renderer.domElement.getBoundingClientRect();
     pointerNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
@@ -3070,6 +3086,7 @@ export async function startV2App(opts = {}) {
     camera.updateProjectionMatrix();
     camera.updateMatrixWorld();
     renderer.setSize(rw, rh);
+    volumetricCloudSystem?.setDepthTargetSize?.();
     if (csm?.mainFrustum && toolState.csm.enabled) csm.updateFrustums();
   }
   if (_uiContainer) {
@@ -3092,6 +3109,10 @@ export async function startV2App(opts = {}) {
     audioSystem.update(dtSec);
     camera.updateMatrixWorld();
     const focusPos = playMode.active ? playMode.playerPos : camera.position;
+    /** Cloud volume follow anchor — same idea as superjet `playerPos`, not the orbit camera. */
+    const cloudFollowAnchor = playMode.active
+      ? playMode.playerPos
+      : controls.target;
 
     const Li = toolState.light;
     const S = toolState.physicalSky;
@@ -3195,7 +3216,9 @@ export async function startV2App(opts = {}) {
     // }
     riverSystem.update(dtMs * 0.001);
     splineSystem.update(dtMs * 0.001);
-    renderer.render(scene, camera);
+    if (!volumetricCloudSystem?.tryRenderFrame?.(cloudFollowAnchor, dtSec)) {
+      renderer.render(scene, camera);
+    }
   });
 
   return {
@@ -3360,6 +3383,12 @@ export async function startV2App(opts = {}) {
     cliffTextureSlotChanged() { _cliffTextureSlotChanged(); },
     groundTextureSlotChanged() { _groundTextureSlotChanged(); },
     onConfigChanged() { chunkStream.update(camera.position); },
+    rebuildVolumetricCloudVolume() {
+      volumetricCloudSystem?.rebuildVolume?.();
+    },
+    rebuildVolumetricCloudMasks() {
+      volumetricCloudSystem?.rebuildMaskTextures?.();
+    },
     dispose() {
       renderer.domElement.removeEventListener("wheel", onCanvasWheelBrush, { capture: true });
       if (csm) {
@@ -3375,6 +3404,8 @@ export async function startV2App(opts = {}) {
       if (pmremGenerator) pmremGenerator.dispose();
       sky.dispose?.();
       lensFlare.dispose();
+      volumetricCloudSystem?.dispose?.();
+      volumetricCloudSystem = null;
       ui.dispose();
       chunkStream.dispose();
       treeLodRenderer.dispose();

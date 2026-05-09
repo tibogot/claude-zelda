@@ -96,6 +96,10 @@ export function createToolState() {
       height: { ...V2_CONFIG.fog.height },
       distance: { ...V2_CONFIG.fog.distance },
     },
+    volumetricCloud: {
+      ...V2_CONFIG.volumetricCloud,
+      seed: Math.random() * 1000,
+    },
     playSmoke: {
       enabled: true,
       emitRate: 48,
