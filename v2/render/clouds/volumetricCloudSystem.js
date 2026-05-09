@@ -1,6 +1,6 @@
 /**
  * Volumetric cloud box (ray-marched) — ported from `clouds_terrain_1600-superjet.html`.
- * Phase 1: depth-aware volume + composite into scene; no occlusion god-rays pass.
+ * Depth prepass, occlusion mask, god-rays, scene → `finalRT`, composite, canvas blit (superjet-style).
  * Cloud mesh lives on {@link VOLUME_LAYER} so a layer-0 depth prepass excludes it.
  */
 import * as THREE from "three";
@@ -46,6 +46,8 @@ const VOLUME_LAYER = 10;
 const PI_VAL = 3.14159265359;
 const MAX_RM_STEPS = 120;
 const MAX_LIGHT_STEPS = 32;
+const MAX_GOD_SAMPLES = 128;
+const SUN_DISC_GEOM_RADIUS = 340;
 /** Same as `clouds_terrain_1600-superjet.html` for distance-based step LOD. */
 const LOD_DIST_NEAR = 180;
 const LOD_DIST_FAR = 1200;
@@ -191,6 +193,7 @@ function buildMaskTexture3D(maskSize, freq, seed) {
  * @param {() => THREE.Vector3} opts.getSunDir
  * @param {THREE.DirectionalLight} opts.sun
  * @param {THREE.HemisphereLight} opts.hemi
+ * @param {() => THREE.Object3D[]} [opts.getOccluderMeshes] — terrain/solids for occlusion pass (e.g. chunk meshes).
  */
 export async function createVolumetricCloudSystem({
   renderer,
@@ -200,19 +203,71 @@ export async function createVolumetricCloudSystem({
   getSunDir,
   sun,
   hemi,
+  getOccluderMeshes = () => [],
 }) {
   const p0 = toolState.volumetricCloud;
   const _drawingBuf = new THREE.Vector2();
   let w = 1;
   let h = 1;
-  renderer.getDrawingBufferSize(_drawingBuf);
-  w = Math.max(1, Math.floor(_drawingBuf.x));
-  h = Math.max(1, Math.floor(_drawingBuf.y));
+  let hw = 1;
+  let hh = 1;
+
+  const finalRTDefaults = {
+    minFilter: THREE.LinearFilter,
+    magFilter: THREE.LinearFilter,
+    format: THREE.RGBAFormat,
+    type: THREE.HalfFloatType,
+  };
+  const effectRTDefaults = {
+    minFilter: THREE.LinearFilter,
+    magFilter: THREE.LinearFilter,
+    format: THREE.RGBAFormat,
+    type: THREE.UnsignedByteType,
+  };
+
+  function layoutEffectBufferSizes() {
+    renderer.getDrawingBufferSize(_drawingBuf);
+    w = Math.max(1, Math.floor(_drawingBuf.x));
+    h = Math.max(1, Math.floor(_drawingBuf.y));
+    const es = THREE.MathUtils.clamp(
+      toolState.volumetricCloud.effectBufferScale ?? 0.35,
+      0.2,
+      1,
+    );
+    hw = Math.max(1, Math.floor(w * es));
+    hh = Math.max(1, Math.floor(h * es));
+  }
+  layoutEffectBufferSizes();
 
   const depthTarget = new THREE.RenderTarget(w, h);
   depthTarget.depthTexture = new THREE.DepthTexture(w, h);
   depthTarget.depthTexture.format = THREE.DepthFormat;
   depthTarget.depthTexture.type = THREE.UnsignedShortType;
+
+  const occlusionRT = new THREE.RenderTarget(hw, hh, effectRTDefaults);
+  const godraysRT = new THREE.RenderTarget(hw, hh, effectRTDefaults);
+  const finalRT = new THREE.RenderTarget(w, h, finalRTDefaults);
+
+  const occlusionMaterialBlack = new THREE.MeshBasicMaterial({
+    color: 0x000000,
+    fog: false,
+    toneMapped: false,
+  });
+  const occlusionLineBlack = new THREE.LineBasicMaterial({
+    color: 0x000000,
+    fog: false,
+    toneMapped: false,
+  });
+  const occlusionMaterialWhite = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    fog: false,
+    toneMapped: false,
+  });
+
+  const postScene = new THREE.Scene();
+  const postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  const postQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2));
+  postScene.add(postQuad);
 
   const depthPlaceholder = new THREE.DataTexture(new Uint8Array([255]), 1, 1, THREE.RedFormat);
   depthPlaceholder.needsUpdate = true;
@@ -639,20 +694,109 @@ export async function createVolumetricCloudSystem({
   cloudMesh.name = "VolumetricCloudVolume";
   scene.add(cloudMesh);
 
+  const occlusionTexForGodRays = texture(occlusionRT.texture);
+  const godraysResultTex = texture(godraysRT.texture);
+  const godRaysLightUv = uniform(new THREE.Vector2(0.5, 0.5));
+  const godRaysSunColor = uniform(new THREE.Color(0xffddaa));
+  const godRaysDensity = uniform(p0.godRaysDensity ?? 0.98);
+  const godRaysDecay = uniform(p0.godRaysDecay ?? 0.975);
+  const godRaysWeight = uniform(p0.godRaysWeight ?? 0.55);
+  const godRaysExposure = uniform(p0.godRaysExposureUI ?? 0.58);
+  const godRaysSamples = uniform(p0.godRaysSamplesUI ?? 64);
+
+  const godRaysNodeFixed = Fn(() => {
+    const vUv = uv();
+    const lightPos = vec2(godRaysLightUv.x, godRaysLightUv.y);
+    const delta = lightPos.sub(vUv);
+    const step = delta.div(godRaysSamples.max(1));
+    const colorAcc = vec3(0).toVar();
+    const illuminationDecay = float(1.0).toVar();
+    Loop(MAX_GOD_SAMPLES, ({ i: gi }) => {
+      If(float(gi).greaterThanEqual(godRaysSamples), () => Break());
+      const sampleCoord = vUv.add(float(gi).mul(step));
+      const sc = texture(occlusionTexForGodRays, sampleCoord);
+      colorAcc.addAssign(sc.rgb.mul(illuminationDecay).mul(godRaysWeight));
+      illuminationDecay.mulAssign(godRaysDecay);
+    });
+    return vec4(
+      colorAcc
+        .mul(godRaysSunColor)
+        .mul(godRaysDensity)
+        .mul(godRaysExposure),
+      1.0,
+    );
+  });
+
+  const godRaysMat = new THREE.MeshBasicNodeMaterial();
+  godRaysMat.colorNode = godRaysNodeFixed();
+  godRaysMat.depthTest = false;
+  godRaysMat.depthWrite = false;
+  godRaysMat.toneMapped = false;
+
+  const finalSceneTex = texture(finalRT.texture);
+  const compositeMat = new THREE.MeshBasicNodeMaterial();
+  compositeMat.colorNode = texture(godraysResultTex, uv());
+  compositeMat.transparent = true;
+  compositeMat.blending = THREE.AdditiveBlending;
+  compositeMat.depthTest = false;
+  compositeMat.depthWrite = false;
+  compositeMat.toneMapped = false;
+
+  const screenMat = new THREE.MeshBasicNodeMaterial();
+  const blitUV = vec2(uv().x, float(1.0).sub(uv().y));
+  screenMat.colorNode = texture(finalSceneTex, blitUV);
+  screenMat.depthTest = false;
+  screenMat.depthWrite = false;
+
+  const sunMaterial = new THREE.MeshBasicMaterial({
+    color: 0xffe8cc,
+    transparent: true,
+    fog: false,
+    toneMapped: false,
+    depthWrite: false,
+  });
+  const sunSphere = new THREE.Mesh(
+    new THREE.SphereGeometry(SUN_DISC_GEOM_RADIUS, 32, 32),
+    sunMaterial,
+  );
+  sunSphere.renderOrder = 15;
+  sunSphere.layers.set(VOLUME_LAYER);
+  sunSphere.name = "VolumetricCloudSunDisc";
+  scene.add(sunSphere);
+
+  function updateSunDiscWorld() {
+    const pv = toolState.volumetricCloud;
+    sunSphere.position.copy(getSunDir()).multiplyScalar(pv.sunMeshDistance ?? 8000);
+    sunSphere.scale.setScalar(
+      (pv.sunDiscRadius ?? 260) / SUN_DISC_GEOM_RADIUS,
+    );
+  }
+
   const _frustum = new THREE.Frustum();
   const _camViewProj = new THREE.Matrix4();
   const _cloudCenterWorld = new THREE.Vector3();
 
-  function setDepthTargetSize() {
-    renderer.getDrawingBufferSize(_drawingBuf);
-    w = Math.max(1, Math.floor(_drawingBuf.x));
-    h = Math.max(1, Math.floor(_drawingBuf.y));
-    depthTarget.setSize(w, h);
-    if (depthTarget.depthTexture) depthTarget.depthTexture.dispose();
-    depthTarget.depthTexture = new THREE.DepthTexture(w, h);
-    depthTarget.depthTexture.format = THREE.DepthFormat;
-    depthTarget.depthTexture.type = THREE.UnsignedShortType;
-    depthTexNode.value = depthTarget.depthTexture;
+  function resizeAllRenderTargets() {
+    const prevW = w;
+    const prevH = h;
+    layoutEffectBufferSizes();
+
+    const drawingSizeChanged = w !== prevW || h !== prevH;
+    if (drawingSizeChanged) {
+      depthTarget.setSize(w, h);
+      if (depthTarget.depthTexture) depthTarget.depthTexture.dispose();
+      depthTarget.depthTexture = new THREE.DepthTexture(w, h);
+      depthTarget.depthTexture.format = THREE.DepthFormat;
+      depthTarget.depthTexture.type = THREE.UnsignedShortType;
+      depthTexNode.value = depthTarget.depthTexture;
+      finalRT.setSize(w, h);
+      finalSceneTex.value = finalRT.texture;
+    }
+
+    occlusionRT.setSize(hw, hh);
+    godraysRT.setSize(hw, hh);
+    occlusionTexForGodRays.value = occlusionRT.texture;
+    godraysResultTex.value = godraysRT.texture;
     uResolution.value.set(w, h);
   }
 
@@ -661,7 +805,6 @@ export async function createVolumetricCloudSystem({
     const fd = toolState.fog.distance;
     uTextureTiling.value = p.textureTiling;
     uOpacity.value = p.opacity;
-    uMaxSteps.value = p.raymarchSteps;
     uLightSteps.value = p.lightSteps;
     uDensityThreshold.value = p.densityThreshold;
     uDensityMultiplier.value = p.densityMultiplier;
@@ -694,6 +837,10 @@ export async function createVolumetricCloudSystem({
     u_mask_forcaRuidoDetalhe.value = p.forcaRuidoDetalhe;
     u_mask_visualize.value = p.visualizeMask ? 1 : 0;
     cloudMesh.scale.setScalar(p.containerScale);
+    const pv = toolState.volumetricCloud;
+    godRaysDensity.value = pv.godRaysDensity ?? 0.98;
+    godRaysDecay.value = pv.godRaysDecay ?? 0.975;
+    godRaysWeight.value = pv.godRaysWeight ?? 0.55;
   }
 
   /**
@@ -706,9 +853,12 @@ export async function createVolumetricCloudSystem({
     const p = toolState.volumetricCloud;
     if (!p.enabled) {
       cloudMesh.visible = false;
+      sunSphere.visible = false;
       return false;
     }
+    sunSphere.visible = true;
     syncUniformsFromToolState();
+    updateSunDiscWorld();
     if (p.followCamera) {
       const s = p.cloudFollowSmoothing;
       cloudMesh.position.x += (anchorXZ.x - cloudMesh.position.x) * s;
@@ -729,19 +879,15 @@ export async function createVolumetricCloudSystem({
         12,
         Math.round(p.raymarchSteps * quality),
       );
+      godRaysSamples.value = Math.max(
+        10,
+        Math.round((p.godRaysSamplesUI ?? 64) * (0.52 + 0.48 * quality)),
+      );
     } else {
       uMaxSteps.value = p.raymarchSteps;
+      godRaysSamples.value = p.godRaysSamplesUI ?? 64;
     }
 
-    if (p.isAnimating) {
-      const d = Math.min(0.05, Math.max(0, dtSec));
-      uTextureOffset.value.x += p.animationSpeedX * d;
-      uTextureOffset.value.y += p.animationSpeedY * d;
-      uTextureOffset.value.z += p.animationSpeedZ * d;
-      uTextureOffset.value.x -= Math.floor(uTextureOffset.value.x);
-      uTextureOffset.value.y -= Math.floor(uTextureOffset.value.y);
-      uTextureOffset.value.z -= Math.floor(uTextureOffset.value.z);
-    }
     _camViewProj.multiplyMatrices(
       camera.projectionMatrix,
       camera.matrixWorldInverse,
@@ -754,19 +900,105 @@ export async function createVolumetricCloudSystem({
     const inFrustum = _frustum.intersectsObject(cloudMesh);
     if (p.lodFrustumCull && !inFrustum) {
       cloudMesh.visible = false;
-      return false;
+    } else {
+      cloudMesh.visible = true;
     }
-    cloudMesh.visible = true;
+
+    const dimGod =
+      p.lodFrustumCull && p.frustumDimGodRays && !inFrustum;
+    godRaysExposure.value = dimGod
+      ? 0
+      : (p.godRaysExposureUI ?? 0.58);
+
+    if (p.isAnimating) {
+      const d = Math.min(0.05, Math.max(0, dtSec));
+      uTextureOffset.value.x += p.animationSpeedX * d;
+      uTextureOffset.value.y += p.animationSpeedY * d;
+      uTextureOffset.value.z += p.animationSpeedZ * d;
+      uTextureOffset.value.x -= Math.floor(uTextureOffset.value.x);
+      uTextureOffset.value.y -= Math.floor(uTextureOffset.value.y);
+      uTextureOffset.value.z -= Math.floor(uTextureOffset.value.z);
+    }
 
     camera.layers.set(0);
     renderer.setRenderTarget(depthTarget);
     renderer.clear();
     renderer.render(scene, camera);
     depthTexNode.value = depthTarget.depthTexture;
+
+    const originalMaterials = new Map();
+    const bgSaved = scene.background;
+    const fogSaved = scene.fog;
+    scene.fog = null;
+    scene.background = new THREE.Color(0x000000);
+    sunSphere.material = occlusionMaterialWhite;
+    uOcclusionMode.value = 1;
+    for (const o of getOccluderMeshes()) {
+      if (o !== cloudMesh && o !== sunSphere && o.material !== undefined) {
+        originalMaterials.set(o.uuid, o.material);
+        if (Array.isArray(o.material)) {
+          const black = o.isLineSegments
+            ? occlusionLineBlack
+            : occlusionMaterialBlack;
+          o.material = o.material.map(() => black);
+        } else {
+          o.material = o.isLineSegments
+            ? occlusionLineBlack
+            : occlusionMaterialBlack;
+        }
+      }
+    }
+
+    camera.layers.set(0);
+    camera.layers.enable(VOLUME_LAYER);
+    renderer.setRenderTarget(occlusionRT);
+    renderer.clear();
+    renderer.render(scene, camera);
+
+    sunSphere.material = sunMaterial;
+    uOcclusionMode.value = 0;
+    for (const o of getOccluderMeshes()) {
+      if (o !== cloudMesh && o !== sunSphere && originalMaterials.has(o.uuid)) {
+        o.material = originalMaterials.get(o.uuid);
+      }
+    }
+    originalMaterials.clear();
+    scene.background = bgSaved;
+    scene.fog = fogSaved;
     camera.layers.enableAll();
 
-    renderer.setRenderTarget(null);
+    occlusionTexForGodRays.value = occlusionRT.texture;
+    const sunNdc = new THREE.Vector3()
+      .copy(sunSphere.position)
+      .project(camera);
+    godRaysLightUv.value.set(
+      sunNdc.x * 0.5 + 0.5,
+      1.0 - (sunNdc.y * 0.5 + 0.5),
+    );
+
+    postQuad.material = godRaysMat;
+    renderer.setRenderTarget(godraysRT);
+    renderer.clear();
+    renderer.render(postScene, postCam);
+    godraysResultTex.value = godraysRT.texture;
+
+    camera.layers.enableAll();
+    renderer.setRenderTarget(finalRT);
+    renderer.clear();
     renderer.render(scene, camera);
+
+    finalSceneTex.value = finalRT.texture;
+    postQuad.material = compositeMat;
+    renderer.autoClear = false;
+    renderer.setRenderTarget(finalRT);
+    renderer.render(postScene, postCam);
+    renderer.autoClear = true;
+
+    postQuad.material = screenMat;
+    renderer.setRenderTarget(null);
+    renderer.clear();
+    renderer.render(postScene, postCam);
+
     return true;
   }
 
@@ -774,7 +1006,20 @@ export async function createVolumetricCloudSystem({
     scene.remove(cloudMesh);
     cloudMesh.geometry.dispose();
     cloudMesh.material.dispose();
+    scene.remove(sunSphere);
+    sunSphere.geometry.dispose();
+    sunMaterial.dispose();
+    occlusionMaterialBlack.dispose();
+    occlusionLineBlack.dispose();
+    occlusionMaterialWhite.dispose();
     depthTarget.dispose();
+    occlusionRT.dispose();
+    godraysRT.dispose();
+    finalRT.dispose();
+    godRaysMat.dispose();
+    compositeMat.dispose();
+    screenMat.dispose();
+    postQuad.geometry.dispose();
     volumeTexture.dispose();
     maskTexture.dispose();
     detailMaskTexture.dispose();
@@ -785,7 +1030,7 @@ export async function createVolumetricCloudSystem({
   return {
     cloudMesh,
     tryRenderFrame,
-    setDepthTargetSize,
+    setDepthTargetSize: resizeAllRenderTargets,
     rebuildVolume: bakeVolume3D,
     rebuildMaskTextures,
     dispose,

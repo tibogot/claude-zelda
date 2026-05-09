@@ -262,6 +262,16 @@ export const V2_CONFIG = {
     forcaRuidoDetalhe: 0.036,
     frequenciaRuidoDetalhe: 10.5,
     visualizeMask: false,
+    /** Occlusion / god-rays buffer scale (same role as superjet `effectBufferScale`). */
+    effectBufferScale: 0.35,
+    godRaysExposureUI: 0.58,
+    godRaysSamplesUI: 64,
+    godRaysDensity: 0.98,
+    godRaysDecay: 0.975,
+    godRaysWeight: 0.55,
+    sunMeshDistance: 8000,
+    sunDiscRadius: 260,
+    frustumDimGodRays: false,
   },
 };
 

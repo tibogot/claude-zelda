@@ -2294,6 +2294,7 @@ export async function startV2App(opts = {}) {
       getSunDir: () => sunDir,
       sun,
       hemi,
+      getOccluderMeshes: () => chunkStream.raycastMeshes(),
     });
   } catch (err) {
     console.warn("[V2] Volumetric cloud volume failed to init:", err);
@@ -3388,6 +3389,9 @@ export async function startV2App(opts = {}) {
     },
     rebuildVolumetricCloudMasks() {
       volumetricCloudSystem?.rebuildMaskTextures?.();
+    },
+    resizeVolumetricCloudTargets() {
+      volumetricCloudSystem?.setDepthTargetSize?.();
     },
     dispose() {
       renderer.domElement.removeEventListener("wheel", onCanvasWheelBrush, { capture: true });
