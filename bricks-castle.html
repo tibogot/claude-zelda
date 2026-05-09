@@ -65,6 +65,20 @@ import {
 
 let renderer, scene, camera, controls;
 let towerGroup;
+let towerMesh, battlementMesh;
+let brickGeometry, brickMaterial;
+let groundMesh;
+let rebuildTimer = null;
+let qualityLevel = "high";
+const dynamicDpr = {
+  moving: 1,
+  resting: Math.min(window.devicePixelRatio || 1, 1.5),
+  current: -1,
+  settleUntil: 0
+};
+const tempObj = new THREE.Object3D();
+const tempVec = new THREE.Vector3();
+const towerInstanceData = [];
 
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
@@ -86,6 +100,7 @@ const params = {
 
   // random scaling
   scaleRandomness:0.3,
+  brickSegments:3,
 
   // shape
   deformation:0.06,
@@ -116,6 +131,9 @@ const params = {
   sunIntensity:3,
   ambientIntensity:1.4,
 
+  // quality
+  quality:"high",
+
   rebuild:()=>{
 
     removedBricks.clear();
@@ -133,10 +151,17 @@ async function init(){
     antialias:true
   });
 
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.05;
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+
   renderer.setSize(
     window.innerWidth,
     window.innerHeight
   );
+  setDynamicPixelRatio(dynamicDpr.resting);
 
   document.body.appendChild(
     renderer.domElement
@@ -191,6 +216,15 @@ async function init(){
     );
 
   sun.position.set(10,20,10);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048,2048);
+  sun.shadow.camera.near = 1;
+  sun.shadow.camera.far = 80;
+  sun.shadow.camera.left = -30;
+  sun.shadow.camera.right = 30;
+  sun.shadow.camera.top = 30;
+  sun.shadow.camera.bottom = -30;
+  sun.shadow.bias = -0.0002;
 
   sun.name = "sun";
 
@@ -198,21 +232,23 @@ async function init(){
 
   // GROUND
 
-  const ground = new THREE.Mesh(
+  groundMesh = new THREE.Mesh(
 
     new THREE.PlaneGeometry(200,200),
 
     new THREE.MeshStandardMaterial({
-      color:0x22252b,
-      roughness:1
+      color:0x262a31,
+      roughness:0.95,
+      metalness:0.02
     })
 
   );
 
-  ground.rotation.x = -Math.PI * .5;
-  ground.position.y = -2;
+  groundMesh.rotation.x = -Math.PI * .5;
+  groundMesh.position.y = -2;
+  groundMesh.receiveShadow = true;
 
-  scene.add(ground);
+  scene.add(groundMesh);
 
   buildTower();
 
@@ -230,13 +266,40 @@ async function init(){
     onClick
   );
 
+  controls.addEventListener("start",()=>{
+    dynamicDpr.settleUntil = performance.now() + 400;
+    setDynamicPixelRatio(dynamicDpr.moving);
+  });
+
+  controls.addEventListener("change",()=>{
+    dynamicDpr.settleUntil = performance.now() + 250;
+  });
+
 }
 
 function buildTower(){
 
   towerGroup = new THREE.Group();
+  towerGroup.name = "towerGroup";
 
   scene.add(towerGroup);
+  createSharedBrickResources();
+  towerInstanceData.length = 0;
+
+  const ringCount = params.height;
+  const maxTowerBricks =
+    ringCount * params.bricksPerRing;
+
+  towerMesh = new THREE.InstancedMesh(
+    brickGeometry,
+    brickMaterial,
+    maxTowerBricks
+  );
+
+  towerMesh.castShadow = true;
+  towerMesh.receiveShadow = true;
+
+  let towerCount = 0;
 
   for(let y=0;y<params.height;y++){
 
@@ -245,8 +308,6 @@ function buildTower(){
       const id = `${i}_${y}`;
 
       if(removedBricks.has(id)) continue;
-
-      const brick = createStoneBrick();
 
       const stagger =
         params.stagger && y % 2
@@ -268,53 +329,109 @@ function buildTower(){
       const pz =
         Math.sin(angle) * radius;
 
-      brick.position.set(
+      tempObj.position.set(
         px,
         y * params.ringHeight,
         pz
       );
 
-      brick.lookAt(
+      tempObj.lookAt(
         px * 2,
-        brick.position.y,
+        tempObj.position.y,
         pz * 2
       );
 
-      brick.rotateY(Math.PI * .5);
+      tempObj.rotateY(Math.PI * .5);
 
-      brick.rotation.x +=
+      tempObj.rotation.x +=
         (Math.random() - .5)
         * params.rotationVariation;
 
-      brick.rotation.y +=
+      tempObj.rotation.y +=
         (Math.random() - .5)
         * params.rotationVariation;
 
-      brick.rotation.z +=
+      tempObj.rotation.z +=
         (Math.random() - .5)
         * params.rotationVariation;
 
-      brick.position.y +=
+      tempObj.position.y +=
         (Math.random() - .5)
         * params.verticalVariation;
 
-      brick.userData.id = id;
+      const r = params.scaleRandomness;
+      tempObj.scale.set(
+        1 + (Math.random() - .5) * r,
+        1 + (Math.random() - .5) * r,
+        1 + (Math.random() - .5) * r
+      );
+      tempObj.updateMatrix();
 
-      towerGroup.add(brick);
+      towerMesh.setMatrixAt(
+        towerCount,
+        tempObj.matrix
+      );
+
+      const grey =
+        params.stoneDarkness
+        + Math.random()
+        * (params.stoneLightness - params.stoneDarkness);
+
+      towerMesh.setColorAt(
+        towerCount,
+        new THREE.Color(
+          grey * .92,
+          grey * .95,
+          grey
+        )
+      );
+
+      towerInstanceData.push({
+        id,
+        position:new THREE.Vector3(
+          tempObj.position.x,
+          tempObj.position.y,
+          tempObj.position.z
+        ),
+        removed:false
+      });
+
+      towerCount++;
 
     }
 
   }
 
+  towerMesh.count = towerCount;
+  towerMesh.instanceMatrix.needsUpdate = true;
+  if(towerMesh.instanceColor){
+    towerMesh.instanceColor.needsUpdate = true;
+  }
+  towerGroup.add(towerMesh);
+
   // battlements
+  const maxBattlements =
+    Math.ceil(
+      params.bricksPerRing /
+      Math.max(1, params.battlementSkip)
+    );
+
+  battlementMesh = new THREE.InstancedMesh(
+    brickGeometry,
+    brickMaterial,
+    maxBattlements
+  );
+
+  battlementMesh.castShadow = true;
+  battlementMesh.receiveShadow = true;
+
+  let battlementCount = 0;
 
   for(
     let i=0;
     i<params.bricksPerRing;
     i += params.battlementSkip
   ){
-
-    const brick = createStoneBrick();
 
     const angle =
       (i / params.bricksPerRing)
@@ -326,56 +443,77 @@ function buildTower(){
     const pz =
       Math.sin(angle) * params.radius;
 
-    brick.position.set(
+    tempObj.position.set(
       px,
       params.height * params.ringHeight,
       pz
     );
 
-    brick.scale.y =
+    tempObj.scale.set(1,1,1);
+    tempObj.scale.y =
       params.battlementHeight;
 
-    brick.lookAt(
+    tempObj.lookAt(
       px * 2,
-      brick.position.y,
+      tempObj.position.y,
       pz * 2
     );
 
-    brick.rotateY(Math.PI * .5);
+    tempObj.rotateY(Math.PI * .5);
+    tempObj.updateMatrix();
 
-    towerGroup.add(brick);
+    battlementMesh.setMatrixAt(
+      battlementCount,
+      tempObj.matrix
+    );
+
+    const grey =
+      params.stoneDarkness
+      + Math.random()
+      * (params.stoneLightness - params.stoneDarkness);
+
+    battlementMesh.setColorAt(
+      battlementCount,
+      new THREE.Color(
+        grey * .92,
+        grey * .95,
+        grey
+      )
+    );
+
+    battlementCount++;
 
   }
 
+  battlementMesh.count = battlementCount;
+  battlementMesh.instanceMatrix.needsUpdate = true;
+  if(battlementMesh.instanceColor){
+    battlementMesh.instanceColor.needsUpdate = true;
+  }
+  towerGroup.add(battlementMesh);
+
 }
 
-function createStoneBrick(){
+function createSharedBrickResources(){
 
-  const geo = new THREE.BoxGeometry(
+  if(brickGeometry) brickGeometry.dispose();
+  if(brickMaterial) brickMaterial.dispose();
+
+  brickGeometry = new THREE.BoxGeometry(
 
     params.brickWidth,
     params.brickHeight,
     params.brickDepth,
 
-    10,
-    8,
-    8
+    params.brickSegments,
+    params.brickSegments,
+    params.brickSegments
 
   );
 
-  const grey =
-    params.stoneDarkness
-    + Math.random()
-    * (params.stoneLightness - params.stoneDarkness);
-
-  const mat =
+  brickMaterial =
     new THREE.MeshStandardNodeMaterial({
-
-      color:new THREE.Color(
-        grey * .92,
-        grey * .95,
-        grey
-      ),
+      color:new THREE.Color(0xb3b6bc),
 
       roughness:params.roughness,
       metalness:params.metalness
@@ -384,7 +522,7 @@ function createStoneBrick(){
 
   // TSL deformation
 
-  mat.positionNode = Fn(()=>{
+  brickMaterial.positionNode = Fn(()=>{
 
     const p = positionLocal;
 
@@ -426,7 +564,7 @@ function createStoneBrick(){
 
   })();
 
-  mat.normalNode = Fn(()=>{
+  brickMaterial.normalNode = Fn(()=>{
 
     return normalize(
 
@@ -440,23 +578,6 @@ function createStoneBrick(){
 
   })();
 
-  const mesh = new THREE.Mesh(
-    geo,
-    mat
-  );
-
-  const r = params.scaleRandomness;
-
-  mesh.scale.set(
-
-    1 + (Math.random() - .5) * r,
-    1 + (Math.random() - .5) * r,
-    1 + (Math.random() - .5) * r
-
-  );
-
-  return mesh;
-
 }
 
 function rebuildTower(){
@@ -464,16 +585,7 @@ function rebuildTower(){
   if(towerGroup){
 
     scene.remove(towerGroup);
-
-    towerGroup.traverse(obj=>{
-
-      if(obj.geometry)
-        obj.geometry.dispose();
-
-      if(obj.material)
-        obj.material.dispose();
-
-    });
+    towerGroup.clear();
 
   }
 
@@ -496,37 +608,66 @@ function onClick(event){
 
   const hits =
     raycaster.intersectObjects(
-      towerGroup.children
+      [towerMesh]
     );
 
   if(hits.length){
 
-    const hitPoint =
-      hits[0].object.position;
+    const hitIndex = hits[0].instanceId ?? -1;
+    if(
+      hitIndex >= 0
+      && towerInstanceData[hitIndex]
+      && !towerInstanceData[hitIndex].removed
+    ){
+      const hitPoint = towerInstanceData[hitIndex].position;
+      let removedAny = false;
 
-    towerGroup.children.forEach(brick=>{
+      for(let i=0;i<towerInstanceData.length;i++){
+        const instance = towerInstanceData[i];
+        if(instance.removed) continue;
 
-      const d =
-        brick.position.distanceTo(hitPoint);
-
-      if(d < params.removeRadius){
-
-        if(brick.userData.id){
-
-          removedBricks.add(
-            brick.userData.id
-          );
-
-          towerGroup.remove(brick);
-
+        const d = instance.position.distanceTo(hitPoint);
+        if(d < params.removeRadius){
+          removedBricks.add(instance.id);
+          instance.removed = true;
+          hideTowerInstance(i);
+          removedAny = true;
         }
-
       }
 
-    });
+      if(removedAny){
+        towerMesh.instanceMatrix.needsUpdate = true;
+      }
+    }
 
   }
 
+}
+
+function hideTowerInstance(index){
+  tempObj.position.set(0,-9999,0);
+  tempObj.rotation.set(0,0,0);
+  tempObj.scale.set(0.001,0.001,0.001);
+  tempObj.updateMatrix();
+  towerMesh.setMatrixAt(index, tempObj.matrix);
+}
+
+function scheduleRebuild(){
+  if(rebuildTimer){
+    clearTimeout(rebuildTimer);
+  }
+  rebuildTimer = setTimeout(()=>{
+    rebuildTimer = null;
+    rebuildTower();
+  }, 120);
+}
+
+function setDynamicPixelRatio(value){
+  if(Math.abs(dynamicDpr.current - value) < 0.01){
+    return;
+  }
+  dynamicDpr.current = value;
+  renderer.setPixelRatio(value);
 }
 
 function buildPane(){
@@ -547,25 +688,25 @@ function buildPane(){
     params,
     "radius",
     { min:2, max:12 }
-  ).on("change", rebuildTower);
+  ).on("change", scheduleRebuild);
 
   fTower.addBinding(
     params,
     "height",
     { min:8, max:60, step:1 }
-  ).on("change", rebuildTower);
+  ).on("change", scheduleRebuild);
 
   fTower.addBinding(
     params,
     "bricksPerRing",
     { min:6, max:60, step:1 }
-  ).on("change", rebuildTower);
+  ).on("change", scheduleRebuild);
 
   fTower.addBinding(
     params,
     "ringHeight",
     { min:0.2, max:1.2 }
-  ).on("change", rebuildTower);
+  ).on("change", scheduleRebuild);
 
   // brick
 
@@ -578,25 +719,31 @@ function buildPane(){
     params,
     "brickWidth",
     { min:0.2, max:3 }
-  ).on("change", rebuildTower);
+  ).on("change", scheduleRebuild);
 
   fBrick.addBinding(
     params,
     "brickHeight",
     { min:0.2, max:2 }
-  ).on("change", rebuildTower);
+  ).on("change", scheduleRebuild);
 
   fBrick.addBinding(
     params,
     "brickDepth",
     { min:0.2, max:3 }
-  ).on("change", rebuildTower);
+  ).on("change", scheduleRebuild);
 
   fBrick.addBinding(
     params,
     "scaleRandomness",
     { min:0, max:1 }
-  ).on("change", rebuildTower);
+  ).on("change", scheduleRebuild);
+
+  fBrick.addBinding(
+    params,
+    "brickSegments",
+    { min:1, max:10, step:1 }
+  ).on("change", scheduleRebuild);
 
   // shape
 
@@ -609,25 +756,25 @@ function buildPane(){
     params,
     "deformation",
     { min:0, max:0.2 }
-  ).on("change", rebuildTower);
+  ).on("change", scheduleRebuild);
 
   fShape.addBinding(
     params,
     "edgeWarp",
     { min:0, max:0.1 }
-  ).on("change", rebuildTower);
+  ).on("change", scheduleRebuild);
 
   fShape.addBinding(
     params,
     "inflate",
     { min:0, max:0.1 }
-  ).on("change", rebuildTower);
+  ).on("change", scheduleRebuild);
 
   fShape.addBinding(
     params,
     "normalSmooth",
     { min:0, max:1 }
-  ).on("change", rebuildTower);
+  ).on("change", scheduleRebuild);
 
   // randomness
 
@@ -640,24 +787,24 @@ function buildPane(){
     params,
     "radiusVariation",
     { min:0, max:1 }
-  ).on("change", rebuildTower);
+  ).on("change", scheduleRebuild);
 
   fRandom.addBinding(
     params,
     "verticalVariation",
     { min:0, max:0.5 }
-  ).on("change", rebuildTower);
+  ).on("change", scheduleRebuild);
 
   fRandom.addBinding(
     params,
     "rotationVariation",
     { min:0, max:0.2 }
-  ).on("change", rebuildTower);
+  ).on("change", scheduleRebuild);
 
   fRandom.addBinding(
     params,
     "stagger"
-  ).on("change", rebuildTower);
+  ).on("change", scheduleRebuild);
 
   // destruction
 
@@ -683,13 +830,13 @@ function buildPane(){
     params,
     "battlementHeight",
     { min:0.5, max:4 }
-  ).on("change", rebuildTower);
+  ).on("change", scheduleRebuild);
 
   fBattle.addBinding(
     params,
     "battlementSkip",
     { min:1, max:6, step:1 }
-  ).on("change", rebuildTower);
+  ).on("change", scheduleRebuild);
 
   // material
 
@@ -702,19 +849,19 @@ function buildPane(){
     params,
     "roughness",
     { min:0, max:1 }
-  ).on("change", rebuildTower);
+  ).on("change", scheduleRebuild);
 
   fMaterial.addBinding(
     params,
     "metalness",
     { min:0, max:1 }
-  ).on("change", rebuildTower);
+  ).on("change", scheduleRebuild);
 
   fMaterial.addBinding(
     params,
     "stoneDarkness",
     { min:0.1, max:1 }
-  ).on("change", rebuildTower);
+  ).on("change", scheduleRebuild);
 
   fMaterial.addBinding(
     params,
@@ -751,10 +898,62 @@ function buildPane(){
 
   });
 
+  const fQuality =
+    pane.addFolder({
+      title:"Quality"
+    });
+
+  fQuality.addBinding(
+    params,
+    "quality",
+    {
+      options:{
+        low:"low",
+        medium:"medium",
+        high:"high",
+        cinematic:"cinematic"
+      }
+    }
+  ).on("change", e=>{
+    applyQualityPreset(e.value);
+  });
+
   pane.addButton({
     title:"REBUILD"
   }).on("click", params.rebuild);
 
+}
+
+function applyQualityPreset(level){
+  qualityLevel = level;
+  if(level === "low"){
+    params.brickSegments = 1;
+    dynamicDpr.resting = 1;
+    renderer.toneMappingExposure = 1;
+    const sun = scene.getObjectByName("sun");
+    if(sun) sun.shadow.mapSize.set(1024,1024);
+  }else if(level === "medium"){
+    params.brickSegments = 2;
+    dynamicDpr.resting = Math.min(window.devicePixelRatio || 1, 1.25);
+    renderer.toneMappingExposure = 1.02;
+    const sun = scene.getObjectByName("sun");
+    if(sun) sun.shadow.mapSize.set(1536,1536);
+  }else if(level === "cinematic"){
+    params.brickSegments = 6;
+    dynamicDpr.resting = Math.min(window.devicePixelRatio || 1, 2);
+    renderer.toneMappingExposure = 1.12;
+    const sun = scene.getObjectByName("sun");
+    if(sun) sun.shadow.mapSize.set(3072,3072);
+  }else{
+    params.brickSegments = 3;
+    dynamicDpr.resting = Math.min(window.devicePixelRatio || 1, 1.5);
+    renderer.toneMappingExposure = 1.05;
+    const sun = scene.getObjectByName("sun");
+    if(sun) sun.shadow.mapSize.set(2048,2048);
+  }
+
+  setDynamicPixelRatio(dynamicDpr.resting);
+  scheduleRebuild();
 }
 
 function animate(){
@@ -762,6 +961,12 @@ function animate(){
   requestAnimationFrame(animate);
 
   controls.update();
+
+  if(performance.now() > dynamicDpr.settleUntil){
+    setDynamicPixelRatio(dynamicDpr.resting);
+  }else{
+    setDynamicPixelRatio(dynamicDpr.moving);
+  }
 
   renderer.render(
     scene,
@@ -782,6 +987,7 @@ function onResize(){
     window.innerWidth,
     window.innerHeight
   );
+  setDynamicPixelRatio(dynamicDpr.current > 0 ? dynamicDpr.current : dynamicDpr.resting);
 
 }
 
