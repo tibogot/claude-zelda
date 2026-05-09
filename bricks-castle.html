@@ -78,7 +78,10 @@ const dynamicDpr = {
 };
 const tempObj = new THREE.Object3D();
 const tempVec = new THREE.Vector3();
+const tempVec2 = new THREE.Vector3();
 const towerInstanceData = [];
+const battlementInstanceData = [];
+const simClock = new THREE.Clock();
 
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
@@ -116,6 +119,9 @@ const params = {
 
   // destruction
   removeRadius:1.2,
+  gravity:18,
+  bounce:0.28,
+  angularDamping:0.985,
 
   // material
   roughness:1,
@@ -285,6 +291,7 @@ function buildTower(){
   scene.add(towerGroup);
   createSharedBrickResources();
   towerInstanceData.length = 0;
+  battlementInstanceData.length = 0;
 
   const ringCount = params.height;
   const maxTowerBricks =
@@ -388,12 +395,29 @@ function buildTower(){
 
       towerInstanceData.push({
         id,
+        ringIndex:i,
+        ringY:y,
         position:new THREE.Vector3(
           tempObj.position.x,
           tempObj.position.y,
           tempObj.position.z
         ),
-        removed:false
+        rotation:new THREE.Vector3(
+          tempObj.rotation.x,
+          tempObj.rotation.y,
+          tempObj.rotation.z
+        ),
+        scale:new THREE.Vector3(
+          tempObj.scale.x,
+          tempObj.scale.y,
+          tempObj.scale.z
+        ),
+        velocity:new THREE.Vector3(),
+        angularVelocity:new THREE.Vector3(),
+        removed:false,
+        hidden:false,
+        falling:false,
+        ttl:0
       });
 
       towerCount++;
@@ -480,6 +504,31 @@ function buildTower(){
         grey
       )
     );
+
+    battlementInstanceData.push({
+      ringIndex:i,
+      position:new THREE.Vector3(
+        tempObj.position.x,
+        tempObj.position.y,
+        tempObj.position.z
+      ),
+      rotation:new THREE.Vector3(
+        tempObj.rotation.x,
+        tempObj.rotation.y,
+        tempObj.rotation.z
+      ),
+      scale:new THREE.Vector3(
+        tempObj.scale.x,
+        tempObj.scale.y,
+        tempObj.scale.z
+      ),
+      velocity:new THREE.Vector3(),
+      angularVelocity:new THREE.Vector3(),
+      removed:false,
+      hidden:false,
+      falling:false,
+      ttl:0
+    });
 
     battlementCount++;
 
@@ -608,48 +657,347 @@ function onClick(event){
 
   const hits =
     raycaster.intersectObjects(
-      [towerMesh]
+      [towerMesh, battlementMesh]
     );
 
   if(hits.length){
 
     const hitIndex = hits[0].instanceId ?? -1;
+    if(hitIndex < 0){
+      return;
+    }
+
+    const hitObject = hits[0].object;
+    let hitPoint = null;
+
     if(
-      hitIndex >= 0
+      hitObject === towerMesh
       && towerInstanceData[hitIndex]
       && !towerInstanceData[hitIndex].removed
     ){
-      const hitPoint = towerInstanceData[hitIndex].position;
-      let removedAny = false;
+      hitPoint = towerInstanceData[hitIndex].position;
+    }else if(
+      hitObject === battlementMesh
+      && battlementInstanceData[hitIndex]
+      && !battlementInstanceData[hitIndex].removed
+    ){
+      hitPoint = battlementInstanceData[hitIndex].position;
+    }
 
-      for(let i=0;i<towerInstanceData.length;i++){
-        const instance = towerInstanceData[i];
-        if(instance.removed) continue;
-
-        const d = instance.position.distanceTo(hitPoint);
-        if(d < params.removeRadius){
-          removedBricks.add(instance.id);
-          instance.removed = true;
-          hideTowerInstance(i);
-          removedAny = true;
-        }
-      }
-
-      if(removedAny){
-        towerMesh.instanceMatrix.needsUpdate = true;
-      }
+    if(hitPoint){
+      applyImpactFall(hitPoint);
+      triggerStructuralCollapse();
     }
 
   }
 
 }
 
-function hideTowerInstance(index){
+function applyImpactFall(hitPoint){
+  applyImpactFallToCollection(
+    towerInstanceData,
+    towerMesh,
+    hitPoint,
+    true
+  );
+  applyImpactFallToCollection(
+    battlementInstanceData,
+    battlementMesh,
+    hitPoint,
+    false
+  );
+}
+
+function applyImpactFallToCollection(
+  collection,
+  mesh,
+  hitPoint,
+  trackRemoved
+){
+  if(!mesh) return;
+  let removedAny = false;
+  for(let i=0;i<collection.length;i++){
+    const instance = collection[i];
+    if(instance.removed) continue;
+
+    const d = instance.position.distanceTo(hitPoint);
+    if(d < params.removeRadius){
+      instance.removed = true;
+      if(trackRemoved && instance.id){
+        removedBricks.add(instance.id);
+      }
+      startFallingInstance(
+        collection,
+        mesh,
+        i,
+        hitPoint
+      );
+      removedAny = true;
+    }
+  }
+  if(removedAny){
+    mesh.instanceMatrix.needsUpdate = true;
+  }
+}
+
+function startFallingInstance(
+  collection,
+  mesh,
+  index,
+  hitPoint
+){
+  const instance = collection[index];
+  if(!instance || instance.hidden || instance.falling){
+    return;
+  }
+
+  tempVec.subVectors(
+    instance.position,
+    hitPoint
+  );
+
+  const lenSq = tempVec.lengthSq();
+  if(lenSq < 1e-6){
+    tempVec.set(
+      (Math.random() - 0.5) * 0.3,
+      0,
+      (Math.random() - 0.5) * 0.3
+    );
+  }else{
+    tempVec.normalize();
+  }
+
+  const push = 2.6 + Math.random() * 1.8;
+  instance.velocity.set(
+    tempVec.x * push,
+    2.5 + Math.random() * 2.2,
+    tempVec.z * push
+  );
+
+  instance.angularVelocity.set(
+    (Math.random() - 0.5) * 6,
+    (Math.random() - 0.5) * 6,
+    (Math.random() - 0.5) * 6
+  );
+
+  instance.falling = true;
+  instance.hidden = false;
+  instance.ttl = 6;
+}
+
+function hideInstance(collection, mesh, index){
+  const instance = collection[index];
+  if(instance){
+    instance.hidden = true;
+    instance.falling = false;
+    instance.ttl = 0;
+  }
+
   tempObj.position.set(0,-9999,0);
   tempObj.rotation.set(0,0,0);
   tempObj.scale.set(0.001,0.001,0.001);
   tempObj.updateMatrix();
-  towerMesh.setMatrixAt(index, tempObj.matrix);
+  mesh.setMatrixAt(index, tempObj.matrix);
+}
+
+function triggerStructuralCollapse(){
+  const stableMap = new Map();
+  const stableTower = instance=>
+    !instance.removed && !instance.falling && !instance.hidden;
+
+  for(let i=0;i<towerInstanceData.length;i++){
+    const instance = towerInstanceData[i];
+    if(stableTower(instance)){
+      stableMap.set(
+        `${instance.ringIndex}_${instance.ringY}`,
+        i
+      );
+    }
+  }
+
+  const wrapIndex = index=>{
+    const n = params.bricksPerRing;
+    return ((index % n) + n) % n;
+  };
+
+  let changed = true;
+  let guard = 0;
+
+  while(changed && guard < params.height + 3){
+    changed = false;
+    guard++;
+
+    for(let i=0;i<towerInstanceData.length;i++){
+      const instance = towerInstanceData[i];
+      if(!stableTower(instance)){
+        continue;
+      }
+
+      if(instance.ringY <= 0){
+        continue;
+      }
+
+      let supported = false;
+      const by = instance.ringY - 1;
+      for(let o=-1;o<=1;o++){
+        const key = `${wrapIndex(instance.ringIndex + o)}_${by}`;
+        if(stableMap.has(key)){
+          supported = true;
+          break;
+        }
+      }
+
+      if(!supported){
+        instance.removed = true;
+        if(instance.id){
+          removedBricks.add(instance.id);
+        }
+        stableMap.delete(
+          `${instance.ringIndex}_${instance.ringY}`
+        );
+        startFallingInstance(
+          towerInstanceData,
+          towerMesh,
+          i,
+          instance.position
+        );
+        changed = true;
+      }
+    }
+
+    const topRingY = params.height - 1;
+    for(let i=0;i<battlementInstanceData.length;i++){
+      const battlement = battlementInstanceData[i];
+      if(
+        battlement.removed
+        || battlement.hidden
+        || battlement.falling
+      ){
+        continue;
+      }
+
+      let supported = false;
+      for(let o=-1;o<=1;o++){
+        const key = `${wrapIndex(battlement.ringIndex + o)}_${topRingY}`;
+        if(stableMap.has(key)){
+          supported = true;
+          break;
+        }
+      }
+
+      if(!supported){
+        battlement.removed = true;
+        startFallingInstance(
+          battlementInstanceData,
+          battlementMesh,
+          i,
+          battlement.position
+        );
+        changed = true;
+      }
+    }
+  }
+
+  if(towerMesh){
+    towerMesh.instanceMatrix.needsUpdate = true;
+  }
+  if(battlementMesh){
+    battlementMesh.instanceMatrix.needsUpdate = true;
+  }
+}
+
+function updateFallingBricks(dt){
+  if(!towerMesh) return;
+
+  const groundY = groundMesh ? groundMesh.position.y : -2;
+  updateFallingCollection(
+    towerInstanceData,
+    towerMesh,
+    dt,
+    groundY
+  );
+  updateFallingCollection(
+    battlementInstanceData,
+    battlementMesh,
+    dt,
+    groundY
+  );
+}
+
+function updateFallingCollection(
+  collection,
+  mesh,
+  dt,
+  groundY
+){
+  if(!mesh) return;
+  let updatedAny = false;
+
+  for(let i=0;i<collection.length;i++){
+    const instance = collection[i];
+    if(!instance.falling || instance.hidden){
+      continue;
+    }
+
+    instance.velocity.y -= params.gravity * dt;
+    instance.position.addScaledVector(
+      instance.velocity,
+      dt
+    );
+
+    instance.rotation.x +=
+      instance.angularVelocity.x * dt;
+    instance.rotation.y +=
+      instance.angularVelocity.y * dt;
+    instance.rotation.z +=
+      instance.angularVelocity.z * dt;
+
+    tempVec2.copy(instance.angularVelocity)
+      .multiplyScalar(params.angularDamping);
+    instance.angularVelocity.copy(tempVec2);
+
+    const minY =
+      groundY + params.brickHeight * 0.45;
+
+    if(instance.position.y < minY){
+      instance.position.y = minY;
+      if(Math.abs(instance.velocity.y) > 0.5){
+        instance.velocity.y =
+          -instance.velocity.y * params.bounce;
+        instance.velocity.x *= 0.86;
+        instance.velocity.z *= 0.86;
+      }else{
+        instance.velocity.y = 0;
+        instance.velocity.x *= 0.9;
+        instance.velocity.z *= 0.9;
+      }
+    }
+
+    instance.ttl -= dt;
+    if(
+      instance.ttl <= 0
+      || instance.position.y < groundY - 8
+    ){
+      hideInstance(collection, mesh, i);
+      updatedAny = true;
+      continue;
+    }
+
+    tempObj.position.copy(instance.position);
+    tempObj.rotation.set(
+      instance.rotation.x,
+      instance.rotation.y,
+      instance.rotation.z
+    );
+    tempObj.scale.copy(instance.scale);
+    tempObj.updateMatrix();
+    mesh.setMatrixAt(i, tempObj.matrix);
+    updatedAny = true;
+  }
+
+  if(updatedAny){
+    mesh.instanceMatrix.needsUpdate = true;
+  }
 }
 
 function scheduleRebuild(){
@@ -819,6 +1167,18 @@ function buildPane(){
     { min:0.2, max:6 }
   );
 
+  fDestroy.addBinding(
+    params,
+    "gravity",
+    { min:2, max:40 }
+  );
+
+  fDestroy.addBinding(
+    params,
+    "bounce",
+    { min:0, max:0.9 }
+  );
+
   // battlements
 
   const fBattle =
@@ -959,8 +1319,13 @@ function applyQualityPreset(level){
 function animate(){
 
   requestAnimationFrame(animate);
+  const dt = Math.min(
+    simClock.getDelta(),
+    0.033
+  );
 
   controls.update();
+  updateFallingBricks(dt);
 
   if(performance.now() > dynamicDpr.settleUntil){
     setDynamicPixelRatio(dynamicDpr.resting);
