@@ -368,6 +368,7 @@ function extractSerializableSettings(toolState) {
     volumetricCloud: { ...toolState.volumetricCloud },
     borderMountains: { ...toolState.borderMountains },
     playSpawn: { ...toolState.playSpawn },
+    playCamera: { ...toolState.playCamera },
     audio: {
       muteAll: toolState.audio.muteAll,
       pauseWhenHidden: toolState.audio.pauseWhenHidden,
@@ -456,6 +457,7 @@ export function applySettings(toolState, settings) {
   }
   if (settings.borderMountains) Object.assign(toolState.borderMountains, settings.borderMountains);
   if (settings.playSpawn) Object.assign(toolState.playSpawn, settings.playSpawn);
+  if (settings.playCamera) Object.assign(toolState.playCamera, settings.playCamera);
   if (settings.audio) {
     if (settings.audio.muteAll != null) toolState.audio.muteAll = settings.audio.muteAll;
     if (settings.audio.pauseWhenHidden != null) {
