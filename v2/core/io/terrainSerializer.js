@@ -27,7 +27,8 @@
  *         slotIdx: uint16 LE
  */
 
-import { parseChunkKey } from "../terrain/chunkMath.js";
+import { parseChunkKey, worldHalf } from "../terrain/chunkMath.js";
+import { getChunkCountPerAxis } from "../../app/config.js";
 
 const MAGIC = "V2TR";
 const VERSION = 3;
@@ -239,6 +240,84 @@ export function downloadBlob(blob, filename) {
     URL.revokeObjectURL(url);
     a.remove();
   }, 100);
+}
+
+/** Max edge length for heightmap PNG (memory + `getImageData` limits). */
+const HEIGHTMAP_EXPORT_MAX_DIM = 4096;
+
+/**
+ * Square PNG of world XZ heightfield. Each pixel is opaque grayscale
+ * (normalized min→0, max→255 world Y inside this export). Matches
+ * `BrushMask.loadFromFile` (luminance × alpha); use R=G=B, A=255.
+ *
+ * @param {import("../terrain/terrainStore.js").TerrainStore} terrainStore
+ * @param {object} config
+ * @returns {Promise<Blob>}
+ */
+export async function rasterizeWorldHeightmapPngBlob(terrainStore, config) {
+  const half = worldHalf(config);
+  const worldSize = config.world.size;
+  const chunkCount = getChunkCountPerAxis(config);
+  const res = config.world.dataResolution;
+  let dim = chunkCount * res;
+  if (dim > HEIGHTMAP_EXPORT_MAX_DIM) dim = HEIGHTMAP_EXPORT_MAX_DIM;
+
+  const buf = new Float32Array(dim * dim);
+  let minH = Infinity;
+  let maxH = -Infinity;
+  const invDim = 1 / dim;
+
+  for (let j = 0; j < dim; j++) {
+    const wz = half - (j + 0.5) * invDim * worldSize;
+    for (let i = 0; i < dim; i++) {
+      const wx = -half + (i + 0.5) * invDim * worldSize;
+      const h = terrainStore.getChunkHeightfieldHeight(wx, wz);
+      const idx = j * dim + i;
+      buf[idx] = h;
+      if (h < minH) minH = h;
+      if (h > maxH) maxH = h;
+    }
+  }
+
+  const range = maxH > minH ? maxH - minH : 1;
+  const imageData = new ImageData(dim, dim);
+  const u8 = imageData.data;
+  for (let k = 0, p = 0; k < buf.length; k++, p += 4) {
+    const t = (buf[k] - minH) / range;
+    const c = Math.round(Math.min(255, Math.max(0, t * 255)));
+    u8[p] = c;
+    u8[p + 1] = c;
+    u8[p + 2] = c;
+    u8[p + 3] = 255;
+  }
+
+  const canvas =
+    typeof OffscreenCanvas !== "undefined"
+      ? new OffscreenCanvas(dim, dim)
+      : Object.assign(document.createElement("canvas"), { width: dim, height: dim });
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("2D context unavailable for heightmap export");
+  ctx.putImageData(imageData, 0, 0);
+
+  if (typeof canvas.convertToBlob === "function") {
+    return canvas.convertToBlob({ type: "image/png" });
+  }
+  const htmlCanvas = /** @type {HTMLCanvasElement} */ (canvas);
+  return new Promise((resolve, reject) => {
+    htmlCanvas.toBlob((b) => (b ? resolve(b) : reject(new Error("PNG export failed"))), "image/png");
+  });
+}
+
+/**
+ * Rasterize full-world height to PNG and trigger download.
+ *
+ * @param {import("../terrain/terrainStore.js").TerrainStore} terrainStore
+ * @param {object} config
+ */
+export async function downloadWorldHeightmapPng(terrainStore, config) {
+  const blob = await rasterizeWorldHeightmapPngBlob(terrainStore, config);
+  const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  downloadBlob(blob, `heightmap-${ts}.png`);
 }
 
 /** Open a file picker and resolve with the chosen File (or null on cancel). */

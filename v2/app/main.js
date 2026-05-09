@@ -40,6 +40,7 @@ import {
   serializeProject,
   deserializeProject,
   downloadBlob,
+  downloadWorldHeightmapPng,
   openFilePicker,
   applySettings,
 } from "../core/io/terrainSerializer.js";
@@ -3260,6 +3261,13 @@ export async function startV2App(opts = {}) {
     undo() { sculptSystem.undo(); },
     redo() { sculptSystem.redo(); },
     saveProject() { _saveProject(); },
+    async saveHeightmapPng() {
+      try {
+        await downloadWorldHeightmapPng(terrainStore, config);
+      } catch (e) {
+        console.error("Heightmap export failed", e);
+      }
+    },
     loadProject() { _loadProject(); },
     config,
     syncFog,
