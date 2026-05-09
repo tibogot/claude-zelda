@@ -44,6 +44,43 @@ function extractStyle(params) {
   return style;
 }
 
+const EDGE_MARKING_STYLE_KEYS = new Set([
+  "centerLine",
+  "centerLineDashed",
+  "laneLines",
+  "doubleCenterLine",
+  "centerLineGap",
+  "centerLineWidth",
+  "centerLeftEnabled",
+  "centerRightEnabled",
+  "centerLeftDashed",
+  "centerRightDashed",
+]);
+const EDGE_MARKING_STYLE_BOOL = new Set([
+  "centerLine",
+  "centerLineDashed",
+  "laneLines",
+  "doubleCenterLine",
+  "centerLeftEnabled",
+  "centerRightEnabled",
+  "centerLeftDashed",
+  "centerRightDashed",
+]);
+
+function normalizeImportedEdgeStyle(raw) {
+  if (!raw || typeof raw !== "object") return undefined;
+  const st = {};
+  for (const k of EDGE_MARKING_STYLE_KEYS) {
+    if (raw[k] === undefined) continue;
+    if (EDGE_MARKING_STYLE_BOOL.has(k)) st[k] = !!raw[k];
+    else {
+      const n = Number(raw[k]);
+      if (Number.isFinite(n)) st[k] = n;
+    }
+  }
+  return Object.keys(st).length ? st : undefined;
+}
+
 function cloneVec3Like(p) {
   return new THREE.Vector3(p.x, p.y, p.z);
 }
@@ -121,6 +158,8 @@ export class FullRoadSystem {
     this.nodes = [];
     this.edges = [];
     this.selectedNodeId = null;
+    /** Selected graph edge id (Smart Road segment overrides); null if none. */
+    this.selectedEdgeId = null;
     this.dragging = false;
     this._nextNodeId = 1;
     this._nextEdgeId = 1;
@@ -266,8 +305,13 @@ export class FullRoadSystem {
   _snapshot() {
     return {
       nodes: this.nodes.map(n => ({ id: n.id, x: n.position.x, y: n.position.y, z: n.position.z, forceJunction: !!n.forceJunction })),
-      edges: this.edges.map(e => ({ id: e.id, a: e.a, b: e.b })),
+      edges: this.edges.map(e => {
+        const row = { id: e.id, a: e.a, b: e.b };
+        if (e.style && Object.keys(e.style).length) row.style = { ...e.style };
+        return row;
+      }),
       selectedNodeId: this.selectedNodeId,
+      selectedEdgeId: this.selectedEdgeId,
       nextNodeId: this._nextNodeId,
       nextEdgeId: this._nextEdgeId,
     };
@@ -279,8 +323,15 @@ export class FullRoadSystem {
       position: new THREE.Vector3(n.x, n.y, n.z),
       forceJunction: !!n.forceJunction,
     }));
-    this.edges = snap.edges.map(e => ({ id: e.id, a: e.a, b: e.b }));
+    this.edges = snap.edges.map(e => {
+      const edge = { id: e.id, a: e.a, b: e.b };
+      if (e.style && Object.keys(e.style).length) edge.style = { ...e.style };
+      return edge;
+    });
     this.selectedNodeId = snap.selectedNodeId ?? null;
+    const se = snap.selectedEdgeId ?? null;
+    this.selectedEdgeId =
+      se != null && this.edges.some((e) => e.id === se) ? se : null;
     this._nextNodeId = snap.nextNodeId ?? (Math.max(0, ...this.nodes.map(n => n.id)) + 1);
     this._nextEdgeId = snap.nextEdgeId ?? (Math.max(0, ...this.edges.map(e => e.id)) + 1);
     this._rebuildVisual();
@@ -453,9 +504,10 @@ export class FullRoadSystem {
     return node;
   }
 
-  _createEdge(a, b) {
+  _createEdge(a, b, inheritedStyle) {
     if (a === b || this._edgeBetween(a, b)) return null;
     const edge = { id: this._nextEdgeId++, a, b };
+    if (inheritedStyle && Object.keys(inheritedStyle).length) edge.style = { ...inheritedStyle };
     this.edges.push(edge);
     return edge;
   }
@@ -492,6 +544,60 @@ export class FullRoadSystem {
     return best;
   }
 
+  /** Alt+click terrain — selects nearest edge for per-segment marking overrides (Smart Road lab mesh). */
+  trySelectEdgeAt(worldPos, radius) {
+    const hit = this._findNearestEdge(worldPos, radius);
+    if (!hit) return false;
+    this.selectedEdgeId = hit.edge.id;
+    this.selectedNodeId = null;
+    this._rebuildHandles();
+    this._updateSelectedY();
+    return true;
+  }
+
+  clearSelectedEdge() {
+    if (this.selectedEdgeId == null) return;
+    this.selectedEdgeId = null;
+    this._rebuildHandles();
+  }
+
+  _selectedEdge() {
+    if (this.selectedEdgeId == null) return null;
+    return this.edges.find((e) => e.id === this.selectedEdgeId) ?? null;
+  }
+
+  /**
+   * Merge marking overrides onto the selected edge. Pass `null` for a key to remove that override (inherit global).
+   * Only keys in `EDGE_MARKING_STYLE_KEYS` are kept.
+   */
+  mergeSelectedEdgeStyle(patch) {
+    const edge = this._selectedEdge();
+    if (!edge || !patch || typeof patch !== "object") return;
+    this._pushUndo();
+    if (!edge.style) edge.style = {};
+    for (const [k, v] of Object.entries(patch)) {
+      if (!EDGE_MARKING_STYLE_KEYS.has(k)) continue;
+      if (v === null || v === undefined) delete edge.style[k];
+      else if (EDGE_MARKING_STYLE_BOOL.has(k)) edge.style[k] = !!v;
+      else {
+        const n = Number(v);
+        if (Number.isFinite(n)) edge.style[k] = n;
+      }
+    }
+    if (Object.keys(edge.style).length === 0) delete edge.style;
+    this._rebuildVisual();
+    this._updateSelectedY();
+  }
+
+  clearSelectedEdgeStyle() {
+    const edge = this._selectedEdge();
+    if (!edge?.style) return;
+    this._pushUndo();
+    delete edge.style;
+    this._rebuildVisual();
+    this._updateSelectedY();
+  }
+
   _splitEdge(edge, pos) {
     const idx = this.edges.indexOf(edge);
     if (idx < 0) return null;
@@ -502,9 +608,11 @@ export class FullRoadSystem {
     const y = hit.y;
     const node = this._createNode(new THREE.Vector3(hit.x, y, hit.z));
     node.forceJunction = true;
+    const inherited = edge.style ? { ...edge.style } : null;
     this.edges.splice(idx, 1);
-    this._createEdge(a.id, node.id);
-    this._createEdge(node.id, b.id);
+    if (this.selectedEdgeId === edge.id) this.selectedEdgeId = null;
+    this._createEdge(a.id, node.id, inherited);
+    this._createEdge(node.id, b.id, inherited);
     return node;
   }
 
@@ -533,9 +641,11 @@ export class FullRoadSystem {
     // Use the exact position from the path curve hit
     const node = this._createNode(new THREE.Vector3(hit.x, hit.y, hit.z));
     node.forceJunction = true;
+    const inherited = edge.style ? { ...edge.style } : null;
     this.edges.splice(idx, 1);
-    this._createEdge(a.id, node.id);
-    this._createEdge(node.id, b.id);
+    if (this.selectedEdgeId === edge.id) this.selectedEdgeId = null;
+    this._createEdge(a.id, node.id, inherited);
+    this._createEdge(node.id, b.id, inherited);
     return node;
   }
 
@@ -654,6 +764,7 @@ export class FullRoadSystem {
 
   startBranch() {
     this.selectedNodeId = null;
+    this.selectedEdgeId = null;
     this._rebuildHandles();
     this._updateSelectedY();
   }
@@ -704,6 +815,7 @@ export class FullRoadSystem {
     this.edges = this.edges.filter(e => e.a !== this.selectedNodeId && e.b !== this.selectedNodeId);
     this.nodes = this.nodes.filter(n => n.id !== this.selectedNodeId);
     this.selectedNodeId = this.nodes.at(-1)?.id ?? null;
+    if (!this.edges.some((e) => e.id === this.selectedEdgeId)) this.selectedEdgeId = null;
     this._rebuildVisual();
     this._updateSelectedY();
   }
@@ -714,6 +826,7 @@ export class FullRoadSystem {
     this.nodes = [];
     this.edges = [];
     this.selectedNodeId = null;
+    this.selectedEdgeId = null;
     this._rebuildVisual();
   }
 
@@ -831,7 +944,12 @@ export class FullRoadSystem {
       z: n.position.z,
       forceJunction: !!n.forceJunction,
     }));
-    const edges2 = this.edges.map((e) => ({ a: e.a, b: e.b }));
+    const edges2 = this.edges.map((e) => ({
+      id: e.id,
+      a: e.a,
+      b: e.b,
+      style: e.style,
+    }));
 
     const { pieces, markings } = buildLabNetworkGeometry(nodes2, edges2, {
       width: p.width,
@@ -848,6 +966,11 @@ export class FullRoadSystem {
       centerLineWidth: p.centerLineWidth ?? 0.02,
       centerLeftEnabled: p.centerLeftEnabled !== false,
       centerRightEnabled: p.centerRightEnabled !== false,
+      centerLineDashed: p.centerLineDashed !== false,
+      centerLeftDashed: p.centerLeftDashed !== false,
+      centerRightDashed: p.centerRightDashed !== false,
+      centerLineDashScale: p.centerLineDashScale ?? 0.08,
+      laneDashScale: p.laneDashScale ?? 0.08,
     });
 
     // Lab road surface + line marking materials (TSL); markings need the same uniforms for line scratch.
@@ -919,7 +1042,7 @@ export class FullRoadSystem {
       if (!m.path || m.path.length < 2) continue;
       const mat = this._labMatForMarkingType(m.type);
       if (!mat) continue;
-      const { dashed, dashScale } = this._labDashOptsForMarking(m.type, p);
+      const { dashed, dashScale } = this._labDashOptsForMarking(m.type, p, m);
       const paths = dashed ? this._labDashFragments2d(m.path, dashScale) : [m.path];
       const usePaths = paths.length ? paths : [m.path];
       const halfStripe = this._labMarkingHalfWidthWorld(m.type, roadW, p);
@@ -1146,9 +1269,13 @@ export class FullRoadSystem {
     }
   }
 
-  _labDashOptsForMarking(type, p) {
+  _labDashOptsForMarking(type, p, marking) {
     const laneDash = p.laneDashScale ?? 0.08;
     const centerDash = p.centerLineDashScale ?? 0.08;
+    if (marking && marking.dashed !== undefined) {
+      const dashScale = marking.dashScale ?? (type === "divider" ? laneDash : centerDash);
+      return { dashed: !!marking.dashed, dashScale };
+    }
     switch (type) {
       case "divider":
         return { dashed: !!p.laneLines, dashScale: laneDash };
@@ -2911,7 +3038,11 @@ export class FullRoadSystem {
         z: n.position.z,
         forceJunction: !!n.forceJunction,
       })),
-      edges: this.edges.map(e => ({ id: e.id, a: e.a, b: e.b })),
+      edges: this.edges.map((e) => {
+        const row = { id: e.id, a: e.a, b: e.b };
+        if (e.style && Object.keys(e.style).length) row.style = { ...e.style };
+        return row;
+      }),
       guardrails: serializeAccessories(this.guardrails),
       kerbs: serializeAccessories(this.kerbs),
       barriers: serializeAccessories(this.barriers),
@@ -2930,6 +3061,7 @@ export class FullRoadSystem {
         stripeCount: d.stripeCount,
       })),
       selectedNodeId: this.selectedNodeId,
+      selectedEdgeId: this.selectedEdgeId,
       nextNodeId: this._nextNodeId,
       nextEdgeId: this._nextEdgeId,
       nextAccessoryId: this._nextAccessoryId,
@@ -2959,7 +3091,12 @@ export class FullRoadSystem {
     const nodeIds = new Set(this.nodes.map(n => n.id));
     this.edges = Array.isArray(data?.edges)
       ? data.edges
-        .map(e => ({ id: Number(e.id), a: Number(e.a), b: Number(e.b) }))
+        .map((e) => {
+          const edge = { id: Number(e.id), a: Number(e.a), b: Number(e.b) };
+          const st = normalizeImportedEdgeStyle(e.style);
+          if (st) edge.style = st;
+          return edge;
+        })
         .filter(e => Number.isFinite(e.id) && nodeIds.has(e.a) && nodeIds.has(e.b) && e.a !== e.b)
       : [];
     
@@ -2970,6 +3107,11 @@ export class FullRoadSystem {
     this.tunnels = parseAccessories(data?.tunnels);
     
     this.selectedNodeId = nodeIds.has(data?.selectedNodeId) ? data.selectedNodeId : null;
+    const se = data?.selectedEdgeId;
+    this.selectedEdgeId =
+      se != null && Number.isFinite(Number(se)) && this.edges.some((e) => e.id === Number(se))
+        ? Number(se)
+        : null;
     this._nextNodeId = Math.max(data?.nextNodeId ?? 1, Math.max(0, ...this.nodes.map(n => n.id)) + 1);
     this._nextEdgeId = Math.max(data?.nextEdgeId ?? 1, Math.max(0, ...this.edges.map(e => e.id)) + 1);
     

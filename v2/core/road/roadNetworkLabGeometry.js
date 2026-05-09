@@ -141,9 +141,10 @@ function junctionBoundary(node, roads, clipDistance, hw, junctionRadius, junctio
 
 /**
  * @param nodes { id, x, z, forceJunction? }[]
- * @param edges { a, b }[]
+ * @param edges { a, b, style? }[] — optional `style` overrides markings on **straight network spans** only (not smooth bends / junction cores).
  * @param params { width, lanesPerDir, junctionRadius, curveSegments, junctionSegments, twoRoadNodes, endCapStyle,
- *   centerLine?, laneLines?, doubleCenterLine?, centerLineGap?, centerLineWidth?, centerLeftEnabled?, centerRightEnabled? }
+ *   centerLine?, laneLines?, doubleCenterLine?, centerLineGap?, centerLineWidth?, centerLeftEnabled?, centerRightEnabled?,
+ *   centerLineDashed?, centerLeftDashed?, centerRightDashed?, centerLineDashScale?, laneDashScale? }
  */
 export function buildLabNetworkGeometry(nodes, edges, params) {
   const width = params.width;
@@ -160,6 +161,11 @@ export function buildLabNetworkGeometry(nodes, edges, params) {
   const centerLineWidth = params.centerLineWidth ?? 0.02;
   const centerLeftEnabled = params.centerLeftEnabled !== false;
   const centerRightEnabled = params.centerRightEnabled !== false;
+  const centerLineDashedGlobal = params.centerLineDashed !== false;
+  const centerLeftDashedGlobal = params.centerLeftDashed !== false;
+  const centerRightDashedGlobal = params.centerRightDashed !== false;
+  const centerLineDashScale = params.centerLineDashScale ?? 0.08;
+  const laneDashScale = params.laneDashScale ?? 0.08;
 
   /** Physical lateral offsets along `side` from road spine (matches Full Road normalized gap/width). */
   function centerStripeOffsets() {
@@ -170,6 +176,36 @@ export function buildLabNetworkGeometry(nodes, edges, params) {
     const out = [];
     if (centerLeftEnabled) out.push({ off: -d, role: "centerLeft" });
     if (centerRightEnabled) out.push({ off: d, role: "centerRight" });
+    return out;
+  }
+
+  /** Per-edge effective marking flags for straight `networkSpan` pieces (merged with global `params`). */
+  function edgeSpanMarkingParams(edge) {
+    const st = edge.style || {};
+    const boolOr = (key, fallback) => (st[key] !== undefined ? !!st[key] : fallback);
+    const numOr = (key, fallback) => (st[key] !== undefined ? st[key] : fallback);
+    return {
+      centerLine: boolOr("centerLine", centerLine),
+      laneLines: boolOr("laneLines", laneLines),
+      doubleCenterLine: boolOr("doubleCenterLine", doubleCenterLine),
+      centerLineGap: numOr("centerLineGap", centerLineGap),
+      centerLineWidth: numOr("centerLineWidth", centerLineWidth),
+      centerLeftEnabled: boolOr("centerLeftEnabled", centerLeftEnabled),
+      centerRightEnabled: boolOr("centerRightEnabled", centerRightEnabled),
+      centerLineDashed: boolOr("centerLineDashed", centerLineDashedGlobal),
+      centerLeftDashed: boolOr("centerLeftDashed", centerLeftDashedGlobal),
+      centerRightDashed: boolOr("centerRightDashed", centerRightDashedGlobal),
+    };
+  }
+
+  function centerStripeOffsetsFor(em) {
+    if (!em.doubleCenterLine) return [{ off: 0, role: "center" }];
+    const halfGap = em.centerLineGap * 0.5;
+    const halfW = em.centerLineWidth * 0.5;
+    const d = (halfGap + halfW) * width;
+    const out = [];
+    if (em.centerLeftEnabled) out.push({ off: -d, role: "centerLeft" });
+    if (em.centerRightEnabled) out.push({ off: d, role: "centerRight" });
     return out;
   }
 
@@ -228,21 +264,30 @@ export function buildLabNetworkGeometry(nodes, edges, params) {
       networkSpan: true,
     });
 
+    const em = edgeSpanMarkingParams(edge);
     for (let i = 1; i < count; i++) {
       if (i === lanesPerDir) {
-        if (!centerLine) continue;
-        for (const { off: cOff, role } of centerStripeOffsets()) {
+        if (!em.centerLine) continue;
+        for (const { off: cOff, role } of centerStripeOffsetsFor(em)) {
+          let dashed;
+          if (role === "center") dashed = em.centerLineDashed;
+          else if (role === "centerLeft") dashed = em.centerLeftDashed;
+          else dashed = em.centerRightDashed;
           markings.push({
             path: [add(start, mul(side, cOff)), add(end, mul(side, cOff))],
             type: role,
+            dashed,
+            dashScale: centerLineDashScale,
           });
         }
       } else {
-        if (!laneLines) continue;
+        if (!em.laneLines) continue;
         const off = -hw + i * laneW;
         markings.push({
           path: [add(start, mul(side, off)), add(end, mul(side, off))],
           type: "divider",
+          dashed: true,
+          dashScale: laneDashScale,
         });
       }
     }

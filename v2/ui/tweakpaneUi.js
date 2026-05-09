@@ -110,6 +110,8 @@ export function createTweakpaneUi({
   onFullRoadToggleJunction,
   onFullRoadFlattenTerrain,
   onFullRoadApplyCityPreset,
+  onSmartRoadEdgeStylePatch,
+  onSmartRoadEdgeStyleClear,
   onRiverChanged,
   onRiverNewRiver,
   onRiverDeleteActive,
@@ -435,6 +437,8 @@ export function createTweakpaneUi({
     onFullRoadToggleJunction,
     onFullRoadFlattenTerrain,
     onFullRoadApplyCityPreset,
+    onSmartRoadEdgeStylePatch,
+    onSmartRoadEdgeStyleClear,
     stateKey: "smartRoad",
     title: "Smart Road",
   });

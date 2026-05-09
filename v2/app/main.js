@@ -1467,6 +1467,14 @@ export async function startV2App(opts = {}) {
       sys._rebuildHandles();
       ui?.pane.refresh();
     },
+    onSmartRoadEdgeStylePatch: (patch) => {
+      smartRoadSystem.mergeSelectedEdgeStyle(patch);
+      ui?.pane.refresh();
+    },
+    onSmartRoadEdgeStyleClear: () => {
+      smartRoadSystem.clearSelectedEdgeStyle();
+      ui?.pane.refresh();
+    },
     onAccessoryTypeChanged: () => {
       activeGraphRoadSystem().cancelAccessoryPaint();
       ui?.pane.refresh();
@@ -2565,10 +2573,27 @@ export async function startV2App(opts = {}) {
         }
         return;
       }
+
+      if (toolState.mode === "smartRoad" && event.altKey) {
+        const hit = pickTerrain(event);
+        if (hit) {
+          const rp = toolState.smartRoad;
+          const r = Math.max(1, rp.branchSnapRadius ?? 12);
+          if (smartRoadSystem.trySelectEdgeAt(hit.point, r)) {
+            ui?.pane.refresh();
+            return;
+          }
+          smartRoadSystem.clearSelectedEdge();
+          ui?.pane.refresh();
+          return;
+        }
+        return;
+      }
       
       const picked = graphRoadSystem.pickNode(raycaster);
       if (picked != null) {
         graphRoadSystem.selectedNodeId = picked;
+        if (toolState.mode === "smartRoad") smartRoadSystem.clearSelectedEdge();
         graphRoadSystem.dragging = true;
         controls.enabled = false;
         graphRoadSystem._rebuildHandles();
@@ -2577,6 +2602,7 @@ export async function startV2App(opts = {}) {
       } else {
         const hit = pickTerrain(event);
         if (hit) {
+          if (toolState.mode === "smartRoad") smartRoadSystem.clearSelectedEdge();
           graphRoadSystem.addOrConnect(hit.point);
           ui?.pane.refresh();
         }
@@ -3402,6 +3428,14 @@ export async function startV2App(opts = {}) {
       splineSystem.syncGuardrailsToGround();
       splineSystem.syncKerbsToGround();
       splineSystem.syncLinearFeaturesToGround();
+      ui?.pane.refresh();
+    },
+    smartRoadPatchSelectedEdgeStyle(patch) {
+      smartRoadSystem.mergeSelectedEdgeStyle(patch);
+      ui?.pane.refresh();
+    },
+    smartRoadClearSelectedEdgeStyle() {
+      smartRoadSystem.clearSelectedEdgeStyle();
       ui?.pane.refresh();
     },
     smartRoadGraphAccessoryTypeChanged() {

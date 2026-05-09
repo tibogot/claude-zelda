@@ -67,13 +67,13 @@ export function createRoadUniforms(params) {
     uScratchScale: uniform(params.scratchScale ?? 24.0),
     uScratchThinness: uniform(params.scratchThinness ?? 0.8),
     // line paint scratches (directional wear)
-    uLineScratchAmount: uniform(params.lineScratchAmount ?? 0.5),
+    uLineScratchAmount: uniform(params.lineScratchAmount ?? 1.0),
     uLineScratchScale: uniform(params.lineScratchScale ?? 5.0),
-    uLineScratchStretch: uniform(params.lineScratchStretch ?? 8.0),
+    uLineScratchStretch: uniform(params.lineScratchStretch ?? 1.0),
     uLineScratchThreshold: uniform(params.lineScratchThreshold ?? 0.35),
     uLineScratchSoftness: uniform(params.lineScratchSoftness ?? 0.15),
     uLineScratchWarp: uniform(params.lineScratchWarp ?? 0.4),
-    uLineScratchDetail: uniform(params.lineScratchDetail ?? 0.5),
+    uLineScratchDetail: uniform(params.lineScratchDetail ?? 1.0),
     uLineScratchEdge: uniform(params.lineScratchEdge ?? 0.3),
     uRoughnessDirtBoost: uniform(params.roughnessDirtBoost ?? 0.0),
     uRoughnessWearReduce: uniform(params.roughnessWearReduce ?? 0.0),
@@ -888,13 +888,13 @@ export function syncRoadUniforms(uniforms, params) {
   uniforms.uScratchScale.value = params.scratchScale ?? 24.0;
   uniforms.uScratchThinness.value = params.scratchThinness ?? 0.8;
   // line paint scratches
-  uniforms.uLineScratchAmount.value = params.lineScratchAmount ?? 0.5;
+  uniforms.uLineScratchAmount.value = params.lineScratchAmount ?? 1.0;
   uniforms.uLineScratchScale.value = params.lineScratchScale ?? 5.0;
-  uniforms.uLineScratchStretch.value = params.lineScratchStretch ?? 8.0;
+  uniforms.uLineScratchStretch.value = params.lineScratchStretch ?? 1.0;
   uniforms.uLineScratchThreshold.value = params.lineScratchThreshold ?? 0.35;
   uniforms.uLineScratchSoftness.value = params.lineScratchSoftness ?? 0.15;
   uniforms.uLineScratchWarp.value = params.lineScratchWarp ?? 0.4;
-  uniforms.uLineScratchDetail.value = params.lineScratchDetail ?? 0.5;
+  uniforms.uLineScratchDetail.value = params.lineScratchDetail ?? 1.0;
   uniforms.uLineScratchEdge.value = params.lineScratchEdge ?? 0.3;
   uniforms.uRoughnessDirtBoost.value = params.roughnessDirtBoost ?? 0.0;
   uniforms.uRoughnessWearReduce.value = params.roughnessWearReduce ?? 0.0;

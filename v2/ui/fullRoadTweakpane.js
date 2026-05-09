@@ -110,6 +110,8 @@ export function addFullRoadFolder(pane, toolState, opts) {
     onFullRoadToggleJunction,
     onFullRoadFlattenTerrain,
     onFullRoadApplyCityPreset,
+    onSmartRoadEdgeStylePatch,
+    onSmartRoadEdgeStyleClear,
     onAccessoryTypeChanged,
     onAccessoryParamsChanged,
     onAccessoryClearAll,
@@ -204,6 +206,37 @@ export function addFullRoadFolder(pane, toolState, opts) {
     mk.addBinding(rp, "laneLines", { label: "Lane separators" }).on("change", onFullRoadChanged);
     mk.addBinding(rp, "laneLineWidth", { label: "Lane width", min: 0.002, max: 0.06, step: 0.001 }).on("change", onFullRoadChanged);
     mk.addBinding(rp, "laneDashScale", { label: "Lane dash density", min: 0.005, max: 2, step: 0.005 }).on("change", onFullRoadChanged);
+
+    const segMk = folder.addFolder({ title: "Selected straight edge (Alt+click)", expanded: false });
+    segMk.addButton({ title: "Solid center (override)" }).on("click", () =>
+      onSmartRoadEdgeStylePatch?.({ centerLine: true, centerLineDashed: false }),
+    );
+    segMk.addButton({ title: "Dashed center (override)" }).on("click", () =>
+      onSmartRoadEdgeStylePatch?.({ centerLine: true, centerLineDashed: true }),
+    );
+    segMk.addButton({ title: "Inherit center line & dash" }).on("click", () =>
+      onSmartRoadEdgeStylePatch?.({ centerLine: null, centerLineDashed: null }),
+    );
+    segMk.addButton({ title: "Double yellow on segment" }).on("click", () =>
+      onSmartRoadEdgeStylePatch?.({ doubleCenterLine: true, centerLine: true }),
+    );
+    segMk
+      .addButton({ title: "Inherit double-center layout" })
+      .on("click", () =>
+        onSmartRoadEdgeStylePatch?.({
+          doubleCenterLine: null,
+          centerLineGap: null,
+          centerLineWidth: null,
+          centerLeftEnabled: null,
+          centerRightEnabled: null,
+          centerLeftDashed: null,
+          centerRightDashed: null,
+        }),
+      );
+    segMk.addButton({ title: "Hide lane lines on segment" }).on("click", () => onSmartRoadEdgeStylePatch?.({ laneLines: false }));
+    segMk.addButton({ title: "Show lane lines on segment" }).on("click", () => onSmartRoadEdgeStylePatch?.({ laneLines: true }));
+    segMk.addButton({ title: "Inherit lane lines" }).on("click", () => onSmartRoadEdgeStylePatch?.({ laneLines: null }));
+    segMk.addButton({ title: "Clear all overrides on selected edge" }).on("click", () => onSmartRoadEdgeStyleClear?.());
 
     const matSurf = folder.addFolder({ title: "Material / surface color", expanded: false });
     matSurf.addBinding(rp, "colorTint", { label: "Tint", view: "color" }).on("change", onFullRoadChanged);
