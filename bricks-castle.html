@@ -50,6 +50,7 @@
 
 import * as THREE from "three/webgpu";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { Pane } from "tweakpane";
 
 import {
@@ -68,6 +69,10 @@ let towerGroup;
 let towerMesh, battlementMesh;
 let brickGeometry, brickMaterial;
 let groundMesh;
+let carvePreviewMesh;
+let carveGizmoPivot, carveGizmo;
+let carveGizmoHelper;
+let isDraggingCarveGizmo = false;
 let rebuildTimer = null;
 let qualityLevel = "high";
 const dynamicDpr = {
@@ -79,6 +84,8 @@ const dynamicDpr = {
 const tempObj = new THREE.Object3D();
 const tempVec = new THREE.Vector3();
 const tempVec2 = new THREE.Vector3();
+const tempVec3 = new THREE.Vector3();
+const tempVec4 = new THREE.Vector3();
 const towerInstanceData = [];
 const battlementInstanceData = [];
 const simTimer = new THREE.Timer();
@@ -127,6 +134,17 @@ const params = {
   debrisLifetime:6,
   maxDebrisCount:800,
   sleepThreshold:0.42,
+  interactionMode:"destruct",
+
+  // carve mode
+  carveShape:"doorRect",
+  carveAngleDeg:0,
+  carveCenterY:3,
+  carveWidth:2.2,
+  carveHeight:3.8,
+  carveDepth:1.6,
+  carveApplyOnClick:false,
+  carveGizmoMode:"translate",
 
   // material
   roughness:1,
@@ -262,6 +280,8 @@ async function init(){
   scene.add(groundMesh);
 
   buildTower();
+  createCarvePreviewMesh();
+  createCarveGizmo();
 
   buildPane();
 
@@ -288,10 +308,59 @@ async function init(){
 
 }
 
+function createCarvePreviewMesh(){
+  carvePreviewMesh = new THREE.Mesh(
+    new THREE.BoxGeometry(1,1,1),
+    new THREE.MeshBasicMaterial({
+      color:0x66c6ff,
+      wireframe:true,
+      transparent:true,
+      opacity:0.6,
+      depthTest:false
+    })
+  );
+  carvePreviewMesh.visible = false;
+  scene.add(carvePreviewMesh);
+}
+
+function createCarveGizmo(){
+  carveGizmoPivot = new THREE.Object3D();
+  scene.add(carveGizmoPivot);
+
+  carveGizmo = new TransformControls(
+    camera,
+    renderer.domElement
+  );
+  carveGizmo.attach(carveGizmoPivot);
+  carveGizmo.setMode(params.carveGizmoMode);
+  carveGizmo.setSpace("world");
+  carveGizmo.setSize(0.9);
+  carveGizmo.enabled = false;
+  carveGizmo.visible = false;
+
+  carveGizmo.addEventListener(
+    "dragging-changed",
+    e=>{
+      isDraggingCarveGizmo = e.value;
+      controls.enabled = !e.value;
+    }
+  );
+
+  carveGizmo.addEventListener("change", ()=>{
+    syncParamsFromCarveGizmo();
+  });
+
+  carveGizmoHelper = carveGizmo.getHelper();
+  scene.add(carveGizmoHelper);
+  updateCarveGizmoFromParams();
+}
+
 function buildTower(){
 
   towerGroup = new THREE.Group();
   towerGroup.name = "towerGroup";
+  const groundY = groundMesh ? groundMesh.position.y : -2;
+  const towerBaseY = groundY + params.brickHeight * 0.5;
 
   scene.add(towerGroup);
   createSharedBrickResources();
@@ -343,7 +412,7 @@ function buildTower(){
 
       tempObj.position.set(
         px,
-        y * params.ringHeight,
+        towerBaseY + y * params.ringHeight,
         pz
       );
 
@@ -367,9 +436,11 @@ function buildTower(){
         (Math.random() - .5)
         * params.rotationVariation;
 
-      tempObj.position.y +=
-        (Math.random() - .5)
-        * params.verticalVariation;
+      if(y > 0){
+        tempObj.position.y +=
+          (Math.random() - .5)
+          * params.verticalVariation;
+      }
 
       const r = params.scaleRandomness;
       tempObj.scale.set(
@@ -476,7 +547,7 @@ function buildTower(){
 
     tempObj.position.set(
       px,
-      params.height * params.ringHeight,
+      towerBaseY + params.height * params.ringHeight,
       pz
     );
 
@@ -694,12 +765,280 @@ function onClick(event){
     }
 
     if(hitPoint){
-      applyImpactFall(hitPoint);
-      triggerStructuralCollapse();
+      if(params.interactionMode === "carve"){
+        setCarveFromHitPoint(hitPoint);
+        if(params.carveApplyOnClick){
+          applyCarveAtCurrentSettings(hitPoint);
+        }
+      }else{
+        applyImpactFall(hitPoint);
+        triggerStructuralCollapse();
+      }
     }
 
   }
 
+}
+
+function setCarveFromHitPoint(hitPoint){
+  tempVec.set(hitPoint.x, 0, hitPoint.z);
+  if(tempVec.lengthSq() < 1e-6){
+    return;
+  }
+  const angle = Math.atan2(tempVec.z, tempVec.x);
+  params.carveAngleDeg = THREE.MathUtils.radToDeg(angle);
+  if(params.carveShape.startsWith("door")){
+    params.carveCenterY =
+      hitPoint.y + params.carveHeight * 0.5;
+  }else{
+    params.carveCenterY = hitPoint.y;
+  }
+  updateCarveGizmoFromParams();
+}
+
+function getCarveFrame(){
+  const angle = THREE.MathUtils.degToRad(params.carveAngleDeg);
+  const radial = new THREE.Vector3(
+    Math.cos(angle),
+    0,
+    Math.sin(angle)
+  );
+  const tangent = new THREE.Vector3(
+    -radial.z,
+    0,
+    radial.x
+  );
+
+  const center = new THREE.Vector3(
+    radial.x * params.radius,
+    params.carveCenterY,
+    radial.z * params.radius
+  );
+
+  return { center, radial, tangent };
+}
+
+function applyCarveAtCurrentSettings(fallbackHitPoint = null){
+  const frame = getCarveFrame();
+  const center = fallbackHitPoint || frame.center;
+  const radial = frame.radial;
+  const tangent = frame.tangent;
+
+  let removedAny = false;
+  removedAny = applyCarveToCollection(
+    towerInstanceData,
+    towerMesh,
+    center,
+    radial,
+    tangent,
+    true
+  ) || removedAny;
+
+  removedAny = applyCarveToCollection(
+    battlementInstanceData,
+    battlementMesh,
+    center,
+    radial,
+    tangent,
+    false
+  ) || removedAny;
+
+  if(removedAny){
+    triggerStructuralCollapse();
+  }
+}
+
+function syncParamsFromCarveGizmo(){
+  if(!carveGizmoPivot) return;
+
+  const rotAngle = carveGizmoPivot.rotation.y;
+  const planarLen = Math.hypot(
+    carveGizmoPivot.position.x,
+    carveGizmoPivot.position.z
+  );
+
+  let angle = rotAngle;
+  if(planarLen > 1e-5){
+    angle = Math.atan2(
+      carveGizmoPivot.position.z,
+      carveGizmoPivot.position.x
+    );
+  }
+
+  params.carveAngleDeg = THREE.MathUtils.radToDeg(angle);
+  carveGizmoPivot.position.x =
+    Math.cos(angle) * params.radius;
+  carveGizmoPivot.position.z =
+    Math.sin(angle) * params.radius;
+  params.carveCenterY = carveGizmoPivot.position.y;
+
+  params.carveWidth = Math.max(
+    0.3,
+    Math.abs(carveGizmoPivot.scale.x)
+  );
+  params.carveHeight = Math.max(
+    0.3,
+    Math.abs(carveGizmoPivot.scale.y)
+  );
+  params.carveDepth = Math.max(
+    0.2,
+    Math.abs(carveGizmoPivot.scale.z)
+  );
+}
+
+function updateCarveGizmoFromParams(){
+  if(!carveGizmoPivot || isDraggingCarveGizmo){
+    return;
+  }
+
+  const frame = getCarveFrame();
+  carveGizmoPivot.position.copy(frame.center);
+  carveGizmoPivot.rotation.set(
+    0,
+    THREE.MathUtils.degToRad(params.carveAngleDeg),
+    0
+  );
+  carveGizmoPivot.scale.set(
+    params.carveWidth,
+    params.carveHeight,
+    params.carveDepth
+  );
+}
+
+function applyCarveToCollection(
+  collection,
+  mesh,
+  center,
+  radial,
+  tangent,
+  trackRemoved
+){
+  if(!mesh) return false;
+
+  let removedAny = false;
+  const halfWidth = params.carveWidth * 0.5;
+  const halfHeight = params.carveHeight * 0.5;
+  const halfDepth = params.carveDepth * 0.5;
+
+  for(let i=0;i<collection.length;i++){
+    const instance = collection[i];
+    if(instance.removed) continue;
+
+    tempVec4.subVectors(instance.position, center);
+
+    const tangentDist =
+      Math.abs(tempVec4.dot(tangent));
+    const verticalDist =
+      Math.abs(tempVec4.y);
+    const radialDist =
+      Math.abs(tempVec4.dot(radial));
+    const localY = tempVec4.y;
+    const absX = tangentDist;
+
+    let inside =
+      radialDist <= halfDepth
+      && isInsideCarveProfile(
+        absX,
+        localY,
+        verticalDist,
+        halfWidth,
+        halfHeight
+      );
+
+    if(
+      inside
+      && params.carveShape === "windowSlit"
+      && verticalDist > halfHeight * 0.8
+      && tangentDist > halfWidth * 0.35
+    ){
+      inside = false;
+    }
+
+    if(inside){
+      instance.removed = true;
+      if(trackRemoved && instance.id){
+        removedBricks.add(instance.id);
+      }
+      startFallingInstance(
+        collection,
+        mesh,
+        i,
+        center
+      );
+      removedAny = true;
+    }
+  }
+
+  if(removedAny){
+    mesh.instanceMatrix.needsUpdate = true;
+  }
+
+  return removedAny;
+}
+
+function isInsideCarveProfile(
+  absX,
+  localY,
+  verticalDist,
+  halfWidth,
+  halfHeight
+){
+  const totalHeight = halfHeight * 2;
+  const yFromBottom = localY + halfHeight;
+
+  if(
+    params.carveShape === "doorRect"
+  ){
+    return (
+      absX <= halfWidth
+      && yFromBottom >= 0
+      && yFromBottom <= totalHeight
+    );
+  }
+
+  if(params.carveShape === "doorArch"){
+    const radius = Math.min(halfWidth, totalHeight * 0.45);
+    const archCenterY = totalHeight - radius;
+    const inRect =
+      absX <= halfWidth
+      && yFromBottom >= 0
+      && yFromBottom <= archCenterY;
+    const dy = yFromBottom - archCenterY;
+    const inArch =
+      yFromBottom >= archCenterY
+      && yFromBottom <= totalHeight
+      && (absX * absX + dy * dy) <= radius * radius;
+    return inRect || inArch;
+  }
+
+  if(params.carveShape === "windowSlit"){
+    const inBody =
+      absX <= halfWidth * 0.35
+      && verticalDist <= halfHeight;
+    const inTopBottom =
+      absX <= halfWidth * 0.7
+      && verticalDist <= halfHeight * 0.25;
+    return inBody || inTopBottom;
+  }
+
+  if(params.carveShape === "windowArch"){
+    const radius =
+      Math.min(halfWidth * 0.9, halfHeight * 0.65);
+    const rectHalfWidth = Math.min(halfWidth, radius * 0.75);
+    const archCenterY = halfHeight - radius;
+    const inRect =
+      absX <= rectHalfWidth
+      && localY >= -halfHeight
+      && localY <= archCenterY;
+    const dy = localY - archCenterY;
+    const inArch =
+      localY >= archCenterY
+      && localY <= halfHeight
+      && (absX * absX + dy * dy) <= radius * radius;
+    return inRect || inArch;
+  }
+
+  return absX <= halfWidth && verticalDist <= halfHeight;
 }
 
 function applyImpactFall(hitPoint){
@@ -1262,6 +1601,17 @@ function buildPane(){
 
   fDestroy.addBinding(
     params,
+    "interactionMode",
+    {
+      options:{
+        destruct:"destruct",
+        carve:"carve"
+      }
+    }
+  );
+
+  fDestroy.addBinding(
+    params,
     "removeRadius",
     { min:0.2, max:6 }
   );
@@ -1306,6 +1656,83 @@ function buildPane(){
     "sleepThreshold",
     { min:0.05, max:2 }
   );
+
+  const fCarve =
+    pane.addFolder({
+      title:"Carve Mode"
+    });
+
+  fCarve.addBinding(
+    params,
+    "carveShape",
+    {
+      options:{
+        doorRect:"doorRect",
+        doorArch:"doorArch",
+        windowSlit:"windowSlit",
+        windowArch:"windowArch"
+      }
+    }
+  ).on("change", ()=>{
+    updateCarveGizmoFromParams();
+  });
+
+  fCarve.addBinding(
+    params,
+    "carveAngleDeg",
+    { min:-180, max:180 }
+  ).on("change", updateCarveGizmoFromParams);
+
+  fCarve.addBinding(
+    params,
+    "carveCenterY",
+    { min:-2, max:60 }
+  ).on("change", updateCarveGizmoFromParams);
+
+  fCarve.addBinding(
+    params,
+    "carveWidth",
+    { min:0.3, max:8 }
+  ).on("change", updateCarveGizmoFromParams);
+
+  fCarve.addBinding(
+    params,
+    "carveHeight",
+    { min:0.3, max:10 }
+  ).on("change", updateCarveGizmoFromParams);
+
+  fCarve.addBinding(
+    params,
+    "carveDepth",
+    { min:0.2, max:6 }
+  ).on("change", updateCarveGizmoFromParams);
+
+  fCarve.addBinding(
+    params,
+    "carveGizmoMode",
+    {
+      options:{
+        translate:"translate",
+        rotate:"rotate",
+        scale:"scale"
+      }
+    }
+  ).on("change", e=>{
+    if(carveGizmo){
+      carveGizmo.setMode(e.value);
+    }
+  });
+
+  fCarve.addBinding(
+    params,
+    "carveApplyOnClick"
+  );
+
+  fCarve.addButton({
+    title:"APPLY CARVE"
+  }).on("click", ()=>{
+    applyCarveAtCurrentSettings();
+  });
 
   // battlements
 
@@ -1455,6 +1882,7 @@ function animate(){
 
   controls.update();
   updateFallingBricks(dt);
+  updateCarvePreview();
 
   if(performance.now() > dynamicDpr.settleUntil){
     setDynamicPixelRatio(dynamicDpr.resting);
@@ -1467,6 +1895,38 @@ function animate(){
     camera
   );
 
+}
+
+function updateCarvePreview(){
+  if(!carvePreviewMesh){
+    return;
+  }
+
+  const show =
+    params.interactionMode === "carve";
+  carvePreviewMesh.visible = show;
+  if(carveGizmo){
+    carveGizmo.enabled = show;
+  }
+  if(carveGizmoHelper){
+    carveGizmoHelper.visible = show;
+  }
+
+  if(!show){
+    return;
+  }
+
+  if(!isDraggingCarveGizmo){
+    updateCarveGizmoFromParams();
+  }
+
+  carvePreviewMesh.position.copy(carveGizmoPivot.position);
+  carvePreviewMesh.scale.copy(carveGizmoPivot.scale);
+  carvePreviewMesh.rotation.set(
+    0,
+    THREE.MathUtils.degToRad(params.carveAngleDeg),
+    0
+  );
 }
 
 function onResize(){
