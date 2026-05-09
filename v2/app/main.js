@@ -953,6 +953,7 @@ export async function startV2App(opts = {}) {
     carSettings: toolState.playCar,
     carAudioSettings: toolState.playCarAudio,
     spawnSettings: toolState.playSpawn,
+    cameraCollisionSettings: toolState.playCamera,
     audioSystem,
     excludeFromReflection: (obj) => roadReflection.excludeFromReflection(obj),
   });

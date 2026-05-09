@@ -787,6 +787,7 @@ export class PlayMode {
     carSettings,
     carAudioSettings,
     spawnSettings,
+    cameraCollisionSettings,
     audioSystem,
     excludeFromReflection,
   }) {
@@ -803,6 +804,7 @@ export class PlayMode {
     this.carAudioSettings = carAudioSettings || {};
     this._excludeFromReflection = excludeFromReflection || null;
     this.spawnSettings = spawnSettings || null;
+    this.cameraCollisionSettings = cameraCollisionSettings || null;
     /** @type {object | null} */
     this._audioSystem = audioSystem || null;
     /** @type {(() => void) | null} */
@@ -4059,57 +4061,76 @@ export class PlayMode {
       this.camera.lookAt(this.playerPos.x, lookAtY, this.playerPos.z);
     }
 
-    // Camera collision — raise camera above terrain/BVH surfaces, keep full distance
+    // Camera collision — raise camera above terrain/BVH surfaces, keep full distance.
+    // All knobs come from toolState.playCamera so the editor UI can tweak / disable live.
+    const camCfg = this.cameraCollisionSettings;
+    const camColEnabled = camCfg ? camCfg.enabled !== false : true;
+    if (!camColEnabled) {
+      // Relax pulled-in distance back out so re-enabling doesn't snap.
+      this._camCollisionDist = 1;
+      return;
+    }
+    const camColOffset = camCfg?.offset ?? CAM_COLLISION_OFFSET;
+    const camColEaseOut = camCfg?.easeOut ?? CAM_COLLISION_EASE_OUT;
+    const floorClampEnabled = camCfg ? camCfg.floorClampEnabled !== false : true;
+    const wallPullEnabled = camCfg ? camCfg.wallPullEnabled !== false : true;
+
     const camTarget = _camColTarget;
     camTarget.set(this.playerPos.x, lookAtY, this.playerPos.z);
     const camPos = this.camera.position;
 
     // Floor clamp: keep camera above terrain (not BVH — ramps/slopes are player surfaces, not camera barriers)
-    const floorAtCam = this.getWorldHeight(camPos.x, camPos.z);
-    const minCamY = floorAtCam + CAM_COLLISION_OFFSET + 1.0;
-    if (camPos.y < minCamY) {
-      const targetCamY = minCamY;
-      const liftSmooth = 1 - Math.exp(-8 * dtSec);
-      camPos.y = camPos.y + (targetCamY - camPos.y) * liftSmooth;
-      this.camera.lookAt(camTarget.x, camTarget.y, camTarget.z);
+    if (floorClampEnabled) {
+      const floorAtCam = this.getWorldHeight(camPos.x, camPos.z);
+      const minCamY = floorAtCam + camColOffset + 1.0;
+      if (camPos.y < minCamY) {
+        const targetCamY = minCamY;
+        const liftSmooth = 1 - Math.exp(-8 * dtSec);
+        camPos.y = camPos.y + (targetCamY - camPos.y) * liftSmooth;
+        this.camera.lookAt(camTarget.x, camTarget.y, camTarget.z);
+      }
     }
 
     // Wall pull-in: only for vertical surfaces (walls, not floors/ramps)
-    _camColDir.subVectors(camPos, camTarget);
-    const fullDist = _camColDir.length();
-    if (fullDist > 0.01) {
-      _camColDir.divideScalar(fullDist);
-      let allowedDist = fullDist;
+    if (wallPullEnabled) {
+      _camColDir.subVectors(camPos, camTarget);
+      const fullDist = _camColDir.length();
+      if (fullDist > 0.01) {
+        _camColDir.divideScalar(fullDist);
+        let allowedDist = fullDist;
 
-      if (this.cliffBvh?.baked) {
-        const hit = this.cliffBvh.raycast3D(
-          camTarget.x,
-          camTarget.y,
-          camTarget.z,
-          _camColDir.x,
-          _camColDir.y,
-          _camColDir.z,
-          fullDist,
-        );
-        if (hit && Math.abs(hit.normal.y) < 0.3) {
-          const hitDist = hit.distance - CAM_COLLISION_OFFSET;
-          if (hitDist < allowedDist) allowedDist = hitDist;
+        if (this.cliffBvh?.baked) {
+          const hit = this.cliffBvh.raycast3D(
+            camTarget.x,
+            camTarget.y,
+            camTarget.z,
+            _camColDir.x,
+            _camColDir.y,
+            _camColDir.z,
+            fullDist,
+          );
+          if (hit && Math.abs(hit.normal.y) < 0.3) {
+            const hitDist = hit.distance - camColOffset;
+            if (hitDist < allowedDist) allowedDist = hitDist;
+          }
+        }
+
+        const ratio = Math.max(0.1, allowedDist / fullDist);
+        if (ratio < this._camCollisionDist) {
+          this._camCollisionDist = ratio;
+        } else {
+          this._camCollisionDist +=
+            (ratio - this._camCollisionDist) *
+            (1 - Math.exp(-camColEaseOut * dtSec));
+        }
+
+        if (this._camCollisionDist < 0.999) {
+          camPos.lerpVectors(camTarget, camPos, this._camCollisionDist);
+          this.camera.lookAt(camTarget.x, camTarget.y, camTarget.z);
         }
       }
-
-      const ratio = Math.max(0.1, allowedDist / fullDist);
-      if (ratio < this._camCollisionDist) {
-        this._camCollisionDist = ratio;
-      } else {
-        this._camCollisionDist +=
-          (ratio - this._camCollisionDist) *
-          (1 - Math.exp(-CAM_COLLISION_EASE_OUT * dtSec));
-      }
-
-      if (this._camCollisionDist < 0.999) {
-        camPos.lerpVectors(camTarget, camPos, this._camCollisionDist);
-        this.camera.lookAt(camTarget.x, camTarget.y, camTarget.z);
-      }
+    } else {
+      this._camCollisionDist = 1;
     }
   }
 

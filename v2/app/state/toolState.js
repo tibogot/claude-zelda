@@ -124,6 +124,20 @@ export function createToolState() {
       cameraChaseSpeed: 3.5,
       cameraDriftLag: 1.8,
     },
+    /**
+     * Play-mode camera collision (chase cam wall pull-in + floor lift).
+     * `enabled` master switch; `wallPullEnabled` and `floorClampEnabled` toggle
+     * the two passes independently. `offset` = skin distance from cliff/terrain
+     * surfaces. `easeOut` = exponential rate (per second) at which the wall
+     * pull-in relaxes back out once the obstacle is gone.
+     */
+    playCamera: {
+      enabled: true,
+      wallPullEnabled: true,
+      floorClampEnabled: true,
+      offset: 0.3,
+      easeOut: 5,
+    },
     /** Car Howler layers (vehicle bus). Assets: `v2/static/sounds/vehicle/` */
     playCarAudio: {
       enabled: false,

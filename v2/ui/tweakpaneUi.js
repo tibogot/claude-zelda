@@ -234,6 +234,24 @@ export function createTweakpaneUi({
   carFolder.addBinding(car, "cameraChaseSpeed", { label: "cam chase", min: 0.5, max: 12, step: 0.1 });
   carFolder.addBinding(car, "cameraDriftLag", { label: "drift cam lag", min: 0, max: 5, step: 0.1 });
 
+  const camColFolder = pane.addFolder({ title: "Play / Camera Collision", expanded: false });
+  const camCol = toolState.playCamera;
+  camColFolder.addBinding(camCol, "enabled", { label: "enabled" });
+  camColFolder.addBinding(camCol, "wallPullEnabled", { label: "wall pull-in" });
+  camColFolder.addBinding(camCol, "floorClampEnabled", { label: "floor clamp" });
+  camColFolder.addBinding(camCol, "offset", {
+    label: "skin offset",
+    min: 0,
+    max: 2,
+    step: 0.05,
+  });
+  camColFolder.addBinding(camCol, "easeOut", {
+    label: "ease-out rate",
+    min: 0.5,
+    max: 20,
+    step: 0.1,
+  });
+
   const carAudioFolder = pane.addFolder({ title: "Play / Car audio", expanded: false });
   const carAu = toolState.playCarAudio;
   carAudioFolder.addBinding(carAu, "enabled", { label: "enabled" });

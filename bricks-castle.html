@@ -1,0 +1,790 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Procedural Medieval Tower - Tweakpane Edition</title>
+
+<style>
+  body{
+    margin:0;
+    overflow:hidden;
+    background:#0f1118;
+  }
+
+  #pane{
+    position:absolute;
+    top:0;
+    left:0;
+    width:340px;
+    height:100%;
+    overflow:auto;
+    background:rgba(0,0,0,.65);
+    backdrop-filter:blur(12px);
+    border-right:1px solid #444;
+  }
+
+  canvas{
+    display:block;
+  }
+</style>
+</head>
+
+<body>
+
+<div id="pane"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.1/build/three.tsl.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.1/examples/jsm/",
+    "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.3/dist/tweakpane.min.js"
+  }
+}
+</script>
+
+<script type="module">
+
+import * as THREE from "three/webgpu";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { Pane } from "tweakpane";
+
+import {
+  Fn,
+  positionLocal,
+  normalLocal,
+  vec3,
+  sin,
+  cos,
+  mix,
+  normalize
+} from "three/tsl";
+
+let renderer, scene, camera, controls;
+let towerGroup;
+
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+
+const removedBricks = new Set();
+
+const params = {
+
+  // tower
+  radius:5,
+  height:36,
+  bricksPerRing:28,
+  ringHeight:0.55,
+
+  // brick size
+  brickWidth:1.1,
+  brickHeight:0.5,
+  brickDepth:0.9,
+
+  // random scaling
+  scaleRandomness:0.3,
+
+  // shape
+  deformation:0.06,
+  edgeWarp:0.025,
+  inflate:0.03,
+  normalSmooth:0.35,
+
+  // layout
+  stagger:true,
+  radiusVariation:0.15,
+  verticalVariation:0.08,
+  rotationVariation:0.05,
+
+  // destruction
+  removeRadius:1.2,
+
+  // material
+  roughness:1,
+  metalness:0,
+  stoneDarkness:0.45,
+  stoneLightness:0.7,
+
+  // battlements
+  battlementHeight:1.6,
+  battlementSkip:2,
+
+  // lighting
+  sunIntensity:3,
+  ambientIntensity:1.4,
+
+  rebuild:()=>{
+
+    removedBricks.clear();
+    rebuildTower();
+
+  }
+
+};
+
+init();
+
+async function init(){
+
+  renderer = new THREE.WebGPURenderer({
+    antialias:true
+  });
+
+  renderer.setSize(
+    window.innerWidth,
+    window.innerHeight
+  );
+
+  document.body.appendChild(
+    renderer.domElement
+  );
+
+  await renderer.init();
+
+  scene = new THREE.Scene();
+
+  scene.background =
+    new THREE.Color(0x0f1118);
+
+  scene.fog = new THREE.Fog(
+    0x0f1118,
+    20,
+    90
+  );
+
+  camera = new THREE.PerspectiveCamera(
+    50,
+    window.innerWidth/window.innerHeight,
+    0.1,
+    1000
+  );
+
+  camera.position.set(0,12,25);
+
+  controls = new OrbitControls(
+    camera,
+    renderer.domElement
+  );
+
+  controls.enableDamping = true;
+
+  // LIGHTS
+
+  const hemi =
+    new THREE.HemisphereLight(
+      0xaabbff,
+      0x222233,
+      params.ambientIntensity
+    );
+
+  hemi.name = "hemi";
+
+  scene.add(hemi);
+
+  const sun =
+    new THREE.DirectionalLight(
+      0xffffff,
+      params.sunIntensity
+    );
+
+  sun.position.set(10,20,10);
+
+  sun.name = "sun";
+
+  scene.add(sun);
+
+  // GROUND
+
+  const ground = new THREE.Mesh(
+
+    new THREE.PlaneGeometry(200,200),
+
+    new THREE.MeshStandardMaterial({
+      color:0x22252b,
+      roughness:1
+    })
+
+  );
+
+  ground.rotation.x = -Math.PI * .5;
+  ground.position.y = -2;
+
+  scene.add(ground);
+
+  buildTower();
+
+  buildPane();
+
+  animate();
+
+  window.addEventListener(
+    "resize",
+    onResize
+  );
+
+  window.addEventListener(
+    "pointerdown",
+    onClick
+  );
+
+}
+
+function buildTower(){
+
+  towerGroup = new THREE.Group();
+
+  scene.add(towerGroup);
+
+  for(let y=0;y<params.height;y++){
+
+    for(let i=0;i<params.bricksPerRing;i++){
+
+      const id = `${i}_${y}`;
+
+      if(removedBricks.has(id)) continue;
+
+      const brick = createStoneBrick();
+
+      const stagger =
+        params.stagger && y % 2
+        ? 0.5
+        : 0;
+
+      const angle =
+        ((i + stagger) / params.bricksPerRing)
+        * Math.PI * 2;
+
+      const radius =
+        params.radius
+        + (Math.random() - .5)
+        * params.radiusVariation;
+
+      const px =
+        Math.cos(angle) * radius;
+
+      const pz =
+        Math.sin(angle) * radius;
+
+      brick.position.set(
+        px,
+        y * params.ringHeight,
+        pz
+      );
+
+      brick.lookAt(
+        px * 2,
+        brick.position.y,
+        pz * 2
+      );
+
+      brick.rotateY(Math.PI * .5);
+
+      brick.rotation.x +=
+        (Math.random() - .5)
+        * params.rotationVariation;
+
+      brick.rotation.y +=
+        (Math.random() - .5)
+        * params.rotationVariation;
+
+      brick.rotation.z +=
+        (Math.random() - .5)
+        * params.rotationVariation;
+
+      brick.position.y +=
+        (Math.random() - .5)
+        * params.verticalVariation;
+
+      brick.userData.id = id;
+
+      towerGroup.add(brick);
+
+    }
+
+  }
+
+  // battlements
+
+  for(
+    let i=0;
+    i<params.bricksPerRing;
+    i += params.battlementSkip
+  ){
+
+    const brick = createStoneBrick();
+
+    const angle =
+      (i / params.bricksPerRing)
+      * Math.PI * 2;
+
+    const px =
+      Math.cos(angle) * params.radius;
+
+    const pz =
+      Math.sin(angle) * params.radius;
+
+    brick.position.set(
+      px,
+      params.height * params.ringHeight,
+      pz
+    );
+
+    brick.scale.y =
+      params.battlementHeight;
+
+    brick.lookAt(
+      px * 2,
+      brick.position.y,
+      pz * 2
+    );
+
+    brick.rotateY(Math.PI * .5);
+
+    towerGroup.add(brick);
+
+  }
+
+}
+
+function createStoneBrick(){
+
+  const geo = new THREE.BoxGeometry(
+
+    params.brickWidth,
+    params.brickHeight,
+    params.brickDepth,
+
+    10,
+    8,
+    8
+
+  );
+
+  const grey =
+    params.stoneDarkness
+    + Math.random()
+    * (params.stoneLightness - params.stoneDarkness);
+
+  const mat =
+    new THREE.MeshStandardNodeMaterial({
+
+      color:new THREE.Color(
+        grey * .92,
+        grey * .95,
+        grey
+      ),
+
+      roughness:params.roughness,
+      metalness:params.metalness
+
+    });
+
+  // TSL deformation
+
+  mat.positionNode = Fn(()=>{
+
+    const p = positionLocal;
+
+    const largeNoise =
+      sin(p.x.mul(5))
+      .mul(cos(p.y.mul(7)))
+      .mul(params.deformation);
+
+    const mediumNoise =
+      sin(p.z.mul(9))
+      .mul(cos(p.x.mul(8)))
+      .mul(params.deformation * .6);
+
+    const edgeWarp =
+      sin(p.y.mul(14))
+      .mul(params.edgeWarp);
+
+    const inflate =
+      normalize(p)
+      .mul(params.inflate);
+
+    return vec3(
+
+      p.x
+      .add(largeNoise)
+      .add(edgeWarp)
+      .add(inflate.x),
+
+      p.y
+      .add(mediumNoise)
+      .add(inflate.y),
+
+      p.z
+      .add(largeNoise)
+      .add(edgeWarp)
+      .add(inflate.z)
+
+    );
+
+  })();
+
+  mat.normalNode = Fn(()=>{
+
+    return normalize(
+
+      mix(
+        normalLocal,
+        normalize(positionLocal),
+        params.normalSmooth
+      )
+
+    );
+
+  })();
+
+  const mesh = new THREE.Mesh(
+    geo,
+    mat
+  );
+
+  const r = params.scaleRandomness;
+
+  mesh.scale.set(
+
+    1 + (Math.random() - .5) * r,
+    1 + (Math.random() - .5) * r,
+    1 + (Math.random() - .5) * r
+
+  );
+
+  return mesh;
+
+}
+
+function rebuildTower(){
+
+  if(towerGroup){
+
+    scene.remove(towerGroup);
+
+    towerGroup.traverse(obj=>{
+
+      if(obj.geometry)
+        obj.geometry.dispose();
+
+      if(obj.material)
+        obj.material.dispose();
+
+    });
+
+  }
+
+  buildTower();
+
+}
+
+function onClick(event){
+
+  mouse.x =
+    (event.clientX / window.innerWidth) * 2 - 1;
+
+  mouse.y =
+    -(event.clientY / window.innerHeight) * 2 + 1;
+
+  raycaster.setFromCamera(
+    mouse,
+    camera
+  );
+
+  const hits =
+    raycaster.intersectObjects(
+      towerGroup.children
+    );
+
+  if(hits.length){
+
+    const hitPoint =
+      hits[0].object.position;
+
+    towerGroup.children.forEach(brick=>{
+
+      const d =
+        brick.position.distanceTo(hitPoint);
+
+      if(d < params.removeRadius){
+
+        if(brick.userData.id){
+
+          removedBricks.add(
+            brick.userData.id
+          );
+
+          towerGroup.remove(brick);
+
+        }
+
+      }
+
+    });
+
+  }
+
+}
+
+function buildPane(){
+
+  const pane = new Pane({
+    container:document.getElementById("pane"),
+    title:"Tower Generator"
+  });
+
+  // tower
+
+  const fTower =
+    pane.addFolder({
+      title:"Tower Shape"
+    });
+
+  fTower.addBinding(
+    params,
+    "radius",
+    { min:2, max:12 }
+  ).on("change", rebuildTower);
+
+  fTower.addBinding(
+    params,
+    "height",
+    { min:8, max:60, step:1 }
+  ).on("change", rebuildTower);
+
+  fTower.addBinding(
+    params,
+    "bricksPerRing",
+    { min:6, max:60, step:1 }
+  ).on("change", rebuildTower);
+
+  fTower.addBinding(
+    params,
+    "ringHeight",
+    { min:0.2, max:1.2 }
+  ).on("change", rebuildTower);
+
+  // brick
+
+  const fBrick =
+    pane.addFolder({
+      title:"Brick Size"
+    });
+
+  fBrick.addBinding(
+    params,
+    "brickWidth",
+    { min:0.2, max:3 }
+  ).on("change", rebuildTower);
+
+  fBrick.addBinding(
+    params,
+    "brickHeight",
+    { min:0.2, max:2 }
+  ).on("change", rebuildTower);
+
+  fBrick.addBinding(
+    params,
+    "brickDepth",
+    { min:0.2, max:3 }
+  ).on("change", rebuildTower);
+
+  fBrick.addBinding(
+    params,
+    "scaleRandomness",
+    { min:0, max:1 }
+  ).on("change", rebuildTower);
+
+  // shape
+
+  const fShape =
+    pane.addFolder({
+      title:"Stone Shape"
+    });
+
+  fShape.addBinding(
+    params,
+    "deformation",
+    { min:0, max:0.2 }
+  ).on("change", rebuildTower);
+
+  fShape.addBinding(
+    params,
+    "edgeWarp",
+    { min:0, max:0.1 }
+  ).on("change", rebuildTower);
+
+  fShape.addBinding(
+    params,
+    "inflate",
+    { min:0, max:0.1 }
+  ).on("change", rebuildTower);
+
+  fShape.addBinding(
+    params,
+    "normalSmooth",
+    { min:0, max:1 }
+  ).on("change", rebuildTower);
+
+  // randomness
+
+  const fRandom =
+    pane.addFolder({
+      title:"Randomness"
+    });
+
+  fRandom.addBinding(
+    params,
+    "radiusVariation",
+    { min:0, max:1 }
+  ).on("change", rebuildTower);
+
+  fRandom.addBinding(
+    params,
+    "verticalVariation",
+    { min:0, max:0.5 }
+  ).on("change", rebuildTower);
+
+  fRandom.addBinding(
+    params,
+    "rotationVariation",
+    { min:0, max:0.2 }
+  ).on("change", rebuildTower);
+
+  fRandom.addBinding(
+    params,
+    "stagger"
+  ).on("change", rebuildTower);
+
+  // destruction
+
+  const fDestroy =
+    pane.addFolder({
+      title:"Destruction"
+    });
+
+  fDestroy.addBinding(
+    params,
+    "removeRadius",
+    { min:0.2, max:6 }
+  );
+
+  // battlements
+
+  const fBattle =
+    pane.addFolder({
+      title:"Battlements"
+    });
+
+  fBattle.addBinding(
+    params,
+    "battlementHeight",
+    { min:0.5, max:4 }
+  ).on("change", rebuildTower);
+
+  fBattle.addBinding(
+    params,
+    "battlementSkip",
+    { min:1, max:6, step:1 }
+  ).on("change", rebuildTower);
+
+  // material
+
+  const fMaterial =
+    pane.addFolder({
+      title:"Material"
+    });
+
+  fMaterial.addBinding(
+    params,
+    "roughness",
+    { min:0, max:1 }
+  ).on("change", rebuildTower);
+
+  fMaterial.addBinding(
+    params,
+    "metalness",
+    { min:0, max:1 }
+  ).on("change", rebuildTower);
+
+  fMaterial.addBinding(
+    params,
+    "stoneDarkness",
+    { min:0.1, max:1 }
+  ).on("change", rebuildTower);
+
+  fMaterial.addBinding(
+    params,
+    "stoneLightness",
+    { min:0.1, max:1 }
+  ).on("change", rebuildTower);
+
+  // lighting
+
+  const fLight =
+    pane.addFolder({
+      title:"Lighting"
+    });
+
+  fLight.addBinding(
+    params,
+    "sunIntensity",
+    { min:0, max:10 }
+  ).on("change", e=>{
+
+    scene.getObjectByName("sun")
+      .intensity = e.value;
+
+  });
+
+  fLight.addBinding(
+    params,
+    "ambientIntensity",
+    { min:0, max:5 }
+  ).on("change", e=>{
+
+    scene.getObjectByName("hemi")
+      .intensity = e.value;
+
+  });
+
+  pane.addButton({
+    title:"REBUILD"
+  }).on("click", params.rebuild);
+
+}
+
+function animate(){
+
+  requestAnimationFrame(animate);
+
+  controls.update();
+
+  renderer.render(
+    scene,
+    camera
+  );
+
+}
+
+function onResize(){
+
+  camera.aspect =
+    window.innerWidth /
+    window.innerHeight;
+
+  camera.updateProjectionMatrix();
+
+  renderer.setSize(
+    window.innerWidth,
+    window.innerHeight
+  );
+
+}
+
+</script>
+</body>
+</html>
